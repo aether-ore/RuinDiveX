@@ -3,6 +3,7 @@ export class Inventory {
     this.capacity = capacity;
     this.items = [];
     this.gold = 0;
+    this.scraps = 0;
   }
 
   addItem(item) {
@@ -45,5 +46,6 @@ export class Inventory {
   clear() {
     this.items.length = 0;
     this.gold = 0;
+    this.scraps = 0;
   }
 }

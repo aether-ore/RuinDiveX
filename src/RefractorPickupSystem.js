@@ -146,6 +146,20 @@ export class RefractorPickupSystem {
     }
   }
 
+  rollChestDrop(position, { count = 4, bonusValue = 0, rareBoost = false } = {}) {
+    for (let i = 0; i < count; i += 1) {
+      const tier = weightedTier(rareBoost);
+      const value = randomInt(tier.value[0], tier.value[1]) + bonusValue;
+      const dropPosition = position.clone();
+      const angle = Math.random() * Math.PI * 2;
+      const distance = randomBetween(0.25, 1.05);
+      dropPosition.x += Math.cos(angle) * distance;
+      dropPosition.z += Math.sin(angle) * distance;
+      dropPosition.y = 0.46 + Math.random() * 0.22;
+      this.createPickup({ tier, value, position: dropPosition });
+    }
+  }
+
   createPickup({ tier = REFRACTOR_TIERS[0], value = tier.value[0], position }) {
     const object = createRefractorObject(tier);
     object.position.copy(position);

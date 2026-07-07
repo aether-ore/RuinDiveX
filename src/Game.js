@@ -14,6 +14,8 @@ import { UIManager } from './UIManager.js';
 
 const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
 const CAMERA_LOOK_OFFSET = new THREE.Vector3(0, 1.1, 0);
+const SCRAP_QUEST_BASE_REQUIREMENT = 5;
+const SCRAP_QUEST_REWARD = 95;
 const POSE_DEBUG_HANDLE_COLOR = 0xffd36f;
 const POSE_DEBUG_HANDLE_SELECTED_COLOR = 0xffffff;
 const POSE_DEBUG_DRAG_DEGREES_PER_PIXEL = 0.35;
@@ -73,6 +75,7 @@ export class Game {
     this.ruinFloor = 1;
     this.largeRefractorsSecured = 0;
     this.ruinCompleted = false;
+    this.scrapQuestTurnIns = 0;
     this.arenaRadius = 82;
     this.pointer = {
       x: window.innerWidth * 0.5,
@@ -276,6 +279,28 @@ export class Game {
 
   getRuinResetCost() {
     return 120 + Math.max(0, this.ruinFloor - 1) * 45;
+  }
+
+  getScrapQuestRequirement() {
+    return SCRAP_QUEST_BASE_REQUIREMENT + Math.floor(this.scrapQuestTurnIns * 1.5);
+  }
+
+  turnInScrapQuest() {
+    const required = this.getScrapQuestRequirement();
+    const current = this.inventory.scraps ?? 0;
+
+    if (current < required) {
+      this.ui?.showToast?.(`Scrap quest: ${current}/${required} Reaverbot scraps`, '#ffd66b');
+      return false;
+    }
+
+    const reward = SCRAP_QUEST_REWARD + this.ruinFloor * 18 + this.scrapQuestTurnIns * 24;
+    this.inventory.scraps = current - required;
+    this.inventory.gold += reward;
+    this.scrapQuestTurnIns += 1;
+    this.ui?.showToast?.(`Scrap quest complete +${reward}z`, '#ffd66b');
+    this.ui?.renderInventory?.();
+    return true;
   }
 
   completeRuinObjective({ reward = 650, position = null } = {}) {
@@ -1667,7 +1692,24 @@ export class Game {
 
     this.refractors.rollEnemyDrop(enemy);
     this.dungeonController?.rollEnemyKeycardDrop?.(enemy);
+    this._rollEnemyScrapDrop(enemy);
     this.lootSystem.rollDrop(enemy);
+  }
+
+  _rollEnemyScrapDrop(enemy) {
+    const chance = enemy?.isElite ? 0.92 : enemy?.typeKey === 'gorubesshu' || enemy?.typeKey === 'horokko' ? 0.58 : 0.42;
+
+    if (Math.random() > chance) {
+      return 0;
+    }
+
+    const amount = (enemy?.isElite ? 2 : 1) + (Math.random() < 0.18 ? 1 : 0);
+    this.inventory.scraps = (this.inventory.scraps ?? 0) + amount;
+    tempVectorA.copy(enemy.root.position);
+    tempVectorA.y = 0.7;
+    this.addParticleBurst(tempVectorA, 0x9aa7ad, 10 + amount * 4, 0.11);
+    this.ui?.showToast?.(`Reaverbot Scrap +${amount}`, '#c7d0d6');
+    return amount;
   }
 
   _applyEnemyStatusFromHit(enemy, dealt, meta = {}) {

@@ -87,6 +87,15 @@ export class DungeonGenerator {
       addRectRoom(tiles, room);
     }
 
+    const keycardRoom = rooms.find((room) => room.id === 'keycardRoom');
+    const conveyorRoom = rooms.find((room) => room.id === 'conveyorRoom');
+    if (keycardRoom) {
+      setTile(tiles, keycardRoom.x - side, keycardRoom.z - 1, 'chest');
+    }
+    if (conveyorRoom) {
+      setTile(tiles, conveyorRoom.x + side, conveyorRoom.z + 1, 'chest');
+    }
+
     for (let i = 1; i < rooms.length; i += 1) {
       addHallway(tiles, rooms[i - 1], rooms[i]);
     }
@@ -108,7 +117,7 @@ export class DungeonGenerator {
 
     this._addWalls(group, tiles, materials);
     const doors = this._addDoors(group, rooms, materials);
-    const landmarks = this._addRoomLandmarks(group, rooms, materials);
+    const landmarks = this._addRoomLandmarks(group, rooms, materials, tiles);
     const encounters = this._createEncounterDefinitions(rooms);
 
     const enemySpawnPoints = rooms
@@ -121,6 +130,7 @@ export class DungeonGenerator {
       tiles,
       doors,
       keycards: landmarks.keycards,
+      chests: landmarks.chests,
       mechanisms: landmarks.mechanisms,
       safeInteractables: landmarks.safeInteractables,
       safeZones: this._createRoomZones(rooms, 'hub').concat(this._createRoomZones(rooms, 'camp')),
@@ -183,6 +193,13 @@ export class DungeonGenerator {
       emissiveIntensity: 0.18,
       roughness: 0.74,
       metalness: 0.08,
+    });
+    const chest = new THREE.MeshStandardMaterial({
+      color: 0x4c5d68,
+      emissive: 0x07141d,
+      emissiveIntensity: 0.14,
+      roughness: 0.62,
+      metalness: 0.16,
     });
     const shrine = new THREE.MeshStandardMaterial({
       color: 0x303d4d,
@@ -265,6 +282,13 @@ export class DungeonGenerator {
         transparent: true,
         opacity: 0.86,
       }),
+      chestTrim: new THREE.MeshStandardMaterial({
+        color: 0xffd66b,
+        emissive: 0x5c3505,
+        emissiveIntensity: 0.42,
+        roughness: 0.36,
+        metalness: 0.28,
+      }),
       floorByType: {
         floor,
         hallway,
@@ -273,6 +297,7 @@ export class DungeonGenerator {
         trap,
         conveyor,
         keycard,
+        chest,
         shrine,
         hub,
         camp,
@@ -408,9 +433,10 @@ export class DungeonGenerator {
     return doors;
   }
 
-  _addRoomLandmarks(group, rooms, materials) {
+  _addRoomLandmarks(group, rooms, materials, tiles) {
     const landmarks = {
       keycards: [],
+      chests: [],
       mechanisms: [],
       safeInteractables: [],
       shrine: null,
@@ -450,6 +476,25 @@ export class DungeonGenerator {
       } else if (room.type === 'trap') {
         this._addTrapEmitters(group, position, materials);
       }
+    }
+
+    let chestIndex = 0;
+    for (const tile of tiles.values()) {
+      if (tile.type !== 'chest') {
+        continue;
+      }
+
+      const position = this._tileToWorld(tile.x, tile.z);
+      const object = this._addTreasureChest(group, position, materials, chestIndex);
+      landmarks.chests.push({
+        id: `ruinChest_${chestIndex + 1}`,
+        object,
+        position: position.clone(),
+        opened: false,
+        keycardChance: chestIndex === 0 ? 0.65 : 0.28,
+        rareBoost: chestIndex > 0,
+      });
+      chestIndex += 1;
     }
 
     return landmarks;
@@ -650,6 +695,52 @@ export class DungeonGenerator {
     terminal.add(base, screen, node);
     group.add(terminal);
     return terminal;
+  }
+
+  _addTreasureChest(group, position, materials, index = 0) {
+    const chest = new THREE.Group();
+    chest.name = `ruinTreasureChest_${index + 1}`;
+    chest.position.set(position.x, 0, position.z);
+
+    const base = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.42, 0.64), materials.floorByType.chest);
+    base.name = 'ruinChestBase';
+    base.position.y = 0.24;
+    base.castShadow = true;
+    base.receiveShadow = true;
+
+    const lid = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.22, 0.68), materials.floorByType.chest);
+    lid.name = 'ruinChestLid';
+    lid.position.set(0, 0.58, -0.02);
+    lid.castShadow = true;
+    lid.receiveShadow = true;
+
+    const band = new THREE.Mesh(new THREE.BoxGeometry(1.02, 0.08, 0.72), materials.chestTrim);
+    band.name = 'ruinChestTrim';
+    band.position.y = 0.61;
+    band.castShadow = true;
+
+    const lock = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.2, 0.08), materials.glowYellow);
+    lock.name = 'ruinChestLock';
+    lock.position.set(0, 0.49, -0.36);
+    lock.castShadow = true;
+
+    const glow = new THREE.Mesh(
+      new THREE.RingGeometry(0.62, 0.82, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xffd66b,
+        transparent: true,
+        opacity: 0.18,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    glow.name = 'ruinChestGlow';
+    glow.rotation.x = -Math.PI / 2;
+    glow.position.y = 0.04;
+
+    chest.add(base, lid, band, lock, glow);
+    group.add(chest);
+    return chest;
   }
 
   _addLargeRefractorShrine(group, position, materials) {

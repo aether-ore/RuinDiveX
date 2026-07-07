@@ -63,6 +63,7 @@ export class DungeonController {
     this.tiles = dungeon?.tiles ?? new Map();
     this.doors = dungeon?.doors ?? [];
     this.keycards = dungeon?.keycards ?? [];
+    this.chests = dungeon?.chests ?? [];
     this.mechanisms = dungeon?.mechanisms ?? [];
     this.safeInteractables = dungeon?.safeInteractables ?? [];
     this.safeZones = dungeon?.safeZones ?? [];
@@ -80,6 +81,8 @@ export class DungeonController {
     if (game?.player?.root) {
       this.lastSafePlayerPosition.copy(game.player.root.position);
     }
+
+    this._bindConveyorVisuals();
   }
 
   update(dt) {
@@ -94,6 +97,7 @@ export class DungeonController {
     this._updateEncounters();
     this._constrainPlayerToWalkable();
     this._updateDoorVisuals(dt);
+    this._updateChestVisuals(dt);
     this._updateMechanismVisuals(dt);
     this._updateNearestInteractable();
     this.navigationCache.clear();
@@ -117,6 +121,11 @@ export class DungeonController {
 
     if (interactable.kind === 'mechanism') {
       this._activateMechanism(interactable.target);
+      return true;
+    }
+
+    if (interactable.kind === 'chest') {
+      this._activateChest(interactable.target);
       return true;
     }
 
@@ -289,12 +298,16 @@ export class DungeonController {
     position.x += (Math.random() - 0.5) * 0.7;
     position.z += (Math.random() - 0.5) * 0.7;
 
+    return this._spawnKeycardAt(position, 'enemyKeycard');
+  }
+
+  _spawnKeycardAt(position, idPrefix = 'ruinKeycard') {
     const object = createDroppedKeycardObject();
     object.position.copy(position);
     this.game.scene.add(object);
 
     const keycard = {
-      id: `enemyKeycard_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      id: `${idPrefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
       object,
       position: position.clone(),
       collected: false,
@@ -376,6 +389,8 @@ export class DungeonController {
     const playerRoot = this.game.player.root;
 
     for (const conveyor of this.conveyors) {
+      this._updateConveyorVisuals(conveyor, dt);
+
       if (!conveyor.active) {
         continue;
       }
@@ -472,14 +487,18 @@ export class DungeonController {
       }
     }
 
-    for (const safeInteractable of this.safeInteractables) {
-      const distanceSq = playerPosition.distanceToSquared(safeInteractable.position);
-      if (distanceSq <= 2.0 * 2.0 && distanceSq < nearestDistanceSq) {
+    for (const chest of this.chests) {
+      if (chest.opened) {
+        continue;
+      }
+
+      const distanceSq = playerPosition.distanceToSquared(chest.position);
+      if (distanceSq <= 2.05 * 2.05 && distanceSq < nearestDistanceSq) {
         nearest = {
-          kind: 'safe',
-          target: safeInteractable,
-          label: safeInteractable.label,
-          color: safeInteractable.color,
+          kind: 'chest',
+          target: chest,
+          label: 'Open Ruin Chest',
+          color: KEYCARD_COLOR,
         };
         nearestDistanceSq = distanceSq;
       }
@@ -550,6 +569,10 @@ export class DungeonController {
       trap.active = false;
     }
 
+    for (const conveyor of this.conveyors) {
+      conveyor.active = false;
+    }
+
     for (const door of this.doors) {
       if (door.mechanismId === mechanism.id) {
         this._openDoor(door, 'Shrine seal released');
@@ -557,7 +580,37 @@ export class DungeonController {
     }
 
     this.game.addParticleBurst(mechanism.position, MECHANISM_COLOR, 24, 0.18);
-    this.game.ui?.showToast?.('Override console online', '#6bdcff');
+    this.game.ui?.showToast?.('Override online: traps and conveyors disabled', '#6bdcff');
+  }
+
+  _activateChest(chest) {
+    if (!chest || chest.opened) {
+      return;
+    }
+
+    chest.opened = true;
+    chest.object.userData.opened = true;
+
+    this.game.refractors?.rollChestDrop?.(chest.position, {
+      count: chest.rareBoost ? 5 : 4,
+      bonusValue: chest.rareBoost ? 4 : 1,
+      rareBoost: chest.rareBoost,
+    });
+
+    const keycardDropped = Math.random() < (chest.keycardChance ?? 0);
+    if (keycardDropped) {
+      const keycardPosition = chest.position.clone();
+      keycardPosition.y = 0.55;
+      keycardPosition.x += 0.45;
+      keycardPosition.z += 0.28;
+      this._spawnKeycardAt(keycardPosition, 'chestKeycard');
+    }
+
+    this.game.addParticleBurst(chest.position, KEYCARD_COLOR, keycardDropped ? 28 : 18, 0.16);
+    this.game.ui?.showToast?.(
+      keycardDropped ? 'Ruin chest opened: keycard and refractors' : 'Ruin chest opened: refractors',
+      '#ffd66b',
+    );
   }
 
   _updateEncounters() {
@@ -582,6 +635,35 @@ export class DungeonController {
         if (door.encounterId === encounter.id) {
           this._openDoor(door, `${door.label} unlocked`);
         }
+      }
+    }
+  }
+
+  _updateChestVisuals(dt) {
+    for (const chest of this.chests) {
+      const lid = chest.object?.getObjectByName?.('ruinChestLid');
+      const trim = chest.object?.getObjectByName?.('ruinChestTrim');
+      const lock = chest.object?.getObjectByName?.('ruinChestLock');
+      const glow = chest.object?.getObjectByName?.('ruinChestGlow');
+
+      if (lid) {
+        const targetX = chest.opened ? -0.92 : 0;
+        lid.rotation.x = THREE.MathUtils.lerp(lid.rotation.x, targetX, Math.min(1, dt * 8));
+        lid.position.y = THREE.MathUtils.lerp(lid.position.y, chest.opened ? 0.72 : 0.58, Math.min(1, dt * 8));
+      }
+
+      if (trim) {
+        trim.visible = !chest.opened;
+      }
+
+      if (lock) {
+        lock.visible = !chest.opened;
+      }
+
+      if (glow?.material) {
+        glow.material.opacity = chest.opened
+          ? THREE.MathUtils.lerp(glow.material.opacity, 0, Math.min(1, dt * 5))
+          : 0.15 + Math.sin(this.game.elapsedTime * 4.2) * 0.04;
       }
     }
   }
@@ -613,7 +695,13 @@ export class DungeonController {
       return;
     }
 
-    if (interactable.action === 'quest' || interactable.action === 'expedition') {
+    if (interactable.action === 'quest') {
+      this.game.turnInScrapQuest?.();
+      this.game.addParticleBurst(interactable.position, interactable.color ?? KEYCARD_COLOR, 10, 0.1);
+      return;
+    }
+
+    if (interactable.action === 'expedition') {
       if (this.game.ruinCompleted) {
         this.game.offerRuinReset?.();
         return;
@@ -648,6 +736,65 @@ export class DungeonController {
     tempVectorB.copy(door.position);
     tempVectorB.y = 0.9;
     this.game.addParticleBurst(tempVectorB, color, 16, 0.12);
+  }
+
+  _bindConveyorVisuals() {
+    if (!this.dungeon?.group) {
+      return;
+    }
+
+    for (const conveyor of this.conveyors) {
+      conveyor.visuals = [];
+    }
+
+    this.dungeon.group.traverse((object) => {
+      if (object.name !== 'conveyorDirectionArrow') {
+        return;
+      }
+
+      const conveyor = this.conveyors.find((candidate) => isInsideZone(object.position, candidate));
+      if (!conveyor) {
+        return;
+      }
+
+      if (object.material) {
+        object.material = object.material.clone();
+        object.material.transparent = true;
+      }
+      object.userData.baseY = object.position.y;
+      object.userData.baseScale = object.scale.x || 1;
+      conveyor.visuals.push(object);
+    });
+  }
+
+  _updateConveyorVisuals(conveyor, dt) {
+    if (!conveyor.visuals?.length) {
+      return;
+    }
+
+    for (const arrow of conveyor.visuals) {
+      arrow.position.y = (arrow.userData.baseY ?? 0.04) + Math.sin(this.game.elapsedTime * 6 + arrow.position.z) * 0.015;
+      const targetScale = conveyor.active
+        ? (arrow.userData.baseScale ?? 1) * (1 + Math.sin(this.game.elapsedTime * 7 + arrow.position.z) * 0.07)
+        : (arrow.userData.baseScale ?? 1) * 0.82;
+      arrow.scale.lerp(tempVectorA.set(targetScale, targetScale, targetScale), Math.min(1, dt * 8));
+
+      if (arrow.material) {
+        arrow.material.opacity = THREE.MathUtils.lerp(
+          arrow.material.opacity ?? 1,
+          conveyor.active ? 1 : 0.28,
+          Math.min(1, dt * 6),
+        );
+
+        if (arrow.material.emissive) {
+          arrow.material.emissiveIntensity = THREE.MathUtils.lerp(
+            arrow.material.emissiveIntensity ?? 1,
+            conveyor.active ? 1.1 : 0.16,
+            Math.min(1, dt * 6),
+          );
+        }
+      }
+    }
   }
 
   _isMechanismActivated(id) {

@@ -313,6 +313,7 @@ export class UIManager {
     this.weaponStats = document.getElementById('weapon-stats');
     this.armHotbar = document.getElementById('arm-hotbar');
     this.goldValue = document.getElementById('gold-value');
+    this.scrapValue = document.getElementById('scrap-value');
     this.inventoryPanel = document.getElementById('inventory-panel');
     this.inventoryActions = document.getElementById('inventory-actions');
     this.inventoryItems = document.getElementById('inventory-items');
@@ -368,6 +369,9 @@ export class UIManager {
     }
     this._renderWeaponTelemetry(weaponHud);
     this.goldValue.textContent = String(this.game.inventory.gold);
+    if (this.scrapValue) {
+      this.scrapValue.textContent = String(this.game.inventory.scraps ?? 0);
+    }
     this._renderArmHotbar(weaponHud?.tabs);
     this._renderMapEventPrompt();
     this._renderBuffTray();

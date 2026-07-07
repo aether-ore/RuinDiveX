@@ -93,18 +93,68 @@ export class DungeonController {
     this._constrainPlayerToWalkable();
     this._updateKeycards(dt);
     this._updateTraps(dt);
+    this._updateTrapVisuals(dt);
     this._updateConveyors(dt);
     this._updateEncounters();
     this._constrainPlayerToWalkable();
     this._updateDoorVisuals(dt);
     this._updateChestVisuals(dt);
     this._updateMechanismVisuals(dt);
+    this._updateExtractionVisuals(dt);
     this._updateNearestInteractable();
     this.navigationCache.clear();
   }
 
   getNearestInteractable() {
     return this.nearestInteractable;
+  }
+
+  getObjectiveText() {
+    if (this.isPlayerInSafeZone()) {
+      return this.game.ruinCompleted ? 'Expedition complete' : 'Enter ruin';
+    }
+
+    const activeEncounter = this.encounters.find((encounter) => (
+      encounter.spawned
+      && !encounter.cleared
+    ));
+
+    if (activeEncounter) {
+      return `Clear ${activeEncounter.label}`;
+    }
+
+    const unclaimedKeycard = this.keycards.some((keycard) => !keycard.collected);
+    const keycardDoor = this.doors.find((door) => door.requiresKeycard && door.closed && !door.optional);
+    if (keycardDoor) {
+      return this.keycardCount > 0
+        ? 'Open keycard door'
+        : unclaimedKeycard
+          ? 'Find keycard'
+          : 'Hunt Reaverbots';
+    }
+
+    const activeTrap = this.traps.find((trap) => (
+      trap.active
+      && isInsideZone(this.game.player.root.position, trap)
+    ));
+    if (activeTrap) {
+      return this.keycardCount > 0 ? 'Disable trap' : 'Cross trap room';
+    }
+
+    if (this.game.ruinCompleted && this.shrine?.collected) {
+      return 'Use extraction pad';
+    }
+
+    const shrineDoor = this.doors.find((door) => door.id === 'largeRefractorSeal');
+    if (shrineDoor?.closed) {
+      return 'Find override console';
+    }
+
+    if (this.shrine && !this.shrine.collected) {
+      return 'Secure Large Refractor';
+    }
+
+    return 'Return to camp';
   }
 
   activateNearest() {
@@ -124,6 +174,11 @@ export class DungeonController {
       return true;
     }
 
+    if (interactable.kind === 'trap') {
+      this._activateTrap(interactable.target);
+      return true;
+    }
+
     if (interactable.kind === 'chest') {
       this._activateChest(interactable.target);
       return true;
@@ -131,6 +186,11 @@ export class DungeonController {
 
     if (interactable.kind === 'shrine') {
       this._activateShrine();
+      return true;
+    }
+
+    if (interactable.kind === 'extraction') {
+      this._activateExtraction();
       return true;
     }
 
@@ -368,20 +428,76 @@ export class DungeonController {
   _updateTraps(dt) {
     this.trapPulseTimer = Math.max(0, this.trapPulseTimer - dt);
     const player = this.game.player;
+    const pulseNow = this.trapPulseTimer <= 0;
+    let trapPulseUsed = false;
 
     for (const trap of this.traps) {
-      if (!trap.active || !isInsideZone(player.root.position, trap)) {
+      if (!trap.active) {
         continue;
       }
 
-      player.takeDamage(8 * dt);
+      if (isInsideZone(player.root.position, trap)) {
+        player.takeDamage(8 * dt);
 
-      if (this.trapPulseTimer <= 0) {
-        this.trapPulseTimer = 0.32;
-        tempVectorA.copy(player.root.position);
-        tempVectorA.y = 0.2;
-        this.game.addParticleBurst(tempVectorA, 0xff645d, 6, 0.08);
+        if (pulseNow) {
+          tempVectorA.copy(player.root.position);
+          tempVectorA.y = 0.2;
+          this.game.addParticleBurst(tempVectorA, 0xff645d, 6, 0.08);
+          trapPulseUsed = true;
+        }
       }
+
+      if (!pulseNow) {
+        continue;
+      }
+
+      for (const enemy of this.game.enemies) {
+        if (enemy.dead || !isInsideZone(enemy.root.position, trap)) {
+          continue;
+        }
+
+        tempVectorA.copy(enemy.root.position);
+        tempVectorA.y = 0.72;
+        this.game.damageEnemy(enemy, trap.damagePerPulse ?? 5, {
+          source: trap,
+          element: 'shock',
+          hitPosition: tempVectorA.clone(),
+        });
+        this.game.addParticleBurst(tempVectorA, 0xff645d, 5, 0.075);
+        trapPulseUsed = true;
+      }
+    }
+
+    if (trapPulseUsed) {
+      this.trapPulseTimer = 0.32;
+    }
+  }
+
+  _updateTrapVisuals(dt) {
+    for (const trap of this.traps) {
+      if (!trap.object) {
+        continue;
+      }
+
+      const activePulse = trap.active
+        ? 0.72 + Math.sin(this.game.elapsedTime * 9) * 0.12
+        : 0.08;
+      const targetScaleY = trap.active ? 1 : 0.32;
+
+      trap.object.traverse((object) => {
+        if (!object.isMesh) {
+          return;
+        }
+
+        object.scale.y = THREE.MathUtils.lerp(object.scale.y, targetScaleY, Math.min(1, dt * 8));
+        if (object.material?.emissive) {
+          object.material.emissiveIntensity = THREE.MathUtils.lerp(
+            object.material.emissiveIntensity,
+            activePulse,
+            Math.min(1, dt * 8),
+          );
+        }
+      });
     }
   }
 
@@ -429,15 +545,46 @@ export class DungeonController {
     for (const mechanism of this.mechanisms) {
       const core = mechanism.object?.getObjectByName?.('mechanismTerminalCore');
       const screen = mechanism.object?.getObjectByName?.('mechanismTerminalScreen');
+      const blockedEncounter = this._getMechanismBlockingEncounter(mechanism);
 
       if (core) {
-        core.rotation.y += dt * (mechanism.activated ? 2.8 : 1.2);
+        core.rotation.y += dt * (mechanism.activated ? 2.8 : blockedEncounter ? 0.45 : 1.2);
         core.position.y = 1.08 + Math.sin(this.game.elapsedTime * 3.5) * 0.04;
       }
 
       if (screen?.material?.emissive) {
-        screen.material.emissiveIntensity = mechanism.activated ? 0.28 : 1.05;
+        screen.material.emissiveIntensity = mechanism.activated
+          ? 0.28
+          : blockedEncounter
+            ? 0.42
+            : 1.05;
       }
+    }
+  }
+
+  _updateExtractionVisuals(dt) {
+    const pad = this.shrine?.object?.getObjectByName?.('largeRefractorExtractionPad');
+    if (!pad?.visible) {
+      return;
+    }
+
+    const ring = pad.getObjectByName('largeRefractorExtractionPadRing');
+    const core = pad.getObjectByName('largeRefractorExtractionPadCore');
+    pad.rotation.y += dt * 0.9;
+
+    if (ring?.material) {
+      ring.material.opacity = 0.28 + Math.sin(this.game.elapsedTime * 5.4) * 0.08;
+    }
+
+    if (core?.material?.emissive) {
+      core.material.emissiveIntensity = 0.85 + Math.sin(this.game.elapsedTime * 6.2) * 0.18;
+    }
+  }
+
+  _setExtractionPadVisible(visible) {
+    const pad = this.shrine?.object?.getObjectByName?.('largeRefractorExtractionPad');
+    if (pad) {
+      pad.visible = visible;
     }
   }
 
@@ -477,11 +624,31 @@ export class DungeonController {
 
       const distanceSq = playerPosition.distanceToSquared(mechanism.position);
       if (distanceSq <= 2.1 * 2.1 && distanceSq < nearestDistanceSq) {
+        const blockedEncounter = this._getMechanismBlockingEncounter(mechanism);
         nearest = {
           kind: 'mechanism',
           target: mechanism,
-          label: mechanism.label,
-          color: MECHANISM_COLOR,
+          label: blockedEncounter
+            ? `${mechanism.label}: Clear ${blockedEncounter.label}`
+            : mechanism.label,
+          color: blockedEncounter ? LOCKED_COLOR : MECHANISM_COLOR,
+        };
+        nearestDistanceSq = distanceSq;
+      }
+    }
+
+    for (const trap of this.traps) {
+      if (!trap.active) {
+        continue;
+      }
+
+      const distanceSq = playerPosition.distanceToSquared(trap.position);
+      if (distanceSq <= 3.1 * 3.1 && distanceSq < nearestDistanceSq) {
+        nearest = {
+          kind: 'trap',
+          target: trap,
+          label: this.keycardCount > 0 ? trap.label : `${trap.label}: Keycard`,
+          color: this.keycardCount > 0 ? KEYCARD_COLOR : LOCKED_COLOR,
         };
         nearestDistanceSq = distanceSq;
       }
@@ -530,6 +697,19 @@ export class DungeonController {
       }
     }
 
+    if (this.shrine?.collected && this.game.ruinCompleted) {
+      const distanceSq = playerPosition.distanceToSquared(this.shrine.position);
+      if (distanceSq <= 3.0 * 3.0 && distanceSq < nearestDistanceSq) {
+        nearest = {
+          kind: 'extraction',
+          target: this.shrine,
+          label: 'Return to Camp',
+          color: MECHANISM_COLOR,
+        };
+        nearestDistanceSq = distanceSq;
+      }
+    }
+
     this.nearestInteractable = nearest;
   }
 
@@ -563,6 +743,13 @@ export class DungeonController {
   }
 
   _activateMechanism(mechanism) {
+    const blockedEncounter = this._getMechanismBlockingEncounter(mechanism);
+    if (blockedEncounter) {
+      this.game.ui?.showToast?.(`Clear ${blockedEncounter.label} before using this console`, '#ffb347');
+      this.game.addParticleBurst(mechanism.position, LOCKED_COLOR, 12, 0.12);
+      return;
+    }
+
     mechanism.activated = true;
 
     for (const trap of this.traps) {
@@ -581,6 +768,32 @@ export class DungeonController {
 
     this.game.addParticleBurst(mechanism.position, MECHANISM_COLOR, 24, 0.18);
     this.game.ui?.showToast?.('Override online: traps and conveyors disabled', '#6bdcff');
+  }
+
+  _getMechanismBlockingEncounter(mechanism) {
+    if (!mechanism?.requiresEncounterId) {
+      return null;
+    }
+
+    const encounter = this.encounters.find((candidate) => candidate.id === mechanism.requiresEncounterId);
+    return encounter && !encounter.cleared ? encounter : null;
+  }
+
+  _activateTrap(trap) {
+    if (!trap?.active) {
+      return;
+    }
+
+    if (this.keycardCount <= 0) {
+      this.game.ui?.showToast?.('A keycard can disable this trap relay', '#ffd66b');
+      this.game.addParticleBurst(trap.position, LOCKED_COLOR, 10, 0.1);
+      return;
+    }
+
+    this.keycardCount = Math.max(0, this.keycardCount - 1);
+    trap.active = false;
+    this.game.addParticleBurst(trap.position, KEYCARD_COLOR, 24, 0.16);
+    this.game.ui?.showToast?.('Keycard accepted: trap disabled', '#ffd66b');
   }
 
   _activateChest(chest) {
@@ -678,11 +891,21 @@ export class DungeonController {
     if (refractor) {
       refractor.visible = false;
     }
+    this._setExtractionPadVisible(true);
 
     this.game.completeRuinObjective?.({
       reward: 650,
       position: this.shrine.position,
     });
+  }
+
+  _activateExtraction() {
+    if (!this.game.ruinCompleted) {
+      return;
+    }
+
+    this.game.addParticleBurst(this.shrine.position, MECHANISM_COLOR, 20, 0.16);
+    this.game.extractToCamp?.();
   }
 
   _activateSafeInteractable(interactable) {

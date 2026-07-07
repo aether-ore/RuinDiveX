@@ -87,7 +87,10 @@ button:focus-visible {
   top: 12px;
   left: 50%;
   display: flex;
+  max-width: min(92vw, 760px);
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   transform: translateX(-50%);
   color: var(--muted);

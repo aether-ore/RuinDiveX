@@ -281,6 +281,11 @@ export class Game {
     return 120 + Math.max(0, this.ruinFloor - 1) * 45;
   }
 
+  getObjectiveText() {
+    return this.dungeonController?.getObjectiveText?.()
+      ?? (this.ruinCompleted ? 'Return to camp' : 'Explore ruin');
+  }
+
   getScrapQuestRequirement() {
     return SCRAP_QUEST_BASE_REQUIREMENT + Math.floor(this.scrapQuestTurnIns * 1.5);
   }
@@ -318,6 +323,26 @@ export class Game {
 
     this.ui?.showToast?.(`Large Refractor secured +${reward}z`, '#7df8ff');
     this.ui?.renderInventory?.();
+    return true;
+  }
+
+  extractToCamp() {
+    const target = this.dungeon?.campReturnPosition?.clone?.()
+      ?? this.dungeon?.playerStart?.clone?.()
+      ?? null;
+
+    if (!target) {
+      return false;
+    }
+
+    this.player.root.position.copy(target);
+    this.player.root.position.y = 0;
+    this.player.lastMoveDirection.set(0, 0, 1);
+    this.player.faceDirection(this.player.lastMoveDirection);
+    this.dungeonController?.lastSafePlayerPosition?.copy?.(this.player.root.position);
+    this.cameraController.snapTo(this.player);
+    this.addParticleBurst(this.player.root.position, 0x6bdcff, 28, 0.18);
+    this.ui?.showToast?.('Returned to expedition camp', '#6bdcff');
     return true;
   }
 

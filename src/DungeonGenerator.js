@@ -72,7 +72,7 @@ export class DungeonGenerator {
   generate() {
     const tiles = new Map();
     const side = this.random() < 0.5 ? -1 : 1;
-    const rooms = [
+    const mainRooms = [
       { id: 'hubTown', type: 'hub', x: 0, z: -12, width: 7, depth: 5 },
       { id: 'expeditionCamp', type: 'camp', x: 0, z: -6, width: 7, depth: 5 },
       { id: 'entrance', type: 'entrance', x: 0, z: 0, width: 5, depth: 5 },
@@ -82,6 +82,8 @@ export class DungeonGenerator {
       { id: 'conveyorRoom', type: 'conveyor', x: 0, z: 20, width: 5, depth: 5 },
       { id: 'shrineRoom', type: 'shrine', x: 0, z: 27, width: 7, depth: 7 },
     ];
+    const bonusVault = { id: 'bonusVault', type: 'bonus', x: side * 6, z: 20, width: 5, depth: 5 };
+    const rooms = [...mainRooms, bonusVault];
 
     for (const room of rooms) {
       addRectRoom(tiles, room);
@@ -95,9 +97,13 @@ export class DungeonGenerator {
     if (conveyorRoom) {
       setTile(tiles, conveyorRoom.x + side, conveyorRoom.z + 1, 'chest');
     }
+    setTile(tiles, bonusVault.x, bonusVault.z, 'chest');
 
-    for (let i = 1; i < rooms.length; i += 1) {
-      addHallway(tiles, rooms[i - 1], rooms[i]);
+    for (let i = 1; i < mainRooms.length; i += 1) {
+      addHallway(tiles, mainRooms[i - 1], mainRooms[i]);
+    }
+    if (conveyorRoom) {
+      addHallway(tiles, conveyorRoom, bonusVault);
     }
 
     const group = new THREE.Group();
@@ -119,9 +125,10 @@ export class DungeonGenerator {
     const doors = this._addDoors(group, rooms, materials);
     const landmarks = this._addRoomLandmarks(group, rooms, materials, tiles);
     const encounters = this._createEncounterDefinitions(rooms);
+    const trapVisualsByRoom = new Map(landmarks.trapVisuals.map((entry) => [entry.roomId, entry.object]));
 
     const enemySpawnPoints = rooms
-      .filter((room) => !['hub', 'camp', 'entrance'].includes(room.type))
+      .filter((room) => !['hub', 'camp', 'entrance', 'bonus'].includes(room.type))
       .flatMap((room) => this._roomSpawnPoints(room));
 
     return {
@@ -135,7 +142,12 @@ export class DungeonGenerator {
       safeInteractables: landmarks.safeInteractables,
       safeZones: this._createRoomZones(rooms, 'hub').concat(this._createRoomZones(rooms, 'camp')),
       encounters,
-      traps: this._createRoomZones(rooms, 'trap'),
+      traps: this._createRoomZones(rooms, 'trap').map((zone) => ({
+        ...zone,
+        label: 'Trap Keycard Override',
+        object: trapVisualsByRoom.get(zone.roomId) ?? null,
+        damagePerPulse: 5,
+      })),
       conveyors: this._createRoomZones(rooms, 'conveyor').map((zone) => ({
         ...zone,
         direction: new THREE.Vector3(0, 0, 1),
@@ -144,6 +156,10 @@ export class DungeonGenerator {
       shrine: landmarks.shrine,
       tileSize: this.tileSize,
       playerStart: this._tileToWorld(rooms[0].x, rooms[0].z),
+      campReturnPosition: this._tileToWorld(
+        rooms.find((room) => room.id === 'expeditionCamp')?.x ?? rooms[0].x,
+        rooms.find((room) => room.id === 'expeditionCamp')?.z ?? rooms[0].z,
+      ),
       enemySpawnPoints,
       shrinePosition: this._tileToWorld(rooms.at(-1).x, rooms.at(-1).z),
       boundsRadius: 82,
@@ -186,6 +202,13 @@ export class DungeonGenerator {
       emissiveIntensity: 0.18,
       roughness: 0.62,
       metalness: 0.22,
+    });
+    const bonus = new THREE.MeshStandardMaterial({
+      color: 0x33405d,
+      emissive: 0x071634,
+      emissiveIntensity: 0.2,
+      roughness: 0.6,
+      metalness: 0.18,
     });
     const keycard = new THREE.MeshStandardMaterial({
       color: 0x3b4430,
@@ -296,6 +319,7 @@ export class DungeonGenerator {
         enemy,
         trap,
         conveyor,
+        bonus,
         keycard,
         chest,
         shrine,
@@ -377,6 +401,7 @@ export class DungeonGenerator {
       { id: 'entranceDoor', from: roomById.get('expeditionCamp'), to: roomById.get('entrance'), locked: false, closed: false, label: 'Ruin Entrance' },
       { id: 'enemyNestGate', from: roomById.get('enemyNest'), to: roomById.get('keycardRoom'), locked: true, closed: true, encounterId: 'enemyNest', label: 'Security Gate' },
       { id: 'lockedKeycardDoor', from: roomById.get('keycardRoom'), to: roomById.get('trapRoom'), locked: true, closed: true, requiresKeycard: true, label: 'Keycard Door' },
+      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, requiresKeycard: true, optional: true, label: 'Bonus Vault' },
       { id: 'largeRefractorSeal', from: roomById.get('conveyorRoom'), to: roomById.get('shrineRoom'), locked: true, closed: true, mechanismId: 'conveyorOverride', label: 'Shrine Seal' },
     ];
     const doors = [];
@@ -421,6 +446,7 @@ export class DungeonGenerator {
         locked: descriptor.locked,
         closed: descriptor.closed,
         requiresKeycard: Boolean(descriptor.requiresKeycard),
+        optional: Boolean(descriptor.optional),
         mechanismId: descriptor.mechanismId ?? null,
         encounterId: descriptor.encounterId ?? null,
         opened: !descriptor.closed,
@@ -439,6 +465,7 @@ export class DungeonGenerator {
       chests: [],
       mechanisms: [],
       safeInteractables: [],
+      trapVisuals: [],
       shrine: null,
     };
 
@@ -464,6 +491,7 @@ export class DungeonGenerator {
           label: 'Ruin Override Console',
           object: this._addMechanismTerminal(group, position, materials),
           position: position.clone(),
+          requiresEncounterId: 'conveyorGuard',
           activated: false,
         });
       } else if (room.type === 'shrine') {
@@ -474,7 +502,10 @@ export class DungeonGenerator {
           collected: false,
         };
       } else if (room.type === 'trap') {
-        this._addTrapEmitters(group, position, materials);
+        landmarks.trapVisuals.push({
+          roomId: room.id,
+          object: this._addTrapEmitters(group, position, materials),
+        });
       }
     }
 
@@ -774,19 +805,50 @@ export class DungeonGenerator {
     glow.position.y = 0.06;
     glow.rotation.x = -Math.PI / 2;
 
-    shrine.add(base, refractor, glow);
+    const extractionPad = new THREE.Group();
+    extractionPad.name = 'largeRefractorExtractionPad';
+    extractionPad.visible = false;
+
+    const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.05, 1.22, 0.1, 32), materials.glowBlue.clone());
+    pad.name = 'largeRefractorExtractionPadCore';
+    pad.position.y = 0.08;
+    pad.receiveShadow = true;
+
+    const padRing = new THREE.Mesh(
+      new THREE.RingGeometry(1.28, 1.62, 48),
+      new THREE.MeshBasicMaterial({
+        color: 0x6bdcff,
+        transparent: true,
+        opacity: 0.34,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    padRing.name = 'largeRefractorExtractionPadRing';
+    padRing.position.y = 0.16;
+    padRing.rotation.x = -Math.PI / 2;
+
+    extractionPad.add(pad, padRing);
+    shrine.add(base, refractor, glow, extractionPad);
     group.add(shrine);
     return shrine;
   }
 
   _addTrapEmitters(group, position, materials) {
+    const emitters = new THREE.Group();
+    emitters.name = 'trapEmitterGroup';
+    emitters.position.copy(position);
+
     for (const offset of [-1.15, 1.15]) {
-      const emitter = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.58, 0.34), materials.glowRed);
+      const emitter = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.58, 0.34), materials.glowRed.clone());
       emitter.name = 'trapLaserEmitter';
-      emitter.position.set(position.x + offset, 0.29, position.z);
+      emitter.position.set(offset, 0.29, 0);
       emitter.castShadow = true;
-      group.add(emitter);
+      emitters.add(emitter);
     }
+
+    group.add(emitters);
+    return emitters;
   }
 
   _roomSpawnPoints(room) {

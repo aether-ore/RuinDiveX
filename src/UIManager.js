@@ -299,6 +299,9 @@ export class UIManager {
     this.healthText = document.getElementById('health-text');
     this.timeValue = document.getElementById('time-value');
     this.enemyCount = document.getElementById('enemy-count');
+    this.floorValue = document.getElementById('floor-value');
+    this.keycardValue = document.getElementById('keycard-value');
+    this.objectiveValue = document.getElementById('objective-value');
     this.levelValue = document.getElementById('level-value');
     this.weaponValue = document.getElementById('weapon-value');
     this.weaponGauge = document.getElementById('weapon-gauge');
@@ -362,6 +365,15 @@ export class UIManager {
     this.healthGauge?.classList.toggle('is-damaged', this.healthDamagePulseTimer > 0);
     this.timeValue.textContent = formatTime(this.game.elapsedTime);
     this.enemyCount.textContent = String(this.game.enemies.filter((enemy) => !enemy.dead).length);
+    if (this.floorValue) {
+      this.floorValue.textContent = String(this.game.ruinFloor ?? 1);
+    }
+    if (this.keycardValue) {
+      this.keycardValue.textContent = String(this.game.dungeonController?.keycardCount ?? 0);
+    }
+    if (this.objectiveValue) {
+      this.objectiveValue.textContent = this.game.getObjectiveText?.() ?? 'Explore ruin';
+    }
     this.levelValue.textContent = String(player.level);
     const weaponHud = this.game.combat?.getWeaponHudData?.() ?? null;
     if (this.weaponValue) {

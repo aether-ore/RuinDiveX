@@ -1,0 +1,82 @@
+# Mega Man Legends-Inspired Ruin Crawler Prototype
+
+A procedural Three.js top-down ruin-crawler prototype with Mega Man Legends-inspired robotic salvage, arm weapons, buster upgrades, Kevlar and alloy armor, elite Reaverbot-style encounters, loot pickups, and a garage loadout screen.
+
+The equipment foundation now uses robotic part categories instead of fantasy RPG gear:
+
+- Arm Weapons: `Buster Arm`, `Sword Arm`, `Drill Arm`, `Shield Arm`, `Cannon Arm`, `Grenade Arm`, `Machine Gun Arm`, `Rail Buster Arm`, `Scatter Buster Arm`, `Homing Seeker Arm`, and elemental arm parts.
+- Buster Parts: `Power Raiser`, `Range Booster`, `Rapid Fire Unit`, `Energy Battery`, `Sniper Scope`, and `Heat Sink Core`.
+- Armor and Sensor Gear: `Kevlar Jacket`, `Alloy Chest Plate`, `Refractor-Lined Armor`, `Utility Helmet`, and `Lock-On Visor`.
+- Mobility Gear: `Servo Boots`, `Jet Skates`, and `Magnetic Soles`.
+- Utility Salvage: `Reactor Chip`, `Capacitor Module`, `Targeting Chip`, `Energy Cartridge`, `Adapter Plug`, and `Refractor Core`.
+
+Primary weapon stats follow the intended buster-part language:
+
+- `Attack`: single hit, shot, beam pulse, slash, or explosion impact.
+- `Energy`: burst capacity before reload, recharge, or heat venting.
+- `Range`: projectile distance, blade reach, beam length, or lock-on distance.
+- `Rapid`: firing rhythm, swing speed, drill tick rate, or launch interval.
+
+## Controls
+
+- WASD or arrow keys move.
+- Mouse aims; the cyan reticle marks the current ground target.
+- Hold left mouse to fire or swing the active arm weapon.
+- Right mouse uses a secondary arm function when available. With `Shield Arm` equipped, it raises a timed guard; early timing parries and staggers attackers. Otherwise it manually vents/reloads the active arm weapon when Energy is not full.
+- Number keys `1` through `4` switch arm weapon slots.
+- `E` activates nearby ruin devices such as Refractor Surge pylons, Overclock Terminals, Repair Stations, Cooling Vents, and Salvage Caches.
+- `I` opens the Garage Loadout screen.
+- Arm weapon salvage in the Garage has `1`-`4` loadout buttons for assigning it directly to a hotbar slot.
+
+The current combat pass uses manual attacks, a four-slot arm hotbar, per-arm Energy, reload timers, swap delay, distinct arm projectile behaviors, Shield Arm secondary guarding/parrying, robotic status effects, elite armor weaknesses, temporary map-event buffs, and direct Garage hotbar assignment. Additional weapon-specific secondary functions and drag/drop polish are still future work.
+
+Implemented arm behavior examples include arcing explosive `Grenade Arm` shots, piercing `Rail Buster Arm` rounds, close-range `Scatter Buster Arm` spread fire, and `Homing Seeker Arm` rounds that curve toward nearby targets.
+
+## Ruin Devices
+
+Interactable field devices now spawn around the arena:
+
+- `Refractor Surge` temporarily increases Energy and recharge, refills arm weapons, and may attract Reaverbots.
+- `Overclock Terminal` boosts Rapid and cooling at the cost of Armor, then triggers a defense wave.
+- `Repair Station` restores HP and can wake nearby security units.
+- `Cooling Vent` reduces reload/cooldown pressure and creates a temporary cooling field.
+- `Refractor Pylon` adds thermal, cryo, shock, or corrosive output for a short duration.
+- `Salvage Cache` drops a robotic part and may spawn an elite guardian.
+
+## Run
+
+Serve the folder with any local static server, then open the shown localhost URL.
+
+```powershell
+node scripts/dev-server.mjs 5174
+```
+
+The app uses a browser import map for Three.js, so no package install is required for this prototype.
+
+## Main Files
+
+- `index.html` - app shell, HUD labels, and garage loadout panel.
+- `src/main.js` - creates and starts the game.
+- `src/Game.js` - scene, camera, loop, effects, hazards, enemy and loot coordination.
+- `src/MapEventSystem.js` - interactable ruin devices, temporary field buffs, risky event rewards.
+- `src/Player.js` - movement, health, stats, model animation, buster pose, and equipment hooks.
+- `src/ModularHumanoid.js` - procedural modular humanoid fallback character.
+- `src/LootSystem.js` and `src/Item.js` - robotic part generation, salvage rarity, affixes, pickups.
+- `src/Enemy.js`, `src/EliteEnemy.js`, `src/EnemySpawner.js` - enemy types, elite traits, waves.
+- `src/CombatSystem.js`, `src/ProjectileSystem.js` - current combat prototype and projectile behavior.
+- `src/Inventory.js`, `src/EquipmentManager.js`, `src/UIManager.js` - salvage inventory, garage equipment, UI.
+- `src/ExternalModelRig.js` - segmented Mega Man Volnutt model rig and buster arm pose.
+- `src/AnimationController.js` - procedural idle, walk, attack, hurt, and death poses.
+- `src/ui.css` - HUD and garage styling.
+
+## Development Hooks
+
+The running game exposes a few helpers on `window`:
+
+```js
+window.spawnElite('tank');
+window.generateLoot('swordArm', 'legendary');
+window.generateLoot('powerRaiser', 'prototype');
+window.generateLoot('kevlarJacket', 'tuned');
+window.openInventory();
+```

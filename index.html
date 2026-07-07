@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ruin Digger Prototype</title>
+    <link rel="stylesheet" href="./src/ui.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main id="game-container" aria-label="3D ruin digger action prototype"></main>
+
+    <div id="ui-root">
+      <div class="combat-meta" aria-label="Combat status">
+        <span id="time-value">00:00</span>
+        <span><strong id="enemy-count">0</strong> enemies</span>
+      </div>
+
+      <button id="inventory-button" class="visually-hidden" aria-pressed="false">Garage</button>
+
+      <section id="health-gauge" class="legends-gauge legends-health-gauge" aria-label="Player health gauge">
+        <div class="gauge-stack gauge-single">
+          <div class="gauge-cap gauge-cap-top"></div>
+          <div class="gauge-track">
+            <div id="health-fill" class="gauge-fill health-gauge-fill"></div>
+          </div>
+          <div class="gauge-cap gauge-cap-bottom"></div>
+        </div>
+        <div class="gauge-node health-node" aria-label="Player level">
+          <span class="level-node-text">Lv <strong id="level-value">1</strong></span>
+        </div>
+        <span id="health-text" class="gauge-readout">120 / 120</span>
+      </section>
+
+      <div class="weapon-hud-cluster" aria-label="Weapon status">
+        <div id="arm-hotbar" class="arm-hotbar" aria-label="Arm weapon tabs"></div>
+
+        <section id="weapon-gauge" class="legends-gauge legends-weapon-gauge" aria-label="Weapon energy and output gauge">
+          <div class="gauge-stack gauge-double">
+            <div class="gauge-cap gauge-cap-top"></div>
+            <div class="dual-gauge-rails">
+              <div class="gauge-track">
+                <div id="weapon-energy-fill" class="gauge-fill weapon-green-fill"></div>
+              </div>
+              <div class="gauge-track">
+                <div id="weapon-output-fill" class="gauge-fill weapon-blue-fill"></div>
+              </div>
+            </div>
+            <div class="gauge-cap gauge-cap-bottom"></div>
+          </div>
+          <div id="weapon-mode-node" class="gauge-node output-node" aria-label="Weapon mode">
+            <div id="weapon-mode-mark" class="node-mark output-mark mode-mark mode-symbol-manual is-main"></div>
+          </div>
+          <span id="energy-value" class="gauge-readout">E 0/0 O 0%</span>
+        </section>
+      </div>
+
+      <div id="loot-toast" role="status" aria-live="polite"></div>
+      <div id="event-prompt" class="event-prompt" hidden></div>
+      <div id="buff-tray" class="buff-tray" aria-label="Active field buffs"></div>
+
+      <section id="inventory-panel" class="inventory-panel" hidden>
+        <header class="inventory-header">
+          <h1>Garage Loadout</h1>
+          <div class="garage-currency"><span>Zenny</span><strong id="gold-value">0</strong></div>
+          <button class="close-button" data-action="close">X</button>
+        </header>
+        <div class="inventory-layout">
+          <section>
+            <h2>Arm Loadout</h2>
+            <div id="garage-weapon-slots" class="garage-weapon-grid"></div>
+            <h2>Equipped Parts</h2>
+            <div id="equipment-slots" class="equipment-grid"></div>
+          </section>
+          <section>
+            <div class="salvage-controls">
+              <div class="inventory-title-row">
+                <h2>Salvage Inventory</h2>
+                <button class="optimize-button" data-action="optimize-equipment">Optimize</button>
+              </div>
+              <div id="inventory-actions" class="inventory-actions" aria-label="Inventory actions"></div>
+            </div>
+            <div id="inventory-items" class="inventory-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <aside id="item-tooltip" class="item-tooltip" hidden></aside>
+
+      <section id="pose-debug-panel" class="pose-debug-panel" hidden>
+        <header class="pose-debug-header">
+          <h1>Pose Debug</h1>
+          <button data-action="pose-copy">Copy Prompt</button>
+          <button data-action="pose-reset">Reset</button>
+          <button class="close-button" data-action="pose-close">X</button>
+        </header>
+        <div class="pose-debug-body">
+          <p id="pose-debug-status" class="pose-debug-status">Tilde toggles this editor. World simulation is paused while it is open.</p>
+          <div class="pose-debug-timeline" aria-label="Animation keyframe editor">
+            <label>
+              <span>Animation</span>
+              <select id="pose-debug-animation"></select>
+            </label>
+            <label>
+              <span>Keyframe</span>
+              <select id="pose-debug-keyframe"></select>
+            </label>
+            <div class="pose-debug-key-actions">
+              <button data-action="pose-add-keyframe">New Key</button>
+              <button data-action="pose-delete-keyframe">Delete Key</button>
+            </div>
+          </div>
+          <div id="pose-debug-controls" class="pose-debug-controls"></div>
+          <label class="pose-debug-output-label" for="pose-debug-output">Pose prompt</label>
+          <textarea id="pose-debug-output" class="pose-debug-output" readonly></textarea>
+        </div>
+      </section>
+
+      <section id="game-over" class="game-over" hidden>
+        <h1>Defeated</h1>
+        <button id="restart-button">Restart</button>
+      </section>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

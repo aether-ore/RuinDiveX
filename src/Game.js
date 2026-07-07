@@ -1,14 +1,18 @@
 import * as THREE from 'three';
 import { CombatSystem } from './CombatSystem.js';
+import { CameraController } from './CameraController.js';
+import { DungeonController } from './DungeonController.js';
+import { DungeonGenerator } from './DungeonGenerator.js';
 import { EnemySpawner } from './EnemySpawner.js';
 import { Inventory } from './Inventory.js';
 import { LootSystem } from './LootSystem.js';
 import { MapEventSystem } from './MapEventSystem.js';
 import { Player } from './Player.js';
 import { ProjectileSystem } from './ProjectileSystem.js';
+import { RefractorPickupSystem } from './RefractorPickupSystem.js';
 import { UIManager } from './UIManager.js';
 
-const CAMERA_OFFSET = new THREE.Vector3(0, 10.5, 9.5);
+const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
 const CAMERA_LOOK_OFFSET = new THREE.Vector3(0, 1.1, 0);
 const POSE_DEBUG_HANDLE_COLOR = 0xffd36f;
 const POSE_DEBUG_HANDLE_SELECTED_COLOR = 0xffffff;
@@ -40,6 +44,7 @@ export class Game {
 
     this.camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 120);
     this.camera.name = 'followCamera';
+    this.cameraController = new CameraController(this.camera);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -65,7 +70,10 @@ export class Game {
     this.inventoryOpen = false;
     this.poseDebugOpen = false;
     this.isGameOver = false;
-    this.arenaRadius = 34;
+    this.ruinFloor = 1;
+    this.largeRefractorsSecured = 0;
+    this.ruinCompleted = false;
+    this.arenaRadius = 82;
     this.pointer = {
       x: window.innerWidth * 0.5,
       y: window.innerHeight * 0.5,
@@ -104,7 +112,7 @@ export class Game {
     this.poseDebugCamera = {
       yaw: 0,
       pitch: 0.72,
-      distance: CAMERA_OFFSET.length(),
+      distance: POSE_DEBUG_CAMERA_DEFAULT_DISTANCE,
       rotating: false,
       lastX: 0,
       lastY: 0,
@@ -116,13 +124,18 @@ export class Game {
 
     this.player = new Player();
     this.scene.add(this.player.root);
+    if (this.dungeon?.playerStart) {
+      this.player.root.position.copy(this.dungeon.playerStart);
+    }
 
     this.inventory = new Inventory(54);
     this.lootSystem = new LootSystem(this.scene);
+    this.refractors = new RefractorPickupSystem(this.scene);
     this.projectiles = new ProjectileSystem(this);
     this.combat = new CombatSystem(this);
     this.spawner = new EnemySpawner(this);
     this.ui = new UIManager(this);
+    this.dungeonController = new DungeonController(this, this.dungeon);
     this.mapEvents = new MapEventSystem(this);
 
     this._addStarterItems();
@@ -245,6 +258,97 @@ export class Game {
 
   spawnEnemy(type = 'basic', elite = false) {
     return this.spawner.spawnEnemy(type, elite);
+  }
+
+  getNearestInteractable() {
+    return this.dungeonController?.getNearestInteractable?.()
+      ?? this.mapEvents?.getNearestInteractable?.()
+      ?? null;
+  }
+
+  activateNearestInteractable() {
+    if (this.dungeonController?.activateNearest?.()) {
+      return true;
+    }
+
+    return this.mapEvents?.activateNearest?.() ?? false;
+  }
+
+  getRuinResetCost() {
+    return 120 + Math.max(0, this.ruinFloor - 1) * 45;
+  }
+
+  completeRuinObjective({ reward = 650, position = null } = {}) {
+    if (this.ruinCompleted) {
+      return false;
+    }
+
+    this.ruinCompleted = true;
+    this.largeRefractorsSecured += 1;
+    this.inventory.gold += reward;
+
+    if (position) {
+      this.addParticleBurst(position, 0x7df8ff, 42, 0.24);
+    }
+
+    this.ui?.showToast?.(`Large Refractor secured +${reward}z`, '#7df8ff');
+    this.ui?.renderInventory?.();
+    return true;
+  }
+
+  offerRuinReset() {
+    if (this.ruinCompleted) {
+      this.resetDungeonLayout({ free: true, message: 'Ruin shifted after Large Refractor recovery' });
+      return true;
+    }
+
+    const cost = this.getRuinResetCost();
+    if (this.inventory.gold < cost) {
+      this.ui?.showToast?.(`Need ${cost}z to reset the ruin`, '#ffb347');
+      return false;
+    }
+
+    this.inventory.gold -= cost;
+    this.resetDungeonLayout({ free: true, message: `Ruin reset for ${cost}z` });
+    return true;
+  }
+
+  resetDungeonLayout({ free = false, message = 'Ruin layout reset' } = {}) {
+    if (!free) {
+      const cost = this.getRuinResetCost();
+      if (this.inventory.gold < cost) {
+        this.ui?.showToast?.(`Need ${cost}z to reset the ruin`, '#ffb347');
+        return false;
+      }
+      this.inventory.gold -= cost;
+    }
+
+    this._clearDungeonRunState();
+
+    if (this.dungeon?.group) {
+      this.dungeon.group.removeFromParent();
+    }
+
+    const dungeon = new DungeonGenerator().generate();
+    this.dungeon = dungeon;
+    this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
+    this.scene.add(dungeon.group);
+    this.dungeonController = new DungeonController(this, dungeon);
+
+    this.player.root.position.copy(dungeon.playerStart);
+    this.player.lastMoveDirection.set(0, 0, 1);
+    this.player.faceDirection(this.player.lastMoveDirection);
+    this.cameraController.snapTo(this.player);
+
+    this._buildJunkField();
+    this.spawner = new EnemySpawner(this);
+    this.spawner.spawnInitialPack();
+    this.ruinFloor += 1;
+    this.ruinCompleted = false;
+
+    this.ui?.showToast?.(message, '#6bdcff');
+    this.ui?.renderInventory?.();
+    return true;
   }
 
   generateLoot(type = null, rarity = null) {
@@ -651,10 +755,17 @@ export class Game {
     if (!this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver) {
       this.elapsedTime += dt;
       this._updateAimFromPointer();
-      this.player.update(dt, this.keys, this.arenaRadius);
+      const movementBasis = this.cameraController.getMovementBasis(this.player.lastMoveDirection);
+      this.player.update(dt, this.keys, {
+        arenaRadius: this.arenaRadius,
+        movementForward: movementBasis.forward,
+        movementRight: movementBasis.right,
+      });
+      this.dungeonController.update(dt);
       this.mapEvents.update(dt);
       this.spawner.update(dt);
       this._updateEnemies(dt);
+      this.dungeonController.constrainEnemies();
       this.combat.update(dt);
       this.projectiles.update(dt);
       this._updateHazards(dt);
@@ -667,6 +778,11 @@ export class Game {
 
       if (collected.length > 0) {
         this.ui.renderInventory();
+      }
+
+      const collectedRefractors = this.refractors.update(dt, this.player, this.inventory);
+      for (const refractor of collectedRefractors) {
+        this.ui.showToast(`${refractor.label} +${refractor.value}z`, refractor.color);
       }
 
       if (this.player.dead) {
@@ -702,28 +818,25 @@ export class Game {
     key.shadow.camera.bottom = -18;
     this.scene.add(key);
 
-    const ground = new THREE.Mesh(
-      new THREE.CircleGeometry(this.arenaRadius + 4, 96),
-      new THREE.MeshStandardMaterial({ color: 0x303123, roughness: 0.92, metalness: 0 }),
+    const underlay = new THREE.Mesh(
+      new THREE.PlaneGeometry(this.arenaRadius * 2.5, this.arenaRadius * 2.5),
+      new THREE.MeshStandardMaterial({ color: 0x171b1d, roughness: 0.96, metalness: 0 }),
     );
-    ground.name = 'arenaGround';
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = true;
-    this.scene.add(ground);
+    underlay.name = 'ruinVoidUnderlay';
+    underlay.rotation.x = -Math.PI / 2;
+    underlay.position.y = -0.09;
+    underlay.receiveShadow = true;
+    this.scene.add(underlay);
 
-    const grid = new THREE.GridHelper(this.arenaRadius * 2, 34, 0x5d6045, 0x424531);
-    grid.name = 'arenaGrid';
-    grid.position.y = 0.012;
+    const grid = new THREE.GridHelper(this.arenaRadius * 2.2, 64, 0x43515a, 0x283138);
+    grid.name = 'ruinConstructionGrid';
+    grid.position.y = 0.014;
     this.scene.add(grid);
 
-    const border = new THREE.Mesh(
-      new THREE.TorusGeometry(this.arenaRadius, 0.09, 8, 128),
-      new THREE.MeshBasicMaterial({ color: 0x8a6f38, transparent: true, opacity: 0.48 }),
-    );
-    border.name = 'arenaBorder';
-    border.rotation.x = Math.PI / 2;
-    border.position.y = 0.05;
-    this.scene.add(border);
+    const dungeon = new DungeonGenerator().generate();
+    this.dungeon = dungeon;
+    this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
+    this.scene.add(dungeon.group);
 
     this._buildJunkField();
   }
@@ -743,6 +856,51 @@ export class Game {
     placements.forEach(([x, z, scale], index) => {
       this._createJunkCube(new THREE.Vector3(x, 0, z), index, scale);
     });
+  }
+
+  _clearDungeonRunState() {
+    for (const enemy of this.enemies) {
+      enemy.root.removeFromParent();
+    }
+    this.enemies.length = 0;
+
+    this.projectiles?.clear?.();
+    this.lootSystem?.clear?.();
+    this.refractors?.clear?.();
+
+    for (const hazard of this.hazards) {
+      hazard.object?.removeFromParent?.();
+    }
+    this.hazards.length = 0;
+
+    for (const junk of this.destructibles) {
+      junk.root?.removeFromParent?.();
+    }
+    this.destructibles.length = 0;
+
+    for (const effect of this.timedEffects) {
+      effect.object?.removeFromParent?.();
+    }
+    this.timedEffects.length = 0;
+
+    for (const number of this.damageNumbers) {
+      number.sprite?.removeFromParent?.();
+    }
+    this.damageNumbers.length = 0;
+
+    for (const effect of this.activeHitEffects) {
+      effect.mesh.visible = false;
+      effect.mesh.removeFromParent();
+      this.hitEffectPool.push(effect);
+    }
+    this.activeHitEffects.length = 0;
+
+    for (const particle of this.activeParticles) {
+      particle.mesh.visible = false;
+      particle.mesh.removeFromParent();
+      this.particlePool.push(particle);
+    }
+    this.activeParticles.length = 0;
   }
 
   _createJunkCube(position, index = 0, scale = 1) {
@@ -880,7 +1038,7 @@ export class Game {
       }
 
       if (!this.inventoryOpen && event.code === 'KeyE') {
-        if (this.mapEvents.activateNearest()) {
+        if (this.activateNearestInteractable()) {
           return;
         }
       }
@@ -1283,7 +1441,7 @@ export class Game {
     tempVectorA.copy(this.player.root.position).add(CAMERA_LOOK_OFFSET);
     tempVectorB.copy(this.camera.position).sub(tempVectorA);
 
-    const distance = THREE.MathUtils.clamp(tempVectorB.length() || CAMERA_OFFSET.length(), POSE_DEBUG_CAMERA_MIN_DISTANCE, POSE_DEBUG_CAMERA_MAX_DISTANCE);
+    const distance = THREE.MathUtils.clamp(tempVectorB.length() || POSE_DEBUG_CAMERA_DEFAULT_DISTANCE, POSE_DEBUG_CAMERA_MIN_DISTANCE, POSE_DEBUG_CAMERA_MAX_DISTANCE);
     const horizontal = Math.max(0.001, Math.hypot(tempVectorB.x, tempVectorB.z));
 
     this.poseDebugCamera.distance = distance;
@@ -1496,10 +1654,7 @@ export class Game {
       return;
     }
 
-    tempVectorA.copy(this.player.root.position).add(CAMERA_OFFSET);
-    tempVectorB.copy(this.player.root.position).add(CAMERA_LOOK_OFFSET);
-    this.camera.position.lerp(tempVectorA, Math.min(1, dt * 5));
-    this.camera.lookAt(tempVectorB);
+    this.cameraController.update(dt, this.player);
   }
 
   _handleEnemyKilled(enemy, meta) {
@@ -1510,6 +1665,8 @@ export class Game {
       this.addExplosion(enemy.root.position, this.player.stats.attackDamage * 1.4, 1.9, 0xff8a42);
     }
 
+    this.refractors.rollEnemyDrop(enemy);
+    this.dungeonController?.rollEnemyKeycardDrop?.(enemy);
     this.lootSystem.rollDrop(enemy);
   }
 

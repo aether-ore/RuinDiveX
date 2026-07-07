@@ -35,37 +35,45 @@ function randomPointAround(center, minRadius, maxRadius) {
   );
 }
 
+function randomDungeonSpawnPoint(game, center, minDistance = 9) {
+  const points = game.dungeon?.enemySpawnPoints;
+
+  if (!points?.length) {
+    return null;
+  }
+
+  const minDistanceSq = minDistance * minDistance;
+  const candidates = points.filter((point) => point.distanceToSquared(center) >= minDistanceSq);
+  const pool = candidates.length > 0 ? candidates : points;
+  const point = pool[Math.floor(Math.random() * pool.length)].clone();
+  point.x += (Math.random() - 0.5) * 1.25;
+  point.z += (Math.random() - 0.5) * 1.25;
+  point.y = 0;
+  return point;
+}
+
 export class EnemySpawner {
   constructor(game) {
     this.game = game;
-    this.spawnTimer = 0.25;
-    this.waveTimer = 8;
     this.elapsed = 0;
     this.wave = 1;
   }
 
   update(dt) {
-    this.elapsed += dt;
-    this.spawnTimer -= dt;
-    this.waveTimer -= dt;
-
-    const difficulty = this.getDifficulty();
-    const maxEnemies = Math.min(90, 16 + Math.floor(difficulty * 6));
-
-    if (this.game.enemies.length < maxEnemies && this.spawnTimer <= 0) {
-      this.spawnEnemy();
-      this.spawnTimer = Math.max(0.22, 1.65 - difficulty * 0.07);
+    if (this.game.dungeonController?.isPlayerInSafeZone?.()) {
+      return;
     }
 
-    if (this.waveTimer <= 0) {
-      this.spawnWave();
-      this.wave += 1;
-      this.waveTimer = Math.max(10, 18 - difficulty * 0.4);
+    this.elapsed += dt;
+
+    const encounter = this.game.dungeonController?.getUnspawnedEncounterAt?.(this.game.player.root.position);
+    if (encounter) {
+      this.spawnEncounter(encounter);
     }
   }
 
   getDifficulty() {
-    return 1 + this.elapsed / 45 + this.wave * 0.08;
+    return Math.max(1, this.game.ruinFloor ?? 1) + this.elapsed / 120 + this.wave * 0.08;
   }
 
   spawnWave(count = null) {
@@ -77,7 +85,7 @@ export class EnemySpawner {
     }
   }
 
-  spawnEnemy(typeKey = weightedType(), forceElite = false) {
+  spawnEnemy(typeKey = weightedType(), forceElite = false, position = null) {
     const difficulty = this.getDifficulty();
     const level = Math.max(1, Math.floor(difficulty));
     const eliteChance = Math.min(0.26, 0.035 + difficulty * 0.015);
@@ -86,24 +94,35 @@ export class EnemySpawner {
       ? new EliteEnemy(typeKey, level, ELITE_AFFIXES[Math.floor(Math.random() * ELITE_AFFIXES.length)])
       : new Enemy(typeKey, level);
 
-    enemy.root.position.copy(randomPointAround(this.game.player.root.position, 13, 19));
+    enemy.root.position.copy(position
+      ?? randomDungeonSpawnPoint(this.game, this.game.player.root.position)
+      ?? randomPointAround(this.game.player.root.position, 13, 19));
     this.game.addEnemy(enemy);
     return enemy;
   }
 
-  spawnInitialPack() {
-    this.spawnEnemy('basic', false);
-    this.spawnEnemy('fast', false);
-    this.spawnEnemy('ranged', false);
-    if (Math.random() < 0.65) {
-      this.spawnEnemy('horokko', false);
-    }
-    if (Math.random() < 0.35) {
-      this.spawnEnemy('gorubesshu', false);
+  spawnEncounter(encounter) {
+    const enemies = [];
+    const spawnPoints = encounter.spawnPoints?.length
+      ? encounter.spawnPoints
+      : [encounter.zone.position];
+    const roster = encounter.roster?.length ? encounter.roster : ['basic', 'fast', 'ranged'];
+
+    for (let i = 0; i < roster.length; i += 1) {
+      const spawnPoint = spawnPoints[i % spawnPoints.length].clone();
+      spawnPoint.x += (Math.random() - 0.5) * 0.65;
+      spawnPoint.z += (Math.random() - 0.5) * 0.65;
+      const forceElite = encounter.id === 'shrineDefense' && i === 0;
+      const enemy = this.spawnEnemy(roster[i], forceElite, spawnPoint);
+      enemy.encounterId = encounter.id;
+      enemies.push(enemy);
     }
 
-    for (let i = 0; i < 2; i += 1) {
-      this.spawnEnemy('basic', false);
-    }
+    this.game.dungeonController?.markEncounterSpawned?.(encounter.id, enemies);
+    return enemies;
+  }
+
+  spawnInitialPack() {
+    // Encounters now spawn when the player enters dungeon rooms.
   }
 }

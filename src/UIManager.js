@@ -1049,14 +1049,14 @@ export class UIManager {
       return;
     }
 
-    const event = this.game.mapEvents?.getNearestInteractable?.();
+    const event = this.game.getNearestInteractable?.() ?? this.game.mapEvents?.getNearestInteractable?.();
     if (!event) {
       this.eventPrompt.hidden = true;
       return;
     }
 
-    const label = event.variant?.label ?? event.config.label;
-    const color = event.variant?.color ?? event.config.color;
+    const label = event.label ?? event.variant?.label ?? event.config.label;
+    const color = event.color ?? event.variant?.color ?? event.config.color;
     this.eventPrompt.hidden = false;
     this.eventPrompt.style.borderColor = `#${color.toString(16).padStart(6, '0')}`;
     this.eventPrompt.innerHTML = `<span>E</span><strong>${label}</strong>`;

@@ -135,6 +135,7 @@ export const ENEMY_TYPES = {
 };
 
 const tempDirection = new THREE.Vector3();
+const tempNavigationDirection = new THREE.Vector3();
 const tempPosition = new THREE.Vector3();
 const tempForward = new THREE.Vector3();
 const tempHitVector = new THREE.Vector3();
@@ -736,6 +737,13 @@ export class Enemy {
       return;
     }
 
+    if (game.dungeonController?.isPlayerInSafeZone?.()) {
+      this.animation.update(dt, { moving: false, moveAmount: 0 });
+      this._updateExternalModelVisual(dt, false);
+      this._updateHealthBar(game.camera);
+      return;
+    }
+
     const controlLocked = this._isControlLocked();
     const attackRateMultiplier = this._getStatusAttackRateMultiplier();
 
@@ -746,7 +754,12 @@ export class Enemy {
     const moving = !controlLocked && !hitStopped && distance > desiredDistance;
 
     if (moving) {
-      this.root.position.addScaledVector(tempDirection, this.stats.moveSpeed * this._getStatusMoveMultiplier() * dt);
+      const navigationDirection = game.dungeonController?.getNavigationDirection?.(this.root.position, player.root.position);
+      tempNavigationDirection.copy(navigationDirection ?? tempDirection);
+      if (tempNavigationDirection.lengthSq() > 0.0001) {
+        tempNavigationDirection.normalize();
+      }
+      this.root.position.addScaledVector(tempNavigationDirection, this.stats.moveSpeed * this._getStatusMoveMultiplier() * dt);
       this.root.position.y = 0;
     }
 

@@ -38,6 +38,9 @@ const PLAYER_BASE_STATS = {
 
 const moveVector = new THREE.Vector2();
 const worldForward = new THREE.Vector3();
+const worldMoveDirection = new THREE.Vector3();
+const movementBasisForward = new THREE.Vector3();
+const movementBasisRight = new THREE.Vector3();
 const guardSourceDirection = new THREE.Vector3();
 const PLAYER_MODEL_PATH = './assets/models/';
 const PLAYER_MODEL_MTL = 'Mega Man Volnutt.mtl';
@@ -116,7 +119,12 @@ export class Player {
     this._loadCharacterModel();
   }
 
-  update(dt, input, arenaRadius = 32) {
+  update(dt, input, arenaRadius = 32, movementOptions = {}) {
+    if (typeof arenaRadius === 'object') {
+      movementOptions = arenaRadius;
+      arenaRadius = movementOptions.arenaRadius ?? 32;
+    }
+
     if (this.dead) {
       this.animation.update(dt);
       return;
@@ -131,26 +139,30 @@ export class Player {
 
     moveVector.set(0, 0);
 
-    if (input.has('KeyW') || input.has('ArrowUp')) moveVector.y -= 1;
-    if (input.has('KeyS') || input.has('ArrowDown')) moveVector.y += 1;
+    if (input.has('KeyW') || input.has('ArrowUp')) moveVector.y += 1;
+    if (input.has('KeyS') || input.has('ArrowDown')) moveVector.y -= 1;
     if (input.has('KeyA') || input.has('ArrowLeft')) moveVector.x -= 1;
     if (input.has('KeyD') || input.has('ArrowRight')) moveVector.x += 1;
 
     const moving = moveVector.lengthSq() > 0;
+    const running = moving && (input.has('ShiftLeft') || input.has('ShiftRight'));
     let moveAmount = 0;
 
     if (moving) {
       moveVector.normalize();
-      moveAmount = moveVector.length();
+      moveAmount = running ? 1.35 : 1;
+
+      this._resolveMovementDirection(moveVector, movementOptions);
+
       const guardMoveMultiplier = this.isShieldGuarding() ? 0.72 : 1;
-      const speed = this.stats.moveSpeed * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
-      this.root.position.x += moveVector.x * speed * dt;
-      this.root.position.z += moveVector.y * speed * dt;
+      const runMultiplier = running ? 1.42 : 1;
+      const speed = this.stats.moveSpeed * runMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
+      this.root.position.addScaledVector(worldMoveDirection, speed * dt);
 
       this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -arenaRadius, arenaRadius);
       this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -arenaRadius, arenaRadius);
 
-      this.lastMoveDirection.set(moveVector.x, 0, moveVector.y).normalize();
+      this.lastMoveDirection.copy(worldMoveDirection);
     }
 
     const attackFacing = this.attackFacingTimer > 0 && this.attackFacingDirection.lengthSq() > 0.0001;
@@ -170,6 +182,45 @@ export class Player {
     this.animation.update(dt, { moving: visiblyMoving, moveAmount: moveAnimationAmount });
     this.updateWeaponVisualState();
     this._updateExternalModelMotion(dt, visiblyMoving, moveAnimationAmount, backpedaling);
+  }
+
+  _resolveMovementDirection(inputVector, movementOptions = {}) {
+    worldMoveDirection.set(0, 0, 0);
+
+    const forward = movementOptions.movementForward ?? movementOptions.forward;
+    const right = movementOptions.movementRight ?? movementOptions.right;
+
+    if (forward && right) {
+      movementBasisForward.copy(forward);
+      movementBasisForward.y = 0;
+
+      if (movementBasisForward.lengthSq() <= 0.0001) {
+        movementBasisForward.set(0, 0, 1);
+      } else {
+        movementBasisForward.normalize();
+      }
+
+      movementBasisRight.copy(right);
+      movementBasisRight.y = 0;
+
+      if (movementBasisRight.lengthSq() <= 0.0001) {
+        movementBasisRight.set(1, 0, 0);
+      } else {
+        movementBasisRight.normalize();
+      }
+
+      worldMoveDirection
+        .addScaledVector(movementBasisRight, inputVector.x)
+        .addScaledVector(movementBasisForward, inputVector.y);
+    } else {
+      worldMoveDirection.set(inputVector.x, 0, -inputVector.y);
+    }
+
+    if (worldMoveDirection.lengthSq() <= 0.0001) {
+      worldMoveDirection.set(0, 0, 1);
+    } else {
+      worldMoveDirection.normalize();
+    }
   }
 
   faceDirection(direction) {

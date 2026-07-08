@@ -791,7 +791,10 @@ export class Enemy {
       this.flashIntensity = 1.25;
       this.hitReactDuration = 0.22;
       this.hitWobbleStrength = 0.095;
-      this.hitStopTimer = Math.max(this.hitStopTimer, meta.hitStopDuration ?? 0.18);
+      this.hitStopTimer = Math.max(
+        this.hitStopTimer,
+        meta.enemyHitStopDuration ?? meta.hitStopDuration ?? 0.18,
+      );
       this.hitWobbleSeed = Math.random() * Math.PI * 2;
       this.animation.playHurt(0.18);
     } else {
@@ -800,6 +803,9 @@ export class Enemy {
       this.flashIntensity = 0.85;
       this.hitReactDuration = 0.16;
       this.hitWobbleStrength = 0;
+      if ((meta.enemyHitStopDuration ?? 0) > 0) {
+        this.hitStopTimer = Math.max(this.hitStopTimer, meta.enemyHitStopDuration);
+      }
       this.animation.playHurt(0.14);
     }
 
@@ -1737,5 +1743,8 @@ export class Enemy {
     const dealt = game.player.takeDamage(this.stats.damage, this);
     this.onHitPlayer(game.player, dealt);
     game.addHitEffect(game.player.root.position, 0xff695c, 0.55);
+    if (dealt > 0) {
+      game.requestHitStop?.(0.08, { timeScale: 0.05 });
+    }
   }
 }

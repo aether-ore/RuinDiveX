@@ -105,6 +105,7 @@ export class DungeonController {
     this._updateChestVisuals(dt);
     this._updateMechanismVisuals(dt);
     this._updateExtractionVisuals(dt);
+    this._updateExpeditionEntryState();
     this._updateNearestInteractable();
     this.navigationCache.clear();
   }
@@ -117,9 +118,7 @@ export class DungeonController {
     if (this.isPlayerInSafeZone()) {
       return this.game.ruinCompleted
         ? 'Expedition complete'
-        : this.game.expeditionAccepted
-          ? 'Use ruin lift'
-          : 'Accept briefing';
+        : 'Enter ruin';
     }
 
     const activeEncounter = this.encounters.find((encounter) => (
@@ -236,6 +235,19 @@ export class DungeonController {
 
   isPlayerInSafeZone() {
     return this.isPositionInSafeZone(this.game.player.root.position);
+  }
+
+  _updateExpeditionEntryState() {
+    if (this.game.ruinCompleted) {
+      return;
+    }
+
+    const inSafeZone = this.isPlayerInSafeZone();
+    this.game.expeditionActive = !inSafeZone;
+
+    if (!inSafeZone && !this.game.expeditionAccepted) {
+      this.game.beginExpedition?.({ silent: true });
+    }
   }
 
   getUnspawnedEncounterAt(position) {
@@ -830,14 +842,12 @@ export class DungeonController {
         nearest = {
           kind: 'door',
           target: door,
-          label: door.requiresLift
-            ? 'Ruin Descent Gate: Use Lift'
-            : encounter && !encounter.cleared
+          label: encounter && !encounter.cleared
             ? `${door.label}: Clear Reaverbots`
             : needsKeycard
               ? `${door.label}: Keycard or Plate`
               : door.label,
-          color: door.requiresLift || (needsKeycard && this.keycardCount <= 0) || (encounter && !encounter.cleared)
+          color: (needsKeycard && this.keycardCount <= 0) || (encounter && !encounter.cleared)
             ? LOCKED_COLOR
             : MECHANISM_COLOR,
         };
@@ -975,26 +985,13 @@ export class DungeonController {
     if (interactable.action === 'enterRuin') {
       return this.game.ruinCompleted
         ? `${interactable.label}: Complete`
-        : this.game.expeditionAccepted
-          ? `${interactable.label}: Descend`
-          : `${interactable.label}: Need Briefing`;
+        : `${interactable.label}: Descend`;
     }
 
     return interactable.label;
   }
 
   _activateDoor(door) {
-    if (door.requiresLift) {
-      this.game.ui?.showToast?.(
-        this.game.expeditionAccepted
-          ? 'Use the camp ruin lift to descend'
-          : 'Accept the expedition briefing first',
-        '#ffd66b',
-      );
-      this._pulseDoor(door, LOCKED_COLOR);
-      return;
-    }
-
     if (door.encounterId) {
       const encounter = this.encounters.find((candidate) => candidate.id === door.encounterId);
       if (encounter && !encounter.cleared) {
@@ -1234,12 +1231,6 @@ export class DungeonController {
     }
 
     if (interactable.action === 'enterRuin') {
-      if (!this.game.expeditionAccepted) {
-        this.game.ui?.showToast?.('Talk to the expedition leader first', '#ffd66b');
-        this.game.addParticleBurst(interactable.position, LOCKED_COLOR, 10, 0.1);
-        return;
-      }
-
       this.game.enterRuinFromCamp?.();
       return;
     }

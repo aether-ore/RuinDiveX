@@ -5,6 +5,19 @@ const LEG_SWING = 0.5;
 const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
 const BEAM_BLADE_SLASH_END = 16 / BEAM_BLADE_TOTAL_FRAMES;
+const DODGE_ROLL_DURATION = 0.66;
+const JUMP_DURATION = 0.82;
+const KNOCKBACK_FALL_DURATION = 0.86;
+const DOWNED_HOLD_DURATION = 0.24;
+const GET_UP_DURATION = 1.05;
+const FULL_BODY_ACTION_STATES = new Set([
+  'dodgeRoll',
+  'neutralJump',
+  'forwardJump',
+  'knockbackFall',
+  'downed',
+  'getUp',
+]);
 
 function lerpRotation(object, targetX, targetY, targetZ, alpha) {
   if (!object) {
@@ -27,6 +40,10 @@ export class AnimationController {
     this.attackStyle = 'melee';
     this.hurtTimer = 0;
     this.dead = false;
+    this.actionState = null;
+    this.actionTimer = 0;
+    this.actionDuration = 0;
+    this.downedTimer = 0;
   }
 
   setState(state) {
@@ -38,19 +55,25 @@ export class AnimationController {
   }
 
   playAttack(duration = 0.34, style = 'melee') {
+    if (this.isControlLocked()) {
+      return false;
+    }
+
     this.attackDuration = duration;
     this.attackTimer = duration;
     this.attackStyle = style;
     this.setState('attacking');
+    return true;
   }
 
   playHurt(duration = 0.18) {
-    if (this.dead) {
-      return;
+    if (this.dead || this.isControlLocked()) {
+      return false;
     }
 
     this.hurtTimer = duration;
     this.setState('hurt');
+    return true;
   }
 
   playDead() {
@@ -58,11 +81,79 @@ export class AnimationController {
     this.setState('dead');
   }
 
+  playDodgeRoll(duration = DODGE_ROLL_DURATION) {
+    if (!this.canStartFullBodyAction()) {
+      return false;
+    }
+
+    this._startFullBodyAction('dodgeRoll', duration);
+    return true;
+  }
+
+  playJump(kind = 'neutralJump', duration = JUMP_DURATION) {
+    if (!this.canStartFullBodyAction()) {
+      return false;
+    }
+
+    this._startFullBodyAction(kind === 'forwardJump' ? 'forwardJump' : 'neutralJump', duration);
+    return true;
+  }
+
+  playKnockbackFall(duration = KNOCKBACK_FALL_DURATION, downedHold = DOWNED_HOLD_DURATION) {
+    if (this.dead) {
+      return false;
+    }
+
+    this.hurtTimer = 0;
+    this.attackTimer = 0;
+    this.downedTimer = Math.max(0, downedHold);
+    this._startFullBodyAction('knockbackFall', duration);
+    return true;
+  }
+
+  playGetUp(duration = GET_UP_DURATION) {
+    if (this.dead) {
+      return false;
+    }
+
+    this._startFullBodyAction('getUp', duration);
+    return true;
+  }
+
+  canStartFullBodyAction() {
+    return !this.dead && !this.actionState && this.hurtTimer <= 0 && this.attackTimer <= 0;
+  }
+
+  isControlLocked() {
+    return FULL_BODY_ACTION_STATES.has(this.actionState);
+  }
+
+  isFullBodyActionActive() {
+    return this.isControlLocked();
+  }
+
+  getActionProgress() {
+    if (this.actionState === 'downed') {
+      return 1;
+    }
+
+    if (!this.actionState || this.actionDuration <= 0) {
+      return 0;
+    }
+
+    return 1 - THREE.MathUtils.clamp(this.actionTimer / this.actionDuration, 0, 1);
+  }
+
   update(dt, { moving = false, running = false, moveAmount = 1 } = {}) {
     this.time += dt;
 
     if (this.dead) {
       this._applyDeadPose(dt);
+      return;
+    }
+
+    if (this.actionState) {
+      this._updateFullBodyAction(dt);
       return;
     }
 
@@ -90,6 +181,50 @@ export class AnimationController {
     } else {
       this._applyIdlePose(dt);
     }
+  }
+
+  _startFullBodyAction(state, duration) {
+    this.actionState = state;
+    this.actionDuration = Math.max(0.001, duration);
+    this.actionTimer = this.actionDuration;
+    this.setState(state);
+  }
+
+  _updateFullBodyAction(dt) {
+    if (this.actionState === 'downed') {
+      this.downedTimer -= dt;
+      this.setState('downed');
+      this._applyDownedPose(dt);
+
+      if (this.downedTimer <= 0) {
+        this.playGetUp();
+      }
+
+      return;
+    }
+
+    this.actionTimer -= dt;
+    this.setState(this.actionState);
+    this._applyFullBodyActionPose(dt, this.actionState, this.getActionProgress());
+
+    if (this.actionTimer > 0) {
+      return;
+    }
+
+    const finishedState = this.actionState;
+
+    if (finishedState === 'knockbackFall') {
+      this.actionState = 'downed';
+      this.actionDuration = Math.max(0.001, this.downedTimer);
+      this.actionTimer = this.downedTimer;
+      this.setState('downed');
+      return;
+    }
+
+    this.actionState = null;
+    this.actionTimer = 0;
+    this.actionDuration = 0;
+    this.setState('idle');
   }
 
   _applyIdlePose(dt) {
@@ -239,6 +374,101 @@ export class AnimationController {
     lerpRotation(this.joints.get('rightShoulder'), -0.3, 0, -0.2, alpha);
     lerpRotation(this.joints.get('leftHip'), 0.18, 0, 0, alpha);
     lerpRotation(this.joints.get('rightHip'), 0.18, 0, 0, alpha);
+  }
+
+  _applyFullBodyActionPose(dt, state, progress) {
+    if (state === 'dodgeRoll') {
+      this._applyDodgeRollPose(dt, progress);
+    } else if (state === 'neutralJump' || state === 'forwardJump') {
+      this._applyJumpPose(dt, progress, state === 'forwardJump');
+    } else if (state === 'knockbackFall') {
+      this._applyKnockbackFallPose(dt, progress);
+    } else if (state === 'getUp') {
+      this._applyGetUpPose(dt, progress);
+    }
+  }
+
+  _applyDodgeRollPose(dt, progress) {
+    const alpha = Math.min(1, dt * 24);
+    const tuck = Math.sin(progress * Math.PI);
+    const roll = progress * Math.PI * 2;
+
+    lerpRotation(this.joints.get('hips'), 0.55 * tuck, 0, roll, alpha);
+    lerpRotation(this.joints.get('spine'), 0.62 * tuck, 0, 0, alpha);
+    lerpRotation(this.joints.get('neck'), 0.28 * tuck, 0, 0, alpha);
+    lerpRotation(this.joints.get('leftShoulder'), -0.85 * tuck, 0, 0.35 * tuck, alpha);
+    lerpRotation(this.joints.get('rightShoulder'), -0.85 * tuck, 0, -0.35 * tuck, alpha);
+    lerpRotation(this.joints.get('leftElbow'), 0.95 * tuck, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightElbow'), 0.95 * tuck, 0, 0, alpha);
+    lerpRotation(this.joints.get('leftHip'), 0.9 * tuck, 0, 0.18 * tuck, alpha);
+    lerpRotation(this.joints.get('rightHip'), 0.9 * tuck, 0, -0.18 * tuck, alpha);
+    lerpRotation(this.joints.get('leftKnee'), 1.25 * tuck, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightKnee'), 1.25 * tuck, 0, 0, alpha);
+  }
+
+  _applyJumpPose(dt, progress, forward = false) {
+    const alpha = Math.min(1, dt * 18);
+    const crouch = 1 - THREE.MathUtils.smoothstep(progress, 0.02, 0.22);
+    const airborne = THREE.MathUtils.smoothstep(progress, 0.16, 0.45);
+    const landing = THREE.MathUtils.smoothstep(progress, 0.74, 1);
+    const balance = Math.sin(progress * Math.PI);
+    const lean = forward ? 0.18 : 0.04;
+
+    lerpRotation(this.joints.get('hips'), -0.18 * crouch + lean * airborne, 0, 0, alpha);
+    lerpRotation(this.joints.get('spine'), -0.12 * crouch + lean * airborne, 0, 0, alpha);
+    lerpRotation(this.joints.get('leftShoulder'), -0.3 * balance, 0, 0.18 * balance, alpha);
+    lerpRotation(this.joints.get('rightShoulder'), -0.22 * balance, 0, -0.16 * balance, alpha);
+    lerpRotation(this.joints.get('leftHip'), 0.36 * crouch - 0.18 * airborne, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightHip'), 0.36 * crouch - 0.18 * airborne, 0, 0, alpha);
+    lerpRotation(this.joints.get('leftKnee'), 0.85 * crouch + 0.22 * airborne + 0.55 * landing, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightKnee'), 0.85 * crouch + 0.22 * airborne + 0.55 * landing, 0, 0, alpha);
+    lerpRotation(this.joints.get('leftAnkle'), -0.18 * crouch, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightAnkle'), -0.18 * crouch, 0, 0, alpha);
+  }
+
+  _applyKnockbackFallPose(dt, progress) {
+    const alpha = Math.min(1, dt * 20);
+    const impact = 1 - THREE.MathUtils.smoothstep(progress, 0.08, 0.24);
+    const fall = THREE.MathUtils.smoothstep(progress, 0.22, 0.78);
+
+    lerpRotation(this.joints.get('hips'), -0.45 * impact - 1.15 * fall, 0.15 * fall, -0.75 * fall, alpha);
+    lerpRotation(this.joints.get('spine'), -0.55 * impact - 0.8 * fall, -0.12 * fall, -0.45 * fall, alpha);
+    lerpRotation(this.joints.get('neck'), -0.42 * impact - 0.28 * fall, 0, -0.18 * fall, alpha);
+    lerpRotation(this.joints.get('leftShoulder'), -0.45, 0, 0.36 + 0.25 * fall, alpha);
+    lerpRotation(this.joints.get('rightShoulder'), -0.45, 0, -0.36 - 0.25 * fall, alpha);
+    lerpRotation(this.joints.get('leftHip'), 0.55 * impact + 0.45 * fall, 0, 0.18 * fall, alpha);
+    lerpRotation(this.joints.get('rightHip'), 0.42 * impact + 0.35 * fall, 0, -0.18 * fall, alpha);
+    lerpRotation(this.joints.get('leftKnee'), 0.48 + 0.28 * fall, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightKnee'), 0.48 + 0.18 * fall, 0, 0, alpha);
+  }
+
+  _applyDownedPose(dt) {
+    const alpha = Math.min(1, dt * 14);
+
+    lerpRotation(this.joints.get('hips'), -1.15, 0.15, -0.78, alpha);
+    lerpRotation(this.joints.get('spine'), -0.82, -0.12, -0.48, alpha);
+    lerpRotation(this.joints.get('neck'), -0.24, 0, -0.12, alpha);
+    lerpRotation(this.joints.get('leftShoulder'), -0.35, 0, 0.62, alpha);
+    lerpRotation(this.joints.get('rightShoulder'), -0.35, 0, -0.62, alpha);
+    lerpRotation(this.joints.get('leftKnee'), 0.72, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightKnee'), 0.58, 0, 0, alpha);
+  }
+
+  _applyGetUpPose(dt, progress) {
+    const alpha = Math.min(1, dt * 16);
+    const brace = 1 - THREE.MathUtils.smoothstep(progress, 0.12, 0.45);
+    const crouch = Math.sin(THREE.MathUtils.clamp((progress - 0.18) / 0.72, 0, 1) * Math.PI);
+    const stand = THREE.MathUtils.smoothstep(progress, 0.58, 1);
+
+    lerpRotation(this.joints.get('hips'), THREE.MathUtils.lerp(-0.9 * brace + 0.5 * crouch, 0, stand), 0.08 * brace, -0.42 * brace, alpha);
+    lerpRotation(this.joints.get('spine'), THREE.MathUtils.lerp(-0.62 * brace + 0.35 * crouch, 0, stand), -0.05 * brace, -0.28 * brace, alpha);
+    lerpRotation(this.joints.get('neck'), THREE.MathUtils.lerp(-0.2 * brace, 0, stand), 0, 0, alpha);
+    lerpRotation(this.joints.get('leftShoulder'), -0.2 * brace, 0, 0.4 * brace, alpha);
+    lerpRotation(this.joints.get('rightShoulder'), -0.25 * brace, 0, -0.42 * brace, alpha);
+    lerpRotation(this.joints.get('leftHip'), 0.7 * crouch, 0, 0.12 * brace, alpha);
+    lerpRotation(this.joints.get('rightHip'), 0.55 * crouch, 0, -0.12 * brace, alpha);
+    lerpRotation(this.joints.get('leftKnee'), 0.9 * crouch, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightKnee'), 0.74 * crouch, 0, 0, alpha);
   }
 
   _applyDeadPose(dt) {

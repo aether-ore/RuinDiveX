@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 
 const DEFAULT_PROJECTILE_COLOR = 0x9fe8ff;
+const PROJECTILE_ENEMY_HIT_STOP_DURATION = 0.055;
+const DRILL_PROJECTILE_ENEMY_HIT_STOP_DURATION = 0.09;
+const PROJECTILE_EXPLOSION_ENEMY_HIT_STOP_DURATION = 0.08;
 const tempPosition = new THREE.Vector3();
 const tempDirection = new THREE.Vector3();
 const tempExplosionPosition = new THREE.Vector3();
@@ -292,7 +295,9 @@ export class ProjectileSystem {
         this.game.damageEnemy(enemy, projectile.damage, {
           projectileHit: true,
           hitPosition: position.clone(),
-          hitStopDuration: projectile.visualType === 'drillHead' ? 0.1 : 0.18,
+          enemyHitStopDuration: projectile.visualType === 'drillHead'
+            ? DRILL_PROJECTILE_ENEMY_HIT_STOP_DURATION
+            : PROJECTILE_ENEMY_HIT_STOP_DURATION,
           critical: projectile.critical,
           source: projectile.source,
           element: projectile.element,
@@ -317,6 +322,8 @@ export class ProjectileSystem {
             armorPierce: projectile.armorPierce,
             statusBuildup: projectile.statusBuildup,
             stagger: projectile.stagger,
+            enemyHitStopDuration: PROJECTILE_EXPLOSION_ENEMY_HIT_STOP_DURATION,
+            globalHitStopDuration: 0,
           });
         }
 
@@ -359,6 +366,11 @@ export class ProjectileSystem {
       projectile.source?.onHitPlayer?.(player, dealt);
       this.game.addDamageNumber(player.root.position, dealt, 0xff6b5e);
       this.game.addHitEffect(player.root.position, 0xff6b5e, 0.45);
+      if (dealt > 0) {
+        this.game.requestHitStop?.(projectile.visualType === 'drillHead' ? 0.1 : 0.12, {
+          timeScale: 0.05,
+        });
+      }
       if (projectile.explosiveRadius > 0) {
         tempExplosionPosition.copy(projectile.mesh.position);
         tempExplosionPosition.y = 0.08;
@@ -636,6 +648,8 @@ export class ProjectileSystem {
         damageEnemies: !fromEnemy,
         damagePlayer: true,
         playerDamageScale: fromEnemy ? 1 : 0.35,
+        enemyHitStopDuration: fromEnemy ? undefined : PROJECTILE_EXPLOSION_ENEMY_HIT_STOP_DURATION,
+        globalHitStopDuration: fromEnemy ? undefined : 0,
         triggerMines: !fromEnemy,
       });
     }

@@ -18,19 +18,32 @@ const LIFT_ENEMY_OUTPUT_DRAIN_PER_SECOND = 0.48;
 const SPRAY_TICK_INTERVAL = 0.11;
 const SPRAY_PARTICLE_INTERVAL = 0.055;
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
+const BUSTER_BASE_ENERGY = 6;
+const BUSTER_BASE_BURST_SHOTS = 3;
+const BUSTER_ENERGY_PER_EXTRA_SHOT = 3;
+const BUSTER_MIN_BURST_SHOTS = 1;
+const BUSTER_DEFAULT_SHOT_COOLDOWN = 0.24;
+const BUSTER_DEFAULT_STATS = Object.freeze({
+  attackDamage: 8,
+  maxEnergy: BUSTER_BASE_ENERGY,
+  attackRange: 6.9,
+  attackSpeed: 0.1,
+});
 
 const ARM_PROFILES = {
   busterArm: {
-    energyCost: 1,
-    outputDrainPerShot: 0.12,
-    outputRequiredToFire: 0.06,
-    outputRecoveryPerSecond: 0.7,
-    outputRecoveryDelay: 0.12,
+    energyCost: 0,
+    outputDrainPerShot: 1 / BUSTER_BASE_BURST_SHOTS,
+    outputRequiredToFire: 1 / BUSTER_BASE_BURST_SHOTS,
+    outputRecoveryPerSecond: 0.82,
+    outputRecoveryDelay: 0.16,
+    outputVentDuration: 0.34,
     outputLabel: 'Output',
     projectileSpeed: 9.5,
     projectileRadius: 0.17,
     cooldownMultiplier: 1,
-    animationDuration: 0.24,
+    baseCooldown: BUSTER_DEFAULT_SHOT_COOLDOWN,
+    animationDuration: 0.18,
     visualType: 'buster',
     color: 0x7ee7ff,
   },
@@ -410,6 +423,10 @@ function usesDefaultBeamBladeVisualColor(weapon, profile) {
   return profile.type === 'swordArm' && (!weapon || weapon.rarity === 'scrap' || weapon.rarity === 'standard');
 }
 
+function isBusterProfile(profile) {
+  return profile?.type === 'busterArm';
+}
+
 function defineResourceAlias(state, alias, backingField) {
   const descriptor = Object.getOwnPropertyDescriptor(state, alias);
   if (descriptor?.get) {
@@ -492,9 +509,14 @@ export class CombatSystem {
       return;
     }
 
+    const pointer = this.game.pointer;
+    if (player.animation?.isControlLocked?.()) {
+      this._suspendForControlLock(state, pointer);
+      return;
+    }
+
     this._updatePendingMeleeStrikes(dt);
 
-    const pointer = this.game.pointer;
     if (!pointer) {
       this._stopDrillSpin();
       this._stopLiftArm(false);
@@ -595,6 +617,30 @@ export class CombatSystem {
     this.alternateWasDown = false;
   }
 
+  _suspendForControlLock(state = null, pointer = null) {
+    if (pointer) {
+      pointer.primaryPressed = false;
+      pointer.secondaryPressed = false;
+      pointer.alternatePressed = false;
+    }
+
+    this._stopLaserBeam(true);
+    this._stopDrillSpin();
+    this._stopLiftArm(false);
+    this._clearLockOn();
+    this._hideGrenadePreview();
+    this.pendingMeleeStrikes.length = 0;
+
+    if (state) {
+      state.sprayActive = false;
+      state.sprayWasActiveLastFrame = false;
+    }
+
+    this.primaryWasDown = Boolean(pointer?.primary);
+    this.secondaryWasDown = Boolean(pointer?.secondary);
+    this.alternateWasDown = Boolean(pointer?.alternate);
+  }
+
   switchArmSlot(slotIndex) {
     this._stopLaserBeam(true);
     this._stopDrillSpin();
@@ -672,8 +718,14 @@ export class CombatSystem {
     state.weaponType = weapon?.type ?? state.weaponType ?? 'busterArm';
     state.maxEnergyReserve = maxEnergy;
     state.reloadDuration = this._getReloadDuration();
-    state.energyReserve = Math.min(state.energyReserve, state.maxEnergyReserve);
-    this._ensureOutputState(state, ARM_PROFILES[state.weaponType] ?? DEFAULT_PROFILE);
+    const profile = ARM_PROFILES[state.weaponType] ?? DEFAULT_PROFILE;
+    if (isBusterProfile(profile)) {
+      state.energyReserve = state.maxEnergyReserve;
+      state.reloadTimer = 0;
+    } else {
+      state.energyReserve = Math.min(state.energyReserve, state.maxEnergyReserve);
+    }
+    this._ensureOutputState(state, profile);
     return state;
   }
 
@@ -725,14 +777,13 @@ export class CombatSystem {
     const weapon = player.getActiveArmWeapon?.() ?? player.equipment.get('weapon');
     const state = this.getCurrentWeaponState();
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
-    const cooldownReduction = THREE.MathUtils.clamp(player.stats.cooldownReduction ?? 0, 0, 0.75);
-    const cooldown = Math.max(0.08, (1 / Math.max(0.25, player.stats.attackSpeed)) * (profile.cooldownMultiplier ?? 1) * (1 - cooldownReduction));
-    const rapid = cooldown > 0 ? 1 / cooldown : 0;
-    let attack = Math.max(1, Math.round((player.stats.attackDamage + player.stats.fireDamage + player.stats.iceDamage + (player.stats.corrosionDamage ?? 0)) * (profile.damageMultiplier ?? 1)));
+    const stats = this._getCombatStatsForProfile(profile, weapon);
+    const cooldown = this._getAttackCooldown(profile, stats);
+    let attack = Math.max(1, Math.round((stats.attackDamage + stats.fireDamage + stats.iceDamage + (stats.corrosionDamage ?? 0)) * (profile.damageMultiplier ?? 1)));
     if (profile.special === 'laser') {
       attack = Math.max(1, Math.round(attack * (1 + (state.laserHeat ?? 0) * (profile.maxHeatDamageBonus ?? 0.72))));
     }
-    const range = this._getProfileRange(profile);
+    const range = this._getProfileRange(profile, stats);
     const status = this._getWeaponStatusLabel(profile, state);
     const visual = this._getActiveWeaponVisual(profile);
     const readiness = this._getWeaponReadiness(profile, state);
@@ -769,7 +820,7 @@ export class CombatSystem {
         attack,
         energy: Math.round(state.maxEnergy),
         range: Number(range.toFixed(1)),
-        rapid: Number(rapid.toFixed(1)),
+        rapid: this._getRapidDisplayValue(profile, stats, cooldown),
       },
       mode,
       modeIndicator: this._getWeaponModeIndicator(profile, state, visual, mode),
@@ -828,6 +879,11 @@ export class CombatSystem {
 
   requestManualReload() {
     const state = this.getCurrentWeaponState();
+    const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
+
+    if (isBusterProfile(profile)) {
+      return false;
+    }
 
     if (state.reloadTimer > 0 || state.energy >= state.maxEnergy) {
       return false;
@@ -840,7 +896,13 @@ export class CombatSystem {
   _updateManualAimPose(aimWorld, profile, state) {
     const player = this.game.player;
 
-    if (!aimWorld || player.dead || this.swapTimer > 0 || profile.melee || profile.special === 'drill' || profile.special === 'lift') {
+    if (!aimWorld
+      || player.dead
+      || player.animation?.isControlLocked?.()
+      || this.swapTimer > 0
+      || profile.melee
+      || profile.special === 'drill'
+      || profile.special === 'lift') {
       return;
     }
 
@@ -854,6 +916,10 @@ export class CombatSystem {
     const player = this.game.player;
     const state = this.getCurrentWeaponState();
     const profile = this._getCurrentProfile();
+
+    if (player.animation?.isControlLocked?.()) {
+      return false;
+    }
 
     if (profile.special === 'drill') {
       return this._tryLaunchDrillHead(profile, state, aimWorld);
@@ -1242,7 +1308,7 @@ export class CombatSystem {
     const player = this.game.player;
     const state = this.getCurrentWeaponState();
 
-    if (this.swapTimer > 0 || state.cooldown > 0 || state.reloadTimer > 0) {
+    if (player.animation?.isControlLocked?.() || this.swapTimer > 0 || state.cooldown > 0 || state.reloadTimer > 0) {
       return false;
     }
 
@@ -1272,11 +1338,10 @@ export class CombatSystem {
 
     tempDirection.normalize();
 
-    const rapid = Math.max(0.25, player.stats.attackSpeed);
-    const cooldownReduction = THREE.MathUtils.clamp(player.stats.cooldownReduction ?? 0, 0, 0.75);
-    const attackDuration = Math.max(0.12, profile.animationDuration ?? 0.38 / rapid);
-    const cooldown = Math.max(0.08, (1 / rapid) * (profile.cooldownMultiplier ?? 1) * (1 - cooldownReduction));
-    const targetPoint = player.root.position.clone().addScaledVector(tempDirection, player.stats.attackRange);
+    const stats = this._getCombatStatsForProfile(profile);
+    const cooldown = this._getAttackCooldown(profile, stats);
+    const attackDuration = this._getAttackAnimationDuration(profile, stats);
+    const targetPoint = player.root.position.clone().addScaledVector(tempDirection, this._getProfileRange(profile, stats));
     const projectileAimOptions = { weaponKey: state.key };
 
     if (profile.special === 'mine') {
@@ -1312,7 +1377,7 @@ export class CombatSystem {
 
     state.energy = Math.max(0, state.energy - profile.energyCost);
     this._drainWeaponOutput(state, profile);
-    state.cooldown = cooldown;
+    state.cooldown = Math.max(state.cooldown, cooldown);
 
     if (state.energy <= 0.001) {
       state.reloadTimer = state.reloadDuration;
@@ -1438,6 +1503,91 @@ export class CombatSystem {
     return this._applyOutputModifiers(statefulProfile, state);
   }
 
+  _getBusterUpgradeStats() {
+    return this.game.player.getBusterUpgradeStatBonuses?.() ?? {};
+  }
+
+  _getBusterStatTotals(weapon = null) {
+    const buster = weapon?.type === 'busterArm'
+      ? weapon
+      : this.game.player.armHotbar?.[0] ?? this.game.player.getActiveArmWeapon?.() ?? null;
+    const weaponStats = buster?.type === 'busterArm'
+      ? buster.getStatTotals?.() ?? {}
+      : {};
+    const upgradeStats = this._getBusterUpgradeStats();
+    const stats = { ...BUSTER_DEFAULT_STATS, ...weaponStats };
+
+    for (const [stat, value] of Object.entries(upgradeStats)) {
+      stats[stat] = (stats[stat] ?? 0) + value;
+    }
+
+    stats.attackDamage = Math.max(1, stats.attackDamage ?? BUSTER_DEFAULT_STATS.attackDamage);
+    stats.maxEnergy = Math.max(1, stats.maxEnergy ?? BUSTER_DEFAULT_STATS.maxEnergy);
+    stats.attackRange = Math.max(1, stats.attackRange ?? BUSTER_DEFAULT_STATS.attackRange);
+    stats.attackSpeed = Math.max(0, stats.attackSpeed ?? BUSTER_DEFAULT_STATS.attackSpeed);
+    stats.energyRecharge = Math.max(0, stats.energyRecharge ?? 0);
+    stats.cooldownReduction = THREE.MathUtils.clamp(stats.cooldownReduction ?? 0, 0, 0.75);
+
+    return stats;
+  }
+
+  _getCombatStatsForProfile(profile, weapon = null) {
+    if (!isBusterProfile(profile)) {
+      return this.game.player.stats;
+    }
+
+    return {
+      ...this.game.player.stats,
+      ...this._getBusterStatTotals(weapon ?? this.game.player.getActiveArmWeapon?.()),
+    };
+  }
+
+  _getBusterBurstShotCapacity(profile = DEFAULT_PROFILE) {
+    const energy = this._getBusterStatTotals().maxEnergy;
+    const shots = BUSTER_BASE_BURST_SHOTS + ((energy - BUSTER_BASE_ENERGY) / BUSTER_ENERGY_PER_EXTRA_SHOT);
+    return Math.max(BUSTER_MIN_BURST_SHOTS, shots);
+  }
+
+  _getBusterOutputCostPerShot(profile = DEFAULT_PROFILE) {
+    return 1 / this._getBusterBurstShotCapacity(profile);
+  }
+
+  _getAttackCooldown(profile, stats = this.game.player.stats) {
+    const cooldownReduction = THREE.MathUtils.clamp(stats.cooldownReduction ?? 0, 0, 0.75);
+
+    if (isBusterProfile(profile)) {
+      const rapidBonus = Math.max(0, stats.attackSpeed ?? BUSTER_DEFAULT_STATS.attackSpeed);
+      const rapidMultiplier = 1 + rapidBonus;
+      return Math.max(
+        0.075,
+        ((profile.baseCooldown ?? BUSTER_DEFAULT_SHOT_COOLDOWN) / rapidMultiplier) * (1 - cooldownReduction),
+      );
+    }
+
+    const rapid = Math.max(0.25, stats.attackSpeed);
+    return Math.max(0.08, (1 / rapid) * (profile.cooldownMultiplier ?? 1) * (1 - cooldownReduction));
+  }
+
+  _getAttackAnimationDuration(profile, stats = this.game.player.stats) {
+    if (Number.isFinite(profile.animationDuration)) {
+      return Math.max(0.1, profile.animationDuration);
+    }
+
+    if (isBusterProfile(profile)) {
+      return Math.max(0.1, this._getAttackCooldown(profile, stats) * 0.82);
+    }
+
+    return Math.max(0.12, 0.38 / Math.max(0.25, stats.attackSpeed));
+  }
+
+  _getRapidDisplayValue(profile, stats, cooldown) {
+    if (isBusterProfile(profile)) {
+      return `${Math.round(Math.max(0, stats.attackSpeed ?? 0) * 100)}%`;
+    }
+
+    return Number((cooldown > 0 ? 1 / cooldown : 0).toFixed(1));
+  }
+
   _ensureResourceAliases(state) {
     if (!state) {
       return state;
@@ -1463,6 +1613,10 @@ export class CombatSystem {
   }
 
   _getEstimatedMaxEnergyForWeapon(weapon) {
+    if (weapon?.type === 'busterArm') {
+      return this._getBusterStatTotals(weapon).maxEnergy;
+    }
+
     if (!weapon) {
       return this._getCurrentMaxEnergy();
     }
@@ -1494,6 +1648,10 @@ export class CombatSystem {
   }
 
   _getOutputRecoveryRate(profile) {
+    if (isBusterProfile(profile)) {
+      return profile.outputRecoveryPerSecond ?? 0.82;
+    }
+
     const rapidModifier = this._getRapidOutputModifier();
 
     if (Number.isFinite(profile.outputRecoveryPerSecond)) {
@@ -1516,6 +1674,10 @@ export class CombatSystem {
   }
 
   _getOutputCost(profile, amount = null) {
+    if (isBusterProfile(profile)) {
+      return amount ?? this._getBusterOutputCostPerShot(profile);
+    }
+
     const baseCost = Math.max(0, amount ?? profile.outputDrainPerShot ?? 0.08);
     return baseCost / this._getRapidOutputModifier();
   }
@@ -1526,12 +1688,20 @@ export class CombatSystem {
   }
 
   _getOutputRequiredToFire(profile) {
+    if (isBusterProfile(profile)) {
+      return this._getBusterOutputCostPerShot(profile);
+    }
+
     const fallback = Math.min(0.98, Math.max(0.02, (profile.outputDrainPerShot ?? 0.08) * 0.75));
     const baseRequired = Math.max(0, profile.outputRequiredToFire ?? fallback);
     return THREE.MathUtils.clamp(baseRequired / Math.sqrt(this._getRapidOutputModifier()), 0, 1);
   }
 
   _getOutputRecoveryDelay(profile) {
+    if (isBusterProfile(profile)) {
+      return Math.max(0, profile.outputRecoveryDelay ?? 0.16);
+    }
+
     const baseDelay = Math.max(0, profile.outputRecoveryDelay ?? 0.18);
     return baseDelay / Math.sqrt(this._getRapidOutputModifier());
   }
@@ -1685,8 +1855,8 @@ export class CombatSystem {
     return Math.max(0.42, (1.35 - Math.min(recharge, 0.9) * 0.36) * (1 - cooldownReduction * 0.45));
   }
 
-  _getProfileRange(profile) {
-    const baseRange = this.game.player.stats.attackRange;
+  _getProfileRange(profile, stats = this.game.player.stats) {
+    const baseRange = stats.attackRange;
 
     if (profile.type === 'swordArm') return this._getBeamBladeArcRange(profile);
     if (profile.special === 'drill') return this._getDrillContactRange(profile);
@@ -1698,6 +1868,7 @@ export class CombatSystem {
     if (profile.special === 'chain') return baseRange + 0.8;
     if (profile.special === 'lift') return profile.liftRange ?? 1.55;
     if (profile.melee) return baseRange;
+    if (isBusterProfile(profile)) return baseRange;
 
     return baseRange + 1.8;
   }
@@ -1923,6 +2094,13 @@ export class CombatSystem {
       return 'Wide horizontal laser blade slash';
     }
 
+    if (isBusterProfile(profile)) {
+      const cost = this._getBusterOutputCostPerShot(profile);
+      const shotsReady = Math.floor((state.weaponOutput + 0.001) / cost);
+      const burstCapacity = Math.floor(this._getBusterBurstShotCapacity(profile) + 0.001);
+      return `Burst output ${shotsReady}/${burstCapacity} shots`;
+    }
+
     if (profile.freeHoming) {
       return 'Seeker rounds bend toward targets';
     }
@@ -1945,20 +2123,22 @@ export class CombatSystem {
     }
 
     const player = this.game.player;
+    const stats = this._getCombatStatsForProfile(profile);
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-    const count = Math.max(1, Math.round(player.stats.projectileCount + (profile.extraProjectiles ?? 0)));
+    const count = Math.max(1, Math.round((stats.projectileCount ?? 1) + (profile.extraProjectiles ?? 0)));
     const spread = profile.spread ?? (count > 1 ? 0.16 : 0);
-    const projectileSpeed = (profile.projectileSpeed ?? 9.5) + (player.stats.projectileSpeed ?? 0);
-    const pierce = Math.max(0, Math.round(player.stats.projectilePierce + (profile.pierceBonus ?? 0)));
-    const element = getPlayerElement(player.stats, profile);
+    const projectileSpeed = (profile.projectileSpeed ?? 9.5) + (stats.projectileSpeed ?? 0);
+    const pierce = Math.max(0, Math.round((stats.projectilePierce ?? 0) + (profile.pierceBonus ?? 0)));
+    const element = getPlayerElement(stats, profile);
     const color = getElementColor(element, profile.color ?? 0x7ee7ff);
-    const armorBreakChance = (player.stats.armorBreakChance ?? 0) + (profile.armorBreakBonus ?? 0);
+    const armorBreakChance = (stats.armorBreakChance ?? 0) + (profile.armorBreakBonus ?? 0);
     const lockedTarget = profile.lockOn && this.lockOn.progress >= 1 ? this.lockOn.target : null;
+    const range = this._getProfileRange(profile, stats);
 
     for (let i = 0; i < count; i += 1) {
       const offset = (i - (count - 1) / 2) * spread;
       const shotDirection = direction.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), offset);
-      const damageRoll = this._rollPlayerDamage(profile);
+      const damageRoll = this._rollPlayerDamage(profile, stats);
       const damage = lockedTarget && profile.special === 'missile'
         ? damageRoll.damage * 1.12
         : damageRoll.damage;
@@ -1968,7 +2148,7 @@ export class CombatSystem {
         position: origin,
         direction: shotDirection,
         speed: projectileSpeed,
-        range: player.stats.attackRange + 1.8,
+        range,
         radius: profile.projectileRadius ?? 0.17,
         damage,
         color,
@@ -3001,6 +3181,8 @@ export class CombatSystem {
         stagger: profile.stagger ?? 0.08,
         knockbackDirection: direction,
         knockback: 1.8,
+        hitStopDuration: damageRoll.critical ? 0.09 : 0.065,
+        hitStopTimeScale: damageRoll.critical ? 0.04 : 0.06,
       });
       this.game.addHitEffect(enemy.root.position, color, 0.5);
     }
@@ -3429,23 +3611,24 @@ export class CombatSystem {
           statusBuildup: profile.statusBuildup ?? 1,
           knockbackDirection: tempToEnemy,
           knockback: profile.type === 'drillArm' ? 1.2 : 3.2,
+          hitStopDuration: beamBlade ? (damageRoll.critical ? 0.13 : 0.105) : (damageRoll.critical ? 0.085 : 0.055),
+          hitStopTimeScale: beamBlade ? 0.04 : 0.07,
         });
       }
     }
   }
 
-  _rollPlayerDamage(profile = DEFAULT_PROFILE) {
-    const stats = this.game.player.stats;
-    const elemental = stats.fireDamage + stats.iceDamage + (stats.corrosionDamage ?? 0);
-    let damage = stats.attackDamage + elemental;
-    const critical = Math.random() < stats.criticalChance;
+  _rollPlayerDamage(profile = DEFAULT_PROFILE, stats = this.game.player.stats) {
+    const elemental = (stats.fireDamage ?? 0) + (stats.iceDamage ?? 0) + (stats.corrosionDamage ?? 0);
+    let damage = (stats.attackDamage ?? 1) + elemental;
+    const critical = Math.random() < (stats.criticalChance ?? 0);
 
     damage *= 0.9 + Math.random() * 0.22;
-    damage *= 1 + stats.areaDamage;
+    damage *= 1 + (stats.areaDamage ?? 0);
     damage *= profile.damageMultiplier ?? 1;
 
     if (critical) {
-      damage *= stats.criticalDamage;
+      damage *= stats.criticalDamage ?? 1.55;
     }
 
     return { damage, critical };

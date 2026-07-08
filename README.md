@@ -17,9 +17,14 @@ Primary weapon stats follow the intended buster-part language:
 - `Range`: projectile distance, blade reach, beam length, or lock-on distance.
 - `Rapid`: firing rhythm, swing speed, drill tick rate, or launch interval.
 
+For the standard Buster Arm, Energy is not ammo. Buster shots are unlimited; Energy improves Output efficiency so the starting ENG 6 buster fires three rapid shots before Output is fully drained, with each additional 3 Energy adding another full shot to the burst.
+
 ## Controls
 
 - WASD or arrow keys move.
+- Hold `Shift` while moving to jog.
+- `Space` jumps; jump direction follows the current movement input.
+- `Q` performs a short dodge roll in the current movement direction.
 - Mouse aims; the cyan reticle marks the current ground target.
 - Hold left mouse to fire or swing the active arm weapon.
 - Right mouse uses a secondary arm function when available. With `Shield Arm` equipped, it raises a timed guard; early timing parries and staggers attackers. Otherwise it manually vents/reloads the active arm weapon when Energy is not full.
@@ -36,8 +41,7 @@ Implemented arm behavior examples include arcing explosive `Grenade Arm` shots, 
 
 The current prototype starts in a safe hub/camp approach, then pushes the player into a randomized ruin path:
 
-- Talk to the expedition leader to accept the Large Refractor briefing.
-- Use the camp ruin lift to descend to the ruin entrance.
+- Enter the ruin directly from camp, or use the camp ruin lift as a shortcut.
 - Clear Reaverbot rooms, collect keycards, open locked doors, cross or disable traps, and use override mechanisms.
 - Process recovered Reaverbot scrap at the camp research station for Research Data and Zenny.
 - Secure the Large Refractor in the shrine chamber.
@@ -70,7 +74,7 @@ The app uses a browser import map for Three.js, so no package install is require
 
 - `index.html` - app shell, HUD labels, and garage loadout panel.
 - `src/main.js` - creates and starts the game.
-- `src/Game.js` - scene, camera, loop, expedition state, effects, hazards, enemy and loot coordination.
+- `src/Game.js` - scene, camera, loop, hitstop timing, expedition state, effects, hazards, enemy and loot coordination.
 - `src/DungeonGenerator.js`, `src/DungeonController.js` - randomized ruin rooms, hub/camp spaces, doors, keycards, traps, conveyors, mechanisms, shrine objective, and extraction flow.
 - `src/MapEventSystem.js` - interactable ruin devices, temporary field buffs, risky event rewards.
 - `src/Player.js` - movement, health, stats, model animation, buster pose, and equipment hooks.
@@ -79,8 +83,9 @@ The app uses a browser import map for Three.js, so no package install is require
 - `src/Enemy.js`, `src/EliteEnemy.js`, `src/EnemySpawner.js` - enemy types, elite traits, waves.
 - `src/CombatSystem.js`, `src/ProjectileSystem.js` - current combat prototype and projectile behavior.
 - `src/Inventory.js`, `src/EquipmentManager.js`, `src/UIManager.js` - salvage inventory, garage equipment, UI.
-- `src/ExternalModelRig.js` - segmented Mega Man Volnutt model rig and buster arm pose.
-- `src/AnimationController.js` - procedural idle, walk, attack, hurt, and death poses.
+- `src/ExternalModelRig.js` - segmented Mega Man Volnutt model rig, semantic rig application, buster arm pose, and action overlays.
+- `src/SemanticRigMapper.js`, `src/animation/LocomotionAnimator.js`, `src/animation/UpperBodyAimLayer.js`, `src/animation/CombatAnimator.js`, `src/animation/DamageAnimator.js`, `src/animation/DodgeRollAnimator.js`, `src/animation/JumpAnimator.js` - semantic pose mapping, authored walk/jog clips, upper-body aim/recoil, combat poses, damage recovery, dodge, and jump action layers for the external segmented rig.
+- `src/AnimationController.js` - procedural animation state timing, attacks, damage reactions, and full-body actions.
 - `src/ui.css` - HUD and garage styling.
 
 ## Development Hooks
@@ -93,4 +98,9 @@ window.generateLoot('swordArm', 'legendary');
 window.generateLoot('powerRaiser', 'prototype');
 window.generateLoot('kevlarJacket', 'tuned');
 window.openInventory();
+window.setAnimationPreviewMode('walk');
+window.setAnimationPreviewMode('aimJog');
+window.setAnimationPreviewMode('off');
 ```
+
+Animation preview can also be started from the URL with `?animationPreview=walk`, `?animationPreview=jog`, `?animationPreview=aimWalk`, `?animationPreview=aimJog`, `?animationPreview=strafeLeft`, `?animationPreview=strafeRight`, or `?animationPreview=backpedal`. Add `animationPreviewCamera=front`, `rear`, `left`, `right`, `frontLeft`, `frontRight`, `rearLeft`, `rearRight`, or `top` to lock the preview camera for gait review.

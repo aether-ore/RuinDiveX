@@ -130,11 +130,13 @@ export class LootSystem {
     const scaledLevel = Math.max(1, level);
 
     const legendaryTemplate = this._pickLegendaryTemplate(type, rarity);
-    const baseStats = {};
+    const baseStats = options.baseStats ? { ...options.baseStats } : {};
 
-    for (const [stat, range] of Object.entries(typeData.baseStats)) {
-      const levelScale = 1 + scaledLevel * 0.055;
-      baseStats[stat] = roundStat(stat, randomBetween(range[0], range[1]) * rarityData.statMultiplier * levelScale);
+    if (!options.baseStats) {
+      for (const [stat, range] of Object.entries(typeData.baseStats)) {
+        const levelScale = 1 + scaledLevel * 0.055;
+        baseStats[stat] = roundStat(stat, randomBetween(range[0], range[1]) * rarityData.statMultiplier * levelScale);
+      }
     }
 
     const affixes = [

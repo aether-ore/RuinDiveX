@@ -1579,6 +1579,13 @@ button:focus-visible {
   font-weight: 900;
 }
 
+.pose-joint-helper {
+  margin: -2px 9px 8px;
+  color: rgba(213, 226, 246, 0.72);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .pose-axis-grid {
   display: grid;
   gap: 7px;
@@ -1587,12 +1594,13 @@ button:focus-visible {
 
 .pose-axis-control {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) 54px;
+  grid-template-columns: 162px minmax(0, 1fr) 54px;
   align-items: center;
   gap: 8px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 900;
+  line-height: 1.2;
 }
 
 .pose-axis-control input {

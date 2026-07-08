@@ -42,6 +42,8 @@ const worldMoveDirection = new THREE.Vector3();
 const movementBasisForward = new THREE.Vector3();
 const movementBasisRight = new THREE.Vector3();
 const guardSourceDirection = new THREE.Vector3();
+const damageSourceDirection = new THREE.Vector3();
+const damageFacingRight = new THREE.Vector3();
 const PLAYER_MODEL_PATH = './assets/models/';
 const PLAYER_MODEL_MTL = 'Mega Man Volnutt.mtl';
 const PLAYER_MODEL_OBJ = 'Mega Man Volnutt.obj';
@@ -51,6 +53,13 @@ const TARGET_MODEL_HEIGHT = 2.85;
 const MIN_BRACED_SHOT_TIME = 0.28;
 const MIN_PROJECTILE_AIM_LOCK_TIME = 0.44;
 const PROJECTILE_STANCE_LINGER_TIME = 1.05;
+const DODGE_ROLL_DISTANCE = 2.75;
+const DODGE_ROLL_DURATION = 0.66;
+const FORWARD_JUMP_DISTANCE = 1.65;
+const JUMP_DURATION = 0.82;
+const HEAVY_HIT_HEALTH_FRACTION = 0.16;
+const HEAVY_HIT_MIN_DAMAGE = 18;
+const KNOCKBACK_FALL_DISTANCE = 1.55;
 const SHIELD_GUARD_DURATION = 0.7;
 const SHIELD_GUARD_COOLDOWN = 0.82;
 const SHIELD_PARRY_WINDOW = 0.18;
@@ -124,6 +133,10 @@ export class Player {
     this.bracedBackpedalTimer = 0;
     this.movementLockTimer = 0;
     this.movementLockMultiplier = 1;
+    this.dodgeDirection = new THREE.Vector3(0, 0, 1);
+    this.jumpDirection = new THREE.Vector3(0, 0, 1);
+    this.knockbackFallDirection = new THREE.Vector3(0, 0, -1);
+    this.damageHitLocalDirection = new THREE.Vector3(0, 0, 1);
     this.isRunning = false;
     this.guardDirection = new THREE.Vector3(0, 0, 1);
     this.guardTimer = 0;
@@ -159,6 +172,21 @@ export class Player {
     this._updateShieldGuardState(dt);
     this._updateMovementLockState(dt);
     this._updateAttackFacingState(dt);
+
+    if (this.animation.isFullBodyActionActive?.()) {
+      this.animation.update(dt, {
+        moving: false,
+        running: false,
+        moveAmount: 0,
+      });
+      this._updateFullBodyActionMotion(dt, arenaRadius);
+      this.updateWeaponVisualState();
+      this._updateExternalModelMotion(dt, false, 0, false, false, {
+        lockOnActive: false,
+        strafeAmount: 0,
+      });
+      return;
+    }
 
     moveVector.set(0, 0);
     const lockOnTarget = movementOptions.lockOnTarget ?? null;
@@ -351,6 +379,152 @@ export class Player {
     if (worldForward.lengthSq() > 0.0001) {
       this.lastMoveDirection.copy(worldForward.normalize());
     }
+  }
+
+  tryDodgeRoll(input = new Set(), movementOptions = {}) {
+    if (!this.animation.playDodgeRoll?.(DODGE_ROLL_DURATION)) {
+      return false;
+    }
+
+    this._resolveActionDirection(input, movementOptions, this.dodgeDirection);
+    this.faceDirection(this.dodgeDirection);
+    this.attackFacingTimer = 0;
+    this.movementLockTimer = Math.max(this.movementLockTimer, DODGE_ROLL_DURATION);
+    this.movementLockMultiplier = 0;
+    return true;
+  }
+
+  tryJump(input = new Set(), movementOptions = {}) {
+    this._resolveActionDirection(input, movementOptions, this.jumpDirection);
+    const moving = this._hasMovementInput(input);
+    const jumpKind = moving ? 'forwardJump' : 'neutralJump';
+
+    if (!this.animation.playJump?.(jumpKind, JUMP_DURATION)) {
+      return false;
+    }
+
+    if (moving) {
+      this.faceDirection(this.jumpDirection);
+    }
+
+    this.movementLockTimer = Math.max(this.movementLockTimer, JUMP_DURATION * 0.55);
+    this.movementLockMultiplier = Math.min(this.movementLockMultiplier, moving ? 0.35 : 0.18);
+    return true;
+  }
+
+  previewExternalAnimation(dt, {
+    moving = false,
+    running = false,
+    moveAmount = moving ? (running ? 1.35 : 1) : 0,
+    projectileAiming = false,
+    lockOnActive = false,
+    strafeAmount = 0,
+    backpedaling = false,
+    attackKind = null,
+    attackProgress = null,
+    forceSwordArm = false,
+  } = {}) {
+    if (this.dead) {
+      return;
+    }
+
+    this.animation.update(dt, {
+      moving,
+      running,
+      moveAmount,
+    });
+    this.updateWeaponVisualState();
+    const previewAttackKind = projectileAiming ? 'projectile' : attackKind ?? this._attackWeaponKind;
+    const previewAttackProgress = Number.isFinite(attackProgress)
+      ? attackProgress
+      : projectileAiming
+      ? 1
+      : null;
+
+    if (forceSwordArm && previewAttackKind === 'beamBlade') {
+      this.externalRig?.setDrillArmActive?.(false);
+      this.externalRig?.setBusterArmActive?.(true);
+      this.externalRig?.setBeamBladeActive?.(true, this.getActiveWeaponGlowColor(this.weaponColor.getHex()));
+    }
+
+    this._updateExternalModelMotion(dt, moving, moveAmount, backpedaling, running, {
+      lockOnActive,
+      strafeAmount,
+      projectileAiming,
+      attackKind: previewAttackKind,
+      attackProgress: previewAttackProgress,
+      animationState: previewAttackKind === 'beamBlade' ? 'attacking' : undefined,
+      skipAttackKindReset: true,
+    });
+  }
+
+  _hasMovementInput(input = new Set()) {
+    return input.has('KeyW')
+      || input.has('ArrowUp')
+      || input.has('KeyS')
+      || input.has('ArrowDown')
+      || input.has('KeyA')
+      || input.has('ArrowLeft')
+      || input.has('KeyD')
+      || input.has('ArrowRight');
+  }
+
+  _resolveActionDirection(input = new Set(), movementOptions = {}, target = worldMoveDirection) {
+    const x = (input.has('KeyD') || input.has('ArrowRight') ? 1 : 0)
+      + (input.has('KeyA') || input.has('ArrowLeft') ? -1 : 0);
+    const y = (input.has('KeyW') || input.has('ArrowUp') ? 1 : 0)
+      + (input.has('KeyS') || input.has('ArrowDown') ? -1 : 0);
+
+    if (Math.abs(x) > 0.001 || Math.abs(y) > 0.001) {
+      moveVector.set(x, y).normalize();
+      this._resolveMovementDirection(moveVector, movementOptions);
+      target.copy(worldMoveDirection);
+    } else {
+      target.copy(this.lastMoveDirection);
+    }
+
+    target.y = 0;
+
+    if (target.lengthSq() <= 0.0001) {
+      target.set(0, 0, 1);
+    } else {
+      target.normalize();
+    }
+
+    return target;
+  }
+
+  _updateFullBodyActionMotion(dt, arenaRadius = 32) {
+    const state = this.animation.state;
+    const progress = this.animation.getActionProgress?.() ?? 0;
+
+    if (state === 'dodgeRoll') {
+      this._applyActionDisplacement(this.dodgeDirection, DODGE_ROLL_DISTANCE, DODGE_ROLL_DURATION, progress, dt);
+    } else if (state === 'forwardJump') {
+      this._applyActionDisplacement(this.jumpDirection, FORWARD_JUMP_DISTANCE, JUMP_DURATION, progress, dt);
+    } else if (state === 'knockbackFall') {
+      const knockbackProgress = THREE.MathUtils.clamp(progress / 0.62, 0, 1);
+      this._applyActionDisplacement(
+        this.knockbackFallDirection,
+        KNOCKBACK_FALL_DISTANCE,
+        0.62,
+        knockbackProgress,
+        dt,
+      );
+    }
+
+    this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -arenaRadius, arenaRadius);
+    this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -arenaRadius, arenaRadius);
+  }
+
+  _applyActionDisplacement(direction, distance, duration, progress, dt) {
+    if (!direction || direction.lengthSq() <= 0.0001 || duration <= 0) {
+      return;
+    }
+
+    const localProgress = THREE.MathUtils.clamp(progress, 0, 1);
+    const speedScale = Math.sin(localProgress * Math.PI) * (Math.PI / 2);
+    this.root.position.addScaledVector(direction, (distance / duration) * speedScale * dt);
   }
 
   faceTarget(targetPosition) {
@@ -857,7 +1031,15 @@ export class Player {
     this.health = Math.max(0, this.health - mitigated);
 
     if (!guardResult.parried && mitigated > amount * 0.18) {
-      this.animation.playHurt();
+      const heavyHitThreshold = Math.max(HEAVY_HIT_MIN_DAMAGE, this.stats.maxHealth * HEAVY_HIT_HEALTH_FRACTION);
+
+      this._captureDamageHitDirection(source);
+
+      if (!guardResult.blocked && mitigated >= heavyHitThreshold) {
+        this._playKnockbackFall(source);
+      } else {
+        this.animation.playHurt();
+      }
     }
 
     if (source?.affix?.id === 'frostCore' && mitigated > 0.5) {
@@ -870,6 +1052,63 @@ export class Player {
     }
 
     return mitigated;
+  }
+
+  _playKnockbackFall(source = null) {
+    if (source?.root?.position || source?.position) {
+      this.knockbackFallDirection.copy(this.root.position).sub(source.root?.position ?? source.position);
+      this.knockbackFallDirection.y = 0;
+    } else {
+      this.knockbackFallDirection.copy(this.lastMoveDirection).multiplyScalar(-1);
+    }
+
+    if (this.knockbackFallDirection.lengthSq() <= 0.0001) {
+      this.knockbackFallDirection.set(0, 0, -1);
+    } else {
+      this.knockbackFallDirection.normalize();
+    }
+
+    this._releaseProjectileAim();
+    this.attackFacingTimer = 0;
+    this.movementLockTimer = Math.max(this.movementLockTimer, 2.0);
+    this.movementLockMultiplier = 0;
+
+    if (!this.animation.playKnockbackFall?.()) {
+      this.animation.playHurt();
+    }
+  }
+
+  _captureDamageHitDirection(source = null) {
+    if (source?.root?.position || source?.position) {
+      damageSourceDirection.copy(source.root?.position ?? source.position).sub(this.root.position);
+      damageSourceDirection.y = 0;
+    } else {
+      damageSourceDirection.copy(this.lastMoveDirection);
+    }
+
+    if (damageSourceDirection.lengthSq() <= 0.0001) {
+      damageSourceDirection.copy(this.lastMoveDirection);
+    }
+
+    if (damageSourceDirection.lengthSq() <= 0.0001) {
+      damageSourceDirection.set(0, 0, 1);
+    } else {
+      damageSourceDirection.normalize();
+    }
+
+    worldForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
+    if (worldForward.lengthSq() <= 0.0001) {
+      worldForward.set(0, 0, 1);
+    } else {
+      worldForward.normalize();
+    }
+
+    damageFacingRight.set(worldForward.z, 0, -worldForward.x);
+    this.damageHitLocalDirection.set(
+      THREE.MathUtils.clamp(damageSourceDirection.dot(damageFacingRight), -1, 1),
+      0,
+      THREE.MathUtils.clamp(damageSourceDirection.dot(worldForward), -1, 1),
+    );
   }
 
   heal(amount) {
@@ -1266,18 +1505,46 @@ export class Player {
       this._modelWalkTime += dt * walkSpeed * walkDirection;
     }
 
+    const actionProgress = Number.isFinite(motionOptions.actionProgress)
+      ? THREE.MathUtils.clamp(motionOptions.actionProgress, 0, 1)
+      : this.animation.getActionProgress?.() ?? 0;
+    const animationState = motionOptions.animationState ?? this.animation.state;
     const stepLift = Math.abs(Math.sin(this._modelWalkTime));
-    const targetY = moving ? stepLift * 0.062 : 0;
-    const targetRoll = moving ? Math.sin(this._modelWalkTime) * 0.032 : 0;
+    let targetY = moving ? stepLift * 0.062 : 0;
+    let targetRoll = moving ? Math.sin(this._modelWalkTime) * 0.032 : 0;
+    let targetPitch = 0;
+
+    if (animationState === 'neutralJump' || animationState === 'forwardJump') {
+      const jumpLift = Math.sin(actionProgress * Math.PI) * (animationState === 'forwardJump' ? 0.58 : 0.72);
+      const landingCompression = THREE.MathUtils.smoothstep(actionProgress, 0.78, 1) * 0.045;
+      targetY = Math.max(targetY, jumpLift) - landingCompression;
+      targetPitch = animationState === 'forwardJump' ? -Math.sin(actionProgress * Math.PI) * 0.08 : 0;
+    } else if (animationState === 'dodgeRoll') {
+      targetY = Math.max(0.02, targetY * 0.45);
+      targetPitch = Math.sin(actionProgress * Math.PI) * 0.18;
+      targetRoll += Math.sin(actionProgress * Math.PI * 2) * 0.08;
+    } else if (animationState === 'knockbackFall' || animationState === 'downed') {
+      targetY = Math.max(0, targetY * 0.25);
+      targetPitch = -THREE.MathUtils.smoothstep(actionProgress, 0.15, 0.85) * 0.16;
+      targetRoll += -THREE.MathUtils.smoothstep(actionProgress, 0.2, 0.8) * 0.08;
+    } else if (animationState === 'getUp') {
+      const crouch = Math.sin(actionProgress * Math.PI);
+      targetY = Math.max(0, targetY * 0.35 - crouch * 0.025);
+      targetPitch = -0.1 * (1 - THREE.MathUtils.smoothstep(actionProgress, 0.25, 1));
+    }
 
     this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, targetY, Math.min(1, dt * 12));
+    this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, targetPitch, Math.min(1, dt * 12));
     this.modelRoot.rotation.z = THREE.MathUtils.lerp(this.modelRoot.rotation.z, targetRoll, Math.min(1, dt * 12));
 
-    const rawAttackProgress = this.animation.attackDuration > 0
+    const rawAttackProgress = Number.isFinite(motionOptions.attackProgress)
+      ? THREE.MathUtils.clamp(motionOptions.attackProgress, 0, 1)
+      : this.animation.attackDuration > 0
       ? 1 - THREE.MathUtils.clamp(this.animation.attackTimer / this.animation.attackDuration, 0, 1)
       : 0;
-    const projectileAimLocked = this._attackWeaponKind === 'projectile' && this.bracedFireTimer > 0;
-    const projectileAiming = projectileAimLocked || (this._attackWeaponKind === 'projectile' && this.animation.attackTimer > 0);
+    const attackKind = motionOptions.attackKind ?? this._attackWeaponKind;
+    const projectileAimLocked = motionOptions.projectileAiming ?? (attackKind === 'projectile' && this.bracedFireTimer > 0);
+    const projectileAiming = motionOptions.projectileAiming ?? (projectileAimLocked || (attackKind === 'projectile' && this.animation.attackTimer > 0));
     const sustainedProjectileAim = projectileAiming && this.animation.attackTimer <= 0;
     const attackProgress = sustainedProjectileAim ? 1 : rawAttackProgress;
     const hurtProgress = this.animation.hurtTimer > 0
@@ -1287,18 +1554,21 @@ export class Player {
     this.externalRig?.update(dt, {
       moving,
       moveAmount,
-      state: projectileAiming ? 'attacking' : this.animation.state,
+      state: projectileAiming ? 'attacking' : animationState,
       attackProgress,
+      actionProgress,
+      actionDuration: this.animation.actionDuration ?? 0,
       hurtProgress,
+      damageHitLocal: this.damageHitLocalDirection,
       projectileAiming,
       backpedaling,
       running,
-      attackKind: this._attackWeaponKind,
+      attackKind,
       lockOnActive: Boolean(motionOptions.lockOnActive),
       strafeAmount: motionOptions.strafeAmount ?? 0,
     });
 
-    if (this.animation.attackTimer <= 0 && !projectileAimLocked) {
+    if (!motionOptions.skipAttackKindReset && this.animation.attackTimer <= 0 && !projectileAimLocked) {
       this._attackWeaponKind = null;
     }
   }

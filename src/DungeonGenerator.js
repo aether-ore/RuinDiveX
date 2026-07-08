@@ -441,7 +441,7 @@ export class DungeonGenerator {
   _addDoors(group, rooms, materials) {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const descriptors = [
-      { id: 'entranceDoor', from: roomById.get('expeditionCamp'), to: roomById.get('entrance'), locked: true, closed: true, requiresLift: true, label: 'Ruin Descent Gate' },
+      { id: 'entranceDoor', from: roomById.get('expeditionCamp'), to: roomById.get('entrance'), locked: false, closed: false, label: 'Ruin Entrance' },
       { id: 'enemyNestGate', from: roomById.get('enemyNest'), to: roomById.get('keycardRoom'), locked: true, closed: true, encounterId: 'enemyNest', label: 'Security Gate' },
       { id: 'lockedKeycardDoor', from: roomById.get('keycardRoom'), to: roomById.get('trapRoom'), locked: true, closed: true, requiresKeycard: true, label: 'Keycard Door' },
       { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, requiresKeycard: true, pressurePlateId: 'conveyorVaultPlate', optional: true, label: 'Bonus Vault' },
@@ -458,6 +458,9 @@ export class DungeonGenerator {
       const door = new THREE.Group();
       door.name = descriptor.id;
       door.position.copy(position);
+      if (!descriptor.closed) {
+        door.position.y = -2.35;
+      }
 
       const frame = new THREE.Mesh(
         new THREE.BoxGeometry(alongX ? 0.22 : this.tileSize * 0.9, 1.95, alongX ? this.tileSize * 0.9 : 0.22),
@@ -488,7 +491,6 @@ export class DungeonGenerator {
         radius: 1.1,
         locked: descriptor.locked,
         closed: descriptor.closed,
-        requiresLift: Boolean(descriptor.requiresLift),
         requiresKeycard: Boolean(descriptor.requiresKeycard),
         optional: Boolean(descriptor.optional),
         mechanismId: descriptor.mechanismId ?? null,

@@ -11,3 +11,5 @@ window.game = game;
 window.spawnElite = (type = 'tank') => game.spawnEnemy(type, true);
 window.generateLoot = (type, rarity) => game.generateLoot(type, rarity);
 window.openInventory = () => game.setInventoryOpen(true);
+window.setAnimationPreviewMode = (mode = 'off', options = {}) => game.setAnimationPreviewMode(mode, options);
+window.getAnimationPreviewState = () => game.getAnimationPreviewState();

@@ -1,4 +1,19 @@
 import * as THREE from 'three';
+import {
+  SemanticRigMapper,
+  createNeutralSemanticPose,
+  degrees,
+} from './SemanticRigMapper.js';
+import { CombatAnimator } from './animation/CombatAnimator.js';
+import { DamageAnimator } from './animation/DamageAnimator.js';
+import { DodgeRollAnimator } from './animation/DodgeRollAnimator.js';
+import { JumpAnimator } from './animation/JumpAnimator.js';
+import { LocomotionAnimator } from './animation/LocomotionAnimator.js';
+import {
+  UPPER_BODY_AIM_BLEND_IN_SPEED,
+  UPPER_BODY_AIM_BLEND_OUT_SPEED,
+  UpperBodyAimLayer,
+} from './animation/UpperBodyAimLayer.js';
 
 const PART_NAMES = [
   'head',
@@ -55,43 +70,10 @@ const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
 const BEAM_BLADE_SLASH_END = 16 / BEAM_BLADE_TOTAL_FRAMES;
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
-const WALK_CYCLE_SPEED = 8.6;
-const WALK_STEP_HIP_FORWARD = 0.66;
-const WALK_STEP_SUPPORT_BEND = 0.1;
-const WALK_STEP_KNEE_PITCH = THREE.MathUtils.degToRad(89.25);
-const WALK_STEP_KNEE_YAW = THREE.MathUtils.degToRad(13.3);
-const WALK_STEP_KNEE_ROLL = THREE.MathUtils.degToRad(-22);
-const WALK_STEP_ANKLE_PITCH = THREE.MathUtils.degToRad(-4.9);
-const WALK_STEP_ANKLE_YAW = THREE.MathUtils.degToRad(-22.55);
-const WALK_STEP_ANKLE_ROLL = THREE.MathUtils.degToRad(-4);
-const WALK_STEP_SIDE_TWIST_SCALE = 0.32;
-const WALK_STEP_KNEE_FORWARD_OFFSET = -0.045;
-const WALK_STEP_ANKLE_FORWARD_OFFSET = -0.13;
-const BEAM_BLADE_POSE_JOINTS = [
-  'hips',
-  'spine',
-  'neck',
-  'leftShoulder',
-  'leftElbow',
-  'leftWrist',
-  'rightShoulder',
-  'rightElbow',
-  'rightWrist',
-  'leftHip',
-  'leftKnee',
-  'leftAnkle',
-  'rightHip',
-  'rightKnee',
-  'rightAnkle',
-];
-const BEAM_BLADE_PLANTED_JOINTS = new Set([
-  'leftHip',
-  'leftKnee',
-  'leftAnkle',
-  'rightHip',
-  'rightKnee',
-  'rightAnkle',
-]);
+const WALK_LOOP_SECONDS = 1.08;
+const JOG_LOOP_SECONDS = 0.66;
+const AIM_RIGHT_ARM_SWING_SCALE = 0.46;
+const ARM_CARRIAGE_SHOULDER_OUT = 0.028;
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
@@ -100,134 +82,6 @@ const tempNormalMatrix = new THREE.Matrix3();
 const zeroEuler = new THREE.Euler();
 const upVector = new THREE.Vector3(0, 1, 0);
 const textureSamplerCache = new WeakMap();
-
-function poseEuler(pitch = 0, yaw = 0, roll = 0) {
-  return new THREE.Euler(
-    THREE.MathUtils.degToRad(pitch),
-    THREE.MathUtils.degToRad(yaw),
-    THREE.MathUtils.degToRad(roll),
-  );
-}
-
-const BEAM_BLADE_CHAMBER_POSE = {
-  hips: poseEuler(0, 0, 0),
-  spine: poseEuler(-4, 2, -2),
-  neck: poseEuler(0, 0, 0),
-  leftShoulder: poseEuler(8, 14, -55),
-  leftElbow: poseEuler(11, -72, 7),
-  leftWrist: poseEuler(0, 0, 0),
-  rightShoulder: poseEuler(-2, 78, -5),
-  rightElbow: poseEuler(19, 107, -31),
-  rightWrist: poseEuler(0, 0, 0),
-  leftHip: poseEuler(-45, -5, -7),
-  leftKnee: poseEuler(62, -5, -2),
-  leftAnkle: poseEuler(-14, 11, 2),
-  rightHip: poseEuler(14, -42, -2),
-  rightKnee: poseEuler(0, -4, 0),
-  rightAnkle: poseEuler(0, 0, 0),
-};
-
-const BEAM_BLADE_RELEASE_POSE = {
-  hips: poseEuler(-1, -8, -1),
-  spine: poseEuler(-5, -16, -3),
-  neck: poseEuler(0, 0, 0),
-  leftShoulder: poseEuler(8, -4, -48),
-  leftElbow: poseEuler(18, -26, 8),
-  leftWrist: poseEuler(0, 0, 0),
-  rightShoulder: poseEuler(-7, 42, 7),
-  rightElbow: poseEuler(14, 34, -12),
-  rightWrist: poseEuler(-4, -12, 10),
-  leftHip: poseEuler(-39, -3, 7),
-  leftKnee: poseEuler(64, -3, -1),
-  leftAnkle: poseEuler(-10, 7, 1),
-  rightHip: poseEuler(10, -24, -10),
-  rightKnee: poseEuler(16, -2, 0),
-  rightAnkle: poseEuler(0, 0, -2),
-};
-
-const BEAM_BLADE_ACTIVE_POSE = {
-  hips: poseEuler(-2, -18, -2),
-  spine: poseEuler(-8, -34, -5),
-  neck: poseEuler(0, 4, 0),
-  leftShoulder: poseEuler(10, -12, -40),
-  leftElbow: poseEuler(24, -10, 8),
-  leftWrist: poseEuler(0, 0, 0),
-  rightShoulder: poseEuler(-9, -54, 8),
-  rightElbow: poseEuler(10, 10, -4),
-  rightWrist: poseEuler(-5, 28, 12),
-  leftHip: poseEuler(-33, -2, 12),
-  leftKnee: poseEuler(66, -2, 0),
-  leftAnkle: poseEuler(-8, 5, 1),
-  rightHip: poseEuler(6, -12, -14),
-  rightKnee: poseEuler(22, 0, 0),
-  rightAnkle: poseEuler(0, 0, -3),
-};
-
-const BEAM_BLADE_FOLLOW_POSE = {
-  hips: poseEuler(-1, -22, -1),
-  spine: poseEuler(-5, -40, -4),
-  neck: poseEuler(0, 6, 0),
-  leftShoulder: poseEuler(8, -14, -36),
-  leftElbow: poseEuler(20, 0, 8),
-  leftWrist: poseEuler(0, 0, 0),
-  rightShoulder: poseEuler(-7, -95, 11),
-  rightElbow: poseEuler(7, 8, -3),
-  rightWrist: poseEuler(-3, 42, 10),
-  leftHip: poseEuler(-29, 0, 11),
-  leftKnee: poseEuler(58, 0, 0),
-  leftAnkle: poseEuler(-6, 3, 1),
-  rightHip: poseEuler(3, -6, -12),
-  rightKnee: poseEuler(18, 0, 0),
-  rightAnkle: poseEuler(0, 0, -2),
-};
-
-function stagedBeamBladeRotationValue(base, chamber, release, active, follow, weights) {
-  const earlyWindup = THREE.MathUtils.lerp(base, chamber, 0.45);
-  let value = THREE.MathUtils.lerp(base, earlyWindup, weights.beginWindup);
-
-  value = THREE.MathUtils.lerp(value, chamber, weights.chamber);
-  value = THREE.MathUtils.lerp(value, release, weights.release);
-  value = THREE.MathUtils.lerp(value, active, weights.slash);
-  value = THREE.MathUtils.lerp(value, follow, weights.followThrough);
-  return THREE.MathUtils.lerp(value, base, weights.recovery);
-}
-
-function stagedBeamBladePlantedRotationValue(base, chamber, weights) {
-  const earlyWindup = THREE.MathUtils.lerp(base, chamber, 0.45);
-  let value = THREE.MathUtils.lerp(base, earlyWindup, weights.beginWindup);
-
-  value = THREE.MathUtils.lerp(value, chamber, weights.chamber);
-  return value;
-}
-
-function setBeamBladePoseTarget(map, name, weights) {
-  const base = map.get(name) ?? zeroEuler;
-  const baseX = base.x;
-  const baseY = base.y;
-  const baseZ = base.z;
-  const chamber = BEAM_BLADE_CHAMBER_POSE[name] ?? base;
-  const release = BEAM_BLADE_RELEASE_POSE[name] ?? chamber;
-  const active = BEAM_BLADE_ACTIVE_POSE[name] ?? release;
-  const follow = BEAM_BLADE_FOLLOW_POSE[name] ?? active;
-
-  if (BEAM_BLADE_PLANTED_JOINTS.has(name)) {
-    return setTarget(
-      map,
-      name,
-      stagedBeamBladePlantedRotationValue(baseX, chamber.x, weights),
-      stagedBeamBladePlantedRotationValue(baseY, chamber.y, weights),
-      stagedBeamBladePlantedRotationValue(baseZ, chamber.z, weights),
-    );
-  }
-
-  return setTarget(
-    map,
-    name,
-    stagedBeamBladeRotationValue(baseX, chamber.x, release.x, active.x, follow.x, weights),
-    stagedBeamBladeRotationValue(baseY, chamber.y, release.y, active.y, follow.y, weights),
-    stagedBeamBladeRotationValue(baseZ, chamber.z, release.z, active.z, follow.z, weights),
-  );
-}
 
 function createBuckets() {
   return new Map(PART_NAMES.map((partName) => [partName, {
@@ -729,77 +583,12 @@ function setTarget(map, name, x = 0, y = 0, z = 0) {
   return target;
 }
 
-function setPositionTarget(map, name, basePosition, x = 0, y = 0, z = 0) {
-  if (!basePosition) {
-    return null;
-  }
-
-  let target = map.get(name);
-
-  if (!target) {
-    target = new THREE.Vector3();
-    map.set(name, target);
-  }
-
-  target.set(basePosition.x + x, basePosition.y + y, basePosition.z + z);
-  return target;
-}
-
-function addToTarget(map, name, x = 0, y = 0, z = 0) {
-  let target = map.get(name);
-
-  if (!target) {
-    target = new THREE.Euler();
-    map.set(name, target);
-  }
-
-  target.x += x;
-  target.y += y;
-  target.z += z;
-  return target;
-}
-
-function blendTarget(map, name, targetX, targetY, targetZ, weight) {
-  const current = map.get(name) ?? zeroEuler;
-  return setTarget(
-    map,
-    name,
-    THREE.MathUtils.lerp(current.x, targetX, weight),
-    THREE.MathUtils.lerp(current.y, targetY, weight),
-    THREE.MathUtils.lerp(current.z, targetZ, weight),
-  );
-}
-
-function getWalkLegPose(phase, runBlend = 0) {
-  const cycle = ((phase % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-  const lifting = cycle < Math.PI;
-  const stepProgress = lifting ? cycle / Math.PI : (cycle - Math.PI) / Math.PI;
-  const lift = lifting ? Math.sin(stepProgress * Math.PI) : 0;
-  const deliberateLift = Math.pow(lift, 0.72);
-  const support = lifting ? 0 : Math.sin(stepProgress * Math.PI);
-  const baseKnee = 0.06 + support * WALK_STEP_SUPPORT_BEND;
-  const baseAnkle = support * 0.04;
-  const settle = support * 0.55;
-  const hipReach = WALK_STEP_HIP_FORWARD * (1 + runBlend * 0.16);
-  const kneeReach = WALK_STEP_KNEE_PITCH * (1 + runBlend * 0.13);
-  const ankleReach = WALK_STEP_ANKLE_PITCH * (1 + runBlend * 0.08);
-
-  return {
-    hip: -deliberateLift * hipReach + settle * (0.03 + runBlend * 0.025),
-    knee: THREE.MathUtils.lerp(baseKnee, kneeReach, deliberateLift),
-    kneeYaw: WALK_STEP_KNEE_YAW * deliberateLift * WALK_STEP_SIDE_TWIST_SCALE,
-    kneeRoll: WALK_STEP_KNEE_ROLL * deliberateLift * WALK_STEP_SIDE_TWIST_SCALE,
-    ankle: THREE.MathUtils.lerp(baseAnkle, ankleReach, deliberateLift),
-    ankleYaw: WALK_STEP_ANKLE_YAW * deliberateLift * WALK_STEP_SIDE_TWIST_SCALE,
-    anklePoseRoll: WALK_STEP_ANKLE_ROLL * deliberateLift * WALK_STEP_SIDE_TWIST_SCALE,
-    kneeForward: WALK_STEP_KNEE_FORWARD_OFFSET * (1 + runBlend * 1.15) * deliberateLift,
-    ankleForward: WALK_STEP_ANKLE_FORWARD_OFFSET * (1 + runBlend * 0.65) * deliberateLift,
-    hipRoll: settle * (0.018 + runBlend * 0.006),
-    hipYaw: 0,
-    ankleRoll: 0,
-    contact: support,
-    lift: deliberateLift,
-  };
+function semanticPoseToTargets(mapper, targets, pose) {
+  mapper.setCorePose(targets, pose.core);
+  mapper.setArmPose(targets, 'left', pose.leftArm);
+  mapper.setArmPose(targets, 'right', pose.rightArm);
+  mapper.setLegPose(targets, 'left', pose.leftLeg);
+  mapper.setLegPose(targets, 'right', pose.rightLeg);
 }
 
 export class ExternalModelRig {
@@ -828,6 +617,18 @@ export class ExternalModelRig {
     this.beamBladeColor = new THREE.Color(DEFAULT_BEAM_BLADE_COLOR);
     this.debugPoseEnabled = false;
     this.debugPoseOverrides = new Map();
+    this.semanticMapper = new SemanticRigMapper(this.joints);
+    this.neutralSemanticPose = createNeutralSemanticPose();
+    this.modelHeight = 1;
+    this.locomotionAnimator = new LocomotionAnimator(this.semanticMapper);
+    this.upperBodyAimLayer = new UpperBodyAimLayer(this.semanticMapper);
+    this.combatAnimator = new CombatAnimator(this.semanticMapper);
+    this.damageAnimator = new DamageAnimator(this.semanticMapper);
+    this.dodgeRollAnimator = new DodgeRollAnimator(this.semanticMapper);
+    this.jumpAnimator = new JumpAnimator(this.semanticMapper);
+    this.aimLayerWeight = 0;
+    this.previousRigState = 'idle';
+    this.stateTime = 0;
     this.legMaterials = {
       thigh: makeSolidMaterial('material_playerProceduralThigh', 0x57c0d2, { roughness: 0.5 }),
       knee: makeSolidMaterial('material_playerProceduralKnee', 0x1a57c8, { roughness: 0.38, metalness: 0.16 }),
@@ -1230,8 +1031,8 @@ export class ExternalModelRig {
     let targetZ = 0;
 
     if (state === 'attacking' && attackKind === 'beamBlade') {
-      targetX = 0.08 * chamberHold - 0.04 * slashSweep;
-      targetZ = -0.04 * chamberHold + 0.06 * slashSweep;
+      targetX = 0.08 * chamberHold;
+      targetZ = -0.04 * chamberHold;
     }
 
     this.busterArmGroup.rotation.x = THREE.MathUtils.lerp(this.busterArmGroup.rotation.x, targetX, alpha);
@@ -1239,12 +1040,114 @@ export class ExternalModelRig {
     this.busterArmGroup.rotation.z = THREE.MathUtils.lerp(this.busterArmGroup.rotation.z, targetZ, alpha);
   }
 
+  _applyIdleSemanticPose(targets) {
+    semanticPoseToTargets(this.semanticMapper, targets, this.neutralSemanticPose);
+
+    const breathing = Math.sin(this.time * 2.4);
+    this.semanticMapper.addCorePose(targets, {
+      spine: { pitch: breathing * degrees(0.5), yaw: 0, roll: breathing * degrees(0.4) },
+      neck: { pitch: breathing * degrees(0.35), yaw: 0, roll: -breathing * degrees(0.25) },
+    });
+    this.semanticMapper.addArmPose(targets, 'left', {
+      armForwardBack: breathing * degrees(0.8),
+      armRaise: breathing * degrees(0.5),
+      elbowBend: degrees(2),
+    });
+    this.semanticMapper.addArmPose(targets, 'right', {
+      armForwardBack: -breathing * degrees(0.6),
+      armRaise: -breathing * degrees(0.35),
+      elbowBend: degrees(2),
+    });
+  }
+
+  _applyLocomotionSemanticPose(targets, positionTargets, {
+    moving = false,
+    moveAmount = 0,
+    running = false,
+    projectileAiming = false,
+    lockOnActive = false,
+    strafeAmount = 0,
+  } = {}) {
+    if (!moving) {
+      this._applyIdleSemanticPose(targets);
+      return;
+    }
+
+    const speedBlend = THREE.MathUtils.clamp(moveAmount, 0, 1.35);
+    const runBlend = running ? THREE.MathUtils.clamp((speedBlend - 1) / 0.35, 0, 1) : 0;
+    const rightArmSwingScale = projectileAiming || lockOnActive ? AIM_RIGHT_ARM_SWING_SCALE : 1;
+
+    this.locomotionAnimator.apply({
+      rotationTargets: targets,
+      positionTargets,
+      phase: this.walkPhase,
+      moveAmount: Math.min(speedBlend, 1),
+      runBlend,
+      rightArmSwingScale,
+      restPositionFor: (name) => this.joints.get(name)?.userData.restLocalPosition,
+    });
+
+    const lockOnStrafe = lockOnActive ? THREE.MathUtils.clamp(strafeAmount, -1, 1) : 0;
+    if (Math.abs(lockOnStrafe) > 0.05) {
+      const twist = lockOnStrafe * (moving ? 1 : 0.55);
+      this.semanticMapper.addCorePose(targets, {
+        hips: { pitch: 0, yaw: -degrees(13) * twist, roll: degrees(2.5) * twist },
+        spine: { pitch: 0, yaw: degrees(8) * twist, roll: -degrees(1.8) * twist },
+      });
+      this.semanticMapper.addLegPose(targets, 'left', { hipYaw: -degrees(4) * twist, hipRoll: degrees(2) * twist }, 1);
+      this.semanticMapper.addLegPose(targets, 'right', { hipYaw: -degrees(4) * twist, hipRoll: degrees(2) * twist }, 1);
+    }
+  }
+
+  _addJointPositionOffset(positionTargets, name, x = 0, y = 0, z = 0) {
+    const joint = this.joints.get(name);
+    const restPosition = joint?.userData?.restLocalPosition;
+
+    if (!restPosition) {
+      return;
+    }
+
+    let target = positionTargets.get(name);
+    if (!target) {
+      target = restPosition.clone();
+      positionTargets.set(name, target);
+    }
+
+    target.x += x;
+    target.y += y;
+    target.z += z;
+  }
+
+  _applyArmCarriagePositionTargets(positionTargets) {
+    const scale = this.modelHeight || 1;
+    const shoulderOut = scale * ARM_CARRIAGE_SHOULDER_OUT;
+
+    for (const side of ['left', 'right']) {
+      const sign = side === 'left' ? 1 : -1;
+      this._addJointPositionOffset(positionTargets, `${side}Shoulder`, sign * shoulderOut, 0, 0);
+    }
+  }
+
+  _applyFullBodyActionPose(targets, state, progress) {
+    if (state === 'dodgeRoll') {
+      this.dodgeRollAnimator.apply(targets, progress);
+    } else if (state === 'neutralJump' || state === 'forwardJump' || state === 'fall' || state === 'land') {
+      this.jumpAnimator.apply(targets, state, progress);
+    } else if (state === 'knockbackFall' || state === 'downed') {
+      this.damageAnimator.applyKnockbackFall(targets, state, progress);
+    } else if (state === 'getUp') {
+      this.damageAnimator.applyGetUp(targets, progress);
+    }
+  }
+
   update(dt, {
     moving = false,
     moveAmount = 0,
     state = 'idle',
     attackProgress = 0,
+    actionProgress = null,
     hurtProgress = 0,
+    damageHitLocal = null,
     projectileAiming = false,
     backpedaling = false,
     running = false,
@@ -1253,130 +1156,67 @@ export class ExternalModelRig {
     strafeAmount = 0,
   } = {}) {
     this.time += dt;
+    const rigState = `${state}:${attackKind ?? ''}`;
+    if (rigState !== this.previousRigState) {
+      this.previousRigState = rigState;
+      this.stateTime = 0;
+    } else {
+      this.stateTime += dt;
+    }
+
     if (moving) {
       const walkDirection = backpedaling ? -0.86 : 1;
-      const gaitSpeed = WALK_CYCLE_SPEED * (running ? 1.12 : 1);
+      const loopDuration = THREE.MathUtils.lerp(WALK_LOOP_SECONDS, JOG_LOOP_SECONDS, running ? 1 : 0);
+      const gaitSpeed = (Math.PI * 2) / loopDuration;
       this.walkPhase += dt * gaitSpeed * Math.max(0.55, moveAmount) * walkDirection;
     }
 
     const targets = new Map();
     const positionTargets = new Map();
     const alpha = Math.min(1, dt * (moving ? 20 : 12));
-    const walkPhase = this.walkPhase;
-    const speedBlend = moving ? THREE.MathUtils.clamp(moveAmount, 0, 1.35) : 0;
-    const runBlend = running ? THREE.MathUtils.clamp((speedBlend - 1) / 0.35, 0, 1) : 0;
-    const locomotionBlend = moving ? Math.min(1.18, Math.min(speedBlend, 1) + runBlend * 0.18) : 0;
-    const leftLeg = getWalkLegPose(walkPhase, runBlend);
-    const rightLeg = getWalkLegPose(walkPhase + Math.PI, runBlend);
-    const walkBlend = locomotionBlend;
-    const breathing = Math.sin(this.time * 2.4);
-    const leftArmDrop = -1.28;
-    const rightArmDrop = 1.28;
-    const leftHipStraighten = -0.1;
-    const rightHipStraighten = 0.1;
 
-    if (moving) {
-      setTarget(targets, 'leftHip', leftLeg.hip * walkBlend, leftLeg.hipYaw * walkBlend, leftHipStraighten + leftLeg.hipRoll * walkBlend);
-      setTarget(targets, 'rightHip', rightLeg.hip * walkBlend, rightLeg.hipYaw * walkBlend, rightHipStraighten - rightLeg.hipRoll * walkBlend);
-      setTarget(targets, 'leftKnee', leftLeg.knee * walkBlend, -leftLeg.kneeYaw * walkBlend, -leftLeg.kneeRoll * walkBlend);
-      setTarget(targets, 'rightKnee', rightLeg.knee * walkBlend, rightLeg.kneeYaw * walkBlend, rightLeg.kneeRoll * walkBlend);
-      setTarget(targets, 'leftAnkle', leftLeg.ankle * walkBlend, -leftLeg.ankleYaw * walkBlend, (-leftLeg.anklePoseRoll + leftLeg.ankleRoll) * walkBlend);
-      setTarget(targets, 'rightAnkle', rightLeg.ankle * walkBlend, rightLeg.ankleYaw * walkBlend, (rightLeg.anklePoseRoll - rightLeg.ankleRoll) * walkBlend);
-      setPositionTarget(positionTargets, 'leftKnee', this.joints.get('leftKnee')?.userData.restLocalPosition, 0, 0, leftLeg.kneeForward * walkBlend);
-      setPositionTarget(positionTargets, 'rightKnee', this.joints.get('rightKnee')?.userData.restLocalPosition, 0, 0, rightLeg.kneeForward * walkBlend);
-      setPositionTarget(positionTargets, 'leftAnkle', this.joints.get('leftAnkle')?.userData.restLocalPosition, 0, 0, leftLeg.ankleForward * walkBlend);
-      setPositionTarget(positionTargets, 'rightAnkle', this.joints.get('rightAnkle')?.userData.restLocalPosition, 0, 0, rightLeg.ankleForward * walkBlend);
+    this._applyLocomotionSemanticPose(targets, positionTargets, {
+      moving,
+      moveAmount,
+      running,
+      projectileAiming,
+      lockOnActive,
+      strafeAmount,
+    });
 
-      const armSwingScale = 0.42 + runBlend * 0.12;
-      const leftArmSwing = Math.sin(walkPhase + Math.PI) * armSwingScale * walkBlend;
-      const rightArmSwing = Math.sin(walkPhase) * armSwingScale * walkBlend;
-      setTarget(targets, 'leftShoulder', leftArmSwing, 0.04 + runBlend * 0.02, leftArmDrop + leftArmSwing * 0.08);
-      setTarget(targets, 'rightShoulder', rightArmSwing, -0.04 - runBlend * 0.02, rightArmDrop - rightArmSwing * 0.08);
-      setTarget(targets, 'leftElbow', leftArmSwing * (0.24 + runBlend * 0.08), 0, 0);
-      setTarget(targets, 'rightElbow', rightArmSwing * (0.24 + runBlend * 0.08), 0, 0);
-      const stepCompression = Math.max(leftLeg.contact, rightLeg.contact) * walkBlend;
-      const hipRoll = Math.sin(walkPhase) * 0.026 * walkBlend;
-      const runLean = runBlend * 0.1;
-      setTarget(targets, 'spine', stepCompression * 0.026 - runLean, 0, -hipRoll * 0.58);
-      setTarget(targets, 'hips', stepCompression * 0.018 - runLean * 0.32, Math.sin(walkPhase) * 0.025 * walkBlend, hipRoll);
-    } else {
-      setTarget(targets, 'spine', breathing * 0.004, 0, breathing * 0.006);
-      setTarget(targets, 'neck', breathing * 0.008, 0, -breathing * 0.006);
-      setTarget(targets, 'leftShoulder', 0.03, 0.03, leftArmDrop + breathing * 0.012);
-      setTarget(targets, 'rightShoulder', -0.03, -0.03, rightArmDrop - breathing * 0.012);
-      setTarget(targets, 'leftElbow', 0.03, 0, 0);
-      setTarget(targets, 'rightElbow', -0.03, 0, 0);
-      setTarget(targets, 'leftHip', 0, 0, leftHipStraighten);
-      setTarget(targets, 'rightHip', 0, 0, rightHipStraighten);
-      setTarget(targets, 'leftKnee', 0.06, 0, 0);
-      setTarget(targets, 'rightKnee', 0.06, 0, 0);
-    }
-
-    const lockOnStrafe = lockOnActive ? THREE.MathUtils.clamp(strafeAmount, -1, 1) : 0;
-    if (Math.abs(lockOnStrafe) > 0.05) {
-      const twist = lockOnStrafe * (moving ? 1 : 0.55);
-      addToTarget(targets, 'hips', 0, -0.28 * twist, 0.025 * twist);
-      addToTarget(targets, 'spine', 0, 0.12 * twist, -0.018 * twist);
-      addToTarget(targets, 'leftHip', 0, -0.06 * twist, 0.025 * twist);
-      addToTarget(targets, 'rightHip', 0, -0.06 * twist, 0.025 * twist);
-    }
+    const targetAimWeight = projectileAiming || lockOnActive ? 1 : 0;
+    const aimBlendSpeed = targetAimWeight > this.aimLayerWeight
+      ? UPPER_BODY_AIM_BLEND_IN_SPEED
+      : UPPER_BODY_AIM_BLEND_OUT_SPEED;
+    this.aimLayerWeight = THREE.MathUtils.lerp(this.aimLayerWeight, targetAimWeight, Math.min(1, dt * aimBlendSpeed));
+    this.upperBodyAimLayer.apply(targets, {
+      weight: this.aimLayerWeight,
+      attackProgress,
+      projectileAiming,
+      backpedaling,
+      lockOnActive,
+      strafeAmount,
+    });
 
     if (state === 'attacking' && projectileAiming) {
-      const aimWeight = Math.sin(THREE.MathUtils.clamp(attackProgress * 1.35, 0, 1) * Math.PI * 0.5);
-      addToTarget(targets, 'spine', -0.04 * aimWeight, 0.1 * aimWeight, -0.03 * aimWeight);
-      blendTarget(targets, 'rightShoulder', -0.05, Math.PI / 2, 0.04, aimWeight);
-      blendTarget(targets, 'rightElbow', 0.02, 0, 0, aimWeight);
-      blendTarget(targets, 'rightWrist', 0, 0, 0, aimWeight);
-      blendTarget(targets, 'leftShoulder', 0.05, -Math.PI / 2 + 0.12, -0.86, aimWeight);
-      blendTarget(targets, 'leftElbow', 0.18, -1.18, 0.92, aimWeight);
-      blendTarget(targets, 'leftWrist', -0.36, -0.35, -0.62, aimWeight);
-      addToTarget(targets, 'leftHip', -0.06 * aimWeight, 0, 0.16 * aimWeight);
-      addToTarget(targets, 'rightHip', -0.06 * aimWeight, 0, -0.16 * aimWeight);
-      addToTarget(targets, 'leftKnee', 0.1 * aimWeight, 0, 0);
-      addToTarget(targets, 'rightKnee', 0.1 * aimWeight, 0, 0);
-      addToTarget(targets, 'leftAnkle', -0.04 * aimWeight, 0, 0.035 * aimWeight);
-      addToTarget(targets, 'rightAnkle', -0.04 * aimWeight, 0, -0.035 * aimWeight);
-
-      if (backpedaling) {
-        addToTarget(targets, 'spine', -0.03 * aimWeight, 0, 0);
-        addToTarget(targets, 'hips', 0.04 * aimWeight, 0, 0);
-      }
+      this.semanticMapper.addLegPose(targets, 'left', { kneeBend: degrees(7), ankleRoll: degrees(2) }, this.aimLayerWeight);
+      this.semanticMapper.addLegPose(targets, 'right', { kneeBend: degrees(7), ankleRoll: -degrees(2) }, this.aimLayerWeight);
     } else if (state === 'attacking' && attackKind === 'beamBlade') {
-      const attackFrame = attackProgress * BEAM_BLADE_TOTAL_FRAMES;
-      const beginWindup = THREE.MathUtils.smoothstep(attackFrame, 0, 3);
-      const chamber = THREE.MathUtils.smoothstep(attackFrame, 3, 6);
-      const release = THREE.MathUtils.smoothstep(attackFrame, 10, 12);
-      const slash = THREE.MathUtils.smoothstep(attackFrame, 12, 16);
-      const followThrough = THREE.MathUtils.smoothstep(attackFrame, 16, 19);
-      const recovery = THREE.MathUtils.smoothstep(attackFrame, 19, 24);
-      const committed = 1 - recovery;
-      const strike = Math.sin(slash * Math.PI);
-      const weights = { beginWindup, chamber, release, slash, followThrough, recovery };
-
-      for (const jointName of BEAM_BLADE_POSE_JOINTS) {
-        setBeamBladePoseTarget(targets, jointName, weights);
-      }
-
-      addToTarget(targets, 'hips', -0.012 * strike * committed, 0, -0.01 * strike * committed);
-      addToTarget(targets, 'spine', -0.018 * strike * committed, 0, -0.018 * strike * committed);
+      this.combatAnimator.applyBeamBladeSlash(targets, attackProgress);
     } else if (state === 'attacking') {
-      const swing = Math.sin(attackProgress * Math.PI);
-      const followThrough = Math.sin(attackProgress * Math.PI * 0.5);
-      addToTarget(targets, 'spine', 0, -0.12 * swing, -0.05 * swing);
-      addToTarget(targets, 'rightShoulder', -0.18 * swing, -0.95 * swing, -0.42 * followThrough);
-      addToTarget(targets, 'rightElbow', 0, -0.45 * swing, -0.2 * swing);
-      addToTarget(targets, 'rightWrist', 0, -0.2 * swing, -0.22 * swing);
-      addToTarget(targets, 'leftShoulder', 0.08 * swing, 0.22 * swing, 0.12 * swing);
+      this.combatAnimator.applyMelee(targets, attackProgress);
+    } else {
+      const fullBodyActionProgress = Number.isFinite(actionProgress)
+        ? THREE.MathUtils.clamp(actionProgress, 0, 1)
+        : THREE.MathUtils.clamp(this.stateTime / 0.75, 0, 1);
+      this._applyFullBodyActionPose(targets, state, fullBodyActionProgress);
     }
 
     if (state === 'hurt') {
-      const recoil = Math.sin(hurtProgress * Math.PI) * 0.16;
-      addToTarget(targets, 'spine', -0.12, 0, recoil);
-      addToTarget(targets, 'neck', -0.16, 0, recoil * 0.6);
-      addToTarget(targets, 'leftShoulder', -0.16, 0.08, 0.12);
-      addToTarget(targets, 'rightShoulder', -0.16, -0.08, -0.12);
+      this.damageAnimator.applyStandingFlinch(targets, hurtProgress, damageHitLocal);
     }
 
+    this._applyArmCarriagePositionTargets(positionTargets);
     this._applyDebugPoseOverrides(targets);
 
     for (const [name, joint] of this.joints.entries()) {
@@ -1395,6 +1235,7 @@ export class ExternalModelRig {
     const bounds = new THREE.Box3().setFromObject(sourceModel);
     const size = bounds.getSize(new THREE.Vector3());
     const height = size.y;
+    this.modelHeight = height || 1;
     const buckets = createBuckets();
 
     sourceModel.traverse((object) => {

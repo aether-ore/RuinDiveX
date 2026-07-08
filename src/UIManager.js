@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { EQUIPMENT_SLOTS } from './EquipmentManager.js';
 import { formatStatValue, RARITIES, STAT_LABELS } from './Item.js';
+import { DebugPoseExporter } from './SemanticRigMapper.js';
 
 function formatTime(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -59,7 +60,7 @@ function compareByPower(a, b) {
 }
 
 const OUTPUT_BEHAVIOR_LINES = {
-  busterArm: 'Output: balanced shots spend small chunks and recover quickly.',
+  busterArm: 'Output: buster shots are unlimited, but Energy sets how many rapid shots fit in one burst.',
   liftArm: 'Output: lifting Junk is free; holding small Reaverbots drains Lift Output until they break free.',
   machineGunArm: 'Output: rapid fire spends small chunks; low Output widens spread and slows effective fire.',
   cannonArm: 'Output: heavy shells drain nearly all Chamber Output before it rebuilds.',
@@ -95,11 +96,86 @@ const POSE_DEBUG_JOINTS = [
   ['rightAnkle', 'Right ankle'],
 ].map(([name, label]) => ({ name, label }));
 
-const POSE_AXES = [
-  ['x', 'Pitch'],
-  ['y', 'Yaw'],
-  ['z', 'Roll'],
-];
+const POSE_AXES = ['x', 'y', 'z'];
+const POSE_AXIS_LABELS = {
+  x: 'Local X',
+  y: 'Local Y',
+  z: 'Local Z',
+};
+
+const POSE_SEMANTIC_AXIS_LABELS = {
+  leftShoulder: {
+    x: 'Local X / Arm Twist',
+    y: 'Local Y / Arm Forward/Back',
+    z: 'Local Z / Arm Raise',
+  },
+  rightShoulder: {
+    x: 'Local X / Arm Twist',
+    y: 'Local Y / Arm Forward/Back',
+    z: 'Local Z / Arm Raise',
+  },
+  leftElbow: {
+    x: 'Local X / Forearm Twist',
+    y: 'Local Y / Elbow Depth',
+    z: 'Local Z / Elbow Bend',
+  },
+  rightElbow: {
+    x: 'Local X / Forearm Twist',
+    y: 'Local Y / Elbow Depth',
+    z: 'Local Z / Elbow Bend',
+  },
+  leftWrist: {
+    x: 'Local X / Wrist Aim',
+    y: 'Local Y / Wrist Yaw',
+    z: 'Local Z / Wrist Roll',
+  },
+  rightWrist: {
+    x: 'Local X / Wrist Aim',
+    y: 'Local Y / Wrist Yaw',
+    z: 'Local Z / Wrist Roll',
+  },
+  leftHip: {
+    x: 'Local X / Hip Pitch',
+    y: 'Local Y / Hip Yaw',
+    z: 'Local Z / Hip Roll',
+  },
+  rightHip: {
+    x: 'Local X / Hip Pitch',
+    y: 'Local Y / Hip Yaw',
+    z: 'Local Z / Hip Roll',
+  },
+  leftKnee: {
+    x: 'Local X / Knee Bend',
+    y: 'Local Y / Knee Yaw',
+    z: 'Local Z / Knee Roll',
+  },
+  rightKnee: {
+    x: 'Local X / Knee Bend',
+    y: 'Local Y / Knee Yaw',
+    z: 'Local Z / Knee Roll',
+  },
+  leftAnkle: {
+    x: 'Local X / Ankle Pitch',
+    y: 'Local Y / Ankle Yaw',
+    z: 'Local Z / Ankle Roll',
+  },
+  rightAnkle: {
+    x: 'Local X / Ankle Pitch',
+    y: 'Local Y / Ankle Yaw',
+    z: 'Local Z / Ankle Roll',
+  },
+};
+
+const POSE_HELPER_NOTES = {
+  leftShoulder: 'Arm side lift/drop is mostly local Z. Positive semantic armRaise maps to negative local Z on this side.',
+  rightShoulder: 'Arm side lift/drop is mostly local Z. Positive semantic armRaise maps to positive local Z on this side.',
+  leftElbow: 'Visible elbow bend is mostly local Z. Positive semantic elbowBend maps to negative local Z on this side.',
+  rightElbow: 'Visible elbow bend is mostly local Z. Positive semantic elbowBend maps to positive local Z on this side.',
+  leftHip: 'Hip and knee local X behaved predictably in testing and can be treated as pitch for most leg poses.',
+  rightHip: 'Hip and knee local X behaved predictably in testing and can be treated as pitch for most leg poses.',
+  leftKnee: 'Knee bend is primarily local X/pitch.',
+  rightKnee: 'Knee bend is primarily local X/pitch.',
+};
 
 const WEAPON_MODE_SHAPES = new Set([
   'arc',
@@ -159,6 +235,10 @@ function createPoseValueMap(poseDegrees = {}) {
     const joint = normalized[name] ?? { pitch: 0, yaw: 0, roll: 0 };
     return [name, { x: joint.pitch, y: joint.yaw, z: joint.roll }];
   }));
+}
+
+function getPoseAxisLabel(jointName, axis) {
+  return POSE_SEMANTIC_AXIS_LABELS[jointName]?.[axis] ?? POSE_AXIS_LABELS[axis] ?? axis;
 }
 
 const POSE_DEBUG_ANIMATION_PRESETS = [
@@ -364,6 +444,7 @@ export class UIManager {
     this.healthDamagePulseTimer = 0;
     this.poseDebugOpen = false;
     this.poseDebugControlsRendered = false;
+    this.poseDebugPresetAnimations = this._createPoseDebugAnimations();
     this.poseDebugAnimations = this._createPoseDebugAnimations();
     this.poseDebugAnimationId = this.poseDebugAnimations[0]?.id ?? '';
     this.poseDebugKeyframeId = this.poseDebugAnimations[0]?.keyframes[0]?.id ?? '';
@@ -665,12 +746,14 @@ export class UIManager {
       const group = document.createElement('details');
       group.className = 'pose-joint-group';
       group.open = ['hips', 'spine', 'rightShoulder', 'rightElbow', 'leftHip', 'rightHip'].includes(name);
+      const helperNote = POSE_HELPER_NOTES[name] ?? 'Raw local Euler axes are shown for inspection. Use semantic export for animation authoring.';
       group.innerHTML = `
         <summary>${label}</summary>
+        <p class="pose-joint-helper">${helperNote}</p>
         <div class="pose-axis-grid">
-          ${POSE_AXES.map(([axis, axisLabel]) => `
+          ${POSE_AXES.map((axis) => `
             <label class="pose-axis-control">
-              <span>${axisLabel}</span>
+              <span>${getPoseAxisLabel(name, axis)}</span>
               <input
                 type="range"
                 min="-180"
@@ -697,7 +780,7 @@ export class UIManager {
 
     if (this.poseDebugStatus) {
       this.poseDebugStatus.textContent = ready
-        ? 'Pose debug active. Drag rig handles or model parts to pose. Right-drag empty space to orbit.'
+        ? 'Pose debug active. Drag empty space to orbit. Shift-drag selected handle to edit roll/local Z.'
         : 'External Mega Man rig is still loading; controls will apply when it is ready.';
     }
 
@@ -769,7 +852,7 @@ export class UIManager {
 
   _syncAllPoseDebugControls() {
     for (const { name } of POSE_DEBUG_JOINTS) {
-      for (const [axis] of POSE_AXES) {
+      for (const axis of POSE_AXES) {
         this._syncPoseDebugAxisControl(name, axis);
       }
     }
@@ -813,6 +896,24 @@ export class UIManager {
     this._renderPoseDebugPrompt();
   }
 
+  _restorePoseDebugKeyframe() {
+    const presetAnimation = this.poseDebugPresetAnimations.find((entry) => entry.id === this.poseDebugAnimationId);
+    const presetKeyframe = presetAnimation?.keyframes.find((entry) => entry.id === this.poseDebugKeyframeId);
+
+    if (!presetKeyframe) {
+      this.showToast('No preset keyframe to restore');
+      return;
+    }
+
+    const activeKeyframe = this._getActivePoseKeyframe();
+    if (activeKeyframe) {
+      activeKeyframe.poseDegrees = clonePoseDegrees(presetKeyframe.poseDegrees);
+    }
+
+    this._loadPoseDebugKeyframe(activeKeyframe);
+    this.showToast('Preset keyframe restored');
+  }
+
   _renderPoseDebugPrompt() {
     if (!this.poseDebugOutput) {
       return;
@@ -820,6 +921,7 @@ export class UIManager {
 
     this._writePoseDebugValuesToActiveKeyframe();
     const poseDegrees = this._getPoseDebugDegrees();
+    const semanticPoseDegrees = DebugPoseExporter.rawPoseToSemanticDegrees(poseDegrees);
     const animation = this._getActivePoseAnimation();
     const keyframe = this._getActivePoseKeyframe();
     const activeWeapon = this.game.player.getActiveArmWeapon?.();
@@ -838,14 +940,15 @@ export class UIManager {
       : null;
     const prompt = [
       'Use this Mega Man Legends rig animation keyframe set as the target.',
-      'Values are local joint Euler rotations in degrees using pitch/yaw/roll.',
+      'Prefer the semanticPoseDegrees payload for animation authoring.',
+      'rawLocalPoseDegrees are local joint Euler rotations in degrees using local X/Y/Z.',
       'Keep the current model proportions and equipment unless I say otherwise.',
       '',
       `Active weapon: ${activeWeapon?.name ?? 'none'}`,
       `Selected animation: ${animation?.label ?? 'none'}`,
       `Selected keyframe: ${keyframe ? `${keyframe.frame}: ${keyframe.label}` : 'none'}`,
       '',
-      JSON.stringify({ animation: animationPayload, poseDegrees }, null, 2),
+      JSON.stringify({ animation: animationPayload, semanticPoseDegrees, rawLocalPoseDegrees: poseDegrees }, null, 2),
     ].join('\n');
 
     this.poseDebugOutput.value = prompt;
@@ -1331,8 +1434,10 @@ export class UIManager {
 
       if (action === 'pose-close') {
         this.game.setPoseDebugOpen(false);
-      } else if (action === 'pose-reset') {
+      } else if (action === 'pose-zero') {
         this._resetPoseDebugValues();
+      } else if (action === 'pose-restore') {
+        this._restorePoseDebugKeyframe();
       } else if (action === 'pose-copy') {
         this._copyPoseDebugPrompt();
       } else if (action === 'pose-add-keyframe') {

@@ -28,6 +28,8 @@ const POSE_DEBUG_CAMERA_MAX_DISTANCE = 22;
 const MOUSE_TURN_DEAD_ZONE_RATIO = 0.12;
 const MOUSE_TURN_DEAD_ZONE_MIN_RADIUS = 64;
 const MOUSE_TURN_DEAD_ZONE_MAX_RADIUS = 150;
+const HIT_STOP_MAX_DURATION = 0.16;
+const HIT_STOP_DEFAULT_TIME_SCALE = 0.06;
 
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
@@ -75,6 +77,9 @@ export class Game {
     this.particlePool = [];
     this.activeParticles = [];
     this.elapsedTime = 0;
+    this.hitStopTimer = 0;
+    this.hitStopTimeScale = 1;
+    this.animationPreview = this._readAnimationPreviewFromUrl();
     this.inventoryOpen = false;
     this.poseDebugOpen = false;
     this.isGameOver = false;
@@ -114,7 +119,7 @@ export class Game {
     this.poseDebugHandles = [];
     this.poseDebugHandleMap = new Map();
     this.poseDebugPartPickables = [];
-    this.poseDebugHandleGeometry = new THREE.SphereGeometry(0.08, 14, 10);
+    this.poseDebugHandleGeometry = new THREE.SphereGeometry(0.1, 16, 12);
     this.poseDebugHandleMaterial = new THREE.MeshBasicMaterial({
       color: POSE_DEBUG_HANDLE_COLOR,
       transparent: true,
@@ -129,7 +134,15 @@ export class Game {
       depthTest: false,
       depthWrite: false,
     });
+    this.poseDebugHandleHoverMaterial = new THREE.MeshBasicMaterial({
+      color: 0x8cffd5,
+      transparent: true,
+      opacity: 0.96,
+      depthTest: false,
+      depthWrite: false,
+    });
     this.poseDebugActiveDrag = null;
+    this.poseDebugHoveredJointName = null;
     this.poseDebugCamera = {
       yaw: 0,
       pitch: 0.72,
@@ -163,6 +176,7 @@ export class Game {
     this.spawner.spawnInitialPack();
     this.ui.renderInventory();
     this._bindEvents();
+    this._syncAnimationPreviewDataset();
     this._updateCamera(1);
   }
 
@@ -173,6 +187,226 @@ export class Game {
 
   stop() {
     this.renderer.setAnimationLoop(null);
+  }
+
+  setAnimationPreviewMode(mode = 'off', options = {}) {
+    this.animationPreview = this._createAnimationPreview(mode, options);
+
+    if (this.animationPreview.active) {
+      this._exitGameplayPointerLock();
+      this.keys.clear();
+      this.pointer.primary = false;
+      this.pointer.primaryPressed = false;
+      this.pointer.secondary = false;
+      this.pointer.secondaryPressed = false;
+      this.pointer.alternate = false;
+      this.pointer.alternatePressed = false;
+    }
+
+    this._syncAnimationPreviewDataset();
+    return this.getAnimationPreviewState();
+  }
+
+  getAnimationPreviewState() {
+    return {
+      active: Boolean(this.animationPreview?.active),
+      mode: this.animationPreview?.mode ?? 'off',
+      moving: Boolean(this.animationPreview?.moving),
+      running: Boolean(this.animationPreview?.running),
+      moveAmount: this.animationPreview?.moveAmount ?? 0,
+      projectileAiming: Boolean(this.animationPreview?.projectileAiming),
+      lockOnActive: Boolean(this.animationPreview?.lockOnActive),
+      strafeAmount: this.animationPreview?.strafeAmount ?? 0,
+      backpedaling: Boolean(this.animationPreview?.backpedaling),
+      cameraAngle: this.animationPreview?.cameraAngle ?? 'follow',
+      attackKind: this.animationPreview?.attackKind ?? null,
+      attackProgress: this.animationPreview?.currentAttackProgress ?? this.animationPreview?.attackProgress ?? null,
+    };
+  }
+
+  _readAnimationPreviewFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get('animationPreview') ?? params.get('animPreview') ?? 'off';
+
+    const parseNumberParam = (...names) => {
+      for (const name of names) {
+        const rawValue = params.get(name);
+        if (rawValue === null) {
+          continue;
+        }
+
+        const value = Number(rawValue);
+        if (Number.isFinite(value)) {
+          return value;
+        }
+      }
+
+      return null;
+    };
+
+    const options = {
+      cameraAngle: params.get('animationPreviewCamera') ?? params.get('animCamera') ?? 'follow',
+    };
+    const attackProgress = parseNumberParam('animationPreviewAttackProgress', 'animAttackProgress');
+    const attackDuration = parseNumberParam('animationPreviewAttackDuration', 'animAttackDuration');
+
+    if (attackProgress !== null) {
+      options.attackProgress = attackProgress;
+    }
+
+    if (attackDuration !== null) {
+      options.attackDuration = attackDuration;
+    }
+
+    return this._createAnimationPreview(mode, options);
+  }
+
+  _createAnimationPreview(mode = 'off', options = {}) {
+    const normalizedMode = String(mode ?? 'off').trim();
+    const modeKey = normalizedMode.toLowerCase();
+    const preview = {
+      active: modeKey !== '' && modeKey !== 'off' && modeKey !== 'none',
+      mode: normalizedMode || 'off',
+      moving: false,
+      running: false,
+      moveAmount: 0,
+      projectileAiming: false,
+      lockOnActive: false,
+      strafeAmount: 0,
+      backpedaling: false,
+      cameraAngle: 'follow',
+      attackKind: null,
+      attackProgress: null,
+      attackDuration: 0,
+      currentAttackProgress: null,
+      forceSwordArm: false,
+    };
+
+    if (preview.active) {
+      if (modeKey === 'walk') {
+        preview.moving = true;
+        preview.moveAmount = 1;
+      } else if (modeKey === 'jog' || modeKey === 'sprint') {
+        preview.moving = true;
+        preview.running = true;
+        preview.moveAmount = 1.35;
+      } else if (modeKey === 'aim' || modeKey === 'aimidle') {
+        preview.projectileAiming = true;
+        preview.lockOnActive = true;
+      } else if (modeKey === 'aimwalk') {
+        preview.moving = true;
+        preview.moveAmount = 1;
+        preview.projectileAiming = true;
+        preview.lockOnActive = true;
+      } else if (modeKey === 'aimjog' || modeKey === 'aimsprint') {
+        preview.moving = true;
+        preview.running = true;
+        preview.moveAmount = 1.35;
+        preview.projectileAiming = true;
+        preview.lockOnActive = true;
+      } else if (modeKey === 'strafeleft' || modeKey === 'straferight') {
+        preview.moving = true;
+        preview.moveAmount = 1;
+        preview.projectileAiming = true;
+        preview.lockOnActive = true;
+        preview.strafeAmount = modeKey === 'strafeleft' ? -1 : 1;
+      } else if (modeKey === 'backpedal' || modeKey === 'aimbackpedal') {
+        preview.moving = true;
+        preview.moveAmount = 0.92;
+        preview.backpedaling = true;
+        preview.projectileAiming = true;
+        preview.lockOnActive = true;
+      } else if (modeKey === 'beamslash'
+        || modeKey === 'beamblade'
+        || modeKey === 'beambladeslash'
+        || modeKey === 'slash'
+        || modeKey === 'swordslash') {
+        preview.attackKind = 'beamBlade';
+        preview.attackDuration = 0.86;
+        preview.forceSwordArm = true;
+      } else if (modeKey === 'idle') {
+        preview.active = true;
+      }
+    }
+
+    return {
+      ...preview,
+      ...options,
+      mode: options.mode ?? preview.mode,
+      active: options.active ?? preview.active,
+      cameraAngle: options.cameraAngle ?? preview.cameraAngle,
+    };
+  }
+
+  _syncAnimationPreviewDataset() {
+    if (typeof document === 'undefined' || !document.body) {
+      return;
+    }
+
+    const state = this.getAnimationPreviewState();
+    document.body.dataset.animationPreview = state.active ? state.mode : 'off';
+    document.body.dataset.animationPreviewMoving = state.moving ? 'true' : 'false';
+    document.body.dataset.animationPreviewRunning = state.running ? 'true' : 'false';
+    document.body.dataset.animationPreviewAiming = state.projectileAiming ? 'true' : 'false';
+    document.body.dataset.animationPreviewStrafe = String(Number(state.strafeAmount).toFixed(2));
+    document.body.dataset.animationPreviewBackpedaling = state.backpedaling ? 'true' : 'false';
+    document.body.dataset.animationPreviewCamera = state.cameraAngle;
+    document.body.dataset.animationPreviewAttackKind = state.attackKind ?? 'none';
+    document.body.dataset.animationPreviewAttackProgress = Number.isFinite(state.attackProgress)
+      ? String(Number(state.attackProgress).toFixed(3))
+      : 'none';
+    document.body.dataset.animationPreviewRig = this.player?.externalRig ? 'ready' : 'loading';
+    document.body.dataset.animationPreviewPhase = String(Number(this.player?._modelWalkTime ?? 0).toFixed(3));
+    document.body.dataset.animationPreviewLegs = JSON.stringify(this._getAnimationPreviewLegTelemetry());
+  }
+
+  _getAnimationPreviewLegTelemetry() {
+    const rig = this.player?.externalRig;
+    const root = this.player?.root;
+
+    if (!rig?.joints || !root) {
+      return null;
+    }
+
+    const readJoint = (name) => {
+      const joint = rig.joints.get(name);
+      if (!joint) {
+        return null;
+      }
+
+      const local = tempVectorD;
+      joint.getWorldPosition(local);
+      root.worldToLocal(local);
+      return {
+        x: Number(local.x.toFixed(3)),
+        y: Number(local.y.toFixed(3)),
+        z: Number(local.z.toFixed(3)),
+      };
+    };
+
+    const leftHip = readJoint('leftHip');
+    const leftKnee = readJoint('leftKnee');
+    const leftAnkle = readJoint('leftAnkle');
+    const rightHip = readJoint('rightHip');
+    const rightKnee = readJoint('rightKnee');
+    const rightAnkle = readJoint('rightAnkle');
+
+    return {
+      left: {
+        hip: leftHip,
+        knee: leftKnee,
+        ankle: leftAnkle,
+        kneeBehindHip: leftHip && leftKnee ? Number((leftKnee.z - leftHip.z).toFixed(3)) : null,
+        ankleAheadHip: leftHip && leftAnkle ? Number((leftAnkle.z - leftHip.z).toFixed(3)) : null,
+      },
+      right: {
+        hip: rightHip,
+        knee: rightKnee,
+        ankle: rightAnkle,
+        kneeBehindHip: rightHip && rightKnee ? Number((rightKnee.z - rightHip.z).toFixed(3)) : null,
+        ankleAheadHip: rightHip && rightAnkle ? Number((rightAnkle.z - rightHip.z).toFixed(3)) : null,
+      },
+    };
   }
 
   setInventoryOpen(open) {
@@ -380,6 +614,7 @@ export class Game {
 
     const refractorComplete = Boolean(this.ruinCompleted);
     const extracted = refractorComplete && Boolean(controller?.isPlayerInSafeZone?.());
+    const expeditionStarted = Boolean(this.expeditionAccepted || this.expeditionActive);
     entries.push({
       id: 'largeRefractor',
       title: 'Large Refractor Expedition',
@@ -387,8 +622,8 @@ export class Game {
         ? 'Recovered'
         : refractorComplete
           ? 'Extract to camp'
-          : !this.expeditionAccepted
-            ? 'Accept briefing'
+          : !expeditionStarted
+            ? 'Enter ruin'
             : shrine?.collected
             ? 'Extraction pad online'
             : shrineDoor?.closed
@@ -396,10 +631,8 @@ export class Game {
               : 'Secure the refractor',
       detail: extracted
         ? `${this.largeRefractorsSecured} Large Refractor${this.largeRefractorsSecured === 1 ? '' : 's'} secured`
-        : this.expeditionAccepted
-          ? 'Recover the ruin core and return to the expedition camp.'
-          : 'Talk to the expedition leader, then descend from camp.',
-      progress: extracted ? 1 : refractorComplete ? 0.9 : !this.expeditionAccepted ? 0.12 : shrineDoor?.closed ? 0.55 : 0.78,
+        : 'Enter the ruin, recover the ruin core, and return to the expedition camp.',
+      progress: extracted ? 1 : refractorComplete ? 0.9 : !expeditionStarted ? 0.18 : shrineDoor?.closed ? 0.55 : 0.78,
       color: '#7df8ff',
     });
 
@@ -636,6 +869,15 @@ export class Game {
     }
 
     const dealt = enemy.takeDamage(amount, meta);
+    const globalHitStopDuration = meta.globalHitStopDuration
+      ?? (meta.projectileHit ? 0 : meta.hitStopDuration);
+    const hitStopDuration = Number(globalHitStopDuration) || 0;
+    if (dealt > 0 && hitStopDuration > 0 && !meta.statusTick) {
+      this.requestHitStop(hitStopDuration, {
+        timeScale: meta.hitStopTimeScale ?? (meta.critical ? 0.04 : HIT_STOP_DEFAULT_TIME_SCALE),
+      });
+    }
+
     const color = meta.critical
       ? 0xffe36e
       : meta.element === 'fire'
@@ -928,6 +1170,8 @@ export class Game {
 
         if (enemy.root.position.distanceTo(position) <= radius) {
           tempVectorA.copy(enemy.root.position).sub(position).setY(0).normalize();
+          const enemyHitStopDuration = meta.enemyHitStopDuration ?? meta.hitStopDuration ?? 0.1;
+          const globalHitStopDuration = meta.globalHitStopDuration ?? meta.hitStopDuration ?? 0.1;
           this.damageEnemy(enemy, damage, {
             source: meta.source ?? this.player,
             element: meta.element ?? 'fire',
@@ -938,13 +1182,22 @@ export class Game {
             statusBuildup: meta.statusBuildup ?? 1,
             knockbackDirection: tempVectorA,
             knockback: meta.knockback ?? 4,
+            hitStopDuration: enemyHitStopDuration,
+            enemyHitStopDuration,
+            globalHitStopDuration,
+            hitStopTimeScale: meta.hitStopTimeScale ?? 0.05,
           });
         }
       }
     }
 
     if ((meta.damagePlayer ?? true) && this.player.root.position.distanceTo(position) <= radius && !this.player.dead) {
-      this.player.takeDamage(damage * (meta.playerDamageScale ?? 0.35), meta.source ?? null);
+      const dealt = this.player.takeDamage(damage * (meta.playerDamageScale ?? 0.35), meta.source ?? null);
+      if (dealt > 0) {
+        this.requestHitStop(meta.playerHitStopDuration ?? meta.hitStopDuration ?? 0.11, {
+          timeScale: meta.hitStopTimeScale ?? 0.05,
+        });
+      }
     }
 
     if (meta.triggerMines !== false) {
@@ -1020,45 +1273,50 @@ export class Game {
 
   _loop() {
     const dt = Math.min(this.clock.getDelta(), 0.05);
+    const gameplayDt = this._consumeHitStopDt(dt);
 
     if (!this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver) {
-      this.elapsedTime += dt;
-      this._updateAimFromPointer();
-      const movementBasis = this._getPlayerMovementBasis();
-      this.player.update(dt, this.keys, {
-        arenaRadius: this.arenaRadius,
-        movementForward: movementBasis.forward,
-        movementRight: movementBasis.right,
-        lockOnTarget: movementBasis.lockOnTarget,
-        aimWorld: this.pointer.aimWorld,
-        mouseTurnActive: this._isPointerOutsideMouseTurnDeadZone(),
-      });
-      this.dungeonController.update(dt);
-      this.mapEvents.update(dt);
-      this.spawner.update(dt);
-      this._updateEnemies(dt);
-      this.dungeonController.constrainEnemies();
-      this.combat.update(dt);
-      this.projectiles.update(dt);
-      this._updateHazards(dt);
-      this._updateDestructibles(dt);
+      this.elapsedTime += gameplayDt;
+      if (this.animationPreview?.active) {
+        this._updateAnimationPreview(gameplayDt);
+      } else {
+        this._updateAimFromPointer();
+        const movementBasis = this._getPlayerMovementBasis();
+        this.player.update(gameplayDt, this.keys, {
+          arenaRadius: this.arenaRadius,
+          movementForward: movementBasis.forward,
+          movementRight: movementBasis.right,
+          lockOnTarget: movementBasis.lockOnTarget,
+          aimWorld: this.pointer.aimWorld,
+          mouseTurnActive: this._isPointerOutsideMouseTurnDeadZone(),
+        });
+        this.dungeonController.update(gameplayDt);
+        this.mapEvents.update(gameplayDt);
+        this.spawner.update(gameplayDt);
+        this._updateEnemies(gameplayDt);
+        this.dungeonController.constrainEnemies();
+        this.combat.update(gameplayDt);
+        this.projectiles.update(gameplayDt);
+        this._updateHazards(gameplayDt);
+        this._updateDestructibles(gameplayDt);
 
-      const collected = this.lootSystem.update(dt, this.player, this.inventory);
-      for (const item of collected) {
-        this.ui.showLootToast(item);
-      }
+        const collected = this.lootSystem.update(gameplayDt, this.player, this.inventory);
+        for (const item of collected) {
+          this.ui.showLootToast(item);
+        }
 
-      if (collected.length > 0) {
-        this.ui.renderInventory();
-      }
+        if (collected.length > 0) {
+          this.ui.renderInventory();
+        }
 
-      const collectedRefractors = this.refractors.update(dt, this.player, this.inventory);
-      for (const refractor of collectedRefractors) {
-        this.ui.showToast(`${refractor.label} +${refractor.value}z`, refractor.color);
-      }
+        const collectedRefractors = this.refractors.update(gameplayDt, this.player, this.inventory);
+        for (const refractor of collectedRefractors) {
+          this.ui.showToast(`${refractor.label} +${refractor.value}z`, refractor.color);
+        }
 
-      if (this.player.dead) {
-        this.isGameOver = true;
+        if (this.player.dead) {
+          this.isGameOver = true;
+        }
       }
     }
 
@@ -1072,6 +1330,71 @@ export class Game {
     this._updateCamera(dt);
     this.ui.update(dt);
     this.renderer.render(this.scene, this.camera);
+  }
+
+  _updateAnimationPreview(dt) {
+    const previewPosition = this.dungeon?.ruinEntryPosition ?? this.dungeon?.playerStart;
+    if (previewPosition && this.player?.root) {
+      this.player.root.position.copy(previewPosition);
+      this.player.root.position.y = 0;
+      this.player.root.rotation.y = 0;
+    }
+
+    const attackProgress = this._getAnimationPreviewAttackProgress(this.animationPreview);
+    this.animationPreview.currentAttackProgress = attackProgress;
+    this.player.previewExternalAnimation?.(dt, {
+      ...this.animationPreview,
+      attackProgress,
+    });
+    this._syncAnimationPreviewDataset();
+  }
+
+  _getAnimationPreviewAttackProgress(preview = this.animationPreview) {
+    if (!preview?.attackKind) {
+      return null;
+    }
+
+    if (Number.isFinite(preview.attackProgress)) {
+      return THREE.MathUtils.clamp(preview.attackProgress, 0, 1);
+    }
+
+    const attackDuration = Number(preview.attackDuration);
+    if (!Number.isFinite(attackDuration) || attackDuration <= 0) {
+      return null;
+    }
+
+    return (this.elapsedTime % attackDuration) / attackDuration;
+  }
+
+  requestHitStop(duration = 0.06, { timeScale = HIT_STOP_DEFAULT_TIME_SCALE } = {}) {
+    const safeDuration = THREE.MathUtils.clamp(Number(duration) || 0, 0, HIT_STOP_MAX_DURATION);
+
+    if (safeDuration <= 0 || this.poseDebugOpen || this.inventoryOpen || this.isGameOver) {
+      return false;
+    }
+
+    this.hitStopTimer = Math.max(this.hitStopTimer, safeDuration);
+    this.hitStopTimeScale = Math.min(
+      this.hitStopTimeScale,
+      THREE.MathUtils.clamp(Number(timeScale) || HIT_STOP_DEFAULT_TIME_SCALE, 0, 1),
+    );
+    return true;
+  }
+
+  _consumeHitStopDt(dt) {
+    if (this.hitStopTimer <= 0) {
+      this.hitStopTimeScale = 1;
+      return dt;
+    }
+
+    const scaledDt = dt * this.hitStopTimeScale;
+    this.hitStopTimer = Math.max(0, this.hitStopTimer - dt);
+
+    if (this.hitStopTimer <= 0) {
+      this.hitStopTimeScale = 1;
+    }
+
+    return scaledDt;
   }
 
   _getPlayerMovementBasis() {
@@ -1420,6 +1743,20 @@ export class Game {
         return;
       }
 
+      if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'Space') {
+        event.preventDefault();
+        if (this.player?.tryJump?.(this.keys, this._getPlayerMovementBasis())) {
+          return;
+        }
+      }
+
+      if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'KeyQ') {
+        event.preventDefault();
+        if (this.player?.tryDodgeRoll?.(this.keys, this._getPlayerMovementBasis())) {
+          return;
+        }
+      }
+
       if (!this.inventoryOpen && event.code.startsWith('Digit')) {
         const slotIndex = Number(event.code.slice(5)) - 1;
 
@@ -1556,6 +1893,13 @@ export class Game {
       type: 'busterArm',
       rarity: 'standard',
       name: 'Calibrated Buster Arm',
+      affixCount: 0,
+      baseStats: {
+        attackDamage: 8,
+        maxEnergy: 6,
+        attackRange: 6.9,
+        attackSpeed: 0.1,
+      },
     });
     const starterSword = this.lootSystem.generateItem(1, {
       type: 'swordArm',
@@ -1915,9 +2259,11 @@ export class Game {
 
       joint.getWorldPosition(handle.position);
       const distance = Math.max(1, this.camera.position.distanceTo(handle.position));
-      handle.scale.setScalar(THREE.MathUtils.clamp(distance * 0.012, 0.055, 0.16));
+      handle.scale.setScalar(THREE.MathUtils.clamp(distance * 0.016, 0.075, 0.22));
       handle.material = this.poseDebugActiveDrag?.jointName === name
         ? this.poseDebugHandleSelectedMaterial
+        : this.poseDebugHoveredJointName === name
+          ? this.poseDebugHandleHoverMaterial
         : this.poseDebugHandleMaterial;
       handle.visible = true;
     }
@@ -1967,6 +2313,7 @@ export class Game {
     }
 
     if (!this.poseDebugCamera.rotating) {
+      this._updatePoseDebugHover(event);
       return;
     }
 
@@ -2001,6 +2348,16 @@ export class Game {
     for (const handle of this.poseDebugHandles) {
       handle.material = this.poseDebugHandleMaterial;
     }
+  }
+
+  _updatePoseDebugHover(event) {
+    this._setRaycasterFromPointerEvent(event);
+    this._updatePoseDebugHandles();
+
+    const handleHits = this.raycaster.intersectObjects(this.poseDebugHandles.filter((handle) => handle.visible), false);
+    this.poseDebugHoveredJointName = handleHits[0]?.object.userData.poseJointName ?? null;
+    this.renderer.domElement.style.cursor = this.poseDebugHoveredJointName ? 'grab' : 'crosshair';
+    this._updatePoseDebugHandles();
   }
 
   _updatePoseDebugJointDrag(event) {
@@ -2072,6 +2429,11 @@ export class Game {
   }
 
   _updateCamera(dt) {
+    if (this.animationPreview?.active && this.animationPreview.cameraAngle !== 'follow') {
+      this._updateAnimationPreviewCamera(dt);
+      return;
+    }
+
     if (this.poseDebugOpen) {
       tempVectorA.copy(this.player.root.position).add(CAMERA_LOOK_OFFSET);
       const horizontal = Math.cos(this.poseDebugCamera.pitch) * this.poseDebugCamera.distance;
@@ -2086,6 +2448,43 @@ export class Game {
     }
 
     this.cameraController.update(dt, this.player);
+  }
+
+  _updateAnimationPreviewCamera(dt) {
+    const root = this.player?.root;
+    if (!root) {
+      return;
+    }
+
+    const angle = this.animationPreview?.cameraAngle ?? 'rear';
+    const distance = 6.6;
+    const height = angle === 'top' ? 8.4 : 2.65;
+    const lookHeight = 1.22;
+    const offset = tempVectorB.set(0, height, -distance);
+
+    if (angle === 'front') {
+      offset.set(0, height, distance);
+    } else if (angle === 'left') {
+      offset.set(-distance, height, 0);
+    } else if (angle === 'right') {
+      offset.set(distance, height, 0);
+    } else if (angle === 'frontLeft') {
+      offset.set(-distance * 0.72, height, distance * 0.72);
+    } else if (angle === 'frontRight') {
+      offset.set(distance * 0.72, height, distance * 0.72);
+    } else if (angle === 'rearLeft') {
+      offset.set(-distance * 0.72, height, -distance * 0.72);
+    } else if (angle === 'rearRight') {
+      offset.set(distance * 0.72, height, -distance * 0.72);
+    } else if (angle === 'top') {
+      offset.set(0, height, 0.12);
+    }
+
+    const desiredPosition = tempVectorC.copy(root.position).add(offset);
+    const lookTarget = tempVectorA.copy(root.position);
+    lookTarget.y += lookHeight;
+    this.camera.position.lerp(desiredPosition, Math.min(1, dt * 14));
+    this.camera.lookAt(lookTarget);
   }
 
   _handleEnemyKilled(enemy, meta) {

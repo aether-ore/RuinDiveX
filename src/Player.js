@@ -164,20 +164,31 @@ export class Player {
     const lockOnTarget = movementOptions.lockOnTarget ?? null;
     const lockOnPosition = lockOnTarget?.root?.position ?? movementOptions.lockOnTargetPosition ?? null;
     const lockOnActive = Boolean(lockOnPosition && !lockOnTarget?.dead);
+    const aimWorld = movementOptions.aimWorld ?? null;
+    const mouseTurnActive = movementOptions.mouseTurnActive !== false;
 
     if (input.has('KeyW') || input.has('ArrowUp')) moveVector.y += 1;
     if (input.has('KeyS') || input.has('ArrowDown')) moveVector.y -= 1;
     if (input.has('KeyA') || input.has('ArrowLeft')) moveVector.x -= 1;
     if (input.has('KeyD') || input.has('ArrowRight')) moveVector.x += 1;
 
+    const rawLateralInput = moveVector.x;
+    const rawForwardInput = moveVector.y;
     const moving = moveVector.lengthSq() > 0;
     const running = moving && (input.has('ShiftLeft') || input.has('ShiftRight'));
     let moveAmount = 0;
     let movingBackward = false;
+    let movingForward = false;
+    let lateralOnly = false;
+    let strafeAmount = 0;
+    let mouseFacing = false;
 
     if (moving) {
       moveVector.normalize();
-      movingBackward = moveVector.y < -0.35;
+      movingBackward = rawForwardInput < -0.35;
+      movingForward = rawForwardInput > 0.35;
+      lateralOnly = Math.abs(rawLateralInput) > 0.35 && Math.abs(rawForwardInput) < 0.35;
+      strafeAmount = THREE.MathUtils.clamp(rawLateralInput, -1, 1);
       moveAmount = running ? 1.35 : 1;
 
       this._resolveMovementDirection(moveVector, movementOptions);
@@ -192,10 +203,12 @@ export class Player {
 
       if (lockOnActive) {
         this._resolveLockOnFacingDirection(lockOnPosition);
+      } else if (mouseTurnActive && this._resolveMouseFacingDirection(aimWorld)) {
+        mouseFacing = true;
       } else if (movingBackward) {
         this._resolveBackwardFacingDirection(movementOptions);
-      } else {
-        this.lastMoveDirection.copy(worldMoveDirection);
+      } else if (movingForward) {
+        this._resolveForwardFacingDirection(movementOptions);
       }
     } else if (lockOnActive) {
       this._resolveLockOnFacingDirection(lockOnPosition);
@@ -219,6 +232,8 @@ export class Player {
       this.faceDirection(this.bracedFireDirection);
     } else if (lockOnActive) {
       this.faceDirection(this.lastMoveDirection);
+    } else if (lateralOnly && !mouseFacing) {
+      this.faceDirection(worldMoveDirection);
     } else if (moving) {
       this.faceDirection(this.lastMoveDirection);
     }
@@ -229,7 +244,10 @@ export class Player {
       moveAmount: moveAnimationAmount,
     });
     this.updateWeaponVisualState();
-    this._updateExternalModelMotion(dt, visiblyMoving, moveAnimationAmount, backpedaling, visiblyRunning);
+    this._updateExternalModelMotion(dt, visiblyMoving, moveAnimationAmount, backpedaling, visiblyRunning, {
+      lockOnActive,
+      strafeAmount,
+    });
   }
 
   _resolveLockOnFacingDirection(targetPosition) {
@@ -244,6 +262,10 @@ export class Player {
   }
 
   _resolveBackwardFacingDirection(movementOptions = {}) {
+    this._resolveForwardFacingDirection(movementOptions);
+  }
+
+  _resolveForwardFacingDirection(movementOptions = {}) {
     const forward = movementOptions.movementForward ?? movementOptions.forward;
 
     if (forward && forward.lengthSq() > 0.0001) {
@@ -258,6 +280,22 @@ export class Player {
 
     worldForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
     this.lastMoveDirection.copy(worldForward.normalize());
+  }
+
+  _resolveMouseFacingDirection(aimWorld) {
+    if (!aimWorld) {
+      return false;
+    }
+
+    worldForward.copy(aimWorld).sub(this.root.position);
+    worldForward.y = 0;
+
+    if (worldForward.lengthSq() <= 0.12) {
+      return false;
+    }
+
+    this.lastMoveDirection.copy(worldForward.normalize());
+    return true;
   }
 
   _resolveMovementDirection(inputVector, movementOptions = {}) {
@@ -305,6 +343,14 @@ export class Player {
     }
 
     this.root.rotation.y = Math.atan2(direction.x, direction.z);
+  }
+
+  syncMoveDirectionToBodyFacing() {
+    worldForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
+
+    if (worldForward.lengthSq() > 0.0001) {
+      this.lastMoveDirection.copy(worldForward.normalize());
+    }
   }
 
   faceTarget(targetPosition) {
@@ -1209,7 +1255,7 @@ export class Player {
     console.warn('Could not load player buster arm model.', error);
   }
 
-  _updateExternalModelMotion(dt, moving, moveAmount = 0, backpedaling = false, running = false) {
+  _updateExternalModelMotion(dt, moving, moveAmount = 0, backpedaling = false, running = false, motionOptions = {}) {
     if (!this._loadedModel) {
       return;
     }
@@ -1248,6 +1294,8 @@ export class Player {
       backpedaling,
       running,
       attackKind: this._attackWeaponKind,
+      lockOnActive: Boolean(motionOptions.lockOnActive),
+      strafeAmount: motionOptions.strafeAmount ?? 0,
     });
 
     if (this.animation.attackTimer <= 0 && !projectileAimLocked) {

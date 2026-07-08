@@ -445,6 +445,7 @@ export class CombatSystem {
       skippedTargetId: null,
       skipTimer: 0,
       manual: false,
+      movementLocked: false,
     };
     this.grenadePreview = null;
     this.grenadeArcPreview = null;
@@ -503,16 +504,17 @@ export class CombatSystem {
 
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
     const primaryPressed = pointer.primaryPressed || (pointer.primary && !this.primaryWasDown);
+    const secondaryPressed = pointer.secondaryPressed || (pointer.secondary && !this.secondaryWasDown);
     const alternatePressed = pointer.alternatePressed || (pointer.alternate && !this.alternateWasDown);
     pointer.primaryPressed = false;
     pointer.secondaryPressed = false;
     pointer.alternatePressed = false;
 
-    this._updateLockOn(dt, pointer.aimWorld, profile);
+    this._updateLockOn(dt, pointer.aimWorld, profile, secondaryPressed);
     const aimWorld = this._getEffectiveAimWorld(pointer.aimWorld);
     this._updateGrenadePreview(aimWorld, profile);
 
-    if (pointer.secondary) {
+    if (pointer.secondary || this.getMovementLockTarget()) {
       this._updateManualAimPose(aimWorld, profile, state);
     }
 
@@ -622,7 +624,7 @@ export class CombatSystem {
   getMovementLockTarget() {
     const target = this.lockOn.target;
 
-    if (!this.game.pointer?.secondary || !this._isValidLockTarget(target)) {
+    if (!this.lockOn.movementLocked || !this._isValidLockTarget(target)) {
       return null;
     }
 
@@ -2256,8 +2258,17 @@ export class CombatSystem {
     return Math.max(1, Math.round((profile.maxActiveMines ?? 4) + Math.min(2, this.game.player.stats.projectileCount - 1)));
   }
 
-  _updateLockOn(dt, aimWorld, profile) {
-    const manualAimLock = Boolean(this.game.pointer?.secondary);
+  _updateLockOn(dt, aimWorld, profile, togglePressed = false) {
+    if (togglePressed) {
+      this.lockOn.movementLocked = !this.lockOn.movementLocked;
+
+      if (!this.lockOn.movementLocked && !profile.lockOn) {
+        this._clearLockOn();
+        return;
+      }
+    }
+
+    const manualAimLock = Boolean(this.lockOn.movementLocked);
 
     if (!profile.lockOn && !manualAimLock) {
       this._clearLockOn();
@@ -2271,7 +2282,7 @@ export class CombatSystem {
       }
     }
 
-    if (manualAimLock && !profile.lockOn && this._isValidLockTarget(this.lockOn.target)) {
+    if (manualAimLock && this._isValidLockTarget(this.lockOn.target)) {
       const range = Math.max(2, profile.homingRange ?? this.game.player.stats.attackRange);
       tempFlat.copy(this.lockOn.target.root.position).sub(this.game.player.root.position);
       tempFlat.y = 0;
@@ -2293,7 +2304,7 @@ export class CombatSystem {
 
     if (candidate !== this.lockOn.target) {
       this.lockOn.target = candidate;
-      this.lockOn.progress = manualAimLock && !profile.lockOn ? 1 : 0;
+      this.lockOn.progress = manualAimLock ? 1 : 0;
     }
 
     this.lockOn.manual = manualAimLock && !profile.lockOn;
@@ -2408,6 +2419,7 @@ export class CombatSystem {
     this.lockOn.target = null;
     this.lockOn.progress = 0;
     this.lockOn.manual = false;
+    this.lockOn.movementLocked = false;
     if (clearSkip) {
       this.lockOn.skippedTargetId = null;
       this.lockOn.skipTimer = 0;

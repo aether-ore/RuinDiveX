@@ -25,6 +25,9 @@ const POSE_DEBUG_CAMERA_MIN_PITCH = 0.18;
 const POSE_DEBUG_CAMERA_MAX_PITCH = 1.25;
 const POSE_DEBUG_CAMERA_MIN_DISTANCE = 4.5;
 const POSE_DEBUG_CAMERA_MAX_DISTANCE = 22;
+const MOUSE_TURN_DEAD_ZONE_RATIO = 0.12;
+const MOUSE_TURN_DEAD_ZONE_MIN_RADIUS = 64;
+const MOUSE_TURN_DEAD_ZONE_MAX_RADIUS = 150;
 
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
@@ -1027,6 +1030,8 @@ export class Game {
         movementForward: movementBasis.forward,
         movementRight: movementBasis.right,
         lockOnTarget: movementBasis.lockOnTarget,
+        aimWorld: this.pointer.aimWorld,
+        mouseTurnActive: this._isPointerOutsideMouseTurnDeadZone(),
       });
       this.dungeonController.update(dt);
       this.mapEvents.update(dt);
@@ -1087,6 +1092,21 @@ export class Game {
     this.lockOnMovementRight.crossVectors(this.lockOnMovementForward, WORLD_UP).normalize();
     this.lockOnMovementBasis.lockOnTarget = lockOnTarget;
     return this.lockOnMovementBasis;
+  }
+
+  _isPointerOutsideMouseTurnDeadZone() {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const centerX = rect.left + rect.width * 0.5;
+    const centerY = rect.top + rect.height * 0.5;
+    const radius = THREE.MathUtils.clamp(
+      Math.min(rect.width, rect.height) * MOUSE_TURN_DEAD_ZONE_RATIO,
+      MOUSE_TURN_DEAD_ZONE_MIN_RADIUS,
+      MOUSE_TURN_DEAD_ZONE_MAX_RADIUS,
+    );
+    const dx = this.pointer.x - centerX;
+    const dy = this.pointer.y - centerY;
+
+    return dx * dx + dy * dy > radius * radius;
   }
 
   _buildWorld() {
@@ -1359,6 +1379,8 @@ export class Game {
       this.pointer.secondary = pressed;
       if (pressed) {
         this.pointer.secondaryPressed = true;
+        this.player?.syncMoveDirectionToBodyFacing?.();
+        this.cameraController?.swingBehindPlayer?.();
       }
       return true;
     }

@@ -1249,6 +1249,8 @@ export class ExternalModelRig {
     backpedaling = false,
     running = false,
     attackKind = 'melee',
+    lockOnActive = false,
+    strafeAmount = 0,
   } = {}) {
     this.time += dt;
     if (moving) {
@@ -1308,6 +1310,15 @@ export class ExternalModelRig {
       setTarget(targets, 'rightHip', 0, 0, rightHipStraighten);
       setTarget(targets, 'leftKnee', 0.06, 0, 0);
       setTarget(targets, 'rightKnee', 0.06, 0, 0);
+    }
+
+    const lockOnStrafe = lockOnActive ? THREE.MathUtils.clamp(strafeAmount, -1, 1) : 0;
+    if (Math.abs(lockOnStrafe) > 0.05) {
+      const twist = lockOnStrafe * (moving ? 1 : 0.55);
+      addToTarget(targets, 'hips', 0, -0.28 * twist, 0.025 * twist);
+      addToTarget(targets, 'spine', 0, 0.12 * twist, -0.018 * twist);
+      addToTarget(targets, 'leftHip', 0, -0.06 * twist, 0.025 * twist);
+      addToTarget(targets, 'rightHip', 0, -0.06 * twist, 0.025 * twist);
     }
 
     if (state === 'attacking' && projectileAiming) {

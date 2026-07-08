@@ -31,6 +31,7 @@ export class CameraController {
     this.followResponsiveness = followResponsiveness;
     this.yawResponsiveness = yawResponsiveness;
     this.yaw = 0;
+    this.recenterTimer = 0;
     this.movementForward = new THREE.Vector3(0, 0, 1);
     this.movementRight = new THREE.Vector3(1, 0, 0);
   }
@@ -66,10 +67,14 @@ export class CameraController {
       return;
     }
 
-    const facingDirection = this._getPlayerFacingDirection(player);
+    const recentering = this.recenterTimer > 0;
+    const facingDirection = recentering
+      ? this._getPlayerBodyFacingDirection(player)
+      : this._getPlayerFacingDirection(player);
     const targetYaw = Math.atan2(facingDirection.x, facingDirection.z);
-    const yawAlpha = Math.min(1, dt * this.yawResponsiveness);
+    const yawAlpha = Math.min(1, dt * (recentering ? 16 : this.yawResponsiveness));
     this.yaw = lerpAngle(this.yaw, targetYaw, yawAlpha);
+    this.recenterTimer = Math.max(0, this.recenterTimer - dt);
 
     const running = Boolean(player.isRunning);
     const cameraEase = Math.min(1, dt * 3.5);
@@ -97,6 +102,10 @@ export class CameraController {
     this.update(1, player);
   }
 
+  swingBehindPlayer() {
+    this.recenterTimer = Math.max(this.recenterTimer, 0.42);
+  }
+
   _getPlayerFacingDirection(player) {
     const direction = tempVectorC;
 
@@ -111,6 +120,17 @@ export class CameraController {
     }
 
     direction.y = 0;
+    if (direction.lengthSq() <= 0.0001) {
+      direction.set(0, 0, 1);
+    }
+
+    return direction.normalize();
+  }
+
+  _getPlayerBodyFacingDirection(player) {
+    const direction = tempVectorC;
+    direction.set(Math.sin(player.root.rotation.y), 0, Math.cos(player.root.rotation.y));
+
     if (direction.lengthSq() <= 0.0001) {
       direction.set(0, 0, 1);
     }

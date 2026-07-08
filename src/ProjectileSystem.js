@@ -4,10 +4,178 @@ const DEFAULT_PROJECTILE_COLOR = 0x9fe8ff;
 const PROJECTILE_ENEMY_HIT_STOP_DURATION = 0.055;
 const DRILL_PROJECTILE_ENEMY_HIT_STOP_DURATION = 0.09;
 const PROJECTILE_EXPLOSION_ENEMY_HIT_STOP_DURATION = 0.08;
+const BUSTER_SHOT_TEXTURE_SIZE = 128;
+const BUSTER_SHOT_ASPECT = 1.76;
+const BUSTER_SHOT_WIDTH_SCALE = 3.8;
+const BUSTER_SHOT_ROTATION_SPEED = 1.45;
 const tempPosition = new THREE.Vector3();
 const tempDirection = new THREE.Vector3();
 const tempExplosionPosition = new THREE.Vector3();
 const tempClusterDirection = new THREE.Vector3();
+let busterShotTextures = null;
+
+function smoothstep(edge0, edge1, value) {
+  const t = THREE.MathUtils.clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function createBusterShotTexture(kind) {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  const size = BUSTER_SHOT_TEXTURE_SIZE;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+
+  const context = canvas.getContext('2d');
+  const image = context.createImageData(size, size);
+  const data = image.data;
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const nx = (x + 0.5 - size * 0.5) / (size * 0.48);
+      const ny = (y + 0.5 - size * 0.5) / (size * 0.28);
+      const distance = Math.sqrt(nx * nx + ny * ny);
+      const noise = Math.sin(x * 0.18 + y * 0.11) * 0.5
+        + Math.sin(x * 0.07 - y * 0.23) * 0.35
+        + Math.sin((x + y) * 0.13) * 0.15;
+      let alpha = 0;
+
+      if (kind === 'shell') {
+        const outer = 1 - smoothstep(0.93, 1.02, distance);
+        const centerFade = smoothstep(0.42, 0.72, distance);
+        alpha = outer * (0.55 + centerFade * 0.38 + noise * 0.055);
+      } else if (kind === 'core') {
+        const core = 1 - smoothstep(0.45 + noise * 0.035, 0.84 + noise * 0.025, distance);
+        const hotMiddle = 1 - smoothstep(0, 0.45, distance);
+        alpha = core * (0.78 + hotMiddle * 0.22);
+      } else if (kind === 'rim') {
+        const outside = 1 - smoothstep(0.97, 1.02, distance);
+        const inside = smoothstep(0.86, 0.95, distance);
+        alpha = outside * inside * (0.76 + noise * 0.08);
+      }
+
+      const index = (y * size + x) * 4;
+      data[index] = 255;
+      data[index + 1] = 255;
+      data[index + 2] = 255;
+      data[index + 3] = Math.round(THREE.MathUtils.clamp(alpha, 0, 1) * 255);
+    }
+  }
+
+  context.putImageData(image, 0, 0);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.name = `texture_busterShot_${kind}`;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  if ('colorSpace' in texture) {
+    texture.colorSpace = THREE.SRGBColorSpace;
+  }
+
+  return texture;
+}
+
+function getBusterShotTextures() {
+  if (!busterShotTextures) {
+    busterShotTextures = {
+      shell: createBusterShotTexture('shell'),
+      core: createBusterShotTexture('core'),
+      rim: createBusterShotTexture('rim'),
+    };
+  }
+
+  return busterShotTextures;
+}
+
+function createBusterShotSprite(name, map, color, opacity, blending = THREE.NormalBlending) {
+  const material = new THREE.SpriteMaterial({
+    map,
+    color,
+    transparent: true,
+    opacity,
+    depthWrite: false,
+    depthTest: true,
+    blending,
+    toneMapped: false,
+  });
+  material.name = `material_${name}`;
+
+  const sprite = new THREE.Sprite(material);
+  sprite.name = name;
+  sprite.renderOrder = 5;
+  return sprite;
+}
+
+function ensureBusterShotVisual(projectile) {
+  const mesh = projectile.mesh;
+  if (mesh.userData.busterShotVisual) {
+    return mesh.userData.busterShotVisual;
+  }
+
+  const textures = getBusterShotTextures();
+  const group = new THREE.Group();
+  group.name = 'projectileBusterShotVisual';
+
+  const shell = createBusterShotSprite('busterShotTintedShell', textures.shell, DEFAULT_PROJECTILE_COLOR, 0.96, THREE.AdditiveBlending);
+  const core = createBusterShotSprite('busterShotWhiteCore', textures.core, 0xffffff, 0.98, THREE.AdditiveBlending);
+  const rim = createBusterShotSprite('busterShotWhiteRim', textures.rim, 0xffffff, 0.82, THREE.NormalBlending);
+
+  group.add(shell, core, rim);
+  group.userData.tintMaterials = [shell.material];
+  group.userData.sprites = [shell, core, rim];
+  mesh.add(group);
+  mesh.userData.busterShotVisual = group;
+  return group;
+}
+
+function setBusterShotRoll(projectile, roll) {
+  const visual = projectile.mesh.userData.busterShotVisual;
+  if (!visual) {
+    return;
+  }
+
+  for (const sprite of visual.userData.sprites ?? []) {
+    sprite.material.rotation = roll;
+  }
+}
+
+function configureBusterShotVisual(projectile, radius) {
+  const visual = ensureBusterShotVisual(projectile);
+  const width = radius * BUSTER_SHOT_WIDTH_SCALE;
+  const height = width / BUSTER_SHOT_ASPECT;
+
+  visual.visible = true;
+  visual.scale.set(width, height, 1);
+  visual.userData.tintMaterials?.forEach((material) => {
+    material.color.copy(projectile.mesh.material.color);
+  });
+
+  projectile.busterShotRoll = Math.random() * Math.PI * 2;
+  setBusterShotRoll(projectile, projectile.busterShotRoll);
+}
+
+function setBusterShotVisible(projectile, visible) {
+  const visual = projectile.mesh.userData.busterShotVisual;
+  if (visual) {
+    visual.visible = visible;
+  }
+}
+
+function setProjectileCoreVisible(mesh, visible) {
+  mesh.material.transparent = !visible;
+  mesh.material.opacity = visible ? 1 : 0;
+  mesh.material.depthWrite = visible;
+  mesh.material.needsUpdate = true;
+  mesh.castShadow = visible;
+}
+
+function usesPlayerBusterShotVisual(projectile, visualType) {
+  return projectile.owner === 'player' && visualType === 'buster';
+}
 
 function ensureDrillProjectileVisual(projectile) {
   const mesh = projectile.mesh;
@@ -75,12 +243,26 @@ function tintDrillProjectileVisual(projectile) {
 function applyProjectileVisual(projectile, visualType, radius) {
   const scale = radius / 0.16;
   const mesh = projectile.mesh;
+  const playerBusterShot = usesPlayerBusterShotVisual(projectile, visualType);
+
+  setBusterShotVisible(projectile, false);
+  setProjectileCoreVisible(mesh, !playerBusterShot);
 
   if (mesh.userData.drillHeadVisual) {
     mesh.userData.drillHeadVisual.visible = false;
   }
 
   switch (visualType) {
+    case 'buster':
+      if (playerBusterShot) {
+        projectile.baseVisualScale.set(1, 1, 1);
+        mesh.material.emissiveIntensity = 0;
+        configureBusterShotVisual(projectile, radius);
+        break;
+      }
+      projectile.baseVisualScale.set(scale, scale, scale);
+      mesh.material.emissiveIntensity = 0.65;
+      break;
     case 'bullet':
       projectile.baseVisualScale.set(scale * 0.48, scale * 0.48, scale * 1.85);
       mesh.material.emissiveIntensity = 0.85;
@@ -439,6 +621,7 @@ export class ProjectileSystem {
       clusterArcHeight: 0.42,
       trailTimer: 0,
       baseVisualScale: new THREE.Vector3(1, 1, 1),
+      busterShotRoll: 0,
       shadow: null,
       baseY: 0,
       endY: 0,
@@ -509,6 +692,9 @@ export class ProjectileSystem {
       if (projectile.visualType === 'seeker') {
         const pulse = 1 + Math.sin(this.game.elapsedTime * 18 + projectile.distance * 2) * 0.13;
         mesh.scale.copy(projectile.baseVisualScale).multiplyScalar(pulse);
+      } else if (usesPlayerBusterShotVisual(projectile, projectile.visualType)) {
+        projectile.busterShotRoll += dt * BUSTER_SHOT_ROTATION_SPEED;
+        setBusterShotRoll(projectile, projectile.busterShotRoll);
       } else if (projectile.visualType === 'drillHead') {
         mesh.rotateZ(dt * 34);
       }
@@ -669,6 +855,8 @@ export class ProjectileSystem {
     projectile.clusterSpreadRadius = 1.45;
     projectile.clusterArcHeight = 0.42;
     projectile.trailTimer = 0;
+    projectile.busterShotRoll = 0;
+    setBusterShotVisible(projectile, false);
     if (projectile.shadow) {
       projectile.shadow.visible = false;
       projectile.shadow.removeFromParent();

@@ -764,7 +764,7 @@ export class DungeonController {
         continue;
       }
 
-      const targetY = door.closed ? 0 : -2.35;
+      const targetY = door.closed ? 0 : -3.25;
       door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, targetY, Math.min(1, dt * 8));
 
       if (door.light?.material?.emissive) {

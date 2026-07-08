@@ -507,8 +507,9 @@ export class SkeletalModelRig {
       running,
       backpedaling,
       lockOnActive,
-      strafeAmount,
       turnAmount,
+      attackProgress,
+      actionProgress,
     });
     this.mixer.update(dt);
     this._applyPistolBusterPoseCorrection();
@@ -786,6 +787,11 @@ export class SkeletalModelRig {
       crouchedsneakright: 'crouchedSneakRight',
       fallingidle: 'fallingIdle',
       fallingtoroll: 'fallingToRoll',
+      dodgeroll: 'dodgeRoll',
+      standingdiveforward: 'dodgeRoll',
+      standingdive: 'dodgeRoll',
+      diveforward: 'dodgeRoll',
+      roll: 'dodgeRoll',
       hardlanding: 'hardLanding',
       breathingidle: 'breathingIdle',
       breathidle: 'breathingIdle',
@@ -804,6 +810,12 @@ export class SkeletalModelRig {
       warrioridle: 'warriorIdle',
       armstretch: 'warriorIdle',
       stretchidle: 'warriorIdle',
+      beambladeslash: 'swordInwardSlash',
+      stableinwardslash: 'swordInwardSlash',
+      stableswordinwardslash: 'swordInwardSlash',
+      swordarmslash: 'swordInwardSlash',
+      swordinwardslash: 'swordInwardSlash',
+      swordslash: 'swordInwardSlash',
       jump: 'jump',
       jumpingup: 'jumpingUp',
       leftcoversneak: 'leftCoverSneak',
@@ -889,6 +901,10 @@ export class SkeletalModelRig {
 
     const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
 
+    if (state === 'attacking' && attackKind === 'beamBlade') {
+      return this._firstAvailable('swordInwardSlash', 'walking', 'strutWalking', 'breathingIdle', 'idle');
+    }
+
     if (state === 'neutralJump' || state === 'forwardJump') {
       return busterAimActive
         ? this._firstAvailable('pistolJump', 'pistolJump2', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
@@ -906,7 +922,7 @@ export class SkeletalModelRig {
     }
 
     if (state === 'dodgeRoll') {
-      return this._firstAvailable('fallingToRoll', 'hardLanding', 'running', 'breathingIdle', 'idle');
+      return this._firstAvailable('dodgeRoll', 'fallingToRoll', 'hardLanding', 'running', 'breathingIdle', 'idle');
     }
 
     if (state === 'knockbackFall' || state === 'downed') {
@@ -1073,6 +1089,8 @@ export class SkeletalModelRig {
     running = false,
     backpedaling = false,
     turnAmount = 0,
+    attackProgress = null,
+    actionProgress = null,
   } = {}) {
     if (!this.activeAction || !key) {
       return;
@@ -1104,11 +1122,21 @@ export class SkeletalModelRig {
       speed = THREE.MathUtils.clamp((moveAmount || 1.2) / 1.2, 0.78, 1.35);
     } else if (key === 'slowJogBackwards') {
       speed = THREE.MathUtils.clamp(moveAmount || 0.9, 0.7, 1.15);
+    } else if (key === 'swordInwardSlash' || key === 'dodgeRoll') {
+      speed = 0;
     } else if (!moving && !running && !backpedaling) {
       speed = 1;
     }
 
     this.activeAction.setEffectiveTimeScale(speed);
+
+    if (key === 'swordInwardSlash' && Number.isFinite(attackProgress)) {
+      const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
+      this.activeAction.time = THREE.MathUtils.clamp(attackProgress, 0, 1) * Math.max(0.1, clipDuration);
+    } else if (key === 'dodgeRoll' && Number.isFinite(actionProgress)) {
+      const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
+      this.activeAction.time = THREE.MathUtils.clamp(actionProgress, 0, 1) * Math.max(0.1, clipDuration);
+    }
   }
 
   _applyDebugPoseOverridesImmediate() {

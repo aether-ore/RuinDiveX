@@ -25,9 +25,6 @@ const POSE_DEBUG_CAMERA_MIN_PITCH = 0.18;
 const POSE_DEBUG_CAMERA_MAX_PITCH = 1.25;
 const POSE_DEBUG_CAMERA_MIN_DISTANCE = 4.5;
 const POSE_DEBUG_CAMERA_MAX_DISTANCE = 22;
-const MOUSE_TURN_DEAD_ZONE_RATIO = 0.12;
-const MOUSE_TURN_DEAD_ZONE_MIN_RADIUS = 64;
-const MOUSE_TURN_DEAD_ZONE_MAX_RADIUS = 150;
 const HIT_STOP_MAX_DURATION = 0.16;
 const HIT_STOP_DEFAULT_TIME_SCALE = 0.06;
 
@@ -867,7 +864,6 @@ export class Game {
     this.player.faceDirection(this.player.lastMoveDirection);
     this.cameraController.snapTo(this.player);
 
-    this._buildJunkField();
     this.spawner = new EnemySpawner(this);
     this.spawner.spawnInitialPack();
     this.ruinFloor += 1;
@@ -1315,7 +1311,7 @@ export class Game {
           movementRight: movementBasis.right,
           lockOnTarget: movementBasis.lockOnTarget,
           aimWorld: this.pointer.aimWorld,
-          mouseTurnActive: this._isPointerOutsideMouseTurnDeadZone(),
+          projectileAimInputHeld: Boolean(this.pointer.primary || this.pointer.secondary),
         });
         this.dungeonController.update(gameplayDt);
         this.mapEvents.update(gameplayDt);
@@ -1444,21 +1440,6 @@ export class Game {
     return this.lockOnMovementBasis;
   }
 
-  _isPointerOutsideMouseTurnDeadZone() {
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    const centerX = rect.left + rect.width * 0.5;
-    const centerY = rect.top + rect.height * 0.5;
-    const radius = THREE.MathUtils.clamp(
-      Math.min(rect.width, rect.height) * MOUSE_TURN_DEAD_ZONE_RATIO,
-      MOUSE_TURN_DEAD_ZONE_MIN_RADIUS,
-      MOUSE_TURN_DEAD_ZONE_MAX_RADIUS,
-    );
-    const dx = this.pointer.x - centerX;
-    const dy = this.pointer.y - centerY;
-
-    return dx * dx + dy * dy > radius * radius;
-  }
-
   _buildWorld() {
     const hemi = new THREE.HemisphereLight(0xd8e6ff, 0x34251d, 1.8);
     hemi.name = 'arenaHemisphereLight';
@@ -1495,24 +1476,6 @@ export class Game {
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
 
-    this._buildJunkField();
-  }
-
-  _buildJunkField() {
-    const placements = [
-      [2.7, 2.35, 1.02],
-      [-3.15, -2.65, 0.88],
-      [-6.2, 5.8, 1.05],
-      [5.2, 4.9, 0.96],
-      [6.25, 5.55, 0.78],
-      [-4.6, -6.4, 0.92],
-      [3.8, -7.1, 1.08],
-      [8.2, -2.4, 0.84],
-    ];
-
-    placements.forEach(([x, z, scale], index) => {
-      this._createJunkCube(new THREE.Vector3(x, 0, z), index, scale);
-    });
   }
 
   _clearDungeonRunState() {
@@ -1558,59 +1521,6 @@ export class Game {
       this.particlePool.push(particle);
     }
     this.activeParticles.length = 0;
-  }
-
-  _createJunkCube(position, index = 0, scale = 1) {
-    const group = new THREE.Group();
-    group.name = `drillableJunk_${index + 1}`;
-    group.position.copy(position);
-
-    const baseColor = index % 2 === 0 ? 0x536477 : 0x465466;
-    const material = new THREE.MeshStandardMaterial({
-      color: baseColor,
-      emissive: 0x101822,
-      emissiveIntensity: 0.08,
-      roughness: 0.74,
-      metalness: 0.18,
-    });
-    material.name = `material_drillableJunk_${index + 1}`;
-
-    const size = 0.72 * scale;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), material);
-    body.name = 'drillableJunkBody';
-    body.position.y = size * 0.5;
-    body.castShadow = true;
-    body.receiveShadow = true;
-    body.rotation.y = (index % 4) * 0.18;
-
-    const capMaterial = new THREE.MeshStandardMaterial({
-      color: 0x263747,
-      emissive: 0x09121a,
-      emissiveIntensity: 0.06,
-      roughness: 0.66,
-      metalness: 0.28,
-    });
-    capMaterial.name = `material_drillableJunkCaps_${index + 1}`;
-
-    const cap = new THREE.Mesh(new THREE.BoxGeometry(size * 1.08, size * 0.12, size * 0.22), capMaterial);
-    cap.name = 'drillableJunkBand';
-    cap.position.set(0, size * 0.82, 0);
-    cap.castShadow = true;
-
-    group.add(body, cap);
-    this.scene.add(group);
-    this.destructibles.push({
-      id: `junk-${index + 1}`,
-      root: group,
-      mesh: body,
-      materials: [material, capMaterial],
-      hp: Math.round(18 * scale + index * 1.5),
-      maxHp: Math.round(18 * scale + index * 1.5),
-      radius: size * 0.78,
-      flashTimer: 0,
-      baseColor,
-      dead: false,
-    });
   }
 
   _buildAimReticle() {
@@ -1813,7 +1723,14 @@ export class Game {
 
       if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'Space') {
         event.preventDefault();
-        if (this.player?.tryJump?.(this.keys, this._getPlayerMovementBasis())) {
+        const movementBasis = this._getPlayerMovementBasis();
+
+        if (this.player?.hasLateralDodgeInput?.(this.keys)) {
+          this.player?.tryLateralDodgeRoll?.(this.keys, movementBasis);
+          return;
+        }
+
+        if (this.player?.tryJump?.(this.keys, movementBasis)) {
           return;
         }
       }
@@ -1960,7 +1877,7 @@ export class Game {
     const starterBuster = this.lootSystem.generateItem(1, {
       type: 'busterArm',
       rarity: 'standard',
-      name: 'Calibrated Buster Arm',
+      name: 'Mega Buster',
       affixCount: 0,
       baseStats: {
         attackDamage: 8,
@@ -2168,18 +2085,6 @@ export class Game {
     junk.root.removeFromParent();
 
     const level = Math.max(1, this.player?.level ?? 1);
-    const equipmentDrop = Math.random() < 0.28;
-    if (equipmentDrop && this.lootSystem) {
-      const item = this.lootSystem.generateItem(level, {
-        rarity: Math.random() < 0.82 ? 'scrap' : 'standard',
-      });
-      const pickupPosition = position.clone();
-      pickupPosition.y = 0.35;
-      this.lootSystem.createPickup(item, pickupPosition);
-      this.ui?.showToast?.('Junk dropped equipment', item.color);
-      return;
-    }
-
     const zenny = 10 + Math.floor(Math.random() * 18) + Math.round(level * 2);
     if (this.inventory) {
       this.inventory.gold += zenny;

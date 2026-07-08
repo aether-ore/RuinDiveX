@@ -427,6 +427,14 @@ function isBusterProfile(profile) {
   return profile?.type === 'busterArm';
 }
 
+function usesProjectileAimBrace(profile) {
+  return profile
+    && !profile.melee
+    && profile.special !== 'drill'
+    && profile.special !== 'lift'
+    && profile.special !== 'laser';
+}
+
 function defineResourceAlias(state, alias, backingField) {
   const descriptor = Object.getOwnPropertyDescriptor(state, alias);
   if (descriptor?.get) {
@@ -455,6 +463,7 @@ export class CombatSystem {
     this.alternateWasDown = false;
     this.activeMines = [];
     this.pendingMeleeStrikes = [];
+    this.pendingProjectileShots = [];
     this.lockOn = {
       target: null,
       progress: 0,
@@ -496,6 +505,7 @@ export class CombatSystem {
       this._stopDrillSpin();
       this._stopLiftArm(false);
       this._clearLockOn();
+      this._clearPendingAttacks();
       return;
     }
 
@@ -516,6 +526,7 @@ export class CombatSystem {
     }
 
     this._updatePendingMeleeStrikes(dt);
+    this._updatePendingProjectileShots(dt);
 
     if (!pointer) {
       this._stopDrillSpin();
@@ -605,7 +616,7 @@ export class CombatSystem {
     this._stopLiftArm(false);
     this._clearLockOn();
     this._hideGrenadePreview();
-    this.pendingMeleeStrikes.length = 0;
+    this._clearPendingAttacks();
 
     if (state) {
       state.sprayActive = false;
@@ -629,7 +640,7 @@ export class CombatSystem {
     this._stopLiftArm(false);
     this._clearLockOn();
     this._hideGrenadePreview();
-    this.pendingMeleeStrikes.length = 0;
+    this._clearPendingAttacks();
 
     if (state) {
       state.sprayActive = false;
@@ -654,7 +665,7 @@ export class CombatSystem {
       return false;
     }
 
-    this.pendingMeleeStrikes.length = 0;
+    this._clearPendingAttacks();
     const swapSpeed = this.game.player.stats.swapSpeed ?? 0;
     this.swapTimer = Math.max(0.12, 0.34 * (1 - THREE.MathUtils.clamp(swapSpeed, 0, 0.65)));
     this.getCurrentWeaponState();
@@ -1343,19 +1354,21 @@ export class CombatSystem {
     const attackDuration = this._getAttackAnimationDuration(profile, stats);
     const targetPoint = player.root.position.clone().addScaledVector(tempDirection, this._getProfileRange(profile, stats));
     const projectileAimOptions = { weaponKey: state.key };
+    const projectileActionNeedsBrace = usesProjectileAimBrace(profile)
+      && !player.isProjectileAimSustained?.(state.key);
 
     if (profile.special === 'mine') {
       player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
-      this._placeMine(aimWorld, profile);
+      this._fireOrQueueProjectileAction('mine', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     } else if (profile.special === 'rail') {
       player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
-      this._railAttackDirection(tempDirection, profile);
+      this._fireOrQueueProjectileAction('rail', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     } else if (profile.special === 'cone') {
       player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
-      this._coneAttackDirection(tempDirection, profile);
+      this._fireOrQueueProjectileAction('cone', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     } else if (profile.special === 'chain') {
       player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
-      this._chainAttackDirection(tempDirection, profile, aimWorld);
+      this._fireOrQueueProjectileAction('chain', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     } else if (profile.special === 'drill') {
       player.playAttackAnimation(attackDuration, 'melee', targetPoint);
       this._drillAttackDirection(tempDirection, profile);
@@ -1372,7 +1385,7 @@ export class CombatSystem {
       }
     } else {
       player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
-      this._projectileAttackDirection(tempDirection, profile, aimWorld);
+      this._fireOrQueueProjectileAction('projectile', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     }
 
     state.energy = Math.max(0, state.energy - profile.energyCost);
@@ -1428,6 +1441,31 @@ export class CombatSystem {
     });
   }
 
+  _fireOrQueueProjectileAction(action, direction, profile, aimWorld, delay, state, needsBrace) {
+    if (needsBrace) {
+      this._queueProjectileShot(direction, profile, aimWorld, delay, {
+        action,
+        weaponKey: state.key,
+        requireSustainedAim: true,
+      });
+      return;
+    }
+
+    this._fireProjectileAction(action, direction, profile, aimWorld);
+  }
+
+  _queueProjectileShot(direction, profile, aimWorld, delay, options = {}) {
+    this.pendingProjectileShots.push({
+      action: options.action ?? 'projectile',
+      timer: Math.max(0, delay),
+      direction: direction.clone(),
+      profile: { ...profile },
+      aimWorld: aimWorld?.clone?.() ?? null,
+      weaponKey: options.weaponKey ?? null,
+      requireSustainedAim: Boolean(options.requireSustainedAim),
+    });
+  }
+
   _updatePendingMeleeStrikes(dt) {
     for (let i = this.pendingMeleeStrikes.length - 1; i >= 0; i -= 1) {
       const strike = this.pendingMeleeStrikes[i];
@@ -1446,6 +1484,76 @@ export class CombatSystem {
 
       this.pendingMeleeStrikes.splice(i, 1);
     }
+  }
+
+  _updatePendingProjectileShots(dt) {
+    for (let i = this.pendingProjectileShots.length - 1; i >= 0; i -= 1) {
+      const shot = this.pendingProjectileShots[i];
+
+      if (!this._isPendingProjectileShotStillViable(shot)) {
+        this.pendingProjectileShots.splice(i, 1);
+        continue;
+      }
+
+      shot.timer -= dt;
+
+      if (shot.timer > 0) {
+        continue;
+      }
+
+      if (shot.requireSustainedAim && !this.game.player.isProjectileAimSustained?.(shot.weaponKey)) {
+        continue;
+      }
+
+      this._fireProjectileAction(shot.action, shot.direction, shot.profile, shot.aimWorld);
+      this.pendingProjectileShots.splice(i, 1);
+    }
+  }
+
+  _fireProjectileAction(action, direction, profile, aimWorld = null) {
+    if (action === 'mine') {
+      this._placeMine(aimWorld, profile);
+      return;
+    }
+
+    if (action === 'rail') {
+      this._railAttackDirection(direction, profile);
+      return;
+    }
+
+    if (action === 'cone') {
+      this._coneAttackDirection(direction, profile);
+      return;
+    }
+
+    if (action === 'chain') {
+      this._chainAttackDirection(direction, profile, aimWorld);
+      return;
+    }
+
+    this._projectileAttackDirection(direction, profile, aimWorld);
+  }
+
+  _isPendingProjectileShotStillViable(shot) {
+    const player = this.game.player;
+
+    if (player.dead || player.animation?.isControlLocked?.()) {
+      return false;
+    }
+
+    const state = this.getCurrentWeaponState();
+    if (shot.weaponKey && state.key !== shot.weaponKey) {
+      return false;
+    }
+
+    const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
+    return usesProjectileAimBrace(profile)
+      && player.isProjectileAimHeld?.(shot.weaponKey ?? state.key);
+  }
+
+  _clearPendingAttacks() {
+    this.pendingMeleeStrikes.length = 0;
+    this.pendingProjectileShots.length = 0;
   }
 
   _getCurrentProfile() {
@@ -2812,6 +2920,11 @@ export class CombatSystem {
     });
     player.setMovementLock(0.09, profile.beamMovementMultiplier ?? 0.08);
 
+    if (!player.isProjectileAimSustained?.(state.key)) {
+      this._stopLaserBeam(false);
+      return;
+    }
+
     this._ensureLaserVisuals(profile);
     this.laser.active = true;
     this.laser.currentState = state;
@@ -3287,6 +3400,10 @@ export class CombatSystem {
       weaponKey: state.key,
       continuous: true,
     });
+
+    if (!player.isProjectileAimSustained?.(state.key)) {
+      return;
+    }
 
     const energyDrain = profile.energyDrainPerSecond ?? (profile.energyCost ?? 1) * 1.9;
     const outputDrain = this._getOutputDrainPerSecond(profile);

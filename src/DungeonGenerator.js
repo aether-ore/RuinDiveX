@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 
 const DEFAULT_TILE_SIZE = 2.8;
+const RUIN_TEXTURE_BASE_PATH = '/assets/textures/ruins/';
+const RUIN_WALL_HEIGHT = 3.2;
+const RUIN_WALL_THICKNESS = 0.22;
+const RUIN_CEILING_THICKNESS = 0.12;
+const RUIN_OPEN_AIR_ROOM_TYPES = new Set(['hub', 'camp']);
 const DIRECTIONS = [
   [1, 0],
   [-1, 0],
@@ -40,6 +45,24 @@ function setTile(tiles, x, z, type = 'floor') {
   return tile;
 }
 
+function setConveyorTile(tiles, x, z, {
+  directionX = 0,
+  directionZ = 1,
+  speed = 2.4,
+  active = true,
+} = {}) {
+  const tile = setTile(tiles, x, z, 'conveyor');
+
+  if (tile.type === 'conveyor') {
+    tile.conveyorDirectionX = directionX;
+    tile.conveyorDirectionZ = directionZ;
+    tile.conveyorSpeed = speed;
+    tile.conveyorActive = active;
+  }
+
+  return tile;
+}
+
 function addRectRoom(tiles, room) {
   const halfW = Math.floor(room.width / 2);
   const halfD = Math.floor(room.depth / 2);
@@ -67,6 +90,8 @@ export class DungeonGenerator {
   constructor({ tileSize = DEFAULT_TILE_SIZE, random = Math.random } = {}) {
     this.tileSize = tileSize;
     this.random = random;
+    this.textureLoader = new THREE.TextureLoader();
+    this.textureCache = new Map();
   }
 
   _randomInt(min, max) {
@@ -129,6 +154,9 @@ export class DungeonGenerator {
       setTile(tiles, keycardRoom.x - side, keycardRoom.z - 1, 'chest');
     }
     if (conveyorRoom) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        setConveyorTile(tiles, conveyorRoom.x, conveyorRoom.z + dz);
+      }
       setTile(tiles, conveyorRoom.x + side, conveyorRoom.z + 1, 'chest');
     }
     setTile(tiles, bonusVault.x, bonusVault.z, 'chest');
@@ -155,7 +183,10 @@ export class DungeonGenerator {
       this._addTileDetail(group, tile, materials);
     }
 
-    this._addWalls(group, tiles, materials);
+    const openAirTileKeys = this._createOpenAirTileKeys(rooms);
+    this._addCeilings(group, tiles, materials, openAirTileKeys);
+    this._addWalls(group, tiles, materials, openAirTileKeys);
+    this._addInvisibleOpenAirBounds(group, tiles, materials, openAirTileKeys);
     const doors = this._addDoors(group, rooms, materials);
     const landmarks = this._addRoomLandmarks(group, rooms, materials, tiles);
     const encounters = this._createEncounterDefinitions(rooms);
@@ -193,11 +224,7 @@ export class DungeonGenerator {
         telegraphDuration: 0.42,
         phaseOffset: this.random() * 0.8,
       })),
-      conveyors: this._createRoomZones(rooms, 'conveyor').map((zone) => ({
-        ...zone,
-        direction: new THREE.Vector3(0, 0, 1),
-        speed: 2.4,
-      })),
+      conveyors: this._createConveyorTileZones(tiles),
       shrine: landmarks.shrine,
       tileSize: this.tileSize,
       playerStart: this._tileToWorld(hubRoom.x, hubRoom.z),
@@ -209,114 +236,168 @@ export class DungeonGenerator {
     };
   }
 
+  _loadRuinTexture(name) {
+    if (this.textureCache.has(name)) {
+      return this.textureCache.get(name);
+    }
+
+    const texture = this.textureLoader.load(`${RUIN_TEXTURE_BASE_PATH}${name}.png`);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.anisotropy = 4;
+    this.textureCache.set(name, texture);
+    return texture;
+  }
+
+  _createRuinMaterial(textureName, {
+    color = 0xffffff,
+    emissive = 0x000000,
+    emissiveIntensity = 0,
+    roughness = 0.78,
+    metalness = 0.08,
+    transparent = false,
+    opacity = 1,
+  } = {}) {
+    return new THREE.MeshStandardMaterial({
+      color,
+      map: this._loadRuinTexture(textureName),
+      emissive,
+      emissiveIntensity,
+      roughness,
+      metalness,
+      transparent,
+      opacity,
+    });
+  }
+
   _createMaterials() {
-    const floor = new THREE.MeshStandardMaterial({
-      color: 0x323c42,
-      roughness: 0.82,
-      metalness: 0.08,
-    });
-    const hallway = new THREE.MeshStandardMaterial({
-      color: 0x28343d,
-      roughness: 0.84,
-      metalness: 0.1,
-    });
-    const entrance = new THREE.MeshStandardMaterial({
-      color: 0x334b5a,
-      emissive: 0x061522,
-      emissiveIntensity: 0.16,
-      roughness: 0.74,
-      metalness: 0.12,
-    });
-    const enemy = new THREE.MeshStandardMaterial({
-      color: 0x3b3d35,
+    const floor = this._createRuinMaterial('floor_plain', {
       roughness: 0.86,
+      metalness: 0.04,
+    });
+    const hallway = this._createRuinMaterial('floor_panel', {
+      color: 0xf1ead8,
+      roughness: 0.84,
       metalness: 0.06,
     });
-    const trap = new THREE.MeshStandardMaterial({
-      color: 0x422f35,
-      emissive: 0x2b0505,
-      emissiveIntensity: 0.24,
+    const entrance = this._createRuinMaterial('floor_cross_panel', {
+      color: 0xf2ead6,
+      emissive: 0x052f34,
+      emissiveIntensity: 0.08,
       roughness: 0.78,
       metalness: 0.08,
     });
-    const conveyor = new THREE.MeshStandardMaterial({
-      color: 0x26394e,
-      emissive: 0x05213c,
+    const enemy = this._createRuinMaterial('floor_circuit', {
+      color: 0xe8e0c9,
+      emissive: 0x042f34,
+      emissiveIntensity: 0.1,
+      roughness: 0.78,
+      metalness: 0.08,
+    });
+    const trap = this._createRuinMaterial('special_trap', {
+      emissive: 0x2b0505,
       emissiveIntensity: 0.18,
-      roughness: 0.62,
+      roughness: 0.74,
+      metalness: 0.08,
+    });
+    const conveyor = this._createRuinMaterial('special_conveyor', {
+      emissive: 0x052d32,
+      emissiveIntensity: 0.16,
+      roughness: 0.6,
       metalness: 0.22,
     });
-    const bonus = new THREE.MeshStandardMaterial({
-      color: 0x33405d,
-      emissive: 0x071634,
-      emissiveIntensity: 0.2,
-      roughness: 0.6,
-      metalness: 0.18,
+    const bonus = this._createRuinMaterial('floor_octagon', {
+      color: 0xf4ebd6,
+      emissive: 0x052326,
+      emissiveIntensity: 0.1,
+      roughness: 0.7,
+      metalness: 0.1,
     });
-    const keycard = new THREE.MeshStandardMaterial({
-      color: 0x3b4430,
-      emissive: 0x1b2507,
-      emissiveIntensity: 0.18,
-      roughness: 0.74,
-      metalness: 0.08,
-    });
-    const chest = new THREE.MeshStandardMaterial({
-      color: 0x4c5d68,
-      emissive: 0x07141d,
-      emissiveIntensity: 0.14,
-      roughness: 0.62,
-      metalness: 0.16,
-    });
-    const shrine = new THREE.MeshStandardMaterial({
-      color: 0x303d4d,
-      emissive: 0x041b2b,
-      emissiveIntensity: 0.22,
-      roughness: 0.68,
-      metalness: 0.18,
-    });
-    const hub = new THREE.MeshStandardMaterial({
-      color: 0x2f4553,
-      emissive: 0x061824,
-      emissiveIntensity: 0.14,
-      roughness: 0.78,
-      metalness: 0.08,
-    });
-    const camp = new THREE.MeshStandardMaterial({
-      color: 0x3d4744,
-      emissive: 0x10180f,
+    const keycard = this._createRuinMaterial('door_keycard', {
+      color: 0xf1ead9,
+      emissive: 0x241500,
       emissiveIntensity: 0.12,
-      roughness: 0.82,
-      metalness: 0.06,
+      roughness: 0.72,
+      metalness: 0.08,
+    });
+    const chest = this._createRuinMaterial('accent_hatch', {
+      color: 0xf1ead9,
+      emissive: 0x07141d,
+      emissiveIntensity: 0.08,
+      roughness: 0.62,
+      metalness: 0.12,
+    });
+    const shrine = this._createRuinMaterial('floor_shrine', {
+      color: 0xf1ead9,
+      emissive: 0x052326,
+      emissiveIntensity: 0.14,
+      roughness: 0.68,
+      metalness: 0.12,
+    });
+    const hub = this._createRuinMaterial('floor_mossy', {
+      color: 0xf0ead6,
+      emissive: 0x07120a,
+      emissiveIntensity: 0.08,
+      roughness: 0.88,
+      metalness: 0.03,
+    });
+    const camp = this._createRuinMaterial('floor_mossy', {
+      color: 0xf3edd8,
+      emissive: 0x07120a,
+      emissiveIntensity: 0.08,
+      roughness: 0.9,
+      metalness: 0.03,
     });
 
     return {
       floor,
       hallway,
-      wall: new THREE.MeshStandardMaterial({
-        color: 0x42505a,
-        roughness: 0.7,
-        metalness: 0.18,
+      wall: this._createRuinMaterial('wall_9slice_panel', {
+        color: 0xf2ead8,
+        emissive: 0x030505,
+        emissiveIntensity: 0.03,
+        roughness: 0.72,
+        metalness: 0.08,
       }),
-      wallTrim: new THREE.MeshStandardMaterial({
-        color: 0x71808a,
-        emissive: 0x071018,
-        emissiveIntensity: 0.1,
-        roughness: 0.5,
-        metalness: 0.34,
+      ceiling: this._createRuinMaterial('ceiling_panel', {
+        color: 0xe8dfcc,
+        roughness: 0.84,
+        metalness: 0.04,
       }),
-      door: new THREE.MeshStandardMaterial({
-        color: 0x3e5364,
-        emissive: 0x061623,
-        emissiveIntensity: 0.24,
+      wallTrim: this._createRuinMaterial('accent_slate', {
+        color: 0xf0e8d5,
+        emissive: 0x061010,
+        emissiveIntensity: 0.06,
+        roughness: 0.58,
+        metalness: 0.14,
+      }),
+      door: this._createRuinMaterial('door_frame', {
+        color: 0xf1ead8,
+        emissive: 0x052326,
+        emissiveIntensity: 0.14,
         roughness: 0.48,
-        metalness: 0.36,
+        metalness: 0.22,
       }),
-      lockedDoor: new THREE.MeshStandardMaterial({
-        color: 0x615037,
-        emissive: 0x3c2404,
-        emissiveIntensity: 0.45,
+      lockedDoor: this._createRuinMaterial('door_sealed', {
+        color: 0xf1ead8,
+        emissive: 0x241500,
+        emissiveIntensity: 0.28,
         roughness: 0.46,
-        metalness: 0.3,
+        metalness: 0.2,
+      }),
+      terminal: this._createRuinMaterial('terminal_mechanism', {
+        color: 0xf1ead8,
+        emissive: 0x04282c,
+        emissiveIntensity: 0.12,
+        roughness: 0.5,
+        metalness: 0.16,
+      }),
+      invisibleBoundary: new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
       }),
       glowBlue: new THREE.MeshStandardMaterial({
         color: 0x6bdcff,
@@ -405,11 +486,48 @@ export class DungeonGenerator {
     }
   }
 
-  _addWalls(group, tiles, materials) {
-    const wallHeight = 1.45;
-    const wallThickness = 0.18;
+  _addCeilings(group, tiles, materials, openAirTileKeys = new Set()) {
+    const ceilingGeometry = new THREE.BoxGeometry(
+      this.tileSize,
+      RUIN_CEILING_THICKNESS,
+      this.tileSize,
+    );
 
     for (const tile of tiles.values()) {
+      if (openAirTileKeys.has(tileKey(tile.x, tile.z))) {
+        continue;
+      }
+
+      const ceiling = new THREE.Mesh(ceilingGeometry, materials.ceiling);
+      ceiling.name = 'dungeonRoomCeiling';
+      ceiling.position.set(
+        tile.x * this.tileSize,
+        RUIN_WALL_HEIGHT + RUIN_CEILING_THICKNESS * 0.5,
+        tile.z * this.tileSize,
+      );
+      ceiling.castShadow = true;
+      ceiling.receiveShadow = true;
+      group.add(ceiling);
+    }
+  }
+
+  _addWalls(group, tiles, materials, openAirTileKeys = new Set()) {
+    const horizontalWallGeometry = new THREE.BoxGeometry(
+      this.tileSize,
+      RUIN_WALL_HEIGHT,
+      RUIN_WALL_THICKNESS,
+    );
+    const verticalWallGeometry = new THREE.BoxGeometry(
+      RUIN_WALL_THICKNESS,
+      RUIN_WALL_HEIGHT,
+      this.tileSize,
+    );
+
+    for (const tile of tiles.values()) {
+      if (openAirTileKeys.has(tileKey(tile.x, tile.z))) {
+        continue;
+      }
+
       for (const [dx, dz] of DIRECTIONS) {
         if (tiles.has(tileKey(tile.x + dx, tile.z + dz))) {
           continue;
@@ -417,23 +535,65 @@ export class DungeonGenerator {
 
         const horizontal = dz !== 0;
         const wall = new THREE.Mesh(
-          new THREE.BoxGeometry(
-            horizontal ? this.tileSize : wallThickness,
-            wallHeight,
-            horizontal ? wallThickness : this.tileSize,
-          ),
+          horizontal ? horizontalWallGeometry : verticalWallGeometry,
           materials.wall,
         );
 
         wall.name = 'dungeonBoundaryWall';
         wall.position.set(
           tile.x * this.tileSize + dx * this.tileSize * 0.5,
-          wallHeight * 0.5,
+          RUIN_WALL_HEIGHT * 0.5,
           tile.z * this.tileSize + dz * this.tileSize * 0.5,
         );
         wall.castShadow = true;
         wall.receiveShadow = true;
         group.add(wall);
+      }
+    }
+  }
+
+  _addInvisibleOpenAirBounds(group, tiles, materials, openAirTileKeys = new Set()) {
+    if (!openAirTileKeys.size) {
+      return;
+    }
+
+    const horizontalWallGeometry = new THREE.BoxGeometry(
+      this.tileSize,
+      RUIN_WALL_HEIGHT,
+      RUIN_WALL_THICKNESS,
+    );
+    const verticalWallGeometry = new THREE.BoxGeometry(
+      RUIN_WALL_THICKNESS,
+      RUIN_WALL_HEIGHT,
+      this.tileSize,
+    );
+
+    for (const key of openAirTileKeys) {
+      const tile = tiles.get(key);
+      if (!tile) {
+        continue;
+      }
+
+      for (const [dx, dz] of DIRECTIONS) {
+        if (tiles.has(tileKey(tile.x + dx, tile.z + dz))) {
+          continue;
+        }
+
+        const horizontal = dz !== 0;
+        const boundary = new THREE.Mesh(
+          horizontal ? horizontalWallGeometry : verticalWallGeometry,
+          materials.invisibleBoundary,
+        );
+        boundary.name = 'expeditionCampInvisibleBoundary';
+        boundary.position.set(
+          tile.x * this.tileSize + dx * this.tileSize * 0.5,
+          RUIN_WALL_HEIGHT * 0.5,
+          tile.z * this.tileSize + dz * this.tileSize * 0.5,
+        );
+        boundary.userData.invisibleWalkBoundary = true;
+        boundary.castShadow = false;
+        boundary.receiveShadow = false;
+        group.add(boundary);
       }
     }
   }
@@ -459,15 +619,15 @@ export class DungeonGenerator {
       door.name = descriptor.id;
       door.position.copy(position);
       if (!descriptor.closed) {
-        door.position.y = -2.35;
+        door.position.y = -3.25;
       }
 
       const frame = new THREE.Mesh(
-        new THREE.BoxGeometry(alongX ? 0.22 : this.tileSize * 0.9, 1.95, alongX ? this.tileSize * 0.9 : 0.22),
+        new THREE.BoxGeometry(alongX ? 0.24 : this.tileSize * 0.9, 2.72, alongX ? this.tileSize * 0.9 : 0.24),
         descriptor.locked ? materials.lockedDoor : materials.door,
       );
       frame.name = 'dungeonDoorFrame';
-      frame.position.y = 0.98;
+      frame.position.y = 1.36;
       frame.castShadow = true;
       frame.receiveShadow = true;
 
@@ -476,7 +636,7 @@ export class DungeonGenerator {
         descriptor.locked ? materials.glowYellow : materials.glowBlue,
       );
       light.name = descriptor.locked ? 'lockedDoorStatusLight' : 'doorStatusLight';
-      light.position.y = 1.75;
+      light.position.y = 2.48;
 
       door.add(frame, light);
       group.add(door);
@@ -837,7 +997,7 @@ export class DungeonGenerator {
     terminal.name = 'ruinMechanismTerminal';
     terminal.position.set(position.x, 0, position.z - 1.1);
 
-    const base = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.72, 0.48), materials.wallTrim);
+    const base = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.72, 0.48), materials.terminal ?? materials.wallTrim);
     base.name = 'mechanismTerminalBase';
     base.position.y = 0.36;
     base.castShadow = true;
@@ -1076,6 +1236,37 @@ export class DungeonGenerator {
     return new THREE.Vector3(x * this.tileSize, 0, z * this.tileSize);
   }
 
+  _createOpenAirTileKeys(rooms) {
+    const openAirTileKeys = new Set();
+    const openAirRooms = rooms.filter((room) => RUIN_OPEN_AIR_ROOM_TYPES.has(room.type));
+
+    for (const room of openAirRooms) {
+      const halfW = Math.floor(room.width / 2);
+      const halfD = Math.floor(room.depth / 2);
+
+      for (let x = room.x - halfW; x <= room.x + halfW; x += 1) {
+        for (let z = room.z - halfD; z <= room.z + halfD; z += 1) {
+          openAirTileKeys.add(tileKey(x, z));
+        }
+      }
+    }
+
+    for (let i = 1; i < openAirRooms.length; i += 1) {
+      const from = openAirRooms[i - 1];
+      const to = openAirRooms[i];
+
+      for (const x of rangeBetween(from.x, to.x)) {
+        openAirTileKeys.add(tileKey(x, from.z));
+      }
+
+      for (const z of rangeBetween(from.z, to.z)) {
+        openAirTileKeys.add(tileKey(to.x, z));
+      }
+    }
+
+    return openAirTileKeys;
+  }
+
   _createRoomZones(rooms, type) {
     return rooms
       .filter((room) => room.type === type)
@@ -1087,6 +1278,35 @@ export class DungeonGenerator {
         halfDepth: (Math.floor(room.depth / 2) + 0.5) * this.tileSize,
         active: true,
       }));
+  }
+
+  _createConveyorTileZones(tiles) {
+    return [...tiles.values()]
+      .filter((tile) => tile.type === 'conveyor')
+      .map((tile) => {
+        const direction = new THREE.Vector3(
+          tile.conveyorDirectionX ?? 0,
+          0,
+          tile.conveyorDirectionZ ?? 1,
+        );
+
+        if (direction.lengthSq() <= 0.0001) {
+          direction.set(0, 0, 1);
+        }
+
+        return {
+          id: `conveyorTile_${tile.x}_${tile.z}`,
+          tileX: tile.x,
+          tileZ: tile.z,
+          position: this._tileToWorld(tile.x, tile.z),
+          halfWidth: this.tileSize * 0.5,
+          halfDepth: this.tileSize * 0.5,
+          direction: direction.normalize(),
+          speed: tile.conveyorSpeed ?? 2.4,
+          active: tile.conveyorActive !== false,
+          label: 'Conveyor Belt',
+        };
+      });
   }
 
   _createEncounterDefinitions(rooms) {

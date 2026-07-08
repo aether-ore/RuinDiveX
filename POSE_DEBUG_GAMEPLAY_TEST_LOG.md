@@ -280,3 +280,17 @@ Tested the live debug pose mode against the external Mega Man Volnutt segmented 
 - Browser verification: W+A, W+D, S+A, and S+D all set `tankTurnTranslating = true`, kept recenter timers at `0`, and held camera yaw within about `0.08` radians of body yaw while moving. A-only stayed `tankTurnTranslating = false`, kept root position fixed, selected `leftTurn`, and held camera yaw during the turn.
 - Secondary aim pressed during pure A/D tank-turning must use Mega Man's current body-facing direction as the immediate aim/camera target. The camera swing is allowed to override the tank-turn hold, and `pointer.aimWorld` gets a short body-facing override so the first manual aim update does not read the stale camera ray.
 - Browser verification: after holding A with body yaw about `1.62` radians while camera yaw stayed `0`, pressing secondary aim immediately set aim yaw equal to body yaw and enabled body-facing camera recenter. In a non-safe position, the first sustained aim frame kept `bracedFireDirection` equal to body yaw and selected `pistolIdle` instead of snapping the pose back toward the stale camera ray.
+
+## Follow-up Implementation Pass: Sword Arm Slash Clip
+
+- Added `Stable Sword Inward Slash.fbx` as the authored `swordInwardSlash` clip for sword-arm/beam-blade attacks.
+- `attacking + beamBlade` now selects `swordInwardSlash` directly instead of falling through to generic locomotion while the old procedural beam-blade timing still drives the hit window and blade visual.
+- The slash clip time is keyed to gameplay `attackProgress`, so the authored pose stays aligned with the existing sword-arm active frames even if the FBX duration differs from the attack duration.
+
+## Follow-up Implementation Pass: Standing Dive Dodge Roll
+
+- Added `Standing Dive Forward.fbx` as the authored `dodgeRoll` clip.
+- Dodge roll gameplay displacement is still applied to the player root so collision and arena clamping remain authoritative, but the FBX clip time is keyed to gameplay `actionProgress` so the visual dive stays synced to the movement window.
+- The dodge direction and yaw are latched when the roll starts. Inputs, camera movement, aiming, or turn systems should not pivot/angle the roll after it begins.
+- The current roll distance is `8.4` world units, matching three dungeon floor tiles at the generator's `2.8` tile size.
+- The visible model root gets a small action-progress air-lift arc during `dodgeRoll`, while the gameplay/collision root remains grounded. This makes the move read as a forward dive through the air before the authored floor recovery settles back to neutral.

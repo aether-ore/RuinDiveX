@@ -63,6 +63,7 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'crouchedSneakRight', file: 'crouched sneaking right.fbx', label: 'Crouched Sneak Right', loop: true },
   { key: 'fallingIdle', file: 'falling idle.fbx', label: 'Falling Idle', loop: true },
   { key: 'fallingToRoll', file: 'falling to roll.fbx', label: 'Falling To Roll', loop: false },
+  { key: 'dodgeRoll', file: 'Standing Dive Forward.fbx', label: 'Standing Dive Forward', loop: false },
   { key: 'hardLanding', file: 'hard landing.fbx', label: 'Hard Landing', loop: false },
   { key: 'idle', file: 'idle.fbx', label: 'Look Around Idle', loop: true, preserveRootMotion: true },
   { key: 'idle2', file: 'idle (2).fbx', label: 'Idle 2', loop: true, preserveRootMotion: true },
@@ -71,6 +72,7 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'idle5', file: 'idle (5).fbx', label: 'Idle 5', loop: true, preserveRootMotion: true },
   { key: 'sideIdle', file: 'Side Idle.fbx', label: 'Side Idle', loop: true, preserveRootMotion: true },
   { key: 'warriorIdle', file: 'Warrior Idle.fbx', label: 'Warrior Idle', loop: false, preserveRootMotion: true },
+  { key: 'swordInwardSlash', file: 'Stable Sword Inward Slash.fbx', label: 'Sword Inward Slash', loop: false },
   { key: 'jump', file: 'jump.fbx', label: 'Jump', loop: false },
   { key: 'jumpingUp', file: 'jumping up.fbx', label: 'Jumping Up', loop: false },
   { key: 'leftCoverSneak', file: 'left cover sneak.fbx', label: 'Left Cover Sneak', loop: true },
@@ -115,8 +117,10 @@ const TARGET_MODEL_HEIGHT = 2.85;
 const MIN_BRACED_SHOT_TIME = 0.28;
 const MIN_PROJECTILE_AIM_LOCK_TIME = 0.44;
 const PROJECTILE_STANCE_LINGER_TIME = 1.05;
-const DODGE_ROLL_DISTANCE = 2.75;
-const DODGE_ROLL_DURATION = 0.66;
+const DODGE_ROLL_DISTANCE = 8.4;
+const DODGE_ROLL_DURATION = 0.86;
+const DODGE_ROLL_AIR_LIFT = 0.52;
+const DODGE_ROLL_RECOVERY_SINK = 0.14;
 const FORWARD_JUMP_DISTANCE = 1.65;
 const JUMP_DURATION = 0.82;
 const HEAVY_HIT_HEALTH_FRACTION = 0.16;
@@ -144,6 +148,13 @@ function isUtilityArmItem(item) {
 
 function isBusterUpgradeItem(item) {
   return item?.category === 'Buster Part';
+}
+
+function getDodgeRollVisualLift(progress) {
+  const localProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  const hang = Math.pow(Math.max(0, Math.sin(localProgress * Math.PI)), 0.72);
+  const recovery = THREE.MathUtils.smoothstep(localProgress, 0.68, 1);
+  return Math.max(0, hang * DODGE_ROLL_AIR_LIFT - recovery * DODGE_ROLL_RECOVERY_SINK);
 }
 
 export class Player {
@@ -201,6 +212,7 @@ export class Player {
     this.movementLockTimer = 0;
     this.movementLockMultiplier = 1;
     this.dodgeDirection = new THREE.Vector3(0, 0, 1);
+    this.dodgeRollYaw = 0;
     this.jumpDirection = new THREE.Vector3(0, 0, 1);
     this.knockbackFallDirection = new THREE.Vector3(0, 0, -1);
     this.damageHitLocalDirection = new THREE.Vector3(0, 0, 1);
@@ -268,8 +280,6 @@ export class Player {
     const lockOnTarget = movementOptions.lockOnTarget ?? null;
     const lockOnPosition = lockOnTarget?.root?.position ?? movementOptions.lockOnTargetPosition ?? null;
     const lockOnActive = Boolean(lockOnPosition && !lockOnTarget?.dead);
-    const aimWorld = movementOptions.aimWorld ?? null;
-    const mouseTurnActive = movementOptions.mouseTurnActive !== false;
 
     if (input.has('KeyW') || input.has('ArrowUp')) moveVector.y += 1;
     if (input.has('KeyS') || input.has('ArrowDown')) moveVector.y -= 1;
@@ -280,18 +290,24 @@ export class Player {
     const rawForwardInput = moveVector.y;
     const moving = moveVector.lengthSq() > 0;
     const attackFacing = this.attackFacingTimer > 0 && this.attackFacingDirection.lengthSq() > 0.0001;
+    const lateralTurnAttempt = Math.abs(rawLateralInput) > TANK_TURN_INPUT_THRESHOLD;
+    const projectileAimInputHeld = movementOptions.projectileAimInputHeld === true;
+
+    if (lateralTurnAttempt && !projectileAimInputHeld && this.isProjectileAimHeld()) {
+      this._releaseProjectileAim();
+    }
+
     const bracedAiming = this.bracedFireTimer > 0 && this.bracedFireDirection.lengthSq() > 0.0001;
     const tankTurnInput = !lockOnActive ? THREE.MathUtils.clamp(rawLateralInput, -1, 1) : 0;
     const tankTurnActive = !lockOnActive
       && !attackFacing
       && !bracedAiming
-      && Math.abs(tankTurnInput) > TANK_TURN_INPUT_THRESHOLD;
+      && lateralTurnAttempt;
     let translating = false;
     const running = moving && (input.has('ShiftLeft') || input.has('ShiftRight'));
     let moveAmount = 0;
     let movingBackward = false;
     let strafeAmount = 0;
-    let mouseFacing = false;
 
     if (moving) {
       moveVector.normalize();
@@ -306,9 +322,6 @@ export class Player {
         if (tankTurnActive) {
           this.root.rotation.y -= tankTurnInput * TANK_TURN_RATE * dt;
           this.syncMoveDirectionToBodyFacing();
-        } else if (mouseTurnActive && this._resolveMouseFacingDirection(aimWorld)) {
-          mouseFacing = true;
-          this.faceDirection(this.lastMoveDirection);
         } else {
           this.syncMoveDirectionToBodyFacing();
         }
@@ -359,8 +372,6 @@ export class Player {
       this.faceDirection(this.bracedFireDirection);
     } else if (lockOnActive) {
       this.faceDirection(this.lastMoveDirection);
-    } else if (mouseFacing) {
-      this.faceDirection(this.lastMoveDirection);
     }
 
     this.animation.update(dt, {
@@ -406,22 +417,6 @@ export class Player {
 
     worldForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
     this.lastMoveDirection.copy(worldForward.normalize());
-  }
-
-  _resolveMouseFacingDirection(aimWorld) {
-    if (!aimWorld) {
-      return false;
-    }
-
-    worldForward.copy(aimWorld).sub(this.root.position);
-    worldForward.y = 0;
-
-    if (worldForward.lengthSq() <= 0.12) {
-      return false;
-    }
-
-    this.lastMoveDirection.copy(worldForward.normalize());
-    return true;
   }
 
   _resolveMovementDirection(inputVector, movementOptions = {}) {
@@ -486,6 +481,23 @@ export class Player {
 
     this._resolveActionDirection(input, movementOptions, this.dodgeDirection);
     this.faceDirection(this.dodgeDirection);
+    this.dodgeRollYaw = this.root.rotation.y;
+    this.attackFacingTimer = 0;
+    this.movementLockTimer = Math.max(this.movementLockTimer, DODGE_ROLL_DURATION);
+    this.movementLockMultiplier = 0;
+    return true;
+  }
+
+  tryLateralDodgeRoll(input = new Set(), movementOptions = {}) {
+    const lateral = this._getLateralDodgeInput(input);
+
+    if (lateral === 0 || !this.animation.playDodgeRoll?.(DODGE_ROLL_DURATION)) {
+      return false;
+    }
+
+    this._resolveLateralActionDirection(lateral, movementOptions, this.dodgeDirection);
+    this.faceDirection(this.dodgeDirection);
+    this.dodgeRollYaw = this.root.rotation.y;
     this.attackFacingTimer = 0;
     this.movementLockTimer = Math.max(this.movementLockTimer, DODGE_ROLL_DURATION);
     this.movementLockMultiplier = 0;
@@ -571,6 +583,21 @@ export class Player {
       || input.has('ArrowRight');
   }
 
+  hasLateralDodgeInput(input = new Set()) {
+    return this._getLateralDodgeInput(input) !== 0;
+  }
+
+  _getLateralDodgeInput(input = new Set()) {
+    const left = input.has('KeyA') || input.has('ArrowLeft');
+    const right = input.has('KeyD') || input.has('ArrowRight');
+
+    if (left === right) {
+      return 0;
+    }
+
+    return right ? 1 : -1;
+  }
+
   _resolveActionDirection(input = new Set(), movementOptions = {}, target = worldMoveDirection) {
     const x = (input.has('KeyD') || input.has('ArrowRight') ? 1 : 0)
       + (input.has('KeyA') || input.has('ArrowLeft') ? -1 : 0);
@@ -596,11 +623,27 @@ export class Player {
     return target;
   }
 
+  _resolveLateralActionDirection(lateral = 0, movementOptions = {}, target = worldMoveDirection) {
+    moveVector.set(Math.sign(lateral), 0);
+    this._resolveMovementDirection(moveVector, movementOptions);
+    target.copy(worldMoveDirection);
+    target.y = 0;
+
+    if (target.lengthSq() <= 0.0001) {
+      target.set(Math.sign(lateral) || 1, 0, 0);
+    } else {
+      target.normalize();
+    }
+
+    return target;
+  }
+
   _updateFullBodyActionMotion(dt, arenaRadius = 32) {
     const state = this.animation.state;
     const progress = this.animation.getActionProgress?.() ?? 0;
 
     if (state === 'dodgeRoll') {
+      this.root.rotation.y = this.dodgeRollYaw;
       this._applyActionDisplacement(this.dodgeDirection, DODGE_ROLL_DISTANCE, DODGE_ROLL_DURATION, progress, dt);
     } else if (state === 'forwardJump') {
       this._applyActionDisplacement(this.jumpDirection, FORWARD_JUMP_DISTANCE, JUMP_DURATION, progress, dt);
@@ -1005,6 +1048,18 @@ export class Player {
   _getActiveArmWeaponKey() {
     const weapon = this.getActiveArmWeapon?.() ?? this.equipment.get('weapon');
     return weapon?.id ?? weapon?.type ?? 'default-buster';
+  }
+
+  isProjectileAimHeld(weaponKey = this._getActiveArmWeaponKey()) {
+    const activeWeaponKey = weaponKey ?? this._getActiveArmWeaponKey();
+    return this._attackWeaponKind === 'projectile'
+      && this._bracedFireWeaponKey === activeWeaponKey
+      && this.bracedFireTimer > 0;
+  }
+
+  isProjectileAimSustained(weaponKey = this._getActiveArmWeaponKey()) {
+    return this.isProjectileAimHeld(weaponKey)
+      && (this.animation?.attackTimer ?? 0) <= 0;
   }
 
   setMovementLock(duration = 0.12, multiplier = 0) {
@@ -1744,8 +1799,9 @@ export class Player {
     const animationState = motionOptions.animationState ?? this.animation.state;
 
     if (clipDrivenRig) {
-      const alpha = Math.min(1, dt * 14);
-      this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, 0, alpha);
+      const dodgeAirLift = animationState === 'dodgeRoll' ? getDodgeRollVisualLift(actionProgress) : 0;
+      const alpha = Math.min(1, dt * (animationState === 'dodgeRoll' ? 20 : 14));
+      this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, dodgeAirLift, alpha);
       this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, 0, alpha);
       this.modelRoot.rotation.z = THREE.MathUtils.lerp(this.modelRoot.rotation.z, 0, alpha);
     } else {
@@ -1760,7 +1816,7 @@ export class Player {
         targetY = Math.max(targetY, jumpLift) - landingCompression;
         targetPitch = animationState === 'forwardJump' ? -Math.sin(actionProgress * Math.PI) * 0.08 : 0;
       } else if (animationState === 'dodgeRoll') {
-        targetY = Math.max(0.02, targetY * 0.45);
+        targetY = Math.max(getDodgeRollVisualLift(actionProgress), targetY * 0.45);
         targetPitch = Math.sin(actionProgress * Math.PI) * 0.18;
         targetRoll += Math.sin(actionProgress * Math.PI * 2) * 0.08;
       } else if (animationState === 'knockbackFall' || animationState === 'downed') {

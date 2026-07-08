@@ -44,6 +44,11 @@ export class AnimationController {
     this.actionTimer = 0;
     this.actionDuration = 0;
     this.downedTimer = 0;
+    this.poseOutputEnabled = true;
+  }
+
+  setPoseOutputEnabled(enabled = true) {
+    this.poseOutputEnabled = Boolean(enabled);
   }
 
   setState(state) {
@@ -148,7 +153,9 @@ export class AnimationController {
     this.time += dt;
 
     if (this.dead) {
-      this._applyDeadPose(dt);
+      if (this.poseOutputEnabled) {
+        this._applyDeadPose(dt);
+      }
       return;
     }
 
@@ -159,13 +166,17 @@ export class AnimationController {
 
     if (this.hurtTimer > 0) {
       this.hurtTimer -= dt;
-      this._applyHurtPose(dt);
+      if (this.poseOutputEnabled) {
+        this._applyHurtPose(dt);
+      }
       return;
     }
 
     if (this.attackTimer > 0) {
       this.attackTimer -= dt;
-      this._applyAttackPose(dt);
+      if (this.poseOutputEnabled) {
+        this._applyAttackPose(dt);
+      }
 
       if (this.attackTimer <= 0) {
         this.setState(moving ? (running ? 'running' : 'walking') : 'idle');
@@ -175,6 +186,10 @@ export class AnimationController {
     }
 
     this.setState(moving ? (running ? 'running' : 'walking') : 'idle');
+
+    if (!this.poseOutputEnabled) {
+      return;
+    }
 
     if (moving) {
       this._applyWalkPose(dt, moveAmount, running);
@@ -194,7 +209,9 @@ export class AnimationController {
     if (this.actionState === 'downed') {
       this.downedTimer -= dt;
       this.setState('downed');
-      this._applyDownedPose(dt);
+      if (this.poseOutputEnabled) {
+        this._applyDownedPose(dt);
+      }
 
       if (this.downedTimer <= 0) {
         this.playGetUp();
@@ -205,7 +222,9 @@ export class AnimationController {
 
     this.actionTimer -= dt;
     this.setState(this.actionState);
-    this._applyFullBodyActionPose(dt, this.actionState, this.getActionProgress());
+    if (this.poseOutputEnabled) {
+      this._applyFullBodyActionPose(dt, this.actionState, this.getActionProgress());
+    }
 
     if (this.actionTimer > 0) {
       return;

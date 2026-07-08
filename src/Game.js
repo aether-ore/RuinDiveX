@@ -221,6 +221,7 @@ export class Game {
       cameraAngle: this.animationPreview?.cameraAngle ?? 'follow',
       attackKind: this.animationPreview?.attackKind ?? null,
       attackProgress: this.animationPreview?.currentAttackProgress ?? this.animationPreview?.attackProgress ?? null,
+      clipKey: this.animationPreview?.clipKey ?? null,
     };
   }
 
@@ -247,8 +248,13 @@ export class Game {
     const options = {
       cameraAngle: params.get('animationPreviewCamera') ?? params.get('animCamera') ?? 'follow',
     };
+    const clipKey = params.get('animationPreviewClip') ?? params.get('fbxClip') ?? params.get('clip');
     const attackProgress = parseNumberParam('animationPreviewAttackProgress', 'animAttackProgress');
     const attackDuration = parseNumberParam('animationPreviewAttackDuration', 'animAttackDuration');
+
+    if (clipKey) {
+      options.clipKey = clipKey;
+    }
 
     if (attackProgress !== null) {
       options.attackProgress = attackProgress;
@@ -280,6 +286,7 @@ export class Game {
       attackDuration: 0,
       currentAttackProgress: null,
       forceSwordArm: false,
+      clipKey: null,
     };
 
     if (preview.active) {
@@ -326,6 +333,8 @@ export class Game {
         preview.forceSwordArm = true;
       } else if (modeKey === 'idle') {
         preview.active = true;
+      } else {
+        preview.clipKey = normalizedMode;
       }
     }
 
@@ -352,6 +361,7 @@ export class Game {
     document.body.dataset.animationPreviewBackpedaling = state.backpedaling ? 'true' : 'false';
     document.body.dataset.animationPreviewCamera = state.cameraAngle;
     document.body.dataset.animationPreviewAttackKind = state.attackKind ?? 'none';
+    document.body.dataset.animationPreviewClip = state.clipKey ?? 'auto';
     document.body.dataset.animationPreviewAttackProgress = Number.isFinite(state.attackProgress)
       ? String(Number(state.attackProgress).toFixed(3))
       : 'none';

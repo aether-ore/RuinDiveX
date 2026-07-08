@@ -219,3 +219,23 @@ Tested the live debug pose mode against the external Mega Man Volnutt segmented 
 - The existing `Mega Man Volnutt.png` diffuse texture works on the FBX only with `flipY = true`; `flipY = false` made the legs sample incorrect brown/white texture regions.
 - The old buster OBJ and the FBX source model use different scale assumptions. The skeletal rig now rescales the buster attachment against the live right elbow-to-wrist length before mounting it.
 - Browser verification loaded `SkeletalModelRig` with 4 skinned meshes, 79 bones, all 15 expected Pose Debug joints, and a nonblank rear/profile walk preview. The only recurring loader warnings were Three.js FBX skin-weight truncation warnings for vertices with more than 4 weights, plus the previously observed generic Chromium `UnknownError` noise.
+
+## Follow-up Implementation Pass: FBX Animation Library Ownership
+
+- Copied the full Mixamo FBX animation library into `assets/models/animations/` and registered all clips on the live `SkeletalModelRig`.
+- The skeletal FBX rig is now clip-driven through `THREE.AnimationMixer`. The old semantic locomotion/combat/damage translators are no longer imported or applied by `SkeletalModelRig`.
+- The procedural `AnimationController` still owns gameplay timers and state transitions, but its pose output is disabled when the FBX clip rig is active. This keeps attack/jump/hurt state timing without double-posing the visible skeleton.
+- Mixamo hip/root horizontal position tracks are flattened on import so walk/run clips animate the body in place while the game movement code moves the player root.
+- Animation clip tracks are retargeted by normalized Mixamo bone name before binding, which protects against FBX files that spell the same skeleton path slightly differently.
+- Direct clip preview is available with URL parameters such as `?animationPreview=idle&animationPreviewClip=walking` or `?animationPreview=Strut%20Walking&animationPreviewCamera=right`.
+
+## Follow-up Implementation Pass: FBX Buster Neutral Mount
+
+- The old segmented OBJ buster mount carried a hard-coded local `Y = -90deg` rotation. On the FBX skeleton this pointed the buster muzzle along elbow-local `-X`, while the real right forearm child direction is elbow-local `+Y`.
+- The skeletal buster mount now computes its neutral quaternion from the live right elbow-to-wrist vector and aligns the buster asset's local `+Z` barrel axis to that bone direction.
+- The beam-blade chamber tilt now layers as a small offset on top of that neutral quaternion instead of restoring the old OBJ-era `-90deg` Y flip every frame.
+
+## Follow-up Implementation Pass: Breathing Default Idle
+
+- Added `Breathing Idle.fbx` to the local Mixamo clip library and made it the preferred default idle for the FBX rig.
+- The previous `idle.fbx` loop is now treated as a look-around/waiting idle. It is selected only after the player remains idle for several seconds, or directly through preview aliases such as `lookAround`, `lookAroundIdle`, and `waitingIdle`.

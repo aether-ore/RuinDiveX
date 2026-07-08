@@ -1,42 +1,19 @@
 import * as THREE from 'three';
-import {
-  SemanticRigMapper,
-  createNeutralSemanticPose,
-  degrees,
-} from './SemanticRigMapper.js';
-import { CombatAnimator } from './animation/CombatAnimator.js';
-import { DamageAnimator } from './animation/DamageAnimator.js';
-import { DodgeRollAnimator } from './animation/DodgeRollAnimator.js';
-import { JumpAnimator } from './animation/JumpAnimator.js';
-import { LocomotionAnimator } from './animation/LocomotionAnimator.js';
-import {
-  UPPER_BODY_AIM_BLEND_IN_SPEED,
-  UPPER_BODY_AIM_BLEND_OUT_SPEED,
-  UpperBodyAimLayer,
-} from './animation/UpperBodyAimLayer.js';
 
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
 const BEAM_BLADE_SLASH_END = 16 / BEAM_BLADE_TOTAL_FRAMES;
-const WALK_LOOP_SECONDS = 1.08;
-const JOG_LOOP_SECONDS = 0.66;
-const AIM_RIGHT_ARM_SWING_SCALE = 0.46;
-const SHOULDER_CLAVICLE_BLEND = 0.16;
-const SHOULDER_FORWARD_AXIS_SCALE = 1;
-const ELBOW_TWIST_SCALE = 0.12;
+const WAITING_IDLE_DELAY_SECONDS = 4.5;
 const zeroEuler = new THREE.Euler();
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
+const tempEuler = new THREE.Euler();
 const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
-const tempQuaternionC = new THREE.Quaternion();
-const tempQuaternionD = new THREE.Quaternion();
-const modelAxisX = new THREE.Vector3(1, 0, 0);
-const modelAxisY = new THREE.Vector3(0, 1, 0);
-const modelAxisZ = new THREE.Vector3(0, 0, 1);
+const localForwardZ = new THREE.Vector3(0, 0, 1);
 
-const SEMANTIC_BONE_ALIASES = {
+const RIG_BONE_ALIASES = {
   hips: ['hips'],
   spine: ['spine1', 'spine', 'spine2'],
   neck: ['neck'],
@@ -54,15 +31,30 @@ const SEMANTIC_BONE_ALIASES = {
   rightAnkle: ['rightfoot'],
 };
 
+const LOOPING_CLIP_KEYS = new Set([
+  'breathingIdle',
+  'idle',
+  'idle2',
+  'idle3',
+  'idle4',
+  'idle5',
+  'walking',
+  'strutWalking',
+  'running',
+  'slowJogBackwards',
+  'fallingIdle',
+  'crouchedSneakLeft',
+  'crouchedSneakRight',
+  'leftCoverSneak',
+  'rightCoverSneak',
+  'climbingLadder',
+]);
+
 function normalizeBoneName(name = '') {
   return String(name)
     .replace(/^mixamorig/i, '')
     .replace(/[^a-z0-9]/gi, '')
     .toLowerCase();
-}
-
-function uniqueObjects(objects = []) {
-  return [...new Set(objects.filter(Boolean))];
 }
 
 function makeSolidMaterial(name, color, options = {}) {
@@ -77,30 +69,6 @@ function makeSolidMaterial(name, color, options = {}) {
   return material;
 }
 
-function setTarget(map, name, x = 0, y = 0, z = 0) {
-  let target = map.get(name);
-
-  if (!target) {
-    target = new THREE.Euler();
-    map.set(name, target);
-  }
-
-  target.set(x, y, z);
-  return target;
-}
-
-function semanticPoseToTargets(mapper, targets, pose) {
-  mapper.setCorePose(targets, pose.core);
-  mapper.setArmPose(targets, 'left', pose.leftArm);
-  mapper.setArmPose(targets, 'right', pose.rightArm);
-  mapper.setLegPose(targets, 'left', pose.leftLeg);
-  mapper.setLegPose(targets, 'right', pose.rightLeg);
-}
-
-function scaleEuler(source = zeroEuler, scale = 1) {
-  return new THREE.Euler(source.x * scale, source.y * scale, source.z * scale);
-}
-
 export class SkeletalModelRig {
   constructor(sourceModel) {
     if (!sourceModel?.isObject3D) {
@@ -110,24 +78,20 @@ export class SkeletalModelRig {
     this.root = sourceModel;
     this.root.name = this.root.name || 'playerMegaManVolnuttFbxRig';
     this.root.userData.externalModelRig = this;
+    this.root.userData.animationSource = 'fbxClips';
 
     this.joints = new Map();
     this.restPositions = new Map();
-    this.partMeshes = new Map();
     this.bonesByName = new Map();
+    this.bones = [];
     this.skinnedMeshes = [];
     this.animatedBones = new Set();
     this.restLocalQuaternions = new Map();
-    this.restLocalPositions = new Map();
-    this.restLocalScales = new Map();
-    this.parentSpaceAxes = new Map();
-    this.spineBones = [];
-    this.clavicleBones = { left: null, right: null };
     this.meshCount = 0;
     this.time = 0;
-    this.walkPhase = 0;
     this.busterArmGroup = null;
     this.busterMuzzle = null;
+    this.busterNeutralQuaternion = new THREE.Quaternion();
     this.busterArmActive = false;
     this.drillArmGroup = null;
     this.drillBitSpin = null;
@@ -140,21 +104,20 @@ export class SkeletalModelRig {
     this.beamBladeColor = new THREE.Color(DEFAULT_BEAM_BLADE_COLOR);
     this.debugPoseEnabled = false;
     this.debugPoseOverrides = new Map();
-    this.semanticMapper = new SemanticRigMapper(this.joints);
-    this.neutralSemanticPose = createNeutralSemanticPose();
     this.modelHeight = 1;
-    this.locomotionAnimator = new LocomotionAnimator(this.semanticMapper);
-    this.upperBodyAimLayer = new UpperBodyAimLayer(this.semanticMapper);
-    this.combatAnimator = new CombatAnimator(this.semanticMapper);
-    this.damageAnimator = new DamageAnimator(this.semanticMapper);
-    this.dodgeRollAnimator = new DodgeRollAnimator(this.semanticMapper);
-    this.jumpAnimator = new JumpAnimator(this.semanticMapper);
-    this.aimLayerWeight = 0;
+    this.mixer = new THREE.AnimationMixer(this.root);
+    this.animationClips = new Map();
+    this.animationActions = new Map();
+    this.animationMetadata = new Map();
+    this.activeAction = null;
+    this.activeClipKey = null;
+    this.availableAnimationNames = [];
+    this.usesFbxAnimationClips = true;
     this.previousRigState = 'idle';
     this.stateTime = 0;
 
     this._buildBoneMap();
-    this._registerSemanticJoints();
+    this._registerRigJoints();
     this._captureRestState();
     this._prepareSkinnedMeshes();
     this._createAndAttachDrillArm();
@@ -201,7 +164,7 @@ export class SkeletalModelRig {
 
     if (this.debugPoseEnabled) {
       const target = new THREE.Euler(rotation.x, rotation.y, rotation.z);
-      this._applySemanticJointRotation(jointName, target, 1, new Set());
+      this._applyDebugJointRotation(jointName, target, 1);
     }
 
     return true;
@@ -224,9 +187,12 @@ export class SkeletalModelRig {
     const size = bounds.getSize(new THREE.Vector3());
     const center = bounds.getCenter(new THREE.Vector3());
     const group = new THREE.Group();
+    const neutralQuaternion = this._createForearmAlignedQuaternion(elbow, this.joints.get('rightWrist'));
 
     group.name = 'rigSkeletalBusterArmGroup';
-    group.rotation.y = -Math.PI / 2;
+    group.quaternion.copy(neutralQuaternion);
+    group.userData.neutralLocalQuaternion = neutralQuaternion.clone();
+    this.busterNeutralQuaternion.copy(neutralQuaternion);
     this._applyInverseRootScale(group);
     busterObject.position.sub(new THREE.Vector3(center.x, center.y, bounds.min.z));
 
@@ -242,6 +208,23 @@ export class SkeletalModelRig {
     this.setBusterArmActive(this.busterArmActive);
     this.setBeamBladeActive(this.beamBladeActive, this.beamBladeColor);
     return true;
+  }
+
+  _createForearmAlignedQuaternion(elbow, wrist) {
+    if (!elbow || !wrist) {
+      return new THREE.Quaternion();
+    }
+
+    elbow.updateMatrixWorld(true);
+    wrist.updateMatrixWorld(true);
+    wrist.getWorldPosition(tempVectorA);
+    elbow.worldToLocal(tempVectorA);
+
+    if (tempVectorA.lengthSq() <= 0.000001) {
+      return new THREE.Quaternion();
+    }
+
+    return new THREE.Quaternion().setFromUnitVectors(localForwardZ, tempVectorA.normalize());
   }
 
   _scaleBusterToForearm(busterObject) {
@@ -351,6 +334,58 @@ export class SkeletalModelRig {
     return null;
   }
 
+  setAnimationClips(animationEntries = {}) {
+    const entries = animationEntries instanceof Map
+      ? [...animationEntries.entries()]
+      : Object.entries(animationEntries);
+
+    this.mixer.stopAllAction();
+    this.animationClips.clear();
+    this.animationActions.clear();
+    this.animationMetadata.clear();
+    this.availableAnimationNames = [];
+    this.activeAction = null;
+    this.activeClipKey = null;
+
+    for (const [rawKey, rawEntry] of entries) {
+      const key = this._normalizeClipKey(rawKey);
+      const entry = rawEntry?.clip ? rawEntry : { clip: rawEntry };
+      const clip = entry.clip;
+
+      if (!key || !clip?.tracks?.length) {
+        continue;
+      }
+
+      const preparedClip = this._prepareAnimationClip(clip, key);
+      const action = this.mixer.clipAction(preparedClip, this.root);
+      const looping = entry.loop ?? LOOPING_CLIP_KEYS.has(key);
+
+      action.enabled = true;
+      action.clampWhenFinished = !looping;
+      action.setLoop(looping ? THREE.LoopRepeat : THREE.LoopOnce, looping ? Infinity : 1);
+      action.setEffectiveWeight(0);
+      action.setEffectiveTimeScale(1);
+
+      this.animationClips.set(key, preparedClip);
+      this.animationActions.set(key, action);
+      this.animationMetadata.set(key, {
+        ...entry,
+        key,
+        loop: looping,
+        duration: preparedClip.duration,
+      });
+      this.availableAnimationNames.push(key);
+    }
+
+    const initialClip = this._firstAvailable('breathingIdle', 'idle', 'idle2', 'idle3', 'walking', 'running');
+    if (initialClip) {
+      this._fadeToClip(initialClip, 0);
+    }
+
+    this.root.userData.fbxAnimationClips = [...this.availableAnimationNames];
+    return this.availableAnimationNames.length;
+  }
+
   update(dt, {
     moving = false,
     moveAmount = 0,
@@ -365,6 +400,7 @@ export class SkeletalModelRig {
     attackKind = 'melee',
     lockOnActive = false,
     strafeAmount = 0,
+    clipKey = null,
   } = {}) {
     this.time += dt;
     const rigState = `${state}:${attackKind ?? ''}`;
@@ -375,60 +411,40 @@ export class SkeletalModelRig {
       this.stateTime += dt;
     }
 
-    if (moving) {
-      const walkDirection = backpedaling ? -0.86 : 1;
-      const loopDuration = THREE.MathUtils.lerp(WALK_LOOP_SECONDS, JOG_LOOP_SECONDS, running ? 1 : 0);
-      const gaitSpeed = (Math.PI * 2) / loopDuration;
-      this.walkPhase += dt * gaitSpeed * Math.max(0.55, moveAmount) * walkDirection;
+    if (this.debugPoseEnabled) {
+      this._applyDebugPoseOverridesImmediate();
+      this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
+      this._updateDrillArmVisual(dt);
+      this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
+      return;
     }
 
-    const targets = new Map();
-    const alpha = Math.min(1, dt * (moving ? 20 : 12));
+    const selectedClip = this._selectAnimationClipKey({
+      moving,
+      moveAmount,
+      state,
+      actionProgress,
+      hurtProgress,
+      damageHitLocal,
+      projectileAiming,
+      backpedaling,
+      running,
+      attackKind,
+      lockOnActive,
+      strafeAmount,
+      clipKey,
+    });
 
-    this._applyLocomotionSemanticPose(targets, {
+    this._fadeToClip(selectedClip, this.activeAction ? 0.16 : 0);
+    this._syncActiveActionSpeed(selectedClip, {
       moving,
       moveAmount,
       running,
-      projectileAiming,
-      lockOnActive,
-      strafeAmount,
-    });
-
-    const targetAimWeight = projectileAiming || lockOnActive ? 1 : 0;
-    const aimBlendSpeed = targetAimWeight > this.aimLayerWeight
-      ? UPPER_BODY_AIM_BLEND_IN_SPEED
-      : UPPER_BODY_AIM_BLEND_OUT_SPEED;
-    this.aimLayerWeight = THREE.MathUtils.lerp(this.aimLayerWeight, targetAimWeight, Math.min(1, dt * aimBlendSpeed));
-    this.upperBodyAimLayer.apply(targets, {
-      weight: this.aimLayerWeight,
-      attackProgress,
-      projectileAiming,
       backpedaling,
       lockOnActive,
       strafeAmount,
     });
-
-    if (state === 'attacking' && projectileAiming) {
-      this.semanticMapper.addLegPose(targets, 'left', { kneeBend: degrees(7), ankleRoll: degrees(2) }, this.aimLayerWeight);
-      this.semanticMapper.addLegPose(targets, 'right', { kneeBend: degrees(7), ankleRoll: -degrees(2) }, this.aimLayerWeight);
-    } else if (state === 'attacking' && attackKind === 'beamBlade') {
-      this.combatAnimator.applyBeamBladeSlash(targets, attackProgress);
-    } else if (state === 'attacking') {
-      this.combatAnimator.applyMelee(targets, attackProgress);
-    } else {
-      const fullBodyActionProgress = Number.isFinite(actionProgress)
-        ? THREE.MathUtils.clamp(actionProgress, 0, 1)
-        : THREE.MathUtils.clamp(this.stateTime / 0.75, 0, 1);
-      this._applyFullBodyActionPose(targets, state, fullBodyActionProgress);
-    }
-
-    if (state === 'hurt') {
-      this.damageAnimator.applyStandingFlinch(targets, hurtProgress, damageHitLocal);
-    }
-
-    this._applyDebugPoseOverrides(targets);
-    this._applyTargetRotations(targets, alpha);
-    this._resetAnimatedBonePositions(alpha);
+    this.mixer.update(dt);
     this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
     this._updateDrillArmVisual(dt);
     this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
@@ -447,6 +463,7 @@ export class SkeletalModelRig {
         return;
       }
 
+      this.bones.push(object);
       const key = normalizeBoneName(object.name);
       const bones = this.bonesByName.get(key);
 
@@ -458,32 +475,18 @@ export class SkeletalModelRig {
     });
   }
 
-  _registerSemanticJoints() {
-    for (const [jointName, aliases] of Object.entries(SEMANTIC_BONE_ALIASES)) {
+  _registerRigJoints() {
+    for (const [jointName, aliases] of Object.entries(RIG_BONE_ALIASES)) {
       const bone = this._pickBone(aliases);
       if (!bone) {
         continue;
       }
 
-      bone.userData.semanticJointName = jointName;
+      bone.userData.poseJointName = jointName;
       this.joints.set(jointName, bone);
     }
 
-    this.spineBones = uniqueObjects([
-      this._pickBone(['spine']),
-      this._pickBone(['spine1']),
-      this._pickBone(['spine2']),
-      this.joints.get('spine'),
-    ]);
-    this.clavicleBones.left = this._pickBone(['leftshoulder']);
-    this.clavicleBones.right = this._pickBone(['rightshoulder']);
-
-    for (const bone of [
-      ...this.joints.values(),
-      ...this.spineBones,
-      this.clavicleBones.left,
-      this.clavicleBones.right,
-    ]) {
+    for (const bone of this.bones) {
       if (bone) {
         this.animatedBones.add(bone);
       }
@@ -497,11 +500,8 @@ export class SkeletalModelRig {
 
     for (const bone of this.animatedBones) {
       this.restLocalQuaternions.set(bone, bone.quaternion.clone());
-      this.restLocalPositions.set(bone, bone.position.clone());
-      this.restLocalScales.set(bone, bone.scale.clone());
       bone.userData.restLocalPosition = bone.position.clone();
       bone.userData.restWorldPosition = bone.getWorldPosition(new THREE.Vector3());
-      this.parentSpaceAxes.set(bone, this._getParentSpaceAxes(bone));
     }
 
     for (const [name, joint] of this.joints.entries()) {
@@ -554,241 +554,302 @@ export class SkeletalModelRig {
     return descendantBoneCount * 4 + directBoneChildren * 8;
   }
 
-  _getParentSpaceAxes(bone) {
-    const parent = bone.parent;
-    const rootQuaternion = this.root.getWorldQuaternion(tempQuaternionA);
-    const parentQuaternion = parent?.getWorldQuaternion(tempQuaternionB) ?? tempQuaternionB.identity();
-    const parentInverse = parentQuaternion.clone().invert();
-
-    const toParentAxis = (axis) => axis
-      .clone()
-      .applyQuaternion(rootQuaternion)
-      .applyQuaternion(parentInverse)
-      .normalize();
-
-    return {
-      x: toParentAxis(modelAxisX),
-      y: toParentAxis(modelAxisY),
-      z: toParentAxis(modelAxisZ),
-    };
+  _prepareAnimationClip(clip, key) {
+    const tracks = clip.tracks
+      .map((track) => this._prepareAnimationTrack(track))
+      .filter(Boolean);
+    const preparedClip = new THREE.AnimationClip(key, clip.duration, tracks);
+    preparedClip.name = key;
+    return preparedClip;
   }
 
-  _applyLocomotionSemanticPose(targets, {
+  _prepareAnimationTrack(track) {
+    const trackName = this._retargetAnimationTrackName(track.name);
+    const property = trackName.slice(trackName.lastIndexOf('.') + 1);
+
+    if (property !== 'position' || !this._isRootMotionTrack(trackName)) {
+      const clonedTrack = track.clone();
+      clonedTrack.name = trackName;
+      return clonedTrack;
+    }
+
+    const values = track.values.slice();
+    const baseX = values[0] ?? 0;
+    const baseZ = values[2] ?? 0;
+
+    for (let index = 0; index < values.length; index += 3) {
+      values[index] = baseX;
+      values[index + 2] = baseZ;
+    }
+
+    return new THREE.VectorKeyframeTrack(
+      trackName,
+      track.times.slice(),
+      values,
+      track.getInterpolation(),
+    );
+  }
+
+  _retargetAnimationTrackName(trackName = '') {
+    const targetName = this._getTrackTargetName(trackName);
+    const normalized = normalizeBoneName(targetName);
+    const candidates = this.bonesByName.get(normalized);
+
+    if (!candidates?.length) {
+      return trackName;
+    }
+
+    const bone = candidates
+      .slice()
+      .sort((a, b) => this._scoreBoneCandidate(b) - this._scoreBoneCandidate(a))[0];
+
+    if (!bone?.name || bone.name === targetName) {
+      return trackName;
+    }
+
+    if (trackName.includes(`[${targetName}]`)) {
+      return trackName.replace(`[${targetName}]`, `[${bone.name}]`);
+    }
+
+    return trackName.replace(targetName, bone.name);
+  }
+
+  _isRootMotionTrack(trackName = '') {
+    const targetName = this._getTrackTargetName(trackName);
+    const normalized = normalizeBoneName(targetName);
+
+    return normalized === 'hips'
+      || normalized === normalizeBoneName(this.root.name)
+      || normalized.includes('armature');
+  }
+
+  _getTrackTargetName(trackName = '') {
+    const propertyIndex = trackName.lastIndexOf('.');
+    const targetPath = propertyIndex >= 0 ? trackName.slice(0, propertyIndex) : trackName;
+    const bracketMatch = targetPath.match(/\[([^\]]+)\]$/);
+
+    if (bracketMatch) {
+      return bracketMatch[1];
+    }
+
+    const slashParts = targetPath.split('/');
+    return slashParts[slashParts.length - 1] ?? targetPath;
+  }
+
+  _normalizeClipKey(key) {
+    const text = String(key ?? '').trim();
+    if (!text) {
+      return null;
+    }
+
+    const compact = text.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    const aliases = {
+      climbingladder: 'climbingLadder',
+      covertostand: 'coverToStand',
+      covertostand2: 'coverToStand2',
+      crouchedsneakingleft: 'crouchedSneakLeft',
+      crouchedsneakingright: 'crouchedSneakRight',
+      crouchedsneakleft: 'crouchedSneakLeft',
+      crouchedsneakright: 'crouchedSneakRight',
+      fallingidle: 'fallingIdle',
+      fallingtoroll: 'fallingToRoll',
+      hardlanding: 'hardLanding',
+      breathingidle: 'breathingIdle',
+      breathidle: 'breathingIdle',
+      defaultidle: 'breathingIdle',
+      idle: 'idle',
+      lookaround: 'idle',
+      lookaroundidle: 'idle',
+      waitingidle: 'idle',
+      idle2: 'idle2',
+      idle3: 'idle3',
+      idle4: 'idle4',
+      idle5: 'idle5',
+      jumpingup: 'jumpingUp',
+      leftcoversneak: 'leftCoverSneak',
+      leftturn: 'leftTurn',
+      rightcoversneak: 'rightCoverSneak',
+      rightturn: 'rightTurn',
+      runtostop: 'runToStop',
+      running: 'running',
+      slowjogbackwards: 'slowJogBackwards',
+      standtocover: 'standToCover',
+      standtocover2: 'standToCover2',
+      strutwalking: 'strutWalking',
+      walking: 'walking',
+      walk: 'walking',
+      jog: 'running',
+      run: 'running',
+      sprint: 'running',
+      backpedal: 'slowJogBackwards',
+    };
+
+    return aliases[compact] ?? text;
+  }
+
+  _firstAvailable(...keys) {
+    for (const key of keys.map((entry) => this._normalizeClipKey(entry))) {
+      if (key && this.animationActions.has(key)) {
+        return key;
+      }
+    }
+
+    return null;
+  }
+
+  _selectAnimationClipKey({
+    moving = false,
+    moveAmount = 0,
+    state = 'idle',
+    projectileAiming = false,
+    backpedaling = false,
+    running = false,
+    attackKind = 'melee',
+    lockOnActive = false,
+    strafeAmount = 0,
+    clipKey = null,
+  } = {}) {
+    const forcedClip = this._normalizeClipKey(clipKey);
+    if (forcedClip && this.animationActions.has(forcedClip)) {
+      return forcedClip;
+    }
+
+    if (state === 'neutralJump' || state === 'forwardJump') {
+      return this._firstAvailable('jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'fall') {
+      return this._firstAvailable('fallingIdle', 'jumpingUp', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'land') {
+      return this._firstAvailable('hardLanding', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'dodgeRoll') {
+      return this._firstAvailable('fallingToRoll', 'hardLanding', 'running', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'knockbackFall' || state === 'downed') {
+      return this._firstAvailable('fallingToRoll', 'fallingIdle', 'hardLanding', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'getUp') {
+      return this._firstAvailable('coverToStand', 'coverToStand2', 'hardLanding', 'breathingIdle', 'idle');
+    }
+
+    const isAttackingWithoutAuthoredClip = state === 'attacking'
+      && (attackKind === 'beamBlade' || attackKind === 'melee' || projectileAiming);
+    const shouldUseLocomotion = moving || state === 'walking' || state === 'running' || isAttackingWithoutAuthoredClip;
+
+    if (shouldUseLocomotion) {
+      if (backpedaling) {
+        return this._firstAvailable('slowJogBackwards', 'walking', 'strutWalking', 'breathingIdle', 'idle');
+      }
+
+      if (lockOnActive && Math.abs(strafeAmount) > 0.35) {
+        return strafeAmount < 0
+          ? this._firstAvailable('crouchedSneakLeft', 'leftCoverSneak', 'leftTurn', 'walking', 'breathingIdle', 'idle')
+          : this._firstAvailable('crouchedSneakRight', 'rightCoverSneak', 'rightTurn', 'walking', 'breathingIdle', 'idle');
+      }
+
+      if (running || state === 'running' || moveAmount > 1.1) {
+        return this._firstAvailable('running', 'strutWalking', 'walking', 'breathingIdle', 'idle');
+      }
+
+      return this._firstAvailable('walking', 'strutWalking', 'running', 'breathingIdle', 'idle');
+    }
+
+    if (this.stateTime >= WAITING_IDLE_DELAY_SECONDS) {
+      return this._firstAvailable('idle', 'idle2', 'idle3', 'idle4', 'idle5', 'breathingIdle', 'walking');
+    }
+
+    return this._firstAvailable('breathingIdle', 'idle', 'idle2', 'idle3', 'idle4', 'idle5', 'walking');
+  }
+
+  _fadeToClip(key, fadeSeconds = 0.16) {
+    if (!key) {
+      return false;
+    }
+
+    const action = this.animationActions.get(key);
+    if (!action) {
+      return false;
+    }
+
+    if (this.activeAction === action) {
+      return true;
+    }
+
+    const previousAction = this.activeAction;
+    action.reset();
+    action.enabled = true;
+    action.setEffectiveWeight(1);
+    action.play();
+
+    if (previousAction) {
+      if (fadeSeconds > 0) {
+        previousAction.crossFadeTo(action, fadeSeconds, false);
+      } else {
+        previousAction.stop();
+      }
+    }
+
+    this.activeAction = action;
+    this.activeClipKey = key;
+    this.root.userData.activeFbxAnimationClip = key;
+    return true;
+  }
+
+  _syncActiveActionSpeed(key, {
     moving = false,
     moveAmount = 0,
     running = false,
-    projectileAiming = false,
-    lockOnActive = false,
-    strafeAmount = 0,
+    backpedaling = false,
   } = {}) {
-    if (!moving) {
-      this._applyIdleSemanticPose(targets);
+    if (!this.activeAction || !key) {
       return;
     }
 
-    const speedBlend = THREE.MathUtils.clamp(moveAmount, 0, 1.35);
-    const runBlend = running ? THREE.MathUtils.clamp((speedBlend - 1) / 0.35, 0, 1) : 0;
-    const rightArmSwingScale = projectileAiming || lockOnActive ? AIM_RIGHT_ARM_SWING_SCALE : 1;
-
-    this.locomotionAnimator.apply({
-      rotationTargets: targets,
-      positionTargets: new Map(),
-      phase: this.walkPhase,
-      moveAmount: Math.min(speedBlend, 1),
-      runBlend,
-      rightArmSwingScale,
-      restPositionFor: () => null,
-    });
-
-    const lockOnStrafe = lockOnActive ? THREE.MathUtils.clamp(strafeAmount, -1, 1) : 0;
-    if (Math.abs(lockOnStrafe) > 0.05) {
-      const twist = lockOnStrafe * (moving ? 1 : 0.55);
-      this.semanticMapper.addCorePose(targets, {
-        hips: { pitch: 0, yaw: -degrees(13) * twist, roll: degrees(2.5) * twist },
-        spine: { pitch: 0, yaw: degrees(8) * twist, roll: -degrees(1.8) * twist },
-      });
-      this.semanticMapper.addLegPose(targets, 'left', { hipYaw: -degrees(4) * twist, hipRoll: degrees(2) * twist }, 1);
-      this.semanticMapper.addLegPose(targets, 'right', { hipYaw: -degrees(4) * twist, hipRoll: degrees(2) * twist }, 1);
-    }
-  }
-
-  _applyIdleSemanticPose(targets) {
-    semanticPoseToTargets(this.semanticMapper, targets, this.neutralSemanticPose);
-
-    const breathing = Math.sin(this.time * 2.4);
-    this.semanticMapper.addCorePose(targets, {
-      spine: { pitch: breathing * degrees(0.5), yaw: 0, roll: breathing * degrees(0.4) },
-      neck: { pitch: breathing * degrees(0.35), yaw: 0, roll: -breathing * degrees(0.25) },
-    });
-    this.semanticMapper.addArmPose(targets, 'left', {
-      armForwardBack: breathing * degrees(0.8),
-      armRaise: breathing * degrees(0.5),
-      elbowBend: degrees(2),
-    });
-    this.semanticMapper.addArmPose(targets, 'right', {
-      armForwardBack: -breathing * degrees(0.6),
-      armRaise: -breathing * degrees(0.35),
-      elbowBend: degrees(2),
-    });
-  }
-
-  _applyFullBodyActionPose(targets, state, progress) {
-    if (state === 'dodgeRoll') {
-      this.dodgeRollAnimator.apply(targets, progress);
-    } else if (state === 'neutralJump' || state === 'forwardJump' || state === 'fall' || state === 'land') {
-      this.jumpAnimator.apply(targets, state, progress);
-    } else if (state === 'knockbackFall' || state === 'downed') {
-      this.damageAnimator.applyKnockbackFall(targets, state, progress);
-    } else if (state === 'getUp') {
-      this.damageAnimator.applyGetUp(targets, progress);
-    }
-  }
-
-  _applyDebugPoseOverrides(targets) {
-    if (!this.debugPoseEnabled) {
-      return;
+    let speed = 1;
+    if (key === 'walking' || key === 'strutWalking') {
+      speed = THREE.MathUtils.clamp(moveAmount || 1, 0.68, 1.22);
+    } else if (key === 'running') {
+      speed = THREE.MathUtils.clamp((moveAmount || 1.2) / 1.2, 0.78, 1.35);
+    } else if (key === 'slowJogBackwards') {
+      speed = THREE.MathUtils.clamp(moveAmount || 0.9, 0.7, 1.15);
+    } else if (!moving && !running && !backpedaling) {
+      speed = 1;
     }
 
-    for (const [jointName, rotation] of this.debugPoseOverrides.entries()) {
-      setTarget(targets, jointName, rotation.x, rotation.y, rotation.z);
-    }
+    this.activeAction.setEffectiveTimeScale(speed);
   }
 
   _applyDebugPoseOverridesImmediate() {
-    const applied = new Set();
     for (const [jointName, rotation] of this.debugPoseOverrides.entries()) {
-      this._applySemanticJointRotation(jointName, new THREE.Euler(rotation.x, rotation.y, rotation.z), 1, applied);
+      this._applyDebugJointRotation(jointName, new THREE.Euler(rotation.x, rotation.y, rotation.z), 1);
     }
   }
 
-  _applyTargetRotations(targets, alpha) {
-    const applied = new Set();
-
-    for (const [jointName, joint] of this.joints.entries()) {
-      if (!joint || jointName === 'spine') {
-        continue;
-      }
-
-      this._applySemanticJointRotation(jointName, targets.get(jointName) ?? zeroEuler, alpha, applied);
-    }
-
-    this._applySpineRotation(targets.get('spine') ?? zeroEuler, alpha, applied);
-
-    for (const bone of this.animatedBones) {
-      if (!applied.has(bone)) {
-        this._applyBoneRotation(bone, zeroEuler, alpha);
-      }
-    }
-  }
-
-  _applySemanticJointRotation(jointName, target, alpha, applied) {
-    if (jointName === 'spine') {
-      this._applySpineRotation(target, alpha, applied);
-      return;
-    }
-
-    if (jointName === 'leftShoulder' || jointName === 'rightShoulder') {
-      const side = jointName.startsWith('left') ? 'left' : 'right';
-      this._applyShoulderRotation(side, target, alpha, applied);
-      return;
-    }
-
+  _applyDebugJointRotation(jointName, target = zeroEuler, alpha = 1) {
     const joint = this.joints.get(jointName);
     if (!joint) {
       return;
     }
 
-    this._applyBoneRotation(joint, this._mapJointRotation(jointName, target), alpha);
-    applied.add(joint);
-  }
-
-  _applySpineRotation(target, alpha, applied) {
-    const bones = this.spineBones.length > 0 ? this.spineBones : [this.joints.get('spine')];
-    const weights = bones.length >= 3 ? [0.32, 0.42, 0.26] : bones.length === 2 ? [0.55, 0.45] : [1];
-
-    bones.forEach((bone, index) => {
-      if (!bone) {
-        return;
-      }
-
-      this._applyBoneRotation(bone, scaleEuler(target, weights[index] ?? 1), alpha);
-      applied.add(bone);
-    });
-  }
-
-  _applyShoulderRotation(side, target, alpha, applied) {
-    const joint = this.joints.get(`${side}Shoulder`);
-    const clavicle = this.clavicleBones[side];
-    const mapped = this._mapJointRotation(`${side}Shoulder`, target);
-
-    if (clavicle && clavicle !== joint) {
-      this._applyBoneRotation(clavicle, scaleEuler(mapped, SHOULDER_CLAVICLE_BLEND), alpha);
-      applied.add(clavicle);
-    }
-
-    if (joint) {
-      this._applyBoneRotation(joint, mapped, alpha);
-      applied.add(joint);
-    }
-  }
-
-  _mapJointRotation(jointName, target = zeroEuler) {
-    if (jointName.endsWith('Shoulder')) {
-      return new THREE.Euler(
-        (target.x + target.y) * SHOULDER_FORWARD_AXIS_SCALE,
-        0,
-        target.z,
-      );
-    }
-
-    if (jointName.endsWith('Elbow')) {
-      return new THREE.Euler(
-        target.x * ELBOW_TWIST_SCALE,
-        target.y,
-        target.z,
-      );
-    }
-
-    return target;
+    this._applyBoneRotation(joint, target, alpha);
   }
 
   _applyBoneRotation(bone, rotation = zeroEuler, alpha = 1) {
     const rest = this.restLocalQuaternions.get(bone);
-    const axes = this.parentSpaceAxes.get(bone);
 
-    if (!rest || !axes) {
+    if (!rest) {
       return;
     }
 
-    const delta = tempQuaternionA.identity();
-
-    if (Math.abs(rotation.x) > 0.000001) {
-      delta.multiply(tempQuaternionB.setFromAxisAngle(axes.x, rotation.x));
-    }
-    if (Math.abs(rotation.y) > 0.000001) {
-      delta.multiply(tempQuaternionC.setFromAxisAngle(axes.y, rotation.y));
-    }
-    if (Math.abs(rotation.z) > 0.000001) {
-      delta.multiply(tempQuaternionD.setFromAxisAngle(axes.z, rotation.z));
-    }
-
-    const targetQuaternion = rest.clone().premultiply(delta);
+    tempQuaternionA.setFromEuler(rotation);
+    const targetQuaternion = rest.clone().multiply(tempQuaternionA);
     bone.quaternion.slerp(targetQuaternion, THREE.MathUtils.clamp(alpha, 0, 1));
-  }
-
-  _resetAnimatedBonePositions(alpha = 1) {
-    for (const bone of this.animatedBones) {
-      const restPosition = this.restLocalPositions.get(bone);
-      const restScale = this.restLocalScales.get(bone);
-
-      if (restPosition) {
-        bone.position.lerp(restPosition, alpha);
-      }
-
-      if (restScale) {
-        bone.scale.lerp(restScale, alpha);
-      }
-    }
   }
 
   _syncRightArmReplacementVisibility() {
@@ -1012,7 +1073,6 @@ export class SkeletalModelRig {
     const alpha = Math.min(1, dt * 22);
 
     let targetX = 0;
-    const targetY = -Math.PI / 2;
     let targetZ = 0;
 
     if (state === 'attacking' && attackKind === 'beamBlade') {
@@ -1020,9 +1080,10 @@ export class SkeletalModelRig {
       targetZ = -0.04 * chamberHold;
     }
 
-    this.busterArmGroup.rotation.x = THREE.MathUtils.lerp(this.busterArmGroup.rotation.x, targetX, alpha);
-    this.busterArmGroup.rotation.y = THREE.MathUtils.lerp(this.busterArmGroup.rotation.y, targetY, alpha);
-    this.busterArmGroup.rotation.z = THREE.MathUtils.lerp(this.busterArmGroup.rotation.z, targetZ, alpha);
+    tempEuler.set(targetX, 0, targetZ);
+    tempQuaternionB.setFromEuler(tempEuler);
+    tempQuaternionA.copy(this.busterNeutralQuaternion).multiply(tempQuaternionB);
+    this.busterArmGroup.quaternion.slerp(tempQuaternionA, alpha);
   }
 
   _applyInverseRootScale(group) {

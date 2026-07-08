@@ -49,10 +49,39 @@ const damageFacingRight = new THREE.Vector3();
 const PLAYER_MODEL_PATH = './assets/models/';
 const PLAYER_MODEL_FBX = 'Mega Man Volnutt.fbx';
 const PLAYER_MODEL_TEXTURE = 'Mega Man Volnutt.png';
+const PLAYER_ANIMATION_PATH = `${PLAYER_MODEL_PATH}animations/`;
 const PLAYER_MODEL_MTL = 'Mega Man Volnutt.mtl';
 const PLAYER_MODEL_OBJ = 'Mega Man Volnutt.obj';
 const BUSTER_MODEL_MTL = 'Mega Man Volnutt Buster US.mtl';
 const BUSTER_MODEL_OBJ = 'Mega Man Volnutt Buster US.obj';
+const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
+  { key: 'breathingIdle', file: 'Breathing Idle.fbx', label: 'Breathing Idle', loop: true },
+  { key: 'climbingLadder', file: 'Climbing Ladder.fbx', label: 'Climbing Ladder', loop: true },
+  { key: 'coverToStand', file: 'cover to stand.fbx', label: 'Cover To Stand', loop: false },
+  { key: 'coverToStand2', file: 'cover to stand (2).fbx', label: 'Cover To Stand Alt', loop: false },
+  { key: 'crouchedSneakLeft', file: 'crouched sneaking left.fbx', label: 'Crouched Sneak Left', loop: true },
+  { key: 'crouchedSneakRight', file: 'crouched sneaking right.fbx', label: 'Crouched Sneak Right', loop: true },
+  { key: 'fallingIdle', file: 'falling idle.fbx', label: 'Falling Idle', loop: true },
+  { key: 'fallingToRoll', file: 'falling to roll.fbx', label: 'Falling To Roll', loop: false },
+  { key: 'hardLanding', file: 'hard landing.fbx', label: 'Hard Landing', loop: false },
+  { key: 'idle', file: 'idle.fbx', label: 'Look Around Idle', loop: true },
+  { key: 'idle2', file: 'idle (2).fbx', label: 'Idle 2', loop: true },
+  { key: 'idle3', file: 'idle (3).fbx', label: 'Idle 3', loop: true },
+  { key: 'idle4', file: 'idle (4).fbx', label: 'Idle 4', loop: true },
+  { key: 'idle5', file: 'idle (5).fbx', label: 'Idle 5', loop: true },
+  { key: 'jumpingUp', file: 'jumping up.fbx', label: 'Jumping Up', loop: false },
+  { key: 'leftCoverSneak', file: 'left cover sneak.fbx', label: 'Left Cover Sneak', loop: true },
+  { key: 'leftTurn', file: 'left turn.fbx', label: 'Left Turn', loop: false },
+  { key: 'rightCoverSneak', file: 'right cover sneak.fbx', label: 'Right Cover Sneak', loop: true },
+  { key: 'rightTurn', file: 'right turn.fbx', label: 'Right Turn', loop: false },
+  { key: 'runToStop', file: 'run to stop.fbx', label: 'Run To Stop', loop: false },
+  { key: 'running', file: 'running.fbx', label: 'Running', loop: true },
+  { key: 'slowJogBackwards', file: 'Slow Jog Backwards.fbx', label: 'Slow Jog Backwards', loop: true },
+  { key: 'standToCover', file: 'stand to cover.fbx', label: 'Stand To Cover', loop: false },
+  { key: 'standToCover2', file: 'stand to cover (2).fbx', label: 'Stand To Cover Alt', loop: false },
+  { key: 'strutWalking', file: 'Strut Walking.fbx', label: 'Strut Walking', loop: true },
+  { key: 'walking', file: 'walking.fbx', label: 'Walking', loop: true },
+]);
 const TARGET_MODEL_HEIGHT = 2.85;
 const MIN_BRACED_SHOT_TIME = 0.28;
 const MIN_PROJECTILE_AIM_LOCK_TIME = 0.44;
@@ -128,6 +157,9 @@ export class Player {
     this.externalRig = null;
     this._modelWalkTime = 0;
     this._characterModelScale = 1;
+    this._loadedModelUsesFbxClips = false;
+    this._fbxAnimationLibraryLoading = false;
+    this._fbxAnimationLibraryLoaded = false;
     this._busterArmLoading = false;
     this._busterArmLoaded = false;
     this._attackWeaponKind = null;
@@ -427,6 +459,7 @@ export class Player {
     attackKind = null,
     attackProgress = null,
     forceSwordArm = false,
+    clipKey = null,
   } = {}) {
     if (this.dead) {
       return;
@@ -457,6 +490,7 @@ export class Player {
       projectileAiming,
       attackKind: previewAttackKind,
       attackProgress: previewAttackProgress,
+      clipKey,
       animationState: previewAttackKind === 'beamBlade' ? 'attacking' : undefined,
       skipAttackKindReset: true,
     });
@@ -1356,6 +1390,67 @@ export class Player {
     );
   }
 
+  _loadFbxAnimationLibrary(targetRig = this.externalRig) {
+    if (!targetRig?.setAnimationClips || this._fbxAnimationLibraryLoading) {
+      return;
+    }
+
+    this._fbxAnimationLibraryLoading = true;
+    this._fbxAnimationLibraryLoaded = false;
+
+    const loader = new FBXLoader();
+    loader.setPath(PLAYER_ANIMATION_PATH);
+    loader.setResourcePath(PLAYER_MODEL_PATH);
+
+    const loadClip = (definition) => new Promise((resolve) => {
+      loader.load(
+        definition.file,
+        (animationModel) => {
+          const clip = animationModel.animations?.[0] ?? null;
+
+          if (!clip) {
+            console.warn(`FBX animation file did not include an animation clip: ${definition.file}`);
+            resolve(null);
+            return;
+          }
+
+          clip.name = definition.key;
+          resolve([definition.key, { ...definition, clip }]);
+        },
+        undefined,
+        (error) => {
+          console.warn(`Could not load FBX animation clip: ${definition.file}`, error);
+          resolve(null);
+        },
+      );
+    });
+
+    Promise.all(PLAYER_FBX_ANIMATION_DEFINITIONS.map(loadClip))
+      .then((loadedEntries) => {
+        if (this.externalRig !== targetRig) {
+          return;
+        }
+
+        const clips = new Map();
+        for (const entry of loadedEntries) {
+          if (entry) {
+            clips.set(entry[0], entry[1]);
+          }
+        }
+
+        const loadedCount = targetRig.setAnimationClips(clips);
+        targetRig.root.userData.fbxAnimationLoadState = {
+          loaded: loadedCount,
+          expected: PLAYER_FBX_ANIMATION_DEFINITIONS.length,
+          clips: [...clips.keys()],
+        };
+        this._fbxAnimationLibraryLoaded = loadedCount > 0;
+      })
+      .finally(() => {
+        this._fbxAnimationLibraryLoading = false;
+      });
+  }
+
   _useExternalCharacterModel(model, { source = 'obj' } = {}) {
     model.name = 'playerMegaManVolnuttModel';
     const isSkinnedModel = source === 'fbx' || this._modelHasSkinnedMesh(model);
@@ -1388,6 +1483,7 @@ export class Player {
 
     let visibleModel = model;
     this.externalRig = null;
+    this._loadedModelUsesFbxClips = false;
 
     try {
       const rig = isSkinnedModel
@@ -1397,10 +1493,20 @@ export class Player {
       if (rig.meshCount > 0) {
         visibleModel = rig.root;
         this.externalRig = rig;
+        this._loadedModelUsesFbxClips = Boolean(rig.usesFbxAnimationClips);
+        this.animation.setPoseOutputEnabled?.(!this._loadedModelUsesFbxClips);
         this._loadBusterArmModel();
+
+        if (this._loadedModelUsesFbxClips) {
+          this._loadFbxAnimationLibrary(rig);
+        }
       }
     } catch (error) {
       console.warn('Could not create animated player rig. Using the static model instead.', error);
+    }
+
+    if (!this._loadedModelUsesFbxClips) {
+      this.animation.setPoseOutputEnabled?.(true);
     }
 
     this.modelRoot.clear();
@@ -1567,37 +1673,46 @@ export class Player {
       this._modelWalkTime += dt * walkSpeed * walkDirection;
     }
 
+    const clipDrivenRig = Boolean(this.externalRig?.usesFbxAnimationClips);
     const actionProgress = Number.isFinite(motionOptions.actionProgress)
       ? THREE.MathUtils.clamp(motionOptions.actionProgress, 0, 1)
       : this.animation.getActionProgress?.() ?? 0;
     const animationState = motionOptions.animationState ?? this.animation.state;
-    const stepLift = Math.abs(Math.sin(this._modelWalkTime));
-    let targetY = moving ? stepLift * 0.062 : 0;
-    let targetRoll = moving ? Math.sin(this._modelWalkTime) * 0.032 : 0;
-    let targetPitch = 0;
 
-    if (animationState === 'neutralJump' || animationState === 'forwardJump') {
-      const jumpLift = Math.sin(actionProgress * Math.PI) * (animationState === 'forwardJump' ? 0.58 : 0.72);
-      const landingCompression = THREE.MathUtils.smoothstep(actionProgress, 0.78, 1) * 0.045;
-      targetY = Math.max(targetY, jumpLift) - landingCompression;
-      targetPitch = animationState === 'forwardJump' ? -Math.sin(actionProgress * Math.PI) * 0.08 : 0;
-    } else if (animationState === 'dodgeRoll') {
-      targetY = Math.max(0.02, targetY * 0.45);
-      targetPitch = Math.sin(actionProgress * Math.PI) * 0.18;
-      targetRoll += Math.sin(actionProgress * Math.PI * 2) * 0.08;
-    } else if (animationState === 'knockbackFall' || animationState === 'downed') {
-      targetY = Math.max(0, targetY * 0.25);
-      targetPitch = -THREE.MathUtils.smoothstep(actionProgress, 0.15, 0.85) * 0.16;
-      targetRoll += -THREE.MathUtils.smoothstep(actionProgress, 0.2, 0.8) * 0.08;
-    } else if (animationState === 'getUp') {
-      const crouch = Math.sin(actionProgress * Math.PI);
-      targetY = Math.max(0, targetY * 0.35 - crouch * 0.025);
-      targetPitch = -0.1 * (1 - THREE.MathUtils.smoothstep(actionProgress, 0.25, 1));
+    if (clipDrivenRig) {
+      const alpha = Math.min(1, dt * 14);
+      this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, 0, alpha);
+      this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, 0, alpha);
+      this.modelRoot.rotation.z = THREE.MathUtils.lerp(this.modelRoot.rotation.z, 0, alpha);
+    } else {
+      const stepLift = Math.abs(Math.sin(this._modelWalkTime));
+      let targetY = moving ? stepLift * 0.062 : 0;
+      let targetRoll = moving ? Math.sin(this._modelWalkTime) * 0.032 : 0;
+      let targetPitch = 0;
+
+      if (animationState === 'neutralJump' || animationState === 'forwardJump') {
+        const jumpLift = Math.sin(actionProgress * Math.PI) * (animationState === 'forwardJump' ? 0.58 : 0.72);
+        const landingCompression = THREE.MathUtils.smoothstep(actionProgress, 0.78, 1) * 0.045;
+        targetY = Math.max(targetY, jumpLift) - landingCompression;
+        targetPitch = animationState === 'forwardJump' ? -Math.sin(actionProgress * Math.PI) * 0.08 : 0;
+      } else if (animationState === 'dodgeRoll') {
+        targetY = Math.max(0.02, targetY * 0.45);
+        targetPitch = Math.sin(actionProgress * Math.PI) * 0.18;
+        targetRoll += Math.sin(actionProgress * Math.PI * 2) * 0.08;
+      } else if (animationState === 'knockbackFall' || animationState === 'downed') {
+        targetY = Math.max(0, targetY * 0.25);
+        targetPitch = -THREE.MathUtils.smoothstep(actionProgress, 0.15, 0.85) * 0.16;
+        targetRoll += -THREE.MathUtils.smoothstep(actionProgress, 0.2, 0.8) * 0.08;
+      } else if (animationState === 'getUp') {
+        const crouch = Math.sin(actionProgress * Math.PI);
+        targetY = Math.max(0, targetY * 0.35 - crouch * 0.025);
+        targetPitch = -0.1 * (1 - THREE.MathUtils.smoothstep(actionProgress, 0.25, 1));
+      }
+
+      this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, targetY, Math.min(1, dt * 12));
+      this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, targetPitch, Math.min(1, dt * 12));
+      this.modelRoot.rotation.z = THREE.MathUtils.lerp(this.modelRoot.rotation.z, targetRoll, Math.min(1, dt * 12));
     }
-
-    this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, targetY, Math.min(1, dt * 12));
-    this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, targetPitch, Math.min(1, dt * 12));
-    this.modelRoot.rotation.z = THREE.MathUtils.lerp(this.modelRoot.rotation.z, targetRoll, Math.min(1, dt * 12));
 
     const rawAttackProgress = Number.isFinite(motionOptions.attackProgress)
       ? THREE.MathUtils.clamp(motionOptions.attackProgress, 0, 1)
@@ -1628,6 +1743,7 @@ export class Player {
       attackKind,
       lockOnActive: Boolean(motionOptions.lockOnActive),
       strafeAmount: motionOptions.strafeAmount ?? 0,
+      clipKey: motionOptions.clipKey ?? null,
     });
 
     if (!motionOptions.skipAttackKindReset && this.animation.attackTimer <= 0 && !projectileAimLocked) {

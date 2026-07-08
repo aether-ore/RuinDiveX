@@ -14,6 +14,7 @@ const contentTypes = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.svg': 'image/svg+xml',
+  '.fbx': 'application/octet-stream',
 };
 
 const server = createServer(async (request, response) => {

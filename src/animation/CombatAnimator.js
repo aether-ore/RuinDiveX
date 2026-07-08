@@ -1,7 +1,58 @@
 import * as THREE from 'three';
-import { degrees } from '../SemanticRigMapper.js';
+import { degrees, semanticPoseDegreesToRadians } from '../SemanticRigMapper.js';
 
 const BEAM_BLADE_TOTAL_FRAMES = 24;
+const BEAM_BLADE_CHAMBER_POSE = semanticPoseDegreesToRadians({
+  core: {
+    hips: { pitch: 0, yaw: 0, roll: 0 },
+    spine: { pitch: -4, yaw: 2, roll: -2 },
+    neck: { pitch: 0, yaw: 0, roll: 0 },
+  },
+  leftArm: {
+    armTwist: 8,
+    armForwardBack: 14,
+    armRaise: 55,
+    forearmTwist: 11,
+    elbowDepth: -72,
+    elbowBend: -7,
+    wristPitch: 0,
+    wristYaw: 0,
+    wristRoll: 0,
+  },
+  rightArm: {
+    armTwist: -2,
+    armForwardBack: 78,
+    armRaise: -5,
+    forearmTwist: 19,
+    elbowDepth: 107,
+    elbowBend: -31,
+    wristPitch: 0,
+    wristYaw: 0,
+    wristRoll: 0,
+  },
+  leftLeg: {
+    hipPitch: -45,
+    hipYaw: -5,
+    hipRoll: -7,
+    kneeBend: 62,
+    kneeYaw: -5,
+    kneeRoll: -2,
+    anklePitch: -14,
+    ankleYaw: 11,
+    ankleRoll: 2,
+  },
+  rightLeg: {
+    hipPitch: 14,
+    hipYaw: -42,
+    hipRoll: -2,
+    kneeBend: 0,
+    kneeYaw: -4,
+    kneeRoll: 0,
+    anklePitch: 0,
+    ankleYaw: 0,
+    ankleRoll: 0,
+  },
+});
 
 export class CombatAnimator {
   constructor(mapper) {
@@ -50,38 +101,12 @@ export class CombatAnimator {
     const slashWeight = slash * committed;
     const followWeight = followThrough * committed;
 
-    this.mapper.blendJoint(
-      targets,
-      'hips',
-      0,
-      0,
-      0,
-      chamberWeight,
-    );
-    this.mapper.blendJoint(
-      targets,
-      'spine',
-      degrees(-4),
-      degrees(2),
-      degrees(-2),
-      chamberWeight,
-    );
-    this.mapper.blendJoint(targets, 'neck', 0, 0, 0, chamberWeight);
+    this.mapper.blendCorePose(targets, BEAM_BLADE_CHAMBER_POSE.core, chamberWeight);
     this.mapper.blendJoint(targets, 'hips', -degrees(2) * strike, degrees(-16), -degrees(2) * strike, slashWeight);
     this.mapper.blendJoint(targets, 'spine', -degrees(4) * strike, degrees(-38), -degrees(5) * strike, slashWeight);
     this.mapper.blendJoint(targets, 'neck', 0, degrees(5), 0, Math.max(releaseWeight, slashWeight));
 
-    this.mapper.blendArmPose(targets, 'right', {
-      armForwardBack: degrees(78),
-      armRaise: degrees(-5),
-      armTwist: degrees(-2),
-      forearmTwist: degrees(19),
-      elbowDepth: degrees(107),
-      elbowBend: degrees(-31),
-      wristPitch: 0,
-      wristYaw: 0,
-      wristRoll: 0,
-    }, chamberWeight);
+    this.mapper.blendArmPose(targets, 'right', BEAM_BLADE_CHAMBER_POSE.rightArm, chamberWeight);
     this.mapper.blendArmPose(targets, 'right', {
       armForwardBack: degrees(-28),
       armRaise: degrees(-8),
@@ -110,29 +135,15 @@ export class CombatAnimator {
       wristRoll: degrees(0),
     }, followWeight);
 
-    this.mapper.blendArmPose(targets, 'left', {
-      armForwardBack: degrees(14),
-      armRaise: degrees(55),
-      armTwist: degrees(8),
-      forearmTwist: degrees(11),
-      elbowDepth: degrees(-72),
-      elbowBend: degrees(-7),
-      wristPitch: 0,
-      wristYaw: 0,
-      wristRoll: 0,
-    }, chamberWeight);
+    this.mapper.blendArmPose(targets, 'left', BEAM_BLADE_CHAMBER_POSE.leftArm, chamberWeight);
     this.mapper.blendArmPose(targets, 'left', {
       armForwardBack: degrees(-10),
       armRaise: degrees(48),
       elbowBend: degrees(18),
     }, slashWeight * 0.55);
 
-    this.mapper.blendJoint(targets, 'leftHip', degrees(-45), degrees(-5), degrees(-7), chamberWeight);
-    this.mapper.blendJoint(targets, 'leftKnee', degrees(62), degrees(-5), degrees(-2), chamberWeight);
-    this.mapper.blendJoint(targets, 'leftAnkle', degrees(-14), degrees(11), degrees(2), chamberWeight);
-    this.mapper.blendJoint(targets, 'rightHip', degrees(14), degrees(-42), degrees(-2), chamberWeight);
-    this.mapper.blendJoint(targets, 'rightKnee', 0, degrees(-4), 0, chamberWeight);
-    this.mapper.blendJoint(targets, 'rightAnkle', 0, 0, 0, chamberWeight);
+    this.mapper.blendLegPose(targets, 'left', BEAM_BLADE_CHAMBER_POSE.leftLeg, chamberWeight);
+    this.mapper.blendLegPose(targets, 'right', BEAM_BLADE_CHAMBER_POSE.rightLeg, chamberWeight);
     this.mapper.blendJoint(targets, 'leftHip', degrees(-35), 0, degrees(10), slashWeight);
     this.mapper.blendJoint(targets, 'leftKnee', degrees(52) + strike * degrees(10), 0, 0, slashWeight);
     this.mapper.blendJoint(targets, 'rightHip', degrees(-8), 0, degrees(-12), slashWeight);

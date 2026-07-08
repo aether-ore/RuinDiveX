@@ -5,16 +5,28 @@ export function degrees(value = 0) {
   return THREE.MathUtils.degToRad(Number(value) || 0);
 }
 
-export function semanticDegreesToRadians(value = {}) {
+export function semanticPoseDegreesToRadians(value = {}) {
+  if (typeof value === 'number') {
+    return degrees(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => semanticPoseDegreesToRadians(entry));
+  }
+
   if (!value || typeof value !== 'object') {
-    return {};
+    return value;
   }
 
   const converted = {};
   for (const [key, entry] of Object.entries(value)) {
-    converted[key] = typeof entry === 'number' ? degrees(entry) : entry;
+    converted[key] = semanticPoseDegreesToRadians(entry);
   }
   return converted;
+}
+
+export function semanticDegreesToRadians(value = {}) {
+  return semanticPoseDegreesToRadians(value);
 }
 
 function ensureEuler(map, name) {
@@ -250,6 +262,20 @@ export class SemanticRigMapper {
     this.blendJoint(targets, `${side}Wrist`, euler.wrist.x, euler.wrist.y, euler.wrist.z, weight);
   }
 
+  blendCorePose(targets, pose = {}, weight = 1) {
+    if (pose.hips) {
+      this.blendJoint(targets, 'hips', pose.hips.pitch ?? 0, pose.hips.yaw ?? 0, pose.hips.roll ?? 0, weight);
+    }
+
+    if (pose.spine) {
+      this.blendJoint(targets, 'spine', pose.spine.pitch ?? 0, pose.spine.yaw ?? 0, pose.spine.roll ?? 0, weight);
+    }
+
+    if (pose.neck) {
+      this.blendJoint(targets, 'neck', pose.neck.pitch ?? 0, pose.neck.yaw ?? 0, pose.neck.roll ?? 0, weight);
+    }
+  }
+
   setLegPose(targets, side, pose = {}) {
     this.setJoint(
       targets,
@@ -278,6 +304,12 @@ export class SemanticRigMapper {
     this.addJoint(targets, `${side}Hip`, pose.hipPitch ?? 0, pose.hipYaw ?? 0, pose.hipRoll ?? 0, weight);
     this.addJoint(targets, `${side}Knee`, pose.kneeBend ?? 0, pose.kneeYaw ?? 0, pose.kneeRoll ?? 0, weight);
     this.addJoint(targets, `${side}Ankle`, pose.anklePitch ?? 0, pose.ankleYaw ?? 0, pose.ankleRoll ?? 0, weight);
+  }
+
+  blendLegPose(targets, side, pose = {}, weight = 1) {
+    this.blendJoint(targets, `${side}Hip`, pose.hipPitch ?? 0, pose.hipYaw ?? 0, pose.hipRoll ?? 0, weight);
+    this.blendJoint(targets, `${side}Knee`, pose.kneeBend ?? 0, pose.kneeYaw ?? 0, pose.kneeRoll ?? 0, weight);
+    this.blendJoint(targets, `${side}Ankle`, pose.anklePitch ?? 0, pose.ankleYaw ?? 0, pose.ankleRoll ?? 0, weight);
   }
 
   setCorePose(targets, pose = {}) {

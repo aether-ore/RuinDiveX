@@ -444,6 +444,7 @@ export class UIManager {
     this.healthDamagePulseTimer = 0;
     this.poseDebugOpen = false;
     this.poseDebugControlsRendered = false;
+    this.poseDebugFocusedJointName = null;
     this.poseDebugPresetAnimations = this._createPoseDebugAnimations();
     this.poseDebugAnimations = this._createPoseDebugAnimations();
     this.poseDebugAnimationId = this.poseDebugAnimations[0]?.id ?? '';
@@ -708,8 +709,38 @@ export class UIManager {
       this.game.player.externalRig?.updateDebugPoseOverride?.(jointName, axis, degreesToRadians(joint[axis]));
     }
 
+    this.focusPoseDebugJoint(jointName);
     this._writePoseDebugValuesToActiveKeyframe();
     this._renderPoseDebugPrompt();
+  }
+
+  focusPoseDebugJoint(jointName, { scroll = true, focusAxis = null } = {}) {
+    if (!jointName || !this.poseDebugControlsRendered) {
+      return;
+    }
+
+    const group = this.poseDebugControls?.querySelector(`[data-pose-joint-group="${jointName}"]`);
+    if (!group) {
+      return;
+    }
+
+    const jointChanged = this.poseDebugFocusedJointName !== jointName;
+    this.poseDebugFocusedJointName = jointName;
+
+    for (const entry of this.poseDebugControls?.querySelectorAll('.pose-joint-group.is-active') ?? []) {
+      entry.classList.remove('is-active');
+    }
+
+    group.classList.add('is-active');
+    group.open = true;
+
+    if (focusAxis) {
+      group.querySelector(`input[data-pose-joint="${jointName}"][data-pose-axis="${focusAxis}"]`)?.focus({ preventScroll: true });
+    }
+
+    if (scroll && jointChanged) {
+      group.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
   }
 
   showLootToast(item) {
@@ -745,6 +776,7 @@ export class UIManager {
     for (const { name, label } of POSE_DEBUG_JOINTS) {
       const group = document.createElement('details');
       group.className = 'pose-joint-group';
+      group.dataset.poseJointGroup = name;
       group.open = ['hips', 'spine', 'rightShoulder', 'rightElbow', 'leftHip', 'rightHip'].includes(name);
       const helperNote = POSE_HELPER_NOTES[name] ?? 'Raw local Euler axes are shown for inspection. Use semantic export for animation authoring.';
       group.innerHTML = `
@@ -763,7 +795,17 @@ export class UIManager {
                 data-pose-joint="${name}"
                 data-pose-axis="${axis}"
               />
-              <output data-pose-output="${name}:${axis}">${formatPoseDegrees(this.poseDebugValues.get(name)?.[axis] ?? 0)} deg</output>
+              <input
+                class="pose-axis-number"
+                type="number"
+                min="-180"
+                max="180"
+                step="0.5"
+                value="${formatPoseDegrees(this.poseDebugValues.get(name)?.[axis] ?? 0)}"
+                aria-label="${label} ${getPoseAxisLabel(name, axis)} degrees"
+                data-pose-number-joint="${name}"
+                data-pose-number-axis="${axis}"
+              />
             </label>
           `).join('')}
         </div>
@@ -772,6 +814,9 @@ export class UIManager {
     }
 
     this.poseDebugControlsRendered = true;
+    if (this.poseDebugFocusedJointName) {
+      this.focusPoseDebugJoint(this.poseDebugFocusedJointName, { scroll: false });
+    }
   }
 
   _syncPoseDebugRigState() {
@@ -839,14 +884,14 @@ export class UIManager {
       return;
     }
 
-    const input = this.poseDebugPanel?.querySelector(`input[data-pose-joint="${jointName}"][data-pose-axis="${axis}"]`);
+    const input = this.poseDebugPanel?.querySelector(`input[type="range"][data-pose-joint="${jointName}"][data-pose-axis="${axis}"]`);
     if (input) {
       input.value = String(joint[axis]);
     }
 
-    const output = this.poseDebugPanel?.querySelector(`[data-pose-output="${jointName}:${axis}"]`);
-    if (output) {
-      output.textContent = `${formatPoseDegrees(joint[axis])} deg`;
+    const numberInput = this.poseDebugPanel?.querySelector(`input[data-pose-number-joint="${jointName}"][data-pose-number-axis="${axis}"]`);
+    if (numberInput) {
+      numberInput.value = formatPoseDegrees(joint[axis]);
     }
   }
 
@@ -858,7 +903,7 @@ export class UIManager {
     }
   }
 
-  _updatePoseDebugValue(jointName, axis, value) {
+  _updatePoseDebugValue(jointName, axis, value, { focusAxis = axis } = {}) {
     const joint = this.poseDebugValues.get(jointName);
 
     if (!joint || !['x', 'y', 'z'].includes(axis)) {
@@ -867,10 +912,34 @@ export class UIManager {
 
     joint[axis] = THREE.MathUtils.clamp(Number(value) || 0, -180, 180);
     this._syncPoseDebugAxisControl(jointName, axis);
+    this.focusPoseDebugJoint(jointName, { scroll: false, focusAxis });
 
     this.game.player.externalRig?.updateDebugPoseOverride?.(jointName, axis, degreesToRadians(joint[axis]));
     this._writePoseDebugValuesToActiveKeyframe();
     this._renderPoseDebugPrompt();
+  }
+
+  _commitPoseDebugNumberInput(input) {
+    const jointName = input?.dataset.poseNumberJoint;
+    const axis = input?.dataset.poseNumberAxis;
+
+    if (!jointName || !axis) {
+      return;
+    }
+
+    const valueText = input.value.trim();
+    if (!valueText) {
+      this._syncPoseDebugAxisControl(jointName, axis);
+      return;
+    }
+
+    const value = Number(valueText);
+    if (!Number.isFinite(value)) {
+      this._syncPoseDebugAxisControl(jointName, axis);
+      return;
+    }
+
+    this._updatePoseDebugValue(jointName, axis, value, { focusAxis: null });
   }
 
   _resetPoseDebugValues() {
@@ -883,13 +952,7 @@ export class UIManager {
       }
     }
 
-    for (const input of this.poseDebugPanel?.querySelectorAll('[data-pose-joint]') ?? []) {
-      input.value = '0';
-    }
-
-    for (const output of this.poseDebugPanel?.querySelectorAll('[data-pose-output]') ?? []) {
-      output.textContent = '0 deg';
-    }
+    this._syncAllPoseDebugControls();
 
     this._applyPoseDebugValues();
     this._writePoseDebugValuesToActiveKeyframe();
@@ -1409,7 +1472,31 @@ export class UIManager {
       this._updatePoseDebugValue(input.dataset.poseJoint, input.dataset.poseAxis, input.value);
     });
 
+    this.poseDebugPanel?.addEventListener('keydown', (event) => {
+      const numberInput = event.target.closest('input[data-pose-number-joint]');
+
+      if (!numberInput) {
+        return;
+      }
+
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        this._commitPoseDebugNumberInput(numberInput);
+        numberInput.blur();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        this._syncPoseDebugAxisControl(numberInput.dataset.poseNumberJoint, numberInput.dataset.poseNumberAxis);
+        numberInput.blur();
+      }
+    });
+
     this.poseDebugPanel?.addEventListener('change', (event) => {
+      const numberInput = event.target.closest('input[data-pose-number-joint]');
+      if (numberInput) {
+        this._commitPoseDebugNumberInput(numberInput);
+        return;
+      }
+
       const select = event.target.closest('select');
 
       if (!select) {
@@ -1424,6 +1511,13 @@ export class UIManager {
     });
 
     this.poseDebugPanel?.addEventListener('click', (event) => {
+      const numberInput = event.target.closest('input[data-pose-number-joint]');
+      if (numberInput) {
+        numberInput.select();
+        this.focusPoseDebugJoint(numberInput.dataset.poseNumberJoint, { scroll: false });
+        return;
+      }
+
       const button = event.target.closest('button');
 
       if (!button) {

@@ -1023,7 +1023,6 @@ export class ExternalModelRig {
     const slash = THREE.MathUtils.smoothstep(attackFrame, 12, 16);
     const recovery = THREE.MathUtils.smoothstep(attackFrame, 19, 24);
     const chamberHold = Math.max(beginWindup * 0.55, chamber) * (1 - release) * (1 - slash) * (1 - recovery);
-    const slashSweep = slash * (1 - recovery);
     const alpha = Math.min(1, dt * 22);
 
     let targetX = 0;

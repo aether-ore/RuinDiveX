@@ -185,3 +185,28 @@ Tested the live debug pose mode against the external Mega Man Volnutt segmented 
 - Browser verification: `walk` and `jog` animation previews from side and front-right cameras showed visible opposing arm travel with the player parked at the clear ruin entrance preview spot.
 - Browser verification: `aimWalk` still reported aiming `true` and held the braced buster upper-body pose instead of inheriting the free locomotion arm swing.
 - Remaining browser noise: repeated generic Chromium `UnknownError` entries persisted, but no app-specific module errors or blank-canvas failures appeared during this pass.
+
+## Follow-up Documentation Pass: Rig Idiosyncrasies To Preserve
+
+- The external model's raw local Euler axes are not anatomical controls. Continue using `SemanticRigMapper` and the animator modules for authored gameplay animation instead of hand-writing raw `x/y/z` joint values.
+- Pose Debug exports `semanticPoseDegrees` in degrees for prompt readability, but runtime semantic poses are radians. `semanticPoseDegreesToRadians` now recursively converts pasted nested semantic payloads so future keyframe imports do not need scattered manual `degrees(...)` calls.
+- Arm local-Z signs are intentionally side-aware: positive semantic `armRaise` and `elbowBend` map to left-arm negative local Z and right-arm positive local Z. Local arm X is mostly twist, not visible raise or elbow bend.
+- Locomotion has its own local adapter signs in `LocomotionAnimator.js`. `LEG_STRIDE_AXIS_SIGN = -1` is required for hip/ankle stride pitch and joint Z offsets to travel in player-local `+Z`; `LEG_KNEE_BEND_SIGN = 1` must stay separate so knees do not fold backward.
+- Locomotion arm swing also uses deliberate adapter signs: shoulder forward/back is mirrored per side, elbow depth is mirrored per side, and the arm-raise offset is scaled around the rig's `74` degree neutral carriage. These constants are compensating for the segmented model's arm rest pose, not generic humanoid math.
+- Beam-blade slash direction has two contributors: `CombatAnimator.applyBeamBladeSlash` drives the shoulder/elbow/wrist pose, while `ExternalModelRig._updateBusterArmLocalPose` drives the attached buster/beam-blade mount. If the blade looks wrist-down again, inspect both layers. The active slash mount should stay neutral; only the chamber keeps a small mount tilt.
+- Animation preview is now the preferred visual test path for pose fixes. Useful URLs include `?animationPreview=beamBladeSlash&animationPreviewCamera=right&animationPreviewAttackProgress=0` for chamber and `...attackProgress=0.62` for the flat active slash.
+- Pose composition order matters: idle/locomotion is applied first, aim/recoil can overlay upper body, combat/full-body actions then override or blend, damage flinch can add on top, arm carriage position offsets broaden shoulders, and Pose Debug rotation overrides are applied near the end.
+- Fixes made in this pass: added recursive semantic degree conversion, added mapper helpers for blending core and leg semantic poses, refactored the Beam Blade Slash chamber to use the pasted semantic keyframe payload as a single converted constant, and removed the stale unused slash-sweep variable from the buster mount update.
+- Remaining idiosyncrasies are mostly source-rig behavior rather than bugs. Fix them by authoring through semantic controls and preview URLs, not by globally flipping raw local axes.
+
+## Follow-up Reference Note: Walk Arm Swing
+
+- The Mega Man X running reference depends on the arm silhouette as much as the leg kick/plant. Arms should remain wide, elbows bent, and forearms carried at an angle through the whole gait.
+- The arms should oppose each other deliberately: while one arm is forward, the other is back. Avoid same-direction arm travel and avoid transitional frames where both arms relax into a straight vertical drop.
+- Rear view is the most useful camera for diagnosing arm inversion. Side view can hide forearms that are bending inward across the torso.
+- The latest locomotion tuning keeps a minimum semantic shoulder forward/back swing, elbow bend, and elbow depth inside `LocomotionAnimator.armPose` so kick-out and foot-plant frames still hold a visible swagger instead of collapsing toward neutral.
+- Follow-up rear-view testing showed the forced elbow-depth carry had the old inward sign. `FOREARM_CARRY_AXIS_SIGN = 1` is now the locomotion adapter sign.
+- Do not move elbow or wrist joint positions outward to fake wider arm swing. That tears the segmented forearms away from the upper arms. Keep carriage position offsets shoulder-only, and tune lower-arm width through semantic rotations.
+- Locomotion wrist/forearm twist channels should stay neutral. `forearmTwist`, `wristPitch`, and `wristRoll` read as inward corkscrew motion on the segmented rig.
+- Rear-view axis testing showed that locomotion `elbowDepth` yaw cancels shoulder `armForwardBack` and makes the lower arms appear to twist inward even when wrist rotations are neutral. For free walk/jog swing, keep elbow-depth yaw neutral and drive the visible forward/back fist path from shoulder `armForwardBack` plus elbow `elbowBend`.
+- Follow-up direct axis testing clarified that the raised walk-arm pose needs shoulder local X for the visible forward/back wrist path. Shoulder local Y reads more like side/inward yaw from the rear camera in this pose, so free locomotion routes authored forward/back swing through the shoulder-X semantic channel and leaves shoulder-Y neutral.

@@ -2296,6 +2296,7 @@ export class Game {
           startY: event.clientY,
           startDegrees,
         };
+        this.ui.focusPoseDebugJoint?.(target.jointName);
         this.renderer.domElement.style.cursor = 'grabbing';
         this._updatePoseDebugHandles();
         return;

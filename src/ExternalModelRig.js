@@ -74,6 +74,7 @@ const WALK_LOOP_SECONDS = 1.08;
 const JOG_LOOP_SECONDS = 0.66;
 const AIM_RIGHT_ARM_SWING_SCALE = 0.46;
 const ARM_CARRIAGE_SHOULDER_OUT = 0.028;
+const HAND_MESH_DISTAL_HAND_RATIO = 0.76;
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
@@ -264,6 +265,38 @@ function isHeadMesh(meshName) {
   return meshName.includes('BodyMesh_c');
 }
 
+function handMeshSide(meshName, fallbackPoint, modelCenterX) {
+  if (meshName.includes('HandMesh_L')) {
+    return 'left';
+  }
+
+  if (meshName.includes('HandMesh_R')) {
+    return 'right';
+  }
+
+  return sidePrefix(fallbackPoint, modelCenterX);
+}
+
+function isHandMesh(meshName) {
+  return meshName.includes('HandMesh_L') || meshName.includes('HandMesh_R');
+}
+
+function getHandComponentPartName(componentBounds, meshName, meshBounds, bounds) {
+  if (!meshBounds || meshBounds.isEmpty()) {
+    return null;
+  }
+
+  const modelCenterX = (bounds.min.x + bounds.max.x) * 0.5;
+  const componentCenter = componentBounds.getCenter(new THREE.Vector3());
+  const side = handMeshSide(meshName, componentCenter, modelCenterX);
+  const span = Math.max(0.001, meshBounds.max.x - meshBounds.min.x);
+  const distalRatio = side === 'left'
+    ? (componentCenter.x - meshBounds.min.x) / span
+    : (meshBounds.max.x - componentCenter.x) / span;
+
+  return distalRatio >= HAND_MESH_DISTAL_HAND_RATIO ? `${side}Hand` : `${side}Forearm`;
+}
+
 function shouldAttachToAnkleCuff(centroid, side, bounds, height, textureColor = null) {
   const normalizedY = getNormalizedY(centroid, bounds, height);
 
@@ -301,8 +334,9 @@ function classifyTriangle(centroid, meshName, bounds, height, textureColor = nul
   const absX = Math.abs(xOffset);
   const side = sidePrefix(centroid, centerX);
 
-  if (meshName.includes('HandMesh_L')) return 'leftHand';
-  if (meshName.includes('HandMesh_R')) return 'rightHand';
+  if (isHandMesh(meshName)) {
+    return `${handMeshSide(meshName, centroid, centerX)}Hand`;
+  }
   if (isHeadMesh(meshName)) return 'head';
 
   if (normalizedY > 0.55 && absX > height * 0.11) {
@@ -423,8 +457,10 @@ function getFootComponentPartName(componentBounds, colorCounts, bounds, height) 
   return isFootTopIsland ? `${side}Foot` : null;
 }
 
-function getTriangleComponentPartOverrides(mesh, bounds, height, positionAttribute, uvAttribute, indexAttribute, transform) {
-  if (!mesh.name.includes('BodyMesh_m')) {
+function getTriangleComponentPartOverrides(mesh, bounds, height, positionAttribute, uvAttribute, indexAttribute, transform, meshBounds) {
+  const handMesh = isHandMesh(mesh.name);
+
+  if (!mesh.name.includes('BodyMesh_m') && !handMesh) {
     return new Map();
   }
 
@@ -493,8 +529,10 @@ function getTriangleComponentPartOverrides(mesh, bounds, height, positionAttribu
       }
     }
 
-    const partName = getShoulderComponentPartName(componentBounds, colorCounts, bounds, height)
-      ?? getFootComponentPartName(componentBounds, colorCounts, bounds, height);
+    const partName = handMesh
+      ? getHandComponentPartName(componentBounds, mesh.name, meshBounds, bounds)
+      : getShoulderComponentPartName(componentBounds, colorCounts, bounds, height)
+        ?? getFootComponentPartName(componentBounds, colorCounts, bounds, height);
 
     if (partName) {
       for (const triangle of component) {
@@ -1299,6 +1337,7 @@ export class ExternalModelRig {
     const uvAttribute = geometry.attributes.uv ?? null;
     const indexAttribute = geometry.index ?? null;
     const transform = mesh.matrixWorld;
+    const meshBounds = new THREE.Box3().setFromObject(mesh);
     tempNormalMatrix.getNormalMatrix(transform);
 
     const triangleCount = indexAttribute ? indexAttribute.count / 3 : positionAttribute.count / 3;
@@ -1310,6 +1349,7 @@ export class ExternalModelRig {
       uvAttribute,
       indexAttribute,
       transform,
+      meshBounds,
     );
 
     for (let triangle = 0; triangle < triangleCount; triangle += 1) {

@@ -60,7 +60,7 @@ export class EnemySpawner {
   }
 
   update(dt) {
-    if (this.game.dungeonController?.isPlayerInSafeZone?.()) {
+    if (this.game.isPlayerInSafeArea?.()) {
       return;
     }
 

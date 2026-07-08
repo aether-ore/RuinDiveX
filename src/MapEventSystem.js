@@ -170,6 +170,7 @@ export class MapEventSystem {
   }
 
   update(dt) {
+    const safeArea = Boolean(this.game.isPlayerInSafeArea?.());
     let nearest = null;
     let nearestDistanceSq = Infinity;
 
@@ -178,6 +179,10 @@ export class MapEventSystem {
 
       if (event.cooldownRemaining > 0) {
         event.cooldownRemaining = Math.max(0, event.cooldownRemaining - dt);
+        continue;
+      }
+
+      if (safeArea) {
         continue;
       }
 

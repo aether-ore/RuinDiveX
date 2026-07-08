@@ -267,6 +267,10 @@ export class Game {
     return this.spawner.spawnEnemy(type, elite);
   }
 
+  isPlayerInSafeArea() {
+    return Boolean(this.dungeonController?.isPlayerInSafeZone?.());
+  }
+
   getNearestInteractable() {
     return this.dungeonController?.getNearestInteractable?.()
       ?? this.mapEvents?.getNearestInteractable?.()

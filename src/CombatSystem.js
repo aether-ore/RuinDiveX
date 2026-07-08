@@ -453,9 +453,15 @@ export class CombatSystem {
 
     const state = this.getCurrentWeaponState();
     this._updateWeaponStates(dt);
-    this._updatePendingMeleeStrikes(dt);
     this._updateMines(dt);
     this.swapTimer = Math.max(0, this.swapTimer - dt);
+
+    if (this.game.isPlayerInSafeArea?.()) {
+      this._suspendForSafeArea(state);
+      return;
+    }
+
+    this._updatePendingMeleeStrikes(dt);
 
     const pointer = this.game.pointer;
     if (!pointer) {
@@ -509,6 +515,28 @@ export class CombatSystem {
 
     this.primaryWasDown = pointer.primary;
     this.secondaryWasDown = pointer.secondary;
+  }
+
+  _suspendForSafeArea(state = null) {
+    const pointer = this.game.pointer;
+    if (pointer) {
+      pointer.primaryPressed = false;
+      pointer.secondaryPressed = false;
+    }
+
+    this._stopLaserBeam(true);
+    this._stopDrillSpin();
+    this._clearLockOn();
+    this._hideGrenadePreview();
+    this.pendingMeleeStrikes.length = 0;
+
+    if (state) {
+      state.sprayActive = false;
+      state.sprayWasActiveLastFrame = false;
+    }
+
+    this.primaryWasDown = false;
+    this.secondaryWasDown = false;
   }
 
   switchArmSlot(slotIndex) {

@@ -253,14 +253,6 @@ export class DungeonController {
     this.game.ui?.showToast?.(`${encounter.label} active`, '#ffb347');
   }
 
-  isPositionInSafeZone(position) {
-    return this.safeZones.some((zone) => isInsideZone(position, zone));
-  }
-
-  isPlayerInSafeZone() {
-    return this.isPositionInSafeZone(this.game.player.root.position);
-  }
-
   worldToTile(position) {
     return {
       x: Math.round(position.x / this.tileSize),

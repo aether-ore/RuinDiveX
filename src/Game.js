@@ -2411,6 +2411,11 @@ export class Game {
       return null;
     }
 
+    const resolvedJointName = rig.resolveDebugJointForObject?.(object);
+    if (resolvedJointName && rig.joints.has(resolvedJointName)) {
+      return resolvedJointName;
+    }
+
     for (let current = object; current; current = current.parent) {
       for (const [name, joint] of rig.joints.entries()) {
         if (joint === current) {

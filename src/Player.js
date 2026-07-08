@@ -1,10 +1,12 @@
 import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { AnimationController } from './AnimationController.js';
 import { EquipmentManager } from './EquipmentManager.js';
 import { ExternalModelRig } from './ExternalModelRig.js';
 import { ModularHumanoid } from './ModularHumanoid.js';
+import { SkeletalModelRig } from './SkeletalModelRig.js';
 
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 
@@ -45,6 +47,8 @@ const guardSourceDirection = new THREE.Vector3();
 const damageSourceDirection = new THREE.Vector3();
 const damageFacingRight = new THREE.Vector3();
 const PLAYER_MODEL_PATH = './assets/models/';
+const PLAYER_MODEL_FBX = 'Mega Man Volnutt.fbx';
+const PLAYER_MODEL_TEXTURE = 'Mega Man Volnutt.png';
 const PLAYER_MODEL_MTL = 'Mega Man Volnutt.mtl';
 const PLAYER_MODEL_OBJ = 'Mega Man Volnutt.obj';
 const BUSTER_MODEL_MTL = 'Mega Man Volnutt Buster US.mtl';
@@ -1312,6 +1316,22 @@ export class Player {
   }
 
   _loadCharacterModel() {
+    const fbxLoader = new FBXLoader();
+    fbxLoader.setPath(PLAYER_MODEL_PATH);
+    fbxLoader.setResourcePath(PLAYER_MODEL_PATH);
+
+    fbxLoader.load(
+      PLAYER_MODEL_FBX,
+      (model) => this._useExternalCharacterModel(model, { source: 'fbx' }),
+      undefined,
+      (error) => {
+        console.warn('Could not load rigged FBX player model. Falling back to OBJ model.', error);
+        this._loadLegacyObjCharacterModel();
+      },
+    );
+  }
+
+  _loadLegacyObjCharacterModel() {
     const materialLoader = new MTLLoader();
     materialLoader.setPath(PLAYER_MODEL_PATH);
     materialLoader.setResourcePath(PLAYER_MODEL_PATH);
@@ -1336,8 +1356,13 @@ export class Player {
     );
   }
 
-  _useExternalCharacterModel(model) {
+  _useExternalCharacterModel(model, { source = 'obj' } = {}) {
     model.name = 'playerMegaManVolnuttModel';
+    const isSkinnedModel = source === 'fbx' || this._modelHasSkinnedMesh(model);
+
+    if (isSkinnedModel) {
+      this._applyVolnuttTextureToSkinnedModel(model);
+    }
 
     model.traverse((object) => {
       if (!object.isMesh) {
@@ -1365,7 +1390,9 @@ export class Player {
     this.externalRig = null;
 
     try {
-      const rig = new ExternalModelRig(model);
+      const rig = isSkinnedModel
+        ? new SkeletalModelRig(model)
+        : new ExternalModelRig(model);
 
       if (rig.meshCount > 0) {
         visibleModel = rig.root;
@@ -1373,7 +1400,7 @@ export class Player {
         this._loadBusterArmModel();
       }
     } catch (error) {
-      console.warn('Could not create segmented player rig. Using the static model instead.', error);
+      console.warn('Could not create animated player rig. Using the static model instead.', error);
     }
 
     this.modelRoot.clear();
@@ -1383,6 +1410,41 @@ export class Player {
     this._hideProceduralBodyMeshes();
     this._setEquipmentVisualsVisible(false);
     this.updateWeaponVisualState();
+  }
+
+  _modelHasSkinnedMesh(model) {
+    let hasSkinnedMesh = false;
+
+    model.traverse((object) => {
+      if (object.isSkinnedMesh) {
+        hasSkinnedMesh = true;
+      }
+    });
+
+    return hasSkinnedMesh;
+  }
+
+  _applyVolnuttTextureToSkinnedModel(model) {
+    const texture = new THREE.TextureLoader().load(`${PLAYER_MODEL_PATH}${PLAYER_MODEL_TEXTURE}`);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.flipY = true;
+    texture.name = 'texture_MegaManVolnutt_FBXDiffuse';
+
+    model.traverse((object) => {
+      if (!object.isMesh) {
+        return;
+      }
+
+      const material = new THREE.MeshStandardMaterial({
+        name: 'material_MegaManVolnutt_FBXTextured',
+        map: texture,
+        color: 0xffffff,
+        roughness: 0.42,
+        metalness: 0.08,
+      });
+      material.side = THREE.FrontSide;
+      object.material = material;
+    });
   }
 
   _fitModelToPlayer(model) {

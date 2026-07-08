@@ -111,7 +111,11 @@ export class DungeonController {
 
   getObjectiveText() {
     if (this.isPlayerInSafeZone()) {
-      return this.game.ruinCompleted ? 'Expedition complete' : 'Enter ruin';
+      return this.game.ruinCompleted
+        ? 'Expedition complete'
+        : this.game.expeditionAccepted
+          ? 'Use ruin lift'
+          : 'Accept briefing';
     }
 
     const activeEncounter = this.encounters.find((encounter) => (
@@ -606,10 +610,12 @@ export class DungeonController {
         nearest = {
           kind: 'door',
           target: door,
-          label: encounter && !encounter.cleared
+          label: door.requiresLift
+            ? 'Ruin Descent Gate: Use Lift'
+            : encounter && !encounter.cleared
             ? `${door.label}: Clear Reaverbots`
             : door.requiresKeycard ? `${door.label}: Keycard` : door.label,
-          color: (door.requiresKeycard && this.keycardCount <= 0) || (encounter && !encounter.cleared)
+          color: door.requiresLift || (door.requiresKeycard && this.keycardCount <= 0) || (encounter && !encounter.cleared)
             ? LOCKED_COLOR
             : MECHANISM_COLOR,
         };
@@ -677,7 +683,7 @@ export class DungeonController {
         nearest = {
           kind: 'safe',
           target: safeInteractable,
-          label: safeInteractable.label,
+          label: this._getSafeInteractablePrompt(safeInteractable),
           color: safeInteractable.color,
         };
         nearestDistanceSq = distanceSq;
@@ -713,7 +719,60 @@ export class DungeonController {
     this.nearestInteractable = nearest;
   }
 
+  _getSafeInteractablePrompt(interactable) {
+    if (interactable.action === 'quest') {
+      const required = this.game.getScrapQuestRequirement?.() ?? 0;
+      const scraps = this.game.inventory?.scraps ?? 0;
+      return scraps >= required
+        ? `${interactable.label}: Turn In`
+        : `${interactable.label}: Scrap ${scraps}/${required}`;
+    }
+
+    if (interactable.action === 'research') {
+      const required = this.game.getResearchProcessRequirement?.() ?? 0;
+      const scraps = this.game.inventory?.scraps ?? 0;
+      return scraps >= required
+        ? `${interactable.label}: Process`
+        : `${interactable.label}: Scrap ${scraps}/${required}`;
+    }
+
+    if (interactable.action === 'resetRuin') {
+      return this.game.ruinCompleted
+        ? `${interactable.label}: Shift Ruin`
+        : `${interactable.label}: ${this.game.getRuinResetCost?.() ?? 0}z`;
+    }
+
+    if (interactable.action === 'expedition') {
+      return this.game.ruinCompleted
+        ? `${interactable.label}: Debrief`
+        : this.game.expeditionAccepted
+          ? `${interactable.label}: Briefed`
+        : `${interactable.label}: Large Refractor`;
+    }
+
+    if (interactable.action === 'enterRuin') {
+      return this.game.ruinCompleted
+        ? `${interactable.label}: Complete`
+        : this.game.expeditionAccepted
+          ? `${interactable.label}: Descend`
+          : `${interactable.label}: Need Briefing`;
+    }
+
+    return interactable.label;
+  }
+
   _activateDoor(door) {
+    if (door.requiresLift) {
+      this.game.ui?.showToast?.(
+        this.game.expeditionAccepted
+          ? 'Use the camp ruin lift to descend'
+          : 'Accept the expedition briefing first',
+        '#ffd66b',
+      );
+      this._pulseDoor(door, LOCKED_COLOR);
+      return;
+    }
+
     if (door.encounterId) {
       const encounter = this.encounters.find((candidate) => candidate.id === door.encounterId);
       if (encounter && !encounter.cleared) {
@@ -924,14 +983,37 @@ export class DungeonController {
       return;
     }
 
+    if (interactable.action === 'research') {
+      const processed = this.game.processResearchScraps?.();
+      this.game.addParticleBurst(
+        interactable.position,
+        processed ? interactable.color ?? SHRINE_COLOR : LOCKED_COLOR,
+        processed ? 16 : 8,
+        0.1,
+      );
+      return;
+    }
+
     if (interactable.action === 'expedition') {
       if (this.game.ruinCompleted) {
         this.game.offerRuinReset?.();
         return;
       }
 
-      this.game.ui?.showToast?.('Objective: secure the Large Refractor', '#ffd66b');
-      this.game.addParticleBurst(interactable.position, interactable.color ?? KEYCARD_COLOR, 14, 0.12);
+      this.game.beginExpedition?.({
+        position: interactable.position,
+      });
+      return;
+    }
+
+    if (interactable.action === 'enterRuin') {
+      if (!this.game.expeditionAccepted) {
+        this.game.ui?.showToast?.('Talk to the expedition leader first', '#ffd66b');
+        this.game.addParticleBurst(interactable.position, LOCKED_COLOR, 10, 0.1);
+        return;
+      }
+
+      this.game.enterRuinFromCamp?.();
       return;
     }
 

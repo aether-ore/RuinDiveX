@@ -4,6 +4,7 @@ export class Inventory {
     this.items = [];
     this.gold = 0;
     this.scraps = 0;
+    this.researchData = 0;
   }
 
   addItem(item) {
@@ -47,5 +48,6 @@ export class Inventory {
     this.items.length = 0;
     this.gold = 0;
     this.scraps = 0;
+    this.researchData = 0;
   }
 }

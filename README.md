@@ -1,6 +1,6 @@
 # Mega Man Legends-Inspired Ruin Crawler Prototype
 
-A procedural Three.js top-down ruin-crawler prototype with Mega Man Legends-inspired robotic salvage, arm weapons, buster upgrades, Kevlar and alloy armor, elite Reaverbot-style encounters, loot pickups, and a garage loadout screen.
+A procedural Three.js third-person ruin-crawler prototype with Mega Man Legends-inspired robotic salvage, arm weapons, buster upgrades, Kevlar and alloy armor, elite Reaverbot-style encounters, loot pickups, expedition objectives, and a garage loadout screen.
 
 The equipment foundation now uses robotic part categories instead of fantasy RPG gear:
 
@@ -24,13 +24,26 @@ Primary weapon stats follow the intended buster-part language:
 - Hold left mouse to fire or swing the active arm weapon.
 - Right mouse uses a secondary arm function when available. With `Shield Arm` equipped, it raises a timed guard; early timing parries and staggers attackers. Otherwise it manually vents/reloads the active arm weapon when Energy is not full.
 - Number keys `1` through `4` switch arm weapon slots.
-- `E` activates nearby ruin devices such as Refractor Surge pylons, Overclock Terminals, Repair Stations, Cooling Vents, and Salvage Caches.
+- `E` activates nearby camp, garage, quest, ruin lift, door, chest, mechanism, and field-device interactions.
 - `I` opens the Garage Loadout screen.
 - Arm weapon salvage in the Garage has `1`-`4` loadout buttons for assigning it directly to a hotbar slot.
 
 The current combat pass uses manual attacks, a four-slot arm hotbar, per-arm Energy, reload timers, swap delay, distinct arm projectile behaviors, Shield Arm secondary guarding/parrying, robotic status effects, elite armor weaknesses, temporary map-event buffs, and direct Garage hotbar assignment. Additional weapon-specific secondary functions and drag/drop polish are still future work.
 
 Implemented arm behavior examples include arcing explosive `Grenade Arm` shots, piercing `Rail Buster Arm` rounds, close-range `Scatter Buster Arm` spread fire, and `Homing Seeker Arm` rounds that curve toward nearby targets.
+
+## Expedition Loop
+
+The current prototype starts in a safe hub/camp approach, then pushes the player into a randomized ruin path:
+
+- Talk to the expedition leader to accept the Large Refractor briefing.
+- Use the camp ruin lift to descend to the ruin entrance.
+- Clear Reaverbot rooms, collect keycards, open locked doors, cross or disable traps, and use override mechanisms.
+- Process recovered Reaverbot scrap at the camp research station for Research Data and Zenny.
+- Secure the Large Refractor in the shrine chamber.
+- Use the extraction pad to return to camp, or pay Zenny at camp to reset the current ruin layout.
+
+The Garage includes an Expedition Log that tracks the Large Refractor objective, required keycard route, ruin override console, Reaverbot scrap contract, and research processing.
 
 ## Ruin Devices
 
@@ -57,7 +70,8 @@ The app uses a browser import map for Three.js, so no package install is require
 
 - `index.html` - app shell, HUD labels, and garage loadout panel.
 - `src/main.js` - creates and starts the game.
-- `src/Game.js` - scene, camera, loop, effects, hazards, enemy and loot coordination.
+- `src/Game.js` - scene, camera, loop, expedition state, effects, hazards, enemy and loot coordination.
+- `src/DungeonGenerator.js`, `src/DungeonController.js` - randomized ruin rooms, hub/camp spaces, doors, keycards, traps, conveyors, mechanisms, shrine objective, and extraction flow.
 - `src/MapEventSystem.js` - interactable ruin devices, temporary field buffs, risky event rewards.
 - `src/Player.js` - movement, health, stats, model animation, buster pose, and equipment hooks.
 - `src/ModularHumanoid.js` - procedural modular humanoid fallback character.

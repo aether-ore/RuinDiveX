@@ -1169,6 +1169,79 @@ button:focus-visible {
   text-align: center;
 }
 
+.quest-log {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0 14px;
+}
+
+.quest-entry {
+  padding: 8px;
+  border: 1px solid rgba(166, 190, 220, 0.22);
+  border-radius: 6px;
+  background: rgba(127, 159, 198, 0.08);
+}
+
+.quest-entry.is-complete {
+  background: rgba(107, 220, 255, 0.11);
+}
+
+.quest-entry.is-empty {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.quest-entry-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.quest-entry-header strong,
+.quest-entry-header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quest-entry-header strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.quest-entry-header span {
+  color: var(--brass);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.quest-entry p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.quest-progress {
+  height: 5px;
+  margin-top: 7px;
+  overflow: hidden;
+  border: 1px solid rgba(166, 190, 220, 0.2);
+  border-radius: 999px;
+  background: rgba(7, 13, 18, 0.62);
+}
+
+.quest-progress span {
+  display: block;
+  height: 100%;
+  box-shadow: 0 0 10px currentColor;
+}
+
 .salvage-controls {
   display: inline-grid;
   max-width: 100%;

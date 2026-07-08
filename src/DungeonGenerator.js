@@ -130,6 +130,9 @@ export class DungeonGenerator {
     const enemySpawnPoints = rooms
       .filter((room) => !['hub', 'camp', 'entrance', 'bonus'].includes(room.type))
       .flatMap((room) => this._roomSpawnPoints(room));
+    const hubRoom = rooms.find((room) => room.id === 'hubTown') ?? rooms[0];
+    const campRoom = rooms.find((room) => room.id === 'expeditionCamp') ?? hubRoom;
+    const entranceRoom = rooms.find((room) => room.id === 'entrance') ?? campRoom;
 
     return {
       group,
@@ -155,11 +158,9 @@ export class DungeonGenerator {
       })),
       shrine: landmarks.shrine,
       tileSize: this.tileSize,
-      playerStart: this._tileToWorld(rooms[0].x, rooms[0].z),
-      campReturnPosition: this._tileToWorld(
-        rooms.find((room) => room.id === 'expeditionCamp')?.x ?? rooms[0].x,
-        rooms.find((room) => room.id === 'expeditionCamp')?.z ?? rooms[0].z,
-      ),
+      playerStart: this._tileToWorld(hubRoom.x, hubRoom.z),
+      campReturnPosition: this._tileToWorld(campRoom.x, campRoom.z),
+      ruinEntryPosition: this._tileToWorld(entranceRoom.x, entranceRoom.z),
       enemySpawnPoints,
       shrinePosition: this._tileToWorld(rooms.at(-1).x, rooms.at(-1).z),
       boundsRadius: 82,
@@ -398,7 +399,7 @@ export class DungeonGenerator {
   _addDoors(group, rooms, materials) {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const descriptors = [
-      { id: 'entranceDoor', from: roomById.get('expeditionCamp'), to: roomById.get('entrance'), locked: false, closed: false, label: 'Ruin Entrance' },
+      { id: 'entranceDoor', from: roomById.get('expeditionCamp'), to: roomById.get('entrance'), locked: true, closed: true, requiresLift: true, label: 'Ruin Descent Gate' },
       { id: 'enemyNestGate', from: roomById.get('enemyNest'), to: roomById.get('keycardRoom'), locked: true, closed: true, encounterId: 'enemyNest', label: 'Security Gate' },
       { id: 'lockedKeycardDoor', from: roomById.get('keycardRoom'), to: roomById.get('trapRoom'), locked: true, closed: true, requiresKeycard: true, label: 'Keycard Door' },
       { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, requiresKeycard: true, optional: true, label: 'Bonus Vault' },
@@ -445,6 +446,7 @@ export class DungeonGenerator {
         radius: 1.1,
         locked: descriptor.locked,
         closed: descriptor.closed,
+        requiresLift: Boolean(descriptor.requiresLift),
         requiresKeycard: Boolean(descriptor.requiresKeycard),
         optional: Boolean(descriptor.optional),
         mechanismId: descriptor.mechanismId ?? null,
@@ -622,6 +624,33 @@ export class DungeonGenerator {
     const leader = this._createNpcMarker('expeditionLeaderNpc', leaderMaterial);
     leader.position.set(0, 0, -0.6);
 
+    const researcherMaterial = new THREE.MeshStandardMaterial({
+      color: 0x7df8ff,
+      emissive: 0x06363c,
+      emissiveIntensity: 0.24,
+      roughness: 0.66,
+      metalness: 0.08,
+    });
+    const researcher = this._createNpcMarker('expeditionResearcherNpc', researcherMaterial);
+    researcher.position.set(-1.05, 0, -1.2);
+
+    const researchStation = new THREE.Group();
+    researchStation.name = 'expeditionResearchStation';
+    researchStation.position.set(-0.42, 0, -1.25);
+    const researchBench = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.42, 0.54), materials.wallTrim);
+    researchBench.name = 'expeditionResearchBench';
+    researchBench.position.y = 0.21;
+    researchBench.castShadow = true;
+    researchBench.receiveShadow = true;
+    const researchCore = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), materials.glowBlue);
+    researchCore.name = 'expeditionResearchScannerCore';
+    researchCore.position.set(0, 0.55, 0);
+    const researchScreen = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.24, 0.05), materials.glowBlue);
+    researchScreen.name = 'expeditionResearchScannerScreen';
+    researchScreen.position.set(0, 0.48, -0.27);
+    researchScreen.rotation.x = -0.28;
+    researchStation.add(researchBench, researchCore, researchScreen);
+
     const resetConsole = new THREE.Group();
     resetConsole.name = 'expeditionRuinResetConsole';
     resetConsole.position.set(1.35, 0, -1.15);
@@ -635,7 +664,24 @@ export class DungeonGenerator {
     resetCore.position.y = 0.75;
     resetConsole.add(resetBase, resetCore);
 
-    camp.add(tent, board, leader, resetConsole);
+    const ruinLift = new THREE.Group();
+    ruinLift.name = 'expeditionRuinLift';
+    ruinLift.position.set(0, 0, 1.55);
+    const liftPad = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 0.82, 0.12, 28), materials.entrance);
+    liftPad.name = 'expeditionRuinLiftPad';
+    liftPad.position.y = 0.06;
+    liftPad.receiveShadow = true;
+    const liftRing = new THREE.Mesh(new THREE.TorusGeometry(0.56, 0.035, 8, 28), materials.glowBlue);
+    liftRing.name = 'expeditionRuinLiftRing';
+    liftRing.position.y = 0.16;
+    liftRing.rotation.x = Math.PI / 2;
+    const liftMarker = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.34, 4), materials.glowYellow);
+    liftMarker.name = 'expeditionRuinLiftMarker';
+    liftMarker.position.y = 0.48;
+    liftMarker.rotation.y = Math.PI / 4;
+    ruinLift.add(liftPad, liftRing, liftMarker);
+
+    camp.add(tent, board, leader, researcher, researchStation, resetConsole, ruinLift);
     group.add(camp);
 
     interactables.push({
@@ -655,12 +701,28 @@ export class DungeonGenerator {
       color: 0xffd66b,
     });
     interactables.push({
+      id: 'researchStation',
+      label: 'Research Station',
+      action: 'research',
+      position: position.clone().add(new THREE.Vector3(-0.42, 0, -1.25)),
+      object: researchStation,
+      color: 0x7df8ff,
+    });
+    interactables.push({
       id: 'ruinResetConsole',
       label: 'Reset Ruin',
       action: 'resetRuin',
       position: position.clone().add(new THREE.Vector3(1.35, 0, -1.15)),
       object: resetConsole,
       color: 0x6bdcff,
+    });
+    interactables.push({
+      id: 'ruinLift',
+      label: 'Ruin Lift',
+      action: 'enterRuin',
+      position: position.clone().add(new THREE.Vector3(0, 0, 1.55)),
+      object: ruinLift,
+      color: 0x7df8ff,
     });
 
     return interactables;

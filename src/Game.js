@@ -16,6 +16,8 @@ const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
 const CAMERA_LOOK_OFFSET = new THREE.Vector3(0, 1.1, 0);
 const SCRAP_QUEST_BASE_REQUIREMENT = 5;
 const SCRAP_QUEST_REWARD = 95;
+const RESEARCH_PROCESS_BASE_REQUIREMENT = 3;
+const RESEARCH_PROCESS_REWARD = 42;
 const POSE_DEBUG_HANDLE_COLOR = 0xffd36f;
 const POSE_DEBUG_HANDLE_SELECTED_COLOR = 0xffffff;
 const POSE_DEBUG_DRAG_DEGREES_PER_PIXEL = 0.35;
@@ -75,6 +77,8 @@ export class Game {
     this.ruinFloor = 1;
     this.largeRefractorsSecured = 0;
     this.ruinCompleted = false;
+    this.expeditionAccepted = false;
+    this.expeditionActive = false;
     this.scrapQuestTurnIns = 0;
     this.arenaRadius = 82;
     this.pointer = {
@@ -286,8 +290,176 @@ export class Game {
       ?? (this.ruinCompleted ? 'Return to camp' : 'Explore ruin');
   }
 
+  beginExpedition({ silent = false, position = null } = {}) {
+    if (this.ruinCompleted) {
+      return false;
+    }
+
+    const wasAccepted = this.expeditionAccepted;
+    this.expeditionAccepted = true;
+
+    if (!silent) {
+      this.ui?.showToast?.(
+        wasAccepted ? 'Briefing active: descend when ready' : 'Expedition briefing accepted',
+        '#ffd66b',
+      );
+    }
+
+    if (position) {
+      tempVectorA.copy(position);
+      tempVectorA.y = 0.7;
+      this.addParticleBurst(tempVectorA, 0xffd66b, 14, 0.12);
+    }
+
+    this.ui?.renderInventory?.();
+    return true;
+  }
+
+  enterRuinFromCamp() {
+    const target = this.dungeon?.ruinEntryPosition?.clone?.()
+      ?? this.dungeon?.playerStart?.clone?.()
+      ?? null;
+
+    if (!target || this.ruinCompleted) {
+      return false;
+    }
+
+    this.beginExpedition({ silent: true });
+    this.expeditionActive = true;
+    this.player.root.position.copy(target);
+    this.player.root.position.y = 0;
+    this.player.lastMoveDirection.set(0, 0, 1);
+    this.player.faceDirection(this.player.lastMoveDirection);
+    this.dungeonController?.lastSafePlayerPosition?.copy?.(this.player.root.position);
+    this.cameraController.snapTo(this.player);
+    this.addParticleBurst(this.player.root.position, 0x7df8ff, 24, 0.16);
+    this.ui?.showToast?.('Descending into the ruin', '#7df8ff');
+    this.ui?.renderInventory?.();
+    return true;
+  }
+
+  getQuestLogEntries() {
+    const controller = this.dungeonController;
+    const entries = [];
+    const shrine = controller?.shrine ?? null;
+    const shrineDoor = controller?.doors?.find?.((door) => door.id === 'largeRefractorSeal') ?? null;
+    const requiredKeycardDoor = controller?.doors?.find?.((door) => door.requiresKeycard && !door.optional) ?? null;
+    const keycardHeld = controller?.keycardCount ?? 0;
+    const unclaimedKeycards = controller?.keycards?.filter?.((keycard) => !keycard.collected).length ?? 0;
+    const override = controller?.mechanisms?.find?.((mechanism) => mechanism.id === 'conveyorOverride') ?? null;
+    const blockingEncounter = override?.requiresEncounterId
+      ? controller?.encounters?.find?.((encounter) => encounter.id === override.requiresEncounterId && !encounter.cleared)
+      : null;
+
+    const refractorComplete = Boolean(this.ruinCompleted);
+    const extracted = refractorComplete && Boolean(controller?.isPlayerInSafeZone?.());
+    entries.push({
+      id: 'largeRefractor',
+      title: 'Large Refractor Expedition',
+      status: extracted
+        ? 'Recovered'
+        : refractorComplete
+          ? 'Extract to camp'
+          : !this.expeditionAccepted
+            ? 'Accept briefing'
+            : shrine?.collected
+            ? 'Extraction pad online'
+            : shrineDoor?.closed
+              ? 'Reach the shrine seal'
+              : 'Secure the refractor',
+      detail: extracted
+        ? `${this.largeRefractorsSecured} Large Refractor${this.largeRefractorsSecured === 1 ? '' : 's'} secured`
+        : this.expeditionAccepted
+          ? 'Recover the ruin core and return to the expedition camp.'
+          : 'Talk to the expedition leader, then descend from camp.',
+      progress: extracted ? 1 : refractorComplete ? 0.9 : !this.expeditionAccepted ? 0.12 : shrineDoor?.closed ? 0.55 : 0.78,
+      color: '#7df8ff',
+    });
+
+    if (requiredKeycardDoor) {
+      entries.push({
+        id: 'keycardRoute',
+        title: 'Security Keycard Route',
+        status: requiredKeycardDoor.closed
+          ? keycardHeld > 0
+            ? 'Keycard ready'
+            : unclaimedKeycards > 0
+              ? 'Recover keycard'
+              : 'Hunt Reaverbots'
+          : 'Gate opened',
+        detail: requiredKeycardDoor.closed
+          ? 'Use a keycard to open the required ruin gate.'
+          : 'The required keycard gate is open.',
+        progress: requiredKeycardDoor.closed ? (keycardHeld > 0 ? 0.72 : 0.28) : 1,
+        color: '#ffd66b',
+      });
+    }
+
+    if (override) {
+      entries.push({
+        id: 'conveyorOverride',
+        title: 'Ruin Override Console',
+        status: override.activated
+          ? 'Override complete'
+          : blockingEncounter
+            ? `Clear ${blockingEncounter.label}`
+            : 'Console available',
+        detail: override.activated
+          ? 'Shrine security and local hazards are disabled.'
+          : 'Activate the console to disable traps and release the shrine seal.',
+        progress: override.activated ? 1 : blockingEncounter ? 0.35 : 0.66,
+        color: '#6bdcff',
+      });
+    }
+
+    const scrapRequired = this.getScrapQuestRequirement();
+    const scraps = this.inventory.scraps ?? 0;
+    entries.push({
+      id: 'scrapQuest',
+      title: 'Reaverbot Scrap Contract',
+      status: scraps >= scrapRequired ? 'Ready to turn in' : `${scraps}/${scrapRequired} scraps`,
+      detail: `Quest Board reward: ${SCRAP_QUEST_REWARD + this.ruinFloor * 18 + this.scrapQuestTurnIns * 24}z`,
+      progress: Math.min(1, scraps / Math.max(1, scrapRequired)),
+      color: '#c7d0d6',
+    });
+
+    const researchRequired = this.getResearchProcessRequirement();
+    entries.push({
+      id: 'researchProcessing',
+      title: 'Ruin Research Processing',
+      status: scraps >= researchRequired ? 'Ready to process' : `${scraps}/${researchRequired} scraps`,
+      detail: `Research Data ${this.inventory.researchData ?? 0}`,
+      progress: Math.min(1, scraps / Math.max(1, researchRequired)),
+      color: '#7df8ff',
+    });
+
+    return entries;
+  }
+
   getScrapQuestRequirement() {
     return SCRAP_QUEST_BASE_REQUIREMENT + Math.floor(this.scrapQuestTurnIns * 1.5);
+  }
+
+  getResearchProcessRequirement() {
+    return RESEARCH_PROCESS_BASE_REQUIREMENT + Math.floor((this.inventory.researchData ?? 0) / 4);
+  }
+
+  processResearchScraps() {
+    const required = this.getResearchProcessRequirement();
+    const current = this.inventory.scraps ?? 0;
+
+    if (current < required) {
+      this.ui?.showToast?.(`Research needs ${required} scrap samples`, '#7df8ff');
+      return false;
+    }
+
+    const reward = RESEARCH_PROCESS_REWARD + this.ruinFloor * 8 + (this.inventory.researchData ?? 0) * 5;
+    this.inventory.scraps = current - required;
+    this.inventory.researchData = (this.inventory.researchData ?? 0) + 1;
+    this.inventory.gold += reward;
+    this.ui?.showToast?.(`Research data processed +${reward}z`, '#7df8ff');
+    this.ui?.renderInventory?.();
+    return true;
   }
 
   turnInScrapQuest() {
@@ -339,6 +511,7 @@ export class Game {
     this.player.root.position.y = 0;
     this.player.lastMoveDirection.set(0, 0, 1);
     this.player.faceDirection(this.player.lastMoveDirection);
+    this.expeditionActive = false;
     this.dungeonController?.lastSafePlayerPosition?.copy?.(this.player.root.position);
     this.cameraController.snapTo(this.player);
     this.addParticleBurst(this.player.root.position, 0x6bdcff, 28, 0.18);
@@ -395,6 +568,8 @@ export class Game {
     this.spawner.spawnInitialPack();
     this.ruinFloor += 1;
     this.ruinCompleted = false;
+    this.expeditionAccepted = false;
+    this.expeditionActive = false;
 
     this.ui?.showToast?.(message, '#6bdcff');
     this.ui?.renderInventory?.();
@@ -1734,6 +1909,7 @@ export class Game {
     tempVectorA.y = 0.7;
     this.addParticleBurst(tempVectorA, 0x9aa7ad, 10 + amount * 4, 0.11);
     this.ui?.showToast?.(`Reaverbot Scrap +${amount}`, '#c7d0d6');
+    this.ui?.renderInventory?.();
     return amount;
   }
 

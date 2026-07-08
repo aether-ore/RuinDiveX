@@ -317,11 +317,13 @@ export class UIManager {
     this.armHotbar = document.getElementById('arm-hotbar');
     this.goldValue = document.getElementById('gold-value');
     this.scrapValue = document.getElementById('scrap-value');
+    this.researchValue = document.getElementById('research-value');
     this.inventoryPanel = document.getElementById('inventory-panel');
     this.inventoryActions = document.getElementById('inventory-actions');
     this.inventoryItems = document.getElementById('inventory-items');
     this.equipmentSlots = document.getElementById('equipment-slots');
     this.garageWeaponSlots = document.getElementById('garage-weapon-slots');
+    this.questLog = document.getElementById('quest-log');
     this.tooltip = document.getElementById('item-tooltip');
     this.poseDebugPanel = document.getElementById('pose-debug-panel');
     this.poseDebugAnimationSelect = document.getElementById('pose-debug-animation');
@@ -383,6 +385,9 @@ export class UIManager {
     this.goldValue.textContent = String(this.game.inventory.gold);
     if (this.scrapValue) {
       this.scrapValue.textContent = String(this.game.inventory.scraps ?? 0);
+    }
+    if (this.researchValue) {
+      this.researchValue.textContent = String(this.game.inventory.researchData ?? 0);
     }
     this._renderArmHotbar(weaponHud?.tabs);
     this._renderMapEventPrompt();
@@ -618,6 +623,7 @@ export class UIManager {
 
   renderInventory() {
     this._renderEquipment();
+    this._renderQuestLog();
     this._renderInventoryActions();
     this._renderInventoryItems();
   }
@@ -985,6 +991,43 @@ export class UIManager {
         <span class="slot-item" style="color: ${item?.color ?? '#aebbd0'}">${item?.name ?? 'Empty'}</span>
       `;
       this.equipmentSlots.appendChild(slotElement);
+    }
+  }
+
+  _renderQuestLog() {
+    if (!this.questLog) {
+      return;
+    }
+
+    const entries = this.game.getQuestLogEntries?.() ?? [];
+    this.questLog.innerHTML = '';
+
+    if (entries.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'quest-entry is-empty';
+      empty.textContent = 'No active expedition tasks';
+      this.questLog.appendChild(empty);
+      return;
+    }
+
+    for (const entry of entries) {
+      const progress = Number.isFinite(entry.progress) ? Math.max(0, Math.min(1, entry.progress)) : null;
+      const card = document.createElement('div');
+      card.className = `quest-entry${progress >= 1 ? ' is-complete' : ''}`;
+      card.style.borderColor = entry.color ?? '#6bdcff';
+      card.innerHTML = `
+        <div class="quest-entry-header">
+          <strong>${entry.title}</strong>
+          <span style="color: ${entry.color ?? '#6bdcff'}">${entry.status}</span>
+        </div>
+        <p>${entry.detail}</p>
+        ${progress === null ? '' : `
+          <div class="quest-progress" aria-label="${entry.title} progress">
+            <span style="width: ${Math.round(progress * 100)}%; background: ${entry.color ?? '#6bdcff'}"></span>
+          </div>
+        `}
+      `;
+      this.questLog.appendChild(card);
     }
   }
 

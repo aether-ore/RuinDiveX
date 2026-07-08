@@ -55,7 +55,7 @@ const PLAYER_MODEL_OBJ = 'Mega Man Volnutt.obj';
 const BUSTER_MODEL_MTL = 'Mega Man Volnutt Buster US.mtl';
 const BUSTER_MODEL_OBJ = 'Mega Man Volnutt Buster US.obj';
 const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
-  { key: 'breathingIdle', file: 'Breathing Idle.fbx', label: 'Breathing Idle', loop: true },
+  { key: 'breathingIdle', file: 'Breathing Idle.fbx', label: 'Breathing Idle', loop: true, preserveRootMotion: true },
   { key: 'climbingLadder', file: 'Climbing Ladder.fbx', label: 'Climbing Ladder', loop: true },
   { key: 'coverToStand', file: 'cover to stand.fbx', label: 'Cover To Stand', loop: false },
   { key: 'coverToStand2', file: 'cover to stand (2).fbx', label: 'Cover To Stand Alt', loop: false },
@@ -64,16 +64,45 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'fallingIdle', file: 'falling idle.fbx', label: 'Falling Idle', loop: true },
   { key: 'fallingToRoll', file: 'falling to roll.fbx', label: 'Falling To Roll', loop: false },
   { key: 'hardLanding', file: 'hard landing.fbx', label: 'Hard Landing', loop: false },
-  { key: 'idle', file: 'idle.fbx', label: 'Look Around Idle', loop: true },
-  { key: 'idle2', file: 'idle (2).fbx', label: 'Idle 2', loop: true },
-  { key: 'idle3', file: 'idle (3).fbx', label: 'Idle 3', loop: true },
-  { key: 'idle4', file: 'idle (4).fbx', label: 'Idle 4', loop: true },
-  { key: 'idle5', file: 'idle (5).fbx', label: 'Idle 5', loop: true },
+  { key: 'idle', file: 'idle.fbx', label: 'Look Around Idle', loop: true, preserveRootMotion: true },
+  { key: 'idle2', file: 'idle (2).fbx', label: 'Idle 2', loop: true, preserveRootMotion: true },
+  { key: 'idle3', file: 'idle (3).fbx', label: 'Idle 3', loop: true, preserveRootMotion: true },
+  { key: 'idle4', file: 'idle (4).fbx', label: 'Idle 4', loop: true, preserveRootMotion: true },
+  { key: 'idle5', file: 'idle (5).fbx', label: 'Idle 5', loop: true, preserveRootMotion: true },
+  { key: 'sideIdle', file: 'Side Idle.fbx', label: 'Side Idle', loop: true, preserveRootMotion: true },
+  { key: 'warriorIdle', file: 'Warrior Idle.fbx', label: 'Warrior Idle', loop: false, preserveRootMotion: true },
+  { key: 'jump', file: 'jump.fbx', label: 'Jump', loop: false },
   { key: 'jumpingUp', file: 'jumping up.fbx', label: 'Jumping Up', loop: false },
   { key: 'leftCoverSneak', file: 'left cover sneak.fbx', label: 'Left Cover Sneak', loop: true },
-  { key: 'leftTurn', file: 'left turn.fbx', label: 'Left Turn', loop: false },
+  { key: 'leftStrafeWalking', file: 'left strafe walking.fbx', label: 'Left Strafe Walking', loop: true },
+  { key: 'leftStrafe', file: 'left strafe.fbx', label: 'Left Strafe', loop: true },
+  { key: 'leftTurn', file: 'left turn.fbx', label: 'Left Turn', loop: true },
+  { key: 'leftTurn90', file: 'left turn 90.fbx', label: 'Left Turn 90', loop: false },
   { key: 'rightCoverSneak', file: 'right cover sneak.fbx', label: 'Right Cover Sneak', loop: true },
-  { key: 'rightTurn', file: 'right turn.fbx', label: 'Right Turn', loop: false },
+  { key: 'rightStrafeWalking', file: 'right strafe walking.fbx', label: 'Right Strafe Walking', loop: true },
+  { key: 'rightStrafe', file: 'right strafe.fbx', label: 'Right Strafe', loop: true },
+  { key: 'rightTurn', file: 'right turn.fbx', label: 'Right Turn', loop: true },
+  { key: 'rightTurn90', file: 'right turn 90.fbx', label: 'Right Turn 90', loop: false },
+  { key: 'pistolIdle', file: 'pistol idle.fbx', label: 'Pistol Idle', loop: true, preserveRootMotion: true },
+  { key: 'pistolJump', file: 'pistol jump.fbx', label: 'Pistol Jump', loop: false },
+  { key: 'pistolJump2', file: 'pistol jump (2).fbx', label: 'Pistol Jump Alt', loop: false },
+  { key: 'pistolKneelToStand', file: 'pistol kneel to stand.fbx', label: 'Pistol Kneel To Stand', loop: false },
+  { key: 'pistolKneelingIdle', file: 'pistol kneeling idle.fbx', label: 'Pistol Kneeling Idle', loop: true, preserveRootMotion: true },
+  { key: 'pistolRunArc', file: 'pistol run arc.fbx', label: 'Pistol Run Arc', loop: true },
+  { key: 'pistolRunArc2', file: 'pistol run arc (2).fbx', label: 'Pistol Run Arc Alt', loop: true },
+  { key: 'pistolRunBackwardArc', file: 'pistol run backward arc.fbx', label: 'Pistol Run Backward Arc', loop: true },
+  { key: 'pistolRunBackwardArc2', file: 'pistol run backward arc (2).fbx', label: 'Pistol Run Backward Arc Alt', loop: true },
+  { key: 'pistolRunBackward', file: 'pistol run backward.fbx', label: 'Pistol Run Backward', loop: true },
+  { key: 'pistolRun', file: 'pistol run.fbx', label: 'Pistol Run', loop: true },
+  { key: 'pistolStandToKneel', file: 'pistol stand to kneel.fbx', label: 'Pistol Stand To Kneel', loop: false },
+  { key: 'pistolStrafe', file: 'pistol strafe.fbx', label: 'Pistol Strafe', loop: true },
+  { key: 'pistolStrafe2', file: 'pistol strafe (2).fbx', label: 'Pistol Strafe Alt', loop: true },
+  { key: 'pistolWalkArc', file: 'pistol walk arc.fbx', label: 'Pistol Walk Arc', loop: true },
+  { key: 'pistolWalkArc2', file: 'pistol walk arc (2).fbx', label: 'Pistol Walk Arc Alt', loop: true },
+  { key: 'pistolWalkBackwardArc', file: 'pistol walk backward arc.fbx', label: 'Pistol Walk Backward Arc', loop: true },
+  { key: 'pistolWalkBackwardArc2', file: 'pistol walk backward arc (2).fbx', label: 'Pistol Walk Backward Arc Alt', loop: true },
+  { key: 'pistolWalkBackward', file: 'pistol walk backward.fbx', label: 'Pistol Walk Backward', loop: true },
+  { key: 'pistolWalk', file: 'pistol walk.fbx', label: 'Pistol Walk', loop: true },
   { key: 'runToStop', file: 'run to stop.fbx', label: 'Run To Stop', loop: false },
   { key: 'running', file: 'running.fbx', label: 'Running', loop: true },
   { key: 'slowJogBackwards', file: 'Slow Jog Backwards.fbx', label: 'Slow Jog Backwards', loop: true },
@@ -96,6 +125,8 @@ const KNOCKBACK_FALL_DISTANCE = 1.55;
 const SHIELD_GUARD_DURATION = 0.7;
 const SHIELD_GUARD_COOLDOWN = 0.82;
 const SHIELD_PARRY_WINDOW = 0.18;
+const TANK_TURN_RATE = 2.7;
+const TANK_TURN_INPUT_THRESHOLD = 0.35;
 const BUSTER_SLOT_INDEX = 0;
 const UTILITY_ARM_SLOT_INDEX = 3;
 
@@ -174,6 +205,9 @@ export class Player {
     this.knockbackFallDirection = new THREE.Vector3(0, 0, -1);
     this.damageHitLocalDirection = new THREE.Vector3(0, 0, 1);
     this.isRunning = false;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
     this.guardDirection = new THREE.Vector3(0, 0, 1);
     this.guardTimer = 0;
     this.guardDuration = 0;
@@ -198,6 +232,9 @@ export class Player {
 
     if (this.dead) {
       this.isRunning = false;
+      this.tankTurnActive = false;
+      this.tankTurnAmount = 0;
+      this.tankTurnTranslating = false;
       this.animation.update(dt);
       return;
     }
@@ -221,6 +258,9 @@ export class Player {
         lockOnActive: false,
         strafeAmount: 0,
       });
+      this.tankTurnActive = false;
+      this.tankTurnAmount = 0;
+      this.tankTurnTranslating = false;
       return;
     }
 
@@ -239,55 +279,78 @@ export class Player {
     const rawLateralInput = moveVector.x;
     const rawForwardInput = moveVector.y;
     const moving = moveVector.lengthSq() > 0;
+    const attackFacing = this.attackFacingTimer > 0 && this.attackFacingDirection.lengthSq() > 0.0001;
+    const bracedAiming = this.bracedFireTimer > 0 && this.bracedFireDirection.lengthSq() > 0.0001;
+    const tankTurnInput = !lockOnActive ? THREE.MathUtils.clamp(rawLateralInput, -1, 1) : 0;
+    const tankTurnActive = !lockOnActive
+      && !attackFacing
+      && !bracedAiming
+      && Math.abs(tankTurnInput) > TANK_TURN_INPUT_THRESHOLD;
+    let translating = false;
     const running = moving && (input.has('ShiftLeft') || input.has('ShiftRight'));
     let moveAmount = 0;
     let movingBackward = false;
-    let movingForward = false;
-    let lateralOnly = false;
     let strafeAmount = 0;
     let mouseFacing = false;
 
     if (moving) {
       moveVector.normalize();
       movingBackward = rawForwardInput < -0.35;
-      movingForward = rawForwardInput > 0.35;
-      lateralOnly = Math.abs(rawLateralInput) > 0.35 && Math.abs(rawForwardInput) < 0.35;
-      strafeAmount = THREE.MathUtils.clamp(rawLateralInput, -1, 1);
-      moveAmount = running ? 1.35 : 1;
+      translating = lockOnActive || Math.abs(rawForwardInput) > 0.35;
+      strafeAmount = lockOnActive ? THREE.MathUtils.clamp(rawLateralInput, -1, 1) : 0;
+      moveAmount = translating && running ? 1.35 : 1;
 
-      this._resolveMovementDirection(moveVector, movementOptions);
+      if (lockOnActive) {
+        this._resolveMovementDirection(moveVector, movementOptions);
+      } else {
+        if (tankTurnActive) {
+          this.root.rotation.y -= tankTurnInput * TANK_TURN_RATE * dt;
+          this.syncMoveDirectionToBodyFacing();
+        } else if (mouseTurnActive && this._resolveMouseFacingDirection(aimWorld)) {
+          mouseFacing = true;
+          this.faceDirection(this.lastMoveDirection);
+        } else {
+          this.syncMoveDirectionToBodyFacing();
+        }
+
+        const throttle = THREE.MathUtils.clamp(rawForwardInput, -1, 1);
+        const directionSign = throttle < 0 ? -1 : 1;
+        worldMoveDirection.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y))
+          .multiplyScalar(directionSign);
+      }
 
       const guardMoveMultiplier = this.isShieldGuarding() ? 0.72 : 1;
       const runMultiplier = running ? 1.42 : 1;
       const speed = this.stats.moveSpeed * runMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
-      this.root.position.addScaledVector(worldMoveDirection, speed * dt);
+      if (translating) {
+        this.root.position.addScaledVector(worldMoveDirection, speed * dt);
+      }
 
       this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -arenaRadius, arenaRadius);
       this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -arenaRadius, arenaRadius);
 
       if (lockOnActive) {
         this._resolveLockOnFacingDirection(lockOnPosition);
-      } else if (mouseTurnActive && this._resolveMouseFacingDirection(aimWorld)) {
-        mouseFacing = true;
-      } else if (movingBackward) {
-        this._resolveBackwardFacingDirection(movementOptions);
-      } else if (movingForward) {
-        this._resolveForwardFacingDirection(movementOptions);
       }
     } else if (lockOnActive) {
       this._resolveLockOnFacingDirection(lockOnPosition);
     }
 
-    const attackFacing = this.attackFacingTimer > 0 && this.attackFacingDirection.lengthSq() > 0.0001;
-    const bracedAiming = this.bracedFireTimer > 0 && this.bracedFireDirection.lengthSq() > 0.0001;
     const backpedaling = movingBackward || (lockOnActive && moveVector.y < -0.35) || (bracedAiming && this.bracedBackpedalTimer > 0 && moving);
-    const moveAnimationAmount = moving ? moveAmount * this.movementLockMultiplier : 0;
+    const tankTurnInPlace = tankTurnActive && !translating;
+    const tankTurnTranslating = tankTurnActive && translating;
+    const moveAnimationAmount = (translating || tankTurnInPlace) ? moveAmount * this.movementLockMultiplier : 0;
     const visiblyMoving = moveAnimationAmount > 0.05;
     const visiblyRunning = visiblyMoving
+      && translating
       && running
       && !backpedaling
       && !this.isShieldGuarding()
       && this.movementLockMultiplier > 0.85;
+    const freeTurnAmount = tankTurnInPlace ? tankTurnInput : 0;
+    this.tankTurnActive = tankTurnActive;
+    this.tankTurnAmount = tankTurnActive ? tankTurnInput : 0;
+    this.tankTurnTranslating = tankTurnTranslating;
     this.isRunning = visiblyRunning;
 
     if (attackFacing) {
@@ -296,9 +359,7 @@ export class Player {
       this.faceDirection(this.bracedFireDirection);
     } else if (lockOnActive) {
       this.faceDirection(this.lastMoveDirection);
-    } else if (lateralOnly && !mouseFacing) {
-      this.faceDirection(worldMoveDirection);
-    } else if (moving) {
+    } else if (mouseFacing) {
       this.faceDirection(this.lastMoveDirection);
     }
 
@@ -311,6 +372,7 @@ export class Player {
     this._updateExternalModelMotion(dt, visiblyMoving, moveAnimationAmount, backpedaling, visiblyRunning, {
       lockOnActive,
       strafeAmount,
+      turnAmount: freeTurnAmount,
     });
   }
 
@@ -455,6 +517,7 @@ export class Player {
     projectileAiming = false,
     lockOnActive = false,
     strafeAmount = 0,
+    turnAmount = 0,
     backpedaling = false,
     attackKind = null,
     attackProgress = null,
@@ -487,6 +550,7 @@ export class Player {
     this._updateExternalModelMotion(dt, moving, moveAmount, backpedaling, running, {
       lockOnActive,
       strafeAmount,
+      turnAmount,
       projectileAiming,
       attackKind: previewAttackKind,
       attackProgress: previewAttackProgress,
@@ -1743,6 +1807,7 @@ export class Player {
       attackKind,
       lockOnActive: Boolean(motionOptions.lockOnActive),
       strafeAmount: motionOptions.strafeAmount ?? 0,
+      turnAmount: motionOptions.turnAmount ?? 0,
       clipKey: motionOptions.clipKey ?? null,
     });
 

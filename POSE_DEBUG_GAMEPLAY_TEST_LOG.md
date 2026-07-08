@@ -239,3 +239,44 @@ Tested the live debug pose mode against the external Mega Man Volnutt segmented 
 
 - Added `Breathing Idle.fbx` to the local Mixamo clip library and made it the preferred default idle for the FBX rig.
 - The previous `idle.fbx` loop is now treated as a look-around/waiting idle. It is selected only after the player remains idle for several seconds, or directly through preview aliases such as `lookAround`, `lookAroundIdle`, and `waitingIdle`.
+- Breathing/look-around idle clips preserve their authored root/hip position tracks. Locomotion clips still flatten horizontal root motion on import so gameplay movement remains authoritative, but stationary idles need the subtle authored body drift to keep the feet from sliding under a locked pelvis.
+- Passive idle now starts with `20` seconds of `Side Idle.fbx`, plays one full look-around clip, then enters `Breathing Idle.fbx`.
+- Once the breathing phase has held for `20` seconds, `Warrior Idle.fbx` plays once as an arm-stretch accent, then returns to breathing for another `20` seconds before repeating that breathing/stretch loop. Any non-passive state such as movement, aiming, lock-on, forced preview, or action changes the rig state key and resets the passive idle timer back to the opening side-idle phase when Mega Man returns to rest.
+- Side Idle and look-around shoulder tracks are normalized to the same starting shoulder values; Breathing Idle and Warrior Idle shoulder tracks are normalized to a separate shared neutral shoulder baseline. This keeps phase handoffs from inheriting mismatched Mixamo shoulder defaults while preserving each clip's authored shoulder motion.
+
+## Follow-up Implementation Pass: FBX Locomotion Clip Coverage
+
+- Added the non-duplicate Mixamo locomotion FBX files for `jump`, `leftStrafeWalking`, `leftStrafe`, `leftTurn90`, `rightStrafeWalking`, `rightStrafe`, and `rightTurn90`.
+- Existing duplicate `idle`, `walking`, `running`, `leftTurn`, and `rightTurn` clips were intentionally left unchanged so previously verified clip behavior stayed stable.
+- Lock-on lateral movement now prefers the authored strafe-walking clips before falling back to older cover-sneak/turn clips. Jump state now prefers `jump.fbx` before the older `jumping up.fbx` fallback.
+
+## Follow-up Implementation Pass: Right Buster And Pistol Aim Clips
+
+- The active buster arm remains a right-arm replacement because the pistol aim clips are authored around the right arm being raised. The skeletal FBX rig mounts the buster on `rightElbow` toward `rightWrist` and hides `HandMesh_R` while either the buster or right-side drill/utility replacement is active.
+- Added the pistol Mixamo clip set as authored buster-up animations. `pistolIdle` is the braced aim idle, `pistolWalk`/`pistolRun` cover forward aimed movement, `pistolWalkBackward`/`pistolRunBackward` cover aimed backpedal, and the two pistol strafe clips are used for lock-on lateral movement.
+- Stationary buster-up state must use `pistolIdle` even though gameplay reports the state as an attack/aim state. Without the explicit stillness check, the selector treats sustained aiming as locomotion and plays `pistolWalk` in place.
+- Pistol idle clips preserve authored root/hip position like other idles. Pistol locomotion clips still flatten horizontal root motion on import so gameplay movement controls the player root.
+- All `pistol...` FBX clips now receive a small runtime buster-accommodation correction after the authored clip samples: `leftElbow` is held at `pitch -22.5`, `yaw 1.5`, `roll 111.5`, and `leftWrist` is held at `pitch 43`, `yaw -7.5`, `roll 4.5`. This is raw FBX local pose data, not old OBJ semantic pose data.
+
+## Follow-up Implementation Pass: Pose Debug Current Pose Capture
+
+- Pose Debug now captures the live FBX rig pose when opened and selects a temporary `Current Pose` keyframe, so opening the panel freezes Mega Man in the pose he was already holding instead of snapping to a preset.
+- The generated pose prompt no longer exports or recommends `semanticPoseDegrees`. It now exports only `rawLocalPoseDegrees`, which are the editable local FBX joint rotations shown by the sliders.
+
+## Follow-up Implementation Pass: Free-Turn Locomotion
+
+- Normal, non-lock-on lateral input now feeds a separate FBX `turnAmount` instead of reusing the lock-on `strafeAmount`. This keeps buster/lock-on strafing on pistol strafe clips while free movement with left/right input uses turning locomotion.
+- `leftTurn` and `rightTurn` are treated as looping locomotion clips. `leftTurn90` and `rightTurn90` remain one-shot fallbacks/preview clips.
+- Browser verification: `turnLeft` selected `leftTurn`, `turnRight` selected `rightTurn`, ordinary `walk` still selected `walking`, and lock-on `strafeLeft` still selected `pistolStrafe`.
+
+## Follow-up Implementation Pass: Tank Turn Controls And Camera Hold
+
+- Normal A/D input now rotates Mega Man in place instead of moving his root laterally. W/S movement travels along the body-facing direction, while lock-on movement still uses `strafeAmount` for authored buster strafe clips.
+- During normal A/D tank turning, the camera yaw holds steady. After turning stops, the camera waits briefly, then eases behind Mega Man at a lower recenter responsiveness to reduce sudden camera motion.
+- Tank-turn yaw sign is intentionally inverted from the raw A/D input sign. This corrects the old OBJ-era screen-direction mismatch: A selects `leftTurn` and rotates Mega Man left; D selects `rightTurn` and rotates him right.
+- Browser verification: holding A selected `leftTurn`, rotated Mega Man by about `+1.15` radians, produced `0` root-position delta, and produced `0` camera-yaw delta. Holding D selected `rightTurn`, rotated Mega Man by about `-1.15` radians, and also produced `0` root-position and camera-yaw delta.
+- Forward/backward translation suppresses the FBX turn-clip request. W+A/W+D still rotate the body with tank-turn yaw, but the rig receives `turnAmount = 0` so it keeps the forward walk/run or backpedal clips instead of switching to `leftTurn`/`rightTurn`.
+- Diagonal tank movement (`W+A`, `W+D`, `S+A`, `S+D`) is a camera-follow mode, not a camera-hold mode. The player exposes `tankTurnTranslating` so the camera locks behind the body while turning with the player; pure A/D still holds the camera and recenters after the turn ends.
+- Browser verification: W+A, W+D, S+A, and S+D all set `tankTurnTranslating = true`, kept recenter timers at `0`, and held camera yaw within about `0.08` radians of body yaw while moving. A-only stayed `tankTurnTranslating = false`, kept root position fixed, selected `leftTurn`, and held camera yaw during the turn.
+- Secondary aim pressed during pure A/D tank-turning must use Mega Man's current body-facing direction as the immediate aim/camera target. The camera swing is allowed to override the tank-turn hold, and `pointer.aimWorld` gets a short body-facing override so the first manual aim update does not read the stale camera ray.
+- Browser verification: after holding A with body yaw about `1.62` radians while camera yaw stayed `0`, pressing secondary aim immediately set aim yaw equal to body yaw and enabled body-facing camera recenter. In a non-safe position, the first sustained aim frame kept `bracedFireDirection` equal to body yaw and selected `pistolIdle` instead of snapping the pose back toward the stale camera ray.

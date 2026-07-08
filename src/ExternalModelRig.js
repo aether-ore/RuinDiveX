@@ -66,6 +66,9 @@ const PROCEDURAL_REPLACEMENT_PARTS = new Set([
   'rightKnee',
 ]);
 const HIDDEN_WITH_BUSTER = ['rightForearm', 'rightHand'];
+const HIDDEN_WITH_DRILL = ['rightForearm', 'rightHand'];
+const BUSTER_ELBOW_JOINT = 'rightElbow';
+const BUSTER_CHAMBER_ROLL_SIGN = -1;
 const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
 const BEAM_BLADE_SLASH_END = 16 / BEAM_BLADE_TOTAL_FRAMES;
@@ -91,6 +94,10 @@ function createBuckets() {
     uvs: [],
     material: null,
   }]));
+}
+
+function radiansToPoseDegrees(value) {
+  return Number(THREE.MathUtils.radToDeg(value).toFixed(1));
 }
 
 function cloneRigMaterial(material) {
@@ -700,6 +707,26 @@ export class ExternalModelRig {
     }
   }
 
+  getCurrentDebugPoseDegrees(jointNames = []) {
+    const names = jointNames.length > 0 ? jointNames : [...this.joints.keys()];
+    const poseDegrees = {};
+
+    for (const jointName of names) {
+      const joint = this.joints.get(jointName);
+      if (!joint) {
+        continue;
+      }
+
+      poseDegrees[jointName] = {
+        pitch: radiansToPoseDegrees(joint.rotation.x),
+        yaw: radiansToPoseDegrees(joint.rotation.y),
+        roll: radiansToPoseDegrees(joint.rotation.z),
+      };
+    }
+
+    return poseDegrees;
+  }
+
   updateDebugPoseOverride(jointName, axis, value) {
     const joint = this.joints.get(jointName);
 
@@ -739,7 +766,7 @@ export class ExternalModelRig {
   }
 
   setBusterArm(busterObject) {
-    const elbow = this.joints.get('rightElbow');
+    const elbow = this.joints.get(BUSTER_ELBOW_JOINT);
 
     if (!elbow || !busterObject?.isObject3D) {
       return false;
@@ -780,7 +807,7 @@ export class ExternalModelRig {
       this.busterArmGroup.visible = this.busterArmActive;
     }
 
-    this._syncRightArmReplacementVisibility();
+    this._syncArmReplacementVisibility();
 
     if (!this.busterArmActive && this.beamBladeGroup) {
       this.beamBladeGroup.visible = false;
@@ -803,7 +830,7 @@ export class ExternalModelRig {
       this.busterArmGroup.visible = false;
     }
 
-    this._syncRightArmReplacementVisibility();
+    this._syncArmReplacementVisibility();
 
     if (!this.drillArmActive) {
       this.setDrillSpinning(false);
@@ -814,13 +841,16 @@ export class ExternalModelRig {
     this.drillSpinning = Boolean(active && this.drillArmActive);
   }
 
-  _syncRightArmReplacementVisibility() {
-    const replacementActive = this.busterArmActive || this.drillArmActive;
+  _syncArmReplacementVisibility() {
+    const partNames = new Set([...HIDDEN_WITH_BUSTER, ...HIDDEN_WITH_DRILL]);
 
-    for (const partName of HIDDEN_WITH_BUSTER) {
+    for (const partName of partNames) {
+      const hiddenForBuster = this.busterArmActive && HIDDEN_WITH_BUSTER.includes(partName);
+      const hiddenForDrill = this.drillArmActive && HIDDEN_WITH_DRILL.includes(partName);
       const mesh = this.partMeshes.get(partName);
+
       if (mesh) {
-        mesh.visible = !replacementActive;
+        mesh.visible = !hiddenForBuster && !hiddenForDrill;
       }
     }
   }
@@ -1069,7 +1099,7 @@ export class ExternalModelRig {
 
     if (state === 'attacking' && attackKind === 'beamBlade') {
       targetX = 0.08 * chamberHold;
-      targetZ = -0.04 * chamberHold;
+      targetZ = BUSTER_CHAMBER_ROLL_SIGN * 0.04 * chamberHold;
     }
 
     this.busterArmGroup.rotation.x = THREE.MathUtils.lerp(this.busterArmGroup.rotation.x, targetX, alpha);

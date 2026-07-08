@@ -4,7 +4,7 @@ const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
 const BEAM_BLADE_SLASH_END = 16 / BEAM_BLADE_TOTAL_FRAMES;
-const WAITING_IDLE_DELAY_SECONDS = 4.5;
+const PASSIVE_IDLE_HOLD_SECONDS = 20;
 const zeroEuler = new THREE.Euler();
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
@@ -12,6 +12,17 @@ const tempEuler = new THREE.Euler();
 const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
 const localForwardZ = new THREE.Vector3(0, 0, 1);
+const BUSTER_ELBOW_JOINT = 'rightElbow';
+const BUSTER_WRIST_JOINT = 'rightWrist';
+const BUSTER_HAND_MESH_TOKEN = 'HandMesh_R';
+const DRILL_HAND_MESH_TOKEN = 'HandMesh_R';
+const BUSTER_CHAMBER_ROLL_SIGN = -1;
+const FREE_TURN_LOCOMOTION_THRESHOLD = 0.35;
+const PISTOL_BUSTER_POSE_DEGREES = Object.freeze({
+  leftElbow: Object.freeze({ pitch: -22.5, yaw: 1.5, roll: 111.5 }),
+  leftWrist: Object.freeze({ pitch: 43, yaw: -7.5, roll: 4.5 }),
+});
+const PASSIVE_IDLE_SHOULDER_JOINTS = Object.freeze(['leftShoulder', 'rightShoulder']);
 
 const RIG_BONE_ALIASES = {
   hips: ['hips'],
@@ -38,9 +49,14 @@ const LOOPING_CLIP_KEYS = new Set([
   'idle3',
   'idle4',
   'idle5',
+  'sideIdle',
   'walking',
   'strutWalking',
   'running',
+  'leftStrafeWalking',
+  'leftStrafe',
+  'rightStrafeWalking',
+  'rightStrafe',
   'slowJogBackwards',
   'fallingIdle',
   'crouchedSneakLeft',
@@ -55,6 +71,10 @@ function normalizeBoneName(name = '') {
     .replace(/^mixamorig/i, '')
     .replace(/[^a-z0-9]/gi, '')
     .toLowerCase();
+}
+
+function radiansToPoseDegrees(value) {
+  return Number(THREE.MathUtils.radToDeg(value).toFixed(1));
 }
 
 function makeSolidMaterial(name, color, options = {}) {
@@ -92,6 +112,7 @@ export class SkeletalModelRig {
     this.busterArmGroup = null;
     this.busterMuzzle = null;
     this.busterNeutralQuaternion = new THREE.Quaternion();
+    this.busterMountedElbow = null;
     this.busterArmActive = false;
     this.drillArmGroup = null;
     this.drillBitSpin = null;
@@ -151,6 +172,35 @@ export class SkeletalModelRig {
     }
   }
 
+  getCurrentDebugPoseDegrees(jointNames = []) {
+    const names = jointNames.length > 0 ? jointNames : [...this.joints.keys()];
+    const poseDegrees = {};
+
+    for (const jointName of names) {
+      const joint = this.joints.get(jointName);
+      if (!joint) {
+        continue;
+      }
+
+      const rest = this.restLocalQuaternions.get(joint);
+      if (rest) {
+        tempQuaternionA.copy(rest).invert();
+        tempQuaternionB.copy(tempQuaternionA).multiply(joint.quaternion);
+        tempEuler.setFromQuaternion(tempQuaternionB, joint.rotation.order);
+      } else {
+        tempEuler.copy(joint.rotation);
+      }
+
+      poseDegrees[jointName] = {
+        pitch: radiansToPoseDegrees(tempEuler.x),
+        yaw: radiansToPoseDegrees(tempEuler.y),
+        roll: radiansToPoseDegrees(tempEuler.z),
+      };
+    }
+
+    return poseDegrees;
+  }
+
   updateDebugPoseOverride(jointName, axis, value) {
     const joint = this.joints.get(jointName);
 
@@ -171,7 +221,7 @@ export class SkeletalModelRig {
   }
 
   setBusterArm(busterObject) {
-    const elbow = this.joints.get('rightElbow');
+    const elbow = this.joints.get(BUSTER_ELBOW_JOINT);
 
     if (!elbow || !busterObject?.isObject3D) {
       return false;
@@ -187,7 +237,7 @@ export class SkeletalModelRig {
     const size = bounds.getSize(new THREE.Vector3());
     const center = bounds.getCenter(new THREE.Vector3());
     const group = new THREE.Group();
-    const neutralQuaternion = this._createForearmAlignedQuaternion(elbow, this.joints.get('rightWrist'));
+    const neutralQuaternion = this._createForearmAlignedQuaternion(elbow, this.joints.get(BUSTER_WRIST_JOINT));
 
     group.name = 'rigSkeletalBusterArmGroup';
     group.quaternion.copy(neutralQuaternion);
@@ -205,6 +255,7 @@ export class SkeletalModelRig {
     group.add(busterObject, this.busterMuzzle);
     elbow.add(group);
     this.busterArmGroup = group;
+    this.busterMountedElbow = elbow;
     this.setBusterArmActive(this.busterArmActive);
     this.setBeamBladeActive(this.beamBladeActive, this.beamBladeColor);
     return true;
@@ -228,8 +279,8 @@ export class SkeletalModelRig {
   }
 
   _scaleBusterToForearm(busterObject) {
-    const elbow = this.joints.get('rightElbow');
-    const wrist = this.joints.get('rightWrist');
+    const elbow = this.joints.get(BUSTER_ELBOW_JOINT);
+    const wrist = this.joints.get(BUSTER_WRIST_JOINT);
 
     if (!elbow || !wrist) {
       return;
@@ -260,7 +311,7 @@ export class SkeletalModelRig {
       this.busterArmGroup.visible = this.busterArmActive;
     }
 
-    this._syncRightArmReplacementVisibility();
+    this._syncArmReplacementVisibility();
 
     if (!this.busterArmActive && this.beamBladeGroup) {
       this.beamBladeGroup.visible = false;
@@ -283,7 +334,7 @@ export class SkeletalModelRig {
       this.busterArmGroup.visible = false;
     }
 
-    this._syncRightArmReplacementVisibility();
+    this._syncArmReplacementVisibility();
 
     if (!this.drillArmActive) {
       this.setDrillSpinning(false);
@@ -356,7 +407,9 @@ export class SkeletalModelRig {
         continue;
       }
 
-      const preparedClip = this._prepareAnimationClip(clip, key);
+      const preparedClip = this._prepareAnimationClip(clip, key, {
+        preserveRootMotion: Boolean(entry.preserveRootMotion),
+      });
       const action = this.mixer.clipAction(preparedClip, this.root);
       const looping = entry.loop ?? LOOPING_CLIP_KEYS.has(key);
 
@@ -373,11 +426,14 @@ export class SkeletalModelRig {
         key,
         loop: looping,
         duration: preparedClip.duration,
+        preserveRootMotion: Boolean(entry.preserveRootMotion),
       });
       this.availableAnimationNames.push(key);
     }
 
-    const initialClip = this._firstAvailable('breathingIdle', 'idle', 'idle2', 'idle3', 'walking', 'running');
+    this._normalizePassiveIdleShoulderTracks();
+
+    const initialClip = this._firstAvailable('sideIdle', 'breathingIdle', 'idle', 'idle2', 'idle3', 'walking', 'running');
     if (initialClip) {
       this._fadeToClip(initialClip, 0);
     }
@@ -400,10 +456,18 @@ export class SkeletalModelRig {
     attackKind = 'melee',
     lockOnActive = false,
     strafeAmount = 0,
+    turnAmount = 0,
     clipKey = null,
   } = {}) {
     this.time += dt;
-    const rigState = `${state}:${attackKind ?? ''}`;
+    const rigState = [
+      state,
+      attackKind ?? '',
+      moving ? 'moving' : 'still',
+      projectileAiming ? 'aiming' : 'freeAim',
+      lockOnActive ? 'lockOn' : 'freeLock',
+      clipKey ? `clip:${clipKey}` : 'auto',
+    ].join(':');
     if (rigState !== this.previousRigState) {
       this.previousRigState = rigState;
       this.stateTime = 0;
@@ -432,6 +496,7 @@ export class SkeletalModelRig {
       attackKind,
       lockOnActive,
       strafeAmount,
+      turnAmount,
       clipKey,
     });
 
@@ -443,8 +508,10 @@ export class SkeletalModelRig {
       backpedaling,
       lockOnActive,
       strafeAmount,
+      turnAmount,
     });
     this.mixer.update(dt);
+    this._applyPistolBusterPoseCorrection();
     this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
     this._updateDrillArmVisual(dt);
     this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
@@ -554,20 +621,21 @@ export class SkeletalModelRig {
     return descendantBoneCount * 4 + directBoneChildren * 8;
   }
 
-  _prepareAnimationClip(clip, key) {
+  _prepareAnimationClip(clip, key, { preserveRootMotion = false } = {}) {
     const tracks = clip.tracks
-      .map((track) => this._prepareAnimationTrack(track))
+      .map((track) => this._prepareAnimationTrack(track, { preserveRootMotion }))
       .filter(Boolean);
     const preparedClip = new THREE.AnimationClip(key, clip.duration, tracks);
     preparedClip.name = key;
     return preparedClip;
   }
 
-  _prepareAnimationTrack(track) {
+  _prepareAnimationTrack(track, { preserveRootMotion = false } = {}) {
     const trackName = this._retargetAnimationTrackName(track.name);
     const property = trackName.slice(trackName.lastIndexOf('.') + 1);
+    const preservesRootMotion = preserveRootMotion && property === 'position' && this._isRootMotionTrack(trackName);
 
-    if (property !== 'position' || !this._isRootMotionTrack(trackName)) {
+    if (property !== 'position' || !this._isRootMotionTrack(trackName) || preservesRootMotion) {
       const clonedTrack = track.clone();
       clonedTrack.name = trackName;
       return clonedTrack;
@@ -588,6 +656,71 @@ export class SkeletalModelRig {
       values,
       track.getInterpolation(),
     );
+  }
+
+  _normalizePassiveIdleShoulderTracks() {
+    const alertReference = this._firstAvailable('sideIdle', 'idle', 'idle2', 'idle3', 'idle4', 'idle5');
+    const neutralReference = this._firstAvailable('breathingIdle', 'warriorIdle');
+
+    this._normalizeShoulderTracksToReference(
+      alertReference,
+      ['sideIdle', 'idle', 'idle2', 'idle3', 'idle4', 'idle5'],
+    );
+    this._normalizeShoulderTracksToReference(neutralReference, ['breathingIdle', 'warriorIdle']);
+
+    this.root.userData.passiveIdleShoulderNormalization = {
+      alertReference,
+      neutralReference,
+    };
+  }
+
+  _normalizeShoulderTracksToReference(referenceKey, clipKeys = []) {
+    const referenceClip = this.animationClips.get(referenceKey);
+
+    if (!referenceClip) {
+      return;
+    }
+
+    for (const jointName of PASSIVE_IDLE_SHOULDER_JOINTS) {
+      const referenceTrack = this._findJointQuaternionTrack(referenceClip, jointName);
+
+      if (!referenceTrack?.values || referenceTrack.values.length < 4) {
+        continue;
+      }
+
+      const referenceQuaternion = new THREE.Quaternion().fromArray(referenceTrack.values, 0).normalize();
+
+      for (const key of clipKeys) {
+        const targetClip = this.animationClips.get(key);
+        const targetTrack = targetClip ? this._findJointQuaternionTrack(targetClip, jointName) : null;
+
+        if (!targetTrack?.values || targetTrack.values.length < 4) {
+          continue;
+        }
+
+        const sourceQuaternion = new THREE.Quaternion().fromArray(targetTrack.values, 0).normalize();
+        const correction = referenceQuaternion.clone().multiply(sourceQuaternion.clone().invert());
+        const adjusted = new THREE.Quaternion();
+
+        for (let index = 0; index < targetTrack.values.length; index += 4) {
+          adjusted.fromArray(targetTrack.values, index).normalize();
+          adjusted.premultiply(correction).normalize();
+          adjusted.toArray(targetTrack.values, index);
+        }
+      }
+    }
+  }
+
+  _findJointQuaternionTrack(clip, jointName) {
+    const joint = this.joints.get(jointName);
+
+    if (!joint) {
+      return null;
+    }
+
+    const normalizedJointName = normalizeBoneName(joint.name);
+    return clip.tracks.find((track) => track.name.endsWith('.quaternion')
+      && normalizeBoneName(this._getTrackTargetName(track.name)) === normalizedJointName) ?? null;
   }
 
   _retargetAnimationTrackName(trackName = '') {
@@ -665,11 +798,50 @@ export class SkeletalModelRig {
       idle3: 'idle3',
       idle4: 'idle4',
       idle5: 'idle5',
+      sideidle: 'sideIdle',
+      sideidling: 'sideIdle',
+      sidewaitingidle: 'sideIdle',
+      warrioridle: 'warriorIdle',
+      armstretch: 'warriorIdle',
+      stretchidle: 'warriorIdle',
+      jump: 'jump',
       jumpingup: 'jumpingUp',
       leftcoversneak: 'leftCoverSneak',
+      leftstrafe: 'leftStrafe',
+      leftstrafewalking: 'leftStrafeWalking',
+      leftsidestep: 'leftStrafe',
+      leftsidestepwalking: 'leftStrafeWalking',
       leftturn: 'leftTurn',
+      leftturn90: 'leftTurn90',
+      pistolaim: 'pistolIdle',
+      pistolbusteridle: 'pistolIdle',
+      pistolidle: 'pistolIdle',
+      pistoljump: 'pistolJump',
+      pistoljump2: 'pistolJump2',
+      pistolkneeltostand: 'pistolKneelToStand',
+      pistolkneelingidle: 'pistolKneelingIdle',
+      pistolrun: 'pistolRun',
+      pistolrunarc: 'pistolRunArc',
+      pistolrunarc2: 'pistolRunArc2',
+      pistolrunbackward: 'pistolRunBackward',
+      pistolrunbackwardarc: 'pistolRunBackwardArc',
+      pistolrunbackwardarc2: 'pistolRunBackwardArc2',
+      pistolstandtokneel: 'pistolStandToKneel',
+      pistolstrafe: 'pistolStrafe',
+      pistolstrafe2: 'pistolStrafe2',
+      pistolwalk: 'pistolWalk',
+      pistolwalkarc: 'pistolWalkArc',
+      pistolwalkarc2: 'pistolWalkArc2',
+      pistolwalkbackward: 'pistolWalkBackward',
+      pistolwalkbackwardarc: 'pistolWalkBackwardArc',
+      pistolwalkbackwardarc2: 'pistolWalkBackwardArc2',
       rightcoversneak: 'rightCoverSneak',
+      rightstrafe: 'rightStrafe',
+      rightstrafewalking: 'rightStrafeWalking',
+      rightsidestep: 'rightStrafe',
+      rightsidestepwalking: 'rightStrafeWalking',
       rightturn: 'rightTurn',
+      rightturn90: 'rightTurn90',
       runtostop: 'runToStop',
       running: 'running',
       slowjogbackwards: 'slowJogBackwards',
@@ -707,6 +879,7 @@ export class SkeletalModelRig {
     attackKind = 'melee',
     lockOnActive = false,
     strafeAmount = 0,
+    turnAmount = 0,
     clipKey = null,
   } = {}) {
     const forcedClip = this._normalizeClipKey(clipKey);
@@ -714,12 +887,18 @@ export class SkeletalModelRig {
       return forcedClip;
     }
 
+    const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
+
     if (state === 'neutralJump' || state === 'forwardJump') {
-      return this._firstAvailable('jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
+      return busterAimActive
+        ? this._firstAvailable('pistolJump', 'pistolJump2', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
+        : this._firstAvailable('jump', 'jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
     }
 
     if (state === 'fall') {
-      return this._firstAvailable('fallingIdle', 'jumpingUp', 'breathingIdle', 'idle');
+      return busterAimActive
+        ? this._firstAvailable('pistolJump2', 'pistolJump', 'fallingIdle', 'jump', 'jumpingUp', 'pistolIdle', 'breathingIdle', 'idle')
+        : this._firstAvailable('fallingIdle', 'jump', 'jumpingUp', 'breathingIdle', 'idle');
     }
 
     if (state === 'land') {
@@ -742,15 +921,55 @@ export class SkeletalModelRig {
       && (attackKind === 'beamBlade' || attackKind === 'melee' || projectileAiming);
     const shouldUseLocomotion = moving || state === 'walking' || state === 'running' || isAttackingWithoutAuthoredClip;
 
+    if (busterAimActive) {
+      if (!moving && state !== 'walking' && state !== 'running') {
+        return this._firstAvailable('pistolIdle', 'breathingIdle', 'idle', 'idle2', 'walking');
+      }
+
+      if (shouldUseLocomotion) {
+        if (backpedaling) {
+          if (lockOnActive && Math.abs(strafeAmount) > 0.35) {
+            return strafeAmount < 0
+              ? this._firstAvailable('pistolWalkBackwardArc', 'pistolRunBackwardArc', 'pistolWalkBackward', 'pistolRunBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+              : this._firstAvailable('pistolWalkBackwardArc2', 'pistolRunBackwardArc2', 'pistolWalkBackward', 'pistolRunBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
+          }
+
+          return running || moveAmount > 1.1
+            ? this._firstAvailable('pistolRunBackward', 'pistolWalkBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+            : this._firstAvailable('pistolWalkBackward', 'pistolRunBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
+        }
+
+        if (lockOnActive && Math.abs(strafeAmount) > 0.35) {
+          return strafeAmount < 0
+            ? this._firstAvailable('pistolStrafe', 'pistolWalkArc', 'pistolRunArc', 'leftStrafeWalking', 'leftStrafe', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+            : this._firstAvailable('pistolStrafe2', 'pistolWalkArc2', 'pistolRunArc2', 'rightStrafeWalking', 'rightStrafe', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
+        }
+
+        if (running || state === 'running' || moveAmount > 1.1) {
+          return this._firstAvailable('pistolRun', 'pistolWalk', 'running', 'strutWalking', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
+        }
+
+        return this._firstAvailable('pistolWalk', 'pistolRun', 'walking', 'strutWalking', 'running', 'pistolIdle', 'breathingIdle', 'idle');
+      }
+
+      return this._firstAvailable('pistolIdle', 'breathingIdle', 'idle', 'idle2', 'walking');
+    }
+
     if (shouldUseLocomotion) {
       if (backpedaling) {
         return this._firstAvailable('slowJogBackwards', 'walking', 'strutWalking', 'breathingIdle', 'idle');
       }
 
+      if (!lockOnActive && Math.abs(turnAmount) > FREE_TURN_LOCOMOTION_THRESHOLD) {
+        return turnAmount < 0
+          ? this._firstAvailable('leftTurn', 'leftTurn90', 'walking', 'strutWalking', 'running', 'breathingIdle', 'idle')
+          : this._firstAvailable('rightTurn', 'rightTurn90', 'walking', 'strutWalking', 'running', 'breathingIdle', 'idle');
+      }
+
       if (lockOnActive && Math.abs(strafeAmount) > 0.35) {
         return strafeAmount < 0
-          ? this._firstAvailable('crouchedSneakLeft', 'leftCoverSneak', 'leftTurn', 'walking', 'breathingIdle', 'idle')
-          : this._firstAvailable('crouchedSneakRight', 'rightCoverSneak', 'rightTurn', 'walking', 'breathingIdle', 'idle');
+          ? this._firstAvailable('leftStrafeWalking', 'leftStrafe', 'leftCoverSneak', 'crouchedSneakLeft', 'leftTurn90', 'leftTurn', 'walking', 'breathingIdle', 'idle')
+          : this._firstAvailable('rightStrafeWalking', 'rightStrafe', 'rightCoverSneak', 'crouchedSneakRight', 'rightTurn90', 'rightTurn', 'walking', 'breathingIdle', 'idle');
       }
 
       if (running || state === 'running' || moveAmount > 1.1) {
@@ -760,11 +979,58 @@ export class SkeletalModelRig {
       return this._firstAvailable('walking', 'strutWalking', 'running', 'breathingIdle', 'idle');
     }
 
-    if (this.stateTime >= WAITING_IDLE_DELAY_SECONDS) {
-      return this._firstAvailable('idle', 'idle2', 'idle3', 'idle4', 'idle5', 'breathingIdle', 'walking');
+    return this._selectPassiveIdleClipKey();
+  }
+
+  _selectPassiveIdleClipKey() {
+    const sideIdleClip = this._firstAvailable('sideIdle', 'breathingIdle', 'idle', 'walking');
+    const lookAroundClip = this._firstAvailable('idle', 'idle2', 'idle3', 'idle4', 'idle5', 'sideIdle', 'breathingIdle', 'walking');
+    const breathingClip = this._firstAvailable('breathingIdle', 'sideIdle', 'idle', 'walking');
+    const warriorClip = this._firstAvailable('warriorIdle', 'breathingIdle', 'sideIdle', 'idle', 'walking');
+
+    if (this.stateTime < PASSIVE_IDLE_HOLD_SECONDS) {
+      return sideIdleClip ?? breathingClip ?? lookAroundClip ?? warriorClip;
     }
 
-    return this._firstAvailable('breathingIdle', 'idle', 'idle2', 'idle3', 'idle4', 'idle5', 'walking');
+    const afterSideIdleTime = this.stateTime - PASSIVE_IDLE_HOLD_SECONDS;
+
+    if (lookAroundClip && lookAroundClip !== sideIdleClip) {
+      const lookAroundDuration = this._clipDuration(lookAroundClip);
+
+      if (afterSideIdleTime < lookAroundDuration) {
+        return lookAroundClip;
+      }
+
+      return this._selectNeutralIdleCycleClip(
+        afterSideIdleTime - lookAroundDuration,
+        breathingClip,
+        warriorClip,
+      );
+    }
+
+    return this._selectNeutralIdleCycleClip(afterSideIdleTime, breathingClip ?? sideIdleClip, warriorClip);
+  }
+
+  _selectNeutralIdleCycleClip(neutralTime, breathingClip, warriorClip) {
+    if (!breathingClip) {
+      return warriorClip ?? this._firstAvailable('sideIdle', 'idle', 'walking');
+    }
+
+    if (!warriorClip || warriorClip === breathingClip) {
+      return breathingClip;
+    }
+
+    if (neutralTime < PASSIVE_IDLE_HOLD_SECONDS) {
+      return breathingClip;
+    }
+
+    const warriorDuration = this._clipDuration(warriorClip);
+    const cycleTime = (neutralTime - PASSIVE_IDLE_HOLD_SECONDS) % (warriorDuration + PASSIVE_IDLE_HOLD_SECONDS);
+    return cycleTime < warriorDuration ? warriorClip : breathingClip;
+  }
+
+  _clipDuration(key) {
+    return Math.max(0.1, this.animationMetadata.get(key)?.duration ?? 0);
   }
 
   _fadeToClip(key, fadeSeconds = 0.16) {
@@ -806,15 +1072,35 @@ export class SkeletalModelRig {
     moveAmount = 0,
     running = false,
     backpedaling = false,
+    turnAmount = 0,
   } = {}) {
     if (!this.activeAction || !key) {
       return;
     }
 
     let speed = 1;
-    if (key === 'walking' || key === 'strutWalking') {
+    if (key === 'walking'
+      || key === 'strutWalking'
+      || key === 'leftTurn'
+      || key === 'rightTurn'
+      || key === 'leftTurn90'
+      || key === 'rightTurn90'
+      || key === 'pistolWalk'
+      || key === 'pistolWalkBackward'
+      || key === 'pistolWalkArc'
+      || key === 'pistolWalkArc2'
+      || key === 'pistolWalkBackwardArc'
+      || key === 'pistolWalkBackwardArc2'
+      || key === 'pistolStrafe'
+      || key === 'pistolStrafe2') {
       speed = THREE.MathUtils.clamp(moveAmount || 1, 0.68, 1.22);
-    } else if (key === 'running') {
+    } else if (key === 'running'
+      || key === 'pistolRun'
+      || key === 'pistolRunBackward'
+      || key === 'pistolRunArc'
+      || key === 'pistolRunArc2'
+      || key === 'pistolRunBackwardArc'
+      || key === 'pistolRunBackwardArc2') {
       speed = THREE.MathUtils.clamp((moveAmount || 1.2) / 1.2, 0.78, 1.35);
     } else if (key === 'slowJogBackwards') {
       speed = THREE.MathUtils.clamp(moveAmount || 0.9, 0.7, 1.15);
@@ -852,12 +1138,39 @@ export class SkeletalModelRig {
     bone.quaternion.slerp(targetQuaternion, THREE.MathUtils.clamp(alpha, 0, 1));
   }
 
-  _syncRightArmReplacementVisibility() {
-    const replacementActive = this.busterArmActive || this.drillArmActive;
+  _applyPistolBusterPoseCorrection() {
+    if (!this._isPistolClipKey(this.activeClipKey)) {
+      return;
+    }
 
+    for (const [jointName, pose] of Object.entries(PISTOL_BUSTER_POSE_DEGREES)) {
+      const joint = this.joints.get(jointName);
+      if (!joint) {
+        continue;
+      }
+
+      tempEuler.set(
+        THREE.MathUtils.degToRad(pose.pitch),
+        THREE.MathUtils.degToRad(pose.yaw),
+        THREE.MathUtils.degToRad(pose.roll),
+        joint.rotation.order,
+      );
+      this._applyBoneRotation(joint, tempEuler, 1);
+    }
+  }
+
+  _isPistolClipKey(key) {
+    return this._normalizeClipKey(key)?.startsWith('pistol') ?? false;
+  }
+
+  _syncArmReplacementVisibility() {
     for (const mesh of this.skinnedMeshes) {
-      if (mesh.name.includes('HandMesh_R')) {
-        mesh.visible = !replacementActive;
+      const isBusterMesh = mesh.name.includes(BUSTER_HAND_MESH_TOKEN);
+      const isDrillMesh = mesh.name.includes(DRILL_HAND_MESH_TOKEN);
+
+      if (isBusterMesh || isDrillMesh) {
+        mesh.visible = !(isBusterMesh && this.busterArmActive)
+          && !(isDrillMesh && this.drillArmActive);
       }
     }
   }
@@ -1077,7 +1390,7 @@ export class SkeletalModelRig {
 
     if (state === 'attacking' && attackKind === 'beamBlade') {
       targetX = 0.08 * chamberHold;
-      targetZ = -0.04 * chamberHold;
+      targetZ = BUSTER_CHAMBER_ROLL_SIGN * 0.04 * chamberHold;
     }
 
     tempEuler.set(targetX, 0, targetZ);

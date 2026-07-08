@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { EQUIPMENT_SLOTS } from './EquipmentManager.js';
 import { formatStatValue, RARITIES, STAT_LABELS } from './Item.js';
-import { DebugPoseExporter } from './SemanticRigMapper.js';
 
 function formatTime(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -97,6 +96,8 @@ const POSE_DEBUG_JOINTS = [
 ].map(([name, label]) => ({ name, label }));
 
 const POSE_AXES = ['x', 'y', 'z'];
+const POSE_DEBUG_CURRENT_ANIMATION_ID = 'currentPose';
+const POSE_DEBUG_CURRENT_KEYFRAME_ID = 'capturedPose';
 const POSE_AXIS_LABELS = {
   x: 'Local X',
   y: 'Local Y',
@@ -531,10 +532,11 @@ export class UIManager {
     }
 
     if (open) {
+      this._captureCurrentPoseDebugPose();
       this._renderPoseDebugTimeline();
       this._renderPoseDebugControls();
+      this._syncAllPoseDebugControls();
       this._syncPoseDebugRigState();
-      this._applyPoseDebugValues();
       this._renderPoseDebugPrompt();
     } else {
       this.game.player.externalRig?.setDebugPoseEnabled?.(false);
@@ -575,6 +577,46 @@ export class UIManager {
     }
 
     keyframe.poseDegrees = this._getPoseDebugDegrees();
+  }
+
+  _captureCurrentPoseDebugPose() {
+    const rig = this.game.player.externalRig;
+    const jointNames = POSE_DEBUG_JOINTS.map(({ name }) => name);
+    const currentPoseDegrees = rig?.getCurrentDebugPoseDegrees?.(jointNames);
+
+    if (!currentPoseDegrees) {
+      return false;
+    }
+
+    const poseDegrees = normalizePoseDegrees(currentPoseDegrees);
+    let animation = this.poseDebugAnimations.find((entry) => entry.id === POSE_DEBUG_CURRENT_ANIMATION_ID);
+
+    if (!animation) {
+      animation = {
+        id: POSE_DEBUG_CURRENT_ANIMATION_ID,
+        label: 'Current Pose',
+        keyframes: [],
+      };
+      this.poseDebugAnimations.unshift(animation);
+    }
+
+    let keyframe = animation.keyframes.find((entry) => entry.id === POSE_DEBUG_CURRENT_KEYFRAME_ID);
+    if (!keyframe) {
+      keyframe = {
+        id: POSE_DEBUG_CURRENT_KEYFRAME_ID,
+        label: 'Captured on open',
+        frame: 0,
+        poseDegrees,
+      };
+      animation.keyframes.unshift(keyframe);
+    } else {
+      keyframe.poseDegrees = poseDegrees;
+    }
+
+    this.poseDebugAnimationId = animation.id;
+    this.poseDebugKeyframeId = keyframe.id;
+    this.poseDebugValues = createPoseValueMap(poseDegrees);
+    return true;
   }
 
   _loadPoseDebugKeyframe(keyframe) {
@@ -778,7 +820,7 @@ export class UIManager {
       group.className = 'pose-joint-group';
       group.dataset.poseJointGroup = name;
       group.open = ['hips', 'spine', 'rightShoulder', 'rightElbow', 'leftHip', 'rightHip'].includes(name);
-      const helperNote = POSE_HELPER_NOTES[name] ?? 'Raw local Euler axes are shown for inspection. Use semantic export for animation authoring.';
+      const helperNote = POSE_HELPER_NOTES[name] ?? 'Raw local Euler axes are shown for inspecting the active FBX rig pose.';
       group.innerHTML = `
         <summary>${label}</summary>
         <p class="pose-joint-helper">${helperNote}</p>
@@ -984,7 +1026,6 @@ export class UIManager {
 
     this._writePoseDebugValuesToActiveKeyframe();
     const poseDegrees = this._getPoseDebugDegrees();
-    const semanticPoseDegrees = DebugPoseExporter.rawPoseToSemanticDegrees(poseDegrees);
     const animation = this._getActivePoseAnimation();
     const keyframe = this._getActivePoseKeyframe();
     const activeWeapon = this.game.player.getActiveArmWeapon?.();
@@ -1002,16 +1043,15 @@ export class UIManager {
         }
       : null;
     const prompt = [
-      'Use this Mega Man Legends rig animation keyframe set as the target.',
-      'Prefer the semanticPoseDegrees payload for animation authoring.',
-      'rawLocalPoseDegrees are local joint Euler rotations in degrees using local X/Y/Z.',
+      'Use this Mega Man Legends FBX rig pose/keyframe set as the target.',
+      'rawLocalPoseDegrees are the editable local joint rotations in degrees as pitch/yaw/roll.',
       'Keep the current model proportions and equipment unless I say otherwise.',
       '',
       `Active weapon: ${activeWeapon?.name ?? 'none'}`,
       `Selected animation: ${animation?.label ?? 'none'}`,
       `Selected keyframe: ${keyframe ? `${keyframe.frame}: ${keyframe.label}` : 'none'}`,
       '',
-      JSON.stringify({ animation: animationPayload, semanticPoseDegrees, rawLocalPoseDegrees: poseDegrees }, null, 2),
+      JSON.stringify({ animation: animationPayload, rawLocalPoseDegrees: poseDegrees }, null, 2),
     ].join('\n');
 
     this.poseDebugOutput.value = prompt;

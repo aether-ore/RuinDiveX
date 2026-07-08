@@ -102,6 +102,7 @@ export class Game {
       aimWorld: new THREE.Vector3(0, 0, 1),
     };
     this.pointerLocked = false;
+    this.bodyFacingAimOverrideFrames = 0;
     this.lockOnMovementForward = new THREE.Vector3(0, 0, 1);
     this.lockOnMovementRight = new THREE.Vector3(1, 0, 0);
     this.lockOnMovementBasis = {
@@ -217,6 +218,7 @@ export class Game {
       projectileAiming: Boolean(this.animationPreview?.projectileAiming),
       lockOnActive: Boolean(this.animationPreview?.lockOnActive),
       strafeAmount: this.animationPreview?.strafeAmount ?? 0,
+      turnAmount: this.animationPreview?.turnAmount ?? 0,
       backpedaling: Boolean(this.animationPreview?.backpedaling),
       cameraAngle: this.animationPreview?.cameraAngle ?? 'follow',
       attackKind: this.animationPreview?.attackKind ?? null,
@@ -251,6 +253,7 @@ export class Game {
     const clipKey = params.get('animationPreviewClip') ?? params.get('fbxClip') ?? params.get('clip');
     const attackProgress = parseNumberParam('animationPreviewAttackProgress', 'animAttackProgress');
     const attackDuration = parseNumberParam('animationPreviewAttackDuration', 'animAttackDuration');
+    const turnAmount = parseNumberParam('animationPreviewTurn', 'animTurn', 'turnAmount', 'turn');
 
     if (clipKey) {
       options.clipKey = clipKey;
@@ -262,6 +265,10 @@ export class Game {
 
     if (attackDuration !== null) {
       options.attackDuration = attackDuration;
+    }
+
+    if (turnAmount !== null) {
+      options.turnAmount = THREE.MathUtils.clamp(turnAmount, -1, 1);
     }
 
     return this._createAnimationPreview(mode, options);
@@ -279,6 +286,7 @@ export class Game {
       projectileAiming: false,
       lockOnActive: false,
       strafeAmount: 0,
+      turnAmount: 0,
       backpedaling: false,
       cameraAngle: 'follow',
       attackKind: null,
@@ -317,6 +325,14 @@ export class Game {
         preview.projectileAiming = true;
         preview.lockOnActive = true;
         preview.strafeAmount = modeKey === 'strafeleft' ? -1 : 1;
+      } else if (modeKey === 'turnleft' || modeKey === 'leftturn') {
+        preview.moving = true;
+        preview.moveAmount = 1;
+        preview.turnAmount = -1;
+      } else if (modeKey === 'turnright' || modeKey === 'rightturn') {
+        preview.moving = true;
+        preview.moveAmount = 1;
+        preview.turnAmount = 1;
       } else if (modeKey === 'backpedal' || modeKey === 'aimbackpedal') {
         preview.moving = true;
         preview.moveAmount = 0.92;
@@ -358,6 +374,7 @@ export class Game {
     document.body.dataset.animationPreviewRunning = state.running ? 'true' : 'false';
     document.body.dataset.animationPreviewAiming = state.projectileAiming ? 'true' : 'false';
     document.body.dataset.animationPreviewStrafe = String(Number(state.strafeAmount).toFixed(2));
+    document.body.dataset.animationPreviewTurn = String(Number(state.turnAmount).toFixed(2));
     document.body.dataset.animationPreviewBackpedaling = state.backpedaling ? 'true' : 'false';
     document.body.dataset.animationPreviewCamera = state.cameraAngle;
     document.body.dataset.animationPreviewAttackKind = state.attackKind ?? 'none';
@@ -1613,6 +1630,14 @@ export class Game {
   }
 
   _updateAimFromPointer() {
+    if (this.bodyFacingAimOverrideFrames > 0 && this._alignAimWorldToTankTurnFacing()) {
+      this.bodyFacingAimOverrideFrames -= 1;
+      this._updateAimReticleStyle();
+      return;
+    }
+
+    this.bodyFacingAimOverrideFrames = 0;
+
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointerNdc.x = ((this.pointer.x - rect.left) / rect.width) * 2 - 1;
     this.pointerNdc.y = -((this.pointer.y - rect.top) / rect.height) * 2 + 1;
@@ -1713,12 +1738,45 @@ export class Game {
       if (pressed) {
         this.pointer.secondaryPressed = true;
         this.player?.syncMoveDirectionToBodyFacing?.();
-        this.cameraController?.swingBehindPlayer?.();
+        if (this._alignAimWorldToTankTurnFacing()) {
+          this.bodyFacingAimOverrideFrames = 2;
+        }
+        this.cameraController?.swingBehindPlayer?.(this.player);
       }
       return true;
     }
 
     return false;
+  }
+
+  _alignAimWorldToTankTurnFacing() {
+    const player = this.player;
+    const lockedTarget = this.combat?.getMovementLockTarget?.() ?? null;
+
+    if (!player?.root
+      || lockedTarget?.root
+      || !player.tankTurnActive
+      || player.tankTurnTranslating) {
+      return false;
+    }
+
+    const range = Math.max(2, player.stats?.attackRange ?? 6.2);
+    tempVectorA.set(Math.sin(player.root.rotation.y), 0, Math.cos(player.root.rotation.y));
+
+    if (tempVectorA.lengthSq() <= 0.0001) {
+      return false;
+    }
+
+    tempVectorA.normalize();
+    this.pointer.aimWorld.copy(player.root.position).addScaledVector(tempVectorA, range);
+    this.pointer.aimWorld.y = 0;
+
+    if (this.aimReticle) {
+      this.aimReticle.position.copy(this.pointer.aimWorld);
+      this.aimReticle.position.y = 0.055;
+    }
+
+    return true;
   }
 
   _bindEvents() {

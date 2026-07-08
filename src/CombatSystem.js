@@ -2554,6 +2554,12 @@ export class CombatSystem {
         this._clearLockOn();
         return;
       }
+
+      if (this.lockOn.movementLocked) {
+        this.lockOn.target = null;
+        this.lockOn.progress = 0;
+        this.lockOn.manual = false;
+      }
     }
 
     const manualAimLock = Boolean(this.lockOn.movementLocked);
@@ -2583,7 +2589,7 @@ export class CombatSystem {
       }
     }
 
-    const candidate = this._findLockCandidate(aimWorld, profile);
+    const candidate = this._findLockCandidate(profile);
 
     if (!candidate) {
       this._clearLockOn();
@@ -2606,23 +2612,11 @@ export class CombatSystem {
     this._updateLockMarker();
   }
 
-  _findLockCandidate(aimWorld, profile) {
+  _findLockCandidate(profile) {
     const player = this.game.player;
     const range = Math.max(2, profile.homingRange ?? player.stats.attackRange);
-    const aimDirection = tempDirection.copy(aimWorld ?? player.root.position).sub(player.root.position);
-    aimDirection.y = 0;
-
-    if (aimDirection.lengthSq() <= 0.001) {
-      aimDirection.copy(player.lastMoveDirection);
-    }
-
-    if (aimDirection.lengthSq() <= 0.001) {
-      aimDirection.set(0, 0, 1);
-    }
-
-    aimDirection.normalize();
     let bestEnemy = null;
-    let bestScore = Infinity;
+    let nearestDistanceSq = Infinity;
 
     for (const enemy of this.game.enemies) {
       if (enemy.dead || enemy.id === this.lockOn.skippedTargetId) {
@@ -2631,20 +2625,13 @@ export class CombatSystem {
 
       tempToEnemy.copy(enemy.root.position).sub(player.root.position);
       tempToEnemy.y = 0;
-      const distance = tempToEnemy.length();
-      if (distance > range || distance <= 0.001) {
+      const distanceSq = tempToEnemy.lengthSq();
+      if (distanceSq > range * range || distanceSq <= 0.001) {
         continue;
       }
 
-      const angle = angleBetweenFlat(aimDirection, tempToEnemy.normalize());
-      const reticleDistance = aimWorld ? enemy.root.position.distanceTo(aimWorld) : distance;
-      if (angle > 0.95 && reticleDistance > 2.4) {
-        continue;
-      }
-
-      const score = angle * 2.4 + reticleDistance * 0.42 + distance * 0.035;
-      if (score < bestScore) {
-        bestScore = score;
+      if (distanceSq < nearestDistanceSq) {
+        nearestDistanceSq = distanceSq;
         bestEnemy = enemy;
       }
     }

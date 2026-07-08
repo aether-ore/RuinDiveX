@@ -27,6 +27,7 @@ const POSE_DEBUG_CAMERA_MIN_DISTANCE = 4.5;
 const POSE_DEBUG_CAMERA_MAX_DISTANCE = 22;
 const HIT_STOP_MAX_DURATION = 0.16;
 const HIT_STOP_DEFAULT_TIME_SCALE = 0.06;
+const CAMERA_WALL_OCCLUSION_TARGET_HEIGHT = 1.25;
 
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
@@ -108,6 +109,9 @@ export class Game {
       lockOnTarget: null,
     };
     this.raycaster = new THREE.Raycaster();
+    this.cameraOcclusionRaycaster = new THREE.Raycaster();
+    this.cameraOcclusionWalls = [];
+    this.cameraOcclusionHiddenWalls = new Set();
     this.aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.pointerNdc = new THREE.Vector2();
     this.aimReticle = null;
@@ -857,6 +861,7 @@ export class Game {
     this.dungeon = dungeon;
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
+    this._collectCameraOcclusionWalls();
     this.dungeonController = new DungeonController(this, dungeon);
 
     this.player.root.position.copy(dungeon.playerStart);
@@ -1351,6 +1356,7 @@ export class Game {
       this._updatePoseDebugHandles();
     }
     this._updateCamera(dt);
+    this._updateCameraWallOcclusion();
     this.ui.update(dt);
     this.renderer.render(this.scene, this.camera);
   }
@@ -1475,6 +1481,7 @@ export class Game {
     this.dungeon = dungeon;
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
+    this._collectCameraOcclusionWalls();
 
   }
 
@@ -1537,6 +1544,54 @@ export class Game {
     reticleMesh.position.y = 0.055;
     this.scene.add(reticleMesh);
     this.aimReticle = reticleMesh;
+  }
+
+  _collectCameraOcclusionWalls() {
+    for (const wall of this.cameraOcclusionHiddenWalls) {
+      wall.visible = true;
+    }
+
+    this.cameraOcclusionHiddenWalls.clear();
+    this.cameraOcclusionWalls.length = 0;
+
+    this.dungeon?.group?.traverse?.((object) => {
+      if (object.name !== 'dungeonBoundaryWall') {
+        return;
+      }
+
+      this.cameraOcclusionWalls.push(object);
+    });
+  }
+
+  _updateCameraWallOcclusion() {
+    for (const wall of this.cameraOcclusionHiddenWalls) {
+      wall.visible = true;
+    }
+    this.cameraOcclusionHiddenWalls.clear();
+
+    if (!this.cameraOcclusionWalls.length || !this.player?.root) {
+      return;
+    }
+
+    tempVectorA.copy(this.player.root.position);
+    tempVectorA.y += CAMERA_WALL_OCCLUSION_TARGET_HEIGHT;
+    tempVectorB.copy(tempVectorA).sub(this.camera.position);
+    const distance = tempVectorB.length();
+
+    if (distance <= 0.001) {
+      return;
+    }
+
+    tempVectorB.divideScalar(distance);
+    this.cameraOcclusionRaycaster.set(this.camera.position, tempVectorB);
+    this.cameraOcclusionRaycaster.near = 0.08;
+    this.cameraOcclusionRaycaster.far = Math.max(0.08, distance - 0.08);
+
+    const hits = this.cameraOcclusionRaycaster.intersectObjects(this.cameraOcclusionWalls, false);
+    for (const hit of hits) {
+      hit.object.visible = false;
+      this.cameraOcclusionHiddenWalls.add(hit.object);
+    }
   }
 
   _updateAimFromPointer() {

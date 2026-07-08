@@ -2,10 +2,17 @@ import * as THREE from 'three';
 
 const DEFAULT_TILE_SIZE = 2.8;
 const RUIN_TEXTURE_BASE_PATH = '/assets/textures/ruins/';
-const RUIN_WALL_HEIGHT = 3.2;
+const RUIN_WALL_HEIGHT = 6.4;
 const RUIN_WALL_THICKNESS = 0.22;
+const RUIN_WALL_FACE_OFFSET = 0.006;
+const RUIN_WALL_TILE_OVERLAP = 0.014;
+const RUIN_WALL_TILE_ROWS = 3;
 const RUIN_CEILING_THICKNESS = 0.12;
+const RUIN_DOOR_HEIGHT = 4.8;
+const RUIN_DOOR_OPEN_Y = -5.3;
 const RUIN_OPEN_AIR_ROOM_TYPES = new Set(['hub', 'camp']);
+const WALL_MACRO_VARIANTS = ['sand', 'overgrown', 'industrial'];
+const WALL_MACRO_TILE_KEYS = ['tl', 'tm', 'tr', 'ml', 'mm', 'mr', 'bl', 'bm', 'br'];
 const DIRECTIONS = [
   [1, 0],
   [-1, 0],
@@ -271,6 +278,39 @@ export class DungeonGenerator {
     });
   }
 
+  _createWallMacroTileMaterials(variant) {
+    const style = {
+      sand: {
+        color: 0xf2ead8,
+        emissive: 0x031010,
+        roughness: 0.76,
+        metalness: 0.06,
+      },
+      overgrown: {
+        color: 0xf0ecd7,
+        emissive: 0x06140a,
+        roughness: 0.84,
+        metalness: 0.03,
+      },
+      industrial: {
+        color: 0xd8d9e2,
+        emissive: 0x030510,
+        roughness: 0.72,
+        metalness: 0.1,
+      },
+    }[variant] ?? {};
+    const materials = {};
+
+    for (const key of WALL_MACRO_TILE_KEYS) {
+      materials[key] = this._createRuinMaterial(`wall_macro_${variant}_${key}`, {
+        emissiveIntensity: 0.04,
+        ...style,
+      });
+    }
+
+    return materials;
+  }
+
   _createMaterials() {
     const floor = this._createRuinMaterial('floor_plain', {
       roughness: 0.86,
@@ -349,17 +389,23 @@ export class DungeonGenerator {
       roughness: 0.9,
       metalness: 0.03,
     });
+    const wallMacroVariant = WALL_MACRO_VARIANTS[
+      this._randomInt(0, WALL_MACRO_VARIANTS.length - 1)
+    ];
+    const wallMacroTiles = this._createWallMacroTileMaterials(wallMacroVariant);
 
     return {
       floor,
       hallway,
-      wall: this._createRuinMaterial('wall_9slice_panel', {
-        color: 0xf2ead8,
+      wall: new THREE.MeshStandardMaterial({
+        color: 0xa79d87,
         emissive: 0x030505,
-        emissiveIntensity: 0.03,
-        roughness: 0.72,
-        metalness: 0.08,
+        emissiveIntensity: 0.025,
+        roughness: 0.78,
+        metalness: 0.06,
       }),
+      wallMacroTiles,
+      wallMacroVariant,
       ceiling: this._createRuinMaterial('ceiling_panel', {
         color: 0xe8dfcc,
         roughness: 0.84,
@@ -512,16 +558,15 @@ export class DungeonGenerator {
   }
 
   _addWalls(group, tiles, materials, openAirTileKeys = new Set()) {
-    const horizontalWallGeometry = new THREE.BoxGeometry(
-      this.tileSize,
-      RUIN_WALL_HEIGHT,
-      RUIN_WALL_THICKNESS,
-    );
-    const verticalWallGeometry = new THREE.BoxGeometry(
-      RUIN_WALL_THICKNESS,
-      RUIN_WALL_HEIGHT,
-      this.tileSize,
-    );
+    const runs = this._collectBoundaryWallRuns(tiles, openAirTileKeys);
+
+    for (const run of runs) {
+      this._addBoundaryWallRun(group, run, materials);
+    }
+  }
+
+  _collectBoundaryWallRuns(tiles, openAirTileKeys) {
+    const buckets = new Map();
 
     for (const tile of tiles.values()) {
       if (openAirTileKeys.has(tileKey(tile.x, tile.z))) {
@@ -534,22 +579,186 @@ export class DungeonGenerator {
         }
 
         const horizontal = dz !== 0;
-        const wall = new THREE.Mesh(
-          horizontal ? horizontalWallGeometry : verticalWallGeometry,
-          materials.wall,
-        );
+        const line = horizontal ? tile.z + dz * 0.5 : tile.x + dx * 0.5;
+        const axis = horizontal ? tile.x : tile.z;
+        const key = `${horizontal ? 'h' : 'v'}:${dx}:${dz}:${line}`;
+        let bucket = buckets.get(key);
 
-        wall.name = 'dungeonBoundaryWall';
-        wall.position.set(
-          tile.x * this.tileSize + dx * this.tileSize * 0.5,
-          RUIN_WALL_HEIGHT * 0.5,
-          tile.z * this.tileSize + dz * this.tileSize * 0.5,
-        );
-        wall.castShadow = true;
-        wall.receiveShadow = true;
-        group.add(wall);
+        if (!bucket) {
+          bucket = {
+            horizontal,
+            dx,
+            dz,
+            line,
+            axes: new Set(),
+          };
+          buckets.set(key, bucket);
+        }
+
+        bucket.axes.add(axis);
       }
     }
+
+    const runs = [];
+    for (const bucket of buckets.values()) {
+      const axes = [...bucket.axes].sort((a, b) => a - b);
+
+      if (!axes.length) {
+        continue;
+      }
+
+      let start = axes[0];
+      let previous = axes[0];
+      const pushRun = () => {
+        runs.push({
+          horizontal: bucket.horizontal,
+          dx: bucket.dx,
+          dz: bucket.dz,
+          line: bucket.line,
+          start,
+          end: previous,
+          lengthTiles: previous - start + 1,
+        });
+      };
+
+      for (let i = 1; i < axes.length; i += 1) {
+        const axis = axes[i];
+        if (axis === previous + 1) {
+          previous = axis;
+          continue;
+        }
+
+        pushRun();
+        start = axis;
+        previous = axis;
+      }
+
+      pushRun();
+    }
+
+    return runs;
+  }
+
+  _addBoundaryWallRun(group, run, materials) {
+    const lengthWorld = run.lengthTiles * this.tileSize;
+    const geometry = new THREE.BoxGeometry(
+      run.horizontal ? lengthWorld : RUIN_WALL_THICKNESS,
+      RUIN_WALL_HEIGHT,
+      run.horizontal ? RUIN_WALL_THICKNESS : lengthWorld,
+    );
+    const wall = new THREE.Mesh(geometry, materials.wall);
+    const axisCenter = ((run.start + run.end) * 0.5) * this.tileSize;
+
+    wall.name = 'dungeonBoundaryWall';
+    wall.position.set(
+      run.horizontal ? axisCenter : run.line * this.tileSize,
+      RUIN_WALL_HEIGHT * 0.5,
+      run.horizontal ? run.line * this.tileSize : axisCenter,
+    );
+    wall.userData.wallRun = {
+      horizontal: run.horizontal,
+      dx: run.dx,
+      dz: run.dz,
+      line: run.line,
+      start: run.start,
+      end: run.end,
+      lengthTiles: run.lengthTiles,
+    };
+    wall.castShadow = true;
+    wall.receiveShadow = true;
+
+    this._addMacroWallFace(wall, run, lengthWorld, materials);
+    group.add(wall);
+  }
+
+  _addMacroWallFace(wall, run, lengthWorld, materials) {
+    const faceOffset = RUIN_WALL_THICKNESS * 0.5 + RUIN_WALL_FACE_OFFSET;
+    const addFace = (normalX, normalZ) => {
+      this._addMacroWallTileGrid(wall, run, lengthWorld, materials, normalX, normalZ, faceOffset);
+    };
+
+    if (run.horizontal) {
+      addFace(0, -run.dz);
+      addFace(0, run.dz);
+    } else {
+      addFace(-run.dx, 0);
+      addFace(run.dx, 0);
+    }
+  }
+
+  _addMacroWallTileGrid(wall, run, lengthWorld, materials, normalX, normalZ, faceOffset) {
+    const columns = Math.max(
+      3,
+      Math.round(lengthWorld / (RUIN_WALL_HEIGHT / RUIN_WALL_TILE_ROWS)),
+    );
+    const rows = RUIN_WALL_TILE_ROWS;
+    const tileWidth = lengthWorld / columns;
+    const tileHeight = RUIN_WALL_HEIGHT / rows;
+    const geometry = new THREE.PlaneGeometry(
+      tileWidth + RUIN_WALL_TILE_OVERLAP,
+      tileHeight + RUIN_WALL_TILE_OVERLAP,
+    );
+
+    for (let row = 0; row < rows; row += 1) {
+      for (let column = 0; column < columns; column += 1) {
+        const tileName = this._getWallMacroTileName(column, row, columns, rows);
+        const tile = new THREE.Mesh(
+          geometry,
+          materials.wallMacroTiles?.[tileName] ?? materials.wallMacroTiles?.mm ?? materials.wall,
+        );
+        const along = -lengthWorld * 0.5 + tileWidth * (column + 0.5);
+
+        tile.name = 'dungeonBoundaryWallMacroTile';
+        tile.receiveShadow = true;
+        tile.position.y = RUIN_WALL_HEIGHT * 0.5 - tileHeight * (row + 0.5);
+
+        if (run.horizontal) {
+          tile.position.x = along;
+          tile.position.z = normalZ * faceOffset;
+          tile.rotation.y = normalZ >= 0 ? 0 : Math.PI;
+        } else {
+          tile.position.x = normalX * faceOffset;
+          tile.position.z = along;
+          tile.rotation.y = normalX >= 0 ? Math.PI / 2 : -Math.PI / 2;
+        }
+
+        wall.add(tile);
+      }
+    }
+  }
+
+  _getWallMacroTileName(column, row, columns, rows) {
+    const top = row === 0;
+    const bottom = row === rows - 1;
+    const left = column === 0;
+    const right = column === columns - 1;
+
+    if (top && left) {
+      return 'tl';
+    }
+    if (top && right) {
+      return 'tr';
+    }
+    if (bottom && left) {
+      return 'bl';
+    }
+    if (bottom && right) {
+      return 'br';
+    }
+    if (top) {
+      return 'tm';
+    }
+    if (bottom) {
+      return 'bm';
+    }
+    if (left) {
+      return 'ml';
+    }
+    if (right) {
+      return 'mr';
+    }
+
+    return 'mm';
   }
 
   _addInvisibleOpenAirBounds(group, tiles, materials, openAirTileKeys = new Set()) {
@@ -619,15 +828,15 @@ export class DungeonGenerator {
       door.name = descriptor.id;
       door.position.copy(position);
       if (!descriptor.closed) {
-        door.position.y = -3.25;
+        door.position.y = RUIN_DOOR_OPEN_Y;
       }
 
       const frame = new THREE.Mesh(
-        new THREE.BoxGeometry(alongX ? 0.24 : this.tileSize * 0.9, 2.72, alongX ? this.tileSize * 0.9 : 0.24),
+        new THREE.BoxGeometry(alongX ? 0.24 : this.tileSize * 0.9, RUIN_DOOR_HEIGHT, alongX ? this.tileSize * 0.9 : 0.24),
         descriptor.locked ? materials.lockedDoor : materials.door,
       );
       frame.name = 'dungeonDoorFrame';
-      frame.position.y = 1.36;
+      frame.position.y = RUIN_DOOR_HEIGHT * 0.5;
       frame.castShadow = true;
       frame.receiveShadow = true;
 
@@ -636,7 +845,7 @@ export class DungeonGenerator {
         descriptor.locked ? materials.glowYellow : materials.glowBlue,
       );
       light.name = descriptor.locked ? 'lockedDoorStatusLight' : 'doorStatusLight';
-      light.position.y = 2.48;
+      light.position.y = RUIN_DOOR_HEIGHT - 0.34;
 
       door.add(frame, light);
       group.add(door);

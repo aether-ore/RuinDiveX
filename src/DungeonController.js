@@ -4,6 +4,7 @@ const KEYCARD_COLOR = 0xffd66b;
 const MECHANISM_COLOR = 0x6bdcff;
 const SHRINE_COLOR = 0x7df8ff;
 const LOCKED_COLOR = 0xffb347;
+const DOOR_OPEN_Y = -5.3;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
   [-1, 0],
@@ -764,7 +765,7 @@ export class DungeonController {
         continue;
       }
 
-      const targetY = door.closed ? 0 : -3.25;
+      const targetY = door.closed ? 0 : DOOR_OPEN_Y;
       door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, targetY, Math.min(1, dt * 8));
 
       if (door.light?.material?.emissive) {

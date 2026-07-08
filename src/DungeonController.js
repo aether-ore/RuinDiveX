@@ -65,6 +65,8 @@ export class DungeonController {
     this.keycards = dungeon?.keycards ?? [];
     this.chests = dungeon?.chests ?? [];
     this.mechanisms = dungeon?.mechanisms ?? [];
+    this.puzzleBlocks = dungeon?.puzzleBlocks ?? [];
+    this.pressurePlates = dungeon?.pressurePlates ?? [];
     this.safeInteractables = dungeon?.safeInteractables ?? [];
     this.safeZones = dungeon?.safeZones ?? [];
     this.encounters = dungeon?.encounters ?? [];
@@ -94,7 +96,9 @@ export class DungeonController {
     this._updateKeycards(dt);
     this._updateTraps(dt);
     this._updateTrapVisuals(dt);
+    this._updatePuzzleBlocks(dt);
     this._updateConveyors(dt);
+    this._updatePressurePlates(dt);
     this._updateEncounters();
     this._constrainPlayerToWalkable();
     this._updateDoorVisuals(dt);
@@ -142,7 +146,7 @@ export class DungeonController {
       && isInsideZone(this.game.player.root.position, trap)
     ));
     if (activeTrap) {
-      return this.keycardCount > 0 ? 'Disable trap' : 'Cross trap room';
+      return this.keycardCount > 0 ? 'Disable trap' : 'Time laser pulses';
     }
 
     if (this.game.ruinCompleted && this.shrine?.collected) {
@@ -432,8 +436,13 @@ export class DungeonController {
         continue;
       }
 
+      const timing = this._getTrapTiming(trap);
+      if (!timing.live) {
+        continue;
+      }
+
       if (isInsideZone(player.root.position, trap)) {
-        player.takeDamage(8 * dt);
+        player.takeDamage((trap.damagePerSecond ?? 18) * dt);
 
         if (pulseNow) {
           tempVectorA.copy(player.root.position);
@@ -475,10 +484,21 @@ export class DungeonController {
         continue;
       }
 
+      const timing = this._getTrapTiming(trap);
       const activePulse = trap.active
-        ? 0.72 + Math.sin(this.game.elapsedTime * 9) * 0.12
+        ? timing.live
+          ? 1.1 + Math.sin(this.game.elapsedTime * 22) * 0.16
+          : timing.telegraph
+            ? 0.62 + Math.sin(this.game.elapsedTime * 14) * 0.18
+            : 0.22
         : 0.08;
-      const targetScaleY = trap.active ? 1 : 0.32;
+      const targetScaleY = trap.active
+        ? timing.live
+          ? 1
+          : timing.telegraph
+            ? 0.72
+            : 0.28
+        : 0.18;
 
       trap.object.traverse((object) => {
         if (!object.isMesh) {
@@ -493,7 +513,75 @@ export class DungeonController {
             Math.min(1, dt * 8),
           );
         }
+
+        if (object.name === 'trapLaserBeam' && object.material) {
+          object.material.opacity = THREE.MathUtils.lerp(
+            object.material.opacity ?? 0.7,
+            trap.active
+              ? timing.live
+                ? 0.82
+                : timing.telegraph
+                  ? 0.28
+                  : 0.035
+              : 0,
+            Math.min(1, dt * 10),
+          );
+        }
       });
+    }
+  }
+
+  _getTrapTiming(trap) {
+    if (!trap?.active) {
+      return { live: false, telegraph: false, phase: 0 };
+    }
+
+    const interval = Math.max(0.5, trap.pulseInterval ?? 1.55);
+    const liveDuration = Math.min(interval, Math.max(0.08, trap.activeDuration ?? 0.36));
+    const telegraphDuration = Math.max(0.08, trap.telegraphDuration ?? 0.4);
+    const phase = THREE.MathUtils.euclideanModulo(this.game.elapsedTime + (trap.phaseOffset ?? 0), interval);
+    const live = phase <= liveDuration;
+    const telegraph = !live && phase >= interval - telegraphDuration;
+
+    return { live, telegraph, phase };
+  }
+
+  _updatePuzzleBlocks(dt) {
+    const player = this.game.player;
+    const playerRoot = player.root;
+    const playerRadius = player.radius ?? 0.42;
+
+    for (const block of this.puzzleBlocks) {
+      if (!block?.object || block.locked) {
+        continue;
+      }
+
+      tempVectorA.copy(block.position);
+      tempVectorB.copy(block.position).sub(playerRoot.position);
+      tempVectorB.y = 0;
+
+      const minDistance = (block.radius ?? 0.58) + playerRadius + 0.08;
+      const distance = tempVectorB.length();
+      if (distance > 0.001 && distance < minDistance) {
+        tempVectorB.normalize();
+        block.position.addScaledVector(tempVectorB, Math.min(1.6 * dt, minDistance - distance + 0.02));
+      } else if (distance <= 0.001 && player.lastMoveDirection?.lengthSq?.() > 0.0001) {
+        tempVectorB.copy(player.lastMoveDirection).normalize();
+        block.position.addScaledVector(tempVectorB, 1.2 * dt);
+      }
+
+      if (!this.isPositionWalkable(block.position)) {
+        block.position.copy(tempVectorA);
+      }
+
+      block.position.y = 0;
+      block.object.position.lerp(block.position, Math.min(1, dt * 12));
+      block.object.rotation.y += dt * 0.35;
+
+      const core = block.object.getObjectByName?.('relayBlockPowerCore');
+      if (core?.material?.emissive) {
+        core.material.emissiveIntensity = 0.72 + Math.sin(this.game.elapsedTime * 5.8) * 0.18;
+      }
     }
   }
 
@@ -518,6 +606,143 @@ export class DungeonController {
 
         enemy.root.position.addScaledVector(conveyor.direction, conveyor.speed * dt * 0.72);
       }
+
+      for (const block of this.puzzleBlocks) {
+        if (block.locked || !isInsideZone(block.position, conveyor)) {
+          continue;
+        }
+
+        tempVectorA.copy(block.position);
+        block.position.addScaledVector(conveyor.direction, conveyor.speed * dt * 0.55);
+        block.position.y = 0;
+
+        if (!this.isPositionWalkable(block.position)) {
+          block.position.copy(tempVectorA);
+        }
+
+        block.object?.position.copy(block.position);
+      }
+    }
+  }
+
+  _updatePressurePlates(dt) {
+    for (const plate of this.pressurePlates) {
+      const occupied = this._isPressurePlateOccupied(plate);
+      const powered = this._isPressurePlatePowered(plate);
+      plate.active = occupied;
+
+      if (powered && !plate.activated) {
+        plate.activated = true;
+        this.game.addParticleBurst(plate.position, MECHANISM_COLOR, 24, 0.16);
+
+        const targetDoor = this.doors.find((door) => door.id === plate.targetDoorId);
+        if (targetDoor?.closed) {
+          this._openDoor(targetDoor, `${plate.label} powered: ${targetDoor.label} opened`);
+        } else {
+          this.game.ui?.showToast?.(`${plate.label} powered`, '#6bdcff');
+        }
+      }
+
+      this._updatePressurePlateVisual(plate, dt);
+    }
+  }
+
+  _isPressurePlateOccupied(plate) {
+    if (!plate) {
+      return false;
+    }
+
+    const radius = plate.radius ?? 0.9;
+    const radiusSq = radius * radius;
+
+    tempVectorA.copy(this.game.player.root.position);
+    tempVectorA.y = plate.position.y;
+    if (tempVectorA.distanceToSquared(plate.position) <= radiusSq) {
+      return true;
+    }
+
+    for (const block of this.puzzleBlocks) {
+      if (block.locked) {
+        continue;
+      }
+
+      tempVectorA.copy(block.position);
+      tempVectorA.y = plate.position.y;
+      const blockRadius = radius + (block.radius ?? 0.58) * 0.35;
+      if (tempVectorA.distanceToSquared(plate.position) <= blockRadius * blockRadius) {
+        return true;
+      }
+    }
+
+    for (const enemy of this.game.enemies) {
+      if (enemy.dead) {
+        continue;
+      }
+
+      tempVectorA.copy(enemy.root.position);
+      tempVectorA.y = plate.position.y;
+      if (tempVectorA.distanceToSquared(plate.position) <= radiusSq) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  _isPressurePlatePowered(plate) {
+    if (!plate) {
+      return false;
+    }
+
+    if (!plate.requiredBlockId) {
+      return this._isPressurePlateOccupied(plate);
+    }
+
+    const block = this.puzzleBlocks.find((candidate) => candidate.id === plate.requiredBlockId);
+    if (!block || block.locked) {
+      return false;
+    }
+
+    tempVectorA.copy(block.position);
+    tempVectorA.y = plate.position.y;
+    const radius = (plate.radius ?? 0.9) + (block.radius ?? 0.58) * 0.35;
+    return tempVectorA.distanceToSquared(plate.position) <= radius * radius;
+  }
+
+  _updatePressurePlateVisual(plate, dt) {
+    const object = plate.object;
+    if (!object) {
+      return;
+    }
+
+    const energized = plate.activated || plate.active;
+    const base = object.getObjectByName?.('pressurePlateBase');
+    const ring = object.getObjectByName?.('pressurePlatePowerRing');
+    const glyph = object.getObjectByName?.('pressurePlatePowerGlyph');
+    const alpha = Math.min(1, dt * 8);
+
+    if (base) {
+      base.scale.y = THREE.MathUtils.lerp(base.scale.y, energized ? 0.72 : 1, alpha);
+    }
+
+    if (ring?.material) {
+      ring.material.opacity = THREE.MathUtils.lerp(
+        ring.material.opacity ?? 0.32,
+        plate.activated ? 0.56 : plate.active ? 0.44 : 0.24,
+        alpha,
+      );
+    }
+
+    if (glyph) {
+      glyph.rotation.y += dt * (energized ? 1.6 : 0.45);
+      glyph.position.y = THREE.MathUtils.lerp(glyph.position.y, energized ? 0.12 : 0.15, alpha);
+      if (glyph.material?.emissive) {
+        glyph.material.emissiveIntensity = THREE.MathUtils.lerp(
+          glyph.material.emissiveIntensity ?? 0.8,
+          energized ? 1.1 : 0.42,
+          alpha,
+        );
+      }
     }
   }
 
@@ -531,7 +756,8 @@ export class DungeonController {
       door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, targetY, Math.min(1, dt * 8));
 
       if (door.light?.material?.emissive) {
-        const ready = !door.locked || (door.requiresKeycard && this.keycardCount > 0);
+        const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
+        const ready = !door.locked || pressureReady || (door.requiresKeycard && this.keycardCount > 0);
         door.light.material.emissiveIntensity = ready ? 0.95 : 0.36;
       }
     }
@@ -599,6 +825,8 @@ export class DungeonController {
         const encounter = door.encounterId
           ? this.encounters.find((candidate) => candidate.id === door.encounterId)
           : null;
+        const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
+        const needsKeycard = door.requiresKeycard && !pressureReady;
         nearest = {
           kind: 'door',
           target: door,
@@ -606,8 +834,10 @@ export class DungeonController {
             ? 'Ruin Descent Gate: Use Lift'
             : encounter && !encounter.cleared
             ? `${door.label}: Clear Reaverbots`
-            : door.requiresKeycard ? `${door.label}: Keycard` : door.label,
-          color: door.requiresLift || (door.requiresKeycard && this.keycardCount <= 0) || (encounter && !encounter.cleared)
+            : needsKeycard
+              ? `${door.label}: Keycard or Plate`
+              : door.label,
+          color: door.requiresLift || (needsKeycard && this.keycardCount <= 0) || (encounter && !encounter.cleared)
             ? LOCKED_COLOR
             : MECHANISM_COLOR,
         };
@@ -774,8 +1004,13 @@ export class DungeonController {
       }
     }
 
-    if (door.requiresKeycard && this.keycardCount <= 0) {
-      this.game.ui?.showToast?.('Keycard required', '#ffb347');
+    const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
+
+    if (door.requiresKeycard && this.keycardCount <= 0 && !pressureReady) {
+      this.game.ui?.showToast?.(
+        door.pressurePlateId ? 'Keycard or pressure plate required' : 'Keycard required',
+        '#ffb347',
+      );
       this._pulseDoor(door, LOCKED_COLOR);
       return;
     }
@@ -786,11 +1021,11 @@ export class DungeonController {
       return;
     }
 
-    if (door.requiresKeycard) {
+    if (door.requiresKeycard && !pressureReady) {
       this.keycardCount = Math.max(0, this.keycardCount - 1);
     }
 
-    this._openDoor(door, door.requiresKeycard ? 'Keycard door unlocked' : 'Door opened');
+    this._openDoor(door, pressureReady ? 'Pressure plate route unlocked' : door.requiresKeycard ? 'Keycard door unlocked' : 'Door opened');
   }
 
   _activateMechanism(mechanism) {
@@ -1096,6 +1331,10 @@ export class DungeonController {
 
   _isMechanismActivated(id) {
     return this.mechanisms.some((mechanism) => mechanism.id === id && mechanism.activated);
+  }
+
+  _isPressurePlateActivated(id) {
+    return this.pressurePlates.some((plate) => plate.id === id && plate.activated);
   }
 
   _findNearestWalkablePosition(position) {

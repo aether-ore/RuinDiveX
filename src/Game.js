@@ -30,6 +30,7 @@ const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 function createDamageCanvas() {
   const canvas = document.createElement('canvas');
@@ -88,7 +89,17 @@ export class Game {
       primaryPressed: false,
       secondary: false,
       secondaryPressed: false,
+      alternate: false,
+      alternatePressed: false,
       aimWorld: new THREE.Vector3(0, 0, 1),
+    };
+    this.pointerLocked = false;
+    this.lockOnMovementForward = new THREE.Vector3(0, 0, 1);
+    this.lockOnMovementRight = new THREE.Vector3(1, 0, 0);
+    this.lockOnMovementBasis = {
+      forward: this.lockOnMovementForward,
+      right: this.lockOnMovementRight,
+      lockOnTarget: null,
     };
     this.raycaster = new THREE.Raycaster();
     this.aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -168,10 +179,13 @@ export class Game {
 
     this.inventoryOpen = open;
     if (open) {
+      this._exitGameplayPointerLock();
       this.pointer.primary = false;
       this.pointer.primaryPressed = false;
       this.pointer.secondary = false;
       this.pointer.secondaryPressed = false;
+      this.pointer.alternate = false;
+      this.pointer.alternatePressed = false;
     }
     this.ui.setInventoryOpen(open);
   }
@@ -183,10 +197,13 @@ export class Game {
 
     this.poseDebugOpen = open;
     if (open) {
+      this._exitGameplayPointerLock();
       this.pointer.primary = false;
       this.pointer.primaryPressed = false;
       this.pointer.secondary = false;
       this.pointer.secondaryPressed = false;
+      this.pointer.alternate = false;
+      this.pointer.alternatePressed = false;
       this.keys.clear();
       this._syncPoseDebugCameraFromCurrent();
     } else {
@@ -354,6 +371,9 @@ export class Game {
     const blockingEncounter = override?.requiresEncounterId
       ? controller?.encounters?.find?.((encounter) => encounter.id === override.requiresEncounterId && !encounter.cleared)
       : null;
+    const bonusDoor = controller?.doors?.find?.((door) => door.id === 'bonusVaultDoor') ?? null;
+    const vaultPlate = controller?.pressurePlates?.find?.((plate) => plate.id === 'conveyorVaultPlate') ?? null;
+    const relayBlock = controller?.puzzleBlocks?.find?.((block) => block.id === 'conveyorRelayBlock') ?? null;
 
     const refractorComplete = Boolean(this.ruinCompleted);
     const extracted = refractorComplete && Boolean(controller?.isPlayerInSafeZone?.());
@@ -412,6 +432,23 @@ export class Game {
           ? 'Shrine security and local hazards are disabled.'
           : 'Activate the console to disable traps and release the shrine seal.',
         progress: override.activated ? 1 : blockingEncounter ? 0.35 : 0.66,
+        color: '#6bdcff',
+      });
+    }
+
+    if (bonusDoor && vaultPlate && relayBlock) {
+      entries.push({
+        id: 'vaultRelay',
+        title: 'Optional Vault Relay',
+        status: bonusDoor.closed
+          ? vaultPlate.activated
+            ? 'Plate powered'
+            : 'Route relay block'
+          : 'Vault opened',
+        detail: bonusDoor.closed
+          ? 'Push the relay block onto the conveyor plate or spend a keycard at the vault door.'
+          : 'The optional conveyor vault route is unlocked.',
+        progress: bonusDoor.closed ? (vaultPlate.activated ? 0.82 : 0.35) : 1,
         color: '#6bdcff',
       });
     }
@@ -984,11 +1021,12 @@ export class Game {
     if (!this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver) {
       this.elapsedTime += dt;
       this._updateAimFromPointer();
-      const movementBasis = this.cameraController.getMovementBasis(this.player.lastMoveDirection);
+      const movementBasis = this._getPlayerMovementBasis();
       this.player.update(dt, this.keys, {
         arenaRadius: this.arenaRadius,
         movementForward: movementBasis.forward,
         movementRight: movementBasis.right,
+        lockOnTarget: movementBasis.lockOnTarget,
       });
       this.dungeonController.update(dt);
       this.mapEvents.update(dt);
@@ -1029,6 +1067,26 @@ export class Game {
     this._updateCamera(dt);
     this.ui.update(dt);
     this.renderer.render(this.scene, this.camera);
+  }
+
+  _getPlayerMovementBasis() {
+    const lockOnTarget = this.combat?.getMovementLockTarget?.() ?? null;
+
+    if (!lockOnTarget?.root || lockOnTarget.dead) {
+      return this.cameraController.getMovementBasis(this.player.lastMoveDirection);
+    }
+
+    this.lockOnMovementForward.copy(lockOnTarget.root.position).sub(this.player.root.position);
+    this.lockOnMovementForward.y = 0;
+
+    if (this.lockOnMovementForward.lengthSq() <= 0.0001) {
+      return this.cameraController.getMovementBasis(this.player.lastMoveDirection);
+    }
+
+    this.lockOnMovementForward.normalize();
+    this.lockOnMovementRight.crossVectors(this.lockOnMovementForward, WORLD_UP).normalize();
+    this.lockOnMovementBasis.lockOnTarget = lockOnTarget;
+    return this.lockOnMovementBasis;
   }
 
   _buildWorld() {
@@ -1230,8 +1288,82 @@ export class Game {
         ? 0.9
         : weaponHud.mode.includes('Cone')
           ? 1.16
-          : 1;
+        : 1;
     this.aimReticle.scale.lerp(tempVectorA.set(scale, scale, scale), 0.22);
+  }
+
+  _isGameplayPointerLockAllowed() {
+    return !this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver;
+  }
+
+  _requestGameplayPointerLock() {
+    if (!this._isGameplayPointerLockAllowed() || document.pointerLockElement === this.renderer.domElement) {
+      return;
+    }
+
+    try {
+      this.renderer.domElement.requestPointerLock?.();
+    } catch {
+      // Pointer lock is best-effort and may be blocked by browser settings.
+    }
+  }
+
+  _exitGameplayPointerLock() {
+    if (document.pointerLockElement !== this.renderer.domElement) {
+      return;
+    }
+
+    try {
+      document.exitPointerLock?.();
+    } catch {
+      // Ignore pointer lock exit failures; browser state will correct on lockchange.
+    }
+  }
+
+  _handlePointerLockChange() {
+    this.pointerLocked = document.pointerLockElement === this.renderer.domElement;
+
+    if (!this.pointerLocked) {
+      this.pointer.primary = false;
+      this.pointer.primaryPressed = false;
+      this.pointer.secondary = false;
+      this.pointer.secondaryPressed = false;
+    }
+  }
+
+  _updatePointerFromMouseEvent(event) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+
+    if (this.pointerLocked) {
+      const nextX = this.pointer.x + (event.movementX ?? 0);
+      const nextY = this.pointer.y + (event.movementY ?? 0);
+      this.pointer.x = THREE.MathUtils.clamp(nextX, rect.left, rect.right);
+      this.pointer.y = THREE.MathUtils.clamp(nextY, rect.top, rect.bottom);
+      return;
+    }
+
+    this.pointer.x = event.clientX;
+    this.pointer.y = event.clientY;
+  }
+
+  _setCombatMouseButton(button, pressed) {
+    if (button === 0) {
+      this.pointer.primary = pressed;
+      if (pressed) {
+        this.pointer.primaryPressed = true;
+      }
+      return true;
+    }
+
+    if (button === 2) {
+      this.pointer.secondary = pressed;
+      if (pressed) {
+        this.pointer.secondaryPressed = true;
+      }
+      return true;
+    }
+
+    return false;
   }
 
   _bindEvents() {
@@ -1257,6 +1389,15 @@ export class Game {
         return;
       }
 
+      if (!this.inventoryOpen && !this.poseDebugOpen && event.code === 'KeyZ') {
+        event.preventDefault();
+        this.pointer.alternate = true;
+        if (!event.repeat) {
+          this.pointer.alternatePressed = true;
+        }
+        return;
+      }
+
       if (!this.inventoryOpen && event.code.startsWith('Digit')) {
         const slotIndex = Number(event.code.slice(5)) - 1;
 
@@ -1276,6 +1417,11 @@ export class Game {
     });
 
     window.addEventListener('keyup', (event) => {
+      if (event.code === 'KeyZ') {
+        this.pointer.alternate = false;
+        return;
+      }
+
       this.keys.delete(event.code);
     });
 
@@ -1285,11 +1431,44 @@ export class Game {
       this.pointer.primaryPressed = false;
       this.pointer.secondary = false;
       this.pointer.secondaryPressed = false;
+      this.pointer.alternate = false;
+      this.pointer.alternatePressed = false;
+    });
+
+    document.addEventListener('pointerlockchange', () => this._handlePointerLockChange());
+
+    document.addEventListener('mousemove', (event) => {
+      if (!this.pointerLocked || this.poseDebugOpen) {
+        return;
+      }
+
+      this._updatePointerFromMouseEvent(event);
+    });
+
+    document.addEventListener('mousedown', (event) => {
+      if (!this.pointerLocked || this.poseDebugOpen || !this._isGameplayPointerLockAllowed()) {
+        return;
+      }
+
+      if (this._setCombatMouseButton(event.button, true)) {
+        event.preventDefault();
+      }
+    });
+
+    document.addEventListener('mouseup', (event) => {
+      if (!this.pointerLocked || this.poseDebugOpen) {
+        return;
+      }
+
+      if (this._setCombatMouseButton(event.button, false)) {
+        event.preventDefault();
+      }
     });
 
     this.renderer.domElement.addEventListener('pointermove', (event) => {
-      this.pointer.x = event.clientX;
-      this.pointer.y = event.clientY;
+      if (!this.pointerLocked) {
+        this._updatePointerFromMouseEvent(event);
+      }
 
       if (this.poseDebugOpen) {
         this._handlePoseDebugPointerMove(event);
@@ -1311,13 +1490,9 @@ export class Game {
         return;
       }
 
-      if (event.button === 0) {
-        this.pointer.primary = true;
-        this.pointer.primaryPressed = true;
-      } else if (event.button === 2) {
-        this.pointer.secondary = true;
-        this.pointer.secondaryPressed = true;
-      }
+      this._requestGameplayPointerLock();
+      event.preventDefault();
+      this._setCombatMouseButton(event.button, true);
     });
 
     window.addEventListener('pointerup', (event) => {
@@ -1326,11 +1501,7 @@ export class Game {
         return;
       }
 
-      if (event.button === 0) {
-        this.pointer.primary = false;
-      } else if (event.button === 2) {
-        this.pointer.secondary = false;
-      }
+      this._setCombatMouseButton(event.button, false);
     });
 
     this.renderer.domElement.addEventListener('contextmenu', (event) => {
@@ -1374,6 +1545,12 @@ export class Game {
       rarity: 'scrap',
       name: 'Patched Cannon Arm',
     });
+    const starterLift = this.lootSystem.generateItem(1, {
+      type: 'liftArm',
+      rarity: 'standard',
+      name: 'Lift Arm',
+      affixCount: 0,
+    });
     const starterMachineGun = this.lootSystem.generateItem(1, {
       type: 'machineGunArm',
       rarity: 'scrap',
@@ -1394,11 +1571,14 @@ export class Game {
       name: 'Rebuilt Servo Boots',
     });
 
-    this.player.setArmHotbar([starterBuster, starterSword, starterCannon, starterDrill]);
+    this.player.setArmHotbar([starterBuster, starterSword, starterCannon]);
+    this.player.setUtilityArms([starterLift]);
+    this.player.switchArmWeapon(0, true);
     this.player.equipment.equip(starterShield, 'offhand');
     this.player.equipment.equip(starterBoots);
 
     this.inventory.addItem(starterMachineGun);
+    this.inventory.addItem(starterDrill);
     this.inventory.addItem(this.lootSystem.generateItem(1, { type: 'powerRaiser', rarity: 'standard' }));
     this.inventory.addItem(this.lootSystem.generateItem(1, {
       type: 'flameArm',

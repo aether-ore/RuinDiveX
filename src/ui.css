@@ -804,6 +804,25 @@ button:focus-visible {
   background: #101820;
 }
 
+.mode-symbol-utility::before {
+  top: 3px;
+  left: 12px;
+  width: 8px;
+  height: 18px;
+  border-radius: 999px 999px 3px 3px;
+}
+
+.mode-symbol-utility::after {
+  bottom: 3px;
+  left: 7px;
+  width: 18px;
+  height: 11px;
+  border: 4px solid var(--mode-color);
+  border-top: 0;
+  border-radius: 0 0 999px 999px;
+  background: transparent;
+}
+
 @keyframes mode-emblem-pulse {
   from {
     opacity: 0.82;

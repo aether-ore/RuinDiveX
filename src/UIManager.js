@@ -28,6 +28,22 @@ function isArmWeapon(item) {
   return item?.slot === 'weapon' && item?.category === 'Arm Weapon';
 }
 
+function isBusterArm(item) {
+  return isArmWeapon(item) && item?.type === 'busterArm';
+}
+
+function isUtilityArm(item) {
+  return isArmWeapon(item) && (item?.type === 'liftArm' || item?.tags?.includes('utility'));
+}
+
+function isCombatArm(item) {
+  return isArmWeapon(item) && !isBusterArm(item) && !isUtilityArm(item);
+}
+
+function isBusterUpgrade(item) {
+  return item?.category === 'Buster Part';
+}
+
 function getItemPower(item) {
   return item?.getPowerScore?.() ?? 0;
 }
@@ -44,6 +60,7 @@ function compareByPower(a, b) {
 
 const OUTPUT_BEHAVIOR_LINES = {
   busterArm: 'Output: balanced shots spend small chunks and recover quickly.',
+  liftArm: 'Output: lifting Junk is free; holding small Reaverbots drains Lift Output until they break free.',
   machineGunArm: 'Output: rapid fire spends small chunks; low Output widens spread and slows effective fire.',
   cannonArm: 'Output: heavy shells drain nearly all Chamber Output before it rebuilds.',
   mineArm: 'Output: mine placement spends Arming Output, limiting rapid trap stacking.',
@@ -57,7 +74,7 @@ const OUTPUT_BEHAVIOR_LINES = {
   iceSprayerArm: 'Output: pressure drains while held; low pressure weakens icy gas range, damage, and freeze buildup.',
   shockCoilArm: 'Output: chain shots spend Coil Output before the next stable discharge.',
   swordArm: 'Output: beam-blade slashes spend Servo Output, so heavy swings cannot be spammed.',
-  drillArm: 'Output: held drilling drains Torque Output rapidly and does not recover until released; right-click fires the drill head.',
+  drillArm: 'Output: held drilling drains Torque Output rapidly and does not recover until released; Z fires the drill head.',
 };
 
 const POSE_DEBUG_JOINTS = [
@@ -101,6 +118,7 @@ const WEAPON_MODE_SHAPES = new Set([
   'seeker',
   'spread',
   'trap',
+  'utility',
 ]);
 
 function degreesToRadians(value) {
@@ -284,6 +302,10 @@ function itemFitsSlot(item, slot) {
 
   if (slot === 'module1' || slot === 'module2') {
     return item.slot === 'module';
+  }
+
+  if (slot === 'hands' && isBusterUpgrade(item)) {
+    return false;
   }
 
   return item.slot === slot;
@@ -1076,6 +1098,42 @@ export class UIManager {
       `;
       this.garageWeaponSlots.appendChild(card);
     }
+
+    for (let i = 0; i < (this.game.player.busterUpgradeSlots?.length ?? 0); i += 1) {
+      const item = this.game.player.busterUpgradeSlots[i];
+      const card = document.createElement('button');
+      card.className = `garage-weapon-card garage-buster-upgrade${item ? '' : ' is-empty'}`;
+      card.dataset.action = 'empty';
+
+      if (!item) {
+        card.innerHTML = `
+          <span class="garage-weapon-index">B${i + 1}</span>
+          <span class="garage-weapon-main">
+            <strong class="garage-weapon-name">Empty</strong>
+            <span class="garage-weapon-meta">Buster upgrade slot</span>
+          </span>
+        `;
+        this.garageWeaponSlots.appendChild(card);
+        continue;
+      }
+
+      const totals = item.getStatTotals();
+      const chips = Object.entries(totals)
+        .slice(0, 3)
+        .map(([stat, value]) => `<span class="garage-stat-chip">${STAT_LABELS[stat] ?? stat} ${formatStatValue(stat, value)}</span>`)
+        .join('');
+
+      card.style.borderColor = item.color;
+      card.innerHTML = `
+        <span class="garage-weapon-index">B${i + 1}</span>
+        <span class="garage-weapon-main">
+          <strong class="garage-weapon-name" style="color: ${item.color}">${item.name}</strong>
+          <span class="garage-weapon-meta">${RARITIES[item.rarity].label} ${item.typeLabel} - Lv ${item.level}</span>
+          <span class="garage-stat-grid">${chips}</span>
+        </span>
+      `;
+      this.garageWeaponSlots.appendChild(card);
+    }
   }
 
   _renderInventoryActions() {
@@ -1155,16 +1213,17 @@ export class UIManager {
       card.className = 'inventory-item';
       card.dataset.itemId = item.id;
       card.style.borderColor = item.color;
-      const armSlotButtons = isArmWeapon(item)
+      const armSlotButtons = this._renderInventoryArmAssignmentButtons(item);
+      const busterUpgradeButtons = isBusterUpgrade(item)
         ? `
-          <div class="arm-assignments" aria-label="Assign arm weapon">
+          <div class="arm-assignments" aria-label="Assign buster upgrade">
             ${[0, 1, 2, 3].map((slotIndex) => `
               <button
-                data-action="assign-arm-slot"
+                data-action="assign-buster-upgrade"
                 data-item-id="${item.id}"
                 data-slot-index="${slotIndex}"
-                title="Load into arm slot ${slotIndex + 1}"
-              >${slotIndex + 1}</button>
+                title="Install into Buster upgrade slot ${slotIndex + 1}"
+              >B${slotIndex + 1}</button>
             `).join('')}
           </div>
         `
@@ -1177,11 +1236,48 @@ export class UIManager {
         <div class="item-actions">
           <button data-action="equip" data-item-id="${item.id}">Equip</button>
           ${armSlotButtons}
+          ${busterUpgradeButtons}
           <button data-action="discard" data-item-id="${item.id}">Scrap</button>
         </div>
       `;
       this.inventoryItems.appendChild(card);
     }
+  }
+
+  _renderInventoryArmAssignmentButtons(item) {
+    if (!isArmWeapon(item)) {
+      return '';
+    }
+
+    const assignments = [];
+
+    if (isBusterArm(item)) {
+      assignments.push({ slotIndex: 0, label: 'B', title: 'Replace the fixed Buster slot' });
+    } else if (isUtilityArm(item)) {
+      assignments.push({ slotIndex: 3, label: 'U', title: 'Equip as a Utility Arm' });
+    } else if (isCombatArm(item)) {
+      assignments.push(
+        { slotIndex: 1, label: '2', title: 'Load into combat arm slot 2' },
+        { slotIndex: 2, label: '3', title: 'Load into combat arm slot 3' },
+      );
+    }
+
+    if (assignments.length === 0) {
+      return '';
+    }
+
+    return `
+      <div class="arm-assignments" aria-label="Assign arm weapon">
+        ${assignments.map((assignment) => `
+          <button
+            data-action="assign-arm-slot"
+            data-item-id="${item.id}"
+            data-slot-index="${assignment.slotIndex}"
+            title="${assignment.title}"
+          >${assignment.label}</button>
+        `).join('')}
+      </div>
+    `;
   }
 
   _bindEvents() {
@@ -1262,6 +1358,8 @@ export class UIManager {
         this._equipInventoryItem(button.dataset.itemId);
       } else if (action === 'assign-arm-slot') {
         this._assignArmWeaponToSlot(button.dataset.itemId, Number(button.dataset.slotIndex));
+      } else if (action === 'assign-buster-upgrade') {
+        this._assignBusterUpgradeToSlot(button.dataset.itemId, Number(button.dataset.slotIndex));
       } else if (action === 'discard') {
         this._discardInventoryItem(button.dataset.itemId);
       } else if (action === 'salvage-rarity') {
@@ -1308,9 +1406,22 @@ export class UIManager {
       return;
     }
 
-    const previous = item.slot === 'weapon' && item.category === 'Arm Weapon'
-      ? this.game.player.assignArmWeaponToSlot(this.game.player.activeArmIndex, item)
-      : this.game.player.equipment.equip(item);
+    let previous = null;
+
+    if (isArmWeapon(item)) {
+      const preferredSlot = isBusterArm(item)
+        ? 0
+        : isUtilityArm(item)
+          ? 3
+          : this.game.player.activeArmIndex === 1 || this.game.player.activeArmIndex === 2
+            ? this.game.player.activeArmIndex
+            : 1;
+      previous = this.game.player.assignArmWeaponToSlot(preferredSlot, item);
+    } else if (isBusterUpgrade(item)) {
+      previous = this.game.player.assignBusterUpgradeToSlot(this._getPreferredBusterUpgradeSlot(), item);
+    } else {
+      previous = this.game.player.equipment.equip(item);
+    }
 
     if (previous) {
       this.game.inventory.addItem(previous);
@@ -1335,8 +1446,50 @@ export class UIManager {
       this.game.inventory.addItem(previous);
     }
 
-    this.showToast(`${item.typeLabel} loaded in slot ${slotIndex + 1}`, item.color);
+    const slotLabel = slotIndex === 0 ? 'Buster' : slotIndex === 3 ? 'Utility Arm' : `slot ${slotIndex + 1}`;
+    this.showToast(`${item.typeLabel} loaded in ${slotLabel}`, item.color);
     this.renderInventory();
+  }
+
+  _assignBusterUpgradeToSlot(itemId, slotIndex) {
+    const item = this.game.inventory.removeItem(itemId);
+    if (!item) {
+      return;
+    }
+
+    if (!isBusterUpgrade(item)) {
+      this.game.inventory.addItem(item);
+      return;
+    }
+
+    const previous = this.game.player.assignBusterUpgradeToSlot(slotIndex, item);
+    if (previous) {
+      this.game.inventory.addItem(previous);
+    }
+
+    this.showToast(`${item.typeLabel} installed in Buster ${slotIndex + 1}`, item.color);
+    this.renderInventory();
+  }
+
+  _getPreferredBusterUpgradeSlot() {
+    const slots = this.game.player.busterUpgradeSlots ?? [];
+    const emptyIndex = slots.findIndex((item) => !item);
+
+    if (emptyIndex >= 0) {
+      return emptyIndex;
+    }
+
+    let weakestIndex = 0;
+    let weakestPower = Infinity;
+    for (let i = 0; i < slots.length; i += 1) {
+      const power = getItemPower(slots[i]);
+      if (power < weakestPower) {
+        weakestPower = power;
+        weakestIndex = i;
+      }
+    }
+
+    return weakestIndex;
   }
 
   _unequipSlot(slot) {
@@ -1395,23 +1548,48 @@ export class UIManager {
       }
     };
 
-    const armLoadout = pool
-      .filter((item) => isArmWeapon(item))
+    const buster = pool
+      .filter((item) => isBusterArm(item))
       .sort(compareByPower)
-      .slice(0, player.armHotbar.length);
+      [0] ?? player.armHotbar[0] ?? null;
+    const armLoadout = pool
+      .filter((item) => isCombatArm(item))
+      .sort(compareByPower)
+      .slice(0, 2);
+    const utilityLoadout = pool
+      .filter((item) => isUtilityArm(item))
+      .sort(compareByPower);
+    const busterUpgrades = pool
+      .filter((item) => isBusterUpgrade(item))
+      .sort(compareByPower)
+      .slice(0, player.busterUpgradeSlots?.length ?? 4);
 
+    if (buster) {
+      usedItemIds.add(buster.id);
+    }
     for (const item of armLoadout) {
+      usedItemIds.add(item.id);
+    }
+    for (const item of utilityLoadout) {
+      usedItemIds.add(item.id);
+    }
+    for (const item of busterUpgrades) {
       usedItemIds.add(item.id);
     }
 
     for (const slot of EQUIPMENT_SLOTS) {
-      if (slot !== 'weapon') {
+      if (slot !== 'weapon' && slot !== 'hands') {
         takeBestForSlot(slot);
       }
     }
 
     player.equipment.clear();
-    player.setArmHotbar(armLoadout);
+    player.setArmHotbar([buster, ...armLoadout].filter(Boolean));
+    player.setUtilityArms(utilityLoadout, true);
+    player.switchArmWeapon(0, true);
+    for (let i = 0; i < (player.busterUpgradeSlots?.length ?? 0); i += 1) {
+      player.assignBusterUpgradeToSlot(i, busterUpgrades[i] ?? null);
+    }
 
     for (const [slot, item] of selectedSlots.entries()) {
       player.equipment.equip(item, slot);
@@ -1444,6 +1622,14 @@ export class UIManager {
     }
 
     for (const item of this.game.player.armHotbar) {
+      addItem(item);
+    }
+
+    for (const item of this.game.player.utilityArms ?? []) {
+      addItem(item);
+    }
+
+    for (const item of this.game.player.busterUpgradeSlots ?? []) {
       addItem(item);
     }
 
@@ -1488,8 +1674,20 @@ export class UIManager {
   }
 
   _getHotbarLine(item) {
+    if (isBusterUpgrade(item)) {
+      const assignedIndex = this.game.player.busterUpgradeSlots?.findIndex((slotItem) => slotItem?.id === item.id) ?? -1;
+      return assignedIndex >= 0
+        ? `Installed in Buster upgrade B${assignedIndex + 1}`
+        : 'Can be installed into Buster upgrade slots B1-B4';
+    }
+
     if (!isArmWeapon(item)) {
       return '';
+    }
+
+    const utilityIndex = this.game.player.utilityArms?.findIndex((slotItem) => slotItem?.id === item.id) ?? -1;
+    if (utilityIndex >= 0) {
+      return `Equipped Utility Arm ${utilityIndex + 1}; press 4 to cycle`;
     }
 
     const assignedIndex = this.game.player.armHotbar.findIndex((slotItem) => slotItem?.id === item.id);
@@ -1497,10 +1695,27 @@ export class UIManager {
       return `Loaded in arm slot ${assignedIndex + 1}`;
     }
 
-    return 'Can be loaded into arm slots 1-4';
+    if (isBusterArm(item)) {
+      return 'Can replace the fixed Buster slot';
+    }
+
+    if (isUtilityArm(item)) {
+      return 'Can be equipped into the Utility Arm cycle';
+    }
+
+    return 'Can be loaded into combat arm slots 2-3';
   }
 
   _getComparisonItem(item) {
+    if (isBusterUpgrade(item)) {
+      const equipped = (this.game.player.busterUpgradeSlots ?? []).filter(Boolean);
+      if (equipped.length === 0) {
+        return null;
+      }
+
+      return equipped.sort((a, b) => getItemPower(a) - getItemPower(b))[0];
+    }
+
     if (item.slot === 'module') {
       const module1 = this.game.player.equipment.get('module1');
       const module2 = this.game.player.equipment.get('module2');

@@ -118,6 +118,19 @@ export const ITEM_TYPES = {
       armorBreakChance: [0.06, 0.14],
     },
   },
+  liftArm: {
+    label: 'Lift Arm',
+    category: ARM_WEAPON,
+    slot: 'weapon',
+    weaponKind: 'utility',
+    tags: ['utility-arm', 'utility', 'lift'],
+    behavior: 'Default utility arm used to lift ruin objects, junk, and small Reaverbots.',
+    baseStats: {
+      maxEnergy: [5, 8],
+      attackRange: [1.25, 1.65],
+      attackSpeed: [0.04, 0.1],
+    },
+  },
   machineGunArm: {
     label: 'Machine Gun Arm',
     category: ARM_WEAPON,

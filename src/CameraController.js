@@ -25,6 +25,9 @@ export class CameraController {
     this.height = height;
     this.lookHeight = lookHeight;
     this.lookAhead = lookAhead;
+    this.baseDistance = distance;
+    this.baseHeight = height;
+    this.baseLookAhead = lookAhead;
     this.followResponsiveness = followResponsiveness;
     this.yawResponsiveness = yawResponsiveness;
     this.yaw = 0;
@@ -54,7 +57,7 @@ export class CameraController {
     }
 
     this.movementForward.normalize();
-    this.movementRight.crossVectors(WORLD_UP, this.movementForward).normalize();
+    this.movementRight.crossVectors(this.movementForward, WORLD_UP).normalize();
   }
 
   update(dt, player) {
@@ -67,6 +70,12 @@ export class CameraController {
     const targetYaw = Math.atan2(facingDirection.x, facingDirection.z);
     const yawAlpha = Math.min(1, dt * this.yawResponsiveness);
     this.yaw = lerpAngle(this.yaw, targetYaw, yawAlpha);
+
+    const running = Boolean(player.isRunning);
+    const cameraEase = Math.min(1, dt * 3.5);
+    this.distance = THREE.MathUtils.lerp(this.distance, this.baseDistance + (running ? 0.72 : 0), cameraEase);
+    this.height = THREE.MathUtils.lerp(this.height, this.baseHeight + (running ? 0.12 : 0), cameraEase);
+    this.lookAhead = THREE.MathUtils.lerp(this.lookAhead, this.baseLookAhead + (running ? 0.48 : 0), cameraEase);
 
     const forward = tempVectorD.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     const target = root.position;

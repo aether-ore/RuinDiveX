@@ -24,6 +24,8 @@ const ARM_CANNON_TYPES = new Set([
   'shockCoilArm',
 ]);
 
+const UTILITY_ARM_TYPES = new Set(['liftArm', 'drillArm']);
+
 const BUSTER_PART_TYPES = new Set([
   'powerRaiser',
   'rangeBooster',
@@ -349,6 +351,10 @@ export class EquipmentManager {
       cannon.rotation.set(Math.PI / 2, 0, 0);
       cannon.position.set(0.02, -0.08, 0.12);
       return [cannon];
+    }
+
+    if (UTILITY_ARM_TYPES.has(item.type)) {
+      return [];
     }
 
     if (item.type === 'shieldArm') {

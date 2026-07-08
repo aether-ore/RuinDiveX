@@ -58,7 +58,7 @@ export class AnimationController {
     this.setState('dead');
   }
 
-  update(dt, { moving = false, moveAmount = 1 } = {}) {
+  update(dt, { moving = false, running = false, moveAmount = 1 } = {}) {
     this.time += dt;
 
     if (this.dead) {
@@ -77,16 +77,16 @@ export class AnimationController {
       this._applyAttackPose(dt);
 
       if (this.attackTimer <= 0) {
-        this.setState(moving ? 'walking' : 'idle');
+        this.setState(moving ? (running ? 'running' : 'walking') : 'idle');
       }
 
       return;
     }
 
-    this.setState(moving ? 'walking' : 'idle');
+    this.setState(moving ? (running ? 'running' : 'walking') : 'idle');
 
     if (moving) {
-      this._applyWalkPose(dt, moveAmount);
+      this._applyWalkPose(dt, moveAmount, running);
     } else {
       this._applyIdlePose(dt);
     }
@@ -107,21 +107,28 @@ export class AnimationController {
     lerpRotation(this.joints.get('neck'), 0, 0, breathe * 0.4, alpha);
   }
 
-  _applyWalkPose(dt, moveAmount) {
-    const speed = 8.8 * Math.max(0.55, moveAmount);
+  _applyWalkPose(dt, moveAmount, running = false) {
+    const runBlend = running ? 1 : 0;
+    const speed = (8.8 + runBlend * 1.8) * Math.max(0.55, moveAmount);
     const stride = Math.sin(this.time * speed);
     const counterStride = Math.sin(this.time * speed + Math.PI);
     const alpha = Math.min(1, dt * 16);
+    const armSwing = ARM_SWING * (1 + runBlend * 0.18);
+    const legSwing = LEG_SWING * (1 + runBlend * 0.24);
+    const kneeLift = 0.45 + runBlend * 0.26;
+    const forwardLean = runBlend * 0.1;
 
-    lerpRotation(this.joints.get('leftShoulder'), counterStride * ARM_SWING, 0, 0.08, alpha);
-    lerpRotation(this.joints.get('rightShoulder'), stride * ARM_SWING, 0, -0.08, alpha);
-    lerpRotation(this.joints.get('leftElbow'), 0.18 + Math.max(0, stride) * 0.25, 0, 0, alpha);
-    lerpRotation(this.joints.get('rightElbow'), 0.18 + Math.max(0, counterStride) * 0.25, 0, 0, alpha);
+    lerpRotation(this.joints.get('spine'), -forwardLean, 0, 0.03 * Math.sin(this.time * speed), alpha);
+    lerpRotation(this.joints.get('hips'), -forwardLean * 0.35, 0, 0.025 * Math.sin(this.time * speed), alpha);
+    lerpRotation(this.joints.get('leftShoulder'), counterStride * armSwing, 0, 0.08, alpha);
+    lerpRotation(this.joints.get('rightShoulder'), stride * armSwing, 0, -0.08, alpha);
+    lerpRotation(this.joints.get('leftElbow'), 0.18 + Math.max(0, stride) * (0.25 + runBlend * 0.12), 0, 0, alpha);
+    lerpRotation(this.joints.get('rightElbow'), 0.18 + Math.max(0, counterStride) * (0.25 + runBlend * 0.12), 0, 0, alpha);
 
-    lerpRotation(this.joints.get('leftHip'), stride * LEG_SWING, 0, 0, alpha);
-    lerpRotation(this.joints.get('rightHip'), counterStride * LEG_SWING, 0, 0, alpha);
-    lerpRotation(this.joints.get('leftKnee'), Math.max(0, -stride) * 0.45, 0, 0, alpha);
-    lerpRotation(this.joints.get('rightKnee'), Math.max(0, -counterStride) * 0.45, 0, 0, alpha);
+    lerpRotation(this.joints.get('leftHip'), stride * legSwing - forwardLean * 0.3, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightHip'), counterStride * legSwing - forwardLean * 0.3, 0, 0, alpha);
+    lerpRotation(this.joints.get('leftKnee'), Math.max(0, -stride) * kneeLift, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightKnee'), Math.max(0, -counterStride) * kneeLift, 0, 0, alpha);
     lerpRotation(this.joints.get('neck'), 0.03 * Math.sin(this.time * speed * 0.5), 0, 0, alpha);
   }
 

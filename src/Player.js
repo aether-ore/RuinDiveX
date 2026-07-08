@@ -54,6 +54,24 @@ const PROJECTILE_STANCE_LINGER_TIME = 1.05;
 const SHIELD_GUARD_DURATION = 0.7;
 const SHIELD_GUARD_COOLDOWN = 0.82;
 const SHIELD_PARRY_WINDOW = 0.18;
+const BUSTER_SLOT_INDEX = 0;
+const UTILITY_ARM_SLOT_INDEX = 3;
+
+function isArmWeaponItem(item) {
+  return item?.slot === 'weapon' && item?.category === 'Arm Weapon';
+}
+
+function isBusterArmItem(item) {
+  return isArmWeaponItem(item) && item?.type === 'busterArm';
+}
+
+function isUtilityArmItem(item) {
+  return isArmWeaponItem(item) && (item?.type === 'liftArm' || item?.tags?.includes('utility'));
+}
+
+function isBusterUpgradeItem(item) {
+  return item?.category === 'Buster Part';
+}
 
 export class Player {
   constructor() {
@@ -106,6 +124,7 @@ export class Player {
     this.bracedBackpedalTimer = 0;
     this.movementLockTimer = 0;
     this.movementLockMultiplier = 1;
+    this.isRunning = false;
     this.guardDirection = new THREE.Vector3(0, 0, 1);
     this.guardTimer = 0;
     this.guardDuration = 0;
@@ -114,6 +133,9 @@ export class Player {
     this.lastGuardResult = null;
     this.armHotbar = [null, null, null, null];
     this.activeArmIndex = 0;
+    this.utilityArms = [];
+    this.activeUtilityArmIndex = 0;
+    this.busterUpgradeSlots = [null, null, null, null];
     this.temporaryStatBonuses = new Map();
 
     this._loadCharacterModel();
@@ -126,6 +148,7 @@ export class Player {
     }
 
     if (this.dead) {
+      this.isRunning = false;
       this.animation.update(dt);
       return;
     }
@@ -138,6 +161,9 @@ export class Player {
     this._updateAttackFacingState(dt);
 
     moveVector.set(0, 0);
+    const lockOnTarget = movementOptions.lockOnTarget ?? null;
+    const lockOnPosition = lockOnTarget?.root?.position ?? movementOptions.lockOnTargetPosition ?? null;
+    const lockOnActive = Boolean(lockOnPosition && !lockOnTarget?.dead);
 
     if (input.has('KeyW') || input.has('ArrowUp')) moveVector.y += 1;
     if (input.has('KeyS') || input.has('ArrowDown')) moveVector.y -= 1;
@@ -147,9 +173,11 @@ export class Player {
     const moving = moveVector.lengthSq() > 0;
     const running = moving && (input.has('ShiftLeft') || input.has('ShiftRight'));
     let moveAmount = 0;
+    let movingBackward = false;
 
     if (moving) {
       moveVector.normalize();
+      movingBackward = moveVector.y < -0.35;
       moveAmount = running ? 1.35 : 1;
 
       this._resolveMovementDirection(moveVector, movementOptions);
@@ -162,26 +190,74 @@ export class Player {
       this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -arenaRadius, arenaRadius);
       this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -arenaRadius, arenaRadius);
 
-      this.lastMoveDirection.copy(worldMoveDirection);
+      if (lockOnActive) {
+        this._resolveLockOnFacingDirection(lockOnPosition);
+      } else if (movingBackward) {
+        this._resolveBackwardFacingDirection(movementOptions);
+      } else {
+        this.lastMoveDirection.copy(worldMoveDirection);
+      }
+    } else if (lockOnActive) {
+      this._resolveLockOnFacingDirection(lockOnPosition);
     }
 
     const attackFacing = this.attackFacingTimer > 0 && this.attackFacingDirection.lengthSq() > 0.0001;
     const bracedAiming = this.bracedFireTimer > 0 && this.bracedFireDirection.lengthSq() > 0.0001;
-    const backpedaling = bracedAiming && this.bracedBackpedalTimer > 0 && moving;
+    const backpedaling = movingBackward || (lockOnActive && moveVector.y < -0.35) || (bracedAiming && this.bracedBackpedalTimer > 0 && moving);
     const moveAnimationAmount = moving ? moveAmount * this.movementLockMultiplier : 0;
     const visiblyMoving = moveAnimationAmount > 0.05;
+    const visiblyRunning = visiblyMoving
+      && running
+      && !backpedaling
+      && !this.isShieldGuarding()
+      && this.movementLockMultiplier > 0.85;
+    this.isRunning = visiblyRunning;
 
     if (attackFacing) {
       this.faceDirection(this.attackFacingDirection);
     } else if (bracedAiming) {
       this.faceDirection(this.bracedFireDirection);
+    } else if (lockOnActive) {
+      this.faceDirection(this.lastMoveDirection);
     } else if (moving) {
       this.faceDirection(this.lastMoveDirection);
     }
 
-    this.animation.update(dt, { moving: visiblyMoving, moveAmount: moveAnimationAmount });
+    this.animation.update(dt, {
+      moving: visiblyMoving,
+      running: visiblyRunning,
+      moveAmount: moveAnimationAmount,
+    });
     this.updateWeaponVisualState();
-    this._updateExternalModelMotion(dt, visiblyMoving, moveAnimationAmount, backpedaling);
+    this._updateExternalModelMotion(dt, visiblyMoving, moveAnimationAmount, backpedaling, visiblyRunning);
+  }
+
+  _resolveLockOnFacingDirection(targetPosition) {
+    worldForward.copy(targetPosition).sub(this.root.position);
+    worldForward.y = 0;
+
+    if (worldForward.lengthSq() <= 0.0001) {
+      return;
+    }
+
+    this.lastMoveDirection.copy(worldForward.normalize());
+  }
+
+  _resolveBackwardFacingDirection(movementOptions = {}) {
+    const forward = movementOptions.movementForward ?? movementOptions.forward;
+
+    if (forward && forward.lengthSq() > 0.0001) {
+      worldForward.copy(forward);
+      worldForward.y = 0;
+
+      if (worldForward.lengthSq() > 0.0001) {
+        this.lastMoveDirection.copy(worldForward.normalize());
+        return;
+      }
+    }
+
+    worldForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
+    this.lastMoveDirection.copy(worldForward.normalize());
   }
 
   _resolveMovementDirection(inputVector, movementOptions = {}) {
@@ -275,15 +351,21 @@ export class Player {
   }
 
   getWeaponKind() {
-    return this.equipment.get('weapon')?.weaponKind ?? 'projectile';
+    return this.getActiveArmWeapon?.()?.weaponKind ?? this.equipment.get('weapon')?.weaponKind ?? 'projectile';
   }
 
   isUsingProjectileWeapon() {
-    if (this.getActiveArmWeapon?.()?.type === 'swordArm') {
+    const activeType = this.getActiveArmWeapon?.()?.type;
+
+    if (activeType === 'swordArm') {
       return true;
     }
 
-    return this.getWeaponKind() !== 'melee';
+    if (activeType === 'liftArm' || activeType === 'drillArm') {
+      return false;
+    }
+
+    return this.getWeaponKind() === 'projectile';
   }
 
   getActiveWeaponElement() {
@@ -315,22 +397,60 @@ export class Player {
   }
 
   setArmHotbar(items = []) {
-    for (let i = 0; i < this.armHotbar.length; i += 1) {
-      this.armHotbar[i] = items[i] ?? null;
+    const buster = items.find((item) => isBusterArmItem(item)) ?? this.armHotbar[BUSTER_SLOT_INDEX] ?? null;
+    const combatArms = items.filter((item) => isArmWeaponItem(item) && !isBusterArmItem(item) && !isUtilityArmItem(item));
+    const utilityArms = items.filter((item) => isUtilityArmItem(item));
+
+    this.armHotbar[BUSTER_SLOT_INDEX] = buster;
+    this.armHotbar[1] = combatArms[0] ?? null;
+    this.armHotbar[2] = combatArms[1] ?? null;
+
+    if (utilityArms.length > 0 || this.utilityArms.length === 0) {
+      this.setUtilityArms(utilityArms, true);
+    } else {
+      this._syncUtilityArmHotbarSlot();
     }
 
-    const firstFilledSlot = this.armHotbar.findIndex(Boolean);
-    if (firstFilledSlot >= 0) {
-      this.switchArmWeapon(firstFilledSlot, true);
+    if (!this.armHotbar[this.activeArmIndex]) {
+      this.activeArmIndex = BUSTER_SLOT_INDEX;
+    }
+
+    if (this.armHotbar[this.activeArmIndex]) {
+      this.switchArmWeapon(this.activeArmIndex, true);
     }
   }
 
   assignArmWeaponToSlot(slotIndex, item) {
-    if (!item || item.slot !== 'weapon') {
+    if (!isArmWeaponItem(item)) {
       return null;
     }
 
     const index = THREE.MathUtils.clamp(Math.trunc(slotIndex), 0, this.armHotbar.length - 1);
+
+    if (index === BUSTER_SLOT_INDEX) {
+      if (!isBusterArmItem(item)) {
+        return item;
+      }
+
+      const previous = this.armHotbar[BUSTER_SLOT_INDEX] ?? null;
+      this.armHotbar[BUSTER_SLOT_INDEX] = item;
+      this.switchArmWeapon(BUSTER_SLOT_INDEX, true);
+      return previous === item ? null : previous;
+    }
+
+    if (index === UTILITY_ARM_SLOT_INDEX) {
+      if (!isUtilityArmItem(item)) {
+        return item;
+      }
+
+      this.addUtilityArm(item, true);
+      return null;
+    }
+
+    if (isBusterArmItem(item) || isUtilityArmItem(item)) {
+      return item;
+    }
+
     const previous = this.armHotbar[index] ?? null;
     this.armHotbar[index] = item;
     this.switchArmWeapon(index, true);
@@ -339,9 +459,24 @@ export class Player {
 
   switchArmWeapon(slotIndex, force = false) {
     const index = THREE.MathUtils.clamp(Math.trunc(slotIndex), 0, this.armHotbar.length - 1);
-    const item = this.armHotbar[index];
+    let item = this.armHotbar[index];
+    let cycledUtility = false;
 
-    if (!item || (!force && index === this.activeArmIndex)) {
+    if (index === UTILITY_ARM_SLOT_INDEX) {
+      if (this.utilityArms.length <= 0) {
+        return false;
+      }
+
+      if (!force && this.activeArmIndex === UTILITY_ARM_SLOT_INDEX && this.utilityArms.length > 1) {
+        this.activeUtilityArmIndex = (this.activeUtilityArmIndex + 1) % this.utilityArms.length;
+        cycledUtility = true;
+      }
+
+      this._syncUtilityArmHotbarSlot();
+      item = this.getActiveUtilityArm();
+    }
+
+    if (!item || (!force && index === this.activeArmIndex && !cycledUtility)) {
       return false;
     }
 
@@ -353,6 +488,113 @@ export class Player {
 
   getActiveArmWeapon() {
     return this.armHotbar[this.activeArmIndex] ?? this.equipment.get('weapon');
+  }
+
+  setUtilityArms(items = [], keepCurrent = false) {
+    const existingActive = keepCurrent ? this.getActiveUtilityArm() : null;
+    const unique = [];
+    const seen = new Set();
+
+    for (const item of items) {
+      if (!isUtilityArmItem(item) || seen.has(item.id)) {
+        continue;
+      }
+
+      seen.add(item.id);
+      unique.push(item);
+    }
+
+    this.utilityArms = unique;
+
+    const activeIndex = existingActive
+      ? this.utilityArms.findIndex((item) => item.id === existingActive.id)
+      : -1;
+    this.activeUtilityArmIndex = activeIndex >= 0 ? activeIndex : 0;
+    this._syncUtilityArmHotbarSlot();
+
+    if (this.activeArmIndex === UTILITY_ARM_SLOT_INDEX) {
+      if (this.getActiveUtilityArm()) {
+        this.switchArmWeapon(UTILITY_ARM_SLOT_INDEX, true);
+      } else {
+        this.switchArmWeapon(BUSTER_SLOT_INDEX, true);
+      }
+    }
+  }
+
+  addUtilityArm(item, select = false) {
+    if (!isUtilityArmItem(item)) {
+      return false;
+    }
+
+    const existingIndex = this.utilityArms.findIndex((utility) => utility.id === item.id);
+    if (existingIndex >= 0) {
+      if (select) {
+        this.activeUtilityArmIndex = existingIndex;
+        this.switchArmWeapon(UTILITY_ARM_SLOT_INDEX, true);
+      }
+      return false;
+    }
+
+    this.utilityArms.push(item);
+    if (select || this.utilityArms.length === 1) {
+      this.activeUtilityArmIndex = this.utilityArms.length - 1;
+      this.switchArmWeapon(UTILITY_ARM_SLOT_INDEX, true);
+    } else {
+      this._syncUtilityArmHotbarSlot();
+    }
+
+    return true;
+  }
+
+  getActiveUtilityArm() {
+    return this.utilityArms[this.activeUtilityArmIndex] ?? this.utilityArms[0] ?? null;
+  }
+
+  _syncUtilityArmHotbarSlot() {
+    this.activeUtilityArmIndex = THREE.MathUtils.clamp(
+      Math.trunc(this.activeUtilityArmIndex),
+      0,
+      Math.max(0, this.utilityArms.length - 1),
+    );
+    this.armHotbar[UTILITY_ARM_SLOT_INDEX] = this.getActiveUtilityArm();
+  }
+
+  assignBusterUpgradeToSlot(slotIndex, item) {
+    const index = THREE.MathUtils.clamp(Math.trunc(slotIndex), 0, this.busterUpgradeSlots.length - 1);
+
+    if (item === null) {
+      const previous = this.busterUpgradeSlots[index] ?? null;
+      this.busterUpgradeSlots[index] = null;
+      this.recalculateStats();
+      this.updateWeaponVisualState?.();
+      return previous;
+    }
+
+    if (!isBusterUpgradeItem(item)) {
+      return item ?? null;
+    }
+
+    const previous = this.busterUpgradeSlots[index] ?? null;
+    this.busterUpgradeSlots[index] = item;
+    this.recalculateStats();
+    this.updateWeaponVisualState?.();
+    return previous === item ? null : previous;
+  }
+
+  getBusterUpgradeStatBonuses() {
+    const bonuses = {};
+
+    for (const item of this.busterUpgradeSlots) {
+      if (!item) {
+        continue;
+      }
+
+      for (const [stat, value] of Object.entries(item.getStatTotals())) {
+        bonuses[stat] = (bonuses[stat] ?? 0) + value;
+      }
+    }
+
+    return bonuses;
   }
 
   playAttackAnimation(duration, weaponKind = this.getWeaponKind(), targetPosition = null) {
@@ -524,6 +766,12 @@ export class Player {
 
     for (const [stat, value] of Object.entries(bonuses)) {
       this.stats[stat] = (this.stats[stat] ?? 0) + value;
+    }
+
+    if (this.activeArmIndex === BUSTER_SLOT_INDEX) {
+      for (const [stat, value] of Object.entries(this.getBusterUpgradeStatBonuses())) {
+        this.stats[stat] = (this.stats[stat] ?? 0) + value;
+      }
     }
 
     for (const buff of this.temporaryStatBonuses.values()) {
@@ -961,7 +1209,7 @@ export class Player {
     console.warn('Could not load player buster arm model.', error);
   }
 
-  _updateExternalModelMotion(dt, moving, moveAmount = 0, backpedaling = false) {
+  _updateExternalModelMotion(dt, moving, moveAmount = 0, backpedaling = false, running = false) {
     if (!this._loadedModel) {
       return;
     }
@@ -998,6 +1246,7 @@ export class Player {
       hurtProgress,
       projectileAiming,
       backpedaling,
+      running,
       attackKind: this._attackWeaponKind,
     });
 

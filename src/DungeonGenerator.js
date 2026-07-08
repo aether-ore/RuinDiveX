@@ -69,20 +69,54 @@ export class DungeonGenerator {
     this.random = random;
   }
 
+  _randomInt(min, max) {
+    return min + Math.floor(this.random() * (max - min + 1));
+  }
+
+  _choose(values) {
+    return values[Math.floor(this.random() * values.length)];
+  }
+
   generate() {
     const tiles = new Map();
     const side = this.random() < 0.5 ? -1 : 1;
+    const secondarySide = this.random() < 0.65 ? -side : side;
+    const enemyNestZ = this._randomInt(5, 6);
+    const keycardZ = enemyNestZ + this._randomInt(4, 6);
+    const trapZ = keycardZ + this._randomInt(4, 6);
+    const conveyorZ = trapZ + this._randomInt(4, 6);
+    const shrineZ = conveyorZ + this._randomInt(6, 8);
+    const keycardX = side * this._randomInt(3, 5);
+    const trapX = secondarySide * this._randomInt(3, 5);
+    const conveyorX = this._choose([0, side * 2, secondarySide * 2]);
+    const shrineX = conveyorX + this._choose([0, 0, side * 2, secondarySide * 2]);
+    const bonusSide = this.random() < 0.5 ? side : -side;
+    const layoutVariant = {
+      side,
+      enemyNestZ,
+      keycardZ,
+      trapZ,
+      conveyorZ,
+      shrineZ,
+    };
     const mainRooms = [
       { id: 'hubTown', type: 'hub', x: 0, z: -12, width: 7, depth: 5 },
       { id: 'expeditionCamp', type: 'camp', x: 0, z: -6, width: 7, depth: 5 },
       { id: 'entrance', type: 'entrance', x: 0, z: 0, width: 5, depth: 5 },
-      { id: 'enemyNest', type: 'enemy', x: 0, z: 5, width: 5, depth: 5 },
-      { id: 'keycardRoom', type: 'keycard', x: side * 4, z: 10, width: 5, depth: 5 },
-      { id: 'trapRoom', type: 'trap', x: -side * 4, z: 15, width: 5, depth: 5 },
-      { id: 'conveyorRoom', type: 'conveyor', x: 0, z: 20, width: 5, depth: 5 },
-      { id: 'shrineRoom', type: 'shrine', x: 0, z: 27, width: 7, depth: 7 },
+      { id: 'enemyNest', type: 'enemy', x: this._choose([0, side * 1, -side * 1]), z: enemyNestZ, width: 5, depth: 5 },
+      { id: 'keycardRoom', type: 'keycard', x: keycardX, z: keycardZ, width: this._choose([5, 5, 7]), depth: 5 },
+      { id: 'trapRoom', type: 'trap', x: trapX, z: trapZ, width: 5, depth: this._choose([5, 5, 7]) },
+      { id: 'conveyorRoom', type: 'conveyor', x: conveyorX, z: conveyorZ, width: 5, depth: 5 },
+      { id: 'shrineRoom', type: 'shrine', x: shrineX, z: shrineZ, width: 7, depth: 7 },
     ];
-    const bonusVault = { id: 'bonusVault', type: 'bonus', x: side * 6, z: 20, width: 5, depth: 5 };
+    const bonusVault = {
+      id: 'bonusVault',
+      type: 'bonus',
+      x: conveyorX + bonusSide * this._randomInt(5, 7),
+      z: conveyorZ + this._randomInt(-1, 2),
+      width: 5,
+      depth: 5,
+    };
     const rooms = [...mainRooms, bonusVault];
 
     for (const room of rooms) {
@@ -138,18 +172,26 @@ export class DungeonGenerator {
       group,
       rooms,
       tiles,
+      layoutVariant,
       doors,
       keycards: landmarks.keycards,
       chests: landmarks.chests,
       mechanisms: landmarks.mechanisms,
+      puzzleBlocks: landmarks.puzzleBlocks,
+      pressurePlates: landmarks.pressurePlates,
       safeInteractables: landmarks.safeInteractables,
       safeZones: this._createRoomZones(rooms, 'hub').concat(this._createRoomZones(rooms, 'camp')),
       encounters,
       traps: this._createRoomZones(rooms, 'trap').map((zone) => ({
         ...zone,
-        label: 'Trap Keycard Override',
+        label: 'Timed Laser Grid',
         object: trapVisualsByRoom.get(zone.roomId) ?? null,
         damagePerPulse: 5,
+        damagePerSecond: 18,
+        pulseInterval: 1.45 + this.random() * 0.35,
+        activeDuration: 0.34 + this.random() * 0.08,
+        telegraphDuration: 0.42,
+        phaseOffset: this.random() * 0.8,
       })),
       conveyors: this._createRoomZones(rooms, 'conveyor').map((zone) => ({
         ...zone,
@@ -402,7 +444,7 @@ export class DungeonGenerator {
       { id: 'entranceDoor', from: roomById.get('expeditionCamp'), to: roomById.get('entrance'), locked: true, closed: true, requiresLift: true, label: 'Ruin Descent Gate' },
       { id: 'enemyNestGate', from: roomById.get('enemyNest'), to: roomById.get('keycardRoom'), locked: true, closed: true, encounterId: 'enemyNest', label: 'Security Gate' },
       { id: 'lockedKeycardDoor', from: roomById.get('keycardRoom'), to: roomById.get('trapRoom'), locked: true, closed: true, requiresKeycard: true, label: 'Keycard Door' },
-      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, requiresKeycard: true, optional: true, label: 'Bonus Vault' },
+      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, requiresKeycard: true, pressurePlateId: 'conveyorVaultPlate', optional: true, label: 'Bonus Vault' },
       { id: 'largeRefractorSeal', from: roomById.get('conveyorRoom'), to: roomById.get('shrineRoom'), locked: true, closed: true, mechanismId: 'conveyorOverride', label: 'Shrine Seal' },
     ];
     const doors = [];
@@ -450,6 +492,7 @@ export class DungeonGenerator {
         requiresKeycard: Boolean(descriptor.requiresKeycard),
         optional: Boolean(descriptor.optional),
         mechanismId: descriptor.mechanismId ?? null,
+        pressurePlateId: descriptor.pressurePlateId ?? null,
         encounterId: descriptor.encounterId ?? null,
         opened: !descriptor.closed,
         alongX,
@@ -466,6 +509,8 @@ export class DungeonGenerator {
       keycards: [],
       chests: [],
       mechanisms: [],
+      puzzleBlocks: [],
+      pressurePlates: [],
       safeInteractables: [],
       trapVisuals: [],
       shrine: null,
@@ -488,12 +533,32 @@ export class DungeonGenerator {
           collected: false,
         });
       } else if (room.type === 'conveyor') {
+        const blockPosition = position.clone().add(new THREE.Vector3(0, 0, -this.tileSize * 0.72));
+        const platePosition = position.clone().add(new THREE.Vector3(0, 0, this.tileSize * 0.78));
         landmarks.mechanisms.push({
           id: 'conveyorOverride',
           label: 'Ruin Override Console',
           object: this._addMechanismTerminal(group, position, materials),
           position: position.clone(),
           requiresEncounterId: 'conveyorGuard',
+          activated: false,
+        });
+        landmarks.puzzleBlocks.push({
+          id: 'conveyorRelayBlock',
+          label: 'Relay Block',
+          object: this._addPuzzleBlock(group, blockPosition, materials),
+          position: blockPosition.clone(),
+          radius: 0.58,
+        });
+        landmarks.pressurePlates.push({
+          id: 'conveyorVaultPlate',
+          label: 'Vault Pressure Plate',
+          object: this._addPressurePlate(group, platePosition, materials),
+          position: platePosition.clone(),
+          radius: 0.92,
+          targetDoorId: 'bonusVaultDoor',
+          requiredBlockId: 'conveyorRelayBlock',
+          active: false,
           activated: false,
         });
       } else if (room.type === 'shrine') {
@@ -790,6 +855,70 @@ export class DungeonGenerator {
     return terminal;
   }
 
+  _addPuzzleBlock(group, position, materials) {
+    const block = new THREE.Group();
+    block.name = 'conveyorRelayBlock';
+    block.position.copy(position);
+
+    const shellMaterial = materials.wallTrim.clone();
+    shellMaterial.color.setHex(0x54646f);
+    shellMaterial.emissive.setHex(0x07141d);
+    shellMaterial.emissiveIntensity = 0.18;
+
+    const coreMaterial = materials.glowBlue.clone();
+    coreMaterial.emissiveIntensity = 0.9;
+
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.72, 0.92), shellMaterial);
+    body.name = 'relayBlockBody';
+    body.position.y = 0.36;
+    body.castShadow = true;
+    body.receiveShadow = true;
+
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), coreMaterial);
+    core.name = 'relayBlockPowerCore';
+    core.position.y = 0.82;
+    core.castShadow = true;
+
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.08, 0.18), materials.glowYellow.clone());
+    stripe.name = 'relayBlockDirectionStripe';
+    stripe.position.set(0, 0.55, -0.47);
+
+    block.add(body, core, stripe);
+    group.add(block);
+    return block;
+  }
+
+  _addPressurePlate(group, position, materials) {
+    const plate = new THREE.Group();
+    plate.name = 'conveyorVaultPressurePlate';
+    plate.position.copy(position);
+
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.88, 0.98, 0.1, 32), materials.wallTrim.clone());
+    base.name = 'pressurePlateBase';
+    base.position.y = 0.05;
+    base.receiveShadow = true;
+
+    const ringMaterial = new THREE.MeshBasicMaterial({
+      color: 0x6bdcff,
+      transparent: true,
+      opacity: 0.32,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.5, 0.82, 40), ringMaterial);
+    ring.name = 'pressurePlatePowerRing';
+    ring.position.y = 0.12;
+    ring.rotation.x = -Math.PI / 2;
+
+    const glyph = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.04, 0.72), materials.glowYellow.clone());
+    glyph.name = 'pressurePlatePowerGlyph';
+    glyph.position.y = 0.15;
+
+    plate.add(base, ring, glyph);
+    group.add(plate);
+    return plate;
+  }
+
   _addTreasureChest(group, position, materials, index = 0) {
     const chest = new THREE.Group();
     chest.name = `ruinTreasureChest_${index + 1}`;
@@ -900,6 +1029,9 @@ export class DungeonGenerator {
     const emitters = new THREE.Group();
     emitters.name = 'trapEmitterGroup';
     emitters.position.copy(position);
+    const beamMaterial = materials.glowRed.clone();
+    beamMaterial.transparent = true;
+    beamMaterial.opacity = 0.72;
 
     for (const offset of [-1.15, 1.15]) {
       const emitter = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.58, 0.34), materials.glowRed.clone());
@@ -907,6 +1039,14 @@ export class DungeonGenerator {
       emitter.position.set(offset, 0.29, 0);
       emitter.castShadow = true;
       emitters.add(emitter);
+    }
+
+    for (const y of [0.36, 0.62, 0.88]) {
+      const beam = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.055, 0.08), beamMaterial.clone());
+      beam.name = 'trapLaserBeam';
+      beam.position.set(0, y, 0);
+      beam.castShadow = false;
+      emitters.add(beam);
     }
 
     group.add(emitters);
@@ -953,32 +1093,32 @@ export class DungeonGenerator {
         roomId: 'enemyNest',
         id: 'enemyNest',
         label: 'Reaverbot Nest',
-        roster: ['basic', 'fast', 'ranged', 'basic'],
+        roster: this._createEncounterRoster('nest'),
         gateDoorId: 'enemyNestGate',
       },
       {
         roomId: 'keycardRoom',
         id: 'keycardGuard',
         label: 'Keycard Guard',
-        roster: ['ranged', 'basic'],
+        roster: this._createEncounterRoster('keycard'),
       },
       {
         roomId: 'trapRoom',
         id: 'trapAmbush',
         label: 'Trap Ambush',
-        roster: ['fast', 'basic', 'horokko'],
+        roster: this._createEncounterRoster('trap'),
       },
       {
         roomId: 'conveyorRoom',
         id: 'conveyorGuard',
         label: 'Conveyor Guard',
-        roster: ['gorubesshu', 'ranged'],
+        roster: this._createEncounterRoster('conveyor'),
       },
       {
         roomId: 'shrineRoom',
         id: 'shrineDefense',
         label: 'Shrine Defense',
-        roster: ['tank', 'horokko', 'ranged'],
+        roster: this._createEncounterRoster('shrine'),
       },
     ];
     const roomById = new Map(rooms.map((room) => [room.id, room]));
@@ -1007,6 +1147,38 @@ export class DungeonGenerator {
         };
       })
       .filter(Boolean);
+  }
+
+  _createEncounterRoster(kind) {
+    const pools = {
+      nest: [
+        ['basic', 'fast', 'ranged', 'basic'],
+        ['basic', 'basic', 'horokko'],
+        ['fast', 'fast', 'ranged', 'basic'],
+      ],
+      keycard: [
+        ['ranged', 'basic'],
+        ['basic', 'horokko'],
+        ['ranged', 'fast'],
+      ],
+      trap: [
+        ['fast', 'basic', 'horokko'],
+        ['horokko', 'horokko'],
+        ['fast', 'ranged', 'basic'],
+      ],
+      conveyor: [
+        ['gorubesshu', 'ranged'],
+        ['gorubesshu', 'basic', 'fast'],
+        ['ranged', 'ranged', 'horokko'],
+      ],
+      shrine: [
+        ['tank', 'horokko', 'ranged'],
+        ['tank', 'gorubesshu', 'fast'],
+        ['horokko', 'gorubesshu', 'ranged', 'basic'],
+      ],
+    };
+
+    return [...this._choose(pools[kind] ?? [['basic', 'ranged']])];
   }
 }
 

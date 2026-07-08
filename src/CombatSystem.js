@@ -13,6 +13,8 @@ const PROJECTILE_AIM_LOCK_BUFFER = 0.12;
 const LASER_TICK_INTERVAL = 0.1;
 const DRILL_TICK_INTERVAL = 0.12;
 const DRILL_PARTICLE_INTERVAL = 0.045;
+const LIFT_BREAK_DURATION = 2.45;
+const LIFT_ENEMY_OUTPUT_DRAIN_PER_SECOND = 0.48;
 const SPRAY_TICK_INTERVAL = 0.11;
 const SPRAY_PARTICLE_INTERVAL = 0.055;
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
@@ -30,6 +32,24 @@ const ARM_PROFILES = {
     cooldownMultiplier: 1,
     animationDuration: 0.24,
     visualType: 'buster',
+    color: 0x7ee7ff,
+  },
+  liftArm: {
+    special: 'lift',
+    energyCost: 0,
+    outputDrainPerShot: 0,
+    outputRequiredToFire: 0,
+    outputRecoveryPerSecond: 0.55,
+    outputRecoveryDelay: 0.16,
+    outputVentDuration: 0.42,
+    outputLabel: 'Lift Output',
+    cooldownMultiplier: 0.2,
+    animationDuration: 0.18,
+    damageMultiplier: 0,
+    liftRange: 1.55,
+    liftHoldHeight: 2.45,
+    liftObjectOffset: 0.22,
+    liftEnemyOutputDrainPerSecond: LIFT_ENEMY_OUTPUT_DRAIN_PER_SECOND,
     color: 0x7ee7ff,
   },
   machineGunArm: {
@@ -415,6 +435,7 @@ export class CombatSystem {
     this.swapTimer = 0;
     this.primaryWasDown = false;
     this.secondaryWasDown = false;
+    this.alternateWasDown = false;
     this.activeMines = [];
     this.pendingMeleeStrikes = [];
     this.lockOn = {
@@ -423,6 +444,7 @@ export class CombatSystem {
       marker: null,
       skippedTargetId: null,
       skipTimer: 0,
+      manual: false,
     };
     this.grenadePreview = null;
     this.grenadeArcPreview = null;
@@ -439,6 +461,13 @@ export class CombatSystem {
       particleTimer: 0,
       currentState: null,
     };
+    this.lift = {
+      active: false,
+      target: null,
+      kind: null,
+      breakTimer: 0,
+      currentState: null,
+    };
   }
 
   update(dt) {
@@ -447,6 +476,7 @@ export class CombatSystem {
     if (player.dead) {
       this._stopLaserBeam(false);
       this._stopDrillSpin();
+      this._stopLiftArm(false);
       this._clearLockOn();
       return;
     }
@@ -466,28 +496,35 @@ export class CombatSystem {
     const pointer = this.game.pointer;
     if (!pointer) {
       this._stopDrillSpin();
+      this._stopLiftArm(false);
       this._clearLockOn();
       return;
     }
 
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
     const primaryPressed = pointer.primaryPressed || (pointer.primary && !this.primaryWasDown);
-    const secondaryPressed = pointer.secondaryPressed || (pointer.secondary && !this.secondaryWasDown);
+    const alternatePressed = pointer.alternatePressed || (pointer.alternate && !this.alternateWasDown);
     pointer.primaryPressed = false;
     pointer.secondaryPressed = false;
+    pointer.alternatePressed = false;
 
     this._updateLockOn(dt, pointer.aimWorld, profile);
-    this._updateGrenadePreview(pointer.aimWorld, profile);
+    const aimWorld = this._getEffectiveAimWorld(pointer.aimWorld);
+    this._updateGrenadePreview(aimWorld, profile);
 
-    if (secondaryPressed) {
-      if (!this.trySecondaryAction(pointer.aimWorld)) {
+    if (pointer.secondary) {
+      this._updateManualAimPose(aimWorld, profile, state);
+    }
+
+    if (alternatePressed) {
+      if (!this.trySecondaryAction(aimWorld)) {
         this.requestManualReload();
       }
     }
 
     if (profile.special === 'laser') {
       if (pointer.primary) {
-        this._updateLaserBeam(dt, pointer.aimWorld, profile, state);
+        this._updateLaserBeam(dt, aimWorld, profile, state);
       } else {
         this._stopLaserBeam(true);
       }
@@ -497,7 +534,7 @@ export class CombatSystem {
 
     if (profile.special === 'drill') {
       if (pointer.primary) {
-        this._updateDrillSpin(dt, pointer.aimWorld, profile, state);
+        this._updateDrillSpin(dt, aimWorld, profile, state);
       } else {
         this._stopDrillSpin();
       }
@@ -505,27 +542,43 @@ export class CombatSystem {
       this._stopDrillSpin();
     }
 
+    if (profile.special === 'lift') {
+      if (pointer.primary) {
+        this._updateLiftArm(dt, aimWorld, profile, state);
+      } else {
+        this._stopLiftArm(false);
+      }
+    } else {
+      this._stopLiftArm(false);
+    }
+
     if (profile.special === 'cone') {
       if (pointer.primary) {
-        this._updateConeSpray(dt, pointer.aimWorld, profile, state);
+        this._updateConeSpray(dt, aimWorld, profile, state);
       }
-    } else if (profile.special !== 'laser' && profile.special !== 'drill' && (pointer.primary || primaryPressed)) {
-      this.tryPrimaryAttack(pointer.aimWorld);
+    } else if (profile.special !== 'laser' && profile.special !== 'drill' && profile.special !== 'lift' && (pointer.primary || primaryPressed)) {
+      this.tryPrimaryAttack(aimWorld);
     }
 
     this.primaryWasDown = pointer.primary;
     this.secondaryWasDown = pointer.secondary;
+    this.alternateWasDown = pointer.alternate;
   }
 
   _suspendForSafeArea(state = null) {
     const pointer = this.game.pointer;
     if (pointer) {
+      pointer.primary = false;
       pointer.primaryPressed = false;
+      pointer.secondary = false;
       pointer.secondaryPressed = false;
+      pointer.alternate = false;
+      pointer.alternatePressed = false;
     }
 
     this._stopLaserBeam(true);
     this._stopDrillSpin();
+    this._stopLiftArm(false);
     this._clearLockOn();
     this._hideGrenadePreview();
     this.pendingMeleeStrikes.length = 0;
@@ -537,11 +590,13 @@ export class CombatSystem {
 
     this.primaryWasDown = false;
     this.secondaryWasDown = false;
+    this.alternateWasDown = false;
   }
 
   switchArmSlot(slotIndex) {
     this._stopLaserBeam(true);
     this._stopDrillSpin();
+    this._stopLiftArm(false);
     this._clearLockOn();
     this._hideGrenadePreview();
 
@@ -562,6 +617,30 @@ export class CombatSystem {
     const player = this.game.player;
     const weapon = player.getActiveArmWeapon?.() ?? player.equipment.get('weapon');
     return this._getWeaponStateForItem(weapon);
+  }
+
+  getMovementLockTarget() {
+    const target = this.lockOn.target;
+
+    if (!this.game.pointer?.secondary || !this._isValidLockTarget(target)) {
+      return null;
+    }
+
+    return target;
+  }
+
+  _getEffectiveAimWorld(fallbackAimWorld = null) {
+    const target = this.getMovementLockTarget();
+
+    if (!target?.root) {
+      return fallbackAimWorld;
+    }
+
+    return target.root.position;
+  }
+
+  _isValidLockTarget(target) {
+    return Boolean(target?.root && !target.dead && target.root.parent);
   }
 
   _getWeaponStateForItem(weapon) {
@@ -756,6 +835,19 @@ export class CombatSystem {
     return true;
   }
 
+  _updateManualAimPose(aimWorld, profile, state) {
+    const player = this.game.player;
+
+    if (!aimWorld || player.dead || this.swapTimer > 0 || profile.melee || profile.special === 'drill' || profile.special === 'lift') {
+      return;
+    }
+
+    player.holdProjectileFiringPose(aimWorld, 0.18, {
+      weaponKey: state?.key,
+      continuous: true,
+    });
+  }
+
   trySecondaryAction(aimWorld) {
     const player = this.game.player;
     const state = this.getCurrentWeaponState();
@@ -863,6 +955,163 @@ export class CombatSystem {
     this.game.addParticleBurst(origin, color, 10, 0.13);
     this._stopDrillSpin();
     return true;
+  }
+
+  _updateLiftArm(dt, aimWorld, profile, state) {
+    if (this.swapTimer > 0 || state.cooldown > 0 || state.reloadTimer > 0) {
+      return;
+    }
+
+    const player = this.game.player;
+    tempDirection.copy(aimWorld ?? player.root.position).sub(player.root.position);
+    tempDirection.y = 0;
+
+    if (tempDirection.lengthSq() <= 0.001) {
+      tempDirection.copy(player.lastMoveDirection);
+    }
+
+    if (tempDirection.lengthSq() <= 0.001) {
+      tempDirection.set(0, 0, 1);
+    }
+
+    tempDirection.normalize();
+    player.faceDirection(tempDirection);
+    player.setMovementLock?.(0.08, this.lift.kind === 'enemy' ? 0.45 : 0.62);
+
+    if (!this.lift.active) {
+      const target = this._findLiftArmTarget(tempDirection, profile);
+
+      if (!target) {
+        return;
+      }
+
+      this.lift.active = true;
+      this.lift.target = target;
+      this.lift.kind = target.kind;
+      this.lift.breakTimer = target.kind === 'enemy' ? LIFT_BREAK_DURATION : Infinity;
+      this.lift.currentState = state;
+      this.game.addParticleBurst(target.root.position.clone().add(new THREE.Vector3(0, 0.75, 0)), profile.color ?? 0x7ee7ff, 8, 0.08);
+    }
+
+    const lifted = this.lift.target;
+    if (!lifted || !lifted.root || lifted.root.parent === null || lifted.junk?.dead || lifted.enemy?.dead) {
+      this._stopLiftArm(false);
+      return;
+    }
+
+    const holdPosition = player.root.position.clone().addScaledVector(tempDirection, profile.liftObjectOffset ?? 0.22);
+    holdPosition.y = profile.liftHoldHeight ?? 2.45;
+    lifted.root.position.lerp(holdPosition, Math.min(1, dt * 13));
+    lifted.root.rotation.y = player.root.rotation.y;
+
+    if (lifted.enemy) {
+      lifted.enemy.hitStopTimer = Math.max(lifted.enemy.hitStopTimer ?? 0, 0.1);
+      lifted.enemy.hitReactTimer = Math.max(lifted.enemy.hitReactTimer ?? 0, 0.12);
+      lifted.enemy.attackCooldown = Math.max(lifted.enemy.attackCooldown ?? 0, 0.25);
+      lifted.enemy.knockback?.set?.(0, 0, 0);
+
+      const drain = profile.liftEnemyOutputDrainPerSecond ?? LIFT_ENEMY_OUTPUT_DRAIN_PER_SECOND;
+      state.weaponOutput = Math.max(0, state.weaponOutput - drain * dt);
+      state.outputRecoveryDelay = Math.max(state.outputRecoveryDelay ?? 0, this._getOutputRecoveryDelay(profile));
+      this.lift.breakTimer -= dt;
+
+      if (state.weaponOutput <= 0.001 || this.lift.breakTimer <= 0) {
+        const damage = Math.max(3, (lifted.enemy.stats?.damage ?? 8) * 0.55);
+        player.takeDamage(damage, lifted.enemy);
+        this.game.addParticleBurst(player.root.position.clone().add(new THREE.Vector3(0, 1.15, 0)), 0xffd36f, 12, 0.12);
+        state.cooldown = Math.max(state.cooldown, profile.outputVentDuration ?? 0.42);
+        this._stopLiftArm(true);
+      }
+    }
+  }
+
+  _findLiftArmTarget(direction, profile) {
+    const player = this.game.player;
+    const range = profile.liftRange ?? 1.55;
+    const coneAngle = profile.liftConeAngle ?? 0.82;
+    let best = null;
+    let bestScore = Infinity;
+
+    const evaluate = (root, radius = 0.35) => {
+      tempToEnemy.copy(root.position).sub(player.root.position);
+      tempToEnemy.y = 0;
+      const distance = tempToEnemy.length();
+
+      if (distance <= 0.001 || distance > range + radius) {
+        return Infinity;
+      }
+
+      tempToEnemy.normalize();
+      const angle = angleBetweenFlat(direction, tempToEnemy);
+      if (angle > coneAngle) {
+        return Infinity;
+      }
+
+      return distance + angle * 0.75;
+    };
+
+    for (const junk of this.game.destructibles ?? []) {
+      if (junk.dead) {
+        continue;
+      }
+
+      const score = evaluate(junk.root, junk.radius ?? 0.45);
+      if (score < bestScore) {
+        bestScore = score;
+        best = { kind: 'junk', root: junk.root, junk };
+      }
+    }
+
+    for (const enemy of this.game.enemies ?? []) {
+      if (enemy.dead || (enemy.typeKey !== 'horokko' && enemy.type?.modelAsset !== 'horokko')) {
+        continue;
+      }
+
+      const score = evaluate(enemy.root, enemy.radius ?? 0.45);
+      if (score < bestScore) {
+        bestScore = score;
+        best = { kind: 'enemy', root: enemy.root, enemy };
+      }
+    }
+
+    return best;
+  }
+
+  _stopLiftArm(escaped = false) {
+    if (!this.lift.active) {
+      return;
+    }
+
+    const lifted = this.lift.target;
+    if (lifted?.root && lifted.root.parent !== null) {
+      const player = this.game.player;
+      tempDirection.copy(player.attackFacingDirection ?? player.lastMoveDirection);
+      tempDirection.y = 0;
+
+      if (tempDirection.lengthSq() <= 0.001) {
+        tempDirection.copy(player.lastMoveDirection);
+      }
+
+      if (tempDirection.lengthSq() <= 0.001) {
+        tempDirection.set(0, 0, 1);
+      }
+
+      tempDirection.normalize();
+      const dropDistance = escaped ? 0.75 : 1.05;
+      lifted.root.position.copy(player.root.position).addScaledVector(tempDirection, dropDistance);
+      lifted.root.position.y = 0;
+
+      if (lifted.enemy && !lifted.enemy.dead) {
+        lifted.enemy.hitStopTimer = Math.max(lifted.enemy.hitStopTimer ?? 0, escaped ? 0.08 : 0.18);
+        lifted.enemy.applyStatus?.('stagger', { duration: escaped ? 0.08 : 0.22 });
+      }
+    }
+
+    this.lift.active = false;
+    this.lift.target = null;
+    this.lift.kind = null;
+    this.lift.breakTimer = 0;
+    this.lift.currentState = null;
   }
 
   _tryMissileSalvo(profile, state, aimWorld) {
@@ -1073,7 +1322,7 @@ export class CombatSystem {
   _updateWeaponStates(dt) {
     const activeWeapon = this.game.player.getActiveArmWeapon?.() ?? this.game.player.equipment.get('weapon');
     const activeKey = activeWeapon?.id ?? 'default-buster';
-    const activeInputHeld = Boolean(this.game.pointer?.primary || this.game.pointer?.secondary);
+    const activeInputHeld = Boolean(this.game.pointer?.primary || this.game.pointer?.alternate);
 
     for (const state of this.weaponStates.values()) {
       state.cooldown = Math.max(0, state.cooldown - dt);
@@ -1082,13 +1331,14 @@ export class CombatSystem {
       state.outputRecoveryDelay = Math.max(0, (state.outputRecoveryDelay ?? 0) - dt);
       const wasSpraying = state.sprayActive === true;
       const wasDrilling = this.drill.active && this.drill.currentState === state;
-      const activeWeaponBeingUsed = activeInputHeld && state.key === activeKey;
+      const wasLiftingEnemy = this.lift.active && this.lift.currentState === state && this.lift.kind === 'enemy';
+      const activeWeaponBeingUsed = activeInputHeld && state.key === activeKey && profile.special !== 'lift';
       state.sprayWasActiveLastFrame = wasSpraying;
       state.sprayActive = false;
 
       if (!this.laser.active || this.laser.currentState !== state) {
         state.laserHeat = Math.max(0, (state.laserHeat ?? 0) - dt * (profile.heatCoolRate ?? 0.58));
-        if (!wasSpraying && !wasDrilling && !activeWeaponBeingUsed) {
+        if (!wasSpraying && !wasDrilling && !wasLiftingEnemy && !activeWeaponBeingUsed) {
           this._recoverWeaponOutput(state, profile, dt);
         }
       }
@@ -1328,6 +1578,7 @@ export class CombatSystem {
   _getWeaponAbbreviation(weapon) {
     return {
       busterArm: 'B',
+      liftArm: 'L',
       swordArm: 'LB',
       drillArm: 'D',
       machineGunArm: 'MG',
@@ -1443,6 +1694,7 @@ export class CombatSystem {
     if (profile.special === 'grenade') return baseRange + 0.8;
     if (profile.special === 'cone') return baseRange * (profile.coneRangeMultiplier ?? 1);
     if (profile.special === 'chain') return baseRange + 0.8;
+    if (profile.special === 'lift') return profile.liftRange ?? 1.55;
     if (profile.melee) return baseRange;
 
     return baseRange + 1.8;
@@ -1481,6 +1733,7 @@ export class CombatSystem {
     if (profile.special === 'rail') return 'Pierce';
     if (profile.special === 'cone') return profile.element === 'ice' ? 'Cryo Cone' : 'Thermal Cone';
     if (profile.special === 'chain') return 'Chain';
+    if (profile.special === 'lift') return 'Lift';
     if (profile.special === 'drill') return 'Drill';
     if (profile.type === 'swordArm') return 'Beam Blade';
     if (profile.melee) return 'Melee';
@@ -1510,7 +1763,7 @@ export class CombatSystem {
         mode: alternateReady ? 'alternate-ready' : 'main',
         shape: alternateReady ? 'detonate' : 'trap',
         color: colorToCss(alternateReady ? 0xf2c84b : mainColor),
-        label: alternateReady ? 'Alternate Ready: Detonate Mines' : 'Main Mode: Place Mines',
+        label: alternateReady ? 'Z Ready: Detonate Mines' : 'Main Mode: Place Mines',
       };
     }
 
@@ -1520,7 +1773,7 @@ export class CombatSystem {
         mode: salvoReady ? 'alternate-ready' : 'main',
         shape: salvoReady ? 'salvo' : 'lock',
         color: colorToCss(salvoReady ? 0xf2c84b : mainColor),
-        label: salvoReady ? 'Alternate Ready: Missile Salvo' : 'Main Mode: Lock-On Shot',
+        label: salvoReady ? 'Z Ready: Missile Salvo' : 'Main Mode: Lock-On Shot',
       };
     }
 
@@ -1540,6 +1793,10 @@ export class CombatSystem {
       return { mode: 'main', shape: 'chain', color: colorToCss(mainColor), label: `Main Mode: ${modeLabel}` };
     }
 
+    if (profile.special === 'lift') {
+      return { mode: 'main', shape: 'utility', color: colorToCss(mainColor), label: 'Main Mode: Lift / Carry' };
+    }
+
     if (profile.special === 'drill') {
       const launchCost = this._getOutputCost(profile, profile.drillLaunchOutputCost ?? 0.72);
       const alternateReady = Boolean(state && state.weaponOutput >= launchCost && state.cooldown <= 0 && state.reloadTimer <= 0);
@@ -1547,7 +1804,7 @@ export class CombatSystem {
         mode: alternateReady ? 'alternate-ready' : 'main',
         shape: alternateReady ? 'pierce' : 'contact',
         color: colorToCss(alternateReady ? 0xf2c84b : mainColor),
-        label: alternateReady ? 'Alternate Ready: Launch Drill Head' : 'Main Mode: Sustained Contact Drill',
+        label: alternateReady ? 'Z Ready: Launch Drill Head' : 'Main Mode: Sustained Contact Drill',
       };
     }
 
@@ -1598,7 +1855,7 @@ export class CombatSystem {
 
     if (profile.special === 'mine') {
       return this.activeMines.length > 0
-        ? `Mines armed ${this.activeMines.length}/${this._getMineLimit(profile)} | RMB detonate`
+        ? `Mines armed ${this.activeMines.length}/${this._getMineLimit(profile)} | Z detonate`
         : `Place mines within range`;
     }
 
@@ -1611,17 +1868,17 @@ export class CombatSystem {
       if (this.lockOn.progress >= 1) {
         const salvoCost = profile.salvoEnergyCost ?? (profile.energyCost ?? 1) * 2.2;
         return state.energy >= salvoCost
-          ? `Target locked | RMB missile salvo`
+          ? `Target locked | Z missile salvo`
           : `Target locked | needs ${salvoCost.toFixed(1)} Energy for salvo`;
       }
 
-      return `Acquiring lock ${percent}% | RMB cycle target`;
+      return `Acquiring lock ${percent}% | Z cycle target`;
     }
 
     if (profile.special === 'grenade') {
       return this._getGrenadeMode(state) === 'cluster'
-        ? 'Cluster grenade splits on detonation | RMB impact mode'
-        : 'Impact grenade with landing preview | RMB cluster mode';
+        ? 'Cluster grenade splits on detonation | Z impact mode'
+        : 'Impact grenade with landing preview | Z cluster mode';
     }
 
     if (profile.special === 'laser') {
@@ -1644,10 +1901,20 @@ export class CombatSystem {
       return 'Chains through clustered targets';
     }
 
+    if (profile.special === 'lift') {
+      if (this.lift.active && this.lift.kind === 'enemy') {
+        return `Holding Horokko | break ${Math.max(0, this.lift.breakTimer).toFixed(1)}s`;
+      }
+
+      return this.lift.active
+        ? 'Holding object | release to drop'
+        : 'Hold fire near Junk or Horokko to lift';
+    }
+
     if (profile.special === 'drill') {
       return this.drill.active
-        ? 'Drilling contact | RMB fires drill head'
-        : 'Hold fire to drill junk or armor | RMB launches drill head';
+        ? 'Drilling contact | Z fires drill head'
+        : 'Hold fire to drill junk or armor | Z launches drill head';
     }
 
     if (profile.type === 'swordArm') {
@@ -1990,7 +2257,9 @@ export class CombatSystem {
   }
 
   _updateLockOn(dt, aimWorld, profile) {
-    if (!profile.lockOn) {
+    const manualAimLock = Boolean(this.game.pointer?.secondary);
+
+    if (!profile.lockOn && !manualAimLock) {
       this._clearLockOn();
       return;
     }
@@ -1999,6 +2268,19 @@ export class CombatSystem {
       this.lockOn.skipTimer = Math.max(0, this.lockOn.skipTimer - dt);
       if (this.lockOn.skipTimer <= 0) {
         this.lockOn.skippedTargetId = null;
+      }
+    }
+
+    if (manualAimLock && !profile.lockOn && this._isValidLockTarget(this.lockOn.target)) {
+      const range = Math.max(2, profile.homingRange ?? this.game.player.stats.attackRange);
+      tempFlat.copy(this.lockOn.target.root.position).sub(this.game.player.root.position);
+      tempFlat.y = 0;
+
+      if (tempFlat.lengthSq() <= range * range) {
+        this.lockOn.progress = 1;
+        this.lockOn.manual = true;
+        this._updateLockMarker();
+        return;
       }
     }
 
@@ -2011,19 +2293,24 @@ export class CombatSystem {
 
     if (candidate !== this.lockOn.target) {
       this.lockOn.target = candidate;
-      this.lockOn.progress = 0;
+      this.lockOn.progress = manualAimLock && !profile.lockOn ? 1 : 0;
     }
 
-    const lockSpeed = 1 + (this.game.player.stats.lockOnSpeed ?? 0);
-    const lockTime = Math.max(0.12, profile.lockTime ?? 0.48);
-    this.lockOn.progress = Math.min(1, this.lockOn.progress + (dt * lockSpeed) / lockTime);
+    this.lockOn.manual = manualAimLock && !profile.lockOn;
+    if (this.lockOn.manual) {
+      this.lockOn.progress = 1;
+    } else {
+      const lockSpeed = 1 + (this.game.player.stats.lockOnSpeed ?? 0);
+      const lockTime = Math.max(0.12, profile.lockTime ?? 0.48);
+      this.lockOn.progress = Math.min(1, this.lockOn.progress + (dt * lockSpeed) / lockTime);
+    }
     this._updateLockMarker();
   }
 
   _findLockCandidate(aimWorld, profile) {
     const player = this.game.player;
     const range = Math.max(2, profile.homingRange ?? player.stats.attackRange);
-    const aimDirection = tempDirection.copy(aimWorld).sub(player.root.position);
+    const aimDirection = tempDirection.copy(aimWorld ?? player.root.position).sub(player.root.position);
     aimDirection.y = 0;
 
     if (aimDirection.lengthSq() <= 0.001) {
@@ -2051,7 +2338,7 @@ export class CombatSystem {
       }
 
       const angle = angleBetweenFlat(aimDirection, tempToEnemy.normalize());
-      const reticleDistance = enemy.root.position.distanceTo(aimWorld);
+      const reticleDistance = aimWorld ? enemy.root.position.distanceTo(aimWorld) : distance;
       if (angle > 0.95 && reticleDistance > 2.4) {
         continue;
       }
@@ -2120,6 +2407,7 @@ export class CombatSystem {
   _clearLockOn(clearSkip = true) {
     this.lockOn.target = null;
     this.lockOn.progress = 0;
+    this.lockOn.manual = false;
     if (clearSkip) {
       this.lockOn.skippedTargetId = null;
       this.lockOn.skipTimer = 0;

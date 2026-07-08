@@ -770,7 +770,7 @@ function blendTarget(map, name, targetX, targetY, targetZ, weight) {
   );
 }
 
-function getWalkLegPose(phase) {
+function getWalkLegPose(phase, runBlend = 0) {
   const cycle = ((phase % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
   const lifting = cycle < Math.PI;
   const stepProgress = lifting ? cycle / Math.PI : (cycle - Math.PI) / Math.PI;
@@ -780,18 +780,21 @@ function getWalkLegPose(phase) {
   const baseKnee = 0.06 + support * WALK_STEP_SUPPORT_BEND;
   const baseAnkle = support * 0.04;
   const settle = support * 0.55;
+  const hipReach = WALK_STEP_HIP_FORWARD * (1 + runBlend * 0.16);
+  const kneeReach = WALK_STEP_KNEE_PITCH * (1 + runBlend * 0.13);
+  const ankleReach = WALK_STEP_ANKLE_PITCH * (1 + runBlend * 0.08);
 
   return {
-    hip: -deliberateLift * WALK_STEP_HIP_FORWARD + settle * 0.03,
-    knee: THREE.MathUtils.lerp(baseKnee, WALK_STEP_KNEE_PITCH, deliberateLift),
+    hip: -deliberateLift * hipReach + settle * (0.03 + runBlend * 0.025),
+    knee: THREE.MathUtils.lerp(baseKnee, kneeReach, deliberateLift),
     kneeYaw: WALK_STEP_KNEE_YAW * deliberateLift * WALK_STEP_SIDE_TWIST_SCALE,
     kneeRoll: WALK_STEP_KNEE_ROLL * deliberateLift * WALK_STEP_SIDE_TWIST_SCALE,
-    ankle: THREE.MathUtils.lerp(baseAnkle, WALK_STEP_ANKLE_PITCH, deliberateLift),
+    ankle: THREE.MathUtils.lerp(baseAnkle, ankleReach, deliberateLift),
     ankleYaw: WALK_STEP_ANKLE_YAW * deliberateLift * WALK_STEP_SIDE_TWIST_SCALE,
     anklePoseRoll: WALK_STEP_ANKLE_ROLL * deliberateLift * WALK_STEP_SIDE_TWIST_SCALE,
-    kneeForward: WALK_STEP_KNEE_FORWARD_OFFSET * deliberateLift,
-    ankleForward: WALK_STEP_ANKLE_FORWARD_OFFSET * deliberateLift,
-    hipRoll: settle * 0.018,
+    kneeForward: WALK_STEP_KNEE_FORWARD_OFFSET * (1 + runBlend * 1.15) * deliberateLift,
+    ankleForward: WALK_STEP_ANKLE_FORWARD_OFFSET * (1 + runBlend * 0.65) * deliberateLift,
+    hipRoll: settle * (0.018 + runBlend * 0.006),
     hipYaw: 0,
     ankleRoll: 0,
     contact: support,
@@ -1244,21 +1247,26 @@ export class ExternalModelRig {
     hurtProgress = 0,
     projectileAiming = false,
     backpedaling = false,
+    running = false,
     attackKind = 'melee',
   } = {}) {
     this.time += dt;
     if (moving) {
       const walkDirection = backpedaling ? -0.86 : 1;
-      this.walkPhase += dt * WALK_CYCLE_SPEED * Math.max(0.55, moveAmount) * walkDirection;
+      const gaitSpeed = WALK_CYCLE_SPEED * (running ? 1.12 : 1);
+      this.walkPhase += dt * gaitSpeed * Math.max(0.55, moveAmount) * walkDirection;
     }
 
     const targets = new Map();
     const positionTargets = new Map();
     const alpha = Math.min(1, dt * (moving ? 20 : 12));
     const walkPhase = this.walkPhase;
-    const leftLeg = getWalkLegPose(walkPhase);
-    const rightLeg = getWalkLegPose(walkPhase + Math.PI);
-    const walkBlend = moving ? THREE.MathUtils.clamp(moveAmount, 0, 1) : 0;
+    const speedBlend = moving ? THREE.MathUtils.clamp(moveAmount, 0, 1.35) : 0;
+    const runBlend = running ? THREE.MathUtils.clamp((speedBlend - 1) / 0.35, 0, 1) : 0;
+    const locomotionBlend = moving ? Math.min(1.18, Math.min(speedBlend, 1) + runBlend * 0.18) : 0;
+    const leftLeg = getWalkLegPose(walkPhase, runBlend);
+    const rightLeg = getWalkLegPose(walkPhase + Math.PI, runBlend);
+    const walkBlend = locomotionBlend;
     const breathing = Math.sin(this.time * 2.4);
     const leftArmDrop = -1.28;
     const rightArmDrop = 1.28;
@@ -1277,16 +1285,18 @@ export class ExternalModelRig {
       setPositionTarget(positionTargets, 'leftAnkle', this.joints.get('leftAnkle')?.userData.restLocalPosition, 0, 0, leftLeg.ankleForward * walkBlend);
       setPositionTarget(positionTargets, 'rightAnkle', this.joints.get('rightAnkle')?.userData.restLocalPosition, 0, 0, rightLeg.ankleForward * walkBlend);
 
-      const leftArmSwing = Math.sin(walkPhase + Math.PI) * 0.42 * walkBlend;
-      const rightArmSwing = Math.sin(walkPhase) * 0.42 * walkBlend;
-      setTarget(targets, 'leftShoulder', leftArmSwing, 0.04, leftArmDrop + leftArmSwing * 0.08);
-      setTarget(targets, 'rightShoulder', rightArmSwing, -0.04, rightArmDrop - rightArmSwing * 0.08);
-      setTarget(targets, 'leftElbow', leftArmSwing * 0.24, 0, 0);
-      setTarget(targets, 'rightElbow', rightArmSwing * 0.24, 0, 0);
+      const armSwingScale = 0.42 + runBlend * 0.12;
+      const leftArmSwing = Math.sin(walkPhase + Math.PI) * armSwingScale * walkBlend;
+      const rightArmSwing = Math.sin(walkPhase) * armSwingScale * walkBlend;
+      setTarget(targets, 'leftShoulder', leftArmSwing, 0.04 + runBlend * 0.02, leftArmDrop + leftArmSwing * 0.08);
+      setTarget(targets, 'rightShoulder', rightArmSwing, -0.04 - runBlend * 0.02, rightArmDrop - rightArmSwing * 0.08);
+      setTarget(targets, 'leftElbow', leftArmSwing * (0.24 + runBlend * 0.08), 0, 0);
+      setTarget(targets, 'rightElbow', rightArmSwing * (0.24 + runBlend * 0.08), 0, 0);
       const stepCompression = Math.max(leftLeg.contact, rightLeg.contact) * walkBlend;
       const hipRoll = Math.sin(walkPhase) * 0.026 * walkBlend;
-      setTarget(targets, 'spine', stepCompression * 0.026, 0, -hipRoll * 0.58);
-      setTarget(targets, 'hips', stepCompression * 0.018, Math.sin(walkPhase) * 0.025 * walkBlend, hipRoll);
+      const runLean = runBlend * 0.1;
+      setTarget(targets, 'spine', stepCompression * 0.026 - runLean, 0, -hipRoll * 0.58);
+      setTarget(targets, 'hips', stepCompression * 0.018 - runLean * 0.32, Math.sin(walkPhase) * 0.025 * walkBlend, hipRoll);
     } else {
       setTarget(targets, 'spine', breathing * 0.004, 0, breathing * 0.006);
       setTarget(targets, 'neck', breathing * 0.008, 0, -breathing * 0.006);

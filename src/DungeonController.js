@@ -26,8 +26,8 @@ function isInsideZone(position, zone) {
   if (Number.isFinite(zone.rotationY) && Math.abs(zone.rotationY) > 0.0001) {
     const cos = Math.cos(zone.rotationY);
     const sin = Math.sin(zone.rotationY);
-    const rotatedX = localX * cos - localZ * sin;
-    const rotatedZ = localX * sin + localZ * cos;
+    const rotatedX = localX * cos + localZ * sin;
+    const rotatedZ = -localX * sin + localZ * cos;
     localX = rotatedX;
     localZ = rotatedZ;
   }

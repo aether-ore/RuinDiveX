@@ -1,0 +1,66 @@
+{
+  "roomId": "industrial_coolant_relay_puzzle_room",
+  "displayName": "Industrial Coolant Relay Puzzle Chamber",
+  "objective": "Route three colored coolant flows into the central pressure core, then confirm pressure on the upper control balcony.",
+  "entities": {
+    "valves": [
+      {
+        "id": "valve_A_teal_west",
+        "terminalId": "terminal_valve_A",
+        "color": "teal",
+        "correctRotationIndex": 1,
+        "rotationCount": 4,
+        "feeds": "central_pressure_core"
+      },
+      {
+        "id": "valve_B_amber_east",
+        "terminalId": "terminal_valve_B",
+        "color": "amber",
+        "correctRotationIndex": 3,
+        "rotationCount": 4,
+        "feeds": "central_pressure_core"
+      },
+      {
+        "id": "valve_C_violet_south",
+        "terminalId": "terminal_valve_C",
+        "color": "violet",
+        "correctRotationIndex": 2,
+        "rotationCount": 4,
+        "feeds": "central_pressure_core"
+      }
+    ],
+    "masterConsole": "upper_master_pressure_console",
+    "exitGate": "north_locked_exit_gate",
+    "optionalRewardGate": "west_optional_reward_gate",
+    "centralCore": "central_pressure_core",
+    "enemySpawnSockets": [
+      "dormant_reaverbot_socket_0",
+      "dormant_reaverbot_socket_1",
+      "dormant_reaverbot_socket_2",
+      "dormant_reaverbot_socket_3"
+    ]
+  },
+  "rules": {
+    "onValveTerminalInteract": "rotate that valve by +1 rotation index and update its conduit light state",
+    "onMasterConsoleInteract": "if all valves match their correctRotationIndex, open exit gate; otherwise spawn Reaverbots from dormant sockets and briefly vent steam from pit",
+    "optionalReward": "if the player solves with no failed master-console attempts, open the optional reward gate",
+    "resetBehavior": "Dungeon reset randomizes correctRotationIndex values and visual hint placement"
+  },
+  "proceduralVariation": {
+    "randomizeCorrectValveRotations": true,
+    "randomizeLiquidColors": [
+      "teal",
+      "amber",
+      "violet",
+      "green",
+      "blue"
+    ],
+    "randomizeFailureSpawnCount": [
+      1,
+      2,
+      3
+    ],
+    "randomizeRewardGate": true,
+    "randomizeHintMonitors": true
+  }
+}

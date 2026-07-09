@@ -48,7 +48,6 @@ function randomDungeonSpawnPoint(game, center, minDistance = 9) {
   const point = pool[Math.floor(Math.random() * pool.length)].clone();
   point.x += (Math.random() - 0.5) * 1.25;
   point.z += (Math.random() - 0.5) * 1.25;
-  point.y = 0;
   return point;
 }
 

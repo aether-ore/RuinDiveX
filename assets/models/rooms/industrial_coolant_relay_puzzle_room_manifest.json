@@ -1,0 +1,36 @@
+{
+  "name": "Industrial Coolant Relay Puzzle Room",
+  "format": "glb",
+  "units": "arbitrary game units",
+  "y_up": true,
+  "contains": [
+    "industrial room shell",
+    "lowered service pit",
+    "central coolant pressure core",
+    "colored source tanks",
+    "valve pylons",
+    "local terminals",
+    "colored floor conduits",
+    "upper steel mesh balcony",
+    "stairs",
+    "locked exit gate",
+    "optional reward gate",
+    "dormant Reaverbot sockets",
+    "wall puzzle monitors",
+    "red Reaverbot-eye surveillance nodes",
+    "overhead pipes"
+  ],
+  "puzzle": {
+    "type": "coolant_relay",
+    "primaryGoal": "Align three valve rotations and validate at upper master console.",
+    "failure": "Spawn Reaverbots from dormant sockets.",
+    "perfectReward": "Open optional reward gate if solved with no failed attempts."
+  },
+  "files": {
+    "model": "industrial_coolant_relay_puzzle_room.glb",
+    "preview": "industrial_coolant_relay_puzzle_room_topdown_preview.png",
+    "readme": "README_industrial_coolant_relay_puzzle_room.txt",
+    "puzzleImplementation": "PUZZLE_IMPLEMENTATION.md",
+    "puzzleConfig": "coolant_relay_puzzle_config.json"
+  }
+}

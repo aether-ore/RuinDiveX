@@ -20,8 +20,30 @@ function tileKey(x, z) {
 }
 
 function isInsideZone(position, zone) {
-  return Math.abs(position.x - zone.position.x) <= zone.halfWidth
-    && Math.abs(position.z - zone.position.z) <= zone.halfDepth;
+  let localX = position.x - zone.position.x;
+  let localZ = position.z - zone.position.z;
+
+  if (Number.isFinite(zone.rotationY) && Math.abs(zone.rotationY) > 0.0001) {
+    const cos = Math.cos(zone.rotationY);
+    const sin = Math.sin(zone.rotationY);
+    const rotatedX = localX * cos - localZ * sin;
+    const rotatedZ = localX * sin + localZ * cos;
+    localX = rotatedX;
+    localZ = rotatedZ;
+  }
+
+  const insideXZ = Math.abs(localX) <= zone.halfWidth
+    && Math.abs(localZ) <= zone.halfDepth;
+
+  if (!insideXZ) {
+    return false;
+  }
+
+  if (Number.isFinite(zone.verticalHalfHeight)) {
+    return Math.abs((position.y ?? 0) - (zone.position.y ?? 0)) <= zone.verticalHalfHeight;
+  }
+
+  return true;
 }
 
 function createDroppedKeycardObject() {
@@ -62,6 +84,8 @@ export class DungeonController {
     this.dungeon = dungeon;
     this.tileSize = dungeon?.tileSize ?? 2.8;
     this.tiles = dungeon?.tiles ?? new Map();
+    this.floorTiles = dungeon?.floorTiles ?? [...this.tiles.values()];
+    this.floorTilesByColumn = this._createFloorTileColumns(this.floorTiles);
     this.doors = dungeon?.doors ?? [];
     this.keycards = dungeon?.keycards ?? [];
     this.chests = dungeon?.chests ?? [];
@@ -70,6 +94,7 @@ export class DungeonController {
     this.pressurePlates = dungeon?.pressurePlates ?? [];
     this.safeInteractables = dungeon?.safeInteractables ?? [];
     this.safeZones = dungeon?.safeZones ?? [];
+    this.solidZones = dungeon?.solidZones ?? [];
     this.encounters = dungeon?.encounters ?? [];
     this.traps = dungeon?.traps ?? [];
     this.conveyors = dungeon?.conveyors ?? [];
@@ -131,16 +156,6 @@ export class DungeonController {
       return `Clear ${activeEncounter.label}`;
     }
 
-    const unclaimedKeycard = this.keycards.some((keycard) => !keycard.collected);
-    const keycardDoor = this.doors.find((door) => door.requiresKeycard && door.closed && !door.optional);
-    if (keycardDoor) {
-      return this.keycardCount > 0
-        ? 'Open keycard door'
-        : unclaimedKeycard
-          ? 'Find keycard'
-          : 'Hunt Reaverbots';
-    }
-
     const activeTrap = this.traps.find((trap) => (
       trap.active
       && isInsideZone(this.game.player.root.position, trap)
@@ -154,12 +169,22 @@ export class DungeonController {
     }
 
     const shrineDoor = this.doors.find((door) => door.id === 'largeRefractorSeal');
-    if (shrineDoor?.closed) {
-      return 'Find override console';
+    if (this.shrine && !this.shrine.collected && !shrineDoor?.closed) {
+      return 'Secure Large Refractor';
     }
 
-    if (this.shrine && !this.shrine.collected) {
-      return 'Secure Large Refractor';
+    const unclaimedKeycard = this.keycards.some((keycard) => !keycard.collected);
+    const keycardDoor = this.doors.find((door) => door.requiresKeycard && door.closed && !door.optional);
+    if (keycardDoor) {
+      return this.keycardCount > 0
+        ? 'Open keycard door'
+        : unclaimedKeycard
+          ? 'Find keycard'
+          : 'Hunt Reaverbots';
+    }
+
+    if (shrineDoor?.closed) {
+      return 'Find override console';
     }
 
     return 'Return to camp';
@@ -211,9 +236,8 @@ export class DungeonController {
   }
 
   isPositionWalkable(position) {
-    const { x: tileX, z: tileZ } = this.worldToTile(position);
-
-    if (!this.tiles.has(tileKey(tileX, tileZ))) {
+    const floorTile = this.getFloorTileAt(position);
+    if (!floorTile) {
       return false;
     }
 
@@ -227,7 +251,15 @@ export class DungeonController {
       }
     }
 
+    if (this._isPositionInsideSolidZone(position)) {
+      return false;
+    }
+
     return true;
+  }
+
+  _isPositionInsideSolidZone(position) {
+    return this.solidZones.some((zone) => isInsideZone(position, zone));
   }
 
   isPositionInSafeZone(position) {
@@ -278,7 +310,105 @@ export class DungeonController {
   }
 
   tileToWorld(x, z, target = new THREE.Vector3()) {
-    return target.set(x * this.tileSize, 0, z * this.tileSize);
+    return target.set(x * this.tileSize, this.getTileElevation(x, z), z * this.tileSize);
+  }
+
+  _createFloorTileColumns(floorTiles) {
+    const columns = new Map();
+
+    for (const tile of floorTiles) {
+      const key = tileKey(tile.x, tile.z);
+      const column = columns.get(key) ?? [];
+      column.push(tile);
+      columns.set(key, column);
+    }
+
+    for (const column of columns.values()) {
+      column.sort((a, b) => (a.elevation ?? 0) - (b.elevation ?? 0));
+    }
+
+    return columns;
+  }
+
+  getFloorTileAt(position, { maxVerticalGap = 1.45, allowClosest = false } = {}) {
+    const { x, z } = this.worldToTile(position);
+    const column = this.floorTilesByColumn.get(tileKey(x, z));
+
+    if (!column?.length) {
+      return null;
+    }
+
+    let closest = null;
+    let closestDistance = Infinity;
+    const y = position.y ?? 0;
+
+    for (const tile of column) {
+      const elevation = this._getTileElevationAtPosition(tile, position);
+      const distance = Math.abs(elevation - y);
+      if (distance < closestDistance) {
+        closest = tile;
+        closestDistance = distance;
+      }
+    }
+
+    if (!allowClosest && closestDistance > maxVerticalGap) {
+      return null;
+    }
+
+    return closest;
+  }
+
+  getTileElevation(x, z, elevationHint = 0) {
+    const position = tempVectorA.set(x * this.tileSize, elevationHint, z * this.tileSize);
+    const tile = this.getFloorTileAt(position, { allowClosest: true });
+    return tile ? this._getTileElevationAtPosition(tile, position) : 0;
+  }
+
+  getFloorElevationAt(position) {
+    const tile = this.getFloorTileAt(position, { allowClosest: true });
+    return tile ? this._getTileElevationAtPosition(tile, position) : 0;
+  }
+
+  _getTileElevationAtPosition(tile, position) {
+    if (!tile) {
+      return 0;
+    }
+
+    const isRamp = tile.surface === 'industrialRamp'
+      && Number.isFinite(tile.rampStartElevation)
+      && Number.isFinite(tile.rampEndElevation);
+
+    if (!isRamp) {
+      return tile.elevation ?? 0;
+    }
+
+    const directionX = Math.sign(tile.rampDirectionX ?? 0);
+    const directionZ = Math.sign(tile.rampDirectionZ ?? 0);
+
+    if (directionX === 0 && directionZ === 0) {
+      return tile.elevation ?? 0;
+    }
+
+    const localX = position.x / this.tileSize - tile.x;
+    const localZ = position.z / this.tileSize - tile.z;
+    const axis = directionX !== 0 ? localX * directionX : localZ * directionZ;
+    const progress = THREE.MathUtils.clamp(axis + 0.5, 0, 1);
+    return THREE.MathUtils.lerp(tile.rampStartElevation, tile.rampEndElevation, progress);
+  }
+
+  _isPlayerPreservingVerticalMotion() {
+    return this.game.player?.animation?.isFullBodyActionActive?.() === true;
+  }
+
+  _syncPositionToFloor(position, { preservePlayerAction = false } = {}) {
+    if (preservePlayerAction && this._isPlayerPreservingVerticalMotion()) {
+      return;
+    }
+
+    const floorTile = this.getFloorTileAt(position, { allowClosest: true });
+    if (floorTile) {
+      position.y = this._getTileElevationAtPosition(floorTile, position);
+    }
   }
 
   getNavigationDirection(fromPosition, targetPosition) {
@@ -336,6 +466,7 @@ export class DungeonController {
       const position = enemy.root.position;
 
       if (this.isPositionWalkable(position)) {
+        this._syncPositionToFloor(position);
         this.lastSafeEnemyPositions.set(enemy.id, position.clone());
         continue;
       }
@@ -343,9 +474,11 @@ export class DungeonController {
       const fallback = this.lastSafeEnemyPositions.get(enemy.id);
       if (fallback) {
         position.copy(fallback);
+        this._syncPositionToFloor(position);
       } else {
         const nearest = this._findNearestWalkablePosition(position);
         position.copy(nearest);
+        this._syncPositionToFloor(position);
         this.lastSafeEnemyPositions.set(enemy.id, nearest.clone());
       }
     }
@@ -367,7 +500,7 @@ export class DungeonController {
     }
 
     const position = enemy.root.position.clone();
-    position.y = 0.46;
+    position.y = this.getFloorElevationAt(position);
     position.x += (Math.random() - 0.5) * 0.7;
     position.z += (Math.random() - 0.5) * 0.7;
 
@@ -376,13 +509,15 @@ export class DungeonController {
 
   _spawnKeycardAt(position, idPrefix = 'ruinKeycard') {
     const object = createDroppedKeycardObject();
-    object.position.copy(position);
+    const floorPosition = position.clone();
+    floorPosition.y = this.getFloorElevationAt(position);
+    object.position.set(floorPosition.x, floorPosition.y + 0.42, floorPosition.z);
     this.game.scene.add(object);
 
     const keycard = {
       id: `${idPrefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
       object,
-      position: position.clone(),
+      position: floorPosition,
       collected: false,
     };
     this.keycards.push(keycard);
@@ -394,6 +529,7 @@ export class DungeonController {
     const current = playerRoot.position;
 
     if (this.isPositionWalkable(current)) {
+      this._syncPositionToFloor(current, { preservePlayerAction: true });
       this.lastSafePlayerPosition.copy(current);
       return;
     }
@@ -401,6 +537,7 @@ export class DungeonController {
     tempVectorA.set(current.x, current.y, this.lastSafePlayerPosition.z);
     if (this.isPositionWalkable(tempVectorA)) {
       current.copy(tempVectorA);
+      this._syncPositionToFloor(current, { preservePlayerAction: true });
       this.lastSafePlayerPosition.copy(current);
       return;
     }
@@ -408,11 +545,13 @@ export class DungeonController {
     tempVectorA.set(this.lastSafePlayerPosition.x, current.y, current.z);
     if (this.isPositionWalkable(tempVectorA)) {
       current.copy(tempVectorA);
+      this._syncPositionToFloor(current, { preservePlayerAction: true });
       this.lastSafePlayerPosition.copy(current);
       return;
     }
 
     current.copy(this.lastSafePlayerPosition);
+    this._syncPositionToFloor(current, { preservePlayerAction: true });
   }
 
   _updateKeycards(dt) {
@@ -424,7 +563,7 @@ export class DungeonController {
       }
 
       keycard.object.rotation.y += dt * 1.6;
-      keycard.object.position.y = 0.42 + Math.sin(this.game.elapsedTime * 4.2) * 0.08;
+      keycard.object.position.y = keycard.position.y + 0.42 + Math.sin(this.game.elapsedTime * 4.2) * 0.08;
 
       if (playerPosition.distanceToSquared(keycard.position) > 1.45 * 1.45) {
         continue;
@@ -459,7 +598,7 @@ export class DungeonController {
 
         if (pulseNow) {
           tempVectorA.copy(player.root.position);
-          tempVectorA.y = 0.2;
+          tempVectorA.y += 0.2;
           this.game.addParticleBurst(tempVectorA, 0xff645d, 6, 0.08);
           trapPulseUsed = true;
         }
@@ -475,7 +614,7 @@ export class DungeonController {
         }
 
         tempVectorA.copy(enemy.root.position);
-        tempVectorA.y = 0.72;
+        tempVectorA.y += 0.72;
         this.game.damageEnemy(enemy, trap.damagePerPulse ?? 5, {
           source: trap,
           element: 'shock',
@@ -587,7 +726,7 @@ export class DungeonController {
         block.position.copy(tempVectorA);
       }
 
-      block.position.y = 0;
+      block.position.y = this.getFloorElevationAt(block.position);
       block.object.position.lerp(block.position, Math.min(1, dt * 12));
       block.object.rotation.y += dt * 0.35;
 
@@ -627,12 +766,12 @@ export class DungeonController {
 
         tempVectorA.copy(block.position);
         block.position.addScaledVector(conveyor.direction, conveyor.speed * dt * 0.55);
-        block.position.y = 0;
 
         if (!this.isPositionWalkable(block.position)) {
           block.position.copy(tempVectorA);
         }
 
+        block.position.y = this.getFloorElevationAt(block.position);
         block.object?.position.copy(block.position);
       }
     }
@@ -765,7 +904,8 @@ export class DungeonController {
         continue;
       }
 
-      const targetY = door.closed ? 0 : DOOR_OPEN_Y;
+      const baseY = door.baseY ?? 0;
+      const targetY = baseY + (door.closed ? 0 : DOOR_OPEN_Y);
       door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, targetY, Math.min(1, dt * 8));
 
       if (door.light?.material?.emissive) {
@@ -1144,7 +1284,7 @@ export class DungeonController {
       const glow = chest.object?.getObjectByName?.('ruinChestGlow');
 
       if (lid) {
-        const targetX = chest.opened ? -0.92 : 0;
+        const targetX = chest.opened ? 0.92 : 0;
         lid.rotation.x = THREE.MathUtils.lerp(lid.rotation.x, targetX, Math.min(1, dt * 8));
         lid.position.y = THREE.MathUtils.lerp(lid.position.y, chest.opened ? 0.72 : 0.58, Math.min(1, dt * 8));
       }
@@ -1258,7 +1398,7 @@ export class DungeonController {
 
   _pulseDoor(door, color) {
     tempVectorB.copy(door.position);
-    tempVectorB.y = 0.9;
+    tempVectorB.y = (door.baseY ?? 0) + 0.9;
     this.game.addParticleBurst(tempVectorB, color, 16, 0.12);
   }
 
@@ -1333,8 +1473,12 @@ export class DungeonController {
     let nearest = null;
     let nearestDistanceSq = Infinity;
 
-    for (const tile of this.tiles.values()) {
-      tempVectorA.set(tile.x * this.tileSize, 0, tile.z * this.tileSize);
+    for (const tile of this.floorTiles) {
+      tempVectorA.set(
+        tile.x * this.tileSize,
+        tile.elevation ?? 0,
+        tile.z * this.tileSize,
+      );
       const distanceSq = tempVectorA.distanceToSquared(position);
       if (distanceSq < nearestDistanceSq && this.isPositionWalkable(tempVectorA)) {
         nearestDistanceSq = distanceSq;
@@ -1402,7 +1546,7 @@ export class DungeonController {
       return false;
     }
 
-    tempVectorC.set(x * this.tileSize, 0, z * this.tileSize);
+    this.tileToWorld(x, z, tempVectorC);
     for (const door of this.doors) {
       if (!door.closed) {
         continue;
@@ -1411,6 +1555,10 @@ export class DungeonController {
       if (tempVectorC.distanceToSquared(door.position) <= door.radius * door.radius) {
         return false;
       }
+    }
+
+    if (this._isPositionInsideSolidZone(tempVectorC)) {
+      return false;
     }
 
     return true;

@@ -5,10 +5,6 @@ const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
-const TANK_TURN_RECENTER_DELAY = 0.28;
-const TANK_TURN_RECENTER_DURATION = 1.25;
-const TANK_TURN_RECENTER_RESPONSIVENESS = 1.45;
-const TANK_TURN_TRANSLATION_YAW_RESPONSIVENESS = 28;
 const AIM_RECENTER_RESPONSIVENESS = 18;
 
 function lerpAngle(current, target, alpha) {
@@ -37,8 +33,6 @@ export class CameraController {
     this.yawResponsiveness = yawResponsiveness;
     this.yaw = 0;
     this.recenterTimer = 0;
-    this.tankTurnRecenterDelay = 0;
-    this.tankTurnRecenterTimer = 0;
     this.forceBodyFacingRecenter = false;
     this.movementForward = new THREE.Vector3(0, 0, 1);
     this.movementRight = new THREE.Vector3(1, 0, 0);
@@ -76,40 +70,21 @@ export class CameraController {
     }
 
     const tankTurnActive = Boolean(player.tankTurnActive);
-    const tankTurnTranslating = Boolean(player.tankTurnTranslating);
-    const tankTurnInPlace = tankTurnActive && !tankTurnTranslating;
-    if (tankTurnTranslating) {
-      this.tankTurnRecenterDelay = 0;
-      this.tankTurnRecenterTimer = 0;
-    } else if (tankTurnInPlace) {
-      this.tankTurnRecenterDelay = TANK_TURN_RECENTER_DELAY;
-      this.tankTurnRecenterTimer = 0;
-    } else if (this.tankTurnRecenterDelay > 0) {
-      this.tankTurnRecenterDelay = Math.max(0, this.tankTurnRecenterDelay - dt);
-      if (this.tankTurnRecenterDelay <= 0) {
-        this.tankTurnRecenterTimer = Math.max(this.tankTurnRecenterTimer, TANK_TURN_RECENTER_DURATION);
-      }
-    }
-
     const forcedRecentering = this.recenterTimer > 0;
     const forceBodyFacingRecenter = forcedRecentering && this.forceBodyFacingRecenter;
-    const tankRecenterWaiting = this.tankTurnRecenterDelay > 0;
-    const tankRecentering = this.tankTurnRecenterTimer > 0;
-    const facingDirection = forceBodyFacingRecenter || tankRecentering || tankTurnTranslating
+    const facingDirection = forceBodyFacingRecenter || tankTurnActive
       ? this._getPlayerBodyFacingDirection(player)
       : this._getPlayerFacingDirection(player);
 
-    if (forceBodyFacingRecenter || tankTurnTranslating || (!tankTurnActive && !tankRecenterWaiting)) {
-      const targetYaw = Math.atan2(facingDirection.x, facingDirection.z);
+    const targetYaw = Math.atan2(facingDirection.x, facingDirection.z);
+    if (tankTurnActive) {
+      this.yaw = targetYaw;
+    } else {
       const responsiveness = forceBodyFacingRecenter
         ? AIM_RECENTER_RESPONSIVENESS
-        : tankTurnTranslating
-        ? TANK_TURN_TRANSLATION_YAW_RESPONSIVENESS
         : forcedRecentering
-        ? 16
-        : tankRecentering
-        ? TANK_TURN_RECENTER_RESPONSIVENESS
-        : this.yawResponsiveness;
+          ? 16
+          : this.yawResponsiveness;
       const yawAlpha = Math.min(1, dt * responsiveness);
       this.yaw = lerpAngle(this.yaw, targetYaw, yawAlpha);
     }
@@ -117,9 +92,6 @@ export class CameraController {
     this.recenterTimer = Math.max(0, this.recenterTimer - dt);
     if (this.recenterTimer <= 0) {
       this.forceBodyFacingRecenter = false;
-    }
-    if (!tankTurnActive || tankTurnTranslating) {
-      this.tankTurnRecenterTimer = Math.max(0, this.tankTurnRecenterTimer - dt);
     }
 
     const running = Boolean(player.isRunning);
@@ -138,7 +110,7 @@ export class CameraController {
       .addScaledVector(forward, this.lookAhead);
     lookTarget.y += this.lookHeight;
 
-    const followAlpha = Math.min(1, dt * this.followResponsiveness);
+    const followAlpha = tankTurnActive ? 1 : Math.min(1, dt * this.followResponsiveness);
     this.camera.position.lerp(desiredPosition, followAlpha);
     this.camera.lookAt(lookTarget);
     this.syncMovementBasis(facingDirection);
@@ -151,11 +123,6 @@ export class CameraController {
   swingBehindPlayer(player = null) {
     this.recenterTimer = Math.max(this.recenterTimer, 0.42);
     this.forceBodyFacingRecenter = Boolean(player?.root);
-
-    if (this.forceBodyFacingRecenter) {
-      this.tankTurnRecenterDelay = 0;
-      this.tankTurnRecenterTimer = 0;
-    }
   }
 
   _getPlayerFacingDirection(player) {

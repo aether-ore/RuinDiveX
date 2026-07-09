@@ -15,6 +15,11 @@ const MACHINE_FACTORY_ROOM_MODEL = `${RUIN_ROOM_MODEL_BASE_PATH}industrial_machi
 const MACHINE_FACTORY_ROOM_FOOTPRINT = { width: 30, depth: 22 };
 const COOLANT_RELAY_ROOM_MODEL = `${RUIN_ROOM_MODEL_BASE_PATH}industrial_coolant_relay_puzzle_room.glb`;
 const COOLANT_RELAY_ROOM_FOOTPRINT = { width: 30, depth: 24 };
+const ENABLE_IMPORTED_GLB_ROOMS = false;
+const ENABLE_PROCEDURAL_FLOATING_DECOR = false;
+const ENABLE_PROCEDURAL_GLOW_LINES = false;
+const ENABLE_PROCEDURAL_OVERHEAD_DECOR = false;
+const ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS = false;
 const RUIN_WALL_HEIGHT = 12.4;
 const RUIN_WALL_THICKNESS = 0.22;
 const RUIN_WALL_FACE_OFFSET = 0.006;
@@ -349,7 +354,7 @@ export class DungeonGenerator {
     this.random = random;
     this.difficulty = Math.max(1, Math.trunc(difficulty) || 1);
     this.textureLoader = new THREE.TextureLoader();
-    this.gltfLoader = new GLTFLoader();
+    this.gltfLoader = ENABLE_IMPORTED_GLB_ROOMS ? new GLTFLoader() : null;
     this.textureCache = new Map();
   }
 
@@ -647,17 +652,23 @@ export class DungeonGenerator {
       alienServerRoom: {
         archetype: 'Alien Server Room Example',
         flavor: 'powered',
-        layoutVariant: 'Imported GLB prefab with procedural fallback',
+        layoutVariant: ENABLE_IMPORTED_GLB_ROOMS
+          ? 'Imported GLB prefab with procedural fallback'
+          : 'Procedural server room fallback',
       },
       machineFactoryRoom: {
         archetype: 'Industrial Machine Factory Room Example',
         flavor: 'powered',
-        layoutVariant: 'Imported machine factory GLB with procedural fallback',
+        layoutVariant: ENABLE_IMPORTED_GLB_ROOMS
+          ? 'Imported machine factory GLB with procedural fallback'
+          : 'Procedural machine factory fallback',
       },
       coolantRelayRoom: {
         archetype: 'Industrial Coolant Relay Puzzle Room',
         flavor: 'unstable',
-        layoutVariant: 'Imported coolant relay GLB with procedural fallback',
+        layoutVariant: ENABLE_IMPORTED_GLB_ROOMS
+          ? 'Imported coolant relay GLB with procedural fallback'
+          : 'Procedural coolant relay fallback',
       },
       shrineRoom: {
         archetype: 'Data Shrine / Machine Chapel',
@@ -1458,6 +1469,10 @@ export class DungeonGenerator {
     const progressionAccessTileKeys = this._createProgressionAccessTileKeys(tiles, rooms);
     const coolantFixtureTileKeys = this._createCoolantFixtureTileKeys(tiles, rooms);
     const pushExtra = (x, z, options = {}) => {
+      if (!ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS && (options.elevation ?? 0) > 0.05) {
+        return null;
+      }
+
       const columnKey = tileKey(x, z);
       if (!tiles.has(columnKey)) {
         return null;
@@ -1506,6 +1521,9 @@ export class DungeonGenerator {
       conveyorSpeed = 1.4,
     }) => {
       if (!room) {
+        return;
+      }
+      if (!ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS && elevation > 0.05) {
         return;
       }
 
@@ -1635,6 +1653,13 @@ export class DungeonGenerator {
       }
     };
     const addRampRun = (room, points, fromElevation, toElevation, fromLevel, toLevel) => {
+      if (
+        !ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS
+        && (fromElevation > 0.05 || toElevation > 0.05 || fromLevel > 0 || toLevel > 0)
+      ) {
+        return;
+      }
+
       const rampPoints = expandRampPath(points);
       if (rampPoints.length < 2) {
         return;
@@ -2290,13 +2315,27 @@ export class DungeonGenerator {
     );
   }
 
+  _isGroundedPropTile(tile) {
+    if (!tile) {
+      return false;
+    }
+
+    if (tile.surface === 'industrialRamp' || tile.surface === 'rampLanding') {
+      return false;
+    }
+
+    return (tile.elevation ?? 0) <= 0.05;
+  }
+
   _findRoomFloorTile(room, floorTiles = [], preferredSurfaces = [], {
     avoidKeys = new Set(),
     preferFarthest = false,
+    groundedOnly = false,
   } = {}) {
     const surfaceRank = new Map(preferredSurfaces.map((surface, index) => [surface, index]));
     const candidates = this._getRoomFloorTiles(room, floorTiles)
-      .filter((tile) => !avoidKeys.has(floorTileKey(tile.x, tile.z, tile.level ?? 0)));
+      .filter((tile) => !avoidKeys.has(floorTileKey(tile.x, tile.z, tile.level ?? 0)))
+      .filter((tile) => !groundedOnly || this._isGroundedPropTile(tile));
 
     if (!candidates.length) {
       return null;
@@ -2402,6 +2441,7 @@ export class DungeonGenerator {
   _findReachableRoomFloorTile(room, floorTiles = [], preferredSurfaces = [], {
     avoidKeys = new Set(),
     preferFarthest = false,
+    groundedOnly = false,
   } = {}) {
     const roomTiles = this._getRoomFloorTiles(room, floorTiles);
     const startTile = this._findRoomFloorTile(room, roomTiles, []);
@@ -2414,7 +2454,8 @@ export class DungeonGenerator {
     const surfaceRank = new Map(preferredSurfaces.map((surface, index) => [surface, index]));
     const candidates = roomTiles
       .filter((tile) => reachable.has(this._getFloorTileGraphKey(tile)))
-      .filter((tile) => !avoidKeys.has(this._getFloorTileGraphKey(tile)));
+      .filter((tile) => !avoidKeys.has(this._getFloorTileGraphKey(tile)))
+      .filter((tile) => !groundedOnly || this._isGroundedPropTile(tile));
 
     if (!candidates.length) {
       return null;
@@ -2708,7 +2749,7 @@ export class DungeonGenerator {
         halfWidth: 0.95,
         halfDepth: 0.52,
         verticalHalfHeight: 1.0,
-        elevation: RUIN_SECOND_FLOOR_ELEVATION,
+        elevation: ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_SECOND_FLOOR_ELEVATION : 0,
         blocksScaffold: false,
       },
     ];
@@ -2930,13 +2971,15 @@ export class DungeonGenerator {
                     ? 'Coolant relay balcony ramp'
                     : 'Upper maintenance ramp',
         position: new THREE.Vector3(room.x * this.tileSize, 0, room.z * this.tileSize),
-        levels: room.type === 'trap' || room.type === 'bonus'
-          ? [-1, 0]
-          : room.type === 'coolant'
-            ? [-1, 0, 1]
-          : room.type === 'conveyor' || room.type === 'boss' || room.type === 'shrine'
-            ? [0, 1, 2]
-            : [0, 1],
+        levels: !ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS
+          ? (room.type === 'trap' || room.type === 'bonus' || room.type === 'coolant' ? [-1, 0] : [0])
+          : room.type === 'trap' || room.type === 'bonus'
+            ? [-1, 0]
+            : room.type === 'coolant'
+              ? [-1, 0, 1]
+            : room.type === 'conveyor' || room.type === 'boss' || room.type === 'shrine'
+              ? [0, 1, 2]
+              : [0, 1],
       }));
   }
 
@@ -2958,7 +3001,7 @@ export class DungeonGenerator {
       }
 
       markTileSurface(tiles, x, z, {
-        elevation: RUIN_FACTORY_ELEVATION,
+        elevation: ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_FACTORY_ELEVATION : 0,
         surface,
       });
     };
@@ -3044,7 +3087,7 @@ export class DungeonGenerator {
         directionZ: dz,
         speed,
         active: true,
-        elevation: RUIN_FACTORY_ELEVATION,
+        elevation: ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_FACTORY_ELEVATION : 0,
         surface,
       });
     }
@@ -3905,21 +3948,23 @@ export class DungeonGenerator {
       server: ['serverCoreFloor', 'serverUpperCatwalk', 'catwalk'],
       machine: ['machinePressZone', 'machineAssemblyConveyor', 'machineCrossBridge', 'machineUpperCatwalk'],
       coolant: ['coolantValveDeck', 'coolantServicePit', 'coolantControlBalcony', 'coolantPipeBridge'],
-      enemy: ['secondFloor', 'catwalk', 'raisedDeck'],
-      keycard: ['secondFloor'],
+      enemy: ['enemy', 'secondFloor', 'catwalk', 'raisedDeck'],
+      keycard: ['keycard', 'secondFloor'],
       trap: ['basementFloor', 'industrialRamp'],
-      conveyor: ['thirdFloorGantry', 'secondFloorConveyor', 'conveyorBridge'],
-      boss: ['thirdFloorGantry', 'raisedDeck', 'catwalk'],
-      shrine: ['refractorDais', 'reveredMezzanine'],
+      conveyor: ['conveyor', 'conveyorPuzzleBelt', 'conveyorBridge', 'secondFloorConveyor', 'thirdFloorGantry'],
+      boss: ['boss', 'raisedDeck', 'catwalk', 'thirdFloorGantry'],
+      shrine: ['shrine', 'reveredMezzanine', 'refractorDais'],
       bonus: ['basementFloor'],
       entrance: ['entrance'],
     };
     const createRoomGroup = (room, surfaces = roomSurfacePreferences[room.type] ?? []) => {
-      const tile = this._findRoomFloorTile(room, floorTiles, surfaces) ?? {
-        x: room.x,
-        z: room.z,
-        elevation: 0,
-      };
+      const tile = this._findRoomFloorTile(room, floorTiles, surfaces, { groundedOnly: true })
+        ?? this._findRoomFloorTile(room, floorTiles, surfaces)
+        ?? {
+          x: room.x,
+          z: room.z,
+          elevation: 0,
+        };
       const roomGroup = new THREE.Group();
       roomGroup.name = `industrialRoomSetpiece_${room.id}`;
       roomGroup.position.copy(this._floorTileToWorld(tile));
@@ -3953,6 +3998,19 @@ export class DungeonGenerator {
       parent.add(mesh);
       return mesh;
     };
+    const addMountedPanel = (parent, name, x, z, width, height, depth, material, y) => {
+      const supportHeight = Math.max(0.12, y - height * 0.5);
+      addBox(parent, `${name}BackPlate`, x, z - 0.035, width + 0.18, height + 0.14, Math.max(depth, 0.08), materials.wallTrim, y);
+      addBox(parent, `${name}SupportPost`, x, z, 0.08, supportHeight, 0.08, materials.supportMetal, supportHeight * 0.5);
+      addBox(parent, `${name}FloorFoot`, x, z, Math.min(Math.max(width * 0.42, 0.28), 0.56), 0.08, 0.28, materials.supportMetal, 0.04);
+      return addBox(parent, name, x, z, width, height, depth, material, y);
+    };
+    const addMountedGlowNode = (parent, name, x, z, material, y = 0.92, radius = 0.16) => {
+      const supportHeight = Math.max(0.12, y - radius * 1.2);
+      addPost(parent, `${name}SupportPost`, x, z, Math.max(0.035, radius * 0.28), supportHeight, materials.supportMetal);
+      addBox(parent, `${name}MountPlate`, x, z, Math.max(radius * 2.6, 0.18), 0.08, Math.max(radius * 1.5, 0.08), materials.wallTrim, Math.max(0.08, y - radius * 0.75));
+      return addGlowNode(parent, name, x, z, material, y, radius);
+    };
     const addConduitSegment = (parent, name, fromX, fromZ, toX, toZ, material, y = 0.1, thickness = 0.1) => {
       const dx = toX - fromX;
       const dz = toZ - fromZ;
@@ -3978,20 +4036,26 @@ export class DungeonGenerator {
             ? materials.glowYellow
             : materials.glowBlue;
 
-      addBox(parent, 'ruinIdentityOverheadPipe', 0, northZ, halfW * 1.28, 0.1, 0.12, materials.factoryRail, 2.7);
-      addBox(parent, 'ruinIdentityPipeDropLeft', -halfW * 0.52, northZ + 0.34, 0.1, 1.1, 0.1, materials.factoryRail, 2.12);
-      addBox(parent, 'ruinIdentityPipeDropRight', halfW * 0.52, northZ + 0.34, 0.1, 1.1, 0.1, materials.factoryRail, 2.12);
-      addBox(parent, 'ruinIdentityWallMonitor', -halfW * 0.34, northZ - 0.08, 1.0 * detailScale, 0.44 * detailScale, 0.06, materials.glowBlue, 1.62);
-      addGlowNode(parent, 'ruinIdentityRedEyeNode', halfW * 0.34, northZ - 0.1, materials.glowRed, 1.74, 0.1 * detailScale);
+      if (ENABLE_PROCEDURAL_OVERHEAD_DECOR) {
+        addBox(parent, 'ruinIdentityOverheadPipe', 0, northZ, halfW * 1.28, 0.1, 0.12, materials.factoryRail, 2.7);
+        addBox(parent, 'ruinIdentityPipeDropLeft', -halfW * 0.52, northZ + 0.34, 0.1, 1.1, 0.1, materials.factoryRail, 2.12);
+        addBox(parent, 'ruinIdentityPipeDropRight', halfW * 0.52, northZ + 0.34, 0.1, 1.1, 0.1, materials.factoryRail, 2.12);
+      }
+      addMountedPanel(parent, 'ruinIdentityWallMonitor', -halfW * 0.34, northZ - 0.08, 1.0 * detailScale, 0.44 * detailScale, 0.06, materials.glowBlue, 1.62);
+      addMountedGlowNode(parent, 'ruinIdentityRedEyeNode', halfW * 0.34, northZ - 0.1, materials.glowRed, 1.74, 0.1 * detailScale);
 
       if (room.type === 'enemy' || room.type === 'trap' || room.type === 'conveyor' || room.type === 'keycard' || room.type === 'boss') {
         addPost(parent, 'sharedCoolantSourceTank', -halfW * 0.44, southZ, 0.22 * detailScale, 1.08 * detailScale, conduitMaterial);
         addPost(parent, 'sharedValveRelayPylon', halfW * 0.32, southZ - 0.38, 0.14 * detailScale, 1.28 * detailScale, materials.wallTrim);
         addGlowNode(parent, 'sharedValveRelayCore', halfW * 0.32, southZ - 0.38, conduitMaterial, 1.42 * detailScale, 0.12 * detailScale);
-        addConduitSegment(parent, 'sharedFloorCoolantConduit', -halfW * 0.44, southZ, halfW * 0.32, southZ - 0.38, conduitMaterial, 0.12, 0.08);
+        if (ENABLE_PROCEDURAL_GLOW_LINES) {
+          addConduitSegment(parent, 'sharedFloorCoolantConduit', -halfW * 0.44, southZ, halfW * 0.32, southZ - 0.38, conduitMaterial, 0.12, 0.08);
+        }
       } else if (room.type === 'shrine' || room.type === 'bonus') {
         addBox(parent, 'sharedIndustrialPartsRack', halfW * 0.38, southZ, 1.12 * detailScale, 1.24 * detailScale, 0.28, materials.supportMetal, 0.62 * detailScale);
-        addConduitSegment(parent, 'sharedRefractorServiceCable', -halfW * 0.34, southZ - 0.24, halfW * 0.36, southZ - 0.24, conduitMaterial, 0.12, 0.08);
+        if (ENABLE_PROCEDURAL_GLOW_LINES) {
+          addConduitSegment(parent, 'sharedRefractorServiceCable', -halfW * 0.34, southZ - 0.24, halfW * 0.36, southZ - 0.24, conduitMaterial, 0.12, 0.08);
+        }
       }
     };
 
@@ -4050,12 +4114,14 @@ export class DungeonGenerator {
         addPost(fallback, 'coolantPressureCoreBase', 0, 0, 0.62, 0.34, materials.supportMetal);
         addPost(fallback, 'coolantGlassPressureChamber', 0, 0, 0.42, 1.8, materials.largeRefractor);
         addGlowNode(fallback, 'coolantCentralRegulatorCrystal', 0, 0, materials.glowGreen, 2.08, 0.32);
-        for (const y of [0.6, 1.12, 1.64]) {
-          const ring = new THREE.Mesh(new THREE.TorusGeometry(0.76, 0.035, 8, 38), materials.glowBlue);
-          ring.name = 'coolantPressureCoreRing';
-          ring.position.y = y;
-          ring.rotation.x = Math.PI / 2;
-          fallback.add(ring);
+        if (ENABLE_PROCEDURAL_FLOATING_DECOR) {
+          for (const y of [0.6, 1.12, 1.64]) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(0.76, 0.035, 8, 38), materials.glowBlue);
+            ring.name = 'coolantPressureCoreRing';
+            ring.position.y = y;
+            ring.rotation.x = Math.PI / 2;
+            fallback.add(ring);
+          }
         }
 
         for (const spec of valveSpecs) {
@@ -4071,32 +4137,43 @@ export class DungeonGenerator {
 
           addPost(fallback, `coolantValve${spec.label}PylonBase`, valveX, valveZ, 0.26, 0.72, materials.wallTrim);
           addPost(fallback, `coolantValve${spec.label}Tower`, valveX, valveZ, 0.16, 1.48, materials.supportMetal);
-          const ring = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.035, 8, 28), material);
-          ring.name = `coolantValve${spec.label}RotatingRing`;
-          ring.position.set(valveX, 1.5, valveZ);
-          ring.rotation.x = Math.PI / 2;
-          fallback.add(ring);
-          addBox(fallback, `coolantValve${spec.label}DirectionBar`, valveX, valveZ, 0.76, 0.06, 0.08, material, 1.5);
+          if (ENABLE_PROCEDURAL_FLOATING_DECOR) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.035, 8, 28), material);
+            ring.name = `coolantValve${spec.label}RotatingRing`;
+            ring.position.set(valveX, 1.5, valveZ);
+            ring.rotation.x = Math.PI / 2;
+            fallback.add(ring);
+          }
+          if (ENABLE_PROCEDURAL_GLOW_LINES) {
+            addBox(fallback, `coolantValve${spec.label}DirectionBar`, valveX, valveZ, 0.76, 0.06, 0.08, material, 1.5);
+          }
 
           addBox(fallback, `coolantTerminal${spec.label}Base`, terminalX, terminalZ, 0.76, 0.62, 0.44, materials.terminal, 0.31);
           addBox(fallback, `coolantTerminal${spec.label}Screen`, terminalX, terminalZ - 0.24, 0.54, 0.08, 0.08, material, 0.78);
           addGlowNode(fallback, `coolantTerminal${spec.label}Button`, terminalX + 0.28, terminalZ - 0.18, materials.glowRed, 0.88, 0.06);
 
-          addConduitSegment(fallback, `coolant${spec.label}FeedConduit`, tankX, tankZ, valveX, valveZ, material, 0.13, 0.11);
-          addConduitSegment(fallback, `coolant${spec.label}CoreConduit`, valveX, valveZ, 0, 0, material, 0.16, 0.1);
+          if (ENABLE_PROCEDURAL_GLOW_LINES) {
+            addConduitSegment(fallback, `coolant${spec.label}FeedConduit`, tankX, tankZ, valveX, valveZ, material, 0.13, 0.11);
+            addConduitSegment(fallback, `coolant${spec.label}CoreConduit`, valveX, valveZ, 0, 0, material, 0.16, 0.1);
+          }
         }
 
         addPost(fallback, 'coolantOverflowWasteTank', halfW * 0.74, halfD * 0.68, 0.32, 1.28, materials.glowGreen);
-        addConduitSegment(fallback, 'coolantOverflowReturnLine', halfW * 0.74, halfD * 0.68, 0, 0, materials.glowGreen, 0.11, 0.09);
+        if (ENABLE_PROCEDURAL_GLOW_LINES) {
+          addConduitSegment(fallback, 'coolantOverflowReturnLine', halfW * 0.74, halfD * 0.68, 0, 0, materials.glowGreen, 0.11, 0.09);
+        }
 
-        addBox(fallback, 'coolantNorthControlBalcony', 0, -halfD * 0.82, halfW * 1.25, 0.12, 1.12, materials.coolantFloor, RUIN_SECOND_FLOOR_ELEVATION);
-        addBox(fallback, 'coolantBalconyInnerRail', 0, -halfD * 0.7, halfW * 1.16, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.76);
-        addBox(fallback, 'coolantBalconyOuterRail', 0, -halfD * 0.94, halfW * 1.16, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.76);
-        addBox(fallback, 'coolantMasterPressureConsole', 0, -halfD * 0.82, 1.18, 0.72, 0.52, materials.terminal, RUIN_SECOND_FLOOR_ELEVATION + 0.36);
-        addBox(fallback, 'coolantMasterPressureConsoleScreen', 0, -halfD * 0.58, 0.82, 0.08, 0.08, materials.glowGreen, RUIN_SECOND_FLOOR_ELEVATION + 0.86);
+        const coolantControlDeckY = ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_SECOND_FLOOR_ELEVATION : 0.08;
+        addBox(fallback, 'coolantNorthControlBalcony', 0, -halfD * 0.82, halfW * 1.25, 0.12, 1.12, materials.coolantFloor, coolantControlDeckY);
+        if (ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS) {
+          addBox(fallback, 'coolantBalconyInnerRail', 0, -halfD * 0.7, halfW * 1.16, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.76);
+          addBox(fallback, 'coolantBalconyOuterRail', 0, -halfD * 0.94, halfW * 1.16, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.76);
+        }
+        addBox(fallback, 'coolantMasterPressureConsole', 0, -halfD * 0.82, 1.18, 0.72, 0.52, materials.terminal, coolantControlDeckY + 0.28);
+        addBox(fallback, 'coolantMasterPressureConsoleScreen', 0, -halfD * 0.58, 0.82, 0.08, 0.08, materials.glowGreen, coolantControlDeckY + 0.78);
 
-        addGlowNode(fallback, 'coolantNorthOpenGateStatusNode', 0, -halfD + 0.32, materials.glowGreen, 1.72, 0.1);
-        addGlowNode(fallback, 'coolantWestRewardAlcoveStatusNode', -halfW + 0.32, 0, materials.glowYellow, 1.56, 0.1);
+        addMountedGlowNode(fallback, 'coolantNorthOpenGateStatusNode', 0, -halfD + 0.32, materials.glowGreen, 1.72, 0.1);
+        addMountedGlowNode(fallback, 'coolantWestRewardAlcoveStatusNode', -halfW + 0.32, 0, materials.glowYellow, 1.56, 0.1);
 
         for (const [x, z] of [[-halfW * 0.58, -halfD * 0.42], [halfW * 0.58, -halfD * 0.42], [-halfW * 0.58, halfD * 0.42], [halfW * 0.58, halfD * 0.42]]) {
           addPost(fallback, 'coolantDormantReaverbotSocket', x, z, 0.22, 0.22, materials.supportMetal);
@@ -4104,13 +4181,17 @@ export class DungeonGenerator {
         }
 
         for (const [x, label] of [[-halfW * 0.28, 'A'], [0, 'B'], [halfW * 0.28, 'C']]) {
-          addBox(fallback, `coolantWallPuzzleMonitor${label}`, x, -halfD + 0.34, 1.0, 0.48, 0.06, materials.glowBlue, 2.32);
-          addGlowNode(fallback, `coolantWallPuzzleMonitor${label}Lock`, x + 0.42, -halfD + 0.28, materials.glowRed, 2.82, 0.08);
+          addMountedPanel(fallback, `coolantWallPuzzleMonitor${label}`, x, -halfD + 0.34, 1.0, 0.48, 0.06, materials.glowBlue, 2.32);
+          addMountedGlowNode(fallback, `coolantWallPuzzleMonitor${label}Lock`, x + 0.42, -halfD + 0.28, materials.glowRed, 2.82, 0.08);
         }
 
-        for (const [x, material] of [[-halfW * 0.44, materials.glowBlue], [0, materials.glowViolet], [halfW * 0.44, materials.glowYellow]]) {
-          addBox(fallback, 'coolantOverheadPipeSpine', x, -halfD * 0.16, 0.1, 0.1, halfD * 1.16, materials.factoryRail, 4.86);
-          addBox(fallback, 'coolantOverheadPipeGlowChannel', x, -halfD * 0.16, 0.055, 0.055, halfD * 1.02, material, 4.94);
+        if (ENABLE_PROCEDURAL_OVERHEAD_DECOR) {
+          for (const [x, material] of [[-halfW * 0.44, materials.glowBlue], [0, materials.glowViolet], [halfW * 0.44, materials.glowYellow]]) {
+            addBox(fallback, 'coolantOverheadPipeSpine', x, -halfD * 0.16, 0.1, 0.1, halfD * 1.16, materials.factoryRail, 4.86);
+            if (ENABLE_PROCEDURAL_GLOW_LINES) {
+              addBox(fallback, 'coolantOverheadPipeGlowChannel', x, -halfD * 0.16, 0.055, 0.055, halfD * 1.02, material, 4.94);
+            }
+          }
         }
 
         roomGroup.add(fallback);
@@ -4173,14 +4254,16 @@ export class DungeonGenerator {
           }
         }
 
-        addBox(fallback, 'machineOverheadCraneRail', 0, -halfD * 0.74, halfW * 1.45, 0.14, 0.2, materials.supportMetal, 5.0);
-        addBox(fallback, 'machineOverheadCraneTrolley', 0, -halfD * 0.74, 1.1, 0.34, 0.52, materials.hazardStripe, 4.68);
-        addPost(fallback, 'machineOverheadCraneCable', 0, -halfD * 0.74, 0.035, 1.28, materials.supportMetal).position.y = 4.0;
-        const hook = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.035, 8, 18, Math.PI * 1.3), materials.supportMetal);
-        hook.name = 'machineOverheadCraneHook';
-        hook.position.set(0, 3.28, -halfD * 0.74);
-        hook.rotation.x = Math.PI / 2;
-        fallback.add(hook);
+        if (ENABLE_PROCEDURAL_OVERHEAD_DECOR) {
+          addBox(fallback, 'machineOverheadCraneRail', 0, -halfD * 0.74, halfW * 1.45, 0.14, 0.2, materials.supportMetal, 5.0);
+          addBox(fallback, 'machineOverheadCraneTrolley', 0, -halfD * 0.74, 1.1, 0.34, 0.52, materials.hazardStripe, 4.68);
+          addPost(fallback, 'machineOverheadCraneCable', 0, -halfD * 0.74, 0.035, 1.28, materials.supportMetal).position.y = 4.0;
+          const hook = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.035, 8, 18, Math.PI * 1.3), materials.supportMetal);
+          hook.name = 'machineOverheadCraneHook';
+          hook.position.set(0, 3.28, -halfD * 0.74);
+          hook.rotation.x = Math.PI / 2;
+          fallback.add(hook);
+        }
 
         const tankSpecs = [
           [-halfW * 0.72, -halfD * 0.66, materials.glowBlue],
@@ -4193,29 +4276,36 @@ export class DungeonGenerator {
           addBox(fallback, 'machineTankPipeRun', x, z + 0.62, 0.08, 0.08, 1.15, materials.factoryRail, 1.18);
         }
 
-        const chassis = new THREE.Group();
-        chassis.name = 'machineSuspendedReaverbotChassis';
-        chassis.position.set(0, 3.22, -halfD * 0.34);
-        const chassisBody = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.46, 0.62), materials.supportMetal);
-        const chassisEye = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 10), materials.glowRed);
-        chassisEye.position.set(0, 0.03, -0.34);
-        chassis.add(chassisBody, chassisEye);
-        fallback.add(chassis);
+        if (ENABLE_PROCEDURAL_FLOATING_DECOR) {
+          const chassis = new THREE.Group();
+          chassis.name = 'machineSuspendedReaverbotChassis';
+          chassis.position.set(0, 3.22, -halfD * 0.34);
+          const chassisBody = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.46, 0.62), materials.supportMetal);
+          const chassisEye = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 10), materials.glowRed);
+          chassisEye.position.set(0, 0.03, -0.34);
+          chassis.add(chassisBody, chassisEye);
+          fallback.add(chassis);
+        }
 
-        addBox(fallback, 'machineNorthUpperCatwalk', 0, -halfD * 0.86, halfW * 1.42, 0.1, 1.06, materials.machineFloor, RUIN_SECOND_FLOOR_ELEVATION);
-        addBox(fallback, 'machineCrossCatwalkBridge', 0, 0, halfW * 1.56, 0.1, 1.0, materials.machineFloor, RUIN_SECOND_FLOOR_ELEVATION);
-        addBox(fallback, 'machineLeftCatwalkRail', -halfW * 0.72, 0, 0.1, 0.08, halfD * 1.3, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
-        addBox(fallback, 'machineRightCatwalkRail', halfW * 0.72, 0, 0.1, 0.08, halfD * 1.3, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
+        const machineDeckY = ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_SECOND_FLOOR_ELEVATION : 0.08;
+        addBox(fallback, 'machineNorthUpperCatwalk', 0, -halfD * 0.86, halfW * 1.42, 0.1, 1.06, materials.machineFloor, machineDeckY);
+        addBox(fallback, 'machineCrossCatwalkBridge', 0, 0, halfW * 1.56, 0.1, 1.0, materials.machineFloor, machineDeckY);
+        if (ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS) {
+          addBox(fallback, 'machineLeftCatwalkRail', -halfW * 0.72, 0, 0.1, 0.08, halfD * 1.3, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
+          addBox(fallback, 'machineRightCatwalkRail', halfW * 0.72, 0, 0.1, 0.08, halfD * 1.3, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
+        }
 
         for (const x of [-halfW * 0.42, 0, halfW * 0.42]) {
-          addBox(fallback, 'machineWallMonitor', x, -halfD + 0.28, 1.18, 0.46, 0.06, materials.glowBlue, 2.72);
-          addGlowNode(fallback, 'machineWallRedEye', x + 0.48, -halfD + 0.24, materials.glowRed, 3.22, 0.09);
+          addMountedPanel(fallback, 'machineWallMonitor', x, -halfD + 0.28, 1.18, 0.46, 0.06, materials.glowBlue, 2.72);
+          addMountedGlowNode(fallback, 'machineWallRedEye', x + 0.48, -halfD + 0.24, materials.glowRed, 3.22, 0.09);
         }
         addBox(fallback, 'machineEntryControlConsole', 0, halfD * 0.78, 1.24, 0.7, 0.56, materials.terminal, 0.35);
         addBox(fallback, 'machineEntryConsoleScreen', 0, halfD * 0.48, 0.88, 0.08, 0.08, materials.glowBlue, 0.92);
-        for (const z of [-halfD * 0.54, -halfD * 0.12, halfD * 0.28]) {
-          addBox(fallback, 'machineCableBundle', -halfW * 0.34, z, 0.08, 0.045, halfD * 0.32, materials.glowBlue, 0.08);
-          addBox(fallback, 'machineCableBundle', halfW * 0.34, z, 0.08, 0.045, halfD * 0.32, materials.glowBlue, 0.08);
+        if (ENABLE_PROCEDURAL_GLOW_LINES) {
+          for (const z of [-halfD * 0.54, -halfD * 0.12, halfD * 0.28]) {
+            addBox(fallback, 'machineCableBundle', -halfW * 0.34, z, 0.08, 0.045, halfD * 0.32, materials.glowBlue, 0.08);
+            addBox(fallback, 'machineCableBundle', halfW * 0.34, z, 0.08, 0.045, halfD * 0.32, materials.glowBlue, 0.08);
+          }
         }
         for (const [x, z] of [[-halfW * 0.36, -halfD * 0.24], [halfW * 0.36, -halfD * 0.12], [-halfW * 0.36, halfD * 0.42], [halfW * 0.36, halfD * 0.42]]) {
           addGlowNode(fallback, 'machineRefractorPowerShard', x, z, materials.largeRefractor, 0.52, 0.12);
@@ -4248,48 +4338,57 @@ export class DungeonGenerator {
         addBox(fallback, 'alienServerCentralOctagonBase', 0, 0, 2.15, 0.16, 2.15, materials.serverFloor, 0.08).rotation.y = Math.PI / 4;
         addPost(fallback, 'alienServerVerticalEnergyCore', 0, 0, 0.18, 2.6, materials.glowBlue);
         addGlowNode(fallback, 'alienServerMemoryCrystal', 0, 0, materials.largeRefractor, 2.85, 0.42);
-        for (const y of [1.08, 2.02, 2.78]) {
-          const ring = new THREE.Mesh(
-            new THREE.TorusGeometry(0.84, 0.035, 8, 36),
-            materials.glowBlue,
-          );
-          ring.name = 'alienServerEnergyRing';
-          ring.position.y = y;
-          ring.rotation.x = Math.PI / 2;
-          fallback.add(ring);
+        if (ENABLE_PROCEDURAL_FLOATING_DECOR) {
+          for (const y of [1.08, 2.02, 2.78]) {
+            const ring = new THREE.Mesh(
+              new THREE.TorusGeometry(0.84, 0.035, 8, 36),
+              materials.glowBlue,
+            );
+            ring.name = 'alienServerEnergyRing';
+            ring.position.y = y;
+            ring.rotation.x = Math.PI / 2;
+            fallback.add(ring);
+          }
         }
 
-        for (const z of serverZs) {
-          addBox(fallback, 'alienServerFloorCableLeft', -halfW * 0.22, z * 0.5, halfW * 0.42, 0.04, 0.08, materials.glowBlue, 0.08);
-          addBox(fallback, 'alienServerFloorCableRight', halfW * 0.22, z * 0.5, halfW * 0.42, 0.04, 0.08, materials.glowBlue, 0.08);
-        }
-        for (const x of [-halfW * 0.36, halfW * 0.36]) {
-          addBox(fallback, 'alienServerFloorCableSpine', x, 0, 0.08, 0.04, halfD * 0.92, materials.glowBlue, 0.075);
+        if (ENABLE_PROCEDURAL_GLOW_LINES) {
+          for (const z of serverZs) {
+            addBox(fallback, 'alienServerFloorCableLeft', -halfW * 0.22, z * 0.5, halfW * 0.42, 0.04, 0.08, materials.glowBlue, 0.08);
+            addBox(fallback, 'alienServerFloorCableRight', halfW * 0.22, z * 0.5, halfW * 0.42, 0.04, 0.08, materials.glowBlue, 0.08);
+          }
+          for (const x of [-halfW * 0.36, halfW * 0.36]) {
+            addBox(fallback, 'alienServerFloorCableSpine', x, 0, 0.08, 0.04, halfD * 0.92, materials.glowBlue, 0.075);
+          }
         }
 
-        addBox(fallback, 'alienServerNorthUpperCatwalk', 0, -halfD * 0.78, halfW * 1.42, 0.1, 1.22, materials.serverFloor, RUIN_SECOND_FLOOR_ELEVATION);
-        addBox(fallback, 'alienServerEastUpperCatwalk', halfW * 0.78, 0, 1.22, 0.1, halfD * 1.32, materials.serverFloor, RUIN_SECOND_FLOOR_ELEVATION);
-        addBox(fallback, 'alienServerNorthCatwalkRail', 0, -halfD * 0.7, halfW * 1.32, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
-        addBox(fallback, 'alienServerEastCatwalkRail', halfW * 0.7, 0, 0.1, 0.08, halfD * 1.18, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
+        const serverDeckY = ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_SECOND_FLOOR_ELEVATION : 0.08;
+        addBox(fallback, 'alienServerNorthUpperCatwalk', 0, -halfD * 0.78, halfW * 1.42, 0.1, 1.22, materials.serverFloor, serverDeckY);
+        addBox(fallback, 'alienServerEastUpperCatwalk', halfW * 0.78, 0, 1.22, 0.1, halfD * 1.32, materials.serverFloor, serverDeckY);
+        if (ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS) {
+          addBox(fallback, 'alienServerNorthCatwalkRail', 0, -halfD * 0.7, halfW * 1.32, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
+          addBox(fallback, 'alienServerEastCatwalkRail', halfW * 0.7, 0, 0.1, 0.08, halfD * 1.18, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
+        }
 
         for (const x of [-halfW * 0.42, -halfW * 0.14, halfW * 0.14, halfW * 0.42]) {
-          addBox(fallback, 'alienServerWallDataScreen', x, -halfD + 0.26, 1.04, 0.48, 0.06, materials.glowBlue, 2.36);
-          addGlowNode(fallback, 'alienServerWallRedEye', x + 0.44, -halfD + 0.22, materials.glowRed, 2.96, 0.1);
+          addMountedPanel(fallback, 'alienServerWallDataScreen', x, -halfD + 0.26, 1.04, 0.48, 0.06, materials.glowBlue, 2.36);
+          addMountedGlowNode(fallback, 'alienServerWallRedEye', x + 0.44, -halfD + 0.22, materials.glowRed, 2.96, 0.1);
         }
         for (const [x, z] of [[-halfW * 0.78, -halfD * 0.74], [halfW * 0.78, -halfD * 0.74], [-halfW * 0.78, halfD * 0.74], [halfW * 0.78, halfD * 0.74]]) {
-          addGlowNode(fallback, 'alienServerRoomSurveillanceEye', x, z, materials.glowRed, 2.25, 0.14);
+          addMountedGlowNode(fallback, 'alienServerRoomSurveillanceEye', x, z, materials.glowRed, 2.25, 0.14);
         }
 
         addBox(fallback, 'alienServerEntryConsoleBase', 0, halfD * 0.78, 1.12, 0.74, 0.5, materials.terminal, 0.37);
         addBox(fallback, 'alienServerEntryConsoleScreen', 0, halfD * 0.52, 0.82, 0.08, 0.08, materials.glowBlue, 0.92);
         addGlowNode(fallback, 'alienServerEntryConsoleButton', 0.38, halfD * 0.54, materials.glowRed, 0.94, 0.07);
 
-        for (let i = 0; i < 7; i += 1) {
-          const mote = new THREE.Mesh(new THREE.IcosahedronGeometry(0.055, 0), materials.glowBlue);
-          mote.name = 'alienServerFloatingDataMote';
-          const angle = i * 1.72;
-          mote.position.set(Math.cos(angle) * 1.24, 1.46 + i * 0.18, Math.sin(angle) * 0.94);
-          fallback.add(mote);
+        if (ENABLE_PROCEDURAL_FLOATING_DECOR) {
+          for (let i = 0; i < 7; i += 1) {
+            const mote = new THREE.Mesh(new THREE.IcosahedronGeometry(0.055, 0), materials.glowBlue);
+            mote.name = 'alienServerFloatingDataMote';
+            const angle = i * 1.72;
+            mote.position.set(Math.cos(angle) * 1.24, 1.46 + i * 0.18, Math.sin(angle) * 0.94);
+            fallback.add(mote);
+          }
         }
 
         roomGroup.add(fallback);
@@ -4315,7 +4414,9 @@ export class DungeonGenerator {
             }
           }
         }
-        addBox(roomGroup, 'roomFunctionFloorCable', 0, 0, halfW * 1.1, 0.045, 0.12, materials.glowBlue, 0.08);
+        if (ENABLE_PROCEDURAL_GLOW_LINES) {
+          addBox(roomGroup, 'roomFunctionFloorCable', 0, 0, halfW * 1.1, 0.045, 0.12, materials.glowBlue, 0.08);
+        }
       } else if (room.type === 'keycard') {
         for (const z of [-0.72, 0.72]) {
           addBox(roomGroup, 'surveillanceConsoleBank', -0.78, z, 1.02, 0.62, 0.34, materials.terminal ?? materials.wallTrim);
@@ -4328,7 +4429,9 @@ export class DungeonGenerator {
         addBox(roomGroup, 'hazardProcessorPressRight', 0.78, 0, 0.38, 1.15, halfD * 1.16, materials.supportMetal);
         addBox(roomGroup, 'hazardEmergencyShutoffLine', 0, -halfD * 0.5, halfW * 0.86, 0.06, 0.12, materials.hazardStripe, 0.14);
       } else if (room.type === 'conveyor') {
-        addBox(roomGroup, 'assemblyOverheadRail', 0, 0, halfW * 1.35, 0.12, 0.16, materials.supportMetal, 1.92);
+        if (ENABLE_PROCEDURAL_OVERHEAD_DECOR) {
+          addBox(roomGroup, 'assemblyOverheadRail', 0, 0, halfW * 1.35, 0.12, 0.16, materials.supportMetal, 1.92);
+        }
         for (const x of [-halfW * 0.36, halfW * 0.36]) {
           addPost(roomGroup, 'assemblyLineRobotArmBase', x, 0.42, 0.1, 1.25, materials.supportMetal);
           const arm = addBox(roomGroup, 'assemblyLineRobotArm', x + Math.sign(x || 1) * 0.28, 0.18, 0.64, 0.1, 0.12, materials.hazardStripe, 1.38);
@@ -4347,14 +4450,16 @@ export class DungeonGenerator {
           addPost(roomGroup, 'refractorRelayPylon', x, z, 0.13, 1.75, materials.wallTrim);
           addGlowNode(roomGroup, 'refractorRelayCore', x, z, materials.glowBlue, 1.88, 0.15);
         }
-        const ring = new THREE.Mesh(
-          new THREE.TorusGeometry(1.58, 0.045, 10, 44),
-          materials.glowBlue,
-        );
-        ring.name = 'machineChapelConduitRing';
-        ring.position.y = 0.18;
-        ring.rotation.x = Math.PI / 2;
-        roomGroup.add(ring);
+        if (ENABLE_PROCEDURAL_GLOW_LINES) {
+          const ring = new THREE.Mesh(
+            new THREE.TorusGeometry(1.58, 0.045, 10, 44),
+            materials.glowBlue,
+          );
+          ring.name = 'machineChapelConduitRing';
+          ring.position.y = 0.18;
+          ring.rotation.x = Math.PI / 2;
+          roomGroup.add(ring);
+        }
       } else if (room.type === 'bonus') {
         for (const x of [-0.95, 0.95]) {
           addBox(roomGroup, 'storageVaultCrateStack', x, -0.82, 0.64, 0.82, 0.54, materials.wallTrim);
@@ -4372,6 +4477,10 @@ export class DungeonGenerator {
   }
 
   _loadAlienServerRoomModel(roomGroup, fallback, room, solidZones = []) {
+    if (!ENABLE_IMPORTED_GLB_ROOMS || !this.gltfLoader) {
+      return;
+    }
+
     this.gltfLoader.load(
       ALIEN_SERVER_ROOM_MODEL,
       (gltf) => {
@@ -4423,6 +4532,10 @@ export class DungeonGenerator {
   }
 
   _loadMachineFactoryRoomModel(roomGroup, fallback, room, solidZones = []) {
+    if (!ENABLE_IMPORTED_GLB_ROOMS || !this.gltfLoader) {
+      return;
+    }
+
     this.gltfLoader.load(
       MACHINE_FACTORY_ROOM_MODEL,
       (gltf) => {
@@ -4474,6 +4587,10 @@ export class DungeonGenerator {
   }
 
   _loadCoolantRelayRoomModel(roomGroup, fallback, room, solidZones = []) {
+    if (!ENABLE_IMPORTED_GLB_ROOMS || !this.gltfLoader) {
+      return;
+    }
+
     this.gltfLoader.load(
       COOLANT_RELAY_ROOM_MODEL,
       (gltf) => {
@@ -5058,7 +5175,8 @@ export class DungeonGenerator {
       shrine: null,
     };
     const roomPosition = (room, surfaces = []) => {
-      const tile = this._findRoomFloorTile(room, floorTiles, surfaces);
+      const tile = this._findRoomFloorTile(room, floorTiles, surfaces, { groundedOnly: true })
+        ?? this._findRoomFloorTile(room, floorTiles, surfaces);
       return tile ? this._floorTileToWorld(tile) : this._tileToWorld(room.x, room.z, tiles);
     };
 
@@ -5081,7 +5199,8 @@ export class DungeonGenerator {
           activated: false,
         };
       } else if (room.type === 'keycard') {
-        const keycardTile = this._findReachableRoomFloorTile(room, floorTiles, ['secondFloor'])
+        const keycardTile = this._findReachableRoomFloorTile(room, floorTiles, ['keycard', 'secondFloor'], { groundedOnly: true })
+          ?? this._findReachableRoomFloorTile(room, floorTiles, ['keycard', 'secondFloor'])
           ?? this._findReachableRoomFloorTile(room, floorTiles, []);
         const keycardPosition = keycardTile
           ? this._floorTileToWorld(keycardTile)
@@ -5170,7 +5289,7 @@ export class DungeonGenerator {
           completed: false,
         });
       } else if (room.type === 'coolant') {
-        const terminalPosition = roomPosition(room, ['coolantControlBalcony', 'coolantPipeBridge']);
+        const terminalPosition = roomPosition(room, ['coolantValveDeck', 'coolantServicePit', 'coolantControlBalcony', 'coolantPipeBridge']);
         const terminal = this._addMechanismTerminal(group, terminalPosition, materials);
         terminal.name = 'coolantRelayMasterConsoleInteractable';
         landmarks.mechanisms.push({
@@ -5183,7 +5302,7 @@ export class DungeonGenerator {
           puzzleType: 'coolantRelay',
         });
       } else if (room.type === 'shrine') {
-        const shrinePosition = roomPosition(room, ['refractorDais']);
+        const shrinePosition = roomPosition(room, ['shrine', 'refractorWell', 'reveredMezzanine', 'refractorDais']);
         landmarks.shrine = {
           id: 'largeRefractor',
           object: this._addLargeRefractorShrine(group, shrinePosition, materials),
@@ -5241,12 +5360,12 @@ export class DungeonGenerator {
     }
 
     const chestRequests = [
-      { roomId: 'alienServerRoom', surfaces: ['serverUpperCatwalk', 'serverCoreFloor'], keycardChance: 0, rareBoost: true },
-      { roomId: 'machineFactoryRoom', surfaces: ['machineCrossBridge', 'machineUpperCatwalk', 'machinePressZone'], keycardChance: 0, rareBoost: true },
-      { roomId: 'coolantRelayRoom', surfaces: ['coolantControlBalcony', 'coolantValveDeck', 'coolantPipeBridge'], keycardChance: 0, guaranteedKeycardId: 'Keycard_Beta', rareBoost: true },
-      { roomId: 'enemyNest', surfaces: ['secondFloor'], keycardChance: 0, rareBoost: true },
+      { roomId: 'alienServerRoom', surfaces: ['serverCoreFloor', 'serverUpperCatwalk'], keycardChance: 0, rareBoost: true },
+      { roomId: 'machineFactoryRoom', surfaces: ['machinePressZone', 'machineAssemblyConveyor', 'machineCrossBridge', 'machineUpperCatwalk'], keycardChance: 0, rareBoost: true },
+      { roomId: 'coolantRelayRoom', surfaces: ['coolantValveDeck', 'coolantServicePit', 'coolantControlBalcony', 'coolantPipeBridge'], keycardChance: 0, guaranteedKeycardId: 'Keycard_Beta', rareBoost: true },
+      { roomId: 'enemyNest', surfaces: ['enemy', 'secondFloor'], keycardChance: 0, rareBoost: true },
       { roomId: 'trapRoom', surfaces: ['basementFloor'], keycardChance: 0, rareBoost: true },
-      { roomId: 'conveyorRoom', surfaces: ['thirdFloorGantry'], keycardChance: 0, rareBoost: true },
+      { roomId: 'conveyorRoom', surfaces: ['conveyor', 'conveyorPuzzleBelt', 'thirdFloorGantry'], keycardChance: 0, rareBoost: true },
     ];
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     for (const request of chestRequests) {
@@ -5256,6 +5375,10 @@ export class DungeonGenerator {
       }
 
       const tile = this._findReachableRoomFloorTile(room, floorTiles, request.surfaces, {
+        avoidKeys: placedChestKeys,
+        preferFarthest: true,
+        groundedOnly: true,
+      }) ?? this._findReachableRoomFloorTile(room, floorTiles, request.surfaces, {
         avoidKeys: placedChestKeys,
         preferFarthest: true,
       });
@@ -5825,18 +5948,20 @@ export class DungeonGenerator {
     if (Array.isArray(floorSource)) {
       const surfacePreferences = {
         server: ['serverCoreFloor', 'serverUpperCatwalk', 'catwalk'],
-        machine: ['machineCrossBridge', 'machineUpperCatwalk', 'machinePressZone', 'machineAssemblyConveyor'],
-        coolant: ['coolantValveDeck', 'coolantControlBalcony', 'coolantPipeBridge', 'coolantServicePit'],
-        enemy: ['secondFloor', 'catwalk', 'raisedDeck'],
-        keycard: ['secondFloor'],
+        machine: ['machinePressZone', 'machineAssemblyConveyor', 'machineCrossBridge', 'machineUpperCatwalk'],
+        coolant: ['coolantValveDeck', 'coolantServicePit', 'coolantControlBalcony', 'coolantPipeBridge'],
+        enemy: ['enemy', 'secondFloor', 'catwalk', 'raisedDeck'],
+        keycard: ['keycard', 'secondFloor'],
         trap: ['basementFloor', 'industrialRamp'],
-        conveyor: ['thirdFloorGantry', 'secondFloorConveyor', 'conveyorBridge'],
-        boss: ['thirdFloorGantry', 'raisedDeck', 'catwalk'],
-        shrine: ['refractorDais', 'reveredMezzanine', 'refractorWell'],
+        conveyor: ['conveyor', 'conveyorPuzzleBelt', 'conveyorBridge', 'secondFloorConveyor', 'thirdFloorGantry'],
+        boss: ['boss', 'raisedDeck', 'catwalk', 'thirdFloorGantry'],
+        shrine: ['shrine', 'refractorWell', 'reveredMezzanine', 'refractorDais'],
         bonus: ['basementFloor'],
       }[room.type] ?? [];
-      const candidates = this._getRoomFloorTiles(room, floorSource)
+      const roomTiles = this._getRoomFloorTiles(room, floorSource)
         .filter((tile) => !['hub', 'camp', 'entrance'].includes(tile.type));
+      const groundedCandidates = roomTiles.filter((tile) => this._isGroundedPropTile(tile));
+      const candidates = groundedCandidates.length ? groundedCandidates : roomTiles;
       const surfaceRank = new Map(surfacePreferences.map((surface, index) => [surface, index]));
       const chosen = [];
       const used = new Set();

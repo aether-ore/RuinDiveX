@@ -11,6 +11,7 @@ const LOCKED_COLOR = 0xffb347;
 const KEY_SEEKER_COLOR = 0x5ee77b;
 const TRACKING_COLOR = 0xa06cff;
 const DOOR_OPEN_Y = -5.3;
+const PLAYER_JUMP_OFF_LEDGE_MAX_DROP = 2.4;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
   [-1, 0],
@@ -114,6 +115,7 @@ export class DungeonController {
     this.discoveredRoomIds = new Set(['hubTown', 'expeditionCamp', 'entrance']);
     this.nearestInteractable = null;
     this.lastSafePlayerPosition = new THREE.Vector3();
+    this.pendingPlayerJumpOffLanding = null;
     this.lastSafeEnemyPositions = new Map();
     this.navigationCache = new Map();
     this.trapPulseTimer = 0;
@@ -261,11 +263,25 @@ export class DungeonController {
   }
 
   isPositionWalkable(position) {
+    if (Number.isFinite(this.game.getDebugLedgeFloorElevation?.(position))) {
+      return true;
+    }
+
+    if (this.game.isPositionInsideDebugLedgeBlock?.(position)) {
+      return false;
+    }
+
     const floorTile = this.getFloorTileAt(position);
     if (!floorTile) {
       return false;
     }
 
+    tempVectorB.copy(position);
+    tempVectorB.y = this._getTileElevationAtPosition(floorTile, position);
+    return this._isResolvedFloorPositionWalkable(tempVectorB);
+  }
+
+  _isResolvedFloorPositionWalkable(position) {
     for (const door of this.doors) {
       if (!door.closed) {
         continue;
@@ -280,7 +296,35 @@ export class DungeonController {
       return false;
     }
 
+    if (this.game.isPositionInsideDebugLedgeBlock?.(position)) {
+      return false;
+    }
+
     return true;
+  }
+
+  _getWalkableJumpOffLanding(position, target = new THREE.Vector3()) {
+    const debugLedgeElevation = this.game.getDebugLedgeFloorElevation?.(position);
+    if (Number.isFinite(debugLedgeElevation)) {
+      target.copy(position);
+      target.y = debugLedgeElevation;
+      return target;
+    }
+
+    const floorTile = this.getFloorTileAt(position, { allowClosest: true });
+    if (!floorTile) {
+      return null;
+    }
+
+    const floorY = this._getTileElevationAtPosition(floorTile, position);
+    const drop = (position.y ?? floorY) - floorY;
+    if (drop < -0.1 || drop > PLAYER_JUMP_OFF_LEDGE_MAX_DROP) {
+      return null;
+    }
+
+    target.copy(position);
+    target.y = floorY;
+    return this._isResolvedFloorPositionWalkable(target) ? target : null;
   }
 
   _isPositionInsideSolidZone(position) {
@@ -422,11 +466,30 @@ export class DungeonController {
   }
 
   _isPlayerPreservingVerticalMotion() {
-    return this.game.player?.animation?.isFullBodyActionActive?.() === true;
+    const player = this.game.player;
+    return player?.animation?.isFullBodyActionActive?.() === true
+      || player?.isJumpVerticalMotionActive?.() === true
+      || player?.isLedgeClinging?.() === true;
+  }
+
+  _isPlayerJumping() {
+    const player = this.game.player;
+    if (player?.isJumpAirborne?.()) {
+      return true;
+    }
+
+    const actionState = player?.animation?.actionState;
+    return actionState === 'neutralJump' || actionState === 'forwardJump';
   }
 
   _syncPositionToFloor(position, { preservePlayerAction = false } = {}) {
     if (preservePlayerAction && this._isPlayerPreservingVerticalMotion()) {
+      return;
+    }
+
+    const debugLedgeElevation = this.game.getDebugLedgeFloorElevation?.(position);
+    if (Number.isFinite(debugLedgeElevation)) {
+      position.y = debugLedgeElevation;
       return;
     }
 
@@ -1049,11 +1112,40 @@ export class DungeonController {
   _constrainPlayerToWalkable() {
     const playerRoot = this.game.player.root;
     const current = playerRoot.position;
+    const playerJumping = this._isPlayerJumping();
+
+    // Ledge actions intentionally pass through the obstacle footprint while
+    // the hands stay planted. Player owns the complete root path until the
+    // climb finishes on the walkable top surface.
+    if (this.game.player.isLedgeClinging?.()) {
+      this.lastSafePlayerPosition.copy(current);
+      return;
+    }
 
     if (this.isPositionWalkable(current)) {
       this._syncPositionToFloor(current, { preservePlayerAction: true });
       this.lastSafePlayerPosition.copy(current);
+      if (!playerJumping) {
+        this.pendingPlayerJumpOffLanding = null;
+      }
       return;
+    }
+
+    if (!playerJumping && this.pendingPlayerJumpOffLanding) {
+      current.copy(this.pendingPlayerJumpOffLanding);
+      this._syncPositionToFloor(current);
+      this.lastSafePlayerPosition.copy(current);
+      this.pendingPlayerJumpOffLanding = null;
+      return;
+    }
+
+    if (playerJumping) {
+      const jumpLanding = this._getWalkableJumpOffLanding(current, tempVectorB);
+      if (jumpLanding) {
+        this.pendingPlayerJumpOffLanding = jumpLanding.clone();
+        this.lastSafePlayerPosition.copy(current);
+        return;
+      }
     }
 
     tempVectorA.set(current.x, current.y, this.lastSafePlayerPosition.z);

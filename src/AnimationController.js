@@ -149,7 +149,13 @@ export class AnimationController {
     return 1 - THREE.MathUtils.clamp(this.actionTimer / this.actionDuration, 0, 1);
   }
 
-  update(dt, { moving = false, running = false, moveAmount = 1 } = {}) {
+  update(dt, {
+    moving = false,
+    running = false,
+    moveAmount = 1,
+    forcedState = null,
+    actionProgress = 0,
+  } = {}) {
     this.time += dt;
 
     if (this.dead) {
@@ -182,6 +188,17 @@ export class AnimationController {
         this.setState(moving ? (running ? 'running' : 'walking') : 'idle');
       }
 
+      return;
+    }
+
+    if (forcedState === 'neutralJump'
+      || forcedState === 'forwardJump'
+      || forcedState === 'fall'
+      || forcedState === 'land') {
+      this.setState(forcedState);
+      if (this.poseOutputEnabled) {
+        this._applyFullBodyActionPose(dt, forcedState, THREE.MathUtils.clamp(actionProgress ?? 0, 0, 1));
+      }
       return;
     }
 
@@ -398,8 +415,8 @@ export class AnimationController {
   _applyFullBodyActionPose(dt, state, progress) {
     if (state === 'dodgeRoll') {
       this._applyDodgeRollPose(dt, progress);
-    } else if (state === 'neutralJump' || state === 'forwardJump') {
-      this._applyJumpPose(dt, progress, state === 'forwardJump');
+    } else if (state === 'neutralJump' || state === 'forwardJump' || state === 'fall' || state === 'land') {
+      this._applyJumpPose(dt, progress, state === 'forwardJump', state);
     } else if (state === 'knockbackFall') {
       this._applyKnockbackFallPose(dt, progress);
     } else if (state === 'getUp') {
@@ -425,11 +442,17 @@ export class AnimationController {
     lerpRotation(this.joints.get('rightKnee'), 1.25 * tuck, 0, 0, alpha);
   }
 
-  _applyJumpPose(dt, progress, forward = false) {
+  _applyJumpPose(dt, progress, forward = false, state = forward ? 'forwardJump' : 'neutralJump') {
     const alpha = Math.min(1, dt * 18);
-    const crouch = 1 - THREE.MathUtils.smoothstep(progress, 0.02, 0.22);
-    const airborne = THREE.MathUtils.smoothstep(progress, 0.16, 0.45);
-    const landing = THREE.MathUtils.smoothstep(progress, 0.74, 1);
+    const crouch = state === 'land'
+      ? 1 - progress
+      : 1 - THREE.MathUtils.smoothstep(progress, 0.02, 0.22);
+    const airborne = state === 'fall'
+      ? 1
+      : THREE.MathUtils.smoothstep(progress, 0.16, 0.45);
+    const landing = state === 'land'
+      ? 1 - progress
+      : THREE.MathUtils.smoothstep(progress, 0.74, 1);
     const balance = Math.sin(progress * Math.PI);
     const lean = forward ? 0.18 : 0.04;
 

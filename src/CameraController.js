@@ -5,7 +5,12 @@ const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
+const tempVectorE = new THREE.Vector3();
 const AIM_RECENTER_RESPONSIVENESS = 18;
+const TANK_TURN_YAW_RESPONSIVENESS = 3.8;
+const TANK_TURN_FOLLOW_RESPONSIVENESS = 6.2;
+const VERTICAL_FOCUS_RESPONSIVENESS = 8.5;
+const ELEVATION_TRANSITION_RESPONSIVENESS = 5.2;
 
 function lerpAngle(current, target, alpha) {
   const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
@@ -36,6 +41,8 @@ export class CameraController {
     this.forceBodyFacingRecenter = false;
     this.movementForward = new THREE.Vector3(0, 0, 1);
     this.movementRight = new THREE.Vector3(1, 0, 0);
+    this.smoothedTargetY = 0;
+    this.hasSmoothedTarget = false;
   }
 
   getMovementBasis(fallbackForward = null) {
@@ -77,17 +84,15 @@ export class CameraController {
       : this._getPlayerFacingDirection(player);
 
     const targetYaw = Math.atan2(facingDirection.x, facingDirection.z);
-    if (tankTurnActive) {
-      this.yaw = targetYaw;
-    } else {
-      const responsiveness = forceBodyFacingRecenter
+    const responsiveness = tankTurnActive
+      ? TANK_TURN_YAW_RESPONSIVENESS
+      : forceBodyFacingRecenter
         ? AIM_RECENTER_RESPONSIVENESS
         : forcedRecentering
           ? 16
           : this.yawResponsiveness;
-      const yawAlpha = Math.min(1, dt * responsiveness);
-      this.yaw = lerpAngle(this.yaw, targetYaw, yawAlpha);
-    }
+    const yawAlpha = Math.min(1, dt * responsiveness);
+    this.yaw = lerpAngle(this.yaw, targetYaw, yawAlpha);
 
     this.recenterTimer = Math.max(0, this.recenterTimer - dt);
     if (this.recenterTimer <= 0) {
@@ -101,7 +106,26 @@ export class CameraController {
     this.lookAhead = THREE.MathUtils.lerp(this.lookAhead, this.baseLookAhead + (running ? 0.48 : 0), cameraEase);
 
     const forward = tempVectorD.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    const target = root.position;
+    const rawTarget = typeof player.getCameraFocusPosition === 'function'
+      ? player.getCameraFocusPosition(tempVectorE)
+      : tempVectorE.copy(root.position);
+    const target = tempVectorE.copy(rawTarget);
+    if (!this.hasSmoothedTarget || dt >= 1) {
+      this.smoothedTargetY = rawTarget.y;
+      this.hasSmoothedTarget = true;
+    } else {
+      const actionActive = Boolean(player.animation?.isFullBodyActionActive?.() || player.isLedgeClinging?.());
+      const verticalResponsiveness = actionActive
+        ? VERTICAL_FOCUS_RESPONSIVENESS
+        : ELEVATION_TRANSITION_RESPONSIVENESS;
+      this.smoothedTargetY = THREE.MathUtils.lerp(
+        this.smoothedTargetY,
+        rawTarget.y,
+        Math.min(1, dt * verticalResponsiveness),
+      );
+    }
+    target.y = this.smoothedTargetY;
+
     const desiredPosition = tempVectorB.copy(target)
       .addScaledVector(forward, -this.distance);
     desiredPosition.y += this.height;
@@ -110,13 +134,17 @@ export class CameraController {
       .addScaledVector(forward, this.lookAhead);
     lookTarget.y += this.lookHeight;
 
-    const followAlpha = tankTurnActive ? 1 : Math.min(1, dt * this.followResponsiveness);
+    const followResponsiveness = tankTurnActive
+      ? TANK_TURN_FOLLOW_RESPONSIVENESS
+      : this.followResponsiveness;
+    const followAlpha = Math.min(1, dt * followResponsiveness);
     this.camera.position.lerp(desiredPosition, followAlpha);
     this.camera.lookAt(lookTarget);
     this.syncMovementBasis(facingDirection);
   }
 
   snapTo(player) {
+    this.hasSmoothedTarget = false;
     this.update(1, player);
   }
 

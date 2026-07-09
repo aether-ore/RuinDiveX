@@ -44,11 +44,22 @@ const PLAYER_BASE_STATS = {
 const moveVector = new THREE.Vector2();
 const worldForward = new THREE.Vector3();
 const worldMoveDirection = new THREE.Vector3();
+const desiredMoveVelocity = new THREE.Vector3();
+const horizontalVelocityDelta = new THREE.Vector3();
+const zeroMoveVelocity = new THREE.Vector3();
 const movementBasisForward = new THREE.Vector3();
 const movementBasisRight = new THREE.Vector3();
+const ledgeMovementDirection = new THREE.Vector3();
+const ledgeFaceDirection = new THREE.Vector3();
+const ledgeAnchorPosition = new THREE.Vector3();
+const ledgeAnimatedWristPosition = new THREE.Vector3();
+const ledgeAnimatedRightWristPosition = new THREE.Vector3();
+const ledgeRootCorrection = new THREE.Vector3();
 const guardSourceDirection = new THREE.Vector3();
 const damageSourceDirection = new THREE.Vector3();
 const damageFacingRight = new THREE.Vector3();
+const modelGroundBounds = new THREE.Box3();
+const modelGroundPosition = new THREE.Vector3();
 const PLAYER_MODEL_PATH = './assets/models/';
 const PLAYER_MODEL_FBX = 'Mega Man Volnutt.fbx';
 const PLAYER_MODEL_TEXTURE = 'Mega Man Volnutt.png';
@@ -65,7 +76,16 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'crouchedSneakLeft', file: 'crouched sneaking left.fbx', label: 'Crouched Sneak Left', loop: true },
   { key: 'crouchedSneakRight', file: 'crouched sneaking right.fbx', label: 'Crouched Sneak Right', loop: true },
   { key: 'fallingIdle', file: 'falling idle.fbx', label: 'Falling Idle', loop: true },
+  { key: 'fallingToLanding', file: 'Falling To Landing.fbx', label: 'Falling To Landing', loop: false, lockRootY: true },
+  { key: 'forwardJumpLaunch', file: 'Jump Attack.fbx', label: 'Jump Attack Launch', loop: false, lockRootY: true, subclip: { startFrame: 0, endFrame: 33, fps: 30 } },
+  { key: 'forwardJumpFall', file: 'Jump Attack.fbx', label: 'Jump Attack Fall', loop: false, lockRootY: true, subclip: { startFrame: 33, endFrame: 53, fps: 30 } },
+  { key: 'forwardJumpLanding', file: 'Jump Attack.fbx', label: 'Jump Attack Landing', loop: false, lockRootY: true, subclip: { startFrame: 53, endFrame: 90, fps: 30 } },
   { key: 'fallingToRoll', file: 'falling to roll.fbx', label: 'Falling To Roll', loop: false },
+  { key: 'hangingIdle', file: 'Hanging Idle.fbx', label: 'Hanging Idle', loop: true, lockRootY: true },
+  { key: 'jumpingToHanging', file: 'Jumping To Hanging.fbx', label: 'Jumping To Hanging', loop: false, lockRootY: true },
+  { key: 'bracedToFreeHang', file: 'Braced To Free Hang.fbx', label: 'Braced To Free Hang', loop: false, lockRootY: true },
+  { key: 'freeHangToBraced', file: 'Free Hang To Braced.fbx', label: 'Free Hang To Braced', loop: false, lockRootY: true },
+  { key: 'ledgeClimbUp', file: 'Braced Hang To Crouch.fbx', label: 'Ledge Climb Up', loop: false, lockRootY: true, extractRootMotion: true },
   { key: 'dodgeRoll', file: 'Standing Dive Forward.fbx', label: 'Standing Dive Forward', loop: false },
   { key: 'hardLanding', file: 'hard landing.fbx', label: 'Hard Landing', loop: false },
   { key: 'idle', file: 'idle.fbx', label: 'Look Around Idle', loop: true, preserveRootMotion: true },
@@ -76,6 +96,7 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'sideIdle', file: 'Side Idle.fbx', label: 'Side Idle', loop: true, preserveRootMotion: true },
   { key: 'warriorIdle', file: 'Warrior Idle.fbx', label: 'Warrior Idle', loop: false, preserveRootMotion: true },
   { key: 'swordInwardSlash', file: 'Stable Sword Inward Slash.fbx', label: 'Sword Inward Slash', loop: false },
+  { key: 'neutralJump', file: 'Neutral Jump.fbx', label: 'Neutral Jump', loop: false, lockRootY: true },
   { key: 'jump', file: 'jump.fbx', label: 'Jump', loop: false },
   { key: 'jumpingUp', file: 'jumping up.fbx', label: 'Jumping Up', loop: false },
   { key: 'leftCoverSneak', file: 'left cover sneak.fbx', label: 'Left Cover Sneak', loop: true },
@@ -124,8 +145,30 @@ const DODGE_ROLL_DISTANCE = 8.4;
 const DODGE_ROLL_DURATION = 0.86;
 const DODGE_ROLL_AIR_LIFT = 0.52;
 const DODGE_ROLL_RECOVERY_SINK = 0.14;
-const FORWARD_JUMP_DISTANCE = 1.65;
-const JUMP_DURATION = 0.82;
+const FORWARD_JUMP_DISTANCE = 1.9;
+const JUMP_DURATION = 0.9;
+const NEUTRAL_JUMP_DURATION = 1.75;
+const NEUTRAL_JUMP_LAUNCH_PROGRESS = 0.6;
+const NEUTRAL_JUMP_VISUAL_LIFT = 2.05;
+const FORWARD_JUMP_VISUAL_LIFT = 1.85;
+const FORWARD_JUMP_FALL_ANIMATION_START_PROGRESS = 0.52;
+const NEUTRAL_JUMP_FALL_ANIMATION_START_PROGRESS = 0.78;
+const JUMP_LANDING_VISUAL_HOLD_DURATION = 1.08;
+const LEDGE_JUMP_TO_HANG_DURATION = 1.5;
+const LEDGE_SETTLE_TO_FREE_HANG_DURATION = 0.917;
+const LEDGE_PREPARE_CLIMB_DURATION = 1.125;
+const LEDGE_CLIMB_UP_DURATION = 1.125;
+// The climb clip keeps both hands planted through its pull and push-off. Keep
+// that contact authored in world space, then release for the final crouch.
+const LEDGE_CLIMB_HAND_RELEASE_PROGRESS = 0.82;
+const LEDGE_CLIMB_HAND_RELEASE_END_PROGRESS = 0.94;
+const LEDGE_TOWARD_INPUT_DOT = 0.38;
+// These values define the authored hand contact, not a visual root offset. A
+// small outward bias keeps the wrist joints on the player-facing side of the
+// ledge while the hand meshes still wrap over its top edge.
+const LEDGE_HAND_OUTWARD_OFFSET = 0.055;
+const LEDGE_FREE_HANG_ROOT_OUTWARD_OFFSET = 0.34;
+const LEDGE_FREE_HANG_ROOT_VERTICAL_OFFSET = 0.8;
 const HEAVY_HIT_HEALTH_FRACTION = 0.16;
 const HEAVY_HIT_MIN_DAMAGE = 18;
 const KNOCKBACK_FALL_DISTANCE = 1.55;
@@ -136,6 +179,84 @@ const TANK_TURN_RATE = 2.7;
 const TANK_TURN_INPUT_THRESHOLD = 0.35;
 const BUSTER_SLOT_INDEX = 0;
 const UTILITY_ARM_SLOT_INDEX = 3;
+const MML_JUMP_STATES = Object.freeze({
+  Grounded: 'Grounded',
+  Rising: 'Rising',
+  Falling: 'Falling',
+  LandRecovery: 'LandRecovery',
+});
+const DEFAULT_MML_JUMP_SETTINGS = Object.freeze({
+  // Low fixed height is the core Mega Man Legends-like commitment: the button never changes the apex.
+  jumpHeight: 1.55,
+  // Short time to apex makes the hop snappy without becoming a floaty modern platformer jump.
+  jumpTimeToApex: 0.33,
+  // Slightly stronger fall gravity brings Volnutt back down with that PS1 action-adventure weight.
+  fallGravityMultiplier: 1.22,
+  // Forward speed stays modest so the preserved takeoff velocity feels like a committed hop.
+  forwardSpeed: 4.35,
+  // Ground acceleration/deceleration shape the planted tank-control feel before takeoff.
+  groundAcceleration: 28,
+  groundDeceleration: 22,
+  // Very low air acceleration prevents instant strafing once the jump is committed.
+  airAcceleration: 1.2,
+  // Near-zero reversal response keeps airborne turns weak instead of modern and reactive.
+  airTurnMultiplier: 0.1,
+  // Landing recovery and damping make the landing read as a committed action.
+  landingRecoveryTime: 0.11,
+  landingHorizontalDamping: 0.65,
+  // These are intentionally tiny: forgiving input without making the hop feel elastic.
+  jumpBufferTime: 0.05,
+  coyoteTime: 0.03,
+  // Global tuning scalar for tests or upgrades while preserving fixed-height button behavior.
+  jumpHeightMultiplier: 1,
+});
+const PHYSICAL_JUMP_RISING_CLIP_END = 0.52;
+const PHYSICAL_JUMP_LANDING_CLIP_KEY = 'fallingToLanding';
+const GROUNDED_STEP_DOWN_SNAP_HEIGHT = 0.24;
+
+function getJumpVisualLift(progress = 0, forward = false) {
+  const p = THREE.MathUtils.clamp(progress, 0, 1);
+
+  if (forward) {
+    return Math.sin(p * Math.PI) * FORWARD_JUMP_VISUAL_LIFT;
+  }
+
+  if (p <= NEUTRAL_JUMP_LAUNCH_PROGRESS) {
+    return 0;
+  }
+
+  const arcProgress = THREE.MathUtils.clamp(
+    (p - NEUTRAL_JUMP_LAUNCH_PROGRESS) / (1 - NEUTRAL_JUMP_LAUNCH_PROGRESS),
+    0,
+    1,
+  );
+  const launch = THREE.MathUtils.smoothstep(arcProgress, 0, 0.14);
+  const airborneArc = Math.sin(arcProgress * Math.PI);
+  const landing = 1 - THREE.MathUtils.smoothstep(arcProgress, 0.72, 1);
+  return Math.max(0, airborneArc * launch * landing) * NEUTRAL_JUMP_VISUAL_LIFT;
+}
+
+function getForwardJumpTravelProgress(progress = 0) {
+  const p = THREE.MathUtils.clamp(progress, 0, 1);
+  return (1 - Math.cos(p * Math.PI)) * 0.5;
+}
+
+function getJumpLandingCompression(progress = 0, forward = false) {
+  const p = THREE.MathUtils.clamp(progress, 0, 1);
+  return THREE.MathUtils.smoothstep(p, forward ? 0.78 : 0.84, 1) * (forward ? 0.06 : 0.08);
+}
+
+function getJumpFallAnimationStartProgress(animationState) {
+  if (animationState === 'forwardJump') {
+    return FORWARD_JUMP_FALL_ANIMATION_START_PROGRESS;
+  }
+
+  if (animationState === 'neutralJump') {
+    return NEUTRAL_JUMP_FALL_ANIMATION_START_PROGRESS;
+  }
+
+  return Infinity;
+}
 
 function isArmWeaponItem(item) {
   return item?.slot === 'weapon' && item?.category === 'Arm Weapon';
@@ -207,6 +328,11 @@ export class Player {
     this._fbxAnimationLibraryLoaded = false;
     this._busterArmLoading = false;
     this._busterArmLoaded = false;
+    this._jumpLandingVisualTimer = 0;
+    this._jumpLandingVisualState = null;
+    this._jumpLandingVisualClipKey = null;
+    this._lastExternalModelGrounding = null;
+    this.ledgeCling = null;
     this._attackWeaponKind = null;
     this._bracedFireWeaponKey = null;
     this.bracedFireDirection = new THREE.Vector3(0, 0, 1);
@@ -217,6 +343,20 @@ export class Player {
     this.dodgeDirection = new THREE.Vector3(0, 0, 1);
     this.dodgeRollYaw = 0;
     this.jumpDirection = new THREE.Vector3(0, 0, 1);
+    this.jumpStartY = 0;
+    this.jumpSettings = { ...DEFAULT_MML_JUMP_SETTINGS };
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this.velocity = new THREE.Vector3();
+    this.takeoffHorizontalVelocity = new THREE.Vector3();
+    this._jumpBufferTimer = 0;
+    this._coyoteTimer = this.jumpSettings.coyoteTime;
+    this._landingRecoveryTimer = 0;
+    this._jumpAirTimer = 0;
+    this._jumpKind = 'neutralJump';
+    this._jumpGroundY = this.root.position.y;
+    this._forwardJumpTravelProgress = 0;
+    this.jumpLedgeClingResolver = null;
+    this.jumpPlatformLandingResolver = null;
     this.knockbackFallDirection = new THREE.Vector3(0, 0, -1);
     this.damageHitLocalDirection = new THREE.Vector3(0, 0, 1);
     this.isRunning = false;
@@ -261,17 +401,44 @@ export class Player {
     this._updateMovementLockState(dt);
     this._updateAttackFacingState(dt);
 
+    if (this.isLedgeClinging()) {
+      this._updateLedgeClingState(dt, input, movementOptions);
+      return;
+    }
+
     if (this.animation.isFullBodyActionActive?.()) {
+      const actionStateBeforeUpdate = this.animation.actionState;
       this.animation.update(dt, {
         moving: false,
         running: false,
         moveAmount: 0,
       });
-      this._updateFullBodyActionMotion(dt, arenaRadius);
+      const completedJumpThisFrame = (actionStateBeforeUpdate === 'neutralJump' || actionStateBeforeUpdate === 'forwardJump')
+        && !this.animation.actionState;
+      const completedActionState = completedJumpThisFrame ? actionStateBeforeUpdate : null;
+      const completedActionProgress = completedJumpThisFrame ? 1 : null;
+      if (completedJumpThisFrame) {
+        this._jumpLandingVisualState = 'land';
+        this._jumpLandingVisualTimer = JUMP_LANDING_VISUAL_HOLD_DURATION;
+        this._jumpLandingVisualClipKey = completedActionState === 'forwardJump'
+          ? 'forwardJumpLanding'
+          : null;
+      }
+      this._updateFullBodyActionMotion(dt, arenaRadius, completedActionState, completedActionProgress);
+      if (this.isLedgeClinging()) {
+        this._updateLedgeClingState(dt, input, movementOptions);
+        return;
+      }
+      if (completedJumpThisFrame) {
+        this._tryResolveJumpPlatformLanding(completedActionState);
+      }
       this.updateWeaponVisualState();
       this._updateExternalModelMotion(dt, false, 0, false, false, {
+        animationState: completedJumpThisFrame ? 'land' : undefined,
+        actionProgress: completedJumpThisFrame ? 0 : undefined,
         lockOnActive: false,
         strafeAmount: 0,
+        clipKey: completedJumpThisFrame ? this._jumpLandingVisualClipKey : null,
       });
       this.tankTurnActive = false;
       this.tankTurnAmount = 0;
@@ -292,6 +459,10 @@ export class Player {
     const rawLateralInput = moveVector.x;
     const rawForwardInput = moveVector.y;
     const moving = moveVector.lengthSq() > 0;
+    if (moving && this._jumpLandingVisualTimer > 0) {
+      this._cancelJumpLandingVisual({ restoreMovement: true });
+    }
+
     const attackFacing = this.attackFacingTimer > 0 && this.attackFacingDirection.lengthSq() > 0.0001;
     const lateralTurnAttempt = Math.abs(rawLateralInput) > TANK_TURN_INPUT_THRESHOLD;
     const projectileAimInputHeld = movementOptions.projectileAimInputHeld === true;
@@ -301,16 +472,21 @@ export class Player {
     }
 
     const bracedAiming = this.bracedFireTimer > 0 && this.bracedFireDirection.lengthSq() > 0.0001;
+    const jumpAirborne = this.isJumpAirborne();
+    const landingRecovering = this.jumpState === MML_JUMP_STATES.LandRecovery;
     const tankTurnInput = !lockOnActive ? THREE.MathUtils.clamp(rawLateralInput, -1, 1) : 0;
     const tankTurnActive = !lockOnActive
       && !attackFacing
       && !bracedAiming
-      && lateralTurnAttempt;
+      && lateralTurnAttempt
+      && !jumpAirborne
+      && !landingRecovering;
     let translating = false;
     const running = moving && (input.has('ShiftLeft') || input.has('ShiftRight'));
     let moveAmount = 0;
     let movingBackward = false;
     let strafeAmount = 0;
+    desiredMoveVelocity.set(0, 0, 0);
 
     if (moving) {
       moveVector.normalize();
@@ -319,7 +495,9 @@ export class Player {
       strafeAmount = lockOnActive ? THREE.MathUtils.clamp(rawLateralInput, -1, 1) : 0;
       moveAmount = translating && running ? PLAYER_RUN_ANIMATION_AMOUNT : 1;
 
-      if (lockOnActive) {
+      if (jumpAirborne) {
+        this._resolveMovementDirection(moveVector, movementOptions);
+      } else if (lockOnActive) {
         this._resolveMovementDirection(moveVector, movementOptions);
       } else {
         if (tankTurnActive) {
@@ -337,25 +515,38 @@ export class Player {
 
       const guardMoveMultiplier = this.isShieldGuarding() ? 0.72 : 1;
       const runMultiplier = running ? PLAYER_RUN_SPEED_MULTIPLIER : 1;
-      const speed = this.stats.moveSpeed * runMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
-      if (translating) {
-        this.root.position.addScaledVector(worldMoveDirection, speed * dt);
+      const speed = this._getTunedForwardSpeed() * runMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
+      if (jumpAirborne) {
+        desiredMoveVelocity.copy(worldMoveDirection).multiplyScalar(speed);
+      } else if (translating && !landingRecovering) {
+        desiredMoveVelocity.copy(worldMoveDirection).multiplyScalar(speed);
       }
 
-      this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -arenaRadius, arenaRadius);
-      this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -arenaRadius, arenaRadius);
-
-      if (lockOnActive) {
+      if (lockOnActive && !jumpAirborne) {
         this._resolveLockOnFacingDirection(lockOnPosition);
       }
-    } else if (lockOnActive) {
+    } else if (lockOnActive && !jumpAirborne) {
       this._resolveLockOnFacingDirection(lockOnPosition);
     }
 
     const backpedaling = movingBackward || (lockOnActive && moveVector.y < -0.35) || (bracedAiming && this.bracedBackpedalTimer > 0 && moving);
     const tankTurnInPlace = tankTurnActive && !translating;
     const tankTurnTranslating = tankTurnActive && translating;
-    const moveAnimationAmount = (translating || tankTurnInPlace) ? moveAmount * this.movementLockMultiplier : 0;
+    const jumpMotionResult = this._updatePhysicalJumpAndMovement(dt, desiredMoveVelocity, {
+      arenaRadius,
+      movementOptions,
+    });
+    if (jumpMotionResult === 'ledgeCling') {
+      this._updateLedgeClingState(dt, input, movementOptions);
+      return;
+    }
+
+    const jumpAnimationState = this._getPhysicalJumpAnimationState();
+    const jumpAnimationProgress = this._getPhysicalJumpAnimationProgress();
+    const jumpDrivenAnimation = Boolean(jumpAnimationState);
+    const moveAnimationAmount = (!jumpDrivenAnimation && (translating || tankTurnInPlace))
+      ? moveAmount * this.movementLockMultiplier
+      : 0;
     const visiblyMoving = moveAnimationAmount > 0.05;
     const visiblyRunning = visiblyMoving
       && translating
@@ -369,25 +560,53 @@ export class Player {
     this.tankTurnTranslating = tankTurnTranslating;
     this.isRunning = visiblyRunning;
 
-    if (attackFacing) {
+    const currentlyAirborne = this.isJumpAirborne();
+    const currentlyLandingRecovering = this.jumpState === MML_JUMP_STATES.LandRecovery;
+    if (!currentlyAirborne && !currentlyLandingRecovering && attackFacing) {
       this.faceDirection(this.attackFacingDirection);
-    } else if (bracedAiming) {
+    } else if (!currentlyAirborne && !currentlyLandingRecovering && bracedAiming) {
       this.faceDirection(this.bracedFireDirection);
-    } else if (lockOnActive) {
+    } else if (!currentlyAirborne && !currentlyLandingRecovering && lockOnActive) {
       this.faceDirection(this.lastMoveDirection);
     }
 
     this.animation.update(dt, {
-      moving: visiblyMoving,
-      running: visiblyRunning,
-      moveAmount: moveAnimationAmount,
+      moving: jumpDrivenAnimation ? false : visiblyMoving,
+      running: jumpDrivenAnimation ? false : visiblyRunning,
+      moveAmount: jumpDrivenAnimation ? 0 : moveAnimationAmount,
+      forcedState: jumpAnimationState,
+      actionProgress: jumpAnimationProgress,
     });
     this.updateWeaponVisualState();
-    this._updateExternalModelMotion(dt, visiblyMoving, moveAnimationAmount, backpedaling, visiblyRunning, {
+    const landingVisualState = this._jumpLandingVisualTimer > 0
+      ? this._jumpLandingVisualState
+      : null;
+    const physicalLandingClipKey = jumpAnimationState === 'land'
+      ? (this._jumpKind === 'forwardJump' ? 'forwardJumpLanding' : PHYSICAL_JUMP_LANDING_CLIP_KEY)
+      : null;
+    const externalMoving = (jumpDrivenAnimation || landingVisualState) ? false : visiblyMoving;
+    const externalMoveAmount = (jumpDrivenAnimation || landingVisualState) ? 0 : moveAnimationAmount;
+    const externalBackpedaling = (jumpDrivenAnimation || landingVisualState) ? false : backpedaling;
+    const externalRunning = (jumpDrivenAnimation || landingVisualState) ? false : visiblyRunning;
+    const landingVisualProgress = landingVisualState ? this._getJumpLandingVisualProgress() : null;
+
+    this._updateExternalModelMotion(dt, externalMoving, externalMoveAmount, externalBackpedaling, externalRunning, {
+      animationState: jumpAnimationState ?? landingVisualState ?? undefined,
+      actionProgress: jumpAnimationProgress ?? landingVisualProgress ?? undefined,
       lockOnActive,
       strafeAmount,
-      turnAmount: freeTurnAmount,
+      turnAmount: jumpDrivenAnimation ? 0 : freeTurnAmount,
+      clipKey: physicalLandingClipKey ?? (landingVisualState ? this._jumpLandingVisualClipKey : null),
+      physicalJump: jumpDrivenAnimation,
     });
+
+    if (this._jumpLandingVisualTimer > 0) {
+      this._jumpLandingVisualTimer = Math.max(0, this._jumpLandingVisualTimer - dt);
+      if (this._jumpLandingVisualTimer <= 0) {
+        this._jumpLandingVisualState = null;
+        this._jumpLandingVisualClipKey = null;
+      }
+    }
   }
 
   _resolveLockOnFacingDirection(targetPosition) {
@@ -477,6 +696,308 @@ export class Player {
     }
   }
 
+  isJumpAirborne() {
+    return this.jumpState === MML_JUMP_STATES.Rising
+      || this.jumpState === MML_JUMP_STATES.Falling;
+  }
+
+  isPhysicalJumpActive() {
+    return this.isJumpAirborne() || this.jumpState === MML_JUMP_STATES.LandRecovery;
+  }
+
+  isJumpVerticalMotionActive() {
+    return this.isJumpAirborne();
+  }
+
+  _getJumpSetting(key, fallback = 0) {
+    const value = this.jumpSettings?.[key];
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  _getTunedForwardSpeed() {
+    const statScale = PLAYER_BASE_MOVE_SPEED > 0
+      ? Math.max(0.01, this.stats.moveSpeed / PLAYER_BASE_MOVE_SPEED)
+      : 1;
+    return Math.max(0, this._getJumpSetting('forwardSpeed', DEFAULT_MML_JUMP_SETTINGS.forwardSpeed)) * statScale;
+  }
+
+  _getConfiguredJumpHeight() {
+    const height = this._getJumpSetting('jumpHeight', DEFAULT_MML_JUMP_SETTINGS.jumpHeight);
+    const multiplier = this._getJumpSetting('jumpHeightMultiplier', DEFAULT_MML_JUMP_SETTINGS.jumpHeightMultiplier);
+    return Math.max(0.05, height * multiplier);
+  }
+
+  _getJumpTimeToApex() {
+    return Math.max(0.05, this._getJumpSetting('jumpTimeToApex', DEFAULT_MML_JUMP_SETTINGS.jumpTimeToApex));
+  }
+
+  _getJumpInitialVelocity() {
+    return (2 * this._getConfiguredJumpHeight()) / this._getJumpTimeToApex();
+  }
+
+  _getJumpGravity() {
+    const timeToApex = this._getJumpTimeToApex();
+    return -(2 * this._getConfiguredJumpHeight()) / (timeToApex * timeToApex);
+  }
+
+  _getFallGravityMultiplier() {
+    return Math.max(0.01, this._getJumpSetting('fallGravityMultiplier', DEFAULT_MML_JUMP_SETTINGS.fallGravityMultiplier));
+  }
+
+  _getEstimatedJumpAirTime() {
+    const timeToApex = this._getJumpTimeToApex();
+    return timeToApex + (timeToApex / Math.sqrt(this._getFallGravityMultiplier()));
+  }
+
+  _resolvePhysicalGroundY(movementOptions = {}) {
+    const groundY = movementOptions.groundY;
+    if (Number.isFinite(groundY)) {
+      return groundY;
+    }
+
+    return this.isJumpAirborne() ? this._jumpGroundY : this.root.position.y;
+  }
+
+  _canStartBufferedPhysicalJump() {
+    if (this._jumpBufferTimer <= 0 || this.dead || this.isLedgeClinging()) {
+      return false;
+    }
+
+    if (this.animation?.actionState || this.animation?.hurtTimer > 0 || this.animation?.attackTimer > 0) {
+      return false;
+    }
+
+    if (this.jumpState === MML_JUMP_STATES.LandRecovery) {
+      return false;
+    }
+
+    return this.jumpState === MML_JUMP_STATES.Grounded || this._coyoteTimer > 0;
+  }
+
+  _startPhysicalJump() {
+    this._jumpBufferTimer = 0;
+    this._coyoteTimer = 0;
+    this._landingRecoveryTimer = 0;
+    this.jumpStartY = this.root.position.y;
+    this._jumpGroundY = this.root.position.y;
+    this._jumpAirTimer = 0;
+    this.velocity.y = this._getJumpInitialVelocity();
+    this.takeoffHorizontalVelocity.set(this.velocity.x, 0, this.velocity.z);
+
+    if (this.takeoffHorizontalVelocity.lengthSq() > 0.0025) {
+      this.jumpDirection.copy(this.takeoffHorizontalVelocity).normalize();
+      this._jumpKind = this.takeoffHorizontalVelocity.lengthSq() > 0.16 ? 'forwardJump' : 'neutralJump';
+    } else {
+      this.jumpDirection.copy(this.lastMoveDirection);
+      this._jumpKind = 'neutralJump';
+    }
+
+    this.jumpState = MML_JUMP_STATES.Rising;
+    this._jumpLandingVisualTimer = 0;
+    this._jumpLandingVisualState = null;
+    this._jumpLandingVisualClipKey = null;
+  }
+
+  _approachHorizontalVelocity(targetVelocity, acceleration, dt) {
+    horizontalVelocityDelta.set(
+      targetVelocity.x - this.velocity.x,
+      0,
+      targetVelocity.z - this.velocity.z,
+    );
+
+    const deltaLength = horizontalVelocityDelta.length();
+    const maxDelta = Math.max(0, acceleration) * dt;
+    if (deltaLength <= 0.0001 || maxDelta <= 0) {
+      return;
+    }
+
+    if (deltaLength <= maxDelta) {
+      this.velocity.x = targetVelocity.x;
+      this.velocity.z = targetVelocity.z;
+      return;
+    }
+
+    horizontalVelocityDelta.multiplyScalar(maxDelta / deltaLength);
+    this.velocity.x += horizontalVelocityDelta.x;
+    this.velocity.z += horizontalVelocityDelta.z;
+  }
+
+  _applyGroundHorizontalControl(targetVelocity, dt) {
+    const targetSpeedSq = targetVelocity.x * targetVelocity.x + targetVelocity.z * targetVelocity.z;
+    const acceleration = targetSpeedSq > 0.0001
+      ? this._getJumpSetting('groundAcceleration', DEFAULT_MML_JUMP_SETTINGS.groundAcceleration)
+      : this._getJumpSetting('groundDeceleration', DEFAULT_MML_JUMP_SETTINGS.groundDeceleration);
+    this._approachHorizontalVelocity(targetVelocity, acceleration, dt);
+  }
+
+  _applyAirHorizontalControl(targetVelocity, dt) {
+    const targetSpeedSq = targetVelocity.x * targetVelocity.x + targetVelocity.z * targetVelocity.z;
+    if (targetSpeedSq <= 0.0001) {
+      return;
+    }
+
+    let acceleration = this._getJumpSetting('airAcceleration', DEFAULT_MML_JUMP_SETTINGS.airAcceleration);
+    const currentSpeedSq = this.velocity.x * this.velocity.x + this.velocity.z * this.velocity.z;
+    if (currentSpeedSq > 0.0001) {
+      const dot = (this.velocity.x * targetVelocity.x) + (this.velocity.z * targetVelocity.z);
+      if (dot < 0) {
+        acceleration *= this._getJumpSetting('airTurnMultiplier', DEFAULT_MML_JUMP_SETTINGS.airTurnMultiplier);
+      }
+    }
+
+    this._approachHorizontalVelocity(targetVelocity, acceleration, dt);
+  }
+
+  _updatePhysicalJumpAndMovement(dt, targetVelocity = desiredMoveVelocity, {
+    arenaRadius = 32,
+    movementOptions = {},
+  } = {}) {
+    const groundY = this._resolvePhysicalGroundY(movementOptions);
+    const steppedOffGround = this.jumpState === MML_JUMP_STATES.Grounded
+      && this.root.position.y - groundY > GROUNDED_STEP_DOWN_SNAP_HEIGHT;
+    if (steppedOffGround) {
+      this.jumpState = MML_JUMP_STATES.Falling;
+      this._coyoteTimer = Math.max(
+        this._coyoteTimer,
+        this._getJumpSetting('coyoteTime', DEFAULT_MML_JUMP_SETTINGS.coyoteTime),
+      );
+      this.velocity.y = Math.min(0, this.velocity.y);
+      this._jumpAirTimer = 0;
+      this.jumpStartY = this.root.position.y;
+      if (this.velocity.x * this.velocity.x + this.velocity.z * this.velocity.z > 0.0025) {
+        this.jumpDirection.set(this.velocity.x, 0, this.velocity.z).normalize();
+      }
+    }
+
+    if (this.jumpState === MML_JUMP_STATES.LandRecovery) {
+      this._landingRecoveryTimer = Math.max(0, this._landingRecoveryTimer - dt);
+      if (this._landingRecoveryTimer <= 0) {
+        this.jumpState = MML_JUMP_STATES.Grounded;
+      }
+    }
+
+    if (this.jumpState === MML_JUMP_STATES.Grounded || this.jumpState === MML_JUMP_STATES.LandRecovery) {
+      this._coyoteTimer = this._getJumpSetting('coyoteTime', DEFAULT_MML_JUMP_SETTINGS.coyoteTime);
+      this._jumpGroundY = groundY;
+      this.velocity.y = 0;
+      this.root.position.y = groundY;
+    } else {
+      this._coyoteTimer = steppedOffGround ? this._coyoteTimer : Math.max(0, this._coyoteTimer - dt);
+    }
+
+    if (this._canStartBufferedPhysicalJump()) {
+      this._startPhysicalJump();
+    }
+
+    const airborne = this.isJumpAirborne();
+    if (airborne) {
+      this._applyAirHorizontalControl(targetVelocity, dt);
+      const motionResult = this._integrateAirborneJump(dt, groundY);
+      if (motionResult === 'ledgeCling') {
+        return motionResult;
+      }
+    } else {
+      const groundedTargetVelocity = this.jumpState === MML_JUMP_STATES.LandRecovery
+        ? zeroMoveVelocity
+        : targetVelocity;
+      this._applyGroundHorizontalControl(groundedTargetVelocity, dt);
+      this.root.position.addScaledVector(this.velocity, dt);
+      this.root.position.y = groundY;
+    }
+
+    this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -arenaRadius, arenaRadius);
+    this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -arenaRadius, arenaRadius);
+    this._jumpBufferTimer = Math.max(0, this._jumpBufferTimer - dt);
+    return null;
+  }
+
+  _integrateAirborneJump(dt, groundY) {
+    const gravity = this._getJumpGravity() * (this.velocity.y <= 0 ? this._getFallGravityMultiplier() : 1);
+    this.root.position.x += this.velocity.x * dt;
+    this.root.position.z += this.velocity.z * dt;
+    this.root.position.y += (this.velocity.y * dt) + (0.5 * gravity * dt * dt);
+    this.velocity.y += gravity * dt;
+    this._jumpAirTimer += dt;
+
+    if (this.jumpState === MML_JUMP_STATES.Rising && this.velocity.y <= 0) {
+      this.jumpState = MML_JUMP_STATES.Falling;
+    }
+
+    if (this._tryStartJumpLedgeCling(this._jumpKind, this._getPhysicalJumpAnimationProgress())) {
+      this.velocity.set(0, 0, 0);
+      this.jumpState = MML_JUMP_STATES.Grounded;
+      this._jumpBufferTimer = 0;
+      return 'ledgeCling';
+    }
+
+    let resolvedGroundY = groundY;
+    if (this.jumpState === MML_JUMP_STATES.Falling
+      && this.velocity.y <= 0
+      && this._tryResolveJumpPlatformLanding(this._jumpKind)) {
+      resolvedGroundY = this.root.position.y;
+    }
+
+    if (this.velocity.y <= 0 && this.root.position.y <= resolvedGroundY) {
+      this._landPhysicalJump(resolvedGroundY);
+    }
+
+    return null;
+  }
+
+  _landPhysicalJump(groundY) {
+    const resolvedGroundY = Number.isFinite(groundY) ? groundY : this._jumpGroundY;
+    const damping = THREE.MathUtils.clamp(
+      this._getJumpSetting('landingHorizontalDamping', DEFAULT_MML_JUMP_SETTINGS.landingHorizontalDamping),
+      0,
+      1,
+    );
+    this.root.position.y = resolvedGroundY;
+    this.velocity.y = 0;
+    this.velocity.x *= damping;
+    this.velocity.z *= damping;
+    this._jumpGroundY = resolvedGroundY;
+    this._landingRecoveryTimer = Math.max(
+      0,
+      this._getJumpSetting('landingRecoveryTime', DEFAULT_MML_JUMP_SETTINGS.landingRecoveryTime),
+    );
+    this.jumpState = this._landingRecoveryTimer > 0
+      ? MML_JUMP_STATES.LandRecovery
+      : MML_JUMP_STATES.Grounded;
+    this.modelRoot.position.y = 0;
+  }
+
+  _getPhysicalJumpAnimationState() {
+    if (this.jumpState === MML_JUMP_STATES.Rising) {
+      return this._jumpKind === 'forwardJump' ? 'forwardJump' : 'neutralJump';
+    }
+
+    if (this.jumpState === MML_JUMP_STATES.Falling) {
+      return 'fall';
+    }
+
+    if (this.jumpState === MML_JUMP_STATES.LandRecovery) {
+      return 'land';
+    }
+
+    return null;
+  }
+
+  _getPhysicalJumpAnimationProgress() {
+    if (this.jumpState === MML_JUMP_STATES.LandRecovery) {
+      const duration = Math.max(0.001, this._getJumpSetting('landingRecoveryTime', DEFAULT_MML_JUMP_SETTINGS.landingRecoveryTime));
+      return THREE.MathUtils.clamp(1 - (this._landingRecoveryTimer / duration), 0, 1);
+    }
+
+    if (!this.isJumpAirborne()) {
+      return null;
+    }
+
+    const progress = THREE.MathUtils.clamp(this._jumpAirTimer / Math.max(0.001, this._getEstimatedJumpAirTime()), 0, 1);
+    return this.jumpState === MML_JUMP_STATES.Rising
+      ? Math.min(progress, PHYSICAL_JUMP_RISING_CLIP_END)
+      : progress;
+  }
+
   tryDodgeRoll(input = new Set(), movementOptions = {}) {
     if (!this.animation.playDodgeRoll?.(DODGE_ROLL_DURATION)) {
       return false;
@@ -508,21 +1029,45 @@ export class Player {
   }
 
   tryJump(input = new Set(), movementOptions = {}) {
-    this._resolveActionDirection(input, movementOptions, this.jumpDirection);
-    const moving = this._hasMovementInput(input);
-    const jumpKind = moving ? 'forwardJump' : 'neutralJump';
+    if (this.isLedgeClinging()) {
+      return this._tryLedgeJump(input, movementOptions);
+    }
 
-    if (!this.animation.playJump?.(jumpKind, JUMP_DURATION)) {
+    this._resolveActionDirection(input, movementOptions, this.jumpDirection);
+
+    if (this.dead || this.animation?.actionState || this.animation?.hurtTimer > 0 || this.animation?.attackTimer > 0) {
       return false;
     }
 
-    if (moving) {
-      this.faceDirection(this.jumpDirection);
+    this._jumpBufferTimer = Math.max(
+      this._jumpBufferTimer,
+      this._getJumpSetting('jumpBufferTime', DEFAULT_MML_JUMP_SETTINGS.jumpBufferTime),
+    );
+
+    if (this._canStartBufferedPhysicalJump()) {
+      this._startPhysicalJump();
     }
 
-    this.movementLockTimer = Math.max(this.movementLockTimer, JUMP_DURATION * 0.55);
-    this.movementLockMultiplier = Math.min(this.movementLockMultiplier, moving ? 0.35 : 0.18);
     return true;
+  }
+
+  getJumpReachHeight() {
+    return this._getConfiguredJumpHeight();
+  }
+
+  getCameraFocusPosition(target = new THREE.Vector3()) {
+    target.copy(this.root.position);
+
+    const actionState = this.animation?.actionState;
+    const includeVisualLift = actionState === 'neutralJump'
+      || actionState === 'forwardJump'
+      || actionState === 'dodgeRoll'
+      || this._jumpLandingVisualTimer > 0;
+    if (includeVisualLift) {
+      target.y += Math.max(0, this.modelRoot?.position?.y ?? 0);
+    }
+
+    return target;
   }
 
   previewExternalAnimation(dt, {
@@ -641,15 +1186,20 @@ export class Player {
     return target;
   }
 
-  _updateFullBodyActionMotion(dt, arenaRadius = 32) {
-    const state = this.animation.state;
-    const progress = this.animation.getActionProgress?.() ?? 0;
+  _updateFullBodyActionMotion(dt, arenaRadius = 32, stateOverride = null, progressOverride = null) {
+    const state = stateOverride ?? this.animation.state;
+    const progress = Number.isFinite(progressOverride)
+      ? THREE.MathUtils.clamp(progressOverride, 0, 1)
+      : this.animation.getActionProgress?.() ?? 0;
+    const ledgeClingStarted = this._tryStartJumpLedgeCling(state, progress);
 
-    if (state === 'dodgeRoll') {
+    if (ledgeClingStarted) {
+      this.movementLockMultiplier = 0;
+    } else if (state === 'dodgeRoll') {
       this.root.rotation.y = this.dodgeRollYaw;
       this._applyActionDisplacement(this.dodgeDirection, DODGE_ROLL_DISTANCE, DODGE_ROLL_DURATION, progress, dt);
     } else if (state === 'forwardJump') {
-      this._applyActionDisplacement(this.jumpDirection, FORWARD_JUMP_DISTANCE, JUMP_DURATION, progress, dt);
+      this._applyForwardJumpDisplacement(this.jumpDirection, FORWARD_JUMP_DISTANCE, progress);
     } else if (state === 'knockbackFall') {
       const knockbackProgress = THREE.MathUtils.clamp(progress / 0.62, 0, 1);
       this._applyActionDisplacement(
@@ -665,6 +1215,478 @@ export class Player {
     this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -arenaRadius, arenaRadius);
   }
 
+  _tryStartJumpLedgeCling(state, progress = 0) {
+    if (state !== 'neutralJump' && state !== 'forwardJump') {
+      return false;
+    }
+
+    if (typeof this.jumpLedgeClingResolver !== 'function') {
+      return false;
+    }
+
+    return this.jumpLedgeClingResolver({
+      player: this,
+      state,
+      progress: THREE.MathUtils.clamp(progress, 0, 1),
+      root: this.root,
+      jumpDirection: this.jumpDirection,
+      jumpStartY: this.jumpStartY,
+      jumpReachHeight: this.getJumpReachHeight(state),
+    }) === true;
+  }
+
+  _tryResolveJumpPlatformLanding(state) {
+    if (state !== 'neutralJump' && state !== 'forwardJump') {
+      return false;
+    }
+
+    if (typeof this.jumpPlatformLandingResolver !== 'function') {
+      return false;
+    }
+
+    return this.jumpPlatformLandingResolver({
+      player: this,
+      state,
+      root: this.root,
+      jumpDirection: this.jumpDirection,
+      jumpStartY: this.jumpStartY,
+      jumpReachHeight: this.getJumpReachHeight(state),
+    }) === true;
+  }
+
+  isLedgeClinging() {
+    return Boolean(this.ledgeCling);
+  }
+
+  startLedgeCling(ledge = {}) {
+    if (!ledge.hangPosition || !ledge.climbPosition || !ledge.normal) {
+      return false;
+    }
+
+    const normal = ledge.normal.clone();
+    normal.y = 0;
+    if (normal.lengthSq() <= 0.0001) {
+      normal.set(0, 0, -1);
+    } else {
+      normal.normalize();
+    }
+
+    const inward = normal.clone().multiplyScalar(-1);
+    this.ledgeCling = {
+      id: ledge.id ?? 'debugLedge',
+      state: 'jumpingToHanging',
+      timer: 0,
+      duration: LEDGE_JUMP_TO_HANG_DURATION,
+      normal,
+      inward,
+      startPosition: this.root.position.clone(),
+      hangPosition: ledge.hangPosition.clone(),
+      handPosition: (ledge.handPosition?.clone() ?? ledge.hangPosition.clone()
+        .addScaledVector(normal, LEDGE_HAND_OUTWARD_OFFSET)
+        .setY(Number.isFinite(ledge.topY) ? ledge.topY : ledge.climbPosition.y)),
+      climbPosition: ledge.climbPosition.clone(),
+      climbStartPosition: ledge.hangPosition.clone(),
+      climbLeftHandPosition: new THREE.Vector3(),
+      climbRightHandPosition: new THREE.Vector3(),
+      climbLeftHandQuaternion: new THREE.Quaternion(),
+      climbRightHandQuaternion: new THREE.Quaternion(),
+      climbReleasePosition: new THREE.Vector3(),
+      climbHandAnchorsCaptured: false,
+      climbHandsReleased: false,
+      climbHighestRootY: -Infinity,
+      climbFarthestInward: -Infinity,
+      topY: Number.isFinite(ledge.topY) ? ledge.topY : ledge.climbPosition.y,
+      inputToward: false,
+    };
+
+    this.animation.actionState = null;
+    this.animation.actionTimer = 0;
+    this.animation.actionDuration = 0;
+    this.animation.setState('ledgeCling');
+    this._forwardJumpTravelProgress = 0;
+    this._jumpLandingVisualTimer = 0;
+    this._jumpLandingVisualState = null;
+    this._jumpLandingVisualClipKey = null;
+    this.movementLockTimer = 0;
+    this.movementLockMultiplier = 0;
+    this.faceDirection(inward);
+    return true;
+  }
+
+  getLedgeClingDiagnostics() {
+    if (!this.ledgeCling) {
+      return null;
+    }
+
+    return {
+      id: this.ledgeCling.id,
+      state: this.ledgeCling.state,
+      progress: this._getLedgeActionProgress(),
+      inputToward: this.ledgeCling.inputToward,
+      topY: this.ledgeCling.topY,
+    };
+  }
+
+  _tryLedgeJump(input = new Set(), movementOptions = {}) {
+    if (!this.ledgeCling) {
+      return false;
+    }
+
+    const state = this.ledgeCling.state;
+    const inputToward = this._isInputTowardLedge(input, movementOptions);
+    this.ledgeCling.inputToward = inputToward;
+
+    if (state === 'hangingIdle' && inputToward) {
+      this._startLedgeClimbPreparation();
+      return true;
+    }
+
+    return true;
+  }
+
+  _updateLedgeClingState(dt, input = new Set(), movementOptions = {}) {
+    const ledge = this.ledgeCling;
+    if (!ledge) {
+      return;
+    }
+
+    ledge.inputToward = this._isInputTowardLedge(input, movementOptions);
+    ledge.timer = Math.min(ledge.duration, ledge.timer + dt);
+    const progress = this._getLedgeActionProgress();
+
+    if (ledge.state === 'jumpingToHanging') {
+      const eased = THREE.MathUtils.smoothstep(progress, 0, 1);
+      this.root.position.lerpVectors(
+        ledge.startPosition,
+        this._getLedgeRootAnchorPosition(ledgeAnchorPosition),
+        eased,
+      );
+      if (progress >= 1) {
+        this._setLedgeState('settlingToFreeHang', LEDGE_SETTLE_TO_FREE_HANG_DURATION);
+      }
+    } else if (ledge.state === 'settlingToFreeHang') {
+      this.root.position.copy(this._getLedgeRootAnchorPosition(ledgeAnchorPosition));
+      if (progress >= 1) {
+        if (ledge.inputToward) {
+          this._startLedgeClimbPreparation();
+        } else {
+          this._setLedgeState('hangingIdle', 0);
+        }
+      }
+    } else if (ledge.state === 'hangingIdle') {
+      this.root.position.copy(this._getLedgeRootAnchorPosition(ledgeAnchorPosition));
+      if (ledge.inputToward) {
+        this._startLedgeClimbPreparation();
+      }
+    } else if (ledge.state === 'preparingToClimb') {
+      if (progress >= 1) {
+        this._captureClimbHandAnchors();
+        this._startLedgeClimb();
+      } else {
+        this.root.position.copy(this._getLedgeRootAnchorPosition(ledgeAnchorPosition));
+      }
+    } else if (ledge.state === 'climbingUp') {
+      if (ledge.climbHandsReleased) {
+        const releaseProgress = THREE.MathUtils.clamp(
+          (progress - LEDGE_CLIMB_HAND_RELEASE_PROGRESS)
+            / (1 - LEDGE_CLIMB_HAND_RELEASE_PROGRESS),
+          0,
+          1,
+        );
+        this.root.position.lerpVectors(
+          ledge.climbReleasePosition,
+          ledge.climbPosition,
+          THREE.MathUtils.smoothstep(releaseProgress, 0, 1),
+        );
+      }
+      if (progress >= 1) {
+        this._finishLedgeClimb();
+        return;
+      }
+    }
+
+    this.faceDirection(ledge.inward);
+    this.lastMoveDirection.copy(ledge.inward);
+    this.isRunning = false;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
+    this.animation.setState('ledgeCling');
+    this.updateWeaponVisualState();
+    this._updateExternalModelMotion(dt, false, 0, false, false, {
+      animationState: this._getLedgeExternalState(),
+      actionProgress: this._getLedgeActionProgress(),
+      clipKey: this._getLedgeClipKey(),
+      skipAttackKindReset: true,
+    });
+    if (ledge.state === 'climbingUp') {
+      this._anchorClimbHands(this._getLedgeActionProgress());
+    } else {
+      this._anchorLedgeAnimationPose(this._getLedgeActionProgress());
+    }
+  }
+
+  _setLedgeState(state, duration) {
+    if (!this.ledgeCling) {
+      return;
+    }
+
+    this.ledgeCling.state = state;
+    this.ledgeCling.timer = 0;
+    this.ledgeCling.duration = Math.max(0.001, duration);
+  }
+
+  _startLedgeClimb() {
+    if (!this.ledgeCling) {
+      return false;
+    }
+
+    if (!this.ledgeCling.climbHandAnchorsCaptured) {
+      this._captureClimbHandAnchors();
+    }
+    this.ledgeCling.climbStartPosition.copy(this.root.position);
+    this.ledgeCling.climbReleasePosition.copy(this.root.position);
+    this.ledgeCling.climbHandsReleased = false;
+    this.ledgeCling.climbHighestRootY = this.root.position.y;
+    this.ledgeCling.climbFarthestInward = this.root.position.dot(this.ledgeCling.inward);
+    this._setLedgeState('climbingUp', LEDGE_CLIMB_UP_DURATION);
+    return true;
+  }
+
+  _startLedgeClimbPreparation() {
+    if (!this.ledgeCling || this.ledgeCling.state === 'preparingToClimb') {
+      return false;
+    }
+
+    this._setLedgeState('preparingToClimb', LEDGE_PREPARE_CLIMB_DURATION);
+    return true;
+  }
+
+  _finishLedgeClimb() {
+    const ledge = this.ledgeCling;
+    if (ledge) {
+      this.root.position.copy(ledge.climbPosition);
+      this.lastMoveDirection.copy(ledge.inward);
+      this.faceDirection(ledge.inward);
+    }
+
+    this.ledgeCling = null;
+    this.animation.setState('idle');
+    this.movementLockMultiplier = 1;
+    this.movementLockTimer = 0;
+    this.modelRoot.position.y = 0;
+  }
+
+  _captureClimbHandAnchors() {
+    const ledge = this.ledgeCling;
+    const leftWrist = this.externalRig?.joints?.get('leftWrist');
+    const rightWrist = this.externalRig?.joints?.get('rightWrist');
+    if (!ledge || !leftWrist) {
+      return false;
+    }
+
+    this.root.updateMatrixWorld(true);
+    leftWrist.getWorldPosition(ledge.climbLeftHandPosition);
+    leftWrist.getWorldQuaternion(ledge.climbLeftHandQuaternion);
+    if (rightWrist) {
+      rightWrist.getWorldPosition(ledge.climbRightHandPosition);
+      rightWrist.getWorldQuaternion(ledge.climbRightHandQuaternion);
+    } else {
+      ledge.climbRightHandPosition.copy(ledge.climbLeftHandPosition);
+      ledge.climbRightHandQuaternion.copy(ledge.climbLeftHandQuaternion);
+    }
+    ledge.climbHandAnchorsCaptured = true;
+    return true;
+  }
+
+  _anchorClimbHands(progress = this._getLedgeActionProgress()) {
+    const ledge = this.ledgeCling;
+    const leftWrist = this.externalRig?.joints?.get('leftWrist');
+    const rightWrist = this.externalRig?.joints?.get('rightWrist');
+    if (!ledge
+      || ledge.state !== 'climbingUp'
+      || !ledge.climbHandAnchorsCaptured
+      || !leftWrist) {
+      return;
+    }
+
+    const releaseBlend = THREE.MathUtils.smoothstep(
+      progress,
+      LEDGE_CLIMB_HAND_RELEASE_PROGRESS,
+      LEDGE_CLIMB_HAND_RELEASE_END_PROGRESS,
+    );
+    const anchorWeight = 1 - releaseBlend;
+    if (anchorWeight <= 0) {
+      return;
+    }
+
+    // First translate the complete rig around the planted wrist midpoint so
+    // the FBX pose, rather than a hand-authored body path, drives the pull-up.
+    this.root.updateMatrixWorld(true);
+    leftWrist.getWorldPosition(ledgeAnimatedWristPosition);
+    if (!ledge.climbHandsReleased && rightWrist) {
+      rightWrist.getWorldPosition(ledgeAnimatedRightWristPosition);
+      ledgeAnimatedWristPosition.add(ledgeAnimatedRightWristPosition).multiplyScalar(0.5);
+      ledgeRootCorrection.copy(ledge.climbLeftHandPosition)
+        .add(ledge.climbRightHandPosition)
+        .multiplyScalar(0.5)
+        .sub(ledgeAnimatedWristPosition);
+    } else if (!ledge.climbHandsReleased) {
+      ledgeRootCorrection.copy(ledge.climbLeftHandPosition).sub(ledgeAnimatedWristPosition);
+    }
+
+    if (!ledge.climbHandsReleased) {
+      this.root.position.add(ledgeRootCorrection);
+      this.root.position.y = Math.max(this.root.position.y, ledge.climbHighestRootY);
+      ledge.climbHighestRootY = this.root.position.y;
+      const inwardDistance = this.root.position.dot(ledge.inward);
+      if (inwardDistance < ledge.climbFarthestInward) {
+        this.root.position.addScaledVector(
+          ledge.inward,
+          ledge.climbFarthestInward - inwardDistance,
+        );
+      } else {
+        ledge.climbFarthestInward = inwardDistance;
+      }
+    }
+    this.root.updateMatrixWorld(true);
+
+    // The animation still supplies the shoulder and elbow shape. A fresh CCD
+    // solve each frame only removes retargeting drift at the planted wrists.
+    this.externalRig?.anchorHandsToWorldPositions?.({
+      leftPosition: ledge.climbLeftHandPosition,
+      leftQuaternion: ledge.climbLeftHandQuaternion,
+      rightPosition: rightWrist ? ledge.climbRightHandPosition : null,
+      rightQuaternion: rightWrist ? ledge.climbRightHandQuaternion : null,
+      weight: anchorWeight,
+    });
+    this.root.updateMatrixWorld(true);
+
+    if (!ledge.climbHandsReleased && progress >= LEDGE_CLIMB_HAND_RELEASE_PROGRESS) {
+      ledge.climbReleasePosition.copy(this.root.position);
+      ledge.climbHandsReleased = true;
+    }
+  }
+
+  _getLedgeActionProgress() {
+    const ledge = this.ledgeCling;
+    if (!ledge) {
+      return 0;
+    }
+
+    if (ledge.state === 'hangingIdle') {
+      return 0;
+    }
+
+    return THREE.MathUtils.clamp(ledge.timer / Math.max(0.001, ledge.duration), 0, 1);
+  }
+
+  _getLedgeExternalState() {
+    return this.ledgeCling?.state ?? 'idle';
+  }
+
+  _getLedgeRootAnchorPosition(target = ledgeAnchorPosition) {
+    const ledge = this.ledgeCling;
+    if (!ledge) {
+      return target.set(0, 0, 0);
+    }
+
+    target.copy(ledge.hangPosition)
+      .addScaledVector(ledge.normal, LEDGE_FREE_HANG_ROOT_OUTWARD_OFFSET);
+    target.y += LEDGE_FREE_HANG_ROOT_VERTICAL_OFFSET;
+    return target;
+  }
+
+  _anchorLedgeAnimationPose(progress = this._getLedgeActionProgress()) {
+    const ledge = this.ledgeCling;
+    const leftWrist = this.externalRig?.joints?.get('leftWrist');
+    if (!ledge?.handPosition || !ledge.normal || !leftWrist) {
+      return;
+    }
+
+    if (ledge.state === 'climbingUp') {
+      return;
+    }
+
+    // The ledge clips fully own every arm bone. Keep the authored grip planted
+    // by translating only the character root.
+    this.root.updateMatrixWorld(true);
+    leftWrist.getWorldPosition(ledgeAnimatedWristPosition);
+    ledgeRootCorrection.copy(ledge.handPosition).sub(ledgeAnimatedWristPosition);
+    this.root.position.addScaledVector(
+      ledge.normal,
+      ledgeRootCorrection.dot(ledge.normal),
+    );
+    this.root.position.y += ledgeRootCorrection.y;
+    this.root.updateMatrixWorld(true);
+  }
+
+  _getLedgeClipKey() {
+    switch (this.ledgeCling?.state) {
+      case 'jumpingToHanging':
+        return 'jumpingToHanging';
+      case 'settlingToFreeHang':
+        return 'bracedToFreeHang';
+      case 'hangingIdle':
+        return 'hangingIdle';
+      case 'preparingToClimb':
+        return 'freeHangToBraced';
+      case 'climbingUp':
+        return 'ledgeClimbUp';
+      default:
+        return null;
+    }
+  }
+
+  _isInputTowardLedge(input = new Set(), movementOptions = {}) {
+    const ledge = this.ledgeCling;
+    if (!ledge) {
+      return false;
+    }
+
+    const x = (input.has('KeyD') || input.has('ArrowRight') ? 1 : 0)
+      + (input.has('KeyA') || input.has('ArrowLeft') ? -1 : 0);
+    const y = (input.has('KeyW') || input.has('ArrowUp') ? 1 : 0)
+      + (input.has('KeyS') || input.has('ArrowDown') ? -1 : 0);
+
+    if (Math.abs(x) <= 0.001 && Math.abs(y) <= 0.001) {
+      return false;
+    }
+
+    const forward = movementOptions.movementForward ?? movementOptions.forward;
+    const right = movementOptions.movementRight ?? movementOptions.right;
+    ledgeMovementDirection.set(0, 0, 0);
+
+    if (forward && right) {
+      movementBasisForward.copy(forward).setY(0);
+      movementBasisRight.copy(right).setY(0);
+
+      if (movementBasisForward.lengthSq() > 0.0001) {
+        movementBasisForward.normalize();
+        ledgeMovementDirection.addScaledVector(movementBasisForward, y);
+      }
+
+      if (movementBasisRight.lengthSq() > 0.0001) {
+        movementBasisRight.normalize();
+        ledgeMovementDirection.addScaledVector(movementBasisRight, x);
+      }
+    } else {
+      ledgeFaceDirection.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
+      ledgeMovementDirection.addScaledVector(ledgeFaceDirection, y);
+      ledgeMovementDirection.addScaledVector(
+        ledgeFaceDirection.set(Math.cos(this.root.rotation.y), 0, -Math.sin(this.root.rotation.y)),
+        x,
+      );
+    }
+
+    if (ledgeMovementDirection.lengthSq() <= 0.0001) {
+      return false;
+    }
+
+    ledgeMovementDirection.normalize();
+    return ledgeMovementDirection.dot(ledge.inward) >= LEDGE_TOWARD_INPUT_DOT;
+  }
+
   _applyActionDisplacement(direction, distance, duration, progress, dt) {
     if (!direction || direction.lengthSq() <= 0.0001 || duration <= 0) {
       return;
@@ -673,6 +1695,24 @@ export class Player {
     const localProgress = THREE.MathUtils.clamp(progress, 0, 1);
     const speedScale = Math.sin(localProgress * Math.PI) * (Math.PI / 2);
     this.root.position.addScaledVector(direction, (distance / duration) * speedScale * dt);
+  }
+
+  _applyForwardJumpDisplacement(direction, distance, progress) {
+    if (!direction || direction.lengthSq() <= 0.0001 || distance <= 0) {
+      return;
+    }
+
+    const localProgress = THREE.MathUtils.clamp(progress, 0, 1);
+    const travelProgress = getForwardJumpTravelProgress(localProgress);
+    if (travelProgress < this._forwardJumpTravelProgress) {
+      this._forwardJumpTravelProgress = 0;
+    }
+
+    const deltaProgress = Math.max(0, travelProgress - this._forwardJumpTravelProgress);
+    if (deltaProgress > 0) {
+      this.root.position.addScaledVector(direction, distance * deltaProgress);
+    }
+    this._forwardJumpTravelProgress = travelProgress;
   }
 
   faceTarget(targetPosition) {
@@ -1536,8 +2576,25 @@ export class Player {
             return;
           }
 
-          clip.name = definition.key;
-          resolve([definition.key, { ...definition, clip }]);
+          let preparedClip = clip;
+          const subclip = definition.subclip;
+          if (subclip
+            && Number.isFinite(subclip.startFrame)
+            && Number.isFinite(subclip.endFrame)) {
+            preparedClip = THREE.AnimationUtils.subclip(
+              clip,
+              definition.key,
+              subclip.startFrame,
+              subclip.endFrame,
+              subclip.fps ?? 30,
+            );
+          } else {
+            preparedClip = clip.clone?.() ?? clip;
+            preparedClip.name = definition.key;
+          }
+
+          preparedClip.name = definition.key;
+          resolve([definition.key, { ...definition, clip: preparedClip }]);
         },
         undefined,
         (error) => {
@@ -1799,42 +2856,75 @@ export class Player {
     const actionProgress = Number.isFinite(motionOptions.actionProgress)
       ? THREE.MathUtils.clamp(motionOptions.actionProgress, 0, 1)
       : this.animation.getActionProgress?.() ?? 0;
-    const animationState = motionOptions.animationState ?? this.animation.state;
+    const motionState = motionOptions.animationState ?? this.animation.state;
+    const animationState = this._resolveExternalAnimationState(motionState, actionProgress);
 
     if (clipDrivenRig) {
-      const dodgeAirLift = animationState === 'dodgeRoll' ? getDodgeRollVisualLift(actionProgress) : 0;
-      const alpha = Math.min(1, dt * (animationState === 'dodgeRoll' ? 20 : 14));
-      this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, dodgeAirLift, alpha);
-      this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, 0, alpha);
+      let targetY = motionState === 'dodgeRoll' ? getDodgeRollVisualLift(actionProgress) : 0;
+      let targetPitch = 0;
+      let landingSnap = false;
+      const physicalJump = motionOptions.physicalJump === true;
+
+      if (motionState === 'neutralJump' || motionState === 'forwardJump') {
+        const forwardJump = motionState === 'forwardJump';
+        if (!physicalJump) {
+          const jumpLift = getJumpVisualLift(actionProgress, forwardJump);
+          const landingCompression = getJumpLandingCompression(actionProgress, forwardJump);
+          targetY = Math.max(targetY, jumpLift - landingCompression);
+        }
+        targetPitch = forwardJump ? -Math.sin(actionProgress * Math.PI) * 0.08 : 0;
+        landingSnap = actionProgress >= 0.985;
+
+        if (landingSnap) {
+          targetY = 0;
+        }
+      }
+
+      const alpha = (landingSnap || motionState === 'forwardJump')
+        ? 1
+        : Math.min(1, dt * (motionState === 'dodgeRoll' ? 20 : 14));
+      this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, targetY, alpha);
+      this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, targetPitch, alpha);
       this.modelRoot.rotation.z = THREE.MathUtils.lerp(this.modelRoot.rotation.z, 0, alpha);
     } else {
       const stepLift = Math.abs(Math.sin(this._modelWalkTime));
       let targetY = moving ? stepLift * 0.062 : 0;
       let targetRoll = moving ? Math.sin(this._modelWalkTime) * 0.032 : 0;
       let targetPitch = 0;
+      let landingSnap = false;
+      const physicalJump = motionOptions.physicalJump === true;
 
-      if (animationState === 'neutralJump' || animationState === 'forwardJump') {
-        const jumpLift = Math.sin(actionProgress * Math.PI) * (animationState === 'forwardJump' ? 0.58 : 0.72);
-        const landingCompression = THREE.MathUtils.smoothstep(actionProgress, 0.78, 1) * 0.045;
-        targetY = Math.max(targetY, jumpLift) - landingCompression;
-        targetPitch = animationState === 'forwardJump' ? -Math.sin(actionProgress * Math.PI) * 0.08 : 0;
-      } else if (animationState === 'dodgeRoll') {
+      if (motionState === 'neutralJump' || motionState === 'forwardJump') {
+        const forwardJump = motionState === 'forwardJump';
+        if (!physicalJump) {
+          const jumpLift = getJumpVisualLift(actionProgress, forwardJump);
+          const landingCompression = getJumpLandingCompression(actionProgress, forwardJump);
+          targetY = Math.max(targetY, jumpLift) - landingCompression;
+        }
+        targetPitch = forwardJump ? -Math.sin(actionProgress * Math.PI) * 0.08 : 0;
+        landingSnap = actionProgress >= 0.985;
+
+        if (landingSnap) {
+          targetY = 0;
+        }
+      } else if (motionState === 'dodgeRoll') {
         targetY = Math.max(getDodgeRollVisualLift(actionProgress), targetY * 0.45);
         targetPitch = Math.sin(actionProgress * Math.PI) * 0.18;
         targetRoll += Math.sin(actionProgress * Math.PI * 2) * 0.08;
-      } else if (animationState === 'knockbackFall' || animationState === 'downed') {
+      } else if (motionState === 'knockbackFall' || motionState === 'downed') {
         targetY = Math.max(0, targetY * 0.25);
         targetPitch = -THREE.MathUtils.smoothstep(actionProgress, 0.15, 0.85) * 0.16;
         targetRoll += -THREE.MathUtils.smoothstep(actionProgress, 0.2, 0.8) * 0.08;
-      } else if (animationState === 'getUp') {
+      } else if (motionState === 'getUp') {
         const crouch = Math.sin(actionProgress * Math.PI);
         targetY = Math.max(0, targetY * 0.35 - crouch * 0.025);
         targetPitch = -0.1 * (1 - THREE.MathUtils.smoothstep(actionProgress, 0.25, 1));
       }
 
-      this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, targetY, Math.min(1, dt * 12));
-      this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, targetPitch, Math.min(1, dt * 12));
-      this.modelRoot.rotation.z = THREE.MathUtils.lerp(this.modelRoot.rotation.z, targetRoll, Math.min(1, dt * 12));
+      const alpha = (landingSnap || motionState === 'forwardJump') ? 1 : Math.min(1, dt * 12);
+      this.modelRoot.position.y = THREE.MathUtils.lerp(this.modelRoot.position.y, targetY, alpha);
+      this.modelRoot.rotation.x = THREE.MathUtils.lerp(this.modelRoot.rotation.x, targetPitch, alpha);
+      this.modelRoot.rotation.z = THREE.MathUtils.lerp(this.modelRoot.rotation.z, targetRoll, alpha);
     }
 
     const rawAttackProgress = Number.isFinite(motionOptions.attackProgress)
@@ -1850,6 +2940,9 @@ export class Player {
     const hurtProgress = this.animation.hurtTimer > 0
       ? 1 - THREE.MathUtils.clamp(this.animation.hurtTimer / 0.18, 0, 1)
       : 0;
+    const fallAnimationClipProgress = animationState === 'land'
+      ? actionProgress
+      : null;
 
     this.externalRig?.update(dt, {
       moving,
@@ -1858,6 +2951,7 @@ export class Player {
       attackProgress,
       actionProgress,
       actionDuration: this.animation.actionDuration ?? 0,
+      fallAnimationClipProgress,
       hurtProgress,
       damageHitLocal: this.damageHitLocalDirection,
       projectileAiming,
@@ -1870,9 +2964,143 @@ export class Player {
       clipKey: motionOptions.clipKey ?? null,
     });
 
+    if (animationState === 'land') {
+      this._clampExternalModelFeetToGround({ allowRaise: true, reason: 'land' });
+    } else if (!motionOptions.physicalJump && this._shouldClampNeutralJumpWindup(motionState, actionProgress)) {
+      this._clampExternalModelFeetToGround({ reason: 'jumpWindup' });
+    } else if (this._shouldClampStationaryGroundedPose(animationState, moving)) {
+      this._clampExternalModelFeetToGround({ allowRaise: true, reason: 'groundedIdle' });
+    } else {
+      this._lastExternalModelGrounding = this._measureExternalModelGrounding();
+    }
+
     if (!motionOptions.skipAttackKindReset && this.animation.attackTimer <= 0 && !projectileAimLocked) {
       this._attackWeaponKind = null;
     }
+  }
+
+  _resolveExternalAnimationState(animationState, actionProgress = 0) {
+    if (animationState === 'land') {
+      return 'land';
+    }
+
+    if (animationState !== 'neutralJump' && animationState !== 'forwardJump') {
+      return animationState;
+    }
+
+    const fallStart = getJumpFallAnimationStartProgress(animationState);
+    if (!Number.isFinite(actionProgress) || actionProgress < fallStart) {
+      return animationState;
+    }
+
+    return animationState === 'forwardJump' ? 'forwardJumpFall' : 'fall';
+  }
+
+  _getJumpLandingVisualProgress() {
+    if (this._jumpLandingVisualTimer <= 0) {
+      return 1;
+    }
+
+    return THREE.MathUtils.clamp(
+      1 - (this._jumpLandingVisualTimer / JUMP_LANDING_VISUAL_HOLD_DURATION),
+      0,
+      1,
+    );
+  }
+
+  _cancelJumpLandingVisual({ restoreMovement = false } = {}) {
+    this._jumpLandingVisualTimer = 0;
+    this._jumpLandingVisualState = null;
+    this._jumpLandingVisualClipKey = null;
+
+    if (restoreMovement) {
+      this.movementLockTimer = 0;
+      this.movementLockMultiplier = 1;
+    }
+  }
+
+  _shouldClampNeutralJumpWindup(animationState, actionProgress = 0) {
+    return animationState === 'neutralJump'
+      && Number.isFinite(actionProgress)
+      && actionProgress < NEUTRAL_JUMP_LAUNCH_PROGRESS;
+  }
+
+  _shouldClampStationaryGroundedPose(animationState, moving = false) {
+    return !moving && animationState === 'idle';
+  }
+
+  getExternalModelGroundingDiagnostics() {
+    return this._lastExternalModelGrounding ?? this._measureExternalModelGrounding();
+  }
+
+  _measureExternalModelGrounding() {
+    if (!this.modelRoot?.visible || !this._loadedModel) {
+      return null;
+    }
+
+    this.root.getWorldPosition(modelGroundPosition);
+    this.modelRoot.updateMatrixWorld(true);
+
+    const footGrounding = this.externalRig?.measureFootGroundClearance?.(modelGroundPosition.y) ?? null;
+    modelGroundBounds.setFromObject(this.modelRoot);
+    const boundsClearance = Number.isFinite(modelGroundBounds.min.y)
+      ? modelGroundBounds.min.y - modelGroundPosition.y
+      : null;
+
+    const result = {
+      source: footGrounding?.source ?? 'modelBounds',
+      groundY: modelGroundPosition.y,
+      footClearance: Number.isFinite(footGrounding?.clearance) ? footGrounding.clearance : null,
+      leftFootClearance: Number.isFinite(footGrounding?.leftClearance) ? footGrounding.leftClearance : null,
+      rightFootClearance: Number.isFinite(footGrounding?.rightClearance) ? footGrounding.rightClearance : null,
+      footMinY: Number.isFinite(footGrounding?.minY) ? footGrounding.minY : null,
+      leftFootY: Number.isFinite(footGrounding?.leftY) ? footGrounding.leftY : null,
+      rightFootY: Number.isFinite(footGrounding?.rightY) ? footGrounding.rightY : null,
+      footSampleCount: Number.isFinite(footGrounding?.sampleCount) ? footGrounding.sampleCount : 0,
+      boundsClearance,
+      boundsMinY: Number.isFinite(modelGroundBounds.min.y) ? modelGroundBounds.min.y : null,
+      correction: 0,
+      corrected: false,
+      reason: null,
+    };
+
+    this._lastExternalModelGrounding = result;
+    return result;
+  }
+
+  _clampExternalModelFeetToGround({ allowRaise = false, reason = 'grounded' } = {}) {
+    if (!this.modelRoot?.visible || !this._loadedModel) {
+      return;
+    }
+
+    const before = this._measureExternalModelGrounding();
+    if (!before) {
+      return;
+    }
+
+    const clearance = Number.isFinite(before.footClearance)
+      ? before.footClearance
+      : before.boundsClearance;
+    const shouldLowerToGround = Number.isFinite(clearance) && clearance > 0.003;
+    const shouldRaiseToGround = allowRaise && Number.isFinite(clearance) && clearance < -0.003;
+
+    if (shouldLowerToGround || shouldRaiseToGround) {
+      this.modelRoot.position.y -= clearance;
+      this.modelRoot.updateMatrixWorld(true);
+      const after = this._measureExternalModelGrounding();
+      if (after) {
+        after.correction = -clearance;
+        after.corrected = true;
+        after.reason = reason;
+        after.beforeFootClearance = before.footClearance;
+        after.beforeBoundsClearance = before.boundsClearance;
+        this._lastExternalModelGrounding = after;
+      }
+      return;
+    }
+
+    before.reason = reason;
+    this._lastExternalModelGrounding = before;
   }
 
   _setEquipmentVisualsVisible(visible) {

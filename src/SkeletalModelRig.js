@@ -8,9 +8,12 @@ const PASSIVE_IDLE_HOLD_SECONDS = 20;
 const zeroEuler = new THREE.Euler();
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
+const tempVectorC = new THREE.Vector3();
+const tempVectorD = new THREE.Vector3();
 const tempEuler = new THREE.Euler();
 const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
+const tempQuaternionC = new THREE.Quaternion();
 const localForwardZ = new THREE.Vector3(0, 0, 1);
 const BUSTER_ELBOW_JOINT = 'rightElbow';
 const BUSTER_WRIST_JOINT = 'rightWrist';
@@ -64,13 +67,76 @@ const LOOPING_CLIP_KEYS = new Set([
   'leftCoverSneak',
   'rightCoverSneak',
   'climbingLadder',
+  'hangingIdle',
 ]);
+const JUMP_ACTION_CLIP_KEYS = new Set([
+  'neutralJump',
+  'forwardJumpLaunch',
+  'forwardJumpFall',
+  'jump',
+  'jumpingUp',
+  'pistolJump',
+  'pistolJump2',
+]);
+const LEDGE_SYNC_CLIP_KEYS = new Set([
+  'jumpingToHanging',
+  'bracedToFreeHang',
+  'freeHangToBraced',
+  'hangingIdle',
+  'ledgeClimbUp',
+]);
+const NEUTRAL_JUMP_LAUNCH_PROGRESS = 0.6;
+const NEUTRAL_JUMP_LAUNCH_CLIP_PROGRESS = 0.42;
+const FORWARD_JUMP_FALL_START_PROGRESS = 0.52;
+const FOOT_VERTEX_WEIGHT_THRESHOLD = 0.08;
 
 function normalizeBoneName(name = '') {
   return String(name)
     .replace(/^mixamorig/i, '')
     .replace(/[^a-z0-9]/gi, '')
     .toLowerCase();
+}
+
+function getNeutralJumpClipProgress(progress = 0) {
+  const p = THREE.MathUtils.clamp(progress, 0, 1);
+
+  if (p <= NEUTRAL_JUMP_LAUNCH_PROGRESS) {
+    return THREE.MathUtils.smoothstep(p, 0, NEUTRAL_JUMP_LAUNCH_PROGRESS) * NEUTRAL_JUMP_LAUNCH_CLIP_PROGRESS;
+  }
+
+  const airborneProgress = THREE.MathUtils.clamp(
+    (p - NEUTRAL_JUMP_LAUNCH_PROGRESS) / (1 - NEUTRAL_JUMP_LAUNCH_PROGRESS),
+    0,
+    1,
+  );
+  return THREE.MathUtils.lerp(NEUTRAL_JUMP_LAUNCH_CLIP_PROGRESS, 1, airborneProgress);
+}
+
+function getForwardJumpLaunchClipProgress(progress = 0) {
+  return THREE.MathUtils.smoothstep(
+    THREE.MathUtils.clamp(progress, 0, FORWARD_JUMP_FALL_START_PROGRESS),
+    0,
+    FORWARD_JUMP_FALL_START_PROGRESS,
+  );
+}
+
+function getForwardJumpFallClipProgress(progress = 0) {
+  return THREE.MathUtils.clamp(
+    (progress - FORWARD_JUMP_FALL_START_PROGRESS) / (1 - FORWARD_JUMP_FALL_START_PROGRESS),
+    0,
+    1,
+  );
+}
+
+function getAttributeComponent(attribute, index, component) {
+  if (!attribute || component >= attribute.itemSize) {
+    return 0;
+  }
+
+  if (component === 0) return attribute.getX(index);
+  if (component === 1) return attribute.getY(index);
+  if (component === 2) return attribute.getZ(index);
+  return attribute.getW(index);
 }
 
 function radiansToPoseDegrees(value) {
@@ -130,6 +196,9 @@ export class SkeletalModelRig {
     this.animationClips = new Map();
     this.animationActions = new Map();
     this.animationMetadata = new Map();
+    this.footVertexSamples = [];
+    this.footVertexSampleCount = 0;
+    this._lastFootGroundClearance = null;
     this.activeAction = null;
     this.activeClipKey = null;
     this.availableAnimationNames = [];
@@ -141,6 +210,7 @@ export class SkeletalModelRig {
     this._registerRigJoints();
     this._captureRestState();
     this._prepareSkinnedMeshes();
+    this._buildFootVertexSamples();
     this._createAndAttachDrillArm();
 
     if (this.meshCount <= 0 || !this.joints.get('hips')) {
@@ -278,6 +348,91 @@ export class SkeletalModelRig {
     return new THREE.Quaternion().setFromUnitVectors(localForwardZ, tempVectorA.normalize());
   }
 
+  anchorHandsToWorldPositions({
+    leftPosition = null,
+    leftQuaternion = null,
+    rightPosition = null,
+    rightQuaternion = null,
+    weight = 1,
+  } = {}) {
+    const blend = THREE.MathUtils.clamp(weight, 0, 1);
+    if (blend <= 0) {
+      return false;
+    }
+
+    let anchored = false;
+    if (leftPosition) {
+      anchored = this._solveArmToWorldTarget(
+        'leftShoulder',
+        'leftElbow',
+        'leftWrist',
+        leftPosition,
+        leftQuaternion,
+        blend,
+      ) || anchored;
+    }
+    if (rightPosition) {
+      anchored = this._solveArmToWorldTarget(
+        'rightShoulder',
+        'rightElbow',
+        'rightWrist',
+        rightPosition,
+        rightQuaternion,
+        blend,
+      ) || anchored;
+    }
+    return anchored;
+  }
+
+  _solveArmToWorldTarget(shoulderName, elbowName, wristName, position, quaternion, weight) {
+    const shoulder = this.joints.get(shoulderName);
+    const elbow = this.joints.get(elbowName);
+    const wrist = this.joints.get(wristName);
+    if (!shoulder || !elbow || !wrist) {
+      return false;
+    }
+
+    this.root.updateMatrixWorld(true);
+    wrist.getWorldPosition(tempVectorC).lerp(position, weight);
+    wrist.getWorldQuaternion(tempQuaternionC);
+    if (quaternion) {
+      tempQuaternionC.slerp(quaternion, weight);
+    }
+
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+      this._rotateJointTowardWorldTarget(elbow, wrist, tempVectorC);
+      this._rotateJointTowardWorldTarget(shoulder, wrist, tempVectorC);
+    }
+
+    if (wrist.parent) {
+      wrist.parent.getWorldQuaternion(tempQuaternionA).invert();
+      wrist.quaternion.copy(tempQuaternionA.multiply(tempQuaternionC));
+      this.root.updateMatrixWorld(true);
+    }
+    return true;
+  }
+
+  _rotateJointTowardWorldTarget(joint, endJoint, target) {
+    this.root.updateMatrixWorld(true);
+    joint.getWorldPosition(tempVectorA);
+    endJoint.getWorldPosition(tempVectorB).sub(tempVectorA);
+    tempVectorD.copy(target).sub(tempVectorA);
+    if (tempVectorB.lengthSq() <= 0.000001 || tempVectorD.lengthSq() <= 0.000001) {
+      return;
+    }
+
+    tempQuaternionA.setFromUnitVectors(tempVectorB.normalize(), tempVectorD.normalize());
+    joint.getWorldQuaternion(tempQuaternionB);
+    tempQuaternionA.multiply(tempQuaternionB);
+    if (joint.parent) {
+      joint.parent.getWorldQuaternion(tempQuaternionB).invert();
+      joint.quaternion.copy(tempQuaternionB.multiply(tempQuaternionA));
+    } else {
+      joint.quaternion.copy(tempQuaternionA);
+    }
+    this.root.updateMatrixWorld(true);
+  }
+
   _scaleBusterToForearm(busterObject) {
     const elbow = this.joints.get(BUSTER_ELBOW_JOINT);
     const wrist = this.joints.get(BUSTER_WRIST_JOINT);
@@ -407,8 +562,12 @@ export class SkeletalModelRig {
         continue;
       }
 
+      const rootMotion = entry.extractRootMotion
+        ? this._createRootMotionData(clip)
+        : null;
       const preparedClip = this._prepareAnimationClip(clip, key, {
         preserveRootMotion: Boolean(entry.preserveRootMotion),
+        lockRootY: Boolean(entry.lockRootY),
       });
       const action = this.mixer.clipAction(preparedClip, this.root);
       const looping = entry.loop ?? LOOPING_CLIP_KEYS.has(key);
@@ -427,6 +586,9 @@ export class SkeletalModelRig {
         loop: looping,
         duration: preparedClip.duration,
         preserveRootMotion: Boolean(entry.preserveRootMotion),
+        lockRootY: Boolean(entry.lockRootY),
+        extractRootMotion: Boolean(entry.extractRootMotion),
+        rootMotion,
       });
       this.availableAnimationNames.push(key);
     }
@@ -457,6 +619,7 @@ export class SkeletalModelRig {
     lockOnActive = false,
     strafeAmount = 0,
     turnAmount = 0,
+    fallAnimationClipProgress = null,
     clipKey = null,
   } = {}) {
     this.time += dt;
@@ -500,7 +663,10 @@ export class SkeletalModelRig {
       clipKey,
     });
 
-    this._fadeToClip(selectedClip, this.activeAction ? 0.16 : 0);
+    const fadeSeconds = selectedClip && LEDGE_SYNC_CLIP_KEYS.has(selectedClip)
+      ? 0
+      : this.activeAction ? 0.16 : 0;
+    this._fadeToClip(selectedClip, fadeSeconds);
     this._syncActiveActionSpeed(selectedClip, {
       moving,
       moveAmount,
@@ -510,6 +676,7 @@ export class SkeletalModelRig {
       turnAmount,
       attackProgress,
       actionProgress,
+      fallAnimationClipProgress,
     });
     this.mixer.update(dt);
     this._applyPistolBusterPoseCorrection();
@@ -565,6 +732,7 @@ export class SkeletalModelRig {
     this.root.updateMatrixWorld(true);
     const bounds = new THREE.Box3().setFromObject(this.root);
     this.modelHeight = bounds.getSize(tempVectorA).y || 1;
+    this.root.userData.restLocalPosition = this.root.position.clone();
 
     for (const bone of this.animatedBones) {
       this.restLocalQuaternions.set(bone, bone.quaternion.clone());
@@ -595,6 +763,177 @@ export class SkeletalModelRig {
     }
   }
 
+  _buildFootVertexSamples() {
+    const leftFootBones = this._collectFootBoneSet('leftAnkle', 'left');
+    const rightFootBones = this._collectFootBoneSet('rightAnkle', 'right');
+
+    for (const mesh of this.skinnedMeshes) {
+      const geometry = mesh.geometry;
+      const position = geometry?.attributes?.position;
+      const skinIndex = geometry?.attributes?.skinIndex;
+      const skinWeight = geometry?.attributes?.skinWeight;
+      const skeletonBones = mesh.skeleton?.bones;
+
+      const canApplySkinning = typeof mesh.applyBoneTransform === 'function'
+        || typeof mesh.boneTransform === 'function';
+
+      if (!position || !skinIndex || !skinWeight || !skeletonBones?.length || !canApplySkinning) {
+        continue;
+      }
+
+      const leftIndices = new Set();
+      const rightIndices = new Set();
+      for (let boneIndex = 0; boneIndex < skeletonBones.length; boneIndex += 1) {
+        const bone = skeletonBones[boneIndex];
+        const normalized = normalizeBoneName(bone?.name);
+
+        if (leftFootBones.has(bone) || normalized.includes('leftfoot') || normalized.includes('lefttoe')) {
+          leftIndices.add(boneIndex);
+        }
+
+        if (rightFootBones.has(bone) || normalized.includes('rightfoot') || normalized.includes('righttoe')) {
+          rightIndices.add(boneIndex);
+        }
+      }
+
+      if (!leftIndices.size && !rightIndices.size) {
+        continue;
+      }
+
+      const leftVertexIndices = [];
+      const rightVertexIndices = [];
+      for (let vertexIndex = 0; vertexIndex < position.count; vertexIndex += 1) {
+        let leftWeight = 0;
+        let rightWeight = 0;
+
+        for (let component = 0; component < skinIndex.itemSize; component += 1) {
+          const boneIndex = getAttributeComponent(skinIndex, vertexIndex, component);
+          const weight = getAttributeComponent(skinWeight, vertexIndex, component);
+
+          if (leftIndices.has(boneIndex)) {
+            leftWeight += weight;
+          }
+
+          if (rightIndices.has(boneIndex)) {
+            rightWeight += weight;
+          }
+        }
+
+        if (leftWeight >= FOOT_VERTEX_WEIGHT_THRESHOLD && leftWeight >= rightWeight) {
+          leftVertexIndices.push(vertexIndex);
+        } else if (rightWeight >= FOOT_VERTEX_WEIGHT_THRESHOLD) {
+          rightVertexIndices.push(vertexIndex);
+        }
+      }
+
+      if (leftVertexIndices.length) {
+        this.footVertexSamples.push({ mesh, side: 'left', indices: leftVertexIndices });
+        this.footVertexSampleCount += leftVertexIndices.length;
+      }
+
+      if (rightVertexIndices.length) {
+        this.footVertexSamples.push({ mesh, side: 'right', indices: rightVertexIndices });
+        this.footVertexSampleCount += rightVertexIndices.length;
+      }
+    }
+
+    this.root.userData.footVertexSampleCount = this.footVertexSampleCount;
+  }
+
+  _collectFootBoneSet(jointName, side) {
+    const bones = new Set();
+    const joint = this.joints.get(jointName);
+
+    if (joint) {
+      joint.traverse((object) => {
+        if (object.isBone) {
+          bones.add(object);
+        }
+      });
+    }
+
+    const sidePrefix = side === 'left' ? 'left' : 'right';
+    for (const bone of this.bones) {
+      const normalized = normalizeBoneName(bone?.name);
+      if (normalized.includes(`${sidePrefix}foot`) || normalized.includes(`${sidePrefix}toe`)) {
+        bones.add(bone);
+      }
+    }
+
+    return bones;
+  }
+
+  measureFootGroundClearance(groundY = 0) {
+    let leftMinY = Infinity;
+    let rightMinY = Infinity;
+    let source = 'skinnedFootVertices';
+
+    this.root.updateMatrixWorld(true);
+
+    for (const sample of this.footVertexSamples) {
+      const position = sample.mesh.geometry?.attributes?.position;
+      if (!position) {
+        continue;
+      }
+
+      sample.mesh.updateMatrixWorld(true);
+
+      for (const vertexIndex of sample.indices) {
+        tempVectorA.fromBufferAttribute(position, vertexIndex);
+        if (typeof sample.mesh.applyBoneTransform === 'function') {
+          sample.mesh.applyBoneTransform(vertexIndex, tempVectorA);
+        } else {
+          sample.mesh.boneTransform(vertexIndex, tempVectorA);
+        }
+        sample.mesh.localToWorld(tempVectorA);
+
+        if (sample.side === 'left') {
+          leftMinY = Math.min(leftMinY, tempVectorA.y);
+        } else {
+          rightMinY = Math.min(rightMinY, tempVectorA.y);
+        }
+      }
+    }
+
+    if (!Number.isFinite(leftMinY) && !Number.isFinite(rightMinY)) {
+      source = 'footBones';
+      const leftAnkle = this.joints.get('leftAnkle');
+      const rightAnkle = this.joints.get('rightAnkle');
+
+      if (leftAnkle) {
+        leftMinY = leftAnkle.getWorldPosition(tempVectorA).y;
+      }
+
+      if (rightAnkle) {
+        rightMinY = rightAnkle.getWorldPosition(tempVectorA).y;
+      }
+    }
+
+    const minY = Math.min(leftMinY, rightMinY);
+    if (!Number.isFinite(minY)) {
+      return null;
+    }
+
+    const result = {
+      source,
+      groundY,
+      minY,
+      leftY: Number.isFinite(leftMinY) ? leftMinY : null,
+      rightY: Number.isFinite(rightMinY) ? rightMinY : null,
+      clearance: minY - groundY,
+      leftClearance: Number.isFinite(leftMinY) ? leftMinY - groundY : null,
+      rightClearance: Number.isFinite(rightMinY) ? rightMinY - groundY : null,
+      sampleCount: this.footVertexSampleCount,
+    };
+
+    this._lastFootGroundClearance = result;
+    this.root.userData.footGroundClearance = result.clearance;
+    this.root.userData.leftFootGroundClearance = result.leftClearance;
+    this.root.userData.rightFootGroundClearance = result.rightClearance;
+    this.root.userData.footGroundingSource = result.source;
+    return result;
+  }
+
   _pickBone(aliases = []) {
     for (const alias of aliases) {
       const candidates = this.bonesByName.get(normalizeBoneName(alias));
@@ -622,32 +961,125 @@ export class SkeletalModelRig {
     return descendantBoneCount * 4 + directBoneChildren * 8;
   }
 
-  _prepareAnimationClip(clip, key, { preserveRootMotion = false } = {}) {
+  _createRootMotionData(clip) {
+    let selected = null;
+    let selectedDistanceSq = -1;
+
+    for (const sourceTrack of clip?.tracks ?? []) {
+      const trackName = this._retargetAnimationTrackName(sourceTrack.name);
+      const property = trackName.slice(trackName.lastIndexOf('.') + 1);
+      if (property !== 'position' || !this._isRootMotionTrack(trackName) || sourceTrack.values.length < 6) {
+        continue;
+      }
+
+      const last = sourceTrack.values.length - 3;
+      const deltaX = sourceTrack.values[last] - sourceTrack.values[0];
+      const deltaY = sourceTrack.values[last + 1] - sourceTrack.values[1];
+      const deltaZ = sourceTrack.values[last + 2] - sourceTrack.values[2];
+      const distanceSq = (deltaX * deltaX) + (deltaY * deltaY) + (deltaZ * deltaZ);
+      if (distanceSq <= selectedDistanceSq) {
+        continue;
+      }
+
+      selectedDistanceSq = distanceSq;
+      selected = {
+        trackName,
+        times: sourceTrack.times.slice(),
+        values: sourceTrack.values.slice(),
+        duration: Math.max(0.001, clip.duration),
+        startX: sourceTrack.values[0],
+        startY: sourceTrack.values[1],
+        startZ: sourceTrack.values[2],
+        totalX: deltaX,
+        totalY: deltaY,
+        totalZ: deltaZ,
+        totalDistance: Math.sqrt(distanceSq),
+      };
+    }
+
+    return selected;
+  }
+
+  sampleRootMotionProgress(key, progress = 0, target = {}) {
+    const data = this.animationMetadata.get(this._normalizeClipKey(key))?.rootMotion;
+    if (!data?.times?.length || !data?.values?.length) {
+      return null;
+    }
+
+    const time = THREE.MathUtils.clamp(progress, 0, 1) * data.duration;
+    let upperIndex = data.times.length - 1;
+    for (let index = 1; index < data.times.length; index += 1) {
+      if (data.times[index] >= time) {
+        upperIndex = index;
+        break;
+      }
+    }
+    const lowerIndex = Math.max(0, upperIndex - 1);
+    const lowerTime = data.times[lowerIndex];
+    const upperTime = data.times[upperIndex];
+    const alpha = upperTime > lowerTime
+      ? THREE.MathUtils.clamp((time - lowerTime) / (upperTime - lowerTime), 0, 1)
+      : 0;
+    const lowerOffset = lowerIndex * 3;
+    const upperOffset = upperIndex * 3;
+    const sampleX = THREE.MathUtils.lerp(data.values[lowerOffset], data.values[upperOffset], alpha);
+    const sampleY = THREE.MathUtils.lerp(data.values[lowerOffset + 1], data.values[upperOffset + 1], alpha);
+    const sampleZ = THREE.MathUtils.lerp(data.values[lowerOffset + 2], data.values[upperOffset + 2], alpha);
+    const deltaX = sampleX - data.startX;
+    const deltaY = sampleY - data.startY;
+    const deltaZ = sampleZ - data.startZ;
+    const totalDistanceSq = (data.totalX * data.totalX)
+      + (data.totalY * data.totalY)
+      + (data.totalZ * data.totalZ);
+    const overall = totalDistanceSq > 0.000001
+      ? ((deltaX * data.totalX) + (deltaY * data.totalY) + (deltaZ * data.totalZ)) / totalDistanceSq
+      : progress;
+    const horizontalDistanceSq = (data.totalX * data.totalX) + (data.totalZ * data.totalZ);
+    const horizontal = horizontalDistanceSq > 0.000001
+      ? ((deltaX * data.totalX) + (deltaZ * data.totalZ)) / horizontalDistanceSq
+      : overall;
+    const vertical = Math.abs(data.totalY) > 0.000001
+      ? deltaY / data.totalY
+      : overall;
+
+    target.horizontal = THREE.MathUtils.clamp(horizontal, 0, 1);
+    target.vertical = THREE.MathUtils.clamp(vertical, 0, 1);
+    target.overall = THREE.MathUtils.clamp(overall, 0, 1);
+    return target;
+  }
+
+  _prepareAnimationClip(clip, key, { preserveRootMotion = false, lockRootY = false } = {}) {
     const tracks = clip.tracks
-      .map((track) => this._prepareAnimationTrack(track, { preserveRootMotion }))
+      .map((track) => this._prepareAnimationTrack(track, { preserveRootMotion, lockRootY }))
       .filter(Boolean);
     const preparedClip = new THREE.AnimationClip(key, clip.duration, tracks);
     preparedClip.name = key;
     return preparedClip;
   }
 
-  _prepareAnimationTrack(track, { preserveRootMotion = false } = {}) {
+  _prepareAnimationTrack(track, { preserveRootMotion = false, lockRootY = false } = {}) {
     const trackName = this._retargetAnimationTrackName(track.name);
     const property = trackName.slice(trackName.lastIndexOf('.') + 1);
-    const preservesRootMotion = preserveRootMotion && property === 'position' && this._isRootMotionTrack(trackName);
+    const rootPositionTrack = property === 'position' && this._isRootMotionTrack(trackName);
+    const preservesRootMotion = preserveRootMotion && rootPositionTrack;
 
-    if (property !== 'position' || !this._isRootMotionTrack(trackName) || preservesRootMotion) {
+    if (!rootPositionTrack || preservesRootMotion) {
       const clonedTrack = track.clone();
       clonedTrack.name = trackName;
       return clonedTrack;
     }
 
     const values = track.values.slice();
-    const baseX = values[0] ?? 0;
-    const baseZ = values[2] ?? 0;
+    const restPosition = this._getTrackRestLocalPosition(trackName);
+    const baseX = restPosition?.x ?? values[0] ?? 0;
+    const baseY = values[1] ?? 0;
+    const baseZ = restPosition?.z ?? values[2] ?? 0;
 
     for (let index = 0; index < values.length; index += 3) {
       values[index] = baseX;
+      if (lockRootY) {
+        values[index + 1] = baseY;
+      }
       values[index + 2] = baseZ;
     }
 
@@ -657,6 +1089,26 @@ export class SkeletalModelRig {
       values,
       track.getInterpolation(),
     );
+  }
+
+  _getTrackRestLocalPosition(trackName = '') {
+    const targetName = this._getTrackTargetName(trackName);
+    const normalized = normalizeBoneName(targetName);
+    const candidates = this.bonesByName.get(normalized);
+
+    if (candidates?.length) {
+      const bone = candidates
+        .slice()
+        .sort((a, b) => this._scoreBoneCandidate(b) - this._scoreBoneCandidate(a))[0];
+      return bone?.userData?.restLocalPosition ?? null;
+    }
+
+    if (normalized === normalizeBoneName(this.root.name) || normalized.includes('armature')) {
+      return this.root.userData?.restLocalPosition ?? null;
+    }
+
+    const targetObject = this.root.getObjectByName?.(targetName);
+    return targetObject?.userData?.restLocalPosition ?? null;
   }
 
   _normalizePassiveIdleShoulderTracks() {
@@ -786,7 +1238,19 @@ export class SkeletalModelRig {
       crouchedsneakleft: 'crouchedSneakLeft',
       crouchedsneakright: 'crouchedSneakRight',
       fallingidle: 'fallingIdle',
+      fallingtolanding: 'fallingToLanding',
+      forwardjumplaunch: 'forwardJumpLaunch',
+      jumpattacklaunch: 'forwardJumpLaunch',
+      forwardjumpfall: 'forwardJumpFall',
+      jumpattackfall: 'forwardJumpFall',
+      forwardjumplanding: 'forwardJumpLanding',
+      jumpattacklanding: 'forwardJumpLanding',
       fallingtoroll: 'fallingToRoll',
+      hangingidle: 'hangingIdle',
+      jumpingtohanging: 'jumpingToHanging',
+      bracedtofreehang: 'bracedToFreeHang',
+      freehangtobraced: 'freeHangToBraced',
+      ledgeclimbup: 'ledgeClimbUp',
       dodgeroll: 'dodgeRoll',
       standingdiveforward: 'dodgeRoll',
       standingdive: 'dodgeRoll',
@@ -816,6 +1280,7 @@ export class SkeletalModelRig {
       swordarmslash: 'swordInwardSlash',
       swordinwardslash: 'swordInwardSlash',
       swordslash: 'swordInwardSlash',
+      neutraljump: 'neutralJump',
       jump: 'jump',
       jumpingup: 'jumpingUp',
       leftcoversneak: 'leftCoverSneak',
@@ -905,20 +1370,52 @@ export class SkeletalModelRig {
       return this._firstAvailable('swordInwardSlash', 'walking', 'strutWalking', 'breathingIdle', 'idle');
     }
 
-    if (state === 'neutralJump' || state === 'forwardJump') {
+    if (state === 'neutralJump') {
       return busterAimActive
-        ? this._firstAvailable('pistolJump', 'pistolJump2', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
-        : this._firstAvailable('jump', 'jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
+        ? this._firstAvailable('neutralJump', 'pistolJump', 'pistolJump2', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
+        : this._firstAvailable('neutralJump', 'jump', 'jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'forwardJump') {
+      return busterAimActive
+        ? this._firstAvailable('forwardJumpLaunch', 'pistolJump', 'pistolJump2', 'neutralJump', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
+        : this._firstAvailable('forwardJumpLaunch', 'jump', 'neutralJump', 'jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'forwardJumpFall') {
+      return busterAimActive
+        ? this._firstAvailable('forwardJumpFall', 'fallingIdle', 'pistolJump2', 'pistolJump', 'jump', 'jumpingUp', 'pistolIdle', 'breathingIdle', 'idle')
+        : this._firstAvailable('forwardJumpFall', 'fallingIdle', 'jump', 'jumpingUp', 'breathingIdle', 'idle');
     }
 
     if (state === 'fall') {
       return busterAimActive
-        ? this._firstAvailable('pistolJump2', 'pistolJump', 'fallingIdle', 'jump', 'jumpingUp', 'pistolIdle', 'breathingIdle', 'idle')
+        ? this._firstAvailable('fallingIdle', 'pistolJump2', 'pistolJump', 'jump', 'jumpingUp', 'pistolIdle', 'breathingIdle', 'idle')
         : this._firstAvailable('fallingIdle', 'jump', 'jumpingUp', 'breathingIdle', 'idle');
     }
 
     if (state === 'land') {
-      return this._firstAvailable('hardLanding', 'breathingIdle', 'idle');
+      return this._firstAvailable('fallingToLanding', 'hardLanding', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'jumpingToHanging') {
+      return this._firstAvailable('jumpingToHanging', 'hangingIdle', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'settlingToFreeHang') {
+      return this._firstAvailable('bracedToFreeHang', 'hangingIdle', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'hangingIdle') {
+      return this._firstAvailable('hangingIdle', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'preparingToClimb') {
+      return this._firstAvailable('freeHangToBraced', 'hangingIdle', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'climbingUp') {
+      return this._firstAvailable('ledgeClimbUp', 'hardLanding', 'breathingIdle', 'idle');
     }
 
     if (state === 'dodgeRoll') {
@@ -1091,11 +1588,16 @@ export class SkeletalModelRig {
     turnAmount = 0,
     attackProgress = null,
     actionProgress = null,
+    fallAnimationClipProgress = null,
   } = {}) {
     if (!this.activeAction || !key) {
       return;
     }
 
+    const syncFallingToLanding = (key === 'fallingToLanding' || key === 'forwardJumpLanding')
+      && Number.isFinite(fallAnimationClipProgress);
+    const syncLedgeClip = LEDGE_SYNC_CLIP_KEYS.has(key)
+      && Number.isFinite(actionProgress);
     let speed = 1;
     if (key === 'walking'
       || key === 'strutWalking'
@@ -1122,7 +1624,11 @@ export class SkeletalModelRig {
       speed = THREE.MathUtils.clamp((moveAmount || 1.2) / 1.2, 0.78, 1.35);
     } else if (key === 'slowJogBackwards') {
       speed = THREE.MathUtils.clamp(moveAmount || 0.9, 0.7, 1.15);
-    } else if (key === 'swordInwardSlash' || key === 'dodgeRoll') {
+    } else if (key === 'swordInwardSlash'
+      || key === 'dodgeRoll'
+      || JUMP_ACTION_CLIP_KEYS.has(key)
+      || syncLedgeClip
+      || syncFallingToLanding) {
       speed = 0;
     } else if (!moving && !running && !backpedaling) {
       speed = 1;
@@ -1133,9 +1639,24 @@ export class SkeletalModelRig {
     if (key === 'swordInwardSlash' && Number.isFinite(attackProgress)) {
       const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
       this.activeAction.time = THREE.MathUtils.clamp(attackProgress, 0, 1) * Math.max(0.1, clipDuration);
-    } else if (key === 'dodgeRoll' && Number.isFinite(actionProgress)) {
+    } else if ((key === 'dodgeRoll' || JUMP_ACTION_CLIP_KEYS.has(key)) && Number.isFinite(actionProgress)) {
+      const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
+      let clipProgress = THREE.MathUtils.clamp(actionProgress, 0, 1);
+      if (key === 'neutralJump') {
+        clipProgress = getNeutralJumpClipProgress(actionProgress);
+      } else if (key === 'forwardJumpLaunch') {
+        clipProgress = getForwardJumpLaunchClipProgress(actionProgress);
+      } else if (key === 'forwardJumpFall') {
+        clipProgress = getForwardJumpFallClipProgress(actionProgress);
+      }
+      this.activeAction.time = clipProgress * Math.max(0.1, clipDuration);
+    } else if (syncLedgeClip) {
       const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
       this.activeAction.time = THREE.MathUtils.clamp(actionProgress, 0, 1) * Math.max(0.1, clipDuration);
+    } else if (syncFallingToLanding) {
+      const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
+      const fallProgress = THREE.MathUtils.clamp(fallAnimationClipProgress, 0, 1);
+      this.activeAction.time = fallProgress * Math.max(0.1, clipDuration);
     }
   }
 

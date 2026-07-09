@@ -28,6 +28,24 @@ const POSE_DEBUG_CAMERA_MAX_DISTANCE = 22;
 const HIT_STOP_MAX_DURATION = 0.16;
 const HIT_STOP_DEFAULT_TIME_SCALE = 0.06;
 const CAMERA_WALL_OCCLUSION_TARGET_HEIGHT = 1.25;
+const DEBUG_LEDGE_CUBE_WIDTH = 3;
+const DEBUG_LEDGE_CUBE_DEPTH = 3;
+const DEBUG_LEDGE_CUBE_HEIGHT = 3;
+const DEBUG_LEDGE_CUBE_FORWARD_OFFSET = 3.05;
+const DEBUG_LEDGE_GRAB_DISTANCE_MIN = 0.05;
+const DEBUG_LEDGE_GRAB_DISTANCE_MAX = 1.05;
+const DEBUG_LEDGE_GRAB_PROGRESS_MIN = 0.34;
+const DEBUG_LEDGE_GRAB_PROGRESS_MAX = 0.98;
+const DEBUG_LEDGE_APPROACH_DOT_MAX = -0.2;
+const DEBUG_LEDGE_GRAB_HEIGHT_MIN = 0.75;
+const DEBUG_LEDGE_GRAB_HEIGHT_MAX = 3.35;
+const DEBUG_LEDGE_GRAB_IDEAL_HEIGHT = 3;
+const DEBUG_LEDGE_NORMAL_LANDING_MARGIN = 0.14;
+const DEBUG_LEDGE_LANDING_INSET = 0.08;
+const DEBUG_LEDGE_HANG_ROOT_DROP = 3.35;
+const DEBUG_LEDGE_HANG_OFFSET = 0.42;
+const DEBUG_LEDGE_CLIMB_INSET = 0.82;
+const DEBUG_LEDGE_HAND_OUTWARD_OFFSET = 0.055;
 
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
@@ -40,6 +58,21 @@ function createDamageCanvas() {
   canvas.width = 192;
   canvas.height = 80;
   return canvas;
+}
+
+function formatBrowserDiagnosticNumber(value, digits = 3) {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number.toFixed(digits)) : 'none';
+}
+
+function getBrowserDiagnosticAngleDelta(a, b) {
+  const left = Number(a);
+  const right = Number(b);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) {
+    return NaN;
+  }
+
+  return Math.atan2(Math.sin(left - right), Math.cos(left - right));
 }
 
 export class Game {
@@ -153,6 +186,11 @@ export class Game {
       lastX: 0,
       lastY: 0,
     };
+    this.debugLedgeTester = null;
+    this.debugLedgeCandidates = [];
+    this.debugLedgePlatform = null;
+    this.lastDebugLedgeClingId = null;
+    this.lastDebugLedgeLandingId = null;
 
     this._buildWorld();
     this._buildAimReticle();
@@ -163,6 +201,8 @@ export class Game {
     if (this.dungeon?.playerStart) {
       this.player.root.position.copy(this.dungeon.playerStart);
     }
+    this.player.jumpLedgeClingResolver = (context) => this._tryResolveDebugLedgeCling(context);
+    this.player.jumpPlatformLandingResolver = (context) => this._tryResolveDebugPlatformLanding(context);
 
     this.inventory = new Inventory(54);
     this.lootSystem = new LootSystem(this.scene);
@@ -179,6 +219,7 @@ export class Game {
     this.ui.renderInventory();
     this._bindEvents();
     this._syncAnimationPreviewDataset();
+    this._syncBrowserTestDataset();
     this._updateCamera(1);
   }
 
@@ -386,6 +427,63 @@ export class Game {
     document.body.dataset.animationPreviewRig = this.player?.externalRig ? 'ready' : 'loading';
     document.body.dataset.animationPreviewPhase = String(Number(this.player?._modelWalkTime ?? 0).toFixed(3));
     document.body.dataset.animationPreviewLegs = JSON.stringify(this._getAnimationPreviewLegTelemetry());
+  }
+
+  _syncBrowserTestDataset() {
+    if (!this.container?.dataset) {
+      return;
+    }
+
+    const dataset = this.container.dataset;
+    const player = this.player;
+    const animation = player?.animation;
+    const rig = player?.externalRig;
+    const activeAction = rig?.activeAction ?? null;
+    const activeClipKey = rig?.activeClipKey ?? null;
+    const activeClipDuration = activeClipKey
+      ? rig?.animationMetadata?.get?.(activeClipKey)?.duration ?? activeAction?.getClip?.()?.duration ?? null
+      : null;
+    const actionProgress = animation?.getActionProgress?.();
+    const grounding = player?.getExternalModelGroundingDiagnostics?.() ?? null;
+    const ledge = player?.getLedgeClingDiagnostics?.() ?? null;
+    const playerYaw = player?.root?.rotation?.y;
+    const cameraYaw = this.cameraController?.yaw;
+
+    dataset.browserTestReady = 'true';
+    dataset.gameElapsed = formatBrowserDiagnosticNumber(this.elapsedTime);
+    dataset.canvasCount = String(this.container.querySelectorAll?.('canvas').length ?? 0);
+    dataset.playerAnimationState = animation?.state ?? 'none';
+    dataset.playerFullBodyAction = animation?.actionState ?? 'none';
+    dataset.playerActionProgress = formatBrowserDiagnosticNumber(actionProgress);
+    dataset.playerActionDuration = formatBrowserDiagnosticNumber(animation?.actionDuration);
+    dataset.playerActionTimer = formatBrowserDiagnosticNumber(animation?.actionTimer);
+    dataset.playerRootY = formatBrowserDiagnosticNumber(player?.root?.position?.y);
+    dataset.playerYaw = formatBrowserDiagnosticNumber(playerYaw);
+    dataset.playerTankTurnActive = player?.tankTurnActive ? 'true' : 'false';
+    dataset.playerTankTurnTranslating = player?.tankTurnTranslating ? 'true' : 'false';
+    dataset.playerModelRootY = formatBrowserDiagnosticNumber(player?.modelRoot?.position?.y);
+    dataset.playerModelVisible = player?.modelRoot?.visible ? 'true' : 'false';
+    dataset.cameraYaw = formatBrowserDiagnosticNumber(cameraYaw);
+    dataset.cameraYawPlayerDelta = formatBrowserDiagnosticNumber(getBrowserDiagnosticAngleDelta(cameraYaw, playerYaw));
+    dataset.playerExternalRig = rig ? (rig.usesFbxAnimationClips ? 'fbx' : 'procedural') : 'loading';
+    dataset.playerActiveFbxClip = activeClipKey ?? 'none';
+    dataset.playerActiveFbxClipTime = formatBrowserDiagnosticNumber(activeAction?.time);
+    dataset.playerActiveFbxClipDuration = formatBrowserDiagnosticNumber(activeClipDuration);
+    dataset.playerFootGroundClearance = formatBrowserDiagnosticNumber(grounding?.footClearance);
+    dataset.playerLeftFootGroundClearance = formatBrowserDiagnosticNumber(grounding?.leftFootClearance);
+    dataset.playerRightFootGroundClearance = formatBrowserDiagnosticNumber(grounding?.rightFootClearance);
+    dataset.playerModelBoundsGroundClearance = formatBrowserDiagnosticNumber(grounding?.boundsClearance);
+    dataset.playerFootGroundCorrection = formatBrowserDiagnosticNumber(grounding?.correction);
+    dataset.playerFootGroundingSource = grounding?.source ?? 'none';
+    dataset.playerFootGroundingReason = grounding?.reason ?? 'none';
+    dataset.playerFootVertexSampleCount = String(grounding?.footSampleCount ?? 0);
+    dataset.playerLedgeState = ledge?.state ?? 'none';
+    dataset.playerLedgeProgress = formatBrowserDiagnosticNumber(ledge?.progress);
+    dataset.playerLedgeInputToward = ledge?.inputToward ? 'true' : 'false';
+    dataset.playerLedgeTopY = formatBrowserDiagnosticNumber(ledge?.topY);
+    dataset.debugLedgeCount = String(this.debugLedgeCandidates?.length ?? 0);
+    dataset.debugLastLedgeClingId = this.lastDebugLedgeClingId ?? 'none';
+    dataset.debugLastLedgeLandingId = this.lastDebugLedgeLandingId ?? 'none';
   }
 
   _getAnimationPreviewLegTelemetry() {
@@ -871,6 +969,7 @@ export class Game {
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
     this._collectCameraOcclusionWalls();
+    this._rebuildDebugLedgeTester(dungeon.playerStart);
     this.dungeonController = new DungeonController(this, dungeon);
 
     this.player.root.position.copy(dungeon.playerStart);
@@ -1319,6 +1418,7 @@ export class Game {
       } else {
         this._updateAimFromPointer();
         const movementBasis = this._getPlayerMovementBasis();
+        const playerGroundY = this._getPlayerGroundY();
         this.player.update(gameplayDt, this.keys, {
           arenaRadius: this.arenaRadius,
           movementForward: movementBasis.forward,
@@ -1326,6 +1426,7 @@ export class Game {
           lockOnTarget: movementBasis.lockOnTarget,
           aimWorld: this.pointer.aimWorld,
           projectileAimInputHeld: Boolean(this.pointer.primary || this.pointer.secondary),
+          groundY: playerGroundY,
         });
         this.dungeonController.update(gameplayDt);
         this.mapEvents.update(gameplayDt);
@@ -1367,7 +1468,22 @@ export class Game {
     this._updateCamera(dt);
     this._updateCameraWallOcclusion();
     this.ui.update(dt);
+    this._syncBrowserTestDataset();
     this.renderer.render(this.scene, this.camera);
+  }
+
+  _getPlayerGroundY() {
+    const position = this.player?.root?.position;
+    if (!position) {
+      return 0;
+    }
+
+    const debugLedgeElevation = this.getDebugLedgeFloorElevation?.(position);
+    if (Number.isFinite(debugLedgeElevation)) {
+      return debugLedgeElevation;
+    }
+
+    return this.dungeonController?.getFloorElevationAt?.(position) ?? 0;
   }
 
   _updateAnimationPreview(dt) {
@@ -1491,7 +1607,300 @@ export class Game {
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
     this._collectCameraOcclusionWalls();
+    this._rebuildDebugLedgeTester(dungeon.playerStart);
 
+  }
+
+  _rebuildDebugLedgeTester(origin = new THREE.Vector3()) {
+    this.debugLedgeTester?.removeFromParent?.();
+    this.debugLedgeCandidates = [];
+    this.debugLedgePlatform = null;
+
+    const base = origin?.clone?.() ?? new THREE.Vector3();
+    const center = base.clone().add(new THREE.Vector3(
+      0,
+      DEBUG_LEDGE_CUBE_HEIGHT * 0.5,
+      DEBUG_LEDGE_CUBE_FORWARD_OFFSET,
+    ));
+    const topY = center.y + DEBUG_LEDGE_CUBE_HEIGHT * 0.5;
+    this.debugLedgePlatform = {
+      id: 'debug-low-jump-cube',
+      center: center.clone(),
+      halfWidth: DEBUG_LEDGE_CUBE_WIDTH * 0.5,
+      halfDepth: DEBUG_LEDGE_CUBE_DEPTH * 0.5,
+      topY,
+      baseY: base.y,
+    };
+    const group = new THREE.Group();
+    group.name = 'debugLedgeClimbTester';
+
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(DEBUG_LEDGE_CUBE_WIDTH, DEBUG_LEDGE_CUBE_HEIGHT, DEBUG_LEDGE_CUBE_DEPTH),
+      new THREE.MeshStandardMaterial({
+        color: 0x34434f,
+        roughness: 0.86,
+        metalness: 0.08,
+      }),
+    );
+    body.name = 'debugLedgeClimbCubeBody';
+    body.position.copy(center);
+    body.castShadow = true;
+    body.receiveShadow = true;
+    group.add(body);
+
+    const ledgeMaterial = new THREE.MeshStandardMaterial({
+      color: 0x74e6ff,
+      emissive: 0x1a6070,
+      emissiveIntensity: 0.55,
+      roughness: 0.42,
+      metalness: 0.2,
+    });
+    const markerThickness = 0.08;
+    const markerDrop = 0.1;
+    const xHalf = DEBUG_LEDGE_CUBE_WIDTH * 0.5;
+    const zHalf = DEBUG_LEDGE_CUBE_DEPTH * 0.5;
+
+    this._addDebugLedge(group, {
+      id: 'debug-front-ledge',
+      center: new THREE.Vector3(center.x, topY, center.z - zHalf),
+      normal: new THREE.Vector3(0, 0, -1),
+      axis: new THREE.Vector3(1, 0, 0),
+      halfSpan: xHalf,
+      markerSize: new THREE.Vector3(DEBUG_LEDGE_CUBE_WIDTH + 0.16, markerThickness, markerThickness),
+      markerPosition: new THREE.Vector3(center.x, topY - markerDrop, center.z - zHalf - 0.025),
+      material: ledgeMaterial,
+    });
+    this._addDebugLedge(group, {
+      id: 'debug-back-ledge',
+      center: new THREE.Vector3(center.x, topY, center.z + zHalf),
+      normal: new THREE.Vector3(0, 0, 1),
+      axis: new THREE.Vector3(1, 0, 0),
+      halfSpan: xHalf,
+      markerSize: new THREE.Vector3(DEBUG_LEDGE_CUBE_WIDTH + 0.16, markerThickness, markerThickness),
+      markerPosition: new THREE.Vector3(center.x, topY - markerDrop, center.z + zHalf + 0.025),
+      material: ledgeMaterial,
+    });
+    this._addDebugLedge(group, {
+      id: 'debug-left-ledge',
+      center: new THREE.Vector3(center.x - xHalf, topY, center.z),
+      normal: new THREE.Vector3(-1, 0, 0),
+      axis: new THREE.Vector3(0, 0, 1),
+      halfSpan: zHalf,
+      markerSize: new THREE.Vector3(markerThickness, markerThickness, DEBUG_LEDGE_CUBE_DEPTH + 0.16),
+      markerPosition: new THREE.Vector3(center.x - xHalf - 0.025, topY - markerDrop, center.z),
+      material: ledgeMaterial,
+    });
+    this._addDebugLedge(group, {
+      id: 'debug-right-ledge',
+      center: new THREE.Vector3(center.x + xHalf, topY, center.z),
+      normal: new THREE.Vector3(1, 0, 0),
+      axis: new THREE.Vector3(0, 0, 1),
+      halfSpan: zHalf,
+      markerSize: new THREE.Vector3(markerThickness, markerThickness, DEBUG_LEDGE_CUBE_DEPTH + 0.16),
+      markerPosition: new THREE.Vector3(center.x + xHalf + 0.025, topY - markerDrop, center.z),
+      material: ledgeMaterial,
+    });
+
+    this.debugLedgeTester = group;
+    this.scene.add(group);
+  }
+
+  getDebugLedgeFloorElevation(position) {
+    const platform = this.debugLedgePlatform;
+    if (!platform || !position) {
+      return null;
+    }
+
+    const insideX = Math.abs(position.x - platform.center.x) <= platform.halfWidth + 0.08;
+    const insideZ = Math.abs(position.z - platform.center.z) <= platform.halfDepth + 0.08;
+    if (!insideX || !insideZ || position.y < platform.topY - 0.5) {
+      return null;
+    }
+
+    return platform.topY;
+  }
+
+  isPositionInsideDebugLedgeBlock(position, margin = 0.08) {
+    const platform = this.debugLedgePlatform;
+    if (!platform || !position) {
+      return false;
+    }
+
+    const insideX = Math.abs(position.x - platform.center.x) <= platform.halfWidth + margin;
+    const insideZ = Math.abs(position.z - platform.center.z) <= platform.halfDepth + margin;
+    const belowTop = position.y < platform.topY - 0.05;
+    return insideX && insideZ && belowTop;
+  }
+
+  _addDebugLedge(group, {
+    id,
+    center,
+    normal,
+    axis,
+    halfSpan,
+    markerSize,
+    markerPosition,
+    material,
+  }) {
+    const marker = new THREE.Mesh(
+      new THREE.BoxGeometry(markerSize.x, markerSize.y, markerSize.z),
+      material,
+    );
+    marker.name = `${id}Marker`;
+    marker.position.copy(markerPosition);
+    marker.castShadow = true;
+    marker.receiveShadow = true;
+    group.add(marker);
+
+    this.debugLedgeCandidates.push({
+      id,
+      center,
+      normal: normal.clone().normalize(),
+      axis: axis.clone().normalize(),
+      halfSpan,
+      topY: center.y,
+    });
+  }
+
+  _isDebugLedgeNormallyLandable(ledgeHeight, jumpReachHeight) {
+    return Number.isFinite(ledgeHeight)
+      && Number.isFinite(jumpReachHeight)
+      && ledgeHeight > 0
+      && ledgeHeight <= jumpReachHeight - DEBUG_LEDGE_NORMAL_LANDING_MARGIN;
+  }
+
+  _isInsideDebugPlatformTop(position, inset = 0) {
+    const platform = this.debugLedgePlatform;
+    if (!platform || !position) {
+      return false;
+    }
+
+    return Math.abs(position.x - platform.center.x) <= Math.max(0, platform.halfWidth - inset)
+      && Math.abs(position.z - platform.center.z) <= Math.max(0, platform.halfDepth - inset);
+  }
+
+  _tryResolveDebugPlatformLanding({
+    player,
+    root,
+    jumpStartY,
+    jumpReachHeight,
+  } = {}) {
+    const platform = this.debugLedgePlatform;
+    if (!platform || !player || !root) {
+      return false;
+    }
+
+    const startY = Number.isFinite(jumpStartY) ? jumpStartY : root.position.y;
+    const ledgeHeight = platform.topY - startY;
+    if (!this._isDebugLedgeNormallyLandable(ledgeHeight, jumpReachHeight)) {
+      return false;
+    }
+
+    if (!this._isInsideDebugPlatformTop(root.position, DEBUG_LEDGE_LANDING_INSET)) {
+      return false;
+    }
+
+    root.position.y = platform.topY;
+    if (player.modelRoot) {
+      player.modelRoot.position.y = 0;
+    }
+    this.lastDebugLedgeLandingId = platform.id;
+    return true;
+  }
+
+  _tryResolveDebugLedgeCling({
+    player,
+    root,
+    jumpDirection,
+    progress = 0,
+    jumpStartY,
+    jumpReachHeight,
+  } = {}) {
+    if (!player || !root || !this.debugLedgeCandidates.length) {
+      return false;
+    }
+
+    if (progress < DEBUG_LEDGE_GRAB_PROGRESS_MIN || progress > DEBUG_LEDGE_GRAB_PROGRESS_MAX) {
+      return false;
+    }
+
+    tempVectorA.copy(jumpDirection ?? player.lastMoveDirection ?? WORLD_UP);
+    tempVectorA.y = 0;
+    if (tempVectorA.lengthSq() <= 0.0001) {
+      return false;
+    }
+    tempVectorA.normalize();
+
+    const startY = Number.isFinite(jumpStartY) ? jumpStartY : root.position.y;
+    const reachHeight = Number.isFinite(jumpReachHeight)
+      ? jumpReachHeight
+      : player.getJumpReachHeight?.() ?? 0;
+    let best = null;
+    for (const ledge of this.debugLedgeCandidates) {
+      tempVectorB.copy(root.position).sub(ledge.center);
+      const faceDistance = tempVectorB.dot(ledge.normal);
+      if (faceDistance < DEBUG_LEDGE_GRAB_DISTANCE_MIN || faceDistance > DEBUG_LEDGE_GRAB_DISTANCE_MAX) {
+        continue;
+      }
+
+      const lateral = tempVectorB.dot(ledge.axis);
+      if (Math.abs(lateral) > ledge.halfSpan + 0.52) {
+        continue;
+      }
+
+      if (tempVectorA.dot(ledge.normal) > DEBUG_LEDGE_APPROACH_DOT_MAX) {
+        continue;
+      }
+
+      const ledgeHeight = ledge.topY - startY;
+      if (ledgeHeight < DEBUG_LEDGE_GRAB_HEIGHT_MIN || ledgeHeight > DEBUG_LEDGE_GRAB_HEIGHT_MAX) {
+        continue;
+      }
+
+      if (this._isDebugLedgeNormallyLandable(ledgeHeight, reachHeight)) {
+        continue;
+      }
+
+      const score = Math.abs(faceDistance - 0.42)
+        + Math.max(0, Math.abs(lateral) - ledge.halfSpan) * 1.5
+        + Math.abs(ledgeHeight - DEBUG_LEDGE_GRAB_IDEAL_HEIGHT) * 0.15;
+      if (!best || score < best.score) {
+        best = { ledge, lateral, score };
+      }
+    }
+
+    if (!best) {
+      return false;
+    }
+
+    const { ledge } = best;
+    const lateral = THREE.MathUtils.clamp(best.lateral, -ledge.halfSpan + 0.28, ledge.halfSpan - 0.28);
+    tempVectorC.copy(ledge.center).addScaledVector(ledge.axis, lateral);
+
+    const hangPosition = tempVectorC.clone()
+      .addScaledVector(ledge.normal, DEBUG_LEDGE_HANG_OFFSET)
+      .setY(ledge.topY - DEBUG_LEDGE_HANG_ROOT_DROP);
+    const climbPosition = tempVectorC.clone()
+      .addScaledVector(ledge.normal, -DEBUG_LEDGE_CLIMB_INSET)
+      .setY(ledge.topY + 0.02);
+    const handPosition = tempVectorC.clone()
+      .addScaledVector(ledge.normal, DEBUG_LEDGE_HAND_OUTWARD_OFFSET)
+      .setY(ledge.topY);
+
+    const started = player.startLedgeCling({
+      id: ledge.id,
+      normal: ledge.normal,
+      topY: ledge.topY,
+      hangPosition,
+      handPosition,
+      climbPosition,
+    });
+
+    if (started) {
+      this.lastDebugLedgeClingId = ledge.id;
+    }
+
+    return started;
   }
 
   _clearDungeonRunState() {
@@ -1788,6 +2197,11 @@ export class Game {
       if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'Space') {
         event.preventDefault();
         const movementBasis = this._getPlayerMovementBasis();
+
+        if (this.player?.isLedgeClinging?.()) {
+          this.player?.tryJump?.(this.keys, movementBasis);
+          return;
+        }
 
         if (this.player?.hasLateralDodgeInput?.(this.keys)) {
           this.player?.tryLateralDodgeRoll?.(this.keys, movementBasis);

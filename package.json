@@ -1,0 +1,22 @@
+{
+  "name": "ruin-digger-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Procedural Three.js third-person ruin-crawler prototype.",
+  "scripts": {
+    "dev": "node scripts/dev-server.mjs 5174",
+    "dev:5154": "node scripts/dev-server.mjs 5154",
+    "start": "npm run dev",
+    "check": "node --check scripts/dev-server.mjs && node --check src/main.js && node --check src/Game.js && node --check src/Player.js && node --check src/SkeletalModelRig.js && node --check src/DungeonGenerator.js && node --check src/UIManager.js",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "dependencies": {
+    "three": "0.165.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

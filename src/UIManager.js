@@ -406,6 +406,10 @@ export class UIManager {
     this.keycardValue = document.getElementById('keycard-value');
     this.objectiveValue = document.getElementById('objective-value');
     this.minimap = document.getElementById('dungeon-minimap');
+    this.minimapZoom = 1;
+    this.minimapMinZoom = 1;
+    this.minimapMaxZoom = 4;
+    this.minimapZoomStep = 0.25;
     this.levelValue = document.getElementById('level-value');
     this.weaponValue = document.getElementById('weapon-value');
     this.weaponGauge = document.getElementById('weapon-gauge');
@@ -1383,6 +1387,9 @@ export class UIManager {
 
     this.minimap.hidden = false;
     const number = (value) => Number(value ?? 0).toFixed(2);
+    const viewBox = this._getMinimapViewBox(snapshot);
+    const canZoomOut = this.minimapZoom > this.minimapMinZoom + 0.001;
+    const canZoomIn = this.minimapZoom < this.minimapMaxZoom - 0.001;
     const roomMarkup = snapshot.rooms.map((room) => {
       const bounds = room.roomBounds2D;
       const classes = [
@@ -1425,8 +1432,26 @@ export class UIManager {
     `).join('');
 
     this.minimap.innerHTML = `
+      <div class="minimap-controls" aria-label="Minimap zoom controls">
+        <button
+          type="button"
+          class="minimap-zoom-button"
+          data-action="minimap-zoom-out"
+          aria-label="Zoom minimap out"
+          title="Zoom out"
+          ${canZoomOut ? '' : 'disabled'}
+        >-</button>
+        <button
+          type="button"
+          class="minimap-zoom-button"
+          data-action="minimap-zoom-in"
+          aria-label="Zoom minimap in"
+          title="Zoom in"
+          ${canZoomIn ? '' : 'disabled'}
+        >+</button>
+      </div>
       <svg
-        viewBox="${number(snapshot.bounds.minX)} ${number(snapshot.bounds.minZ)} ${number(snapshot.bounds.width)} ${number(snapshot.bounds.depth)}"
+        viewBox="${number(viewBox.minX)} ${number(viewBox.minZ)} ${number(viewBox.width)} ${number(viewBox.depth)}"
         role="img"
         aria-label="Dungeon minimap"
         preserveAspectRatio="xMidYMid meet"
@@ -1446,6 +1471,50 @@ export class UIManager {
         </g>
       </svg>
     `;
+  }
+
+  _getMinimapViewBox(snapshot) {
+    const bounds = snapshot?.bounds;
+    if (!bounds) {
+      return {
+        minX: 0,
+        minZ: 0,
+        width: 1,
+        depth: 1,
+      };
+    }
+
+    const zoom = THREE.MathUtils.clamp(this.minimapZoom, this.minimapMinZoom, this.minimapMaxZoom);
+    const width = Math.max(1, (bounds.width ?? 1) / zoom);
+    const depth = Math.max(1, (bounds.depth ?? 1) / zoom);
+    const minBoundX = bounds.minX ?? 0;
+    const minBoundZ = bounds.minZ ?? 0;
+    const maxBoundX = minBoundX + (bounds.width ?? width);
+    const maxBoundZ = minBoundZ + (bounds.depth ?? depth);
+    const targetX = snapshot.player?.x ?? minBoundX + width * 0.5;
+    const targetZ = snapshot.player?.z ?? minBoundZ + depth * 0.5;
+    const minX = THREE.MathUtils.clamp(targetX - width * 0.5, minBoundX, maxBoundX - width);
+    const minZ = THREE.MathUtils.clamp(targetZ - depth * 0.5, minBoundZ, maxBoundZ - depth);
+
+    return {
+      minX,
+      minZ,
+      width,
+      depth,
+    };
+  }
+
+  _adjustMinimapZoom(delta) {
+    const previousZoom = this.minimapZoom;
+    this.minimapZoom = THREE.MathUtils.clamp(
+      this.minimapZoom + delta,
+      this.minimapMinZoom,
+      this.minimapMaxZoom,
+    );
+
+    if (Math.abs(this.minimapZoom - previousZoom) > 0.001) {
+      this._renderMinimap();
+    }
   }
 
   _renderMinimapMarker(marker, number) {
@@ -1657,6 +1726,50 @@ export class UIManager {
       this._renderArmHotbar();
       this.renderInventory();
     });
+
+    const applyMinimapZoomAction = (action) => {
+      const delta = action === 'minimap-zoom-in'
+        ? this.minimapZoomStep
+        : -this.minimapZoomStep;
+      this._adjustMinimapZoom(delta);
+    };
+
+    this.minimap?.addEventListener('pointerdown', (event) => {
+      const button = event.target?.closest?.('button[data-action^="minimap-zoom"]');
+      if (!button || button.disabled) {
+        return;
+      }
+      if (Number.isFinite(event.button) && event.button !== 0) {
+        return;
+      }
+
+      event.preventDefault();
+      applyMinimapZoomAction(button.dataset.action);
+    });
+
+    this.minimap?.addEventListener('click', (event) => {
+      if (event.detail !== 0) {
+        return;
+      }
+
+      const button = event.target?.closest?.('button[data-action^="minimap-zoom"]');
+      if (!button || button.disabled) {
+        return;
+      }
+
+      event.preventDefault();
+      applyMinimapZoomAction(button.dataset.action);
+    });
+
+    this.minimap?.addEventListener('wheel', (event) => {
+      if (this.minimap.hidden) {
+        return;
+      }
+
+      event.preventDefault();
+      const direction = event.deltaY < 0 ? 1 : -1;
+      this._adjustMinimapZoom(direction * this.minimapZoomStep);
+    }, { passive: false });
 
     this.poseDebugPanel?.addEventListener('input', (event) => {
       const input = event.target.closest('input[data-pose-joint]');

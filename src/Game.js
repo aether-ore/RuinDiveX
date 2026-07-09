@@ -628,17 +628,26 @@ export class Game {
     const controller = this.dungeonController;
     const entries = [];
     const shrine = controller?.shrine ?? null;
-    const shrineDoor = controller?.doors?.find?.((door) => door.id === 'largeRefractorSeal') ?? null;
-    const requiredKeycardDoor = controller?.doors?.find?.((door) => door.requiresKeycard && !door.optional) ?? null;
-    const keycardHeld = controller?.keycardCount ?? 0;
-    const unclaimedKeycards = controller?.keycards?.filter?.((keycard) => !keycard.collected).length ?? 0;
-    const override = controller?.mechanisms?.find?.((mechanism) => mechanism.id === 'conveyorOverride') ?? null;
-    const blockingEncounter = override?.requiresEncounterId
-      ? controller?.encounters?.find?.((encounter) => encounter.id === override.requiresEncounterId && !encounter.cleared)
-      : null;
+    const shrineDoor = controller?.doors?.find?.((door) => door.id === 'Door_Shrine') ?? null;
+    const trackedDoor = controller?.progressionManager?.getCurrentTrackedDoor?.(controller?.doors ?? []) ?? null;
+    const nextKeycard = controller?._getNextUncollectedProgressionKeycard?.() ?? null;
     const bonusDoor = controller?.doors?.find?.((door) => door.id === 'bonusVaultDoor') ?? null;
-    const vaultPlate = controller?.pressurePlates?.find?.((plate) => plate.id === 'conveyorVaultPlate') ?? null;
-    const relayBlock = controller?.puzzleBlocks?.find?.((block) => block.id === 'conveyorRelayBlock') ?? null;
+    const conveyorPuzzle = controller?.conveyorPuzzles?.find?.((puzzle) => puzzle.targetDoorId === 'bonusVaultDoor')
+      ?? controller?.conveyorPuzzles?.[0]
+      ?? null;
+    const conveyorPuzzleControls = conveyorPuzzle
+      ? controller?.mechanisms?.filter?.((mechanism) => mechanism.conveyorPuzzleId === conveyorPuzzle.id) ?? []
+      : [];
+    const conveyorBlockingEncounter = conveyorPuzzleControls
+      .map((mechanism) => (
+        mechanism.requiresEncounterId
+          ? controller?.encounters?.find?.((encounter) => encounter.id === mechanism.requiresEncounterId && !encounter.cleared)
+          : null
+      ))
+      .find(Boolean);
+    const conveyorRouteReady = Boolean(conveyorPuzzle?.junctions?.every?.((junction) => (
+      (junction.stateIndex ?? 0) === (conveyorPuzzle.solutionState?.[junction.id] ?? junction.solutionStateIndex ?? 0)
+    )));
 
     const refractorComplete = Boolean(this.ruinCompleted);
     const extracted = refractorComplete && Boolean(controller?.isPlayerInSafeZone?.());
@@ -655,64 +664,64 @@ export class Game {
             : shrine?.collected
             ? 'Extraction pad online'
             : shrineDoor?.closed
-              ? 'Reach the shrine seal'
+              ? 'Defeat boss and unlock shrine'
               : 'Secure the refractor',
       detail: extracted
         ? `${this.largeRefractorsSecured} Large Refractor${this.largeRefractorsSecured === 1 ? '' : 's'} secured`
-        : 'Enter the ruin, recover the ruin core, and return to the expedition camp.',
+        : 'Enter the ruin, defeat the boss for the Shrine Key, recover the ruin core, and return to camp.',
       progress: extracted ? 1 : refractorComplete ? 0.9 : !expeditionStarted ? 0.18 : shrineDoor?.closed ? 0.55 : 0.78,
       color: '#7df8ff',
     });
 
-    if (requiredKeycardDoor) {
+    if (trackedDoor || nextKeycard) {
       entries.push({
         id: 'keycardRoute',
         title: 'Security Keycard Route',
-        status: requiredKeycardDoor.closed
-          ? keycardHeld > 0
-            ? 'Keycard ready'
-            : unclaimedKeycards > 0
-              ? 'Recover keycard'
-              : 'Hunt Reaverbots'
-          : 'Gate opened',
-        detail: requiredKeycardDoor.closed
-          ? 'Use a keycard to open the required ruin gate.'
-          : 'The required keycard gate is open.',
-        progress: requiredKeycardDoor.closed ? (keycardHeld > 0 ? 0.72 : 0.28) : 1,
+        status: trackedDoor
+          ? `${trackedDoor.keycard.displayName} ready`
+          : nextKeycard
+            ? `Recover ${nextKeycard.spawnMode === 'Chest' ? 'keycard chest' : nextKeycard.spawnMode === 'EliteEnemyDrop' ? 'elite carrier keycard' : nextKeycard.displayName}`
+            : 'Route opened',
+        detail: trackedDoor
+          ? `Use ${trackedDoor.keycard.displayName} at ${trackedDoor.runtimeDoor.label}.`
+          : 'Progressive keycards unlock their paired security doors.',
+        progress: trackedDoor ? 0.72 : nextKeycard ? 0.34 : 1,
         color: '#ffd66b',
       });
     }
 
-    if (override) {
+    if (bonusDoor && conveyorPuzzle) {
+      const vaultOpened = !bonusDoor.closed || conveyorPuzzle.completed || conveyorPuzzle.state === 'VaultOpened';
+      const cargoMoving = conveyorPuzzle.state === 'ObjectMoving';
+      const cargoBlocked = conveyorPuzzle.state === 'ObjectBlocked';
       entries.push({
-        id: 'conveyorOverride',
-        title: 'Ruin Override Console',
-        status: override.activated
-          ? 'Override complete'
-          : blockingEncounter
-            ? `Clear ${blockingEncounter.label}`
-            : 'Console available',
-        detail: override.activated
-          ? 'Shrine security and local hazards are disabled.'
-          : 'Activate the console to disable traps and release the shrine seal.',
-        progress: override.activated ? 1 : blockingEncounter ? 0.35 : 0.66,
-        color: '#6bdcff',
-      });
-    }
-
-    if (bonusDoor && vaultPlate && relayBlock) {
-      entries.push({
-        id: 'vaultRelay',
-        title: 'Optional Vault Relay',
-        status: bonusDoor.closed
-          ? vaultPlate.activated
-            ? 'Plate powered'
-            : 'Route relay block'
-          : 'Vault opened',
-        detail: bonusDoor.closed
-          ? 'Push the relay block onto the conveyor plate or spend a keycard at the vault door.'
-          : 'The optional conveyor vault route is unlocked.',
-        progress: bonusDoor.closed ? (vaultPlate.activated ? 0.82 : 0.35) : 1,
+        id: 'conveyorCargoVault',
+        title: 'Optional Cargo Routing Vault',
+        status: vaultOpened
+          ? 'Vault opened'
+          : conveyorBlockingEncounter
+            ? `Clear ${conveyorBlockingEncounter.label}`
+            : cargoMoving
+              ? 'Cargo moving'
+              : cargoBlocked
+                ? 'Reset cargo'
+                : conveyorRouteReady
+                  ? 'Release cargo'
+                  : 'Set receiver route',
+        detail: vaultOpened
+          ? 'The optional conveyor vault route is unlocked.'
+          : 'Set the conveyor route, release the cargo, and guide it to the receiver plate to open the optional vault.',
+        progress: vaultOpened
+          ? 1
+          : conveyorBlockingEncounter
+            ? 0.22
+            : cargoMoving
+              ? 0.66
+              : cargoBlocked
+                ? 0.48
+                : conveyorRouteReady
+                  ? 0.52
+                  : 0.34,
         color: '#6bdcff',
       });
     }
@@ -857,7 +866,7 @@ export class Game {
       this.dungeon.group.removeFromParent();
     }
 
-    const dungeon = new DungeonGenerator().generate();
+    const dungeon = new DungeonGenerator({ difficulty: this.ruinFloor }).generate();
     this.dungeon = dungeon;
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
@@ -1477,7 +1486,7 @@ export class Game {
     grid.position.y = 0.014;
     this.scene.add(grid);
 
-    const dungeon = new DungeonGenerator().generate();
+    const dungeon = new DungeonGenerator({ difficulty: this.ruinFloor }).generate();
     this.dungeon = dungeon;
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);

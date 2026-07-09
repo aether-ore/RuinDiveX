@@ -1,9 +1,15 @@
 import * as THREE from 'three';
+import {
+  DungeonProgressionManager,
+  SHRINE_KEY_ID,
+} from './DungeonProgression.js';
 
 const KEYCARD_COLOR = 0xffd66b;
 const MECHANISM_COLOR = 0x6bdcff;
 const SHRINE_COLOR = 0x7df8ff;
 const LOCKED_COLOR = 0xffb347;
+const KEY_SEEKER_COLOR = 0x5ee77b;
+const TRACKING_COLOR = 0xa06cff;
 const DOOR_OPEN_Y = -5.3;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
@@ -98,8 +104,14 @@ export class DungeonController {
     this.encounters = dungeon?.encounters ?? [];
     this.traps = dungeon?.traps ?? [];
     this.conveyors = dungeon?.conveyors ?? [];
+    this.conveyorPuzzles = dungeon?.conveyorPuzzles ?? [];
+    this.conveyorPuzzleById = new Map(this.conveyorPuzzles.map((puzzle) => [puzzle.id, puzzle]));
     this.shrine = dungeon?.shrine ?? null;
-    this.keycardCount = 0;
+    this.keySeeker = dungeon?.keySeeker ?? dungeon?.progression?.keySeeker ?? null;
+    this.progression = dungeon?.progression ?? null;
+    this.progressionManager = new DungeonProgressionManager(this.progression);
+    this.keycardCount = this.progressionManager.getNormalKeycardCount();
+    this.discoveredRoomIds = new Set(['hubTown', 'expeditionCamp', 'entrance']);
     this.nearestInteractable = null;
     this.lastSafePlayerPosition = new THREE.Vector3();
     this.lastSafeEnemyPositions = new Map();
@@ -111,6 +123,7 @@ export class DungeonController {
     }
 
     this._bindConveyorVisuals();
+    this._initializeConveyorPuzzles();
   }
 
   update(dt) {
@@ -119,17 +132,20 @@ export class DungeonController {
     }
 
     this._constrainPlayerToWalkable();
+    this._updateRoomDiscovery();
     this._updateKeycards(dt);
     this._updateTraps(dt);
     this._updateTrapVisuals(dt);
     this._updatePuzzleBlocks(dt);
     this._updateConveyors(dt);
+    this._updateConveyorPuzzles(dt);
     this._updatePressurePlates(dt);
     this._updateEncounters();
     this._constrainPlayerToWalkable();
     this._updateDoorVisuals(dt);
     this._updateChestVisuals(dt);
     this._updateMechanismVisuals(dt);
+    this._updateKeySeekerVisuals(dt);
     this._updateExtractionVisuals(dt);
     this._updateExpeditionEntryState();
     this._updateNearestInteractable();
@@ -156,35 +172,39 @@ export class DungeonController {
       return `Clear ${activeEncounter.label}`;
     }
 
-    const activeTrap = this.traps.find((trap) => (
-      trap.active
-      && isInsideZone(this.game.player.root.position, trap)
-    ));
-    if (activeTrap) {
-      return this.keycardCount > 0 ? 'Disable trap' : 'Time laser pulses';
-    }
-
     if (this.game.ruinCompleted && this.shrine?.collected) {
       return 'Use extraction pad';
     }
 
-    const shrineDoor = this.doors.find((door) => door.id === 'largeRefractorSeal');
+    const shrineDoor = this.doors.find((door) => door.id === 'Door_Shrine');
     if (this.shrine && !this.shrine.collected && !shrineDoor?.closed) {
       return 'Secure Large Refractor';
     }
 
-    const unclaimedKeycard = this.keycards.some((keycard) => !keycard.collected);
-    const keycardDoor = this.doors.find((door) => door.requiresKeycard && door.closed && !door.optional);
-    if (keycardDoor) {
-      return this.keycardCount > 0
-        ? 'Open keycard door'
-        : unclaimedKeycard
-          ? 'Find keycard'
-          : 'Hunt Reaverbots';
+    const trackedDoor = this.progressionManager.getCurrentTrackedDoor(this.doors);
+    if (trackedDoor?.runtimeDoor) {
+      const keycardName = this.progressionManager.getKeycardDisplayName(trackedDoor.keycard.keycardId);
+      return trackedDoor.keycard.keycardId === SHRINE_KEY_ID
+        ? 'Open shrine door'
+        : `Use ${keycardName}`;
+    }
+
+    const bossEncounter = this.encounters.find((encounter) => encounter.isBoss);
+    if (bossEncounter && !bossEncounter.cleared && this._isRoomReachableWithCurrentKeys(bossEncounter.roomId)) {
+      return 'Defeat ruin boss';
+    }
+
+    const nextKeycard = this._getNextUncollectedProgressionKeycard();
+    if (nextKeycard) {
+      return nextKeycard.spawnMode === 'EliteEnemyDrop'
+        ? 'Find elite keycard carrier'
+        : nextKeycard.spawnMode === 'Chest'
+          ? 'Open keycard chest'
+          : `Find ${nextKeycard.displayName}`;
     }
 
     if (shrineDoor?.closed) {
-      return 'Find override console';
+      return 'Defeat boss for Shrine Key';
     }
 
     return 'Return to camp';
@@ -214,6 +234,11 @@ export class DungeonController {
 
     if (interactable.kind === 'chest') {
       this._activateChest(interactable.target);
+      return true;
+    }
+
+    if (interactable.kind === 'keySeeker') {
+      this._activateKeySeeker();
       return true;
     }
 
@@ -491,11 +516,8 @@ export class DungeonController {
   }
 
   rollEnemyKeycardDrop(enemy) {
-    const uncollectedKeycardExists = this.keycards.some((keycard) => !keycard.collected);
-    const neededForProgress = this.keycardCount <= 0 && !uncollectedKeycardExists;
-    const chance = neededForProgress ? 0.32 : enemy?.isElite ? 0.16 : 0.045;
-
-    if (Math.random() > chance) {
+    const keycardId = enemy?.guaranteedKeycardDropId ?? null;
+    if (!keycardId || this.progressionManager.hasKeycard(keycardId)) {
       return null;
     }
 
@@ -504,24 +526,524 @@ export class DungeonController {
     position.x += (Math.random() - 0.5) * 0.7;
     position.z += (Math.random() - 0.5) * 0.7;
 
-    return this._spawnKeycardAt(position, 'enemyKeycard');
+    return this._spawnKeycardAt(position, 'enemyKeycard', keycardId);
   }
 
-  _spawnKeycardAt(position, idPrefix = 'ruinKeycard') {
+  _spawnKeycardAt(position, idPrefix = 'ruinKeycard', keycardId = null) {
+    if (keycardId && this.progressionManager.hasKeycard(keycardId)) {
+      return null;
+    }
+
     const object = createDroppedKeycardObject();
     const floorPosition = position.clone();
     floorPosition.y = this.getFloorElevationAt(position);
     object.position.set(floorPosition.x, floorPosition.y + 0.42, floorPosition.z);
     this.game.scene.add(object);
+    const definition = keycardId ? this.progressionManager.getKeycard(keycardId) : null;
 
     const keycard = {
-      id: `${idPrefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      id: keycardId ?? `${idPrefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      keycardId,
+      displayName: definition?.displayName ?? 'Keycard',
+      pairedDoorId: definition?.pairedDoorId ?? null,
+      progressionTier: definition?.progressionTier ?? null,
+      spawnMode: definition?.spawnMode ?? 'Dropped',
+      isRequiredForMainProgression: Boolean(definition?.isRequiredForMainProgression),
       object,
       position: floorPosition,
       collected: false,
     };
     this.keycards.push(keycard);
     return keycard;
+  }
+
+  getKeycardHudLabel() {
+    return this.progressionManager.getHudLabel();
+  }
+
+  _grantKeycard(keycardId, { position = null } = {}) {
+    if (!keycardId) {
+      return false;
+    }
+
+    const keycard = this.progressionManager.getKeycard(keycardId);
+    const collected = this.progressionManager.collectKeycard(keycardId);
+    if (!collected) {
+      return false;
+    }
+
+    this.keycardCount = this.progressionManager.getNormalKeycardCount();
+    const message = keycardId === SHRINE_KEY_ID
+      ? 'Shrine Key obtained.'
+      : `Obtained ${keycard?.displayName ?? 'Keycard'}.`;
+    const color = keycardId === SHRINE_KEY_ID ? SHRINE_COLOR : KEY_SEEKER_COLOR;
+
+    if (position) {
+      this.game.addParticleBurst(position, color, 22, 0.16);
+    }
+
+    this.game.ui?.showToast?.(message, keycardId === SHRINE_KEY_ID ? '#7df8ff' : '#5ee77b');
+    this.game.ui?.renderInventory?.();
+    return true;
+  }
+
+  _collectKeycard(keycard, { position = null } = {}) {
+    if (!keycard || keycard.collected) {
+      return false;
+    }
+
+    const keycardId = keycard.keycardId ?? keycard.id;
+    const collected = this._grantKeycard(keycardId, {
+      position: position ?? keycard.position,
+    });
+
+    keycard.collected = true;
+    if (keycard.object) {
+      keycard.object.visible = false;
+    }
+
+    return collected;
+  }
+
+  _getCollectedInventorySet() {
+    return new Set(this.progressionManager.collectedKeycardIds);
+  }
+
+  _getNextUncollectedProgressionKeycard() {
+    const keycards = [...(this.progression?.keycards ?? [])]
+      .filter((keycard) => !this.progressionManager.hasKeycard(keycard.keycardId))
+      .sort((a, b) => (a.progressionTier ?? 99) - (b.progressionTier ?? 99));
+
+    return keycards.find((keycard) => this._isRoomReachableWithCurrentKeys(keycard.spawnRoomId))
+      ?? keycards[0]
+      ?? null;
+  }
+
+  _isRoomReachableWithCurrentKeys(roomId) {
+    return this._getReachableRoomIds(this._getCollectedInventorySet()).has(roomId);
+  }
+
+  _getReachableRoomIds(inventory = new Set(), forceClosedDoorIds = new Set()) {
+    const connections = this.progression?.roomConnections ?? [];
+    const startRoomId = this.progression?.entranceRoomId ?? 'hubTown';
+    const reachable = new Set([startRoomId]);
+    const queue = [startRoomId];
+
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const roomId = queue[cursor];
+
+      for (const connection of connections) {
+        const nextRoomId = connection.fromRoomId === roomId
+          ? connection.toRoomId
+          : connection.toRoomId === roomId
+            ? connection.fromRoomId
+            : null;
+
+        if (!nextRoomId || reachable.has(nextRoomId)) {
+          continue;
+        }
+
+        if (!this._canTraverseProgressionConnection(connection, inventory, forceClosedDoorIds)) {
+          continue;
+        }
+
+        reachable.add(nextRoomId);
+        queue.push(nextRoomId);
+      }
+    }
+
+    return reachable;
+  }
+
+  _canTraverseProgressionConnection(connection, inventory, forceClosedDoorIds = new Set()) {
+    if (!connection.doorId || connection.doorId === 'entranceDoor') {
+      return true;
+    }
+
+    if (forceClosedDoorIds.has(connection.doorId)) {
+      return false;
+    }
+
+    const door = this.doors.find((candidate) => candidate.id === connection.doorId);
+    if (!door || !door.closed) {
+      return true;
+    }
+
+    if (door.encounterId) {
+      const encounter = this.encounters.find((candidate) => candidate.id === door.encounterId);
+      if (encounter && !encounter.cleared) {
+        return false;
+      }
+    }
+
+    if (door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId)) {
+      return true;
+    }
+
+    if (door.mechanismId && !this._isMechanismActivated(door.mechanismId)) {
+      return false;
+    }
+
+    if (door.requiresKeycard) {
+      return inventory.has(door.requiredKeycardId);
+    }
+
+    return !door.locked;
+  }
+
+  _getRoomAtPosition(position) {
+    if (!position) {
+      return null;
+    }
+
+    const tile = this.worldToTile(position);
+
+    for (const room of this.dungeon?.rooms ?? []) {
+      const halfW = Math.floor((room.width ?? 1) / 2);
+      const halfD = Math.floor((room.depth ?? 1) / 2);
+      if (
+        Math.abs(tile.x - room.x) <= halfW
+        && Math.abs(tile.z - room.z) <= halfD
+      ) {
+        return room;
+      }
+    }
+
+    return null;
+  }
+
+  _updateRoomDiscovery() {
+    const room = this._getRoomAtPosition(this.game.player.root.position);
+    if (!room) {
+      return;
+    }
+
+    this.discoveredRoomIds.add(room.id);
+
+    for (const connection of this.progression?.roomConnections ?? []) {
+      if (connection.fromRoomId === room.id) {
+        this.discoveredRoomIds.add(connection.toRoomId);
+      } else if (connection.toRoomId === room.id) {
+        this.discoveredRoomIds.add(connection.fromRoomId);
+      }
+    }
+  }
+
+  _activateKeySeeker() {
+    if (!this.keySeeker || this.keySeeker.activated) {
+      return;
+    }
+
+    this.keySeeker.activated = true;
+    this.keySeeker.isActivated = true;
+    if (this.progression?.keySeeker) {
+      this.progression.keySeeker.isActivated = true;
+    }
+
+    this.game.addParticleBurst(this.keySeeker.position, KEY_SEEKER_COLOR, 28, 0.18);
+    this.game.ui?.showToast?.('Key Seeker activated. Keycard signals added to minimap.', '#5ee77b');
+  }
+
+  _updateKeySeekerVisuals(dt) {
+    const object = this.keySeeker?.object;
+    if (!object) {
+      return;
+    }
+
+    const lens = object.getObjectByName?.('keySeekerSignalLens');
+    const ring = object.getObjectByName?.('keySeekerSignalRing');
+    const active = Boolean(this.keySeeker.activated);
+
+    if (lens) {
+      lens.rotation.y += dt * (active ? 3.2 : 1.1);
+      lens.position.y = 0.88 + Math.sin(this.game.elapsedTime * (active ? 5.4 : 2.4)) * (active ? 0.07 : 0.03);
+      if (lens.material?.emissive) {
+        lens.material.emissiveIntensity = active
+          ? 1.35 + Math.sin(this.game.elapsedTime * 6) * 0.18
+          : 0.72;
+      }
+    }
+
+    if (ring?.material) {
+      ring.material.opacity = active
+        ? 0.38 + Math.sin(this.game.elapsedTime * 5.4) * 0.1
+        : 0.18 + Math.sin(this.game.elapsedTime * 2.2) * 0.04;
+    }
+  }
+
+  getMinimapSnapshot() {
+    const minimap = this.progression?.minimap;
+    if (!minimap) {
+      return null;
+    }
+
+    const roomById = new Map(minimap.rooms.map((room) => [room.roomId, room]));
+    const playerPoint = this._worldToMinimapPoint(this.game.player.root.position);
+    const reachableRooms = this._getReachableRoomIds(this._getCollectedInventorySet());
+    const rooms = minimap.rooms.map((room) => ({
+      ...room,
+      isDiscovered: this.discoveredRoomIds.has(room.roomId),
+      isReachable: reachableRooms.has(room.roomId),
+      isCurrent: this._getRoomAtPosition(this.game.player.root.position)?.id === room.roomId,
+    }));
+    const hallways = minimap.hallways.map((hallway) => {
+      const fromRoom = roomById.get(hallway.fromRoomId);
+      const toRoom = roomById.get(hallway.toRoomId);
+      return {
+        ...hallway,
+        from: fromRoom?.roomCenter2D ?? null,
+        to: toRoom?.roomCenter2D ?? null,
+        isDiscovered: this.discoveredRoomIds.has(hallway.fromRoomId) || this.discoveredRoomIds.has(hallway.toRoomId),
+      };
+    });
+    const markers = this._createMinimapMarkers(reachableRooms);
+    const arrows = this._createMinimapArrows(playerPoint, reachableRooms);
+
+    return {
+      bounds: minimap.bounds,
+      rooms,
+      hallways,
+      markers,
+      arrows,
+      player: playerPoint,
+    };
+  }
+
+  _createMinimapMarkers(reachableRooms) {
+    const markers = [];
+    const addMarker = (type, position, options = {}) => {
+      if (!position) {
+        return;
+      }
+
+      markers.push({
+        id: options.id ?? `${type}_${markers.length}`,
+        type,
+        point: this._worldToMinimapPoint(position),
+        roomId: options.roomId ?? this._getRoomAtPosition(position)?.id ?? null,
+        label: options.label ?? type,
+        priority: options.priority ?? 0,
+        isReachable: options.roomId ? reachableRooms.has(options.roomId) : true,
+      });
+    };
+
+    for (const door of this.doors) {
+      const visible = this.discoveredRoomIds.has(door.fromRoomId) || this.discoveredRoomIds.has(door.toRoomId);
+      if (!visible || !door.closed) {
+        continue;
+      }
+
+      addMarker(
+        door.isShrineDoor
+          ? 'shrineDoor'
+          : this.progressionManager.hasKeycard(door.requiredKeycardId)
+            ? 'usableDoor'
+            : 'lockedDoor',
+        door.position,
+        {
+          id: door.id,
+          roomId: door.toRoomId,
+          label: door.label,
+          priority: door.isShrineDoor ? 90 : 70,
+        },
+      );
+    }
+
+    for (const chest of this.chests) {
+      if (chest.opened) {
+        continue;
+      }
+
+      const visible = this.discoveredRoomIds.has(chest.roomId) || (this.keySeeker?.activated && chest.guaranteedKeycardId);
+      if (visible) {
+        addMarker(chest.guaranteedKeycardId ? 'keycardChest' : 'chest', chest.position, {
+          id: chest.id,
+          roomId: chest.roomId,
+          label: chest.guaranteedKeycardId ? 'Keycard Signal' : 'Chest',
+          priority: chest.guaranteedKeycardId ? 78 : 35,
+        });
+      }
+    }
+
+    for (const keycard of this.keycards) {
+      if (keycard.collected) {
+        continue;
+      }
+
+      const roomId = keycard.spawnRoomId ?? this._getRoomAtPosition(keycard.position)?.id ?? null;
+      const visible = this.discoveredRoomIds.has(roomId) || this.keySeeker?.activated;
+      if (visible) {
+        addMarker('keycard', keycard.position, {
+          id: keycard.keycardId ?? keycard.id,
+          roomId,
+          label: this.keySeeker?.activated && !this.progressionManager.hasKeycard(keycard.keycardId)
+            ? 'Keycard Signal'
+            : keycard.displayName,
+          priority: 82,
+        });
+      }
+    }
+
+    for (const enemy of this.game.enemies) {
+      if (enemy.dead) {
+        continue;
+      }
+
+      const roomId = this._getRoomAtPosition(enemy.root.position)?.id ?? null;
+      const isCarrier = Boolean(enemy.guaranteedKeycardDropId);
+      const visible = this.discoveredRoomIds.has(roomId) || (isCarrier && this.keySeeker?.activated);
+      if (visible) {
+        addMarker(isCarrier ? 'keyHoldingElite' : 'enemy', enemy.root.position, {
+          id: enemy.id,
+          roomId,
+          label: isCarrier ? 'Elite keycard carrier' : 'Enemy',
+          priority: isCarrier ? 84 : 30,
+        });
+      }
+    }
+
+    for (const encounter of this.encounters) {
+      if (encounter.cleared) {
+        continue;
+      }
+
+      if (encounter.keycardDropId && !this.progressionManager.hasKeycard(encounter.keycardDropId)) {
+        const visible = this.keySeeker?.activated || this.discoveredRoomIds.has(encounter.roomId);
+        if (visible && !encounter.spawned) {
+          addMarker('keyHoldingElite', encounter.zone.position, {
+            id: `${encounter.id}_carrier`,
+            roomId: encounter.roomId,
+            label: 'Elite keycard carrier',
+            priority: 84,
+          });
+        }
+      }
+
+      if (encounter.isBoss && this.discoveredRoomIds.has(encounter.roomId)) {
+        addMarker('boss', encounter.zone.position, {
+          id: encounter.id,
+          roomId: encounter.roomId,
+          label: 'Boss',
+          priority: 86,
+        });
+      }
+    }
+
+    if (this.keySeeker && !this.keySeeker.activated && this.discoveredRoomIds.has(this.keySeeker.roomId)) {
+      addMarker('keySeeker', this.keySeeker.position, {
+        id: this.keySeeker.id,
+        roomId: this.keySeeker.roomId,
+        label: 'Key Seeker',
+        priority: 62,
+      });
+    }
+
+    if (this.shrine && this.discoveredRoomIds.has('shrineRoom')) {
+      addMarker('shrine', this.shrine.position, {
+        id: this.shrine.id,
+        roomId: 'shrineRoom',
+        label: 'Large Refractor',
+        priority: 88,
+      });
+    }
+
+    return markers.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+  }
+
+  _createMinimapArrows(playerPoint, reachableRooms) {
+    const arrows = [];
+    const addArrow = (type, position, options = {}) => {
+      const point = this._worldToMinimapPoint(position);
+      const angle = THREE.MathUtils.radToDeg(Math.atan2(point.z - playerPoint.z, point.x - playerPoint.x));
+      arrows.push({
+        id: options.id ?? `${type}_${arrows.length}`,
+        type,
+        point,
+        angle,
+        isDim: Boolean(options.isDim),
+        label: options.label ?? type,
+      });
+    };
+
+    if (this.keySeeker?.activated) {
+      for (const keycard of this.progression?.keycards ?? []) {
+        if (this.progressionManager.hasKeycard(keycard.keycardId)) {
+          continue;
+        }
+
+        const source = this._getKeycardSource(keycard.keycardId);
+        if (!source?.position) {
+          continue;
+        }
+
+        addArrow('keySignal', source.position, {
+          id: `${keycard.keycardId}_signal`,
+          isDim: source.roomId ? !reachableRooms.has(source.roomId) : false,
+          label: 'Keycard Signal',
+        });
+      }
+    }
+
+    const trackedDoor = this.progressionManager.getCurrentTrackedDoor(this.doors);
+    if (trackedDoor?.runtimeDoor?.position) {
+      addArrow(trackedDoor.keycard.keycardId === SHRINE_KEY_ID ? 'shrineObjective' : 'usableDoor', trackedDoor.runtimeDoor.position, {
+        id: `${trackedDoor.keycard.keycardId}_doorArrow`,
+        label: trackedDoor.runtimeDoor.label,
+      });
+    }
+
+    return arrows;
+  }
+
+  _getKeycardSource(keycardId) {
+    const dropped = this.keycards.find((keycard) => keycard.keycardId === keycardId && !keycard.collected);
+    if (dropped) {
+      return {
+        position: dropped.position,
+        roomId: dropped.spawnRoomId ?? this._getRoomAtPosition(dropped.position)?.id ?? null,
+      };
+    }
+
+    const chest = this.chests.find((candidate) => candidate.guaranteedKeycardId === keycardId && !candidate.opened);
+    if (chest) {
+      return {
+        position: chest.position,
+        roomId: chest.roomId,
+      };
+    }
+
+    const carrier = this.game.enemies.find((enemy) => !enemy.dead && enemy.guaranteedKeycardDropId === keycardId);
+    if (carrier) {
+      return {
+        position: carrier.root.position,
+        roomId: this._getRoomAtPosition(carrier.root.position)?.id ?? null,
+      };
+    }
+
+    const encounter = this.encounters.find((candidate) => candidate.keycardDropId === keycardId && !candidate.cleared);
+    if (encounter) {
+      return {
+        position: encounter.zone.position,
+        roomId: encounter.roomId,
+      };
+    }
+
+    const progressionKeycard = this.progression?.keycards?.find((keycard) => keycard.keycardId === keycardId);
+    if (progressionKeycard?.sourcePosition) {
+      return {
+        position: progressionKeycard.sourcePosition,
+        roomId: progressionKeycard.spawnRoomId,
+      };
+    }
+
+    return null;
+  }
+
+  _worldToMinimapPoint(position) {
+    return {
+      x: Number((position.x / this.tileSize).toFixed(3)),
+      z: Number((position.z / this.tileSize).toFixed(3)),
+    };
   }
 
   _constrainPlayerToWalkable() {
@@ -569,11 +1091,9 @@ export class DungeonController {
         continue;
       }
 
-      keycard.collected = true;
-      keycard.object.visible = false;
-      this.keycardCount += 1;
-      this.game.addParticleBurst(keycard.position, KEYCARD_COLOR, 18, 0.16);
-      this.game.ui?.showToast?.('Keycard acquired', '#ffd66b');
+      this._collectKeycard(keycard, {
+        position: keycard.position,
+      });
     }
   }
 
@@ -777,6 +1297,319 @@ export class DungeonController {
     }
   }
 
+  _initializeConveyorPuzzles() {
+    for (const puzzle of this.conveyorPuzzles) {
+      puzzle.beltByKey = new Map((puzzle.belts ?? []).map((belt) => [belt.key, belt]));
+      puzzle.junctionById = new Map((puzzle.junctions ?? []).map((junction) => [junction.id, junction]));
+      puzzle.junctionByBeltId = new Map((puzzle.junctions ?? []).map((junction) => [junction.beltId, junction]));
+      puzzle.state = puzzle.completed ? 'VaultOpened' : puzzle.state ?? 'ObjectReady';
+
+      for (const junction of puzzle.junctions ?? []) {
+        this._applyConveyorPuzzleJunctionState(puzzle, junction, junction.stateIndex ?? 0, { silent: true });
+      }
+
+      this._resetConveyorPuzzleCargo(puzzle, { silent: true, keepConsoleStates: true });
+    }
+  }
+
+  _updateConveyorPuzzles(dt) {
+    for (const puzzle of this.conveyorPuzzles) {
+      this._updateConveyorPuzzleVisuals(puzzle, dt);
+
+      if (puzzle.completed || puzzle.state === 'VaultOpened') {
+        continue;
+      }
+
+      const cargo = puzzle.cargo;
+      if (!cargo || puzzle.state !== 'ObjectMoving') {
+        continue;
+      }
+
+      if (cargo.moving) {
+        cargo.moveProgress = Math.min(1, (cargo.moveProgress ?? 0) + dt * (puzzle.objectSpeed ?? 2.4));
+        cargo.position.lerpVectors(cargo.fromPosition, cargo.toPosition, cargo.moveProgress);
+        cargo.position.y = this.getFloorElevationAt(cargo.position);
+        cargo.object?.position.copy(cargo.position);
+
+        if (cargo.moveProgress >= 1) {
+          cargo.currentTileKey = cargo.toTileKey;
+          cargo.moving = false;
+          cargo.fromTileKey = null;
+          cargo.toTileKey = null;
+          if (cargo.currentTileKey === puzzle.target.key) {
+            this._completeConveyorPuzzle(puzzle);
+          }
+        }
+        continue;
+      }
+
+      this._advanceConveyorPuzzleCargo(puzzle);
+    }
+  }
+
+  _updateConveyorPuzzleVisuals(puzzle, dt) {
+    const cargoCore = puzzle.cargo?.object?.getObjectByName?.('conveyorCargoRefractorCore');
+    if (cargoCore?.material?.emissive) {
+      cargoCore.rotation.y += dt * (puzzle.state === 'ObjectMoving' ? 2.8 : 1.1);
+      cargoCore.material.emissiveIntensity = 0.82 + Math.sin(this.game.elapsedTime * 5.6) * 0.16;
+    }
+
+    const spawnerRing = puzzle.spawner?.object?.getObjectByName?.('conveyorCargoSpawnerRing');
+    if (spawnerRing?.material) {
+      spawnerRing.rotation.z += dt * 0.85;
+      spawnerRing.material.opacity = THREE.MathUtils.lerp(
+        spawnerRing.material.opacity ?? 0.26,
+        puzzle.state === 'ObjectReady' ? 0.38 : 0.18,
+        Math.min(1, dt * 5),
+      );
+    }
+  }
+
+  _activateConveyorPuzzleMechanism(mechanism) {
+    const puzzle = this.conveyorPuzzleById.get(mechanism.conveyorPuzzleId);
+    if (!puzzle) {
+      return;
+    }
+
+    const blockedEncounter = this._getMechanismBlockingEncounter(mechanism);
+    if (blockedEncounter) {
+      this.game.ui?.showToast?.(`Clear ${blockedEncounter.label} before using this console`, '#ffb347');
+      this.game.addParticleBurst(mechanism.position, LOCKED_COLOR, 12, 0.12);
+      return;
+    }
+
+    if (puzzle.completed || puzzle.state === 'VaultOpened') {
+      this.game.ui?.showToast?.('Cargo route complete. Bonus vault unlocked.', '#6bdcff');
+      return;
+    }
+
+    if (mechanism.conveyorPuzzleAction === 'cycleJunction') {
+      const junctionId = mechanism.controlledJunctionIds?.[0] ?? puzzle.junctions?.[0]?.id;
+      const junction = puzzle.junctionById?.get(junctionId);
+      if (!junction?.states?.length) {
+        return;
+      }
+
+      const nextStateIndex = ((junction.stateIndex ?? 0) + 1) % junction.states.length;
+      this._applyConveyorPuzzleJunctionState(puzzle, junction, nextStateIndex);
+      const stateLabel = junction.states[nextStateIndex]?.label ?? `Route ${nextStateIndex + 1}`;
+      this.game.ui?.showToast?.(`Conveyor route set: ${stateLabel}`, '#6bdcff');
+      this.game.addParticleBurst(mechanism.position, MECHANISM_COLOR, 14, 0.12);
+      return;
+    }
+
+    if (mechanism.conveyorPuzzleAction === 'launchOrReset') {
+      if (puzzle.state === 'ObjectMoving' || puzzle.state === 'ObjectBlocked') {
+        this._resetConveyorPuzzleCargo(puzzle);
+        return;
+      }
+
+      this._launchConveyorPuzzleCargo(puzzle);
+    }
+  }
+
+  _applyConveyorPuzzleJunctionState(puzzle, junction, stateIndex, { silent = false } = {}) {
+    if (!junction?.states?.length) {
+      return;
+    }
+
+    const clampedState = THREE.MathUtils.clamp(Math.trunc(stateIndex), 0, junction.states.length - 1);
+    const state = junction.states[clampedState];
+    junction.stateIndex = clampedState;
+
+    const belt = (puzzle.belts ?? []).find((candidate) => candidate.id === junction.beltId);
+    if (belt) {
+      belt.currentDirection = { ...state.direction };
+    }
+
+    const conveyor = this.conveyors.find((candidate) => (
+      candidate.conveyorPuzzleId === puzzle.id
+      && candidate.conveyorNodeId === junction.beltId
+    ));
+    if (conveyor) {
+      conveyor.direction.set(state.direction.x, 0, state.direction.z);
+      if (conveyor.direction.lengthSq() <= 0.0001) {
+        conveyor.direction.set(0, 0, 1);
+      } else {
+        conveyor.direction.normalize();
+      }
+    }
+
+    if (!silent) {
+      this._pulseConveyorGroup(puzzle.id, junction.beltId);
+    }
+  }
+
+  _pulseConveyorGroup(puzzleId, nodeId) {
+    for (const conveyor of this.conveyors) {
+      if (conveyor.conveyorPuzzleId !== puzzleId || conveyor.conveyorNodeId !== nodeId) {
+        continue;
+      }
+
+      for (const arrow of conveyor.visuals ?? []) {
+        if (arrow.material?.emissive) {
+          arrow.material.emissiveIntensity = 1.8;
+        }
+      }
+    }
+  }
+
+  _launchConveyorPuzzleCargo(puzzle) {
+    const cargo = puzzle.cargo;
+    if (!cargo) {
+      return;
+    }
+
+    if (cargo.currentTileKey !== puzzle.spawner.key) {
+      this._resetConveyorPuzzleCargo(puzzle, { silent: true, keepConsoleStates: true });
+    }
+
+    puzzle.state = 'ObjectMoving';
+    cargo.accepted = false;
+    cargo.moving = false;
+    this.game.ui?.showToast?.('Cargo released. Route it to the receiver plate.', '#6bdcff');
+    this.game.addParticleBurst(puzzle.spawner.position, MECHANISM_COLOR, 18, 0.12);
+  }
+
+  _resetConveyorPuzzleCargo(puzzle, {
+    silent = false,
+    keepConsoleStates = true,
+  } = {}) {
+    const cargo = puzzle.cargo;
+    if (!cargo) {
+      return;
+    }
+
+    puzzle.state = puzzle.completed ? 'VaultOpened' : 'ObjectReady';
+    cargo.currentTileKey = puzzle.completed ? puzzle.target.key : puzzle.spawner.key;
+    cargo.fromTileKey = null;
+    cargo.toTileKey = null;
+    cargo.moving = false;
+    cargo.moveProgress = 0;
+    cargo.accepted = Boolean(puzzle.completed);
+    cargo.position.copy(puzzle.completed ? puzzle.target.position : puzzle.spawner.position);
+    cargo.position.y = this.getFloorElevationAt(cargo.position);
+    cargo.object?.position.copy(cargo.position);
+
+    const plate = this.pressurePlates.find((candidate) => candidate.id === puzzle.targetPressurePlateId);
+    if (plate && !puzzle.completed) {
+      plate.active = false;
+      plate.activated = false;
+    }
+
+    if (!keepConsoleStates) {
+      for (const junction of puzzle.junctions ?? []) {
+        this._applyConveyorPuzzleJunctionState(puzzle, junction, 0, { silent: true });
+      }
+    }
+
+    if (!silent) {
+      this.game.ui?.showToast?.('Cargo returned to the spawner.', '#6bdcff');
+      this.game.addParticleBurst(puzzle.spawner.position, MECHANISM_COLOR, 14, 0.1);
+    }
+  }
+
+  _advanceConveyorPuzzleCargo(puzzle) {
+    const cargo = puzzle.cargo;
+    const direction = this._getConveyorPuzzleCurrentDirection(puzzle);
+
+    if (!direction || (direction.x === 0 && direction.z === 0)) {
+      puzzle.state = 'ObjectBlocked';
+      this.game.ui?.showToast?.('Cargo is blocked. Reset or change the route.', '#ffb347');
+      return;
+    }
+
+    const { x, z } = this._parseTileKey(cargo.currentTileKey);
+    const nextKey = tileKey(x + direction.x, z + direction.z);
+    const validNext = nextKey === puzzle.target.key || puzzle.beltByKey?.has(nextKey);
+
+    if (!validNext) {
+      puzzle.state = 'ObjectBlocked';
+      this.game.ui?.showToast?.('Cargo reached a stopper. Reset or change the route.', '#ffb347');
+      return;
+    }
+
+    cargo.fromTileKey = cargo.currentTileKey;
+    cargo.toTileKey = nextKey;
+    cargo.fromPosition = cargo.position.clone();
+    cargo.toPosition = this._getConveyorPuzzleTilePosition(puzzle, nextKey);
+    cargo.moveProgress = 0;
+    cargo.moving = true;
+  }
+
+  _getConveyorPuzzleCurrentDirection(puzzle) {
+    const currentKey = puzzle.cargo?.currentTileKey;
+    if (currentKey === puzzle.spawner.key) {
+      return puzzle.spawner.launchDirection;
+    }
+
+    const belt = puzzle.beltByKey?.get(currentKey);
+    if (!belt) {
+      return null;
+    }
+
+    const junction = puzzle.junctionByBeltId?.get(belt.id);
+    if (junction?.states?.length) {
+      const stateIndex = THREE.MathUtils.clamp(junction.stateIndex ?? 0, 0, junction.states.length - 1);
+      return junction.states[stateIndex]?.direction ?? belt.defaultDirection;
+    }
+
+    return belt.currentDirection ?? belt.defaultDirection;
+  }
+
+  _getConveyorPuzzleTilePosition(puzzle, key) {
+    if (key === puzzle.spawner.key) {
+      return puzzle.spawner.position.clone();
+    }
+    if (key === puzzle.target.key) {
+      return puzzle.target.position.clone();
+    }
+
+    const { x, z } = this._parseTileKey(key);
+    return this.tileToWorld(x, z, new THREE.Vector3());
+  }
+
+  _parseTileKey(key) {
+    const [xText, zText] = String(key).split(',');
+    return {
+      x: Number(xText),
+      z: Number(zText),
+    };
+  }
+
+  _completeConveyorPuzzle(puzzle) {
+    if (puzzle.completed) {
+      return;
+    }
+
+    puzzle.completed = true;
+    puzzle.state = 'VaultOpened';
+
+    const cargo = puzzle.cargo;
+    if (cargo) {
+      cargo.currentTileKey = puzzle.target.key;
+      cargo.moving = false;
+      cargo.accepted = true;
+      cargo.position.copy(puzzle.target.position);
+      cargo.position.y = this.getFloorElevationAt(cargo.position);
+      cargo.object?.position.copy(cargo.position);
+    }
+
+    const plate = this.pressurePlates.find((candidate) => candidate.id === puzzle.targetPressurePlateId);
+    if (plate) {
+      plate.active = true;
+      plate.activated = true;
+      this.game.addParticleBurst(plate.position, MECHANISM_COLOR, 24, 0.16);
+    }
+
+    const targetDoor = this.doors.find((door) => door.id === puzzle.targetDoorId);
+    if (targetDoor?.closed) {
+      this._openDoor(targetDoor, 'Cargo receiver powered: bonus vault unlocked');
+    } else {
+      this.game.ui?.showToast?.('Cargo receiver powered.', '#6bdcff');
+    }
+  }
+
   _updatePressurePlates(dt) {
     for (const plate of this.pressurePlates) {
       const occupied = this._isPressurePlateOccupied(plate);
@@ -826,6 +1659,23 @@ export class DungeonController {
       }
     }
 
+    for (const puzzle of this.conveyorPuzzles) {
+      if (plate.requiredPuzzleObjectId && puzzle.cargo?.id !== plate.requiredPuzzleObjectId) {
+        continue;
+      }
+
+      const cargo = puzzle.cargo;
+      if (!cargo) {
+        continue;
+      }
+
+      tempVectorA.copy(cargo.position);
+      tempVectorA.y = plate.position.y;
+      if (tempVectorA.distanceToSquared(plate.position) <= radiusSq) {
+        return true;
+      }
+    }
+
     for (const enemy of this.game.enemies) {
       if (enemy.dead) {
         continue;
@@ -847,6 +1697,19 @@ export class DungeonController {
     }
 
     if (!plate.requiredBlockId) {
+      if (plate.requiredPuzzleObjectId) {
+        const puzzle = this.conveyorPuzzles.find((candidate) => (
+          candidate.cargo?.id === plate.requiredPuzzleObjectId
+        ));
+        return Boolean(
+          puzzle?.completed
+          || (
+            puzzle?.cargo
+            && puzzle.cargo.currentTileKey === puzzle.target?.key
+          ),
+        );
+      }
+
       return this._isPressurePlateOccupied(plate);
     }
 
@@ -910,7 +1773,9 @@ export class DungeonController {
 
       if (door.light?.material?.emissive) {
         const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
-        const ready = !door.locked || pressureReady || (door.requiresKeycard && this.keycardCount > 0);
+        const ready = !door.locked
+          || pressureReady
+          || (door.requiresKeycard && this.progressionManager.hasKeycard(door.requiredKeycardId));
         door.light.material.emissiveIntensity = ready ? 0.95 : 0.36;
       }
     }
@@ -980,24 +1845,33 @@ export class DungeonController {
           : null;
         const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
         const needsKeycard = door.requiresKeycard && !pressureReady;
+        const needsPressurePlate = door.pressurePlateId && !pressureReady && !door.requiresKeycard;
+        const hasRequiredKeycard = needsKeycard && this.progressionManager.hasKeycard(door.requiredKeycardId);
+        const requiredName = this.progressionManager.getKeycardDisplayName(door.requiredKeycardId);
         nearest = {
           kind: 'door',
           target: door,
           label: encounter && !encounter.cleared
             ? `${door.label}: Clear Reaverbots`
+            : needsPressurePlate
+              ? `${door.label}: Receiver Plate`
             : needsKeycard
-              ? `${door.label}: Keycard or Plate`
+              ? hasRequiredKeycard
+                ? `${door.label}: ${requiredName}`
+                : `${door.label}: Requires ${requiredName}`
               : door.label,
-          color: (needsKeycard && this.keycardCount <= 0) || (encounter && !encounter.cleared)
+          color: (needsKeycard && !hasRequiredKeycard) || needsPressurePlate || (encounter && !encounter.cleared)
             ? LOCKED_COLOR
-            : MECHANISM_COLOR,
+            : needsKeycard
+              ? TRACKING_COLOR
+              : MECHANISM_COLOR,
         };
         nearestDistanceSq = distanceSq;
       }
     }
 
     for (const mechanism of this.mechanisms) {
-      if (mechanism.activated) {
+      if (mechanism.activated && !mechanism.repeatable) {
         continue;
       }
 
@@ -1007,7 +1881,9 @@ export class DungeonController {
         nearest = {
           kind: 'mechanism',
           target: mechanism,
-          label: blockedEncounter
+          label: mechanism.conveyorPuzzleAction && !blockedEncounter
+            ? this._getConveyorPuzzleMechanismPrompt(mechanism)
+            : blockedEncounter
             ? `${mechanism.label}: Clear ${blockedEncounter.label}`
             : mechanism.label,
           color: blockedEncounter ? LOCKED_COLOR : MECHANISM_COLOR,
@@ -1026,7 +1902,7 @@ export class DungeonController {
         nearest = {
           kind: 'trap',
           target: trap,
-          label: this.keycardCount > 0 ? trap.label : `${trap.label}: Keycard`,
+          label: this.keycardCount > 0 ? `${trap.label}: Scan` : `${trap.label}: Keycard Scan`,
           color: this.keycardCount > 0 ? KEYCARD_COLOR : LOCKED_COLOR,
         };
         nearestDistanceSq = distanceSq;
@@ -1043,8 +1919,21 @@ export class DungeonController {
         nearest = {
           kind: 'chest',
           target: chest,
-          label: 'Open Ruin Chest',
-          color: KEYCARD_COLOR,
+          label: chest.guaranteedKeycardId ? 'Open Keycard Chest' : 'Open Ruin Chest',
+          color: chest.guaranteedKeycardId ? KEY_SEEKER_COLOR : KEYCARD_COLOR,
+        };
+        nearestDistanceSq = distanceSq;
+      }
+    }
+
+    if (this.keySeeker && !this.keySeeker.activated) {
+      const distanceSq = playerPosition.distanceToSquared(this.keySeeker.position);
+      if (distanceSq <= 2.1 * 2.1 && distanceSq < nearestDistanceSq) {
+        nearest = {
+          kind: 'keySeeker',
+          target: this.keySeeker,
+          label: 'Activate Key Seeker',
+          color: KEY_SEEKER_COLOR,
         };
         nearestDistanceSq = distanceSq;
       }
@@ -1065,7 +1954,7 @@ export class DungeonController {
 
     if (this.shrine && !this.shrine.collected) {
       const distanceSq = playerPosition.distanceToSquared(this.shrine.position);
-      const shrineDoor = this.doors.find((door) => door.id === 'largeRefractorSeal');
+      const shrineDoor = this.doors.find((door) => door.id === 'Door_Shrine');
       if (distanceSq <= 2.8 * 2.8 && distanceSq < nearestDistanceSq && !shrineDoor?.closed) {
         nearest = {
           kind: 'shrine',
@@ -1090,6 +1979,32 @@ export class DungeonController {
     }
 
     this.nearestInteractable = nearest;
+  }
+
+  _getConveyorPuzzleMechanismPrompt(mechanism) {
+    const puzzle = this.conveyorPuzzleById.get(mechanism.conveyorPuzzleId);
+    if (!puzzle) {
+      return mechanism.label;
+    }
+
+    if (puzzle.completed || puzzle.state === 'VaultOpened') {
+      return `${mechanism.label}: Complete`;
+    }
+
+    if (mechanism.conveyorPuzzleAction === 'cycleJunction') {
+      const junctionId = mechanism.controlledJunctionIds?.[0] ?? puzzle.junctions?.[0]?.id;
+      const junction = puzzle.junctionById?.get(junctionId);
+      const state = junction?.states?.[junction.stateIndex ?? 0];
+      return `${mechanism.label}: ${state?.label ?? 'Switch Route'}`;
+    }
+
+    if (mechanism.conveyorPuzzleAction === 'launchOrReset') {
+      return puzzle.state === 'ObjectMoving' || puzzle.state === 'ObjectBlocked'
+        ? `${mechanism.label}: Reset Cargo`
+        : `${mechanism.label}: Release Cargo`;
+    }
+
+    return mechanism.label;
   }
 
   _getSafeInteractablePrompt(interactable) {
@@ -1144,9 +2059,21 @@ export class DungeonController {
 
     const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
 
-    if (door.requiresKeycard && this.keycardCount <= 0 && !pressureReady) {
+    if (door.pressurePlateId && !pressureReady && !door.requiresKeycard) {
+      this.game.ui?.showToast?.('Route the cargo object to the receiver plate.', '#ffb347');
+      this._pulseDoor(door, LOCKED_COLOR);
+      return;
+    }
+
+    if (door.requiresKeycard && !this.progressionManager.hasKeycard(door.requiredKeycardId) && !pressureReady) {
+      const requiredName = this.progressionManager.getKeycardDisplayName(door.requiredKeycardId);
+      const keySeekerHint = this.keySeeker?.activated && !door.isShrineDoor
+        ? ' Search for keycard signals on your minimap.'
+        : '';
       this.game.ui?.showToast?.(
-        door.pressurePlateId ? 'Keycard or pressure plate required' : 'Keycard required',
+        door.isShrineDoor
+          ? 'Shrine sealed. Requires Shrine Key.'
+          : `Locked. Requires ${requiredName}.${keySeekerHint}`,
         '#ffb347',
       );
       this._pulseDoor(door, LOCKED_COLOR);
@@ -1160,13 +2087,20 @@ export class DungeonController {
     }
 
     if (door.requiresKeycard && !pressureReady) {
-      this.keycardCount = Math.max(0, this.keycardCount - 1);
+      const requiredName = this.progressionManager.getKeycardDisplayName(door.requiredKeycardId);
+      this._openDoor(door, door.isShrineDoor ? 'Shrine access granted.' : `${door.label} unlocked with ${requiredName}.`);
+      return;
     }
 
-    this._openDoor(door, pressureReady ? 'Pressure plate route unlocked' : door.requiresKeycard ? 'Keycard door unlocked' : 'Door opened');
+    this._openDoor(door, pressureReady ? 'Pressure plate route unlocked' : 'Door opened');
   }
 
   _activateMechanism(mechanism) {
+    if (mechanism.conveyorPuzzleAction) {
+      this._activateConveyorPuzzleMechanism(mechanism);
+      return;
+    }
+
     const blockedEncounter = this._getMechanismBlockingEncounter(mechanism);
     if (blockedEncounter) {
       this.game.ui?.showToast?.(`Clear ${blockedEncounter.label} before using this console`, '#ffb347');
@@ -1209,15 +2143,14 @@ export class DungeonController {
     }
 
     if (this.keycardCount <= 0) {
-      this.game.ui?.showToast?.('A keycard can disable this trap relay', '#ffd66b');
+      this.game.ui?.showToast?.('A collected keycard can scan this trap relay', '#ffd66b');
       this.game.addParticleBurst(trap.position, LOCKED_COLOR, 10, 0.1);
       return;
     }
 
-    this.keycardCount = Math.max(0, this.keycardCount - 1);
     trap.active = false;
     this.game.addParticleBurst(trap.position, KEYCARD_COLOR, 24, 0.16);
-    this.game.ui?.showToast?.('Keycard accepted: trap disabled', '#ffd66b');
+    this.game.ui?.showToast?.('Keycard scan accepted: trap disabled', '#ffd66b');
   }
 
   _activateChest(chest) {
@@ -1234,20 +2167,24 @@ export class DungeonController {
       rareBoost: chest.rareBoost,
     });
 
-    const keycardDropped = Math.random() < (chest.keycardChance ?? 0);
-    if (keycardDropped) {
+    let keycardCollected = false;
+    if (chest.guaranteedKeycardId && !chest.keycardClaimed) {
       const keycardPosition = chest.position.clone();
-      keycardPosition.y = 0.55;
+      keycardPosition.y = this.getFloorElevationAt(keycardPosition);
       keycardPosition.x += 0.45;
       keycardPosition.z += 0.28;
-      this._spawnKeycardAt(keycardPosition, 'chestKeycard');
+      keycardCollected = this._grantKeycard(chest.guaranteedKeycardId, {
+        position: keycardPosition,
+        source: 'Chest',
+      });
+      chest.keycardClaimed = true;
+      chest.containsKeycard = false;
     }
 
-    this.game.addParticleBurst(chest.position, KEYCARD_COLOR, keycardDropped ? 28 : 18, 0.16);
-    this.game.ui?.showToast?.(
-      keycardDropped ? 'Ruin chest opened: keycard and refractors' : 'Ruin chest opened: refractors',
-      '#ffd66b',
-    );
+    this.game.addParticleBurst(chest.position, keycardCollected ? KEY_SEEKER_COLOR : KEYCARD_COLOR, keycardCollected ? 28 : 18, 0.16);
+    if (!keycardCollected) {
+      this.game.ui?.showToast?.('Ruin chest opened: refractors', '#ffd66b');
+    }
   }
 
   _updateEncounters() {
@@ -1267,6 +2204,23 @@ export class DungeonController {
 
       encounter.cleared = true;
       this.game.ui?.showToast?.(`${encounter.label} cleared`, '#6bdcff');
+
+      if (encounter.bossRewardKeycardId) {
+        this._grantKeycard(encounter.bossRewardKeycardId, {
+          position: encounter.zone.position,
+          source: 'BossReward',
+        });
+      }
+
+      if (
+        encounter.keycardDropId
+        && !this.progressionManager.hasKeycard(encounter.keycardDropId)
+        && !this.keycards.some((keycard) => keycard.keycardId === encounter.keycardDropId && !keycard.collected)
+      ) {
+        const fallback = encounter.zone.position.clone();
+        fallback.y = this.getFloorElevationAt(fallback);
+        this._spawnKeycardAt(fallback, 'eliteFallbackKeycard', encounter.keycardDropId);
+      }
 
       for (const door of this.doors) {
         if (door.encounterId === encounter.id) {
@@ -1391,6 +2345,10 @@ export class DungeonController {
     door.closed = false;
     door.locked = false;
     door.opened = true;
+    const progressionDoor = this.progressionManager.getDoor(door.id);
+    if (progressionDoor) {
+      progressionDoor.isUnlocked = true;
+    }
     this._pulseDoor(door, MECHANISM_COLOR);
     this.game.ui?.showToast?.(message, '#6bdcff');
     this.lastSafePlayerPosition.copy(this.game.player.root.position);
@@ -1425,8 +2383,17 @@ export class DungeonController {
         object.material = object.material.clone();
         object.material.transparent = true;
       }
+      const directionX = conveyor.direction.x;
+      const directionZ = conveyor.direction.z;
+      const offsetX = object.position.x - conveyor.position.x;
+      const offsetZ = object.position.z - conveyor.position.z;
       object.userData.baseY = object.position.y;
       object.userData.baseScale = object.scale.x || 1;
+      object.userData.conveyorOffsetIndex = THREE.MathUtils.clamp(
+        Math.round((offsetX * directionX + offsetZ * directionZ) / 0.52),
+        -1,
+        1,
+      );
       conveyor.visuals.push(object);
     });
   }
@@ -1437,7 +2404,11 @@ export class DungeonController {
     }
 
     for (const arrow of conveyor.visuals) {
+      const offsetIndex = arrow.userData.conveyorOffsetIndex ?? 0;
+      arrow.position.x = conveyor.position.x + conveyor.direction.x * offsetIndex * 0.52;
+      arrow.position.z = conveyor.position.z + conveyor.direction.z * offsetIndex * 0.52;
       arrow.position.y = (arrow.userData.baseY ?? 0.04) + Math.sin(this.game.elapsedTime * 6 + arrow.position.z) * 0.015;
+      arrow.rotation.z = Math.PI + Math.atan2(conveyor.direction.x, conveyor.direction.z);
       const targetScale = conveyor.active
         ? (arrow.userData.baseScale ?? 1) * (1 + Math.sin(this.game.elapsedTime * 7 + arrow.position.z) * 0.07)
         : (arrow.userData.baseScale ?? 1) * 0.82;

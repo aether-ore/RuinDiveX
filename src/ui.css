@@ -112,6 +112,162 @@ button:focus-visible {
   color: var(--ink);
 }
 
+.dungeon-minimap {
+  position: absolute;
+  top: 48px;
+  right: 18px;
+  width: 190px;
+  height: 190px;
+  overflow: hidden;
+  border: 1px solid rgba(166, 190, 220, 0.28);
+  border-radius: 8px;
+  background: rgba(7, 13, 20, 0.68);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.42);
+  pointer-events: none;
+}
+
+.dungeon-minimap svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.minimap-room {
+  fill: rgba(92, 119, 148, 0.12);
+  stroke: rgba(176, 202, 226, 0.34);
+  stroke-width: 0.35;
+  vector-effect: non-scaling-stroke;
+}
+
+.minimap-room.is-undiscovered {
+  fill: rgba(92, 119, 148, 0.045);
+  stroke: rgba(176, 202, 226, 0.14);
+}
+
+.minimap-room.is-current {
+  fill: rgba(107, 220, 255, 0.18);
+  stroke: rgba(107, 220, 255, 0.86);
+  stroke-width: 0.7;
+}
+
+.minimap-room.is-blocked {
+  stroke-dasharray: 1.2 1;
+}
+
+.minimap-hallway {
+  fill: none;
+  stroke: rgba(176, 202, 226, 0.34);
+  stroke-linecap: round;
+  stroke-width: 0.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.minimap-hallway.is-undiscovered {
+  stroke: rgba(176, 202, 226, 0.12);
+  stroke-dasharray: 1.4 1.1;
+}
+
+.minimap-marker,
+.minimap-arrow path,
+.minimap-player path {
+  vector-effect: non-scaling-stroke;
+}
+
+.marker-enemy {
+  fill: #ff645d;
+  stroke: rgba(255, 255, 255, 0.36);
+  stroke-width: 0.24;
+}
+
+.marker-keyHoldingElite circle:first-child {
+  fill: #ff645d;
+  stroke: rgba(255, 255, 255, 0.36);
+  stroke-width: 0.24;
+}
+
+.marker-keyHoldingElite .marker-ring {
+  fill: none;
+  stroke: #5ee77b;
+  stroke-width: 0.42;
+}
+
+.marker-chest,
+.marker-keycardChest rect {
+  fill: #ffd66b;
+  stroke: rgba(25, 17, 4, 0.88);
+  stroke-width: 0.28;
+}
+
+.marker-keycard,
+.marker-keycardChest .marker-highlight,
+.marker-keySeeker {
+  fill: #5ee77b;
+  stroke: rgba(5, 30, 14, 0.9);
+  stroke-width: 0.26;
+}
+
+.marker-lockedDoor rect,
+.marker-shrineDoor rect {
+  fill: #ffb347;
+  stroke: rgba(25, 16, 4, 0.92);
+  stroke-width: 0.3;
+}
+
+.marker-lockedDoor line,
+.marker-shrineDoor line {
+  stroke: rgba(25, 16, 4, 0.95);
+  stroke-width: 0.35;
+}
+
+.marker-usableDoor,
+.marker-usableDoor path {
+  fill: #a06cff;
+  stroke: rgba(255, 255, 255, 0.42);
+  stroke-width: 0.25;
+}
+
+.marker-boss {
+  fill: #ff645d;
+  stroke: rgba(255, 255, 255, 0.42);
+  stroke-width: 0.24;
+}
+
+.marker-boss path {
+  fill: rgba(10, 14, 20, 0.76);
+}
+
+.marker-shrine {
+  fill: #7df8ff;
+  stroke: rgba(6, 38, 44, 0.95);
+  stroke-width: 0.28;
+}
+
+.minimap-arrow path {
+  fill: #5ee77b;
+  stroke: rgba(5, 30, 14, 0.86);
+  stroke-width: 0.3;
+}
+
+.minimap-arrow.marker-usableDoor path,
+.minimap-arrow.marker-shrineObjective path {
+  fill: #a06cff;
+  stroke: rgba(255, 255, 255, 0.38);
+}
+
+.minimap-arrow.is-dim {
+  opacity: 0.38;
+}
+
+.minimap-player path {
+  fill: #eef5ff;
+  stroke: rgba(4, 8, 12, 0.92);
+  stroke-width: 0.28;
+}
+
+.minimap-marker.is-dim {
+  opacity: 0.46;
+}
+
 .arm-hotbar {
   display: flex;
   width: 228px;
@@ -1687,6 +1843,13 @@ button:focus-visible {
     top: 8px;
     gap: 6px;
     font-size: 11px;
+  }
+
+  .dungeon-minimap {
+    top: 74px;
+    right: 10px;
+    width: 136px;
+    height: 136px;
   }
 
   .legends-health-gauge {

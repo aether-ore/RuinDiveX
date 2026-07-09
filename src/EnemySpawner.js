@@ -111,9 +111,16 @@ export class EnemySpawner {
       const spawnPoint = spawnPoints[i % spawnPoints.length].clone();
       spawnPoint.x += (Math.random() - 0.5) * 0.65;
       spawnPoint.z += (Math.random() - 0.5) * 0.65;
-      const forceElite = encounter.id === 'shrineDefense' && i === 0;
+      const forceElite = (encounter.keycardDropId && i === 0) || (encounter.isBoss && i === 0);
       const enemy = this.spawnEnemy(roster[i], forceElite, spawnPoint);
       enemy.encounterId = encounter.id;
+      if (encounter.keycardDropId && i === 0) {
+        enemy.guaranteedKeycardDropId = encounter.keycardDropId;
+        enemy.isKeyHoldingElite = true;
+      }
+      if (encounter.isBoss && i === 0) {
+        enemy.isBoss = true;
+      }
       enemies.push(enemy);
     }
 

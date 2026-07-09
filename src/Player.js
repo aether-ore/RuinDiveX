@@ -9,10 +9,13 @@ import { ModularHumanoid } from './ModularHumanoid.js';
 import { SkeletalModelRig } from './SkeletalModelRig.js';
 
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
+const PLAYER_BASE_MOVE_SPEED = 6.2;
+const PLAYER_RUN_SPEED_MULTIPLIER = 1.68;
+const PLAYER_RUN_ANIMATION_AMOUNT = 1.55;
 
 const PLAYER_BASE_STATS = {
   maxHealth: 160,
-  moveSpeed: 4.6,
+  moveSpeed: PLAYER_BASE_MOVE_SPEED,
   attackDamage: 12,
   maxEnergy: 8,
   energyRecharge: 1,
@@ -314,7 +317,7 @@ export class Player {
       movingBackward = rawForwardInput < -0.35;
       translating = lockOnActive || Math.abs(rawForwardInput) > 0.35;
       strafeAmount = lockOnActive ? THREE.MathUtils.clamp(rawLateralInput, -1, 1) : 0;
-      moveAmount = translating && running ? 1.35 : 1;
+      moveAmount = translating && running ? PLAYER_RUN_ANIMATION_AMOUNT : 1;
 
       if (lockOnActive) {
         this._resolveMovementDirection(moveVector, movementOptions);
@@ -333,7 +336,7 @@ export class Player {
       }
 
       const guardMoveMultiplier = this.isShieldGuarding() ? 0.72 : 1;
-      const runMultiplier = running ? 1.42 : 1;
+      const runMultiplier = running ? PLAYER_RUN_SPEED_MULTIPLIER : 1;
       const speed = this.stats.moveSpeed * runMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
       if (translating) {
         this.root.position.addScaledVector(worldMoveDirection, speed * dt);

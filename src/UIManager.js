@@ -405,6 +405,7 @@ export class UIManager {
     this.floorValue = document.getElementById('floor-value');
     this.keycardValue = document.getElementById('keycard-value');
     this.objectiveValue = document.getElementById('objective-value');
+    this.minimap = document.getElementById('dungeon-minimap');
     this.levelValue = document.getElementById('level-value');
     this.weaponValue = document.getElementById('weapon-value');
     this.weaponGauge = document.getElementById('weapon-gauge');
@@ -476,7 +477,8 @@ export class UIManager {
       this.floorValue.textContent = String(this.game.ruinFloor ?? 1);
     }
     if (this.keycardValue) {
-      this.keycardValue.textContent = String(this.game.dungeonController?.keycardCount ?? 0);
+      this.keycardValue.textContent = this.game.dungeonController?.getKeycardHudLabel?.()
+        ?? String(this.game.dungeonController?.keycardCount ?? 0);
     }
     if (this.objectiveValue) {
       this.objectiveValue.textContent = this.game.getObjectiveText?.() ?? 'Explore ruin';
@@ -495,6 +497,7 @@ export class UIManager {
       this.researchValue.textContent = String(this.game.inventory.researchData ?? 0);
     }
     this._renderArmHotbar(weaponHud?.tabs);
+    this._renderMinimap();
     this._renderMapEventPrompt();
     this._renderBuffTray();
     if (this.poseDebugOpen) {
@@ -1365,6 +1368,159 @@ export class UIManager {
       button.textContent = `${rarity.label} (${count})`;
       this.inventoryActions.appendChild(button);
     }
+  }
+
+  _renderMinimap() {
+    if (!this.minimap) {
+      return;
+    }
+
+    const snapshot = this.game.dungeonController?.getMinimapSnapshot?.() ?? null;
+    if (!snapshot) {
+      this.minimap.hidden = true;
+      return;
+    }
+
+    this.minimap.hidden = false;
+    const number = (value) => Number(value ?? 0).toFixed(2);
+    const roomMarkup = snapshot.rooms.map((room) => {
+      const bounds = room.roomBounds2D;
+      const classes = [
+        'minimap-room',
+        room.isDiscovered ? 'is-discovered' : 'is-undiscovered',
+        room.isReachable ? 'is-reachable' : 'is-blocked',
+        room.isCurrent ? 'is-current' : '',
+        `room-${room.roomType}`,
+      ].filter(Boolean).join(' ');
+      return `
+        <rect
+          class="${classes}"
+          x="${number(bounds.x)}"
+          y="${number(bounds.z)}"
+          width="${number(bounds.width)}"
+          height="${number(bounds.depth)}"
+          rx="0.8"
+          ry="0.8"
+        />`;
+    }).join('');
+    const hallwayMarkup = snapshot.hallways
+      .filter((hallway) => hallway.from && hallway.to)
+      .map((hallway) => `
+        <line
+          class="minimap-hallway ${hallway.isDiscovered ? 'is-discovered' : 'is-undiscovered'}"
+          x1="${number(hallway.from.x)}"
+          y1="${number(hallway.from.z)}"
+          x2="${number(hallway.to.x)}"
+          y2="${number(hallway.to.z)}"
+        />`)
+      .join('');
+    const markerMarkup = snapshot.markers.map((marker) => this._renderMinimapMarker(marker, number)).join('');
+    const arrowMarkup = snapshot.arrows.map((arrow) => `
+      <g
+        class="minimap-arrow marker-${arrow.type} ${arrow.isDim ? 'is-dim' : ''}"
+        transform="translate(${number(arrow.point.x)} ${number(arrow.point.z)}) rotate(${number(arrow.angle)})"
+      >
+        <path d="M -1.7 -1.05 L 1.8 0 L -1.7 1.05 L -0.75 0 Z"></path>
+      </g>
+    `).join('');
+
+    this.minimap.innerHTML = `
+      <svg
+        viewBox="${number(snapshot.bounds.minX)} ${number(snapshot.bounds.minZ)} ${number(snapshot.bounds.width)} ${number(snapshot.bounds.depth)}"
+        role="img"
+        aria-label="Dungeon minimap"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <g class="minimap-layer minimap-layout">
+          ${hallwayMarkup}
+          ${roomMarkup}
+        </g>
+        <g class="minimap-layer minimap-markers">
+          ${markerMarkup}
+        </g>
+        <g class="minimap-layer minimap-arrows">
+          ${arrowMarkup}
+        </g>
+        <g class="minimap-player" transform="translate(${number(snapshot.player.x)} ${number(snapshot.player.z)})">
+          <path d="M 0 -1.35 L 1.05 1.05 L 0 0.58 L -1.05 1.05 Z"></path>
+        </g>
+      </svg>
+    `;
+  }
+
+  _renderMinimapMarker(marker, number) {
+    const x = number(marker.point.x);
+    const y = number(marker.point.z);
+    const dimClass = marker.isReachable === false ? ' is-dim' : '';
+    const className = `minimap-marker marker-${marker.type}${dimClass}`;
+
+    if (marker.type === 'enemy') {
+      return `<circle class="${className}" cx="${x}" cy="${y}" r="0.9" />`;
+    }
+
+    if (marker.type === 'keyHoldingElite') {
+      return `
+        <g class="${className}" transform="translate(${x} ${y})">
+          <circle r="0.95"></circle>
+          <circle class="marker-ring" r="1.42"></circle>
+        </g>`;
+    }
+
+    if (marker.type === 'chest') {
+      return `<rect class="${className}" x="${number(marker.point.x - 0.9)}" y="${number(marker.point.z - 0.9)}" width="1.8" height="1.8" rx="0.15" />`;
+    }
+
+    if (marker.type === 'keycardChest') {
+      return `
+        <g class="${className}" transform="translate(${x} ${y})">
+          <rect x="-0.95" y="-0.95" width="1.9" height="1.9" rx="0.18"></rect>
+          <path class="marker-highlight" d="M 0 -1.35 L 1.1 0 L 0 1.35 L -1.1 0 Z"></path>
+        </g>`;
+    }
+
+    if (marker.type === 'keycard') {
+      return `<path class="${className}" d="M ${x} ${number(marker.point.z - 1.28)} L ${number(marker.point.x + 1.05)} ${y} L ${x} ${number(marker.point.z + 1.28)} L ${number(marker.point.x - 1.05)} ${y} Z" />`;
+    }
+
+    if (marker.type === 'usableDoor') {
+      return `
+        <g class="${className}" transform="translate(${x} ${y})">
+          <path d="M -1.15 -1.0 L 1.15 0 L -1.15 1.0 Z"></path>
+        </g>`;
+    }
+
+    if (marker.type === 'lockedDoor' || marker.type === 'shrineDoor') {
+      return `
+        <g class="${className}" transform="translate(${x} ${y})">
+          <rect x="-1.05" y="-1.05" width="2.1" height="2.1" rx="0.25"></rect>
+          <line x1="-0.72" y1="0" x2="0.72" y2="0"></line>
+        </g>`;
+    }
+
+    if (marker.type === 'boss') {
+      return `
+        <g class="${className}" transform="translate(${x} ${y})">
+          <circle r="1.2"></circle>
+          <path d="M -0.65 -0.1 L 0 -1.2 L 0.65 -0.1 L 0.35 0.95 L -0.35 0.95 Z"></path>
+        </g>`;
+    }
+
+    if (marker.type === 'shrine') {
+      return `
+        <g class="${className}" transform="translate(${x} ${y})">
+          <path d="M 0 -1.45 L 1.35 -0.38 L 0.82 1.25 L -0.82 1.25 L -1.35 -0.38 Z"></path>
+        </g>`;
+    }
+
+    if (marker.type === 'keySeeker') {
+      return `
+        <g class="${className}" transform="translate(${x} ${y})">
+          <circle r="1.18"></circle>
+          <path d="M 0 -1.6 L 0.45 -0.28 L 1.6 0 L 0.45 0.28 L 0 1.6 L -0.45 0.28 L -1.6 0 L -0.45 -0.28 Z"></path>
+        </g>`;
+    }
+
+    return `<circle class="${className}" cx="${x}" cy="${y}" r="0.8" />`;
   }
 
   _renderMapEventPrompt() {

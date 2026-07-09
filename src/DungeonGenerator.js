@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import {
+  createDungeonProgressionData,
+  PROGRESSION_CONNECTIONS,
+  PROGRESSION_ROOM_BANDS,
+} from './DungeonProgression.js';
 
 const DEFAULT_TILE_SIZE = 2.8;
 const RUIN_TEXTURE_BASE_PATH = '/assets/textures/ruins/';
@@ -35,6 +40,7 @@ const ROOM_FLAVORS_BY_TYPE = {
   coolant: ['powered', 'overheated', 'unstable'],
   enemy: ['infested', 'dormant', 'collapsed'],
   keycard: ['locked down', 'powered', 'alarmed'],
+  boss: ['alarmed', 'powered', 'refractor-rich'],
   trap: ['overheated', 'unstable', 'electrified'],
   conveyor: ['powered', 'collapsed', 'refractor-rich'],
   shrine: ['refractor-rich', 'powered', 'dormant'],
@@ -67,6 +73,11 @@ const ROOM_ARCHETYPES_BY_TYPE = {
     'Security Checkpoint',
     'Ancient Server Crypt',
   ],
+  boss: [
+    'Ruin Core Antechamber',
+    'Reaverbot Command Vault',
+    'Ancient Guardian Arena',
+  ],
   trap: [
     'Hazard Processing Room',
     'Pump and Coolant Works',
@@ -92,6 +103,7 @@ const RESERVED_FACTORY_SURFACE_TYPES = new Set([
   'entrance',
   'hallway',
   'keycard',
+  'boss',
   'shrine',
   'chest',
 ]);
@@ -149,6 +161,15 @@ function isDoorOrHallwayClearance(tiles, x, z) {
     const neighbor = tiles.get(tileKey(x + dx, z + dz));
     return neighbor?.type === 'hallway' || neighbor?.type === 'entrance';
   });
+}
+
+function wouldObstructProgressionAccess(options = {}) {
+  return options.surface === 'industrialRamp'
+    || options.surface === 'rampLanding'
+    || (Number.isFinite(options.elevation) && Math.abs(options.elevation) > 0.05)
+    || (Number.isFinite(options.level) && Math.abs(options.level) > 0.05)
+    || Number.isFinite(options.rampStartElevation)
+    || Number.isFinite(options.rampEndElevation);
 }
 
 function floorTileKey(x, z, level = 0) {
@@ -323,9 +344,10 @@ function addHallway(tiles, from, to) {
 }
 
 export class DungeonGenerator {
-  constructor({ tileSize = DEFAULT_TILE_SIZE, random = Math.random } = {}) {
+  constructor({ tileSize = DEFAULT_TILE_SIZE, random = Math.random, difficulty = 1 } = {}) {
     this.tileSize = tileSize;
     this.random = random;
+    this.difficulty = Math.max(1, Math.trunc(difficulty) || 1);
     this.textureLoader = new THREE.TextureLoader();
     this.gltfLoader = new GLTFLoader();
     this.textureCache = new Map();
@@ -340,6 +362,20 @@ export class DungeonGenerator {
   }
 
   generate() {
+    let lastDungeon = null;
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      lastDungeon = this._generateOnce();
+      if (lastDungeon.progression?.validation?.accepted) {
+        return lastDungeon;
+      }
+    }
+
+    console.warn('Dungeon progression validation failed after retries.', lastDungeon?.progression?.validation?.errors ?? []);
+    return lastDungeon ?? this._generateOnce();
+  }
+
+  _generateOnce() {
     const tiles = new Map();
     const side = this.random() < 0.5 ? -1 : 1;
     const secondarySide = this.random() < 0.65 ? -side : side;
@@ -347,12 +383,14 @@ export class DungeonGenerator {
     const keycardZ = enemyNestZ + this._randomInt(18, 22);
     const trapZ = keycardZ + this._randomInt(20, 24);
     const conveyorZ = trapZ + this._randomInt(22, 26);
-    const shrineZ = conveyorZ + this._randomInt(28, 34);
+    const bossZ = conveyorZ + this._randomInt(18, 22);
+    const shrineZ = bossZ + this._randomInt(18, 24);
     const enemyNestX = this._choose([0, side * 2, -side * 2]);
     const keycardX = side * this._randomInt(8, 11);
     const trapX = secondarySide * this._randomInt(9, 12);
     const conveyorX = this._choose([0, side * 6, secondarySide * 6]);
-    const shrineX = conveyorX + this._choose([0, side * 5, secondarySide * 5]);
+    const bossX = conveyorX + this._choose([0, side * 4, secondarySide * 4]);
+    const shrineX = bossX + this._choose([0, side * 5, secondarySide * 5]);
     const serverSide = this.random() < 0.5 ? side : -side;
     const bonusSide = this.random() < 0.5 ? side : -side;
     const machineSide = -bonusSide;
@@ -366,6 +404,7 @@ export class DungeonGenerator {
       keycardZ,
       trapZ,
       conveyorZ,
+      bossZ,
       shrineZ,
     };
     const mainRooms = [
@@ -376,6 +415,7 @@ export class DungeonGenerator {
       { id: 'keycardRoom', type: 'keycard', x: keycardX, z: keycardZ, width: this._choose([15, 17]), depth: 13 },
       { id: 'trapRoom', type: 'trap', x: trapX, z: trapZ, width: 17, depth: this._choose([15, 17]) },
       { id: 'conveyorRoom', type: 'conveyor', x: conveyorX, z: conveyorZ, width: 21, depth: 17 },
+      { id: 'bossRoom', type: 'boss', x: bossX, z: bossZ, width: 21, depth: 19 },
       { id: 'shrineRoom', type: 'shrine', x: shrineX, z: shrineZ, width: 25, depth: 23 },
     ];
     const serverRoom = {
@@ -433,9 +473,10 @@ export class DungeonGenerator {
       setTile(tiles, keycardRoom.x - side, keycardRoom.z - 1, 'chest');
     }
     if (conveyorRoom) {
-      for (let dz = -1; dz <= 1; dz += 1) {
-        setConveyorTile(tiles, conveyorRoom.x, conveyorRoom.z + dz);
-      }
+      setTile(tiles, conveyorRoom.x, conveyorRoom.z, 'floor', {
+        roomId: conveyorRoom.id,
+        forceType: true,
+      });
       setTile(tiles, conveyorRoom.x + side, conveyorRoom.z + 1, 'chest');
     }
     if (machineFactoryRoom) {
@@ -474,11 +515,15 @@ export class DungeonGenerator {
     }
 
     this._applyIndustrialFactoryLayout(tiles, rooms, layoutVariant);
+    const conveyorPuzzleValidation = this._applyConveyorPuzzleTemplates(tiles, rooms);
     let floorTiles = [
       ...tiles.values(),
       ...this._createFactoryLevelTiles(tiles, rooms),
     ];
     floorTiles = this._enforceGeneratedWalkability(floorTiles, rooms);
+    const solidZones = this._createSolidCollisionZones(rooms);
+    const progressionAccessValidation = this._validateProgressionAccess(floorTiles, tiles, rooms);
+    const coolantWalkabilityValidation = this._validateCoolantRoomWalkability(floorTiles, tiles, rooms, solidZones);
     const floorTileLookup = this._createFloorTileLookup(floorTiles);
 
     const group = new THREE.Group();
@@ -507,7 +552,6 @@ export class DungeonGenerator {
     }
 
     const openAirTileKeys = this._createOpenAirTileKeys(rooms);
-    const solidZones = this._createSolidCollisionZones(rooms);
     this._addIndustrialFactoryFeatures(group, floorTiles, materials, openAirTileKeys, floorTileLookup);
     this._addIndustrialRoomSetpieces(group, rooms, floorTiles, materials, solidZones);
     this._addCeilings(group, tiles, materials, openAirTileKeys);
@@ -525,6 +569,34 @@ export class DungeonGenerator {
     const campRoom = rooms.find((room) => room.id === 'expeditionCamp') ?? hubRoom;
     const entranceRoom = rooms.find((room) => room.id === 'entrance') ?? campRoom;
     const shrineRoom = rooms.find((room) => room.id === 'shrineRoom') ?? rooms.at(-1);
+    const progression = createDungeonProgressionData({
+      rooms,
+      doors,
+      landmarks,
+      chests: landmarks.chests,
+      encounters,
+    });
+    progression.validation = {
+      ...progression.validation,
+      accepted: Boolean(
+        progression.validation?.accepted
+        && progressionAccessValidation.accepted
+        && coolantWalkabilityValidation.accepted
+        && conveyorPuzzleValidation.accepted
+      ),
+      errors: [
+        ...(progression.validation?.errors ?? []),
+        ...progressionAccessValidation.errors,
+        ...coolantWalkabilityValidation.errors,
+        ...conveyorPuzzleValidation.errors,
+      ],
+      warnings: [
+        ...(progression.validation?.warnings ?? []),
+        ...progressionAccessValidation.warnings,
+        ...coolantWalkabilityValidation.warnings,
+        ...conveyorPuzzleValidation.warnings,
+      ],
+    };
 
     return {
       group,
@@ -538,14 +610,19 @@ export class DungeonGenerator {
         archetype: room.archetype ?? room.type,
         flavor: room.flavor ?? null,
         layoutVariant: room.layoutVariant ?? null,
+        progressionBand: PROGRESSION_ROOM_BANDS[room.id] ?? 0,
       })),
       layoutVariant,
+      progression,
+      minimap: progression.minimap,
       doors,
       keycards: landmarks.keycards,
+      keySeeker: landmarks.keySeeker,
       chests: landmarks.chests,
       mechanisms: landmarks.mechanisms,
       puzzleBlocks: landmarks.puzzleBlocks,
       pressurePlates: landmarks.pressurePlates,
+      conveyorPuzzles: landmarks.conveyorPuzzles,
       safeInteractables: landmarks.safeInteractables,
       safeZones: this._createRoomZones(rooms, 'hub').concat(this._createRoomZones(rooms, 'camp')),
       solidZones,
@@ -597,6 +674,11 @@ export class DungeonGenerator {
         flavor: 'unstable',
         layoutVariant: 'Multi-level hazard room',
       },
+      bossRoom: {
+        archetype: 'Ancient Guardian Arena',
+        flavor: 'alarmed',
+        layoutVariant: 'Boss room before Refractor shrine',
+      },
       bonusVault: {
         archetype: 'Storage Vault / Parts Warehouse',
         flavor: 'sealed',
@@ -620,6 +702,720 @@ export class DungeonGenerator {
     }
   }
 
+  _applyConveyorPuzzleTemplates(tiles, rooms) {
+    const errors = [];
+    const warnings = [];
+    const conveyorRoom = rooms.find((room) => room.id === 'conveyorRoom');
+
+    if (!conveyorRoom) {
+      return {
+        accepted: true,
+        errors,
+        warnings: ['No conveyor puzzle room was generated.'],
+      };
+    }
+
+    const templateFactories = this.difficulty <= 1
+      ? [
+        this._createSimpleRedirectConveyorPuzzleDefinition,
+        this._createTwoRouteConveyorPuzzleDefinition,
+      ]
+      : this.difficulty === 2
+        ? [
+          this._createTwoRouteConveyorPuzzleDefinition,
+          this._createReturnLoopConveyorPuzzleDefinition,
+          this._createSimpleRedirectConveyorPuzzleDefinition,
+        ]
+        : [
+          this._createMultiStageConveyorPuzzleDefinition,
+          this._createReturnLoopConveyorPuzzleDefinition,
+          this._createTwoRouteConveyorPuzzleDefinition,
+          this._createSimpleRedirectConveyorPuzzleDefinition,
+        ];
+    const startIndex = Math.floor((this.random?.() ?? 0.35) * templateFactories.length) % templateFactories.length;
+    const orderedFactories = [
+      ...templateFactories.slice(startIndex),
+      ...templateFactories.slice(0, startIndex),
+    ];
+    const rejectedTemplates = [];
+
+    for (const factory of orderedFactories) {
+      const puzzle = factory.call(this, conveyorRoom);
+      const stagedTiles = new Map([...tiles.entries()].map(([key, tile]) => [key, { ...tile }]));
+      this._stampConveyorPuzzleDefinition(stagedTiles, puzzle);
+      const validation = this._validateConveyorPuzzleDefinition(puzzle, stagedTiles, rooms);
+      if (!validation.accepted) {
+        rejectedTemplates.push(...validation.errors);
+        continue;
+      }
+
+      this._stampConveyorPuzzleDefinition(tiles, puzzle);
+      conveyorRoom.conveyorPuzzleDefinition = puzzle;
+      return {
+        ...validation,
+        warnings: [
+          ...validation.warnings,
+          `${puzzle.archetype} conveyor puzzle template selected.`,
+        ],
+      };
+    }
+
+    return {
+      accepted: false,
+      errors: rejectedTemplates.length
+        ? rejectedTemplates
+        : ['No conveyor puzzle template could be placed.'],
+      warnings,
+    };
+  }
+
+  _stampConveyorPuzzleDefinition(tiles, puzzle) {
+    for (const belt of puzzle.belts) {
+      const tile = setConveyorTile(tiles, belt.x, belt.z, {
+        directionX: belt.defaultDirection.x,
+        directionZ: belt.defaultDirection.z,
+        speed: puzzle.objectSpeed,
+        elevation: 0,
+        surface: 'conveyorPuzzleBelt',
+      });
+      if (tile) {
+        tile.conveyorPuzzleId = puzzle.id;
+        tile.conveyorGroupId = belt.groupId;
+        tile.conveyorNodeId = belt.id;
+        tile.conveyorTileType = belt.tileType;
+      }
+    }
+  }
+
+  _createSimpleRedirectConveyorPuzzleDefinition(room) {
+    const at = (dx, dz) => ({
+      x: room.x + dx,
+      z: room.z + dz,
+      key: tileKey(room.x + dx, room.z + dz),
+    });
+    const direction = (x, z) => ({ x, z });
+    const belts = [
+      { id: 'feedA', ...at(-5, 2), defaultDirection: direction(1, 0), groupId: 'feed', tileType: 'straight' },
+      {
+        id: 'redirectA',
+        ...at(-4, 2),
+        defaultDirection: direction(0, 1),
+        groupId: 'redirectA',
+        tileType: 'rotator',
+        switchable: true,
+        stateIndex: 0,
+        states: [
+          { label: 'Stopper', direction: direction(0, 1) },
+          { label: 'Receiver', direction: direction(1, 0) },
+        ],
+      },
+      { id: 'stopperA', ...at(-4, 3), defaultDirection: direction(0, 0), groupId: 'stopper', tileType: 'stopper' },
+      { id: 'targetRunA', ...at(-3, 2), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunB', ...at(-2, 2), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+    ];
+    const spawner = {
+      id: 'conveyorCargoSpawner',
+      ...at(-6, 2),
+      launchDirection: direction(1, 0),
+    };
+    const target = {
+      id: 'conveyorVaultPlate',
+      ...at(-1, 2),
+    };
+
+    return {
+      id: 'conveyorVaultRoutingPuzzle',
+      archetype: 'SimpleRedirect',
+      difficulty: 1,
+      roomId: room.id,
+      targetDoorId: 'bonusVaultDoor',
+      targetPressurePlateId: target.id,
+      objectId: 'conveyorCargoObject',
+      objectType: 'Refractor Battery',
+      objectSpeed: 2.35,
+      state: 'ObjectReady',
+      spawner,
+      target,
+      belts,
+      consoles: [
+        {
+          id: 'conveyorRouteConsole',
+          label: 'Redirect Console',
+          action: 'cycleJunction',
+          controls: ['redirectA'],
+          ...at(-5, 6),
+        },
+        {
+          id: 'conveyorLaunchConsole',
+          label: 'Cargo Launcher',
+          action: 'launchOrReset',
+          ...at(1, 6),
+        },
+      ],
+      junctions: [{
+        id: 'redirectA',
+        beltId: 'redirectA',
+        tileKey: at(-4, 2).key,
+        stateIndex: 0,
+        states: belts.find((belt) => belt.id === 'redirectA').states,
+        solutionStateIndex: 1,
+      }],
+      solutionState: {
+        redirectA: 1,
+      },
+      maxSimulationSteps: 48,
+      canReset: true,
+      optional: true,
+      rewardTier: 'Basic',
+    };
+  }
+
+  _createTwoRouteConveyorPuzzleDefinition(room) {
+    const at = (dx, dz) => ({
+      x: room.x + dx,
+      z: room.z + dz,
+      key: tileKey(room.x + dx, room.z + dz),
+    });
+    const direction = (x, z) => ({ x, z });
+    const belts = [
+      { id: 'feedA', ...at(-6, -2), defaultDirection: direction(1, 0), groupId: 'feed', tileType: 'straight' },
+      { id: 'feedB', ...at(-5, -2), defaultDirection: direction(1, 0), groupId: 'feed', tileType: 'straight' },
+      { id: 'feedC', ...at(-4, -2), defaultDirection: direction(1, 0), groupId: 'feed', tileType: 'straight' },
+      { id: 'feedD', ...at(-3, -2), defaultDirection: direction(1, 0), groupId: 'feed', tileType: 'straight' },
+      {
+        id: 'junctionA',
+        ...at(-2, -2),
+        defaultDirection: direction(0, 1),
+        groupId: 'junctionA',
+        tileType: 'junction',
+        switchable: true,
+        stateIndex: 0,
+        states: [
+          { label: 'Return Loop', direction: direction(0, 1) },
+          { label: 'Receiver', direction: direction(1, 0) },
+        ],
+      },
+      { id: 'targetRunA', ...at(-1, -2), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunB', ...at(0, -2), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunC', ...at(1, -2), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunD', ...at(2, -2), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunE', ...at(3, -2), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'returnA', ...at(-2, -1), defaultDirection: direction(0, 1), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'returnB', ...at(-2, 0), defaultDirection: direction(0, 1), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'returnC', ...at(-2, 1), defaultDirection: direction(-1, 0), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'returnD', ...at(-3, 1), defaultDirection: direction(-1, 0), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'returnE', ...at(-4, 1), defaultDirection: direction(-1, 0), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'returnF', ...at(-5, 1), defaultDirection: direction(-1, 0), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'returnG', ...at(-6, 1), defaultDirection: direction(0, -1), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'returnH', ...at(-6, 0), defaultDirection: direction(0, -1), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'returnI', ...at(-6, -1), defaultDirection: direction(0, -1), groupId: 'returnLoop', tileType: 'return' },
+    ];
+    const spawner = {
+      id: 'conveyorCargoSpawner',
+      ...at(-7, -2),
+      launchDirection: direction(1, 0),
+    };
+    const target = {
+      id: 'conveyorVaultPlate',
+      ...at(4, -2),
+    };
+    const routeConsole = {
+      id: 'conveyorRouteConsole',
+      label: 'Conveyor Console',
+      action: 'cycleJunction',
+      controls: ['junctionA'],
+      ...at(-5, -6),
+    };
+    const launchConsole = {
+      id: 'conveyorLaunchConsole',
+      label: 'Cargo Launcher',
+      action: 'launchOrReset',
+      ...at(3, -6),
+    };
+
+    return {
+      id: 'conveyorVaultRoutingPuzzle',
+      archetype: 'TwoRouteJunction',
+      difficulty: 1,
+      roomId: room.id,
+      targetDoorId: 'bonusVaultDoor',
+      targetPressurePlateId: target.id,
+      objectId: 'conveyorCargoObject',
+      objectType: 'Refractor Battery',
+      objectSpeed: 2.4,
+      state: 'ObjectReady',
+      spawner,
+      target,
+      belts,
+      consoles: [routeConsole, launchConsole],
+      junctions: [{
+        id: 'junctionA',
+        beltId: 'junctionA',
+        tileKey: at(-2, -2).key,
+        stateIndex: 0,
+        states: belts.find((belt) => belt.id === 'junctionA').states,
+        solutionStateIndex: 1,
+      }],
+      solutionState: {
+        junctionA: 1,
+      },
+      maxSimulationSteps: 96,
+      canReset: true,
+      optional: true,
+      rewardTier: 'Basic',
+    };
+  }
+
+  _createReturnLoopConveyorPuzzleDefinition(room) {
+    const at = (dx, dz) => ({
+      x: room.x + dx,
+      z: room.z + dz,
+      key: tileKey(room.x + dx, room.z + dz),
+    });
+    const direction = (x, z) => ({ x, z });
+    const belts = [
+      { id: 'loopA', ...at(-6, 0), defaultDirection: direction(1, 0), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'loopB', ...at(-5, 0), defaultDirection: direction(1, 0), groupId: 'returnLoop', tileType: 'return' },
+      {
+        id: 'loopExit',
+        ...at(-4, 0),
+        defaultDirection: direction(0, 1),
+        groupId: 'loopExit',
+        tileType: 'junction',
+        switchable: true,
+        stateIndex: 0,
+        states: [
+          { label: 'Hold Loop', direction: direction(0, 1) },
+          { label: 'Receiver Exit', direction: direction(1, 0) },
+        ],
+      },
+      { id: 'loopC', ...at(-4, 1), defaultDirection: direction(-1, 0), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'loopD', ...at(-5, 1), defaultDirection: direction(-1, 0), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'loopE', ...at(-6, 1), defaultDirection: direction(0, -1), groupId: 'returnLoop', tileType: 'return' },
+      { id: 'targetRunA', ...at(-3, 0), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunB', ...at(-2, 0), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+    ];
+    const spawner = {
+      id: 'conveyorCargoSpawner',
+      ...at(-7, 0),
+      launchDirection: direction(1, 0),
+    };
+    const target = {
+      id: 'conveyorVaultPlate',
+      ...at(-1, 0),
+    };
+
+    return {
+      id: 'conveyorVaultRoutingPuzzle',
+      archetype: 'ReturnLoop',
+      difficulty: 2,
+      roomId: room.id,
+      targetDoorId: 'bonusVaultDoor',
+      targetPressurePlateId: target.id,
+      objectId: 'conveyorCargoObject',
+      objectType: 'Refractor Battery',
+      objectSpeed: 2.35,
+      state: 'ObjectReady',
+      spawner,
+      target,
+      belts,
+      consoles: [
+        {
+          id: 'conveyorRouteConsole',
+          label: 'Loop Exit Console',
+          action: 'cycleJunction',
+          controls: ['loopExit'],
+          ...at(-5, -5),
+        },
+        {
+          id: 'conveyorLaunchConsole',
+          label: 'Cargo Launcher',
+          action: 'launchOrReset',
+          ...at(1, -5),
+        },
+      ],
+      junctions: [{
+        id: 'loopExit',
+        beltId: 'loopExit',
+        tileKey: at(-4, 0).key,
+        stateIndex: 0,
+        states: belts.find((belt) => belt.id === 'loopExit').states,
+        solutionStateIndex: 1,
+      }],
+      solutionState: {
+        loopExit: 1,
+      },
+      maxSimulationSteps: 72,
+      canReset: true,
+      optional: true,
+      rewardTier: 'Basic',
+    };
+  }
+
+  _createMultiStageConveyorPuzzleDefinition(room) {
+    const at = (dx, dz) => ({
+      x: room.x + dx,
+      z: room.z + dz,
+      key: tileKey(room.x + dx, room.z + dz),
+    });
+    const direction = (x, z) => ({ x, z });
+    const belts = [
+      { id: 'feedA', ...at(-7, -3), defaultDirection: direction(1, 0), groupId: 'feed', tileType: 'straight' },
+      { id: 'feedB', ...at(-6, -3), defaultDirection: direction(1, 0), groupId: 'feed', tileType: 'straight' },
+      {
+        id: 'junctionA',
+        ...at(-5, -3),
+        defaultDirection: direction(0, 1),
+        groupId: 'junctionA',
+        tileType: 'junction',
+        switchable: true,
+        stateIndex: 0,
+        states: [
+          { label: 'Return Loop A', direction: direction(0, 1) },
+          { label: 'Junction B Feed', direction: direction(1, 0) },
+        ],
+      },
+      { id: 'middleA', ...at(-4, -3), defaultDirection: direction(1, 0), groupId: 'middle', tileType: 'straight' },
+      { id: 'middleB', ...at(-3, -3), defaultDirection: direction(1, 0), groupId: 'middle', tileType: 'straight' },
+      {
+        id: 'junctionB',
+        ...at(-2, -3),
+        defaultDirection: direction(0, -1),
+        groupId: 'junctionB',
+        tileType: 'junction',
+        switchable: true,
+        stateIndex: 0,
+        states: [
+          { label: 'Return Loop B', direction: direction(0, -1) },
+          { label: 'Receiver Run', direction: direction(1, 0) },
+        ],
+      },
+      { id: 'targetRunA', ...at(-1, -3), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunB', ...at(0, -3), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunC', ...at(1, -3), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'targetRunD', ...at(2, -3), defaultDirection: direction(1, 0), groupId: 'targetRun', tileType: 'straight' },
+      { id: 'returnA1', ...at(-5, -2), defaultDirection: direction(0, 1), groupId: 'returnLoopA', tileType: 'return' },
+      { id: 'returnA2', ...at(-5, -1), defaultDirection: direction(-1, 0), groupId: 'returnLoopA', tileType: 'return' },
+      { id: 'returnA3', ...at(-6, -1), defaultDirection: direction(-1, 0), groupId: 'returnLoopA', tileType: 'return' },
+      { id: 'returnA4', ...at(-7, -1), defaultDirection: direction(0, -1), groupId: 'returnLoopA', tileType: 'return' },
+      { id: 'returnA5', ...at(-7, -2), defaultDirection: direction(0, -1), groupId: 'returnLoopA', tileType: 'return' },
+      { id: 'returnB1', ...at(-2, -4), defaultDirection: direction(-1, 0), groupId: 'returnLoopB', tileType: 'return' },
+      { id: 'returnB2', ...at(-3, -4), defaultDirection: direction(-1, 0), groupId: 'returnLoopB', tileType: 'return' },
+      { id: 'returnB3', ...at(-4, -4), defaultDirection: direction(0, 1), groupId: 'returnLoopB', tileType: 'return' },
+    ];
+    const spawner = {
+      id: 'conveyorCargoSpawner',
+      ...at(-8, -3),
+      launchDirection: direction(1, 0),
+    };
+    const target = {
+      id: 'conveyorVaultPlate',
+      ...at(3, -3),
+    };
+
+    return {
+      id: 'conveyorVaultRoutingPuzzle',
+      archetype: 'MultiStageRouting',
+      difficulty: 3,
+      roomId: room.id,
+      targetDoorId: 'bonusVaultDoor',
+      targetPressurePlateId: target.id,
+      objectId: 'conveyorCargoObject',
+      objectType: 'Refractor Battery',
+      objectSpeed: 2.25,
+      state: 'ObjectReady',
+      spawner,
+      target,
+      belts,
+      consoles: [
+        {
+          id: 'conveyorRouteConsole',
+          label: 'Junction A Console',
+          action: 'cycleJunction',
+          controls: ['junctionA'],
+          ...at(-7, -7),
+        },
+        {
+          id: 'conveyorRouteConsoleB',
+          label: 'Junction B Console',
+          action: 'cycleJunction',
+          controls: ['junctionB'],
+          ...at(0, -7),
+        },
+        {
+          id: 'conveyorLaunchConsole',
+          label: 'Cargo Launcher',
+          action: 'launchOrReset',
+          ...at(5, -7),
+        },
+      ],
+      junctions: [
+        {
+          id: 'junctionA',
+          beltId: 'junctionA',
+          tileKey: at(-5, -3).key,
+          stateIndex: 0,
+          states: belts.find((belt) => belt.id === 'junctionA').states,
+          solutionStateIndex: 1,
+        },
+        {
+          id: 'junctionB',
+          beltId: 'junctionB',
+          tileKey: at(-2, -3).key,
+          stateIndex: 0,
+          states: belts.find((belt) => belt.id === 'junctionB').states,
+          solutionStateIndex: 1,
+        },
+      ],
+      solutionState: {
+        junctionA: 1,
+        junctionB: 1,
+      },
+      maxSimulationSteps: 120,
+      canReset: true,
+      optional: true,
+      rewardTier: 'Rare',
+    };
+  }
+
+  _validateConveyorPuzzleDefinition(puzzle, tiles, rooms) {
+    const errors = [];
+    const warnings = [];
+    const room = rooms.find((candidate) => candidate.id === puzzle.roomId);
+    const beltKeys = new Set(puzzle.belts.map((belt) => belt.key));
+
+    if (!room) {
+      errors.push(`${puzzle.id} is missing its room.`);
+    }
+
+    for (const belt of puzzle.belts) {
+      const tile = tiles.get(belt.key);
+      if (!tile) {
+        errors.push(`${puzzle.id} belt ${belt.id} is not on a valid floor tile.`);
+        continue;
+      }
+      if (tile.type !== 'conveyor') {
+        errors.push(`${puzzle.id} belt ${belt.id} could not be stamped as a conveyor tile.`);
+      }
+    }
+
+    for (const console of puzzle.consoles) {
+      const tile = tiles.get(console.key);
+      if (!tile) {
+        errors.push(`${console.label} is not on a valid floor tile.`);
+        continue;
+      }
+      if (tile.type === 'conveyor' || beltKeys.has(console.key)) {
+        errors.push(`${console.label} overlaps a conveyor belt.`);
+      }
+      if (Math.abs(console.x - room.x) > Math.floor(room.width / 2) - 1
+        || Math.abs(console.z - room.z) > Math.floor(room.depth / 2) - 1) {
+        errors.push(`${console.label} is too close to the conveyor room wall.`);
+      }
+      const nearestBeltDistance = Math.min(...puzzle.belts.map((belt) => (
+        Math.abs(belt.x - console.x) + Math.abs(belt.z - console.z)
+      )));
+      if (nearestBeltDistance <= 1) {
+        errors.push(`${console.label} is too close to the conveyor path.`);
+      }
+      if (!this._isConveyorPuzzleConsoleReachable(puzzle, console, tiles, room, beltKeys)) {
+        errors.push(`${console.label} is not reachable from the conveyor room floor without crossing belts.`);
+      }
+    }
+
+    const spawnerTile = tiles.get(puzzle.spawner.key);
+    if (!spawnerTile || beltKeys.has(puzzle.spawner.key)) {
+      errors.push(`${puzzle.id} spawner is invalid.`);
+    }
+
+    const targetTile = tiles.get(puzzle.target.key);
+    if (!targetTile || beltKeys.has(puzzle.target.key)) {
+      errors.push(`${puzzle.id} pressure plate is invalid.`);
+    }
+
+    const stateCombos = this._getConveyorPuzzleStateCombinations(puzzle);
+    let hasSolution = false;
+    let hasOnlySafeFailures = true;
+
+    for (const states of stateCombos) {
+      const result = this._simulateConveyorPuzzleDefinition(puzzle, states);
+      if (result.status === 'ReachedTarget') {
+        hasSolution = true;
+      } else if (result.status !== 'LoopDetected' && result.status !== 'Blocked') {
+        hasOnlySafeFailures = false;
+      }
+    }
+
+    const solutionResult = this._simulateConveyorPuzzleDefinition(puzzle, puzzle.solutionState);
+    if (solutionResult.status !== 'ReachedTarget') {
+      errors.push(`${puzzle.id} stored solution state does not reach the pressure plate.`);
+    }
+    if (!hasSolution) {
+      errors.push(`${puzzle.id} has no static solution.`);
+    }
+    if (!hasOnlySafeFailures) {
+      errors.push(`${puzzle.id} has a console state that can lose the cargo object.`);
+    }
+
+    return {
+      accepted: errors.length === 0,
+      errors,
+      warnings: errors.length ? warnings : [`${puzzle.id} conveyor routing puzzle validated successfully.`],
+    };
+  }
+
+  _isConveyorPuzzleConsoleReachable(puzzle, console, tiles, room, beltKeys) {
+    if (!room || !console) {
+      return false;
+    }
+
+    const halfW = Math.floor(room.width / 2);
+    const halfD = Math.floor(room.depth / 2);
+    const targetKey = console.key;
+    const isInsideRoom = (x, z) => (
+      x >= room.x - halfW
+      && x <= room.x + halfW
+      && z >= room.z - halfD
+      && z <= room.z + halfD
+    );
+    const isTraversable = (x, z) => {
+      if (!isInsideRoom(x, z)) {
+        return false;
+      }
+
+      const key = tileKey(x, z);
+      const tile = tiles.get(key);
+      return Boolean(
+        tile
+        && !beltKeys.has(key)
+        && key !== puzzle.spawner.key
+        && key !== puzzle.target.key
+        && tile.type !== 'conveyor'
+        && tile.type !== 'chest'
+      );
+    };
+
+    if (!isTraversable(console.x, console.z)) {
+      return false;
+    }
+
+    const startCandidates = [
+      [room.x, room.z],
+      [room.x - halfW + 2, room.z],
+      [room.x + halfW - 2, room.z],
+      [room.x, room.z - halfD + 2],
+      [room.x, room.z + halfD - 2],
+      [console.x, room.z],
+    ];
+    const start = startCandidates.find(([x, z]) => isTraversable(x, z));
+    if (!start) {
+      return false;
+    }
+
+    const queue = [start];
+    const visited = new Set([tileKey(start[0], start[1])]);
+
+    for (let index = 0; index < queue.length; index += 1) {
+      const [x, z] = queue[index];
+      const key = tileKey(x, z);
+      if (key === targetKey) {
+        return true;
+      }
+
+      for (const [dx, dz] of DIRECTIONS) {
+        const nextX = x + dx;
+        const nextZ = z + dz;
+        const nextKey = tileKey(nextX, nextZ);
+        if (visited.has(nextKey) || !isTraversable(nextX, nextZ)) {
+          continue;
+        }
+
+        visited.add(nextKey);
+        queue.push([nextX, nextZ]);
+      }
+    }
+
+    return false;
+  }
+
+  _getConveyorPuzzleStateCombinations(puzzle) {
+    const junctions = puzzle.junctions ?? [];
+    const combinations = [];
+    const visit = (index, state) => {
+      if (index >= junctions.length) {
+        combinations.push({ ...state });
+        return;
+      }
+
+      const junction = junctions[index];
+      for (let stateIndex = 0; stateIndex < (junction.states?.length ?? 1); stateIndex += 1) {
+        visit(index + 1, {
+          ...state,
+          [junction.id]: stateIndex,
+        });
+      }
+    };
+
+    visit(0, {});
+    return combinations;
+  }
+
+  _simulateConveyorPuzzleDefinition(puzzle, junctionStates = {}) {
+    const beltByKey = new Map(puzzle.belts.map((belt) => [belt.key, belt]));
+    const junctionByBeltId = new Map((puzzle.junctions ?? []).map((junction) => [junction.beltId, junction]));
+    let currentKey = puzzle.spawner.key;
+    const visited = new Set();
+
+    for (let step = 0; step < (puzzle.maxSimulationSteps ?? 120); step += 1) {
+      if (currentKey === puzzle.target.key) {
+        return { status: 'ReachedTarget', steps: step };
+      }
+
+      const belt = beltByKey.get(currentKey);
+      const direction = currentKey === puzzle.spawner.key
+        ? puzzle.spawner.launchDirection
+        : this._getConveyorPuzzleBeltDirection(belt, junctionByBeltId.get(belt?.id), junctionStates);
+
+      if (!direction || (direction.x === 0 && direction.z === 0)) {
+        return { status: 'Blocked', steps: step };
+      }
+
+      const [xText, zText] = currentKey.split(',');
+      const nextKey = tileKey(Number(xText) + direction.x, Number(zText) + direction.z);
+      const configurationKey = `${currentKey}|${Object.entries(junctionStates).map(([id, value]) => `${id}:${value}`).join('|')}`;
+      if (visited.has(configurationKey)) {
+        return { status: 'LoopDetected', steps: step };
+      }
+      visited.add(configurationKey);
+
+      if (nextKey === puzzle.target.key || beltByKey.has(nextKey)) {
+        currentKey = nextKey;
+        continue;
+      }
+
+      return { status: 'InvalidPath', steps: step, nextKey };
+    }
+
+    return { status: 'MaxStepsExceeded', steps: puzzle.maxSimulationSteps ?? 120 };
+  }
+
+  _getConveyorPuzzleBeltDirection(belt, junction = null, junctionStates = {}) {
+    if (!belt) {
+      return null;
+    }
+
+    if (junction?.states?.length) {
+      const stateIndex = THREE.MathUtils.clamp(
+        junctionStates[junction.id] ?? junction.stateIndex ?? 0,
+        0,
+        junction.states.length - 1,
+      );
+      return junction.states[stateIndex]?.direction ?? belt.defaultDirection;
+    }
+
+    return belt.defaultDirection;
+  }
+
   _calculateBoundsRadius(tiles) {
     let maxAbsTile = 0;
 
@@ -633,6 +1429,7 @@ export class DungeonGenerator {
   _applyIndustrialFactoryLayout(tiles, rooms) {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const conveyorRoom = roomById.get('conveyorRoom');
+    const bossRoom = roomById.get('bossRoom');
     const shrineRoom = roomById.get('shrineRoom');
     const trapRoom = roomById.get('trapRoom');
 
@@ -644,8 +1441,12 @@ export class DungeonGenerator {
       speed: 1.45,
       surface: 'conveyorBridge',
     });
-    this._markConveyorBridge(tiles, conveyorRoom, shrineRoom, {
+    this._markConveyorBridge(tiles, conveyorRoom, bossRoom, {
       speed: 1.72,
+      surface: 'conveyorBridge',
+    });
+    this._markConveyorBridge(tiles, bossRoom, shrineRoom, {
+      speed: 1.38,
       surface: 'conveyorBridge',
     });
   }
@@ -654,8 +1455,14 @@ export class DungeonGenerator {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const extraTiles = [];
     const seen = new Set();
+    const progressionAccessTileKeys = this._createProgressionAccessTileKeys(tiles, rooms);
+    const coolantFixtureTileKeys = this._createCoolantFixtureTileKeys(tiles, rooms);
     const pushExtra = (x, z, options = {}) => {
-      if (!tiles.has(tileKey(x, z))) {
+      const columnKey = tileKey(x, z);
+      if (!tiles.has(columnKey)) {
+        return null;
+      }
+      if (progressionAccessTileKeys.has(columnKey) || coolantFixtureTileKeys.has(columnKey)) {
         return null;
       }
 
@@ -674,6 +1481,13 @@ export class DungeonGenerator {
       const tile = tiles.get(tileKey(x, z));
       if (!tile) {
         return null;
+      }
+      const columnKey = tileKey(x, z);
+      if (
+        (progressionAccessTileKeys.has(columnKey) || coolantFixtureTileKeys.has(columnKey))
+        && wouldObstructProgressionAccess(options)
+      ) {
+        return tile;
       }
 
       return applyTileOptions(tile, options);
@@ -965,10 +1779,14 @@ export class DungeonGenerator {
       const rampLength = Math.max(2, Math.ceil(Math.abs(targetElevation) / RUIN_RAMP_MAX_STEP));
       const allTiles = getAllFloorTiles();
       const room = getRoomForTile(chainTile);
+      if (coolantFixtureTileKeys.has(tileKey(chainTile.x, chainTile.z))) {
+        return null;
+      }
 
       for (let distance = 1; distance <= rampLength; distance += 1) {
         const x = chainTile.x + direction[0] * distance;
         const z = chainTile.z + direction[1] * distance;
+        const columnKey = tileKey(x, z);
         const base = tiles.get(tileKey(x, z));
 
         if (
@@ -982,7 +1800,7 @@ export class DungeonGenerator {
         if (base.surface === 'industrialRamp' || Math.abs(base.elevation ?? 0) > 0.05) {
           return null;
         }
-        if (occupiedRampKeys.has(tileKey(x, z))) {
+        if (occupiedRampKeys.has(columnKey) || coolantFixtureTileKeys.has(columnKey)) {
           return null;
         }
 
@@ -1219,19 +2037,11 @@ export class DungeonGenerator {
         minZ: coolantRoom.z - halfD + 1,
         maxZ: coolantRoom.z - halfD + 2,
       });
-      addDeck(coolantRoom, {
-        level: 1,
-        elevation: RUIN_SECOND_FLOOR_ELEVATION,
-        surface: 'coolantPipeBridge',
-        minX: coolantRoom.x - 2,
-        maxX: coolantRoom.x + 2,
-        minZ: coolantRoom.z - 1,
-        maxZ: coolantRoom.z + 1,
-      });
+      const rampX = coolantRoom.x + halfW - 4;
       addRampRun(coolantRoom, [
-        { x: coolantRoom.x + halfW - 1, z: coolantRoom.z + halfD - 1 },
-        { x: coolantRoom.x + halfW - 1, z: coolantRoom.z - halfD + 3 },
-        { x: coolantRoom.x + halfW - 3, z: coolantRoom.z - halfD + 3 },
+        { x: rampX, z: coolantRoom.z + halfD - 1 },
+        { x: rampX, z: coolantRoom.z - halfD + 3 },
+        { x: rampX, z: coolantRoom.z - halfD + 2 },
       ], 0, RUIN_SECOND_FLOOR_ELEVATION, 0, 1);
     }
 
@@ -1399,6 +2209,7 @@ export class DungeonGenerator {
     }
 
     addScaffoldAccessRamps();
+    this._clearProgressionAccessObstructions(tiles, extraTiles, progressionAccessTileKeys);
 
     return extraTiles;
   }
@@ -1694,9 +2505,410 @@ export class DungeonGenerator {
     return floorTiles.filter((tile) => keepTiles.has(tile));
   }
 
+  _createProgressionAccessTileKeys(tiles, rooms) {
+    const roomById = new Map(rooms.map((room) => [room.id, room]));
+    const accessKeys = new Set();
+    const addIfPresent = (x, z) => {
+      const key = tileKey(x, z);
+      if (tiles.has(key)) {
+        accessKeys.add(key);
+      }
+    };
+    const addClearance = (x, z, radius = 1) => {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        for (let dz = -radius; dz <= radius; dz += 1) {
+          if (Math.abs(dx) + Math.abs(dz) > radius) {
+            continue;
+          }
+          addIfPresent(x + dx, z + dz);
+        }
+      }
+    };
+
+    for (const [fromRoomId, toRoomId] of PROGRESSION_CONNECTIONS) {
+      const fromRoom = roomById.get(fromRoomId);
+      const toRoom = roomById.get(toRoomId);
+      if (!fromRoom || !toRoom) {
+        continue;
+      }
+
+      for (const point of this._buildOrthogonalPath(fromRoom, toRoom)) {
+        if (isDoorOrHallwayClearance(tiles, point.x, point.z)) {
+          addClearance(point.x, point.z);
+        }
+      }
+
+      const doorX = Math.round((fromRoom.x + toRoom.x) * 0.5);
+      const doorZ = Math.round((fromRoom.z + toRoom.z) * 0.5);
+      addClearance(doorX, doorZ);
+    }
+
+    return accessKeys;
+  }
+
+  _resetProgressionAccessTile(tile) {
+    const wasRaised = Math.abs(tile.elevation ?? 0) > 0.05
+      || Math.abs(tile.level ?? 0) > 0.05
+      || tile.surface === 'industrialRamp'
+      || tile.surface === 'rampLanding';
+
+    tile.elevation = 0;
+    tile.level = 0;
+    if (wasRaised) {
+      tile.surface = tile.type;
+    }
+    delete tile.rampStartElevation;
+    delete tile.rampEndElevation;
+    delete tile.rampDirectionX;
+    delete tile.rampDirectionZ;
+    delete tile.steepRamp;
+  }
+
+  _clearProgressionAccessObstructions(tiles, extraTiles, progressionAccessTileKeys) {
+    if (!progressionAccessTileKeys?.size) {
+      return;
+    }
+
+    for (const key of progressionAccessTileKeys) {
+      const tile = tiles.get(key);
+      if (tile) {
+        this._resetProgressionAccessTile(tile);
+      }
+    }
+
+    for (let index = extraTiles.length - 1; index >= 0; index -= 1) {
+      const tile = extraTiles[index];
+      if (progressionAccessTileKeys.has(tileKey(tile.x, tile.z))) {
+        extraTiles.splice(index, 1);
+      }
+    }
+  }
+
+  _getCoolantFixtureSpecs(room) {
+    if (!room) {
+      return [];
+    }
+
+    const halfW = Math.max(1.1, Math.floor(room.width / 2) * this.tileSize - 0.7);
+    const halfD = Math.max(1.1, Math.floor(room.depth / 2) * this.tileSize - 0.7);
+    return [
+      {
+        id: 'coolantCentralMachineBase',
+        label: 'Central coolant machinery base',
+        localX: 0,
+        localZ: 0,
+        halfWidth: 2.85,
+        halfDepth: 2.25,
+        verticalHalfHeight: 1.45,
+      },
+      {
+        id: 'coolantPressureCore',
+        label: 'Coolant pressure core',
+        localX: 0,
+        localZ: 0,
+        halfWidth: 1.75,
+        halfDepth: 1.75,
+        verticalHalfHeight: 3.25,
+      },
+      {
+        id: 'coolantSourceTankA',
+        label: 'Coolant source tank',
+        localX: -halfW * 0.74,
+        localZ: -halfD * 0.68,
+        halfWidth: 1.18,
+        halfDepth: 1.18,
+        verticalHalfHeight: 2.25,
+      },
+      {
+        id: 'coolantSourceTankB',
+        label: 'Coolant source tank',
+        localX: halfW * 0.74,
+        localZ: -halfD * 0.68,
+        halfWidth: 1.18,
+        halfDepth: 1.18,
+        verticalHalfHeight: 2.25,
+      },
+      {
+        id: 'coolantSourceTankC',
+        label: 'Coolant source tank',
+        localX: -halfW * 0.74,
+        localZ: halfD * 0.68,
+        halfWidth: 1.18,
+        halfDepth: 1.18,
+        verticalHalfHeight: 2.25,
+      },
+      {
+        id: 'coolantOverflowTank',
+        label: 'Coolant overflow tank',
+        localX: halfW * 0.74,
+        localZ: halfD * 0.68,
+        halfWidth: 1.12,
+        halfDepth: 1.12,
+        verticalHalfHeight: 2.05,
+      },
+      {
+        id: 'coolantValvePylonA',
+        label: 'Coolant valve pylon',
+        localX: -halfW * 0.34,
+        localZ: -halfD * 0.08,
+        halfWidth: 0.74,
+        halfDepth: 0.74,
+        verticalHalfHeight: 1.7,
+      },
+      {
+        id: 'coolantValvePylonB',
+        label: 'Coolant valve pylon',
+        localX: halfW * 0.34,
+        localZ: -halfD * 0.08,
+        halfWidth: 0.74,
+        halfDepth: 0.74,
+        verticalHalfHeight: 1.7,
+      },
+      {
+        id: 'coolantValvePylonC',
+        label: 'Coolant valve pylon',
+        localX: 0,
+        localZ: halfD * 0.44,
+        halfWidth: 0.74,
+        halfDepth: 0.74,
+        verticalHalfHeight: 1.7,
+      },
+      {
+        id: 'coolantTerminalA',
+        label: 'Coolant valve terminal',
+        localX: -halfW * 0.44,
+        localZ: halfD * 0.08,
+        halfWidth: 0.86,
+        halfDepth: 0.58,
+        verticalHalfHeight: 1.1,
+      },
+      {
+        id: 'coolantTerminalB',
+        label: 'Coolant valve terminal',
+        localX: halfW * 0.44,
+        localZ: halfD * 0.08,
+        halfWidth: 0.86,
+        halfDepth: 0.58,
+        verticalHalfHeight: 1.1,
+      },
+      {
+        id: 'coolantTerminalC',
+        label: 'Coolant valve terminal',
+        localX: 0,
+        localZ: halfD * 0.66,
+        halfWidth: 0.86,
+        halfDepth: 0.58,
+        verticalHalfHeight: 1.1,
+      },
+      {
+        id: 'coolantMasterConsole',
+        label: 'Master pressure console',
+        localX: 0,
+        localZ: -halfD * 0.82,
+        halfWidth: 0.95,
+        halfDepth: 0.52,
+        verticalHalfHeight: 1.0,
+        elevation: RUIN_SECOND_FLOOR_ELEVATION,
+        blocksScaffold: false,
+      },
+    ];
+  }
+
+  _worldToRoomLocal(room, worldX, worldZ) {
+    const dx = worldX - room.x * this.tileSize;
+    const dz = worldZ - room.z * this.tileSize;
+    const rotationY = room.prefabYaw ?? 0;
+    const cos = Math.cos(rotationY);
+    const sin = Math.sin(rotationY);
+
+    return {
+      x: dx * cos + dz * sin,
+      z: -dx * sin + dz * cos,
+    };
+  }
+
+  _isTileInsideRoomLocalRect(tile, room, spec, padding = 0) {
+    const local = this._worldToRoomLocal(
+      room,
+      tile.x * this.tileSize,
+      tile.z * this.tileSize,
+    );
+
+    return Math.abs(local.x - spec.localX) <= spec.halfWidth + padding
+      && Math.abs(local.z - spec.localZ) <= spec.halfDepth + padding;
+  }
+
+  _createCoolantFixtureTileKeys(tiles, rooms, padding = this.tileSize * 0.24) {
+    const room = rooms.find((candidate) => candidate.id === 'coolantRelayRoom');
+    if (!room) {
+      return new Set();
+    }
+
+    const fixtureSpecs = this._getCoolantFixtureSpecs(room)
+      .filter((spec) => spec.blocksScaffold !== false);
+    const keys = new Set();
+
+    for (const tile of tiles.values()) {
+      if (!this._isTileInsideRoom(tile, room)) {
+        continue;
+      }
+      if (fixtureSpecs.some((spec) => this._isTileInsideRoomLocalRect(tile, room, spec, padding))) {
+        keys.add(tileKey(tile.x, tile.z));
+      }
+    }
+
+    return keys;
+  }
+
+  _isPositionInsideZone(position, zone, { ignoreVertical = false } = {}) {
+    let localX = position.x - zone.position.x;
+    let localZ = position.z - zone.position.z;
+
+    if (Number.isFinite(zone.rotationY) && Math.abs(zone.rotationY) > 0.0001) {
+      const cos = Math.cos(zone.rotationY);
+      const sin = Math.sin(zone.rotationY);
+      const rotatedX = localX * cos + localZ * sin;
+      const rotatedZ = -localX * sin + localZ * cos;
+      localX = rotatedX;
+      localZ = rotatedZ;
+    }
+
+    if (Math.abs(localX) > zone.halfWidth || Math.abs(localZ) > zone.halfDepth) {
+      return false;
+    }
+
+    if (!ignoreVertical && Number.isFinite(zone.verticalHalfHeight)) {
+      return Math.abs((position.y ?? 0) - (zone.position.y ?? 0)) <= zone.verticalHalfHeight;
+    }
+
+    return true;
+  }
+
+  _isFloorTileBlockedBySolidZone(tile, solidZones = []) {
+    const position = this._floorTileToWorld(tile);
+    return solidZones.some((zone) => this._isPositionInsideZone(position, zone));
+  }
+
+  _validateProgressionAccess(floorTiles = [], tiles = new Map(), rooms = []) {
+    const progressionAccessTileKeys = this._createProgressionAccessTileKeys(tiles, rooms);
+    const floorTilesByColumn = this._createFloorTileLookup(floorTiles);
+    const roomById = new Map(rooms.map((room) => [room.id, room]));
+    const errors = [];
+
+    for (const key of progressionAccessTileKeys) {
+      const [xText, zText] = key.split(',');
+      const x = Number(xText);
+      const z = Number(zText);
+      const column = floorTilesByColumn.get(key) ?? [];
+      const baseTile = column.find((tile) => (
+        Math.abs(tile.elevation ?? 0) <= 0.05
+        && Math.abs(tile.level ?? 0) <= 0.05
+        && tile.surface !== 'industrialRamp'
+        && tile.surface !== 'rampLanding'
+      ));
+      const elevatedBlocker = column.find((tile) => (
+        tile.surface === 'industrialRamp'
+        || tile.surface === 'rampLanding'
+        || Math.abs(tile.level ?? 0) > 0.05
+      ));
+
+      if (!baseTile) {
+        errors.push(`Progression access tile ${x},${z} has no clear base-floor footing.`);
+      }
+      if (elevatedBlocker) {
+        errors.push(`Progression access tile ${x},${z} is obstructed by ${elevatedBlocker.surface ?? elevatedBlocker.type}.`);
+      }
+    }
+
+    const startRoom = roomById.get('hubTown') ?? roomById.get('expeditionCamp') ?? rooms[0];
+    const startTile = this._findRoomWalkabilityStartTile(startRoom, floorTiles);
+    const reachable = this._createReachableFloorTileKeySet(startTile, floorTiles);
+    const progressionRoomIds = new Set(PROGRESSION_CONNECTIONS.flatMap(([fromRoomId, toRoomId]) => [
+      fromRoomId,
+      toRoomId,
+    ]));
+
+    for (const roomId of progressionRoomIds) {
+      const room = roomById.get(roomId);
+      if (!room) {
+        continue;
+      }
+
+      const roomStartTile = this._findRoomWalkabilityStartTile(room, floorTiles);
+      if (!roomStartTile) {
+        errors.push(`Progression room ${roomId} has no walkable floor tile.`);
+        continue;
+      }
+      if (!reachable.has(this._getFloorTileGraphKey(roomStartTile))) {
+        errors.push(`Progression room ${roomId} is not reachable from the dungeon start.`);
+      }
+    }
+
+    return {
+      accepted: errors.length === 0,
+      errors,
+      warnings: errors.length ? [] : ['Progression access geometry validated successfully.'],
+    };
+  }
+
+  _validateCoolantRoomWalkability(floorTiles = [], tiles = new Map(), rooms = [], solidZones = []) {
+    const room = rooms.find((candidate) => candidate.id === 'coolantRelayRoom');
+    if (!room) {
+      return { accepted: true, errors: [], warnings: [] };
+    }
+
+    const errors = [];
+    const fixtureTileKeys = this._createCoolantFixtureTileKeys(tiles, rooms);
+    const roomTiles = this._getRoomFloorTiles(room, floorTiles);
+    const navigableTiles = roomTiles.filter((tile) => (
+      !fixtureTileKeys.has(tileKey(tile.x, tile.z))
+      && !this._isFloorTileBlockedBySolidZone(tile, solidZones)
+    ));
+
+    const startTile = [...navigableTiles].sort((a, b) => {
+      const elevationA = Math.abs(a.elevation ?? 0);
+      const elevationB = Math.abs(b.elevation ?? 0);
+      if (Math.abs(elevationA - elevationB) > 0.001) {
+        return elevationA - elevationB;
+      }
+
+      const distanceA = Math.abs(a.x - room.x) + Math.abs(a.z - room.z);
+      const distanceB = Math.abs(b.x - room.x) + Math.abs(b.z - room.z);
+      return distanceA - distanceB;
+    })[0] ?? null;
+
+    if (!startTile) {
+      errors.push('Coolant room has no unobstructed walkability start tile.');
+    }
+
+    const reachable = this._createReachableFloorTileKeySet(startTile, floorTiles);
+    for (const tile of navigableTiles) {
+      const key = this._getFloorTileGraphKey(tile);
+      if (!reachable.has(key)) {
+        errors.push(`Coolant room tile ${key} is not reachable from the room floor.`);
+      }
+      if (tile.surface === 'industrialRamp' && tile.steepRamp) {
+        errors.push(`Coolant room ramp tile ${key} is too steep to use reliably.`);
+      }
+    }
+
+    for (const tile of roomTiles) {
+      const elevated = Math.abs(tile.elevation ?? 0) > 0.05 || Math.abs(tile.level ?? 0) > 0.05;
+      if (elevated && fixtureTileKeys.has(tileKey(tile.x, tile.z))) {
+        errors.push(`Coolant room elevated tile ${this._getFloorTileGraphKey(tile)} overlaps a tank or pressure core footprint.`);
+      }
+    }
+
+    return {
+      accepted: errors.length === 0,
+      errors,
+      warnings: errors.length ? [] : ['Coolant room walkability validated successfully.'],
+    };
+  }
+
   _createVerticalConnectors(rooms) {
     return rooms
-      .filter((room) => ['server', 'machine', 'coolant', 'enemy', 'keycard', 'trap', 'conveyor', 'shrine', 'bonus'].includes(room.type))
+      .filter((room) => ['server', 'machine', 'coolant', 'enemy', 'keycard', 'trap', 'conveyor', 'boss', 'shrine', 'bonus'].includes(room.type))
       .map((room) => ({
         id: `${room.id}VerticalConnector`,
         roomId: room.id,
@@ -1706,6 +2918,8 @@ export class DungeonGenerator {
           ? 'Basement maintenance ramp'
           : room.type === 'shrine'
             ? 'Refractor shrine ramp tower'
+            : room.type === 'boss'
+              ? 'Guardian arena access ramp'
             : room.type === 'conveyor'
               ? 'Factory gantry ramp'
               : room.type === 'server'
@@ -1720,7 +2934,7 @@ export class DungeonGenerator {
           ? [-1, 0]
           : room.type === 'coolant'
             ? [-1, 0, 1]
-          : room.type === 'conveyor' || room.type === 'shrine'
+          : room.type === 'conveyor' || room.type === 'boss' || room.type === 'shrine'
             ? [0, 1, 2]
             : [0, 1],
       }));
@@ -1770,6 +2984,18 @@ export class DungeonGenerator {
     if (room.type === 'shrine') {
       for (let x = room.x - halfW; x <= room.x + halfW; x += 1) {
         mark(x, room.z - halfD, 'catwalk');
+      }
+      for (let z = room.z - halfD; z <= room.z + halfD; z += 1) {
+        mark(room.x - halfW, z, 'catwalk');
+        mark(room.x + halfW, z, 'catwalk');
+      }
+      return;
+    }
+
+    if (room.type === 'boss') {
+      for (let x = room.x - halfW; x <= room.x + halfW; x += 1) {
+        mark(x, room.z - halfD, 'raisedDeck');
+        mark(x, room.z + halfD, 'raisedDeck');
       }
       for (let z = room.z - halfD; z <= room.z + halfD; z += 1) {
         mark(room.x - halfW, z, 'catwalk');
@@ -2212,6 +3438,7 @@ export class DungeonGenerator {
         coolant: coolantFloor,
         entrance,
         enemy,
+        boss: enemy,
         trap,
         conveyor,
         bonus,
@@ -2682,6 +3909,7 @@ export class DungeonGenerator {
       keycard: ['secondFloor'],
       trap: ['basementFloor', 'industrialRamp'],
       conveyor: ['thirdFloorGantry', 'secondFloorConveyor', 'conveyorBridge'],
+      boss: ['thirdFloorGantry', 'raisedDeck', 'catwalk'],
       shrine: ['refractorDais', 'reveredMezzanine'],
       bonus: ['basementFloor'],
       entrance: ['entrance'],
@@ -2756,7 +3984,7 @@ export class DungeonGenerator {
       addBox(parent, 'ruinIdentityWallMonitor', -halfW * 0.34, northZ - 0.08, 1.0 * detailScale, 0.44 * detailScale, 0.06, materials.glowBlue, 1.62);
       addGlowNode(parent, 'ruinIdentityRedEyeNode', halfW * 0.34, northZ - 0.1, materials.glowRed, 1.74, 0.1 * detailScale);
 
-      if (room.type === 'enemy' || room.type === 'trap' || room.type === 'conveyor' || room.type === 'keycard') {
+      if (room.type === 'enemy' || room.type === 'trap' || room.type === 'conveyor' || room.type === 'keycard' || room.type === 'boss') {
         addPost(parent, 'sharedCoolantSourceTank', -halfW * 0.44, southZ, 0.22 * detailScale, 1.08 * detailScale, conduitMaterial);
         addPost(parent, 'sharedValveRelayPylon', halfW * 0.32, southZ - 0.38, 0.14 * detailScale, 1.28 * detailScale, materials.wallTrim);
         addGlowNode(parent, 'sharedValveRelayCore', halfW * 0.32, southZ - 0.38, conduitMaterial, 1.42 * detailScale, 0.12 * detailScale);
@@ -2862,7 +4090,6 @@ export class DungeonGenerator {
         addConduitSegment(fallback, 'coolantOverflowReturnLine', halfW * 0.74, halfD * 0.68, 0, 0, materials.glowGreen, 0.11, 0.09);
 
         addBox(fallback, 'coolantNorthControlBalcony', 0, -halfD * 0.82, halfW * 1.25, 0.12, 1.12, materials.coolantFloor, RUIN_SECOND_FLOOR_ELEVATION);
-        addBox(fallback, 'coolantCentralPipeBridge', 0, 0, 1.24, 0.12, halfD * 0.68, materials.coolantFloor, RUIN_SECOND_FLOOR_ELEVATION);
         addBox(fallback, 'coolantBalconyInnerRail', 0, -halfD * 0.7, halfW * 1.16, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.76);
         addBox(fallback, 'coolantBalconyOuterRail', 0, -halfD * 0.94, halfW * 1.16, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.76);
         addBox(fallback, 'coolantMasterPressureConsole', 0, -halfD * 0.82, 1.18, 0.72, 0.52, materials.terminal, RUIN_SECOND_FLOOR_ELEVATION + 0.36);
@@ -3108,6 +4335,13 @@ export class DungeonGenerator {
           arm.rotation.z = Math.sign(x || 1) * 0.45;
         }
         addGlowNode(roomGroup, 'assemblyLinePowerNode', 0, 0, materials.glowBlue, 0.8, 0.18);
+      } else if (room.type === 'boss') {
+        for (const [x, z] of [[-1.4, -1.0], [1.4, -1.0], [-1.4, 1.0], [1.4, 1.0]]) {
+          addPost(roomGroup, 'bossArenaContainmentPylon', x, z, 0.16, 1.95, materials.supportMetal);
+          addGlowNode(roomGroup, 'bossArenaWarningCore', x, z, materials.glowRed, 2.08, 0.13);
+        }
+        addBox(roomGroup, 'bossArenaSignalRail', 0, -halfD * 0.62, halfW * 1.2, 0.08, 0.14, materials.glowRed, 0.2);
+        addGlowNode(roomGroup, 'bossArenaCentralBeacon', 0, 0, materials.glowViolet, 0.88, 0.28);
       } else if (room.type === 'shrine') {
         for (const [x, z] of [[-1.15, 0], [1.15, 0], [0, -1.15], [0, 1.15]]) {
           addPost(roomGroup, 'refractorRelayPylon', x, z, 0.13, 1.75, materials.wallTrim);
@@ -3282,7 +4516,7 @@ export class DungeonGenerator {
 
         roomGroup.add(model);
         this._addImportedModelCollisionZones(model, roomGroup, room, solidZones);
-        fallback.visible = true;
+        fallback.visible = false;
       },
       undefined,
       (error) => {
@@ -3735,9 +4969,11 @@ export class DungeonGenerator {
     const descriptors = [
       { id: 'entranceDoor', from: roomById.get('expeditionCamp'), to: roomById.get('entrance'), locked: false, closed: false, label: 'Ruin Entrance' },
       { id: 'enemyNestGate', from: roomById.get('enemyNest'), to: roomById.get('keycardRoom'), locked: true, closed: true, encounterId: 'enemyNest', label: 'Security Gate' },
-      { id: 'lockedKeycardDoor', from: roomById.get('keycardRoom'), to: roomById.get('trapRoom'), locked: true, closed: true, requiresKeycard: true, label: 'Keycard Door' },
-      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, requiresKeycard: true, pressurePlateId: 'conveyorVaultPlate', optional: true, label: 'Bonus Vault' },
-      { id: 'largeRefractorSeal', from: roomById.get('conveyorRoom'), to: roomById.get('shrineRoom'), locked: true, closed: true, mechanismId: 'conveyorOverride', label: 'Shrine Seal' },
+      { id: 'Door_Alpha', from: roomById.get('keycardRoom'), to: roomById.get('trapRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Alpha', progressionTier: 1, label: 'Security Door Alpha' },
+      { id: 'Door_Beta', from: roomById.get('trapRoom'), to: roomById.get('conveyorRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Beta', progressionTier: 2, label: 'Security Door Beta' },
+      { id: 'Door_Gamma', from: roomById.get('conveyorRoom'), to: roomById.get('bossRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Gamma', progressionTier: 3, label: 'Security Door Gamma' },
+      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, pressurePlateId: 'conveyorVaultPlate', optional: true, label: 'Bonus Vault' },
+      { id: 'Door_Shrine', from: roomById.get('bossRoom'), to: roomById.get('shrineRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Shrine_Key', progressionTier: 'Final', isShrineDoor: true, label: 'Refractor Shrine Door' },
     ];
     const doors = [];
 
@@ -3789,7 +5025,12 @@ export class DungeonGenerator {
         locked: descriptor.locked,
         closed: descriptor.closed,
         requiresKeycard: Boolean(descriptor.requiresKeycard),
+        requiredKeycardId: descriptor.requiredKeycardId ?? null,
+        progressionTier: descriptor.progressionTier ?? null,
+        fromRoomId: descriptor.from.id,
+        toRoomId: descriptor.to.id,
         optional: Boolean(descriptor.optional),
+        isShrineDoor: Boolean(descriptor.isShrineDoor),
         mechanismId: descriptor.mechanismId ?? null,
         pressurePlateId: descriptor.pressurePlateId ?? null,
         encounterId: descriptor.encounterId ?? null,
@@ -3810,8 +5051,10 @@ export class DungeonGenerator {
       mechanisms: [],
       puzzleBlocks: [],
       pressurePlates: [],
+      conveyorPuzzles: [],
       safeInteractables: [],
       trapVisuals: [],
+      keySeeker: null,
       shrine: null,
     };
     const roomPosition = (room, surfaces = []) => {
@@ -3828,6 +5071,15 @@ export class DungeonGenerator {
         landmarks.safeInteractables.push(...this._addExpeditionCamp(group, position, materials));
       } else if (room.type === 'entrance') {
         this._addExpeditionPad(group, position, materials);
+        const keySeekerPosition = this._tileToWorld(room.x + 2, room.z + 2, tiles);
+        landmarks.keySeeker = {
+          id: 'KeySeeker',
+          label: 'Key Seeker',
+          roomId: room.id,
+          object: this._addKeySeekerInteractable(group, keySeekerPosition, materials),
+          position: keySeekerPosition.clone(),
+          activated: false,
+        };
       } else if (room.type === 'keycard') {
         const keycardTile = this._findReachableRoomFloorTile(room, floorTiles, ['secondFloor'])
           ?? this._findReachableRoomFloorTile(room, floorTiles, []);
@@ -3835,44 +5087,87 @@ export class DungeonGenerator {
           ? this._floorTileToWorld(keycardTile)
           : roomPosition(room);
         landmarks.keycards.push({
-          id: 'ruinKeycardA',
+          id: 'Keycard_Alpha',
+          keycardId: 'Keycard_Alpha',
+          displayName: 'Keycard Alpha',
+          pairedDoorId: 'Door_Alpha',
+          progressionTier: 1,
+          spawnRoomId: room.id,
+          spawnMode: 'Pedestal',
+          isRequiredForMainProgression: true,
           object: this._addKeycardMarker(group, keycardPosition, materials),
           position: keycardPosition.clone(),
           collected: false,
         });
       } else if (room.type === 'conveyor') {
-        const terminalPosition = roomPosition(room, ['thirdFloorGantry', 'secondFloorConveyor']);
-        const puzzlePosition = roomPosition(room, ['thirdFloorGantry']);
-        const blockPosition = puzzlePosition.clone().add(new THREE.Vector3(-this.tileSize * 0.86, 0, 0));
-        blockPosition.y = puzzlePosition.y;
-        const platePosition = puzzlePosition.clone().add(new THREE.Vector3(this.tileSize * 0.86, 0, 0));
-        platePosition.y = puzzlePosition.y;
-        const terminal = this._addMechanismTerminal(group, terminalPosition, materials);
-        landmarks.mechanisms.push({
-          id: 'conveyorOverride',
-          label: 'Upper Gantry Override',
-          object: terminal,
-          position: terminal.position.clone(),
-          requiresEncounterId: 'conveyorGuard',
-          activated: false,
-        });
-        landmarks.puzzleBlocks.push({
-          id: 'conveyorRelayBlock',
-          label: 'Relay Block',
-          object: this._addPuzzleBlock(group, blockPosition, materials),
-          position: blockPosition.clone(),
-          radius: 0.58,
-        });
+        const puzzleDefinition = room.conveyorPuzzleDefinition;
+        if (!puzzleDefinition) {
+          continue;
+        }
+
+        const spawnerPosition = this._tileToWorld(puzzleDefinition.spawner.x, puzzleDefinition.spawner.z, tiles);
+        const targetPosition = this._tileToWorld(puzzleDefinition.target.x, puzzleDefinition.target.z, tiles);
+        const cargoObject = this._addConveyorCargoObject(group, spawnerPosition, materials);
+        const spawnerObject = this._addConveyorCargoSpawner(group, spawnerPosition, materials);
+
+        for (const console of puzzleDefinition.consoles) {
+          const consolePosition = this._tileToWorld(console.x, console.z, tiles);
+          const terminal = this._addMechanismTerminal(group, consolePosition, materials);
+          terminal.name = `${console.id}Interactable`;
+          landmarks.mechanisms.push({
+            id: console.id,
+            label: console.label,
+            object: terminal,
+            position: terminal.position.clone(),
+            requiresEncounterId: 'conveyorGuard',
+            activated: false,
+            repeatable: true,
+            conveyorPuzzleId: puzzleDefinition.id,
+            conveyorPuzzleAction: console.action,
+            controlledJunctionIds: console.controls ?? [],
+          });
+        }
+
         landmarks.pressurePlates.push({
-          id: 'conveyorVaultPlate',
-          label: 'Vault Pressure Plate',
-          object: this._addPressurePlate(group, platePosition, materials),
-          position: platePosition.clone(),
+          id: puzzleDefinition.targetPressurePlateId,
+          label: 'Cargo Receiver Plate',
+          object: this._addPressurePlate(group, targetPosition, materials),
+          position: targetPosition.clone(),
           radius: 0.92,
-          targetDoorId: 'bonusVaultDoor',
-          requiredBlockId: 'conveyorRelayBlock',
+          targetDoorId: puzzleDefinition.targetDoorId,
+          requiredPuzzleObjectId: puzzleDefinition.objectId,
           active: false,
           activated: false,
+        });
+
+        landmarks.conveyorPuzzles.push({
+          ...puzzleDefinition,
+          belts: puzzleDefinition.belts.map((belt) => ({ ...belt, defaultDirection: { ...belt.defaultDirection } })),
+          consoles: puzzleDefinition.consoles.map((console) => ({ ...console })),
+          junctions: puzzleDefinition.junctions.map((junction) => ({
+            ...junction,
+            states: junction.states.map((state) => ({ ...state, direction: { ...state.direction } })),
+          })),
+          spawner: {
+            ...puzzleDefinition.spawner,
+            launchDirection: { ...puzzleDefinition.spawner.launchDirection },
+            position: spawnerPosition.clone(),
+            object: spawnerObject,
+          },
+          target: {
+            ...puzzleDefinition.target,
+            position: targetPosition.clone(),
+          },
+          cargo: {
+            id: puzzleDefinition.objectId,
+            object: cargoObject,
+            position: spawnerPosition.clone(),
+            currentTileKey: puzzleDefinition.spawner.key,
+            spawnTileKey: puzzleDefinition.spawner.key,
+            moving: false,
+            accepted: false,
+          },
+          completed: false,
         });
       } else if (room.type === 'coolant') {
         const terminalPosition = roomPosition(room, ['coolantControlBalcony', 'coolantPipeBridge']);
@@ -3907,9 +5202,10 @@ export class DungeonGenerator {
     let chestIndex = 0;
     const placedChestKeys = new Set();
     const addChest = (tile, {
-      keycardChance = chestIndex === 0 ? 0.65 : 0.28,
+      keycardChance = 0,
       rareBoost = chestIndex > 0,
       roomId = tile.roomId ?? null,
+      guaranteedKeycardId = null,
     } = {}) => {
       const key = floorTileKey(tile.x, tile.z, tile.level ?? 0);
       if (placedChestKeys.has(key)) {
@@ -3925,6 +5221,8 @@ export class DungeonGenerator {
         position: position.clone(),
         opened: false,
         keycardChance,
+        guaranteedKeycardId,
+        containsKeycard: Boolean(guaranteedKeycardId),
         rareBoost,
         roomId,
         floorKey: key,
@@ -3943,12 +5241,12 @@ export class DungeonGenerator {
     }
 
     const chestRequests = [
-      { roomId: 'alienServerRoom', surfaces: ['serverUpperCatwalk', 'serverCoreFloor'], keycardChance: 0.08, rareBoost: true },
-      { roomId: 'machineFactoryRoom', surfaces: ['machineCrossBridge', 'machineUpperCatwalk', 'machinePressZone'], keycardChance: 0.08, rareBoost: true },
-      { roomId: 'coolantRelayRoom', surfaces: ['coolantControlBalcony', 'coolantValveDeck', 'coolantPipeBridge'], keycardChance: 0.1, rareBoost: true },
-      { roomId: 'enemyNest', surfaces: ['secondFloor'], keycardChance: 0.12, rareBoost: true },
-      { roomId: 'trapRoom', surfaces: ['basementFloor'], keycardChance: 0.18, rareBoost: true },
-      { roomId: 'conveyorRoom', surfaces: ['thirdFloorGantry'], keycardChance: 0.1, rareBoost: true },
+      { roomId: 'alienServerRoom', surfaces: ['serverUpperCatwalk', 'serverCoreFloor'], keycardChance: 0, rareBoost: true },
+      { roomId: 'machineFactoryRoom', surfaces: ['machineCrossBridge', 'machineUpperCatwalk', 'machinePressZone'], keycardChance: 0, rareBoost: true },
+      { roomId: 'coolantRelayRoom', surfaces: ['coolantControlBalcony', 'coolantValveDeck', 'coolantPipeBridge'], keycardChance: 0, guaranteedKeycardId: 'Keycard_Beta', rareBoost: true },
+      { roomId: 'enemyNest', surfaces: ['secondFloor'], keycardChance: 0, rareBoost: true },
+      { roomId: 'trapRoom', surfaces: ['basementFloor'], keycardChance: 0, rareBoost: true },
+      { roomId: 'conveyorRoom', surfaces: ['thirdFloorGantry'], keycardChance: 0, rareBoost: true },
     ];
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     for (const request of chestRequests) {
@@ -4201,6 +5499,46 @@ export class DungeonGenerator {
     return marker;
   }
 
+  _addKeySeekerInteractable(group, position, materials) {
+    const seeker = new THREE.Group();
+    seeker.name = 'keySeekerInteractable';
+    seeker.position.copy(position);
+
+    const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.48, 0.46, 18), materials.wallTrim);
+    pedestal.name = 'keySeekerPedestal';
+    pedestal.position.y = 0.23;
+    pedestal.castShadow = true;
+    pedestal.receiveShadow = true;
+
+    const scanner = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.14, 0.48), materials.terminal ?? materials.wallTrim);
+    scanner.name = 'keySeekerScannerPlate';
+    scanner.position.y = 0.58;
+    scanner.rotation.x = -0.26;
+    scanner.castShadow = true;
+
+    const lens = new THREE.Mesh(new THREE.OctahedronGeometry(0.2, 0), materials.glowGreen);
+    lens.name = 'keySeekerSignalLens';
+    lens.position.y = 0.88;
+
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.38, 0.52, 28),
+      new THREE.MeshBasicMaterial({
+        color: 0x5ee77b,
+        transparent: true,
+        opacity: 0.28,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    ring.name = 'keySeekerSignalRing';
+    ring.position.y = 0.08;
+    ring.rotation.x = -Math.PI / 2;
+
+    seeker.add(pedestal, scanner, lens, ring);
+    group.add(seeker);
+    return seeker;
+  }
+
   _addMechanismTerminal(group, position, materials) {
     const terminal = new THREE.Group();
     terminal.name = 'ruinMechanismTerminal';
@@ -4257,6 +5595,65 @@ export class DungeonGenerator {
     block.add(body, core, stripe);
     group.add(block);
     return block;
+  }
+
+  _addConveyorCargoObject(group, position, materials) {
+    const cargo = new THREE.Group();
+    cargo.name = 'conveyorPuzzleCargoObject';
+    cargo.position.copy(position);
+
+    const shellMaterial = materials.wallTrim.clone();
+    shellMaterial.color.setHex(0x405766);
+    shellMaterial.emissive.setHex(0x081f2a);
+    shellMaterial.emissiveIntensity = 0.22;
+
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.72, 0.88), shellMaterial);
+    body.name = 'conveyorCargoBody';
+    body.position.y = 0.42;
+    body.castShadow = true;
+    body.receiveShadow = true;
+
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.24, 0), materials.glowBlue.clone());
+    core.name = 'conveyorCargoRefractorCore';
+    core.position.y = 0.92;
+    core.castShadow = true;
+
+    const routeStripe = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.08, 0.16), materials.glowYellow.clone());
+    routeStripe.name = 'conveyorCargoRouteStripe';
+    routeStripe.position.set(0, 0.64, -0.45);
+
+    cargo.add(body, core, routeStripe);
+    group.add(cargo);
+    return cargo;
+  }
+
+  _addConveyorCargoSpawner(group, position, materials) {
+    const spawner = new THREE.Group();
+    spawner.name = 'conveyorCargoSpawner';
+    spawner.position.copy(position);
+
+    const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.76, 0.9, 0.12, 32), materials.wallTrim.clone());
+    pad.name = 'conveyorCargoSpawnerPad';
+    pad.position.y = 0.06;
+    pad.receiveShadow = true;
+
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.68, 0.94, 40),
+      new THREE.MeshBasicMaterial({
+        color: 0x6bdcff,
+        transparent: true,
+        opacity: 0.26,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    ring.name = 'conveyorCargoSpawnerRing';
+    ring.position.y = 0.14;
+    ring.rotation.x = -Math.PI / 2;
+
+    spawner.add(pad, ring);
+    group.add(spawner);
+    return spawner;
   }
 
   _addPressurePlate(group, position, materials) {
@@ -4434,6 +5831,7 @@ export class DungeonGenerator {
         keycard: ['secondFloor'],
         trap: ['basementFloor', 'industrialRamp'],
         conveyor: ['thirdFloorGantry', 'secondFloorConveyor', 'conveyorBridge'],
+        boss: ['thirdFloorGantry', 'raisedDeck', 'catwalk'],
         shrine: ['refractorDais', 'reveredMezzanine', 'refractorWell'],
         bonus: ['basementFloor'],
       }[room.type] ?? [];
@@ -4617,52 +6015,13 @@ export class DungeonGenerator {
           label: 'Machine control console',
         });
       } else if (room.id === 'coolantRelayRoom') {
-        const valveSpecs = [
-          {
-            tank: [-halfW * 0.74, -halfD * 0.68],
-            valve: [-halfW * 0.34, -halfD * 0.08],
-            terminal: [-halfW * 0.44, halfD * 0.08],
-          },
-          {
-            tank: [halfW * 0.74, -halfD * 0.68],
-            valve: [halfW * 0.34, -halfD * 0.08],
-            terminal: [halfW * 0.44, halfD * 0.08],
-          },
-          {
-            tank: [-halfW * 0.74, halfD * 0.68],
-            valve: [0, halfD * 0.44],
-            terminal: [0, halfD * 0.66],
-          },
-        ];
-
-        addZone(room, 'coolantCentralMachineBase', 0, 0, 2.15, 1.55, {
-          label: 'Central coolant machinery base',
-          verticalHalfHeight: 1.25,
-        });
-        addZone(room, 'coolantPressureCore', 0, 0, 1.35, 1.35, {
-          label: 'Coolant pressure core',
-          verticalHalfHeight: 3.1,
-        });
-
-        valveSpecs.forEach((spec, index) => {
-          addZone(room, `coolantSourceTank_${index}`, spec.tank[0], spec.tank[1], 0.55, 0.55, {
-            label: 'Coolant source tank',
+        for (const spec of this._getCoolantFixtureSpecs(room)) {
+          addZone(room, spec.id, spec.localX, spec.localZ, spec.halfWidth, spec.halfDepth, {
+            label: spec.label,
+            elevation: spec.elevation,
+            verticalHalfHeight: spec.verticalHalfHeight,
           });
-          addZone(room, `coolantValvePylon_${index}`, spec.valve[0], spec.valve[1], 0.52, 0.52, {
-            label: 'Coolant valve pylon',
-          });
-          addZone(room, `coolantValveTerminal_${index}`, spec.terminal[0], spec.terminal[1], 0.58, 0.42, {
-            label: 'Coolant valve terminal',
-          });
-        });
-
-        addZone(room, 'coolantOverflowTank', halfW * 0.74, halfD * 0.68, 0.52, 0.52, {
-          label: 'Coolant overflow tank',
-        });
-        addZone(room, 'coolantMasterConsole', 0, -halfD * 0.82, 0.9, 0.46, {
-          label: 'Master pressure console',
-          elevation: RUIN_SECOND_FLOOR_ELEVATION,
-        });
+        }
       }
     }
 
@@ -4739,6 +6098,10 @@ export class DungeonGenerator {
           direction: direction.normalize(),
           speed: tile.conveyorSpeed ?? 2.4,
           active: tile.conveyorActive !== false,
+          conveyorPuzzleId: tile.conveyorPuzzleId ?? null,
+          conveyorGroupId: tile.conveyorGroupId ?? null,
+          conveyorNodeId: tile.conveyorNodeId ?? null,
+          conveyorTileType: tile.conveyorTileType ?? null,
           label: 'Conveyor Belt',
         };
       });
@@ -4788,12 +6151,15 @@ export class DungeonGenerator {
         id: 'conveyorGuard',
         label: 'Conveyor Guard',
         roster: this._createEncounterRoster('conveyor'),
+        keycardDropId: 'Keycard_Gamma',
       },
       {
-        roomId: 'shrineRoom',
-        id: 'shrineDefense',
-        label: 'Shrine Defense',
-        roster: this._createEncounterRoster('shrine'),
+        roomId: 'bossRoom',
+        id: 'bossEncounter',
+        label: 'Ruin Core Boss',
+        roster: this._createEncounterRoster('boss'),
+        isBoss: true,
+        bossRewardKeycardId: 'Shrine_Key',
       },
     ];
     const roomById = new Map(rooms.map((room) => [room.id, room]));
@@ -4860,6 +6226,11 @@ export class DungeonGenerator {
         ['gorubesshu', 'ranged'],
         ['gorubesshu', 'basic', 'fast'],
         ['ranged', 'ranged', 'horokko'],
+      ],
+      boss: [
+        ['tank', 'gorubesshu', 'ranged'],
+        ['tank', 'horokko', 'ranged'],
+        ['gorubesshu', 'gorubesshu', 'fast'],
       ],
       shrine: [
         ['tank', 'horokko', 'ranged'],

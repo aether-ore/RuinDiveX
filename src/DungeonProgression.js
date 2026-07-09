@@ -1,0 +1,687 @@
+export const SHRINE_KEY_ID = 'Shrine_Key';
+
+export const PROGRESSION_ROOM_BANDS = {
+  hubTown: 0,
+  expeditionCamp: 0,
+  entrance: 0,
+  enemyNest: 0,
+  alienServerRoom: 0,
+  keycardRoom: 0,
+  trapRoom: 1,
+  coolantRelayRoom: 1,
+  conveyorRoom: 2,
+  machineFactoryRoom: 2,
+  bonusVault: 2,
+  bossRoom: 3,
+  shrineRoom: 4,
+};
+
+export const PROGRESSION_KEYCARDS = [
+  {
+    keycardId: 'Keycard_Alpha',
+    displayName: 'Keycard Alpha',
+    pairedDoorId: 'Door_Alpha',
+    progressionTier: 1,
+    spawnRoomId: 'keycardRoom',
+    spawnMode: 'Pedestal',
+    isRequiredForMainProgression: true,
+  },
+  {
+    keycardId: 'Keycard_Beta',
+    displayName: 'Keycard Beta',
+    pairedDoorId: 'Door_Beta',
+    progressionTier: 2,
+    spawnRoomId: 'coolantRelayRoom',
+    spawnMode: 'Chest',
+    isRequiredForMainProgression: true,
+  },
+  {
+    keycardId: 'Keycard_Gamma',
+    displayName: 'Keycard Gamma',
+    pairedDoorId: 'Door_Gamma',
+    progressionTier: 3,
+    spawnRoomId: 'conveyorRoom',
+    spawnMode: 'EliteEnemyDrop',
+    isRequiredForMainProgression: true,
+  },
+];
+
+export const PROGRESSION_DOORS = [
+  {
+    doorId: 'Door_Alpha',
+    displayName: 'Security Door Alpha',
+    requiredKeycardId: 'Keycard_Alpha',
+    progressionTier: 1,
+    leadsToDepthBand: 1,
+    isCriticalPathDoor: true,
+    isShrineDoor: false,
+  },
+  {
+    doorId: 'Door_Beta',
+    displayName: 'Security Door Beta',
+    requiredKeycardId: 'Keycard_Beta',
+    progressionTier: 2,
+    leadsToDepthBand: 2,
+    isCriticalPathDoor: true,
+    isShrineDoor: false,
+  },
+  {
+    doorId: 'Door_Gamma',
+    displayName: 'Security Door Gamma',
+    requiredKeycardId: 'Keycard_Gamma',
+    progressionTier: 3,
+    leadsToDepthBand: 3,
+    isCriticalPathDoor: true,
+    isShrineDoor: false,
+  },
+  {
+    doorId: 'Door_Shrine',
+    displayName: 'Refractor Shrine Door',
+    requiredKeycardId: SHRINE_KEY_ID,
+    progressionTier: 'Final',
+    leadsToDepthBand: 4,
+    isCriticalPathDoor: true,
+    isShrineDoor: true,
+  },
+];
+
+export const PROGRESSION_BANDS = [
+  {
+    bandId: 0,
+    label: 'Initial unlocked area',
+    roomIds: ['hubTown', 'expeditionCamp', 'entrance', 'enemyNest', 'alienServerRoom', 'keycardRoom'],
+    exitDoorId: 'Door_Alpha',
+    requiredKeycardIdForExit: 'Keycard_Alpha',
+  },
+  {
+    bandId: 1,
+    label: 'First deeper area',
+    roomIds: ['trapRoom', 'coolantRelayRoom'],
+    entryDoorId: 'Door_Alpha',
+    exitDoorId: 'Door_Beta',
+    requiredKeycardIdForExit: 'Keycard_Beta',
+  },
+  {
+    bandId: 2,
+    label: 'Deep dungeon area',
+    roomIds: ['conveyorRoom', 'machineFactoryRoom', 'bonusVault'],
+    entryDoorId: 'Door_Beta',
+    exitDoorId: 'Door_Gamma',
+    requiredKeycardIdForExit: 'Keycard_Gamma',
+  },
+  {
+    bandId: 3,
+    label: 'Boss access',
+    roomIds: ['bossRoom'],
+    entryDoorId: 'Door_Gamma',
+    exitDoorId: 'Door_Shrine',
+    requiredKeycardIdForExit: SHRINE_KEY_ID,
+  },
+  {
+    bandId: 4,
+    label: 'Large Refractor shrine',
+    roomIds: ['shrineRoom'],
+    entryDoorId: 'Door_Shrine',
+  },
+];
+
+export const PROGRESSION_CONNECTIONS = [
+  ['hubTown', 'expeditionCamp', null],
+  ['expeditionCamp', 'entrance', 'entranceDoor'],
+  ['entrance', 'enemyNest', null],
+  ['enemyNest', 'keycardRoom', 'enemyNestGate'],
+  ['enemyNest', 'alienServerRoom', null],
+  ['keycardRoom', 'trapRoom', 'Door_Alpha'],
+  ['trapRoom', 'coolantRelayRoom', null],
+  ['trapRoom', 'conveyorRoom', 'Door_Beta'],
+  ['conveyorRoom', 'machineFactoryRoom', null],
+  ['conveyorRoom', 'bonusVault', 'bonusVaultDoor'],
+  ['conveyorRoom', 'bossRoom', 'Door_Gamma'],
+  ['bossRoom', 'shrineRoom', 'Door_Shrine'],
+];
+
+function clonePosition(position = null) {
+  if (!position) {
+    return null;
+  }
+
+  return {
+    x: Number(position.x ?? 0),
+    y: Number(position.y ?? 0),
+    z: Number(position.z ?? 0),
+  };
+}
+
+function roomBounds2D(room) {
+  const halfWidth = Math.floor((room?.width ?? 1) / 2);
+  const halfDepth = Math.floor((room?.depth ?? 1) / 2);
+
+  return {
+    x: (room?.x ?? 0) - halfWidth,
+    z: (room?.z ?? 0) - halfDepth,
+    width: Math.max(1, (halfWidth * 2) + 1),
+    depth: Math.max(1, (halfDepth * 2) + 1),
+  };
+}
+
+function roomCenter2D(room) {
+  return {
+    x: Number(room?.x ?? 0),
+    z: Number(room?.z ?? 0),
+  };
+}
+
+function findSourcePosition({ keycardId, spawnMode, landmarks, chests, encounters }) {
+  if (spawnMode === 'Pedestal') {
+    return clonePosition(landmarks.keycards.find((keycard) => keycard.keycardId === keycardId)?.position);
+  }
+
+  if (spawnMode === 'Chest') {
+    return clonePosition(chests.find((chest) => chest.guaranteedKeycardId === keycardId)?.position);
+  }
+
+  if (spawnMode === 'EliteEnemyDrop') {
+    return clonePosition(encounters.find((encounter) => encounter.keycardDropId === keycardId)?.zone?.position);
+  }
+
+  return null;
+}
+
+function createRoomConnections(roomById) {
+  return PROGRESSION_CONNECTIONS
+    .filter(([fromRoomId, toRoomId]) => roomById.has(fromRoomId) && roomById.has(toRoomId))
+    .map(([fromRoomId, toRoomId, doorId]) => ({
+      id: `${fromRoomId}_${toRoomId}`,
+      fromRoomId,
+      toRoomId,
+      doorId,
+    }));
+}
+
+function createMinimapData({ rooms, roomConnections, doors, keycards, chests, keySeeker, shrine, bossEncounter }) {
+  let minX = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxZ = -Infinity;
+
+  for (const room of rooms) {
+    const bounds = roomBounds2D(room);
+    minX = Math.min(minX, bounds.x);
+    minZ = Math.min(minZ, bounds.z);
+    maxX = Math.max(maxX, bounds.x + bounds.width);
+    maxZ = Math.max(maxZ, bounds.z + bounds.depth);
+  }
+
+  const padding = 6;
+  const safeMinX = Number.isFinite(minX) ? minX - padding : -24;
+  const safeMinZ = Number.isFinite(minZ) ? minZ - padding : -24;
+  const safeMaxX = Number.isFinite(maxX) ? maxX + padding : 24;
+  const safeMaxZ = Number.isFinite(maxZ) ? maxZ + padding : 24;
+
+  return {
+    bounds: {
+      minX: safeMinX,
+      minZ: safeMinZ,
+      width: Math.max(1, safeMaxX - safeMinX),
+      depth: Math.max(1, safeMaxZ - safeMinZ),
+    },
+    rooms: rooms.map((room) => ({
+      roomId: room.id,
+      roomType: room.type,
+      roomBounds2D: roomBounds2D(room),
+      roomCenter2D: roomCenter2D(room),
+      connectedRoomIds: roomConnections
+        .filter((connection) => connection.fromRoomId === room.id || connection.toRoomId === room.id)
+        .map((connection) => connection.fromRoomId === room.id ? connection.toRoomId : connection.fromRoomId),
+      progressionBand: PROGRESSION_ROOM_BANDS[room.id] ?? 0,
+      isInitialUnlockedArea: (PROGRESSION_ROOM_BANDS[room.id] ?? 0) === 0,
+      containsKeycard: keycards.some((keycard) => keycard.spawnRoomId === room.id),
+      containsChest: chests.some((chest) => chest.roomId === room.id),
+      containsBoss: bossEncounter?.roomId === room.id,
+      containsShrine: shrine?.roomId === room.id || room.id === 'shrineRoom',
+    })),
+    hallways: roomConnections.map((connection) => ({
+      hallwayId: connection.id,
+      fromRoomId: connection.fromRoomId,
+      toRoomId: connection.toRoomId,
+      doorId: connection.doorId,
+    })),
+    markers: [
+      ...doors.map((door) => ({
+        markerId: `${door.doorId}_marker`,
+        markerType: door.isShrineDoor ? 'ShrineDoor' : 'LockedDoor',
+        associatedEntityId: door.doorId,
+        associatedRoomId: door.toRoomId,
+        worldPosition: door.position,
+        minimapPosition: door.position ? { x: door.position.x, z: door.position.z } : null,
+        revealCondition: 'AdjacentRoomDiscovered',
+        priority: door.isShrineDoor ? 90 : 70,
+      })),
+      ...keycards.map((keycard) => ({
+        markerId: `${keycard.keycardId}_source`,
+        markerType: keycard.spawnMode === 'EliteEnemyDrop' ? 'KeyHoldingElite' : 'Keycard',
+        associatedEntityId: keycard.keycardId,
+        associatedRoomId: keycard.spawnRoomId,
+        worldPosition: keycard.sourcePosition,
+        minimapPosition: keycard.sourcePosition ? { x: keycard.sourcePosition.x, z: keycard.sourcePosition.z } : null,
+        revealCondition: keycard.spawnMode === 'Pedestal' ? 'RoomDiscovered' : 'KeySeeker',
+        priority: 80 - keycard.progressionTier,
+      })),
+      keySeeker ? {
+        markerId: 'KeySeeker_marker',
+        markerType: 'KeySeeker',
+        associatedEntityId: keySeeker.id,
+        associatedRoomId: keySeeker.roomId,
+        worldPosition: keySeeker.position,
+        minimapPosition: keySeeker.position ? { x: keySeeker.position.x, z: keySeeker.position.z } : null,
+        revealCondition: 'RoomDiscovered',
+        priority: 60,
+      } : null,
+    ].filter(Boolean),
+  };
+}
+
+export function createDungeonProgressionData({
+  rooms = [],
+  doors = [],
+  landmarks = {},
+  chests = [],
+  encounters = [],
+} = {}) {
+  const roomById = new Map(rooms.map((room) => [room.id, room]));
+  const doorById = new Map(doors.map((door) => [door.id, door]));
+  const roomConnections = createRoomConnections(roomById);
+  const keycards = PROGRESSION_KEYCARDS.map((keycard) => ({
+    ...keycard,
+    spawnRoomId: keycard.spawnRoomId,
+    sourcePosition: findSourcePosition({
+      keycardId: keycard.keycardId,
+      spawnMode: keycard.spawnMode,
+      landmarks,
+      chests,
+      encounters,
+    }),
+    isCollected: false,
+  }));
+  const progressionDoors = PROGRESSION_DOORS.map((door) => {
+    const generatedDoor = doorById.get(door.doorId);
+
+    return {
+      ...door,
+      doorId: door.doorId,
+      fromRoomId: generatedDoor?.fromRoomId ?? null,
+      toRoomId: generatedDoor?.toRoomId ?? null,
+      position: clonePosition(generatedDoor?.position),
+      isUnlocked: !generatedDoor?.closed,
+    };
+  });
+  const bossEncounter = encounters.find((encounter) => encounter.isBoss) ?? null;
+  const keySeeker = landmarks.keySeeker
+    ? {
+      id: landmarks.keySeeker.id,
+      displayName: landmarks.keySeeker.label ?? 'Key Seeker',
+      roomId: landmarks.keySeeker.roomId,
+      position: clonePosition(landmarks.keySeeker.position),
+      isActivated: false,
+    }
+    : null;
+  const shrine = landmarks.shrine
+    ? {
+      id: landmarks.shrine.id,
+      roomId: 'shrineRoom',
+      position: clonePosition(landmarks.shrine.position),
+    }
+    : null;
+
+  for (const room of rooms) {
+    room.progressionBand = PROGRESSION_ROOM_BANDS[room.id] ?? 0;
+  }
+
+  const progression = {
+    entranceRoomId: 'hubTown',
+    ruinEntranceRoomId: 'entrance',
+    bossRoomId: bossEncounter?.roomId ?? 'bossRoom',
+    shrineRoomId: 'shrineRoom',
+    keycards,
+    doors: progressionDoors,
+    bands: PROGRESSION_BANDS,
+    roomConnections,
+    keySeeker,
+    shrineKey: {
+      keycardId: SHRINE_KEY_ID,
+      displayName: 'Shrine Key',
+      pairedDoorId: 'Door_Shrine',
+      progressionTier: 'Final',
+      spawnRoomId: bossEncounter?.roomId ?? 'bossRoom',
+      spawnMode: 'BossReward',
+      isCollected: false,
+      isRequiredForMainProgression: true,
+      isShrineKey: true,
+    },
+    boss: {
+      encounterId: bossEncounter?.id ?? 'bossEncounter',
+      roomId: bossEncounter?.roomId ?? 'bossRoom',
+      rewardKeycardId: SHRINE_KEY_ID,
+      mustDropShrineKey: true,
+    },
+  };
+
+  progression.minimap = createMinimapData({
+    rooms,
+    roomConnections,
+    doors: progressionDoors,
+    keycards,
+    chests,
+    keySeeker,
+    shrine,
+    bossEncounter,
+  });
+  progression.validation = new DungeonValidator(progression).validate();
+
+  return progression;
+}
+
+export class DungeonProgressionManager {
+  constructor(progression = null) {
+    this.progression = progression ?? {
+      keycards: [],
+      doors: [],
+      shrineKey: null,
+      roomConnections: [],
+    };
+    this.collectedKeycardIds = new Set();
+
+    for (const keycard of this.progression.keycards ?? []) {
+      if (keycard.isCollected) {
+        this.collectedKeycardIds.add(keycard.keycardId);
+      }
+    }
+
+    if (this.progression.shrineKey?.isCollected) {
+      this.collectedKeycardIds.add(SHRINE_KEY_ID);
+    }
+  }
+
+  getKeycard(keycardId) {
+    if (keycardId === SHRINE_KEY_ID) {
+      return this.progression.shrineKey ?? null;
+    }
+
+    return this.progression.keycards?.find((keycard) => keycard.keycardId === keycardId) ?? null;
+  }
+
+  getDoor(doorId) {
+    return this.progression.doors?.find((door) => door.doorId === doorId) ?? null;
+  }
+
+  getKeycardDisplayName(keycardId) {
+    return this.getKeycard(keycardId)?.displayName ?? keycardId ?? 'Keycard';
+  }
+
+  hasKeycard(keycardId) {
+    return this.collectedKeycardIds.has(keycardId);
+  }
+
+  collectKeycard(keycardId) {
+    if (!keycardId || this.hasKeycard(keycardId)) {
+      return false;
+    }
+
+    this.collectedKeycardIds.add(keycardId);
+    const keycard = this.getKeycard(keycardId);
+    if (keycard) {
+      keycard.isCollected = true;
+    }
+
+    return true;
+  }
+
+  getNormalKeycardCount() {
+    return [...this.collectedKeycardIds].filter((keycardId) => keycardId !== SHRINE_KEY_ID).length;
+  }
+
+  getRequiredNormalKeycardCount() {
+    return this.progression.keycards?.filter((keycard) => keycard.isRequiredForMainProgression).length ?? 0;
+  }
+
+  getHudLabel() {
+    return `${this.getNormalKeycardCount()}/${this.getRequiredNormalKeycardCount()}`;
+  }
+
+  getCurrentTrackedDoor(runtimeDoors = []) {
+    const runtimeDoorById = new Map(runtimeDoors.map((door) => [door.id, door]));
+    const candidates = [
+      ...(this.progression.keycards ?? []),
+      this.progression.shrineKey,
+    ]
+      .filter(Boolean)
+      .filter((keycard) => this.hasKeycard(keycard.keycardId))
+      .map((keycard) => ({
+        keycard,
+        progressionDoor: this.getDoor(keycard.pairedDoorId),
+        runtimeDoor: runtimeDoorById.get(keycard.pairedDoorId),
+      }))
+      .filter(({ runtimeDoor }) => runtimeDoor?.closed);
+
+    candidates.sort((a, b) => {
+      if (a.keycard.keycardId === SHRINE_KEY_ID) {
+        return -1;
+      }
+      if (b.keycard.keycardId === SHRINE_KEY_ID) {
+        return 1;
+      }
+
+      return (a.keycard.progressionTier ?? 99) - (b.keycard.progressionTier ?? 99);
+    });
+
+    return candidates[0] ?? null;
+  }
+}
+
+export class DungeonValidator {
+  constructor(progression = {}) {
+    this.progression = progression;
+    this.roomsById = new Map();
+    this.doorsById = new Map((progression.doors ?? []).map((door) => [door.doorId, door]));
+    this.keycardsById = new Map((progression.keycards ?? []).map((keycard) => [keycard.keycardId, keycard]));
+    this.connections = progression.roomConnections ?? [];
+
+    for (const band of progression.bands ?? []) {
+      for (const roomId of band.roomIds ?? []) {
+        this.roomsById.set(roomId, {
+          roomId,
+          bandId: band.bandId,
+        });
+      }
+    }
+  }
+
+  validate() {
+    const errors = [];
+    const warnings = [];
+    const entranceRoomId = this.progression.entranceRoomId ?? 'hubTown';
+
+    if (!this.roomsById.has(entranceRoomId)) {
+      errors.push(`Entrance room ${entranceRoomId} is missing from the progression graph.`);
+    }
+
+    const initialReachable = this.getReachableRooms(new Set());
+    if (this.progression.keySeeker && !initialReachable.has(this.progression.keySeeker.roomId)) {
+      errors.push('Key Seeker is not reachable without keycards.');
+    }
+
+    const alpha = this.keycardsById.get('Keycard_Alpha');
+    if (alpha && !initialReachable.has(alpha.spawnRoomId)) {
+      errors.push('Keycard Alpha is not reachable without keycards.');
+    }
+
+    for (const keycard of this.progression.keycards ?? []) {
+      const previousKeys = new Set(
+        (this.progression.keycards ?? [])
+          .filter((candidate) => (candidate.progressionTier ?? 0) < (keycard.progressionTier ?? 0))
+          .map((candidate) => candidate.keycardId),
+      );
+      const reachableBeforeDoor = this.getReachableRooms(previousKeys);
+
+      if (!reachableBeforeDoor.has(keycard.spawnRoomId)) {
+        errors.push(`${keycard.displayName} is not reachable before ${keycard.pairedDoorId}.`);
+      }
+
+      const pairedDoor = this.doorsById.get(keycard.pairedDoorId);
+      if (!pairedDoor) {
+        errors.push(`${keycard.displayName} is paired to missing door ${keycard.pairedDoorId}.`);
+      } else if (pairedDoor.requiredKeycardId !== keycard.keycardId) {
+        errors.push(`${pairedDoor.displayName} does not require its paired ${keycard.displayName}.`);
+      }
+    }
+
+    for (const door of this.progression.doors ?? []) {
+      if (!door.isCriticalPathDoor) {
+        continue;
+      }
+
+      const previousKeys = new Set(
+        (this.progression.keycards ?? [])
+          .filter((keycard) => (
+            typeof door.progressionTier === 'number'
+            && (keycard.progressionTier ?? 0) < door.progressionTier
+          ))
+          .map((keycard) => keycard.keycardId),
+      );
+      const reachableWithDoorClosed = this.getReachableRooms(previousKeys, new Set([door.doorId]));
+      const bypassed = [...reachableWithDoorClosed].some((roomId) => {
+        const band = this.roomsById.get(roomId)?.bandId ?? 0;
+        return typeof band === 'number' && band >= door.leadsToDepthBand;
+      });
+
+      if (bypassed) {
+        errors.push(`${door.displayName} can be bypassed without ${door.requiredKeycardId}.`);
+      }
+    }
+
+    const solver = this.solve();
+    if (!solver.completed) {
+      errors.push('Validation solver could not reach the Large Refractor shrine room.');
+    }
+
+    if (!solver.inventory.includes(SHRINE_KEY_ID)) {
+      errors.push('Boss traversal did not award the Shrine Key.');
+    }
+
+    if (!this.doorsById.get('Door_Shrine')?.isShrineDoor) {
+      errors.push('Final shrine door is not marked as a shrine door.');
+    }
+
+    if (errors.length === 0 && warnings.length === 0) {
+      warnings.push('Dungeon progression graph validated successfully.');
+    }
+
+    return {
+      accepted: errors.length === 0,
+      errors,
+      warnings,
+      solver,
+    };
+  }
+
+  solve() {
+    const inventory = new Set();
+    let reachableRooms = this.getReachableRooms(inventory);
+    const shrineRoomId = this.progression.shrineRoomId ?? 'shrineRoom';
+    const maxIterations = Math.max(8, (this.progression.keycards?.length ?? 0) + 6);
+
+    for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+      const previousReachableKey = [...reachableRooms].sort().join('|');
+      let collectedSomething = false;
+
+      for (const keycard of this.progression.keycards ?? []) {
+        if (!inventory.has(keycard.keycardId) && reachableRooms.has(keycard.spawnRoomId)) {
+          inventory.add(keycard.keycardId);
+          collectedSomething = true;
+        }
+      }
+
+      if (
+        !inventory.has(SHRINE_KEY_ID)
+        && reachableRooms.has(this.progression.boss?.roomId ?? 'bossRoom')
+      ) {
+        inventory.add(SHRINE_KEY_ID);
+        collectedSomething = true;
+      }
+
+      reachableRooms = this.getReachableRooms(inventory);
+      if (reachableRooms.has(shrineRoomId)) {
+        return {
+          completed: true,
+          inventory: [...inventory],
+          reachableRooms: [...reachableRooms],
+          iterations: iteration + 1,
+        };
+      }
+
+      const nextReachableKey = [...reachableRooms].sort().join('|');
+      if (!collectedSomething && nextReachableKey === previousReachableKey) {
+        break;
+      }
+    }
+
+    return {
+      completed: false,
+      inventory: [...inventory],
+      reachableRooms: [...reachableRooms],
+      iterations: maxIterations,
+    };
+  }
+
+  getReachableRooms(inventory = new Set(), forceClosedDoorIds = new Set()) {
+    const startRoomId = this.progression.entranceRoomId ?? 'hubTown';
+    const reachable = new Set([startRoomId]);
+    const queue = [startRoomId];
+
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const roomId = queue[cursor];
+
+      for (const connection of this.connections) {
+        const nextRoomId = connection.fromRoomId === roomId
+          ? connection.toRoomId
+          : connection.toRoomId === roomId
+            ? connection.fromRoomId
+            : null;
+
+        if (!nextRoomId || reachable.has(nextRoomId)) {
+          continue;
+        }
+
+        if (!this.canPassConnection(connection, inventory, forceClosedDoorIds)) {
+          continue;
+        }
+
+        reachable.add(nextRoomId);
+        queue.push(nextRoomId);
+      }
+    }
+
+    return reachable;
+  }
+
+  canPassConnection(connection, inventory, forceClosedDoorIds) {
+    if (!connection.doorId || connection.doorId === 'entranceDoor') {
+      return true;
+    }
+
+    if (forceClosedDoorIds.has(connection.doorId)) {
+      return false;
+    }
+
+    const door = this.doorsById.get(connection.doorId);
+    if (!door) {
+      return true;
+    }
+
+    if (!door.requiredKeycardId) {
+      return true;
+    }
+
+    return inventory.has(door.requiredKeycardId);
+  }
+}

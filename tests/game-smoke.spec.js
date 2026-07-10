@@ -1247,3 +1247,817 @@ test('pressing S from a ledge plays the wall jump and hands off to falling', asy
     ledgeReleased: true,
   });
 });
+
+test('generated factory rooms expose validated vertical plans and elevation-matched portals', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.goto('/');
+  const container = page.locator('#game-container');
+  await expect
+    .poll(
+      async () => container.getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const dungeon = window.game.dungeon;
+    const functionalRooms = dungeon.rooms.filter((room) => !['hub', 'camp'].includes(room.type));
+    const elevatedConnections = dungeon.connectionPlans.filter((connection) => connection.level > 0);
+    const floorKeys = new Set(dungeon.floorTiles.map((tile) => `${tile.x},${tile.z}@${tile.level ?? 0}`));
+
+    return {
+      accepted: dungeon.progression.validation.accepted,
+      platformability: dungeon.progression.validation.platformability,
+      generationAttempts: dungeon.generationAttempts,
+      rooms: functionalRooms.map((room) => ({
+        id: room.id,
+        purpose: room.purpose,
+        mood: room.mood,
+        story: room.environmentalStory,
+        ceilingHeight: room.ceilingHeight,
+        tierCount: room.numberOfVerticalTiers,
+        platformCount: room.platformNodes.length,
+        hasPurposefulPlatform: room.platformNodes.every((platform) => (
+          Boolean(platform.purpose)
+          && ['jump', 'ledge_climb'].includes(platform.requiredTraversalAction)
+        )),
+      })),
+      connections: elevatedConnections.map((connection) => ({
+        id: connection.id,
+        fromElevation: connection.fromSocket.elevation,
+        toElevation: connection.toSocket.elevation,
+        fromSocketExists: floorKeys.has(connection.fromSocket.floorKey),
+        toSocketExists: floorKeys.has(connection.toSocket.floorKey),
+        bridgeExists: connection.bridgePath.every((point) => (
+          floorKeys.has(`${point.x},${point.z}@${connection.level}`)
+        )),
+      })),
+      verticalPortalCount: dungeon.verticalPortals.length,
+      jumpPlatforms: dungeon.platforms
+        .filter((platform) => platform.generated && platform.requiredTraversalAction === 'jump')
+        .map((platform) => ({
+          id: platform.id,
+          purpose: platform.purpose,
+          blocksBelow: platform.blocksBelow,
+        })),
+      ledgeSurfaces: dungeon.platforms
+        .filter((platform) => platform.generated && platform.requiredTraversalAction === 'ledge_climb')
+        .map((platform) => ({
+          id: platform.id,
+          purpose: platform.purpose,
+          blocksBelow: platform.blocksBelow,
+        })),
+      doorPortalPairs: dungeon.doors.map((door) => ({
+        id: door.id,
+        exitElevation: door.exitElevation,
+        entranceElevation: door.entranceElevation,
+        hasFromPortal: Boolean(door.fromPortal),
+        hasToPortal: Boolean(door.toPortal),
+      })),
+      closedDoorCollision: dungeon.doors
+        .filter((door) => door.closed)
+        .map((door) => {
+          const Vector3 = door.position.constructor;
+          const across = (offset) => new Vector3(
+            door.position.x + (door.alongX ? 0 : offset),
+            door.baseY,
+            door.position.z + (door.alongX ? offset : 0),
+          );
+          return {
+            id: door.id,
+            corridorSamplesBlocked: [-0.48, 0, 0.48].every((scale) => (
+              window.game.dungeonController._isPositionInsideClosedDoor(
+                across(scale * dungeon.tileSize),
+                door,
+              )
+            )),
+            outsideCorridorClear: !window.game.dungeonController._isPositionInsideClosedDoor(
+              across(dungeon.tileSize * 0.8),
+              door,
+            ),
+            upperTierClear: !window.game.dungeonController._isPositionInsideClosedDoor(
+              new Vector3(door.position.x, door.baseY + door.collisionHeight + 0.5, door.position.z),
+              door,
+            ),
+          };
+        }),
+    };
+  });
+
+  expect(result.accepted).toBe(true);
+  expect(result.generationAttempts).toBeGreaterThanOrEqual(1);
+  expect(result.platformability.reachableNodeCount).toBeGreaterThan(1000);
+  expect(result.platformability.platformNodeCount).toBeGreaterThanOrEqual(result.rooms.length);
+  expect(result.rooms.every((room) => (
+    room.purpose
+    && room.mood
+    && room.story
+    && room.ceilingHeight >= 8
+    && room.tierCount >= 2
+    && room.platformCount >= 1
+    && room.hasPurposefulPlatform
+  ))).toBe(true);
+  expect(result.connections.length).toBeGreaterThanOrEqual(2);
+  expect(result.connections.every((connection) => (
+    connection.fromElevation === connection.toElevation
+    && connection.fromSocketExists
+    && connection.toSocketExists
+    && connection.bridgeExists
+  ))).toBe(true);
+  expect(result.verticalPortalCount).toBe(result.connections.length * 2);
+  expect(result.jumpPlatforms.length).toBeGreaterThanOrEqual(result.rooms.length);
+  expect(result.jumpPlatforms.every((platform) => platform.purpose && platform.blocksBelow === true)).toBe(true);
+  expect(result.ledgeSurfaces).toHaveLength(result.connections.length * 2);
+  expect(result.ledgeSurfaces.every((platform) => platform.purpose && platform.blocksBelow === false)).toBe(true);
+  expect(result.doorPortalPairs.every((door) => (
+    door.exitElevation === door.entranceElevation
+    && door.hasFromPortal
+    && door.hasToPortal
+  ))).toBe(true);
+  expect(result.closedDoorCollision.length).toBeGreaterThan(0);
+  expect(result.closedDoorCollision.every((door) => (
+    door.corridorSamplesBlocked
+    && door.outsideCorridorClear
+    && door.upperTierClear
+  ))).toBe(true);
+});
+
+test('industrial rooms and connectors use solid volumetric prefabs, large slopes, and a keycard pyramid', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const { dungeon } = game;
+    const requiredObjectNames = [
+      'waterTankCylindricalBody',
+      'pumpTurbineHousing',
+      'crankHandwheel',
+      'engineMainCrankcase',
+      'openProcessingVatWall',
+      'massiveAlienMonolith',
+      'girderFrameHeader',
+      'industrialCylinderArch',
+      'chainLinkFenceMesh',
+      'automaticSlidingDoorPanelLeft',
+      'automaticSlidingDoorPanelRight',
+    ];
+    const objectNameCounts = Object.fromEntries(requiredObjectNames.map((name) => [name, 0]));
+    const largePlatformMasses = [];
+    const largeSlopes = [];
+    let pyramidLayerCount = 0;
+    dungeon.group.traverse((object) => {
+      if (Object.hasOwn(objectNameCounts, object.name)) {
+        objectNameCounts[object.name] += 1;
+      }
+      if (object.name?.startsWith('solidPurposePlatformMass_')) {
+        largePlatformMasses.push({
+          width: object.geometry?.parameters?.width ?? 0,
+          depth: object.geometry?.parameters?.depth ?? 0,
+        });
+      }
+      if (object.name === 'largeTexturedIndustrialSlopeVolume') {
+        largeSlopes.push({
+          rampTileCount: object.userData.rampTileCount,
+          texturedWallToFloor: object.userData.texturedWallToFloor,
+        });
+      }
+      if (object.name?.startsWith('reverentMechanicalPyramidLayer')) {
+        pyramidLayerCount += 1;
+      }
+    });
+
+    const keycardRoom = dungeon.rooms.find((room) => room.id === 'keycardRoom');
+    const pyramidCenter = keycardRoom.mechanicalPyramidCenter;
+    const keycard = dungeon.keycards.find((candidate) => candidate.keycardId === 'Keycard_Alpha');
+    const summitTiles = dungeon.floorTiles.filter((tile) => (
+      tile.roomId === keycardRoom.id && tile.surface === 'mechanicalPyramidSummit'
+    ));
+    const apexTiles = dungeon.floorTiles.filter((tile) => (
+      tile.roomId === keycardRoom.id && tile.surface === 'mechanicalPyramidApex'
+    ));
+    const connectorTiles = dungeon.floorTiles.filter((tile) => tile.connectorId);
+    const roomById = new Map(dungeon.rooms.map((room) => [room.id, room]));
+    const groundExplorationPlans = dungeon.connectionPlans.filter((plan) => (
+      plan.level === 0 && (plan.bridgePath?.length ?? 0) >= 5
+      && !['hub', 'camp'].includes(roomById.get(plan.fromRoomId)?.type)
+      && !['hub', 'camp'].includes(roomById.get(plan.toRoomId)?.type)
+    ));
+    const progressionConnections = new Map(
+      dungeon.progression.roomConnections
+        .flatMap((connection) => connection.routes ?? [])
+        .map((route) => [route.id, route]),
+    );
+    const solidPrefabLabels = dungeon.solidZones
+      .filter((zone) => zone.fromProceduralPrefab)
+      .map((zone) => zone.label);
+    const closedDoor = dungeon.doors.find((door) => door.closed);
+    const axis = closedDoor.slidingAxis;
+    const closedOffsets = {
+      left: closedDoor.leftPanel.position[axis],
+      right: closedDoor.rightPanel.position[axis],
+      rootY: closedDoor.object.position.y,
+    };
+    closedDoor.closed = false;
+    game.dungeonController._updateDoorVisuals(1);
+
+    return {
+      accepted: dungeon.progression.validation.accepted,
+      objectNameCounts,
+      solidPrefabLabels,
+      largePlatformMasses,
+      largeSlopes,
+      pyramidLayerCount,
+      summitTileCount: summitTiles.length,
+      apexTileCount: apexTiles.length,
+      keycardOnPyramid: Boolean(pyramidCenter && keycard)
+        && Math.abs(keycard.position.x - pyramidCenter.x * dungeon.tileSize) <= dungeon.tileSize * 1.5
+        && Math.abs(keycard.position.z - pyramidCenter.z * dungeon.tileSize) <= dungeon.tileSize * 1.5
+        && Math.abs(keycard.position.y - pyramidCenter.elevation) < 0.01,
+      connectorGalleryTileCount: connectorTiles.length,
+      explorationAlcoveCount: connectorTiles.filter((tile) => tile.connectorZone === 'exploration_alcove').length,
+      serviceLaneCount: connectorTiles.filter((tile) => tile.connectorZone === 'service_lane').length,
+      explorationPlans: groundExplorationPlans.map((plan) => ({
+        id: plan.id,
+        beatCount: plan.explorationBeats?.length ?? 0,
+        progressionBeatCount: progressionConnections.get(plan.id)?.explorationBeats?.length ?? 0,
+      })),
+      doorSlidesLaterally: closedDoor.leftPanel.position[axis] < closedOffsets.left
+        && closedDoor.rightPanel.position[axis] > closedOffsets.right,
+      doorRootStaysAtElevation: Math.abs(closedDoor.object.position.y - closedOffsets.rootY) < 0.001,
+      solidPurposePlatformCount: dungeon.platforms.filter((platform) => (
+        platform.generated && platform.solidVolume && platform.blocksBelow
+      )).length,
+      functionalRoomCount: dungeon.rooms.filter((room) => !['hub', 'camp'].includes(room.type)).length,
+    };
+  });
+
+  expect(result.accepted).toBe(true);
+  expect(Object.values(result.objectNameCounts).every((count) => count > 0)).toBe(true);
+  for (const labelPattern of [/tank/i, /pump/i, /crank/i, /engine/i, /vat/i, /monolith/i, /girder/i, /arch/i, /fence/i]) {
+    expect(result.solidPrefabLabels.some((label) => labelPattern.test(label))).toBe(true);
+  }
+  expect(result.largePlatformMasses.length).toBeGreaterThanOrEqual(7);
+  expect(result.largePlatformMasses.filter((platform) => (
+    platform.width > 4.5 && platform.depth > 4.5
+  )).length).toBeGreaterThanOrEqual(7);
+  expect(result.solidPurposePlatformCount).toBeGreaterThanOrEqual(result.functionalRoomCount);
+  expect(result.largeSlopes.length).toBeGreaterThan(0);
+  expect(result.largeSlopes.every((slope) => slope.rampTileCount >= 2 && slope.texturedWallToFloor)).toBe(true);
+  expect(result.pyramidLayerCount).toBeGreaterThanOrEqual(6);
+  expect(result.summitTileCount).toBe(9);
+  expect(result.apexTileCount).toBe(1);
+  expect(result.keycardOnPyramid).toBe(true);
+  expect(result.connectorGalleryTileCount).toBeGreaterThan(40);
+  expect(result.explorationAlcoveCount).toBeGreaterThan(0);
+  expect(result.serviceLaneCount).toBeGreaterThan(0);
+  expect(result.explorationPlans.length).toBeGreaterThan(5);
+  expect(result.explorationPlans.every((plan) => (
+    plan.beatCount === 2 && plan.progressionBeatCount === 2
+  ))).toBe(true);
+  expect(result.doorSlidesLaterally).toBe(true);
+  expect(result.doorRootStaysAtElevation).toBe(true);
+});
+
+test('elevated drops and effects stay on their tier while lore announcements are preserved', async ({ page }) => {
+  test.setTimeout(30000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const elevatedTile = game.dungeon.floorTiles.find((tile) => (
+      tile.surface === 'upperConnectionBridge' && tile.elevation >= 4
+    ));
+    const Vector3 = game.player.root.position.constructor;
+    const elevatedPosition = new Vector3(
+      elevatedTile.x * game.dungeon.tileSize,
+      elevatedTile.elevation,
+      elevatedTile.z * game.dungeon.tileSize,
+    );
+    const fakeEnemy = {
+      root: { position: elevatedPosition.clone() },
+      isElite: true,
+      level: 4,
+    };
+    const originalRandom = Math.random;
+    Math.random = () => 0;
+    const refractorStart = game.refractors.pickups.length;
+    game.refractors.rollEnemyDrop(fakeEnemy);
+    const refractorYs = game.refractors.pickups
+      .slice(refractorStart)
+      .map((pickup) => pickup.object.position.y);
+    const lootObject = game.lootSystem.rollDrop(fakeEnemy);
+    Math.random = originalRandom;
+
+    const hazardStart = game.hazards.length;
+    game.addFireZone(elevatedPosition.clone(), 4, 1, 1);
+    const fireZone = game.hazards[hazardStart].object;
+    const effectStart = game.timedEffects.length;
+    game.combat._addConeEffect(elevatedPosition.clone(), new Vector3(1, 0, 0), 3, 0.5, 0xffaa33);
+    const cone = game.timedEffects[effectStart].object;
+
+    const controller = game.dungeonController;
+    const encounter = controller.encounters.find((candidate) => !candidate.spawned);
+    const toastCalls = [];
+    const originalShowToast = game.ui.showToast;
+    game.ui.showToast = (message, color) => toastCalls.push({ message, color });
+    controller.environmentalStoryToastTimer = 1;
+    controller.pendingRoomAnnouncements.length = 0;
+    controller.markEncounterSpawned(encounter.id, []);
+    const queuedBeforeLoreExpires = controller.pendingRoomAnnouncements.length;
+    const immediateToastCount = toastCalls.length;
+    controller._updateRoomAnnouncements(0.5);
+    const toastCountDuringLore = toastCalls.length;
+    controller._updateRoomAnnouncements(0.6);
+    game.ui.showToast = originalShowToast;
+
+    return {
+      elevation: elevatedTile.elevation,
+      refractorYs,
+      lootY: lootObject.position.y,
+      fireZoneY: fireZone.position.y,
+      coneY: cone.position.y,
+      queuedBeforeLoreExpires,
+      immediateToastCount,
+      toastCountDuringLore,
+      toastAfterLore: toastCalls.at(-1)?.message,
+      pendingAfterLore: controller.pendingRoomAnnouncements.length,
+    };
+  });
+
+  expect(result.refractorYs.length).toBeGreaterThan(0);
+  expect(Math.min(...result.refractorYs)).toBeGreaterThan(result.elevation + 0.4);
+  expect(result.lootY).toBeCloseTo(result.elevation + 0.35, 3);
+  expect(result.fireZoneY).toBeCloseTo(result.elevation + 0.035, 3);
+  expect(result.coneY).toBeCloseTo(result.elevation + 0.09, 3);
+  expect(result.queuedBeforeLoreExpires).toBe(1);
+  expect(result.immediateToastCount).toBe(0);
+  expect(result.toastCountDuringLore).toBe(0);
+  expect(result.toastAfterLore).toContain('active');
+  expect(result.pendingAfterLore).toBe(0);
+});
+
+test('procedural vertical solver accepts a deterministic seed sweep', async ({ page }) => {
+  test.setTimeout(60000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const results = await page.evaluate(async () => {
+    const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
+    const generated = [];
+
+    for (const seed of [...Array.from({ length: 12 }, (_, index) => index + 1), 60]) {
+      let state = seed >>> 0;
+      const random = () => (
+        (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296
+      );
+      const dungeon = new DungeonGenerator({ random }).generate();
+      generated.push({
+        seed,
+        accepted: dungeon.progression.validation.accepted,
+        errors: dungeon.progression.validation.errors,
+        matchedConnections: dungeon.progression.validation.platformability.matchedConnectionCount,
+        platforms: dungeon.progression.validation.platformability.platformNodeCount,
+      });
+      dungeon.group.clear();
+    }
+
+    return generated;
+  });
+
+  expect(results.every((result) => result.accepted && result.errors.length === 0)).toBe(true);
+  expect(results.every((result) => result.matchedConnections >= 14)).toBe(true);
+  expect(results.every((result) => result.platforms >= 11)).toBe(true);
+});
+
+test('generated jump platforms support landing and block their unsupported underside', async ({ page }) => {
+  test.setTimeout(30000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const platform = game.dungeon.platforms.find((candidate) => (
+      candidate.generated && candidate.requiredTraversalAction === 'jump'
+    ));
+    const player = game.player;
+    const under = platform.center.clone();
+    under.y = platform.baseY;
+    const landing = platform.center.clone();
+    landing.y = platform.topY + 0.06;
+    player.root.position.copy(landing);
+
+    const landed = game._tryResolvePlatformLanding({
+      player,
+      root: player.root,
+      jumpStartY: platform.baseY,
+      jumpReachHeight: player.getJumpReachHeight(),
+    });
+
+    return {
+      id: platform.id,
+      purpose: platform.purpose,
+      blocksBelow: platform.blocksBelow,
+      underIsBlocked: game.isPositionInsidePlatformBlock(under),
+      topElevation: game.getPlatformFloorElevation(player.root.position),
+      topY: platform.topY,
+      landed,
+    };
+  });
+
+  expect(result.purpose).toBeTruthy();
+  expect(result.blocksBelow).toBe(true);
+  expect(result.underIsBlocked).toBe(true);
+  expect(result.landed).toBe(true);
+  expect(result.topElevation).toBeCloseTo(result.topY, 5);
+});
+
+test('critical closed doors remain physical choke points for their deeper rooms', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(async () => {
+    const { game } = window;
+    game.stop();
+    const criticalDoorIds = new Set(['Door_Alpha', 'Door_Beta', 'Door_Gamma', 'Door_Shrine']);
+
+    // Exercise the runtime collision rule at the full width that its tile
+    // navigation currently treats as usable. A closed door must not leave a
+    // point-sized route around either side of its collider.
+    const originalClosedStates = new Map(game.dungeon.doors.map((door) => [door.id, door.closed]));
+    const colliderLeaks = [];
+    try {
+      for (const door of game.dungeon.doors.filter((candidate) => criticalDoorIds.has(candidate.id))) {
+        for (const candidate of game.dungeon.doors) {
+          candidate.closed = candidate.id === door.id;
+        }
+
+        const lateralOffsets = [-1, 1].map((sign) => (
+          sign * ((game.dungeon.tileSize * 0.5) - 0.01)
+        ));
+        const walkableOffsets = lateralOffsets.filter((offset) => {
+          const position = door.position.clone();
+          if (door.alongX) {
+            position.z += offset;
+          } else {
+            position.x += offset;
+          }
+          return game.dungeonController.isPositionWalkable(position);
+        });
+
+        if (walkableOffsets.length) {
+          colliderLeaks.push({
+            doorId: door.id,
+            walkableOffsets: walkableOffsets.map((offset) => Number(offset.toFixed(3))),
+          });
+        }
+      }
+    } finally {
+      for (const door of game.dungeon.doors) {
+        door.closed = originalClosedStates.get(door.id);
+      }
+    }
+
+    // Seed 1 deterministically exposes broad routes around late critical
+    // doors. Remove the whole doorway tile (a stronger blocker than the
+    // runtime collider), leave every other door open, and verify that the
+    // target room center is disconnected from the dungeon start.
+    const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
+    let state = 1;
+    const random = () => (
+      (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296
+    );
+    const generator = new DungeonGenerator({ random });
+    const dungeon = generator.generate();
+    const alternateRouteBypasses = [];
+    const startRoom = dungeon.rooms.find((room) => room.id === 'hubTown');
+
+    for (const door of dungeon.doors.filter((candidate) => criticalDoorIds.has(candidate.id))) {
+      const doorX = Math.round(door.position.x / dungeon.tileSize);
+      const doorZ = Math.round(door.position.z / dungeon.tileSize);
+      const doorElevation = door.exitElevation ?? door.baseY ?? 0;
+      const floorWithoutDoorway = dungeon.floorTiles.filter((tile) => (
+        !(
+          tile.x === doorX
+          && tile.z === doorZ
+          && Math.abs((tile.elevation ?? 0) - doorElevation) <= 0.1
+        )
+        && !generator._isFloorTileBlockedBySolidZone(tile, dungeon.solidZones)
+      ));
+      const startTile = generator._findRoomWalkabilityStartTile(startRoom, floorWithoutDoorway);
+      const reachable = generator._createReachableFloorTileKeySet(startTile, floorWithoutDoorway);
+      const targetRoom = dungeon.rooms.find((room) => room.id === door.toRoomId);
+      const targetCenterKeys = floorWithoutDoorway
+        .filter((tile) => tile.x === targetRoom.x && tile.z === targetRoom.z)
+        .map((tile) => generator._getFloorTileGraphKey(tile));
+
+      if (targetCenterKeys.some((key) => reachable.has(key))) {
+        alternateRouteBypasses.push({
+          doorId: door.id,
+          targetRoomId: door.toRoomId,
+          targetCenterKeys,
+        });
+      }
+    }
+
+    dungeon.group.clear();
+    return {
+      colliderLeaks,
+      alternateRouteBypasses,
+    };
+  });
+
+  expect(result.colliderLeaks).toEqual([]);
+  expect(result.alternateRouteBypasses).toEqual([]);
+});
+
+test('upper connection sockets are reachable from inside their owning rooms', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const failures = await page.evaluate(async () => {
+    window.game.stop();
+    const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
+    let state = 1;
+    const random = () => (
+      (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296
+    );
+    const generator = new DungeonGenerator({ random });
+    const dungeon = generator.generate();
+    const inaccessibleSockets = [];
+
+    for (const connection of dungeon.connectionPlans.filter((plan) => plan.level > 0)) {
+      for (const role of ['from', 'to']) {
+        const socket = connection[`${role}Socket`];
+        const room = dungeon.rooms.find((candidate) => candidate.id === socket.roomId);
+        const localFloorTiles = dungeon.floorTiles.filter((tile) => (
+          generator._isTileInsideRoom(tile, room)
+          && !generator._isFloorTileBlockedBySolidZone(tile, dungeon.solidZones)
+        ));
+        const localStart = generator._findRoomWalkabilityStartTile(room, localFloorTiles);
+        const locallyReachable = generator._createReachableFloorTileKeySet(
+          localStart,
+          localFloorTiles,
+        );
+
+        if (!locallyReachable.has(socket.floorKey)) {
+          inaccessibleSockets.push({
+            connectionId: connection.id,
+            role,
+            roomId: room.id,
+            socketFloorKey: socket.floorKey,
+            reachableLocalNodeCount: locallyReachable.size,
+            totalLocalNodeCount: localFloorTiles.length,
+          });
+        }
+      }
+    }
+
+    dungeon.group.clear();
+    return inaccessibleSockets;
+  });
+
+  expect(failures).toEqual([]);
+});
+
+test('default buster stays level on the same tier and aims up at an upper lock target', async ({ page }) => {
+  test.setTimeout(30000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+
+    const { combat, player } = game;
+    const weaponState = combat.getCurrentWeaponState();
+    const capturedDirections = [];
+    const originalFireOrQueue = combat._fireOrQueueProjectileAction;
+    const originalPlayProjectileShotAnimation = player.playProjectileShotAnimation;
+    const originalLockState = {
+      target: combat.lockOn.target,
+      progress: combat.lockOn.progress,
+      movementLocked: combat.lockOn.movementLocked,
+      manual: combat.lockOn.manual,
+    };
+    const resetWeaponState = () => {
+      combat.swapTimer = 0;
+      weaponState.cooldown = 0;
+      weaponState.reloadTimer = 0;
+      weaponState.energy = weaponState.maxEnergy;
+      weaponState.weaponOutput = weaponState.maxWeaponOutput;
+      weaponState.outputRecoveryDelay = 0;
+    };
+
+    try {
+      combat._fireOrQueueProjectileAction = (action, direction) => {
+        capturedDirections.push({
+          action,
+          direction: direction.clone(),
+        });
+      };
+      player.playProjectileShotAnimation = () => {};
+
+      const forward = player.lastMoveDirection.clone().setY(0);
+      if (forward.lengthSq() <= 0.0001) {
+        forward.set(0, 0, 1);
+      }
+      forward.normalize();
+
+      combat.lockOn.target = null;
+      combat.lockOn.progress = 0;
+      combat.lockOn.movementLocked = false;
+      combat.lockOn.manual = false;
+      const sameTierAim = player.root.position.clone().addScaledVector(forward, 8);
+      resetWeaponState();
+      const sameTierStarted = combat.tryPrimaryAttack(sameTierAim);
+
+      const upperTarget = {
+        id: 'verticalAimRegressionTarget',
+        dead: false,
+        root: {
+          parent: game.scene,
+          position: player.root.position.clone()
+            .addScaledVector(forward, 8)
+            .add({ x: 0, y: 4.05, z: 0 }),
+        },
+      };
+      combat.lockOn.target = upperTarget;
+      combat.lockOn.progress = 1;
+      combat.lockOn.movementLocked = true;
+      combat.lockOn.manual = true;
+      const upperAim = combat._getEffectiveAimWorld(sameTierAim).clone();
+      const upperOrigin = player.getProjectileOrigin();
+      const expectedUpperDirection = upperAim.clone().sub(upperOrigin).normalize();
+      resetWeaponState();
+      const upperStarted = combat.tryPrimaryAttack(upperAim);
+
+      const sameTierDirection = capturedDirections[0]?.direction ?? null;
+      const upperDirection = capturedDirections[1]?.direction ?? null;
+      return {
+        weaponType: weaponState.weaponType,
+        sameTierStarted,
+        upperStarted,
+        sameTierDirectionY: sameTierDirection?.y ?? null,
+        upperDirectionY: upperDirection?.y ?? null,
+        upperAlignment: upperDirection?.dot(expectedUpperDirection) ?? null,
+      };
+    } finally {
+      combat._fireOrQueueProjectileAction = originalFireOrQueue;
+      player.playProjectileShotAnimation = originalPlayProjectileShotAnimation;
+      Object.assign(combat.lockOn, originalLockState);
+    }
+  });
+
+  expect(result.weaponType).toBe('busterArm');
+  expect(result.sameTierStarted).toBe(true);
+  expect(result.upperStarted).toBe(true);
+  expect(result.sameTierDirectionY).toBeCloseTo(0, 2);
+  expect(result.upperDirectionY).toBeGreaterThan(0.1);
+  expect(result.upperAlignment).toBeGreaterThan(0.999);
+});
+
+test('projectile collision and homing preserve vertical separation', async ({ page }) => {
+  test.setTimeout(30000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+
+    const originalEnemies = game.enemies;
+    const originalDamageEnemy = game.damageEnemy;
+    const origin = game.player.root.position.clone().set(12, 6, 12);
+    const lowEnemy = {
+      id: 'lowVerticalRegressionEnemy',
+      dead: false,
+      radius: 0.42,
+      root: { position: origin.clone().setY(0) },
+    };
+    const upperEnemy = {
+      id: 'upperVerticalRegressionEnemy',
+      dead: false,
+      radius: 0.42,
+      root: { position: origin.clone() },
+    };
+    const projectile = {
+      mesh: { position: origin.clone() },
+      radius: 0.16,
+      damage: 1,
+      source: game.player,
+      critical: false,
+      element: null,
+      pierceRemaining: 0,
+      explosiveRadius: 0,
+      armorBreakChance: 0,
+      armorPierce: 0,
+      stagger: 0,
+      statusBuildup: 1,
+      chainChance: 0,
+      chainDamageMultiplier: 0,
+      visualType: 'buster',
+      hitEnemyIds: new Set(),
+      direction: game.player.lastMoveDirection.clone().set(1, 0, 0),
+    };
+
+    try {
+      game.damageEnemy = () => 1;
+      game.enemies = [lowEnemy];
+      const lowEnemyHit = game.projectiles._checkEnemyHit(projectile);
+
+      projectile.hitEnemyIds.clear();
+      game.enemies = [upperEnemy];
+      const upperEnemyHit = game.projectiles._checkEnemyHit(projectile);
+
+      const homingProjectile = {
+        owner: 'player',
+        homingStrength: 8,
+        homingRange: 12,
+        range: 12,
+        freeHoming: false,
+        target: {
+          id: 'upperHomingRegressionTarget',
+          dead: false,
+          root: {
+            position: origin.clone().set(16, 10, 12),
+          },
+        },
+        hitEnemyIds: new Set(),
+        mesh: {
+          position: origin.clone(),
+        },
+        direction: game.player.lastMoveDirection.clone().set(1, 0, 0),
+      };
+      const expectedHomingDirection = homingProjectile.target.root.position.clone()
+        .sub(homingProjectile.mesh.position)
+        .normalize();
+      const alignmentBefore = homingProjectile.direction.dot(expectedHomingDirection);
+      game.projectiles._updateHoming(homingProjectile, 0.1);
+      const alignmentAfter = homingProjectile.direction.dot(expectedHomingDirection);
+
+      return {
+        lowEnemyHit,
+        upperEnemyHit,
+        homingDirectionY: homingProjectile.direction.y,
+        alignmentBefore,
+        alignmentAfter,
+      };
+    } finally {
+      game.enemies = originalEnemies;
+      game.damageEnemy = originalDamageEnemy;
+    }
+  });
+
+  expect(result.lowEnemyHit).toBe(false);
+  expect(result.upperEnemyHit).toBe(true);
+  expect(result.homingDirectionY).toBeGreaterThan(0);
+  expect(result.alignmentAfter).toBeGreaterThan(result.alignmentBefore);
+});

@@ -141,7 +141,7 @@ export class RefractorPickupSystem {
       const distance = randomBetween(0.22, 0.88);
       position.x += Math.cos(angle) * distance;
       position.z += Math.sin(angle) * distance;
-      position.y = 0.42 + Math.random() * 0.18;
+      position.y += 0.42 + Math.random() * 0.18;
       this.createPickup({ tier, value, position });
     }
   }
@@ -155,7 +155,7 @@ export class RefractorPickupSystem {
       const distance = randomBetween(0.25, 1.05);
       dropPosition.x += Math.cos(angle) * distance;
       dropPosition.z += Math.sin(angle) * distance;
-      dropPosition.y = 0.46 + Math.random() * 0.22;
+      dropPosition.y += 0.46 + Math.random() * 0.22;
       this.createPickup({ tier, value, position: dropPosition });
     }
   }

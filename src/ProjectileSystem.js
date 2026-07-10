@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { PLAYER_TRAVERSAL_ENVELOPE } from './TraversalCapabilities.js';
 
 const DEFAULT_PROJECTILE_COLOR = 0x9fe8ff;
 const PROJECTILE_ENEMY_HIT_STOP_DURATION = 0.055;
@@ -13,6 +14,25 @@ const tempDirection = new THREE.Vector3();
 const tempExplosionPosition = new THREE.Vector3();
 const tempClusterDirection = new THREE.Vector3();
 let busterShotTextures = null;
+
+function getTargetCollisionHeight(target, fallbackHeight = 1.8) {
+  return Math.max(
+    (target?.radius ?? 0.42) * 2.2,
+    target?.collisionHeight ?? target?.type?.modelHeight ?? fallbackHeight,
+  );
+}
+
+function getProjectileCapsuleDistanceSquared(position, target, height) {
+  const radius = target?.radius ?? 0.42;
+  const bottom = (target?.root?.position?.y ?? 0) + radius;
+  const top = Math.max(bottom, (target?.root?.position?.y ?? 0) + height - radius);
+  tempPosition.set(
+    target?.root?.position?.x ?? 0,
+    THREE.MathUtils.clamp(position.y, bottom, top),
+    target?.root?.position?.z ?? 0,
+  );
+  return position.distanceToSquared(tempPosition);
+}
 
 function smoothstep(edge0, edge1, value) {
   const t = THREE.MathUtils.clamp((value - edge0) / (edge1 - edge0), 0, 1);
@@ -464,11 +484,9 @@ export class ProjectileSystem {
         continue;
       }
 
-      tempPosition.copy(enemy.root.position);
-      tempPosition.y = position.y;
-
       const radius = projectile.radius + enemy.radius;
-      if (position.distanceToSquared(tempPosition) <= radius * radius) {
+      const enemyHeight = getTargetCollisionHeight(enemy);
+      if (getProjectileCapsuleDistanceSquared(position, enemy, enemyHeight) <= radius * radius) {
         if (projectile.hitEnemyIds.has(enemy.id)) {
           continue;
         }
@@ -495,7 +513,6 @@ export class ProjectileSystem {
 
         if (projectile.explosiveRadius > 0) {
           tempExplosionPosition.copy(position);
-          tempExplosionPosition.y = 0.08;
           this.game.addExplosion(tempExplosionPosition, projectile.damage * 0.62, projectile.explosiveRadius, projectile.mesh.material.color.getHex(), {
             source: projectile.source,
             element: projectile.element,
@@ -539,11 +556,12 @@ export class ProjectileSystem {
   _checkPlayerHit(projectile) {
     const player = this.game.player;
 
-    tempPosition.copy(player.root.position);
-    tempPosition.y = projectile.mesh.position.y;
-
     const radius = projectile.radius + player.radius;
-    if (projectile.mesh.position.distanceToSquared(tempPosition) <= radius * radius) {
+    if (getProjectileCapsuleDistanceSquared(
+      projectile.mesh.position,
+      player,
+      PLAYER_TRAVERSAL_ENVELOPE.standingHeight,
+    ) <= radius * radius) {
       const dealt = player.takeDamage(projectile.damage, projectile.source);
       projectile.source?.onHitPlayer?.(player, dealt);
       this.game.addDamageNumber(player.root.position, dealt, 0xff6b5e);
@@ -555,7 +573,6 @@ export class ProjectileSystem {
       }
       if (projectile.explosiveRadius > 0) {
         tempExplosionPosition.copy(projectile.mesh.position);
-        tempExplosionPosition.y = 0.08;
         this.game.addExplosion(tempExplosionPosition, projectile.damage, projectile.explosiveRadius, projectile.mesh.material.color.getHex(), {
           source: projectile.source,
           element: projectile.element,
@@ -652,8 +669,12 @@ export class ProjectileSystem {
           continue;
         }
 
-        tempPosition.copy(enemy.root.position);
-        tempPosition.y = projectile.mesh.position.y;
+        const enemyHeight = getTargetCollisionHeight(enemy);
+        tempPosition.set(
+          enemy.root.position.x,
+          enemy.root.position.y + enemyHeight * 0.55,
+          enemy.root.position.z,
+        );
         const distanceSq = projectile.mesh.position.distanceToSquared(tempPosition);
 
         if (distanceSq < nearestDistanceSq) {
@@ -667,8 +688,12 @@ export class ProjectileSystem {
       return;
     }
 
-    tempDirection.copy(nearest.root.position).sub(projectile.mesh.position);
-    tempDirection.y = 0;
+    const targetHeight = getTargetCollisionHeight(nearest);
+    tempDirection.set(
+      nearest.root.position.x,
+      nearest.root.position.y + targetHeight * 0.55,
+      nearest.root.position.z,
+    ).sub(projectile.mesh.position);
 
     if (tempDirection.lengthSq() <= 0.001) {
       return;
@@ -769,7 +794,11 @@ export class ProjectileSystem {
     const spread = THREE.MathUtils.clamp(1 + height * 0.18, 1, 1.55);
     const opacity = THREE.MathUtils.clamp(0.24 - height * 0.035, 0.08, 0.24);
 
-    projectile.shadow.position.set(projectile.mesh.position.x, 0.026, projectile.mesh.position.z);
+    projectile.shadow.position.set(
+      projectile.mesh.position.x,
+      projectile.endY + 0.026,
+      projectile.mesh.position.z,
+    );
     projectile.shadow.scale.setScalar((projectile.radius / 0.22) * spread);
     projectile.shadow.material.opacity = opacity;
   }
@@ -813,7 +842,7 @@ export class ProjectileSystem {
         chainChance: projectile.chainChance,
         chainDamageMultiplier: projectile.chainDamageMultiplier,
         arcHeight: projectile.clusterArcHeight,
-        endY: 0.12,
+        endY: projectile.endY + 0.12,
         visualType: 'grenade',
       });
     }
@@ -826,7 +855,6 @@ export class ProjectileSystem {
     this.active.splice(index, 1);
     if (expired && projectile.explodeOnExpire && projectile.explosiveRadius > 0) {
       tempExplosionPosition.copy(projectile.mesh.position);
-      tempExplosionPosition.y = 0.08;
       const fromEnemy = projectile.owner !== 'player';
       this.game.addExplosion(tempExplosionPosition, projectile.damage * 0.72, projectile.explosiveRadius, projectile.mesh.material.color.getHex(), {
         source: projectile.source,

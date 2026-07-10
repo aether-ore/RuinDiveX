@@ -8,7 +8,7 @@
     "dev": "node scripts/dev-server.mjs 5174",
     "dev:5154": "node scripts/dev-server.mjs 5154",
     "start": "npm run dev",
-    "check": "node --check scripts/dev-server.mjs && node --check src/main.js && node --check src/Game.js && node --check src/Player.js && node --check src/SkeletalModelRig.js && node --check src/DungeonGenerator.js && node --check src/UIManager.js",
+    "check": "node --check scripts/dev-server.mjs && node --check src/main.js && node --check src/Game.js && node --check src/Player.js && node --check src/Enemy.js && node --check src/CombatSystem.js && node --check src/ProjectileSystem.js && node --check src/SkeletalModelRig.js && node --check src/DungeonGenerator.js && node --check src/DungeonController.js && node --check src/DungeonProgression.js && node --check src/IndustrialRoomArchetypes.js && node --check src/TraversalCapabilities.js && node --check src/UIManager.js",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui"

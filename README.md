@@ -49,6 +49,23 @@ The current prototype starts in a safe hub/camp approach, then pushes the player
 
 The Garage includes an Expedition Log that tracks the Large Refractor objective, required keycard route, ruin override console, Reaverbot scrap contract, and research processing.
 
+## Procedural Vertical Factory Rooms
+
+Generated ruin chambers are now planned as 3D volumes rather than flat footprints. Functional rooms receive a purpose, mood, environmental-story beat, flavor modifier, ceiling budget, tier map, ramps, supported catwalks, and a purposeful jump platform tied to loot, lore, controls, a hazard bypass, or a combat flank.
+
+- The room catalog supports 15 industrial archetypes, from server crypts and fluid tanks to maintenance shafts and self-contained mini-dungeons.
+- Flavor modifiers affect room lighting, hazards, encounter composition, reward chances, ambience metadata, props, and puzzle variants.
+- Upper exits use paired portal sockets. The generator accepts a connection only when both room endpoints use the same elevation and connector type.
+- A movement-aware platformability solver uses the same jump, ledge-climb, ramp, landing, clearance, and safe-drop envelope as the player controller.
+- Required doors, keycards, mechanisms, chests, encounter spawns, the shrine, elevated bridges, and room tiers must all validate before a layout can be used. Invalid attempts are regenerated; an invalid dungeon is never returned.
+- Elevated enemy spawn points and level-aware ramp navigation make upper decks tactically useful instead of decorative.
+- A reusable volumetric prefab kit fills rooms with cylindrical water tanks, pumps, hand cranks, flywheel engines, open processing vats, massive monoliths, I-beam frames, cylinder arches, structural columns, and chain-link partitions. Their visible footprints also feed the runtime and solver collision maps.
+- Ground connectors widen into service lanes and exploration alcoves with fenced machinery, lit arches, and girder transitions; locked-door throats remain intentionally narrow physical chokepoints.
+- Purpose platforms are predominantly large textured solid volumes rather than isolated tiles. Long ramp runs render as continuous textured slopes with side walls extending to the floor, while catwalk scaffolding remains a supporting traversal type rather than the only platform language.
+- The first required keycard sits on a three-tier reverent mechanical pyramid, and progression gates use paired hydraulic panels that slide laterally inside permanent machine-door frames.
+
+For visual development, load `?roomPreview=<roomId>&roomPreviewLevel=<level>` to start at a generated room tier. Optional `roomPreviewFacing=north|south|east|west` fixes the initial view direction.
+
 ## Ruin Devices
 
 Interactable field devices now spawn around the arena:
@@ -75,7 +92,9 @@ The app uses a browser import map for Three.js, so no package install is require
 - `index.html` - app shell, HUD labels, and garage loadout panel.
 - `src/main.js` - creates and starts the game.
 - `src/Game.js` - scene, camera, loop, hitstop timing, expedition state, effects, hazards, enemy and loot coordination.
-- `src/DungeonGenerator.js`, `src/DungeonController.js` - randomized ruin rooms, hub/camp spaces, doors, keycards, traps, conveyors, mechanisms, shrine objective, and extraction flow.
+- `src/DungeonGenerator.js`, `src/DungeonController.js` - randomized 3D ruin rooms, elevation-aware portals, platformability, doors, keycards, traps, conveyors, mechanisms, shrine objective, and extraction flow.
+- `src/IndustrialRoomArchetypes.js` - the 15-room industrial catalog, flavor effects, purpose, lore, layout, puzzle, encounter, reward, and verticality metadata.
+- `src/TraversalCapabilities.js` - the shared player movement envelope used by physics, generated platforms, ramps, ledges, and the dungeon solver.
 - `src/MapEventSystem.js` - interactable ruin devices, temporary field buffs, risky event rewards.
 - `src/Player.js` - movement, health, stats, model animation, buster pose, and equipment hooks.
 - `src/ModularHumanoid.js` - procedural modular humanoid fallback character.

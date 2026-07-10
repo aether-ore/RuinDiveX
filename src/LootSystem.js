@@ -202,7 +202,7 @@ export class LootSystem {
 
     const item = this.generateItem(enemy?.level ?? 1, { enemy });
     const position = enemy.root.position.clone();
-    position.y = 0.35;
+    position.y += 0.35;
     position.x += randomBetween(-0.45, 0.45);
     position.z += randomBetween(-0.45, 0.45);
 

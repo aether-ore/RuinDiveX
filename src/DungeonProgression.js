@@ -187,15 +187,32 @@ function findSourcePosition({ keycardId, spawnMode, landmarks, chests, encounter
   return null;
 }
 
-function createRoomConnections(roomById) {
+function createRoomConnections(roomById, connectionPlans = []) {
   return PROGRESSION_CONNECTIONS
     .filter(([fromRoomId, toRoomId]) => roomById.has(fromRoomId) && roomById.has(toRoomId))
-    .map(([fromRoomId, toRoomId, doorId]) => ({
-      id: `${fromRoomId}_${toRoomId}`,
-      fromRoomId,
-      toRoomId,
-      doorId,
-    }));
+    .map(([fromRoomId, toRoomId, doorId]) => {
+      const id = `${fromRoomId}_${toRoomId}`;
+      const routes = connectionPlans
+        .filter((plan) => plan.logicalConnectionId === id)
+        .map((plan) => ({
+          id: plan.id,
+          connectorType: plan.connectorType,
+          level: plan.level,
+          elevation: plan.elevation,
+          purpose: plan.purpose,
+          requiredForProgression: plan.requiredForProgression,
+          explorationBeats: (plan.explorationBeats ?? []).map((beat) => ({ ...beat })),
+          fromSocket: { ...plan.fromSocket },
+          toSocket: { ...plan.toSocket },
+        }));
+      return {
+        id,
+        fromRoomId,
+        toRoomId,
+        doorId,
+        routes,
+      };
+    });
 }
 
 function createMinimapData({ rooms, roomConnections, doors, keycards, chests, keySeeker, shrine, bossEncounter }) {
@@ -239,12 +256,18 @@ function createMinimapData({ rooms, roomConnections, doors, keycards, chests, ke
       containsChest: chests.some((chest) => chest.roomId === room.id),
       containsBoss: bossEncounter?.roomId === room.id,
       containsShrine: shrine?.roomId === room.id || room.id === 'shrineRoom',
+      ceilingHeight: room.ceilingHeight ?? null,
+      verticalTierCount: room.numberOfVerticalTiers ?? 1,
+      elevations: (room.localTierMap ?? []).map((tier) => tier.elevation),
+      archetype: room.archetype ?? room.type,
+      purpose: room.purpose ?? null,
     })),
     hallways: roomConnections.map((connection) => ({
       hallwayId: connection.id,
       fromRoomId: connection.fromRoomId,
       toRoomId: connection.toRoomId,
       doorId: connection.doorId,
+      routes: connection.routes,
     })),
     markers: [
       ...doors.map((door) => ({
@@ -287,10 +310,11 @@ export function createDungeonProgressionData({
   landmarks = {},
   chests = [],
   encounters = [],
+  connectionPlans = [],
 } = {}) {
   const roomById = new Map(rooms.map((room) => [room.id, room]));
   const doorById = new Map(doors.map((door) => [door.id, door]));
-  const roomConnections = createRoomConnections(roomById);
+  const roomConnections = createRoomConnections(roomById, connectionPlans);
   const keycards = PROGRESSION_KEYCARDS.map((keycard) => ({
     ...keycard,
     spawnRoomId: keycard.spawnRoomId,
@@ -503,6 +527,26 @@ export class DungeonValidator {
 
     if (!this.roomsById.has(entranceRoomId)) {
       errors.push(`Entrance room ${entranceRoomId} is missing from the progression graph.`);
+    }
+
+    for (const connection of this.connections) {
+      const routes = connection.routes ?? [];
+      if (!routes.some((route) => route.requiredForProgression)) {
+        errors.push(`${connection.id} has no required physical traversal route.`);
+      }
+      for (const route of routes) {
+        if (Math.abs((route.fromSocket?.elevation ?? 0) - (route.toSocket?.elevation ?? 0)) > 0.001) {
+          errors.push(`${route.id} connects mismatched portal elevations.`);
+        }
+        if (route.fromSocket?.roomId !== connection.fromRoomId
+          || route.toSocket?.roomId !== connection.toRoomId) {
+          errors.push(`${route.id} portal ownership does not match its room connection.`);
+        }
+        if (route.fromSocket?.matchingSocketId !== route.toSocket?.id
+          || route.toSocket?.matchingSocketId !== route.fromSocket?.id) {
+          errors.push(`${route.id} portal sockets are not paired bidirectionally.`);
+        }
+      }
     }
 
     const initialReachable = this.getReachableRooms(new Set());

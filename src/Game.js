@@ -11,6 +11,7 @@ import { Player } from './Player.js';
 import { ProjectileSystem } from './ProjectileSystem.js';
 import { RefractorPickupSystem } from './RefractorPickupSystem.js';
 import { UIManager } from './UIManager.js';
+import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
 
 const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
 const CAMERA_LOOK_OFFSET = new THREE.Vector3(0, 1.1, 0);
@@ -44,8 +45,8 @@ const PLATFORM_EDGE_CATCH_DISTANCE_MIN = -0.05;
 const PLATFORM_EDGE_CATCH_DISTANCE_MAX = 0.2;
 const PLATFORM_EDGE_CATCH_VERTICAL_ABOVE = 0.24;
 const PLATFORM_LEDGE_GRAB_HEIGHT_MIN = -0.45;
-const PLATFORM_NORMAL_JUMP_REACH_RATIO = 0.98;
-const PLATFORM_LEDGE_MAX_REACH_RATIO = 2.16;
+const PLATFORM_NORMAL_JUMP_REACH_RATIO = PLAYER_TRAVERSAL_CAPABILITIES.normalJumpReachRatio;
+const PLATFORM_LEDGE_MAX_REACH_RATIO = PLAYER_TRAVERSAL_CAPABILITIES.ledgeGrabHeightRatio;
 const PLATFORM_LEDGE_IDEAL_REACH_RATIO = 1.94;
 const DEBUG_LEDGE_LANDING_INSET = 0.08;
 const PLATFORM_LANDING_VERTICAL_TOLERANCE = 0.42;
@@ -127,6 +128,7 @@ export class Game {
     this.hitStopTimer = 0;
     this.hitStopTimeScale = 1;
     this.animationPreview = this._readAnimationPreviewFromUrl();
+    this.roomPreview = this._readRoomPreviewFromUrl();
     this.inventoryOpen = false;
     this.poseDebugOpen = false;
     this.isGameOver = false;
@@ -225,6 +227,14 @@ export class Game {
     this.scene.add(this.player.root);
     if (this.dungeon?.playerStart) {
       this.player.root.position.copy(this.dungeon.playerStart);
+    }
+    const roomPreviewPosition = this._getRoomPreviewPosition();
+    if (roomPreviewPosition) {
+      this.player.root.position.copy(roomPreviewPosition);
+      const facingX = this.roomPreview?.facingX ?? 0;
+      const facingZ = this.roomPreview?.facingZ ?? 1;
+      this.player.lastMoveDirection.set(facingX, 0, facingZ).normalize();
+      this.player.root.rotation.y = Math.atan2(facingX, facingZ);
     }
     this.player.jumpLedgeClingResolver = (context) => this._tryResolvePlatformLedgeCling(context);
     this.player.jumpPlatformLandingResolver = (context) => this._tryResolvePlatformLanding(context);
@@ -339,6 +349,82 @@ export class Game {
     }
 
     return this._createAnimationPreview(mode, options);
+  }
+
+  _readRoomPreviewFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const roomId = params.get('roomPreview');
+    if (!roomId) {
+      return null;
+    }
+    const levelParam = params.get('roomPreviewLevel');
+    const levelValue = Number(levelParam);
+    const facing = {
+      north: { x: 0, z: -1 },
+      south: { x: 0, z: 1 },
+      east: { x: 1, z: 0 },
+      west: { x: -1, z: 0 },
+    }[params.get('roomPreviewFacing')];
+    return {
+      roomId,
+      level: levelParam !== null && Number.isFinite(levelValue) ? levelValue : null,
+      facingX: facing?.x,
+      facingZ: facing?.z,
+    };
+  }
+
+  _getRoomPreviewPosition() {
+    if (!this.roomPreview || !this.dungeon) {
+      return null;
+    }
+    const room = this.dungeon.rooms.find((candidate) => candidate.id === this.roomPreview.roomId);
+    if (!room) {
+      return null;
+    }
+    const halfW = Math.floor(room.width / 2);
+    const halfD = Math.floor(room.depth / 2);
+    const candidates = this.dungeon.floorTiles
+      .filter((tile) => (
+        tile.roomId === room.id
+        || (
+          Math.abs(tile.x - room.x) <= halfW
+          && Math.abs(tile.z - room.z) <= halfD
+        )
+      ))
+      .filter((tile) => tile.surface !== 'industrialRamp');
+    const desiredLevel = this.roomPreview.level;
+    candidates.sort((a, b) => {
+      if (Number.isFinite(desiredLevel)) {
+        const levelDelta = Math.abs((a.level ?? 0) - desiredLevel) - Math.abs((b.level ?? 0) - desiredLevel);
+        if (Math.abs(levelDelta) > 0.001) {
+          return levelDelta;
+        }
+      }
+      const bridgeRankA = a.surface === 'upperConnectionBridge' ? 0 : 1;
+      const bridgeRankB = b.surface === 'upperConnectionBridge' ? 0 : 1;
+      if (bridgeRankA !== bridgeRankB) {
+        return bridgeRankA - bridgeRankB;
+      }
+      return Math.abs(a.x - room.x) + Math.abs(a.z - room.z)
+        - Math.abs(b.x - room.x) - Math.abs(b.z - room.z);
+    });
+    const tile = candidates[0];
+    if (!Number.isFinite(this.roomPreview.facingX) || !Number.isFinite(this.roomPreview.facingZ)) {
+      const connection = this.dungeon.connectionPlans.find((plan) => (
+        plan.level > 0
+        && (plan.fromRoomId === room.id || plan.toRoomId === room.id)
+      ));
+      const socket = connection
+        ? (connection.fromRoomId === room.id ? connection.fromSocket : connection.toSocket)
+        : null;
+      if (socket) {
+        this.roomPreview.facingX = socket.facingX;
+        this.roomPreview.facingZ = socket.facingZ;
+      }
+    }
+    return tile
+      ? new THREE.Vector3(tile.x * this.dungeon.tileSize, tile.elevation ?? 0, tile.z * this.dungeon.tileSize)
+      : null;
   }
 
   _createAnimationPreview(mode = 'off', options = {}) {
@@ -1357,7 +1443,7 @@ export class Game {
 
     zone.name = target === 'enemies' ? 'playerFireZone' : 'eliteFireZone';
     zone.position.copy(position);
-    zone.position.y = 0.035;
+    zone.position.y = (this.dungeonController?.getSurfaceElevationAt?.(position) ?? position.y ?? 0) + 0.035;
     zone.rotation.x = -Math.PI / 2;
     this.scene.add(zone);
     this.hazards.push({
@@ -1448,7 +1534,7 @@ export class Game {
 
     wave.name = 'explosionWave';
     wave.position.copy(position);
-    wave.position.y = 0.08;
+    wave.position.y += 0.08;
     wave.rotation.x = -Math.PI / 2;
     this.scene.add(wave);
     this.timedEffects.push({ object: wave, life: 0.32, maxLife: 0.32, grow: true });
@@ -1908,6 +1994,9 @@ export class Game {
     if (!platform || !position) {
       return false;
     }
+    if (platform.blocksBelow === false) {
+      return false;
+    }
 
     const insideX = Math.abs(position.x - platform.center.x) <= platform.halfWidth + margin;
     const insideZ = Math.abs(position.z - platform.center.z) <= platform.halfDepth + margin;
@@ -2326,9 +2415,13 @@ export class Game {
     this.pointerNdc.y = -((this.pointer.y - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+    const aimSurfaceY = this.dungeonController?.getSurfaceElevationAt?.(this.player.root.position)
+      ?? this.player.root.position.y
+      ?? 0;
+    this.aimPlane.constant = -aimSurfaceY;
     if (this.raycaster.ray.intersectPlane(this.aimPlane, this.pointer.aimWorld)) {
       this.aimReticle.position.copy(this.pointer.aimWorld);
-      this.aimReticle.position.y = 0.055;
+      this.aimReticle.position.y = aimSurfaceY + 0.055;
       this._updateAimReticleStyle();
     }
   }
@@ -2452,11 +2545,10 @@ export class Game {
 
     tempVectorA.normalize();
     this.pointer.aimWorld.copy(player.root.position).addScaledVector(tempVectorA, range);
-    this.pointer.aimWorld.y = 0;
 
     if (this.aimReticle) {
       this.aimReticle.position.copy(this.pointer.aimWorld);
-      this.aimReticle.position.y = 0.055;
+      this.aimReticle.position.y += 0.055;
     }
 
     return true;

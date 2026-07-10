@@ -714,6 +714,7 @@ export class Enemy {
     }
 
     const player = game.player;
+    const verticalGap = Math.abs(player.root.position.y - this.root.position.y);
     tempDirection.copy(player.root.position).sub(this.root.position);
     tempDirection.y = 0;
     const distance = tempDirection.length();
@@ -750,8 +751,9 @@ export class Enemy {
     this.attackCooldown -= dt * attackRateMultiplier;
 
     const desiredDistance = this.type.ranged ? this.stats.attackRange * 0.72 : this.stats.attackRange;
+    const hasVerticalAttackAccess = this.type.ranged || verticalGap <= 1.35;
     const hitStopped = this.hitStopTimer > 0;
-    const moving = !controlLocked && !hitStopped && distance > desiredDistance;
+    const moving = !controlLocked && !hitStopped && (distance > desiredDistance || !hasVerticalAttackAccess);
 
     if (moving) {
       const navigationDirection = game.dungeonController?.getNavigationDirection?.(this.root.position, player.root.position);
@@ -760,10 +762,13 @@ export class Enemy {
         tempNavigationDirection.normalize();
       }
       this.root.position.addScaledVector(tempNavigationDirection, this.stats.moveSpeed * this._getStatusMoveMultiplier() * dt);
-      this.root.position.y = 0;
     }
 
-    if (!controlLocked && !hitStopped && distance <= this.stats.attackRange && this.attackCooldown <= 0) {
+    if (!controlLocked
+      && !hitStopped
+      && hasVerticalAttackAccess
+      && distance <= this.stats.attackRange
+      && this.attackCooldown <= 0) {
       this._attack(game, tempDirection);
       this.attackCooldown = this.stats.attackCooldown;
     }
@@ -826,6 +831,7 @@ export class Enemy {
     if (this.health <= 0 && !this.dead) {
       this.dead = true;
       this.deathTimer = 1.25;
+      this.deathFloorY = this.root.position.y;
       this.deathStartRotation.copy(this.root.rotation);
       this.healthBar.visible = false;
       this._applyRagdollPose();
@@ -1412,10 +1418,11 @@ export class Enemy {
   _fireHorokkoLob(game, direction, targetPosition) {
     tempPosition.copy(this.root.position).add(new THREE.Vector3(0, 0.72, 0));
     const target = targetPosition.clone();
-    target.y = 0.12;
+    target.y += 0.12;
 
     tempDirection.copy(target).sub(tempPosition);
     tempDirection.y = 0;
+    const distance = Math.max(1.2, tempDirection.length());
 
     if (tempDirection.lengthSq() <= 0.001) {
       tempDirection.copy(direction);
@@ -1423,7 +1430,6 @@ export class Enemy {
 
     tempDirection.normalize();
 
-    const distance = Math.max(1.2, this.root.position.distanceTo(target));
     game.projectiles.spawn({
       owner: 'enemy',
       position: tempPosition,
@@ -1437,7 +1443,7 @@ export class Enemy {
       explosiveRadius: this.type.explosiveRadius ?? 1.05,
       explodeOnExpire: true,
       arcHeight: (this.type.lobArcHeight ?? 1.35) + Math.min(distance * 0.08, 0.65),
-      endY: 0.12,
+      endY: target.y,
       visualType: 'grenade',
     });
     game.addParticleBurst(tempPosition, 0xff365f, 9, 0.11);
@@ -1649,7 +1655,8 @@ export class Enemy {
 
     this.root.rotation.x = THREE.MathUtils.lerp(this.deathStartRotation.x, this.deathFallAxis.z * Math.PI * 0.5, fallEase);
     this.root.rotation.z = THREE.MathUtils.lerp(this.deathStartRotation.z, -this.deathFallAxis.x * Math.PI * 0.5, fallEase);
-    this.root.position.y = THREE.MathUtils.lerp(this.root.position.y, -0.08, Math.min(1, dt * 5));
+    const deathFloorY = this.deathFloorY ?? this.root.position.y;
+    this.root.position.y = THREE.MathUtils.lerp(this.root.position.y, deathFloorY - 0.08, Math.min(1, dt * 5));
     setObjectOpacity(this.root, fade);
   }
 
@@ -1726,10 +1733,13 @@ export class Enemy {
 
     if (this.type.ranged) {
       tempPosition.copy(this.root.position).add(new THREE.Vector3(0, 1.1, 0));
+      tempHitVector.copy(game.player.root.position);
+      tempHitVector.y += 1.25;
+      tempHitVector.sub(tempPosition).normalize();
       game.projectiles.spawn({
         owner: 'enemy',
         position: tempPosition,
-        direction,
+        direction: tempHitVector,
         speed: this.type.projectileSpeed ?? 6,
         range: this.stats.attackRange + 1.5,
         radius: 0.18,

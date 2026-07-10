@@ -3,6 +3,7 @@ import {
   DungeonProgressionManager,
   SHRINE_KEY_ID,
 } from './DungeonProgression.js';
+import { PLAYER_TRAVERSAL_ENVELOPE } from './TraversalCapabilities.js';
 
 const KEYCARD_COLOR = 0xffd66b;
 const MECHANISM_COLOR = 0x6bdcff;
@@ -11,8 +12,8 @@ const LOCKED_COLOR = 0xffb347;
 const KEY_SEEKER_COLOR = 0x5ee77b;
 const TRACKING_COLOR = 0xa06cff;
 const DOOR_OPEN_Y = -5.3;
-const PLAYER_JUMP_OFF_LEDGE_MAX_DROP = 6;
-const PLAYER_STEP_OFF_FALL_HEIGHT = 0.24;
+const PLAYER_JUMP_OFF_LEDGE_MAX_DROP = PLAYER_TRAVERSAL_ENVELOPE.safeDropHeight;
+const PLAYER_STEP_OFF_FALL_HEIGHT = PLAYER_TRAVERSAL_ENVELOPE.groundedStepDownHeight;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
   [-1, 0],
@@ -114,12 +115,15 @@ export class DungeonController {
     this.progressionManager = new DungeonProgressionManager(this.progression);
     this.keycardCount = this.progressionManager.getNormalKeycardCount();
     this.discoveredRoomIds = new Set(['hubTown', 'expeditionCamp', 'entrance']);
+    this.visitedRoomIds = new Set(['hubTown', 'expeditionCamp', 'entrance']);
     this.nearestInteractable = null;
     this.lastSafePlayerPosition = new THREE.Vector3();
     this.pendingPlayerJumpOffLanding = null;
     this.lastSafeEnemyPositions = new Map();
     this.navigationCache = new Map();
     this.trapPulseTimer = 0;
+    this.environmentalStoryToastTimer = 0;
+    this.pendingRoomAnnouncements = [];
 
     if (game?.player?.root) {
       this.lastSafePlayerPosition.copy(game.player.root.position);
@@ -134,6 +138,7 @@ export class DungeonController {
       return;
     }
 
+    this._updateRoomAnnouncements(dt);
     this._constrainPlayerToWalkable();
     this._updateRoomDiscovery();
     this._updateKeycards(dt);
@@ -288,7 +293,7 @@ export class DungeonController {
         continue;
       }
 
-      if (position.distanceToSquared(door.position) <= door.radius * door.radius) {
+      if (this._isPositionInsideClosedDoor(position, door)) {
         return false;
       }
     }
@@ -302,6 +307,21 @@ export class DungeonController {
     }
 
     return true;
+  }
+
+  _isPositionInsideClosedDoor(position, door) {
+    if (!position || !door?.position) {
+      return false;
+    }
+    const playerRadius = this.game?.player?.radius ?? PLAYER_TRAVERSAL_ENVELOPE.collisionRadius;
+    const halfWidth = (door.collisionHalfWidth ?? (door.alongX ? 0.16 : this.tileSize * 0.48)) + playerRadius;
+    const halfDepth = (door.collisionHalfDepth ?? (door.alongX ? this.tileSize * 0.48 : 0.16)) + playerRadius;
+    const baseY = door.baseY ?? door.position.y ?? 0;
+    const height = door.collisionHeight ?? 4.8;
+    return Math.abs(position.x - door.position.x) <= halfWidth
+      && Math.abs(position.z - door.position.z) <= halfDepth
+      && (position.y ?? 0) >= baseY - PLAYER_STEP_OFF_FALL_HEIGHT
+      && (position.y ?? 0) <= baseY + height;
   }
 
   _getWalkableJumpOffLanding(position, target = new THREE.Vector3()) {
@@ -369,7 +389,22 @@ export class DungeonController {
 
     encounter.spawned = true;
     encounter.enemyIds = enemies.map((enemy) => enemy.id);
-    this.game.ui?.showToast?.(`${encounter.label} active`, '#ffb347');
+    const announcement = { message: `${encounter.label} active`, color: '#ffb347' };
+    if (this.environmentalStoryToastTimer > 0) {
+      this.pendingRoomAnnouncements.push(announcement);
+    } else {
+      this.game.ui?.showToast?.(announcement.message, announcement.color);
+    }
+  }
+
+  _updateRoomAnnouncements(dt) {
+    this.environmentalStoryToastTimer = Math.max(0, this.environmentalStoryToastTimer - dt);
+    if (this.environmentalStoryToastTimer > 0 || !this.pendingRoomAnnouncements.length) {
+      return;
+    }
+
+    const announcement = this.pendingRoomAnnouncements.shift();
+    this.game.ui?.showToast?.(announcement.message, announcement.color);
   }
 
   worldToTile(position) {
@@ -512,10 +547,13 @@ export class DungeonController {
       return null;
     }
 
-    const start = this.worldToTile(fromPosition);
-    const goal = this.worldToTile(targetPosition);
-    const startKey = tileKey(start.x, start.z);
-    const goalKey = tileKey(goal.x, goal.z);
+    const start = this.getFloorTileAt(fromPosition, { allowClosest: true });
+    const goal = this.getFloorTileAt(targetPosition, { allowClosest: true });
+    if (!start || !goal) {
+      return null;
+    }
+    const startKey = this._getFloorGraphKey(start);
+    const goalKey = this._getFloorGraphKey(goal);
 
     if (startKey === goalKey) {
       tempVectorC.copy(targetPosition).sub(fromPosition);
@@ -529,14 +567,18 @@ export class DungeonController {
       return cached ? cached.clone() : null;
     }
 
-    const path = this._findTilePath(start, goal);
+    const path = this._findFloorTilePath(start, goal);
     if (!path || path.length < 2) {
       this.navigationCache.set(cacheKey, null);
       return null;
     }
 
     const next = path[1];
-    const nextCenter = this.tileToWorld(next.x, next.z, tempVectorA);
+    const nextCenter = tempVectorA.set(
+      next.x * this.tileSize,
+      next.elevation ?? 0,
+      next.z * this.tileSize,
+    );
     const direction = nextCenter.sub(fromPosition);
     direction.y = 0;
 
@@ -548,6 +590,88 @@ export class DungeonController {
     direction.normalize();
     this.navigationCache.set(cacheKey, direction.clone());
     return direction.clone();
+  }
+
+  _getFloorGraphKey(tile) {
+    return `${tile.x},${tile.z}@${Number(tile.level ?? 0).toFixed(2)}`;
+  }
+
+  _getFloorConnectionElevation(tile, dx, dz) {
+    if (tile?.surface !== 'industrialRamp'
+      || !Number.isFinite(tile.rampStartElevation)
+      || !Number.isFinite(tile.rampEndElevation)) {
+      return tile?.elevation ?? 0;
+    }
+    const alongRamp = dx * Math.sign(tile.rampDirectionX ?? 0)
+      + dz * Math.sign(tile.rampDirectionZ ?? 0);
+    return alongRamp > 0
+      ? tile.rampEndElevation
+      : alongRamp < 0
+        ? tile.rampStartElevation
+        : tile.elevation ?? 0;
+  }
+
+  _canEnemyTraverseFloorTiles(fromTile, toTile) {
+    const dx = Math.abs(fromTile.x - toTile.x);
+    const dz = Math.abs(fromTile.z - toTile.z);
+    if ((dx + dz) !== 1) {
+      return false;
+    }
+    const directionX = Math.sign(toTile.x - fromTile.x);
+    const directionZ = Math.sign(toTile.z - fromTile.z);
+    const fromElevation = this._getFloorConnectionElevation(fromTile, directionX, directionZ);
+    const toElevation = this._getFloorConnectionElevation(toTile, -directionX, -directionZ);
+    const usesRamp = fromTile.surface === 'industrialRamp' || toTile.surface === 'industrialRamp';
+    const maximumRise = usesRamp
+      ? PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.12
+      : PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile;
+    return Math.abs(fromElevation - toElevation) <= maximumRise;
+  }
+
+  _isFloorTileRuntimeWalkable(tile) {
+    tempVectorC.set(tile.x * this.tileSize, tile.elevation ?? 0, tile.z * this.tileSize);
+    return this._isResolvedFloorPositionWalkable(tempVectorC);
+  }
+
+  _findFloorTilePath(start, goal) {
+    if (!this._isFloorTileRuntimeWalkable(start) || !this._isFloorTileRuntimeWalkable(goal)) {
+      return null;
+    }
+    const startKey = this._getFloorGraphKey(start);
+    const goalKey = this._getFloorGraphKey(goal);
+    const queue = [start];
+    const cameFrom = new Map([[startKey, null]]);
+
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const current = queue[cursor];
+      const currentKey = this._getFloorGraphKey(current);
+      if (currentKey === goalKey) {
+        const path = [current];
+        let key = currentKey;
+        while (cameFrom.get(key)) {
+          const previous = cameFrom.get(key);
+          path.push(previous);
+          key = this._getFloorGraphKey(previous);
+        }
+        path.reverse();
+        return path;
+      }
+
+      for (const [dx, dz] of CARDINAL_NEIGHBORS) {
+        for (const next of this.floorTilesByColumn.get(tileKey(current.x + dx, current.z + dz)) ?? []) {
+          const nextKey = this._getFloorGraphKey(next);
+          if (cameFrom.has(nextKey)
+            || !this._canEnemyTraverseFloorTiles(current, next)
+            || !this._isFloorTileRuntimeWalkable(next)) {
+            continue;
+          }
+          cameFrom.set(nextKey, current);
+          queue.push(next);
+        }
+      }
+    }
+
+    return null;
   }
 
   constrainEnemies() {
@@ -789,7 +913,18 @@ export class DungeonController {
       return;
     }
 
+    const firstVisit = !this.visitedRoomIds.has(room.id);
+    this.visitedRoomIds.add(room.id);
+
     this.discoveredRoomIds.add(room.id);
+
+    if (firstVisit && room.environmentalStory) {
+      this.game.ui?.showToast?.(
+        `${room.archetype ?? room.type}: ${room.environmentalStory}`,
+        room.flavorId === 'alarmed' ? '#ffb347' : '#6bdcff',
+      );
+      this.environmentalStoryToastTimer = 2.25;
+    }
 
     for (const connection of this.progression?.roomConnections ?? []) {
       if (connection.fromRoomId === room.id) {
@@ -1130,8 +1265,16 @@ export class DungeonController {
       return;
     }
 
-    if (this.isPositionWalkable(current)) {
-      const surfaceY = this.getSurfaceElevationAt(current);
+    const surfaceY = this.getSurfaceElevationAt(current);
+    const groundedRiseRequiresJumpAt = (position) => {
+      const tile = this.getFloorTileAt(position, { allowClosest: true });
+      const candidateY = this.getSurfaceElevationAt(position);
+      return !playerJumping
+        && tile?.surface !== 'industrialRamp'
+        && candidateY - this.lastSafePlayerPosition.y > PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.05;
+    };
+
+    if (this.isPositionWalkable(current) && !groundedRiseRequiresJumpAt(current)) {
       const steppingOffElevatedSurface = !playerJumping
         && current.y - surfaceY > PLAYER_STEP_OFF_FALL_HEIGHT;
       if (!steppingOffElevatedSurface) {
@@ -1162,7 +1305,7 @@ export class DungeonController {
     }
 
     tempVectorA.set(current.x, current.y, this.lastSafePlayerPosition.z);
-    if (this.isPositionWalkable(tempVectorA)) {
+    if (this.isPositionWalkable(tempVectorA) && !groundedRiseRequiresJumpAt(tempVectorA)) {
       current.copy(tempVectorA);
       this._syncPositionToFloor(current, { preservePlayerAction: true });
       this.lastSafePlayerPosition.copy(current);
@@ -1170,7 +1313,7 @@ export class DungeonController {
     }
 
     tempVectorA.set(this.lastSafePlayerPosition.x, current.y, current.z);
-    if (this.isPositionWalkable(tempVectorA)) {
+    if (this.isPositionWalkable(tempVectorA) && !groundedRiseRequiresJumpAt(tempVectorA)) {
       current.copy(tempVectorA);
       this._syncPositionToFloor(current, { preservePlayerAction: true });
       this.lastSafePlayerPosition.copy(current);
@@ -1873,8 +2016,25 @@ export class DungeonController {
       }
 
       const baseY = door.baseY ?? 0;
-      const targetY = baseY + (door.closed ? 0 : DOOR_OPEN_Y);
-      door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, targetY, Math.min(1, dt * 8));
+      const alpha = Math.min(1, dt * 8);
+      if (door.leftPanel && door.rightPanel && door.slidingAxis) {
+        door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, baseY, alpha);
+        const openOffset = door.closed ? 0 : (door.slidingOpenOffset ?? this.tileSize * 0.42);
+        const axis = door.slidingAxis;
+        door.leftPanel.position[axis] = THREE.MathUtils.lerp(
+          door.leftPanel.position[axis],
+          (door.leftPanelClosedOffset ?? -this.tileSize * 0.24) - openOffset,
+          alpha,
+        );
+        door.rightPanel.position[axis] = THREE.MathUtils.lerp(
+          door.rightPanel.position[axis],
+          (door.rightPanelClosedOffset ?? this.tileSize * 0.24) + openOffset,
+          alpha,
+        );
+      } else {
+        const targetY = baseY + (door.closed ? 0 : DOOR_OPEN_Y);
+        door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, targetY, alpha);
+      }
 
       if (door.light?.material?.emissive) {
         const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
@@ -2628,7 +2788,7 @@ export class DungeonController {
         continue;
       }
 
-      if (tempVectorC.distanceToSquared(door.position) <= door.radius * door.radius) {
+      if (this._isPositionInsideClosedDoor(tempVectorC, door)) {
         return false;
       }
     }

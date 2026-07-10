@@ -5,7 +5,6 @@ const tempToEnemy = new THREE.Vector3();
 const tempAimPoint = new THREE.Vector3();
 const tempStart = new THREE.Vector3();
 const tempEnd = new THREE.Vector3();
-const tempClosest = new THREE.Vector3();
 const tempMidpoint = new THREE.Vector3();
 const tempFlat = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
@@ -464,6 +463,7 @@ export class CombatSystem {
     this.activeMines = [];
     this.pendingMeleeStrikes = [];
     this.pendingProjectileShots = [];
+    this.lockAimWorld = new THREE.Vector3();
     this.lockOn = {
       target: null,
       progress: 0,
@@ -695,7 +695,11 @@ export class CombatSystem {
       return fallbackAimWorld;
     }
 
-    return target.root.position;
+    return this.lockAimWorld.set(
+      target.root.position.x,
+      target.root.position.y + 1.15,
+      target.root.position.z,
+    );
   }
 
   _isValidLockTarget(target) {
@@ -1178,7 +1182,6 @@ export class CombatSystem {
       tempDirection.normalize();
       const dropDistance = escaped ? 0.75 : 1.05;
       lifted.root.position.copy(player.root.position).addScaledVector(tempDirection, dropDistance);
-      lifted.root.position.y = 0;
 
       if (lifted.enemy && !lifted.enemy.dead) {
         lifted.enemy.hitStopTimer = Math.max(lifted.enemy.hitStopTimer ?? 0, escaped ? 0.08 : 0.18);
@@ -1224,6 +1227,7 @@ export class CombatSystem {
     const cooldownReduction = THREE.MathUtils.clamp(player.stats.cooldownReduction ?? 0, 0, 0.75);
     const cooldown = Math.max(0.16, (1 / rapid) * (profile.salvoCooldownMultiplier ?? 1.7) * (1 - cooldownReduction));
     const targetPoint = target.root.position.clone();
+    targetPoint.y += 1.15;
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
     const count = Math.max(2, Math.round(profile.salvoCount ?? 3));
     const spread = profile.salvoSpread ?? 0.18;
@@ -1232,11 +1236,10 @@ export class CombatSystem {
     const color = getElementColor(element, profile.color ?? 0xffd36f);
     const armorBreakChance = (player.stats.armorBreakChance ?? 0) + (profile.armorBreakBonus ?? 0);
 
-    tempDirection.copy(target.root.position).sub(origin);
-    tempDirection.y = 0;
+    tempDirection.copy(targetPoint).sub(origin);
 
     if (tempDirection.lengthSq() <= 0.001) {
-      tempDirection.copy(aimWorld ?? player.root.position).sub(player.root.position).setY(0);
+      tempDirection.copy(aimWorld ?? player.root.position).sub(origin);
     }
 
     if (tempDirection.lengthSq() <= 0.001) {
@@ -1336,8 +1339,19 @@ export class CombatSystem {
       return false;
     }
 
-    tempDirection.copy(aimWorld).sub(player.root.position);
-    tempDirection.y = 0;
+    const supportsVerticalAim = !profile.melee
+      && !['mine', 'drill', 'lift', 'grenade'].includes(profile.special);
+    const attackOrigin = supportsVerticalAim
+      ? (player.getProjectileOrigin?.() ?? player.getAttackOrigin())
+      : player.root.position;
+    tempAimPoint.copy(aimWorld ?? player.root.position);
+    if (supportsVerticalAim && !this.getMovementLockTarget()) {
+      tempAimPoint.y += attackOrigin.y - player.root.position.y;
+    }
+    tempDirection.copy(tempAimPoint).sub(attackOrigin);
+    if (!supportsVerticalAim) {
+      tempDirection.y = 0;
+    }
 
     if (tempDirection.lengthSq() <= 0.001) {
       tempDirection.copy(player.lastMoveDirection);
@@ -2292,6 +2306,8 @@ export class CombatSystem {
     const color = getElementColor(element, profile.color ?? 0xff9f43);
     const armorBreakChance = (player.stats.armorBreakChance ?? 0) + (profile.armorBreakBonus ?? 0);
     const targetPoint = this._getClampedAimPoint(aimWorld, player.stats.attackRange + 0.8);
+    const targetElevation = this.game.dungeonController?.getSurfaceElevationAt?.(targetPoint)
+      ?? player.root.position.y;
 
     for (let i = 0; i < count; i += 1) {
       const offset = (i - (count - 1) / 2) * spread;
@@ -2323,7 +2339,7 @@ export class CombatSystem {
         chainChance: profile.chainChance ?? 0,
         chainDamageMultiplier: profile.chainDamageMultiplier ?? 0.36,
         arcHeight: (profile.arcHeight ?? 1.3) + travelRange * 0.08,
-        endY: 0.14,
+        endY: targetElevation + 0.14,
         visualType: profile.visualType ?? 'grenade',
         clusterCount: profile.grenadeMode === 'cluster' ? profile.clusterCount ?? 5 : 0,
         clusterDamageMultiplier: profile.clusterDamageMultiplier ?? 0.42,
@@ -2358,7 +2374,8 @@ export class CombatSystem {
   _placeMine(aimWorld, profile) {
     const player = this.game.player;
     const position = this._getClampedAimPoint(aimWorld, player.stats.attackRange).clone();
-    position.y = 0.055;
+    position.y = (this.game.dungeonController?.getSurfaceElevationAt?.(position)
+      ?? player.root.position.y) + 0.055;
 
     const damageRoll = this._rollPlayerDamage(profile);
     const color = profile.color ?? 0xffd36f;
@@ -2469,6 +2486,9 @@ export class CombatSystem {
         if (enemy.dead) {
           continue;
         }
+        if (Math.abs(enemy.root.position.y - mine.group.position.y) > 1.65) {
+          continue;
+        }
 
         tempFlat.copy(enemy.root.position).sub(mine.group.position);
         tempFlat.y = 0;
@@ -2489,6 +2509,9 @@ export class CombatSystem {
       if (enemy.dead) {
         continue;
       }
+      if (Math.abs(enemy.root.position.y - mine.group.position.y) > 1.65) {
+        continue;
+      }
 
       tempFlat.copy(mine.group.position).sub(enemy.root.position);
       tempFlat.y = 0;
@@ -2504,7 +2527,6 @@ export class CombatSystem {
       const pull = mine.magnetStrength * (0.35 + falloff * 0.65) * dt;
       tempFlat.divideScalar(distance);
       enemy.root.position.addScaledVector(tempFlat, pull);
-      enemy.root.position.y = 0;
     }
   }
 
@@ -2515,7 +2537,7 @@ export class CombatSystem {
     }
 
     const position = mine.group.position.clone();
-    position.y = 0.08;
+    position.y += 0.025;
     mine.group.removeFromParent();
     this.game.addExplosion(position, mine.damage, mine.explosionRadius, mine.color, {
       element: getPlayerElement(this.game.player.stats, { element: null }) ?? 'fire',
@@ -2861,7 +2883,8 @@ export class CombatSystem {
     ring.name = 'grenadeLandingPulse';
     ring.rotation.x = -Math.PI / 2;
     ring.position.copy(position);
-    ring.position.y = 0.06;
+    ring.position.y = (this.game.dungeonController?.getSurfaceElevationAt?.(position)
+      ?? position.y) + 0.06;
     ring.scale.setScalar(radius);
     this.game.scene.add(ring);
     this.game.timedEffects.push({ object: ring, life: 0.36, maxLife: 0.36, grow: true });
@@ -2887,8 +2910,13 @@ export class CombatSystem {
     }
 
     const player = this.game.player;
-    tempDirection.copy(aimWorld).sub(player.root.position);
-    tempDirection.y = 0;
+    const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
+    origin.y = Math.max(origin.y, player.root.position.y + 1.05);
+    tempAimPoint.copy(aimWorld ?? player.root.position);
+    if (!this.getMovementLockTarget()) {
+      tempAimPoint.y += origin.y - player.root.position.y;
+    }
+    tempDirection.copy(tempAimPoint).sub(origin);
 
     if (tempDirection.lengthSq() <= 0.001) {
       tempDirection.copy(player.lastMoveDirection);
@@ -2925,8 +2953,6 @@ export class CombatSystem {
     const energyOverflow = state.energy <= 0.001;
     const outputOverflow = state.weaponOutput <= 0.001;
 
-    const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-    origin.y = Math.max(origin.y, 1.05);
     tempEnd.copy(origin).addScaledVector(tempDirection, range);
     this._updateLaserVisual(origin, tempEnd, profile, heat);
 
@@ -3010,23 +3036,26 @@ export class CombatSystem {
     const heatCurve = THREE.MathUtils.smoothstep(heat, 0, 1);
     const beamWidth = (profile.beamWidth ?? 0.34) * (1 + heatCurve * (profile.maxHeatWidthBonus ?? 0.95));
     tempStart.copy(origin);
-    tempStart.y = 0;
 
     for (const enemy of this.game.enemies) {
       if (enemy.dead) {
         continue;
       }
 
-      tempToEnemy.copy(enemy.root.position).sub(tempStart);
-      tempToEnemy.y = 0;
+      const enemyHeight = enemy.type?.modelHeight ?? Math.max(1.55, enemy.radius * 3.6);
+      tempToEnemy.set(
+        enemy.root.position.x,
+        enemy.root.position.y + enemyHeight * 0.55,
+        enemy.root.position.z,
+      ).sub(tempStart);
       const along = tempToEnemy.dot(direction);
       if (along < 0 || along > range) {
         continue;
       }
 
-      tempClosest.copy(tempStart).addScaledVector(direction, along);
       const hitRadius = beamWidth + enemy.radius;
-      if (enemy.root.position.distanceToSquared(tempClosest) > hitRadius * hitRadius) {
+      const perpendicularDistanceSq = Math.max(0, tempToEnemy.lengthSq() - along * along);
+      if (perpendicularDistanceSq > hitRadius * hitRadius) {
         continue;
       }
 
@@ -3263,7 +3292,7 @@ export class CombatSystem {
     const range = player.stats.attackRange + (profile.railRangeBonus ?? 2.4);
     const color = profile.color ?? 0xcff9ff;
     const maxHits = Math.max(1, Math.round(player.stats.projectilePierce + (profile.pierceBonus ?? 0) + 1));
-    const candidates = this._getLineHitCandidates(player.root.position, direction, range, profile.railWidth ?? 0.22);
+    const candidates = this._getLineHitCandidates(origin, direction, range, profile.railWidth ?? 0.22);
 
     tempEnd.copy(origin).addScaledVector(direction, range);
     this._addLineEffect(origin, tempEnd, color, 0.075, 0.16, 0.9);
@@ -3290,27 +3319,32 @@ export class CombatSystem {
 
   _coneAttackDirection(direction, profile) {
     const player = this.game.player;
+    const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
     const range = Math.max(1.6, player.stats.attackRange * (profile.coneRangeMultiplier ?? 1));
     const coneAngle = profile.coneAngle ?? 0.52;
     const color = profile.color ?? 0xff7842;
     const element = getPlayerElement(player.stats, profile);
 
-    this._addConeEffect(player.root.position, direction, range, coneAngle, color);
+    this._addConeEffect(origin, direction, range, coneAngle, color);
 
     for (const enemy of this.game.enemies) {
       if (enemy.dead) {
         continue;
       }
 
-      tempToEnemy.copy(enemy.root.position).sub(player.root.position);
-      tempToEnemy.y = 0;
+      const enemyHeight = enemy.type?.modelHeight ?? Math.max(1.55, enemy.radius * 3.6);
+      tempToEnemy.set(
+        enemy.root.position.x,
+        enemy.root.position.y + enemyHeight * 0.55,
+        enemy.root.position.z,
+      ).sub(origin);
       const distance = tempToEnemy.length();
       if (distance > range + enemy.radius || distance <= 0.001) {
         continue;
       }
 
       tempToEnemy.normalize();
-      if (angleBetweenFlat(direction, tempToEnemy) > coneAngle) {
+      if (direction.angleTo(tempToEnemy) > coneAngle) {
         continue;
       }
 
@@ -3329,8 +3363,9 @@ export class CombatSystem {
     }
 
     if (element === 'fire' && profile.fireZoneDuration > 0) {
-      tempAimPoint.copy(player.root.position).addScaledVector(direction, range * 0.72);
-      tempAimPoint.y = 0.04;
+      tempAimPoint.copy(origin).addScaledVector(direction, range * 0.72);
+      tempAimPoint.y = (this.game.dungeonController?.getSurfaceElevationAt?.(tempAimPoint)
+        ?? player.root.position.y) + 0.04;
       this.game.addFireZone(tempAimPoint, Math.max(1, player.stats.attackDamage * 0.22), profile.fireZoneDuration, 0.78 + player.stats.areaDamage * 0.5, {
         target: 'enemies',
         source: player,
@@ -3363,8 +3398,12 @@ export class CombatSystem {
 
     const player = this.game.player;
     state.sprayActive = true;
-    tempDirection.copy(aimWorld).sub(player.root.position);
-    tempDirection.y = 0;
+    const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
+    tempAimPoint.copy(aimWorld ?? player.root.position);
+    if (!this.getMovementLockTarget()) {
+      tempAimPoint.y += origin.y - player.root.position.y;
+    }
+    tempDirection.copy(tempAimPoint).sub(origin);
 
     if (tempDirection.lengthSq() <= 0.001) {
       tempDirection.copy(player.lastMoveDirection);
@@ -3400,8 +3439,6 @@ export class CombatSystem {
 
     state.coneParticleTimer = Math.max(0, (state.coneParticleTimer ?? 0) - dt);
     if (state.coneParticleTimer <= 0) {
-      const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-      origin.y = Math.max(origin.y, 0.9);
       this.game.addDirectedParticleSpray(origin, tempDirection, color, {
         count: profile.element === 'ice' ? 8 : 6,
         range,
@@ -3409,14 +3446,15 @@ export class CombatSystem {
         baseScale: profile.element === 'ice' ? 0.21 : 0.17,
         pressure: outputPercent,
       });
-      this._addConeEffect(player.root.position, tempDirection, range, coneAngle, color, 0.14 + outputPercent * 0.12);
+      this._addConeEffect(origin, tempDirection, range, coneAngle, color, 0.14 + outputPercent * 0.12);
       state.coneParticleTimer = SPRAY_PARTICLE_INTERVAL;
     }
 
     state.coneZoneTimer = Math.max(0, (state.coneZoneTimer ?? 0) - dt);
     if (element === 'fire' && profile.fireZoneDuration > 0 && state.coneZoneTimer <= 0) {
-      tempAimPoint.copy(player.root.position).addScaledVector(tempDirection, range * 0.62);
-      tempAimPoint.y = 0.04;
+      tempAimPoint.copy(origin).addScaledVector(tempDirection, range * 0.62);
+      tempAimPoint.y = (this.game.dungeonController?.getSurfaceElevationAt?.(tempAimPoint)
+        ?? player.root.position.y) + 0.04;
       this.game.addFireZone(tempAimPoint, Math.max(0.8, player.stats.attackDamage * 0.12 * outputPercent), 0.85, 0.62 + player.stats.areaDamage * 0.34, {
         target: 'enemies',
         source: player,
@@ -3447,6 +3485,7 @@ export class CombatSystem {
 
   _damageConeSpray(direction, profile, range, coneAngle, tickInterval) {
     const player = this.game.player;
+    const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
     const element = getPlayerElement(player.stats, profile);
     const tickScale = tickInterval * (profile.sprayDamagePerSecondMultiplier ?? 1.45);
 
@@ -3455,15 +3494,19 @@ export class CombatSystem {
         continue;
       }
 
-      tempToEnemy.copy(enemy.root.position).sub(player.root.position);
-      tempToEnemy.y = 0;
+      const enemyHeight = enemy.type?.modelHeight ?? Math.max(1.55, enemy.radius * 3.6);
+      tempToEnemy.set(
+        enemy.root.position.x,
+        enemy.root.position.y + enemyHeight * 0.55,
+        enemy.root.position.z,
+      ).sub(origin);
       const distance = tempToEnemy.length();
       if (distance > range + enemy.radius || distance <= 0.001) {
         continue;
       }
 
       tempToEnemy.normalize();
-      if (angleBetweenFlat(direction, tempToEnemy) > coneAngle) {
+      if (direction.angleTo(tempToEnemy) > coneAngle) {
         continue;
       }
 
@@ -3597,24 +3640,36 @@ export class CombatSystem {
 
   _getLineHitCandidates(start, direction, range, width) {
     const candidates = [];
+    const usesVerticalAim = Math.abs(direction.y) > 0.001;
     tempStart.copy(start);
-    tempStart.y = 0;
+    if (!usesVerticalAim) {
+      tempStart.y = 0;
+    }
 
     for (const enemy of this.game.enemies) {
       if (enemy.dead) {
         continue;
       }
 
-      tempToEnemy.copy(enemy.root.position).sub(tempStart);
-      tempToEnemy.y = 0;
+      if (usesVerticalAim) {
+        const enemyHeight = enemy.type?.modelHeight ?? Math.max(1.55, enemy.radius * 3.6);
+        tempToEnemy.set(
+          enemy.root.position.x,
+          enemy.root.position.y + enemyHeight * 0.55,
+          enemy.root.position.z,
+        ).sub(tempStart);
+      } else {
+        tempToEnemy.copy(enemy.root.position).sub(tempStart);
+        tempToEnemy.y = 0;
+      }
       const along = tempToEnemy.dot(direction);
       if (along < 0 || along > range) {
         continue;
       }
 
-      tempClosest.copy(tempStart).addScaledVector(direction, along);
       const hitRadius = width + enemy.radius;
-      if (enemy.root.position.distanceToSquared(tempClosest) > hitRadius * hitRadius) {
+      const perpendicularDistanceSq = Math.max(0, tempToEnemy.lengthSq() - along * along);
+      if (perpendicularDistanceSq > hitRadius * hitRadius) {
         continue;
       }
 
@@ -3662,7 +3717,11 @@ export class CombatSystem {
     );
     cone.name = 'elementalConeEffect';
     cone.position.copy(position);
-    cone.position.y = 0.09;
+    cone.position.y = (
+      this.game.dungeonController?.getSurfaceElevationAt?.(position)
+      ?? position.y
+      ?? 0
+    ) + 0.09;
     cone.rotation.x = -Math.PI / 2;
     cone.rotation.z = Math.atan2(-direction.z, direction.x);
     this.game.scene.add(cone);

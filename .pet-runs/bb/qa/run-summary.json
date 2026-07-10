@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "spriteVersionNumber": 2,
+  "run_dir": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb",
+  "spritesheet": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\final\\spritesheet-extended.webp",
+  "validation": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\final\\validation-extended.json",
+  "chroma_despill": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\qa\\chroma-despill-extended.json",
+  "contact_sheet": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\qa\\contact-sheet-extended.png",
+  "direction_sheet": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\qa\\look-directions.png",
+  "direction_semantics": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\qa\\direction-semantics.json",
+  "blind_direction_validation": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\qa\\direction-blind-validation.json",
+  "blind_review_resolution": null,
+  "continuity": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\qa\\look-continuity.json",
+  "review": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\qa\\review.json",
+  "final_visual_qa": "C:\\Users\\K\\Documents\\New Three.js Practice\\.pet-runs\\bb\\qa\\final-visual-qa.json",
+  "package": "C:\\Users\\K\\.codex\\pets\\bb"
+}

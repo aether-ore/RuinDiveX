@@ -1,0 +1,15 @@
+{
+  "visual_qa": "pass",
+  "qa_note": "All 11 rows preserve BB's chibi cel-shaded identity, palette, face, proportions, asymmetric red ribbon, cyan accent, practical scale, and clean silhouette; standard loops match their semantics and the direction loop has clear cardinals with no visible reversal, pop, or interior seam.",
+  "review_warnings": [
+    "022.5 horizontal blind ambiguity accepted from labeled loop context",
+    "135 horizontal blind ambiguity accepted from labeled loop context",
+    "157.5 residual-right cue is subtle but does not reverse",
+    "247.5 vertical blind ambiguity accepted from labeled loop context",
+    "292.5 vertical blind ambiguity accepted from labeled loop context",
+    "continuity hole flags are leg and open-coat-tail negative space with no seam crossing a filled body part",
+    "continuity diff outliers show no visible snap, registration jump, or scale pop"
+  ],
+  "repair_rows": [],
+  "repair_notes": "none"
+}

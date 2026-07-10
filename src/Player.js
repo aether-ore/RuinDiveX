@@ -7,6 +7,7 @@ import { EquipmentManager } from './EquipmentManager.js';
 import { ExternalModelRig } from './ExternalModelRig.js';
 import { ModularHumanoid } from './ModularHumanoid.js';
 import { SkeletalModelRig } from './SkeletalModelRig.js';
+import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
 
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 const PLAYER_BASE_MOVE_SPEED = 6.2;
@@ -196,15 +197,15 @@ const MML_JUMP_STATES = Object.freeze({
 });
 const DEFAULT_MML_JUMP_SETTINGS = Object.freeze({
   // Low fixed height is the core Mega Man Legends-like commitment: the button never changes the apex.
-  jumpHeight: 1.55,
+  jumpHeight: PLAYER_TRAVERSAL_CAPABILITIES.jumpHeight,
   // Short time to apex makes the hop snappy without becoming a floaty modern platformer jump.
-  jumpTimeToApex: 0.33,
+  jumpTimeToApex: PLAYER_TRAVERSAL_CAPABILITIES.jumpTimeToApex,
   // Slightly stronger fall gravity brings Volnutt back down with that PS1 action-adventure weight.
-  fallGravityMultiplier: 1.22,
+  fallGravityMultiplier: PLAYER_TRAVERSAL_CAPABILITIES.fallGravityMultiplier,
   // Scales acceleration while initial velocity is recalculated to preserve the selected apex.
   gravityScale: 1,
   // Forward speed stays modest so the preserved takeoff velocity feels like a committed hop.
-  forwardSpeed: 4.35,
+  forwardSpeed: PLAYER_TRAVERSAL_CAPABILITIES.forwardJumpSpeed,
   // Ground acceleration/deceleration shape the planted tank-control feel before takeoff.
   groundAcceleration: 28,
   groundDeceleration: 22,
@@ -223,7 +224,7 @@ const DEFAULT_MML_JUMP_SETTINGS = Object.freeze({
 });
 const PHYSICAL_JUMP_RISING_CLIP_END = 0.52;
 const PHYSICAL_JUMP_LANDING_CLIP_KEY = 'fallingToLanding';
-const GROUNDED_STEP_DOWN_SNAP_HEIGHT = 0.24;
+const GROUNDED_STEP_DOWN_SNAP_HEIGHT = PLAYER_TRAVERSAL_CAPABILITIES.groundedStepDownHeight;
 
 function getJumpVisualLift(progress = 0, forward = false) {
   const p = THREE.MathUtils.clamp(progress, 0, 1);
@@ -322,7 +323,7 @@ export class Player {
     this.level = 1;
     this.experience = 0;
     this.experienceToNext = 40;
-    this.radius = 0.42;
+    this.radius = PLAYER_TRAVERSAL_CAPABILITIES.collisionRadius;
     this.dead = false;
     this.slowTimer = 0;
     this.slowMultiplier = 1;

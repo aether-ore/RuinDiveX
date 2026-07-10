@@ -26,13 +26,18 @@ const RUIN_WALL_HEIGHT = 15.6;
 const RUIN_WALL_THICKNESS = 0.22;
 const RUIN_WALL_FACE_OFFSET = 0.006;
 const RUIN_WALL_TILE_OVERLAP = 0.014;
-const RUIN_WALL_TILE_ROWS = 3;
+const RUIN_WALL_TILE_ROWS = 6;
 const RUIN_CEILING_THICKNESS = 0.12;
 const RUIN_DOOR_HEIGHT = 4.8;
 const RUIN_DOOR_OPEN_Y = -5.3;
 const RUIN_FACTORY_ELEVATION = 1.05;
 const RUIN_OVERHEAD_GANTRY_HEIGHT = 4.35;
 const RUIN_BASEMENT_ELEVATION = -3.2;
+// The optional trap/vault chambers need enough vertical room for the full
+// character silhouette, overhead bridges, and the authored ledge animation.
+// Keep their floor separate from the shallower coolant/shrine service pits.
+const RUIN_MINOR_DROP_ELEVATION = -4.8;
+const RUIN_MINOR_DROP_SHELF_ELEVATION = -1.5;
 const RUIN_SECOND_FLOOR_ELEVATION = 4.05;
 const RUIN_THIRD_FLOOR_ELEVATION = 7.25;
 const RUIN_RAIL_HEIGHT = 0.68;
@@ -49,6 +54,17 @@ const ROOM_CEILING_HEIGHT_BY_SIZE = Object.freeze({
 const RUIN_OPEN_AIR_ROOM_TYPES = new Set(['hub', 'camp']);
 const WALL_MACRO_VARIANTS = ['industrial'];
 const WALL_MACRO_TILE_KEYS = ['tl', 'tm', 'tr', 'ml', 'mm', 'mr', 'bl', 'bm', 'br'];
+const WALL_MACRO_ACCENT_KEYS = [
+  'conduit',
+  'glyph',
+  'hatch',
+  'recessed',
+  'sensor',
+  'slate',
+  'symbol',
+  'vent',
+  'wiring',
+];
 const RESERVED_FACTORY_SURFACE_TYPES = new Set([
   'hub',
   'camp',
@@ -89,6 +105,8 @@ const SCAFFOLD_RAMP_ACCESS_SURFACES = new Set([
   'upperConnectionBridge',
   'jumpPlatform',
 ]);
+const isArchitecturalDeckTile = (tile) => Boolean(tile?.massGroupId);
+const isSolidArchitecturalDeckTile = (tile) => tile?.supportStyle === 'solid_mass';
 const DIRECTIONS = [
   [1, 0],
   [-1, 0],
@@ -157,6 +175,50 @@ function rangeBetweenOrdered(a, b) {
   return values;
 }
 
+function stableRenderHash(value = '') {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function findConnectionDoorPathIndex(path = []) {
+  const midpointIndex = Math.floor((path.length - 1) * 0.5);
+  return path
+    .map((point, index) => ({ point, index }))
+    .filter(({ index }) => {
+      const previous = path[index - 1];
+      const next = path[index + 1];
+      return previous && next && (previous.x === next.x || previous.z === next.z);
+    })
+    .sort((a, b) => Math.abs(a.index - midpointIndex) - Math.abs(b.index - midpointIndex))[0]?.index
+    ?? midpointIndex;
+}
+
+function resolveConnectionDoorPlacement(connectionPlan, fromRoom, toRoom) {
+  const path = connectionPlan?.bridgePath ?? [];
+  const index = findConnectionDoorPathIndex(path);
+  const pathPoint = path[index] ?? null;
+  const point = pathPoint ?? (
+    fromRoom && toRoom
+      ? {
+          x: Math.round((fromRoom.x + toRoom.x) * 0.5),
+          z: Math.round((fromRoom.z + toRoom.z) * 0.5),
+        }
+      : null
+  );
+  const previous = path[Math.max(0, index - 1)] ?? null;
+  const next = path[Math.min(path.length - 1, index + 1)] ?? null;
+  const alongX = pathPoint && previous && next
+    ? Math.abs(next.x - previous.x) >= Math.abs(next.z - previous.z)
+    : Math.abs((fromRoom?.x ?? 0) - (toRoom?.x ?? 0))
+      > Math.abs((fromRoom?.z ?? 0) - (toRoom?.z ?? 0));
+
+  return { path, index, pathPoint, point, previous, next, alongX };
+}
+
 function applyTileOptions(tile, options = {}) {
   if (!tile || !options) {
     return tile;
@@ -194,6 +256,32 @@ function applyTileOptions(tile, options = {}) {
   }
   if (options.platformGroupId) {
     tile.platformGroupId = options.platformGroupId;
+  }
+  for (const key of [
+    'isPlatformingSurface',
+    'isLedgeSurface',
+    'platformPurpose',
+    'requiredTraversalAction',
+    'preserveProgressionOverpass',
+    'supportStyle',
+    'massGroupId',
+    'allowsGroundedDropLanding',
+    'dropSpaceId',
+    'preserveProgressionFooting',
+    'supportBaseElevation',
+    'blockedBySolidLedgeSupport',
+    'rampRouteId',
+    'rampRunId',
+  ]) {
+    if (options[key] !== undefined) {
+      tile[key] = options[key];
+    }
+  }
+  if (Array.isArray(options.ledgeEdges)) {
+    tile.ledgeEdges = [...options.ledgeEdges];
+  }
+  if (Array.isArray(options.openRetainingWallEdges)) {
+    tile.openRetainingWallEdges = [...options.openRetainingWallEdges];
   }
 
   return tile;
@@ -238,6 +326,17 @@ function createFloorTile(x, z, {
   connectorId = null,
   connectorZone = null,
   platformGroupId = null,
+  supportStyle = null,
+  massGroupId = null,
+  ledgeEdges = null,
+  allowsGroundedDropLanding = false,
+  dropSpaceId = null,
+  openRetainingWallEdges = null,
+  preserveProgressionFooting = false,
+  supportBaseElevation = null,
+  blockedBySolidLedgeSupport = false,
+  rampRouteId = null,
+  rampRunId = null,
 } = {}) {
   const tile = {
     x,
@@ -256,6 +355,19 @@ function createFloorTile(x, z, {
     connectorId,
     connectorZone,
     platformGroupId,
+    supportStyle,
+    massGroupId,
+    ledgeEdges: Array.isArray(ledgeEdges) ? [...ledgeEdges] : null,
+    allowsGroundedDropLanding,
+    dropSpaceId,
+    preserveProgressionFooting,
+    supportBaseElevation,
+    blockedBySolidLedgeSupport,
+    rampRouteId,
+    rampRunId,
+    openRetainingWallEdges: Array.isArray(openRetainingWallEdges)
+      ? [...openRetainingWallEdges]
+      : null,
   };
 
   if (type === 'conveyor') {
@@ -349,7 +461,7 @@ export class DungeonGenerator {
   generate() {
     let lastDungeon = null;
 
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
       lastDungeon = this._generateOnce();
       if (lastDungeon.progression?.validation?.accepted) {
         lastDungeon.generationAttempts = attempt + 1;
@@ -358,7 +470,7 @@ export class DungeonGenerator {
     }
 
     const errors = lastDungeon?.progression?.validation?.errors ?? ['Unknown dungeon validation failure.'];
-    throw new Error(`Unable to generate a solvable vertical dungeon after 8 attempts: ${errors.join(' | ')}`);
+    throw new Error(`Unable to generate a solvable vertical dungeon after 12 attempts: ${errors.join(' | ')}`);
   }
 
   _generateOnce() {
@@ -401,7 +513,9 @@ export class DungeonGenerator {
       { id: 'expeditionCamp', type: 'camp', x: 0, z: -11, width: 11, depth: 7 },
       { id: 'entrance', type: 'entrance', x: 0, z: 0, width: 9, depth: 9 },
       { id: 'enemyNest', type: 'enemy', x: enemyNestX, z: enemyNestZ, width: 15, depth: 13 },
-      { id: 'keycardRoom', type: 'keycard', x: keycardX, z: keycardZ, width: this._choose([15, 17]), depth: 13 },
+      // The keycard chamber is deliberately oversized so the pyramid is the
+      // room, rather than a small prop competing with unrelated scaffolding.
+      { id: 'keycardRoom', type: 'keycard', x: keycardX, z: keycardZ, width: 23, depth: 21 },
       { id: 'trapRoom', type: 'trap', x: trapX, z: trapZ, width: 17, depth: this._choose([15, 17]) },
       { id: 'conveyorRoom', type: 'conveyor', x: conveyorX, z: conveyorZ, width: 21, depth: 17 },
       { id: 'bossRoom', type: 'boss', x: bossX, z: bossZ, width: 21, depth: 19 },
@@ -443,7 +557,10 @@ export class DungeonGenerator {
     const bonusVault = {
       id: 'bonusVault',
       type: 'bonus',
-      x: conveyorX + bonusSide * this._randomInt(15, 19),
+      // Keep a real corridor gap between the factory and vault footprints.
+      // The old 15-19 tile offset could overlap their floors, making the
+      // pressure-plate door trivial to walk around.
+      x: conveyorX + bonusSide * this._randomInt(22, 25),
       z: conveyorZ + this._randomInt(-4, 5),
       width: this._choose([13, 15]),
       depth: 13,
@@ -492,7 +609,11 @@ export class DungeonGenerator {
     setTile(tiles, serverRoom.x - serverSide * 2, serverRoom.z, 'chest');
     setTile(tiles, machineFactoryRoom.x - machineSide * 3, machineFactoryRoom.z + 1, 'chest');
     setTile(tiles, coolantRelayRoom.x - coolantSide * 4, coolantRelayRoom.z + 2, 'chest');
-    setTile(tiles, bonusVault.x, bonusVault.z, 'chest', { forceType: true });
+    setTile(tiles, bonusVault.x, bonusVault.z, 'floor', {
+      roomId: bonusVault.id,
+      surface: 'vaultSanctumFloor',
+      forceType: true,
+    });
 
     for (let i = 1; i < mainRooms.length; i += 1) {
       addHallway(tiles, mainRooms[i - 1], mainRooms[i]);
@@ -523,12 +644,22 @@ export class DungeonGenerator {
     const materials = this._createMaterials();
 
     for (const tile of floorTiles) {
+      if (tile.surface === 'industrialRamp') {
+        continue;
+      }
       const elevation = tile.elevation ?? 0;
+      const visualOwner = new THREE.Group();
+      visualOwner.name = 'dungeonFloorTileVisual';
+      visualOwner.userData.cameraOcclusionOwner = true;
+      visualOwner.userData.roomId = tile.roomId ?? null;
+      visualOwner.userData.connectorId = tile.connectorId ?? null;
       const mesh = this._createFloorTileMesh(tile, materials);
       mesh.name = `dungeonTile_${tile.type}_level${tile.level ?? 0}`;
+      mesh.userData.cameraOcclusionSurface = true;
       mesh.userData.floorTile = {
         x: tile.x,
         z: tile.z,
+        roomId: tile.roomId ?? null,
         level: tile.level ?? 0,
         elevation,
         surface: tile.surface ?? tile.type,
@@ -540,15 +671,22 @@ export class DungeonGenerator {
         connectorId: tile.connectorId,
         connectorZone: tile.connectorZone,
         platformGroupId: tile.platformGroupId,
+        supportStyle: tile.supportStyle,
+        massGroupId: tile.massGroupId,
         isPlatformingSurface: Boolean(tile.isPlatformingSurface),
         isLedgeSurface: Boolean(tile.isLedgeSurface),
         platformPurpose: tile.platformPurpose,
         requiredTraversalAction: tile.requiredTraversalAction,
+        ledgeEdges: tile.ledgeEdges ?? null,
+        allowsGroundedDropLanding: Boolean(tile.allowsGroundedDropLanding),
+        dropSpaceId: tile.dropSpaceId ?? null,
+        preserveProgressionFooting: Boolean(tile.preserveProgressionFooting),
       };
       mesh.receiveShadow = true;
-      group.add(mesh);
+      visualOwner.add(mesh);
 
-      this._addTileDetail(group, tile, materials);
+      this._addTileDetail(visualOwner, tile, materials);
+      group.add(visualOwner);
     }
     this._addSolidTraversalVolumes(group, floorTiles, rooms, materials);
 
@@ -576,12 +714,12 @@ export class DungeonGenerator {
     const verticalPortals = this._addVerticalConnectionPortals(group, connectionPlans, materials);
     const landmarks = this._addRoomLandmarks(group, rooms, materials, tiles, floorTiles, solidZones);
     landmarks.platforms.push(...this._createGeneratedPlatformSurfaces(floorTiles));
-    const encounters = this._createEncounterDefinitions(rooms, floorTiles);
+    const encounters = this._createEncounterDefinitions(rooms, floorTiles, solidZones);
     const trapVisualsByRoom = new Map(landmarks.trapVisuals.map((entry) => [entry.roomId, entry.object]));
 
     const enemySpawnPoints = rooms
       .filter((room) => !['hub', 'camp', 'entrance', 'bonus'].includes(room.type))
-      .flatMap((room) => this._roomSpawnPoints(room, floorTiles));
+      .flatMap((room) => this._roomSpawnPoints(room, floorTiles, solidZones));
     const hubRoom = rooms.find((room) => room.id === 'hubTown') ?? rooms[0];
     const campRoom = rooms.find((room) => room.id === 'expeditionCamp') ?? hubRoom;
     const entranceRoom = rooms.find((room) => room.id === 'entrance') ?? campRoom;
@@ -632,6 +770,19 @@ export class DungeonGenerator {
         ...platformabilityValidation.warnings,
       ],
     };
+    const renderCullGroups = this._createStaticRenderCullGroups(group, [
+      doors,
+      verticalPortals,
+      landmarks.keycards,
+      landmarks.keySeeker,
+      landmarks.chests,
+      landmarks.mechanisms,
+      landmarks.puzzleBlocks,
+      landmarks.pressurePlates,
+      landmarks.safeInteractables,
+      landmarks.trapVisuals,
+      landmarks.shrine,
+    ]);
 
     return {
       group,
@@ -682,7 +833,214 @@ export class DungeonGenerator {
       enemySpawnPoints,
       shrinePosition: landmarks.shrine?.position?.clone?.() ?? this._tileToWorld(shrineRoom.x, shrineRoom.z, tiles),
       boundsRadius: this._calculateBoundsRadius(tiles),
+      renderCullGroups,
     };
+  }
+
+  _createStaticRenderCullGroups(root, criticalSources = []) {
+    if (!root) {
+      return [];
+    }
+    const criticalObjects = new Set();
+    const collectCritical = (value) => {
+      if (!value) {
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach(collectCritical);
+        return;
+      }
+      if (value.isObject3D) {
+        criticalObjects.add(value);
+        return;
+      }
+      for (const key of ['object', 'group', 'root', 'leftPanel', 'rightPanel']) {
+        if (value[key]?.isObject3D) {
+          criticalObjects.add(value[key]);
+        }
+      }
+    };
+    criticalSources.forEach(collectCritical);
+    const criticalRoots = new Set();
+    for (const object of criticalObjects) {
+      let current = object;
+      while (current?.parent && current.parent !== root) {
+        current = current.parent;
+      }
+      if (current?.parent === root) {
+        criticalRoots.add(current);
+      }
+    }
+
+    root.updateMatrixWorld(true);
+    const chunkWorldSize = this.tileSize * 8;
+    const maxBucketSpan = chunkWorldSize * 1.5;
+    const maxBucketDrawObjects = 64;
+    const buckets = [];
+    const center = new THREE.Vector3();
+    let parentSequence = 0;
+
+    const isDrawObject = (object) => Boolean(
+      object?.isMesh
+      || object?.isLine
+      || object?.isPoints
+      || object?.isSprite
+    );
+    const countDrawObjects = (object) => {
+      let count = 0;
+      object.traverse((descendant) => {
+        if (isDrawObject(descendant)) {
+          count += 1;
+        }
+      });
+      return count;
+    };
+    const resolveOwnerId = (object) => {
+      for (let current = object; current && current !== root; current = current.parent) {
+        if (current.userData?.connectorId) {
+          return `connector:${current.userData.connectorId}`;
+        }
+        if (current.userData?.roomId) {
+          return `room:${current.userData.roomId}`;
+        }
+        if (current.userData?.dropSpaceId) {
+          return `drop:${current.userData.dropSpaceId}`;
+        }
+      }
+      return 'spatial';
+    };
+    const canAddToBucket = (bucket, bounds, drawObjectCount) => {
+      if (bucket.drawObjectCount + drawObjectCount > maxBucketDrawObjects) {
+        return false;
+      }
+      const combined = bucket.bounds.clone().union(bounds);
+      return combined.max.x - combined.min.x <= maxBucketSpan + 0.001
+        && combined.max.z - combined.min.z <= maxBucketSpan + 0.001;
+    };
+
+    // Keep identity cull groups under each object's existing parent. This lets
+    // large room/prefab subtrees split across chunks without flattening their
+    // coordinate space or changing any member's local transform/visibility.
+    const partitionChildren = (parent, depth = 0) => {
+      const parentId = parentSequence;
+      parentSequence += 1;
+      const candidates = [];
+
+      for (const object of [...parent.children]) {
+        if (object.userData?.renderCullGroup) {
+          continue;
+        }
+        const isRootChild = parent === root;
+        if (
+          object.userData?.alwaysRendered
+          || (isRootChild && criticalRoots.has(object))
+        ) {
+          continue;
+        }
+
+        const bounds = new THREE.Box3().setFromObject(object);
+        if (bounds.isEmpty()) {
+          continue;
+        }
+        const drawObjectCount = countDrawObjects(object);
+        if (drawObjectCount <= 0) {
+          continue;
+        }
+        const spanX = bounds.max.x - bounds.min.x;
+        const spanZ = bounds.max.z - bounds.min.z;
+        const canPartitionSubtree = !isDrawObject(object) && object.children.length > 0;
+        if (
+          canPartitionSubtree
+          && (
+            spanX > chunkWorldSize
+            || spanZ > chunkWorldSize
+            || drawObjectCount > maxBucketDrawObjects
+          )
+        ) {
+          partitionChildren(object, depth + 1);
+          continue;
+        }
+
+        bounds.getCenter(center);
+        candidates.push({
+          object,
+          bounds,
+          drawObjectCount,
+          ownerId: resolveOwnerId(object),
+          chunkX: Math.floor(center.x / chunkWorldSize),
+          chunkZ: Math.floor(center.z / chunkWorldSize),
+          span: Math.max(spanX, spanZ),
+        });
+      }
+
+      const shardsByKey = new Map();
+      for (const candidate of candidates) {
+        const baseKey = `${candidate.ownerId}:${candidate.chunkX}:${candidate.chunkZ}`;
+        const shards = shardsByKey.get(baseKey) ?? [];
+        let bucket = shards.find((entry) => canAddToBucket(
+          entry,
+          candidate.bounds,
+          candidate.drawObjectCount,
+        ));
+        if (!bucket) {
+          const shardIndex = shards.length;
+          const id = `${baseKey}:p${parentId}:s${shardIndex}`;
+          const bucketGroup = new THREE.Group();
+          bucketGroup.name = 'dungeonStaticRenderCullGroup';
+          bucketGroup.userData.renderCullGroup = true;
+          bucketGroup.userData.renderCullGroupId = id;
+          bucketGroup.userData.ownerId = candidate.ownerId;
+          parent.add(bucketGroup);
+          bucket = {
+            id,
+            ownerId: candidate.ownerId,
+            chunkX: candidate.chunkX,
+            chunkZ: candidate.chunkZ,
+            group: bucketGroup,
+            bounds: new THREE.Box3(),
+            memberCount: 0,
+            drawObjectCount: 0,
+            maxMemberSpan: 0,
+            hierarchyDepth: depth,
+            parentName: parent.name || parent.type || 'Object3D',
+          };
+          shards.push(bucket);
+          shardsByKey.set(baseKey, shards);
+          buckets.push(bucket);
+        }
+        bucket.bounds.union(candidate.bounds);
+        bucket.memberCount += 1;
+        bucket.drawObjectCount += candidate.drawObjectCount;
+        bucket.maxMemberSpan = Math.max(bucket.maxMemberSpan, candidate.span);
+        bucket.group.add(candidate.object);
+      }
+    };
+
+    partitionChildren(root);
+    root.updateMatrixWorld(true);
+
+    return buckets.map((bucket) => ({
+      id: bucket.id,
+      ownerId: bucket.ownerId,
+      chunkX: bucket.chunkX,
+      chunkZ: bucket.chunkZ,
+      group: bucket.group,
+      minX: bucket.bounds.min.x,
+      maxX: bucket.bounds.max.x,
+      minZ: bucket.bounds.min.z,
+      maxZ: bucket.bounds.max.z,
+      // objectCount remains as a compatibility alias, but now reflects actual
+      // descendant draw objects rather than only immediate scene roots.
+      objectCount: bucket.drawObjectCount,
+      drawObjectCount: bucket.drawObjectCount,
+      memberCount: bucket.memberCount,
+      maxMemberSpan: bucket.maxMemberSpan,
+      hierarchyDepth: bucket.hierarchyDepth,
+      parentName: bucket.parentName,
+      chunkWorldSize,
+      maxBucketSpan,
+      maxBucketDrawObjects,
+    }));
   }
 
   _assignRoomArchetypes(rooms) {
@@ -943,7 +1301,11 @@ export class DungeonGenerator {
         }
         const perpendicularX = -directionZ;
         const perpendicularZ = directionX;
-        const isDoorPinch = Boolean(plan.doorId) && Math.abs(index - midpoint) <= 2;
+        const isDoorPinch = Boolean(plan.doorId) && (
+          Math.abs(index - midpoint) <= 2
+          || index <= 3
+          || index >= path.length - 4
+        );
         const sideWidth = isDoorPinch ? 0 : galleryCenters.has(index) ? 2 : 1;
 
         const centerTile = tiles.get(tileKey(point.x, point.z));
@@ -1722,7 +2084,42 @@ export class DungeonGenerator {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const extraTiles = [];
     const seen = new Set();
+    let rampRouteSequence = 0;
     const progressionAccessTileKeys = this._createProgressionAccessTileKeys(tiles, rooms);
+    const structuralVoidTileKeys = new Set(progressionAccessTileKeys);
+    const fullHeightDoorVoidTileKeys = new Set();
+    const reserveStructuralVoid = (x, z, radius = 1) => {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        for (let dz = -radius; dz <= radius; dz += 1) {
+          if (Math.abs(dx) + Math.abs(dz) <= radius && tiles.has(tileKey(x + dx, z + dz))) {
+            structuralVoidTileKeys.add(tileKey(x + dx, z + dz));
+          }
+        }
+      }
+    };
+    for (const connection of connectionPlans.filter((plan) => plan.level === 0)) {
+      for (const point of connection.fullPath ?? []) {
+        reserveStructuralVoid(point.x, point.z);
+      }
+    }
+    for (const connection of connectionPlans.filter((plan) => plan.level === 0 && plan.doorId)) {
+      const fromRoom = roomById.get(connection.fromRoomId);
+      const toRoom = roomById.get(connection.toRoomId);
+      const { point, alongX } = resolveConnectionDoorPlacement(connection, fromRoom, toRoom);
+      if (!point) {
+        continue;
+      }
+      const clearanceOffsets = alongX
+        ? [[0, -1], [0, 0], [0, 1]]
+        : [[-1, 0], [0, 0], [1, 0]];
+      for (const [dx, dz] of clearanceOffsets) {
+        const key = tileKey(point.x + dx, point.z + dz);
+        if (tiles.has(key)) {
+          fullHeightDoorVoidTileKeys.add(key);
+          structuralVoidTileKeys.add(key);
+        }
+      }
+    }
     const coolantFixtureTileKeys = this._createCoolantFixtureTileKeys(tiles, rooms);
     const pushExtra = (x, z, options = {}) => {
       if (!ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS && (options.elevation ?? 0) > 0.05) {
@@ -1762,7 +2159,8 @@ export class DungeonGenerator {
       }
       const columnKey = tileKey(x, z);
       if (
-        (progressionAccessTileKeys.has(columnKey) || coolantFixtureTileKeys.has(columnKey))
+        !options.allowProgressionAccess
+        && (progressionAccessTileKeys.has(columnKey) || coolantFixtureTileKeys.has(columnKey))
         && wouldObstructProgressionAccess(options)
       ) {
         return tile;
@@ -1782,6 +2180,8 @@ export class DungeonGenerator {
       ring = false,
       conveyorAxis = null,
       conveyorSpeed = 1.4,
+      supportStyle = null,
+      massGroupId = null,
     }) => {
       if (!room) {
         return;
@@ -1798,6 +2198,14 @@ export class DungeonGenerator {
 
           const dx = conveyorAxis === 'x' ? Math.sign((room.x - x) || 1) : 0;
           const dz = conveyorAxis === 'z' ? Math.sign((room.z - z) || 1) : 0;
+          const baseTile = tiles.get(tileKey(x, z));
+          if (supportStyle === 'solid_mass' && fullHeightDoorVoidTileKeys.has(tileKey(x, z))) {
+            continue;
+          }
+          const keepUnderpassOpen = supportStyle === 'solid_mass' && (
+            structuralVoidTileKeys.has(tileKey(x, z))
+            || ['hallway', 'entrance'].includes(baseTile?.type)
+          );
           pushExtra(x, z, {
             type,
             elevation,
@@ -1807,6 +2215,8 @@ export class DungeonGenerator {
             directionX: dx,
             directionZ: dz,
             speed: conveyorSpeed,
+            supportStyle: keepUnderpassOpen ? 'open_underpass' : supportStyle,
+            massGroupId,
           });
         }
       }
@@ -1819,6 +2229,8 @@ export class DungeonGenerator {
       maxX,
       minZ,
       maxZ,
+      supportStyle = null,
+      massGroupId = null,
     }) => {
       if (!room) {
         return;
@@ -1831,6 +2243,8 @@ export class DungeonGenerator {
             level,
             surface,
             roomId: room.id,
+            supportStyle,
+            massGroupId,
           });
         }
       }
@@ -1969,27 +2383,70 @@ export class DungeonGenerator {
       const useBaseFloor = fromLevel === 0 || toLevel === 0;
       const span = rampPoints.length - 1;
       const risePerTile = Math.abs(toElevation - fromElevation) / span;
+      const rampRouteId = `rampRoute_${room?.id ?? 'unowned'}_${rampRouteSequence += 1}`;
+      const stepDirection = (from, to) => ({
+        x: Math.sign((to?.x ?? from.x) - from.x),
+        z: Math.sign((to?.z ?? from.z) - from.z),
+      });
+      const isTurnIndex = (index) => {
+        if (index <= 0 || index >= rampPoints.length - 1) {
+          return false;
+        }
+        const incoming = stepDirection(rampPoints[index - 1], rampPoints[index]);
+        const outgoing = stepDirection(rampPoints[index], rampPoints[index + 1]);
+        return incoming.x !== outgoing.x || incoming.z !== outgoing.z;
+      };
+      let straightRunIndex = 0;
 
       for (let i = 0; i < rampPoints.length; i += 1) {
         const point = rampPoints[i];
-        const previous = rampPoints[i - 1] ?? point;
-        const next = rampPoints[i + 1] ?? point;
-        const directionX = Math.sign((next.x - point.x) || (point.x - previous.x));
-        const directionZ = Math.sign((next.z - point.z) || (point.z - previous.z));
         const t = i / span;
+        const elevation = THREE.MathUtils.lerp(fromElevation, toElevation, t);
+        const level = Math.round((fromLevel + (toLevel - fromLevel) * t) * 100) / 100;
+
+        if (isTurnIndex(i)) {
+          const landingOptions = {
+            type: 'floor',
+            elevation,
+            level,
+            surface: 'rampLanding',
+            roomId: room?.id,
+            rampRouteId,
+          };
+          const landing = useBaseFloor
+            ? markBase(point.x, point.z, landingOptions)
+            : pushExtra(point.x, point.z, landingOptions);
+          if (landing?.surface === 'rampLanding') {
+            delete landing.rampStartElevation;
+            delete landing.rampEndElevation;
+            delete landing.rampDirectionX;
+            delete landing.rampDirectionZ;
+            delete landing.rampRunId;
+            delete landing.steepRamp;
+          }
+          straightRunIndex += 1;
+          continue;
+        }
+
+        const previous = rampPoints[i - 1] ?? null;
+        const next = rampPoints[i + 1] ?? null;
+        const direction = next
+          ? stepDirection(point, next)
+          : stepDirection(previous, point);
         const startT = Math.max(0, (i - 0.5) / span);
         const endT = Math.min(1, (i + 0.5) / span);
-        const elevation = THREE.MathUtils.lerp(fromElevation, toElevation, t);
         const options = {
           type: 'floor',
           elevation,
-          level: Math.round((fromLevel + (toLevel - fromLevel) * t) * 100) / 100,
+          level,
           surface: 'industrialRamp',
           roomId: room?.id,
           rampStartElevation: THREE.MathUtils.lerp(fromElevation, toElevation, startT),
           rampEndElevation: THREE.MathUtils.lerp(fromElevation, toElevation, endT),
-          rampDirectionX: directionX,
-          rampDirectionZ: directionZ,
+          rampDirectionX: direction.x,
+          rampDirectionZ: direction.z,
+          rampRouteId,
+          rampRunId: `${rampRouteId}_run_${straightRunIndex + 1}`,
         };
         const tile = useBaseFloor
           ? markBase(point.x, point.z, options)
@@ -2002,6 +2459,242 @@ export class DungeonGenerator {
 
       addRampLandingPath(room, rampPoints[0], fromElevation, fromLevel);
       addRampLandingPath(room, rampPoints[rampPoints.length - 1], toElevation, toLevel);
+    };
+    const addMinorDropSpace = (room, {
+      id,
+      width = 9,
+      depth = 9,
+      purpose = 'optional_lower_exploration_space',
+    } = {}) => {
+      if (!room || !id) {
+        return null;
+      }
+
+      const roomHalfW = Math.floor(room.width / 2);
+      const roomHalfD = Math.floor(room.depth / 2);
+      const halfW = Math.floor(width / 2);
+      const halfD = Math.floor(depth / 2);
+      const minCenterX = room.x - roomHalfW + halfW + 2;
+      const maxCenterX = room.x + roomHalfW - halfW - 2;
+      const minCenterZ = room.z - roomHalfD + halfD + 2;
+      const maxCenterZ = room.z + roomHalfD - halfD - 2;
+      const directions = [
+        { dx: 1, dz: 0, ledgeEdge: 'left' },
+        { dx: -1, dz: 0, ledgeEdge: 'right' },
+        { dx: 0, dz: 1, ledgeEdge: 'front' },
+        { dx: 0, dz: -1, ledgeEdge: 'back' },
+      ];
+      const candidates = [];
+
+      for (let centerX = minCenterX; centerX <= maxCenterX; centerX += 1) {
+        for (let centerZ = minCenterZ; centerZ <= maxCenterZ; centerZ += 1) {
+          const bounds = {
+            minX: centerX - halfW,
+            maxX: centerX + halfW,
+            minZ: centerZ - halfD,
+            maxZ: centerZ + halfD,
+          };
+          if (
+            room.x < bounds.minX
+            || room.x > bounds.maxX
+            || room.z < bounds.minZ
+            || room.z > bounds.maxZ
+          ) {
+            continue;
+          }
+
+          for (const direction of directions) {
+            const alongOffsets = [-1, 0];
+            const returnShelfPoints = alongOffsets.map((offset) => ({
+              x: direction.dx
+                ? (direction.dx > 0 ? bounds.maxX : bounds.minX)
+                : centerX + offset,
+              z: direction.dz
+                ? (direction.dz > 0 ? bounds.maxZ : bounds.minZ)
+                : centerZ + offset,
+            }));
+            const entryDirection = { dx: -direction.dx, dz: -direction.dz };
+            const entryFloorPoints = alongOffsets.map((offset) => ({
+              x: entryDirection.dx
+                ? (entryDirection.dx > 0 ? bounds.maxX : bounds.minX)
+                : centerX + offset,
+              z: entryDirection.dz
+                ? (entryDirection.dz > 0 ? bounds.maxZ : bounds.minZ)
+                : centerZ + offset,
+            }));
+            const entryLipPoints = entryFloorPoints.map((point) => ({
+              x: point.x + entryDirection.dx,
+              z: point.z + entryDirection.dz,
+            }));
+            const exitRimPoints = returnShelfPoints.map((point) => ({
+              x: point.x + direction.dx,
+              z: point.z + direction.dz,
+            }));
+            const criticalPoints = [
+              ...returnShelfPoints,
+              ...entryFloorPoints,
+              ...entryLipPoints,
+              ...exitRimPoints,
+            ];
+            if (criticalPoints.some((point) => !tiles.has(tileKey(point.x, point.z)))) {
+              continue;
+            }
+
+            let reservedCount = 0;
+            for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+              for (let z = bounds.minZ; z <= bounds.maxZ; z += 1) {
+                const baseTile = tiles.get(tileKey(x, z));
+                if (
+                  progressionAccessTileKeys.has(tileKey(x, z))
+                  || ['hallway', 'entrance'].includes(baseTile?.type)
+                ) {
+                  reservedCount += 1;
+                }
+              }
+            }
+            const criticalReserved = criticalPoints.filter((point) => (
+              progressionAccessTileKeys.has(tileKey(point.x, point.z))
+            )).length;
+            candidates.push({
+              bounds,
+              direction,
+              entryDirection,
+              entryFloorPoints,
+              entryLipPoints,
+              returnShelfPoints,
+              exitRimPoints,
+              score: criticalReserved * 1000
+                + reservedCount * 20
+                + Math.abs(centerX - room.x)
+                + Math.abs(centerZ - room.z),
+            });
+          }
+        }
+      }
+
+      const selected = candidates.sort((a, b) => a.score - b.score)[0];
+      if (!selected) {
+        return null;
+      }
+
+      const lowerElevation = RUIN_MINOR_DROP_ELEVATION;
+      const lowerFloorKeys = [];
+      const bridgeFloorKeys = [];
+      for (let x = selected.bounds.minX; x <= selected.bounds.maxX; x += 1) {
+        for (let z = selected.bounds.minZ; z <= selected.bounds.maxZ; z += 1) {
+          const baseTile = tiles.get(tileKey(x, z));
+          const preserveGroundBridge = progressionAccessTileKeys.has(tileKey(x, z))
+            || ['hallway', 'entrance'].includes(baseTile?.type);
+          const lowered = preserveGroundBridge
+            ? applyTileOptions(baseTile, {
+                level: -1,
+                elevation: lowerElevation,
+                surface: 'basementFloor',
+                roomId: room.id,
+                dropSpaceId: id,
+              })
+            : markBase(x, z, {
+            level: -1,
+            elevation: lowerElevation,
+            surface: 'basementFloor',
+            roomId: room.id,
+            dropSpaceId: id,
+              });
+          if (lowered && Math.abs((lowered.elevation ?? 0) - lowerElevation) <= 0.05) {
+            lowerFloorKeys.push(this._getFloorTileGraphKey(lowered));
+          }
+          if (preserveGroundBridge) {
+            const bridge = pushExtra(x, z, {
+              type: 'floor',
+              elevation: 0,
+              level: 0,
+              surface: 'dropSpaceOverpass',
+              roomId: room.id,
+              dropSpaceId: id,
+              preserveProgressionFooting: true,
+              allowProgressionAccess: true,
+            });
+            if (bridge) {
+              bridgeFloorKeys.push(this._getFloorTileGraphKey(bridge));
+            }
+          }
+        }
+      }
+
+      const entryFloorKeys = [];
+      for (const point of selected.entryFloorPoints) {
+        const tile = tiles.get(tileKey(point.x, point.z));
+        if (!tile || Math.abs((tile.elevation ?? 0) - lowerElevation) > 0.05) {
+          continue;
+        }
+        tile.allowsGroundedDropLanding = true;
+        tile.dropSpaceId = id;
+        const edgeKey = `${selected.entryDirection.dx},${selected.entryDirection.dz}`;
+        tile.openRetainingWallEdges = [...new Set([...(tile.openRetainingWallEdges ?? []), edgeKey])];
+        entryFloorKeys.push(this._getFloorTileGraphKey(tile));
+      }
+
+      const returnShelfFloorKeys = [];
+      const returnShelfColumnKeys = new Set();
+      for (const point of selected.returnShelfPoints) {
+        const lowerTile = tiles.get(tileKey(point.x, point.z));
+        if (lowerTile) {
+          const outwardEdge = `${selected.direction.dx},${selected.direction.dz}`;
+          lowerTile.blockedBySolidLedgeSupport = true;
+          lowerTile.openRetainingWallEdges = [
+            ...new Set([...(lowerTile.openRetainingWallEdges ?? []), outwardEdge]),
+          ];
+        }
+        const shelf = pushExtra(point.x, point.z, {
+          type: 'floor',
+          elevation: RUIN_MINOR_DROP_SHELF_ELEVATION,
+          level: -0.5,
+          surface: 'basementReturnShelf',
+          roomId: room.id,
+          isLedgeSurface: true,
+          ledgeEdges: [selected.direction.ledgeEdge],
+          platformPurpose: `${id}_return_climb_shelf`,
+          requiredTraversalAction: 'ledge_climb',
+          dropSpaceId: id,
+          supportBaseElevation: lowerElevation,
+          allowProgressionAccess: true,
+        });
+        if (shelf) {
+          returnShelfColumnKeys.add(tileKey(point.x, point.z));
+          returnShelfFloorKeys.push(this._getFloorTileGraphKey(shelf));
+        }
+      }
+
+      // These two columns are occupied by solid ledge plinths. They remain
+      // visually floored beneath the mass, but are deliberately excluded from
+      // the walkable lower-floor contract so the player can never stand inside
+      // or jump through a floating shelf.
+      for (let index = lowerFloorKeys.length - 1; index >= 0; index -= 1) {
+        const [coordinates] = lowerFloorKeys[index].split('@');
+        if (returnShelfColumnKeys.has(coordinates)) {
+          lowerFloorKeys.splice(index, 1);
+        }
+      }
+
+      const dropSpace = {
+        id,
+        roomId: room.id,
+        purpose,
+        lowerBounds: { ...selected.bounds },
+        lowerElevation,
+        shelfElevation: RUIN_MINOR_DROP_SHELF_ELEVATION,
+        entryFloorKeys,
+        entryLipFloorKeys: selected.entryLipPoints.map((point) => floorTileKey(point.x, point.z, 0)),
+        lowerFloorKeys,
+        bridgeFloorKeys,
+        returnShelfFloorKeys,
+        exitFloorKeys: selected.exitRimPoints.map((point) => floorTileKey(point.x, point.z, 0)),
+        requiredActions: ['drop', 'ledge_climb', 'jump'],
+        returnDirectionX: selected.direction.dx,
+        returnDirectionZ: selected.direction.dz,
+      };
+      room.dropSpace = dropSpace;
+      return dropSpace;
     };
     const getAllFloorTiles = () => [...tiles.values(), ...extraTiles];
     const isScaffoldAccessTile = (tile) => (
@@ -2117,6 +2810,11 @@ export class DungeonGenerator {
       const rampLength = Math.max(2, Math.ceil(Math.abs(targetElevation) / RUIN_RAMP_MAX_STEP));
       const allTiles = getAllFloorTiles();
       const room = getRoomForTile(chainTile);
+      if (room?.id === 'alienServerRoom') {
+        // This room has one authored outer-wall ramp. Automatic straight-line
+        // repairs through its center would intersect the monolith field.
+        return null;
+      }
       if (coolantFixtureTileKeys.has(tileKey(chainTile.x, chainTile.z))) {
         return null;
       }
@@ -2450,6 +3148,8 @@ export class DungeonGenerator {
         maxX: enemyRoom.x + halfW,
         minZ: enemyRoom.z + halfD - 2,
         maxZ: enemyRoom.z + halfD,
+        supportStyle: 'solid_mass',
+        massGroupId: `${enemyRoom.id}_rearStructuralMass`,
       });
       addRampRun(enemyRoom, [
         { x: enemyRoom.x - halfW + 1, z: enemyRoom.z - halfD + 1 },
@@ -2488,9 +3188,11 @@ export class DungeonGenerator {
         minZ: serverRoom.z - halfD + 2,
         maxZ: serverRoom.z + halfD - 2,
       });
+      const outerRampSide = (serverRoom.prefabYaw ?? 0) > 0 ? -1 : 1;
+      const outerRampX = serverRoom.x + outerRampSide * (halfW - 1);
       addRampRun(serverRoom, [
-        { x: serverRoom.x + halfW - 1, z: serverRoom.z + halfD - 1 },
-        { x: serverRoom.x + halfW - 1, z: serverRoom.z - halfD + 3 },
+        { x: outerRampX, z: serverRoom.z + halfD - 1 },
+        { x: outerRampX, z: serverRoom.z - halfD + 2 },
       ], 0, RUIN_SECOND_FLOOR_ELEVATION, 0, 1);
     }
 
@@ -2498,96 +3200,91 @@ export class DungeonGenerator {
     if (keycardRoom) {
       const halfW = Math.floor(keycardRoom.width / 2);
       const halfD = Math.floor(keycardRoom.depth / 2);
-      addDeck(keycardRoom, {
-        level: 1,
-        elevation: RUIN_SECOND_FLOOR_ELEVATION,
-        surface: 'secondFloor',
-        minX: keycardRoom.x - 2,
-        maxX: keycardRoom.x + 3,
-        minZ: keycardRoom.z + halfD - 4,
-        maxZ: keycardRoom.z + halfD,
-      });
-      addRampRun(keycardRoom, [
-        { x: keycardRoom.x - halfW + 1, z: keycardRoom.z - halfD + 1 },
-        { x: keycardRoom.x - halfW + 1, z: keycardRoom.z + halfD - 4 },
-        { x: keycardRoom.x - 2, z: keycardRoom.z + halfD - 4 },
-      ], 0, RUIN_SECOND_FLOOR_ELEVATION, 0, 1);
+      const baseHalfExtent = Math.min(8, halfW - 3, halfD - 2);
+      const stepRise = 0.5;
+      const terraceCount = baseHalfExtent;
+      const summitElevation = terraceCount * stepRise;
+      const center = { x: keycardRoom.x, z: keycardRoom.z };
+      const pyramidGroupId = `${keycardRoom.id}_grandMechanicalPyramid`;
 
-      const pyramidCenters = [
-        { x: keycardRoom.x + halfW - 3, z: keycardRoom.z },
-        { x: keycardRoom.x - halfW + 3, z: keycardRoom.z },
-        { x: keycardRoom.x, z: keycardRoom.z + halfD - 3 },
-        { x: keycardRoom.x, z: keycardRoom.z - halfD + 3 },
-      ];
-      const pyramidCenter = pyramidCenters.find((center) => {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          for (let dz = -1; dz <= 1; dz += 1) {
-            const x = center.x + dx;
-            const z = center.z + dz;
-            if (!tiles.has(tileKey(x, z)) || progressionAccessTileKeys.has(tileKey(x, z))) {
-              return false;
-            }
-          }
-        }
-        return true;
-      });
+      keycardRoom.mechanicalPyramidCenter = {
+        ...center,
+        elevation: summitElevation,
+        baseHalfExtent,
+        stepRise,
+        terraceCount,
+        summitHalfExtent: 1,
+        platformGroupId: pyramidGroupId,
+      };
 
-      if (pyramidCenter) {
-        const platformGroupId = `${keycardRoom.id}_mechanicalPyramidTerrace`;
-        const apexPlatformGroupId = `${keycardRoom.id}_mechanicalPyramidApex`;
-        keycardRoom.mechanicalPyramidCenter = {
-          ...pyramidCenter,
-          elevation: RUIN_JUMP_PLATFORM_ELEVATION * 2,
-          platformGroupId,
-          apexPlatformGroupId,
-        };
-        for (let dx = -1; dx <= 1; dx += 1) {
-          for (let dz = -1; dz <= 1; dz += 1) {
-            pushExtra(pyramidCenter.x + dx, pyramidCenter.z + dz, {
-              type: 'floor',
-              elevation: RUIN_JUMP_PLATFORM_ELEVATION,
-              level: 0.5,
-              surface: 'mechanicalPyramidSummit',
-              roomId: keycardRoom.id,
-              isPlatformingSurface: true,
-              platformGroupId,
-              platformPurpose: 'required_keycard_pyramid_processional_terrace',
-              requiredTraversalAction: 'jump',
-            });
-          }
+      // A 17x17 stepped solid dominates the room. Each adjacent terrace rises
+      // only 0.5m, so the processional face is genuinely walkable instead of
+      // being a decorative mesh with a disconnected collision cap.
+      for (let dx = -baseHalfExtent; dx <= baseHalfExtent; dx += 1) {
+        for (let dz = -baseHalfExtent; dz <= baseHalfExtent; dz += 1) {
+          const inset = Math.min(baseHalfExtent - Math.abs(dx), baseHalfExtent - Math.abs(dz));
+          const terraceIndex = Math.min(terraceCount - 1, inset);
+          const elevation = (terraceIndex + 1) * stepRise;
+          const onSummit = Math.abs(dx) <= 1 && Math.abs(dz) <= 1;
+          const onProcessionalStair = Math.abs(dx) <= 1 && dz <= -1;
+          markBase(center.x + dx, center.z + dz, {
+            type: 'floor',
+            elevation,
+            level: Math.round((elevation / RUIN_SECOND_FLOOR_ELEVATION) * 100) / 100,
+            surface: onSummit
+              ? 'mechanicalPyramidSummit'
+              : onProcessionalStair
+                ? 'mechanicalPyramidProcessionalStep'
+                : 'mechanicalPyramidTerrace',
+            roomId: keycardRoom.id,
+            supportStyle: 'solid_mass',
+            massGroupId: `${pyramidGroupId}_terrace_${terraceIndex + 1}`,
+            platformPurpose: onSummit
+              ? 'keycard_pyramid_summit'
+              : onProcessionalStair
+                ? 'enemy_lined_processional_stair'
+                : 'walkable_mayan_terrace',
+            requiredTraversalAction: 'step',
+            allowProgressionAccess: true,
+          });
         }
-        pushExtra(pyramidCenter.x, pyramidCenter.z, {
-          type: 'floor',
-          elevation: RUIN_JUMP_PLATFORM_ELEVATION * 2,
-          level: 0.75,
-          surface: 'mechanicalPyramidApex',
-          roomId: keycardRoom.id,
-          isPlatformingSurface: true,
-          platformGroupId: apexPlatformGroupId,
-          platformPurpose: 'required_keycard_pyramid_apex',
-          requiredTraversalAction: 'jump',
-        });
+      }
+
+      // Faster optional side routes use chunky blocks with jump-height rises.
+      // They deliberately flank, rather than replace, the central stair climb.
+      for (const sign of [-1, 1]) {
+        const sideRoute = [
+          { x: center.x + sign * (baseHalfExtent + 1), z: center.z + 2, elevation: RUIN_JUMP_PLATFORM_ELEVATION },
+          { x: center.x + sign * baseHalfExtent, z: center.z + 1, elevation: RUIN_JUMP_PLATFORM_ELEVATION * 2 },
+          { x: center.x + sign * (baseHalfExtent - 1), z: center.z, elevation: summitElevation },
+        ];
+        for (const [index, point] of sideRoute.entries()) {
+          markBase(point.x, point.z, {
+            type: 'floor',
+            elevation: point.elevation,
+            level: 0.5 + index * 0.25,
+            surface: 'mechanicalPyramidSidePlatform',
+            roomId: keycardRoom.id,
+            isPlatformingSurface: true,
+            platformGroupId: `${pyramidGroupId}_side_${sign}_${index + 1}`,
+            supportStyle: 'solid_mass',
+            massGroupId: `${pyramidGroupId}_side_${sign}_${index + 1}`,
+            platformPurpose: 'optional_side_platforming_ascent',
+            requiredTraversalAction: 'jump',
+            allowProgressionAccess: true,
+          });
+        }
       }
     }
 
     const trapRoom = roomById.get('trapRoom');
     if (trapRoom) {
-      const halfW = Math.floor(trapRoom.width / 2);
-      const halfD = Math.floor(trapRoom.depth / 2);
-      markBaseRect(trapRoom, {
-        level: -1,
-        elevation: RUIN_BASEMENT_ELEVATION,
-        surface: 'basementFloor',
-        minX: trapRoom.x - 2,
-        maxX: trapRoom.x + 2,
-        minZ: trapRoom.z - 2,
-        maxZ: trapRoom.z + 2,
+      addMinorDropSpace(trapRoom, {
+        id: `${trapRoom.id}_hazardDropSpace`,
+        width: 9,
+        depth: 9,
+        purpose: 'descend_to_disable_hazard_processing_and_recover_by_climb_shelf',
       });
-      addRampRun(trapRoom, [
-        { x: trapRoom.x + halfW - 1, z: trapRoom.z - halfD + 1 },
-        { x: trapRoom.x + halfW - 1, z: trapRoom.z },
-        { x: trapRoom.x + 2, z: trapRoom.z },
-      ], 0, RUIN_BASEMENT_ELEVATION, 0, -1);
     }
 
     const coolantRoom = roomById.get('coolantRelayRoom');
@@ -2650,6 +3347,8 @@ export class DungeonGenerator {
         maxX: conveyorRoom.x - halfW + 3,
         minZ: conveyorRoom.z - halfD,
         maxZ: conveyorRoom.z + halfD,
+        supportStyle: 'solid_mass',
+        massGroupId: `${conveyorRoom.id}_sideStructuralMass`,
       });
       addDeck(conveyorRoom, {
         level: 1,
@@ -2751,9 +3450,9 @@ export class DungeonGenerator {
         ring: true,
       });
       markBaseRect(shrineRoom, {
-        level: -1,
-        elevation: RUIN_BASEMENT_ELEVATION,
-        surface: 'refractorWell',
+        level: 0,
+        elevation: 0,
+        surface: 'shrineSanctumFloor',
         minX: shrineRoom.x - 2,
         maxX: shrineRoom.x + 2,
         minZ: shrineRoom.z - 2,
@@ -2767,7 +3466,14 @@ export class DungeonGenerator {
         maxX: shrineRoom.x + 2,
         minZ: shrineRoom.z - 2,
         maxZ: shrineRoom.z + 2,
+        supportStyle: 'solid_mass',
+        massGroupId: `${shrineRoom.id}_refractorSanctumMass`,
       });
+      shrineRoom.refractorFocalPoint = {
+        x: shrineRoom.x,
+        z: shrineRoom.z,
+        elevation: RUIN_THIRD_FLOOR_ELEVATION,
+      };
       addRampRun(shrineRoom, [
         { x: shrineRoom.x - halfW + 1, z: shrineRoom.z - halfD + 1 },
         { x: shrineRoom.x - halfW + 1, z: shrineRoom.z + halfD - 1 },
@@ -2781,22 +3487,22 @@ export class DungeonGenerator {
 
     const bonusRoom = roomById.get('bonusVault');
     if (bonusRoom) {
-      const halfW = Math.floor(bonusRoom.width / 2);
-      const halfD = Math.floor(bonusRoom.depth / 2);
       markBaseRect(bonusRoom, {
-        elevation: RUIN_BASEMENT_ELEVATION,
-        level: -1,
-        surface: 'basementFloor',
-        minX: bonusRoom.x - 2,
-        maxX: bonusRoom.x + 2,
-        minZ: bonusRoom.z - 2,
-        maxZ: bonusRoom.z + 2,
+        level: 0.1,
+        elevation: 0.42,
+        surface: 'vaultRewardDais',
+        minX: bonusRoom.x - 1,
+        maxX: bonusRoom.x + 1,
+        minZ: bonusRoom.z - 1,
+        maxZ: bonusRoom.z + 1,
+        supportStyle: 'solid_mass',
+        massGroupId: `${bonusRoom.id}_rewardDaisMass`,
       });
-      addRampRun(bonusRoom, [
-        { x: bonusRoom.x - halfW + 1, z: bonusRoom.z + halfD - 1 },
-        { x: bonusRoom.x + 2, z: bonusRoom.z + halfD - 1 },
-        { x: bonusRoom.x + 2, z: bonusRoom.z + 2 },
-      ], 0, RUIN_BASEMENT_ELEVATION, 0, -1);
+      bonusRoom.rewardFocalPoint = {
+        x: bonusRoom.x,
+        z: bonusRoom.z,
+        elevation: 0.42,
+      };
     }
 
     for (const connection of connectionPlans.filter((plan) => plan.level > 0)) {
@@ -2834,6 +3540,12 @@ export class DungeonGenerator {
           continue;
         }
         connectSocketToLocalTier(room, socket, connection.id);
+        if (room.id === 'alienServerRoom') {
+          // The server crypt uses one deliberate outer-wall ramp. Do not stamp
+          // a second socket-aligned slope across its monolith field. The later
+          // collision-aware owner-access pass remains the fallback validator.
+          continue;
+        }
         const rampLength = Math.ceil(connection.elevation / RUIN_RAMP_MAX_STEP);
         const perpendiculars = socket.facingX !== 0
           ? [{ x: 0, z: 1 }, { x: 0, z: -1 }]
@@ -3042,6 +3754,32 @@ export class DungeonGenerator {
     return extraTiles;
   }
 
+  _createTiledBoxGeometry(width, height, depth, tileWorldSize = this.tileSize) {
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const uv = geometry.getAttribute('uv');
+    const safeTileSize = Math.max(0.1, tileWorldSize);
+    const faceRepeats = [
+      [depth / safeTileSize, height / safeTileSize],
+      [depth / safeTileSize, height / safeTileSize],
+      [width / safeTileSize, depth / safeTileSize],
+      [width / safeTileSize, depth / safeTileSize],
+      [width / safeTileSize, height / safeTileSize],
+      [width / safeTileSize, height / safeTileSize],
+    ];
+
+    for (let face = 0; face < faceRepeats.length; face += 1) {
+      const [repeatU, repeatV] = faceRepeats[face];
+      for (let vertex = face * 4; vertex < face * 4 + 4; vertex += 1) {
+        uv.setXY(vertex, uv.getX(vertex) * repeatU, uv.getY(vertex) * repeatV);
+      }
+    }
+    uv.needsUpdate = true;
+    geometry.userData.tiledTexture = true;
+    geometry.userData.tileWorldSize = safeTileSize;
+    geometry.userData.dimensions = { width, height, depth };
+    return geometry;
+  }
+
   _createFloorTileMesh(tile, materials) {
     const material = this._getFloorMaterialForTile(tile, materials);
     const elevation = tile.elevation ?? 0;
@@ -3232,12 +3970,12 @@ export class DungeonGenerator {
     const toElevation = this._getFloorTileConnectionElevation(toTile, -directionX, -directionZ);
     const rise = toElevation - fromElevation;
 
-    if (rise > 0 && rise <= PLAYER_TRAVERSAL_ENVELOPE.maximumNormalJumpRise + 0.02) {
+    if (rise > 0 && rise <= PLAYER_TRAVERSAL_ENVELOPE.maximumNormalJumpRise) {
       return 'jump';
     }
     if (
       rise > 0
-      && rise <= PLAYER_TRAVERSAL_ENVELOPE.maximumLedgeClimbRise + 0.02
+      && rise <= PLAYER_TRAVERSAL_ENVELOPE.maximumLedgeClimbRise
       && (toTile.isPlatformingSurface || toTile.isLedgeSurface)
     ) {
       return 'ledge_climb';
@@ -3290,9 +4028,13 @@ export class DungeonGenerator {
     preferFarthest = false,
     groundedOnly = false,
   } = {}) {
-    const roomTiles = this._getRoomFloorTiles(room, floorTiles);
+    const blockingPlatforms = this._createBlockingPlatformColumnMap(floorTiles);
+    const navigableFloorTiles = floorTiles.filter((tile) => (
+      !this._isFloorTileBlockedByGeneratedPlatform(tile, blockingPlatforms)
+    ));
+    const roomTiles = this._getRoomFloorTiles(room, navigableFloorTiles);
     const startTile = this._findRoomFloorTile(room, roomTiles, []);
-    const reachable = this._createReachableFloorTileKeySet(startTile, floorTiles);
+    const reachable = this._createReachableFloorTileKeySet(startTile, navigableFloorTiles);
 
     if (!reachable.size) {
       return null;
@@ -3394,14 +4136,21 @@ export class DungeonGenerator {
 
       for (const point of this._buildOrthogonalPath(fromRoom, toRoom)) {
         const tile = tiles.get(tileKey(point.x, point.z));
-        if (tile && ['hallway', 'entrance', 'hub', 'camp'].includes(tile.type)) {
+        if (
+          tile
+          && !['keycardRoom', 'bonusVault'].includes(tile.roomId)
+          && ['hallway', 'entrance', 'hub', 'camp'].includes(tile.type)
+        ) {
           addClearance(point.x, point.z);
         }
       }
 
       const doorX = Math.round((fromRoom.x + toRoom.x) * 0.5);
       const doorZ = Math.round((fromRoom.z + toRoom.z) * 0.5);
-      addClearance(doorX, doorZ);
+      const midpointTile = tiles.get(tileKey(doorX, doorZ));
+      if (!['keycardRoom', 'bonusVault'].includes(midpointTile?.roomId)) {
+        addClearance(doorX, doorZ);
+      }
     }
 
     return accessKeys;
@@ -3423,6 +4172,12 @@ export class DungeonGenerator {
     delete tile.rampDirectionX;
     delete tile.rampDirectionZ;
     delete tile.steepRamp;
+    delete tile.supportStyle;
+    delete tile.massGroupId;
+    delete tile.isPlatformingSurface;
+    delete tile.platformGroupId;
+    delete tile.platformPurpose;
+    delete tile.requiredTraversalAction;
   }
 
   _isClearProgressionOverpass(tile = {}) {
@@ -3441,7 +4196,11 @@ export class DungeonGenerator {
 
     for (const key of progressionAccessTileKeys) {
       const tile = tiles.get(key);
-      if (tile) {
+      const hasPreservedFooting = extraTiles.some((candidate) => (
+        tileKey(candidate.x, candidate.z) === key
+        && candidate.preserveProgressionFooting
+      ));
+      if (tile && !hasPreservedFooting) {
         this._resetProgressionAccessTile(tile);
       }
     }
@@ -3449,7 +4208,11 @@ export class DungeonGenerator {
     for (let index = extraTiles.length - 1; index >= 0; index -= 1) {
       const tile = extraTiles[index];
       const isClearOverpass = this._isClearProgressionOverpass(tile);
-      if (progressionAccessTileKeys.has(tileKey(tile.x, tile.z)) && !isClearOverpass) {
+      if (
+        progressionAccessTileKeys.has(tileKey(tile.x, tile.z))
+        && !isClearOverpass
+        && !tile.preserveProgressionFooting
+      ) {
         extraTiles.splice(index, 1);
       }
     }
@@ -3662,7 +4425,11 @@ export class DungeonGenerator {
 
   _createBlockingPlatformColumnMap(floorTiles = []) {
     const blockingTops = new Map();
-    for (const tile of floorTiles.filter((candidate) => candidate.isPlatformingSurface)) {
+    for (const tile of floorTiles.filter((candidate) => (
+      candidate.isPlatformingSurface
+      || candidate.surface === 'basementReturnShelf'
+      || isSolidArchitecturalDeckTile(candidate)
+    ))) {
       const key = tileKey(tile.x, tile.z);
       blockingTops.set(key, Math.max(blockingTops.get(key) ?? -Infinity, tile.elevation ?? 0));
     }
@@ -3670,7 +4437,15 @@ export class DungeonGenerator {
   }
 
   _isFloorTileBlockedByGeneratedPlatform(tile, blockingTops = new Map()) {
-    if (!tile || tile.isPlatformingSurface) {
+    if (tile?.blockedBySolidLedgeSupport) {
+      return true;
+    }
+    if (
+      !tile
+      || tile.isPlatformingSurface
+      || tile.surface === 'basementReturnShelf'
+      || isSolidArchitecturalDeckTile(tile)
+    ) {
       return false;
     }
     const topY = blockingTops.get(tileKey(tile.x, tile.z));
@@ -3709,7 +4484,11 @@ export class DungeonGenerator {
     const checks = [];
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const startRoom = roomById.get('hubTown') ?? roomById.get('expeditionCamp') ?? rooms[0];
-    const criticalDoors = doors.filter((door) => door.requiresKeycard && !door.optional);
+    const criticalDoors = doors.filter((door) => (
+      door.closed
+      && door.locked
+      && (door.requiresKeycard || door.pressurePlateId)
+    ));
     const blockingPlatformTops = this._createBlockingPlatformColumnMap(floorTiles);
 
     for (const door of criticalDoors) {
@@ -3764,6 +4543,10 @@ export class DungeonGenerator {
     const floorTilesByColumn = this._createFloorTileLookup(floorTiles);
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const errors = [];
+    const blockingPlatforms = this._createBlockingPlatformColumnMap(floorTiles);
+    const navigableFloorTiles = floorTiles.filter((tile) => (
+      !this._isFloorTileBlockedByGeneratedPlatform(tile, blockingPlatforms)
+    ));
 
     for (const key of progressionAccessTileKeys) {
       const [xText, zText] = key.split(',');
@@ -3776,6 +4559,10 @@ export class DungeonGenerator {
         && tile.surface !== 'industrialRamp'
         && tile.surface !== 'rampLanding'
       ));
+      const hasPreservedFooting = column.some((candidate) => (
+        candidate.preserveProgressionFooting
+        && Math.abs(candidate.elevation ?? 0) <= 0.05
+      ));
       const elevatedBlocker = column.find((tile) => (
         (tile.surface === 'industrialRamp'
           || tile.surface === 'rampLanding'
@@ -3783,6 +4570,7 @@ export class DungeonGenerator {
         && !(
           this._isClearProgressionOverpass(tile)
         )
+        && !(hasPreservedFooting && tile.dropSpaceId && (tile.elevation ?? 0) < -0.05)
       ));
 
       if (!baseTile) {
@@ -3794,8 +4582,8 @@ export class DungeonGenerator {
     }
 
     const startRoom = roomById.get('hubTown') ?? roomById.get('expeditionCamp') ?? rooms[0];
-    const startTile = this._findRoomWalkabilityStartTile(startRoom, floorTiles);
-    const reachable = this._createReachableFloorTileKeySet(startTile, floorTiles);
+    const startTile = this._findRoomWalkabilityStartTile(startRoom, navigableFloorTiles);
+    const reachable = this._createReachableFloorTileKeySet(startTile, navigableFloorTiles);
     const progressionRoomIds = new Set(PROGRESSION_CONNECTIONS.flatMap(([fromRoomId, toRoomId]) => [
       fromRoomId,
       toRoomId,
@@ -3807,7 +4595,7 @@ export class DungeonGenerator {
         continue;
       }
 
-      const roomStartTile = this._findRoomWalkabilityStartTile(room, floorTiles);
+      const roomStartTile = this._findRoomWalkabilityStartTile(room, navigableFloorTiles);
       if (!roomStartTile) {
         errors.push(`Progression room ${roomId} has no walkable floor tile.`);
         continue;
@@ -3967,11 +4755,16 @@ export class DungeonGenerator {
         halfWidth: this.tileSize * 0.46,
         halfDepth: this.tileSize * 0.46,
         topY: tile.elevation ?? 0,
-        baseY: 0,
-        blocksBelow: !tile.isLedgeSurface,
+        baseY: Number.isFinite(tile.supportBaseElevation) ? tile.supportBaseElevation : 0,
+        blocksBelow: tile.surface === 'basementReturnShelf' || !tile.isLedgeSurface,
         generated: true,
         purpose: tile.platformPurpose ?? (tile.isLedgeSurface ? 'matched_elevation_portal_landing' : null),
         requiredTraversalAction: tile.requiredTraversalAction ?? (tile.isLedgeSurface ? 'ledge_climb' : null),
+        ledgeEdges: Array.isArray(tile.ledgeEdges) ? [...tile.ledgeEdges] : null,
+        dropSpaceId: tile.dropSpaceId ?? null,
+        minimumHangRootY: Number.isFinite(tile.supportBaseElevation)
+          ? tile.supportBaseElevation
+          : null,
       }));
     const groupedTiles = new Map();
     for (const tile of floorTiles.filter((candidate) => candidate.isPlatformingSurface && candidate.platformGroupId)) {
@@ -4012,6 +4805,41 @@ export class DungeonGenerator {
         requiredTraversalAction: representative.requiredTraversalAction ?? 'jump',
       });
     }
+    for (const assembly of this._createSolidArchitecturalDeckAssemblies(floorTiles)) {
+      for (const [segmentIndex, rectangle] of assembly.rectangles.entries()) {
+        const representative = assembly.solidTiles.find((tile) => (
+          tile.x >= rectangle.minX
+          && tile.x <= rectangle.maxX
+          && tile.z >= rectangle.minZ
+          && tile.z <= rectangle.maxZ
+        ));
+        if (!representative) {
+          continue;
+        }
+        surfaces.push({
+          id: `generatedArchitecturalMass_${assembly.id}_${segmentIndex + 1}`,
+          roomId: assembly.roomId,
+          floorKey: this._getFloorTileGraphKey(representative),
+          center: new THREE.Vector3(
+            (rectangle.minX + rectangle.maxX) * this.tileSize * 0.5,
+            assembly.elevation,
+            (rectangle.minZ + rectangle.maxZ) * this.tileSize * 0.5,
+          ),
+          halfWidth: (rectangle.maxX - rectangle.minX + 1) * this.tileSize * 0.492,
+          halfDepth: (rectangle.maxZ - rectangle.minZ + 1) * this.tileSize * 0.492,
+          topY: assembly.elevation,
+          baseY: 0,
+          blocksBelow: true,
+          generated: true,
+          solidVolume: true,
+          architecturalMass: true,
+          createsLedgeCandidates: false,
+          massGroupId: assembly.id,
+          purpose: 'solid_architectural_deck_support',
+          requiredTraversalAction: 'architectural_access',
+        });
+      }
+    }
     return surfaces;
   }
 
@@ -4035,6 +4863,7 @@ export class DungeonGenerator {
     const incomingActions = new Map();
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const localSocketChecks = [];
+    const dropSpaceChecks = [];
     const startRoom = rooms.find((room) => room.id === 'hubTown') ?? rooms[0];
     const startTile = this._findRoomWalkabilityStartTile(startRoom, navigableTiles);
     const reachable = new Set();
@@ -4144,14 +4973,22 @@ export class DungeonGenerator {
         errors.push(`${room.id} platform segment does not require a real jump or ledge action.`);
       }
       if (room.type === 'keycard') {
-        const pyramidSummitTiles = this._getRoomFloorTiles(room, navigableTiles)
+        const pyramidTiles = this._getRoomFloorTiles(room, navigableTiles);
+        const pyramidSummitTiles = pyramidTiles
           .filter((tile) => tile.surface === 'mechanicalPyramidSummit');
-        const pyramidApexTiles = this._getRoomFloorTiles(room, navigableTiles)
-          .filter((tile) => tile.surface === 'mechanicalPyramidApex');
+        const processionalSteps = pyramidTiles
+          .filter((tile) => tile.surface === 'mechanicalPyramidProcessionalStep');
+        const terraces = pyramidTiles
+          .filter((tile) => tile.surface === 'mechanicalPyramidTerrace');
+        const sidePlatforms = pyramidTiles
+          .filter((tile) => tile.surface === 'mechanicalPyramidSidePlatform');
         if (!room.mechanicalPyramidCenter
+          || (room.mechanicalPyramidCenter.elevation ?? 0) < 3.5
           || pyramidSummitTiles.length !== 9
-          || pyramidApexTiles.length !== 1) {
-          errors.push(`${room.id} does not contain the required mechanical pyramid terrace and apex.`);
+          || processionalSteps.length < 18
+          || terraces.length < 180
+          || sidePlatforms.length !== 6) {
+          errors.push(`${room.id} does not contain the required tall stepped pyramid, stable summit, enemy stair, and paired side-platform routes (height=${room.mechanicalPyramidCenter?.elevation ?? 'missing'}, summit=${pyramidSummitTiles.length}, stairs=${processionalSteps.length}, terraces=${terraces.length}, sidePlatforms=${sidePlatforms.length}).`);
         }
       }
 
@@ -4160,6 +4997,138 @@ export class DungeonGenerator {
         && highestElevation + PLAYER_TRAVERSAL_ENVELOPE.headClearance > room.ceilingHeight) {
         errors.push(`${room.id} lacks ceiling clearance above its highest reachable tier.`);
       }
+    }
+
+    for (const room of rooms.filter((candidate) => candidate.dropSpace)) {
+      const spec = room.dropSpace;
+      const lowerTiles = spec.lowerFloorKeys
+        .map((key) => navigableByKey.get(key))
+        .filter(Boolean);
+      const entryTiles = spec.entryFloorKeys
+        .map((key) => navigableByKey.get(key))
+        .filter(Boolean);
+      const entryLipTiles = spec.entryLipFloorKeys
+        .map((key) => navigableByKey.get(key))
+        .filter(Boolean);
+      const shelfTiles = spec.returnShelfFloorKeys
+        .map((key) => navigableByKey.get(key))
+        .filter(Boolean);
+      const exitTiles = spec.exitFloorKeys
+        .map((key) => navigableByKey.get(key))
+        .filter(Boolean);
+      const hasAction = (fromTiles, toTiles, action) => fromTiles.some((fromTile) => (
+        toTiles.some((toTile) => this._getTraversalActionBetweenFloorTiles(fromTile, toTile) === action)
+      ));
+      const lowerStart = lowerTiles.find((tile) => (
+        Math.abs(tile.x - room.x) + Math.abs(tile.z - room.z)
+        === Math.min(...lowerTiles.map((candidate) => (
+          Math.abs(candidate.x - room.x) + Math.abs(candidate.z - room.z)
+        )))
+      )) ?? lowerTiles[0] ?? null;
+      const egressReachable = this._createReachableFloorTileKeySet(lowerStart, navigableTiles);
+      const entryDropExists = hasAction(entryLipTiles, entryTiles, 'drop');
+      const returnClimbExists = hasAction(lowerTiles, shelfTiles, 'ledge_climb');
+      const exitJumpExists = hasAction(shelfTiles, exitTiles, 'jump');
+      const entryFlagsValid = entryTiles.length === spec.entryFloorKeys.length
+        && entryTiles.every((tile) => tile.allowsGroundedDropLanding && tile.dropSpaceId === spec.id);
+      const entryLipsReachable = entryLipTiles.length === spec.entryLipFloorKeys.length
+        && entryLipTiles.every((tile) => reachable.has(this._getFloorTileGraphKey(tile)));
+      const expectedShelfEdge = spec.returnDirectionX > 0
+        ? 'left'
+        : spec.returnDirectionX < 0
+          ? 'right'
+          : spec.returnDirectionZ > 0
+            ? 'front'
+            : 'back';
+      const shelfEdgesValid = shelfTiles.length === spec.returnShelfFloorKeys.length
+        && shelfTiles.every((tile) => (
+          tile.ledgeEdges?.length === 1
+          && tile.ledgeEdges[0] === expectedShelfEdge
+          && Math.abs((tile.supportBaseElevation ?? Infinity) - spec.lowerElevation) <= 0.01
+        ));
+      const shelfSupportColumnsBlocked = shelfTiles.every((shelf) => (
+        (columns.get(tileKey(shelf.x, shelf.z)) ?? []).some((candidate) => (
+          candidate.surface === 'basementFloor'
+          && this._isFloorTileBlockedByGeneratedPlatform(candidate, blockingPlatformTops)
+        ))
+      ));
+      const bridgeTiles = spec.bridgeFloorKeys
+        .map((key) => navigableByKey.get(key))
+        .filter(Boolean);
+      const lowerArea = (spec.lowerBounds.maxX - spec.lowerBounds.minX + 1)
+        * (spec.lowerBounds.maxZ - spec.lowerBounds.minZ + 1);
+      const bridgeCoverageRatio = bridgeTiles.length / Math.max(1, lowerArea);
+      const overheadClearanceValid = bridgeTiles.every((tile) => (
+        (tile.elevation ?? 0) - spec.lowerElevation
+        >= PLAYER_TRAVERSAL_ENVELOPE.headClearance + 0.3
+      ));
+      const lowerReachable = lowerTiles.length >= 36 && lowerTiles.every((tile) => (
+        reachable.has(this._getFloorTileGraphKey(tile))
+      ));
+      const canExit = exitTiles.some((tile) => egressReachable.has(this._getFloorTileGraphKey(tile)));
+      const reverseReachable = new Set(exitTiles.map((tile) => this._getFloorTileGraphKey(tile)));
+      const reverseQueue = [...exitTiles];
+      for (let cursor = 0; cursor < reverseQueue.length; cursor += 1) {
+        const current = reverseQueue[cursor];
+        for (const [dx, dz] of DIRECTIONS) {
+          for (const candidate of columns.get(tileKey(current.x + dx, current.z + dz)) ?? []) {
+            const candidateKey = this._getFloorTileGraphKey(candidate);
+            if (
+              reverseReachable.has(candidateKey)
+              || !navigableByKey.has(candidateKey)
+              || !this._getTraversalActionBetweenFloorTiles(candidate, current)
+            ) {
+              continue;
+            }
+            reverseReachable.add(candidateKey);
+            reverseQueue.push(candidate);
+          }
+        }
+      }
+      const everyLowerTileCanExit = lowerTiles.every((tile) => (
+        reverseReachable.has(this._getFloorTileGraphKey(tile))
+      ));
+
+      if (!entryDropExists || !entryFlagsValid || !entryLipsReachable) {
+        errors.push(`${spec.id} has no authored drop entry.`);
+      }
+      if (
+        !returnClimbExists
+        || !exitJumpExists
+        || !shelfEdgesValid
+        || !shelfSupportColumnsBlocked
+      ) {
+        errors.push(
+          `${spec.id} lacks its climb-shelf and jump return sequence `
+          + `(climb=${returnClimbExists}, jump=${exitJumpExists}, edges=${shelfEdgesValid}, support=${shelfSupportColumnsBlocked}).`,
+        );
+      }
+      if (!lowerReachable || !canExit || !everyLowerTileCanExit) {
+        errors.push(`${spec.id} lower exploration floor is not safely reachable and escapable.`);
+      }
+      if (!overheadClearanceValid || bridgeCoverageRatio > 0.5) {
+        errors.push(
+          `${spec.id} overpasses compromise lower-space clearance or exploration area `
+          + `(clearance=${overheadClearanceValid}, coverage=${bridgeCoverageRatio.toFixed(2)}).`,
+        );
+      }
+      dropSpaceChecks.push({
+        id: spec.id,
+        roomId: room.id,
+        lowerTileCount: lowerTiles.length,
+        entryDropExists,
+        entryFlagsValid,
+        entryLipsReachable,
+        returnClimbExists,
+        exitJumpExists,
+        shelfEdgesValid,
+        shelfSupportColumnsBlocked,
+        lowerReachable,
+        canExit,
+        everyLowerTileCanExit,
+        overheadClearanceValid,
+        bridgeCoverageRatio,
+      });
     }
 
     for (const tile of navigableTiles) {
@@ -4250,6 +5219,7 @@ export class DungeonGenerator {
         matchedConnectionCount: connectionPlans.length,
         locallyReachableSocketCount: localSocketChecks.filter((check) => check.accessibleFromOwnerRoom).length,
         localSocketChecks,
+        dropSpaceChecks,
         platformNodeCount: rooms.reduce((count, room) => count + (room.platformNodes?.length ?? 0), 0),
         movementEnvelope: PLAYER_TRAVERSAL_ENVELOPE,
       },
@@ -4265,7 +5235,9 @@ export class DungeonGenerator {
         archetype: room.archetype ?? room.type,
         flavor: room.flavor ?? null,
         label: room.type === 'trap'
-          ? 'Basement maintenance ramp'
+          ? 'Hazard drop and return ledges'
+          : room.type === 'bonus'
+            ? 'Sealed vault reward dais'
           : room.type === 'shrine'
             ? 'Refractor shrine ramp tower'
             : room.type === 'boss'
@@ -4292,8 +5264,8 @@ export class DungeonGenerator {
             purpose: plan.purpose,
           })),
         levels: !ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS
-          ? (room.type === 'trap' || room.type === 'bonus' || room.type === 'coolant' ? [-1, 0] : [0])
-          : room.type === 'trap' || room.type === 'bonus'
+          ? (room.type === 'trap' || room.type === 'coolant' ? [-1, 0] : [0])
+          : room.type === 'trap'
             ? [-1, 0]
             : room.type === 'coolant'
               ? [-1, 0, 1]
@@ -4507,6 +5479,23 @@ export class DungeonGenerator {
     return materials;
   }
 
+  _createWallMacroAccentMaterials() {
+    return Object.fromEntries(WALL_MACRO_ACCENT_KEYS.map((key) => [
+      key,
+      this._createRuinMaterial(`accent_${key}`, {
+        color: key === 'sensor' ? 0xd6dde2 : 0xc7cbd0,
+        emissive: key === 'sensor'
+          ? 0x2a0505
+          : ['conduit', 'wiring'].includes(key)
+            ? 0x052c34
+            : 0x030608,
+        emissiveIntensity: ['sensor', 'conduit', 'wiring'].includes(key) ? 0.2 : 0.05,
+        roughness: 0.68,
+        metalness: 0.16,
+      }),
+    ]));
+  }
+
   _createMaterials() {
     const floor = this._createRuinMaterial('floor_plain', {
       roughness: 0.86,
@@ -4659,6 +5648,7 @@ export class DungeonGenerator {
       this._randomInt(0, WALL_MACRO_VARIANTS.length - 1)
     ];
     const wallMacroTiles = this._createWallMacroTileMaterials(wallMacroVariant);
+    const wallMacroAccents = this._createWallMacroAccentMaterials();
 
     return {
       floor,
@@ -4671,6 +5661,7 @@ export class DungeonGenerator {
         metalness: 0.06,
       }),
       wallMacroTiles,
+      wallMacroAccents,
       wallMacroVariant,
       ceiling: this._createRuinMaterial('ceiling_panel', {
         color: 0xe8dfcc,
@@ -4867,6 +5858,12 @@ export class DungeonGenerator {
     if (tile.surface === 'industrialRamp' || tile.surface === 'rampLanding') {
       return materials.industrialRamp;
     }
+    if (tile.surface === 'basementReturnShelf') {
+      return materials.raisedDeckFloor;
+    }
+    if (tile.surface === 'dropSpaceOverpass') {
+      return materials.hallway;
+    }
 
     return materials.floorByType[tile.type] ?? materials.floor;
   }
@@ -4874,6 +5871,65 @@ export class DungeonGenerator {
   _addTileDetail(group, tile, materials) {
     const position = this._tileToWorld(tile.x, tile.z);
     const elevation = tile.elevation ?? 0;
+
+    if (tile.surface === 'basementReturnShelf') {
+      const supportBase = Number.isFinite(tile.supportBaseElevation)
+        ? tile.supportBaseElevation
+        : RUIN_MINOR_DROP_ELEVATION;
+      const supportHeight = Math.max(0.46, elevation - supportBase - 0.06);
+      const shelf = new THREE.Mesh(
+        this._createTiledBoxGeometry(
+          this.tileSize * 0.94,
+          supportHeight,
+          this.tileSize * 0.94,
+        ),
+        [
+          materials.wallMacroTiles.mm,
+          materials.wallMacroTiles.mm,
+          materials.raisedDeckFloor,
+          materials.supportMetal,
+          materials.wallMacroTiles.mm,
+          materials.wallMacroTiles.mm,
+        ],
+      );
+      shelf.name = 'minorDropReturnShelfVolume';
+      shelf.position.set(position.x, supportBase + supportHeight * 0.5, position.z);
+      shelf.castShadow = true;
+      shelf.receiveShadow = true;
+      shelf.userData.dropSpaceId = tile.dropSpaceId ?? null;
+      shelf.userData.solidLedgeSupport = true;
+      shelf.userData.supportBaseElevation = supportBase;
+      group.add(shelf);
+
+      for (const ratio of [0.28, 0.72]) {
+        const band = new THREE.Mesh(
+          new THREE.BoxGeometry(this.tileSize * 0.97, 0.12, this.tileSize * 0.97),
+          materials.supportMetal,
+        );
+        band.name = 'minorDropReturnShelfBand';
+        band.position.set(position.x, supportBase + supportHeight * ratio, position.z);
+        band.castShadow = true;
+        band.userData.dropSpaceId = tile.dropSpaceId ?? null;
+        group.add(band);
+      }
+    }
+
+    if (tile.surface === 'dropSpaceOverpass') {
+      for (const rotate of [false, true]) {
+        const beam = new THREE.Mesh(
+          new THREE.BoxGeometry(
+            rotate ? 0.16 : this.tileSize * 0.9,
+            0.18,
+            rotate ? this.tileSize * 0.9 : 0.16,
+          ),
+          materials.supportMetal,
+        );
+        beam.name = 'minorDropOverpassUnderbeam';
+        beam.position.set(position.x, elevation - 0.18, position.z);
+        beam.castShadow = true;
+        group.add(beam);
+      }
+    }
 
     if (tile.surface === 'industrialRamp') {
       const directionX = Math.sign(tile.rampDirectionX ?? 0);
@@ -4968,7 +6024,147 @@ export class DungeonGenerator {
     }
   }
 
+  _createSolidArchitecturalDeckAssemblies(floorTiles = []) {
+    const grouped = new Map();
+    for (const tile of floorTiles.filter(isArchitecturalDeckTile)) {
+      const key = [
+        tile.massGroupId,
+        tile.roomId ?? 'room',
+        tile.surface ?? 'deck',
+        Number(tile.elevation ?? 0).toFixed(2),
+      ].join(':');
+      const assembly = grouped.get(key) ?? {
+        id: tile.massGroupId,
+        roomId: tile.roomId ?? null,
+        surface: tile.surface ?? 'deck',
+        elevation: tile.elevation ?? 0,
+        level: tile.level ?? 0,
+        tiles: [],
+      };
+      assembly.tiles.push(tile);
+      grouped.set(key, assembly);
+    }
+
+    return [...grouped.values()].map((assembly) => {
+      const solidTiles = assembly.tiles.filter(isSolidArchitecturalDeckTile);
+      const rows = new Map();
+      for (const tile of solidTiles) {
+        const xs = rows.get(tile.z) ?? [];
+        xs.push(tile.x);
+        rows.set(tile.z, xs);
+      }
+
+      const rectangles = [];
+      let active = new Map();
+      for (const z of [...rows.keys()].sort((a, b) => a - b)) {
+        const xs = [...new Set(rows.get(z))].sort((a, b) => a - b);
+        const runs = [];
+        let runStart = xs[0];
+        let previous = runStart;
+        for (let index = 1; index < xs.length; index += 1) {
+          const x = xs[index];
+          if (x === previous + 1) {
+            previous = x;
+          } else {
+            runs.push({ minX: runStart, maxX: previous });
+            runStart = x;
+            previous = x;
+          }
+        }
+        if (Number.isFinite(runStart)) {
+          runs.push({ minX: runStart, maxX: previous });
+        }
+
+        const nextActive = new Map();
+        for (const run of runs) {
+          const runKey = `${run.minX},${run.maxX}`;
+          const existing = active.get(runKey);
+          const canExtend = existing && existing.maxZ === z - 1;
+          if (existing && !canExtend) {
+            rectangles.push(existing);
+          }
+          const rectangle = canExtend
+            ? { ...existing, maxZ: z }
+            : { ...run, minZ: z, maxZ: z };
+          nextActive.set(runKey, rectangle);
+        }
+        for (const [runKey, rectangle] of active) {
+          if (!nextActive.has(runKey)) {
+            rectangles.push(rectangle);
+          }
+        }
+        active = nextActive;
+      }
+      rectangles.push(...active.values());
+
+      return {
+        ...assembly,
+        solidTiles,
+        underpassTileCount: assembly.tiles.length - solidTiles.length,
+        rectangles,
+      };
+    });
+  }
+
   _addSolidTraversalVolumes(group, floorTiles = [], rooms = [], materials) {
+    for (const assembly of this._createSolidArchitecturalDeckAssemblies(floorTiles)) {
+      const architecture = new THREE.Group();
+      architecture.name = `solidArchitecturalDeckAssembly_${assembly.id}`;
+      architecture.userData.solidArchitecturalMass = true;
+      architecture.userData.roomId = assembly.roomId;
+      architecture.userData.surface = assembly.surface;
+      architecture.userData.solidTileCount = assembly.solidTiles.length;
+      architecture.userData.underpassTileCount = assembly.underpassTileCount;
+      architecture.userData.segmentCount = assembly.rectangles.length;
+      architecture.userData.cameraOcclusionOwner = true;
+
+      for (const [segmentIndex, rectangle] of assembly.rectangles.entries()) {
+        const width = (rectangle.maxX - rectangle.minX + 1) * this.tileSize * 0.985;
+        const depth = (rectangle.maxZ - rectangle.minZ + 1) * this.tileSize * 0.985;
+        const baseY = 0;
+        const height = Math.max(0.18, assembly.elevation - baseY - 0.1);
+        const mass = new THREE.Mesh(
+          this._createTiledBoxGeometry(width, height, depth),
+          [
+            materials.wallMacroTiles.mm,
+            materials.wallMacroTiles.mm,
+            materials.secondFloor,
+            materials.supportMetal,
+            materials.wallMacroTiles.mm,
+            materials.wallMacroTiles.mm,
+          ],
+        );
+        mass.name = `solidArchitecturalDeckMass_${assembly.id}_${segmentIndex + 1}`;
+        mass.position.set(
+          (rectangle.minX + rectangle.maxX) * this.tileSize * 0.5,
+          baseY + height * 0.5 - 0.04,
+          (rectangle.minZ + rectangle.maxZ) * this.tileSize * 0.5,
+        );
+        mass.castShadow = true;
+        mass.receiveShadow = true;
+        mass.userData.solidArchitecturalMass = true;
+        mass.userData.cameraOcclusionSurface = true;
+        mass.userData.massGroupId = assembly.id;
+        mass.userData.segmentIndex = segmentIndex;
+        mass.userData.tileBounds = { ...rectangle };
+        architecture.add(mass);
+
+        for (const yRatio of [0.3, 0.72]) {
+          const band = new THREE.Mesh(
+            new THREE.BoxGeometry(width + 0.08, 0.14, depth + 0.08),
+            materials.supportMetal,
+          );
+          band.name = 'solidArchitecturalDeckReinforcementBand';
+          band.position.set(mass.position.x, baseY + height * yRatio, mass.position.z);
+          band.castShadow = true;
+          band.userData.cameraOcclusionSurface = true;
+          architecture.add(band);
+        }
+      }
+
+      group.add(architecture);
+    }
+
     const platformGroups = new Map();
     for (const tile of floorTiles.filter((candidate) => candidate.isPlatformingSurface)) {
       const groupId = tile.platformGroupId ?? `${tile.roomId ?? 'room'}_${tile.x}_${tile.z}`;
@@ -4993,12 +6189,19 @@ export class DungeonGenerator {
       const baseY = Math.min(0, ...tiles.map((tile) => tile.baseElevation ?? 0));
       const height = Math.max(0.18, topY - baseY - 0.1);
       const mass = new THREE.Mesh(
-        new THREE.BoxGeometry(
+        this._createTiledBoxGeometry(
           (maxX - minX + 1) * this.tileSize * 0.96,
           height,
           (maxZ - minZ + 1) * this.tileSize * 0.96,
         ),
-        materials.raisedDeckFloor,
+        [
+          materials.wallMacroTiles.mm,
+          materials.wallMacroTiles.mm,
+          materials.raisedDeckFloor,
+          materials.supportMetal,
+          materials.wallMacroTiles.mm,
+          materials.wallMacroTiles.mm,
+        ],
       );
       mass.name = `solidPurposePlatformMass_${groupId}`;
       mass.position.set(
@@ -5009,6 +6212,8 @@ export class DungeonGenerator {
       mass.castShadow = true;
       mass.receiveShadow = true;
       mass.userData.solidPlatformVolume = true;
+      mass.userData.cameraOcclusionSurface = true;
+      mass.userData.cameraOcclusionOwner = true;
       group.add(mass);
 
       const bandHeight = 0.16;
@@ -5025,6 +6230,8 @@ export class DungeonGenerator {
         band.position.copy(mass.position);
         band.position.y = y;
         band.castShadow = true;
+        band.userData.cameraOcclusionSurface = true;
+        band.userData.cameraOcclusionOwner = true;
         group.add(band);
       }
     }
@@ -5041,6 +6248,9 @@ export class DungeonGenerator {
         !exclude.has(candidate)
         && candidate !== tile
         && isStraightRampTile(candidate)
+        && candidate.roomId === tile.roomId
+        && (candidate.connectionId ?? null) === (tile.connectionId ?? null)
+        && (candidate.rampRunId ?? null) === (tile.rampRunId ?? null)
         && Math.sign(candidate.rampDirectionX ?? 0) === directionX
         && Math.sign(candidate.rampDirectionZ ?? 0) === directionZ
         && candidate.x === tile.x + directionX * offset
@@ -5056,52 +6266,102 @@ export class DungeonGenerator {
       const last = run[run.length - 1];
       const startY = first?.rampStartElevation;
       const endY = last?.rampEndElevation;
-      if (!Number.isFinite(startY) || !Number.isFinite(endY) || Math.max(startY, endY) <= 0.18) {
+      if (!Number.isFinite(startY) || !Number.isFinite(endY)) {
         return null;
       }
-      const bottomY = Math.min(0, startY, endY) - 0.08;
+      const bottomY = Math.min(0, startY, endY) - 0.12;
       const halfWidth = this.tileSize * 0.48;
-      const halfLength = this.tileSize * run.length * 0.5;
-      const topStart = startY - 0.1;
-      const topEnd = endY - 0.1;
-      const vertices = new Float32Array([
-        -halfWidth, bottomY, -halfLength,
-        halfWidth, bottomY, -halfLength,
-        halfWidth, bottomY, halfLength,
-        -halfWidth, bottomY, halfLength,
-        -halfWidth, topStart, -halfLength,
-        halfWidth, topStart, -halfLength,
-        halfWidth, topEnd, halfLength,
-        -halfWidth, topEnd, halfLength,
-      ]);
-      const indices = [
-        0, 2, 1, 0, 3, 2,
-        4, 5, 6, 4, 6, 7,
-        0, 1, 5, 0, 5, 4,
-        1, 2, 6, 1, 6, 5,
-        2, 3, 7, 2, 7, 6,
-        3, 0, 4, 3, 4, 7,
-      ];
+      const lengthWorld = this.tileSize * run.length;
+      const halfLength = lengthWorld * 0.5;
+      const slopeLength = Math.hypot(lengthWorld, endY - startY);
+      const slopeRepeats = slopeLength / this.tileSize;
+      const vertices = [];
+      const uvs = [];
+      const groups = [];
+      const addQuad = (a, b, c, d, uvA, uvB, uvC, uvD, materialIndex) => {
+        const start = vertices.length / 3;
+        for (const point of [a, b, c, a, c, d]) {
+          vertices.push(...point);
+        }
+        for (const uv of [uvA, uvB, uvC, uvA, uvC, uvD]) {
+          uvs.push(...uv);
+        }
+        groups.push({ start, count: 6, materialIndex });
+      };
+      const startHeightRepeat = Math.max(0.05, (startY - bottomY) / this.tileSize);
+      const endHeightRepeat = Math.max(0.05, (endY - bottomY) / this.tileSize);
+      const widthRepeat = (halfWidth * 2) / this.tileSize;
+      addQuad(
+        [-halfWidth, startY, -halfLength],
+        [-halfWidth, endY, halfLength],
+        [halfWidth, endY, halfLength],
+        [halfWidth, startY, -halfLength],
+        [0, 0], [0, slopeRepeats], [1, slopeRepeats], [1, 0],
+        0,
+      );
+      addQuad(
+        [-halfWidth, bottomY, halfLength],
+        [-halfWidth, bottomY, -halfLength],
+        [halfWidth, bottomY, -halfLength],
+        [halfWidth, bottomY, halfLength],
+        [0, 0], [0, run.length], [1, run.length], [1, 0],
+        1,
+      );
+      addQuad(
+        [-halfWidth, bottomY, -halfLength],
+        [-halfWidth, bottomY, halfLength],
+        [-halfWidth, endY, halfLength],
+        [-halfWidth, startY, -halfLength],
+        [0, 0], [run.length, 0], [run.length, endHeightRepeat], [0, startHeightRepeat],
+        1,
+      );
+      addQuad(
+        [halfWidth, bottomY, halfLength],
+        [halfWidth, bottomY, -halfLength],
+        [halfWidth, startY, -halfLength],
+        [halfWidth, endY, halfLength],
+        [0, 0], [run.length, 0], [run.length, startHeightRepeat], [0, endHeightRepeat],
+        1,
+      );
+      addQuad(
+        [halfWidth, bottomY, -halfLength],
+        [-halfWidth, bottomY, -halfLength],
+        [-halfWidth, startY, -halfLength],
+        [halfWidth, startY, -halfLength],
+        [0, 0], [widthRepeat, 0], [widthRepeat, startHeightRepeat], [0, startHeightRepeat],
+        1,
+      );
+      addQuad(
+        [-halfWidth, bottomY, halfLength],
+        [halfWidth, bottomY, halfLength],
+        [halfWidth, endY, halfLength],
+        [-halfWidth, endY, halfLength],
+        [0, 0], [widthRepeat, 0], [widthRepeat, endHeightRepeat], [0, endHeightRepeat],
+        1,
+      );
       const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-      geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([
-        0, 0, 1, 0, 1, run.length, 0, run.length,
-        0, 0, 1, 0, 1, run.length, 0, run.length,
-      ]), 2));
-      geometry.setIndex(indices);
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+      for (const geometryGroup of groups) {
+        geometry.addGroup(geometryGroup.start, geometryGroup.count, geometryGroup.materialIndex);
+      }
       geometry.computeVertexNormals();
-      const wedge = new THREE.Mesh(geometry, materials.industrialRamp);
+      geometry.userData.contiguousRampUv = true;
+      geometry.userData.slopeRepeats = slopeRepeats;
+      const wedge = new THREE.Mesh(geometry, [materials.industrialRamp, materials.wallTrim]);
       wedge.name = run.length > 1
         ? 'largeTexturedIndustrialSlopeVolume'
         : 'solidIndustrialSlopeVolume';
-      wedge.position.set(
+      const rampVisual = new THREE.Group();
+      rampVisual.name = 'contiguousIndustrialRampRun';
+      rampVisual.position.set(
         (first.x + last.x) * this.tileSize * 0.5,
         0,
         (first.z + last.z) * this.tileSize * 0.5,
       );
       const directionX = Math.sign(first.rampDirectionX ?? 0);
       const directionZ = Math.sign(first.rampDirectionZ ?? 0);
-      wedge.rotation.y = directionX > 0
+      rampVisual.rotation.y = directionX > 0
         ? Math.PI / 2
         : directionX < 0
           ? -Math.PI / 2
@@ -5113,7 +6373,45 @@ export class DungeonGenerator {
       wedge.userData.solidSlopeVolume = true;
       wedge.userData.rampTileCount = run.length;
       wedge.userData.texturedWallToFloor = true;
-      return wedge;
+      wedge.userData.contiguousRampSurface = true;
+      wedge.userData.tiledTextureRepeats = slopeRepeats;
+      wedge.userData.rampRouteId = first.rampRouteId ?? null;
+      wedge.userData.rampRunId = first.rampRunId ?? null;
+      wedge.userData.cameraOcclusionSurface = true;
+      rampVisual.userData.cameraOcclusionOwner = true;
+      rampVisual.userData.rampTileCount = run.length;
+      rampVisual.userData.roomId = first.roomId ?? null;
+      rampVisual.userData.rampRouteId = first.rampRouteId ?? null;
+      rampVisual.userData.rampRunId = first.rampRunId ?? null;
+      rampVisual.add(wedge);
+
+      const slopeAngle = Math.atan2(endY - startY, lengthWorld);
+      const edgeGeometry = new THREE.BoxGeometry(0.09, 0.08, lengthWorld * 0.985);
+      for (const side of [-1, 1]) {
+        const edge = new THREE.Mesh(edgeGeometry, materials.factoryRail);
+        edge.name = 'contiguousIndustrialRampRaisedEdge';
+        edge.position.set(side * halfWidth * 0.91, (startY + endY) * 0.5 + 0.07, 0);
+        edge.rotation.x = -slopeAngle;
+        edge.castShadow = true;
+        rampVisual.add(edge);
+      }
+      const stripeGeometry = new THREE.BoxGeometry(halfWidth * 1.58, 0.045, 0.075);
+      for (let index = 0; index < run.length; index += 1) {
+        const progress = (index + 0.5) / run.length;
+        const stripe = new THREE.Mesh(
+          stripeGeometry,
+          index % 2 === 0 ? materials.hazardStripe : materials.supportMetal,
+        );
+        stripe.name = 'contiguousIndustrialRampGripStripe';
+        stripe.position.set(
+          0,
+          THREE.MathUtils.lerp(startY, endY, progress) + 0.055,
+          -halfLength + lengthWorld * progress,
+        );
+        stripe.rotation.x = -slopeAngle;
+        rampVisual.add(stripe);
+      }
+      return rampVisual;
     };
 
     const usedRampTiles = new Set();
@@ -5198,6 +6496,143 @@ export class DungeonGenerator {
       }
     }
 
+    const dropEntryGroups = new Map();
+    for (const tile of floorTiles.filter((candidate) => candidate.allowsGroundedDropLanding)) {
+      for (const edge of tile.openRetainingWallEdges ?? []) {
+        const [dx, dz] = edge.split(',').map(Number);
+        if (!Number.isFinite(dx) || !Number.isFinite(dz)) {
+          continue;
+        }
+        const key = `${tile.dropSpaceId ?? tile.roomId ?? 'drop'}:${dx},${dz}`;
+        const entryGroup = dropEntryGroups.get(key) ?? { dx, dz, tiles: [] };
+        entryGroup.tiles.push(tile);
+        dropEntryGroups.set(key, entryGroup);
+      }
+    }
+
+    for (const { dx, dz, tiles: entryTiles } of dropEntryGroups.values()) {
+      const elevation = Math.min(...entryTiles.map((tile) => (
+        tile.elevation ?? RUIN_MINOR_DROP_ELEVATION
+      )));
+      const wallHeight = Math.abs(elevation);
+      const horizontal = dz !== 0;
+      const minX = Math.min(...entryTiles.map((tile) => tile.x));
+      const maxX = Math.max(...entryTiles.map((tile) => tile.x));
+      const minZ = Math.min(...entryTiles.map((tile) => tile.z));
+      const maxZ = Math.max(...entryTiles.map((tile) => tile.z));
+      const centerX = (minX + maxX) * this.tileSize * 0.5;
+      const centerZ = (minZ + maxZ) * this.tileSize * 0.5;
+      const openingSpan = (horizontal ? maxX - minX + 1 : maxZ - minZ + 1) * this.tileSize;
+      const roomId = entryTiles[0]?.roomId ?? null;
+      const dropSpaceId = entryTiles[0]?.dropSpaceId ?? null;
+      const alcove = new THREE.Group();
+      alcove.name = 'factoryBasementEntryAlcoveVisual';
+      alcove.userData.cameraOcclusionOwner = true;
+      alcove.userData.roomId = roomId;
+      alcove.userData.dropSpaceId = dropSpaceId;
+
+      const backdrop = new THREE.Mesh(
+        this._createTiledBoxGeometry(
+          horizontal ? openingSpan : RUIN_WALL_THICKNESS,
+          wallHeight,
+          horizontal ? RUIN_WALL_THICKNESS : openingSpan,
+        ),
+        materials.wallMacroTiles.mm,
+      );
+      backdrop.name = 'factoryBasementEntryBackdrop';
+      backdrop.position.set(
+        centerX + dx * this.tileSize * 1.5,
+        elevation + wallHeight * 0.5,
+        centerZ + dz * this.tileSize * 1.5,
+      );
+      backdrop.castShadow = true;
+      backdrop.receiveShadow = true;
+      backdrop.userData.roomId = roomId;
+      backdrop.userData.dropSpaceId = dropSpaceId;
+      alcove.add(backdrop);
+
+      const interiorNormalX = -dx;
+      const interiorNormalZ = -dz;
+      const accentSize = Math.min(this.tileSize * 0.72, wallHeight * 0.45);
+      const accent = new THREE.Mesh(
+        new THREE.PlaneGeometry(accentSize, accentSize),
+        materials.wallMacroAccents?.hatch ?? materials.wallMacroTiles.mm,
+      );
+      accent.name = 'factoryBasementEntryAccent';
+      accent.position.copy(backdrop.position);
+      accent.position.x += interiorNormalX * (RUIN_WALL_THICKNESS * 0.5 + 0.014);
+      accent.position.y = elevation + wallHeight * 0.55;
+      accent.position.z += interiorNormalZ * (RUIN_WALL_THICKNESS * 0.5 + 0.014);
+      accent.rotation.y = interiorNormalX !== 0
+        ? (interiorNormalX > 0 ? Math.PI / 2 : -Math.PI / 2)
+        : (interiorNormalZ >= 0 ? 0 : Math.PI);
+      accent.userData.wallAccentType = 'hatch';
+      accent.userData.baseWallGrammar = 'mm';
+      accent.userData.integratedWallAccent = true;
+      accent.userData.dropSpaceId = dropSpaceId;
+      alcove.add(accent);
+
+      const sill = new THREE.Mesh(
+        new THREE.BoxGeometry(
+          horizontal ? openingSpan + 0.08 : 0.3,
+          0.2,
+          horizontal ? 0.3 : openingSpan + 0.08,
+        ),
+        materials.supportMetal,
+      );
+      sill.name = 'factoryBasementEntrySill';
+      sill.position.copy(backdrop.position);
+      sill.position.y = elevation + 0.08;
+      sill.castShadow = true;
+      sill.userData.dropSpaceId = dropSpaceId;
+      alcove.add(sill);
+
+      for (const side of [-1, 1]) {
+        const reveal = new THREE.Mesh(
+          this._createTiledBoxGeometry(
+            horizontal ? RUIN_WALL_THICKNESS : this.tileSize,
+            wallHeight,
+            horizontal ? this.tileSize : RUIN_WALL_THICKNESS,
+          ),
+          materials.wallMacroTiles.mm,
+        );
+        reveal.name = 'factoryBasementEntryRevealWall';
+        reveal.position.set(
+          horizontal
+            ? (side < 0 ? minX - 0.5 : maxX + 0.5) * this.tileSize
+            : centerX + dx * this.tileSize,
+          elevation + wallHeight * 0.5,
+          horizontal
+            ? centerZ + dz * this.tileSize
+            : (side < 0 ? minZ - 0.5 : maxZ + 0.5) * this.tileSize,
+        );
+        reveal.castShadow = true;
+        reveal.receiveShadow = true;
+        reveal.userData.roomId = roomId;
+        reveal.userData.dropSpaceId = dropSpaceId;
+        alcove.add(reveal);
+      }
+
+      const header = new THREE.Mesh(
+        new THREE.BoxGeometry(
+          horizontal ? openingSpan + RUIN_WALL_THICKNESS * 2 : this.tileSize,
+          0.24,
+          horizontal ? this.tileSize : openingSpan + RUIN_WALL_THICKNESS * 2,
+        ),
+        materials.supportMetal,
+      );
+      header.name = 'factoryBasementEntryHeaderBeam';
+      header.position.set(
+        centerX + dx * this.tileSize,
+        -0.18,
+        centerZ + dz * this.tileSize,
+      );
+      header.castShadow = true;
+      header.userData.dropSpaceId = dropSpaceId;
+      alcove.add(header);
+      group.add(alcove);
+    }
+
     this._addFactoryRailRuns(group, floorTiles, floorTileLookup, materials, openAirTileKeys);
   }
 
@@ -5215,6 +6650,9 @@ export class DungeonGenerator {
   }
 
   _addBasementRetainingWalls(group, tile, floorTileLookup, materials) {
+    if (tile.surface === 'basementReturnShelf') {
+      return;
+    }
     const elevation = tile.elevation ?? 0;
     const wallHeight = Math.abs(elevation);
     const y = elevation + wallHeight * 0.5;
@@ -5222,18 +6660,24 @@ export class DungeonGenerator {
     const baseZ = tile.z * this.tileSize;
 
     for (const [dx, dz] of DIRECTIONS) {
+      if ((tile.openRetainingWallEdges ?? []).includes(`${dx},${dz}`)) {
+        continue;
+      }
       if (this._findSameFloorNeighbor(floorTileLookup, tile, dx, dz)) {
         continue;
       }
 
       const horizontal = dz !== 0;
+      const width = horizontal ? this.tileSize : RUIN_WALL_THICKNESS;
+      const depth = horizontal ? RUIN_WALL_THICKNESS : this.tileSize;
+      const visualOwner = new THREE.Group();
+      visualOwner.name = 'factoryBasementRetainingWallVisual';
+      visualOwner.userData.cameraOcclusionOwner = true;
+      visualOwner.userData.roomId = tile.roomId ?? null;
+      visualOwner.userData.dropSpaceId = tile.dropSpaceId ?? null;
       const wall = new THREE.Mesh(
-        new THREE.BoxGeometry(
-          horizontal ? this.tileSize : RUIN_WALL_THICKNESS,
-          wallHeight,
-          horizontal ? RUIN_WALL_THICKNESS : this.tileSize,
-        ),
-        materials.supportMetal,
+        this._createTiledBoxGeometry(width, wallHeight, depth),
+        materials.wallMacroTiles.mm,
       );
       wall.name = 'factoryBasementRetainingWall';
       wall.position.set(
@@ -5243,7 +6687,22 @@ export class DungeonGenerator {
       );
       wall.castShadow = true;
       wall.receiveShadow = true;
-      group.add(wall);
+      wall.userData.tiledRetainingWall = true;
+      wall.userData.roomId = tile.roomId ?? null;
+      wall.userData.dropSpaceId = tile.dropSpaceId ?? null;
+
+      const band = new THREE.Mesh(
+        new THREE.BoxGeometry(width + 0.035, 0.12, depth + 0.035),
+        materials.supportMetal,
+      );
+      band.name = 'factoryBasementRetainingWallBand';
+      band.position.copy(wall.position);
+      band.position.y = elevation + wallHeight * 0.62;
+      band.castShadow = true;
+      band.userData.roomId = tile.roomId ?? null;
+      band.userData.dropSpaceId = tile.dropSpaceId ?? null;
+      visualOwner.add(wall, band);
+      group.add(visualOwner);
     }
   }
 
@@ -5254,6 +6713,9 @@ export class DungeonGenerator {
     }
 
     if (!RAIL_ELIGIBLE_FACTORY_SURFACES.has(tile.surface)) {
+      return;
+    }
+    if (isArchitecturalDeckTile(tile)) {
       return;
     }
 
@@ -5298,30 +6760,44 @@ export class DungeonGenerator {
       if (elevation <= 0.05) {
         continue;
       }
-      if (tile.surface === 'industrialRamp' || tile.surface === 'jumpPlatform') {
+      if (
+        tile.surface === 'industrialRamp'
+        || tile.surface === 'jumpPlatform'
+        || String(tile.surface ?? '').startsWith('mechanicalPyramid')
+      ) {
         continue;
       }
       if (openAirTileKeys.has(tileKey(tile.x, tile.z))) {
         continue;
       }
-      if (!RAIL_ELIGIBLE_FACTORY_SURFACES.has(tile.surface)) {
+      if (
+        !RAIL_ELIGIBLE_FACTORY_SURFACES.has(tile.surface)
+        && !isArchitecturalDeckTile(tile)
+      ) {
         continue;
       }
 
       for (const [dx, dz] of DIRECTIONS) {
-        const sameFloorNeighbor = this._findSameFloorNeighbor(floorTileLookup, tile, dx, dz);
-        if (sameFloorNeighbor) {
+        const adjacentColumn = floorTileLookup.get(tileKey(tile.x + dx, tile.z + dz)) ?? [];
+        const hasSameTierSurface = adjacentColumn.some((candidate) => (
+          candidate.surface !== 'industrialRamp'
+          && Math.abs((candidate.elevation ?? 0) - elevation) <= 0.3
+          && !openAirTileKeys.has(tileKey(candidate.x, candidate.z))
+        ));
+        if (hasSameTierSurface) {
           continue;
         }
-
-        const adjacentColumn = floorTileLookup.get(tileKey(tile.x + dx, tile.z + dz)) ?? [];
-        const hasRampOrAccessNeighbor = adjacentColumn.some((candidate) => (
-          candidate.surface === 'industrialRamp'
-          || candidate.type === 'hallway'
-          || candidate.type === 'entrance'
-        ));
-
-        if (hasRampOrAccessNeighbor) {
+        const hasRealRampOpening = adjacentColumn.some((candidate) => {
+          if (candidate.surface !== 'industrialRamp') {
+            return false;
+          }
+          const rampDirectionX = Math.sign(candidate.rampDirectionX ?? 0);
+          const rampDirectionZ = Math.sign(candidate.rampDirectionZ ?? 0);
+          const crossesEdge = Math.abs(rampDirectionX * dx + rampDirectionZ * dz) === 1;
+          return crossesEdge
+            && this._getTraversalActionBetweenFloorTiles(tile, candidate) === 'ramp';
+        });
+        if (hasRealRampOpening) {
           continue;
         }
 
@@ -5364,6 +6840,7 @@ export class DungeonGenerator {
       buckets.set(key, bucket);
     }
 
+    const railPostKeys = new Set();
     for (const bucket of buckets.values()) {
       bucket.axes.sort((a, b) => a - b);
 
@@ -5372,7 +6849,9 @@ export class DungeonGenerator {
 
       const flush = () => {
         const lengthTiles = previous - start + 1;
-        const lengthWorld = lengthTiles * this.tileSize * 0.96;
+        const startEndpoint = start - 0.5;
+        const endEndpoint = previous + 0.5;
+        const lengthWorld = lengthTiles * this.tileSize;
         const centerAxis = ((start + previous) * 0.5) * this.tileSize;
 
         const rail = new THREE.Mesh(
@@ -5392,6 +6871,12 @@ export class DungeonGenerator {
         );
         rail.castShadow = true;
         rail.receiveShadow = true;
+        rail.userData.factoryRailRun = true;
+        rail.userData.startEndpoint = startEndpoint;
+        rail.userData.endEndpoint = endEndpoint;
+        rail.userData.horizontal = bucket.horizontal;
+        rail.userData.line = bucket.line;
+        rail.userData.elevation = bucket.elevation;
         group.add(rail);
 
         const postGeometry = new THREE.BoxGeometry(
@@ -5400,22 +6885,33 @@ export class DungeonGenerator {
           RUIN_RAIL_THICKNESS,
         );
         const postAxes = [];
-        for (let axis = start; axis <= previous; axis += 2) {
+        for (let axis = startEndpoint; axis <= endEndpoint; axis += 2) {
           postAxes.push(axis);
         }
-        if (postAxes.at(-1) !== previous) {
-          postAxes.push(previous);
+        if (Math.abs((postAxes.at(-1) ?? startEndpoint) - endEndpoint) > 0.001) {
+          postAxes.push(endEndpoint);
         }
         for (const axis of postAxes) {
+          const postX = bucket.horizontal ? axis * this.tileSize : bucket.line * this.tileSize;
+          const postZ = bucket.horizontal ? bucket.line * this.tileSize : axis * this.tileSize;
+          const postKey = `${postX.toFixed(3)},${postZ.toFixed(3)},${bucket.elevation.toFixed(3)}`;
+          if (railPostKeys.has(postKey)) {
+            continue;
+          }
+          railPostKeys.add(postKey);
           const post = new THREE.Mesh(postGeometry, materials.factoryRail);
           post.name = 'factoryCatwalkRailPost';
           post.position.set(
-            bucket.horizontal ? axis * this.tileSize : bucket.line * this.tileSize,
+            postX,
             bucket.elevation + RUIN_RAIL_HEIGHT * 0.5,
-            bucket.horizontal ? bucket.line * this.tileSize : axis * this.tileSize,
+            postZ,
           );
           post.castShadow = true;
           post.receiveShadow = true;
+          post.userData.factoryRailPost = true;
+          post.userData.elevation = bucket.elevation;
+          post.userData.runEndpoint = Math.abs(axis - startEndpoint) <= 0.001
+            || Math.abs(axis - endEndpoint) <= 0.001;
           group.add(post);
         }
       };
@@ -5472,12 +6968,12 @@ export class DungeonGenerator {
       machine: ['machinePressZone', 'machineAssemblyConveyor', 'machineCrossBridge', 'machineUpperCatwalk'],
       coolant: ['coolantValveDeck', 'coolantServicePit', 'coolantControlBalcony', 'coolantPipeBridge'],
       enemy: ['enemy', 'secondFloor', 'catwalk', 'raisedDeck'],
-      keycard: ['keycard', 'secondFloor'],
+      keycard: ['mechanicalPyramidSummit', 'mechanicalPyramidProcessionalStep', 'mechanicalPyramidTerrace'],
       trap: ['basementFloor', 'industrialRamp'],
       conveyor: ['conveyor', 'conveyorPuzzleBelt', 'conveyorBridge', 'secondFloorConveyor', 'thirdFloorGantry'],
       boss: ['boss', 'raisedDeck', 'catwalk', 'thirdFloorGantry'],
       shrine: ['shrine', 'reveredMezzanine', 'refractorDais'],
-      bonus: ['basementFloor'],
+      bonus: ['vaultRewardDais', 'vaultSanctumFloor'],
       entrance: ['entrance'],
     };
     const createRoomGroup = (room, surfaces = roomSurfacePreferences[room.type] ?? []) => {
@@ -5706,10 +7202,6 @@ export class DungeonGenerator {
 
         const coolantControlDeckY = ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_SECOND_FLOOR_ELEVATION : 0.08;
         addBox(fallback, 'coolantNorthControlBalcony', 0, -halfD * 0.82, halfW * 1.25, 0.12, 1.12, materials.coolantFloor, coolantControlDeckY);
-        if (ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS) {
-          addBox(fallback, 'coolantBalconyInnerRail', 0, -halfD * 0.7, halfW * 1.16, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.76);
-          addBox(fallback, 'coolantBalconyOuterRail', 0, -halfD * 0.94, halfW * 1.16, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.76);
-        }
         addBox(fallback, 'coolantMasterPressureConsole', 0, -halfD * 0.82, 1.18, 0.72, 0.52, materials.terminal, coolantControlDeckY + 0.28);
         addBox(fallback, 'coolantMasterPressureConsoleScreen', 0, -halfD * 0.58, 0.82, 0.08, 0.08, materials.glowGreen, coolantControlDeckY + 0.78);
 
@@ -5831,10 +7323,6 @@ export class DungeonGenerator {
         const machineDeckY = ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_SECOND_FLOOR_ELEVATION : 0.08;
         addBox(fallback, 'machineNorthUpperCatwalk', 0, -halfD * 0.86, halfW * 1.42, 0.1, 1.06, materials.machineFloor, machineDeckY);
         addBox(fallback, 'machineCrossCatwalkBridge', 0, 0, halfW * 1.56, 0.1, 1.0, materials.machineFloor, machineDeckY);
-        if (ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS) {
-          addBox(fallback, 'machineLeftCatwalkRail', -halfW * 0.72, 0, 0.1, 0.08, halfD * 1.3, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
-          addBox(fallback, 'machineRightCatwalkRail', halfW * 0.72, 0, 0.1, 0.08, halfD * 1.3, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
-        }
 
         for (const x of [-halfW * 0.42, 0, halfW * 0.42]) {
           addMountedPanel(fallback, 'machineWallMonitor', x, -halfD + 0.28, 1.18, 0.46, 0.06, materials.glowBlue, 2.72);
@@ -5905,10 +7393,6 @@ export class DungeonGenerator {
         const serverDeckY = ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS ? RUIN_SECOND_FLOOR_ELEVATION : 0.08;
         addBox(fallback, 'alienServerNorthUpperCatwalk', 0, -halfD * 0.78, halfW * 1.42, 0.1, 1.22, materials.serverFloor, serverDeckY);
         addBox(fallback, 'alienServerEastUpperCatwalk', halfW * 0.78, 0, 1.22, 0.1, halfD * 1.32, materials.serverFloor, serverDeckY);
-        if (ENABLE_PROCEDURAL_RAISED_ROOM_LEVELS) {
-          addBox(fallback, 'alienServerNorthCatwalkRail', 0, -halfD * 0.7, halfW * 1.32, 0.08, 0.1, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
-          addBox(fallback, 'alienServerEastCatwalkRail', halfW * 0.7, 0, 0.1, 0.08, halfD * 1.18, materials.factoryRail, RUIN_SECOND_FLOOR_ELEVATION + 0.78);
-        }
 
         for (const x of [-halfW * 0.42, -halfW * 0.14, halfW * 0.14, halfW * 0.42]) {
           addMountedPanel(fallback, 'alienServerWallDataScreen', x, -halfD + 0.26, 1.04, 0.48, 0.06, materials.glowBlue, 2.36);
@@ -6340,31 +7824,95 @@ export class DungeonGenerator {
         return;
       }
       const prefab = new THREE.Group();
-      const layers = [
-        { bottom: this.tileSize * 2.06, top: this.tileSize * 1.82, height: 0.45, y: 0.225, material: materials.wallTrim },
-        { bottom: this.tileSize * 1.8, top: this.tileSize * 1.62, height: 0.45, y: 0.675, material: materials.supportMetal },
-        { bottom: this.tileSize * 1.6, top: this.tileSize * 1.43, height: 0.45, y: 1.125, material: materials.raisedDeckFloor },
-        { bottom: this.tileSize * 1.42, top: this.tileSize * 1.18, height: 0.45, y: 1.575, material: materials.wallTrim },
-        { bottom: this.tileSize * 1.16, top: this.tileSize * 0.9, height: 0.45, y: 2.025, material: materials.supportMetal },
-        { bottom: this.tileSize * 0.88, top: this.tileSize * 0.7, height: 0.45, y: 2.475, material: materials.raisedDeckFloor },
-      ];
-      for (const [index, layer] of layers.entries()) {
-        const mesh = addMesh(
+      const baseHalfExtent = center.baseHalfExtent ?? 8;
+      const stepRise = center.stepRise ?? 0.5;
+      const terraceCount = center.terraceCount ?? baseHalfExtent;
+
+      for (let index = 0; index < terraceCount; index += 1) {
+        const halfExtent = baseHalfExtent - index;
+        const span = (halfExtent * 2 + 1) * this.tileSize * 0.985;
+        const topY = (index + 1) * stepRise;
+        const cap = addMesh(
           prefab,
           `reverentMechanicalPyramidLayer${index + 1}`,
-          new THREE.CylinderGeometry(layer.top, layer.bottom, layer.height, 4, 1),
-          layer.material,
+          this._createTiledBoxGeometry(span, 0.08, span),
+          index % 3 === 0
+            ? materials.wallTrim
+            : index % 3 === 1
+              ? materials.supportMetal
+              : materials.raisedDeckFloor,
           0,
-          layer.y,
+          topY - 0.035,
           0,
         );
-        mesh.rotation.y = Math.PI / 4;
+        cap.userData.mechanicalPyramidTerrace = true;
+        cap.userData.terraceIndex = index;
+
+        // A luminous three-tile-wide stair spine makes the intended combat
+        // ascent legible from the entrance side of the room.
+        const stairZ = -(halfExtent * this.tileSize);
+        addBox(
+          prefab,
+          `pyramidProcessionalCircuitTread_${index + 1}`,
+          this.tileSize * 2.72,
+          0.045,
+          this.tileSize * 0.82,
+          materials.keycard ?? materials.raisedDeckFloor,
+          0,
+          topY + 0.022,
+          stairZ,
+        );
+        addBox(
+          prefab,
+          `pyramidProcessionalCircuitStep_${index + 1}`,
+          this.tileSize * 2.55,
+          0.055,
+          0.24,
+          index % 2 ? materials.glowBlue : materials.glowYellow,
+          0,
+          topY + 0.035,
+          stairZ,
+        );
+
+        if (index % 2 === 0) {
+          for (const sign of [-1, 1]) {
+            const nodeX = sign * Math.max(this.tileSize * 1.15, (halfExtent - 0.55) * this.tileSize);
+            const nodeZ = -(halfExtent - 0.55) * this.tileSize;
+            addMesh(
+              prefab,
+              `pyramidTerraceRefractorNode_${index + 1}_${sign}`,
+              new THREE.OctahedronGeometry(0.18 + index * 0.012, 0),
+              materials.glowBlue,
+              nodeX,
+              topY + 0.28,
+              nodeZ,
+            );
+          }
+        }
+
+        if (index === 2 || index === 5) {
+          const guardianEye = addMesh(
+            prefab,
+            `pyramidReaverbotGuardianEyeDecal_${index + 1}`,
+            new THREE.OctahedronGeometry(0.3, 0),
+            materials.glowRed,
+            0,
+            topY - stepRise * 0.45,
+            stairZ - this.tileSize * 0.5 + 0.04,
+          );
+          guardianEye.scale.set(1.35, 0.72, 0.28);
+        }
       }
-      for (const [x, z] of [[-3.35, -3.35], [3.35, -3.35], [-3.35, 3.35], [3.35, 3.35]]) {
-        addCylinder(prefab, 'pyramidHydraulicColumn', 0.18, 0.3, 2.72, materials.factoryRail, x, 1.36, z, 14);
-        addMesh(prefab, 'pyramidRefractorNode', new THREE.OctahedronGeometry(0.2, 0), materials.glowYellow, x, 2.84, z);
-      }
-      const summit = addMesh(prefab, 'pyramidKeycardSummitGlyph', new THREE.TorusGeometry(1.15, 0.08, 10, 4), materials.glowBlue, 0, 2.74, 0);
+
+      const summit = addMesh(
+        prefab,
+        'pyramidKeycardSummitGlyph',
+        new THREE.TorusGeometry(this.tileSize * 0.72, 0.1, 10, 4),
+        materials.glowBlue,
+        0,
+        center.elevation + 0.08,
+        0,
+      );
       summit.rotation.x = Math.PI / 2;
       summit.rotation.z = Math.PI / 4;
       place(
@@ -6514,6 +8062,43 @@ export class DungeonGenerator {
         place(createGirderFrame(frameWidth, 7.0), 'bossRoomLoadBearingGirder', centerX, frameZ);
         registerFrameColumns({ id: `${room.id}_loadBearingGirder`, roomId: room.id, label: 'Boss chamber load-bearing girder', x: centerX, z: frameZ, width: frameWidth, height: 7.0 });
       } else if (room.type === 'shrine') {
+        const sanctumElevation = room.refractorFocalPoint?.elevation ?? RUIN_THIRD_FLOOR_ELEVATION;
+        const sanctum = new THREE.Group();
+        sanctum.name = 'shrineTriplePillarSanctum';
+        const pillarOffsets = [
+          [-3.15, 1.525],
+          [3.15, 1.525],
+          [0, -3.05],
+        ];
+        for (const [index, [offsetX, offsetZ]] of pillarOffsets.entries()) {
+          const pillar = createMonolith(0.78, materials.largeRefractor);
+          pillar.name = `shrineFocalPillar_${index + 1}`;
+          pillar.position.set(offsetX, 0, offsetZ);
+          pillar.rotation.y = index === 2 ? Math.PI : index === 0 ? Math.PI * 0.25 : -Math.PI * 0.25;
+          sanctum.add(pillar);
+          registerSolid({
+            id: `${room.id}_focalPillar_${index + 1}`,
+            roomId: room.id,
+            label: 'Triple-pillar refractor sanctum',
+            x: centerX + offsetX,
+            z: centerZ + offsetZ,
+            elevation: sanctumElevation,
+            halfWidth: 0.86,
+            halfDepth: 0.86,
+            height: 4.25,
+          });
+        }
+        const crown = addMesh(
+          sanctum,
+          'shrineTriplePillarRefractorCrown',
+          new THREE.TorusGeometry(3.75, 0.13, 10, 48),
+          materials.largeRefractor,
+          0,
+          4.48,
+          0,
+        );
+        crown.rotation.x = Math.PI / 2;
+        place(sanctum, 'shrineTriplePillarSanctum', centerX, centerZ, 0, sanctumElevation);
         for (const sign of [-1, 1]) {
           const { x, z } = findSafeRoomPrefabCenter(
             room,
@@ -7031,6 +8616,10 @@ export class DungeonGenerator {
         const horizontal = dz !== 0;
         const line = horizontal ? tile.z + dz * 0.5 : tile.x + dx * 0.5;
         const axis = horizontal ? tile.x : tile.z;
+        const ownerId = tile.roomId ?? tile.connectorId ?? tile.type ?? 'spatial';
+        // Ownership changes do not create a physical corner. Build the facade
+        // from the continuous silhouette, then retain per-axis ownership for
+        // culling metadata and objective-biased accent placement.
         const key = `${horizontal ? 'h' : 'v'}:${dx}:${dz}:${line}`;
         let bucket = buckets.get(key);
 
@@ -7041,11 +8630,13 @@ export class DungeonGenerator {
             dz,
             line,
             axes: new Set(),
+            ownerByAxis: new Map(),
           };
           buckets.set(key, bucket);
         }
 
         bucket.axes.add(axis);
+        bucket.ownerByAxis.set(axis, ownerId);
       }
     }
 
@@ -7060,6 +8651,15 @@ export class DungeonGenerator {
       let start = axes[0];
       let previous = axes[0];
       const pushRun = () => {
+        const ownerByAxis = {};
+        const ownerIds = [];
+        for (let axis = start; axis <= previous; axis += 1) {
+          const ownerId = bucket.ownerByAxis.get(axis) ?? 'spatial';
+          ownerByAxis[axis] = ownerId;
+          if (!ownerIds.includes(ownerId)) {
+            ownerIds.push(ownerId);
+          }
+        }
         runs.push({
           horizontal: bucket.horizontal,
           dx: bucket.dx,
@@ -7068,6 +8668,10 @@ export class DungeonGenerator {
           start,
           end: previous,
           lengthTiles: previous - start + 1,
+          ownerId: ownerIds.length === 1 ? ownerIds[0] : null,
+          ownerIds,
+          ownerByAxis,
+          facadeId: `${bucket.horizontal ? 'h' : 'v'}:${bucket.dx}:${bucket.dz}:${bucket.line}:${start}:${previous}`,
         });
       };
 
@@ -7091,20 +8695,25 @@ export class DungeonGenerator {
 
   _addBoundaryWallRun(group, run, materials) {
     const lengthWorld = run.lengthTiles * this.tileSize;
+    const visualOwner = new THREE.Group();
+    visualOwner.name = 'dungeonBoundaryWallVisual';
+    visualOwner.position.set(
+      run.horizontal ? ((run.start + run.end) * 0.5) * this.tileSize : run.line * this.tileSize,
+      RUIN_WALL_HEIGHT * 0.5,
+      run.horizontal ? run.line * this.tileSize : ((run.start + run.end) * 0.5) * this.tileSize,
+    );
+    visualOwner.userData.cameraOcclusionOwner = true;
+    visualOwner.userData.roomId = run.ownerId ?? null;
+    visualOwner.userData.wallOwnerIds = [...(run.ownerIds ?? [])];
+    visualOwner.userData.wallFacadeId = run.facadeId;
     const geometry = new THREE.BoxGeometry(
       run.horizontal ? lengthWorld : RUIN_WALL_THICKNESS,
       RUIN_WALL_HEIGHT,
       run.horizontal ? RUIN_WALL_THICKNESS : lengthWorld,
     );
     const wall = new THREE.Mesh(geometry, materials.wall);
-    const axisCenter = ((run.start + run.end) * 0.5) * this.tileSize;
 
     wall.name = 'dungeonBoundaryWall';
-    wall.position.set(
-      run.horizontal ? axisCenter : run.line * this.tileSize,
-      RUIN_WALL_HEIGHT * 0.5,
-      run.horizontal ? run.line * this.tileSize : axisCenter,
-    );
     wall.userData.wallRun = {
       horizontal: run.horizontal,
       dx: run.dx,
@@ -7113,18 +8722,42 @@ export class DungeonGenerator {
       start: run.start,
       end: run.end,
       lengthTiles: run.lengthTiles,
+      ownerId: run.ownerId ?? null,
+      ownerIds: [...(run.ownerIds ?? [])],
+      ownerByAxis: { ...(run.ownerByAxis ?? {}) },
+      facadeId: run.facadeId,
     };
+    wall.userData.roomId = run.ownerId ?? null;
     wall.castShadow = true;
     wall.receiveShadow = true;
 
-    this._addMacroWallFace(wall, run, lengthWorld, materials);
-    group.add(wall);
+    visualOwner.add(wall);
+    const batchState = {
+      macroBatches: new Map(),
+      accentBatches: new Map(),
+      geometryCache: new Map(),
+      chunkWorldSize: this.tileSize * 8,
+    };
+    this._addMacroWallFace(visualOwner, run, lengthWorld, materials, batchState);
+    this._flushMacroWallInstanceBatches(visualOwner, run, batchState);
+    group.add(visualOwner);
   }
 
-  _addMacroWallFace(wall, run, lengthWorld, materials) {
+  _addMacroWallFace(wall, run, lengthWorld, materials, batchState) {
     const faceOffset = RUIN_WALL_THICKNESS * 0.5 + RUIN_WALL_FACE_OFFSET;
     const addFace = (normalX, normalZ) => {
-      this._addMacroWallTileGrid(wall, run, lengthWorld, materials, normalX, normalZ, faceOffset);
+      const isInteriorFace = normalX === -run.dx && normalZ === -run.dz;
+      this._addMacroWallTileGrid(
+        wall,
+        run,
+        lengthWorld,
+        materials,
+        normalX,
+        normalZ,
+        faceOffset,
+        isInteriorFace,
+        batchState,
+      );
     };
 
     if (run.horizontal) {
@@ -7136,43 +8769,228 @@ export class DungeonGenerator {
     }
   }
 
-  _addMacroWallTileGrid(wall, run, lengthWorld, materials, normalX, normalZ, faceOffset) {
-    const columns = Math.max(
-      3,
-      Math.round(lengthWorld / (RUIN_WALL_HEIGHT / RUIN_WALL_TILE_ROWS)),
-    );
+  _addMacroWallTileGrid(
+    wall,
+    run,
+    lengthWorld,
+    materials,
+    normalX,
+    normalZ,
+    faceOffset,
+    isInteriorFace = false,
+    batchState,
+  ) {
     const rows = RUIN_WALL_TILE_ROWS;
-    const tileWidth = lengthWorld / columns;
     const tileHeight = RUIN_WALL_HEIGHT / rows;
-    const geometry = new THREE.PlaneGeometry(
-      tileWidth + RUIN_WALL_TILE_OVERLAP,
-      tileHeight + RUIN_WALL_TILE_OVERLAP,
-    );
+    const columns = Math.max(1, Math.ceil(lengthWorld / tileHeight));
+    const edgeWidth = columns <= 2
+      ? lengthWorld / columns
+      : (lengthWorld - tileHeight * (columns - 2)) * 0.5;
+    const columnWidths = Array.from({ length: columns }, (_, column) => (
+      columns === 1
+        ? lengthWorld
+        : (column === 0 || column === columns - 1 ? edgeWidth : tileHeight)
+    ));
+    let alongCursor = -lengthWorld * 0.5;
 
     for (let row = 0; row < rows; row += 1) {
+      alongCursor = -lengthWorld * 0.5;
       for (let column = 0; column < columns; column += 1) {
+        const tileWidth = columnWidths[column];
         const tileName = this._getWallMacroTileName(column, row, columns, rows);
-        const tile = new THREE.Mesh(
-          geometry,
-          this._pickWallMacroTileMaterial(materials, tileName),
-        );
-        const along = -lengthWorld * 0.5 + tileWidth * (column + 0.5);
-
-        tile.name = 'dungeonBoundaryWallMacroTile';
-        tile.receiveShadow = true;
-        tile.position.y = RUIN_WALL_HEIGHT * 0.5 - tileHeight * (row + 0.5);
-
-        if (run.horizontal) {
-          tile.position.x = along;
-          tile.position.z = normalZ * faceOffset;
-          tile.rotation.y = normalZ >= 0 ? 0 : Math.PI;
-        } else {
-          tile.position.x = normalX * faceOffset;
-          tile.position.z = along;
-          tile.rotation.y = normalX >= 0 ? Math.PI / 2 : -Math.PI / 2;
+        const widthRatio = Math.min(1, tileWidth / tileHeight);
+        const cropSide = column === columns - 1 ? 'right' : 'left';
+        const geometryKey = `${tileWidth.toFixed(3)}:${cropSide}`;
+        let geometry = batchState.geometryCache.get(geometryKey);
+        if (!geometry) {
+          geometry = new THREE.PlaneGeometry(
+            tileWidth + RUIN_WALL_TILE_OVERLAP,
+            tileHeight + RUIN_WALL_TILE_OVERLAP,
+          );
+          const uv = geometry.getAttribute('uv');
+          if (widthRatio < 0.999) {
+            const minU = cropSide === 'right' ? 1 - widthRatio : 0;
+            for (let index = 0; index < uv.count; index += 1) {
+              uv.setX(index, minU + uv.getX(index) * widthRatio);
+            }
+            uv.needsUpdate = true;
+          }
+          geometry.userData.wallMacroCell = true;
+          geometry.userData.nominalCellSize = tileHeight;
+          geometry.userData.uvWidthRatio = widthRatio;
+          batchState.geometryCache.set(geometryKey, geometry);
         }
+        const along = alongCursor + tileWidth * 0.5;
+        alongCursor += tileWidth;
+        const localY = RUIN_WALL_HEIGHT * 0.5 - tileHeight * (row + 0.5);
+        let localX;
+        let localZ;
+        let rotationY;
+        if (run.horizontal) {
+          localX = along;
+          localZ = normalZ * faceOffset;
+          rotationY = normalZ >= 0 ? 0 : Math.PI;
+        } else {
+          localX = normalX * faceOffset;
+          localZ = along;
+          rotationY = normalX >= 0 ? Math.PI / 2 : -Math.PI / 2;
+        }
+        const worldX = wall.position.x + localX;
+        const worldZ = wall.position.z + localZ;
+        const chunkX = Math.floor(worldX / batchState.chunkWorldSize);
+        const chunkZ = Math.floor(worldZ / batchState.chunkWorldSize);
+        const worldAlong = run.horizontal ? worldX : worldZ;
+        const ownerAxis = Math.max(
+          run.start,
+          Math.min(run.end, Math.round(worldAlong / this.tileSize)),
+        );
+        const ownerId = run.ownerByAxis?.[ownerAxis] ?? run.ownerId ?? 'spatial';
+        const material = this._pickWallMacroTileMaterial(materials, tileName);
+        const macroBatchKey = [
+          chunkX,
+          chunkZ,
+          geometryKey,
+          material.uuid,
+        ].join(':');
+        let macroBatch = batchState.macroBatches.get(macroBatchKey);
+        if (!macroBatch) {
+          macroBatch = {
+            geometry,
+            material,
+            chunkX,
+            chunkZ,
+            entries: [],
+            records: [],
+          };
+          batchState.macroBatches.set(macroBatchKey, macroBatch);
+        }
+        const matrix = new THREE.Matrix4().makeRotationY(rotationY);
+        matrix.setPosition(localX, localY, localZ);
+        macroBatch.entries.push(matrix);
+        macroBatch.records.push({
+          grammar: tileName,
+          ownerId,
+          row,
+          column,
+          columnCount: columns,
+          width: tileWidth,
+          height: tileHeight,
+          uvWidthRatio: widthRatio,
+          cropSide,
+          normalX,
+          normalZ,
+          interiorFace: isInteriorFace,
+          chunkX,
+          chunkZ,
+        });
 
-        wall.add(tile);
+        if (isInteriorFace && tileName === 'mm') {
+          const accentHash = stableRenderHash([
+            ownerId,
+            run.horizontal ? 'h' : 'v',
+            run.line,
+            run.start,
+            column,
+            row,
+            'wall-accent',
+          ].join(':'));
+          const objectiveWall = /keycard|trap|server|shrine|boss|coolant|machine/i.test(ownerId);
+          const density = objectiveWall ? 0.16 : 0.075;
+          if ((accentHash % 1000) < density * 1000) {
+            const accentKey = WALL_MACRO_ACCENT_KEYS[
+              Math.floor(accentHash / 1000) % WALL_MACRO_ACCENT_KEYS.length
+            ];
+            const accentSize = tileHeight * (0.64 + ((accentHash >>> 8) % 10) * 0.01);
+            const accentMaterial = materials.wallMacroAccents?.[accentKey]
+              ?? materials.wallMacroTiles.mm;
+            const accentBatchKey = `${chunkX}:${chunkZ}:${accentMaterial.uuid}`;
+            let accentBatch = batchState.accentBatches.get(accentBatchKey);
+            if (!accentBatch) {
+              accentBatch = {
+                material: accentMaterial,
+                chunkX,
+                chunkZ,
+                entries: [],
+                records: [],
+              };
+              batchState.accentBatches.set(accentBatchKey, accentBatch);
+            }
+            const accentMatrix = new THREE.Matrix4().makeRotationY(rotationY);
+            accentMatrix.scale(new THREE.Vector3(accentSize, accentSize, 1));
+            accentMatrix.setPosition(
+              localX + normalX * 0.012,
+              localY,
+              localZ + normalZ * 0.012,
+            );
+            accentBatch.entries.push(accentMatrix);
+            accentBatch.records.push({
+              type: accentKey,
+              ownerId,
+              row,
+              column,
+              size: accentSize,
+              grammar: tileName,
+              integrated: true,
+              chunkX,
+              chunkZ,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  _flushMacroWallInstanceBatches(wall, run, batchState) {
+    const addInstances = ({
+      geometry,
+      material,
+      entries,
+      records,
+      chunkX,
+      chunkZ,
+      accent = false,
+    }) => {
+      const instances = new THREE.InstancedMesh(geometry, material, entries.length);
+      instances.name = accent
+        ? 'dungeonBoundaryWallAccentBatch'
+        : 'dungeonBoundaryWallMacroBatch';
+      entries.forEach((matrix, index) => instances.setMatrixAt(index, matrix));
+      instances.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      instances.instanceMatrix.needsUpdate = true;
+      instances.receiveShadow = !accent;
+      instances.userData.roomId = run.ownerId ?? null;
+      instances.userData.wallOwnerIds = [...new Set(records.map((record) => record.ownerId))];
+      instances.userData.wallFacadeId = run.facadeId;
+      instances.userData.wallChunkX = chunkX;
+      instances.userData.wallChunkZ = chunkZ;
+      if (accent) {
+        instances.userData.wallAccentBatch = true;
+        instances.userData.wallAccentCount = records.length;
+        instances.userData.wallAccentRecords = records.map((record, instanceIndex) => ({
+          ...record,
+          instanceIndex,
+        }));
+      } else {
+        instances.userData.wallMacroBatch = true;
+        instances.userData.wallMacroCellCount = records.length;
+        instances.userData.wallMacroCells = records.map((record, instanceIndex) => ({
+          ...record,
+          instanceIndex,
+        }));
+      }
+      instances.computeBoundingBox();
+      instances.computeBoundingSphere();
+      wall.add(instances);
+    };
+
+    for (const batch of batchState.macroBatches.values()) {
+      addInstances(batch);
+    }
+    if (batchState.accentBatches.size > 0) {
+      const accentGeometry = new THREE.PlaneGeometry(1, 1);
+      accentGeometry.userData.wallAccentUnitPlane = true;
+      for (const batch of batchState.accentBatches.values()) {
+        addInstances({ ...batch, geometry: accentGeometry, accent: true });
       }
     }
   }
@@ -7192,6 +9010,16 @@ export class DungeonGenerator {
     const bottom = row === rows - 1;
     const left = column === 0;
     const right = column === columns - 1;
+
+    if (columns === 1) {
+      if (top) {
+        return 'tm';
+      }
+      if (bottom) {
+        return 'bm';
+      }
+      return 'mm';
+    }
 
     if (top && left) {
       return 'tl';
@@ -7342,7 +9170,7 @@ export class DungeonGenerator {
       { id: 'Door_Alpha', from: roomById.get('keycardRoom'), to: roomById.get('trapRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Alpha', progressionTier: 1, label: 'Security Door Alpha' },
       { id: 'Door_Beta', from: roomById.get('trapRoom'), to: roomById.get('conveyorRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Beta', progressionTier: 2, label: 'Security Door Beta' },
       { id: 'Door_Gamma', from: roomById.get('conveyorRoom'), to: roomById.get('bossRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Gamma', progressionTier: 3, label: 'Security Door Gamma' },
-      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, pressurePlateId: 'conveyorVaultPlate', optional: true, label: 'Bonus Vault' },
+      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, pressurePlateId: 'conveyorVaultPlate', optional: true, sealAtDestinationThreshold: true, sealedPortal: true, label: 'Bonus Vault' },
       { id: 'Door_Shrine', from: roomById.get('bossRoom'), to: roomById.get('shrineRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Shrine_Key', progressionTier: 'Final', isShrineDoor: true, label: 'Refractor Shrine Door' },
     ];
     const doors = [];
@@ -7353,32 +9181,24 @@ export class DungeonGenerator {
         && plan.fromRoomId === descriptor.from.id
         && plan.toRoomId === descriptor.to.id
       ));
-      const plannedPath = connectionPlan?.bridgePath ?? [];
-      const midpointIndex = Math.floor((plannedPath.length - 1) * 0.5);
-      const straightDoorIndices = plannedPath
-        .map((point, index) => ({ point, index }))
-        .filter(({ index }) => {
-          const previous = plannedPath[index - 1];
-          const next = plannedPath[index + 1];
-          return previous && next
-            && (previous.x === next.x || previous.z === next.z);
-        })
-        .sort((a, b) => Math.abs(a.index - midpointIndex) - Math.abs(b.index - midpointIndex));
-      const plannedDoorIndex = straightDoorIndices[0]?.index ?? midpointIndex;
-      const plannedDoorPoint = plannedPath[plannedDoorIndex];
-      const doorX = plannedDoorPoint?.x ?? Math.round((descriptor.from.x + descriptor.to.x) * 0.5);
-      const doorZ = plannedDoorPoint?.z ?? Math.round((descriptor.from.z + descriptor.to.z) * 0.5);
+      const defaultPlacement = resolveConnectionDoorPlacement(connectionPlan, descriptor.from, descriptor.to);
+      const placement = descriptor.sealAtDestinationThreshold && connectionPlan?.toSocket
+        ? {
+          ...defaultPlacement,
+          point: { x: connectionPlan.toSocket.x, z: connectionPlan.toSocket.z },
+          alongX: Math.abs(connectionPlan.toSocket.facingX ?? 0)
+            > Math.abs(connectionPlan.toSocket.facingZ ?? 0),
+        }
+        : defaultPlacement;
+      const doorX = placement.point.x;
+      const doorZ = placement.point.z;
       const position = this._tileToWorld(
         doorX,
         doorZ,
         tiles,
       );
       const baseY = position.y;
-      const previousDoorPoint = plannedPath[Math.max(0, plannedDoorIndex - 1)];
-      const nextDoorPoint = plannedPath[Math.min(plannedPath.length - 1, plannedDoorIndex + 1)];
-      const alongX = plannedDoorPoint && previousDoorPoint && nextDoorPoint
-        ? Math.abs(nextDoorPoint.x - previousDoorPoint.x) >= Math.abs(nextDoorPoint.z - previousDoorPoint.z)
-        : Math.abs(descriptor.from.x - descriptor.to.x) > Math.abs(descriptor.from.z - descriptor.to.z);
+      const alongX = placement.alongX;
       const door = new THREE.Group();
       door.name = descriptor.id;
       door.position.copy(position);
@@ -7459,6 +9279,29 @@ export class DungeonGenerator {
         0,
         materials.wallTrim,
       );
+      if (descriptor.sealedPortal) {
+        const transomHeight = Math.max(0.8, RUIN_WALL_HEIGHT - RUIN_DOOR_HEIGHT);
+        const transom = new THREE.Mesh(
+          this._createTiledBoxGeometry(
+            alongX ? RUIN_WALL_THICKNESS : portalSpan * 1.34,
+            transomHeight,
+            alongX ? portalSpan * 1.34 : RUIN_WALL_THICKNESS,
+          ),
+          [
+            materials.wallMacroTiles.mm,
+            materials.wallMacroTiles.mm,
+            materials.wallTrim,
+            materials.wallTrim,
+            materials.wallMacroTiles.mm,
+            materials.wallMacroTiles.mm,
+          ],
+        );
+        transom.name = 'vaultSealedPortalTransom';
+        transom.position.y = RUIN_DOOR_HEIGHT + transomHeight * 0.5;
+        transom.castShadow = true;
+        transom.receiveShadow = true;
+        frame.add(transom);
+      }
 
       const light = new THREE.Mesh(
         new THREE.BoxGeometry(alongX ? 0.26 : this.tileSize * 0.42, 0.08, alongX ? this.tileSize * 0.42 : 0.26),
@@ -7513,6 +9356,51 @@ export class DungeonGenerator {
     }
 
     return doors;
+  }
+
+  _resolveConveyorConsoleTile(console, room, floorTiles = [], solidZones = [], reservedKeys = new Set()) {
+    const halfW = Math.floor(room.width / 2);
+    const halfD = Math.floor(room.depth / 2);
+    const structuralColumns = new Set(
+      floorTiles
+        .filter((tile) => tile.roomId === room.id && tile.supportStyle === 'solid_mass')
+        .map((tile) => tileKey(tile.x, tile.z)),
+    );
+    const unsafeElevatedColumns = new Set(
+      floorTiles
+        .filter((tile) => (
+          tile.roomId === room.id
+          && (tile.elevation ?? 0) > 0.2
+          && tile.surface !== 'mechanicalPyramidSidePlatform'
+        ))
+        .map((tile) => tileKey(tile.x, tile.z)),
+    );
+    const candidates = floorTiles
+      .filter((tile) => (
+        tile.roomId === room.id
+        && Math.abs(tile.elevation ?? 0) <= 0.05
+        && Math.abs(tile.level ?? 0) <= 0.05
+        && tile.surface !== 'industrialRamp'
+        && tile.type !== 'conveyor'
+        && !String(tile.surface ?? '').toLowerCase().includes('conveyor')
+        && tile.x >= room.x - halfW + 2
+        && tile.x <= room.x + halfW - 2
+        && tile.z >= room.z - halfD + 2
+        && tile.z <= room.z + halfD - 2
+        && !structuralColumns.has(tileKey(tile.x, tile.z))
+        && !unsafeElevatedColumns.has(tileKey(tile.x, tile.z))
+        && !reservedKeys.has(tileKey(tile.x, tile.z))
+      ))
+      .filter((tile) => {
+        const position = this._floorTileToWorld(tile);
+        return !solidZones.some((zone) => this._isPositionInsideZone(position, zone));
+      })
+      .sort((a, b) => (
+        Math.abs(a.x - console.x) + Math.abs(a.z - console.z)
+        - Math.abs(b.x - console.x) - Math.abs(b.z - console.z)
+      ));
+
+    return candidates[0] ?? null;
   }
 
   _addRoomLandmarks(
@@ -7570,8 +9458,16 @@ export class DungeonGenerator {
           activated: false,
         };
       } else if (room.type === 'keycard') {
-        const keycardTile = this._findReachableRoomFloorTile(room, floorTiles, ['mechanicalPyramidApex', 'mechanicalPyramidSummit', 'solidPurposePlatform', 'jumpPlatform', 'secondFloor', 'keycard'])
-          ?? this._findReachableRoomFloorTile(room, floorTiles, []);
+        const pyramidCenter = room.mechanicalPyramidCenter;
+        const keycardTile = pyramidCenter
+          ? floorTiles.find((tile) => (
+            tile.roomId === room.id
+            && tile.x === pyramidCenter.x
+            && tile.z === pyramidCenter.z
+            && tile.surface === 'mechanicalPyramidSummit'
+          ))
+          : this._findReachableRoomFloorTile(room, floorTiles, ['mechanicalPyramidSummit', 'mechanicalPyramidTerrace', 'keycard'])
+            ?? this._findReachableRoomFloorTile(room, floorTiles, []);
         const keycardPosition = keycardTile
           ? this._floorTileToWorld(keycardTile)
           : roomPosition(room);
@@ -7599,8 +9495,26 @@ export class DungeonGenerator {
         const cargoObject = this._addConveyorCargoObject(group, spawnerPosition, materials);
         const spawnerObject = this._addConveyorCargoSpawner(group, spawnerPosition, materials);
 
+        const reservedConsoleKeys = new Set();
         for (const console of puzzleDefinition.consoles) {
-          const consolePosition = this._tileToWorld(console.x, console.z, tiles);
+          const safeTile = this._resolveConveyorConsoleTile(
+            console,
+            room,
+            floorTiles,
+            solidZones,
+            reservedConsoleKeys,
+          );
+          if (safeTile) {
+            console.originalX ??= console.x;
+            console.originalZ ??= console.z;
+            console.x = safeTile.x;
+            console.z = safeTile.z;
+            console.key = tileKey(safeTile.x, safeTile.z);
+            reservedConsoleKeys.add(console.key);
+          }
+          const consolePosition = safeTile
+            ? this._floorTileToWorld(safeTile)
+            : this._tileToWorld(console.x, console.z, tiles);
           const terminal = this._addMechanismTerminal(group, consolePosition, materials);
           terminal.name = `${console.id}Interactable`;
           landmarks.mechanisms.push({
@@ -7676,7 +9590,14 @@ export class DungeonGenerator {
           puzzleType: 'coolantRelay',
         });
       } else if (room.type === 'shrine') {
-        const shrinePosition = roomPosition(room, ['shrine', 'refractorWell', 'reveredMezzanine', 'refractorDais']);
+        const focalPoint = room.refractorFocalPoint;
+        const shrinePosition = focalPoint
+          ? new THREE.Vector3(
+            focalPoint.x * this.tileSize,
+            focalPoint.elevation,
+            focalPoint.z * this.tileSize,
+          )
+          : roomPosition(room, ['refractorDais', 'shrineSanctumFloor', 'shrine']);
         landmarks.shrine = {
           id: 'largeRefractor',
           object: this._addLargeRefractorShrine(group, shrinePosition, materials),
@@ -7744,6 +9665,7 @@ export class DungeonGenerator {
       { roomId: 'enemyNest', surfaces: ['jumpPlatform', 'secondFloor', 'enemy'], keycardChance: 0, rareBoost: true },
       { roomId: 'trapRoom', surfaces: ['jumpPlatform', 'basementFloor'], keycardChance: 0, rareBoost: true },
       { roomId: 'conveyorRoom', surfaces: ['jumpPlatform', 'thirdFloorGantry', 'conveyorPuzzleBelt', 'conveyor'], keycardChance: 0, rareBoost: true },
+      { roomId: 'bonusVault', surfaces: ['vaultRewardDais'], focalPoint: true, keycardChance: 0, rareBoost: true },
     ];
     for (const request of chestRequests) {
       const room = roomById.get(request.roomId);
@@ -7751,10 +9673,18 @@ export class DungeonGenerator {
         continue;
       }
 
-      const tile = this._findReachableRoomFloorTile(room, floorTiles, request.surfaces, {
-        avoidKeys: placedChestKeys,
-        preferFarthest: true,
-      });
+      const focalPoint = request.focalPoint ? room.rewardFocalPoint : null;
+      const tile = focalPoint
+        ? floorTiles.find((candidate) => (
+          candidate.roomId === room.id
+          && candidate.x === focalPoint.x
+          && candidate.z === focalPoint.z
+          && request.surfaces.includes(candidate.surface)
+        ))
+        : this._findReachableRoomFloorTile(room, floorTiles, request.surfaces, {
+          avoidKeys: placedChestKeys,
+          preferFarthest: true,
+        });
       if (tile) {
         addChest(tile, request);
       }
@@ -8369,27 +10299,47 @@ export class DungeonGenerator {
     return emitters;
   }
 
-  _roomSpawnPoints(room, floorSource = null) {
+  _roomSpawnPoints(room, floorSource = null, solidZones = []) {
     if (Array.isArray(floorSource)) {
       const surfacePreferences = {
         server: ['serverCoreFloor', 'serverUpperCatwalk', 'catwalk'],
         machine: ['machinePressZone', 'machineAssemblyConveyor', 'machineCrossBridge', 'machineUpperCatwalk'],
         coolant: ['coolantValveDeck', 'coolantServicePit', 'coolantControlBalcony', 'coolantPipeBridge'],
         enemy: ['enemy', 'secondFloor', 'catwalk', 'raisedDeck'],
-        keycard: ['keycard', 'secondFloor'],
+        keycard: ['mechanicalPyramidProcessionalStep', 'mechanicalPyramidTerrace', 'mechanicalPyramidSummit', 'keycard'],
         trap: ['basementFloor', 'industrialRamp'],
         conveyor: ['conveyor', 'conveyorPuzzleBelt', 'conveyorBridge', 'secondFloorConveyor', 'thirdFloorGantry'],
         boss: ['boss', 'raisedDeck', 'catwalk', 'thirdFloorGantry'],
-        shrine: ['shrine', 'refractorWell', 'reveredMezzanine', 'refractorDais'],
-        bonus: ['basementFloor'],
+        shrine: ['refractorDais', 'shrineSanctumFloor', 'reveredMezzanine', 'shrine'],
+        bonus: ['vaultRewardDais', 'vaultSanctumFloor'],
       }[room.type] ?? [];
-      const allRoomTiles = this._getRoomFloorTiles(room, floorSource)
+      const blockingPlatforms = this._createBlockingPlatformColumnMap(floorSource);
+      const navigableFloorTiles = floorSource.filter((tile) => (
+        !this._isFloorTileBlockedByGeneratedPlatform(tile, blockingPlatforms)
+        && !this._isFloorTileBlockedBySolidZone(tile, solidZones)
+      ));
+      const allRoomTiles = this._getRoomFloorTiles(room, navigableFloorTiles)
         .filter((tile) => !['hub', 'camp', 'entrance'].includes(tile.type));
       const startTile = this._findRoomWalkabilityStartTile(room, allRoomTiles);
-      const reachable = this._createReachableFloorTileKeySet(startTile, floorSource);
+      const reachable = this._createReachableFloorTileKeySet(startTile, navigableFloorTiles);
       const candidates = allRoomTiles
         .filter((tile) => reachable.has(this._getFloorTileGraphKey(tile)))
         .filter((tile) => tile.surface !== 'industrialRamp' && tile.surface !== 'jumpPlatform');
+      if (room.type === 'keycard') {
+        const stairLine = candidates
+          .filter((tile) => (
+            tile.surface === 'mechanicalPyramidProcessionalStep'
+            && tile.x === room.x
+          ))
+          .sort((a, b) => a.z - b.z);
+        if (stairLine.length >= 4) {
+          const stride = Math.max(1, Math.floor(stairLine.length / 6));
+          return stairLine
+            .filter((_, index) => index % stride === 0)
+            .slice(0, 6)
+            .map((tile) => this._floorTileToWorld(tile));
+        }
+      }
       const surfaceRank = new Map(surfacePreferences.map((surface, index) => [surface, index]));
       const chosen = [];
       const used = new Set();
@@ -8671,7 +10621,7 @@ export class DungeonGenerator {
       });
   }
 
-  _createEncounterDefinitions(rooms, tiles = null) {
+  _createEncounterDefinitions(rooms, tiles = null, solidZones = []) {
     const encounterRooms = [
       {
         roomId: 'alienServerRoom',
@@ -8754,6 +10704,9 @@ export class DungeonGenerator {
           roster,
           roomArchetypeId: room.archetypeId,
           roomFlavorId: room.flavorId,
+          enemyTags: enemyEffects?.favoredTags ?? [],
+          enemySuppressedTags: enemyEffects?.suppressedTags ?? [],
+          enemyHealthMultiplier: enemyEffects?.healthMultiplier ?? 1,
           enemyBehaviorModifiers: enemyEffects?.behaviorModifiers ?? [],
           zone: {
             id: `${definition.id}Zone`,
@@ -8763,7 +10716,7 @@ export class DungeonGenerator {
             halfDepth: (Math.floor(room.depth / 2) + 0.5) * this.tileSize,
             active: true,
           },
-          spawnPoints: this._roomSpawnPoints(room, tiles),
+          spawnPoints: this._roomSpawnPoints(room, tiles, solidZones),
           spawned: false,
           cleared: false,
           enemyIds: [],

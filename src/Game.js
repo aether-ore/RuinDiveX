@@ -12,6 +12,7 @@ import { ProjectileSystem } from './ProjectileSystem.js';
 import { RefractorPickupSystem } from './RefractorPickupSystem.js';
 import { UIManager } from './UIManager.js';
 import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
+import { getCombatTargetWorldPosition } from './reaverbots/CombatTarget.js';
 
 const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
 const CAMERA_LOOK_OFFSET = new THREE.Vector3(0, 1.1, 0);
@@ -29,6 +30,10 @@ const POSE_DEBUG_CAMERA_MAX_DISTANCE = 22;
 const HIT_STOP_MAX_DURATION = 0.16;
 const HIT_STOP_DEFAULT_TIME_SCALE = 0.06;
 const CAMERA_WALL_OCCLUSION_TARGET_HEIGHT = 1.25;
+const DUNGEON_RENDER_CULL_UPDATE_INTERVAL = 0.2;
+const DUNGEON_RENDER_CULL_HIDE_DISTANCE = 68;
+const DUNGEON_RENDER_CULL_SHOW_DISTANCE = 54;
+const CAMERA_OCCLUSION_BIN_SIZE = 11.2;
 const DEBUG_LEDGE_CUBE_WIDTH = 3;
 const DEBUG_LEDGE_CUBE_DEPTH = 3;
 const DEBUG_LEDGE_CUBE_HEIGHT = 3;
@@ -154,15 +159,34 @@ export class Game {
     this.bodyFacingAimOverrideFrames = 0;
     this.lockOnMovementForward = new THREE.Vector3(0, 0, 1);
     this.lockOnMovementRight = new THREE.Vector3(1, 0, 0);
+    this.lockOnMovementTargetPosition = new THREE.Vector3();
     this.lockOnMovementBasis = {
       forward: this.lockOnMovementForward,
       right: this.lockOnMovementRight,
       lockOnTarget: null,
+      lockOnTargetPosition: this.lockOnMovementTargetPosition,
     };
     this.raycaster = new THREE.Raycaster();
     this.cameraOcclusionRaycaster = new THREE.Raycaster();
-    this.cameraOcclusionWalls = [];
-    this.cameraOcclusionHiddenWalls = new Set();
+    this.cameraOcclusionEntries = [];
+    this.cameraOcclusionBins = new Map();
+    this.cameraOcclusionCandidateSet = new Set();
+    this.cameraOcclusionCandidateObjects = [];
+    this.cameraOcclusionHits = [];
+    this.cameraOcclusionOwnerByObject = new WeakMap();
+    this.cameraOcclusionHiddenOwners = new Set();
+    this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
+    this.dungeonRenderCullGroups = [];
+    this.dungeonRenderCullAccumulator = 0;
+    this.dungeonRenderCullStats = {
+      visibleGroupCount: 0,
+      hiddenGroupCount: 0,
+      hiddenObjectCount: 0,
+      visibleDrawObjectCount: 0,
+      hiddenDrawObjectCount: 0,
+      totalDrawObjectCount: 0,
+    };
+    this.lastDungeonResourceDisposalStats = null;
     this.aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.pointerNdc = new THREE.Vector2();
     this.aimReticle = null;
@@ -256,6 +280,7 @@ export class Game {
     this._syncAnimationPreviewDataset();
     this._syncBrowserTestDataset();
     this._updateCamera(1);
+    this._updateDungeonRenderCulling(0, { force: true });
   }
 
   start() {
@@ -1197,19 +1222,20 @@ export class Game {
       this.inventory.gold -= cost;
     }
 
+    const previousDungeon = this.dungeon;
     this._clearDungeonRunState();
-
-    if (this.dungeon?.group) {
-      this.dungeon.group.removeFromParent();
-    }
-
     const dungeon = new DungeonGenerator({ difficulty: this.ruinFloor }).generate();
+    previousDungeon?.group?.removeFromParent?.();
     this.dungeon = dungeon;
     this.platformingPlatforms = [...(dungeon.platforms ?? [])];
     this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
+    this.lastDungeonResourceDisposalStats = this._disposeDetachedDungeonResources(
+      previousDungeon?.group,
+    );
     this._collectCameraOcclusionWalls();
+    this._collectDungeonRenderCullGroups();
     this._rebuildDebugLedgeTester(dungeon.playerStart);
     this.dungeonController = new DungeonController(this, dungeon);
 
@@ -1217,6 +1243,7 @@ export class Game {
     this.player.lastMoveDirection.set(0, 0, 1);
     this.player.faceDirection(this.player.lastMoveDirection);
     this.cameraController.snapTo(this.player);
+    this._updateDungeonRenderCulling(0, { force: true });
 
     this.spawner = new EnemySpawner(this);
     this.spawner.spawnInitialPack();
@@ -1268,18 +1295,23 @@ export class Game {
               : 0xffffff;
 
     const hitPosition = meta.hitPosition ?? enemy.root.position;
-    const hitEffectColor = meta.shieldBlocked ? 0xffd36f : meta.projectileHit ? 0xffffff : color;
-    this.addDamageNumber(enemy.root.position, dealt, meta.shieldBlocked ? 0xffd36f : color, meta.critical);
+    const damageColor = meta.shieldBlocked ? 0xffd36f : meta.weakPointHit ? 0xffe36e : color;
+    const hitEffectColor = meta.shieldBlocked ? 0xffd36f : meta.weakPointHit ? 0xffe36e : meta.projectileHit ? 0xffffff : color;
+    if (dealt > 0) {
+      this.addDamageNumber(enemy.root.position, dealt, damageColor, meta.critical || meta.weakPointHit);
+    }
 
-    if (!meta.shieldBlocked) {
+    if (!meta.shieldBlocked && dealt > 0) {
       this.addHitEffect(hitPosition, hitEffectColor, meta.critical ? 0.85 : 0.55, {
         absolute: Boolean(meta.hitPosition),
       });
     }
 
-    if (meta.shieldBlocked && dealt > 0) {
-      this.addParticleBurst(hitPosition, 0xffd36f, 11, 0.075);
+    if (meta.shieldBlocked) {
+      this.addParticleBurst(hitPosition, 0xffd36f, meta.damageNullified ? 14 : 11, 0.075);
       this.addParticleBurst(hitPosition, 0xffffff, 4, 0.045);
+    } else if (meta.weakPointHit && dealt > 0) {
+      this.addParticleBurst(hitPosition, 0xffe36e, 14, 0.105);
     } else if (meta.projectileHit && dealt > 0) {
       this.addParticleBurst(hitPosition, 0xfff0a3, 9, 0.09);
       this.addParticleBurst(hitPosition, 0xffc533, 5, 0.055);
@@ -1569,7 +1601,11 @@ export class Game {
     }
 
     if ((meta.damagePlayer ?? true) && this.player.root.position.distanceTo(position) <= radius && !this.player.dead) {
-      const dealt = this.player.takeDamage(damage * (meta.playerDamageScale ?? 0.35), meta.source ?? null);
+      const dealt = this.player.takeDamage(damage * (meta.playerDamageScale ?? 0.35), meta.source ?? null, {
+        impactPosition: position,
+        attackKind: meta.attackKind ?? 'explosion',
+        unblockable: Boolean(meta.unblockable),
+      });
       if (dealt > 0) {
         this.requestHitStop(meta.playerHitStopDuration ?? meta.hitStopDuration ?? 0.11, {
           timeScale: meta.hitStopTimeScale ?? 0.05,
@@ -1665,6 +1701,7 @@ export class Game {
           movementForward: movementBasis.forward,
           movementRight: movementBasis.right,
           lockOnTarget: movementBasis.lockOnTarget,
+          lockOnTargetPosition: movementBasis.lockOnTargetPosition,
           aimWorld: this.pointer.aimWorld,
           projectileAimInputHeld: Boolean(this.pointer.primary || this.pointer.secondary),
           groundY: playerGroundY,
@@ -1709,6 +1746,7 @@ export class Game {
       this.poseDebugHandleGroup.visible = false;
     }
     this._updateCamera(dt);
+    this._updateDungeonRenderCulling(dt);
     this._updateCameraWallOcclusion();
     this.ui.update(dt);
     this._syncBrowserTestDataset();
@@ -1801,7 +1839,8 @@ export class Game {
       return this.cameraController.getMovementBasis(this.player.lastMoveDirection);
     }
 
-    this.lockOnMovementForward.copy(lockOnTarget.root.position).sub(this.player.root.position);
+    getCombatTargetWorldPosition(lockOnTarget, this.lockOnMovementTargetPosition);
+    this.lockOnMovementForward.copy(this.lockOnMovementTargetPosition).sub(this.player.root.position);
     this.lockOnMovementForward.y = 0;
 
     if (this.lockOnMovementForward.lengthSq() <= 0.0001) {
@@ -1852,6 +1891,7 @@ export class Game {
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
     this._collectCameraOcclusionWalls();
+    this._collectDungeonRenderCullGroups();
     this._rebuildDebugLedgeTester(dungeon.playerStart);
 
   }
@@ -2020,15 +2060,16 @@ export class Game {
   }
 
   _createPlatformLedgeCandidates(platform) {
-    if (!platform) {
+    if (!platform || platform.createsLedgeCandidates === false) {
       return [];
     }
 
     const xHalf = platform.halfWidth;
     const zHalf = platform.halfDepth;
     const { center, topY } = platform;
-    return [
+    const candidates = [
       {
+        edge: 'front',
         id: `${platform.id}-front-ledge`,
         center: new THREE.Vector3(center.x, topY, center.z - zHalf),
         normal: new THREE.Vector3(0, 0, -1),
@@ -2037,6 +2078,7 @@ export class Game {
         topY,
       },
       {
+        edge: 'back',
         id: `${platform.id}-back-ledge`,
         center: new THREE.Vector3(center.x, topY, center.z + zHalf),
         normal: new THREE.Vector3(0, 0, 1),
@@ -2045,6 +2087,7 @@ export class Game {
         topY,
       },
       {
+        edge: 'left',
         id: `${platform.id}-left-ledge`,
         center: new THREE.Vector3(center.x - xHalf, topY, center.z),
         normal: new THREE.Vector3(-1, 0, 0),
@@ -2053,6 +2096,7 @@ export class Game {
         topY,
       },
       {
+        edge: 'right',
         id: `${platform.id}-right-ledge`,
         center: new THREE.Vector3(center.x + xHalf, topY, center.z),
         normal: new THREE.Vector3(1, 0, 0),
@@ -2061,6 +2105,14 @@ export class Game {
         topY,
       },
     ];
+    if (Number.isFinite(platform.minimumHangRootY)) {
+      for (const candidate of candidates) {
+        candidate.minimumHangRootY = platform.minimumHangRootY;
+      }
+    }
+    return Array.isArray(platform.ledgeEdges)
+      ? candidates.filter((candidate) => platform.ledgeEdges.includes(candidate.edge))
+      : candidates;
   }
 
   _addDebugLedge(group, {
@@ -2265,9 +2317,13 @@ export class Game {
     const lateral = THREE.MathUtils.clamp(best.lateral, -ledge.halfSpan + 0.28, ledge.halfSpan - 0.28);
     tempVectorC.copy(ledge.center).addScaledVector(ledge.axis, lateral);
 
+    const authoredHangY = ledge.topY - DEBUG_LEDGE_HANG_ROOT_DROP;
+    const hangY = Number.isFinite(ledge.minimumHangRootY)
+      ? Math.max(authoredHangY, ledge.minimumHangRootY)
+      : authoredHangY;
     const hangPosition = tempVectorC.clone()
       .addScaledVector(ledge.normal, DEBUG_LEDGE_HANG_OFFSET)
-      .setY(ledge.topY - DEBUG_LEDGE_HANG_ROOT_DROP);
+      .setY(hangY);
     const climbPosition = tempVectorC.clone()
       .addScaledVector(ledge.normal, -DEBUG_LEDGE_CLIMB_INSET)
       .setY(ledge.topY + 0.02);
@@ -2283,6 +2339,9 @@ export class Game {
       handPosition,
       climbPosition,
       autoClimb: best.autoClimb,
+      minimumRootY: Number.isFinite(ledge.minimumHangRootY)
+        ? ledge.minimumHangRootY
+        : null,
     });
 
     if (started) {
@@ -2293,7 +2352,10 @@ export class Game {
   }
 
   _clearDungeonRunState() {
+    this.combat?._clearLockOn?.();
+
     for (const enemy of this.enemies) {
+      enemy.dispose?.();
       enemy.root.removeFromParent();
     }
     this.enemies.length = 0;
@@ -2314,6 +2376,7 @@ export class Game {
 
     for (const effect of this.timedEffects) {
       effect.object?.removeFromParent?.();
+      this._disposeTimedEffectObject(effect.object);
     }
     this.timedEffects.length = 0;
 
@@ -2337,6 +2400,101 @@ export class Game {
     this.activeParticles.length = 0;
   }
 
+  _collectRenderResources(root) {
+    const geometries = new Set();
+    const materials = new Set();
+    const textures = new Set();
+    const collectMaterial = (material) => {
+      if (!material || materials.has(material)) {
+        return;
+      }
+      materials.add(material);
+      for (const value of Object.values(material)) {
+        if (value?.isTexture) {
+          textures.add(value);
+        }
+      }
+      for (const uniform of Object.values(material.uniforms ?? {})) {
+        const value = uniform?.value;
+        if (value?.isTexture) {
+          textures.add(value);
+        } else if (Array.isArray(value)) {
+          for (const entry of value) {
+            if (entry?.isTexture) {
+              textures.add(entry);
+            }
+          }
+        }
+      }
+    };
+
+    root?.traverse?.((object) => {
+      if (object.geometry?.isBufferGeometry) {
+        geometries.add(object.geometry);
+      }
+      const objectMaterials = Array.isArray(object.material)
+        ? object.material
+        : [object.material];
+      objectMaterials.forEach(collectMaterial);
+      if (object.skeleton?.boneTexture?.isTexture) {
+        textures.add(object.skeleton.boneTexture);
+      }
+    });
+
+    return { geometries, materials, textures };
+  }
+
+  _disposeDetachedDungeonResources(detachedRoot) {
+    const emptyStats = {
+      geometryCount: 0,
+      materialCount: 0,
+      textureCount: 0,
+      disposedGeometryCount: 0,
+      disposedMaterialCount: 0,
+      disposedTextureCount: 0,
+      preservedGeometryCount: 0,
+      preservedMaterialCount: 0,
+      preservedTextureCount: 0,
+    };
+    if (!detachedRoot) {
+      return emptyStats;
+    }
+
+    const owned = this._collectRenderResources(detachedRoot);
+    // The replacement dungeon is already live in the scene. Protect every
+    // resource still referenced anywhere outside the detached dungeon before
+    // releasing the old GPU allocations, including deliberately shared maps.
+    const live = this._collectRenderResources(this.scene);
+    const disposeUnreferenced = (ownedResources, liveResources) => {
+      let disposedCount = 0;
+      let preservedCount = 0;
+      for (const resource of ownedResources) {
+        if (liveResources.has(resource)) {
+          preservedCount += 1;
+          continue;
+        }
+        resource.dispose?.();
+        disposedCount += 1;
+      }
+      return { disposedCount, preservedCount };
+    };
+    const geometryResult = disposeUnreferenced(owned.geometries, live.geometries);
+    const materialResult = disposeUnreferenced(owned.materials, live.materials);
+    const textureResult = disposeUnreferenced(owned.textures, live.textures);
+
+    return {
+      geometryCount: owned.geometries.size,
+      materialCount: owned.materials.size,
+      textureCount: owned.textures.size,
+      disposedGeometryCount: geometryResult.disposedCount,
+      disposedMaterialCount: materialResult.disposedCount,
+      disposedTextureCount: textureResult.disposedCount,
+      preservedGeometryCount: geometryResult.preservedCount,
+      preservedMaterialCount: materialResult.preservedCount,
+      preservedTextureCount: textureResult.preservedCount,
+    };
+  }
+
   _buildAimReticle() {
     const material = new THREE.MeshBasicMaterial({
       color: 0x77e8ff,
@@ -2354,51 +2512,206 @@ export class Game {
   }
 
   _collectCameraOcclusionWalls() {
-    for (const wall of this.cameraOcclusionHiddenWalls) {
-      wall.visible = true;
+    for (const owner of this.cameraOcclusionHiddenOwners) {
+      owner.visible = this.cameraOcclusionOwnerBaseVisibility.get(owner) ?? true;
     }
 
-    this.cameraOcclusionHiddenWalls.clear();
-    this.cameraOcclusionWalls.length = 0;
+    this.cameraOcclusionHiddenOwners.clear();
+    this.cameraOcclusionEntries.length = 0;
+    this.cameraOcclusionBins.clear();
+    this.cameraOcclusionCandidateSet.clear();
+    this.cameraOcclusionCandidateObjects.length = 0;
+    this.cameraOcclusionHits.length = 0;
+    this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
+    this.cameraOcclusionOwnerByObject = new WeakMap();
 
     this.dungeon?.group?.traverse?.((object) => {
-      if (object.name !== 'dungeonBoundaryWall') {
+      const isWall = object.name === 'dungeonBoundaryWall'
+        || object.name === 'factoryBasementRetainingWall'
+        || object.name === 'factoryBasementEntryBackdrop'
+        || object.name === 'factoryBasementEntryRevealWall';
+      if (!isWall && object.userData?.cameraOcclusionSurface !== true) {
         return;
       }
-
-      this.cameraOcclusionWalls.push(object);
+      let owner = object;
+      while (owner.parent && owner.parent !== this.dungeon.group) {
+        if (owner.userData?.cameraOcclusionOwner) {
+          break;
+        }
+        owner = owner.parent;
+      }
+      if (!owner.userData?.cameraOcclusionOwner) {
+        owner = object;
+      }
+      this.cameraOcclusionOwnerBaseVisibility.set(owner, owner.visible);
+      const bounds = new THREE.Box3().setFromObject(object);
+      const entry = { object, owner, bounds };
+      this.cameraOcclusionEntries.push(entry);
+      this.cameraOcclusionOwnerByObject.set(object, owner);
+      const minBinX = Math.floor(bounds.min.x / CAMERA_OCCLUSION_BIN_SIZE);
+      const maxBinX = Math.floor(bounds.max.x / CAMERA_OCCLUSION_BIN_SIZE);
+      const minBinZ = Math.floor(bounds.min.z / CAMERA_OCCLUSION_BIN_SIZE);
+      const maxBinZ = Math.floor(bounds.max.z / CAMERA_OCCLUSION_BIN_SIZE);
+      for (let binX = minBinX; binX <= maxBinX; binX += 1) {
+        for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
+          const binKey = `${binX},${binZ}`;
+          const bin = this.cameraOcclusionBins.get(binKey) ?? [];
+          bin.push(entry);
+          this.cameraOcclusionBins.set(binKey, bin);
+        }
+      }
     });
   }
 
   _updateCameraWallOcclusion() {
-    for (const wall of this.cameraOcclusionHiddenWalls) {
-      wall.visible = true;
+    for (const owner of this.cameraOcclusionHiddenOwners) {
+      owner.visible = this.cameraOcclusionOwnerBaseVisibility.get(owner) ?? true;
     }
-    this.cameraOcclusionHiddenWalls.clear();
+    this.cameraOcclusionHiddenOwners.clear();
 
-    if (!this.cameraOcclusionWalls.length || !this.player?.root) {
+    if (!this.cameraOcclusionEntries.length || !this.player?.root) {
       return;
     }
 
-    tempVectorA.copy(this.player.root.position);
-    tempVectorA.y += CAMERA_WALL_OCCLUSION_TARGET_HEIGHT;
-    tempVectorB.copy(tempVectorA).sub(this.camera.position);
-    const distance = tempVectorB.length();
+    tempVectorC.set(1, 0, 0).applyQuaternion(this.camera.quaternion).setY(0);
+    if (tempVectorC.lengthSq() <= 0.0001) {
+      tempVectorC.set(1, 0, 0);
+    } else {
+      tempVectorC.normalize();
+    }
+    const targetOffsets = [0, -0.42, 0.42];
+    for (const offset of targetOffsets) {
+      tempVectorA.copy(this.player.root.position)
+        .addScaledVector(tempVectorC, offset);
+      tempVectorA.y += CAMERA_WALL_OCCLUSION_TARGET_HEIGHT;
+      tempVectorB.copy(tempVectorA).sub(this.camera.position);
+      const distance = tempVectorB.length();
+      if (distance <= 0.001) {
+        continue;
+      }
+      const minX = Math.min(this.camera.position.x, tempVectorA.x) - 1.5;
+      const maxX = Math.max(this.camera.position.x, tempVectorA.x) + 1.5;
+      const minY = Math.min(this.camera.position.y, tempVectorA.y) - 0.5;
+      const maxY = Math.max(this.camera.position.y, tempVectorA.y) + 0.5;
+      const minZ = Math.min(this.camera.position.z, tempVectorA.z) - 1.5;
+      const maxZ = Math.max(this.camera.position.z, tempVectorA.z) + 1.5;
+      this.cameraOcclusionCandidateSet.clear();
+      this.cameraOcclusionCandidateObjects.length = 0;
+      const minBinX = Math.floor(minX / CAMERA_OCCLUSION_BIN_SIZE);
+      const maxBinX = Math.floor(maxX / CAMERA_OCCLUSION_BIN_SIZE);
+      const minBinZ = Math.floor(minZ / CAMERA_OCCLUSION_BIN_SIZE);
+      const maxBinZ = Math.floor(maxZ / CAMERA_OCCLUSION_BIN_SIZE);
+      for (let binX = minBinX; binX <= maxBinX; binX += 1) {
+        for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
+          for (const entry of this.cameraOcclusionBins.get(`${binX},${binZ}`) ?? []) {
+            if (
+              this.cameraOcclusionCandidateSet.has(entry)
+              || entry.bounds.max.x < minX
+              || entry.bounds.min.x > maxX
+              || entry.bounds.max.y < minY
+              || entry.bounds.min.y > maxY
+              || entry.bounds.max.z < minZ
+              || entry.bounds.min.z > maxZ
+            ) {
+              continue;
+            }
+            this.cameraOcclusionCandidateSet.add(entry);
+            this.cameraOcclusionCandidateObjects.push(entry.object);
+          }
+        }
+      }
+      tempVectorB.divideScalar(distance);
+      this.cameraOcclusionRaycaster.set(this.camera.position, tempVectorB);
+      this.cameraOcclusionRaycaster.near = 0.08;
+      this.cameraOcclusionRaycaster.far = Math.max(0.08, distance - 0.08);
+      this.cameraOcclusionHits.length = 0;
+      const hits = this.cameraOcclusionRaycaster.intersectObjects(
+        this.cameraOcclusionCandidateObjects,
+        false,
+        this.cameraOcclusionHits,
+      );
+      for (const hit of hits) {
+        const owner = this.cameraOcclusionOwnerByObject.get(hit.object) ?? hit.object;
+        owner.visible = false;
+        this.cameraOcclusionHiddenOwners.add(owner);
+      }
+    }
+  }
 
-    if (distance <= 0.001) {
+  _collectDungeonRenderCullGroups() {
+    for (const descriptor of this.dungeonRenderCullGroups) {
+      if (descriptor.group) {
+        descriptor.group.visible = true;
+      }
+    }
+    this.dungeonRenderCullGroups = [...(this.dungeon?.renderCullGroups ?? [])];
+    this.dungeonRenderCullAccumulator = 0;
+  }
+
+  _distanceToRenderCullBounds(position, descriptor) {
+    if (!position || !descriptor) {
+      return Infinity;
+    }
+    const dx = position.x < descriptor.minX
+      ? descriptor.minX - position.x
+      : position.x > descriptor.maxX
+        ? position.x - descriptor.maxX
+        : 0;
+    const dz = position.z < descriptor.minZ
+      ? descriptor.minZ - position.z
+      : position.z > descriptor.maxZ
+        ? position.z - descriptor.maxZ
+        : 0;
+    return Math.hypot(dx, dz);
+  }
+
+  _updateDungeonRenderCulling(dt = 0, { force = false } = {}) {
+    if (!this.dungeonRenderCullGroups.length || !this.player?.root || !this.camera) {
       return;
     }
-
-    tempVectorB.divideScalar(distance);
-    this.cameraOcclusionRaycaster.set(this.camera.position, tempVectorB);
-    this.cameraOcclusionRaycaster.near = 0.08;
-    this.cameraOcclusionRaycaster.far = Math.max(0.08, distance - 0.08);
-
-    const hits = this.cameraOcclusionRaycaster.intersectObjects(this.cameraOcclusionWalls, false);
-    for (const hit of hits) {
-      hit.object.visible = false;
-      this.cameraOcclusionHiddenWalls.add(hit.object);
+    this.dungeonRenderCullAccumulator += Math.max(0, dt);
+    if (!force && this.dungeonRenderCullAccumulator < DUNGEON_RENDER_CULL_UPDATE_INTERVAL) {
+      return;
     }
+    this.dungeonRenderCullAccumulator = 0;
+    let visibleGroupCount = 0;
+    let hiddenGroupCount = 0;
+    let hiddenObjectCount = 0;
+    let visibleDrawObjectCount = 0;
+    let hiddenDrawObjectCount = 0;
+    for (const descriptor of this.dungeonRenderCullGroups) {
+      const renderGroup = descriptor.group;
+      if (!renderGroup) {
+        continue;
+      }
+      const distance = Math.min(
+        this._distanceToRenderCullBounds(this.player.root.position, descriptor),
+        this._distanceToRenderCullBounds(this.camera.position, descriptor),
+      );
+      if (renderGroup.visible && distance > DUNGEON_RENDER_CULL_HIDE_DISTANCE) {
+        renderGroup.visible = false;
+      } else if (!renderGroup.visible && distance < DUNGEON_RENDER_CULL_SHOW_DISTANCE) {
+        renderGroup.visible = true;
+      }
+      renderGroup.userData.distanceCulled = !renderGroup.visible;
+      const drawObjectCount = descriptor.drawObjectCount ?? descriptor.objectCount ?? 0;
+      if (renderGroup.visible) {
+        visibleGroupCount += 1;
+        visibleDrawObjectCount += drawObjectCount;
+      } else {
+        hiddenGroupCount += 1;
+        hiddenObjectCount += drawObjectCount;
+        hiddenDrawObjectCount += drawObjectCount;
+      }
+    }
+    this.dungeonRenderCullStats = {
+      visibleGroupCount,
+      hiddenGroupCount,
+      hiddenObjectCount,
+      visibleDrawObjectCount,
+      hiddenDrawObjectCount,
+      totalDrawObjectCount: visibleDrawObjectCount + hiddenDrawObjectCount,
+    };
   }
 
   _updateAimFromPointer() {
@@ -2857,6 +3170,7 @@ export class Game {
       enemy.update(dt, this);
 
       if (enemy.dead && enemy.deathTimer <= 0) {
+        enemy.dispose?.();
         enemy.root.removeFromParent();
         this.enemies.splice(i, 1);
       }
@@ -2877,7 +3191,9 @@ export class Game {
           hazard.tickTimer = tickInterval;
 
           for (const enemy of this.enemies) {
-            if (enemy.dead || enemy.root.position.distanceTo(hazard.object.position) > hazard.radius + enemy.radius) {
+            if (enemy.dead
+              || (enemy.navigationMode === 'air' && hazard.groundOnly !== false)
+              || enemy.root.position.distanceTo(hazard.object.position) > hazard.radius + enemy.radius) {
               continue;
             }
 
@@ -3012,6 +3328,20 @@ export class Game {
     }
   }
 
+  _disposeTimedEffectObject(object) {
+    const geometries = new Set();
+    const materials = new Set();
+    object?.traverse?.((child) => {
+      if (child.geometry) geometries.add(child.geometry);
+      const childMaterials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of childMaterials) {
+        if (material) materials.add(material);
+      }
+    });
+    for (const geometry of geometries) geometry.dispose?.();
+    for (const material of materials) material.dispose?.();
+  }
+
   _updateTimedEffects(dt) {
     for (let i = this.timedEffects.length - 1; i >= 0; i -= 1) {
       const effect = this.timedEffects[i];
@@ -3041,6 +3371,7 @@ export class Game {
 
       if (effect.life <= 0) {
         effect.object.removeFromParent();
+        this._disposeTimedEffectObject(effect.object);
         this.timedEffects.splice(i, 1);
       }
     }
@@ -3337,7 +3668,10 @@ export class Game {
   }
 
   _handleEnemyKilled(enemy, meta) {
-    enemy.onDeath(this);
+    enemy.onDeath(this, meta);
+    if (meta.selfDestruct) {
+      return;
+    }
     this.player.addExperience(enemy.stats.experience);
 
     if (meta.source === this.player && this.player.stats.explodeOnKillChance > 0 && Math.random() < this.player.stats.explodeOnKillChance) {

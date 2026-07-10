@@ -473,7 +473,7 @@ export class Player {
 
     moveVector.set(0, 0);
     const lockOnTarget = movementOptions.lockOnTarget ?? null;
-    const lockOnPosition = lockOnTarget?.root?.position ?? movementOptions.lockOnTargetPosition ?? null;
+    const lockOnPosition = movementOptions.lockOnTargetPosition ?? lockOnTarget?.root?.position ?? null;
     const lockOnActive = Boolean(lockOnPosition && !lockOnTarget?.dead);
 
     if (input.has('KeyW') || input.has('ArrowUp')) moveVector.y += 1;
@@ -1370,6 +1370,7 @@ export class Player {
       climbFarthestInward: -Infinity,
       autoClimb: ledge.autoClimb === true,
       topY: Number.isFinite(ledge.topY) ? ledge.topY : ledge.climbPosition.y,
+      minimumRootY: Number.isFinite(ledge.minimumRootY) ? ledge.minimumRootY : null,
       inputToward: false,
     };
 
@@ -1565,6 +1566,9 @@ export class Player {
       this._anchorClimbHands(this._getLedgeActionProgress());
     } else {
       this._anchorLedgeAnimationPose(this._getLedgeActionProgress());
+    }
+    if (Number.isFinite(ledge.minimumRootY)) {
+      this.root.position.y = Math.max(this.root.position.y, ledge.minimumRootY);
     }
   }
 
@@ -2357,12 +2361,17 @@ export class Player {
     this.health = THREE.MathUtils.clamp(this.stats.maxHealth * healthPercent, 1, this.stats.maxHealth);
   }
 
-  takeDamage(amount, source = null) {
+  takeDamage(amount, source = null, damageContext = {}) {
     if (this.dead) {
       return 0;
     }
 
-    const guardResult = this._getShieldGuardResult(source);
+    const damageOrigin = damageContext.impactPosition
+      ? { position: damageContext.impactPosition }
+      : source;
+    const guardResult = damageContext.unblockable
+      ? { blocked: false, parried: false, reduction: 0 }
+      : this._getShieldGuardResult(source, damageOrigin);
     const guardedAmount = amount * (1 - guardResult.reduction);
     const mitigated = guardedAmount * (100 / (100 + this.stats.armor));
 
@@ -2375,10 +2384,10 @@ export class Player {
     if (!guardResult.parried && mitigated > amount * 0.18) {
       const heavyHitThreshold = Math.max(HEAVY_HIT_MIN_DAMAGE, this.stats.maxHealth * HEAVY_HIT_HEALTH_FRACTION);
 
-      this._captureDamageHitDirection(source);
+      this._captureDamageHitDirection(damageOrigin);
 
       if (!guardResult.blocked && mitigated >= heavyHitThreshold) {
-        this._playKnockbackFall(source);
+        this._playKnockbackFall(damageOrigin);
       } else {
         this.animation.playHurt();
       }
@@ -2601,8 +2610,8 @@ export class Player {
     this.attackFacingTimer = Math.max(0, this.attackFacingTimer - dt);
   }
 
-  _getShieldGuardResult(source) {
-    if (!this.isShieldGuarding() || !this._isGuardFacingSource(source)) {
+  _getShieldGuardResult(source, damageOrigin = source) {
+    if (!this.isShieldGuarding() || !this._isGuardFacingSource(damageOrigin)) {
       return { blocked: false, parried: false, reduction: 0 };
     }
 

@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import {
+  getCombatTargetWorldPosition,
+  getEnemyCombatTargets,
+  isCombatTargetValid,
+} from './reaverbots/CombatTarget.js';
 
 const tempDirection = new THREE.Vector3();
 const tempToEnemy = new THREE.Vector3();
@@ -695,15 +700,11 @@ export class CombatSystem {
       return fallbackAimWorld;
     }
 
-    return this.lockAimWorld.set(
-      target.root.position.x,
-      target.root.position.y + 1.15,
-      target.root.position.z,
-    );
+    return getCombatTargetWorldPosition(target, this.lockAimWorld);
   }
 
   _isValidLockTarget(target) {
-    return Boolean(target?.root && !target.dead && target.root.parent);
+    return isCombatTargetValid(target);
   }
 
   _getWeaponStateForItem(weapon) {
@@ -1146,7 +1147,7 @@ export class CombatSystem {
     }
 
     for (const enemy of this.game.enemies ?? []) {
-      if (enemy.dead || (enemy.typeKey !== 'horokko' && enemy.type?.modelAsset !== 'horokko')) {
+      if (enemy.dead || (!enemy.liftable && enemy.typeKey !== 'horokko' && enemy.type?.modelAsset !== 'horokko')) {
         continue;
       }
 
@@ -1226,8 +1227,7 @@ export class CombatSystem {
     const rapid = Math.max(0.25, player.stats.attackSpeed);
     const cooldownReduction = THREE.MathUtils.clamp(player.stats.cooldownReduction ?? 0, 0, 0.75);
     const cooldown = Math.max(0.16, (1 / rapid) * (profile.salvoCooldownMultiplier ?? 1.7) * (1 - cooldownReduction));
-    const targetPoint = target.root.position.clone();
-    targetPoint.y += 1.15;
+    const targetPoint = getCombatTargetWorldPosition(target, new THREE.Vector3());
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
     const count = Math.max(2, Math.round(profile.salvoCount ?? 3));
     const spread = profile.salvoSpread ?? 0.18;
@@ -1291,7 +1291,7 @@ export class CombatSystem {
       state.reloadTimer = state.reloadDuration;
     }
 
-    this._showMissileSalvoPulse(origin, target.root.position, color);
+    this._showMissileSalvoPulse(origin, targetPoint, color);
     return true;
   }
 
@@ -2600,7 +2600,7 @@ export class CombatSystem {
 
     if (manualAimLock && this._isValidLockTarget(this.lockOn.target)) {
       const range = Math.max(2, profile.homingRange ?? this.game.player.stats.attackRange);
-      tempFlat.copy(this.lockOn.target.root.position).sub(this.game.player.root.position);
+      getCombatTargetWorldPosition(this.lockOn.target, tempFlat).sub(this.game.player.root.position);
       tempFlat.y = 0;
 
       if (tempFlat.lengthSq() <= range * range) {
@@ -2637,28 +2637,35 @@ export class CombatSystem {
   _findLockCandidate(profile) {
     const player = this.game.player;
     const range = Math.max(2, profile.homingRange ?? player.stats.attackRange);
-    let bestEnemy = null;
+    let bestTarget = null;
     let nearestDistanceSq = Infinity;
 
     for (const enemy of this.game.enemies) {
-      if (enemy.dead || enemy.id === this.lockOn.skippedTargetId) {
+      if (enemy.dead) {
         continue;
       }
 
-      tempToEnemy.copy(enemy.root.position).sub(player.root.position);
-      tempToEnemy.y = 0;
-      const distanceSq = tempToEnemy.lengthSq();
-      if (distanceSq > range * range || distanceSq <= 0.001) {
-        continue;
-      }
+      for (const target of getEnemyCombatTargets(enemy)) {
+        if (!isCombatTargetValid(target) || target.id === this.lockOn.skippedTargetId) {
+          continue;
+        }
 
-      if (distanceSq < nearestDistanceSq) {
-        nearestDistanceSq = distanceSq;
-        bestEnemy = enemy;
+        getCombatTargetWorldPosition(target, tempToEnemy).sub(player.root.position);
+        tempToEnemy.y = 0;
+        const distanceSq = tempToEnemy.lengthSq();
+        if (distanceSq > range * range || distanceSq <= 0.001) {
+          continue;
+        }
+
+        const score = distanceSq * (target.isWeakPointTarget ? 0.94 : 1);
+        if (score < nearestDistanceSq) {
+          nearestDistanceSq = score;
+          bestTarget = target;
+        }
       }
     }
 
-    return bestEnemy;
+    return bestTarget;
   }
 
   _ensureLockMarker() {
@@ -2699,8 +2706,10 @@ export class CombatSystem {
     const marker = this._ensureLockMarker();
     const color = this.lockOn.progress >= 1 ? 0x7ee7ff : 0xffd36f;
     marker.visible = true;
-    marker.position.copy(this.lockOn.target.root.position);
-    marker.position.y += 1.95;
+    getCombatTargetWorldPosition(this.lockOn.target, marker.position);
+    if (!this.lockOn.target.isWeakPointTarget) {
+      marker.position.y += 0.58;
+    }
     marker.rotation.y += 0.08;
     marker.scale.setScalar(0.78 + this.lockOn.progress * 0.34);
 
@@ -3035,29 +3044,11 @@ export class CombatSystem {
     const player = this.game.player;
     const heatCurve = THREE.MathUtils.smoothstep(heat, 0, 1);
     const beamWidth = (profile.beamWidth ?? 0.34) * (1 + heatCurve * (profile.maxHeatWidthBonus ?? 0.95));
-    tempStart.copy(origin);
+    const candidates = this._getLineHitCandidates(origin, direction, range, beamWidth, {
+      preserveVertical: true,
+    });
 
-    for (const enemy of this.game.enemies) {
-      if (enemy.dead) {
-        continue;
-      }
-
-      const enemyHeight = enemy.type?.modelHeight ?? Math.max(1.55, enemy.radius * 3.6);
-      tempToEnemy.set(
-        enemy.root.position.x,
-        enemy.root.position.y + enemyHeight * 0.55,
-        enemy.root.position.z,
-      ).sub(tempStart);
-      const along = tempToEnemy.dot(direction);
-      if (along < 0 || along > range) {
-        continue;
-      }
-
-      const hitRadius = beamWidth + enemy.radius;
-      const perpendicularDistanceSq = Math.max(0, tempToEnemy.lengthSq() - along * along);
-      if (perpendicularDistanceSq > hitRadius * hitRadius) {
-        continue;
-      }
+    for (const { enemy, hitInfo } of candidates) {
 
       const damageRoll = this._rollPlayerDamage(profile);
       this.game.damageEnemy(enemy, damageRoll.damage * (1 + heatCurve * (profile.maxHeatDamageBonus ?? 1.65)), {
@@ -3070,6 +3061,11 @@ export class CombatSystem {
         statusBuildup: profile.statusBuildup ?? 1,
         knockbackDirection: direction,
         knockback: 0.75,
+        directHit: true,
+        attackKind: 'beam',
+        hitPartId: hitInfo?.hitPartId ?? null,
+        weakPointHit: Boolean(hitInfo?.weakPointHit),
+        hitPosition: hitInfo?.hitPosition,
       });
     }
   }
@@ -3252,7 +3248,7 @@ export class CombatSystem {
     const color = profile.color ?? 0xffd36f;
     const candidates = this._getLineHitCandidates(player.root.position, direction, range, width);
 
-    for (const { enemy } of candidates) {
+    for (const { enemy, hitInfo } of candidates) {
       const damageRoll = this._rollPlayerDamage(profile);
       const enemyDamage = THREE.MathUtils.clamp(
         damageRoll.damage * 0.08 * (tickInterval / DRILL_TICK_INTERVAL),
@@ -3269,6 +3265,9 @@ export class CombatSystem {
         statusBuildup: profile.statusBuildup ?? 1,
         knockbackDirection: direction,
         knockback: 0.28,
+        hitPartId: hitInfo?.hitPartId ?? null,
+        weakPointHit: Boolean(hitInfo?.weakPointHit),
+        hitPosition: hitInfo?.hitPosition,
       });
     }
 
@@ -3299,7 +3298,7 @@ export class CombatSystem {
     this.game.addParticleBurst(tempEnd, color, 8, 0.12);
 
     for (let i = 0; i < Math.min(maxHits, candidates.length); i += 1) {
-      const enemy = candidates[i].enemy;
+      const { enemy, hitInfo } = candidates[i];
       const damageRoll = this._rollPlayerDamage(profile);
       this.game.damageEnemy(enemy, damageRoll.damage, {
         critical: damageRoll.critical,
@@ -3312,6 +3311,11 @@ export class CombatSystem {
         knockback: 1.8,
         hitStopDuration: damageRoll.critical ? 0.09 : 0.065,
         hitStopTimeScale: damageRoll.critical ? 0.04 : 0.06,
+        directHit: true,
+        attackKind: 'rail',
+        hitPartId: hitInfo?.hitPartId ?? null,
+        weakPointHit: Boolean(hitInfo?.weakPointHit),
+        hitPosition: hitInfo?.hitPosition,
       });
       this.game.addHitEffect(enemy.root.position, color, 0.5);
     }
@@ -3638,9 +3642,9 @@ export class CombatSystem {
     return bestEnemy;
   }
 
-  _getLineHitCandidates(start, direction, range, width) {
+  _getLineHitCandidates(start, direction, range, width, { preserveVertical = false } = {}) {
     const candidates = [];
-    const usesVerticalAim = Math.abs(direction.y) > 0.001;
+    const usesVerticalAim = preserveVertical || Math.abs(direction.y) > 0.001;
     tempStart.copy(start);
     if (!usesVerticalAim) {
       tempStart.y = 0;
@@ -3648,6 +3652,12 @@ export class CombatSystem {
 
     for (const enemy of this.game.enemies) {
       if (enemy.dead) {
+        continue;
+      }
+
+      const hitInfo = enemy.resolveLineHit?.(start, direction, range, width) ?? null;
+      if (hitInfo) {
+        candidates.push({ enemy, along: hitInfo.along, hitInfo });
         continue;
       }
 
@@ -3673,7 +3683,7 @@ export class CombatSystem {
         continue;
       }
 
-      candidates.push({ enemy, along });
+      candidates.push({ enemy, along, hitInfo: null });
     }
 
     candidates.sort((a, b) => a.along - b.along);

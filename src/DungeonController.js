@@ -435,7 +435,11 @@ export class DungeonController {
     return columns;
   }
 
-  getFloorTileAt(position, { maxVerticalGap = 1.45, allowClosest = false } = {}) {
+  getFloorTileAt(position, {
+    maxVerticalGap = 1.45,
+    allowClosest = false,
+    maxElevationAbove = Infinity,
+  } = {}) {
     const { x, z } = this.worldToTile(position);
     const column = this.floorTilesByColumn.get(tileKey(x, z));
 
@@ -449,6 +453,9 @@ export class DungeonController {
 
     for (const tile of column) {
       const elevation = this._getTileElevationAtPosition(tile, position);
+      if (elevation - y > maxElevationAbove) {
+        continue;
+      }
       const distance = Math.abs(elevation - y);
       if (distance < closestDistance) {
         closest = tile;
@@ -470,7 +477,10 @@ export class DungeonController {
   }
 
   getFloorElevationAt(position) {
-    const tile = this.getFloorTileAt(position, { allowClosest: true });
+    const tile = this.getFloorTileAt(position, {
+      allowClosest: true,
+      maxElevationAbove: 0.42,
+    }) ?? this.getFloorTileAt(position, { allowClosest: true });
     return tile ? this._getTileElevationAtPosition(tile, position) : 0;
   }
 
@@ -1266,6 +1276,21 @@ export class DungeonController {
     }
 
     const surfaceY = this.getSurfaceElevationAt(current);
+    const closestFloorTile = this.getFloorTileAt(current, { allowClosest: true });
+    const closestFloorY = closestFloorTile
+      ? this._getTileElevationAtPosition(closestFloorTile, current)
+      : surfaceY;
+    const authoredGroundedDrop = !playerJumping
+      && closestFloorTile?.allowsGroundedDropLanding === true
+      && current.y - closestFloorY > PLAYER_STEP_OFF_FALL_HEIGHT
+      && current.y - closestFloorY <= PLAYER_TRAVERSAL_ENVELOPE.safeDropHeight
+      && this._isResolvedFloorPositionWalkable(
+        tempVectorC.set(current.x, closestFloorY, current.z),
+      );
+    if (authoredGroundedDrop) {
+      this.pendingPlayerJumpOffLanding = null;
+      return;
+    }
     const groundedRiseRequiresJumpAt = (position) => {
       const tile = this.getFloorTileAt(position, { allowClosest: true });
       const candidateY = this.getSurfaceElevationAt(position);

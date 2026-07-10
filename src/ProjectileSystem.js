@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import { PLAYER_TRAVERSAL_ENVELOPE } from './TraversalCapabilities.js';
+import {
+  getCombatTargetOwner,
+  getCombatTargetWorldPosition,
+} from './reaverbots/CombatTarget.js';
 
 const DEFAULT_PROJECTILE_COLOR = 0x9fe8ff;
 const PROJECTILE_ENEMY_HIT_STOP_DURATION = 0.055;
@@ -307,6 +311,10 @@ function applyProjectileVisual(projectile, visualType, radius) {
       projectile.baseVisualScale.set(scale * 1.12, scale * 1.12, scale * 1.12);
       mesh.material.emissiveIntensity = 1;
       break;
+    case 'electricOrb':
+      projectile.baseVisualScale.set(scale * 1.28, scale * 1.28, scale * 1.28);
+      mesh.material.emissiveIntensity = 1.35;
+      break;
     case 'drillHead':
       projectile.baseVisualScale.set(scale * 0.62, scale * 0.62, scale * 1.38);
       mesh.material.emissiveIntensity = 0.78;
@@ -336,6 +344,8 @@ function getTrailInterval(visualType) {
     case 'grenade':
     case 'seeker':
       return 0.06;
+    case 'electricOrb':
+      return 0.045;
     default:
       return 0;
   }
@@ -381,6 +391,15 @@ export class ProjectileSystem {
     clusterExplosionRadius = 0.68,
     clusterSpreadRadius = 1.45,
     clusterArcHeight = 0.42,
+    lifetime = Infinity,
+    collisionRadius = radius,
+    persistentOnPlayerHit = false,
+    hitInterval = 0.35,
+    maxPlayerHits = Infinity,
+    landAsMine = false,
+    mineLifetime = 5.5,
+    mineArmDelay = 0.45,
+    mineTriggerRadius = 1.05,
   }) {
     const projectile = this._getProjectile();
     projectile.owner = owner;
@@ -412,6 +431,20 @@ export class ProjectileSystem {
     projectile.clusterExplosionRadius = clusterExplosionRadius;
     projectile.clusterSpreadRadius = clusterSpreadRadius;
     projectile.clusterArcHeight = clusterArcHeight;
+    projectile.remainingLifetime = Number.isFinite(lifetime) ? Math.max(0.01, lifetime) : Infinity;
+    projectile.collisionRadius = Math.max(radius, collisionRadius ?? radius);
+    projectile.persistentOnPlayerHit = Boolean(persistentOnPlayerHit);
+    projectile.playerHitCooldown = 0;
+    projectile.hitInterval = Math.max(0.05, hitInterval);
+    projectile.maxPlayerHits = Number.isFinite(maxPlayerHits) ? Math.max(1, Math.floor(maxPlayerHits)) : Infinity;
+    projectile.playerHitCount = 0;
+    projectile.landAsMine = Boolean(landAsMine);
+    projectile.landedMine = false;
+    projectile.mineLifetime = Math.max(0.5, mineLifetime);
+    projectile.mineArmDelay = Math.max(0.05, mineArmDelay);
+    projectile.mineArmTimer = projectile.mineArmDelay;
+    projectile.mineTriggerRadius = Math.max(radius, mineTriggerRadius);
+    projectile.mineArmed = false;
     projectile.trailTimer = 0;
     projectile.distance = 0;
     projectile.baseY = position.y;
@@ -441,6 +474,29 @@ export class ProjectileSystem {
       const projectile = this.active[i];
       const travel = projectile.speed * dt;
 
+      projectile.playerHitCooldown = Math.max(0, projectile.playerHitCooldown - dt);
+      projectile.remainingLifetime -= dt;
+      if (projectile.remainingLifetime <= 0) {
+        this._deactivate(i, true);
+        continue;
+      }
+
+      if (projectile.landedMine) {
+        projectile.mineArmTimer = Math.max(0, projectile.mineArmTimer - dt);
+        projectile.mineArmed = projectile.mineArmTimer <= 0;
+        const pulse = projectile.mineArmed
+          ? 1 + Math.sin(this.game.elapsedTime * 9) * 0.11
+          : 0.82 + (1 - projectile.mineArmTimer / projectile.mineArmDelay) * 0.18;
+        projectile.mesh.scale.copy(projectile.baseVisualScale).multiplyScalar(pulse);
+        projectile.mesh.material.emissiveIntensity = projectile.mineArmed ? 1.1 : 0.35;
+        this._updateGroundShadow(projectile);
+        if (projectile.mineArmed
+          && projectile.mesh.position.distanceTo(this.game.player.root.position) <= projectile.mineTriggerRadius + this.game.player.radius) {
+          this._deactivate(i, true);
+        }
+        continue;
+      }
+
       this._updateHoming(projectile, dt);
       projectile.mesh.position.addScaledVector(projectile.direction, travel);
       projectile.distance += travel;
@@ -465,7 +521,11 @@ export class ProjectileSystem {
       }
 
       if (projectile.distance >= projectile.range) {
-        this._deactivate(i, true);
+        if (projectile.landAsMine) {
+          this._landMine(projectile);
+        } else {
+          this._deactivate(i, true);
+        }
       }
     }
   }
@@ -484,9 +544,14 @@ export class ProjectileSystem {
         continue;
       }
 
+      const resolvedPart = enemy.resolveProjectileHit?.(
+        position,
+        projectile.radius,
+        projectile.direction,
+      ) ?? null;
       const radius = projectile.radius + enemy.radius;
       const enemyHeight = getTargetCollisionHeight(enemy);
-      if (getProjectileCapsuleDistanceSquared(position, enemy, enemyHeight) <= radius * radius) {
+      if (resolvedPart || getProjectileCapsuleDistanceSquared(position, enemy, enemyHeight) <= radius * radius) {
         if (projectile.hitEnemyIds.has(enemy.id)) {
           continue;
         }
@@ -494,7 +559,6 @@ export class ProjectileSystem {
         projectile.hitEnemyIds.add(enemy.id);
         this.game.damageEnemy(enemy, projectile.damage, {
           projectileHit: true,
-          hitPosition: position.clone(),
           enemyHitStopDuration: projectile.visualType === 'drillHead'
             ? DRILL_PROJECTILE_ENEMY_HIT_STOP_DURATION
             : PROJECTILE_ENEMY_HIT_STOP_DURATION,
@@ -509,6 +573,9 @@ export class ProjectileSystem {
           chainDamageMultiplier: projectile.chainDamageMultiplier,
           knockbackDirection: projectile.direction,
           knockback: 2.1,
+          hitPartId: resolvedPart?.hitPartId ?? null,
+          weakPointHit: Boolean(resolvedPart?.weakPointHit),
+          hitPosition: resolvedPart?.hitPosition ?? position.clone(),
         });
 
         if (projectile.explosiveRadius > 0) {
@@ -556,13 +623,20 @@ export class ProjectileSystem {
   _checkPlayerHit(projectile) {
     const player = this.game.player;
 
-    const radius = projectile.radius + player.radius;
+    if (projectile.persistentOnPlayerHit && projectile.playerHitCooldown > 0) {
+      return false;
+    }
+
+    const radius = (projectile.collisionRadius ?? projectile.radius) + player.radius;
     if (getProjectileCapsuleDistanceSquared(
       projectile.mesh.position,
       player,
       PLAYER_TRAVERSAL_ENVELOPE.standingHeight,
     ) <= radius * radius) {
-      const dealt = player.takeDamage(projectile.damage, projectile.source);
+      const dealt = player.takeDamage(projectile.damage, projectile.source, {
+        impactPosition: projectile.mesh.position,
+        attackKind: projectile.visualType,
+      });
       projectile.source?.onHitPlayer?.(player, dealt);
       this.game.addDamageNumber(player.root.position, dealt, 0xff6b5e);
       this.game.addHitEffect(player.root.position, 0xff6b5e, 0.45);
@@ -581,10 +655,28 @@ export class ProjectileSystem {
           triggerMines: false,
         });
       }
-      return true;
+      projectile.playerHitCount += 1;
+      projectile.playerHitCooldown = projectile.hitInterval;
+      return !projectile.persistentOnPlayerHit || projectile.playerHitCount >= projectile.maxPlayerHits;
     }
 
     return false;
+  }
+
+  _landMine(projectile) {
+    projectile.landedMine = true;
+    projectile.mineArmed = false;
+    projectile.mineArmTimer = projectile.mineArmDelay;
+    projectile.speed = 0;
+    projectile.distance = 0;
+    projectile.range = Infinity;
+    projectile.arcHeight = 0;
+    projectile.remainingLifetime = projectile.mineLifetime;
+    projectile.mesh.position.y = projectile.endY + Math.max(0.06, projectile.radius * 0.45);
+    projectile.mesh.rotation.set(0, 0, 0);
+    projectile.mesh.scale.copy(projectile.baseVisualScale).multiplyScalar(0.82);
+    this._ensureGroundShadow(projectile);
+    this.game.addParticleBurst(projectile.mesh.position, projectile.mesh.material.color.getHex(), 6, projectile.radius * 0.35);
   }
 
   _getProjectile() {
@@ -636,6 +728,20 @@ export class ProjectileSystem {
       clusterExplosionRadius: 0.68,
       clusterSpreadRadius: 1.45,
       clusterArcHeight: 0.42,
+      remainingLifetime: Infinity,
+      collisionRadius: 0,
+      persistentOnPlayerHit: false,
+      playerHitCooldown: 0,
+      hitInterval: 0.35,
+      maxPlayerHits: Infinity,
+      playerHitCount: 0,
+      landAsMine: false,
+      landedMine: false,
+      mineLifetime: 5.5,
+      mineArmDelay: 0.45,
+      mineArmTimer: 0.45,
+      mineTriggerRadius: 1.05,
+      mineArmed: false,
       trailTimer: 0,
       baseVisualScale: new THREE.Vector3(1, 1, 1),
       busterShotRoll: 0,
@@ -653,9 +759,15 @@ export class ProjectileSystem {
       return;
     }
 
-    let nearest = projectile.target && !projectile.target.dead && !projectile.hitEnemyIds.has(projectile.target.id)
+    const requestedOwner = getCombatTargetOwner(projectile.target);
+    let nearest = projectile.target
+      && projectile.target.active !== false
+      && !projectile.target.dead
+      && !projectile.hitEnemyIds.has(requestedOwner?.id)
       ? projectile.target
-      : null;
+      : requestedOwner && !requestedOwner.dead && !projectile.hitEnemyIds.has(requestedOwner.id)
+        ? requestedOwner
+        : null;
 
     if (!nearest && !projectile.freeHoming) {
       return;
@@ -688,12 +800,16 @@ export class ProjectileSystem {
       return;
     }
 
-    const targetHeight = getTargetCollisionHeight(nearest);
-    tempDirection.set(
-      nearest.root.position.x,
-      nearest.root.position.y + targetHeight * 0.55,
-      nearest.root.position.z,
-    ).sub(projectile.mesh.position);
+    if (nearest?.isWeakPointTarget) {
+      getCombatTargetWorldPosition(nearest, tempDirection).sub(projectile.mesh.position);
+    } else {
+      const targetHeight = getTargetCollisionHeight(nearest);
+      tempDirection.set(
+        nearest.root.position.x,
+        nearest.root.position.y + targetHeight * 0.55,
+        nearest.root.position.z,
+      ).sub(projectile.mesh.position);
+    }
 
     if (tempDirection.lengthSq() <= 0.001) {
       return;
@@ -714,7 +830,12 @@ export class ProjectileSystem {
       tempPosition.copy(mesh.position).add(projectile.direction);
       mesh.lookAt(tempPosition);
 
-      if (projectile.visualType === 'seeker') {
+      if (projectile.visualType === 'electricOrb') {
+        const pulse = 1 + Math.sin(this.game.elapsedTime * 13 + projectile.distance * 2.5) * 0.18;
+        mesh.scale.copy(projectile.baseVisualScale).multiplyScalar(pulse);
+        mesh.rotation.x += dt * 2.4;
+        mesh.rotation.y -= dt * 3.1;
+      } else if (projectile.visualType === 'seeker') {
         const pulse = 1 + Math.sin(this.game.elapsedTime * 18 + projectile.distance * 2) * 0.13;
         mesh.scale.copy(projectile.baseVisualScale).multiplyScalar(pulse);
       } else if (usesPlayerBusterShotVisual(projectile, projectile.visualType)) {
@@ -752,6 +873,9 @@ export class ProjectileSystem {
         break;
       case 'seeker':
         this.game.addParticleBurst(tempPosition, projectile.mesh.material.color.getHex(), 1, projectile.radius * 0.34);
+        break;
+      case 'electricOrb':
+        this.game.addParticleBurst(tempPosition, projectile.mesh.material.color.getHex(), 2, projectile.radius * 0.46);
         break;
       case 'drillHead':
         this.game.addParticleBurst(tempPosition, projectile.mesh.material.color.getHex(), 2, projectile.radius * 0.22);
@@ -804,7 +928,7 @@ export class ProjectileSystem {
   }
 
   _spawnClusterProjectiles(projectile) {
-    if (projectile.clusterCount <= 0 || projectile.owner !== 'player') {
+    if (projectile.clusterCount <= 0) {
       return;
     }
 
@@ -882,6 +1006,20 @@ export class ProjectileSystem {
     projectile.clusterExplosionRadius = 0.68;
     projectile.clusterSpreadRadius = 1.45;
     projectile.clusterArcHeight = 0.42;
+    projectile.remainingLifetime = Infinity;
+    projectile.collisionRadius = 0;
+    projectile.persistentOnPlayerHit = false;
+    projectile.playerHitCooldown = 0;
+    projectile.hitInterval = 0.35;
+    projectile.maxPlayerHits = Infinity;
+    projectile.playerHitCount = 0;
+    projectile.landAsMine = false;
+    projectile.landedMine = false;
+    projectile.mineLifetime = 5.5;
+    projectile.mineArmDelay = 0.45;
+    projectile.mineArmTimer = 0.45;
+    projectile.mineTriggerRadius = 1.05;
+    projectile.mineArmed = false;
     projectile.trailTimer = 0;
     projectile.busterShotRoll = 0;
     setBusterShotVisible(projectile, false);

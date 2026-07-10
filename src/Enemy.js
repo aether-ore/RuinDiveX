@@ -713,6 +713,17 @@ export class Enemy {
       this.knockback.multiplyScalar(Math.pow(0.08, dt));
     }
 
+    const customBehavior = this._updateCustomBehavior?.(dt, game);
+    if (customBehavior?.handled) {
+      this.animation.update(dt, {
+        moving: Boolean(customBehavior.moving),
+        moveAmount: customBehavior.moveAmount ?? (customBehavior.moving ? 1 : 0),
+      });
+      this._updateExternalModelVisual(dt, Boolean(customBehavior.moving));
+      this._updateHealthBar(game.camera);
+      return;
+    }
+
     const player = game.player;
     const verticalGap = Math.abs(player.root.position.y - this.root.position.y);
     tempDirection.copy(player.root.position).sub(this.root.position);

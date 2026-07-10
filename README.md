@@ -37,6 +37,25 @@ The current combat pass uses manual attacks, a four-slot arm hotbar, per-arm Ene
 
 Implemented arm behavior examples include arcing explosive `Grenade Arm` shots, piercing `Rail Buster Arm` rounds, close-range `Scatter Buster Arm` spread fire, and `Homing Seeker Arm` rounds that curve toward nearby targets.
 
+## Procedural Reaverbots
+
+Dungeon encounters now turn their roster intent, room archetype, room flavor, and encounter slot into a reproducible Reaverbot genome. Each generated enemy receives a compatible body plan, weapon, defense, weak point, behavior package, proportions, and behavior-linked palette. A validation pass rejects incompatible or unfair combinations before the enemy is built.
+
+The eight behavior archetypes are:
+
+- `Pursuer`: fast ram, jaw, or claw hunter with punishable recovery.
+- `Shield Sentinel`: guards behind frontal protection, opens to attack, then exposes its linked weak point.
+- `Pouncer`: circles, marks a predicted landing point, commits to a leap or shock slam, and exposes its belly during recovery.
+- `Artillery Walker`: maintains range and fires pulse shells, lobbed mortars, or cluster explosives.
+- `Zone Controller`: uses flamethrowers, mine-like explosives, or slow electric orbs that pulse repeatedly near the player.
+- `Aerial Bomber`: floats inward behind a cycling shell, exposes its core during a countdown, and self-destructs at close range.
+- `Pack Hunter`: flanks and attacks only while another member of its encounter remains nearby.
+- `Ruin Duelist`: sidesteps at close range and alternates guarded positioning with committed melee, piston, or beam attacks.
+
+Generated silhouettes include bipeds, low bipeds, quadrupeds, crawlers, hoppers, tripods, hovering bells, and winged flyers. Their low-poly wedges, cones, segmented limbs, plates, spires, and circuit inlays follow the supplied PlayStation-era shape references. Archetype palettes remain consistent—ochre pursuers, blue-gray sentinels, olive pouncers, violet artillery, teal controllers, ivory bombers, sand-colored packs, and burgundy duelists—while saturated red is reserved for the single dominant Reaverbot eye.
+
+Weak points are separate combat targets while exposed. Lock-on and homing can aim at them directly, and enough weak-point damage permanently breaks the linked defense with a module-specific consequence. Directional shields can fully nullify frontal buster shots, while flanking, attack windows, recovery windows, melee, and explosions provide explicit counters. Progression-critical bosses and keycard carriers are never assigned the self-destruct archetype.
+
 ## Expedition Loop
 
 The current prototype starts in a safe hub/camp approach, then pushes the player into a randomized ruin path:
@@ -99,7 +118,8 @@ The app uses a browser import map for Three.js, so no package install is require
 - `src/Player.js` - movement, health, stats, model animation, buster pose, and equipment hooks.
 - `src/ModularHumanoid.js` - procedural modular humanoid fallback character.
 - `src/LootSystem.js` and `src/Item.js` - robotic part generation, salvage rarity, affixes, pickups.
-- `src/Enemy.js`, `src/EliteEnemy.js`, `src/EnemySpawner.js` - enemy types, elite traits, waves.
+- `src/Enemy.js`, `src/EliteEnemy.js`, `src/EnemySpawner.js` - legacy enemy contract, elite traits, seeded encounter spawning.
+- `src/reaverbots/` - procedural genome catalog and validator, seeded RNG, low-poly visual factory, target adapters, behavior state machines, defenses, weak points, and attacks.
 - `src/CombatSystem.js`, `src/ProjectileSystem.js` - current combat prototype and projectile behavior.
 - `src/Inventory.js`, `src/EquipmentManager.js`, `src/UIManager.js` - salvage inventory, garage equipment, UI.
 - `src/ExternalModelRig.js` - segmented Mega Man Volnutt model rig, semantic rig application, buster arm pose, and action overlays.
@@ -113,6 +133,10 @@ The running game exposes a few helpers on `window`:
 
 ```js
 window.spawnElite('tank');
+window.spawnReaverbot({ archetypeId: 'pouncer', seed: 'demo-pouncer' });
+window.spawnReaverbot({ archetypeId: 'zoneController', seed: 'demo-orb', elite: true });
+window.spawnCuratedReaverbot('horokko');
+window.getReaverbotCatalog();
 window.generateLoot('swordArm', 'legendary');
 window.generateLoot('powerRaiser', 'prototype');
 window.generateLoot('kevlarJacket', 'tuned');
@@ -121,5 +145,7 @@ window.setAnimationPreviewMode('walk');
 window.setAnimationPreviewMode('aimJog');
 window.setAnimationPreviewMode('off');
 ```
+
+Add `?reaverbotSeed=<seed>` to the URL to reproduce the same procedural enemy stream and encounter-slot variants for a run. For example: `?reaverbotSeed=gallery-17`.
 
 Animation preview can also be started from the URL with `?animationPreview=walk`, `?animationPreview=jog`, `?animationPreview=aimWalk`, `?animationPreview=aimJog`, `?animationPreview=strafeLeft`, `?animationPreview=strafeRight`, or `?animationPreview=backpedal`. Add `animationPreviewCamera=front`, `rear`, `left`, `right`, `frontLeft`, `frontRight`, `rearLeft`, `rearRight`, or `top` to lock the preview camera for gait review.

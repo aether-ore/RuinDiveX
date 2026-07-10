@@ -1299,6 +1299,7 @@ test('generated factory rooms expose validated vertical plans and elevation-matc
           id: platform.id,
           purpose: platform.purpose,
           blocksBelow: platform.blocksBelow,
+          dropSpaceId: platform.dropSpaceId ?? null,
         })),
       ledgeSurfaces: dungeon.platforms
         .filter((platform) => platform.generated && platform.requiredTraversalAction === 'ledge_climb')
@@ -1306,6 +1307,7 @@ test('generated factory rooms expose validated vertical plans and elevation-matc
           id: platform.id,
           purpose: platform.purpose,
           blocksBelow: platform.blocksBelow,
+          dropSpaceId: platform.dropSpaceId ?? null,
         })),
       doorPortalPairs: dungeon.doors.map((door) => ({
         id: door.id,
@@ -1367,8 +1369,16 @@ test('generated factory rooms expose validated vertical plans and elevation-matc
   expect(result.verticalPortalCount).toBe(result.connections.length * 2);
   expect(result.jumpPlatforms.length).toBeGreaterThanOrEqual(result.rooms.length);
   expect(result.jumpPlatforms.every((platform) => platform.purpose && platform.blocksBelow === true)).toBe(true);
-  expect(result.ledgeSurfaces).toHaveLength(result.connections.length * 2);
-  expect(result.ledgeSurfaces.every((platform) => platform.purpose && platform.blocksBelow === false)).toBe(true);
+  expect(result.ledgeSurfaces.filter((platform) => (
+    platform.purpose === 'matched_elevation_portal_landing'
+  ))).toHaveLength(result.connections.length * 2);
+  expect(result.ledgeSurfaces.length).toBeGreaterThanOrEqual(result.connections.length * 2 + 2);
+  expect(result.ledgeSurfaces.every((platform) => platform.purpose)).toBe(true);
+  expect(result.ledgeSurfaces.filter((platform) => !platform.dropSpaceId)
+    .every((platform) => platform.blocksBelow === false)).toBe(true);
+  expect(result.ledgeSurfaces.filter((platform) => platform.dropSpaceId)).toHaveLength(2);
+  expect(result.ledgeSurfaces.filter((platform) => platform.dropSpaceId)
+    .every((platform) => platform.blocksBelow === true)).toBe(true);
   expect(result.doorPortalPairs.every((door) => (
     door.exitElevation === door.entranceElevation
     && door.hasFromPortal
@@ -1409,10 +1419,26 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
       'automaticSlidingDoorPanelLeft',
       'automaticSlidingDoorPanelRight',
     ];
+    const forbiddenFallbackRailNames = new Set([
+      'coolantBalconyInnerRail',
+      'coolantBalconyOuterRail',
+      'machineLeftCatwalkRail',
+      'machineRightCatwalkRail',
+      'alienServerNorthCatwalkRail',
+      'alienServerEastCatwalkRail',
+    ]);
     const objectNameCounts = Object.fromEntries(requiredObjectNames.map((name) => [name, 0]));
     const largePlatformMasses = [];
     const largeSlopes = [];
+    const architecturalAssemblies = [];
+    const architecturalMasses = [];
+    const railRuns = [];
+    const railPostKeys = new Set();
+    let forbiddenFallbackRailCount = 0;
     let pyramidLayerCount = 0;
+    let pyramidCircuitStepCount = 0;
+    let pyramidGuardianDecalCount = 0;
+    let shrineFocalPillarCount = 0;
     dungeon.group.traverse((object) => {
       if (Object.hasOwn(objectNameCounts, object.name)) {
         objectNameCounts[object.name] += 1;
@@ -1432,7 +1458,71 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
       if (object.name?.startsWith('reverentMechanicalPyramidLayer')) {
         pyramidLayerCount += 1;
       }
+      if (object.name?.startsWith('pyramidProcessionalCircuitStep_')) {
+        pyramidCircuitStepCount += 1;
+      }
+      if (object.name?.startsWith('pyramidReaverbotGuardianEyeDecal_')) {
+        pyramidGuardianDecalCount += 1;
+      }
+      if (object.name?.startsWith('shrineFocalPillar_')) {
+        shrineFocalPillarCount += 1;
+      }
+      if (object.name?.startsWith('solidArchitecturalDeckAssembly_')) {
+        architecturalAssemblies.push({
+          id: object.name.replace('solidArchitecturalDeckAssembly_', ''),
+          roomId: object.userData.roomId,
+          surface: object.userData.surface,
+          solidTileCount: object.userData.solidTileCount,
+          underpassTileCount: object.userData.underpassTileCount,
+          segmentCount: object.userData.segmentCount,
+        });
+      }
+      if (object.name?.startsWith('solidArchitecturalDeckMass_')) {
+        const height = object.geometry?.parameters?.height ?? 0;
+        architecturalMasses.push({
+          id: object.userData.massGroupId,
+          width: object.geometry?.parameters?.width ?? 0,
+          depth: object.geometry?.parameters?.depth ?? 0,
+          height,
+          bottomY: object.position.y - height * 0.5,
+          topY: object.position.y + height * 0.5,
+        });
+      }
+      if (object.userData.factoryRailRun) {
+        railRuns.push({
+          horizontal: object.userData.horizontal,
+          line: object.userData.line,
+          startEndpoint: object.userData.startEndpoint,
+          endEndpoint: object.userData.endEndpoint,
+          elevation: object.userData.elevation,
+        });
+      }
+      if (object.userData.factoryRailPost) {
+        railPostKeys.add([
+          object.position.x.toFixed(3),
+          object.position.z.toFixed(3),
+          Number(object.userData.elevation).toFixed(3),
+        ].join(','));
+      }
+      if (forbiddenFallbackRailNames.has(object.name)) {
+        forbiddenFallbackRailCount += 1;
+      }
     });
+
+    const missingRailEndpoints = [];
+    const railEndpointKey = (run, endpoint) => [
+      (run.horizontal ? endpoint : run.line) * dungeon.tileSize,
+      (run.horizontal ? run.line : endpoint) * dungeon.tileSize,
+      run.elevation,
+    ].map((value) => Number(value).toFixed(3)).join(',');
+    for (const run of railRuns) {
+      for (const endpoint of [run.startEndpoint, run.endEndpoint]) {
+        const key = railEndpointKey(run, endpoint);
+        if (!railPostKeys.has(key)) {
+          missingRailEndpoints.push(key);
+        }
+      }
+    }
 
     const keycardRoom = dungeon.rooms.find((room) => room.id === 'keycardRoom');
     const pyramidCenter = keycardRoom.mechanicalPyramidCenter;
@@ -1440,9 +1530,16 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
     const summitTiles = dungeon.floorTiles.filter((tile) => (
       tile.roomId === keycardRoom.id && tile.surface === 'mechanicalPyramidSummit'
     ));
-    const apexTiles = dungeon.floorTiles.filter((tile) => (
-      tile.roomId === keycardRoom.id && tile.surface === 'mechanicalPyramidApex'
+    const processionalStepTiles = dungeon.floorTiles.filter((tile) => (
+      tile.roomId === keycardRoom.id && tile.surface === 'mechanicalPyramidProcessionalStep'
     ));
+    const pyramidTerraceTiles = dungeon.floorTiles.filter((tile) => (
+      tile.roomId === keycardRoom.id && tile.surface === 'mechanicalPyramidTerrace'
+    ));
+    const pyramidSidePlatforms = dungeon.floorTiles.filter((tile) => (
+      tile.roomId === keycardRoom.id && tile.surface === 'mechanicalPyramidSidePlatform'
+    ));
+    const keycardEncounter = dungeon.encounters.find((encounter) => encounter.id === 'keycardGuard');
     const connectorTiles = dungeon.floorTiles.filter((tile) => tile.connectorId);
     const roomById = new Map(dungeon.rooms.map((room) => [room.id, room]));
     const groundExplorationPlans = dungeon.connectionPlans.filter((plan) => (
@@ -1458,6 +1555,56 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
     const solidPrefabLabels = dungeon.solidZones
       .filter((zone) => zone.fromProceduralPrefab)
       .map((zone) => zone.label);
+    const architecturalPlatforms = dungeon.platforms.filter((platform) => platform.architecturalMass);
+    const architecturalTiles = dungeon.floorTiles.filter((tile) => tile.massGroupId);
+    const openUnderpassTiles = architecturalTiles.filter((tile) => tile.supportStyle === 'open_underpass');
+    const architecturalTileCounts = {};
+    for (const tile of architecturalTiles) {
+      architecturalTileCounts[tile.massGroupId] ??= { solid: 0, underpass: 0 };
+      architecturalTileCounts[tile.massGroupId][
+        tile.supportStyle === 'solid_mass' ? 'solid' : 'underpass'
+      ] += 1;
+    }
+    const architecturalMassCentersBlocked = architecturalPlatforms.every((platform) => (
+      game._isPositionInsidePlatformBlock(platform, {
+        x: platform.center.x,
+        y: platform.baseY + (platform.topY - platform.baseY) * 0.5,
+        z: platform.center.z,
+      }, 0)
+    ));
+    const unblockedArchitecturalPlatformIds = architecturalPlatforms
+      .filter((platform) => !game._isPositionInsidePlatformBlock(platform, {
+        x: platform.center.x,
+        y: platform.baseY + (platform.topY - platform.baseY) * 0.5,
+        z: platform.center.z,
+      }, 0))
+      .map((platform) => ({ id: platform.id, baseY: platform.baseY, topY: platform.topY }));
+    const openUnderpassesClear = openUnderpassTiles.every((tile) => (
+      architecturalPlatforms.every((platform) => !game._isPositionInsidePlatformBlock(platform, {
+        x: tile.x * dungeon.tileSize,
+        y: 0.5,
+        z: tile.z * dungeon.tileSize,
+      }, 0))
+    ));
+    const doorClearanceOverlapCount = dungeon.doors.reduce((count, door) => {
+      const clearanceSamples = [-0.6, 0, 0.6].map((offset) => ({
+        x: door.position.x + (door.alongX ? 0 : offset * dungeon.tileSize),
+        z: door.position.z + (door.alongX ? offset * dungeon.tileSize : 0),
+      }));
+      return count + clearanceSamples.filter((sample) => architecturalPlatforms.some((platform) => (
+        Math.abs(sample.x - platform.center.x) <= platform.halfWidth
+        && Math.abs(sample.z - platform.center.z) <= platform.halfDepth
+      ))).length;
+    }, 0);
+    const doorDeckSlabOverlapCount = dungeon.doors.reduce((count, door) => {
+      const clearanceSamples = [-0.6, 0, 0.6].map((offset) => ({
+        x: Math.round(door.position.x / dungeon.tileSize) + (door.alongX ? 0 : Math.sign(offset)),
+        z: Math.round(door.position.z / dungeon.tileSize) + (door.alongX ? Math.sign(offset) : 0),
+      }));
+      return count + clearanceSamples.filter((sample) => architecturalTiles.some((tile) => (
+        tile.x === sample.x && tile.z === sample.z
+      ))).length;
+    }, 0);
     const closedDoor = dungeon.doors.find((door) => door.closed);
     const axis = closedDoor.slidingAxis;
     const closedOffsets = {
@@ -1474,12 +1621,59 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
       solidPrefabLabels,
       largePlatformMasses,
       largeSlopes,
+      architecturalAssemblies,
+      architecturalMasses,
+      architecturalTileCounts,
+      architecturalPlatformCount: architecturalPlatforms.length,
+      architecturalMassCentersBlocked,
+      unblockedArchitecturalPlatformIds,
+      architecturalPlatformsDisableLedgeCandidates: architecturalPlatforms.every((platform) => (
+        platform.createsLedgeCandidates === false
+      )),
+      generatedArchitecturalLedgeCandidateCount: game.platformingLedgeCandidates.filter((candidate) => (
+        candidate.id?.startsWith('generatedArchitecturalMass_')
+      )).length,
+      openUnderpassTileCount: openUnderpassTiles.length,
+      openUnderpassesClear,
+      doorClearanceOverlapCount,
+      doorDeckSlabOverlapCount,
+      unexpectedArchitecturalSurfaceCount: architecturalTiles.filter((tile) => tile.surface !== 'secondFloor').length,
+      reveredDaisMassTileCount: dungeon.floorTiles.filter((tile) => (
+        tile.surface === 'refractorDais' && tile.massGroupId
+      )).length,
+      railRunCount: railRuns.length,
+      railPostCount: railPostKeys.size,
+      missingRailEndpoints,
+      forbiddenFallbackRailCount,
       pyramidLayerCount,
+      pyramidCircuitStepCount,
+      pyramidGuardianDecalCount,
+      shrineFocalPillarCount,
       summitTileCount: summitTiles.length,
-      apexTileCount: apexTiles.length,
+      processionalStepTileCount: processionalStepTiles.length,
+      pyramidTerraceTileCount: pyramidTerraceTiles.length,
+      pyramidSidePlatformCount: pyramidSidePlatforms.length,
+      pyramidMaxElevation: Math.max(...summitTiles.map((tile) => tile.elevation ?? 0)),
+      pyramidSummitCollisionStable: summitTiles.every((tile) => {
+        const world = new keycard.position.constructor(
+          tile.x * dungeon.tileSize,
+          (tile.elevation ?? 0) + 0.05,
+          tile.z * dungeon.tileSize,
+        );
+        const resolved = game.dungeonController.getFloorTileAt(world, { allowClosest: true });
+        const column = game.dungeonController.floorTilesByColumn.get(`${tile.x},${tile.z}`) ?? [];
+        return resolved?.surface === 'mechanicalPyramidSummit'
+          && Math.abs((resolved.elevation ?? 0) - tile.elevation) < 0.001
+          && column.filter((candidate) => candidate.surface === 'mechanicalPyramidSummit').length === 1;
+      }),
+      pyramidEnemySpawnPoints: keycardEncounter.spawnPoints.map((point) => ({
+        x: point.x / dungeon.tileSize,
+        y: point.y,
+        z: point.z / dungeon.tileSize,
+      })),
       keycardOnPyramid: Boolean(pyramidCenter && keycard)
-        && Math.abs(keycard.position.x - pyramidCenter.x * dungeon.tileSize) <= dungeon.tileSize * 1.5
-        && Math.abs(keycard.position.z - pyramidCenter.z * dungeon.tileSize) <= dungeon.tileSize * 1.5
+        && Math.abs(keycard.position.x - pyramidCenter.x * dungeon.tileSize) < 0.01
+        && Math.abs(keycard.position.z - pyramidCenter.z * dungeon.tileSize) < 0.01
         && Math.abs(keycard.position.y - pyramidCenter.elevation) < 0.01,
       connectorGalleryTileCount: connectorTiles.length,
       explorationAlcoveCount: connectorTiles.filter((tile) => tile.connectorZone === 'exploration_alcove').length,
@@ -1508,12 +1702,60 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
   expect(result.largePlatformMasses.filter((platform) => (
     platform.width > 4.5 && platform.depth > 4.5
   )).length).toBeGreaterThanOrEqual(7);
+  const expectedLegacyArchitecturalTileRanges = {
+    enemyNest_rearStructuralMass: { min: 36, max: 39 },
+    conveyorRoom_sideStructuralMass: { min: 59, max: 68 },
+  };
+  expect(result.architecturalAssemblies.length).toBeGreaterThanOrEqual(15);
+  for (const [id, expectedRange] of Object.entries(expectedLegacyArchitecturalTileRanges)) {
+    const assembly = result.architecturalAssemblies.find((candidate) => candidate.id === id);
+    const counts = result.architecturalTileCounts[id];
+    const tileCount = counts.solid + counts.underpass;
+    expect(assembly).toBeTruthy();
+    expect(assembly.surface).toBe('secondFloor');
+    expect(assembly.solidTileCount).toBeGreaterThan(0);
+    expect(assembly.segmentCount).toBeGreaterThan(0);
+    expect(assembly.solidTileCount + assembly.underpassTileCount).toBe(tileCount);
+    expect(tileCount).toBeGreaterThanOrEqual(expectedRange.min);
+    expect(tileCount).toBeLessThanOrEqual(expectedRange.max);
+  }
+  expect(result.architecturalMasses.length).toBe(result.architecturalPlatformCount);
+  const legacyArchitecturalMasses = result.architecturalMasses.filter((mass) => (
+    Object.hasOwn(expectedLegacyArchitecturalTileRanges, mass.id)
+  ));
+  expect(legacyArchitecturalMasses.every((mass) => (
+    mass.width > 2 && mass.depth > 2 && mass.height > 3.5
+    && mass.bottomY <= 0.01 && mass.topY > 3.7
+  ))).toBe(true);
+  expect(result.unblockedArchitecturalPlatformIds).toEqual([]);
+  expect(result.architecturalPlatformsDisableLedgeCandidates).toBe(true);
+  expect(result.generatedArchitecturalLedgeCandidateCount).toBe(0);
+  expect(result.openUnderpassesClear).toBe(true);
+  expect(result.doorClearanceOverlapCount).toBe(0);
+  expect(result.doorDeckSlabOverlapCount).toBe(0);
+  expect(result.reveredDaisMassTileCount).toBe(25);
+  expect(result.railRunCount).toBeGreaterThan(0);
+  expect(result.railPostCount).toBeGreaterThan(0);
+  expect(result.missingRailEndpoints).toEqual([]);
+  expect(result.forbiddenFallbackRailCount).toBe(0);
   expect(result.solidPurposePlatformCount).toBeGreaterThanOrEqual(result.functionalRoomCount);
   expect(result.largeSlopes.length).toBeGreaterThan(0);
   expect(result.largeSlopes.every((slope) => slope.rampTileCount >= 2 && slope.texturedWallToFloor)).toBe(true);
-  expect(result.pyramidLayerCount).toBeGreaterThanOrEqual(6);
+  expect(result.pyramidLayerCount).toBe(8);
+  expect(result.pyramidCircuitStepCount).toBe(8);
+  expect(result.pyramidGuardianDecalCount).toBe(2);
+  expect(result.shrineFocalPillarCount).toBe(3);
   expect(result.summitTileCount).toBe(9);
-  expect(result.apexTileCount).toBe(1);
+  expect(result.processionalStepTileCount).toBeGreaterThanOrEqual(21);
+  expect(result.pyramidTerraceTileCount).toBeGreaterThanOrEqual(250);
+  expect(result.pyramidSidePlatformCount).toBe(6);
+  expect(result.pyramidMaxElevation).toBeGreaterThanOrEqual(4);
+  expect(result.pyramidSummitCollisionStable).toBe(true);
+  expect(result.pyramidEnemySpawnPoints).toHaveLength(6);
+  expect(result.pyramidEnemySpawnPoints.every((point) => (
+    point.x === result.pyramidEnemySpawnPoints[0].x
+  ))).toBe(true);
+  expect(new Set(result.pyramidEnemySpawnPoints.map((point) => point.y)).size).toBeGreaterThanOrEqual(4);
   expect(result.keycardOnPyramid).toBe(true);
   expect(result.connectorGalleryTileCount).toBeGreaterThan(40);
   expect(result.explorationAlcoveCount).toBeGreaterThan(0);
@@ -1524,6 +1766,1248 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
   ))).toBe(true);
   expect(result.doorSlidesLaterally).toBe(true);
   expect(result.doorRootStaysAtElevation).toBe(true);
+});
+
+test('conveyor consoles, sealed vault, refractor sanctum, and grand keycard pyramid hold across seeds', async ({ page }) => {
+  test.setTimeout(60000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const results = await page.evaluate(async () => {
+    window.game.stop();
+    const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
+    const generated = [];
+
+    for (const seed of [1, 2, 3, 7, 11, 17, 29, 60]) {
+      let state = seed >>> 0;
+      const random = () => (
+        (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296
+      );
+      const dungeon = new DungeonGenerator({ random, difficulty: 3 }).generate();
+      const roomById = new Map(dungeon.rooms.map((room) => [room.id, room]));
+      const conveyorRoom = roomById.get('conveyorRoom');
+      const vaultRoom = roomById.get('bonusVault');
+      const shrineRoom = roomById.get('shrineRoom');
+      const keycardRoom = roomById.get('keycardRoom');
+      const structuralColumns = new Set(
+        dungeon.floorTiles
+          .filter((tile) => tile.roomId === conveyorRoom.id && tile.supportStyle === 'solid_mass')
+          .map((tile) => `${tile.x},${tile.z}`),
+      );
+      const consoleChecks = dungeon.conveyorPuzzles[0].consoles.map((console) => {
+        const mechanism = dungeon.mechanisms.find((candidate) => candidate.id === console.id);
+        const x = Math.round(mechanism.position.x / dungeon.tileSize);
+        const z = Math.round(mechanism.position.z / dungeon.tileSize);
+        return {
+          id: console.id,
+          movedFromUnsafeTemplate: console.originalX === undefined
+            || console.x !== console.originalX
+            || console.z !== console.originalZ,
+          structuralOverlap: structuralColumns.has(`${x},${z}`),
+          solidZoneOverlap: dungeon.solidZones.some((zone) => (
+            Math.abs(zone.position.x - mechanism.position.x) <= zone.halfWidth
+            && Math.abs(zone.position.z - mechanism.position.z) <= zone.halfDepth
+          )),
+          raisedColumnOverlap: dungeon.floorTiles.some((tile) => (
+            tile.roomId === conveyorRoom.id
+            && tile.x === x
+            && tile.z === z
+            && (tile.elevation ?? 0) > 0.2
+          )),
+        };
+      });
+
+      const vaultDoor = dungeon.doors.find((door) => door.id === 'bonusVaultDoor');
+      const vaultChest = dungeon.chests.find((chest) => chest.roomId === vaultRoom.id);
+      const vaultFocalTile = dungeon.floorTiles.find((tile) => (
+        tile.roomId === vaultRoom.id
+        && tile.x === vaultRoom.x
+        && tile.z === vaultRoom.z
+        && tile.surface === 'vaultRewardDais'
+      ));
+      const halfW = Math.floor(vaultRoom.width / 2);
+      const halfD = Math.floor(vaultRoom.depth / 2);
+      const boundaryOpenings = [];
+      for (let x = vaultRoom.x - halfW; x <= vaultRoom.x + halfW; x += 1) {
+        for (let z = vaultRoom.z - halfD; z <= vaultRoom.z + halfD; z += 1) {
+          const onBoundary = x === vaultRoom.x - halfW || x === vaultRoom.x + halfW
+            || z === vaultRoom.z - halfD || z === vaultRoom.z + halfD;
+          if (!onBoundary) continue;
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const outsideX = x + dx;
+            const outsideZ = z + dz;
+            const leavesRoom = outsideX < vaultRoom.x - halfW || outsideX > vaultRoom.x + halfW
+              || outsideZ < vaultRoom.z - halfD || outsideZ > vaultRoom.z + halfD;
+            if (leavesRoom && dungeon.tiles.has(`${outsideX},${outsideZ}`)) {
+              boundaryOpenings.push(`${x},${z}`);
+            }
+          }
+        }
+      }
+      const physicalVaultCheck = dungeon.progression.validation.physicalProgression.checks
+        .find((check) => check.doorId === 'bonusVaultDoor');
+
+      const shrinePillars = dungeon.solidZones.filter((zone) => zone.id.startsWith('shrineRoom_focalPillar_'));
+      const shrineObjective = dungeon.shrine.position;
+      let focalPillarMeshCount = 0;
+      let pyramidLayerCount = 0;
+      let pyramidCircuitCount = 0;
+      let pyramidGuardianDecalCount = 0;
+      dungeon.group.traverse((object) => {
+        if (object.name?.startsWith('shrineFocalPillar_')) focalPillarMeshCount += 1;
+        if (object.name?.startsWith('reverentMechanicalPyramidLayer')) pyramidLayerCount += 1;
+        if (object.name?.startsWith('pyramidProcessionalCircuitStep_')) pyramidCircuitCount += 1;
+        if (object.name?.startsWith('pyramidReaverbotGuardianEyeDecal_')) pyramidGuardianDecalCount += 1;
+      });
+
+      const pyramidTiles = dungeon.floorTiles.filter((tile) => (
+        tile.roomId === keycardRoom.id
+        && String(tile.surface).startsWith('mechanicalPyramid')
+      ));
+      const summitTiles = pyramidTiles.filter((tile) => tile.surface === 'mechanicalPyramidSummit');
+      const stairLine = pyramidTiles
+        .filter((tile) => tile.x === keycardRoom.x && (
+          tile.surface === 'mechanicalPyramidProcessionalStep'
+          || tile.surface === 'mechanicalPyramidSummit'
+        ))
+        .filter((tile) => tile.z <= keycardRoom.z)
+        .sort((a, b) => a.z - b.z);
+      const sidePlatforms = pyramidTiles.filter((tile) => tile.surface === 'mechanicalPyramidSidePlatform');
+      const keycard = dungeon.keycards.find((entry) => entry.keycardId === 'Keycard_Alpha');
+      const keycardEncounter = dungeon.encounters.find((encounter) => encounter.id === 'keycardGuard');
+
+      generated.push({
+        seed,
+        accepted: dungeon.progression.validation.accepted,
+        errors: dungeon.progression.validation.errors,
+        consolesClear: consoleChecks.every((check) => (
+          !check.structuralOverlap && !check.solidZoneOverlap && !check.raisedColumnOverlap
+        )),
+        consoleChecks,
+        vault: {
+          roomGapTiles: Math.abs(vaultRoom.x - conveyorRoom.x)
+            - Math.floor(vaultRoom.width / 2)
+            - Math.floor(conveyorRoom.width / 2),
+          uniqueBoundaryOpenings: [...new Set(boundaryOpenings)],
+          doorAtOnlyOpening: [...new Set(boundaryOpenings)].length === 1
+            && [...new Set(boundaryOpenings)][0] === `${vaultDoor.toPortal.x},${vaultDoor.toPortal.z}`
+            && Math.round(vaultDoor.position.x / dungeon.tileSize) === vaultDoor.toPortal.x
+            && Math.round(vaultDoor.position.z / dungeon.tileSize) === vaultDoor.toPortal.z,
+          lockedByPuzzle: vaultDoor.closed && vaultDoor.locked
+            && vaultDoor.pressurePlateId === 'conveyorVaultPlate',
+          inaccessibleWhileClosed: physicalVaultCheck?.destinationReachableWhileClosed === false,
+          chestAtFocalPoint: Boolean(vaultChest && vaultFocalTile)
+            && Math.abs(vaultChest.position.x - vaultRoom.x * dungeon.tileSize) < 0.01
+            && Math.abs(vaultChest.position.z - vaultRoom.z * dungeon.tileSize) < 0.01
+            && Math.abs(vaultChest.position.y - vaultFocalTile.elevation) < 0.01,
+          chestPosition: vaultChest ? {
+            x: vaultChest.position.x / dungeon.tileSize,
+            y: vaultChest.position.y,
+            z: vaultChest.position.z / dungeon.tileSize,
+          } : null,
+          focalTile: vaultFocalTile ? {
+            x: vaultFocalTile.x,
+            y: vaultFocalTile.elevation,
+            z: vaultFocalTile.z,
+          } : null,
+          basementTileCount: dungeon.floorTiles.filter((tile) => (
+            tile.roomId === vaultRoom.id && (tile.elevation ?? 0) < -0.1
+          )).length,
+        },
+        shrine: {
+          noFloorDivot: dungeon.floorTiles.every((tile) => (
+            tile.roomId !== shrineRoom.id || tile.surface !== 'refractorWell'
+          )),
+          objectiveCentered: Math.abs(shrineObjective.x - shrineRoom.x * dungeon.tileSize) < 0.01
+            && Math.abs(shrineObjective.z - shrineRoom.z * dungeon.tileSize) < 0.01
+            && Math.abs(shrineObjective.y - shrineRoom.refractorFocalPoint.elevation) < 0.01,
+          pillarCount: shrinePillars.length,
+          pillarMeshCount: focalPillarMeshCount,
+          pillarCentroidCentered: shrinePillars.length === 3
+            && Math.abs(shrinePillars.reduce((sum, zone) => sum + zone.position.x, 0) / 3 - shrineObjective.x) < 0.01
+            && Math.abs(shrinePillars.reduce((sum, zone) => sum + zone.position.z, 0) / 3 - shrineObjective.z) < 0.01,
+        },
+        pyramid: {
+          centerIsRoomCenter: keycardRoom.mechanicalPyramidCenter.x === keycardRoom.x
+            && keycardRoom.mechanicalPyramidCenter.z === keycardRoom.z,
+          layerCount: pyramidLayerCount,
+          circuitCount: pyramidCircuitCount,
+          guardianDecalCount: pyramidGuardianDecalCount,
+          summitCount: summitTiles.length,
+          summitStable: summitTiles.length === 9
+            && new Set(summitTiles.map((tile) => tile.elevation)).size === 1,
+          stairCount: pyramidTiles.filter((tile) => tile.surface === 'mechanicalPyramidProcessionalStep').length,
+          stairWalkable: stairLine.length >= 8 && stairLine.every((tile, index) => (
+            index === 0 || tile.elevation - stairLine[index - 1].elevation <= 0.5 + 0.001
+          )),
+          sidePlatformCount: sidePlatforms.length,
+          pairedSideRoutes: [-1, 1].every((sign) => (
+            sidePlatforms.filter((tile) => Math.sign(tile.x - keycardRoom.x) === sign).length === 3
+          )),
+          keycardCentered: Math.abs(keycard.position.x - keycardRoom.x * dungeon.tileSize) < 0.01
+            && Math.abs(keycard.position.z - keycardRoom.z * dungeon.tileSize) < 0.01
+            && Math.abs(keycard.position.y - keycardRoom.mechanicalPyramidCenter.elevation) < 0.01,
+          enemiesLineSteps: keycardEncounter.spawnPoints.length === 6
+            && keycardEncounter.spawnPoints.every((point) => (
+              Math.round(point.x / dungeon.tileSize) === keycardRoom.x
+            ))
+            && new Set(keycardEncounter.spawnPoints.map((point) => point.y)).size >= 4,
+        },
+      });
+      dungeon.group.clear();
+    }
+
+    return generated;
+  });
+
+  expect(results.every((result) => result.accepted && result.errors.length === 0)).toBe(true);
+  expect(results.every((result) => result.consolesClear)).toBe(true);
+  expect(results.filter((result) => !(
+    result.vault.roomGapTiles >= 5
+    && result.vault.doorAtOnlyOpening
+    && result.vault.lockedByPuzzle
+    && result.vault.inaccessibleWhileClosed
+    && result.vault.chestAtFocalPoint
+    && result.vault.basementTileCount === 0
+  )).map((result) => ({ seed: result.seed, vault: result.vault }))).toEqual([]);
+  expect(results.every((result) => (
+    result.shrine.noFloorDivot
+    && result.shrine.objectiveCentered
+    && result.shrine.pillarCount === 3
+    && result.shrine.pillarMeshCount === 3
+    && result.shrine.pillarCentroidCentered
+  ))).toBe(true);
+  expect(results.every((result) => (
+    result.pyramid.centerIsRoomCenter
+    && result.pyramid.layerCount === 8
+    && result.pyramid.circuitCount === 8
+    && result.pyramid.guardianDecalCount === 2
+    && result.pyramid.summitCount === 9
+    && result.pyramid.summitStable
+    && result.pyramid.stairCount >= 21
+    && result.pyramid.stairWalkable
+    && result.pyramid.sidePlatformCount === 6
+    && result.pyramid.pairedSideRoutes
+    && result.pyramid.keycardCentered
+    && result.pyramid.enemiesLineSteps
+  ))).toBe(true);
+});
+
+test('solid architectural decks preserve carved underpasses and deterministic progression routes', async ({ page }) => {
+  test.setTimeout(60000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const results = await page.evaluate(async () => {
+    window.game.stop();
+    const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
+    const expectedTileRanges = new Map([
+      ['enemyNest_rearStructuralMass', { min: 36, max: 39 }],
+      ['conveyorRoom_sideStructuralMass', { min: 59, max: 68 }],
+    ]);
+    const generated = [];
+
+    for (const seed of [3, 10, 17, 18, 53, 60]) {
+      let state = seed >>> 0;
+      const random = () => (
+        (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296
+      );
+      const generator = new DungeonGenerator({ random });
+      const dungeon = generator.generate();
+      const architecturalTiles = dungeon.floorTiles.filter((tile) => tile.massGroupId);
+      const solidTiles = architecturalTiles.filter((tile) => tile.supportStyle === 'solid_mass');
+      const openTiles = architecturalTiles.filter((tile) => tile.supportStyle === 'open_underpass');
+      const platforms = dungeon.platforms.filter((platform) => platform.architecturalMass);
+      const containsColumn = (platform, tile) => (
+        Math.abs(tile.x * dungeon.tileSize - platform.center.x) <= platform.halfWidth
+        && Math.abs(tile.z * dungeon.tileSize - platform.center.z) <= platform.halfDepth
+      );
+      const groupCounts = new Map();
+      for (const tile of architecturalTiles) {
+        groupCounts.set(tile.massGroupId, (groupCounts.get(tile.massGroupId) ?? 0) + 1);
+      }
+      const spawnInsideMassCount = dungeon.encounters.reduce((count, encounter) => (
+        count + (encounter.spawnPoints ?? []).filter((spawnPoint) => platforms.some((platform) => (
+          Math.abs(spawnPoint.x - platform.center.x) <= platform.halfWidth
+          && Math.abs(spawnPoint.z - platform.center.z) <= platform.halfDepth
+          && spawnPoint.y < platform.topY - 0.05
+        ))).length
+      ), 0);
+      const doorClearanceOverlapCount = dungeon.doors.reduce((count, door) => {
+        const clearanceSamples = [-0.6, 0, 0.6].map((offset) => ({
+          x: door.position.x + (door.alongX ? 0 : offset * dungeon.tileSize),
+          z: door.position.z + (door.alongX ? offset * dungeon.tileSize : 0),
+        }));
+        return count + clearanceSamples.filter((sample) => platforms.some((platform) => (
+          Math.abs(sample.x - platform.center.x) <= platform.halfWidth
+          && Math.abs(sample.z - platform.center.z) <= platform.halfDepth
+        ))).length;
+      }, 0);
+      const doorDeckSlabOverlapCount = dungeon.doors.reduce((count, door) => {
+        const clearanceSamples = [-0.6, 0, 0.6].map((offset) => ({
+          x: Math.round(door.position.x / dungeon.tileSize) + (door.alongX ? 0 : Math.sign(offset)),
+          z: Math.round(door.position.z / dungeon.tileSize) + (door.alongX ? Math.sign(offset) : 0),
+        }));
+        return count + clearanceSamples.filter((sample) => architecturalTiles.some((tile) => (
+          tile.x === sample.x && tile.z === sample.z
+        ))).length;
+      }, 0);
+
+      generated.push({
+        seed,
+        accepted: dungeon.progression.validation.accepted,
+        errors: dungeon.progression.validation.errors,
+        allLocalSocketsReachable: dungeon.progression.validation.platformability.localSocketChecks
+          .every((check) => check.accessibleFromOwnerRoom),
+        groupCount: groupCounts.size,
+        groupTileCountsCorrect: [...expectedTileRanges].every(([id, range]) => (
+          groupCounts.get(id) >= range.min && groupCounts.get(id) <= range.max
+        )),
+        solidTileCount: solidTiles.length,
+        openTileCount: openTiles.length,
+        everySolidColumnBlocked: solidTiles.every((tile) => platforms.some((platform) => (
+          containsColumn(platform, tile)
+        ))),
+        everyUnderpassColumnClear: openTiles.every((tile) => platforms.every((platform) => (
+          !containsColumn(platform, tile)
+        ))),
+        spawnInsideMassCount,
+        doorClearanceOverlapCount,
+        doorDeckSlabOverlapCount,
+        architecturalPlatformsDisableLedgeCandidates: platforms.every((platform) => (
+          platform.createsLedgeCandidates === false
+        )),
+        unexpectedMassSurfaceCount: architecturalTiles.filter((tile) => ![
+          'secondFloor',
+          'mechanicalPyramidTerrace',
+          'mechanicalPyramidProcessionalStep',
+          'mechanicalPyramidSummit',
+          'mechanicalPyramidSidePlatform',
+          'refractorDais',
+          'vaultRewardDais',
+        ].includes(tile.surface)).length,
+        reveredDaisMassTileCount: dungeon.floorTiles.filter((tile) => (
+          tile.surface === 'refractorDais' && tile.massGroupId
+        )).length,
+      });
+      dungeon.group.clear();
+    }
+
+    return generated;
+  });
+
+  expect(results.every((result) => result.accepted && result.errors.length === 0)).toBe(true);
+  expect(results.every((result) => result.allLocalSocketsReachable)).toBe(true);
+  expect(results.every((result) => result.groupCount >= 18 && result.groupTileCountsCorrect)).toBe(true);
+  expect(results.every((result) => result.solidTileCount > 0)).toBe(true);
+  expect(results.reduce((count, result) => count + result.openTileCount, 0)).toBeGreaterThan(0);
+  expect(results.every((result) => result.everySolidColumnBlocked && result.everyUnderpassColumnClear)).toBe(true);
+  expect(results.every((result) => result.spawnInsideMassCount === 0)).toBe(true);
+  expect(results.every((result) => (
+    result.doorClearanceOverlapCount === 0
+    && result.doorDeckSlabOverlapCount === 0
+    && result.architecturalPlatformsDisableLedgeCandidates
+  ))).toBe(true);
+  expect(results.every((result) => (
+    result.unexpectedMassSurfaceCount === 0 && result.reveredDaisMassTileCount === 25
+  ))).toBe(true);
+});
+
+test('trap basement remains a purposeful drop space while the bonus vault reward stays on its focal dais', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.goto('/?roomPreview=trapRoom&roomPreviewLevel=0&roomPreviewFacing=north');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const { dungeon } = game;
+    const dropRooms = ['trapRoom'].map((roomId) => (
+      dungeon.rooms.find((room) => room.id === roomId)
+    ));
+    const checks = dungeon.progression.validation.platformability.dropSpaceChecks;
+    const shelves = dungeon.platforms.filter((platform) => platform.dropSpaceId);
+    const shelfLedges = game.platformingLedgeCandidates.filter((candidate) => (
+      shelves.some((platform) => candidate.id.startsWith(`${platform.id}-`))
+    ));
+    const negativeRampCount = dungeon.floorTiles.filter((tile) => (
+      tile.roomId === 'trapRoom'
+      && tile.surface === 'industrialRamp'
+      && Math.min(tile.rampStartElevation ?? 0, tile.rampEndElevation ?? 0) < -0.05
+    )).length;
+    const entryTiles = dungeon.floorTiles.filter((tile) => tile.allowsGroundedDropLanding);
+    const bridgeTiles = dungeon.floorTiles.filter((tile) => tile.surface === 'dropSpaceOverpass');
+    const lowerTiles = dungeon.floorTiles.filter((tile) => (
+      tile.dropSpaceId && tile.surface === 'basementFloor'
+    ));
+    let shelfVolumeCount = 0;
+    let shelfBandCount = 0;
+    let overpassBeamCount = 0;
+    let entryBackdropCount = 0;
+    let entryRevealWallCount = 0;
+    let entryHeaderCount = 0;
+    let entrySillCount = 0;
+    let entryAccentCount = 0;
+    dungeon.group.traverse((object) => {
+      if (object.name === 'minorDropReturnShelfVolume') shelfVolumeCount += 1;
+      if (object.name === 'minorDropReturnShelfBand') shelfBandCount += 1;
+      if (object.name === 'minorDropOverpassUnderbeam') overpassBeamCount += 1;
+      if (object.name === 'factoryBasementEntryBackdrop') entryBackdropCount += 1;
+      if (object.name === 'factoryBasementEntryRevealWall') entryRevealWallCount += 1;
+      if (object.name === 'factoryBasementEntryHeaderBeam') entryHeaderCount += 1;
+      if (object.name === 'factoryBasementEntrySill') entrySillCount += 1;
+      if (object.name === 'factoryBasementEntryAccent') entryAccentCount += 1;
+    });
+
+    const player = game.player;
+    const controller = game.dungeonController;
+    const spec = dropRooms[0].dropSpace;
+    const entryKey = spec.entryFloorKeys[0];
+    const lipKey = spec.entryLipFloorKeys[0];
+    const entryTile = dungeon.floorTiles.find((tile) => (
+      `${tile.x},${tile.z}@${tile.level}` === entryKey
+    ));
+    const lipTile = dungeon.floorTiles.find((tile) => (
+      `${tile.x},${tile.z}@${tile.level}` === lipKey
+    ));
+    player.jumpState = 'Grounded';
+    controller.lastSafePlayerPosition.set(
+      lipTile.x * dungeon.tileSize,
+      lipTile.elevation ?? 0,
+      lipTile.z * dungeon.tileSize,
+    );
+    player.root.position.set(
+      entryTile.x * dungeon.tileSize,
+      0,
+      entryTile.z * dungeon.tileSize,
+    );
+    controller._constrainPlayerToWalkable();
+    const groundedDropWasAccepted = Math.abs(player.root.position.x - entryTile.x * dungeon.tileSize) < 0.01
+      && Math.abs(player.root.position.z - entryTile.z * dungeon.tileSize) < 0.01
+      && Math.abs(player.root.position.y) < 0.01
+      && Math.abs(game._getPlayerGroundY() - spec.lowerElevation) < 0.01;
+
+    const Vector3 = player.root.position.constructor;
+    const resetPlayer = (position, direction) => {
+      player.ledgeCling = null;
+      player.root.position.copy(position);
+      player.modelRoot.position.y = 0;
+      player.velocity.set(0, 0, 0);
+      player.jumpState = 'Grounded';
+      player._jumpGroundY = position.y;
+      player._jumpBufferTimer = 0;
+      player._coyoteTimer = player.jumpSettings.coyoteTime;
+      player._landingRecoveryTimer = 0;
+      player.animation.actionState = null;
+      player.animation.actionTimer = 0;
+      player.animation.actionDuration = 0;
+      player.lastMoveDirection.copy(direction);
+      player.faceDirection(direction);
+      controller.pendingPlayerJumpOffLanding = null;
+      controller.lastSafePlayerPosition.copy(position);
+    };
+    const updatePlayer = (frames, direction, input = new Set(), stopWhen = null) => {
+      let minimumY = player.root.position.y;
+      for (let frame = 0; frame < frames; frame += 1) {
+        player.update(1 / 60, input, {
+          arenaRadius: game.arenaRadius,
+          movementForward: direction,
+          movementRight: new Vector3(direction.z, 0, -direction.x),
+          groundY: game._getPlayerGroundY(),
+        });
+        controller.update(1 / 60);
+        minimumY = Math.min(minimumY, player.root.position.y);
+        if (stopWhen?.()) break;
+      }
+      return minimumY;
+    };
+
+    const dropDirection = new Vector3(
+      entryTile.x - lipTile.x,
+      0,
+      entryTile.z - lipTile.z,
+    ).normalize();
+    resetPlayer(new Vector3(entryTile.x * dungeon.tileSize, 0, entryTile.z * dungeon.tileSize), dropDirection);
+    controller.lastSafePlayerPosition.set(
+      lipTile.x * dungeon.tileSize,
+      lipTile.elevation ?? 0,
+      lipTile.z * dungeon.tileSize,
+    );
+    controller._constrainPlayerToWalkable();
+    let enteredFalling = false;
+    updatePlayer(240, dropDirection, new Set(), () => {
+      enteredFalling ||= player.jumpState === 'Falling';
+      return enteredFalling
+        && player.jumpState === 'Grounded'
+        && Math.abs(player.root.position.y - spec.lowerElevation) < 0.03;
+    });
+    const completedGroundedDrop = enteredFalling
+      && player.jumpState === 'Grounded'
+      && Math.abs(player.root.position.y - spec.lowerElevation) < 0.03;
+
+    const shelf = shelves.find((platform) => platform.dropSpaceId === spec.id);
+    const ledge = shelfLedges.find((candidate) => candidate.id.startsWith(`${shelf.id}-`));
+    const inward = ledge.normal.clone().multiplyScalar(-1);
+    const approachPosition = shelf.center.clone()
+      .addScaledVector(ledge.normal, dungeon.tileSize)
+      .setY(spec.lowerElevation);
+    const underShelfPosition = shelf.center.clone().setY(spec.lowerElevation);
+    resetPlayer(approachPosition, inward);
+    const underShelfIsSolid = game.isPositionInsidePlatformBlock(underShelfPosition);
+    player.root.position.copy(underShelfPosition);
+    controller._constrainPlayerToWalkable();
+    const solidShelfRejectedUnderside = player.root.position.distanceTo(approachPosition) < 0.05;
+
+    resetPlayer(approachPosition, inward);
+    player.tryJump(new Set(), {
+      arenaRadius: game.arenaRadius,
+      movementForward: inward,
+      movementRight: new Vector3(inward.z, 0, -inward.x),
+      groundY: spec.lowerElevation,
+    });
+    updatePlayer(240, inward, new Set(), () => (
+      player.jumpState === 'Grounded' && Math.abs(player.root.position.y - spec.lowerElevation) < 0.03
+    ));
+    const neutralJumpStayedOnLowerFloor = !player.isLedgeClinging()
+      && Math.abs(player.root.position.y - spec.lowerElevation) < 0.03;
+
+    const clingStart = ledge.center.clone()
+      .addScaledVector(ledge.normal, 0.42)
+      .setY(spec.lowerElevation);
+    resetPlayer(clingStart, inward);
+    const generatedLedgeGrabStarted = game._tryResolveDebugLedgeCling({
+      player,
+      root: player.root,
+      jumpDirection: inward,
+      progress: 0.5,
+      jumpStartY: spec.lowerElevation,
+      jumpReachHeight: player.getJumpReachHeight(),
+    }, [ledge]);
+    const authoredHangY = player.ledgeCling?.hangPosition.y ?? -Infinity;
+    const minimumClingRootY = updatePlayer(360, inward, new Set(['KeyW']), () => (
+      !player.isLedgeClinging() && Math.abs(player.root.position.y - shelf.topY) < 0.05
+    ));
+    const completedGeneratedLedgeClimb = generatedLedgeGrabStarted
+      && !player.isLedgeClinging()
+      && Math.abs(player.root.position.y - shelf.topY) < 0.05;
+
+    const bonusChest = dungeon.chests.find((chest) => chest.roomId === 'bonusVault');
+    const trapZone = dungeon.traps.find((trap) => trap.roomId === 'trapRoom');
+    return {
+      accepted: dungeon.progression.validation.accepted,
+      dropSpaces: dropRooms.map((room) => room.dropSpace),
+      checks,
+      lowerTileCounts: Object.fromEntries(dropRooms.map((room) => [
+        room.id,
+        lowerTiles.filter((tile) => tile.dropSpaceId === room.dropSpace.id).length,
+      ])),
+      bridgeTileCount: bridgeTiles.length,
+      bridgeKeysUnique: new Set(bridgeTiles.map((tile) => `${tile.x},${tile.z}@${tile.level}`)).size,
+      shelfCount: shelves.length,
+      shelfVolumeCount,
+      shelfBandCount,
+      shelfLedgeCount: shelfLedges.length,
+      shelfEdges: shelves.map((shelf) => shelf.ledgeEdges),
+      shelfBlocksBelow: shelves.map((platform) => platform.blocksBelow),
+      shelfBaseYs: shelves.map((platform) => platform.baseY),
+      shelfMinimumHangYs: shelves.map((platform) => platform.minimumHangRootY),
+      overpassBeamCount,
+      entryBackdropCount,
+      entryRevealWallCount,
+      entryHeaderCount,
+      entrySillCount,
+      entryAccentCount,
+      entryTileCount: entryTiles.length,
+      groundedDropWasAccepted,
+      completedGroundedDrop,
+      underShelfIsSolid,
+      solidShelfRejectedUnderside,
+      neutralJumpStayedOnLowerFloor,
+      generatedLedgeGrabStarted,
+      authoredHangY,
+      minimumClingRootY,
+      completedGeneratedLedgeClimb,
+      negativeRampCount,
+      bonusChestY: bonusChest?.position.y ?? null,
+      bonusBasementTileCount: dungeon.floorTiles.filter((tile) => (
+        tile.roomId === 'bonusVault' && (tile.elevation ?? 0) < -0.1
+      )).length,
+      trapZoneY: trapZone?.position.y ?? null,
+    };
+  });
+
+  expect(result.accepted).toBe(true);
+  expect(result.dropSpaces).toHaveLength(1);
+  expect(result.dropSpaces.every((space) => (
+    space.lowerFloorKeys.length === 79
+    && space.lowerElevation === -4.8
+    && space.shelfElevation === -1.5
+    && space.entryFloorKeys.length === 2
+    && space.returnShelfFloorKeys.length === 2
+    && space.exitFloorKeys.length === 2
+    && space.requiredActions.join(',') === 'drop,ledge_climb,jump'
+  ))).toBe(true);
+  expect(result.checks).toHaveLength(1);
+  expect(result.checks.every((check) => (
+    check.lowerTileCount === 79
+    && check.entryDropExists
+    && check.entryFlagsValid
+    && check.entryLipsReachable
+    && check.returnClimbExists
+    && check.exitJumpExists
+    && check.shelfEdgesValid
+    && check.shelfSupportColumnsBlocked
+    && check.lowerReachable
+    && check.canExit
+    && check.everyLowerTileCanExit
+    && check.overheadClearanceValid
+    && check.bridgeCoverageRatio <= 0.5
+  ))).toBe(true);
+  expect(Object.values(result.lowerTileCounts)).toEqual([81]);
+  expect(result.bridgeTileCount).toBeGreaterThan(0);
+  expect(result.bridgeKeysUnique).toBe(result.bridgeTileCount);
+  expect(result.shelfCount).toBe(2);
+  expect(result.shelfVolumeCount).toBe(2);
+  expect(result.shelfBandCount).toBe(4);
+  expect(result.shelfLedgeCount).toBe(2);
+  expect(result.shelfEdges.every((edges) => edges?.length === 1)).toBe(true);
+  expect(result.shelfBlocksBelow.every(Boolean)).toBe(true);
+  expect(result.shelfBaseYs.every((value) => value === -4.8)).toBe(true);
+  expect(result.shelfMinimumHangYs.every((value) => value === -4.8)).toBe(true);
+  expect(result.overpassBeamCount).toBe(result.bridgeTileCount * 2);
+  expect(result.entryBackdropCount).toBe(1);
+  expect(result.entryRevealWallCount).toBe(2);
+  expect(result.entryHeaderCount).toBe(1);
+  expect(result.entrySillCount).toBe(1);
+  expect(result.entryAccentCount).toBe(1);
+  expect(result.entryTileCount).toBe(2);
+  expect(result.groundedDropWasAccepted).toBe(true);
+  expect(result.completedGroundedDrop).toBe(true);
+  expect(result.underShelfIsSolid).toBe(true);
+  expect(result.solidShelfRejectedUnderside).toBe(true);
+  expect(result.neutralJumpStayedOnLowerFloor).toBe(true);
+  expect(result.generatedLedgeGrabStarted).toBe(true);
+  expect(result.authoredHangY).toBeGreaterThanOrEqual(-4.8);
+  expect(result.minimumClingRootY).toBeGreaterThanOrEqual(-4.8);
+  expect(result.completedGeneratedLedgeClimb).toBe(true);
+  expect(result.negativeRampCount).toBe(0);
+  expect(result.bonusChestY).toBeCloseTo(0.42, 2);
+  expect(result.bonusBasementTileCount).toBe(0);
+  expect(result.trapZoneY).toBeLessThan(-4.5);
+});
+
+test('ramps and macro walls preserve tiled texel density without repeated slab seams', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(async () => {
+    window.game.stop();
+    const { dungeon, raycaster } = window.game;
+    const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
+    const Vector3 = window.game.player.root.position.constructor;
+    const rampSurfaces = [];
+    const wallCells = [];
+    const wallAccents = [];
+    let contiguousRampRunCount = 0;
+    let oldRampSlabCount = 0;
+    let oldRampStripeCount = 0;
+    let architecturalTiledMassCount = 0;
+    let wallBaseDrawObjectCount = 0;
+    let wallMacroDrawObjectCount = 0;
+    let wallAccentDrawObjectCount = 0;
+    let oldWallMacroMeshCount = 0;
+    let oldWallAccentMeshCount = 0;
+    let wallMacroInstanceRecordMismatchCount = 0;
+    let maximumWallBatchSpan = 0;
+    dungeon.group.traverse((object) => {
+      if (object.name === 'contiguousIndustrialRampRun') contiguousRampRunCount += 1;
+      if (object.userData.floorTile?.surface === 'industrialRamp') oldRampSlabCount += 1;
+      if (object.name === 'industrialRampGripStripe') oldRampStripeCount += 1;
+      if (object.name?.startsWith('solidArchitecturalDeckMass_')
+        && object.geometry?.userData?.tiledTexture) {
+        architecturalTiledMassCount += 1;
+      }
+      if (object.userData.contiguousRampSurface) {
+        object.updateWorldMatrix(true, false);
+        const position = object.geometry.getAttribute('position');
+        const normal = object.geometry.getAttribute('normal');
+        const uv = object.geometry.getAttribute('uv');
+        const topGroup = object.geometry.groups[0];
+        const bottomGroup = object.geometry.groups[1];
+        const topV = [];
+        const topNormalY = [];
+        const bottomNormalY = [];
+        for (let index = topGroup.start; index < topGroup.start + topGroup.count; index += 1) {
+          topV.push(uv.getY(index));
+          topNormalY.push(normal.getY(index));
+        }
+        for (let index = bottomGroup.start; index < bottomGroup.start + bottomGroup.count; index += 1) {
+          bottomNormalY.push(normal.getY(index));
+        }
+        const worldVertex = (index) => new Vector3(
+          position.getX(index),
+          position.getY(index),
+          position.getZ(index),
+        ).applyMatrix4(object.matrixWorld);
+        const topA = worldVertex(topGroup.start);
+        const topB = worldVertex(topGroup.start + 1);
+        const topC = worldVertex(topGroup.start + 2);
+        const topCentroid = topA.clone().add(topB).add(topC).multiplyScalar(1 / 3);
+        raycaster.set(
+          topCentroid.clone().add(new Vector3(0, 10, 0)),
+          new Vector3(0, -1, 0),
+        );
+        raycaster.near = 0;
+        raycaster.far = 20;
+        const topHit = raycaster.intersectObject(object, false)[0] ?? null;
+        const rampMaterial = Array.isArray(object.material) ? object.material[0] : object.material;
+        rampSurfaces.push({
+          tileCount: object.userData.rampTileCount,
+          rampRunId: object.userData.rampRunId,
+          repeats: object.userData.tiledTextureRepeats,
+          uvVSpan: Math.max(...topV) - Math.min(...topV),
+          minimumTopNormalY: Math.min(...topNormalY),
+          maximumBottomNormalY: Math.max(...bottomNormalY),
+          rayHitTop: Boolean(topHit),
+          rayHitMaterialIndex: topHit?.face?.materialIndex ?? null,
+          rayHitNormalY: topHit?.face?.normal?.y ?? null,
+          rayHitSurfaceDelta: topHit ? Math.abs(topHit.point.y - topCentroid.y) : null,
+          wrapS: rampMaterial.map?.wrapS,
+          wrapT: rampMaterial.map?.wrapT,
+          repeatX: rampMaterial.map?.repeat.x,
+          repeatY: rampMaterial.map?.repeat.y,
+          offsetX: rampMaterial.map?.offset.x,
+          offsetY: rampMaterial.map?.offset.y,
+        });
+      }
+      if (object.name === 'dungeonBoundaryWall') {
+        wallBaseDrawObjectCount += 1;
+      }
+      if (object.name === 'dungeonBoundaryWallMacroTile') {
+        oldWallMacroMeshCount += 1;
+      }
+      if (object.name === 'dungeonBoundaryWallAccent') {
+        oldWallAccentMeshCount += 1;
+      }
+      if (object.name === 'dungeonBoundaryWallMacroBatch') {
+        wallMacroDrawObjectCount += 1;
+        const records = object.userData.wallMacroCells ?? [];
+        if (object.count !== records.length) {
+          wallMacroInstanceRecordMismatchCount += 1;
+        }
+        const uv = object.geometry.getAttribute('uv');
+        const us = Array.from({ length: uv.count }, (_, index) => uv.getX(index));
+        const vs = Array.from({ length: uv.count }, (_, index) => uv.getY(index));
+        const uSpan = Math.max(...us) - Math.min(...us);
+        const vSpan = Math.max(...vs) - Math.min(...vs);
+        object.computeBoundingBox();
+        maximumWallBatchSpan = Math.max(
+          maximumWallBatchSpan,
+          object.boundingBox.max.x - object.boundingBox.min.x,
+          object.boundingBox.max.z - object.boundingBox.min.z,
+        );
+        for (const record of records) {
+          wallCells.push({
+            ...record,
+            facadeId: object.userData.wallFacadeId,
+            uDensity: uSpan / record.width,
+            vDensity: vSpan / record.height,
+            uvRatioMatches: Math.abs(uSpan - record.uvWidthRatio) < 0.002,
+          });
+        }
+      }
+      if (object.name === 'dungeonBoundaryWallAccentBatch') {
+        wallAccentDrawObjectCount += 1;
+        const records = object.userData.wallAccentRecords ?? [];
+        if (object.count !== records.length) {
+          wallMacroInstanceRecordMismatchCount += 1;
+        }
+        wallAccents.push(...records);
+      }
+    });
+    const facadeRows = new Map();
+    for (const cell of wallCells) {
+      const key = `${cell.facadeId}:${cell.normalX},${cell.normalZ}:${cell.row}`;
+      const cells = facadeRows.get(key) ?? [];
+      cells.push(cell);
+      facadeRows.set(key, cells);
+    }
+    let ownerTransitionCount = 0;
+    let falseOwnerGrammarSeamCount = 0;
+    for (const cells of facadeRows.values()) {
+      cells.sort((left, right) => left.column - right.column);
+      for (let index = 1; index < cells.length; index += 1) {
+        const left = cells[index - 1];
+        const right = cells[index];
+        if (left.column + 1 !== right.column || left.ownerId === right.ownerId) {
+          continue;
+        }
+        ownerTransitionCount += 1;
+        if (
+          ['tr', 'mr', 'br'].includes(left.grammar)
+          || ['tl', 'ml', 'bl'].includes(right.grammar)
+        ) {
+          falseOwnerGrammarSeamCount += 1;
+        }
+      }
+    }
+    const facadeProbe = new DungeonGenerator();
+    const syntheticContinuousMixedOwnerFacadeCount = facadeProbe
+      ._collectBoundaryWallRuns(new Map([
+        ['0,0', { x: 0, z: 0, roomId: 'ownerA' }],
+        ['1,0', { x: 1, z: 0, roomId: 'ownerB' }],
+      ]), new Set())
+      .filter((run) => run.horizontal && run.lengthTiles === 2 && run.ownerIds.length === 2)
+      .length;
+    const logicalRampTiles = dungeon.floorTiles.filter((tile) => tile.surface === 'industrialRamp');
+    const dualAxisRampTiles = logicalRampTiles.filter((tile) => (
+      Math.abs(Math.sign(tile.rampDirectionX ?? 0))
+      + Math.abs(Math.sign(tile.rampDirectionZ ?? 0))
+    ) !== 1);
+    const routedTurnLandings = dungeon.floorTiles.filter((tile) => (
+      tile.surface === 'rampLanding' && tile.rampRouteId
+    ));
+    const directionsByRun = new Map();
+    for (const tile of logicalRampTiles) {
+      const directions = directionsByRun.get(tile.rampRunId) ?? new Set();
+      directions.add(`${Math.sign(tile.rampDirectionX ?? 0)},${Math.sign(tile.rampDirectionZ ?? 0)}`);
+      directionsByRun.set(tile.rampRunId, directions);
+    }
+    return {
+      accepted: dungeon.progression.validation.accepted,
+      logicalRampTileCount: logicalRampTiles.length,
+      rampTilesMissingRunId: logicalRampTiles.filter((tile) => !tile.rampRunId).length,
+      dualAxisRampTileCount: dualAxisRampTiles.length,
+      routedTurnLandingCount: routedTurnLandings.length,
+      mixedDirectionRunCount: [...directionsByRun.values()].filter((directions) => directions.size !== 1).length,
+      contiguousRampRunCount,
+      rampSurfaces,
+      oldRampSlabCount,
+      oldRampStripeCount,
+      wallCells,
+      wallAccents,
+      wallBaseDrawObjectCount,
+      wallMacroDrawObjectCount,
+      wallAccentDrawObjectCount,
+      oldWallMacroMeshCount,
+      oldWallAccentMeshCount,
+      wallMacroInstanceRecordMismatchCount,
+      maximumWallBatchSpan,
+      ownerTransitionCount,
+      falseOwnerGrammarSeamCount,
+      syntheticContinuousMixedOwnerFacadeCount,
+      architecturalTiledMassCount,
+    };
+  });
+
+  expect(result.accepted).toBe(true);
+  expect(result.contiguousRampRunCount).toBeGreaterThan(0);
+  expect(result.rampSurfaces.length).toBe(result.contiguousRampRunCount);
+  expect(result.rampSurfaces.reduce((sum, ramp) => sum + ramp.tileCount, 0)).toBe(result.logicalRampTileCount);
+  expect(result.rampSurfaces.every((ramp) => (
+    Math.abs(ramp.uvVSpan - ramp.repeats) < 0.001
+    && Boolean(ramp.rampRunId)
+    && ramp.minimumTopNormalY > 0.9
+    && ramp.maximumBottomNormalY < -0.9
+    && ramp.rayHitTop
+    && ramp.rayHitMaterialIndex === 0
+    && ramp.rayHitNormalY > 0.9
+    && ramp.rayHitSurfaceDelta < 0.002
+    && ramp.wrapS === 1000
+    && ramp.wrapT === 1000
+    && ramp.repeatX === 1
+    && ramp.repeatY === 1
+    && ramp.offsetX === 0
+    && ramp.offsetY === 0
+  ))).toBe(true);
+  expect(result.rampTilesMissingRunId).toBe(0);
+  expect(result.dualAxisRampTileCount).toBe(0);
+  expect(result.routedTurnLandingCount).toBeGreaterThan(0);
+  expect(result.mixedDirectionRunCount).toBe(0);
+  expect(result.oldRampSlabCount).toBe(0);
+  expect(result.oldRampStripeCount).toBe(0);
+  expect(result.architecturalTiledMassCount).toBeGreaterThan(0);
+  expect(result.wallCells.length).toBeGreaterThan(1000);
+  expect(new Set(result.wallCells.map((cell) => cell.row))).toEqual(new Set([0, 1, 2, 3, 4, 5]));
+  expect(result.wallCells.every((cell) => (
+    cell.uvRatioMatches && Math.abs(cell.uDensity - cell.vDensity) < 0.002
+  ))).toBe(true);
+  expect(result.oldWallMacroMeshCount).toBe(0);
+  expect(result.oldWallAccentMeshCount).toBe(0);
+  expect(result.wallMacroInstanceRecordMismatchCount).toBe(0);
+  expect(result.wallMacroDrawObjectCount).toBeLessThan(2500);
+  expect(result.wallMacroDrawObjectCount).toBeLessThan(result.wallCells.length * 0.2);
+  expect(
+    result.wallBaseDrawObjectCount
+      + result.wallMacroDrawObjectCount
+      + result.wallAccentDrawObjectCount,
+  ).toBeLessThan(result.wallCells.length * 0.25);
+  expect(result.maximumWallBatchSpan).toBeLessThan(26);
+  expect(result.falseOwnerGrammarSeamCount).toBe(0);
+  expect(result.syntheticContinuousMixedOwnerFacadeCount).toBe(2);
+  expect(result.wallAccents.length).toBeGreaterThan(20);
+  expect(result.wallAccents.every((accent) => (
+    accent.integrated && accent.grammar === 'mm' && Boolean(accent.type)
+  ))).toBe(true);
+});
+
+test('static dungeon chunks cull by distance while floor occlusion and important objects remain safe', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.goto('/?roomPreview=trapRoom&roomPreviewLevel=0&roomPreviewFacing=north');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const { dungeon } = game;
+    const hasCullAncestor = (object) => {
+      for (let current = object; current; current = current.parent) {
+        if (current.userData?.renderCullGroup) return true;
+      }
+      return false;
+    };
+    const importantObjects = [
+      ...dungeon.doors.map((entry) => entry.object),
+      ...dungeon.keycards.map((entry) => entry.object),
+      ...dungeon.chests.map((entry) => entry.object),
+      ...dungeon.mechanisms.map((entry) => entry.object),
+      dungeon.keySeeker?.object,
+      dungeon.shrine?.object,
+    ].filter(Boolean);
+    const cullBucketSpan = (candidate) => Math.max(
+      candidate.maxX - candidate.minX,
+      candidate.maxZ - candidate.minZ,
+    );
+    const compositeCullGroups = dungeon.renderCullGroups.filter((candidate) => (
+      candidate.memberCount > 1
+    ));
+    const retainingWallOwners = [];
+    dungeon.group.traverse((object) => {
+      if (object.name === 'factoryBasementRetainingWallVisual') {
+        retainingWallOwners.push(object);
+      }
+    });
+    const dynamicRootsStayOutside = game.enemies.every((enemy) => (
+      enemy.root.parent && !hasCullAncestor(enemy.root)
+    ));
+    const descriptor = dungeon.renderCullGroups.find((candidate) => (
+      candidate.maxX - candidate.minX < 30 && candidate.maxZ - candidate.minZ < 30
+    ));
+    const originalPlayerPosition = game.player.root.position.clone();
+    const originalCameraPosition = game.camera.position.clone();
+    const originalCameraQuaternion = game.camera.quaternion.clone();
+    const leaf = descriptor.group.children[0];
+    const originalLeafVisibility = leaf.visible;
+    leaf.visible = false;
+    descriptor.group.visible = false;
+    descriptor.group.visible = true;
+    const leafVisibilityPreserved = leaf.visible === false;
+    leaf.visible = originalLeafVisibility;
+
+    const centerZ = (descriptor.minZ + descriptor.maxZ) * 0.5;
+    const setCullProbe = (distance) => {
+      game.player.root.position.set(descriptor.maxX + distance, 0, centerZ);
+      game.camera.position.set(descriptor.maxX + distance, 3, centerZ);
+    };
+    descriptor.group.visible = true;
+    setCullProbe(60);
+    game._updateDungeonRenderCulling(0, { force: true });
+    const visibleStateHoldsInsideHideThreshold = descriptor.group.visible;
+    descriptor.group.visible = false;
+    game._updateDungeonRenderCulling(0, { force: true });
+    const hiddenStateHoldsOutsideShowThreshold = !descriptor.group.visible;
+    setCullProbe(0);
+    game._updateDungeonRenderCulling(0, { force: true });
+    const nearGroupRestored = descriptor.group.visible;
+    setCullProbe(100000);
+    game._updateDungeonRenderCulling(0, { force: true });
+    const farCullStats = { ...game.dungeonRenderCullStats };
+
+    const bridgeEntry = game.cameraOcclusionEntries.find((entry) => (
+      entry.object.userData.floorTile?.surface === 'dropSpaceOverpass'
+    ));
+    const dropSpaceElevation = dungeon.rooms.find((room) => room.dropSpace)?.dropSpace?.lowerElevation ?? -4.8;
+    for (let current = bridgeEntry.owner; current; current = current.parent) {
+      current.visible = true;
+    }
+    const bridgePosition = bridgeEntry.object.getWorldPosition(bridgeEntry.object.position.clone());
+    game.player.root.position.set(bridgePosition.x, dropSpaceElevation, bridgePosition.z - 4);
+    game.camera.position.set(bridgePosition.x, 2.5, bridgePosition.z + 4);
+    game.camera.lookAt(game.player.root.position.x, -1.95, game.player.root.position.z);
+    game.camera.updateMatrixWorld(true);
+    game._updateCameraWallOcclusion();
+    const bridgeFloorOccluded = bridgeEntry.owner.visible === false;
+    game.camera.position.set(bridgePosition.x, 2.5, bridgePosition.z + 4);
+    game.player.root.position.set(bridgePosition.x, 0, bridgePosition.z + 3);
+    game.camera.lookAt(game.player.root.position.x, 1.25, game.player.root.position.z);
+    game.camera.updateMatrixWorld(true);
+    game._updateCameraWallOcclusion();
+    const bridgeFloorRestored = bridgeEntry.owner.visible === true;
+
+    const architecturalEntry = game.cameraOcclusionEntries.find((entry) => (
+      entry.object.name === 'solidArchitecturalDeckReinforcementBand'
+      && entry.owner.name.startsWith('solidArchitecturalDeckAssembly_')
+      && (
+        entry.owner.name.includes('enemyNest_rearStructuralMass')
+        || entry.owner.name.includes('conveyorRoom_sideStructuralMass')
+      )
+    ));
+    for (let current = architecturalEntry.owner; current; current = current.parent) {
+      current.visible = true;
+    }
+    const architecturalCenter = architecturalEntry.bounds.getCenter(new bridgePosition.constructor());
+    const architecturalSize = architecturalEntry.bounds.getSize(new bridgePosition.constructor());
+    const probeAlongX = architecturalSize.x <= architecturalSize.z;
+    const probeDistance = (probeAlongX ? architecturalSize.x : architecturalSize.z) * 0.5 + 2;
+    game.camera.position.copy(architecturalCenter);
+    game.player.root.position.copy(architecturalCenter);
+    if (probeAlongX) {
+      game.camera.position.x += probeDistance;
+      game.player.root.position.x -= probeDistance;
+    } else {
+      game.camera.position.z += probeDistance;
+      game.player.root.position.z -= probeDistance;
+    }
+    game.camera.lookAt(game.player.root.position);
+    game.camera.updateMatrixWorld(true);
+    game._updateCameraWallOcclusion();
+    const architecturalMassOccluded = architecturalEntry.owner.visible === false;
+    game.player.root.position.copy(game.camera.position);
+    if (probeAlongX) {
+      game.player.root.position.x += 1;
+    } else {
+      game.player.root.position.z += 1;
+    }
+    game.camera.lookAt(game.player.root.position);
+    game.camera.updateMatrixWorld(true);
+    game._updateCameraWallOcclusion();
+    const architecturalMassRestored = architecturalEntry.owner.visible === true;
+
+    game.player.root.position.copy(originalPlayerPosition);
+    game.camera.position.copy(originalCameraPosition);
+    game.camera.quaternion.copy(originalCameraQuaternion);
+    game.camera.updateMatrixWorld(true);
+    game._updateDungeonRenderCulling(0, { force: true });
+    game._updateCameraWallOcclusion();
+
+    return {
+      accepted: dungeon.progression.validation.accepted,
+      cullGroupCount: dungeon.renderCullGroups.length,
+      cullObjectCount: dungeon.renderCullGroups.reduce((sum, group) => sum + group.objectCount, 0),
+      cullDrawObjectCount: dungeon.renderCullGroups.reduce((sum, group) => (
+        sum + group.drawObjectCount
+      ), 0),
+      maxCullBucketSpan: Math.max(...dungeon.renderCullGroups.map(cullBucketSpan)),
+      maxCompositeCullBucketSpan: Math.max(...compositeCullGroups.map(cullBucketSpan)),
+      configuredCompositeCullBucketSpan: Math.max(...compositeCullGroups.map((candidate) => (
+        candidate.maxBucketSpan
+      ))),
+      maxCullBucketDrawObjectCount: Math.max(...dungeon.renderCullGroups.map((candidate) => (
+        candidate.drawObjectCount
+      ))),
+      configuredMaxCullBucketDrawObjects: Math.max(...dungeon.renderCullGroups.map((candidate) => (
+        candidate.maxBucketDrawObjects
+      ))),
+      nestedCullGroupCount: dungeon.renderCullGroups.filter((candidate) => (
+        candidate.hierarchyDepth > 0
+      )).length,
+      importantObjectsUnbucketed: importantObjects.every((object) => !hasCullAncestor(object)),
+      dynamicRootsStayOutside,
+      retainingWallOwnershipCoupled: retainingWallOwners.length > 0
+        && retainingWallOwners.every((owner) => (
+          owner.children.some((child) => child.name === 'factoryBasementRetainingWall')
+          && owner.children.some((child) => child.name === 'factoryBasementRetainingWallBand')
+        )),
+      retainingWallOcclusionCoupled: game.cameraOcclusionEntries
+        .filter((entry) => entry.object.name === 'factoryBasementRetainingWall')
+        .every((entry) => entry.owner.name === 'factoryBasementRetainingWallVisual'),
+      leafVisibilityPreserved,
+      visibleStateHoldsInsideHideThreshold,
+      hiddenStateHoldsOutsideShowThreshold,
+      nearGroupRestored,
+      farCullStats,
+      cameraOcclusionEntryCount: game.cameraOcclusionEntries.length,
+      floorOcclusionEntryCount: game.cameraOcclusionEntries.filter((entry) => (
+        entry.object.userData.floorTile
+      )).length,
+      cameraOcclusionBinCount: game.cameraOcclusionBins.size,
+      bridgeFloorOccluded,
+      bridgeFloorRestored,
+      architecturalMassOccluded,
+      architecturalMassRestored,
+    };
+  });
+
+  expect(result.accepted).toBe(true);
+  expect(result.cullGroupCount).toBeGreaterThan(100);
+  expect(result.cullObjectCount).toBeGreaterThan(1000);
+  expect(result.cullDrawObjectCount).toBe(result.cullObjectCount);
+  expect(result.maxCullBucketSpan).toBeLessThan(120);
+  expect(result.maxCompositeCullBucketSpan).toBeLessThanOrEqual(
+    result.configuredCompositeCullBucketSpan + 0.002,
+  );
+  expect(result.maxCullBucketDrawObjectCount).toBeLessThanOrEqual(
+    result.configuredMaxCullBucketDrawObjects,
+  );
+  expect(result.nestedCullGroupCount).toBeGreaterThan(0);
+  expect(result.importantObjectsUnbucketed).toBe(true);
+  expect(result.dynamicRootsStayOutside).toBe(true);
+  expect(result.retainingWallOwnershipCoupled).toBe(true);
+  expect(result.retainingWallOcclusionCoupled).toBe(true);
+  expect(result.leafVisibilityPreserved).toBe(true);
+  expect(result.visibleStateHoldsInsideHideThreshold).toBe(true);
+  expect(result.hiddenStateHoldsOutsideShowThreshold).toBe(true);
+  expect(result.nearGroupRestored).toBe(true);
+  expect(result.farCullStats.hiddenGroupCount).toBeGreaterThan(0);
+  expect(result.farCullStats.hiddenObjectCount).toBeGreaterThan(1000);
+  expect(result.farCullStats.hiddenDrawObjectCount).toBe(
+    result.farCullStats.hiddenObjectCount,
+  );
+  expect(result.farCullStats.totalDrawObjectCount).toBe(result.cullDrawObjectCount);
+  expect(result.cameraOcclusionEntryCount).toBeGreaterThan(1000);
+  expect(result.floorOcclusionEntryCount).toBeGreaterThan(1000);
+  expect(result.cameraOcclusionBinCount).toBeGreaterThan(50);
+  expect(result.bridgeFloorOccluded).toBe(true);
+  expect(result.bridgeFloorRestored).toBe(true);
+  expect(result.architecturalMassOccluded).toBe(true);
+  expect(result.architecturalMassRestored).toBe(true);
+});
+
+test('dungeon reset disposes detached GPU resources while preserving live shared assets', async ({ page }) => {
+  test.setTimeout(45000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const oldRoot = game.dungeon.group;
+    const oldMeshes = [];
+    oldRoot.traverse((object) => {
+      if (object.isMesh && object.geometry && object.material) {
+        oldMeshes.push(object);
+      }
+    });
+    const sharedMesh = oldMeshes.find((mesh) => (
+      !Array.isArray(mesh.material) && mesh.material.map
+    ));
+    const unsharedMesh = oldMeshes.find((mesh) => (
+      mesh.geometry !== sharedMesh.geometry
+      && !Array.isArray(mesh.material)
+      && mesh.material !== sharedMesh.material
+      && mesh.material.map
+      && mesh.material.map !== sharedMesh.material.map
+    ));
+    const sentinel = sharedMesh.clone(false);
+    sentinel.name = 'externalSharedDungeonResourceSentinel';
+    sentinel.visible = false;
+    game.scene.add(sentinel);
+
+    const disposed = {
+      sharedGeometry: false,
+      sharedMaterial: false,
+      sharedTexture: false,
+      unsharedGeometry: false,
+      unsharedMaterial: false,
+      unsharedTexture: false,
+    };
+    sharedMesh.geometry.addEventListener('dispose', () => { disposed.sharedGeometry = true; });
+    sharedMesh.material.addEventListener('dispose', () => { disposed.sharedMaterial = true; });
+    sharedMesh.material.map.addEventListener('dispose', () => { disposed.sharedTexture = true; });
+    unsharedMesh.geometry.addEventListener('dispose', () => { disposed.unsharedGeometry = true; });
+    unsharedMesh.material.addEventListener('dispose', () => { disposed.unsharedMaterial = true; });
+    unsharedMesh.material.map.addEventListener('dispose', () => { disposed.unsharedTexture = true; });
+
+    const resetAccepted = game.resetDungeonLayout({ free: true, message: 'GPU disposal test' });
+    const disposalStats = { ...game.lastDungeonResourceDisposalStats };
+    let newDungeonReferencesPreservedResource = false;
+    game.dungeon.group.traverse((object) => {
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      if (
+        object.geometry === sharedMesh.geometry
+        || materials.includes(sharedMesh.material)
+        || materials.some((material) => material?.map === sharedMesh.material.map)
+      ) {
+        newDungeonReferencesPreservedResource = true;
+      }
+    });
+    const sharedResourcesSurvived = !disposed.sharedGeometry
+      && !disposed.sharedMaterial
+      && !disposed.sharedTexture;
+    const detachedResourcesDisposed = disposed.unsharedGeometry
+      && disposed.unsharedMaterial
+      && disposed.unsharedTexture;
+
+    sentinel.removeFromParent();
+    sharedMesh.geometry.dispose();
+    sharedMesh.material.dispose();
+    sharedMesh.material.map.dispose();
+
+    return {
+      resetAccepted,
+      oldRootDetached: oldRoot.parent === null,
+      newRootAttached: game.dungeon.group.parent === game.scene,
+      newDungeonAccepted: game.dungeon.progression.validation.accepted,
+      sharedResourcesSurvived,
+      detachedResourcesDisposed,
+      newDungeonReferencesPreservedResource,
+      disposalStats,
+    };
+  });
+
+  expect(result.resetAccepted).toBe(true);
+  expect(result.oldRootDetached).toBe(true);
+  expect(result.newRootAttached).toBe(true);
+  expect(result.newDungeonAccepted).toBe(true);
+  expect(result.sharedResourcesSurvived).toBe(true);
+  expect(result.detachedResourcesDisposed).toBe(true);
+  expect(result.newDungeonReferencesPreservedResource).toBe(false);
+  expect(result.disposalStats.disposedGeometryCount).toBeGreaterThan(1000);
+  expect(result.disposalStats.disposedMaterialCount).toBeGreaterThan(20);
+  expect(result.disposalStats.disposedTextureCount).toBeGreaterThan(10);
+  expect(result.disposalStats.preservedGeometryCount).toBeGreaterThanOrEqual(1);
+  expect(result.disposalStats.preservedMaterialCount).toBeGreaterThanOrEqual(1);
+  expect(result.disposalStats.preservedTextureCount).toBeGreaterThanOrEqual(1);
+  expect(
+    result.disposalStats.disposedGeometryCount + result.disposalStats.preservedGeometryCount,
+  ).toBe(result.disposalStats.geometryCount);
+  expect(
+    result.disposalStats.disposedMaterialCount + result.disposalStats.preservedMaterialCount,
+  ).toBe(result.disposalStats.materialCount);
+  expect(
+    result.disposalStats.disposedTextureCount + result.disposalStats.preservedTextureCount,
+  ).toBe(result.disposalStats.textureCount);
 });
 
 test('elevated drops and effects stay on their tier while lore announcements are preserved', async ({ page }) => {
@@ -1647,6 +3131,130 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
   expect(results.every((result) => result.accepted && result.errors.length === 0)).toBe(true);
   expect(results.every((result) => result.matchedConnections >= 14)).toBe(true);
   expect(results.every((result) => result.platforms >= 11)).toBe(true);
+});
+
+test('server room keeps one clear perimeter ramp while its upper socket remains reachable', async ({ page }) => {
+  test.setTimeout(60000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const results = await page.evaluate(async () => {
+    window.game.stop();
+    const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
+    const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    const generated = [];
+
+    for (const seed of [3, 6, 10, 12]) {
+      let state = seed >>> 0;
+      const random = () => (
+        (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296
+      );
+      const generator = new DungeonGenerator({ random });
+      const dungeon = generator.generate();
+      const server = dungeon.rooms.find((room) => room.id === 'alienServerRoom');
+      const blockingPlatforms = generator._createBlockingPlatformColumnMap(dungeon.floorTiles);
+      const localTiles = dungeon.floorTiles.filter((tile) => (
+        generator._isTileInsideRoom(tile, server)
+        && !generator._isFloorTileBlockedBySolidZone(tile, dungeon.solidZones)
+        && !generator._isFloorTileBlockedByGeneratedPlatform(tile, blockingPlatforms)
+      ));
+      const start = generator._findRoomWalkabilityStartTile(server, localTiles);
+      const reachable = generator._createReachableFloorTileKeySet(start, localTiles);
+      const rampTiles = localTiles.filter((tile) => tile.surface === 'industrialRamp');
+      const rampColumns = new Map();
+      const rampByKey = new Map();
+
+      for (const tile of rampTiles) {
+        const columnKey = `${tile.x},${tile.z}`;
+        const column = rampColumns.get(columnKey) ?? [];
+        column.push(tile);
+        rampColumns.set(columnKey, column);
+        rampByKey.set(generator._getFloorTileGraphKey(tile), tile);
+      }
+
+      const unvisited = new Set(rampByKey.keys());
+      const components = [];
+      for (const [startKey, startTile] of rampByKey) {
+        if (!unvisited.has(startKey)) {
+          continue;
+        }
+
+        const queue = [startTile];
+        const component = [];
+        unvisited.delete(startKey);
+        for (let cursor = 0; cursor < queue.length; cursor += 1) {
+          const current = queue[cursor];
+          component.push(current);
+          for (const [dx, dz] of directions) {
+            for (const candidate of rampColumns.get(`${current.x + dx},${current.z + dz}`) ?? []) {
+              const candidateKey = generator._getFloorTileGraphKey(candidate);
+              if (!unvisited.has(candidateKey)
+                || !generator._canTraverseBetweenFloorTiles(current, candidate)) {
+                continue;
+              }
+              unvisited.delete(candidateKey);
+              queue.push(candidate);
+            }
+          }
+        }
+        components.push(component);
+      }
+
+      const fullHeightRamps = components.filter((component) => {
+        const elevations = component.flatMap((tile) => [
+          tile.elevation,
+          tile.rampStartElevation,
+          tile.rampEndElevation,
+        ]).filter(Number.isFinite);
+        return Math.min(...elevations) <= 0.05
+          && Math.max(...elevations) >= 4
+          && component.every((tile) => reachable.has(generator._getFloorTileGraphKey(tile)));
+      });
+      const serverSocketChecks = dungeon.progression.validation.platformability.localSocketChecks
+        .filter((check) => check.roomId === server.id);
+
+      generated.push({
+        seed,
+        accepted: dungeon.progression.validation.accepted,
+        errors: dungeon.progression.validation.errors,
+        fullHeightRampCount: fullHeightRamps.length,
+        hasCrossRoomRamp: fullHeightRamps.some((component) => (
+          component.some((tile) => Math.abs(tile.rampDirectionX ?? 0) > 0)
+        )),
+        blockedRampCount: dungeon.floorTiles.filter((tile) => (
+          tile.roomId === server.id
+          && tile.surface === 'industrialRamp'
+          && generator._isFloorTileBlockedBySolidZone(tile, dungeon.solidZones)
+        )).length,
+        allElevatedTilesReachable: localTiles
+          .filter((tile) => (tile.elevation ?? 0) > 0.05)
+          .every((tile) => reachable.has(generator._getFloorTileGraphKey(tile))),
+        serverSocketChecks,
+        upperEntranceAccessible: serverSocketChecks.some((check) => (
+          check.socketId === 'enemyNest_alienServerRoom_upper_entrance'
+          && check.accessibleFromOwnerRoom
+        )),
+      });
+      dungeon.group.clear();
+    }
+
+    return generated;
+  });
+
+  expect(results.every((result) => result.accepted && result.errors.length === 0)).toBe(true);
+  expect(results.every((result) => result.fullHeightRampCount === 1)).toBe(true);
+  expect(results.every((result) => !result.hasCrossRoomRamp && result.blockedRampCount === 0)).toBe(true);
+  expect(results.every((result) => result.allElevatedTilesReachable)).toBe(true);
+  expect(results.every((result) => (
+    result.serverSocketChecks.length > 0
+    && result.serverSocketChecks.every((check) => check.accessibleFromOwnerRoom)
+    && result.upperEntranceAccessible
+  ))).toBe(true);
 });
 
 test('generated jump platforms support landing and block their unsupported underside', async ({ page }) => {

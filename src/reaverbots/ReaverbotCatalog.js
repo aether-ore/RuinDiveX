@@ -87,8 +87,8 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
     role: 'controller',
     bodyPlans: ['hoverBell', 'tripod'],
     weapons: ['arcEmitter', 'flameNozzle', 'mineDispenser'],
-    defenses: ['rotatingPlates', 'energyMembrane', 'armorShutters'],
-    weakPoints: ['emitterCore', 'coolingVents', 'eyeLens'],
+    defenses: ['rotatingPlates', 'energyMembrane', 'armorShutters', 'sidePlates'],
+    weakPoints: ['emitterCore', 'coolingVents', 'eyeLens', 'counterweightCore'],
     paletteId: 'controllerTeal',
     baseStats: { health: 31, damage: 5, speed: 1.55, armor: 6, radius: 0.66 },
     behavior: {
@@ -98,6 +98,26 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
       commit: 0.4,
       recovery: 1.15,
       turnRate: 2.2,
+    },
+    threatCost: 7,
+  },
+  rotorHunter: {
+    id: 'rotorHunter',
+    label: 'Rotor Hunter',
+    role: 'spinner',
+    bodyPlans: ['tripod', 'hoverBell'],
+    weapons: ['rotorBlade'],
+    defenses: ['rotatingPlates'],
+    weakPoints: ['counterweightCore'],
+    paletteId: 'rotorCopper',
+    baseStats: { health: 34, damage: 7, speed: 2.05, armor: 8, radius: 0.7 },
+    behavior: {
+      preferredRange: 1.45,
+      aggroRange: 16,
+      telegraph: 0.72,
+      commit: 0.9,
+      recovery: 0.82,
+      turnRate: 3.1,
     },
     threatCost: 7,
   },
@@ -274,6 +294,10 @@ export const REAVERBOT_WEAPONS = Object.freeze({
     id: 'mineDispenser', label: 'Mine Dispenser', tags: ['ranged', 'zone', 'explosive'], requires: ['stablePose'],
     attackKind: 'mine', range: 5.4, damageScale: 0.78, threatCost: 4,
   },
+  rotorBlade: {
+    id: 'rotorBlade', label: 'Rotor Blade', tags: ['melee', 'spin', 'area'], requires: ['stablePose'],
+    attackKind: 'charge', range: 1.75, damageScale: 0.72, threatCost: 4,
+  },
   overloadCore: {
     id: 'overloadCore', label: 'Overload Core', tags: ['selfDestruct', 'area'], requiresAny: ['aerial', 'hovering'],
     attackKind: 'selfDestruct', range: 2.2, damageScale: 1.55, explosiveRadius: 3, threatCost: 5,
@@ -291,7 +315,7 @@ export const REAVERBOT_DEFENSES = Object.freeze({
   },
   sidePlates: {
     id: 'sidePlates', label: 'Side Plates', tags: ['sideArmor'],
-    directMultiplier: 0.55, flankMultiplier: 0.72, uptime: 0.5, threatCost: 2,
+    directMultiplier: 0.2, flankMultiplier: 1, uptime: 0.62, threatCost: 3,
   },
   armoredBack: {
     id: 'armoredBack', label: 'Armored Back', tags: ['carapace'],
@@ -311,7 +335,7 @@ export const REAVERBOT_DEFENSES = Object.freeze({
   },
   rotatingPlates: {
     id: 'rotatingPlates', label: 'Rotating Plates', tags: ['rotating', 'guard'],
-    directMultiplier: 0.22, flankMultiplier: 0.58, uptime: 0.48, threatCost: 4,
+    directMultiplier: 0.08, flankMultiplier: 1, uptime: 0.62, threatCost: 4,
   },
   energyMembrane: {
     id: 'energyMembrane', label: 'Energy Membrane', tags: ['energy', 'guard'],
@@ -323,7 +347,7 @@ export const REAVERBOT_DEFENSES = Object.freeze({
   },
   reactivePlate: {
     id: 'reactivePlate', label: 'Reactive Plate', tags: ['reactive'],
-    directMultiplier: 0.42, flankMultiplier: 0.78, uptime: 0.42, threatCost: 2,
+    directMultiplier: 0.26, flankMultiplier: 1, uptime: 0.48, threatCost: 3,
   },
 });
 
@@ -353,7 +377,10 @@ export const REAVERBOT_WEAK_POINTS = Object.freeze({
     id: 'overloadCore', label: 'Overload Core', location: 'center', multiplier: 3, lockable: true, exposure: 'telegraph', radius: 0.28,
   },
   legJoint: {
-    id: 'legJoint', label: 'Drive Joint', location: 'leg', multiplier: 2, lockable: true, exposure: 'always', radius: 0.18,
+    id: 'legJoint', label: 'Drive Joint', location: 'leg', multiplier: 2.15, lockable: true, exposure: 'recovery', radius: 0.25,
+  },
+  counterweightCore: {
+    id: 'counterweightCore', label: 'Counterweight Core', location: 'rotorOpposite', multiplier: 2.55, lockable: true, exposure: 'always', radius: 0.27,
   },
 });
 
@@ -363,6 +390,7 @@ export const REAVERBOT_PALETTES = Object.freeze({
   pouncerOlive: { primary: 0x6f7d3d, secondary: 0x38452c, trim: 0xb3b86a, dark: 0x20271b, emissive: 0xffc65b },
   artilleryViolet: { primary: 0x65546e, secondary: 0x343344, trim: 0xa694a8, dark: 0x211e29, emissive: 0xc39bff },
   controllerTeal: { primary: 0x3f7771, secondary: 0x244844, trim: 0xa0b99d, dark: 0x172b2b, emissive: 0x6fffe1 },
+  rotorCopper: { primary: 0x8c6648, secondary: 0x3d4b4d, trim: 0xd1b178, dark: 0x242829, emissive: 0x67e6ff },
   bomberIvory: { primary: 0xb8aa82, secondary: 0x50483e, trim: 0xe1d5a7, dark: 0x292521, emissive: 0xff9c47 },
   packSand: { primary: 0x8e8560, secondary: 0x48523d, trim: 0xc7b988, dark: 0x292d23, emissive: 0xaeea6d },
   duelistBurgundy: { primary: 0x71434d, secondary: 0x3c2730, trim: 0xa78b84, dark: 0x24191e, emissive: 0xffa75c },
@@ -370,13 +398,13 @@ export const REAVERBOT_PALETTES = Object.freeze({
 
 export const INTENT_ARCHETYPE_WEIGHTS = Object.freeze({
   basic: [
-    ['pursuer', 3], ['packHunter', 3], ['duelist', 1.5], ['shieldSentinel', 1], ['pouncer', 1],
+    ['pursuer', 3], ['packHunter', 3], ['duelist', 1.5], ['shieldSentinel', 1], ['pouncer', 1], ['rotorHunter', 1.2],
   ],
   fast: [
-    ['pursuer', 4], ['pouncer', 3], ['packHunter', 4], ['aerialBomber', 1],
+    ['pursuer', 4], ['pouncer', 3], ['packHunter', 4], ['rotorHunter', 2], ['aerialBomber', 1],
   ],
   tank: [
-    ['shieldSentinel', 4], ['artillery', 2], ['duelist', 2], ['zoneController', 1],
+    ['shieldSentinel', 4], ['artillery', 2], ['duelist', 2], ['rotorHunter', 1.4], ['zoneController', 1],
   ],
   ranged: [
     ['artillery', 4], ['zoneController', 4], ['shieldSentinel', 2], ['aerialBomber', 1.5],
@@ -391,15 +419,15 @@ export const INTENT_ARCHETYPE_WEIGHTS = Object.freeze({
 });
 
 export const LINKED_WEAK_POINT_WEIGHTS = Object.freeze({
-  directionalShield: [['rearBattery', 4], ['shieldHinge', 3], ['eyeLens', 1]],
-  guardArms: [['eyeLens', 4], ['rearBattery', 2], ['shieldHinge', 1]],
-  armorShutters: [['eyeLens', 5], ['ammoDrum', 2], ['coolingVents', 1]],
-  armoredBack: [['bellyCore', 6], ['legJoint', 2]],
-  armoredCarapace: [['rearBattery', 3], ['bellyCore', 3], ['ammoDrum', 2]],
-  rotatingPlates: [['emitterCore', 4], ['eyeLens', 3]],
-  energyMembrane: [['emitterCore', 3], ['overloadCore', 3], ['eyeLens', 2]],
-  phaseShell: [['eyeLens', 4], ['overloadCore', 4]],
-  armoredSkull: [['rearBattery', 4], ['legJoint', 2]],
-  sidePlates: [['legJoint', 3], ['rearBattery', 3], ['bellyCore', 2]],
-  reactivePlate: [['rearBattery', 3], ['legJoint', 3], ['eyeLens', 1]],
+  directionalShield: [['rearBattery', 5], ['shieldHinge', 4], ['eyeLens', 2]],
+  guardArms: [['eyeLens', 5], ['shieldHinge', 3], ['rearBattery', 2]],
+  armorShutters: [['eyeLens', 8]],
+  armoredBack: [['bellyCore', 8]],
+  armoredCarapace: [['ammoDrum', 6], ['rearBattery', 5], ['bellyCore', 2]],
+  rotatingPlates: [['counterweightCore', 10]],
+  energyMembrane: [['emitterCore', 5], ['overloadCore', 5], ['eyeLens', 3]],
+  phaseShell: [['eyeLens', 5], ['overloadCore', 6]],
+  armoredSkull: [['rearBattery', 8]],
+  sidePlates: [['legJoint', 8], ['coolingVents', 6]],
+  reactivePlate: [['rearBattery', 6], ['eyeLens', 4], ['shieldHinge', 3]],
 });

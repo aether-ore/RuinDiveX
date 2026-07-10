@@ -28,6 +28,7 @@ const WEAPON_WEAK_POINT_WEIGHTS = Object.freeze({
   flameNozzle: [['coolingVents', 7], ['rearBattery', 2]],
   beamPrism: [['eyeLens', 4], ['emitterCore', 3]],
   mineDispenser: [['ammoDrum', 4], ['rearBattery', 3]],
+  rotorBlade: [['counterweightCore', 10]],
   overloadCore: [['overloadCore', 8], ['eyeLens', 4]],
 });
 
@@ -115,26 +116,30 @@ function pickWeapon(rng, archetype, body) {
 function pickDefense(rng, archetype, body) {
   const compatible = archetype.defenses
     .map((id) => REAVERBOT_DEFENSES[id])
-    .filter((defense) => defense && hasBodyRequirements(defense, body));
-  return rng.pick(compatible) ?? REAVERBOT_DEFENSES.reactivePlate;
+    .filter((defense) => defense
+      && hasBodyRequirements(defense, body)
+      && (LINKED_WEAK_POINT_WEIGHTS[defense.id] ?? [])
+        .some(([weakPointId]) => archetype.weakPoints.includes(weakPointId)));
+  return rng.pick(compatible) ?? compatible[0] ?? REAVERBOT_DEFENSES.reactivePlate;
 }
 
 function mergeWeightedWeakPoints(archetype, defense, weapon) {
   const allowed = new Set(archetype.weakPoints);
-  const combined = new Map(archetype.weakPoints.map((id) => [id, 1]));
+  const combined = new Map();
 
   for (const [id, weight] of LINKED_WEAK_POINT_WEIGHTS[defense.id] ?? []) {
-    if (allowed.has(id)) combined.set(id, (combined.get(id) ?? 0) + weight);
+    if (allowed.has(id)) combined.set(id, weight);
   }
   for (const [id, weight] of WEAPON_WEAK_POINT_WEIGHTS[weapon.id] ?? []) {
-    if (allowed.has(id)) combined.set(id, (combined.get(id) ?? 0) + weight);
+    if (combined.has(id)) combined.set(id, combined.get(id) + weight);
   }
 
   return [...combined.entries()].map(([value, weight]) => ({ value, weight }));
 }
 
 function pickWeakPoint(rng, archetype, defense, weapon) {
-  const id = rng.weighted(mergeWeightedWeakPoints(archetype, defense, weapon), archetype.weakPoints[0]);
+  const options = mergeWeightedWeakPoints(archetype, defense, weapon);
+  const id = rng.weighted(options, options[0]?.value ?? archetype.weakPoints[0]);
   return REAVERBOT_WEAK_POINTS[id] ?? REAVERBOT_WEAK_POINTS.eyeLens;
 }
 
@@ -312,6 +317,10 @@ export function validateReaverbotGenome(genome) {
   if (archetype && weapon && !archetype.weapons.includes(weapon.id)) errors.push('weapon-archetype-incompatible');
   if (archetype && defense && !archetype.defenses.includes(defense.id)) errors.push('defense-archetype-incompatible');
   if (archetype && weakPoint && !archetype.weakPoints.includes(weakPoint.id)) errors.push('weak-point-archetype-incompatible');
+  if (defense && weakPoint
+    && !(LINKED_WEAK_POINT_WEIGHTS[defense.id] ?? []).some(([id]) => id === weakPoint.id)) {
+    errors.push('defense-weak-point-unpaired');
+  }
   if ((genome?.behavior?.exposureDuration ?? 0) < 0.6) errors.push('weak-point-window-too-short');
   if ((defense?.uptime ?? 0) > 0.7) errors.push('defense-uptime-too-high');
   if ((genome?.threat?.spent ?? Infinity) > (genome?.threat?.budget ?? -Infinity)) errors.push('threat-budget-exceeded');

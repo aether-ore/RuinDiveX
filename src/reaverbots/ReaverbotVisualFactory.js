@@ -362,6 +362,30 @@ function createWeapon(root, genome, frame, materials) {
       mesh(weapon, new THREE.CylinderGeometry(0.16, 0.16, 0.08, 8), materials.emissive, 'generatedStoredMine', [side * 0.2, 0, 0.52], [Math.PI / 2, 0, 0]);
     }
     muzzle.position.set(0, -0.15, 0.7);
+  } else if (id === 'rotorBlade') {
+    box(weapon, materials.dark, 'generatedRotorBladeCrossbar', [2.08, 0.14, 0.18], [0, 0, 0]);
+    for (const side of [-1, 1]) {
+      const blade = mesh(
+        weapon,
+        new THREE.ConeGeometry(0.2, 0.78, 5),
+        materials.weapon,
+        'generatedRotorBlade',
+        [side * 1.12, 0, 0],
+        [0, 0, side * -Math.PI / 2],
+      );
+      blade.userData.rotorSide = side;
+      for (let link = 0; link < 3; link += 1) {
+        mesh(
+          weapon,
+          new THREE.TorusGeometry(0.07, 0.018, 5, 8),
+          materials.trim,
+          'generatedRotorFlailLink',
+          [side * (0.72 + link * 0.13), 0, 0],
+          [Math.PI / 2, 0, 0],
+        );
+      }
+    }
+    muzzle.position.set(0, 0, 0.2);
   } else {
     mesh(weapon, new THREE.IcosahedronGeometry(0.34, 0), materials.emissive, 'generatedOverloadWeaponCore', [0, 0, 0.16]);
     mesh(weapon, new THREE.TorusGeometry(0.42, 0.045, 6, 16), materials.weapon, 'generatedOverloadCoreCage', [0, 0, 0.16], [Math.PI / 2, 0, 0]);
@@ -378,18 +402,39 @@ function createDefense(root, genome, frame, materials) {
   let anchor = frame.anchors.defense;
   if (id === 'armorShutters' || id === 'armoredSkull') {
     anchor = frame.anchors.eye;
-  } else if (id === 'guardArms' || id === 'sidePlates') {
+  } else if (id === 'directionalShield' || id === 'reactivePlate') {
+    anchor = [...frame.anchors.frontSide];
+    const side = Math.sign(anchor[0] || -1);
+    anchor[0] = side * (id === 'directionalShield' ? 0.82 : 0.58);
+    anchor[1] += 0.08;
+    anchor[2] += 0.3;
+  } else if (id === 'guardArms') {
     anchor = [...frame.anchors.center];
     anchor[2] += 0.42;
+  } else if (id === 'sidePlates') {
+    anchor = [...frame.anchors.center];
+    anchor[1] -= 0.14;
+    anchor[2] = frame.anchors.frontSide[2] + 0.18;
   }
   const defense = group(root, `generatedDefense_${id}`, anchor);
-  const parts = { group: defense, shell: null, shutters: [], plates: [] };
+  const guardNormal = new THREE.Object3D();
+  guardNormal.name = 'generatedDefenseGuardNormal';
+  defense.add(guardNormal);
+  const parts = {
+    group: defense,
+    shell: null,
+    shutters: [],
+    plates: [],
+    guardNormal,
+    primaryPlate: null,
+  };
 
   if (id === 'directionalShield') {
-    const plate = mesh(defense, new THREE.CylinderGeometry(0.64, 0.7, 0.14, 6), defenseMaterial, 'generatedDirectionalShield', [0, 0, 0], [Math.PI / 2, 0, 0], [0.78, 1, 1]);
-    mesh(plate, new THREE.TorusGeometry(0.44, 0.055, 5, 6), materials.trim, 'generatedDirectionalShieldRim', [0, -0.08, 0], [Math.PI / 2, 0, 0]);
-    mesh(plate, new THREE.CylinderGeometry(0.14, 0.14, 0.17, 8), materials.emissive, 'generatedDirectionalShieldNode', [0, -0.11, 0], [Math.PI / 2, 0, 0]);
+    const plate = mesh(defense, new THREE.CylinderGeometry(0.82, 0.9, 0.16, 6), defenseMaterial, 'generatedDirectionalShield', [0, 0, 0], [Math.PI / 2, 0, 0], [0.9, 1.08, 1]);
+    mesh(plate, new THREE.TorusGeometry(0.64, 0.065, 5, 6), materials.trim, 'generatedDirectionalShieldRim', [0, -0.09, 0], [Math.PI / 2, 0, 0]);
+    mesh(plate, new THREE.CylinderGeometry(0.17, 0.17, 0.19, 8), materials.emissive, 'generatedDirectionalShieldNode', [0, -0.12, 0], [Math.PI / 2, 0, 0]);
     parts.plates.push(plate);
+    parts.primaryPlate = plate;
   } else if (id === 'guardArms') {
     for (const side of [-1, 1]) {
       const arm = box(defense, defenseMaterial, 'generatedGuardArm', [0.32, 0.9, 0.28], [side * 0.2, 0, 0], [0, 0, side * 0.58]);
@@ -405,12 +450,13 @@ function createDefense(root, genome, frame, materials) {
     }
   } else if (id === 'rotatingPlates') {
     defense.position.copy(new THREE.Vector3(...frame.anchors.center));
-    for (let index = 0; index < 3; index += 1) {
-      const angle = index * Math.PI * 2 / 3;
-      const plate = box(defense, defenseMaterial, 'generatedRotatingDefensePlate', [0.42, 0.75, 0.12], [Math.sin(angle) * 0.82, 0, Math.cos(angle) * 0.82]);
-      plate.rotation.y = angle;
-      parts.plates.push(plate);
-    }
+    box(defense, materials.dark, 'generatedRotorGuardSpine', [0.16, 0.16, 1.72], [0, 0, 0]);
+    const plate = box(defense, defenseMaterial, 'generatedRotatingDefensePlate', [0.96, 1.02, 0.18], [0, 0, 0.86]);
+    box(plate, materials.trim, 'generatedRotatingDefensePlateInset', [0.68, 0.72, 0.04], [0, 0, 0.11]);
+    mesh(plate, new THREE.CylinderGeometry(0.15, 0.15, 0.2, 8), materials.emissive, 'generatedRotatingDefenseNode', [0, 0, 0.14], [Math.PI / 2, 0, 0]);
+    guardNormal.position.set(0, 0, 0.95);
+    parts.plates.push(plate);
+    parts.primaryPlate = plate;
   } else if (id === 'energyMembrane' || id === 'phaseShell') {
     defense.position.copy(new THREE.Vector3(...frame.anchors.center));
     const shellMaterial = materials.shieldEnergy.clone();
@@ -423,7 +469,10 @@ function createDefense(root, genome, frame, materials) {
     }
   } else if (id === 'sidePlates') {
     for (const side of [-1, 1]) {
-      const plate = box(defense, defenseMaterial, 'generatedSideArmorPlate', [0.18, 0.68, 0.72], [side * 0.48, 0, 0], [0, 0, side * 0.08]);
+      const plate = box(defense, defenseMaterial, 'generatedSideArmorPlate', [0.54, 1.18, 0.16], [side * 0.34, -0.18, 0], [0, side * -0.06, side * 0.04]);
+      plate.userData.guardSide = side;
+      plate.userData.closedPosition = plate.position.clone();
+      plate.userData.openPosition = new THREE.Vector3(side * 0.72, 0.26, -0.08);
       parts.plates.push(plate);
     }
   } else if (id === 'armoredBack' || id === 'armoredCarapace') {
@@ -433,12 +482,14 @@ function createDefense(root, genome, frame, materials) {
       parts.plates.push(plate);
     }
   } else {
-    const plate = box(defense, defenseMaterial, 'generatedReactivePlate', [0.5, 0.72, 0.18], [0, 0, 0], [0, 0, -0.18]);
+    const plate = box(defense, defenseMaterial, 'generatedReactivePlate', [0.8, 1.06, 0.18], [0, 0, 0], [0, 0, -0.1]);
     parts.plates.push(plate);
+    parts.primaryPlate = plate;
   }
 
   defense.userData.defenseId = id;
   defense.userData.basePosition = defense.position.clone();
+  parts.primaryPlate ??= parts.plates[0] ?? null;
 
   return parts;
 }
@@ -453,12 +504,13 @@ function weakPointAnchor(frame, location) {
     case 'frontLow': return frame.anchors.frontLow;
     case 'frontSide': return frame.anchors.frontSide;
     case 'center': return frame.anchors.center;
+    case 'rotorOpposite': return frame.anchors.center;
     case 'rear':
     default: return frame.anchors.rear;
   }
 }
 
-function createWeakPoint(root, genome, frame, materials, eye) {
+function createWeakPoint(root, genome, frame, materials, eye, defense) {
   const definition = genome.modules.weakPoint;
   if (definition.location === 'eye') {
     eye.lens.userData.weakPoint = true;
@@ -466,8 +518,23 @@ function createWeakPoint(root, genome, frame, materials, eye) {
     return { group: eye.group, core: eye.lens, socket: eye.socket, sharedWithEye: true };
   }
 
-  const anchor = weakPointAnchor(frame, definition.location);
-  const weakPoint = group(root, `generatedWeakPoint_${definition.id}`, anchor);
+  const linkedToRotor = definition.location === 'rotorOpposite'
+    && genome.modules.defense.id === 'rotatingPlates';
+  const anchor = linkedToRotor ? [0, -0.05, -0.86] : weakPointAnchor(frame, definition.location);
+  const weakPoint = group(
+    linkedToRotor ? defense.group : root,
+    `generatedWeakPoint_${definition.id}`,
+    anchor,
+  );
+  if (linkedToRotor) {
+    weakPoint.rotation.y = Math.PI;
+    weakPoint.userData.linkedDefenseId = 'rotatingPlates';
+  } else if (definition.location === 'leg') {
+    weakPoint.position.y += 0.12;
+    weakPoint.rotation.y = anchor[0] < 0 ? -Math.PI / 2 : Math.PI / 2;
+  } else if (definition.location === 'side') {
+    weakPoint.rotation.y = anchor[0] < 0 ? -Math.PI / 2 : Math.PI / 2;
+  }
   const radius = definition.radius ?? 0.22;
   const socket = mesh(weakPoint, new THREE.CylinderGeometry(radius * 1.28, radius * 1.4, 0.11, 10), materials.dark, 'generatedWeakPointSocket', [0, 0, 0], [Math.PI / 2, 0, 0]);
   const core = mesh(weakPoint, new THREE.SphereGeometry(radius, 10, 7), materials.weakPoint, 'generatedWeakPointCore', [0, 0, 0.07], null, [1, 1, 0.5]);
@@ -503,7 +570,13 @@ export function createReaverbotVisual(genome) {
   const eye = createEye(visualRoot, frame.anchors.eye, materials, genome.body.proportions.headScale);
   const weapon = createWeapon(visualRoot, genome, frame, materials);
   const defense = createDefense(visualRoot, genome, frame, materials);
-  const weakPoint = createWeakPoint(visualRoot, genome, frame, materials, eye);
+  if (genome.modules.weapon.id === 'rotorBlade') {
+    defense.group.add(weapon.group);
+    weapon.group.position.set(0, 0, 0);
+    weapon.group.rotation.set(0, 0, 0);
+    weapon.group.userData.linkedDefenseId = 'rotatingPlates';
+  }
+  const weakPoint = createWeakPoint(visualRoot, genome, frame, materials, eye, defense);
   addSurfaceGrammar(visualRoot, genome, frame, materials);
   visualRoot.scale.setScalar(genome.body.proportions.overallScale);
   visualRoot.updateMatrixWorld(true);
@@ -535,9 +608,13 @@ export function setReaverbotDefenseVisualActive(visual, active, openness = activ
   if (basePosition) {
     defense.group.position.copy(basePosition);
   }
-  if (defenseId === 'directionalShield') {
+  if (defenseId === 'directionalShield' || defenseId === 'reactivePlate') {
     defense.group.position.y -= easedOpen * 0.52;
-    defense.group.rotation.z = THREE.MathUtils.lerp(0, -0.82, easedOpen);
+    defense.group.rotation.z = THREE.MathUtils.lerp(
+      0,
+      defenseId === 'directionalShield' ? -0.82 : -0.58,
+      easedOpen,
+    );
   }
   for (const shutter of defense.shutters) {
     const side = Math.sign(shutter.userData.openX || shutter.position.x || 1);
@@ -553,6 +630,14 @@ export function setReaverbotDefenseVisualActive(visual, active, openness = activ
       const side = plate.userData.guardSide ?? Math.sign(plate.position.x || 1);
       plate.position.x = side * THREE.MathUtils.lerp(0.2, 0.56, easedOpen);
       plate.rotation.z = side * THREE.MathUtils.lerp(0.58, 0.12, easedOpen);
+    } else if (defenseId === 'sidePlates') {
+      const closed = plate.userData.closedPosition;
+      const open = plate.userData.openPosition;
+      if (closed && open) {
+        plate.position.lerpVectors(closed, open, easedOpen);
+      }
+      const side = plate.userData.guardSide ?? Math.sign(plate.position.x || 1);
+      plate.rotation.y = side * THREE.MathUtils.lerp(-0.06, -0.72, easedOpen);
     }
     plate.material.emissive?.set(active ? visual.materials.emissive.color : 0x000000);
     plate.material.emissiveIntensity = active ? 0.12 : 0;
@@ -580,6 +665,7 @@ export function animateReaverbotVisual(visual, {
   attackKind = null,
   defenseActive = false,
   weakPointExposed = false,
+  weakPointLocation = null,
 } = {}) {
   const locomotion = moving ? Math.sin(time * (7 + speedRatio * 3)) : Math.sin(time * 1.8) * 0.08;
   for (const limb of visual.frame.limbs) {
@@ -593,7 +679,17 @@ export function animateReaverbotVisual(visual, {
   }
 
   if (visual.defense.group.name.includes('rotatingPlates')) {
-    visual.defense.group.rotation.y += dt * (defenseActive ? 2.6 : 0.8);
+    const rotorWeapon = visual.weapon.group.name.includes('rotorBlade');
+    const rotorSpeed = rotorWeapon
+      ? state === 'commit'
+        ? 7.2
+        : moving
+          ? 3.4
+          : state === 'recovery'
+            ? 1.5
+            : 2.2
+      : defenseActive ? 2.6 : 0.8;
+    visual.defense.group.rotation.y += dt * rotorSpeed;
   }
   if (visual.defense.shell) {
     visual.defense.shell.rotation.y += dt * (defenseActive ? 0.9 : 0.25);
@@ -604,12 +700,16 @@ export function animateReaverbotVisual(visual, {
   const hover = visual.frame.plan === 'flyer' || visual.frame.plan === 'hoverBell'
     ? Math.sin(time * 2.2) * 0.12
     : 0;
+  const recoveryReveal = state === 'recovery' && weakPointLocation === 'belly'
+    ? THREE.MathUtils.smoothstep(stateProgress, 0, 0.28)
+      * (1 - THREE.MathUtils.smoothstep(stateProgress, 0.86, 1))
+    : 0;
   const attackLift = state === 'commit' && attackKind === 'pounce'
     ? Math.sin(stateProgress * Math.PI) * 1.25
     : state === 'commit' && attackKind === 'charge'
       ? Math.sin(stateProgress * Math.PI) * 0.12
       : 0;
-  visual.root.position.y = hoverHeight + hover + attackLift;
+  visual.root.position.y = hoverHeight + hover + attackLift + recoveryReveal * 0.28;
 
   let pitch = 0;
   let squashY = 1;
@@ -619,7 +719,9 @@ export function animateReaverbotVisual(visual, {
   } else if (state === 'commit' || state === 'pounce') {
     pitch = -0.22;
   } else if (state === 'recovery') {
-    pitch = Math.sin(stateProgress * Math.PI) * 0.1;
+    pitch = weakPointLocation === 'belly'
+      ? recoveryReveal * 0.52
+      : Math.sin(stateProgress * Math.PI) * 0.1;
   }
   visual.frame.body.rotation.x = THREE.MathUtils.lerp(visual.frame.body.rotation.x, pitch, Math.min(1, dt * 9));
   visual.root.scale.y = genomeSafeScale(visual.root.scale.x * squashY);

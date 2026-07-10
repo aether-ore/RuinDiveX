@@ -13,7 +13,6 @@ const tempForward = new THREE.Vector3();
 const WORLD_FORWARD = new THREE.Vector3(0, 0, 1);
 const PASSIVE_DEFENSES = new Set([
   'armoredSkull',
-  'sidePlates',
   'armoredBack',
   'armoredCarapace',
 ]);
@@ -143,7 +142,8 @@ export class ReaverbotEnemy extends Enemy {
       moving: false,
       speedRatio: 0,
       defenseActive: true,
-      weakPointExposed: genome.modules.weakPoint.exposure === 'always',
+      weakPointExposed: genome.modules.weakPoint.exposure === 'always'
+        && genome.modules.defense.id !== 'rotatingPlates',
       attackFired: false,
       attackHit: false,
       effectTimer: 0,
@@ -271,20 +271,45 @@ export class ReaverbotEnemy extends Enemy {
   modifyDamageTaken(amount, meta = {}) {
     let adjusted = super.modifyDamageTaken(amount, meta);
     const weakPoint = this.genome.modules.weakPoint;
+    const weakPointHit = meta.hitPartId === weakPoint.id && this.brain.weakPointExposed;
+    const directHit = meta.projectileHit || meta.directHit;
+    const defense = this.genome.modules.defense;
+    const passiveArmorOpening = weakPointHit
+      && (defense.id === 'armoredBack' || defense.id === 'armoredCarapace');
+    const defenseMultiplier = !meta.unblockable
+      && directHit
+      && !this.defenseDisabled
+      && this.brain.defenseActive
+      && !passiveArmorOpening
+      ? this._getDefenseDamageMultiplier(meta, defense)
+      : 1;
 
-    if (meta.hitPartId === weakPoint.id && this.brain.weakPointExposed) {
+    if (defenseMultiplier < 1) {
+      meta.shieldBlocked = true;
+      meta.defensePartId = defense.id;
+      meta.weakPointDefended = weakPointHit;
+      const blocker = this.visual.defense.primaryPlate ?? this.visual.defense.group;
+      meta.hitPosition = blocker.getWorldPosition(new THREE.Vector3());
+      if (defenseMultiplier <= 0.001) {
+        meta.damageNullified = true;
+        adjusted = 0;
+      } else {
+        adjusted *= defenseMultiplier;
+      }
+      return this._applyEliteDamageModifiers(adjusted, meta);
+    }
+
+    if (weakPointHit) {
       meta.weakPointHit = true;
       meta.hitPosition = meta.hitPosition ?? this.visual.weakPoint.core.getWorldPosition(new THREE.Vector3());
       adjusted *= weakPoint.multiplier;
       return this._applyEliteDamageModifiers(adjusted, meta);
     }
 
-    const directHit = meta.projectileHit || meta.directHit;
-    if (meta.unblockable || !directHit || this.defenseDisabled || !this.brain.defenseActive) {
-      return this._applyEliteDamageModifiers(adjusted, meta);
-    }
+    return this._applyEliteDamageModifiers(adjusted, meta);
+  }
 
-    const defense = this.genome.modules.defense;
+  _getDefenseDamageMultiplier(meta, defense) {
     tempForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y)).normalize();
     tempA.copy(meta.knockbackDirection ?? WORLD_FORWARD).setY(0);
     if (tempA.lengthSq() <= 0.0001) tempA.copy(WORLD_FORWARD);
@@ -306,11 +331,22 @@ export class ReaverbotEnemy extends Enemy {
         multiplier = rearHit ? defense.directMultiplier : defense.flankMultiplier;
         break;
       case 'sidePlates':
-        multiplier = sideHit ? defense.directMultiplier : defense.flankMultiplier;
+        multiplier = frontHit || sideHit ? defense.directMultiplier : defense.flankMultiplier;
         break;
       case 'phaseShell':
       case 'energyMembrane':
-      case 'rotatingPlates':
+        multiplier = defense.directMultiplier;
+        break;
+      case 'rotatingPlates': {
+        this.visual.defense.guardNormal?.getWorldDirection(tempB);
+        tempB.y = 0;
+        if (tempB.lengthSq() <= 0.0001) tempB.copy(tempForward);
+        tempB.normalize();
+        multiplier = tempB.dot(tempA) < -0.32
+          ? defense.directMultiplier
+          : defense.flankMultiplier;
+        break;
+      }
       case 'armorShutters':
       case 'reactivePlate':
         multiplier = frontHit ? defense.directMultiplier : defense.flankMultiplier;
@@ -319,19 +355,7 @@ export class ReaverbotEnemy extends Enemy {
         break;
     }
 
-    if (multiplier < 1) {
-      meta.shieldBlocked = true;
-      meta.defensePartId = defense.id;
-      meta.hitPosition = this.visual.defense.group.getWorldPosition(new THREE.Vector3());
-      if (multiplier <= 0.001) {
-        meta.damageNullified = true;
-        adjusted = 0;
-      } else {
-        adjusted *= multiplier;
-      }
-    }
-
-    return this._applyEliteDamageModifiers(adjusted, meta);
+    return multiplier;
   }
 
   onHitPlayer(player, dealt = 0) {
@@ -452,6 +476,8 @@ export class ReaverbotEnemy extends Enemy {
       mode = distance < 3.7 ? 'retreat' : distance > preferred + 1.1 ? 'approachSlow' : 'orbitSlow';
     } else if (archetype === 'zoneController') {
       mode = distance < 3.2 ? 'retreat' : distance > preferred + 0.9 ? 'approachSlow' : 'orbit';
+    } else if (archetype === 'rotorHunter') {
+      mode = distance > 1.6 ? 'approach' : 'orbit';
     } else if (archetype === 'aerialBomber') {
       mode = 'approachSlow';
     } else if (archetype === 'packHunter') {
@@ -902,15 +928,21 @@ export class ReaverbotEnemy extends Enemy {
   _updateExposureAndDefense() {
     const brain = this.brain;
     const exposure = this.genome.modules.weakPoint.exposure;
-    brain.weakPointExposed = this.weakPointBroken
-      || exposure === 'always'
-      || (exposure === 'telegraph' && brain.state === 'telegraph')
-      || (exposure === 'attack' && (brain.state === 'telegraph' || brain.state === 'commit'))
-      || (exposure === 'recovery' && brain.state === 'recovery');
-
     const defenseId = this.genome.modules.defense.id;
+    const linkedRotorCore = defenseId === 'rotatingPlates'
+      && this.genome.modules.weakPoint.id === 'counterweightCore';
+    brain.weakPointExposed = this.weakPointBroken
+      || (linkedRotorCore
+        ? Math.cos(this.visual.defense.group.rotation.y) < -0.05
+        : exposure === 'always'
+          || (exposure === 'telegraph' && brain.state === 'telegraph')
+          || (exposure === 'attack' && (brain.state === 'telegraph' || brain.state === 'commit'))
+          || (exposure === 'recovery' && brain.state === 'recovery'));
+
     if (this.defenseDisabled) {
       brain.defenseActive = false;
+    } else if (defenseId === 'rotatingPlates') {
+      brain.defenseActive = true;
     } else if (PASSIVE_DEFENSES.has(defenseId)) {
       brain.defenseActive = true;
     } else if (defenseId === 'phaseShell') {
@@ -918,7 +950,7 @@ export class ReaverbotEnemy extends Enemy {
     } else if (defenseId === 'reactivePlate') {
       brain.defenseActive = brain.state === 'position' && Math.sin(brain.time * 1.6) > -0.3;
     } else {
-      brain.defenseActive = brain.state === 'position' || (brain.state === 'telegraph' && defenseId === 'energyMembrane');
+      brain.defenseActive = brain.state === 'position';
     }
   }
 
@@ -941,6 +973,7 @@ export class ReaverbotEnemy extends Enemy {
       attackKind: this.genome.modules.weapon.attackKind,
       defenseActive: brain.defenseActive,
       weakPointExposed: brain.weakPointExposed,
+      weakPointLocation: this.genome.modules.weakPoint.location,
     });
   }
 

@@ -7,8 +7,14 @@ import {
   getReaverbotCatalogSummary,
   validateReaverbotGenome,
 } from '../src/reaverbots/ReaverbotGenerator.js';
-import { REAVERBOT_EYE_COLOR } from '../src/reaverbots/ReaverbotCatalog.js';
-import { createReaverbotVisual } from '../src/reaverbots/ReaverbotVisualFactory.js';
+import {
+  LINKED_WEAK_POINT_WEIGHTS,
+  REAVERBOT_EYE_COLOR,
+} from '../src/reaverbots/ReaverbotCatalog.js';
+import {
+  createReaverbotVisual,
+  setReaverbotDefenseVisualActive,
+} from '../src/reaverbots/ReaverbotVisualFactory.js';
 
 test('the same seed and context reproduce the same Reaverbot genome', () => {
   const options = {
@@ -42,6 +48,16 @@ test('a broad seed sweep always satisfies the gameplay contract', () => {
     assert.ok(genome.modules.weapon.id);
     assert.ok(genome.modules.defense.id);
     assert.ok(genome.modules.weakPoint.id);
+    assert.ok(
+      (LINKED_WEAK_POINT_WEIGHTS[genome.modules.defense.id] ?? [])
+        .some(([weakPointId]) => weakPointId === genome.modules.weakPoint.id),
+      `seed ${seed}: defense ${genome.modules.defense.id} must protect ${genome.modules.weakPoint.id}`,
+    );
+    if (genome.modules.weakPoint.id === 'legJoint') {
+      assert.equal(genome.modules.defense.id, 'sidePlates');
+      assert.ok(genome.modules.weakPoint.radius >= 0.24);
+      assert.equal(genome.modules.weakPoint.exposure, 'recovery');
+    }
     assert.ok(genome.behavior.exposureDuration >= 0.6);
     assert.ok(genome.threat.spent <= genome.threat.budget);
     archetypes.add(genome.archetypeId);
@@ -151,8 +167,16 @@ test('defensive modules use readable body-family anchors', () => {
     let expected = anchors.defense;
     if (defenseId === 'armorShutters' || defenseId === 'armoredSkull') {
       expected = anchors.eye;
-    } else if (defenseId === 'guardArms' || defenseId === 'sidePlates') {
+    } else if (defenseId === 'directionalShield' || defenseId === 'reactivePlate') {
+      expected = [
+        Math.sign(anchors.frontSide[0] || -1) * (defenseId === 'directionalShield' ? 0.82 : 0.58),
+        anchors.frontSide[1] + 0.08,
+        anchors.frontSide[2] + 0.3,
+      ];
+    } else if (defenseId === 'guardArms') {
       expected = [anchors.center[0], anchors.center[1], anchors.center[2] + 0.42];
+    } else if (defenseId === 'sidePlates') {
+      expected = [anchors.center[0], anchors.center[1] - 0.14, anchors.frontSide[2] + 0.18];
     } else if (['rotatingPlates', 'energyMembrane', 'phaseShell'].includes(defenseId)) {
       expected = anchors.center;
     } else if (defenseId === 'armoredBack' || defenseId === 'armoredCarapace') {
@@ -170,8 +194,62 @@ test('defensive modules use readable body-family anchors', () => {
       visual.defense.plates.every((plate) => plate.material !== visual.materials.primary),
       `${defenseId} defense cues must not mutate the shared body material`,
     );
+    if (defenseId === 'sidePlates') {
+      for (const plate of visual.defense.plates) {
+        assert.ok(plate.geometry.parameters.width > plate.geometry.parameters.depth * 2);
+        assert.ok(plate.geometry.parameters.height >= 1);
+      }
+      assert.ok(actual.z > anchors.frontSide[2]);
+    }
+    if (defenseId === 'directionalShield') {
+      assert.ok(visual.defense.primaryPlate.geometry.parameters.radiusTop >= 0.8);
+      assert.ok(actual.z >= anchors.frontSide[2] + 0.29);
+    }
+    if (defenseId === 'reactivePlate') {
+      assert.ok(visual.defense.primaryPlate.geometry.parameters.width >= 0.75);
+      assert.ok(visual.defense.primaryPlate.geometry.parameters.height >= 1);
+      assert.ok(actual.z >= anchors.frontSide[2] + 0.29);
+    }
+    if (defenseId === 'rotatingPlates') {
+      const shieldDirection = visual.defense.primaryPlate.position.clone().normalize();
+      const weakDirection = visual.weakPoint.group.position.clone().normalize();
+      assert.ok(shieldDirection.dot(weakDirection) < -0.9);
+      if (genome.modules.weapon.id === 'rotorBlade') {
+        assert.equal(visual.weapon.group.parent, visual.defense.group);
+      }
+    }
     found.set(defenseId, true);
   }
 
   assert.deepEqual([...found.keys()].sort(), [...expectedDefenseIds].sort());
+});
+
+test('leg armor physically covers its paired joint until the plates retract', () => {
+  const genome = generateReaverbotGenome({
+    seed: 'paired:pursuer:0',
+    archetypeId: 'pursuer',
+    threatTier: 2,
+    encounterSize: 3,
+  });
+  assert.equal(genome.modules.defense.id, 'sidePlates');
+  assert.equal(genome.modules.weakPoint.id, 'legJoint');
+
+  const visual = createReaverbotVisual(genome);
+  const weakPosition = visual.weakPoint.core.getWorldPosition(new THREE.Vector3());
+  const castTowardJoint = () => new THREE.Raycaster(
+    weakPosition.clone().add(new THREE.Vector3(0, 0, 4)),
+    new THREE.Vector3(0, 0, -1),
+    0,
+    8,
+  ).intersectObject(visual.root, true)
+    .find((hit) => hit.object.visible !== false
+      && !(hit.object.material?.transparent && hit.object.material.opacity < 0.5));
+
+  setReaverbotDefenseVisualActive(visual, true, 0);
+  visual.root.updateMatrixWorld(true);
+  assert.equal(castTowardJoint()?.object.name, 'generatedSideArmorPlate');
+
+  setReaverbotDefenseVisualActive(visual, false, 1);
+  visual.root.updateMatrixWorld(true);
+  assert.equal(castTowardJoint()?.object.userData?.weakPoint, true);
 });

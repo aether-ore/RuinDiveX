@@ -17,7 +17,7 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
     sentinelPosition.z += 4;
     const sentinel = window.spawnReaverbot({
       archetypeId: 'shieldSentinel',
-      seed: 'qa:7',
+      seed: 'qa:3',
       position: sentinelPosition,
     });
 
@@ -182,7 +182,7 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
     };
   });
 
-  expect(result.catalog.archetypes).toHaveLength(8);
+  expect(result.catalog.archetypes).toHaveLength(9);
   expect(result.catalog.bodyPlans).toHaveLength(8);
   expect(result.catalog.weapons.length).toBeGreaterThanOrEqual(12);
   expect(result.sentinel.eyeCount).toBe(1);
@@ -462,4 +462,235 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
   expect(result.safeZoneAffixDamage).toBe(0);
   expect(result.selfDestructExperience).toBe(0);
   expect(result.selfDestructExplosionCount).toBe(1);
+});
+
+test('paired guards protect leg joints and the rotor exposes its counterweight side', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=paired-defense-runtime');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const Vector3 = game.player.root.position.constructor;
+    game.stop();
+    game.projectiles.clear();
+    for (const enemy of [...game.enemies]) {
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+
+    const legGuard = window.spawnReaverbot({
+      archetypeId: 'pursuer',
+      seed: 'paired:pursuer:0',
+      position: new Vector3(0, 0, 4),
+    });
+    legGuard.root.rotation.y = 0;
+    legGuard.brain.state = 'position';
+    legGuard._updateExposureAndDefense();
+    legGuard._animateVisual(0);
+    const closedPlatePositions = legGuard.visual.defense.plates.map((plate) => plate.position.clone());
+    const closedTargets = legGuard.getCombatTargets().length;
+    legGuard.visual.weakPoint.core.getWorldPosition(legGuard.brain.targetPosition);
+    const closedResolve = legGuard.resolveProjectileHit(legGuard.brain.targetPosition, 0.12);
+    const guardedMeta = {
+      projectileHit: true,
+      hitPartId: legGuard.genome.modules.weakPoint.id,
+      knockbackDirection: new Vector3(0, 0, -1),
+    };
+    legGuard.brain.weakPointExposed = true;
+    const guardedWeakDamage = legGuard.modifyDamageTaken(10, guardedMeta);
+    legGuard.brain.weakPointExposed = false;
+
+    legGuard.brain.state = 'recovery';
+    legGuard.brain.stateTime = legGuard.genome.behavior.recoveryDuration * 0.45;
+    legGuard._updateExposureAndDefense();
+    legGuard._animateVisual(0.12);
+    const openTargets = legGuard.getCombatTargets().length;
+    legGuard.visual.weakPoint.core.getWorldPosition(legGuard.brain.targetPosition);
+    const openResolve = legGuard.resolveProjectileHit(legGuard.brain.targetPosition, 0.12);
+    const openMeta = {
+      projectileHit: true,
+      hitPartId: legGuard.genome.modules.weakPoint.id,
+      knockbackDirection: new Vector3(0, 0, -1),
+    };
+    const openWeakDamage = legGuard.modifyDamageTaken(10, openMeta);
+    const plateRetraction = Math.max(...legGuard.visual.defense.plates.map((plate, index) => (
+      plate.position.distanceTo(closedPlatePositions[index])
+    )));
+
+    const rotor = window.spawnReaverbot({
+      archetypeId: 'rotorHunter',
+      seed: 'paired:rotor:0',
+      position: new Vector3(0, 0, 8),
+    });
+    rotor.root.rotation.y = 0;
+    rotor.visual.defense.group.rotation.y = 0;
+    rotor.brain.state = 'position';
+    rotor._updateExposureAndDefense();
+    const shieldPhaseTargets = rotor.getCombatTargets().length;
+    const rotorFrontMeta = { projectileHit: true, knockbackDirection: new Vector3(0, 0, -1) };
+    const rotorFrontDamage = rotor.modifyDamageTaken(10, rotorFrontMeta);
+    const rotorRearMeta = { projectileHit: true, knockbackDirection: new Vector3(0, 0, 1) };
+    const rotorRearDamage = rotor.modifyDamageTaken(10, rotorRearMeta);
+
+    const shieldDirection = rotor.visual.defense.primaryPlate.position.clone().normalize();
+    const weakDirection = rotor.visual.weakPoint.group.position.clone().normalize();
+    const shieldWeakDot = shieldDirection.dot(weakDirection);
+    const linkedAssembly = rotor.visual.weakPoint.group.parent === rotor.visual.defense.group
+      && rotor.visual.weapon.group.parent === rotor.visual.defense.group;
+
+    rotor.visual.defense.group.rotation.y = Math.PI;
+    rotor._updateExposureAndDefense();
+    const weakPhaseTargets = rotor.getCombatTargets().length;
+    const rotorWeakMeta = {
+      projectileHit: true,
+      hitPartId: rotor.genome.modules.weakPoint.id,
+      knockbackDirection: new Vector3(0, 0, -1),
+    };
+    const rotorWeakDamage = rotor.modifyDamageTaken(10, rotorWeakMeta);
+
+    game.player.root.position.set(0, 0, 3.5);
+    rotor.root.position.set(0, 0, 8);
+    rotor.brain.state = 'position';
+    rotor.brain.cooldown = 99;
+    rotor.brain.alerted = true;
+    const distanceBefore = rotor.root.position.distanceTo(game.player.root.position);
+    const angleBefore = rotor.visual.defense.group.rotation.y;
+    rotor._updatePositionState(0.2, game, new Vector3(0, 0, -1), distanceBefore);
+    rotor._animateVisual(0.2);
+    const distanceAfter = rotor.root.position.distanceTo(game.player.root.position);
+    const rotorAngleAdvance = rotor.visual.defense.group.rotation.y - angleBefore;
+
+    const passiveArmor = [
+      {
+        archetypeId: 'pouncer',
+        seed: 'passive:pouncer:0',
+        expectedDefense: 'armoredBack',
+        expectedWeakPoint: 'bellyCore',
+      },
+      {
+        archetypeId: 'artillery',
+        seed: 'passive:artillery:0',
+        expectedDefense: 'armoredCarapace',
+        expectedWeakPoint: 'ammoDrum',
+      },
+    ].map((sample, index) => {
+      const enemy = window.spawnReaverbot({
+        archetypeId: sample.archetypeId,
+        seed: sample.seed,
+        position: new Vector3(4 + index * 2, 0, 8),
+      });
+      enemy.root.rotation.y = 0;
+      enemy.brain.state = 'position';
+      enemy._updateExposureAndDefense();
+      const bodyMeta = {
+        projectileHit: true,
+        knockbackDirection: new Vector3(0, 0, 1),
+      };
+      const guardedBodyDamage = enemy.modifyDamageTaken(10, bodyMeta);
+
+      enemy.brain.state = 'recovery';
+      enemy.brain.stateTime = enemy.genome.behavior.recoveryDuration * 0.45;
+      enemy._updateExposureAndDefense();
+      const weakMeta = {
+        projectileHit: true,
+        hitPartId: enemy.genome.modules.weakPoint.id,
+        knockbackDirection: new Vector3(0, 0, 1),
+      };
+      const exposedWeakDamage = enemy.modifyDamageTaken(10, weakMeta);
+
+      return {
+        expectedDefense: sample.expectedDefense,
+        expectedWeakPoint: sample.expectedWeakPoint,
+        defense: enemy.genome.modules.defense.id,
+        weakPoint: enemy.genome.modules.weakPoint.id,
+        guardedBodyDamage,
+        bodyBlocked: bodyMeta.shieldBlocked,
+        recoveryDefenseActive: enemy.brain.defenseActive,
+        weakExposed: enemy.brain.weakPointExposed,
+        exposedWeakDamage,
+        weakHit: weakMeta.weakPointHit,
+        weakBlocked: Boolean(weakMeta.shieldBlocked),
+      };
+    });
+
+    return {
+      leg: {
+        defense: legGuard.genome.modules.defense.id,
+        weakPoint: legGuard.genome.modules.weakPoint.id,
+        weakRadius: legGuard.genome.modules.weakPoint.radius,
+        closedTargets,
+        closedResolvedWeak: Boolean(closedResolve?.weakPointHit),
+        guardedWeakDamage,
+        guardedWeakBlocked: guardedMeta.shieldBlocked,
+        guardedWeakDefended: guardedMeta.weakPointDefended,
+        openTargets,
+        openResolvedWeak: Boolean(openResolve?.weakPointHit),
+        openWeakDamage,
+        openWeakHit: openMeta.weakPointHit,
+        plateRetraction,
+      },
+      rotor: {
+        archetype: rotor.genome.archetypeId,
+        weapon: rotor.genome.modules.weapon.id,
+        defense: rotor.genome.modules.defense.id,
+        weakPoint: rotor.genome.modules.weakPoint.id,
+        shieldPhaseTargets,
+        rotorFrontDamage,
+        rotorFrontBlocked: rotorFrontMeta.shieldBlocked,
+        rotorRearDamage,
+        shieldWeakDot,
+        linkedAssembly,
+        weakPhaseTargets,
+        rotorWeakDamage,
+        rotorWeakHit: rotorWeakMeta.weakPointHit,
+        distanceBefore,
+        distanceAfter,
+        rotorAngleAdvance,
+      },
+      passiveArmor,
+    };
+  });
+
+  expect(result.leg.defense).toBe('sidePlates');
+  expect(result.leg.weakPoint).toBe('legJoint');
+  expect(result.leg.weakRadius).toBeGreaterThanOrEqual(0.24);
+  expect(result.leg.closedTargets).toBe(1);
+  expect(result.leg.closedResolvedWeak).toBe(false);
+  expect(result.leg.guardedWeakDamage).toBeLessThan(3);
+  expect(result.leg.guardedWeakBlocked).toBe(true);
+  expect(result.leg.guardedWeakDefended).toBe(true);
+  expect(result.leg.openTargets).toBe(2);
+  expect(result.leg.openResolvedWeak).toBe(true);
+  expect(result.leg.openWeakDamage).toBeGreaterThan(20);
+  expect(result.leg.openWeakHit).toBe(true);
+  expect(result.leg.plateRetraction).toBeGreaterThan(0.35);
+
+  expect(result.rotor.archetype).toBe('rotorHunter');
+  expect(result.rotor.weapon).toBe('rotorBlade');
+  expect(result.rotor.defense).toBe('rotatingPlates');
+  expect(result.rotor.weakPoint).toBe('counterweightCore');
+  expect(result.rotor.shieldPhaseTargets).toBe(1);
+  expect(result.rotor.rotorFrontDamage).toBeLessThan(1);
+  expect(result.rotor.rotorFrontBlocked).toBe(true);
+  expect(result.rotor.rotorRearDamage).toBe(10);
+  expect(result.rotor.shieldWeakDot).toBeLessThan(-0.9);
+  expect(result.rotor.linkedAssembly).toBe(true);
+  expect(result.rotor.weakPhaseTargets).toBe(2);
+  expect(result.rotor.rotorWeakDamage).toBeGreaterThan(25);
+  expect(result.rotor.rotorWeakHit).toBe(true);
+  expect(result.rotor.distanceAfter).toBeLessThan(result.rotor.distanceBefore);
+  expect(result.rotor.rotorAngleAdvance).toBeGreaterThan(0.5);
+
+  for (const sample of result.passiveArmor) {
+    expect(sample.defense).toBe(sample.expectedDefense);
+    expect(sample.weakPoint).toBe(sample.expectedWeakPoint);
+    expect(sample.guardedBodyDamage).toBeLessThan(8);
+    expect(sample.bodyBlocked).toBe(true);
+    expect(sample.recoveryDefenseActive).toBe(true);
+    expect(sample.weakExposed).toBe(true);
+    expect(sample.exposedWeakDamage).toBeGreaterThan(20);
+    expect(sample.weakHit).toBe(true);
+    expect(sample.weakBlocked).toBe(false);
+  }
 });

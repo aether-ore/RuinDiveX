@@ -55,6 +55,7 @@ const ledgeAnchorPosition = new THREE.Vector3();
 const ledgeAnimatedWristPosition = new THREE.Vector3();
 const ledgeAnimatedRightWristPosition = new THREE.Vector3();
 const ledgeRootCorrection = new THREE.Vector3();
+const ledgeWallJumpRootMotion = {};
 const guardSourceDirection = new THREE.Vector3();
 const damageSourceDirection = new THREE.Vector3();
 const damageFacingRight = new THREE.Vector3();
@@ -83,6 +84,7 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'fallingToRoll', file: 'falling to roll.fbx', label: 'Falling To Roll', loop: false },
   { key: 'hangingIdle', file: 'Hanging Idle.fbx', label: 'Hanging Idle', loop: true, lockRootY: true },
   { key: 'jumpingToHanging', file: 'Jumping To Hanging.fbx', label: 'Jumping To Hanging', loop: false, lockRootY: true },
+  { key: 'jumpFromWall', file: 'Jump From Wall.fbx', label: 'Jump From Wall', loop: false, lockRootY: true, extractRootMotion: true },
   { key: 'bracedToFreeHang', file: 'Braced To Free Hang.fbx', label: 'Braced To Free Hang', loop: false, lockRootY: true },
   { key: 'freeHangToBraced', file: 'Free Hang To Braced.fbx', label: 'Free Hang To Braced', loop: false, lockRootY: true },
   { key: 'ledgeClimbUp', file: 'Braced Hang To Crouch.fbx', label: 'Ledge Climb Up', loop: false, lockRootY: true, extractRootMotion: true },
@@ -141,8 +143,10 @@ const TARGET_MODEL_HEIGHT = 2.85;
 const MIN_BRACED_SHOT_TIME = 0.28;
 const MIN_PROJECTILE_AIM_LOCK_TIME = 0.44;
 const PROJECTILE_STANCE_LINGER_TIME = 1.05;
-const DODGE_ROLL_DISTANCE = 8.4;
+const DODGE_ROLL_DISTANCE = 7.8;
 const DODGE_ROLL_DURATION = 0.86;
+// The opening dive can cross a short gap; the grounded tuck and recovery cannot.
+const DODGE_ROLL_AIRBORNE_PROGRESS = 0.25;
 const DODGE_ROLL_AIR_LIFT = 0.52;
 const DODGE_ROLL_RECOVERY_SINK = 0.14;
 const FORWARD_JUMP_DISTANCE = 1.9;
@@ -158,6 +162,11 @@ const LEDGE_JUMP_TO_HANG_DURATION = 1.5;
 const LEDGE_SETTLE_TO_FREE_HANG_DURATION = 0.917;
 const LEDGE_PREPARE_CLIMB_DURATION = 1.125;
 const LEDGE_CLIMB_UP_DURATION = 1.125;
+const LEDGE_WALL_JUMP_DURATION = 1.125;
+const LEDGE_WALL_JUMP_DISTANCE = 1.45;
+const LEDGE_WALL_JUMP_LIFT = 0.9;
+const LEDGE_WALL_JUMP_FALL_SPEED = 2.2;
+const LEDGE_WALL_JUMP_FALL_VERTICAL_VELOCITY = -1.2;
 // The climb clip keeps both hands planted through its pull and push-off. Keep
 // that contact authored in world space, then release for the final crouch.
 const LEDGE_CLIMB_HAND_RELEASE_PROGRESS = 0.82;
@@ -192,6 +201,8 @@ const DEFAULT_MML_JUMP_SETTINGS = Object.freeze({
   jumpTimeToApex: 0.33,
   // Slightly stronger fall gravity brings Volnutt back down with that PS1 action-adventure weight.
   fallGravityMultiplier: 1.22,
+  // Scales acceleration while initial velocity is recalculated to preserve the selected apex.
+  gravityScale: 1,
   // Forward speed stays modest so the preserved takeoff velocity feels like a committed hop.
   forwardSpeed: 4.35,
   // Ground acceleration/deceleration shape the planted tank-control feel before takeoff.
@@ -333,6 +344,10 @@ export class Player {
     this._jumpLandingVisualClipKey = null;
     this._lastExternalModelGrounding = null;
     this.ledgeCling = null;
+    this.ledgeWallJumpDirection = new THREE.Vector3(0, 0, -1);
+    this.ledgeWallJumpStartPosition = new THREE.Vector3();
+    this.ledgeWallJumpGroundY = 0;
+    this.ledgeWallJumpYaw = 0;
     this._attackWeaponKind = null;
     this._bracedFireWeaponKey = null;
     this.bracedFireDirection = new THREE.Vector3(0, 0, 1);
@@ -415,8 +430,12 @@ export class Player {
       });
       const completedJumpThisFrame = (actionStateBeforeUpdate === 'neutralJump' || actionStateBeforeUpdate === 'forwardJump')
         && !this.animation.actionState;
-      const completedActionState = completedJumpThisFrame ? actionStateBeforeUpdate : null;
-      const completedActionProgress = completedJumpThisFrame ? 1 : null;
+      const completedWallJumpThisFrame = actionStateBeforeUpdate === 'wallJump'
+        && !this.animation.actionState;
+      const completedActionState = completedJumpThisFrame || completedWallJumpThisFrame
+        ? actionStateBeforeUpdate
+        : null;
+      const completedActionProgress = completedActionState ? 1 : null;
       if (completedJumpThisFrame) {
         this._jumpLandingVisualState = 'land';
         this._jumpLandingVisualTimer = JUMP_LANDING_VISUAL_HOLD_DURATION;
@@ -425,6 +444,9 @@ export class Player {
           : null;
       }
       this._updateFullBodyActionMotion(dt, arenaRadius, completedActionState, completedActionProgress);
+      if (completedWallJumpThisFrame) {
+        this._finishLedgeWallJumpToFall();
+      }
       if (this.isLedgeClinging()) {
         this._updateLedgeClingState(dt, input, movementOptions);
         return;
@@ -434,8 +456,10 @@ export class Player {
       }
       this.updateWeaponVisualState();
       this._updateExternalModelMotion(dt, false, 0, false, false, {
-        animationState: completedJumpThisFrame ? 'land' : undefined,
-        actionProgress: completedJumpThisFrame ? 0 : undefined,
+        animationState: completedJumpThisFrame ? 'land' : (completedWallJumpThisFrame ? 'fall' : undefined),
+        actionProgress: completedJumpThisFrame
+          ? 0
+          : (completedWallJumpThisFrame ? this._getPhysicalJumpAnimationProgress() : undefined),
         lockOnActive: false,
         strafeAmount: 0,
         clipKey: completedJumpThisFrame ? this._jumpLandingVisualClipKey : null,
@@ -709,6 +733,11 @@ export class Player {
     return this.isJumpAirborne();
   }
 
+  isDodgeRollAirborne() {
+    return this.animation?.actionState === 'dodgeRoll'
+      && this.animation.getActionProgress() <= DODGE_ROLL_AIRBORNE_PROGRESS;
+  }
+
   _getJumpSetting(key, fallback = 0) {
     const value = this.jumpSettings?.[key];
     return Number.isFinite(value) ? value : fallback;
@@ -732,12 +761,16 @@ export class Player {
   }
 
   _getJumpInitialVelocity() {
-    return (2 * this._getConfiguredJumpHeight()) / this._getJumpTimeToApex();
+    return Math.sqrt(2 * this._getConfiguredJumpHeight() * Math.abs(this._getJumpGravity()));
   }
 
   _getJumpGravity() {
     const timeToApex = this._getJumpTimeToApex();
-    return -(2 * this._getConfiguredJumpHeight()) / (timeToApex * timeToApex);
+    return -(2 * this._getConfiguredJumpHeight()) / (timeToApex * timeToApex) * this._getGravityScale();
+  }
+
+  _getGravityScale() {
+    return Math.max(0.01, this._getJumpSetting('gravityScale', DEFAULT_MML_JUMP_SETTINGS.gravityScale));
   }
 
   _getFallGravityMultiplier() {
@@ -745,8 +778,33 @@ export class Player {
   }
 
   _getEstimatedJumpAirTime() {
-    const timeToApex = this._getJumpTimeToApex();
+    const gravity = Math.abs(this._getJumpGravity());
+    const timeToApex = gravity > 0.0001 ? this._getJumpInitialVelocity() / gravity : this._getJumpTimeToApex();
     return timeToApex + (timeToApex / Math.sqrt(this._getFallGravityMultiplier()));
+  }
+
+  setJumpPhysicsDebug({ jumpHeightMultiplier, gravityScale } = {}) {
+    if (Number.isFinite(jumpHeightMultiplier)) {
+      this.jumpSettings.jumpHeightMultiplier = THREE.MathUtils.clamp(jumpHeightMultiplier, 0.25, 8);
+    }
+    if (Number.isFinite(gravityScale)) {
+      this.jumpSettings.gravityScale = THREE.MathUtils.clamp(gravityScale, 0.05, 3);
+    }
+    return this.getJumpPhysicsDebug();
+  }
+
+  getJumpPhysicsDebug() {
+    const jumpHeightMultiplier = this._getJumpSetting(
+      'jumpHeightMultiplier',
+      DEFAULT_MML_JUMP_SETTINGS.jumpHeightMultiplier,
+    );
+    return {
+      jumpHeightMultiplier,
+      gravityScale: this._getGravityScale(),
+      jumpHeight: this._getConfiguredJumpHeight(),
+      timeToApex: this._getJumpInitialVelocity() / Math.abs(this._getJumpGravity()),
+      gravity: this._getJumpGravity(),
+    };
   }
 
   _resolvePhysicalGroundY(movementOptions = {}) {
@@ -1198,6 +1256,20 @@ export class Player {
     } else if (state === 'dodgeRoll') {
       this.root.rotation.y = this.dodgeRollYaw;
       this._applyActionDisplacement(this.dodgeDirection, DODGE_ROLL_DISTANCE, DODGE_ROLL_DURATION, progress, dt);
+    } else if (state === 'wallJump') {
+      this.root.rotation.y = this.ledgeWallJumpYaw;
+      const bakedMotion = this.externalRig?.sampleRootMotionProgress?.(
+        'jumpFromWall',
+        progress,
+        ledgeWallJumpRootMotion,
+      );
+      const horizontalProgress = bakedMotion?.horizontal
+        ?? THREE.MathUtils.smoothstep(progress, 0, 1);
+      const verticalProgress = bakedMotion?.vertical
+        ?? THREE.MathUtils.smoothstep(progress, 0, 1);
+      this.root.position.copy(this.ledgeWallJumpStartPosition)
+        .addScaledVector(this.ledgeWallJumpDirection, LEDGE_WALL_JUMP_DISTANCE * horizontalProgress);
+      this.root.position.y += LEDGE_WALL_JUMP_LIFT * verticalProgress;
     } else if (state === 'forwardJump') {
       this._applyForwardJumpDisplacement(this.jumpDirection, FORWARD_JUMP_DISTANCE, progress);
     } else if (state === 'knockbackFall') {
@@ -1295,6 +1367,7 @@ export class Player {
       climbHandsReleased: false,
       climbHighestRootY: -Infinity,
       climbFarthestInward: -Infinity,
+      autoClimb: ledge.autoClimb === true,
       topY: Number.isFinite(ledge.topY) ? ledge.topY : ledge.climbPosition.y,
       inputToward: false,
     };
@@ -1310,6 +1383,23 @@ export class Player {
     this.movementLockTimer = 0;
     this.movementLockMultiplier = 0;
     this.faceDirection(inward);
+    if (this.ledgeCling.autoClimb) {
+      this._startLowLedgeAutoClimb();
+    }
+    return true;
+  }
+
+  _startLowLedgeAutoClimb() {
+    const ledge = this.ledgeCling;
+    if (!ledge) {
+      return false;
+    }
+
+    ledge.climbStartPosition.copy(this.root.position);
+    ledge.climbReleasePosition.copy(this.root.position);
+    ledge.climbHandsReleased = true;
+    ledge.climbHandAnchorsCaptured = false;
+    this._setLedgeState('climbingUp', LEDGE_CLIMB_UP_DURATION);
     return true;
   }
 
@@ -1344,9 +1434,54 @@ export class Player {
     return true;
   }
 
+  _startLedgeWallJump(movementOptions = {}) {
+    const ledge = this.ledgeCling;
+    if (!ledge || !this.animation.playWallJump?.(LEDGE_WALL_JUMP_DURATION)) {
+      return false;
+    }
+
+    this.ledgeWallJumpDirection.copy(ledge.normal).setY(0).normalize();
+    this.ledgeWallJumpStartPosition.copy(this.root.position);
+    this.ledgeWallJumpGroundY = Number.isFinite(movementOptions.groundY)
+      ? movementOptions.groundY
+      : this._jumpGroundY;
+    this.ledgeWallJumpYaw = this.root.rotation.y;
+    this.ledgeCling = null;
+    this.velocity.set(0, 0, 0);
+    this._jumpBufferTimer = 0;
+    this._coyoteTimer = 0;
+    this._landingRecoveryTimer = 0;
+    this.movementLockTimer = Math.max(this.movementLockTimer, LEDGE_WALL_JUMP_DURATION);
+    this.movementLockMultiplier = 0;
+    return true;
+  }
+
+  _finishLedgeWallJumpToFall() {
+    this.jumpState = MML_JUMP_STATES.Falling;
+    this.jumpStartY = this.root.position.y;
+    this._jumpGroundY = this.ledgeWallJumpGroundY;
+    this._jumpAirTimer = this._getEstimatedJumpAirTime() * 0.55;
+    this._jumpKind = 'forwardJump';
+    this.jumpDirection.copy(this.ledgeWallJumpDirection);
+    this.takeoffHorizontalVelocity.copy(this.ledgeWallJumpDirection)
+      .multiplyScalar(LEDGE_WALL_JUMP_FALL_SPEED);
+    this.velocity.copy(this.takeoffHorizontalVelocity);
+    this.velocity.y = LEDGE_WALL_JUMP_FALL_VERTICAL_VELOCITY;
+    this.lastMoveDirection.copy(this.ledgeWallJumpDirection);
+    this.movementLockTimer = 0;
+    this.movementLockMultiplier = 1;
+  }
+
   _updateLedgeClingState(dt, input = new Set(), movementOptions = {}) {
     const ledge = this.ledgeCling;
     if (!ledge) {
+      return;
+    }
+
+    const canJumpFromWall = ledge.state === 'settlingToFreeHang'
+      || ledge.state === 'hangingIdle';
+    if (canJumpFromWall && (input.has('KeyS') || input.has('ArrowDown'))) {
+      this._startLedgeWallJump(movementOptions);
       return;
     }
 
@@ -1386,7 +1521,13 @@ export class Player {
         this.root.position.copy(this._getLedgeRootAnchorPosition(ledgeAnchorPosition));
       }
     } else if (ledge.state === 'climbingUp') {
-      if (ledge.climbHandsReleased) {
+      if (ledge.autoClimb) {
+        this.root.position.lerpVectors(
+          ledge.climbStartPosition,
+          ledge.climbPosition,
+          THREE.MathUtils.smoothstep(progress, 0, 1),
+        );
+      } else if (ledge.climbHandsReleased) {
         const releaseProgress = THREE.MathUtils.clamp(
           (progress - LEDGE_CLIMB_HAND_RELEASE_PROGRESS)
             / (1 - LEDGE_CLIMB_HAND_RELEASE_PROGRESS),
@@ -1419,7 +1560,7 @@ export class Player {
       clipKey: this._getLedgeClipKey(),
       skipAttackKindReset: true,
     });
-    if (ledge.state === 'climbingUp') {
+    if (ledge.state === 'climbingUp' && !ledge.autoClimb) {
       this._anchorClimbHands(this._getLedgeActionProgress());
     } else {
       this._anchorLedgeAnimationPose(this._getLedgeActionProgress());

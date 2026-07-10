@@ -628,6 +628,7 @@ export class DungeonGenerator {
       puzzleBlocks: landmarks.puzzleBlocks,
       pressurePlates: landmarks.pressurePlates,
       conveyorPuzzles: landmarks.conveyorPuzzles,
+      platforms: landmarks.platforms,
       safeInteractables: landmarks.safeInteractables,
       safeZones: this._createRoomZones(rooms, 'hub').concat(this._createRoomZones(rooms, 'camp')),
       solidZones,
@@ -5169,6 +5170,7 @@ export class DungeonGenerator {
       puzzleBlocks: [],
       pressurePlates: [],
       conveyorPuzzles: [],
+      platforms: [],
       safeInteractables: [],
       trapVisuals: [],
       keySeeker: null,
@@ -5187,6 +5189,7 @@ export class DungeonGenerator {
         landmarks.safeInteractables.push(...this._addHubTown(group, position, materials));
       } else if (room.type === 'camp') {
         landmarks.safeInteractables.push(...this._addExpeditionCamp(group, position, materials));
+        landmarks.platforms.push(...this._addCampPlatformingCourse(group, position, materials));
       } else if (room.type === 'entrance') {
         this._addExpeditionPad(group, position, materials);
         const keySeekerPosition = this._tileToWorld(room.x + 2, room.z + 2, tiles);
@@ -5397,19 +5400,71 @@ export class DungeonGenerator {
     group.add(pad);
   }
 
+  _addCampPlatformingCourse(group, position, materials) {
+    const platformDefinitions = [
+      { id: 'campLowJumpDeck', x: 5.6, z: 0.5, width: 3.8, depth: 3.8, height: 1.1 },
+      { id: 'campHighClimbDeck', x: 5.6, z: 5.4, width: 3.8, depth: 3.8, height: 2.8 },
+      { id: 'campHighGapDeck', x: 10.4, z: 5.4, width: 3.6, depth: 3.8, height: 2.8 },
+      { id: 'campReturnDeck', x: 10.4, z: 0.4, width: 3.6, depth: 3.6, height: 1.5 },
+    ];
+    const platforms = [];
+
+    for (const definition of platformDefinitions) {
+      const center = position.clone().add(new THREE.Vector3(
+        definition.x,
+        definition.height * 0.5,
+        definition.z,
+      ));
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(definition.width, definition.height, definition.depth),
+        materials.wallTrim,
+      );
+      body.name = `${definition.id}Body`;
+      body.position.copy(center);
+      body.castShadow = true;
+      body.receiveShadow = true;
+
+      const lip = new THREE.Mesh(
+        new THREE.BoxGeometry(definition.width + 0.08, 0.08, definition.depth + 0.08),
+        materials.glowBlue,
+      );
+      lip.name = `${definition.id}Lip`;
+      lip.position.set(center.x, position.y + definition.height - 0.04, center.z);
+      lip.castShadow = true;
+      lip.receiveShadow = true;
+      group.add(body, lip);
+
+      platforms.push({
+        id: definition.id,
+        center,
+        halfWidth: definition.width * 0.5,
+        halfDepth: definition.depth * 0.5,
+        topY: definition.height,
+        baseY: position.y,
+      });
+    }
+
+    return platforms;
+  }
+
   _addHubTown(group, position, materials) {
     const interactables = [];
     const plaza = new THREE.Group();
     plaza.name = 'minimalHubTown';
     plaza.position.copy(position);
 
+    // The hub center is the player spawn and the +Z axis is the main route to
+    // camp. Keep all hub services on the perimeter instead of crowding either.
+    const garageOffset = new THREE.Vector3(-5.2, 0, -2.2);
+    const mechanicOffset = new THREE.Vector3(5.2, 0, -2.2);
+
     const sign = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.12, 0.44), materials.glowBlue);
     sign.name = 'hubTownGarageSign';
-    sign.position.set(-1.6, 0.96, -0.8);
+    sign.position.copy(garageOffset).add(new THREE.Vector3(0, 0.96, -0.25));
 
     const garage = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.86, 0.72), materials.wallTrim);
     garage.name = 'hubTownGarageWorkbench';
-    garage.position.set(-1.6, 0.43, -0.55);
+    garage.position.copy(garageOffset).setY(0.43);
     garage.castShadow = true;
     garage.receiveShadow = true;
 
@@ -5421,7 +5476,7 @@ export class DungeonGenerator {
       metalness: 0.1,
     });
     const mechanic = this._createNpcMarker('hubMechanicNpc', npcMaterial);
-    mechanic.position.set(1.4, 0, -0.2);
+    mechanic.position.copy(mechanicOffset);
 
     plaza.add(sign, garage, mechanic);
     group.add(plaza);
@@ -5430,7 +5485,7 @@ export class DungeonGenerator {
       id: 'garageWorkbench',
       label: 'Garage Workbench',
       action: 'garage',
-      position: position.clone().add(new THREE.Vector3(-1.6, 0, -0.55)),
+      position: position.clone().add(garageOffset),
       object: plaza,
       color: 0x6bdcff,
     });
@@ -5438,7 +5493,7 @@ export class DungeonGenerator {
       id: 'hubMechanic',
       label: 'Mechanic',
       action: 'mechanic',
-      position: position.clone().add(new THREE.Vector3(1.4, 0, -0.2)),
+      position: position.clone().add(mechanicOffset),
       object: mechanic,
       color: 0x6bdcff,
     });

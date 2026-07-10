@@ -1695,6 +1695,32 @@ button:focus-visible {
   padding: 12px;
 }
 
+.pose-debug-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border: 1px solid rgba(166, 190, 220, 0.22);
+  border-radius: 6px;
+  background: rgba(4, 9, 15, 0.72);
+}
+
+.pose-debug-tabs button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.pose-debug-tabs button[aria-selected="true"] {
+  color: #08131d;
+  background: #67b7ff;
+}
+
 .pose-debug-status {
   margin: 0 0 10px;
   color: var(--muted);
@@ -1847,6 +1873,110 @@ button:focus-visible {
   color: var(--ink);
   background: rgba(4, 9, 15, 0.74);
   font: 11px/1.45 Consolas, "Liberation Mono", monospace;
+}
+
+.platform-debug-view {
+  display: grid;
+  gap: 10px;
+}
+
+.platform-debug-section {
+  padding: 10px;
+  border-top: 1px solid rgba(166, 190, 220, 0.2);
+  background: rgba(127, 159, 198, 0.05);
+}
+
+.platform-debug-section:first-child {
+  border-top: 0;
+}
+
+.platform-debug-section h2 {
+  margin: 0 0 9px;
+  color: var(--brass);
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.platform-debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.platform-debug-grid label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.platform-debug-grid select,
+.platform-debug-grid input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid rgba(166, 190, 220, 0.28);
+  border-radius: 5px;
+  padding: 0 7px;
+  color: var(--ink);
+  background: rgba(4, 9, 15, 0.78);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.platform-debug-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 10px 0 0;
+  background: rgba(166, 190, 220, 0.18);
+}
+
+.platform-debug-metrics div {
+  min-width: 0;
+  padding: 8px;
+  background: rgba(8, 18, 28, 0.94);
+}
+
+.platform-debug-metrics dt {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.platform-debug-metrics dd {
+  margin: 3px 0 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.platform-debug-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.platform-debug-actions button {
+  min-height: 34px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.platform-debug-count {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-align: right;
 }
 
 .game-over {

@@ -11,7 +11,8 @@ const LOCKED_COLOR = 0xffb347;
 const KEY_SEEKER_COLOR = 0x5ee77b;
 const TRACKING_COLOR = 0xa06cff;
 const DOOR_OPEN_Y = -5.3;
-const PLAYER_JUMP_OFF_LEDGE_MAX_DROP = 2.4;
+const PLAYER_JUMP_OFF_LEDGE_MAX_DROP = 6;
+const PLAYER_STEP_OFF_FALL_HEIGHT = 0.24;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
   [-1, 0],
@@ -263,11 +264,11 @@ export class DungeonController {
   }
 
   isPositionWalkable(position) {
-    if (Number.isFinite(this.game.getDebugLedgeFloorElevation?.(position))) {
+    if (Number.isFinite(this.game.getPlatformFloorElevation?.(position))) {
       return true;
     }
 
-    if (this.game.isPositionInsideDebugLedgeBlock?.(position)) {
+    if (this.game.isPositionInsidePlatformBlock?.(position)) {
       return false;
     }
 
@@ -296,7 +297,7 @@ export class DungeonController {
       return false;
     }
 
-    if (this.game.isPositionInsideDebugLedgeBlock?.(position)) {
+    if (this.game.isPositionInsidePlatformBlock?.(position)) {
       return false;
     }
 
@@ -304,10 +305,10 @@ export class DungeonController {
   }
 
   _getWalkableJumpOffLanding(position, target = new THREE.Vector3()) {
-    const debugLedgeElevation = this.game.getDebugLedgeFloorElevation?.(position);
-    if (Number.isFinite(debugLedgeElevation)) {
+    const platformElevation = this.game.getPlatformFloorElevation?.(position);
+    if (Number.isFinite(platformElevation)) {
       target.copy(position);
-      target.y = debugLedgeElevation;
+      target.y = platformElevation;
       return target;
     }
 
@@ -438,6 +439,13 @@ export class DungeonController {
     return tile ? this._getTileElevationAtPosition(tile, position) : 0;
   }
 
+  getSurfaceElevationAt(position) {
+    const platformElevation = this.game.getPlatformFloorElevation?.(position);
+    return Number.isFinite(platformElevation)
+      ? platformElevation
+      : this.getFloorElevationAt(position);
+  }
+
   _getTileElevationAtPosition(tile, position) {
     if (!tile) {
       return 0;
@@ -474,12 +482,12 @@ export class DungeonController {
 
   _isPlayerJumping() {
     const player = this.game.player;
-    if (player?.isJumpAirborne?.()) {
+    if (player?.isJumpAirborne?.() || player?.isDodgeRollAirborne?.()) {
       return true;
     }
 
     const actionState = player?.animation?.actionState;
-    return actionState === 'neutralJump' || actionState === 'forwardJump';
+    return actionState === 'neutralJump' || actionState === 'forwardJump' || actionState === 'wallJump';
   }
 
   _syncPositionToFloor(position, { preservePlayerAction = false } = {}) {
@@ -487,9 +495,9 @@ export class DungeonController {
       return;
     }
 
-    const debugLedgeElevation = this.game.getDebugLedgeFloorElevation?.(position);
-    if (Number.isFinite(debugLedgeElevation)) {
-      position.y = debugLedgeElevation;
+    const platformElevation = this.game.getPlatformFloorElevation?.(position);
+    if (Number.isFinite(platformElevation)) {
+      position.y = platformElevation;
       return;
     }
 
@@ -1123,7 +1131,12 @@ export class DungeonController {
     }
 
     if (this.isPositionWalkable(current)) {
-      this._syncPositionToFloor(current, { preservePlayerAction: true });
+      const surfaceY = this.getSurfaceElevationAt(current);
+      const steppingOffElevatedSurface = !playerJumping
+        && current.y - surfaceY > PLAYER_STEP_OFF_FALL_HEIGHT;
+      if (!steppingOffElevatedSurface) {
+        this._syncPositionToFloor(current, { preservePlayerAction: true });
+      }
       this.lastSafePlayerPosition.copy(current);
       if (!playerJumping) {
         this.pendingPlayerJumpOffLanding = null;

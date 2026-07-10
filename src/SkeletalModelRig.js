@@ -70,6 +70,7 @@ const LOOPING_CLIP_KEYS = new Set([
   'hangingIdle',
 ]);
 const JUMP_ACTION_CLIP_KEYS = new Set([
+  'jumpFromWall',
   'neutralJump',
   'forwardJumpLaunch',
   'forwardJumpFall',
@@ -1248,6 +1249,7 @@ export class SkeletalModelRig {
       fallingtoroll: 'fallingToRoll',
       hangingidle: 'hangingIdle',
       jumpingtohanging: 'jumpingToHanging',
+      jumpfromwall: 'jumpFromWall',
       bracedtofreehang: 'bracedToFreeHang',
       freehangtobraced: 'freeHangToBraced',
       ledgeclimbup: 'ledgeClimbUp',
@@ -1392,6 +1394,10 @@ export class SkeletalModelRig {
       return busterAimActive
         ? this._firstAvailable('fallingIdle', 'pistolJump2', 'pistolJump', 'jump', 'jumpingUp', 'pistolIdle', 'breathingIdle', 'idle')
         : this._firstAvailable('fallingIdle', 'jump', 'jumpingUp', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'wallJump') {
+      return this._firstAvailable('jumpFromWall', 'forwardJumpLaunch', 'jump', 'fallingIdle', 'breathingIdle', 'idle');
     }
 
     if (state === 'land') {

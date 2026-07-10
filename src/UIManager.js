@@ -439,6 +439,17 @@ export class UIManager {
     this.poseDebugControls = document.getElementById('pose-debug-controls');
     this.poseDebugOutput = document.getElementById('pose-debug-output');
     this.poseDebugStatus = document.getElementById('pose-debug-status');
+    this.platformDebugView = document.getElementById('platform-debug-view');
+    this.platformDebugJumpHeight = document.getElementById('platform-debug-jump-height');
+    this.platformDebugGravity = document.getElementById('platform-debug-gravity');
+    this.platformDebugApex = document.getElementById('platform-debug-apex');
+    this.platformDebugApexTime = document.getElementById('platform-debug-apex-time');
+    this.platformDebugGrabMin = document.getElementById('platform-debug-grab-min');
+    this.platformDebugWidth = document.getElementById('platform-debug-width');
+    this.platformDebugDepth = document.getElementById('platform-debug-depth');
+    this.platformDebugHeight = document.getElementById('platform-debug-height');
+    this.platformDebugDistance = document.getElementById('platform-debug-distance');
+    this.platformDebugCount = document.getElementById('platform-debug-count');
     this.toast = document.getElementById('loot-toast');
     this.eventPrompt = document.getElementById('event-prompt');
     this.buffTray = document.getElementById('buff-tray');
@@ -449,6 +460,7 @@ export class UIManager {
     this.previousHealth = null;
     this.healthDamagePulseTimer = 0;
     this.poseDebugOpen = false;
+    this.poseDebugTab = 'pose';
     this.poseDebugControlsRendered = false;
     this.poseDebugFocusedJointName = null;
     this.poseDebugPresetAnimations = this._createPoseDebugAnimations();
@@ -504,8 +516,10 @@ export class UIManager {
     this._renderMinimap();
     this._renderMapEventPrompt();
     this._renderBuffTray();
-    if (this.poseDebugOpen) {
+    if (this.poseDebugOpen && this.poseDebugTab === 'pose') {
       this._syncPoseDebugRigState();
+    } else if (this.poseDebugOpen) {
+      this._syncPlatformDebugControls();
     }
 
     if (this.toastTimer > 0) {
@@ -543,11 +557,62 @@ export class UIManager {
       this._renderPoseDebugTimeline();
       this._renderPoseDebugControls();
       this._syncAllPoseDebugControls();
-      this._syncPoseDebugRigState();
       this._renderPoseDebugPrompt();
+      this._selectPoseDebugTab(this.poseDebugTab);
     } else {
       this.game.player.externalRig?.setDebugPoseEnabled?.(false);
     }
+  }
+
+  _selectPoseDebugTab(tab = 'pose') {
+    this.poseDebugTab = tab === 'platforming' ? 'platforming' : 'pose';
+    for (const button of this.poseDebugPanel?.querySelectorAll('[data-debug-tab]') ?? []) {
+      button.setAttribute('aria-selected', String(button.dataset.debugTab === this.poseDebugTab));
+    }
+    for (const view of this.poseDebugPanel?.querySelectorAll('[data-debug-view]') ?? []) {
+      view.hidden = view.dataset.debugView !== this.poseDebugTab;
+    }
+    for (const control of this.poseDebugPanel?.querySelectorAll('[data-pose-only]') ?? []) {
+      control.hidden = this.poseDebugTab !== 'pose';
+    }
+
+    this.game.setPoseDebugSection?.(this.poseDebugTab);
+    if (this.poseDebugTab === 'pose') {
+      this._syncPoseDebugRigState();
+    } else {
+      this.game.player.externalRig?.setDebugPoseEnabled?.(false);
+      this._syncPlatformDebugControls();
+    }
+  }
+
+  _syncPlatformDebugControls() {
+    const state = this.game.getPlatformDebugState?.();
+    if (!state) {
+      return;
+    }
+
+    if (this.platformDebugJumpHeight) this.platformDebugJumpHeight.value = state.jumpHeightPreset;
+    if (this.platformDebugGravity) this.platformDebugGravity.value = state.gravityPreset;
+    if (this.platformDebugApex) this.platformDebugApex.textContent = state.jumpHeight.toFixed(2);
+    if (this.platformDebugApexTime) this.platformDebugApexTime.textContent = `${state.timeToApex.toFixed(2)}s`;
+    if (this.platformDebugGrabMin) this.platformDebugGrabMin.textContent = state.minimumGrabElevation.toFixed(2);
+    if (this.platformDebugCount) {
+      const count = state.spawnedPlatformCount;
+      this.platformDebugCount.textContent = `${count} block${count === 1 ? '' : 's'}`;
+    }
+  }
+
+  _spawnPlatformDebugBlock() {
+    const platform = this.game.spawnDebugPlatform?.({
+      width: Number(this.platformDebugWidth?.value),
+      depth: Number(this.platformDebugDepth?.value),
+      height: Number(this.platformDebugHeight?.value),
+      distance: Number(this.platformDebugDistance?.value),
+    });
+    if (platform) {
+      this.showToast(`${platform.id}: ${platform.halfWidth * 2}×${platform.topY - platform.baseY}×${platform.halfDepth * 2}`);
+    }
+    this._syncPlatformDebugControls();
   }
 
   _createPoseDebugAnimations() {
@@ -1816,6 +1881,12 @@ export class UIManager {
         this._selectPoseDebugAnimation(select.value);
       } else if (select.id === 'pose-debug-keyframe') {
         this._selectPoseDebugKeyframe(select.value);
+      } else if (select.id === 'platform-debug-jump-height') {
+        this.game.setDebugJumpHeightPreset?.(select.value);
+        this._syncPlatformDebugControls();
+      } else if (select.id === 'platform-debug-gravity') {
+        this.game.setDebugGravityPreset?.(select.value);
+        this._syncPlatformDebugControls();
       }
     });
 
@@ -1835,7 +1906,9 @@ export class UIManager {
 
       const action = button.dataset.action;
 
-      if (action === 'pose-close') {
+      if (action === 'pose-debug-tab') {
+        this._selectPoseDebugTab(button.dataset.debugTab);
+      } else if (action === 'pose-close') {
         this.game.setPoseDebugOpen(false);
       } else if (action === 'pose-zero') {
         this._resetPoseDebugValues();
@@ -1847,6 +1920,12 @@ export class UIManager {
         this._addPoseDebugKeyframe();
       } else if (action === 'pose-delete-keyframe') {
         this._deletePoseDebugKeyframe();
+      } else if (action === 'platform-spawn') {
+        this._spawnPlatformDebugBlock();
+      } else if (action === 'platform-clear') {
+        const removed = this.game.clearDebugPlatforms?.() ?? 0;
+        this._syncPlatformDebugControls();
+        this.showToast(`${removed} debug block${removed === 1 ? '' : 's'} cleared`);
       }
     });
 

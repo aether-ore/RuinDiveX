@@ -6,12 +6,14 @@ const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
 const BEAM_BLADE_SLASH_END = 16 / BEAM_BLADE_TOTAL_FRAMES;
 const DODGE_ROLL_DURATION = 0.86;
+const WALL_JUMP_DURATION = 1.125;
 const JUMP_DURATION = 0.82;
 const KNOCKBACK_FALL_DURATION = 0.86;
 const DOWNED_HOLD_DURATION = 0.24;
 const GET_UP_DURATION = 1.05;
 const FULL_BODY_ACTION_STATES = new Set([
   'dodgeRoll',
+  'wallJump',
   'neutralJump',
   'forwardJump',
   'knockbackFall',
@@ -92,6 +94,15 @@ export class AnimationController {
     }
 
     this._startFullBodyAction('dodgeRoll', duration);
+    return true;
+  }
+
+  playWallJump(duration = WALL_JUMP_DURATION) {
+    if (!this.canStartFullBodyAction()) {
+      return false;
+    }
+
+    this._startFullBodyAction('wallJump', duration);
     return true;
   }
 
@@ -415,6 +426,8 @@ export class AnimationController {
   _applyFullBodyActionPose(dt, state, progress) {
     if (state === 'dodgeRoll') {
       this._applyDodgeRollPose(dt, progress);
+    } else if (state === 'wallJump') {
+      this._applyJumpPose(dt, progress, true, state);
     } else if (state === 'neutralJump' || state === 'forwardJump' || state === 'fall' || state === 'land') {
       this._applyJumpPose(dt, progress, state === 'forwardJump', state);
     } else if (state === 'knockbackFall') {

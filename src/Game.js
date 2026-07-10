@@ -31,21 +31,37 @@ const CAMERA_WALL_OCCLUSION_TARGET_HEIGHT = 1.25;
 const DEBUG_LEDGE_CUBE_WIDTH = 3;
 const DEBUG_LEDGE_CUBE_DEPTH = 3;
 const DEBUG_LEDGE_CUBE_HEIGHT = 3;
+// Keep world-space debug geometry in a side testing bay so the spawn point and
+// the main route toward the expedition camp remain completely unobstructed.
+const DEBUG_LEDGE_CUBE_LATERAL_OFFSET = 7.25;
 const DEBUG_LEDGE_CUBE_FORWARD_OFFSET = 3.05;
 const DEBUG_LEDGE_GRAB_DISTANCE_MIN = 0.05;
 const DEBUG_LEDGE_GRAB_DISTANCE_MAX = 1.05;
 const DEBUG_LEDGE_GRAB_PROGRESS_MIN = 0.34;
 const DEBUG_LEDGE_GRAB_PROGRESS_MAX = 0.98;
 const DEBUG_LEDGE_APPROACH_DOT_MAX = -0.2;
-const DEBUG_LEDGE_GRAB_HEIGHT_MIN = 0.75;
-const DEBUG_LEDGE_GRAB_HEIGHT_MAX = 3.35;
-const DEBUG_LEDGE_GRAB_IDEAL_HEIGHT = 3;
-const DEBUG_LEDGE_NORMAL_LANDING_MARGIN = 0.14;
+const PLATFORM_EDGE_CATCH_DISTANCE_MIN = -0.05;
+const PLATFORM_EDGE_CATCH_DISTANCE_MAX = 0.2;
+const PLATFORM_EDGE_CATCH_VERTICAL_ABOVE = 0.24;
+const PLATFORM_LEDGE_GRAB_HEIGHT_MIN = -0.45;
+const PLATFORM_NORMAL_JUMP_REACH_RATIO = 0.98;
+const PLATFORM_LEDGE_MAX_REACH_RATIO = 2.16;
+const PLATFORM_LEDGE_IDEAL_REACH_RATIO = 1.94;
 const DEBUG_LEDGE_LANDING_INSET = 0.08;
+const PLATFORM_LANDING_VERTICAL_TOLERANCE = 0.42;
 const DEBUG_LEDGE_HANG_ROOT_DROP = 3.35;
 const DEBUG_LEDGE_HANG_OFFSET = 0.42;
 const DEBUG_LEDGE_CLIMB_INSET = 0.82;
 const DEBUG_LEDGE_HAND_OUTWARD_OFFSET = 0.055;
+const DEBUG_JUMP_HEIGHT_PRESETS = Object.freeze({
+  normal: 1,
+  double: 2,
+  triple: 3,
+});
+const DEBUG_GRAVITY_PRESETS = Object.freeze({
+  normal: 1,
+  moon: 0.28,
+});
 
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
@@ -189,20 +205,29 @@ export class Game {
     this.debugLedgeTester = null;
     this.debugLedgeCandidates = [];
     this.debugLedgePlatform = null;
+    this.platformingPlatforms = [];
+    this.platformingLedgeCandidates = [];
+    this.debugSpawnedPlatforms = [];
+    this.debugPlatformCounter = 0;
+    this.debugJumpHeightPreset = 'normal';
+    this.debugGravityPreset = 'normal';
+    this.poseDebugSection = 'pose';
+    this.debugSpawnedPlatformGroup = new THREE.Group();
+    this.debugSpawnedPlatformGroup.name = 'debugSpawnedPlatformGroup';
     this.lastDebugLedgeClingId = null;
     this.lastDebugLedgeLandingId = null;
 
     this._buildWorld();
     this._buildAimReticle();
-    this.scene.add(this.poseDebugHandleGroup);
+    this.scene.add(this.poseDebugHandleGroup, this.debugSpawnedPlatformGroup);
 
     this.player = new Player();
     this.scene.add(this.player.root);
     if (this.dungeon?.playerStart) {
       this.player.root.position.copy(this.dungeon.playerStart);
     }
-    this.player.jumpLedgeClingResolver = (context) => this._tryResolveDebugLedgeCling(context);
-    this.player.jumpPlatformLandingResolver = (context) => this._tryResolveDebugPlatformLanding(context);
+    this.player.jumpLedgeClingResolver = (context) => this._tryResolvePlatformLedgeCling(context);
+    this.player.jumpPlatformLandingResolver = (context) => this._tryResolvePlatformLanding(context);
 
     this.inventory = new Inventory(54);
     this.lootSystem = new LootSystem(this.scene);
@@ -484,6 +509,11 @@ export class Game {
     dataset.debugLedgeCount = String(this.debugLedgeCandidates?.length ?? 0);
     dataset.debugLastLedgeClingId = this.lastDebugLedgeClingId ?? 'none';
     dataset.debugLastLedgeLandingId = this.lastDebugLedgeLandingId ?? 'none';
+    const platformDebug = player?.getJumpPhysicsDebug?.();
+    dataset.debugJumpHeightMultiplier = formatBrowserDiagnosticNumber(platformDebug?.jumpHeightMultiplier);
+    dataset.debugGravityScale = formatBrowserDiagnosticNumber(platformDebug?.gravityScale);
+    dataset.debugJumpHeight = formatBrowserDiagnosticNumber(platformDebug?.jumpHeight);
+    dataset.debugSpawnedPlatformCount = String(this.debugSpawnedPlatforms?.length ?? 0);
   }
 
   _getAnimationPreviewLegTelemetry() {
@@ -574,8 +604,131 @@ export class Game {
       this.poseDebugCamera.rotating = false;
     }
 
-    this._setPoseDebugHandlesVisible(open);
+    this._setPoseDebugHandlesVisible(open && this.poseDebugSection === 'pose');
     this.ui.setPoseDebugOpen(open);
+  }
+
+  setPoseDebugSection(section = 'pose') {
+    this.poseDebugSection = section === 'platforming' ? 'platforming' : 'pose';
+    this._setPoseDebugHandlesVisible(this.poseDebugOpen && this.poseDebugSection === 'pose');
+    if (this.poseDebugSection !== 'pose') {
+      this.player.externalRig?.setDebugPoseEnabled?.(false);
+    }
+    return this.poseDebugSection;
+  }
+
+  setDebugJumpHeightPreset(preset = 'normal') {
+    const key = Object.hasOwn(DEBUG_JUMP_HEIGHT_PRESETS, preset) ? preset : 'normal';
+    this.debugJumpHeightPreset = key;
+    this.player.setJumpPhysicsDebug({ jumpHeightMultiplier: DEBUG_JUMP_HEIGHT_PRESETS[key] });
+    return this.getPlatformDebugState();
+  }
+
+  setDebugGravityPreset(preset = 'normal') {
+    const key = Object.hasOwn(DEBUG_GRAVITY_PRESETS, preset) ? preset : 'normal';
+    this.debugGravityPreset = key;
+    this.player.setJumpPhysicsDebug({ gravityScale: DEBUG_GRAVITY_PRESETS[key] });
+    return this.getPlatformDebugState();
+  }
+
+  getPlatformDebugState() {
+    const jump = this.player.getJumpPhysicsDebug();
+    return {
+      jumpHeightPreset: this.debugJumpHeightPreset,
+      gravityPreset: this.debugGravityPreset,
+      jumpHeightMultiplier: jump.jumpHeightMultiplier,
+      gravityScale: jump.gravityScale,
+      jumpHeight: jump.jumpHeight,
+      timeToApex: jump.timeToApex,
+      minimumGrabElevation: jump.jumpHeight * PLATFORM_NORMAL_JUMP_REACH_RATIO,
+      maximumGrabElevation: jump.jumpHeight * PLATFORM_LEDGE_MAX_REACH_RATIO,
+      spawnedPlatformCount: this.debugSpawnedPlatforms.length,
+    };
+  }
+
+  spawnDebugPlatform({ width = 3, depth = 3, height = 3, distance = 5 } = {}) {
+    const resolvedWidth = THREE.MathUtils.clamp(Number(width) || 3, 0.5, 12);
+    const resolvedDepth = THREE.MathUtils.clamp(Number(depth) || 3, 0.5, 12);
+    const resolvedHeight = THREE.MathUtils.clamp(Number(height) || 3, 0.25, 12);
+    const resolvedDistance = Math.max(
+      THREE.MathUtils.clamp(Number(distance) || 5, 2, 20),
+      resolvedDepth * 0.5 + 1.5,
+    );
+    const forward = tempVectorA.set(
+      Math.sin(this.player.root.rotation.y),
+      0,
+      Math.cos(this.player.root.rotation.y),
+    ).normalize();
+    const baseY = this._getPlayerGroundY();
+    const center = this.player.root.position.clone()
+      .addScaledVector(forward, resolvedDistance)
+      .setY(baseY + resolvedHeight * 0.5);
+    const id = `debugPlatform${++this.debugPlatformCounter}`;
+    const group = new THREE.Group();
+    group.name = id;
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+      color: 0x34434f,
+      roughness: 0.84,
+      metalness: 0.1,
+    });
+    const lipMaterial = new THREE.MeshStandardMaterial({
+      color: 0x74e6ff,
+      emissive: 0x1a6070,
+      emissiveIntensity: 0.55,
+      roughness: 0.42,
+      metalness: 0.2,
+    });
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(resolvedWidth, resolvedHeight, resolvedDepth),
+      bodyMaterial,
+    );
+    body.name = `${id}Body`;
+    body.position.copy(center);
+    body.castShadow = true;
+    body.receiveShadow = true;
+    const lip = new THREE.Mesh(
+      new THREE.BoxGeometry(resolvedWidth + 0.08, 0.08, resolvedDepth + 0.08),
+      lipMaterial,
+    );
+    lip.name = `${id}Lip`;
+    lip.position.set(center.x, baseY + resolvedHeight - 0.04, center.z);
+    lip.castShadow = true;
+    lip.receiveShadow = true;
+    group.add(body, lip);
+    this.debugSpawnedPlatformGroup.add(group);
+
+    const platform = {
+      id,
+      center,
+      halfWidth: resolvedWidth * 0.5,
+      halfDepth: resolvedDepth * 0.5,
+      topY: baseY + resolvedHeight,
+      baseY,
+      object: group,
+      debugSpawned: true,
+    };
+    this.debugSpawnedPlatforms.push(platform);
+    this._rebuildPlatformingLedgeCandidates();
+    return platform;
+  }
+
+  clearDebugPlatforms() {
+    const activeLedgeId = this.player?.ledgeCling?.id ?? '';
+    for (const platform of this.debugSpawnedPlatforms) {
+      platform.object?.traverse?.((object) => {
+        object.geometry?.dispose?.();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of materials) material?.dispose?.();
+      });
+      platform.object?.removeFromParent?.();
+      if (activeLedgeId.startsWith(`${platform.id}-`)) {
+        this.player.ledgeCling = null;
+      }
+    }
+    const removed = this.debugSpawnedPlatforms.length;
+    this.debugSpawnedPlatforms = [];
+    this._rebuildPlatformingLedgeCandidates();
+    return removed;
   }
 
   addEnemy(enemy) {
@@ -966,6 +1119,8 @@ export class Game {
 
     const dungeon = new DungeonGenerator({ difficulty: this.ruinFloor }).generate();
     this.dungeon = dungeon;
+    this.platformingPlatforms = [...(dungeon.platforms ?? [])];
+    this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
     this._collectCameraOcclusionWalls();
@@ -1462,8 +1617,10 @@ export class Game {
     this._updateHitEffects(dt);
     this._updateParticles(dt);
     this._updateTimedEffects(dt);
-    if (this.poseDebugOpen) {
+    if (this.poseDebugOpen && this.poseDebugSection === 'pose') {
       this._updatePoseDebugHandles();
+    } else if (this.poseDebugOpen) {
+      this.poseDebugHandleGroup.visible = false;
     }
     this._updateCamera(dt);
     this._updateCameraWallOcclusion();
@@ -1478,9 +1635,9 @@ export class Game {
       return 0;
     }
 
-    const debugLedgeElevation = this.getDebugLedgeFloorElevation?.(position);
-    if (Number.isFinite(debugLedgeElevation)) {
-      return debugLedgeElevation;
+    const platformElevation = this.getPlatformFloorElevation?.(position);
+    if (Number.isFinite(platformElevation)) {
+      return platformElevation;
     }
 
     return this.dungeonController?.getFloorElevationAt?.(position) ?? 0;
@@ -1604,6 +1761,8 @@ export class Game {
 
     const dungeon = new DungeonGenerator({ difficulty: this.ruinFloor }).generate();
     this.dungeon = dungeon;
+    this.platformingPlatforms = [...(dungeon.platforms ?? [])];
+    this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
     this._collectCameraOcclusionWalls();
@@ -1618,7 +1777,7 @@ export class Game {
 
     const base = origin?.clone?.() ?? new THREE.Vector3();
     const center = base.clone().add(new THREE.Vector3(
-      0,
+      DEBUG_LEDGE_CUBE_LATERAL_OFFSET,
       DEBUG_LEDGE_CUBE_HEIGHT * 0.5,
       DEBUG_LEDGE_CUBE_FORWARD_OFFSET,
     ));
@@ -1707,6 +1866,21 @@ export class Game {
 
   getDebugLedgeFloorElevation(position) {
     const platform = this.debugLedgePlatform;
+    return this._getPlatformFloorElevation(platform, position);
+  }
+
+  getPlatformFloorElevation(position) {
+    let elevation = null;
+    for (const platform of this._getPlatformingSurfaces()) {
+      const candidate = this._getPlatformFloorElevation(platform, position);
+      if (Number.isFinite(candidate) && (!Number.isFinite(elevation) || candidate > elevation)) {
+        elevation = candidate;
+      }
+    }
+    return elevation;
+  }
+
+  _getPlatformFloorElevation(platform, position) {
     if (!platform || !position) {
       return null;
     }
@@ -1721,7 +1895,16 @@ export class Game {
   }
 
   isPositionInsideDebugLedgeBlock(position, margin = 0.08) {
-    const platform = this.debugLedgePlatform;
+    return this._isPositionInsidePlatformBlock(this.debugLedgePlatform, position, margin);
+  }
+
+  isPositionInsidePlatformBlock(position, margin = 0.08) {
+    return this._getPlatformingSurfaces().some((platform) => (
+      this._isPositionInsidePlatformBlock(platform, position, margin)
+    ));
+  }
+
+  _isPositionInsidePlatformBlock(platform, position, margin = 0.08) {
     if (!platform || !position) {
       return false;
     }
@@ -1730,6 +1913,65 @@ export class Game {
     const insideZ = Math.abs(position.z - platform.center.z) <= platform.halfDepth + margin;
     const belowTop = position.y < platform.topY - 0.05;
     return insideX && insideZ && belowTop;
+  }
+
+  _getPlatformingSurfaces() {
+    return this.debugLedgePlatform
+      ? [this.debugLedgePlatform, ...this.platformingPlatforms, ...this.debugSpawnedPlatforms]
+      : [...this.platformingPlatforms, ...this.debugSpawnedPlatforms];
+  }
+
+  _rebuildPlatformingLedgeCandidates() {
+    this.platformingLedgeCandidates = [
+      ...this.platformingPlatforms,
+      ...this.debugSpawnedPlatforms,
+    ].flatMap((platform) => (
+      this._createPlatformLedgeCandidates(platform)
+    ));
+  }
+
+  _createPlatformLedgeCandidates(platform) {
+    if (!platform) {
+      return [];
+    }
+
+    const xHalf = platform.halfWidth;
+    const zHalf = platform.halfDepth;
+    const { center, topY } = platform;
+    return [
+      {
+        id: `${platform.id}-front-ledge`,
+        center: new THREE.Vector3(center.x, topY, center.z - zHalf),
+        normal: new THREE.Vector3(0, 0, -1),
+        axis: new THREE.Vector3(1, 0, 0),
+        halfSpan: xHalf,
+        topY,
+      },
+      {
+        id: `${platform.id}-back-ledge`,
+        center: new THREE.Vector3(center.x, topY, center.z + zHalf),
+        normal: new THREE.Vector3(0, 0, 1),
+        axis: new THREE.Vector3(1, 0, 0),
+        halfSpan: xHalf,
+        topY,
+      },
+      {
+        id: `${platform.id}-left-ledge`,
+        center: new THREE.Vector3(center.x - xHalf, topY, center.z),
+        normal: new THREE.Vector3(-1, 0, 0),
+        axis: new THREE.Vector3(0, 0, 1),
+        halfSpan: zHalf,
+        topY,
+      },
+      {
+        id: `${platform.id}-right-ledge`,
+        center: new THREE.Vector3(center.x + xHalf, topY, center.z),
+        normal: new THREE.Vector3(1, 0, 0),
+        axis: new THREE.Vector3(0, 0, 1),
+        halfSpan: zHalf,
+        topY,
+      },
+    ];
   }
 
   _addDebugLedge(group, {
@@ -1762,15 +2004,55 @@ export class Game {
     });
   }
 
-  _isDebugLedgeNormallyLandable(ledgeHeight, jumpReachHeight) {
-    return Number.isFinite(ledgeHeight)
-      && Number.isFinite(jumpReachHeight)
-      && ledgeHeight > 0
-      && ledgeHeight <= jumpReachHeight - DEBUG_LEDGE_NORMAL_LANDING_MARGIN;
+  _tryResolvePlatformLanding(context = {}) {
+    return this._tryResolveDebugPlatformLanding(context, this._getPlatformingSurfaces());
   }
 
-  _isInsideDebugPlatformTop(position, inset = 0) {
-    const platform = this.debugLedgePlatform;
+  _tryResolveDebugPlatformLanding({
+    player,
+    root,
+    jumpStartY,
+    jumpReachHeight,
+  } = {}, platforms = this.debugLedgePlatform ? [this.debugLedgePlatform] : []) {
+    if (!player || !root || !platforms.length) {
+      return false;
+    }
+
+    const startY = Number.isFinite(jumpStartY) ? jumpStartY : root.position.y;
+    let landingPlatform = null;
+    for (const platform of platforms) {
+      const ledgeHeight = platform.topY - startY;
+      if (ledgeHeight > jumpReachHeight * PLATFORM_NORMAL_JUMP_REACH_RATIO) {
+        continue;
+      }
+
+      if (!this._isInsidePlatformTop(platform, root.position, DEBUG_LEDGE_LANDING_INSET)) {
+        continue;
+      }
+
+      const verticalDistance = root.position.y - platform.topY;
+      if (verticalDistance < -0.12 || verticalDistance > PLATFORM_LANDING_VERTICAL_TOLERANCE) {
+        continue;
+      }
+
+      if (!landingPlatform || platform.topY > landingPlatform.topY) {
+        landingPlatform = platform;
+      }
+    }
+
+    if (!landingPlatform) {
+      return false;
+    }
+
+    root.position.y = landingPlatform.topY;
+    if (player.modelRoot) {
+      player.modelRoot.position.y = 0;
+    }
+    this.lastDebugLedgeLandingId = landingPlatform.id;
+    return true;
+  }
+
+  _isInsidePlatformTop(platform, position, inset = 0) {
     if (!platform || !position) {
       return false;
     }
@@ -1779,33 +2061,29 @@ export class Game {
       && Math.abs(position.z - platform.center.z) <= Math.max(0, platform.halfDepth - inset);
   }
 
-  _tryResolveDebugPlatformLanding({
+  _tryResolvePlatformLedgeCling(context = {}) {
+    return this._tryResolveDebugLedgeCling(
+      context,
+      [...this.debugLedgeCandidates, ...this.platformingLedgeCandidates],
+    );
+  }
+
+  _isExceptionalPlatformEdgeCatch({
     player,
     root,
-    jumpStartY,
-    jumpReachHeight,
-  } = {}) {
-    const platform = this.debugLedgePlatform;
-    if (!platform || !player || !root) {
+    ledge,
+    faceDistance,
+    maximumGrabElevation,
+  }) {
+    if (player.jumpState !== 'Falling' || (player.velocity?.y ?? 1) > 0) {
       return false;
     }
 
-    const startY = Number.isFinite(jumpStartY) ? jumpStartY : root.position.y;
-    const ledgeHeight = platform.topY - startY;
-    if (!this._isDebugLedgeNormallyLandable(ledgeHeight, jumpReachHeight)) {
-      return false;
-    }
-
-    if (!this._isInsideDebugPlatformTop(root.position, DEBUG_LEDGE_LANDING_INSET)) {
-      return false;
-    }
-
-    root.position.y = platform.topY;
-    if (player.modelRoot) {
-      player.modelRoot.position.y = 0;
-    }
-    this.lastDebugLedgeLandingId = platform.id;
-    return true;
+    const verticalDistance = root.position.y - ledge.topY;
+    return faceDistance >= PLATFORM_EDGE_CATCH_DISTANCE_MIN
+      && faceDistance <= PLATFORM_EDGE_CATCH_DISTANCE_MAX
+      && verticalDistance >= -maximumGrabElevation
+      && verticalDistance <= PLATFORM_EDGE_CATCH_VERTICAL_ABOVE;
   }
 
   _tryResolveDebugLedgeCling({
@@ -1815,14 +2093,13 @@ export class Game {
     progress = 0,
     jumpStartY,
     jumpReachHeight,
-  } = {}) {
-    if (!player || !root || !this.debugLedgeCandidates.length) {
+  } = {}, candidates = this.debugLedgeCandidates) {
+    if (!player || !root || !candidates.length) {
       return false;
     }
 
-    if (progress < DEBUG_LEDGE_GRAB_PROGRESS_MIN || progress > DEBUG_LEDGE_GRAB_PROGRESS_MAX) {
-      return false;
-    }
+    const normalProgressWindow = progress >= DEBUG_LEDGE_GRAB_PROGRESS_MIN
+      && progress <= DEBUG_LEDGE_GRAB_PROGRESS_MAX;
 
     tempVectorA.copy(jumpDirection ?? player.lastMoveDirection ?? WORLD_UP);
     tempVectorA.y = 0;
@@ -1836,10 +2113,10 @@ export class Game {
       ? jumpReachHeight
       : player.getJumpReachHeight?.() ?? 0;
     let best = null;
-    for (const ledge of this.debugLedgeCandidates) {
+    for (const ledge of candidates) {
       tempVectorB.copy(root.position).sub(ledge.center);
       const faceDistance = tempVectorB.dot(ledge.normal);
-      if (faceDistance < DEBUG_LEDGE_GRAB_DISTANCE_MIN || faceDistance > DEBUG_LEDGE_GRAB_DISTANCE_MAX) {
+      if (faceDistance < PLATFORM_EDGE_CATCH_DISTANCE_MIN || faceDistance > DEBUG_LEDGE_GRAB_DISTANCE_MAX) {
         continue;
       }
 
@@ -1853,19 +2130,41 @@ export class Game {
       }
 
       const ledgeHeight = ledge.topY - startY;
-      if (ledgeHeight < DEBUG_LEDGE_GRAB_HEIGHT_MIN || ledgeHeight > DEBUG_LEDGE_GRAB_HEIGHT_MAX) {
+      const maximumGrabElevation = reachHeight * PLATFORM_LEDGE_MAX_REACH_RATIO;
+      if (ledgeHeight < PLATFORM_LEDGE_GRAB_HEIGHT_MIN || ledgeHeight > maximumGrabElevation) {
         continue;
       }
 
-      if (this._isDebugLedgeNormallyLandable(ledgeHeight, reachHeight)) {
+      const exceptionalEdgeCatch = this._isExceptionalPlatformEdgeCatch({
+        player,
+        root,
+        ledge,
+        faceDistance,
+        maximumGrabElevation,
+      });
+      if (!exceptionalEdgeCatch && !normalProgressWindow) {
+        continue;
+      }
+      if (!exceptionalEdgeCatch && faceDistance < DEBUG_LEDGE_GRAB_DISTANCE_MIN) {
         continue;
       }
 
-      const score = Math.abs(faceDistance - 0.42)
+      const minimumGrabElevation = reachHeight * PLATFORM_NORMAL_JUMP_REACH_RATIO;
+      if (ledgeHeight <= minimumGrabElevation && !exceptionalEdgeCatch) {
+        continue;
+      }
+
+      const idealFaceDistance = exceptionalEdgeCatch ? 0.08 : 0.42;
+      const score = Math.abs(faceDistance - idealFaceDistance)
         + Math.max(0, Math.abs(lateral) - ledge.halfSpan) * 1.5
-        + Math.abs(ledgeHeight - DEBUG_LEDGE_GRAB_IDEAL_HEIGHT) * 0.15;
+        + Math.abs(ledgeHeight - reachHeight * PLATFORM_LEDGE_IDEAL_REACH_RATIO) * 0.15;
       if (!best || score < best.score) {
-        best = { ledge, lateral, score };
+        best = {
+          ledge,
+          lateral,
+          score,
+          autoClimb: exceptionalEdgeCatch && ledgeHeight <= minimumGrabElevation,
+        };
       }
     }
 
@@ -1894,6 +2193,7 @@ export class Game {
       hangPosition,
       handPosition,
       climbPosition,
+      autoClimb: best.autoClimb,
     });
 
     if (started) {

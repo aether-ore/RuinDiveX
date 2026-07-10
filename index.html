@@ -107,31 +107,78 @@
 
       <section id="pose-debug-panel" class="pose-debug-panel" hidden>
         <header class="pose-debug-header">
-          <h1>Pose Debug</h1>
-          <button data-action="pose-copy">Copy Prompt</button>
-          <button data-action="pose-zero">Zero Pose</button>
-          <button data-action="pose-restore">Restore Key</button>
+          <h1>Debug Tools</h1>
+          <button data-pose-only data-action="pose-copy">Copy Prompt</button>
+          <button data-pose-only data-action="pose-zero">Zero Pose</button>
+          <button data-pose-only data-action="pose-restore">Restore Key</button>
           <button class="close-button" data-action="pose-close">X</button>
         </header>
         <div class="pose-debug-body">
-          <p id="pose-debug-status" class="pose-debug-status">Tilde toggles this editor. World simulation is paused while it is open.</p>
-          <div class="pose-debug-timeline" aria-label="Animation keyframe editor">
-            <label>
-              <span>Animation</span>
-              <select id="pose-debug-animation"></select>
-            </label>
-            <label>
-              <span>Keyframe</span>
-              <select id="pose-debug-keyframe"></select>
-            </label>
-            <div class="pose-debug-key-actions">
-              <button data-action="pose-add-keyframe">New Key</button>
-              <button data-action="pose-delete-keyframe">Delete Key</button>
-            </div>
+          <div class="pose-debug-tabs" role="tablist" aria-label="Debug tool">
+            <button role="tab" aria-selected="true" data-action="pose-debug-tab" data-debug-tab="pose">Pose</button>
+            <button role="tab" aria-selected="false" data-action="pose-debug-tab" data-debug-tab="platforming">Platforming</button>
           </div>
-          <div id="pose-debug-controls" class="pose-debug-controls"></div>
-          <label class="pose-debug-output-label" for="pose-debug-output">Pose prompt</label>
-          <textarea id="pose-debug-output" class="pose-debug-output" readonly></textarea>
+          <div data-debug-view="pose">
+            <p id="pose-debug-status" class="pose-debug-status">Tilde toggles this editor. World simulation is paused while it is open.</p>
+            <div class="pose-debug-timeline" aria-label="Animation keyframe editor">
+              <label>
+                <span>Animation</span>
+                <select id="pose-debug-animation"></select>
+              </label>
+              <label>
+                <span>Keyframe</span>
+                <select id="pose-debug-keyframe"></select>
+              </label>
+              <div class="pose-debug-key-actions">
+                <button data-action="pose-add-keyframe">New Key</button>
+                <button data-action="pose-delete-keyframe">Delete Key</button>
+              </div>
+            </div>
+            <div id="pose-debug-controls" class="pose-debug-controls"></div>
+            <label class="pose-debug-output-label" for="pose-debug-output">Pose prompt</label>
+            <textarea id="pose-debug-output" class="pose-debug-output" readonly></textarea>
+          </div>
+          <div id="platform-debug-view" class="platform-debug-view" data-debug-view="platforming" hidden>
+            <section class="platform-debug-section" aria-labelledby="platform-jump-heading">
+              <h2 id="platform-jump-heading">Jump Physics</h2>
+              <div class="platform-debug-grid">
+                <label>
+                  <span>Jump height</span>
+                  <select id="platform-debug-jump-height">
+                    <option value="normal">1× Normal</option>
+                    <option value="double">2× High Jump</option>
+                    <option value="triple">3× Test Jump</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Gravity</span>
+                  <select id="platform-debug-gravity">
+                    <option value="normal">Normal</option>
+                    <option value="moon">Moon 0.28g</option>
+                  </select>
+                </label>
+              </div>
+              <dl class="platform-debug-metrics">
+                <div><dt>Apex</dt><dd id="platform-debug-apex">1.55</dd></div>
+                <div><dt>Time to apex</dt><dd id="platform-debug-apex-time">0.33s</dd></div>
+                <div><dt>Grab above</dt><dd id="platform-debug-grab-min">1.52</dd></div>
+              </dl>
+            </section>
+            <section class="platform-debug-section" aria-labelledby="platform-block-heading">
+              <h2 id="platform-block-heading">Platform Block</h2>
+              <div class="platform-debug-grid platform-debug-grid-four">
+                <label><span>Width</span><input id="platform-debug-width" type="number" min="0.5" max="12" step="0.25" value="3" /></label>
+                <label><span>Depth</span><input id="platform-debug-depth" type="number" min="0.5" max="12" step="0.25" value="3" /></label>
+                <label><span>Height</span><input id="platform-debug-height" type="number" min="0.25" max="12" step="0.25" value="3" /></label>
+                <label><span>Distance</span><input id="platform-debug-distance" type="number" min="2" max="20" step="0.25" value="5" /></label>
+              </div>
+              <div class="platform-debug-actions">
+                <button data-action="platform-spawn">Spawn Block</button>
+                <button data-action="platform-clear">Clear Blocks</button>
+              </div>
+              <output id="platform-debug-count" class="platform-debug-count">0 blocks</output>
+            </section>
+          </div>
         </div>
       </section>
 

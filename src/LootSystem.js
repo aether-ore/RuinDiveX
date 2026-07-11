@@ -9,6 +9,7 @@ import {
 
 const ITEM_TYPE_KEYS = Object.keys(ITEM_TYPES);
 const RARITY_KEYS = Object.keys(RARITIES);
+const SCRAP_PICKUP_SHAPES = Object.freeze(['bolt', 'screw', 'gear']);
 const MATERIAL_PREFIXES = {
   'Arm Weapon': ['Alloy', 'Cobalt', 'Chrome', 'Tungsten', 'Industrial'],
   'Buster Part': ['Refractor', 'Chrome', 'Cobalt', 'Ancient Circuit', 'Composite'],
@@ -61,33 +62,93 @@ function weightedPick(entries, weightAccessor) {
   return entries[entries.length - 1];
 }
 
+function createMechanicalScrapCore(shape, material) {
+  const core = new THREE.Group();
+  core.name = `mechanicalScrapCore_${shape}`;
+  core.userData.scrapShape = shape;
+
+  const addPart = (geometry, name, position = [0, 0, 0], rotation = [0, 0, 0]) => {
+    const part = new THREE.Mesh(geometry, material);
+    part.name = name;
+    part.position.set(...position);
+    part.rotation.set(...rotation);
+    part.castShadow = true;
+    core.add(part);
+    return part;
+  };
+
+  if (shape === 'bolt') {
+    addPart(new THREE.CylinderGeometry(0.052, 0.052, 0.34, 8), 'scrapBoltShaft', [0, 0, 0], [0, 0, Math.PI / 2]);
+    addPart(new THREE.CylinderGeometry(0.12, 0.12, 0.1, 6), 'scrapBoltHead', [-0.2, 0, 0], [0, 0, Math.PI / 2]);
+    addPart(new THREE.CylinderGeometry(0.09, 0.09, 0.065, 6), 'scrapBoltNut', [0.19, 0, 0], [0, 0, Math.PI / 2]);
+    core.rotation.set(0.28, 0.12, -0.34);
+    core.scale.setScalar(1.2);
+  } else if (shape === 'screw') {
+    addPart(new THREE.CylinderGeometry(0.047, 0.047, 0.3, 8), 'scrapScrewShaft', [-0.015, 0, 0], [0, 0, Math.PI / 2]);
+    addPart(new THREE.CylinderGeometry(0.115, 0.1, 0.085, 10), 'scrapScrewHead', [-0.2, 0, 0], [0, 0, Math.PI / 2]);
+    addPart(new THREE.ConeGeometry(0.062, 0.15, 8), 'scrapScrewTip', [0.205, 0, 0], [0, 0, -Math.PI / 2]);
+    for (let index = 0; index < 4; index += 1) {
+      addPart(
+        new THREE.TorusGeometry(0.064, 0.01, 5, 10),
+        'scrapScrewThread',
+        [-0.055 + index * 0.065, 0, 0],
+        [0, Math.PI / 2, 0],
+      );
+    }
+    core.rotation.set(-0.2, 0.18, 0.4);
+    core.scale.setScalar(1.25);
+  } else {
+    addPart(new THREE.CylinderGeometry(0.105, 0.105, 0.09, 14), 'scrapGearHub', [0, 0, 0], [Math.PI / 2, 0, 0]);
+    addPart(new THREE.TorusGeometry(0.17, 0.045, 7, 18), 'scrapGearRing', [0, 0, 0], [0, 0, 0]);
+    for (let index = 0; index < 10; index += 1) {
+      const angle = index * Math.PI * 2 / 10;
+      addPart(
+        new THREE.BoxGeometry(0.075, 0.095, 0.08),
+        'scrapGearTooth',
+        [Math.cos(angle) * 0.225, Math.sin(angle) * 0.225, 0],
+        [0, 0, angle],
+      );
+    }
+    core.rotation.set(0.16, -0.22, 0.12);
+  }
+
+  return core;
+}
+
 function createPickupMesh(item) {
   const group = new THREE.Group();
   group.name = `lootPickup_${item.id}`;
   group.userData.item = item;
+  group.userData.pickupKind = item.pickupKind ?? 'item';
 
   const rarity = RARITIES[item.rarity];
+  const glow = item.glowColor ?? rarity.glow;
+  const isMaterial = item.pickupKind === 'material';
   const coreMaterial = new THREE.MeshStandardMaterial({
-    color: rarity.glow,
-    emissive: rarity.glow,
-    emissiveIntensity: 0.55,
-    roughness: 0.35,
-    metalness: 0.08,
+    color: isMaterial ? 0xa7afb2 : glow,
+    emissive: glow,
+    emissiveIntensity: isMaterial ? 0.14 : 0.55,
+    roughness: isMaterial ? 0.42 : 0.35,
+    metalness: isMaterial ? 0.72 : 0.08,
   });
 
   const haloMaterial = new THREE.MeshStandardMaterial({
-    color: rarity.glow,
-    emissive: rarity.glow,
+    color: glow,
+    emissive: glow,
     emissiveIntensity: 0.85,
     roughness: 0.5,
     transparent: true,
-    opacity: 0.5,
+    opacity: isMaterial ? 0.32 : 0.5,
     side: THREE.DoubleSide,
   });
 
-  const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.18, 0), coreMaterial);
-  core.name = 'lootCore';
-  core.castShadow = true;
+  const core = isMaterial
+    ? createMechanicalScrapCore(item.scrapShape ?? 'bolt', coreMaterial)
+    : new THREE.Mesh(new THREE.OctahedronGeometry(0.18, 0), coreMaterial);
+  if (!isMaterial) {
+    core.name = 'lootCore';
+    core.castShadow = true;
+  }
 
   const halo = new THREE.Mesh(new THREE.TorusGeometry(0.27, 0.018, 8, 24), haloMaterial);
   halo.name = 'lootRarityHalo';
@@ -105,10 +166,25 @@ function createPickupMesh(item) {
   return group;
 }
 
+function disposePickupObject(object) {
+  const geometries = new Set();
+  const materials = new Set();
+  object?.traverse?.((child) => {
+    if (child.geometry) geometries.add(child.geometry);
+    const childMaterials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of childMaterials) {
+      if (material) materials.add(material);
+    }
+  });
+  for (const geometry of geometries) geometry.dispose?.();
+  for (const material of materials) material.dispose?.();
+}
+
 export class LootSystem {
   constructor(scene) {
     this.scene = scene;
     this.pickups = [];
+    this.nextMaterialPickupId = 1;
   }
 
   rollRarity(enemy = null) {
@@ -201,7 +277,7 @@ export class LootSystem {
     }
 
     const item = this.generateItem(enemy?.level ?? 1, { enemy });
-    const position = enemy.root.position.clone();
+    const position = (enemy.deathDropPosition ?? enemy.root.position).clone();
     position.y += 0.35;
     position.x += randomBetween(-0.45, 0.45);
     position.z += randomBetween(-0.45, 0.45);
@@ -216,8 +292,33 @@ export class LootSystem {
     object.userData.life = 0;
 
     this.scene.add(object);
-    this.pickups.push({ item, object, collected: false });
+    this.pickups.push({
+      item,
+      object,
+      kind: item.pickupKind ?? 'item',
+      collected: false,
+    });
     return object;
+  }
+
+  createMaterialPickup(material, quantity, position, source = null) {
+    const amount = Math.max(1, Math.trunc(quantity) || 1);
+    const pickupIndex = this.nextMaterialPickupId++;
+    const item = {
+      id: `reaverbot-material-${material.id}-${pickupIndex}`,
+      pickupKind: 'material',
+      scrapShape: SCRAP_PICKUP_SHAPES[(pickupIndex - 1) % SCRAP_PICKUP_SHAPES.length],
+      material,
+      materialId: material.id,
+      quantity: amount,
+      source: source ? { ...source } : null,
+      name: `${material.name}${amount > 1 ? ` +${amount}` : ''}`,
+      category: 'Crafting Material',
+      rarity: 'scrap',
+      color: material.color ?? RARITIES.scrap.color,
+      glowColor: new THREE.Color(material.color ?? RARITIES.scrap.color).getHex(),
+    };
+    return this.createPickup(item, position);
   }
 
   update(dt, player, inventory) {
@@ -237,10 +338,18 @@ export class LootSystem {
 
       const distance = pickup.object.position.distanceTo(playerPosition);
       if (distance <= pickupRadius) {
-        if (inventory.addItem(pickup.item)) {
+        const accepted = pickup.kind === 'material'
+          ? Boolean(inventory.addMaterial(
+            pickup.item.material,
+            pickup.item.quantity,
+            pickup.item.source,
+          ))
+          : inventory.addItem(pickup.item);
+        if (accepted) {
           pickup.collected = true;
           pickup.object.visible = false;
           this.scene.remove(pickup.object);
+          disposePickupObject(pickup.object);
           collected.push(pickup.item);
         }
       }
@@ -256,9 +365,11 @@ export class LootSystem {
   clear() {
     for (const pickup of this.pickups) {
       this.scene.remove(pickup.object);
+      disposePickupObject(pickup.object);
     }
 
     this.pickups.length = 0;
+    this.nextMaterialPickupId = 1;
   }
 
   _pickLegendaryTemplate(type, rarity) {

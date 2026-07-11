@@ -6,6 +6,7 @@ const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
 const tempVectorE = new THREE.Vector3();
+const tempVectorF = new THREE.Vector3();
 const AIM_RECENTER_RESPONSIVENESS = 18;
 const TANK_TURN_YAW_RESPONSIVENESS = 3.8;
 const TANK_TURN_FOLLOW_RESPONSIVENESS = 6.2;
@@ -109,8 +110,18 @@ export class CameraController {
     const rawTarget = typeof player.getCameraFocusPosition === 'function'
       ? player.getCameraFocusPosition(tempVectorE)
       : tempVectorE.copy(root.position);
-    const target = tempVectorE.copy(rawTarget);
-    if (!this.hasSmoothedTarget || dt >= 1) {
+    const powerKnockbackCameraAnchorY = player.getPowerKnockbackCameraAnchorY?.();
+    const powerKnockbackCameraActive = player.isPowerKnockbackActive?.() === true
+      && Number.isFinite(powerKnockbackCameraAnchorY);
+    const target = tempVectorF.copy(rawTarget);
+    if (powerKnockbackCameraActive) {
+      // Powerful knockback can lower the invisible player root beneath the
+      // floor until the animated back makes contact. Hold the camera at the
+      // takeoff elevation and aim down at the body instead of following that
+      // hidden root into the surface.
+      this.smoothedTargetY = powerKnockbackCameraAnchorY;
+      this.hasSmoothedTarget = true;
+    } else if (!this.hasSmoothedTarget || dt >= 1) {
       this.smoothedTargetY = rawTarget.y;
       this.hasSmoothedTarget = true;
     } else {
@@ -130,9 +141,12 @@ export class CameraController {
       .addScaledVector(forward, -this.distance);
     desiredPosition.y += this.height;
 
-    const lookTarget = tempVectorA.copy(target)
-      .addScaledVector(forward, this.lookAhead);
-    lookTarget.y += this.lookHeight;
+    const lookTarget = tempVectorA.copy(powerKnockbackCameraActive ? rawTarget : target)
+      .addScaledVector(
+        forward,
+        powerKnockbackCameraActive ? this.lookAhead * 0.3 : this.lookAhead,
+      );
+    lookTarget.y += powerKnockbackCameraActive ? 0.12 : this.lookHeight;
 
     const followResponsiveness = tankTurnActive
       ? TANK_TURN_FOLLOW_RESPONSIVENESS

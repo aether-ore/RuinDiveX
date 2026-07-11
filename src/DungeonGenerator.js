@@ -702,7 +702,7 @@ export class DungeonGenerator {
       solidZones,
     );
     this._addCeilings(group, tiles, materials, openAirTileKeys, rooms);
-    this._addWalls(group, tiles, materials, openAirTileKeys);
+    const aerialBoundaryZones = this._addWalls(group, tiles, materials, openAirTileKeys);
     this._addInvisibleOpenAirBounds(group, tiles, materials, openAirTileKeys);
     const doors = this._addDoors(group, rooms, materials, tiles, connectionPlans);
     const criticalDoorValidation = this._validateCriticalDoorChokepoints({
@@ -822,6 +822,7 @@ export class DungeonGenerator {
       safeInteractables: landmarks.safeInteractables,
       safeZones: this._createRoomZones(rooms, 'hub').concat(this._createRoomZones(rooms, 'camp')),
       solidZones,
+      aerialBoundaryZones,
       encounters,
       traps: this._createTrapZones(rooms, floorTiles, trapVisualsByRoom),
       conveyors: this._createConveyorTileZones(floorTiles),
@@ -8598,6 +8599,29 @@ export class DungeonGenerator {
     for (const run of runs) {
       this._addBoundaryWallRun(group, run, materials);
     }
+
+    // Keep flight collision data separate from grounded solid zones. Aerial
+    // navigation ignores floor gaps, ledges, and railings, but still needs the
+    // exact boundary-wall silhouette so a direct pursuit cannot pass through
+    // the dungeon shell.
+    return runs.map((run) => {
+      const lengthWorld = run.lengthTiles * this.tileSize;
+      return {
+        id: `aerialBoundary_${run.facadeId}`,
+        label: 'Dungeon boundary wall',
+        obstacleKind: 'boundaryWall',
+        position: new THREE.Vector3(
+          run.horizontal ? ((run.start + run.end) * 0.5) * this.tileSize : run.line * this.tileSize,
+          RUIN_WALL_HEIGHT * 0.5,
+          run.horizontal ? run.line * this.tileSize : ((run.start + run.end) * 0.5) * this.tileSize,
+        ),
+        halfWidth: run.horizontal ? lengthWorld * 0.5 : RUIN_WALL_THICKNESS * 0.5,
+        halfDepth: run.horizontal ? RUIN_WALL_THICKNESS * 0.5 : lengthWorld * 0.5,
+        verticalHalfHeight: RUIN_WALL_HEIGHT * 0.5,
+        allowFlyOver: false,
+        wallFacadeId: run.facadeId,
+      };
+    });
   }
 
   _collectBoundaryWallRuns(tiles, openAirTileKeys) {
@@ -10322,9 +10346,18 @@ export class DungeonGenerator {
         .filter((tile) => !['hub', 'camp', 'entrance'].includes(tile.type));
       const startTile = this._findRoomWalkabilityStartTile(room, allRoomTiles);
       const reachable = this._createReachableFloorTileKeySet(startTile, navigableFloorTiles);
-      const candidates = allRoomTiles
+      const reachableCandidates = allRoomTiles
         .filter((tile) => reachable.has(this._getFloorTileGraphKey(tile)))
         .filter((tile) => tile.surface !== 'industrialRamp' && tile.surface !== 'jumpPlatform');
+      const halfRoomWidth = Math.max(1, Math.floor(room.width / 2));
+      const halfRoomDepth = Math.max(1, Math.floor(room.depth / 2));
+      // Do not use the outer two-tile corner wedges. The previous farthest-
+      // first ordering made these exact corners the default encounter layout.
+      const candidates = reachableCandidates.filter((tile) => {
+        const xEdgeInset = halfRoomWidth - Math.abs(tile.x - room.x);
+        const zEdgeInset = halfRoomDepth - Math.abs(tile.z - room.z);
+        return !(xEdgeInset <= 1 && zEdgeInset <= 1);
+      });
       if (room.type === 'keycard') {
         const stairLine = candidates
           .filter((tile) => (
@@ -10342,6 +10375,7 @@ export class DungeonGenerator {
       }
       const surfaceRank = new Map(surfacePreferences.map((surface, index) => [surface, index]));
       const chosen = [];
+      const chosenTiles = [];
       const used = new Set();
 
       candidates.sort((a, b) => {
@@ -10351,23 +10385,45 @@ export class DungeonGenerator {
           return rankA - rankB;
         }
 
-        const distanceA = Math.abs(a.x - room.x) + Math.abs(a.z - room.z);
-        const distanceB = Math.abs(b.x - room.x) + Math.abs(b.z - room.z);
-        return distanceB - distanceA;
+        const normalizedRadiusA = Math.hypot(
+          (a.x - room.x) / halfRoomWidth,
+          (a.z - room.z) / halfRoomDepth,
+        );
+        const normalizedRadiusB = Math.hypot(
+          (b.x - room.x) / halfRoomWidth,
+          (b.z - room.z) / halfRoomDepth,
+        );
+        // Favor a readable interior ring instead of stacking every unit on the
+        // exact center or pushing all of them against the room boundary.
+        return Math.abs(normalizedRadiusA - 0.46) - Math.abs(normalizedRadiusB - 0.46);
       });
 
       const chooseFrom = (pool, limit) => {
-        for (const tile of pool) {
-          if (chosen.length >= limit) {
-            break;
-          }
-          const key = floorTileKey(tile.x, tile.z, tile.level ?? 0);
-          if (used.has(key)) {
-            continue;
-          }
+        const tryChoose = (respectSpacing) => {
+          for (const tile of pool) {
+            if (chosen.length >= limit) {
+              break;
+            }
+            const key = floorTileKey(tile.x, tile.z, tile.level ?? 0);
+            if (used.has(key)) {
+              continue;
+            }
+            if (respectSpacing && chosenTiles.some((entry) => (
+              Math.abs((entry.elevation ?? 0) - (tile.elevation ?? 0)) < 0.8
+              && Math.hypot(entry.x - tile.x, entry.z - tile.z) < 1.8
+            ))) {
+              continue;
+            }
 
-          used.add(key);
-          chosen.push(this._floorTileToWorld(tile));
+            used.add(key);
+            chosenTiles.push(tile);
+            chosen.push(this._floorTileToWorld(tile));
+          }
+        };
+
+        tryChoose(true);
+        if (chosen.length < limit) {
+          tryChoose(false);
         }
       };
       const groundCandidates = candidates.filter((tile) => Math.abs(tile.elevation ?? 0) <= 0.6);
@@ -10384,11 +10440,13 @@ export class DungeonGenerator {
     const points = [];
     const tiles = floorSource;
     const offsets = [
-      [-1, -1],
-      [1, -1],
-      [-1, 1],
-      [1, 1],
       [0, 0],
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+      [0, 1],
+      [-2, 0],
+      [2, 0],
     ];
 
     for (const [dx, dz] of offsets) {
@@ -10697,6 +10755,10 @@ export class DungeonGenerator {
         } else if ((enemyEffects?.countMultiplier ?? 1) < 0.95 && roster.length > 2) {
           roster.pop();
         }
+        const reinforcement = definition.isBoss
+          ? 'fast'
+          : roster.find((type) => type === 'fast' || type === 'basic' || type === 'horokko') ?? 'basic';
+        roster.push(reinforcement);
         roster.sort((left, right) => Number(left === 'ranged') - Number(right === 'ranged'));
 
         return {

@@ -41,21 +41,30 @@ Implemented arm behavior examples include arcing explosive `Grenade Arm` shots, 
 
 Dungeon encounters now turn their roster intent, room archetype, room flavor, and encounter slot into a reproducible Reaverbot genome. Each generated enemy receives a compatible body plan, weapon, defense, weak point, behavior package, proportions, and behavior-linked palette. A validation pass rejects incompatible or unfair combinations before the enemy is built.
 
-The nine behavior archetypes are:
+The ten behavior archetypes are:
 
 - `Pursuer`: fast ram, jaw, or claw hunter with punishable recovery.
 - `Shield Sentinel`: guards behind frontal protection, opens to attack, then exposes its linked weak point.
 - `Pouncer`: circles, marks a predicted landing point, commits to a leap or shock slam, and exposes its belly during recovery.
 - `Artillery Walker`: maintains range and fires pulse shells, lobbed mortars, or cluster explosives.
 - `Zone Controller`: uses flamethrowers, mine-like explosives, or slow electric orbs that pulse repeatedly near the player.
+- `Tractor Controller`: races between nearby allies, evades MegaMan, abducts one Reaverbot beneath its horseshoe magnet, and throws that machine near the player instead of attacking directly.
 - `Aerial Bomber`: floats inward behind a cycling shell, exposes its core during a countdown, and self-destructs at close range.
 - `Pack Hunter`: flanks and attacks only while another member of its encounter remains nearby.
 - `Ruin Duelist`: sidesteps at close range and alternates guarded positioning with committed melee, piston, or beam attacks.
 - `Rotor Hunter`: advances behind a rotating plate while its shared blade/flail assembly spins, alternating the guarded face with an opposite counterweight weak point.
 
-Generated silhouettes include bipeds, low bipeds, quadrupeds, crawlers, hoppers, tripods, hovering bells, and winged flyers. Their low-poly wedges, cones, segmented limbs, plates, spires, and circuit inlays follow the supplied PlayStation-era shape references. Archetype palettes remain consistent—ochre pursuers, blue-gray sentinels, olive pouncers, violet artillery, teal controllers, ivory bombers, sand-colored packs, burgundy duelists, and copper rotor hunters—while saturated red is reserved for the single dominant Reaverbot eye.
+Close-range weapon modules now carry a deliberately heavier combat contract. Claw carriers mount a Reaverbot-sized two-link hydraulic arm, extend it into MegaMan's lane for three horizontal or vertical swipes, drag their chassis forward under its weight, and vault low obstacles along collision-checked arcs. Jaw carriers are quadruped-only armored hunters that circle, strafe, hold a two-piece bear-trap mouth open, and hop through three red-blinking shockwave bites. All melee-tagged generations receive substantial armor and extra health, while Rotor Hunter blades deal contact damage throughout positioning, telegraph, attack, and recovery rather than only during a charge.
+
+Air navigation is fully three-dimensional. Flyers ignore floor walkability, ledges, and railings, pursue along the most direct clear route, and climb over or route around actual walls, closed doors, platforms, and solid fixtures. Tractor Controllers use the same clearance system for both their own chassis and the full generated silhouette of their captive. A successful player hit briefly stalls their evasive flight; hitting one during an active abduction immediately drops and heavily damages both machines, leaves the Controller helpless on the floor, then lets a survivor relaunch. Blocked lift, carry, or throw paths are rejected before geometry can pass through the dungeon.
+
+Generated silhouettes include bipeds, low bipeds, quadrupeds, crawlers, hoppers, tripods, hovering bells, and winged flyers. Spring Hoppers never skate across the floor: their coil legs compress into ballistic bounces, clear obstacles, and climb onto raised platforms. Their low-poly wedges, cones, segmented limbs, plates, spires, and circuit inlays follow the supplied PlayStation-era shape references. Archetype palettes remain consistent—ochre pursuers, blue-gray sentinels, olive pouncers, violet artillery, teal zone controllers, lavender tractor controllers, ivory bombers, sand-colored packs, burgundy duelists, and copper rotor hunters—while saturated red is reserved for the single dominant Reaverbot eye.
+
+Enemy pacing and room participation share a common navigation contract. Procedural movement is 22% faster than the previous baseline, curated enemies are roughly 25–32% faster, and archetype-relative pacing remains intact. Encounter rosters spawn on spaced interior-room positions rather than corner tiles; authored or legacy corner points are pulled inward and revalidated for walkability and full-body clearance. Encounter enemies remember their arena center, progressively bias inward near its edges, probe their full footprint before entering walls or ledges, sidestep partial obstructions, and recover toward a verified open point instead of repeatedly sticking to the same wall.
 
 Every generated weak point is now selected from a strict defense-specific pairing table, so it has a corresponding guard and a readable opening. Leg joints sit behind enlarged forward side plates and become lock-on targets only when those plates retract during recovery; eye shutters open with attacks; rear batteries reward flanking; and rotor counterweights appear only on the side opposite their shield. Defensive geometry intercepts projectile hits before weak-point bonus damage is evaluated. Lock-on and homing can aim at exposed weak points directly, and enough weak-point damage permanently breaks the linked defense with a module-specific consequence. Directional shields can fully nullify frontal buster shots, while flanking, attack windows, recovery windows, melee, and explosions provide explicit counters. Progression-critical bosses and keycard carriers are never assigned the self-destruct archetype.
+
+Procedural Reaverbots also carry a six-entry salvage profile derived from their behavior, chassis, red eye, weapon, defense, and weak point. Normal defeats guarantee at least one corresponding physical crafting-material pickup, elites guarantee at least two different materials, and breaking a weak point greatly improves its specialized material chance. Material pickups use steel bolt, screw, and gear silhouettes so they remain distinct from glowing refractor crystals. These materials stack separately from equipment and retain their visible source—for example, Spring Hoppers yield Tempered Jump Springs and Pulse Cannon users can yield Revolving Pulse Barrels. The complete source tables, drop chances, and future recipe examples are in [the Reaverbot Salvage Design Guide](docs/REAVERBOT_SALVAGE_DESIGN.md).
 
 ## Expedition Loop
 
@@ -138,6 +147,7 @@ window.spawnReaverbot({ archetypeId: 'pouncer', seed: 'demo-pouncer' });
 window.spawnReaverbot({ archetypeId: 'zoneController', seed: 'demo-orb', elite: true });
 window.spawnCuratedReaverbot('horokko');
 window.getReaverbotCatalog();
+window.getReaverbotSalvageCatalog();
 window.generateLoot('swordArm', 'legendary');
 window.generateLoot('powerRaiser', 'prototype');
 window.generateLoot('kevlarJacket', 'tuned');

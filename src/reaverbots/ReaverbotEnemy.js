@@ -4,13 +4,51 @@ import {
   animateReaverbotVisual,
   createReaverbotVisual,
 } from './ReaverbotVisualFactory.js';
+import { createReaverbotSalvageProfile } from './ReaverbotSalvageCatalog.js';
 import { SeededRandom } from './SeededRandom.js';
 
 const tempA = new THREE.Vector3();
 const tempB = new THREE.Vector3();
 const tempC = new THREE.Vector3();
+const tempD = new THREE.Vector3();
+const tempE = new THREE.Vector3();
+const tempF = new THREE.Vector3();
+const tempG = new THREE.Vector3();
+const tempH = new THREE.Vector3();
+const tempI = new THREE.Vector3();
+const tempBounds = new THREE.Box3();
 const tempForward = new THREE.Vector3();
 const WORLD_FORWARD = new THREE.Vector3(0, 0, 1);
+const RUSH_WARNING_COLOR_HEX = 0xff2020;
+const RUSH_WARNING_COLOR = new THREE.Color(RUSH_WARNING_COLOR_HEX);
+const CHARGE_INITIATION_RANGE = 10.5;
+const CHARGE_MAX_TRAVEL_DISTANCE = 12.5;
+const CHARGE_TRACK_LOCK_PROGRESS = 0.7;
+const RUSH_WARNING_MIN_RATE = 2.2;
+const RUSH_WARNING_MAX_RATE = 10.5;
+const TRACTOR_BEAM_COLOR = 0x68fff2;
+const TRACTOR_CARGO_GAP = 0.58;
+const TRACTOR_CARGO_ROOT_LIFT = 1.35;
+const TRACTOR_PURSUIT_SPEED_SCALE = 3.15;
+const TRACTOR_BEAM_TRACK_SPEED_SCALE = 2.15;
+const TRACTOR_FLIP_WINDUP_DURATION = 0.38;
+const TRACTOR_ZIGZAG_SPEED_SCALE = 5.35;
+const TRACTOR_ZIGZAG_MIN_INTERVAL = 0.08;
+const TRACTOR_ZIGZAG_MAX_INTERVAL = 0.12;
+const TRACTOR_ZIGZAG_MIN_AMPLITUDE = 1.05;
+const TRACTOR_ZIGZAG_MAX_AMPLITUDE = 1.45;
+const TRACTOR_ZIGZAG_TIMEOUT = 1.65;
+const TRACTOR_PLAYER_CAPTURE_RADIUS = 0.95;
+const TRACTOR_PLAYER_THROW_DISTANCE = 4.4;
+const TRACTOR_PLAYER_IMPACT_RADIUS = 1.8;
+const TRACTOR_PLAYER_AVOID_RADIUS = 5.8;
+const TRACTOR_TAG_PAUSE_DURATION = 0.24;
+const TRACTOR_CRASH_FALL_DURATION = 0.52;
+const TRACTOR_CRASH_GROUNDED_DURATION = 1.35;
+const TRACTOR_CRASH_RELAUNCH_DURATION = 0.62;
+const COIL_BOUNCE_DURATION = 0.58;
+const COIL_BOUNCE_MIN_HEIGHT = 2.35;
+const CLAW_VAULT_DURATION = 0.54;
 const PASSIVE_DEFENSES = new Set([
   'armoredSkull',
   'armoredBack',
@@ -131,6 +169,8 @@ export class ReaverbotEnemy extends Enemy {
     this.root.add(this.visual.root);
     this.root.userData.enemy = this;
     this.root.userData.reaverbotGenome = genome;
+    this.salvageProfile = createReaverbotSalvageProfile(genome);
+    this.root.userData.reaverbotSalvageProfile = this.salvageProfile;
     this.healthBar.position.y = this.collisionHeight + 0.42;
 
     this.aiRandom = new SeededRandom(`${genome.seed}:runtime`);
@@ -152,7 +192,51 @@ export class ReaverbotEnemy extends Enemy {
       attackDirection: new THREE.Vector3(0, 0, 1),
       commitStart: new THREE.Vector3(),
       telegraphMarker: null,
-      packSupported: true,
+      commitDistance: 0,
+      warningPhase: 0,
+      warningBlinkRate: 0,
+      warningIntensity: 0,
+      comboStrikesFired: 0,
+      jawHopTravel: [0, 0, 0],
+      contactCooldown: 0,
+      tractorTarget: null,
+      tractorTargetKind: null,
+      tractorLiftStart: new THREE.Vector3(),
+      tractorBeamActive: false,
+      tractorBeamIntensity: 0,
+      tractorBeamLength: 3.4,
+      tractorPathFailureTime: 0,
+      tractorCargoTopOffset: 0,
+      tractorApproachPhase: 'choose',
+      tractorApproachTimer: 0,
+      tractorApproachStart: new THREE.Vector3(),
+      tractorApproachDestination: new THREE.Vector3(),
+      tractorZigzagSign: this.aiRandom.chance(0.5) ? 1 : -1,
+      tractorZigzagSwitchTimer: 0,
+      tractorZigzagInterval: TRACTOR_ZIGZAG_MIN_INTERVAL,
+      tractorZigzagAmplitude: TRACTOR_ZIGZAG_MIN_AMPLITUDE,
+      tractorFlipDirection: this.aiRandom.chance(0.5) ? 1 : -1,
+      tractorBeamPoint: new THREE.Vector3(),
+      controllerTagPause: 0,
+      tractorCrashPhase: null,
+      tractorCrashTimer: 0,
+      tractorCrashStart: new THREE.Vector3(),
+      tractorCrashLanding: new THREE.Vector3(),
+      coilBounceActive: false,
+      coilBounceTime: 0,
+      coilBounceCooldown: 0,
+      coilBounceDuration: COIL_BOUNCE_DURATION,
+      coilBounceHeight: COIL_BOUNCE_MIN_HEIGHT,
+      coilBounceStart: new THREE.Vector3(),
+      coilBounceLanding: new THREE.Vector3(),
+      clawDragSpeed: 0,
+      clawVaultActive: false,
+      clawVaultTime: 0,
+      clawVaultDuration: CLAW_VAULT_DURATION,
+      clawVaultHeight: 0,
+      clawVaultCooldown: 0,
+      clawVaultStart: new THREE.Vector3(),
+      clawVaultLanding: new THREE.Vector3(),
       alerted: false,
     };
     this.weakPointDamage = 0;
@@ -189,6 +273,10 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   update(dt, game) {
+    // Damage is resolved outside the enemy update loop. Retaining the current
+    // game reference lets an interrupted tractor beam resolve both machines
+    // immediately instead of waiting a frame with stale ownership.
+    this._runtimeGame = game;
     if (this.dead) {
       this._removeTelegraphMarker();
     }
@@ -197,6 +285,7 @@ export class ReaverbotEnemy extends Enemy {
 
     if (!this.dead
       && !game.player.dead
+      && !this.isExternalMotionActive?.()
       && !game.dungeonController?.isPlayerInSafeZone?.()) {
       this._updateEliteAffix(dt, game);
     }
@@ -256,6 +345,7 @@ export class ReaverbotEnemy extends Enemy {
 
     if (dealt > 0) {
       this.brain.alerted = true;
+      this._handleControllerTagged(meta);
     }
 
     if (meta.weakPointHit && dealt > 0 && !this.weakPointBroken) {
@@ -266,6 +356,130 @@ export class ReaverbotEnemy extends Enemy {
     }
 
     return dealt;
+  }
+
+  _handleControllerTagged(meta) {
+    if (this.genome.archetypeId !== 'tractorController'
+      || meta.statusTick
+      || meta.tractorCrashSelfDamage) {
+      return;
+    }
+
+    const game = this._runtimeGame;
+    const damageSource = meta.source ?? null;
+    const taggedByPlayer = damageSource === game?.player
+      || damageSource?.owner === game?.player
+      || damageSource?.source === game?.player
+      || meta.playerOwnedAttack === true;
+    if (!taggedByPlayer) return;
+
+    const brain = this.brain;
+    if (!brain.tractorCrashPhase) {
+      brain.controllerTagPause = Math.max(
+        brain.controllerTagPause,
+        TRACTOR_TAG_PAUSE_DURATION,
+      );
+    }
+
+    const target = brain.tractorTarget;
+    const interruptibleAbduction = (brain.state === 'telegraph' || brain.state === 'commit')
+      && target?.hasExternalControl?.(this);
+    if (!interruptibleAbduction) return;
+
+    brain.controllerTagPause = 0;
+    if (brain.tractorTargetKind === 'player') {
+      // Tagging a solo Controller is the player's escape valve. MegaMan is
+      // dropped through the same collision-checked release path, while the
+      // destabilized Controller falls and must relaunch before it can try
+      // another beam. Enemy-cargo collision damage never routes through the
+      // Player object.
+      this._releaseTractorTarget('controller-tagged-during-player-abduction', game);
+      if (!this.dead) this._beginTractorCrash(game);
+      return;
+    }
+    const cargoDamage = Math.max(
+      18,
+      (target.stats?.maxHealth ?? target.health ?? 30) * 0.42,
+      this.stats.damage * 3.2,
+    );
+    if (game?.damageEnemy) {
+      game.damageEnemy(target, cargoDamage, {
+        source: this,
+        attackKind: 'tractorAbductionCrash',
+        directHit: true,
+        unblockable: true,
+        armorPierce: 999,
+        powerfulKnockback: true,
+      });
+    } else if (!target.dead) {
+      target.takeDamage?.(cargoDamage, {
+        source: this,
+        attackKind: 'tractorAbductionCrash',
+        directHit: true,
+        unblockable: true,
+        armorPierce: 999,
+      });
+    }
+
+    // Release after applying the collision damage so a lethal cargo hit is
+    // resolved at its actual suspended position. Survivors then fall from the
+    // magnet through the existing collision-checked release path.
+    this._releaseTractorTarget('controller-tagged-during-abduction', game);
+
+    if (this.dead) return;
+    const controllerCrashDamage = Math.max(16, this.stats.maxHealth * 0.38);
+    if (game?.damageEnemy) {
+      game.damageEnemy(this, controllerCrashDamage, {
+        source: game.player,
+        attackKind: 'tractorAbductionCrash',
+        directHit: true,
+        unblockable: true,
+        armorPierce: 999,
+        tractorCrashSelfDamage: true,
+      });
+    } else {
+      super.takeDamage(controllerCrashDamage, {
+        directHit: true,
+        unblockable: true,
+        armorPierce: 999,
+      });
+    }
+
+    if (!this.dead) {
+      this._beginTractorCrash(game);
+    }
+  }
+
+  _beginTractorCrash(game) {
+    const brain = this.brain;
+    this._removeTelegraphMarker();
+    this._resetTractorApproach();
+    brain.tractorCrashPhase = 'falling';
+    brain.tractorCrashTimer = 0;
+    brain.tractorCrashStart.copy(this.root.position);
+    brain.tractorCrashLanding.copy(this.root.position);
+    brain.tractorCrashLanding.y = game?.dungeonController?.getSurfaceElevationAt?.(
+      brain.tractorCrashLanding,
+    ) ?? game?.player?.root?.position?.y ?? 0;
+    brain.state = 'crash';
+    brain.stateTime = 0;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.tractorBeamActive = false;
+    brain.tractorBeamIntensity = 0;
+    this.knockback.set(0, 0, 0);
+    game?.addParticleBurst?.(this.root.position, TRACTOR_BEAM_COLOR, 18, 0.16);
+    game?.addHitEffect?.(this.root.position, TRACTOR_BEAM_COLOR, 0.9, { absolute: true });
+  }
+
+  shouldIgnoreGroundConstraint() {
+    return super.shouldIgnoreGroundConstraint()
+      || Boolean(this.brain?.tractorCrashPhase)
+      || Boolean(this.brain?.coilBounceActive)
+      || Boolean(this.brain?.clawVaultActive)
+      || (this.genome.body.planId === 'hopper'
+        && this.brain?.state === 'commit'
+        && this.genome.modules.weapon.attackKind === 'pounce');
   }
 
   modifyDamageTaken(amount, meta = {}) {
@@ -373,6 +587,7 @@ export class ReaverbotEnemy extends Enemy {
 
   onDeath(game, meta = {}) {
     this._removeTelegraphMarker();
+    this._releaseTractorTarget('controller-death', game);
     if (this.affix?.id === 'explosiveCore' && !meta.selfDestruct) {
       game.addExplosion(this.root.position, this.stats.damage * 2.2, 2.25, this.affix.color, { source: this });
     }
@@ -386,6 +601,8 @@ export class ReaverbotEnemy extends Enemy {
 
   dispose() {
     this._removeTelegraphMarker();
+    this._releaseTractorTarget('controller-dispose');
+    this.clearExternalMotion?.('dispose');
     const geometries = new Set();
     const materials = new Set(Object.values(this.visual?.materials ?? {}));
     this.root?.traverse?.((object) => {
@@ -412,11 +629,15 @@ export class ReaverbotEnemy extends Enemy {
     }
 
     if (game.dungeonController?.isPlayerInSafeZone?.() || game.player.dead) {
+      this._releaseTractorTarget('safe-zone', game);
+      brain.tractorBeamActive = false;
       brain.moving = false;
       this._updateExposureAndDefense();
       this._animateVisual(dt);
       return { handled: true, moving: false };
     }
+
+    this._updatePersistentWeaponContact(dt, game);
 
     if (this._isControlLocked() || this.hitStopTimer > 0) {
       brain.moving = false;
@@ -425,12 +646,17 @@ export class ReaverbotEnemy extends Enemy {
       return { handled: true, moving: false };
     }
 
+    if (this.genome.archetypeId === 'tractorController') {
+      return this._updateTractorController(dt, game);
+    }
+
     tempA.copy(game.player.root.position).sub(this.root.position).setY(0);
     const distance = tempA.length();
     if (distance > 0.001) tempA.divideScalar(distance);
     else tempA.copy(WORLD_FORWARD);
 
-    if (brain.state !== 'commit' || !['charge', 'pounce'].includes(this.genome.modules.weapon.attackKind)) {
+    if (brain.state !== 'commit'
+      || !['charge', 'pounce', 'clawCombo'].includes(this.genome.modules.weapon.attackKind)) {
       this._turnToward(tempA, dt, this.genome.behavior.turnRate);
     }
 
@@ -445,16 +671,16 @@ export class ReaverbotEnemy extends Enemy {
     }
 
     this._updateExposureAndDefense();
-    this._updateTelegraphMarker(game);
     this._animateVisual(dt);
+    this._updateTelegraphMarker(game);
     return { handled: true, moving: brain.moving, moveAmount: brain.speedRatio };
   }
 
   _updatePositionState(dt, game, toPlayer, distance) {
     const brain = this.brain;
     const archetype = this.genome.archetypeId;
+    const attackKind = this.genome.modules.weapon.attackKind;
     brain.cooldown = Math.max(0, brain.cooldown - dt * this._getStatusAttackRateMultiplier());
-    brain.packSupported = this._hasPackSupport(game);
 
     const aggroRange = this.genome.behavior.aggroRange ?? 14;
     if (!brain.alerted && distance > aggroRange) {
@@ -466,12 +692,21 @@ export class ReaverbotEnemy extends Enemy {
 
     let mode = 'hold';
     const preferred = this.genome.behavior.preferredRange;
-    if (archetype === 'pursuer') {
+    if (archetype === 'packHunter') {
+      mode = 'rearFlank';
+    } else if (attackKind === 'jawCombo') {
+      // Jaw carriers behave like vicious mechanical dogs regardless of their
+      // broader spawn role: close fast, then strafe and hop in a tight circle.
+      mode = distance > Math.max(2.65, preferred + 0.35) ? 'approach' : 'jawOrbit';
+    } else if (archetype === 'pursuer') {
       mode = distance > Math.max(1.15, preferred) ? 'approach' : 'hold';
     } else if (archetype === 'shieldSentinel') {
       mode = 'hold';
     } else if (archetype === 'pouncer') {
-      mode = distance < 3 ? 'retreat' : distance > 6.1 ? 'approach' : 'orbit';
+      const pounceApproachRange = this.genome.modules.weapon.attackKind === 'pounce'
+        ? Math.max(6.1, this.stats.attackRange - 0.35)
+        : 6.1;
+      mode = distance < 3 ? 'retreat' : distance > pounceApproachRange ? 'approach' : 'orbit';
     } else if (archetype === 'artillery') {
       mode = distance < 3.7 ? 'retreat' : distance > preferred + 1.1 ? 'approachSlow' : 'orbitSlow';
     } else if (archetype === 'zoneController') {
@@ -480,47 +715,124 @@ export class ReaverbotEnemy extends Enemy {
       mode = distance > 1.6 ? 'approach' : 'orbit';
     } else if (archetype === 'aerialBomber') {
       mode = 'approachSlow';
-    } else if (archetype === 'packHunter') {
-      mode = brain.packSupported
-        ? (distance > 2.2 ? 'flank' : 'hold')
-        : (distance < 5 ? 'retreat' : 'orbitSlow');
     } else {
       mode = distance < 1.7 ? 'retreat' : distance > preferred + 0.6 ? 'approach' : 'orbit';
     }
 
-    brain.moving = this._moveByMode(mode, dt, game, toPlayer, distance);
+    const attackDistance = this.navigationMode === 'air'
+      ? this.root.position.distanceTo(game.player.root.position)
+      : distance;
+    const rearAttackReady = archetype !== 'packHunter' || this._isPlayerBackExposed(game);
+    const readyToAttack = brain.cooldown <= 0
+      && rearAttackReady
+      && this._isAttackDistance(attackDistance)
+      && this._canBeginAttack(game);
+    // A spring hopper that already has a valid attack should compress into its
+    // authored telegraph from the ground. Starting a navigation bounce first
+    // would strand the attack state halfway through a jump.
+    if (this.genome.body.planId === 'hopper'
+      && !brain.coilBounceActive
+      && readyToAttack) {
+      brain.moving = false;
+      brain.speedRatio = 0;
+      this._beginTelegraph(game, toPlayer);
+      return;
+    }
+
+    if (archetype === 'packHunter' && readyToAttack) {
+      brain.moving = false;
+      brain.speedRatio = 0;
+      this._beginTelegraph(game, toPlayer);
+      return;
+    }
+
+    brain.moving = archetype === 'packHunter'
+      ? this._movePackHunterTowardRear(dt, game)
+      : this._moveByMode(mode, dt, game, toPlayer, distance);
     brain.speedRatio = brain.moving ? (mode.includes('Slow') ? 0.55 : 1) : 0;
 
-    if (brain.cooldown <= 0 && brain.packSupported && this._isAttackDistance(distance)) {
+    if (brain.cooldown <= 0
+      && !brain.coilBounceActive
+      && (archetype !== 'packHunter' || this._isPlayerBackExposed(game))
+      && this._isAttackDistance(attackDistance)
+      && this._canBeginAttack(game)) {
       this._beginTelegraph(game, toPlayer);
     }
   }
 
   _updateTelegraphState(dt, game, toPlayer) {
     const brain = this.brain;
+    const weapon = this.genome.modules.weapon;
+    const kind = weapon.attackKind;
     brain.stateTime += dt;
     brain.moving = false;
-    this._turnToward(toPlayer, dt, this.genome.behavior.turnRate * 0.72);
+    const telegraphProgress = clamp01(brain.stateTime / Math.max(0.01, this.genome.behavior.telegraphDuration));
+
+    // Charges track during the early warning, then lock so the final rapid blinks
+    // communicate a committed line the player can evade.
+    if (kind === 'charge' && telegraphProgress < CHARGE_TRACK_LOCK_PROGRESS) {
+      // _isAerialRootPathClear uses tempD/tempE internally, so preserve the
+      // last valid commitment in independent vectors before probing a new one.
+      tempG.copy(brain.attackDirection);
+      tempH.copy(brain.targetPosition);
+      brain.attackDirection.lerp(toPlayer, Math.min(1, dt * 4.2)).normalize();
+      brain.targetPosition.copy(this.root.position).addScaledVector(brain.attackDirection, brain.commitDistance);
+      if (this.navigationMode === 'ground') {
+        brain.targetPosition.y = game.dungeonController?.getSurfaceElevationAt?.(brain.targetPosition)
+          ?? brain.targetPosition.y;
+        this._clampCommitTargetToWalkablePath(game, brain.targetPosition);
+      } else {
+        brain.targetPosition.y = game.player.root.position.y + 0.9;
+        // If the player ducks behind a wall during tracking, retain the last
+        // clear committed line rather than telegraphing a charge through it.
+        if (!this._isAerialRootPathClear(game, brain.targetPosition)) {
+          brain.attackDirection.copy(tempG);
+          brain.targetPosition.copy(tempH);
+        }
+      }
+    } else if (kind === 'jawCombo' || kind === 'clawCombo') {
+      brain.attackDirection.lerp(toPlayer, Math.min(1, dt * 7.5)).normalize();
+    }
+    this._turnToward(
+      kind === 'charge' ? brain.attackDirection : toPlayer,
+      dt,
+      this.genome.behavior.turnRate * 0.72,
+    );
 
     brain.effectTimer -= dt;
     if (brain.effectTimer <= 0) {
-      brain.effectTimer = 0.11;
-      const kind = this.genome.modules.weapon.attackKind;
-      if (['charge', 'melee', 'flamethrower', 'beam'].includes(kind)) {
-        const halfAngle = kind === 'beam' ? 0.07 : kind === 'flamethrower' ? 0.78 : 0.32;
+      const rushAttack = kind === 'charge' || kind === 'pounce';
+      brain.effectTimer = rushAttack ? THREE.MathUtils.lerp(0.18, 0.045, telegraphProgress) : 0.11;
+      if (['charge', 'pounce', 'melee', 'clawCombo', 'flamethrower', 'beam'].includes(kind)) {
+        const halfAngle = kind === 'beam'
+          ? 0.07
+          : kind === 'flamethrower'
+            ? 0.78
+            : kind === 'pounce'
+              ? 0.24
+              : kind === 'jawCombo'
+                ? 0.58
+                : kind === 'clawCombo'
+                  ? (weapon.comboOrientation === 'vertical'
+                    ? (weapon.verticalHalfAngle ?? 0.42)
+                    : (weapon.horizontalHalfAngle ?? 1.02))
+              : 0.32;
         const range = kind === 'beam'
           ? this.stats.attackRange
-          : kind === 'charge'
+          : kind === 'charge' || kind === 'pounce'
             ? flatDistance(this.root.position, brain.targetPosition)
             : Math.min(this.stats.attackRange, 4.8);
-        game.addGroundConeTelegraph(this.root.position, brain.attackDirection, range, halfAngle, this.genome.palette.emissive, {
+        const telegraphDirection = kind === 'clawCombo'
+          ? this._getClawStrikeDirection(0, tempF)
+          : brain.attackDirection;
+        game.addGroundConeTelegraph(this.root.position, telegraphDirection, range, halfAngle, (rushAttack || kind === 'jawCombo') ? RUSH_WARNING_COLOR_HEX : this.genome.palette.emissive, {
           duration: 0.16,
           opacity: kind === 'beam' ? 0.28 : 0.22,
           name: `generatedReaverbot${kind}Telegraph`,
         });
       }
       this.visual.weapon.muzzle.getWorldPosition(tempB);
-      game.addParticleBurst(tempB, this.genome.palette.emissive, 2, 0.055);
+      game.addParticleBurst(tempB, (rushAttack || kind === 'jawCombo') ? RUSH_WARNING_COLOR_HEX : this.genome.palette.emissive, 2, 0.055);
     }
 
     if (brain.stateTime >= this.genome.behavior.telegraphDuration) {
@@ -528,8 +840,13 @@ export class ReaverbotEnemy extends Enemy {
       brain.stateTime = 0;
       brain.attackFired = false;
       brain.attackHit = false;
+      brain.comboStrikesFired = 0;
+      brain.jawHopTravel.fill(0);
       brain.tickTimer = 0;
       brain.commitStart.copy(this.root.position);
+      if (kind === 'clawCombo') {
+        brain.attackDirection.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y)).normalize();
+      }
     }
   }
 
@@ -539,7 +856,7 @@ export class ReaverbotEnemy extends Enemy {
     brain.stateTime += dt;
     const duration = Math.max(0.08, this.genome.behavior.commitDuration);
     const progress = clamp01(brain.stateTime / duration);
-    brain.moving = ['charge', 'pounce'].includes(kind);
+    brain.moving = ['charge', 'pounce', 'jawCombo'].includes(kind);
     brain.speedRatio = brain.moving ? 1.4 : 0;
 
     if (kind === 'charge' || kind === 'pounce') {
@@ -547,8 +864,9 @@ export class ReaverbotEnemy extends Enemy {
         ? THREE.MathUtils.smoothstep(progress, 0.05, 0.9)
         : THREE.MathUtils.smoothstep(progress, 0, 0.72);
       const nextX = THREE.MathUtils.lerp(brain.commitStart.x, brain.targetPosition.x, eased);
+      const nextY = THREE.MathUtils.lerp(brain.commitStart.y, brain.targetPosition.y, eased);
       const nextZ = THREE.MathUtils.lerp(brain.commitStart.z, brain.targetPosition.z, eased);
-      if (!this._moveCommitAlongWalkablePath(game, nextX, nextZ)) {
+      if (!this._moveCommitAlongWalkablePath(game, nextX, nextZ, nextY)) {
         this._removeTelegraphMarker();
         brain.state = 'recovery';
         brain.stateTime = 0;
@@ -556,7 +874,19 @@ export class ReaverbotEnemy extends Enemy {
         brain.speedRatio = 0;
         return;
       }
-      this._tryContactHit(game, kind === 'pounce' ? 0.75 : 0.5);
+      if (kind === 'pounce' && this.genome.body.planId === 'hopper') {
+        const baseY = THREE.MathUtils.lerp(brain.commitStart.y, brain.targetPosition.y, eased);
+        this.root.position.y = baseY
+          + Math.sin(progress * Math.PI) * Math.max(2.5, Math.abs(brain.targetPosition.y - brain.commitStart.y) + 1.3);
+      }
+      if (!this.genome.modules.weapon.continuousContactDamage) {
+        this._tryContactHit(game, kind === 'pounce' ? 0.75 : 0.5);
+      }
+    } else if (kind === 'clawCombo') {
+      brain.moving = this._updateClawCombo(dt, game, progress);
+      brain.speedRatio = brain.moving ? 1.35 : 0;
+    } else if (kind === 'jawCombo') {
+      this._updateJawCombo(dt, game, progress);
     } else if (kind === 'flamethrower') {
       this._updateFlamethrower(dt, game);
     } else if (!brain.attackFired && progress >= (kind === 'selfDestruct' ? 0.72 : 0.24)) {
@@ -582,17 +912,21 @@ export class ReaverbotEnemy extends Enemy {
     }
   }
 
-  _updateRecoveryState(dt) {
+  _updateRecoveryState(dt, game = null) {
     const brain = this.brain;
     brain.stateTime += dt;
-    brain.moving = false;
-    brain.speedRatio = 0;
+    brain.moving = Boolean(brain.clawVaultActive && game)
+      && this._advanceClawVault(dt);
+    brain.speedRatio = brain.moving ? 1 : 0;
     if (brain.stateTime >= this.genome.behavior.recoveryDuration) {
       brain.state = 'position';
       brain.stateTime = 0;
       brain.cooldown = this.stats.attackCooldown * this.aiRandom.float(0.84, 1.16);
       brain.attackFired = false;
       brain.attackHit = false;
+      brain.comboStrikesFired = 0;
+      brain.jawHopTravel.fill(0);
+      brain.clawDragSpeed = 0;
     }
   }
 
@@ -602,22 +936,35 @@ export class ReaverbotEnemy extends Enemy {
     brain.state = 'telegraph';
     brain.stateTime = 0;
     brain.effectTimer = 0;
+    brain.warningPhase = 0;
+    brain.warningBlinkRate = RUSH_WARNING_MIN_RATE;
+    brain.warningIntensity = 0;
+    brain.comboStrikesFired = 0;
+    brain.clawDragSpeed = 0;
+    brain.clawVaultCooldown = 0;
     brain.attackDirection.copy(toPlayer).normalize();
     brain.targetPosition.copy(game.player.root.position);
 
     if (kind === 'pounce') {
       brain.targetPosition.addScaledVector(game.player.lastMoveDirection ?? WORLD_FORWARD, 0.9);
     } else if (kind === 'charge') {
-      const distance = Math.min(5.8, Math.max(2.2, flatDistance(this.root.position, game.player.root.position) + 0.8));
-      brain.targetPosition.copy(this.root.position).addScaledVector(brain.attackDirection, distance);
+      brain.commitDistance = Math.min(
+        CHARGE_MAX_TRAVEL_DISTANCE,
+        Math.max(3, flatDistance(this.root.position, game.player.root.position) + 1.4),
+      );
+      brain.targetPosition.copy(this.root.position).addScaledVector(brain.attackDirection, brain.commitDistance);
     } else if (kind === 'selfDestruct' || kind === 'shockwave') {
       brain.targetPosition.copy(this.root.position);
     }
 
-    const surfaceY = game.dungeonController?.getSurfaceElevationAt?.(brain.targetPosition) ?? brain.targetPosition.y;
-    brain.targetPosition.y = surfaceY;
-    if (kind === 'charge' || kind === 'pounce') {
-      this._clampCommitTargetToWalkablePath(game, brain.targetPosition);
+    if (this.navigationMode === 'ground') {
+      const surfaceY = game.dungeonController?.getSurfaceElevationAt?.(brain.targetPosition) ?? brain.targetPosition.y;
+      brain.targetPosition.y = surfaceY;
+      if (kind === 'charge' || kind === 'pounce') {
+        this._clampCommitTargetToWalkablePath(game, brain.targetPosition);
+      }
+    } else if (kind === 'charge' || kind === 'pounce') {
+      brain.targetPosition.y = game.player.root.position.y + 0.9;
     }
 
     const markerRadius = kind === 'selfDestruct'
@@ -628,9 +975,1408 @@ export class ReaverbotEnemy extends Enemy {
           ? 1.15
           : kind === 'pounce' || kind === 'shockwave'
             ? 1.25
+            : kind === 'jawCombo'
+              ? (this.genome.modules.weapon.shockwaveRadius ?? 1.85)
             : 0;
     if (markerRadius > 0) {
-      this._createTelegraphMarker(game, markerRadius);
+      this._createTelegraphMarker(
+        game,
+        markerRadius,
+        (kind === 'pounce' || kind === 'jawCombo') ? RUSH_WARNING_COLOR_HEX : this.genome.palette.emissive,
+      );
+    }
+  }
+
+  _getClawStrikeDirection(strikeIndex, out) {
+    const weapon = this.genome.modules.weapon;
+    const horizontal = weapon.comboOrientation !== 'vertical';
+    if (!horizontal) {
+      return out.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y)).normalize();
+    }
+
+    const side = Math.sign(weapon.mountSide || 1);
+    const alternate = (strikeIndex % 2 === 0 ? 1 : -1)
+      * Math.sign(weapon.initialSweepDirection || 1);
+    const sweep = THREE.MathUtils.smoothstep(weapon.strikeProgress ?? 0.6, 0.08, 0.86);
+    const inward = 0.24 * side;
+    const outward = 1.28 * side;
+    const yawOffset = alternate > 0
+      ? THREE.MathUtils.lerp(outward, inward, sweep)
+      : THREE.MathUtils.lerp(inward, outward, sweep);
+    const yaw = this.root.rotation.y + yawOffset;
+    return out.set(Math.sin(yaw), 0, Math.cos(yaw)).normalize();
+  }
+
+  _updateClawCombo(dt, game, progress) {
+    const brain = this.brain;
+    const weapon = this.genome.modules.weapon;
+    const strikeCount = weapon.comboCount ?? 3;
+    const strikeProgress = weapon.strikeProgress ?? 0.62;
+    const cycle = Math.min(strikeCount - 1, Math.floor(progress * strikeCount));
+    const localProgress = progress >= 1 ? 1 : (progress * strikeCount) - cycle;
+    const moved = this._updateClawDragAndVault(dt, game, progress);
+
+    brain.tickTimer -= dt;
+    if (localProgress < strikeProgress && brain.tickTimer <= 0) {
+      brain.tickTimer = 0.085;
+      const horizontal = weapon.comboOrientation !== 'vertical';
+      const strikeDirection = this._getClawStrikeDirection(cycle, tempF);
+      game.addGroundConeTelegraph(
+        this.root.position,
+        strikeDirection,
+        this.stats.attackRange,
+        horizontal ? (weapon.horizontalHalfAngle ?? 1.02) : (weapon.verticalHalfAngle ?? 0.42),
+        this.genome.palette.emissive,
+        {
+          duration: 0.12,
+          opacity: 0.2 + clamp01(localProgress / strikeProgress) * 0.16,
+          name: `generatedReaverbotClawSwipe${cycle + 1}`,
+        },
+      );
+    }
+
+    while (brain.comboStrikesFired < strikeCount) {
+      const threshold = (brain.comboStrikesFired + strikeProgress) / strikeCount;
+      if (progress + 0.0001 < threshold) break;
+      this._performClawStrike(game, brain.comboStrikesFired);
+      brain.comboStrikesFired += 1;
+    }
+    brain.attackFired = brain.comboStrikesFired >= strikeCount;
+    return moved;
+  }
+
+  _updateClawDragAndVault(dt, game, progress) {
+    const brain = this.brain;
+    const weapon = this.genome.modules.weapon;
+    brain.clawVaultCooldown = Math.max(0, brain.clawVaultCooldown - dt);
+
+    if (brain.clawVaultActive) {
+      return this._advanceClawVault(dt, game);
+    }
+    if (progress >= 0.92) {
+      brain.clawDragSpeed *= Math.max(0, 1 - dt * 8);
+      return false;
+    }
+
+    tempA.copy(game.player.root.position).sub(this.root.position).setY(0);
+    const playerDistance = tempA.length();
+    const desiredSeparation = Math.max(1.25, (weapon.baseReach ?? 2.95) * 0.46);
+    if (playerDistance <= desiredSeparation || playerDistance <= 0.001) {
+      brain.clawDragSpeed *= Math.max(0, 1 - dt * 7);
+      return false;
+    }
+    tempA.divideScalar(playerDistance);
+
+    // The shoulder tracks the player's current lane while the chassis is
+    // pulled forward by the weight of the extended construction arm.
+    this._turnToward(tempA, dt, this.genome.behavior.turnRate * 1.12);
+    brain.attackDirection.lerp(tempA, Math.min(1, dt * 4.8)).normalize();
+    const targetSpeed = this.stats.moveSpeed * (weapon.dragSpeedScale ?? 1.35);
+    const acceleration = targetSpeed * (weapon.dragAccelerationScale ?? 1.5) * 3.4;
+    brain.clawDragSpeed = Math.min(targetSpeed, brain.clawDragSpeed + acceleration * dt);
+    const step = Math.min(
+      brain.clawDragSpeed * dt,
+      Math.max(0, playerDistance - desiredSeparation),
+    );
+    if (step <= 0.0001) return false;
+
+    const controller = game.dungeonController;
+    tempB.copy(this.root.position).addScaledVector(tempA, step);
+    tempB.y = controller?.getSurfaceElevationAt?.(tempB) ?? this.root.position.y;
+    const elevationDelta = tempB.y - this.root.position.y;
+    const directClear = controller?.isEnemyPositionClear
+      ? controller.isEnemyPositionClear(this, tempB, { maximumElevationDelta: 0.62 })
+      : !controller?.isPositionWalkable || controller.isPositionWalkable(tempB);
+    if (directClear && Math.abs(elevationDelta) <= 0.62) {
+      this.root.position.copy(tempB);
+      return true;
+    }
+
+    // A failed direct footprint probe is the cue to plant the enormous claw
+    // and vault the chassis. New vaults start early enough that the full arc
+    // completes before the third swipe and its recovery opening.
+    if (progress <= 0.5
+      && brain.clawVaultCooldown <= 0
+      && this._beginClawVault(game, tempA, playerDistance)) {
+      return this._advanceClawVault(dt, game);
+    }
+
+    brain.clawVaultCooldown = Math.max(brain.clawVaultCooldown, 0.12);
+    brain.clawDragSpeed *= 0.45;
+    return false;
+  }
+
+  _beginClawVault(game, direction, playerDistance) {
+    const controller = game.dungeonController;
+    if (!controller?.isEnemyPositionClear) return false;
+
+    const weapon = this.genome.modules.weapon;
+    const maximumForward = Math.min(
+      weapon.vaultForwardDistance ?? 3.1,
+      Math.max(1.55, playerDistance - 0.9),
+    );
+    const maximumElevation = weapon.obstacleVaultHeight ?? 1.85;
+    const baseVaultHeight = weapon.vaultHeight ?? 2.15;
+
+    for (const distanceScale of [1, 0.82, 0.66, 0.5]) {
+      const travel = maximumForward * distanceScale;
+      if (travel < 1.35) continue;
+      tempC.copy(this.root.position).addScaledVector(direction, travel);
+      // When MegaMan occupies a low platform, probe at his elevation so the
+      // surface resolver can select its top instead of the floor beneath it.
+      tempC.y = Math.max(this.root.position.y, game.player.root.position.y);
+      tempC.y = controller.getSurfaceElevationAt?.(tempC) ?? tempC.y;
+      const elevationDelta = tempC.y - this.root.position.y;
+      if (elevationDelta > maximumElevation || elevationDelta < -maximumElevation * 1.4) {
+        continue;
+      }
+
+      const arenaCandidate = controller.getEnemyArenaTarget?.(this, tempC, tempD);
+      if (arenaCandidate) {
+        tempC.x = arenaCandidate.x;
+        tempC.z = arenaCandidate.z;
+        tempC.y = controller.getSurfaceElevationAt?.(tempC) ?? tempC.y;
+      }
+      if (!controller.isEnemyPositionClear(this, tempC, {
+        maximumElevationDelta: maximumElevation + 0.2,
+      })) {
+        continue;
+      }
+
+      const vaultHeight = Math.max(baseVaultHeight, Math.max(0, elevationDelta) + 1.05);
+      if (!this._isClawVaultArcClear(game, this.root.position, tempC, vaultHeight)) {
+        continue;
+      }
+
+      const brain = this.brain;
+      brain.clawVaultActive = true;
+      brain.clawVaultTime = 0;
+      brain.clawVaultDuration = THREE.MathUtils.clamp(
+        CLAW_VAULT_DURATION + Math.max(0, elevationDelta) * 0.045,
+        CLAW_VAULT_DURATION,
+        0.66,
+      );
+      brain.clawVaultHeight = vaultHeight;
+      brain.clawVaultStart.copy(this.root.position);
+      brain.clawVaultLanding.copy(tempC);
+      brain.clawDragSpeed = 0;
+      game.addParticleBurst?.(this.root.position, this.genome.palette.trim, 9, 0.09);
+      return true;
+    }
+    return false;
+  }
+
+  _advanceClawVault(dt, game = null) {
+    const brain = this.brain;
+    if (!brain.clawVaultActive) return false;
+    brain.clawVaultTime = Math.min(
+      brain.clawVaultDuration,
+      brain.clawVaultTime + Math.max(0, dt),
+    );
+    const progress = clamp01(brain.clawVaultTime / Math.max(0.01, brain.clawVaultDuration));
+    const horizontalProgress = THREE.MathUtils.smoothstep(progress, 0.02, 0.98);
+    this.root.position.lerpVectors(brain.clawVaultStart, brain.clawVaultLanding, horizontalProgress);
+    this.root.position.y += Math.sin(progress * Math.PI) * brain.clawVaultHeight;
+    this.root.rotation.x = -Math.sin(progress * Math.PI) * 0.18;
+
+    if (progress >= 1) {
+      brain.clawVaultActive = false;
+      brain.clawVaultTime = 0;
+      brain.clawVaultCooldown = 0.18;
+      this.root.position.copy(brain.clawVaultLanding);
+      this.root.rotation.x = 0;
+      game?.addParticleBurst?.(this.root.position, this.genome.palette.trim, 12, 0.1);
+    }
+    return true;
+  }
+
+  _isClawVaultArcClear(game, startRootPosition, landingRootPosition, vaultHeight) {
+    const controller = game.dungeonController;
+    if (!controller?.isAerialPositionClear) return true;
+    const travelDistance = flatDistance(startRootPosition, landingRootPosition);
+    const steps = Math.max(12, Math.ceil(travelDistance / 0.2));
+    const centerOffset = Math.max(0.5, this.collisionHeight * 0.48);
+    const options = {
+      radius: Math.max(0.28, Math.min(0.76, this.radius * 0.88)),
+      verticalRadius: Math.max(0.38, this.collisionHeight * 0.34),
+    };
+    // Endpoints use the grounded footprint query. Sampling only the open arc
+    // avoids treating the floor or destination platform as an aerial blocker.
+    for (let step = 1; step < steps; step += 1) {
+      const progress = step / steps;
+      tempE.copy(startRootPosition).lerp(landingRootPosition, progress);
+      tempE.y += Math.sin(progress * Math.PI) * vaultHeight + centerOffset;
+      if (!controller.isAerialPositionClear(tempE, options)) return false;
+    }
+    return true;
+  }
+
+  _performClawStrike(game, strikeIndex) {
+    const weapon = this.genome.modules.weapon;
+    const player = game.player;
+    tempA.copy(player.root.position).sub(this.root.position).setY(0);
+    const distance = tempA.length();
+    if (distance > 0.001) tempA.divideScalar(distance);
+    else tempA.copy(this.brain.attackDirection);
+    this._getClawStrikeDirection(strikeIndex, tempForward);
+    const horizontal = weapon.comboOrientation !== 'vertical';
+    const halfAngle = horizontal
+      ? (weapon.horizontalHalfAngle ?? 1.02)
+      : (weapon.verticalHalfAngle ?? 0.42);
+    const verticalReach = horizontal ? 1.55 : Math.max(2.4, this.collisionHeight + 0.8);
+    const inArc = tempForward.dot(tempA) >= Math.cos(halfAngle);
+    const inRange = distance <= this.stats.attackRange + player.radius + 0.28;
+    const inHeight = Math.abs((player.root.position.y + 0.85) - (this.root.position.y + this.collisionHeight * 0.52)) <= verticalReach;
+
+    this.visual.weapon.muzzle.getWorldPosition(tempB);
+    game.addDirectedParticleSpray?.(tempB, tempForward, this.genome.palette.emissive, {
+      count: 8,
+      range: this.stats.attackRange,
+      halfAngle,
+      baseScale: 0.16,
+      pressure: 1,
+    });
+    if (!inArc || !inRange || !inHeight || player.dead) return;
+
+    const powerful = strikeIndex === (weapon.comboCount ?? 3) - 1;
+    const dealt = player.takeDamage(this.stats.damage * (weapon.strikeDamageScale ?? 0.78), this, {
+      attackKind: 'clawSwipe',
+      powerfulKnockback: powerful,
+      knockbackDirection: tempA,
+      knockbackStrength: powerful ? 1.08 : 0.72,
+    });
+    this.onHitPlayer(player, dealt);
+    game.addHitEffect(player.root.position, this.genome.palette.emissive, powerful ? 0.82 : 0.62);
+    if (dealt > 0) game.requestHitStop?.(powerful ? 0.11 : 0.075, { timeScale: 0.05 });
+  }
+
+  _updateJawCombo(dt, game, progress) {
+    const brain = this.brain;
+    const weapon = this.genome.modules.weapon;
+    const strikeCount = weapon.comboCount ?? 3;
+    const strikeProgress = weapon.strikeProgress ?? 0.62;
+    const cycle = Math.min(strikeCount - 1, Math.floor(progress * strikeCount));
+    const localProgress = progress >= 1 ? 1 : (progress * strikeCount) - cycle;
+
+    // Each snap is also a short forward dog-like hop. Tracking remains live so
+    // the three bites pressure movement instead of attacking an obsolete point.
+    tempA.copy(game.player.root.position).sub(this.root.position).setY(0);
+    const distance = tempA.length();
+    if (distance > 0.001) tempA.divideScalar(distance);
+    else tempA.copy(brain.attackDirection);
+    const currentYaw = Math.atan2(brain.attackDirection.x, brain.attackDirection.z);
+    const targetYaw = Math.atan2(tempA.x, tempA.z);
+    const steeringStep = Math.max(0, this.genome.behavior.turnRate * 1.65 * dt);
+    const steeredYaw = currentYaw + THREE.MathUtils.clamp(
+      angleDelta(currentYaw, targetYaw),
+      -steeringStep,
+      steeringStep,
+    );
+    brain.attackDirection.set(Math.sin(steeredYaw), 0, Math.cos(steeredYaw));
+    this._turnToward(brain.attackDirection, dt, this.genome.behavior.turnRate * 1.3);
+    if (localProgress >= 0.34 && localProgress <= 0.76) {
+      const hopWindowDuration = Math.max(
+        0.08,
+        (this.genome.behavior.commitDuration / strikeCount) * (0.76 - 0.34),
+      );
+      const hopSpeed = (weapon.hopDistance ?? 1.25) / hopWindowDuration;
+      this.root.updateMatrixWorld(true);
+      this.visual.weapon.muzzle.getWorldPosition(tempB);
+      tempC.copy(tempB).sub(game.player.root.position);
+      const mouthAlongAttack = tempC.dot(brain.attackDirection);
+      const mouthLateralSq = Math.max(
+        0,
+        tempC.lengthSq() - mouthAlongAttack * mouthAlongAttack,
+      );
+      const safeShockwaveRadius = Math.max(0.35, (weapon.shockwaveRadius ?? 1.9) - 0.12);
+      const safeMouthAdvance = Math.max(
+        0,
+        Math.sqrt(Math.max(0, safeShockwaveRadius * safeShockwaveRadius - mouthLateralSq))
+          - mouthAlongAttack,
+      );
+      const remainingCycleTravel = Math.max(
+        0,
+        (weapon.hopDistance ?? 1.25) - (brain.jawHopTravel[cycle] ?? 0),
+      );
+      const hopStep = Math.min(
+        hopSpeed * dt,
+        remainingCycleTravel,
+        safeMouthAdvance,
+        Math.max(0, distance - (weapon.minimumHopSeparation ?? 0.82)),
+      );
+      const nextX = this.root.position.x + brain.attackDirection.x * hopStep;
+      const nextZ = this.root.position.z + brain.attackDirection.z * hopStep;
+      const moved = this._moveCommitAlongWalkablePath(game, nextX, nextZ, this.root.position.y);
+      if (moved) brain.jawHopTravel[cycle] += hopStep;
+      brain.moving = true;
+      brain.speedRatio = 1.45;
+    }
+
+    while (brain.comboStrikesFired < strikeCount) {
+      const threshold = (brain.comboStrikesFired + strikeProgress) / strikeCount;
+      if (progress + 0.0001 < threshold) break;
+      this._performJawBite(game, brain.comboStrikesFired);
+      brain.comboStrikesFired += 1;
+    }
+    brain.attackFired = brain.comboStrikesFired >= strikeCount;
+  }
+
+  _performJawBite(game, strikeIndex) {
+    const weapon = this.genome.modules.weapon;
+    this.root.updateMatrixWorld(true);
+    this.visual.weapon.muzzle.getWorldPosition(tempA);
+    tempB.copy(game.player.root.position).sub(this.root.position).setY(0);
+    if (tempB.lengthSq() <= 0.0001) tempB.copy(this.brain.attackDirection);
+    tempB.normalize();
+    const finalBite = strikeIndex === (weapon.comboCount ?? 3) - 1;
+    game.addParticleBurst(tempA, RUSH_WARNING_COLOR_HEX, finalBite ? 18 : 12, 0.16);
+    game.addExplosion(
+      tempA,
+      this.stats.damage * (weapon.strikeDamageScale ?? 0.82),
+      weapon.shockwaveRadius ?? 1.85,
+      RUSH_WARNING_COLOR_HEX,
+      {
+        source: this,
+        attackKind: 'jawBiteShockwave',
+        powerfulKnockback: finalBite,
+        knockbackDirection: tempB,
+        knockbackStrength: finalBite ? 1.05 : 0.72,
+        damageEnemies: false,
+        damagePlayer: true,
+        playerDamageScale: 1,
+        triggerMines: false,
+      },
+    );
+  }
+
+  _updatePersistentWeaponContact(dt, game) {
+    const weapon = this.genome.modules.weapon;
+    if (!weapon.continuousContactDamage || this.dead || game.player.dead) return;
+    this.brain.contactCooldown = Math.max(0, this.brain.contactCooldown - dt);
+    if (this.brain.contactCooldown > 0) return;
+
+    this.root.updateMatrixWorld(true);
+    this.visual.weapon.group.getWorldPosition(tempA);
+    tempB.copy(game.player.root.position);
+    tempB.y += 0.82;
+    const verticalReach = Math.max(0.9, this.collisionHeight * 0.55);
+    if (Math.abs(tempB.y - tempA.y) > verticalReach) return;
+    tempC.copy(tempB).sub(tempA).setY(0);
+    const radius = weapon.contactRadius ?? 1.65;
+    if (tempC.length() > radius + game.player.radius) return;
+
+    this.brain.contactCooldown = weapon.contactHitInterval ?? 0.6;
+    if (tempC.lengthSq() <= 0.0001) tempC.copy(this.brain.attackDirection);
+    tempC.normalize();
+    const dealt = game.player.takeDamage(this.stats.damage * (weapon.contactDamageScale ?? 0.72), this, {
+      attackKind: 'rotorContact',
+      knockbackDirection: tempC,
+      knockbackStrength: 0.78,
+    });
+    this.onHitPlayer(game.player, dealt);
+    game.addHitEffect(game.player.root.position, RUSH_WARNING_COLOR_HEX, 0.68);
+    if (dealt > 0) game.requestHitStop?.(0.07, { timeScale: 0.08 });
+  }
+
+  _updateTractorController(dt, game) {
+    const brain = this.brain;
+    const weapon = this.genome.modules.weapon;
+    brain.cooldown = Math.max(0, brain.cooldown - dt * this._getStatusAttackRateMultiplier());
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.tractorBeamActive = false;
+    brain.tractorBeamIntensity = 0;
+
+    if (brain.tractorCrashPhase) {
+      return this._updateTractorCrash(dt, game);
+    }
+
+    if (brain.controllerTagPause > 0) {
+      brain.controllerTagPause = Math.max(0, brain.controllerTagPause - dt);
+      this._updateExposureAndDefense();
+      this._animateVisual(dt);
+      return { handled: true, moving: false, moveAmount: 0 };
+    }
+
+    if (brain.state === 'position') {
+      if (!this._isTractorObjectiveValid(game, false)
+        || !this._canReachTractorTarget(game, brain.tractorTarget)) {
+        const objective = this._selectTractorObjective(game);
+        this._setTractorObjective(objective?.target ?? null, objective?.kind ?? null);
+      }
+      const target = brain.tractorTarget;
+      if (target) {
+        tempB.copy(target.root.position).sub(this.root.position).setY(0);
+        if (tempB.lengthSq() > 0.0001) {
+          tempB.normalize();
+          this._turnToward(tempB, dt, this.genome.behavior.turnRate * 2.6);
+        }
+        const approach = this._updateTractorApproach(dt, game, target);
+        brain.moving = approach.moving;
+        brain.speedRatio = approach.speedRatio;
+        const intentionalManeuver = brain.tractorApproachPhase === 'flip'
+          || brain.tractorApproachPhase === 'zigzag';
+        brain.tractorPathFailureTime = brain.moving || approach.aligned || intentionalManeuver
+          ? 0
+          : brain.tractorPathFailureTime + dt;
+        if (brain.tractorPathFailureTime >= 1.1) {
+          this._setTractorObjective(null, null);
+        }
+        if (brain.cooldown <= 0
+          && approach.aligned) {
+          if (brain.tractorTargetKind === 'player') {
+            this._beginTractorTelegraph(game, target, false);
+          } else if (target.tryClaimExternalControl?.(this, 'tractorBeam', {
+            freeze: true,
+            ignoreGroundConstraint: true,
+          })) {
+            this._beginTractorTelegraph(game, target, true);
+          }
+        }
+      } else {
+        brain.moving = this._moveTractorAwayFromPlayer(dt, game, 1.75);
+        brain.speedRatio = brain.moving ? 1.25 : 0;
+      }
+    } else if (brain.state === 'telegraph') {
+      const target = brain.tractorTarget;
+      const targetingPlayer = brain.tractorTargetKind === 'player';
+      if (!this._isTractorObjectiveValid(game, !targetingPlayer)) {
+        this._abortTractorCycle('target-lost', game);
+      } else {
+        brain.stateTime += dt;
+        brain.moving = targetingPlayer
+          ? this._moveTractorAboveBeamPoint(dt, game)
+          : this._moveTractorAboveTarget(
+            dt,
+            game,
+            target,
+            TRACTOR_BEAM_TRACK_SPEED_SCALE,
+          );
+        brain.speedRatio = brain.moving ? 1.45 : 0;
+        const progress = clamp01(brain.stateTime / Math.max(0.01, this.genome.behavior.telegraphDuration));
+        if (targetingPlayer) {
+          this._setTractorBeamAtPosition(
+            brain.tractorBeamPoint,
+            (target.collisionHeight ?? 1.75) * 0.46,
+            0.25 + progress * 0.75,
+          );
+        } else {
+          this._setTractorBeamForTarget(target, 0.25 + progress * 0.75);
+        }
+        brain.effectTimer -= dt;
+        if (brain.effectTimer <= 0) {
+          brain.effectTimer = THREE.MathUtils.lerp(0.16, 0.055, progress);
+          this.visual.weapon.muzzle.getWorldPosition(tempA);
+          game.addParticleBurst(tempA, TRACTOR_BEAM_COLOR, 4, 0.09);
+        }
+        if (brain.stateTime >= this.genome.behavior.telegraphDuration) {
+          if (!targetingPlayer) {
+            this._enterTractorCommit(target);
+          } else {
+            const captureRadius = this.genome.modules.weapon.playerCaptureRadius
+              ?? TRACTOR_PLAYER_CAPTURE_RADIUS;
+            const stayedInBeam = flatDistance(target.root.position, brain.tractorBeamPoint)
+              <= captureRadius + (target.radius ?? 0.42);
+            const claimed = stayedInBeam
+              && this._isTractorObjectiveValid(game, false)
+              && target.tryClaimExternalControl?.(this, 'tractorBeam', {
+                freeze: true,
+                ignoreGroundConstraint: true,
+              });
+            if (claimed) {
+              brain.tractorCargoTopOffset = this._measureTractorCargoTopOffset(target);
+              this._enterTractorCommit(target);
+            } else {
+              this._abortTractorCycle(
+                stayedInBeam ? 'player-control-unavailable' : 'player-escaped-beam',
+                game,
+              );
+            }
+          }
+        }
+      }
+    } else if (brain.state === 'commit') {
+      const target = brain.tractorTarget;
+      const targetingPlayer = brain.tractorTargetKind === 'player';
+      if (!this._isTractorObjectiveValid(game, true)) {
+        this._abortTractorCycle('target-lost', game);
+      } else {
+        brain.stateTime += dt;
+        const liftDuration = weapon.liftDuration ?? 1;
+        const carryDuration = weapon.carryDuration ?? 1.25;
+        const throwDuration = weapon.throwDuration ?? 0.45;
+        const liftProgress = clamp01(brain.stateTime / Math.max(0.01, liftDuration));
+        if (brain.stateTime > liftDuration && !targetingPlayer) {
+          this._moveTractorTowardThrowPosition(dt, game, target);
+        } else if (targetingPlayer) {
+          this._moveTractorAboveBeamPoint(dt, game, 1.25);
+        }
+        // Captives rotate only around the beam axis while carried. Player and
+        // generated machine silhouettes therefore keep a stable collision
+        // envelope until the authored throw begins.
+        target.root.rotation.x = 0;
+        target.root.rotation.z = 0;
+        target.root.rotation.y += dt * (targetingPlayer ? 3.8 : 5.6);
+        brain.tractorCargoTopOffset = this._measureTractorCargoTopOffset(target);
+        const carryAnchor = this._getTractorCarryAnchor(target, tempA);
+        if (brain.stateTime <= liftDuration) {
+          tempI.lerpVectors(
+            brain.tractorLiftStart,
+            carryAnchor,
+            THREE.MathUtils.smoothstep(liftProgress, 0, 1),
+          );
+        } else {
+          tempI.copy(target.root.position).lerp(carryAnchor, Math.min(1, dt * 12));
+        }
+        if (!this._isTractorCargoRootPathClear(game, target, target.root.position, tempI)) {
+          this._abortTractorCycle('cargo-path-blocked', game);
+          this._updateExposureAndDefense();
+          this._animateVisual(dt);
+          return { handled: true, moving: false, moveAmount: 0 };
+        }
+        target.root.position.copy(tempI);
+        this._setTractorBeamForTarget(target, 1);
+
+        if (!brain.attackFired && brain.stateTime >= liftDuration + carryDuration) {
+          const throwArcHeight = targetingPlayer ? 2.45 : 2.1;
+          const landing = targetingPlayer
+            ? this._findTractorPlayerThrowLanding(game, target, throwArcHeight)
+            : this._findTractorThrowLanding(game, target, throwArcHeight);
+          if (!landing) {
+            this._abortTractorCycle('throw-path-blocked', game);
+            this._updateExposureAndDefense();
+            this._animateVisual(dt);
+            return { handled: true, moving: false, moveAmount: 0 };
+          }
+          const captive = target;
+          const impactDamage = targetingPlayer
+            ? Math.max(12, this.stats.damage * (
+              weapon.playerImpactDamageScale ?? 1.6
+            ))
+            : this.stats.damage * 0.9;
+          const launched = captive.startExternalBallisticMotion?.(this, {
+            targetPosition: landing,
+            duration: Math.max(0.72, throwDuration + 0.38),
+            arcHeight: throwArcHeight,
+            // Keep the captured unit rotating around its upright axis during
+            // flight. This preserves the sci-fi toss while giving collision
+            // validation a stable vertical envelope for modular silhouettes.
+            spinRate: targetingPlayer
+              ? { x: 6.2, y: 1.8, z: 0 }
+              : { x: 0, y: 9.5, z: 0 },
+            onLand: (landedTarget, activeGame, reason) => {
+              if (reason !== 'landed' && reason !== 'blocked') return;
+              const runtimeGame = activeGame ?? game;
+              runtimeGame?.addExplosion?.(
+                landedTarget.root.position,
+                impactDamage,
+                targetingPlayer
+                  ? (weapon.playerImpactRadius ?? TRACTOR_PLAYER_IMPACT_RADIUS)
+                  : 1.5,
+                TRACTOR_BEAM_COLOR,
+                {
+                  source: this,
+                  attackKind: targetingPlayer
+                    ? 'tractorThrownPlayerImpact'
+                    : 'tractorThrownEnemy',
+                  powerfulKnockback: true,
+                  damageEnemies: false,
+                  damagePlayer: true,
+                  playerDamageScale: 1,
+                  unblockable: targetingPlayer,
+                  triggerMines: false,
+                },
+              );
+            },
+          });
+          if (launched) {
+            brain.attackFired = true;
+            this._setTractorObjective(null, null);
+            brain.tractorBeamActive = false;
+            this._removeTelegraphMarker();
+            brain.state = 'recovery';
+            brain.stateTime = 0;
+          } else {
+            this._abortTractorCycle('throw-failed', game);
+          }
+        }
+      }
+    } else if (brain.state === 'recovery') {
+      brain.stateTime += dt;
+      brain.moving = this._moveTractorAwayFromPlayer(dt, game, 1.55);
+      brain.speedRatio = brain.moving ? 1.15 : 0;
+      if (brain.stateTime >= this.genome.behavior.recoveryDuration) {
+        brain.state = 'position';
+        brain.stateTime = 0;
+        brain.cooldown = this.stats.attackCooldown * this.aiRandom.float(0.88, 1.14);
+        this._resetTractorApproach();
+      }
+    }
+
+    this._updateExposureAndDefense();
+    this._animateVisual(dt);
+    this._updateTelegraphMarker(game);
+    return { handled: true, moving: brain.moving, moveAmount: brain.speedRatio };
+  }
+
+  _selectTractorObjective(game) {
+    const machine = this._findTractorTarget(game);
+    if (machine) {
+      return { target: machine, kind: 'enemy' };
+    }
+    if (this._canTargetPlayerWhenAlone(game)) {
+      return { target: game.player, kind: 'player' };
+    }
+    return null;
+  }
+
+  _setTractorObjective(target, kind) {
+    const brain = this.brain;
+    const resolvedKind = target ? (kind ?? (target === this._runtimeGame?.player ? 'player' : 'enemy')) : null;
+    if (brain.tractorTarget === target && brain.tractorTargetKind === resolvedKind) return;
+    brain.tractorTarget = target;
+    brain.tractorTargetKind = resolvedKind;
+    brain.tractorPathFailureTime = 0;
+    brain.tractorCargoTopOffset = 0;
+    this._resetTractorApproach();
+  }
+
+  _isTractorObjectiveValid(game, requireClaim = false) {
+    const brain = this.brain;
+    const target = brain.tractorTarget;
+    if (!target) return false;
+    if (!brain.tractorTargetKind) {
+      brain.tractorTargetKind = target === game.player ? 'player' : 'enemy';
+    }
+    if (brain.tractorTargetKind === 'player') {
+      if (target !== game.player
+        || target.dead
+        || !this._canTargetPlayerWhenAlone(game, { ignoreExistingClaim: true })) {
+        return false;
+      }
+      return !requireClaim || Boolean(target.hasExternalControl?.(this));
+    }
+    return brain.tractorTargetKind === 'enemy'
+      && this._isValidTractorTarget(target, requireClaim);
+  }
+
+  _canTargetPlayerWhenAlone(game, { ignoreExistingClaim = false } = {}) {
+    const player = game?.player;
+    if (!player?.root || player.dead || game.dungeonController?.isPlayerInSafeZone?.()) {
+      return false;
+    }
+    if (!ignoreExistingClaim
+      && player.hasExternalControl?.()
+      && !player.hasExternalControl?.(this)) {
+      return false;
+    }
+    return !this._hasLivingTractorArenaAlly(game)
+      && this._isPlayerInsideTractorArena(game);
+  }
+
+  _hasLivingTractorArenaAlly(game) {
+    return (game?.enemies ?? []).some((enemy) => (
+      enemy
+      && enemy !== this
+      && !enemy.dead
+      && enemy.root
+      && this._isPositionWithinTractorArena(enemy.root.position, game)
+    ));
+  }
+
+  _isPlayerInsideTractorArena(game) {
+    const playerPosition = game?.player?.root?.position;
+    return Boolean(playerPosition && this._isPositionWithinTractorArena(playerPosition, game));
+  }
+
+  _getTractorArenaBounds(game = this._runtimeGame) {
+    const arena = this.encounterArena;
+    const center = arena?.zoneCenter ?? arena?.center;
+    if (center && Number.isFinite(arena?.halfWidth) && Number.isFinite(arena?.halfDepth)) {
+      return {
+        center,
+        halfWidth: arena.halfWidth,
+        halfDepth: arena.halfDepth,
+      };
+    }
+
+    const encounterId = this.encounterId ?? arena?.encounterId ?? null;
+    const encounter = encounterId
+      ? game?.dungeonController?.encounters?.find?.((candidate) => candidate.id === encounterId)
+      : null;
+    if (encounter?.zone?.position) {
+      return {
+        center: encounter.zone.position,
+        halfWidth: encounter.zone.halfWidth,
+        halfDepth: encounter.zone.halfDepth,
+      };
+    }
+    return null;
+  }
+
+  _isPositionWithinTractorArena(position, game = this._runtimeGame) {
+    if (!position) return false;
+    const bounds = this._getTractorArenaBounds(game);
+    if (bounds) {
+      return Math.abs(position.x - bounds.center.x) <= bounds.halfWidth + 0.4
+        && Math.abs(position.z - bounds.center.z) <= bounds.halfDepth + 0.4;
+    }
+    return flatDistance(position, this.root.position)
+      <= (this.genome.behavior.aggroRange ?? 18);
+  }
+
+  _resetTractorApproach() {
+    const brain = this.brain;
+    brain.tractorApproachPhase = 'choose';
+    brain.tractorApproachTimer = 0;
+    brain.tractorZigzagSwitchTimer = 0;
+    if (this.visual?.root) this.visual.root.rotation.z = 0;
+  }
+
+  _prepareTractorApproach(game, target) {
+    const brain = this.brain;
+    brain.tractorApproachStart.copy(this.root.position);
+    this._getTractorApproachDestination(game, target, brain.tractorApproachDestination);
+    brain.tractorApproachTimer = 0;
+    brain.tractorZigzagSign = this.aiRandom.chance(0.5) ? 1 : -1;
+    brain.tractorFlipDirection = this.aiRandom.chance(0.5) ? 1 : -1;
+    brain.tractorZigzagInterval = this.aiRandom.float(
+      TRACTOR_ZIGZAG_MIN_INTERVAL,
+      TRACTOR_ZIGZAG_MAX_INTERVAL,
+    );
+    brain.tractorZigzagSwitchTimer = brain.tractorZigzagInterval;
+    brain.tractorZigzagAmplitude = this.aiRandom.float(
+      TRACTOR_ZIGZAG_MIN_AMPLITUDE,
+      TRACTOR_ZIGZAG_MAX_AMPLITUDE,
+    );
+    const aligned = flatDistance(this.root.position, brain.tractorApproachDestination) <= 1.15
+      && Math.abs(this.root.position.y - brain.tractorApproachDestination.y) <= 0.9;
+    brain.tractorApproachPhase = aligned ? 'align' : 'flip';
+  }
+
+  _getTractorApproachDestination(game, target, out) {
+    out.copy(target.root.position);
+    out.y = this._getTractorControllerHeight(target);
+    if (this.brain.tractorTargetKind !== 'player') {
+      tempA.copy(this.root.position).sub(game.player.root.position).setY(0);
+      const playerDistance = tempA.length();
+      if (playerDistance < TRACTOR_PLAYER_AVOID_RADIUS) {
+        if (playerDistance <= 0.001) tempA.set(this.genome.behavior.orbitDirection, 0, 0.35);
+        tempA.normalize();
+        out.addScaledVector(
+          tempA,
+          clamp01((TRACTOR_PLAYER_AVOID_RADIUS - playerDistance) / TRACTOR_PLAYER_AVOID_RADIUS) * 0.82,
+        );
+      }
+    }
+    return out;
+  }
+
+  _updateTractorApproach(dt, game, target) {
+    const brain = this.brain;
+    if (brain.tractorApproachPhase === 'choose') {
+      this._prepareTractorApproach(game, target);
+    }
+
+    if (brain.tractorApproachPhase === 'flip') {
+      brain.tractorApproachTimer += dt;
+      const duration = this.genome.modules.weapon.flipWindupDuration
+        ?? TRACTOR_FLIP_WINDUP_DURATION;
+      const progress = clamp01(brain.tractorApproachTimer / Math.max(0.01, duration));
+      this.visual.root.rotation.z = brain.tractorFlipDirection
+        * Math.PI * 2
+        * THREE.MathUtils.smootherstep(progress, 0, 1);
+      if (progress >= 1) {
+        this.visual.root.rotation.z = 0;
+        brain.tractorApproachPhase = 'zigzag';
+        brain.tractorApproachTimer = 0;
+        brain.tractorZigzagSwitchTimer = brain.tractorZigzagInterval;
+      }
+      return { moving: false, aligned: false, speedRatio: 0 };
+    }
+
+    if (brain.tractorApproachPhase === 'zigzag') {
+      brain.tractorApproachTimer += dt;
+      brain.tractorZigzagSwitchTimer -= dt;
+      if (brain.tractorZigzagSwitchTimer <= 0) {
+        brain.tractorZigzagSign *= -1;
+        brain.tractorZigzagInterval = this.aiRandom.float(
+          TRACTOR_ZIGZAG_MIN_INTERVAL,
+          TRACTOR_ZIGZAG_MAX_INTERVAL,
+        );
+        brain.tractorZigzagSwitchTimer += brain.tractorZigzagInterval;
+      }
+
+      const remaining = flatDistance(this.root.position, brain.tractorApproachDestination);
+      tempB.copy(brain.tractorApproachDestination).sub(this.root.position).setY(0);
+      if (tempB.lengthSq() <= 0.0001) tempB.set(0, 0, 1);
+      else tempB.normalize();
+      tempC.copy(brain.tractorApproachDestination);
+      if (remaining > 1.35) {
+        tempC.x += -tempB.z * brain.tractorZigzagSign * brain.tractorZigzagAmplitude;
+        tempC.z += tempB.x * brain.tractorZigzagSign * brain.tractorZigzagAmplitude;
+      }
+      const moving = this._moveAirTowardPosition(
+        dt,
+        game,
+        tempC,
+        this.genome.modules.weapon.zigzagSpeedScale ?? TRACTOR_ZIGZAG_SPEED_SCALE,
+      );
+      tempD.copy(tempC).sub(this.root.position).setY(0);
+      if (tempD.lengthSq() > 0.0001) {
+        tempD.normalize();
+        this._turnToward(tempD, dt, this.genome.behavior.turnRate * 4.2);
+      }
+      if (remaining <= 1.2 || brain.tractorApproachTimer >= TRACTOR_ZIGZAG_TIMEOUT) {
+        brain.tractorApproachPhase = 'align';
+        brain.tractorApproachTimer = 0;
+      }
+      return { moving, aligned: false, speedRatio: moving ? 2.7 : 0 };
+    }
+
+    if (brain.tractorTargetKind === 'player') {
+      const playerDrift = flatDistance(target.root.position, brain.tractorApproachDestination);
+      if (playerDrift > 2.2) {
+        this._resetTractorApproach();
+        return { moving: false, aligned: false, speedRatio: 0 };
+      }
+      tempC.copy(brain.tractorApproachDestination);
+      const moving = this._moveAirTowardPosition(dt, game, tempC, TRACTOR_PURSUIT_SPEED_SCALE);
+      const aligned = flatDistance(this.root.position, tempC) <= 1.15
+        && Math.abs(this.root.position.y - tempC.y) <= 0.9;
+      return { moving, aligned, speedRatio: moving ? 1.8 : 0 };
+    }
+
+    const moving = this._moveTractorAboveTarget(
+      dt,
+      game,
+      target,
+      TRACTOR_PURSUIT_SPEED_SCALE,
+    );
+    tempA.copy(target.root.position).sub(this.root.position).setY(0);
+    const aligned = tempA.length() <= 1.15
+      && Math.abs(this.root.position.y - this._getTractorControllerHeight(target)) <= 0.9;
+    return { moving, aligned, speedRatio: moving ? 1.8 : 0 };
+  }
+
+  _beginTractorTelegraph(game, target, alreadyClaimed) {
+    const brain = this.brain;
+    brain.tractorCargoTopOffset = this._measureTractorCargoTopOffset(target);
+    brain.state = 'telegraph';
+    brain.stateTime = 0;
+    brain.effectTimer = 0;
+    brain.tractorLiftStart.copy(target.root.position);
+    this._resetTractorApproach();
+    if (brain.tractorTargetKind === 'player') {
+      brain.tractorBeamPoint.copy(target.root.position);
+      brain.targetPosition.copy(brain.tractorBeamPoint);
+      this._createTelegraphMarker(
+        game,
+        this.genome.modules.weapon.playerCaptureRadius ?? TRACTOR_PLAYER_CAPTURE_RADIUS,
+        TRACTOR_BEAM_COLOR,
+      );
+    } else if (!alreadyClaimed) {
+      this._abortTractorCycle('claim-required', game);
+    }
+  }
+
+  _enterTractorCommit(target) {
+    this.brain.state = 'commit';
+    this.brain.stateTime = 0;
+    this.brain.attackFired = false;
+    this.brain.tractorLiftStart.copy(target.root.position);
+    this._removeTelegraphMarker();
+  }
+
+  _moveTractorAboveBeamPoint(dt, game, speedScale = TRACTOR_BEAM_TRACK_SPEED_SCALE) {
+    tempC.copy(this.brain.tractorBeamPoint);
+    tempC.y = this.brain.tractorApproachDestination.y
+      || this._getTractorControllerHeight(game.player);
+    return this._moveAirTowardPosition(dt, game, tempC, speedScale);
+  }
+
+  _updateTractorCrash(dt, game) {
+    const brain = this.brain;
+    brain.tractorCrashTimer += dt;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.tractorBeamActive = false;
+    brain.tractorBeamIntensity = 0;
+    this.knockback.set(0, 0, 0);
+
+    if (brain.tractorCrashPhase === 'falling') {
+      const progress = clamp01(brain.tractorCrashTimer / TRACTOR_CRASH_FALL_DURATION);
+      const eased = THREE.MathUtils.smoothstep(progress, 0, 1);
+      this.root.position.lerpVectors(brain.tractorCrashStart, brain.tractorCrashLanding, eased);
+      this.root.rotation.x = Math.sin(progress * Math.PI) * 0.24;
+      this.root.rotation.z = eased * Math.PI * 0.5;
+      if (progress >= 1) {
+        brain.tractorCrashPhase = 'grounded';
+        brain.tractorCrashTimer = 0;
+        this.root.position.copy(brain.tractorCrashLanding);
+        this.root.rotation.set(0, this.root.rotation.y, Math.PI * 0.5);
+        game?.addParticleBurst?.(this.root.position, this.genome.palette.dark, 12, 0.12);
+        game?.addHitEffect?.(this.root.position, TRACTOR_BEAM_COLOR, 0.65, { absolute: true });
+      }
+    } else if (brain.tractorCrashPhase === 'grounded') {
+      this.root.position.copy(brain.tractorCrashLanding);
+      this.root.rotation.x = 0;
+      this.root.rotation.z = Math.PI * 0.5;
+      if (brain.tractorCrashTimer >= TRACTOR_CRASH_GROUNDED_DURATION) {
+        brain.tractorCrashPhase = 'relaunching';
+        brain.tractorCrashTimer = 0;
+        brain.tractorCrashStart.copy(this.root.position);
+        brain.tractorCrashLanding.copy(this.root.position);
+        brain.tractorCrashLanding.y += Math.max(1.85, this.hoverHeight + 0.9);
+      }
+    } else if (brain.tractorCrashPhase === 'relaunching') {
+      const progress = clamp01(brain.tractorCrashTimer / TRACTOR_CRASH_RELAUNCH_DURATION);
+      const eased = THREE.MathUtils.smootherstep(progress, 0, 1);
+      this.root.position.lerpVectors(brain.tractorCrashStart, brain.tractorCrashLanding, eased);
+      this.root.rotation.x = 0;
+      this.root.rotation.z = THREE.MathUtils.lerp(Math.PI * 0.5, 0, eased);
+      if (progress >= 1) {
+        brain.tractorCrashPhase = null;
+        brain.tractorCrashTimer = 0;
+        brain.state = 'position';
+        brain.stateTime = 0;
+        brain.cooldown = Math.max(brain.cooldown, 0.35);
+        this.root.position.copy(brain.tractorCrashLanding);
+        this.root.rotation.x = 0;
+        this.root.rotation.z = 0;
+        this._resetTractorApproach();
+      }
+    }
+
+    this._updateExposureAndDefense();
+    this._animateVisual(dt);
+    return { handled: true, moving: false, moveAmount: 0 };
+  }
+
+  _findTractorTarget(game) {
+    const acquireRange = Math.max(
+      14,
+      (this.genome.modules.weapon.acquireRange ?? this.stats.attackRange ?? 8.5) * 1.45,
+    );
+    let best = null;
+    let bestScore = Infinity;
+    for (const enemy of game.enemies ?? []) {
+      if (!this._isValidTractorTarget(enemy, false)) continue;
+      if (!this._isPositionWithinTractorArena(enemy.root.position, game)) continue;
+      const distance = flatDistance(enemy.root.position, this.root.position);
+      if (distance > acquireRange) continue;
+      if (!this._canReachTractorTarget(game, enemy)) continue;
+      const sameEncounter = this.encounterId && enemy.encounterId === this.encounterId;
+      const score = distance + (sameEncounter ? 0 : 4.5) + (enemy.navigationMode === 'air' ? 1.2 : 0);
+      if (score < bestScore) {
+        best = enemy;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  _isValidTractorTarget(target, requireClaim = false) {
+    if (!target || target === this || target.dead || !target.root) return false;
+    if (target === this._runtimeGame?.player) return false;
+    if (target.genome?.archetypeId === 'tractorController') return false;
+    if (target.isBoss || target.type?.boss || target.typeKey === 'boss') return false;
+    if (requireClaim) return Boolean(target.hasExternalControl?.(this));
+    if (target.isExternalMotionActive?.()) return Boolean(target.hasExternalControl?.(this));
+    return !target.hasExternalControl?.() || Boolean(target.hasExternalControl?.(this));
+  }
+
+  _canReachTractorTarget(game, target) {
+    if (!target?.root) return false;
+    const controller = game.dungeonController;
+    if (!controller?.getAerialNavigationDirection) return true;
+    tempD.copy(this.root.position);
+    tempD.y += this.combatAimOffset;
+    tempE.copy(target.root.position);
+    tempE.y = this._getTractorControllerHeight(target) + this.combatAimOffset;
+    const routeDirection = controller.getAerialNavigationDirection(
+      tempD,
+      tempE,
+      this._getAerialCollisionOptions(),
+    );
+    if (!routeDirection) return false;
+
+    // A reachable controller center is insufficient if the generated cargo
+    // silhouette cannot rise into the magnet. Preflight the actual lift path
+    // so an oversized claw or jaw is not repeatedly selected under a fixture.
+    const prospectiveControllerRoot = target.root.position.clone();
+    prospectiveControllerRoot.y = this._getTractorControllerHeight(target);
+    const controllerDelta = prospectiveControllerRoot.clone().sub(this.root.position);
+    const prospectiveCargoRoot = this._getTractorCarryAnchor(target, new THREE.Vector3())
+      .add(controllerDelta);
+    return this._isTractorCargoRootPathClear(
+      game,
+      target,
+      target.root.position,
+      prospectiveCargoRoot,
+    );
+  }
+
+  _measureTractorCargoTopOffset(target) {
+    if (this.brain.tractorTargetKind === 'player'
+      && target === this._runtimeGame?.player) {
+      return 1.68;
+    }
+    target.root.updateMatrixWorld(true);
+    const visualRoot = target.visual?.root ?? target.root;
+    tempBounds.setFromObject(visualRoot);
+    if (tempBounds.isEmpty()) return (target.collisionHeight ?? 1.4) * 0.62;
+    return Math.max(
+      (target.collisionHeight ?? 1.4) * 0.45,
+      tempBounds.max.y - target.root.position.y,
+    );
+  }
+
+  _measureTractorCargoCollisionProfile(target) {
+    if (this.brain.tractorTargetKind === 'player'
+      && target === this._runtimeGame?.player) {
+      return {
+        radius: Math.max(0.42, target.radius ?? 0.42),
+        centerOffsetY: 0.88,
+        verticalRadius: 0.84,
+      };
+    }
+    target.root.updateMatrixWorld(true);
+    const visualRoot = target.visual?.root ?? target.root;
+    tempBounds.setFromObject(visualRoot);
+    if (tempBounds.isEmpty()) {
+      const height = target.collisionHeight ?? 1.4;
+      return {
+        radius: Math.max(0.22, target.radius ?? 0.45),
+        centerOffsetY: height * 0.45,
+        verticalRadius: Math.max(0.38, height * 0.43),
+      };
+    }
+
+    const rootPosition = target.root.position;
+    const xExtent = Math.max(
+      Math.abs(tempBounds.min.x - rootPosition.x),
+      Math.abs(tempBounds.max.x - rootPosition.x),
+    );
+    const zExtent = Math.max(
+      Math.abs(tempBounds.min.z - rootPosition.z),
+      Math.abs(tempBounds.max.z - rootPosition.z),
+    );
+    const floorClearance = 0.035;
+    return {
+      // The corner radius is conservative under the captive's continuing
+      // Y-axis rotation, including enormous off-center claws and jaws.
+      radius: Math.max(0.22, target.radius ?? 0.45, Math.hypot(xExtent, zExtent)),
+      centerOffsetY: ((tempBounds.min.y + tempBounds.max.y) * 0.5)
+        - rootPosition.y
+        + floorClearance,
+      verticalRadius: Math.max(0.2, (tempBounds.max.y - tempBounds.min.y) * 0.5),
+    };
+  }
+
+  _isTractorCargoRootPathClear(game, target, fromRootPosition, toRootPosition) {
+    const controller = game.dungeonController;
+    if (!controller?.isAerialPathClear) return true;
+    const profile = this._measureTractorCargoCollisionProfile(target);
+    tempG.copy(fromRootPosition);
+    tempG.y += profile.centerOffsetY;
+    tempH.copy(toRootPosition);
+    tempH.y += profile.centerOffsetY;
+    return controller.isAerialPathClear(tempG, tempH, {
+      radius: profile.radius,
+      verticalRadius: profile.verticalRadius,
+    });
+  }
+
+  _getTractorMuzzleOffsetY() {
+    this.root.updateMatrixWorld(true);
+    this.visual.weapon.muzzle.getWorldPosition(tempF);
+    return tempF.y - this.root.position.y;
+  }
+
+  _getTractorMagnetBottomOffsetY() {
+    const magnet = this.root.getObjectByName('generatedTractorHorseshoeMagnet');
+    if (!magnet) return this._getTractorMuzzleOffsetY();
+    this.root.updateMatrixWorld(true);
+    tempBounds.setFromObject(magnet);
+    return tempBounds.isEmpty()
+      ? this._getTractorMuzzleOffsetY()
+      : tempBounds.min.y - this.root.position.y;
+  }
+
+  _getTractorControllerHeight(target) {
+    const topOffset = this.brain.tractorTarget === target && this.brain.tractorCargoTopOffset > 0
+      ? this.brain.tractorCargoTopOffset
+      : this._measureTractorCargoTopOffset(target);
+    return target.root.position.y
+      + TRACTOR_CARGO_ROOT_LIFT
+      + topOffset
+      + TRACTOR_CARGO_GAP
+      - this._getTractorMagnetBottomOffsetY();
+  }
+
+  _moveTractorAboveTarget(dt, game, target, speedScale = 1) {
+    tempC.copy(target.root.position);
+    tempC.y = this._getTractorControllerHeight(target);
+
+    // The controller still has to enter beam alignment, but biases that
+    // approach to the side opposite MegaMan. The offset remains inside the
+    // tractor's acquisition tolerance so avoidance cannot deadlock a rescue.
+    tempA.copy(this.root.position).sub(game.player.root.position).setY(0);
+    const playerDistance = tempA.length();
+    if (playerDistance < TRACTOR_PLAYER_AVOID_RADIUS) {
+      if (playerDistance <= 0.001) {
+        tempA.copy(target.root.position).sub(game.player.root.position).setY(0);
+        if (tempA.lengthSq() <= 0.001) {
+          tempA.set(this.genome.behavior.orbitDirection, 0, 0.35);
+        }
+      }
+      tempA.normalize();
+      const avoidance = clamp01(
+        (TRACTOR_PLAYER_AVOID_RADIUS - playerDistance) / TRACTOR_PLAYER_AVOID_RADIUS,
+      ) * 0.82;
+      tempC.addScaledVector(tempA, avoidance);
+    }
+    return this._moveAirTowardPosition(dt, game, tempC, speedScale);
+  }
+
+  _moveTractorTowardThrowPosition(dt, game, target) {
+    tempA.copy(this.root.position).sub(game.player.root.position).setY(0);
+    if (tempA.lengthSq() <= 0.001) tempA.set(0, 0, -1);
+    tempA.normalize();
+    tempC.copy(game.player.root.position).addScaledVector(tempA, 3.8);
+    tempC.y = game.player.root.position.y + 1.75;
+    return this._moveAirTowardPosition(dt, game, tempC, 2.2, target);
+  }
+
+  _moveTractorAwayFromPlayer(dt, game, speedScale = 1) {
+    tempA.copy(this.root.position).sub(game.player.root.position).setY(0);
+    const distance = tempA.length();
+    if (distance >= TRACTOR_PLAYER_AVOID_RADIUS + 1.2) return false;
+    if (distance <= 0.001) {
+      tempA.set(this.genome.behavior.orbitDirection, 0, 0.4);
+    }
+    tempA.normalize();
+    tempB.set(tempA.z * this.genome.behavior.orbitDirection, 0, -tempA.x * this.genome.behavior.orbitDirection);
+    tempA.addScaledVector(tempB, 0.24).normalize();
+    tempC.copy(this.root.position).addScaledVector(tempA, 5.2);
+    tempC.y = Math.max(this.root.position.y, game.player.root.position.y + 2.15);
+    return this._moveAirTowardPosition(dt, game, tempC, speedScale);
+  }
+
+  _getTractorCarryAnchor(target, out) {
+    this.root.updateMatrixWorld(true);
+    this.visual.weapon.muzzle.getWorldPosition(out);
+    const topOffset = this.brain.tractorTarget === target && this.brain.tractorCargoTopOffset > 0
+      ? this.brain.tractorCargoTopOffset
+      : this._measureTractorCargoTopOffset(target);
+    // Place the captive's actual visual top below the lowest generated pole
+    // piece. Using the magnet bounds, rather than the abstract muzzle, keeps
+    // the gap stable across flyer scales and oversized modular silhouettes.
+    const magnet = this.root.getObjectByName('generatedTractorHorseshoeMagnet');
+    if (magnet) {
+      tempBounds.setFromObject(magnet);
+      if (!tempBounds.isEmpty()) {
+        out.y = tempBounds.min.y - topOffset - TRACTOR_CARGO_GAP;
+        return out;
+      }
+    }
+    out.y -= topOffset + TRACTOR_CARGO_GAP;
+    return out;
+  }
+
+  _setTractorBeamForTarget(target, intensity) {
+    this._setTractorBeamAtPosition(
+      target.root.position,
+      (target.collisionHeight ?? 1.4) * 0.45,
+      intensity,
+    );
+  }
+
+  _setTractorBeamAtPosition(position, verticalOffset, intensity) {
+    this.root.updateMatrixWorld(true);
+    this.visual.weapon.muzzle.getWorldPosition(tempA);
+    tempB.copy(position);
+    tempB.y += verticalOffset;
+    if (this.visual.weapon.tractorDirection) {
+      this.visual.weapon.group.worldToLocal(tempC.copy(tempB));
+      this.visual.weapon.tractorDirection
+        .copy(tempC)
+        .sub(this.visual.weapon.muzzle.position)
+        .normalize();
+    }
+    this.brain.tractorBeamActive = true;
+    this.brain.tractorBeamIntensity = intensity;
+    this.brain.tractorBeamLength = THREE.MathUtils.clamp(tempA.distanceTo(tempB), 1.1, 6.2);
+  }
+
+  _findTractorPlayerThrowLanding(game, target, arcHeight = 2.45) {
+    const controller = game.dungeonController;
+    tempD.copy(this.brain.tractorBeamPoint);
+    tempD.y = controller?.getSurfaceElevationAt?.(tempD) ?? game.player.root.position.y;
+    tempB.copy(this.brain.tractorBeamPoint).sub(this.brain.tractorApproachStart).setY(0);
+    if (tempB.lengthSq() <= 0.001) {
+      tempB.copy(game.player.lastMoveDirection ?? WORLD_FORWARD).setY(0);
+    }
+    if (tempB.lengthSq() <= 0.001) tempB.copy(WORLD_FORWARD);
+    tempB.normalize();
+
+    const preferredDistance = this.genome.modules.weapon.playerThrowDistance
+      ?? TRACTOR_PLAYER_THROW_DISTANCE;
+    const radii = [preferredDistance, preferredDistance * 0.82, preferredDistance * 0.64, 2.2];
+    const angles = [0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, Math.PI];
+    for (const radius of radii) {
+      for (const angle of angles) {
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        tempC.set(
+          tempD.x + (tempB.x * cos - tempB.z * sin) * radius,
+          tempD.y,
+          tempD.z + (tempB.x * sin + tempB.z * cos) * radius,
+        );
+        tempC.y = controller?.getSurfaceElevationAt?.(tempC) ?? tempC.y;
+        if (controller?.isPositionWalkable && !controller.isPositionWalkable(tempC)) continue;
+        if (!this._isPositionInsideTractorArena(tempC)) continue;
+        if (this._isTractorThrowArcClear(game, target, tempC, arcHeight)) {
+          return tempC.clone();
+        }
+      }
+    }
+    return null;
+  }
+
+  _isPositionInsideTractorArena(position) {
+    const bounds = this._getTractorArenaBounds();
+    if (!bounds) {
+      return true;
+    }
+    const margin = Math.max(0.6, this._runtimeGame?.player?.radius ?? 0.42);
+    return Math.abs(position.x - bounds.center.x) <= Math.max(0.5, bounds.halfWidth - margin)
+      && Math.abs(position.z - bounds.center.z) <= Math.max(0.5, bounds.halfDepth - margin);
+  }
+
+  _findTractorThrowLanding(game, target, arcHeight = 2.1) {
+    const controller = game.dungeonController;
+    tempD.copy(game.player.root.position);
+    tempB.copy(game.player.lastMoveDirection ?? WORLD_FORWARD).setY(0);
+    if (tempB.lengthSq() <= 0.001) tempB.copy(WORLD_FORWARD);
+    tempB.normalize();
+    tempD.addScaledVector(tempB, 0.75);
+    const angles = [0, Math.PI / 2, -Math.PI / 2, Math.PI, Math.PI / 4, -Math.PI / 4];
+    const radii = [0, 0.7, 1.25, 1.8];
+    for (const radius of radii) {
+      for (const angle of angles) {
+        tempC.set(
+          tempD.x + Math.sin(angle) * radius,
+          tempD.y,
+          tempD.z + Math.cos(angle) * radius,
+        );
+        tempC.y = controller?.getSurfaceElevationAt?.(tempC) ?? tempC.y;
+        const walkable = !controller?.isPositionWalkable || controller.isPositionWalkable(tempC);
+        if (walkable && this._isTractorThrowArcClear(game, target, tempC, arcHeight)) {
+          return tempC.clone();
+        }
+      }
+    }
+    return null;
+  }
+
+  _isTractorThrowArcClear(game, target, landingRootPosition, arcHeight) {
+    const controller = game.dungeonController;
+    if (!controller?.isAerialPositionClear || !target?.root) return true;
+    const profile = this._measureTractorCargoCollisionProfile(target);
+    const options = {
+      radius: profile.radius,
+      verticalRadius: profile.verticalRadius,
+    };
+    const distance = target.root.position.distanceTo(landingRootPosition);
+    const steps = Math.max(12, Math.ceil(distance / 0.28));
+    for (let step = 0; step <= steps; step += 1) {
+      const progress = step / steps;
+      tempE.copy(target.root.position).lerp(landingRootPosition, progress);
+      tempE.y += Math.sin(progress * Math.PI) * arcHeight;
+      tempE.y += profile.centerOffsetY;
+      if (!controller.isAerialPositionClear(tempE, options)) return false;
+    }
+    return true;
+  }
+
+  _abortTractorCycle(reason, game = null) {
+    this._removeTelegraphMarker();
+    this._releaseTractorTarget(reason, game);
+    this._resetTractorApproach();
+    this.brain.state = 'recovery';
+    this.brain.stateTime = 0;
+    this.brain.moving = false;
+  }
+
+  _findTractorReleaseLanding(game, target) {
+    const controller = game.dungeonController;
+    if (!controller || !target?.root) return null;
+    const origin = target.root.position;
+    const angles = [
+      0,
+      Math.PI / 4,
+      Math.PI / 2,
+      Math.PI * 3 / 4,
+      Math.PI,
+      -Math.PI * 3 / 4,
+      -Math.PI / 2,
+      -Math.PI / 4,
+    ];
+    for (const radius of [0, 0.75, 1.35, 2.1, 3]) {
+      for (const angle of angles) {
+        tempD.set(
+          origin.x + Math.sin(angle) * radius,
+          origin.y,
+          origin.z + Math.cos(angle) * radius,
+        );
+        tempD.y = controller.getSurfaceElevationAt?.(tempD) ?? tempD.y;
+        if (controller.isPositionWalkable && !controller.isPositionWalkable(tempD)) continue;
+        const arcHeight = radius <= 0.01 ? 0 : Math.min(1.35, 0.38 + radius * 0.34);
+        if (this._isTractorThrowArcClear(game, target, tempD, arcHeight)) {
+          return { position: tempD.clone(), arcHeight };
+        }
+      }
+    }
+    return null;
+  }
+
+  _releaseTractorTarget(reason = 'released', game = null) {
+    const target = this.brain?.tractorTarget;
+    const targetWasPlayer = this.brain?.tractorTargetKind === 'player';
+    if (target?.hasExternalControl?.(this)) {
+      let dropping = false;
+      if (game && (targetWasPlayer || target.navigationMode === 'ground')) {
+        target.root.rotation.x = 0;
+        target.root.rotation.z = 0;
+        const release = this._findTractorReleaseLanding(game, target);
+        if (release) {
+          dropping = Boolean(target.startExternalBallisticMotion?.(this, {
+            targetPosition: release.position,
+            duration: THREE.MathUtils.clamp(
+              0.36 + target.root.position.distanceTo(release.position) * 0.07,
+              0.42,
+              0.82,
+            ),
+            arcHeight: release.arcHeight,
+            spinRate: { x: 0, y: 3.5, z: 0 },
+          }));
+        }
+      }
+      if (!dropping) target.releaseExternalControl?.(this, reason);
+      if (!dropping) {
+        target.root.rotation.x = 0;
+        target.root.rotation.z = 0;
+      }
+    }
+    if (this.brain) {
+      this.brain.tractorTarget = null;
+      this.brain.tractorTargetKind = null;
+      this.brain.tractorBeamActive = false;
+      this.brain.tractorBeamIntensity = 0;
+      this.brain.tractorCargoTopOffset = 0;
+      this._resetTractorApproach();
     }
   }
 
@@ -643,6 +2389,8 @@ export class ReaverbotEnemy extends Enemy {
       case 'shockwave':
         game.addExplosion(this.root.position, this.stats.damage, 1.9, this.genome.palette.emissive, {
           source: this,
+          attackKind: 'shockwave',
+          powerfulKnockback: true,
           damageEnemies: false,
           damagePlayer: true,
           playerDamageScale: 1,
@@ -815,17 +2563,64 @@ export class ReaverbotEnemy extends Enemy {
     if (Math.abs(this.root.position.y - game.player.root.position.y) > 1.4) return;
     if (flatDistance(this.root.position, game.player.root.position) > this.radius + game.player.radius + padding) return;
     this.brain.attackHit = true;
-    const dealt = game.player.takeDamage(this.stats.damage, this);
+    const attackKind = this.genome.modules.weapon.attackKind;
+    tempC.copy(game.player.root.position).sub(this.root.position).setY(0);
+    if (tempC.lengthSq() <= 0.0001) tempC.copy(this.brain.attackDirection);
+    tempC.normalize();
+    const powerfulKnockback = attackKind === 'charge' || attackKind === 'pounce';
+    const dealt = game.player.takeDamage(this.stats.damage, this, {
+      attackKind,
+      powerfulKnockback,
+      knockbackDirection: tempC,
+      knockbackStrength: attackKind === 'charge' ? 1.2 : attackKind === 'pounce' ? 1.08 : 1,
+    });
     this.onHitPlayer(game.player, dealt);
     game.addHitEffect(game.player.root.position, this.genome.palette.emissive, 0.58);
     if (dealt > 0) game.requestHitStop?.(0.08, { timeScale: 0.05 });
   }
 
   _moveByMode(mode, dt, game, toPlayer, distance) {
+    if (this.genome.body.planId === 'hopper' && this.brain.coilBounceActive) {
+      return this._updateCoilBounce(dt, game);
+    }
     if (mode === 'hold') return false;
     let speedScale = mode.includes('Slow') ? 0.55 : 1;
+
+    if (this.navigationMode === 'air') {
+      tempA.copy(game.player.root.position).sub(this.root.position).setY(0);
+      const horizontalDistance = tempA.length();
+      if (horizontalDistance > 0.001) tempA.divideScalar(horizontalDistance);
+      else tempA.copy(WORLD_FORWARD);
+      const cruiseHeight = this.genome.archetypeId === 'aerialBomber' ? 0.45 : 0.95;
+      tempC.copy(game.player.root.position);
+      tempC.y += cruiseHeight;
+
+      if (mode === 'retreat') {
+        tempC.copy(this.root.position).addScaledVector(tempA, -3.2);
+        tempC.y = game.player.root.position.y + cruiseHeight;
+        speedScale = 0.7;
+      } else if (!['approach', 'approachSlow'].includes(mode)) {
+        const side = this.genome.behavior.orbitDirection;
+        tempB.set(tempA.z * side, 0, -tempA.x * side);
+        const preferred = this.genome.behavior.preferredRange ?? 4.5;
+        tempB.addScaledVector(tempA, THREE.MathUtils.clamp((horizontalDistance - preferred) * 0.24, -0.5, 0.6));
+        if (tempB.lengthSq() <= 0.001) tempB.copy(tempA);
+        tempB.normalize();
+        tempC.copy(this.root.position).addScaledVector(tempB, 3.2);
+        tempC.y = game.player.root.position.y + cruiseHeight;
+        speedScale = mode.includes('Slow') ? 0.45 : 0.76;
+      }
+      return this._moveAirTowardPosition(dt, game, tempC, speedScale);
+    }
+
     if (mode === 'approach' || mode === 'approachSlow') {
-      const navigation = game.dungeonController?.getNavigationDirection?.(this.root.position, game.player.root.position);
+      const navigation = game.dungeonController?.getEnemyNavigationDirection?.(
+        this,
+        game.player.root.position,
+      ) ?? game.dungeonController?.getNavigationDirection?.(
+        this.root.position,
+        game.player.root.position,
+      );
       tempB.copy(navigation ?? toPlayer).setY(0);
     } else if (mode === 'retreat') {
       tempB.copy(toPlayer).multiplyScalar(-1);
@@ -835,15 +2630,171 @@ export class ReaverbotEnemy extends Enemy {
       tempB.set(toPlayer.z * side, 0, -toPlayer.x * side);
       const radialCorrection = mode === 'flank'
         ? THREE.MathUtils.clamp((distance - 2.4) * 0.24, -0.4, 0.5)
-        : THREE.MathUtils.clamp((distance - this.genome.behavior.preferredRange) * 0.18, -0.36, 0.36);
+        : mode === 'jawOrbit'
+          ? THREE.MathUtils.clamp((distance - 2.1) * 0.34, -0.55, 0.64)
+          : THREE.MathUtils.clamp((distance - this.genome.behavior.preferredRange) * 0.18, -0.36, 0.36);
       tempB.addScaledVector(toPlayer, radialCorrection);
-      speedScale = mode.includes('Slow') ? 0.42 : 0.72;
+      speedScale = mode === 'jawOrbit' ? 1.05 : mode.includes('Slow') ? 0.42 : 0.72;
     }
 
     if (tempB.lengthSq() <= 0.001) return false;
     tempB.normalize();
+
+    if (!['approach', 'approachSlow'].includes(mode)
+      && game.dungeonController?.getEnemyNavigationDirection) {
+      tempC.copy(this.root.position).addScaledVector(tempB, 3.2);
+      const guardedDirection = game.dungeonController.getEnemyNavigationDirection(this, tempC);
+      if (guardedDirection?.lengthSq() > 0.0001) {
+        tempB.copy(guardedDirection).setY(0).normalize();
+      }
+    }
+
+    if (this.genome.body.planId === 'hopper') {
+      return this._updateCoilBounce(dt, game, tempB, speedScale);
+    }
+
     this.root.position.addScaledVector(tempB, this.stats.moveSpeed * this._getStatusMoveMultiplier() * speedScale * dt);
     return true;
+  }
+
+  _updateCoilBounce(dt, game, desiredDirection = null, speedScale = 1) {
+    const brain = this.brain;
+    if (brain.coilBounceActive) {
+      brain.coilBounceTime = Math.min(
+        brain.coilBounceDuration,
+        brain.coilBounceTime + Math.max(0, dt),
+      );
+      const progress = clamp01(brain.coilBounceTime / Math.max(0.01, brain.coilBounceDuration));
+      this.root.position.lerpVectors(brain.coilBounceStart, brain.coilBounceLanding, progress);
+      this.root.position.y += Math.sin(progress * Math.PI) * brain.coilBounceHeight;
+      if (progress >= 1) {
+        brain.coilBounceActive = false;
+        brain.coilBounceTime = 0;
+        brain.coilBounceCooldown = this.aiRandom.float(0.12, 0.22);
+        this.root.position.copy(brain.coilBounceLanding);
+      }
+      return true;
+    }
+
+    brain.coilBounceCooldown = Math.max(0, brain.coilBounceCooldown - dt);
+    if (brain.coilBounceCooldown > 0 || !desiredDirection || desiredDirection.lengthSq() <= 0.0001) {
+      return false;
+    }
+
+    tempA.copy(desiredDirection).setY(0).normalize();
+    const jumpDistance = THREE.MathUtils.clamp(
+      this.stats.moveSpeed * this._getStatusMoveMultiplier() * speedScale * 0.78,
+      1.65,
+      4.15,
+    );
+    const controller = game.dungeonController;
+    let foundLanding = false;
+    for (const distanceScale of [1, 0.78, 0.56, 0.36]) {
+      tempB.copy(this.root.position).addScaledVector(tempA, jumpDistance * distanceScale);
+      // Supplying the player's elevation as a probe allows the surface query
+      // to recognize a platform above the hopper's current floor.
+      tempB.y = Math.max(this.root.position.y, game.player.root.position.y);
+      tempB.y = controller?.getSurfaceElevationAt?.(tempB) ?? tempB.y;
+      const elevationDelta = tempB.y - this.root.position.y;
+      if (elevationDelta > 4.4 || elevationDelta < -3.2) continue;
+      const clearLanding = controller?.isEnemyPositionClear
+        ? controller.isEnemyPositionClear(this, tempB, { maximumElevationDelta: 4.6 })
+        : !controller?.isPositionWalkable || controller.isPositionWalkable(tempB);
+      if (!clearLanding) continue;
+
+      const jumpHeight = Math.max(
+        COIL_BOUNCE_MIN_HEIGHT,
+        Math.max(0, elevationDelta) + 1.25,
+        Math.abs(elevationDelta) * 0.45 + 1.7,
+      );
+      if (!this._isCoilBounceArcClear(game, this.root.position, tempB, jumpHeight)) continue;
+
+      brain.coilBounceLanding.copy(tempB);
+      brain.coilBounceHeight = jumpHeight;
+      foundLanding = true;
+      break;
+    }
+
+    if (!foundLanding) {
+      brain.coilBounceCooldown = 0.12;
+      return false;
+    }
+
+    brain.coilBounceActive = true;
+    brain.coilBounceTime = 0;
+    brain.coilBounceDuration = THREE.MathUtils.clamp(
+      COIL_BOUNCE_DURATION + Math.max(0, brain.coilBounceLanding.y - this.root.position.y) * 0.055,
+      COIL_BOUNCE_DURATION,
+      0.82,
+    );
+    brain.coilBounceStart.copy(this.root.position);
+    return true;
+  }
+
+  _isCoilBounceArcClear(game, startRootPosition, landingRootPosition, jumpHeight) {
+    const controller = game.dungeonController;
+    if (!controller?.isAerialPositionClear) return true;
+    const horizontalDistance = flatDistance(startRootPosition, landingRootPosition);
+    const steps = Math.max(10, Math.ceil(horizontalDistance / 0.24));
+    const centerOffset = Math.max(0.42, this.collisionHeight * 0.43);
+    const options = {
+      radius: Math.max(0.2, this.radius * 0.72),
+      verticalRadius: Math.max(0.3, this.collisionHeight * 0.32),
+    };
+    for (let step = 0; step <= steps; step += 1) {
+      const progress = step / steps;
+      tempC.copy(startRootPosition).lerp(landingRootPosition, progress);
+      tempC.y += Math.sin(progress * Math.PI) * jumpHeight + centerOffset;
+      if (!controller.isAerialPositionClear(tempC, options)) return false;
+    }
+    return true;
+  }
+
+  _moveAirTowardPosition(dt, game, targetRootPosition, speedScale = 1, carriedTarget = null) {
+    tempA.copy(this.root.position);
+    tempA.y += this.combatAimOffset;
+    tempB.copy(targetRootPosition);
+    tempB.y += this.combatAimOffset;
+    const distance = tempA.distanceTo(tempB);
+    if (distance <= 0.015) return false;
+
+    const controller = game.dungeonController;
+    let direction = null;
+    if (controller?.getAerialNavigationDirection) {
+      direction = controller.getAerialNavigationDirection(
+        tempA,
+        tempB,
+        this._getAerialCollisionOptions(),
+      );
+      // A null result means every tested over/around route is blocked. Do not
+      // fall through a wall just because direct pursuit would be shorter.
+      if (!direction) return false;
+    } else {
+      direction = tempC.copy(tempB).sub(tempA).normalize();
+    }
+
+    const step = Math.min(
+      distance,
+      this.stats.moveSpeed * this._getStatusMoveMultiplier() * speedScale * dt,
+    );
+    tempD.copy(this.root.position).addScaledVector(direction, step);
+
+    if (carriedTarget && controller?.isAerialPathClear) {
+      const cargoProfile = this._measureTractorCargoCollisionProfile(carriedTarget);
+      tempE.copy(carriedTarget.root.position);
+      tempE.y += cargoProfile.centerOffsetY;
+      this._getTractorCarryAnchor(carriedTarget, tempF);
+      tempF.sub(this.root.position).add(tempD);
+      tempF.y += cargoProfile.centerOffsetY;
+      const cargoOptions = {
+        radius: cargoProfile.radius,
+        verticalRadius: cargoProfile.verticalRadius,
+      };
+      if (!controller.isAerialPathClear(tempE, tempF, cargoOptions)) return false;
+    }
+
+    this.root.position.copy(tempD);
+    return step > 0.0001;
   }
 
   _turnToward(direction, dt, rate) {
@@ -858,28 +2809,106 @@ export class ReaverbotEnemy extends Enemy {
     if (this.genome.archetypeId === 'shieldSentinel') {
       return distance <= Math.min(this.stats.attackRange, this.genome.behavior.preferredRange + 0.45);
     }
-    if (kind === 'charge') return distance >= 1.2 && distance <= Math.max(5.8, this.stats.attackRange);
+    if (kind === 'charge') return distance >= 1.2 && distance <= Math.max(CHARGE_INITIATION_RANGE, this.stats.attackRange);
     if (kind === 'pounce') return distance >= 2 && distance <= this.stats.attackRange;
     if (kind === 'selfDestruct') return distance <= this.stats.attackRange + 0.4;
-    if (['melee', 'shockwave'].includes(kind)) return distance <= this.stats.attackRange + 0.5;
+    if (['melee', 'clawCombo', 'jawCombo', 'shockwave'].includes(kind)) return distance <= this.stats.attackRange + 0.5;
     return distance <= this.stats.attackRange;
   }
 
-  _hasPackSupport(game) {
-    const minimum = this.genome.behavior.minimumPackSize ?? 1;
-    if (minimum <= 1) return true;
-    let count = 0;
-    for (const enemy of game.enemies) {
-      if (enemy.dead) continue;
-      const sameEncounter = this.encounterId
-        ? enemy.encounterId === this.encounterId
-        : flatDistance(enemy.root.position, this.root.position) <= 8;
-      if (sameEncounter && flatDistance(enemy.root.position, this.root.position) <= 8) count += 1;
+  _getAerialCollisionOptions() {
+    return {
+      radius: Math.max(0.24, this.radius),
+      verticalRadius: Math.max(0.42, this.collisionHeight * 0.43),
+      lookAhead: Math.max(2.8, this.stats.moveSpeed * 1.15),
+    };
+  }
+
+  _isAerialRootPathClear(game, targetRootPosition) {
+    const controller = game.dungeonController;
+    if (!controller?.isAerialPathClear) return true;
+    tempD.copy(this.root.position);
+    tempD.y += this.combatAimOffset;
+    tempE.copy(targetRootPosition);
+    tempE.y += this.combatAimOffset;
+    return controller.isAerialPathClear(tempD, tempE, this._getAerialCollisionOptions());
+  }
+
+  _canBeginAttack(game) {
+    if (this.navigationMode !== 'air') return true;
+    const kind = this.genome.modules.weapon.attackKind;
+    if (!['charge', 'pounce'].includes(kind)) return true;
+    tempF.copy(game.player.root.position);
+    if (kind === 'charge') {
+      tempG.copy(game.player.root.position).sub(this.root.position).setY(0);
+      if (tempG.lengthSq() <= 0.0001) tempG.copy(WORLD_FORWARD);
+      else tempG.normalize();
+      const prospectiveDistance = Math.min(
+        CHARGE_MAX_TRAVEL_DISTANCE,
+        Math.max(3, flatDistance(this.root.position, game.player.root.position) + 1.4),
+      );
+      tempF.copy(this.root.position).addScaledVector(tempG, prospectiveDistance);
+    } else {
+      tempF.addScaledVector(game.player.lastMoveDirection ?? WORLD_FORWARD, 0.9);
     }
-    return count >= minimum;
+    tempF.y = game.player.root.position.y + 0.9;
+    return this._isAerialRootPathClear(game, tempF);
+  }
+
+  _getPackPlayerFacing(game, target = new THREE.Vector3()) {
+    const player = game?.player;
+    const yaw = player?.root?.rotation?.y;
+    if (Number.isFinite(yaw)) {
+      target.set(Math.sin(yaw), 0, Math.cos(yaw));
+    } else {
+      target.copy(player?.lastMoveDirection ?? WORLD_FORWARD).setY(0);
+    }
+    if (target.lengthSq() <= 0.0001) target.copy(WORLD_FORWARD);
+    return target.normalize();
+  }
+
+  _getPackRearTarget(game, target = new THREE.Vector3()) {
+    const behavior = this.genome.behavior;
+    this._getPackPlayerFacing(game, tempF);
+    tempG.set(tempF.z, 0, -tempF.x)
+      .multiplyScalar((behavior.rearLaneOffset ?? 0.62) * behavior.orbitDirection);
+    target.copy(game.player.root.position)
+      .addScaledVector(tempF, -(behavior.rearApproachDistance ?? 1.8))
+      .add(tempG);
+    target.y = this.root.position.y;
+    return target;
+  }
+
+  _isPlayerBackExposed(game) {
+    this._getPackPlayerFacing(game, tempF);
+    tempG.copy(this.root.position).sub(game.player.root.position).setY(0);
+    if (tempG.lengthSq() <= 0.0001) return false;
+    const rearDot = tempF.dot(tempG.normalize());
+    return rearDot <= (this.genome.behavior.rearAttackDot ?? -0.34);
+  }
+
+  _movePackHunterTowardRear(dt, game) {
+    this._getPackRearTarget(game, tempC);
+    tempD.copy(tempC).sub(this.root.position).setY(0);
+    const distance = tempD.length();
+    if (distance <= 0.16) return false;
+
+    const controller = game.dungeonController;
+    const navigation = controller?.getEnemyNavigationDirection?.(this, tempC);
+    if (controller?.getEnemyNavigationDirection && !navigation) return false;
+    tempD.copy(navigation ?? tempD).setY(0);
+    if (tempD.lengthSq() <= 0.0001) return false;
+    tempD.normalize();
+
+    const speed = this.stats.moveSpeed
+      * this._getStatusMoveMultiplier()
+      * (this.genome.behavior.rearPursuitSpeedScale ?? 1.22);
+    this.root.position.addScaledVector(tempD, Math.min(distance, speed * dt));
+    return true;
   }
 
   _clampCommitTargetToWalkablePath(game, target) {
+    if (this.navigationMode === 'air') return target;
     const controller = game.dungeonController;
     if (!controller?.isPositionWalkable) return target;
 
@@ -901,10 +2930,22 @@ export class ReaverbotEnemy extends Enemy {
     return target;
   }
 
-  _moveCommitAlongWalkablePath(game, nextX, nextZ) {
+  _moveCommitAlongWalkablePath(game, nextX, nextZ, nextY = this.root.position.y) {
     const controller = game.dungeonController;
+    if (this.navigationMode === 'air') {
+      tempA.copy(this.root.position);
+      tempA.y += this.combatAimOffset;
+      tempB.set(nextX, nextY + this.combatAimOffset, nextZ);
+      if (controller?.isAerialPathClear
+        && !controller.isAerialPathClear(tempA, tempB, this._getAerialCollisionOptions())) {
+        return false;
+      }
+      this.root.position.set(nextX, nextY, nextZ);
+      return true;
+    }
     if (!controller?.isPositionWalkable) {
       this.root.position.x = nextX;
+      this.root.position.y = nextY;
       this.root.position.z = nextZ;
       return true;
     }
@@ -971,15 +3012,51 @@ export class ReaverbotEnemy extends Enemy {
       state: brain.state,
       stateProgress: clamp01(brain.stateTime / Math.max(0.01, duration)),
       attackKind: this.genome.modules.weapon.attackKind,
+      comboOrientation: this.genome.modules.weapon.comboOrientation,
+      comboMountSide: this.genome.modules.weapon.mountSide,
+      comboInitialDirection: this.genome.modules.weapon.initialSweepDirection,
       defenseActive: brain.defenseActive,
       weakPointExposed: brain.weakPointExposed,
       weakPointLocation: this.genome.modules.weakPoint.location,
+      tractorBeamActive: brain.tractorBeamActive,
+      tractorBeamIntensity: brain.tractorBeamIntensity,
+      tractorBeamLength: brain.tractorBeamLength,
     });
+    this._applyRushAttackWarning(dt);
   }
 
-  _createTelegraphMarker(game, radius) {
+  _applyRushAttackWarning(dt) {
+    const brain = this.brain;
+    const kind = this.genome.modules.weapon.attackKind;
+    const rushTelegraph = brain.state === 'telegraph' && (kind === 'charge' || kind === 'pounce');
+    const chargeCommit = brain.state === 'commit' && kind === 'charge';
+
+    brain.warningBlinkRate = 0;
+    brain.warningIntensity = 0;
+    if (!rushTelegraph && !chargeCommit) return;
+
+    if (rushTelegraph) {
+      const progress = clamp01(brain.stateTime / Math.max(0.01, this.genome.behavior.telegraphDuration));
+      const urgency = THREE.MathUtils.smoothstep(progress, 0, 1);
+      brain.warningBlinkRate = THREE.MathUtils.lerp(RUSH_WARNING_MIN_RATE, RUSH_WARNING_MAX_RATE, urgency);
+      brain.warningPhase += dt * brain.warningBlinkRate * Math.PI * 2;
+      const blink = THREE.MathUtils.smoothstep(Math.sin(brain.warningPhase) * 0.5 + 0.5, 0.34, 0.88);
+      brain.warningIntensity = THREE.MathUtils.lerp(0.24, 1.05, urgency) * blink;
+    } else {
+      // A restrained solid highlight keeps a charging enemy readable at speed.
+      brain.warningIntensity = 0.2;
+    }
+
+    if (this.flashTimer > 0 || brain.warningIntensity <= 0.001) return;
+    for (const state of this._materialStates) {
+      state.material.emissive.copy(RUSH_WARNING_COLOR);
+      state.material.emissiveIntensity = Math.max(state.material.emissiveIntensity ?? 0, brain.warningIntensity);
+    }
+  }
+
+  _createTelegraphMarker(game, radius, color = this.genome.palette.emissive) {
     this._removeTelegraphMarker();
-    const marker = createTelegraphRing(this.genome.palette.emissive, radius);
+    const marker = createTelegraphRing(color, radius);
     this.brain.telegraphMarker = marker;
     game.scene.add(marker);
     this._updateTelegraphMarker(game);
@@ -989,14 +3066,29 @@ export class ReaverbotEnemy extends Enemy {
     const marker = this.brain.telegraphMarker;
     if (!marker) return;
     const kind = this.genome.modules.weapon.attackKind;
-    const position = kind === 'selfDestruct' || kind === 'shockwave'
+    let position = kind === 'selfDestruct' || kind === 'shockwave'
       ? this.root.position
       : this.brain.targetPosition;
+    if (kind === 'jawCombo') {
+      this.root.updateMatrixWorld(true);
+      this.visual.weapon.muzzle.getWorldPosition(tempA);
+      position = tempA;
+    }
     marker.position.copy(position);
     marker.position.y = (game.dungeonController?.getSurfaceElevationAt?.(position) ?? position.y) + 0.055;
-    const pulse = 1 + Math.sin(this.brain.time * 14) * 0.07;
+    const rushAttack = kind === 'charge' || kind === 'pounce';
+    const jawCycleProgress = kind === 'jawCombo' && this.brain.state === 'commit'
+      ? ((this.brain.stateTime / Math.max(0.01, this.genome.behavior.commitDuration)) * 3) % 1
+      : 0;
+    const pulse = rushAttack
+      ? 1 + this.brain.warningIntensity * 0.12
+      : kind === 'jawCombo'
+        ? 0.96 + (1 - jawCycleProgress) * 0.08
+      : 1 + Math.sin(this.brain.time * 14) * 0.07;
     marker.scale.setScalar(pulse);
-    marker.material.opacity = 0.28 + clamp01(this.brain.stateTime / Math.max(0.01, this.genome.behavior.telegraphDuration)) * 0.42;
+    marker.material.opacity = kind === 'jawCombo' && this.brain.state === 'commit'
+      ? 0.18 + (1 - jawCycleProgress) * 0.52
+      : 0.28 + clamp01(this.brain.stateTime / Math.max(0.01, this.genome.behavior.telegraphDuration)) * 0.42;
   }
 
   _removeTelegraphMarker() {

@@ -101,6 +101,27 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
     },
     threatCost: 7,
   },
+  tractorController: {
+    id: 'tractorController',
+    label: 'Tractor Controller',
+    role: 'supportController',
+    bodyPlans: ['hoverBell', 'flyer'],
+    weapons: ['tractorMagnet'],
+    defenses: ['energyMembrane', 'phaseShell', 'armorShutters'],
+    weakPoints: ['emitterCore', 'eyeLens'],
+    paletteId: 'tractorLavender',
+    baseStats: { health: 36, damage: 6, speed: 1.85, armor: 9, radius: 0.68 },
+    behavior: {
+      preferredRange: 6.2,
+      aggroRange: 20,
+      telegraph: 0.85,
+      commit: 2.7,
+      recovery: 1.1,
+      turnRate: 2.8,
+      minimumPackSize: 2,
+    },
+    threatCost: 7,
+  },
   rotorHunter: {
     id: 'rotorHunter',
     label: 'Rotor Hunter',
@@ -158,7 +179,10 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
       commit: 0.38,
       recovery: 0.68,
       turnRate: 4.8,
-      minimumPackSize: 2,
+      rearApproachDistance: 1.8,
+      rearLaneOffset: 0.62,
+      rearAttackDot: -0.34,
+      rearPursuitSpeedScale: 1.22,
     },
     threatCost: 4,
   },
@@ -248,23 +272,36 @@ export const REAVERBOT_BODY_PLANS = Object.freeze({
 export const REAVERBOT_WEAPONS = Object.freeze({
   ramHorn: {
     id: 'ramHorn', label: 'Ram Horn', tags: ['melee', 'charge'], requires: ['forwardMount'],
-    attackKind: 'charge', range: 1.15, damageScale: 1.08, threatCost: 2,
+    attackKind: 'charge', range: 1.15, damageScale: 1.08, meleeArmorBonus: 22, healthScale: 1.18, threatCost: 2,
   },
   crusherJaw: {
-    id: 'crusherJaw', label: 'Crushing Jaw', tags: ['melee', 'bite'], requires: ['forwardMount'],
-    attackKind: 'melee', range: 1.05, damageScale: 1, threatCost: 2,
+    id: 'crusherJaw', label: 'Crushing Jaw', tags: ['melee', 'bite', 'combo', 'shockwave'], requires: ['forwardMount'], bodyPlans: ['quadruped'],
+    attackKind: 'jawCombo', range: 3.6, preferredRange: 3.05, damageScale: 1.12, threatCost: 3,
+    comboCount: 3, strikeProgress: 0.72, strikeDamageScale: 0.78,
+    shockwaveRadius: 1.9, shockwaveDamageScale: 0.72, hopDistance: 1.25, minimumHopSeparation: 0.82,
+    telegraphDuration: 1.05, commitDuration: 2.1, recoveryDuration: 0.95, cooldownScale: 0.48,
+    meleeArmorBonus: 28, healthScale: 1.24, moveSpeedScale: 1.18,
   },
   clawArm: {
-    id: 'clawArm', label: 'Claw Arm', tags: ['melee', 'sweep'], requiresAny: ['armMount', 'forwardMount'],
-    attackKind: 'melee', range: 1.3, damageScale: 0.95, threatCost: 2,
+    id: 'clawArm', label: 'Constructor Claw', tags: ['melee', 'sweep', 'combo', 'articulated', 'vault'], requiresAny: ['armMount', 'forwardMount'],
+    attackKind: 'clawCombo', range: 4.55, preferredRange: 3.45, damageScale: 1.14, threatCost: 4,
+    comboCount: 3, strikeProgress: 0.6, strikeDamageScale: 0.74,
+    horizontalHalfAngle: 1.02, verticalHalfAngle: 0.42,
+    telegraphDuration: 0.72, commitDuration: 1.38, recoveryDuration: 0.82, cooldownScale: 0.58,
+    // Runtime uses the articulated reach for lane alignment and the vault
+    // envelope when the heavy claw drags its chassis over low cover.
+    baseReach: 2.95, extendedReach: 4.55, extensionDistance: 1.6,
+    dragSpeedScale: 1.38, dragAccelerationScale: 1.5,
+    vaultForwardDistance: 3.1, vaultHeight: 2.15, obstacleVaultHeight: 1.85,
+    meleeArmorBonus: 30, healthScale: 1.24,
   },
   pounceActuator: {
     id: 'pounceActuator', label: 'Pounce Actuator', tags: ['melee', 'pounce'], requires: ['jumpCapable'],
-    attackKind: 'pounce', range: 6.2, damageScale: 1.12, threatCost: 3,
+    attackKind: 'pounce', range: 8.6, damageScale: 1.12, meleeArmorBonus: 20, healthScale: 1.18, threatCost: 3,
   },
   shockPiston: {
     id: 'shockPiston', label: 'Shock Piston', tags: ['melee', 'shockwave'], requires: ['jumpCapable'],
-    attackKind: 'shockwave', range: 2.15, damageScale: 0.92, threatCost: 3,
+    attackKind: 'shockwave', range: 2.15, damageScale: 0.92, meleeArmorBonus: 22, healthScale: 1.18, threatCost: 3,
   },
   pulseCannon: {
     id: 'pulseCannon', label: 'Pulse Cannon', tags: ['ranged', 'direct'], requires: ['forwardMount'],
@@ -297,6 +334,19 @@ export const REAVERBOT_WEAPONS = Object.freeze({
   rotorBlade: {
     id: 'rotorBlade', label: 'Rotor Blade', tags: ['melee', 'spin', 'area'], requires: ['stablePose'],
     attackKind: 'charge', range: 1.75, damageScale: 0.72, threatCost: 4,
+    meleeArmorBonus: 26, healthScale: 1.22,
+    continuousContactDamage: true, contactDamageScale: 0.72, contactRadius: 1.65, contactHitInterval: 0.6,
+  },
+  tractorMagnet: {
+    id: 'tractorMagnet', label: 'Horseshoe Tractor Magnet', tags: ['support', 'control', 'tractor', 'magnetic'], requires: ['aerial'],
+    attackKind: 'tractorBeam', range: 8.5, preferredRange: 6.2, damageScale: 1, threatCost: 4,
+    acquireRange: 8.5, maxCargo: 1, telegraphDuration: 0.85, commitDuration: 2.7, recoveryDuration: 1.1,
+    liftDuration: 1, carryDuration: 1.25, throwDuration: 0.45,
+    cargoHoverOffset: 1.35, cargoSpinRate: 2.8,
+    throwLeadDistance: 1.4, throwSpeed: 8.2, throwArcHeight: 1.15, impactRadius: 1.35,
+    flipWindupDuration: 0.38, zigzagSpeedScale: 5.35,
+    playerCaptureRadius: 0.95, playerThrowDistance: 4.4,
+    playerImpactDamageScale: 1.6, playerImpactRadius: 1.8,
   },
   overloadCore: {
     id: 'overloadCore', label: 'Overload Core', tags: ['selfDestruct', 'area'], requiresAny: ['aerial', 'hovering'],
@@ -390,6 +440,7 @@ export const REAVERBOT_PALETTES = Object.freeze({
   pouncerOlive: { primary: 0x6f7d3d, secondary: 0x38452c, trim: 0xb3b86a, dark: 0x20271b, emissive: 0xffc65b },
   artilleryViolet: { primary: 0x65546e, secondary: 0x343344, trim: 0xa694a8, dark: 0x211e29, emissive: 0xc39bff },
   controllerTeal: { primary: 0x3f7771, secondary: 0x244844, trim: 0xa0b99d, dark: 0x172b2b, emissive: 0x6fffe1 },
+  tractorLavender: { primary: 0x68647f, secondary: 0x343348, trim: 0xc0b5d5, dark: 0x1d1d29, emissive: 0x9fffe8 },
   rotorCopper: { primary: 0x8c6648, secondary: 0x3d4b4d, trim: 0xd1b178, dark: 0x242829, emissive: 0x67e6ff },
   bomberIvory: { primary: 0xb8aa82, secondary: 0x50483e, trim: 0xe1d5a7, dark: 0x292521, emissive: 0xff9c47 },
   packSand: { primary: 0x8e8560, secondary: 0x48523d, trim: 0xc7b988, dark: 0x292d23, emissive: 0xaeea6d },
@@ -398,16 +449,16 @@ export const REAVERBOT_PALETTES = Object.freeze({
 
 export const INTENT_ARCHETYPE_WEIGHTS = Object.freeze({
   basic: [
-    ['pursuer', 3], ['packHunter', 3], ['duelist', 1.5], ['shieldSentinel', 1], ['pouncer', 1], ['rotorHunter', 1.2],
+    ['pursuer', 3], ['packHunter', 3], ['duelist', 1.5], ['shieldSentinel', 1], ['pouncer', 1], ['rotorHunter', 1.2], ['tractorController', 0.8],
   ],
   fast: [
-    ['pursuer', 4], ['pouncer', 3], ['packHunter', 4], ['rotorHunter', 2], ['aerialBomber', 1],
+    ['pursuer', 4], ['pouncer', 3], ['packHunter', 4], ['rotorHunter', 2], ['aerialBomber', 1], ['tractorController', 0.6],
   ],
   tank: [
     ['shieldSentinel', 4], ['artillery', 2], ['duelist', 2], ['rotorHunter', 1.4], ['zoneController', 1],
   ],
   ranged: [
-    ['artillery', 4], ['zoneController', 4], ['shieldSentinel', 2], ['aerialBomber', 1.5],
+    ['artillery', 4], ['zoneController', 4], ['shieldSentinel', 2], ['aerialBomber', 1.5], ['tractorController', 2],
   ],
   horokko: [
     ['artillery', 4], ['zoneController', 2], ['pouncer', 1],

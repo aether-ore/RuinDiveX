@@ -119,6 +119,7 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
 
     for (const enemy of [...game.enemies]) enemy.root.removeFromParent();
     game.enemies.length = 0;
+    game.player.root.rotation.y = 0;
     const hunterPosition = game.player.root.position.clone();
     hunterPosition.z += 1.2;
     const hunter = window.spawnReaverbot({
@@ -128,22 +129,20 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
     });
     hunter.encounterId = 'runtime-pack-test';
     hunter.brain.cooldown = 0;
-    const soloSupport = hunter._hasPackSupport(game);
-    hunter._updatePositionState(0.1, game, toPlayer, 1.2);
-    const soloState = hunter.brain.state;
-    const allyPosition = hunterPosition.clone();
-    allyPosition.x += 2;
-    const ally = window.spawnReaverbot({
-      archetypeId: 'pursuer',
-      seed: 'qa:0',
-      position: allyPosition,
-    });
-    ally.encounterId = 'runtime-pack-test';
-    const groupedSupport = hunter._hasPackSupport(game);
+    const frontExposed = hunter._isPlayerBackExposed(game);
+    const rearTarget = hunter._getPackRearTarget(game).clone();
+    const frontDirection = game.player.root.position.clone().sub(hunter.root.position).setY(0).normalize();
+    hunter._updatePositionState(0.1, game, frontDirection, 1.2);
+    const frontState = hunter.brain.state;
+
+    hunter.root.position.copy(game.player.root.position);
+    hunter.root.position.z -= 1.5;
+    const rearExposed = hunter._isPlayerBackExposed(game);
+    const rearDirection = game.player.root.position.clone().sub(hunter.root.position).setY(0).normalize();
     hunter.brain.cooldown = 0;
     hunter.brain.state = 'position';
-    hunter._updatePositionState(0.1, game, toPlayer, 1.2);
-    const groupedState = hunter.brain.state;
+    hunter._updatePositionState(0.1, game, rearDirection, 1.5);
+    const soloRearState = hunter.brain.state;
 
     game.player.health = game.player.stats.maxHealth;
     const verticalHealthBefore = game.player.health;
@@ -177,12 +176,20 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
         telegraph: pounceTelegraph,
         recoveryWeakPoint: pounceRecoveryWeakPoint,
       },
-      pack: { soloSupport, soloState, groupedSupport, groupedState },
+      pack: {
+        minimumPackSize: hunter.genome.behavior.minimumPackSize,
+        frontExposed,
+        frontState,
+        rearExposed,
+        soloRearState,
+        rearTargetZ: rearTarget.z,
+        playerZ: game.player.root.position.z,
+      },
       verticalMeleeDamage,
     };
   });
 
-  expect(result.catalog.archetypes).toHaveLength(9);
+  expect(result.catalog.archetypes).toHaveLength(10);
   expect(result.catalog.bodyPlans).toHaveLength(8);
   expect(result.catalog.weapons.length).toBeGreaterThanOrEqual(12);
   expect(result.sentinel.eyeCount).toBe(1);
@@ -210,10 +217,12 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
   expect(result.pounce.telegraph.state).toBe('telegraph');
   expect(result.pounce.telegraph.marker).toBe(true);
   expect(result.pounce.recoveryWeakPoint).toBe(true);
-  expect(result.pack.soloSupport).toBe(false);
-  expect(result.pack.soloState).toBe('position');
-  expect(result.pack.groupedSupport).toBe(true);
-  expect(result.pack.groupedState).toBe('telegraph');
+  expect(result.pack.minimumPackSize).toBe(1);
+  expect(result.pack.frontExposed).toBe(false);
+  expect(result.pack.frontState).toBe('position');
+  expect(result.pack.rearExposed).toBe(true);
+  expect(result.pack.soloRearState).toBe('telegraph');
+  expect(result.pack.rearTargetZ).toBeLessThan(result.pack.playerZ);
   expect(result.verticalMeleeDamage).toBe(0);
 });
 
@@ -693,4 +702,230 @@ test('paired guards protect leg joints and the rotor exposes its counterweight s
     expect(sample.weakHit).toBe(true);
     expect(sample.weakBlocked).toBe(false);
   }
+});
+
+test('procedural Reaverbot modules become stackable crafting-material pickups with visible sources', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=module-salvage-runtime');
+  await page.waitForFunction(() => Boolean(
+    window.game
+    && window.spawnReaverbot
+    && window.getReaverbotSalvageCatalog,
+  ));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    game.stop();
+    game.lootSystem.clear();
+    game.inventory.materials = {};
+    for (const enemy of [...game.enemies]) {
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+
+    let hopper = null;
+    for (let index = 0; index < 80; index += 1) {
+      const candidate = window.spawnReaverbot({
+        archetypeId: 'pouncer',
+        seed: `runtime-spring-hunt:${index}`,
+        position: game.player.root.position.clone().add({ x: 0, y: 0, z: 3 }),
+      });
+      if (candidate.genome.body.planId === 'hopper') {
+        hopper = candidate;
+        break;
+      }
+      candidate.dispose?.();
+      candidate.root.removeFromParent();
+      game.enemies.splice(game.enemies.indexOf(candidate), 1);
+    }
+
+    if (!hopper) throw new Error('Unable to generate a Spring Hopper salvage sample.');
+    const profile = hopper.salvageProfile.map((candidate) => ({
+      aspect: candidate.aspect,
+      moduleId: candidate.moduleId,
+      materialId: candidate.materialId,
+    }));
+    const drops = game._rollEnemyModuleDrops(hopper, { random: () => 0 });
+    const pickupCount = game.lootSystem.pickups.length;
+    const pickupShapes = game.lootSystem.pickups.map((pickup) => ({
+      itemShape: pickup.item.scrapShape,
+      visualShape: pickup.object.children[0]?.userData?.scrapShape,
+      partNames: pickup.object.children[0]?.children?.map((part) => part.name) ?? [],
+    }));
+    game.player.root.position.copy(hopper.root.position);
+    const collected = game.lootSystem.update(0.016, game.player, game.inventory);
+    game.ui.renderInventory();
+
+    return {
+      catalogMaterialCount: window.getReaverbotSalvageCatalog().materials.length,
+      bodyPlan: hopper.genome.body.planId,
+      profile,
+      drops: drops.map((drop) => ({ id: drop.id, aspect: drop.source.aspect })),
+      pickupCount,
+      pickupShapes,
+      remainingPickups: game.lootSystem.pickups.length,
+      collectedKinds: collected.map((pickup) => pickup.pickupKind),
+      springCount: game.inventory.getMaterialCount('temperedJumpSpring'),
+      materialCount: game.inventory.getMaterials().length,
+      materialUi: document.getElementById('material-inventory')?.textContent ?? '',
+    };
+  });
+
+  expect(result.catalogMaterialCount).toBe(55);
+  expect(result.bodyPlan).toBe('hopper');
+  expect(result.profile).toHaveLength(6);
+  expect(result.profile.find((candidate) => candidate.aspect === 'body')).toEqual({
+    aspect: 'body',
+    moduleId: 'hopper',
+    materialId: 'temperedJumpSpring',
+  });
+  expect(result.drops).toHaveLength(6);
+  expect(result.pickupCount).toBe(6);
+  expect([...new Set(result.pickupShapes.map((pickup) => pickup.itemShape))].sort()).toEqual(['bolt', 'gear', 'screw']);
+  expect(result.pickupShapes.every((pickup) => pickup.itemShape === pickup.visualShape)).toBe(true);
+  expect(result.pickupShapes.some((pickup) => pickup.partNames.includes('scrapBoltHead'))).toBe(true);
+  expect(result.pickupShapes.some((pickup) => pickup.partNames.includes('scrapScrewThread'))).toBe(true);
+  expect(result.pickupShapes.some((pickup) => pickup.partNames.includes('scrapGearTooth'))).toBe(true);
+  expect(result.remainingPickups).toBe(0);
+  expect(result.collectedKinds.every((kind) => kind === 'material')).toBe(true);
+  expect(result.springCount).toBe(1);
+  expect(result.materialCount).toBe(6);
+  expect(result.materialUi).toContain('Tempered Jump Spring');
+  expect(result.materialUi).toContain('Spring Hopper');
+});
+
+test('rush enemies acquire from range and expose accelerating red attack warnings', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    game.stop();
+    game.projectiles.clear();
+    for (const enemy of [...game.enemies]) {
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+
+    const Vector3 = game.player.root.position.constructor;
+    const base = game.player.root.position.clone();
+    const controller = game.dungeonController;
+    const originalWalkable = controller.isPositionWalkable;
+    const originalElevation = controller.getSurfaceElevationAt;
+    controller.isPositionWalkable = () => true;
+    controller.getSurfaceElevationAt = (position) => position.y;
+
+    const removeEnemy = (enemy) => {
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+      const index = game.enemies.indexOf(enemy);
+      if (index >= 0) game.enemies.splice(index, 1);
+    };
+    const findEnemy = (archetypeId, attackKind, position) => {
+      for (let variant = 0; variant < 100; variant += 1) {
+        const enemy = window.spawnReaverbot({
+          archetypeId,
+          seed: `runtime-rush:${archetypeId}:${variant}`,
+          position,
+        });
+        if (enemy.genome.modules.weapon.attackKind === attackKind) return enemy;
+        removeEnemy(enemy);
+      }
+      return null;
+    };
+
+    const pouncerPosition = base.clone().add(new Vector3(0, 0, 8.2));
+    const pouncer = findEnemy('pouncer', 'pounce', pouncerPosition);
+    pouncer.brain.cooldown = 0;
+    const pounceDirection = base.clone().sub(pouncer.root.position).setY(0).normalize();
+    pouncer._updatePositionState(1 / 60, game, pounceDirection, 8.2);
+    const pounceMarkerColor = pouncer.brain.telegraphMarker?.material.color.getHex() ?? null;
+    pouncer.brain.warningPhase = 0;
+    pouncer.brain.stateTime = pouncer.genome.behavior.telegraphDuration * 0.1;
+    pouncer._animateVisual(0);
+    const pounceEarlyRate = pouncer.brain.warningBlinkRate;
+    pouncer.brain.warningPhase = 0;
+    pouncer.brain.stateTime = pouncer.genome.behavior.telegraphDuration * 0.9;
+    pouncer._animateVisual(0);
+    const pounceLateRate = pouncer.brain.warningBlinkRate;
+    const pounceBodyColor = pouncer.visual.materials.primary.emissive.getHex();
+    const pounceBodyIntensity = pouncer.visual.materials.primary.emissiveIntensity;
+
+    const chargerPosition = base.clone().add(new Vector3(0, 0, 10));
+    const charger = findEnemy('pursuer', 'charge', chargerPosition);
+    const chargeDirection = base.clone().sub(charger.root.position).setY(0).normalize();
+    const chargeCanStartAtTen = charger._isAttackDistance(10);
+    charger._beginTelegraph(game, chargeDirection);
+    const initialChargeDirection = charger.brain.attackDirection.clone();
+    const initialChargeTravel = charger.root.position.distanceTo(charger.brain.targetPosition);
+    const trackingDirection = new Vector3(0.75, 0, -0.66).normalize();
+    charger._updateTelegraphState(0.05, game, trackingDirection);
+    const trackedDirectionDot = charger.brain.attackDirection.dot(initialChargeDirection);
+    charger.brain.warningPhase = 0;
+    charger.brain.stateTime = charger.genome.behavior.telegraphDuration * 0.1;
+    charger._animateVisual(0);
+    const chargeEarlyRate = charger.brain.warningBlinkRate;
+    charger.brain.warningPhase = 0;
+    charger.brain.stateTime = charger.genome.behavior.telegraphDuration * 0.9;
+    charger._animateVisual(0);
+    const chargeLateRate = charger.brain.warningBlinkRate;
+
+    charger._applyStatusVisuals();
+    charger.brain.state = 'commit';
+    charger.brain.stateTime = charger.genome.behavior.commitDuration * 0.35;
+    charger._animateVisual(0);
+    const chargeCommitColor = charger.visual.materials.primary.emissive.getHex();
+    const chargeCommitIntensity = charger.visual.materials.primary.emissiveIntensity;
+
+    const minimumEncounterSize = Math.min(
+      ...game.dungeonController.encounters.map((encounter) => encounter.roster.length),
+    );
+
+    pouncer._removeTelegraphMarker();
+    charger._removeTelegraphMarker();
+    controller.isPositionWalkable = originalWalkable;
+    controller.getSurfaceElevationAt = originalElevation;
+
+    return {
+      pounce: {
+        attackRange: pouncer.stats.attackRange,
+        aggroRange: pouncer.genome.behavior.aggroRange,
+        state: pouncer.brain.state,
+        markerColor: pounceMarkerColor,
+        earlyRate: pounceEarlyRate,
+        lateRate: pounceLateRate,
+        bodyColor: pounceBodyColor,
+        bodyIntensity: pounceBodyIntensity,
+      },
+      charge: {
+        aggroRange: charger.genome.behavior.aggroRange,
+        canStartAtTen: chargeCanStartAtTen,
+        travel: initialChargeTravel,
+        trackedDirectionDot,
+        earlyRate: chargeEarlyRate,
+        lateRate: chargeLateRate,
+        commitColor: chargeCommitColor,
+        commitIntensity: chargeCommitIntensity,
+      },
+      minimumEncounterSize,
+    };
+  });
+
+  expect(result.pounce.attackRange).toBeGreaterThanOrEqual(8.5);
+  expect(result.pounce.aggroRange).toBeGreaterThanOrEqual(24);
+  expect(result.pounce.state).toBe('telegraph');
+  expect(result.pounce.markerColor).toBe(0xff2020);
+  expect(result.pounce.lateRate).toBeGreaterThan(result.pounce.earlyRate * 3);
+  expect(result.pounce.bodyColor).toBe(0xff2020);
+  expect(result.pounce.bodyIntensity).toBeGreaterThan(0.1);
+  expect(result.charge.aggroRange).toBeGreaterThanOrEqual(26);
+  expect(result.charge.canStartAtTen).toBe(true);
+  expect(result.charge.travel).toBeGreaterThan(10.5);
+  expect(result.charge.travel).toBeLessThanOrEqual(12.5);
+  expect(result.charge.trackedDirectionDot).toBeLessThan(0.999);
+  expect(result.charge.lateRate).toBeGreaterThan(result.charge.earlyRate * 3);
+  expect(result.charge.commitColor).toBe(0xff2020);
+  expect(result.charge.commitIntensity).toBeGreaterThanOrEqual(0.2);
+  expect(result.minimumEncounterSize).toBeGreaterThanOrEqual(3);
 });

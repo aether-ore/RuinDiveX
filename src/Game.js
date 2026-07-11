@@ -13,6 +13,7 @@ import { RefractorPickupSystem } from './RefractorPickupSystem.js';
 import { UIManager } from './UIManager.js';
 import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
 import { getCombatTargetWorldPosition } from './reaverbots/CombatTarget.js';
+import { rollReaverbotSalvageDrops } from './reaverbots/ReaverbotSalvageCatalog.js';
 
 const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
 const CAMERA_LOOK_OFFSET = new THREE.Vector3(0, 1.1, 0);
@@ -49,6 +50,9 @@ const DEBUG_LEDGE_APPROACH_DOT_MAX = -0.2;
 const PLATFORM_EDGE_CATCH_DISTANCE_MIN = -0.05;
 const PLATFORM_EDGE_CATCH_DISTANCE_MAX = 0.2;
 const PLATFORM_EDGE_CATCH_VERTICAL_ABOVE = 0.24;
+const PLATFORM_EDGE_CLEAR_FOOT_TOLERANCE = 0.1;
+const PLATFORM_EDGE_CLEAR_DISTANCE_MAX = 0.42;
+const PLATFORM_EDGE_CLEAR_INWARD_SPEED_MIN = 0.65;
 const PLATFORM_LEDGE_GRAB_HEIGHT_MIN = -0.45;
 const PLATFORM_NORMAL_JUMP_REACH_RATIO = PLAYER_TRAVERSAL_CAPABILITIES.normalJumpReachRatio;
 const PLATFORM_LEDGE_MAX_REACH_RATIO = PLAYER_TRAVERSAL_CAPABILITIES.ledgeGrabHeightRatio;
@@ -268,9 +272,16 @@ export class Game {
     this.refractors = new RefractorPickupSystem(this.scene);
     this.projectiles = new ProjectileSystem(this);
     this.combat = new CombatSystem(this);
+    this.player.onDodgeStarted = () => this.combat.cancelForDodge();
     this.spawner = new EnemySpawner(this);
     this.ui = new UIManager(this);
     this.dungeonController = new DungeonController(this, this.dungeon);
+    this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
+      this.dungeonController.resolvePowerKnockbackTravel(fromPosition, position)
+    );
+    this.player.powerKnockbackLandingResolver = ({ position, direction, originPosition }) => (
+      this.dungeonController.resolvePowerKnockbackLanding(position, direction, originPosition)
+    );
     this.mapEvents = new MapEventSystem(this);
 
     this._addStarterItems();
@@ -1272,7 +1283,14 @@ export class Game {
       return 0;
     }
 
+    const externalMotionOwner = enemy.externalControl?.owner
+      ?? enemy.externalBallisticMotion?.owner
+      ?? null;
+    const wasExternallyMoved = Boolean(enemy.isExternalMotionActive?.());
     const dealt = enemy.takeDamage(amount, meta);
+    if (enemy.dead && wasExternallyMoved) {
+      this._prepareExternallyMovedEnemyDeath(enemy, externalMotionOwner);
+    }
     const globalHitStopDuration = meta.globalHitStopDuration
       ?? (meta.projectileHit ? 0 : meta.hitStopDuration);
     const hitStopDuration = Number(globalHitStopDuration) || 0;
@@ -1601,9 +1619,17 @@ export class Game {
     }
 
     if ((meta.damagePlayer ?? true) && this.player.root.position.distanceTo(position) <= radius && !this.player.dead) {
+      tempVectorA.copy(this.player.root.position).sub(position).setY(0);
+      if (tempVectorA.lengthSq() <= 0.0001) {
+        tempVectorA.copy(this.player.lastMoveDirection).multiplyScalar(-1);
+      }
+      tempVectorA.normalize();
       const dealt = this.player.takeDamage(damage * (meta.playerDamageScale ?? 0.35), meta.source ?? null, {
         impactPosition: position,
         attackKind: meta.attackKind ?? 'explosion',
+        powerfulKnockback: meta.powerfulKnockback ?? true,
+        knockbackDirection: tempVectorA,
+        knockbackStrength: meta.knockbackStrength ?? 1.08,
         unblockable: Boolean(meta.unblockable),
       });
       if (dealt > 0) {
@@ -1705,6 +1731,7 @@ export class Game {
           aimWorld: this.pointer.aimWorld,
           projectileAimInputHeld: Boolean(this.pointer.primary || this.pointer.secondary),
           groundY: playerGroundY,
+          game: this,
         });
         this.dungeonController.update(gameplayDt);
         this.mapEvents.update(gameplayDt);
@@ -2154,6 +2181,7 @@ export class Game {
     root,
     jumpStartY,
     jumpReachHeight,
+    previousRootY,
   } = {}, platforms = this.debugLedgePlatform ? [this.debugLedgePlatform] : []) {
     if (!player || !root || !platforms.length) {
       return false;
@@ -2174,6 +2202,13 @@ export class Game {
       const verticalDistance = root.position.y - platform.topY;
       if (verticalDistance < -0.12 || verticalDistance > PLATFORM_LANDING_VERTICAL_TOLERANCE) {
         continue;
+      }
+      if (Number.isFinite(previousRootY)) {
+        const crossedTop = previousRootY >= platform.topY && root.position.y <= platform.topY;
+        const alreadyOnTop = Math.abs(verticalDistance) <= 0.01;
+        if (!crossedTop && !alreadyOnTop) {
+          continue;
+        }
       }
 
       if (!landingPlatform || platform.topY > landingPlatform.topY) {
@@ -2227,6 +2262,18 @@ export class Game {
       && verticalDistance <= PLATFORM_EDGE_CATCH_VERTICAL_ABOVE;
   }
 
+  _isForwardJumpClearingPlatformEdge({ player, root, ledge, faceDistance }) {
+    const verticalDistance = root.position.y - ledge.topY;
+    const inwardSpeed = -(
+      (player.velocity?.x ?? 0) * ledge.normal.x
+      + (player.velocity?.z ?? 0) * ledge.normal.z
+    );
+    return faceDistance <= PLATFORM_EDGE_CLEAR_DISTANCE_MAX
+      && verticalDistance >= -PLATFORM_EDGE_CLEAR_FOOT_TOLERANCE
+      && verticalDistance <= PLATFORM_LANDING_VERTICAL_TOLERANCE
+      && inwardSpeed >= PLATFORM_EDGE_CLEAR_INWARD_SPEED_MIN;
+  }
+
   _tryResolveDebugLedgeCling({
     player,
     root,
@@ -2273,6 +2320,14 @@ export class Game {
       const ledgeHeight = ledge.topY - startY;
       const maximumGrabElevation = reachHeight * PLATFORM_LEDGE_MAX_REACH_RATIO;
       if (ledgeHeight < PLATFORM_LEDGE_GRAB_HEIGHT_MIN || ledgeHeight > maximumGrabElevation) {
+        continue;
+      }
+      if (this._isForwardJumpClearingPlatformEdge({
+        player,
+        root,
+        ledge,
+        faceDistance,
+      })) {
         continue;
       }
 
@@ -3680,8 +3735,61 @@ export class Game {
 
     this.refractors.rollEnemyDrop(enemy);
     this.dungeonController?.rollEnemyKeycardDrop?.(enemy);
+    this._rollEnemyModuleDrops(enemy);
     this._rollEnemyScrapDrop(enemy);
     this.lootSystem.rollDrop(enemy);
+  }
+
+  _prepareExternallyMovedEnemyDeath(enemy, externalMotionOwner = null) {
+    if (!enemy?.root) return null;
+    let landing = externalMotionOwner?._findTractorReleaseLanding?.(this, enemy)?.position ?? null;
+    if (!landing) {
+      tempVectorA.copy(enemy.root.position).sub(this.player.root.position).setY(0);
+      if (tempVectorA.lengthSq() <= 0.0001) tempVectorA.set(1, 0, 0);
+      const resolved = this.dungeonController?.resolvePowerKnockbackLanding?.(
+        enemy.root.position,
+        tempVectorA,
+      );
+      landing = resolved?.position?.clone?.() ?? null;
+    }
+    if (!landing) {
+      landing = enemy.root.position.clone();
+      landing.y = this.dungeonController?.getSurfaceElevationAt?.(landing) ?? landing.y;
+    }
+
+    enemy.deathStartPosition?.copy(enemy.root.position);
+    enemy.deathLandingPosition = landing.clone();
+    enemy.deathDropPosition = landing.clone();
+    enemy.deathFloorY = landing.y;
+    return landing;
+  }
+
+  _rollEnemyModuleDrops(enemy, { random = Math.random } = {}) {
+    if (!enemy?.isProceduralReaverbot || !enemy.genome) return [];
+
+    const drops = rollReaverbotSalvageDrops(enemy.genome, {
+      random,
+      isElite: enemy.isElite,
+      weakPointBroken: enemy.weakPointBroken,
+    });
+
+    drops.forEach((drop, index) => {
+      const angle = random() * Math.PI * 2 + index * 1.7;
+      const distance = 0.32 + random() * 0.28;
+      const position = (enemy.deathDropPosition ?? enemy.root.position).clone();
+      position.x += Math.cos(angle) * distance;
+      position.y += 0.34 + index * 0.06;
+      position.z += Math.sin(angle) * distance;
+      const source = {
+        ...drop.source,
+        enemyName: enemy.genome.name,
+        enemySeed: enemy.genome.seed,
+      };
+      this.lootSystem.createMaterialPickup(drop, drop.quantity, position, source);
+    });
+
+    enemy.lastSalvageDrops = drops;
+    return drops;
   }
 
   _rollEnemyScrapDrop(enemy) {
@@ -3693,8 +3801,8 @@ export class Game {
 
     const amount = (enemy?.isElite ? 2 : 1) + (Math.random() < 0.18 ? 1 : 0);
     this.inventory.scraps = (this.inventory.scraps ?? 0) + amount;
-    tempVectorA.copy(enemy.root.position);
-    tempVectorA.y = 0.7;
+    tempVectorA.copy(enemy.deathDropPosition ?? enemy.root.position);
+    tempVectorA.y += 0.7;
     this.addParticleBurst(tempVectorA, 0x9aa7ad, 10 + amount * 4, 0.11);
     this.ui?.showToast?.(`Reaverbot Scrap +${amount}`, '#c7d0d6');
     this.ui?.renderInventory?.();

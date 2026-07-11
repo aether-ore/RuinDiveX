@@ -21,6 +21,22 @@ const BUSTER_HAND_MESH_TOKEN = 'HandMesh_R';
 const DRILL_HAND_MESH_TOKEN = 'HandMesh_R';
 const BUSTER_CHAMBER_ROLL_SIGN = -1;
 const FREE_TURN_LOCOMOTION_THRESHOLD = 0.35;
+// Keep the launch handoff soft without washing out the fall clip's wide arm swing.
+const FORWARD_JUMP_PHASE_BLEND_SECONDS = 0.12;
+const FORWARD_JUMP_FALL_TRANSITION_SPEED = 1.5;
+const AIRBORNE_BUSTER_AIM_STATES = new Set([
+  'neutralJump',
+  'forwardJump',
+  'forwardJumpFall',
+  'fall',
+]);
+const GENERATED_POWER_KNOCKBACK_STATES = new Set([
+  'knockbackLaunch',
+  'aerialKnockbackFall',
+  'backLanding',
+  'downed',
+]);
+const BUSTER_AIM_JOINTS = Object.freeze(['rightShoulder', 'rightElbow', 'rightWrist']);
 const PISTOL_BUSTER_POSE_DEGREES = Object.freeze({
   leftElbow: Object.freeze({ pitch: -22.5, yaw: 1.5, roll: 111.5 }),
   leftWrist: Object.freeze({ pitch: 43, yaw: -7.5, roll: 4.5 }),
@@ -90,6 +106,8 @@ const NEUTRAL_JUMP_LAUNCH_PROGRESS = 0.6;
 const NEUTRAL_JUMP_LAUNCH_CLIP_PROGRESS = 0.42;
 const FORWARD_JUMP_FALL_START_PROGRESS = 0.52;
 const FOOT_VERTEX_WEIGHT_THRESHOLD = 0.08;
+const BACK_VERTEX_WEIGHT_THRESHOLD = 0.12;
+const BACK_CONTACT_JOINT_NAMES = Object.freeze(['hips', 'spine']);
 
 function normalizeBoneName(name = '') {
   return String(name)
@@ -118,14 +136,6 @@ function getForwardJumpLaunchClipProgress(progress = 0) {
     THREE.MathUtils.clamp(progress, 0, FORWARD_JUMP_FALL_START_PROGRESS),
     0,
     FORWARD_JUMP_FALL_START_PROGRESS,
-  );
-}
-
-function getForwardJumpFallClipProgress(progress = 0) {
-  return THREE.MathUtils.clamp(
-    (progress - FORWARD_JUMP_FALL_START_PROGRESS) / (1 - FORWARD_JUMP_FALL_START_PROGRESS),
-    0,
-    1,
   );
 }
 
@@ -179,6 +189,7 @@ export class SkeletalModelRig {
     this.busterArmGroup = null;
     this.busterMuzzle = null;
     this.busterNeutralQuaternion = new THREE.Quaternion();
+    this.busterAirAimPose = new Map();
     this.busterMountedElbow = null;
     this.busterArmActive = false;
     this.drillArmGroup = null;
@@ -200,6 +211,9 @@ export class SkeletalModelRig {
     this.footVertexSamples = [];
     this.footVertexSampleCount = 0;
     this._lastFootGroundClearance = null;
+    this.backVertexSamples = [];
+    this.backVertexSampleCount = 0;
+    this._lastBackGroundClearance = null;
     this.activeAction = null;
     this.activeClipKey = null;
     this.availableAnimationNames = [];
@@ -212,6 +226,7 @@ export class SkeletalModelRig {
     this._captureRestState();
     this._prepareSkinnedMeshes();
     this._buildFootVertexSamples();
+    this._buildBackVertexSamples();
     this._createAndAttachDrillArm();
 
     if (this.meshCount <= 0 || !this.joints.get('hips')) {
@@ -595,6 +610,7 @@ export class SkeletalModelRig {
     }
 
     this._normalizePassiveIdleShoulderTracks();
+    this._captureBusterAirAimPose();
 
     const initialClip = this._firstAvailable('sideIdle', 'breathingIdle', 'idle', 'idle2', 'idle3', 'walking', 'running');
     if (initialClip) {
@@ -664,11 +680,16 @@ export class SkeletalModelRig {
       clipKey,
     });
 
+    const forwardJumpPhaseChange = this.activeClipKey === 'forwardJumpLaunch'
+      && selectedClip === 'forwardJumpFall';
     const fadeSeconds = selectedClip && LEDGE_SYNC_CLIP_KEYS.has(selectedClip)
       ? 0
-      : this.activeAction ? 0.16 : 0;
+      : forwardJumpPhaseChange
+        ? FORWARD_JUMP_PHASE_BLEND_SECONDS
+        : this.activeAction ? 0.16 : 0;
     this._fadeToClip(selectedClip, fadeSeconds);
     this._syncActiveActionSpeed(selectedClip, {
+      state,
       moving,
       moveAmount,
       running,
@@ -684,6 +705,10 @@ export class SkeletalModelRig {
     this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
     this._updateDrillArmVisual(dt);
     this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
+    this._applyAirborneBusterAimPose(
+      projectileAiming && AIRBORNE_BUSTER_AIM_STATES.has(state),
+    );
+    this._applyGeneratedPowerKnockbackPose(state, actionProgress ?? 0, dt);
   }
 
   _buildBoneMap() {
@@ -864,6 +889,65 @@ export class SkeletalModelRig {
     return bones;
   }
 
+  _buildBackVertexSamples() {
+    const backBones = new Set(
+      BACK_CONTACT_JOINT_NAMES
+        .map((jointName) => this.joints.get(jointName))
+        .filter(Boolean),
+    );
+
+    for (const mesh of this.skinnedMeshes) {
+      const geometry = mesh.geometry;
+      const position = geometry?.attributes?.position;
+      const skinIndex = geometry?.attributes?.skinIndex;
+      const skinWeight = geometry?.attributes?.skinWeight;
+      const skeletonBones = mesh.skeleton?.bones;
+      const canApplySkinning = typeof mesh.applyBoneTransform === 'function'
+        || typeof mesh.boneTransform === 'function';
+
+      if (!position || !skinIndex || !skinWeight || !skeletonBones?.length || !canApplySkinning) {
+        continue;
+      }
+
+      const backBoneIndices = new Set();
+      for (let boneIndex = 0; boneIndex < skeletonBones.length; boneIndex += 1) {
+        const bone = skeletonBones[boneIndex];
+        const normalized = normalizeBoneName(bone?.name);
+        if (backBones.has(bone)
+          || normalized === 'hips'
+          || normalized.startsWith('spine')) {
+          backBoneIndices.add(boneIndex);
+        }
+      }
+
+      if (!backBoneIndices.size) {
+        continue;
+      }
+
+      const vertexIndices = [];
+      for (let vertexIndex = 0; vertexIndex < position.count; vertexIndex += 1) {
+        let backWeight = 0;
+        for (let component = 0; component < skinIndex.itemSize; component += 1) {
+          const boneIndex = getAttributeComponent(skinIndex, vertexIndex, component);
+          if (backBoneIndices.has(boneIndex)) {
+            backWeight += getAttributeComponent(skinWeight, vertexIndex, component);
+          }
+        }
+
+        if (backWeight >= BACK_VERTEX_WEIGHT_THRESHOLD) {
+          vertexIndices.push(vertexIndex);
+        }
+      }
+
+      if (vertexIndices.length) {
+        this.backVertexSamples.push({ mesh, indices: vertexIndices });
+        this.backVertexSampleCount += vertexIndices.length;
+      }
+    }
+
+    this.root.userData.backVertexSampleCount = this.backVertexSampleCount;
+  }
+
   measureFootGroundClearance(groundY = 0) {
     let leftMinY = Infinity;
     let rightMinY = Infinity;
@@ -932,6 +1016,63 @@ export class SkeletalModelRig {
     this.root.userData.leftFootGroundClearance = result.leftClearance;
     this.root.userData.rightFootGroundClearance = result.rightClearance;
     this.root.userData.footGroundingSource = result.source;
+    return result;
+  }
+
+  measureBackGroundClearance(groundY = 0) {
+    let minY = Infinity;
+    let source = 'skinnedBackVertices';
+
+    this.root.updateMatrixWorld(true);
+
+    for (const sample of this.backVertexSamples) {
+      const position = sample.mesh.geometry?.attributes?.position;
+      if (!position) {
+        continue;
+      }
+
+      sample.mesh.updateMatrixWorld(true);
+      for (const vertexIndex of sample.indices) {
+        tempVectorA.fromBufferAttribute(position, vertexIndex);
+        if (typeof sample.mesh.applyBoneTransform === 'function') {
+          sample.mesh.applyBoneTransform(vertexIndex, tempVectorA);
+        } else {
+          sample.mesh.boneTransform(vertexIndex, tempVectorA);
+        }
+        sample.mesh.localToWorld(tempVectorA);
+        minY = Math.min(minY, tempVectorA.y);
+      }
+    }
+
+    if (!Number.isFinite(minY)) {
+      source = 'backJoints';
+      for (const jointName of BACK_CONTACT_JOINT_NAMES) {
+        const joint = this.joints.get(jointName);
+        if (joint) {
+          minY = Math.min(minY, joint.getWorldPosition(tempVectorA).y);
+        }
+      }
+
+      if (Number.isFinite(minY)) {
+        minY -= Math.max(0.16, this.modelHeight * 0.085);
+      }
+    }
+
+    if (!Number.isFinite(minY)) {
+      return null;
+    }
+
+    const result = {
+      source,
+      groundY,
+      minY,
+      clearance: minY - groundY,
+      sampleCount: this.backVertexSampleCount,
+    };
+
+    this._lastBackGroundClearance = result;
+    this.root.userData.backGroundClearance = result.clearance;
+    this.root.userData.backGroundingSource = result.source;
     return result;
   }
 
@@ -1050,15 +1191,18 @@ export class SkeletalModelRig {
   }
 
   _prepareAnimationClip(clip, key, { preserveRootMotion = false, lockRootY = false } = {}) {
+    const lockRootYToRest = key === 'forwardJumpLaunch'
+      || key === 'forwardJumpFall'
+      || key === 'forwardJumpLanding';
     const tracks = clip.tracks
-      .map((track) => this._prepareAnimationTrack(track, { preserveRootMotion, lockRootY }))
+      .map((track) => this._prepareAnimationTrack(track, { preserveRootMotion, lockRootY, lockRootYToRest }))
       .filter(Boolean);
     const preparedClip = new THREE.AnimationClip(key, clip.duration, tracks);
     preparedClip.name = key;
     return preparedClip;
   }
 
-  _prepareAnimationTrack(track, { preserveRootMotion = false, lockRootY = false } = {}) {
+  _prepareAnimationTrack(track, { preserveRootMotion = false, lockRootY = false, lockRootYToRest = false } = {}) {
     const trackName = this._retargetAnimationTrackName(track.name);
     const property = trackName.slice(trackName.lastIndexOf('.') + 1);
     const rootPositionTrack = property === 'position' && this._isRootMotionTrack(trackName);
@@ -1073,7 +1217,7 @@ export class SkeletalModelRig {
     const values = track.values.slice();
     const restPosition = this._getTrackRestLocalPosition(trackName);
     const baseX = restPosition?.x ?? values[0] ?? 0;
-    const baseY = values[1] ?? 0;
+    const baseY = lockRootYToRest ? (restPosition?.y ?? values[1] ?? 0) : (values[1] ?? 0);
     const baseZ = restPosition?.z ?? values[2] ?? 0;
 
     for (let index = 0; index < values.length; index += 3) {
@@ -1126,6 +1270,29 @@ export class SkeletalModelRig {
       alertReference,
       neutralReference,
     };
+  }
+
+  _captureBusterAirAimPose() {
+    this.busterAirAimPose.clear();
+    const clip = this.animationClips.get('pistolIdle') ?? this.animationClips.get('pistolJump');
+    if (!clip) {
+      return;
+    }
+
+    const sampleTime = Math.min(Math.max(0, clip.duration * 0.25), 0.25);
+    for (const jointName of BUSTER_AIM_JOINTS) {
+      const track = this._findJointQuaternionTrack(clip, jointName);
+      if (!track?.values || track.values.length < 4) {
+        continue;
+      }
+
+      const sampled = track.createInterpolant(new Float32Array(4)).evaluate(sampleTime);
+      this.busterAirAimPose.set(
+        jointName,
+        new THREE.Quaternion().fromArray(sampled).normalize(),
+      );
+    }
+    this.root.userData.busterAirAimPoseJointCount = this.busterAirAimPose.size;
   }
 
   _normalizeShoulderTracksToReference(referenceKey, clipKeys = []) {
@@ -1282,7 +1449,7 @@ export class SkeletalModelRig {
       swordarmslash: 'swordInwardSlash',
       swordinwardslash: 'swordInwardSlash',
       swordslash: 'swordInwardSlash',
-      neutraljump: 'neutralJump',
+      neutraljump: 'forwardJumpLaunch',
       jump: 'jump',
       jumpingup: 'jumpingUp',
       leftcoversneak: 'leftCoverSneak',
@@ -1374,8 +1541,8 @@ export class SkeletalModelRig {
 
     if (state === 'neutralJump') {
       return busterAimActive
-        ? this._firstAvailable('neutralJump', 'pistolJump', 'pistolJump2', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
-        : this._firstAvailable('neutralJump', 'jump', 'jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
+        ? this._firstAvailable('forwardJumpLaunch', 'pistolJump', 'pistolJump2', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
+        : this._firstAvailable('forwardJumpLaunch', 'jump', 'jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
     }
 
     if (state === 'forwardJump') {
@@ -1428,8 +1595,18 @@ export class SkeletalModelRig {
       return this._firstAvailable('dodgeRoll', 'fallingToRoll', 'hardLanding', 'running', 'breathingIdle', 'idle');
     }
 
-    if (state === 'knockbackFall' || state === 'downed') {
-      return this._firstAvailable('fallingToRoll', 'fallingIdle', 'hardLanding', 'breathingIdle', 'idle');
+    if (state === 'knockbackFall'
+      || state === 'knockbackLaunch'
+      || state === 'aerialKnockbackFall') {
+      return this._firstAvailable('fallingIdle', 'fallingToRoll', 'hardLanding', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'lyingFlat') {
+      return this._firstAvailable('lyingFlat', 'fallingIdle', 'hardLanding', 'breathingIdle', 'idle');
+    }
+
+    if (state === 'backLanding' || state === 'downed') {
+      return this._firstAvailable('fallingIdle', 'hardLanding', 'fallingToRoll', 'breathingIdle', 'idle');
     }
 
     if (state === 'getUp') {
@@ -1552,6 +1729,12 @@ export class SkeletalModelRig {
     return Math.max(0.1, this.animationMetadata.get(key)?.duration ?? 0);
   }
 
+  hasAnimationClipFinished(key) {
+    return this.activeClipKey === key
+      && Boolean(this.activeAction)
+      && this.activeAction.time >= this._clipDuration(key) - 0.001;
+  }
+
   _fadeToClip(key, fadeSeconds = 0.16) {
     if (!key) {
       return false;
@@ -1583,10 +1766,15 @@ export class SkeletalModelRig {
     this.activeAction = action;
     this.activeClipKey = key;
     this.root.userData.activeFbxAnimationClip = key;
+    this.root.userData.lastFbxAnimationFadeSeconds = fadeSeconds;
+    this.root.userData.lastFbxAnimationTransition = previousAction
+      ? `${previousAction.getClip?.()?.name ?? 'unknown'}->${key}`
+      : `none->${key}`;
     return true;
   }
 
   _syncActiveActionSpeed(key, {
+    state = 'idle',
     moving = false,
     moveAmount = 0,
     running = false,
@@ -1604,8 +1792,13 @@ export class SkeletalModelRig {
       && Number.isFinite(fallAnimationClipProgress);
     const syncLedgeClip = LEDGE_SYNC_CLIP_KEYS.has(key)
       && Number.isFinite(actionProgress);
+    const generatedPowerKnockback = GENERATED_POWER_KNOCKBACK_STATES.has(state);
+    const heldPoseProgress = this.animationMetadata.get(key)?.holdProgress;
+    const heldAuthoredPose = state === 'lyingFlat' && Number.isFinite(heldPoseProgress);
     let speed = 1;
-    if (key === 'walking'
+    if (generatedPowerKnockback || heldAuthoredPose) {
+      speed = 0;
+    } else if (key === 'walking'
       || key === 'strutWalking'
       || key === 'leftTurn'
       || key === 'rightTurn'
@@ -1630,6 +1823,10 @@ export class SkeletalModelRig {
       speed = THREE.MathUtils.clamp((moveAmount || 1.2) / 1.2, 0.78, 1.35);
     } else if (key === 'slowJogBackwards') {
       speed = THREE.MathUtils.clamp(moveAmount || 0.9, 0.7, 1.15);
+    } else if (key === 'forwardJumpFall') {
+      // Reach the dedicated falling loop sooner without changing jump physics.
+      // The physical landing state may still interrupt this clip at any frame.
+      speed = FORWARD_JUMP_FALL_TRANSITION_SPEED;
     } else if (key === 'swordInwardSlash'
       || key === 'dodgeRoll'
       || JUMP_ACTION_CLIP_KEYS.has(key)
@@ -1642,18 +1839,23 @@ export class SkeletalModelRig {
 
     this.activeAction.setEffectiveTimeScale(speed);
 
-    if (key === 'swordInwardSlash' && Number.isFinite(attackProgress)) {
+    if (heldAuthoredPose) {
+      const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
+      this.activeAction.time = THREE.MathUtils.clamp(heldPoseProgress, 0, 1) * Math.max(0.1, clipDuration);
+    } else if (generatedPowerKnockback) {
+      const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
+      this.activeAction.time = Math.min(0.12, Math.max(0, clipDuration * 0.18));
+    } else if (key === 'swordInwardSlash' && Number.isFinite(attackProgress)) {
       const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
       this.activeAction.time = THREE.MathUtils.clamp(attackProgress, 0, 1) * Math.max(0.1, clipDuration);
-    } else if ((key === 'dodgeRoll' || JUMP_ACTION_CLIP_KEYS.has(key)) && Number.isFinite(actionProgress)) {
+    } else if ((key === 'dodgeRoll' || (JUMP_ACTION_CLIP_KEYS.has(key) && key !== 'forwardJumpFall'))
+      && Number.isFinite(actionProgress)) {
       const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
       let clipProgress = THREE.MathUtils.clamp(actionProgress, 0, 1);
       if (key === 'neutralJump') {
         clipProgress = getNeutralJumpClipProgress(actionProgress);
       } else if (key === 'forwardJumpLaunch') {
         clipProgress = getForwardJumpLaunchClipProgress(actionProgress);
-      } else if (key === 'forwardJumpFall') {
-        clipProgress = getForwardJumpFallClipProgress(actionProgress);
       }
       this.activeAction.time = clipProgress * Math.max(0.1, clipDuration);
     } else if (syncLedgeClip) {
@@ -1712,6 +1914,58 @@ export class SkeletalModelRig {
       );
       this._applyBoneRotation(joint, tempEuler, 1);
     }
+  }
+
+  _applyAirborneBusterAimPose(active = false) {
+    this.root.userData.airborneBusterAimActive = active;
+    if (!active || this.busterAirAimPose.size <= 0) {
+      return;
+    }
+
+    for (const [jointName, quaternion] of this.busterAirAimPose) {
+      this.joints.get(jointName)?.quaternion.copy(quaternion);
+    }
+  }
+
+  _applyGeneratedPowerKnockbackPose(state, progress = 0, dt = 0) {
+    if (!['knockbackLaunch', 'aerialKnockbackFall', 'backLanding', 'downed'].includes(state)) {
+      return;
+    }
+
+    const p = THREE.MathUtils.clamp(progress, 0, 1);
+    const launch = state === 'knockbackLaunch' ? THREE.MathUtils.smoothstep(p, 0, 0.55) : 1;
+    const flat = state === 'lyingFlat' || state === 'downed'
+      ? 1
+      : state === 'backLanding'
+        ? THREE.MathUtils.smoothstep(p, 0.04, 0.72)
+        : 0;
+    const flight = state === 'knockbackLaunch'
+      ? launch
+      : state === 'aerialKnockbackFall'
+        ? 1
+        : 1 - flat;
+    const bounce = state === 'backLanding' ? Math.sin(p * Math.PI) * (1 - flat * 0.65) : 0;
+    const alpha = THREE.MathUtils.clamp(this.stateTime * 12 + dt * 12, 0, 1);
+    const apply = (jointName, x, y = 0, z = 0) => {
+      const joint = this.joints.get(jointName);
+      if (!joint) return;
+      tempEuler.set(x, y, z, joint.rotation.order);
+      this._applyBoneRotation(joint, tempEuler, alpha);
+    };
+
+    apply('hips', THREE.MathUtils.lerp(-0.4 - 0.48 * flight, -1.48, flat), 0.08 * flight, 0);
+    apply('spine', THREE.MathUtils.lerp(-0.56 - 0.34 * flight, 0.06, flat), -0.06 * flight, 0);
+    apply('neck', THREE.MathUtils.lerp(-0.32 + 0.16 * flight, 0.08, flat) + 0.18 * bounce, 0, 0);
+    apply('leftShoulder', THREE.MathUtils.lerp(-0.52, 0, flat), -0.08 * (1 - flat), THREE.MathUtils.lerp(0.72, 0.08, flat));
+    apply('rightShoulder', THREE.MathUtils.lerp(-0.52, 0, flat), 0.08 * (1 - flat), THREE.MathUtils.lerp(-0.72, -0.08, flat));
+    apply('leftElbow', THREE.MathUtils.lerp(0.24 + 0.3 * bounce, 0.05, flat));
+    apply('rightElbow', THREE.MathUtils.lerp(0.24 + 0.24 * bounce, 0.06, flat));
+    apply('leftHip', THREE.MathUtils.lerp(0.28 + 0.3 * flight, 0, flat), 0, THREE.MathUtils.lerp(0.12, 0.04, flat));
+    apply('rightHip', THREE.MathUtils.lerp(0.2 + 0.22 * flight, 0, flat), 0, THREE.MathUtils.lerp(-0.12, -0.04, flat));
+    apply('leftKnee', THREE.MathUtils.lerp(0.42 + 0.38 * flight, 0.04, flat));
+    apply('rightKnee', THREE.MathUtils.lerp(0.34 + 0.3 * flight, 0.04, flat));
+    apply('leftAnkle', THREE.MathUtils.lerp(-0.08 * flight, 0, flat));
+    apply('rightAnkle', THREE.MathUtils.lerp(-0.06 * flight, 0, flat));
   }
 
   _isPistolClipKey(key) {

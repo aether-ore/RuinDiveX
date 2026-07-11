@@ -13,6 +13,7 @@ import { hashSeed, SeededRandom } from './SeededRandom.js';
 
 const SCHEMA_VERSION = 1;
 const CANDIDATE_COUNT = 8;
+const GLOBAL_REAVERBOT_MOVE_SPEED_SCALE = 1.22;
 const NAME_PREFIXES = ['AR', 'BA', 'DA', 'GA', 'KA', 'KO', 'MU', 'NA', 'OM', 'RA', 'SA', 'TO', 'UR', 'VA', 'ZA'];
 const NAME_SUFFIXES = ['EN', 'GAR', 'KIR', 'MOL', 'ORA', 'RAK', 'TUM', 'VAN', 'XEL', 'ZUN'];
 const WEAPON_WEAK_POINT_WEIGHTS = Object.freeze({
@@ -29,6 +30,7 @@ const WEAPON_WEAK_POINT_WEIGHTS = Object.freeze({
   beamPrism: [['eyeLens', 4], ['emitterCore', 3]],
   mineDispenser: [['ammoDrum', 4], ['rearBattery', 3]],
   rotorBlade: [['counterweightCore', 10]],
+  tractorMagnet: [['emitterCore', 8], ['eyeLens', 3]],
   overloadCore: [['overloadCore', 8], ['eyeLens', 4]],
 });
 
@@ -40,8 +42,10 @@ function hasBodyRequirements(module, body) {
   const tags = new Set(body.tags ?? []);
   const required = module.requires ?? [];
   const requiredAny = module.requiresAny ?? [];
+  const bodyPlans = module.bodyPlans ?? [];
   return required.every((tag) => tags.has(tag))
-    && (requiredAny.length === 0 || requiredAny.some((tag) => tags.has(tag)));
+    && (requiredAny.length === 0 || requiredAny.some((tag) => tags.has(tag)))
+    && (bodyPlans.length === 0 || bodyPlans.includes(body.id));
 }
 
 function getContextText(context) {
@@ -67,24 +71,28 @@ function getArchetypeWeights(intent, context) {
   };
 
   if (/nest|swarm|crawler|pack/.test(text)) boost(['packHunter', 'pursuer'], 2.2);
-  if (/server|sensor|turret|security/.test(text)) boost(['shieldSentinel', 'zoneController', 'artillery'], 1.8);
+  if (/server|sensor|turret|security/.test(text)) boost(['shieldSentinel', 'zoneController', 'tractorController', 'artillery'], 1.8);
   if (/machine|factory|assembly|heavy/.test(text)) boost(['artillery', 'shieldSentinel', 'duelist'], 1.65);
-  if (/coolant|fluid|cryo|electric|energy/.test(text)) boost(['zoneController', 'aerialBomber'], 1.9);
+  if (/coolant|fluid|cryo|electric|energy/.test(text)) boost(['zoneController', 'aerialBomber', 'tractorController'], 1.9);
   if (/trap|ambush|hunting|aggressive/.test(text)) boost(['pouncer', 'pursuer'], 1.8);
-  if (/flying|aerial|hover/.test(text)) boost(['aerialBomber', 'zoneController'], 2.4);
+  if (/flying|aerial|hover/.test(text)) boost(['aerialBomber', 'zoneController', 'tractorController'], 2.4);
   if (context.isBoss) boost(['duelist', 'shieldSentinel', 'artillery'], 2.6);
 
   const suppressed = (context.suppressedTags ?? []).join(' ').toLowerCase();
   if (/turret|sensor|security/.test(suppressed)) boost(['artillery', 'shieldSentinel'], 0.48);
   if (/crawler|swarm|wild/.test(suppressed)) boost(['packHunter', 'pursuer', 'pouncer'], 0.48);
-  if (/flying|aerial|hover/.test(suppressed)) boost(['aerialBomber', 'zoneController'], 0.42);
+  if (/flying|aerial|hover/.test(suppressed)) boost(['aerialBomber', 'zoneController', 'tractorController'], 0.42);
   if (/large|heavy|guardian/.test(suppressed)) boost(['shieldSentinel', 'artillery', 'duelist'], 0.55);
 
   if ((context.encounterSize ?? 1) < 2) {
-    weights.delete('packHunter');
+    weights.delete('tractorController');
   }
   if (context.isBoss || context.keycardCarrier) {
     weights.delete('aerialBomber');
+    weights.delete('tractorController');
+  }
+  for (const id of context.excludedArchetypes ?? []) {
+    weights.delete(id);
   }
 
   return [...weights.entries()].map(([value, weight]) => ({ value, weight }));
@@ -111,6 +119,17 @@ function pickWeapon(rng, archetype, body) {
     .map((id) => REAVERBOT_WEAPONS[id])
     .filter((weapon) => weapon && hasBodyRequirements(weapon, body));
   return rng.pick(compatible) ?? REAVERBOT_WEAPONS.pulseCannon;
+}
+
+function createWeaponVariant(weapon, rng) {
+  if (weapon.id !== 'clawArm') return weapon;
+  const mountSide = rng.chance(0.5) ? -1 : 1;
+  return {
+    ...weapon,
+    comboOrientation: rng.chance(0.5) ? 'horizontal' : 'vertical',
+    mountSide,
+    initialSweepDirection: rng.chance(0.5) ? -1 : 1,
+  };
 }
 
 function pickDefense(rng, archetype, body) {
@@ -173,18 +192,30 @@ function createStats(archetype, body, weapon, threatTier, proportions, context) 
   const bodyScale = body.radiusScale * proportions.overallScale;
   const base = archetype.baseStats;
   const attackRange = weapon.range ?? archetype.behavior.preferredRange;
+  const melee = weapon.tags.includes('melee');
+  const healthScale = weapon.healthScale ?? (melee ? 1.15 : 1);
+  const moveSpeedScale = weapon.moveSpeedScale ?? 1;
+  const meleeArmorBonus = melee ? (weapon.meleeArmorBonus ?? 20) : 0;
+  const telegraphDuration = weapon.telegraphDuration ?? archetype.behavior.telegraph;
+  const commitDuration = weapon.commitDuration ?? archetype.behavior.commit;
+  const recoveryDuration = weapon.recoveryDuration ?? archetype.behavior.recovery;
 
   return {
-    maxHealth: Number((base.health * tierHealth * roomHealth).toFixed(3)),
-    damage: Number((base.damage * tierDamage * (weapon.damageScale ?? 1)).toFixed(3)),
-    moveSpeed: Number((base.speed * (1 + Math.min(0.16, (tier - 1) * 0.025))).toFixed(3)),
+    maxHealth: Number((base.health * tierHealth * roomHealth * 1.12 * healthScale).toFixed(3)),
+    damage: Number((base.damage * tierDamage * (weapon.damageScale ?? 1) * 1.1).toFixed(3)),
+    moveSpeed: Number((
+      base.speed
+      * GLOBAL_REAVERBOT_MOVE_SPEED_SCALE
+      * moveSpeedScale
+      * (1 + Math.min(0.16, (tier - 1) * 0.025))
+    ).toFixed(3)),
     attackRange: Number(attackRange.toFixed(3)),
     attackCooldown: Number(clamp(
-      archetype.behavior.telegraph + archetype.behavior.commit + archetype.behavior.recovery,
-      0.8,
-      3.6,
+      (telegraphDuration + commitDuration + recoveryDuration) * 0.9 * (weapon.cooldownScale ?? 1),
+      0.75,
+      3.25,
     ).toFixed(3)),
-    armor: Number((base.armor * (1 + (tier - 1) * 0.12)).toFixed(3)),
+    armor: Number(((base.armor + meleeArmorBonus) * (1 + (tier - 1) * 0.12)).toFixed(3)),
     experience: Math.round((4 + archetype.threatCost * 1.4) * (1 + (tier - 1) * 0.22)),
     radius: Number((base.radius * bodyScale).toFixed(3)),
     collisionHeight: Number((body.height * proportions.overallScale + (body.hoverHeight ?? 0)).toFixed(3)),
@@ -193,27 +224,47 @@ function createStats(archetype, body, weapon, threatTier, proportions, context) 
 
 function createBehavior(archetype, weapon, weakPoint, rng) {
   const base = archetype.behavior;
+  const attackKind = weapon.attackKind;
+  const telegraphDuration = weapon.telegraphDuration ?? base.telegraph;
+  const commitDuration = weapon.commitDuration ?? base.commit;
+  const recoveryDuration = weapon.recoveryDuration ?? base.recovery;
+  // Close-range Reaverbots should remain a threat across a whole combat space,
+  // with rush attacks acquiring from farther away than ordinary melee attacks.
+  const aggroRange = attackKind === 'charge'
+    ? Math.max(base.aggroRange, 26)
+    : attackKind === 'pounce'
+      ? Math.max(base.aggroRange, 24)
+      : weapon.tags.includes('melee')
+        ? Math.max(base.aggroRange, 22)
+        : base.aggroRange;
   const exposureDuration = weakPoint.exposure === 'always'
     ? 99
     : weakPoint.exposure === 'telegraph'
-      ? Math.max(0.65, base.telegraph)
+      ? Math.max(0.65, telegraphDuration)
       : weakPoint.exposure === 'attack'
-        ? Math.max(0.65, base.telegraph + base.commit * 0.45)
-        : Math.max(0.7, base.recovery * 0.78);
+        ? Math.max(0.65, telegraphDuration + commitDuration * 0.45)
+        : Math.max(0.7, recoveryDuration * 0.78);
 
   return {
     id: archetype.id,
     role: archetype.role,
-    preferredRange: weapon.tags.includes('ranged') ? Math.max(base.preferredRange, weapon.range * 0.66) : base.preferredRange,
-    aggroRange: base.aggroRange,
-    telegraphDuration: base.telegraph,
-    commitDuration: base.commit,
-    recoveryDuration: base.recovery,
+    preferredRange: weapon.preferredRange
+      ?? (weapon.tags.includes('ranged') ? Math.max(base.preferredRange, weapon.range * 0.66) : base.preferredRange),
+    aggroRange,
+    telegraphDuration,
+    commitDuration,
+    recoveryDuration,
     exposureDuration: Number(exposureDuration.toFixed(3)),
     turnRate: base.turnRate,
     orbitDirection: rng.chance(0.5) ? -1 : 1,
     aggression: Number(rng.float(0.88, 1.12).toFixed(3)),
     minimumPackSize: base.minimumPackSize ?? 1,
+    ...(archetype.id === 'packHunter' ? {
+      rearApproachDistance: base.rearApproachDistance,
+      rearLaneOffset: base.rearLaneOffset,
+      rearAttackDot: base.rearAttackDot,
+      rearPursuitSpeedScale: base.rearPursuitSpeedScale,
+    } : {}),
   };
 }
 
@@ -221,7 +272,8 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
   const rng = new SeededRandom(`${seed}:candidate:${candidateIndex}`);
   const archetype = pickArchetype(rng.fork('archetype'), context);
   const body = pickBodyPlan(rng.fork('body'), archetype);
-  const weapon = pickWeapon(rng.fork('weapon'), archetype, body);
+  const weaponDefinition = pickWeapon(rng.fork('weapon'), archetype, body);
+  const weapon = createWeaponVariant(weaponDefinition, rng.fork('weaponVariant'));
   const defense = pickDefense(rng.fork('defense'), archetype, body);
   const weakPoint = pickWeakPoint(rng.fork('weakPoint'), archetype, defense, weapon);
   const proportions = createProportions(rng.fork('proportions'), body);
@@ -324,8 +376,9 @@ export function validateReaverbotGenome(genome) {
   if ((genome?.behavior?.exposureDuration ?? 0) < 0.6) errors.push('weak-point-window-too-short');
   if ((defense?.uptime ?? 0) > 0.7) errors.push('defense-uptime-too-high');
   if ((genome?.threat?.spent ?? Infinity) > (genome?.threat?.budget ?? -Infinity)) errors.push('threat-budget-exceeded');
-  if (genome?.archetypeId === 'packHunter' && (genome?.context?.encounterSize ?? 1) < 2) errors.push('pack-hunter-alone');
+  if (genome?.archetypeId === 'tractorController' && (genome?.context?.encounterSize ?? 1) < 2) errors.push('tractor-controller-alone');
   if (genome?.archetypeId === 'aerialBomber' && (genome?.context?.isBoss || genome?.context?.keycardCarrier)) errors.push('critical-self-destruct');
+  if (genome?.archetypeId === 'tractorController' && (genome?.context?.isBoss || genome?.context?.keycardCarrier)) errors.push('critical-dependent-controller');
   if (weakPoint?.location === 'eye' && defense?.id === 'armoredSkull') warnings.push('eye-near-front-armor');
 
   return { valid: errors.length === 0, errors, warnings };

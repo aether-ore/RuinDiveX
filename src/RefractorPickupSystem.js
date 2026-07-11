@@ -136,7 +136,7 @@ export class RefractorPickupSystem {
     for (let i = 0; i < count; i += 1) {
       const tier = weightedTier(enemy?.isElite);
       const value = randomInt(tier.value[0], tier.value[1]) + Math.floor((enemy?.level ?? 1) * (tier.scale * 2.4));
-      const position = enemy.root.position.clone();
+      const position = (enemy.deathDropPosition ?? enemy.root.position).clone();
       const angle = Math.random() * Math.PI * 2;
       const distance = randomBetween(0.22, 0.88);
       position.x += Math.cos(angle) * distance;

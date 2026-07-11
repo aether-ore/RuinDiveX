@@ -8,7 +8,7 @@ export const PLAYER_TRAVERSAL_CAPABILITIES = Object.freeze({
   standingHeight: 2.85,
   headClearance: 3.15,
   groundedStepDownHeight: 0.24,
-  jumpHeight: 1.55,
+  jumpHeight: 1.65,
   jumpTimeToApex: 0.33,
   fallGravityMultiplier: 1.22,
   forwardJumpSpeed: 4.35,

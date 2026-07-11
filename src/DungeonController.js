@@ -14,6 +14,12 @@ const TRACKING_COLOR = 0xa06cff;
 const DOOR_OPEN_Y = -5.3;
 const PLAYER_JUMP_OFF_LEDGE_MAX_DROP = PLAYER_TRAVERSAL_ENVELOPE.safeDropHeight;
 const PLAYER_STEP_OFF_FALL_HEIGHT = PLAYER_TRAVERSAL_ENVELOPE.groundedStepDownHeight;
+const AERIAL_DEFAULT_LOOKAHEAD = 3.4;
+const AERIAL_PATH_SAMPLE_SPACING = 0.24;
+const AERIAL_WAYPOINT_CLEARANCE = 0.28;
+const AERIAL_CEILING_CLEARANCE = 0.08;
+const POWER_KNOCKBACK_BARRIER_SAMPLE_SPACING = 0.06;
+const POWER_KNOCKBACK_BARRIER_LABEL_PATTERN = /boundary|wall|door|gate|barrier|fence|partition|bulkhead/i;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
   [-1, 0],
@@ -23,6 +29,53 @@ const CARDINAL_NEIGHBORS = [
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
+
+function getZoneLocalXZ(position, zone) {
+  let x = position.x - zone.position.x;
+  let z = position.z - zone.position.z;
+  const rotationY = zone.rotationY ?? 0;
+
+  if (Math.abs(rotationY) > 0.0001) {
+    const cos = Math.cos(rotationY);
+    const sin = Math.sin(rotationY);
+    const rotatedX = x * cos + z * sin;
+    const rotatedZ = -x * sin + z * cos;
+    x = rotatedX;
+    z = rotatedZ;
+  }
+
+  return { x, z };
+}
+
+function zoneLocalToWorld(zone, x, y, z) {
+  const rotationY = zone.rotationY ?? 0;
+  const cos = Math.cos(rotationY);
+  const sin = Math.sin(rotationY);
+  return new THREE.Vector3(
+    zone.position.x + x * cos - z * sin,
+    y,
+    zone.position.z + x * sin + z * cos,
+  );
+}
+
+function isInsideExpandedZone(position, zone, radius = 0, verticalRadius = radius) {
+  if (!position || !zone?.position) {
+    return false;
+  }
+
+  const local = getZoneLocalXZ(position, zone);
+  if (Math.abs(local.x) > (zone.halfWidth ?? 0) + radius
+    || Math.abs(local.z) > (zone.halfDepth ?? 0) + radius) {
+    return false;
+  }
+
+  if (Number.isFinite(zone.verticalHalfHeight)) {
+    return Math.abs((position.y ?? 0) - (zone.position.y ?? 0))
+      <= zone.verticalHalfHeight + verticalRadius;
+  }
+
+  return true;
+}
 
 function tileKey(x, z) {
   return `${x},${z}`;
@@ -104,6 +157,7 @@ export class DungeonController {
     this.safeInteractables = dungeon?.safeInteractables ?? [];
     this.safeZones = dungeon?.safeZones ?? [];
     this.solidZones = dungeon?.solidZones ?? [];
+    this.aerialBoundaryZones = dungeon?.aerialBoundaryZones ?? [];
     this.encounters = dungeon?.encounters ?? [];
     this.traps = dungeon?.traps ?? [];
     this.conveyors = dungeon?.conveyors ?? [];
@@ -285,6 +339,522 @@ export class DungeonController {
     tempVectorB.copy(position);
     tempVectorB.y = this._getTileElevationAtPosition(floorTile, position);
     return this._isResolvedFloorPositionWalkable(tempVectorB);
+  }
+
+  /**
+   * Tests an airborne enemy's collision center against true dungeon volumes.
+   * Floor availability, elevation changes, ledges, and railings are
+   * intentionally absent from this query.
+   */
+  isAerialPositionClear(position, options = {}) {
+    return this._getAerialBlockingObstacle(position, options) === null;
+  }
+
+  isAerialPathClear(fromPosition, targetPosition, options = {}) {
+    if (!fromPosition || !targetPosition) {
+      return false;
+    }
+    return this._findFirstAerialPathBlocker(fromPosition, targetPosition, options) === null;
+  }
+
+  /**
+   * Returns a normalized, fully three-dimensional pursuit direction. When the
+   * direct path is clear the result is exactly target - origin. Low fixtures
+   * are crossed from above; walls and other tall blockers are routed around
+   * through the dungeon's aerial topology.
+   */
+  getAerialNavigationDirection(fromPosition, targetPosition, options = {}) {
+    if (!fromPosition || !targetPosition) {
+      return null;
+    }
+
+    const delta = targetPosition.clone().sub(fromPosition);
+    const distance = delta.length();
+    if (distance <= 0.0001) {
+      return null;
+    }
+
+    const direct = delta.divideScalar(distance);
+    const lookAhead = Math.max(0.5, options.lookAhead ?? AERIAL_DEFAULT_LOOKAHEAD);
+    const probeTarget = fromPosition.clone().addScaledVector(direct, Math.min(distance, lookAhead));
+    const blocker = this._findFirstAerialPathBlocker(fromPosition, probeTarget, options);
+    if (!blocker) {
+      return direct;
+    }
+
+    const obstacle = blocker.obstacle;
+    if (obstacle.kind === 'boundaryWall'
+      || obstacle.kind === 'closedDoor'
+      || obstacle.kind === 'airspace') {
+      return this._getAerialTopologyDirection(fromPosition, targetPosition, options);
+    }
+    if (!obstacle.zone) {
+      return null;
+    }
+
+    const radius = Math.max(0, options.radius ?? 0.45);
+    const verticalRadius = Math.max(0, options.verticalRadius ?? radius);
+    const zone = obstacle.zone;
+    const candidates = [];
+    const addCandidate = (waypoint, routeRemainder = 0, routeClear = true) => {
+      const travel = waypoint.clone().sub(fromPosition);
+      const travelDistance = travel.length();
+      if (travelDistance <= 0.025 || !this.isAerialPathClear(fromPosition, waypoint, options)) {
+        return;
+      }
+      candidates.push({
+        direction: travel.divideScalar(travelDistance),
+        score: travelDistance + routeRemainder + (routeClear ? 0 : distance * 1.5),
+      });
+    };
+
+    if (zone.allowFlyOver !== false && Number.isFinite(zone.verticalHalfHeight)) {
+      const aboveY = zone.position.y
+        + zone.verticalHalfHeight
+        + verticalRadius
+        + AERIAL_WAYPOINT_CLEARANCE;
+      const horizontalDirection = direct.clone().setY(0);
+      if (horizontalDirection.lengthSq() <= 0.0001) {
+        horizontalDirection.set(0, 0, 1);
+      } else {
+        horizontalDirection.normalize();
+      }
+
+      const rotationY = zone.rotationY ?? 0;
+      const cos = Math.cos(rotationY);
+      const sin = Math.sin(rotationY);
+      const localDirectionX = horizontalDirection.x * cos + horizontalDirection.z * sin;
+      const localDirectionZ = -horizontalDirection.x * sin + horizontalDirection.z * cos;
+      const routeExtent = Math.abs(localDirectionX) * (zone.halfWidth ?? 0)
+        + Math.abs(localDirectionZ) * (zone.halfDepth ?? 0)
+        + radius
+        + AERIAL_WAYPOINT_CLEARANCE;
+      const entry = zoneLocalToWorld(
+        zone,
+        -localDirectionX * routeExtent,
+        aboveY,
+        -localDirectionZ * routeExtent,
+      );
+      const exit = zoneLocalToWorld(
+        zone,
+        localDirectionX * routeExtent,
+        aboveY,
+        localDirectionZ * routeExtent,
+      );
+      const overRouteClear = this.isAerialPathClear(entry, exit, options);
+      const exitRouteClear = overRouteClear && this.isAerialPathClear(exit, targetPosition, options);
+      const overRemainder = entry.distanceTo(exit) + exit.distanceTo(targetPosition);
+
+      if (fromPosition.y < aboveY - 0.04) {
+        const lift = fromPosition.clone().setY(aboveY);
+        const liftRouteClear = this.isAerialPathClear(lift, entry, options) && overRouteClear;
+        addCandidate(
+          lift,
+          lift.distanceTo(entry) + overRemainder,
+          liftRouteClear && exitRouteClear,
+        );
+      }
+      if (overRouteClear) {
+        addCandidate(entry, overRemainder, exitRouteClear);
+        addCandidate(exit, exit.distanceTo(targetPosition), exitRouteClear);
+      }
+    }
+
+    const lateralMargin = radius + AERIAL_WAYPOINT_CLEARANCE;
+    const lateralY = fromPosition.y;
+    for (const sideX of [-1, 1]) {
+      for (const sideZ of [-1, 1]) {
+        const waypoint = zoneLocalToWorld(
+          zone,
+          sideX * ((zone.halfWidth ?? 0) + lateralMargin),
+          lateralY,
+          sideZ * ((zone.halfDepth ?? 0) + lateralMargin),
+        );
+        const onwardClear = this.isAerialPathClear(waypoint, targetPosition, options);
+        addCandidate(waypoint, waypoint.distanceTo(targetPosition), onwardClear);
+      }
+    }
+
+    candidates.sort((left, right) => left.score - right.score);
+    return candidates[0]?.direction
+      ?? this._getAerialTopologyDirection(fromPosition, targetPosition, options);
+  }
+
+  _normalizeAerialCollisionOptions(options = {}) {
+    const radius = Math.max(0, options.radius ?? 0.45);
+    return {
+      ...options,
+      radius,
+      verticalRadius: Math.max(0, options.verticalRadius ?? radius),
+      sampleSpacing: Math.max(0.08, options.sampleSpacing ?? AERIAL_PATH_SAMPLE_SPACING),
+    };
+  }
+
+  _getAerialBlockingObstacle(position, rawOptions = {}) {
+    const options = this._normalizeAerialCollisionOptions(rawOptions);
+    if (!options.ignoreAirspace && !this._isInsideAerialNavigableFootprint(position)) {
+      return { kind: 'airspace', zone: null };
+    }
+
+    const ceilingHeight = this._getAerialCeilingHeight(position);
+    if (Number.isFinite(ceilingHeight)
+      && position.y + options.verticalRadius > ceilingHeight - AERIAL_CEILING_CLEARANCE) {
+      return { kind: 'ceiling', zone: null };
+    }
+
+    for (const zone of this.aerialBoundaryZones) {
+      if (isInsideExpandedZone(position, zone, options.radius, options.verticalRadius)) {
+        return { kind: 'boundaryWall', zone };
+      }
+    }
+
+    for (const door of this.doors) {
+      if (!door.closed) {
+        continue;
+      }
+      const zone = this._createAerialDoorZone(door);
+      if (isInsideExpandedZone(position, zone, options.radius, options.verticalRadius)) {
+        return { kind: 'closedDoor', zone };
+      }
+    }
+
+    for (const zone of this.solidZones) {
+      if (isInsideExpandedZone(position, zone, options.radius, options.verticalRadius)) {
+        return { kind: zone.obstacleKind ?? 'solid', zone: { allowFlyOver: true, ...zone } };
+      }
+    }
+
+    for (const platform of this._getAerialPlatformSurfaces()) {
+      const zone = this._createAerialPlatformZone(platform);
+      if (zone && isInsideExpandedZone(position, zone, options.radius, options.verticalRadius)) {
+        return { kind: 'platform', zone };
+      }
+    }
+
+    return null;
+  }
+
+  _findFirstAerialPathBlocker(fromPosition, targetPosition, rawOptions = {}) {
+    const options = this._normalizeAerialCollisionOptions(rawOptions);
+    const distance = fromPosition.distanceTo(targetPosition);
+    const steps = Math.max(1, Math.ceil(distance / options.sampleSpacing));
+    for (let step = 0; step <= steps; step += 1) {
+      const point = new THREE.Vector3().copy(fromPosition).lerp(targetPosition, step / steps);
+      const obstacle = this._getAerialBlockingObstacle(point, options);
+      if (obstacle) {
+        return { point, obstacle };
+      }
+    }
+    return null;
+  }
+
+  _isInsideAerialNavigableFootprint(position) {
+    if (this._getRoomAtPosition(position)) {
+      return true;
+    }
+    const tile = this.worldToTile(position);
+    return this.floorTilesByColumn.has(tileKey(tile.x, tile.z))
+      || this.tiles.has(tileKey(tile.x, tile.z));
+  }
+
+  _getAerialCeilingHeight(position) {
+    const room = this._getRoomAtPosition(position);
+    if (Number.isFinite(room?.ceilingHeight)) {
+      return room.ceilingHeight;
+    }
+    if (room?.ceilingHeight === null) {
+      return Infinity;
+    }
+
+    const tile = this.worldToTile(position);
+    if (this.tiles.has(tileKey(tile.x, tile.z)) || this.floorTilesByColumn.has(tileKey(tile.x, tile.z))) {
+      return 8.4;
+    }
+    return Infinity;
+  }
+
+  _createAerialDoorZone(door) {
+    const baseY = door.baseY ?? door.position.y ?? 0;
+    const height = door.collisionHeight ?? 4.8;
+    return {
+      id: `aerialDoor_${door.id}`,
+      obstacleKind: 'closedDoor',
+      position: new THREE.Vector3(door.position.x, baseY + height * 0.5, door.position.z),
+      halfWidth: door.collisionHalfWidth ?? (door.alongX ? 0.16 : this.tileSize * 0.48),
+      halfDepth: door.collisionHalfDepth ?? (door.alongX ? this.tileSize * 0.48 : 0.16),
+      verticalHalfHeight: height * 0.5,
+      allowFlyOver: false,
+    };
+  }
+
+  _getAerialPlatformSurfaces() {
+    if (typeof this.game?._getPlatformingSurfaces === 'function') {
+      return this.game._getPlatformingSurfaces();
+    }
+    return this.dungeon?.platforms ?? [];
+  }
+
+  _createAerialPlatformZone(platform) {
+    if (!platform?.center || platform.blocksBelow === false) {
+      return null;
+    }
+    const topY = platform.topY ?? platform.center.y ?? 0;
+    const baseY = Number.isFinite(platform.baseY) ? platform.baseY : 0;
+    const height = topY - baseY;
+    if (height <= 0.05) {
+      return null;
+    }
+    return {
+      id: `aerialPlatform_${platform.id}`,
+      obstacleKind: 'platform',
+      position: new THREE.Vector3(platform.center.x, baseY + height * 0.5, platform.center.z),
+      halfWidth: platform.halfWidth ?? 0,
+      halfDepth: platform.halfDepth ?? 0,
+      verticalHalfHeight: height * 0.5,
+      allowFlyOver: true,
+    };
+  }
+
+  _getAerialTopologyDirection(fromPosition, targetPosition, rawOptions = {}) {
+    const options = this._normalizeAerialCollisionOptions(rawOptions);
+    const start = this.worldToTile(fromPosition);
+    const goal = this.worldToTile(targetPosition);
+    const startKey = tileKey(start.x, start.z);
+    const goalKey = tileKey(goal.x, goal.z);
+    if (!this.tiles.has(startKey) || !this.tiles.has(goalKey)) {
+      return null;
+    }
+
+    const cacheKey = `aerial:${startKey}>${goalKey}`;
+    let next = this.navigationCache.get(cacheKey);
+    if (next === undefined) {
+      const path = this._findAerialTilePath(start, goal, fromPosition.y, options);
+      next = path?.[1] ?? null;
+      this.navigationCache.set(cacheKey, next);
+    }
+    if (!next) {
+      return null;
+    }
+
+    const waypoint = new THREE.Vector3(
+      next.x * this.tileSize,
+      fromPosition.y + THREE.MathUtils.clamp(targetPosition.y - fromPosition.y, -this.tileSize, this.tileSize),
+      next.z * this.tileSize,
+    );
+    if (!this.isAerialPathClear(fromPosition, waypoint, options)) {
+      return null;
+    }
+    const direction = waypoint.sub(fromPosition);
+    return direction.lengthSq() > 0.0001 ? direction.normalize() : null;
+  }
+
+  _findAerialTilePath(start, goal, altitude, options) {
+    const startKey = tileKey(start.x, start.z);
+    const goalKey = tileKey(goal.x, goal.z);
+    const queue = [start];
+    const cameFrom = new Map([[startKey, null]]);
+
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const current = queue[cursor];
+      const currentKey = tileKey(current.x, current.z);
+      if (currentKey === goalKey) {
+        return this._reconstructPath(cameFrom, current);
+      }
+
+      for (const [dx, dz] of CARDINAL_NEIGHBORS) {
+        const next = { x: current.x + dx, z: current.z + dz };
+        const nextKey = tileKey(next.x, next.z);
+        if (cameFrom.has(nextKey)
+          || !this.tiles.has(nextKey)
+          || this._aerialTileEdgeCrossesClosedDoor(current, next, altitude, options)) {
+          continue;
+        }
+        cameFrom.set(nextKey, current);
+        queue.push(next);
+      }
+    }
+
+    return null;
+  }
+
+  _aerialTileEdgeCrossesClosedDoor(fromTile, toTile, altitude, options) {
+    if (!this.doors.some((door) => door.closed)) {
+      return false;
+    }
+    const from = new THREE.Vector3(fromTile.x * this.tileSize, altitude, fromTile.z * this.tileSize);
+    const to = new THREE.Vector3(toTile.x * this.tileSize, altitude, toTile.z * this.tileSize);
+    const steps = Math.max(2, Math.ceil(this.tileSize / AERIAL_PATH_SAMPLE_SPACING));
+    for (let step = 0; step <= steps; step += 1) {
+      const point = new THREE.Vector3().copy(from).lerp(to, step / steps);
+      for (const door of this.doors) {
+        if (door.closed
+          && isInsideExpandedZone(
+            point,
+            this._createAerialDoorZone(door),
+            options.radius,
+            options.verticalRadius,
+          )) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Stops the otherwise unconstrained airborne knockback arc at barriers that
+   * must separate dungeon spaces. Ordinary fixtures stay recoverable so a
+   * powerful hit can still carry the player over a crate or small machine.
+   */
+  resolvePowerKnockbackTravel(fromPosition, targetPosition) {
+    if (!fromPosition || !targetPosition) {
+      return null;
+    }
+
+    const barrier = this._findPowerKnockbackBarrier(fromPosition, targetPosition);
+    if (!barrier) {
+      return null;
+    }
+
+    return {
+      blocked: true,
+      position: barrier.lastClearPosition,
+      barrierKind: barrier.kind,
+      barrier: barrier.source,
+    };
+  }
+
+  resolvePowerKnockbackLanding(position, direction, originPosition = null) {
+    if (!position || !direction) {
+      return null;
+    }
+
+    const travel = direction.clone().setY(0);
+    if (travel.lengthSq() <= 0.0001) {
+      travel.set(0, 0, -1);
+    } else {
+      travel.normalize();
+    }
+
+    const recoveryOrigin = originPosition?.clone?.() ?? position.clone();
+    const resolveAtDistance = (distance, mode) => {
+      const candidate = position.clone().addScaledVector(travel, distance);
+      candidate.y = this.getSurfaceElevationAt(candidate);
+      if (candidate.y > position.y + 0.3
+        || !this.isPositionWalkable(candidate)
+        || this._findPowerKnockbackBarrier(recoveryOrigin, candidate, { ignoreVertical: true })) {
+        return null;
+      }
+      return { position: candidate, mode };
+    };
+
+    const current = resolveAtDistance(0, 'current');
+    if (current) {
+      return current;
+    }
+
+    // Preserve the hit's momentum: clear the invalid footprint in the travel
+    // direction before considering a correction back toward the attacker.
+    for (let distance = 0.4; distance <= 6; distance += 0.4) {
+      const past = resolveAtDistance(distance, 'pastObstacle');
+      if (past) {
+        return past;
+      }
+    }
+
+    for (let distance = 0.4; distance <= 6; distance += 0.4) {
+      const before = resolveAtDistance(-distance, 'beforeObstacle');
+      if (before) {
+        return before;
+      }
+    }
+
+    const nearest = this._findNearestWalkablePosition(position);
+    if (nearest && !this._findPowerKnockbackBarrier(
+      recoveryOrigin,
+      nearest,
+      { ignoreVertical: true },
+    )) {
+      return { position: nearest, mode: 'nearestWalkable' };
+    }
+
+    // If an older/custom map supplies no safe candidate around the impact,
+    // the launch point remains preferable to teleporting through a room wall.
+    recoveryOrigin.y = this.getSurfaceElevationAt(recoveryOrigin);
+    return this.isPositionWalkable(recoveryOrigin)
+      ? { position: recoveryOrigin, mode: 'launchSideFallback' }
+      : null;
+  }
+
+  _findPowerKnockbackBarrier(fromPosition, targetPosition, { ignoreVertical = false } = {}) {
+    const distance = fromPosition.distanceTo(targetPosition);
+    if (distance <= 0.0001) {
+      return null;
+    }
+
+    const playerRadius = this.game?.player?.radius
+      ?? PLAYER_TRAVERSAL_ENVELOPE.collisionRadius;
+    const steps = Math.max(1, Math.ceil(distance / POWER_KNOCKBACK_BARRIER_SAMPLE_SPACING));
+    let lastClearPosition = fromPosition.clone();
+
+    for (let step = 1; step <= steps; step += 1) {
+      const sample = new THREE.Vector3().copy(fromPosition).lerp(targetPosition, step / steps);
+      const blocker = this._getPowerKnockbackBarrierAt(sample, playerRadius, ignoreVertical);
+      if (blocker) {
+        return {
+          ...blocker,
+          point: sample,
+          lastClearPosition,
+        };
+      }
+      lastClearPosition = sample;
+    }
+
+    return null;
+  }
+
+  _getPowerKnockbackBarrierAt(position, playerRadius, ignoreVertical = false) {
+    const verticalRadius = ignoreVertical ? Infinity : 0;
+    for (const zone of this.aerialBoundaryZones) {
+      if (isInsideExpandedZone(position, zone, playerRadius, verticalRadius)) {
+        return { kind: 'boundaryWall', source: zone };
+      }
+    }
+
+    for (const door of this.doors) {
+      if (door.closed
+        && isInsideExpandedZone(
+          position,
+          this._createAerialDoorZone(door),
+          playerRadius,
+          verticalRadius,
+        )) {
+        return { kind: 'closedDoor', source: door };
+      }
+    }
+
+    for (const zone of this.solidZones) {
+      if (!this._isHardPowerKnockbackBarrier(zone)) {
+        continue;
+      }
+      if (isInsideExpandedZone(position, zone, playerRadius, verticalRadius)) {
+        return { kind: zone.obstacleKind ?? 'solidBarrier', source: zone };
+      }
+    }
+
+    return null;
+  }
+
+  _isHardPowerKnockbackBarrier(zone) {
+    if (!zone || zone.allowPowerKnockbackRecovery === true) {
+      return false;
+    }
+    if (zone.blocksPowerKnockback === true || zone.allowFlyOver === false) {
+      return true;
+    }
+
+    const descriptor = `${zone.obstacleKind ?? ''} ${zone.id ?? ''} ${zone.label ?? ''}`;
+    return POWER_KNOCKBACK_BARRIER_LABEL_PATTERN.test(descriptor);
   }
 
   _isResolvedFloorPositionWalkable(position) {
@@ -522,12 +1092,15 @@ export class DungeonController {
     const player = this.game.player;
     return player?.animation?.isFullBodyActionActive?.() === true
       || player?.isJumpVerticalMotionActive?.() === true
+      || player?.isPowerKnockbackActive?.() === true
       || player?.isLedgeClinging?.() === true;
   }
 
   _isPlayerJumping() {
     const player = this.game.player;
-    if (player?.isJumpAirborne?.() || player?.isDodgeRollAirborne?.()) {
+    if (player?.isJumpAirborne?.()
+      || player?.isDodgeRollAirborne?.()
+      || player?.isPowerKnockbackAirborne?.()) {
       return true;
     }
 
@@ -600,6 +1173,259 @@ export class DungeonController {
     direction.normalize();
     this.navigationCache.set(cacheKey, direction.clone());
     return direction.clone();
+  }
+
+  /**
+   * Resolves the destination an enemy should currently pursue. Encounter
+   * enemies retain their authored target through the middle of a room, then
+   * progressively bias toward open arena space near a wall or room boundary.
+   * A short-lived recovery target takes priority after collision correction so
+   * an AI cannot immediately walk back into the same obstacle every frame.
+   */
+  getEnemyArenaTarget(enemy, desiredTarget, target = new THREE.Vector3()) {
+    const position = enemy?.root?.position;
+    const arena = enemy?.encounterArena;
+    if (!position || !desiredTarget) {
+      return null;
+    }
+
+    const recoveryTarget = enemy.navigationRecoveryTarget;
+    if (recoveryTarget && (enemy.navigationRecoveryTimer ?? 0) > 0) {
+      const recoveryDistanceSq = (recoveryTarget.x - position.x) ** 2
+        + (recoveryTarget.z - position.z) ** 2;
+      if (recoveryDistanceSq > 0.16) {
+        return target.copy(recoveryTarget);
+      }
+      enemy.clearNavigationRecoveryTarget?.();
+    }
+
+    target.copy(desiredTarget);
+    if (!arena?.center) {
+      return target;
+    }
+
+    const softHalfWidth = Math.max(0.5, arena.softHalfWidth ?? arena.halfWidth ?? 1);
+    const softHalfDepth = Math.max(0.5, arena.softHalfDepth ?? arena.halfDepth ?? 1);
+    const zoneCenter = arena.zoneCenter ?? arena.center;
+    const offsetX = position.x - zoneCenter.x;
+    const offsetZ = position.z - zoneCenter.z;
+    const edgeRatio = Math.max(
+      Math.abs(offsetX) / softHalfWidth,
+      Math.abs(offsetZ) / softHalfDepth,
+    );
+
+    // Do not let a target outside the encounter pull its enemies through a
+    // doorway. The enemy can still fight anywhere inside the soft envelope.
+    target.x = THREE.MathUtils.clamp(
+      target.x,
+      zoneCenter.x - softHalfWidth,
+      zoneCenter.x + softHalfWidth,
+    );
+    target.z = THREE.MathUtils.clamp(
+      target.z,
+      zoneCenter.z - softHalfDepth,
+      zoneCenter.z + softHalfDepth,
+    );
+
+    const centerBias = THREE.MathUtils.smoothstep(edgeRatio, 0.38, 1.03) * 0.78;
+    if (centerBias > 0.001) {
+      target.x = THREE.MathUtils.lerp(target.x, arena.center.x, centerBias);
+      target.z = THREE.MathUtils.lerp(target.z, arena.center.z, centerBias);
+    }
+    enemy.lastArenaSteeringStrength = centerBias;
+    return target;
+  }
+
+  getEnemyNavigationDirection(enemy, desiredTarget, options = {}) {
+    if (!enemy?.root?.position || !desiredTarget) {
+      return null;
+    }
+
+    const arenaTarget = this.getEnemyArenaTarget(enemy, desiredTarget, new THREE.Vector3());
+    if (!arenaTarget) {
+      return null;
+    }
+
+    if (enemy.navigationMode === 'air') {
+      return this.getAerialNavigationDirection(
+        enemy.root.position,
+        arenaTarget,
+        {
+          ...this._getEnemyAerialCollisionOptions(enemy),
+          ...options,
+        },
+      );
+    }
+    const navigation = this.getNavigationDirection(enemy.root.position, arenaTarget);
+    return this._getEnemyGroundAvoidanceDirection(enemy, navigation, arenaTarget, options);
+  }
+
+  _getEnemyGroundAvoidanceDirection(enemy, navigation, arenaTarget, options = {}) {
+    if (!navigation?.isVector3 || navigation.lengthSq() <= 0.0001) {
+      return null;
+    }
+
+    const origin = enemy.root.position;
+    const forward = navigation.clone().setY(0).normalize();
+    const lookAhead = Math.max(
+      0.5,
+      options.lookAhead ?? 0,
+      (enemy.radius ?? 0.42) * 1.25,
+      (enemy.stats?.moveSpeed ?? 2) * 0.12,
+    );
+    const probe = origin.clone().addScaledVector(forward, lookAhead);
+    probe.y = this.getSurfaceElevationAt(probe);
+    if (this.isEnemyPositionClear(enemy, probe, options)) {
+      return forward;
+    }
+
+    const desired = arenaTarget.clone().sub(origin).setY(0);
+    if (desired.lengthSq() > 0.0001) desired.normalize();
+    const arenaCenter = enemy.encounterArena?.center;
+    const inward = arenaCenter
+      ? arenaCenter.clone().sub(origin).setY(0).normalize()
+      : desired;
+    const candidates = [];
+    for (const offset of [Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, 3 * Math.PI / 4, -3 * Math.PI / 4, Math.PI]) {
+      const cos = Math.cos(offset);
+      const sin = Math.sin(offset);
+      const direction = new THREE.Vector3(
+        forward.x * cos - forward.z * sin,
+        0,
+        forward.x * sin + forward.z * cos,
+      ).normalize();
+      probe.copy(origin).addScaledVector(direction, lookAhead);
+      probe.y = this.getSurfaceElevationAt(probe);
+      if (!this.isEnemyPositionClear(enemy, probe, options)) {
+        continue;
+      }
+      candidates.push({
+        direction,
+        probe: probe.clone(),
+        score: direction.dot(desired) + direction.dot(inward) * 0.38,
+      });
+    }
+
+    candidates.sort((left, right) => right.score - left.score);
+    const best = candidates[0];
+    if (!best) {
+      return forward;
+    }
+    enemy.setNavigationRecoveryTarget?.(best.probe, 0.55);
+    return best.direction;
+  }
+
+  shouldEnemyRecenter(enemy, threshold = 0.72) {
+    if ((enemy?.navigationRecoveryTimer ?? 0) > 0 && enemy?.navigationRecoveryTarget) {
+      return true;
+    }
+    const arena = enemy?.encounterArena;
+    const position = enemy?.root?.position;
+    if (!arena?.center || !position) {
+      return false;
+    }
+    const zoneCenter = arena.zoneCenter ?? arena.center;
+    const edgeRatio = Math.max(
+      Math.abs(position.x - zoneCenter.x) / Math.max(0.5, arena.softHalfWidth),
+      Math.abs(position.z - zoneCenter.z) / Math.max(0.5, arena.softHalfDepth),
+    );
+    return edgeRatio >= threshold;
+  }
+
+  isEnemyPositionClear(enemy, position, options = {}) {
+    if (!enemy || !position) {
+      return false;
+    }
+    if (enemy.navigationMode === 'air') {
+      const center = this._getEnemyAerialNavigationCenter(enemy, new THREE.Vector3());
+      center.add(position).sub(enemy.root.position);
+      return this.isAerialPositionClear(center, {
+        ...this._getEnemyAerialCollisionOptions(enemy),
+        ...options,
+      });
+    }
+    if (!this.isPositionWalkable(position)) {
+      return false;
+    }
+
+    const clearanceRadius = Math.max(
+      0.18,
+      Math.min(0.86, options.radius ?? (enemy.radius ?? 0.42) * 0.78),
+    );
+    for (const zone of this.solidZones) {
+      if (isInsideExpandedZone(position, zone, clearanceRadius, 0.12)) {
+        return false;
+      }
+    }
+    for (const door of this.doors) {
+      if (door.closed
+        && isInsideExpandedZone(
+          position,
+          this._createAerialDoorZone(door),
+          clearanceRadius,
+          0.12,
+        )) {
+        return false;
+      }
+    }
+    const centerElevation = this.getSurfaceElevationAt(position);
+    const maximumElevationDelta = options.maximumElevationDelta ?? 0.48;
+    const sample = new THREE.Vector3();
+    for (let index = 0; index < 8; index += 1) {
+      const angle = index * Math.PI * 0.25;
+      sample.set(
+        position.x + Math.cos(angle) * clearanceRadius,
+        position.y,
+        position.z + Math.sin(angle) * clearanceRadius,
+      );
+      if (!this.isPositionWalkable(sample)
+        || Math.abs(this.getSurfaceElevationAt(sample) - centerElevation) > maximumElevationDelta) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  findNearestEnemyClearPosition(enemy, position, options = {}) {
+    if (!enemy || !position) {
+      return null;
+    }
+
+    const candidate = position.clone();
+    if (enemy.navigationMode !== 'air') {
+      candidate.y = this.getSurfaceElevationAt(candidate);
+    }
+    if (this.isEnemyPositionClear(enemy, candidate, options)) {
+      return candidate;
+    }
+
+    const preferred = options.preferredPosition ?? enemy.encounterArena?.center ?? position;
+    const preferredAngle = Math.atan2(preferred.z - position.z, preferred.x - position.x);
+    const maximumRadius = Math.max(0.6, options.maximumRadius ?? 5.4);
+    const radialStep = Math.max(0.3, options.radialStep ?? 0.45);
+    const directions = 16;
+    for (let radius = radialStep; radius <= maximumRadius + 0.001; radius += radialStep) {
+      for (let index = 0; index < directions; index += 1) {
+        // Alternate left/right around the preferred direction so an inward
+        // candidate wins ties without preventing a necessary side-step.
+        const offsetIndex = index === 0
+          ? 0
+          : Math.ceil(index * 0.5) * (index % 2 === 1 ? 1 : -1);
+        const angle = preferredAngle + offsetIndex * (Math.PI * 2 / directions);
+        candidate.set(
+          position.x + Math.cos(angle) * radius,
+          position.y,
+          position.z + Math.sin(angle) * radius,
+        );
+        if (enemy.navigationMode !== 'air') {
+          candidate.y = this.getSurfaceElevationAt(candidate);
+        }
+        if (this.isEnemyPositionClear(enemy, candidate, options)) {
+          return candidate.clone();
+        }
+      }
+    }
+    return null;
   }
 
   _getFloorGraphKey(tile) {
@@ -693,23 +1519,84 @@ export class DungeonController {
       }
 
       liveEnemyIds.add(enemy.id);
+      if (enemy.shouldIgnoreGroundConstraint?.()) {
+        continue;
+      }
       const position = enemy.root.position;
 
-      if (this.isPositionWalkable(position)) {
+      if (enemy.navigationMode === 'air') {
+        const center = this._getEnemyAerialNavigationCenter(enemy, new THREE.Vector3());
+        const collisionOptions = this._getEnemyAerialCollisionOptions(enemy);
+        if (this.isAerialPositionClear(center, collisionOptions)) {
+          this.lastSafeEnemyPositions.set(enemy.id, position.clone());
+          enemy.wallContactCount = Math.max(0, (enemy.wallContactCount ?? 0) - 1);
+          this._maintainEnemyArenaRecovery(enemy);
+          continue;
+        }
+
+        const fallback = this.lastSafeEnemyPositions.get(enemy.id);
+        if (fallback) {
+          position.copy(fallback);
+        } else {
+          const clearCenter = this._findNearestClearAerialCenter(center, collisionOptions);
+          if (clearCenter) {
+            position.add(clearCenter.sub(center));
+            this.lastSafeEnemyPositions.set(enemy.id, position.clone());
+          }
+        }
+        enemy.wallContactCount = (enemy.wallContactCount ?? 0) + 1;
+        const inwardProbe = position.clone().lerp(
+          enemy.encounterArena?.center ?? position,
+          0.52,
+        );
+        inwardProbe.y = position.y;
+        const recovery = this.findNearestEnemyClearPosition(enemy, inwardProbe, {
+          preferredPosition: enemy.encounterArena?.center,
+          maximumRadius: 4.2,
+        });
+        if (recovery) {
+          enemy.setNavigationRecoveryTarget?.(recovery, 2.2);
+        }
+        continue;
+      }
+
+      if (this.isEnemyPositionClear(enemy, position)) {
         this._syncPositionToFloor(position);
         this.lastSafeEnemyPositions.set(enemy.id, position.clone());
+        enemy.wallContactCount = Math.max(0, (enemy.wallContactCount ?? 0) - 1);
+        this._maintainEnemyArenaRecovery(enemy);
         continue;
       }
 
       const fallback = this.lastSafeEnemyPositions.get(enemy.id);
-      if (fallback) {
+      if (fallback && this.isEnemyPositionClear(enemy, fallback)) {
         position.copy(fallback);
         this._syncPositionToFloor(position);
       } else {
-        const nearest = this._findNearestWalkablePosition(position);
+        const nearest = this.findNearestEnemyClearPosition(enemy, position, {
+          preferredPosition: enemy.encounterArena?.center,
+        }) ?? this._findNearestWalkablePosition(position);
         position.copy(nearest);
         this._syncPositionToFloor(position);
         this.lastSafeEnemyPositions.set(enemy.id, nearest.clone());
+      }
+
+      enemy.wallContactCount = (enemy.wallContactCount ?? 0) + 1;
+      const inwardProbe = position.clone().lerp(
+        enemy.encounterArena?.center ?? position,
+        0.58,
+      );
+      const recovery = this.findNearestEnemyClearPosition(enemy, inwardProbe, {
+        preferredPosition: enemy.encounterArena?.center,
+        maximumRadius: 4.2,
+      });
+      if (recovery) {
+        if (typeof enemy.setNavigationRecoveryTarget === 'function') {
+          enemy.setNavigationRecoveryTarget(recovery, 2.2);
+        } else {
+          enemy.navigationRecoveryTarget = recovery;
+          enemy.navigationRecoveryTimer = 2.2;
+        }
       }
     }
 
@@ -720,13 +1607,101 @@ export class DungeonController {
     }
   }
 
+  _maintainEnemyArenaRecovery(enemy) {
+    const arena = enemy?.encounterArena;
+    const position = enemy?.root?.position;
+    if (!arena?.center || !position) {
+      return;
+    }
+
+    const zoneCenter = arena.zoneCenter ?? arena.center;
+    const edgeRatio = Math.max(
+      Math.abs(position.x - zoneCenter.x) / Math.max(0.5, arena.softHalfWidth),
+      Math.abs(position.z - zoneCenter.z) / Math.max(0.5, arena.softHalfDepth),
+    );
+    if (edgeRatio >= 1) {
+      const centerTarget = arena.center.clone();
+      if (enemy.navigationMode === 'air') {
+        centerTarget.y = position.y;
+      }
+      if (typeof enemy.setNavigationRecoveryTarget === 'function') {
+        enemy.setNavigationRecoveryTarget(centerTarget, 1.25);
+      } else {
+        enemy.navigationRecoveryTarget = centerTarget;
+        enemy.navigationRecoveryTimer = 1.25;
+      }
+      return;
+    }
+
+    const recovery = enemy.navigationRecoveryTarget;
+    if (recovery
+      && (position.x - recovery.x) ** 2 + (position.z - recovery.z) ** 2 <= 0.16) {
+      enemy.clearNavigationRecoveryTarget?.();
+    }
+  }
+
+  _getEnemyAerialNavigationCenter(enemy, target) {
+    if (typeof enemy?.getAerialNavigationCenter === 'function') {
+      const result = enemy.getAerialNavigationCenter(target);
+      if (result?.isVector3) {
+        return target.copy(result);
+      }
+      return target;
+    }
+
+    const offsetY = Number.isFinite(enemy?.aerialNavigationOffsetY)
+      ? enemy.aerialNavigationOffsetY
+      : Number.isFinite(enemy?.combatAimOffset)
+        ? enemy.combatAimOffset
+        : Math.max(0.35, enemy?.hoverHeight ?? 0.5);
+    return target.copy(enemy.root.position).add(new THREE.Vector3(0, offsetY, 0));
+  }
+
+  _getEnemyAerialCollisionOptions(enemy) {
+    const radius = Math.max(0.2, enemy?.aerialNavigationRadius ?? enemy?.radius ?? 0.45);
+    return {
+      radius,
+      verticalRadius: Math.max(
+        0.42,
+        enemy?.aerialNavigationVerticalRadius ?? Math.min(1.4, (enemy?.collisionHeight ?? 1.4) * 0.43),
+      ),
+    };
+  }
+
+  _findNearestClearAerialCenter(center, options) {
+    const candidate = new THREE.Vector3();
+    const verticalOffsets = [0.5, 1, 1.5, -0.5];
+    for (const offsetY of verticalOffsets) {
+      candidate.copy(center).add(new THREE.Vector3(0, offsetY, 0));
+      if (this.isAerialPositionClear(candidate, options)) {
+        return candidate.clone();
+      }
+    }
+
+    for (let distance = 0.6; distance <= 4.2; distance += 0.6) {
+      for (let index = 0; index < 8; index += 1) {
+        const angle = index * Math.PI * 0.25;
+        candidate.set(
+          center.x + Math.cos(angle) * distance,
+          center.y,
+          center.z + Math.sin(angle) * distance,
+        );
+        if (this.isAerialPositionClear(candidate, options)) {
+          return candidate.clone();
+        }
+      }
+    }
+
+    return null;
+  }
+
   rollEnemyKeycardDrop(enemy) {
     const keycardId = enemy?.guaranteedKeycardDropId ?? null;
     if (!keycardId || this.progressionManager.hasKeycard(keycardId)) {
       return null;
     }
 
-    const position = enemy.root.position.clone();
+    const position = (enemy.deathDropPosition ?? enemy.root.position).clone();
     position.y = this.getFloorElevationAt(position);
     position.x += (Math.random() - 0.5) * 0.7;
     position.z += (Math.random() - 0.5) * 0.7;
@@ -1272,6 +2247,20 @@ export class DungeonController {
     // climb finishes on the walkable top surface.
     if (this.game.player.isLedgeClinging?.()) {
       this.lastSafePlayerPosition.copy(current);
+      return;
+    }
+
+    // Tractor beams and player-owned ballistic throws have exclusive control
+    // of the root until they release or land. Normal floor correction during
+    // that window would snap the player out of the beam or flatten the arc.
+    if (this.game.player.shouldIgnoreGroundConstraint?.()) {
+      return;
+    }
+
+    // Powerful knockback owns its airborne path and performs a forward-first
+    // walkable landing correction when descending. Axis clamping here would
+    // erase the impact momentum before that resolver can make its choice.
+    if (this.game.player.isPowerKnockbackActive?.()) {
       return;
     }
 

@@ -1200,7 +1200,12 @@ export class ExternalModelRig {
       this.dodgeRollAnimator.apply(targets, progress);
     } else if (state === 'neutralJump' || state === 'forwardJump' || state === 'fall' || state === 'land') {
       this.jumpAnimator.apply(targets, state, progress);
-    } else if (state === 'knockbackFall' || state === 'downed') {
+    } else if (state === 'knockbackFall'
+      || state === 'knockbackLaunch'
+      || state === 'aerialKnockbackFall'
+      || state === 'backLanding'
+      || state === 'lyingFlat'
+      || state === 'downed') {
       this.damageAnimator.applyKnockbackFall(targets, state, progress);
     } else if (state === 'getUp') {
       this.damageAnimator.applyGetUp(targets, progress);

@@ -16,6 +16,53 @@ const TYPE_WEIGHTS = [
   ['horokko', 10],
   ['gorubesshu', 7],
 ];
+const MIN_ENCOUNTER_CORNER_BAND = 2.4;
+const ENCOUNTER_CORNER_BAND_RATIO = 0.22;
+const ENCOUNTER_CORNER_ESCAPE_MARGIN = 0.85;
+
+function getEncounterCornerBand(zone) {
+  if (!zone?.position) return 0;
+  const halfWidth = Math.max(0.01, Number(zone.halfWidth) || 0.01);
+  const halfDepth = Math.max(0.01, Number(zone.halfDepth) || 0.01);
+  return Math.min(
+    Math.max(
+      MIN_ENCOUNTER_CORNER_BAND,
+      Math.min(halfWidth, halfDepth) * ENCOUNTER_CORNER_BAND_RATIO,
+    ),
+    halfWidth * 0.44,
+    halfDepth * 0.44,
+  );
+}
+
+export function isEncounterCornerPosition(position, zone) {
+  if (!position || !zone?.position) return false;
+  const band = getEncounterCornerBand(zone);
+  const xWallClearance = (Number(zone.halfWidth) || 0)
+    - Math.abs(position.x - zone.position.x);
+  const zWallClearance = (Number(zone.halfDepth) || 0)
+    - Math.abs(position.z - zone.position.z);
+  return xWallClearance <= band && zWallClearance <= band;
+}
+
+export function pullEncounterSpawnFromCorner(position, zone, target = new THREE.Vector3()) {
+  target.copy(position);
+  if (!isEncounterCornerPosition(position, zone)) return target;
+
+  const band = getEncounterCornerBand(zone);
+  const safeHalfWidth = Math.max(
+    0,
+    (Number(zone.halfWidth) || 0) - band - ENCOUNTER_CORNER_ESCAPE_MARGIN,
+  );
+  const safeHalfDepth = Math.max(
+    0,
+    (Number(zone.halfDepth) || 0) - band - ENCOUNTER_CORNER_ESCAPE_MARGIN,
+  );
+  const xDirection = Math.sign(position.x - zone.position.x) || 1;
+  const zDirection = Math.sign(position.z - zone.position.z) || 1;
+  target.x = zone.position.x + xDirection * safeHalfWidth;
+  target.z = zone.position.z + zDirection * safeHalfDepth;
+  return target;
+}
 
 function weightedType(random = Math.random) {
   const total = TYPE_WEIGHTS.reduce((sum, [, weight]) => sum + weight, 0);
@@ -132,6 +179,7 @@ export class EnemySpawner {
         favoredTags: options.favoredTags,
         suppressedTags: options.suppressedTags,
         behaviorModifiers: options.behaviorModifiers,
+        excludedArchetypes: options.excludedArchetypes,
         encounterSize: options.encounterSize ?? 1,
         healthMultiplier: options.healthMultiplier ?? 1,
         elite: isElite,
@@ -156,6 +204,7 @@ export class EnemySpawner {
 
   spawnEncounter(encounter) {
     const enemies = [];
+    let tractorControllerCount = 0;
     const spawnPoints = encounter.spawnPoints?.length
       ? encounter.spawnPoints
       : [encounter.zone.position];
@@ -164,9 +213,13 @@ export class EnemySpawner {
     for (let i = 0; i < roster.length; i += 1) {
       const seed = createEncounterSlotSeed(this.runSeed, encounter.id, i);
       const slotRandom = new SeededRandom(`${seed}:position`);
-      const spawnPoint = spawnPoints[i % spawnPoints.length].clone();
-      spawnPoint.x += (slotRandom.next() - 0.5) * 0.65;
-      spawnPoint.z += (slotRandom.next() - 0.5) * 0.65;
+      const authoredSpawnPoint = spawnPoints[i % spawnPoints.length].clone();
+      authoredSpawnPoint.x += (slotRandom.next() - 0.5) * 0.65;
+      authoredSpawnPoint.z += (slotRandom.next() - 0.5) * 0.65;
+      const spawnPoint = pullEncounterSpawnFromCorner(
+        authoredSpawnPoint,
+        encounter.zone,
+      );
       const forceElite = (encounter.keycardDropId && i === 0) || (encounter.isBoss && i === 0);
       const keycardCarrier = Boolean(encounter.keycardDropId && i === 0);
       const enemy = this.spawnEnemy(roster[i], forceElite, spawnPoint, {
@@ -178,10 +231,36 @@ export class EnemySpawner {
         favoredTags: encounter.enemyTags,
         suppressedTags: encounter.enemySuppressedTags,
         healthMultiplier: encounter.enemyHealthMultiplier ?? 1,
+        excludedArchetypes: tractorControllerCount > 0 ? ['tractorController'] : [],
         isBoss: Boolean(encounter.isBoss && i === 0),
         keycardCarrier,
       });
       enemy.encounterId = encounter.id;
+      const controller = this.game.dungeonController;
+      enemy.root.position.copy(this._resolveEncounterSpawnPosition(
+        encounter,
+        enemy,
+        spawnPoint,
+      ));
+      const rawArenaCenter = encounter.zone?.position?.clone?.();
+      if (rawArenaCenter) {
+        rawArenaCenter.y = enemy.navigationMode === 'air'
+          ? enemy.root.position.y
+          : (controller?.getSurfaceElevationAt?.(rawArenaCenter) ?? rawArenaCenter.y);
+      }
+      const resolvedArenaCenter = rawArenaCenter
+        ? controller?.findNearestEnemyClearPosition?.(enemy, rawArenaCenter, {
+          preferredPosition: rawArenaCenter,
+          maximumRadius: Math.max(
+            1.4,
+            Math.min(encounter.zone.halfWidth ?? 5, encounter.zone.halfDepth ?? 5) * 0.72,
+          ),
+        }) ?? rawArenaCenter
+        : null;
+      enemy.setEncounterArena?.(encounter, resolvedArenaCenter);
+      if (enemy.genome?.archetypeId === 'tractorController') {
+        tractorControllerCount += 1;
+      }
       if (keycardCarrier) {
         enemy.guaranteedKeycardDropId = encounter.keycardDropId;
         enemy.isKeyHoldingElite = true;
@@ -194,6 +273,46 @@ export class EnemySpawner {
 
     this.game.dungeonController?.markEncounterSpawned?.(encounter.id, enemies);
     return enemies;
+  }
+
+  _resolveEncounterSpawnPosition(encounter, enemy, requestedPosition) {
+    const zone = encounter?.zone;
+    const controller = this.game.dungeonController;
+    const safeRequest = pullEncounterSpawnFromCorner(requestedPosition, zone);
+    if (enemy.navigationMode !== 'air') {
+      safeRequest.y = controller?.getSurfaceElevationAt?.(safeRequest) ?? safeRequest.y;
+    }
+    if (!controller?.findNearestEnemyClearPosition) {
+      return safeRequest;
+    }
+
+    const localSearchRadius = Math.max(1.4, getEncounterCornerBand(zone) * 0.72);
+    const resolved = controller.findNearestEnemyClearPosition(enemy, safeRequest, {
+      preferredPosition: zone?.position,
+      maximumRadius: localSearchRadius,
+    });
+    if (resolved && !isEncounterCornerPosition(resolved, zone)) {
+      return resolved;
+    }
+
+    const center = zone?.position?.clone?.() ?? safeRequest.clone();
+    center.y = enemy.navigationMode === 'air'
+      ? safeRequest.y
+      : (controller.getSurfaceElevationAt?.(center) ?? center.y);
+    const centerResolved = controller.findNearestEnemyClearPosition(enemy, center, {
+      preferredPosition: center,
+      maximumRadius: Math.max(
+        1.4,
+        Math.min(Number(zone?.halfWidth) || 5, Number(zone?.halfDepth) || 5) * 0.58,
+      ),
+    });
+    if (centerResolved && !isEncounterCornerPosition(centerResolved, zone)) {
+      return centerResolved;
+    }
+
+    // The clear-position search is allowed to explore broadly for unusual
+    // room geometry, so sanitize its final fallback one more time.
+    return pullEncounterSpawnFromCorner(centerResolved ?? resolved ?? safeRequest, zone);
   }
 
   spawnInitialPack() {

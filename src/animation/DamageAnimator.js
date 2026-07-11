@@ -46,36 +46,42 @@ export class DamageAnimator {
     }
 
     const p = THREE.MathUtils.clamp(progress, 0, 1);
-    const fall = state === 'downed' ? 1 : THREE.MathUtils.smoothstep(p, 0.18, 0.82);
-    const impact = state === 'downed' ? 0 : 1 - THREE.MathUtils.smoothstep(p, 0.08, 0.3);
-    const settle = state === 'downed' ? 1 : THREE.MathUtils.smoothstep(p, 0.68, 1);
+    const airborne = state === 'aerialKnockbackFall';
+    const landing = state === 'backLanding';
+    const lyingFlat = state === 'lyingFlat' || state === 'downed';
+    const launch = state === 'knockbackLaunch'
+      ? THREE.MathUtils.smoothstep(p, 0.08, 0.62)
+      : 1;
+    const settle = lyingFlat ? 1 : landing ? THREE.MathUtils.smoothstep(p, 0.04, 0.72) : 0;
+    const flight = airborne ? 1 : landing ? 1 - settle : launch;
+    const impact = airborne || landing || lyingFlat ? 0 : 1 - THREE.MathUtils.smoothstep(p, 0.08, 0.3);
 
     this.mapper.addCorePose(targets, {
-      hips: { pitch: -degrees(38) * impact - degrees(72) * fall, yaw: degrees(12) * fall, roll: -degrees(48) * fall },
-      spine: { pitch: -degrees(44) * impact - degrees(48) * fall, yaw: -degrees(10) * fall, roll: -degrees(32) * fall },
-      neck: { pitch: -degrees(24) * impact - degrees(14) * fall, yaw: 0, roll: -degrees(10) * fall },
-    }, Math.max(impact, fall));
+      hips: { pitch: -degrees(38) * impact - THREE.MathUtils.lerp(degrees(50), degrees(85), settle) * flight, yaw: degrees(5) * flight, roll: 0 },
+      spine: { pitch: -degrees(44) * impact - THREE.MathUtils.lerp(degrees(52), -degrees(3), settle), yaw: -degrees(4) * flight, roll: 0 },
+      neck: { pitch: -degrees(24) * impact - THREE.MathUtils.lerp(degrees(9), -degrees(5), settle), yaw: 0, roll: 0 },
+    }, Math.max(impact, flight, settle));
     this.mapper.blendArmPose(targets, 'left', {
       armForwardBack: degrees(18) * impact,
-      armRaise: degrees(36) + degrees(12) * settle,
-      elbowBend: degrees(62),
-      elbowDepth: degrees(12),
-    }, Math.max(impact * 0.75, fall));
+      armRaise: THREE.MathUtils.lerp(degrees(36), degrees(5), settle),
+      elbowBend: THREE.MathUtils.lerp(degrees(62), degrees(5), settle),
+      elbowDepth: degrees(12) * (1 - settle),
+    }, Math.max(impact * 0.75, flight, settle));
     this.mapper.blendArmPose(targets, 'right', {
       armForwardBack: -degrees(12) * impact,
-      armRaise: degrees(38) + degrees(10) * settle,
-      elbowBend: degrees(58),
-      elbowDepth: -degrees(10),
-    }, Math.max(impact * 0.75, fall));
+      armRaise: THREE.MathUtils.lerp(degrees(38), degrees(5), settle),
+      elbowBend: THREE.MathUtils.lerp(degrees(58), degrees(6), settle),
+      elbowDepth: -degrees(10) * (1 - settle),
+    }, Math.max(impact * 0.75, flight, settle));
     this.mapper.addLegPose(targets, 'left', {
-      hipPitch: degrees(40) * impact + degrees(28) * fall,
-      hipRoll: -degrees(10) * fall,
-      kneeBend: degrees(42) * impact + degrees(58) * fall,
+      hipPitch: degrees(40) * impact + THREE.MathUtils.lerp(degrees(28), 0, settle) * flight,
+      hipRoll: -THREE.MathUtils.lerp(degrees(10), degrees(2), settle),
+      kneeBend: degrees(42) * impact + THREE.MathUtils.lerp(degrees(58), degrees(3), settle) * flight,
     });
     this.mapper.addLegPose(targets, 'right', {
-      hipPitch: degrees(32) * impact + degrees(18) * fall,
-      hipRoll: degrees(8) * fall,
-      kneeBend: degrees(36) * impact + degrees(44) * fall,
+      hipPitch: degrees(32) * impact + THREE.MathUtils.lerp(degrees(18), 0, settle) * flight,
+      hipRoll: THREE.MathUtils.lerp(degrees(8), degrees(2), settle),
+      kneeBend: degrees(36) * impact + THREE.MathUtils.lerp(degrees(44), degrees(3), settle) * flight,
     });
   }
 

@@ -27,6 +27,7 @@ const BUSTER_BASE_BURST_SHOTS = 3;
 const BUSTER_ENERGY_PER_EXTRA_SHOT = 3;
 const BUSTER_MIN_BURST_SHOTS = 1;
 const BUSTER_DEFAULT_SHOT_COOLDOWN = 0.24;
+const WEAPON_OUTPUT_REGEN_DELAY_AFTER_FIRE = 0.5;
 const BUSTER_DEFAULT_STATS = Object.freeze({
   attackDamage: 8,
   maxEnergy: BUSTER_BASE_ENERGY,
@@ -1069,6 +1070,13 @@ export class CombatSystem {
         return;
       }
 
+      if (target.enemy && !target.enemy.tryClaimExternalControl?.(this, 'playerLift', {
+        freeze: true,
+        ignoreGroundConstraint: true,
+      })) {
+        return;
+      }
+
       this.lift.active = true;
       this.lift.target = target;
       this.lift.kind = target.kind;
@@ -1078,7 +1086,12 @@ export class CombatSystem {
     }
 
     const lifted = this.lift.target;
-    if (!lifted || !lifted.root || lifted.root.parent === null || lifted.junk?.dead || lifted.enemy?.dead) {
+    if (!lifted
+      || !lifted.root
+      || lifted.root.parent === null
+      || lifted.junk?.dead
+      || lifted.enemy?.dead
+      || (lifted.enemy?.hasExternalControl && !lifted.enemy.hasExternalControl(this))) {
       this._stopLiftArm(false);
       return;
     }
@@ -1147,7 +1160,10 @@ export class CombatSystem {
     }
 
     for (const enemy of this.game.enemies ?? []) {
-      if (enemy.dead || (!enemy.liftable && enemy.typeKey !== 'horokko' && enemy.type?.modelAsset !== 'horokko')) {
+      if (enemy.dead
+        || enemy.hasExternalControl?.()
+        || enemy.externalBallisticMotion
+        || (!enemy.liftable && enemy.typeKey !== 'horokko' && enemy.type?.modelAsset !== 'horokko')) {
         continue;
       }
 
@@ -1167,7 +1183,11 @@ export class CombatSystem {
     }
 
     const lifted = this.lift.target;
-    if (lifted?.root && lifted.root.parent !== null) {
+    const ownsEnemy = !lifted?.enemy
+      || !lifted.enemy.hasExternalControl
+      || lifted.enemy.hasExternalControl(this);
+    const targetAlive = !lifted?.junk?.dead && !lifted?.enemy?.dead;
+    if (lifted?.root && lifted.root.parent !== null && ownsEnemy && targetAlive) {
       const player = this.game.player;
       tempDirection.copy(player.attackFacingDirection ?? player.lastMoveDirection);
       tempDirection.y = 0;
@@ -1188,6 +1208,10 @@ export class CombatSystem {
         lifted.enemy.hitStopTimer = Math.max(lifted.enemy.hitStopTimer ?? 0, escaped ? 0.08 : 0.18);
         lifted.enemy.applyStatus?.('stagger', { duration: escaped ? 0.08 : 0.22 });
       }
+    }
+
+    if (lifted?.enemy && ownsEnemy) {
+      lifted.enemy.releaseExternalControl?.(this, escaped ? 'escaped' : 'released');
     }
 
     this.lift.active = false;
@@ -1388,7 +1412,14 @@ export class CombatSystem {
       this._drillAttackDirection(tempDirection, profile);
     } else if (profile.melee) {
       if (profile.type === 'swordArm') {
-        player.playSwordSlashAnimation?.(attackDuration, targetPoint);
+        // Sword arcs follow the character's current facing instead of aimWorld,
+        // preventing mouse aim from forcibly rotating Mega Man during a slash.
+        tempDirection.set(Math.sin(player.root.rotation.y), 0, Math.cos(player.root.rotation.y));
+        if (tempDirection.lengthSq() <= 0.001) {
+          tempDirection.copy(player.lastMoveDirection);
+        }
+        tempDirection.normalize();
+        player.playSwordSlashAnimation?.(attackDuration);
         player.setMovementLock?.(attackDuration * 0.96, 0);
         this._queueMeleeStrike(tempDirection, profile, attackDuration * (profile.activeStart ?? 0.48), {
           visual: this._getActiveWeaponVisual(profile),
@@ -1414,10 +1445,6 @@ export class CombatSystem {
   }
 
   _updateWeaponStates(dt) {
-    const activeWeapon = this.game.player.getActiveArmWeapon?.() ?? this.game.player.equipment.get('weapon');
-    const activeKey = activeWeapon?.id ?? 'default-buster';
-    const activeInputHeld = Boolean(this.game.pointer?.primary || this.game.pointer?.alternate);
-
     for (const state of this.weaponStates.values()) {
       state.cooldown = Math.max(0, state.cooldown - dt);
       const profile = ARM_PROFILES[state.weaponType] ?? DEFAULT_PROFILE;
@@ -1426,13 +1453,12 @@ export class CombatSystem {
       const wasSpraying = state.sprayActive === true;
       const wasDrilling = this.drill.active && this.drill.currentState === state;
       const wasLiftingEnemy = this.lift.active && this.lift.currentState === state && this.lift.kind === 'enemy';
-      const activeWeaponBeingUsed = activeInputHeld && state.key === activeKey && profile.special !== 'lift';
       state.sprayWasActiveLastFrame = wasSpraying;
       state.sprayActive = false;
 
       if (!this.laser.active || this.laser.currentState !== state) {
         state.laserHeat = Math.max(0, (state.laserHeat ?? 0) - dt * (profile.heatCoolRate ?? 0.58));
-        if (!wasSpraying && !wasDrilling && !wasLiftingEnemy && !activeWeaponBeingUsed) {
+        if (!wasSpraying && !wasDrilling && !wasLiftingEnemy) {
           this._recoverWeaponOutput(state, profile, dt);
         }
       }
@@ -1568,6 +1594,14 @@ export class CombatSystem {
   _clearPendingAttacks() {
     this.pendingMeleeStrikes.length = 0;
     this.pendingProjectileShots.length = 0;
+  }
+
+  cancelForDodge() {
+    this._stopLaserBeam(true);
+    this._stopDrillSpin();
+    this._stopLiftArm(false);
+    this._hideGrenadePreview();
+    this._clearPendingAttacks();
   }
 
   _getCurrentProfile() {
@@ -1820,12 +1854,7 @@ export class CombatSystem {
   }
 
   _getOutputRecoveryDelay(profile) {
-    if (isBusterProfile(profile)) {
-      return Math.max(0, profile.outputRecoveryDelay ?? 0.16);
-    }
-
-    const baseDelay = Math.max(0, profile.outputRecoveryDelay ?? 0.18);
-    return baseDelay / Math.sqrt(this._getRapidOutputModifier());
+    return WEAPON_OUTPUT_REGEN_DELAY_AFTER_FIRE;
   }
 
   _getWeaponReadiness(profile, state) {

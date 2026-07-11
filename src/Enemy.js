@@ -36,7 +36,7 @@ export const ENEMY_TYPES = {
     scale: 0.86,
     maxHealth: 24,
     damage: 5,
-    moveSpeed: 1.95,
+    moveSpeed: 2.45,
     attackRange: 0.75,
     attackCooldown: 1.2,
     experience: 5,
@@ -50,7 +50,7 @@ export const ENEMY_TYPES = {
     scale: 0.76,
     maxHealth: 16,
     damage: 4,
-    moveSpeed: 3,
+    moveSpeed: 3.7,
     attackRange: 0.7,
     attackCooldown: 0.9,
     experience: 6,
@@ -64,7 +64,7 @@ export const ENEMY_TYPES = {
     scale: 1.06,
     maxHealth: 58,
     damage: 9,
-    moveSpeed: 1.35,
+    moveSpeed: 1.8,
     attackRange: 0.85,
     attackCooldown: 1.7,
     armor: 12,
@@ -79,7 +79,7 @@ export const ENEMY_TYPES = {
     scale: 0.84,
     maxHealth: 21,
     damage: 5,
-    moveSpeed: 1.75,
+    moveSpeed: 2.25,
     attackRange: 5.8,
     attackCooldown: 1.9,
     ranged: true,
@@ -96,7 +96,7 @@ export const ENEMY_TYPES = {
     radius: 0.54,
     maxHealth: 32,
     damage: 6,
-    moveSpeed: 2.05,
+    moveSpeed: 2.6,
     attackRange: 6.1,
     attackCooldown: 2.25,
     armor: 4,
@@ -120,7 +120,7 @@ export const ENEMY_TYPES = {
     radius: 0.72,
     maxHealth: 82,
     damage: 7,
-    moveSpeed: 1.25,
+    moveSpeed: 1.65,
     attackRange: 4.65,
     attackCooldown: 2.55,
     armor: 18,
@@ -597,8 +597,24 @@ export class Enemy {
     this.deathTimer = 1.25;
     this.deathFallAxis = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
     this.deathStartRotation = new THREE.Euler();
+    this.deathStartPosition = new THREE.Vector3();
+    this.deathLandingPosition = null;
+    this.deathDropPosition = null;
     this.knockback = new THREE.Vector3();
     this.statusEffects = createStatusState();
+    // External control is an exclusive, short-lived ownership claim used by
+    // systems such as the Lift Arm and tractor-beam Reaverbots. Ballistic
+    // motion is stored separately so a launched enemy owns the rest of its
+    // trajectory even if the original carrier is destroyed.
+    this.externalControl = null;
+    this.externalBallisticMotion = null;
+    // Encounter ownership also carries a soft movement envelope. Dungeon
+    // navigation uses it to keep enemies participating in their fight instead
+    // of camping doorways or endlessly pressing against room geometry.
+    this.encounterArena = null;
+    this.navigationRecoveryTarget = null;
+    this.navigationRecoveryTimer = 0;
+    this.wallContactCount = 0;
 
     this.stats = {
       maxHealth: scaledStat(this.type.maxHealth, level, 0.16),
@@ -662,11 +678,60 @@ export class Enemy {
     this._captureMaterialStates();
   }
 
+  setEncounterArena(encounter, resolvedCenter = null) {
+    const zone = encounter?.zone;
+    if (!zone?.position
+      || !Number.isFinite(zone.halfWidth)
+      || !Number.isFinite(zone.halfDepth)) {
+      this.encounterArena = null;
+      this.navigationRecoveryTarget = null;
+      this.navigationRecoveryTimer = 0;
+      return null;
+    }
+
+    const center = resolvedCenter?.clone?.() ?? zone.position.clone();
+    const edgeMargin = Math.max(1.25, this.radius * 2.2);
+    this.encounterArena = {
+      encounterId: encounter.id ?? this.encounterId ?? null,
+      center,
+      zoneCenter: zone.position.clone(),
+      halfWidth: zone.halfWidth,
+      halfDepth: zone.halfDepth,
+      softHalfWidth: Math.max(1.1, zone.halfWidth - edgeMargin),
+      softHalfDepth: Math.max(1.1, zone.halfDepth - edgeMargin),
+    };
+    this.navigationRecoveryTarget = null;
+    this.navigationRecoveryTimer = 0;
+    this.wallContactCount = 0;
+    return this.encounterArena;
+  }
+
+  setNavigationRecoveryTarget(position, duration = 1.4) {
+    if (!position?.isVector3) {
+      return false;
+    }
+    this.navigationRecoveryTarget = position.clone();
+    this.navigationRecoveryTimer = Math.max(this.navigationRecoveryTimer, duration);
+    return true;
+  }
+
+  clearNavigationRecoveryTarget() {
+    this.navigationRecoveryTarget = null;
+    this.navigationRecoveryTimer = 0;
+  }
+
   update(dt, game) {
     if (this.dead) {
       this._updateDeath(dt);
       this._updateHealthBar(game.camera);
       return;
+    }
+
+    if (this.navigationRecoveryTimer > 0) {
+      this.navigationRecoveryTimer = Math.max(0, this.navigationRecoveryTimer - dt);
+      if (this.navigationRecoveryTimer <= 0) {
+        this.navigationRecoveryTarget = null;
+      }
     }
 
     this._updateStatusEffects(dt, game);
@@ -706,6 +771,13 @@ export class Enemy {
 
     if (this.gorubesshuBlockTimer > 0) {
       this.gorubesshuBlockTimer = Math.max(0, this.gorubesshuBlockTimer - dt);
+    }
+
+    if (this._updateExternalMotion(dt, game)) {
+      this.animation.update(dt, { moving: false, moveAmount: 0 });
+      this._updateExternalModelVisual(dt, false);
+      this._updateHealthBar(game.camera);
+      return;
     }
 
     if (this.knockback.lengthSq() > 0.0001) {
@@ -764,10 +836,16 @@ export class Enemy {
     const desiredDistance = this.type.ranged ? this.stats.attackRange * 0.72 : this.stats.attackRange;
     const hasVerticalAttackAccess = this.type.ranged || verticalGap <= 1.35;
     const hitStopped = this.hitStopTimer > 0;
-    const moving = !controlLocked && !hitStopped && (distance > desiredDistance || !hasVerticalAttackAccess);
+    const shouldRecenter = game.dungeonController?.shouldEnemyRecenter?.(this) ?? false;
+    const moving = !controlLocked
+      && !hitStopped
+      && (distance > desiredDistance || !hasVerticalAttackAccess || shouldRecenter);
 
     if (moving) {
-      const navigationDirection = game.dungeonController?.getNavigationDirection?.(this.root.position, player.root.position);
+      const navigationDirection = game.dungeonController?.getEnemyNavigationDirection?.(
+        this,
+        player.root.position,
+      ) ?? game.dungeonController?.getNavigationDirection?.(this.root.position, player.root.position);
       tempNavigationDirection.copy(navigationDirection ?? tempDirection);
       if (tempNavigationDirection.lengthSq() > 0.0001) {
         tempNavigationDirection.normalize();
@@ -787,6 +865,180 @@ export class Enemy {
     this.animation.update(dt, { moving, moveAmount: moving ? 1 : 0 });
     this._updateExternalModelVisual(dt, moving);
     this._updateHealthBar(game.camera);
+  }
+
+  tryClaimExternalControl(owner, kind = 'external', options = {}) {
+    if (!owner || this.dead || this.externalBallisticMotion) {
+      return false;
+    }
+
+    if (this.externalControl && this.externalControl.owner !== owner) {
+      return false;
+    }
+
+    const freeze = options.freeze ?? true;
+    const previous = this.externalControl;
+    this.externalControl = {
+      owner,
+      kind,
+      freeze,
+      ignoreGroundConstraint: options.ignoreGroundConstraint ?? freeze,
+      releasePosition: options.releasePosition?.clone?.()
+        ?? previous?.releasePosition
+        ?? this.root.position.clone(),
+      onRelease: options.onRelease ?? previous?.onRelease ?? null,
+    };
+
+    if (freeze) {
+      this.knockback.set(0, 0, 0);
+    }
+    return true;
+  }
+
+  hasExternalControl(owner = null) {
+    if (!this.externalControl) {
+      return false;
+    }
+    return owner ? this.externalControl.owner === owner : true;
+  }
+
+  releaseExternalControl(owner, reason = 'released', options = {}) {
+    const control = this.externalControl;
+    if (!control || control.owner !== owner) {
+      return false;
+    }
+
+    this.externalControl = null;
+    this.knockback.set(0, 0, 0);
+    if (options.snapToReleasePosition && control.releasePosition) {
+      this.root.position.copy(control.releasePosition);
+    }
+    control.onRelease?.(this, owner, reason);
+    return true;
+  }
+
+  startExternalBallisticMotion(owner, {
+    targetPosition,
+    duration = 0.9,
+    arcHeight = 1.6,
+    spinRate = 8,
+    onLand = null,
+  } = {}) {
+    const control = this.externalControl;
+    if (!control || control.owner !== owner || this.dead || this.externalBallisticMotion) {
+      return false;
+    }
+    if (!targetPosition?.isVector3 && !(
+      Number.isFinite(targetPosition?.x)
+      && Number.isFinite(targetPosition?.y)
+      && Number.isFinite(targetPosition?.z)
+    )) {
+      return false;
+    }
+
+    const resolvedDuration = Number.isFinite(duration) ? Math.max(0.05, duration) : 0.9;
+    const resolvedArcHeight = Number.isFinite(arcHeight) ? Math.max(0, arcHeight) : 1.6;
+    const spin = new THREE.Vector3();
+    if (Number.isFinite(spinRate)) {
+      spin.set(0, spinRate, 0);
+    } else {
+      spin.set(
+        Number.isFinite(spinRate?.x) ? spinRate.x : 0,
+        Number.isFinite(spinRate?.y) ? spinRate.y : 8,
+        Number.isFinite(spinRate?.z) ? spinRate.z : 0,
+      );
+    }
+
+    this.externalControl = null;
+    control.onRelease?.(this, owner, 'thrown');
+    this.knockback.set(0, 0, 0);
+    this.externalBallisticMotion = {
+      owner,
+      startPosition: this.root.position.clone(),
+      targetPosition: new THREE.Vector3(targetPosition.x, targetPosition.y, targetPosition.z),
+      startRotation: this.root.rotation.clone(),
+      duration: resolvedDuration,
+      elapsed: 0,
+      arcHeight: resolvedArcHeight,
+      spinRate: spin,
+      onLand: typeof onLand === 'function' ? onLand : null,
+    };
+    return true;
+  }
+
+  cancelExternalBallisticMotion(reason = 'cancelled', game = null, options = {}) {
+    const motion = this.externalBallisticMotion;
+    if (!motion) {
+      return false;
+    }
+
+    this.externalBallisticMotion = null;
+    this.knockback.set(0, 0, 0);
+    if (options.snapToTarget) {
+      this.root.position.copy(motion.targetPosition);
+      this.root.rotation.x = 0;
+      this.root.rotation.z = 0;
+    }
+    motion.onLand?.(this, game, reason);
+    return true;
+  }
+
+  clearExternalMotion(reason = 'cleared', game = null) {
+    let cleared = false;
+    if (this.externalBallisticMotion) {
+      cleared = this.cancelExternalBallisticMotion(reason, game, {
+        // Death must resolve where the enemy was actually struck. Snapping a
+        // carried or thrown target to an old acquisition/landing point causes
+        // visible warps and misplaced loot.
+        snapToTarget: reason === 'dispose' || reason === 'reset',
+      }) || cleared;
+    }
+    if (this.externalControl) {
+      const { owner } = this.externalControl;
+      cleared = this.releaseExternalControl(owner, reason, {
+        snapToReleasePosition: reason === 'dispose' || reason === 'reset',
+      }) || cleared;
+    }
+    return cleared;
+  }
+
+  isExternalMotionActive() {
+    return Boolean(this.externalBallisticMotion || this.externalControl?.freeze);
+  }
+
+  shouldIgnoreGroundConstraint() {
+    return Boolean(this.externalBallisticMotion || this.externalControl?.ignoreGroundConstraint);
+  }
+
+  _updateExternalMotion(dt, game) {
+    const motion = this.externalBallisticMotion;
+    if (motion) {
+      motion.elapsed = Math.min(motion.duration, motion.elapsed + Math.max(0, dt));
+      const progress = THREE.MathUtils.clamp(motion.elapsed / motion.duration, 0, 1);
+      this.root.position.lerpVectors(motion.startPosition, motion.targetPosition, progress);
+      this.root.position.y += Math.sin(progress * Math.PI) * motion.arcHeight;
+      this.root.rotation.set(
+        motion.startRotation.x + motion.spinRate.x * motion.elapsed,
+        motion.startRotation.y + motion.spinRate.y * motion.elapsed,
+        motion.startRotation.z + motion.spinRate.z * motion.elapsed,
+      );
+      this.knockback.set(0, 0, 0);
+
+      if (progress >= 1) {
+        this.externalBallisticMotion = null;
+        this.root.position.copy(motion.targetPosition);
+        this.root.rotation.x = 0;
+        this.root.rotation.z = 0;
+        motion.onLand?.(this, game, 'landed');
+      }
+      return true;
+    }
+
+    if (this.externalControl?.freeze) {
+      this.knockback.set(0, 0, 0);
+      return true;
+    }
+    return false;
   }
 
   takeDamage(amount, meta = {}) {
@@ -840,10 +1092,14 @@ export class Enemy {
     }
 
     if (this.health <= 0 && !this.dead) {
+      this.clearExternalMotion('death');
       this.dead = true;
       this.deathTimer = 1.25;
       this.deathFloorY = this.root.position.y;
       this.deathStartRotation.copy(this.root.rotation);
+      this.deathStartPosition.copy(this.root.position);
+      this.deathLandingPosition = null;
+      this.deathDropPosition = null;
       this.healthBar.visible = false;
       this._applyRagdollPose();
       this.animation.playDead();
@@ -1269,7 +1525,7 @@ export class Enemy {
       rig.shieldArm,
       guard * 7.2 - shieldAside * 10.5,
       guard * 1.7 + blockPop * 1.35,
-      -guard * 10.2 + shieldAside * 5.8 - blockPop * 1.8,
+      -guard * 11.8 + shieldAside * 5.8 - blockPop * 1.8,
       guard * 0.16 - shieldAside * 0.24,
       -guard * 1.05 + shieldAside * 1.35,
       guard * 0.42 - shieldAside * 0.62 + blockPop * 0.18,
@@ -1666,8 +1922,14 @@ export class Enemy {
 
     this.root.rotation.x = THREE.MathUtils.lerp(this.deathStartRotation.x, this.deathFallAxis.z * Math.PI * 0.5, fallEase);
     this.root.rotation.z = THREE.MathUtils.lerp(this.deathStartRotation.z, -this.deathFallAxis.x * Math.PI * 0.5, fallEase);
-    const deathFloorY = this.deathFloorY ?? this.root.position.y;
-    this.root.position.y = THREE.MathUtils.lerp(this.root.position.y, deathFloorY - 0.08, Math.min(1, dt * 5));
+    if (this.deathLandingPosition) {
+      tempPosition.copy(this.deathLandingPosition);
+      tempPosition.y -= 0.08;
+      this.root.position.lerpVectors(this.deathStartPosition, tempPosition, fallEase);
+    } else {
+      const deathFloorY = this.deathFloorY ?? this.root.position.y;
+      this.root.position.y = THREE.MathUtils.lerp(this.root.position.y, deathFloorY - 0.08, Math.min(1, dt * 5));
+    }
     setObjectOpacity(this.root, fade);
   }
 

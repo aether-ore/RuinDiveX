@@ -428,6 +428,7 @@ export class UIManager {
     this.researchValue = document.getElementById('research-value');
     this.inventoryPanel = document.getElementById('inventory-panel');
     this.inventoryActions = document.getElementById('inventory-actions');
+    this.materialInventory = document.getElementById('material-inventory');
     this.inventoryItems = document.getElementById('inventory-items');
     this.equipmentSlots = document.getElementById('equipment-slots');
     this.garageWeaponSlots = document.getElementById('garage-weapon-slots');
@@ -873,6 +874,7 @@ export class UIManager {
     this._renderEquipment();
     this._renderQuestLog();
     this._renderInventoryActions();
+    this._renderCraftingMaterials();
     this._renderInventoryItems();
   }
 
@@ -1737,6 +1739,39 @@ export class UIManager {
         </div>
       `;
       this.inventoryItems.appendChild(card);
+    }
+  }
+
+  _renderCraftingMaterials() {
+    if (!this.materialInventory) return;
+    const materials = this.game.inventory.getMaterials?.() ?? [];
+    this.materialInventory.innerHTML = '';
+
+    if (materials.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'material-empty';
+      empty.textContent = 'No specific Reaverbot parts recovered';
+      this.materialInventory.appendChild(empty);
+      return;
+    }
+
+    for (const material of materials) {
+      const card = document.createElement('article');
+      card.className = 'material-card';
+      card.style.borderColor = material.color;
+      const source = material.lastSource?.moduleLabel
+        ? `Last source: ${material.lastSource.moduleLabel}`
+        : material.family;
+      const tags = material.craftingTags.slice(0, 3).join(' / ');
+      card.innerHTML = `
+        <span class="material-quantity">${material.quantity}</span>
+        <span class="material-main">
+          <strong style="color: ${material.color}">${material.name}</strong>
+          <span>${source}</span>
+          <small>${tags}</small>
+        </span>
+      `;
+      this.materialInventory.appendChild(card);
     }
   }
 

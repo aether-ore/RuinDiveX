@@ -77,10 +77,11 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'coverToStand2', file: 'cover to stand (2).fbx', label: 'Cover To Stand Alt', loop: false },
   { key: 'crouchedSneakLeft', file: 'crouched sneaking left.fbx', label: 'Crouched Sneak Left', loop: true },
   { key: 'crouchedSneakRight', file: 'crouched sneaking right.fbx', label: 'Crouched Sneak Right', loop: true },
+  { key: 'lyingFlat', file: 'Dying.fbx', label: 'Lying Flat', loop: false, lockRootY: true, holdProgress: 0.98 },
   { key: 'fallingIdle', file: 'falling idle.fbx', label: 'Falling Idle', loop: true },
   { key: 'fallingToLanding', file: 'Falling To Landing.fbx', label: 'Falling To Landing', loop: false, lockRootY: true },
   { key: 'forwardJumpLaunch', file: 'Jump Attack.fbx', label: 'Jump Attack Launch', loop: false, lockRootY: true, subclip: { startFrame: 0, endFrame: 33, fps: 30 } },
-  { key: 'forwardJumpFall', file: 'Jump Attack.fbx', label: 'Jump Attack Fall', loop: false, lockRootY: true, subclip: { startFrame: 33, endFrame: 53, fps: 30 } },
+  { key: 'forwardJumpFall', file: 'Jump Attack.fbx', label: 'Jump To Fall', loop: false, lockRootY: true, subclip: { startFrame: 33, endFrame: 43, fps: 30 } },
   { key: 'forwardJumpLanding', file: 'Jump Attack.fbx', label: 'Jump Attack Landing', loop: false, lockRootY: true, subclip: { startFrame: 53, endFrame: 90, fps: 30 } },
   { key: 'fallingToRoll', file: 'falling to roll.fbx', label: 'Falling To Roll', loop: false },
   { key: 'hangingIdle', file: 'Hanging Idle.fbx', label: 'Hanging Idle', loop: true, lockRootY: true },
@@ -99,7 +100,6 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'sideIdle', file: 'Side Idle.fbx', label: 'Side Idle', loop: true, preserveRootMotion: true },
   { key: 'warriorIdle', file: 'Warrior Idle.fbx', label: 'Warrior Idle', loop: false, preserveRootMotion: true },
   { key: 'swordInwardSlash', file: 'Stable Sword Inward Slash.fbx', label: 'Sword Inward Slash', loop: false },
-  { key: 'neutralJump', file: 'Neutral Jump.fbx', label: 'Neutral Jump', loop: false, lockRootY: true },
   { key: 'jump', file: 'jump.fbx', label: 'Jump', loop: false },
   { key: 'jumpingUp', file: 'jumping up.fbx', label: 'Jumping Up', loop: false },
   { key: 'leftCoverSneak', file: 'left cover sneak.fbx', label: 'Left Cover Sneak', loop: true },
@@ -181,7 +181,24 @@ const LEDGE_FREE_HANG_ROOT_OUTWARD_OFFSET = 0.34;
 const LEDGE_FREE_HANG_ROOT_VERTICAL_OFFSET = 0.8;
 const HEAVY_HIT_HEALTH_FRACTION = 0.16;
 const HEAVY_HIT_MIN_DAMAGE = 18;
-const KNOCKBACK_FALL_DISTANCE = 1.55;
+const POWER_KNOCKBACK_UPWARD_SPEED = 5.2;
+const POWER_KNOCKBACK_HORIZONTAL_SPEED = 5.4;
+const POWER_KNOCKBACK_GRAVITY = -12.5;
+const POWER_KNOCKBACK_FALL_GRAVITY_MULTIPLIER = 1.08;
+const POWER_KNOCKBACK_BACK_LANDING_TIME = 0.14;
+const POWER_KNOCKBACK_LYING_FLAT_TIME = 0.3;
+const POWER_KNOCKBACK_GET_UP_TIME = 0.9;
+const POWER_KNOCKBACK_LANDING_COMMIT_MARGIN = 0.04;
+const POWER_KNOCKBACK_FALLBACK_BACK_RADIUS = 0.24;
+const POWERFUL_KNOCKBACK_ATTACKS = new Set([
+  'charge',
+  'pounce',
+  'explosion',
+  'shockwave',
+  'selfDestruct',
+  'mortar',
+  'mine',
+]);
 const SHIELD_GUARD_DURATION = 0.7;
 const SHIELD_GUARD_COOLDOWN = 0.82;
 const SHIELD_PARRY_WINDOW = 0.18;
@@ -194,6 +211,13 @@ const MML_JUMP_STATES = Object.freeze({
   Rising: 'Rising',
   Falling: 'Falling',
   LandRecovery: 'LandRecovery',
+});
+const POWER_KNOCKBACK_STATES = Object.freeze({
+  Rising: 'KnockbackRising',
+  Falling: 'AerialKnockbackFalling',
+  Landing: 'BackLanding',
+  LyingFlat: 'LyingFlat',
+  GetUp: 'GetUp',
 });
 const DEFAULT_MML_JUMP_SETTINGS = Object.freeze({
   // Low fixed height is the core Mega Man Legends-like commitment: the button never changes the apex.
@@ -368,12 +392,35 @@ export class Player {
     this._coyoteTimer = this.jumpSettings.coyoteTime;
     this._landingRecoveryTimer = 0;
     this._jumpAirTimer = 0;
-    this._jumpKind = 'neutralJump';
+    this._jumpFallTransitionActive = false;
+    this._jumpKind = 'forwardJump';
     this._jumpGroundY = this.root.position.y;
     this._forwardJumpTravelProgress = 0;
     this.jumpLedgeClingResolver = null;
     this.jumpPlatformLandingResolver = null;
+    this.powerKnockbackTravelResolver = null;
+    this.powerKnockbackLandingResolver = null;
+    this.onDodgeStarted = null;
     this.knockbackFallDirection = new THREE.Vector3(0, 0, -1);
+    this.powerKnockbackState = null;
+    this.powerKnockbackVelocity = new THREE.Vector3();
+    this.powerKnockbackTimer = 0;
+    this.powerKnockbackDuration = 0;
+    this.powerKnockbackStartY = 0;
+    this.powerKnockbackApexY = 0;
+    this.powerKnockbackOriginPosition = new THREE.Vector3();
+    this.powerKnockbackPreviousPosition = new THREE.Vector3();
+    this.powerKnockbackLandingPosition = new THREE.Vector3();
+    this.powerKnockbackLandingMode = null;
+    this.powerKnockbackLandingCommitted = false;
+    this.powerKnockbackImpactRootY = 0;
+    this.powerKnockbackCameraAnchorY = 0;
+    this._lastPowerKnockbackBackContact = null;
+    // External motion gives a carrier exclusive ownership of the player root.
+    // Ballistic motion is target-owned so a throw still completes if the
+    // original carrier is destroyed after release.
+    this.externalControl = null;
+    this.externalBallisticMotion = null;
     this.damageHitLocalDirection = new THREE.Vector3(0, 0, 1);
     this.isRunning = false;
     this.tankTurnActive = false;
@@ -410,6 +457,10 @@ export class Player {
       return;
     }
 
+    if (this._updateExternalMotion(dt, movementOptions.game ?? null)) {
+      return;
+    }
+
     this._updateStatusEffects(dt);
     this._updateTemporaryStatBonuses(dt);
     this._updateBracedFireState(dt);
@@ -419,6 +470,11 @@ export class Player {
 
     if (this.isLedgeClinging()) {
       this._updateLedgeClingState(dt, input, movementOptions);
+      return;
+    }
+
+    if (this.isPowerKnockbackActive()) {
+      this._updatePowerKnockback(dt, arenaRadius, movementOptions);
       return;
     }
 
@@ -607,7 +663,7 @@ export class Player {
       ? this._jumpLandingVisualState
       : null;
     const physicalLandingClipKey = jumpAnimationState === 'land'
-      ? (this._jumpKind === 'forwardJump' ? 'forwardJumpLanding' : PHYSICAL_JUMP_LANDING_CLIP_KEY)
+      ? PHYSICAL_JUMP_LANDING_CLIP_KEY
       : null;
     const externalMoving = (jumpDrivenAnimation || landingVisualState) ? false : visiblyMoving;
     const externalMoveAmount = (jumpDrivenAnimation || landingVisualState) ? 0 : moveAnimationAmount;
@@ -840,16 +896,18 @@ export class Player {
     this.jumpStartY = this.root.position.y;
     this._jumpGroundY = this.root.position.y;
     this._jumpAirTimer = 0;
+    this._jumpFallTransitionActive = false;
     this.velocity.y = this._getJumpInitialVelocity();
     this.takeoffHorizontalVelocity.set(this.velocity.x, 0, this.velocity.z);
 
     if (this.takeoffHorizontalVelocity.lengthSq() > 0.0025) {
       this.jumpDirection.copy(this.takeoffHorizontalVelocity).normalize();
-      this._jumpKind = this.takeoffHorizontalVelocity.lengthSq() > 0.16 ? 'forwardJump' : 'neutralJump';
     } else {
       this.jumpDirection.copy(this.lastMoveDirection);
-      this._jumpKind = 'neutralJump';
     }
+    // Standing and moving hops share the expressive forward-jump animation flow;
+    // horizontal motion still comes exclusively from the captured takeoff velocity.
+    this._jumpKind = 'forwardJump';
 
     this.jumpState = MML_JUMP_STATES.Rising;
     this._jumpLandingVisualTimer = 0;
@@ -971,6 +1029,7 @@ export class Player {
   }
 
   _integrateAirborneJump(dt, groundY) {
+    const previousRootY = this.root.position.y;
     const gravity = this._getJumpGravity() * (this.velocity.y <= 0 ? this._getFallGravityMultiplier() : 1);
     this.root.position.x += this.velocity.x * dt;
     this.root.position.z += this.velocity.z * dt;
@@ -980,6 +1039,7 @@ export class Player {
 
     if (this.jumpState === MML_JUMP_STATES.Rising && this.velocity.y <= 0) {
       this.jumpState = MML_JUMP_STATES.Falling;
+      this._jumpFallTransitionActive = true;
     }
 
     if (this._tryStartJumpLedgeCling(this._jumpKind, this._getPhysicalJumpAnimationProgress())) {
@@ -992,7 +1052,7 @@ export class Player {
     let resolvedGroundY = groundY;
     if (this.jumpState === MML_JUMP_STATES.Falling
       && this.velocity.y <= 0
-      && this._tryResolveJumpPlatformLanding(this._jumpKind)) {
+      && this._tryResolveJumpPlatformLanding(this._jumpKind, previousRootY)) {
       resolvedGroundY = this.root.position.y;
     }
 
@@ -1023,14 +1083,20 @@ export class Player {
       ? MML_JUMP_STATES.LandRecovery
       : MML_JUMP_STATES.Grounded;
     this.modelRoot.position.y = 0;
+    this._jumpFallTransitionActive = false;
   }
 
   _getPhysicalJumpAnimationState() {
     if (this.jumpState === MML_JUMP_STATES.Rising) {
-      return this._jumpKind === 'forwardJump' ? 'forwardJump' : 'neutralJump';
+      return 'forwardJump';
     }
 
     if (this.jumpState === MML_JUMP_STATES.Falling) {
+      if (this._jumpFallTransitionActive
+        && !this.externalRig?.hasAnimationClipFinished?.('forwardJumpFall')) {
+        return 'forwardJumpFall';
+      }
+      this._jumpFallTransitionActive = false;
       return 'fall';
     }
 
@@ -1058,33 +1124,54 @@ export class Player {
   }
 
   tryDodgeRoll(input = new Set(), movementOptions = {}) {
-    if (!this.animation.playDodgeRoll?.(DODGE_ROLL_DURATION)) {
+    const cancelFiring = this._isProjectileFiringPoseActive();
+    if (!this.animation.playDodgeRoll?.(DODGE_ROLL_DURATION, { cancelAttack: cancelFiring })) {
       return false;
     }
 
+    this._cancelFiringPoseForDodge(cancelFiring);
     this._resolveActionDirection(input, movementOptions, this.dodgeDirection);
     this.faceDirection(this.dodgeDirection);
     this.dodgeRollYaw = this.root.rotation.y;
     this.attackFacingTimer = 0;
     this.movementLockTimer = Math.max(this.movementLockTimer, DODGE_ROLL_DURATION);
     this.movementLockMultiplier = 0;
+    this.onDodgeStarted?.();
     return true;
   }
 
   tryLateralDodgeRoll(input = new Set(), movementOptions = {}) {
     const lateral = this._getLateralDodgeInput(input);
+    const cancelFiring = this._isProjectileFiringPoseActive();
 
-    if (lateral === 0 || !this.animation.playDodgeRoll?.(DODGE_ROLL_DURATION)) {
+    if (lateral === 0 || !this.animation.playDodgeRoll?.(DODGE_ROLL_DURATION, { cancelAttack: cancelFiring })) {
       return false;
     }
 
+    this._cancelFiringPoseForDodge(cancelFiring);
     this._resolveLateralActionDirection(lateral, movementOptions, this.dodgeDirection);
     this.faceDirection(this.dodgeDirection);
     this.dodgeRollYaw = this.root.rotation.y;
     this.attackFacingTimer = 0;
     this.movementLockTimer = Math.max(this.movementLockTimer, DODGE_ROLL_DURATION);
     this.movementLockMultiplier = 0;
+    this.onDodgeStarted?.();
     return true;
+  }
+
+  _isProjectileFiringPoseActive() {
+    return this._attackWeaponKind === 'projectile'
+      && (this.animation.attackTimer > 0 || this.bracedFireTimer > 0);
+  }
+
+  _cancelFiringPoseForDodge(cancelFiring = false) {
+    if (!cancelFiring) {
+      return;
+    }
+
+    this._releaseProjectileAim();
+    this._attackWeaponKind = null;
+    this.attackFacingTimer = 0;
   }
 
   tryJump(input = new Set(), movementOptions = {}) {
@@ -1115,6 +1202,21 @@ export class Player {
   }
 
   getCameraFocusPosition(target = new THREE.Vector3()) {
+    if (this.isPowerKnockbackActive()) {
+      this.root.updateMatrixWorld(true);
+      const torso = this.externalRig?.joints?.get('spine')
+        ?? this.externalRig?.joints?.get('hips')
+        ?? this.humanoid?.joints?.get('spine')
+        ?? this.humanoid?.joints?.get('hips');
+      if (torso) {
+        return torso.getWorldPosition(target);
+      }
+
+      target.copy(this.root.position);
+      target.y += 0.65;
+      return target;
+    }
+
     target.copy(this.root.position);
 
     const actionState = this.animation?.actionState;
@@ -1127,6 +1229,12 @@ export class Player {
     }
 
     return target;
+  }
+
+  getPowerKnockbackCameraAnchorY() {
+    return this.isPowerKnockbackActive() && Number.isFinite(this.powerKnockbackCameraAnchorY)
+      ? this.powerKnockbackCameraAnchorY
+      : null;
   }
 
   previewExternalAnimation(dt, {
@@ -1273,15 +1381,6 @@ export class Player {
       this.root.position.y += LEDGE_WALL_JUMP_LIFT * verticalProgress;
     } else if (state === 'forwardJump') {
       this._applyForwardJumpDisplacement(this.jumpDirection, FORWARD_JUMP_DISTANCE, progress);
-    } else if (state === 'knockbackFall') {
-      const knockbackProgress = THREE.MathUtils.clamp(progress / 0.62, 0, 1);
-      this._applyActionDisplacement(
-        this.knockbackFallDirection,
-        KNOCKBACK_FALL_DISTANCE,
-        0.62,
-        knockbackProgress,
-        dt,
-      );
     }
 
     this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -arenaRadius, arenaRadius);
@@ -1308,7 +1407,7 @@ export class Player {
     }) === true;
   }
 
-  _tryResolveJumpPlatformLanding(state) {
+  _tryResolveJumpPlatformLanding(state, previousRootY = null) {
     if (state !== 'neutralJump' && state !== 'forwardJump') {
       return false;
     }
@@ -1324,6 +1423,7 @@ export class Player {
       jumpDirection: this.jumpDirection,
       jumpStartY: this.jumpStartY,
       jumpReachHeight: this.getJumpReachHeight(state),
+      previousRootY,
     }) === true;
   }
 
@@ -1345,6 +1445,10 @@ export class Player {
     }
 
     const inward = normal.clone().multiplyScalar(-1);
+    if (ledge.autoClimb === true) {
+      return this._stepOntoLowLedge(ledge, inward);
+    }
+
     this.ledgeCling = {
       id: ledge.id ?? 'debugLedge',
       state: 'jumpingToHanging',
@@ -1385,23 +1489,34 @@ export class Player {
     this.movementLockTimer = 0;
     this.movementLockMultiplier = 0;
     this.faceDirection(inward);
-    if (this.ledgeCling.autoClimb) {
-      this._startLowLedgeAutoClimb();
-    }
     return true;
   }
 
-  _startLowLedgeAutoClimb() {
-    const ledge = this.ledgeCling;
-    if (!ledge) {
+  _stepOntoLowLedge(ledge, inward) {
+    if (!ledge?.climbPosition) {
       return false;
     }
 
-    ledge.climbStartPosition.copy(this.root.position);
-    ledge.climbReleasePosition.copy(this.root.position);
-    ledge.climbHandsReleased = true;
-    ledge.climbHandAnchorsCaptured = false;
-    this._setLedgeState('climbingUp', LEDGE_CLIMB_UP_DURATION);
+    this.root.position.copy(ledge.climbPosition);
+    this.velocity.set(0, 0, 0);
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this._jumpGroundY = this.root.position.y;
+    this._jumpBufferTimer = 0;
+    this._landingRecoveryTimer = 0;
+    this._jumpFallTransitionActive = false;
+    this.ledgeCling = null;
+    this.animation.actionState = null;
+    this.animation.actionTimer = 0;
+    this.animation.actionDuration = 0;
+    this.animation.setState('idle');
+    this._jumpLandingVisualTimer = 0;
+    this._jumpLandingVisualState = null;
+    this._jumpLandingVisualClipKey = null;
+    this.movementLockTimer = 0;
+    this.movementLockMultiplier = 1;
+    this.modelRoot.position.y = 0;
+    this.lastMoveDirection.copy(inward);
+    this.faceDirection(inward);
     return true;
   }
 
@@ -2166,9 +2281,11 @@ export class Player {
     this.animation.playAttack(duration);
   }
 
-  playSwordSlashAnimation(duration, targetPosition = null) {
+  playSwordSlashAnimation(duration) {
     this._attackWeaponKind = 'beamBlade';
-    this.lockAttackFacing(targetPosition, duration);
+    // The beam blade is a committed body-forward swing. Do not turn the whole
+    // character toward the cursor when the slash begins.
+    this.attackFacingTimer = 0;
 
     this.animation.playAttack(duration, 'beamBlade');
   }
@@ -2361,6 +2478,307 @@ export class Player {
     this.health = THREE.MathUtils.clamp(this.stats.maxHealth * healthPercent, 1, this.stats.maxHealth);
   }
 
+  tryClaimExternalControl(owner, kind = 'external', options = {}) {
+    if (!owner || this.dead || this.externalBallisticMotion) {
+      return false;
+    }
+
+    if (this.externalControl && this.externalControl.owner !== owner) {
+      return false;
+    }
+
+    const freeze = options.freeze ?? true;
+    const previous = this.externalControl;
+    this.externalControl = {
+      owner,
+      kind,
+      freeze,
+      ignoreGroundConstraint: options.ignoreGroundConstraint ?? freeze,
+      releasePosition: options.releasePosition?.clone?.()
+        ?? previous?.releasePosition
+        ?? this.root.position.clone(),
+      onRelease: options.onRelease ?? previous?.onRelease ?? null,
+    };
+
+    if (freeze && !previous?.freeze) {
+      this._prepareForExternalControl();
+    }
+    return true;
+  }
+
+  hasExternalControl(owner = null) {
+    if (!this.externalControl) {
+      return false;
+    }
+    return owner ? this.externalControl.owner === owner : true;
+  }
+
+  releaseExternalControl(owner, reason = 'released', options = {}) {
+    const control = this.externalControl;
+    if (!control || control.owner !== owner) {
+      return false;
+    }
+
+    this.externalControl = null;
+    if (options.snapToReleasePosition && control.releasePosition) {
+      this.root.position.copy(control.releasePosition);
+    }
+    if (control.freeze) {
+      this._restoreAfterExternalMotion({
+        grounded: Boolean(options.snapToReleasePosition),
+        groundY: control.releasePosition?.y,
+      });
+    }
+    control.onRelease?.(this, owner, reason);
+    return true;
+  }
+
+  startExternalBallisticMotion(owner, {
+    targetPosition,
+    duration = 0.9,
+    arcHeight = 1.6,
+    spinRate = 8,
+    onLand = null,
+  } = {}) {
+    const control = this.externalControl;
+    if (!control || control.owner !== owner || this.dead || this.externalBallisticMotion) {
+      return false;
+    }
+    if (!targetPosition?.isVector3 && !(
+      Number.isFinite(targetPosition?.x)
+      && Number.isFinite(targetPosition?.y)
+      && Number.isFinite(targetPosition?.z)
+    )) {
+      return false;
+    }
+
+    const resolvedDuration = Number.isFinite(duration) ? Math.max(0.05, duration) : 0.9;
+    const resolvedArcHeight = Number.isFinite(arcHeight) ? Math.max(0, arcHeight) : 1.6;
+    const spin = new THREE.Vector3();
+    if (Number.isFinite(spinRate)) {
+      spin.set(0, spinRate, 0);
+    } else {
+      spin.set(
+        Number.isFinite(spinRate?.x) ? spinRate.x : 0,
+        Number.isFinite(spinRate?.y) ? spinRate.y : 8,
+        Number.isFinite(spinRate?.z) ? spinRate.z : 0,
+      );
+    }
+
+    this.externalControl = null;
+    control.onRelease?.(this, owner, 'thrown');
+    this._prepareForExternalControl();
+    this.externalBallisticMotion = {
+      owner,
+      startPosition: this.root.position.clone(),
+      targetPosition: new THREE.Vector3(targetPosition.x, targetPosition.y, targetPosition.z),
+      startRotation: this.root.rotation.clone(),
+      duration: resolvedDuration,
+      elapsed: 0,
+      arcHeight: resolvedArcHeight,
+      spinRate: spin,
+      onLand: typeof onLand === 'function' ? onLand : null,
+      releaseGroundY: control.releasePosition?.y,
+    };
+    return true;
+  }
+
+  cancelExternalBallisticMotion(reason = 'cancelled', game = null, options = {}) {
+    const motion = this.externalBallisticMotion;
+    if (!motion) {
+      return false;
+    }
+
+    this.externalBallisticMotion = null;
+    if (options.snapToTarget) {
+      this.root.position.copy(motion.targetPosition);
+      this.root.rotation.x = 0;
+      this.root.rotation.z = 0;
+    }
+    this._restoreAfterExternalMotion({
+      grounded: Boolean(options.snapToTarget),
+      groundY: options.snapToTarget ? motion.targetPosition.y : motion.releaseGroundY,
+    });
+    motion.onLand?.(this, game, reason);
+    return true;
+  }
+
+  clearExternalMotion(reason = 'cleared', game = null) {
+    let cleared = false;
+    if (this.externalBallisticMotion) {
+      cleared = this.cancelExternalBallisticMotion(reason, game, {
+        snapToTarget: reason === 'dispose' || reason === 'reset',
+      }) || cleared;
+    }
+    if (this.externalControl) {
+      const { owner } = this.externalControl;
+      cleared = this.releaseExternalControl(owner, reason, {
+        snapToReleasePosition: reason === 'dispose' || reason === 'reset',
+      }) || cleared;
+    }
+    return cleared;
+  }
+
+  isExternalMotionActive() {
+    return Boolean(this.externalBallisticMotion || this.externalControl?.freeze);
+  }
+
+  shouldIgnoreGroundConstraint() {
+    return Boolean(this.externalBallisticMotion || this.externalControl?.ignoreGroundConstraint);
+  }
+
+  _prepareForExternalControl() {
+    this.velocity.set(0, 0, 0);
+    this.takeoffHorizontalVelocity.set(0, 0, 0);
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this._jumpBufferTimer = 0;
+    this._coyoteTimer = 0;
+    this._landingRecoveryTimer = 0;
+    this._jumpAirTimer = 0;
+    this._jumpFallTransitionActive = false;
+    this._jumpLandingVisualTimer = 0;
+    this._jumpLandingVisualState = null;
+    this._jumpLandingVisualClipKey = null;
+    this.ledgeCling = null;
+    this.powerKnockbackState = null;
+    this.powerKnockbackTimer = 0;
+    this.powerKnockbackDuration = 0;
+    this.powerKnockbackLandingCommitted = false;
+    this.powerKnockbackVelocity.set(0, 0, 0);
+    this._releaseProjectileAim();
+    this.bracedFireTimer = 0;
+    this.bracedBackpedalTimer = 0;
+    this.attackFacingTimer = 0;
+    this.guardTimer = 0;
+    this.guardParryTimer = 0;
+    this.lastGuardResult = null;
+    this.movementLockTimer = 0;
+    this.movementLockMultiplier = 1;
+    this.animation.actionState = null;
+    this.animation.actionTimer = 0;
+    this.animation.actionDuration = 0;
+    this.animation.hurtTimer = 0;
+    this.animation.cancelAttack?.();
+    this.animation.externalControlLocked = true;
+    this._attackWeaponKind = null;
+    this.isRunning = false;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
+  }
+
+  _restoreAfterExternalMotion({ grounded = false, groundY = null } = {}) {
+    this.velocity.set(0, 0, 0);
+    this.takeoffHorizontalVelocity.set(0, 0, 0);
+    this.animation.externalControlLocked = false;
+    this.root.rotation.x = 0;
+    this.root.rotation.z = 0;
+
+    if (grounded) {
+      this.jumpState = MML_JUMP_STATES.Grounded;
+      this._jumpGroundY = Number.isFinite(groundY) ? groundY : this.root.position.y;
+      this.root.position.y = this._jumpGroundY;
+    } else {
+      this.jumpState = MML_JUMP_STATES.Falling;
+      this._jumpGroundY = Number.isFinite(groundY) ? groundY : this.root.position.y;
+      this._jumpAirTimer = 0;
+      this.jumpStartY = this.root.position.y;
+    }
+
+    if (!this.dead) {
+      this.animation.setState(grounded ? 'idle' : 'fall');
+    }
+  }
+
+  _updateExternalMotion(dt, game = null) {
+    const motion = this.externalBallisticMotion;
+    if (motion) {
+      const previousPosition = this.root.position.clone();
+      motion.elapsed = Math.min(motion.duration, motion.elapsed + Math.max(0, dt));
+      const progress = THREE.MathUtils.clamp(motion.elapsed / motion.duration, 0, 1);
+      this.root.position.lerpVectors(motion.startPosition, motion.targetPosition, progress);
+      this.root.position.y += Math.sin(progress * Math.PI) * motion.arcHeight;
+      this.root.rotation.set(
+        motion.startRotation.x + motion.spinRate.x * motion.elapsed,
+        motion.startRotation.y + motion.spinRate.y * motion.elapsed,
+        motion.startRotation.z + motion.spinRate.z * motion.elapsed,
+      );
+
+      const pathDirection = motion.targetPosition.clone().sub(motion.startPosition).setY(0);
+      const pathResolution = this.powerKnockbackTravelResolver?.({
+        player: this,
+        fromPosition: previousPosition,
+        position: this.root.position,
+        originPosition: motion.startPosition,
+        direction: pathDirection,
+      });
+      if (pathResolution?.blocked && pathResolution.position) {
+        this.root.position.copy(pathResolution.position);
+        const landing = this.powerKnockbackLandingResolver?.({
+          player: this,
+          position: this.root.position,
+          originPosition: motion.startPosition,
+          direction: pathDirection,
+          velocity: pathDirection,
+        });
+        if (landing?.position) {
+          this.root.position.copy(landing.position);
+        }
+        this.externalBallisticMotion = null;
+        this._restoreAfterExternalMotion({
+          grounded: Boolean(landing?.position),
+          groundY: landing?.position?.y ?? motion.releaseGroundY,
+        });
+        motion.onLand?.(this, game, 'blocked');
+        return true;
+      }
+
+      if (progress >= 1) {
+        this.externalBallisticMotion = null;
+        this.root.position.copy(motion.targetPosition);
+        this._restoreAfterExternalMotion({ grounded: true, groundY: motion.targetPosition.y });
+        motion.onLand?.(this, game, 'landed');
+        return true;
+      }
+
+      this._updateExternalMotionPose(dt, progress);
+      return true;
+    }
+
+    if (this.externalControl?.freeze) {
+      this.velocity.set(0, 0, 0);
+      this.powerKnockbackVelocity.set(0, 0, 0);
+      this._updateExternalMotionPose(dt, 0.5);
+      return true;
+    }
+    return false;
+  }
+
+  _updateExternalMotionPose(dt, progress = 0.5) {
+    const poseProgress = THREE.MathUtils.clamp(progress, 0, 1);
+    this.animation.update(dt, {
+      moving: false,
+      running: false,
+      moveAmount: 0,
+      forcedState: 'fall',
+      actionProgress: poseProgress,
+    });
+    this.updateWeaponVisualState();
+    this._updateExternalModelMotion(dt, false, 0, false, false, {
+      animationState: 'fall',
+      actionProgress: poseProgress,
+      physicalJump: true,
+      projectileAiming: false,
+      lockOnActive: false,
+      strafeAmount: 0,
+      skipAttackKindReset: true,
+    });
+    this.isRunning = false;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
+  }
+
   takeDamage(amount, source = null, damageContext = {}) {
     if (this.dead) {
       return 0;
@@ -2386,9 +2804,13 @@ export class Player {
 
       this._captureDamageHitDirection(damageOrigin);
 
-      if (!guardResult.blocked && mitigated >= heavyHitThreshold) {
-        this._playKnockbackFall(damageOrigin);
-      } else {
+      const powerfulAttack = damageContext.powerfulKnockback === true
+        || POWERFUL_KNOCKBACK_ATTACKS.has(damageContext.attackKind);
+      if (!this.isExternalMotionActive()
+        && !guardResult.blocked
+        && (powerfulAttack || mitigated >= heavyHitThreshold)) {
+        this._playKnockbackFall(damageOrigin, damageContext);
+      } else if (!this.isExternalMotionActive()) {
         this.animation.playHurt();
       }
     }
@@ -2399,14 +2821,26 @@ export class Player {
 
     if (this.health <= 0) {
       this.dead = true;
+      this.clearExternalMotion('death');
       this.animation.playDead();
     }
 
     return mitigated;
   }
 
-  _playKnockbackFall(source = null) {
-    if (source?.root?.position || source?.position) {
+  isPowerKnockbackActive() {
+    return this.powerKnockbackState !== null;
+  }
+
+  isPowerKnockbackAirborne() {
+    return this.powerKnockbackState === POWER_KNOCKBACK_STATES.Rising
+      || this.powerKnockbackState === POWER_KNOCKBACK_STATES.Falling;
+  }
+
+  _playKnockbackFall(source = null, damageContext = {}) {
+    if (damageContext.knockbackDirection?.lengthSq?.() > 0.0001) {
+      this.knockbackFallDirection.copy(damageContext.knockbackDirection).setY(0);
+    } else if (source?.root?.position || source?.position) {
       this.knockbackFallDirection.copy(this.root.position).sub(source.root?.position ?? source.position);
       this.knockbackFallDirection.y = 0;
     } else {
@@ -2419,14 +2853,299 @@ export class Player {
       this.knockbackFallDirection.normalize();
     }
 
+    const strength = THREE.MathUtils.clamp(damageContext.knockbackStrength ?? 1, 0.7, 1.5);
+    this.powerKnockbackState = POWER_KNOCKBACK_STATES.Rising;
+    this.powerKnockbackTimer = 0;
+    this.powerKnockbackDuration = POWER_KNOCKBACK_UPWARD_SPEED / Math.abs(POWER_KNOCKBACK_GRAVITY);
+    this.powerKnockbackStartY = this.root.position.y;
+    this.powerKnockbackApexY = this.root.position.y;
+    this.powerKnockbackOriginPosition.copy(this.root.position);
+    this.powerKnockbackPreviousPosition.copy(this.root.position);
+    this.powerKnockbackLandingPosition.copy(this.root.position);
+    this.powerKnockbackLandingMode = null;
+    this.powerKnockbackLandingCommitted = false;
+    this.powerKnockbackImpactRootY = this.root.position.y;
+    this.powerKnockbackCameraAnchorY = this.root.position.y;
+    this._lastPowerKnockbackBackContact = null;
+    this.powerKnockbackVelocity.copy(this.knockbackFallDirection)
+      .multiplyScalar(POWER_KNOCKBACK_HORIZONTAL_SPEED * strength);
+    this.powerKnockbackVelocity.y = POWER_KNOCKBACK_UPWARD_SPEED * Math.sqrt(strength);
+    this.velocity.set(0, 0, 0);
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this._jumpFallTransitionActive = false;
+    this.ledgeCling = null;
     this._releaseProjectileAim();
     this.attackFacingTimer = 0;
-    this.movementLockTimer = Math.max(this.movementLockTimer, 2.0);
+    this.movementLockTimer = 0;
     this.movementLockMultiplier = 0;
+    this.animation.actionState = null;
+    this.animation.actionTimer = 0;
+    this.animation.actionDuration = 0;
+    this.animation.cancelAttack?.();
+    this.animation.hurtTimer = 0;
+    this.animation.externalControlLocked = true;
+    this.lastMoveDirection.copy(this.knockbackFallDirection).multiplyScalar(-1);
+    this.faceDirection(this.lastMoveDirection);
+    return true;
+  }
 
-    if (!this.animation.playKnockbackFall?.()) {
-      this.animation.playHurt();
+  _updatePowerKnockback(dt, arenaRadius, movementOptions = {}) {
+    const state = this.powerKnockbackState;
+    this.powerKnockbackTimer += dt;
+
+    if (this.isPowerKnockbackAirborne()) {
+      const gravityMultiplier = state === POWER_KNOCKBACK_STATES.Falling
+        ? POWER_KNOCKBACK_FALL_GRAVITY_MULTIPLIER
+        : 1;
+      const gravity = POWER_KNOCKBACK_GRAVITY * gravityMultiplier;
+      this.powerKnockbackPreviousPosition.copy(this.root.position);
+      this.root.position.addScaledVector(this.powerKnockbackVelocity, dt);
+      this.root.position.y += 0.5 * gravity * dt * dt;
+      this.powerKnockbackVelocity.y += gravity * dt;
+
+      const travelResolution = this.powerKnockbackTravelResolver?.({
+        player: this,
+        fromPosition: this.powerKnockbackPreviousPosition,
+        position: this.root.position,
+        originPosition: this.powerKnockbackOriginPosition,
+        direction: this.knockbackFallDirection,
+        velocity: this.powerKnockbackVelocity,
+      });
+      if (travelResolution?.blocked && travelResolution.position) {
+        this.root.position.x = travelResolution.position.x;
+        this.root.position.z = travelResolution.position.z;
+        this.powerKnockbackVelocity.x = 0;
+        this.powerKnockbackVelocity.z = 0;
+      }
+
+      this.root.position.x = THREE.MathUtils.clamp(this.root.position.x, -arenaRadius, arenaRadius);
+      this.root.position.z = THREE.MathUtils.clamp(this.root.position.z, -arenaRadius, arenaRadius);
+      this.powerKnockbackApexY = Math.max(this.powerKnockbackApexY, this.root.position.y);
+
+      if (state === POWER_KNOCKBACK_STATES.Rising && this.powerKnockbackVelocity.y <= 0) {
+        this.powerKnockbackState = POWER_KNOCKBACK_STATES.Falling;
+        this.powerKnockbackTimer = 0;
+        this.powerKnockbackDuration = 1;
+      }
+
+      if (this.powerKnockbackState === POWER_KNOCKBACK_STATES.Falling) {
+        const resolvedLanding = this.powerKnockbackLandingCommitted
+          ? {
+            position: this.powerKnockbackLandingPosition,
+            mode: this.powerKnockbackLandingMode,
+          }
+          : this._resolvePowerKnockbackLanding(movementOptions);
+
+        if (!this.powerKnockbackLandingCommitted
+          && resolvedLanding
+          && this.root.position.y <= resolvedLanding.position.y + POWER_KNOCKBACK_LANDING_COMMIT_MARGIN) {
+          this.root.position.x = resolvedLanding.position.x;
+          this.root.position.z = resolvedLanding.position.z;
+          this.powerKnockbackLandingMode = resolvedLanding.mode ?? 'current';
+          this.powerKnockbackLandingCommitted = true;
+          this.powerKnockbackVelocity.x = 0;
+          this.powerKnockbackVelocity.z = 0;
+        }
+
+        if (this.powerKnockbackLandingCommitted) {
+          this.root.position.x = this.powerKnockbackLandingPosition.x;
+          this.root.position.z = this.powerKnockbackLandingPosition.z;
+        }
+      }
+    } else if (state === POWER_KNOCKBACK_STATES.Landing
+      && this.powerKnockbackTimer >= this.powerKnockbackDuration) {
+      this._setPowerKnockbackState(
+        POWER_KNOCKBACK_STATES.LyingFlat,
+        POWER_KNOCKBACK_LYING_FLAT_TIME,
+      );
+    } else if (state === POWER_KNOCKBACK_STATES.LyingFlat
+      && this.powerKnockbackTimer >= this.powerKnockbackDuration) {
+      this._setPowerKnockbackState(POWER_KNOCKBACK_STATES.GetUp, POWER_KNOCKBACK_GET_UP_TIME);
+    } else if (state === POWER_KNOCKBACK_STATES.GetUp) {
+      const getUpProgress = THREE.MathUtils.clamp(
+        this.powerKnockbackTimer / this.powerKnockbackDuration,
+        0,
+        1,
+      );
+      const rootRecovery = THREE.MathUtils.smoothstep(getUpProgress, 0.08, 0.95);
+      this.root.position.x = this.powerKnockbackLandingPosition.x;
+      this.root.position.y = THREE.MathUtils.lerp(
+        this.powerKnockbackImpactRootY,
+        this.powerKnockbackLandingPosition.y,
+        rootRecovery,
+      );
+      this.root.position.z = this.powerKnockbackLandingPosition.z;
+
+      if (this.powerKnockbackTimer >= this.powerKnockbackDuration) {
+        this.root.position.copy(this.powerKnockbackLandingPosition);
+        this.powerKnockbackState = null;
+        this.powerKnockbackTimer = 0;
+        this.powerKnockbackDuration = 0;
+        this.powerKnockbackLandingCommitted = false;
+        this.movementLockMultiplier = 1;
+        this.animation.externalControlLocked = false;
+        this.animation.setState('idle');
+        this.modelRoot.position.y = 0;
+        this.modelRoot.rotation.set(0, 0, 0);
+        return;
+      }
     }
+
+    const animationState = this._getPowerKnockbackAnimationState();
+    const progress = this.powerKnockbackDuration > 0
+      ? THREE.MathUtils.clamp(this.powerKnockbackTimer / this.powerKnockbackDuration, 0, 1)
+      : 0;
+    this.animation.update(dt, {
+      moving: false,
+      forcedState: animationState,
+      actionProgress: progress,
+    });
+    this.updateWeaponVisualState();
+    this._updateExternalModelMotion(dt, false, 0, false, false, {
+      animationState,
+      actionProgress: progress,
+      physicalPowerKnockback: true,
+      skipAttackKindReset: true,
+    });
+
+    if (this.powerKnockbackState === POWER_KNOCKBACK_STATES.Falling
+      && this.powerKnockbackLandingCommitted) {
+      const contact = this._measurePowerKnockbackBackGroundClearance(
+        this.powerKnockbackLandingPosition.y,
+      );
+      if (Number.isFinite(contact?.clearance) && contact.clearance <= 0) {
+        // Integrate through the abstract feet/root plane, then remove only the
+        // final frame's penetration. Recovery cannot begin before the animated
+        // torso has physically reached the selected walkable surface.
+        this.root.position.y -= contact.clearance;
+        this.root.updateMatrixWorld(true);
+        this.powerKnockbackImpactRootY = this.root.position.y;
+        this._lastPowerKnockbackBackContact = this._measurePowerKnockbackBackGroundClearance(
+          this.powerKnockbackLandingPosition.y,
+        ) ?? contact;
+        this.powerKnockbackVelocity.set(0, 0, 0);
+        this._setPowerKnockbackState(
+          POWER_KNOCKBACK_STATES.Landing,
+          POWER_KNOCKBACK_BACK_LANDING_TIME,
+        );
+      }
+    } else if (this.powerKnockbackState === POWER_KNOCKBACK_STATES.Landing
+      || this.powerKnockbackState === POWER_KNOCKBACK_STATES.LyingFlat) {
+      const contact = this._measurePowerKnockbackBackGroundClearance(
+        this.powerKnockbackLandingPosition.y,
+      );
+      if (Number.isFinite(contact?.clearance)) {
+        // The settle animation changes the limb silhouette after impact. Keep
+        // the sampled torso planted while that pose blends into lying flat.
+        this.root.position.y -= contact.clearance;
+        this.root.updateMatrixWorld(true);
+        this.powerKnockbackImpactRootY = this.root.position.y;
+        this._lastPowerKnockbackBackContact = this._measurePowerKnockbackBackGroundClearance(
+          this.powerKnockbackLandingPosition.y,
+        ) ?? contact;
+      }
+    }
+
+    this.faceDirection(this.lastMoveDirection);
+    this.isRunning = false;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
+  }
+
+  _setPowerKnockbackState(state, duration) {
+    this.powerKnockbackState = state;
+    this.powerKnockbackTimer = 0;
+    this.powerKnockbackDuration = Math.max(0.001, duration);
+  }
+
+  _getPowerKnockbackAnimationState() {
+    return {
+      [POWER_KNOCKBACK_STATES.Rising]: 'knockbackLaunch',
+      [POWER_KNOCKBACK_STATES.Falling]: 'aerialKnockbackFall',
+      [POWER_KNOCKBACK_STATES.Landing]: 'backLanding',
+      [POWER_KNOCKBACK_STATES.LyingFlat]: 'lyingFlat',
+      [POWER_KNOCKBACK_STATES.GetUp]: 'getUp',
+    }[this.powerKnockbackState] ?? 'idle';
+  }
+
+  _resolvePowerKnockbackLanding(movementOptions = {}) {
+    const resolved = this.powerKnockbackLandingResolver?.({
+      player: this,
+      position: this.root.position,
+      originPosition: this.powerKnockbackOriginPosition,
+      direction: this.knockbackFallDirection,
+      velocity: this.powerKnockbackVelocity,
+    });
+    const position = resolved?.position ?? (resolved?.isVector3 ? resolved : null);
+    if (position) {
+      this.powerKnockbackLandingPosition.copy(position);
+      return {
+        position: this.powerKnockbackLandingPosition,
+        mode: resolved.mode ?? 'current',
+      };
+    }
+
+    const groundY = Number.isFinite(movementOptions.groundY)
+      ? movementOptions.groundY
+      : this.powerKnockbackStartY;
+    this.powerKnockbackLandingPosition.copy(this.root.position).setY(groundY);
+    return { position: this.powerKnockbackLandingPosition, mode: 'fallback' };
+  }
+
+  _measurePowerKnockbackBackGroundClearance(groundY) {
+    this.root.updateMatrixWorld(true);
+    this.modelRoot.updateMatrixWorld(true);
+
+    const rigContact = this.externalRig?.measureBackGroundClearance?.(groundY) ?? null;
+    if (Number.isFinite(rigContact?.clearance)) {
+      this._lastPowerKnockbackBackContact = rigContact;
+      return rigContact;
+    }
+
+    const joints = this.externalRig?.joints ?? this.humanoid?.joints;
+    let minY = Infinity;
+    for (const jointName of ['hips', 'spine']) {
+      const joint = joints?.get?.(jointName);
+      if (joint) {
+        minY = Math.min(minY, joint.getWorldPosition(modelGroundPosition).y);
+      }
+    }
+
+    if (!Number.isFinite(minY)) {
+      modelGroundBounds.setFromObject(this.root);
+      minY = modelGroundBounds.min.y;
+    } else {
+      minY -= POWER_KNOCKBACK_FALLBACK_BACK_RADIUS;
+    }
+
+    if (!Number.isFinite(minY)) {
+      return null;
+    }
+
+    const result = {
+      source: 'fallbackBackContact',
+      groundY,
+      minY,
+      clearance: minY - groundY,
+      sampleCount: 0,
+    };
+    this._lastPowerKnockbackBackContact = result;
+    return result;
+  }
+
+  getPowerKnockbackLandingDiagnostics() {
+    return {
+      state: this.powerKnockbackState,
+      committed: this.powerKnockbackLandingCommitted,
+      landingY: this.powerKnockbackLandingPosition.y,
+      landingMode: this.powerKnockbackLandingMode,
+      impactRootY: this.powerKnockbackImpactRootY,
+      cameraAnchorY: this.powerKnockbackCameraAnchorY,
+      backClearance: this._lastPowerKnockbackBackContact?.clearance ?? null,
+      backContactSource: this._lastPowerKnockbackBackContact?.source ?? null,
+      backContactSampleCount: this._lastPowerKnockbackBackContact?.sampleCount ?? 0,
+    };
   }
 
   _captureDamageHitDirection(source = null) {
@@ -3029,6 +3748,21 @@ export class Player {
         if (landingSnap) {
           targetY = 0;
         }
+      } else if (motionState === 'knockbackLaunch') {
+        targetY = 0.08;
+        targetPitch = 0;
+      } else if (motionState === 'aerialKnockbackFall') {
+        targetY = 0.1;
+        targetPitch = 0;
+      } else if (motionState === 'backLanding') {
+        targetY = 0.1;
+        targetPitch = 0;
+      } else if (motionState === 'lyingFlat' || motionState === 'downed') {
+        targetY = 0.1;
+        targetPitch = 0;
+      } else if (motionState === 'getUp') {
+        targetY = THREE.MathUtils.lerp(0.1, 0, actionProgress);
+        targetPitch = 0;
       }
 
       const alpha = (landingSnap || motionState === 'forwardJump')
@@ -3062,14 +3796,21 @@ export class Player {
         targetY = Math.max(getDodgeRollVisualLift(actionProgress), targetY * 0.45);
         targetPitch = Math.sin(actionProgress * Math.PI) * 0.18;
         targetRoll += Math.sin(actionProgress * Math.PI * 2) * 0.08;
-      } else if (motionState === 'knockbackFall' || motionState === 'downed') {
-        targetY = Math.max(0, targetY * 0.25);
-        targetPitch = -THREE.MathUtils.smoothstep(actionProgress, 0.15, 0.85) * 0.16;
-        targetRoll += -THREE.MathUtils.smoothstep(actionProgress, 0.2, 0.8) * 0.08;
+      } else if (motionState === 'knockbackFall' || motionState === 'knockbackLaunch') {
+        targetY = 0.08;
+        targetPitch = 0;
+      } else if (motionState === 'aerialKnockbackFall') {
+        targetY = 0.1;
+        targetPitch = 0;
+      } else if (motionState === 'backLanding') {
+        targetY = 0.1;
+        targetPitch = 0;
+      } else if (motionState === 'lyingFlat' || motionState === 'downed') {
+        targetY = 0.1;
+        targetPitch = 0;
       } else if (motionState === 'getUp') {
-        const crouch = Math.sin(actionProgress * Math.PI);
-        targetY = Math.max(0, targetY * 0.35 - crouch * 0.025);
-        targetPitch = -0.1 * (1 - THREE.MathUtils.smoothstep(actionProgress, 0.25, 1));
+        targetY = THREE.MathUtils.lerp(0.1, 0, actionProgress);
+        targetPitch = 0;
       }
 
       const alpha = (landingSnap || motionState === 'forwardJump') ? 1 : Math.min(1, dt * 12);
@@ -3094,11 +3835,15 @@ export class Player {
     const fallAnimationClipProgress = animationState === 'land'
       ? actionProgress
       : null;
+    const airborneJumpAnimation = animationState === 'neutralJump'
+      || animationState === 'forwardJump'
+      || animationState === 'forwardJumpFall'
+      || animationState === 'fall';
 
     this.externalRig?.update(dt, {
       moving,
       moveAmount,
-      state: projectileAiming ? 'attacking' : animationState,
+      state: projectileAiming && !airborneJumpAnimation ? 'attacking' : animationState,
       attackProgress,
       actionProgress,
       actionDuration: this.animation.actionDuration ?? 0,
@@ -3116,7 +3861,10 @@ export class Player {
     });
 
     if (animationState === 'land') {
-      this._clampExternalModelFeetToGround({ allowRaise: true, reason: 'land' });
+      // Let the launch/fall action cross-fade into its authored landing pose.
+      // Forcing the feet to ground here translates the whole model by the
+      // airborne tuck clearance and creates a visible one-frame downward snap.
+      this._lastExternalModelGrounding = this._measureExternalModelGrounding();
     } else if (!motionOptions.physicalJump && this._shouldClampNeutralJumpWindup(motionState, actionProgress)) {
       this._clampExternalModelFeetToGround({ reason: 'jumpWindup' });
     } else if (this._shouldClampStationaryGroundedPose(animationState, moving)) {

@@ -34,6 +34,600 @@ test('loads the ruin scene and performs a fixed-height jump', async ({ page }) =
   expect(runtimeErrors).toEqual([]);
 });
 
+test('standing and moving hops share the forward-jump animation flow', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const player = game.player;
+    const Vector3 = player.root.position.constructor;
+    const forward = new Vector3(0, 0, 1);
+    const right = new Vector3(1, 0, 0);
+    const spawn = game.dungeon.playerStart.clone();
+    const movementOptions = {
+      arenaRadius: game.arenaRadius,
+      movementForward: forward,
+      movementRight: right,
+      groundY: spawn.y,
+    };
+
+    const sampleJump = (speed, keys) => {
+      player.ledgeCling = null;
+      player.root.position.copy(spawn);
+      player.modelRoot.position.y = 0;
+      player.velocity.set(0, 0, speed);
+      player.jumpState = 'Grounded';
+      player._jumpGroundY = spawn.y;
+      player._jumpBufferTimer = 0;
+      player._coyoteTimer = player.jumpSettings.coyoteTime;
+      player._landingRecoveryTimer = 0;
+      player.lastMoveDirection.copy(forward);
+      player.faceDirection(forward);
+      player.tryJump(keys, movementOptions);
+      player.update(1 / 60, keys, movementOptions);
+      return {
+        kind: player._jumpKind,
+        state: player._getPhysicalJumpAnimationState(),
+        clip: player.externalRig.activeClipKey,
+        horizontalSpeed: Math.hypot(player.velocity.x, player.velocity.z),
+      };
+    };
+
+    const standing = sampleJump(0, new Set());
+    const moving = sampleJump(4.35, new Set(['KeyW']));
+    const leftShoulder = player.externalRig.joints.get('leftShoulder');
+    const rightShoulder = player.externalRig.joints.get('rightShoulder');
+    let previousLeft = leftShoulder.quaternion.clone();
+    let previousRight = rightShoulder.quaternion.clone();
+    let previousY = player.root.position.y;
+    let previousJumpState = player.jumpState;
+    let transitionSeen = false;
+    let transitionWindow = 0;
+    let maximumTransitionArmStep = 0;
+    let fallingArmTravel = 0;
+    let maximumFallingHeightIncrease = 0;
+    let previousFootClearance = player.getExternalModelGroundingDiagnostics()?.footClearance;
+    let maximumFootDropPerFrame = 0;
+    let maximumTransitionFootRise = 0;
+    let maximumFootDropContext = null;
+    let transitionFadeSeconds = null;
+    const jumpClipSequence = [];
+
+    for (let frame = 0; frame < 240 && player.jumpState !== 'Grounded'; frame += 1) {
+      const previousClip = player.externalRig.activeClipKey;
+      player.update(1 / 120, new Set(['KeyW']), movementOptions);
+      const currentClip = player.externalRig.activeClipKey;
+      if (jumpClipSequence.at(-1) !== currentClip) {
+        jumpClipSequence.push(currentClip);
+      }
+      if (previousClip === 'forwardJumpLaunch' && currentClip === 'forwardJumpFall') {
+        transitionSeen = true;
+        transitionWindow = 12;
+        transitionFadeSeconds = player.externalRig.root.userData.lastFbxAnimationFadeSeconds;
+      }
+      if (transitionWindow > 0) {
+        maximumTransitionArmStep = Math.max(
+          maximumTransitionArmStep,
+          previousLeft.angleTo(leftShoulder.quaternion),
+          previousRight.angleTo(rightShoulder.quaternion),
+        );
+        transitionWindow -= 1;
+      }
+      if (currentClip === 'forwardJumpFall' || currentClip === 'fallingIdle') {
+        fallingArmTravel += previousLeft.angleTo(leftShoulder.quaternion)
+          + previousRight.angleTo(rightShoulder.quaternion);
+      }
+      if (previousJumpState === 'Falling') {
+        maximumFallingHeightIncrease = Math.max(
+          maximumFallingHeightIncrease,
+          player.root.position.y - previousY,
+        );
+      }
+      const footClearance = player.getExternalModelGroundingDiagnostics()?.footClearance;
+      if (Number.isFinite(previousFootClearance) && Number.isFinite(footClearance)) {
+        if (currentClip === 'forwardJumpFall') {
+          maximumTransitionFootRise = Math.max(
+            maximumTransitionFootRise,
+            footClearance - previousFootClearance,
+          );
+        }
+        const footDrop = previousFootClearance - footClearance;
+        if (footDrop > maximumFootDropPerFrame) {
+          maximumFootDropPerFrame = footDrop;
+          maximumFootDropContext = {
+            frame,
+            clip: currentClip,
+            jumpState: player.jumpState,
+            rootY: player.root.position.y,
+            previousFootClearance,
+            footClearance,
+          };
+        }
+      }
+      previousFootClearance = footClearance;
+      previousLeft = leftShoulder.quaternion.clone();
+      previousRight = rightShoulder.quaternion.clone();
+      previousY = player.root.position.y;
+      previousJumpState = player.jumpState;
+    }
+
+    player.root.position.copy(spawn).add(new Vector3(0, 5, 0));
+    player.modelRoot.position.y = 0;
+    player.velocity.set(0, -1, 0);
+    player.jumpState = 'Falling';
+    player._jumpGroundY = spawn.y;
+    player._jumpAirTimer = player._getEstimatedJumpAirTime() * 0.52;
+    player._jumpFallTransitionActive = true;
+    const longFallClipSequence = [];
+    for (let frame = 0; frame < 300 && player.jumpState !== 'Grounded'; frame += 1) {
+      player.update(1 / 120, new Set(), movementOptions);
+      const clip = player.externalRig.activeClipKey;
+      if (longFallClipSequence.at(-1) !== clip) {
+        longFallClipSequence.push(clip);
+      }
+    }
+
+    return {
+      jumpHeight: player.getJumpPhysicsDebug().jumpHeight,
+      neutralClipLoaded: player.externalRig.animationClips.has('neutralJump'),
+      standing,
+      moving,
+      transitionSeen,
+      transitionFadeSeconds,
+      maximumTransitionArmStep,
+      fallingArmTravel,
+      maximumFallingHeightIncrease,
+      maximumFootDropPerFrame,
+      maximumFootDropContext,
+      maximumTransitionFootRise,
+      jumpClipSequence,
+      longFallClipSequence,
+    };
+  });
+
+  expect(result.jumpHeight).toBeCloseTo(1.65, 2);
+  expect(result.neutralClipLoaded).toBe(false);
+  expect(result.standing).toMatchObject({
+    kind: 'forwardJump',
+    state: 'forwardJump',
+    clip: 'forwardJumpLaunch',
+  });
+  expect(result.standing.horizontalSpeed).toBeLessThan(0.05);
+  expect(result.moving).toMatchObject({
+    kind: 'forwardJump',
+    state: 'forwardJump',
+    clip: 'forwardJumpLaunch',
+  });
+  expect(result.moving.horizontalSpeed).toBeGreaterThan(4);
+  expect(result.transitionSeen).toBe(true);
+  expect(result.transitionFadeSeconds).toBeCloseTo(0.12, 3);
+  expect(result.maximumTransitionArmStep).toBeLessThan(0.2);
+  expect(result.fallingArmTravel).toBeGreaterThan(1);
+  expect(result.maximumFallingHeightIncrease).toBeLessThanOrEqual(0.0001);
+  expect(result.maximumFootDropPerFrame).toBeLessThan(0.5);
+  expect(result.maximumTransitionFootRise).toBeLessThanOrEqual(0.02);
+  expect(result.jumpClipSequence.slice(0, 4)).toEqual([
+    'forwardJumpLaunch',
+    'forwardJumpFall',
+    'fallingIdle',
+    'fallingToLanding',
+  ]);
+  expect(result.longFallClipSequence.slice(0, 3)).toEqual([
+    'forwardJumpFall',
+    'fallingIdle',
+    'fallingToLanding',
+  ]);
+});
+
+test('airborne firing layers the buster arm over jump motion and dodge cancels firing', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const player = game.player;
+    const combat = game.combat;
+    const Vector3 = player.root.position.constructor;
+    const forward = new Vector3(0, 0, 1);
+    const right = new Vector3(1, 0, 0);
+    const spawn = game.dungeon.playerStart.clone();
+    const movementOptions = {
+      arenaRadius: game.arenaRadius,
+      movementForward: forward,
+      movementRight: right,
+      groundY: spawn.y,
+    };
+    const resetPlayer = () => {
+      player.ledgeCling = null;
+      player.root.position.copy(spawn);
+      player.modelRoot.position.y = 0;
+      player.velocity.set(0, 0, 4.35);
+      player.jumpState = 'Grounded';
+      player._jumpGroundY = spawn.y;
+      player._jumpBufferTimer = 0;
+      player._coyoteTimer = player.jumpSettings.coyoteTime;
+      player._landingRecoveryTimer = 0;
+      player.animation.actionState = null;
+      player.animation.actionTimer = 0;
+      player.animation.actionDuration = 0;
+      player.animation.cancelAttack();
+      player.bracedFireTimer = 0;
+      player.bracedBackpedalTimer = 0;
+      player._attackWeaponKind = null;
+      player.movementLockTimer = 0;
+      player.movementLockMultiplier = 1;
+      player.lastMoveDirection.copy(forward);
+      player.faceDirection(forward);
+    };
+
+    player.switchArmWeapon(0, true);
+    resetPlayer();
+    player.tryJump(new Set(['KeyW']), movementOptions);
+    const aimPoint = player.root.position.clone().addScaledVector(forward, 8);
+    player.playProjectileShotAnimation(0.5, aimPoint, 0.8, {
+      weaponKey: player.getActiveArmWeapon()?.id,
+    });
+
+    const rig = player.externalRig;
+    const rightShoulder = rig.joints.get('rightShoulder');
+    const leftShoulder = rig.joints.get('leftShoulder');
+    const aimShoulder = rig.busterAirAimPose.get('rightShoulder');
+    let maximumBusterAimError = 0;
+    let leftShoulderTravel = 0;
+    let previousLeft = leftShoulder.quaternion.clone();
+    let launchClipSeen = false;
+    let fallClipSeen = false;
+    let busterAimFrames = 0;
+
+    for (let frame = 0; frame < 100 && player.isJumpAirborne(); frame += 1) {
+      player.update(1 / 120, new Set(['KeyW']), movementOptions);
+      launchClipSeen ||= rig.activeClipKey === 'forwardJumpLaunch';
+      fallClipSeen ||= rig.activeClipKey === 'forwardJumpFall';
+      if (aimShoulder && rig.root.userData.airborneBusterAimActive) {
+        busterAimFrames += 1;
+        maximumBusterAimError = Math.max(
+          maximumBusterAimError,
+          rightShoulder.quaternion.angleTo(aimShoulder),
+        );
+      }
+      leftShoulderTravel += previousLeft.angleTo(leftShoulder.quaternion);
+      previousLeft = leftShoulder.quaternion.clone();
+    }
+
+    resetPlayer();
+    player.playProjectileShotAnimation(0.6, aimPoint, 0.8, {
+      weaponKey: player.getActiveArmWeapon()?.id,
+    });
+    combat.pendingProjectileShots.push({ timer: 0.3, direction: forward.clone(), profile: {} });
+    const dodgeStarted = player.tryDodgeRoll(new Set(['KeyW']), movementOptions);
+    player.update(1 / 60, new Set(), movementOptions);
+
+    return {
+      aimPoseJointCount: rig.busterAirAimPose.size,
+      launchClipSeen,
+      fallClipSeen,
+      maximumBusterAimError,
+      busterAimFrames,
+      leftShoulderTravel,
+      dodgeStarted,
+      dodgeClip: rig.activeClipKey,
+      actionState: player.animation.actionState,
+      attackTimer: player.animation.attackTimer,
+      bracedFireTimer: player.bracedFireTimer,
+      attackWeaponKind: player._attackWeaponKind,
+      pendingProjectileCount: combat.pendingProjectileShots.length,
+    };
+  });
+
+  expect(result.aimPoseJointCount).toBe(3);
+  expect(result.launchClipSeen).toBe(true);
+  expect(result.fallClipSeen).toBe(true);
+  expect(result.busterAimFrames).toBeGreaterThan(0);
+  expect(result.maximumBusterAimError).toBeLessThan(0.001);
+  expect(result.leftShoulderTravel).toBeGreaterThan(0.05);
+  expect(result.dodgeStarted).toBe(true);
+  expect(result.dodgeClip).toBe('dodgeRoll');
+  expect(result.actionState).toBe('dodgeRoll');
+  expect(result.attackTimer).toBe(0);
+  expect(result.bracedFireTimer).toBe(0);
+  expect(result.attackWeaponKind).toBeNull();
+  expect(result.pendingProjectileCount).toBe(0);
+});
+
+test('powerful hits use a distinct airborne knockback arc and resolve walkable landings', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const player = game.player;
+    const Vector3 = player.root.position.constructor;
+    const start = game.dungeon.playerStart.clone();
+    const lowerLandingY = start.y - 1.5;
+    const movementOptions = {
+      arenaRadius: game.arenaRadius,
+      movementForward: new Vector3(0, 0, 1),
+      movementRight: new Vector3(1, 0, 0),
+      groundY: start.y,
+    };
+
+    player.root.position.copy(start);
+    player.health = player.stats.maxHealth;
+    player.dead = false;
+    player.animation.dead = false;
+    game.cameraController.snapTo(player);
+    player.powerKnockbackLandingResolver = ({ position }) => ({
+      position: new Vector3(position.x, lowerLandingY, position.z),
+      mode: 'lowerTestSurface',
+    });
+    const source = { position: start.clone().add(new Vector3(0, 0, -1)) };
+    const dealt = player.takeDamage(5, source, {
+      attackKind: 'pounce',
+      powerfulKnockback: true,
+      knockbackDirection: new Vector3(0, 0, 1),
+    });
+
+    const states = [];
+    const animationStates = [];
+    let maximumY = player.root.position.y;
+    let previousFallingY = Infinity;
+    let maximumFallingRise = 0;
+    let stayedAirborneBelowOriginalFloor = false;
+    let lyingFlatPitch = 0;
+    let lyingFlatBodyAngle = 0;
+    let minimumLyingFlatKneeAngle = Infinity;
+    let maximumLyingFlatBackClearance = 0;
+    let lyingFlatFrameCount = 0;
+    let aerialAnimationWhileLyingFlat = false;
+    let authoredLyingFlatClipSeen = false;
+    let minimumLyingFlatClipProgress = Infinity;
+    let jumpFallStateSeen = false;
+    let rootDescendedBelowLandingSurface = false;
+    let landingContactClearance = null;
+    let landingContactSource = null;
+    let landingContactSampleCount = 0;
+    let landingRootY = null;
+    let recoveryBeganBeforeBackContact = false;
+    let backContactConfirmed = false;
+    let minimumContactDescentCameraY = Infinity;
+    let maximumContactDescentCameraY = -Infinity;
+    let steepestContactDescentCameraLookY = 0;
+    const cameraDirection = new Vector3();
+    for (let frame = 0; frame < 600 && player.isPowerKnockbackActive(); frame += 1) {
+      player.update(1 / 120, new Set(), movementOptions);
+      game.cameraController.update(1 / 120, player);
+      const state = player.powerKnockbackState;
+      const diagnostics = player.getPowerKnockbackLandingDiagnostics();
+      if (state && states.at(-1) !== state) states.push(state);
+      if (animationStates.at(-1) !== player.animation.state) animationStates.push(player.animation.state);
+      maximumY = Math.max(maximumY, player.root.position.y);
+      if (state === 'AerialKnockbackFalling') {
+        if (Number.isFinite(previousFallingY)) {
+          maximumFallingRise = Math.max(maximumFallingRise, player.root.position.y - previousFallingY);
+        }
+        previousFallingY = player.root.position.y;
+        stayedAirborneBelowOriginalFloor ||= player.root.position.y < start.y - 0.1;
+        if (player.root.position.y < lowerLandingY - 0.02) {
+          rootDescendedBelowLandingSurface = true;
+          minimumContactDescentCameraY = Math.min(minimumContactDescentCameraY, game.camera.position.y);
+          maximumContactDescentCameraY = Math.max(maximumContactDescentCameraY, game.camera.position.y);
+          game.camera.getWorldDirection(cameraDirection);
+          steepestContactDescentCameraLookY = Math.min(
+            steepestContactDescentCameraLookY,
+            cameraDirection.y,
+          );
+        }
+      }
+      if (state === 'BackLanding' && landingContactClearance === null) {
+        landingContactClearance = diagnostics.backClearance;
+        landingContactSource = diagnostics.backContactSource;
+        landingContactSampleCount = diagnostics.backContactSampleCount;
+        landingRootY = player.root.position.y;
+        backContactConfirmed = Number.isFinite(landingContactClearance)
+          && Math.abs(landingContactClearance) <= 0.002;
+      }
+      if ((state === 'LyingFlat' || state === 'GetUp') && !backContactConfirmed) {
+        recoveryBeganBeforeBackContact = true;
+      }
+      if (state === 'LyingFlat') {
+        lyingFlatFrameCount += 1;
+        lyingFlatPitch = Math.max(lyingFlatPitch, Math.abs(player.modelRoot.rotation.x));
+        maximumLyingFlatBackClearance = Math.max(
+          maximumLyingFlatBackClearance,
+          Math.abs(diagnostics.backClearance ?? Infinity),
+        );
+        aerialAnimationWhileLyingFlat ||= player.animation.state === 'aerialKnockbackFall';
+        authoredLyingFlatClipSeen ||= player.externalRig.activeClipKey === 'lyingFlat';
+        const lyingFlatDuration = player.externalRig.animationMetadata.get('lyingFlat')?.duration ?? 0;
+        if (lyingFlatDuration > 0 && player.externalRig.activeClipKey === 'lyingFlat') {
+          minimumLyingFlatClipProgress = Math.min(
+            minimumLyingFlatClipProgress,
+            player.externalRig.activeAction.time / lyingFlatDuration,
+          );
+        }
+        const hips = player.externalRig.joints.get('hips');
+        const restHips = player.externalRig.restLocalQuaternions.get(hips);
+        if (hips && restHips) {
+          lyingFlatBodyAngle = Math.max(lyingFlatBodyAngle, hips.quaternion.angleTo(restHips));
+        }
+        const leftKnee = player.externalRig.joints.get('leftKnee');
+        const restLeftKnee = player.externalRig.restLocalQuaternions.get(leftKnee);
+        if (leftKnee && restLeftKnee) {
+          minimumLyingFlatKneeAngle = Math.min(
+            minimumLyingFlatKneeAngle,
+            leftKnee.quaternion.angleTo(restLeftKnee),
+          );
+        }
+      }
+      jumpFallStateSeen ||= player.animation.state === 'fall' || player.animation.state === 'forwardJumpFall';
+    }
+
+    const contactDescentCameraDrift = Number.isFinite(minimumContactDescentCameraY)
+      ? maximumContactDescentCameraY - minimumContactDescentCameraY
+      : null;
+
+    const knockbackSummary = {
+      dealt,
+      states,
+      animationStates,
+      maximumY,
+      startY: start.y,
+      finalY: player.root.position.y,
+      backwardTravel: player.root.position.z - start.z,
+      maximumFallingRise,
+      stayedAirborneBelowOriginalFloor,
+      lyingFlatPitch,
+      lyingFlatBodyAngle,
+      minimumLyingFlatKneeAngle,
+      maximumLyingFlatBackClearance,
+      lyingFlatFrameCount,
+      aerialAnimationWhileLyingFlat,
+      authoredLyingFlatClipSeen,
+      minimumLyingFlatClipProgress,
+      landingMode: player.powerKnockbackLandingMode,
+      jumpFallStateSeen,
+      controlRestored: !player.animation.externalControlLocked,
+      rootDescendedBelowLandingSurface,
+      landingContactClearance,
+      landingContactSource,
+      landingContactSampleCount,
+      landingRootY,
+      lowerLandingY,
+      recoveryBeganBeforeBackContact,
+      contactDescentCameraDrift,
+      minimumContactDescentCameraY,
+      steepestContactDescentCameraLookY,
+    };
+
+    player.powerKnockbackState = null;
+    player.animation.externalControlLocked = false;
+    player.animation.actionState = null;
+    player.animation.hurtTimer = 0;
+    player.root.position.copy(start);
+    player.takeDamage(1, source, { attackKind: 'melee' });
+    const lightHitStartedPowerKnockback = player.isPowerKnockbackActive();
+
+    player.powerKnockbackState = null;
+    player.animation.externalControlLocked = false;
+    player.animation.hurtTimer = 0;
+    player.root.position.copy(start);
+    player.health = player.stats.maxHealth;
+    const pouncer = window.spawnReaverbot({
+      archetypeId: 'pouncer',
+      seed: 'qa:0',
+      position: start.clone().add(new Vector3(0, 0, 0.5)),
+    });
+    pouncer.brain.attackHit = false;
+    pouncer._tryContactHit(game, 1);
+    const pounceWiring = {
+      attackKind: pouncer.genome.modules.weapon.attackKind,
+      state: player.powerKnockbackState,
+    };
+    pouncer.root.removeFromParent();
+    game.enemies.splice(game.enemies.indexOf(pouncer), 1);
+
+    player.powerKnockbackState = null;
+    player.animation.externalControlLocked = false;
+    player.root.position.copy(start);
+    player.health = player.stats.maxHealth;
+    game.addExplosion(start.clone(), 5, 1.5, 0xff8844, {
+      damageEnemies: false,
+      damagePlayer: true,
+      playerDamageScale: 1,
+      triggerMines: false,
+    });
+    const explosionWiringState = player.powerKnockbackState;
+    player.powerKnockbackState = null;
+    player.animation.externalControlLocked = false;
+
+    const controller = game.dungeonController;
+    const originalWalkable = controller.isPositionWalkable;
+    const originalSurface = controller.getSurfaceElevationAt;
+    const originalNearest = controller._findNearestWalkablePosition;
+    let pastResolution;
+    let beforeResolution;
+    try {
+      controller.getSurfaceElevationAt = () => 0;
+      controller._findNearestWalkablePosition = () => new Vector3(9, 0, 9);
+      controller.isPositionWalkable = (position) => position.x >= 1.1;
+      pastResolution = controller.resolvePowerKnockbackLanding(
+        new Vector3(0, 0.1, 0),
+        new Vector3(1, 0, 0),
+      );
+      controller.isPositionWalkable = (position) => position.x <= -0.9;
+      beforeResolution = controller.resolvePowerKnockbackLanding(
+        new Vector3(0, 0.1, 0),
+        new Vector3(1, 0, 0),
+      );
+    } finally {
+      controller.isPositionWalkable = originalWalkable;
+      controller.getSurfaceElevationAt = originalSurface;
+      controller._findNearestWalkablePosition = originalNearest;
+    }
+
+    return {
+      knockbackSummary,
+      lightHitStartedPowerKnockback,
+      pounceWiring,
+      explosionWiringState,
+      pastResolution: { mode: pastResolution?.mode, x: pastResolution?.position.x },
+      beforeResolution: { mode: beforeResolution?.mode, x: beforeResolution?.position.x },
+    };
+  });
+
+  expect(result.knockbackSummary.dealt).toBeGreaterThan(0);
+  expect(result.knockbackSummary.states).toEqual([
+    'KnockbackRising',
+    'AerialKnockbackFalling',
+    'BackLanding',
+    'LyingFlat',
+    'GetUp',
+  ]);
+  expect(result.knockbackSummary.animationStates).toContain('aerialKnockbackFall');
+  expect(result.knockbackSummary.animationStates).toContain('lyingFlat');
+  expect(result.knockbackSummary.maximumY).toBeGreaterThan(result.knockbackSummary.startY + 0.9);
+  expect(result.knockbackSummary.backwardTravel).toBeGreaterThan(2);
+  expect(result.knockbackSummary.maximumFallingRise).toBeLessThanOrEqual(0.0001);
+  expect(result.knockbackSummary.stayedAirborneBelowOriginalFloor).toBe(true);
+  expect(result.knockbackSummary.finalY).toBeCloseTo(result.knockbackSummary.startY - 1.5, 3);
+  expect(result.knockbackSummary.lyingFlatPitch).toBeLessThan(0.05);
+  expect(result.knockbackSummary.lyingFlatBodyAngle).toBeGreaterThan(0.7);
+  expect(result.knockbackSummary.minimumLyingFlatKneeAngle).toBeLessThan(0.2);
+  expect(result.knockbackSummary.maximumLyingFlatBackClearance).toBeLessThanOrEqual(0.002);
+  expect(result.knockbackSummary.lyingFlatFrameCount).toBeGreaterThan(10);
+  expect(result.knockbackSummary.aerialAnimationWhileLyingFlat).toBe(false);
+  expect(result.knockbackSummary.authoredLyingFlatClipSeen).toBe(true);
+  expect(result.knockbackSummary.minimumLyingFlatClipProgress).toBeGreaterThan(0.95);
+  expect(result.knockbackSummary.landingMode).toBe('lowerTestSurface');
+  expect(result.knockbackSummary.jumpFallStateSeen).toBe(false);
+  expect(result.knockbackSummary.controlRestored).toBe(true);
+  expect(result.knockbackSummary.rootDescendedBelowLandingSurface).toBe(true);
+  expect(result.knockbackSummary.landingContactSource).toBe('skinnedBackVertices');
+  expect(result.knockbackSummary.landingContactSampleCount).toBeGreaterThan(100);
+  expect(Math.abs(result.knockbackSummary.landingContactClearance)).toBeLessThanOrEqual(0.002);
+  expect(result.knockbackSummary.landingRootY).toBeLessThan(result.knockbackSummary.lowerLandingY - 0.05);
+  expect(result.knockbackSummary.recoveryBeganBeforeBackContact).toBe(false);
+  expect(result.knockbackSummary.contactDescentCameraDrift).toBeLessThan(0.01);
+  expect(result.knockbackSummary.minimumContactDescentCameraY).toBeGreaterThan(
+    result.knockbackSummary.lowerLandingY + 3,
+  );
+  expect(result.knockbackSummary.steepestContactDescentCameraLookY).toBeLessThan(-0.1);
+  expect(result.lightHitStartedPowerKnockback).toBe(false);
+  expect(result.pounceWiring).toEqual({
+    attackKind: 'pounce',
+    state: 'KnockbackRising',
+  });
+  expect(result.explosionWiringState).toBe('KnockbackRising');
+  expect(result.pastResolution.mode).toBe('pastObstacle');
+  expect(result.pastResolution.x).toBeGreaterThan(1);
+  expect(result.beforeResolution.mode).toBe('beforeObstacle');
+  expect(result.beforeResolution.x).toBeLessThan(-0.8);
+});
+
 test('debug ledge cube is a solid 3x3x3 block with a default-height grab ledge', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('canvas')).toHaveCount(1);
@@ -692,8 +1286,8 @@ test('platform debug menu scales jump reach, moon gravity, and spawned blocks', 
     spawnedPlatformCount: 1,
     platform: { width: 4, depth: 3, height: 4.5 },
   });
-  expect(menuState.jumpHeight).toBeCloseTo(4.65, 2);
-  expect(menuState.minimumGrabElevation).toBeCloseTo(4.557, 2);
+  expect(menuState.jumpHeight).toBeCloseTo(4.95, 2);
+  expect(menuState.minimumGrabElevation).toBeCloseTo(4.851, 2);
   expect(menuState.timeToApex).toBeGreaterThan(0.6);
 
   await page.locator('[data-action="pose-close"]').click();
@@ -810,7 +1404,7 @@ test('platform debug menu scales jump reach, moon gravity, and spawned blocks', 
     };
   });
 
-  expect(traversal.maxY).toBeCloseTo(4.65, 1);
+  expect(traversal.maxY).toBeCloseTo(4.95, 1);
   expect(traversal.apexTime).toBeGreaterThan(0.58);
   expect(traversal.upgradedLanding).toMatchObject({
     y: traversal.jumpableTopY,
@@ -953,6 +1547,7 @@ test('a descending edge contact catches low ledges without making normal jumps s
       center: new Vector3(18, 15, 18),
       topY: 15,
     };
+    const defaultMaximumGrabElevation = game.getPlatformDebugState().maximumGrabElevation;
 
     const attempt = ({
       candidate = ledge,
@@ -960,6 +1555,7 @@ test('a descending edge contact catches low ledges without making normal jumps s
       verticalDistance,
       jumpState,
       velocityY,
+      horizontalSpeed = 0,
       progress,
       jumpStartY = 0,
       jumpReachHeight = player.getJumpReachHeight(),
@@ -967,7 +1563,8 @@ test('a descending edge contact catches low ledges without making normal jumps s
       const jumpDirection = candidate.normal.clone().multiplyScalar(-1);
       player.ledgeCling = null;
       player.jumpState = jumpState;
-      player.velocity.set(0, velocityY, 0);
+      player.velocity.copy(jumpDirection).multiplyScalar(horizontalSpeed);
+      player.velocity.y = velocityY;
       player.jumpStartY = jumpStartY;
       player.jumpDirection.copy(jumpDirection);
       player.lastMoveDirection.copy(jumpDirection);
@@ -1021,6 +1618,14 @@ test('a descending edge contact catches low ledges without making normal jumps s
         velocityY: -1,
         progress: 1,
       }),
+      clearingLowEdge: attempt({
+        faceDistance: 0.1,
+        verticalDistance: 0.05,
+        jumpState: 'Falling',
+        velocityY: -1,
+        horizontalSpeed: 4.35,
+        progress: 1,
+      }),
       elevatedSmallDifference: attempt({
         candidate: elevatedLedge,
         faceDistance: 0.1,
@@ -1056,7 +1661,7 @@ test('a descending edge contact catches low ledges without making normal jumps s
         jumpState: 'Falling',
         velocityY: -5,
         progress: 1,
-        jumpStartY: 11.5,
+        jumpStartY: upgradedLedge.topY - defaultMaximumGrabElevation - 0.15,
       }),
       autoClimbMotion: (() => {
         const started = attempt({
@@ -1093,16 +1698,17 @@ test('a descending edge contact catches low ledges without making normal jumps s
   expect(result.fallingAwayFromLip.grabbed).toBe(false);
   expect(result.lateFallingLipContact).toMatchObject({
     grabbed: true,
-    id: 'campLowJumpDeck-front-ledge',
-    state: 'climbingUp',
-    autoClimb: true,
+    id: null,
+    state: null,
+    autoClimb: false,
   });
-  expect(result.lateFallingLipContact.rootY).toBeGreaterThan(0.5);
+  expect(result.lateFallingLipContact.rootY).toBeCloseTo(result.lowLedgeHeight + 0.02, 3);
+  expect(result.clearingLowEdge.grabbed).toBe(false);
   expect(result.elevatedSmallDifference).toMatchObject({
     grabbed: true,
-    id: 'elevated-difference-ledge',
-    state: 'climbingUp',
-    autoClimb: true,
+    id: null,
+    state: null,
+    autoClimb: false,
   });
   expect(result.elevatedOutsideLipBand.grabbed).toBe(false);
   expect(result.upgradedScaledRange).toMatchObject({
@@ -1114,11 +1720,11 @@ test('a descending edge contact catches low ledges without making normal jumps s
   expect(result.beyondDefaultScaledRange.grabbed).toBe(false);
   expect(result.autoClimbMotion.started).toMatchObject({
     grabbed: true,
-    state: 'climbingUp',
-    autoClimb: true,
+    state: null,
+    autoClimb: false,
   });
   expect(result.autoClimbMotion.minimumDelta).toBeGreaterThanOrEqual(-0.001);
-  expect(result.autoClimbMotion.finalY).toBeGreaterThan(result.autoClimbMotion.startY);
+  expect(result.autoClimbMotion.finalY).toBeCloseTo(result.autoClimbMotion.startY, 5);
   expect(result.autoClimbMotion.completed).toBe(true);
 });
 
@@ -3463,6 +4069,112 @@ test('upper connection sockets are reachable from inside their owning rooms', as
   });
 
   expect(failures).toEqual([]);
+});
+
+test('sword arm slashes preserve body facing and strike forward', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const player = game.player;
+    const combat = game.combat;
+    const Vector3 = player.root.position.constructor;
+    const swordIndex = player.armHotbar.findIndex((item) => item?.type === 'swordArm');
+    player.switchArmWeapon(swordIndex, true);
+
+    const state = combat.getCurrentWeaponState();
+    state.cooldown = 0;
+    state.reloadTimer = 0;
+    state.energy = state.maxEnergy;
+    state.weaponOutput = state.maxWeaponOutput;
+    combat.swapTimer = 0;
+    combat.pendingMeleeStrikes.length = 0;
+    player.animation.attackTimer = 0;
+    player.animation.actionState = null;
+    player.attackFacingTimer = 0;
+    player.root.rotation.y = 0.73;
+    player.lastMoveDirection.set(-1, 0, 0);
+
+    const initialYaw = player.root.rotation.y;
+    const expectedForward = new Vector3(Math.sin(initialYaw), 0, Math.cos(initialYaw)).normalize();
+    const aimWorld = player.root.position.clone().add(new Vector3(-10, 0, 0));
+    const attacked = combat.tryPrimaryAttack(aimWorld);
+    const immediateYaw = player.root.rotation.y;
+    const strikeDirection = combat.pendingMeleeStrikes[0]?.direction.clone() ?? new Vector3();
+
+    for (let frame = 0; frame < 12; frame += 1) {
+      player.update(1 / 60, new Set(), {
+        arenaRadius: game.arenaRadius,
+        movementForward: new Vector3(0, 0, 1),
+        movementRight: new Vector3(1, 0, 0),
+        groundY: player.root.position.y,
+      });
+    }
+
+    return {
+      swordIndex,
+      attacked,
+      initialYaw,
+      immediateYaw,
+      finalYaw: player.root.rotation.y,
+      attackFacingTimer: player.attackFacingTimer,
+      strikeForwardDot: strikeDirection.dot(expectedForward),
+      strikeAimDot: strikeDirection.dot(new Vector3(-1, 0, 0)),
+    };
+  });
+
+  expect(result.swordIndex).toBeGreaterThanOrEqual(0);
+  expect(result.attacked).toBe(true);
+  expect(result.immediateYaw).toBeCloseTo(result.initialYaw, 5);
+  expect(result.finalYaw).toBeCloseTo(result.initialYaw, 5);
+  expect(result.attackFacingTimer).toBe(0);
+  expect(result.strikeForwardDot).toBeGreaterThan(0.999);
+  expect(result.strikeAimDot).toBeLessThan(0.95);
+});
+
+test('weapon output regeneration waits half a second after firing, not while aiming', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => window.game?.combat && window.game?.player);
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const combat = game.combat;
+    const state = combat.getCurrentWeaponState();
+    const profile = combat._getStatefulProfile(combat._getCurrentProfile(), state);
+
+    state.weaponOutput = state.maxWeaponOutput * 0.4;
+    state.outputRecoveryDelay = 0;
+    game.pointer.primary = true;
+    const beforeAimRecovery = state.weaponOutput;
+    combat._updateWeaponStates(0.1);
+    const afterAimRecovery = state.weaponOutput;
+
+    combat._drainWeaponOutput(state, profile, 0.05);
+    const afterShot = state.weaponOutput;
+    const shotDelay = state.outputRecoveryDelay;
+    combat._updateWeaponStates(0.49);
+    const beforeDelayExpires = state.weaponOutput;
+    combat._updateWeaponStates(0.02);
+    const afterDelayExpires = state.weaponOutput;
+    game.pointer.primary = false;
+
+    return {
+      beforeAimRecovery,
+      afterAimRecovery,
+      afterShot,
+      shotDelay,
+      beforeDelayExpires,
+      afterDelayExpires,
+    };
+  });
+
+  expect(result.afterAimRecovery).toBeGreaterThan(result.beforeAimRecovery);
+  expect(result.shotDelay).toBeCloseTo(0.5, 5);
+  expect(result.beforeDelayExpires).toBeCloseTo(result.afterShot, 5);
+  expect(result.afterDelayExpires).toBeGreaterThan(result.beforeDelayExpires);
 });
 
 test('default buster stays level on the same tier and aims up at an upper lock target', async ({ page }) => {

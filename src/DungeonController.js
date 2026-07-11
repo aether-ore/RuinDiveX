@@ -20,6 +20,12 @@ const AERIAL_WAYPOINT_CLEARANCE = 0.28;
 const AERIAL_CEILING_CLEARANCE = 0.08;
 const POWER_KNOCKBACK_BARRIER_SAMPLE_SPACING = 0.06;
 const POWER_KNOCKBACK_BARRIER_LABEL_PATTERN = /boundary|wall|door|gate|barrier|fence|partition|bulkhead/i;
+const PLAYER_RAIL_BALANCE_TOLERANCE = 0.045;
+const PLAYER_RAIL_LANDING_VERTICAL_TOLERANCE = 0.16;
+const PLAYER_RAIL_STALL_PROXIMITY = 0.42;
+const PLAYER_RAIL_STALL_TIME = 0.2;
+const PLAYER_RAIL_RECOVERY_NUDGE = 0.16;
+const RAMP_SUPPORT_CAPTURE_HEIGHT = PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.18;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
   [-1, 0],
@@ -173,6 +179,14 @@ export class DungeonController {
     this.nearestInteractable = null;
     this.lastSafePlayerPosition = new THREE.Vector3();
     this.pendingPlayerJumpOffLanding = null;
+    this.playerRailTopSurfaces = this._collectPlayerRailTopSurfaces();
+    this.playerRailRecoveryState = {
+      initialized: false,
+      lastPosition: new THREE.Vector3(),
+      stallTimer: 0,
+      cooldown: 0,
+      lastResult: null,
+    };
     this.lastSafeEnemyPositions = new Map();
     this.navigationCache = new Map();
     this.trapPulseTimer = 0;
@@ -194,6 +208,7 @@ export class DungeonController {
 
     this._updateRoomAnnouncements(dt);
     this._constrainPlayerToWalkable();
+    this._updatePlayerAirborneRailRecovery(dt);
     this._updateRoomDiscovery();
     this._updateKeycards(dt);
     this._updateTraps(dt);
@@ -212,6 +227,204 @@ export class DungeonController {
     this._updateExpeditionEntryState();
     this._updateNearestInteractable();
     this.navigationCache.clear();
+  }
+
+  _collectPlayerRailTopSurfaces() {
+    const surfaces = [];
+    const root = this.dungeon?.group;
+    if (!root?.traverse) {
+      return surfaces;
+    }
+
+    root.updateMatrixWorld?.(true);
+    const bounds = new THREE.Box3();
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    root.traverse((object) => {
+      if (!object?.isMesh) {
+        return;
+      }
+
+      const name = object.name ?? '';
+      const explicitRun = object.userData?.factoryRailRun === true;
+      const authoredWalkwayRail = /(?:catwalk|balcony|guard).*rail|rail.*(?:catwalk|balcony|guard)/i.test(name)
+        && !/post|overhead|crane|pipe/i.test(name);
+      if (!explicitRun && !authoredWalkwayRail) {
+        return;
+      }
+
+      bounds.setFromObject(object);
+      bounds.getSize(size);
+      bounds.getCenter(center);
+      if (!Number.isFinite(size.x) || Math.max(size.x, size.z) < 0.3) {
+        return;
+      }
+
+      surfaces.push({
+        id: object.uuid,
+        object,
+        center: center.clone(),
+        halfWidth: size.x * 0.5,
+        halfDepth: size.z * 0.5,
+        topY: bounds.max.y,
+        horizontal: size.x >= size.z,
+      });
+    });
+    return surfaces;
+  }
+
+  _isBalancedOnRail(surface, position, tolerance = PLAYER_RAIL_BALANCE_TOLERANCE) {
+    return Math.abs(position.x - surface.center.x) <= surface.halfWidth + tolerance
+      && Math.abs(position.z - surface.center.z) <= surface.halfDepth + tolerance;
+  }
+
+  _findNearbyPlayerRail(position, proximity = PLAYER_RAIL_BALANCE_TOLERANCE) {
+    let nearest = null;
+    let nearestDistanceSq = Infinity;
+    for (const surface of this.playerRailTopSurfaces) {
+      const dx = Math.max(0, Math.abs(position.x - surface.center.x) - surface.halfWidth);
+      const dz = Math.max(0, Math.abs(position.z - surface.center.z) - surface.halfDepth);
+      const verticalDistance = Math.abs(position.y - surface.topY);
+      const distanceSq = dx * dx + dz * dz;
+      if (dx > proximity || dz > proximity || verticalDistance > 1.05 || distanceSq >= nearestDistanceSq) {
+        continue;
+      }
+      nearest = surface;
+      nearestDistanceSq = distanceSq;
+    }
+    return nearest;
+  }
+
+  getPlayerRailSupportElevation(position) {
+    const surface = this._findNearbyPlayerRail(position, PLAYER_RAIL_BALANCE_TOLERANCE);
+    if (!surface || !this._isBalancedOnRail(surface, position)) {
+      return null;
+    }
+
+    const player = this.game?.player;
+    if (player?.isJumpAirborne?.() && player.velocity?.y > 0) {
+      return null;
+    }
+    const verticalTolerance = player?.isJumpAirborne?.()
+      ? PLAYER_RAIL_LANDING_VERTICAL_TOLERANCE
+      : 0.2;
+    return Math.abs(position.y - surface.topY) <= verticalTolerance
+      ? surface.topY
+      : null;
+  }
+
+  tryResolvePlayerRailLanding({ player, root, previousRootY } = {}) {
+    if (!player || !root || player.velocity?.y > 0) {
+      return false;
+    }
+
+    let landingSurface = null;
+    for (const surface of this.playerRailTopSurfaces) {
+      if (!this._isBalancedOnRail(surface, root.position)) {
+        continue;
+      }
+      const crossedTop = Number.isFinite(previousRootY)
+        && previousRootY >= surface.topY
+        && root.position.y <= surface.topY;
+      const alreadyAtTop = Math.abs(root.position.y - surface.topY) <= 0.015;
+      if (!crossedTop && !alreadyAtTop) {
+        continue;
+      }
+      if (root.position.y < surface.topY - PLAYER_RAIL_LANDING_VERTICAL_TOLERANCE) {
+        continue;
+      }
+      if (!landingSurface || surface.topY > landingSurface.topY) {
+        landingSurface = surface;
+      }
+    }
+
+    if (!landingSurface) {
+      return false;
+    }
+    root.position.y = landingSurface.topY;
+    if (player.modelRoot) {
+      player.modelRoot.position.y = 0;
+    }
+    this.playerRailRecoveryState.lastResult = {
+      mode: 'balancedLanding',
+      railId: landingSurface.id,
+    };
+    return true;
+  }
+
+  _resolvePlayerAirborneRailRecovery(position, rail, preferredVelocity) {
+    const preferred = preferredVelocity?.clone?.().setY(0) ?? new THREE.Vector3();
+    if (preferred.lengthSq() > 0.0001) {
+      preferred.normalize();
+    }
+    const railNormalA = rail.horizontal
+      ? new THREE.Vector3(0, 0, 1)
+      : new THREE.Vector3(1, 0, 0);
+    const directions = [railNormalA, railNormalA.clone().negate()];
+    if (preferred.lengthSq() > 0.0001) {
+      directions.sort((a, b) => b.dot(preferred) - a.dot(preferred));
+    }
+
+    for (let distance = PLAYER_RAIL_RECOVERY_NUDGE; distance <= 1.12; distance += 0.16) {
+      for (const direction of directions) {
+        const candidate = position.clone().addScaledVector(direction, distance);
+        const floorY = this.getSurfaceElevationAt(candidate);
+        const groundedCandidate = candidate.clone().setY(floorY);
+        if (floorY > position.y + 0.05
+          || !this.isPositionWalkable(groundedCandidate)
+          || this._findPowerKnockbackBarrier(position, groundedCandidate, { ignoreVertical: true })) {
+          continue;
+        }
+        return {
+          x: candidate.x,
+          z: candidate.z,
+          groundY: floorY,
+          railId: rail.id,
+          distance,
+        };
+      }
+    }
+    return null;
+  }
+
+  _updatePlayerAirborneRailRecovery(dt) {
+    const state = this.playerRailRecoveryState;
+    const player = this.game?.player;
+    const position = player?.root?.position;
+    if (!state || !position) {
+      return;
+    }
+
+    state.cooldown = Math.max(0, state.cooldown - dt);
+    const falling = player.isJumpAirborne?.() && player.velocity?.y < -0.3;
+    const rail = falling ? this._findNearbyPlayerRail(position, PLAYER_RAIL_STALL_PROXIMITY) : null;
+    if (!falling || !rail) {
+      state.initialized = true;
+      state.lastPosition.copy(position);
+      state.stallTimer = 0;
+      return;
+    }
+
+    if (!state.initialized) {
+      state.initialized = true;
+      state.lastPosition.copy(position);
+      return;
+    }
+
+    const actualDescent = state.lastPosition.y - position.y;
+    const expectedDescent = Math.abs(player.velocity.y) * dt;
+    const stalled = actualDescent < Math.max(0.003, expectedDescent * 0.18);
+    state.stallTimer = stalled ? state.stallTimer + dt : Math.max(0, state.stallTimer - dt * 2);
+
+    if (state.stallTimer >= PLAYER_RAIL_STALL_TIME && state.cooldown <= 0) {
+      const recovery = this._resolvePlayerAirborneRailRecovery(position, rail, player.velocity);
+      if (recovery && player.resumeAirborneFall?.(recovery)) {
+        state.lastResult = { mode: 'stalledFallNudge', ...recovery };
+        state.cooldown = 0.4;
+        state.stallTimer = 0;
+      }
+    }
+    state.lastPosition.copy(position);
   }
 
   getNearestInteractable() {
@@ -947,7 +1160,7 @@ export class DungeonController {
     return this.encounters.find((encounter) => (
       !encounter.spawned
       && !encounter.cleared
-      && isInsideZone(position, encounter.zone)
+      && isInsideZone(position, encounter.triggerZone ?? encounter.zone)
     )) ?? null;
   }
 
@@ -1054,11 +1267,51 @@ export class DungeonController {
     return tile ? this._getTileElevationAtPosition(tile, position) : 0;
   }
 
+  getRampSurfaceElevationAt(position) {
+    const { x, z } = this.worldToTile(position);
+    const column = this.floorTilesByColumn.get(tileKey(x, z));
+    if (!column?.length) {
+      return null;
+    }
+
+    let nearestElevation = null;
+    let nearestDistance = Infinity;
+    for (const tile of column) {
+      if (tile.surface !== 'industrialRamp') {
+        continue;
+      }
+      const elevation = this._getTileElevationAtPosition(tile, position);
+      const distance = Math.abs(elevation - (position.y ?? 0));
+      if (distance <= RAMP_SUPPORT_CAPTURE_HEIGHT && distance < nearestDistance) {
+        nearestElevation = elevation;
+        nearestDistance = distance;
+      }
+    }
+    return nearestElevation;
+  }
+
   getSurfaceElevationAt(position) {
+    // Elevated conveyor ramps can overlap a flat structural deck for several
+    // tiles. Capture the nearby authored slope first so that flat deck support
+    // cannot mask the rising surface and create a discontinuity at its edge.
+    const rampElevation = this.getRampSurfaceElevationAt(position);
+    if (Number.isFinite(rampElevation)) {
+      return rampElevation;
+    }
     const platformElevation = this.game.getPlatformFloorElevation?.(position);
     return Number.isFinite(platformElevation)
       ? platformElevation
       : this.getFloorElevationAt(position);
+  }
+
+  _getGroundedStepTransitionHeight(fromPosition, toPosition, fallback) {
+    const fromTile = this.getFloorTileAt(fromPosition, { allowClosest: true });
+    const toTile = this.getFloorTileAt(toPosition, { allowClosest: true });
+    return Math.max(
+      fallback,
+      Number(fromTile?.groundedStepTransitionHeight) || 0,
+      Number(toTile?.groundedStepTransitionHeight) || 0,
+    );
   }
 
   _getTileElevationAtPosition(tile, position) {
@@ -1110,6 +1363,12 @@ export class DungeonController {
 
   _syncPositionToFloor(position, { preservePlayerAction = false } = {}) {
     if (preservePlayerAction && this._isPlayerPreservingVerticalMotion()) {
+      return;
+    }
+
+    const rampElevation = this.getRampSurfaceElevationAt(position);
+    if (Number.isFinite(rampElevation)) {
+      position.y = rampElevation;
       return;
     }
 
@@ -1378,8 +1637,13 @@ export class DungeonController {
         position.y,
         position.z + Math.sin(angle) * clearanceRadius,
       );
+      const allowedElevationDelta = this._getGroundedStepTransitionHeight(
+        position,
+        sample,
+        maximumElevationDelta,
+      );
       if (!this.isPositionWalkable(sample)
-        || Math.abs(this.getSurfaceElevationAt(sample) - centerElevation) > maximumElevationDelta) {
+        || Math.abs(this.getSurfaceElevationAt(sample) - centerElevation) > allowedElevationDelta) {
         return false;
       }
     }
@@ -1458,9 +1722,14 @@ export class DungeonController {
     const fromElevation = this._getFloorConnectionElevation(fromTile, directionX, directionZ);
     const toElevation = this._getFloorConnectionElevation(toTile, -directionX, -directionZ);
     const usesRamp = fromTile.surface === 'industrialRamp' || toTile.surface === 'industrialRamp';
-    const maximumRise = usesRamp
+    const baseMaximumRise = usesRamp
       ? PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.12
       : PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile;
+    const maximumRise = Math.max(
+      baseMaximumRise,
+      Number(fromTile.groundedStepTransitionHeight) || 0,
+      Number(toTile.groundedStepTransitionHeight) || 0,
+    );
     return Math.abs(fromElevation - toElevation) <= maximumRise;
   }
 
@@ -2269,9 +2538,14 @@ export class DungeonController {
     const closestFloorY = closestFloorTile
       ? this._getTileElevationAtPosition(closestFloorTile, current)
       : surfaceY;
+    const groundedStepTransitionHeight = this._getGroundedStepTransitionHeight(
+      this.lastSafePlayerPosition,
+      current,
+      PLAYER_STEP_OFF_FALL_HEIGHT,
+    );
     const authoredGroundedDrop = !playerJumping
       && closestFloorTile?.allowsGroundedDropLanding === true
-      && current.y - closestFloorY > PLAYER_STEP_OFF_FALL_HEIGHT
+      && current.y - closestFloorY > groundedStepTransitionHeight
       && current.y - closestFloorY <= PLAYER_TRAVERSAL_ENVELOPE.safeDropHeight
       && this._isResolvedFloorPositionWalkable(
         tempVectorC.set(current.x, closestFloorY, current.z),
@@ -2283,16 +2557,24 @@ export class DungeonController {
     const groundedRiseRequiresJumpAt = (position) => {
       const tile = this.getFloorTileAt(position, { allowClosest: true });
       const candidateY = this.getSurfaceElevationAt(position);
+      const allowedRise = this._getGroundedStepTransitionHeight(
+        this.lastSafePlayerPosition,
+        position,
+        PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.05,
+      );
       return !playerJumping
         && tile?.surface !== 'industrialRamp'
-        && candidateY - this.lastSafePlayerPosition.y > PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.05;
+        && candidateY - this.lastSafePlayerPosition.y > allowedRise;
     };
 
     if (this.isPositionWalkable(current) && !groundedRiseRequiresJumpAt(current)) {
       const steppingOffElevatedSurface = !playerJumping
-        && current.y - surfaceY > PLAYER_STEP_OFF_FALL_HEIGHT;
+        && current.y - surfaceY > groundedStepTransitionHeight;
       if (!steppingOffElevatedSurface) {
-        this._syncPositionToFloor(current, { preservePlayerAction: true });
+        const authoredGroundedStep = !playerJumping
+          && groundedStepTransitionHeight > PLAYER_STEP_OFF_FALL_HEIGHT + 0.01
+          && Math.abs(current.y - surfaceY) <= groundedStepTransitionHeight + 0.01;
+        this._syncPositionToFloor(current, { preservePlayerAction: !authoredGroundedStep });
       }
       this.lastSafePlayerPosition.copy(current);
       if (!playerJumping) {
@@ -2343,11 +2625,30 @@ export class DungeonController {
 
     for (const keycard of this.keycards) {
       if (keycard.collected) {
+        if (keycard.barrierObject) {
+          keycard.barrierObject.visible = false;
+        }
         continue;
       }
 
       keycard.object.rotation.y += dt * 1.6;
       keycard.object.position.y = keycard.position.y + 0.42 + Math.sin(this.game.elapsedTime * 4.2) * 0.08;
+      const protectingEncounter = keycard.protectedByEncounterId
+        ? this.encounters.find((encounter) => encounter.id === keycard.protectedByEncounterId)
+        : null;
+      const protectedByEncounter = Boolean(protectingEncounter && !protectingEncounter.cleared);
+      if (keycard.barrierObject) {
+        keycard.barrierObject.visible = protectedByEncounter;
+        keycard.barrierObject.rotation.y += dt * 0.8;
+        const shellMaterial = keycard.barrierObject.userData?.shellMaterial;
+        if (shellMaterial) {
+          shellMaterial.opacity = 0.2 + Math.sin(this.game.elapsedTime * 5.4) * 0.055;
+        }
+      }
+
+      if (protectedByEncounter) {
+        continue;
+      }
 
       if (playerPosition.distanceToSquared(keycard.position) > 1.45 * 1.45) {
         continue;

@@ -814,6 +814,135 @@ function createWeakPoint(root, genome, frame, materials, eye, defense) {
   return { group: weakPoint, core, socket, sharedWithEye: false };
 }
 
+function markDecorativeMeleeArmor(object, kind) {
+  object.userData.decorativeArmor = true;
+  object.userData.gameplayDefense = false;
+  object.userData.meleeSilhouetteKind = kind;
+  return object;
+}
+
+function createMeleeSilhouetteArmor(root, genome, frame, materials) {
+  const enabled = genome.modules.weapon.tags.includes('melee');
+  const parts = {
+    enabled,
+    group: null,
+    plates: [],
+    sidePlates: [],
+    topPlates: [],
+    spikes: [],
+  };
+  if (!enabled) return parts;
+
+  const center = frame.anchors.center;
+  const sideExtent = Math.max(0.46, Math.abs(frame.anchors.side[0] - center[0]));
+  const animal = frame.plan === 'quadruped' || frame.plan === 'crawler';
+  const upright = frame.plan === 'biped' || frame.plan === 'lowBiped';
+  const compact = frame.plan === 'hopper' || frame.plan === 'hoverBell';
+  const lowUpright = frame.plan === 'lowBiped';
+  const armor = group(root, 'generatedMeleeSilhouetteArmor', center);
+  markDecorativeMeleeArmor(armor, 'assembly');
+  armor.userData.authoredDefenseId = null;
+  armor.userData.keepsEyeSightlineClear = true;
+  parts.group = armor;
+
+  const sidePlateSize = animal
+    ? [0.2, 0.52, 1.08]
+    : upright
+      ? [0.2, lowUpright ? 0.66 : 0.82, 0.62]
+      : compact
+        ? [0.18, 0.56, 0.74]
+        : [0.2, 0.66, 0.72];
+  const sidePlateX = sideExtent + (animal ? 0.14 : 0.12);
+  const sidePlateY = animal ? 0.02 : upright ? -0.02 : -0.04;
+  const sidePlateZ = animal ? -0.12 : -0.08;
+  const topPlateY = animal ? 0.43 : upright ? (lowUpright ? 0.38 : 0.5) : 0.38;
+  const topPlateSize = animal
+    ? [0.38, 0.16, 0.92]
+    : upright
+      ? [0.48, 0.17, 0.56]
+      : [0.4, 0.16, 0.62];
+  const topPlateX = Math.max(0.24, sideExtent * (animal ? 0.48 : 0.58));
+
+  for (const side of [-1, 1]) {
+    const sidePlate = box(
+      armor,
+      materials.primary,
+      'generatedMeleeDecorativeSidePlate',
+      sidePlateSize,
+      [side * sidePlateX, sidePlateY, sidePlateZ],
+      [0, side * 0.08, side * (animal ? 0.04 : 0.08)],
+    );
+    markDecorativeMeleeArmor(sidePlate, 'sidePlate');
+    sidePlate.userData.decorativeSidePlate = true;
+    sidePlate.userData.guardSide = side;
+    parts.plates.push(sidePlate);
+    parts.sidePlates.push(sidePlate);
+
+    const sideInset = box(
+      sidePlate,
+      materials.trim,
+      'generatedMeleeDecorativeSidePlateInset',
+      [0.035, sidePlateSize[1] * 0.62, sidePlateSize[2] * 0.7],
+      [side * (sidePlateSize[0] * 0.56), 0, 0.02],
+    );
+    markDecorativeMeleeArmor(sideInset, 'sidePlateInset');
+
+    const topPlate = box(
+      armor,
+      materials.secondary,
+      animal ? 'generatedMeleeDorsalArmorPlate' : 'generatedMeleeShoulderArmorPlate',
+      topPlateSize,
+      [side * topPlateX, topPlateY, animal ? -0.14 : -0.08],
+      [0, side * 0.05, side * 0.08],
+    );
+    markDecorativeMeleeArmor(topPlate, animal ? 'dorsalPlate' : 'shoulderPlate');
+    topPlate.userData.guardSide = side;
+    parts.plates.push(topPlate);
+    parts.topPlates.push(topPlate);
+
+    // Paired flank spikes make the close-range threat readable in silhouette.
+    // They sit above the leg-joint band and behind front-side weak points.
+    for (const spikeOffset of [-0.2, 0.2]) {
+      const length = 0.52 + (genome.body.proportions.spikeCount % 2) * 0.07;
+      const spike = mesh(
+        armor,
+        new THREE.ConeGeometry(0.11, length, 5),
+        materials.trim,
+        'generatedMeleeFlankSpike',
+        [
+          side * (sidePlateX + sidePlateSize[0] * 0.5 + length * 0.34),
+          sidePlateY + (animal ? 0.08 : 0.1),
+          sidePlateZ + spikeOffset,
+        ],
+        [0, 0, side * -Math.PI / 2],
+      );
+      markDecorativeMeleeArmor(spike, 'flankSpike');
+      spike.userData.contactDamage = false;
+      parts.spikes.push(spike);
+    }
+
+    // Dorsal/shoulder spikes stay laterally offset so the single ruby eye
+    // remains the unobstructed focal point from the standard combat camera.
+    if (genome.body.proportions.spikeCount >= 2) {
+      const dorsalLength = animal ? 0.56 : 0.48;
+      const dorsalSpike = mesh(
+        armor,
+        new THREE.ConeGeometry(0.105, dorsalLength, 5),
+        materials.trim,
+        animal ? 'generatedMeleeDorsalSpike' : 'generatedMeleeShoulderSpike',
+        [side * topPlateX, topPlateY + topPlateSize[1] * 0.5 + dorsalLength * 0.38, animal ? -0.18 : -0.1],
+      );
+      markDecorativeMeleeArmor(dorsalSpike, animal ? 'dorsalSpike' : 'shoulderSpike');
+      dorsalSpike.userData.contactDamage = false;
+      parts.spikes.push(dorsalSpike);
+    }
+  }
+
+  armor.userData.plateCount = parts.plates.length;
+  armor.userData.spikeCount = parts.spikes.length;
+  return parts;
+}
+
 function addSurfaceGrammar(root, genome, frame, materials) {
   const rhythm = genome.body.proportions.panelRhythm;
   const center = frame.anchors.center;
@@ -854,7 +983,9 @@ export function createReaverbotVisual(genome) {
     weapon.group.userData.linkedDefenseId = 'rotatingPlates';
   }
   const weakPoint = createWeakPoint(visualRoot, genome, frame, materials, eye, defense);
+  const meleeArmor = createMeleeSilhouetteArmor(visualRoot, genome, frame, materials);
   addSurfaceGrammar(visualRoot, genome, frame, materials);
+  visualRoot.userData.meleeSilhouetteArmored = meleeArmor.enabled;
   visualRoot.scale.setScalar(genome.body.proportions.overallScale);
   visualRoot.updateMatrixWorld(true);
 
@@ -868,6 +999,7 @@ export function createReaverbotVisual(genome) {
     weapon,
     defense,
     weakPoint,
+    meleeArmor,
     materials,
     bounds,
     size,

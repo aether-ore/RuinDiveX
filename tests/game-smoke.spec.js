@@ -628,6 +628,137 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
   expect(result.beforeResolution.x).toBeLessThan(-0.8);
 });
 
+test('power knockback prevents airborne juggling and darkens the health gauge through get-up', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
+
+  const result = await page.evaluate(async () => {
+    const { game } = window;
+    game.stop();
+    const player = game.player;
+    const Vector3 = player.root.position.constructor;
+    const start = game.dungeon.playerStart.clone();
+    const source = { position: start.clone().add(new Vector3(0, 0, -1)) };
+    const externalOwner = { id: 'knockback-juggle-test' };
+    const movementOptions = {
+      arenaRadius: game.arenaRadius,
+      movementForward: new Vector3(0, 0, 1),
+      movementRight: new Vector3(1, 0, 0),
+      groundY: start.y,
+    };
+
+    player.root.position.copy(start);
+    player.health = player.stats.maxHealth;
+    player.dead = false;
+    player.animation.dead = false;
+    player.powerKnockbackState = null;
+    player.animation.externalControlLocked = false;
+    player.powerKnockbackLandingResolver = ({ position }) => ({
+      position: new Vector3(position.x, start.y, position.z),
+      mode: 'juggleImmunityTestSurface',
+    });
+
+    const initialDamage = player.takeDamage(5, source, {
+      attackKind: 'pounce',
+      powerfulKnockback: true,
+      knockbackDirection: new Vector3(0, 0, 1),
+    });
+    const protectedHealth = player.health;
+    const samples = [];
+    const sampledStates = new Set();
+    const track = document.querySelector('#health-gauge .gauge-track');
+    const sampleProtection = () => {
+      const state = player.powerKnockbackState;
+      if (!state || sampledStates.has(state)) return;
+      sampledStates.add(state);
+      game.ui.update(0);
+      const velocityBefore = player.powerKnockbackVelocity.clone();
+      const stateBefore = player.powerKnockbackState;
+      const repeatedDamage = player.takeDamage(9999, source, {
+        attackKind: 'shockwave',
+        powerfulKnockback: true,
+        knockbackDirection: new Vector3(1, 0, 0),
+        knockbackStrength: 1.5,
+        unblockable: true,
+      });
+      const directRelaunch = player._playKnockbackFall(source, {
+        knockbackDirection: new Vector3(-1, 0, 0),
+        knockbackStrength: 1.5,
+      });
+      const externalClaimed = player.tryClaimExternalControl(externalOwner, 'tractorBeam', {
+        freeze: true,
+        ignoreGroundConstraint: true,
+      });
+      samples.push({
+        state,
+        repeatedDamage,
+        directRelaunch,
+        externalClaimed,
+        health: player.health,
+        dead: player.dead,
+        stateUnchanged: player.powerKnockbackState === stateBefore,
+        velocityUnchanged: player.powerKnockbackVelocity.distanceTo(velocityBefore) < 0.000001,
+        gaugeProtectedClass: document.getElementById('health-gauge')
+          .classList.contains('is-power-knockback'),
+        trackBackground: getComputedStyle(track).backgroundColor,
+      });
+    };
+
+    game.ui.update(0);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    sampleProtection();
+    for (let frame = 0; frame < 600 && player.isPowerKnockbackActive(); frame += 1) {
+      player.update(1 / 120, new Set(), movementOptions);
+      sampleProtection();
+    }
+
+    game.ui.update(0);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const recoveryComplete = !player.isPowerKnockbackActive();
+    const postRecoveryGaugeClass = document.getElementById('health-gauge')
+      .classList.contains('is-power-knockback');
+    const postRecoveryTrackBackground = getComputedStyle(track).backgroundColor;
+    const healthBeforePostRecoveryHit = player.health;
+    const postRecoveryDamage = player.takeDamage(1, source, { attackKind: 'melee' });
+
+    return {
+      initialDamage,
+      protectedHealth,
+      samples,
+      recoveryComplete,
+      postRecoveryGaugeClass,
+      postRecoveryTrackBackground,
+      postRecoveryDamage,
+      postRecoveryHealthLost: healthBeforePostRecoveryHit - player.health,
+    };
+  });
+
+  expect(result.initialDamage).toBeGreaterThan(0);
+  expect(result.samples.map((sample) => sample.state)).toEqual([
+    'KnockbackRising',
+    'AerialKnockbackFalling',
+    'BackLanding',
+    'LyingFlat',
+    'GetUp',
+  ]);
+  expect(result.samples.filter((sample) => !(
+    sample.repeatedDamage === 0
+    && sample.directRelaunch === false
+    && sample.externalClaimed === false
+    && sample.health === result.protectedHealth
+    && !sample.dead
+    && sample.stateUnchanged
+    && sample.velocityUnchanged
+    && sample.gaugeProtectedClass
+    && sample.trackBackground === 'rgb(33, 9, 13)'
+  ))).toEqual([]);
+  expect(result.recoveryComplete).toBe(true);
+  expect(result.postRecoveryGaugeClass).toBe(false);
+  expect(result.postRecoveryTrackBackground).toBe('rgb(5, 9, 11)');
+  expect(result.postRecoveryDamage).toBeGreaterThan(0);
+  expect(result.postRecoveryHealthLost).toBeCloseTo(result.postRecoveryDamage, 5);
+});
+
 test('debug ledge cube is a solid 3x3x3 block with a default-height grab ledge', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('canvas')).toHaveCount(1);
@@ -2277,6 +2408,16 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
         y: point.y,
         z: point.z / dungeon.tileSize,
       })),
+      pyramidTinyStepAllowance: [...processionalStepTiles, ...pyramidTerraceTiles].every((tile) => (
+        tile.groundedStepTransitionHeight >= 0.55
+        && tile.groundedStepTransitionHeight < 1.1
+      )),
+      pyramidEncounterUsesSummitTrigger: Boolean(keycardEncounter.triggerZone)
+        && Math.abs(keycardEncounter.triggerZone.position.x - pyramidCenter.x * dungeon.tileSize) < 0.01
+        && Math.abs(keycardEncounter.triggerZone.position.z - pyramidCenter.z * dungeon.tileSize) < 0.01
+        && Math.abs(keycardEncounter.triggerZone.position.y - pyramidCenter.elevation) < 0.01,
+      keycardBarrierPresent: keycard.barrierObject?.name === 'keycardEncounterProtectionBarrier'
+        && keycard.protectedByEncounterId === keycardEncounter.id,
       keycardOnPyramid: Boolean(pyramidCenter && keycard)
         && Math.abs(keycard.position.x - pyramidCenter.x * dungeon.tileSize) < 0.01
         && Math.abs(keycard.position.z - pyramidCenter.z * dungeon.tileSize) < 0.01
@@ -2358,10 +2499,14 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
   expect(result.pyramidMaxElevation).toBeGreaterThanOrEqual(4);
   expect(result.pyramidSummitCollisionStable).toBe(true);
   expect(result.pyramidEnemySpawnPoints).toHaveLength(6);
+  expect(new Set(result.pyramidEnemySpawnPoints.map((point) => `${point.x},${point.z}`)).size).toBe(6);
   expect(result.pyramidEnemySpawnPoints.every((point) => (
-    point.x === result.pyramidEnemySpawnPoints[0].x
+    point.y >= result.pyramidMaxElevation - 1.5
+    && point.y <= result.pyramidMaxElevation - 0.45
   ))).toBe(true);
-  expect(new Set(result.pyramidEnemySpawnPoints.map((point) => point.y)).size).toBeGreaterThanOrEqual(4);
+  expect(result.pyramidTinyStepAllowance).toBe(true);
+  expect(result.pyramidEncounterUsesSummitTrigger).toBe(true);
+  expect(result.keycardBarrierPresent).toBe(true);
   expect(result.keycardOnPyramid).toBe(true);
   expect(result.connectorGalleryTileCount).toBeGreaterThan(40);
   expect(result.explorationAlcoveCount).toBeGreaterThan(0);
@@ -2502,8 +2647,8 @@ test('conveyor consoles, sealed vault, refractor sanctum, and grand keycard pyra
           uniqueBoundaryOpenings: [...new Set(boundaryOpenings)],
           doorAtOnlyOpening: [...new Set(boundaryOpenings)].length === 1
             && [...new Set(boundaryOpenings)][0] === `${vaultDoor.toPortal.x},${vaultDoor.toPortal.z}`
-            && Math.round(vaultDoor.position.x / dungeon.tileSize) === vaultDoor.toPortal.x
-            && Math.round(vaultDoor.position.z / dungeon.tileSize) === vaultDoor.toPortal.z,
+            && Math.round(vaultDoor.graphBlockingPosition.x / dungeon.tileSize) === vaultDoor.toPortal.x
+            && Math.round(vaultDoor.graphBlockingPosition.z / dungeon.tileSize) === vaultDoor.toPortal.z,
           lockedByPuzzle: vaultDoor.closed && vaultDoor.locked
             && vaultDoor.pressurePlateId === 'conveyorVaultPlate',
           inaccessibleWhileClosed: physicalVaultCheck?.destinationReachableWhileClosed === false,
@@ -2558,11 +2703,21 @@ test('conveyor consoles, sealed vault, refractor sanctum, and grand keycard pyra
           keycardCentered: Math.abs(keycard.position.x - keycardRoom.x * dungeon.tileSize) < 0.01
             && Math.abs(keycard.position.z - keycardRoom.z * dungeon.tileSize) < 0.01
             && Math.abs(keycard.position.y - keycardRoom.mechanicalPyramidCenter.elevation) < 0.01,
-          enemiesLineSteps: keycardEncounter.spawnPoints.length === 6
+          enemiesGuardUpperRing: keycardEncounter.spawnPoints.length === 6
+            && new Set(keycardEncounter.spawnPoints.map((point) => (
+              `${Math.round(point.x / dungeon.tileSize)},${Math.round(point.z / dungeon.tileSize)}`
+            ))).size === 6
             && keycardEncounter.spawnPoints.every((point) => (
-              Math.round(point.x / dungeon.tileSize) === keycardRoom.x
-            ))
-            && new Set(keycardEncounter.spawnPoints.map((point) => point.y)).size >= 4,
+              point.y >= keycardRoom.mechanicalPyramidCenter.elevation - 1.5
+              && point.y <= keycardRoom.mechanicalPyramidCenter.elevation - 0.45
+            )),
+          summitTrigger: Boolean(keycardEncounter.triggerZone)
+            && Math.abs(keycardEncounter.triggerZone.position.y - keycardRoom.mechanicalPyramidCenter.elevation) < 0.01,
+          protectedKeycard: keycard.protectedByEncounterId === keycardEncounter.id
+            && keycard.barrierObject?.name === 'keycardEncounterProtectionBarrier',
+          tinyStepsGrounded: pyramidTiles
+            .filter((tile) => tile.surface !== 'mechanicalPyramidSidePlatform')
+            .every((tile) => tile.groundedStepTransitionHeight >= 0.55),
         },
       });
       dungeon.group.clear();
@@ -2600,7 +2755,10 @@ test('conveyor consoles, sealed vault, refractor sanctum, and grand keycard pyra
     && result.pyramid.sidePlatformCount === 6
     && result.pyramid.pairedSideRoutes
     && result.pyramid.keycardCentered
-    && result.pyramid.enemiesLineSteps
+    && result.pyramid.enemiesGuardUpperRing
+    && result.pyramid.summitTrigger
+    && result.pyramid.protectedKeycard
+    && result.pyramid.tinyStepsGrounded
   ))).toBe(true);
 });
 
@@ -3924,7 +4082,14 @@ test('critical closed doors remain physical choke points for their deeper rooms'
   const result = await page.evaluate(async () => {
     const { game } = window;
     game.stop();
-    const criticalDoorIds = new Set(['Door_Alpha', 'Door_Beta', 'Door_Gamma', 'Door_Shrine']);
+    const criticalDoorIds = new Set([
+      'enemyNestGate',
+      'Door_Alpha',
+      'Door_Beta',
+      'Door_Gamma',
+      'bonusVaultDoor',
+      'Door_Shrine',
+    ]);
 
     // Exercise the runtime collision rule at the full width that its tile
     // navigation currently treats as usable. A closed door must not leave a
@@ -3978,8 +4143,8 @@ test('critical closed doors remain physical choke points for their deeper rooms'
     const startRoom = dungeon.rooms.find((room) => room.id === 'hubTown');
 
     for (const door of dungeon.doors.filter((candidate) => criticalDoorIds.has(candidate.id))) {
-      const doorX = Math.round(door.position.x / dungeon.tileSize);
-      const doorZ = Math.round(door.position.z / dungeon.tileSize);
+      const doorX = Math.round(door.graphBlockingPosition.x / dungeon.tileSize);
+      const doorZ = Math.round(door.graphBlockingPosition.z / dungeon.tileSize);
       const doorElevation = door.exitElevation ?? door.baseY ?? 0;
       const floorWithoutDoorway = dungeon.floorTiles.filter((tile) => (
         !(
@@ -4014,6 +4179,113 @@ test('critical closed doors remain physical choke points for their deeper rooms'
 
   expect(result.colliderLeaks).toEqual([]);
   expect(result.alternateRouteBypasses).toEqual([]);
+});
+
+test('every generated door is anchored in a sealed room threshold across seeds', async ({ page }) => {
+  test.setTimeout(60000);
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20000 },
+    )
+    .toBe('true');
+
+  const failures = await page.evaluate(async () => {
+    window.game.stop();
+    const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
+    const generatedFailures = [];
+
+    for (let seed = 1; seed <= 12; seed += 1) {
+      let state = seed;
+      const random = () => (
+        (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296
+      );
+      const generator = new DungeonGenerator({ random });
+      const dungeon = generator.generate();
+
+      for (const door of dungeon.doors) {
+        const room = dungeon.rooms.find((candidate) => candidate.id === door.toRoomId);
+        const portal = door.toPortal;
+        const expectedX = (portal.x + (portal.facingX ?? 0) * 0.5) * dungeon.tileSize;
+        const expectedZ = (portal.z + (portal.facingZ ?? 0) * 0.5) * dungeon.tileSize;
+        const graphX = portal.x * dungeon.tileSize;
+        const graphZ = portal.z * dungeon.tileSize;
+        const wallZones = [...(door.thresholdWallZones ?? [])].sort((left, right) => {
+          const leftValue = door.alongX ? left.position.z : left.position.x;
+          const rightValue = door.alongX ? right.position.z : right.position.x;
+          return leftValue - rightValue;
+        });
+        const segmentBounds = wallZones.map((zone) => {
+          const center = door.alongX ? zone.position.z : zone.position.x;
+          const halfSpan = door.alongX ? zone.halfDepth : zone.halfWidth;
+          return { min: center - halfSpan, max: center + halfSpan };
+        });
+        const halfW = Math.floor(room.width / 2);
+        const halfD = Math.floor(room.depth / 2);
+        const expectedMin = door.alongX
+          ? (room.z - halfD - 0.5) * dungeon.tileSize
+          : (room.x - halfW - 0.5) * dungeon.tileSize;
+        const expectedMax = door.alongX
+          ? (room.z + halfD + 0.5) * dungeon.tileSize
+          : (room.x + halfW + 0.5) * dungeon.tileSize;
+        const wallMeshes = ['left', 'right']
+          .map((side) => door.thresholdSeal?.getObjectByName(`doorThresholdWallWing_${side}`))
+          .filter(Boolean);
+        const checks = {
+          thresholdAnchored: door.thresholdAnchored === true,
+          positionAtDestinationBoundary: (
+            Math.abs(door.position.x - expectedX) < 0.001
+            && Math.abs(door.position.z - expectedZ) < 0.001
+          ),
+          graphBlockerOnPortalTile: (
+            Math.abs(door.graphBlockingPosition.x - graphX) < 0.001
+            && Math.abs(door.graphBlockingPosition.z - graphZ) < 0.001
+          ),
+          twoWallWings: wallZones.length === 2 && wallMeshes.length === 2,
+          wallSpanReachesBothRoomEdges: segmentBounds.length === 2 && (
+            Math.abs(segmentBounds[0].min - expectedMin) < 0.001
+            && Math.abs(segmentBounds[1].max - expectedMax) < 0.001
+          ),
+          onlyDoorSizedOpening: segmentBounds.length === 2 && (
+            Math.abs(
+              (segmentBounds[1].min - segmentBounds[0].max) - door.thresholdPortalSpan,
+            ) < 0.001
+          ),
+          wallsArePhysical: wallZones.every((zone) => (
+            dungeon.solidZones.includes(zone)
+            && dungeon.aerialBoundaryZones.includes(zone)
+            && zone.allowFlyOver === false
+          )),
+        };
+
+        if (Object.values(checks).some((accepted) => !accepted)) {
+          generatedFailures.push({ seed, doorId: door.id, checks });
+        }
+      }
+
+      const physicalChecks = dungeon.progression.validation.physicalProgression.checks;
+      if (
+        physicalChecks.length !== 6
+        || physicalChecks.some((check) => (
+          !check.thresholdAnchored
+          || check.thresholdWallWingCount !== 2
+          || check.destinationReachableWhileClosed
+        ))
+      ) {
+        generatedFailures.push({
+          seed,
+          doorId: 'physicalProgressionAudit',
+          physicalChecks,
+        });
+      }
+      dungeon.group.clear();
+    }
+
+    return generatedFailures;
+  });
+
+  expect(failures).toEqual([]);
 });
 
 test('upper connection sockets are reachable from inside their owning rooms', async ({ page }) => {

@@ -199,9 +199,22 @@ function findConnectionDoorPathIndex(path = []) {
 
 function resolveConnectionDoorPlacement(connectionPlan, fromRoom, toRoom) {
   const path = connectionPlan?.bridgePath ?? [];
-  const index = findConnectionDoorPathIndex(path);
+  const destinationThreshold = connectionPlan?.doorId && connectionPlan?.toSocket
+    ? connectionPlan.toSocket
+    : null;
+  const thresholdIndex = destinationThreshold
+    ? path.findIndex((point) => (
+        point.x === destinationThreshold.x
+        && point.z === destinationThreshold.z
+      ))
+    : -1;
+  const index = thresholdIndex >= 0
+    ? thresholdIndex
+    : findConnectionDoorPathIndex(path);
   const pathPoint = path[index] ?? null;
-  const point = pathPoint ?? (
+  const point = destinationThreshold
+    ? { x: destinationThreshold.x, z: destinationThreshold.z }
+    : pathPoint ?? (
     fromRoom && toRoom
       ? {
           x: Math.round((fromRoom.x + toRoom.x) * 0.5),
@@ -211,12 +224,24 @@ function resolveConnectionDoorPlacement(connectionPlan, fromRoom, toRoom) {
   );
   const previous = path[Math.max(0, index - 1)] ?? null;
   const next = path[Math.min(path.length - 1, index + 1)] ?? null;
-  const alongX = pathPoint && previous && next
+  const alongX = destinationThreshold
+    ? Math.abs(destinationThreshold.facingX ?? 0)
+      > Math.abs(destinationThreshold.facingZ ?? 0)
+    : pathPoint && previous && next
     ? Math.abs(next.x - previous.x) >= Math.abs(next.z - previous.z)
     : Math.abs((fromRoom?.x ?? 0) - (toRoom?.x ?? 0))
       > Math.abs((fromRoom?.z ?? 0) - (toRoom?.z ?? 0));
 
-  return { path, index, pathPoint, point, previous, next, alongX };
+  return {
+    path,
+    index,
+    pathPoint,
+    point,
+    previous,
+    next,
+    alongX,
+    thresholdAnchored: Boolean(destinationThreshold),
+  };
 }
 
 function applyTileOptions(tile, options = {}) {
@@ -266,6 +291,7 @@ function applyTileOptions(tile, options = {}) {
     'supportStyle',
     'massGroupId',
     'allowsGroundedDropLanding',
+    'groundedStepTransitionHeight',
     'dropSpaceId',
     'preserveProgressionFooting',
     'supportBaseElevation',
@@ -330,6 +356,7 @@ function createFloorTile(x, z, {
   massGroupId = null,
   ledgeEdges = null,
   allowsGroundedDropLanding = false,
+  groundedStepTransitionHeight = null,
   dropSpaceId = null,
   openRetainingWallEdges = null,
   preserveProgressionFooting = false,
@@ -359,6 +386,7 @@ function createFloorTile(x, z, {
     massGroupId,
     ledgeEdges: Array.isArray(ledgeEdges) ? [...ledgeEdges] : null,
     allowsGroundedDropLanding,
+    groundedStepTransitionHeight,
     dropSpaceId,
     preserveProgressionFooting,
     supportBaseElevation,
@@ -704,7 +732,15 @@ export class DungeonGenerator {
     this._addCeilings(group, tiles, materials, openAirTileKeys, rooms);
     const aerialBoundaryZones = this._addWalls(group, tiles, materials, openAirTileKeys);
     this._addInvisibleOpenAirBounds(group, tiles, materials, openAirTileKeys);
-    const doors = this._addDoors(group, rooms, materials, tiles, connectionPlans);
+    const doors = this._addDoors(
+      group,
+      rooms,
+      materials,
+      tiles,
+      connectionPlans,
+      solidZones,
+      aerialBoundaryZones,
+    );
     const criticalDoorValidation = this._validateCriticalDoorChokepoints({
       floorTiles,
       rooms,
@@ -855,7 +891,7 @@ export class DungeonGenerator {
         criticalObjects.add(value);
         return;
       }
-      for (const key of ['object', 'group', 'root', 'leftPanel', 'rightPanel']) {
+      for (const key of ['object', 'barrierObject', 'group', 'root', 'leftPanel', 'rightPanel']) {
         if (value[key]?.isObject3D) {
           criticalObjects.add(value[key]);
         }
@@ -3246,6 +3282,10 @@ export class DungeonGenerator {
                 ? 'enemy_lined_processional_stair'
                 : 'walkable_mayan_terrace',
             requiredTraversalAction: 'step',
+            // Pyramid tiers remain below the camp's 1.1m smallest test ledge.
+            // Player and ground enemies may traverse these 0.5m blocky steps
+            // without entering a jump or falling state.
+            groundedStepTransitionHeight: stepRise + 0.05,
             allowProgressionAccess: true,
           });
         }
@@ -4463,14 +4503,15 @@ export class DungeonGenerator {
     }
 
     const position = this._floorTileToWorld(tile);
+    const blockingPosition = door.graphBlockingPosition ?? door.position;
     const playerRadius = PLAYER_TRAVERSAL_ENVELOPE.collisionRadius;
     const halfWidth = (door.collisionHalfWidth ?? (door.alongX ? 0.16 : this.tileSize * 0.48)) + playerRadius;
     const halfDepth = (door.collisionHalfDepth ?? (door.alongX ? this.tileSize * 0.48 : 0.16)) + playerRadius;
     const baseY = door.baseY ?? door.position.y ?? 0;
     const height = door.collisionHeight ?? RUIN_DOOR_HEIGHT;
 
-    return Math.abs(position.x - door.position.x) <= halfWidth
-      && Math.abs(position.z - door.position.z) <= halfDepth
+    return Math.abs(position.x - blockingPosition.x) <= halfWidth
+      && Math.abs(position.z - blockingPosition.z) <= halfDepth
       && position.y >= baseY - PLAYER_TRAVERSAL_ENVELOPE.groundedStepDownHeight
       && position.y <= baseY + height;
   }
@@ -4485,14 +4526,16 @@ export class DungeonGenerator {
     const checks = [];
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const startRoom = roomById.get('hubTown') ?? roomById.get('expeditionCamp') ?? rooms[0];
-    const criticalDoors = doors.filter((door) => (
-      door.closed
-      && door.locked
-      && (door.requiresKeycard || door.pressurePlateId)
-    ));
+    const criticalDoors = doors.filter((door) => door.closed && door.locked);
     const blockingPlatformTops = this._createBlockingPlatformColumnMap(floorTiles);
 
     for (const door of criticalDoors) {
+      if (!door.thresholdAnchored) {
+        errors.push(`${door.id} is not anchored to its destination-room threshold.`);
+      }
+      if ((door.thresholdWallZones?.length ?? 0) !== 2) {
+        errors.push(`${door.id} does not have two continuous threshold wall wings.`);
+      }
       const traversableTiles = floorTiles.filter((tile) => (
         !this._isFloorTileBlockedBySolidZone(tile, solidZones)
         && !this._isFloorTileBlockedByGeneratedPlatform(tile, blockingPlatformTops)
@@ -4522,6 +4565,8 @@ export class DungeonGenerator {
         destinationBand: PROGRESSION_ROOM_BANDS[door.toRoomId] ?? null,
         sourceReachable,
         destinationReachableWhileClosed: destinationReachable,
+        thresholdAnchored: Boolean(door.thresholdAnchored),
+        thresholdWallWingCount: door.thresholdWallZones?.length ?? 0,
         blockedTraversalNodeCount: floorTiles.length - traversableTiles.length,
       });
     }
@@ -9186,7 +9231,126 @@ export class DungeonGenerator {
     return portals;
   }
 
-  _addDoors(group, rooms, materials, tiles = null, connectionPlans = []) {
+  _addDoorThresholdSeal({
+    group,
+    descriptor,
+    placement,
+    position,
+    materials,
+    solidZones = [],
+    aerialBoundaryZones = [],
+  }) {
+    if (!descriptor?.to || !placement?.point) {
+      return null;
+    }
+
+    const room = descriptor.to;
+    const alongX = placement.alongX;
+    const halfW = Math.floor(room.width / 2);
+    const halfD = Math.floor(room.depth / 2);
+    const transverseMin = alongX
+      ? (room.z - halfD - 0.5) * this.tileSize
+      : (room.x - halfW - 0.5) * this.tileSize;
+    const transverseMax = alongX
+      ? (room.z + halfD + 0.5) * this.tileSize
+      : (room.x + halfW + 0.5) * this.tileSize;
+    const transverseCenter = alongX ? position.z : position.x;
+    const portalSpan = this.tileSize * 0.94;
+    const openingMin = Math.max(transverseMin, transverseCenter - portalSpan * 0.5);
+    const openingMax = Math.min(transverseMax, transverseCenter + portalSpan * 0.5);
+    // The normal dungeon shell already occupies the exact exterior boundary.
+    // Recess this reinforced seal slightly into the destination room so its
+    // tiled faces cannot z-fight with the shell while remaining flush with the
+    // automatic door frame from the player's perspective.
+    const outwardX = alongX ? Math.sign(position.x - room.x * this.tileSize) : 0;
+    const outwardZ = alongX ? 0 : Math.sign(position.z - room.z * this.tileSize);
+    const sealPlaneX = position.x - outwardX * RUIN_WALL_THICKNESS * 0.62;
+    const sealPlaneZ = position.z - outwardZ * RUIN_WALL_THICKNESS * 0.62;
+    const seal = new THREE.Group();
+    seal.name = `${descriptor.id}_thresholdSeal`;
+    seal.userData.cameraOcclusionOwner = true;
+    seal.userData.roomId = room.id;
+    seal.userData.doorId = descriptor.id;
+    seal.userData.doorThresholdSeal = true;
+    const wallZones = [];
+    const segmentDefinitions = [
+      { side: 'left', min: transverseMin, max: openingMin },
+      { side: 'right', min: openingMax, max: transverseMax },
+    ];
+
+    for (const segment of segmentDefinitions) {
+      const span = segment.max - segment.min;
+      if (span <= 0.05) {
+        continue;
+      }
+
+      const segmentCenter = (segment.min + segment.max) * 0.5;
+      const width = alongX ? RUIN_WALL_THICKNESS : span;
+      const depth = alongX ? span : RUIN_WALL_THICKNESS;
+      const wall = new THREE.Mesh(
+        this._createTiledBoxGeometry(width, RUIN_WALL_HEIGHT, depth),
+        [
+          materials.wallMacroTiles.mm,
+          materials.wallMacroTiles.mm,
+          materials.wallTrim,
+          materials.wallTrim,
+          materials.wallMacroTiles.mm,
+          materials.wallMacroTiles.mm,
+        ],
+      );
+      wall.name = `doorThresholdWallWing_${segment.side}`;
+      wall.position.set(
+        alongX ? sealPlaneX : segmentCenter,
+        position.y + RUIN_WALL_HEIGHT * 0.5,
+        alongX ? segmentCenter : sealPlaneZ,
+      );
+      wall.castShadow = true;
+      wall.receiveShadow = true;
+      wall.userData.doorId = descriptor.id;
+      wall.userData.roomId = room.id;
+      wall.userData.thresholdSide = segment.side;
+      seal.add(wall);
+
+      const zone = {
+        id: `${descriptor.id}_thresholdWall_${segment.side}`,
+        roomId: room.id,
+        doorId: descriptor.id,
+        label: 'Door threshold wall wing',
+        obstacleKind: 'doorThresholdWall',
+        position: wall.position.clone(),
+        halfWidth: width * 0.5,
+        halfDepth: depth * 0.5,
+        verticalHalfHeight: RUIN_WALL_HEIGHT * 0.5,
+        allowFlyOver: false,
+        blocksPowerKnockback: true,
+        thresholdSide: segment.side,
+      };
+      solidZones.push(zone);
+      aerialBoundaryZones.push(zone);
+      wallZones.push(zone);
+    }
+
+    group.add(seal);
+    return {
+      object: seal,
+      roomId: room.id,
+      doorId: descriptor.id,
+      portalSpan,
+      transverseMin,
+      transverseMax,
+      wallZones,
+    };
+  }
+
+  _addDoors(
+    group,
+    rooms,
+    materials,
+    tiles = null,
+    connectionPlans = [],
+    solidZones = [],
+    aerialBoundaryZones = [],
+  ) {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const descriptors = [
       { id: 'entranceDoor', from: roomById.get('expeditionCamp'), to: roomById.get('entrance'), locked: false, closed: false, label: 'Ruin Entrance' },
@@ -9194,7 +9358,7 @@ export class DungeonGenerator {
       { id: 'Door_Alpha', from: roomById.get('keycardRoom'), to: roomById.get('trapRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Alpha', progressionTier: 1, label: 'Security Door Alpha' },
       { id: 'Door_Beta', from: roomById.get('trapRoom'), to: roomById.get('conveyorRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Beta', progressionTier: 2, label: 'Security Door Beta' },
       { id: 'Door_Gamma', from: roomById.get('conveyorRoom'), to: roomById.get('bossRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Keycard_Gamma', progressionTier: 3, label: 'Security Door Gamma' },
-      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, pressurePlateId: 'conveyorVaultPlate', optional: true, sealAtDestinationThreshold: true, sealedPortal: true, label: 'Bonus Vault' },
+      { id: 'bonusVaultDoor', from: roomById.get('conveyorRoom'), to: roomById.get('bonusVault'), locked: true, closed: true, pressurePlateId: 'conveyorVaultPlate', optional: true, sealedPortal: true, label: 'Bonus Vault' },
       { id: 'Door_Shrine', from: roomById.get('bossRoom'), to: roomById.get('shrineRoom'), locked: true, closed: true, requiresKeycard: true, requiredKeycardId: 'Shrine_Key', progressionTier: 'Final', isShrineDoor: true, label: 'Refractor Shrine Door' },
     ];
     const doors = [];
@@ -9205,24 +9369,30 @@ export class DungeonGenerator {
         && plan.fromRoomId === descriptor.from.id
         && plan.toRoomId === descriptor.to.id
       ));
-      const defaultPlacement = resolveConnectionDoorPlacement(connectionPlan, descriptor.from, descriptor.to);
-      const placement = descriptor.sealAtDestinationThreshold && connectionPlan?.toSocket
-        ? {
-          ...defaultPlacement,
-          point: { x: connectionPlan.toSocket.x, z: connectionPlan.toSocket.z },
-          alongX: Math.abs(connectionPlan.toSocket.facingX ?? 0)
-            > Math.abs(connectionPlan.toSocket.facingZ ?? 0),
-        }
-        : defaultPlacement;
+      const placement = resolveConnectionDoorPlacement(connectionPlan, descriptor.from, descriptor.to);
       const doorX = placement.point.x;
       const doorZ = placement.point.z;
-      const position = this._tileToWorld(
+      const thresholdTilePosition = this._tileToWorld(
         doorX,
         doorZ,
         tiles,
       );
-      const baseY = position.y;
+      const position = thresholdTilePosition.clone();
+      if (placement.thresholdAnchored && connectionPlan?.toSocket) {
+        position.x += (connectionPlan.toSocket.facingX ?? 0) * this.tileSize * 0.5;
+        position.z += (connectionPlan.toSocket.facingZ ?? 0) * this.tileSize * 0.5;
+      }
+      const baseY = thresholdTilePosition.y;
       const alongX = placement.alongX;
+      const thresholdSeal = this._addDoorThresholdSeal({
+        group,
+        descriptor,
+        placement,
+        position,
+        materials,
+        solidZones,
+        aerialBoundaryZones,
+      });
       const door = new THREE.Group();
       door.name = descriptor.id;
       door.position.copy(position);
@@ -9346,6 +9516,7 @@ export class DungeonGenerator {
         rightPanel,
         light,
         position: position.clone(),
+        graphBlockingPosition: thresholdTilePosition.clone(),
         baseY,
         radius: 1.1,
         locked: descriptor.locked,
@@ -9370,6 +9541,10 @@ export class DungeonGenerator {
         collisionHalfDepth: alongX ? this.tileSize * 0.48 : 0.16,
         collisionHeight: RUIN_DOOR_HEIGHT,
         connectionPlanId: connectionPlan?.id ?? null,
+        thresholdAnchored: Boolean(placement.thresholdAnchored),
+        thresholdSeal: thresholdSeal?.object ?? null,
+        thresholdWallZones: thresholdSeal?.wallZones ?? [],
+        thresholdPortalSpan: thresholdSeal?.portalSpan ?? null,
         exitElevation: connectionPlan?.fromSocket.elevation ?? baseY,
         entranceElevation: connectionPlan?.toSocket.elevation ?? baseY,
         fromPortal: connectionPlan ? { ...connectionPlan.fromSocket } : null,
@@ -9495,6 +9670,7 @@ export class DungeonGenerator {
         const keycardPosition = keycardTile
           ? this._floorTileToWorld(keycardTile)
           : roomPosition(room);
+        const barrierObject = this._addKeycardProtectionBarrier(group, keycardPosition);
         landmarks.keycards.push({
           id: 'Keycard_Alpha',
           keycardId: 'Keycard_Alpha',
@@ -9505,6 +9681,8 @@ export class DungeonGenerator {
           spawnMode: 'Pedestal',
           isRequiredForMainProgression: true,
           object: this._addKeycardMarker(group, keycardPosition, materials),
+          barrierObject,
+          protectedByEncounterId: 'keycardGuard',
           position: keycardPosition.clone(),
           collected: false,
         });
@@ -10001,6 +10179,42 @@ export class DungeonGenerator {
     return marker;
   }
 
+  _addKeycardProtectionBarrier(group, position) {
+    const barrier = new THREE.Group();
+    barrier.name = 'keycardEncounterProtectionBarrier';
+    barrier.position.set(position.x, position.y, position.z);
+
+    const shellMaterial = new THREE.MeshBasicMaterial({
+      color: 0x46dfff,
+      transparent: true,
+      opacity: 0.24,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const shell = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.92, 0.92, 2.35, 36, 1, true),
+      shellMaterial,
+    );
+    shell.name = 'keycardBarrierCyanCylinder';
+    shell.position.y = 1.18;
+
+    const ringMaterial = shellMaterial.clone();
+    ringMaterial.opacity = 0.72;
+    for (const y of [0.08, 2.28]) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.92, 0.045, 8, 36), ringMaterial.clone());
+      ring.name = 'keycardBarrierEnergyRing';
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = y;
+      barrier.add(ring);
+    }
+
+    barrier.userData.shellMaterial = shellMaterial;
+    barrier.add(shell);
+    group.add(barrier);
+    return barrier;
+  }
+
   _addKeySeekerInteractable(group, position, materials) {
     const seeker = new THREE.Group();
     seeker.name = 'keySeekerInteractable';
@@ -10359,18 +10573,40 @@ export class DungeonGenerator {
         return !(xEdgeInset <= 1 && zEdgeInset <= 1);
       });
       if (room.type === 'keycard') {
-        const stairLine = candidates
-          .filter((tile) => (
-            tile.surface === 'mechanicalPyramidProcessionalStep'
-            && tile.x === room.x
-          ))
-          .sort((a, b) => a.z - b.z);
-        if (stairLine.length >= 4) {
-          const stride = Math.max(1, Math.floor(stairLine.length / 6));
-          return stairLine
-            .filter((_, index) => index % stride === 0)
-            .slice(0, 6)
-            .map((tile) => this._floorTileToWorld(tile));
+        const summitY = room.mechanicalPyramidCenter?.elevation ?? 4;
+        const upperRing = candidates.filter((tile) => (
+          ['mechanicalPyramidTerrace', 'mechanicalPyramidProcessionalStep'].includes(tile.surface)
+          && (tile.elevation ?? 0) >= summitY - 1.5
+          && (tile.elevation ?? 0) <= summitY - 0.45
+          && Math.hypot(tile.x - room.x, tile.z - room.z) >= 2
+        ));
+        if (upperRing.length >= 6) {
+          const chosenUpperTiles = [];
+          const usedUpperTiles = new Set();
+          for (let index = 0; index < 6; index += 1) {
+            const targetAngle = -Math.PI * 0.5 + index * (Math.PI * 2 / 6);
+            const score = (tile) => {
+              const angle = Math.atan2(tile.z - room.z, tile.x - room.x);
+              const angleDelta = Math.abs(Math.atan2(
+                Math.sin(angle - targetAngle),
+                Math.cos(angle - targetAngle),
+              ));
+              const radiusPenalty = Math.abs(
+                Math.hypot(tile.x - room.x, tile.z - room.z) - 3,
+              ) * 0.12;
+              return angleDelta + radiusPenalty;
+            };
+            const candidate = upperRing
+              .filter((tile) => !usedUpperTiles.has(`${tile.x},${tile.z}`))
+              .sort((left, right) => score(left) - score(right))[0];
+            if (candidate) {
+              usedUpperTiles.add(`${candidate.x},${candidate.z}`);
+              chosenUpperTiles.push(candidate);
+            }
+          }
+          if (chosenUpperTiles.length === 6) {
+            return chosenUpperTiles.map((tile) => this._floorTileToWorld(tile));
+          }
         }
       }
       const surfaceRank = new Map(surfacePreferences.map((surface, index) => [surface, index]));
@@ -10760,6 +10996,22 @@ export class DungeonGenerator {
           : roster.find((type) => type === 'fast' || type === 'basic' || type === 'horokko') ?? 'basic';
         roster.push(reinforcement);
         roster.sort((left, right) => Number(left === 'ranged') - Number(right === 'ranged'));
+        const pyramid = definition.id === 'keycardGuard'
+          ? room.mechanicalPyramidCenter
+          : null;
+        const triggerZone = pyramid ? {
+          id: `${definition.id}SummitTrigger`,
+          roomId: room.id,
+          position: new THREE.Vector3(
+            pyramid.x * this.tileSize,
+            pyramid.elevation,
+            pyramid.z * this.tileSize,
+          ),
+          halfWidth: this.tileSize * 1.55,
+          halfDepth: this.tileSize * 1.55,
+          verticalHalfHeight: 1.1,
+          active: true,
+        } : null;
 
         return {
           ...definition,
@@ -10778,6 +11030,7 @@ export class DungeonGenerator {
             halfDepth: (Math.floor(room.depth / 2) + 0.5) * this.tileSize,
             active: true,
           },
+          triggerZone,
           spawnPoints: this._roomSpawnPoints(room, tiles, solidZones),
           spawned: false,
           cleared: false,

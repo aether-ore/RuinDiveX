@@ -1786,9 +1786,19 @@ export class Game {
       return 0;
     }
 
+    const rampElevation = this.dungeonController?.getRampSurfaceElevationAt?.(position);
+    if (Number.isFinite(rampElevation)) {
+      return rampElevation;
+    }
+
     const platformElevation = this.getPlatformFloorElevation?.(position);
     if (Number.isFinite(platformElevation)) {
       return platformElevation;
+    }
+
+    const railElevation = this.dungeonController?.getPlayerRailSupportElevation?.(position);
+    if (Number.isFinite(railElevation)) {
+      return railElevation;
     }
 
     return this.dungeonController?.getFloorElevationAt?.(position) ?? 0;
@@ -2173,7 +2183,8 @@ export class Game {
   }
 
   _tryResolvePlatformLanding(context = {}) {
-    return this._tryResolveDebugPlatformLanding(context, this._getPlatformingSurfaces());
+    return this._tryResolveDebugPlatformLanding(context, this._getPlatformingSurfaces())
+      || this.dungeonController?.tryResolvePlayerRailLanding?.(context) === true;
   }
 
   _tryResolveDebugPlatformLanding({

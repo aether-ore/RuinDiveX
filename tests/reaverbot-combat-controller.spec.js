@@ -605,6 +605,197 @@ test('jaw triple hops stay player-facing, bounded, and in shockwave range', asyn
   expect(result.perCycleTravel.every((travel) => travel <= result.configuredHopDistance + 0.01)).toBe(true);
 });
 
+test('jaw hinge overlap recovers before snapping and melee body contact forces knockback', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=jaw-hinge-overlap-regression');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const Vector3 = game.player.root.position.constructor;
+    game.stop();
+
+    for (const enemy of [...game.enemies]) {
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+
+    const playerPosition = game.player.root.position.clone();
+    const overlapPosition = playerPosition.clone().add(new Vector3(0, 0, 0.08));
+    let jaw = null;
+    for (let variant = 0; variant < 320; variant += 1) {
+      const candidate = window.spawnReaverbot({
+        archetypeId: 'pursuer',
+        seed: `jaw-hinge-overlap-regression:${variant}`,
+        position: overlapPosition,
+      });
+      if (candidate.genome.modules.weapon.attackKind === 'jawCombo') {
+        jaw = candidate;
+        break;
+      }
+      game.enemies.splice(game.enemies.indexOf(candidate), 1);
+      candidate.dispose?.();
+      candidate.root.removeFromParent();
+    }
+    if (!jaw) throw new Error('Could not generate a jaw pursuer');
+
+    const dungeonController = game.dungeonController;
+    const originalWalkable = dungeonController.isPositionWalkable;
+    const originalSurface = dungeonController.getSurfaceElevationAt;
+    const originalSafeZone = dungeonController.isPlayerInSafeZone;
+    const originalExplosion = game.addExplosion;
+    const originalBurst = game.addParticleBurst;
+    const originalHitEffect = game.addHitEffect;
+    const originalHitStop = game.requestHitStop;
+    const originalTakeDamage = game.player.takeDamage;
+    dungeonController.isPositionWalkable = () => true;
+    dungeonController.getSurfaceElevationAt = () => playerPosition.y;
+    dungeonController.isPlayerInSafeZone = () => false;
+
+    const damageAttempts = [];
+    const successfulContacts = [];
+    let rejectNextContact = true;
+    let hitEffects = 0;
+    game.player.takeDamage = (amount, source, context = {}) => {
+      damageAttempts.push({
+        amount,
+        sourceIsJaw: source === jaw,
+        attackKind: context.attackKind,
+        powerfulKnockback: context.powerfulKnockback,
+        unblockable: context.unblockable,
+        knockbackStrength: context.knockbackStrength,
+        knockbackDirection: context.knockbackDirection?.clone?.() ?? null,
+      });
+      if (rejectNextContact) {
+        rejectNextContact = false;
+        return 0;
+      }
+      successfulContacts.push(context.attackKind);
+      return amount;
+    };
+    game.addHitEffect = () => { hitEffects += 1; };
+    game.requestHitStop = () => {};
+    game.addParticleBurst = () => {};
+
+    jaw.root.position.copy(overlapPosition);
+    jaw.root.rotation.y = Math.PI;
+    jaw.brain.attackDirection.set(0, 0, -1);
+    jaw.brain.contactCooldown = 0;
+
+    // The first rejected hit models dodge-roll invulnerability: it must not
+    // consume the contact cooldown or emit impact feedback. The next frame can
+    // then apply the real body hit, and the cooldown suppresses a duplicate.
+    jaw._updatePersistentWeaponContact(0.016, game);
+    const cooldownAfterRejectedContact = jaw.brain.contactCooldown;
+    const hitEffectsAfterRejectedContact = hitEffects;
+    jaw._updatePersistentWeaponContact(0.016, game);
+    const cooldownAfterSuccessfulContact = jaw.brain.contactCooldown;
+    jaw._updatePersistentWeaponContact(0.016, game);
+    const attemptsAfterImmediateRepeat = damageAttempts.length;
+
+    jaw.brain.state = 'commit';
+    jaw.brain.contactCooldown = 0;
+    jaw._updatePersistentWeaponContact(0.016, game);
+    const attemptsDuringCommit = damageAttempts.length;
+
+    const originalEnemyPositionClear = dungeonController.isEnemyPositionClear;
+    let radiusAwareRecoverySamples = 0;
+    dungeonController.isEnemyPositionClear = () => {
+      radiusAwareRecoverySamples += 1;
+      return false;
+    };
+    const blockedRecoveryStart = jaw.root.position.clone();
+    const blockedRecoveryMoved = jaw._moveJawAlongClearPath(
+      game,
+      jaw.root.position.x + 0.18,
+      jaw.root.position.z,
+      jaw.root.position.y,
+    );
+    const blockedRecoveryTravel = jaw.root.position.distanceTo(blockedRecoveryStart);
+    dungeonController.isEnemyPositionClear = originalEnemyPositionClear;
+    jaw.root.position.copy(overlapPosition);
+
+    const minimumSeparation = jaw._getJawMinimumRootSeparation(game);
+    const initialDistance = jaw.root.position.distanceTo(playerPosition);
+    const shockwaves = [];
+    game.addExplosion = (position, damage, radius, color, meta = {}) => {
+      if (meta.attackKind === 'jawBiteShockwave') {
+        shockwaves.push({
+          distanceToPlayer: position.distanceTo(game.player.root.position),
+          radius,
+          rootDistanceToPlayer: jaw.root.position.distanceTo(game.player.root.position),
+        });
+      }
+    };
+
+    jaw.brain.state = 'commit';
+    jaw.brain.stateTime = 0;
+    jaw.brain.comboStrikesFired = 0;
+    jaw.brain.jawHopTravel.fill(0);
+    const duration = jaw.genome.behavior.commitDuration;
+    for (let frame = 0; frame < 100 && jaw.brain.state === 'commit'; frame += 1) {
+      jaw._updateCustomBehavior(Math.min(0.035, duration - jaw.brain.stateTime), game);
+    }
+
+    const resultSummary = {
+      damageAttempts: damageAttempts.map((attempt) => ({
+        ...attempt,
+        knockbackDirectionLength: attempt.knockbackDirection?.length?.() ?? 0,
+      })),
+      successfulContacts,
+      cooldownAfterRejectedContact,
+      cooldownAfterSuccessfulContact,
+      hitEffectsAfterRejectedContact,
+      attemptsAfterImmediateRepeat,
+      attemptsDuringCommit,
+      hitEffects,
+      radiusAwareRecoverySamples,
+      blockedRecoveryMoved,
+      blockedRecoveryTravel,
+      initialDistance,
+      minimumSeparation,
+      shockwaves,
+      finalDistance: jaw.root.position.distanceTo(playerPosition),
+    };
+
+    game.player.takeDamage = originalTakeDamage;
+    game.addExplosion = originalExplosion;
+    game.addParticleBurst = originalBurst;
+    game.addHitEffect = originalHitEffect;
+    game.requestHitStop = originalHitStop;
+    dungeonController.isPositionWalkable = originalWalkable;
+    dungeonController.getSurfaceElevationAt = originalSurface;
+    dungeonController.isPlayerInSafeZone = originalSafeZone;
+    jaw.dispose?.();
+    jaw.root.removeFromParent();
+    game.enemies.length = 0;
+    return resultSummary;
+  });
+
+  expect(result.initialDistance).toBeLessThan(result.minimumSeparation);
+  expect(result.cooldownAfterRejectedContact).toBe(0);
+  expect(result.hitEffectsAfterRejectedContact).toBe(0);
+  expect(result.cooldownAfterSuccessfulContact).toBeGreaterThan(0.6);
+  expect(result.attemptsAfterImmediateRepeat).toBe(2);
+  expect(result.attemptsDuringCommit).toBe(2);
+  expect(result.radiusAwareRecoverySamples).toBeGreaterThan(0);
+  expect(result.blockedRecoveryMoved).toBe(false);
+  expect(result.blockedRecoveryTravel).toBeLessThan(0.001);
+  expect(result.successfulContacts).toEqual(['meleeBodyContact']);
+  expect(result.damageAttempts[1]).toMatchObject({
+    sourceIsJaw: true,
+    attackKind: 'meleeBodyContact',
+    powerfulKnockback: true,
+    unblockable: true,
+  });
+  expect(result.damageAttempts[1].knockbackStrength).toBeGreaterThanOrEqual(0.85);
+  expect(result.damageAttempts[1].knockbackDirectionLength).toBeGreaterThan(0.99);
+  expect(result.shockwaves).toHaveLength(3);
+  expect(result.shockwaves.every((wave) => wave.distanceToPlayer <= wave.radius + 0.001)).toBe(true);
+  expect(result.shockwaves[0].rootDistanceToPlayer).toBeGreaterThanOrEqual(result.minimumSeparation - 0.08);
+  expect(result.finalDistance).toBeGreaterThanOrEqual(result.minimumSeparation - 0.08);
+});
+
 test('horizontal claw damage and muzzle follow the visible mounted sweep', async ({ page }) => {
   await page.goto('/?reaverbotSeed=claw-side-regression');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));

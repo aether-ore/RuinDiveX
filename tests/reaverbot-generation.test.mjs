@@ -218,6 +218,108 @@ test('revamped melee modules are armored, deterministic, and body-plan compatibl
   assert.deepEqual([...clawOrientations].sort(), ['horizontal', 'vertical']);
 });
 
+test('melee visual grammar adds substantial spikes and cosmetic flank armor without replacing authored defense', () => {
+  const expectedWeapons = new Set(
+    Object.values(REAVERBOT_WEAPONS)
+      .filter((weapon) => weapon.tags.includes('melee'))
+      .map((weapon) => weapon.id),
+  );
+  const samples = new Map();
+
+  for (const archetypeId of ['pursuer', 'packHunter', 'duelist', 'pouncer', 'rotorHunter']) {
+    for (let variant = 0; variant < 260 && samples.size < expectedWeapons.size; variant += 1) {
+      const genome = generateReaverbotGenome({
+        seed: `melee-silhouette:${archetypeId}:${variant}`,
+        archetypeId,
+        threatTier: 2,
+        encounterSize: 4,
+      });
+      if (genome.modules.weapon.tags.includes('melee')) {
+        samples.set(genome.modules.weapon.id, genome);
+      }
+    }
+  }
+
+  assert.deepEqual([...samples.keys()].sort(), [...expectedWeapons].sort());
+
+  for (const [weaponId, genome] of samples) {
+    const visual = createReaverbotVisual(genome);
+    try {
+      const armor = visual.meleeArmor;
+      assert.equal(armor.enabled, true, weaponId);
+      assert.equal(visual.root.userData.meleeSilhouetteArmored, true, weaponId);
+      assert.equal(armor.group.parent, visual.root, weaponId);
+      assert.equal(armor.group.userData.decorativeArmor, true, weaponId);
+      assert.equal(armor.group.userData.gameplayDefense, false, weaponId);
+      assert.equal(armor.group.userData.authoredDefenseId, null, weaponId);
+      assert.equal(armor.plates.length, 4, weaponId);
+      assert.equal(armor.sidePlates.length, 2, weaponId);
+      assert.equal(armor.topPlates.length, 2, weaponId);
+      assert.ok(armor.spikes.length >= 4, weaponId);
+      assert.ok(armor.sidePlates[0].position.x * armor.sidePlates[1].position.x < 0, weaponId);
+      assert.ok(
+        armor.sidePlates.every((plate) => plate.geometry.parameters.height >= 0.5
+          && plate.geometry.parameters.depth >= 0.6),
+        `${weaponId} cosmetic side plating should be visually substantial`,
+      );
+      assert.ok(
+        [...armor.plates, ...armor.spikes].every((part) => (
+          part.userData.decorativeArmor === true
+          && part.userData.gameplayDefense === false
+          && !visual.defense.plates.includes(part)
+        )),
+        `${weaponId} silhouette armor must remain independent of gameplay defense`,
+      );
+      assert.equal(visual.defense.group.userData.defenseId, genome.modules.defense.id, weaponId);
+
+      visual.root.updateMatrixWorld(true);
+      const eyePosition = visual.eye.lens.getWorldPosition(new THREE.Vector3());
+      const firstVisibleHit = new THREE.Raycaster(
+        eyePosition.clone().add(new THREE.Vector3(0, 0, 5)),
+        new THREE.Vector3(0, 0, -1),
+        0,
+        8,
+      ).intersectObject(visual.root, true)
+        .find((hit) => hit.object.visible !== false
+          && !(hit.object.material?.transparent && hit.object.material.opacity < 0.5));
+      assert.equal(
+        firstVisibleHit?.object.userData?.reaverbotEye,
+        true,
+        `${weaponId}/${genome.body.planId} armor must preserve the ruby-eye sightline (hit ${firstVisibleHit?.object.name ?? 'nothing'})`,
+      );
+    } finally {
+      const geometries = new Set();
+      const materials = new Set();
+      visual.root.traverse((object) => {
+        if (object.geometry) geometries.add(object.geometry);
+        const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of objectMaterials) {
+          if (material) materials.add(material);
+        }
+      });
+      for (const geometry of geometries) geometry.dispose?.();
+      for (const material of materials) material.dispose?.();
+    }
+  }
+
+  let rangedGenome = null;
+  for (let variant = 0; variant < 80 && !rangedGenome; variant += 1) {
+    const candidate = generateReaverbotGenome({
+      seed: `ranged-silhouette-control:${variant}`,
+      archetypeId: 'shieldSentinel',
+      threatTier: 2,
+      encounterSize: 4,
+    });
+    if (!candidate.modules.weapon.tags.includes('melee')) rangedGenome = candidate;
+  }
+  assert.ok(rangedGenome);
+  const rangedVisual = createReaverbotVisual(rangedGenome);
+  assert.equal(rangedVisual.meleeArmor.enabled, false);
+  assert.equal(rangedVisual.meleeArmor.group, null);
+  assert.equal(rangedVisual.meleeArmor.plates.length, 0);
+  assert.equal(rangedVisual.root.userData.meleeSilhouetteArmored, false);
+});
+
 test('articulated claw extends into the target lane without hiding the red eye in live frames', () => {
   const bodyPlans = new Set();
   const orientations = new Set();

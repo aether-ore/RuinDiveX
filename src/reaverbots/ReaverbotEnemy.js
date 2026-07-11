@@ -49,6 +49,11 @@ const TRACTOR_CRASH_RELAUNCH_DURATION = 0.62;
 const COIL_BOUNCE_DURATION = 0.58;
 const COIL_BOUNCE_MIN_HEIGHT = 2.35;
 const CLAW_VAULT_DURATION = 0.54;
+const MELEE_BODY_CONTACT_INTERVAL = 0.72;
+const MELEE_BODY_CONTACT_DAMAGE_SCALE = 0.32;
+const MELEE_BODY_CONTACT_KNOCKBACK = 0.86;
+const JAW_PLAYER_SEPARATION_BUFFER = 0.16;
+const JAW_OVERLAP_RECOVERY_SPEED_SCALE = 2.2;
 const PASSIVE_DEFENSES = new Set([
   'armoredSkull',
   'armoredBack',
@@ -638,6 +643,13 @@ export class ReaverbotEnemy extends Enemy {
     }
 
     this._updatePersistentWeaponContact(dt, game);
+
+    if (this.genome.modules.weapon.attackKind === 'jawCombo') {
+      // A crusher jaw extends several metres in front of a comparatively
+      // compact quadruped body. Keep the body outside the player's footprint
+      // so the visible mouth cannot overshoot MegaMan from an invalid overlap.
+      this._resolveJawPlayerOverlap(dt, game);
+    }
 
     if (this._isControlLocked() || this.hitStopTimer > 0) {
       brain.moving = false;
@@ -1245,9 +1257,98 @@ export class ReaverbotEnemy extends Enemy {
       knockbackDirection: tempA,
       knockbackStrength: powerful ? 1.08 : 0.72,
     });
-    this.onHitPlayer(player, dealt);
-    game.addHitEffect(player.root.position, this.genome.palette.emissive, powerful ? 0.82 : 0.62);
-    if (dealt > 0) game.requestHitStop?.(powerful ? 0.11 : 0.075, { timeScale: 0.05 });
+    if (dealt > 0) {
+      this.onHitPlayer(player, dealt);
+      game.addHitEffect(player.root.position, this.genome.palette.emissive, powerful ? 0.82 : 0.62);
+      game.requestHitStop?.(powerful ? 0.11 : 0.075, { timeScale: 0.05 });
+    }
+  }
+
+  _getJawMinimumRootSeparation(game) {
+    const weapon = this.genome.modules.weapon;
+    const player = game.player;
+    this.root.updateMatrixWorld(true);
+    this.visual.weapon.muzzle.getWorldPosition(tempG);
+
+    // Generated quadrupeds vary in torso length, so derive the clearance from
+    // the actual assembled mouth instead of relying on one catalog constant.
+    const mouthReach = flatDistance(this.root.position, tempG);
+    const shockwaveRadius = Math.max(0.35, weapon.shockwaveRadius ?? 1.9);
+    // Base clearance on a same-floor target. MegaMan jumping over the mouth
+    // should evade it, not make the quadruped retreat farther from his shadow.
+    const verticalGap = Math.abs(tempG.y - this.root.position.y);
+    const horizontalShockwaveReach = Math.sqrt(Math.max(
+      0,
+      shockwaveRadius * shockwaveRadius - verticalGap * verticalGap,
+    ));
+    const bodyClearance = this.radius + (player.radius ?? 0.42) + JAW_PLAYER_SEPARATION_BUFFER;
+    const mouthClearance = mouthReach - horizontalShockwaveReach + JAW_PLAYER_SEPARATION_BUFFER;
+    return Math.max(
+      weapon.minimumHopSeparation ?? 0.82,
+      bodyClearance,
+      mouthClearance,
+    );
+  }
+
+  _resolveJawPlayerOverlap(dt, game) {
+    const player = game.player;
+    const minimumSeparation = this._getJawMinimumRootSeparation(game);
+    tempA.copy(this.root.position).sub(player.root.position).setY(0);
+    const distance = tempA.length();
+    if (distance >= minimumSeparation - 0.001) return false;
+
+    if (distance <= 0.001) {
+      tempA.copy(this.brain.attackDirection).setY(0).multiplyScalar(-1);
+      if (tempA.lengthSq() <= 0.0001) {
+        tempA.set(-Math.sin(this.root.rotation.y), 0, -Math.cos(this.root.rotation.y));
+      }
+    }
+    tempA.normalize();
+
+    const recoverySpeed = Math.max(
+      5.5,
+      this.stats.moveSpeed * JAW_OVERLAP_RECOVERY_SPEED_SCALE,
+    );
+    const recoveryStep = Math.min(
+      minimumSeparation - distance,
+      recoverySpeed * Math.max(0, dt),
+    );
+    if (recoveryStep <= 0.0001) return false;
+
+    const nextX = this.root.position.x + tempA.x * recoveryStep;
+    const nextZ = this.root.position.z + tempA.z * recoveryStep;
+    return this._moveJawAlongClearPath(game, nextX, nextZ, this.root.position.y);
+  }
+
+  _moveJawAlongClearPath(game, nextX, nextZ, nextY = this.root.position.y) {
+    const controller = game.dungeonController;
+    if (!controller?.isEnemyPositionClear) {
+      return this._moveCommitAlongWalkablePath(game, nextX, nextZ, nextY);
+    }
+
+    tempF.copy(this.root.position);
+    tempG.set(nextX, nextY, nextZ);
+    const distance = flatDistance(tempF, tempG);
+    if (distance <= 0.0001) return false;
+
+    // A crusher jaw has a much wider visual/body envelope than its center
+    // point. Sample the full enemy footprint densely enough that thin walls
+    // cannot be skipped by overlap recovery or a bite hop.
+    const steps = Math.max(1, Math.ceil(distance / 0.06));
+    for (let step = 1; step <= steps; step += 1) {
+      tempH.copy(tempF).lerp(tempG, step / steps);
+      tempH.y = controller.getSurfaceElevationAt?.(tempH) ?? tempH.y;
+      if (!controller.isEnemyPositionClear(this, tempH, {
+        maximumElevationDelta: 0.72,
+      })) {
+        return false;
+      }
+    }
+
+    this.root.position.copy(tempG);
+    this.root.position.y = controller.getSurfaceElevationAt?.(this.root.position)
+      ?? nextY;
+    return true;
   }
 
   _updateJawCombo(dt, game, progress) {
@@ -1257,6 +1358,7 @@ export class ReaverbotEnemy extends Enemy {
     const strikeProgress = weapon.strikeProgress ?? 0.62;
     const cycle = Math.min(strikeCount - 1, Math.floor(progress * strikeCount));
     const localProgress = progress >= 1 ? 1 : (progress * strikeCount) - cycle;
+    const minimumRootSeparation = this._getJawMinimumRootSeparation(game);
 
     // Each snap is also a short forward dog-like hop. Tracking remains live so
     // the three bites pressure movement instead of attacking an obsolete point.
@@ -1302,11 +1404,11 @@ export class ReaverbotEnemy extends Enemy {
         hopSpeed * dt,
         remainingCycleTravel,
         safeMouthAdvance,
-        Math.max(0, distance - (weapon.minimumHopSeparation ?? 0.82)),
+        Math.max(0, distance - minimumRootSeparation),
       );
       const nextX = this.root.position.x + brain.attackDirection.x * hopStep;
       const nextZ = this.root.position.z + brain.attackDirection.z * hopStep;
-      const moved = this._moveCommitAlongWalkablePath(game, nextX, nextZ, this.root.position.y);
+      const moved = this._moveJawAlongClearPath(game, nextX, nextZ, this.root.position.y);
       if (moved) brain.jawHopTravel[cycle] += hopStep;
       brain.moving = true;
       brain.speedRatio = 1.45;
@@ -1330,8 +1432,9 @@ export class ReaverbotEnemy extends Enemy {
     tempB.normalize();
     const finalBite = strikeIndex === (weapon.comboCount ?? 3) - 1;
     game.addParticleBurst(tempA, RUSH_WARNING_COLOR_HEX, finalBite ? 18 : 12, 0.16);
+    this._getJawShockwaveOrigin(game, tempC);
     game.addExplosion(
-      tempA,
+      tempC,
       this.stats.damage * (weapon.strikeDamageScale ?? 0.82),
       weapon.shockwaveRadius ?? 1.85,
       RUSH_WARNING_COLOR_HEX,
@@ -1349,12 +1452,46 @@ export class ReaverbotEnemy extends Enemy {
     );
   }
 
+  _getJawShockwaveOrigin(game, target) {
+    // The visible bear-trap jaw spans the whole segment from its hinge to its
+    // muzzle. Use the nearest point on that segment as the snap origin. This
+    // preserves the muzzle-centred wave at normal range while making a player
+    // caught inside the hinged blades part of the bite volume instead of an
+    // accidental safe spot behind the muzzle.
+    this.visual.weapon.group.getWorldPosition(tempG);
+    this.visual.weapon.muzzle.getWorldPosition(tempH);
+    tempI.copy(tempH).sub(tempG);
+    const segmentLengthSq = tempI.lengthSq();
+    if (segmentLengthSq <= 0.0001) return target.copy(tempH);
+
+    const playerPosition = game.player.root.position;
+    const projection = ((playerPosition.x - tempG.x) * tempI.x
+      + (playerPosition.y - tempG.y) * tempI.y
+      + (playerPosition.z - tempG.z) * tempI.z) / segmentLengthSq;
+    return target.copy(tempG).addScaledVector(tempI, clamp01(projection));
+  }
+
   _updatePersistentWeaponContact(dt, game) {
     const weapon = this.genome.modules.weapon;
-    if (!weapon.continuousContactDamage || this.dead || game.player.dead) return;
+    const continuousWeaponContact = Boolean(weapon.continuousContactDamage);
+    // Authored commit attacks own their strike frames. Body contact remains
+    // live while positioning/telegraphing/recovering, but cannot stack a
+    // second damage event on the same frame as a bite, swipe, ram, or pounce.
+    const meleeBodyContact = weapon.tags?.includes('melee')
+      && !continuousWeaponContact
+      && this.brain.state !== 'commit';
+    if ((!continuousWeaponContact && !meleeBodyContact) || this.dead || game.player.dead) return;
     this.brain.contactCooldown = Math.max(0, this.brain.contactCooldown - dt);
     if (this.brain.contactCooldown > 0) return;
 
+    if (meleeBodyContact) {
+      this._tryMeleeBodyContact(game);
+      return;
+    }
+
+    // Rotating weapons retain their authored always-live blade volume. They do
+    // not also run the generic melee body check, avoiding duplicate contact
+    // hits from a single overlap.
     this.root.updateMatrixWorld(true);
     this.visual.weapon.group.getWorldPosition(tempA);
     tempB.copy(game.player.root.position);
@@ -1373,9 +1510,52 @@ export class ReaverbotEnemy extends Enemy {
       knockbackDirection: tempC,
       knockbackStrength: 0.78,
     });
-    this.onHitPlayer(game.player, dealt);
-    game.addHitEffect(game.player.root.position, RUSH_WARNING_COLOR_HEX, 0.68);
-    if (dealt > 0) game.requestHitStop?.(0.07, { timeScale: 0.08 });
+    if (dealt > 0) {
+      this.onHitPlayer(game.player, dealt);
+      game.addHitEffect(game.player.root.position, RUSH_WARNING_COLOR_HEX, 0.68);
+      game.requestHitStop?.(0.07, { timeScale: 0.08 });
+    }
+  }
+
+  _tryMeleeBodyContact(game) {
+    const player = game.player;
+    const verticalGap = Math.abs(player.root.position.y - this.root.position.y);
+    if (verticalGap > Math.max(1.15, this.collisionHeight * 0.62)) return false;
+
+    tempA.copy(player.root.position).sub(this.root.position).setY(0);
+    const contactRadius = this.radius + (player.radius ?? 0.42) + 0.12;
+    if (tempA.lengthSq() > contactRadius * contactRadius) return false;
+
+    if (tempA.lengthSq() <= 0.0001) {
+      tempA.copy(this.brain.attackDirection).setY(0);
+      if (tempA.lengthSq() <= 0.0001) {
+        tempA.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
+      }
+    }
+    tempA.normalize();
+    const dealt = player.takeDamage(
+      this.stats.damage * (this.genome.modules.weapon.bodyContactDamageScale
+        ?? MELEE_BODY_CONTACT_DAMAGE_SCALE),
+      this,
+      {
+        attackKind: 'meleeBodyContact',
+        powerfulKnockback: true,
+        knockbackDirection: tempA,
+        knockbackStrength: this.genome.modules.weapon.bodyContactKnockback
+          ?? MELEE_BODY_CONTACT_KNOCKBACK,
+        // A shield can guard an authored swipe, but it must not turn standing
+        // inside a heavily armored machine into a stable position.
+        unblockable: true,
+      },
+    );
+    if (dealt > 0) {
+      this.brain.contactCooldown = this.genome.modules.weapon.bodyContactHitInterval
+        ?? MELEE_BODY_CONTACT_INTERVAL;
+      this.onHitPlayer(player, dealt);
+      game.addHitEffect(player.root.position, this.genome.palette.emissive, 0.62);
+      game.requestHitStop?.(0.065, { timeScale: 0.08 });
+    }
+    return dealt > 0;
   }
 
   _updateTractorController(dt, game) {
@@ -2574,9 +2754,11 @@ export class ReaverbotEnemy extends Enemy {
       knockbackDirection: tempC,
       knockbackStrength: attackKind === 'charge' ? 1.2 : attackKind === 'pounce' ? 1.08 : 1,
     });
-    this.onHitPlayer(game.player, dealt);
-    game.addHitEffect(game.player.root.position, this.genome.palette.emissive, 0.58);
-    if (dealt > 0) game.requestHitStop?.(0.08, { timeScale: 0.05 });
+    if (dealt > 0) {
+      this.onHitPlayer(game.player, dealt);
+      game.addHitEffect(game.player.root.position, this.genome.palette.emissive, 0.58);
+      game.requestHitStop?.(0.08, { timeScale: 0.05 });
+    }
   }
 
   _moveByMode(mode, dt, game, toPlayer, distance) {

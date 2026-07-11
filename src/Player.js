@@ -790,9 +790,39 @@ export class Player {
     return this.isJumpAirborne();
   }
 
+  resumeAirborneFall({ x, z, groundY, minimumFallSpeed = 1.1 } = {}) {
+    if (!this.isJumpAirborne()) {
+      return false;
+    }
+
+    if (Number.isFinite(x)) {
+      this.root.position.x = x;
+    }
+    if (Number.isFinite(z)) {
+      this.root.position.z = z;
+    }
+    if (Number.isFinite(groundY)) {
+      this._jumpGroundY = groundY;
+    }
+
+    // Rail recovery only restores a normal deterministic descent. It never
+    // adds height or starts a second jump arc.
+    this.jumpState = MML_JUMP_STATES.Falling;
+    this.velocity.y = Math.min(this.velocity.y, -Math.max(0, minimumFallSpeed));
+    this._jumpFallTransitionActive = false;
+    return true;
+  }
+
   isDodgeRollAirborne() {
     return this.animation?.actionState === 'dodgeRoll'
       && this.animation.getActionProgress() <= DODGE_ROLL_AIRBORNE_PROGRESS;
+  }
+
+  isDodgeRollInvulnerable() {
+    // Dodge i-frames follow the complete deterministic gameplay action. The
+    // authored FBX is normalized to this same action duration, so visual clip
+    // loading or playback differences cannot shorten the protection window.
+    return !this.dead && this.animation?.actionState === 'dodgeRoll';
   }
 
   _getJumpSetting(key, fallback = 0) {
@@ -1130,6 +1160,7 @@ export class Player {
     }
 
     this._cancelFiringPoseForDodge(cancelFiring);
+    this._cancelShieldGuardForDodge();
     this._resolveActionDirection(input, movementOptions, this.dodgeDirection);
     this.faceDirection(this.dodgeDirection);
     this.dodgeRollYaw = this.root.rotation.y;
@@ -1149,6 +1180,7 @@ export class Player {
     }
 
     this._cancelFiringPoseForDodge(cancelFiring);
+    this._cancelShieldGuardForDodge();
     this._resolveLateralActionDirection(lateral, movementOptions, this.dodgeDirection);
     this.faceDirection(this.dodgeDirection);
     this.dodgeRollYaw = this.root.rotation.y;
@@ -1172,6 +1204,16 @@ export class Player {
     this._releaseProjectileAim();
     this._attackWeaponKind = null;
     this.attackFacingTimer = 0;
+  }
+
+  _cancelShieldGuardForDodge() {
+    // A roll replaces the guard pose. Keep the existing cooldown so repeatedly
+    // rolling cannot be used to reset shield availability.
+    this.guardTimer = 0;
+    this.guardParryTimer = 0;
+    this.lastGuardResult = null;
+    this.bracedFireTimer = 0;
+    this.bracedBackpedalTimer = 0;
   }
 
   tryJump(input = new Set(), movementOptions = {}) {
@@ -2374,13 +2416,19 @@ export class Player {
   }
 
   canUseShieldGuard() {
-    return this.equipment.get('offhand')?.type === 'shieldArm' && this.guardCooldown <= 0 && !this.dead;
+    return this.equipment.get('offhand')?.type === 'shieldArm'
+      && this.guardCooldown <= 0
+      && !this.dead
+      && !this.isDodgeRollInvulnerable();
   }
 
   startShieldGuard(targetPosition = null) {
     const shield = this.equipment.get('offhand');
 
-    if (shield?.type !== 'shieldArm' || this.guardCooldown > 0 || this.dead) {
+    if (shield?.type !== 'shieldArm'
+      || this.guardCooldown > 0
+      || this.dead
+      || this.isDodgeRollInvulnerable()) {
       return false;
     }
 
@@ -2479,7 +2527,7 @@ export class Player {
   }
 
   tryClaimExternalControl(owner, kind = 'external', options = {}) {
-    if (!owner || this.dead || this.externalBallisticMotion) {
+    if (!owner || this.dead || this.externalBallisticMotion || this.isPowerKnockbackActive()) {
       return false;
     }
 
@@ -2784,6 +2832,20 @@ export class Player {
       return 0;
     }
 
+    // A power hit owns the complete reaction through the final get-up frame.
+    // Ignoring damage here prevents follow-up attacks, hazards, and other
+    // powerful hits from draining health or relaunching an airborne player.
+    if (this.isPowerKnockbackActive()) {
+      return 0;
+    }
+
+    // Resolve dodge immunity before shield/parry, armor, statuses, hurt poses,
+    // or knockback. Callers can rely on zero meaning the attack had no gameplay
+    // effect during the roll.
+    if (this.isDodgeRollInvulnerable()) {
+      return 0;
+    }
+
     const damageOrigin = damageContext.impactPosition
       ? { position: damageContext.impactPosition }
       : source;
@@ -2838,6 +2900,12 @@ export class Player {
   }
 
   _playKnockbackFall(source = null, damageContext = {}) {
+    // Keep the power-knockback entry point safe even if a future attack calls it
+    // directly instead of routing through takeDamage().
+    if (this.isDodgeRollInvulnerable() || this.isPowerKnockbackActive()) {
+      return false;
+    }
+
     if (damageContext.knockbackDirection?.lengthSq?.() > 0.0001) {
       this.knockbackFallDirection.copy(damageContext.knockbackDirection).setY(0);
     } else if (source?.root?.position || source?.position) {

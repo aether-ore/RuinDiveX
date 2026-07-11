@@ -378,6 +378,17 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
     const mineTriggered = mineLanded && !game.projectiles.active.includes(mine);
     const mineDamage = healthBeforeMine - game.player.health;
 
+    // The armed mine is a powerful hit and now correctly protects the player
+    // through get-up. Reset that completed scenario before independently
+    // exercising shield impact-direction logic below.
+    game.player.powerKnockbackState = null;
+    game.player.powerKnockbackTimer = 0;
+    game.player.powerKnockbackDuration = 0;
+    game.player.powerKnockbackLandingCommitted = false;
+    game.player.powerKnockbackVelocity.set(0, 0, 0);
+    game.player.movementLockMultiplier = 1;
+    game.player.animation.externalControlLocked = false;
+
     const originalEquipmentGet = game.player.equipment.get;
     game.player.equipment.get = function getRuntimeShield(slot) {
       if (slot === 'offhand') {

@@ -488,6 +488,10 @@ export class UIManager {
     this.healthText.textContent = `${Math.ceil(player.health)} / ${Math.ceil(player.stats.maxHealth)}`;
     this.healthGauge?.classList.toggle('is-warning', healthPercent <= 0.25);
     this.healthGauge?.classList.toggle('is-damaged', this.healthDamagePulseTimer > 0);
+    this.healthGauge?.classList.toggle(
+      'is-power-knockback',
+      player.isPowerKnockbackActive?.() === true,
+    );
     this.timeValue.textContent = formatTime(this.game.elapsedTime);
     this.enemyCount.textContent = String(this.game.enemies.filter((enemy) => !enemy.dead).length);
     if (this.floorValue) {

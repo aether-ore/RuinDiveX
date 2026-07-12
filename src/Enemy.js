@@ -151,7 +151,9 @@ export const ENEMY_TYPES = {
     experience: 18,
     modelAsset: 'sharukurusu',
     modelHeight: SHARUKURUSU_TARGET_HEIGHT,
-    modelYawOffset: Math.PI,
+    // The authored red-eye face and drill-ready stance point down local +Z,
+    // which is also the enemy root's combat-forward axis.
+    modelYawOffset: 0,
   },
 };
 

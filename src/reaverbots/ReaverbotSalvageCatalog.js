@@ -49,6 +49,8 @@ export const BODY_SALVAGE = Object.freeze({
   quadruped: material('articulatedPawGearset', 'Articulated Paw Gearset', 'body', 'common', ['traction', 'agility', 'quadruped'], ['traction boots', 'wall-grip modules'], 'A synchronized paw and ankle gearset made for fast four-legged pursuit.'),
   tripod: material('threeAxisGyro', 'Three-Axis Stabilizer', 'body', 'common', ['stability', 'recoil', 'gyro'], ['cannon braces', 'aim stabilizers'], 'A three-axis gyro that keeps top-mounted weapons level under recoil.'),
   crawler: material('crawlerTrackLink', 'Crawler Track Link', 'body', 'common', ['traction', 'armor', 'ground'], ['all-terrain boots', 'heavy carriers'], 'A dense linked tread segment made to carry armored frames over uneven floors.'),
+  articulatedCrawler: material('crawlerLegLinkage', 'Crawler Leg Linkage', 'body', 'common', ['traction', 'articulated', 'ground'], ['all-terrain boots', 'multi-joint stabilizers'], 'A six-leg linkage with paired bearings built to keep an armored chassis planted on broken terrain.'),
+  wheelBogies: material('ancientWheelGearset', 'Ancient Wheel Gearset', 'body', 'specialized', ['wheel', 'speed', 'mobility'], ['dash skates', 'wheeled support carriers'], 'A compact driven hub, suspension fork, and reduction gear recovered from a four-wheel Reaverbot bogy.'),
   hopper: material('temperedJumpSpring', 'Tempered Jump Spring', 'body', 'specialized', ['jump', 'spring', 'mobility'], ['Jump Springs', 'recoil launchers'], 'A high-tension leg spring prized for mobility upgrades and vertical traversal parts.'),
   hoverBell: material('levitationCoil', 'Levitation Coil', 'body', 'specialized', ['hover', 'magnetic', 'aerial'], ['hover boots', 'floating support drones'], 'A wound field coil that offsets the weight of a bell-shaped chassis.'),
   flyer: material('aerofoilServo', 'Aerofoil Servo', 'body', 'specialized', ['flight', 'steering', 'lightweight'], ['air-dash vanes', 'guided projectiles'], 'A lightweight wing servo capable of rapid directional corrections.'),
@@ -135,9 +137,15 @@ function createCandidate(aspect, moduleId, moduleLabel) {
 export function createReaverbotSalvageProfile(genome) {
   if (!genome) return Object.freeze([]);
 
+  // A spring conversion is the meaningful chassis/locomotion module on a
+  // pouncer, even when the underlying silhouette remains quadrupedal. This
+  // keeps the visible promise of spring legs tied to Tempered Jump Springs.
+  const bodySalvageId = genome.body?.mobilitySalvageId ?? genome.body?.planId;
+  const bodySalvageLabel = genome.body?.mobilityLabel ?? genome.body?.label;
+
   return Object.freeze([
     createCandidate('behavior', genome.archetypeId, genome.archetypeLabel),
-    createCandidate('body', genome.body?.planId, genome.body?.label),
+    createCandidate('body', bodySalvageId, bodySalvageLabel),
     createCandidate('eye', genome.modules?.eye?.id, 'Ruby Reaverbot Eye'),
     createCandidate('weapon', genome.modules?.weapon?.id, genome.modules?.weapon?.label),
     createCandidate('defense', genome.modules?.defense?.id, genome.modules?.defense?.label),

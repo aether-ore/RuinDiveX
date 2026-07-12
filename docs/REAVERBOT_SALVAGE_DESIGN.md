@@ -81,7 +81,8 @@ These are acquisition chances, not final recipe costs. Recipe quantities will be
 | Needle Biped | Lightweight Servo Rod | Low inertia, speed, limbs | Dash skates, rapid mechanisms |
 | Mechanical Quadruped | Articulated Paw Gearset | Traction, agility, four-legged motion | Traction boots, wall-grip modules |
 | Tripod Idol | Three-Axis Stabilizer | Recoil control, gyros, stable aim | Cannon braces, aim stabilizers |
-| Armored Crawler | Crawler Track Link | Ground traction, armor, load | All-terrain boots, heavy carriers |
+| Six-Leg Crawler Linkage | Crawler Leg Linkage | Ground traction, articulation, stability | All-terrain boots, multi-joint stabilizers |
+| Four-Wheel Bogy Drive | Ancient Wheel Gearset | Speed, wheel drive, suspension | Dash skates, wheeled support carriers |
 | Spring Hopper | Tempered Jump Spring | Jumping, stored force, mobility | Jump Springs, recoil launchers |
 | Hovering Bell | Levitation Coil | Hovering, magnetic lift, aerial support | Hover boots, support drones |
 | Winged Relic | Aerofoil Servo | Flight steering, lightweight control | Air-dash vanes, guided projectiles |

@@ -33,7 +33,50 @@ async function prepareSharukurusu(page, { two = false } = {}) {
   }, { requireSecond: two });
 }
 
-test('Sharukurusu loads its authored texture and independent eleven-joint rig', async ({ page }) => {
+async function stageSharukurusuPose(page, pose) {
+  await page.evaluate(({ stagedPose }) => {
+    const { game } = window;
+    const enemy = window.__sharukurusuQA.first;
+    const Vector3 = game.player.root.position.constructor;
+    enemy.root.position.set(0, stagedPose === 'diveAirborne' ? 1 : 0, -6);
+    enemy.root.rotation.y = 0;
+    enemy.sharukurusuState.direction.set(0, 0, 1);
+    enemy.sharukurusuState.attackSequence = 1;
+    enemy.sharukurusuState.bladeSpin = 1.4;
+    enemy._setSharukurusuState(stagedPose, 1);
+    enemy.sharukurusuState.timer = 0.2;
+    enemy._updateExternalModelVisual(0, false);
+    enemy.root.updateMatrixWorld(true);
+
+    const belongsToEnemy = (object) => {
+      for (let current = object; current; current = current.parent) {
+        if (current === enemy.root) return true;
+      }
+      return false;
+    };
+    game.scene.traverse((object) => {
+      if (object.isMesh) object.visible = belongsToEnemy(object);
+    });
+    enemy.healthBar.visible = false;
+    game.player.root.visible = false;
+    const uiRoot = document.getElementById('ui-root');
+    if (uiRoot) uiRoot.style.display = 'none';
+    game.scene.fog = null;
+    game.scene.background?.set?.(0x10151d);
+    if (stagedPose === 'diveAirborne') {
+      game.camera.position.set(4.0, 2.0, -4.7);
+      game.camera.lookAt(new Vector3(0, 1.65, -6));
+    } else {
+      game.camera.position.set(2.9, 1.5, -3.15);
+      game.camera.lookAt(new Vector3(0, 1.05, -6));
+    }
+    game.camera.updateMatrixWorld(true);
+    game.renderer.setAnimationLoop(null);
+    game.renderer.render(game.scene, game.camera);
+  }, { stagedPose: pose });
+}
+
+test('Sharukurusu loads its authored texture and independent head-extended rig', async ({ page }) => {
   await prepareSharukurusu(page, { two: true });
 
   const result = await page.evaluate(async () => {
@@ -41,7 +84,7 @@ test('Sharukurusu loads its authored texture and independent eleven-joint rig', 
     const { first, second } = window.__sharukurusuQA;
     const rig = first.sharukurusuRig;
     const semanticParts = [
-      'abdomen',
+      'abdomen', 'head',
       'leftThigh', 'leftShin', 'leftFoot',
       'rightThigh', 'rightShin', 'rightFoot',
       'leftUpperArm', 'leftDrill',
@@ -116,6 +159,9 @@ test('Sharukurusu loads its authored texture and independent eleven-joint rig', 
       semanticPartsPresent: semanticParts.every((name) => Boolean(rig[name])),
       skinnedMeshCount: rig.skinnedMeshes.length,
       skeletonBoneCount: rig.skinnedMeshes[0]?.skeleton?.bones?.length ?? 0,
+      authoredRigJointCount: first.externalModelVisual.userData.authoredRigJointCount,
+      runtimeRigJointCount: first.externalModelVisual.userData.runtimeRigJointCount,
+      runtimeHeadVertexCount: first.externalModelVisual.userData.runtimeHeadVertexCount,
       vertexCount: meshes.reduce((sum, mesh) => sum + (mesh.geometry.attributes.position?.count ?? 0), 0),
       textureSources,
       texturesUseSrgb,
@@ -133,6 +179,7 @@ test('Sharukurusu loads its authored texture and independent eleven-joint rig', 
       ].every((group) => group.visible === false),
       correctHierarchy: rig.leftDrill.parent === rig.leftUpperArm
         && rig.rightDrill.parent === rig.rightUpperArm
+        && rig.head.parent === rig.abdomen
         && rig.leftShin.parent === rig.leftThigh
         && rig.leftFoot.parent === rig.leftShin
         && rig.rightShin.parent === rig.rightThigh
@@ -151,7 +198,10 @@ test('Sharukurusu loads its authored texture and independent eleven-joint rig', 
   expect(result.modelAsset).toBe('sharukurusu');
   expect(result.semanticPartsPresent).toBe(true);
   expect(result.skinnedMeshCount).toBeGreaterThan(0);
-  expect(result.skeletonBoneCount).toBe(11);
+  expect(result.authoredRigJointCount).toBe(11);
+  expect(result.runtimeRigJointCount).toBe(12);
+  expect(result.skeletonBoneCount).toBe(12);
+  expect(result.runtimeHeadVertexCount).toBeGreaterThan(10);
   expect(result.vertexCount).toBeGreaterThan(250);
   expect(result.textureSources.some((source) => source.endsWith('/assets/models/reaverbots/Sharukurusu.png'))).toBe(true);
   expect(result.texturesUseSrgb).toBe(true);
@@ -169,6 +219,140 @@ test('Sharukurusu loads its authored texture and independent eleven-joint rig', 
   expect(result.projectileLimbHit).toBe('leftDrill');
   expect(['leftDrill', 'leftUpperArm']).toContain(result.lineLimbHit);
   expect(result.continuousCapsuleLineHit).toBe('leftDrill');
+});
+
+test('Sharukurusu keeps its authored ruby-eye texture on its combat-facing side', async ({ page }, testInfo) => {
+  await prepareSharukurusu(page);
+
+  const result = await page.evaluate(async () => {
+    const {
+      Box3,
+      Vector2,
+      Vector3,
+    } = await import('three');
+    const { game } = window;
+    const enemy = window.__sharukurusuQA.first;
+    game.player.root.position.set(0, 0, 0);
+    enemy.root.position.set(0, 0, -6);
+    enemy.root.rotation.y = 0;
+    enemy._updateExternalModelVisual(0, false);
+    enemy.root.updateMatrixWorld(true);
+
+    // The authored atlas' red facial lens is centered here. Find the skinned
+    // triangle containing that semantic UV instead of relying on a screenshot
+    // pixel or a brittle source triangle index.
+    const eyeUv = new Vector2(218.5 / 256, 1 - 32.5 / 256);
+    const barycentricUv = (point, a, b, c) => {
+      const v0x = b.x - a.x;
+      const v0y = b.y - a.y;
+      const v1x = c.x - a.x;
+      const v1y = c.y - a.y;
+      const v2x = point.x - a.x;
+      const v2y = point.y - a.y;
+      const d00 = v0x * v0x + v0y * v0y;
+      const d01 = v0x * v1x + v0y * v1y;
+      const d11 = v1x * v1x + v1y * v1y;
+      const d20 = v2x * v0x + v2y * v0y;
+      const d21 = v2x * v1x + v2y * v1y;
+      const denominator = d00 * d11 - d01 * d01;
+      if (Math.abs(denominator) < 0.0000001) return null;
+      const second = (d11 * d20 - d01 * d21) / denominator;
+      const third = (d00 * d21 - d01 * d20) / denominator;
+      const first = 1 - second - third;
+      return first >= -0.0001 && second >= -0.0001 && third >= -0.0001
+        ? [first, second, third]
+        : null;
+    };
+    let eyeWorld = null;
+    let eyeMesh = null;
+    for (const mesh of enemy.sharukurusuRig.skinnedMeshes) {
+      const geometry = mesh.geometry;
+      const uv = geometry.getAttribute('uv');
+      const position = geometry.getAttribute('position');
+      if (!uv || !position) continue;
+      const index = geometry.getIndex();
+      const triangleCount = Math.floor((index?.count ?? position.count) / 3);
+      for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+        const indices = [0, 1, 2].map((corner) => (
+          index ? index.getX(triangle * 3 + corner) : triangle * 3 + corner
+        ));
+        const triangleUvs = indices.map((vertexIndex) => new Vector2().fromBufferAttribute(uv, vertexIndex));
+        const weights = barycentricUv(eyeUv, triangleUvs[0], triangleUvs[1], triangleUvs[2]);
+        if (!weights) continue;
+        const vertices = indices.map((vertexIndex) => {
+          const vertex = new Vector3().fromBufferAttribute(position, vertexIndex);
+          mesh.applyBoneTransform(vertexIndex, vertex);
+          return mesh.localToWorld(vertex);
+        });
+        const candidate = new Vector3();
+        for (let corner = 0; corner < 3; corner += 1) {
+          candidate.addScaledVector(vertices[corner], weights[corner]);
+        }
+        const modelCenter = new Box3().setFromObject(enemy.externalModelVisual).getCenter(new Vector3());
+        const combatForward = game.player.root.position.clone().sub(enemy.root.position).setY(0).normalize();
+        if (candidate.clone().sub(modelCenter).dot(combatForward) > 0) {
+          eyeWorld = candidate;
+          eyeMesh = mesh;
+          break;
+        }
+      }
+      if (eyeWorld) break;
+    }
+
+    const modelCenter = new Box3().setFromObject(enemy.externalModelVisual).getCenter(new Vector3());
+    const combatForward = game.player.root.position.clone().sub(enemy.root.position).setY(0).normalize();
+    const textureFlipY = [];
+    enemy.externalModelVisual.traverse((object) => {
+      if (!object.isMesh) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (material?.map) textureFlipY.push(material.map.flipY);
+      }
+    });
+
+    const belongsToEnemy = (object) => {
+      for (let current = object; current; current = current.parent) {
+        if (current === enemy.root) return true;
+      }
+      return false;
+    };
+    game.scene.traverse((object) => {
+      if (object.isMesh) object.visible = belongsToEnemy(object);
+    });
+    enemy.healthBar.visible = false;
+    game.player.root.visible = false;
+    const uiRoot = document.getElementById('ui-root');
+    if (uiRoot) uiRoot.style.display = 'none';
+    game.scene.fog = null;
+    game.scene.background?.set?.(0x10151d);
+    game.camera.position.set(0, 1.45, 0.6);
+    game.camera.lookAt(new Vector3(0, 1.2, -6));
+    game.camera.updateMatrixWorld(true);
+    game.renderer.setAnimationLoop(null);
+    game.renderer.render(game.scene, game.camera);
+
+    return {
+      modelYawOffset: enemy.type.modelYawOffset,
+      renderedYaw: enemy.externalModelGroup.rotation.y,
+      eyeTriangleFound: Boolean(eyeMesh && eyeWorld),
+      eyeForwardProjection: eyeWorld
+        ? eyeWorld.clone().sub(modelCenter).dot(combatForward)
+        : Number.NEGATIVE_INFINITY,
+      textureFlipY,
+    };
+  });
+
+  expect(result.modelYawOffset).toBe(0);
+  expect(result.renderedYaw).toBeCloseTo(0, 6);
+  expect(result.eyeTriangleFound).toBe(true);
+  expect(result.eyeForwardProjection).toBeGreaterThan(0.08);
+  expect(result.textureFlipY.length).toBeGreaterThan(0);
+  expect(result.textureFlipY.every(Boolean)).toBe(true);
+
+  await page.screenshot({
+    path: testInfo.outputPath('sharukurusu-front-texture-orientation.png'),
+    fullPage: false,
+  });
 });
 
 test('generated keycard encounter preserves Sharukurusu elite and authored-asset contracts', async ({ page }) => {
@@ -300,7 +484,7 @@ test('generated keycard encounter preserves Sharukurusu elite and authored-asset
   expect(result.eliteAirborneRadius).toBeGreaterThan(1.5);
 });
 
-test('Sharukurusu sprints, spins both drill arms, charges once, and backflips away', async ({ page }) => {
+test('Sharukurusu sprints, spins both drill arms, charges once, and backflips away', async ({ page }, testInfo) => {
   await prepareSharukurusu(page);
 
   const result = await page.evaluate(() => {
@@ -357,6 +541,50 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
       let maximumChargeTravel = 0;
       let sawBackflip = false;
       enemy._startSharukurusuCharge(game, new Vector3(0, 0, 1));
+      // Advance through the tell so pose assertions describe the moving dash,
+      // rather than the grounded charge windup.
+      enemy.update(0.35, game);
+      enemy._updateExternalModelVisual(0, false);
+      enemy.root.updateMatrixWorld(true);
+      const chargePoseAlignment = (upperArm, drillTip) => {
+        const shoulder = new Vector3();
+        const tip = new Vector3();
+        upperArm.getWorldPosition(shoulder);
+        drillTip.getWorldPosition(tip);
+        return tip.sub(shoulder).normalize().dot(enemy.sharukurusuState.direction);
+      };
+      const leftChargePoseForward = chargePoseAlignment(
+        enemy.sharukurusuRig.leftUpperArm,
+        enemy.sharukurusuRig.leftDrillTip,
+      );
+      const rightChargePoseForward = chargePoseAlignment(
+        enemy.sharukurusuRig.rightUpperArm,
+        enemy.sharukurusuRig.rightDrillTip,
+      );
+      const chargeLegProjection = (thigh, shin, foot) => {
+        const hip = new Vector3();
+        const knee = new Vector3();
+        const ankle = new Vector3();
+        thigh.getWorldPosition(hip);
+        shin.getWorldPosition(knee);
+        foot.getWorldPosition(ankle);
+        return {
+          kneeFromHip: knee.clone().sub(hip).dot(enemy.sharukurusuState.direction),
+          ankleFromKnee: ankle.clone().sub(knee).dot(enemy.sharukurusuState.direction),
+          ankleFromHip: ankle.clone().sub(hip).dot(enemy.sharukurusuState.direction),
+        };
+      };
+      const leftChargeLeg = chargeLegProjection(
+        enemy.sharukurusuRig.leftThigh,
+        enemy.sharukurusuRig.leftShin,
+        enemy.sharukurusuRig.leftFoot,
+      );
+      const rightChargeLeg = chargeLegProjection(
+        enemy.sharukurusuRig.rightThigh,
+        enemy.sharukurusuRig.rightShin,
+        enemy.sharukurusuRig.rightFoot,
+      );
+      const chargeLeadsLeft = enemy.sharukurusuState.attackSequence % 2 !== 0;
       for (let step = 0; step < 110; step += 1) {
         enemy.update(0.025, game);
         maximumChargeTravel = Math.max(
@@ -422,6 +650,11 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
         chargeTravel: maximumChargeTravel,
         leftSpin,
         rightSpin,
+        leftChargePoseForward,
+        rightChargePoseForward,
+        chargeLeadsLeft,
+        leftChargeLeg,
+        rightChargeLeg,
         hitCount: hits.length,
         hit: hits[0] ? {
           attackKind: hits[0].context.attackKind,
@@ -458,6 +691,14 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
   expect(result.chargeTravel).toBeGreaterThan(4);
   expect(result.leftSpin).toBeGreaterThan(Math.PI * 2);
   expect(result.rightSpin).toBeGreaterThan(Math.PI * 2);
+  expect(result.leftChargePoseForward).toBeGreaterThan(0.9);
+  expect(result.rightChargePoseForward).toBeGreaterThan(0.9);
+  const leadLeg = result.chargeLeadsLeft ? result.leftChargeLeg : result.rightChargeLeg;
+  const trailingLeg = result.chargeLeadsLeft ? result.rightChargeLeg : result.leftChargeLeg;
+  expect(leadLeg.kneeFromHip).toBeGreaterThan(0.08);
+  expect(leadLeg.ankleFromKnee).toBeLessThan(-0.02);
+  expect(trailingLeg.kneeFromHip).toBeLessThan(-0.08);
+  expect(trailingLeg.ankleFromHip).toBeLessThan(-0.12);
   expect(result.hitCount).toBe(1);
   expect(result.hit).toMatchObject({
     attackKind: 'sharukurusuDrillCharge',
@@ -475,6 +716,12 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
   expect(result.arenaRejectsDoorwayExit).toBe(true);
   expect(result.finalState).toBe('ninjaRun');
   expect(result.finalGroundedY).toBeCloseTo(0, 4);
+
+  await stageSharukurusuPose(page, 'drillCharge');
+  await page.screenshot({
+    path: testInfo.outputPath('sharukurusu-deliberate-dash-pose.png'),
+    fullPage: false,
+  });
 });
 
 test('only a projectile during Sharukurusu diving blades knocks it to the floor', async ({ page }) => {
@@ -624,7 +871,7 @@ test('only a projectile during Sharukurusu diving blades knocks it to the floor'
   expect(result.blockedDiveGrounded).toBe(true);
 });
 
-test('Sharukurusu faces Mega Man and leads a dive with both drill arms', async ({ page }) => {
+test('Sharukurusu faces Mega Man and leads a dive with both drill arms', async ({ page }, testInfo) => {
   await prepareSharukurusu(page);
 
   const result = await page.evaluate(async () => {
@@ -680,12 +927,76 @@ test('Sharukurusu faces Mega Man and leads a dive with both drill arms', async (
           forwardReach: tip.clone().sub(enemy.root.position).dot(bodyForward),
         };
       };
+      const diveLegAlignment = (thigh, shin, foot) => {
+        const hip = new Vector3();
+        const knee = new Vector3();
+        const ankle = new Vector3();
+        thigh.getWorldPosition(hip);
+        shin.getWorldPosition(knee);
+        foot.getWorldPosition(ankle);
+        return {
+          kneeFromHip: knee.clone().sub(hip).dot(movementDirection),
+          ankleFromHip: ankle.clone().sub(hip).dot(movementDirection),
+        };
+      };
+      const abdomenWorldQuaternion = enemy.sharukurusuRig.abdomen.getWorldQuaternion(
+        enemy.sharukurusuRig.abdomen.quaternion.clone(),
+      );
+      const headWorldQuaternion = enemy.sharukurusuRig.head.getWorldQuaternion(
+        enemy.sharukurusuRig.head.quaternion.clone(),
+      );
+      const abdomenBottomMovementDot = new Vector3(0, -1, 0)
+        .applyQuaternion(abdomenWorldQuaternion)
+        .dot(movementDirection);
+      const headCrownMovementDot = new Vector3(0, 1, 0)
+        .applyQuaternion(headWorldQuaternion)
+        .dot(movementDirection);
+      const left = drillAlignment(
+        enemy.sharukurusuRig.leftUpperArm,
+        enemy.sharukurusuRig.leftDrillTip,
+      );
+      const right = drillAlignment(
+        enemy.sharukurusuRig.rightUpperArm,
+        enemy.sharukurusuRig.rightDrillTip,
+      );
+      const leftLeg = diveLegAlignment(
+        enemy.sharukurusuRig.leftThigh,
+        enemy.sharukurusuRig.leftShin,
+        enemy.sharukurusuRig.leftFoot,
+      );
+      const rightLeg = diveLegAlignment(
+        enemy.sharukurusuRig.rightThigh,
+        enemy.sharukurusuRig.rightShin,
+        enemy.sharukurusuRig.rightFoot,
+      );
+
+      // The head inherits the body's pitch, then uses only its added local yaw
+      // hinge to keep the ruby eye tracking a player who leaves the dive lane.
+      const originalPlayerPosition = player.root.position.clone();
+      const bodyRight = new Vector3(bodyForward.z, 0, -bodyForward.x);
+      player.root.position.copy(enemy.root.position)
+        .addScaledVector(bodyForward, 3)
+        .addScaledVector(bodyRight, 3);
+      enemy._updateExternalModelVisual(0, true);
+      const trackedHeadYaw = enemy.sharukurusuRig.head.rotation.y
+        - enemy.sharukurusuRig.head.userData.sharukurusuBaseRotation.y;
+      player.root.position.copy(originalPlayerPosition);
       return {
         mode: enemy.sharukurusuState.mode,
         bodyFacesMovement: bodyForward.dot(movementDirection),
         bodyFacesPlayer: bodyForward.dot(toPlayer),
-        left: drillAlignment(enemy.sharukurusuRig.leftUpperArm, enemy.sharukurusuRig.leftDrillTip),
-        right: drillAlignment(enemy.sharukurusuRig.rightUpperArm, enemy.sharukurusuRig.rightDrillTip),
+        abdomenDivePitch: enemy.sharukurusuRig.abdomen.rotation.x
+          - enemy.sharukurusuRig.abdomen.userData.sharukurusuBaseRotation.x,
+        headLocalDivePitch: enemy.sharukurusuRig.head.rotation.x
+          - enemy.sharukurusuRig.head.userData.sharukurusuBaseRotation.x,
+        wholeModelDivePitch: enemy.sharukurusuFlipPivot.rotation.x,
+        abdomenBottomMovementDot,
+        headCrownMovementDot,
+        trackedHeadYaw,
+        left,
+        right,
+        leftLeg,
+        rightLeg,
       };
     } finally {
       controller.getSurfaceElevationAt = originals.getSurfaceElevationAt;
@@ -698,10 +1009,27 @@ test('Sharukurusu faces Mega Man and leads a dive with both drill arms', async (
   expect(result.mode).toBe('diveAirborne');
   expect(result.bodyFacesMovement).toBeGreaterThan(0.98);
   expect(result.bodyFacesPlayer).toBeGreaterThan(0.95);
+  expect(result.abdomenDivePitch).toBeGreaterThan(0.7);
+  expect(result.headLocalDivePitch).toBeCloseTo(0, 6);
+  expect(result.wholeModelDivePitch).toBeCloseTo(0, 6);
+  expect(result.abdomenBottomMovementDot).toBeLessThan(-0.6);
+  expect(result.headCrownMovementDot).toBeGreaterThan(0.6);
+  expect(Math.abs(result.trackedHeadYaw)).toBeGreaterThan(0.55);
+  expect(Math.abs(result.trackedHeadYaw)).toBeLessThan(0.63);
   expect(result.left.movementDot).toBeGreaterThan(0.9);
   expect(result.right.movementDot).toBeGreaterThan(0.9);
   expect(result.left.playerDot).toBeGreaterThan(0.9);
   expect(result.right.playerDot).toBeGreaterThan(0.9);
-  expect(result.left.forwardReach).toBeGreaterThan(1);
-  expect(result.right.forwardReach).toBeGreaterThan(1);
+  expect(result.left.forwardReach).toBeGreaterThan(0.75);
+  expect(result.right.forwardReach).toBeGreaterThan(0.75);
+  expect(result.leftLeg.kneeFromHip).toBeLessThan(-0.08);
+  expect(result.rightLeg.kneeFromHip).toBeLessThan(-0.08);
+  expect(result.leftLeg.ankleFromHip).toBeLessThan(-0.12);
+  expect(result.rightLeg.ankleFromHip).toBeLessThan(-0.12);
+
+  await stageSharukurusuPose(page, 'diveAirborne');
+  await page.screenshot({
+    path: testInfo.outputPath('sharukurusu-trailing-leg-dive-pose.png'),
+    fullPage: false,
+  });
 });

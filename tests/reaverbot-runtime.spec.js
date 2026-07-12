@@ -340,12 +340,12 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
     const clampedTravel = blockedTarget.z - startZ;
 
     controller.isPositionWalkable = (position) => position.z <= startZ + 0.55;
-    pouncer.brain.state = 'commit';
-    pouncer.brain.stateTime = 0;
-    pouncer.brain.commitStart.copy(pouncer.root.position);
-    pouncer.brain.targetPosition.copy(pouncer.root.position).add(new Vector3(0, 0, 4));
-    pouncer._updateCommitState(pouncer.genome.behavior.commitDuration * 0.7, game);
-    const blockedCommitState = pouncer.brain.state;
+    const blockedCommitAccepted = pouncer._moveCommitAlongWalkablePath(
+      game,
+      pouncer.root.position.x,
+      pouncer.root.position.z + 4,
+      pouncer.root.position.y,
+    );
     const blockedCommitTravel = pouncer.root.position.z - startZ;
     controller.isPositionWalkable = originalWalkable;
     controller.getSurfaceElevationAt = originalElevation;
@@ -448,7 +448,7 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
       alertedTravel,
       lineWeakPoint,
       clampedTravel,
-      blockedCommitState,
+      blockedCommitAccepted,
       blockedCommitTravel,
       markerWasAttached,
       markerRemovedByDispose,
@@ -472,7 +472,7 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
   expect(result.lineWeakPoint).toBe(true);
   expect(result.clampedTravel).toBeGreaterThan(0.5);
   expect(result.clampedTravel).toBeLessThanOrEqual(1.05);
-  expect(result.blockedCommitState).toBe('recovery');
+  expect(result.blockedCommitAccepted).toBe(false);
   expect(result.blockedCommitTravel).toBeLessThanOrEqual(0.55);
   expect(result.markerWasAttached).toBe(true);
   expect(result.markerRemovedByDispose).toBe(true);
@@ -788,6 +788,7 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
     return {
       catalogMaterialCount: window.getReaverbotSalvageCatalog().materials.length,
       bodyPlan: hopper.genome.body.planId,
+      mobilityLabel: hopper.genome.body.mobilityLabel,
       profile,
       drops: drops.map((drop) => ({ id: drop.id, aspect: drop.source.aspect })),
       pickupCount,
@@ -800,7 +801,7 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
     };
   });
 
-  expect(result.catalogMaterialCount).toBe(56);
+  expect(result.catalogMaterialCount).toBe(58);
   expect(result.bodyPlan).toBe('hopper');
   expect(result.profile).toHaveLength(6);
   expect(result.profile.find((candidate) => candidate.aspect === 'body')).toEqual({
@@ -820,7 +821,7 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
   expect(result.springCount).toBe(1);
   expect(result.materialCount).toBe(6);
   expect(result.materialUi).toContain('Tempered Jump Spring');
-  expect(result.materialUi).toContain('Spring Hopper');
+  expect(result.materialUi).toContain(result.mobilityLabel);
 });
 
 test('rush enemies acquire from range and expose accelerating red attack warnings', async ({ page }) => {

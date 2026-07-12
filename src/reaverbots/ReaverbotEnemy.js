@@ -209,6 +209,7 @@ export class ReaverbotEnemy extends Enemy {
       commitStart: new THREE.Vector3(),
       telegraphMarker: null,
       commitDistance: 0,
+      pounceJumpHeight: 2.5,
       warningPhase: 0,
       warningBlinkRate: 0,
       warningIntensity: 0,
@@ -245,6 +246,7 @@ export class ReaverbotEnemy extends Enemy {
       coilBounceHeight: COIL_BOUNCE_MIN_HEIGHT,
       coilBounceStart: new THREE.Vector3(),
       coilBounceLanding: new THREE.Vector3(),
+      springBounceFailures: 0,
       clawDragSpeed: 0,
       clawVaultActive: false,
       clawVaultTime: 0,
@@ -336,6 +338,51 @@ export class ReaverbotEnemy extends Enemy {
   _isClawCarrier() {
     return this.genome.modules.weapon.id === 'clawArm'
       || this.genome.modules.weapon.attackKind === 'clawMoveset';
+  }
+
+  _usesSpringLocomotion() {
+    return this.genome.body.movementModel === 'springBounce'
+      || this.genome.body.tags?.includes('springLoaded');
+  }
+
+  _resetSpringMovementState({ cancelPounce = false } = {}) {
+    if (!this._usesSpringLocomotion() || !this.brain) return;
+    const brain = this.brain;
+    brain.coilBounceActive = false;
+    brain.coilBounceTime = 0;
+    brain.coilBounceCooldown = 0.12;
+    brain.springBounceFailures = 0;
+    brain.coilBounceStart.copy(this.root.position);
+    brain.coilBounceLanding.copy(this.root.position);
+
+    if (cancelPounce
+      && brain.state === 'commit'
+      && this._getEffectiveAttackKind() === 'pounce') {
+      this._removeTelegraphMarker();
+      brain.state = 'recovery';
+      brain.stateTime = 0;
+      brain.moving = false;
+      brain.speedRatio = 0;
+      brain.attackFired = true;
+    }
+  }
+
+  tryClaimExternalControl(owner, kind = 'external', options = {}) {
+    const claimed = super.tryClaimExternalControl(owner, kind, options);
+    if (claimed) this._resetSpringMovementState({ cancelPounce: true });
+    return claimed;
+  }
+
+  releaseExternalControl(owner, reason = 'released', options = {}) {
+    const released = super.releaseExternalControl(owner, reason, options);
+    if (released) this._resetSpringMovementState({ cancelPounce: true });
+    return released;
+  }
+
+  startExternalBallisticMotion(owner, options = {}) {
+    const started = super.startExternalBallisticMotion(owner, options);
+    if (started) this._resetSpringMovementState({ cancelPounce: true });
+    return started;
   }
 
   _getEffectiveAttackKind() {
@@ -706,7 +753,7 @@ export class ReaverbotEnemy extends Enemy {
       || Boolean(this.brain?.tractorCrashPhase)
       || Boolean(this.brain?.coilBounceActive)
       || Boolean(this.brain?.clawVaultActive)
-      || (this.genome.body.planId === 'hopper'
+      || (this._usesSpringLocomotion()
         && this.brain?.state === 'commit'
         && this.genome.modules.weapon.attackKind === 'pounce');
   }
@@ -1030,10 +1077,10 @@ export class ReaverbotEnemy extends Enemy {
       && flankAttackReady
       && this._isAttackDistance(attackDistance)
       && this._canBeginAttack(game);
-    // A spring hopper that already has a valid attack should compress into its
+    // A spring chassis that already has a valid attack should compress into its
     // authored telegraph from the ground. Starting a navigation bounce first
     // would strand the attack state halfway through a jump.
-    if (this.genome.body.planId === 'hopper'
+    if (this._usesSpringLocomotion()
       && !brain.coilBounceActive
       && readyToAttack) {
       brain.moving = false;
@@ -1175,7 +1222,11 @@ export class ReaverbotEnemy extends Enemy {
       const nextX = THREE.MathUtils.lerp(brain.commitStart.x, brain.targetPosition.x, eased);
       const nextY = THREE.MathUtils.lerp(brain.commitStart.y, brain.targetPosition.y, eased);
       const nextZ = THREE.MathUtils.lerp(brain.commitStart.z, brain.targetPosition.z, eased);
-      if (!this._moveCommitAlongWalkablePath(game, nextX, nextZ, nextY)) {
+      const springPounce = kind === 'pounce' && this._usesSpringLocomotion();
+      const moved = springPounce
+        ? true
+        : this._moveCommitAlongWalkablePath(game, nextX, nextZ, nextY);
+      if (!moved) {
         this._removeTelegraphMarker();
         brain.state = 'recovery';
         brain.stateTime = 0;
@@ -1183,10 +1234,16 @@ export class ReaverbotEnemy extends Enemy {
         brain.speedRatio = 0;
         return;
       }
-      if (kind === 'pounce' && this.genome.body.planId === 'hopper') {
+      if (springPounce) {
         const baseY = THREE.MathUtils.lerp(brain.commitStart.y, brain.targetPosition.y, eased);
-        this.root.position.y = baseY
-          + Math.sin(progress * Math.PI) * Math.max(2.5, Math.abs(brain.targetPosition.y - brain.commitStart.y) + 1.3);
+        this.root.position.set(
+          nextX,
+          baseY + Math.sin(progress * Math.PI) * Math.max(
+            brain.pounceJumpHeight,
+            Math.abs(brain.targetPosition.y - brain.commitStart.y) + 1.3,
+          ),
+          nextZ,
+        );
       }
       if (!this.genome.modules.weapon.continuousContactDamage) {
         this._tryContactHit(game, kind === 'pounce' ? 0.75 : 0.5);
@@ -1205,7 +1262,10 @@ export class ReaverbotEnemy extends Enemy {
     if (brain.stateTime >= duration && !this.dead) {
       if ((kind === 'pounce' || kind === 'shockwave') && !brain.attackFired) {
         brain.attackFired = true;
-        game.addExplosion(this.root.position, this.stats.damage, 1.85, this.genome.palette.emissive, {
+        const landingDamage = this.stats.damage
+          * (this.genome.modules.weapon.landingDamageScale ?? 1);
+        const landingRadius = this.genome.modules.weapon.landingRadius ?? 1.85;
+        game.addExplosion(this.root.position, landingDamage, landingRadius, this.genome.palette.emissive, {
           source: this,
           damageEnemies: false,
           damagePlayer: kind === 'shockwave' || !brain.attackHit,
@@ -1274,11 +1334,18 @@ export class ReaverbotEnemy extends Enemy {
     if (this.navigationMode === 'ground') {
       const surfaceY = game.dungeonController?.getSurfaceElevationAt?.(brain.targetPosition) ?? brain.targetPosition.y;
       brain.targetPosition.y = surfaceY;
-      if (kind === 'charge' || kind === 'pounce') {
+      if (kind === 'pounce' && this._usesSpringLocomotion()) {
+        this._resolveSpringPounceLanding(game, brain.targetPosition);
+      } else if (kind === 'charge' || kind === 'pounce') {
         this._clampCommitTargetToWalkablePath(game, brain.targetPosition);
       }
     } else if (kind === 'charge' || kind === 'pounce') {
       brain.targetPosition.y = game.player.root.position.y + 0.9;
+    }
+
+    if (kind === 'pounce') {
+      tempA.copy(brain.targetPosition).sub(this.root.position).setY(0);
+      if (tempA.lengthSq() > 0.0001) brain.attackDirection.copy(tempA.normalize());
     }
 
     const markerRadius = kind === 'selfDestruct'
@@ -1287,8 +1354,8 @@ export class ReaverbotEnemy extends Enemy {
         ? (this.genome.modules.weapon.explosiveRadius ?? 1.2)
         : kind === 'mine'
           ? 1.15
-          : kind === 'pounce' || kind === 'shockwave'
-            ? 1.25
+        : kind === 'pounce' || kind === 'shockwave'
+            ? (this.genome.modules.weapon.landingRadius ?? 1.85)
             : kind === 'jawCombo'
               ? (this.genome.modules.weapon.shockwaveRadius ?? 1.85)
               : kind === 'clawMoveset' && brain.clawAttackVariant === 'verticalSlam'
@@ -2853,6 +2920,7 @@ export class ReaverbotEnemy extends Enemy {
     const controller = game.dungeonController;
     if (!controller || !target?.root) return null;
     const origin = target.root.position;
+    const cargoProfile = this._measureTractorCargoCollisionProfile(target);
     const angles = [
       0,
       Math.PI / 4,
@@ -2863,7 +2931,21 @@ export class ReaverbotEnemy extends Enemy {
       -Math.PI / 2,
       -Math.PI / 4,
     ];
-    for (const radius of [0, 0.75, 1.35, 2.1, 3]) {
+    // Articulated hounds and massive claw/jaw carriers can be much wider than
+    // their navigation root while rotating beneath the magnet. Search beyond
+    // that full silhouette when a direct drop is obstructed, otherwise a
+    // Controller can simply release control and strand large cargo in midair.
+    const radii = [...new Set([
+      0,
+      0.75,
+      1.35,
+      2.1,
+      3,
+      Number((cargoProfile.radius + 0.6).toFixed(3)),
+      Number((cargoProfile.radius + 1.5).toFixed(3)),
+      Number((cargoProfile.radius + 2.6).toFixed(3)),
+    ])].filter((radius) => radius <= 7.5).sort((left, right) => left - right);
+    for (const radius of radii) {
       for (const angle of angles) {
         tempD.set(
           origin.x + Math.sin(angle) * radius,
@@ -3121,7 +3203,7 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   _moveByMode(mode, dt, game, toPlayer, distance) {
-    if (this.genome.body.planId === 'hopper' && this.brain.coilBounceActive) {
+    if (this._usesSpringLocomotion() && this.brain.coilBounceActive) {
       return this._updateCoilBounce(dt, game);
     }
     if (mode === 'hold') return false;
@@ -3190,7 +3272,7 @@ export class ReaverbotEnemy extends Enemy {
       }
     }
 
-    if (this.genome.body.planId === 'hopper') {
+    if (this._usesSpringLocomotion()) {
       return this._updateCoilBounce(dt, game, tempB, speedScale);
     }
 
@@ -3212,6 +3294,7 @@ export class ReaverbotEnemy extends Enemy {
         brain.coilBounceActive = false;
         brain.coilBounceTime = 0;
         brain.coilBounceCooldown = this.aiRandom.float(0.12, 0.22);
+        brain.springBounceFailures = 0;
         this.root.position.copy(brain.coilBounceLanding);
       }
       return true;
@@ -3230,37 +3313,69 @@ export class ReaverbotEnemy extends Enemy {
     );
     const controller = game.dungeonController;
     let foundLanding = false;
-    for (const distanceScale of [1, 0.78, 0.56, 0.36]) {
-      tempB.copy(this.root.position).addScaledVector(tempA, jumpDistance * distanceScale);
-      // Supplying the player's elevation as a probe allows the surface query
-      // to recognize a platform above the hopper's current floor.
-      tempB.y = Math.max(this.root.position.y, game.player.root.position.y);
-      tempB.y = controller?.getSurfaceElevationAt?.(tempB) ?? tempB.y;
-      const elevationDelta = tempB.y - this.root.position.y;
-      if (elevationDelta > 4.4 || elevationDelta < -3.2) continue;
-      const clearLanding = controller?.isEnemyPositionClear
-        ? controller.isEnemyPositionClear(this, tempB, { maximumElevationDelta: 4.6 })
-        : !controller?.isPositionWalkable || controller.isPositionWalkable(tempB);
-      if (!clearLanding) continue;
+    const baseDirectionX = tempA.x;
+    const baseDirectionZ = tempA.z;
+    landingSearch:
+    for (const directionOffset of [0, 0.42, -0.42, 0.82, -0.82, Math.PI]) {
+      const cos = Math.cos(directionOffset);
+      const sin = Math.sin(directionOffset);
+      tempD.set(
+        baseDirectionX * cos - baseDirectionZ * sin,
+        0,
+        baseDirectionX * sin + baseDirectionZ * cos,
+      ).normalize();
+      for (const distanceScale of [1, 0.78, 0.56, 0.36]) {
+        tempB.copy(this.root.position).addScaledVector(tempD, jumpDistance * distanceScale);
+        const arenaTarget = controller?.getEnemyArenaTarget?.(this, tempB, tempE);
+        if (arenaTarget) {
+          tempB.x = arenaTarget.x;
+          tempB.z = arenaTarget.z;
+        }
+        // Supplying the player's elevation as a probe allows the surface query
+        // to recognize a platform above the spring chassis' current floor.
+        tempB.y = Math.max(this.root.position.y, game.player.root.position.y);
+        tempB.y = controller?.getSurfaceElevationAt?.(tempB) ?? tempB.y;
+        const elevationDelta = tempB.y - this.root.position.y;
+        if (elevationDelta > 4.4 || elevationDelta < -3.2) continue;
+        const clearLanding = controller?.isEnemyPositionClear
+          ? controller.isEnemyPositionClear(this, tempB, { maximumElevationDelta: 4.6 })
+          : !controller?.isPositionWalkable || controller.isPositionWalkable(tempB);
+        if (!clearLanding) continue;
 
-      const jumpHeight = Math.max(
-        COIL_BOUNCE_MIN_HEIGHT,
-        Math.max(0, elevationDelta) + 1.25,
-        Math.abs(elevationDelta) * 0.45 + 1.7,
-      );
-      if (!this._isCoilBounceArcClear(game, this.root.position, tempB, jumpHeight)) continue;
-
-      brain.coilBounceLanding.copy(tempB);
-      brain.coilBounceHeight = jumpHeight;
-      foundLanding = true;
-      break;
+        const preferredHeight = Math.max(
+          COIL_BOUNCE_MIN_HEIGHT,
+          Math.max(0, elevationDelta) + 1.25,
+          Math.abs(elevationDelta) * 0.45 + 1.7,
+        );
+        const heightCandidates = Math.abs(elevationDelta) <= 0.5
+          ? [preferredHeight, 1.25]
+          : [preferredHeight];
+        for (const jumpHeight of heightCandidates) {
+          if (!this._isCoilBounceArcClear(game, this.root.position, tempB, jumpHeight)) continue;
+          brain.coilBounceLanding.copy(tempB);
+          brain.coilBounceHeight = jumpHeight;
+          foundLanding = true;
+          break landingSearch;
+        }
+      }
     }
 
     if (!foundLanding) {
+      brain.springBounceFailures += 1;
       brain.coilBounceCooldown = 0.12;
+      if (brain.springBounceFailures >= 3 && controller?.findNearestEnemyClearPosition) {
+        tempD.copy(this.root.position).addScaledVector(tempA, jumpDistance * 0.75);
+        const recovery = controller.findNearestEnemyClearPosition(this, tempD, {
+          preferredPosition: this.encounterArena?.center ?? this.root.position,
+          maximumRadius: 3.6,
+          maximumElevationDelta: 1.2,
+        });
+        if (recovery) this.setNavigationRecoveryTarget?.(recovery, 1.4);
+      }
       return false;
     }
 
+    brain.springBounceFailures = 0;
     brain.coilBounceActive = true;
     brain.coilBounceTime = 0;
     brain.coilBounceDuration = THREE.MathUtils.clamp(
@@ -3352,7 +3467,7 @@ export class ReaverbotEnemy extends Enemy {
       return distance <= Math.min(this.stats.attackRange, this.genome.behavior.preferredRange + 0.45);
     }
     if (kind === 'charge') return distance >= 1.2 && distance <= Math.max(CHARGE_INITIATION_RANGE, this.stats.attackRange);
-    if (kind === 'pounce') return distance >= 2 && distance <= this.stats.attackRange;
+    if (kind === 'pounce') return distance <= this.stats.attackRange;
     if (kind === 'selfDestruct') return distance <= this.stats.attackRange + 0.4;
     if (['melee', 'clawMoveset', 'jawCombo', 'shockwave'].includes(kind)) return distance <= this.stats.attackRange + 0.5;
     return distance <= this.stats.attackRange;
@@ -3464,6 +3579,81 @@ export class ReaverbotEnemy extends Enemy {
 
   _movePackHunterTowardRear(dt, game) {
     return this._movePackHunterTowardFlank(dt, game);
+  }
+
+  _resolveSpringPounceLanding(game, target) {
+    const controller = game.dungeonController;
+    const brain = this.brain;
+    const surfaceProbeY = Math.max(
+      this.root.position.y,
+      target.y,
+      game.player.root.position.y,
+    );
+    tempF.copy(this.root.position);
+    tempG.copy(target).sub(tempF).setY(0);
+    let desiredTravel = tempG.length();
+    if (desiredTravel <= 0.001) {
+      tempG.copy(brain.attackDirection).setY(0);
+      if (tempG.lengthSq() <= 0.0001) {
+        tempG.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
+      }
+      desiredTravel = 2.4;
+    }
+    tempG.normalize();
+    desiredTravel = THREE.MathUtils.clamp(desiredTravel, 2.4, Math.max(2.4, this.stats.attackRange - 0.35));
+
+    const clearLanding = (candidate) => {
+      // Surface queries use the supplied height to choose between stacked
+      // walkable levels. Probe from the intended target elevation so a pouncer
+      // can recognize the platform MegaMan is standing on instead of selecting
+      // the floor directly beneath it.
+      candidate.y = Math.max(candidate.y, surfaceProbeY);
+      candidate.y = controller?.getSurfaceElevationAt?.(candidate) ?? candidate.y;
+      const elevationDelta = candidate.y - this.root.position.y;
+      if (elevationDelta > 4.4 || elevationDelta < -3.2) return false;
+      const footprintClear = controller?.isEnemyPositionClear
+        ? controller.isEnemyPositionClear(this, candidate, { maximumElevationDelta: 4.6 })
+        : !controller?.isPositionWalkable || controller.isPositionWalkable(candidate);
+      if (!footprintClear) return false;
+      const jumpHeight = Math.max(2.5, Math.max(0, elevationDelta) + 1.3);
+      if (!this._isCoilBounceArcClear(game, this.root.position, candidate, jumpHeight)) return false;
+      brain.pounceJumpHeight = jumpHeight;
+      target.copy(candidate);
+      return true;
+    };
+
+    for (const directionOffset of [0, 0.3, -0.3, 0.58, -0.58]) {
+      const cos = Math.cos(directionOffset);
+      const sin = Math.sin(directionOffset);
+      tempH.set(
+        tempG.x * cos - tempG.z * sin,
+        0,
+        tempG.x * sin + tempG.z * cos,
+      ).normalize();
+      for (const distanceScale of [1, 0.82, 0.64, 0.46]) {
+        tempI.copy(tempF).addScaledVector(tempH, desiredTravel * distanceScale);
+        const arenaTarget = controller?.getEnemyArenaTarget?.(this, tempI, tempD);
+        if (arenaTarget) {
+          tempI.x = arenaTarget.x;
+          tempI.z = arenaTarget.z;
+        }
+        if (clearLanding(tempI)) return true;
+      }
+    }
+
+    const nearest = controller?.findNearestEnemyClearPosition?.(this, target, {
+      preferredPosition: game.player.root.position,
+      maximumRadius: 3.6,
+      maximumElevationDelta: 4.6,
+    });
+    if (nearest && clearLanding(nearest)) return true;
+
+    // A point-blank or completely boxed-in pouncer still performs a vertical
+    // landing attack instead of silently cancelling after its full warning.
+    target.copy(this.root.position);
+    target.y = controller?.getSurfaceElevationAt?.(target) ?? target.y;
+    brain.pounceJumpHeight = 2.5;
+    return false;
   }
 
   _clampCommitTargetToWalkablePath(game, target) {
@@ -3597,6 +3787,10 @@ export class ReaverbotEnemy extends Enemy {
       tractorBeamActive: brain.tractorBeamActive,
       tractorBeamIntensity: brain.tractorBeamIntensity,
       tractorBeamLength: brain.tractorBeamLength,
+      springBounceActive: brain.coilBounceActive,
+      springBounceProgress: brain.coilBounceActive
+        ? clamp01(brain.coilBounceTime / Math.max(0.01, brain.coilBounceDuration))
+        : 0,
     });
     this._applyRushAttackWarning(dt);
   }

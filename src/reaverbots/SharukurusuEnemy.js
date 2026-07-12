@@ -15,6 +15,37 @@ const BACKFLIP_TIME = 0.72;
 const DIVE_HEIGHT = 2.35;
 const BACKFLIP_HEIGHT = 1.15;
 const AUTHORED_HALF_WIDTH = 1.32;
+const HEAD_BONE_NAME = 'SharukurusuHeadPivot';
+const HEAD_PIVOT_Y = 19.9;
+const DIVE_BODY_PITCH = 0.78;
+const HEAD_TRACK_YAW_LIMIT = 0.62;
+const HEAD_VERTEX_KEYS = new Set([
+  '4.30|48.15|5.90',
+  '-4.30|48.15|5.90',
+  '0.00|58.80|0.10',
+  '0.00|48.15|-7.30',
+  '6.95|48.15|-2.25',
+  '-6.95|48.15|-2.25',
+  '-10.60|19.90|-3.45',
+  '-6.55|19.90|9.05',
+  '0.00|19.90|-11.15',
+  '10.60|19.90|-3.45',
+  '6.55|19.90|9.05',
+]);
+const CHARGE_ARM_LUNGE_ANGLE = -1.38;
+const CHARGE_LEAD_THIGH_ANGLE = -0.38;
+const CHARGE_LEAD_SHIN_ANGLE = 0.78;
+const CHARGE_LEAD_FOOT_ANGLE = -0.26;
+const CHARGE_TRAIL_THIGH_ANGLE = 0.72;
+const CHARGE_TRAIL_SHIN_ANGLE = -0.18;
+const CHARGE_TRAIL_FOOT_ANGLE = -0.12;
+// The airborne flip pivot and abdomen together pitch the skeleton forward by
+// 1.10 radians, so these values intentionally counter-rotate past that pose.
+const DIVE_WINDUP_ARM_LUNGE_ANGLE = -1.72;
+const DIVE_AIRBORNE_ARM_LUNGE_ANGLE = -2.5;
+const DIVE_TRAIL_THIGH_ANGLE = 0.17;
+const DIVE_TRAIL_SHIN_ANGLE = -0.18;
+const DIVE_TRAIL_FOOT_ANGLE = -0.08;
 
 export const SHARUKURUSU_STATES = Object.freeze({
   NinjaRun: 'ninjaRun',
@@ -28,6 +59,7 @@ export const SHARUKURUSU_STATES = Object.freeze({
 
 const BONE_NAMES = Object.freeze({
   abdomen: ['Bone000', 'joint1'],
+  head: [HEAD_BONE_NAME],
   leftThigh: ['Bone008', 'joint2'],
   leftShin: ['Bone009', 'joint3'],
   leftFoot: ['Bone010', 'joint4'],
@@ -68,6 +100,7 @@ const tempClosestSecondPoint = new THREE.Vector3();
 const tempClosestSegmentResult = { distanceSquared: Infinity, firstRatio: 0, secondRatio: 0 };
 const tempChargeDelta = new THREE.Vector3();
 const tempChargeTipEnd = new THREE.Vector3();
+const tempHeadLookDirection = new THREE.Vector3();
 const tempSharukurusuArmSegments = [
   { id: 'leftDrill', start: tempLeftElbowWorld, end: tempLeftDrillWorld, radius: 0.34 },
   { id: 'leftUpperArm', start: tempLeftShoulderWorld, end: tempLeftElbowWorld, radius: 0.42 },
@@ -105,10 +138,64 @@ function createSharukurusuMaterial(source) {
   return material;
 }
 
+function getAuthoredVertexKey(position, vertex) {
+  return [position.getX(vertex), position.getY(vertex), position.getZ(vertex)]
+    .map((value) => value.toFixed(2))
+    .join('|');
+}
+
+function addSharukurusuHeadPivot(model) {
+  const abdomen = findNamedObject(model, BONE_NAMES.abdomen);
+  if (!abdomen || findNamedObject(model, BONE_NAMES.head)) return;
+
+  // The source rig gives the disconnected ruby-eye head island and the lower
+  // body one root joint. Add a runtime-only hinge at the head island's base
+  // ring so the ruby eye can turn toward MegaMan while inheriting body pitch.
+  const head = new THREE.Bone();
+  head.name = HEAD_BONE_NAME;
+  head.position.set(0, HEAD_PIVOT_Y, 0);
+  abdomen.add(head);
+  model.updateMatrixWorld(true);
+
+  const remappedGeometries = new WeakSet();
+  let remappedVertexCount = 0;
+  model.traverse((object) => {
+    if (!object.isSkinnedMesh || !object.skeleton) return;
+    const abdomenIndex = object.skeleton.bones.indexOf(abdomen);
+    if (abdomenIndex < 0) return;
+    const headIndex = object.skeleton.bones.length;
+    const position = object.geometry.getAttribute('position');
+    const skinIndex = object.geometry.getAttribute('skinIndex');
+    const skinWeight = object.geometry.getAttribute('skinWeight');
+    if (!position || !skinIndex || !skinWeight) return;
+
+    if (!remappedGeometries.has(object.geometry)) {
+      for (let vertex = 0; vertex < position.count; vertex += 1) {
+        if (skinIndex.getX(vertex) !== abdomenIndex
+          || skinWeight.getX(vertex) < 0.99
+          || !HEAD_VERTEX_KEYS.has(getAuthoredVertexKey(position, vertex))) continue;
+        skinIndex.setX(vertex, headIndex);
+        remappedVertexCount += 1;
+      }
+      skinIndex.needsUpdate = true;
+      remappedGeometries.add(object.geometry);
+    }
+
+    const extendedSkeleton = new THREE.Skeleton(
+      [...object.skeleton.bones, head],
+      [...object.skeleton.boneInverses, head.matrixWorld.clone().invert()],
+    );
+    object.bind(extendedSkeleton, object.bindMatrix.clone());
+  });
+  model.userData.runtimeRigJointCount = 12;
+  model.userData.runtimeHeadVertexCount = remappedVertexCount;
+}
+
 function prepareSharukurusuTemplate(model) {
   model.name = 'sharukurusuReaverbotTemplate';
   model.userData.authoredReaverbotAsset = 'Sharukurusu';
   model.userData.authoredRigJointCount = 11;
+  addSharukurusuHeadPivot(model);
   model.traverse((object) => {
     if (!object.isMesh) return;
     object.castShadow = true;
@@ -312,6 +399,7 @@ export class SharukurusuEnemy extends Enemy {
       runPhase: Math.random() * Math.PI * 2,
       runHop: 0,
       bladeSpin: 0,
+      headYaw: 0,
       startPosition: this.root.position.clone(),
       targetPosition: this.root.position.clone(),
       direction: new THREE.Vector3(0, 0, 1),
@@ -1023,28 +1111,129 @@ export class SharukurusuEnemy extends Enemy {
     const runSwing = Math.sin(state.runPhase) * run;
     const charge = state.mode === SHARUKURUSU_STATES.ChargeWindup
       || state.mode === SHARUKURUSU_STATES.DrillCharge ? 1 : 0;
-    const dive = state.mode === SHARUKURUSU_STATES.DiveWindup
-      || state.mode === SHARUKURUSU_STATES.DiveAirborne ? 1 : 0;
+    const diveWindup = state.mode === SHARUKURUSU_STATES.DiveWindup ? 1 : 0;
+    const diveAirborne = state.mode === SHARUKURUSU_STATES.DiveAirborne ? 1 : 0;
     const knockedDown = state.mode === SHARUKURUSU_STATES.KnockedDown;
     const backflip = state.mode === SHARUKURUSU_STATES.Backflip;
+    const canTrackHead = !knockedDown && !backflip && Boolean(this._sharukurusuLastGame?.player);
+    let targetHeadYaw = 0;
+    if (canTrackHead) {
+      tempHeadLookDirection.copy(this._sharukurusuLastGame.player.root.position)
+        .sub(this.root.position)
+        .setY(0);
+      if (tempHeadLookDirection.lengthSq() > 0.0001) {
+        const desiredYaw = Math.atan2(tempHeadLookDirection.x, tempHeadLookDirection.z);
+        const yawDelta = desiredYaw - this.root.rotation.y;
+        targetHeadYaw = THREE.MathUtils.clamp(
+          Math.atan2(Math.sin(yawDelta), Math.cos(yawDelta)),
+          -HEAD_TRACK_YAW_LIMIT,
+          HEAD_TRACK_YAW_LIMIT,
+        );
+      }
+    }
+    state.headYaw = dt > 0
+      ? THREE.MathUtils.damp(state.headYaw ?? 0, targetHeadYaw, 14, dt)
+      : targetHeadYaw;
+    const chargeLeadsLeft = state.attackSequence % 2 !== 0;
+    const leftChargeThigh = chargeLeadsLeft
+      ? CHARGE_LEAD_THIGH_ANGLE
+      : CHARGE_TRAIL_THIGH_ANGLE;
+    const rightChargeThigh = chargeLeadsLeft
+      ? CHARGE_TRAIL_THIGH_ANGLE
+      : CHARGE_LEAD_THIGH_ANGLE;
+    const leftChargeShin = chargeLeadsLeft
+      ? CHARGE_LEAD_SHIN_ANGLE
+      : CHARGE_TRAIL_SHIN_ANGLE;
+    const rightChargeShin = chargeLeadsLeft
+      ? CHARGE_TRAIL_SHIN_ANGLE
+      : CHARGE_LEAD_SHIN_ANGLE;
+    const leftChargeFoot = chargeLeadsLeft
+      ? CHARGE_LEAD_FOOT_ANGLE
+      : CHARGE_TRAIL_FOOT_ANGLE;
+    const rightChargeFoot = chargeLeadsLeft
+      ? CHARGE_TRAIL_FOOT_ANGLE
+      : CHARGE_LEAD_FOOT_ANGLE;
 
-    setPartRotation(rig.abdomen, charge * -0.28 + dive * -0.48, 0, runSwing * 0.035);
-    setPartRotation(rig.leftThigh, runSwing * 0.72 - dive * 0.48, 0, 0);
-    setPartRotation(rig.rightThigh, -runSwing * 0.72 - dive * 0.48, 0, 0);
-    setPartRotation(rig.leftShin, Math.max(0, -runSwing) * 0.82 + dive * 0.92, 0, 0);
-    setPartRotation(rig.rightShin, Math.max(0, runSwing) * 0.82 + dive * 0.92, 0, 0);
-    setPartRotation(rig.leftFoot, Math.max(0, runSwing) * -0.32, 0, 0);
-    setPartRotation(rig.rightFoot, Math.max(0, -runSwing) * -0.32, 0, 0);
-    // The authored arm bones extend down local -Y and the imported model uses
-    // a 180-degree yaw correction. Positive X rotation therefore points the
-    // drills along the root's forward axis; the previous negative dive angle
-    // swept both weapons behind the body while it flew toward Mega Man.
-    setPartRotation(rig.leftUpperArm, -runSwing * 0.4 - charge * 1.08 + dive * 2.5, 0, -0.08);
-    setPartRotation(rig.rightUpperArm, runSwing * 0.4 - charge * 1.08 + dive * 2.5, 0, 0.08);
+    setPartRotation(
+      rig.abdomen,
+      charge * -0.28 + diveWindup * -0.48 + diveAirborne * DIVE_BODY_PITCH,
+      0,
+      runSwing * 0.035,
+    );
+    setPartRotation(
+      rig.head,
+      0,
+      state.headYaw,
+      0,
+    );
+    // The charge reads as a held sprinting lunge: one bent lead knee and one
+    // long trailing leg. Alternate the leading side between attack cycles so
+    // repeated charges retain the authored ninja-like rhythm.
+    setPartRotation(
+      rig.leftThigh,
+      runSwing * 0.72 + charge * leftChargeThigh - diveWindup * 0.3
+        + diveAirborne * DIVE_TRAIL_THIGH_ANGLE,
+      0,
+      0,
+    );
+    setPartRotation(
+      rig.rightThigh,
+      -runSwing * 0.72 + charge * rightChargeThigh - diveWindup * 0.3
+        + diveAirborne * DIVE_TRAIL_THIGH_ANGLE,
+      0,
+      0,
+    );
+    setPartRotation(
+      rig.leftShin,
+      Math.max(0, -runSwing) * 0.82 + charge * leftChargeShin
+        + diveWindup * 0.88 + diveAirborne * DIVE_TRAIL_SHIN_ANGLE,
+      0,
+      0,
+    );
+    setPartRotation(
+      rig.rightShin,
+      Math.max(0, runSwing) * 0.82 + charge * rightChargeShin
+        + diveWindup * 0.88 + diveAirborne * DIVE_TRAIL_SHIN_ANGLE,
+      0,
+      0,
+    );
+    setPartRotation(
+      rig.leftFoot,
+      Math.max(0, runSwing) * -0.32 + charge * leftChargeFoot
+        + diveWindup * -0.22 + diveAirborne * DIVE_TRAIL_FOOT_ANGLE,
+      0,
+      0,
+    );
+    setPartRotation(
+      rig.rightFoot,
+      Math.max(0, -runSwing) * -0.32 + charge * rightChargeFoot
+        + diveWindup * -0.22 + diveAirborne * DIVE_TRAIL_FOOT_ANGLE,
+      0,
+      0,
+    );
+    // The authored arm bones extend down local -Y. With the model's facial
+    // +Z side aligned to combat forward, negative X rotation leads both the
+    // charge and dive with the drill tips instead of sweeping them rearward.
+    setPartRotation(
+      rig.leftUpperArm,
+      -runSwing * 0.4 + charge * CHARGE_ARM_LUNGE_ANGLE
+        + diveWindup * DIVE_WINDUP_ARM_LUNGE_ANGLE
+        + diveAirborne * DIVE_AIRBORNE_ARM_LUNGE_ANGLE,
+      0,
+      -0.08,
+    );
+    setPartRotation(
+      rig.rightUpperArm,
+      runSwing * 0.4 + charge * CHARGE_ARM_LUNGE_ANGLE
+        + diveWindup * DIVE_WINDUP_ARM_LUNGE_ANGLE
+        + diveAirborne * DIVE_AIRBORNE_ARM_LUNGE_ANGLE,
+      0,
+      0.08,
+    );
     setPartRotation(rig.leftDrill, 0, state.bladeSpin, 0);
     setPartRotation(rig.rightDrill, 0, -state.bladeSpin, 0);
 
-    const yawOffset = this.type.modelYawOffset ?? Math.PI;
+    const yawOffset = this.type.modelYawOffset ?? 0;
     this.externalModelGroup.rotation.y = yawOffset;
     if (run) this.externalModelGroup.position.y += state.runHop;
     const flipPivot = this.sharukurusuFlipPivot;
@@ -1064,7 +1253,7 @@ export class SharukurusuEnemy extends Enemy {
       } else if (state.mode === SHARUKURUSU_STATES.DiveAirborne) {
         this.externalModelGroup.rotation.x = 0;
         this.externalModelGroup.rotation.z = 0;
-        flipPivot.rotation.x = -0.62;
+        flipPivot.rotation.x = 0;
         flipPivot.rotation.z = Math.sin(state.timer * 18) * 0.06;
       }
     } else if (knockedDown) {
@@ -1075,7 +1264,7 @@ export class SharukurusuEnemy extends Enemy {
       this.externalModelGroup.rotation.x = -state.backflipRotation;
       this.externalModelGroup.rotation.z = 0;
     } else if (state.mode === SHARUKURUSU_STATES.DiveAirborne) {
-      this.externalModelGroup.rotation.x = -0.62;
+      this.externalModelGroup.rotation.x = 0;
       this.externalModelGroup.rotation.z = Math.sin(state.timer * 18) * 0.06;
     }
   }

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('quadruped eyelids and the back-of-claw guard read as distinct defenses', async ({ page }, testInfo) => {
+test('quadruped eyelids and the cross-body claw brace read as distinct defenses', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto('/?reaverbotSeed=defense-pose-visual-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
@@ -93,20 +93,28 @@ test('quadruped eyelids and the back-of-claw guard read as distinct defenses', a
       enemy.visual.defense.shutters[1].position.y
         - enemy.visual.defense.shutters[0].position.y,
     );
+    const bodyQuaternion = claw.root.getWorldQuaternion(claw.visual.root.quaternion.clone());
     const bodyForward = new Vector3(0, 0, 1)
-      .applyQuaternion(claw.root.getWorldQuaternion(claw.visual.root.quaternion.clone()))
+      .applyQuaternion(bodyQuaternion)
       .setY(0)
       .normalize();
+    const bodyRight = new Vector3(1, 0, 0).applyQuaternion(bodyQuaternion).normalize();
     const backForward = new Vector3(0, 0, -1)
       .applyQuaternion(claw.visual.weapon.clawPalmBackAnchor.getWorldQuaternion(claw.visual.root.quaternion.clone()))
       .setY(0)
       .normalize();
-    const guardTarget = claw.visual.root.localToWorld(new Vector3(
-      claw.visual.frame.anchors.center[0],
-      claw.visual.frame.anchors.center[1] + 0.08,
-      claw.visual.frame.anchors.center[2] + 0.58,
-    ));
-    const guardBack = claw.visual.weapon.clawPalmBackAnchor.getWorldPosition(new Vector3());
+    const guardShoulder = claw.visual.weapon.clawSwingPivot.getWorldPosition(new Vector3());
+    const guardElbow = claw.visual.weapon.clawElbowPivot.getWorldPosition(new Vector3());
+    const guardWrist = claw.visual.weapon.clawWristPivot.getWorldPosition(new Vector3());
+    const upperDirection = guardElbow.clone().sub(guardShoulder).normalize();
+    const forearmDirection = guardWrist.clone().sub(guardElbow).normalize();
+    const guardElbowBend = Math.acos(Math.max(-1, Math.min(1, upperDirection.dot(forearmDirection))));
+    const guardElbowLocal = claw.visual.root.worldToLocal(guardElbow.clone());
+    const guardWristLocal = claw.visual.root.worldToLocal(guardWrist.clone());
+    const guardBackLocal = claw.visual.root.worldToLocal(
+      claw.visual.weapon.clawPalmBackAnchor.getWorldPosition(new Vector3()),
+    );
+    const halfBodyWidth = Math.max(0.45, Math.abs(claw.visual.frame.anchors.side[0]));
 
     const stagedRoots = [closedQuadruped.root, openQuadruped.root, claw.root];
     const belongsToStage = (object) => stagedRoots.some((root) => {
@@ -141,7 +149,15 @@ test('quadruped eyelids and the back-of-claw guard read as distinct defenses', a
       openEyeExposed: openQuadruped.brain.weakPointExposed,
       openWeakPointResolved,
       earlyTelegraph,
-      guardBackDistance: guardBack.distanceTo(guardTarget),
+      guardStyle: claw.visual.weapon.group.userData.clawRig.guardStyle,
+      guardBasePositionShift: claw.visual.weapon.group.position.distanceTo(
+        claw.visual.weapon.group.userData.clawBasePosition,
+      ),
+      guardElbowBend,
+      guardForearmAcross: forearmDirection.dot(bodyRight)
+        * claw.genome.modules.weapon.mountSide,
+      guardDepthReturn: guardElbowLocal.z - guardWristLocal.z,
+      guardPalmCenterOverlap: Math.abs(guardBackLocal.x) < halfBodyWidth + 0.25,
       guardBackFacingDot: backForward.dot(bodyForward),
       guardPalmVisible: claw.visual.weakPoint.group.visible,
     };
@@ -162,7 +178,13 @@ test('quadruped eyelids and the back-of-claw guard read as distinct defenses', a
   });
   expect(result.openEyeExposed).toBe(true);
   expect(result.openWeakPointResolved).toBe(true);
-  expect(result.guardBackDistance).toBeLessThan(0.08);
+  expect(result.guardStyle).toBe('crossBodyElbowBrace');
+  expect(result.guardBasePositionShift).toBeLessThan(0.001);
+  expect(result.guardElbowBend).toBeGreaterThan(2.05);
+  expect(result.guardElbowBend).toBeLessThan(2.3);
+  expect(result.guardForearmAcross).toBeLessThan(-0.72);
+  expect(result.guardDepthReturn).toBeGreaterThan(1.1);
+  expect(result.guardPalmCenterOverlap).toBe(true);
   expect(result.guardBackFacingDot).toBeGreaterThan(0.95);
   expect(result.guardPalmVisible).toBe(false);
 

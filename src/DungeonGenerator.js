@@ -15,6 +15,12 @@ const ALIEN_SERVER_ROOM_MODEL = `${RUIN_ROOM_MODEL_BASE_PATH}alien_server_room_e
 const ALIEN_SERVER_ROOM_FOOTPRINT = { width: 24, depth: 18 };
 const MACHINE_FACTORY_ROOM_MODEL = `${RUIN_ROOM_MODEL_BASE_PATH}industrial_machine_factory_room.glb`;
 const MACHINE_FACTORY_ROOM_FOOTPRINT = { width: 30, depth: 22 };
+const MACHINE_PRESS_LEG_OFFSET_X = 1.15;
+const MACHINE_PRESS_LEG_WIDTH = 0.18;
+const MACHINE_PRESS_LEG_HEIGHT = 1.45;
+const MACHINE_PRESS_LEG_DEPTH = 0.32;
+const MACHINE_PRESS_LEG_VISUAL_CENTER_Y = 0.72;
+const MACHINE_PRESS_LEG_COLLISION_PADDING = 0.05;
 const COOLANT_RELAY_ROOM_MODEL = `${RUIN_ROOM_MODEL_BASE_PATH}industrial_coolant_relay_puzzle_room.glb`;
 const COOLANT_RELAY_ROOM_FOOTPRINT = { width: 30, depth: 24 };
 const ENABLE_IMPORTED_GLB_ROOMS = false;
@@ -7619,8 +7625,28 @@ export class DungeonGenerator {
         addConveyor('machineRightPartsFeedConveyor', sideBeltX, 0, 1.55, halfD * 1.16, 1);
 
         for (const z of pressZs) {
-          addBox(fallback, 'machinePressLeftLeg', -1.15, z, 0.18, 1.45, 0.32, materials.supportMetal, 0.72);
-          addBox(fallback, 'machinePressRightLeg', 1.15, z, 0.18, 1.45, 0.32, materials.supportMetal, 0.72);
+          addBox(
+            fallback,
+            'machinePressLeftLeg',
+            -MACHINE_PRESS_LEG_OFFSET_X,
+            z,
+            MACHINE_PRESS_LEG_WIDTH,
+            MACHINE_PRESS_LEG_HEIGHT,
+            MACHINE_PRESS_LEG_DEPTH,
+            materials.supportMetal,
+            MACHINE_PRESS_LEG_VISUAL_CENTER_Y,
+          );
+          addBox(
+            fallback,
+            'machinePressRightLeg',
+            MACHINE_PRESS_LEG_OFFSET_X,
+            z,
+            MACHINE_PRESS_LEG_WIDTH,
+            MACHINE_PRESS_LEG_HEIGHT,
+            MACHINE_PRESS_LEG_DEPTH,
+            materials.supportMetal,
+            MACHINE_PRESS_LEG_VISUAL_CENTER_Y,
+          );
           addBox(fallback, 'machinePressTopHousing', 0, z, 3.15, 0.5, 0.76, materials.wallTrim, 1.78);
           addBox(fallback, 'machinePressPlate', 0, z, 2.55, 0.16, 0.7, materials.hazardStripe, 1.1);
           addPost(fallback, 'machinePressHydraulicPiston', 0, z, 0.1, 0.78, materials.supportMetal);
@@ -11106,10 +11132,28 @@ export class DungeonGenerator {
         const pressZs = [-halfD * 0.34, 0, halfD * 0.34];
 
         for (const z of pressZs) {
-          addZone(room, `machinePress_${z.toFixed(2)}`, 0, z, 1.72, 0.62, {
-            label: 'Machine press',
-            verticalHalfHeight: 2.6,
-          });
+          // The press housing and plate are overhead decoration. Projecting
+          // their full footprint down to the floor creates an invisible wall
+          // through access ramps that legitimately pass beneath the press.
+          // Only the two visible support legs should block grounded movement.
+          for (const [side, localX] of [
+            ['left', -MACHINE_PRESS_LEG_OFFSET_X],
+            ['right', MACHINE_PRESS_LEG_OFFSET_X],
+          ]) {
+            addZone(
+              room,
+              `machinePress_${z.toFixed(2)}_${side}Leg`,
+              localX,
+              z,
+              MACHINE_PRESS_LEG_WIDTH * 0.5 + MACHINE_PRESS_LEG_COLLISION_PADDING,
+              MACHINE_PRESS_LEG_DEPTH * 0.5 + MACHINE_PRESS_LEG_COLLISION_PADDING,
+              {
+                label: 'Machine press support leg',
+                elevation: MACHINE_PRESS_LEG_HEIGHT * 0.5,
+                verticalHalfHeight: MACHINE_PRESS_LEG_HEIGHT * 0.5,
+              },
+            );
+          }
         }
 
         for (const x of [-sideBeltX - 1.5, -sideBeltX + 1.5, sideBeltX - 1.5, sideBeltX + 1.5]) {

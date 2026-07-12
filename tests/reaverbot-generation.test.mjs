@@ -368,6 +368,215 @@ test('close-range Reaverbots use the harder long-tracking combat profile', () =>
   assert.ok(pouncer.stats.attackCooldown < 2.5);
 });
 
+test('pouncers couple their attack module to generated spring locomotion', () => {
+  const mobilityIds = new Set();
+  const weaponIds = new Set();
+  for (let variant = 0; variant < 320; variant += 1) {
+    const genome = generateReaverbotGenome({
+      seed: `spring-contract:${variant}`,
+      archetypeId: 'pouncer',
+      threatTier: 2,
+      encounterSize: 3,
+    });
+    mobilityIds.add(genome.body.mobilityId);
+    weaponIds.add(genome.modules.weapon.id);
+    assert.equal(genome.body.movementModel, 'springBounce');
+    assert.ok(genome.body.tags.includes('springLoaded'));
+    assert.ok(genome.body.tags.includes('bouncing'));
+    assert.equal(genome.modules.weapon.attackKind, 'pounce');
+    assert.equal(genome.modules.weapon.mountRole, 'locomotion');
+    assert.equal(genome.modules.weapon.integratedIntoMobility, true);
+    assert.equal(genome.stats.attackRange, 8.6);
+    assert.equal(validateReaverbotGenome(genome).valid, true);
+    if (genome.body.planId === 'quadruped') {
+      assert.equal(genome.body.mobilityId, 'springQuadruped');
+      assert.equal(genome.body.mobilityLegCount, 4);
+    } else {
+      assert.ok(['pairedSprings', 'monoPogo'].includes(genome.body.mobilityId));
+      assert.equal(genome.body.mobilityLegCount, genome.body.mobilityId === 'monoPogo' ? 1 : 2);
+    }
+  }
+  assert.deepEqual([...mobilityIds].sort(), ['monoPogo', 'pairedSprings', 'springQuadruped']);
+  assert.deepEqual([...weaponIds].sort(), ['pounceActuator', 'shockPiston']);
+
+  const fixtures = [
+    ['spring-audit:1', 'springQuadruped', 4],
+    ['spring-audit:3', 'monoPogo', 1],
+    ['spring-audit:16', 'pairedSprings', 2],
+  ];
+  for (const [seed, mobilityId, legCount] of fixtures) {
+    const genome = generateReaverbotGenome({ seed, archetypeId: 'pouncer', threatTier: 2, encounterSize: 2 });
+    const visual = createReaverbotVisual(genome);
+    assert.equal(genome.body.mobilityId, mobilityId);
+    assert.equal(visual.frame.springMobility.id, mobilityId);
+    assert.equal(visual.frame.springLimbs.length, legCount);
+    assert.ok(visual.frame.springLimbs.every((limb) => limb.springLoaded && limb.springCoils.length >= 4));
+    const facialWeaponMeshes = [];
+    visual.weapon.group.traverse((object) => {
+      if (object.isMesh) facialWeaponMeshes.push(object.name);
+    });
+    assert.deepEqual(facialWeaponMeshes, []);
+    const names = [];
+    let integratedWeaponSurfaces = 0;
+    visual.root.traverse((object) => {
+      names.push(object.name);
+      if (object.userData?.integratedMobilityWeapon) integratedWeaponSurfaces += 1;
+    });
+    assert.ok(integratedWeaponSurfaces >= legCount * 2);
+    assert.equal(names.some((name) => name === 'generatedPounceActuatorArmorFace'), false);
+    if (mobilityId === 'springQuadruped') {
+      assert.equal(names.some((name) => /CanineLower(Link|Armor)/.test(name)), false);
+    } else if (mobilityId === 'monoPogo') {
+      assert.ok(names.includes('generatedHopperMonoPogoLeg'));
+      assert.equal(names.some((name) => /generatedHopper(Left|Right)SpringLeg/.test(name)), false);
+    }
+  }
+
+  const invalid = generateReaverbotGenome({
+    seed: 'spring-invalid-proof',
+    archetypeId: 'pouncer',
+    encounterSize: 2,
+  });
+  invalid.body.mobilityId = 'standard';
+  invalid.body.movementModel = 'groundStep';
+  invalid.body.tags = invalid.body.tags.filter((tag) => !['springLoaded', 'bouncing', 'singleLegged'].includes(tag));
+  const validation = validateReaverbotGenome(invalid);
+  assert.ok(validation.errors.includes('pouncer-spring-mobility-required'));
+  assert.ok(validation.errors.includes('pounce-spring-mobility-required'));
+
+  const invalidMount = generateReaverbotGenome({
+    seed: 'spring-invalid-mount-proof',
+    archetypeId: 'pouncer',
+    encounterSize: 2,
+  });
+  invalidMount.modules.weapon.integratedIntoMobility = false;
+  invalidMount.modules.weapon.mountRole = 'forward';
+  assert.ok(validateReaverbotGenome(invalidMount).errors.includes('pouncer-mobility-weapon-required'));
+
+  const springQuadruped = generateReaverbotGenome({
+    seed: 'spring-audit:1',
+    archetypeId: 'pouncer',
+    threatTier: 2,
+    encounterSize: 2,
+  });
+  const bodyDrop = createReaverbotSalvageProfile(springQuadruped)
+    .find((candidate) => candidate.aspect === 'body');
+  assert.equal(bodyDrop?.materialId, 'temperedJumpSpring');
+  assert.equal(bodyDrop?.moduleLabel, 'Spring-Loaded Quadruped');
+});
+
+test('crawler artillery use compound silhouettes with articulated legs or driven wheel bogies', () => {
+  let articulated = null;
+  let wheeled = null;
+  let wheeledSeed = null;
+  for (let variant = 0; variant < 512 && (!articulated || !wheeled); variant += 1) {
+    const seed = `crawler-mobility-contract:${variant}`;
+    const genome = generateReaverbotGenome({
+      seed,
+      archetypeId: 'artillery',
+      threatTier: 2,
+      encounterSize: 3,
+    });
+    if (genome.body.planId !== 'crawler') continue;
+    if (genome.body.mobilityId === 'articulatedCrawler') articulated ??= genome;
+    if (genome.body.mobilityId === 'wheelBogies' && !wheeled) {
+      wheeled = genome;
+      wheeledSeed = seed;
+    }
+  }
+  assert.ok(articulated, 'seed sweep should produce an articulated crawler');
+  assert.ok(wheeled, 'seed sweep should produce a wheeled crawler');
+
+  const summarizeAssembly = (object) => {
+    const meshes = [];
+    object.traverse((entry) => {
+      if (entry.isMesh) meshes.push(entry);
+    });
+    return {
+      meshCount: meshes.length,
+      geometryFamilies: new Set(meshes.map((mesh) => mesh.geometry.type)),
+    };
+  };
+  const inspect = (genome) => {
+    const visual = createReaverbotVisual(genome);
+    const names = [];
+    visual.root.traverse((object) => names.push(object.name));
+    return { visual, names };
+  };
+  const articulatedVisual = inspect(articulated);
+  const wheeledVisual = inspect(wheeled);
+
+  for (const { visual, names } of [articulatedVisual, wheeledVisual]) {
+    assert.equal(validateReaverbotGenome(visual.genome ?? (visual === articulatedVisual.visual ? articulated : wheeled)).valid, true);
+    assert.equal(visual.frame.body.isGroup, true);
+    assert.equal(visual.frame.head.isGroup, true);
+    assert.ok(summarizeAssembly(visual.frame.body).meshCount >= 8);
+    assert.ok(summarizeAssembly(visual.frame.body).geometryFamilies.size >= 3);
+    assert.ok(summarizeAssembly(visual.frame.head).meshCount >= 6);
+    assert.ok(summarizeAssembly(visual.frame.head).geometryFamilies.size >= 3);
+    assert.equal(names.includes('generatedReaverbotAnimalTorso'), false);
+    assert.equal(names.includes('generatedReaverbotAnimalHead'), false);
+    assert.equal(names.some((name) => /generatedCrawler(UpperLeg|LowerLeg|WedgeFoot)/.test(name)), false);
+  }
+
+  assert.equal(articulated.body.movementModel, 'groundStep');
+  assert.equal(articulated.body.mobilityLegCount, 6);
+  assert.equal(articulated.body.mobilityWheelCount, 0);
+  assert.equal(articulatedVisual.visual.frame.limbs.length, 6);
+  assert.equal(articulatedVisual.visual.frame.wheels.length, 0);
+  assert.ok(articulatedVisual.visual.frame.limbs.every((limb) => (
+    limb.crawlerArticulated
+    && limb.kneePivot.parent === limb.hipPivot
+    && limb.footPivot.parent === limb.kneePivot
+  )));
+
+  assert.equal(wheeled.body.movementModel, 'wheelDrive');
+  assert.equal(wheeled.body.mobilityLegCount, 0);
+  assert.equal(wheeled.body.mobilityWheelCount, 4);
+  assert.ok(wheeled.body.tags.includes('wheeled'));
+  assert.ok(wheeled.body.tags.includes('rolling'));
+  assert.ok(wheeled.stats.moveSpeed > articulated.stats.moveSpeed);
+  assert.ok(wheeled.behavior.turnRate < articulated.behavior.turnRate);
+  assert.equal(wheeledVisual.visual.frame.limbs.length, 0);
+  assert.equal(wheeledVisual.visual.frame.wheels.length, 4);
+  assert.ok(wheeledVisual.visual.frame.wheels.every((wheel) => (
+    wheel.spinPivot && wheel.steerPivot && wheel.tire.userData.reaverbotWorkingEnd
+  )));
+  assert.deepEqual(
+    generateReaverbotGenome({
+      seed: wheeledSeed,
+      archetypeId: 'artillery',
+      threatTier: 2,
+      encounterSize: 3,
+    }).body.mobilityId,
+    wheeled.body.mobilityId,
+  );
+  const wheelDrop = createReaverbotSalvageProfile(wheeled)
+    .find((candidate) => candidate.aspect === 'body');
+  assert.equal(wheelDrop?.materialId, 'ancientWheelGearset');
+
+  const invalidBody = structuredClone(wheeled);
+  invalidBody.body.planId = 'tripod';
+  assert.ok(validateReaverbotGenome(invalidBody).errors.includes('crawler-mobility-body-incompatible'));
+  const invalidDrive = structuredClone(wheeled);
+  invalidDrive.body.movementModel = 'groundStep';
+  assert.ok(validateReaverbotGenome(invalidDrive).errors.includes('wheel-bogy-contract'));
+
+  let suppressedCrawlerCount = 0;
+  for (let variant = 0; variant < 180; variant += 1) {
+    const genome = generateReaverbotGenome({
+      seed: `crawler-wheel-suppression:${variant}`,
+      archetypeId: 'artillery',
+      encounterSize: 3,
+      suppressedTags: ['rolling_reaverbot'],
+    });
+    if (genome.body.planId !== 'crawler') continue;
+    suppressedCrawlerCount += 1;
+    assert.equal(genome.body.mobilityId, 'articulatedCrawler');
+  }
+  assert.ok(suppressedCrawlerCount > 0);
+});
+
 test('revamped melee modules are armored, deterministic, and body-plan compatible', () => {
   const clawMountSides = new Set();
   let jawCount = 0;
@@ -932,12 +1141,15 @@ test('leg armor physically covers its paired joint until the plates retract', ()
 
 test('every procedural Reaverbot aspect has a specific crafting material source', () => {
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.behavior).sort(), Object.keys(REAVERBOT_ARCHETYPES).sort());
-  assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.body).sort(), Object.keys(REAVERBOT_BODY_PLANS).sort());
+  assert.deepEqual(
+    Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.body).sort(),
+    [...Object.keys(REAVERBOT_BODY_PLANS), 'articulatedCrawler', 'wheelBogies'].sort(),
+  );
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.eye), ['singleRubyLens']);
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.weapon).sort(), Object.keys(REAVERBOT_WEAPONS).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.defense).sort(), Object.keys(REAVERBOT_DEFENSES).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.weakPoint).sort(), Object.keys(REAVERBOT_WEAK_POINTS).sort());
-  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 56);
+  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 58);
 
   let foundClawProfile = false;
   for (let seed = 0; seed < 250; seed += 1) {

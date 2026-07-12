@@ -16,6 +16,8 @@ const CANDIDATE_COUNT = 8;
 const GLOBAL_REAVERBOT_MOVE_SPEED_SCALE = 1.22;
 const NAME_PREFIXES = ['AR', 'BA', 'DA', 'GA', 'KA', 'KO', 'MU', 'NA', 'OM', 'RA', 'SA', 'TO', 'UR', 'VA', 'ZA'];
 const NAME_SUFFIXES = ['EN', 'GAR', 'KIR', 'MOL', 'ORA', 'RAK', 'TUM', 'VAN', 'XEL', 'ZUN'];
+const SPRING_MOBILITY_IDS = new Set(['springQuadruped', 'pairedSprings', 'monoPogo']);
+const CRAWLER_MOBILITY_IDS = new Set(['articulatedCrawler', 'wheelBogies']);
 const WEAPON_WEAK_POINT_WEIGHTS = Object.freeze({
   ramHorn: [['legJoint', 4], ['rearBattery', 3]],
   crusherJaw: [['rearBattery', 3], ['legJoint', 3], ['eyeLens', 1]],
@@ -73,6 +75,7 @@ function getArchetypeWeights(intent, context) {
   if (/nest|swarm|crawler|pack/.test(text)) boost(['packHunter', 'pursuer'], 2.2);
   if (/server|sensor|turret|security/.test(text)) boost(['shieldSentinel', 'zoneController', 'tractorController', 'artillery'], 1.8);
   if (/machine|factory|assembly|heavy/.test(text)) boost(['artillery', 'shieldSentinel', 'duelist'], 1.65);
+  if (/rolling|wheel|conveyor/.test(text)) boost(['artillery'], 2.1);
   if (/coolant|fluid|cryo|electric|energy/.test(text)) boost(['zoneController', 'aerialBomber', 'tractorController'], 1.9);
   if (/trap|ambush|hunting|aggressive/.test(text)) boost(['pouncer', 'pursuer'], 1.8);
   if (/flying|aerial|hover/.test(text)) boost(['aerialBomber', 'zoneController', 'tractorController'], 2.4);
@@ -114,6 +117,73 @@ function pickBodyPlan(rng, archetype) {
   return rng.pick(compatible) ?? REAVERBOT_BODY_PLANS.biped;
 }
 
+function createMobilityVariant(rng, archetype, body, context = {}) {
+  if (archetype.id !== 'pouncer' && body.id === 'crawler') {
+    const contextText = getContextText(context);
+    const suppressedText = (context.suppressedTags ?? []).join(' ').toLowerCase();
+    const wheelChance = /rolling|wheel/.test(suppressedText)
+      ? 0
+      : /rolling|wheel|conveyor/.test(contextText)
+        ? 0.78
+        : 0.46;
+    const wheeled = rng.chance(wheelChance);
+    return {
+      id: wheeled ? 'wheelBogies' : 'articulatedCrawler',
+      label: wheeled ? 'Four-Wheel Bogy Drive' : 'Six-Leg Crawler Linkage',
+      movementModel: wheeled ? 'wheelDrive' : 'groundStep',
+      legCount: wheeled ? 0 : 6,
+      wheelCount: wheeled ? 4 : 0,
+      salvageModuleId: wheeled ? 'wheelBogies' : 'articulatedCrawler',
+      moveSpeedScale: wheeled ? 1.18 : 1,
+      turnRateScale: wheeled ? 0.84 : 1,
+      tags: wheeled
+        ? ['wheeled', 'rolling', 'traction', 'wheelDrive', 'lowProfile']
+        : ['articulated', 'sixLegged', 'terrainGrip'],
+    };
+  }
+
+  if (archetype.id !== 'pouncer') {
+    return {
+      id: 'standard',
+      label: body.label,
+      movementModel: body.tags.includes('aerial') ? 'flight' : 'groundStep',
+      legCount: null,
+      wheelCount: 0,
+      salvageModuleId: body.id,
+      moveSpeedScale: 1,
+      turnRateScale: 1,
+      tags: [],
+    };
+  }
+
+  if (body.id === 'quadruped') {
+    return {
+      id: 'springQuadruped',
+      label: 'Spring-Loaded Quadruped',
+      movementModel: 'springBounce',
+      legCount: 4,
+      wheelCount: 0,
+      salvageModuleId: 'hopper',
+      moveSpeedScale: 1,
+      turnRateScale: 1,
+      tags: ['springLoaded', 'bouncing'],
+    };
+  }
+
+  const monoPogo = rng.chance(0.4);
+  return {
+    id: monoPogo ? 'monoPogo' : 'pairedSprings',
+    label: monoPogo ? 'Mono-Pogo Chassis' : 'Paired Spring Legs',
+    movementModel: 'springBounce',
+    legCount: monoPogo ? 1 : 2,
+    wheelCount: 0,
+    salvageModuleId: 'hopper',
+    moveSpeedScale: 1,
+    turnRateScale: 1,
+    tags: ['springLoaded', 'bouncing', ...(monoPogo ? ['singleLegged'] : [])],
+  };
+}
+
 function pickWeapon(rng, archetype, body) {
   const compatible = archetype.weapons
     .map((id) => REAVERBOT_WEAPONS[id])
@@ -121,12 +191,46 @@ function pickWeapon(rng, archetype, body) {
   return rng.pick(compatible) ?? REAVERBOT_WEAPONS.pulseCannon;
 }
 
-function createWeaponVariant(weapon, rng) {
-  if (weapon.id !== 'clawArm') return weapon;
-  return {
-    ...weapon,
-    mountSide: rng.chance(0.5) ? -1 : 1,
-  };
+function createWeaponVariant(weapon, rng, archetype) {
+  if (archetype.id === 'pouncer') {
+    const integratedMobility = {
+      mountRole: 'locomotion',
+      integratedIntoMobility: true,
+    };
+    if (weapon.id === 'shockPiston') {
+      return {
+        ...weapon,
+        ...integratedMobility,
+        tags: [...new Set([...weapon.tags, 'pounce', 'landingShockwave'])],
+        attackKind: 'pounce',
+        range: 8.6,
+        preferredRange: 4.5,
+        damageScale: 1.08,
+        landingRadius: 2.35,
+        landingDamageScale: 1.08,
+      };
+    }
+    if (weapon.id === 'pounceActuator') {
+      return {
+        ...weapon,
+        ...integratedMobility,
+        tags: [...weapon.tags],
+      };
+    }
+  }
+  if (weapon.id === 'clawArm') {
+    return {
+      ...weapon,
+      mountSide: rng.chance(0.5) ? -1 : 1,
+    };
+  }
+  if (weapon.id === 'crusherJaw') {
+    return {
+      ...weapon,
+      jawVariant: rng.chance(0.5) ? 'canineFangCage' : 'crusherTrap',
+    };
+  }
+  return weapon;
 }
 
 function pickDefense(rng, archetype, body) {
@@ -182,7 +286,7 @@ function createProportions(rng, body) {
   };
 }
 
-function createStats(archetype, body, weapon, threatTier, proportions, context) {
+function createStats(archetype, body, mobility, weapon, threatTier, proportions, context) {
   const tier = clamp(Math.trunc(threatTier) || 1, 1, 8);
   const tierHealth = 1 + (tier - 1) * 0.2;
   const tierDamage = 1 + (tier - 1) * 0.105;
@@ -205,6 +309,7 @@ function createStats(archetype, body, weapon, threatTier, proportions, context) 
       base.speed
       * GLOBAL_REAVERBOT_MOVE_SPEED_SCALE
       * moveSpeedScale
+      * (mobility.moveSpeedScale ?? 1)
       * (1 + Math.min(0.16, (tier - 1) * 0.025))
     ).toFixed(3)),
     attackRange: Number(attackRange.toFixed(3)),
@@ -223,7 +328,7 @@ function createStats(archetype, body, weapon, threatTier, proportions, context) 
   };
 }
 
-function createBehavior(archetype, weapon, weakPoint, rng) {
+function createBehavior(archetype, mobility, weapon, weakPoint, rng) {
   const base = archetype.behavior;
   const attackKind = weapon.attackKind;
   const telegraphDuration = weapon.telegraphDuration ?? base.telegraph;
@@ -256,7 +361,7 @@ function createBehavior(archetype, weapon, weakPoint, rng) {
     commitDuration,
     recoveryDuration,
     exposureDuration: Number(exposureDuration.toFixed(3)),
-    turnRate: base.turnRate,
+    turnRate: Number((base.turnRate * (mobility.turnRateScale ?? 1)).toFixed(3)),
     orbitDirection: rng.chance(0.5) ? -1 : 1,
     aggression: Number(rng.float(0.88, 1.12).toFixed(3)),
     minimumPackSize: base.minimumPackSize ?? 1,
@@ -277,15 +382,16 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
   const rng = new SeededRandom(`${seed}:candidate:${candidateIndex}`);
   const archetype = pickArchetype(rng.fork('archetype'), context);
   const body = pickBodyPlan(rng.fork('body'), archetype);
+  const mobility = createMobilityVariant(rng.fork('mobility'), archetype, body, context);
   const weaponDefinition = pickWeapon(rng.fork('weapon'), archetype, body);
-  const weapon = createWeaponVariant(weaponDefinition, rng.fork('weaponVariant'));
+  const weapon = createWeaponVariant(weaponDefinition, rng.fork('weaponVariant'), archetype);
   const defense = weapon.id === 'clawArm'
     ? null
     : pickDefense(rng.fork('defense'), archetype, body);
   const weakPoint = pickWeakPoint(rng.fork('weakPoint'), archetype, defense, weapon);
   const proportions = createProportions(rng.fork('proportions'), body);
-  const behavior = createBehavior(archetype, weapon, weakPoint, rng.fork('behavior'));
-  const stats = createStats(archetype, body, weapon, threatTier, proportions, context);
+  const behavior = createBehavior(archetype, mobility, weapon, weakPoint, rng.fork('behavior'));
+  const stats = createStats(archetype, body, mobility, weapon, threatTier, proportions, context);
   const tier = clamp(Math.trunc(threatTier) || 1, 1, 8);
   const spent = archetype.threatCost + weapon.threatCost + (defense?.threatCost ?? 0) + Math.max(1, tier - 1);
   const budget = 13 + tier * 3 + (context.elite ? 5 : 0);
@@ -307,7 +413,13 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
       label: body.label,
       navigationMode: body.tags.includes('aerial') ? 'air' : 'ground',
       hoverHeight: body.hoverHeight ?? 0,
-      tags: [...body.tags],
+      tags: [...new Set([...body.tags, ...mobility.tags])],
+      mobilityId: mobility.id,
+      mobilityLabel: mobility.label,
+      movementModel: mobility.movementModel,
+      mobilityLegCount: mobility.legCount,
+      mobilityWheelCount: mobility.wheelCount,
+      mobilitySalvageId: mobility.salvageModuleId,
       proportions,
     },
     modules: {
@@ -347,7 +459,7 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
   // separate defense module, but it still contributes a distinct gameplay
   // idea when scoring candidate variety.
   const defenseNoveltyId = defense?.id ?? (weapon.id === 'clawArm' ? 'integratedClawGuard' : null);
-  const novelty = new Set([body.id, weapon.id, defenseNoveltyId, weakPoint.id].filter(Boolean)).size;
+  const novelty = new Set([body.id, mobility.id, weapon.id, defenseNoveltyId, weakPoint.id].filter(Boolean)).size;
   const coherence = weapon.id === 'clawArm' && weakPoint.id === 'clawPalm'
     ? 2
     : (LINKED_WEAK_POINT_WEIGHTS[defense?.id] ?? []).some(([id]) => id === weakPoint.id) ? 2 : 0;
@@ -398,6 +510,13 @@ export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverrid
   const weakPoint = REAVERBOT_WEAK_POINTS[genome?.modules?.weakPoint?.id];
   const archetype = REAVERBOT_ARCHETYPES[genome?.archetypeId];
   const defensePayload = genome?.modules?.defense;
+  const weaponPayload = genome?.modules?.weapon;
+  const mobilityId = genome?.body?.mobilityId;
+  const springMobility = genome?.body?.movementModel === 'springBounce'
+    && SPRING_MOBILITY_IDS.has(mobilityId);
+  const crawlerMobility = CRAWLER_MOBILITY_IDS.has(mobilityId);
+  const wheelMobility = genome?.body?.movementModel === 'wheelDrive'
+    && mobilityId === 'wheelBogies';
   const isClaw = weapon?.id === 'clawArm';
   const usesQuadrupedEyelids = body?.id === 'quadruped'
     && defense?.id === 'armorShutters'
@@ -426,6 +545,35 @@ export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverrid
     errors.push('quadruped-eye-weak-point-required');
   }
   if (genome?.modules?.eye?.color !== REAVERBOT_EYE_COLOR) errors.push('red-eye-contract');
+  if (genome?.archetypeId === 'pouncer' && !springMobility) errors.push('pouncer-spring-mobility-required');
+  if (weaponPayload?.attackKind === 'pounce' && !springMobility) errors.push('pounce-spring-mobility-required');
+  if (genome?.archetypeId === 'pouncer' && weaponPayload?.attackKind !== 'pounce') errors.push('pouncer-pounce-attack-required');
+  if (genome?.archetypeId === 'pouncer'
+    && (!weaponPayload?.integratedIntoMobility || weaponPayload?.mountRole !== 'locomotion')) {
+    errors.push('pouncer-mobility-weapon-required');
+  }
+  if (mobilityId === 'springQuadruped' && body?.id !== 'quadruped') errors.push('spring-quadruped-body-incompatible');
+  if ((mobilityId === 'pairedSprings' || mobilityId === 'monoPogo') && body?.id !== 'hopper') {
+    errors.push('hopper-spring-body-incompatible');
+  }
+  if (mobilityId === 'monoPogo' && genome?.body?.mobilityLegCount !== 1) errors.push('mono-pogo-single-leg-required');
+  if (crawlerMobility && body?.id !== 'crawler') errors.push('crawler-mobility-body-incompatible');
+  if (genome?.body?.movementModel === 'wheelDrive' && mobilityId !== 'wheelBogies') {
+    errors.push('wheel-drive-mobility-mismatch');
+  }
+  if (mobilityId === 'articulatedCrawler'
+    && (genome?.body?.movementModel !== 'groundStep' || genome?.body?.mobilityLegCount !== 6)) {
+    errors.push('articulated-crawler-contract');
+  }
+  if (mobilityId === 'wheelBogies'
+    && (!wheelMobility
+      || genome?.body?.mobilityLegCount !== 0
+      || genome?.body?.mobilityWheelCount !== 4
+      || genome?.body?.navigationMode !== 'ground'
+      || !genome?.body?.tags?.includes('wheeled')
+      || !genome?.body?.tags?.includes('rolling'))) {
+    errors.push('wheel-bogy-contract');
+  }
   if (body && weapon && !hasBodyRequirements(weapon, body)) errors.push('weapon-body-incompatible');
   if (body && defense && !hasBodyRequirements(defense, body)) errors.push('defense-body-incompatible');
   if (archetype && weapon && !archetype.weapons.includes(weapon.id)) errors.push('weapon-archetype-incompatible');

@@ -51,7 +51,7 @@ const COIL_BOUNCE_MIN_HEIGHT = 2.35;
 const CLAW_VAULT_DURATION = 0.54;
 const CLAW_GUARD_DURATION = 0.62;
 const CLAW_RECOIL_DURATION = 0.85;
-const CLAW_TELEGRAPH_DURATION = 1.1;
+const CLAW_TELEGRAPH_DURATION = 1.65;
 const CLAW_HORIZONTAL_COMMIT_DURATION = 0.52;
 const CLAW_VERTICAL_COMMIT_DURATION = 0.58;
 const CLAW_HORIZONTAL_SWEEP_RADIUS = 4.55;
@@ -194,7 +194,7 @@ export class ReaverbotEnemy extends Enemy {
       time: this.aiRandom.float(0, Math.PI * 2),
       state: 'position',
       stateTime: 0,
-      cooldown: this.aiRandom.float(0.45, 1.25),
+      cooldown: this.aiRandom.float(0.45, 1.25) * (genome.behavior.attackCooldownScale ?? 1),
       moving: false,
       speedRatio: 0,
       defenseActive: true,
@@ -264,6 +264,13 @@ export class ReaverbotEnemy extends Enemy {
       clawPalmHits: 0,
       clawDestroyed: false,
       clawSpinProgress: 0,
+      packAttackIdleTime: 0,
+      packFlankRearBias: genome.archetypeId === 'packHunter'
+        ? this.aiRandom.float(
+          genome.behavior.flankRearBiasMin ?? 0.28,
+          genome.behavior.flankRearBiasMax ?? 0.78,
+        )
+        : 0.5,
       alerted: false,
     };
     this.weakPointDamage = 0;
@@ -718,7 +725,8 @@ export class ReaverbotEnemy extends Enemy {
       meta.shieldBlocked = true;
       meta.damageNullified = true;
       meta.defensePartId = 'clawArmGuard';
-      const blocker = this.visual.weapon.clawPalmAnchor
+      const blocker = this.visual.weapon.clawPalmBackAnchor
+        ?? this.visual.weapon.clawPalmAnchor
         ?? this.visual.weapon.group
         ?? this.visual.weakPoint.core;
       meta.hitPosition = blocker.getWorldPosition(new THREE.Vector3());
@@ -898,6 +906,10 @@ export class ReaverbotEnemy extends Enemy {
       return { handled: true, moving: false };
     }
 
+    if (this.genome.archetypeId === 'packHunter') {
+      brain.packAttackIdleTime += dt;
+    }
+
     this._updatePersistentWeaponContact(dt, game);
 
     const effectiveAttackKind = this._getEffectiveAttackKind();
@@ -980,7 +992,7 @@ export class ReaverbotEnemy extends Enemy {
     } else if (attackKind === 'clawMoveset') {
       mode = distance > Math.max(2.2, preferred) ? 'approach' : 'orbit';
     } else if (archetype === 'packHunter') {
-      mode = 'rearFlank';
+      mode = 'flank';
     } else if (attackKind === 'jawCombo') {
       // Jaw carriers behave like vicious mechanical dogs regardless of their
       // broader spawn role: close fast, then strafe and hop in a tight circle.
@@ -1009,12 +1021,13 @@ export class ReaverbotEnemy extends Enemy {
     const attackDistance = this.navigationMode === 'air'
       ? this.root.position.distanceTo(game.player.root.position)
       : distance;
-    const ignoresPackRearRequirement = this._isClawCarrier();
-    const rearAttackReady = ignoresPackRearRequirement
-      || archetype !== 'packHunter'
-      || this._isPlayerBackExposed(game);
-    const readyToAttack = brain.cooldown <= 0
-      && rearAttackReady
+    const forcedPackAttack = archetype === 'packHunter'
+      && brain.packAttackIdleTime >= (this.genome.behavior.forcedAttackSeconds ?? 15);
+    const flankAttackReady = archetype !== 'packHunter'
+      || forcedPackAttack
+      || this._isPlayerFlankExposed(game);
+    const readyToAttack = (brain.cooldown <= 0 || forcedPackAttack)
+      && flankAttackReady
       && this._isAttackDistance(attackDistance)
       && this._canBeginAttack(game);
     // A spring hopper that already has a valid attack should compress into its
@@ -1041,18 +1054,13 @@ export class ReaverbotEnemy extends Enemy {
     if (this._isClawCarrier() && !clawFallback && mode === 'approach') {
       brain.moving = this._updateClawDragAndVault(dt, game, 0);
     } else {
-      brain.moving = archetype === 'packHunter' && !clawFallback
-        ? this._movePackHunterTowardRear(dt, game)
+      brain.moving = archetype === 'packHunter'
+        ? this._movePackHunterTowardFlank(dt, game)
         : this._moveByMode(mode, dt, game, toPlayer, distance);
     }
     brain.speedRatio = brain.moving ? (mode.includes('Slow') ? 0.55 : 1) : 0;
 
-    if (brain.cooldown <= 0
-      && !brain.coilBounceActive
-      && !brain.clawVaultActive
-      && (ignoresPackRearRequirement || archetype !== 'packHunter' || this._isPlayerBackExposed(game))
-      && this._isAttackDistance(attackDistance)
-      && this._canBeginAttack(game)) {
+    if (readyToAttack && !brain.coilBounceActive && !brain.clawVaultActive) {
       this._beginTelegraph(game, toPlayer);
     }
   }
@@ -1132,6 +1140,13 @@ export class ReaverbotEnemy extends Enemy {
     if (brain.stateTime >= telegraphDuration) {
       brain.state = 'commit';
       brain.stateTime = 0;
+      if (this.genome.archetypeId === 'packHunter') {
+        brain.packAttackIdleTime = 0;
+        brain.packFlankRearBias = this.aiRandom.float(
+          this.genome.behavior.flankRearBiasMin ?? 0.28,
+          this.genome.behavior.flankRearBiasMax ?? 0.78,
+        );
+      }
       brain.attackFired = false;
       brain.attackHit = false;
       brain.comboStrikesFired = 0;
@@ -3394,28 +3409,31 @@ export class ReaverbotEnemy extends Enemy {
     return target.normalize();
   }
 
-  _getPackRearTarget(game, target = new THREE.Vector3()) {
+  _getPackFlankTarget(game, target = new THREE.Vector3()) {
     const behavior = this.genome.behavior;
     this._getPackPlayerFacing(game, tempF);
+    const rearBias = THREE.MathUtils.clamp(this.brain.packFlankRearBias ?? 0.5, 0.05, 0.95);
+    const sideBias = Math.sqrt(Math.max(0, 1 - rearBias * rearBias));
     tempG.set(tempF.z, 0, -tempF.x)
-      .multiplyScalar((behavior.rearLaneOffset ?? 0.62) * behavior.orbitDirection);
+      .multiplyScalar((behavior.orbitDirection ?? 1) * sideBias)
+      .addScaledVector(tempF, -rearBias)
+      .normalize();
     target.copy(game.player.root.position)
-      .addScaledVector(tempF, -(behavior.rearApproachDistance ?? 1.8))
-      .add(tempG);
+      .addScaledVector(tempG, behavior.flankApproachDistance ?? 1.9);
     target.y = this.root.position.y;
     return target;
   }
 
-  _isPlayerBackExposed(game) {
+  _isPlayerFlankExposed(game) {
     this._getPackPlayerFacing(game, tempF);
     tempG.copy(this.root.position).sub(game.player.root.position).setY(0);
     if (tempG.lengthSq() <= 0.0001) return false;
-    const rearDot = tempF.dot(tempG.normalize());
-    return rearDot <= (this.genome.behavior.rearAttackDot ?? -0.34);
+    const facingDot = tempF.dot(tempG.normalize());
+    return facingDot <= (this.genome.behavior.flankAttackDot ?? 0.2);
   }
 
-  _movePackHunterTowardRear(dt, game) {
-    this._getPackRearTarget(game, tempC);
+  _movePackHunterTowardFlank(dt, game) {
+    this._getPackFlankTarget(game, tempC);
     tempD.copy(tempC).sub(this.root.position).setY(0);
     const distance = tempD.length();
     if (distance <= 0.16) return false;
@@ -3429,9 +3447,23 @@ export class ReaverbotEnemy extends Enemy {
 
     const speed = this.stats.moveSpeed
       * this._getStatusMoveMultiplier()
-      * (this.genome.behavior.rearPursuitSpeedScale ?? 1.22);
+      * (this.genome.behavior.flankPursuitSpeedScale ?? 1.28);
     this.root.position.addScaledVector(tempD, Math.min(distance, speed * dt));
     return true;
+  }
+
+  // Compatibility aliases for runtime tools that inspected the old rear-only
+  // behavior. They now expose the broader side-or-rear flank contract.
+  _getPackRearTarget(game, target = new THREE.Vector3()) {
+    return this._getPackFlankTarget(game, target);
+  }
+
+  _isPlayerBackExposed(game) {
+    return this._isPlayerFlankExposed(game);
+  }
+
+  _movePackHunterTowardRear(dt, game) {
+    return this._movePackHunterTowardFlank(dt, game);
   }
 
   _clampCommitTargetToWalkablePath(game, target) {
@@ -3504,12 +3536,20 @@ export class ReaverbotEnemy extends Enemy {
     }
     const linkedRotorCore = defenseId === 'rotatingPlates'
       && this.genome.modules.weakPoint.id === 'counterweightCore';
+    const usesTimedQuadrupedEyelids = defenseId === 'armorShutters'
+      && this.visual.defense.group.userData.quadrupedEyelids === true;
+    const eyelidOpeningProgress = usesTimedQuadrupedEyelids && brain.state === 'telegraph'
+      ? clamp01(brain.stateTime / Math.max(0.01, this._getStateDuration('telegraph')))
+      : 1;
+    const eyelidsCleared = eyelidOpeningProgress >= 0.24;
     brain.weakPointExposed = this.weakPointBroken
       || (linkedRotorCore
         ? Math.cos(this.visual.defense.group.rotation.y) < -0.05
         : exposure === 'always'
           || (exposure === 'telegraph' && brain.state === 'telegraph')
-          || (exposure === 'attack' && (brain.state === 'telegraph' || brain.state === 'commit'))
+          || (exposure === 'attack'
+            && (brain.state === 'commit'
+              || (brain.state === 'telegraph' && (!usesTimedQuadrupedEyelids || eyelidsCleared))))
           || (exposure === 'recovery' && brain.state === 'recovery'));
 
     if (this.defenseDisabled) {
@@ -3522,6 +3562,9 @@ export class ReaverbotEnemy extends Enemy {
       brain.defenseActive = brain.state === 'position' && Math.sin(brain.time * 2.7) > -0.15;
     } else if (defenseId === 'reactivePlate') {
       brain.defenseActive = brain.state === 'position' && Math.sin(brain.time * 1.6) > -0.3;
+    } else if (usesTimedQuadrupedEyelids) {
+      brain.defenseActive = brain.state === 'position'
+        || (brain.state === 'telegraph' && !eyelidsCleared);
     } else {
       brain.defenseActive = brain.state === 'position';
     }
@@ -3539,6 +3582,7 @@ export class ReaverbotEnemy extends Enemy {
       stateProgress: clamp01(brain.stateTime / Math.max(0.01, duration)),
       attackKind: this._getEffectiveAttackKind(),
       defenseActive: brain.defenseActive,
+      defenseDisabled: this.defenseDisabled,
       weakPointExposed: brain.weakPointExposed,
       weakPointLocation: this.genome.modules.weakPoint.location,
       clawAttackVariant: brain.clawAttackVariant,

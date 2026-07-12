@@ -95,6 +95,17 @@ test('a stalled fall near a railing is nudged sideways and resumes descending', 
   assert.equal(controller.playerRailRecoveryState.lastResult.mode, 'stalledFallNudge');
 });
 
+test('airborne railing jumps preserve a valid floor far below a high scaffold', () => {
+  const { controller } = createController();
+  const position = new THREE.Vector3(0, 8, 0.8);
+  const landing = controller._getWalkableJumpOffLanding(position);
+
+  assert.ok(landing);
+  assert.equal(landing.x, position.x);
+  assert.equal(landing.z, position.z);
+  assert.equal(landing.y, 0);
+});
+
 test('rail recovery stays on the near side of a boundary wall', () => {
   const boundary = {
     id: 'test-boundary-wall',

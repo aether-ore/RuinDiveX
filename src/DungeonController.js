@@ -12,7 +12,6 @@ const LOCKED_COLOR = 0xffb347;
 const KEY_SEEKER_COLOR = 0x5ee77b;
 const TRACKING_COLOR = 0xa06cff;
 const DOOR_OPEN_Y = -5.3;
-const PLAYER_JUMP_OFF_LEDGE_MAX_DROP = PLAYER_TRAVERSAL_ENVELOPE.safeDropHeight;
 const PLAYER_STEP_OFF_FALL_HEIGHT = PLAYER_TRAVERSAL_ENVELOPE.groundedStepDownHeight;
 const AERIAL_DEFAULT_LOOKAHEAD = 3.4;
 const AERIAL_PATH_SAMPLE_SPACING = 0.24;
@@ -1122,7 +1121,12 @@ export class DungeonController {
 
     const floorY = this._getTileElevationAtPosition(floorTile, position);
     const drop = (position.y ?? floorY) - floorY;
-    if (drop < -0.1 || drop > PLAYER_JUMP_OFF_LEDGE_MAX_DROP) {
+    // A jump already owns its vertical motion. If there is a genuine walkable
+    // floor below the current X/Z, preserve the arc even when that floor is far
+    // beneath a high catwalk. Limiting this to the grounded safe-drop envelope
+    // made the walkability correction push long railing jumps back onto their
+    // takeoff platform before gravity could carry the player down.
+    if (drop < -0.1) {
       return null;
     }
 

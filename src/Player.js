@@ -643,12 +643,12 @@ export class Player {
 
     const currentlyAirborne = this.isJumpAirborne();
     const currentlyLandingRecovering = this.jumpState === MML_JUMP_STATES.LandRecovery;
-    if (!currentlyAirborne && !currentlyLandingRecovering && attackFacing) {
+    if (!currentlyAirborne && !currentlyLandingRecovering && lockOnActive) {
+      this.faceDirection(this.lastMoveDirection);
+    } else if (!currentlyAirborne && !currentlyLandingRecovering && attackFacing) {
       this.faceDirection(this.attackFacingDirection);
     } else if (!currentlyAirborne && !currentlyLandingRecovering && bracedAiming) {
       this.faceDirection(this.bracedFireDirection);
-    } else if (!currentlyAirborne && !currentlyLandingRecovering && lockOnActive) {
-      this.faceDirection(this.lastMoveDirection);
     }
 
     this.animation.update(dt, {

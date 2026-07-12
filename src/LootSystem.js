@@ -10,6 +10,8 @@ import {
 const ITEM_TYPE_KEYS = Object.keys(ITEM_TYPES);
 const RARITY_KEYS = Object.keys(RARITIES);
 const SCRAP_PICKUP_SHAPES = Object.freeze(['bolt', 'screw', 'gear']);
+const PICKUP_REST_HEIGHT = 0.35;
+const PICKUP_FALL_GRAVITY = 18;
 const MATERIAL_PREFIXES = {
   'Arm Weapon': ['Alloy', 'Cobalt', 'Chrome', 'Tungsten', 'Industrial'],
   'Buster Part': ['Refractor', 'Chrome', 'Cobalt', 'Ancient Circuit', 'Composite'],
@@ -181,8 +183,9 @@ function disposePickupObject(object) {
 }
 
 export class LootSystem {
-  constructor(scene) {
+  constructor(scene, { getFloorElevation = null } = {}) {
     this.scene = scene;
+    this.getFloorElevation = getFloorElevation;
     this.pickups = [];
     this.nextMaterialPickupId = 1;
   }
@@ -288,7 +291,14 @@ export class LootSystem {
   createPickup(item, position) {
     const object = createPickupMesh(item);
     object.position.copy(position);
-    object.userData.spawnY = position.y;
+    const floorY = this.getFloorElevation?.(position);
+    const restY = Number.isFinite(floorY)
+      ? floorY + PICKUP_REST_HEIGHT
+      : position.y;
+    object.position.y = Math.max(object.position.y, restY);
+    object.userData.spawnY = restY;
+    object.userData.fallVelocity = 0;
+    object.userData.falling = object.position.y > restY + 0.001;
     object.userData.life = 0;
 
     this.scene.add(object);
@@ -334,7 +344,19 @@ export class LootSystem {
       pickup.object.userData.life += dt;
       pickup.object.rotation.y += dt * 1.8;
       pickup.object.children[1].rotation.z += dt * 2.4;
-      pickup.object.position.y = pickup.object.userData.spawnY + Math.sin(pickup.object.userData.life * 4) * 0.08;
+      if (pickup.object.userData.falling) {
+        pickup.object.userData.fallVelocity -= PICKUP_FALL_GRAVITY * dt;
+        pickup.object.position.y += pickup.object.userData.fallVelocity * dt;
+        if (pickup.object.position.y <= pickup.object.userData.spawnY) {
+          pickup.object.position.y = pickup.object.userData.spawnY;
+          pickup.object.userData.fallVelocity = 0;
+          pickup.object.userData.falling = false;
+          pickup.object.userData.life = 0;
+        }
+      } else {
+        pickup.object.position.y = pickup.object.userData.spawnY
+          + Math.sin(pickup.object.userData.life * 4) * 0.08;
+      }
 
       const distance = pickup.object.position.distanceTo(playerPosition);
       if (distance <= pickupRadius) {

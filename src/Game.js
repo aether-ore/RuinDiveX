@@ -270,8 +270,11 @@ export class Game {
     this.player.jumpPlatformLandingResolver = (context) => this._tryResolvePlatformLanding(context);
 
     this.inventory = new Inventory(54);
-    this.lootSystem = new LootSystem(this.scene);
-    this.refractors = new RefractorPickupSystem(this.scene);
+    const getPickupFloorElevation = (position) => (
+      this.dungeonController?.getSurfaceElevationAt?.(position)
+    );
+    this.lootSystem = new LootSystem(this.scene, { getFloorElevation: getPickupFloorElevation });
+    this.refractors = new RefractorPickupSystem(this.scene, { getFloorElevation: getPickupFloorElevation });
     this.projectiles = new ProjectileSystem(this);
     this.combat = new CombatSystem(this);
     this.player.onDodgeStarted = () => this.combat.cancelForDodge();
@@ -2912,10 +2915,19 @@ export class Game {
     this.pointerNdc.y = -((this.pointer.y - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
-    const aimSurfaceY = this.dungeonController?.getSurfaceElevationAt?.(this.player.root.position)
-      ?? this.player.root.position.y
-      ?? 0;
-    this.aimPlane.constant = -aimSurfaceY;
+    const manualLockTarget = this.combat?.isManualAimOverrideActive?.(this.pointer)
+      ? this.combat.getMovementLockTarget?.()
+      : null;
+    if (manualLockTarget?.root) {
+      getCombatTargetWorldPosition(manualLockTarget, tempVectorA);
+      this.camera.getWorldDirection(tempVectorB);
+      this.aimPlane.setFromNormalAndCoplanarPoint(tempVectorB, tempVectorA);
+    } else {
+      const aimSurfaceY = this.dungeonController?.getSurfaceElevationAt?.(this.player.root.position)
+        ?? this.player.root.position.y
+        ?? 0;
+      this.aimPlane.set(WORLD_UP, -aimSurfaceY);
+    }
     if (this.raycaster.ray.intersectPlane(this.aimPlane, this.pointer.aimWorld)) {
       this._updateAimReticleStyle();
     }

@@ -41,6 +41,18 @@ test('claw palm rig presents its counter, guard, recoil, and destroyed states wi
         .normalize()
     );
     const palmPosition = () => weapon.clawPalmAnchor.getWorldPosition(new Vector3());
+    const palmBackPosition = () => weapon.clawPalmBackAnchor.getWorldPosition(new Vector3());
+    const palmBackForward = () => (
+      new Vector3(0, 0, -1)
+        .applyQuaternion(weapon.clawPalmBackAnchor.getWorldQuaternion(visual.root.quaternion.clone()))
+        .normalize()
+    );
+    const bodyForward = () => (
+      new Vector3(0, 0, 1)
+        .applyQuaternion(claw.root.getWorldQuaternion(visual.root.quaternion.clone()))
+        .setY(0)
+        .normalize()
+    );
     const centerWorld = () => visual.root.localToWorld(
       new Vector3(
         visual.frame.anchors.center[0],
@@ -90,7 +102,9 @@ test('claw palm rig presents its counter, guard, recoil, and destroyed states wi
       weakPointExposed: false,
     });
     const guard = {
-      palmToTorso: palmPosition().distanceTo(centerWorld()),
+      backToTorso: palmBackPosition().distanceTo(centerWorld()),
+      palmFacingDot: palmForward().setY(0).normalize().dot(bodyForward()),
+      backFacingDot: palmBackForward().setY(0).normalize().dot(bodyForward()),
       palmVisible: visual.weakPoint.group.visible,
       pivotYaw: weapon.clawSwingPivot.rotation.y,
     };
@@ -202,6 +216,11 @@ test('claw palm rig presents its counter, guard, recoil, and destroyed states wi
       palmExposed: visual.weakPoint.core.userData.exposed,
     };
 
+    claw.brain.state = 'telegraph';
+    claw.brain.stateTime = claw._getStateDuration('telegraph') - 0.05;
+    claw._updateExposureAndDefense();
+    const lateTelegraphPalmActive = claw.weakPointTarget.active;
+
     return {
       defense: {
         genome: claw.genome.modules.defense,
@@ -219,6 +238,9 @@ test('claw palm rig presents its counter, guard, recoil, and destroyed states wi
       },
       eyeParts,
       palmParented: visual.weakPoint.group.parent === weapon.clawPalmAnchor,
+      backAnchorPresent: Boolean(weapon.clawPalmBackAnchor),
+      telegraphDuration: claw._getStateDuration('telegraph'),
+      lateTelegraphPalmActive,
       idle,
       guard,
       horizontal,
@@ -242,11 +264,16 @@ test('claw palm rig presents its counter, guard, recoil, and destroyed states wi
   expect(result.eyeParts.filter((eye) => eye.palm)).toHaveLength(1);
   expect(result.eyeParts.every((eye) => eye.color === 0xff254f)).toBe(true);
   expect(result.palmParented).toBe(true);
+  expect(result.backAnchorPresent).toBe(true);
+  expect(result.telegraphDuration).toBeCloseTo(1.65, 5);
+  expect(result.lateTelegraphPalmActive).toBe(true);
 
   expect(result.idle.palmVisible).toBe(false);
   expect(result.idle.armVisible).toBe(true);
   expect(result.idle.stumpVisible).toBe(false);
-  expect(result.guard.palmToTorso).toBeLessThan(0.08);
+  expect(result.guard.backToTorso).toBeLessThan(0.08);
+  expect(result.guard.palmFacingDot).toBeLessThan(-0.95);
+  expect(result.guard.backFacingDot).toBeGreaterThan(0.95);
   expect(result.guard.palmVisible).toBe(false);
   expect(Math.abs(result.guard.pivotYaw)).toBeGreaterThan(0.5);
 

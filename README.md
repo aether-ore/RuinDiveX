@@ -25,9 +25,10 @@ For the standard Buster Arm, Energy is not ammo. Buster shots are unlimited; Ene
 - Hold `Shift` while moving to jog.
 - `Space` jumps; jump direction follows the current movement input.
 - `Q` performs a short dodge roll in the current movement direction.
-- Mouse aims; the cyan reticle marks the current ground target.
+- Mouse aims with the flat cyan screen reticle. While movement-locked, hold right mouse to aim shots through the reticle at the locked target's depth without turning MegaMan away from that target.
 - Hold left mouse to fire or swing the active arm weapon.
-- Right mouse uses a secondary arm function when available. With `Shield Arm` equipped, it raises a timed guard; early timing parries and staggers attackers. Otherwise it manually vents/reloads the active arm weapon when Energy is not full.
+- Tap right mouse to lock onto or release a target; holding it after locking enables manual weak-point aim while preserving lock-on movement and camera facing.
+- `Z` uses a secondary arm function when available. With `Shield Arm` equipped, it raises a timed guard; early timing parries and staggers attackers. Otherwise it manually vents/reloads the active arm weapon when Energy is not full.
 - Number keys `1` through `4` switch arm weapon slots.
 - `E` activates nearby camp, garage, quest, ruin lift, door, chest, mechanism, and field-device interactions.
 - `I` opens the Garage Loadout screen.
@@ -38,6 +39,8 @@ The current combat pass uses manual attacks, a four-slot arm hotbar, per-arm Ene
 Implemented arm behavior examples include arcing explosive `Grenade Arm` shots, piercing `Rail Buster Arm` rounds, close-range `Scatter Buster Arm` spread fire, and `Homing Seeker Arm` rounds that curve toward nearby targets.
 
 ## Procedural Reaverbots
+
+Quadrupeds use paired eyelid armor over their ruby eye instead of offhand shield modules; the lids open during their attack tell.
 
 Dungeon encounters now turn their roster intent, room archetype, room flavor, and encounter slot into a reproducible Reaverbot genome. Each generated enemy receives a compatible body plan, weapon, defense, weak point, behavior package, proportions, and behavior-linked palette. A validation pass rejects incompatible or unfair combinations before the enemy is built.
 
@@ -50,7 +53,7 @@ The ten behavior archetypes are:
 - `Zone Controller`: uses flamethrowers, mine-like explosives, or slow electric orbs that pulse repeatedly near the player.
 - `Tractor Controller`: races between nearby allies, evades MegaMan, abducts one Reaverbot beneath its horseshoe magnet, and throws that machine near the player instead of attacking directly.
 - `Aerial Bomber`: floats inward behind a cycling shell, exposes its core during a countdown, and self-destructs at close range.
-- `Pack Hunter`: flanks and attacks only while another member of its encounter remains nearby.
+- `Pack Hunter`: rapidly alternates between side and rear flanks, and abandons positioning requirements after 15 seconds without an attack.
 - `Ruin Duelist`: sidesteps at close range and alternates guarded positioning with committed melee, piston, or beam attacks.
 - `Rotor Hunter`: advances behind a rotating plate while its shared blade/flail assembly spins, alternating the guarded face with an opposite counterweight weak point.
 

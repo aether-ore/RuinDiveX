@@ -14,6 +14,7 @@ const tempMidpoint = new THREE.Vector3();
 const tempFlat = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const PROJECTILE_AIM_LOCK_BUFFER = 0.12;
+const LOCK_MANUAL_AIM_HOLD_THRESHOLD = 0.16;
 const LASER_TICK_INTERVAL = 0.1;
 const DRILL_TICK_INTERVAL = 0.12;
 const DRILL_PARTICLE_INTERVAL = 0.045;
@@ -470,6 +471,8 @@ export class CombatSystem {
     this.pendingMeleeStrikes = [];
     this.pendingProjectileShots = [];
     this.lockAimWorld = new THREE.Vector3();
+    this.lockFacingWorld = new THREE.Vector3();
+    this.manualAimOverrideActive = false;
     this.lockOn = {
       target: null,
       progress: 0,
@@ -479,6 +482,9 @@ export class CombatSystem {
       manual: false,
       movementLocked: false,
       markerRotation: 0,
+      pendingToggleOff: false,
+      secondaryHoldTimer: 0,
+      manualAimUsed: false,
     };
     this.grenadePreview = null;
     this.grenadeArcPreview = null;
@@ -545,13 +551,23 @@ export class CombatSystem {
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
     const primaryPressed = pointer.primaryPressed || (pointer.primary && !this.primaryWasDown);
     const secondaryPressed = pointer.secondaryPressed || (pointer.secondary && !this.secondaryWasDown);
+    const secondaryReleased = !pointer.secondary && this.secondaryWasDown;
     const alternatePressed = pointer.alternatePressed || (pointer.alternate && !this.alternateWasDown);
     pointer.primaryPressed = false;
     pointer.secondaryPressed = false;
     pointer.alternatePressed = false;
 
-    this._updateLockOn(dt, pointer.aimWorld, profile, secondaryPressed);
-    const aimWorld = this._getEffectiveAimWorld(pointer.aimWorld);
+    this._updateLockOn(dt, pointer.aimWorld, profile, {
+      pressed: secondaryPressed,
+      held: pointer.secondary,
+      released: secondaryReleased,
+      primaryHeld: pointer.primary,
+    });
+    this.manualAimOverrideActive = this.isManualAimOverrideActive(pointer);
+    const aimWorld = this._getEffectiveAimWorld(
+      pointer.aimWorld,
+      this.manualAimOverrideActive,
+    );
     this._updateGrenadePreview(aimWorld, profile);
 
     if (pointer.secondary || this.getMovementLockTarget()) {
@@ -695,14 +711,33 @@ export class CombatSystem {
     return target;
   }
 
-  _getEffectiveAimWorld(fallbackAimWorld = null) {
+  isManualAimOverrideActive(pointer = this.game.pointer) {
+    return Boolean(pointer?.secondary && this.getMovementLockTarget()?.root);
+  }
+
+  _getEffectiveAimWorld(fallbackAimWorld = null, manualAimOverride = this.isManualAimOverrideActive()) {
     const target = this.getMovementLockTarget();
 
-    if (!target?.root) {
+    if (!target?.root || manualAimOverride) {
       return fallbackAimWorld;
     }
 
     return getCombatTargetWorldPosition(target, this.lockAimWorld);
+  }
+
+  _getFacingAimWorld(fallbackAimWorld = null) {
+    const target = this.getMovementLockTarget();
+    return target?.root
+      ? getCombatTargetWorldPosition(target, this.lockFacingWorld)
+      : fallbackAimWorld;
+  }
+
+  _getProjectileLockTarget(profile) {
+    return !this.manualAimOverrideActive
+      && profile.lockOn
+      && this.lockOn.progress >= 1
+      ? this.lockOn.target
+      : null;
   }
 
   _isValidLockTarget(target) {
@@ -924,7 +959,7 @@ export class CombatSystem {
       return;
     }
 
-    player.holdProjectileFiringPose(aimWorld, 0.18, {
+    player.holdProjectileFiringPose(this._getFacingAimWorld(aimWorld), 0.18, {
       weaponKey: state?.key,
       continuous: true,
     });
@@ -1012,7 +1047,7 @@ export class CombatSystem {
     const damageRoll = this._rollPlayerDamage(profile);
     const element = getPlayerElement(player.stats, profile);
 
-    player.playProjectileShotAnimation(profile.animationDuration ?? 0.2, targetPoint, (profile.drillLaunchCooldown ?? 0.5) + PROJECTILE_AIM_LOCK_BUFFER, {
+    player.playProjectileShotAnimation(profile.animationDuration ?? 0.2, this._getFacingAimWorld(targetPoint), (profile.drillLaunchCooldown ?? 0.5) + PROJECTILE_AIM_LOCK_BUFFER, {
       weaponKey: state.key,
     });
 
@@ -1061,7 +1096,10 @@ export class CombatSystem {
     }
 
     tempDirection.normalize();
-    player.faceDirection(tempDirection);
+    tempFlat.copy(this._getFacingAimWorld(aimWorld) ?? player.root.position)
+      .sub(player.root.position)
+      .setY(0);
+    player.faceDirection(tempFlat.lengthSq() > 0.001 ? tempFlat.normalize() : tempDirection);
     player.setMovementLock?.(0.08, this.lift.kind === 'enemy' ? 0.45 : 0.62);
 
     if (!this.lift.active) {
@@ -1392,21 +1430,22 @@ export class CombatSystem {
     const cooldown = this._getAttackCooldown(profile, stats);
     const attackDuration = this._getAttackAnimationDuration(profile, stats);
     const targetPoint = player.root.position.clone().addScaledVector(tempDirection, this._getProfileRange(profile, stats));
+    const facingTargetPoint = this._getFacingAimWorld(targetPoint);
     const projectileAimOptions = { weaponKey: state.key };
     const projectileActionNeedsBrace = usesProjectileAimBrace(profile)
       && !player.isProjectileAimSustained?.(state.key);
 
     if (profile.special === 'mine') {
-      player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
+      player.playProjectileShotAnimation(attackDuration, facingTargetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
       this._fireOrQueueProjectileAction('mine', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     } else if (profile.special === 'rail') {
-      player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
+      player.playProjectileShotAnimation(attackDuration, facingTargetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
       this._fireOrQueueProjectileAction('rail', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     } else if (profile.special === 'cone') {
-      player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
+      player.playProjectileShotAnimation(attackDuration, facingTargetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
       this._fireOrQueueProjectileAction('cone', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     } else if (profile.special === 'chain') {
-      player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
+      player.playProjectileShotAnimation(attackDuration, facingTargetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
       this._fireOrQueueProjectileAction('chain', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     } else if (profile.special === 'drill') {
       player.playAttackAnimation(attackDuration, 'melee', targetPoint);
@@ -1430,7 +1469,7 @@ export class CombatSystem {
         this._meleeAttackDirection(tempDirection, profile);
       }
     } else {
-      player.playProjectileShotAnimation(attackDuration, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
+      player.playProjectileShotAnimation(attackDuration, facingTargetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
       this._fireOrQueueProjectileAction('projectile', tempDirection, profile, aimWorld, attackDuration, state, projectileActionNeedsBrace);
     }
 
@@ -2284,7 +2323,7 @@ export class CombatSystem {
     const element = getPlayerElement(stats, profile);
     const color = getElementColor(element, profile.color ?? 0x7ee7ff);
     const armorBreakChance = (stats.armorBreakChance ?? 0) + (profile.armorBreakBonus ?? 0);
-    const lockedTarget = profile.lockOn && this.lockOn.progress >= 1 ? this.lockOn.target : null;
+    const lockedTarget = this._getProjectileLockTarget(profile);
     const range = this._getProfileRange(profile, stats);
 
     for (let i = 0; i < count; i += 1) {
@@ -2598,19 +2637,47 @@ export class CombatSystem {
     return Math.max(1, Math.round((profile.maxActiveMines ?? 4) + Math.min(2, this.game.player.stats.projectileCount - 1)));
   }
 
-  _updateLockOn(dt, aimWorld, profile, togglePressed = false) {
-    if (togglePressed) {
-      this.lockOn.movementLocked = !this.lockOn.movementLocked;
-
-      if (!this.lockOn.movementLocked && !profile.lockOn) {
-        this._clearLockOn();
-        return;
-      }
-
+  _updateLockOn(dt, aimWorld, profile, input = {}) {
+    const pressed = input.pressed === true;
+    const held = input.held === true;
+    const released = input.released === true;
+    if (pressed) {
       if (this.lockOn.movementLocked) {
+        // A quick second tap still unlocks, but defer that decision until
+        // release so holding the same button can become a manual-aim modifier.
+        this.lockOn.pendingToggleOff = true;
+        this.lockOn.secondaryHoldTimer = 0;
+        this.lockOn.manualAimUsed = Boolean(input.primaryHeld);
+      } else {
+        this.lockOn.movementLocked = true;
+        this.lockOn.pendingToggleOff = false;
+        this.lockOn.secondaryHoldTimer = 0;
+        this.lockOn.manualAimUsed = false;
         this.lockOn.target = null;
         this.lockOn.progress = 0;
         this.lockOn.manual = false;
+      }
+    }
+
+    if (this.lockOn.pendingToggleOff && held) {
+      this.lockOn.secondaryHoldTimer += Math.max(0, dt);
+      this.lockOn.manualAimUsed = this.lockOn.manualAimUsed
+        || input.primaryHeld === true
+        || this.lockOn.secondaryHoldTimer >= LOCK_MANUAL_AIM_HOLD_THRESHOLD;
+    }
+
+    if (this.lockOn.pendingToggleOff && released) {
+      const shouldUnlock = !this.lockOn.manualAimUsed
+        && this.lockOn.secondaryHoldTimer < LOCK_MANUAL_AIM_HOLD_THRESHOLD;
+      this.lockOn.pendingToggleOff = false;
+      this.lockOn.secondaryHoldTimer = 0;
+      this.lockOn.manualAimUsed = false;
+      if (shouldUnlock && !profile.lockOn) {
+        this._clearLockOn();
+        return;
+      }
+      if (shouldUnlock) {
+        this.lockOn.movementLocked = false;
       }
     }
 
@@ -2765,6 +2832,10 @@ export class CombatSystem {
     this.lockOn.progress = 0;
     this.lockOn.manual = false;
     this.lockOn.movementLocked = false;
+    this.lockOn.pendingToggleOff = false;
+    this.lockOn.secondaryHoldTimer = 0;
+    this.lockOn.manualAimUsed = false;
+    this.manualAimOverrideActive = false;
     if (clearSkip) {
       this.lockOn.skippedTargetId = null;
       this.lockOn.skipTimer = 0;
@@ -2978,7 +3049,7 @@ export class CombatSystem {
     tempDirection.normalize();
     const range = player.stats.attackRange + 3.5;
     const targetPoint = player.root.position.clone().addScaledVector(tempDirection, range);
-    player.playProjectileShotAnimation(profile.animationDuration ?? 0.16, targetPoint, 0.2, {
+    player.playProjectileShotAnimation(profile.animationDuration ?? 0.16, this._getFacingAimWorld(targetPoint), 0.2, {
       weaponKey: state.key,
       continuous: true,
     });
@@ -3238,7 +3309,7 @@ export class CombatSystem {
     this.drill.active = true;
     this.drill.currentState = state;
     player.externalRig?.setDrillSpinning?.(true);
-    player.playProjectileShotAnimation(profile.animationDuration ?? 0.2, targetPoint, 0.16, {
+    player.playProjectileShotAnimation(profile.animationDuration ?? 0.2, this._getFacingAimWorld(targetPoint), 0.16, {
       weaponKey: state.key,
       continuous: true,
     });
@@ -3475,7 +3546,7 @@ export class CombatSystem {
     const element = getPlayerElement(player.stats, profile);
     const targetPoint = player.root.position.clone().addScaledVector(tempDirection, range);
 
-    player.playProjectileShotAnimation(profile.animationDuration ?? 0.2, targetPoint, 0.14, {
+    player.playProjectileShotAnimation(profile.animationDuration ?? 0.2, this._getFacingAimWorld(targetPoint), 0.14, {
       weaponKey: state.key,
       continuous: true,
     });

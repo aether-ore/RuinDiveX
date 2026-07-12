@@ -298,6 +298,9 @@ function applyTileOptions(tile, options = {}) {
     'blockedBySolidLedgeSupport',
     'rampRouteId',
     'rampRunId',
+    'rampScaffoldPriority',
+    'rampPointIndex',
+    'rampPointCount',
   ]) {
     if (options[key] !== undefined) {
       tile[key] = options[key];
@@ -364,6 +367,9 @@ function createFloorTile(x, z, {
   blockedBySolidLedgeSupport = false,
   rampRouteId = null,
   rampRunId = null,
+  rampScaffoldPriority = null,
+  rampPointIndex = null,
+  rampPointCount = null,
 } = {}) {
   const tile = {
     x,
@@ -393,6 +399,9 @@ function createFloorTile(x, z, {
     blockedBySolidLedgeSupport,
     rampRouteId,
     rampRunId,
+    rampScaffoldPriority,
+    rampPointIndex,
+    rampPointCount,
     openRetainingWallEdges: Array.isArray(openRetainingWallEdges)
       ? [...openRetainingWallEdges]
       : null,
@@ -2319,7 +2328,7 @@ export class DungeonGenerator {
       append(points[points.length - 1]);
       return expanded.filter((point) => tiles.has(tileKey(point.x, point.z)));
     };
-    const addRampLandingPath = (room, fromPoint, elevation, level) => {
+    const addRampLandingPath = (room, fromPoint, elevation, level, rampRouteId) => {
       if (!room || level === 0 || !fromPoint) {
         return;
       }
@@ -2363,6 +2372,7 @@ export class DungeonGenerator {
           level: levelValue,
           surface: 'rampLanding',
           roomId: room.id,
+          rampRouteId,
         });
       }
     };
@@ -2434,6 +2444,15 @@ export class DungeonGenerator {
         return incoming.x !== outgoing.x || incoming.z !== outgoing.z;
       };
       let straightRunIndex = 0;
+      const markBaseRampTile = (point, options) => {
+        const base = tiles.get(tileKey(point.x, point.z));
+        const original = base && !base.rampRouteId ? { ...base } : null;
+        const marked = markBase(point.x, point.z, options);
+        if (marked && original && !marked.rampBaseOriginal) {
+          marked.rampBaseOriginal = original;
+        }
+        return marked;
+      };
 
       for (let i = 0; i < rampPoints.length; i += 1) {
         const point = rampPoints[i];
@@ -2451,7 +2470,7 @@ export class DungeonGenerator {
             rampRouteId,
           };
           const landing = useBaseFloor
-            ? markBase(point.x, point.z, landingOptions)
+            ? markBaseRampTile(point, landingOptions)
             : pushExtra(point.x, point.z, landingOptions);
           if (landing?.surface === 'rampLanding') {
             delete landing.rampStartElevation;
@@ -2472,7 +2491,7 @@ export class DungeonGenerator {
           : stepDirection(previous, point);
         const startT = Math.max(0, (i - 0.5) / span);
         const endT = Math.min(1, (i + 0.5) / span);
-        const options = {
+          const options = {
           type: 'floor',
           elevation,
           level,
@@ -2482,11 +2501,14 @@ export class DungeonGenerator {
           rampEndElevation: THREE.MathUtils.lerp(fromElevation, toElevation, endT),
           rampDirectionX: direction.x,
           rampDirectionZ: direction.z,
-          rampRouteId,
-          rampRunId: `${rampRouteId}_run_${straightRunIndex + 1}`,
-        };
+            rampRouteId,
+            rampRunId: `${rampRouteId}_run_${straightRunIndex + 1}`,
+            rampScaffoldPriority: room?.type === 'conveyor' ? 'scaffold' : 'ramp',
+            rampPointIndex: i,
+            rampPointCount: rampPoints.length,
+          };
         const tile = useBaseFloor
-          ? markBase(point.x, point.z, options)
+          ? markBaseRampTile(point, options)
           : pushExtra(point.x, point.z, options);
 
         if (tile && risePerTile > RUIN_RAMP_MAX_STEP) {
@@ -2494,8 +2516,14 @@ export class DungeonGenerator {
         }
       }
 
-      addRampLandingPath(room, rampPoints[0], fromElevation, fromLevel);
-      addRampLandingPath(room, rampPoints[rampPoints.length - 1], toElevation, toLevel);
+      addRampLandingPath(room, rampPoints[0], fromElevation, fromLevel, rampRouteId);
+      addRampLandingPath(
+        room,
+        rampPoints[rampPoints.length - 1],
+        toElevation,
+        toLevel,
+        rampRouteId,
+      );
     };
     const addMinorDropSpace = (room, {
       id,
@@ -2856,7 +2884,7 @@ export class DungeonGenerator {
         return null;
       }
 
-      for (let distance = 1; distance <= rampLength; distance += 1) {
+      for (let distance = 1; distance <= rampLength + 1; distance += 1) {
         const x = chainTile.x + direction[0] * distance;
         const z = chainTile.z + direction[1] * distance;
         const columnKey = tileKey(x, z);
@@ -2895,14 +2923,18 @@ export class DungeonGenerator {
       }
 
       const start = {
-        x: chainTile.x + direction[0] * rampLength,
-        z: chainTile.z + direction[1] * rampLength,
+        x: chainTile.x + direction[0] * (rampLength + 1),
+        z: chainTile.z + direction[1] * (rampLength + 1),
+      };
+      const end = {
+        x: chainTile.x + direction[0],
+        z: chainTile.z + direction[1],
       };
 
       return {
         room,
         chainTile,
-        points: [start, { x: chainTile.x, z: chainTile.z }],
+        points: [start, end],
         targetElevation,
         targetLevel,
         rampLength,
@@ -3791,6 +3823,13 @@ export class DungeonGenerator {
     addScaffoldAccessRamps();
     ensureRoomScaffoldAccess();
     ensureUpperSocketOwnerAccess();
+    const scaffoldPriorityRoomIds = new Set(
+      rooms.filter((room) => room.type === 'conveyor').map((room) => room.id),
+    );
+    this._clearRampScaffoldHeadroom(tiles, extraTiles, rooms, {
+      preferScaffoldRoomIds: scaffoldPriorityRoomIds,
+      seen,
+    });
 
     return extraTiles;
   }
@@ -4790,9 +4829,226 @@ export class DungeonGenerator {
     }
   }
 
+  _findRampScaffoldHeadroomConflicts(floorTiles = []) {
+    const columns = this._createFloorTileLookup(floorTiles);
+    const conflicts = [];
+
+    for (const ramp of floorTiles.filter((tile) => tile.surface === 'industrialRamp')) {
+      const replacedBase = ramp.rampBaseOriginal;
+      if (ramp.rampScaffoldPriority === 'scaffold'
+        && (ramp.rampPointIndex ?? 0) > 0
+        && (ramp.rampPointIndex ?? 0) < (ramp.rampPointCount ?? 1) - 1
+        && SCAFFOLD_RAMP_ACCESS_SURFACES.has(replacedBase?.surface)) {
+        conflicts.push({
+          ramp,
+          scaffold: replacedBase,
+          clearance: 0,
+          replacedBase: true,
+        });
+      }
+      const rampTopY = Math.max(
+        ramp.elevation ?? 0,
+        ramp.rampStartElevation ?? -Infinity,
+        ramp.rampEndElevation ?? -Infinity,
+      );
+      const rampBottomY = Math.min(
+        ramp.elevation ?? 0,
+        ramp.rampStartElevation ?? Infinity,
+        ramp.rampEndElevation ?? Infinity,
+      );
+      for (const scaffold of columns.get(tileKey(ramp.x, ramp.z)) ?? []) {
+        if (scaffold === ramp
+          || scaffold.surface === 'industrialRamp'
+          || !SCAFFOLD_RAMP_ACCESS_SURFACES.has(scaffold.surface)) {
+          continue;
+        }
+        const rampReferenceY = ramp.rampScaffoldPriority === 'scaffold'
+          ? rampBottomY
+          : rampTopY;
+        const clearance = (scaffold.elevation ?? 0) - rampReferenceY;
+        const preservesConveyorDeck = ramp.rampScaffoldPriority === 'scaffold'
+          && scaffold.type === 'conveyor'
+          && (scaffold.elevation ?? 0) >= rampBottomY - 0.05;
+        // Equal-height deck seams are normally intentional. Conveyor decks
+        // are the exception: their full scaffold/support footprint wins over
+        // a slope occupying the same column.
+        if (clearance > 0.12 || preservesConveyorDeck) {
+          conflicts.push({ ramp, scaffold, clearance });
+        }
+      }
+      if (ramp.rampScaffoldPriority === 'scaffold') {
+        const directionX = Math.sign(ramp.rampDirectionX ?? 0);
+        const directionZ = Math.sign(ramp.rampDirectionZ ?? 0);
+        const approachColumn = columns.get(tileKey(
+          ramp.x + directionX,
+          ramp.z + directionZ,
+        )) ?? [];
+        for (const scaffold of approachColumn) {
+          if (scaffold.surface !== 'thirdFloorGantry'
+            || (scaffold.elevation ?? 0) <= rampBottomY + 0.12) {
+            continue;
+          }
+          conflicts.push({
+            ramp,
+            scaffold,
+            clearance: (scaffold.elevation ?? 0) - rampBottomY,
+            adjacentSupportFootprint: true,
+          });
+        }
+      }
+    }
+
+    return conflicts;
+  }
+
+  _clearRampScaffoldHeadroom(tiles, extraTiles, rooms = [], {
+    preferScaffoldRoomIds = new Set(),
+    seen = null,
+  } = {}) {
+    const conflicts = this._findRampScaffoldHeadroomConflicts([
+      ...tiles.values(),
+      ...extraTiles,
+    ]);
+    if (!conflicts.length) {
+      return { removedScaffolds: [], removedRampRouteIds: [] };
+    }
+
+    const scaffoldPriorityConflicts = conflicts.filter(({ ramp }) => (
+      preferScaffoldRoomIds.has(ramp.roomId)
+    ));
+    const removedRampRouteIds = new Set(scaffoldPriorityConflicts
+      .filter((conflict) => !conflict.adjacentSupportFootprint)
+      .map(({ ramp }) => ramp.rampRouteId)
+      .filter(Boolean));
+    const convertedRampTiles = new Set(scaffoldPriorityConflicts
+      .filter(({ ramp, adjacentSupportFootprint }) => (
+        adjacentSupportFootprint
+        && !removedRampRouteIds.has(ramp.rampRouteId)
+      ))
+      .map(({ ramp }) => ramp));
+    const removedScaffolds = new Set(conflicts
+      .filter(({ ramp }) => (
+        !preferScaffoldRoomIds.has(ramp.roomId)
+        && !removedRampRouteIds.has(ramp.rampRouteId)
+      ))
+      .map(({ scaffold }) => scaffold));
+
+    for (const ramp of convertedRampTiles) {
+      ramp.type = 'floor';
+      ramp.surface = 'solidPurposePlatform';
+      ramp.isPlatformingSurface = true;
+      ramp.platformGroupId = `${ramp.roomId}_scaffoldPriorityTransition_${ramp.rampRouteId}`;
+      ramp.platformPurpose = 'solid_transition_below_preserved_scaffold';
+      ramp.requiredTraversalAction = 'jump';
+      ramp.baseElevation = 0;
+      delete ramp.rampStartElevation;
+      delete ramp.rampEndElevation;
+      delete ramp.rampDirectionX;
+      delete ramp.rampDirectionZ;
+      delete ramp.rampRunId;
+      delete ramp.rampScaffoldPriority;
+      delete ramp.rampPointIndex;
+      delete ramp.rampPointCount;
+      delete ramp.steepRamp;
+    }
+
+    for (const tile of tiles.values()) {
+      if (!removedRampRouteIds.has(tile.rampRouteId)) {
+        continue;
+      }
+      const original = tile.rampBaseOriginal;
+      if (!original) {
+        continue;
+      }
+      for (const key of Object.keys(tile)) {
+        delete tile[key];
+      }
+      Object.assign(tile, original);
+    }
+
+    for (let index = extraTiles.length - 1; index >= 0; index -= 1) {
+      const tile = extraTiles[index];
+      if (removedScaffolds.has(tile) || removedRampRouteIds.has(tile.rampRouteId)) {
+        seen?.delete?.(floorTileKey(tile.x, tile.z, tile.level ?? 0));
+        extraTiles.splice(index, 1);
+      }
+    }
+
+    for (const room of rooms) {
+      const roomScaffoldRemovals = [...removedScaffolds].filter((tile) => tile.roomId === room.id);
+      const roomRouteRemovals = [...removedRampRouteIds].filter((routeId) => (
+        conflicts.some(({ ramp }) => ramp.roomId === room.id && ramp.rampRouteId === routeId)
+      ));
+      const roomConversions = [...convertedRampTiles].filter((tile) => tile.roomId === room.id);
+      if (roomScaffoldRemovals.length) {
+        const previousColumns = room.rampClearanceRemovedScaffoldColumns ?? [];
+        room.rampClearanceRemovedScaffoldColumns = [
+          ...previousColumns,
+          ...roomScaffoldRemovals.map((tile) => ({
+            x: tile.x,
+            z: tile.z,
+            elevation: tile.elevation ?? 0,
+            surface: tile.surface,
+          })),
+        ];
+        room.rampClearanceRemovedScaffoldTileCount =
+          room.rampClearanceRemovedScaffoldColumns.length;
+      }
+      if (roomRouteRemovals.length) {
+        room.rampClearanceRemovedRampRouteIds = [...new Set([
+          ...(room.rampClearanceRemovedRampRouteIds ?? []),
+          ...roomRouteRemovals,
+        ])];
+        room.rampClearancePreferredScaffold = true;
+      }
+      if (roomConversions.length) {
+        room.rampClearanceConvertedToSolidTileCount =
+          (room.rampClearanceConvertedToSolidTileCount ?? 0) + roomConversions.length;
+        room.rampClearancePreferredScaffold = true;
+      }
+    }
+
+    return {
+      convertedRampTiles: [...convertedRampTiles],
+      removedScaffolds: [...removedScaffolds],
+      removedRampRouteIds: [...removedRampRouteIds],
+    };
+  }
+
+  _createMinorDropReturnShelfAssemblies(floorTiles = []) {
+    const grouped = new Map();
+    for (const tile of floorTiles.filter((candidate) => candidate.surface === 'basementReturnShelf')) {
+      const key = tile.dropSpaceId ?? `${tile.roomId ?? 'room'}_returnShelf`;
+      const assembly = grouped.get(key) ?? {
+        id: key,
+        dropSpaceId: tile.dropSpaceId ?? null,
+        roomId: tile.roomId ?? null,
+        elevation: tile.elevation ?? 0,
+        baseY: Number.isFinite(tile.supportBaseElevation)
+          ? tile.supportBaseElevation
+          : RUIN_MINOR_DROP_ELEVATION,
+        tiles: [],
+      };
+      assembly.tiles.push(tile);
+      grouped.set(key, assembly);
+    }
+
+    return [...grouped.values()].map((assembly) => ({
+      ...assembly,
+      minX: Math.min(...assembly.tiles.map((tile) => tile.x)),
+      maxX: Math.max(...assembly.tiles.map((tile) => tile.x)),
+      minZ: Math.min(...assembly.tiles.map((tile) => tile.z)),
+      maxZ: Math.max(...assembly.tiles.map((tile) => tile.z)),
+      ledgeEdges: [...new Set(assembly.tiles.flatMap((tile) => tile.ledgeEdges ?? []))],
+    }));
+  }
+
   _createGeneratedPlatformSurfaces(floorTiles = []) {
     const surfaces = floorTiles
-      .filter((tile) => tile.isLedgeSurface || (tile.isPlatformingSurface && !tile.platformGroupId))
+      .filter((tile) => (
+        (tile.isLedgeSurface && tile.surface !== 'basementReturnShelf')
+        || (tile.isPlatformingSurface && !tile.platformGroupId)
+      ))
       .map((tile) => ({
         id: `${tile.isLedgeSurface ? 'generatedLedge' : 'generatedPlatform'}_${tile.x}_${tile.z}_${tile.level}`,
         roomId: tile.roomId,
@@ -4812,6 +5068,32 @@ export class DungeonGenerator {
           ? tile.supportBaseElevation
           : null,
       }));
+    for (const assembly of this._createMinorDropReturnShelfAssemblies(floorTiles)) {
+      const representative = assembly.tiles[0];
+      surfaces.push({
+        id: `generatedBasementReturnShelf_${assembly.id}`,
+        roomId: assembly.roomId,
+        floorKey: this._getFloorTileGraphKey(representative),
+        center: new THREE.Vector3(
+          (assembly.minX + assembly.maxX) * this.tileSize * 0.5,
+          assembly.elevation,
+          (assembly.minZ + assembly.maxZ) * this.tileSize * 0.5,
+        ),
+        halfWidth: (assembly.maxX - assembly.minX + 1) * this.tileSize * 0.492,
+        halfDepth: (assembly.maxZ - assembly.minZ + 1) * this.tileSize * 0.492,
+        topY: assembly.elevation,
+        baseY: assembly.baseY,
+        blocksBelow: true,
+        generated: true,
+        solidVolume: true,
+        mergedReturnShelf: true,
+        purpose: representative.platformPurpose ?? 'basement_return_climb_shelf',
+        requiredTraversalAction: representative.requiredTraversalAction ?? 'ledge_climb',
+        ledgeEdges: assembly.ledgeEdges,
+        dropSpaceId: assembly.dropSpaceId,
+        minimumHangRootY: assembly.baseY,
+      });
+    }
     const groupedTiles = new Map();
     for (const tile of floorTiles.filter((candidate) => candidate.isPlatformingSurface && candidate.platformGroupId)) {
       const tiles = groupedTiles.get(tile.platformGroupId) ?? [];
@@ -4899,6 +5181,13 @@ export class DungeonGenerator {
     encounters = [],
   } = {}) {
     const errors = [];
+    const rampScaffoldHeadroomConflicts = this._findRampScaffoldHeadroomConflicts(floorTiles);
+    if (rampScaffoldHeadroomConflicts.length) {
+      const first = rampScaffoldHeadroomConflicts[0];
+      errors.push(
+        `Ramp ${this._getFloorTileGraphKey(first.ramp)} has only ${first.clearance.toFixed(2)} clearance beneath scaffold ${this._getFloorTileGraphKey(first.scaffold)}.`,
+      );
+    }
     const columns = this._createFloorTileLookup(floorTiles);
     const blockingPlatformTops = this._createBlockingPlatformColumnMap(floorTiles);
     const navigableTiles = floorTiles.filter((tile) => (
@@ -5267,6 +5556,13 @@ export class DungeonGenerator {
         localSocketChecks,
         dropSpaceChecks,
         platformNodeCount: rooms.reduce((count, room) => count + (room.platformNodes?.length ?? 0), 0),
+        rampScaffoldHeadroomConflictCount: rampScaffoldHeadroomConflicts.length,
+        rampClearanceRemovedScaffoldTileCount: rooms.reduce((count, room) => (
+          count + (room.rampClearanceRemovedScaffoldTileCount ?? 0)
+        ), 0),
+        rampClearanceConvertedToSolidTileCount: rooms.reduce((count, room) => (
+          count + (room.rampClearanceConvertedToSolidTileCount ?? 0)
+        ), 0),
         movementEnvelope: PLAYER_TRAVERSAL_ENVELOPE,
       },
     };
@@ -5918,48 +6214,6 @@ export class DungeonGenerator {
     const position = this._tileToWorld(tile.x, tile.z);
     const elevation = tile.elevation ?? 0;
 
-    if (tile.surface === 'basementReturnShelf') {
-      const supportBase = Number.isFinite(tile.supportBaseElevation)
-        ? tile.supportBaseElevation
-        : RUIN_MINOR_DROP_ELEVATION;
-      const supportHeight = Math.max(0.46, elevation - supportBase - 0.06);
-      const shelf = new THREE.Mesh(
-        this._createTiledBoxGeometry(
-          this.tileSize * 0.94,
-          supportHeight,
-          this.tileSize * 0.94,
-        ),
-        [
-          materials.wallMacroTiles.mm,
-          materials.wallMacroTiles.mm,
-          materials.raisedDeckFloor,
-          materials.supportMetal,
-          materials.wallMacroTiles.mm,
-          materials.wallMacroTiles.mm,
-        ],
-      );
-      shelf.name = 'minorDropReturnShelfVolume';
-      shelf.position.set(position.x, supportBase + supportHeight * 0.5, position.z);
-      shelf.castShadow = true;
-      shelf.receiveShadow = true;
-      shelf.userData.dropSpaceId = tile.dropSpaceId ?? null;
-      shelf.userData.solidLedgeSupport = true;
-      shelf.userData.supportBaseElevation = supportBase;
-      group.add(shelf);
-
-      for (const ratio of [0.28, 0.72]) {
-        const band = new THREE.Mesh(
-          new THREE.BoxGeometry(this.tileSize * 0.97, 0.12, this.tileSize * 0.97),
-          materials.supportMetal,
-        );
-        band.name = 'minorDropReturnShelfBand';
-        band.position.set(position.x, supportBase + supportHeight * ratio, position.z);
-        band.castShadow = true;
-        band.userData.dropSpaceId = tile.dropSpaceId ?? null;
-        group.add(band);
-      }
-    }
-
     if (tile.surface === 'dropSpaceOverpass') {
       for (const rotate of [false, true]) {
         const beam = new THREE.Mesh(
@@ -6153,6 +6407,54 @@ export class DungeonGenerator {
   }
 
   _addSolidTraversalVolumes(group, floorTiles = [], rooms = [], materials) {
+    for (const assembly of this._createMinorDropReturnShelfAssemblies(floorTiles)) {
+      const width = (assembly.maxX - assembly.minX + 1) * this.tileSize * 0.985;
+      const depth = (assembly.maxZ - assembly.minZ + 1) * this.tileSize * 0.985;
+      const supportHeight = Math.max(0.46, assembly.elevation - assembly.baseY - 0.06);
+      const shelf = new THREE.Mesh(
+        this._createTiledBoxGeometry(width, supportHeight, depth),
+        [
+          materials.wallMacroTiles.mm,
+          materials.wallMacroTiles.mm,
+          materials.raisedDeckFloor,
+          materials.supportMetal,
+          materials.wallMacroTiles.mm,
+          materials.wallMacroTiles.mm,
+        ],
+      );
+      shelf.name = 'minorDropReturnShelfVolume';
+      shelf.position.set(
+        (assembly.minX + assembly.maxX) * this.tileSize * 0.5,
+        assembly.baseY + supportHeight * 0.5,
+        (assembly.minZ + assembly.maxZ) * this.tileSize * 0.5,
+      );
+      shelf.castShadow = true;
+      shelf.receiveShadow = true;
+      shelf.userData.dropSpaceId = assembly.dropSpaceId;
+      shelf.userData.solidLedgeSupport = true;
+      shelf.userData.supportBaseElevation = assembly.baseY;
+      shelf.userData.mergedReturnShelf = true;
+      shelf.userData.tileCount = assembly.tiles.length;
+      group.add(shelf);
+
+      for (const ratio of [0.28, 0.72]) {
+        const band = new THREE.Mesh(
+          new THREE.BoxGeometry(width * 1.01, 0.12, depth * 1.01),
+          materials.supportMetal,
+        );
+        band.name = 'minorDropReturnShelfBand';
+        band.position.set(
+          shelf.position.x,
+          assembly.baseY + supportHeight * ratio,
+          shelf.position.z,
+        );
+        band.castShadow = true;
+        band.userData.dropSpaceId = assembly.dropSpaceId;
+        band.userData.mergedReturnShelf = true;
+        group.add(band);
+      }
+    }
+
     for (const assembly of this._createSolidArchitecturalDeckAssemblies(floorTiles)) {
       const architecture = new THREE.Group();
       architecture.name = `solidArchitecturalDeckAssembly_${assembly.id}`;
@@ -6497,6 +6799,11 @@ export class DungeonGenerator {
     floorTileLookup = this._createFloorTileLookup(floorTiles),
   ) {
     const stepPairs = new Set();
+    const rampColumnKeys = new Set(
+      floorTiles
+        .filter((tile) => tile.surface === 'industrialRamp')
+        .map((tile) => tileKey(tile.x, tile.z)),
+    );
 
     for (const tile of floorTiles) {
       const elevation = tile.elevation ?? 0;
@@ -6515,7 +6822,9 @@ export class DungeonGenerator {
         continue;
       }
 
-      this._addFactoryTileSupports(group, tile, materials);
+      if (!rampColumnKeys.has(key)) {
+        this._addFactoryTileSupports(group, tile, materials);
+      }
 
       for (const [dx, dz] of DIRECTIONS) {
         const neighbor = this._findSameFloorNeighbor(floorTileLookup, tile, dx, dz);

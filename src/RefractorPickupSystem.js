@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
+const REFRACTOR_FALL_GRAVITY = 18;
 
 const REFRACTOR_TIERS = [
   {
@@ -123,8 +124,9 @@ function createRefractorObject(tier) {
 }
 
 export class RefractorPickupSystem {
-  constructor(scene) {
+  constructor(scene, { getFloorElevation = null } = {}) {
     this.scene = scene;
+    this.getFloorElevation = getFloorElevation;
     this.pickups = [];
   }
 
@@ -163,7 +165,15 @@ export class RefractorPickupSystem {
   createPickup({ tier = REFRACTOR_TIERS[0], value = tier.value[0], position }) {
     const object = createRefractorObject(tier);
     object.position.copy(position);
-    object.userData.spawnY = position.y;
+    const floorY = this.getFloorElevation?.(position);
+    const restHeight = Math.max(0.42, tier.scale * 1.85);
+    const restY = Number.isFinite(floorY)
+      ? floorY + restHeight
+      : position.y;
+    object.position.y = Math.max(object.position.y, restY);
+    object.userData.spawnY = restY;
+    object.userData.fallVelocity = 0;
+    object.userData.falling = object.position.y > restY + 0.001;
     object.userData.life = Math.random() * 10;
 
     this.scene.add(object);
@@ -211,6 +221,17 @@ export class RefractorPickupSystem {
 
       if (pickup.magnetized) {
         pickup.object.position.lerp(tempVectorA, Math.min(1, dt * 8));
+        pickup.object.userData.falling = false;
+        pickup.object.userData.fallVelocity = 0;
+      } else if (pickup.object.userData.falling) {
+        pickup.object.userData.fallVelocity -= REFRACTOR_FALL_GRAVITY * dt;
+        pickup.object.position.y += pickup.object.userData.fallVelocity * dt;
+        if (pickup.object.position.y <= pickup.object.userData.spawnY) {
+          pickup.object.position.y = pickup.object.userData.spawnY;
+          pickup.object.userData.fallVelocity = 0;
+          pickup.object.userData.falling = false;
+          pickup.object.userData.life = 0;
+        }
       } else {
         pickup.object.position.y = pickup.object.userData.spawnY + Math.sin(life * 4.5) * 0.1;
       }

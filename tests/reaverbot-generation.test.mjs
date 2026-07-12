@@ -41,6 +41,105 @@ test('the same seed and context reproduce the same Reaverbot genome', () => {
   assert.deepEqual(generateReaverbotGenome(options), generateReaverbotGenome(options));
 });
 
+test('body defense normalization preserves legacy candidate silhouettes and validates in two stages', () => {
+  const snapshots = [
+    {
+      options: { seed: 'aerial-hardening:captive', archetypeId: 'pursuer' },
+      expected: {
+        candidateIndex: 1,
+        bodyPlan: 'quadruped',
+        weaponId: 'ramHorn',
+        mountSide: null,
+        proportions: {
+          overallScale: 1.0761,
+          torsoWidth: 0.997,
+          torsoLength: 0.9827,
+          limbLength: 1.0835,
+          headScale: 0.9206,
+          spikeCount: 4,
+          panelRhythm: 3,
+          asymmetry: 0.1603,
+        },
+        radius: 0.699,
+        collisionHeight: 1.668,
+      },
+    },
+    {
+      options: { seed: 'legacy-nonquad-ram:6', archetypeId: 'pursuer' },
+      expected: {
+        candidateIndex: 5,
+        bodyPlan: 'lowBiped',
+        weaponId: 'ramHorn',
+        mountSide: null,
+        proportions: {
+          overallScale: 0.9796,
+          torsoWidth: 1.1115,
+          torsoLength: 0.966,
+          limbLength: 1.1009,
+          headScale: 0.9131,
+          spikeCount: 1,
+          panelRhythm: 2,
+          asymmetry: 0.0891,
+        },
+        radius: 0.5,
+        collisionHeight: 2.106,
+      },
+    },
+  ];
+
+  for (const { options, expected } of snapshots) {
+    const genome = generateReaverbotGenome(options);
+    assert.deepEqual({
+      candidateIndex: genome.candidateIndex,
+      bodyPlan: genome.body.planId,
+      weaponId: genome.modules.weapon.id,
+      mountSide: genome.modules.weapon.mountSide ?? null,
+      proportions: genome.body.proportions,
+      radius: genome.stats.radius,
+      collisionHeight: genome.stats.collisionHeight,
+    }, expected);
+  }
+
+  const normalized = generateReaverbotGenome(snapshots[0].options);
+  const pending = structuredClone(normalized);
+  pending.modules.defense = structuredClone(REAVERBOT_DEFENSES.armoredSkull);
+  pending.modules.weakPoint = structuredClone(REAVERBOT_WEAK_POINTS.rearBattery);
+  pending.behavior.exposureDuration = Number(Math.max(
+    0.7,
+    pending.behavior.recoveryDuration * 0.78,
+  ).toFixed(3));
+  pending.threat.spent -= REAVERBOT_DEFENSES.armorShutters.threatCost
+    - REAVERBOT_DEFENSES.armoredSkull.threatCost;
+  pending.tags = [
+    'pursuer',
+    'chaser',
+    ...pending.body.tags,
+    ...pending.modules.weapon.tags,
+    ...pending.modules.defense.tags,
+  ].filter((tag, index, tags) => tags.indexOf(tag) === index);
+
+  const strictPending = validateReaverbotGenome(pending);
+  assert.ok(strictPending.errors.includes('quadruped-eyelid-defense-required'));
+  assert.ok(strictPending.errors.includes('quadruped-eye-weak-point-required'));
+  assert.equal(
+    validateReaverbotGenome(pending, { allowPendingBodyDefenseOverride: true }).valid,
+    true,
+  );
+  assert.equal(validateReaverbotGenome(normalized).valid, true);
+  assert.equal(normalized.modules.defense.id, 'armorShutters');
+  assert.equal(normalized.modules.weakPoint.id, 'eyeLens');
+  assert.equal(normalized.threat.spent, pending.threat.spent + 1);
+  assert.ok(normalized.tags.includes('shutters'));
+  assert.equal(normalized.tags.includes('frontArmor'), false);
+  assert.equal(
+    normalized.behavior.exposureDuration,
+    Number(Math.max(
+      0.65,
+      normalized.behavior.telegraphDuration + normalized.behavior.commitDuration * 0.45,
+    ).toFixed(3)),
+  );
+});
+
 test('a broad seed sweep always satisfies the gameplay contract', () => {
   const archetypes = new Set();
   const bodyPlans = new Set();
@@ -72,6 +171,10 @@ test('a broad seed sweep always satisfies the gameplay contract', () => {
         `seed ${seed}: defense ${genome.modules.defense.id} must protect ${genome.modules.weakPoint.id}`,
       );
       defenses.add(genome.modules.defense.id);
+    }
+    if (genome.body.planId === 'quadruped' && genome.modules.weapon.id !== 'clawArm') {
+      assert.equal(genome.modules.defense.id, 'armorShutters');
+      assert.equal(genome.modules.weakPoint.id, 'eyeLens');
     }
     if (genome.modules.weakPoint.id === 'legJoint') {
       assert.equal(genome.modules.defense.id, 'sidePlates');
@@ -126,9 +229,103 @@ test('solo pack hunters remain valid while dependent controllers and self-destru
   const validation = validateReaverbotGenome(forcedSoloHunter);
   assert.equal(validation.valid, true, validation.errors.join(', '));
   assert.equal(forcedSoloHunter.behavior.minimumPackSize, 1);
-  assert.ok(forcedSoloHunter.behavior.rearApproachDistance > 1);
-  assert.ok(forcedSoloHunter.behavior.rearAttackDot < 0);
+  assert.ok(forcedSoloHunter.behavior.flankApproachDistance > 1);
+  assert.ok(forcedSoloHunter.behavior.flankAttackDot >= 0);
+  assert.equal(forcedSoloHunter.behavior.attackCooldownScale, 0.22);
+  assert.equal(forcedSoloHunter.behavior.attackCooldownFloor, 0.32);
+  assert.equal(forcedSoloHunter.behavior.forcedAttackSeconds, 15);
+
+  const packWeapons = new Map();
+  for (let variant = 0; variant < 500 && packWeapons.size < 3; variant += 1) {
+    const genome = generateReaverbotGenome({
+      seed: `pack-cooldown:${variant}`,
+      archetypeId: 'packHunter',
+      encounterSize: 4,
+    });
+    packWeapons.set(genome.modules.weapon.id, genome);
+  }
+  assert.deepEqual([...packWeapons.keys()].sort(), ['clawArm', 'crusherJaw', 'ramHorn']);
+  const previousPackCycles = {
+    ramHorn: 2.964,
+    clawArm: 3.744,
+    crusherJaw: 5.871,
+  };
+  for (const genome of packWeapons.values()) {
+    const weapon = genome.modules.weapon;
+    const unscaledCooldown = Math.max(0.75, Math.min(
+      3.25,
+      (genome.behavior.telegraphDuration
+        + genome.behavior.commitDuration
+        + genome.behavior.recoveryDuration)
+        * 0.9
+        * (weapon.cooldownScale ?? 1),
+    ));
+    assert.ok(genome.stats.attackCooldown < unscaledCooldown, `${weapon.id} should attack more frequently`);
+    const currentCycle = genome.behavior.telegraphDuration
+      + genome.behavior.commitDuration
+      + genome.behavior.recoveryDuration
+      + genome.stats.attackCooldown;
+    assert.ok(
+      currentCycle < previousPackCycles[weapon.id],
+      `${weapon.id} total attack cycle should be faster than its previous cadence`,
+    );
+  }
   assert.ok(weightedSoloPackHunters > 0, 'pack hunters should be selectable in one-enemy encounters');
+});
+
+test('non-claw quadrupeds use opening eyelid armor instead of offhand plates', () => {
+  for (const archetypeId of ['pursuer', 'pouncer', 'packHunter']) {
+    let genome = null;
+    for (let variant = 0; variant < 400; variant += 1) {
+      const candidate = generateReaverbotGenome({
+        seed: `quadruped-eyelids:${archetypeId}:${variant}`,
+        archetypeId,
+        encounterSize: 4,
+      });
+      if (candidate.body.planId === 'quadruped' && candidate.modules.weapon.id !== 'clawArm') {
+        genome = candidate;
+        break;
+      }
+    }
+
+    assert.ok(genome, `expected a non-claw quadruped ${archetypeId}`);
+    assert.equal(genome.modules.defense.id, 'armorShutters');
+    assert.equal(genome.modules.weakPoint.id, 'eyeLens');
+    assert.equal(validateReaverbotGenome(genome).valid, true);
+
+    const visual = createReaverbotVisual(genome);
+    assert.equal(visual.defense.group.userData.quadrupedEyelids, true);
+    assert.equal(visual.defense.group.parent, visual.eye.group);
+    assert.equal(visual.defense.shutters.length, 2);
+    assert.equal(visual.defense.plates.length, 0);
+    assert.ok(visual.defense.shutters.every((shutter) => (
+      shutter.name === 'generatedQuadrupedEyeArmorEyelid'
+      && Number.isFinite(shutter.userData.openY)
+      && Number.isFinite(shutter.userData.closedY)
+    )));
+
+    setReaverbotDefenseVisualActive(visual, true, 0);
+    const closedGap = Math.abs(
+      visual.defense.shutters[1].position.y - visual.defense.shutters[0].position.y,
+    );
+    setReaverbotDefenseVisualActive(visual, false, 1);
+    const openGap = Math.abs(
+      visual.defense.shutters[1].position.y - visual.defense.shutters[0].position.y,
+    );
+    assert.ok(openGap > closedGap + 0.5);
+    animateReaverbotVisual(visual, {
+      dt: 1,
+      state: 'telegraph',
+      stateProgress: 0,
+      defenseActive: false,
+      defenseDisabled: true,
+      weakPointExposed: true,
+    });
+    const brokenTelegraphGap = Math.abs(
+      visual.defense.shutters[1].position.y - visual.defense.shutters[0].position.y,
+    );
+    assert.ok(brokenTelegraphGap > closedGap + 0.5);
+  }
 });
 
 test('encounter slot seeds are stable and independent', () => {
@@ -221,7 +418,7 @@ test('revamped melee modules are armored, deterministic, and body-plan compatibl
         assert.equal('comboOrientation' in weapon, false);
         assert.equal('initialSweepDirection' in weapon, false);
         assert.equal('comboCount' in weapon, false);
-        assert.equal(weapon.telegraphDuration, 1.1);
+        assert.equal(weapon.telegraphDuration, 1.65);
         assert.equal(weapon.horizontalCommitDuration, 0.52);
         assert.equal(weapon.slamCommitDuration, 0.58);
         assert.equal(weapon.recoveryDuration, 0.78);
@@ -654,7 +851,9 @@ test('defensive modules use readable body-family anchors', () => {
       expected = anchors.rearHigh;
     }
 
-    const actual = visual.defense.group.position;
+    const actual = visual.root.worldToLocal(
+      visual.defense.group.getWorldPosition(new THREE.Vector3()),
+    );
     assert.ok(
       Math.abs(actual.x - expected[0]) < 0.0001
         && Math.abs(actual.y - expected[1]) < 0.0001

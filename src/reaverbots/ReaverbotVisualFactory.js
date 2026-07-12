@@ -326,6 +326,7 @@ function createWeapon(root, genome, frame, materials) {
     clawWristPivot: null,
     clawPalm: null,
     clawPalmAnchor: null,
+    clawPalmBackAnchor: null,
     clawTalonPivots: [],
     clawReachSocket: null,
     clawArmAssembly: null,
@@ -500,6 +501,8 @@ function createWeapon(root, genome, frame, materials) {
     palm.userData.breakableWeaponPart = 'clawArm';
     const palmAnchor = group(wristPivot, 'generatedClawPalmWeakPointAnchor', [0, 0, 0.43]);
     palmAnchor.userData.clawRigRole = 'palmWeakPointAnchor';
+    const palmBackAnchor = group(wristPivot, 'generatedClawPalmBackArmorAnchor', [0, 0, -0.39]);
+    palmBackAnchor.userData.clawRigRole = 'palmBackArmorAnchor';
     const talonPivots = [];
     const clawMountSide = Math.sign(genome.modules.weapon.mountSide || 1);
     for (const side of [-1, 0, 1]) {
@@ -579,6 +582,7 @@ function createWeapon(root, genome, frame, materials) {
     parts.clawWristPivot = wristPivot;
     parts.clawPalm = palm;
     parts.clawPalmAnchor = palmAnchor;
+    parts.clawPalmBackAnchor = palmBackAnchor;
     parts.clawTalonPivots = talonPivots;
     parts.clawReachSocket = reachSocket;
     parts.clawArmAssembly = swingPivot;
@@ -784,11 +788,29 @@ function createDefense(root, genome, frame, materials) {
       parts.plates.push(arm);
     }
   } else if (id === 'armorShutters') {
-    for (const side of [-1, 1]) {
-      const shutter = box(defense, defenseMaterial, 'generatedEyeArmorShutter', [0.28, 0.54, 0.12], [side * 0.42, 0, 0.13], [0, 0, side * 0.28]);
-      shutter.userData.openX = side * 0.42;
-      shutter.userData.closedX = side * 0.16;
-      parts.shutters.push(shutter);
+    if (frame.plan === 'quadruped') {
+      for (const verticalSide of [-1, 1]) {
+        const shutter = box(
+          defense,
+          defenseMaterial,
+          'generatedQuadrupedEyeArmorEyelid',
+          [0.64, 0.26, 0.12],
+          [0, verticalSide * 0.23, 0.13],
+          [0, 0, verticalSide * 0.05],
+        );
+        shutter.userData.eyelidSide = verticalSide;
+        shutter.userData.openY = verticalSide * 0.43;
+        shutter.userData.closedY = verticalSide * 0.12;
+        parts.shutters.push(shutter);
+      }
+      defense.userData.quadrupedEyelids = true;
+    } else {
+      for (const side of [-1, 1]) {
+        const shutter = box(defense, defenseMaterial, 'generatedEyeArmorShutter', [0.28, 0.54, 0.12], [side * 0.42, 0, 0.13], [0, 0, side * 0.28]);
+        shutter.userData.openX = side * 0.42;
+        shutter.userData.closedX = side * 0.16;
+        parts.shutters.push(shutter);
+      }
     }
   } else if (id === 'rotatingPlates') {
     defense.position.copy(new THREE.Vector3(...frame.anchors.center));
@@ -1098,6 +1120,11 @@ export function createReaverbotVisual(genome) {
     frame.headAssembly.attach(weapon.group);
   }
   const defense = createDefense(visualRoot, genome, frame, materials);
+  if (genome.modules.defense?.id === 'armorShutters') {
+    visualRoot.updateMatrixWorld(true);
+    eye.group.attach(defense.group);
+    defense.group.userData.basePosition = defense.group.position.clone();
+  }
   if (genome.modules.weapon.id === 'rotorBlade') {
     defense.group.add(weapon.group);
     weapon.group.position.set(0, 0, 0);
@@ -1148,9 +1175,15 @@ export function setReaverbotDefenseVisualActive(visual, active, openness = activ
     );
   }
   for (const shutter of defense.shutters) {
-    const side = Math.sign(shutter.userData.openX || shutter.position.x || 1);
-    shutter.position.x = THREE.MathUtils.lerp(shutter.userData.closedX, shutter.userData.openX, easedOpen);
-    shutter.rotation.z = side * THREE.MathUtils.lerp(0.05, 0.34, easedOpen);
+    if (Number.isFinite(shutter.userData.openY)) {
+      const side = shutter.userData.eyelidSide ?? Math.sign(shutter.position.y || 1);
+      shutter.position.y = THREE.MathUtils.lerp(shutter.userData.closedY, shutter.userData.openY, easedOpen);
+      shutter.rotation.z = side * THREE.MathUtils.lerp(0.05, 0.2, easedOpen);
+    } else {
+      const side = Math.sign(shutter.userData.openX || shutter.position.x || 1);
+      shutter.position.x = THREE.MathUtils.lerp(shutter.userData.closedX, shutter.userData.openX, easedOpen);
+      shutter.rotation.z = side * THREE.MathUtils.lerp(0.05, 0.34, easedOpen);
+    }
   }
   if (defense.shell) {
     defense.shell.material.opacity = active ? 0.18 : 0.035;
@@ -1211,6 +1244,7 @@ export function animateReaverbotVisual(visual, {
   clawDestroyedProgress = 0,
   clawSpinProgress = 0,
   defenseActive = false,
+  defenseDisabled = false,
   weakPointExposed = false,
   weakPointLocation = null,
   tractorBeamActive = false,
@@ -1310,8 +1344,10 @@ export function animateReaverbotVisual(visual, {
       targetZ = mountSide * 0.18 * brace;
       elbowAngle = THREE.MathUtils.lerp(0.42, 0.68, brace);
       elbowYaw = mountSide * 0.72 * brace;
-      wristY = mountSide * 0.12 * brace;
-      talonOpen = THREE.MathUtils.lerp(0.04, 0.22, brace);
+      // Turn the vulnerable palm inward so the broad armored back of the hand
+      // is what visibly braces in front of the chassis like a tower shield.
+      wristY = mountSide * (Math.PI - 0.12) * brace;
+      talonOpen = THREE.MathUtils.lerp(0.04, 0.08, brace);
     } else if (state === 'telegraph') {
       const cock = THREE.MathUtils.smoothstep(progress, 0.06, 0.88);
       const urgency = THREE.MathUtils.smoothstep(progress, 0.08, 1);
@@ -1402,11 +1438,11 @@ export function animateReaverbotVisual(visual, {
       }
     }
 
-    if (guardProgress > 0.001 && weapon.clawPalmAnchor) {
-      // Translate the posed arm just enough that its actual palm—not an
-      // invisible substitute—sits in front of the torso while bracing.
+    if (guardProgress > 0.001 && weapon.clawPalmBackAnchor) {
+      // Translate the posed arm so the reinforced back plate—not the palm
+      // weak point—sits in front of the torso while bracing.
       visual.root.updateMatrixWorld(true);
-      weapon.clawPalmAnchor.getWorldPosition(CLAW_TEMP_WORLD);
+      weapon.clawPalmBackAnchor.getWorldPosition(CLAW_TEMP_WORLD);
       CLAW_TEMP_LOCAL.copy(CLAW_TEMP_WORLD);
       visual.root.worldToLocal(CLAW_TEMP_LOCAL);
       CLAW_TEMP_TARGET.set(
@@ -1535,7 +1571,13 @@ export function animateReaverbotVisual(visual, {
     visual.materials.weapon.emissiveIntensity = jawWarning;
   }
 
-  setReaverbotDefenseVisualActive(visual, defenseActive, defenseActive ? 0 : 1);
+  let defenseOpenness = defenseActive ? 0 : 1;
+  if (visual.defense.group.userData.quadrupedEyelids
+    && state === 'telegraph'
+    && !defenseDisabled) {
+    defenseOpenness = THREE.MathUtils.smoothstep(stateProgress, 0, 0.24);
+  }
+  setReaverbotDefenseVisualActive(visual, defenseActive, defenseOpenness);
   setReaverbotWeakPointExposed(visual, weakPointExposed);
   if (visual.weakPoint.palmMounted && visual.weakPoint.core.userData.exposed) {
     visual.weakPoint.core.material.emissiveIntensity = Math.max(

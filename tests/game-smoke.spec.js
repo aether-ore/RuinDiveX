@@ -3145,10 +3145,10 @@ test('trap basement remains a purposeful drop space while the bonus vault reward
   expect(Object.values(result.lowerTileCounts)).toEqual([81]);
   expect(result.bridgeTileCount).toBeGreaterThan(0);
   expect(result.bridgeKeysUnique).toBe(result.bridgeTileCount);
-  expect(result.shelfCount).toBe(2);
-  expect(result.shelfVolumeCount).toBe(2);
-  expect(result.shelfBandCount).toBe(4);
-  expect(result.shelfLedgeCount).toBe(2);
+  expect(result.shelfCount).toBe(1);
+  expect(result.shelfVolumeCount).toBe(1);
+  expect(result.shelfBandCount).toBe(2);
+  expect(result.shelfLedgeCount).toBe(1);
   expect(result.shelfEdges.every((edges) => edges?.length === 1)).toBe(true);
   expect(result.shelfBlocksBelow.every(Boolean)).toBe(true);
   expect(result.shelfBaseYs.every((value) => value === -4.8)).toBe(true);

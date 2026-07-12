@@ -175,7 +175,7 @@ test('claw palm counters guard, interrupt, break, and replace the moveset withou
     clearEnemies();
     const directRouteSummary = {};
     for (const route of ['beam', 'rail', 'drill', 'melee']) {
-      const routeDistance = route === 'drill' ? 0.72 : (route === 'melee' ? 1.55 : 3);
+      const routeDistance = route === 'drill' ? 0.55 : (route === 'melee' ? 1.55 : 3);
       const routeEnemy = spawnClaw(`route-${route}`, new Vector3(0, 0, routeDistance));
       routeEnemy._runtimeGame = game;
       beginCounterableAttack(routeEnemy);

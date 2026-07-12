@@ -219,7 +219,7 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
   expect(result.pounce.weapon).toBe('pounceActuator');
   expect(result.pounce.telegraph.state).toBe('telegraph');
   expect(result.pounce.telegraph.marker).toBe(true);
-  expect(result.pounce.recoveryWeakPoint).toBe(true);
+  expect(result.pounce.recoveryWeakPoint).toBe(false);
   expect(result.pack.minimumPackSize).toBe(1);
   expect(result.pack.frontExposed).toBe(false);
   expect(result.pack.frontState).toBe('position');

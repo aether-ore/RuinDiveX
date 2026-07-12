@@ -209,8 +209,11 @@ function createStats(archetype, body, weapon, threatTier, proportions, context) 
     ).toFixed(3)),
     attackRange: Number(attackRange.toFixed(3)),
     attackCooldown: Number(clamp(
-      (telegraphDuration + commitDuration + recoveryDuration) * 0.9 * (weapon.cooldownScale ?? 1),
-      0.75,
+      (telegraphDuration + commitDuration + recoveryDuration)
+        * 0.9
+        * (weapon.cooldownScale ?? 1)
+        * (archetype.behavior.attackCooldownScale ?? 1),
+      archetype.behavior.attackCooldownFloor ?? 0.75,
       3.25,
     ).toFixed(3)),
     armor: Number(((base.armor + meleeArmorBonus) * (1 + (tier - 1) * 0.12)).toFixed(3)),
@@ -258,10 +261,14 @@ function createBehavior(archetype, weapon, weakPoint, rng) {
     aggression: Number(rng.float(0.88, 1.12).toFixed(3)),
     minimumPackSize: base.minimumPackSize ?? 1,
     ...(archetype.id === 'packHunter' ? {
-      rearApproachDistance: base.rearApproachDistance,
-      rearLaneOffset: base.rearLaneOffset,
-      rearAttackDot: base.rearAttackDot,
-      rearPursuitSpeedScale: base.rearPursuitSpeedScale,
+      flankApproachDistance: base.flankApproachDistance,
+      flankRearBiasMin: base.flankRearBiasMin,
+      flankRearBiasMax: base.flankRearBiasMax,
+      flankAttackDot: base.flankAttackDot,
+      flankPursuitSpeedScale: base.flankPursuitSpeedScale,
+      attackCooldownScale: base.attackCooldownScale,
+      attackCooldownFloor: base.attackCooldownFloor,
+      forcedAttackSeconds: base.forcedAttackSeconds,
     } : {}),
   };
 }
@@ -335,7 +342,7 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
     ])],
   };
 
-  const validation = validateReaverbotGenome(genome);
+  const validation = validateReaverbotGenome(genome, { allowPendingBodyDefenseOverride: true });
   // The claw's articulated guard is integrated into its weapon rather than a
   // separate defense module, but it still contributes a distinct gameplay
   // idea when scoring candidate variety.
@@ -355,7 +362,34 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
   return { genome, validation, score };
 }
 
-export function validateReaverbotGenome(genome) {
+function applyBodyDefenseOverrides(genome) {
+  if (genome.body.planId !== 'quadruped' || genome.modules.weapon.id === 'clawArm') {
+    return genome;
+  }
+
+  const priorDefenseCost = genome.modules.defense?.threatCost ?? 0;
+  const defense = REAVERBOT_DEFENSES.armorShutters;
+  const weakPoint = REAVERBOT_WEAK_POINTS.eyeLens;
+  genome.modules.defense = { ...defense, tags: [...defense.tags] };
+  genome.modules.weakPoint = { ...weakPoint };
+  genome.behavior.exposureDuration = Number(Math.max(
+    0.65,
+    genome.behavior.telegraphDuration + genome.behavior.commitDuration * 0.45,
+  ).toFixed(3));
+  genome.threat.spent += defense.threatCost - priorDefenseCost;
+
+  const archetype = REAVERBOT_ARCHETYPES[genome.archetypeId];
+  genome.tags = [...new Set([
+    archetype.id,
+    archetype.role,
+    ...genome.body.tags,
+    ...genome.modules.weapon.tags,
+    ...defense.tags,
+  ])];
+  return genome;
+}
+
+export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverride = false } = {}) {
   const errors = [];
   const warnings = [];
   const body = REAVERBOT_BODY_PLANS[genome?.body?.planId];
@@ -365,6 +399,9 @@ export function validateReaverbotGenome(genome) {
   const archetype = REAVERBOT_ARCHETYPES[genome?.archetypeId];
   const defensePayload = genome?.modules?.defense;
   const isClaw = weapon?.id === 'clawArm';
+  const usesQuadrupedEyelids = body?.id === 'quadruped'
+    && defense?.id === 'armorShutters'
+    && weakPoint?.id === 'eyeLens';
 
   if (genome?.schemaVersion !== SCHEMA_VERSION) errors.push('unsupported-schema-version');
   if (!archetype) errors.push('unknown-archetype');
@@ -376,12 +413,28 @@ export function validateReaverbotGenome(genome) {
   if (!weakPoint) errors.push('missing-weak-point');
   if (isClaw && weakPoint?.id !== 'clawPalm') errors.push('claw-palm-weak-point-required');
   if (!isClaw && weakPoint?.id === 'clawPalm') errors.push('claw-palm-non-claw');
+  if (!allowPendingBodyDefenseOverride
+    && body?.id === 'quadruped'
+    && !isClaw
+    && defense?.id !== 'armorShutters') {
+    errors.push('quadruped-eyelid-defense-required');
+  }
+  if (!allowPendingBodyDefenseOverride
+    && body?.id === 'quadruped'
+    && !isClaw
+    && weakPoint?.id !== 'eyeLens') {
+    errors.push('quadruped-eye-weak-point-required');
+  }
   if (genome?.modules?.eye?.color !== REAVERBOT_EYE_COLOR) errors.push('red-eye-contract');
   if (body && weapon && !hasBodyRequirements(weapon, body)) errors.push('weapon-body-incompatible');
   if (body && defense && !hasBodyRequirements(defense, body)) errors.push('defense-body-incompatible');
   if (archetype && weapon && !archetype.weapons.includes(weapon.id)) errors.push('weapon-archetype-incompatible');
-  if (archetype && defense && !archetype.defenses.includes(defense.id)) errors.push('defense-archetype-incompatible');
-  if (archetype && weakPoint && !archetype.weakPoints.includes(weakPoint.id)) errors.push('weak-point-archetype-incompatible');
+  if (archetype && defense && !archetype.defenses.includes(defense.id) && !usesQuadrupedEyelids) {
+    errors.push('defense-archetype-incompatible');
+  }
+  if (archetype && weakPoint && !archetype.weakPoints.includes(weakPoint.id) && !usesQuadrupedEyelids) {
+    errors.push('weak-point-archetype-incompatible');
+  }
   if (!isClaw && defense && weakPoint
     && !(LINKED_WEAK_POINT_WEIGHTS[defense.id] ?? []).some(([id]) => id === weakPoint.id)) {
     errors.push('defense-weak-point-unpaired');
@@ -420,7 +473,15 @@ export function generateReaverbotGenome({
     throw error;
   }
 
-  return best.genome;
+  const genome = applyBodyDefenseOverrides(best.genome);
+  const finalValidation = validateReaverbotGenome(genome);
+  if (!finalValidation.valid) {
+    const error = new Error(`Unable to apply Reaverbot body defense contract: ${finalValidation.errors.join(', ')}`);
+    error.validation = finalValidation;
+    throw error;
+  }
+
+  return genome;
 }
 
 export function createEncounterSlotSeed(runSeed, encounterId, slotIndex) {

@@ -77,6 +77,7 @@ const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
+const tempColor = new THREE.Color();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 function createDamageCanvas() {
@@ -194,6 +195,7 @@ export class Game {
     this.aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.pointerNdc = new THREE.Vector2();
     this.aimReticle = null;
+    this.aimReticleScale = 1;
     this.poseDebugHandleGroup = new THREE.Group();
     this.poseDebugHandleGroup.name = 'poseDebugHandleGroup';
     this.poseDebugHandleGroup.visible = false;
@@ -2631,19 +2633,40 @@ export class Game {
   }
 
   _buildAimReticle() {
-    const material = new THREE.MeshBasicMaterial({
-      color: 0x77e8ff,
-      transparent: true,
-      opacity: 0.78,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-    const reticleMesh = new THREE.Mesh(new THREE.RingGeometry(0.18, 0.25, 32), material);
-    reticleMesh.name = 'manualAimReticle';
-    reticleMesh.rotation.x = -Math.PI / 2;
-    reticleMesh.position.y = 0.055;
-    this.scene.add(reticleMesh);
-    this.aimReticle = reticleMesh;
+    this.aimReticle = document.getElementById('aim-reticle');
+    if (!this.aimReticle) {
+      return;
+    }
+    this.aimReticle.hidden = false;
+    this.aimReticle.dataset.coordinateSpace = 'screen';
+    this._setAimReticleScreenPosition(this.pointer.x, this.pointer.y);
+  }
+
+  _setAimReticleScreenPosition(clientX, clientY) {
+    if (!this.aimReticle) {
+      return false;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const x = THREE.MathUtils.clamp(Number(clientX) || 0, rect.left, rect.right);
+    const y = THREE.MathUtils.clamp(Number(clientY) || 0, rect.top, rect.bottom);
+    this.aimReticle.style.left = `${x}px`;
+    this.aimReticle.style.top = `${y}px`;
+    return true;
+  }
+
+  _projectAimReticleWorldPosition(worldPosition) {
+    if (!this.aimReticle || !worldPosition) {
+      return false;
+    }
+    tempVectorD.copy(worldPosition).project(this.camera);
+    if (tempVectorD.z < -1 || tempVectorD.z > 1) {
+      return false;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    return this._setAimReticleScreenPosition(
+      rect.left + (tempVectorD.x + 1) * rect.width * 0.5,
+      rect.top + (1 - tempVectorD.y) * rect.height * 0.5,
+    );
   }
 
   _collectCameraOcclusionWalls() {
@@ -2884,6 +2907,7 @@ export class Game {
     this.bodyFacingAimOverrideFrames = 0;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
+    this._setAimReticleScreenPosition(this.pointer.x, this.pointer.y);
     this.pointerNdc.x = ((this.pointer.x - rect.left) / rect.width) * 2 - 1;
     this.pointerNdc.y = -((this.pointer.y - rect.top) / rect.height) * 2 + 1;
 
@@ -2893,8 +2917,6 @@ export class Game {
       ?? 0;
     this.aimPlane.constant = -aimSurfaceY;
     if (this.raycaster.ray.intersectPlane(this.aimPlane, this.pointer.aimWorld)) {
-      this.aimReticle.position.copy(this.pointer.aimWorld);
-      this.aimReticle.position.y = aimSurfaceY + 0.055;
       this._updateAimReticleStyle();
     }
   }
@@ -2905,9 +2927,12 @@ export class Game {
       return;
     }
 
-    this.aimReticle.material.color.set(weaponHud.color);
+    this.aimReticle.style.setProperty(
+      '--reticle-color',
+      `#${tempColor.set(weaponHud.color).getHexString()}`,
+    );
     const readiness = Math.min(weaponHud.energyPercent, weaponHud.outputPercent ?? 1);
-    this.aimReticle.material.opacity = readiness <= 0.2 ? 0.48 : 0.78;
+    this.aimReticle.style.setProperty('--reticle-opacity', readiness <= 0.2 ? '0.48' : '0.78');
 
     const scale = weaponHud.mode === 'Trap' || weaponHud.mode === 'Arc'
       ? 1.32
@@ -2916,7 +2941,9 @@ export class Game {
         : weaponHud.mode.includes('Cone')
           ? 1.16
         : 1;
-    this.aimReticle.scale.lerp(tempVectorA.set(scale, scale, scale), 0.22);
+    this.aimReticleScale = THREE.MathUtils.lerp(this.aimReticleScale, scale, 0.22);
+    this.aimReticle.style.setProperty('--reticle-scale', this.aimReticleScale.toFixed(3));
+    this.aimReticle.dataset.weaponMode = weaponHud.mode;
   }
 
   _isGameplayPointerLockAllowed() {
@@ -3019,10 +3046,7 @@ export class Game {
     tempVectorA.normalize();
     this.pointer.aimWorld.copy(player.root.position).addScaledVector(tempVectorA, range);
 
-    if (this.aimReticle) {
-      this.aimReticle.position.copy(this.pointer.aimWorld);
-      this.aimReticle.position.y += 0.055;
-    }
+    this._projectAimReticleWorldPosition(this.pointer.aimWorld);
 
     return true;
   }

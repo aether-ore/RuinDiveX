@@ -18,6 +18,21 @@
     <main id="game-container" aria-label="3D ruin digger action prototype"></main>
 
     <div id="ui-root">
+      <div id="aim-reticle" class="screen-aim-reticle" aria-hidden="true">
+        <span class="aim-reticle-ring"></span>
+        <span class="aim-reticle-tick aim-reticle-tick-top"></span>
+        <span class="aim-reticle-tick aim-reticle-tick-right"></span>
+        <span class="aim-reticle-tick aim-reticle-tick-bottom"></span>
+        <span class="aim-reticle-tick aim-reticle-tick-left"></span>
+        <span class="aim-reticle-dot"></span>
+      </div>
+
+      <div id="lock-on-indicator" class="screen-lock-on-indicator" aria-hidden="true" hidden>
+        <span class="lock-on-progress"></span>
+        <span class="lock-on-brackets"></span>
+        <span class="lock-on-center"></span>
+      </div>
+
       <div class="combat-meta" aria-label="Combat status">
         <span id="time-value">00:00</span>
         <span><strong id="enemy-count">0</strong> enemies</span>

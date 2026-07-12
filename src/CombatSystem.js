@@ -478,6 +478,7 @@ export class CombatSystem {
       skipTimer: 0,
       manual: false,
       movementLocked: false,
+      markerRotation: 0,
     };
     this.grenadePreview = null;
     this.grenadeArcPreview = null;
@@ -2702,28 +2703,14 @@ export class CombatSystem {
       return this.lockOn.marker;
     }
 
-    const group = new THREE.Group();
-    group.name = 'missileLockOnReticle';
-
-    const outer = new THREE.Mesh(
-      new THREE.TorusGeometry(0.52, 0.025, 6, 40),
-      new THREE.MeshBasicMaterial({ color: 0xffd36f, transparent: true, opacity: 0.8, depthWrite: false }),
-    );
-    outer.name = 'lockOnOuterRing';
-    outer.rotation.x = Math.PI / 2;
-
-    const inner = new THREE.Mesh(
-      new THREE.RingGeometry(0.18, 0.23, 28),
-      new THREE.MeshBasicMaterial({ color: 0xffd36f, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false }),
-    );
-    inner.name = 'lockOnProgressRing';
-    inner.rotation.x = -Math.PI / 2;
-
-    group.add(outer, inner);
-    group.visible = false;
-    this.game.scene.add(group);
-    this.lockOn.marker = group;
-    return group;
+    const marker = document.getElementById('lock-on-indicator');
+    if (!marker) {
+      return null;
+    }
+    marker.hidden = true;
+    marker.dataset.coordinateSpace = 'screen';
+    this.lockOn.marker = marker;
+    return marker;
   }
 
   _updateLockMarker() {
@@ -2733,21 +2720,44 @@ export class CombatSystem {
     }
 
     const marker = this._ensureLockMarker();
+    if (!marker) {
+      return;
+    }
     const color = this.lockOn.progress >= 1 ? 0x7ee7ff : 0xffd36f;
-    marker.visible = true;
-    getCombatTargetWorldPosition(this.lockOn.target, marker.position);
+    getCombatTargetWorldPosition(this.lockOn.target, tempFlat);
     if (!this.lockOn.target.isWeakPointTarget) {
-      marker.position.y += 0.58;
+      tempFlat.y += 0.58;
     }
-    marker.rotation.y += 0.08;
-    marker.scale.setScalar(0.78 + this.lockOn.progress * 0.34);
+    tempAimPoint.copy(tempFlat).sub(this.game.camera.position);
+    this.game.camera.getWorldDirection(tempDirection);
+    if (tempAimPoint.dot(tempDirection) <= 0.001) {
+      marker.hidden = true;
+      return;
+    }
+    tempFlat.project(this.game.camera);
+    if (tempFlat.z < -1 || tempFlat.z > 1) {
+      marker.hidden = true;
+      return;
+    }
 
-    for (const child of marker.children) {
-      child.material.color.set(color);
-      child.material.opacity = child.name === 'lockOnProgressRing'
-        ? 0.28 + this.lockOn.progress * 0.48
-        : 0.52 + this.lockOn.progress * 0.32;
-    }
+    const rect = this.game.renderer.domElement.getBoundingClientRect();
+    const offscreen = Math.abs(tempFlat.x) > 1 || Math.abs(tempFlat.y) > 1;
+    const screenX = rect.left
+      + (THREE.MathUtils.clamp(tempFlat.x, -0.94, 0.94) + 1) * rect.width * 0.5;
+    const screenY = rect.top
+      + (1 - THREE.MathUtils.clamp(tempFlat.y, -0.92, 0.92)) * rect.height * 0.5;
+    this.lockOn.markerRotation = (this.lockOn.markerRotation + 4.6) % 360;
+    marker.hidden = false;
+    marker.classList.toggle('is-locked', this.lockOn.progress >= 1);
+    marker.classList.toggle('is-offscreen', offscreen);
+    marker.style.left = `${screenX}px`;
+    marker.style.top = `${screenY}px`;
+    marker.style.setProperty('--lock-color', colorToCss(color));
+    marker.style.setProperty('--lock-progress', String(this.lockOn.progress));
+    marker.style.setProperty('--lock-opacity', String(0.52 + this.lockOn.progress * 0.32));
+    marker.style.setProperty('--lock-scale', String(0.78 + this.lockOn.progress * 0.34));
+    marker.style.setProperty('--lock-rotation', `${this.lockOn.markerRotation.toFixed(1)}deg`);
+    marker.dataset.lockState = this.lockOn.progress >= 1 ? 'locked' : 'acquiring';
   }
 
   _clearLockOn(clearSkip = true) {
@@ -2761,7 +2771,8 @@ export class CombatSystem {
     }
 
     if (this.lockOn.marker) {
-      this.lockOn.marker.visible = false;
+      this.lockOn.marker.hidden = true;
+      this.lockOn.marker.classList.remove('is-locked', 'is-offscreen');
     }
   }
 

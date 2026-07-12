@@ -57,15 +57,22 @@ test('a broad seed sweep always satisfies the gameplay contract', () => {
     });
     const validation = validateReaverbotGenome(genome);
     assert.equal(validation.valid, true, `seed ${seed}: ${validation.errors.join(', ')}`);
+    assert.equal(genome.schemaVersion, 2);
     assert.equal(genome.modules.eye.color, REAVERBOT_EYE_COLOR);
     assert.ok(genome.modules.weapon.id);
-    assert.ok(genome.modules.defense.id);
     assert.ok(genome.modules.weakPoint.id);
-    assert.ok(
-      (LINKED_WEAK_POINT_WEIGHTS[genome.modules.defense.id] ?? [])
-        .some(([weakPointId]) => weakPointId === genome.modules.weakPoint.id),
-      `seed ${seed}: defense ${genome.modules.defense.id} must protect ${genome.modules.weakPoint.id}`,
-    );
+    if (genome.modules.weapon.id === 'clawArm') {
+      assert.equal(genome.modules.defense, null);
+      assert.equal(genome.modules.weakPoint.id, 'clawPalm');
+    } else {
+      assert.ok(genome.modules.defense?.id);
+      assert.ok(
+        (LINKED_WEAK_POINT_WEIGHTS[genome.modules.defense.id] ?? [])
+          .some(([weakPointId]) => weakPointId === genome.modules.weakPoint.id),
+        `seed ${seed}: defense ${genome.modules.defense.id} must protect ${genome.modules.weakPoint.id}`,
+      );
+      defenses.add(genome.modules.defense.id);
+    }
     if (genome.modules.weakPoint.id === 'legJoint') {
       assert.equal(genome.modules.defense.id, 'sidePlates');
       assert.ok(genome.modules.weakPoint.radius >= 0.24);
@@ -76,16 +83,16 @@ test('a broad seed sweep always satisfies the gameplay contract', () => {
     archetypes.add(genome.archetypeId);
     bodyPlans.add(genome.body.planId);
     weapons.add(genome.modules.weapon.id);
-    defenses.add(genome.modules.defense.id);
     weakPoints.add(genome.modules.weakPoint.id);
   }
 
   const catalog = getReaverbotCatalogSummary();
+  assert.equal(catalog.schemaVersion, 2);
   assert.deepEqual([...archetypes].sort(), [...catalog.archetypes].sort());
   assert.deepEqual([...bodyPlans].sort(), [...catalog.bodyPlans].sort());
   assert.ok(weapons.size >= 10);
   assert.ok(defenses.size >= 9);
-  assert.ok(weakPoints.size >= 7);
+  assert.ok(weakPoints.size >= 8);
 });
 
 test('solo pack hunters remain valid while dependent controllers and self-destructors protect progression', () => {
@@ -150,7 +157,7 @@ test('close-range Reaverbots use the harder long-tracking combat profile', () =>
 
   const pouncer = findGenome('pouncer', (genome) => genome.modules.weapon.attackKind === 'pounce');
   const charger = findGenome('pursuer', (genome) => genome.modules.weapon.attackKind === 'charge');
-  const melee = findGenome('pursuer', (genome) => genome.modules.weapon.attackKind === 'clawCombo');
+  const melee = findGenome('pursuer', (genome) => genome.modules.weapon.attackKind === 'clawMoveset');
 
   assert.ok(pouncer);
   assert.ok(charger);
@@ -165,7 +172,7 @@ test('close-range Reaverbots use the harder long-tracking combat profile', () =>
 });
 
 test('revamped melee modules are armored, deterministic, and body-plan compatible', () => {
-  const clawOrientations = new Set();
+  const clawMountSides = new Set();
   let jawCount = 0;
   let meleeCount = 0;
 
@@ -200,22 +207,84 @@ test('revamped melee modules are armored, deterministic, and body-plan compatibl
       }
 
       if (weapon.id === 'clawArm') {
-        clawOrientations.add(weapon.comboOrientation);
-        assert.equal(weapon.attackKind, 'clawCombo');
-        assert.equal(weapon.comboCount, 3);
+        clawMountSides.add(weapon.mountSide);
+        assert.equal(weapon.attackKind, 'clawMoveset');
+        assert.equal(weapon.threatCost, 7);
+        assert.equal(genome.modules.defense, null);
+        assert.equal(genome.modules.weakPoint.id, 'clawPalm');
+        assert.equal(genome.modules.weakPoint.location, 'clawPalm');
+        assert.equal(genome.modules.weakPoint.exposure, 'telegraph');
+        assert.equal(genome.modules.weakPoint.multiplier, 2.25);
+        assert.equal(genome.modules.weakPoint.radius, 0.3);
+        assert.equal(genome.modules.weakPoint.lockable, true);
         assert.ok([-1, 1].includes(weapon.mountSide));
-        assert.ok([-1, 1].includes(weapon.initialSweepDirection));
+        assert.equal('comboOrientation' in weapon, false);
+        assert.equal('initialSweepDirection' in weapon, false);
+        assert.equal('comboCount' in weapon, false);
+        assert.equal(weapon.telegraphDuration, 1.1);
+        assert.equal(weapon.horizontalCommitDuration, 0.52);
+        assert.equal(weapon.slamCommitDuration, 0.58);
+        assert.equal(weapon.recoveryDuration, 0.78);
+        assert.equal(weapon.guardDuration, 0.62);
+        assert.equal(weapon.guardDirectMultiplier, 0);
+        assert.equal(weapon.recoilDuration, 0.85);
+        assert.equal(weapon.palmBreakHitCount, 3);
+        assert.equal(weapon.clawBreakDamageMaxHealthScale, 0.35);
+        assert.equal(weapon.horizontalSweepRadius, 4.55);
+        assert.equal(weapon.horizontalSweepDamageScale, 1);
+        assert.equal(weapon.trailDuration, 0.65);
+        assert.equal(weapon.trailDamageScale, 0.42);
+        assert.equal(weapon.slamRadius, 2.65);
+        assert.equal(weapon.slamDamageScale, 1.15);
         const repeatedWeapon = generateReaverbotGenome(options).modules.weapon;
-        assert.equal(repeatedWeapon.comboOrientation, weapon.comboOrientation);
         assert.equal(repeatedWeapon.mountSide, weapon.mountSide);
-        assert.equal(repeatedWeapon.initialSweepDirection, weapon.initialSweepDirection);
       }
     }
   }
 
   assert.ok(meleeCount > 0);
   assert.ok(jawCount > 0);
-  assert.deepEqual([...clawOrientations].sort(), ['horizontal', 'vertical']);
+  assert.deepEqual([...clawMountSides].sort(), [-1, 1]);
+});
+
+test('schema-v2 validation reserves null defense and the palm weak point for claw carriers', () => {
+  let clawGenome = null;
+  let ordinaryGenome = null;
+  for (let variant = 0; variant < 240 && (!clawGenome || !ordinaryGenome); variant += 1) {
+    const genome = generateReaverbotGenome({
+      seed: `schema-v2-claw-contract:${variant}`,
+      archetypeId: 'pursuer',
+      threatTier: 2,
+      encounterSize: 4,
+    });
+    if (genome.modules.weapon.id === 'clawArm') clawGenome = genome;
+    else ordinaryGenome = genome;
+  }
+
+  assert.ok(clawGenome);
+  assert.ok(ordinaryGenome);
+  assert.equal(validateReaverbotGenome(clawGenome).valid, true);
+  assert.equal(validateReaverbotGenome(ordinaryGenome).valid, true);
+
+  const withSeparateDefense = structuredClone(clawGenome);
+  withSeparateDefense.modules.defense = structuredClone(REAVERBOT_DEFENSES.reactivePlate);
+  assert.ok(validateReaverbotGenome(withSeparateDefense).errors.includes('claw-defense-must-be-null'));
+
+  const withoutPalm = structuredClone(clawGenome);
+  withoutPalm.modules.weakPoint = structuredClone(REAVERBOT_WEAK_POINTS.rearBattery);
+  assert.ok(validateReaverbotGenome(withoutPalm).errors.includes('claw-palm-weak-point-required'));
+
+  const ordinaryWithoutDefense = structuredClone(ordinaryGenome);
+  ordinaryWithoutDefense.modules.defense = null;
+  assert.ok(validateReaverbotGenome(ordinaryWithoutDefense).errors.includes('defense-null-non-claw'));
+
+  const ordinaryWithPalm = structuredClone(ordinaryGenome);
+  ordinaryWithPalm.modules.weakPoint = structuredClone(REAVERBOT_WEAK_POINTS.clawPalm);
+  assert.ok(validateReaverbotGenome(ordinaryWithPalm).errors.includes('claw-palm-non-claw'));
+
+  const oldSchema = structuredClone(clawGenome);
+  oldSchema.schemaVersion = 1;
+  assert.ok(validateReaverbotGenome(oldSchema).errors.includes('unsupported-schema-version'));
 });
 
 test('melee visual grammar adds substantial spikes and cosmetic flank armor without replacing authored defense', () => {
@@ -246,6 +315,7 @@ test('melee visual grammar adds substantial spikes and cosmetic flank armor with
     const visual = createReaverbotVisual(genome);
     try {
       const armor = visual.meleeArmor;
+      const authoredDefensePlates = visual.defense?.plates ?? [];
       assert.equal(armor.enabled, true, weaponId);
       assert.equal(visual.root.userData.meleeSilhouetteArmored, true, weaponId);
       assert.equal(armor.group.parent, visual.root, weaponId);
@@ -266,11 +336,18 @@ test('melee visual grammar adds substantial spikes and cosmetic flank armor with
         [...armor.plates, ...armor.spikes].every((part) => (
           part.userData.decorativeArmor === true
           && part.userData.gameplayDefense === false
-          && !visual.defense.plates.includes(part)
+          && !authoredDefensePlates.includes(part)
         )),
         `${weaponId} silhouette armor must remain independent of gameplay defense`,
       );
-      assert.equal(visual.defense.group.userData.defenseId, genome.modules.defense.id, weaponId);
+      if (weaponId === 'clawArm') {
+        assert.equal(genome.modules.defense, null);
+        assert.equal(visual.defense.group.userData.defenseId, null);
+        assert.equal(visual.defense.primaryPlate, null);
+        assert.equal(visual.defense.plates.length, 0);
+      } else {
+        assert.equal(visual.defense.group.userData.defenseId, genome.modules.defense.id, weaponId);
+      }
 
       visual.root.updateMatrixWorld(true);
       const eyePosition = visual.eye.lens.getWorldPosition(new THREE.Vector3());
@@ -322,11 +399,8 @@ test('melee visual grammar adds substantial spikes and cosmetic flank armor with
 
 test('articulated claw extends into the target lane without hiding the red eye in live frames', () => {
   const bodyPlans = new Set();
-  const orientations = new Set();
   const mountSides = new Set();
-  const initialDirections = new Set();
   let checked = 0;
-  let minimumReachGain = Infinity;
   let minimumExtendedReach = Infinity;
 
   const firstOpaqueHitTowardEye = (visual) => {
@@ -371,9 +445,7 @@ test('articulated claw extends into the target lane without hiding the red eye i
       archetypeSamples += 1;
       checked += 1;
       bodyPlans.add(genome.body.planId);
-      orientations.add(weapon.comboOrientation);
       mountSides.add(weapon.mountSide);
-      initialDirections.add(weapon.initialSweepDirection);
       const visual = createReaverbotVisual(genome);
       let animationTime = 0;
 
@@ -388,6 +460,12 @@ test('articulated claw extends into the target lane without hiding the red eye i
         assert.equal(visual.weapon.muzzle.parent, visual.weapon.clawReachSocket);
         assert.equal(visual.weapon.clawBaseReach, weapon.baseReach);
         assert.equal(visual.weapon.clawMaxReach, weapon.extendedReach);
+        assert.equal(visual.weakPoint.core.userData.weakPointId, 'clawPalm');
+        assert.equal(visual.weakPoint.core.userData.clawPalmEye, true);
+        assert.equal(visual.weakPoint.core.userData.dominantFocalPoint, false);
+        assert.equal(visual.weakPoint.group.parent, visual.weapon.clawPalmAnchor);
+        assert.equal(visual.defense.group.userData.defenseId, null);
+        assert.equal(visual.defense.plates.length, 0);
 
         const shoulderPosition = new THREE.Vector3();
         const muzzlePosition = new THREE.Vector3();
@@ -410,15 +488,20 @@ test('articulated claw extends into the target lane without hiding the red eye i
         visual.weapon.clawSwingPivot.getWorldPosition(shoulderPosition);
         visual.weapon.muzzle.getWorldPosition(muzzlePosition);
         const extendedReach = shoulderPosition.distanceTo(muzzlePosition);
-        minimumReachGain = Math.min(minimumReachGain, extendedReach - foldedReach);
         minimumExtendedReach = Math.min(minimumExtendedReach, extendedReach);
+        assert.ok(extendedReach > foldedReach - 0.6, 'hinge pose must not collapse the oversized claw');
+        assert.equal(visual.weapon.clawReachSocket.userData.extension, 1);
         animateReaverbotVisual(visual, {
           dt: 1,
           state: 'position',
           attackKind: weapon.attackKind,
         });
 
-        for (const state of ['telegraph', 'commit']) {
+        // The horizontal commit deliberately turns the whole chassis through a
+        // complete revolution, so the face eye cannot remain front-facing for
+        // every commit frame. Its sightline must stay clear throughout the
+        // deliberate counter window before that spin begins.
+        for (const state of ['telegraph']) {
           const duration = state === 'telegraph'
             ? genome.behavior.telegraphDuration
             : genome.behavior.commitDuration;
@@ -432,11 +515,10 @@ test('articulated claw extends into the target lane without hiding the red eye i
               state,
               stateProgress: elapsed / duration,
               attackKind: weapon.attackKind,
-              comboOrientation: weapon.comboOrientation,
-              comboMountSide: weapon.mountSide,
-              comboInitialDirection: weapon.initialSweepDirection,
+              clawAttackVariant: 'horizontalSwipe',
+              clawMountSide: weapon.mountSide,
               defenseActive: false,
-              weakPointExposed: false,
+              weakPointExposed: state === 'telegraph',
               weakPointLocation: genome.modules.weakPoint.location,
             });
             const firstHit = firstOpaqueHitTowardEye(visual);
@@ -455,11 +537,10 @@ test('articulated claw extends into the target lane without hiding the red eye i
 
   assert.ok(checked >= 18, 'expected representative articulated-claw samples');
   assert.deepEqual([...bodyPlans].sort(), ['biped', 'lowBiped', 'quadruped']);
-  assert.deepEqual([...orientations].sort(), ['horizontal', 'vertical']);
   assert.deepEqual([...mountSides].sort(), [-1, 1]);
-  assert.deepEqual([...initialDirections].sort(), [-1, 1]);
-  assert.ok(minimumReachGain > 0.25, `folding hinge should add meaningful reach (minimum gain ${minimumReachGain})`);
-  assert.ok(minimumExtendedReach > 4, `constructor claw should reach the target lane (minimum reach ${minimumExtendedReach})`);
+  // The reach socket sits at the palm; the talons extend the visible weapon
+  // beyond it to the configured 4.55 m sweep envelope.
+  assert.ok(minimumExtendedReach > 3.75, `constructor claw palm should reach the target lane (minimum reach ${minimumExtendedReach})`);
 });
 
 test('tractor controllers are dependent flying support units with one-cargo tractor hardware', () => {
@@ -506,12 +587,17 @@ test('every body plan builds one and only one dominant red eye', () => {
       const visual = createReaverbotVisual(genome);
       const eyes = [];
       visual.root.traverse((object) => {
-        if (object.userData?.reaverbotEye) eyes.push(object);
+        if (object.userData?.reaverbotEye || object.userData?.clawPalmEye) eyes.push(object);
       });
-      assert.equal(eyes.length, 1, `${archetypeId}/${genome.body.planId}`);
-      assert.equal(eyes[0].material.color.getHex(), REAVERBOT_EYE_COLOR);
-      assert.equal(eyes[0].userData.dominantFocalPoint, true);
-      const eyePosition = eyes[0].getWorldPosition(new THREE.Vector3());
+      const dominantEyes = eyes.filter((eye) => eye.userData.dominantFocalPoint === true);
+      assert.equal(dominantEyes.length, 1, `${archetypeId}/${genome.body.planId}`);
+      assert.ok(eyes.every((eye) => eye.material.color.getHex() === REAVERBOT_EYE_COLOR));
+      if (genome.modules.weapon.id === 'clawArm') {
+        assert.equal(eyes.filter((eye) => eye.userData.clawPalmEye === true).length, 1);
+      } else {
+        assert.equal(eyes.length, 1, `${archetypeId}/${genome.body.planId}`);
+      }
+      const eyePosition = dominantEyes[0].getWorldPosition(new THREE.Vector3());
       const eyeRay = new THREE.Raycaster(
         eyePosition.clone().add(new THREE.Vector3(0, 0, 5)),
         new THREE.Vector3(0, 0, -1),
@@ -543,7 +629,8 @@ test('defensive modules use readable body-family anchors', () => {
       threatTier: 3,
       encounterSize: 4,
     });
-    const defenseId = genome.modules.defense.id;
+    const defenseId = genome.modules.defense?.id;
+    if (!defenseId) continue;
     if (found.has(defenseId)) continue;
 
     const visual = createReaverbotVisual(genome);
@@ -609,12 +696,18 @@ test('defensive modules use readable body-family anchors', () => {
 });
 
 test('leg armor physically covers its paired joint until the plates retract', () => {
-  const genome = generateReaverbotGenome({
-    seed: 'paired:pursuer:0',
-    archetypeId: 'pursuer',
-    threatTier: 2,
-    encounterSize: 3,
-  });
+  let genome = null;
+  for (let variant = 0; variant < 240 && !genome; variant += 1) {
+    const candidate = generateReaverbotGenome({
+      seed: `paired:pursuer:${variant}`,
+      archetypeId: 'pursuer',
+      threatTier: 2,
+      encounterSize: 3,
+    });
+    if (candidate.modules.defense?.id === 'sidePlates'
+      && candidate.modules.weakPoint.id === 'legJoint') genome = candidate;
+  }
+  assert.ok(genome);
   assert.equal(genome.modules.defense.id, 'sidePlates');
   assert.equal(genome.modules.weakPoint.id, 'legJoint');
 
@@ -645,8 +738,9 @@ test('every procedural Reaverbot aspect has a specific crafting material source'
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.weapon).sort(), Object.keys(REAVERBOT_WEAPONS).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.defense).sort(), Object.keys(REAVERBOT_DEFENSES).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.weakPoint).sort(), Object.keys(REAVERBOT_WEAK_POINTS).sort());
-  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 55);
+  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 56);
 
+  let foundClawProfile = false;
   for (let seed = 0; seed < 250; seed += 1) {
     const genome = generateReaverbotGenome({
       seed: `salvage-profile:${seed}`,
@@ -654,13 +748,20 @@ test('every procedural Reaverbot aspect has a specific crafting material source'
       encounterSize: 4,
     });
     const profile = createReaverbotSalvageProfile(genome);
-    assert.deepEqual(profile.map((candidate) => candidate.aspect), [
-      'behavior', 'body', 'eye', 'weapon', 'defense', 'weakPoint',
-    ]);
-    assert.equal(new Set(profile.map((candidate) => candidate.materialId)).size, 6);
+    const isClaw = genome.modules.weapon.id === 'clawArm';
+    const expectedAspects = isClaw
+      ? ['behavior', 'body', 'eye', 'weapon', 'weakPoint']
+      : ['behavior', 'body', 'eye', 'weapon', 'defense', 'weakPoint'];
+    assert.deepEqual(profile.map((candidate) => candidate.aspect), expectedAspects);
+    assert.equal(new Set(profile.map((candidate) => candidate.materialId)).size, isClaw ? 5 : 6);
+    if (isClaw) {
+      foundClawProfile = true;
+      assert.equal(profile.find((candidate) => candidate.aspect === 'weakPoint')?.materialId, 'clawPalmRecoilServo');
+    }
     assert.ok(profile.every((candidate) => candidate.material.craftingTags.length > 0));
     assert.ok(profile.every((candidate) => candidate.material.exampleUses.length > 0));
   }
+  assert.equal(foundClawProfile, true);
 });
 
 test('module salvage is guaranteed, elites yield more variety, and breaking a weak point improves its recovery chance', () => {
@@ -688,6 +789,45 @@ test('module salvage is guaranteed, elites yield more variety, and breaking a we
   });
   assert.equal(intactRolls.some((drop) => drop.source.aspect === 'weakPoint'), false);
   assert.equal(brokenRolls.some((drop) => drop.source.aspect === 'weakPoint'), true);
+});
+
+test('destroying a claw independently improves its original weapon salvage roll', () => {
+  let genome = null;
+  for (let variant = 0; variant < 240 && !genome; variant += 1) {
+    const candidate = generateReaverbotGenome({
+      seed: `claw-salvage-break:${variant}`,
+      archetypeId: 'pursuer',
+      threatTier: 1,
+      encounterSize: 4,
+    });
+    if (candidate.modules.weapon.id === 'clawArm') genome = candidate;
+  }
+  assert.ok(genome);
+
+  const sequenceRandom = (values) => {
+    let index = 0;
+    return () => values[index++] ?? values.at(-1);
+  };
+  const rolls = [0.1, 0.99, 0.99, 0.5, 0.4];
+  const intact = rollReaverbotSalvageDrops(genome, {
+    random: sequenceRandom(rolls),
+  });
+  const clawBroken = rollReaverbotSalvageDrops(genome, {
+    random: sequenceRandom(rolls),
+    brokenWeaponModuleId: 'clawArm',
+  });
+  const bothBroken = rollReaverbotSalvageDrops(genome, {
+    random: sequenceRandom(rolls),
+    weakPointBroken: true,
+    brokenWeaponModuleId: 'clawArm',
+  });
+
+  assert.equal(intact.some((drop) => drop.source.aspect === 'weapon'), false);
+  assert.equal(intact.some((drop) => drop.source.aspect === 'weakPoint'), false);
+  assert.equal(clawBroken.some((drop) => drop.id === 'serratedClawGear'), true);
+  assert.equal(clawBroken.some((drop) => drop.id === 'clawPalmRecoilServo'), false);
+  assert.equal(bothBroken.some((drop) => drop.id === 'serratedClawGear'), true);
+  assert.equal(bothBroken.some((drop) => drop.id === 'clawPalmRecoilServo'), true);
 });
 
 test('specific Reaverbot materials stack and can be consumed atomically by future recipes', () => {

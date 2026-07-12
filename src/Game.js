@@ -1478,6 +1478,74 @@ export class Game {
     });
   }
 
+  addClawSwipeTrailHazard(position, options = {}) {
+    const radius = Math.max(0.8, options.radius ?? 4.55);
+    const duration = Math.max(0.1, options.duration ?? 0.65);
+    const innerRadius = Math.max(0.35, options.innerRadius ?? radius * 0.62);
+    const color = options.color ?? 0xff2020;
+    const group = new THREE.Group();
+    group.name = 'generatedReaverbotClawTrailHazard';
+    group.position.copy(position);
+    group.position.y = (this.dungeonController?.getSurfaceElevationAt?.(position)
+      ?? position.y
+      ?? 0) + (options.height ?? 0.9);
+
+    for (let index = 0; index < 3; index += 1) {
+      const ribbonRadius = THREE.MathUtils.lerp(innerRadius, radius, (index + 1) / 3);
+      const halfWidth = Math.max(0.035, radius * 0.018);
+      const ribbon = new THREE.Mesh(
+        new THREE.RingGeometry(
+          Math.max(0.05, ribbonRadius - halfWidth),
+          ribbonRadius + halfWidth,
+          72,
+          1,
+          index * 0.16,
+          Math.PI * 2 - 0.24,
+        ),
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.78 - index * 0.1,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        }),
+      );
+      ribbon.name = `generatedReaverbotClawTrailRibbon${index + 1}`;
+      ribbon.rotation.x = -Math.PI / 2;
+      ribbon.position.y = index * 0.13;
+      ribbon.geometry.setDrawRange(0, 0);
+      ribbon.userData.baseOpacity = 0.78 - index * 0.1;
+      ribbon.userData.thetaStart = index * 0.16;
+      ribbon.userData.thetaLength = Math.PI * 2 - 0.24;
+      ribbon.userData.collisionRadius = ribbonRadius;
+      ribbon.userData.collisionHalfWidth = halfWidth;
+      group.add(ribbon);
+    }
+
+    this.scene.add(group);
+    tempVectorA.copy(this.player.root.position).sub(group.position);
+    const initialDistance = Math.hypot(tempVectorA.x, tempVectorA.z);
+    this.hazards.push({
+      kind: 'clawSwipeTrail',
+      object: group,
+      source: options.source ?? null,
+      damage: Math.max(0, options.damage ?? 0),
+      duration,
+      maxDuration: duration,
+      radius,
+      innerRadius,
+      consumed: false,
+      spawnEntrySuppressed: Boolean(options.suppressInitialOverlap)
+        && group.children.some((ribbon) => (
+          Math.abs(initialDistance - ribbon.userData.collisionRadius)
+            <= ribbon.userData.collisionHalfWidth + (this.player.radius ?? 0.42)
+        )),
+      wasInside: false,
+    });
+    return group;
+  }
+
   addFireZone(position, damagePerSecond, duration = 2.4, radius = 1.1, options = {}) {
     const target = options.target ?? 'player';
     const zone = new THREE.Mesh(
@@ -2432,6 +2500,7 @@ export class Game {
 
     for (const hazard of this.hazards) {
       hazard.object?.removeFromParent?.();
+      this._disposeTimedEffectObject(hazard.object);
     }
     this.hazards.length = 0;
 
@@ -2611,7 +2680,11 @@ export class Game {
       }
       this.cameraOcclusionOwnerBaseVisibility.set(owner, owner.visible);
       const bounds = new THREE.Box3().setFromObject(object);
-      const entry = { object, owner, bounds };
+      const entry = {
+        object,
+        owner,
+        bounds,
+      };
       this.cameraOcclusionEntries.push(entry);
       this.cameraOcclusionOwnerByObject.set(object, owner);
       const minBinX = Math.floor(bounds.min.x / CAMERA_OCCLUSION_BIN_SIZE);
@@ -2645,6 +2718,10 @@ export class Game {
     } else {
       tempVectorC.normalize();
     }
+    // Cast only through MegaMan's silhouette. Materials are made temporarily
+    // double-sided for these geometry tests so a camera outside a room can see
+    // the back face of an intervening wall without resorting to a proximity
+    // rule that hides nearby, unobstructing architecture.
     const targetOffsets = [0, -0.42, 0.42];
     for (const offset of targetOffsets) {
       tempVectorA.copy(this.player.root.position)
@@ -2691,11 +2768,28 @@ export class Game {
       this.cameraOcclusionRaycaster.near = 0.08;
       this.cameraOcclusionRaycaster.far = Math.max(0.08, distance - 0.08);
       this.cameraOcclusionHits.length = 0;
-      const hits = this.cameraOcclusionRaycaster.intersectObjects(
-        this.cameraOcclusionCandidateObjects,
-        false,
-        this.cameraOcclusionHits,
-      );
+      const originalMaterialSides = new Map();
+      for (const object of this.cameraOcclusionCandidateObjects) {
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of materials) {
+          if (material && material.side !== THREE.DoubleSide && !originalMaterialSides.has(material)) {
+            originalMaterialSides.set(material, material.side);
+            material.side = THREE.DoubleSide;
+          }
+        }
+      }
+      let hits;
+      try {
+        hits = this.cameraOcclusionRaycaster.intersectObjects(
+          this.cameraOcclusionCandidateObjects,
+          false,
+          this.cameraOcclusionHits,
+        );
+      } finally {
+        for (const [material, side] of originalMaterialSides) {
+          material.side = side;
+        }
+      }
       for (const hit of hits) {
         const owner = this.cameraOcclusionOwnerByObject.get(hit.object) ?? hit.object;
         owner.visible = false;
@@ -3247,10 +3341,94 @@ export class Game {
     for (let i = this.hazards.length - 1; i >= 0; i -= 1) {
       const hazard = this.hazards[i];
       hazard.duration -= dt;
-      hazard.object.material.opacity = Math.max(0, Math.min(0.32, hazard.duration / Math.max(0.001, hazard.maxDuration ?? 2.4) * 0.32));
-      hazard.object.rotation.z += dt * 0.6;
+      if (hazard.kind === 'clawSwipeTrail') {
+        const remaining = THREE.MathUtils.clamp(
+          hazard.duration / Math.max(0.001, hazard.maxDuration),
+          0,
+          1,
+        );
+        const reveal = THREE.MathUtils.smoothstep(1 - remaining, 0, 0.82);
+        hazard.object.rotation.y += dt * 0.7;
+        for (const ribbon of hazard.object.children) {
+          const drawCount = ribbon.geometry?.index?.count
+            ?? ribbon.geometry?.attributes?.position?.count
+            ?? 0;
+          ribbon.geometry?.setDrawRange?.(0, Math.floor(drawCount * reveal));
+          if (ribbon.material) {
+            ribbon.material.opacity = remaining * (ribbon.userData.baseOpacity ?? 0.7)
+              * Math.max(0.35, reveal);
+          }
+        }
 
-      if (hazard.target === 'enemies') {
+        tempVectorA.copy(this.player.root.position).sub(hazard.object.position);
+        const horizontalDistance = Math.hypot(tempVectorA.x, tempVectorA.z);
+        const playerRadius = this.player.radius ?? 0.42;
+        const insideHeight = Math.abs(tempVectorA.y) <= 2.2;
+        hazard.object.updateMatrixWorld(true);
+        tempVectorB.copy(this.player.root.position);
+        hazard.object.worldToLocal(tempVectorB);
+        const playerAngle = THREE.MathUtils.euclideanModulo(
+          Math.atan2(-tempVectorB.z, tempVectorB.x),
+          Math.PI * 2,
+        );
+        const insideRibbonBand = insideHeight && hazard.object.children.some((ribbon) => (
+          Math.abs(horizontalDistance - (ribbon.userData.collisionRadius ?? hazard.radius))
+            <= (ribbon.userData.collisionHalfWidth ?? 0.08) + playerRadius
+        ));
+        const insideRevealedRibbon = insideHeight && hazard.object.children.some((ribbon) => {
+          const insideRadius = Math.abs(
+            horizontalDistance - (ribbon.userData.collisionRadius ?? hazard.radius),
+          ) <= (ribbon.userData.collisionHalfWidth ?? 0.08) + playerRadius;
+          if (!insideRadius) return false;
+          const angleFromStart = THREE.MathUtils.euclideanModulo(
+            playerAngle - (ribbon.userData.thetaStart ?? 0),
+            Math.PI * 2,
+          );
+          return angleFromStart <= (ribbon.userData.thetaLength ?? Math.PI * 2) * reveal;
+        });
+        const hasLineOfSight = hazard.source?._hasClawAttackLineOfSight?.(
+          this,
+          hazard.object.position,
+          this.player.root.position,
+        ) ?? true;
+        const inside = insideRevealedRibbon && hasLineOfSight;
+        if (hazard.spawnEntrySuppressed && !insideRibbonBand) {
+          hazard.spawnEntrySuppressed = false;
+        }
+        if (!hazard.consumed
+          && !hazard.spawnEntrySuppressed
+          && !hazard.wasInside
+          && inside
+          && !this.player.dead) {
+          hazard.consumed = true;
+          tempVectorA.y = 0;
+          if (tempVectorA.lengthSq() <= 0.0001) tempVectorA.copy(this.player.lastMoveDirection);
+          tempVectorA.normalize();
+          const dealt = this.player.takeDamage(hazard.damage, hazard.source, {
+            attackKind: 'clawSwipeTrail',
+            knockbackDirection: tempVectorA,
+            knockbackStrength: 0.72,
+          });
+          if (dealt > 0) {
+            hazard.source?.onHitPlayer?.(this.player, dealt);
+            this.addHitEffect(this.player.root.position, 0xff2020, 0.7);
+            this.requestHitStop?.(0.07, { timeScale: 0.07 });
+          }
+        }
+        hazard.wasInside = inside;
+      } else {
+        if (hazard.object.material) {
+          hazard.object.material.opacity = Math.max(
+            0,
+            Math.min(0.32, hazard.duration / Math.max(0.001, hazard.maxDuration ?? 2.4) * 0.32),
+          );
+        }
+        hazard.object.rotation.z += dt * 0.6;
+      }
+
+      if (hazard.kind === 'clawSwipeTrail') {
+        // The specialized annular crossing check above owns its single hit.
+      } else if (hazard.target === 'enemies') {
         hazard.tickTimer -= dt;
         if (hazard.tickTimer <= 0) {
           const tickInterval = 0.25;
@@ -3277,6 +3455,7 @@ export class Game {
 
       if (hazard.duration <= 0) {
         hazard.object.removeFromParent();
+        if (hazard.kind === 'clawSwipeTrail') this._disposeTimedEffectObject(hazard.object);
         this.hazards.splice(i, 1);
       }
     }
@@ -3782,6 +3961,7 @@ export class Game {
       random,
       isElite: enemy.isElite,
       weakPointBroken: enemy.weakPointBroken,
+      brokenWeaponModuleId: enemy.brokenWeaponModuleId ?? null,
     });
 
     drops.forEach((drop, index) => {
@@ -3804,7 +3984,11 @@ export class Game {
   }
 
   _rollEnemyScrapDrop(enemy) {
-    const chance = enemy?.isElite ? 0.92 : enemy?.typeKey === 'gorubesshu' || enemy?.typeKey === 'horokko' ? 0.58 : 0.42;
+    const chance = enemy?.isElite
+      ? 0.92
+      : ['gorubesshu', 'horokko', 'sharukurusu'].includes(enemy?.typeKey)
+        ? 0.58
+        : 0.42;
 
     if (Math.random() > chance) {
       return 0;

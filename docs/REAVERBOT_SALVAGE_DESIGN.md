@@ -12,7 +12,7 @@ This is implemented as a parallel system to generic `Reaverbot Scrap`. Generic s
 
 ## Runtime Contract
 
-Every spawned procedural Reaverbot receives a six-entry salvage profile derived from its generated genome:
+Most spawned procedural Reaverbots receive a six-entry salvage profile derived from their generated genome:
 
 1. Behavior archetype
 2. Body plan / locomotion
@@ -23,12 +23,15 @@ Every spawned procedural Reaverbot receives a six-entry salvage profile derived 
 
 Each entry maps to exactly one possible material. The same generated module always maps to the same material, so enemy recognition becomes useful knowledge.
 
+Constructor Claw Reaverbots are the deliberate exception. Their claw is both their weapon and their active guard, so they have no generated defensive module or defensive-material entry. Their five-entry profile contains behavior, body, eye, weapon, and Claw Palm weak-point materials. Cosmetic side plating is not a defensive module and never adds a salvage roll.
+
 On a normal defeat:
 
-- Each of the six entries makes an independent material roll.
+- Each profile entry makes an independent material roll: six for ordinary Reaverbots and five for Constructor Claw carriers.
 - If every roll fails, one body, weapon, or defense material is guaranteed.
 - Elite Reaverbots yield at least two different materials.
 - Breaking the weak point before the kill substantially improves the weak-point material roll.
+- Destroying a breakable weapon adds `+15 percentage points` to that exact weapon material roll, independently of the weak-point bonus. Destroying a Constructor Claw therefore improves both its Claw Palm Recoil Servo and Serrated Claw Gear rolls when both break conditions are reported.
 - A Reaverbot that completes its own self-destruction follows the existing no-reward rule; destroying it before detonation yields normal salvage.
 - Materials appear as physical steel bolt, screw, or gear pickups with a subtle material-family halo. They stack automatically, record their most recent source module, and appear in the Garage under **Recovered Reaverbot Materials**.
 
@@ -50,6 +53,7 @@ Modifiers:
 - Threat tier adds `+1.8 percentage points` per tier above Tier 1, capped at `+12 points`.
 - Elite status adds `+14 points` to every aspect and guarantees at least two distinct materials.
 - Breaking the weak point adds `+34 points` to its material roll.
+- Destroying a weapon module adds `+15 points` to the matching weapon material roll.
 - Individual chances are capped at 95%.
 
 These are acquisition chances, not final recipe costs. Recipe quantities will be the primary long-term pacing control once crafting is implemented.
@@ -140,6 +144,7 @@ The eye is universal, but its low acquisition chance keeps it from becoming mean
 | Overload Core | Ruptured Overload Capacitor | Emergency overcharge, burst damage | Burst modules, overcharge circuits |
 | Drive Joint | Precision Drive Bearing | Fast limbs, mobility, low friction | Dash skates, leg servos |
 | Counterweight Core | Balanced Counterweight Core | Gyroscopic stability, spinning mass | Rotor weapons, stabilizers |
+| Claw Palm Core | Claw Palm Recoil Servo | Recoil, counter timing, articulated claws | Countering claw arms, recoiling weapon guards |
 
 ## Example Future Recipes
 
@@ -215,7 +220,7 @@ Recommended additions:
 ## Implementation Map
 
 - Catalog, source mappings, roll chances: `src/reaverbots/ReaverbotSalvageCatalog.js`
-- Per-enemy six-part profile: `src/reaverbots/ReaverbotEnemy.js`
+- Per-enemy five- or six-part profile: `src/reaverbots/ReaverbotEnemy.js`
 - Death drops and source metadata: `src/Game.js`
 - Physical material pickups: `src/LootSystem.js`
 - Stack storage and future recipe consumption: `src/Inventory.js`

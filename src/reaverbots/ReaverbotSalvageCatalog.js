@@ -101,6 +101,7 @@ export const WEAK_POINT_SALVAGE = Object.freeze({
   overloadCore: material('rupturedOverloadCapacitor', 'Ruptured Overload Capacitor', 'weakPoint', 'rare', ['explosive', 'capacitor', 'unstable'], ['burst damage modules', 'emergency overcharge circuits'], 'A damaged capacitor recovered from an interrupted detonation sequence.'),
   legJoint: material('precisionDriveBearing', 'Precision Drive Bearing', 'weakPoint', 'specialized', ['joint', 'speed', 'mobility'], ['dash skates', 'leg servos'], 'A tight-tolerance bearing normally hidden behind retracting leg armor.'),
   counterweightCore: material('balancedCounterweightCore', 'Balanced Counterweight Core', 'weakPoint', 'rare', ['balance', 'spin', 'core'], ['rotor weapons', 'gyroscopic stabilizers'], 'A dense balancing core mounted opposite a rotating shield.'),
+  clawPalm: material('clawPalmRecoilServo', 'Claw Palm Recoil Servo', 'weakPoint', 'rare', ['claw', 'recoil', 'counter'], ['countering claw arms', 'recoiling weapon guards'], 'A compact overload servo surrounding the exposed palm core, built to wrench the entire claw away from a well-placed hit.'),
 });
 
 export const REAVERBOT_SALVAGE_SOURCE_MAPS = Object.freeze({
@@ -167,6 +168,7 @@ export function rollReaverbotSalvageDrops(genome, {
   random = Math.random,
   isElite = false,
   weakPointBroken = false,
+  brokenWeaponModuleId = null,
 } = {}) {
   const profile = createReaverbotSalvageProfile(genome);
   if (profile.length === 0) return [];
@@ -179,7 +181,11 @@ export function rollReaverbotSalvageDrops(genome, {
   for (const candidate of profile) {
     const aspect = REAVERBOT_SALVAGE_ASPECTS[candidate.aspect];
     const breakBonus = candidate.aspect === 'weakPoint' && weakPointBroken ? 0.34 : 0;
-    const chance = Math.min(0.95, aspect.baseDropChance + tierBonus + eliteBonus + breakBonus);
+    const weaponBreakBonus = candidate.aspect === 'weapon'
+      && candidate.moduleId === brokenWeaponModuleId
+      ? 0.15
+      : 0;
+    const chance = Math.min(0.95, aspect.baseDropChance + tierBonus + eliteBonus + breakBonus + weaponBreakBonus);
     if (random() < chance) {
       drops.push(createDrop(candidate));
       droppedMaterialIds.add(candidate.materialId);

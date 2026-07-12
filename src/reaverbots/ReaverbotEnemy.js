@@ -49,6 +49,13 @@ const TRACTOR_CRASH_RELAUNCH_DURATION = 0.62;
 const COIL_BOUNCE_DURATION = 0.58;
 const COIL_BOUNCE_MIN_HEIGHT = 2.35;
 const CLAW_VAULT_DURATION = 0.54;
+const CLAW_GUARD_DURATION = 0.62;
+const CLAW_RECOIL_DURATION = 0.85;
+const CLAW_TELEGRAPH_DURATION = 1.1;
+const CLAW_HORIZONTAL_COMMIT_DURATION = 0.52;
+const CLAW_VERTICAL_COMMIT_DURATION = 0.58;
+const CLAW_HORIZONTAL_SWEEP_RADIUS = 4.55;
+const CLAW_SLAM_RADIUS = 2.65;
 const MELEE_BODY_CONTACT_INTERVAL = 0.72;
 const MELEE_BODY_CONTACT_DAMAGE_SCALE = 0.32;
 const MELEE_BODY_CONTACT_KNOCKBACK = 0.86;
@@ -62,6 +69,10 @@ const PASSIVE_DEFENSES = new Set([
 
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
+}
+
+function brainSafeNumber(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
 }
 
 function angleDelta(from, to) {
@@ -188,7 +199,7 @@ export class ReaverbotEnemy extends Enemy {
       speedRatio: 0,
       defenseActive: true,
       weakPointExposed: genome.modules.weakPoint.exposure === 'always'
-        && genome.modules.defense.id !== 'rotatingPlates',
+        && genome.modules.defense?.id !== 'rotatingPlates',
       attackFired: false,
       attackHit: false,
       effectTimer: 0,
@@ -242,6 +253,17 @@ export class ReaverbotEnemy extends Enemy {
       clawVaultCooldown: 0,
       clawVaultStart: new THREE.Vector3(),
       clawVaultLanding: new THREE.Vector3(),
+      clawGuardDuration: genome.modules.weapon.guardDuration ?? CLAW_GUARD_DURATION,
+      clawGuardTimeRemaining: 0,
+      clawGuardResumeState: 'position',
+      clawGuardResumeTime: 0,
+      clawRecoilDuration: genome.modules.weapon.recoilDuration ?? CLAW_RECOIL_DURATION,
+      clawAttackVariant: null,
+      clawAttackAttempt: 0,
+      clawInterruptedAttempt: -1,
+      clawPalmHits: 0,
+      clawDestroyed: false,
+      clawSpinProgress: 0,
       alerted: false,
     };
     this.weakPointDamage = 0;
@@ -304,6 +326,34 @@ export class ReaverbotEnemy extends Enemy {
     return targets;
   }
 
+  _isClawCarrier() {
+    return this.genome.modules.weapon.id === 'clawArm'
+      || this.genome.modules.weapon.attackKind === 'clawMoveset';
+  }
+
+  _getEffectiveAttackKind() {
+    if (this._isClawCarrier() && this.brain.clawDestroyed) return 'charge';
+    return this.genome.modules.weapon.attackKind;
+  }
+
+  _getStateDuration(state = this.brain.state) {
+    const weapon = this.genome.modules.weapon;
+    if (this._isClawCarrier()) {
+      if (state === 'telegraph') return weapon.telegraphDuration ?? CLAW_TELEGRAPH_DURATION;
+      if (state === 'guard') return brainSafeNumber(this.brain.clawGuardDuration, CLAW_GUARD_DURATION);
+      if (state === 'recoil') return brainSafeNumber(this.brain.clawRecoilDuration, CLAW_RECOIL_DURATION);
+      if (state === 'commit' && !this.brain.clawDestroyed) {
+        return this.brain.clawAttackVariant === 'verticalSlam'
+          ? (weapon.slamCommitDuration ?? CLAW_VERTICAL_COMMIT_DURATION)
+          : (weapon.horizontalCommitDuration ?? CLAW_HORIZONTAL_COMMIT_DURATION);
+      }
+    }
+    if (state === 'telegraph') return this.genome.behavior.telegraphDuration;
+    if (state === 'commit') return this.genome.behavior.commitDuration;
+    if (state === 'recovery') return this.genome.behavior.recoveryDuration;
+    return 1;
+  }
+
   resolveProjectileHit(position, projectileRadius = 0.1) {
     if (!this.brain.weakPointExposed || this.dead) {
       return null;
@@ -322,10 +372,31 @@ export class ReaverbotEnemy extends Enemy {
     };
   }
 
-  resolveLineHit(start, direction, range, width = 0.1) {
+  resolveLineHit(start, direction, range, width = 0.1, options = {}) {
     if (!this.brain.weakPointExposed || this.dead) return null;
     this.visual.weakPoint.core.getWorldPosition(tempA);
     tempB.copy(tempA).sub(start);
+    const exposedPalmCounter = this.genome.modules.weakPoint.id === 'clawPalm'
+      && this.brain.state === 'telegraph';
+    if (options.projectExposedPalm && exposedPalmCounter) {
+      tempC.copy(tempB).setY(0);
+      const projectedAlong = tempC.dot(direction);
+      const projectedPerpendicularSq = Math.max(
+        0,
+        tempC.lengthSq() - projectedAlong * projectedAlong,
+      );
+      const projectedHitRadius = width + (this.genome.modules.weakPoint.radius ?? 0.2);
+      if (projectedAlong >= 0
+        && projectedAlong <= range + projectedHitRadius
+        && projectedPerpendicularSq <= projectedHitRadius * projectedHitRadius) {
+        return {
+          along: projectedAlong,
+          hitPartId: this.genome.modules.weakPoint.id,
+          weakPointHit: true,
+          hitPosition: tempA.clone(),
+        };
+      }
+    }
     const along = tempB.dot(direction);
     if (along < 0 || along > range) return null;
     const perpendicularDistanceSq = Math.max(0, tempB.lengthSq() - along * along);
@@ -335,7 +406,7 @@ export class ReaverbotEnemy extends Enemy {
     tempC.copy(this.root.position);
     tempC.y += this.collisionHeight * 0.5;
     const bodyCenterAlong = tempC.sub(start).dot(direction);
-    if (along > bodyCenterAlong + hitRadius * 0.35) return null;
+    if (!exposedPalmCounter && along > bodyCenterAlong + hitRadius * 0.35) return null;
 
     return {
       along,
@@ -345,7 +416,35 @@ export class ReaverbotEnemy extends Enemy {
     };
   }
 
+  resolveArcHit(origin, direction, range, halfAngle, options = {}) {
+    if (!this.brain.weakPointExposed || this.dead) return null;
+    this.visual.weakPoint.core.getWorldPosition(tempA);
+    tempB.copy(tempA).sub(origin);
+    const verticalDistance = Math.abs(tempB.y);
+    tempB.y = 0;
+    const distance = tempB.length();
+    const hitRadius = this.genome.modules.weakPoint.radius ?? 0.2;
+    const projectedPalmCounter = options.projectExposedPalm
+      && this.genome.modules.weakPoint.id === 'clawPalm'
+      && this.brain.state === 'telegraph';
+    if (distance > range + hitRadius
+      || (!projectedPalmCounter && verticalDistance > 2.8 + hitRadius)) return null;
+    if (distance > 0.001) tempB.divideScalar(distance);
+    else tempB.copy(direction).setY(0).normalize();
+    tempC.copy(direction).setY(0);
+    if (tempC.lengthSq() <= 0.0001) tempC.copy(WORLD_FORWARD);
+    tempC.normalize();
+    if (tempC.dot(tempB) < Math.cos(halfAngle)) return null;
+    return {
+      along: distance,
+      hitPartId: this.genome.modules.weakPoint.id,
+      weakPointHit: true,
+      hitPosition: tempA.clone(),
+    };
+  }
+
   takeDamage(amount, meta = {}) {
+    const stateWhenHit = this.brain.state;
     const dealt = super.takeDamage(amount, meta);
 
     if (dealt > 0) {
@@ -353,14 +452,132 @@ export class ReaverbotEnemy extends Enemy {
       this._handleControllerTagged(meta);
     }
 
-    if (meta.weakPointHit && dealt > 0 && !this.weakPointBroken) {
+    const clawPalmCounter = this._isClawCarrier()
+      && this.genome.modules.weakPoint.id === 'clawPalm'
+      && meta.hitPartId === 'clawPalm'
+      && meta.weakPointHit
+      && dealt > 0
+      && stateWhenHit === 'telegraph'
+      && this.brain.clawInterruptedAttempt !== this.brain.clawAttackAttempt
+      && this._isPlayerOwnedHit(meta);
+    if (clawPalmCounter) {
+      this._registerClawPalmCounter(meta);
+    } else if (meta.weakPointHit && dealt > 0 && !this.weakPointBroken
+      && this.genome.modules.weakPoint.id !== 'clawPalm') {
       this.weakPointDamage += dealt;
       if (this.weakPointDamage >= this.stats.maxHealth * 0.32) {
         this._breakWeakPoint(meta);
       }
     }
 
+    if (dealt > 0
+      && !this.dead
+      && this._isClawCarrier()
+      && !this.brain.clawDestroyed
+      && (stateWhenHit === 'position' || stateWhenHit === 'recovery')
+      && this._isDirectPlayerHit(meta)) {
+      this._beginClawGuard(stateWhenHit);
+    }
+
     return dealt;
+  }
+
+  _isPlayerOwnedHit(meta = {}) {
+    if (meta.playerOwnedAttack === true) return true;
+    const player = this._runtimeGame?.player;
+    if (!player) return false;
+    const source = meta.source ?? null;
+    return source === player || source?.owner === player || source?.source === player;
+  }
+
+  _isDirectPlayerHit(meta = {}) {
+    return this._isPlayerOwnedHit(meta)
+      && !meta.statusTick
+      && !meta.clawBreakSelfDamage
+      && Boolean(meta.projectileHit || meta.directHit || meta.directContactHit);
+  }
+
+  _beginClawGuard(resumeState = this.brain.state) {
+    const brain = this.brain;
+    this._removeTelegraphMarker();
+    brain.clawGuardResumeState = resumeState === 'recovery' ? 'recovery' : 'position';
+    brain.clawGuardResumeTime = resumeState === 'recovery' ? brain.stateTime : 0;
+    brain.state = 'guard';
+    brain.stateTime = 0;
+    brain.clawGuardTimeRemaining = brain.clawGuardDuration;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.attackFired = false;
+    brain.clawSpinProgress = 0;
+    brain.weakPointExposed = false;
+    this.knockback.set(0, 0, 0);
+  }
+
+  _registerClawPalmCounter(meta) {
+    const brain = this.brain;
+    brain.clawInterruptedAttempt = brain.clawAttackAttempt;
+    brain.clawPalmHits += 1;
+    brain.weakPointExposed = false;
+    meta.clawPalmCounter = true;
+    meta.clawPalmHitCount = brain.clawPalmHits;
+    if (brain.clawPalmHits >= (this.genome.modules.weapon.palmBreakHitCount ?? 3)) {
+      this._destroyClaw(meta);
+      return;
+    }
+
+    this._removeTelegraphMarker();
+    brain.state = 'recoil';
+    brain.stateTime = 0;
+    brain.cooldown = 0;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.attackFired = false;
+    brain.clawSpinProgress = 0;
+    this.knockback.set(0, 0, 0);
+    const game = this._runtimeGame;
+    this.visual.weakPoint.core.getWorldPosition(tempA);
+    game?.addParticleBurst?.(tempA, RUSH_WARNING_COLOR_HEX, 18, 0.13);
+    game?.addHitEffect?.(tempA, RUSH_WARNING_COLOR_HEX, 0.9, { absolute: true });
+  }
+
+  _destroyClaw(meta) {
+    const brain = this.brain;
+    brain.clawDestroyed = true;
+    brain.weakPointExposed = false;
+    brain.clawAttackVariant = null;
+    brain.clawSpinProgress = 0;
+    brain.state = 'position';
+    brain.stateTime = 0;
+    brain.cooldown = 0;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    this.weakPointBroken = true;
+    this.brokenWeaponModuleId = 'clawArm';
+    meta.weakPointBroken = true;
+    meta.brokenWeaponModuleId = 'clawArm';
+    this._removeTelegraphMarker();
+    this.knockback.set(0, 0, 0);
+
+    const game = this._runtimeGame;
+    this.visual.weakPoint.core.getWorldPosition(tempA);
+    game?.addParticleBurst?.(tempA, RUSH_WARNING_COLOR_HEX, 32, 0.2);
+    game?.addHitEffect?.(tempA, RUSH_WARNING_COLOR_HEX, 1.25, { absolute: true });
+    game?.ui?.showToast?.('Claw destroyed — charge system exposed', '#ff705c');
+
+    if (!this.dead) {
+      super.takeDamage(
+        this.stats.maxHealth * (this.genome.modules.weapon.clawBreakDamageMaxHealthScale ?? 0.35),
+        {
+          source: game?.player ?? null,
+          playerOwnedAttack: true,
+          directHit: true,
+          attackKind: 'clawBreakDetonation',
+          armorPierce: Number.POSITIVE_INFINITY,
+          unblockable: true,
+          clawBreakSelfDamage: true,
+        },
+      );
+    }
   }
 
   _handleControllerTagged(meta) {
@@ -488,15 +705,35 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   modifyDamageTaken(amount, meta = {}) {
+    if (meta.clawBreakSelfDamage) return amount;
     let adjusted = super.modifyDamageTaken(amount, meta);
     const weakPoint = this.genome.modules.weakPoint;
     const weakPointHit = meta.hitPartId === weakPoint.id && this.brain.weakPointExposed;
     const directHit = meta.projectileHit || meta.directHit;
     const defense = this.genome.modules.defense;
     const passiveArmorOpening = weakPointHit
-      && (defense.id === 'armoredBack' || defense.id === 'armoredCarapace');
+      && (defense?.id === 'armoredBack' || defense?.id === 'armoredCarapace');
+
+    if (this._shouldBlockWithClaw(meta)) {
+      meta.shieldBlocked = true;
+      meta.damageNullified = true;
+      meta.defensePartId = 'clawArmGuard';
+      const blocker = this.visual.weapon.clawPalmAnchor
+        ?? this.visual.weapon.group
+        ?? this.visual.weakPoint.core;
+      meta.hitPosition = blocker.getWorldPosition(new THREE.Vector3());
+      this.brain.clawGuardTimeRemaining = this.brain.clawGuardDuration;
+      this.brain.moving = false;
+      this.brain.speedRatio = 0;
+      this.knockback.set(0, 0, 0);
+      meta.knockbackDirection = null;
+      meta.knockback = 0;
+      return 0;
+    }
+
     const defenseMultiplier = !meta.unblockable
       && directHit
+      && defense
       && !this.defenseDisabled
       && this.brain.defenseActive
       && !passiveArmorOpening
@@ -526,6 +763,25 @@ export class ReaverbotEnemy extends Enemy {
     }
 
     return this._applyEliteDamageModifiers(adjusted, meta);
+  }
+
+  _shouldBlockWithClaw(meta = {}) {
+    if (!this._isClawCarrier()
+      || this.brain.clawDestroyed
+      || this.brain.state !== 'guard'
+      || meta.unblockable
+      || !this._isPlayerOwnedHit(meta)) {
+      return false;
+    }
+    const rangedDirectHit = meta.projectileHit
+      || (meta.directHit && (meta.attackKind === 'beam' || meta.attackKind === 'rail'));
+    if (!rangedDirectHit) return false;
+
+    tempForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y)).normalize();
+    tempA.copy(meta.knockbackDirection ?? WORLD_FORWARD).setY(0);
+    if (tempA.lengthSq() <= 0.0001) return true;
+    tempA.normalize();
+    return tempForward.dot(tempA) < -0.22;
   }
 
   _getDefenseDamageMultiplier(meta, defense) {
@@ -644,7 +900,8 @@ export class ReaverbotEnemy extends Enemy {
 
     this._updatePersistentWeaponContact(dt, game);
 
-    if (this.genome.modules.weapon.attackKind === 'jawCombo') {
+    const effectiveAttackKind = this._getEffectiveAttackKind();
+    if (effectiveAttackKind === 'jawCombo') {
       // A crusher jaw extends several metres in front of a comparatively
       // compact quadruped body. Keep the body outside the player's footprint
       // so the visible mouth cannot overshoot MegaMan from an invalid overlap.
@@ -662,13 +919,26 @@ export class ReaverbotEnemy extends Enemy {
       return this._updateTractorController(dt, game);
     }
 
+    if (brain.state === 'guard') {
+      this._updateClawGuardState(dt);
+      this._updateExposureAndDefense();
+      this._animateVisual(dt);
+      return { handled: true, moving: false, moveAmount: 0 };
+    }
+    if (brain.state === 'recoil') {
+      this._updateClawRecoilState(dt);
+      this._updateExposureAndDefense();
+      this._animateVisual(dt);
+      return { handled: true, moving: false, moveAmount: 0 };
+    }
+
     tempA.copy(game.player.root.position).sub(this.root.position).setY(0);
     const distance = tempA.length();
     if (distance > 0.001) tempA.divideScalar(distance);
     else tempA.copy(WORLD_FORWARD);
 
     if (brain.state !== 'commit'
-      || !['charge', 'pounce', 'clawCombo'].includes(this.genome.modules.weapon.attackKind)) {
+      || !['charge', 'pounce', 'clawMoveset'].includes(effectiveAttackKind)) {
       this._turnToward(tempA, dt, this.genome.behavior.turnRate);
     }
 
@@ -691,7 +961,8 @@ export class ReaverbotEnemy extends Enemy {
   _updatePositionState(dt, game, toPlayer, distance) {
     const brain = this.brain;
     const archetype = this.genome.archetypeId;
-    const attackKind = this.genome.modules.weapon.attackKind;
+    const attackKind = this._getEffectiveAttackKind();
+    const clawFallback = this._isClawCarrier() && brain.clawDestroyed;
     brain.cooldown = Math.max(0, brain.cooldown - dt * this._getStatusAttackRateMultiplier());
 
     const aggroRange = this.genome.behavior.aggroRange ?? 14;
@@ -704,7 +975,11 @@ export class ReaverbotEnemy extends Enemy {
 
     let mode = 'hold';
     const preferred = this.genome.behavior.preferredRange;
-    if (archetype === 'packHunter') {
+    if (clawFallback) {
+      mode = distance < 1.35 ? 'retreat' : 'approach';
+    } else if (attackKind === 'clawMoveset') {
+      mode = distance > Math.max(2.2, preferred) ? 'approach' : 'orbit';
+    } else if (archetype === 'packHunter') {
       mode = 'rearFlank';
     } else if (attackKind === 'jawCombo') {
       // Jaw carriers behave like vicious mechanical dogs regardless of their
@@ -715,7 +990,7 @@ export class ReaverbotEnemy extends Enemy {
     } else if (archetype === 'shieldSentinel') {
       mode = 'hold';
     } else if (archetype === 'pouncer') {
-      const pounceApproachRange = this.genome.modules.weapon.attackKind === 'pounce'
+      const pounceApproachRange = attackKind === 'pounce'
         ? Math.max(6.1, this.stats.attackRange - 0.35)
         : 6.1;
       mode = distance < 3 ? 'retreat' : distance > pounceApproachRange ? 'approach' : 'orbit';
@@ -734,7 +1009,10 @@ export class ReaverbotEnemy extends Enemy {
     const attackDistance = this.navigationMode === 'air'
       ? this.root.position.distanceTo(game.player.root.position)
       : distance;
-    const rearAttackReady = archetype !== 'packHunter' || this._isPlayerBackExposed(game);
+    const ignoresPackRearRequirement = this._isClawCarrier();
+    const rearAttackReady = ignoresPackRearRequirement
+      || archetype !== 'packHunter'
+      || this._isPlayerBackExposed(game);
     const readyToAttack = brain.cooldown <= 0
       && rearAttackReady
       && this._isAttackDistance(attackDistance)
@@ -751,21 +1029,28 @@ export class ReaverbotEnemy extends Enemy {
       return;
     }
 
-    if (archetype === 'packHunter' && readyToAttack) {
+    if ((archetype === 'packHunter' || (this._isClawCarrier() && !clawFallback))
+      && readyToAttack
+      && !brain.clawVaultActive) {
       brain.moving = false;
       brain.speedRatio = 0;
       this._beginTelegraph(game, toPlayer);
       return;
     }
 
-    brain.moving = archetype === 'packHunter'
-      ? this._movePackHunterTowardRear(dt, game)
-      : this._moveByMode(mode, dt, game, toPlayer, distance);
+    if (this._isClawCarrier() && !clawFallback && mode === 'approach') {
+      brain.moving = this._updateClawDragAndVault(dt, game, 0);
+    } else {
+      brain.moving = archetype === 'packHunter' && !clawFallback
+        ? this._movePackHunterTowardRear(dt, game)
+        : this._moveByMode(mode, dt, game, toPlayer, distance);
+    }
     brain.speedRatio = brain.moving ? (mode.includes('Slow') ? 0.55 : 1) : 0;
 
     if (brain.cooldown <= 0
       && !brain.coilBounceActive
-      && (archetype !== 'packHunter' || this._isPlayerBackExposed(game))
+      && !brain.clawVaultActive
+      && (ignoresPackRearRequirement || archetype !== 'packHunter' || this._isPlayerBackExposed(game))
       && this._isAttackDistance(attackDistance)
       && this._canBeginAttack(game)) {
       this._beginTelegraph(game, toPlayer);
@@ -775,10 +1060,11 @@ export class ReaverbotEnemy extends Enemy {
   _updateTelegraphState(dt, game, toPlayer) {
     const brain = this.brain;
     const weapon = this.genome.modules.weapon;
-    const kind = weapon.attackKind;
+    const kind = this._getEffectiveAttackKind();
     brain.stateTime += dt;
     brain.moving = false;
-    const telegraphProgress = clamp01(brain.stateTime / Math.max(0.01, this.genome.behavior.telegraphDuration));
+    const telegraphDuration = this._getStateDuration('telegraph');
+    const telegraphProgress = clamp01(brain.stateTime / Math.max(0.01, telegraphDuration));
 
     // Charges track during the early warning, then lock so the final rapid blinks
     // communicate a committed line the player can evade.
@@ -802,7 +1088,7 @@ export class ReaverbotEnemy extends Enemy {
           brain.targetPosition.copy(tempH);
         }
       }
-    } else if (kind === 'jawCombo' || kind === 'clawCombo') {
+    } else if (kind === 'jawCombo' || kind === 'clawMoveset') {
       brain.attackDirection.lerp(toPlayer, Math.min(1, dt * 7.5)).normalize();
     }
     this._turnToward(
@@ -813,9 +1099,9 @@ export class ReaverbotEnemy extends Enemy {
 
     brain.effectTimer -= dt;
     if (brain.effectTimer <= 0) {
-      const rushAttack = kind === 'charge' || kind === 'pounce';
+      const rushAttack = kind === 'charge' || kind === 'pounce' || kind === 'clawMoveset';
       brain.effectTimer = rushAttack ? THREE.MathUtils.lerp(0.18, 0.045, telegraphProgress) : 0.11;
-      if (['charge', 'pounce', 'melee', 'clawCombo', 'flamethrower', 'beam'].includes(kind)) {
+      if (['charge', 'pounce', 'melee', 'clawMoveset', 'flamethrower', 'beam'].includes(kind)) {
         const halfAngle = kind === 'beam'
           ? 0.07
           : kind === 'flamethrower'
@@ -824,19 +1110,15 @@ export class ReaverbotEnemy extends Enemy {
               ? 0.24
               : kind === 'jawCombo'
                 ? 0.58
-                : kind === 'clawCombo'
-                  ? (weapon.comboOrientation === 'vertical'
-                    ? (weapon.verticalHalfAngle ?? 0.42)
-                    : (weapon.horizontalHalfAngle ?? 1.02))
+                : kind === 'clawMoveset'
+                  ? Math.PI
               : 0.32;
         const range = kind === 'beam'
           ? this.stats.attackRange
           : kind === 'charge' || kind === 'pounce'
             ? flatDistance(this.root.position, brain.targetPosition)
             : Math.min(this.stats.attackRange, 4.8);
-        const telegraphDirection = kind === 'clawCombo'
-          ? this._getClawStrikeDirection(0, tempF)
-          : brain.attackDirection;
+        const telegraphDirection = brain.attackDirection;
         game.addGroundConeTelegraph(this.root.position, telegraphDirection, range, halfAngle, (rushAttack || kind === 'jawCombo') ? RUSH_WARNING_COLOR_HEX : this.genome.palette.emissive, {
           duration: 0.16,
           opacity: kind === 'beam' ? 0.28 : 0.22,
@@ -847,7 +1129,7 @@ export class ReaverbotEnemy extends Enemy {
       game.addParticleBurst(tempB, (rushAttack || kind === 'jawCombo') ? RUSH_WARNING_COLOR_HEX : this.genome.palette.emissive, 2, 0.055);
     }
 
-    if (brain.stateTime >= this.genome.behavior.telegraphDuration) {
+    if (brain.stateTime >= telegraphDuration) {
       brain.state = 'commit';
       brain.stateTime = 0;
       brain.attackFired = false;
@@ -856,7 +1138,7 @@ export class ReaverbotEnemy extends Enemy {
       brain.jawHopTravel.fill(0);
       brain.tickTimer = 0;
       brain.commitStart.copy(this.root.position);
-      if (kind === 'clawCombo') {
+      if (kind === 'clawMoveset') {
         brain.attackDirection.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y)).normalize();
       }
     }
@@ -864,9 +1146,9 @@ export class ReaverbotEnemy extends Enemy {
 
   _updateCommitState(dt, game) {
     const brain = this.brain;
-    const kind = this.genome.modules.weapon.attackKind;
+    const kind = this._getEffectiveAttackKind();
     brain.stateTime += dt;
-    const duration = Math.max(0.08, this.genome.behavior.commitDuration);
+    const duration = Math.max(0.08, this._getStateDuration('commit'));
     const progress = clamp01(brain.stateTime / duration);
     brain.moving = ['charge', 'pounce', 'jawCombo'].includes(kind);
     brain.speedRatio = brain.moving ? 1.4 : 0;
@@ -894,9 +1176,8 @@ export class ReaverbotEnemy extends Enemy {
       if (!this.genome.modules.weapon.continuousContactDamage) {
         this._tryContactHit(game, kind === 'pounce' ? 0.75 : 0.5);
       }
-    } else if (kind === 'clawCombo') {
-      brain.moving = this._updateClawCombo(dt, game, progress);
-      brain.speedRatio = brain.moving ? 1.35 : 0;
+    } else if (kind === 'clawMoveset') {
+      this._updateClawMoveset(game, progress);
     } else if (kind === 'jawCombo') {
       this._updateJawCombo(dt, game, progress);
     } else if (kind === 'flamethrower') {
@@ -930,7 +1211,7 @@ export class ReaverbotEnemy extends Enemy {
     brain.moving = Boolean(brain.clawVaultActive && game)
       && this._advanceClawVault(dt);
     brain.speedRatio = brain.moving ? 1 : 0;
-    if (brain.stateTime >= this.genome.behavior.recoveryDuration) {
+    if (brain.stateTime >= this._getStateDuration('recovery')) {
       brain.state = 'position';
       brain.stateTime = 0;
       brain.cooldown = this.stats.attackCooldown * this.aiRandom.float(0.84, 1.16);
@@ -944,7 +1225,7 @@ export class ReaverbotEnemy extends Enemy {
 
   _beginTelegraph(game, toPlayer) {
     const brain = this.brain;
-    const kind = this.genome.modules.weapon.attackKind;
+    const kind = this._getEffectiveAttackKind();
     brain.state = 'telegraph';
     brain.stateTime = 0;
     brain.effectTimer = 0;
@@ -954,10 +1235,16 @@ export class ReaverbotEnemy extends Enemy {
     brain.comboStrikesFired = 0;
     brain.clawDragSpeed = 0;
     brain.clawVaultCooldown = 0;
+    brain.clawSpinProgress = 0;
     brain.attackDirection.copy(toPlayer).normalize();
     brain.targetPosition.copy(game.player.root.position);
 
-    if (kind === 'pounce') {
+    if (kind === 'clawMoveset') {
+      brain.clawAttackVariant = this.aiRandom.chance(0.5) ? 'horizontalSwipe' : 'verticalSlam';
+      brain.clawAttackAttempt += 1;
+      brain.clawInterruptedAttempt = -1;
+      brain.weakPointExposed = true;
+    } else if (kind === 'pounce') {
       brain.targetPosition.addScaledVector(game.player.lastMoveDirection ?? WORLD_FORWARD, 0.9);
     } else if (kind === 'charge') {
       brain.commitDistance = Math.min(
@@ -989,72 +1276,167 @@ export class ReaverbotEnemy extends Enemy {
             ? 1.25
             : kind === 'jawCombo'
               ? (this.genome.modules.weapon.shockwaveRadius ?? 1.85)
+              : kind === 'clawMoveset' && brain.clawAttackVariant === 'verticalSlam'
+                ? (this.genome.modules.weapon.slamRadius ?? CLAW_SLAM_RADIUS)
             : 0;
     if (markerRadius > 0) {
       this._createTelegraphMarker(
         game,
         markerRadius,
-        (kind === 'pounce' || kind === 'jawCombo') ? RUSH_WARNING_COLOR_HEX : this.genome.palette.emissive,
+        (kind === 'pounce' || kind === 'jawCombo' || kind === 'clawMoveset')
+          ? RUSH_WARNING_COLOR_HEX
+          : this.genome.palette.emissive,
       );
     }
   }
 
-  _getClawStrikeDirection(strikeIndex, out) {
-    const weapon = this.genome.modules.weapon;
-    const horizontal = weapon.comboOrientation !== 'vertical';
-    if (!horizontal) {
-      return out.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y)).normalize();
+  _updateClawGuardState(dt) {
+    const brain = this.brain;
+    brain.stateTime += dt;
+    brain.clawGuardTimeRemaining = Math.max(0, brain.clawGuardTimeRemaining - dt);
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.weakPointExposed = false;
+    this.knockback.set(0, 0, 0);
+    if (brain.clawGuardTimeRemaining <= 0) {
+      brain.state = brain.clawGuardResumeState;
+      brain.stateTime = brain.clawGuardResumeTime;
+      brain.cooldown = Math.max(0, brain.cooldown);
+      brain.clawGuardResumeState = 'position';
+      brain.clawGuardResumeTime = 0;
     }
-
-    const side = Math.sign(weapon.mountSide || 1);
-    const alternate = (strikeIndex % 2 === 0 ? 1 : -1)
-      * Math.sign(weapon.initialSweepDirection || 1);
-    const sweep = THREE.MathUtils.smoothstep(weapon.strikeProgress ?? 0.6, 0.08, 0.86);
-    const inward = 0.24 * side;
-    const outward = 1.28 * side;
-    const yawOffset = alternate > 0
-      ? THREE.MathUtils.lerp(outward, inward, sweep)
-      : THREE.MathUtils.lerp(inward, outward, sweep);
-    const yaw = this.root.rotation.y + yawOffset;
-    return out.set(Math.sin(yaw), 0, Math.cos(yaw)).normalize();
   }
 
-  _updateClawCombo(dt, game, progress) {
+  _updateClawRecoilState(dt) {
     const brain = this.brain;
-    const weapon = this.genome.modules.weapon;
-    const strikeCount = weapon.comboCount ?? 3;
-    const strikeProgress = weapon.strikeProgress ?? 0.62;
-    const cycle = Math.min(strikeCount - 1, Math.floor(progress * strikeCount));
-    const localProgress = progress >= 1 ? 1 : (progress * strikeCount) - cycle;
-    const moved = this._updateClawDragAndVault(dt, game, progress);
+    brain.stateTime += dt;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.weakPointExposed = false;
+    brain.clawSpinProgress = 0;
+    this.knockback.set(0, 0, 0);
+    if (brain.stateTime >= this._getStateDuration('recoil')) {
+      brain.state = 'position';
+      brain.stateTime = 0;
+      brain.cooldown = 0;
+      brain.clawAttackVariant = null;
+    }
+  }
 
-    brain.tickTimer -= dt;
-    if (localProgress < strikeProgress && brain.tickTimer <= 0) {
-      brain.tickTimer = 0.085;
-      const horizontal = weapon.comboOrientation !== 'vertical';
-      const strikeDirection = this._getClawStrikeDirection(cycle, tempF);
-      game.addGroundConeTelegraph(
-        this.root.position,
-        strikeDirection,
-        this.stats.attackRange,
-        horizontal ? (weapon.horizontalHalfAngle ?? 1.02) : (weapon.verticalHalfAngle ?? 0.42),
-        this.genome.palette.emissive,
+  _updateClawMoveset(game, progress) {
+    const brain = this.brain;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.weakPointExposed = false;
+    if (brain.clawAttackVariant === 'verticalSlam') {
+      brain.clawSpinProgress = 0;
+      if (!brain.attackFired && progress >= 0.52) {
+        brain.attackFired = true;
+        this._performClawGroundSlam(game);
+      }
+      return;
+    }
+
+    brain.clawSpinProgress = progress;
+    if (!brain.attackFired && progress >= 0.38) {
+      brain.attackFired = true;
+      this._performClawHorizontalSwipe(game);
+    }
+  }
+
+  _performClawHorizontalSwipe(game) {
+    const weapon = this.genome.modules.weapon;
+    const player = game.player;
+    const radius = weapon.horizontalSweepRadius ?? CLAW_HORIZONTAL_SWEEP_RADIUS;
+    tempA.copy(player.root.position).sub(this.root.position).setY(0);
+    const distance = tempA.length();
+    if (distance <= 0.001) tempA.copy(this.brain.attackDirection);
+    else tempA.divideScalar(distance);
+
+    const inHeight = Math.abs((player.root.position.y + 0.9)
+      - (this.root.position.y + this.collisionHeight * 0.52)) <= 2.2;
+    let directHitLanded = false;
+    if (!player.dead
+      && inHeight
+      && distance <= radius + (player.radius ?? 0.42)
+      && this._hasClawAttackLineOfSight(game, this.root.position, player.root.position)) {
+      const dealt = player.takeDamage(
+        this.stats.damage * (weapon.horizontalSweepDamageScale ?? 1),
+        this,
         {
-          duration: 0.12,
-          opacity: 0.2 + clamp01(localProgress / strikeProgress) * 0.16,
-          name: `generatedReaverbotClawSwipe${cycle + 1}`,
+          attackKind: 'clawHorizontalSwipe',
+          powerfulKnockback: true,
+          knockbackDirection: tempA,
+          knockbackStrength: 1.12,
         },
       );
+      if (dealt > 0) {
+        directHitLanded = true;
+        this.onHitPlayer(player, dealt);
+        game.addHitEffect?.(player.root.position, RUSH_WARNING_COLOR_HEX, 0.9);
+        game.requestHitStop?.(0.11, { timeScale: 0.045 });
+      }
     }
 
-    while (brain.comboStrikesFired < strikeCount) {
-      const threshold = (brain.comboStrikesFired + strikeProgress) / strikeCount;
-      if (progress + 0.0001 < threshold) break;
-      this._performClawStrike(game, brain.comboStrikesFired);
-      brain.comboStrikesFired += 1;
-    }
-    brain.attackFired = brain.comboStrikesFired >= strikeCount;
-    return moved;
+    tempB.copy(this.root.position);
+    tempB.y = game.dungeonController?.getSurfaceElevationAt?.(tempB) ?? tempB.y;
+    game.addClawSwipeTrailHazard?.(tempB, {
+      source: this,
+      radius,
+      height: Math.max(0.75, this.collisionHeight * 0.48),
+      duration: weapon.trailDuration ?? 0.65,
+      damage: this.stats.damage * (weapon.trailDamageScale ?? 0.42),
+      color: RUSH_WARNING_COLOR_HEX,
+      suppressInitialOverlap: directHitLanded,
+    });
+    game.addParticleBurst?.(this.root.position, RUSH_WARNING_COLOR_HEX, 20, 0.17);
+  }
+
+  _performClawGroundSlam(game) {
+    const weapon = this.genome.modules.weapon;
+    // Commit damage may be reached by one coarse simulation step. Pose the
+    // articulated arm at that exact commit progress before sampling its palm,
+    // so the shockwave and visible ground contact cannot diverge by a frame.
+    this._animateVisual(Math.max(0.08, Math.min(0.2, this.brain.stateTime)));
+    this.root.updateMatrixWorld(true);
+    this.visual.weakPoint.core.getWorldPosition(tempA);
+    tempA.y = (game.dungeonController?.getSurfaceElevationAt?.(tempA) ?? this.root.position.y) + 0.06;
+    tempB.copy(game.player.root.position).sub(tempA).setY(0);
+    if (tempB.lengthSq() <= 0.0001) tempB.copy(this.brain.attackDirection);
+    tempB.normalize();
+    game.addExplosion(
+      tempA,
+      this.stats.damage * (weapon.slamDamageScale ?? 1.15),
+      weapon.slamRadius ?? CLAW_SLAM_RADIUS,
+      RUSH_WARNING_COLOR_HEX,
+      {
+        source: this,
+        attackKind: 'clawGroundSlam',
+        powerfulKnockback: true,
+        knockbackDirection: tempB,
+        knockbackStrength: 1.18,
+        damageEnemies: false,
+        damagePlayer: true,
+        playerDamageScale: 1,
+        triggerMines: false,
+      },
+    );
+    game.addParticleBurst?.(tempA, RUSH_WARNING_COLOR_HEX, 26, 0.2);
+    game.requestHitStop?.(0.095, { timeScale: 0.055 });
+  }
+
+  _hasClawAttackLineOfSight(game, fromPosition = this.root.position, toPosition = game.player.root.position) {
+    const controller = game.dungeonController;
+    if (!controller?.isAerialPathClear) return true;
+    tempF.copy(fromPosition);
+    tempF.y = Math.max(tempF.y, this.root.position.y + this.collisionHeight * 0.5);
+    tempG.copy(toPosition);
+    tempG.y = Math.max(tempG.y, game.player.root.position.y + 0.88);
+    return controller.isAerialPathClear(tempF, tempG, {
+      radius: 0.08,
+      verticalRadius: 0.12,
+      lookAhead: Math.max(1, tempF.distanceTo(tempG)),
+    });
   }
 
   _updateClawDragAndVault(dt, game, progress) {
@@ -1221,47 +1603,6 @@ export class ReaverbotEnemy extends Enemy {
       if (!controller.isAerialPositionClear(tempE, options)) return false;
     }
     return true;
-  }
-
-  _performClawStrike(game, strikeIndex) {
-    const weapon = this.genome.modules.weapon;
-    const player = game.player;
-    tempA.copy(player.root.position).sub(this.root.position).setY(0);
-    const distance = tempA.length();
-    if (distance > 0.001) tempA.divideScalar(distance);
-    else tempA.copy(this.brain.attackDirection);
-    this._getClawStrikeDirection(strikeIndex, tempForward);
-    const horizontal = weapon.comboOrientation !== 'vertical';
-    const halfAngle = horizontal
-      ? (weapon.horizontalHalfAngle ?? 1.02)
-      : (weapon.verticalHalfAngle ?? 0.42);
-    const verticalReach = horizontal ? 1.55 : Math.max(2.4, this.collisionHeight + 0.8);
-    const inArc = tempForward.dot(tempA) >= Math.cos(halfAngle);
-    const inRange = distance <= this.stats.attackRange + player.radius + 0.28;
-    const inHeight = Math.abs((player.root.position.y + 0.85) - (this.root.position.y + this.collisionHeight * 0.52)) <= verticalReach;
-
-    this.visual.weapon.muzzle.getWorldPosition(tempB);
-    game.addDirectedParticleSpray?.(tempB, tempForward, this.genome.palette.emissive, {
-      count: 8,
-      range: this.stats.attackRange,
-      halfAngle,
-      baseScale: 0.16,
-      pressure: 1,
-    });
-    if (!inArc || !inRange || !inHeight || player.dead) return;
-
-    const powerful = strikeIndex === (weapon.comboCount ?? 3) - 1;
-    const dealt = player.takeDamage(this.stats.damage * (weapon.strikeDamageScale ?? 0.78), this, {
-      attackKind: 'clawSwipe',
-      powerfulKnockback: powerful,
-      knockbackDirection: tempA,
-      knockbackStrength: powerful ? 1.08 : 0.72,
-    });
-    if (dealt > 0) {
-      this.onHitPlayer(player, dealt);
-      game.addHitEffect(player.root.position, this.genome.palette.emissive, powerful ? 0.82 : 0.62);
-      game.requestHitStop?.(powerful ? 0.11 : 0.075, { timeScale: 0.05 });
-    }
   }
 
   _getJawMinimumRootSeparation(game) {
@@ -1479,6 +1820,9 @@ export class ReaverbotEnemy extends Enemy {
     // second damage event on the same frame as a bite, swipe, ram, or pounce.
     const meleeBodyContact = weapon.tags?.includes('melee')
       && !continuousWeaponContact
+      && !(this._isClawCarrier() && (this.brain.clawDestroyed
+        || this.brain.state === 'guard'
+        || this.brain.state === 'recoil'))
       && this.brain.state !== 'commit';
     if ((!continuousWeaponContact && !meleeBodyContact) || this.dead || game.player.dead) return;
     this.brain.contactCooldown = Math.max(0, this.brain.contactCooldown - dt);
@@ -2561,7 +2905,7 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   _fireAttack(game) {
-    const kind = this.genome.modules.weapon.attackKind;
+    const kind = this._getEffectiveAttackKind();
     switch (kind) {
       case 'melee':
         this._tryContactHit(game, 0.55);
@@ -2743,7 +3087,7 @@ export class ReaverbotEnemy extends Enemy {
     if (Math.abs(this.root.position.y - game.player.root.position.y) > 1.4) return;
     if (flatDistance(this.root.position, game.player.root.position) > this.radius + game.player.radius + padding) return;
     this.brain.attackHit = true;
-    const attackKind = this.genome.modules.weapon.attackKind;
+    const attackKind = this._getEffectiveAttackKind();
     tempC.copy(game.player.root.position).sub(this.root.position).setY(0);
     if (tempC.lengthSq() <= 0.0001) tempC.copy(this.brain.attackDirection);
     tempC.normalize();
@@ -2987,14 +3331,15 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   _isAttackDistance(distance) {
-    const kind = this.genome.modules.weapon.attackKind;
-    if (this.genome.archetypeId === 'shieldSentinel') {
+    const kind = this._getEffectiveAttackKind();
+    if (this.genome.archetypeId === 'shieldSentinel'
+      && !(this._isClawCarrier() && this.brain.clawDestroyed)) {
       return distance <= Math.min(this.stats.attackRange, this.genome.behavior.preferredRange + 0.45);
     }
     if (kind === 'charge') return distance >= 1.2 && distance <= Math.max(CHARGE_INITIATION_RANGE, this.stats.attackRange);
     if (kind === 'pounce') return distance >= 2 && distance <= this.stats.attackRange;
     if (kind === 'selfDestruct') return distance <= this.stats.attackRange + 0.4;
-    if (['melee', 'clawCombo', 'jawCombo', 'shockwave'].includes(kind)) return distance <= this.stats.attackRange + 0.5;
+    if (['melee', 'clawMoveset', 'jawCombo', 'shockwave'].includes(kind)) return distance <= this.stats.attackRange + 0.5;
     return distance <= this.stats.attackRange;
   }
 
@@ -3018,7 +3363,7 @@ export class ReaverbotEnemy extends Enemy {
 
   _canBeginAttack(game) {
     if (this.navigationMode !== 'air') return true;
-    const kind = this.genome.modules.weapon.attackKind;
+    const kind = this._getEffectiveAttackKind();
     if (!['charge', 'pounce'].includes(kind)) return true;
     tempF.copy(game.player.root.position);
     if (kind === 'charge') {
@@ -3151,7 +3496,12 @@ export class ReaverbotEnemy extends Enemy {
   _updateExposureAndDefense() {
     const brain = this.brain;
     const exposure = this.genome.modules.weakPoint.exposure;
-    const defenseId = this.genome.modules.defense.id;
+    const defenseId = this.genome.modules.defense?.id ?? null;
+    if (this._isClawCarrier()) {
+      brain.weakPointExposed = !brain.clawDestroyed && brain.state === 'telegraph';
+      brain.defenseActive = !brain.clawDestroyed && brain.state === 'guard';
+      return;
+    }
     const linkedRotorCore = defenseId === 'rotatingPlates'
       && this.genome.modules.weakPoint.id === 'counterweightCore';
     brain.weakPointExposed = this.weakPointBroken
@@ -3179,13 +3529,7 @@ export class ReaverbotEnemy extends Enemy {
 
   _animateVisual(dt) {
     const brain = this.brain;
-    const duration = brain.state === 'telegraph'
-      ? this.genome.behavior.telegraphDuration
-      : brain.state === 'commit'
-        ? this.genome.behavior.commitDuration
-        : brain.state === 'recovery'
-          ? this.genome.behavior.recoveryDuration
-          : 1;
+    const duration = this._getStateDuration(brain.state);
     animateReaverbotVisual(this.visual, {
       time: brain.time,
       dt,
@@ -3193,13 +3537,19 @@ export class ReaverbotEnemy extends Enemy {
       speedRatio: brain.speedRatio,
       state: brain.state,
       stateProgress: clamp01(brain.stateTime / Math.max(0.01, duration)),
-      attackKind: this.genome.modules.weapon.attackKind,
-      comboOrientation: this.genome.modules.weapon.comboOrientation,
-      comboMountSide: this.genome.modules.weapon.mountSide,
-      comboInitialDirection: this.genome.modules.weapon.initialSweepDirection,
+      attackKind: this._getEffectiveAttackKind(),
       defenseActive: brain.defenseActive,
       weakPointExposed: brain.weakPointExposed,
       weakPointLocation: this.genome.modules.weakPoint.location,
+      clawAttackVariant: brain.clawAttackVariant,
+      clawGuardProgress: brain.state === 'guard'
+        ? clamp01(brain.stateTime / 0.16)
+        : 0,
+      clawRecoilProgress: brain.state === 'recoil'
+        ? clamp01(brain.stateTime / Math.max(0.01, brain.clawRecoilDuration))
+        : 0,
+      clawDestroyedProgress: brain.clawDestroyed ? 1 : 0,
+      clawSpinProgress: brain.clawSpinProgress,
       tractorBeamActive: brain.tractorBeamActive,
       tractorBeamIntensity: brain.tractorBeamIntensity,
       tractorBeamLength: brain.tractorBeamLength,
@@ -3209,8 +3559,9 @@ export class ReaverbotEnemy extends Enemy {
 
   _applyRushAttackWarning(dt) {
     const brain = this.brain;
-    const kind = this.genome.modules.weapon.attackKind;
-    const rushTelegraph = brain.state === 'telegraph' && (kind === 'charge' || kind === 'pounce');
+    const kind = this._getEffectiveAttackKind();
+    const rushTelegraph = brain.state === 'telegraph'
+      && (kind === 'charge' || kind === 'pounce' || kind === 'clawMoveset');
     const chargeCommit = brain.state === 'commit' && kind === 'charge';
 
     brain.warningBlinkRate = 0;
@@ -3218,7 +3569,7 @@ export class ReaverbotEnemy extends Enemy {
     if (!rushTelegraph && !chargeCommit) return;
 
     if (rushTelegraph) {
-      const progress = clamp01(brain.stateTime / Math.max(0.01, this.genome.behavior.telegraphDuration));
+      const progress = clamp01(brain.stateTime / Math.max(0.01, this._getStateDuration('telegraph')));
       const urgency = THREE.MathUtils.smoothstep(progress, 0, 1);
       brain.warningBlinkRate = THREE.MathUtils.lerp(RUSH_WARNING_MIN_RATE, RUSH_WARNING_MAX_RATE, urgency);
       brain.warningPhase += dt * brain.warningBlinkRate * Math.PI * 2;
@@ -3247,7 +3598,7 @@ export class ReaverbotEnemy extends Enemy {
   _updateTelegraphMarker(game) {
     const marker = this.brain.telegraphMarker;
     if (!marker) return;
-    const kind = this.genome.modules.weapon.attackKind;
+    const kind = this._getEffectiveAttackKind();
     let position = kind === 'selfDestruct' || kind === 'shockwave'
       ? this.root.position
       : this.brain.targetPosition;
@@ -3255,10 +3606,14 @@ export class ReaverbotEnemy extends Enemy {
       this.root.updateMatrixWorld(true);
       this.visual.weapon.muzzle.getWorldPosition(tempA);
       position = tempA;
+    } else if (kind === 'clawMoveset' && this.brain.clawAttackVariant === 'verticalSlam') {
+      this.root.updateMatrixWorld(true);
+      this.visual.weakPoint.core.getWorldPosition(tempA);
+      position = tempA;
     }
     marker.position.copy(position);
     marker.position.y = (game.dungeonController?.getSurfaceElevationAt?.(position) ?? position.y) + 0.055;
-    const rushAttack = kind === 'charge' || kind === 'pounce';
+    const rushAttack = kind === 'charge' || kind === 'pounce' || kind === 'clawMoveset';
     const jawCycleProgress = kind === 'jawCombo' && this.brain.state === 'commit'
       ? ((this.brain.stateTime / Math.max(0.01, this.genome.behavior.commitDuration)) * 3) % 1
       : 0;

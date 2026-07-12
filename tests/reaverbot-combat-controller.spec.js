@@ -47,16 +47,9 @@ test('revamped melee, persistent rotors, direct flight, and Tractor Controllers 
 
     const claw = findEnemy(
       'duelist',
-      'clawCombo',
+      'clawMoveset',
       playerBase.clone().add(new Vector3(0, 0, 1.85)),
     );
-    claw.root.rotation.y = Math.PI;
-    claw.brain.state = 'commit';
-    claw.brain.stateTime = 0;
-    claw.brain.attackDirection.set(0, 0, -1);
-    claw.brain.comboStrikesFired = 0;
-    claw._updateCommitState(claw.genome.behavior.commitDuration, game);
-    const clawHits = recordedPlayerHits.filter((hit) => hit.attackKind === 'clawSwipe');
     let massiveClawPartCount = 0;
     claw.visual.weapon.group.traverse((object) => {
       if (object.userData?.massiveWeaponPart) massiveClawPartCount += 1;
@@ -64,9 +57,9 @@ test('revamped melee, persistent rotors, direct flight, and Tractor Controllers 
     const clawShoulderPosition = claw.visual.weapon.clawSwingPivot.getWorldPosition(new Vector3());
     const clawMuzzlePosition = claw.visual.weapon.muzzle.getWorldPosition(new Vector3());
     const clawSummary = {
-      strikeCount: clawHits.length,
-      allDamagePositive: clawHits.every((hit) => hit.amount > 0),
-      orientation: claw.genome.modules.weapon.comboOrientation,
+      attackKind: claw.genome.modules.weapon.attackKind,
+      weakPointId: claw.genome.modules.weakPoint.id,
+      defenseId: claw.genome.modules.defense?.id ?? null,
       hasSwingPivot: Boolean(claw.visual.weapon.clawSwingPivot),
       hasElbowPivot: Boolean(claw.visual.weapon.clawElbowPivot),
       massivePartCount: massiveClawPartCount,
@@ -249,9 +242,9 @@ test('revamped melee, persistent rotors, direct flight, and Tractor Controllers 
     return { clawSummary, jawSummary, rotorSummary, flyerSummary, tractorSummary };
   });
 
-  expect(result.clawSummary.strikeCount).toBe(3);
-  expect(result.clawSummary.allDamagePositive).toBe(true);
-  expect(['horizontal', 'vertical']).toContain(result.clawSummary.orientation);
+  expect(result.clawSummary.attackKind).toBe('clawMoveset');
+  expect(result.clawSummary.weakPointId).toBe('clawPalm');
+  expect(result.clawSummary.defenseId).toBeNull();
   expect(result.clawSummary.hasSwingPivot).toBe(true);
   expect(result.clawSummary.hasElbowPivot).toBe(true);
   expect(result.clawSummary.massivePartCount).toBeGreaterThanOrEqual(4);
@@ -796,113 +789,6 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
   expect(result.finalDistance).toBeGreaterThanOrEqual(result.minimumSeparation - 0.08);
 });
 
-test('horizontal claw damage and muzzle follow the visible mounted sweep', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=claw-side-regression');
-  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
-
-  const result = await page.evaluate(() => {
-    const game = window.game;
-    const Vector3 = game.player.root.position.constructor;
-    game.stop();
-
-    for (const enemy of [...game.enemies]) {
-      enemy.dispose?.();
-      enemy.root.removeFromParent();
-    }
-    game.enemies.length = 0;
-
-    const origin = game.player.root.position.clone();
-    let claw = null;
-    for (let variant = 0; variant < 320; variant += 1) {
-      const candidate = window.spawnReaverbot({
-        archetypeId: 'duelist',
-        seed: `claw-side-regression:${variant}`,
-        position: origin,
-      });
-      const weapon = candidate.genome.modules.weapon;
-      if (weapon.attackKind === 'clawCombo'
-        && weapon.comboOrientation === 'horizontal'
-        && weapon.mountSide === 1) {
-        claw = candidate;
-        break;
-      }
-      game.enemies.splice(game.enemies.indexOf(candidate), 1);
-      candidate.dispose?.();
-      candidate.root.removeFromParent();
-    }
-    if (!claw) throw new Error('Could not generate a right-mounted horizontal claw');
-
-    claw.root.position.copy(origin);
-    claw.root.rotation.y = 0;
-    claw.brain.attackDirection.set(0, 0, 1);
-    const originalTakeDamage = game.player.takeDamage;
-    const originalSpray = game.addDirectedParticleSpray;
-    const originalHitEffect = game.addHitEffect;
-    const originalHitStop = game.requestHitStop;
-    let mountedSideHits = 0;
-    let oppositeSideHits = 0;
-    let recordingOpposite = false;
-    game.player.takeDamage = (amount) => {
-      if (recordingOpposite) oppositeSideHits += 1;
-      else mountedSideHits += 1;
-      return amount;
-    };
-    game.addDirectedParticleSpray = () => {};
-    game.addHitEffect = () => {};
-    game.requestHitStop = () => {};
-
-    const strikeDirection = claw._getClawStrikeDirection(0, new Vector3());
-    game.player.root.position.copy(claw.root.position).addScaledVector(strikeDirection, 2);
-    claw._performClawStrike(game, 0);
-
-    recordingOpposite = true;
-    const oppositeAngle = -0.8;
-    game.player.root.position.copy(claw.root.position).add(new Vector3(
-      Math.sin(oppositeAngle) * 2,
-      0,
-      Math.cos(oppositeAngle) * 2,
-    ));
-    claw._performClawStrike(game, 0);
-
-    const muzzleParentedToReachSocket = claw.visual.weapon.muzzle.parent === claw.visual.weapon.clawReachSocket;
-    const reachSocketParentedToElbow = claw.visual.weapon.clawReachSocket.parent === claw.visual.weapon.clawElbowPivot;
-    claw.brain.state = 'commit';
-    claw.brain.stateTime = claw.genome.behavior.commitDuration * (
-      (0 + claw.genome.modules.weapon.strikeProgress) / 3
-    );
-    claw._animateVisual(1);
-    const firstMuzzlePosition = claw.visual.weapon.muzzle.getWorldPosition(new Vector3());
-    claw.brain.stateTime = claw.genome.behavior.commitDuration * (
-      (1 + claw.genome.modules.weapon.strikeProgress) / 3
-    );
-    claw._animateVisual(1);
-    const secondMuzzlePosition = claw.visual.weapon.muzzle.getWorldPosition(new Vector3());
-
-    const resultSummary = {
-      mountedSideHits,
-      oppositeSideHits,
-      muzzleParentedToReachSocket,
-      reachSocketParentedToElbow,
-      muzzleTravel: firstMuzzlePosition.distanceTo(secondMuzzlePosition),
-    };
-
-    game.player.takeDamage = originalTakeDamage;
-    game.addDirectedParticleSpray = originalSpray;
-    game.addHitEffect = originalHitEffect;
-    game.requestHitStop = originalHitStop;
-    claw.dispose?.();
-    claw.root.removeFromParent();
-    game.enemies.length = 0;
-    return resultSummary;
-  });
-
-  expect(result.mountedSideHits).toBe(1);
-  expect(result.oppositeSideHits).toBe(0);
-  expect(result.muzzleParentedToReachSocket).toBe(true);
-  expect(result.reachSocketParentedToElbow).toBe(true);
-  expect(result.muzzleTravel).toBeGreaterThan(0.35);
-});
-
 test('Tractor Controllers evade, break interrupted abductions, crash and relaunch while coil legs truly bounce', async ({ page }) => {
   await page.goto('/?reaverbotSeed=controller-crash-coil-bounce-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
@@ -951,7 +837,7 @@ test('Tractor Controllers evade, break interrupted abductions, crash and relaunc
 
     const cargo = findEnemy(
       'pursuer',
-      (enemy) => enemy.genome.modules.weapon.attackKind === 'clawCombo',
+      (enemy) => enemy.genome.modules.weapon.attackKind === 'clawMoveset',
       playerStart.clone().add(new Vector3(0, 0, 11.2)),
     );
     const tractor = findEnemy(
@@ -1171,7 +1057,7 @@ test('articulated claw carriers drag into MegaMan\'s lane and vault low obstacle
         seed: `constructor-drag-vault:${variant}`,
         position: game.player.root.position,
       });
-      if (candidate.genome.modules.weapon.attackKind === 'clawCombo') {
+      if (candidate.genome.modules.weapon.attackKind === 'clawMoveset') {
         claw = candidate;
         break;
       }

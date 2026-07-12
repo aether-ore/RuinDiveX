@@ -9309,6 +9309,12 @@ export class DungeonGenerator {
       wall.userData.doorId = descriptor.id;
       wall.userData.roomId = room.id;
       wall.userData.thresholdSide = segment.side;
+      // Threshold wings visually replace the boundary shell around a doorway,
+      // so they must participate in the same camera-to-player occlusion test.
+      // Own each wing independently: hiding one obstructing side must not make
+      // the opposite, non-obstructing side of the doorway disappear.
+      wall.userData.cameraOcclusionSurface = true;
+      wall.userData.cameraOcclusionOwner = true;
       seal.add(wall);
 
       const zone = {
@@ -11050,7 +11056,7 @@ export class DungeonGenerator {
       server: [
         ['ranged', 'ranged', 'fast'],
         ['basic', 'ranged', 'horokko'],
-        ['fast', 'fast', 'ranged', 'basic'],
+        ['legacy:sharukurusu', 'fast', 'ranged', 'basic'],
       ],
       machine: [
         ['gorubesshu', 'basic', 'fast'],
@@ -11068,18 +11074,18 @@ export class DungeonGenerator {
         ['ranged', 'fast'],
       ],
       trap: [
-        ['fast', 'basic', 'horokko'],
+        ['legacy:sharukurusu', 'basic', 'horokko'],
         ['horokko', 'horokko'],
         ['fast', 'ranged', 'basic'],
       ],
       conveyor: [
         ['gorubesshu', 'ranged'],
         ['gorubesshu', 'basic', 'fast'],
-        ['ranged', 'ranged', 'horokko'],
+        ['ranged', 'legacy:sharukurusu', 'horokko'],
       ],
       boss: [
         ['tank', 'gorubesshu', 'ranged'],
-        ['tank', 'horokko', 'ranged'],
+        ['tank', 'legacy:sharukurusu', 'ranged'],
         ['gorubesshu', 'gorubesshu', 'fast'],
       ],
       shrine: [

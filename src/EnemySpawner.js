@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { EliteEnemy, ELITE_AFFIXES } from './EliteEnemy.js';
 import { Enemy } from './Enemy.js';
 import { ReaverbotEnemy } from './reaverbots/ReaverbotEnemy.js';
+import { SharukurusuEnemy } from './reaverbots/SharukurusuEnemy.js';
 import {
   createEncounterSlotSeed,
   generateReaverbotGenome,
@@ -15,6 +16,7 @@ const TYPE_WEIGHTS = [
   ['ranged', 16],
   ['horokko', 10],
   ['gorubesshu', 7],
+  ['sharukurusu', 5],
 ];
 const MIN_ENCOUNTER_CORNER_BAND = 2.4;
 const ENCOUNTER_CORNER_BAND_RATIO = 0.22;
@@ -160,11 +162,19 @@ export class EnemySpawner {
     const curatedType = String(typeKey).startsWith('legacy:')
       ? String(typeKey).slice('legacy:'.length)
       : typeKey;
-    const useCurated = options.curated === true || String(typeKey).startsWith('legacy:');
+    const useCurated = options.curated === true
+      || String(typeKey).startsWith('legacy:')
+      || curatedType === 'sharukurusu';
     let enemy;
 
     if (useCurated) {
-      enemy = isElite
+      enemy = curatedType === 'sharukurusu'
+        ? new SharukurusuEnemy(level, {
+          eliteAffix: isElite
+            ? ELITE_AFFIXES[rng.int(0, ELITE_AFFIXES.length - 1)]
+            : null,
+        })
+        : isElite
         ? new EliteEnemy(curatedType, level, ELITE_AFFIXES[rng.int(0, ELITE_AFFIXES.length - 1)])
         : new Enemy(curatedType, level);
     } else {

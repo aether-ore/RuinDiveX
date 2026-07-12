@@ -8,7 +8,7 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
     bodyPlans: ['quadruped', 'lowBiped'],
     weapons: ['ramHorn', 'crusherJaw', 'clawArm'],
     defenses: ['armoredSkull', 'sidePlates', 'reactivePlate'],
-    weakPoints: ['rearBattery', 'legJoint'],
+    weakPoints: ['rearBattery', 'legJoint', 'clawPalm'],
     paletteId: 'pursuerOchre',
     baseStats: { health: 22, damage: 6, speed: 3.35, armor: 4, radius: 0.58 },
     behavior: {
@@ -169,7 +169,7 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
     bodyPlans: ['quadruped', 'lowBiped'],
     weapons: ['crusherJaw', 'ramHorn', 'clawArm'],
     defenses: ['sidePlates', 'reactivePlate'],
-    weakPoints: ['legJoint', 'rearBattery'],
+    weakPoints: ['legJoint', 'rearBattery', 'clawPalm'],
     paletteId: 'packSand',
     baseStats: { health: 17, damage: 5, speed: 3.05, armor: 3, radius: 0.5 },
     behavior: {
@@ -193,7 +193,7 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
     bodyPlans: ['biped', 'lowBiped'],
     weapons: ['clawArm', 'beamPrism', 'shockPiston'],
     defenses: ['guardArms', 'reactivePlate', 'directionalShield'],
-    weakPoints: ['eyeLens', 'shieldHinge', 'rearBattery'],
+    weakPoints: ['eyeLens', 'shieldHinge', 'rearBattery', 'clawPalm'],
     paletteId: 'duelistBurgundy',
     baseStats: { health: 43, damage: 9, speed: 2.15, armor: 9, radius: 0.62 },
     behavior: {
@@ -283,11 +283,15 @@ export const REAVERBOT_WEAPONS = Object.freeze({
     meleeArmorBonus: 28, healthScale: 1.24, moveSpeedScale: 1.18,
   },
   clawArm: {
-    id: 'clawArm', label: 'Constructor Claw', tags: ['melee', 'sweep', 'combo', 'articulated', 'vault'], requiresAny: ['armMount', 'forwardMount'],
-    attackKind: 'clawCombo', range: 4.55, preferredRange: 3.45, damageScale: 1.14, threatCost: 4,
-    comboCount: 3, strikeProgress: 0.6, strikeDamageScale: 0.74,
-    horizontalHalfAngle: 1.02, verticalHalfAngle: 0.42,
-    telegraphDuration: 0.72, commitDuration: 1.38, recoveryDuration: 0.82, cooldownScale: 0.58,
+    id: 'clawArm', label: 'Constructor Claw', tags: ['melee', 'sweep', 'slam', 'articulated', 'vault', 'counterGuard'], requiresAny: ['armMount', 'forwardMount'],
+    attackKind: 'clawMoveset', range: 4.55, preferredRange: 3.45, damageScale: 1.14, threatCost: 7,
+    telegraphDuration: 1.1, commitDuration: 0.58, horizontalCommitDuration: 0.52, slamCommitDuration: 0.58,
+    recoveryDuration: 0.78, cooldownScale: 0.58,
+    guardDuration: 0.62, guardDirectMultiplier: 0,
+    recoilDuration: 0.85, palmBreakHitCount: 3, clawBreakDamageMaxHealthScale: 0.35,
+    horizontalSweepRadius: 4.55, horizontalSweepDamageScale: 1,
+    trailDuration: 0.65, trailDamageScale: 0.42,
+    slamRadius: 2.65, slamDamageScale: 1.15,
     // Runtime uses the articulated reach for lane alignment and the vault
     // envelope when the heavy claw drags its chassis over low cover.
     baseReach: 2.95, extendedReach: 4.55, extensionDistance: 1.6,
@@ -431,6 +435,9 @@ export const REAVERBOT_WEAK_POINTS = Object.freeze({
   },
   counterweightCore: {
     id: 'counterweightCore', label: 'Counterweight Core', location: 'rotorOpposite', multiplier: 2.55, lockable: true, exposure: 'always', radius: 0.27,
+  },
+  clawPalm: {
+    id: 'clawPalm', label: 'Claw Palm Core', location: 'clawPalm', multiplier: 2.25, lockable: true, exposure: 'telegraph', radius: 0.3,
   },
 });
 

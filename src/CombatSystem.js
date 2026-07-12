@@ -3091,6 +3091,7 @@ export class CombatSystem {
         knockbackDirection: direction,
         knockback: 0.75,
         directHit: true,
+        playerOwnedAttack: true,
         attackKind: 'beam',
         hitPartId: hitInfo?.hitPartId ?? null,
         weakPointHit: Boolean(hitInfo?.weakPointHit),
@@ -3275,7 +3276,11 @@ export class CombatSystem {
     const range = this._getDrillContactRange(profile);
     const width = profile.drillWidth ?? 0.5;
     const color = profile.color ?? 0xffd36f;
-    const candidates = this._getLineHitCandidates(player.root.position, direction, range, width);
+    const attackOrigin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
+    attackOrigin.y = Math.max(attackOrigin.y, 0.9);
+    const candidates = this._getLineHitCandidates(attackOrigin, direction, range, width, {
+      projectExposedPalm: true,
+    });
 
     for (const { enemy, hitInfo } of candidates) {
       const damageRoll = this._rollPlayerDamage(profile);
@@ -3294,6 +3299,9 @@ export class CombatSystem {
         statusBuildup: profile.statusBuildup ?? 1,
         knockbackDirection: direction,
         knockback: 0.28,
+        directContactHit: true,
+        playerOwnedAttack: true,
+        attackKind: 'drill',
         hitPartId: hitInfo?.hitPartId ?? null,
         weakPointHit: Boolean(hitInfo?.weakPointHit),
         hitPosition: hitInfo?.hitPosition,
@@ -3341,6 +3349,7 @@ export class CombatSystem {
         hitStopDuration: damageRoll.critical ? 0.09 : 0.065,
         hitStopTimeScale: damageRoll.critical ? 0.04 : 0.06,
         directHit: true,
+        playerOwnedAttack: true,
         attackKind: 'rail',
         hitPartId: hitInfo?.hitPartId ?? null,
         weakPointHit: Boolean(hitInfo?.weakPointHit),
@@ -3671,7 +3680,13 @@ export class CombatSystem {
     return bestEnemy;
   }
 
-  _getLineHitCandidates(start, direction, range, width, { preserveVertical = false } = {}) {
+  _getLineHitCandidates(
+    start,
+    direction,
+    range,
+    width,
+    { preserveVertical = false, projectExposedPalm = false } = {},
+  ) {
     const candidates = [];
     const usesVerticalAim = preserveVertical || Math.abs(direction.y) > 0.001;
     tempStart.copy(start);
@@ -3684,7 +3699,9 @@ export class CombatSystem {
         continue;
       }
 
-      const hitInfo = enemy.resolveLineHit?.(start, direction, range, width) ?? null;
+      const hitInfo = enemy.resolveLineHit?.(start, direction, range, width, {
+        projectExposedPalm,
+      }) ?? null;
       if (hitInfo) {
         candidates.push({ enemy, along: hitInfo.along, hitInfo });
         continue;
@@ -3791,17 +3808,25 @@ export class CombatSystem {
         continue;
       }
 
+      const hitInfo = enemy.resolveArcHit?.(
+        player.root.position,
+        direction,
+        range,
+        arcAngle,
+        { projectExposedPalm: true },
+      ) ?? null;
       tempToEnemy.copy(enemy.root.position).sub(player.root.position);
       tempToEnemy.y = 0;
       const distance = tempToEnemy.length();
 
-      if (distance > range + enemy.radius || distance <= 0.001) {
+      if (!hitInfo && (distance > range + enemy.radius || distance <= 0.001)) {
         continue;
       }
 
-      tempToEnemy.normalize();
+      if (distance > 0.001) tempToEnemy.normalize();
+      else tempToEnemy.copy(direction).setY(0).normalize();
 
-      if (angleBetweenFlat(direction, tempToEnemy) <= arcAngle) {
+      if (hitInfo || angleBetweenFlat(direction, tempToEnemy) <= arcAngle) {
         const damageRoll = this._rollPlayerDamage(profile);
         const armorBreakChance = (player.stats.armorBreakChance ?? 0) + (profile.armorBreakBonus ?? 0);
         this.game.damageEnemy(enemy, damageRoll.damage, {
@@ -3815,6 +3840,12 @@ export class CombatSystem {
           knockback: profile.type === 'drillArm' ? 1.2 : 3.2,
           hitStopDuration: beamBlade ? (damageRoll.critical ? 0.13 : 0.105) : (damageRoll.critical ? 0.085 : 0.055),
           hitStopTimeScale: beamBlade ? 0.04 : 0.07,
+          directContactHit: true,
+          playerOwnedAttack: true,
+          attackKind: 'melee',
+          hitPartId: hitInfo?.hitPartId ?? null,
+          weakPointHit: Boolean(hitInfo?.weakPointHit),
+          hitPosition: hitInfo?.hitPosition,
         });
       }
     }

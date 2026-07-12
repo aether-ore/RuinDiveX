@@ -11,7 +11,7 @@ import {
 } from './ReaverbotCatalog.js';
 import { hashSeed, SeededRandom } from './SeededRandom.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const CANDIDATE_COUNT = 8;
 const GLOBAL_REAVERBOT_MOVE_SPEED_SCALE = 1.22;
 const NAME_PREFIXES = ['AR', 'BA', 'DA', 'GA', 'KA', 'KO', 'MU', 'NA', 'OM', 'RA', 'SA', 'TO', 'UR', 'VA', 'ZA'];
@@ -19,7 +19,7 @@ const NAME_SUFFIXES = ['EN', 'GAR', 'KIR', 'MOL', 'ORA', 'RAK', 'TUM', 'VAN', 'X
 const WEAPON_WEAK_POINT_WEIGHTS = Object.freeze({
   ramHorn: [['legJoint', 4], ['rearBattery', 3]],
   crusherJaw: [['rearBattery', 3], ['legJoint', 3], ['eyeLens', 1]],
-  clawArm: [['legJoint', 3], ['rearBattery', 2], ['eyeLens', 1]],
+  clawArm: [['clawPalm', 10]],
   pounceActuator: [['bellyCore', 7], ['legJoint', 2]],
   shockPiston: [['bellyCore', 4], ['legJoint', 3]],
   pulseCannon: [['ammoDrum', 3], ['eyeLens', 2], ['rearBattery', 2]],
@@ -123,12 +123,9 @@ function pickWeapon(rng, archetype, body) {
 
 function createWeaponVariant(weapon, rng) {
   if (weapon.id !== 'clawArm') return weapon;
-  const mountSide = rng.chance(0.5) ? -1 : 1;
   return {
     ...weapon,
-    comboOrientation: rng.chance(0.5) ? 'horizontal' : 'vertical',
-    mountSide,
-    initialSweepDirection: rng.chance(0.5) ? -1 : 1,
+    mountSide: rng.chance(0.5) ? -1 : 1,
   };
 }
 
@@ -146,7 +143,7 @@ function mergeWeightedWeakPoints(archetype, defense, weapon) {
   const allowed = new Set(archetype.weakPoints);
   const combined = new Map();
 
-  for (const [id, weight] of LINKED_WEAK_POINT_WEIGHTS[defense.id] ?? []) {
+  for (const [id, weight] of LINKED_WEAK_POINT_WEIGHTS[defense?.id] ?? []) {
     if (allowed.has(id)) combined.set(id, weight);
   }
   for (const [id, weight] of WEAPON_WEAK_POINT_WEIGHTS[weapon.id] ?? []) {
@@ -157,6 +154,7 @@ function mergeWeightedWeakPoints(archetype, defense, weapon) {
 }
 
 function pickWeakPoint(rng, archetype, defense, weapon) {
+  if (weapon.id === 'clawArm') return REAVERBOT_WEAK_POINTS.clawPalm;
   const options = mergeWeightedWeakPoints(archetype, defense, weapon);
   const id = rng.weighted(options, options[0]?.value ?? archetype.weakPoints[0]);
   return REAVERBOT_WEAK_POINTS[id] ?? REAVERBOT_WEAK_POINTS.eyeLens;
@@ -274,13 +272,15 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
   const body = pickBodyPlan(rng.fork('body'), archetype);
   const weaponDefinition = pickWeapon(rng.fork('weapon'), archetype, body);
   const weapon = createWeaponVariant(weaponDefinition, rng.fork('weaponVariant'));
-  const defense = pickDefense(rng.fork('defense'), archetype, body);
+  const defense = weapon.id === 'clawArm'
+    ? null
+    : pickDefense(rng.fork('defense'), archetype, body);
   const weakPoint = pickWeakPoint(rng.fork('weakPoint'), archetype, defense, weapon);
   const proportions = createProportions(rng.fork('proportions'), body);
   const behavior = createBehavior(archetype, weapon, weakPoint, rng.fork('behavior'));
   const stats = createStats(archetype, body, weapon, threatTier, proportions, context);
   const tier = clamp(Math.trunc(threatTier) || 1, 1, 8);
-  const spent = archetype.threatCost + weapon.threatCost + defense.threatCost + Math.max(1, tier - 1);
+  const spent = archetype.threatCost + weapon.threatCost + (defense?.threatCost ?? 0) + Math.max(1, tier - 1);
   const budget = 13 + tier * 3 + (context.elite ? 5 : 0);
   const palette = REAVERBOT_PALETTES[archetype.paletteId];
 
@@ -310,7 +310,7 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
         dominant: true,
       },
       weapon: { ...weapon, tags: [...weapon.tags] },
-      defense: { ...defense, tags: [...defense.tags] },
+      defense: defense ? { ...defense, tags: [...defense.tags] } : null,
       weakPoint: { ...weakPoint },
     },
     paletteId: archetype.paletteId,
@@ -331,13 +331,19 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
       archetype.role,
       ...body.tags,
       ...weapon.tags,
-      ...defense.tags,
+      ...(defense?.tags ?? []),
     ])],
   };
 
   const validation = validateReaverbotGenome(genome);
-  const novelty = new Set([body.id, weapon.id, defense.id, weakPoint.id]).size;
-  const coherence = (LINKED_WEAK_POINT_WEIGHTS[defense.id] ?? []).some(([id]) => id === weakPoint.id) ? 2 : 0;
+  // The claw's articulated guard is integrated into its weapon rather than a
+  // separate defense module, but it still contributes a distinct gameplay
+  // idea when scoring candidate variety.
+  const defenseNoveltyId = defense?.id ?? (weapon.id === 'clawArm' ? 'integratedClawGuard' : null);
+  const novelty = new Set([body.id, weapon.id, defenseNoveltyId, weakPoint.id].filter(Boolean)).size;
+  const coherence = weapon.id === 'clawArm' && weakPoint.id === 'clawPalm'
+    ? 2
+    : (LINKED_WEAK_POINT_WEIGHTS[defense?.id] ?? []).some(([id]) => id === weakPoint.id) ? 2 : 0;
   const weaponLink = (WEAPON_WEAK_POINT_WEIGHTS[weapon.id] ?? []).some(([id]) => id === weakPoint.id) ? 2 : 0;
   const score = (validation.valid ? 100 : -validation.errors.length * 20)
     + novelty * 1.5
@@ -357,19 +363,26 @@ export function validateReaverbotGenome(genome) {
   const defense = REAVERBOT_DEFENSES[genome?.modules?.defense?.id];
   const weakPoint = REAVERBOT_WEAK_POINTS[genome?.modules?.weakPoint?.id];
   const archetype = REAVERBOT_ARCHETYPES[genome?.archetypeId];
+  const defensePayload = genome?.modules?.defense;
+  const isClaw = weapon?.id === 'clawArm';
 
+  if (genome?.schemaVersion !== SCHEMA_VERSION) errors.push('unsupported-schema-version');
   if (!archetype) errors.push('unknown-archetype');
   if (!body) errors.push('unknown-body-plan');
   if (!weapon) errors.push('missing-weapon');
-  if (!defense) errors.push('missing-defense');
+  if (isClaw && defensePayload !== null) errors.push('claw-defense-must-be-null');
+  if (!isClaw && defensePayload === null) errors.push('defense-null-non-claw');
+  if (!isClaw && defensePayload !== null && !defense) errors.push('missing-defense');
   if (!weakPoint) errors.push('missing-weak-point');
+  if (isClaw && weakPoint?.id !== 'clawPalm') errors.push('claw-palm-weak-point-required');
+  if (!isClaw && weakPoint?.id === 'clawPalm') errors.push('claw-palm-non-claw');
   if (genome?.modules?.eye?.color !== REAVERBOT_EYE_COLOR) errors.push('red-eye-contract');
   if (body && weapon && !hasBodyRequirements(weapon, body)) errors.push('weapon-body-incompatible');
   if (body && defense && !hasBodyRequirements(defense, body)) errors.push('defense-body-incompatible');
   if (archetype && weapon && !archetype.weapons.includes(weapon.id)) errors.push('weapon-archetype-incompatible');
   if (archetype && defense && !archetype.defenses.includes(defense.id)) errors.push('defense-archetype-incompatible');
   if (archetype && weakPoint && !archetype.weakPoints.includes(weakPoint.id)) errors.push('weak-point-archetype-incompatible');
-  if (defense && weakPoint
+  if (!isClaw && defense && weakPoint
     && !(LINKED_WEAK_POINT_WEIGHTS[defense.id] ?? []).some(([id]) => id === weakPoint.id)) {
     errors.push('defense-weak-point-unpaired');
   }

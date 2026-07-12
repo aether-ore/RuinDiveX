@@ -5,6 +5,9 @@ const FORWARD = new THREE.Vector3(0, 0, 1);
 const TRACTOR_BEAM_AXIS = new THREE.Vector3(0, -1, 0);
 const TRACTOR_RING_AXIS = new THREE.Vector3(0, 0, 1);
 const TRACTOR_TEMP_DIRECTION = new THREE.Vector3();
+const CLAW_TEMP_WORLD = new THREE.Vector3();
+const CLAW_TEMP_LOCAL = new THREE.Vector3();
+const CLAW_TEMP_TARGET = new THREE.Vector3();
 const ANIMAL_SIDE_MOUNT_WEAPONS = new Set([
   'clawArm',
   'pulseCannon',
@@ -320,9 +323,14 @@ function createWeapon(root, genome, frame, materials) {
     clawUpperBoom: null,
     clawElbowPivot: null,
     clawForearm: null,
+    clawWristPivot: null,
     clawPalm: null,
+    clawPalmAnchor: null,
     clawTalonPivots: [],
     clawReachSocket: null,
+    clawArmAssembly: null,
+    clawBrokenStump: null,
+    clawMountSide: 1,
     clawBaseReach: 0,
     clawMaxReach: 0,
     jawUpperPivot: null,
@@ -475,18 +483,27 @@ function createWeapon(root, genome, frame, materials) {
       );
     }
 
+    // The hand has its own wrist so the arm may stretch sideways or overhead
+    // while the open palm (and its counterplay target) continues to face the
+    // player.  Keeping the palm target below this node also gives gameplay a
+    // stable world-space hit anchor throughout every pose.
+    const wristPivot = group(elbowPivot, 'generatedConstructorClawWristPivot', [0, 0, 2.08]);
+    wristPivot.userData.clawRigRole = 'palmFacingWrist';
     const palm = box(
-      elbowPivot,
+      wristPivot,
       materials.weapon,
       'generatedConstructorClawPalm',
       [1.32, 0.6, 0.76],
-      [0, 0, 2.08],
+      [0, 0, 0],
     );
     palm.userData.massiveWeaponPart = true;
+    palm.userData.breakableWeaponPart = 'clawArm';
+    const palmAnchor = group(wristPivot, 'generatedClawPalmWeakPointAnchor', [0, 0, 0.43]);
+    palmAnchor.userData.clawRigRole = 'palmWeakPointAnchor';
     const talonPivots = [];
     const clawMountSide = Math.sign(genome.modules.weapon.mountSide || 1);
     for (const side of [-1, 0, 1]) {
-      const talonPivot = group(elbowPivot, 'generatedConstructorClawTalonPivot', [side * 0.43, -0.03, 2.3]);
+      const talonPivot = group(wristPivot, 'generatedConstructorClawTalonPivot', [side * 0.43, -0.03, 0.22]);
       // Fan the blades toward the mounted side. A symmetric inner talon on
       // the old oversized claw could point back across the centerline and
       // eclipse the red eye during a vertical wind-up.
@@ -517,23 +534,56 @@ function createWeapon(root, genome, frame, materials) {
       talonPivots.push(talonPivot);
     }
 
-    const reachSocket = group(elbowPivot, 'generatedConstructorClawReachSocket', [0, -0.05, 3.48]);
+    const reachSocket = group(wristPivot, 'generatedConstructorClawReachSocket', [0, -0.05, 1.4]);
     reachSocket.userData.clawRigRole = 'impactSocket';
     muzzle.position.set(0, 0, 0);
     reachSocket.add(muzzle);
+
+    // When the weapon is broken the articulated assembly disappears, but a
+    // chunky fractured shoulder socket remains so the loss reads at distance.
+    const brokenStump = group(weapon, 'generatedDestroyedClawShoulderStump', [0, 0, 0.08]);
+    const stumpSocket = mesh(
+      brokenStump,
+      new THREE.CylinderGeometry(0.38, 0.46, 0.42, 8),
+      materials.dark,
+      'generatedDestroyedClawSocket',
+      [0, 0, 0],
+      [0, 0, Math.PI / 2],
+    );
+    stumpSocket.userData.destroyedWeaponRemnant = true;
+    for (let index = -1; index <= 1; index += 1) {
+      const shard = mesh(
+        brokenStump,
+        new THREE.ConeGeometry(0.1, 0.38 + Math.abs(index) * 0.08, 5),
+        materials.trim,
+        'generatedDestroyedClawJaggedShard',
+        [index * 0.21, 0.02, 0.28 + Math.abs(index) * 0.04],
+        [Math.PI / 2, 0, index * 0.18],
+      );
+      shard.userData.destroyedWeaponRemnant = true;
+    }
+    brokenStump.visible = false;
+    swingPivot.userData.breakableWeaponPart = 'clawArm';
     weapon.userData.clawRig = {
       articulated: true,
       baseReach: genome.modules.weapon.baseReach ?? 2.95,
       maxReach: genome.modules.weapon.extendedReach ?? 4.55,
       segmentCount: 2,
+      palmCounter: true,
     };
+    weapon.userData.clawBasePosition = weapon.position.clone();
     parts.clawSwingPivot = swingPivot;
     parts.clawUpperBoom = upperBoom;
     parts.clawElbowPivot = elbowPivot;
     parts.clawForearm = forearm;
+    parts.clawWristPivot = wristPivot;
     parts.clawPalm = palm;
+    parts.clawPalmAnchor = palmAnchor;
     parts.clawTalonPivots = talonPivots;
     parts.clawReachSocket = reachSocket;
+    parts.clawArmAssembly = swingPivot;
+    parts.clawBrokenStump = brokenStump;
+    parts.clawMountSide = clawMountSide;
     parts.clawBaseReach = weapon.userData.clawRig.baseReach;
     parts.clawMaxReach = weapon.userData.clawRig.maxReach;
   } else if (id === 'pounceActuator' || id === 'shockPiston') {
@@ -666,7 +716,29 @@ function createWeapon(root, genome, frame, materials) {
 }
 
 function createDefense(root, genome, frame, materials) {
-  const id = genome.modules.defense.id;
+  const definition = genome.modules.defense;
+  if (!definition) {
+    // Claw carriers guard with their weapon and intentionally have no authored
+    // defense module. Return the usual shape so animation/UI callers remain
+    // simple, but keep the wrapper completely free of defensive geometry.
+    const defense = group(root, 'generatedDefense_none', frame.anchors.defense);
+    const guardNormal = new THREE.Object3D();
+    guardNormal.name = 'generatedDefenseGuardNormal';
+    defense.add(guardNormal);
+    defense.userData.defenseId = null;
+    defense.userData.emptyDefenseWrapper = true;
+    defense.userData.basePosition = defense.position.clone();
+    return {
+      group: defense,
+      shell: null,
+      shutters: [],
+      plates: [],
+      guardNormal,
+      primaryPlate: null,
+    };
+  }
+
+  const id = definition.id;
   const defenseMaterial = materials.primary.clone();
   defenseMaterial.name = `material_generatedDefense_${id}`;
   let anchor = frame.anchors.defense;
@@ -780,7 +852,7 @@ function weakPointAnchor(frame, location) {
   }
 }
 
-function createWeakPoint(root, genome, frame, materials, eye, defense) {
+function createWeakPoint(root, genome, frame, materials, eye, defense, weapon) {
   const definition = genome.modules.weakPoint;
   if (definition.location === 'eye') {
     eye.lens.userData.weakPoint = true;
@@ -788,8 +860,58 @@ function createWeakPoint(root, genome, frame, materials, eye, defense) {
     return { group: eye.group, core: eye.lens, socket: eye.socket, sharedWithEye: true };
   }
 
+  if (definition.id === 'clawPalm' || definition.location === 'clawPalm') {
+    const anchor = weapon.clawPalmAnchor;
+    if (!anchor) {
+      throw new Error('clawPalm weak point requires an articulated claw palm anchor');
+    }
+    const radius = definition.radius ?? 0.3;
+    const weakPoint = group(anchor, `generatedWeakPoint_${definition.id}`);
+    weakPoint.userData.clawPalmWeakPoint = true;
+    const socket = mesh(
+      weakPoint,
+      new THREE.CylinderGeometry(radius * 1.3, radius * 1.42, 0.13, 12),
+      materials.eyeSocket,
+      'generatedClawPalmEyeSocket',
+      [0, 0, 0],
+      [Math.PI / 2, 0, 0],
+    );
+    const palmEyeMaterial = materials.eye.clone();
+    palmEyeMaterial.name = 'material_generatedClawPalmRedEye';
+    const core = mesh(
+      weakPoint,
+      new THREE.SphereGeometry(radius, 12, 8),
+      palmEyeMaterial,
+      'generatedClawPalmRedEye',
+      [0, 0, 0.075],
+      null,
+      [1, 1, 0.42],
+    );
+    core.userData.weakPoint = true;
+    core.userData.weakPointId = definition.id;
+    core.userData.reaverbotEye = true;
+    core.userData.clawPalmEye = true;
+    core.userData.dominantFocalPoint = false;
+    core.userData.exposed = false;
+    mesh(
+      weakPoint,
+      new THREE.TorusGeometry(radius * 1.16, radius * 0.09, 5, 12),
+      materials.trim,
+      'generatedClawPalmEyeRing',
+      [0, 0, 0.11],
+    );
+    weakPoint.visible = false;
+    return {
+      group: weakPoint,
+      core,
+      socket,
+      sharedWithEye: false,
+      palmMounted: true,
+    };
+  }
+
   const linkedToRotor = definition.location === 'rotorOpposite'
-    && genome.modules.defense.id === 'rotatingPlates';
+    && genome.modules.defense?.id === 'rotatingPlates';
   const anchor = linkedToRotor ? [0, -0.05, -0.86] : weakPointAnchor(frame, definition.location);
   const weakPoint = group(
     linkedToRotor ? defense.group : root,
@@ -982,7 +1104,7 @@ export function createReaverbotVisual(genome) {
     weapon.group.rotation.set(0, 0, 0);
     weapon.group.userData.linkedDefenseId = 'rotatingPlates';
   }
-  const weakPoint = createWeakPoint(visualRoot, genome, frame, materials, eye, defense);
+  const weakPoint = createWeakPoint(visualRoot, genome, frame, materials, eye, defense, weapon);
   const meleeArmor = createMeleeSilhouetteArmor(visualRoot, genome, frame, materials);
   addSurfaceGrammar(visualRoot, genome, frame, materials);
   visualRoot.userData.meleeSilhouetteArmored = meleeArmor.enabled;
@@ -1055,12 +1177,19 @@ export function setReaverbotDefenseVisualActive(visual, active, openness = activ
 
 export function setReaverbotWeakPointExposed(visual, exposed) {
   const { core, socket } = visual.weakPoint;
-  core.userData.exposed = exposed;
-  core.material.emissiveIntensity = exposed ? (visual.weakPoint.sharedWithEye ? 2.1 : 1.75) : (visual.weakPoint.sharedWithEye ? 1.45 : 0.18);
+  const actuallyExposed = exposed && !visual.weapon.clawDestroyed;
+  core.userData.exposed = actuallyExposed;
+  core.material.emissiveIntensity = actuallyExposed ? (visual.weakPoint.sharedWithEye ? 2.1 : 1.75) : (visual.weakPoint.sharedWithEye ? 1.45 : 0.18);
   if (!visual.weakPoint.sharedWithEye) {
-    core.scale.setScalar(exposed ? 1.08 : 0.82);
-    socket.material.emissive?.set(exposed ? visual.materials.emissive.color : 0x000000);
-    socket.material.emissiveIntensity = exposed ? 0.3 : 0;
+    core.userData.baseWeakPointScale ??= core.scale.clone();
+    core.scale.copy(core.userData.baseWeakPointScale).multiplyScalar(actuallyExposed ? 1.08 : 0.82);
+    socket.material.emissive?.set(actuallyExposed ? visual.materials.emissive.color : 0x000000);
+    socket.material.emissiveIntensity = actuallyExposed ? 0.3 : 0;
+  }
+  if (visual.weakPoint.palmMounted) {
+    // The palm eye is physically present throughout the rig, but the talons
+    // conceal it outside a counterable wind-up.
+    visual.weakPoint.group.visible = actuallyExposed;
   }
 }
 
@@ -1076,6 +1205,11 @@ export function animateReaverbotVisual(visual, {
   comboMountSide = 1,
   comboInitialDirection = 1,
   clawExtension = null,
+  clawAttackVariant = null,
+  clawGuardProgress = 0,
+  clawRecoilProgress = 0,
+  clawDestroyedProgress = 0,
+  clawSpinProgress = 0,
   defenseActive = false,
   weakPointExposed = false,
   weakPointLocation = null,
@@ -1115,69 +1249,126 @@ export function animateReaverbotVisual(visual, {
   const comboLocalProgress = stateProgress >= 1
     ? 1
     : (stateProgress * 3) - comboCycle;
+  let clawWarning = 0;
+  let clawRecoilChassisAmount = 0;
   if (visual.weapon.clawSwingPivot) {
+    const weapon = visual.weapon;
     const pivot = visual.weapon.clawSwingPivot;
+    const elbow = visual.weapon.clawElbowPivot;
+    const wrist = visual.weapon.clawWristPivot;
+    const mountSide = Math.sign(visual.weapon.clawMountSide || comboMountSide || 1);
+    const progress = THREE.MathUtils.clamp(stateProgress, 0, 1);
+    const guardProgress = THREE.MathUtils.clamp(clawGuardProgress, 0, 1);
+    const recoilProgress = THREE.MathUtils.clamp(clawRecoilProgress, 0, 1);
+    const recoilAmount = Math.sin(recoilProgress * Math.PI);
+    clawRecoilChassisAmount = recoilAmount;
+    const destroyedProgress = THREE.MathUtils.clamp(clawDestroyedProgress, 0, 1);
+    const vertical = clawAttackVariant === 'verticalSlam'
+      || clawAttackVariant === 'vertical'
+      || (!clawAttackVariant && comboOrientation === 'vertical');
+
+    weapon.clawDestroyed = destroyedProgress > 0.001;
+    if (weapon.clawArmAssembly) {
+      weapon.clawArmAssembly.visible = destroyedProgress < 0.76;
+      weapon.clawArmAssembly.position.y = -destroyedProgress * 1.35;
+      weapon.clawArmAssembly.rotation.z = -mountSide * destroyedProgress * 1.12;
+      weapon.clawArmAssembly.scale.setScalar(Math.max(0.12, 1 - destroyedProgress * 0.38));
+    }
+    if (weapon.clawBrokenStump) {
+      weapon.clawBrokenStump.visible = destroyedProgress > 0.12;
+      weapon.clawBrokenStump.scale.setScalar(THREE.MathUtils.smoothstep(destroyedProgress, 0.08, 0.42));
+    }
+
+    // Only the visual child rotates; logical facing and attack vectors remain
+    // untouched. At the end of a sweep the modulo snaps back to the identical
+    // facing so recovery never inherits a full Euler revolution.
+    visual.root.userData.baseClawVisualYaw ??= visual.root.rotation.y;
+    visual.root.userData.baseClawVisualPitch ??= visual.root.rotation.x;
+    visual.root.userData.baseClawVisualRoll ??= visual.root.rotation.z;
+    const requestedSpin = state === 'commit' && !vertical
+      ? THREE.MathUtils.clamp(clawSpinProgress || progress, 0, 1)
+      : 0;
+    const visibleSpin = requestedSpin >= 0.999 ? 0 : requestedSpin * Math.PI * 2 * mountSide;
+    visual.root.rotation.y = visual.root.userData.baseClawVisualYaw + visibleSpin;
+
+    const basePosition = weapon.group.userData.clawBasePosition;
+    if (basePosition) weapon.group.position.copy(basePosition);
+
     let targetX = 0;
     let targetY = 0;
     let targetZ = 0;
-    if (state === 'telegraph') {
-      const cock = THREE.MathUtils.smoothstep(stateProgress, 0.08, 0.82);
-      if (comboOrientation === 'vertical') targetX = -1.38 * cock;
-      else targetY = 1.28 * Math.sign(comboMountSide || 1) * cock;
-      targetZ = comboOrientation === 'vertical' ? -0.12 * cock : -0.38 * cock;
-    } else if (state === 'commit') {
-      const alternate = (comboCycle % 2 === 0 ? 1 : -1) * Math.sign(comboInitialDirection || 1);
-      const sweep = THREE.MathUtils.smoothstep(comboLocalProgress, 0.08, 0.86);
-      const from = -1.34 * alternate;
-      const to = 1.34 * alternate;
-      if (comboOrientation === 'vertical') {
-        targetX = THREE.MathUtils.lerp(from, to, sweep);
-        targetZ = alternate * 0.16;
+    let elbowAngle = 0.42;
+    let elbowYaw = 0;
+    let wristX = 0;
+    let wristY = 0;
+    let talonOpen = 0.04;
+
+    if (guardProgress > 0) {
+      const brace = THREE.MathUtils.smoothstep(guardProgress, 0, 1);
+      targetX = -0.18 * brace;
+      targetY = -mountSide * 0.68 * brace;
+      targetZ = mountSide * 0.18 * brace;
+      elbowAngle = THREE.MathUtils.lerp(0.42, 0.68, brace);
+      elbowYaw = mountSide * 0.72 * brace;
+      wristY = mountSide * 0.12 * brace;
+      talonOpen = THREE.MathUtils.lerp(0.04, 0.22, brace);
+    } else if (state === 'telegraph') {
+      const cock = THREE.MathUtils.smoothstep(progress, 0.06, 0.88);
+      const urgency = THREE.MathUtils.smoothstep(progress, 0.08, 1);
+      if (vertical) {
+        targetX = -1.48 * cock;
+        targetZ = -0.08 * cock;
+        wristX = 1.48 * cock;
       } else {
-        const side = Math.sign(comboMountSide || 1);
-        // Keep even the innermost edge of the oversized claw on its mounted
-        // side.  Swinging past the chassis center let a talon briefly eclipse
-        // the mandatory red eye on compact quadruped heads.
-        const inward = 0.24 * side;
-        const outward = 1.28 * side;
-        targetY = alternate > 0
-          ? THREE.MathUtils.lerp(outward, inward, sweep)
-          : THREE.MathUtils.lerp(inward, outward, sweep);
-        targetZ = -alternate * side * 0.22;
+        targetY = mountSide * 1.48 * cock;
+        targetZ = -mountSide * 0.2 * cock;
+        wristY = -mountSide * 1.48 * cock;
+      }
+      elbowAngle = THREE.MathUtils.lerp(0.42, 0.055, cock);
+      talonOpen = THREE.MathUtils.lerp(0.04, 0.62, cock);
+      const blinkFrequency = 8 + urgency * 28;
+      clawWarning = (0.45 + urgency * 2.35)
+        * THREE.MathUtils.smoothstep(Math.sin(time * blinkFrequency) * 0.5 + 0.5, 0.18, 0.75);
+    } else if (state === 'commit') {
+      const strike = THREE.MathUtils.smoothstep(progress, 0.04, 0.78);
+      elbowAngle = 0.035;
+      if (vertical) {
+        targetX = THREE.MathUtils.lerp(-1.48, 0.72, strike);
+        wristX = THREE.MathUtils.lerp(1.48, 0.04, THREE.MathUtils.smoothstep(progress, 0.06, 0.68));
+        talonOpen = THREE.MathUtils.lerp(0.62, 0.28, THREE.MathUtils.smoothstep(progress, 0.52, 0.92));
+      } else {
+        // The arm stays exaggeratedly long as the complete visual chassis
+        // swivels through its circular slash.
+        targetY = mountSide * (1.48 - Math.sin(progress * Math.PI) * 0.2);
+        targetZ = -mountSide * 0.2;
+        wristY = -targetY;
+        talonOpen = THREE.MathUtils.lerp(0.62, 0.18, THREE.MathUtils.smoothstep(progress, 0.64, 0.95));
       }
     } else if (state === 'recovery') {
-      const settle = 1 - THREE.MathUtils.smoothstep(stateProgress, 0.05, 0.9);
-      if (comboOrientation === 'vertical') targetX = 0.34 * settle;
-      else targetY = 0.34 * Math.sign(comboMountSide || 1) * settle;
+      const settle = 1 - THREE.MathUtils.smoothstep(progress, 0.05, 0.9);
+      targetX = vertical ? 0.38 * settle : 0;
+      targetY = vertical ? 0 : mountSide * 0.42 * settle;
+      elbowAngle = THREE.MathUtils.lerp(0.5, 0.42, 1 - settle);
+      talonOpen = THREE.MathUtils.lerp(0.18, 0.04, 1 - settle);
     }
+
+    if (recoilAmount > 0.001) {
+      targetX = -0.48 * recoilAmount;
+      targetY = -mountSide * 0.72 * recoilAmount;
+      targetZ = mountSide * 0.76 * recoilAmount;
+      elbowAngle = THREE.MathUtils.lerp(elbowAngle, 0.92, recoilAmount);
+      elbowYaw = -mountSide * 0.24 * recoilAmount;
+      wristX = 0.22 * recoilAmount;
+      wristY = mountSide * 0.58 * recoilAmount;
+      talonOpen = Math.max(talonOpen, 0.68 * recoilAmount);
+    }
+
     const response = Math.min(1, dt * (state === 'commit' ? 28 : 13));
     pivot.rotation.x = THREE.MathUtils.lerp(pivot.rotation.x, targetX, response);
     pivot.rotation.y = THREE.MathUtils.lerp(pivot.rotation.y, targetY, response);
     pivot.rotation.z = THREE.MathUtils.lerp(pivot.rotation.z, targetZ, response);
 
-    const elbow = visual.weapon.clawElbowPivot;
     if (elbow) {
-      let elbowAngle = 0.42;
-      let talonAngle = 0.04;
-      if (state === 'telegraph') {
-        const cock = THREE.MathUtils.smoothstep(stateProgress, 0.06, 0.8);
-        elbowAngle = THREE.MathUtils.lerp(0.42, 0.78, cock);
-        talonAngle = THREE.MathUtils.lerp(0.04, -0.28, cock);
-      } else if (state === 'commit') {
-        // Each swipe straightens both heavy links into the target lane, then
-        // folds just enough to reset for the next of the three attacks.
-        const extend = THREE.MathUtils.smoothstep(comboLocalProgress, 0.02, 0.38);
-        const reset = THREE.MathUtils.smoothstep(comboLocalProgress, 0.82, 1);
-        elbowAngle = THREE.MathUtils.lerp(0.72, 0.035, extend);
-        elbowAngle = THREE.MathUtils.lerp(elbowAngle, 0.46, reset);
-        const close = THREE.MathUtils.smoothstep(comboLocalProgress, 0.42, 0.68);
-        const reopen = THREE.MathUtils.smoothstep(comboLocalProgress, 0.8, 1);
-        talonAngle = THREE.MathUtils.lerp(-0.24, 0.48, close);
-        talonAngle = THREE.MathUtils.lerp(talonAngle, 0.04, reopen);
-      } else if (state === 'recovery') {
-        elbowAngle = THREE.MathUtils.lerp(0.52, 0.42, THREE.MathUtils.smoothstep(stateProgress, 0.08, 0.9));
-      }
-
       if (Number.isFinite(clawExtension)) {
         elbowAngle = THREE.MathUtils.lerp(
           0.78,
@@ -1187,8 +1378,20 @@ export function animateReaverbotVisual(visual, {
       }
       const hingeResponse = Math.min(1, dt * (state === 'commit' ? 24 : 12));
       elbow.rotation.x = THREE.MathUtils.lerp(elbow.rotation.x, elbowAngle, hingeResponse);
+      elbow.rotation.y = THREE.MathUtils.lerp(elbow.rotation.y, elbowYaw, hingeResponse);
+      if (wrist) {
+        wrist.rotation.x = THREE.MathUtils.lerp(wrist.rotation.x, wristX, hingeResponse);
+        wrist.rotation.y = THREE.MathUtils.lerp(wrist.rotation.y, wristY, hingeResponse);
+        wrist.rotation.z = THREE.MathUtils.lerp(wrist.rotation.z, 0, hingeResponse);
+      }
       for (const talon of visual.weapon.clawTalonPivots) {
-        talon.rotation.x = THREE.MathUtils.lerp(talon.rotation.x, talonAngle, hingeResponse);
+        const fanDirection = Math.sign(talon.position.x);
+        talon.rotation.x = THREE.MathUtils.lerp(talon.rotation.x, -talonOpen, hingeResponse);
+        talon.rotation.y = THREE.MathUtils.lerp(
+          talon.rotation.y,
+          (talon.userData.baseYaw ?? 0) + fanDirection * talonOpen * 0.58,
+          hingeResponse,
+        );
       }
       if (visual.weapon.clawReachSocket) {
         visual.weapon.clawReachSocket.userData.extension = THREE.MathUtils.clamp(
@@ -1198,6 +1401,27 @@ export function animateReaverbotVisual(visual, {
         );
       }
     }
+
+    if (guardProgress > 0.001 && weapon.clawPalmAnchor) {
+      // Translate the posed arm just enough that its actual palm—not an
+      // invisible substitute—sits in front of the torso while bracing.
+      visual.root.updateMatrixWorld(true);
+      weapon.clawPalmAnchor.getWorldPosition(CLAW_TEMP_WORLD);
+      CLAW_TEMP_LOCAL.copy(CLAW_TEMP_WORLD);
+      visual.root.worldToLocal(CLAW_TEMP_LOCAL);
+      CLAW_TEMP_TARGET.set(
+        visual.frame.anchors.center[0],
+        visual.frame.anchors.center[1] + 0.08,
+        visual.frame.anchors.center[2] + 0.58,
+      );
+      weapon.group.position.addScaledVector(
+        CLAW_TEMP_TARGET.sub(CLAW_TEMP_LOCAL),
+        THREE.MathUtils.smoothstep(guardProgress, 0, 1),
+      );
+    }
+
+    visual.materials.weapon.emissive.setHex(clawWarning > 0.01 ? 0xff1010 : 0x000000);
+    visual.materials.weapon.emissiveIntensity = clawWarning;
   }
 
   let jawWarning = 0;
@@ -1276,6 +1500,16 @@ export function animateReaverbotVisual(visual, {
           ? Math.max(0, Math.sin(time * 6.2)) * 0.19
       : 0;
   visual.root.position.y = hoverHeight + hover + attackLift + recoveryReveal * 0.28;
+  if (visual.weapon.clawSwingPivot) {
+    // Palm counters knock the visible chassis off its feet while the enemy's
+    // collision/navigation root remains fixed. The sine curve completes the
+    // fall-and-rise within recoil and returns exactly to its authored pose.
+    visual.root.rotation.x = (visual.root.userData.baseClawVisualPitch ?? 0)
+      - clawRecoilChassisAmount * 0.68;
+    visual.root.rotation.z = (visual.root.userData.baseClawVisualRoll ?? 0)
+      - visual.weapon.clawMountSide * clawRecoilChassisAmount * 0.84;
+    visual.root.position.y -= clawRecoilChassisAmount * 0.38;
+  }
 
   let pitch = 0;
   let squashY = 1;
@@ -1303,6 +1537,12 @@ export function animateReaverbotVisual(visual, {
 
   setReaverbotDefenseVisualActive(visual, defenseActive, defenseActive ? 0 : 1);
   setReaverbotWeakPointExposed(visual, weakPointExposed);
+  if (visual.weakPoint.palmMounted && visual.weakPoint.core.userData.exposed) {
+    visual.weakPoint.core.material.emissiveIntensity = Math.max(
+      visual.weakPoint.core.material.emissiveIntensity,
+      1.8 + clawWarning,
+    );
+  }
 }
 
 function genomeSafeScale(value) {

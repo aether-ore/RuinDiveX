@@ -55,7 +55,10 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
 
     for (const enemy of [...game.enemies]) enemy.root.removeFromParent();
     game.enemies.length = 0;
-    const encounter = game.dungeonController.encounters.find((candidate) => !candidate.isBoss);
+    const encounter = game.dungeonController.encounters.find((candidate) => (
+      !candidate.isBoss
+      && !candidate.roster?.some((type) => String(type).startsWith('legacy:'))
+    ));
     encounter.spawned = false;
     encounter.cleared = false;
     encounter.enemyIds = [];
@@ -261,7 +264,7 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
         archetype: enemy.genome.archetypeId,
         body: enemy.genome.body.planId,
         weapon: enemy.genome.modules.weapon.id,
-        defense: enemy.genome.modules.defense.id,
+        defense: enemy.genome.modules.defense?.id ?? null,
         weakPoint: enemy.genome.modules.weakPoint.id,
         position: enemy.root.position.toArray(),
       })),
@@ -301,7 +304,7 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
 
     const dormant = window.spawnReaverbot({
       archetypeId: 'duelist',
-      seed: 'runtime-aggro-proof',
+      seed: 'runtime-aggro-proof:1',
       position: new Vector3(30, 0, 30),
     });
     const dormantStart = dormant.root.position.clone();
@@ -499,11 +502,26 @@ test('paired guards protect leg joints and the rotor exposes its counterweight s
     }
     game.enemies.length = 0;
 
-    const legGuard = window.spawnReaverbot({
-      archetypeId: 'pursuer',
-      seed: 'paired:pursuer:0',
-      position: new Vector3(0, 0, 4),
-    });
+    let legGuard = null;
+    for (let variant = 0; variant < 300; variant += 1) {
+      const candidate = window.spawnReaverbot({
+        archetypeId: 'pursuer',
+        seed: `paired:pursuer:${variant}`,
+        position: new Vector3(0, 0, 4),
+      });
+      if (
+        candidate.genome.modules.defense?.id === 'sidePlates'
+        && candidate.genome.modules.weakPoint.id === 'legJoint'
+      ) {
+        legGuard = candidate;
+        break;
+      }
+      const candidateIndex = game.enemies.indexOf(candidate);
+      if (candidateIndex >= 0) game.enemies.splice(candidateIndex, 1);
+      candidate.dispose?.();
+      candidate.root.removeFromParent();
+    }
+    if (!legGuard) throw new Error('Could not generate a pursuer with paired side plates and a leg-joint weak point.');
     legGuard.root.rotation.y = 0;
     legGuard.brain.state = 'position';
     legGuard._updateExposureAndDefense();
@@ -622,7 +640,7 @@ test('paired guards protect leg joints and the rotor exposes its counterweight s
       return {
         expectedDefense: sample.expectedDefense,
         expectedWeakPoint: sample.expectedWeakPoint,
-        defense: enemy.genome.modules.defense.id,
+        defense: enemy.genome.modules.defense?.id ?? null,
         weakPoint: enemy.genome.modules.weakPoint.id,
         guardedBodyDamage,
         bodyBlocked: bodyMeta.shieldBlocked,
@@ -782,7 +800,7 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
     };
   });
 
-  expect(result.catalogMaterialCount).toBe(55);
+  expect(result.catalogMaterialCount).toBe(56);
   expect(result.bodyPlan).toBe('hopper');
   expect(result.profile).toHaveLength(6);
   expect(result.profile.find((candidate) => candidate.aspect === 'body')).toEqual({

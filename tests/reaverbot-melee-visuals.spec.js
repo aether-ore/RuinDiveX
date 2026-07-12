@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('live melee Reaverbots expose independent armor silhouettes while keeping one red eye readable', async ({ page }, testInfo) => {
+test('live melee Reaverbots expose independent armor silhouettes while keeping their red eye language readable', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto('/?reaverbotSeed=melee-visual-runtime-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
@@ -32,7 +32,7 @@ test('live melee Reaverbots expose independent armor silhouettes while keeping o
     };
 
     const jaw = findEnemy('pursuer', 'jawCombo', 'melee-visual-jaw');
-    const claw = findEnemy('duelist', 'clawCombo', 'melee-visual-claw');
+    const claw = findEnemy('duelist', 'clawMoveset', 'melee-visual-claw');
     jaw.root.position.set(-1.9, 0, 0);
     claw.root.position.set(1.55, 0, -0.05);
     jaw.root.rotation.y = 0.34;
@@ -64,10 +64,10 @@ test('live melee Reaverbots expose independent armor silhouettes while keeping o
           && part.userData.gameplayDefense === false
           && !enemy.visual.defense.plates.includes(part)
         )),
-        defenseId: enemy.visual.defense.group.userData.defenseId,
-        expectedDefenseId: enemy.genome.modules.defense.id,
+        defenseId: enemy.visual.defense.group.userData.defenseId ?? null,
+        expectedDefenseId: enemy.genome.modules.defense?.id ?? null,
         eyeCount: eyeMeshes.length,
-        eyeColor: eyeMeshes[0]?.material?.color?.getHex(),
+        allEyesRed: eyeMeshes.every((eye) => eye.material?.color?.getHex() === 0xff254f),
         sidePlateSpan: Math.abs(armor.sidePlates[1].position.x - armor.sidePlates[0].position.x),
         bodyWidth: enemy.visual.frame.anchors.side[0] * 2,
       };
@@ -123,8 +123,8 @@ test('live melee Reaverbots expose independent armor silhouettes while keeping o
     expect(sample.spikeCount).toBeGreaterThanOrEqual(4);
     expect(sample.decorativeOnly).toBe(true);
     expect(sample.defenseId).toBe(sample.expectedDefenseId);
-    expect(sample.eyeCount).toBe(1);
-    expect(sample.eyeColor).toBe(0xff254f);
+    expect(sample.eyeCount).toBe(sample.weaponId === 'clawArm' ? 2 : 1);
+    expect(sample.allEyesRed).toBe(true);
     expect(sample.sidePlateSpan).toBeGreaterThan(sample.bodyWidth);
   }
   expect(result.jaw.weaponId).toBe('crusherJaw');

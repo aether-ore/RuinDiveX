@@ -12,6 +12,7 @@ const HOROKKO_TARGET_HEIGHT = 2.05;
 const GORUBESSHU_MTL = 'Gorubesshu.mtl';
 const GORUBESSHU_OBJ = 'Gorubesshu.obj';
 const GORUBESSHU_TARGET_HEIGHT = 2.35;
+const SHARUKURUSU_TARGET_HEIGHT = 2.42;
 const GORUBESSHU_RIG_ROOT = 'gorubesshuRigRoot';
 const GORUBESSHU_PART_GROUPS = {
   torso: 'gorubesshuTorsoPivot',
@@ -130,6 +131,26 @@ export const ENEMY_TYPES = {
     shieldBlockMultiplier: 0.24,
     modelAsset: 'gorubesshu',
     modelHeight: GORUBESSHU_TARGET_HEIGHT,
+    modelYawOffset: Math.PI,
+  },
+  sharukurusu: {
+    label: 'Sharukurusu Reaverbot',
+    skinColor: 0x687b48,
+    clothColor: 0x313c27,
+    hairColor: 0x171d13,
+    eyeColor: 0xff245b,
+    scale: 0.9,
+    radius: 0.78,
+    maxHealth: 68,
+    damage: 12,
+    moveSpeed: 5.65,
+    chargeSpeed: 9.4,
+    attackRange: 7.8,
+    attackCooldown: 1.45,
+    armor: 11,
+    experience: 18,
+    modelAsset: 'sharukurusu',
+    modelHeight: SHARUKURUSU_TARGET_HEIGHT,
     modelYawOffset: Math.PI,
   },
 };

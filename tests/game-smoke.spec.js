@@ -272,12 +272,12 @@ test('airborne firing layers the buster arm over jump motion and dodge cancels f
     });
 
     const rig = player.externalRig;
-    const rightShoulder = rig.joints.get('rightShoulder');
     const leftShoulder = rig.joints.get('leftShoulder');
-    const aimShoulder = rig.busterAirAimPose.get('rightShoulder');
+    const rightShoulder = rig.joints.get('rightShoulder');
+    const aimShoulder = rig.busterAirAimPose.get('leftShoulder');
     let maximumBusterAimError = 0;
-    let leftShoulderTravel = 0;
-    let previousLeft = leftShoulder.quaternion.clone();
+    let rightShoulderTravel = 0;
+    let previousRight = rightShoulder.quaternion.clone();
     let launchClipSeen = false;
     let fallClipSeen = false;
     let busterAimFrames = 0;
@@ -290,11 +290,11 @@ test('airborne firing layers the buster arm over jump motion and dodge cancels f
         busterAimFrames += 1;
         maximumBusterAimError = Math.max(
           maximumBusterAimError,
-          rightShoulder.quaternion.angleTo(aimShoulder),
+          leftShoulder.quaternion.angleTo(aimShoulder),
         );
       }
-      leftShoulderTravel += previousLeft.angleTo(leftShoulder.quaternion);
-      previousLeft = leftShoulder.quaternion.clone();
+      rightShoulderTravel += previousRight.angleTo(rightShoulder.quaternion);
+      previousRight = rightShoulder.quaternion.clone();
     }
 
     resetPlayer();
@@ -311,7 +311,7 @@ test('airborne firing layers the buster arm over jump motion and dodge cancels f
       fallClipSeen,
       maximumBusterAimError,
       busterAimFrames,
-      leftShoulderTravel,
+      rightShoulderTravel,
       dodgeStarted,
       dodgeClip: rig.activeClipKey,
       actionState: player.animation.actionState,
@@ -327,7 +327,7 @@ test('airborne firing layers the buster arm over jump motion and dodge cancels f
   expect(result.fallClipSeen).toBe(true);
   expect(result.busterAimFrames).toBeGreaterThan(0);
   expect(result.maximumBusterAimError).toBeLessThan(0.001);
-  expect(result.leftShoulderTravel).toBeGreaterThan(0.05);
+  expect(result.rightShoulderTravel).toBeGreaterThan(0.05);
   expect(result.dodgeStarted).toBe(true);
   expect(result.dodgeClip).toBe('dodgeRoll');
   expect(result.actionState).toBe('dodgeRoll');
@@ -865,7 +865,7 @@ test('debug ledge cube is a solid 3x3x3 block with a default-height grab ledge',
     .toBeGreaterThanOrEqual(5);
 });
 
-test('ledge climb anchors both hands through the baked FBX push-off', async ({ page }) => {
+test('ledge climb anchors the left hand through the baked FBX push-off', async ({ page }) => {
   test.setTimeout(60000);
   await page.goto('/');
   await expect(page.locator('canvas')).toHaveCount(1);
@@ -1072,12 +1072,10 @@ test('ledge climb anchors both hands through the baked FBX push-off', async ({ p
     expect(Math.abs(sample.left.y - sample.topY)).toBeLessThan(0.03);
     expect(Math.abs(sample.left.z - (sample.frontZ - 0.055))).toBeLessThan(0.03);
   };
-  const assertClimbHandsAnchored = (sample) => {
-    for (const side of ['left', 'right']) {
-      expect(Math.abs(sample[side].y - sample.topY)).toBeLessThan(0.13);
-      expect(Math.abs(sample[side].z - (sample.frontZ - 0.055))).toBeLessThan(0.13);
-      expect(sample.handMesh[side].edgeDistance).toBeLessThan(0.16);
-    }
+  const assertLeftClimbHandAnchored = (sample) => {
+    expect(Math.abs(sample.left.y - sample.topY)).toBeLessThan(0.13);
+    expect(Math.abs(sample.left.z - (sample.frontZ - 0.055))).toBeLessThan(0.13);
+    expect(sample.handMesh.left.edgeDistance).toBeLessThan(0.16);
   };
 
   expect(result.freeHangPathStates).toEqual([
@@ -1116,20 +1114,22 @@ test('ledge climb anchors both hands through the baked FBX push-off', async ({ p
     assertLeftHandAnchored(sample);
   }
 
-  for (const side of ['left', 'right']) {
-    const before = result.prepareEnd[side];
-    const after = result.climbStart[side];
-    expect(Math.hypot(after.x - before.x, after.y - before.y, after.z - before.z)).toBeLessThan(0.05);
-    expect(result.prepareEnd.handMesh[side].edgeDistance).toBeLessThan(0.04);
-    expect(result.climbStart.handMesh[side].edgeDistance).toBeLessThan(0.04);
-  }
+  const leftBeforeClimb = result.prepareEnd.left;
+  const leftAfterClimb = result.climbStart.left;
+  expect(Math.hypot(
+    leftAfterClimb.x - leftBeforeClimb.x,
+    leftAfterClimb.y - leftBeforeClimb.y,
+    leftAfterClimb.z - leftBeforeClimb.z,
+  )).toBeLessThan(0.05);
+  expect(result.prepareEnd.handMesh.left.edgeDistance).toBeLessThan(0.04);
+  expect(result.climbStart.handMesh.left.edgeDistance).toBeLessThan(0.04);
 
   const averageClimbStartWristY = result.climbStart.left.y;
   const averageClimbStartWristZ = result.climbStart.left.z;
   expect(result.climbStart.state).toBe('climbingUp');
   expect(Math.abs(averageClimbStartWristY - result.climbStart.topY)).toBeLessThan(0.14);
   expect(averageClimbStartWristZ).toBeLessThan(result.climbStart.frontZ);
-  assertClimbHandsAnchored(result.climbStart);
+  assertLeftClimbHandAnchored(result.climbStart);
   expect(result.bakedRootMotionRange).toBeGreaterThan(0.5);
 
   const activeClimbSamples = result.climbSamples.filter((sample) => sample.state === 'climbingUp');
@@ -1141,13 +1141,11 @@ test('ledge climb anchors both hands through the baked FBX push-off', async ({ p
   const plantedClimbSamples = activeClimbSamples.filter((sample) => !sample.climbHandsReleased);
   expect(plantedClimbSamples.length).toBeGreaterThan(5);
   for (const sample of plantedClimbSamples) {
-    for (const side of ['left', 'right']) {
-      const start = result.climbStart[side];
-      const current = sample[side];
-      expect(Math.hypot(current.x - start.x, current.y - start.y, current.z - start.z))
-        .toBeLessThan(0.045);
-      expect(sample.handMesh[side].edgeDistance).toBeLessThan(0.06);
-    }
+    const start = result.climbStart.left;
+    const current = sample.left;
+    expect(Math.hypot(current.x - start.x, current.y - start.y, current.z - start.z))
+      .toBeLessThan(0.045);
+    expect(sample.handMesh.left.edgeDistance).toBeLessThan(0.06);
   }
   expect(Math.max(...activeClimbSamples.map((sample) => sample.root.y)) - result.climbStart.root.y)
     .toBeGreaterThan(1);

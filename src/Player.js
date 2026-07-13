@@ -168,8 +168,8 @@ const LEDGE_WALL_JUMP_DISTANCE = 1.45;
 const LEDGE_WALL_JUMP_LIFT = 0.9;
 const LEDGE_WALL_JUMP_FALL_SPEED = 2.2;
 const LEDGE_WALL_JUMP_FALL_VERTICAL_VELOCITY = -1.2;
-// The climb clip keeps both hands planted through its pull and push-off. Keep
-// that contact authored in world space, then release for the final crouch.
+// The left hand stays planted through the pull and push-off. The Lift Arm is
+// the one utility replacement allowed to add a right-hand ledge contact.
 const LEDGE_CLIMB_HAND_RELEASE_PROGRESS = 0.82;
 const LEDGE_CLIMB_HAND_RELEASE_END_PROGRESS = 0.94;
 const LEDGE_TOWARD_INPUT_DOT = 0.38;
@@ -1312,6 +1312,7 @@ export class Player {
 
     if (forceSwordArm && previewAttackKind === 'beamBlade') {
       this.externalRig?.setDrillArmActive?.(false);
+      this.externalRig?.setBusterArmSide?.('right');
       this.externalRig?.setBusterArmActive?.(true);
       this.externalRig?.setBeamBladeActive?.(true, this.getActiveWeaponGlowColor(this.weaponColor.getHex()));
     }
@@ -1323,6 +1324,7 @@ export class Player {
       projectileAiming,
       attackKind: previewAttackKind,
       attackProgress: previewAttackProgress,
+      busterArmSide: forceSwordArm ? 'right' : this._getActiveBusterArmSide(),
       clipKey,
       animationState: previewAttackKind === 'beamBlade' ? 'attacking' : undefined,
       skipAttackKindReset: true,
@@ -1511,6 +1513,7 @@ export class Player {
       climbRightHandQuaternion: new THREE.Quaternion(),
       climbReleasePosition: new THREE.Vector3(),
       climbHandAnchorsCaptured: false,
+      climbUsesRightHand: false,
       climbHandsReleased: false,
       climbHighestRootY: -Infinity,
       climbFarthestInward: -Infinity,
@@ -1778,6 +1781,7 @@ export class Player {
     this.movementLockMultiplier = 1;
     this.movementLockTimer = 0;
     this.modelRoot.position.y = 0;
+    this.updateWeaponVisualState();
   }
 
   _captureClimbHandAnchors() {
@@ -1791,7 +1795,8 @@ export class Player {
     this.root.updateMatrixWorld(true);
     leftWrist.getWorldPosition(ledge.climbLeftHandPosition);
     leftWrist.getWorldQuaternion(ledge.climbLeftHandQuaternion);
-    if (rightWrist) {
+    ledge.climbUsesRightHand = Boolean(rightWrist && this._usesRightArmForLedge());
+    if (ledge.climbUsesRightHand) {
       rightWrist.getWorldPosition(ledge.climbRightHandPosition);
       rightWrist.getWorldQuaternion(ledge.climbRightHandQuaternion);
     } else {
@@ -1800,6 +1805,10 @@ export class Player {
     }
     ledge.climbHandAnchorsCaptured = true;
     return true;
+  }
+
+  _usesRightArmForLedge() {
+    return this.getActiveArmWeapon?.()?.type === 'liftArm';
   }
 
   _anchorClimbHands(progress = this._getLedgeActionProgress()) {
@@ -1819,6 +1828,7 @@ export class Player {
       LEDGE_CLIMB_HAND_RELEASE_END_PROGRESS,
     );
     const anchorWeight = 1 - releaseBlend;
+    const useRightHand = Boolean(ledge.climbUsesRightHand && rightWrist);
     if (anchorWeight <= 0) {
       return;
     }
@@ -1827,7 +1837,7 @@ export class Player {
     // the FBX pose, rather than a hand-authored body path, drives the pull-up.
     this.root.updateMatrixWorld(true);
     leftWrist.getWorldPosition(ledgeAnimatedWristPosition);
-    if (!ledge.climbHandsReleased && rightWrist) {
+    if (!ledge.climbHandsReleased && useRightHand) {
       rightWrist.getWorldPosition(ledgeAnimatedRightWristPosition);
       ledgeAnimatedWristPosition.add(ledgeAnimatedRightWristPosition).multiplyScalar(0.5);
       ledgeRootCorrection.copy(ledge.climbLeftHandPosition)
@@ -1859,8 +1869,8 @@ export class Player {
     this.externalRig?.anchorHandsToWorldPositions?.({
       leftPosition: ledge.climbLeftHandPosition,
       leftQuaternion: ledge.climbLeftHandQuaternion,
-      rightPosition: rightWrist ? ledge.climbRightHandPosition : null,
-      rightQuaternion: rightWrist ? ledge.climbRightHandQuaternion : null,
+      rightPosition: useRightHand ? ledge.climbRightHandPosition : null,
+      rightQuaternion: useRightHand ? ledge.climbRightHandQuaternion : null,
       weight: anchorWeight,
     });
     this.root.updateMatrixWorld(true);
@@ -2029,7 +2039,9 @@ export class Player {
   }
 
   getAttackOrigin() {
-    const hand = this.humanoid.getAttachmentPoint('rightHand');
+    const hand = this.humanoid.getAttachmentPoint(
+      this._getActiveBusterArmSide() === 'left' ? 'leftHand' : 'rightHand',
+    );
     const origin = new THREE.Vector3();
 
     if (hand) {
@@ -2051,7 +2063,10 @@ export class Player {
       }
     }
 
-    const muzzlePosition = this.externalRig?.getBusterMuzzleWorldPosition(new THREE.Vector3());
+    const muzzlePosition = this.externalRig?.getBusterMuzzleWorldPosition(
+      new THREE.Vector3(),
+      this._getActiveBusterArmSide(),
+    );
 
     if (muzzlePosition) {
       muzzlePosition.y = Math.max(muzzlePosition.y, 1);
@@ -2077,6 +2092,10 @@ export class Player {
     }
 
     return this.getWeaponKind() === 'projectile';
+  }
+
+  _getActiveBusterArmSide() {
+    return this.activeArmIndex === BUSTER_SLOT_INDEX ? 'left' : 'right';
   }
 
   getActiveWeaponElement() {
@@ -2364,7 +2383,10 @@ export class Player {
     this.holdProjectileFiringPose(targetPosition, lockDuration, { weaponKey });
 
     if (!alreadyLocked) {
-      this.animation.playAttack(duration);
+      this.animation.playAttack(
+        duration,
+        this._getActiveBusterArmSide() === 'left' ? 'projectileLeft' : 'projectileRight',
+      );
     }
   }
 
@@ -3337,9 +3359,15 @@ export class Player {
     const activeArm = this.getActiveArmWeapon?.();
     const beamBladeActive = activeArm?.type === 'swordArm';
     const drillActive = activeArm?.type === 'drillArm';
+    const busterArmSide = this._getActiveBusterArmSide();
+    const rightSubweaponActive = busterArmSide === 'right'
+      && !drillActive
+      && this.isUsingProjectileWeapon();
 
+    this.externalRig?.setBusterArmSide?.(busterArmSide);
+    this.externalRig?.setMegaBusterArmActive?.(!this.isLedgeClinging());
     this.externalRig?.setDrillArmActive?.(drillActive, this.getActiveWeaponGlowColor(0xffd36f));
-    this.externalRig?.setBusterArmActive(!drillActive && this.isUsingProjectileWeapon());
+    this.externalRig?.setBusterArmActive(rightSubweaponActive);
     this.externalRig?.setBeamBladeActive?.(beamBladeActive, this.getActiveWeaponGlowColor(this.weaponColor.getHex()));
   }
 
@@ -3925,6 +3953,8 @@ export class Player {
       lockOnActive: Boolean(motionOptions.lockOnActive),
       strafeAmount: motionOptions.strafeAmount ?? 0,
       turnAmount: motionOptions.turnAmount ?? 0,
+      busterArmSide: motionOptions.busterArmSide ?? this._getActiveBusterArmSide(),
+      useRightArmForLedge: this._usesRightArmForLedge(),
       clipKey: motionOptions.clipKey ?? null,
     });
 
@@ -3935,6 +3965,8 @@ export class Player {
       this._lastExternalModelGrounding = this._measureExternalModelGrounding();
     } else if (!motionOptions.physicalJump && this._shouldClampNeutralJumpWindup(motionState, actionProgress)) {
       this._clampExternalModelFeetToGround({ reason: 'jumpWindup' });
+    } else if (this.externalRig?.root?.userData?.megaBusterActionIdleActive) {
+      this._clampExternalModelFeetToGround({ allowRaise: true, reason: 'megaBusterActionIdle' });
     } else if (this._shouldClampStationaryGroundedPose(animationState, moving)) {
       this._clampExternalModelFeetToGround({ allowRaise: true, reason: 'groundedIdle' });
     } else {

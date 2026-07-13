@@ -296,7 +296,9 @@ export class EquipmentManager {
 
   _attachVisual(slot, item) {
     const visuals = this._createVisualObjects(slot, item);
-    const attachmentNames = VISUAL_ATTACHMENTS[slot] ?? [];
+    const attachmentNames = slot === 'weapon' && item?.type === 'busterArm'
+      ? ['leftHand']
+      : VISUAL_ATTACHMENTS[slot] ?? [];
     const attached = [];
 
     for (let i = 0; i < visuals.length; i += 1) {

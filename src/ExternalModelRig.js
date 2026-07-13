@@ -65,9 +65,9 @@ const PROCEDURAL_REPLACEMENT_PARTS = new Set([
   'rightThigh',
   'rightKnee',
 ]);
+const HIDDEN_WITH_MEGA_BUSTER = ['leftForearm', 'leftHand'];
 const HIDDEN_WITH_BUSTER = ['rightForearm', 'rightHand'];
 const HIDDEN_WITH_DRILL = ['rightForearm', 'rightHand'];
-const BUSTER_ELBOW_JOINT = 'rightElbow';
 const BUSTER_CHAMBER_ROLL_SIGN = -1;
 const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
@@ -651,6 +651,10 @@ export class ExternalModelRig {
     this.busterArmGroup = null;
     this.busterMuzzle = null;
     this.busterArmActive = false;
+    this.megaBusterArmGroup = null;
+    this.megaBusterMuzzle = null;
+    this.megaBusterArmActive = false;
+    this.busterArmSide = 'left';
     this.drillArmGroup = null;
     this.drillBitSpin = null;
     this.drillTip = null;
@@ -766,14 +770,43 @@ export class ExternalModelRig {
   }
 
   setBusterArm(busterObject) {
-    const elbow = this.joints.get(BUSTER_ELBOW_JOINT);
+    const leftElbow = this.joints.get('leftElbow');
+    const rightElbow = this.joints.get('rightElbow');
 
-    if (!elbow || !busterObject?.isObject3D) {
+    if (!leftElbow || !rightElbow || !busterObject?.isObject3D) {
       return false;
     }
 
+    if (this.megaBusterArmGroup?.parent) {
+      this.megaBusterArmGroup.parent.remove(this.megaBusterArmGroup);
+    }
     if (this.busterArmGroup?.parent) {
       this.busterArmGroup.parent.remove(this.busterArmGroup);
+    }
+
+    const leftMount = this._createBusterMount(busterObject.clone(true), 'left');
+    const rightMount = this._createBusterMount(busterObject, 'right');
+    if (!leftMount || !rightMount) {
+      return false;
+    }
+
+    leftElbow.add(leftMount.group);
+    rightElbow.add(rightMount.group);
+    this.megaBusterArmGroup = leftMount.group;
+    this.megaBusterMuzzle = leftMount.muzzle;
+    this.busterArmGroup = rightMount.group;
+    this.busterMuzzle = rightMount.muzzle;
+    this.beamBladeGroup = this._createBeamBladeGroup();
+    this.busterMuzzle.add(this.beamBladeGroup);
+    this.setMegaBusterArmActive(this.megaBusterArmActive);
+    this.setBusterArmActive(this.busterArmActive);
+    this.setBeamBladeActive(this.beamBladeActive, this.beamBladeColor);
+    return true;
+  }
+
+  _createBusterMount(busterObject, side) {
+    if (!busterObject?.isObject3D) {
+      return null;
     }
 
     busterObject.updateMatrixWorld(true);
@@ -782,22 +815,17 @@ export class ExternalModelRig {
     const center = bounds.getCenter(new THREE.Vector3());
     const group = new THREE.Group();
 
-    group.name = 'rigBusterArmGroup';
-    group.rotation.y = -Math.PI / 2;
+    group.name = side === 'left' ? 'rigMegaBusterArmGroupLeft' : 'rigSubweaponArmGroupRight';
+    group.rotation.y = side === 'left' ? Math.PI / 2 : -Math.PI / 2;
+    group.userData.armSide = side;
     busterObject.position.sub(new THREE.Vector3(center.x, center.y, bounds.min.z));
 
-    this.busterMuzzle = new THREE.Group();
-    this.busterMuzzle.name = 'rigBusterMuzzle';
-    this.busterMuzzle.position.set(0, 0, size.z + size.z * 0.12);
-    this.beamBladeGroup = this._createBeamBladeGroup();
-    this.busterMuzzle.add(this.beamBladeGroup);
+    const muzzle = new THREE.Group();
+    muzzle.name = side === 'left' ? 'rigMegaBusterMuzzleLeft' : 'rigSubweaponMuzzleRight';
+    muzzle.position.set(0, 0, size.z + size.z * 0.12);
 
-    group.add(busterObject, this.busterMuzzle);
-    elbow.add(group);
-    this.busterArmGroup = group;
-    this.setBusterArmActive(this.busterArmActive);
-    this.setBeamBladeActive(this.beamBladeActive, this.beamBladeColor);
-    return true;
+    group.add(busterObject, muzzle);
+    return { group, muzzle };
   }
 
   setBusterArmActive(active) {
@@ -842,17 +870,36 @@ export class ExternalModelRig {
   }
 
   _syncArmReplacementVisibility() {
-    const partNames = new Set([...HIDDEN_WITH_BUSTER, ...HIDDEN_WITH_DRILL]);
+    const partNames = new Set([
+      ...HIDDEN_WITH_MEGA_BUSTER,
+      ...HIDDEN_WITH_BUSTER,
+      ...HIDDEN_WITH_DRILL,
+    ]);
 
     for (const partName of partNames) {
+      const hiddenForMegaBuster = this.megaBusterArmActive && HIDDEN_WITH_MEGA_BUSTER.includes(partName);
       const hiddenForBuster = this.busterArmActive && HIDDEN_WITH_BUSTER.includes(partName);
       const hiddenForDrill = this.drillArmActive && HIDDEN_WITH_DRILL.includes(partName);
       const mesh = this.partMeshes.get(partName);
 
       if (mesh) {
-        mesh.visible = !hiddenForBuster && !hiddenForDrill;
+        mesh.visible = !hiddenForMegaBuster && !hiddenForBuster && !hiddenForDrill;
       }
     }
+  }
+
+  setMegaBusterArmActive(active) {
+    this.megaBusterArmActive = Boolean(active && this.megaBusterArmGroup);
+
+    if (this.megaBusterArmGroup) {
+      this.megaBusterArmGroup.visible = this.megaBusterArmActive;
+    }
+
+    this._syncArmReplacementVisibility();
+  }
+
+  setBusterArmSide(side = 'left') {
+    this.busterArmSide = side === 'right' ? 'right' : 'left';
   }
 
   setBeamBladeActive(active, color = null) {
@@ -868,12 +915,16 @@ export class ExternalModelRig {
     }
   }
 
-  getBusterMuzzleWorldPosition(target = new THREE.Vector3()) {
-    if (!this.busterArmActive || !this.busterMuzzle) {
+  getBusterMuzzleWorldPosition(target = new THREE.Vector3(), side = this.busterArmSide) {
+    const useLeftMegaBuster = side !== 'right';
+    const active = useLeftMegaBuster ? this.megaBusterArmActive : this.busterArmActive;
+    const muzzle = useLeftMegaBuster ? this.megaBusterMuzzle : this.busterMuzzle;
+
+    if (!active || !muzzle) {
       return null;
     }
 
-    return this.busterMuzzle.getWorldPosition(target);
+    return muzzle.getWorldPosition(target);
   }
 
   getDrillTipWorldPosition(target = new THREE.Vector3()) {
@@ -1134,6 +1185,7 @@ export class ExternalModelRig {
     projectileAiming = false,
     lockOnActive = false,
     strafeAmount = 0,
+    busterArmSide = this.busterArmSide,
   } = {}) {
     if (!moving) {
       this._applyIdleSemanticPose(targets);
@@ -1142,7 +1194,9 @@ export class ExternalModelRig {
 
     const speedBlend = THREE.MathUtils.clamp(moveAmount, 0, 1.35);
     const runBlend = running ? THREE.MathUtils.clamp((speedBlend - 1) / 0.35, 0, 1) : 0;
-    const rightArmSwingScale = projectileAiming || lockOnActive ? AIM_RIGHT_ARM_SWING_SCALE : 1;
+    const rightArmSwingScale = (projectileAiming || lockOnActive) && busterArmSide === 'right'
+      ? AIM_RIGHT_ARM_SWING_SCALE
+      : 1;
 
     this.locomotionAnimator.apply({
       rotationTargets: targets,
@@ -1226,7 +1280,9 @@ export class ExternalModelRig {
     attackKind = 'melee',
     lockOnActive = false,
     strafeAmount = 0,
+    busterArmSide = this.busterArmSide,
   } = {}) {
+    this.setBusterArmSide(busterArmSide);
     this.time += dt;
     const rigState = `${state}:${attackKind ?? ''}`;
     if (rigState !== this.previousRigState) {
@@ -1254,6 +1310,7 @@ export class ExternalModelRig {
       projectileAiming,
       lockOnActive,
       strafeAmount,
+      busterArmSide: this.busterArmSide,
     });
 
     const targetAimWeight = projectileAiming || lockOnActive ? 1 : 0;
@@ -1268,6 +1325,7 @@ export class ExternalModelRig {
       backpedaling,
       lockOnActive,
       strafeAmount,
+      armSide: this.busterArmSide,
     });
 
     if (state === 'attacking' && projectileAiming) {

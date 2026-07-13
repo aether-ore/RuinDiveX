@@ -206,6 +206,13 @@ export class AnimationController {
     if (this.attackTimer > 0) {
       this.attackTimer -= dt;
       if (this.poseOutputEnabled) {
+        if (this.attackStyle === 'projectileLeft' || this.attackStyle === 'projectileRight') {
+          if (moving) {
+            this._applyWalkPose(dt, moveAmount, running);
+          } else {
+            this._applyIdlePose(dt);
+          }
+        }
         this._applyAttackPose(dt);
       }
 
@@ -341,6 +348,16 @@ export class AnimationController {
 
     if (this.attackStyle === 'beamBlade') {
       this._applyBeamBladeAttackPose(progress, alpha);
+      return;
+    }
+
+    if (this.attackStyle === 'projectileLeft' || this.attackStyle === 'projectileRight') {
+      const side = this.attackStyle === 'projectileLeft' ? 'left' : 'right';
+      const recoil = Math.sin(THREE.MathUtils.clamp(progress / 0.34, 0, 1) * Math.PI);
+      const rollSign = side === 'left' ? 1 : -1;
+      lerpRotation(this.joints.get(`${side}Shoulder`), -1.52 + recoil * 0.08, 0, rollSign * 0.08, alpha);
+      lerpRotation(this.joints.get(`${side}Elbow`), 0.08 + recoil * 0.12, 0, 0, alpha);
+      lerpRotation(this.joints.get(`${side}Wrist`), -recoil * 0.04, 0, rollSign * 0.03, alpha);
       return;
     }
 

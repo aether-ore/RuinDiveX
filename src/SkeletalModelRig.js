@@ -15,9 +15,12 @@ const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
 const tempQuaternionC = new THREE.Quaternion();
 const localForwardZ = new THREE.Vector3(0, 0, 1);
-const BUSTER_ELBOW_JOINT = 'rightElbow';
-const BUSTER_WRIST_JOINT = 'rightWrist';
-const BUSTER_HAND_MESH_TOKEN = 'HandMesh_R';
+const LEFT_BUSTER_ELBOW_JOINT = 'leftElbow';
+const LEFT_BUSTER_WRIST_JOINT = 'leftWrist';
+const LEFT_BUSTER_HAND_MESH_TOKEN = 'HandMesh_L';
+const RIGHT_BUSTER_ELBOW_JOINT = 'rightElbow';
+const RIGHT_BUSTER_WRIST_JOINT = 'rightWrist';
+const RIGHT_BUSTER_HAND_MESH_TOKEN = 'HandMesh_R';
 const DRILL_HAND_MESH_TOKEN = 'HandMesh_R';
 const BUSTER_CHAMBER_ROLL_SIGN = -1;
 const FREE_TURN_LOCOMOTION_THRESHOLD = 0.35;
@@ -36,10 +39,29 @@ const GENERATED_POWER_KNOCKBACK_STATES = new Set([
   'backLanding',
   'downed',
 ]);
-const BUSTER_AIM_JOINTS = Object.freeze(['rightShoulder', 'rightElbow', 'rightWrist']);
+const LEFT_BUSTER_AIM_JOINTS = Object.freeze(['leftShoulder', 'leftElbow', 'leftWrist']);
+const RIGHT_BUSTER_AIM_JOINTS = Object.freeze(['rightShoulder', 'rightElbow', 'rightWrist']);
+const RIGHT_LEDGE_ARM_JOINTS = RIGHT_BUSTER_AIM_JOINTS;
 const PISTOL_BUSTER_POSE_DEGREES = Object.freeze({
   leftElbow: Object.freeze({ pitch: -22.5, yaw: 1.5, roll: 111.5 }),
   leftWrist: Object.freeze({ pitch: 43, yaw: -7.5, roll: 4.5 }),
+});
+const MEGA_BUSTER_ACTION_IDLE_POSE_DEGREES = Object.freeze({
+  hips: Object.freeze({ pitch: -6.2, yaw: -43, roll: -4 }),
+  spine: Object.freeze({ pitch: 11.8, yaw: 9.1, roll: -2.7 }),
+  neck: Object.freeze({ pitch: -4.2, yaw: -1.3, roll: 0.2 }),
+  leftShoulder: Object.freeze({ pitch: 59, yaw: -22.5, roll: 102.5 }),
+  leftElbow: Object.freeze({ pitch: 2.2, yaw: 2.6, roll: 1.5 }),
+  leftWrist: Object.freeze({ pitch: -17.1, yaw: 14.9, roll: -1 }),
+  rightShoulder: Object.freeze({ pitch: 50.6, yaw: 19.7, roll: 17.8 }),
+  rightElbow: Object.freeze({ pitch: 11.2, yaw: 4, roll: -40 }),
+  rightWrist: Object.freeze({ pitch: 15.5, yaw: -6.8, roll: -4.2 }),
+  leftHip: Object.freeze({ pitch: 27.4, yaw: -8.8, roll: 4.1 }),
+  leftKnee: Object.freeze({ pitch: -34.7, yaw: 15.7, roll: 1.1 }),
+  leftAnkle: Object.freeze({ pitch: 3.8, yaw: 1.2, roll: 3 }),
+  rightHip: Object.freeze({ pitch: 6.3, yaw: 14, roll: -4.9 }),
+  rightKnee: Object.freeze({ pitch: -34, yaw: 7.7, roll: -0.4 }),
+  rightAnkle: Object.freeze({ pitch: 19, yaw: 4.4, roll: -0.6 }),
 });
 const PASSIVE_IDLE_SHOULDER_JOINTS = Object.freeze(['leftShoulder', 'rightShoulder']);
 
@@ -189,7 +211,18 @@ export class SkeletalModelRig {
     this.busterArmGroup = null;
     this.busterMuzzle = null;
     this.busterNeutralQuaternion = new THREE.Quaternion();
+    this.megaBusterArmGroup = null;
+    this.megaBusterMuzzle = null;
+    this.megaBusterNeutralQuaternion = new THREE.Quaternion();
+    this.megaBusterArmActive = false;
+    this.busterArmSide = 'left';
+    this.megaBusterActionIdleShoulderLocalQuaternion = new THREE.Quaternion();
+    this.megaBusterActionIdleArmAnchorReady = false;
+    this.megaBusterArmWorldAnchorWasApplied = false;
+    this.megaBusterActionIdlePoseWasApplied = false;
     this.busterAirAimPose = new Map();
+    this.rightBusterAimPose = new Map();
+    this.rightLedgeArmDownPose = new Map();
     this.busterMountedElbow = null;
     this.busterArmActive = false;
     this.drillArmGroup = null;
@@ -224,6 +257,7 @@ export class SkeletalModelRig {
     this._buildBoneMap();
     this._registerRigJoints();
     this._captureRestState();
+    this._captureMegaBusterActionIdleArmAnchor();
     this._prepareSkinnedMeshes();
     this._buildFootVertexSamples();
     this._buildBackVertexSamples();
@@ -307,44 +341,77 @@ export class SkeletalModelRig {
   }
 
   setBusterArm(busterObject) {
-    const elbow = this.joints.get(BUSTER_ELBOW_JOINT);
+    const leftElbow = this.joints.get(LEFT_BUSTER_ELBOW_JOINT);
+    const rightElbow = this.joints.get(RIGHT_BUSTER_ELBOW_JOINT);
 
-    if (!elbow || !busterObject?.isObject3D) {
+    if (!leftElbow || !rightElbow || !busterObject?.isObject3D) {
       return false;
     }
 
+    if (this.megaBusterArmGroup?.parent) {
+      this.megaBusterArmGroup.parent.remove(this.megaBusterArmGroup);
+    }
     if (this.busterArmGroup?.parent) {
       this.busterArmGroup.parent.remove(this.busterArmGroup);
     }
 
-    this._scaleBusterToForearm(busterObject);
+    this._scaleBusterToForearm(busterObject, 'left');
+    const leftBusterObject = busterObject.clone(true);
+    const leftMount = this._createBusterMount(leftBusterObject, 'left');
+    const rightMount = this._createBusterMount(busterObject, 'right');
+
+    if (!leftMount || !rightMount) {
+      return false;
+    }
+
+    leftElbow.add(leftMount.group);
+    rightElbow.add(rightMount.group);
+    this.megaBusterArmGroup = leftMount.group;
+    this.megaBusterMuzzle = leftMount.muzzle;
+    this.megaBusterNeutralQuaternion.copy(leftMount.neutralQuaternion);
+    this.busterArmGroup = rightMount.group;
+    this.busterMuzzle = rightMount.muzzle;
+    this.busterNeutralQuaternion.copy(rightMount.neutralQuaternion);
+    this.busterMountedElbow = rightElbow;
+    this.beamBladeGroup = this._createBeamBladeGroup();
+    this.busterMuzzle.add(this.beamBladeGroup);
+    this.setMegaBusterArmActive(this.megaBusterArmActive);
+    this.setBusterArmActive(this.busterArmActive);
+    this.setBeamBladeActive(this.beamBladeActive, this.beamBladeColor);
+    return true;
+  }
+
+  _createBusterMount(busterObject, side) {
+    const elbow = this.joints.get(side === 'left' ? LEFT_BUSTER_ELBOW_JOINT : RIGHT_BUSTER_ELBOW_JOINT);
+    const wrist = this.joints.get(side === 'left' ? LEFT_BUSTER_WRIST_JOINT : RIGHT_BUSTER_WRIST_JOINT);
+    if (!elbow || !wrist || !busterObject?.isObject3D) {
+      return null;
+    }
+
     busterObject.updateMatrixWorld(true);
     const bounds = new THREE.Box3().setFromObject(busterObject);
     const size = bounds.getSize(new THREE.Vector3());
     const center = bounds.getCenter(new THREE.Vector3());
     const group = new THREE.Group();
-    const neutralQuaternion = this._createForearmAlignedQuaternion(elbow, this.joints.get(BUSTER_WRIST_JOINT));
+    const neutralQuaternion = this._createForearmAlignedQuaternion(elbow, wrist);
 
-    group.name = 'rigSkeletalBusterArmGroup';
+    group.name = side === 'left'
+      ? 'rigSkeletalMegaBusterArmGroupLeft'
+      : 'rigSkeletalSubweaponArmGroupRight';
     group.quaternion.copy(neutralQuaternion);
     group.userData.neutralLocalQuaternion = neutralQuaternion.clone();
-    this.busterNeutralQuaternion.copy(neutralQuaternion);
+    group.userData.armSide = side;
     this._applyInverseRootScale(group);
     busterObject.position.sub(new THREE.Vector3(center.x, center.y, bounds.min.z));
 
-    this.busterMuzzle = new THREE.Group();
-    this.busterMuzzle.name = 'rigSkeletalBusterMuzzle';
-    this.busterMuzzle.position.set(0, 0, size.z + size.z * 0.12);
-    this.beamBladeGroup = this._createBeamBladeGroup();
-    this.busterMuzzle.add(this.beamBladeGroup);
+    const muzzle = new THREE.Group();
+    muzzle.name = side === 'left'
+      ? 'rigSkeletalMegaBusterMuzzleLeft'
+      : 'rigSkeletalSubweaponMuzzleRight';
+    muzzle.position.set(0, 0, size.z + size.z * 0.12);
 
-    group.add(busterObject, this.busterMuzzle);
-    elbow.add(group);
-    this.busterArmGroup = group;
-    this.busterMountedElbow = elbow;
-    this.setBusterArmActive(this.busterArmActive);
-    this.setBeamBladeActive(this.beamBladeActive, this.beamBladeColor);
-    return true;
+    group.add(busterObject, muzzle);
+    return { group, muzzle, neutralQuaternion };
   }
 
   _createForearmAlignedQuaternion(elbow, wrist) {
@@ -449,9 +516,9 @@ export class SkeletalModelRig {
     this.root.updateMatrixWorld(true);
   }
 
-  _scaleBusterToForearm(busterObject) {
-    const elbow = this.joints.get(BUSTER_ELBOW_JOINT);
-    const wrist = this.joints.get(BUSTER_WRIST_JOINT);
+  _scaleBusterToForearm(busterObject, side = 'right') {
+    const elbow = this.joints.get(side === 'left' ? LEFT_BUSTER_ELBOW_JOINT : RIGHT_BUSTER_ELBOW_JOINT);
+    const wrist = this.joints.get(side === 'left' ? LEFT_BUSTER_WRIST_JOINT : RIGHT_BUSTER_WRIST_JOINT);
 
     if (!elbow || !wrist) {
       return;
@@ -487,6 +554,20 @@ export class SkeletalModelRig {
     if (!this.busterArmActive && this.beamBladeGroup) {
       this.beamBladeGroup.visible = false;
     }
+  }
+
+  setMegaBusterArmActive(active) {
+    this.megaBusterArmActive = Boolean(active && this.megaBusterArmGroup);
+
+    if (this.megaBusterArmGroup) {
+      this.megaBusterArmGroup.visible = this.megaBusterArmActive;
+    }
+
+    this._syncArmReplacementVisibility();
+  }
+
+  setBusterArmSide(side = 'left') {
+    this.busterArmSide = side === 'right' ? 'right' : 'left';
   }
 
   setDrillArmActive(active, color = null) {
@@ -529,12 +610,16 @@ export class SkeletalModelRig {
     }
   }
 
-  getBusterMuzzleWorldPosition(target = new THREE.Vector3()) {
-    if (!this.busterArmActive || !this.busterMuzzle) {
+  getBusterMuzzleWorldPosition(target = new THREE.Vector3(), side = this.busterArmSide) {
+    const useLeftMegaBuster = side !== 'right';
+    const active = useLeftMegaBuster ? this.megaBusterArmActive : this.busterArmActive;
+    const muzzle = useLeftMegaBuster ? this.megaBusterMuzzle : this.busterMuzzle;
+
+    if (!active || !muzzle) {
       return null;
     }
 
-    return this.busterMuzzle.getWorldPosition(target);
+    return muzzle.getWorldPosition(target);
   }
 
   getDrillTipWorldPosition(target = new THREE.Vector3()) {
@@ -636,9 +721,12 @@ export class SkeletalModelRig {
     lockOnActive = false,
     strafeAmount = 0,
     turnAmount = 0,
+    busterArmSide = this.busterArmSide,
+    useRightArmForLedge = false,
     fallAnimationClipProgress = null,
     clipKey = null,
   } = {}) {
+    this.setBusterArmSide(busterArmSide);
     this.time += dt;
     const rigState = [
       state,
@@ -646,6 +734,7 @@ export class SkeletalModelRig {
       moving ? 'moving' : 'still',
       projectileAiming ? 'aiming' : 'freeAim',
       lockOnActive ? 'lockOn' : 'freeLock',
+      `buster:${this.busterArmSide}`,
       clipKey ? `clip:${clipKey}` : 'auto',
     ].join(':');
     if (rigState !== this.previousRigState) {
@@ -654,6 +743,13 @@ export class SkeletalModelRig {
     } else {
       this.stateTime += dt;
     }
+
+    // The Mega Buster firing layer is applied after the mixer so its arm can
+    // remain steady over locomotion. Clear last frame's manual transforms
+    // before evaluating the next clip; otherwise clips that do not key bone
+    // positions (notably the dodge roll) inherit the counter-translated
+    // shoulder and can pull the limb away from the body.
+    this._restoreTemporaryMegaBusterPose();
 
     if (this.debugPoseEnabled) {
       this._applyDebugPoseOverridesImmediate();
@@ -677,6 +773,7 @@ export class SkeletalModelRig {
       lockOnActive,
       strafeAmount,
       turnAmount,
+      busterArmSide: this.busterArmSide,
       clipKey,
     });
 
@@ -701,14 +798,16 @@ export class SkeletalModelRig {
       fallAnimationClipProgress,
     });
     this.mixer.update(dt);
-    this._applyPistolBusterPoseCorrection();
+    if (this.busterArmSide === 'right') {
+      this._applyPistolBusterPoseCorrection();
+    }
     this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
     this._updateDrillArmVisual(dt);
     this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
-    this._applyAirborneBusterAimPose(
-      projectileAiming && AIRBORNE_BUSTER_AIM_STATES.has(state),
-    );
+    const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
+    this._applyBusterAimPose(busterAimActive, state, moving);
     this._applyGeneratedPowerKnockbackPose(state, actionProgress ?? 0, dt);
+    this._applyLedgeRightArmPose(state, useRightArmForLedge);
   }
 
   _buildBoneMap() {
@@ -769,6 +868,98 @@ export class SkeletalModelRig {
     for (const [name, joint] of this.joints.entries()) {
       this.restPositions.set(name, joint.userData.restWorldPosition?.clone() ?? joint.getWorldPosition(new THREE.Vector3()));
     }
+  }
+
+  _resetAnimatedBonesToRestPose() {
+    for (const bone of this.animatedBones) {
+      const restQuaternion = this.restLocalQuaternions.get(bone);
+      const restPosition = bone.userData?.restLocalPosition;
+      if (restQuaternion) {
+        bone.quaternion.copy(restQuaternion);
+      }
+      if (restPosition) {
+        bone.position.copy(restPosition);
+      }
+    }
+  }
+
+  _restoreTemporaryMegaBusterPose() {
+    if (!this.megaBusterActionIdlePoseWasApplied && !this.megaBusterArmWorldAnchorWasApplied) {
+      return false;
+    }
+
+    if (this.megaBusterActionIdlePoseWasApplied) {
+      this._resetAnimatedBonesToRestPose();
+    } else if (this.megaBusterArmWorldAnchorWasApplied) {
+      for (const jointName of LEFT_BUSTER_AIM_JOINTS) {
+        const joint = this.joints.get(jointName);
+        const restQuaternion = this.restLocalQuaternions.get(joint);
+        const restPosition = joint?.userData?.restLocalPosition;
+        if (restQuaternion) {
+          joint.quaternion.copy(restQuaternion);
+        }
+        if (joint && restPosition) {
+          joint.position.copy(restPosition);
+        }
+      }
+    }
+
+    this.megaBusterArmWorldAnchorWasApplied = false;
+    this.megaBusterActionIdlePoseWasApplied = false;
+    this.root.userData.megaBusterArmWorldAnchorActive = false;
+    this.root.userData.megaBusterActionIdleActive = false;
+    this.root.updateMatrixWorld(true);
+    return true;
+  }
+
+  _applyRawLocalPoseDegrees(poseDegrees = {}, jointNames = Object.keys(poseDegrees)) {
+    for (const jointName of jointNames) {
+      const pose = poseDegrees[jointName];
+      const joint = this.joints.get(jointName);
+      if (!joint || !pose) {
+        continue;
+      }
+
+      tempEuler.set(
+        THREE.MathUtils.degToRad(pose.pitch),
+        THREE.MathUtils.degToRad(pose.yaw),
+        THREE.MathUtils.degToRad(pose.roll),
+        joint.rotation.order,
+      );
+      this._applyBoneRotation(joint, tempEuler, 1);
+    }
+  }
+
+  _captureMegaBusterActionIdleArmAnchor() {
+    const shoulder = this.joints.get('leftShoulder');
+    if (!shoulder) {
+      return false;
+    }
+
+    const savedBones = [...this.animatedBones].map((bone) => ({
+      bone,
+      position: bone.position.clone(),
+      quaternion: bone.quaternion.clone(),
+    }));
+    this._resetAnimatedBonesToRestPose();
+    this._applyRawLocalPoseDegrees(MEGA_BUSTER_ACTION_IDLE_POSE_DEGREES);
+    this.root.updateMatrixWorld(true);
+
+    this.root.getWorldQuaternion(tempQuaternionA).invert();
+    shoulder.getWorldQuaternion(tempQuaternionB);
+    this.megaBusterActionIdleShoulderLocalQuaternion
+      .copy(tempQuaternionA)
+      .multiply(tempQuaternionB)
+      .normalize();
+
+    for (const saved of savedBones) {
+      saved.bone.position.copy(saved.position);
+      saved.bone.quaternion.copy(saved.quaternion);
+    }
+    this.root.updateMatrixWorld(true);
+    this.megaBusterActionIdleArmAnchorReady = true;
+    this.root.userData.megaBusterActionIdleArmAnchorReady = true;
+    return true;
   }
 
   _prepareSkinnedMeshes() {
@@ -1274,25 +1465,53 @@ export class SkeletalModelRig {
 
   _captureBusterAirAimPose() {
     this.busterAirAimPose.clear();
+    this.rightBusterAimPose.clear();
+    this.rightLedgeArmDownPose.clear();
     const clip = this.animationClips.get('pistolIdle') ?? this.animationClips.get('pistolJump');
     if (!clip) {
       return;
     }
 
     const sampleTime = Math.min(Math.max(0, clip.duration * 0.25), 0.25);
-    for (const jointName of BUSTER_AIM_JOINTS) {
-      const track = this._findJointQuaternionTrack(clip, jointName);
+    for (let index = 0; index < RIGHT_BUSTER_AIM_JOINTS.length; index += 1) {
+      const rightJointName = RIGHT_BUSTER_AIM_JOINTS[index];
+      const leftJointName = LEFT_BUSTER_AIM_JOINTS[index];
+      const track = this._findJointQuaternionTrack(clip, rightJointName);
       if (!track?.values || track.values.length < 4) {
         continue;
       }
 
       const sampled = track.createInterpolant(new Float32Array(4)).evaluate(sampleTime);
-      this.busterAirAimPose.set(
-        jointName,
-        new THREE.Quaternion().fromArray(sampled).normalize(),
-      );
+      const rightQuaternion = new THREE.Quaternion().fromArray(sampled).normalize();
+      this.rightBusterAimPose.set(rightJointName, rightQuaternion);
+      this.busterAirAimPose.set(leftJointName, new THREE.Quaternion(
+        rightQuaternion.x,
+        -rightQuaternion.y,
+        -rightQuaternion.z,
+        rightQuaternion.w,
+      ).normalize());
+    }
+
+    const relaxedClip = this.animationClips.get('breathingIdle')
+      ?? this.animationClips.get('sideIdle')
+      ?? this.animationClips.get('idle');
+    if (relaxedClip) {
+      const relaxedSampleTime = Math.min(Math.max(0, relaxedClip.duration * 0.2), 0.2);
+      for (const jointName of RIGHT_LEDGE_ARM_JOINTS) {
+        const track = this._findJointQuaternionTrack(relaxedClip, jointName);
+        if (!track?.values || track.values.length < 4) {
+          continue;
+        }
+        const sampled = track.createInterpolant(new Float32Array(4)).evaluate(relaxedSampleTime);
+        this.rightLedgeArmDownPose.set(
+          jointName,
+          new THREE.Quaternion().fromArray(sampled).normalize(),
+        );
+      }
     }
     this.root.userData.busterAirAimPoseJointCount = this.busterAirAimPose.size;
+    this.root.userData.rightBusterAimPoseJointCount = this.rightBusterAimPose.size;
+    this.root.userData.rightLedgeArmDownPoseJointCount = this.rightLedgeArmDownPose.size;
   }
 
   _normalizeShoulderTracksToReference(referenceKey, clipKeys = []) {
@@ -1526,6 +1745,7 @@ export class SkeletalModelRig {
     lockOnActive = false,
     strafeAmount = 0,
     turnAmount = 0,
+    busterArmSide = this.busterArmSide,
     clipKey = null,
   } = {}) {
     const forcedClip = this._normalizeClipKey(clipKey);
@@ -1534,31 +1754,32 @@ export class SkeletalModelRig {
     }
 
     const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
+    const useRightBusterClips = busterAimActive && busterArmSide === 'right';
 
     if (state === 'attacking' && attackKind === 'beamBlade') {
       return this._firstAvailable('swordInwardSlash', 'walking', 'strutWalking', 'breathingIdle', 'idle');
     }
 
     if (state === 'neutralJump') {
-      return busterAimActive
+      return useRightBusterClips
         ? this._firstAvailable('forwardJumpLaunch', 'pistolJump', 'pistolJump2', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
         : this._firstAvailable('forwardJumpLaunch', 'jump', 'jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
     }
 
     if (state === 'forwardJump') {
-      return busterAimActive
+      return useRightBusterClips
         ? this._firstAvailable('forwardJumpLaunch', 'pistolJump', 'pistolJump2', 'neutralJump', 'jump', 'jumpingUp', 'fallingIdle', 'pistolIdle', 'breathingIdle', 'idle')
         : this._firstAvailable('forwardJumpLaunch', 'jump', 'neutralJump', 'jumpingUp', 'fallingIdle', 'breathingIdle', 'idle');
     }
 
     if (state === 'forwardJumpFall') {
-      return busterAimActive
+      return useRightBusterClips
         ? this._firstAvailable('forwardJumpFall', 'fallingIdle', 'pistolJump2', 'pistolJump', 'jump', 'jumpingUp', 'pistolIdle', 'breathingIdle', 'idle')
         : this._firstAvailable('forwardJumpFall', 'fallingIdle', 'jump', 'jumpingUp', 'breathingIdle', 'idle');
     }
 
     if (state === 'fall') {
-      return busterAimActive
+      return useRightBusterClips
         ? this._firstAvailable('fallingIdle', 'pistolJump2', 'pistolJump', 'jump', 'jumpingUp', 'pistolIdle', 'breathingIdle', 'idle')
         : this._firstAvailable('fallingIdle', 'jump', 'jumpingUp', 'breathingIdle', 'idle');
     }
@@ -1613,11 +1834,16 @@ export class SkeletalModelRig {
       return this._firstAvailable('coverToStand', 'coverToStand2', 'hardLanding', 'breathingIdle', 'idle');
     }
 
+    const useLeftBusterLayer = busterAimActive && busterArmSide === 'left';
+    if (useLeftBusterLayer && !moving && state !== 'walking' && state !== 'running') {
+      return this._firstAvailable('breathingIdle', 'sideIdle', 'idle', 'idle2');
+    }
+
     const isAttackingWithoutAuthoredClip = state === 'attacking'
       && (attackKind === 'beamBlade' || attackKind === 'melee' || projectileAiming);
     const shouldUseLocomotion = moving || state === 'walking' || state === 'running' || isAttackingWithoutAuthoredClip;
 
-    if (busterAimActive) {
+    if (useRightBusterClips) {
       if (!moving && state !== 'walking' && state !== 'running') {
         return this._firstAvailable('pistolIdle', 'breathingIdle', 'idle', 'idle2', 'walking');
       }
@@ -1916,13 +2142,101 @@ export class SkeletalModelRig {
     }
   }
 
-  _applyAirborneBusterAimPose(active = false) {
-    this.root.userData.airborneBusterAimActive = active;
-    if (!active || this.busterAirAimPose.size <= 0) {
+  _applyBusterAimPose(active = false, state = 'idle', moving = false) {
+    const airborne = AIRBORNE_BUSTER_AIM_STATES.has(state);
+    const applyLeftMegaBusterPose = active && this.busterArmSide === 'left';
+    const applyRightAirbornePose = active && this.busterArmSide === 'right' && airborne;
+    const actionIdleActive = applyLeftMegaBusterPose
+      && !moving
+      && !airborne
+      && (state === 'idle' || state === 'attacking');
+    this.root.userData.leftMegaBusterAimActive = applyLeftMegaBusterPose;
+    this.root.userData.megaBusterActionIdleActive = actionIdleActive;
+    this.root.userData.megaBusterArmWorldAnchorActive = false;
+    this.root.userData.airborneBusterAimActive = airborne
+      && (applyLeftMegaBusterPose || applyRightAirbornePose);
+
+    if (applyLeftMegaBusterPose) {
+      this._applyLeftMegaBusterAimPose(actionIdleActive);
       return;
     }
 
-    for (const [jointName, quaternion] of this.busterAirAimPose) {
+    const pose = applyRightAirbornePose ? this.rightBusterAimPose : null;
+    if (!pose?.size) {
+      return;
+    }
+
+    for (const [jointName, quaternion] of pose) {
+      this.joints.get(jointName)?.quaternion.copy(quaternion);
+    }
+  }
+
+  _applyLeftMegaBusterAimPose(useFullActionIdlePose = false) {
+    const jointNames = useFullActionIdlePose
+      ? Object.keys(MEGA_BUSTER_ACTION_IDLE_POSE_DEGREES)
+      : LEFT_BUSTER_AIM_JOINTS;
+    if (useFullActionIdlePose) {
+      this._resetAnimatedBonesToRestPose();
+      this.megaBusterActionIdlePoseWasApplied = true;
+    } else {
+      for (const jointName of LEFT_BUSTER_AIM_JOINTS) {
+        const joint = this.joints.get(jointName);
+        const restPosition = joint?.userData?.restLocalPosition;
+        if (joint && restPosition) {
+          joint.position.copy(restPosition);
+        }
+      }
+    }
+    this._applyRawLocalPoseDegrees(MEGA_BUSTER_ACTION_IDLE_POSE_DEGREES, jointNames);
+
+    if (!useFullActionIdlePose) {
+      this._anchorMegaBusterArmToActionIdle();
+    }
+
+    for (const jointName of LEFT_BUSTER_AIM_JOINTS) {
+      const joint = this.joints.get(jointName);
+      const captured = this.busterAirAimPose.get(jointName);
+      if (joint && captured) {
+        captured.copy(joint.quaternion);
+      }
+    }
+  }
+
+  _anchorMegaBusterArmToActionIdle() {
+    const shoulder = this.joints.get('leftShoulder');
+    if (!this.megaBusterActionIdleArmAnchorReady || !shoulder?.parent) {
+      return false;
+    }
+
+    // Keep the shoulder socket attached to the torso. Translating it to hold
+    // the muzzle at one absolute point stretches the shoulder-parent segment
+    // whenever the hips turn during locomotion. Counter-rotate the firing arm
+    // instead, allowing only the torso's natural positional bob to carry it.
+    const restPosition = shoulder.userData?.restLocalPosition;
+    if (restPosition) {
+      shoulder.position.copy(restPosition);
+    }
+
+    this.root.getWorldQuaternion(tempQuaternionA);
+    tempQuaternionA.multiply(this.megaBusterActionIdleShoulderLocalQuaternion);
+    shoulder.parent.getWorldQuaternion(tempQuaternionB).invert();
+    shoulder.quaternion.copy(tempQuaternionB.multiply(tempQuaternionA)).normalize();
+    this.root.updateMatrixWorld(true);
+    this.megaBusterArmWorldAnchorWasApplied = true;
+    this.root.userData.megaBusterArmWorldAnchorActive = true;
+    return true;
+  }
+
+  _applyLedgeRightArmPose(state = 'idle', useRightArmForLedge = false) {
+    const ledgeActive = LEDGE_SYNC_CLIP_KEYS.has(this._normalizeClipKey(state))
+      || ['jumpingToHanging', 'settlingToFreeHang', 'hangingIdle', 'preparingToClimb', 'climbingUp'].includes(state);
+    const keepRightArmDown = ledgeActive && !useRightArmForLedge;
+    this.root.userData.rightLedgeArmDownActive = keepRightArmDown;
+    if (!keepRightArmDown) {
+      return;
+    }
+
+    for (const [jointName, quaternion] of this.rightLedgeArmDownPose) {
       this.joints.get(jointName)?.quaternion.copy(quaternion);
     }
   }
@@ -1974,11 +2288,13 @@ export class SkeletalModelRig {
 
   _syncArmReplacementVisibility() {
     for (const mesh of this.skinnedMeshes) {
-      const isBusterMesh = mesh.name.includes(BUSTER_HAND_MESH_TOKEN);
+      const isLeftHandMesh = mesh.name.includes(LEFT_BUSTER_HAND_MESH_TOKEN);
+      const isRightHandMesh = mesh.name.includes(RIGHT_BUSTER_HAND_MESH_TOKEN);
       const isDrillMesh = mesh.name.includes(DRILL_HAND_MESH_TOKEN);
 
-      if (isBusterMesh || isDrillMesh) {
-        mesh.visible = !(isBusterMesh && this.busterArmActive)
+      if (isLeftHandMesh || isRightHandMesh || isDrillMesh) {
+        mesh.visible = !(isLeftHandMesh && this.megaBusterArmActive)
+          && !(isRightHandMesh && this.busterArmActive)
           && !(isDrillMesh && this.drillArmActive);
       }
     }

@@ -48,7 +48,7 @@ The ten behavior archetypes are:
 
 - `Pursuer`: fast ram, jaw, or claw hunter with punishable recovery.
 - `Shield Sentinel`: guards behind frontal protection, opens to attack, then exposes its linked weak point.
-- `Pouncer`: circles, marks a predicted landing point, commits to a leap or shock slam, and exposes its belly during recovery.
+- `Pouncer`: circles, marks a predicted landing point, then commits to a spring leap, shock slam, or rocket-assisted Launch Leg impact.
 - `Artillery Walker`: maintains range and fires pulse shells, lobbed mortars, or cluster explosives.
 - `Zone Controller`: uses flamethrowers, mine-like explosives, or slow electric orbs that pulse repeatedly near the player.
 - `Tractor Controller`: races between nearby allies, evades MegaMan, abducts one Reaverbot beneath its horseshoe magnet, and throws that machine near the player instead of attacking directly.
@@ -57,7 +57,7 @@ The ten behavior archetypes are:
 - `Ruin Duelist`: sidesteps at close range and alternates guarded positioning with committed melee, piston, or beam attacks.
 - `Rotor Hunter`: advances behind a rotating plate while its shared blade/flail assembly spins, alternating the guarded face with an opposite counterweight weak point.
 
-Close-range weapon modules now carry a deliberately heavier combat contract. Claw carriers mount a Reaverbot-sized two-link hydraulic arm, extend it into MegaMan's lane for three horizontal or vertical swipes, drag their chassis forward under its weight, and vault low obstacles along collision-checked arcs. Jaw carriers are quadruped-only armored hunters that circle, strafe, hold a two-piece bear-trap mouth open, and hop through three red-blinking shockwave bites. All melee-tagged generations receive substantial armor and extra health, while Rotor Hunter blades deal contact damage throughout positioning, telegraph, attack, and recovery rather than only during a charge.
+Close-range weapon modules now carry a deliberately heavier combat contract. Claw carriers mount a Reaverbot-sized two-link hydraulic arm, extend it into MegaMan's lane for three horizontal or vertical swipes, drag their chassis forward under its weight, and vault low obstacles along collision-checked arcs. Launch Leg pouncers balance on one enormous three-link kangaroo leg, compress its exposed knee shock stack, ignite paired high-hip rockets, and land on three long claws with a wider impact wave and substantially higher jump arc. Jaw carriers are quadruped-only armored hunters that circle, strafe, hold a two-piece bear-trap mouth open, and hop through three red-blinking shockwave bites. All melee-tagged generations receive substantial armor and extra health, while Rotor Hunter blades deal contact damage throughout positioning, telegraph, attack, and recovery rather than only during a charge.
 
 Air navigation is fully three-dimensional. Flyers ignore floor walkability, ledges, and railings, pursue along the most direct clear route, and climb over or route around actual walls, closed doors, platforms, and solid fixtures. Tractor Controllers use the same clearance system for both their own chassis and the full generated silhouette of their captive. A successful player hit briefly stalls their evasive flight; hitting one during an active abduction immediately drops and heavily damages both machines, leaves the Controller helpless on the floor, then lets a survivor relaunch. Blocked lift, carry, or throw paths are rejected before geometry can pass through the dungeon.
 

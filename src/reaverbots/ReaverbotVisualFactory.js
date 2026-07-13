@@ -473,6 +473,331 @@ function createCompressionSpring(parent, materials, name, {
   return { group: spring, rings };
 }
 
+function createLaunchLegModule(parent, materials, {
+  mountSide = 1,
+  authoredLength = 4.35,
+} = {}) {
+  const sideName = mountSide < 0 ? 'Left' : 'Right';
+  const assembly = group(parent, `generated${sideName}LaunchLegAssembly`);
+  assembly.userData.massiveWeaponPart = true;
+  assembly.userData.integratedMobilityWeapon = true;
+  assembly.userData.launchLegModule = true;
+
+  // The rig follows a kangaroo silhouette: a long armored femur pitches
+  // forward, the shock-stack shin folds back underneath it, and the extended
+  // metatarsal returns to a broad three-clawed foot. It is authored as a
+  // reusable one-leg assembly so a later machine can mount a mirrored pair.
+  const hipPivot = group(assembly, 'generatedLaunchLegHipPivot');
+  hipPivot.userData.launchLegRigRole = 'rocketHip';
+  hipPivot.rotation.x = -0.48;
+  addBearingAssembly(hipPivot, materials, 'generatedLaunchLegHip', [0, 0, 0], {
+    radius: 0.46,
+    width: 1.18,
+  });
+  box(
+    hipPivot,
+    materials.weapon,
+    'generatedLaunchLegHipCradleArmor',
+    [1.18, 0.72, 0.92],
+    [0, -0.05, 0.12],
+  ).userData.massiveWeaponPart = true;
+
+  const upperLength = 1.45;
+  const thigh = box(
+    hipPivot,
+    materials.weapon,
+    'generatedLaunchLegMassiveUpperThigh',
+    [0.88, upperLength, 0.78],
+    [0, -upperLength * 0.5, 0.04],
+  );
+  thigh.userData.massiveWeaponPart = true;
+  box(
+    hipPivot,
+    materials.dark,
+    'generatedLaunchLegUpperThighDarkUnderside',
+    [0.42, upperLength * 0.82, 0.82],
+    [0, -upperLength * 0.54, -0.03],
+  );
+  for (const side of [-1, 1]) {
+    box(
+      hipPivot,
+      materials.trim,
+      'generatedLaunchLegUpperThighRazorRail',
+      [0.11, upperLength * 0.86, 0.84],
+      [side * 0.45, -upperLength * 0.52, 0.04],
+    );
+  }
+  addCircuitPanel(hipPivot, materials, 'generatedLaunchLegUpperThigh', {
+    position: [0, -upperLength * 0.5, 0.445],
+    width: 0.58,
+    height: 0.94,
+    mirror: mountSide < 0,
+  });
+
+  const flameMaterial = standardMaterial('material_generatedLaunchLegRocketFlame', 0xffa12b, {
+    emissive: 0xff3b08,
+    emissiveIntensity: 3.2,
+    transparent: true,
+    opacity: 0.9,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    textureExempt: 'animated additive Launch Leg exhaust flame',
+  });
+  const boosters = [];
+  const boosterNozzles = [];
+  const boosterFlames = [];
+  for (const side of [-1, 1]) {
+    const booster = group(
+      hipPivot,
+      `generatedLaunchLeg${side < 0 ? 'Left' : 'Right'}UpperRocketBooster`,
+      [side * 0.42, 0.12, -0.38],
+    );
+    booster.rotation.x = -0.18;
+    booster.userData.launchLegBooster = true;
+    mesh(
+      booster,
+      new THREE.CylinderGeometry(0.24, 0.2, 0.72, 10),
+      materials.weapon,
+      'generatedLaunchLegUpperRocketHousing',
+      [0, -0.28, 0],
+    );
+    mesh(
+      booster,
+      new THREE.TorusGeometry(0.245, 0.055, 6, 12),
+      materials.emissive,
+      'generatedLaunchLegUpperRocketPoweredBand',
+      [0, -0.2, 0],
+      [Math.PI / 2, 0, 0],
+    );
+    mesh(
+      booster,
+      new THREE.CylinderGeometry(0.16, 0.22, 0.22, 10),
+      materials.dark,
+      'generatedLaunchLegUpperRocketDarkNozzle',
+      [0, -0.72, 0],
+    );
+    const nozzle = new THREE.Object3D();
+    nozzle.name = 'generatedLaunchLegUpperRocketExhaustNozzle';
+    nozzle.position.set(0, -0.84, 0);
+    booster.add(nozzle);
+    const flame = mesh(
+      nozzle,
+      new THREE.ConeGeometry(0.13, 0.9, 8),
+      flameMaterial.clone(),
+      'generatedLaunchLegUpperRocketFlame',
+      [0, -0.43, 0],
+    );
+    flame.material.name = `${flameMaterial.name}_${sideName}_${side}`;
+    flame.material.userData.reaverbotTextureExempt = flameMaterial.userData.reaverbotTextureExempt;
+    flame.visible = false;
+    boosters.push(booster);
+    boosterNozzles.push(nozzle);
+    boosterFlames.push(flame);
+  }
+  flameMaterial.dispose();
+
+  const kneePivot = group(hipPivot, 'generatedLaunchLegKneePivot', [0, -upperLength, 0]);
+  kneePivot.userData.launchLegRigRole = 'compressionKnee';
+  kneePivot.rotation.x = 1.28;
+  addBearingAssembly(kneePivot, materials, 'generatedLaunchLegKnee', [0, 0, 0], {
+    radius: 0.39,
+    width: 1.02,
+  });
+  for (const side of [-1, 1]) {
+    box(
+      kneePivot,
+      materials.weapon,
+      'generatedLaunchLegKneeGuard',
+      [0.2, 0.7, 0.76],
+      [side * 0.43, -0.18, 0.08],
+      [0, 0, side * 0.14],
+    );
+  }
+
+  const lowerLength = 1.35;
+  const shockStack = group(kneePivot, 'generatedLaunchLegTelescopingShockStack');
+  shockStack.userData.springLoaded = true;
+  shockStack.userData.launchLegShockStack = true;
+  taperedColumn(
+    shockStack,
+    materials.dark,
+    'generatedLaunchLegCentralShockRam',
+    0.14,
+    0.18,
+    lowerLength * 0.94,
+    [0, -lowerLength * 0.49, 0],
+    10,
+  );
+  for (const side of [-1, 1]) {
+    taperedColumn(
+      shockStack,
+      materials.weapon,
+      'generatedLaunchLegParallelHydraulicPiston',
+      0.12,
+      0.18,
+      lowerLength * 0.82,
+      [side * 0.28, -lowerLength * 0.48, 0],
+      8,
+    );
+    box(
+      shockStack,
+      materials.trim,
+      'generatedLaunchLegShockRail',
+      [0.09, lowerLength * 0.9, 0.42],
+      [side * 0.44, -lowerLength * 0.5, 0],
+    );
+  }
+  const shockBands = [];
+  for (let index = 0; index < 6; index += 1) {
+    const band = mesh(
+      shockStack,
+      new THREE.TorusGeometry(0.34, 0.06, 6, 12),
+      index % 2 === 0 ? materials.trim : materials.emissive,
+      'generatedLaunchLegShockCompressionBand',
+      [0, -THREE.MathUtils.lerp(0.18, lowerLength * 0.88, index / 5), 0],
+      [Math.PI / 2, 0, 0],
+    );
+    band.userData.springMobilityPart = true;
+    band.userData.integratedMobilityWeapon = true;
+    shockBands.push(band);
+  }
+
+  const anklePivot = group(kneePivot, 'generatedLaunchLegAnklePivot', [0, -lowerLength, 0]);
+  anklePivot.userData.launchLegRigRole = 'reversedHock';
+  anklePivot.rotation.x = -0.74;
+  addBearingAssembly(anklePivot, materials, 'generatedLaunchLegAnkle', [0, 0, 0], {
+    radius: 0.29,
+    width: 0.82,
+  });
+  const hockLength = 0.62;
+  taperedColumn(
+    anklePivot,
+    materials.weapon,
+    'generatedLaunchLegLongKangarooMetatarsal',
+    0.18,
+    0.28,
+    hockLength,
+    [0, -hockLength * 0.5, 0],
+    7,
+  );
+  box(
+    anklePivot,
+    materials.trim,
+    'generatedLaunchLegHockArmorBlade',
+    [0.58, hockLength * 0.72, 0.34],
+    [0, -hockLength * 0.48, 0],
+  );
+
+  const footPivot = group(anklePivot, 'generatedLaunchLegFootPivot', [0, -hockLength, 0]);
+  footPivot.userData.launchLegRigRole = 'clawedLandingFoot';
+  footPivot.rotation.x = -0.06;
+  const foot = box(
+    footPivot,
+    materials.weapon,
+    'generatedLaunchLegMassiveKangarooFoot',
+    [1.42, 0.34, 1.5],
+    [0, 0.04, 0.42],
+  );
+  foot.userData.massiveWeaponPart = true;
+  const sole = addDarkFootEnd(footPivot, materials, 'generatedLaunchLegLandingSole', {
+    size: [1.3, 0.12, 1.34],
+    position: [0, -0.16, 0.42],
+  });
+  box(
+    footPivot,
+    materials.trim,
+    'generatedLaunchLegHeelCounterweight',
+    [0.86, 0.28, 0.5],
+    [0, 0.08, -0.48],
+  );
+
+  const claws = [];
+  for (const [index, x] of [-0.44, 0, 0.44].entries()) {
+    const clawPivot = group(footPivot, `generatedLaunchLegToeClaw${index + 1}Pivot`, [x, 0.08, 1.03]);
+    clawPivot.rotation.y = x * -0.16;
+    const claw = mesh(
+      clawPivot,
+      new THREE.ConeGeometry(index === 1 ? 0.18 : 0.15, index === 1 ? 0.92 : 0.78, 5),
+      materials.trim,
+      'generatedLaunchLegRazorToeClaw',
+      [0, 0, 0.4],
+      [Math.PI / 2, 0, 0],
+    );
+    const darkTip = mesh(
+      clawPivot,
+      new THREE.ConeGeometry(index === 1 ? 0.13 : 0.11, index === 1 ? 0.52 : 0.44, 5),
+      materials.dark,
+      'generatedLaunchLegToeClawDarkWorkingEnd',
+      [0, 0, index === 1 ? 0.95 : 0.84],
+      [Math.PI / 2, 0, 0],
+    );
+    claw.userData.massiveWeaponPart = true;
+    darkTip.userData.reaverbotWorkingEnd = true;
+    darkTip.userData.launchLegClaw = true;
+    claws.push(darkTip);
+  }
+
+  const contactAnchor = new THREE.Object3D();
+  contactAnchor.name = 'generatedLaunchLegSoleContact';
+  contactAnchor.position.set(0, -0.17, 0.42);
+  contactAnchor.userData.contactSurface = true;
+  footPivot.add(contactAnchor);
+
+  const limb = {
+    role: 'launchLeg',
+    launchLeg: true,
+    side: mountSide,
+    pivot: hipPivot,
+    hipPivot,
+    kneePivot,
+    hockPivot: anklePivot,
+    anklePivot,
+    pawPivot: footPivot,
+    footPivot,
+    foot,
+    sole,
+    contactAnchor,
+    springLoaded: true,
+    springGroup: shockStack,
+    springCoils: shockBands,
+    springEndpoint: anklePivot,
+    springEndpointBaseY: anklePivot.position.y,
+    springCompressionTravel: lowerLength * 0.42,
+    restHipX: -0.48,
+    restKneeX: 1.28,
+    restAnkleX: -0.74,
+    restFootX: -0.06,
+  };
+
+  assembly.userData.launchLegRig = {
+    articulated: true,
+    segmentCount: 3,
+    authoredLength,
+    rocketAssisted: true,
+    boosterCount: boosters.length,
+    clawCount: claws.length,
+    mountSide,
+  };
+
+  return {
+    assembly,
+    hipPivot,
+    kneePivot,
+    anklePivot,
+    footPivot,
+    foot,
+    sole,
+    contactAnchor,
+    shockStack,
+    shockBands,
+    boosters,
+    boosterNozzles,
+    boosterFlames,
+    claws,
+    limb,
+  };
+}
+
 function createCanineLeg(root, materials, {
   side,
   front,
@@ -1689,11 +2014,47 @@ function createBodyFrame(root, genome, materials) {
       leg: [-0.5, 0.62, 0.2], side: [0.64, bodyY, 0], frontLow: [0, bodyY - 0.18, 0.58], frontSide: [-0.5, bodyY, 0.42],
     };
   } else if (plan === 'hopper') {
-    const bodyY = 1.08;
+    const launchLeg = mobilityId === 'launchLeg';
+    const bodyY = launchLeg ? 3.18 : 1.08;
     const monoPogo = mobilityId === 'monoPogo';
-    frame.body = mesh(root, new THREE.OctahedronGeometry(0.62, 0), materials.primary, 'generatedReaverbotHopperBody', [0, bodyY, 0], null, [p.torsoWidth, 0.9, p.torsoLength]);
-    frame.head = taperedColumn(root, materials.secondary, 'generatedReaverbotHopperHead', 0.22, 0.32, 0.6, [0, bodyY + 0.6, 0.05], 6);
-    const springSlots = monoPogo ? [0] : [-1, 1];
+    frame.body = mesh(
+      root,
+      new THREE.OctahedronGeometry(0.62, 0),
+      materials.primary,
+      'generatedReaverbotHopperBody',
+      [0, bodyY, 0],
+      null,
+      launchLeg
+        ? [p.torsoWidth * 1.24, 1.08, p.torsoLength * 1.16]
+        : [p.torsoWidth, 0.9, p.torsoLength],
+    );
+    frame.head = taperedColumn(
+      root,
+      materials.secondary,
+      'generatedReaverbotHopperHead',
+      launchLeg ? 0.26 : 0.22,
+      launchLeg ? 0.38 : 0.32,
+      launchLeg ? 0.68 : 0.6,
+      [0, bodyY + (launchLeg ? 0.68 : 0.6), 0.05],
+      6,
+    );
+    if (launchLeg) {
+      box(
+        root,
+        materials.primary,
+        'generatedLaunchLegChassisHipYoke',
+        [1.32, 0.38, 0.84],
+        [0, bodyY - 0.36, -0.05],
+      );
+      box(
+        root,
+        materials.dark,
+        'generatedLaunchLegChassisDarkUnderside',
+        [0.82, 0.26, 0.72],
+        [0, bodyY - 0.5, -0.02],
+      );
+    }
+    const springSlots = launchLeg ? [] : monoPogo ? [0] : [-1, 1];
     for (const side of springSlots) {
       const legName = monoPogo
         ? 'generatedHopperMonoPogoLeg'
@@ -1742,13 +2103,21 @@ function createBodyFrame(root, genome, materials) {
     frame.springMobility = {
       id: mobilityId,
       movementModel: 'springBounce',
-      legCount: frame.springLimbs.length,
+      legCount: launchLeg ? genome.body.mobilityLegCount : frame.springLimbs.length,
       integratedWeaponId: mobilityWeaponId,
     };
+    const launchMountSide = Math.sign(genome.modules.weapon.mountSide || 1);
     frame.anchors = {
-      eye: [0, bodyY + 0.63, 0.3], weapon: [0, bodyY + 0.15, 0.52], defense: [-0.46, bodyY + 0.05, 0.24],
+      eye: [0, bodyY + (launchLeg ? 0.7 : 0.63), launchLeg ? 0.34 : 0.3],
+      weapon: [0, bodyY + 0.15, 0.52],
+      defense: [-0.46, bodyY + 0.05, 0.24],
       center: [0, bodyY, 0], rear: [0, bodyY, -0.58], rearHigh: [0, bodyY + 0.3, -0.42], belly: [0, bodyY - 0.47, 0],
-      leg: [monoPogo ? 0 : -0.34, 0.48, 0], side: [0.52, bodyY, 0], frontLow: [0, bodyY - 0.18, 0.5], frontSide: [-0.42, bodyY, 0.36],
+      leg: launchLeg
+        ? [launchMountSide * 0.42, bodyY - 0.12, -0.08]
+        : [monoPogo ? 0 : -0.34, 0.48, 0],
+      side: [launchLeg ? 0.68 : 0.52, bodyY, 0],
+      frontLow: [0, bodyY - 0.18, 0.5],
+      frontSide: [launchLeg ? -0.56 : -0.42, bodyY, 0.36],
     };
   } else {
     const flyer = plan === 'flyer';
@@ -1801,9 +2170,11 @@ function createWeapon(root, genome, frame, materials) {
   const id = genome.modules.weapon.id;
   const integratedMobility = id === 'pounceActuator'
     || genome.modules.weapon.integratedIntoMobility === true;
-  const anchor = id === 'tractorMagnet' || integratedMobility
-    ? frame.anchors.belly
-    : frame.anchors.weapon;
+  const anchor = id === 'launchLeg'
+    ? frame.anchors.leg
+    : id === 'tractorMagnet' || integratedMobility
+      ? frame.anchors.belly
+      : frame.anchors.weapon;
   const weapon = group(root, `generatedWeapon_${id}`, anchor);
   if (!integratedMobility
     && (frame.plan === 'quadruped' || frame.plan === 'crawler')
@@ -1840,6 +2211,20 @@ function createWeapon(root, genome, frame, materials) {
     clawMountSide: 1,
     clawBaseReach: 0,
     clawMaxReach: 0,
+    launchLegAssembly: null,
+    launchLegHipPivot: null,
+    launchLegKneePivot: null,
+    launchLegAnklePivot: null,
+    launchLegFootPivot: null,
+    launchLegFoot: null,
+    launchLegContactAnchor: null,
+    launchLegShockStack: null,
+    launchLegShockBands: [],
+    launchLegBoosters: [],
+    launchLegBoosterNozzles: [],
+    launchLegFlames: [],
+    launchLegClaws: [],
+    launchLegMountSide: 1,
     jawUpperPivot: null,
     jawLowerPivot: null,
     jawVariant: null,
@@ -2265,6 +2650,41 @@ function createWeapon(root, genome, frame, materials) {
     parts.clawMountSide = clawMountSide;
     parts.clawBaseReach = weapon.userData.clawRig.baseReach;
     parts.clawMaxReach = weapon.userData.clawRig.maxReach;
+  } else if (id === 'launchLeg') {
+    const mountSide = Math.sign(genome.modules.weapon.mountSide || 1);
+    const rig = createLaunchLegModule(weapon, materials, {
+      mountSide,
+      authoredLength: genome.modules.weapon.authoredLength ?? 4.35,
+    });
+    rig.contactAnchor.add(muzzle);
+    muzzle.position.set(0, 0.08, 0.72);
+    rig.limb.impactSocket = muzzle;
+    frame.limbs.push(rig.limb);
+    frame.springLimbs.push(rig.limb);
+    if (frame.springMobility) {
+      frame.springMobility.legCount = frame.springLimbs.length;
+      frame.springMobility.integratedWeaponId = id;
+    }
+    weapon.userData.integratedIntoMobility = true;
+    weapon.userData.mountRole = 'locomotion';
+    weapon.userData.mobilityId = frame.mobilityId;
+    weapon.userData.mobilityLegCount = frame.springLimbs.length;
+    weapon.userData.launchLegBasePosition = weapon.position.clone();
+    weapon.userData.launchLegRig = { ...rig.assembly.userData.launchLegRig };
+    parts.launchLegAssembly = rig.assembly;
+    parts.launchLegHipPivot = rig.hipPivot;
+    parts.launchLegKneePivot = rig.kneePivot;
+    parts.launchLegAnklePivot = rig.anklePivot;
+    parts.launchLegFootPivot = rig.footPivot;
+    parts.launchLegFoot = rig.foot;
+    parts.launchLegContactAnchor = rig.contactAnchor;
+    parts.launchLegShockStack = rig.shockStack;
+    parts.launchLegShockBands = rig.shockBands;
+    parts.launchLegBoosters = rig.boosters;
+    parts.launchLegBoosterNozzles = rig.boosterNozzles;
+    parts.launchLegFlames = rig.boosterFlames;
+    parts.launchLegClaws = rig.claws;
+    parts.launchLegMountSide = mountSide;
   } else if (id === 'pounceActuator' || (id === 'shockPiston' && integratedMobility)) {
     // Pounce hardware is part of the generated spring legs, never a forward
     // facial weapon. Keep only a belly-space logical muzzle for warnings and
@@ -2931,15 +3351,26 @@ function createWeakPoint(root, genome, frame, materials, eye, defense, weapon) {
     };
   }
 
+  const linkedToLaunchLeg = definition.id === 'legJoint'
+    && genome.modules.weapon.id === 'launchLeg'
+    && weapon.launchLegKneePivot;
   const linkedToRotor = definition.location === 'rotorOpposite'
     && genome.modules.defense?.id === 'rotatingPlates';
-  const anchor = linkedToRotor ? [0, -0.05, -0.86] : weakPointAnchor(frame, definition.location);
+  const launchMountSide = Math.sign(weapon.launchLegMountSide || 1);
+  const anchor = linkedToLaunchLeg
+    ? [launchMountSide * 0.54, 0, 0]
+    : linkedToRotor
+      ? [0, -0.05, -0.86]
+      : weakPointAnchor(frame, definition.location);
   const weakPoint = group(
-    linkedToRotor ? defense.group : root,
+    linkedToLaunchLeg ? weapon.launchLegKneePivot : linkedToRotor ? defense.group : root,
     `generatedWeakPoint_${definition.id}`,
     anchor,
   );
-  if (linkedToRotor) {
+  if (linkedToLaunchLeg) {
+    weakPoint.rotation.y = launchMountSide * Math.PI / 2;
+    weakPoint.userData.linkedWeaponId = 'launchLeg';
+  } else if (linkedToRotor) {
     weakPoint.rotation.y = Math.PI;
     weakPoint.userData.linkedDefenseId = 'rotatingPlates';
   } else if (definition.location === 'leg') {
@@ -3571,6 +4002,111 @@ function updateSpringMobilityVisual(visual, {
   return compression;
 }
 
+function updateLaunchLegVisual(visual, {
+  time,
+  dt,
+  state,
+  stateProgress,
+  attackKind,
+  springBounceActive,
+  springBounceProgress,
+}) {
+  const weapon = visual.weapon;
+  if (!weapon.launchLegAssembly) return;
+
+  const restHip = -0.48;
+  const restKnee = 1.28;
+  const restAnkle = -0.74;
+  const crouched = { hip: -0.86, knee: 1.76, ankle: -1.02 };
+  const extended = { hip: -0.12, knee: 0.34, ankle: -0.26 };
+  const tucked = { hip: -0.36, knee: 1.5, ankle: -0.84 };
+  const progress = THREE.MathUtils.clamp(stateProgress, 0, 1);
+  let hip = restHip;
+  let knee = restKnee;
+  let ankle = restAnkle;
+  let rocketThrust = 0;
+
+  const interpolatePose = (from, to, amount) => ({
+    hip: THREE.MathUtils.lerp(from.hip, to.hip, amount),
+    knee: THREE.MathUtils.lerp(from.knee, to.knee, amount),
+    ankle: THREE.MathUtils.lerp(from.ankle, to.ankle, amount),
+  });
+
+  if (state === 'telegraph' && attackKind === 'pounce') {
+    const compression = THREE.MathUtils.smoothstep(progress, 0.06, 0.9);
+    ({ hip, knee, ankle } = interpolatePose(
+      { hip: restHip, knee: restKnee, ankle: restAnkle },
+      crouched,
+      compression,
+    ));
+    // The high hip rockets sputter on during the final warning without yet
+    // producing full exhaust, making their role readable before takeoff.
+    rocketThrust = THREE.MathUtils.smoothstep(progress, 0.82, 1) * 0.18;
+  } else if (state === 'commit' && attackKind === 'pounce') {
+    let pose;
+    if (progress < 0.3) {
+      pose = interpolatePose(crouched, extended, THREE.MathUtils.smoothstep(progress / 0.3, 0, 1));
+    } else if (progress < 0.7) {
+      pose = interpolatePose(extended, tucked, THREE.MathUtils.smoothstep((progress - 0.3) / 0.4, 0, 1));
+    } else {
+      pose = interpolatePose(tucked, extended, THREE.MathUtils.smoothstep((progress - 0.7) / 0.3, 0, 1));
+    }
+    ({ hip, knee, ankle } = pose);
+    rocketThrust = 0.88 + Math.sin(time * 37) * 0.12;
+  } else if (springBounceActive) {
+    const bounceProgress = THREE.MathUtils.clamp(springBounceProgress, 0, 1);
+    const launch = THREE.MathUtils.smoothstep(bounceProgress, 0, 0.24);
+    const landing = THREE.MathUtils.smoothstep(bounceProgress, 0.72, 1);
+    const airbornePose = interpolatePose(crouched, tucked, launch);
+    const pose = interpolatePose(airbornePose, extended, landing);
+    ({ hip, knee, ankle } = pose);
+    rocketThrust = (1 - landing) * (0.72 + Math.sin(time * 31) * 0.12);
+  } else if (state === 'recovery' && attackKind === 'pounce') {
+    ({ hip, knee, ankle } = interpolatePose(
+      extended,
+      { hip: restHip, knee: restKnee, ankle: restAnkle },
+      THREE.MathUtils.smoothstep(progress, 0.06, 0.88),
+    ));
+  }
+
+  const response = Math.min(1, dt * (state === 'commit' ? 24 : 13));
+  weapon.launchLegHipPivot.rotation.x = THREE.MathUtils.lerp(
+    weapon.launchLegHipPivot.rotation.x,
+    hip,
+    response,
+  );
+  weapon.launchLegKneePivot.rotation.x = THREE.MathUtils.lerp(
+    weapon.launchLegKneePivot.rotation.x,
+    knee,
+    response,
+  );
+  weapon.launchLegAnklePivot.rotation.x = THREE.MathUtils.lerp(
+    weapon.launchLegAnklePivot.rotation.x,
+    ankle,
+    response,
+  );
+  weapon.launchLegFootPivot.rotation.x = THREE.MathUtils.lerp(
+    weapon.launchLegFootPivot.rotation.x,
+    -(hip + knee + ankle),
+    response,
+  );
+  weapon.launchLegAssembly.userData.pose = {
+    hip,
+    knee,
+    ankle,
+    rocketThrust,
+  };
+
+  for (let index = 0; index < weapon.launchLegFlames.length; index += 1) {
+    const flame = weapon.launchLegFlames[index];
+    const visible = rocketThrust > 0.035;
+    const pulse = Math.max(0.05, rocketThrust) * (0.92 + Math.sin(time * 43 + index) * 0.08);
+    flame.visible = visible;
+    flame.scale.set(0.82 + pulse * 0.18, 0.2 + pulse * 1.18, 0.82 + pulse * 0.18);
+    flame.material.opacity = visible ? THREE.MathUtils.clamp(0.34 + pulse * 0.62, 0, 0.96) : 0;
+  }
+}
+
 function updateCrawlerArticulatedVisual(visual, {
   time,
   dt,
@@ -3697,6 +4233,15 @@ export function animateReaverbotVisual(visual, {
     springBounceProgress,
   });
   updateSpringMobilityVisual(visual, {
+    state,
+    stateProgress,
+    attackKind,
+    springBounceActive,
+    springBounceProgress,
+  });
+  updateLaunchLegVisual(visual, {
+    time,
+    dt,
     state,
     stateProgress,
     attackKind,
@@ -4048,7 +4593,13 @@ export function animateReaverbotVisual(visual, {
 
   const eyePulse = 1.55 + Math.sin(time * (state === 'telegraph' ? 18 : 4.5)) * (state === 'telegraph' ? 0.7 : 0.22);
   visual.eye.lens.material.emissiveIntensity = weakPointExposed ? Math.max(eyePulse, 2) : eyePulse;
-  visual.weapon.group.scale.setScalar(state === 'telegraph' ? 1 + Math.sin(stateProgress * Math.PI) * 0.12 : 1);
+  visual.weapon.group.scale.setScalar(
+    visual.weapon.launchLegAssembly
+      ? 1
+      : state === 'telegraph'
+        ? 1 + Math.sin(stateProgress * Math.PI) * 0.12
+        : 1,
+  );
   visual.materials.emissive.emissiveIntensity = state === 'telegraph' ? 1.15 : 0.65;
   if (visual.weapon.jawUpperPivot) {
     visual.materials.weapon.emissive.setHex(jawWarning > 0.01 ? 0xff1010 : 0x000000);

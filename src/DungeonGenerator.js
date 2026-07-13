@@ -1,5 +1,9 @@
 import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { PLAYER_TARGET_MODEL_HEIGHT } from './CharacterDimensions.js';
+import { RollNpcAnimator } from './RollNpcAnimator.js';
 import {
   createDungeonProgressionData,
   PROGRESSION_CONNECTIONS,
@@ -22,6 +26,39 @@ const MACHINE_PRESS_LEG_DEPTH = 0.32;
 const MACHINE_PRESS_LEG_VISUAL_CENTER_Y = 0.72;
 const MACHINE_PRESS_LEG_COLLISION_PADDING = 0.05;
 const COOLANT_RELAY_ROOM_MODEL = `${RUIN_ROOM_MODEL_BASE_PATH}industrial_coolant_relay_puzzle_room.glb`;
+const ROLL_MODEL_PATH = '/assets/models/npcs/roll/roll-x-dive.fbx';
+const ROLL_TEXTURE_PATH = '/assets/models/npcs/roll/roll-x-dive.png';
+const ROLL_ANIMATION_BASE_PATH = '/assets/models/npcs/roll/animations/';
+const ROLL_ANIMATION_FILES = Object.freeze({
+  idle: 'idle.fbx',
+  explaining: 'explaining.fbx',
+  thinking: 'thinking.fbx',
+  bashful: 'bashful.fbx',
+  talking: 'talking.fbx',
+  thankful: 'thankful.fbx',
+  waving: 'waving.fbx',
+  happy: 'happy.fbx',
+});
+const ROLL_ANIMATION_LOAD_CONCURRENCY = 2;
+const ROLL_ANIMATION_CLIP_PROMISES = new Map();
+const ROLL_HEIGHT = PLAYER_TARGET_MODEL_HEIGHT;
+const SUPPORT_CAR_BASE_PATH = '/assets/models/props/support-car/';
+const SUPPORT_CAR_MODEL_PATH = `${SUPPORT_CAR_BASE_PATH}support-car.obj`;
+const SUPPORT_CAR_TEXTURE_PATH = `${SUPPORT_CAR_BASE_PATH}support-car.png`;
+const SUPPORT_CAR_HEIGHT = 3.6;
+const SUPPORT_CAR_SOURCE_HEIGHT = 143.5;
+const SUPPORT_CAR_HALF_WIDTH = (56.2 / SUPPORT_CAR_SOURCE_HEIGHT) * SUPPORT_CAR_HEIGHT;
+const SUPPORT_CAR_HALF_DEPTH = (90.2 / SUPPORT_CAR_SOURCE_HEIGHT) * SUPPORT_CAR_HEIGHT;
+const SUPPORT_CAR_YAW = -Math.PI * 0.75;
+const SUPPORT_CAR_CAMP_POSITION = Object.freeze({ x: -10, y: 0, z: -5.7 });
+const SUPPORT_CAR_FRONT_DOOR_LOCAL = Object.freeze({ x: SUPPORT_CAR_HALF_WIDTH, y: 1.45, z: -1.32 });
+const ROLL_WORKSHOP_LOCAL_POSITION = Object.freeze({ x: 2.15, y: 0, z: -1.32 });
+const WORKBENCH_LOCAL_POSITION = Object.freeze({ x: 3.55, y: 0, z: -1.32 });
+const WORKBENCH_WIDTH = 2.2;
+const WORKBENCH_DEPTH = 0.82;
+const WORKBENCH_HEIGHT = 1.1;
+const WORKBENCH_SURFACE_TEXTURE_PATH = '/assets/textures/camp/roll-workbench-albedo.png';
+const WORKBENCH_BLUEPRINT_TEXTURE_PATH = '/assets/textures/camp/roll-workbench-blueprint.png';
 const COOLANT_RELAY_ROOM_FOOTPRINT = { width: 30, depth: 24 };
 const ENABLE_IMPORTED_GLB_ROOMS = false;
 const ENABLE_PROCEDURAL_FLOATING_DECOR = false;
@@ -489,6 +526,8 @@ export class DungeonGenerator {
     this.random = random;
     this.difficulty = Math.max(1, Math.trunc(difficulty) || 1);
     this.textureLoader = new THREE.TextureLoader();
+    this.fbxLoader = new FBXLoader();
+    this.objLoader = new OBJLoader();
     this.gltfLoader = ENABLE_IMPORTED_GLB_ROOMS ? new GLTFLoader() : null;
     this.textureCache = new Map();
   }
@@ -508,6 +547,38 @@ export class DungeonGenerator {
       lastDungeon = this._generateOnce();
       if (lastDungeon.progression?.validation?.accepted) {
         lastDungeon.generationAttempts = attempt + 1;
+        const rollAnchor = lastDungeon.group.getObjectByName('rollCaskettNpc');
+        const supportCarAnchor = lastDungeon.group.getObjectByName('expeditionSupportCar');
+        const workbench = lastDungeon.group.getObjectByName('rollWorkshopWorkbench');
+        lastDungeon.activateNpcAssets = () => {
+          if (
+            rollAnchor
+            && !rollAnchor.userData.modelLoading
+            && !rollAnchor.userData.modelLoaded
+            && !rollAnchor.userData.modelLoadError
+          ) {
+            this._loadRollNpc(
+              rollAnchor,
+              lastDungeon.npcAnimationMixers,
+              lastDungeon.npcAnimators,
+            );
+          }
+          if (
+            supportCarAnchor
+            && !supportCarAnchor.userData.modelLoading
+            && !supportCarAnchor.userData.modelLoaded
+            && !supportCarAnchor.userData.modelLoadError
+          ) {
+            this._loadSupportCar(supportCarAnchor);
+          }
+          if (
+            workbench
+            && !workbench.userData.textureLoading
+            && !workbench.userData.textureAssetsSettled
+          ) {
+            this._loadRollWorkbenchTextures(workbench);
+          }
+        };
         return lastDungeon;
       }
     }
@@ -870,6 +941,8 @@ export class DungeonGenerator {
       pressurePlates: landmarks.pressurePlates,
       conveyorPuzzles: landmarks.conveyorPuzzles,
       platforms: landmarks.platforms,
+      npcAnimationMixers: landmarks.npcAnimationMixers,
+      npcAnimators: landmarks.npcAnimators,
       safeInteractables: landmarks.safeInteractables,
       safeZones: this._createRoomZones(rooms, 'hub').concat(this._createRoomZones(rooms, 'camp')),
       solidZones,
@@ -9960,6 +10033,8 @@ export class DungeonGenerator {
       pressurePlates: [],
       conveyorPuzzles: [],
       platforms: [],
+      npcAnimationMixers: [],
+      npcAnimators: [],
       safeInteractables: [],
       trapVisuals: [],
       keySeeker: null,
@@ -9984,7 +10059,9 @@ export class DungeonGenerator {
       if (room.type === 'hub') {
         landmarks.safeInteractables.push(...this._addHubTown(group, position, materials));
       } else if (room.type === 'camp') {
-        landmarks.safeInteractables.push(...this._addExpeditionCamp(group, position, materials));
+        const campLandmarks = this._addExpeditionCamp(group, position, materials);
+        landmarks.safeInteractables.push(...campLandmarks.interactables);
+        solidZones.push(...campLandmarks.solidZones);
         landmarks.platforms.push(...this._addCampPlatformingCourse(group, position, materials));
       } else if (room.type === 'entrance') {
         this._addExpeditionPad(group, position, materials);
@@ -10299,7 +10376,6 @@ export class DungeonGenerator {
     // The hub center is the player spawn and the +Z axis is the main route to
     // camp. Keep all hub services on the perimeter instead of crowding either.
     const garageOffset = new THREE.Vector3(-5.2, 0, -2.2);
-    const mechanicOffset = new THREE.Vector3(5.2, 0, -2.2);
 
     const sign = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.12, 0.44), materials.glowBlue);
     sign.name = 'hubTownGarageSign';
@@ -10311,17 +10387,7 @@ export class DungeonGenerator {
     garage.castShadow = true;
     garage.receiveShadow = true;
 
-    const npcMaterial = new THREE.MeshStandardMaterial({
-      color: 0x68d8ff,
-      emissive: 0x0b3140,
-      emissiveIntensity: 0.22,
-      roughness: 0.68,
-      metalness: 0.1,
-    });
-    const mechanic = this._createNpcMarker('hubMechanicNpc', npcMaterial);
-    mechanic.position.copy(mechanicOffset);
-
-    plaza.add(sign, garage, mechanic);
+    plaza.add(sign, garage);
     group.add(plaza);
 
     interactables.push({
@@ -10332,20 +10398,12 @@ export class DungeonGenerator {
       object: plaza,
       color: 0x6bdcff,
     });
-    interactables.push({
-      id: 'hubMechanic',
-      label: 'Mechanic',
-      action: 'mechanic',
-      position: position.clone().add(mechanicOffset),
-      object: mechanic,
-      color: 0x6bdcff,
-    });
-
     return interactables;
   }
 
   _addExpeditionCamp(group, position, materials) {
     const interactables = [];
+    const solidZones = [];
     const camp = new THREE.Group();
     camp.name = 'minimalExpeditionCamp';
     camp.position.copy(position);
@@ -10369,42 +10427,51 @@ export class DungeonGenerator {
     board.position.set(1.45, 0.72, 0.2);
     board.castShadow = true;
 
-    const leaderMaterial = new THREE.MeshStandardMaterial({
-      color: 0xffd66b,
-      emissive: 0x3b2604,
-      emissiveIntensity: 0.22,
-      roughness: 0.68,
-      metalness: 0.08,
-    });
-    const leader = this._createNpcMarker('expeditionLeaderNpc', leaderMaterial);
-    leader.position.set(0, 0, -0.6);
+    // Keep the complete workshop ensemble in the unused back-left corner.
+    // The car's authored front faces local -Z; its +X flank carries the front
+    // door, followed by Roll and then the workbench along the same line.
+    const workshop = new THREE.Group();
+    workshop.name = 'rollSupportCampWorkshop';
+    workshop.position.set(
+      SUPPORT_CAR_CAMP_POSITION.x,
+      SUPPORT_CAR_CAMP_POSITION.y,
+      SUPPORT_CAR_CAMP_POSITION.z,
+    );
+    workshop.rotation.y = SUPPORT_CAR_YAW;
 
-    const researcherMaterial = new THREE.MeshStandardMaterial({
-      color: 0x7df8ff,
-      emissive: 0x06363c,
-      emissiveIntensity: 0.24,
-      roughness: 0.66,
-      metalness: 0.08,
-    });
-    const researcher = this._createNpcMarker('expeditionResearcherNpc', researcherMaterial);
-    researcher.position.set(-1.05, 0, -1.2);
+    const supportCar = new THREE.Group();
+    supportCar.name = 'expeditionSupportCar';
+    supportCar.userData.targetModelHeight = SUPPORT_CAR_HEIGHT;
+    supportCar.userData.frontAxis = '-Z';
+    supportCar.userData.frontDoorSide = '+X';
+    supportCar.userData.usingFallback = true;
+    const supportCarFallback = this._createSupportCarFallback();
+    const frontDoorMarker = new THREE.Object3D();
+    frontDoorMarker.name = 'supportCarFrontDoorMarker';
+    frontDoorMarker.position.set(
+      SUPPORT_CAR_FRONT_DOOR_LOCAL.x,
+      SUPPORT_CAR_FRONT_DOOR_LOCAL.y,
+      SUPPORT_CAR_FRONT_DOOR_LOCAL.z,
+    );
+    supportCar.add(supportCarFallback, frontDoorMarker);
 
-    const researchStation = new THREE.Group();
-    researchStation.name = 'expeditionResearchStation';
-    researchStation.position.set(-0.42, 0, -1.25);
-    const researchBench = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.42, 0.54), materials.wallTrim);
-    researchBench.name = 'expeditionResearchBench';
-    researchBench.position.y = 0.21;
-    researchBench.castShadow = true;
-    researchBench.receiveShadow = true;
-    const researchCore = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), materials.glowBlue);
-    researchCore.name = 'expeditionResearchScannerCore';
-    researchCore.position.set(0, 0.55, 0);
-    const researchScreen = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.24, 0.05), materials.glowBlue);
-    researchScreen.name = 'expeditionResearchScannerScreen';
-    researchScreen.position.set(0, 0.48, -0.27);
-    researchScreen.rotation.x = -0.28;
-    researchStation.add(researchBench, researchCore, researchScreen);
+    const roll = new THREE.Group();
+    roll.name = 'rollCaskettNpc';
+    roll.position.set(
+      ROLL_WORKSHOP_LOCAL_POSITION.x,
+      ROLL_WORKSHOP_LOCAL_POSITION.y,
+      ROLL_WORKSHOP_LOCAL_POSITION.z,
+    );
+    roll.rotation.y = Math.PI / 2;
+
+    const workbench = this._createRollWorkshopWorkbench();
+    workbench.position.set(
+      WORKBENCH_LOCAL_POSITION.x,
+      WORKBENCH_LOCAL_POSITION.y,
+      WORKBENCH_LOCAL_POSITION.z,
+    );
+    workbench.rotation.y = Math.PI / 2;
+    workshop.add(supportCar, roll, workbench);
 
     const resetConsole = new THREE.Group();
     resetConsole.name = 'expeditionRuinResetConsole';
@@ -10436,15 +10503,24 @@ export class DungeonGenerator {
     liftMarker.rotation.y = Math.PI / 4;
     ruinLift.add(liftPad, liftRing, liftMarker);
 
-    camp.add(tent, board, leader, researcher, researchStation, resetConsole, ruinLift);
+    camp.add(tent, board, workshop, resetConsole, ruinLift);
     group.add(camp);
 
+    const upAxis = new THREE.Vector3(0, 1, 0);
+    const resolveWorkshopOffset = (localPosition) => new THREE.Vector3(
+      localPosition.x,
+      localPosition.y,
+      localPosition.z,
+    ).applyAxisAngle(upAxis, SUPPORT_CAR_YAW).add(workshop.position);
+    const rollOffset = resolveWorkshopOffset(ROLL_WORKSHOP_LOCAL_POSITION);
+    const workbenchOffset = resolveWorkshopOffset(WORKBENCH_LOCAL_POSITION);
+
     interactables.push({
-      id: 'expeditionLeader',
-      label: 'Expedition Leader',
-      action: 'expedition',
-      position: position.clone().add(new THREE.Vector3(0, 0, -0.6)),
-      object: leader,
+      id: 'rollCaskett',
+      label: 'Roll',
+      action: 'roll',
+      position: position.clone().add(rollOffset),
+      object: roll,
       color: 0xffd66b,
     });
     interactables.push({
@@ -10454,14 +10530,6 @@ export class DungeonGenerator {
       position: position.clone().add(new THREE.Vector3(1.45, 0, 0.2)),
       object: board,
       color: 0xffd66b,
-    });
-    interactables.push({
-      id: 'researchStation',
-      label: 'Research Station',
-      action: 'research',
-      position: position.clone().add(new THREE.Vector3(-0.42, 0, -1.25)),
-      object: researchStation,
-      color: 0x7df8ff,
     });
     interactables.push({
       id: 'ruinResetConsole',
@@ -10480,26 +10548,648 @@ export class DungeonGenerator {
       color: 0x7df8ff,
     });
 
-    return interactables;
+    solidZones.push({
+      id: 'expeditionSupportCarCollision',
+      roomId: 'expeditionCamp',
+      label: 'Support Car',
+      position: position.clone().add(new THREE.Vector3(
+        SUPPORT_CAR_CAMP_POSITION.x,
+        SUPPORT_CAR_HEIGHT * 0.5,
+        SUPPORT_CAR_CAMP_POSITION.z,
+      )),
+      halfWidth: SUPPORT_CAR_HALF_WIDTH + 0.12,
+      halfDepth: SUPPORT_CAR_HALF_DEPTH + 0.12,
+      verticalHalfHeight: SUPPORT_CAR_HEIGHT * 0.5,
+      // Zone helpers store the inverse of Three.js's visual yaw.
+      rotationY: -SUPPORT_CAR_YAW,
+    });
+    solidZones.push({
+      id: 'rollWorkshopWorkbenchCollision',
+      roomId: 'expeditionCamp',
+      label: 'Roll workshop bench',
+      position: position.clone().add(new THREE.Vector3(
+        workbenchOffset.x,
+        WORKBENCH_HEIGHT * 0.5,
+        workbenchOffset.z,
+      )),
+      halfWidth: WORKBENCH_WIDTH * 0.5,
+      halfDepth: WORKBENCH_DEPTH * 0.5,
+      verticalHalfHeight: WORKBENCH_HEIGHT * 0.5,
+      rotationY: -(SUPPORT_CAR_YAW + Math.PI / 2),
+    });
+
+    return { interactables, solidZones };
   }
 
-  _createNpcMarker(name, material) {
-    const npc = new THREE.Group();
-    npc.name = name;
+  _createSupportCarFallback() {
+    const fallback = new THREE.Group();
+    fallback.name = 'supportCarFallback';
+    const orange = new THREE.MeshStandardMaterial({
+      color: 0xd85816,
+      emissive: 0x2d0d02,
+      emissiveIntensity: 0.12,
+      roughness: 0.64,
+      metalness: 0.18,
+    });
+    const trim = new THREE.MeshStandardMaterial({
+      color: 0x555c61,
+      roughness: 0.46,
+      metalness: 0.48,
+    });
+    const rubber = new THREE.MeshStandardMaterial({
+      color: 0x17191a,
+      roughness: 0.86,
+      metalness: 0.02,
+    });
 
-    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.28, 0.78, 14), material);
-    body.name = `${name}Body`;
-    body.position.y = 0.39;
-    body.castShadow = true;
-    body.receiveShadow = true;
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.82, 0.88, 4.35), orange);
+    chassis.name = 'supportCarFallbackChassis';
+    chassis.position.y = 1.05;
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.68, 1.62, 2.05), orange);
+    cabin.name = 'supportCarFallbackCabin';
+    cabin.position.set(0, 2.18, -0.78);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(2.76, 0.16, 2.2), trim);
+    roof.name = 'supportCarFallbackRoof';
+    roof.position.set(0, 3.06, -0.72);
+    const bumper = new THREE.Mesh(new THREE.BoxGeometry(2.94, 0.24, 0.2), trim);
+    bumper.name = 'supportCarFallbackFrontBumper';
+    bumper.position.set(0, 0.72, -2.25);
 
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), material);
-    head.name = `${name}Head`;
-    head.position.y = 0.92;
-    head.castShadow = true;
+    const wheelGeometry = new THREE.CylinderGeometry(0.5, 0.5, 0.24, 16);
+    for (const x of [-1.43, 1.43]) {
+      for (const z of [-1.38, 1.36]) {
+        const wheel = new THREE.Mesh(wheelGeometry, rubber);
+        wheel.name = 'supportCarFallbackWheel';
+        wheel.position.set(x, 0.55, z);
+        wheel.rotation.z = Math.PI / 2;
+        fallback.add(wheel);
+      }
+    }
 
-    npc.add(body, head);
-    return npc;
+    for (const mesh of [chassis, cabin, roof, bumper]) {
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+    }
+    fallback.add(chassis, cabin, roof, bumper);
+    return fallback;
+  }
+
+  _createRollWorkshopWorkbench() {
+    const workbench = new THREE.Group();
+    workbench.name = 'rollWorkshopWorkbench';
+    const frameMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4f5558,
+      roughness: 0.5,
+      metalness: 0.46,
+    });
+    const surfaceMaterial = new THREE.MeshStandardMaterial({
+      name: 'rollWorkbenchGeneratedSurfaceMaterial',
+      color: 0xd8611d,
+      roughness: 0.66,
+      metalness: 0.26,
+    });
+    const blueprintMaterial = new THREE.MeshStandardMaterial({
+      name: 'rollWorkbenchGeneratedBlueprintMaterial',
+      color: 0x176a91,
+      roughness: 0.88,
+      metalness: 0,
+      side: THREE.DoubleSide,
+    });
+    workbench.userData.surfaceMaterial = surfaceMaterial;
+    workbench.userData.blueprintMaterial = blueprintMaterial;
+    workbench.userData.textureLoadErrors = {};
+
+    const topThickness = 0.14;
+    const tabletop = new THREE.Mesh(
+      new THREE.BoxGeometry(WORKBENCH_WIDTH, topThickness, WORKBENCH_DEPTH),
+      [
+        frameMaterial,
+        frameMaterial,
+        surfaceMaterial,
+        frameMaterial,
+        frameMaterial,
+        frameMaterial,
+      ],
+    );
+    tabletop.name = 'rollWorkbenchTop';
+    tabletop.position.y = WORKBENCH_HEIGHT - topThickness * 0.5;
+    tabletop.castShadow = true;
+    tabletop.receiveShadow = true;
+
+    const legHeight = WORKBENCH_HEIGHT - topThickness;
+    const legGeometry = new THREE.BoxGeometry(0.12, legHeight, 0.12);
+    for (const x of [-WORKBENCH_WIDTH * 0.5 + 0.12, WORKBENCH_WIDTH * 0.5 - 0.12]) {
+      for (const z of [-WORKBENCH_DEPTH * 0.5 + 0.1, WORKBENCH_DEPTH * 0.5 - 0.1]) {
+        const leg = new THREE.Mesh(legGeometry, frameMaterial);
+        leg.name = 'rollWorkbenchLeg';
+        leg.position.set(x, legHeight * 0.5, z);
+        leg.castShadow = true;
+        workbench.add(leg);
+      }
+    }
+
+    const backRail = new THREE.Mesh(
+      new THREE.BoxGeometry(WORKBENCH_WIDTH, 0.16, 0.07),
+      frameMaterial,
+    );
+    backRail.name = 'rollWorkbenchBackRail';
+    backRail.position.set(0, WORKBENCH_HEIGHT + 0.06, WORKBENCH_DEPTH * 0.5 - 0.035);
+    backRail.castShadow = true;
+
+    const blueprint = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.05, 0.62),
+      blueprintMaterial,
+    );
+    blueprint.name = 'rollWorkbenchBlueprint';
+    blueprint.position.set(-0.24, WORKBENCH_HEIGHT + 0.004, -0.04);
+    blueprint.rotation.x = -Math.PI / 2;
+    blueprint.rotation.z = -0.08;
+    blueprint.castShadow = true;
+
+    const tools = this._createRollWorkshopTools(frameMaterial);
+    workbench.add(tabletop, backRail, blueprint, tools);
+    return workbench;
+  }
+
+  _createRollWorkshopTools(frameMaterial) {
+    const tools = new THREE.Group();
+    tools.name = 'rollWorkshopTools';
+    tools.position.y = WORKBENCH_HEIGHT + 0.025;
+    const steel = new THREE.MeshStandardMaterial({
+      color: 0xb7c2c5,
+      roughness: 0.34,
+      metalness: 0.72,
+    });
+    const handle = new THREE.MeshStandardMaterial({
+      color: 0xe17620,
+      roughness: 0.62,
+      metalness: 0.08,
+    });
+
+    const wrench = new THREE.Group();
+    wrench.name = 'rollWorkshopWrench';
+    const wrenchBar = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.045, 0.075), steel);
+    const wrenchRingGeometry = new THREE.TorusGeometry(0.085, 0.025, 6, 16);
+    for (const x of [-0.31, 0.31]) {
+      const ring = new THREE.Mesh(wrenchRingGeometry, steel);
+      ring.position.x = x;
+      ring.rotation.x = -Math.PI / 2;
+      wrench.add(ring);
+    }
+    wrench.add(wrenchBar);
+    wrench.position.set(0.54, 0, -0.16);
+    wrench.rotation.y = -0.22;
+
+    const screwdriver = new THREE.Group();
+    screwdriver.name = 'rollWorkshopScrewdriver';
+    const screwdriverHandle = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.09, 0.3, 10),
+      handle,
+    );
+    screwdriverHandle.position.x = -0.17;
+    screwdriverHandle.rotation.z = Math.PI / 2;
+    const screwdriverShaft = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.018, 0.018, 0.42, 8),
+      steel,
+    );
+    screwdriverShaft.position.x = 0.18;
+    screwdriverShaft.rotation.z = Math.PI / 2;
+    screwdriver.add(screwdriverHandle, screwdriverShaft);
+    screwdriver.position.set(0.55, 0.075, 0.16);
+    screwdriver.rotation.y = 0.38;
+
+    const hammer = new THREE.Group();
+    hammer.name = 'rollWorkshopHammer';
+    const hammerHandle = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.045, 0.55), handle);
+    const hammerHead = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.11, 0.14), frameMaterial);
+    hammerHead.position.z = -0.29;
+    hammer.add(hammerHandle, hammerHead);
+    hammer.position.set(-0.78, 0.035, 0.13);
+    hammer.rotation.y = -0.28;
+
+    for (const tool of [wrench, screwdriver, hammer]) {
+      tool.traverse((object) => {
+        if (object.isMesh) object.castShadow = true;
+      });
+      tools.add(tool);
+    }
+    return tools;
+  }
+
+  _loadSupportCar(anchor) {
+    anchor.userData.modelLoading = true;
+    anchor.userData.textureLoading = true;
+    anchor.userData.modelLoadAttempted = true;
+    let cancelled = false;
+    let modelAttached = false;
+
+    const texture = this.textureLoader.load(
+      SUPPORT_CAR_TEXTURE_PATH,
+      () => {
+        if (cancelled || !this._isAttachedToScene(anchor)) {
+          texture.dispose();
+          anchor.userData.textureLoading = false;
+          anchor.userData.textureLoadCancelled = true;
+          return;
+        }
+        anchor.userData.textureLoading = false;
+        anchor.userData.textureLoaded = true;
+        anchor.userData.textureWidth = texture.image?.width ?? null;
+        anchor.userData.textureHeight = texture.image?.height ?? null;
+      },
+      undefined,
+      (error) => {
+        anchor.userData.textureLoading = false;
+        if (cancelled || !this._isAttachedToScene(anchor)) {
+          anchor.userData.textureLoadCancelled = true;
+          return;
+        }
+        carMaterial.map = null;
+        carMaterial.color.setHex(0xd85816);
+        carMaterial.needsUpdate = true;
+        texture.dispose();
+        anchor.userData.textureLoadError = error?.message ?? String(error);
+        console.error('Unable to load Support Car texture.', error);
+      },
+    );
+    texture.name = 'texture_SupportCarDiffuse';
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestMipmapNearestFilter;
+    texture.generateMipmaps = true;
+
+    const carMaterial = new THREE.MeshStandardMaterial({
+      name: 'material_SupportCarTextured',
+      map: texture,
+      color: 0xffffff,
+      roughness: 0.58,
+      metalness: 0.16,
+      alphaTest: 0.5,
+      transparent: false,
+      depthWrite: true,
+      side: THREE.FrontSide,
+    });
+
+    this.objLoader.load(
+      SUPPORT_CAR_MODEL_PATH,
+      (model) => {
+        if (!this._isAttachedToScene(anchor)) {
+          cancelled = true;
+          this._disposeImportedModelResources(model);
+          carMaterial.dispose();
+          texture.dispose();
+          anchor.userData.modelLoading = false;
+          anchor.userData.modelLoadCancelled = true;
+          return;
+        }
+
+        const sourceMaterials = new Set();
+        model.name = 'supportCarModel';
+        model.traverse((object) => {
+          if (!object.isMesh) return;
+          const materials = Array.isArray(object.material) ? object.material : [object.material];
+          for (const material of materials) {
+            if (material) sourceMaterials.add(material);
+          }
+          object.name = object.name === 'Mesh' ? 'supportCarMesh' : object.name;
+          object.material = carMaterial;
+          object.castShadow = true;
+          object.receiveShadow = true;
+        });
+        this._disposeMaterialResources(sourceMaterials);
+
+        model.updateMatrixWorld(true);
+        const bounds = new THREE.Box3().setFromObject(model);
+        const size = bounds.getSize(new THREE.Vector3());
+        const scale = size.y > 0.001 ? SUPPORT_CAR_HEIGHT / size.y : 1;
+        model.scale.setScalar(scale);
+        model.updateMatrixWorld(true);
+        const scaledBounds = new THREE.Box3().setFromObject(model);
+        const center = scaledBounds.getCenter(new THREE.Vector3());
+        model.position.set(-center.x, -scaledBounds.min.y, -center.z);
+        anchor.add(model);
+        modelAttached = true;
+
+        const fallback = anchor.getObjectByName('supportCarFallback');
+        if (fallback) {
+          fallback.removeFromParent();
+          this._disposeImportedModelResources(fallback);
+        }
+        anchor.userData.usingFallback = false;
+        anchor.userData.modelLoading = false;
+        anchor.userData.modelLoaded = true;
+        anchor.userData.modelHeight = SUPPORT_CAR_HEIGHT;
+        anchor.userData.modelScale = scale;
+      },
+      undefined,
+      (error) => {
+        cancelled = true;
+        texture.dispose();
+        if (!modelAttached) carMaterial.dispose();
+        anchor.userData.modelLoading = false;
+        anchor.userData.textureLoading = false;
+        anchor.userData.textureLoaded = false;
+        anchor.userData.textureLoadCancelled = true;
+        anchor.userData.modelLoadError = error?.message ?? String(error);
+        anchor.userData.usingFallback = true;
+        console.warn('Unable to load Support Car model. Keeping the camp fallback.', error);
+      },
+    );
+  }
+
+  _loadRollWorkbenchTextures(workbench) {
+    workbench.userData.textureLoading = true;
+    workbench.userData.textureLoadErrors = {};
+    const specs = [
+      {
+        key: 'surface',
+        path: WORKBENCH_SURFACE_TEXTURE_PATH,
+        material: workbench.userData.surfaceMaterial,
+        configure: (texture) => {
+          texture.wrapS = THREE.RepeatWrapping;
+          texture.wrapT = THREE.RepeatWrapping;
+          texture.repeat.set(2, 1);
+        },
+      },
+      {
+        key: 'blueprint',
+        path: WORKBENCH_BLUEPRINT_TEXTURE_PATH,
+        material: workbench.userData.blueprintMaterial,
+        configure: () => {},
+      },
+    ];
+    let remaining = specs.length;
+    let cancelled = false;
+    const settle = () => {
+      remaining -= 1;
+      if (remaining > 0) return;
+      workbench.userData.textureLoading = false;
+      workbench.userData.textureAssetsSettled = true;
+      workbench.userData.textureLoaded = !cancelled
+        && Object.keys(workbench.userData.textureLoadErrors).length === 0;
+      if (cancelled) workbench.userData.textureLoadCancelled = true;
+    };
+
+    for (const spec of specs) {
+      const texture = this.textureLoader.load(
+        spec.path,
+        () => {
+          if (!this._isAttachedToScene(workbench)) {
+            cancelled = true;
+            texture.dispose();
+            settle();
+            return;
+          }
+          workbench.userData[`${spec.key}TextureLoaded`] = true;
+          workbench.userData[`${spec.key}TextureWidth`] = texture.image?.width ?? null;
+          workbench.userData[`${spec.key}TextureHeight`] = texture.image?.height ?? null;
+          settle();
+        },
+        undefined,
+        (error) => {
+          if (!this._isAttachedToScene(workbench)) {
+            cancelled = true;
+          } else {
+            workbench.userData.textureLoadErrors[spec.key] = error?.message ?? String(error);
+            console.error(`Unable to load Roll workbench ${spec.key} texture.`, error);
+          }
+          if (spec.material?.map === texture) spec.material.map = null;
+          spec.material.needsUpdate = true;
+          texture.dispose();
+          settle();
+        },
+      );
+      texture.name = `texture_RollWorkbench_${spec.key}`;
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.generateMipmaps = true;
+      spec.configure(texture);
+      spec.material.color.set(0xffffff);
+      spec.material.map = texture;
+      spec.material.needsUpdate = true;
+    }
+  }
+
+  _loadRollNpc(anchor, npcAnimationMixers, npcAnimators) {
+    anchor.userData.modelLoading = true;
+    anchor.userData.textureLoading = true;
+    let cancelled = false;
+    const texture = this.textureLoader.load(
+      ROLL_TEXTURE_PATH,
+      () => {
+        if (cancelled || !this._isAttachedToScene(anchor)) {
+          texture.dispose();
+          anchor.userData.textureLoading = false;
+          anchor.userData.textureLoadCancelled = true;
+          return;
+        }
+        anchor.userData.textureLoading = false;
+        anchor.userData.textureLoaded = true;
+      },
+      undefined,
+      (error) => {
+        if (cancelled || !this._isAttachedToScene(anchor)) {
+          anchor.userData.textureLoading = false;
+          anchor.userData.textureLoadCancelled = true;
+          return;
+        }
+        anchor.userData.textureLoading = false;
+        anchor.userData.textureLoadError = error?.message ?? String(error);
+        console.error('Unable to load Roll NPC texture.', error);
+      },
+    );
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    this.fbxLoader.load(
+      ROLL_MODEL_PATH,
+      (model) => {
+        let root = anchor;
+        while (root.parent) root = root.parent;
+        if (!root.isScene) {
+          cancelled = true;
+          this._disposeImportedModelResources(model);
+          texture.dispose();
+          anchor.userData.modelLoading = false;
+          anchor.userData.modelLoadCancelled = true;
+          return;
+        }
+
+        model.name = 'rollCaskettModel';
+        const displacedMaps = new Set();
+        model.traverse((object) => {
+          if (!object.isMesh && !object.isSkinnedMesh) return;
+
+          const sourceMaterials = Array.isArray(object.material)
+            ? object.material
+            : [object.material];
+          const materials = sourceMaterials.map((sourceMaterial) => {
+            const material = sourceMaterial ?? new THREE.MeshStandardMaterial();
+            if (material.map && material.map !== texture) displacedMaps.add(material.map);
+            material.map = texture;
+            material.transparent = false;
+            material.opacity = 1;
+            material.alphaTest = 0;
+            material.needsUpdate = true;
+            return material;
+          });
+          object.material = Array.isArray(object.material) ? materials : materials[0];
+          object.castShadow = true;
+          object.receiveShadow = true;
+        });
+        for (const displacedMap of displacedMaps) displacedMap.dispose?.();
+
+        model.updateMatrixWorld(true);
+        const bounds = new THREE.Box3().setFromObject(model);
+        const size = bounds.getSize(new THREE.Vector3());
+        const scale = size.y > 0.001 ? ROLL_HEIGHT / size.y : 0.01;
+        model.scale.setScalar(scale);
+        model.updateMatrixWorld(true);
+
+        const scaledBounds = new THREE.Box3().setFromObject(model);
+        const center = scaledBounds.getCenter(new THREE.Vector3());
+        model.position.set(-center.x, -scaledBounds.min.y, -center.z);
+        anchor.userData.targetModelHeight = ROLL_HEIGHT;
+        anchor.add(model);
+
+        const animator = new RollNpcAnimator(model, anchor);
+        anchor.userData.rollAnimator = animator;
+        anchor.userData.animationMixer = animator.mixer;
+        anchor.userData.animationLoadErrors = {};
+        npcAnimationMixers.push(animator.mixer);
+        npcAnimators.push(animator);
+        if (anchor.userData.pendingInteractionAnimation) {
+          anchor.userData.pendingInteractionAnimation = false;
+          animator.noteInteraction();
+        }
+        this._loadRollAnimations(anchor, animator);
+        anchor.userData.modelLoading = false;
+        anchor.userData.modelLoaded = true;
+      },
+      undefined,
+      (error) => {
+        cancelled = true;
+        texture.dispose();
+        anchor.userData.modelLoading = false;
+        anchor.userData.textureLoading = false;
+        anchor.userData.textureLoaded = false;
+        anchor.userData.textureLoadCancelled = true;
+        anchor.userData.modelLoadError = error?.message ?? String(error);
+        console.error('Unable to load Roll NPC model.', error);
+      },
+    );
+  }
+
+  _loadRollAnimations(anchor, animator) {
+    const pendingEntries = Object.entries(ROLL_ANIMATION_FILES);
+    let nextEntryIndex = 0;
+    const loadNext = async () => {
+      while (nextEntryIndex < pendingEntries.length) {
+        const [name, filename] = pendingEntries[nextEntryIndex];
+        nextEntryIndex += 1;
+        try {
+          const clip = await this._loadRollAnimationClip(
+            name,
+            `${ROLL_ANIMATION_BASE_PATH}${filename}`,
+          );
+          if (!this._isAttachedToScene(anchor) || animator.disposed) return false;
+          animator.registerClip(name, clip);
+        } catch (error) {
+          if (!this._isAttachedToScene(anchor)) return false;
+          anchor.userData.animationLoadErrors[name] = error?.message ?? String(error);
+          console.error(`Unable to load Roll ${name} animation.`, error);
+        }
+      }
+      return true;
+    };
+    const jobs = Array.from(
+      { length: Math.min(ROLL_ANIMATION_LOAD_CONCURRENCY, pendingEntries.length) },
+      () => loadNext(),
+    );
+
+    Promise.all(jobs).then(() => {
+      if (!this._isAttachedToScene(anchor)) {
+        animator.dispose();
+        anchor.userData.animationLoadCancelled = true;
+        return;
+      }
+
+      animator.settleAssets();
+      const required = ['idle', 'explaining', 'thinking'];
+      anchor.userData.animationLibraryReady = required.every((name) => animator.actions.has(name));
+    });
+  }
+
+  _loadRollAnimationClip(name, path) {
+    const cached = ROLL_ANIMATION_CLIP_PROMISES.get(path);
+    if (cached) return cached;
+
+    const promise = new Promise((resolve, reject) => {
+      this.fbxLoader.load(
+        path,
+        (sourceModel) => {
+          const sourceClip = sourceModel.animations.find((clip) => (
+            clip.duration > 0 && clip.tracks.length > 0
+          ));
+          const clip = sourceClip?.clone?.() ?? null;
+          this._disposeImportedModelResources(sourceModel);
+          if (!clip) {
+            reject(new Error(`${name} FBX did not contain a usable animation clip.`));
+            return;
+          }
+          clip.name = `roll_${name}`;
+          resolve(clip);
+        },
+        undefined,
+        reject,
+      );
+    }).catch((error) => {
+      if (ROLL_ANIMATION_CLIP_PROMISES.get(path) === promise) {
+        ROLL_ANIMATION_CLIP_PROMISES.delete(path);
+      }
+      throw error;
+    });
+    ROLL_ANIMATION_CLIP_PROMISES.set(path, promise);
+    return promise;
+  }
+
+  _isAttachedToScene(object) {
+    let root = object;
+    while (root?.parent) root = root.parent;
+    return root?.isScene === true;
+  }
+
+  _disposeMaterialResources(materials) {
+    const materialSet = new Set();
+    const textures = new Set();
+    for (const material of materials ?? []) {
+      if (!material) continue;
+      materialSet.add(material);
+      for (const value of Object.values(material)) {
+        if (value?.isTexture) textures.add(value);
+      }
+    }
+    for (const material of materialSet) material.dispose?.();
+    for (const texture of textures) texture.dispose?.();
+  }
+
+  _disposeImportedModelResources(model) {
+    const geometries = new Set();
+    const materials = new Set();
+    const skeletonTextures = new Set();
+    model?.traverse?.((object) => {
+      if (object.geometry) geometries.add(object.geometry);
+      const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of objectMaterials) {
+        if (material) materials.add(material);
+      }
+      if (object.skeleton?.boneTexture?.isTexture) {
+        skeletonTextures.add(object.skeleton.boneTexture);
+      }
+    });
+    for (const geometry of geometries) geometry.dispose?.();
+    this._disposeMaterialResources(materials);
+    for (const texture of skeletonTextures) texture.dispose?.();
   }
 
   _addKeycardMarker(group, position, materials) {

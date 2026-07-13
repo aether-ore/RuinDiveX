@@ -16,6 +16,7 @@ const EXPECTED_IDS = Object.freeze({
     'crusherJaw',
     'clawArm',
     'pounceActuator',
+    'launchLeg',
     'shockPiston',
     'pulseCannon',
     'mortarPod',
@@ -172,6 +173,18 @@ test('procedural Reaverbot modules load, share, assign, and render their authore
         genome.body.mobilityLegCount = 2;
         genome.modules.weapon.mountRole = 'locomotion';
         genome.modules.weapon.integratedIntoMobility = true;
+      } else if (id === 'launchLeg') {
+        setBody(genome, 'hopper');
+        genome.body.mobilityId = 'launchLeg';
+        genome.body.mobilityLabel = 'Launch Leg';
+        genome.body.movementModel = 'springBounce';
+        genome.body.mobilityLegCount = 1;
+        genome.body.tags = [...new Set([...genome.body.tags, 'springLoaded', 'singleLegged', 'rocketAssisted'])];
+        genome.modules.weapon.mountRole = 'locomotion';
+        genome.modules.weapon.integratedIntoMobility = true;
+        genome.modules.weapon.mountSide = 1;
+        setDefense(genome, 'sidePlates');
+        setWeakPoint(genome, 'legJoint');
       } else if (id === 'clawArm') {
         setDefense(genome, null);
         setWeakPoint(genome, 'clawPalm');
@@ -921,7 +934,7 @@ test('procedural Reaverbot modules load, share, assign, and render their authore
   expect(structural.catalogKeys).toEqual(sortedExpected);
   expect(structural.profileKeys).toEqual(sortedExpected);
   expect(structural.coverage).toEqual(sortedExpected);
-  expect(structural.fixtureCount).toBe(45);
+  expect(structural.fixtureCount).toBe(46);
   expect(structural.visibleMeshCount).toBeGreaterThan(800);
   expect(structural.mappedVisibleMaterialCount).toBeGreaterThan(800);
   expect(structural.visibleMaterialViolations).toEqual([]);
@@ -947,7 +960,7 @@ test('procedural Reaverbot modules load, share, assign, and render their authore
     expect(structural.groundedWorkingEndProof[bodyId]?.length, `${bodyId} dark foot working ends`).toBeGreaterThan(0);
     expect(structural.groundedWorkingEndProof[bodyId].every((entry) => entry.valueClass === 'dark')).toBe(true);
   }
-  expect(structural.eyeProofs).toHaveLength(45);
+  expect(structural.eyeProofs).toHaveLength(46);
   expect(structural.eyeProofs.every((proof) => (
     proof.dominantEyeCount === 1
     && proof.mapKey === EYE_TEXTURE_KEY

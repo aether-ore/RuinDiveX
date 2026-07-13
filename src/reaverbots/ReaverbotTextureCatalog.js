@@ -71,6 +71,7 @@ export const REAVERBOT_WEAPON_TEXTURE_PROFILES = Object.freeze({
   crusherJaw: freezeProfile({ weapon: 'bladeMetal', trim: 'bladeMetal', dark: 'jointDark' }),
   clawArm: freezeProfile({ weapon: 'weaponHousing', trim: 'bladeMetal', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
   pounceActuator: freezeProfile({ weapon: 'weaponHousing', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
+  launchLeg: freezeProfile({ weapon: 'weaponHousing', trim: 'bladeMetal', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
   shockPiston: freezeProfile({ weapon: 'weaponHousing', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
   pulseCannon: freezeProfile({ weapon: 'weaponHousing', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
   mortarPod: freezeProfile({ weapon: 'weaponHousing', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),

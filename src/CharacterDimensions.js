@@ -1,0 +1,1 @@
+export const PLAYER_TARGET_MODEL_HEIGHT = 2.85;

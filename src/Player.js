@@ -3,6 +3,7 @@ import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { AnimationController } from './AnimationController.js';
+import { PLAYER_TARGET_MODEL_HEIGHT as TARGET_MODEL_HEIGHT } from './CharacterDimensions.js';
 import { EquipmentManager } from './EquipmentManager.js';
 import { ExternalModelRig } from './ExternalModelRig.js';
 import { ModularHumanoid } from './ModularHumanoid.js';
@@ -154,7 +155,6 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'strutWalking', file: 'Strut Walking.fbx', label: 'Strut Walking', loop: true },
   { key: 'walking', file: 'walking.fbx', label: 'Walking', loop: true },
 ]);
-const TARGET_MODEL_HEIGHT = 2.85;
 const MIN_BRACED_SHOT_TIME = 0.28;
 const MIN_PROJECTILE_AIM_LOCK_TIME = 0.44;
 const PROJECTILE_STANCE_LINGER_TIME = 1.05;

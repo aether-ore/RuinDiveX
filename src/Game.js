@@ -1286,12 +1286,14 @@ export class Game {
     const previousDungeon = this.dungeon;
     this._clearDungeonRunState();
     const dungeon = new DungeonGenerator({ difficulty: this.ruinFloor }).generate();
+    for (const animator of previousDungeon?.npcAnimators ?? []) animator.dispose?.();
     previousDungeon?.group?.removeFromParent?.();
     this.dungeon = dungeon;
     this.platformingPlatforms = [...(dungeon.platforms ?? [])];
     this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
+    dungeon.activateNpcAssets?.();
     this.lastDungeonResourceDisposalStats = this._disposeDetachedDungeonResources(
       previousDungeon?.group,
     );
@@ -2422,8 +2424,9 @@ export class Game {
   _loop() {
     const dt = Math.min(this.clock.getDelta(), 0.05);
     const gameplayDt = this._consumeHitStopDt(dt);
+    const gameplayActive = !this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver;
 
-    if (!this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver) {
+    if (gameplayActive) {
       this.elapsedTime += gameplayDt;
       if (this.animationPreview?.active) {
         this._updateAnimationPreview(gameplayDt);
@@ -2473,6 +2476,9 @@ export class Game {
       }
     }
 
+    this.dungeonController?.updateNpcVisuals(dt, {
+      allowAmbient: gameplayActive && !this.animationPreview?.active,
+    });
     this._updateDamageNumbers(dt);
     this._updateHitEffects(dt);
     this._updateParticles(dt);
@@ -2637,6 +2643,7 @@ export class Game {
     this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
+    dungeon.activateNpcAssets?.();
     this._collectCameraOcclusionWalls();
     this._collectDungeonRenderCullGroups();
     this._rebuildDebugLedgeTester(dungeon.playerStart);

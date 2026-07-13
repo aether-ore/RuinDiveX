@@ -159,7 +159,10 @@ export class DungeonController {
     this.mechanisms = dungeon?.mechanisms ?? [];
     this.puzzleBlocks = dungeon?.puzzleBlocks ?? [];
     this.pressurePlates = dungeon?.pressurePlates ?? [];
+    this.npcAnimationMixers = dungeon?.npcAnimationMixers ?? [];
+    this.npcAnimators = dungeon?.npcAnimators ?? [];
     this.safeInteractables = dungeon?.safeInteractables ?? [];
+    this.rollInteractable = this.safeInteractables.find(({ action }) => action === 'roll') ?? null;
     this.safeZones = dungeon?.safeZones ?? [];
     this.solidZones = dungeon?.solidZones ?? [];
     this.aerialBoundaryZones = dungeon?.aerialBoundaryZones ?? [];
@@ -3592,6 +3595,15 @@ export class DungeonController {
   }
 
   _getSafeInteractablePrompt(interactable) {
+    if (interactable.action === 'roll') {
+      const scraps = this.game.inventory?.scraps ?? 0;
+      const researchRequired = this.game.getResearchProcessRequirement?.() ?? Infinity;
+      if (this.game.ruinCompleted) return `${interactable.label}: Debrief`;
+      if (!this.game.expeditionAccepted) return `${interactable.label}: Expedition Briefing`;
+      if (scraps >= researchRequired) return `${interactable.label}: Process Scrap`;
+      return `${interactable.label}: Garage`;
+    }
+
     if (interactable.action === 'quest') {
       const required = this.game.getScrapQuestRequirement?.() ?? 0;
       const scraps = this.game.inventory?.scraps ?? 0;
@@ -3880,6 +3892,31 @@ export class DungeonController {
       return;
     }
 
+    if (interactable.action === 'roll') {
+      const animator = interactable.object?.userData?.rollAnimator;
+      if (animator) {
+        animator.noteInteraction();
+      } else if (interactable.object?.userData) {
+        interactable.object.userData.pendingInteractionAnimation = true;
+      }
+
+      const scraps = this.game.inventory?.scraps ?? 0;
+      const researchRequired = this.game.getResearchProcessRequirement?.() ?? Infinity;
+
+      if (this.game.ruinCompleted) {
+        this.game.offerRuinReset?.();
+      } else if (!this.game.expeditionAccepted) {
+        this.game.beginExpedition?.({ position: interactable.position });
+      } else if (scraps >= researchRequired) {
+        this.game.processResearchScraps?.();
+      } else {
+        this.game.setInventoryOpen?.(true);
+        this.game.ui?.showToast?.('Roll: garage systems online', '#6bdcff');
+      }
+      this.game.addParticleBurst(interactable.position, interactable.color ?? MECHANISM_COLOR, 10, 0.1);
+      return;
+    }
+
     if (interactable.action === 'quest') {
       this.game.turnInScrapQuest?.();
       this.game.addParticleBurst(interactable.position, interactable.color ?? KEYCARD_COLOR, 10, 0.1);
@@ -3922,6 +3959,35 @@ export class DungeonController {
     if (interactable.action === 'mechanic') {
       this.game.ui?.showToast?.('Mechanic: garage systems online', '#6bdcff');
       this.game.addParticleBurst(interactable.position, interactable.color ?? MECHANISM_COLOR, 10, 0.1);
+    }
+  }
+
+  updateNpcVisuals(dt, { allowAmbient = true } = {}) {
+    const playerPosition = this.game?.player?.root?.position;
+    const animatedMixers = new Set();
+
+    for (const animator of this.npcAnimators) {
+      if (!animator || animator.disposed) continue;
+      animatedMixers.add(animator.mixer);
+
+      let allowAnimatorAmbient = allowAmbient;
+      if (animator.anchor?.name === 'rollCaskettNpc') {
+        const rollPosition = this.rollInteractable?.position;
+        allowAnimatorAmbient = Boolean(
+          allowAmbient
+          && playerPosition
+          && rollPosition
+          && playerPosition.distanceToSquared(rollPosition) <= 12 * 12
+        );
+      }
+
+      animator.update(dt, { allowAmbient: allowAnimatorAmbient });
+    }
+
+    // Preserve support for any legacy NPC mixer that has not adopted the
+    // higher-level animator contract yet.
+    for (const mixer of this.npcAnimationMixers) {
+      if (!animatedMixers.has(mixer)) mixer.update(dt);
     }
   }
 

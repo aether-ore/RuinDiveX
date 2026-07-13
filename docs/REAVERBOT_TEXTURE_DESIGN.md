@@ -155,6 +155,7 @@ Names are part of the authored contract: the visual factory uses names such as `
 | `crusherJaw` | Massive upper/lower armor faces, dark mouth and hinge barrel, hinge endcaps, circuit panels, blade rails, teeth, and dark terminal jaw ends |
 | `clawArm` | Shoulder bearing, upper-boom and forearm face designs, mirrored circuit routes, hydraulic details, elbow/wrist hinges, palm-back armor, blade talons, and separate dark talon tips; palm eye unchanged |
 | `pounceActuator` | Mount bearing, spring/actuator housing, compression bands, powered coil details, and dark launch-contact end |
+| `launchLeg` | Oversized kangaroo thigh and reversed hock, hip/knee/ankle bearings, telescoping shock stack, paired high-mounted rocket housings and powered bands, broad landing sole, and three separate dark claw tips |
 | `shockPiston` | Heavy braced housing distinct from the pouncer, piston mechanics, vents, shock-emitter band, and broad dark ground striker |
 | `pulseCannon` | Breech bearing, housing face, side circuit panel, barrel bands, recoil structure, and dark muzzle recess |
 | `mortarPod` | Single tube, elevation bearings, breech face/hatch, control circuit, feed band, and dark tube mouth |

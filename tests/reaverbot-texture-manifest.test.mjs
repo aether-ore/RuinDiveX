@@ -54,6 +54,7 @@ const EXPECTED_WEAPON_KEYS = [
   'crusherJaw',
   'clawArm',
   'pounceActuator',
+  'launchLeg',
   'shockPiston',
   'pulseCannon',
   'mortarPod',

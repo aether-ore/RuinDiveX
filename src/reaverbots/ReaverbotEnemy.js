@@ -212,7 +212,7 @@ export class ReaverbotEnemy extends Enemy {
       commitStart: new THREE.Vector3(),
       telegraphMarker: null,
       commitDistance: 0,
-      pounceJumpHeight: 2.5,
+      pounceJumpHeight: genome.modules.weapon.pounceJumpHeight ?? 2.5,
       warningPhase: 0,
       warningBlinkRate: 0,
       warningIntensity: 0,
@@ -1287,6 +1287,9 @@ export class ReaverbotEnemy extends Enemy {
         this._tryContactHit(game, kind === 'pounce' ? 0.75 : 0.5);
       }
       if (kind === 'charge') this._emitChargeJetTrail(dt, game);
+      if (kind === 'pounce' && this.genome.modules.weapon.id === 'launchLeg') {
+        this._emitLaunchLegJetTrail(dt, game);
+      }
     } else if (kind === 'clawMoveset') {
       this._updateClawMoveset(game, progress);
     } else if (kind === 'jawCombo') {
@@ -3342,6 +3345,7 @@ export class ReaverbotEnemy extends Enemy {
 
   _updateCoilBounce(dt, game, desiredDirection = null, speedScale = 1) {
     const brain = this.brain;
+    const weapon = this.genome.modules.weapon;
     if (brain.coilBounceActive) {
       brain.coilBounceTime = Math.min(
         brain.coilBounceDuration,
@@ -3366,10 +3370,15 @@ export class ReaverbotEnemy extends Enemy {
     }
 
     tempA.copy(desiredDirection).setY(0).normalize();
+    const jumpDistanceScale = weapon.locomotionJumpDistanceScale ?? 1;
     const jumpDistance = THREE.MathUtils.clamp(
-      this.stats.moveSpeed * this._getStatusMoveMultiplier() * speedScale * 0.78,
-      1.65,
-      4.15,
+      this.stats.moveSpeed
+        * this._getStatusMoveMultiplier()
+        * speedScale
+        * 0.78
+        * jumpDistanceScale,
+      1.65 * Math.min(1.12, jumpDistanceScale),
+      4.15 * jumpDistanceScale,
     );
     const controller = game.dungeonController;
     let foundLanding = false;
@@ -3404,6 +3413,7 @@ export class ReaverbotEnemy extends Enemy {
 
         const preferredHeight = Math.max(
           COIL_BOUNCE_MIN_HEIGHT,
+          weapon.navigationJumpHeight ?? 0,
           Math.max(0, elevationDelta) + 1.25,
           Math.abs(elevationDelta) * 0.45 + 1.7,
         );
@@ -3438,10 +3448,11 @@ export class ReaverbotEnemy extends Enemy {
     brain.springBounceFailures = 0;
     brain.coilBounceActive = true;
     brain.coilBounceTime = 0;
+    const navigationJumpDuration = weapon.navigationJumpDuration ?? COIL_BOUNCE_DURATION;
     brain.coilBounceDuration = THREE.MathUtils.clamp(
-      COIL_BOUNCE_DURATION + Math.max(0, brain.coilBounceLanding.y - this.root.position.y) * 0.055,
+      navigationJumpDuration + Math.max(0, brain.coilBounceLanding.y - this.root.position.y) * 0.055,
       COIL_BOUNCE_DURATION,
-      0.82,
+      Math.max(0.82, navigationJumpDuration + 0.1),
     );
     brain.coilBounceStart.copy(this.root.position);
     return true;
@@ -3590,6 +3601,23 @@ export class ReaverbotEnemy extends Enemy {
     }
   }
 
+  _emitLaunchLegJetTrail(dt, game) {
+    const nozzles = this.visual?.weapon?.launchLegBoosterNozzles ?? [];
+    if (nozzles.length === 0) return;
+    this.brain.jetTrailTimer -= dt;
+    if (this.brain.jetTrailTimer > 0) return;
+    this.brain.jetTrailTimer = 0.035;
+    for (const nozzle of nozzles) {
+      nozzle.getWorldPosition(tempA);
+      game.addParticleBurst?.(
+        tempA,
+        this.aiRandom.chance(0.34) ? 0xffef9a : 0xff5b18,
+        3,
+        0.09,
+      );
+    }
+  }
+
   _getPackPlayerFacing(game, target = new THREE.Vector3()) {
     const player = game?.player;
     const yaw = player?.root?.rotation?.y;
@@ -3693,7 +3721,10 @@ export class ReaverbotEnemy extends Enemy {
         ? controller.isEnemyPositionClear(this, candidate, { maximumElevationDelta: 4.6 })
         : !controller?.isPositionWalkable || controller.isPositionWalkable(candidate);
       if (!footprintClear) return false;
-      const jumpHeight = Math.max(2.5, Math.max(0, elevationDelta) + 1.3);
+      const jumpHeight = Math.max(
+        this.genome.modules.weapon.pounceJumpHeight ?? 2.5,
+        Math.max(0, elevationDelta) + 1.3,
+      );
       if (!this._isCoilBounceArcClear(game, this.root.position, candidate, jumpHeight)) return false;
       brain.pounceJumpHeight = jumpHeight;
       target.copy(candidate);
@@ -3730,7 +3761,7 @@ export class ReaverbotEnemy extends Enemy {
     // landing attack instead of silently cancelling after its full warning.
     target.copy(this.root.position);
     target.y = controller?.getSurfaceElevationAt?.(target) ?? target.y;
-    brain.pounceJumpHeight = 2.5;
+    brain.pounceJumpHeight = this.genome.modules.weapon.pounceJumpHeight ?? 2.5;
     return false;
   }
 

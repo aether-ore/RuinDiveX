@@ -17,13 +17,14 @@ const CANDIDATE_COUNT = 8;
 const GLOBAL_REAVERBOT_MOVE_SPEED_SCALE = 1.22;
 const NAME_PREFIXES = ['AR', 'BA', 'DA', 'GA', 'KA', 'KO', 'MU', 'NA', 'OM', 'RA', 'SA', 'TO', 'UR', 'VA', 'ZA'];
 const NAME_SUFFIXES = ['EN', 'GAR', 'KIR', 'MOL', 'ORA', 'RAK', 'TUM', 'VAN', 'XEL', 'ZUN'];
-const SPRING_MOBILITY_IDS = new Set(['springQuadruped', 'pairedSprings', 'monoPogo']);
+const SPRING_MOBILITY_IDS = new Set(['springQuadruped', 'pairedSprings', 'monoPogo', 'launchLeg']);
 const CRAWLER_MOBILITY_IDS = new Set(['articulatedCrawler', 'wheelBogies']);
 const WEAPON_WEAK_POINT_WEIGHTS = Object.freeze({
   rocketLance: [['legJoint', 4], ['rearBattery', 3]],
   crusherJaw: [['rearBattery', 3], ['legJoint', 3], ['eyeLens', 1]],
   clawArm: [['clawPalm', 10]],
   pounceActuator: [['bellyCore', 7], ['legJoint', 2]],
+  launchLeg: [['legJoint', 10]],
   shockPiston: [['bellyCore', 4], ['legJoint', 3]],
   pulseCannon: [['ammoDrum', 3], ['eyeLens', 2], ['rearBattery', 2]],
   mortarPod: [['ammoDrum', 7], ['rearBattery', 2]],
@@ -118,7 +119,7 @@ function pickBodyPlan(rng, archetype) {
   return rng.pick(compatible) ?? REAVERBOT_BODY_PLANS.biped;
 }
 
-function createMobilityVariant(rng, archetype, body, context = {}) {
+function createMobilityVariant(rng, archetype, body, context = {}, weapon = null) {
   if (archetype.id !== 'pouncer' && body.id === 'crawler') {
     const contextText = getContextText(context);
     const suppressedText = (context.suppressedTags ?? []).join(' ').toLowerCase();
@@ -154,6 +155,20 @@ function createMobilityVariant(rng, archetype, body, context = {}) {
       moveSpeedScale: 1,
       turnRateScale: 1,
       tags: [],
+    };
+  }
+
+  if (weapon?.id === 'launchLeg') {
+    return {
+      id: 'launchLeg',
+      label: 'Launch Leg',
+      movementModel: 'springBounce',
+      legCount: 1,
+      wheelCount: 0,
+      salvageModuleId: 'hopper',
+      moveSpeedScale: 0.9,
+      turnRateScale: 0.82,
+      tags: ['springLoaded', 'bouncing', 'singleLegged', 'rocketAssisted', 'massiveArticulatedLeg'],
     };
   }
 
@@ -218,6 +233,14 @@ function createWeaponVariant(weapon, rng, archetype) {
         tags: [...weapon.tags],
       };
     }
+    if (weapon.id === 'launchLeg') {
+      return {
+        ...weapon,
+        ...integratedMobility,
+        mountSide: rng.chance(0.5) ? -1 : 1,
+        tags: [...weapon.tags],
+      };
+    }
   }
   if (weapon.id === 'clawArm') {
     return {
@@ -273,6 +296,7 @@ function mergeWeightedWeakPoints(archetype, defense, weapon) {
 
 function pickWeakPoint(rng, archetype, defense, weapon) {
   if (weapon.id === 'clawArm') return REAVERBOT_WEAK_POINTS.clawPalm;
+  if (weapon.id === 'launchLeg') return REAVERBOT_WEAK_POINTS.legJoint;
   const options = mergeWeightedWeakPoints(archetype, defense, weapon);
   const id = rng.weighted(options, options[0]?.value ?? archetype.weakPoints[0]);
   return REAVERBOT_WEAK_POINTS[id] ?? REAVERBOT_WEAK_POINTS.eyeLens;
@@ -305,7 +329,7 @@ function createStats(archetype, body, mobility, weapon, threatTier, proportions,
   const tierHealth = 1 + (tier - 1) * 0.2;
   const tierDamage = 1 + (tier - 1) * 0.105;
   const roomHealth = clamp(context.healthMultiplier ?? 1, 0.72, 1.6);
-  const bodyScale = body.radiusScale * proportions.overallScale;
+  const bodyScale = body.radiusScale * proportions.overallScale * (weapon.radiusScale ?? 1);
   const base = archetype.baseStats;
   const attackRange = weapon.range ?? archetype.behavior.preferredRange;
   const melee = weapon.tags.includes('melee');
@@ -338,7 +362,12 @@ function createStats(archetype, body, mobility, weapon, threatTier, proportions,
     armor: Number(((base.armor + meleeArmorBonus) * (1 + (tier - 1) * 0.12)).toFixed(3)),
     experience: Math.round((4 + archetype.threatCost * 1.4) * (1 + (tier - 1) * 0.22)),
     radius: Number((base.radius * bodyScale).toFixed(3)),
-    collisionHeight: Number((body.height * proportions.overallScale + (body.hoverHeight ?? 0)).toFixed(3)),
+    collisionHeight: Number((
+      body.height
+      * proportions.overallScale
+      * (weapon.collisionHeightScale ?? 1)
+      + (body.hoverHeight ?? 0)
+    ).toFixed(3)),
   };
 }
 
@@ -396,13 +425,15 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
   const rng = new SeededRandom(`${seed}:candidate:${candidateIndex}`);
   const archetype = pickArchetype(rng.fork('archetype'), context);
   const body = pickBodyPlan(rng.fork('body'), archetype);
-  const mobility = createMobilityVariant(rng.fork('mobility'), archetype, body, context);
   const weaponDefinition = pickWeapon(rng.fork('weapon'), archetype, body);
   const weapon = createWeaponVariant(weaponDefinition, rng.fork('weaponVariant'), archetype);
+  const mobility = createMobilityVariant(rng.fork('mobility'), archetype, body, context, weapon);
   const charge = createChargeModule(body, weapon, rng.fork('chargeModule'));
   const defense = weapon.id === 'clawArm'
     ? null
-    : pickDefense(rng.fork('defense'), archetype, body);
+    : weapon.id === 'launchLeg'
+      ? REAVERBOT_DEFENSES.sidePlates
+      : pickDefense(rng.fork('defense'), archetype, body);
   const weakPoint = pickWeakPoint(rng.fork('weakPoint'), archetype, defense, weapon);
   const proportions = createProportions(rng.fork('proportions'), body);
   const behavior = createBehavior(archetype, mobility, weapon, weakPoint, rng.fork('behavior'));
@@ -476,7 +507,11 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
   // separate defense module, but it still contributes a distinct gameplay
   // idea when scoring candidate variety.
   const defenseNoveltyId = defense?.id ?? (weapon.id === 'clawArm' ? 'integratedClawGuard' : null);
-  const novelty = new Set([body.id, mobility.id, weapon.id, defenseNoveltyId, weakPoint.id].filter(Boolean)).size;
+  const novelty = new Set([body.id, mobility.id, weapon.id, defenseNoveltyId, weakPoint.id].filter(Boolean)).size
+    // Launch Leg is both the weapon and the entire locomotion assembly. Count
+    // those as two authored aspects even though they intentionally share the
+    // same public module id.
+    + (weapon.id === 'launchLeg' && mobility.id === 'launchLeg' ? 1 : 0);
   const coherence = weapon.id === 'clawArm' && weakPoint.id === 'clawPalm'
     ? 2
     : (LINKED_WEAK_POINT_WEIGHTS[defense?.id] ?? []).some(([id]) => id === weakPoint.id) ? 2 : 0;
@@ -538,6 +573,7 @@ export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverrid
   const wheelMobility = genome?.body?.movementModel === 'wheelDrive'
     && mobilityId === 'wheelBogies';
   const isClaw = weapon?.id === 'clawArm';
+  const isLaunchLeg = weapon?.id === 'launchLeg';
   const usesQuadrupedEyelids = body?.id === 'quadruped'
     && defense?.id === 'armorShutters'
     && weakPoint?.id === 'eyeLens';
@@ -567,6 +603,8 @@ export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverrid
   if (!weakPoint) errors.push('missing-weak-point');
   if (isClaw && weakPoint?.id !== 'clawPalm') errors.push('claw-palm-weak-point-required');
   if (!isClaw && weakPoint?.id === 'clawPalm') errors.push('claw-palm-non-claw');
+  if (isLaunchLeg && weakPoint?.id !== 'legJoint') errors.push('launch-leg-joint-weak-point-required');
+  if (isLaunchLeg && defense?.id !== 'sidePlates') errors.push('launch-leg-side-plates-required');
   if (!allowPendingBodyDefenseOverride
     && body?.id === 'quadruped'
     && !isClaw
@@ -590,6 +628,12 @@ export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverrid
   if (mobilityId === 'springQuadruped' && body?.id !== 'quadruped') errors.push('spring-quadruped-body-incompatible');
   if ((mobilityId === 'pairedSprings' || mobilityId === 'monoPogo') && body?.id !== 'hopper') {
     errors.push('hopper-spring-body-incompatible');
+  }
+  if (mobilityId === 'launchLeg'
+    && (body?.id !== 'hopper'
+      || weapon?.id !== 'launchLeg'
+      || genome?.body?.mobilityLegCount !== 1)) {
+    errors.push('launch-leg-mobility-contract');
   }
   if (mobilityId === 'monoPogo' && genome?.body?.mobilityLegCount !== 1) errors.push('mono-pogo-single-leg-required');
   if (crawlerMobility && body?.id !== 'crawler') errors.push('crawler-mobility-body-incompatible');

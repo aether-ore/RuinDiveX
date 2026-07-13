@@ -46,7 +46,7 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
     label: 'Pouncer',
     role: 'disruptor',
     bodyPlans: ['quadruped', 'hopper'],
-    weapons: ['pounceActuator', 'shockPiston'],
+    weapons: ['pounceActuator', 'shockPiston', 'launchLeg'],
     defenses: ['armoredBack', 'sidePlates'],
     weakPoints: ['bellyCore', 'legJoint'],
     paletteId: 'pouncerOlive',
@@ -322,6 +322,19 @@ export const REAVERBOT_WEAPONS = Object.freeze({
   pounceActuator: {
     id: 'pounceActuator', label: 'Pounce Actuator', tags: ['melee', 'pounce'], requires: ['jumpCapable'],
     attackKind: 'pounce', range: 8.6, damageScale: 1.12, meleeArmorBonus: 20, healthScale: 1.18, threatCost: 3,
+  },
+  launchLeg: {
+    id: 'launchLeg', label: 'Launch Leg',
+    tags: ['melee', 'pounce', 'articulated', 'massive', 'rocketBoost', 'jumpUpgrade'],
+    requires: ['jumpCapable'], bodyPlans: ['hopper'],
+    attackKind: 'pounce', range: 9.8, preferredRange: 5.4, damageScale: 1.28, threatCost: 6,
+    telegraphDuration: 1.35, commitDuration: 0.68, recoveryDuration: 1.18, cooldownScale: 0.9,
+    landingRadius: 3.15, landingDamageScale: 1.28,
+    pounceJumpHeight: 4.4, navigationJumpHeight: 3.2,
+    locomotionJumpDistanceScale: 1.28, navigationJumpDuration: 0.72,
+    authoredLength: 4.35, boosterCount: 2, clawCount: 3,
+    collisionHeightScale: 2.25, radiusScale: 1.32,
+    meleeArmorBonus: 34, healthScale: 1.32, moveSpeedScale: 0.9,
   },
   shockPiston: {
     id: 'shockPiston', label: 'Shock Piston', tags: ['melee', 'shockwave'], requires: ['jumpCapable'],

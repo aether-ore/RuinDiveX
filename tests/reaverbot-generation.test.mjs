@@ -460,7 +460,7 @@ test('close-range Reaverbots use the harder long-tracking combat profile', () =>
     return null;
   };
 
-  const pouncer = findGenome('pouncer', (genome) => genome.modules.weapon.attackKind === 'pounce');
+  const pouncer = findGenome('pouncer', (genome) => genome.modules.weapon.id === 'pounceActuator');
   const charger = findGenome('pursuer', (genome) => genome.modules.weapon.attackKind === 'charge');
   const melee = findGenome('pursuer', (genome) => genome.modules.weapon.attackKind === 'clawMoveset');
 
@@ -494,9 +494,17 @@ test('pouncers couple their attack module to generated spring locomotion', () =>
     assert.equal(genome.modules.weapon.attackKind, 'pounce');
     assert.equal(genome.modules.weapon.mountRole, 'locomotion');
     assert.equal(genome.modules.weapon.integratedIntoMobility, true);
-    assert.equal(genome.stats.attackRange, 8.6);
+    assert.equal(genome.stats.attackRange, genome.modules.weapon.id === 'launchLeg' ? 9.8 : 8.6);
     assert.equal(validateReaverbotGenome(genome).valid, true);
-    if (genome.body.planId === 'quadruped') {
+    if (genome.modules.weapon.id === 'launchLeg') {
+      assert.equal(genome.body.planId, 'hopper');
+      assert.equal(genome.body.mobilityId, 'launchLeg');
+      assert.equal(genome.body.mobilityLabel, 'Launch Leg');
+      assert.equal(genome.body.mobilityLegCount, 1);
+      assert.ok([-1, 1].includes(genome.modules.weapon.mountSide));
+      assert.equal(genome.modules.weapon.pounceJumpHeight, 4.4);
+      assert.equal(genome.modules.weapon.landingRadius, 3.15);
+    } else if (genome.body.planId === 'quadruped') {
       assert.equal(genome.body.mobilityId, 'springQuadruped');
       assert.equal(genome.body.mobilityLegCount, 4);
     } else {
@@ -504,13 +512,14 @@ test('pouncers couple their attack module to generated spring locomotion', () =>
       assert.equal(genome.body.mobilityLegCount, genome.body.mobilityId === 'monoPogo' ? 1 : 2);
     }
   }
-  assert.deepEqual([...mobilityIds].sort(), ['monoPogo', 'pairedSprings', 'springQuadruped']);
-  assert.deepEqual([...weaponIds].sort(), ['pounceActuator', 'shockPiston']);
+  assert.deepEqual([...mobilityIds].sort(), ['launchLeg', 'monoPogo', 'pairedSprings', 'springQuadruped']);
+  assert.deepEqual([...weaponIds].sort(), ['launchLeg', 'pounceActuator', 'shockPiston']);
 
   const fixtures = [
     ['spring-audit:1', 'springQuadruped', 4],
     ['spring-audit:3', 'monoPogo', 1],
     ['spring-audit:16', 'pairedSprings', 2],
+    ['spring-launch:4', 'launchLeg', 1],
   ];
   for (const [seed, mobilityId, legCount] of fixtures) {
     const genome = generateReaverbotGenome({ seed, archetypeId: 'pouncer', threatTier: 2, encounterSize: 2 });
@@ -523,7 +532,13 @@ test('pouncers couple their attack module to generated spring locomotion', () =>
     visual.weapon.group.traverse((object) => {
       if (object.isMesh) facialWeaponMeshes.push(object.name);
     });
-    assert.deepEqual(facialWeaponMeshes, []);
+    if (mobilityId === 'launchLeg') {
+      assert.ok(facialWeaponMeshes.length > 20);
+      assert.ok(visual.weapon.launchLegAssembly);
+      assert.equal(visual.weapon.group.userData.launchLegRig.authoredLength, 4.35);
+    } else {
+      assert.deepEqual(facialWeaponMeshes, []);
+    }
     const names = [];
     let integratedWeaponSurfaces = 0;
     visual.root.traverse((object) => {
@@ -537,6 +552,10 @@ test('pouncers couple their attack module to generated spring locomotion', () =>
     } else if (mobilityId === 'monoPogo') {
       assert.ok(names.includes('generatedHopperMonoPogoLeg'));
       assert.equal(names.some((name) => /generatedHopper(Left|Right)SpringLeg/.test(name)), false);
+    } else if (mobilityId === 'launchLeg') {
+      assert.ok(names.some((name) => /LaunchLegAssembly/.test(name)));
+      assert.equal(visual.weapon.launchLegClaws.length, 3);
+      assert.equal(visual.weapon.launchLegBoosters.length, 2);
     }
   }
 
@@ -1258,7 +1277,7 @@ test('every procedural Reaverbot aspect has a specific crafting material source'
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.charge).sort(), Object.keys(REAVERBOT_CHARGE_MODULES).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.defense).sort(), Object.keys(REAVERBOT_DEFENSES).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.weakPoint).sort(), Object.keys(REAVERBOT_WEAK_POINTS).sort());
-  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 61);
+  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 62);
   assert.equal(REAVERBOT_SALVAGE_MATERIALS.impactHorn, undefined);
 
   let foundClawProfile = false;

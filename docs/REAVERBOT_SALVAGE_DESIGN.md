@@ -105,6 +105,7 @@ The eye is universal, but its low acquisition chance keeps it from becoming mean
 | Crushing Jaw | High-Torque Jaw Gear | Torque, gripping, crushing | Crusher arms, grappling tools |
 | Claw Arm | Serrated Claw Gear | Sweeping blades, melee | Claw arms, saw attachments |
 | Pounce Actuator | Compression Pounce Actuator | Leaping, stored compression, impact | Jump Springs, leaping strike arms |
+| Launch Leg | Rocket Launch Greave | Rocket-assisted jumping, clawed landing gear, mobility | Jump Springs, rocket boots, aerial jump upgrades |
 | Shock Piston | Shockwave Piston | Ground impact, pistons, shockwaves | Ground-pound arms, impact hammers |
 | Pulse Cannon | Revolving Pulse Barrel | Rapid direct fire, heat distribution | Machine Busters, rapid pulse cannons |
 | Mortar Pod | High-Angle Launch Tube | Lobbed explosives, ballistic arcs | Grenade Arms, mortar launchers |

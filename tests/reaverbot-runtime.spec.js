@@ -801,7 +801,7 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
     };
   });
 
-  expect(result.catalogMaterialCount).toBe(61);
+  expect(result.catalogMaterialCount).toBe(62);
   expect(result.bodyPlan).toBe('hopper');
   expect(result.profile).toHaveLength(6);
   expect(result.profile.find((candidate) => candidate.aspect === 'body')).toEqual({

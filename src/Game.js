@@ -30,6 +30,17 @@ const POSE_DEBUG_CAMERA_MIN_DISTANCE = 4.5;
 const POSE_DEBUG_CAMERA_MAX_DISTANCE = 22;
 const HIT_STOP_MAX_DURATION = 0.16;
 const HIT_STOP_DEFAULT_TIME_SCALE = 0.06;
+const ENEMY_ATTACK_HANDOFF_DELAY = 0.46;
+const ENEMY_ATTACK_REQUEST_TTL = 0.35;
+const ENEMY_DEATH_EXPLOSION_LIFE = 0.52;
+const ENEMY_DEATH_PART_LIFE = 0.76;
+const ENEMY_DEATH_PART_LIMIT = 3;
+const MAX_ACTIVE_ENEMY_DEATH_EFFECTS = 6;
+const MAX_ACTIVE_PARTICLES = 220;
+const MAX_POOLED_PARTICLES = 220;
+const MAX_POOLED_HIT_EFFECTS = 48;
+const MAX_POOLED_DAMAGE_NUMBERS = 72;
+const MAX_SYNCHRONOUS_EXPLOSIONS = 8;
 const CAMERA_WALL_OCCLUSION_TARGET_HEIGHT = 1.25;
 const DUNGEON_RENDER_CULL_UPDATE_INTERVAL = 0.2;
 const DUNGEON_RENDER_CULL_HIDE_DISTANCE = 68;
@@ -79,6 +90,20 @@ const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
 const tempColor = new THREE.Color();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const ENEMY_DEATH_SPHERE_GEOMETRY = new THREE.SphereGeometry(1, 16, 11);
+const ENEMY_DEATH_CORE_GEOMETRY = new THREE.IcosahedronGeometry(0.72, 1);
+const ENEMY_DEATH_PROXY_GEOMETRIES = [
+  new THREE.BoxGeometry(0.34, 0.18, 0.46),
+  new THREE.CylinderGeometry(0.1, 0.14, 0.42, 7),
+  new THREE.OctahedronGeometry(0.19, 0),
+];
+for (const geometry of [
+  ENEMY_DEATH_SPHERE_GEOMETRY,
+  ENEMY_DEATH_CORE_GEOMETRY,
+  ...ENEMY_DEATH_PROXY_GEOMETRIES,
+]) {
+  geometry.userData.sharedTimedEffectGeometry = true;
+}
 
 function createDamageCanvas() {
   const canvas = document.createElement('canvas');
@@ -125,6 +150,13 @@ export class Game {
     this.clock = new THREE.Clock();
     this.keys = new Set();
     this.enemies = [];
+    this.enemyAttackDirector = {
+      owner: null,
+      handoffTimer: 0,
+      queue: [],
+      time: 0,
+      requestTimes: new Map(),
+    };
     this.hazards = [];
     this.destructibles = [];
     this.timedEffects = [];
@@ -134,6 +166,8 @@ export class Game {
     this.activeHitEffects = [];
     this.particlePool = [];
     this.activeParticles = [];
+    this.pendingExplosions = [];
+    this.explosionDispatchDepth = 0;
     this.elapsedTime = 0;
     this.hitStopTimer = 0;
     this.hitStopTimeScale = 1;
@@ -1293,8 +1327,12 @@ export class Game {
       ?? null;
     const wasExternallyMoved = Boolean(enemy.isExternalMotionActive?.());
     const dealt = enemy.takeDamage(amount, meta);
-    if (enemy.dead && wasExternallyMoved) {
-      this._prepareExternallyMovedEnemyDeath(enemy, externalMotionOwner);
+    if (enemy.dead) {
+      if (wasExternallyMoved) {
+        this._prepareExternallyMovedEnemyDeath(enemy, externalMotionOwner);
+      } else {
+        this._prepareEnemyDeathLanding(enemy);
+      }
     }
     const globalHitStopDuration = meta.globalHitStopDuration
       ?? (meta.projectileHit ? 0 : meta.hitStopDuration);
@@ -1348,7 +1386,11 @@ export class Game {
       this.player.heal(dealt * this.player.stats.lifeSteal);
     }
 
-    if (!meta.statusTick && meta.source === this.player && this.player.stats.chainLightningChance > 0 && Math.random() < this.player.stats.chainLightningChance) {
+    if (!meta.statusTick
+      && !meta.chainProcessed
+      && meta.source === this.player
+      && this.player.stats.chainLightningChance > 0
+      && Math.random() < this.player.stats.chainLightningChance) {
       this._chainLightning(enemy, dealt * 0.42);
     }
 
@@ -1361,7 +1403,10 @@ export class Game {
   }
 
   addDamageNumber(position, amount, color = 0xffffff, critical = false) {
-    const number = this._getDamageNumber();
+    const number = this.damageNumbers.length >= MAX_POOLED_DAMAGE_NUMBERS
+      ? this.damageNumbers.shift()
+      : this._getDamageNumber();
+    number.sprite.removeFromParent();
     const rounded = Math.max(1, Math.round(amount));
 
     number.context.clearRect(0, 0, number.canvas.width, number.canvas.height);
@@ -1374,7 +1419,8 @@ export class Game {
     number.context.strokeText(critical ? `${rounded}!` : String(rounded), 96, 38);
     number.context.fillText(critical ? `${rounded}!` : String(rounded), 96, 38);
     number.texture.needsUpdate = true;
-    number.sprite.position.copy(position).add(new THREE.Vector3(0, 2.2, 0));
+    number.sprite.position.copy(position);
+    number.sprite.position.y += 2.2;
     number.sprite.scale.set(1.15, 0.48, 1);
     number.sprite.material.opacity = 1;
     number.life = 0.85;
@@ -1385,10 +1431,13 @@ export class Game {
   }
 
   addHitEffect(position, color = 0xffffff, scale = 0.5, options = {}) {
-    const effect = this._getHitEffect();
+    const effect = this.activeHitEffects.length >= MAX_POOLED_HIT_EFFECTS
+      ? this.activeHitEffects.shift()
+      : this._getHitEffect();
+    effect.mesh.removeFromParent();
     effect.mesh.position.copy(position);
     if (!options.absolute) {
-      effect.mesh.position.add(new THREE.Vector3(0, 1.05, 0));
+      effect.mesh.position.y += 1.05;
     }
     effect.mesh.material.color.set(color);
     if (effect.mesh.material.emissive) {
@@ -1643,7 +1692,318 @@ export class Game {
     });
   }
 
+  _isEnemyDeathPartVisible(object, root) {
+    let current = object;
+    while (current) {
+      if (!current.visible) return false;
+      if (current === root) break;
+      current = current.parent;
+    }
+    return true;
+  }
+
+  _scoreEnemyDeathPartMesh(mesh) {
+    if (!mesh?.geometry) return 0;
+    if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere?.();
+    const radius = mesh.geometry.boundingSphere?.radius ?? 0.1;
+    const worldScale = mesh.getWorldScale(tempVectorD);
+    return radius * Math.max(Math.abs(worldScale.x), Math.abs(worldScale.y), Math.abs(worldScale.z));
+  }
+
+  _findEnemyDeathPartMesh(root, chosen) {
+    if (!root) return null;
+    root.updateWorldMatrix?.(true, true);
+    let best = null;
+    let bestScore = -Infinity;
+    root.traverse?.((object) => {
+      if (!object.isMesh || object.isSkinnedMesh || chosen.has(object) || !object.geometry) return;
+      if ((object.geometry.attributes?.position?.count ?? 0) > 4800) return;
+      if (!this._isEnemyDeathPartVisible(object, root)) return;
+      const name = object.name?.toLowerCase?.() ?? '';
+      if (name.includes('healthbar') || name.includes('telegraph') || name.includes('targetmarker')) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      if (!materials.some((material) => material && (material.opacity ?? 1) > 0.06)) return;
+      const score = this._scoreEnemyDeathPartMesh(object);
+      if (score > bestScore) {
+        best = object;
+        bestScore = score;
+      }
+    });
+    return best;
+  }
+
+  _collectEnemyDeathPartMeshes(enemy) {
+    const chosen = new Set();
+    const sources = [];
+    const addFromRoot = (root) => {
+      if (sources.length >= ENEMY_DEATH_PART_LIMIT) return;
+      const mesh = this._findEnemyDeathPartMesh(root, chosen);
+      if (!mesh) return;
+      chosen.add(mesh);
+      sources.push(mesh);
+    };
+
+    if (enemy.visual) {
+      const { visual } = enemy;
+      addFromRoot(visual.chargeModule?.group);
+      addFromRoot(visual.weapon?.group);
+      addFromRoot(visual.defense?.group);
+      addFromRoot(visual.weakPoint?.group ?? visual.weakPoint?.core);
+      addFromRoot(visual.eye?.group);
+      addFromRoot(visual.frame?.body);
+      addFromRoot(visual.frame?.headAssembly ?? visual.frame?.head);
+      for (const limb of visual.frame?.limbs ?? []) addFromRoot(limb.pivot);
+      for (const wing of visual.frame?.wings ?? []) addFromRoot(wing.pivot);
+      addFromRoot(visual.frame?.tailPivot);
+    }
+
+    if (sources.length < ENEMY_DEATH_PART_LIMIT) {
+      const fallback = [];
+      enemy.root?.updateWorldMatrix?.(true, true);
+      enemy.root?.traverse?.((object) => {
+        if (!object.isMesh || object.isSkinnedMesh || chosen.has(object) || !object.geometry) return;
+        if ((object.geometry.attributes?.position?.count ?? 0) > 4800) return;
+        if (!this._isEnemyDeathPartVisible(object, enemy.root)) return;
+        const name = object.name?.toLowerCase?.() ?? '';
+        if (name.includes('healthbar') || name.includes('telegraph') || name.includes('targetmarker')) return;
+        const entry = { object, score: this._scoreEnemyDeathPartMesh(object) };
+        const insertAt = fallback.findIndex((candidate) => entry.score > candidate.score);
+        if (insertAt < 0) fallback.push(entry);
+        else fallback.splice(insertAt, 0, entry);
+        if (fallback.length > ENEMY_DEATH_PART_LIMIT - sources.length) fallback.pop();
+      });
+      for (const entry of fallback) {
+        if (sources.length >= ENEMY_DEATH_PART_LIMIT) break;
+        chosen.add(entry.object);
+        sources.push(entry.object);
+      }
+    }
+
+    return sources;
+  }
+
+  _cloneEnemyDeathPartMesh(source, index) {
+    if (!source?.geometry || source.isSkinnedMesh) return null;
+    const sourceMaterials = Array.isArray(source.material) ? source.material : [source.material];
+    const materials = sourceMaterials.map((material) => {
+      const clone = material?.clone?.();
+      if (!clone) return null;
+      clone.transparent = true;
+      clone.depthWrite = false;
+      clone.opacity = material.opacity ?? 1;
+      clone.userData = {
+        ...clone.userData,
+        enemyDeathBaseOpacity: clone.opacity,
+      };
+      return clone;
+    });
+    const material = Array.isArray(source.material) ? materials : materials[0];
+    if (!material || (Array.isArray(material) && material.every((entry) => !entry))) return null;
+
+    const clone = new THREE.Mesh(source.geometry.clone(), material);
+    source.updateWorldMatrix(true, false);
+    source.matrixWorld.decompose(clone.position, clone.quaternion, clone.scale);
+    clone.name = `enemyDeathPart_${source.name || index}`;
+    clone.castShadow = false;
+    clone.receiveShadow = false;
+    clone.renderOrder = source.renderOrder;
+    clone.userData = {
+      enemyDeathPart: true,
+      sourceName: source.name || `part-${index}`,
+    };
+    source.visible = false;
+    source.userData.deathDetached = true;
+    return clone;
+  }
+
+  _createEnemyDeathProxyPart(enemy, center, size, index) {
+    const primaryColor = enemy.genome?.palette?.primary ?? enemy.type?.skinColor ?? 0x8d9382;
+    const secondaryColor = enemy.genome?.palette?.secondary ?? enemy.type?.clothColor ?? 0x4f5548;
+    const color = index % 2 === 0 ? primaryColor : secondaryColor;
+    const material = new THREE.MeshStandardMaterial({
+      color,
+      roughness: 0.42,
+      metalness: 0.62,
+      transparent: true,
+      opacity: 1,
+      depthWrite: false,
+    });
+    material.userData.enemyDeathBaseOpacity = 1;
+    const part = new THREE.Mesh(
+      ENEMY_DEATH_PROXY_GEOMETRIES[index % ENEMY_DEATH_PROXY_GEOMETRIES.length],
+      material,
+    );
+    const angle = index * 2.39996;
+    const spread = Math.max(0.18, Math.min(size.x, size.z) * 0.16);
+    part.name = `enemyDeathPart_proxy${index}`;
+    part.position.copy(center).add(new THREE.Vector3(
+      Math.cos(angle) * spread,
+      (index % 3 - 1) * 0.14,
+      Math.sin(angle) * spread,
+    ));
+    part.rotation.set(angle * 0.3, angle * 0.6, angle * 0.2);
+    part.scale.setScalar(0.8 + Math.min(0.65, Math.max(size.x, size.y, size.z) * 0.08));
+    part.castShadow = false;
+    part.userData = { enemyDeathPart: true, proxy: true };
+    return part;
+  }
+
+  addEnemyDeathEffect(enemy) {
+    if (!enemy?.root || !this.scene) return false;
+
+    const activeDeathEffects = this.timedEffects.reduce(
+      (count, effect) => count + (effect.kind === 'enemyDeathExplosion' ? 1 : 0),
+      0,
+    );
+    if (activeDeathEffects >= MAX_ACTIVE_ENEMY_DEATH_EFFECTS) {
+      tempVectorA.copy(enemy.root.position);
+      tempVectorA.y += Math.min(0.9, Math.max(0.42, (enemy.collisionHeight ?? 1.4) * 0.36));
+      this.addParticleBurst(tempVectorA, 0xff7a16, 6, 0.13);
+      return true;
+    }
+
+    enemy.root.updateWorldMatrix(true, true);
+    const visualRoot = enemy.visual?.root ?? enemy.externalModelGroup ?? enemy.root;
+    const bounds = new THREE.Box3().setFromObject(visualRoot);
+    const center = bounds.isEmpty()
+      ? enemy.root.position.clone().add(new THREE.Vector3(0, 0.65, 0))
+      : bounds.getCenter(new THREE.Vector3());
+    const size = bounds.isEmpty()
+      ? new THREE.Vector3(1, 1.4, 1)
+      : bounds.getSize(new THREE.Vector3());
+    const burstRadius = THREE.MathUtils.clamp(Math.max(size.x, size.y, size.z) * 0.32, 0.48, 1.25);
+    const floorY = enemy.deathLandingPosition?.y ?? enemy.deathFloorY ?? enemy.root.position.y;
+
+    const explosion = new THREE.Group();
+    explosion.name = 'enemyDeathExplosion';
+    explosion.position.copy(center);
+    const addFireSphere = (geometry, color, opacity, name) => {
+      const material = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      material.userData.enemyDeathBaseOpacity = opacity;
+      const sphere = new THREE.Mesh(geometry, material);
+      sphere.name = name;
+      explosion.add(sphere);
+      return sphere;
+    };
+    addFireSphere(ENEMY_DEATH_SPHERE_GEOMETRY, 0xff6a16, 0.5, 'enemyDeathExplosionFieryShell');
+    addFireSphere(ENEMY_DEATH_CORE_GEOMETRY, 0xffa21a, 0.78, 'enemyDeathExplosionFlameCore');
+    const hotCore = addFireSphere(ENEMY_DEATH_SPHERE_GEOMETRY, 0xffe06a, 0.92, 'enemyDeathExplosionHotCore');
+    hotCore.scale.setScalar(0.42);
+    explosion.scale.setScalar(burstRadius * 0.08);
+    this.scene.add(explosion);
+    this.timedEffects.push({
+      kind: 'enemyDeathExplosion',
+      object: explosion,
+      life: ENEMY_DEATH_EXPLOSION_LIFE,
+      maxLife: ENEMY_DEATH_EXPLOSION_LIFE,
+      radius: burstRadius,
+    });
+
+    const debrisGroup = new THREE.Group();
+    debrisGroup.name = 'enemyDeathParts';
+    const parts = [];
+    const sources = this._collectEnemyDeathPartMeshes(enemy);
+    for (let index = 0; index < sources.length; index += 1) {
+      const clone = this._cloneEnemyDeathPartMesh(sources[index], index);
+      if (clone) debrisGroup.add(clone);
+    }
+    while (debrisGroup.children.length < ENEMY_DEATH_PART_LIMIT) {
+      debrisGroup.add(this._createEnemyDeathProxyPart(enemy, center, size, debrisGroup.children.length));
+    }
+
+    for (let index = 0; index < debrisGroup.children.length; index += 1) {
+      const object = debrisGroup.children[index];
+      const outward = object.position.clone().sub(center);
+      outward.y = Math.max(0.16, Math.abs(outward.y) * 0.35);
+      if (outward.lengthSq() < 0.001) {
+        const angle = index * 2.39996;
+        outward.set(Math.cos(angle), 0.28, Math.sin(angle));
+      }
+      outward.normalize();
+      const materials = [];
+      object.traverse((child) => {
+        const childMaterials = Array.isArray(child.material) ? child.material : [child.material];
+        for (const material of childMaterials) {
+          if (material && !materials.includes(material)) materials.push(material);
+        }
+      });
+      parts.push({
+        object,
+        materials,
+        velocity: outward.multiplyScalar(2.35 + Math.random() * 1.65).add(new THREE.Vector3(0, 1.25 + Math.random() * 1.4, 0)),
+        angularVelocity: new THREE.Vector3(
+          (Math.random() - 0.5) * 9,
+          (Math.random() - 0.5) * 12,
+          (Math.random() - 0.5) * 9,
+        ),
+        bounces: 0,
+      });
+    }
+    this.scene.add(debrisGroup);
+    this.timedEffects.push({
+      kind: 'enemyDeathParts',
+      object: debrisGroup,
+      parts,
+      floorY,
+      life: ENEMY_DEATH_PART_LIFE,
+      maxLife: ENEMY_DEATH_PART_LIFE,
+    });
+
+    this.addParticleBurst(center, 0xff6a16, 10, 0.15);
+    this.addParticleBurst(center, 0xffd45a, 6, 0.1);
+    return true;
+  }
+
   addExplosion(position, damage, radius = 2.2, color = 0xffb347, meta = {}) {
+    const request = {
+      position: position.clone?.() ?? new THREE.Vector3(position.x, position.y, position.z),
+      damage,
+      radius,
+      color,
+      meta: { ...meta },
+    };
+    if (this.explosionDispatchDepth > 0) {
+      this.pendingExplosions.push(request);
+      return true;
+    }
+
+    this.explosionDispatchDepth = 1;
+    try {
+      this._resolveExplosion(request.position, request.damage, request.radius, request.color, request.meta);
+      let processed = 1;
+      while (this.pendingExplosions.length > 0 && processed < MAX_SYNCHRONOUS_EXPLOSIONS) {
+        const pending = this.pendingExplosions.shift();
+        this._resolveExplosion(pending.position, pending.damage, pending.radius, pending.color, pending.meta);
+        processed += 1;
+      }
+    } finally {
+      this.explosionDispatchDepth = 0;
+    }
+    return true;
+  }
+
+  _updatePendingExplosions() {
+    if (this.explosionDispatchDepth > 0 || this.pendingExplosions.length === 0) return;
+    this.explosionDispatchDepth = 1;
+    try {
+      let processed = 0;
+      while (this.pendingExplosions.length > 0 && processed < MAX_SYNCHRONOUS_EXPLOSIONS) {
+        const pending = this.pendingExplosions.shift();
+        this._resolveExplosion(pending.position, pending.damage, pending.radius, pending.color, pending.meta);
+        processed += 1;
+      }
+    } finally {
+      this.explosionDispatchDepth = 0;
+    }
+  }
+
+  _resolveExplosion(position, damage, radius = 2.2, color = 0xffb347, meta = {}) {
     const wave = new THREE.Mesh(
       new THREE.RingGeometry(radius * 0.15, radius, 36),
       new THREE.MeshBasicMaterial({
@@ -1718,7 +2078,8 @@ export class Game {
   }
 
   addParticleBurst(position, color = 0x9fe8ff, count = 10, baseScale = 0.16) {
-    for (let i = 0; i < count; i += 1) {
+    const available = Math.max(0, MAX_ACTIVE_PARTICLES - this.activeParticles.length);
+    for (let i = 0; i < Math.min(count, available); i += 1) {
       const particle = this._getParticle();
       const angle = Math.random() * Math.PI * 2;
       const speed = 1.4 + Math.random() * 2.4;
@@ -1755,7 +2116,8 @@ export class Game {
     tempVectorA.normalize();
     tempVectorB.set(-tempVectorA.z, 0, tempVectorA.x);
 
-    for (let i = 0; i < count; i += 1) {
+    const available = Math.max(0, MAX_ACTIVE_PARTICLES - this.activeParticles.length);
+    for (let i = 0; i < Math.min(count, available); i += 1) {
       const particle = this._getParticle();
       const distance = (0.18 + Math.random() * 0.82) * range;
       const side = Math.tan(halfAngle) * distance * (Math.random() - 0.5) * 1.35;
@@ -1771,8 +2133,8 @@ export class Game {
       particle.maxOpacity = particle.mesh.material.opacity;
       particle.mesh.scale.setScalar(baseScale * (0.7 + Math.random() * 0.9) * (0.82 + (1 - pressure) * 0.32));
       particle.velocity.copy(tempVectorA).multiplyScalar(speed)
-        .addScaledVector(tempVectorB, side * 0.42)
-        .add(new THREE.Vector3(0, 0.22 + Math.random() * 0.34, 0));
+        .addScaledVector(tempVectorB, side * 0.42);
+      particle.velocity.y += 0.22 + Math.random() * 0.34;
       particle.gravityScale = 0.12;
       particle.life = 0.45 + Math.random() * 0.34;
       particle.maxLife = particle.life;
@@ -1814,6 +2176,7 @@ export class Game {
         this.combat.update(gameplayDt);
         this.projectiles.update(gameplayDt);
         this._updateHazards(gameplayDt);
+        this._updatePendingExplosions();
         this._updateDestructibles(gameplayDt);
 
         const collected = this.lootSystem.update(gameplayDt, this.player, this.inventory);
@@ -2492,6 +2855,16 @@ export class Game {
 
   _clearDungeonRunState() {
     this.combat?._clearLockOn?.();
+    this.combat?._clearPendingAttacks?.();
+    this.combat?._clearMines?.();
+    this.pendingExplosions.length = 0;
+    this.explosionDispatchDepth = 0;
+    if (this.enemyAttackDirector) {
+      this.enemyAttackDirector.owner = null;
+      this.enemyAttackDirector.queue.length = 0;
+      this.enemyAttackDirector.requestTimes.clear();
+      this.enemyAttackDirector.handoffTimer = 0;
+    }
 
     for (const enemy of this.enemies) {
       enemy.dispose?.();
@@ -2522,20 +2895,37 @@ export class Game {
 
     for (const number of this.damageNumbers) {
       number.sprite?.removeFromParent?.();
+      number.sprite.visible = false;
+      if (this.damageNumberPool.length < MAX_POOLED_DAMAGE_NUMBERS) {
+        this.damageNumberPool.push(number);
+      } else {
+        number.texture?.dispose?.();
+        number.sprite?.material?.dispose?.();
+      }
     }
     this.damageNumbers.length = 0;
 
     for (const effect of this.activeHitEffects) {
       effect.mesh.visible = false;
       effect.mesh.removeFromParent();
-      this.hitEffectPool.push(effect);
+      if (this.hitEffectPool.length < MAX_POOLED_HIT_EFFECTS) {
+        this.hitEffectPool.push(effect);
+      } else {
+        effect.mesh.geometry?.dispose?.();
+        effect.mesh.material?.dispose?.();
+      }
     }
     this.activeHitEffects.length = 0;
 
     for (const particle of this.activeParticles) {
       particle.mesh.visible = false;
       particle.mesh.removeFromParent();
-      this.particlePool.push(particle);
+      if (this.particlePool.length < MAX_POOLED_PARTICLES) {
+        this.particlePool.push(particle);
+      } else {
+        particle.mesh.geometry?.dispose?.();
+        particle.mesh.material?.dispose?.();
+      }
     }
     this.activeParticles.length = 0;
   }
@@ -3361,6 +3751,7 @@ export class Game {
   }
 
   _updateEnemies(dt) {
+    this._updateEnemyAttackDirector(dt);
     for (let i = this.enemies.length - 1; i >= 0; i -= 1) {
       const enemy = this.enemies[i];
       enemy.update(dt, this);
@@ -3371,6 +3762,72 @@ export class Game {
         this.enemies.splice(i, 1);
       }
     }
+  }
+
+  _updateEnemyAttackDirector(dt) {
+    const director = this.enemyAttackDirector;
+    if (!director) return;
+    director.time += Math.max(0, dt);
+    director.handoffTimer = Math.max(0, director.handoffTimer - Math.max(0, dt));
+    this._pruneEnemyAttackQueue();
+
+    const owner = director.owner;
+    if (!owner) return;
+    const brainState = owner.brain?.state;
+    const customAttackActive = typeof owner.isAttackLeaseActive === 'function'
+      ? owner.isAttackLeaseActive()
+      : brainState === 'telegraph' || brainState === 'commit';
+    if (owner.dead || !this.enemies.includes(owner) || !customAttackActive) {
+      this.completeEnemyAttack(owner);
+    }
+  }
+
+  requestEnemyAttack(enemy) {
+    const director = this.enemyAttackDirector;
+    if (!director || !enemy || enemy.dead) return false;
+    director.requestTimes.set(enemy, director.time);
+    this._pruneEnemyAttackQueue();
+    if (director.owner && (director.owner.dead || !this.enemies.includes(director.owner))) {
+      director.requestTimes.delete(director.owner);
+      director.owner = null;
+      director.handoffTimer = 0;
+    }
+    if (director.owner === enemy) return true;
+    if (!director.queue.includes(enemy)) director.queue.push(enemy);
+    if (director.owner || director.handoffTimer > 0 || director.queue[0] !== enemy) return false;
+    director.queue.shift();
+    director.owner = enemy;
+    return true;
+  }
+
+  completeEnemyAttack(enemy, handoffDelay = ENEMY_ATTACK_HANDOFF_DELAY) {
+    const director = this.enemyAttackDirector;
+    if (!director) return;
+    director.queue = director.queue.filter((candidate) => candidate !== enemy);
+    director.requestTimes.delete(enemy);
+    if (director.owner !== enemy) return;
+    director.owner = null;
+    director.handoffTimer = Math.max(director.handoffTimer, handoffDelay);
+  }
+
+  cancelEnemyAttackRequest(enemy) {
+    const director = this.enemyAttackDirector;
+    if (!director) return;
+    director.queue = director.queue.filter((candidate) => candidate !== enemy);
+    director.requestTimes.delete(enemy);
+    if (director.owner === enemy) this.completeEnemyAttack(enemy);
+  }
+
+  _pruneEnemyAttackQueue() {
+    const director = this.enemyAttackDirector;
+    if (!director) return;
+    director.queue = director.queue.filter((candidate) => {
+      const alive = candidate && !candidate.dead && this.enemies.includes(candidate);
+      const fresh = director.time - (director.requestTimes.get(candidate) ?? -Infinity)
+        <= ENEMY_ATTACK_REQUEST_TTL;
+      if (!alive || !fresh) director.requestTimes.delete(candidate);
+      return alive && fresh;
+    });
   }
 
   _updateHazards(dt) {
@@ -3491,7 +3948,7 @@ export class Game {
 
       if (hazard.duration <= 0) {
         hazard.object.removeFromParent();
-        if (hazard.kind === 'clawSwipeTrail') this._disposeTimedEffectObject(hazard.object);
+        this._disposeTimedEffectObject(hazard.object);
         this.hazards.splice(i, 1);
       }
     }
@@ -3570,7 +4027,12 @@ export class Game {
         number.sprite.removeFromParent();
         number.sprite.visible = false;
         this.damageNumbers.splice(i, 1);
-        this.damageNumberPool.push(number);
+        if (this.damageNumberPool.length < MAX_POOLED_DAMAGE_NUMBERS) {
+          this.damageNumberPool.push(number);
+        } else {
+          number.texture?.dispose?.();
+          number.sprite.material?.dispose?.();
+        }
       }
     }
   }
@@ -3587,7 +4049,12 @@ export class Game {
         effect.mesh.removeFromParent();
         effect.mesh.visible = false;
         this.activeHitEffects.splice(i, 1);
-        this.hitEffectPool.push(effect);
+        if (this.hitEffectPool.length < MAX_POOLED_HIT_EFFECTS) {
+          this.hitEffectPool.push(effect);
+        } else {
+          effect.mesh.geometry?.dispose?.();
+          effect.mesh.material?.dispose?.();
+        }
       }
     }
   }
@@ -3604,7 +4071,12 @@ export class Game {
         particle.mesh.removeFromParent();
         particle.mesh.visible = false;
         this.activeParticles.splice(i, 1);
-        this.particlePool.push(particle);
+        if (this.particlePool.length < MAX_POOLED_PARTICLES) {
+          this.particlePool.push(particle);
+        } else {
+          particle.mesh.geometry?.dispose?.();
+          particle.mesh.material?.dispose?.();
+        }
       }
     }
   }
@@ -3613,7 +4085,9 @@ export class Game {
     const geometries = new Set();
     const materials = new Set();
     object?.traverse?.((child) => {
-      if (child.geometry) geometries.add(child.geometry);
+      if (child.geometry && !child.geometry.userData?.sharedTimedEffectGeometry) {
+        geometries.add(child.geometry);
+      }
       const childMaterials = Array.isArray(child.material) ? child.material : [child.material];
       for (const material of childMaterials) {
         if (material) materials.add(material);
@@ -3621,6 +4095,51 @@ export class Game {
     });
     for (const geometry of geometries) geometry.dispose?.();
     for (const material of materials) material.dispose?.();
+  }
+
+  _updateEnemyDeathExplosionEffect(effect, dt, progress) {
+    const age = 1 - progress;
+    const expansion = THREE.MathUtils.smoothstep(age, 0, 0.72);
+    const scale = effect.radius * THREE.MathUtils.lerp(0.08, 1.3, expansion);
+    const fade = Math.pow(progress, 1.35) * Math.min(1, age * 6 + 0.18);
+    effect.object.scale.setScalar(scale);
+    effect.object.rotation.y += dt * 2.4;
+    effect.object.rotation.z += dt * 1.1;
+    for (const child of effect.object.children) {
+      if (child.material) {
+        child.material.opacity = (child.material.userData.enemyDeathBaseOpacity ?? 0.7) * fade;
+      }
+    }
+  }
+
+  _updateEnemyDeathPartsEffect(effect, dt, progress) {
+    const fade = THREE.MathUtils.smoothstep(progress, 0, 0.38);
+    const drag = Math.exp(-0.52 * dt);
+    for (const part of effect.parts) {
+      part.velocity.y -= 5.8 * dt;
+      part.velocity.multiplyScalar(drag);
+      part.object.position.addScaledVector(part.velocity, dt);
+      part.object.rotation.x += part.angularVelocity.x * dt;
+      part.object.rotation.y += part.angularVelocity.y * dt;
+      part.object.rotation.z += part.angularVelocity.z * dt;
+
+      const floor = effect.floorY + 0.08;
+      if (part.object.position.y < floor) {
+        part.object.position.y = floor;
+        if (part.velocity.y < 0 && part.bounces < 1) {
+          part.velocity.y *= -0.24;
+          part.velocity.x *= 0.68;
+          part.velocity.z *= 0.68;
+          part.bounces += 1;
+        } else {
+          part.velocity.y = 0;
+        }
+      }
+
+      for (const material of part.materials) {
+        material.opacity = (material.userData.enemyDeathBaseOpacity ?? 1) * fade;
+      }
+    }
   }
 
   _updateTimedEffects(dt) {
@@ -3637,16 +4156,22 @@ export class Game {
       const progress = Math.max(0, effect.life / effect.maxLife);
       const reveal = THREE.MathUtils.smoothstep(1 - progress, 0, 0.78);
 
+      if (effect.kind === 'enemyDeathExplosion') {
+        this._updateEnemyDeathExplosionEffect(effect, dt, progress);
+      } else if (effect.kind === 'enemyDeathParts') {
+        this._updateEnemyDeathPartsEffect(effect, dt, progress);
+      }
+
       if (effect.sweepDraw && effect.object.geometry) {
         const drawCount = effect.object.geometry.index?.count ?? effect.object.geometry.attributes.position?.count ?? 0;
         effect.object.geometry.setDrawRange(0, Math.max(0, Math.floor(drawCount * reveal)));
       }
 
-      if (effect.object.material) {
+      if (!effect.kind && effect.object.material) {
         effect.object.material.opacity = progress * (effect.opacity ?? 0.52) * (effect.sweepDraw ? Math.max(0.35, reveal) : 1);
       }
 
-      if (effect.grow) {
+      if (!effect.kind && effect.grow) {
         effect.object.scale.multiplyScalar(1 + dt * 2.2);
       }
 
@@ -3966,6 +4491,18 @@ export class Game {
     this.lootSystem.rollDrop(enemy);
   }
 
+  _prepareEnemyDeathLanding(enemy) {
+    if (!enemy?.root) return null;
+    const landing = enemy.root.position.clone();
+    const surfaceY = this.dungeonController?.getSurfaceElevationAt?.(landing);
+    if (Number.isFinite(surfaceY)) landing.y = surfaceY;
+    enemy.deathStartPosition?.copy(enemy.root.position);
+    enemy.deathLandingPosition = landing.clone();
+    enemy.deathDropPosition = landing.clone();
+    enemy.deathFloorY = landing.y;
+    return landing;
+  }
+
   _prepareExternallyMovedEnemyDeath(enemy, externalMotionOwner = null) {
     if (!enemy?.root) return null;
     let landing = externalMotionOwner?._findTractorReleaseLanding?.(this, enemy)?.position ?? null;
@@ -4066,8 +4603,11 @@ export class Game {
         interruptTime: 0.22,
       });
 
-      if (!meta.chained && Math.random() < (meta.chainChance ?? 0.42)) {
-        this._chainLightning(enemy, dealt * (meta.chainDamageMultiplier ?? 0.36));
+      if (!meta.chained) {
+        meta.chainProcessed = true;
+        if (Math.random() < (meta.chainChance ?? 0.42)) {
+          this._chainLightning(enemy, dealt * (meta.chainDamageMultiplier ?? 0.36));
+        }
       }
     } else if (meta.element === 'corrosion') {
       enemy.applyStatus('corrosion', {

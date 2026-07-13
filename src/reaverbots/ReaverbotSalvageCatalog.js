@@ -3,6 +3,7 @@ const ASPECT_COLORS = Object.freeze({
   body: '#d7bd8a',
   eye: '#ff365b',
   weapon: '#ff9c55',
+  charge: '#ff7138',
   defense: '#7fd6e8',
   weakPoint: '#ffd66b',
 });
@@ -12,6 +13,7 @@ export const REAVERBOT_SALVAGE_ASPECTS = Object.freeze({
   body: { id: 'body', label: 'Chassis / Locomotion', baseDropChance: 0.34 },
   eye: { id: 'eye', label: 'Ruby Eye', baseDropChance: 0.08 },
   weapon: { id: 'weapon', label: 'Weapon', baseDropChance: 0.4 },
+  charge: { id: 'charge', label: 'Rocket Boost', baseDropChance: 0.32 },
   defense: { id: 'defense', label: 'Defense', baseDropChance: 0.34 },
   weakPoint: { id: 'weakPoint', label: 'Weak Point', baseDropChance: 0.22 },
 });
@@ -61,7 +63,7 @@ export const EYE_SALVAGE = Object.freeze({
 });
 
 export const WEAPON_SALVAGE = Object.freeze({
-  ramHorn: material('impactHorn', 'Impact Horn', 'weapon', 'common', ['impact', 'charge', 'melee'], ['ram arms', 'armor breakers'], 'A hardened striking horn designed to survive full-speed collisions.'),
+  rocketLance: material('rocketBoostCoupler', 'Rocket Boost Coupler', 'weapon', 'specialized', ['rocket', 'boost', 'propulsion'], ['dash boosters', 'rocket lances'], 'A reinforced thrust coupling that transfers rocket impulse into a forward lance without twisting the chassis.'),
   crusherJaw: material('torqueJawGear', 'High-Torque Jaw Gear', 'weapon', 'common', ['torque', 'grip', 'melee'], ['crusher arms', 'grappling tools'], 'A compact reduction gear that produces crushing force at close range.'),
   clawArm: material('serratedClawGear', 'Serrated Claw Gear', 'weapon', 'common', ['blade', 'sweep', 'melee'], ['claw arms', 'saw attachments'], 'A toothed drive gear and cutting talon from a sweeping claw assembly.'),
   pounceActuator: material('compressionPounceActuator', 'Compression Pounce Actuator', 'weapon', 'specialized', ['jump', 'impact', 'actuator'], ['Jump Springs', 'leaping strike arms'], 'A rapid-release actuator that converts stored compression into a forward leap.'),
@@ -76,6 +78,12 @@ export const WEAPON_SALVAGE = Object.freeze({
   rotorBlade: material('balancedRotorHub', 'Balanced Rotor Hub', 'weapon', 'specialized', ['spin', 'blade', 'balance'], ['rotor arms', 'spinning shield weapons'], 'A precision hub that keeps blades and counterweights stable at attack speed.'),
   tractorMagnet: material('horseshoeTractorCoil', 'Horseshoe Tractor Coil', 'weapon', 'rare', ['magnetic', 'tractor', 'lift'], ['Lift Arms', 'magnetic launchers'], 'A horseshoe-shaped field winding capable of suspending and accelerating an entire Reaverbot chassis.'),
   overloadCore: material('volatileOverloadCell', 'Volatile Overload Cell', 'weapon', 'rare', ['explosive', 'energy', 'unstable'], ['burst cartridges', 'self-destruct drones'], 'A dangerously overcharged energy cell recovered before its final detonation.'),
+});
+
+export const CHARGE_SALVAGE = Object.freeze({
+  spineJet: material('dorsalRocketCombustor', 'Dorsal Rocket Combustor', 'charge', 'specialized', ['rocket', 'fire', 'quadruped'], ['boost modules', 'dash armor'], 'A compact dorsal combustor designed to drive a low four-legged chassis through a committed charge.'),
+  twinRocketPack: material('twinJetManifold', 'Twin-Jet Thrust Manifold', 'charge', 'specialized', ['rocket', 'jetpack', 'thrust'], ['jetpacks', 'dash skates'], 'A paired fuel-and-ignition manifold that keeps two back-mounted rocket nozzles firing in balance.'),
+  vectorRocket: material('vectoringRocketNozzle', 'Vectoring Rocket Nozzle', 'charge', 'rare', ['rocket', 'vectoring', 'aerial'], ['air dashes', 'guided launchers'], 'A gimbaled heavy nozzle that angles beneath an aerial chassis to redirect its full impulse.'),
 });
 
 export const DEFENSE_SALVAGE = Object.freeze({
@@ -111,6 +119,7 @@ export const REAVERBOT_SALVAGE_SOURCE_MAPS = Object.freeze({
   body: BODY_SALVAGE,
   eye: EYE_SALVAGE,
   weapon: WEAPON_SALVAGE,
+  charge: CHARGE_SALVAGE,
   defense: DEFENSE_SALVAGE,
   weakPoint: WEAK_POINT_SALVAGE,
 });
@@ -148,6 +157,7 @@ export function createReaverbotSalvageProfile(genome) {
     createCandidate('body', bodySalvageId, bodySalvageLabel),
     createCandidate('eye', genome.modules?.eye?.id, 'Ruby Reaverbot Eye'),
     createCandidate('weapon', genome.modules?.weapon?.id, genome.modules?.weapon?.label),
+    createCandidate('charge', genome.modules?.charge?.id, genome.modules?.charge?.label),
     createCandidate('defense', genome.modules?.defense?.id, genome.modules?.defense?.label),
     createCandidate('weakPoint', genome.modules?.weakPoint?.id, genome.modules?.weakPoint?.label),
   ].filter(Boolean));
@@ -204,6 +214,7 @@ export function rollReaverbotSalvageDrops(genome, {
     const guaranteedPool = profile.filter((candidate) => (
       candidate.aspect === 'body'
       || candidate.aspect === 'weapon'
+      || candidate.aspect === 'charge'
       || candidate.aspect === 'defense'
     ));
     const guaranteed = chooseCandidate(guaranteedPool.length > 0 ? guaranteedPool : profile, random);

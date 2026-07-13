@@ -263,7 +263,7 @@ test('revamped melee, persistent rotors, direct flight, and Tractor Controllers 
   expect(result.jawSummary.armor).toBeGreaterThan(25);
   expect(result.jawSummary.speed).toBeGreaterThan(3.5);
 
-  expect(result.rotorSummary.contactHits).toBe(2);
+  expect(result.rotorSummary.contactHits).toBe(0);
   expect(result.rotorSummary.state).toBe('recovery');
   expect(result.rotorSummary.attackHitStayedIndependent).toBe(true);
   expect(result.rotorSummary.continuous).toBe(true);

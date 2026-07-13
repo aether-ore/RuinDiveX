@@ -364,6 +364,7 @@ test('solo Tractor Controller can lift and throw MegaMan, preserves his flight a
       position: arenaCenter.clone().add(new Vector3(0, 3, -2)),
     });
     configureController(abortController, 'solo-controller-abort-arena');
+    game._updateEnemyAttackDirector(0.5);
     const abortCommitEntry = enterPlayerCommit(abortController);
     abortController._updateTractorController(liftDuration * 0.42, game);
     const healthBeforeAllyAbort = player.health;

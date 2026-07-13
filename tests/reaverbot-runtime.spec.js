@@ -801,7 +801,7 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
     };
   });
 
-  expect(result.catalogMaterialCount).toBe(58);
+  expect(result.catalogMaterialCount).toBe(61);
   expect(result.bodyPlan).toBe('hopper');
   expect(result.profile).toHaveLength(6);
   expect(result.profile.find((candidate) => candidate.aspect === 'body')).toEqual({
@@ -958,4 +958,162 @@ test('rush enemies acquire from range and expose accelerating red attack warning
   expect(result.charge.commitColor).toBe(0xff2020);
   expect(result.charge.commitIntensity).toBeGreaterThanOrEqual(0.2);
   expect(result.minimumEncounterSize).toBeGreaterThanOrEqual(3);
+});
+
+test('attack pacing serializes enemies while rocket chargers travel slowly and retreat after impact', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=attack-pacing-rocket-proof');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const Vector3 = game.player.root.position.constructor;
+    game.stop();
+    for (const enemy of [...game.enemies]) {
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+    game.enemyAttackDirector.owner = null;
+    game.enemyAttackDirector.handoffTimer = 0;
+    game.enemyAttackDirector.queue.length = 0;
+
+    const controller = game.dungeonController;
+    const originalWalkable = controller.isPositionWalkable;
+    const originalElevation = controller.getSurfaceElevationAt;
+    const originalEnemyNavigation = controller.getEnemyNavigationDirection;
+    const originalSafeZone = controller.isPlayerInSafeZone;
+    controller.isPositionWalkable = () => true;
+    controller.getSurfaceElevationAt = (position) => position.y;
+    controller.getEnemyNavigationDirection = (enemy, target) => target.clone().sub(enemy.root.position).setY(0).normalize();
+    controller.isPlayerInSafeZone = () => false;
+
+    const base = game.player.root.position.clone();
+    const chargers = [];
+    for (let slot = 0; slot < 3; slot += 1) {
+      let charger = null;
+      for (let variant = 0; variant < 180 && !charger; variant += 1) {
+        const candidate = window.spawnReaverbot({
+          archetypeId: 'pursuer',
+          seed: `pacing-charge:${slot}:${variant}`,
+          position: base.clone().add(new Vector3((slot - 1) * 1.6, 0, 7 + slot * 0.4)),
+        });
+        if (candidate.genome.modules.weapon.attackKind === 'charge') charger = candidate;
+        else {
+          const index = game.enemies.indexOf(candidate);
+          if (index >= 0) game.enemies.splice(index, 1);
+          candidate.dispose?.();
+          candidate.root.removeFromParent();
+        }
+      }
+      if (!charger) throw new Error('Unable to generate pacing charger');
+      charger.brain.cooldown = 0;
+      chargers.push(charger);
+    }
+
+    for (const charger of chargers) {
+      const toPlayer = base.clone().sub(charger.root.position).setY(0).normalize();
+      charger._updatePositionState(1 / 60, game, toPlayer, charger.root.position.distanceTo(base));
+    }
+    const simultaneousAttackers = chargers.filter((enemy) => ['telegraph', 'commit'].includes(enemy.brain.state)).length;
+    const first = game.enemyAttackDirector.owner;
+    game.completeEnemyAttack(first);
+    first.brain.state = 'recovery';
+    first.brain.stateTime = 0;
+
+    for (const charger of chargers.filter((enemy) => enemy !== first)) {
+      charger.brain.cooldown = 0;
+      const toPlayer = base.clone().sub(charger.root.position).setY(0).normalize();
+      charger._updatePositionState(1 / 60, game, toPlayer, charger.root.position.distanceTo(base));
+    }
+    const attackedDuringHandoff = chargers.filter((enemy) => enemy !== first && ['telegraph', 'commit'].includes(enemy.brain.state)).length;
+    game._updateEnemyAttackDirector(0.5);
+    for (const charger of chargers.filter((enemy) => enemy !== first)) {
+      charger.brain.cooldown = 0;
+      const toPlayer = base.clone().sub(charger.root.position).setY(0).normalize();
+      charger._updatePositionState(1 / 60, game, toPlayer, charger.root.position.distanceTo(base));
+    }
+    const nextOwnerIndex = chargers.indexOf(game.enemyAttackDirector.owner);
+
+    first.root.position.copy(base).add(new Vector3(0, 0, 1.55));
+    first.brain.state = 'recovery';
+    first.brain.stateTime = 0;
+    const retreatBefore = first.root.position.distanceTo(base);
+    first._updateRecoveryState(0.3, game);
+    const retreatAfter = first.root.position.distanceTo(base);
+
+    const chargeDuration = first._getStateDuration('commit');
+    first.root.position.copy(base).add(new Vector3(0, 0, 7.5));
+    first.brain.state = 'commit';
+    first.brain.stateTime = 0;
+    first.brain.commitStart.copy(first.root.position);
+    first.brain.attackDirection.set(0, 0, -1);
+    first.brain.targetPosition.copy(first.root.position).add(new Vector3(0, 0, -10));
+    first.brain.attackHit = true;
+    const chargeStart = first.root.position.clone();
+    const originalParticleBurst = game.addParticleBurst;
+    const jetTrailBursts = [];
+    game.addParticleBurst = (position, color, count, scale) => {
+      if (count === 2) jetTrailBursts.push({ position: position.clone(), color, scale });
+    };
+    first._updateCommitState(chargeDuration * 0.35, game);
+    game.addParticleBurst = originalParticleBurst;
+    const earlyTravelRatio = first.root.position.distanceTo(chargeStart) / 10;
+    const nozzlePositions = first.visual.chargeModule.nozzles.map((nozzle) => nozzle.getWorldPosition(new Vector3()));
+    first._animateVisual(1 / 60);
+    const flameCount = first.visual.chargeModule.flames.filter((flame) => flame.visible).length;
+    const trailAtNozzle = jetTrailBursts.every((burst) => (
+      nozzlePositions.some((position) => position.distanceTo(burst.position) < 0.05)
+    ));
+
+    game.completeEnemyAttack(game.enemyAttackDirector.owner);
+    game._updateEnemyAttackDirector(0.5);
+    game.enemyAttackDirector.queue.length = 0;
+    game.enemyAttackDirector.requestTimes.clear();
+    game.enemyAttackDirector.handoffTimer = 0;
+    first.brain.state = 'telegraph';
+    first.brain.stateTime = 0;
+    first.statusEffects.stagger.duration = 1;
+    const interruptedLeaseClaimed = game.requestEnemyAttack(first);
+    first._updateCustomBehavior(0.016, game);
+    const interruptedState = first.brain.state;
+    const interruptedLeaseReleased = game.enemyAttackDirector.owner !== first;
+    first.statusEffects.stagger.duration = 0;
+
+    controller.isPositionWalkable = originalWalkable;
+    controller.getSurfaceElevationAt = originalElevation;
+    controller.getEnemyNavigationDirection = originalEnemyNavigation;
+    controller.isPlayerInSafeZone = originalSafeZone;
+    return {
+      simultaneousAttackers,
+      attackedDuringHandoff,
+      nextOwnerIndex,
+      retreatBefore,
+      retreatAfter,
+      chargeDuration,
+      earlyTravelRatio,
+      chargeModuleId: first.genome.modules.charge?.id ?? null,
+      nozzleCount: first.visual.chargeModule.nozzles.length,
+      flameCount,
+      jetTrailBurstCount: jetTrailBursts.length,
+      trailAtNozzle,
+      interruptedState,
+      interruptedLeaseClaimed,
+      interruptedLeaseReleased,
+    };
+  });
+
+  expect(result.simultaneousAttackers).toBe(1);
+  expect(result.attackedDuringHandoff).toBe(0);
+  expect(result.nextOwnerIndex).toBeGreaterThanOrEqual(1);
+  expect(result.retreatAfter).toBeGreaterThan(result.retreatBefore);
+  expect(result.chargeDuration).toBeGreaterThanOrEqual(0.9);
+  expect(result.earlyTravelRatio).toBeLessThan(0.4);
+  expect(result.chargeModuleId).toBeTruthy();
+  expect(result.nozzleCount).toBeGreaterThan(0);
+  expect(result.flameCount).toBe(result.nozzleCount);
+  expect(result.jetTrailBurstCount).toBeGreaterThanOrEqual(result.nozzleCount);
+  expect(result.trailAtNozzle).toBe(true);
+  expect(result.interruptedState).toBe('recovery');
+  expect(result.interruptedLeaseClaimed).toBe(true);
+  expect(result.interruptedLeaseReleased).toBe(true);
 });

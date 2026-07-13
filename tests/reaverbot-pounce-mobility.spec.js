@@ -192,6 +192,10 @@ test('pouncers replace ordinary locomotion with spring quadruped, paired spring,
     game.player.root.position.set(0.1, 0, 0);
     const closeDirection = game.player.root.position.clone().sub(closePouncer.root.position).setY(0).normalize();
     closePouncer._updatePositionState(0.016, game, closeDirection, 0.1);
+    const closeRangeStateDuringHandoff = closePouncer.brain.state;
+    game._updateEnemyAttackDirector(0.5);
+    closePouncer.brain.cooldown = 0;
+    closePouncer._updatePositionState(0.016, game, closeDirection, 0.1);
     const closeRangeState = closePouncer.brain.state;
     const closeRangeLandingTravel = Math.hypot(
       closePouncer.brain.targetPosition.x - closePouncer.root.position.x,
@@ -262,6 +266,7 @@ test('pouncers replace ordinary locomotion with spring quadruped, paired spring,
         explosionRadius: explosionCalls[0]?.radius ?? 0,
       },
       closeRangeState,
+      closeRangeStateDuringHandoff,
       closeRangeLandingTravel,
     };
   });
@@ -316,6 +321,7 @@ test('pouncers replace ordinary locomotion with spring quadruped, paired spring,
   expect(result.shockPouncer.completedAttackState).toBe('recovery');
   expect(result.shockPouncer.explosionCount).toBe(1);
   expect(result.shockPouncer.explosionRadius).toBeCloseTo(2.35, 5);
+  expect(result.closeRangeStateDuringHandoff).toBe('position');
   expect(result.closeRangeState).toBe('telegraph');
   expect(result.closeRangeLandingTravel).toBeGreaterThanOrEqual(2.35);
 

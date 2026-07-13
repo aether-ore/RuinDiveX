@@ -532,7 +532,7 @@ export class ProjectileSystem {
 
   clear() {
     for (let i = this.active.length - 1; i >= 0; i -= 1) {
-      this._deactivate(i, false, false);
+      this._deactivate(i, false, false, false);
     }
   }
 
@@ -974,7 +974,7 @@ export class ProjectileSystem {
     this.game.addParticleBurst(origin, color, 10, projectile.radius * 0.38);
   }
 
-  _deactivate(index, expired = false, allowCluster = true) {
+  _deactivate(index, expired = false, allowCluster = true, emitEffect = true) {
     const projectile = this.active[index];
     this.active.splice(index, 1);
     if (expired && projectile.explodeOnExpire && projectile.explosiveRadius > 0) {
@@ -994,7 +994,9 @@ export class ProjectileSystem {
     if (allowCluster) {
       this._spawnClusterProjectiles(projectile);
     }
-    this.game.addParticleBurst(projectile.mesh.position, projectile.mesh.material.color.getHex(), 10, projectile.radius);
+    if (emitEffect) {
+      this.game.addParticleBurst(projectile.mesh.position, projectile.mesh.material.color.getHex(), 10, projectile.radius);
+    }
     projectile.mesh.visible = false;
     projectile.mesh.removeFromParent();
     projectile.source = null;

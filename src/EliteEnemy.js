@@ -169,13 +169,14 @@ export class EliteEnemy extends Enemy {
     return player;
   }
 
-  onDeath(game) {
-    if (this.affix.id === 'explosiveCore') {
-      game.addExplosion(this.root.position, this.stats.damage * 2.2, 2.25, this.affix.color);
+  onDeath(game, meta = {}) {
+    super.onDeath(game);
+    if (this.affix.id === 'explosiveCore' && !meta.selfDestruct) {
+      game.addExplosion(this.root.position, this.stats.damage * 2.2, 2.25, this.affix.color, { source: this });
     }
 
     if (this.affix.id === 'burningCore') {
-      game.addFireZone(this.root.position, this.stats.damage * 0.5, 2.4, 1.25);
+      game.addFireZone(this.root.position, this.stats.damage * 0.5, 2.4, 1.25, { source: this });
     }
 
     if (this.affix.id === 'refractorRich') {

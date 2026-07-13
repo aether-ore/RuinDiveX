@@ -14,6 +14,9 @@ const GORUBESSHU_OBJ = 'Gorubesshu.obj';
 const GORUBESSHU_TARGET_HEIGHT = 2.35;
 const SHARUKURUSU_TARGET_HEIGHT = 2.42;
 const GORUBESSHU_RIG_ROOT = 'gorubesshuRigRoot';
+const DEATH_SEQUENCE_DURATION = 1.25;
+const DEATH_LIMP_FALL_DURATION = 0.44;
+const DEATH_BODY_FADE_DURATION = 0.18;
 const GORUBESSHU_PART_GROUPS = {
   torso: 'gorubesshuTorsoPivot',
   head: 'gorubesshuHeadPivot',
@@ -606,8 +609,10 @@ export class Enemy {
     this.id = `enemy-${nextEnemyId++}`;
     this.isElite = false;
     this.dead = false;
+    this.disposed = false;
     this.radius = (this.type.radius ?? 0.42) * this.type.scale;
     this.attackCooldown = Math.random() * this.type.attackCooldown;
+    this.postAttackRetreatTimer = 0;
     this.flashTimer = 0;
     this.flashDuration = 0.16;
     this.flashColor = new THREE.Color(0xe61f18);
@@ -617,12 +622,17 @@ export class Enemy {
     this.hitStopTimer = 0;
     this.hitWobbleStrength = 0;
     this.hitWobbleSeed = Math.random() * Math.PI * 2;
-    this.deathTimer = 1.25;
+    this.deathTimer = DEATH_SEQUENCE_DURATION;
     this.deathFallAxis = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
     this.deathStartRotation = new THREE.Euler();
     this.deathStartPosition = new THREE.Vector3();
     this.deathLandingPosition = null;
     this.deathDropPosition = null;
+    this.deathEffectTriggered = false;
+    this.deathPhase = 'alive';
+    this.deathLimpParts = [];
+    this.deathLimpSettled = false;
+    this.deathLastOpacity = null;
     this.knockback = new THREE.Vector3();
     this.statusEffects = createStatusState();
     // External control is an exclusive, short-lived ownership claim used by
@@ -745,7 +755,7 @@ export class Enemy {
 
   update(dt, game) {
     if (this.dead) {
-      this._updateDeath(dt);
+      this._updateDeath(dt, game);
       this._updateHealthBar(game.camera);
       return;
     }
@@ -855,21 +865,27 @@ export class Enemy {
     const attackRateMultiplier = this._getStatusAttackRateMultiplier();
 
     this.attackCooldown -= dt * attackRateMultiplier;
+    this.postAttackRetreatTimer = Math.max(0, this.postAttackRetreatTimer - dt);
 
     const desiredDistance = this.type.ranged ? this.stats.attackRange * 0.72 : this.stats.attackRange;
     const hasVerticalAttackAccess = this.type.ranged || verticalGap <= 1.35;
     const hitStopped = this.hitStopTimer > 0;
     const shouldRecenter = game.dungeonController?.shouldEnemyRecenter?.(this) ?? false;
+    const retreating = this.postAttackRetreatTimer > 0 && hasVerticalAttackAccess;
     const moving = !controlLocked
       && !hitStopped
-      && (distance > desiredDistance || !hasVerticalAttackAccess || shouldRecenter);
+      && (retreating || distance > desiredDistance || !hasVerticalAttackAccess || shouldRecenter);
 
     if (moving) {
+      const navigationTarget = retreating
+        ? tempPosition.copy(this.root.position).addScaledVector(tempDirection, -3)
+        : player.root.position;
       const navigationDirection = game.dungeonController?.getEnemyNavigationDirection?.(
         this,
-        player.root.position,
-      ) ?? game.dungeonController?.getNavigationDirection?.(this.root.position, player.root.position);
+        navigationTarget,
+      ) ?? game.dungeonController?.getNavigationDirection?.(this.root.position, navigationTarget);
       tempNavigationDirection.copy(navigationDirection ?? tempDirection);
+      if (retreating && !navigationDirection) tempNavigationDirection.multiplyScalar(-1);
       if (tempNavigationDirection.lengthSq() > 0.0001) {
         tempNavigationDirection.normalize();
       }
@@ -880,9 +896,12 @@ export class Enemy {
       && !hitStopped
       && hasVerticalAttackAccess
       && distance <= this.stats.attackRange
-      && this.attackCooldown <= 0) {
+      && this.attackCooldown <= 0
+      && (game.requestEnemyAttack?.(this) ?? true)) {
       this._attack(game, tempDirection);
       this.attackCooldown = this.stats.attackCooldown;
+      this.postAttackRetreatTimer = Math.max(this.postAttackRetreatTimer, 0.62);
+      if (!this.isAttackLeaseActive()) game.completeEnemyAttack?.(this);
     }
 
     this.animation.update(dt, { moving, moveAmount: moving ? 1 : 0 });
@@ -1115,16 +1134,24 @@ export class Enemy {
     }
 
     if (this.health <= 0 && !this.dead) {
-      this.clearExternalMotion('death');
       this.dead = true;
-      this.deathTimer = 1.25;
+      // Mark death before releasing external controllers. Release callbacks are
+      // allowed to deal damage, so this prevents a lethal callback from
+      // re-entering takeDamage and initializing the same death twice.
+      this.clearExternalMotion('death');
+      this.deathTimer = DEATH_SEQUENCE_DURATION;
       this.deathFloorY = this.root.position.y;
       this.deathStartRotation.copy(this.root.rotation);
       this.deathStartPosition.copy(this.root.position);
       this.deathLandingPosition = null;
       this.deathDropPosition = null;
+      this.deathEffectTriggered = false;
+      this.deathPhase = 'fall';
+      this.deathLimpSettled = false;
+      this.deathLastOpacity = null;
       this.healthBar.visible = false;
       this._applyRagdollPose();
+      this._captureDeathLimpParts();
       this.animation.playDead();
     }
 
@@ -1345,7 +1372,7 @@ export class Enemy {
     }
 
     loadModel().then((template) => {
-      if (!template || this.dead) {
+      if (!template || this.dead || this.disposed) {
         return;
       }
 
@@ -1689,6 +1716,7 @@ export class Enemy {
       attack.timer = 0;
       attack.fired = false;
       this._resetHorokkoAttackPose();
+      game.completeEnemyAttack?.(this);
     }
 
     return true;
@@ -1804,6 +1832,7 @@ export class Enemy {
       attack.particleTimer = 0;
       attack.telegraphTimer = 0;
       this._resetHorokkoAttackPose();
+      game.completeEnemyAttack?.(this);
     }
 
     return true;
@@ -1872,6 +1901,10 @@ export class Enemy {
     return reduction;
   }
 
+  isAttackLeaseActive() {
+    return Boolean(this.horokkoAttack?.active || this.gorubesshuAttack?.active);
+  }
+
   _applyStatusVisuals() {
     const color = this._getStatusVisualColor();
 
@@ -1937,14 +1970,71 @@ export class Enemy {
     }
   }
 
-  _updateDeath(dt) {
-    this.deathTimer -= dt;
-    const progress = THREE.MathUtils.clamp(1 - this.deathTimer / 1.25, 0, 1);
-    const fallEase = 1 - Math.pow(1 - progress, 3);
-    const fade = THREE.MathUtils.clamp(this.deathTimer / 0.55, 0, 1);
+  _captureDeathLimpParts() {
+    const candidates = [];
+    const seen = new Set();
+    const addCandidate = (object) => {
+      if (!object || object === this.root || seen.has(object)) return;
+      seen.add(object);
+      candidates.push(object);
+    };
 
-    this.root.rotation.x = THREE.MathUtils.lerp(this.deathStartRotation.x, this.deathFallAxis.z * Math.PI * 0.5, fallEase);
-    this.root.rotation.z = THREE.MathUtils.lerp(this.deathStartRotation.z, -this.deathFallAxis.x * Math.PI * 0.5, fallEase);
+    if (this.visual?.frame) {
+      for (const limb of this.visual.frame.limbs ?? []) addCandidate(limb.pivot);
+      for (const wing of this.visual.frame.wings ?? []) addCandidate(wing.pivot);
+      addCandidate(this.visual.frame.headAssembly ?? this.visual.frame.head);
+      addCandidate(this.visual.frame.tailPivot);
+    } else {
+      const limpJointNames = [
+        'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow',
+        'leftHip', 'rightHip', 'leftKnee', 'rightKnee', 'neck',
+      ];
+      for (const name of limpJointNames) addCandidate(this.humanoid?.joints?.get(name));
+    }
+
+    this.deathLimpParts = candidates.slice(0, 10).map((object, index) => {
+      const side = index % 2 === 0 ? -1 : 1;
+      return {
+        object,
+        baseRotation: object.rotation.clone(),
+        phase: this.hitWobbleSeed + index * 1.37,
+        sagX: 0.2 + (index % 3) * 0.075,
+        sagY: side * (0.04 + (index % 2) * 0.035),
+        sagZ: side * (0.16 + (index % 4) * 0.045),
+      };
+    });
+  }
+
+  _updateDeathLimpPose(progress) {
+    if (progress >= 1 && this.deathLimpSettled) return;
+    const settle = THREE.MathUtils.smoothstep(progress, 0, 1);
+    const looseSwing = Math.sin(progress * Math.PI * 2.4) * (1 - settle);
+    for (const part of this.deathLimpParts) {
+      if (!part.object?.parent) continue;
+      const flutter = Math.sin(progress * Math.PI * 3.2 + part.phase) * (1 - settle) * 0.12;
+      part.object.rotation.set(
+        part.baseRotation.x + part.sagX * settle + looseSwing * 0.08 + flutter,
+        part.baseRotation.y + part.sagY * settle,
+        part.baseRotation.z + part.sagZ * settle + flutter * 0.8,
+      );
+    }
+    if (progress >= 1) this.deathLimpSettled = true;
+  }
+
+  _updateDeath(dt, game) {
+    this.deathTimer = Math.max(0, this.deathTimer - dt);
+    const elapsed = DEATH_SEQUENCE_DURATION - this.deathTimer;
+    const fallProgress = THREE.MathUtils.clamp(elapsed / DEATH_LIMP_FALL_DURATION, 0, 1);
+    const fallEase = 1 - Math.pow(1 - fallProgress, 3);
+    const postFallElapsed = Math.max(0, elapsed - DEATH_LIMP_FALL_DURATION);
+    const fadeProgress = THREE.MathUtils.clamp(postFallElapsed / DEATH_BODY_FADE_DURATION, 0, 1);
+    const fade = 1 - THREE.MathUtils.smoothstep(fadeProgress, 0, 1);
+
+    const limpTumble = Math.sin(fallProgress * Math.PI * 2.2 + this.hitWobbleSeed)
+      * (1 - fallProgress) * 0.12;
+    this.root.rotation.x = THREE.MathUtils.lerp(this.deathStartRotation.x, this.deathFallAxis.z * Math.PI * 0.5, fallEase) + limpTumble;
+    this.root.rotation.z = THREE.MathUtils.lerp(this.deathStartRotation.z, -this.deathFallAxis.x * Math.PI * 0.5, fallEase) - limpTumble * 0.7;
+    this._updateDeathLimpPose(fallProgress);
     if (this.deathLandingPosition) {
       tempPosition.copy(this.deathLandingPosition);
       tempPosition.y -= 0.08;
@@ -1953,7 +2043,22 @@ export class Enemy {
       const deathFloorY = this.deathFloorY ?? this.root.position.y;
       this.root.position.y = THREE.MathUtils.lerp(this.root.position.y, deathFloorY - 0.08, Math.min(1, dt * 5));
     }
-    setObjectOpacity(this.root, fade);
+
+    if (fallProgress >= 1 && !this.deathEffectTriggered && game?.addEnemyDeathEffect) {
+      this.deathEffectTriggered = game.addEnemyDeathEffect(this) !== false;
+      this.deathPhase = 'burst';
+    } else if (fallProgress < 1) {
+      this.deathPhase = 'fall';
+    } else if (fadeProgress >= 1) {
+      this.deathPhase = 'debris';
+    }
+
+    if (this.deathLastOpacity === null
+      || Math.abs(fade - this.deathLastOpacity) >= 0.012
+      || (fade === 0 && this.deathLastOpacity !== 0)) {
+      setObjectOpacity(this.root, fade);
+      this.deathLastOpacity = fade;
+    }
   }
 
   modifyDamageTaken(amount, meta = {}) {
@@ -2007,7 +2112,39 @@ export class Enemy {
   }
 
   onDeath(game) {
+    game?.cancelEnemyAttackRequest?.(this);
     return game;
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.dead = true;
+    this._runtimeGame?.cancelEnemyAttackRequest?.(this);
+    this.clearExternalMotion?.('dispose');
+
+    const geometries = new Set();
+    const materials = new Set();
+    this.root?.traverse?.((object) => {
+      let current = object;
+      let belongsToCachedExternalModel = false;
+      while (current) {
+        if (current === this.externalModelGroup) {
+          belongsToCachedExternalModel = true;
+          break;
+        }
+        if (current === this.root) break;
+        current = current.parent;
+      }
+      if (object.geometry && !belongsToCachedExternalModel) geometries.add(object.geometry);
+      const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of objectMaterials) {
+        if (material) materials.add(material);
+      }
+    });
+    for (const geometry of geometries) geometry.dispose?.();
+    for (const material of materials) material.dispose?.();
+    this._materialStates.length = 0;
   }
 
   _attack(game, direction) {

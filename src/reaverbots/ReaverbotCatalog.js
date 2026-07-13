@@ -6,7 +6,7 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
     label: 'Pursuer',
     role: 'chaser',
     bodyPlans: ['quadruped', 'lowBiped'],
-    weapons: ['ramHorn', 'crusherJaw', 'clawArm'],
+    weapons: ['rocketLance', 'crusherJaw', 'clawArm'],
     defenses: ['armoredSkull', 'sidePlates', 'reactivePlate'],
     weakPoints: ['rearBattery', 'legJoint', 'clawPalm'],
     paletteId: 'pursuerOchre',
@@ -167,7 +167,7 @@ export const REAVERBOT_ARCHETYPES = Object.freeze({
     label: 'Pack Hunter',
     role: 'flanker',
     bodyPlans: ['quadruped', 'lowBiped'],
-    weapons: ['crusherJaw', 'ramHorn', 'clawArm'],
+    weapons: ['crusherJaw', 'rocketLance', 'clawArm'],
     defenses: ['sidePlates', 'reactivePlate'],
     weakPoints: ['legJoint', 'rearBattery', 'clawPalm'],
     paletteId: 'packSand',
@@ -273,10 +273,26 @@ export const REAVERBOT_BODY_PLANS = Object.freeze({
   },
 });
 
+export const REAVERBOT_CHARGE_MODULES = Object.freeze({
+  spineJet: {
+    id: 'spineJet', label: 'Dorsal Spine Jet', mountRole: 'back', nozzleCount: 1,
+    tags: ['rocket', 'boost', 'quadruped', 'dorsal'],
+  },
+  twinRocketPack: {
+    id: 'twinRocketPack', label: 'Twin Rocket Pack', mountRole: 'back', nozzleCount: 2,
+    tags: ['rocket', 'boost', 'jetpack', 'paired'],
+  },
+  vectorRocket: {
+    id: 'vectorRocket', label: 'Vectoring Belly Rocket', mountRole: 'belly', nozzleCount: 1,
+    tags: ['rocket', 'boost', 'aerial', 'vectoring'],
+  },
+});
+
 export const REAVERBOT_WEAPONS = Object.freeze({
-  ramHorn: {
-    id: 'ramHorn', label: 'Ram Horn', tags: ['melee', 'charge'], requires: ['forwardMount'],
-    attackKind: 'charge', range: 1.15, damageScale: 1.08, meleeArmorBonus: 22, healthScale: 1.18, threatCost: 2,
+  rocketLance: {
+    id: 'rocketLance', label: 'Rocket Lance', tags: ['melee', 'charge', 'rocketBoost'], requires: ['forwardMount'],
+    attackKind: 'charge', range: 1.15, damageScale: 1.08, commitDuration: 0.9, recoveryDuration: 1.1,
+    meleeArmorBonus: 22, healthScale: 1.18, threatCost: 2,
   },
   crusherJaw: {
     id: 'crusherJaw', label: 'Crushing Jaw', tags: ['melee', 'bite', 'combo', 'shockwave'], requires: ['forwardMount'], bodyPlans: ['quadruped'],
@@ -342,7 +358,7 @@ export const REAVERBOT_WEAPONS = Object.freeze({
   rotorBlade: {
     id: 'rotorBlade', label: 'Rotor Blade', tags: ['melee', 'spin', 'area'], requires: ['stablePose'],
     attackKind: 'charge', range: 1.75, damageScale: 0.72, threatCost: 4,
-    meleeArmorBonus: 26, healthScale: 1.22,
+    meleeArmorBonus: 26, healthScale: 1.22, recoveryDuration: 1.15,
     continuousContactDamage: true, contactDamageScale: 0.72, contactRadius: 1.65, contactHitInterval: 0.6,
   },
   tractorMagnet: {

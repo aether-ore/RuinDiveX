@@ -3,6 +3,7 @@ import {
   LINKED_WEAK_POINT_WEIGHTS,
   REAVERBOT_ARCHETYPES,
   REAVERBOT_BODY_PLANS,
+  REAVERBOT_CHARGE_MODULES,
   REAVERBOT_DEFENSES,
   REAVERBOT_EYE_COLOR,
   REAVERBOT_PALETTES,
@@ -11,7 +12,7 @@ import {
 } from './ReaverbotCatalog.js';
 import { hashSeed, SeededRandom } from './SeededRandom.js';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const CANDIDATE_COUNT = 8;
 const GLOBAL_REAVERBOT_MOVE_SPEED_SCALE = 1.22;
 const NAME_PREFIXES = ['AR', 'BA', 'DA', 'GA', 'KA', 'KO', 'MU', 'NA', 'OM', 'RA', 'SA', 'TO', 'UR', 'VA', 'ZA'];
@@ -19,7 +20,7 @@ const NAME_SUFFIXES = ['EN', 'GAR', 'KIR', 'MOL', 'ORA', 'RAK', 'TUM', 'VAN', 'X
 const SPRING_MOBILITY_IDS = new Set(['springQuadruped', 'pairedSprings', 'monoPogo']);
 const CRAWLER_MOBILITY_IDS = new Set(['articulatedCrawler', 'wheelBogies']);
 const WEAPON_WEAK_POINT_WEIGHTS = Object.freeze({
-  ramHorn: [['legJoint', 4], ['rearBattery', 3]],
+  rocketLance: [['legJoint', 4], ['rearBattery', 3]],
   crusherJaw: [['rearBattery', 3], ['legJoint', 3], ['eyeLens', 1]],
   clawArm: [['clawPalm', 10]],
   pounceActuator: [['bellyCore', 7], ['legJoint', 2]],
@@ -233,6 +234,19 @@ function createWeaponVariant(weapon, rng, archetype) {
   return weapon;
 }
 
+function createChargeModule(body, weapon, rng) {
+  if (weapon.attackKind !== 'charge') return null;
+  const definition = body.tags.includes('aerial')
+    ? REAVERBOT_CHARGE_MODULES.vectorRocket
+    : body.id === 'quadruped' || body.id === 'crawler'
+      ? REAVERBOT_CHARGE_MODULES.spineJet
+      : REAVERBOT_CHARGE_MODULES.twinRocketPack;
+  return {
+    ...definition,
+    thrustScale: Number(rng.float(0.94, 1.16).toFixed(3)),
+  };
+}
+
 function pickDefense(rng, archetype, body) {
   const compatible = archetype.defenses
     .map((id) => REAVERBOT_DEFENSES[id])
@@ -385,6 +399,7 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
   const mobility = createMobilityVariant(rng.fork('mobility'), archetype, body, context);
   const weaponDefinition = pickWeapon(rng.fork('weapon'), archetype, body);
   const weapon = createWeaponVariant(weaponDefinition, rng.fork('weaponVariant'), archetype);
+  const charge = createChargeModule(body, weapon, rng.fork('chargeModule'));
   const defense = weapon.id === 'clawArm'
     ? null
     : pickDefense(rng.fork('defense'), archetype, body);
@@ -429,6 +444,7 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
         dominant: true,
       },
       weapon: { ...weapon, tags: [...weapon.tags] },
+      charge: charge ? { ...charge, tags: [...charge.tags] } : null,
       defense: defense ? { ...defense, tags: [...defense.tags] } : null,
       weakPoint: { ...weakPoint },
     },
@@ -450,6 +466,7 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
       archetype.role,
       ...body.tags,
       ...weapon.tags,
+      ...(charge?.tags ?? []),
       ...(defense?.tags ?? []),
     ])],
   };
@@ -496,6 +513,7 @@ function applyBodyDefenseOverrides(genome) {
     archetype.role,
     ...genome.body.tags,
     ...genome.modules.weapon.tags,
+    ...(genome.modules.charge?.tags ?? []),
     ...defense.tags,
   ])];
   return genome;
@@ -511,6 +529,8 @@ export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverrid
   const archetype = REAVERBOT_ARCHETYPES[genome?.archetypeId];
   const defensePayload = genome?.modules?.defense;
   const weaponPayload = genome?.modules?.weapon;
+  const chargePayload = genome?.modules?.charge;
+  const chargeDefinition = REAVERBOT_CHARGE_MODULES[chargePayload?.id];
   const mobilityId = genome?.body?.mobilityId;
   const springMobility = genome?.body?.movementModel === 'springBounce'
     && SPRING_MOBILITY_IDS.has(mobilityId);
@@ -526,6 +546,21 @@ export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverrid
   if (!archetype) errors.push('unknown-archetype');
   if (!body) errors.push('unknown-body-plan');
   if (!weapon) errors.push('missing-weapon');
+  if (weapon?.attackKind === 'charge' && !chargeDefinition) errors.push('charge-module-required');
+  if (weapon?.attackKind !== 'charge' && chargePayload != null) errors.push('charge-module-on-non-charge');
+  if (chargeDefinition && body?.tags.includes('aerial') && chargeDefinition.id !== 'vectorRocket') {
+    errors.push('aerial-vector-rocket-required');
+  }
+  if (chargeDefinition && (body?.id === 'quadruped' || body?.id === 'crawler') && chargeDefinition.id !== 'spineJet') {
+    errors.push('quadruped-spine-jet-required');
+  }
+  if (chargeDefinition
+    && !body?.tags.includes('aerial')
+    && body?.id !== 'quadruped'
+    && body?.id !== 'crawler'
+    && chargeDefinition.id !== 'twinRocketPack') {
+    errors.push('back-rocket-pack-required');
+  }
   if (isClaw && defensePayload !== null) errors.push('claw-defense-must-be-null');
   if (!isClaw && defensePayload === null) errors.push('defense-null-non-claw');
   if (!isClaw && defensePayload !== null && !defense) errors.push('missing-defense');
@@ -642,6 +677,7 @@ export function getReaverbotCatalogSummary() {
     archetypes: Object.keys(REAVERBOT_ARCHETYPES),
     bodyPlans: Object.keys(REAVERBOT_BODY_PLANS),
     weapons: Object.keys(REAVERBOT_WEAPONS),
+    chargeModules: Object.keys(REAVERBOT_CHARGE_MODULES),
     defenses: Object.keys(REAVERBOT_DEFENSES),
     weakPoints: Object.keys(REAVERBOT_WEAK_POINTS),
     palettes: Object.keys(REAVERBOT_PALETTES),

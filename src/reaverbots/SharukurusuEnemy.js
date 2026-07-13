@@ -7,7 +7,7 @@ const ASSET_PATH = './assets/models/reaverbots/';
 const MODEL_FILE = 'Sharukurusu.dae';
 const TARGET_HEIGHT = 2.42;
 const CHARGE_WINDUP_TIME = 0.34;
-const CHARGE_TIME = 0.72;
+const CHARGE_TIME = 0.9;
 const DIVE_WINDUP_TIME = 0.32;
 const DIVE_TIME = 0.78;
 const KNOCKDOWN_TIME = 1.05;
@@ -563,6 +563,7 @@ export class SharukurusuEnemy extends Enemy {
   }
 
   onDeath(game, meta = {}) {
+    game?.cancelEnemyAttackRequest?.(this);
     if (this.affix?.id === 'explosiveCore' && !meta.selfDestruct) {
       game.addExplosion(this.root.position, this.stats.damage * 2.2, 2.25, this.affix.color, { source: this });
     }
@@ -575,6 +576,7 @@ export class SharukurusuEnemy extends Enemy {
   }
 
   dispose() {
+    this._sharukurusuLastGame?.cancelEnemyAttackRequest?.(this);
     this.sharukurusuDisposed = true;
     this.clearExternalMotion?.('dispose');
     const instanceMaterials = new Set();
@@ -768,6 +770,7 @@ export class SharukurusuEnemy extends Enemy {
   }
 
   _startSharukurusuBackflip(game, direction = null) {
+    game?.completeEnemyAttack?.(this);
     const state = this.sharukurusuState;
     state.startPosition.copy(this.root.position);
     state.groundY = this._getGroundY(game, this.root.position);
@@ -975,7 +978,9 @@ export class SharukurusuEnemy extends Enemy {
     // quick ninja-like bounds. Dungeon constraints can then remain authoritative.
     state.runHop = Math.max(0, Math.sin(state.runPhase)) * 0.14;
 
-    if (this.attackCooldown <= 0 && distance <= 8.5) {
+    if (this.attackCooldown <= 0
+      && distance <= 8.5
+      && (game.requestEnemyAttack?.(this) ?? true)) {
       state.attackSequence += 1;
       if (state.attackSequence % 2 === 0) this._startSharukurusuDive(game, tempDirection);
       else this._startSharukurusuCharge(game, tempDirection);
@@ -989,6 +994,7 @@ export class SharukurusuEnemy extends Enemy {
     if (!state || this.dead) return null;
 
     if (game.dungeonController?.isPlayerInSafeZone?.()) {
+      game.cancelEnemyAttackRequest?.(this);
       if (state.mode !== SHARUKURUSU_STATES.NinjaRun) {
         this.root.position.y = this._getGroundY(game, this.root.position);
         this._setSharukurusuState(SHARUKURUSU_STATES.NinjaRun);
@@ -1021,7 +1027,7 @@ export class SharukurusuEnemy extends Enemy {
       const moved = this._moveSharukurusuGrounded(
         game,
         state.direction,
-        this.type.chargeSpeed ?? 9.4,
+        (this.type.chargeSpeed ?? 9.4) * 0.78,
         dt,
       );
       this._damagePlayerWithSharukurusuAttack(game, 'sharukurusuDrillCharge', 0.82, true);
@@ -1099,6 +1105,15 @@ export class SharukurusuEnemy extends Enemy {
 
     this._setSharukurusuState(SHARUKURUSU_STATES.NinjaRun);
     return { handled: true, moving: false, moveAmount: 0 };
+  }
+
+  isAttackLeaseActive() {
+    return [
+      SHARUKURUSU_STATES.ChargeWindup,
+      SHARUKURUSU_STATES.DrillCharge,
+      SHARUKURUSU_STATES.DiveWindup,
+      SHARUKURUSU_STATES.DiveAirborne,
+    ].includes(this.sharukurusuState?.mode);
   }
 
   _updateExternalModelVisual(dt, moving) {

@@ -12,14 +12,15 @@ This is implemented as a parallel system to generic `Reaverbot Scrap`. Generic s
 
 ## Runtime Contract
 
-Most spawned procedural Reaverbots receive a six-entry salvage profile derived from their generated genome:
+Most spawned procedural Reaverbots receive a six-entry salvage profile derived from their generated genome. Native charge attackers receive a seventh, visibly matched rocket-boost entry:
 
 1. Behavior archetype
 2. Body plan / locomotion
 3. Ruby eye
 4. Weapon module
-5. Defensive module
-6. Weak-point module
+5. Rocket-boost module (charge attackers only)
+6. Defensive module
+7. Weak-point module
 
 Each entry maps to exactly one possible material. The same generated module always maps to the same material, so enemy recognition becomes useful knowledge.
 
@@ -27,8 +28,8 @@ Constructor Claw Reaverbots are the deliberate exception. Their claw is both the
 
 On a normal defeat:
 
-- Each profile entry makes an independent material roll: six for ordinary Reaverbots and five for Constructor Claw carriers.
-- If every roll fails, one body, weapon, or defense material is guaranteed.
+- Each profile entry makes an independent material roll: six for ordinary Reaverbots, seven for native charge attackers, and five for Constructor Claw carriers.
+- If every roll fails, one body, weapon, rocket-boost, or defense material is guaranteed.
 - Elite Reaverbots yield at least two different materials.
 - Breaking the weak point before the kill substantially improves the weak-point material roll.
 - Destroying a breakable weapon adds `+15 percentage points` to that exact weapon material roll, independently of the weak-point bonus. Destroying a Constructor Claw therefore improves both its Claw Palm Recoil Servo and Serrated Claw Gear rolls when both break conditions are reported.
@@ -44,6 +45,7 @@ The bolt/screw/gear silhouette is intentionally cosmetic rather than a second cr
 | Weapon | 40% | Weapon hunting should be the most reliable crafting path. |
 | Body / locomotion | 34% | Supports recognizable traversal and mobility pursuits. |
 | Defense | 34% | Makes shielded and armored silhouettes valuable targets. |
+| Rocket boost | 32% | Makes the visible charge propulsion module a direct salvage target. |
 | Weak point | 22% | Valuable core components require correct combat execution. |
 | Behavior | 18% | Logic chips are specialized recipe gates rather than bulk metal. |
 | Ruby eye | 8% | The universal eye remains a rare ancient optical component. |
@@ -99,7 +101,7 @@ The eye is universal, but its low acquisition chance keeps it from becoming mean
 
 | Weapon module | Possible material | Strong crafting signals | Example future uses |
 |---|---|---|---|
-| Ram Horn | Impact Horn | Charging, impact, armor breaking | Ram arms, armor breakers |
+| Rocket Lance | Rocket Boost Coupler | Rocket impulse, propulsion, charge alignment | Dash boosters, rocket lances |
 | Crushing Jaw | High-Torque Jaw Gear | Torque, gripping, crushing | Crusher arms, grappling tools |
 | Claw Arm | Serrated Claw Gear | Sweeping blades, melee | Claw arms, saw attachments |
 | Pounce Actuator | Compression Pounce Actuator | Leaping, stored compression, impact | Jump Springs, leaping strike arms |
@@ -114,6 +116,14 @@ The eye is universal, but its low acquisition chance keeps it from becoming mean
 | Rotor Blade | Balanced Rotor Hub | Spinning blades, balance, bearings | Rotor Arms, spinning shield weapons |
 | Horseshoe Tractor Magnet | Horseshoe Tractor Coil | Magnetic lift, tractor fields, launching | Lift Arms, magnetic launchers |
 | Overload Core | Volatile Overload Cell | Burst energy, instability, explosives | Burst cartridges, detonation drones |
+
+## Rocket-Boost Materials
+
+| Charge module | Possible material | Strong crafting signals | Example future uses |
+|---|---|---|---|
+| Dorsal Spine Jet | Dorsal Rocket Combustor | Compact thrust, fire, quadruped charge | Boost modules, dash armor |
+| Twin Rocket Pack | Twin-Jet Thrust Manifold | Balanced paired thrust, back mounting | Jetpacks, dash skates |
+| Vectoring Belly Rocket | Vectoring Rocket Nozzle | Gimbaled impulse, aerial steering | Air dashes, guided launchers |
 
 ## Defensive Materials
 
@@ -221,7 +231,7 @@ Recommended additions:
 ## Implementation Map
 
 - Catalog, source mappings, roll chances: `src/reaverbots/ReaverbotSalvageCatalog.js`
-- Per-enemy five- or six-part profile: `src/reaverbots/ReaverbotEnemy.js`
+- Per-enemy five-, six-, or seven-part profile: `src/reaverbots/ReaverbotEnemy.js`
 - Death drops and source metadata: `src/Game.js`
 - Physical material pickups: `src/LootSystem.js`
 - Stack storage and future recipe consumption: `src/Inventory.js`

@@ -123,6 +123,20 @@ function createRefractorObject(tier) {
   return group;
 }
 
+function disposeRefractorObject(object) {
+  const geometries = new Set();
+  const materials = new Set();
+  object?.traverse?.((child) => {
+    if (child.geometry) geometries.add(child.geometry);
+    const childMaterials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of childMaterials) {
+      if (material) materials.add(material);
+    }
+  });
+  for (const geometry of geometries) geometry.dispose?.();
+  for (const material of materials) material.dispose?.();
+}
+
 export class RefractorPickupSystem {
   constructor(scene, { getFloorElevation = null } = {}) {
     this.scene = scene;
@@ -212,7 +226,8 @@ export class RefractorPickupSystem {
         halo.material.opacity = 0.2 + Math.sin(life * 5) * 0.05;
       }
 
-      tempVectorA.copy(playerPosition).add(new THREE.Vector3(0, 0.95, 0));
+      tempVectorA.copy(playerPosition);
+      tempVectorA.y += 0.95;
       const distance = pickup.object.position.distanceTo(playerPosition);
 
       if (distance <= magnetRadius) {
@@ -242,6 +257,7 @@ export class RefractorPickupSystem {
         inventory.gold += pickup.value;
         pickup.object.visible = false;
         this.scene.remove(pickup.object);
+        disposeRefractorObject(pickup.object);
         collected.push({
           label: pickup.tier.label,
           value: pickup.value,
@@ -260,6 +276,7 @@ export class RefractorPickupSystem {
   clear() {
     for (const pickup of this.pickups) {
       this.scene.remove(pickup.object);
+      disposeRefractorObject(pickup.object);
     }
 
     this.pickups.length = 0;

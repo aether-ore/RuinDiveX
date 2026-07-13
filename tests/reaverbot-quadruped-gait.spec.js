@@ -33,7 +33,7 @@ test('quadruped Reaverbots use an articulated canine gait and modular jaw silhou
 
     const ram = findEnemy('pursuer', 'quadruped-gait-ram', (enemy) => (
       enemy.genome.body.planId === 'quadruped'
-      && enemy.genome.modules.weapon.id === 'ramHorn'
+      && enemy.genome.modules.weapon.id === 'rocketLance'
     ));
     const canineJaw = findEnemy('pursuer', 'quadruped-gait-canine-jaw', (enemy) => (
       enemy.genome.modules.weapon.id === 'crusherJaw'

@@ -7,12 +7,14 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import {
   REAVERBOT_BODY_PLANS,
+  REAVERBOT_CHARGE_MODULES,
   REAVERBOT_DEFENSES,
   REAVERBOT_WEAK_POINTS,
   REAVERBOT_WEAPONS,
 } from '../src/reaverbots/ReaverbotCatalog.js';
 import {
   REAVERBOT_BODY_TEXTURE_PROFILES,
+  REAVERBOT_CHARGE_TEXTURE_PROFILES,
   REAVERBOT_DECOR_TEXTURE_PROFILE,
   REAVERBOT_DEFENSE_TEXTURE_PROFILES,
   REAVERBOT_EYE_TEXTURE_PROFILES,
@@ -48,7 +50,7 @@ const EXPECTED_ASSET_KEYS = [
 ];
 const EXPECTED_BODY_KEYS = ['biped', 'lowBiped', 'quadruped', 'tripod', 'crawler', 'hopper', 'hoverBell', 'flyer'];
 const EXPECTED_WEAPON_KEYS = [
-  'ramHorn',
+  'rocketLance',
   'crusherJaw',
   'clawArm',
   'pounceActuator',
@@ -64,6 +66,7 @@ const EXPECTED_WEAPON_KEYS = [
   'tractorMagnet',
   'overloadCore',
 ];
+const EXPECTED_CHARGE_KEYS = ['spineJet', 'twinRocketPack', 'vectorRocket'];
 const EXPECTED_DEFENSE_KEYS = [
   'directionalShield',
   'armoredSkull',
@@ -111,6 +114,7 @@ test('texture profiles exactly cover every current procedural Reaverbot module i
   assertExactKeySet(REAVERBOT_TEXTURE_ASSETS, EXPECTED_ASSET_KEYS, 'texture assets');
   assertExactKeySet(REAVERBOT_BODY_TEXTURE_PROFILES, EXPECTED_BODY_KEYS, 'body profiles');
   assertExactKeySet(REAVERBOT_WEAPON_TEXTURE_PROFILES, EXPECTED_WEAPON_KEYS, 'weapon profiles');
+  assertExactKeySet(REAVERBOT_CHARGE_TEXTURE_PROFILES, EXPECTED_CHARGE_KEYS, 'charge profiles');
   assertExactKeySet(REAVERBOT_DEFENSE_TEXTURE_PROFILES, EXPECTED_DEFENSE_KEYS, 'defense profiles');
   assertExactKeySet(REAVERBOT_WEAK_POINT_TEXTURE_PROFILES, EXPECTED_WEAK_POINT_KEYS, 'weak-point profiles');
   assertExactKeySet(REAVERBOT_EYE_TEXTURE_PROFILES, ['singleRubyLens'], 'eye profiles');
@@ -118,6 +122,7 @@ test('texture profiles exactly cover every current procedural Reaverbot module i
   // Catch both an unmapped new catalog entry and a stale manifest entry.
   assert.deepEqual(sortedKeys(REAVERBOT_BODY_TEXTURE_PROFILES), sortedKeys(REAVERBOT_BODY_PLANS));
   assert.deepEqual(sortedKeys(REAVERBOT_WEAPON_TEXTURE_PROFILES), sortedKeys(REAVERBOT_WEAPONS));
+  assert.deepEqual(sortedKeys(REAVERBOT_CHARGE_TEXTURE_PROFILES), sortedKeys(REAVERBOT_CHARGE_MODULES));
   assert.deepEqual(sortedKeys(REAVERBOT_DEFENSE_TEXTURE_PROFILES), sortedKeys(REAVERBOT_DEFENSES));
   assert.deepEqual(sortedKeys(REAVERBOT_WEAK_POINT_TEXTURE_PROFILES), sortedKeys(REAVERBOT_WEAK_POINTS));
 });
@@ -126,6 +131,7 @@ test('all profile and decor slots reference one of the nine declared assets', ()
   const profileFamilies = {
     body: REAVERBOT_BODY_TEXTURE_PROFILES,
     weapon: REAVERBOT_WEAPON_TEXTURE_PROFILES,
+    charge: REAVERBOT_CHARGE_TEXTURE_PROFILES,
     defense: REAVERBOT_DEFENSE_TEXTURE_PROFILES,
     weakPoint: REAVERBOT_WEAK_POINT_TEXTURE_PROFILES,
     eye: REAVERBOT_EYE_TEXTURE_PROFILES,

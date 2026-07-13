@@ -67,7 +67,7 @@ export const REAVERBOT_BODY_TEXTURE_PROFILES = Object.freeze({
 });
 
 export const REAVERBOT_WEAPON_TEXTURE_PROFILES = Object.freeze({
-  ramHorn: freezeProfile({ weapon: 'bladeMetal', trim: 'trimAlloy', dark: 'jointDark' }),
+  rocketLance: freezeProfile({ weapon: 'bladeMetal', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
   crusherJaw: freezeProfile({ weapon: 'bladeMetal', trim: 'bladeMetal', dark: 'jointDark' }),
   clawArm: freezeProfile({ weapon: 'weaponHousing', trim: 'bladeMetal', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
   pounceActuator: freezeProfile({ weapon: 'weaponHousing', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
@@ -82,6 +82,12 @@ export const REAVERBOT_WEAPON_TEXTURE_PROFILES = Object.freeze({
   rotorBlade: freezeProfile({ weapon: 'bladeMetal', trim: 'trimAlloy', dark: 'jointDark' }),
   tractorMagnet: freezeProfile({ weapon: 'weaponHousing', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask', shieldEnergy: 'energyFieldMask' }),
   overloadCore: freezeProfile({ weapon: 'weaponHousing', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask', shieldEnergy: 'energyFieldMask' }),
+});
+
+export const REAVERBOT_CHARGE_TEXTURE_PROFILES = Object.freeze({
+  spineJet: freezeProfile({ weapon: 'weaponHousing', trim: 'bladeMetal', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
+  twinRocketPack: freezeProfile({ weapon: 'weaponHousing', trim: 'trimAlloy', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
+  vectorRocket: freezeProfile({ weapon: 'weaponHousing', trim: 'bladeMetal', dark: 'jointDark', emissive: 'moduleEmissiveMask' }),
 });
 
 export const REAVERBOT_DEFENSE_TEXTURE_PROFILES = Object.freeze({
@@ -146,6 +152,10 @@ function requireProfile(collection, id, label) {
 export function resolveReaverbotTextureProfile(genome) {
   const body = requireProfile(REAVERBOT_BODY_TEXTURE_PROFILES, genome?.body?.planId, 'body');
   const weapon = requireProfile(REAVERBOT_WEAPON_TEXTURE_PROFILES, genome?.modules?.weapon?.id, 'weapon');
+  const chargeId = genome?.modules?.charge?.id ?? null;
+  const charge = chargeId
+    ? requireProfile(REAVERBOT_CHARGE_TEXTURE_PROFILES, chargeId, 'charge')
+    : null;
   const defenseId = genome?.modules?.defense?.id ?? null;
   const defense = defenseId
     ? requireProfile(REAVERBOT_DEFENSE_TEXTURE_PROFILES, defenseId, 'defense')
@@ -156,6 +166,7 @@ export function resolveReaverbotTextureProfile(genome) {
     ...REAVERBOT_DECOR_TEXTURE_PROFILE,
     ...body,
     ...weapon,
+    ...(charge ?? {}),
     ...(defense ?? {}),
     ...weakPoint,
     ...eye,
@@ -164,6 +175,7 @@ export function resolveReaverbotTextureProfile(genome) {
   return Object.freeze({
     body,
     weapon,
+    charge,
     defense,
     weakPoint,
     eye,

@@ -24,6 +24,8 @@ const RUSH_WARNING_COLOR = new THREE.Color(RUSH_WARNING_COLOR_HEX);
 const CHARGE_INITIATION_RANGE = 10.5;
 const CHARGE_MAX_TRAVEL_DISTANCE = 12.5;
 const CHARGE_TRACK_LOCK_PROGRESS = 0.7;
+const CHARGE_MIN_COMMIT_DURATION = 0.9;
+const CHARGE_MIN_RECOVERY_DURATION = 1.25;
 const RUSH_WARNING_MIN_RATE = 2.2;
 const RUSH_WARNING_MAX_RATE = 10.5;
 const TRACTOR_BEAM_COLOR = 0x68fff2;
@@ -203,6 +205,7 @@ export class ReaverbotEnemy extends Enemy {
       attackFired: false,
       attackHit: false,
       effectTimer: 0,
+      jetTrailTimer: 0,
       tickTimer: 0,
       targetPosition: new THREE.Vector3(),
       attackDirection: new THREE.Vector3(0, 0, 1),
@@ -403,8 +406,16 @@ export class ReaverbotEnemy extends Enemy {
       }
     }
     if (state === 'telegraph') return this.genome.behavior.telegraphDuration;
-    if (state === 'commit') return this.genome.behavior.commitDuration;
-    if (state === 'recovery') return this.genome.behavior.recoveryDuration;
+    if (state === 'commit') {
+      return this._getEffectiveAttackKind() === 'charge'
+        ? Math.max(CHARGE_MIN_COMMIT_DURATION, this.genome.behavior.commitDuration)
+        : this.genome.behavior.commitDuration;
+    }
+    if (state === 'recovery') {
+      return this._getEffectiveAttackKind() === 'charge'
+        ? Math.max(CHARGE_MIN_RECOVERY_DURATION, this.genome.behavior.recoveryDuration)
+        : this.genome.behavior.recoveryDuration;
+    }
     return 1;
   }
 
@@ -589,6 +600,7 @@ export class ReaverbotEnemy extends Enemy {
     brain.clawSpinProgress = 0;
     this.knockback.set(0, 0, 0);
     const game = this._runtimeGame;
+    game?.completeEnemyAttack?.(this);
     this.visual.weakPoint.core.getWorldPosition(tempA);
     game?.addParticleBurst?.(tempA, RUSH_WARNING_COLOR_HEX, 18, 0.13);
     game?.addHitEffect?.(tempA, RUSH_WARNING_COLOR_HEX, 0.9, { absolute: true });
@@ -613,6 +625,7 @@ export class ReaverbotEnemy extends Enemy {
     this.knockback.set(0, 0, 0);
 
     const game = this._runtimeGame;
+    game?.completeEnemyAttack?.(this);
     this.visual.weakPoint.core.getWorldPosition(tempA);
     game?.addParticleBurst?.(tempA, RUSH_WARNING_COLOR_HEX, 32, 0.2);
     game?.addHitEffect?.(tempA, RUSH_WARNING_COLOR_HEX, 1.25, { absolute: true });
@@ -902,6 +915,7 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   onDeath(game, meta = {}) {
+    game?.cancelEnemyAttackRequest?.(this);
     this._removeTelegraphMarker();
     this._releaseTractorTarget('controller-death', game);
     if (this.affix?.id === 'explosiveCore' && !meta.selfDestruct) {
@@ -916,6 +930,7 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   dispose() {
+    this._runtimeGame?.cancelEnemyAttackRequest?.(this);
     this._removeTelegraphMarker();
     this._releaseTractorTarget('controller-dispose');
     this.clearExternalMotion?.('dispose');
@@ -945,6 +960,7 @@ export class ReaverbotEnemy extends Enemy {
     }
 
     if (game.dungeonController?.isPlayerInSafeZone?.() || game.player.dead) {
+      game.cancelEnemyAttackRequest?.(this);
       this._releaseTractorTarget('safe-zone', game);
       brain.tractorBeamActive = false;
       brain.moving = false;
@@ -967,7 +983,28 @@ export class ReaverbotEnemy extends Enemy {
       this._resolveJawPlayerOverlap(dt, game);
     }
 
-    if (this._isControlLocked() || this.hitStopTimer > 0) {
+    if (this._isControlLocked()) {
+      if (brain.state === 'telegraph' || brain.state === 'commit') {
+        if (this.genome.archetypeId === 'tractorController') {
+          this._abortTractorCycle('control-interrupt', game);
+        } else {
+          this._removeTelegraphMarker();
+          brain.state = 'recovery';
+          brain.stateTime = 0;
+          brain.attackFired = true;
+          brain.attackHit = false;
+          brain.contactCooldown = Math.max(brain.contactCooldown, this._getStateDuration('recovery'));
+          game.completeEnemyAttack?.(this);
+        }
+      }
+      brain.moving = false;
+      brain.speedRatio = 0;
+      this._updateExposureAndDefense();
+      this._animateVisual(dt);
+      return { handled: true, moving: false };
+    }
+
+    if (this.hitStopTimer > 0) {
       brain.moving = false;
       this._updateExposureAndDefense();
       this._animateVisual(dt);
@@ -1218,7 +1255,7 @@ export class ReaverbotEnemy extends Enemy {
     if (kind === 'charge' || kind === 'pounce') {
       const eased = kind === 'pounce'
         ? THREE.MathUtils.smoothstep(progress, 0.05, 0.9)
-        : THREE.MathUtils.smoothstep(progress, 0, 0.72);
+        : THREE.MathUtils.smoothstep(progress, 0, 0.94);
       const nextX = THREE.MathUtils.lerp(brain.commitStart.x, brain.targetPosition.x, eased);
       const nextY = THREE.MathUtils.lerp(brain.commitStart.y, brain.targetPosition.y, eased);
       const nextZ = THREE.MathUtils.lerp(brain.commitStart.z, brain.targetPosition.z, eased);
@@ -1232,6 +1269,7 @@ export class ReaverbotEnemy extends Enemy {
         brain.stateTime = 0;
         brain.moving = false;
         brain.speedRatio = 0;
+        game.completeEnemyAttack?.(this);
         return;
       }
       if (springPounce) {
@@ -1248,6 +1286,7 @@ export class ReaverbotEnemy extends Enemy {
       if (!this.genome.modules.weapon.continuousContactDamage) {
         this._tryContactHit(game, kind === 'pounce' ? 0.75 : 0.5);
       }
+      if (kind === 'charge') this._emitChargeJetTrail(dt, game);
     } else if (kind === 'clawMoveset') {
       this._updateClawMoveset(game, progress);
     } else if (kind === 'jawCombo') {
@@ -1277,19 +1316,34 @@ export class ReaverbotEnemy extends Enemy {
       brain.state = 'recovery';
       brain.stateTime = 0;
       brain.moving = false;
+      brain.contactCooldown = Math.max(brain.contactCooldown, this._getStateDuration('recovery'));
+      game.completeEnemyAttack?.(this);
     }
   }
 
   _updateRecoveryState(dt, game = null) {
     const brain = this.brain;
+    const kind = this._getEffectiveAttackKind();
     brain.stateTime += dt;
-    brain.moving = Boolean(brain.clawVaultActive && game)
-      && this._advanceClawVault(dt);
-    brain.speedRatio = brain.moving ? 1 : 0;
-    if (brain.stateTime >= this._getStateDuration('recovery')) {
+    const recoveryDuration = this._getStateDuration('recovery');
+    const recoveryProgress = clamp01(brain.stateTime / Math.max(0.01, recoveryDuration));
+    brain.moving = Boolean(brain.clawVaultActive && game) && this._advanceClawVault(dt);
+    if (!brain.moving && game && recoveryProgress < 0.78) {
+      tempA.copy(game.player.root.position).sub(this.root.position).setY(0);
+      const distance = tempA.length();
+      if (distance > 0.001) tempA.divideScalar(distance);
+      else tempA.copy(WORLD_FORWARD);
+      const retreatSpeedScale = kind === 'charge' ? 1.45 : 1;
+      brain.moving = this._moveByMode('retreat', dt * retreatSpeedScale, game, tempA, distance);
+    }
+    brain.speedRatio = brain.moving ? (kind === 'charge' ? 1.15 : 0.8) : 0;
+    if (brain.stateTime >= recoveryDuration) {
       brain.state = 'position';
       brain.stateTime = 0;
-      brain.cooldown = this.stats.attackCooldown * this.aiRandom.float(0.84, 1.16);
+      brain.cooldown = this.stats.attackCooldown * this.aiRandom.float(
+        kind === 'charge' ? 1.08 : 0.84,
+        kind === 'charge' ? 1.34 : 1.16,
+      );
       brain.attackFired = false;
       brain.attackHit = false;
       brain.comboStrikesFired = 0;
@@ -1304,6 +1358,7 @@ export class ReaverbotEnemy extends Enemy {
     brain.state = 'telegraph';
     brain.stateTime = 0;
     brain.effectTimer = 0;
+    brain.jetTrailTimer = 0;
     brain.warningPhase = 0;
     brain.warningBlinkRate = RUSH_WARNING_MIN_RATE;
     brain.warningIntensity = 0;
@@ -1896,9 +1951,11 @@ export class ReaverbotEnemy extends Enemy {
 
   _updatePersistentWeaponContact(dt, game) {
     const weapon = this.genome.modules.weapon;
+    if (this.brain.state === 'recovery') return;
     const continuousWeaponContact = Boolean(weapon.continuousContactDamage);
     // Authored commit attacks own their strike frames. Body contact remains
-    // live while positioning/telegraphing/recovering, but cannot stack a
+    // live while positioning or telegraphing, but recovery always provides
+    // a damage-free breathing window and cannot stack a
     // second damage event on the same frame as a bite, swipe, ram, or pounce.
     const meleeBodyContact = weapon.tags?.includes('melee')
       && !continuousWeaponContact
@@ -2029,7 +2086,8 @@ export class ReaverbotEnemy extends Enemy {
           this._setTractorObjective(null, null);
         }
         if (brain.cooldown <= 0
-          && approach.aligned) {
+          && approach.aligned
+          && (game.requestEnemyAttack?.(this) ?? true)) {
           if (brain.tractorTargetKind === 'player') {
             this._beginTractorTelegraph(game, target, false);
           } else if (target.tryClaimExternalControl?.(this, 'tractorBeam', {
@@ -2202,6 +2260,7 @@ export class ReaverbotEnemy extends Enemy {
             this._removeTelegraphMarker();
             brain.state = 'recovery';
             brain.stateTime = 0;
+            game.completeEnemyAttack?.(this);
           } else {
             this._abortTractorCycle('throw-failed', game);
           }
@@ -2908,6 +2967,7 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   _abortTractorCycle(reason, game = null) {
+    (game ?? this._runtimeGame)?.completeEnemyAttack?.(this);
     this._removeTelegraphMarker();
     this._releaseTractorTarget(reason, game);
     this._resetTractorApproach();
@@ -3492,9 +3552,9 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   _canBeginAttack(game) {
-    if (this.navigationMode !== 'air') return true;
+    if (this.navigationMode !== 'air') return game.requestEnemyAttack?.(this) ?? true;
     const kind = this._getEffectiveAttackKind();
-    if (!['charge', 'pounce'].includes(kind)) return true;
+    if (!['charge', 'pounce'].includes(kind)) return game.requestEnemyAttack?.(this) ?? true;
     tempF.copy(game.player.root.position);
     if (kind === 'charge') {
       tempG.copy(game.player.root.position).sub(this.root.position).setY(0);
@@ -3509,7 +3569,25 @@ export class ReaverbotEnemy extends Enemy {
       tempF.addScaledVector(game.player.lastMoveDirection ?? WORLD_FORWARD, 0.9);
     }
     tempF.y = game.player.root.position.y + 0.9;
-    return this._isAerialRootPathClear(game, tempF);
+    return this._isAerialRootPathClear(game, tempF)
+      && (game.requestEnemyAttack?.(this) ?? true);
+  }
+
+  isAttackLeaseActive() {
+    return !this.dead
+      && (this.brain?.state === 'telegraph' || this.brain?.state === 'commit');
+  }
+
+  _emitChargeJetTrail(dt, game) {
+    const nozzles = this.visual?.chargeModule?.nozzles ?? [];
+    if (nozzles.length === 0) return;
+    this.brain.jetTrailTimer -= dt;
+    if (this.brain.jetTrailTimer > 0) return;
+    this.brain.jetTrailTimer = 0.045;
+    for (const nozzle of nozzles) {
+      nozzle.getWorldPosition(tempA);
+      game.addParticleBurst?.(tempA, this.aiRandom.chance(0.38) ? 0xffe08a : 0xff5b18, 2, 0.075);
+    }
   }
 
   _getPackPlayerFacing(game, target = new THREE.Vector3()) {
@@ -3791,6 +3869,7 @@ export class ReaverbotEnemy extends Enemy {
       springBounceProgress: brain.coilBounceActive
         ? clamp01(brain.coilBounceTime / Math.max(0.01, brain.coilBounceDuration))
         : 0,
+      chargeDirection: tempA.copy(brain.targetPosition).sub(brain.commitStart).normalize(),
     });
     this._applyRushAttackWarning(dt);
   }

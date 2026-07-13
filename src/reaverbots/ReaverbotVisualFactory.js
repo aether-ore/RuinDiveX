@@ -47,6 +47,7 @@ function standardMaterial(name, color, options = {}) {
     opacity: options.opacity ?? 1,
     side: options.side ?? THREE.FrontSide,
     depthWrite: options.depthWrite ?? true,
+    blending: options.blending ?? THREE.NormalBlending,
     emissive: options.emissive ?? 0x000000,
     emissiveIntensity: options.emissiveIntensity ?? 0,
   });
@@ -889,6 +890,7 @@ function createMaterials(genome) {
   const profile = resolveReaverbotTextureProfile(genome);
   const bodyId = genome.body.planId;
   const weaponId = genome.modules.weapon.id;
+  const chargeId = genome.modules.charge?.id ?? null;
   const defenseId = genome.modules.defense?.id ?? 'integratedClawGuard';
   const weakPointId = genome.modules.weakPoint.id;
   const eyeId = genome.modules.eye.id;
@@ -972,6 +974,32 @@ function createMaterials(genome) {
     side: THREE.DoubleSide,
     depthWrite: false,
   });
+  const chargeProfile = profile.charge ?? profile.weapon;
+  const chargeHull = chargeId ? mappedMaterial('material_generatedReaverbotChargeHull', liftedPaletteColor(palette.secondary, 0.34), {
+    scope: 'charge', moduleId: chargeId, slot: 'housing',
+    mapKey: textureSlot(chargeProfile, profile.decor, 'weapon'),
+    roughness: 0.46, metalness: 0.44,
+  }) : weaponHull;
+  const chargeTrim = chargeId ? mappedMaterial('material_generatedReaverbotChargeTrim', 0xffffff, {
+    scope: 'charge', moduleId: chargeId, slot: 'workingSurface',
+    mapKey: textureSlot(chargeProfile, profile.decor, 'trim'),
+    roughness: 0.38, metalness: 0.54,
+  }) : weaponTrim;
+  const chargeJoint = chargeId ? mappedMaterial('material_generatedReaverbotChargeJoint', liftedPaletteColor(palette.dark, 0.1), {
+    scope: 'charge', moduleId: chargeId, slot: 'joint',
+    mapKey: textureSlot(chargeProfile, profile.decor, 'dark'),
+    roughness: 0.46, metalness: 0.44,
+  }) : weaponJoint;
+  const chargeGlowKey = textureSlot(chargeProfile, profile.decor, 'emissive');
+  const chargeGlow = chargeId ? mappedMaterial('material_generatedReaverbotChargeGlow', palette.emissive, {
+    scope: 'charge', moduleId: chargeId, slot: 'emissive',
+    mapKey: chargeGlowKey,
+    emissiveMapKey: chargeGlowKey,
+    emissive: palette.emissive,
+    emissiveIntensity: 0.8,
+    roughness: 0.24,
+    metalness: 0.2,
+  }) : weaponGlow;
 
   const defenseProfile = profile.defense ?? profile.body;
   const defensePrimary = mappedMaterial('material_generatedReaverbotDefenseHull', liftedPaletteColor(palette.primary, 0.32), {
@@ -1120,6 +1148,7 @@ function createMaterials(genome) {
       body: { primary: bodyPrimary, secondary: bodySecondary, trim: bodyTrim, dark: bodyJoint, emissive: bodyGlow, shieldEnergy: bodyEnergy },
       eye: { eyeSocket, eye: eyeLens, glint },
       weapon: { weapon: weaponHull, trim: weaponTrim, dark: weaponJoint, emissive: weaponGlow, shieldEnergy: weaponEnergy },
+      charge: { weapon: chargeHull, trim: chargeTrim, dark: chargeJoint, emissive: chargeGlow },
       defense: {
         primary: defensePrimary,
         secondary: defenseSecondary,
@@ -1821,16 +1850,19 @@ function createWeapon(root, genome, frame, materials) {
     integratedIntoMobility: integratedMobility,
   };
 
-  if (id === 'ramHorn') {
-    addBearingAssembly(weapon, materials, 'generatedRamHornMount', [0, 0, 0.02], {
+  if (id === 'rocketLance') {
+    if (frame.plan === 'biped' || frame.plan === 'lowBiped') {
+      weapon.position.set(0, frame.anchors.center[1] + 0.08, frame.anchors.frontLow[2]);
+    }
+    addBearingAssembly(weapon, materials, 'generatedRocketLanceMount', [0, 0, 0.02], {
       radius: 0.26,
       width: 0.28,
       rotation: [0, 0, Math.PI / 2],
     });
-    mesh(weapon, new THREE.ConeGeometry(0.22, 0.68, 6), materials.weapon, 'generatedRamHornArmorFace', [0, 0, 0.38], [Math.PI / 2, 0, 0]);
-    mesh(weapon, new THREE.ConeGeometry(0.13, 0.34, 6), materials.dark, 'generatedRamHornDarkWorkingEnd', [0, 0, 0.88], [Math.PI / 2, 0, 0]);
-    mesh(weapon, new THREE.TorusGeometry(0.23, 0.045, 6, 12), materials.trim, 'generatedRamHornMechanicalBand', [0, 0, 0.26]);
-    muzzle.position.set(0, 0, 0.92);
+    mesh(weapon, new THREE.ConeGeometry(0.2, 1.02, 7), materials.weapon, 'generatedRocketLanceArmorShaft', [0, 0, 0.55], [Math.PI / 2, 0, 0]);
+    mesh(weapon, new THREE.ConeGeometry(0.12, 0.52, 7), materials.dark, 'generatedRocketLanceDarkWorkingTip', [0, 0, 1.28], [Math.PI / 2, 0, 0]);
+    mesh(weapon, new THREE.TorusGeometry(0.23, 0.045, 6, 12), materials.trim, 'generatedRocketLanceMechanicalBand', [0, 0, 0.24]);
+    muzzle.position.set(0, 0, 1.55);
   } else if (id === 'crusherJaw') {
     // A huge two-piece bear-trap mouth. Each half hinges at the skull instead
     // of being a small decorative box fixed in front of it. The canine cage
@@ -2502,6 +2534,89 @@ function createWeapon(root, genome, frame, materials) {
   return parts;
 }
 
+function createChargeModule(root, genome, frame, materials) {
+  const definition = genome.modules.charge;
+  const chargeModule = group(root, `generatedChargeModule_${definition?.id ?? 'none'}`);
+  const parts = {
+    id: definition?.id ?? null,
+    variant: definition?.id ?? null,
+    group: chargeModule,
+    gimbal: chargeModule,
+    nozzles: [],
+    flames: [],
+    thrustScale: definition?.thrustScale ?? 1,
+  };
+  if (!definition) {
+    chargeModule.visible = false;
+    return parts;
+  }
+
+  chargeModule.userData.chargeModuleId = definition.id;
+  chargeModule.userData.mountRole = definition.mountRole;
+  const flameMaterial = standardMaterial('material_generatedRocketJetFlame', 0xff8a25, {
+    emissive: 0xff3a08,
+    emissiveIntensity: 2.8,
+    transparent: true,
+    opacity: 0.88,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    textureExempt: 'animated additive rocket exhaust flame',
+  });
+
+  const addRocketPod = (parent, name, position, { radius = 0.18, length = 0.68 } = {}) => {
+    const pod = group(parent, `${name}Assembly`, position);
+    mesh(pod, new THREE.CylinderGeometry(radius, radius * 0.82, length, 10), materials.weapon, `${name}Housing`, [0, 0, 0], [Math.PI / 2, 0, 0]);
+    mesh(pod, new THREE.TorusGeometry(radius * 1.02, radius * 0.16, 6, 12), materials.trim, `${name}ThrustBand`, [0, 0, -length * 0.25]);
+    mesh(pod, new THREE.CylinderGeometry(radius * 0.78, radius * 0.98, 0.18, 10), materials.dark, `${name}DarkNozzle`, [0, 0, -length * 0.57], [Math.PI / 2, 0, 0]);
+    const nozzle = new THREE.Object3D();
+    nozzle.name = `${name}ExhaustNozzle`;
+    nozzle.position.set(0, 0, -length * 0.72);
+    pod.add(nozzle);
+    const flame = mesh(
+      nozzle,
+      new THREE.ConeGeometry(radius * 0.68, length * 1.15, 8),
+      flameMaterial.clone(),
+      `${name}RocketFlame`,
+      [0, 0, -length * 0.52],
+      [-Math.PI / 2, 0, 0],
+    );
+    flame.material.name = `${flameMaterial.name}_${name}`;
+    flame.material.userData.reaverbotTextureExempt = flameMaterial.userData.reaverbotTextureExempt;
+    flame.visible = false;
+    parts.nozzles.push(nozzle);
+    parts.flames.push(flame);
+    return pod;
+  };
+
+  if (definition.id === 'spineJet') {
+    chargeModule.position.set(0, frame.anchors.rearHigh[1] + 0.18, frame.anchors.center[2] - 0.12);
+    chargeModule.rotation.x = -0.06;
+    addRocketPod(chargeModule, 'generatedDorsalSpineJet', [0, 0, 0], { radius: 0.2, length: 0.76 });
+  } else if (definition.id === 'vectorRocket') {
+    chargeModule.position.set(frame.anchors.belly[0], frame.anchors.belly[1] - 0.28, frame.anchors.belly[2] - 0.08);
+    parts.gimbal = group(chargeModule, 'generatedVectorRocketGimbal');
+    addBearingAssembly(chargeModule, materials, 'generatedVectorRocketSwivel', [0, 0.18, 0], {
+      radius: 0.2,
+      width: 0.34,
+      rotation: [0, 0, Math.PI / 2],
+    });
+    addRocketPod(parts.gimbal, 'generatedAerialVectorRocket', [0, 0, 0], { radius: 0.28, length: 1.18 });
+  } else {
+    chargeModule.position.set(0, frame.anchors.rearHigh[1], frame.anchors.rear[2] + 0.08);
+    const podOffset = frame.plan === 'tripod' ? 0.27 : 0.48;
+    for (const side of [-1, 1]) {
+      addRocketPod(
+        chargeModule,
+        side < 0 ? 'generatedJetpackLeftRocket' : 'generatedJetpackRightRocket',
+        [side * podOffset, 0, 0],
+        { radius: frame.plan === 'tripod' ? 0.16 : 0.18, length: 0.7 },
+      );
+    }
+  }
+  flameMaterial.dispose();
+  return parts;
+}
+
 function createDefense(root, genome, frame, materials) {
   const definition = genome.modules.defense;
   if (!definition) {
@@ -3157,6 +3272,7 @@ export function createReaverbotVisual(genome) {
     genome.body.proportions.headScale,
   );
   const weapon = createWeapon(visualRoot, genome, frame, materials.scopes.weapon);
+  const chargeModule = createChargeModule(visualRoot, genome, frame, materials.scopes.charge);
   if (genome.modules.weapon.id === 'crusherJaw' && frame.headAssembly) {
     // The eye and bear-trap mouth are the face. Attaching them to the animal's
     // neck assembly makes each dog-like head tilt move the whole readable face.
@@ -3204,6 +3320,7 @@ export function createReaverbotVisual(genome) {
     frame,
     eye,
     weapon,
+    chargeModule,
     defense,
     weakPoint,
     meleeArmor,
@@ -3562,6 +3679,7 @@ export function animateReaverbotVisual(visual, {
   tractorBeamLength = 3.4,
   springBounceActive = false,
   springBounceProgress = 0,
+  chargeDirection = null,
 } = {}) {
   const comboCycle = Math.min(2, Math.floor(stateProgress * 3));
   const comboLocalProgress = stateProgress >= 1
@@ -3602,6 +3720,34 @@ export function animateReaverbotVisual(visual, {
   for (const wing of visual.frame.wings) {
     wing.pivot.rotation.z = Math.sin(time * 5.5 + wing.phase) * 0.16;
     wing.pivot.rotation.y += dt * (visual.frame.plan === 'flyer' ? 0.45 : 1.7);
+  }
+
+  if (visual.chargeModule?.id) {
+    const thrusting = state === 'commit' && attackKind === 'charge';
+    const pulse = 0.82 + Math.sin(time * 38) * 0.16;
+    for (let index = 0; index < visual.chargeModule.flames.length; index += 1) {
+      const flame = visual.chargeModule.flames[index];
+      flame.visible = thrusting;
+      flame.scale.set(
+        0.86 + index * 0.04,
+        thrusting ? pulse * visual.chargeModule.thrustScale : 0.01,
+        0.86 + index * 0.04,
+      );
+      flame.material.opacity = thrusting ? 0.76 + Math.sin(time * 31 + index) * 0.12 : 0;
+    }
+    if (visual.chargeModule.id === 'vectorRocket') {
+      const horizontal = chargeDirection
+        ? Math.hypot(chargeDirection.x, chargeDirection.z)
+        : 1;
+      const pitch = chargeDirection
+        ? -Math.atan2(chargeDirection.y, Math.max(0.001, horizontal))
+        : 0;
+      visual.chargeModule.gimbal.rotation.x = THREE.MathUtils.lerp(
+        visual.chargeModule.gimbal.rotation.x,
+        thrusting ? pitch : 0,
+        Math.min(1, dt * 8),
+      );
+    }
   }
 
   if (visual.defense.group.name.includes('rotatingPlates')) {

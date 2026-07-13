@@ -151,7 +151,7 @@ Names are part of the authored contract: the visual factory uses names such as `
 
 | Weapon | Authored detail contract |
 |---|---|
-| `ramHorn` | Mount bearing, armor horn body, mechanical band, and separate dark impact tip |
+| `rocketLance` | Centered forward lance, reinforced mount, mechanical band, and separate dark working tip |
 | `crusherJaw` | Massive upper/lower armor faces, dark mouth and hinge barrel, hinge endcaps, circuit panels, blade rails, teeth, and dark terminal jaw ends |
 | `clawArm` | Shoulder bearing, upper-boom and forearm face designs, mirrored circuit routes, hydraulic details, elbow/wrist hinges, palm-back armor, blade talons, and separate dark talon tips; palm eye unchanged |
 | `pounceActuator` | Mount bearing, spring/actuator housing, compression bands, powered coil details, and dark launch-contact end |
@@ -166,6 +166,14 @@ Names are part of the authored contract: the visual factory uses names such as `
 | `rotorBlade` | Central bearing, crossbar bands, chain joints, blade-root mechanics, blade faces, dark working tips, and counterweight connection |
 | `tractorMagnet` | Swivel bearing, horseshoe armor, outer circuit route, dark inner mechanics, segment bands, and authored pole working ends |
 | `overloadCore` | Dark mounting socket, circuit convergence, vented housing, segmented cage bands/ribs, and powered overload core |
+
+### Charge modules
+
+| Rocket boost | Authored detail contract |
+|---|---|
+| `spineJet` | Compact dorsal housing, thrust band, dark nozzle, and animated exhaust for quadruped chargers |
+| `twinRocketPack` | Paired back-mounted housings with a clear central weak-point sightline and independent exhaust flames |
+| `vectorRocket` | Large underslung housing, mechanical gimbal, dark heavy nozzle, and travel-aligned aerial exhaust |
 
 ### Defensive modules
 

@@ -2517,6 +2517,7 @@ export class CombatSystem {
       lifetime: profile.mineLifetime ?? 7.5,
       maxLifetime: profile.mineLifetime ?? 7.5,
       armed: false,
+      detonated: false,
     };
 
     this.activeMines.push(mine);
@@ -2529,6 +2530,9 @@ export class CombatSystem {
   _updateMines(dt) {
     for (let i = this.activeMines.length - 1; i >= 0; i -= 1) {
       const mine = this.activeMines[i];
+      if (!mine || mine.detonated) {
+        continue;
+      }
       mine.lifetime -= dt;
       mine.armingTimer = Math.max(0, mine.armingTimer - dt);
       mine.armed = mine.armingTimer <= 0;
@@ -2600,14 +2604,21 @@ export class CombatSystem {
   }
 
   _detonateMine(mine) {
-    const index = this.activeMines.indexOf(mine);
-    if (index >= 0) {
-      this.activeMines.splice(index, 1);
+    if (!mine || mine.detonated) {
+      return false;
     }
+
+    const index = this.activeMines.indexOf(mine);
+    if (index < 0) {
+      return false;
+    }
+    mine.detonated = true;
+    this.activeMines.splice(index, 1);
 
     const position = mine.group.position.clone();
     position.y += 0.025;
     mine.group.removeFromParent();
+    this.game._disposeTimedEffectObject?.(mine.group);
     this.game.addExplosion(position, mine.damage, mine.explosionRadius, mine.color, {
       element: getPlayerElement(this.game.player.stats, { element: null }) ?? 'fire',
       armorBreakChance: mine.armorBreakChance,
@@ -2615,6 +2626,7 @@ export class CombatSystem {
       critical: mine.critical,
     });
     this.game.addParticleBurst(position, mine.color, 18, 0.2);
+    return true;
   }
 
   _detonateAllMines() {
@@ -2622,6 +2634,15 @@ export class CombatSystem {
     for (const mine of mines) {
       this._detonateMine(mine);
     }
+  }
+
+  _clearMines() {
+    for (const mine of this.activeMines) {
+      mine.detonated = true;
+      mine.group?.removeFromParent?.();
+      this.game._disposeTimedEffectObject?.(mine.group);
+    }
+    this.activeMines.length = 0;
   }
 
   triggerMinesNear(position, radius = 1) {

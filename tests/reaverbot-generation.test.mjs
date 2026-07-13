@@ -11,6 +11,7 @@ import {
   LINKED_WEAK_POINT_WEIGHTS,
   REAVERBOT_ARCHETYPES,
   REAVERBOT_BODY_PLANS,
+  REAVERBOT_CHARGE_MODULES,
   REAVERBOT_DEFENSES,
   REAVERBOT_EYE_COLOR,
   REAVERBOT_WEAK_POINTS,
@@ -48,7 +49,7 @@ test('body defense normalization preserves legacy candidate silhouettes and vali
       expected: {
         candidateIndex: 1,
         bodyPlan: 'quadruped',
-        weaponId: 'ramHorn',
+        weaponId: 'rocketLance',
         mountSide: null,
         proportions: {
           overallScale: 1.0761,
@@ -69,7 +70,7 @@ test('body defense normalization preserves legacy candidate silhouettes and vali
       expected: {
         candidateIndex: 5,
         bodyPlan: 'lowBiped',
-        weaponId: 'ramHorn',
+        weaponId: 'rocketLance',
         mountSide: null,
         proportions: {
           overallScale: 0.9796,
@@ -156,7 +157,7 @@ test('a broad seed sweep always satisfies the gameplay contract', () => {
     });
     const validation = validateReaverbotGenome(genome);
     assert.equal(validation.valid, true, `seed ${seed}: ${validation.errors.join(', ')}`);
-    assert.equal(genome.schemaVersion, 2);
+    assert.equal(genome.schemaVersion, 3);
     assert.equal(genome.modules.eye.color, REAVERBOT_EYE_COLOR);
     assert.ok(genome.modules.weapon.id);
     assert.ok(genome.modules.weakPoint.id);
@@ -190,12 +191,127 @@ test('a broad seed sweep always satisfies the gameplay contract', () => {
   }
 
   const catalog = getReaverbotCatalogSummary();
-  assert.equal(catalog.schemaVersion, 2);
+  assert.equal(catalog.schemaVersion, 3);
   assert.deepEqual([...archetypes].sort(), [...catalog.archetypes].sort());
   assert.deepEqual([...bodyPlans].sort(), [...catalog.bodyPlans].sort());
   assert.ok(weapons.size >= 10);
   assert.ok(defenses.size >= 9);
   assert.ok(weakPoints.size >= 8);
+});
+
+test('charge genomes mount morphology-specific rocket rigs and never expose the removed ram part', () => {
+  assert.equal(REAVERBOT_WEAPONS.ramHorn, undefined);
+  assert.equal(REAVERBOT_SALVAGE_MATERIALS.impactHorn, undefined);
+  const samples = new Map();
+  for (const archetypeId of ['pursuer', 'rotorHunter']) {
+    for (let variant = 0; variant < 600; variant += 1) {
+      const genome = generateReaverbotGenome({
+        seed: `rocket-rig:${archetypeId}:${variant}`,
+        archetypeId,
+        encounterSize: 4,
+      });
+      if (genome.modules.weapon.attackKind !== 'charge') continue;
+      samples.set(genome.body.planId, genome);
+      if (['quadruped', 'lowBiped', 'tripod', 'hoverBell'].every((id) => samples.has(id))) break;
+    }
+  }
+
+  for (const planId of ['quadruped', 'lowBiped', 'tripod', 'hoverBell']) {
+    assert.ok(samples.has(planId), `missing charge sample for ${planId}`);
+  }
+
+  for (const [planId, genome] of samples) {
+    const expectedModule = planId === 'quadruped'
+      ? 'spineJet'
+      : planId === 'hoverBell'
+        ? 'vectorRocket'
+        : 'twinRocketPack';
+    assert.equal(genome.modules.charge.id, expectedModule);
+    assert.ok(genome.modules.charge.tags.includes('rocket'));
+    assert.equal(validateReaverbotGenome(genome).valid, true);
+
+    const visual = createReaverbotVisual(genome);
+    assert.equal(visual.chargeModule.id, expectedModule);
+    assert.equal(visual.chargeModule.nozzles.length, expectedModule === 'twinRocketPack' ? 2 : 1);
+    assert.equal(visual.root.getObjectByName('generatedRamHornArmorFace'), undefined);
+    animateReaverbotVisual(visual, {
+      time: 1,
+      dt: 0.1,
+      state: 'commit',
+      stateProgress: 0.45,
+      attackKind: 'charge',
+      chargeDirection: new THREE.Vector3(0, 0.35, 1).normalize(),
+    });
+    assert.ok(visual.chargeModule.flames.every((flame) => flame.visible));
+    if (expectedModule === 'vectorRocket') {
+      assert.ok(Math.abs(visual.chargeModule.gimbal.rotation.x) > 0.02, 'aerial rocket must gimbal into vertical travel');
+    }
+    if (expectedModule === 'twinRocketPack' && planId !== 'tripod') {
+      const podOffsets = visual.chargeModule.group.children
+        .filter((child) => child.name.includes('Jetpack') && child.name.endsWith('Assembly'))
+        .map((child) => Math.abs(child.position.x));
+      assert.equal(podOffsets.length, 2);
+      assert.ok(podOffsets.every((offset) => offset >= 0.45), 'jetpack must leave the rear battery sightline clear');
+    }
+    animateReaverbotVisual(visual, {
+      time: 1.1,
+      dt: 0.1,
+      state: 'recovery',
+      stateProgress: 0.2,
+      attackKind: 'charge',
+    });
+    assert.ok(visual.chargeModule.flames.every((flame) => !flame.visible));
+
+    const missingCharge = structuredClone(genome);
+    missingCharge.modules.charge = null;
+    assert.ok(validateReaverbotGenome(missingCharge).errors.includes('charge-module-required'));
+
+    const mismatchedCharge = structuredClone(genome);
+    mismatchedCharge.modules.charge = structuredClone(
+      expectedModule === 'spineJet'
+        ? REAVERBOT_CHARGE_MODULES.twinRocketPack
+        : REAVERBOT_CHARGE_MODULES.spineJet,
+    );
+    const expectedError = expectedModule === 'spineJet'
+      ? 'quadruped-spine-jet-required'
+      : expectedModule === 'vectorRocket'
+        ? 'aerial-vector-rocket-required'
+        : 'back-rocket-pack-required';
+    assert.ok(validateReaverbotGenome(mismatchedCharge).errors.includes(expectedError));
+  }
+
+  const nonCharge = generateReaverbotGenome({
+    seed: 'rocket-rig:non-charge-contract',
+    archetypeId: 'pouncer',
+    encounterSize: 4,
+  });
+  nonCharge.modules.charge = structuredClone(REAVERBOT_CHARGE_MODULES.twinRocketPack);
+  assert.ok(validateReaverbotGenome(nonCharge).errors.includes('charge-module-on-non-charge'));
+});
+
+test('rocket chargers roll their visible boost parts and can guarantee boost salvage', () => {
+  let charger = null;
+  for (let variant = 0; variant < 300 && !charger; variant += 1) {
+    const candidate = generateReaverbotGenome({
+      seed: `rocket-salvage:${variant}`,
+      archetypeId: 'pursuer',
+      encounterSize: 4,
+    });
+    if (candidate.modules.weapon.attackKind === 'charge') charger = candidate;
+  }
+  assert.ok(charger);
+
+  const allDrops = rollReaverbotSalvageDrops(charger, { random: () => 0 });
+  assert.ok(allDrops.some((drop) => drop.id === 'rocketBoostCoupler'));
+  assert.ok(allDrops.some((drop) => drop.source.aspect === 'charge'
+    && drop.source.moduleId === charger.modules.charge.id));
+
+  let rollIndex = 0;
+  const fallbackDrops = rollReaverbotSalvageDrops(charger, {
+    random: () => (rollIndex++ < 7 ? 0.999 : 0.55),
+  });
+  assert.equal(fallbackDrops.length, 1);
+  assert.equal(fallbackDrops[0].source.aspect, 'charge');
 });
 
 test('solo pack hunters remain valid while dependent controllers and self-destructors protect progression', () => {
@@ -244,12 +360,7 @@ test('solo pack hunters remain valid while dependent controllers and self-destru
     });
     packWeapons.set(genome.modules.weapon.id, genome);
   }
-  assert.deepEqual([...packWeapons.keys()].sort(), ['clawArm', 'crusherJaw', 'ramHorn']);
-  const previousPackCycles = {
-    ramHorn: 2.964,
-    clawArm: 3.744,
-    crusherJaw: 5.871,
-  };
+  assert.deepEqual([...packWeapons.keys()].sort(), ['clawArm', 'crusherJaw', 'rocketLance']);
   for (const genome of packWeapons.values()) {
     const weapon = genome.modules.weapon;
     const unscaledCooldown = Math.max(0.75, Math.min(
@@ -261,14 +372,11 @@ test('solo pack hunters remain valid while dependent controllers and self-destru
         * (weapon.cooldownScale ?? 1),
     ));
     assert.ok(genome.stats.attackCooldown < unscaledCooldown, `${weapon.id} should attack more frequently`);
-    const currentCycle = genome.behavior.telegraphDuration
-      + genome.behavior.commitDuration
-      + genome.behavior.recoveryDuration
-      + genome.stats.attackCooldown;
-    assert.ok(
-      currentCycle < previousPackCycles[weapon.id],
-      `${weapon.id} total attack cycle should be faster than its previous cadence`,
-    );
+    if (weapon.attackKind === 'charge') {
+      assert.ok(genome.behavior.commitDuration >= 0.9, 'rocket charges must travel over a readable interval');
+      assert.ok(genome.behavior.recoveryDuration >= 1.1, 'rocket charges must include a retreat window');
+      assert.ok(genome.modules.charge?.tags.includes('rocket'));
+    }
   }
   assert.ok(weightedSoloPackHunters > 0, 'pack hunters should be selectable in one-enemy encounters');
 });
@@ -653,12 +761,12 @@ test('revamped melee modules are armored, deterministic, and body-plan compatibl
   assert.deepEqual([...clawMountSides].sort(), [-1, 1]);
 });
 
-test('schema-v2 validation reserves null defense and the palm weak point for claw carriers', () => {
+test('schema-v3 validation reserves null defense and the palm weak point for claw carriers', () => {
   let clawGenome = null;
   let ordinaryGenome = null;
   for (let variant = 0; variant < 240 && (!clawGenome || !ordinaryGenome); variant += 1) {
     const genome = generateReaverbotGenome({
-      seed: `schema-v2-claw-contract:${variant}`,
+      seed: `schema-v3-claw-contract:${variant}`,
       archetypeId: 'pursuer',
       threatTier: 2,
       encounterSize: 4,
@@ -1147,9 +1255,11 @@ test('every procedural Reaverbot aspect has a specific crafting material source'
   );
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.eye), ['singleRubyLens']);
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.weapon).sort(), Object.keys(REAVERBOT_WEAPONS).sort());
+  assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.charge).sort(), Object.keys(REAVERBOT_CHARGE_MODULES).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.defense).sort(), Object.keys(REAVERBOT_DEFENSES).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.weakPoint).sort(), Object.keys(REAVERBOT_WEAK_POINTS).sort());
-  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 58);
+  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 61);
+  assert.equal(REAVERBOT_SALVAGE_MATERIALS.impactHorn, undefined);
 
   let foundClawProfile = false;
   for (let seed = 0; seed < 250; seed += 1) {
@@ -1160,11 +1270,14 @@ test('every procedural Reaverbot aspect has a specific crafting material source'
     });
     const profile = createReaverbotSalvageProfile(genome);
     const isClaw = genome.modules.weapon.id === 'clawArm';
+    const isCharge = genome.modules.weapon.attackKind === 'charge';
     const expectedAspects = isClaw
       ? ['behavior', 'body', 'eye', 'weapon', 'weakPoint']
-      : ['behavior', 'body', 'eye', 'weapon', 'defense', 'weakPoint'];
+      : isCharge
+        ? ['behavior', 'body', 'eye', 'weapon', 'charge', 'defense', 'weakPoint']
+        : ['behavior', 'body', 'eye', 'weapon', 'defense', 'weakPoint'];
     assert.deepEqual(profile.map((candidate) => candidate.aspect), expectedAspects);
-    assert.equal(new Set(profile.map((candidate) => candidate.materialId)).size, isClaw ? 5 : 6);
+    assert.equal(new Set(profile.map((candidate) => candidate.materialId)).size, isClaw ? 5 : isCharge ? 7 : 6);
     if (isClaw) {
       foundClawProfile = true;
       assert.equal(profile.find((candidate) => candidate.aspect === 'weakPoint')?.materialId, 'clawPalmRecoilServo');

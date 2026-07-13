@@ -12,7 +12,7 @@ const EXPECTED_IDS = Object.freeze({
     'flyer',
   ],
   weapon: [
-    'ramHorn',
+    'rocketLance',
     'crusherJaw',
     'clawArm',
     'pounceActuator',

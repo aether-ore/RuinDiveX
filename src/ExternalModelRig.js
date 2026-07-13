@@ -72,6 +72,11 @@ const BUSTER_CHAMBER_ROLL_SIGN = -1;
 const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
 const BEAM_BLADE_SLASH_END = 16 / BEAM_BLADE_TOTAL_FRAMES;
+const FORWARD_SLASH_ACTIVE_START = 0.36;
+const FORWARD_SLASH_END = 0.5;
+const JUMP_SLASH_TOTAL_FRAMES = 56;
+const JUMP_SLASH_ACTIVE_START = 24 / JUMP_SLASH_TOTAL_FRAMES;
+const JUMP_SLASH_END = 37 / JUMP_SLASH_TOTAL_FRAMES;
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 const WALK_LOOP_SECONDS = 1.08;
 const JOG_LOOP_SECONDS = 0.66;
@@ -1114,7 +1119,7 @@ export class ExternalModelRig {
     this.drillBitSpin.scale.setScalar(pulse);
   }
 
-  _updateBeamBladeVisual(visible, attackProgress) {
+  _updateBeamBladeVisual(visible, attackProgress, clipKey = null) {
     if (!this.beamBladeGroup) {
       return;
     }
@@ -1128,7 +1133,19 @@ export class ExternalModelRig {
 
     const attackFrame = attackProgress * BEAM_BLADE_TOTAL_FRAMES;
     const charge = THREE.MathUtils.smoothstep(attackFrame, 6, 8) * (1 - THREE.MathUtils.smoothstep(attackFrame, 10, 12));
-    const sweep = THREE.MathUtils.smoothstep(attackProgress, BEAM_BLADE_ACTIVE_START, BEAM_BLADE_SLASH_END);
+    const forwardSlash = clipKey === 'swordForwardSlash';
+    const jumpSlash = clipKey === 'swordJumpSlash';
+    const activeStart = jumpSlash
+      ? JUMP_SLASH_ACTIVE_START
+      : forwardSlash
+        ? FORWARD_SLASH_ACTIVE_START
+        : BEAM_BLADE_ACTIVE_START;
+    const slashEnd = jumpSlash
+      ? JUMP_SLASH_END
+      : forwardSlash
+        ? FORWARD_SLASH_END
+        : BEAM_BLADE_SLASH_END;
+    const sweep = THREE.MathUtils.smoothstep(attackProgress, activeStart, slashEnd);
     const strike = Math.sin(sweep * Math.PI);
     this.beamBladeGroup.scale.set(1 + charge * 0.08 + strike * 0.18, 1 + charge * 0.08 + strike * 0.18, 0.78 + charge * 0.12 + strike * 0.28);
     this.beamBladeGroup.rotation.z = Math.sin(this.time * 22) * 0.018 * charge + Math.sin(this.time * 30) * 0.025 * strike;
@@ -1286,10 +1303,11 @@ export class ExternalModelRig {
     strafeAmount = 0,
     busterArmSide = this.busterArmSide,
     aimTargetWorld = null,
+    clipKey = null,
   } = {}) {
     this.setBusterArmSide(busterArmSide);
     this.time += dt;
-    const rigState = `${state}:${attackKind ?? ''}`;
+    const rigState = `${state}:${attackKind ?? ''}:${clipKey ?? 'auto'}`;
     if (rigState !== this.previousRigState) {
       this.previousRigState = rigState;
       this.stateTime = 0;
@@ -1366,7 +1384,7 @@ export class ExternalModelRig {
 
     this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
     this._updateDrillArmVisual(dt);
-    this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
+    this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress, clipKey);
   }
 
   _aimMegaBusterAtTarget(targetWorld = null) {

@@ -4,6 +4,13 @@ const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 const BEAM_BLADE_TOTAL_FRAMES = 24;
 const BEAM_BLADE_ACTIVE_START = 12 / BEAM_BLADE_TOTAL_FRAMES;
 const BEAM_BLADE_SLASH_END = 16 / BEAM_BLADE_TOTAL_FRAMES;
+const FORWARD_SLASH_ACTIVE_START = 0.36;
+const FORWARD_SLASH_END = 0.5;
+const JUMP_SLASH_TOTAL_FRAMES = 56;
+const JUMP_SLASH_ACTIVE_START = 24 / JUMP_SLASH_TOTAL_FRAMES;
+const JUMP_SLASH_AERIAL_POSE_PROGRESS = 32 / JUMP_SLASH_TOTAL_FRAMES;
+const JUMP_SLASH_END = 37 / JUMP_SLASH_TOTAL_FRAMES;
+const SWORD_SLASH_CLIP_KEYS = new Set(['swordForwardSlash', 'swordInwardSlash', 'swordJumpSlash']);
 const PASSIVE_IDLE_HOLD_SECONDS = 20;
 const zeroEuler = new THREE.Euler();
 const tempVectorA = new THREE.Vector3();
@@ -62,6 +69,23 @@ const MEGA_BUSTER_ACTION_IDLE_POSE_DEGREES = Object.freeze({
   rightHip: Object.freeze({ pitch: 6.3, yaw: 14, roll: -4.9 }),
   rightKnee: Object.freeze({ pitch: -34, yaw: 7.7, roll: -0.4 }),
   rightAnkle: Object.freeze({ pitch: 19, yaw: 4.4, roll: -0.6 }),
+});
+const JUMP_SLASH_AERIAL_POSE_DEGREES = Object.freeze({
+  hips: Object.freeze({ pitch: 16.2, yaw: 10, roll: -5.6 }),
+  spine: Object.freeze({ pitch: -0.95, yaw: 1, roll: 0.9 }),
+  neck: Object.freeze({ pitch: 2.4, yaw: 2.2, roll: -6.6 }),
+  leftShoulder: Object.freeze({ pitch: 16.7, yaw: 2.6, roll: 34.5 }),
+  leftElbow: Object.freeze({ pitch: -18.3, yaw: 23.3, roll: 9.3 }),
+  leftWrist: Object.freeze({ pitch: 0.6, yaw: -22.3, roll: 6.8 }),
+  rightShoulder: Object.freeze({ pitch: 29.6, yaw: 23.2, roll: 5.7 }),
+  rightElbow: Object.freeze({ pitch: 5.6, yaw: 42.9, roll: 2.7 }),
+  rightWrist: Object.freeze({ pitch: -19.4, yaw: -2.2, roll: 49.7 }),
+  leftHip: Object.freeze({ pitch: 88, yaw: -10.5, roll: -7.5 }),
+  leftKnee: Object.freeze({ pitch: -96.5, yaw: 1.5, roll: 4.5 }),
+  leftAnkle: Object.freeze({ pitch: -12.6, yaw: 7.2, roll: 5.6 }),
+  rightHip: Object.freeze({ pitch: 88.4, yaw: -31.6, roll: -16.3 }),
+  rightKnee: Object.freeze({ pitch: -129.2, yaw: 10.8, roll: 4.6 }),
+  rightAnkle: Object.freeze({ pitch: -19.6, yaw: -2.3, roll: 0.9 }),
 });
 const PASSIVE_IDLE_SHOULDER_JOINTS = Object.freeze(['leftShoulder', 'rightShoulder']);
 
@@ -241,6 +265,10 @@ export class SkeletalModelRig {
     this.animationClips = new Map();
     this.animationActions = new Map();
     this.animationMetadata = new Map();
+    this.jumpSlashAerialHipsPosition = null;
+    this.jumpSlashAerialSeamHipsPosition = null;
+    this.jumpSlashAerialPoseRestoreTransforms = null;
+    this.jumpSlashAirborneRootRestorePosition = null;
     this.footVertexSamples = [];
     this.footVertexSampleCount = 0;
     this._lastFootGroundClearance = null;
@@ -274,6 +302,12 @@ export class SkeletalModelRig {
     if (this.debugPoseEnabled) {
       this._applyDebugPoseOverridesImmediate();
     }
+  }
+
+  clearJumpSlashAerialOverrides() {
+    this.root.userData.jumpSlashAerialPoseActive = false;
+    this.root.userData.jumpSlashAirborneRootAnchorActive = false;
+    return this._restoreJumpSlashAerialOverrides();
   }
 
   setDebugPoseOverrides(overrides = {}) {
@@ -650,6 +684,10 @@ export class SkeletalModelRig {
     this.animationClips.clear();
     this.animationActions.clear();
     this.animationMetadata.clear();
+    this.jumpSlashAerialHipsPosition = null;
+    this.jumpSlashAerialSeamHipsPosition = null;
+    this.jumpSlashAerialPoseRestoreTransforms = null;
+    this.jumpSlashAirborneRootRestorePosition = null;
     this.availableAnimationNames = [];
     this.activeAction = null;
     this.activeClipKey = null;
@@ -669,7 +707,28 @@ export class SkeletalModelRig {
       const preparedClip = this._prepareAnimationClip(clip, key, {
         preserveRootMotion: Boolean(entry.preserveRootMotion),
         lockRootY: Boolean(entry.lockRootY),
+        rootYMode: entry.rootYMode,
       });
+      if (key === 'swordJumpSlash') {
+        const hipsPositionTrack = preparedClip.tracks.find((track) => (
+          track.name.endsWith('.position') && this._isRootMotionTrack(track.name)
+        ));
+        if (hipsPositionTrack?.values?.length >= 3) {
+          this.jumpSlashAerialHipsPosition = new THREE.Vector3(
+            hipsPositionTrack.values[0],
+            hipsPositionTrack.values[1],
+            hipsPositionTrack.values[2],
+          );
+          const seamValues = hipsPositionTrack.createInterpolant().evaluate(
+            preparedClip.duration * JUMP_SLASH_AERIAL_POSE_PROGRESS,
+          );
+          this.jumpSlashAerialSeamHipsPosition = new THREE.Vector3(
+            seamValues[0],
+            seamValues[1],
+            seamValues[2],
+          );
+        }
+      }
       const action = this.mixer.clipAction(preparedClip, this.root);
       const looping = entry.loop ?? LOOPING_CLIP_KEYS.has(key);
 
@@ -688,6 +747,7 @@ export class SkeletalModelRig {
         duration: preparedClip.duration,
         preserveRootMotion: Boolean(entry.preserveRootMotion),
         lockRootY: Boolean(entry.lockRootY),
+        rootYMode: entry.rootYMode ?? null,
         extractRootMotion: Boolean(entry.extractRootMotion),
         rootMotion,
       });
@@ -724,6 +784,8 @@ export class SkeletalModelRig {
     busterArmSide = this.busterArmSide,
     aimTargetWorld = null,
     useRightArmForLedge = false,
+    jumpSlashAirbornePose = false,
+    jumpSlashAirborneRootAnchor = false,
     fallAnimationClipProgress = null,
     clipKey = null,
   } = {}) {
@@ -736,6 +798,8 @@ export class SkeletalModelRig {
       projectileAiming ? 'aiming' : 'freeAim',
       lockOnActive ? 'lockOn' : 'freeLock',
       `buster:${this.busterArmSide}`,
+      jumpSlashAirbornePose ? 'jumpSlashPose' : 'freePose',
+      jumpSlashAirborneRootAnchor ? 'jumpSlashRootAnchor' : 'freeRootAnchor',
       clipKey ? `clip:${clipKey}` : 'auto',
     ].join(':');
     if (rigState !== this.previousRigState) {
@@ -751,12 +815,16 @@ export class SkeletalModelRig {
     // positions (notably the dodge roll) inherit the counter-translated
     // shoulder and can pull the limb away from the body.
     this._restoreTemporaryMegaBusterPose();
+    if (!jumpSlashAirbornePose && !jumpSlashAirborneRootAnchor) {
+      this._restoreJumpSlashAerialOverrides();
+    }
 
     if (this.debugPoseEnabled) {
       this._applyDebugPoseOverridesImmediate();
       this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
       this._updateDrillArmVisual(dt);
-      this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
+      this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress, clipKey);
+      this._applyJumpSlashAerialPose(jumpSlashAirbornePose, jumpSlashAirborneRootAnchor);
       return;
     }
 
@@ -804,11 +872,12 @@ export class SkeletalModelRig {
     }
     this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
     this._updateDrillArmVisual(dt);
-    this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
+    this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress, selectedClip);
     const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
     this._applyBusterAimPose(busterAimActive, state, moving, aimTargetWorld);
     this._applyGeneratedPowerKnockbackPose(state, actionProgress ?? 0, dt);
     this._applyLedgeRightArmPose(state, useRightArmForLedge);
+    this._applyJumpSlashAerialPose(jumpSlashAirbornePose, jumpSlashAirborneRootAnchor);
   }
 
   _buildBoneMap() {
@@ -929,6 +998,72 @@ export class SkeletalModelRig {
       );
       this._applyBoneRotation(joint, tempEuler, 1);
     }
+  }
+
+  _restoreJumpSlashAerialOverrides() {
+    let restored = false;
+    if (this.jumpSlashAerialPoseRestoreTransforms) {
+      for (const { joint, position, quaternion } of this.jumpSlashAerialPoseRestoreTransforms.values()) {
+        joint.position.copy(position);
+        joint.quaternion.copy(quaternion);
+      }
+      this.jumpSlashAerialPoseRestoreTransforms = null;
+      restored = true;
+    } else if (this.jumpSlashAirborneRootRestorePosition) {
+      const hips = this.joints.get('hips');
+      if (hips) {
+        hips.position.copy(this.jumpSlashAirborneRootRestorePosition);
+        restored = true;
+      }
+    }
+    this.jumpSlashAirborneRootRestorePosition = null;
+    if (restored) {
+      this.root.updateMatrixWorld(true);
+    }
+    return restored;
+  }
+
+  _applyJumpSlashAerialPose(poseActive = false, rootAnchorActive = false) {
+    this.root.userData.jumpSlashAerialPoseActive = Boolean(poseActive);
+    this.root.userData.jumpSlashAirborneRootAnchorActive = Boolean(rootAnchorActive);
+    if (!poseActive && !rootAnchorActive) {
+      return;
+    }
+
+    // The authored clip raises and compresses its hips as it travels. Physical
+    // jump simulation already owns that world-space arc, so pin translation
+    // throughout the aerial wind-up/hold and release it at touchdown. Once the
+    // wind-up reaches its seam, the supplied rest-relative rotations take over.
+    const hips = this.joints.get('hips');
+    if (poseActive && !this.jumpSlashAerialPoseRestoreTransforms) {
+      this.jumpSlashAerialPoseRestoreTransforms = new Map();
+      for (const jointName of Object.keys(JUMP_SLASH_AERIAL_POSE_DEGREES)) {
+        const joint = this.joints.get(jointName);
+        if (!joint) {
+          continue;
+        }
+        const position = joint.position.clone();
+        if (jointName === 'hips' && this.jumpSlashAerialSeamHipsPosition) {
+          position.copy(this.jumpSlashAerialSeamHipsPosition);
+        }
+        this.jumpSlashAerialPoseRestoreTransforms.set(jointName, {
+          joint,
+          position,
+          quaternion: joint.quaternion.clone(),
+        });
+      }
+    } else if (!poseActive && rootAnchorActive && hips) {
+      this.jumpSlashAirborneRootRestorePosition = hips.position.clone();
+    }
+    const anchoredHipsPosition = this.jumpSlashAerialHipsPosition
+      ?? hips?.userData?.restLocalPosition;
+    if (hips && anchoredHipsPosition) {
+      hips.position.copy(anchoredHipsPosition);
+    }
+    if (poseActive) {
+      this._applyRawLocalPoseDegrees(JUMP_SLASH_AERIAL_POSE_DEGREES);
+    }
+    this.root.updateMatrixWorld(true);
   }
 
   _captureMegaBusterActionIdleArmAnchor() {
@@ -1382,19 +1517,33 @@ export class SkeletalModelRig {
     return target;
   }
 
-  _prepareAnimationClip(clip, key, { preserveRootMotion = false, lockRootY = false } = {}) {
+  _prepareAnimationClip(clip, key, {
+    preserveRootMotion = false,
+    lockRootY = false,
+    rootYMode = null,
+  } = {}) {
     const lockRootYToRest = key === 'forwardJumpLaunch'
       || key === 'forwardJumpFall'
       || key === 'forwardJumpLanding';
     const tracks = clip.tracks
-      .map((track) => this._prepareAnimationTrack(track, { preserveRootMotion, lockRootY, lockRootYToRest }))
+      .map((track) => this._prepareAnimationTrack(track, {
+        preserveRootMotion,
+        lockRootY,
+        lockRootYToRest,
+        rootYMode,
+      }))
       .filter(Boolean);
     const preparedClip = new THREE.AnimationClip(key, clip.duration, tracks);
     preparedClip.name = key;
     return preparedClip;
   }
 
-  _prepareAnimationTrack(track, { preserveRootMotion = false, lockRootY = false, lockRootYToRest = false } = {}) {
+  _prepareAnimationTrack(track, {
+    preserveRootMotion = false,
+    lockRootY = false,
+    lockRootYToRest = false,
+    rootYMode = null,
+  } = {}) {
     const trackName = this._retargetAnimationTrackName(track.name);
     const property = trackName.slice(trackName.lastIndexOf('.') + 1);
     const rootPositionTrack = property === 'position' && this._isRootMotionTrack(trackName);
@@ -1411,11 +1560,14 @@ export class SkeletalModelRig {
     const baseX = restPosition?.x ?? values[0] ?? 0;
     const baseY = lockRootYToRest ? (restPosition?.y ?? values[1] ?? 0) : (values[1] ?? 0);
     const baseZ = restPosition?.z ?? values[2] ?? 0;
+    const sourceStartY = values[1] ?? baseY;
 
     for (let index = 0; index < values.length; index += 3) {
       values[index] = baseX;
       if (lockRootY) {
-        values[index + 1] = baseY;
+        values[index + 1] = rootYMode === 'compressionOnly'
+          ? Math.min(sourceStartY, values[index + 1])
+          : baseY;
       }
       values[index + 2] = baseZ;
     }
@@ -1663,12 +1815,17 @@ export class SkeletalModelRig {
       warrioridle: 'warriorIdle',
       armstretch: 'warriorIdle',
       stretchidle: 'warriorIdle',
-      beambladeslash: 'swordInwardSlash',
+      beambladeslash: 'swordForwardSlash',
+      forwardslash: 'swordForwardSlash',
+      swordandshieldforwardslash: 'swordForwardSlash',
+      swordforwardslash: 'swordForwardSlash',
       stableinwardslash: 'swordInwardSlash',
       stableswordinwardslash: 'swordInwardSlash',
-      swordarmslash: 'swordInwardSlash',
+      swordarmslash: 'swordForwardSlash',
       swordinwardslash: 'swordInwardSlash',
-      swordslash: 'swordInwardSlash',
+      jumpslash: 'swordJumpSlash',
+      swordjumpslash: 'swordJumpSlash',
+      swordslash: 'swordForwardSlash',
       neutraljump: 'forwardJumpLaunch',
       jump: 'jump',
       jumpingup: 'jumpingUp',
@@ -1758,7 +1915,7 @@ export class SkeletalModelRig {
     const useRightBusterClips = busterAimActive && busterArmSide === 'right';
 
     if (state === 'attacking' && attackKind === 'beamBlade') {
-      return this._firstAvailable('swordInwardSlash', 'walking', 'strutWalking', 'breathingIdle', 'idle');
+      return this._firstAvailable('swordForwardSlash', 'swordInwardSlash', 'walking', 'strutWalking', 'breathingIdle', 'idle');
     }
 
     if (state === 'neutralJump') {
@@ -2054,7 +2211,7 @@ export class SkeletalModelRig {
       // Reach the dedicated falling loop sooner without changing jump physics.
       // The physical landing state may still interrupt this clip at any frame.
       speed = FORWARD_JUMP_FALL_TRANSITION_SPEED;
-    } else if (key === 'swordInwardSlash'
+    } else if (SWORD_SLASH_CLIP_KEYS.has(key)
       || key === 'dodgeRoll'
       || JUMP_ACTION_CLIP_KEYS.has(key)
       || syncLedgeClip
@@ -2072,7 +2229,7 @@ export class SkeletalModelRig {
     } else if (generatedPowerKnockback) {
       const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
       this.activeAction.time = Math.min(0.12, Math.max(0, clipDuration * 0.18));
-    } else if (key === 'swordInwardSlash' && Number.isFinite(attackProgress)) {
+    } else if (SWORD_SLASH_CLIP_KEYS.has(key) && Number.isFinite(attackProgress)) {
       const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;
       this.activeAction.time = THREE.MathUtils.clamp(attackProgress, 0, 1) * Math.max(0.1, clipDuration);
     } else if ((key === 'dodgeRoll' || (JUMP_ACTION_CLIP_KEYS.has(key) && key !== 'forwardJumpFall'))
@@ -2510,7 +2667,7 @@ export class SkeletalModelRig {
     this.drillBitSpin.scale.setScalar(pulse);
   }
 
-  _updateBeamBladeVisual(visible, attackProgress) {
+  _updateBeamBladeVisual(visible, attackProgress, clipKey = this.activeClipKey) {
     if (!this.beamBladeGroup) {
       return;
     }
@@ -2524,7 +2681,19 @@ export class SkeletalModelRig {
 
     const attackFrame = attackProgress * BEAM_BLADE_TOTAL_FRAMES;
     const charge = THREE.MathUtils.smoothstep(attackFrame, 6, 8) * (1 - THREE.MathUtils.smoothstep(attackFrame, 10, 12));
-    const sweep = THREE.MathUtils.smoothstep(attackProgress, BEAM_BLADE_ACTIVE_START, BEAM_BLADE_SLASH_END);
+    const forwardSlash = clipKey === 'swordForwardSlash';
+    const jumpSlash = clipKey === 'swordJumpSlash';
+    const activeStart = jumpSlash
+      ? JUMP_SLASH_ACTIVE_START
+      : forwardSlash
+        ? FORWARD_SLASH_ACTIVE_START
+        : BEAM_BLADE_ACTIVE_START;
+    const slashEnd = jumpSlash
+      ? JUMP_SLASH_END
+      : forwardSlash
+        ? FORWARD_SLASH_END
+        : BEAM_BLADE_SLASH_END;
+    const sweep = THREE.MathUtils.smoothstep(attackProgress, activeStart, slashEnd);
     const strike = Math.sin(sweep * Math.PI);
     this.beamBladeGroup.scale.set(1 + charge * 0.08 + strike * 0.18, 1 + charge * 0.08 + strike * 0.18, 0.78 + charge * 0.12 + strike * 0.28);
     this.beamBladeGroup.rotation.z = Math.sin(this.time * 22) * 0.018 * charge + Math.sin(this.time * 30) * 0.025 * strike;

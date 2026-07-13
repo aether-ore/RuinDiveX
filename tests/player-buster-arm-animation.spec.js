@@ -416,6 +416,11 @@ test('Mega Buster aims at the lock target or the manual reticle without releasin
     game.pointer.secondaryPressed = true;
     game._updateAimFromPointer();
     const manualAimPoint = game.pointer.aimWorld.clone();
+    const projectedResolvedManualAim = manualAimPoint.clone().project(game.camera);
+    const manualReticleProjectionError = Math.hypot(
+      projectedResolvedManualAim.x - projectedManualPoint.x,
+      projectedResolvedManualAim.y - projectedManualPoint.y,
+    );
 
     combat.update(1 / 60);
     settleAimPose();
@@ -427,7 +432,7 @@ test('Mega Buster aims at the lock target or the manual reticle without releasin
       lockedAlignment: lockedAim.alignment,
       manualAlignment: manualAim.alignment,
       aimDirectionSeparation: lockedAim.direction.angleTo(manualAim.direction),
-      manualAimDistanceToDesired: manualAimPoint.distanceTo(desiredManualPoint),
+      manualReticleProjectionError,
       manualOverrideActive: combat.isManualAimOverrideActive(game.pointer),
       movementLockPreserved: combat.getMovementLockTarget() === enemy,
       visualTargetDistanceToManualAim: player.bracedFireTargetWorld.distanceTo(manualAimPoint),
@@ -441,7 +446,7 @@ test('Mega Buster aims at the lock target or the manual reticle without releasin
   expect(result.lockedAlignment).toBeGreaterThan(0.999);
   expect(result.manualAlignment).toBeGreaterThan(0.999);
   expect(result.aimDirectionSeparation).toBeGreaterThan(0.15);
-  expect(result.manualAimDistanceToDesired).toBeLessThan(0.02);
+  expect(result.manualReticleProjectionError).toBeLessThan(0.0001);
   expect(result.manualOverrideActive).toBe(true);
   expect(result.movementLockPreserved).toBe(true);
   expect(result.visualTargetDistanceToManualAim).toBeLessThan(0.001);

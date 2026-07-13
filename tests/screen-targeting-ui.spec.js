@@ -47,7 +47,6 @@ test('aim and lock-on reticles are flat, screen-space HUD indicators', async ({ 
     const markerStyle = getComputedStyle(marker);
     const firstMarkerBounds = marker.getBoundingClientRect();
     const targetWorld = getCombatTargetWorldPosition(enemy, new Vector3());
-    if (!enemy.isWeakPointTarget) targetWorld.y += 0.58;
     const projected = targetWorld.clone().project(game.camera);
     const expectedX = canvasRect.left + (projected.x + 1) * canvasRect.width * 0.5;
     const expectedY = canvasRect.top + (1 - projected.y) * canvasRect.height * 0.5;
@@ -164,6 +163,33 @@ test('manual aim redirects shots while movement lock keeps target facing', async
     game.pointer.secondary = true;
     game._updateAimFromPointer();
     const manualAim = game.pointer.aimWorld.clone();
+    const manualDepthWithLock = game.manualAimPlaneDepth;
+    const savedLockState = {
+      target: combat.lockOn.target,
+      progress: combat.lockOn.progress,
+      movementLocked: combat.lockOn.movementLocked,
+      manual: combat.lockOn.manual,
+      source: combat.lockOn.source,
+    };
+    combat.lockOn.target = null;
+    combat.lockOn.progress = 0;
+    combat.lockOn.movementLocked = false;
+    combat.lockOn.manual = false;
+    combat.lockOn.source = null;
+    game.manualAimPlaneActive = false;
+    game.manualAimPlaneDepth = 0;
+    game._updateAimFromPointer();
+    const manualAimWithoutLock = game.pointer.aimWorld.clone();
+    const manualDepthWithoutLock = game.manualAimPlaneDepth;
+    Object.assign(combat.lockOn, savedLockState);
+    const manualAimProjected = manualAim.clone().project(game.camera);
+    const manualAimReticleError = Math.hypot(
+      manualAimProjected.x - projectedManualPoint.x,
+      manualAimProjected.y - projectedManualPoint.y,
+    );
+    const projectileOrigin = player.getProjectileOrigin();
+    const manualDirectionWithLock = manualAim.clone().sub(projectileOrigin).normalize();
+    const manualDirectionWithoutLock = manualAimWithoutLock.clone().sub(projectileOrigin).normalize();
     const manualOverrideActive = combat.isManualAimOverrideActive(game.pointer);
     const effectiveManualAim = combat._getEffectiveAimWorld(manualAim, manualOverrideActive).clone();
 
@@ -257,8 +283,11 @@ test('manual aim redirects shots while movement lock keeps target facing', async
     return {
       manualOverrideActive,
       automaticAimDistanceToLock: automaticAim.distanceTo(lockPoint),
-      manualAimDistanceToDesired: manualAim.distanceTo(desiredManualPoint),
-      effectiveManualAimDistance: effectiveManualAim.distanceTo(desiredManualPoint),
+      manualAimReticleError,
+      effectiveManualAimDistance: effectiveManualAim.distanceTo(manualAim),
+      manualAimLockIndependence: manualAim.distanceTo(manualAimWithoutLock),
+      manualDirectionLockIndependence: manualDirectionWithLock.dot(manualDirectionWithoutLock),
+      manualDepthDifference: Math.abs(manualDepthWithLock - manualDepthWithoutLock),
       shotCount: capturedShots.length,
       automaticShotDot: automaticShot.direction.dot(automaticExpected),
       manualShotDot: manualShot.direction.dot(manualExpected),
@@ -286,8 +315,11 @@ test('manual aim redirects shots while movement lock keeps target facing', async
 
   expect(result.manualOverrideActive).toBe(true);
   expect(result.automaticAimDistanceToLock).toBeLessThan(0.001);
-  expect(result.manualAimDistanceToDesired).toBeLessThan(0.01);
-  expect(result.effectiveManualAimDistance).toBeLessThan(0.01);
+  expect(result.manualAimReticleError).toBeLessThan(0.0001);
+  expect(result.effectiveManualAimDistance).toBeLessThan(0.001);
+  expect(result.manualAimLockIndependence).toBeLessThan(0.001);
+  expect(result.manualDirectionLockIndependence).toBeGreaterThan(0.999999);
+  expect(result.manualDepthDifference).toBeLessThan(0.001);
   expect(result.shotCount).toBe(2);
   expect(result.automaticShotDot).toBeGreaterThan(0.999);
   expect(result.manualShotDot).toBeGreaterThan(0.999);
@@ -311,6 +343,467 @@ test('manual aim redirects shots while movement lock keeps target facing', async
   expect(result.secondTabPulseQueued).toBe(true);
   expect(result.tabUnlocks).toBe(true);
   expect(result.tabRelocks).toBe(true);
+});
+
+test('free aim reticle acquisition initiates strafing lock without steering manual fire', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=free-aim-reticle-lock-proof');
+  await page.waitForFunction(() => Boolean(window.game?.combat && window.game?.player));
+
+  const result = await page.evaluate(async () => {
+    const { Object3D, Vector3 } = await import('three');
+    const { getCombatTargetWorldPosition } = await import('./src/reaverbots/CombatTarget.js');
+    const game = window.game;
+    const combat = game.combat;
+    const player = game.player;
+    game.stop();
+
+    for (const existing of [...game.enemies]) {
+      existing.dispose?.();
+      existing.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+
+    player.root.position.set(0, 0, 0);
+    player.lastMoveDirection.set(0, 0, 1);
+    player.root.updateMatrixWorld(true);
+    game.camera.position.set(0, 3.1, -7);
+    game.camera.lookAt(0, 1.35, 5.5);
+    game.camera.updateMatrixWorld(true);
+
+    const enemy = game.spawner.spawnEnemy('basic', false, new Vector3(0, 0, 5.5), {
+      allowRandomElite: false,
+    });
+    const makeLockPoint = (id, x) => {
+      const root = new Object3D();
+      root.position.set(x, 1.45, 0);
+      enemy.root.add(root);
+      return {
+        id,
+        ownerEnemy: enemy,
+        root,
+        isWeakPointTarget: true,
+        active: true,
+        get dead() {
+          return enemy.dead;
+        },
+        getWorldPosition(out) {
+          return root.getWorldPosition(out);
+        },
+      };
+    };
+    const leftLockPoint = makeLockPoint(`${enemy.id}:left-lock-point`, -1.2);
+    const rightLockPoint = makeLockPoint(`${enemy.id}:right-lock-point`, 1.2);
+    enemy.getCombatTargets = () => [leftLockPoint, rightLockPoint, enemy];
+    enemy.root.updateMatrixWorld(true);
+
+    const canvasRect = game.renderer.domElement.getBoundingClientRect();
+    const pointReticleAt = (worldPosition, offsetX = 0, offsetY = 0) => {
+      const projected = worldPosition.clone().project(game.camera);
+      game.pointer.x = canvasRect.left + (projected.x + 1) * canvasRect.width * 0.5 + offsetX;
+      game.pointer.y = canvasRect.top + (1 - projected.y) * canvasRect.height * 0.5 + offsetY;
+      game._updateAimFromPointer();
+    };
+    const updateCombat = () => {
+      game.pointer.primary = false;
+      game.pointer.primaryPressed = false;
+      combat.update(1 / 60);
+    };
+
+    combat._clearLockOn();
+    game.pointer.secondary = false;
+    pointReticleAt(getCombatTargetWorldPosition(leftLockPoint, new Vector3()));
+    updateCombat();
+    const hoverWithoutAimIgnored = combat.lockOn.target === null;
+
+    game.pointer.secondary = true;
+    game.pointer.secondaryPressed = true;
+    game.pointer.x = canvasRect.left + canvasRect.width * 0.78;
+    game.pointer.y = canvasRect.top + canvasRect.height * 0.22;
+    game._updateAimFromPointer();
+    updateCombat();
+    const highFreeAim = game.pointer.aimWorld.clone();
+    game.pointer.y = canvasRect.top + canvasRect.height * 0.78;
+    game._updateAimFromPointer();
+    const lowFreeAim = game.pointer.aimWorld.clone();
+    const cameraForward = new Vector3();
+    game.camera.getWorldDirection(cameraForward);
+    const freeAimWithoutLock = {
+      active: combat.isManualAimOverrideActive(game.pointer),
+      cachedActive: combat.manualAimOverrideActive,
+      movementTarget: combat.getMovementLockTarget(),
+      finiteAimWorld: game.pointer.aimWorld.toArray().every(Number.isFinite),
+      verticalAimSpan: highFreeAim.y - lowFreeAim.y,
+      cameraFacingPlane: Math.abs(game.aimPlane.normal.dot(cameraForward)),
+    };
+
+    pointReticleAt(getCombatTargetWorldPosition(leftLockPoint, new Vector3()));
+    updateCombat();
+    const leftTargetWorld = getCombatTargetWorldPosition(leftLockPoint, new Vector3());
+    const expectedLeftMovementForward = leftTargetWorld.clone()
+      .sub(player.root.position)
+      .setY(0)
+      .normalize();
+    const leftMovementBasis = game._getPlayerMovementBasis();
+    const leftHover = {
+      target: combat.lockOn.target,
+      progress: combat.lockOn.progress,
+      movementLocked: combat.lockOn.movementLocked,
+      movementTarget: combat.getMovementLockTarget(),
+      movementBasisTarget: leftMovementBasis.lockOnTarget,
+      movementBasisForwardDot: leftMovementBasis.forward.dot(expectedLeftMovementForward),
+      source: combat.lockOn.source,
+    };
+
+    pointReticleAt(getCombatTargetWorldPosition(enemy, new Vector3()));
+    updateCombat();
+    const bodyHover = {
+      target: combat.lockOn.target,
+      progress: combat.lockOn.progress,
+      movementLocked: combat.lockOn.movementLocked,
+      movementTarget: combat.getMovementLockTarget(),
+      source: combat.lockOn.source,
+    };
+
+    pointReticleAt(getCombatTargetWorldPosition(rightLockPoint, new Vector3()));
+    updateCombat();
+    const rightHover = {
+      target: combat.lockOn.target,
+      progress: combat.lockOn.progress,
+      movementLocked: combat.lockOn.movementLocked,
+      movementTarget: combat.getMovementLockTarget(),
+      source: combat.lockOn.source,
+    };
+
+    const rightTargetWorld = getCombatTargetWorldPosition(rightLockPoint, new Vector3());
+    pointReticleAt(rightTargetWorld, 72);
+    updateCombat();
+    const manualShotAim = game.pointer.aimWorld.clone();
+    combat.manualAimOverrideActive = combat.isManualAimOverrideActive(game.pointer);
+    const effectiveManualAim = combat._getEffectiveAimWorld(
+      game.pointer.aimWorld,
+      combat.manualAimOverrideActive,
+    ).clone();
+    const automaticProjectileTarget = (() => {
+      combat.manualAimOverrideActive = false;
+      return combat._getProjectileLockTarget({ lockOn: true });
+    })();
+    const manualProjectileTarget = (() => {
+      combat.manualAimOverrideActive = true;
+      return combat._getProjectileLockTarget({ lockOn: true });
+    })();
+
+    const state = combat.getCurrentWeaponState();
+    state.cooldown = 0;
+    state.reloadTimer = 0;
+    state.energy = state.maxEnergy;
+    state.weaponOutput = state.maxWeaponOutput ?? 1;
+    player.animation.actionState = null;
+    player.animation.actionTimer = 0;
+    player.animation.attackTimer = 0;
+    player.animation.hurtTimer = 0;
+    player.holdProjectileFiringPose(effectiveManualAim, 1, { weaponKey: state.key });
+    const capturedShots = [];
+    const originalSpawn = game.projectiles.spawn;
+    game.projectiles.spawn = (shot) => {
+      capturedShots.push({
+        position: shot.position.clone(),
+        direction: shot.direction.clone(),
+        target: shot.target ?? null,
+      });
+      return shot;
+    };
+    try {
+      combat.tryPrimaryAttack(effectiveManualAim);
+    } finally {
+      game.projectiles.spawn = originalSpawn;
+    }
+    const manualShot = capturedShots[0];
+    const immediateShotCount = capturedShots.length;
+    const expectedManualDirection = effectiveManualAim.clone().sub(manualShot.position).normalize();
+    const lockDirection = rightTargetWorld.clone().sub(manualShot.position).normalize();
+
+    game.pointer.x = canvasRect.left + 8;
+    game.pointer.y = canvasRect.top + 8;
+    game._updateAimFromPointer();
+    updateCombat();
+    const emptyHoverRetainsRight = combat.lockOn.target === rightLockPoint
+      && combat.lockOn.source === 'reticle'
+      && combat.getMovementLockTarget() === rightLockPoint;
+    game.pointer.secondary = false;
+    updateCombat();
+    const aimReleaseRetainsRight = combat.lockOn.target === rightLockPoint
+      && combat.lockOn.source === 'reticle'
+      && combat.getMovementLockTarget() === rightLockPoint
+      && !combat.isManualAimOverrideActive(game.pointer);
+
+    game.pointer.secondary = true;
+    pointReticleAt(getCombatTargetWorldPosition(leftLockPoint, new Vector3()));
+    updateCombat();
+    const reticleSwitchLocksLeft = combat.getMovementLockTarget() === leftLockPoint;
+
+    const onTargetUnlockEvent = new KeyboardEvent('keydown', {
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(onTargetUnlockEvent);
+    updateCombat();
+    updateCombat();
+    const onTargetTabUnlockStaysOff = combat.getMovementLockTarget() === null
+      && combat.lockOn.target === null;
+    game.pointer.secondary = false;
+    updateCombat();
+    game.pointer.secondary = true;
+    pointReticleAt(getCombatTargetWorldPosition(leftLockPoint, new Vector3()));
+    updateCombat();
+    const aimRepressReacquiresLeft = combat.getMovementLockTarget() === leftLockPoint;
+
+    game.pointer.x = canvasRect.right - 8;
+    game.pointer.y = canvasRect.top + 8;
+    game._updateAimFromPointer();
+    updateCombat();
+    const reticleLockStaysStickyOffTarget = combat.getMovementLockTarget() === leftLockPoint;
+
+    const tabUnlockEvent = new KeyboardEvent('keydown', {
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(tabUnlockEvent);
+    const unlockTabPulseQueued = game.pointer.lockOnPressed;
+    updateCombat();
+    const tabClearsReticleMovementLock = combat.getMovementLockTarget() === null;
+    const tabClearsReticleTarget = combat.lockOn.target === null;
+
+    const relockState = combat.getCurrentWeaponState();
+    const relockProfile = combat._getStatefulProfile(combat._getCurrentProfile(), relockState);
+    const expectedTabRelockTarget = combat._findLockCandidate(relockProfile);
+    const tabRelockEvent = new KeyboardEvent('keydown', {
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(tabRelockEvent);
+    const relockTabPulseQueued = game.pointer.lockOnPressed;
+    updateCombat();
+    const tabRelocksNearest = Boolean(expectedTabRelockTarget)
+      && combat.getMovementLockTarget() === expectedTabRelockTarget
+      && combat.lockOn.progress === 1
+      && combat.lockOn.source === 'tab';
+
+    pointReticleAt(getCombatTargetWorldPosition(rightLockPoint, new Vector3()));
+    updateCombat();
+    const missile = game.inventory.items.find((item) => item.type === 'missileArm');
+    player.assignArmWeaponToSlot(1, missile);
+    const missileState = combat.getCurrentWeaponState();
+    missileState.cooldown = 0;
+    missileState.reloadTimer = 0;
+    missileState.energy = missileState.maxEnergy;
+    missileState.weaponOutput = missileState.maxWeaponOutput ?? 1;
+    const missileOnTargetUnlockEvent = new KeyboardEvent('keydown', {
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(missileOnTargetUnlockEvent);
+    updateCombat();
+    updateCombat();
+    const missileOnTargetTabUnlockStaysOff = combat.getMovementLockTarget() === null
+      && combat.lockOn.target === rightLockPoint;
+    game.pointer.secondary = false;
+    updateCombat();
+    game.pointer.secondary = true;
+    pointReticleAt(getCombatTargetWorldPosition(rightLockPoint, new Vector3()));
+    updateCombat();
+    const missileAimRepressReacquiresRight = combat.getMovementLockTarget() === rightLockPoint;
+    game.pointer.aimWorld.copy(manualShotAim);
+    combat.manualAimOverrideActive = true;
+    const capturedSalvoShots = [];
+    game.projectiles.spawn = (shot) => {
+      capturedSalvoShots.push({
+        position: shot.position.clone(),
+        direction: shot.direction.clone(),
+        target: shot.target ?? null,
+      });
+      return shot;
+    };
+    let manualSalvoAccepted = false;
+    try {
+      manualSalvoAccepted = combat.trySecondaryAction(manualShotAim);
+    } finally {
+      game.projectiles.spawn = originalSpawn;
+    }
+    const salvoDirectionDots = capturedSalvoShots.map((shot) => shot.direction.dot(
+      manualShotAim.clone().sub(shot.position).normalize(),
+    ));
+    const manualSalvoBestAlignment = salvoDirectionDots.length > 0
+      ? Math.max(...salvoDirectionDots)
+      : -1;
+    const manualSalvoWorstAlignment = salvoDirectionDots.length > 0
+      ? Math.min(...salvoDirectionDots)
+      : -1;
+    const manualSalvoTargetsSuppressed = capturedSalvoShots.length > 0
+      && capturedSalvoShots.every((shot) => shot.target === null);
+    missileState.cooldown = 0;
+    missileState.reloadTimer = 0;
+    missileState.energy = missileState.maxEnergy;
+    missileState.weaponOutput = missileState.maxWeaponOutput ?? 1;
+    player._releaseProjectileAim();
+    player.animation.actionState = null;
+    player.animation.actionTimer = 0;
+    player.animation.attackTimer = 0;
+    player.animation.hurtTimer = 0;
+    combat.manualAimOverrideActive = true;
+    const pendingBefore = combat.pendingProjectileShots.length;
+    game.projectiles.spawn = (shot) => {
+      capturedShots.push({
+        position: shot.position.clone(),
+        direction: shot.direction.clone(),
+        target: shot.target ?? null,
+      });
+      return shot;
+    };
+    let delayedAttackAccepted = false;
+    let queuedDuringManualAim = false;
+    try {
+      delayedAttackAccepted = combat.tryPrimaryAttack(manualShotAim);
+      queuedDuringManualAim = combat.pendingProjectileShots.length === pendingBefore + 1;
+      game.pointer.secondary = false;
+      combat.manualAimOverrideActive = false;
+      player.animation.attackTimer = 0;
+      player.animation.actionTimer = 0;
+      combat._updatePendingProjectileShots(1);
+    } finally {
+      game.projectiles.spawn = originalSpawn;
+    }
+    const delayedShot = capturedShots[1] ?? null;
+    const delayedExpectedDirection = delayedShot
+      ? manualShotAim.clone().sub(delayedShot.position).normalize()
+      : null;
+    const releasedAimCanUseSelectedTarget = combat._getProjectileLockTarget({ lockOn: true })
+      === rightLockPoint;
+
+    return {
+      freeAimWithoutLock,
+      hoverWithoutAimIgnored,
+      leftHoverMatches: leftHover.target === leftLockPoint,
+      leftHoverProgress: leftHover.progress,
+      leftHoverMovementLocked: leftHover.movementLocked,
+      leftHoverMovementTargetMatches: leftHover.movementTarget === leftLockPoint,
+      leftMovementBasisTargetMatches: leftHover.movementBasisTarget === leftLockPoint,
+      leftMovementBasisForwardDot: leftHover.movementBasisForwardDot,
+      leftHoverSource: leftHover.source,
+      bodyHoverMatches: bodyHover.target === enemy,
+      bodyHoverProgress: bodyHover.progress,
+      bodyHoverMovementLocked: bodyHover.movementLocked,
+      bodyHoverMovementTargetMatches: bodyHover.movementTarget === enemy,
+      bodyHoverSource: bodyHover.source,
+      rightHoverMatches: rightHover.target === rightLockPoint,
+      rightHoverProgress: rightHover.progress,
+      rightHoverMovementLocked: rightHover.movementLocked,
+      rightHoverMovementTargetMatches: rightHover.movementTarget === rightLockPoint,
+      rightHoverSource: rightHover.source,
+      effectiveAimDistance: effectiveManualAim.distanceTo(manualShotAim),
+      automaticProjectileUsesHoverLock: automaticProjectileTarget === rightLockPoint,
+      manualProjectileIgnoresHoverLock: manualProjectileTarget === null,
+      shotCount: immediateShotCount,
+      shotFollowsReticle: manualShot.direction.dot(expectedManualDirection),
+      shotAngleFromLock: manualShot.direction.angleTo(lockDirection),
+      shotTargetSuppressed: manualShot.target === null,
+      emptyHoverRetainsRight,
+      aimReleaseRetainsRight,
+      tabUnlockPrevented: tabUnlockEvent.defaultPrevented,
+      unlockTabPulseQueued,
+      reticleSwitchLocksLeft,
+      onTargetUnlockPrevented: onTargetUnlockEvent.defaultPrevented,
+      onTargetTabUnlockStaysOff,
+      aimRepressReacquiresLeft,
+      reticleLockStaysStickyOffTarget,
+      tabClearsReticleMovementLock,
+      tabClearsReticleTarget,
+      tabRelockPrevented: tabRelockEvent.defaultPrevented,
+      relockTabPulseQueued,
+      tabRelocksNearest,
+      missileFound: Boolean(missile),
+      missileOnTargetUnlockPrevented: missileOnTargetUnlockEvent.defaultPrevented,
+      missileOnTargetTabUnlockStaysOff,
+      missileAimRepressReacquiresRight,
+      manualSalvoAccepted,
+      manualSalvoShotCount: capturedSalvoShots.length,
+      manualSalvoBestAlignment,
+      manualSalvoWorstAlignment,
+      manualSalvoTargetsSuppressed,
+      delayedAttackAccepted,
+      queuedDuringManualAim,
+      delayedShotFired: Boolean(delayedShot),
+      delayedShotFollowsReticle: delayedShot && delayedExpectedDirection
+        ? delayedShot.direction.dot(delayedExpectedDirection)
+        : -1,
+      delayedShotTargetSuppressed: delayedShot?.target === null,
+      releasedAimCanUseSelectedTarget,
+    };
+  });
+
+  expect(result.freeAimWithoutLock.active).toBe(true);
+  expect(result.freeAimWithoutLock.cachedActive).toBe(true);
+  expect(result.freeAimWithoutLock.movementTarget).toBe(null);
+  expect(result.freeAimWithoutLock.finiteAimWorld).toBe(true);
+  expect(result.freeAimWithoutLock.verticalAimSpan).toBeGreaterThan(1);
+  expect(result.freeAimWithoutLock.cameraFacingPlane).toBeGreaterThan(0.999);
+  expect(result.hoverWithoutAimIgnored).toBe(true);
+  expect(result.leftHoverMatches).toBe(true);
+  expect(result.leftHoverProgress).toBe(1);
+  expect(result.leftHoverMovementLocked).toBe(true);
+  expect(result.leftHoverMovementTargetMatches).toBe(true);
+  expect(result.leftMovementBasisTargetMatches).toBe(true);
+  expect(result.leftMovementBasisForwardDot).toBeGreaterThan(0.9999);
+  expect(result.leftHoverSource).toBe('reticle');
+  expect(result.bodyHoverMatches).toBe(true);
+  expect(result.bodyHoverProgress).toBe(1);
+  expect(result.bodyHoverMovementLocked).toBe(true);
+  expect(result.bodyHoverMovementTargetMatches).toBe(true);
+  expect(result.bodyHoverSource).toBe('reticle');
+  expect(result.rightHoverMatches).toBe(true);
+  expect(result.rightHoverProgress).toBe(1);
+  expect(result.rightHoverMovementLocked).toBe(true);
+  expect(result.rightHoverMovementTargetMatches).toBe(true);
+  expect(result.rightHoverSource).toBe('reticle');
+  expect(result.effectiveAimDistance).toBeLessThan(0.001);
+  expect(result.automaticProjectileUsesHoverLock).toBe(true);
+  expect(result.manualProjectileIgnoresHoverLock).toBe(true);
+  expect(result.shotCount).toBe(1);
+  expect(result.shotFollowsReticle).toBeGreaterThan(0.9999);
+  expect(result.shotAngleFromLock).toBeGreaterThan(0.08);
+  expect(result.shotTargetSuppressed).toBe(true);
+  expect(result.emptyHoverRetainsRight).toBe(true);
+  expect(result.aimReleaseRetainsRight).toBe(true);
+  expect(result.tabUnlockPrevented).toBe(true);
+  expect(result.unlockTabPulseQueued).toBe(true);
+  expect(result.reticleSwitchLocksLeft).toBe(true);
+  expect(result.onTargetUnlockPrevented).toBe(true);
+  expect(result.onTargetTabUnlockStaysOff).toBe(true);
+  expect(result.aimRepressReacquiresLeft).toBe(true);
+  expect(result.reticleLockStaysStickyOffTarget).toBe(true);
+  expect(result.tabClearsReticleMovementLock).toBe(true);
+  expect(result.tabClearsReticleTarget).toBe(true);
+  expect(result.tabRelockPrevented).toBe(true);
+  expect(result.relockTabPulseQueued).toBe(true);
+  expect(result.tabRelocksNearest).toBe(true);
+  expect(result.missileFound).toBe(true);
+  expect(result.missileOnTargetUnlockPrevented).toBe(true);
+  expect(result.missileOnTargetTabUnlockStaysOff).toBe(true);
+  expect(result.missileAimRepressReacquiresRight).toBe(true);
+  expect(result.manualSalvoAccepted).toBe(true);
+  expect(result.manualSalvoShotCount).toBeGreaterThanOrEqual(2);
+  expect(result.manualSalvoBestAlignment).toBeGreaterThan(0.9999);
+  expect(result.manualSalvoWorstAlignment).toBeGreaterThan(0.97);
+  expect(result.manualSalvoTargetsSuppressed).toBe(true);
+  expect(result.delayedAttackAccepted).toBe(true);
+  expect(result.queuedDuringManualAim).toBe(true);
+  expect(result.delayedShotFired).toBe(true);
+  expect(result.delayedShotFollowsReticle).toBeGreaterThan(0.99);
+  expect(result.delayedShotTargetSuppressed).toBe(true);
+  expect(result.releasedAimCanUseSelectedTarget).toBe(true);
 });
 
 test('entering pointer lock preserves the existing reticle position', async ({ page }) => {

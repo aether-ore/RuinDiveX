@@ -26,7 +26,7 @@ For the standard Buster Arm, Energy is not ammo. Buster shots are unlimited; Ene
 - `Space` jumps; jump direction follows the current movement input.
 - `Q` performs a short dodge roll in the current movement direction.
 - Mouse aims with the flat cyan screen reticle. Hold right mouse to aim through the reticle; entering aim preserves the reticle's current position.
-- Hold left mouse to fire or swing the active arm weapon.
+- Hold left mouse to fire or swing the active arm weapon. The Sword Arm opens with a forward slash; release and press again during the sequence to spend another Energy charge and Servo Output on the optional legacy inward-slash follow-up.
 - `Tab` locks onto or releases a target. While locked, hold right mouse for manual reticle aim without dropping the movement lock.
 - `Z` uses a secondary arm function when available. With `Shield Arm` equipped, it raises a timed guard; early timing parries and staggers attackers. Otherwise it manually vents/reloads the active arm weapon when Energy is not full.
 - Number keys `1` through `4` switch arm weapon slots.

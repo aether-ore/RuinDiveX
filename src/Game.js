@@ -88,6 +88,7 @@ const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
+const tempMatrixA = new THREE.Matrix4();
 const tempColor = new THREE.Color();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const ENEMY_DEATH_SPHERE_GEOMETRY = new THREE.SphereGeometry(1, 16, 11);
@@ -227,6 +228,8 @@ export class Game {
     };
     this.lastDungeonResourceDisposalStats = null;
     this.aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    this.manualAimPlaneActive = false;
+    this.manualAimPlaneDepth = 0;
     this.pointerNdc = new THREE.Vector2();
     this.aimReticle = null;
     this.aimReticleScale = 1;
@@ -312,6 +315,11 @@ export class Game {
     this.projectiles = new ProjectileSystem(this);
     this.combat = new CombatSystem(this);
     this.player.onDodgeStarted = () => this.combat.cancelForDodge();
+    this.player.onLedgeClingStarted = () => this.combat.cancelForLedgeCling();
+    this.player.onDeathStarted = () => this.combat.cancelForDeath();
+    this.player.onSwordJumpSlashLandingRecoveryStarted = (startProgress) => (
+      this.combat.beginSwordJumpSlashLandingTrail(startProgress)
+    );
     this.spawner = new EnemySpawner(this);
     this.ui = new UIManager(this);
     this.dungeonController = new DungeonController(this, this.dungeon);
@@ -1454,6 +1462,187 @@ export class Game {
     this.activeHitEffects.push(effect);
   }
 
+  beginBeamBladeSweepTrail(color = 0xa8ff8a, options = {}) {
+    const maxSamples = Math.max(8, options.maxSamples ?? 96);
+    const followObject = options.followObject?.isObject3D ? options.followObject : null;
+    const createRibbon = (name, innerRatio, opacity) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(
+        new Float32Array(maxSamples * 2 * 3),
+        3,
+      ));
+
+      const indices = new Uint16Array((maxSamples - 1) * 6);
+      for (let index = 0; index < maxSamples - 1; index += 1) {
+        const vertex = index * 2;
+        const offset = index * 6;
+        indices[offset] = vertex;
+        indices[offset + 1] = vertex + 1;
+        indices[offset + 2] = vertex + 2;
+        indices[offset + 3] = vertex + 1;
+        indices[offset + 4] = vertex + 3;
+        indices[offset + 5] = vertex + 2;
+      }
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+      geometry.setDrawRange(0, 0);
+
+      const mesh = new THREE.Mesh(
+        geometry,
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        }),
+      );
+      mesh.name = name;
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 7;
+      Object.assign(mesh.userData, {
+        trailMode: 'liveBladeSweep',
+        slashClipKey: options.slashClipKey ?? null,
+        innerRatio,
+        sampleCount: 0,
+        sweepStartProgress: options.startProgress ?? null,
+        sweepEndProgress: options.endProgress ?? null,
+        trailSpace: followObject ? 'followObjectLocal' : 'world',
+        followObjectName: followObject?.name ?? null,
+      });
+      (followObject ?? this.scene).add(mesh);
+      return mesh;
+    };
+
+    return {
+      clipKey: options.slashClipKey ?? null,
+      followObject,
+      maxSamples,
+      samples: [],
+      finished: false,
+      glow: createRibbon('laserBeamBladeSlashGlow', 0.24, 0.34),
+      core: createRibbon('laserBeamBladeSlashCore', 0.76, 0.88),
+    };
+  }
+
+  appendBeamBladeSweepTrail(trail, baseWorld, tipWorld, progress = null) {
+    if (trail?.finished
+      || !baseWorld?.isVector3
+      || !tipWorld?.isVector3
+      || trail.samples.length >= trail.maxSamples) {
+      return false;
+    }
+
+    const sampleBase = baseWorld.clone();
+    const sampleTip = tipWorld.clone();
+    if (trail.followObject?.isObject3D) {
+      // Store an equipment-relative sweep when the attack continues moving in
+      // world space. This preserves the authored blade arc without turning the
+      // character's downward jump travel into a tall ribbon segment.
+      trail.followObject.updateWorldMatrix(true, false);
+      tempMatrixA.copy(trail.followObject.matrixWorld).invert();
+      sampleBase.applyMatrix4(tempMatrixA);
+      sampleTip.applyMatrix4(tempMatrixA);
+    }
+
+    const coordinates = [
+      sampleBase.x,
+      sampleBase.y,
+      sampleBase.z,
+      sampleTip.x,
+      sampleTip.y,
+      sampleTip.z,
+    ];
+    if (!coordinates.every(Number.isFinite)) {
+      return false;
+    }
+
+    const previous = trail.samples[trail.samples.length - 1];
+    if (previous
+      && previous.base.distanceToSquared(sampleBase) < 0.000001
+      && previous.tip.distanceToSquared(sampleTip) < 0.000001) {
+      return false;
+    }
+
+    const sample = {
+      base: sampleBase,
+      tip: sampleTip,
+      baseWorld: baseWorld.clone(),
+      tipWorld: tipWorld.clone(),
+      progress: Number.isFinite(progress) ? progress : null,
+    };
+    trail.samples.push(sample);
+    const sampleIndex = trail.samples.length - 1;
+
+    for (const mesh of [trail.glow, trail.core]) {
+      const innerRatio = mesh.userData.innerRatio;
+      tempVectorA.copy(sample.base).lerp(sample.tip, innerRatio);
+      const positions = mesh.geometry.attributes.position;
+      const offset = sampleIndex * 2;
+      positions.setXYZ(offset, tempVectorA.x, tempVectorA.y, tempVectorA.z);
+      positions.setXYZ(offset + 1, sample.tip.x, sample.tip.y, sample.tip.z);
+      positions.needsUpdate = true;
+      mesh.geometry.setDrawRange(0, Math.max(0, sampleIndex * 6));
+      mesh.userData.sampleCount = trail.samples.length;
+      mesh.userData.firstSampleProgress = trail.samples[0]?.progress ?? null;
+      mesh.userData.lastSampleProgress = sample.progress;
+      mesh.userData.firstBladeBaseWorld = trail.samples[0]?.baseWorld?.clone() ?? null;
+      mesh.userData.firstBladeTipWorld = trail.samples[0]?.tipWorld?.clone() ?? null;
+      mesh.userData.lastBladeBaseWorld = sample.baseWorld.clone();
+      mesh.userData.lastBladeTipWorld = sample.tipWorld.clone();
+      mesh.userData.firstBladeBaseLocal = trail.followObject
+        ? trail.samples[0]?.base.clone() ?? null
+        : null;
+      mesh.userData.firstBladeTipLocal = trail.followObject
+        ? trail.samples[0]?.tip.clone() ?? null
+        : null;
+      mesh.userData.lastBladeBaseLocal = trail.followObject ? sample.base.clone() : null;
+      mesh.userData.lastBladeTipLocal = trail.followObject ? sample.tip.clone() : null;
+      mesh.visible = trail.samples.length >= 2;
+    }
+
+    return true;
+  }
+
+  finishBeamBladeSweepTrail(trail, fadeDuration = 0.16) {
+    if (!trail || trail.finished) {
+      return false;
+    }
+
+    trail.finished = true;
+    if (trail.samples.length < 2) {
+      this.cancelBeamBladeSweepTrail(trail);
+      return false;
+    }
+
+    const life = Math.max(0.06, fadeDuration);
+    for (const mesh of [trail.glow, trail.core]) {
+      mesh.visible = true;
+      this.timedEffects.push({
+        object: mesh,
+        life,
+        maxLife: life,
+        opacity: mesh.material.opacity,
+      });
+    }
+    return true;
+  }
+
+  cancelBeamBladeSweepTrail(trail) {
+    if (!trail) {
+      return;
+    }
+
+    trail.finished = true;
+    for (const mesh of [trail.glow, trail.core]) {
+      if (!mesh) {
+        continue;
+      }
+      mesh.removeFromParent();
+      this._disposeTimedEffectObject(mesh);
+    }
+  }
+
   addSlashEffect(position, direction, range, color = 0xa8ff8a, options = {}) {
     const beamBlade = options.beamBlade ?? false;
     const arcSpan = Math.min(Math.PI * 1.65, (options.arcAngle ?? Math.PI * 0.35) * 2);
@@ -1467,6 +1656,52 @@ export class Game {
     const additive = THREE.AdditiveBlending;
     const glowInnerRadius = visualRange * (beamBlade ? 0.24 : 0.28);
     const glowOuterRadius = visualRange * (beamBlade ? 1 : 0.36);
+    const hasAuthoredTrailPlane = beamBlade
+      && options.trailMotionLocal?.length >= 3
+      && options.trailPlaneNormalLocal?.length >= 3;
+    let trailMotionWorld = null;
+    let trailPlaneNormalWorld = null;
+    let trailCenterWorld = null;
+
+    if (hasAuthoredTrailPlane) {
+      tempVectorA.copy(direction).setY(0);
+      if (tempVectorA.lengthSq() <= 0.0001) {
+        tempVectorA.set(0, 0, 1);
+      } else {
+        tempVectorA.normalize();
+      }
+      tempVectorB.set(tempVectorA.z, 0, -tempVectorA.x);
+
+      const [motionRight, motionUp, motionForward] = options.trailMotionLocal;
+      const [normalRight, normalUp, normalForward] = options.trailPlaneNormalLocal;
+      const [centerRight, centerUp, centerForward] = options.trailCenterLocal?.length >= 3
+        ? options.trailCenterLocal
+        : [0, height, 0];
+      trailCenterWorld = position.clone()
+        .addScaledVector(tempVectorB, centerRight)
+        .addScaledVector(WORLD_UP, centerUp)
+        .addScaledVector(tempVectorA, centerForward);
+      tempVectorC.set(0, 0, 0)
+        .addScaledVector(tempVectorB, motionRight)
+        .addScaledVector(WORLD_UP, motionUp)
+        .addScaledVector(tempVectorA, motionForward)
+        .normalize();
+      tempVectorD.set(0, 0, 0)
+        .addScaledVector(tempVectorB, normalRight)
+        .addScaledVector(WORLD_UP, normalUp)
+        .addScaledVector(tempVectorA, normalForward)
+        .normalize();
+
+      // RingGeometry lives in XY. Its negative, symmetric arc travels along
+      // local -Y, so point that axis along the measured blade motion and keep
+      // local +Z on the authored sweep plane normal.
+      tempVectorC.addScaledVector(tempVectorD, -tempVectorC.dot(tempVectorD)).normalize();
+      trailMotionWorld = tempVectorC.clone();
+      trailPlaneNormalWorld = tempVectorD.clone();
+      tempVectorB.copy(tempVectorC).negate();
+      tempVectorA.copy(tempVectorB).cross(tempVectorD).normalize();
+      tempMatrixA.makeBasis(tempVectorA, tempVectorB, tempVectorD);
+    }
 
     const glow = new THREE.Mesh(
       new THREE.RingGeometry(glowInnerRadius, glowOuterRadius, 56, 1, arcStart, arcLength),
@@ -1481,15 +1716,31 @@ export class Game {
     );
 
     glow.name = beamBlade ? 'laserBeamBladeSlashGlow' : 'slashArcEffect';
-    glow.position.copy(position);
-    glow.position.y = height;
-    glow.rotation.x = -Math.PI / 2;
-    glow.rotation.z = rotation;
+    glow.position.copy(trailCenterWorld ?? position);
+    if (!trailCenterWorld) {
+      glow.position.y += height;
+    }
+    if (hasAuthoredTrailPlane) {
+      glow.quaternion.setFromRotationMatrix(tempMatrixA);
+      Object.assign(glow.userData, {
+        trailMode: 'authoredSlashPlane',
+        slashClipKey: options.slashClipKey ?? null,
+        trailCenterWorld: trailCenterWorld?.clone() ?? null,
+        trailMotionWorld,
+        trailPlaneNormalWorld,
+      });
+    } else {
+      glow.rotation.x = -Math.PI / 2;
+      glow.rotation.z = rotation;
+    }
     glow.visible = !delay;
     if (beamBlade) {
       glow.geometry.setDrawRange(0, 0);
     }
     this.scene.add(glow);
+    if (options.followObject?.isObject3D) {
+      options.followObject.attach(glow);
+    }
     this.timedEffects.push({
       object: glow,
       life: duration,
@@ -1517,13 +1768,33 @@ export class Game {
     );
 
     core.name = 'laserBeamBladeSlashCore';
-    core.position.copy(position);
-    core.position.y = height + 0.018;
-    core.rotation.x = -Math.PI / 2;
-    core.rotation.z = rotation;
+    core.position.copy(trailCenterWorld ?? position);
+    if (!trailCenterWorld) {
+      core.position.y += height;
+    }
+    if (hasAuthoredTrailPlane) {
+      core.position.addScaledVector(tempVectorD, 0.018);
+      // glow may already be reparented to the player root, so rebuild the
+      // shared world orientation before attaching the core as well.
+      core.quaternion.setFromRotationMatrix(tempMatrixA);
+      Object.assign(core.userData, {
+        trailMode: 'authoredSlashPlane',
+        slashClipKey: options.slashClipKey ?? null,
+        trailCenterWorld: trailCenterWorld?.clone() ?? null,
+        trailMotionWorld,
+        trailPlaneNormalWorld,
+      });
+    } else {
+      core.position.y += 0.018;
+      core.rotation.x = -Math.PI / 2;
+      core.rotation.z = rotation;
+    }
     core.visible = !delay;
     core.geometry.setDrawRange(0, 0);
     this.scene.add(core);
+    if (options.followObject?.isObject3D) {
+      options.followObject.attach(core);
+    }
     this.timedEffects.push({
       object: core,
       life: duration * 0.82,
@@ -3300,14 +3571,30 @@ export class Game {
     this.pointerNdc.y = -((this.pointer.y - rect.top) / rect.height) * 2 + 1;
 
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
-    const manualLockTarget = this.combat?.isManualAimOverrideActive?.(this.pointer)
-      ? this.combat.getMovementLockTarget?.()
-      : null;
-    if (manualLockTarget?.root) {
-      getCombatTargetWorldPosition(manualLockTarget, tempVectorA);
+    const manualAimActive = Boolean(this.combat?.isManualAimOverrideActive?.(this.pointer));
+    if (manualAimActive) {
       this.camera.getWorldDirection(tempVectorB);
+
+      if (!this.manualAimPlaneActive) {
+        const projectileOrigin = this.player?.getProjectileOrigin?.()
+          ?? this.player?.getAttackOrigin?.()
+          ?? this.player?.root?.position;
+        const projectileDepth = projectileOrigin
+          ? tempVectorA.copy(projectileOrigin).sub(this.camera.position).dot(tempVectorB)
+          : 0;
+        const freeAimDistance = Math.max(6, this.player?.stats?.attackRange ?? 6);
+        this.manualAimPlaneDepth = projectileDepth + freeAimDistance;
+
+        this.manualAimPlaneDepth = Math.max(2, this.manualAimPlaneDepth);
+        this.manualAimPlaneActive = true;
+      }
+
+      tempVectorA.copy(this.camera.position)
+        .addScaledVector(tempVectorB, this.manualAimPlaneDepth);
       this.aimPlane.setFromNormalAndCoplanarPoint(tempVectorB, tempVectorA);
     } else {
+      this.manualAimPlaneActive = false;
+      this.manualAimPlaneDepth = 0;
       const aimSurfaceY = this.dungeonController?.getSurfaceElevationAt?.(this.player.root.position)
         ?? this.player.root.position.y
         ?? 0;

@@ -12,7 +12,15 @@ const tempStart = new THREE.Vector3();
 const tempEnd = new THREE.Vector3();
 const tempMidpoint = new THREE.Vector3();
 const tempFlat = new THREE.Vector3();
+const tempLockPoint = new THREE.Vector3();
+const tempLockProjected = new THREE.Vector3();
+const tempLockRadiusProjected = new THREE.Vector3();
+const tempLockCameraRight = new THREE.Vector3();
+const tempTrailBase = new THREE.Vector3();
+const tempTrailTip = new THREE.Vector3();
+const tempTrailMatrix = new THREE.Matrix4();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const RETICLE_LOCK_RADIUS_PIXELS = 17;
 const PROJECTILE_AIM_LOCK_BUFFER = 0.12;
 const LASER_TICK_INTERVAL = 0.1;
 const DRILL_TICK_INTERVAL = 0.12;
@@ -22,6 +30,48 @@ const LIFT_ENEMY_OUTPUT_DRAIN_PER_SECOND = 0.48;
 const SPRAY_TICK_INTERVAL = 0.11;
 const SPRAY_PARTICLE_INTERVAL = 0.055;
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
+const SWORD_FORWARD_SLASH_CLIP = 'swordForwardSlash';
+const SWORD_FOLLOW_UP_SLASH_CLIP = 'swordInwardSlash';
+const SWORD_JUMP_SLASH_CLIP = 'swordJumpSlash';
+const SWORD_JUMP_SLASH_HIT_PROGRESS = 0.5;
+const SWORD_JUMP_SLASH_HOLD_PROGRESS = 32 / 56;
+const SWORD_JUMP_SLASH_VISUAL_END = 37 / 56;
+const SWORD_SLASH_TRAIL_PROFILES = Object.freeze({
+  [SWORD_FORWARD_SLASH_CLIP]: Object.freeze({
+    // Sampled from the authored FBX strike: model-right shoulder to the
+    // opposite hip, through a steeply inclined plane in front of the body.
+    motionLocal: Object.freeze([0.816, -0.513, 0.267]),
+    planeNormalLocal: Object.freeze([0.534, 0.79, 0.301]),
+    height: 1.6,
+    hitProgress: 0.4,
+    visualEnd: 0.52,
+  }),
+  [SWORD_FOLLOW_UP_SLASH_CLIP]: Object.freeze({
+    // The legacy inward slash reverses laterally across a nearly level plane.
+    motionLocal: Object.freeze([-0.968, -0.055, 0.245]),
+    planeNormalLocal: Object.freeze([-0.051, 0.998, -0.043]),
+    height: 1.47,
+    hitProgress: 12 / 24,
+    visualEnd: 16 / 24,
+  }),
+  [SWORD_JUMP_SLASH_CLIP]: Object.freeze({
+    // The live ribbon follows the authored wind-up only until the supplied
+    // falling-pose seam. A fitted residual plane covers low-frame fallbacks;
+    // landing continuation gets a fresh ribbon so no segment spans the hold.
+    motionLocal: Object.freeze([-0.512142, -0.852924, -0.101154]),
+    planeNormalLocal: Object.freeze([-0.820581, 0.451102, 0.350933]),
+    centerLocal: Object.freeze([-0.835155, 1.967038, 0.294638]),
+    height: 1.967038,
+    visualRange: 2.25,
+    arcAngle: 1.857862,
+    visualStart: 24 / 56,
+    hitProgress: SWORD_JUMP_SLASH_HIT_PROGRESS,
+    aerialVisualEnd: SWORD_JUMP_SLASH_HOLD_PROGRESS,
+    visualEnd: SWORD_JUMP_SLASH_VISUAL_END,
+    liveBladeSweep: true,
+    followPlayerRoot: true,
+  }),
+});
 const BUSTER_BASE_ENERGY = 6;
 const BUSTER_BASE_BURST_SHOTS = 3;
 const BUSTER_ENERGY_PER_EXTRA_SHOT = 3;
@@ -335,9 +385,11 @@ const ARM_PROFILES = {
     outputLabel: 'Servo Output',
     cooldownMultiplier: 1,
     animationDuration: 0.86,
+    openingActiveStart: 0.4,
     activeStart: 12 / 24,
     slashEnd: 16 / 24,
     visualEnd: 19 / 24,
+    comboFollowUpGrace: 0.38,
     damageMultiplier: 1.1,
     melee: true,
     arcScale: 1.02,
@@ -468,10 +520,20 @@ export class CombatSystem {
     this.activeMines = [];
     this.pendingMeleeStrikes = [];
     this.pendingProjectileShots = [];
+    this.swordCombo = {
+      weaponKey: null,
+      awaitingFollowUp: false,
+      buffered: false,
+      timer: 0,
+    };
+    this.jumpSlashUsedThisAirtime = false;
+    this.suppressPrimaryUntilRelease = false;
+    this.activeSwordSweepTrail = null;
     this.lockAimWorld = new THREE.Vector3();
     this.lockFacingWorld = new THREE.Vector3();
     this.visualAimWorld = new THREE.Vector3();
     this.manualAimOverrideActive = false;
+    this.reticleLockSuppressedUntilAimRelease = false;
     this.lockOn = {
       target: null,
       progress: 0,
@@ -480,6 +542,7 @@ export class CombatSystem {
       skipTimer: 0,
       manual: false,
       movementLocked: false,
+      source: null,
       markerRotation: 0,
     };
     this.grenadePreview = null;
@@ -509,6 +572,10 @@ export class CombatSystem {
   update(dt) {
     const player = this.game.player;
 
+    if (!player.isJumpAirborne?.()) {
+      this.jumpSlashUsedThisAirtime = false;
+    }
+
     if (player.dead) {
       this._stopLaserBeam(false);
       this._stopDrillSpin();
@@ -529,11 +596,16 @@ export class CombatSystem {
     }
 
     const pointer = this.game.pointer;
-    if (player.animation?.isControlLocked?.()) {
+    if (this.suppressPrimaryUntilRelease && !pointer?.primary) {
+      this.suppressPrimaryUntilRelease = false;
+    }
+
+    if (player.animation?.isControlLocked?.() || player.isLedgeClinging?.()) {
       this._suspendForControlLock(state, pointer);
       return;
     }
 
+    this._updateActiveSwordSweepTrail();
     this._updatePendingMeleeStrikes(dt);
     this._updatePendingProjectileShots(dt);
 
@@ -545,6 +617,7 @@ export class CombatSystem {
     }
 
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
+    this._updateSwordCombo(dt, state, profile);
     const primaryPressed = pointer.primaryPressed || (pointer.primary && !this.primaryWasDown);
     const lockOnPressed = pointer.lockOnPressed === true;
     const alternatePressed = pointer.alternatePressed || (pointer.alternate && !this.alternateWasDown);
@@ -555,6 +628,7 @@ export class CombatSystem {
 
     this._updateLockOn(dt, pointer.aimWorld, profile, {
       pressed: lockOnPressed,
+      aiming: pointer.secondary,
     });
     this.manualAimOverrideActive = this.isManualAimOverrideActive(pointer);
     const aimWorld = this._getEffectiveAimWorld(
@@ -607,8 +681,13 @@ export class CombatSystem {
       if (pointer.primary) {
         this._updateConeSpray(dt, aimWorld, profile, state);
       }
-    } else if (profile.special !== 'laser' && profile.special !== 'drill' && profile.special !== 'lift' && (pointer.primary || primaryPressed)) {
-      this.tryPrimaryAttack(aimWorld);
+    } else if (profile.special !== 'laser'
+      && profile.special !== 'drill'
+      && profile.special !== 'lift'
+      && this._shouldTryPrimaryAttack(pointer, primaryPressed, state, profile)) {
+      this.tryPrimaryAttack(aimWorld, {
+        bufferSwordFollowUp: primaryPressed,
+      });
     }
 
     this.primaryWasDown = pointer.primary;
@@ -703,12 +782,22 @@ export class CombatSystem {
     return target;
   }
 
+  getTargetingLockTarget() {
+    const target = this.lockOn.target;
+
+    if (this.lockOn.progress < 1 || !this._isValidLockTarget(target)) {
+      return null;
+    }
+
+    return target;
+  }
+
   isManualAimOverrideActive(pointer = this.game.pointer) {
-    return Boolean(pointer?.secondary && this.getMovementLockTarget()?.root);
+    return Boolean(pointer?.secondary);
   }
 
   _getEffectiveAimWorld(fallbackAimWorld = null, manualAimOverride = this.isManualAimOverrideActive()) {
-    const target = this.getMovementLockTarget();
+    const target = this.getTargetingLockTarget();
 
     if (!target?.root || manualAimOverride) {
       return fallbackAimWorld;
@@ -734,7 +823,7 @@ export class CombatSystem {
     this.visualAimWorld.copy(aimWorld);
     const supportsVerticalAim = !profile.melee
       && !['mine', 'drill', 'lift', 'grenade'].includes(profile.special);
-    if (supportsVerticalAim && !this.getMovementLockTarget()) {
+    if (supportsVerticalAim && this._shouldApplyGroundAimMuzzleOffset()) {
       this.visualAimWorld.y += origin.y - player.root.position.y;
     }
 
@@ -743,10 +832,16 @@ export class CombatSystem {
 
   _getProjectileLockTarget(profile) {
     return !this.manualAimOverrideActive
+      && !profile.suppressLockTarget
       && profile.lockOn
-      && this.lockOn.progress >= 1
-      ? this.lockOn.target
+      ? this.getTargetingLockTarget()
       : null;
+  }
+
+  _shouldApplyGroundAimMuzzleOffset() {
+    return !this.manualAimOverrideActive
+      && !this.isManualAimOverrideActive()
+      && !this.getTargetingLockTarget();
   }
 
   _isValidLockTarget(target) {
@@ -952,6 +1047,9 @@ export class CombatSystem {
     }
 
     state.reloadTimer = state.reloadDuration;
+    if (profile.type === 'swordArm') {
+      this._resetSwordCombo();
+    }
     return true;
   }
 
@@ -1271,8 +1369,8 @@ export class CombatSystem {
   }
 
   _tryMissileSalvo(profile, state, aimWorld) {
-    const target = this.lockOn.target;
-    if (!target || target.dead) {
+    const target = this.getTargetingLockTarget();
+    if (!target) {
       this._clearLockOn();
       return true;
     }
@@ -1308,8 +1406,11 @@ export class CombatSystem {
     const element = getPlayerElement(player.stats, profile);
     const color = getElementColor(element, profile.color ?? 0xffd36f);
     const armorBreakChance = (player.stats.armorBreakChance ?? 0) + (profile.armorBreakBonus ?? 0);
+    const manualAimOverride = this.manualAimOverrideActive || this.isManualAimOverrideActive();
+    const launchTargetPoint = manualAimOverride && aimWorld ? aimWorld : targetPoint;
+    const homingTarget = manualAimOverride ? null : target;
 
-    tempDirection.copy(targetPoint).sub(origin);
+    tempDirection.copy(launchTargetPoint).sub(origin);
 
     if (tempDirection.lengthSq() <= 0.001) {
       tempDirection.copy(aimWorld ?? player.root.position).sub(origin);
@@ -1320,9 +1421,15 @@ export class CombatSystem {
     }
 
     tempDirection.normalize();
-    player.playProjectileShotAnimation(profile.animationDuration ?? 0.3, targetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, {
-      weaponKey: state.key,
-    });
+    player.playProjectileShotAnimation(
+      profile.animationDuration ?? 0.3,
+      this._getFacingAimWorld(launchTargetPoint),
+      cooldown + PROJECTILE_AIM_LOCK_BUFFER,
+      {
+        weaponKey: state.key,
+        aimTargetPosition: launchTargetPoint,
+      },
+    );
 
     for (let i = 0; i < count; i += 1) {
       const offset = (i - (count - 1) / 2) * spread;
@@ -1352,7 +1459,7 @@ export class CombatSystem {
         chainDamageMultiplier: profile.chainDamageMultiplier ?? 0.36,
         homingStrength: (profile.homingStrength ?? 3.2) * 1.18,
         homingRange: profile.homingRange ?? 9.5,
-        target,
+        target: homingTarget,
         visualType: profile.visualType ?? 'missile',
       });
     }
@@ -1364,7 +1471,7 @@ export class CombatSystem {
       state.reloadTimer = state.reloadDuration;
     }
 
-    this._showMissileSalvoPulse(origin, targetPoint, color);
+    this._showMissileSalvoPulse(origin, launchTargetPoint, color);
     return true;
   }
 
@@ -1391,16 +1498,57 @@ export class CombatSystem {
     }
   }
 
-  tryPrimaryAttack(aimWorld) {
+  tryPrimaryAttack(aimWorld, options = {}) {
     const player = this.game.player;
     const state = this.getCurrentWeaponState();
+    const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
+    const playerAirborne = Boolean(player.isJumpAirborne?.());
+    const airborneSwordAttack = profile.type === 'swordArm' && playerAirborne;
 
-    if (player.animation?.isControlLocked?.() || this.swapTimer > 0 || state.cooldown > 0 || state.reloadTimer > 0) {
+    if (!playerAirborne) {
+      this.jumpSlashUsedThisAirtime = false;
+    }
+
+    if (player.animation?.isControlLocked?.()
+      || player.isLedgeClinging?.()
+      || this.swapTimer > 0
+      || this.suppressPrimaryUntilRelease) {
       return false;
     }
 
-    const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
+    if (profile.type === 'swordArm'
+      && player.isPhysicalJumpActive?.()
+      && !playerAirborne) {
+      return false;
+    }
+
+    if (profile.type === 'swordArm'
+      && player.isSwordSlashAnimationActive?.(SWORD_JUMP_SLASH_CLIP)) {
+      return false;
+    }
+
+    if (airborneSwordAttack && this.jumpSlashUsedThisAirtime) {
+      return false;
+    }
+
+    if (state.reloadTimer > 0) {
+      if (profile.type === 'swordArm') {
+        this._resetSwordCombo();
+      }
+      return false;
+    }
+
+    if (state.cooldown > 0) {
+      if (options.bufferSwordFollowUp && !airborneSwordAttack) {
+        this._bufferSwordFollowUp(state, profile);
+      }
+      return false;
+    }
+
     if (!this._hasRequiredWeaponOutput(state, profile)) {
+      if (options.bufferSwordFollowUp && !airborneSwordAttack) {
+        this._bufferSwordFollowUp(state, profile);
+      }
       state.cooldown = Math.max(state.cooldown, state.weaponOutput <= 0.001
         ? profile.outputVentDuration ?? 0.42
         : profile.outputStarvedCooldown ?? 0.08);
@@ -1408,6 +1556,9 @@ export class CombatSystem {
     }
 
     if (state.energy < profile.energyCost) {
+      if (profile.type === 'swordArm') {
+        this._resetSwordCombo();
+      }
       state.reloadTimer = state.reloadDuration;
       return false;
     }
@@ -1418,7 +1569,7 @@ export class CombatSystem {
       ? (player.getProjectileOrigin?.() ?? player.getAttackOrigin())
       : player.root.position;
     tempAimPoint.copy(aimWorld ?? player.root.position);
-    if (supportsVerticalAim && !this.getMovementLockTarget()) {
+    if (supportsVerticalAim && this._shouldApplyGroundAimMuzzleOffset()) {
       tempAimPoint.y += attackOrigin.y - player.root.position.y;
     }
     tempDirection.copy(tempAimPoint).sub(attackOrigin);
@@ -1444,6 +1595,9 @@ export class CombatSystem {
     const projectileAimOptions = { weaponKey: state.key, aimTargetPosition: targetPoint };
     const projectileActionNeedsBrace = usesProjectileAimBrace(profile)
       && !player.isProjectileAimSustained?.(state.key);
+    const swordFollowUp = !airborneSwordAttack
+      && profile.type === 'swordArm'
+      && this._isSwordFollowUpReady(state, profile);
 
     if (profile.special === 'mine') {
       player.playProjectileShotAnimation(attackDuration, facingTargetPoint, cooldown + PROJECTILE_AIM_LOCK_BUFFER, projectileAimOptions);
@@ -1469,11 +1623,27 @@ export class CombatSystem {
           tempDirection.copy(player.lastMoveDirection);
         }
         tempDirection.normalize();
-        player.playSwordSlashAnimation?.(attackDuration);
-        player.setMovementLock?.(attackDuration * 0.96, 0);
-        this._queueMeleeStrike(tempDirection, profile, attackDuration * (profile.activeStart ?? 0.48), {
-          visual: this._getActiveWeaponVisual(profile),
+        const slashClipKey = airborneSwordAttack
+          ? SWORD_JUMP_SLASH_CLIP
+          : swordFollowUp
+            ? SWORD_FOLLOW_UP_SLASH_CLIP
+            : SWORD_FORWARD_SLASH_CLIP;
+        const activeStart = SWORD_SLASH_TRAIL_PROFILES[slashClipKey]?.hitProgress
+          ?? (swordFollowUp
+            ? profile.activeStart ?? 0.5
+            : profile.openingActiveStart ?? profile.activeStart ?? 0.4);
+        player.playSwordSlashAnimation?.(attackDuration, {
+          clipKey: slashClipKey,
         });
+        player.setMovementLock?.(attackDuration * 0.96, 0);
+        const swordVisual = this._getActiveWeaponVisual(profile);
+        this._queueMeleeStrike(tempDirection, profile, attackDuration * activeStart, {
+          visual: swordVisual,
+          slashClipKey,
+        });
+        if (slashClipKey === SWORD_JUMP_SLASH_CLIP) {
+          this._armSwordSweepTrail(slashClipKey, swordVisual.color);
+        }
       } else {
         player.playAttackAnimation(attackDuration, 'melee', targetPoint);
         this._meleeAttackDirection(tempDirection, profile);
@@ -1489,6 +1659,17 @@ export class CombatSystem {
 
     if (state.energy <= 0.001) {
       state.reloadTimer = state.reloadDuration;
+    }
+
+    if (profile.type === 'swordArm') {
+      if (airborneSwordAttack) {
+        this.jumpSlashUsedThisAirtime = true;
+        this._resetSwordCombo();
+      } else if (swordFollowUp || state.energy + 0.001 < profile.energyCost) {
+        this._resetSwordCombo();
+      } else {
+        this._beginSwordFollowUp(state, profile, attackDuration, cooldown);
+      }
     }
 
     return true;
@@ -1528,12 +1709,17 @@ export class CombatSystem {
       direction: direction.clone(),
       profile: { ...profile },
       visual: options.visual ?? null,
+      slashClipKey: options.slashClipKey ?? null,
     });
   }
 
   _fireOrQueueProjectileAction(action, direction, profile, aimWorld, delay, state, needsBrace) {
+    const actionProfile = this.manualAimOverrideActive || this.isManualAimOverrideActive()
+      ? { ...profile, suppressLockTarget: true }
+      : profile;
+
     if (needsBrace) {
-      this._queueProjectileShot(direction, profile, aimWorld, delay, {
+      this._queueProjectileShot(direction, actionProfile, aimWorld, delay, {
         action,
         weaponKey: state.key,
         requireSustainedAim: true,
@@ -1541,7 +1727,7 @@ export class CombatSystem {
       return;
     }
 
-    this._fireProjectileAction(action, direction, profile, aimWorld);
+    this._fireProjectileAction(action, direction, actionProfile, aimWorld);
   }
 
   _queueProjectileShot(direction, profile, aimWorld, delay, options = {}) {
@@ -1569,11 +1755,234 @@ export class CombatSystem {
         this._meleeAttackDirection(strike.direction, strike.profile, {
           visual: strike.visual,
           activeFrame: true,
+          slashClipKey: strike.slashClipKey,
         });
       }
 
       this.pendingMeleeStrikes.splice(i, 1);
     }
+  }
+
+  _armSwordSweepTrail(clipKey, color, options = {}) {
+    this._cancelActiveSwordSweepTrail();
+    const profile = SWORD_SLASH_TRAIL_PROFILES[clipKey];
+    if (!profile?.liveBladeSweep) {
+      return;
+    }
+
+    this.activeSwordSweepTrail = {
+      clipKey,
+      color,
+      startProgress: options.startProgress
+        ?? profile.visualStart
+        ?? profile.hitProgress
+        ?? 0,
+      endProgress: options.endProgress
+        ?? profile.aerialVisualEnd
+        ?? profile.visualEnd
+        ?? 1,
+      progressSource: options.progressSource
+        ?? (clipKey === SWORD_JUMP_SLASH_CLIP ? 'jumpSlashVisual' : 'attackTimer'),
+      followObject: options.followObject
+        ?? (profile.followPlayerRoot ? this.game.player.root : null),
+      previousProgress: null,
+      previousBase: null,
+      previousTip: null,
+      handle: null,
+    };
+  }
+
+  beginSwordJumpSlashLandingTrail(startProgress = SWORD_JUMP_SLASH_HOLD_PROGRESS) {
+    const active = this.activeSwordSweepTrail;
+    if (active) {
+      if (active.handle?.samples?.length >= 2) {
+        this.game.finishBeamBladeSweepTrail?.(active.handle);
+        this.activeSwordSweepTrail = null;
+      } else {
+        this._cancelActiveSwordSweepTrail();
+      }
+    }
+
+    const trailProfile = SWORD_SLASH_TRAIL_PROFILES[SWORD_JUMP_SLASH_CLIP];
+    const weaponState = this.getCurrentWeaponState();
+    const weaponProfile = this._getStatefulProfile(this._getCurrentProfile(), weaponState);
+    if (weaponProfile.type !== 'swordArm') {
+      return false;
+    }
+
+    const clampedStart = THREE.MathUtils.clamp(
+      Math.max(trailProfile.visualStart ?? 0, startProgress),
+      trailProfile.visualStart ?? 0,
+      trailProfile.aerialVisualEnd ?? trailProfile.visualEnd,
+    );
+    this._armSwordSweepTrail(
+      SWORD_JUMP_SLASH_CLIP,
+      this._getActiveWeaponVisual(weaponProfile).color,
+      {
+        startProgress: clampedStart,
+        endProgress: trailProfile.visualEnd,
+        progressSource: 'jumpSlashVisual',
+      },
+    );
+    const landingTrail = this.activeSwordSweepTrail;
+    if (landingTrail
+      && this._captureSwordSweepTrailObservation(landingTrail, startProgress)
+      && startProgress >= landingTrail.startProgress) {
+      // Touchdown is the exact seam between the held aerial pose and the
+      // authored recovery. Seed it synchronously while that seam transform is
+      // still on the rig so a low-frame update cannot begin the ribbon late.
+      this._appendSwordSweepTrailSample(
+        landingTrail,
+        landingTrail.previousBase,
+        landingTrail.previousTip,
+        landingTrail.startProgress,
+      );
+    }
+    return Boolean(this.activeSwordSweepTrail);
+  }
+
+  _updateActiveSwordSweepTrail() {
+    const active = this.activeSwordSweepTrail;
+    if (!active) {
+      return;
+    }
+
+    const player = this.game.player;
+    const animation = player.animation;
+    const useJumpSlashVisualProgress = active.progressSource === 'jumpSlashVisual';
+    if (player.dead
+      || !player.isSwordSlashAnimationActive?.(active.clipKey)
+      || (!useJumpSlashVisualProgress
+        && (!Number.isFinite(animation?.attackDuration) || animation.attackDuration <= 0))) {
+      this._cancelActiveSwordSweepTrail();
+      return;
+    }
+
+    const progress = useJumpSlashVisualProgress
+      ? player.getSwordJumpSlashVisualProgress?.()
+      : 1 - THREE.MathUtils.clamp(
+        animation.attackTimer / animation.attackDuration,
+        0,
+        1,
+      );
+    if (!Number.isFinite(progress)) {
+      this._cancelActiveSwordSweepTrail();
+      return;
+    }
+    if (progress < active.startProgress) {
+      this._captureSwordSweepTrailObservation(active, progress);
+      return;
+    }
+
+    const observed = this._readSwordSweepTrailObservation(active, tempTrailBase, tempTrailTip);
+    if (observed) {
+      const previousProgress = active.previousProgress;
+      const canInterpolate = Number.isFinite(previousProgress)
+        && active.previousBase
+        && active.previousTip
+        && progress > previousProgress;
+
+      if (canInterpolate && previousProgress < active.startProgress) {
+        const startAlpha = THREE.MathUtils.clamp(
+          (active.startProgress - previousProgress) / (progress - previousProgress),
+          0,
+          1,
+        );
+        tempStart.copy(active.previousBase).lerp(tempTrailBase, startAlpha);
+        tempEnd.copy(active.previousTip).lerp(tempTrailTip, startAlpha);
+        this._appendSwordSweepTrailSample(
+          active,
+          tempStart,
+          tempEnd,
+          active.startProgress,
+        );
+      }
+
+      if (progress <= active.endProgress) {
+        this._appendSwordSweepTrailSample(active, tempTrailBase, tempTrailTip, progress);
+      } else if (canInterpolate && previousProgress < active.endProgress) {
+        const endAlpha = THREE.MathUtils.clamp(
+          (active.endProgress - previousProgress) / (progress - previousProgress),
+          0,
+          1,
+        );
+        tempStart.copy(active.previousBase).lerp(tempTrailBase, endAlpha);
+        tempEnd.copy(active.previousTip).lerp(tempTrailTip, endAlpha);
+        this._appendSwordSweepTrailSample(active, tempStart, tempEnd, active.endProgress);
+      }
+
+      active.previousProgress = progress;
+      active.previousBase = active.previousBase?.copy(tempTrailBase) ?? tempTrailBase.clone();
+      active.previousTip = active.previousTip?.copy(tempTrailTip) ?? tempTrailTip.clone();
+    }
+
+    if (progress >= active.endProgress) {
+      this.game.finishBeamBladeSweepTrail?.(active.handle);
+      this.activeSwordSweepTrail = null;
+    }
+  }
+
+  _captureSwordSweepTrailObservation(active, progress) {
+    if (!this._readSwordSweepTrailObservation(active, tempTrailBase, tempTrailTip)) {
+      return false;
+    }
+
+    active.previousProgress = progress;
+    active.previousBase = active.previousBase?.copy(tempTrailBase) ?? tempTrailBase.clone();
+    active.previousTip = active.previousTip?.copy(tempTrailTip) ?? tempTrailTip.clone();
+    return true;
+  }
+
+  _readSwordSweepTrailObservation(active, base, tip) {
+    const blade = this.game.player.externalRig?.beamBladeGroup;
+    if (!blade?.visible) {
+      return false;
+    }
+
+    blade.updateWorldMatrix(true, false);
+    base.setFromMatrixPosition(blade.matrixWorld);
+    tip.set(0, 0, 1.57).applyMatrix4(blade.matrixWorld);
+    if (active.followObject?.isObject3D) {
+      active.followObject.updateWorldMatrix(true, false);
+      tempTrailMatrix.copy(active.followObject.matrixWorld).invert();
+      base.applyMatrix4(tempTrailMatrix);
+      tip.applyMatrix4(tempTrailMatrix);
+    }
+    return true;
+  }
+
+  _appendSwordSweepTrailSample(active, base, tip, progress) {
+    active.handle ??= this.game.beginBeamBladeSweepTrail?.(active.color, {
+      slashClipKey: active.clipKey,
+      startProgress: active.startProgress,
+      endProgress: active.endProgress,
+      followObject: active.followObject,
+    }) ?? null;
+    if (!active.handle) {
+      return false;
+    }
+
+    if (active.followObject?.isObject3D) {
+      active.followObject.updateWorldMatrix(true, false);
+      tempStart.copy(base).applyMatrix4(active.followObject.matrixWorld);
+      tempEnd.copy(tip).applyMatrix4(active.followObject.matrixWorld);
+      return this.game.appendBeamBladeSweepTrail?.(
+        active.handle,
+        tempStart,
+        tempEnd,
+        progress,
+      ) ?? false;
+    }
+    return this.game.appendBeamBladeSweepTrail?.(active.handle, base, tip, progress) ?? false;
+  }
+
+  _cancelActiveSwordSweepTrail() {
+    if (!this.activeSwordSweepTrail) {
+      return;
+    }
+
+    this.game.cancelBeamBladeSweepTrail?.(this.activeSwordSweepTrail.handle);
+    this.activeSwordSweepTrail = null;
   }
 
   _updatePendingProjectileShots(dt) {
@@ -1595,7 +2004,17 @@ export class CombatSystem {
         continue;
       }
 
-      this._fireProjectileAction(shot.action, shot.direction, shot.profile, shot.aimWorld);
+      let launchDirection = shot.direction;
+      if (shot.profile.suppressLockTarget && shot.aimWorld) {
+        const origin = this.game.player.getProjectileOrigin?.()
+          ?? this.game.player.getAttackOrigin();
+        tempDirection.copy(shot.aimWorld).sub(origin);
+        if (tempDirection.lengthSq() > 0.001) {
+          launchDirection = tempDirection.normalize();
+        }
+      }
+
+      this._fireProjectileAction(shot.action, launchDirection, shot.profile, shot.aimWorld);
       this.pendingProjectileShots.splice(i, 1);
     }
   }
@@ -1641,9 +2060,83 @@ export class CombatSystem {
       && player.isProjectileAimHeld?.(shot.weaponKey ?? state.key);
   }
 
+  _updateSwordCombo(dt, state, profile) {
+    if (!this.swordCombo.awaitingFollowUp) {
+      return;
+    }
+
+    if (profile.type !== 'swordArm'
+      || this.swordCombo.weaponKey !== state.key
+      || state.reloadTimer > 0) {
+      this._resetSwordCombo();
+      return;
+    }
+
+    this.swordCombo.timer = Math.max(0, this.swordCombo.timer - dt);
+    if (this.swordCombo.timer <= 0) {
+      this._resetSwordCombo();
+    }
+  }
+
+  _isSwordFollowUpReady(state, profile) {
+    return profile.type === 'swordArm'
+      && this.swordCombo.awaitingFollowUp
+      && this.swordCombo.timer > 0
+      && this.swordCombo.weaponKey === state.key;
+  }
+
+  _hasBufferedSwordFollowUp(state, profile) {
+    return this.swordCombo.buffered && this._isSwordFollowUpReady(state, profile);
+  }
+
+  _shouldTryPrimaryAttack(pointer, primaryPressed, state, profile) {
+    if (this.suppressPrimaryUntilRelease) {
+      return false;
+    }
+
+    if (profile.type === 'swordArm' && this.game.player.isJumpAirborne?.()) {
+      return !this.jumpSlashUsedThisAirtime && Boolean(pointer.primary || primaryPressed);
+    }
+
+    if (profile.type === 'swordArm' && this._isSwordFollowUpReady(state, profile)) {
+      return primaryPressed || this._hasBufferedSwordFollowUp(state, profile);
+    }
+
+    return Boolean(pointer.primary || primaryPressed);
+  }
+
+  _bufferSwordFollowUp(state, profile) {
+    if (!this._isSwordFollowUpReady(state, profile)
+      || state.reloadTimer > 0
+      || state.energy + 0.001 < (profile.energyCost ?? 0)) {
+      return false;
+    }
+
+    this.swordCombo.buffered = true;
+    return true;
+  }
+
+  _beginSwordFollowUp(state, profile, attackDuration, cooldown) {
+    this.swordCombo.weaponKey = state.key;
+    this.swordCombo.awaitingFollowUp = true;
+    this.swordCombo.buffered = false;
+    this.swordCombo.timer = Math.max(attackDuration, cooldown)
+      + (profile.comboFollowUpGrace ?? 0.38);
+  }
+
+  _resetSwordCombo() {
+    this.swordCombo.weaponKey = null;
+    this.swordCombo.awaitingFollowUp = false;
+    this.swordCombo.buffered = false;
+    this.swordCombo.timer = 0;
+  }
+
   _clearPendingAttacks() {
     this.pendingMeleeStrikes.length = 0;
     this.pendingProjectileShots.length = 0;
+    this._cancelActiveSwordSweepTrail();
+    this._resetSwordCombo();
+    this.game.player.cancelSwordJumpSlashVisual?.({ cancelAttack: true });
   }
 
   cancelForDodge() {
@@ -1651,6 +2144,25 @@ export class CombatSystem {
     this._stopDrillSpin();
     this._stopLiftArm(false);
     this._hideGrenadePreview();
+    this._clearPendingAttacks();
+  }
+
+  cancelForLedgeCling() {
+    this._stopLaserBeam(true);
+    this._stopDrillSpin();
+    this._stopLiftArm(false);
+    this._hideGrenadePreview();
+    this._clearPendingAttacks();
+    this.jumpSlashUsedThisAirtime = false;
+    this.suppressPrimaryUntilRelease = true;
+  }
+
+  cancelForDeath() {
+    this._stopLaserBeam(false);
+    this._stopDrillSpin();
+    this._stopLiftArm(false);
+    this._hideGrenadePreview();
+    this._clearLockOn();
     this._clearPendingAttacks();
   }
 
@@ -2292,7 +2804,9 @@ export class CombatSystem {
     }
 
     if (profile.type === 'swordArm') {
-      return 'Wide horizontal laser blade slash';
+      return this._isSwordFollowUpReady(state, profile)
+        ? 'Follow-up ready | press fire for inward slash'
+        : 'Forward slash | press again to combo';
     }
 
     if (isBusterProfile(profile)) {
@@ -2670,26 +3184,10 @@ export class CombatSystem {
 
   _updateLockOn(dt, aimWorld, profile, input = {}) {
     const pressed = input.pressed === true;
-    if (pressed) {
-      if (this.lockOn.movementLocked) {
-        this.lockOn.movementLocked = false;
-        if (!profile.lockOn) {
-          this._clearLockOn();
-          return;
-        }
-      } else {
-        this.lockOn.movementLocked = true;
-        this.lockOn.target = null;
-        this.lockOn.progress = 0;
-        this.lockOn.manual = false;
-      }
-    }
+    const aiming = input.aiming === true;
 
-    const manualAimLock = Boolean(this.lockOn.movementLocked);
-
-    if (!profile.lockOn && !manualAimLock) {
-      this._clearLockOn();
-      return;
+    if (!aiming) {
+      this.reticleLockSuppressedUntilAimRelease = false;
     }
 
     if (this.lockOn.skipTimer > 0) {
@@ -2699,17 +3197,60 @@ export class CombatSystem {
       }
     }
 
-    if (manualAimLock && this._isValidLockTarget(this.lockOn.target)) {
-      const range = Math.max(2, profile.homingRange ?? this.game.player.stats.attackRange);
-      getCombatTargetWorldPosition(this.lockOn.target, tempFlat).sub(this.game.player.root.position);
-      tempFlat.y = 0;
+    if (pressed) {
+      if (this.lockOn.movementLocked) {
+        const releasedTarget = this.lockOn.target;
+        this.lockOn.movementLocked = false;
+        if (aiming && releasedTarget) {
+          this.reticleLockSuppressedUntilAimRelease = true;
+        }
+        if (!profile.lockOn) {
+          this._clearLockOn();
+          return;
+        }
+      } else {
+        this.reticleLockSuppressedUntilAimRelease = false;
+        this.lockOn.movementLocked = true;
+        if (this.getTargetingLockTarget()
+          && this._isLockTargetInRange(this.lockOn.target, profile)) {
+          this.lockOn.progress = 1;
+          this.lockOn.manual = true;
+        } else {
+          this.lockOn.target = null;
+          this.lockOn.progress = 0;
+          this.lockOn.manual = false;
+          this.lockOn.source = 'tab';
+        }
+      }
+    }
 
-      if (tempFlat.lengthSq() <= range * range) {
+    if (aiming && !this.reticleLockSuppressedUntilAimRelease) {
+      const reticleCandidate = this._findReticleLockCandidate(profile);
+      if (reticleCandidate) {
+        this.lockOn.target = reticleCandidate;
         this.lockOn.progress = 1;
         this.lockOn.manual = true;
+        this.lockOn.movementLocked = true;
+        this.lockOn.source = 'reticle';
         this._updateLockMarker();
         return;
       }
+    }
+
+    const currentTargetIsUsable = this._isValidLockTarget(this.lockOn.target)
+      && this._isLockTargetInRange(this.lockOn.target, profile);
+    if (currentTargetIsUsable
+      && (this.lockOn.movementLocked || this.lockOn.source === 'reticle')) {
+      this.lockOn.progress = 1;
+      this.lockOn.manual = true;
+      this._updateLockMarker();
+      return;
+    }
+
+    const movementLockActive = Boolean(this.lockOn.movementLocked);
+    if (!profile.lockOn && !movementLockActive) {
+      this._clearLockOn();
+      return;
     }
 
     const candidate = this._findLockCandidate(profile);
@@ -2721,11 +3262,14 @@ export class CombatSystem {
 
     if (candidate !== this.lockOn.target) {
       this.lockOn.target = candidate;
-      this.lockOn.progress = manualAimLock ? 1 : 0;
+      this.lockOn.progress = movementLockActive ? 1 : 0;
+      this.lockOn.source = movementLockActive ? 'tab' : 'weapon';
+    } else if (!this.lockOn.source) {
+      this.lockOn.source = movementLockActive ? 'tab' : 'weapon';
     }
 
-    this.lockOn.manual = manualAimLock && !profile.lockOn;
-    if (this.lockOn.manual) {
+    this.lockOn.manual = movementLockActive;
+    if (movementLockActive) {
       this.lockOn.progress = 1;
     } else {
       const lockSpeed = 1 + (this.game.player.stats.lockOnSpeed ?? 0);
@@ -2733,6 +3277,92 @@ export class CombatSystem {
       this.lockOn.progress = Math.min(1, this.lockOn.progress + (dt * lockSpeed) / lockTime);
     }
     this._updateLockMarker();
+  }
+
+  _isLockTargetInRange(target, profile) {
+    if (!this._isValidLockTarget(target)) {
+      return false;
+    }
+
+    const player = this.game.player;
+    const range = Math.max(2, profile.homingRange ?? player.stats.attackRange);
+    getCombatTargetWorldPosition(target, tempFlat).sub(player.root.position);
+    tempFlat.y = 0;
+    return tempFlat.lengthSq() > 0.001 && tempFlat.lengthSq() <= range * range;
+  }
+
+  _findReticleLockCandidate(profile) {
+    const { camera, pointer, renderer } = this.game;
+    const player = this.game.player;
+    if (!camera || !pointer || !renderer?.domElement || !player) {
+      return null;
+    }
+
+    const rect = renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    const reticleRadius = RETICLE_LOCK_RADIUS_PIXELS * Math.max(0.75, this.game.aimReticleScale ?? 1);
+    tempLockCameraRight.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+    camera.getWorldDirection(tempDirection);
+    let bestTarget = null;
+    let bestScore = Infinity;
+
+    for (const enemy of this.game.enemies) {
+      if (enemy.dead) {
+        continue;
+      }
+
+      for (const target of getEnemyCombatTargets(enemy)) {
+        if (!isCombatTargetValid(target)
+          || target.id === this.lockOn.skippedTargetId
+          || !this._isLockTargetInRange(target, profile)) {
+          continue;
+        }
+
+        getCombatTargetWorldPosition(target, tempLockPoint);
+        tempAimPoint.copy(tempLockPoint).sub(camera.position);
+        if (tempAimPoint.dot(tempDirection) <= 0.001) {
+          continue;
+        }
+
+        tempLockProjected.copy(tempLockPoint).project(camera);
+        if (tempLockProjected.z < -1 || tempLockProjected.z > 1
+          || Math.abs(tempLockProjected.x) > 1.1
+          || Math.abs(tempLockProjected.y) > 1.1) {
+          continue;
+        }
+
+        const screenX = rect.left + (tempLockProjected.x + 1) * rect.width * 0.5;
+        const screenY = rect.top + (1 - tempLockProjected.y) * rect.height * 0.5;
+        const pixelDistance = Math.hypot(pointer.x - screenX, pointer.y - screenY);
+        const ownerRadius = target.ownerEnemy?.radius ?? target.enemy?.radius ?? enemy.radius;
+        const targetRadius = Math.max(
+          target.isWeakPointTarget ? 0.14 : 0.26,
+          target.lockOnRadius ?? target.radius ?? ownerRadius ?? 0.2,
+        );
+        tempLockRadiusProjected.copy(tempLockPoint)
+          .addScaledVector(tempLockCameraRight, targetRadius)
+          .project(camera);
+        const projectedRadius = Math.abs(tempLockRadiusProjected.x - tempLockProjected.x)
+          * rect.width * 0.5;
+        const hitRadius = reticleRadius + Math.max(4, projectedRadius);
+        if (pixelDistance > hitRadius) {
+          continue;
+        }
+
+        const score = pixelDistance
+          - (target.isWeakPointTarget ? 2 : 0)
+          + Math.max(0, tempLockProjected.z + 1) * 0.001;
+        if (score < bestScore) {
+          bestScore = score;
+          bestTarget = target;
+        }
+      }
+    }
+
+    return bestTarget;
   }
 
   _findLockCandidate(profile) {
@@ -2796,9 +3426,6 @@ export class CombatSystem {
     }
     const color = this.lockOn.progress >= 1 ? 0x7ee7ff : 0xffd36f;
     getCombatTargetWorldPosition(this.lockOn.target, tempFlat);
-    if (!this.lockOn.target.isWeakPointTarget) {
-      tempFlat.y += 0.58;
-    }
     tempAimPoint.copy(tempFlat).sub(this.game.camera.position);
     this.game.camera.getWorldDirection(tempDirection);
     if (tempAimPoint.dot(tempDirection) <= 0.001) {
@@ -2836,6 +3463,7 @@ export class CombatSystem {
     this.lockOn.progress = 0;
     this.lockOn.manual = false;
     this.lockOn.movementLocked = false;
+    this.lockOn.source = null;
     this.manualAimOverrideActive = false;
     if (clearSkip) {
       this.lockOn.skippedTargetId = null;
@@ -3034,7 +3662,7 @@ export class CombatSystem {
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
     origin.y = Math.max(origin.y, player.root.position.y + 1.05);
     tempAimPoint.copy(aimWorld ?? player.root.position);
-    if (!this.getMovementLockTarget()) {
+    if (this._shouldApplyGroundAimMuzzleOffset()) {
       tempAimPoint.y += origin.y - player.root.position.y;
     }
     tempDirection.copy(tempAimPoint).sub(origin);
@@ -3525,7 +4153,7 @@ export class CombatSystem {
     state.sprayActive = true;
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
     tempAimPoint.copy(aimWorld ?? player.root.position);
-    if (!this.getMovementLockTarget()) {
+    if (this._shouldApplyGroundAimMuzzleOffset()) {
       tempAimPoint.y += origin.y - player.root.position.y;
     }
     tempDirection.copy(tempAimPoint).sub(origin);
@@ -3876,15 +4504,48 @@ export class CombatSystem {
       : Math.max(1.2, player.stats.attackRange);
     const arcBase = beamBlade ? 0.38 : 0.34;
     const arcAngle = Math.PI * (arcBase + player.stats.areaDamage * (beamBlade ? 0.2 : 0.28)) * (profile.arcScale ?? 1);
+    const slashClipKey = beamBlade
+      ? options.slashClipKey ?? SWORD_FORWARD_SLASH_CLIP
+      : null;
+    const slashTrail = slashClipKey ? SWORD_SLASH_TRAIL_PROFILES[slashClipKey] : null;
+    const slashActiveStart = slashTrail?.hitProgress
+      ?? (slashClipKey === SWORD_FORWARD_SLASH_CLIP
+        ? profile.openingActiveStart ?? profile.activeStart ?? 0.4
+        : profile.activeStart ?? 0.5);
+    const slashTrailDuration = slashTrail
+      ? Math.max(0.1, profile.animationDuration * Math.max(
+        0.05,
+        (slashTrail.aerialVisualEnd ?? slashTrail.visualEnd) - slashActiveStart,
+      ))
+      : undefined;
+    const slashArcAngle = beamBlade ? slashTrail?.arcAngle ?? arcAngle : arcAngle;
+    const slashVisualRange = beamBlade ? slashTrail?.visualRange ?? range : range;
 
-    this.game.addSlashEffect(player.root.position, direction, range, visual.color, {
-      beamBlade,
-      arcAngle,
-      height: beamBlade ? 0.92 : 0.18,
-      visualRange: range,
-      duration: beamBlade ? profile.animationDuration * ((profile.visualEnd ?? profile.slashEnd ?? 0.96) - (profile.activeStart ?? 0.56)) : undefined,
-      delay: 0,
-    });
+    const liveBladeTrailPending = slashTrail?.liveBladeSweep
+      && this.activeSwordSweepTrail?.clipKey === slashClipKey;
+    const liveBladeTrailReady = liveBladeTrailPending
+      && this.activeSwordSweepTrail.handle?.samples?.length >= 2;
+    if (liveBladeTrailPending && !liveBladeTrailReady) {
+      this._cancelActiveSwordSweepTrail();
+    }
+    if (!liveBladeTrailReady) {
+      this.game.addSlashEffect(player.root.position, direction, range, visual.color, {
+        beamBlade,
+        arcAngle: slashArcAngle,
+        height: beamBlade ? slashTrail?.height ?? 1.05 : 0.18,
+        visualRange: slashVisualRange,
+        duration: beamBlade
+          ? slashTrailDuration
+            ?? profile.animationDuration * ((profile.visualEnd ?? profile.slashEnd ?? 0.96) - (profile.activeStart ?? 0.56))
+          : undefined,
+        delay: 0,
+        slashClipKey,
+        trailMotionLocal: slashTrail?.motionLocal,
+        trailPlaneNormalLocal: slashTrail?.planeNormalLocal,
+        trailCenterLocal: slashTrail?.centerLocal,
+        followObject: beamBlade ? player.root : null,
+      });
+    }
 
     for (const enemy of this.game.enemies) {
       if (enemy.dead) {

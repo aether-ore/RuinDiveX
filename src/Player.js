@@ -10,6 +10,11 @@ import { SkeletalModelRig } from './SkeletalModelRig.js';
 import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
 
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
+const DEFAULT_SWORD_SLASH_CLIP = 'swordForwardSlash';
+const JUMP_SLASH_CLIP = 'swordJumpSlash';
+const JUMP_SLASH_TOTAL_FRAMES = 56;
+const JUMP_SLASH_AERIAL_POSE_FRAME = 32;
+const JUMP_SLASH_AERIAL_POSE_PROGRESS = JUMP_SLASH_AERIAL_POSE_FRAME / JUMP_SLASH_TOTAL_FRAMES;
 const PLAYER_BASE_MOVE_SPEED = 6.2;
 const PLAYER_RUN_SPEED_MULTIPLIER = 1.68;
 const PLAYER_RUN_ANIMATION_AMOUNT = 1.55;
@@ -99,7 +104,16 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'idle5', file: 'idle (5).fbx', label: 'Idle 5', loop: true, preserveRootMotion: true },
   { key: 'sideIdle', file: 'Side Idle.fbx', label: 'Side Idle', loop: true, preserveRootMotion: true },
   { key: 'warriorIdle', file: 'Warrior Idle.fbx', label: 'Warrior Idle', loop: false, preserveRootMotion: true },
+  { key: 'swordForwardSlash', file: 'Sword And Shield Forward Slash.fbx', label: 'Sword Forward Slash', loop: false, preserveRootMotion: true },
   { key: 'swordInwardSlash', file: 'Stable Sword Inward Slash.fbx', label: 'Sword Inward Slash', loop: false },
+  {
+    key: 'swordJumpSlash',
+    file: 'Jump Slash.fbx',
+    label: 'Jump Slash',
+    loop: false,
+    lockRootY: true,
+    rootYMode: 'compressionOnly',
+  },
   { key: 'jump', file: 'jump.fbx', label: 'Jump', loop: false },
   { key: 'jumpingUp', file: 'jumping up.fbx', label: 'Jumping Up', loop: false },
   { key: 'leftCoverSneak', file: 'left cover sneak.fbx', label: 'Left Cover Sneak', loop: true },
@@ -374,6 +388,8 @@ export class Player {
     this.ledgeWallJumpGroundY = 0;
     this.ledgeWallJumpYaw = 0;
     this._attackWeaponKind = null;
+    this._activeSwordSlashClipKey = null;
+    this._jumpSlashVisualState = null;
     this._bracedFireWeaponKey = null;
     this.bracedFireDirection = new THREE.Vector3(0, 0, 1);
     this.bracedFireTargetWorld = new THREE.Vector3();
@@ -403,6 +419,9 @@ export class Player {
     this.powerKnockbackTravelResolver = null;
     this.powerKnockbackLandingResolver = null;
     this.onDodgeStarted = null;
+    this.onLedgeClingStarted = null;
+    this.onDeathStarted = null;
+    this.onSwordJumpSlashLandingRecoveryStarted = null;
     this.knockbackFallDirection = new THREE.Vector3(0, 0, -1);
     this.powerKnockbackState = null;
     this.powerKnockbackVelocity = new THREE.Vector3();
@@ -451,6 +470,7 @@ export class Player {
     }
 
     if (this.dead) {
+      this.cancelSwordJumpSlashVisual({ cancelAttack: true });
       this.isRunning = false;
       this.tankTurnActive = false;
       this.tankTurnAmount = 0;
@@ -458,6 +478,8 @@ export class Player {
       this.animation.update(dt);
       return;
     }
+
+    this._updateSwordJumpSlashVisualState(dt);
 
     if (this._updateExternalMotion(dt, movementOptions.game ?? null)) {
       return;
@@ -910,7 +932,10 @@ export class Player {
       return false;
     }
 
-    if (this.animation?.actionState || this.animation?.hurtTimer > 0 || this.animation?.attackTimer > 0) {
+    if (this.isSwordJumpSlashVisualActive()
+      || this.animation?.actionState
+      || this.animation?.hurtTimer > 0
+      || this.animation?.attackTimer > 0) {
       return false;
     }
 
@@ -1116,6 +1141,7 @@ export class Player {
       : MML_JUMP_STATES.Grounded;
     this.modelRoot.position.y = 0;
     this._jumpFallTransitionActive = false;
+    this._beginSwordJumpSlashLandingRecovery();
   }
 
   _getPhysicalJumpAnimationState() {
@@ -1156,6 +1182,9 @@ export class Player {
   }
 
   tryDodgeRoll(input = new Set(), movementOptions = {}) {
+    if (this.isSwordJumpSlashVisualActive()) {
+      return false;
+    }
     const cancelFiring = this._isProjectileFiringPoseActive();
     if (!this.animation.playDodgeRoll?.(DODGE_ROLL_DURATION, { cancelAttack: cancelFiring })) {
       return false;
@@ -1174,6 +1203,9 @@ export class Player {
   }
 
   tryLateralDodgeRoll(input = new Set(), movementOptions = {}) {
+    if (this.isSwordJumpSlashVisualActive()) {
+      return false;
+    }
     const lateral = this._getLateralDodgeInput(input);
     const cancelFiring = this._isProjectileFiringPoseActive();
 
@@ -1225,7 +1257,11 @@ export class Player {
 
     this._resolveActionDirection(input, movementOptions, this.jumpDirection);
 
-    if (this.dead || this.animation?.actionState || this.animation?.hurtTimer > 0 || this.animation?.attackTimer > 0) {
+    if (this.dead
+      || this.isSwordJumpSlashVisualActive()
+      || this.animation?.actionState
+      || this.animation?.hurtTimer > 0
+      || this.animation?.attackTimer > 0) {
       return false;
     }
 
@@ -1492,7 +1528,11 @@ export class Player {
 
     const inward = normal.clone().multiplyScalar(-1);
     if (ledge.autoClimb === true) {
-      return this._stepOntoLowLedge(ledge, inward);
+      const steppedOntoLedge = this._stepOntoLowLedge(ledge, inward);
+      if (steppedOntoLedge) {
+        this._handleLedgeClingStarted();
+      }
+      return steppedOntoLedge;
     }
 
     this.ledgeCling = {
@@ -1536,7 +1576,18 @@ export class Player {
     this.movementLockTimer = 0;
     this.movementLockMultiplier = 0;
     this.faceDirection(inward);
+    this._handleLedgeClingStarted();
     return true;
+  }
+
+  _handleLedgeClingStarted() {
+    this.cancelSwordJumpSlashVisual({ cancelAttack: true });
+    this.animation.cancelAttack?.();
+    this._attackWeaponKind = null;
+    this._activeSwordSlashClipKey = null;
+    this.attackFacingTimer = 0;
+    this.externalRig?.setBeamBladeActive?.(false);
+    this.onLedgeClingStarted?.();
   }
 
   _stepOntoLowLedge(ledge, inward) {
@@ -2344,13 +2395,164 @@ export class Player {
     this.animation.playAttack(duration);
   }
 
-  playSwordSlashAnimation(duration) {
+  playSwordSlashAnimation(duration, options = {}) {
+    const clipKey = options.clipKey ?? DEFAULT_SWORD_SLASH_CLIP;
     this._attackWeaponKind = 'beamBlade';
+    this._activeSwordSlashClipKey = clipKey;
     // The beam blade is a committed body-forward swing. Do not turn the whole
     // character toward the cursor when the slash begins.
     this.attackFacingTimer = 0;
 
-    this.animation.playAttack(duration, 'beamBlade');
+    const started = this.animation.playAttack(duration, 'beamBlade');
+    if (started !== false && clipKey === JUMP_SLASH_CLIP && this.isJumpAirborne()) {
+      this._jumpSlashVisualState = {
+        phase: 'airborneWindup',
+        duration: Math.max(0.1, duration),
+        recoveryStartProgress: 0,
+        recoveryDuration: 0,
+        recoveryTimer: 0,
+        visualProgress: 0,
+      };
+    } else {
+      this.cancelSwordJumpSlashVisual();
+    }
+    return started;
+  }
+
+  isSwordJumpSlashVisualActive() {
+    return Boolean(this._jumpSlashVisualState);
+  }
+
+  getSwordJumpSlashVisualProgress() {
+    return this._jumpSlashVisualState?.visualProgress ?? null;
+  }
+
+  cancelSwordJumpSlashVisual({ cancelAttack = false } = {}) {
+    if (!this._jumpSlashVisualState) {
+      return false;
+    }
+
+    this._jumpSlashVisualState = null;
+    this.externalRig?.clearJumpSlashAerialOverrides?.();
+    if (cancelAttack) {
+      this.animation.cancelAttack?.();
+    }
+    if ((cancelAttack || this.animation.attackTimer <= 0)
+      && this._activeSwordSlashClipKey === JUMP_SLASH_CLIP) {
+      this._attackWeaponKind = null;
+      this._activeSwordSlashClipKey = null;
+      this.externalRig?.setBeamBladeActive?.(false);
+    }
+    return true;
+  }
+
+  _beginSwordJumpSlashLandingRecovery() {
+    const state = this._jumpSlashVisualState;
+    if (!state
+      || (state.phase !== 'airborneWindup' && state.phase !== 'airborneHold')) {
+      return false;
+    }
+
+    // A very short drop can touch down before the wind-up reaches frame 32.
+    // Resume from the current authored frame in that case so touchdown never
+    // skips the initial motion the player was meant to see. Only a completed
+    // wind-up enters (and later exits) the supplied frame-32 falling hold.
+    state.recoveryStartProgress = THREE.MathUtils.clamp(
+      state.visualProgress,
+      0,
+      JUMP_SLASH_AERIAL_POSE_PROGRESS,
+    );
+    state.recoveryDuration = Math.max(
+      0.05,
+      state.duration * (1 - state.recoveryStartProgress),
+    );
+    state.phase = 'groundedRecovery';
+    state.recoveryTimer = state.recoveryDuration;
+    state.visualProgress = state.recoveryStartProgress;
+    this.movementLockTimer = Math.max(
+      this.movementLockTimer,
+      state.recoveryDuration,
+      this.animation.attackTimer,
+    );
+    this.movementLockMultiplier = 0;
+    this.onSwordJumpSlashLandingRecoveryStarted?.(state.recoveryStartProgress);
+    return true;
+  }
+
+  _updateSwordJumpSlashVisualState(dt) {
+    const state = this._jumpSlashVisualState;
+    if (!state) {
+      return;
+    }
+
+    if (this.getActiveArmWeapon()?.type !== 'swordArm') {
+      this.cancelSwordJumpSlashVisual({ cancelAttack: true });
+      return;
+    }
+
+    if (state.phase === 'airborneWindup') {
+      state.visualProgress = Math.min(
+        JUMP_SLASH_AERIAL_POSE_PROGRESS,
+        state.visualProgress + (Math.max(0, dt) / state.duration),
+      );
+      if (!this.isJumpAirborne()) {
+        this._beginSwordJumpSlashLandingRecovery();
+      } else if (state.visualProgress >= JUMP_SLASH_AERIAL_POSE_PROGRESS) {
+        state.phase = 'airborneHold';
+      }
+      return;
+    }
+
+    if (state.phase === 'airborneHold') {
+      state.visualProgress = JUMP_SLASH_AERIAL_POSE_PROGRESS;
+      if (!this.isJumpAirborne()) {
+        this._beginSwordJumpSlashLandingRecovery();
+      }
+      return;
+    }
+
+    if (state.phase === 'groundedRecovery') {
+      state.recoveryTimer = Math.max(0, state.recoveryTimer - Math.max(0, dt));
+      const recoveryProgress = 1 - THREE.MathUtils.clamp(
+        state.recoveryTimer / Math.max(0.001, state.recoveryDuration),
+        0,
+        1,
+      );
+      state.visualProgress = THREE.MathUtils.lerp(
+        state.recoveryStartProgress,
+        1,
+        recoveryProgress,
+      );
+      if (state.recoveryTimer <= 0) {
+        state.phase = 'groundedHold';
+        state.visualProgress = 1;
+        // Leave frame 56 active for this external-rig update. Natural cleanup
+        // happens on the next player tick, after the authored terminal pose has
+        // actually been rendered at least once.
+        return;
+      }
+    }
+
+    if (state.phase === 'groundedHold') {
+      // The authored terminal frame was rendered on the transition tick. From
+      // here the jump-slash visual owns cleanup even if hurt-stun paused the
+      // generic gameplay attack timer.
+      this.cancelSwordJumpSlashVisual({ cancelAttack: true });
+    }
+  }
+
+  isSwordSlashAnimationActive(clipKey = null) {
+    const jumpSlashVisualActive = this.isSwordJumpSlashVisualActive();
+    if (!jumpSlashVisualActive
+      && (this._attackWeaponKind !== 'beamBlade' || this.animation.attackTimer <= 0)) {
+      return false;
+    }
+
+    const activeClipKey = jumpSlashVisualActive
+      ? JUMP_SLASH_CLIP
+      : this._activeSwordSlashClipKey ?? DEFAULT_SWORD_SLASH_CLIP;
+    return clipKey === null
+      || activeClipKey === clipKey;
   }
 
   lockAttackFacing(targetPosition = null, duration = 0.3) {
@@ -2712,6 +2914,7 @@ export class Player {
   }
 
   _prepareForExternalControl() {
+    this.cancelSwordJumpSlashVisual({ cancelAttack: true });
     this.velocity.set(0, 0, 0);
     this.takeoffHorizontalVelocity.set(0, 0, 0);
     this.jumpState = MML_JUMP_STATES.Grounded;
@@ -2919,6 +3122,8 @@ export class Player {
 
     if (this.health <= 0) {
       this.dead = true;
+      this.cancelSwordJumpSlashVisual({ cancelAttack: true });
+      this.onDeathStarted?.();
       this.clearExternalMotion('death');
       this.animation.playDead();
     }
@@ -2941,6 +3146,8 @@ export class Player {
     if (this.isDodgeRollInvulnerable() || this.isPowerKnockbackActive()) {
       return false;
     }
+
+    this.cancelSwordJumpSlashVisual({ cancelAttack: true });
 
     if (damageContext.knockbackDirection?.lengthSq?.() > 0.0001) {
       this.knockbackFallDirection.copy(damageContext.knockbackDirection).setY(0);
@@ -3934,11 +4141,30 @@ export class Player {
       : this.animation.attackDuration > 0
       ? 1 - THREE.MathUtils.clamp(this.animation.attackTimer / this.animation.attackDuration, 0, 1)
       : 0;
-    const attackKind = motionOptions.attackKind ?? this._attackWeaponKind;
+    const jumpSlashVisualState = this._jumpSlashVisualState;
+    const jumpSlashVisualActive = Boolean(jumpSlashVisualState);
+    const jumpSlashAirbornePose = jumpSlashVisualState?.phase === 'airborneHold'
+      && this.isJumpAirborne();
+    const jumpSlashAirborneRootAnchor = Boolean(jumpSlashVisualState)
+      && (jumpSlashVisualState.phase === 'airborneWindup'
+        || jumpSlashVisualState.phase === 'airborneHold')
+      && this.isJumpAirborne();
+    const attackKind = jumpSlashVisualActive
+      ? 'beamBlade'
+      : motionOptions.attackKind ?? this._attackWeaponKind;
+    const swordSlashClipKey = jumpSlashVisualActive
+      ? JUMP_SLASH_CLIP
+      : attackKind === 'beamBlade' && this.animation.attackTimer > 0
+        ? this._activeSwordSlashClipKey ?? DEFAULT_SWORD_SLASH_CLIP
+        : null;
+    const beamBladeAttacking = jumpSlashVisualActive
+      || (attackKind === 'beamBlade' && this.animation.attackTimer > 0);
     const projectileAimLocked = motionOptions.projectileAiming ?? (attackKind === 'projectile' && this.bracedFireTimer > 0);
     const projectileAiming = motionOptions.projectileAiming ?? (projectileAimLocked || (attackKind === 'projectile' && this.animation.attackTimer > 0));
     const sustainedProjectileAim = projectileAiming && this.animation.attackTimer <= 0;
-    const attackProgress = sustainedProjectileAim ? 1 : rawAttackProgress;
+    const attackProgress = jumpSlashVisualActive
+      ? THREE.MathUtils.clamp(jumpSlashVisualState.visualProgress, 0, 1)
+      : sustainedProjectileAim ? 1 : rawAttackProgress;
     const hurtProgress = this.animation.hurtTimer > 0
       ? 1 - THREE.MathUtils.clamp(this.animation.hurtTimer / 0.18, 0, 1)
       : 0;
@@ -3953,7 +4179,9 @@ export class Player {
     this.externalRig?.update(dt, {
       moving,
       moveAmount,
-      state: projectileAiming && !airborneJumpAnimation ? 'attacking' : animationState,
+      state: beamBladeAttacking || (projectileAiming && !airborneJumpAnimation)
+        ? 'attacking'
+        : animationState,
       attackProgress,
       actionProgress,
       actionDuration: this.animation.actionDuration ?? 0,
@@ -3971,10 +4199,17 @@ export class Player {
       aimTargetWorld: motionOptions.aimTargetWorld
         ?? (this.bracedFireTargetValid ? this.bracedFireTargetWorld : null),
       useRightArmForLedge: this._usesRightArmForLedge(),
-      clipKey: motionOptions.clipKey ?? null,
+      jumpSlashAirbornePose,
+      jumpSlashAirborneRootAnchor,
+      clipKey: swordSlashClipKey ?? motionOptions.clipKey,
     });
 
-    if (animationState === 'land') {
+    if (swordSlashClipKey === JUMP_SLASH_CLIP && !this.isJumpAirborne()) {
+      // Gameplay physics owns the aerial arc. Once it touches down, retain the
+      // FBX clip's authored landing compression while keeping its boots on the
+      // resolved floor for the remainder of the slash recovery.
+      this._clampExternalModelFeetToGround({ allowRaise: true, reason: 'jumpSlashLanding' });
+    } else if (animationState === 'land') {
       // Let the launch/fall action cross-fade into its authored landing pose.
       // Forcing the feet to ground here translates the whole model by the
       // airborne tuck clearance and creates a visible one-frame downward snap.
@@ -3989,8 +4224,12 @@ export class Player {
       this._lastExternalModelGrounding = this._measureExternalModelGrounding();
     }
 
-    if (!motionOptions.skipAttackKindReset && this.animation.attackTimer <= 0 && !projectileAimLocked) {
+    if (!motionOptions.skipAttackKindReset
+      && !jumpSlashVisualActive
+      && this.animation.attackTimer <= 0
+      && !projectileAimLocked) {
       this._attackWeaponKind = null;
+      this._activeSwordSlashClipKey = null;
     }
   }
 

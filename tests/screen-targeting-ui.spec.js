@@ -118,7 +118,7 @@ test('aim and lock-on reticles are flat, screen-space HUD indicators', async ({ 
   expect(result.worldLockReticleAbsent).toBe(true);
 });
 
-test('manual aim overrides only shot direction while movement lock keeps target facing', async ({ page }) => {
+test('manual aim redirects shots while movement lock keeps target facing', async ({ page }) => {
   await page.goto('/?reaverbotSeed=locked-manual-aim-proof');
   await page.waitForFunction(() => Boolean(window.game?.combat && window.game?.player));
 
@@ -226,21 +226,33 @@ test('manual aim overrides only shot direction while movement lock keeps target 
     game.pointer.primaryPressed = false;
     game.pointer.secondary = true;
     game.pointer.secondaryPressed = true;
-    combat.secondaryWasDown = false;
     combat.update(0.1);
     const lockSurvivesManualAimPress = combat.getMovementLockTarget() === enemy;
-    game.pointer.secondary = true;
-    combat.update(0.1);
-    const heldAimRecognized = combat.lockOn.manualAimUsed;
+    const rightMouseActivatesManualAim = combat.isManualAimOverrideActive(game.pointer);
     game.pointer.secondary = false;
     combat.update(0.01);
     const lockSurvivesManualAimRelease = combat.getMovementLockTarget() === enemy;
-    game.pointer.secondary = true;
-    game.pointer.secondaryPressed = true;
-    combat.update(0.05);
-    game.pointer.secondary = false;
-    combat.update(0.05);
-    const quickTapUnlocks = combat.getMovementLockTarget() === null;
+    const rightMouseReleaseEndsManualAim = !combat.isManualAimOverrideActive(game.pointer);
+
+    const unlockEvent = new KeyboardEvent('keydown', {
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(unlockEvent);
+    const firstTabPulseQueued = game.pointer.lockOnPressed;
+    combat.update(0.01);
+    const tabUnlocks = combat.getMovementLockTarget() === null;
+
+    const relockEvent = new KeyboardEvent('keydown', {
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(relockEvent);
+    const secondTabPulseQueued = game.pointer.lockOnPressed;
+    combat.update(0.01);
+    const tabRelocks = combat.getMovementLockTarget() === enemy;
 
     return {
       manualOverrideActive,
@@ -260,9 +272,15 @@ test('manual aim overrides only shot direction while movement lock keeps target 
       targetScreenY: targetOnScreen.y,
       targetScreenZ: targetOnScreen.z,
       lockSurvivesManualAimPress,
-      heldAimRecognized,
+      rightMouseActivatesManualAim,
       lockSurvivesManualAimRelease,
-      quickTapUnlocks,
+      rightMouseReleaseEndsManualAim,
+      unlockTabPrevented: unlockEvent.defaultPrevented,
+      relockTabPrevented: relockEvent.defaultPrevented,
+      firstTabPulseQueued,
+      secondTabPulseQueued,
+      tabUnlocks,
+      tabRelocks,
     };
   });
 
@@ -284,7 +302,79 @@ test('manual aim overrides only shot direction while movement lock keeps target 
   expect(result.targetScreenZ).toBeGreaterThan(-1);
   expect(result.targetScreenZ).toBeLessThan(1);
   expect(result.lockSurvivesManualAimPress).toBe(true);
-  expect(result.heldAimRecognized).toBe(true);
+  expect(result.rightMouseActivatesManualAim).toBe(true);
   expect(result.lockSurvivesManualAimRelease).toBe(true);
-  expect(result.quickTapUnlocks).toBe(true);
+  expect(result.rightMouseReleaseEndsManualAim).toBe(true);
+  expect(result.unlockTabPrevented).toBe(true);
+  expect(result.relockTabPrevented).toBe(true);
+  expect(result.firstTabPulseQueued).toBe(true);
+  expect(result.secondTabPulseQueued).toBe(true);
+  expect(result.tabUnlocks).toBe(true);
+  expect(result.tabRelocks).toBe(true);
+});
+
+test('entering pointer lock preserves the existing reticle position', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=pointer-lock-reticle-continuity');
+  await page.waitForFunction(() => Boolean(window.game?.renderer?.domElement));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    game.stop();
+    const canvas = game.renderer.domElement;
+    const rect = canvas.getBoundingClientRect();
+    const priorPointer = {
+      x: rect.left + rect.width * 0.73,
+      y: rect.top + rect.height * 0.28,
+    };
+    const pointerLockClick = {
+      x: rect.left + rect.width * 0.16,
+      y: rect.top + rect.height * 0.82,
+    };
+    let pointerLockRequests = 0;
+    game._requestGameplayPointerLock = () => {
+      pointerLockRequests += 1;
+    };
+    game.pointerLocked = false;
+    game.pointer.secondary = false;
+    game.pointer.secondaryPressed = false;
+
+    canvas.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: priorPointer.x,
+      clientY: priorPointer.y,
+      bubbles: true,
+    }));
+    const beforePointerDown = { x: game.pointer.x, y: game.pointer.y };
+
+    const pointerDown = new PointerEvent('pointerdown', {
+      pointerId: 1,
+      button: 2,
+      clientX: pointerLockClick.x,
+      clientY: pointerLockClick.y,
+      bubbles: true,
+      cancelable: true,
+    });
+    canvas.dispatchEvent(pointerDown);
+
+    return {
+      priorPointer,
+      pointerLockClick,
+      beforePointerDown,
+      afterPointerDown: { x: game.pointer.x, y: game.pointer.y },
+      pointerLockRequests,
+      secondaryHeld: game.pointer.secondary,
+      secondaryPressed: game.pointer.secondaryPressed,
+      pointerDownPrevented: pointerDown.defaultPrevented,
+    };
+  });
+
+  expect(result.beforePointerDown.x).toBeCloseTo(result.priorPointer.x, 5);
+  expect(result.beforePointerDown.y).toBeCloseTo(result.priorPointer.y, 5);
+  expect(result.afterPointerDown.x).toBeCloseTo(result.priorPointer.x, 5);
+  expect(result.afterPointerDown.y).toBeCloseTo(result.priorPointer.y, 5);
+  expect(result.afterPointerDown.x).not.toBeCloseTo(result.pointerLockClick.x, 1);
+  expect(result.afterPointerDown.y).not.toBeCloseTo(result.pointerLockClick.y, 1);
+  expect(result.pointerLockRequests).toBe(1);
+  expect(result.secondaryHeld).toBe(true);
+  expect(result.secondaryPressed).toBe(true);
+  expect(result.pointerDownPrevented).toBe(true);
 });

@@ -25,9 +25,9 @@ For the standard Buster Arm, Energy is not ammo. Buster shots are unlimited; Ene
 - Hold `Shift` while moving to jog.
 - `Space` jumps; jump direction follows the current movement input.
 - `Q` performs a short dodge roll in the current movement direction.
-- Mouse aims with the flat cyan screen reticle. While movement-locked, hold right mouse to aim shots through the reticle at the locked target's depth without turning MegaMan away from that target.
+- Mouse aims with the flat cyan screen reticle. Hold right mouse to aim through the reticle; entering aim preserves the reticle's current position.
 - Hold left mouse to fire or swing the active arm weapon.
-- Tap right mouse to lock onto or release a target; holding it after locking enables manual weak-point aim while preserving lock-on movement and camera facing.
+- `Tab` locks onto or releases a target. While locked, hold right mouse for manual reticle aim without dropping the movement lock.
 - `Z` uses a secondary arm function when available. With `Shield Arm` equipped, it raises a timed guard; early timing parries and staggers attackers. Otherwise it manually vents/reloads the active arm weapon when Energy is not full.
 - Number keys `1` through `4` switch arm weapon slots.
 - `E` activates nearby camp, garage, quest, ruin lift, door, chest, mechanism, and field-device interactions.

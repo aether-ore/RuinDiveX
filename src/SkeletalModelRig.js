@@ -722,6 +722,7 @@ export class SkeletalModelRig {
     strafeAmount = 0,
     turnAmount = 0,
     busterArmSide = this.busterArmSide,
+    aimTargetWorld = null,
     useRightArmForLedge = false,
     fallAnimationClipProgress = null,
     clipKey = null,
@@ -805,7 +806,7 @@ export class SkeletalModelRig {
     this._updateDrillArmVisual(dt);
     this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
     const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
-    this._applyBusterAimPose(busterAimActive, state, moving);
+    this._applyBusterAimPose(busterAimActive, state, moving, aimTargetWorld);
     this._applyGeneratedPowerKnockbackPose(state, actionProgress ?? 0, dt);
     this._applyLedgeRightArmPose(state, useRightArmForLedge);
   }
@@ -2142,7 +2143,7 @@ export class SkeletalModelRig {
     }
   }
 
-  _applyBusterAimPose(active = false, state = 'idle', moving = false) {
+  _applyBusterAimPose(active = false, state = 'idle', moving = false, aimTargetWorld = null) {
     const airborne = AIRBORNE_BUSTER_AIM_STATES.has(state);
     const applyLeftMegaBusterPose = active && this.busterArmSide === 'left';
     const applyRightAirbornePose = active && this.busterArmSide === 'right' && airborne;
@@ -2153,11 +2154,12 @@ export class SkeletalModelRig {
     this.root.userData.leftMegaBusterAimActive = applyLeftMegaBusterPose;
     this.root.userData.megaBusterActionIdleActive = actionIdleActive;
     this.root.userData.megaBusterArmWorldAnchorActive = false;
+    this.root.userData.megaBusterTargetAimActive = false;
     this.root.userData.airborneBusterAimActive = airborne
       && (applyLeftMegaBusterPose || applyRightAirbornePose);
 
     if (applyLeftMegaBusterPose) {
-      this._applyLeftMegaBusterAimPose(actionIdleActive);
+      this._applyLeftMegaBusterAimPose(actionIdleActive, aimTargetWorld);
       return;
     }
 
@@ -2171,7 +2173,7 @@ export class SkeletalModelRig {
     }
   }
 
-  _applyLeftMegaBusterAimPose(useFullActionIdlePose = false) {
+  _applyLeftMegaBusterAimPose(useFullActionIdlePose = false, aimTargetWorld = null) {
     const jointNames = useFullActionIdlePose
       ? Object.keys(MEGA_BUSTER_ACTION_IDLE_POSE_DEGREES)
       : LEFT_BUSTER_AIM_JOINTS;
@@ -2192,6 +2194,8 @@ export class SkeletalModelRig {
     if (!useFullActionIdlePose) {
       this._anchorMegaBusterArmToActionIdle();
     }
+
+    this._aimMegaBusterAtTarget(aimTargetWorld);
 
     for (const jointName of LEFT_BUSTER_AIM_JOINTS) {
       const joint = this.joints.get(jointName);
@@ -2224,6 +2228,36 @@ export class SkeletalModelRig {
     this.root.updateMatrixWorld(true);
     this.megaBusterArmWorldAnchorWasApplied = true;
     this.root.userData.megaBusterArmWorldAnchorActive = true;
+    return true;
+  }
+
+  _aimMegaBusterAtTarget(targetWorld = null) {
+    const shoulder = this.joints.get('leftShoulder');
+    const muzzle = this.megaBusterMuzzle;
+    if (!targetWorld || !shoulder?.parent || !muzzle) {
+      this.root.userData.megaBusterTargetAimActive = false;
+      return false;
+    }
+
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      this.root.updateMatrixWorld(true);
+      muzzle.getWorldPosition(tempVectorA);
+      tempVectorB.copy(targetWorld).sub(tempVectorA);
+      if (tempVectorB.lengthSq() <= 0.000001) {
+        return false;
+      }
+
+      muzzle.getWorldQuaternion(tempQuaternionA);
+      tempVectorC.copy(localForwardZ).applyQuaternion(tempQuaternionA).normalize();
+      tempQuaternionB.setFromUnitVectors(tempVectorC, tempVectorB.normalize());
+      shoulder.getWorldQuaternion(tempQuaternionC);
+      tempQuaternionC.premultiply(tempQuaternionB).normalize();
+      shoulder.parent.getWorldQuaternion(tempQuaternionA).invert();
+      shoulder.quaternion.copy(tempQuaternionA.multiply(tempQuaternionC)).normalize();
+    }
+
+    this.root.updateMatrixWorld(true);
+    this.root.userData.megaBusterTargetAimActive = true;
     return true;
   }
 

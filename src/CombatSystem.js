@@ -14,7 +14,6 @@ const tempMidpoint = new THREE.Vector3();
 const tempFlat = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const PROJECTILE_AIM_LOCK_BUFFER = 0.12;
-const LOCK_MANUAL_AIM_HOLD_THRESHOLD = 0.16;
 const LASER_TICK_INTERVAL = 0.1;
 const DRILL_TICK_INTERVAL = 0.12;
 const DRILL_PARTICLE_INTERVAL = 0.045;
@@ -465,13 +464,13 @@ export class CombatSystem {
     this.weaponStates = new Map();
     this.swapTimer = 0;
     this.primaryWasDown = false;
-    this.secondaryWasDown = false;
     this.alternateWasDown = false;
     this.activeMines = [];
     this.pendingMeleeStrikes = [];
     this.pendingProjectileShots = [];
     this.lockAimWorld = new THREE.Vector3();
     this.lockFacingWorld = new THREE.Vector3();
+    this.visualAimWorld = new THREE.Vector3();
     this.manualAimOverrideActive = false;
     this.lockOn = {
       target: null,
@@ -482,9 +481,6 @@ export class CombatSystem {
       manual: false,
       movementLocked: false,
       markerRotation: 0,
-      pendingToggleOff: false,
-      secondaryHoldTimer: 0,
-      manualAimUsed: false,
     };
     this.grenadePreview = null;
     this.grenadeArcPreview = null;
@@ -550,18 +546,15 @@ export class CombatSystem {
 
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
     const primaryPressed = pointer.primaryPressed || (pointer.primary && !this.primaryWasDown);
-    const secondaryPressed = pointer.secondaryPressed || (pointer.secondary && !this.secondaryWasDown);
-    const secondaryReleased = !pointer.secondary && this.secondaryWasDown;
+    const lockOnPressed = pointer.lockOnPressed === true;
     const alternatePressed = pointer.alternatePressed || (pointer.alternate && !this.alternateWasDown);
     pointer.primaryPressed = false;
     pointer.secondaryPressed = false;
+    pointer.lockOnPressed = false;
     pointer.alternatePressed = false;
 
     this._updateLockOn(dt, pointer.aimWorld, profile, {
-      pressed: secondaryPressed,
-      held: pointer.secondary,
-      released: secondaryReleased,
-      primaryHeld: pointer.primary,
+      pressed: lockOnPressed,
     });
     this.manualAimOverrideActive = this.isManualAimOverrideActive(pointer);
     const aimWorld = this._getEffectiveAimWorld(
@@ -619,7 +612,6 @@ export class CombatSystem {
     }
 
     this.primaryWasDown = pointer.primary;
-    this.secondaryWasDown = pointer.secondary;
     this.alternateWasDown = pointer.alternate;
   }
 
@@ -630,6 +622,7 @@ export class CombatSystem {
       pointer.primaryPressed = false;
       pointer.secondary = false;
       pointer.secondaryPressed = false;
+      pointer.lockOnPressed = false;
       pointer.alternate = false;
       pointer.alternatePressed = false;
     }
@@ -647,7 +640,6 @@ export class CombatSystem {
     }
 
     this.primaryWasDown = false;
-    this.secondaryWasDown = false;
     this.alternateWasDown = false;
   }
 
@@ -655,6 +647,7 @@ export class CombatSystem {
     if (pointer) {
       pointer.primaryPressed = false;
       pointer.secondaryPressed = false;
+      pointer.lockOnPressed = false;
       pointer.alternatePressed = false;
     }
 
@@ -671,7 +664,6 @@ export class CombatSystem {
     }
 
     this.primaryWasDown = Boolean(pointer?.primary);
-    this.secondaryWasDown = Boolean(pointer?.secondary);
     this.alternateWasDown = Boolean(pointer?.alternate);
   }
 
@@ -730,6 +722,23 @@ export class CombatSystem {
     return target?.root
       ? getCombatTargetWorldPosition(target, this.lockFacingWorld)
       : fallbackAimWorld;
+  }
+
+  _getVisualAimTargetWorld(aimWorld, profile) {
+    const player = this.game.player;
+    if (!aimWorld || !player) {
+      return aimWorld;
+    }
+
+    const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
+    this.visualAimWorld.copy(aimWorld);
+    const supportsVerticalAim = !profile.melee
+      && !['mine', 'drill', 'lift', 'grenade'].includes(profile.special);
+    if (supportsVerticalAim && !this.getMovementLockTarget()) {
+      this.visualAimWorld.y += origin.y - player.root.position.y;
+    }
+
+    return this.visualAimWorld;
   }
 
   _getProjectileLockTarget(profile) {
@@ -962,6 +971,7 @@ export class CombatSystem {
     player.holdProjectileFiringPose(this._getFacingAimWorld(aimWorld), 0.18, {
       weaponKey: state?.key,
       continuous: true,
+      aimTargetPosition: this._getVisualAimTargetWorld(aimWorld, profile),
     });
   }
 
@@ -1431,7 +1441,7 @@ export class CombatSystem {
     const attackDuration = this._getAttackAnimationDuration(profile, stats);
     const targetPoint = player.root.position.clone().addScaledVector(tempDirection, this._getProfileRange(profile, stats));
     const facingTargetPoint = this._getFacingAimWorld(targetPoint);
-    const projectileAimOptions = { weaponKey: state.key };
+    const projectileAimOptions = { weaponKey: state.key, aimTargetPosition: targetPoint };
     const projectileActionNeedsBrace = usesProjectileAimBrace(profile)
       && !player.isProjectileAimSustained?.(state.key);
 
@@ -2660,45 +2670,18 @@ export class CombatSystem {
 
   _updateLockOn(dt, aimWorld, profile, input = {}) {
     const pressed = input.pressed === true;
-    const held = input.held === true;
-    const released = input.released === true;
     if (pressed) {
       if (this.lockOn.movementLocked) {
-        // A quick second tap still unlocks, but defer that decision until
-        // release so holding the same button can become a manual-aim modifier.
-        this.lockOn.pendingToggleOff = true;
-        this.lockOn.secondaryHoldTimer = 0;
-        this.lockOn.manualAimUsed = Boolean(input.primaryHeld);
+        this.lockOn.movementLocked = false;
+        if (!profile.lockOn) {
+          this._clearLockOn();
+          return;
+        }
       } else {
         this.lockOn.movementLocked = true;
-        this.lockOn.pendingToggleOff = false;
-        this.lockOn.secondaryHoldTimer = 0;
-        this.lockOn.manualAimUsed = false;
         this.lockOn.target = null;
         this.lockOn.progress = 0;
         this.lockOn.manual = false;
-      }
-    }
-
-    if (this.lockOn.pendingToggleOff && held) {
-      this.lockOn.secondaryHoldTimer += Math.max(0, dt);
-      this.lockOn.manualAimUsed = this.lockOn.manualAimUsed
-        || input.primaryHeld === true
-        || this.lockOn.secondaryHoldTimer >= LOCK_MANUAL_AIM_HOLD_THRESHOLD;
-    }
-
-    if (this.lockOn.pendingToggleOff && released) {
-      const shouldUnlock = !this.lockOn.manualAimUsed
-        && this.lockOn.secondaryHoldTimer < LOCK_MANUAL_AIM_HOLD_THRESHOLD;
-      this.lockOn.pendingToggleOff = false;
-      this.lockOn.secondaryHoldTimer = 0;
-      this.lockOn.manualAimUsed = false;
-      if (shouldUnlock && !profile.lockOn) {
-        this._clearLockOn();
-        return;
-      }
-      if (shouldUnlock) {
-        this.lockOn.movementLocked = false;
       }
     }
 
@@ -2853,9 +2836,6 @@ export class CombatSystem {
     this.lockOn.progress = 0;
     this.lockOn.manual = false;
     this.lockOn.movementLocked = false;
-    this.lockOn.pendingToggleOff = false;
-    this.lockOn.secondaryHoldTimer = 0;
-    this.lockOn.manualAimUsed = false;
     this.manualAimOverrideActive = false;
     if (clearSkip) {
       this.lockOn.skippedTargetId = null;

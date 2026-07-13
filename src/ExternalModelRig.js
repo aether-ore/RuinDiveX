@@ -81,6 +81,10 @@ const HAND_MESH_DISTAL_HAND_RATIO = 0.76;
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
+const tempQuaternionA = new THREE.Quaternion();
+const tempQuaternionB = new THREE.Quaternion();
+const tempQuaternionC = new THREE.Quaternion();
+const localForwardZ = new THREE.Vector3(0, 0, 1);
 const tempCentroid = new THREE.Vector3();
 const tempNormalMatrix = new THREE.Matrix3();
 const zeroEuler = new THREE.Euler();
@@ -1281,6 +1285,7 @@ export class ExternalModelRig {
     lockOnActive = false,
     strafeAmount = 0,
     busterArmSide = this.busterArmSide,
+    aimTargetWorld = null,
   } = {}) {
     this.setBusterArmSide(busterArmSide);
     this.time += dt;
@@ -1314,6 +1319,7 @@ export class ExternalModelRig {
     });
 
     const targetAimWeight = projectileAiming || lockOnActive ? 1 : 0;
+    this.root.userData.megaBusterTargetAimActive = false;
     const aimBlendSpeed = targetAimWeight > this.aimLayerWeight
       ? UPPER_BODY_AIM_BLEND_IN_SPEED
       : UPPER_BODY_AIM_BLEND_OUT_SPEED;
@@ -1354,9 +1360,43 @@ export class ExternalModelRig {
       lerpPosition(joint, positionTargets.get(name) ?? joint.userData.restLocalPosition, alpha);
     }
 
+    if (this.busterArmSide === 'left' && targetAimWeight > 0) {
+      this._aimMegaBusterAtTarget(aimTargetWorld);
+    }
+
     this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
     this._updateDrillArmVisual(dt);
     this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress);
+  }
+
+  _aimMegaBusterAtTarget(targetWorld = null) {
+    const shoulder = this.joints.get('leftShoulder');
+    const muzzle = this.megaBusterMuzzle;
+    if (!targetWorld || !shoulder?.parent || !muzzle) {
+      this.root.userData.megaBusterTargetAimActive = false;
+      return false;
+    }
+
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      this.root.updateMatrixWorld(true);
+      muzzle.getWorldPosition(tempVectorA);
+      tempVectorB.copy(targetWorld).sub(tempVectorA);
+      if (tempVectorB.lengthSq() <= 0.000001) {
+        return false;
+      }
+
+      muzzle.getWorldQuaternion(tempQuaternionA);
+      tempVectorC.copy(localForwardZ).applyQuaternion(tempQuaternionA).normalize();
+      tempQuaternionB.setFromUnitVectors(tempVectorC, tempVectorB.normalize());
+      shoulder.getWorldQuaternion(tempQuaternionC);
+      tempQuaternionC.premultiply(tempQuaternionB).normalize();
+      shoulder.parent.getWorldQuaternion(tempQuaternionA).invert();
+      shoulder.quaternion.copy(tempQuaternionA.multiply(tempQuaternionC)).normalize();
+    }
+
+    this.root.updateMatrixWorld(true);
+    this.root.userData.megaBusterTargetAimActive = true;
+    return true;
   }
 
   _buildFromModel(sourceModel) {

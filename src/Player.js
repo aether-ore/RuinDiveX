@@ -376,6 +376,8 @@ export class Player {
     this._attackWeaponKind = null;
     this._bracedFireWeaponKey = null;
     this.bracedFireDirection = new THREE.Vector3(0, 0, 1);
+    this.bracedFireTargetWorld = new THREE.Vector3();
+    this.bracedFireTargetValid = false;
     this.bracedFireTimer = 0;
     this.bracedBackpedalTimer = 0;
     this.movementLockTimer = 0;
@@ -2380,7 +2382,10 @@ export class Player {
     const linger = options.continuous ? 0 : PROJECTILE_STANCE_LINGER_TIME;
     const lockDuration = Math.max(duration, aimLockDuration, MIN_PROJECTILE_AIM_LOCK_TIME) + linger;
 
-    this.holdProjectileFiringPose(targetPosition, lockDuration, { weaponKey });
+    this.holdProjectileFiringPose(targetPosition, lockDuration, {
+      weaponKey,
+      aimTargetPosition: options.aimTargetPosition ?? targetPosition,
+    });
 
     if (!alreadyLocked) {
       this.animation.playAttack(
@@ -2398,7 +2403,9 @@ export class Player {
     this._bracedFireWeaponKey = weaponKey;
 
     if (targetPosition) {
-      this.beginProjectileAim(targetPosition, holdDuration);
+      this.beginProjectileAim(targetPosition, holdDuration, {
+        aimTargetPosition: options.aimTargetPosition ?? targetPosition,
+      });
     } else {
       this.bracedFireTimer = Math.max(this.bracedFireTimer, holdDuration);
     }
@@ -2413,6 +2420,7 @@ export class Player {
     this._bracedFireWeaponKey = null;
     this.bracedFireTimer = 0;
     this.bracedBackpedalTimer = 0;
+    this.bracedFireTargetValid = false;
   }
 
   _getActiveArmWeaponKey() {
@@ -2486,7 +2494,13 @@ export class Player {
     return this.isShieldGuarding() && this.guardParryTimer > 0;
   }
 
-  beginProjectileAim(targetPosition, duration = MIN_BRACED_SHOT_TIME) {
+  beginProjectileAim(targetPosition, duration = MIN_BRACED_SHOT_TIME, options = {}) {
+    const aimTargetPosition = options.aimTargetPosition ?? targetPosition;
+    if (aimTargetPosition) {
+      this.bracedFireTargetWorld.copy(aimTargetPosition);
+      this.bracedFireTargetValid = true;
+    }
+
     worldForward.copy(targetPosition).sub(this.root.position);
     worldForward.y = 0;
 
@@ -3954,6 +3968,8 @@ export class Player {
       strafeAmount: motionOptions.strafeAmount ?? 0,
       turnAmount: motionOptions.turnAmount ?? 0,
       busterArmSide: motionOptions.busterArmSide ?? this._getActiveBusterArmSide(),
+      aimTargetWorld: motionOptions.aimTargetWorld
+        ?? (this.bracedFireTargetValid ? this.bracedFireTargetWorld : null),
       useRightArmForLedge: this._usesRightArmForLedge(),
       clipKey: motionOptions.clipKey ?? null,
     });

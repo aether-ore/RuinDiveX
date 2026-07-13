@@ -307,6 +307,147 @@ test('moving Mega Buster fire layers over normal locomotion while alternate fire
   expect(result.alternate.clipKeys.some((key) => key?.startsWith('pistol'))).toBe(true);
 });
 
+test('Mega Buster aims at the lock target or the manual reticle without releasing movement lock', async ({ page }) => {
+  await openLoadedGame(page);
+
+  const result = await page.evaluate(async () => {
+    const { Vector3, Quaternion } = await import('three');
+    const { getCombatTargetWorldPosition } = await import('./src/reaverbots/CombatTarget.js');
+    const { game } = window;
+    game.stop();
+    const { player, combat } = game;
+    const rig = player.externalRig;
+    const forward = new Vector3(0, 0, 1);
+    const right = new Vector3(1, 0, 0);
+
+    for (const existing of [...game.enemies]) {
+      existing.dispose?.();
+      existing.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+
+    player.ledgeCling = null;
+    player.root.position.set(0, 0, 0);
+    player.modelRoot.position.y = 0;
+    player.velocity.set(0, 0, 0);
+    player.jumpState = 'Grounded';
+    player._jumpGroundY = 0;
+    player.animation.actionState = null;
+    player.animation.actionTimer = 0;
+    player.animation.actionDuration = 0;
+    player.animation.cancelAttack();
+    player.bracedFireTimer = 0;
+    player.bracedBackpedalTimer = 0;
+    player.bracedFireTargetValid = false;
+    player._attackWeaponKind = null;
+    player.lastMoveDirection.copy(forward);
+    player.faceDirection(forward);
+    player.switchArmWeapon(0, true);
+    player.updateWeaponVisualState();
+
+    game.camera.position.set(0, 3.1, -7);
+    game.camera.lookAt(0, 1.2, 5);
+    game.camera.updateMatrixWorld(true);
+    const enemy = game.spawner.spawnEnemy('basic', false, new Vector3(0.7, 0, 5), {
+      allowRandomElite: false,
+    });
+    const lockPoint = getCombatTargetWorldPosition(enemy, new Vector3());
+    combat.lockOn.target = enemy;
+    combat.lockOn.progress = 1;
+    combat.lockOn.movementLocked = true;
+    combat.lockOn.manual = true;
+    combat.swapTimer = 0;
+
+    const weaponState = combat.getCurrentWeaponState();
+    weaponState.cooldown = 0;
+    weaponState.reloadTimer = 0;
+    weaponState.energy = weaponState.maxEnergy;
+    weaponState.weaponOutput = weaponState.maxWeaponOutput;
+    game.pointer.primary = false;
+    game.pointer.primaryPressed = false;
+    game.pointer.secondary = false;
+    game.pointer.secondaryPressed = false;
+    game.pointer.lockOnPressed = false;
+    combat.primaryWasDown = false;
+
+    const movementOptions = () => ({
+      arenaRadius: game.arenaRadius,
+      movementForward: forward,
+      movementRight: right,
+      lockOnTarget: enemy,
+      lockOnTargetPosition: lockPoint,
+      aimWorld: game.pointer.aimWorld,
+      projectileAimInputHeld: Boolean(game.pointer.secondary),
+      groundY: 0,
+    });
+    const settleAimPose = () => {
+      for (let frame = 0; frame < 6; frame += 1) {
+        player.update(1 / 120, new Set(), movementOptions());
+      }
+    };
+    const sampleMuzzle = (targetWorld) => {
+      rig.root.updateMatrixWorld(true);
+      const muzzlePosition = rig.megaBusterMuzzle.getWorldPosition(new Vector3());
+      const muzzleForward = new Vector3(0, 0, 1)
+        .applyQuaternion(rig.megaBusterMuzzle.getWorldQuaternion(new Quaternion()))
+        .normalize();
+      const expectedDirection = targetWorld.clone().sub(muzzlePosition).normalize();
+      return {
+        alignment: muzzleForward.dot(expectedDirection),
+        direction: muzzleForward,
+        expectedDirection,
+      };
+    };
+
+    combat.update(1 / 60);
+    settleAimPose();
+    const lockedAim = sampleMuzzle(lockPoint);
+
+    const cameraRight = new Vector3(1, 0, 0).applyQuaternion(game.camera.quaternion).normalize();
+    const cameraUp = new Vector3(0, 1, 0).applyQuaternion(game.camera.quaternion).normalize();
+    const desiredManualPoint = lockPoint.clone()
+      .addScaledVector(cameraRight, 1.8)
+      .addScaledVector(cameraUp, 1.15);
+    const projectedManualPoint = desiredManualPoint.clone().project(game.camera);
+    const canvasRect = game.renderer.domElement.getBoundingClientRect();
+    game.pointer.x = canvasRect.left + (projectedManualPoint.x + 1) * canvasRect.width * 0.5;
+    game.pointer.y = canvasRect.top + (1 - projectedManualPoint.y) * canvasRect.height * 0.5;
+    game.pointer.secondary = true;
+    game.pointer.secondaryPressed = true;
+    game._updateAimFromPointer();
+    const manualAimPoint = game.pointer.aimWorld.clone();
+
+    combat.update(1 / 60);
+    settleAimPose();
+    const manualAim = sampleMuzzle(manualAimPoint);
+
+    return {
+      firingSide: rig.busterArmSide,
+      targetAimActive: rig.root.userData.megaBusterTargetAimActive,
+      lockedAlignment: lockedAim.alignment,
+      manualAlignment: manualAim.alignment,
+      aimDirectionSeparation: lockedAim.direction.angleTo(manualAim.direction),
+      manualAimDistanceToDesired: manualAimPoint.distanceTo(desiredManualPoint),
+      manualOverrideActive: combat.isManualAimOverrideActive(game.pointer),
+      movementLockPreserved: combat.getMovementLockTarget() === enemy,
+      visualTargetDistanceToManualAim: player.bracedFireTargetWorld.distanceTo(manualAimPoint),
+      facingTargetDistanceToLock: player.bracedFireDirection
+        .angleTo(lockPoint.clone().sub(player.root.position).setY(0).normalize()),
+    };
+  });
+
+  expect(result.firingSide).toBe('left');
+  expect(result.targetAimActive).toBe(true);
+  expect(result.lockedAlignment).toBeGreaterThan(0.999);
+  expect(result.manualAlignment).toBeGreaterThan(0.999);
+  expect(result.aimDirectionSeparation).toBeGreaterThan(0.15);
+  expect(result.manualAimDistanceToDesired).toBeLessThan(0.02);
+  expect(result.manualOverrideActive).toBe(true);
+  expect(result.movementLockPreserved).toBe(true);
+  expect(result.visualTargetDistanceToManualAim).toBeLessThan(0.001);
+  expect(result.facingTargetDistanceToLock).toBeLessThan(0.001);
+});
+
 test('stationary Mega Buster aim locks the supplied Action Idle pose without a walk cycle', async ({ page }) => {
   await openLoadedGame(page);
 

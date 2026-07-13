@@ -190,12 +190,12 @@ export class Game {
       primaryPressed: false,
       secondary: false,
       secondaryPressed: false,
+      lockOnPressed: false,
       alternate: false,
       alternatePressed: false,
       aimWorld: new THREE.Vector3(0, 0, 1),
     };
     this.pointerLocked = false;
-    this.bodyFacingAimOverrideFrames = 0;
     this.lockOnMovementForward = new THREE.Vector3(0, 0, 1);
     this.lockOnMovementRight = new THREE.Vector3(1, 0, 0);
     this.lockOnMovementTargetPosition = new THREE.Vector3();
@@ -352,6 +352,7 @@ export class Game {
       this.pointer.primaryPressed = false;
       this.pointer.secondary = false;
       this.pointer.secondaryPressed = false;
+      this.pointer.lockOnPressed = false;
       this.pointer.alternate = false;
       this.pointer.alternatePressed = false;
     }
@@ -738,6 +739,7 @@ export class Game {
       this.pointer.primaryPressed = false;
       this.pointer.secondary = false;
       this.pointer.secondaryPressed = false;
+      this.pointer.lockOnPressed = false;
       this.pointer.alternate = false;
       this.pointer.alternatePressed = false;
     }
@@ -756,6 +758,7 @@ export class Game {
       this.pointer.primaryPressed = false;
       this.pointer.secondary = false;
       this.pointer.secondaryPressed = false;
+      this.pointer.lockOnPressed = false;
       this.pointer.alternate = false;
       this.pointer.alternatePressed = false;
       this.keys.clear();
@@ -3291,14 +3294,6 @@ export class Game {
   }
 
   _updateAimFromPointer() {
-    if (this.bodyFacingAimOverrideFrames > 0 && this._alignAimWorldToTankTurnFacing()) {
-      this.bodyFacingAimOverrideFrames -= 1;
-      this._updateAimReticleStyle();
-      return;
-    }
-
-    this.bodyFacingAimOverrideFrames = 0;
-
     const rect = this.renderer.domElement.getBoundingClientRect();
     this._setAimReticleScreenPosition(this.pointer.x, this.pointer.y);
     this.pointerNdc.x = ((this.pointer.x - rect.left) / rect.width) * 2 - 1;
@@ -3384,6 +3379,7 @@ export class Game {
       this.pointer.primaryPressed = false;
       this.pointer.secondary = false;
       this.pointer.secondaryPressed = false;
+      this.pointer.lockOnPressed = false;
     }
   }
 
@@ -3416,41 +3412,12 @@ export class Game {
       if (pressed) {
         this.pointer.secondaryPressed = true;
         this.player?.syncMoveDirectionToBodyFacing?.();
-        if (this._alignAimWorldToTankTurnFacing()) {
-          this.bodyFacingAimOverrideFrames = 2;
-        }
         this.cameraController?.swingBehindPlayer?.(this.player);
       }
       return true;
     }
 
     return false;
-  }
-
-  _alignAimWorldToTankTurnFacing() {
-    const player = this.player;
-    const lockedTarget = this.combat?.getMovementLockTarget?.() ?? null;
-
-    if (!player?.root
-      || lockedTarget?.root
-      || !player.tankTurnActive
-      || player.tankTurnTranslating) {
-      return false;
-    }
-
-    const range = Math.max(2, player.stats?.attackRange ?? 6.2);
-    tempVectorA.set(Math.sin(player.root.rotation.y), 0, Math.cos(player.root.rotation.y));
-
-    if (tempVectorA.lengthSq() <= 0.0001) {
-      return false;
-    }
-
-    tempVectorA.normalize();
-    this.pointer.aimWorld.copy(player.root.position).addScaledVector(tempVectorA, range);
-
-    this._projectAimReticleWorldPosition(this.pointer.aimWorld);
-
-    return true;
   }
 
   _bindEvents() {
@@ -3482,6 +3449,12 @@ export class Game {
         if (!event.repeat) {
           this.pointer.alternatePressed = true;
         }
+        return;
+      }
+
+      if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'Tab') {
+        event.preventDefault();
+        this.pointer.lockOnPressed = true;
         return;
       }
 
@@ -3544,6 +3517,7 @@ export class Game {
       this.pointer.primaryPressed = false;
       this.pointer.secondary = false;
       this.pointer.secondaryPressed = false;
+      this.pointer.lockOnPressed = false;
       this.pointer.alternate = false;
       this.pointer.alternatePressed = false;
     });
@@ -3589,9 +3563,6 @@ export class Game {
     });
 
     this.renderer.domElement.addEventListener('pointerdown', (event) => {
-      this.pointer.x = event.clientX;
-      this.pointer.y = event.clientY;
-
       if (this.poseDebugOpen) {
         event.preventDefault();
         try {

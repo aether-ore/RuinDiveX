@@ -2,18 +2,23 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   BUSTER_MODULE_CATALOG,
+  BUSTER_BALANCE_SEARCH,
   BusterCompileError,
   CUSTOM_BUSTER_RULESET,
   MEGA_BUSTER_BASE_PROFILE,
   MEGA_BUSTER_CALIBRATION_CATALOG,
+  applyBusterPowerSoftCap,
   compileBusterBuild,
   deserializeBusterBuild,
+  getBusterCombatDepthScalar,
   normalizeBusterBuild,
   serializeBusterBuild,
+  validateBusterAssignments,
   validateBusterBuild,
+  validateBusterProgram,
 } from '../src/buster/index.js';
 
-const RULESET = 'custom-buster-v0.1';
+const RULESET = 'custom-buster-v0.2';
 
 function node(nodeId, moduleId, moduleInstanceId = `instance:${nodeId}`) {
   return { nodeId, moduleId, moduleInstanceId };
@@ -53,7 +58,7 @@ function approximately(actual, expected, epsilon = 1e-12) {
   assert.ok(Math.abs(actual - expected) <= epsilon, `${actual} should be within ${epsilon} of ${expected}`);
 }
 
-test('the v0.1 catalog publishes the exact immutable module constants', () => {
+test('the v0.2 catalog publishes the exact immutable module constants', () => {
   assert.deepEqual(
     {
       power: BUSTER_MODULE_CATALOG.pulseBolt.basePower,
@@ -62,7 +67,7 @@ test('the v0.1 catalog publishes the exact immutable module constants', () => {
       speed: BUSTER_MODULE_CATALOG.pulseBolt.projectileSpeed,
       energy: BUSTER_MODULE_CATALOG.pulseBolt.energyCost,
     },
-    { power: 8, range: 6.9, rapid: 4.2, speed: 9.5, energy: 1 },
+    { power: 8, range: 6.9, rapid: 4.2, speed: 9.5, energy: 2 },
   );
   assert.deepEqual(
     {
@@ -72,11 +77,22 @@ test('the v0.1 catalog publishes the exact immutable module constants', () => {
       speed: BUSTER_MODULE_CATALOG.mortarShell.projectileSpeed,
       energy: BUSTER_MODULE_CATALOG.mortarShell.energyCost,
     },
-    { power: 15, range: 6.2, rapid: 1.15, speed: 5.8, energy: 1 },
+    { power: 15, range: 6.2, rapid: 1.15, speed: 5.8, energy: 3 },
   );
+  assert.equal(BUSTER_MODULE_CATALOG.pursuitGuidance.energyCost, 0);
+  assert.equal(BUSTER_MODULE_CATALOG.pursuitGuidance.cycleDelay, 0);
+  assert.equal(BUSTER_MODULE_CATALOG.atApex.energyCost, 0);
+  assert.equal(BUSTER_MODULE_CATALOG.onImpact.energyCost, 0);
+  assert.equal(BUSTER_MODULE_CATALOG.onImpact.label, 'Terminal Relay');
+  assert.equal(BUSTER_MODULE_CATALOG.afterDelay.energyCost, 0);
+  assert.equal(BUSTER_MODULE_CATALOG.afterDelay.physical, false);
+  assert.equal(BUSTER_MODULE_CATALOG.afterDelay.childTransfer, 1.04);
   assert.deepEqual(BUSTER_MODULE_CATALOG.spread3.angleOffsets, [-0.14, 0, 0.14]);
   assert.equal(BUSTER_MODULE_CATALOG.cluster5.radialCount, 5);
   assert.equal(BUSTER_MODULE_CATALOG.explosion.radius, 1.55);
+  assert.deepEqual(BUSTER_BALANCE_SEARCH.mortarPower, {
+    min: 12, max: 18, step: 0.5, preferred: 15,
+  });
   assert.ok(Object.isFrozen(BUSTER_MODULE_CATALOG));
   assert.ok(Object.isFrozen(BUSTER_MODULE_CATALOG.spread3.angleOffsets));
   assert.deepEqual(
@@ -102,8 +118,8 @@ test('the v0.1 catalog publishes the exact immutable module constants', () => {
   assert.equal(Object.keys(MEGA_BUSTER_CALIBRATION_CATALOG).length, 6);
   assert.deepEqual(MEGA_BUSTER_CALIBRATION_CATALOG.sniperScope.bonuses, { power: 1, range: 1 });
   assert.deepEqual(MEGA_BUSTER_BASE_PROFILE.tuning, { power: 4, energy: 4, range: 4, rapid: 4 });
-  assert.equal(MEGA_BUSTER_BASE_PROFILE.baseMaxEnergy, 9);
-  assert.equal(MEGA_BUSTER_BASE_PROFILE.energyCost, 3);
+  assert.equal(MEGA_BUSTER_BASE_PROFILE.baseMaxEnergy, 6);
+  assert.equal(MEGA_BUSTER_BASE_PROFILE.energyCost, 2);
   assert.equal(MEGA_BUSTER_BASE_PROFILE.socketCount, 4);
   assert.ok(Object.isFrozen(CUSTOM_BUSTER_RULESET));
   assert.ok(Object.isFrozen(MEGA_BUSTER_CALIBRATION_CATALOG.sniperScope.bonuses));
@@ -116,18 +132,21 @@ test('a neutral pulse emitter compiles to the base conformance values', () => {
   assert.equal(plan.stats.basePower, 8);
   assert.equal(plan.stats.effectivePower, 8);
   assert.equal(plan.stats.maxEnergy, 6);
-  assert.equal(plan.stats.energyCost, 1);
+  assert.equal(plan.stats.energyCost, 2);
   assert.equal(plan.stats.baseRapid, 4.2);
   approximately(plan.stats.cycleTime, 1 / 4.2);
   assert.equal(plan.stats.finalRapid, 4.2);
   assert.equal(plan.stats.rootRange, 6.9);
   assert.equal(plan.stats.childRange, 4.485);
-  assert.equal(plan.stats.shotsPerCharge, 6);
+  assert.equal(plan.stats.shotsPerCharge, 3);
   assert.equal(plan.peakProjectileReservation, 1);
   assert.equal(plan.revision, 3);
   assert.equal(plan.actions.length, 1);
   assert.equal(plan.actions[0].type, 'emit');
   assert.equal(plan.actions[0].payload.type, 'pulse');
+  assert.equal(plan.stats.programCapacityUsed, 1);
+  assert.equal(plan.trajectory.nominalRootLifetime, 6.9 / 9.5);
+  assert.equal(plan.occupancy.peakMovingProjectiles, 1);
 
   assert.ok(Object.isFrozen(plan));
   assert.ok(Object.isFrozen(plan.stats));
@@ -144,8 +163,8 @@ test('spread3 multiplies aggregate power before allocating three projectiles', (
   approximately(plan.stats.effectivePower, 8.8);
   approximately(plan.stats.perChildPower, 8.8 / 3);
   approximately(plan.stats.cycleTime, 1 / 4.2 + 0.08);
-  assert.equal(plan.stats.energyCost, 2);
-  assert.equal(plan.stats.shotsPerCharge, 3);
+  assert.equal(plan.stats.energyCost, 3);
+  assert.equal(plan.stats.shotsPerCharge, 2);
   assert.equal(plan.stats.projectileCount, 3);
   assert.equal(plan.peakProjectileReservation, 3);
   assert.deepEqual(plan.splitter.angles, [-0.14, 0, 0.14]);
@@ -163,19 +182,19 @@ test('explosion replaces direct impact and uses its radius, cycle delay, and sta
   assert.equal(plan.payload.replacesDirect, true);
   approximately(plan.stats.cycleTime, 1 / 4.2 + 0.1);
   approximately(plan.stats.stagger, 8 * 0.015);
-  assert.equal(plan.stats.energyCost, 2);
+  assert.equal(plan.stats.energyCost, 3);
 });
 
-test('afterDelay plus cluster5 caps aggregate power before five-way allocation', () => {
+test('afterDelay plus cluster5 remains below the soft-cap knee and allocates once', () => {
   const plan = compileBusterBuild(build(
     [node('emitter', 'pulseBolt'), node('trigger', 'afterDelay'), node('split', 'cluster5')],
     [edge('emitter', 'next', 'trigger'), edge('trigger', 'child', 'split')],
   ));
 
-  approximately(plan.stats.rawEffectivePower, 8 * 1.05 * 1.2);
+  approximately(plan.stats.rawEffectivePower, 8 * 1.04 * 1.2);
   assert.equal(plan.stats.effectivePowerCap, 10);
-  assert.equal(plan.stats.effectivePower, 10);
-  assert.equal(plan.stats.perChildPower, 2);
+  approximately(plan.stats.effectivePower, 8 * 1.04 * 1.2);
+  approximately(plan.stats.perChildPower, (8 * 1.04 * 1.2) / 5);
   assert.equal(plan.stats.childRange, 6.9 * 0.65);
   approximately(plan.stats.cycleTime, 1 / 4.2 + 0.08 + 0.16);
   assert.equal(plan.stats.energyCost, 4);
@@ -183,9 +202,9 @@ test('afterDelay plus cluster5 caps aggregate power before five-way allocation',
   assert.equal(plan.trigger.delay, 0.6);
   assert.deepEqual(plan.actions.map((action) => action.type), ['emit', 'trigger', 'emit']);
   assert.equal(plan.actions[2].count, 5);
-  assert.equal(plan.ledger.power.capClipped > 0, true);
-  assert.equal(plan.powerLedger.at(-1).allocation.each, 2);
-  assert.equal(plan.powerLedger.at(-1).outputPower, 2);
+  assert.equal(plan.ledger.power.capClipped, 0);
+  assert.equal(plan.preview.powerSoftCap, null);
+  approximately(plan.powerLedger.at(-1).allocation.each, (8 * 1.04 * 1.2) / 5);
 });
 
 test('onImpact reserves the larger batch without overlapping its disposed carrier', () => {
@@ -252,7 +271,7 @@ test('one guidance modifier is allowed independently in root and child scopes', 
   assert.equal(plan.preview.rootGuidance, true);
   assert.equal(plan.preview.childGuidance, true);
   assert.match(plan.description, /Pursuit Guidance \(root\).*Pursuit Guidance \(child\)/);
-  approximately(plan.stats.effectivePower, 8 * 0.9 * 1.05 * 0.9);
+  approximately(plan.stats.effectivePower, 8 * 0.9 * 1.04 * 0.9);
 
   const invalid = build(
     [node('emitter', 'pulseBolt'), node('guide-a', 'pursuitGuidance'), node('guide-b', 'pursuitGuidance')],
@@ -359,6 +378,120 @@ test('ownership context checks fabricated instances but exempts built-in nodes',
 
   const missingPhysicalInstance = build([node('emitter', 'pulseBolt', null)]);
   assert.ok(errorCodes(validateBusterBuild(missingPhysicalInstance)).has('MODULE_INSTANCE_REQUIRED'));
+});
+
+test('ownership-free programs compile while physical assignment validation remains separate', () => {
+  const blueprint = build([
+    node('emitter', 'pulseBolt', null),
+    node('payload', 'explosion', null),
+  ], [edge('emitter', 'next', 'payload')]);
+
+  assert.equal(validateBusterProgram(blueprint).valid, true);
+  assert.ok(errorCodes(validateBusterBuild(blueprint)).has('MODULE_INSTANCE_REQUIRED'));
+  assert.equal(compileBusterBuild(blueprint).payload.type, 'explosion');
+
+  const buildA = build([node('emitter', 'pulseBolt', 'shared-emitter')], [], {
+    buildId: 'build-a',
+    chassisId: 'chassis-a',
+  });
+  const buildB = build([node('emitter', 'pulseBolt', 'shared-emitter')], [], {
+    buildId: 'build-b',
+    chassisId: 'chassis-b',
+  });
+  const assignments = validateBusterAssignments({
+    builds: [buildA, buildB],
+    chassisInventory: [{ chassisId: 'chassis-a' }, { chassisId: 'chassis-b' }],
+    moduleInventory: [{ moduleInstanceId: 'shared-emitter', moduleId: 'pulseBolt' }],
+    assignments: { slot2: 'build-a', slot3: 'build-b' },
+  });
+  assert.ok(errorCodes(assignments).has('INSTANCE_ALREADY_CLAIMED'));
+});
+
+test('semantic capacity counts built-ins but not an explicit native Pulse payload', () => {
+  const source = build(
+    [
+      node('emitter', 'pulseBolt'),
+      node('root-guide', 'pursuitGuidance'),
+      node('trigger', 'afterDelay', null),
+      node('child-guide', 'pursuitGuidance'),
+      node('split', 'spread3'),
+      node('payload', 'pulsePayload', null),
+    ],
+    [
+      edge('emitter', 'next', 'root-guide'),
+      edge('root-guide', 'next', 'trigger'),
+      edge('trigger', 'child', 'child-guide'),
+      edge('child-guide', 'next', 'split'),
+      edge('split', 'next', 'payload'),
+    ],
+  );
+  const validation = validateBusterProgram(source);
+  assert.equal(validation.valid, true);
+  assert.equal(validation.semanticCapacityUsed, 5);
+  assert.equal(compileBusterBuild(source).stats.programCapacityUsed, 5);
+});
+
+test('graph traversal order is authoritative and direct Cluster is rejected', () => {
+  const badOrder = build(
+    [node('emitter', 'pulseBolt'), node('split', 'spread3'), node('guide', 'pursuitGuidance')],
+    [edge('emitter', 'next', 'split'), edge('split', 'next', 'guide')],
+  );
+  assert.ok(errorCodes(validateBusterProgram(badOrder)).has('INVALID_MODULE_ORDER'));
+
+  const directCluster = build(
+    [node('emitter', 'pulseBolt'), node('cluster', 'cluster5')],
+    [edge('emitter', 'next', 'cluster')],
+  );
+  assert.ok(errorCodes(validateBusterProgram(directCluster)).has('CHILD_ONLY_MODULE'));
+
+  const shuffledArrays = build(
+    [node('payload', 'explosion'), node('split', 'spread3'), node('emitter', 'pulseBolt')],
+    [edge('split', 'next', 'payload'), edge('emitter', 'next', 'split')],
+    { rootNodeId: 'emitter' },
+  );
+  const plan = compileBusterBuild(shuffledArrays);
+  assert.equal(plan.splitter.moduleId, 'spread3');
+  assert.equal(plan.payload.moduleId, 'explosion');
+  assert.deepEqual(plan.programOrder.root, ['emitter', 'split', 'payload']);
+});
+
+test('After Delay rejects unreachable carriers and warns for a narrow valid window', () => {
+  const nodes = [
+    node('emitter', 'pulseBolt'),
+    node('delay', 'afterDelay', null),
+    node('payload', 'pulsePayload', null),
+  ];
+  const edges = [edge('emitter', 'next', 'delay'), edge('delay', 'child', 'payload')];
+  const unreachable = validateBusterProgram(build(nodes, edges, {
+    tuning: { power: 5, energy: 5, range: 1, rapid: 5 },
+  }));
+  assert.ok(errorCodes(unreachable).has('TRIGGER_UNREACHABLE'));
+
+  const narrow = validateBusterProgram(build(nodes, edges, {
+    tuning: { power: 5, energy: 4, range: 2, rapid: 5 },
+  }));
+  assert.equal(narrow.valid, true);
+  assert.ok(new Set(narrow.warnings.map((warning) => warning.code)).has('TRIGGER_WINDOW_NARROW'));
+  assert.ok(Object.isFrozen(narrow.warnings));
+});
+
+test('soft-cap math and combat-depth scaling are deterministic and exposed in the ledger', () => {
+  assert.equal(applyBusterPowerSoftCap(1.25), 1.25);
+  approximately(applyBusterPowerSoftCap(1.26), 1.25 + 0.01 / 1.04);
+  assert.ok(applyBusterPowerSoftCap(100) < 1.5);
+  approximately(getBusterCombatDepthScalar(5, 1.18), 1.08);
+  assert.equal(getBusterCombatDepthScalar(10, 1.18), 1.18);
+
+  const plan = compileBusterBuild(build([node('emitter', 'pulseBolt')]), {
+    combatDepthLevel: 5,
+    level10PowerScalar: 1.18,
+  });
+  assert.equal(plan.stats.combatDepthLevel, 5);
+  approximately(plan.stats.combatDepthScalar, 1.08);
+  approximately(plan.stats.depthScaledPower, 8 * 1.08);
+  approximately(plan.stats.effectivePower, 8 * 1.08);
+  assert.equal(plan.ledger.power.entries[1].stage, 'combat-depth');
+  assert.equal(plan.preview.powerSoftCap, null);
 });
 
 test('normalization and serialization are canonical, pure, and retain unknown ids', () => {

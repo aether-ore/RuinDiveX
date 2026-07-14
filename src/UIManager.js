@@ -439,6 +439,13 @@ export class UIManager {
     this.rollSalvageView = document.getElementById('roll-salvage-view');
     this.busterLabView = document.getElementById('buster-lab-view');
     this.busterLabWarning = document.getElementById('buster-lab-warning');
+    this.busterLabPersistence = document.getElementById('buster-lab-persistence');
+    this.busterStorageStatus = document.getElementById('buster-storage-status');
+    this.busterStorageMode = document.getElementById('buster-storage-mode');
+    this.busterStorageContext = document.getElementById('buster-storage-context');
+    this.busterStorageReload = document.getElementById('buster-storage-reload');
+    this.busterAdoptV1 = document.getElementById('buster-adopt-v1');
+    this.busterBlueprintImportFile = document.getElementById('buster-blueprint-import-file');
     this.busterBuyChassisButton = document.getElementById('buster-buy-chassis');
     this.busterMegaPanel = document.getElementById('buster-mega-panel');
     this.busterMegaCalibrations = document.getElementById('buster-mega-calibrations');
@@ -450,6 +457,17 @@ export class UIManager {
     this.busterModuleInventory = document.getElementById('buster-module-inventory');
     this.busterRecipeList = document.getElementById('buster-recipe-list');
     this.busterRecipeScrap = document.getElementById('buster-recipe-scrap');
+    this.busterBlueprintPanel = document.getElementById('buster-blueprint-panel');
+    this.busterBlueprintSelect = document.getElementById('buster-blueprint-select');
+    this.busterBlueprintCount = document.getElementById('buster-blueprint-count');
+    this.busterBlueprintStatus = document.getElementById('buster-blueprint-status');
+    this.busterMaterializationSuggestion = document.getElementById('buster-materialization-suggestion');
+    this.busterMaterializeConfirm = document.getElementById('buster-materialize-confirm');
+    this.busterMaterializeTarget = document.getElementById('buster-materialize-target');
+    this.busterTestSandboxButton = document.getElementById('buster-test-sandbox');
+    this.busterBenchmarkPanel = document.getElementById('buster-benchmark-panel');
+    this.busterBenchmarkStatus = document.getElementById('buster-benchmark-status');
+    this.busterBenchmarkMetrics = document.getElementById('buster-benchmark-metrics');
     this.inventoryItems = document.getElementById('inventory-items');
     this.equipmentSlots = document.getElementById('equipment-slots');
     this.garageWeaponSlots = document.getElementById('garage-weapon-slots');
@@ -485,6 +503,10 @@ export class UIManager {
     this.inventoryMode = 'garage';
     this.rollWorkshopTab = 'salvage';
     this.busterLabSelectedBuildId = 'build-a';
+    this.busterLabSelectedBlueprintId = null;
+    this.busterLabReadOnly = false;
+    this.pendingBusterMaterialization = null;
+    this.busterLabActionQueue = Promise.resolve();
     this.lastScrapIdentification = null;
     this.previousHealth = null;
     this.healthDamagePulseTimer = 0;
@@ -603,7 +625,7 @@ export class UIManager {
       this.poseDebugPanel.hidden = !open;
     }
     if (this.busterDebugTabButton) {
-      this.busterDebugTabButton.hidden = !this.game.busterLabEnabled;
+      this.busterDebugTabButton.hidden = !this.game.busterLabDebugEnabled;
     }
 
     if (open) {
@@ -649,11 +671,13 @@ export class UIManager {
   _syncBusterDebugControls() {
     const view = this.game.getBusterLabViewModel?.('build-a');
     if (this.busterDebugGrantButton) {
-      this.busterDebugGrantButton.disabled = !this.game.busterLabEnabled;
+      this.busterDebugGrantButton.disabled = !this.game.busterLabDebugEnabled
+        || Boolean(view?.persistence?.readOnly ?? view?.readOnly)
+        || Boolean(this.game.busterSandboxSession?.active);
     }
     if (!this.busterDebugStatus) return;
     if (!view) {
-      this.busterDebugStatus.textContent = 'Enable ?busterLab=1 to use the Custom Buster testing kit.';
+      this.busterDebugStatus.textContent = 'Enable ?busterLab=1&busterLabDebug=1 to use the Custom Buster testing kit.';
       return;
     }
     const count = view.debugGrantCount ?? 0;
@@ -1023,6 +1047,10 @@ export class UIManager {
     const view = this.game.getBusterLabViewModel?.(this.busterLabSelectedBuildId);
     if (!view) return;
 
+    this._renderBusterPersistence(view);
+    this._renderBusterBlueprints(view);
+    this._renderBusterBenchmark(view);
+
     if (!view.build?.available && this.busterLabSelectedBuildId === 'build-b') {
       this.busterLabSelectedBuildId = 'build-a';
       return this._renderBusterLab();
@@ -1040,7 +1068,7 @@ export class UIManager {
 
     if (this.busterBuyChassisButton) {
       this.busterBuyChassisButton.hidden = Boolean(view.builds?.find((entry) => entry.buildId === 'build-b')?.available);
-      this.busterBuyChassisButton.disabled = !view.canBuySecondChassis;
+      this.busterBuyChassisButton.disabled = this.busterLabReadOnly || !view.canBuySecondChassis;
     }
     if (this.busterLabWarning) {
       this.busterLabWarning.hidden = !view.warning;
@@ -1051,6 +1079,12 @@ export class UIManager {
     }
 
     const megaSelected = selectedId === 'megaBuster';
+    const blueprintSelected = Boolean(
+      view.selectedBlueprint
+      || view.build?.kind === 'blueprint'
+      || view.build?.blueprintId,
+    );
+    const lockedBlueprint = Boolean(view.selectedBlueprint?.locked || view.selectedBlueprint?.redacted);
     if (this.busterMegaPanel) this.busterMegaPanel.hidden = !megaSelected;
     if (this.busterCustomEditor) this.busterCustomEditor.hidden = megaSelected;
     this._renderMegaBusterCalibration(view);
@@ -1059,25 +1093,245 @@ export class UIManager {
     if (!megaSelected && draft) {
       for (const input of this.busterLabView.querySelectorAll('[data-buster-tuning]')) {
         input.value = String(draft.tuning?.[input.dataset.busterTuning] ?? 1);
-        input.disabled = !view.build.available;
+        input.disabled = this.busterLabReadOnly || !view.build.available || lockedBlueprint;
       }
       if (this.busterTuningRemaining) {
         const remaining = view.tuningRemaining ?? (16 - Object.values(draft.tuning ?? {}).reduce((sum, value) => sum + Number(value || 0), 0));
         this.busterTuningRemaining.textContent = `${remaining} point${Math.abs(remaining) === 1 ? '' : 's'} remaining`;
         this.busterTuningRemaining.classList.toggle('is-invalid', remaining !== 0);
       }
-      this._renderBusterProgramControls(view);
+      this._renderBusterProgramControls({ ...view, editingLocked: lockedBlueprint });
     }
 
     this._renderBusterCompilerResult(view, megaSelected);
     this._renderBusterModuleInventory(view);
     this._renderBusterRecipes(view);
 
-    for (const button of this.busterLabView.querySelectorAll('[data-action="buster-save"], [data-action="buster-equip"], [data-action="buster-test-range"]')) {
-      if (button.dataset.action === 'buster-save') button.disabled = megaSelected || !view.canSave;
-      if (button.dataset.action === 'buster-equip') button.disabled = megaSelected || !view.canEquip;
+    for (const button of this.busterLabView.querySelectorAll('[data-action="buster-save"], [data-action="buster-equip"], [data-action="buster-test-range"], [data-action="buster-test-sandbox"]')) {
+      if (button.dataset.action === 'buster-save') button.disabled = this.busterLabReadOnly || megaSelected || blueprintSelected || !view.canSave;
+      if (button.dataset.action === 'buster-equip') button.disabled = this.busterLabReadOnly || megaSelected || blueprintSelected || !view.canEquip;
       if (button.dataset.action === 'buster-test-range') button.disabled = !view.canTest;
+      if (button.dataset.action === 'buster-test-sandbox') button.disabled = !view.canSandbox || !this.game.busterLabSandboxEnabled;
     }
+    if (this.busterTestSandboxButton) {
+      this.busterTestSandboxButton.hidden = !(view.sandboxEnabled ?? this.game.busterLabSandboxEnabled);
+    }
+  }
+
+  _renderBusterPersistence(view) {
+    const persistence = view.persistence ?? view.storage ?? {};
+    const hasStatus = Object.keys(persistence).length > 0
+      || view.readOnly !== undefined
+      || view.saveContextId !== undefined;
+    const readOnly = Boolean(persistence.readOnly ?? view.readOnly);
+    this.busterLabReadOnly = readOnly;
+
+    if (this.busterStorageStatus) this.busterStorageStatus.hidden = !hasStatus;
+    if (this.busterStorageMode) {
+      const status = persistence.status
+        ?? view.persistenceStatus
+        ?? (readOnly ? 'Read-only — durable writes unavailable' : 'Durable storage ready');
+      this.busterStorageMode.textContent = status;
+      this.busterStorageMode.classList.toggle('is-read-only', readOnly);
+    }
+    if (this.busterStorageContext) {
+      const contextId = persistence.saveContextId ?? view.saveContextId ?? null;
+      const revision = persistence.revision ?? view.storageRevision;
+      const contextLabel = contextId ? `Campaign ${String(contextId).slice(0, 12)}` : '';
+      const revisionLabel = Number.isFinite(revision) ? `revision ${revision}` : '';
+      this.busterStorageContext.textContent = [contextLabel, revisionLabel].filter(Boolean).join(' · ');
+      this.busterStorageContext.title = contextId ? `Save context: ${contextId}` : '';
+    }
+    if (this.busterLabPersistence) {
+      this.busterLabPersistence.textContent = readOnly
+        ? 'This Lab is read-only. Inspection, range testing, sandbox testing, and export remain available.'
+        : persistence.message ?? 'Workshop ownership is durably stored for this campaign context.';
+      this.busterLabPersistence.classList.toggle('is-read-only', readOnly);
+    }
+    if (this.busterStorageReload) {
+      this.busterStorageReload.hidden = !persistence.canReload || !persistence.writePaused;
+    }
+    if (this.busterAdoptV1) {
+      this.busterAdoptV1.hidden = !persistence.legacyAdoption?.eligible;
+      this.busterAdoptV1.disabled = readOnly;
+      if (persistence.legacyAdoption?.eligible) {
+        const summary = persistence.legacyAdoption.summary ?? {};
+        this.busterAdoptV1.title = `Adopt ${summary.moduleCount ?? 0} modules, ${summary.chassisCount ?? 0} chassis, and ${summary.identifiedScrap ?? 0} scrap from the untouched v1 payload.`;
+      }
+    }
+  }
+
+  _renderBusterBlueprints(view) {
+    if (!this.busterBlueprintPanel) return;
+    const supported = Object.hasOwn(view, 'blueprints')
+      || Boolean(view.blueprintSupport)
+      || Number.isFinite(view.blueprintCapacity);
+    this.busterBlueprintPanel.hidden = !supported;
+    if (!supported) return;
+
+    const blueprints = Array.isArray(view.blueprints) ? view.blueprints : [];
+    const capacity = Math.max(1, Number(view.blueprintCapacity) || 8);
+    const requestedSelection = view.selectedBlueprint?.blueprintId
+      ?? view.selectedBlueprint?.buildId
+      ?? view.selectedBlueprintId
+      ?? this.busterLabSelectedBlueprintId
+      ?? '';
+    const selected = blueprints.some((entry) => (
+      (entry.blueprintId ?? entry.buildId) === requestedSelection
+    )) ? requestedSelection : '';
+    this.busterLabSelectedBlueprintId = selected || null;
+
+    if (this.busterBlueprintCount) {
+      this.busterBlueprintCount.textContent = `${blueprints.length} / ${capacity}`;
+      this.busterBlueprintCount.classList.toggle('is-invalid', blueprints.length > capacity);
+    }
+    if (this.busterBlueprintSelect) {
+      const emptyOption = document.createElement('option');
+      emptyOption.value = '';
+      emptyOption.textContent = blueprints.length ? 'Choose blueprint' : 'No blueprints saved';
+      this.busterBlueprintSelect.replaceChildren(emptyOption, ...blueprints.map((blueprint, index) => {
+        const option = document.createElement('option');
+        option.value = blueprint.blueprintId ?? blueprint.buildId ?? '';
+        option.textContent = `${blueprint.name ?? blueprint.label ?? `Blueprint ${index + 1}`}${blueprint.invalid ? ' · invalid' : ''}`;
+        return option;
+      }));
+      this.busterBlueprintSelect.value = selected;
+    }
+
+    const selectedBlueprint = view.selectedBlueprint
+      ?? blueprints.find((entry) => (entry.blueprintId ?? entry.buildId) === selected)
+      ?? null;
+    if (this.busterMaterializeTarget) {
+      const availableBuilds = (view.builds ?? []).filter((build) => build.available);
+      const currentTarget = this.busterMaterializeTarget.value;
+      this.busterMaterializeTarget.replaceChildren(...availableBuilds.map((build) => {
+        const option = document.createElement('option');
+        option.value = build.buildId;
+        option.textContent = build.label ?? build.buildId;
+        return option;
+      }));
+      if (availableBuilds.some((build) => build.buildId === currentTarget)) {
+        this.busterMaterializeTarget.value = currentTarget;
+      }
+      this.busterMaterializeTarget.disabled = this.busterLabReadOnly || !selectedBlueprint;
+    }
+    const locked = Boolean(selectedBlueprint?.locked || selectedBlueprint?.redacted);
+    if (this.busterBlueprintStatus) {
+      this.busterBlueprintStatus.textContent = selectedBlueprint
+        ? locked
+          ? 'This imported design is locked and redacted until its known modules are discovered.'
+          : selectedBlueprint.materializedBuildId
+            ? `Materialized as ${selectedBlueprint.materializedBuildId}.`
+            : 'Ownership-free design: simulation is available; production equip requires materialization.'
+        : 'Create a blueprint from the current program, or select an existing design.';
+    }
+
+    for (const button of this.busterBlueprintPanel.querySelectorAll('button[data-action]')) {
+      const action = button.dataset.action;
+      if (action === 'buster-blueprint-new') button.disabled = this.busterLabReadOnly || blueprints.length >= capacity;
+      if (action === 'buster-blueprint-save') button.disabled = this.busterLabReadOnly || !selectedBlueprint;
+      if (action === 'buster-blueprint-delete') button.disabled = this.busterLabReadOnly || !selectedBlueprint;
+      if (action === 'buster-materialize-suggest') {
+        button.disabled = this.busterLabReadOnly || !selectedBlueprint || locked || view.canSuggestMaterialization === false;
+      }
+    }
+
+    const suggestion = view.materializationSuggestion ?? this.pendingBusterMaterialization;
+    this._renderBusterMaterializationSuggestion(suggestion);
+  }
+
+  _renderBusterMaterializationSuggestion(suggestion) {
+    if (!this.busterMaterializationSuggestion || !this.busterMaterializeConfirm) return;
+    this.busterMaterializationSuggestion.hidden = !suggestion;
+    this.busterMaterializeConfirm.hidden = !suggestion;
+    if (!suggestion) {
+      this.busterMaterializationSuggestion.replaceChildren();
+      return;
+    }
+
+    const heading = document.createElement('strong');
+    heading.textContent = suggestion.title ?? 'Revision-bound materialization plan';
+    const detail = document.createElement('p');
+    detail.textContent = suggestion.message
+      ?? `This suggestion is bound to revision ${suggestion.expectedRevision ?? suggestion.revision ?? 'current'}.`;
+    const requests = suggestion.requests ?? suggestion.missingModules ?? [];
+    const list = document.createElement('div');
+    list.className = 'buster-materialization-routes';
+    for (const request of requests) {
+      const row = document.createElement('label');
+      const name = document.createElement('span');
+      const fullyDiscovered = request.fullyDiscovered !== false && !request.redacted;
+      name.textContent = fullyDiscovered
+        ? request.name ?? request.moduleName ?? request.moduleId ?? 'Required module'
+        : request.roleClue ?? request.hint ?? 'Unidentified required component';
+      row.appendChild(name);
+      const routes = fullyDiscovered ? request.routes ?? [] : [];
+      if (routes.length > 0) {
+        const select = document.createElement('select');
+        select.dataset.busterMaterializationModule = request.requestId ?? request.moduleId ?? '';
+        select.setAttribute('aria-label', `Fabrication route for ${name.textContent}`);
+        select.replaceChildren(...routes.map((route) => {
+          const option = document.createElement('option');
+          option.value = route.routeId ?? route.id ?? route.type ?? '';
+          option.textContent = route.label ?? route.name ?? 'Fabrication route';
+          option.disabled = route.affordable === false;
+          return option;
+        }));
+        row.appendChild(select);
+      } else {
+        const clue = document.createElement('small');
+        clue.textContent = fullyDiscovered
+          ? request.message ?? 'No affordable route is currently available.'
+          : 'Exact requirements remain hidden until normal recipe discovery is complete.';
+        row.appendChild(clue);
+      }
+      list.appendChild(row);
+    }
+    this.busterMaterializationSuggestion.replaceChildren(heading, detail, list);
+    this.busterMaterializeConfirm.disabled = this.busterLabReadOnly
+      || suggestion.canConfirm === false
+      || requests.some((request) => request.redacted || request.fullyDiscovered === false);
+  }
+
+  _renderBusterBenchmark(view) {
+    if (!this.busterBenchmarkPanel) return;
+    const benchmark = view.benchmarkRange ?? view.benchmark ?? null;
+    this.busterBenchmarkPanel.hidden = !benchmark;
+    if (!benchmark) return;
+    const config = benchmark.config ?? benchmark.options ?? {};
+    for (const select of this.busterBenchmarkPanel.querySelectorAll('[data-buster-benchmark]')) {
+      const key = select.dataset.busterBenchmark;
+      if (config[key] !== undefined) select.value = String(config[key]);
+      select.disabled = benchmark.configurable === false;
+    }
+    if (this.busterBenchmarkStatus) {
+      this.busterBenchmarkStatus.textContent = benchmark.status ?? (benchmark.running ? 'Running' : 'Ready');
+    }
+    if (!this.busterBenchmarkMetrics) return;
+    const metrics = benchmark.metrics ?? {};
+    const definitions = [
+      ['Delivered PWR', metrics.deliveredPower],
+      ['Mitigated', metrics.mitigation ?? metrics.mitigatedPower],
+      ['Opening mag', metrics.openingMagazine ?? metrics.openingPower],
+      ['Recovery', metrics.recoveryTime],
+      ['10s output', metrics.output10s],
+      ['30s output', metrics.output30s],
+      ['Occupancy', metrics.occupancy ?? metrics.peakOccupancy],
+      ['Weak point', metrics.weakPointResult ?? metrics.weakPointPower],
+      ['Stagger', metrics.stagger ?? metrics.controlTime],
+      ['Misses', metrics.misses],
+      ['TTK / clear', metrics.ttk ?? metrics.clearTime],
+    ].filter(([, value]) => value !== undefined && value !== null);
+    this.busterBenchmarkMetrics.replaceChildren(...definitions.map(([label, value]) => {
+      const card = document.createElement('div');
+      card.className = 'buster-result-stat';
+      const labelNode = document.createElement('span');
+      labelNode.textContent = label;
+      const valueNode = document.createElement('strong');
+      valueNode.textContent = typeof value === 'number' ? String(Number(value.toFixed(2))) : String(value);
+      card.append(labelNode, valueNode);
+      return card;
+    }));
   }
 
   _renderBusterProgramControls(view) {
@@ -1091,7 +1345,7 @@ export class UIManager {
       trigger: [
         { value: '', label: 'None (direct)' },
         { value: 'atApex', label: 'At Apex' },
-        { value: 'onImpact', label: 'On Impact' },
+        { value: 'onImpact', label: 'Terminal Relay' },
         { value: 'afterDelay', label: 'After 0.60s' },
       ],
       childModifier: [{ value: '', label: 'None' }, { value: 'pursuitGuidance', label: 'Pursuit Guidance' }],
@@ -1112,19 +1366,34 @@ export class UIManager {
       select.replaceChildren(...options.map((option) => {
         const element = document.createElement('option');
         element.value = option.value ?? option.moduleId ?? '';
-        element.textContent = option.label ?? option.name ?? option.moduleId ?? 'None';
+        element.textContent = element.value === 'onImpact'
+          ? 'Terminal Relay'
+          : option.label ?? option.name ?? option.moduleId ?? 'None';
         element.disabled = Boolean(option.disabled);
         return element;
       }));
       select.value = selections[slot] ?? '';
-      select.disabled = !view.build?.available;
+      select.disabled = this.busterLabReadOnly || !view.build?.available || view.editingLocked;
     }
     if (this.busterProgramCapacity) {
-      this.busterProgramCapacity.textContent = `${view.nodeCount ?? view.build?.draft?.program?.nodes?.length ?? 0} / 5 nodes`;
+      const used = view.semanticCapacity?.used
+        ?? view.capacity?.used
+        ?? view.nodeCount
+        ?? view.build?.draft?.program?.nodes?.length
+        ?? 0;
+      const maximum = view.semanticCapacity?.maximum ?? view.capacity?.maximum ?? 5;
+      this.busterProgramCapacity.textContent = `${used} / ${maximum} capacity`;
     }
   }
 
   _renderBusterCompilerResult(view, megaSelected) {
+    if (!megaSelected && (view.selectedBlueprint?.locked || view.selectedBlueprint?.redacted)) {
+      if (this.busterCompilerResult) {
+        this.busterCompilerResult.innerHTML = '<p class="buster-redacted">Compiler preview redacted until normal recipe discovery reveals every known module. Full-catalog sandbox execution remains available.</p>';
+      }
+      if (this.busterValidationErrors) this.busterValidationErrors.replaceChildren();
+      return;
+    }
     const result = megaSelected ? view.mega?.result : view.result;
     const stats = result?.stats ?? result ?? null;
     if (this.busterCompilerResult) {
@@ -1133,21 +1402,33 @@ export class UIManager {
           ? `After ${Number(result.trigger.delay ?? 0).toFixed(2)}s`
           : result.trigger.event === 'apex'
             ? 'At ballistic apex'
-            : 'On impact / range end'
+            : 'Terminal Relay (contact / expiry)'
         : 'Direct';
+      const rawMultiplier = Number(
+        result?.ledger?.power?.rawMultiplier
+        ?? result?.ledger?.power?.rawEffectiveMultiplier
+        ?? result?.powerLedger?.rawMultiplier
+        ?? 0,
+      );
+      const capClipped = Number(result?.ledger?.power?.capClipped ?? result?.softCap?.compression ?? 0);
+      const softCapActive = result?.softCap?.active === true || rawMultiplier > 1.25 || capClipped > 0;
       const entries = stats ? [
         ['Base PWR', stats.basePower],
         ['Effective', stats.effectivePower],
-        ['Cap clipped', result?.ledger?.power?.capClipped ?? 0],
         ['Per child', stats.perChildPower],
         ['Projectiles', stats.projectileCount ?? result?.projectileCount],
         ['Energy cost', stats.energyCost],
-        ['Shots / charge', stats.shotsPerCharge],
+        ['Shots / magazine', stats.shotsPerMagazine ?? stats.shotsPerCharge],
         ['Rapid', stats.finalRapid],
         ['Root range', stats.rootRange],
         ['Child range', stats.childRange],
         ['Trigger', triggerBehavior],
         ['Reservation', result?.peakProjectileReservation ?? stats.peakProjectileReservation],
+        ['Occupancy', result?.occupancyEstimate ?? stats.occupancyEstimate],
+        ...(softCapActive ? [
+          ['Raw multiplier', rawMultiplier || result?.softCap?.rawMultiplier],
+          ['Soft-cap compression', capClipped || result?.softCap?.compression],
+        ] : []),
       ] : [];
       this.busterCompilerResult.replaceChildren(...entries.map(([label, value]) => {
         const card = document.createElement('div');
@@ -1168,10 +1449,18 @@ export class UIManager {
 
     if (this.busterValidationErrors) {
       const errors = megaSelected ? [] : view.validation?.errors ?? [];
-      this.busterValidationErrors.replaceChildren(...errors.map((error) => {
+      const warnings = megaSelected ? result?.warnings ?? [] : [
+        ...(view.validation?.warnings ?? []),
+        ...(result?.warnings ?? []),
+      ];
+      this.busterValidationErrors.replaceChildren(...[
+        ...errors.map((error) => ({ ...error, severity: 'error' })),
+        ...warnings.map((warning) => ({ ...warning, severity: 'warning' })),
+      ].map((error) => {
         const item = document.createElement('li');
         item.textContent = error.message ?? error.code ?? 'Invalid program';
         item.title = error.path ?? '';
+        item.classList.toggle('is-warning', error.severity === 'warning');
         return item;
       }));
     }
@@ -1200,7 +1489,15 @@ export class UIManager {
 
   _renderBusterRecipes(view) {
     if (!this.busterRecipeList) return;
-    this.busterRecipeList.replaceChildren(...(view.recipes ?? []).map((recipe) => {
+    const visibleRecipes = (view.recipes ?? []).filter((recipe) => (
+      !recipe.hidden
+      && !recipe.legacyOnly
+      && recipe.moduleId !== 'afterDelay'
+      && recipe.recipeId !== 'afterDelay'
+      && recipe.id !== 'afterDelay'
+      && recipe.legacyModuleId !== 'afterDelay'
+    ));
+    this.busterRecipeList.replaceChildren(...visibleRecipes.map((recipe) => {
       const card = document.createElement('article');
       const state = recipe.discoveryState ?? recipe.state ?? 'unknown';
       card.className = `buster-recipe-card${state === 'unknown' ? ' is-unknown' : ''}`;
@@ -1208,14 +1505,46 @@ export class UIManager {
         card.innerHTML = '<strong>Unknown module</strong><span>Silhouette — identify a compatible Reaverbot part.</span>';
         return card;
       }
+      const isPartial = state === 'hinted' || state === 'partial' || state === 'clue';
       const ingredients = recipe.ingredientsLabel
         ?? Object.entries(recipe.parts ?? recipe.requirements ?? {}).map(([id, count]) => `${id} ×${count}`).join(' + ');
-      card.innerHTML = `
-        <strong>${recipe.name ?? recipe.moduleId}</strong>
-        <span>${recipe.function ?? recipe.description ?? ''}</span>
-        ${state === 'hinted' ? `<small class="buster-recipe-clue">${recipe.hint ?? recipe.rollLine ?? ''}</small>` : `<small>${ingredients} · ${recipe.scrapCost ?? 0} scrap</small>`}
-        <button type="button" data-action="buster-fabricate" data-module-id="${recipe.moduleId}" ${!recipe.canFabricate ? 'disabled' : ''}>Fabricate copy</button>
-      `;
+      const title = document.createElement('strong');
+      title.textContent = recipe.name ?? recipe.moduleId;
+      const description = document.createElement('span');
+      description.textContent = recipe.function ?? recipe.description ?? '';
+      const details = document.createElement('small');
+      details.className = isPartial ? 'buster-recipe-clue' : '';
+      details.textContent = isPartial
+        ? recipe.hint ?? recipe.rollLine ?? ''
+        : `${ingredients} · ${recipe.scrapCost ?? 0} scrap`;
+      card.append(title, description, details);
+
+      if (!isPartial) {
+        const routes = recipe.routes ?? recipe.fabricationRoutes ?? null;
+        if (Array.isArray(routes) && routes.length > 0) {
+          const routeGroup = document.createElement('div');
+          routeGroup.className = 'buster-recipe-routes';
+          for (const route of routes) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.dataset.action = 'buster-fabricate';
+            button.dataset.moduleId = recipe.moduleId;
+            button.dataset.routeId = route.routeId ?? route.id ?? route.type ?? '';
+            button.textContent = route.label ?? route.name ?? 'Fabricate copy';
+            button.disabled = this.busterLabReadOnly || route.affordable === false || route.available === false;
+            routeGroup.appendChild(button);
+          }
+          card.appendChild(routeGroup);
+        } else {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.dataset.action = 'buster-fabricate';
+          button.dataset.moduleId = recipe.moduleId;
+          button.textContent = 'Fabricate copy';
+          button.disabled = this.busterLabReadOnly || !recipe.canFabricate;
+          card.appendChild(button);
+        }
+      }
       return card;
     }));
   }
@@ -1231,6 +1560,7 @@ export class UIManager {
       title.textContent = `Socket ${slotIndex + 1}`;
       const select = document.createElement('select');
       select.dataset.busterCalibrationSlot = String(slotIndex);
+      select.disabled = this.busterLabReadOnly;
       const options = [{ instanceId: '', name: 'Empty' }, ...available];
       select.replaceChildren(...options.map((entry) => {
         const option = document.createElement('option');
@@ -1535,6 +1865,9 @@ export class UIManager {
       const readyClass = {
         EMPTY: 'is-empty',
         NO_ENERGY: 'is-no-energy',
+        ENERGY: 'is-no-energy',
+        RECOVERY: 'is-recovery',
+        CYCLE: 'is-cooldown',
         LOW_OUTPUT: 'is-low-output',
         BOTH_ENERGY_AND_OUTPUT: 'is-no-energy is-low-output',
         COOLDOWN: 'is-cooldown',
@@ -1577,12 +1910,14 @@ export class UIManager {
         this.weaponOutputFill.style.height = '0%';
       }
       this.energyValue.textContent = 'E 0/0 O 0%';
-      this.weaponGauge?.classList.remove('is-warning');
+      this.weaponGauge?.classList.remove('is-warning', 'is-cycle', 'is-energy-blocked', 'is-recovery');
+      if (this.weaponGauge) this.weaponGauge.dataset.resourceState = '';
       this.weaponEnergyTrack?.classList.remove('is-energy-warning');
       this.weaponOutputTrack?.classList.remove('is-output-warning');
       this._renderWeaponModeIndicator(null);
       if (this.weaponStatus) {
         this.weaponStatus.textContent = 'No active arm telemetry';
+        this.weaponStatus.dataset.resourceState = '';
       }
       this.weaponStats?.replaceChildren();
       return;
@@ -1592,23 +1927,52 @@ export class UIManager {
     const outputPercent = Math.round((data.outputPercent ?? 1) * 100);
     const lowEnergy = data.energyPercent <= 0.2;
     const lowOutput = !data.singleGauge && (data.outputPercent ?? 1) <= 0.2;
+    const shotCost = Number(data.energyCost ?? data.shotCost ?? data.energyPerShot ?? 0);
+    const shotsRemaining = Number.isFinite(data.shotsRemaining)
+      ? Math.max(0, Math.floor(data.shotsRemaining))
+      : shotCost > 0
+        ? Math.max(0, Math.floor((Number(data.energy) || 0) / shotCost))
+        : null;
+    const shotsPerMagazine = Number.isFinite(data.shotsPerMagazine)
+      ? Math.max(0, Math.floor(data.shotsPerMagazine))
+      : shotCost > 0
+        ? Math.max(0, Math.floor((Number(data.maxEnergy) || 0) / shotCost))
+        : null;
+    const explicitState = String(data.resourceState ?? data.busterState ?? '').toUpperCase();
+    const blockReason = String(data.cannotFireReason ?? data.blockReason ?? '').toUpperCase();
+    const busterResourceState = data.unifiedBuster
+      ? data.recoveryLocked || explicitState === 'RECOVERY' || blockReason === 'RECOVERY'
+        ? 'RECOVERY'
+        : data.cycleRemaining > 0 || data.cooldownState || explicitState === 'CYCLE' || blockReason === 'CYCLE'
+          ? 'CYCLE'
+          : blockReason === 'ENERGY' || blockReason === 'NO_ENERGY'
+            ? 'ENERGY'
+            : 'READY'
+      : null;
 
     this.weaponGauge?.classList.toggle('is-single-gauge', Boolean(data.singleGauge));
+    this.weaponGauge?.classList.toggle('is-cycle', busterResourceState === 'CYCLE');
+    this.weaponGauge?.classList.toggle('is-energy-blocked', busterResourceState === 'ENERGY');
+    this.weaponGauge?.classList.toggle('is-recovery', busterResourceState === 'RECOVERY');
+    if (this.weaponGauge) this.weaponGauge.dataset.resourceState = busterResourceState ?? '';
 
     this.weaponEnergyFill.style.height = `${energyPercent}%`;
     if (this.weaponOutputFill) {
       this.weaponOutputFill.style.height = `${outputPercent}%`;
     }
     this.energyValue.textContent = data.singleGauge
-      ? `BAT ${Math.floor(data.energy)}/${Math.round(data.maxEnergy)}`
+      ? `BAT ${Math.floor(data.energy)}/${Math.round(data.maxEnergy)}${shotsRemaining !== null ? ` · ${shotsRemaining}/${shotsPerMagazine} shots` : ''}`
       : `E ${Math.floor(data.energy)}/${Math.round(data.maxEnergy)} O ${outputPercent}%`;
-    this.weaponGauge?.classList.toggle('is-warning', lowEnergy || lowOutput || data.reloadState || data.overheatState);
+    this.weaponGauge?.classList.toggle('is-warning', lowEnergy || lowOutput || data.reloadState || data.overheatState || busterResourceState === 'RECOVERY');
     this.weaponEnergyTrack?.classList.toggle('is-energy-warning', Boolean(data.energyWarning));
     this.weaponOutputTrack?.classList.toggle('is-output-warning', Boolean(data.outputWarning));
     this._renderWeaponModeIndicator(data.modeIndicator);
     if (this.weaponStatus) {
-      this.weaponStatus.textContent = `${data.mode}: ${data.status}`;
+      this.weaponStatus.textContent = data.unifiedBuster
+        ? `${data.mode}: ${busterResourceState}`
+        : `${data.mode}: ${data.status}`;
       this.weaponStatus.style.borderColor = data.color;
+      this.weaponStatus.dataset.resourceState = busterResourceState ?? '';
     }
 
     const chips = [
@@ -1616,6 +1980,7 @@ export class UIManager {
       ['ENG', data.stats.energy],
       ['RNG', data.stats.range],
       ['RPD', data.stats.rapid],
+      ...(data.unifiedBuster && shotsPerMagazine !== null ? [['MAG', shotsPerMagazine]] : []),
     ];
 
     this.weaponStats?.replaceChildren(...chips.map(([label, value]) => {
@@ -1771,7 +2136,8 @@ export class UIManager {
       const item = this.game.player.busterUpgradeSlots[i];
       const card = document.createElement('button');
       card.className = `garage-weapon-card garage-buster-upgrade${item ? '' : ' is-empty'}`;
-      card.dataset.action = 'empty';
+      card.dataset.action = item ? 'unassign-buster-upgrade' : 'empty';
+      card.dataset.slotIndex = String(i);
 
       if (!item) {
         card.innerHTML = `
@@ -2085,8 +2451,25 @@ export class UIManager {
 
   _renderInventoryItems() {
     this.inventoryItems.innerHTML = '';
+    const recoveryItems = this.game.busterMigrationRecovery ?? [];
+    if (recoveryItems.length > 0) {
+      const recovery = document.createElement('section');
+      recovery.className = 'migration-recovery';
+      recovery.innerHTML = `
+        <strong>Roll's Migration Recovery</strong>
+        <span>${recoveryItems.length} authoritative item${recoveryItems.length === 1 ? '' : 's'} waiting for inventory space.</span>
+        <div class="migration-recovery-items">
+          ${recoveryItems.map((item, index) => `
+            <button type="button" data-action="recover-migration-item" data-recovery-index="${index}">
+              Recover ${item.name}
+            </button>
+          `).join('')}
+        </div>
+      `;
+      this.inventoryItems.appendChild(recovery);
+    }
 
-    if (this.game.inventory.items.length === 0) {
+    if (this.game.inventory.items.length === 0 && recoveryItems.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'inventory-empty';
       empty.textContent = 'No salvage';
@@ -2197,6 +2580,68 @@ export class UIManager {
         `).join('')}
       </div>
     `;
+  }
+
+  _runBusterLabAction(action, {
+    successMessage = 'Buster Lab updated',
+    failureMessage = 'Buster Lab action failed',
+    render = true,
+    onSuccess = null,
+  } = {}) {
+    const execute = async () => {
+      let pending;
+      try {
+        pending = action?.();
+      } catch (error) {
+        this.showToast(error?.message ?? failureMessage, '#ff9f73');
+        return { ok: false, error };
+      }
+      try {
+        const result = await pending;
+        const ok = result?.ok !== false && result !== undefined && result !== null;
+        if (ok) onSuccess?.(result);
+        this.showToast(
+          result?.message ?? (ok ? successMessage : failureMessage),
+          ok ? '#7df8ff' : '#ff9f73',
+        );
+        if (render && this.game.inventoryOpen) this._renderBusterLab();
+        return result;
+      } catch (error) {
+        this.showToast(error?.message ?? failureMessage, '#ff9f73');
+        if (render && this.game.inventoryOpen) this._renderBusterLab();
+        return { ok: false, error };
+      }
+    };
+    const queued = this.busterLabActionQueue.then(execute, execute);
+    this.busterLabActionQueue = queued.catch(() => null);
+    return queued;
+  }
+
+  _renderBusterAfterMaybeAsync(result) {
+    if (result?.then) {
+      result.then(() => this._renderBusterLab()).catch((error) => {
+        this.showToast(error?.message ?? 'The Buster Lab could not update.', '#ff9f73');
+        this._renderBusterLab();
+      });
+      return;
+    }
+    this._renderBusterLab();
+  }
+
+  _downloadJson(payload, filename = 'buster-lab-export.json') {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  _getBusterMaterializationRouteChoices() {
+    return Object.fromEntries([...this.busterMaterializationSuggestion?.querySelectorAll(
+      '[data-buster-materialization-module]',
+    ) ?? []].map((select) => [select.dataset.busterMaterializationModule, select.value]));
   }
 
   _bindEvents() {
@@ -2350,11 +2795,14 @@ export class UIManager {
         this._syncPlatformDebugControls();
         this.showToast(`${removed} debug block${removed === 1 ? '' : 's'} cleared`);
       } else if (action === 'buster-debug-grant') {
-        const result = this.game.grantBusterLabDebugKit?.();
-        this._syncBusterDebugControls();
-        this.showToast(
-          result?.message ?? (result?.ok ? 'Custom Buster test kit granted' : 'Unable to grant Buster test kit'),
-          result?.ok ? '#7df8ff' : '#ff9f73',
+        this._runBusterLabAction(
+          () => this.game.grantBusterLabDebugKit?.(),
+          {
+            successMessage: 'Custom Buster test kit granted',
+            failureMessage: 'Unable to grant Buster test kit',
+            render: false,
+            onSuccess: () => this._syncBusterDebugControls(),
+          },
         );
       }
     });
@@ -2364,36 +2812,82 @@ export class UIManager {
     });
 
     this.inventoryPanel.addEventListener('change', (event) => {
+      if (event.target === this.busterBlueprintImportFile) {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        file.text().then((text) => this._runBusterLabAction(
+          () => this.game.importBusterBlueprint?.(text),
+          {
+            successMessage: 'Blueprint imported',
+            failureMessage: 'Blueprint import failed',
+            onSuccess: (result) => {
+              const id = result.blueprintId ?? result.blueprint?.blueprintId;
+              if (id) {
+                this.busterLabSelectedBlueprintId = id;
+                this.busterLabSelectedBuildId = id;
+              }
+            },
+          },
+        )).catch((error) => this.showToast(error.message, '#ff9f73'));
+        event.target.value = '';
+        return;
+      }
       const tuning = event.target.closest('[data-buster-tuning]');
       if (tuning) {
-        this.game.updateBusterDraft?.(this.busterLabSelectedBuildId, {
+        const result = this.game.updateBusterDraft?.(this.busterLabSelectedBuildId, {
           type: 'setTuning',
           stat: tuning.dataset.busterTuning,
           value: Number(tuning.value),
         });
-        this._renderBusterLab();
+        this._renderBusterAfterMaybeAsync(result);
         return;
       }
 
       const program = event.target.closest('[data-buster-program]');
       if (program) {
-        this.game.updateBusterDraft?.(this.busterLabSelectedBuildId, {
+        const result = this.game.updateBusterDraft?.(this.busterLabSelectedBuildId, {
           type: 'setProgramSlot',
           slot: program.dataset.busterProgram,
           moduleId: program.value || null,
         });
-        this._renderBusterLab();
+        this._renderBusterAfterMaybeAsync(result);
+        return;
+      }
+
+      const blueprint = event.target.closest('[data-buster-blueprint-select]');
+      if (blueprint) {
+        this.busterLabSelectedBlueprintId = blueprint.value || null;
+        this.busterLabSelectedBuildId = blueprint.value || 'build-a';
+        const result = this.game.selectBusterBlueprint?.(blueprint.value || null);
+        this._renderBusterAfterMaybeAsync(result);
+        return;
+      }
+
+      const benchmark = event.target.closest('[data-buster-benchmark]');
+      if (benchmark) {
+        const key = benchmark.dataset.busterBenchmark;
+        const value = key === 'targetCount' || key === 'depthLevel'
+          ? Number(benchmark.value)
+          : benchmark.value;
+        const update = { [key]: value };
+        const result = this.game.setBusterRangeBenchmarkOptions?.(update)
+          ?? this.game.configureBusterBenchmark?.(update);
+        this._renderBusterAfterMaybeAsync(result);
         return;
       }
 
       const calibration = event.target.closest('[data-buster-calibration-slot]');
       if (calibration) {
-        const result = this.game.setMegaBusterCalibration?.(
-          Number(calibration.dataset.busterCalibrationSlot),
-          calibration.value || null,
+        this._runBusterLabAction(
+          () => this.game.setMegaBusterCalibration?.(
+            Number(calibration.dataset.busterCalibrationSlot),
+            calibration.value || null,
+          ),
+          {
+            successMessage: 'Mega Buster calibration updated',
+            failureMessage: 'Calibration could not be installed',
+          },
         );
-        if (!result?.ok) this.showToast(result?.message ?? 'Calibration could not be installed', '#ff9f73');
-        this._renderBusterLab();
       }
     });
 
@@ -2407,37 +2901,180 @@ export class UIManager {
 
       if (action === 'identify-scrap') {
         this.game.identifyReaverbotScrap?.();
+      } else if (action === 'buster-export-recovery') {
+        this._runBusterLabAction(
+          () => this.game.exportBusterRecoveryData?.(),
+          {
+            successMessage: 'Recovery copy exported',
+            failureMessage: 'Recovery export failed',
+            render: false,
+            onSuccess: (result) => this._downloadJson(result.payload, result.filename),
+          },
+        );
+      } else if (action === 'buster-export-blueprint') {
+        this._runBusterLabAction(
+          () => this.game.exportBusterBlueprint?.(this.busterLabSelectedBlueprintId),
+          {
+            successMessage: 'Blueprint exported',
+            failureMessage: 'Select a blueprint to export',
+            render: false,
+            onSuccess: (result) => this._downloadJson(result.payload, result.filename),
+          },
+        );
+      } else if (action === 'buster-import-blueprint') {
+        this.busterBlueprintImportFile?.click();
+      } else if (action === 'buster-storage-reload') {
+        this._runBusterLabAction(
+          () => this.game.reloadBusterLabDurableState?.(),
+          { successMessage: 'Durable Lab state reloaded', failureMessage: 'Lab reload failed' },
+        );
+      } else if (action === 'buster-adopt-v1') {
+        const preview = this.game.getLegacyBusterAdoptionPreview?.();
+        if (preview?.eligible && globalThis.confirm?.('Adopt the untouched legacy v1 Lab payload into this campaign? The source will be retained.')) {
+          this._runBusterLabAction(
+            () => this.game.adoptLegacyBusterLab?.(),
+            { successMessage: 'Legacy Lab data adopted', failureMessage: 'Legacy adoption failed' },
+          );
+        }
+      } else if (action === 'buster-new-campaign') {
+        if (globalThis.confirm?.('Start a new campaign? This rotates the save context and resets this prototype run. The previous Lab payload remains dormant for recovery.')) {
+          this._runBusterLabAction(
+            () => this.game.beginNewBusterCampaign?.(),
+            { successMessage: 'New campaign created', failureMessage: 'New campaign failed', render: false },
+          );
+        }
       } else if (action === 'roll-workshop-tab') {
         this._selectRollWorkshopTab(button.dataset.rollTab);
       } else if (action === 'buster-select-build') {
         this.busterLabSelectedBuildId = button.dataset.buildId;
+        this.busterLabSelectedBlueprintId = null;
         this._renderBusterLab();
       } else if (action === 'buster-buy-chassis') {
-        const result = this.game.purchaseSecondBusterChassis?.();
-        this.showToast(result?.message ?? (result?.ok ? 'Workshop Chassis fabricated' : 'Unable to fabricate chassis'), result?.ok ? '#7df8ff' : '#ff9f73');
-        if (result?.ok) this.busterLabSelectedBuildId = 'build-b';
-        this._renderBusterLab();
+        this._runBusterLabAction(
+          () => this.game.purchaseSecondBusterChassis?.(),
+          {
+            successMessage: 'Workshop Chassis fabricated',
+            failureMessage: 'Unable to fabricate chassis',
+            onSuccess: () => { this.busterLabSelectedBuildId = 'build-b'; },
+          },
+        );
       } else if (action === 'buster-fabricate') {
-        const result = this.game.fabricateBusterModule?.(button.dataset.moduleId);
-        this.showToast(result?.message ?? (result?.ok ? 'Module fabricated' : 'Fabrication failed'), result?.ok ? '#7df8ff' : '#ff9f73');
-        this._renderBusterLab();
+        this._runBusterLabAction(
+          () => this.game.fabricateBusterModule?.(button.dataset.moduleId, {
+            routeId: button.dataset.routeId || undefined,
+          }),
+          { successMessage: 'Module fabricated', failureMessage: 'Fabrication failed' },
+        );
       } else if (action === 'buster-save') {
-        const result = this.game.saveBusterDraft?.(this.busterLabSelectedBuildId);
-        this.showToast(result?.message ?? (result?.ok ? 'Buster revision saved' : 'Draft is invalid'), result?.ok ? '#7df8ff' : '#ff9f73');
-        this._renderBusterLab();
+        this._runBusterLabAction(
+          () => this.game.saveBusterDraft?.(this.busterLabSelectedBuildId),
+          { successMessage: 'Buster revision saved', failureMessage: 'Draft is invalid' },
+        );
       } else if (action === 'buster-equip') {
-        const result = this.game.equipCustomBuster?.(this.busterLabSelectedBuildId, Number(button.dataset.slotIndex));
-        this.showToast(result?.message ?? (result?.ok ? 'Custom Buster equipped' : 'Unable to equip Buster'), result?.ok ? '#7df8ff' : '#ff9f73');
-        this._renderBusterLab();
+        this._runBusterLabAction(
+          () => this.game.equipCustomBuster?.(this.busterLabSelectedBuildId, Number(button.dataset.slotIndex)),
+          { successMessage: 'Custom Buster equipped', failureMessage: 'Unable to equip Buster' },
+        );
       } else if (action === 'buster-test-range') {
-        const result = this.game.enterBusterTestRange?.(this.busterLabSelectedBuildId);
-        if (!result?.ok) this.showToast(result?.message ?? 'Draft cannot enter the range', '#ff9f73');
+        this._runBusterLabAction(
+          () => this.game.enterBusterTestRange?.(this.busterLabSelectedBuildId),
+          {
+            successMessage: 'Benchmark range active',
+            failureMessage: 'Draft cannot enter the range',
+            render: false,
+          },
+        );
+      } else if (action === 'buster-test-sandbox') {
+        this._runBusterLabAction(
+          () => this.game.enterBusterSandbox?.(this.busterLabSelectedBuildId),
+          {
+            successMessage: 'Disposable Buster dungeon active',
+            failureMessage: 'Draft cannot enter the sandbox dungeon',
+            render: false,
+          },
+        );
+      } else if (action === 'buster-blueprint-new') {
+        this._runBusterLabAction(
+          () => this.game.createBusterBlueprint?.(this.busterLabSelectedBuildId),
+          {
+            successMessage: 'Blueprint created',
+            failureMessage: 'Blueprint could not be created',
+            onSuccess: (result) => {
+              const id = result.blueprintId ?? result.blueprint?.blueprintId ?? result.blueprint?.buildId;
+              if (id) {
+                this.busterLabSelectedBlueprintId = id;
+                this.busterLabSelectedBuildId = id;
+              }
+            },
+          },
+        );
+      } else if (action === 'buster-blueprint-save') {
+        this._runBusterLabAction(
+          () => this.game.saveBusterBlueprint?.(this.busterLabSelectedBlueprintId),
+          { successMessage: 'Blueprint saved', failureMessage: 'Blueprint could not be saved' },
+        );
+      } else if (action === 'buster-blueprint-delete') {
+        this._runBusterLabAction(
+          () => this.game.deleteBusterBlueprint?.(this.busterLabSelectedBlueprintId),
+          {
+            successMessage: 'Blueprint deleted',
+            failureMessage: 'Blueprint could not be deleted',
+            onSuccess: () => {
+              this.busterLabSelectedBlueprintId = null;
+              this.busterLabSelectedBuildId = 'build-a';
+              this.pendingBusterMaterialization = null;
+            },
+          },
+        );
+      } else if (action === 'buster-materialize-suggest') {
+        this._runBusterLabAction(
+          () => this.game.suggestBusterMaterialization?.(
+            this.busterLabSelectedBlueprintId,
+            this.busterMaterializeTarget?.value || 'build-a',
+          ),
+          {
+            successMessage: 'Materialization plan prepared',
+            failureMessage: 'Materialization could not be planned',
+            onSuccess: (result) => {
+              this.pendingBusterMaterialization = result.suggestion ?? result.materialization ?? result;
+            },
+          },
+        );
+      } else if (action === 'buster-materialize-confirm') {
+        const suggestion = this.pendingBusterMaterialization;
+        const routes = this._getBusterMaterializationRouteChoices();
+        this._runBusterLabAction(
+          () => this.game.confirmBusterMaterialization?.({
+            suggestionId: suggestion?.suggestionId ?? suggestion?.id,
+            blueprintId: this.busterLabSelectedBlueprintId,
+            expectedRevision: suggestion?.expectedRevision ?? suggestion?.revision,
+            expectedWriteId: suggestion?.expectedWriteId,
+            routes,
+          }),
+          {
+            successMessage: 'Blueprint materialized atomically',
+            failureMessage: 'Materialization failed without consuming resources',
+            onSuccess: () => { this.pendingBusterMaterialization = null; },
+          },
+        );
       } else if (action === 'equip') {
         this._equipInventoryItem(button.dataset.itemId);
       } else if (action === 'assign-arm-slot') {
         this._assignArmWeaponToSlot(button.dataset.itemId, Number(button.dataset.slotIndex));
       } else if (action === 'assign-buster-upgrade') {
         this._assignBusterUpgradeToSlot(button.dataset.itemId, Number(button.dataset.slotIndex));
+      } else if (action === 'unassign-buster-upgrade') {
+        this._runBusterLabAction(
+          () => this.game.unassignLegacyBusterUpgrade?.(Number(button.dataset.slotIndex)),
+          {
+            successMessage: 'Buster Part returned to inventory',
+            failureMessage: 'Buster Part could not be removed',
+          },
+        );
+      } else if (action === 'recover-migration-item') {
+        const result = this.game.recoverLegacyMigrationItem?.(Number(button.dataset.recoveryIndex));
+        this.showToast(result?.message ?? 'Migration recovery unavailable', result?.ok ? '#7df8ff' : '#ff9f73');
+        this.renderInventory();
       } else if (action === 'discard') {
         this._discardInventoryItem(button.dataset.itemId);
       } else if (action === 'salvage-rarity') {
@@ -2478,7 +3115,31 @@ export class UIManager {
     this.inventoryPanel.addEventListener('mouseleave', () => this.hideTooltip());
   }
 
-  _equipInventoryItem(itemId) {
+  async _equipInventoryItem(itemId) {
+    const pendingItem = this.game.inventory.findItem(itemId);
+    if (!pendingItem) return;
+    if (isBusterUpgrade(pendingItem)) {
+      await this._assignBusterUpgradeToSlot(itemId, this._getPreferredBusterUpgradeSlot());
+      return;
+    }
+    const customSlot = isArmWeapon(pendingItem)
+      ? (isBusterArm(pendingItem)
+        ? 0
+        : isUtilityArm(pendingItem)
+          ? 3
+          : this.game.player.activeArmIndex === 1 || this.game.player.activeArmIndex === 2
+            ? this.game.player.activeArmIndex
+            : 1)
+      : null;
+    const displaced = customSlot == null ? null : this.game.player.armHotbar[customSlot];
+    const durablyDisplacedCustom = displaced?.type === 'customBusterArm';
+    if (durablyDisplacedCustom) {
+      const committed = await this.game.handleDisplacedCustomBuster?.(customSlot, displaced);
+      if (!committed) {
+        this.showToast('The arm slot change could not be saved', '#ff9f73');
+        return;
+      }
+    }
     const item = this.game.inventory.removeItem(itemId);
     if (!item) {
       return;
@@ -2502,14 +3163,25 @@ export class UIManager {
       previous = this.game.player.equipment.equip(item);
     }
 
-    if (previous && !this.game.handleDisplacedCustomBuster?.(preferredSlot, previous)) {
+    if (previous && !durablyDisplacedCustom) {
       this.game.inventory.addItem(previous);
     }
 
     this.renderInventory();
   }
 
-  _assignArmWeaponToSlot(itemId, slotIndex) {
+  async _assignArmWeaponToSlot(itemId, slotIndex) {
+    const pendingItem = this.game.inventory.findItem(itemId);
+    if (!pendingItem) return;
+    const displaced = this.game.player.armHotbar[slotIndex];
+    const durablyDisplacedCustom = displaced?.type === 'customBusterArm';
+    if (durablyDisplacedCustom) {
+      const committed = await this.game.handleDisplacedCustomBuster?.(slotIndex, displaced);
+      if (!committed) {
+        this.showToast('The arm slot change could not be saved', '#ff9f73');
+        return;
+      }
+    }
     const item = this.game.inventory.removeItem(itemId);
     if (!item) {
       return;
@@ -2521,7 +3193,7 @@ export class UIManager {
     }
 
     const previous = this.game.player.assignArmWeaponToSlot(slotIndex, item);
-    if (previous && !this.game.handleDisplacedCustomBuster?.(slotIndex, previous)) {
+    if (previous && !durablyDisplacedCustom) {
       this.game.inventory.addItem(previous);
     }
 
@@ -2530,22 +3202,14 @@ export class UIManager {
     this.renderInventory();
   }
 
-  _assignBusterUpgradeToSlot(itemId, slotIndex) {
-    const item = this.game.inventory.removeItem(itemId);
-    if (!item) {
+  async _assignBusterUpgradeToSlot(itemId, slotIndex) {
+    const item = this.game.inventory.findItem(itemId);
+    if (!item || !isBusterUpgrade(item)) return;
+    const result = await this.game.assignLegacyBusterUpgrade?.(itemId, slotIndex);
+    if (!result?.ok) {
+      this.showToast(result?.message ?? 'The Buster Part move could not be saved', '#ff9f73');
       return;
     }
-
-    if (!isBusterUpgrade(item)) {
-      this.game.inventory.addItem(item);
-      return;
-    }
-
-    const previous = this.game.player.assignBusterUpgradeToSlot(slotIndex, item);
-    if (previous) {
-      this.game.inventory.addItem(previous);
-    }
-
     this.showToast(`${item.typeLabel} installed in Buster ${slotIndex + 1}`, item.color);
     this.renderInventory();
   }
@@ -2585,36 +3249,31 @@ export class UIManager {
     this.renderInventory();
   }
 
-  _discardInventoryItem(itemId) {
-    this.game.inventory.discardItem(itemId);
+  async _discardInventoryItem(itemId) {
+    const result = await this.game.discardInventoryItem?.(itemId);
+    if (!result?.ok) this.showToast(result?.message ?? 'The item could not be discarded', '#ff9f73');
     this.renderInventory();
   }
 
-  _salvageRarity(rarity) {
-    const matches = this.game.inventory.items.filter((item) => item.rarity === rarity);
-
-    if (matches.length === 0) {
+  async _salvageRarity(rarity) {
+    const result = await this.game.salvageInventoryRarity?.(rarity);
+    if (!result?.ok) {
+      this.showToast(result?.message ?? 'Nothing was salvaged', '#ff9f73');
       return;
     }
-
-    let gained = 0;
-    for (const item of matches) {
-      const discarded = this.game.inventory.discardItem(item.id);
-      if (discarded) {
-        gained += Math.max(1, Math.floor(discarded.value * 0.35));
-      }
-    }
-
     this.hideTooltip();
-    this.showToast(`Salvaged ${matches.length} ${RARITIES[rarity]?.label ?? 'items'} for ${gained}z`);
+    this.showToast(`Salvaged ${result.count} ${RARITIES[rarity]?.label ?? 'items'} for ${result.gained}z`);
     this.renderInventory();
   }
 
-  _optimizeEquipment() {
+  async _optimizeEquipment() {
     const player = this.game.player;
     const pool = this._collectOptimizationPool();
     const usedItemIds = new Set();
     const selectedSlots = new Map();
+    const preservedCustomSlots = new Map([1, 2]
+      .map((slotIndex) => [slotIndex, player.armHotbar[slotIndex]])
+      .filter(([, item]) => item?.type === 'customBusterArm'));
 
     const takeBestForSlot = (slot) => {
       const best = pool
@@ -2627,14 +3286,16 @@ export class UIManager {
       }
     };
 
-    const buster = pool
-      .filter((item) => isBusterArm(item))
-      .sort(compareByPower)
-      [0] ?? player.armHotbar[0] ?? null;
+    const buster = this.game.busterLabEnabled
+      ? player.armHotbar[0] ?? null
+      : pool
+        .filter((item) => isBusterArm(item))
+        .sort(compareByPower)
+        [0] ?? player.armHotbar[0] ?? null;
     const armLoadout = pool
       .filter((item) => isCombatArm(item))
       .sort(compareByPower)
-      .slice(0, 2);
+      .slice(0, 2 - preservedCustomSlots.size);
     const utilityLoadout = pool
       .filter((item) => isUtilityArm(item))
       .sort(compareByPower);
@@ -2662,12 +3323,19 @@ export class UIManager {
       }
     }
 
-    for (const slotIndex of [1, 2]) {
-      const current = player.armHotbar[slotIndex];
-      this.game.handleDisplacedCustomBuster?.(slotIndex, current, 'loadoutOptimized');
+    if (!this.game.busterLabEnabled) {
+      const committed = await this.game.commitLegacyBusterOptimization?.(busterUpgrades);
+      if (!committed?.ok) {
+        this.showToast(committed?.message ?? 'Optimize could not be saved', '#ff9f73');
+        return;
+      }
     }
     player.equipment.clear();
-    player.setArmHotbar([buster, ...armLoadout].filter(Boolean));
+    player.armHotbar[0] = buster;
+    let armIndex = 0;
+    for (const slotIndex of [1, 2]) {
+      player.armHotbar[slotIndex] = preservedCustomSlots.get(slotIndex) ?? armLoadout[armIndex++] ?? null;
+    }
     player.setUtilityArms(utilityLoadout, true);
     player.switchArmWeapon(0, true);
     for (let i = 0; i < (player.busterUpgradeSlots?.length ?? 0); i += 1) {
@@ -2806,6 +3474,21 @@ export class UIManager {
       if (!module1) return null;
       if (!module2) return module1;
       return module1.getPowerScore() < module2.getPowerScore() ? module1 : module2;
+    }
+
+    if (isArmWeapon(item)) {
+      const sameDomain = (candidate) => {
+        if (!candidate || candidate.type === 'customBusterArm') return false;
+        if (isBusterArm(item)) return isBusterArm(candidate);
+        if (isUtilityArm(item)) return isUtilityArm(candidate);
+        return isCombatArm(candidate);
+      };
+      const comparable = [
+        ...(this.game.player.armHotbar ?? []),
+        ...(this.game.player.utilityArms ?? []),
+      ].filter(sameDomain);
+      if (comparable.length === 0) return null;
+      return comparable.sort((a, b) => getItemPower(a) - getItemPower(b))[0];
     }
 
     const slot = this.game.player.equipment.resolveSlot(item);

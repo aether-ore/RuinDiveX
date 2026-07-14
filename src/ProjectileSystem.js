@@ -17,6 +17,8 @@ const BUSTER_SHOT_TEXTURE_SIZE = 128;
 const BUSTER_SHOT_ASPECT = 1.76;
 const BUSTER_SHOT_WIDTH_SCALE = 3.8;
 const BUSTER_SHOT_ROTATION_SPEED = 1.45;
+const CONTROLLED_EVENT_EPSILON = 0.000001;
+const CONTROLLED_MAX_EVENTS_PER_FRAME = 16;
 const tempPosition = new THREE.Vector3();
 const tempDirection = new THREE.Vector3();
 const tempExplosionPosition = new THREE.Vector3();
@@ -40,6 +42,96 @@ function getProjectileCapsuleDistanceSquared(position, target, height) {
     target?.root?.position?.z ?? 0,
   );
   return position.distanceToSquared(tempPosition);
+}
+
+function getProjectileCapsuleDistanceSquaredAt(position, target, height) {
+  const radius = target?.radius ?? 0.42;
+  const root = target?.root?.position ?? target?.position ?? { x: 0, y: 0, z: 0 };
+  const bottom = (root.y ?? 0) + radius;
+  const top = Math.max(bottom, (root.y ?? 0) + height - radius);
+  const closestY = THREE.MathUtils.clamp(position.y, bottom, top);
+  const dx = position.x - (root.x ?? 0);
+  const dy = position.y - closestY;
+  const dz = position.z - (root.z ?? 0);
+  return dx * dx + dy * dy + dz * dz;
+}
+
+function findStraightCapsuleHitFraction(start, end, target, projectileRadius, height) {
+  const collisionRadius = projectileRadius + (target?.radius ?? 0.42);
+  const radiusSq = collisionRadius * collisionRadius;
+  const samplePosition = (fraction) => ({
+    x: THREE.MathUtils.lerp(start.x, end.x, fraction),
+    y: THREE.MathUtils.lerp(start.y, end.y, fraction),
+    z: THREE.MathUtils.lerp(start.z, end.z, fraction),
+  });
+  const distanceAt = (fraction) => (
+    getProjectileCapsuleDistanceSquaredAt(samplePosition(fraction), target, height)
+  );
+
+  if (distanceAt(0) <= radiusSq) return 0;
+
+  // Squared distance from a line segment to a vertical capsule is convex.
+  // Find its minimum, then binary-search the first boundary crossing.
+  let minimumLow = 0;
+  let minimumHigh = 1;
+  for (let iteration = 0; iteration < 28; iteration += 1) {
+    const third = (minimumHigh - minimumLow) / 3;
+    const left = minimumLow + third;
+    const right = minimumHigh - third;
+    if (distanceAt(left) <= distanceAt(right)) minimumHigh = right;
+    else minimumLow = left;
+  }
+  const minimum = (minimumLow + minimumHigh) * 0.5;
+  if (distanceAt(minimum) > radiusSq + CONTROLLED_EVENT_EPSILON) return null;
+
+  let low = 0;
+  let high = minimum;
+  for (let iteration = 0; iteration < 32; iteration += 1) {
+    const middle = (low + high) * 0.5;
+    if (distanceAt(middle) <= radiusSq) high = middle;
+    else low = middle;
+  }
+  return high;
+}
+
+function findSampledCapsuleHitFraction(positionAt, target, projectileRadius, height) {
+  const collisionRadius = projectileRadius + (target?.radius ?? 0.42);
+  const radiusSq = collisionRadius * collisionRadius;
+  const isInside = (fraction) => (
+    getProjectileCapsuleDistanceSquaredAt(positionAt(fraction), target, height) <= radiusSq
+  );
+  if (isInside(0)) return 0;
+
+  const steps = 64;
+  let previous = 0;
+  for (let step = 1; step <= steps; step += 1) {
+    const fraction = step / steps;
+    if (!isInside(fraction)) {
+      previous = fraction;
+      continue;
+    }
+    let low = previous;
+    let high = fraction;
+    for (let iteration = 0; iteration < 32; iteration += 1) {
+      const middle = (low + high) * 0.5;
+      if (isInside(middle)) high = middle;
+      else low = middle;
+    }
+    return high;
+  }
+  return null;
+}
+
+function chooseEarlierControlledEvent(current, candidate) {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  if (candidate.time < current.time - CONTROLLED_EVENT_EPSILON) return candidate;
+  if (Math.abs(candidate.time - current.time) <= CONTROLLED_EVENT_EPSILON) {
+    if (candidate.priority < current.priority) return candidate;
+    if (candidate.priority === current.priority
+      && String(candidate.stableId ?? '') < String(current.stableId ?? '')) return candidate;
+  }
+  return current;
 }
 
 function smoothstep(edge0, edge1, value) {
@@ -506,10 +598,12 @@ export class ProjectileSystem {
         : projectile.speed * dt;
 
       projectile.playerHitCooldown = Math.max(0, projectile.playerHitCooldown - dt);
-      projectile.remainingLifetime -= dt;
-      if (projectile.remainingLifetime <= 0) {
-        this._deactivate(i, true);
-        continue;
+      if (!projectile.controller) {
+        projectile.remainingLifetime -= dt;
+        if (projectile.remainingLifetime <= 0) {
+          this._deactivate(i, true);
+          continue;
+        }
       }
 
       if (projectile.landedMine) {
@@ -524,6 +618,14 @@ export class ProjectileSystem {
         if (projectile.mineArmed
           && projectile.mesh.position.distanceTo(this.game.player.root.position) <= projectile.mineTriggerRadius + this.game.player.radius) {
           this._deactivate(i, true);
+        }
+        continue;
+      }
+
+      if (projectile.controller) {
+        const deactivated = this._updateControlledProjectile(projectile, dt);
+        if (!deactivated && this.active.includes(projectile)) {
+          this._updateProjectileVisual(projectile, dt);
         }
         continue;
       }
@@ -619,6 +721,386 @@ export class ProjectileSystem {
         }
       }
     }
+  }
+
+  _updateControlledProjectile(projectile, dt) {
+    let remainingTime = Math.max(0, dt);
+    let processedEvents = 0;
+    this._updateHoming(projectile, remainingTime);
+
+    while (remainingTime > CONTROLLED_EVENT_EPSILON
+      && this.active.includes(projectile)
+      && processedEvents < CONTROLLED_MAX_EVENTS_PER_FRAME) {
+      processedEvents += 1;
+      const speed = Math.max(0, projectile.speed);
+      const remainingRange = Number.isFinite(projectile.range)
+        ? Math.max(0, projectile.range - projectile.distance)
+        : Infinity;
+      const timeToRange = speed > CONTROLLED_EVENT_EPSILON
+        ? remainingRange / speed
+        : Infinity;
+      const timeToDisposal = Number.isFinite(projectile.remainingLifetime)
+        ? Math.max(0, projectile.remainingLifetime)
+        : Infinity;
+      const segmentTime = Math.max(0, Math.min(remainingTime, timeToRange, timeToDisposal));
+      const previousPosition = projectile.mesh.position.clone();
+      const previousDistance = projectile.distance;
+      const previousProgress = THREE.MathUtils.clamp(
+        previousDistance / Math.max(0.001, projectile.range),
+        0,
+        1,
+      );
+      const segmentTravel = speed * segmentTime;
+      const endDistance = previousDistance + segmentTravel;
+      const endProgress = THREE.MathUtils.clamp(
+        endDistance / Math.max(0.001, projectile.range),
+        0,
+        1,
+      );
+      const endPosition = previousPosition.clone().addScaledVector(projectile.direction, segmentTravel);
+      const trajectoryOptions = projectile.arcHeight > 0
+        ? {
+          start: { x: 0, y: projectile.baseY, z: 0 },
+          end: { x: 0, y: projectile.endY, z: 0 },
+          arcHeight: projectile.arcHeight,
+        }
+        : null;
+      if (trajectoryOptions) {
+        endPosition.y = sampleBallisticPoint(trajectoryOptions, endProgress).y;
+      }
+
+      let event = null;
+      let apexProgress = null;
+      if (trajectoryOptions && !projectile.apexCrossed && endProgress + CONTROLLED_EVENT_EPSILON >= previousProgress) {
+        apexProgress = getBallisticApexProgress(trajectoryOptions);
+        if (apexProgress + CONTROLLED_EVENT_EPSILON >= previousProgress
+          && apexProgress <= endProgress + CONTROLLED_EVENT_EPSILON) {
+          const progressSpan = Math.max(CONTROLLED_EVENT_EPSILON, endProgress - previousProgress);
+          const fraction = THREE.MathUtils.clamp((apexProgress - previousProgress) / progressSpan, 0, 1);
+          event = chooseEarlierControlledEvent(event, {
+            type: 'apex',
+            time: segmentTime * fraction,
+            priority: 0,
+            stableId: 'apex',
+            apexProgress,
+          });
+        }
+      }
+
+      const positionAt = trajectoryOptions
+        ? (fraction) => {
+          const sampled = previousPosition.clone().addScaledVector(
+            projectile.direction,
+            segmentTravel * fraction,
+          );
+          const sampledProgress = THREE.MathUtils.clamp(
+            (previousDistance + segmentTravel * fraction) / Math.max(0.001, projectile.range),
+            0,
+            1,
+          );
+          sampled.y = sampleBallisticPoint(trajectoryOptions, sampledProgress).y;
+          return sampled;
+        }
+        : null;
+      const impact = this._findControlledEnemyImpact(
+        projectile,
+        previousPosition,
+        endPosition,
+        positionAt,
+      );
+      if (impact) {
+        event = chooseEarlierControlledEvent(event, {
+          ...impact,
+          type: 'impact',
+          time: segmentTime * impact.fraction,
+          priority: 1,
+          stableId: String(impact.enemy?.id ?? ''),
+        });
+      }
+      if (timeToRange <= remainingTime + CONTROLLED_EVENT_EPSILON) {
+        event = chooseEarlierControlledEvent(event, {
+          type: 'range',
+          time: Math.max(0, timeToRange),
+          priority: 2,
+          stableId: 'range',
+        });
+      }
+      if (timeToDisposal <= remainingTime + CONTROLLED_EVENT_EPSILON) {
+        event = chooseEarlierControlledEvent(event, {
+          type: 'disposal',
+          time: Math.max(0, timeToDisposal),
+          priority: 3,
+          stableId: 'disposal',
+        });
+      }
+
+      const advanceTime = event ? Math.min(segmentTime, Math.max(0, event.time)) : segmentTime;
+      const advanceFraction = segmentTime > CONTROLLED_EVENT_EPSILON
+        ? THREE.MathUtils.clamp(advanceTime / segmentTime, 0, 1)
+        : 0;
+      const advanceTravel = segmentTravel * advanceFraction;
+      const nextDistance = previousDistance + advanceTravel;
+      const nextProgress = THREE.MathUtils.clamp(
+        nextDistance / Math.max(0.001, projectile.range),
+        0,
+        1,
+      );
+      projectile.mesh.position.copy(previousPosition).addScaledVector(projectile.direction, advanceTravel);
+      if (trajectoryOptions) {
+        projectile.mesh.position.y = sampleBallisticPoint(trajectoryOptions, nextProgress).y;
+      }
+      projectile.distance = nextDistance;
+      if (Number.isFinite(projectile.remainingLifetime)) {
+        projectile.remainingLifetime = Math.max(0, projectile.remainingLifetime - advanceTime);
+      }
+
+      // onAdvance is deliberately first at an exact timestamp. A Delay handler
+      // can therefore deliver its branch before impact/range/disposal ties.
+      const advanceResult = this._notifyController(projectile, 'onAdvance', {
+        dt: advanceTime,
+        travel: advanceTravel,
+        previousDistance,
+        previousPosition,
+      });
+      if (advanceResult?.dispose) {
+        this._deactivateProjectile(
+          projectile,
+          false,
+          false,
+          advanceResult.emitEffect !== false,
+          advanceResult.reason ?? 'controller',
+        );
+        return true;
+      }
+
+      remainingTime = Math.max(0, remainingTime - advanceTime);
+      if (!event) return false;
+
+      if (event.type === 'apex') {
+        projectile.apexCrossed = true;
+        const apexResult = this._notifyController(projectile, 'onApexCrossing', {
+          progress: nextProgress,
+          apexProgress: event.apexProgress ?? apexProgress,
+          crossingAlpha: advanceFraction,
+        });
+        if (apexResult?.dispose) {
+          this._deactivateProjectile(
+            projectile,
+            false,
+            false,
+            apexResult.emitEffect !== false,
+            apexResult.reason ?? 'apex',
+          );
+          return true;
+        }
+        continue;
+      }
+
+      if (event.type === 'impact') {
+        const impactResult = this._applyControlledEnemyImpact(projectile, event);
+        if (impactResult.dispose) {
+          this._deactivateProjectile(
+            projectile,
+            false,
+            impactResult.allowCluster !== false,
+            impactResult.emitEffect !== false,
+            impactResult.reason ?? 'impact',
+          );
+          return true;
+        }
+        continue;
+      }
+
+      if (event.type === 'range') {
+        const rangeResult = this._notifyController(projectile, 'onRangeEnd', {
+          position: projectile.mesh.position,
+        });
+        if (rangeResult?.keepAlive) return false;
+        if (projectile.landAsMine) {
+          this._landMine(projectile);
+          return false;
+        }
+        this._deactivateProjectile(
+          projectile,
+          rangeResult?.suppressExpiry ? false : true,
+          rangeResult?.allowCluster !== false,
+          rangeResult?.emitEffect !== false,
+          rangeResult?.reason ?? 'rangeEnd',
+        );
+        return true;
+      }
+
+      this._deactivateProjectile(projectile, true, true, true, 'expired');
+      return true;
+    }
+
+    return !this.active.includes(projectile);
+  }
+
+  _findControlledEnemyImpact(projectile, start, end, positionAt = null) {
+    if (projectile.owner !== 'player') return null;
+    const targets = this.game.getProjectileTargets?.() ?? this.game.enemies;
+    let earliest = null;
+
+    for (const enemy of targets) {
+      if (enemy.dead || projectile.hitEnemyIds.has(enemy.id)) continue;
+      const enemyHeight = getTargetCollisionHeight(enemy);
+      const bodyFraction = positionAt
+        ? findSampledCapsuleHitFraction(positionAt, enemy, projectile.radius, enemyHeight)
+        : findStraightCapsuleHitFraction(
+          start,
+          end,
+          enemy,
+          projectile.radius,
+          enemyHeight,
+        );
+      const pathPositionAt = positionAt ?? ((value) => start.clone().lerp(end, value));
+      const resolvedImpact = this._findControlledResolvedPartImpact(
+        projectile,
+        enemy,
+        pathPositionAt,
+      );
+      const fraction = resolvedImpact && (bodyFraction == null
+        || resolvedImpact.fraction <= bodyFraction + CONTROLLED_EVENT_EPSILON)
+        ? resolvedImpact.fraction
+        : bodyFraction;
+      if (fraction == null) continue;
+      const candidateId = String(enemy.id ?? '');
+      if (earliest
+        && fraction > earliest.fraction + CONTROLLED_EVENT_EPSILON) continue;
+      if (earliest
+        && Math.abs(fraction - earliest.fraction) <= CONTROLLED_EVENT_EPSILON
+        && candidateId >= String(earliest.enemy?.id ?? '')) continue;
+
+      const position = pathPositionAt(fraction);
+      const resolvedPart = resolvedImpact
+        && Math.abs(resolvedImpact.fraction - fraction) <= CONTROLLED_EVENT_EPSILON
+        ? resolvedImpact.resolvedPart
+        : enemy.resolveProjectileHit?.(
+          position,
+          projectile.radius,
+          projectile.direction,
+        ) ?? null;
+      earliest = { enemy, resolvedPart, position, fraction };
+    }
+
+    return earliest;
+  }
+
+  _findControlledResolvedPartImpact(projectile, enemy, positionAt) {
+    if (typeof enemy?.resolveProjectileHit !== 'function') return null;
+    const resolveAt = (fraction) => enemy.resolveProjectileHit(
+      positionAt(fraction),
+      projectile.radius,
+      projectile.direction,
+    ) ?? null;
+    const atStart = resolveAt(0);
+    if (atStart) return { fraction: 0, resolvedPart: atStart };
+
+    const steps = 32;
+    let previous = 0;
+    for (let step = 1; step <= steps; step += 1) {
+      const fraction = step / steps;
+      const resolvedPart = resolveAt(fraction);
+      if (!resolvedPart) {
+        previous = fraction;
+        continue;
+      }
+      let low = previous;
+      let high = fraction;
+      let earliestPart = resolvedPart;
+      for (let iteration = 0; iteration < 24; iteration += 1) {
+        const middle = (low + high) * 0.5;
+        const middlePart = resolveAt(middle);
+        if (middlePart) {
+          high = middle;
+          earliestPart = middlePart;
+        } else {
+          low = middle;
+        }
+      }
+      return { fraction: high, resolvedPart: earliestPart };
+    }
+    return null;
+  }
+
+  _applyControlledEnemyImpact(projectile, impact) {
+    const { enemy, resolvedPart } = impact;
+    const position = projectile.mesh.position;
+    projectile.hitEnemyIds.add(enemy.id);
+    const controllerResult = this._notifyController(projectile, 'onEnemyImpact', {
+      enemy,
+      resolvedPart,
+      position,
+    });
+
+    if (!controllerResult?.suppressDefaultDamage) {
+      this.game.damageEnemy(enemy, projectile.damage, {
+        projectileHit: true,
+        enemyHitStopDuration: projectile.visualType === 'drillHead'
+          ? DRILL_PROJECTILE_ENEMY_HIT_STOP_DURATION
+          : PROJECTILE_ENEMY_HIT_STOP_DURATION,
+        critical: projectile.critical,
+        source: projectile.source,
+        element: projectile.element,
+        armorBreakChance: projectile.armorBreakChance,
+        armorPierce: projectile.armorPierce,
+        stagger: projectile.stagger,
+        statusBuildup: projectile.statusBuildup,
+        chainChance: projectile.chainChance,
+        chainDamageMultiplier: projectile.chainDamageMultiplier,
+        knockbackDirection: projectile.direction,
+        knockback: 2.1,
+        hitPartId: resolvedPart?.hitPartId ?? null,
+        weakPointHit: Boolean(resolvedPart?.weakPointHit),
+        hitPosition: resolvedPart?.hitPosition ?? position.clone(),
+        attackDomain: projectile.attackDomain,
+        ...(projectile.attackMeta ?? {}),
+      });
+    }
+
+    if (projectile.explosiveRadius > 0 && !controllerResult?.suppressDefaultExplosion) {
+      tempExplosionPosition.copy(position);
+      this.game.addExplosion(
+        tempExplosionPosition,
+        projectile.damage * 0.62,
+        projectile.explosiveRadius,
+        projectile.mesh.material.color.getHex(),
+        {
+          source: projectile.source,
+          element: projectile.element,
+          critical: projectile.critical,
+          armorBreakChance: projectile.armorBreakChance,
+          armorPierce: projectile.armorPierce,
+          statusBuildup: projectile.statusBuildup,
+          stagger: projectile.stagger,
+          enemyHitStopDuration: PROJECTILE_EXPLOSION_ENEMY_HIT_STOP_DURATION,
+          globalHitStopDuration: 0,
+          attackDomain: projectile.attackDomain,
+          ...(projectile.attackMeta ?? {}),
+        },
+      );
+    }
+
+    if (controllerResult?.keepAlive) return { dispose: false };
+    if (controllerResult?.dispose !== undefined) {
+      return {
+        dispose: Boolean(controllerResult.dispose),
+        reason: controllerResult.reason ?? 'impact',
+        allowCluster: controllerResult.allowCluster,
+        emitEffect: controllerResult.emitEffect,
+      };
+    }
+    if (projectile.pierceRemaining <= 0) return { dispose: true, reason: 'impact' };
+    projectile.pierceRemaining -= 1;
+    return { dispose: false };
+  }
+
+  _deactivateProjectile(projectile, expired = false, allowCluster = true, emitEffect = true, reason = null) {
+    const index = this.active.indexOf(projectile);
+    if (index < 0) return false;
+    this._deactivate(index, expired, allowCluster, emitEffect, reason);
+    return true;
   }
 
   clear(reason = 'worldClear') {

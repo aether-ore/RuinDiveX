@@ -92,16 +92,6 @@ export const BUSTER_RECIPES = Object.freeze({
     scrapCost: 8,
     parts: { ballisticsLogicChip: 1 },
   }),
-  afterDelay: freezeRecipe({
-    id: 'afterDelay',
-    moduleId: 'afterDelay',
-    kind: 'function',
-    name: 'After Delay',
-    silhouette: 'timed-sequencer',
-    rollClue: 'This sequencer waits before it divides a payload. I can turn that hesitation into a useful signal.',
-    scrapCost: 8,
-    parts: { clusterBurstSequencer: 1 },
-  }),
   spread3: freezeRecipe({
     id: 'spread3',
     moduleId: 'spread3',
@@ -132,6 +122,23 @@ export const BUSTER_RECIPES = Object.freeze({
     scrapCost: 10,
     parts: { volatileOverloadCell: 1 },
   }),
+});
+
+// Kept for v1 audit/migration only. After Delay is a built-in chassis
+// instruction in v0.2 and must never appear as an active fabrication route.
+export const LEGACY_AFTER_DELAY_RECIPE = freezeRecipe({
+  id: 'afterDelay',
+  moduleId: 'afterDelay',
+  kind: 'function',
+  name: 'After Delay',
+  silhouette: 'timed-sequencer',
+  rollClue: 'This sequencer waits before it divides a payload. I can turn that hesitation into a useful signal.',
+  scrapCost: 8,
+  parts: { clusterBurstSequencer: 1 },
+});
+
+export const BUSTER_LEGACY_RECIPE_CATALOG = Object.freeze({
+  afterDelay: LEGACY_AFTER_DELAY_RECIPE,
 });
 
 export const BUSTER_RECIPE_CATALOG = BUSTER_RECIPES;
@@ -218,7 +225,10 @@ export function getRecipeDiscoveryState(recipeOrId, discovery = []) {
     clue: nameVisible ? recipe.rollClue : null,
     rollClue: nameVisible ? recipe.rollClue : null,
     foundPartIds: [...foundPartIds],
-    missingPartIds: recipe.requiredPartIds.filter((partId) => !discovered.has(partId)),
+    // Never expose undiscovered ingredient identifiers through domain/view
+    // data. Partial knowledge is represented solely by Roll's authored role
+    // clue; the exact bill appears only once discovery is complete.
+    missingPartIds: exactVisible ? [] : null,
     requirements: exactVisible
       ? { identifiedScrap: recipe.scrapCost, scrap: recipe.scrapCost, parts: { ...recipe.parts } }
       : null,

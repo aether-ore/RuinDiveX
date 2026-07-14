@@ -333,6 +333,7 @@ function getDodgeRollVisualLift(progress) {
 
 export class Player {
   constructor() {
+    this.disposed = false;
     this.humanoid = new ModularHumanoid({
       skinColor: 0xc88f68,
       hairColor: 0xe3342f,
@@ -3793,7 +3794,7 @@ export class Player {
 
     Promise.all(PLAYER_FBX_ANIMATION_DEFINITIONS.map(loadClip))
       .then((loadedEntries) => {
-        if (this.externalRig !== targetRig) {
+        if (this.disposed || this.externalRig !== targetRig) {
           return;
         }
 
@@ -3817,7 +3818,32 @@ export class Player {
       });
   }
 
+  _disposeDetachedCharacterModel(model) {
+    model?.traverse?.((object) => {
+      object.geometry?.dispose?.();
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (!material) continue;
+        for (const value of Object.values(material)) {
+          if (value?.isTexture) value.dispose?.();
+        }
+        material.dispose?.();
+      }
+    });
+    model?.removeFromParent?.();
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.root?.removeFromParent?.();
+  }
+
   _useExternalCharacterModel(model, { source = 'obj' } = {}) {
+    if (this.disposed) {
+      this._disposeDetachedCharacterModel(model);
+      return;
+    }
     model.name = 'playerMegaManVolnuttModel';
     const isSkinnedModel = source === 'fbx' || this._modelHasSkinnedMesh(model);
 

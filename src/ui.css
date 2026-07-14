@@ -648,6 +648,100 @@ button:focus-visible {
   pointer-events: none;
 }
 
+.weapon-telemetry-panel {
+  display: grid;
+  width: 210px;
+  gap: 5px;
+  align-self: flex-end;
+  margin-bottom: 3px;
+  pointer-events: none;
+}
+
+.weapon-status {
+  justify-self: end;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 7px;
+  border: 1px solid rgba(166, 190, 220, 0.3);
+  border-radius: 5px;
+  color: var(--ink);
+  background: rgba(8, 15, 24, 0.82);
+  font-size: 9px;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.weapon-status[data-resource-state="CYCLE"] {
+  color: #f2c84b;
+}
+
+.weapon-status[data-resource-state="ENERGY"] {
+  color: #ff9f73;
+}
+
+.weapon-status[data-resource-state="RECOVERY"] {
+  color: #7df8ff;
+  animation: buster-recovery-pulse 720ms ease-in-out infinite alternate;
+}
+
+.weapon-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.weapon-chip {
+  min-width: 0;
+  padding: 3px 4px;
+  border: 1px solid rgba(166, 190, 220, 0.22);
+  border-radius: 4px;
+  background: rgba(8, 15, 24, 0.76);
+  text-align: center;
+}
+
+.weapon-chip span,
+.weapon-chip strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.weapon-chip span {
+  color: var(--muted);
+  font-size: 7px;
+  font-weight: 900;
+}
+
+.weapon-chip strong {
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.arm-slot.is-recovery {
+  border-color: rgba(125, 248, 255, 0.8);
+}
+
+.legends-weapon-gauge.is-cycle .gauge-track {
+  border-color: rgba(242, 200, 75, 0.54);
+}
+
+.legends-weapon-gauge.is-energy-blocked .gauge-track {
+  border-color: rgba(255, 159, 115, 0.7);
+}
+
+.legends-weapon-gauge.is-recovery .gauge-track {
+  border-color: rgba(125, 248, 255, 0.74);
+}
+
+@keyframes buster-recovery-pulse {
+  from { filter: brightness(0.9); }
+  to { filter: brightness(1.35); }
+}
+
 .weapon-hud-cluster .legends-gauge {
   position: static;
   bottom: auto;
@@ -1689,6 +1783,62 @@ button:focus-visible {
   line-height: 1.4;
 }
 
+.buster-lab-persistence.is-read-only {
+  color: #ffd19a;
+}
+
+.buster-storage-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(125, 248, 255, 0.2);
+  border-radius: 5px;
+  color: var(--muted);
+  background: rgba(125, 248, 255, 0.045);
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.buster-storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.buster-storage-actions button {
+  font-size: 0.72rem;
+  padding: 0.38rem 0.55rem;
+}
+
+.migration-recovery {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 184, 92, 0.65);
+  background: rgba(69, 38, 17, 0.55);
+}
+
+.migration-recovery-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.buster-storage-status span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.buster-storage-status .is-read-only {
+  color: #ffd19a;
+}
+
 .buster-lab-warning {
   margin: 0;
   padding: 8px 10px;
@@ -1715,6 +1865,117 @@ button:focus-visible {
   display: grid;
   grid-template-columns: minmax(220px, 0.72fr) minmax(360px, 1.28fr);
   gap: 9px;
+}
+
+.buster-blueprint-panel,
+.buster-benchmark-panel {
+  border-color: rgba(125, 248, 255, 0.28);
+  background:
+    linear-gradient(135deg, rgba(125, 248, 255, 0.055), rgba(4, 10, 16, 0.18)),
+    rgba(4, 10, 16, 0.52);
+}
+
+.buster-blueprint-controls,
+.buster-materialization-actions,
+.buster-benchmark-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: end;
+  margin-top: 8px;
+}
+
+.buster-blueprint-controls label,
+.buster-benchmark-controls label {
+  display: grid;
+  min-width: 150px;
+  flex: 1 1 150px;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.buster-blueprint-controls select,
+.buster-benchmark-controls select,
+.buster-materialization-routes select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid rgba(166, 190, 220, 0.28);
+  border-radius: 5px;
+  padding: 0 7px;
+  color: var(--ink);
+  background: rgba(4, 9, 15, 0.86);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.buster-blueprint-controls button,
+.buster-materialization-actions button {
+  min-height: 32px;
+  border-radius: 5px;
+  padding: 0 9px;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.buster-blueprint-status {
+  min-height: 16px;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.buster-materialization-suggestion {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid rgba(242, 200, 75, 0.32);
+  border-radius: 5px;
+  background: rgba(242, 200, 75, 0.045);
+}
+
+.buster-materialization-suggestion > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.buster-materialization-routes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.buster-materialization-routes label {
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid rgba(166, 190, 220, 0.17);
+  border-radius: 4px;
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.buster-materialization-routes small {
+  color: #ef7dff;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.buster-benchmark-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 8px;
 }
 
 .buster-lab-grid {
@@ -1846,6 +2107,12 @@ button:focus-visible {
   font-size: 10px;
 }
 
+.buster-validation-errors li.is-warning {
+  border-left-color: #f2c84b;
+  color: #ffe29a;
+  background: rgba(242, 200, 75, 0.07);
+}
+
 .buster-module-inventory,
 .buster-recipe-list,
 .buster-mega-calibrations {
@@ -1894,6 +2161,17 @@ button:focus-visible {
   border-radius: 5px;
   font-size: 10px;
   font-weight: 900;
+}
+
+.buster-recipe-routes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.buster-recipe-routes button {
+  margin-top: 0;
 }
 
 .buster-recipe-clue {
@@ -2714,6 +2992,14 @@ button:focus-visible {
     gap: 8px;
   }
 
+  .weapon-telemetry-panel {
+    width: 158px;
+  }
+
+  .weapon-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .arm-hotbar {
     width: 174px;
   }
@@ -2781,10 +3067,15 @@ button:focus-visible {
 
   .buster-tuning-controls,
   .buster-compiler-result,
+  .buster-benchmark-metrics,
   .buster-module-inventory,
   .buster-recipe-list,
   .buster-mega-calibrations {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .buster-materialization-routes {
+    grid-template-columns: 1fr;
   }
 
   .event-prompt {

@@ -308,6 +308,7 @@ export class LootSystem {
       object,
       kind: item.pickupKind ?? 'item',
       collected: false,
+      pendingCollection: false,
     });
     return object;
   }
@@ -356,7 +357,17 @@ export class LootSystem {
     return this.createPickup(item, position);
   }
 
-  update(dt, player, inventory) {
+  _finishPickupCollection(pickup) {
+    if (!pickup || pickup.collected) return false;
+    pickup.collected = true;
+    pickup.pendingCollection = false;
+    pickup.object.visible = false;
+    this.scene.remove(pickup.object);
+    disposePickupObject(pickup.object);
+    return true;
+  }
+
+  update(dt, player, inventory, { collectItem = null, onAsyncCollected = null } = {}) {
     const collected = [];
     const playerPosition = player.root.position;
     const pickupRadius = player.stats.pickupRadius;
@@ -384,7 +395,7 @@ export class LootSystem {
       }
 
       const distance = pickup.object.position.distanceTo(playerPosition);
-      if (distance <= pickupRadius) {
+      if (distance <= pickupRadius && !pickup.pendingCollection) {
         const accepted = pickup.kind === 'material'
           ? Boolean(inventory.addMaterial?.(
             pickup.item.material,
@@ -396,13 +407,25 @@ export class LootSystem {
               pickup.item.quantity,
               pickup.item.recovery,
             ))
-            : inventory.addItem(pickup.item);
+            : typeof collectItem === 'function'
+              ? collectItem(pickup.item)
+              : inventory.addItem(pickup.item);
+        if (accepted && typeof accepted.then === 'function') {
+          pickup.pendingCollection = true;
+          Promise.resolve(accepted).then((didAccept) => {
+            pickup.pendingCollection = false;
+            if (!didAccept || !this.pickups.includes(pickup)) return;
+            if (this._finishPickupCollection(pickup)) {
+              this.pickups = this.pickups.filter((entry) => !entry.collected);
+              onAsyncCollected?.(pickup.item);
+            }
+          }).catch(() => {
+            pickup.pendingCollection = false;
+          });
+          continue;
+        }
         if (accepted) {
-          pickup.collected = true;
-          pickup.object.visible = false;
-          this.scene.remove(pickup.object);
-          disposePickupObject(pickup.object);
-          collected.push(pickup.item);
+          if (this._finishPickupCollection(pickup)) collected.push(pickup.item);
         }
       }
     }

@@ -7,6 +7,8 @@ export * from './compiler.js';
 // pure compiler implementation above.
 export * from './BusterRecipeCatalog.js';
 export * from './BusterLabStorage.js';
+export * from './BusterLabPersistence.js';
 export * from './BusterRuntime.js';
+export * from './BusterStagger.js';
 export * from './BusterTrajectory.js';
-
+export * from './BusterBalanceGate.js';

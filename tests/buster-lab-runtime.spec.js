@@ -13,10 +13,18 @@ async function waitForGame(page) {
   await page.waitForFunction(() => Boolean(window.game?.combat && window.game?.ui));
 }
 
-test('feature flag off keeps the legacy Buster and Roll workshop path intact', async ({ page }) => {
+async function waitForRollAssets(page) {
+  await page.waitForFunction(() => {
+    const roll = window.game?.dungeon?.group?.getObjectByName('rollCaskettNpc');
+    return !roll || roll.userData?.animationAssetsSettled === true;
+  });
+}
+
+test('feature-off and feature-on share one canonical starter Power Raiser without duplication', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
   await page.goto('/?reaverbotSeed=buster-feature-off');
   await waitForGame(page);
+  await waitForRollAssets(page);
 
   const state = await page.evaluate(() => {
     const { game } = window;
@@ -28,19 +36,205 @@ test('feature flag off keeps the legacy Buster and Roll workshop path intact', a
       rollTabsHidden: document.getElementById('roll-workshop-tabs')?.hidden,
       busterDebugTabHidden: document.getElementById('buster-debug-tab')?.hidden,
       starterPowerRaisers: game.inventory.items.filter((item) => item.type === 'powerRaiser').length,
+      starterIds: game.inventory.items
+        .filter((item) => item.type === 'powerRaiser')
+        .map((item) => item.legacyBusterId ?? item.canonicalId ?? item.id),
+      shadow: game.busterLabStorage.state.legacyBusterParts.records.find((entry) => entry.starter),
       unifiedHud: Boolean(game.combat.getWeaponHudData()?.unifiedBuster),
     };
   });
 
-  expect(state).toEqual({
-    enabled: false,
-    runtime: null,
-    plan: null,
-    rollTabsHidden: true,
-    busterDebugTabHidden: true,
-    starterPowerRaisers: 1,
-    unifiedHud: false,
+  expect(state.enabled).toBe(false);
+  expect(state.runtime).toBe(null);
+  expect(state.plan).toBe(null);
+  expect(state.rollTabsHidden).toBe(true);
+  expect(state.busterDebugTabHidden).toBe(true);
+  expect(state.starterPowerRaisers).toBe(1);
+  expect(state.starterIds).toEqual([state.shadow.legacyId]);
+  expect(state.shadow.legacyType).toBe('powerRaiser');
+  expect(state.shadow.location).toEqual({ kind: 'megaSocket', socketIndex: 0 });
+  expect(state.unifiedHud).toBe(false);
+
+  await page.goto('/?busterLab=1&reaverbotSeed=buster-feature-off');
+  await waitForGame(page);
+  await waitForRollAssets(page);
+  const featureOn = await page.evaluate(() => {
+    const { game } = window;
+    const shadow = game.busterLabStorage.state.legacyBusterParts.records.find((entry) => entry.starter);
+    return {
+      starterPowerRaisers: game.inventory.items.filter((item) => item.type === 'powerRaiser').length,
+      shadowId: shadow?.legacyId,
+      linkedCalibrationId: shadow?.calibrationInstanceId,
+      socket: game.busterLabState.megaCalibrations.slots[0],
+      power: game.busterLabPlans.get('megaBuster')?.stats?.effectivePower,
+      energy: game.busterLabPlans.get('megaBuster')?.stats?.maxEnergy,
+      cost: game.busterLabPlans.get('megaBuster')?.stats?.energyCost,
+    };
   });
+  expect(featureOn.starterPowerRaisers).toBe(0);
+  expect(featureOn.shadowId).toBe(state.shadow.legacyId);
+  expect(featureOn.linkedCalibrationId).toBe(state.shadow.calibrationInstanceId);
+  expect(featureOn.socket).toBe(state.shadow.calibrationInstanceId);
+  expect(featureOn.power).toBeCloseTo(9.12, 10);
+  expect(featureOn.energy).toBe(6);
+  expect(featureOn.cost).toBe(2);
+
+  await page.goto('/?reaverbotSeed=buster-feature-off');
+  await waitForGame(page);
+  const toggledOff = await page.evaluate(() => ({
+    ids: window.game.inventory.items
+      .filter((item) => item.type === 'powerRaiser')
+      .map((item) => item.legacyBusterId ?? item.canonicalId ?? item.id),
+    recordCount: window.game.busterLabStorage.state.legacyBusterParts.records
+      .filter((entry) => entry.starter).length,
+  }));
+  expect(toggledOff).toEqual({ ids: [state.shadow.legacyId], recordCount: 1 });
+  expect(runtimeErrors).toEqual([]);
+});
+
+test('Buster Part world pickups remain live until their durable ownership commit succeeds', async ({ page }) => {
+  const runtimeErrors = collectRuntimeErrors(page);
+  await page.goto('/?busterLab=1&reaverbotSeed=buster-durable-pickup');
+  await waitForGame(page);
+
+  const result = await page.evaluate(async () => {
+    const { game } = window;
+    game.stop();
+    const storage = game.busterLabStorage;
+    const originalRegister = storage.registerLegacyBusterPartAsync;
+    const item = game.lootSystem.generateItem(1, {
+      type: 'powerRaiser',
+      rarity: 'standard',
+      name: 'Durability Probe Power Raiser',
+    });
+    const inventoryBefore = game.inventory.items.map((entry) => entry.id);
+    const recordsBefore = storage.state.legacyBusterParts.records.length;
+    const calibrationsBefore = storage.state.megaCalibrations.instances.length;
+    const persistedBefore = localStorage.getItem(storage.storageKeys.main);
+    const object = game.lootSystem.createPickup(item, game.player.root.position.clone());
+    const pickup = game.lootSystem.pickups.find((entry) => entry.item === item);
+    let settleAttempt = null;
+    let storageCalls = 0;
+    storage.registerLegacyBusterPartAsync = (..._args) => {
+      storageCalls += 1;
+      return new Promise((resolve) => { settleAttempt = resolve; });
+    };
+    let asyncCollected = 0;
+    const collect = () => game.lootSystem.update(0, game.player, game.inventory, {
+      collectItem: (candidate) => game._collectWorldItemDurably(candidate),
+      onAsyncCollected: () => { asyncCollected += 1; },
+    });
+
+    const syncCollected = collect();
+    for (let attempt = 0; attempt < 20 && typeof settleAttempt !== 'function'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    if (typeof settleAttempt !== 'function') throw new Error('The durable pickup transaction did not start.');
+    const whilePending = {
+      syncCollected: syncCollected.length,
+      pending: pickup.pendingCollection,
+      pickupCount: game.lootSystem.pickups.length,
+      visible: object.visible,
+      inScene: object.parent === game.scene,
+      inventoryIds: game.inventory.items.map((entry) => entry.id),
+      records: storage.state.legacyBusterParts.records.length,
+      calibrations: storage.state.megaCalibrations.instances.length,
+      persisted: localStorage.getItem(storage.storageKeys.main),
+      storageCalls,
+    };
+
+    settleAttempt({
+      ok: false,
+      reason: 'transaction-failed',
+      error: new Error('simulated durable failure'),
+      state: storage.state,
+    });
+    await game.busterGameCommandQueue;
+    await game.busterStorageOperationQueue;
+    await Promise.resolve();
+    await Promise.resolve();
+    const afterFailure = {
+      pending: pickup.pendingCollection,
+      pickupCount: game.lootSystem.pickups.length,
+      visible: object.visible,
+      inScene: object.parent === game.scene,
+      inventoryIds: game.inventory.items.map((entry) => entry.id),
+      records: storage.state.legacyBusterParts.records.length,
+      calibrations: storage.state.megaCalibrations.instances.length,
+      persisted: localStorage.getItem(storage.storageKeys.main),
+      asyncCollected,
+    };
+
+    storage.registerLegacyBusterPartAsync = originalRegister;
+    collect();
+    await game.busterGameCommandQueue;
+    await game.busterStorageOperationQueue;
+    await Promise.resolve();
+    await Promise.resolve();
+    const linkedRecord = storage.state.legacyBusterParts.records.find((entry) => (
+      entry.legacyId === item.legacyBusterId
+    ));
+    const afterSuccess = {
+      pending: pickup.pendingCollection,
+      pickupCount: game.lootSystem.pickups.length,
+      visible: object.visible,
+      inScene: object.parent === game.scene,
+      inventoryIds: game.inventory.items.map((entry) => entry.id),
+      records: storage.state.legacyBusterParts.records.length,
+      calibrations: storage.state.megaCalibrations.instances.length,
+      persistedChanged: localStorage.getItem(storage.storageKeys.main) !== persistedBefore,
+      linked: Boolean(linkedRecord),
+      linkedType: linkedRecord?.legacyType ?? null,
+      linkedCalibration: linkedRecord?.calibrationInstanceId ?? null,
+      asyncCollected,
+    };
+    storage.registerLegacyBusterPartAsync = originalRegister;
+    return {
+      inventoryBefore,
+      recordsBefore,
+      calibrationsBefore,
+      persistedBefore,
+      whilePending,
+      afterFailure,
+      afterSuccess,
+    };
+  });
+
+  expect(result.whilePending).toEqual({
+    syncCollected: 0,
+    pending: true,
+    pickupCount: 1,
+    visible: true,
+    inScene: true,
+    inventoryIds: result.inventoryBefore,
+    records: result.recordsBefore,
+    calibrations: result.calibrationsBefore,
+    persisted: result.persistedBefore,
+    storageCalls: 1,
+  });
+  expect(result.afterFailure).toEqual({
+    pending: false,
+    pickupCount: 1,
+    visible: true,
+    inScene: true,
+    inventoryIds: result.inventoryBefore,
+    records: result.recordsBefore,
+    calibrations: result.calibrationsBefore,
+    persisted: result.persistedBefore,
+    asyncCollected: 0,
+  });
+  expect(result.afterSuccess.pending).toBe(false);
+  expect(result.afterSuccess.pickupCount).toBe(0);
+  expect(result.afterSuccess.visible).toBe(false);
+  expect(result.afterSuccess.inScene).toBe(false);
+  expect(result.afterSuccess.inventoryIds).toEqual(result.inventoryBefore);
+  expect(result.afterSuccess.records).toBe(result.recordsBefore + 1);
+  expect(result.afterSuccess.calibrations).toBe(result.calibrationsBefore + 1);
+  expect(result.afterSuccess.persistedChanged).toBe(true);
+  expect(result.afterSuccess.linked).toBe(true);
+  expect(result.afterSuccess.linkedType).toBe('powerRaiser');
+  expect(result.afterSuccess.linkedCalibration).toContain(':calibration');
+  expect(result.afterSuccess.asyncCollected).toBe(1);
   expect(runtimeErrors).toEqual([]);
 });
 
@@ -65,7 +259,6 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
       'mortarShell',
       'pursuitGuidance',
       'atApex',
-      'afterDelay',
       'spread3',
       'cluster5',
       'explosion',
@@ -86,7 +279,8 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
       calibrationTypes: [...new Set(state.megaCalibrations.instances.map((entry) => entry.legacyType))].sort(),
       recipeLevels: game.getBusterLabViewModel('build-a').recipes.map((entry) => entry.discoveryState),
       scrap: state.rollSalvage.identifiedScrap,
-      namedPartCount: Object.keys(state.rollSalvage.parts).length,
+      namedParts: Object.fromEntries(Object.entries(state.rollSalvage.parts)
+        .map(([partId, part]) => [partId, part.quantity])),
       assignments: { ...state.assignments.slots },
     };
   });
@@ -97,12 +291,11 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
     mortarShell: 1,
     pursuitGuidance: 1,
     atApex: 1,
-    afterDelay: 1,
     spread3: 1,
     cluster5: 1,
     explosion: 1,
   });
-  expect(first.moduleTotal).toBe(9);
+  expect(first.moduleTotal).toBe(8);
   expect(first.uniqueModuleIds).toBe(first.moduleTotal);
   expect(first.chassisCount).toBe(2);
   expect(first.buildBAvailable).toBe(true);
@@ -118,9 +311,45 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
     'sniperScope',
   ]);
   expect(first.recipeLevels.every((level) => level === 'full')).toBe(true);
-  expect(first.scrap).toBe(0);
-  expect(first.namedPartCount).toBe(0);
+  expect(first.scrap).toBe(66);
+  expect(first.namedParts).toEqual({
+    revolvingPulseBarrel: 2,
+    highAngleLaunchTube: 1,
+    behaviorChipPursuit: 1,
+    rubyOpticLens: 1,
+    ballisticsLogicChip: 1,
+    ammunitionFeedDrum: 1,
+    clusterBurstSequencer: 1,
+    volatileOverloadCell: 1,
+  });
   expect(first.assignments).toEqual({ 1: null, 2: null });
+
+  const mortarBattery = await page.evaluate(async () => {
+    const { game } = window;
+    await game.updateBusterDraft('build-a', {
+      type: 'setProgramSlot',
+      slot: 'emitter',
+      moduleId: 'mortarShell',
+    });
+    const view = game.getBusterLabViewModel('build-a');
+    await game.updateBusterDraft('build-a', {
+      type: 'setProgramSlot',
+      slot: 'emitter',
+      moduleId: 'pulseBolt',
+    });
+    return {
+      valid: view.validation.valid,
+      maxEnergy: view.result?.stats.maxEnergy,
+      energyCost: view.result?.stats.energyCost,
+      shotsPerCharge: view.result?.stats.shotsPerCharge,
+    };
+  });
+  expect(mortarBattery).toEqual({
+    valid: true,
+    maxEnergy: 6,
+    energyCost: 3,
+    shotsPerCharge: 2,
+  });
 
   await page.getByRole('button', { name: 'Grant one of each Buster part' }).click();
   await expect(page.locator('#buster-debug-status')).toContainText('2 kits granted');
@@ -130,7 +359,7 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
     chassisCount: window.game.busterLabState.chassisInstances.length,
     calibrationCount: window.game.busterLabState.megaCalibrations.instances.length,
   }));
-  expect(second).toEqual({ grantCount: 2, moduleTotal: 17, chassisCount: 2, calibrationCount: 13 });
+  expect(second).toEqual({ grantCount: 2, moduleTotal: 15, chassisCount: 2, calibrationCount: 13 });
 
   await page.reload();
   await waitForGame(page);
@@ -145,7 +374,7 @@ test('Mega and Custom Busters release only after the arm reaches its extended fi
   await waitForGame(page);
   await page.waitForFunction(() => window.game.player?._fbxAnimationLibraryLoaded === true);
 
-  const result = await page.evaluate(() => {
+  const result = await page.evaluate(async () => {
     const { game } = window;
     game.stop();
     const { player, combat, busterRuntime: runtime, pointer } = game;
@@ -163,6 +392,8 @@ test('Mega and Custom Busters release only after the arm reaches its extended fi
         muzzle: player.getProjectileOrigin().toArray(),
         braceElapsed: combat.compiledBusterBraceElapsed,
         attackTimer: player.animation.attackTimer,
+        sustainedPose: player.isProjectileAimSustained?.(execution.weaponKey) === true,
+        poseReady: combat._isCompiledBusterPoseReady?.(execution.weaponKey) === true,
       });
       runtime.releaseReservation(execution.reservationToken);
       return true;
@@ -209,7 +440,6 @@ test('Mega and Custom Busters release only after the arm reaches its extended fi
       const plan = prepare(slotIndex);
       const captureStart = captures.length;
       const energyBefore = runtime.getHudState(plan.weaponKey).energy;
-      const hipOrigin = player.getProjectileOrigin().clone();
       pointer.primary = true;
       pointer.primaryPressed = true;
       step(1 / 120);
@@ -242,13 +472,14 @@ test('Mega and Custom Busters release only after the arm reaches its extended fi
         releaseMatchesMuzzle: releaseOrigin && releaseMuzzle
           ? releaseOrigin.distanceTo(releaseMuzzle)
           : null,
-        releaseMovedFromHip: releaseOrigin ? releaseOrigin.distanceTo(hipOrigin) : null,
+        sustainedPose: capture?.sustainedPose ?? false,
+        poseReady: capture?.poseReady ?? false,
         pendingAfterRelease: Boolean(combat.pendingCompiledBusterShot),
       };
     };
 
     const mega = fireTap(0);
-    const equipped = game.equipCustomBuster('build-a', 1);
+    const equipped = await game.equipCustomBuster('build-a', 1);
     const custom = equipped.ok ? fireTap(1) : { equipError: equipped.message };
 
     const cancellationPlan = prepare(0);
@@ -286,18 +517,19 @@ test('Mega and Custom Busters release only after the arm reaches its extended fi
     expect(shot.braceElapsed).toBeGreaterThanOrEqual(0.18);
     expect(shot.attackTimerAtRelease).toBeLessThanOrEqual(0);
     expect(shot.releaseMatchesMuzzle).toBeLessThan(0.0001);
-    expect(shot.releaseMovedFromHip).toBeGreaterThan(0.1);
+    expect(shot.sustainedPose).toBe(true);
+    expect(shot.poseReady).toBe(true);
     expect(shot.energyAfter).toBeCloseTo(shot.energyBefore - shot.energyCost, 8);
     expect(shot.pendingAfterRelease).toBe(false);
   }
-  expect(result.mega.energyCost).toBe(3);
-  expect(result.custom.energyCost).toBe(1);
+  expect(result.mega.energyCost).toBe(2);
+  expect(result.custom.energyCost).toBe(2);
   expect(result.cancellation).toEqual({
     queuedBeforeSwitch: true,
     pendingAfterSwitch: false,
     shotsAfterSwitch: 0,
-    energyBefore: 9,
-    energyAfter: 9,
+    energyBefore: 6,
+    energyAfter: 6,
   });
   expect(runtimeErrors).toEqual([]);
 });
@@ -323,6 +555,10 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
       megaEnergy: mega.stats.maxEnergy,
       megaCost: mega.stats.energyCost,
       megaShots: mega.stats.shotsPerCharge,
+      pulseEnergy: view.result.stats.maxEnergy,
+      pulseCost: view.result.stats.energyCost,
+      pulseShots: view.result.stats.shotsPerCharge,
+      pulseMagazineRecovery: view.benchmarkRange.metrics.recoveryTime,
       megaTuning: view.mega.tuning,
       hud: game.combat.getWeaponHudData(),
     };
@@ -335,9 +571,13 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   expect(initial.canTest).toBe(true);
   expect(initial.starterModuleCount).toBe(1);
   expect(initial.starterPowerRaisers).toBe(0);
-  expect(initial.megaEnergy).toBe(9);
-  expect(initial.megaCost).toBe(3);
+  expect(initial.megaEnergy).toBe(6);
+  expect(initial.megaCost).toBe(2);
   expect(initial.megaShots).toBe(3);
+  expect(initial.pulseEnergy).toBe(6);
+  expect(initial.pulseCost).toBe(2);
+  expect(initial.pulseShots).toBe(3);
+  expect(initial.pulseMagazineRecovery).toBeCloseTo(2.45, 8);
   expect(initial.megaTuning).toEqual({ power: 6, energy: 4, range: 4, rapid: 4 });
   expect(initial.hud.unifiedBuster).toBe(true);
   expect(initial.hud.singleGauge).toBe(true);
@@ -348,14 +588,14 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   await expect(page.locator('#buster-tuning-remaining')).toHaveText('0 points remaining');
   await expect(page.locator('[data-action="buster-save"]')).toBeEnabled();
 
-  const staleDraft = await page.evaluate(() => {
+  const staleDraft = await page.evaluate(async () => {
     const { game } = window;
-    game.updateBusterDraft('build-a', { type: 'setTuning', stat: 'power', value: 5 });
-    game.updateBusterDraft('build-a', { type: 'setTuning', stat: 'rapid', value: 3 });
+    await game.updateBusterDraft('build-a', { type: 'setTuning', stat: 'power', value: 5 });
+    await game.updateBusterDraft('build-a', { type: 'setTuning', stat: 'rapid', value: 3 });
     const view = game.getBusterLabViewModel('build-a');
-    const equip = game.equipCustomBuster('build-a', 1);
-    game.updateBusterDraft('build-a', { type: 'setTuning', stat: 'power', value: 4 });
-    game.updateBusterDraft('build-a', { type: 'setTuning', stat: 'rapid', value: 4 });
+    const equip = await game.equipCustomBuster('build-a', 1);
+    await game.updateBusterDraft('build-a', { type: 'setTuning', stat: 'power', value: 4 });
+    await game.updateBusterDraft('build-a', { type: 'setTuning', stat: 'rapid', value: 4 });
     game.ui._renderBusterLab();
     return { valid: view.validation.valid, canEquip: view.canEquip, equip };
   });
@@ -366,6 +606,8 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
 
   await page.locator('[data-action="buster-save"]').click();
   await page.locator('[data-action="buster-equip"][data-slot-index="1"]').click();
+  await expect.poll(() => page.evaluate(() => window.game.busterLabState.assignments.slots['1']))
+    .toBe('build-a');
 
   const equipped = await page.evaluate(() => ({
     activeSlot: window.game.player.activeArmIndex,
@@ -394,6 +636,10 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   expect(persistedAssignment.displacedSwordCount).toBeGreaterThanOrEqual(1);
   await page.getByRole('tab', { name: 'Buster Lab' }).click();
 
+  await page.evaluate(() => {
+    window.game.setBusterRangeBenchmarkOptions({ targetCount: 2, profile: 'moving' });
+    window.game.ui._renderBusterLab();
+  });
   await page.locator('[data-action="buster-test-range"]').click();
   await expect.poll(() => page.evaluate(() => Boolean(window.game.busterTestRange?.active))).toBe(true);
 
@@ -439,7 +685,7 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
 
   expect(shot.fired).toBe(true);
   expect(shot.damage).toBeGreaterThan(0);
-  expect(shot.energy).toBe(5);
+  expect(shot.energy).toBe(4);
   expect(shot.reservations).toBe(0);
   expect(shot.rewardsUnchanged).toBe(true);
   expect(shot.dummyCount).toBe(2);
@@ -476,30 +722,23 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   expect(restoration.battery).toBe(restoration.expectedBattery);
   expect(restoration.rangeProjectiles).toBe(0);
 
-  const replacement = await page.evaluate(() => {
+  const replacement = await page.evaluate(async () => {
     const { game } = window;
-    game.equipCustomBuster('build-a', 2);
+    await game.equipCustomBuster('build-a', 2);
     const afterMove = {
       oldSlot: game.player.armHotbar[1],
       newSlotBuildId: game.player.armHotbar[2]?.buildId,
       assignments: { ...game.busterLabState.assignments.slots },
     };
-    game.equipCustomBuster('build-a', 1);
+    await game.equipCustomBuster('build-a', 1);
     const replacementArm = game.inventory.items.find((item) => item.type === 'machineGunArm');
-    game.ui._assignArmWeaponToSlot(replacementArm.id, 1);
+    await game.ui._assignArmWeaponToSlot(replacementArm.id, 1);
     const afterManual = {
       slotType: game.player.armHotbar[1]?.type,
       assignment: game.busterLabState.assignments.slots['1'],
       customInventoryCount: game.inventory.items.filter((item) => item.type === 'customBusterArm').length,
     };
-    game.equipCustomBuster('build-a', 1);
-    game.ui._optimizeEquipment();
-    return {
-      afterMove,
-      afterManual,
-      optimizedAssignment: game.busterLabState.assignments.slots['1'],
-      optimizedCustomInventoryCount: game.inventory.items.filter((item) => item.type === 'customBusterArm').length,
-    };
+    return { afterMove, afterManual };
   });
   expect(replacement.afterMove.oldSlot).toBe(null);
   expect(replacement.afterMove.newSlotBuildId).toBe('build-a');
@@ -507,10 +746,8 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   expect(replacement.afterManual.slotType).toBe('machineGunArm');
   expect(replacement.afterManual.assignment).toBe(null);
   expect(replacement.afterManual.customInventoryCount).toBe(0);
-  expect(replacement.optimizedAssignment).toBe(null);
-  expect(replacement.optimizedCustomInventoryCount).toBe(0);
 
-  const failedAnalysis = await page.evaluate(() => {
+  const failedAnalysis = await page.evaluate(async () => {
     const { game } = window;
     game.inventory.unidentifiedScrap = 0;
     game.inventory.unidentifiedRecoveries = [];
@@ -518,10 +755,14 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
       source: { enemyId: 'test-reaverbot' },
       recoverableParts: [{ id: 'rubyOpticLens', name: 'Ruby Optic Lens', quantity: 1 }],
     });
-    const originalOnChange = game.rollSalvageStorage.onChange;
-    game.rollSalvageStorage.onChange = () => { throw new Error('quota full'); };
-    const result = game.identifyReaverbotScrap();
-    game.rollSalvageStorage.onChange = originalOnChange;
+    const originalUpdate = game.busterLabStorage.updateRollSalvageAsync;
+    game.busterLabStorage.updateRollSalvageAsync = async () => ({
+      ok: false,
+      reason: 'transaction-failed',
+      error: new Error('quota full'),
+    });
+    const result = await game.identifyReaverbotScrap();
+    game.busterLabStorage.updateRollSalvageAsync = originalUpdate;
     return {
       ok: result.ok,
       unidentified: game.inventory.unidentifiedScrap,
@@ -530,6 +771,401 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
     };
   });
   expect(failedAnalysis).toEqual({ ok: false, unidentified: 2, recoveries: 1, storedParts: 0 });
+  expect(runtimeErrors).toEqual([]);
+});
+
+test('Roll UI stores ownership-free blueprints and atomically materializes an original route', async ({ page }) => {
+  const runtimeErrors = collectRuntimeErrors(page);
+  await page.goto('/?busterLab=1&busterLabDebug=1&reaverbotSeed=buster-blueprint-ui');
+  await waitForGame(page);
+  await page.evaluate(() => window.game.setInventoryOpen(true, { mode: 'roll' }));
+  await page.getByRole('tab', { name: 'Buster Lab' }).click();
+
+  const debugGrant = await page.evaluate(() => window.game.grantBusterLabDebugKit());
+  expect(debugGrant.ok).toBe(true);
+  await page.evaluate(() => window.game.ui._renderBusterLab());
+
+  const payload = page.locator('[data-buster-program="payload"]');
+  await payload.selectOption('explosion');
+  await expect.poll(() => page.evaluate(() => (
+    window.game.getBusterLabViewModel('build-a').programSelections.payload
+  ))).toBe('explosion');
+
+  await page.locator('[data-action="buster-blueprint-new"]').click();
+  await expect(page.locator('#buster-blueprint-count')).toHaveText('1 / 8');
+  const blueprintId = await page.evaluate(() => window.game.selectedBusterBlueprintId);
+  expect(blueprintId).toMatch(/^blueprint-/);
+
+  const ownershipFree = await page.evaluate((id) => {
+    const blueprint = window.game.busterLabState.blueprints.find((entry) => entry.blueprintId === id);
+    return {
+      rulesetVersion: blueprint.rulesetVersion,
+      nodeModuleIds: blueprint.program.nodes.map((node) => node.moduleId),
+      hasPhysicalIds: blueprint.program.nodes.some((node) => (
+        Object.hasOwn(node, 'moduleInstanceId') || Object.hasOwn(node, 'instanceId')
+      )),
+    };
+  }, blueprintId);
+  expect(ownershipFree).toEqual({
+    rulesetVersion: 'custom-buster-v0.2',
+    nodeModuleIds: ['pulseBolt', 'explosion'],
+    hasPhysicalIds: false,
+  });
+
+  const resourceBefore = await page.evaluate(async () => {
+    const { game } = window;
+    const committed = await game.busterLabStorage.transact({
+      operation: 'browser-test-reserve-debug-explosion',
+    }, (state) => {
+      state.moduleInstances = state.moduleInstances.filter((entry) => (
+        entry.moduleId !== 'explosion' || entry.origin !== 'debug'
+      ));
+      return true;
+    });
+    if (!committed.ok) throw committed.error ?? new Error('Could not reserve the debug Explosion copy.');
+    game.busterLabState = committed.state;
+    game._refreshRollSalvageStorage();
+    game._recompileBusterPlans();
+    game.ui._renderBusterLab();
+    return {
+      revision: game.busterLabStorage.revision,
+      scrap: game.busterLabState.rollSalvage.identifiedScrap,
+      volatileCells: game.busterLabState.rollSalvage.parts.volatileOverloadCell?.quantity ?? 0,
+    };
+  });
+  expect(resourceBefore.scrap).toBe(66);
+  expect(resourceBefore.volatileCells).toBe(1);
+
+  await page.locator('[data-action="buster-materialize-suggest"]').click();
+  await expect(page.locator('#buster-materialization-suggestion')).toBeVisible();
+  await expect(page.locator('#buster-materialization-suggestion')).toContainText('Explosion');
+  const route = page.locator('[data-buster-materialization-module="payload"]');
+  await expect(route).toHaveValue('original');
+  await expect(route.locator('option:checked')).toContainText('Original fabrication');
+  await expect(page.locator('#buster-materialize-confirm')).toBeEnabled();
+
+  await page.locator('#buster-materialize-confirm').click();
+  await expect.poll(() => page.evaluate(() => (
+    window.game.busterLabState.chassisBuilds
+      .find((entry) => entry.buildId === 'build-a')?.program.nodes
+      .find((node) => node.moduleId === 'explosion')?.moduleInstanceId ?? null
+  ))).not.toBeNull();
+
+  const materialized = await page.evaluate((id) => {
+    const { game } = window;
+    const blueprint = game.busterLabState.blueprints.find((entry) => entry.blueprintId === id);
+    const build = game.busterLabState.chassisBuilds.find((entry) => entry.buildId === 'build-a');
+    const explosion = build.program.nodes.find((node) => node.moduleId === 'explosion');
+    const instance = game.busterLabState.moduleInstances.find((entry) => (
+      entry.instanceId === explosion.moduleInstanceId
+    ));
+    return {
+      blueprintStillOwnershipFree: blueprint.program.nodes.every((node) => (
+        !Object.hasOwn(node, 'moduleInstanceId')
+      )),
+      buildHasPhysicalAssignments: build.program.nodes
+        .filter((node) => !['pulsePayload', 'onImpact', 'afterDelay'].includes(node.moduleId))
+        .every((node) => typeof node.moduleInstanceId === 'string'),
+      route: instance.fabricationRoute,
+      origin: instance.origin,
+      scrap: game.busterLabState.rollSalvage.identifiedScrap,
+      volatileCells: game.busterLabState.rollSalvage.parts.volatileOverloadCell?.quantity ?? 0,
+      revisionAdvanced: game.busterLabStorage.revision > 0,
+      pendingSuggestion: game.pendingBusterMaterializationSuggestion,
+    };
+  }, blueprintId);
+  expect(materialized).toEqual({
+    blueprintStillOwnershipFree: true,
+    buildHasPhysicalAssignments: true,
+    route: 'original',
+    origin: 'fabricated',
+    scrap: 56,
+    volatileCells: 0,
+    revisionAdvanced: true,
+    pendingSuggestion: null,
+  });
+  expect(runtimeErrors).toEqual([]);
+});
+
+test('full-catalog sandbox isolates ids, rejects durable writes, and remains leak-free across reuse', async ({ page }) => {
+  const runtimeErrors = collectRuntimeErrors(page);
+  await page.goto('/?busterLab=sandbox&busterLabDebug=1&reaverbotSeed=buster-sandbox-freeze');
+  await waitForGame(page);
+
+  const result = await page.evaluate(async () => {
+    const { game } = window;
+    game.stop();
+    game.setInventoryOpen(true, { mode: 'roll' });
+    const production = {
+      scene: game.scene,
+      player: game.player,
+      inventory: game.inventory,
+      projectiles: game.projectiles,
+      runtime: game.busterRuntime,
+      combat: game.combat,
+      enemies: game.enemies,
+      enemyIdAllocator: game.enemyIdAllocator,
+      nextEnemyId: game.enemyIdAllocator.snapshot(),
+      seed: game.dungeon.layoutSeed,
+      position: game.player.root.position.toArray(),
+      health: game.player.health,
+      experience: game.player.experience,
+      gold: game.inventory.gold,
+      elapsedTime: game.elapsedTime,
+      storage: localStorage.getItem(game.busterLabStorage.storageKeys.main),
+      revision: game.busterLabStorage.revision,
+      writeId: game.busterLabStorage.writeId,
+      debugGrantCount: game.busterLabState.migrations.debugKitGrantCount ?? 0,
+      sceneChildCount: game.scene.children.length,
+    };
+    let releasePendingCommand = null;
+    const pendingCommandGate = new Promise((resolve) => { releasePendingCommand = resolve; });
+    const pendingCommand = game._queueBusterGameCommand(() => pendingCommandGate);
+    const blockedByPendingCommand = game.enterBusterSandbox('build-a');
+    releasePendingCommand({ ok: true });
+    await pendingCommand;
+    let releasePendingStorage = null;
+    const pendingStorageGate = new Promise((resolve) => { releasePendingStorage = resolve; });
+    const pendingStorage = game._queueBusterStorageOperation(() => pendingStorageGate);
+    const blockedByPendingStorage = game.enterBusterSandbox('build-a');
+    releasePendingStorage({ ok: true });
+    await pendingStorage;
+    const entered = game.enterBusterSandbox('build-a');
+    const session = game.busterSandboxSession;
+    const sandboxAllocator = game.enemyIdAllocator;
+    const sandboxAllocatedIds = [sandboxAllocator.allocate(), sandboxAllocator.allocate()];
+    const isolated = {
+      scene: game.scene !== production.scene,
+      player: game.player !== production.player,
+      inventory: game.inventory !== production.inventory,
+      projectiles: game.projectiles !== production.projectiles,
+      runtime: game.busterRuntime !== production.runtime,
+      combat: game.combat !== production.combat,
+      enemies: game.enemies !== production.enemies,
+      enemyIdAllocator: sandboxAllocator !== production.enemyIdAllocator,
+      enemyIdPrefix: sandboxAllocator.prefix,
+      sandboxAllocatedIds,
+      productionAllocatorUntouched: production.enemyIdAllocator.snapshot() === production.nextEnemyId,
+      sameLayoutSeed: game.dungeon.layoutSeed === production.seed,
+      independentProjectileBudget: game.busterRuntime.getReservedProjectileCount() === 0,
+      fullHealth: game.player.health === game.player.stats.maxHealth,
+      atEntrance: game.player.root.position.distanceTo(game.dungeon.playerStart) < 0.001,
+    };
+
+    let durableDebugCalls = 0;
+    const originalGrantDebugKitAsync = game.busterLabStorage.grantDebugKitAsync;
+    game.busterLabStorage.grantDebugKitAsync = (...args) => {
+      durableDebugCalls += 1;
+      return originalGrantDebugKitAsync.apply(game.busterLabStorage, args);
+    };
+    const debugWrite = await game.grantBusterLabDebugKit();
+    const draftWrite = await game.updateBusterDraft('build-a', {
+      type: 'setTuning',
+      stat: 'power',
+      value: 5,
+    });
+    game.busterLabStorage.grantDebugKitAsync = originalGrantDebugKitAsync;
+    const rejectedWrites = {
+      debugOk: debugWrite.ok,
+      debugMessage: debugWrite.message,
+      draftOk: draftWrite.ok,
+      draftReason: draftWrite.reason,
+      durableDebugCalls,
+      storageUnchanged: localStorage.getItem(game.busterLabStorage.storageKeys.main) === production.storage,
+      revisionUnchanged: game.busterLabStorage.revision === production.revision,
+      writeIdUnchanged: game.busterLabStorage.writeId === production.writeId,
+      debugGrantCount: game.busterLabState.migrations.debugKitGrantCount ?? 0,
+    };
+
+    game.player.root.position.addScalar(17);
+    game.player.health = 1;
+    game.player.experience += 9000;
+    game.inventory.gold += 9000;
+    game.elapsedTime += 123;
+    game.ruinCompleted = true;
+    game.largeRefractorsSecured += 10;
+    const sandboxScene = game.scene;
+    const sandboxPlayer = game.player;
+    const sandboxProjectiles = game.projectiles;
+    const sandboxEnemies = game.enemies;
+    const submittedBeforeExit = game.updateBusterDraft('build-a', {
+      type: 'setTuning',
+      stat: 'power',
+      value: 6,
+    });
+    const exited = game.exitBusterSandbox('browserTest');
+    const submittedBeforeExitResult = await submittedBeforeExit;
+    const restored = {
+      scene: game.scene === production.scene,
+      player: game.player === production.player,
+      inventory: game.inventory === production.inventory,
+      projectiles: game.projectiles === production.projectiles,
+      runtime: game.busterRuntime === production.runtime,
+      combat: game.combat === production.combat,
+      enemies: game.enemies === production.enemies,
+      enemyIdAllocator: game.enemyIdAllocator === production.enemyIdAllocator,
+      enemyIdSequence: game.enemyIdAllocator.snapshot(),
+      position: game.player.root.position.toArray(),
+      health: game.player.health,
+      experience: game.player.experience,
+      gold: game.inventory.gold,
+      elapsedTime: game.elapsedTime,
+      storage: localStorage.getItem(game.busterLabStorage.storageKeys.main),
+      revision: game.busterLabStorage.revision,
+      writeId: game.busterLabStorage.writeId,
+      inventoryOpen: game.inventoryOpen,
+      workshopMode: game.ui.inventoryMode,
+      sandboxDisposed: sandboxScene.children.length === 0
+        && sandboxPlayer.disposed === true
+        && sandboxProjectiles.active.length === 0
+        && sandboxEnemies.length === 0,
+      sessionCleared: game.busterSandboxSession === null,
+    };
+
+    const repeatedCycles = [];
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const sceneChildCount = game.scene.children.length;
+      const cycleEnter = game.enterBusterSandbox('build-a');
+      const cycleScene = game.scene;
+      const cyclePlayer = game.player;
+      const cycleProjectiles = game.projectiles;
+      const cycleEnemies = game.enemies;
+      const cycleAllocator = game.enemyIdAllocator;
+      const allocatedId = cycleAllocator.allocate();
+      const cycleExit = game.exitBusterSandbox(`browserReuse${cycle + 1}`);
+      repeatedCycles.push({
+        entered: cycleEnter.ok,
+        exited: cycleExit,
+        sandboxId: allocatedId,
+        sceneCleared: cycleScene.children.length === 0,
+        playerDisposed: cyclePlayer.disposed === true,
+        projectilesCleared: cycleProjectiles.active.length === 0,
+        enemiesCleared: cycleEnemies.length === 0,
+        productionSceneStable: game.scene.children.length === sceneChildCount,
+        productionIdentityRestored: game.scene === production.scene
+          && game.player === production.player
+          && game.inventory === production.inventory
+          && game.enemies === production.enemies,
+        allocatorRestored: game.enemyIdAllocator === production.enemyIdAllocator
+          && game.enemyIdAllocator.snapshot() === production.nextEnemyId,
+        storageUnchanged: localStorage.getItem(game.busterLabStorage.storageKeys.main) === production.storage
+          && game.busterLabStorage.revision === production.revision
+          && game.busterLabStorage.writeId === production.writeId,
+      });
+    }
+    return {
+      pendingBarrier: {
+        gameCommandOk: blockedByPendingCommand.ok,
+        gameCommandReason: blockedByPendingCommand.reason,
+        storageOk: blockedByPendingStorage.ok,
+        storageReason: blockedByPendingStorage.reason,
+        gamePending: game.busterGameCommandPending,
+        storagePending: game.busterStorageOperationPending,
+      },
+      entered: entered.ok,
+      sessionActive: Boolean(session?.active),
+      isolated,
+      rejectedWrites,
+      exited,
+      submittedBeforeExit: {
+        ok: submittedBeforeExitResult.ok,
+        reason: submittedBeforeExitResult.reason,
+      },
+      restored,
+      repeatedCycles,
+      production: {
+        position: production.position,
+        health: production.health,
+        experience: production.experience,
+        gold: production.gold,
+        elapsedTime: production.elapsedTime,
+        storage: production.storage,
+        revision: production.revision,
+        writeId: production.writeId,
+        nextEnemyId: production.nextEnemyId,
+        debugGrantCount: production.debugGrantCount,
+      },
+    };
+  });
+
+  expect(result.pendingBarrier).toEqual({
+    gameCommandOk: false,
+    gameCommandReason: 'campaign-command-pending',
+    storageOk: false,
+    storageReason: 'campaign-command-pending',
+    gamePending: 0,
+    storagePending: 0,
+  });
+  expect(result.entered).toBe(true);
+  expect(result.sessionActive).toBe(true);
+  expect(result.isolated).toEqual({
+    scene: true,
+    player: true,
+    inventory: true,
+    projectiles: true,
+    runtime: true,
+    combat: true,
+    enemies: true,
+    enemyIdAllocator: true,
+    enemyIdPrefix: 'sandbox-enemy',
+    sandboxAllocatedIds: ['sandbox-enemy-1', 'sandbox-enemy-2'],
+    productionAllocatorUntouched: true,
+    sameLayoutSeed: true,
+    independentProjectileBudget: true,
+    fullHealth: true,
+    atEntrance: true,
+  });
+  expect(result.rejectedWrites.debugOk).toBe(false);
+  expect(result.rejectedWrites.debugMessage).toContain('could not be granted');
+  expect(result.rejectedWrites.draftOk).toBe(false);
+  expect(result.rejectedWrites.draftReason).toBe('sandbox-read-only');
+  expect(result.rejectedWrites.durableDebugCalls).toBe(0);
+  expect(result.rejectedWrites.storageUnchanged).toBe(true);
+  expect(result.rejectedWrites.revisionUnchanged).toBe(true);
+  expect(result.rejectedWrites.writeIdUnchanged).toBe(true);
+  expect(result.rejectedWrites.debugGrantCount).toBe(result.production.debugGrantCount);
+  expect(result.exited).toBe(true);
+  expect(result.submittedBeforeExit).toEqual({ ok: false, reason: 'sandbox-read-only' });
+  expect(result.restored).toEqual({
+    scene: true,
+    player: true,
+    inventory: true,
+    projectiles: true,
+    runtime: true,
+    combat: true,
+    enemies: true,
+    enemyIdAllocator: true,
+    enemyIdSequence: result.production.nextEnemyId,
+    position: result.production.position,
+    health: result.production.health,
+    experience: result.production.experience,
+    gold: result.production.gold,
+    elapsedTime: result.production.elapsedTime,
+    storage: result.production.storage,
+    revision: result.production.revision,
+    writeId: result.production.writeId,
+    inventoryOpen: true,
+    workshopMode: 'roll',
+    sandboxDisposed: true,
+    sessionCleared: true,
+  });
+  expect(result.repeatedCycles).toHaveLength(3);
+  for (const [index, cycle] of result.repeatedCycles.entries()) {
+    expect(cycle).toEqual({
+      entered: true,
+      exited: true,
+      sandboxId: 'sandbox-enemy-1',
+      sceneCleared: true,
+      playerDisposed: true,
+      projectilesCleared: true,
+      enemiesCleared: true,
+      productionSceneStable: true,
+      productionIdentityRestored: true,
+      allocatorRestored: true,
+      storageUnchanged: true,
+    });
+    expect(index).toBeLessThan(3);
+  }
   expect(runtimeErrors).toEqual([]);
 });
 
@@ -555,7 +1191,6 @@ test('production projectile lifecycle runs Explosion, Delay, Impact, and Apex pr
     const starterInstanceId = 'module-pulse-starter';
     const instanceSpecs = [
       ['module-explosion-test', 'explosion'],
-      ['module-delay-test', 'afterDelay'],
       ['module-cluster-test', 'cluster5'],
       ['module-spread-test', 'spread3'],
       ['module-mortar-test', 'mortarShell'],
@@ -580,7 +1215,7 @@ test('production projectile lifecycle runs Explosion, Delay, Impact, and Apex pr
 
     const makeBuild = (nodes, edges) => ({
       schemaVersion: 1,
-      rulesetVersion: 'custom-buster-v0.1',
+      rulesetVersion: 'custom-buster-v0.2',
       buildId: 'build-a',
       chassisId: 'chassis-a',
       name: 'Build A',
@@ -664,7 +1299,7 @@ test('production projectile lifecycle runs Explosion, Delay, Impact, and Apex pr
 
     install(makeBuild([
       { nodeId: 'pulse', moduleId: 'pulseBolt', moduleInstanceId: starterInstanceId },
-      { nodeId: 'delay', moduleId: 'afterDelay', moduleInstanceId: 'module-delay-test' },
+      { nodeId: 'delay', moduleId: 'afterDelay', moduleInstanceId: null },
       { nodeId: 'cluster', moduleId: 'cluster5', moduleInstanceId: 'module-cluster-test' },
     ], [
       { from: 'pulse', port: 'next', to: 'delay' },
@@ -787,7 +1422,7 @@ test('production projectile lifecycle runs Explosion, Delay, Impact, and Apex pr
   expect(result.delay.beforeDelay).toEqual(['emit-carrier']);
   expect(result.delay.childCount).toBe(5);
   expect(new Set(result.delay.actionIds)).toEqual(new Set(['emit-child']));
-  for (const power of result.delay.powers) expect(power).toBeCloseTo(2, 8);
+  for (const power of result.delay.powers) expect(power).toBeCloseTo(9.984 / 5, 8);
   expect(result.delay.reservation).toBe(5);
   expect(result.delay.repeatDirections).toEqual(result.delay.firstDirections);
   expect(result.impact.carrierDamage).toBeCloseTo(1.6, 8);
@@ -803,7 +1438,12 @@ test('production projectile lifecycle runs Explosion, Delay, Impact, and Apex pr
 test('corrupt local Lab data is quarantined with a visible warning and safe Mega fallback', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
   await page.addInitScript(() => {
-    localStorage.setItem('ruinDigger.busterLab.v1', '{not valid json');
+    const saveContextId = 'campaign-browser-corrupt';
+    localStorage.setItem('ruinDigger.saveContext.v1', JSON.stringify({
+      storageVersion: 1,
+      saveContextId,
+    }));
+    localStorage.setItem(`ruinDigger.busterLab.v2.${encodeURIComponent(saveContextId)}`, '{not valid json');
   });
   await page.goto('/?busterLab=1&reaverbotSeed=buster-corrupt-save');
   await waitForGame(page);
@@ -832,14 +1472,17 @@ test('unknown module ids preserve the invalid draft and force the Mega Buster fa
     window.game?.dungeon?.group?.getObjectByName('rollCaskettNpc')?.userData?.animationAssetsSettled === true
   ));
   await page.evaluate(() => {
-    const key = 'ruinDigger.busterLab.v1';
-    const state = JSON.parse(localStorage.getItem(key));
+    const key = window.game.busterLabStorage.storageKeys.main;
+    const envelope = JSON.parse(localStorage.getItem(key));
+    const state = envelope.state;
     state.moduleInstances[0].moduleId = 'futureArcOrb';
     state.moduleInstances[0].name = 'Future Arc Orb';
     state.chassisBuilds[0].program.nodes[0].moduleId = 'futureArcOrb';
     state.chassisDrafts[0].program.nodes[0].moduleId = 'futureArcOrb';
     state.assignments.slots['1'] = 'build-a';
-    localStorage.setItem(key, JSON.stringify(state));
+    envelope.revision += 1;
+    envelope.writeId = 'browser-unknown-module-injection';
+    localStorage.setItem(key, JSON.stringify(envelope));
   });
   await page.reload();
   await waitForGame(page);

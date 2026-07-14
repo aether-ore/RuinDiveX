@@ -2,7 +2,7 @@ import Game from './Game.js';
 import { getReaverbotCatalogSummary } from './reaverbots/ReaverbotGenerator.js';
 import { getReaverbotSalvageCatalogSummary } from './reaverbots/ReaverbotSalvageCatalog.js';
 
-const game = new Game({
+const game = await Game.create({
   container: document.getElementById('game-container'),
 });
 

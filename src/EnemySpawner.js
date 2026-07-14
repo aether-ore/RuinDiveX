@@ -213,6 +213,9 @@ export class EnemySpawner {
   }
 
   spawnEncounter(encounter) {
+    this.game.setBusterCombatDepthLevel?.(Math.round(this.getDifficulty()), {
+      encounterId: encounter?.id ?? null,
+    });
     const enemies = [];
     let tractorControllerCount = 0;
     const spawnPoints = encounter.spawnPoints?.length

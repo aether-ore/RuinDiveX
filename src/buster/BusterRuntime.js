@@ -1,6 +1,7 @@
 const DEFAULT_RECHARGE_DELAY = 0.65;
 const DEFAULT_RECHARGE_DURATION = 1.8;
 const DEFAULT_PROJECTILE_CAPACITY = 24;
+const EPSILON = 0.000001;
 
 function finite(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -58,13 +59,9 @@ export class BusterRuntime {
     if (!plan) return null;
 
     const key = planKey(plan);
-    const previousPlan = this.plans.get(key);
-    const revision = plan.revision ?? plan.buildRevision ?? 0;
-    const previousRevision = previousPlan?.revision ?? previousPlan?.buildRevision ?? 0;
-    if (previousPlan && revision !== previousRevision) {
-      this.cancelBuild(key, 'recompile');
-    }
-
+    // Executions retain the immutable plan captured by fire(). Re-registering a
+    // newer source revision only changes future shots; it must not cancel shots
+    // that are already in flight.
     this.plans.set(key, plan);
     const stats = readStats(plan);
     let state = this.states.get(key);
@@ -76,11 +73,17 @@ export class BusterRuntime {
         cycleRemaining: 0,
         rechargeDelayRemaining: 0,
         lastContext: null,
+        recoveryLocked: false,
+        firing: false,
       };
       this.states.set(key, state);
     } else {
       state.maxEnergy = stats.maxEnergy;
       state.energy = Math.min(state.energy, state.maxEnergy);
+      if (state.energy + EPSILON >= state.maxEnergy) {
+        state.energy = state.maxEnergy;
+        state.recoveryLocked = false;
+      }
     }
 
     return state;
@@ -90,23 +93,46 @@ export class BusterRuntime {
     return this.getBlockReason(key) === null;
   }
 
+  requestFire(key = this.activeKey) {
+    const plan = this.plans.get(key);
+    const state = this.states.get(key);
+    if (!plan || !state) return { ok: false, reason: 'NO_PLAN' };
+    if (state.firing) return { ok: false, reason: 'FIRING' };
+    if (state.cycleRemaining > EPSILON) return { ok: false, reason: 'CYCLE' };
+    if (state.recoveryLocked) return { ok: false, reason: 'RECOVERY' };
+
+    const stats = readStats(plan);
+    // Capacity is checked before Energy so an atomically rejected batch never
+    // changes the battery state, even when both resources are unavailable.
+    if (this.getReservedProjectileCount() + stats.peakProjectileReservation > this.projectileCapacity) {
+      return { ok: false, reason: 'PROJECTILE_CAP' };
+    }
+    if (state.energy + EPSILON < stats.energyCost) {
+      state.recoveryLocked = true;
+      return { ok: false, reason: 'ENERGY', recoveryLocked: true };
+    }
+
+    return { ok: true };
+  }
+
   getBlockReason(key = this.activeKey) {
     const plan = this.plans.get(key);
     const state = this.states.get(key);
     if (!plan || !state) return 'NO_PLAN';
     if (state.firing) return 'FIRING';
     const stats = readStats(plan);
-    if (state.cycleRemaining > 0.000001) return 'CYCLE';
-    if (state.energy + 0.000001 < stats.energyCost) return 'ENERGY';
+    if (state.cycleRemaining > EPSILON) return 'CYCLE';
+    if (state.recoveryLocked) return 'RECOVERY';
     if (this.getReservedProjectileCount() + stats.peakProjectileReservation > this.projectileCapacity) {
       return 'PROJECTILE_CAP';
     }
+    if (state.energy + EPSILON < stats.energyCost) return 'ENERGY';
     return null;
   }
 
   fire(context = {}, key = this.activeKey) {
-    const reason = this.getBlockReason(key);
-    if (reason) return { ok: false, reason };
+    const request = this.requestFire(key);
+    if (!request.ok) return request;
 
     const plan = this.plans.get(key);
     const state = this.states.get(key);
@@ -130,12 +156,14 @@ export class BusterRuntime {
       cycleRemaining: state.cycleRemaining,
       rechargeDelayRemaining: state.rechargeDelayRemaining,
       lastContext: state.lastContext,
+      recoveryLocked: state.recoveryLocked,
     };
     state.firing = true;
     state.energy = Math.max(0, state.energy - stats.energyCost);
     state.cycleRemaining = stats.cycleTime;
     state.rechargeDelayRemaining = this.rechargeDelay;
     state.lastContext = context;
+    state.recoveryLocked = false;
     let accepted = true;
     try {
       if (this.executeShot) accepted = this.executeShot(execution) !== false;
@@ -155,8 +183,17 @@ export class BusterRuntime {
     return { ok: true, execution };
   }
 
-  update(dt, { fireHeld = false, context = null } = {}) {
+  update(dt, options = {}) {
     const elapsed = Math.max(0, finite(dt));
+    const hasActiveKey = Object.prototype.hasOwnProperty.call(options, 'activeWeaponKey');
+    if (hasActiveKey) {
+      const requestedKey = options.activeWeaponKey;
+      this.activeKey = requestedKey != null && this.plans.has(String(requestedKey))
+        ? String(requestedKey)
+        : null;
+    }
+    const fireHeld = Boolean(options.fireHeld);
+
     for (const [key, state] of this.states) {
       const plan = this.plans.get(key);
       if (!plan) continue;
@@ -166,14 +203,24 @@ export class BusterRuntime {
       const rechargeElapsed = delayBeforeUpdate > 0
         ? Math.max(0, elapsed - delayBeforeUpdate)
         : elapsed;
-      if (rechargeElapsed > 0 && state.energy < state.maxEnergy) {
-        state.energy = Math.min(state.maxEnergy, state.energy + (state.maxEnergy / this.rechargeDuration) * rechargeElapsed);
+
+      const isActive = key === this.activeKey;
+      const heldPause = isActive && fireHeld && !state.recoveryLocked;
+      if (rechargeElapsed > 0 && state.energy < state.maxEnergy && !heldPause) {
+        const rechargeScale = isActive ? 1 : 0.5;
+        state.energy = Math.min(
+          state.maxEnergy,
+          state.energy + (state.maxEnergy / this.rechargeDuration) * rechargeElapsed * rechargeScale,
+        );
+      }
+      if (state.recoveryLocked && state.energy + EPSILON >= state.maxEnergy) {
+        state.energy = state.maxEnergy;
+        state.recoveryLocked = false;
       }
     }
 
-    if (fireHeld && this.activeKey && this.canFire(this.activeKey)) {
-      return this.fire(context ?? this.states.get(this.activeKey)?.lastContext ?? {}, this.activeKey);
-    }
+    // Combat owns firing contexts and the extended-muzzle release. update()
+    // advances resources only and never reuses a stale context autonomously.
     return null;
   }
 
@@ -188,6 +235,15 @@ export class BusterRuntime {
       }
     }
     return tokens.length;
+  }
+
+  unregister(buildId, { cancelExecutions = false, removeState = true, reason = 'invalidated' } = {}) {
+    const key = String(buildId);
+    const existed = this.plans.delete(key);
+    if (cancelExecutions) this.cancelBuild(key, reason);
+    if (removeState) this.states.delete(key);
+    if (this.activeKey === key) this.activeKey = null;
+    return existed;
   }
 
   resetWeapon(key = this.activeKey, { remove = false } = {}) {
@@ -209,6 +265,7 @@ export class BusterRuntime {
       cycleRemaining: 0,
       rechargeDelayRemaining: 0,
       lastContext: null,
+      recoveryLocked: false,
       firing: false,
     });
     return true;
@@ -224,6 +281,7 @@ export class BusterRuntime {
         cycleRemaining: state.cycleRemaining,
         rechargeDelayRemaining: state.rechargeDelayRemaining,
         lastContext: state.lastContext,
+        recoveryLocked: Boolean(state.recoveryLocked),
       })),
     };
   }
@@ -240,6 +298,7 @@ export class BusterRuntime {
         cycleRemaining: Math.max(0, finite(saved.cycleRemaining)),
         rechargeDelayRemaining: Math.max(0, finite(saved.rechargeDelayRemaining)),
         lastContext: saved.lastContext ?? null,
+        recoveryLocked: Boolean(saved.recoveryLocked),
         firing: false,
       });
     }
@@ -275,6 +334,7 @@ export class BusterRuntime {
       energyCost: stats.energyCost,
       cycleRemaining: state.cycleRemaining,
       rechargeDelayRemaining: state.rechargeDelayRemaining,
+      recoveryLocked: Boolean(state.recoveryLocked),
       ready: this.canFire(key),
       blockReason: this.getBlockReason(key),
       reservedProjectiles: this.getReservedProjectileCount(),

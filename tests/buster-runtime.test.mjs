@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as THREE from 'three';
 
+import { ProjectileSystem } from '../src/ProjectileSystem.js';
 import { BusterRuntime } from '../src/buster/BusterRuntime.js';
+import {
+  consumeBusterExecutionStagger,
+  createBusterExecutionStaggerLedger,
+  resolveBusterStaggerDuration,
+} from '../src/buster/BusterStagger.js';
 import {
   getBallisticApexProgress,
   getClusterDirections,
@@ -23,26 +30,70 @@ function plan(overrides = {}) {
   };
 }
 
-test('battery waits 0.65 seconds, recharges at maxEnergy / 1.8, and resumes held fire', () => {
+function createProjectileHarness(enemies = []) {
+  const damage = [];
+  const game = {
+    scene: new THREE.Scene(),
+    enemies,
+    elapsedTime: 0,
+    player: {
+      radius: 0.42,
+      root: { position: new THREE.Vector3(100, 0, 100) },
+    },
+    getProjectileTargets: () => enemies,
+    damageEnemy: (enemy, amount, meta) => {
+      damage.push({ enemy, amount, meta });
+      return amount;
+    },
+    addExplosion: () => true,
+    addParticleBurst: () => {},
+  };
+  return { game, system: new ProjectileSystem(game), damage };
+}
+
+function target(id, x, z, { height = 1.8 } = {}) {
+  return {
+    id,
+    dead: false,
+    radius: 0.42,
+    collisionHeight: height,
+    root: { position: new THREE.Vector3(x, 0, z) },
+  };
+}
+
+test('held firing uses a magazine, insufficient requests lock, and update never fires stale contexts', () => {
   const shots = [];
   const runtime = new BusterRuntime({ executeShot: (execution) => shots.push(execution) });
   runtime.equip(plan());
-  const first = runtime.fire({ marker: 'first' });
-  assert.equal(first.ok, true);
-  runtime.releaseReservation(first.execution.reservationToken);
-  assert.equal(runtime.getHudState().energy, 4);
+  for (let index = 0; index < 3; index += 1) {
+    const shot = runtime.fire({ marker: `shot-${index}` });
+    assert.equal(shot.ok, true);
+    runtime.releaseReservation(shot.execution.reservationToken);
+    runtime.update(0.25, { activeWeaponKey: 'build-a', fireHeld: true });
+  }
+  assert.equal(runtime.getHudState().energy, 0);
+  assert.deepEqual(runtime.requestFire(), { ok: false, reason: 'ENERGY', recoveryLocked: true });
+  assert.equal(runtime.getHudState().blockReason, 'RECOVERY');
 
-  runtime.update(0.64);
-  assert.equal(runtime.getHudState().energy, 4);
-  runtime.update(0.06);
-  assert.ok(Math.abs(runtime.getHudState().energy - (4 + 6 / 1.8 * 0.05)) < 1e-9);
-
-  runtime.update(1, { fireHeld: true, context: { marker: 'held' } });
-  assert.equal(shots.length, 2);
-  assert.equal(shots[1].context.marker, 'held');
+  runtime.update(2.2, { activeWeaponKey: 'build-a', fireHeld: true });
+  assert.equal(runtime.getHudState().energy, 6);
+  assert.equal(runtime.getHudState().recoveryLocked, false);
+  assert.equal(shots.length, 3, 'resource updates never autonomously reuse the last firing context');
 });
 
-test('inactive registered weapons recharge independently', () => {
+test('released active batteries recharge at full rate after 0.65 seconds', () => {
+  const runtime = new BusterRuntime({ executeShot: () => true });
+  runtime.equip(plan());
+  const shot = runtime.fire();
+  runtime.releaseReservation(shot.execution.reservationToken);
+
+  runtime.update(0.64, { activeWeaponKey: 'build-a', fireHeld: false });
+  assert.equal(runtime.getHudState().energy, 4);
+  runtime.update(0.06, { activeWeaponKey: 'build-a', fireHeld: false });
+  assert.ok(Math.abs(runtime.getHudState().energy - (4 + 6 / 1.8 * 0.05)) < 1e-9);
+});
+
+test('inactive registered weapons recharge independently at half speed', () => {
   const runtime = new BusterRuntime({ executeShot: () => true });
   runtime.equip(plan({ weaponKey: 'build-a' }));
   const shotA = runtime.fire();
@@ -51,9 +102,78 @@ test('inactive registered weapons recharge independently', () => {
   const shotB = runtime.fire();
   runtime.releaseReservation(shotB.execution.reservationToken);
 
-  runtime.update(1.65);
-  assert.ok(runtime.getHudState('build-a').energy > 4);
-  assert.ok(runtime.getHudState('build-b').energy > 5);
+  runtime.update(1.65, { activeWeaponKey: 'build-b', fireHeld: false });
+  assert.ok(Math.abs(runtime.getHudState('build-a').energy - (4 + (6 / 1.8) * 0.5)) < 1e-9);
+  assert.ok(Math.abs(runtime.getHudState('build-b').energy - 8) < 1e-9);
+});
+
+test('cycling Mega and two Custom weapons preserves three independent batteries', () => {
+  const runtime = new BusterRuntime({ executeShot: () => true });
+  for (const weaponKey of ['megaBuster', 'build-a', 'build-b']) {
+    runtime.equip(plan({ weaponKey, maxEnergy: 6, energyCost: 2, cycleTime: 0.2 }));
+    const shot = runtime.fire({ weaponKey });
+    runtime.releaseReservation(shot.execution.reservationToken);
+  }
+  assert.deepEqual(
+    ['megaBuster', 'build-a', 'build-b'].map((key) => runtime.getHudState(key).energy),
+    [4, 4, 4],
+  );
+
+  runtime.update(1.65, { activeWeaponKey: 'megaBuster', fireHeld: true });
+  assert.equal(runtime.getHudState('megaBuster').energy, 4);
+  assert.ok(Math.abs(runtime.getHudState('build-a').energy - (4 + (6 / 1.8) * 0.5)) < 1e-9);
+  assert.ok(Math.abs(runtime.getHudState('build-b').energy - (4 + (6 / 1.8) * 0.5)) < 1e-9);
+
+  for (const weaponKey of ['megaBuster', 'build-a', 'build-b']) {
+    runtime.equip(runtime.plans.get(weaponKey));
+    const shot = runtime.fire({ weaponKey, pass: 2 });
+    assert.equal(shot.ok, true);
+    runtime.releaseReservation(shot.execution.reservationToken);
+  }
+  assert.equal(runtime.getHudState('megaBuster').energy, 2);
+  assert.ok(Math.abs(runtime.getHudState('build-a').energy - (2 + (6 / 1.8) * 0.5)) < 1e-9);
+  assert.ok(Math.abs(runtime.getHudState('build-b').energy - (2 + (6 / 1.8) * 0.5)) < 1e-9);
+});
+
+test('held and tapped insufficient requests enter the same recovery lock', () => {
+  for (const fireHeld of [false, true]) {
+    const runtime = new BusterRuntime({ executeShot: () => true });
+    runtime.equip(plan({ energyCost: 4, cycleTime: 0 }));
+    const shot = runtime.fire();
+    runtime.releaseReservation(shot.execution.reservationToken);
+    runtime.update(0, { activeWeaponKey: 'build-a', fireHeld });
+    assert.deepEqual(runtime.requestFire(), { ok: false, reason: 'ENERGY', recoveryLocked: true });
+    assert.equal(runtime.getHudState().recoveryLocked, true);
+  }
+});
+
+test('a failed Energy request does not restart the successful-shot recharge delay', () => {
+  const runtime = new BusterRuntime({ executeShot: () => true });
+  runtime.equip(plan({ energyCost: 4, cycleTime: 0 }));
+  const shot = runtime.fire();
+  runtime.releaseReservation(shot.execution.reservationToken);
+  runtime.update(0.3, { activeWeaponKey: 'build-a', fireHeld: false });
+  runtime.requestFire();
+  assert.ok(Math.abs(runtime.getHudState().rechargeDelayRemaining - 0.35) < 1e-9);
+  runtime.update(0.34, { activeWeaponKey: 'build-a', fireHeld: true });
+  assert.equal(runtime.getHudState().energy, 2);
+  runtime.update(0.02, { activeWeaponKey: 'build-a', fireHeld: true });
+  assert.ok(runtime.getHudState().energy > 2);
+});
+
+test('recovery lock remains closed at a partial shot threshold and clears only at full', () => {
+  const runtime = new BusterRuntime({ executeShot: () => true });
+  runtime.equip(plan({ energyCost: 4, cycleTime: 0 }));
+  const shot = runtime.fire();
+  runtime.releaseReservation(shot.execution.reservationToken);
+  runtime.requestFire();
+  runtime.update(1.25, { activeWeaponKey: 'build-a', fireHeld: true });
+  assert.ok(runtime.getHudState().energy >= 4);
+  assert.equal(runtime.canFire(), false);
+  assert.equal(runtime.getHudState().blockReason, 'RECOVERY');
+  runtime.update(0.6, { activeWeaponKey: 'build-a', fireHeld: true });
+  assert.equal(runtime.getHudState().energy, 6);
+  assert.equal(runtime.canFire(), true);
 });
 
 test('peak projectile reservation is atomic and rejected shots spend no energy', () => {
@@ -67,6 +187,7 @@ test('peak projectile reservation is atomic and rejected shots spend no energy',
   const second = runtime.fire();
   assert.deepEqual(second, { ok: false, reason: 'PROJECTILE_CAP' });
   assert.equal(runtime.getHudState().energy, before);
+  assert.equal(runtime.getHudState().recoveryLocked, false);
   runtime.releaseReservation(first.execution.reservationToken);
   assert.equal(runtime.getReservedProjectileCount(), 0);
 });
@@ -102,7 +223,7 @@ test('spawn rejection and thrown callbacks roll battery and reservation back', (
 
 test('resource snapshots restore every independent battery after a temporary range plan', () => {
   const runtime = new BusterRuntime({ executeShot: () => true });
-  runtime.equip(plan({ weaponKey: 'megaBuster', maxEnergy: 9, energyCost: 3 }));
+  runtime.equip(plan({ weaponKey: 'megaBuster', maxEnergy: 6, energyCost: 2 }));
   const megaShot = runtime.fire({ marker: 'mega' });
   runtime.releaseReservation(megaShot.execution.reservationToken);
   runtime.equip(plan({ weaponKey: 'build-a', energyCost: 1 }));
@@ -116,9 +237,228 @@ test('resource snapshots restore every independent battery after a temporary ran
   assert.equal(runtime.restoreResourceSnapshot(before), true);
 
   assert.equal(runtime.activeKey, 'build-a');
-  assert.equal(runtime.getHudState('megaBuster').energy, 6);
+  assert.equal(runtime.getHudState('megaBuster').energy, 4);
   assert.equal(runtime.getHudState('build-a').energy, 5);
   assert.equal(runtime.states.get('build-a').lastContext.marker, 'custom');
+});
+
+test('registering a new revision changes future shots without cancelling in-flight executions', () => {
+  const cancelled = [];
+  const runtime = new BusterRuntime({
+    executeShot: () => true,
+    cancelExecution: (entry) => cancelled.push(entry),
+  });
+  runtime.equip(plan({ revision: 1 }));
+  const first = runtime.fire({ marker: 'old' });
+  runtime.register(plan({ revision: 2 }));
+  assert.equal(cancelled.length, 0);
+  assert.equal(runtime.getReservedProjectileCount(), 1);
+  assert.equal(first.execution.plan.revision, 1);
+
+  runtime.update(0.25, { activeWeaponKey: 'build-a', fireHeld: false });
+  const second = runtime.fire({ marker: 'new' });
+  assert.equal(second.ok, true);
+  assert.equal(second.execution.plan.revision, 2);
+  runtime.releaseReservation(first.execution.reservationToken);
+  runtime.releaseReservation(second.execution.reservationToken);
+});
+
+test('unregistering an invalid future plan can preserve its in-flight execution', () => {
+  const cancelled = [];
+  const runtime = new BusterRuntime({
+    executeShot: () => true,
+    cancelExecution: (entry) => cancelled.push(entry),
+  });
+  runtime.equip(plan());
+  const shot = runtime.fire();
+  assert.equal(runtime.unregister('build-a'), true);
+  assert.equal(runtime.canFire('build-a'), false);
+  assert.equal(runtime.getReservedProjectileCount(), 1);
+  assert.equal(cancelled.length, 0);
+  runtime.releaseReservation(shot.execution.reservationToken);
+});
+
+test('execution stagger contributes only increases in the largest packet per target', () => {
+  const ledger = createBusterExecutionStaggerLedger('execution-1');
+  const first = { id: 'enemy-a' };
+  const second = { id: 'enemy-b' };
+
+  assert.equal(consumeBusterExecutionStagger(ledger, first, 0.03, 1), 0.03);
+  assert.equal(consumeBusterExecutionStagger(ledger, first, 0.2, 5), 0.17);
+  assert.equal(consumeBusterExecutionStagger(ledger, first, 0.12, 3), 0);
+  assert.equal(consumeBusterExecutionStagger(ledger, second, 0.2, 5), 0.2);
+  assert.equal(consumeBusterExecutionStagger(ledger, first, 0.3, 0), 0);
+  assert.ok(Math.abs(consumeBusterExecutionStagger(ledger, first, 0.3, 5) - 0.1) < 1e-9);
+});
+
+test('stagger resolution leaves legacy packets unchanged and supports shared explosion metadata', () => {
+  const target = { id: 'enemy-a' };
+  assert.equal(resolveBusterStaggerDuration({ stagger: 0.2 }, target, 5), 0.2);
+
+  const busterExecutionStaggerLedger = createBusterExecutionStaggerLedger('execution-2');
+  const direct = { stagger: 0.04, busterExecutionStaggerLedger };
+  const explosion = { stagger: 0.3, busterExecutionStaggerLedger };
+  assert.equal(resolveBusterStaggerDuration(direct, target, 2), 0.04);
+  assert.equal(resolveBusterStaggerDuration(explosion, target, 8), 0.26);
+});
+
+test('controlled projectiles use swept collision and choose the earliest target deterministically', () => {
+  const farther = target('farther', 0, 8);
+  const nearer = target('nearer', 0, 5);
+  const { system, damage } = createProjectileHarness([farther, nearer]);
+  system.spawn({
+    owner: 'player',
+    position: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, 1),
+    speed: 12,
+    range: 20,
+    radius: 0.1,
+    damage: 7,
+    controller: {},
+  });
+
+  system.update(1);
+  assert.equal(damage.length, 1);
+  assert.equal(damage[0].enemy.id, 'nearer');
+  assert.equal(system.active.length, 0);
+});
+
+test('swept controlled hits preserve exposed geometric weak points ahead of the body capsule', () => {
+  const enemy = target('weak', 0, 5);
+  const weakPoint = new THREE.Vector3(0, 1, 4.15);
+  enemy.resolveProjectileHit = (position, projectileRadius) => (
+    position.distanceTo(weakPoint) <= projectileRadius + 0.22
+      ? { hitPartId: 'weak-core', weakPointHit: true, hitPosition: position.clone() }
+      : null
+  );
+  const { system, damage } = createProjectileHarness([enemy]);
+  system.spawn({
+    owner: 'player',
+    position: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, 1),
+    speed: 12,
+    range: 20,
+    radius: 0.1,
+    damage: 7,
+    controller: {},
+  });
+
+  system.update(1);
+  assert.equal(damage.length, 1);
+  assert.equal(damage[0].meta.weakPointHit, true);
+  assert.equal(damage[0].meta.hitPartId, 'weak-core');
+});
+
+test('Delay advance is chronologically arbitrated before a later swept impact', () => {
+  const enemy = target('enemy', 0, 5);
+  const { system, damage } = createProjectileHarness([enemy]);
+  const events = [];
+  const data = { elapsed: 0 };
+  system.spawn({
+    owner: 'player',
+    position: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, 1),
+    speed: 10,
+    range: 20,
+    radius: 0.1,
+    damage: 7,
+    controllerData: data,
+    controller: {
+      onAdvance: ({ projectile, dt, travel, previousPosition }) => {
+        const before = data.elapsed;
+        data.elapsed += dt;
+        if (before < 0.3 && data.elapsed >= 0.3) {
+          const fraction = dt > 0 ? (0.3 - before) / dt : 0;
+          projectile.mesh.position.copy(previousPosition).addScaledVector(projectile.direction, travel * fraction);
+          events.push('delay');
+          return { dispose: true, reason: 'delayTrigger' };
+        }
+        return null;
+      },
+      onEnemyImpact: () => {
+        events.push('impact');
+        return { dispose: true };
+      },
+      onDispose: ({ reason }) => events.push(`dispose:${reason}`),
+    },
+  });
+
+  system.update(1);
+  assert.deepEqual(events, ['delay', 'dispose:delayTrigger']);
+  assert.equal(damage.length, 0);
+});
+
+test('Delay arbitration is frame-rate stable at 30, 60, and 120 Hz', () => {
+  for (const hz of [30, 60, 120]) {
+    const enemy = target(`enemy-${hz}`, 0, 5);
+    const { system, damage } = createProjectileHarness([enemy]);
+    const events = [];
+    const data = { elapsed: 0 };
+    system.spawn({
+      owner: 'player',
+      position: new THREE.Vector3(0, 1, 0),
+      direction: new THREE.Vector3(0, 0, 1),
+      speed: 10,
+      range: 20,
+      radius: 0.1,
+      damage: 7,
+      controller: {
+        onAdvance: ({ projectile, dt, travel, previousPosition }) => {
+          const before = data.elapsed;
+          data.elapsed += dt;
+          if (before < 0.3 && data.elapsed + 1e-9 >= 0.3) {
+            const fraction = dt > 0 ? Math.max(0, Math.min(1, (0.3 - before) / dt)) : 0;
+            projectile.mesh.position.copy(previousPosition).addScaledVector(projectile.direction, travel * fraction);
+            events.push('delay');
+            return { dispose: true, reason: 'delayTrigger' };
+          }
+          return null;
+        },
+        onEnemyImpact: () => {
+          events.push('impact');
+          return { dispose: true };
+        },
+        onDispose: ({ reason }) => events.push(`dispose:${reason}`),
+      },
+    });
+    for (let frame = 0; frame < hz && system.active.length > 0; frame += 1) {
+      system.update(1 / hz);
+    }
+    assert.deepEqual(events, ['delay', 'dispose:delayTrigger'], `${hz} Hz event order`);
+    assert.equal(damage.length, 0, `${hz} Hz damage`);
+  }
+});
+
+test('Apex wins an exact-time tie with enemy impact for controlled projectiles', () => {
+  const tangentEnemy = target('tangent', 0.52, 5, { height: 4 });
+  const { system, damage } = createProjectileHarness([tangentEnemy]);
+  const events = [];
+  system.spawn({
+    owner: 'player',
+    position: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, 1),
+    speed: 10,
+    range: 10,
+    radius: 0.1,
+    damage: 7,
+    arcHeight: 2,
+    endY: 1,
+    controller: {
+      onApexCrossing: () => {
+        events.push('apex');
+        return { dispose: true, reason: 'apexTrigger' };
+      },
+      onEnemyImpact: () => {
+        events.push('impact');
+        return { dispose: true };
+      },
+      onDispose: ({ reason }) => events.push(`dispose:${reason}`),
+    },
+  });
+
+  system.update(1);
+  assert.deepEqual(events, ['apex', 'dispose:apexTrigger']);
+  assert.equal(damage.length, 0);
 });
 
 test('spread, cluster, and ballistic samples are deterministic and elevation-aware', () => {

@@ -62,6 +62,11 @@
       <div class="weapon-hud-cluster" aria-label="Weapon status">
         <div id="arm-hotbar" class="arm-hotbar" aria-label="Arm weapon tabs"></div>
 
+        <div class="weapon-telemetry-panel" aria-live="polite">
+          <strong id="weapon-status" class="weapon-status">No active arm telemetry</strong>
+          <div id="weapon-stats" class="weapon-stats" aria-label="Active weapon statistics"></div>
+        </div>
+
         <section id="weapon-gauge" class="legends-gauge legends-weapon-gauge" aria-label="Weapon energy and output gauge">
           <div class="gauge-stack gauge-double">
             <div class="gauge-cap gauge-cap-top"></div>
@@ -141,11 +146,26 @@
                     <span class="roll-service-eyebrow">Roll's Custom Buster Lab</span>
                     <h2 id="buster-lab-heading">Program a physical Buster chassis</h2>
                   </div>
-                  <div id="buster-lab-persistence" class="buster-lab-persistence">Workshop data is stored locally on this device.</div>
+                  <div id="buster-lab-persistence" class="buster-lab-persistence" role="status" aria-live="polite">
+                    Workshop data is stored locally on this device.
+                  </div>
                 </header>
                 <p class="roll-service-copy">
-                  Only this workshop stockpile, discovered recipes, chassis, and saved Busters persist. General inventory and ruin progress do not.
+                  Lab ownership is scoped to this campaign. Blueprints contain tuning and program instructions only; equipping one requires physical materialization.
                 </p>
+                <div id="buster-storage-status" class="buster-storage-status" hidden>
+                  <span id="buster-storage-mode">Storage ready</span>
+                  <span id="buster-storage-context"></span>
+                  <div class="buster-storage-actions">
+                    <button type="button" data-action="buster-export-recovery">Export recovery copy</button>
+                    <button type="button" data-action="buster-export-blueprint">Export blueprint</button>
+                    <button type="button" data-action="buster-import-blueprint">Import blueprint</button>
+                    <button id="buster-storage-reload" type="button" data-action="buster-storage-reload" hidden>Reload durable state</button>
+                    <button id="buster-adopt-v1" type="button" data-action="buster-adopt-v1" hidden>Adopt legacy Lab data</button>
+                    <button type="button" data-action="buster-new-campaign">New campaign</button>
+                    <input id="buster-blueprint-import-file" type="file" accept="application/json,.json" hidden />
+                  </div>
+                </div>
                 <p id="buster-lab-warning" class="buster-lab-warning" role="alert" hidden></p>
 
                 <div class="buster-build-tabs" role="tablist" aria-label="Buster configuration">
@@ -157,9 +177,41 @@
 
                 <div id="buster-mega-panel" class="buster-mega-panel" hidden>
                   <h3>Mega Buster calibration</h3>
-                  <p>Fixed Pulse shot · 9 Energy · 3 Energy per shot · four physical calibration sockets · ratings cap at 10.</p>
+                  <p>Fixed Pulse shot · 6 Energy · 2 Energy per shot · four physical calibration sockets · ratings cap at 10.</p>
                   <div id="buster-mega-calibrations" class="buster-mega-calibrations"></div>
                 </div>
+
+                <section id="buster-blueprint-panel" class="buster-editor-card buster-blueprint-panel" aria-labelledby="buster-blueprint-heading" hidden>
+                  <div class="buster-card-heading">
+                    <div>
+                      <h3 id="buster-blueprint-heading">Ownership-free blueprints</h3>
+                      <p class="buster-program-help">Design and simulate up to eight revealed programs before committing physical parts.</p>
+                    </div>
+                    <strong id="buster-blueprint-count">0 / 8</strong>
+                  </div>
+                  <div class="buster-blueprint-controls">
+                    <label>
+                      <span>Blueprint</span>
+                      <select id="buster-blueprint-select" data-buster-blueprint-select aria-label="Selected Buster blueprint"></select>
+                    </label>
+                    <button type="button" data-action="buster-blueprint-new">New</button>
+                    <button type="button" data-action="buster-blueprint-save">Save blueprint</button>
+                    <button type="button" data-action="buster-blueprint-delete">Delete</button>
+                  </div>
+                  <p id="buster-blueprint-status" class="buster-blueprint-status" role="status" aria-live="polite"></p>
+                  <div class="buster-materialization-actions">
+                    <label>
+                      <span>Target chassis</span>
+                      <select id="buster-materialize-target" aria-label="Materialization target chassis">
+                        <option value="build-a">Build A</option>
+                        <option value="build-b">Build B</option>
+                      </select>
+                    </label>
+                    <button type="button" data-action="buster-materialize-suggest">Plan materialization</button>
+                    <button id="buster-materialize-confirm" type="button" data-action="buster-materialize-confirm" hidden>Confirm atomic materialization</button>
+                  </div>
+                  <div id="buster-materialization-suggestion" class="buster-materialization-suggestion" hidden></div>
+                </section>
 
                 <div id="buster-custom-editor" class="buster-custom-editor">
                   <section class="buster-editor-card" aria-labelledby="buster-tuning-heading">
@@ -210,6 +262,7 @@
                       <button type="button" data-action="buster-equip" data-slot-index="1">Equip slot 2</button>
                       <button type="button" data-action="buster-equip" data-slot-index="2">Equip slot 3</button>
                       <button type="button" data-action="buster-test-range">Test in Range</button>
+                      <button id="buster-test-sandbox" type="button" data-action="buster-test-sandbox" hidden>Test in Sandbox Dungeon</button>
                     </div>
                   </section>
                   <section class="buster-editor-card" aria-labelledby="buster-inventory-heading">
@@ -224,6 +277,42 @@
                     <strong id="buster-recipe-scrap">0 identified scrap</strong>
                   </div>
                   <div id="buster-recipe-list" class="buster-recipe-list"></div>
+                </section>
+
+                <section id="buster-benchmark-panel" class="buster-editor-card buster-benchmark-panel" aria-labelledby="buster-benchmark-heading" hidden>
+                  <div class="buster-card-heading">
+                    <div>
+                      <h3 id="buster-benchmark-heading">Benchmark range</h3>
+                      <p class="buster-program-help">The arena uses the production compiler and runtime with ephemeral resources and no rewards.</p>
+                    </div>
+                    <strong id="buster-benchmark-status">Ready</strong>
+                  </div>
+                  <div class="buster-benchmark-controls">
+                    <label>Targets
+                      <select data-buster-benchmark="targetCount">
+                        <option value="1">One</option>
+                        <option value="2">Two</option>
+                        <option value="4">Four</option>
+                      </select>
+                    </label>
+                    <label>Profile
+                      <select data-buster-benchmark="profile">
+                        <option value="stationary">Stationary</option>
+                        <option value="moving">Moving</option>
+                        <option value="armored">Armored</option>
+                        <option value="weakPoint">Weak point</option>
+                        <option value="elite">Elite</option>
+                      </select>
+                    </label>
+                    <label>Normalized depth
+                      <select data-buster-benchmark="depthLevel">
+                        <option value="1">Level 1</option>
+                        <option value="5">Level 5</option>
+                        <option value="10">Level 10</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div id="buster-benchmark-metrics" class="buster-benchmark-metrics" aria-live="polite"></div>
                 </section>
               </section>
             </div>
@@ -319,12 +408,12 @@
           </div>
           <div id="buster-debug-view" class="buster-debug-view" data-debug-view="buster" hidden>
             <section class="buster-debug-section" aria-labelledby="buster-debug-heading">
-              <span class="roll-service-eyebrow">Custom Buster v0.1</span>
+              <span class="roll-service-eyebrow">Custom Buster v0.2</span>
               <h2 id="buster-debug-heading">Complete testing kit</h2>
               <p>
-                Grant one fresh physical copy of every craftable module, all six Mega calibrations,
-                full recipe discovery, and Build B if it is missing. Existing builds, sockets,
-                assignments, salvage, and scrap are not changed.
+                Grant one debug physical copy of every physical module and Mega calibration, full
+                recipe discovery, Build B if missing, and the exact named-part bill plus 66 scrap
+                required to exercise every original fabrication route once.
               </p>
               <button id="buster-debug-grant" type="button" data-action="buster-debug-grant">
                 Grant one of each Buster part
@@ -333,8 +422,8 @@
                 No debug kits granted in this save.
               </output>
               <small>
-                This action is repeatable so both physical chassis can own separate copies. Built-in
-                Pulse and On Impact nodes do not require inventory instances.
+                This action is repeatable. After Delay and Terminal Relay are chassis instructions;
+                debug-origin copies never unlock scrap-only replication by themselves.
               </small>
             </section>
           </div>

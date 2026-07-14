@@ -1,12 +1,19 @@
 import {
+  BUSTER_CHASSIS_CAPACITY,
   BUSTER_CHILD_RANGE_MULTIPLIER,
   BUSTER_EFFECTIVE_POWER_CAP_MULTIPLIER,
+  BUSTER_LEVEL_10_POWER_SCALAR,
+  BUSTER_POWER_SOFT_CAP_ASYMPTOTE,
+  BUSTER_POWER_SOFT_CAP_STEEPNESS,
+  applyBusterPowerSoftCap,
+  getBusterCombatDepthLevel,
+  getBusterCombatDepthScalar,
   getBusterMaxEnergy,
   getBusterModuleDefinition,
   getBusterTuningMultiplier,
 } from './catalog.js';
 import { deepFreezeBusterValue } from './model.js';
-import { validateBusterBuild } from './validation.js';
+import { validateBusterProgram } from './validation.js';
 
 export class BusterCompileError extends Error {
   constructor(errors) {
@@ -127,6 +134,9 @@ function getTriggerConfiguration(trigger) {
     carrierAllocation: trigger.carrierAllocation,
     childTransfer: trigger.childTransfer,
     disposeCarrier: true,
+    carrierTerminationBehavior: trigger.event === 'delay' || trigger.event === 'apex'
+      ? 'deliver-child'
+      : 'trigger-child',
   };
 }
 
@@ -159,7 +169,7 @@ function createDescription({
   if (splitter) stages.push(splitter.label);
   stages.push(payload.type === 'explosion' ? 'Explosion' : payload.type === 'pulse' ? 'Native Pulse' : 'Native Impact');
   const projectileWord = stats.projectileCount === 1 ? 'projectile' : 'projectiles';
-  const capNote = capClipped > 0 ? ' Output is clipped by the 125% chassis power cap.' : '';
+  const capNote = capClipped > 0 ? ' Output is compressed by the chassis power soft cap.' : '';
   return `${stages.join(' -> ')}. ${stats.projectileCount} ${projectileWord} at ${stats.perChildPower} power each; ${stats.energyCost} energy per shot.${capNote}`;
 }
 
@@ -173,10 +183,14 @@ function getRevision(build, options) {
  * plan. Invalid builds throw BusterCompileError unless throwOnError is false.
  */
 export function compileBusterBuild(build, options = {}) {
-  const validation = validateBusterBuild(build, options);
+  const validation = validateBusterProgram(build, options);
   if (!validation.valid) {
     if (options?.throwOnError === false) {
-      return deepFreezeBusterValue({ ok: false, errors: validation.errors });
+      return deepFreezeBusterValue({
+        ok: false,
+        errors: validation.errors,
+        warnings: validation.warnings,
+      });
     }
     throw new BusterCompileError(validation.errors);
   }
@@ -202,7 +216,14 @@ export function compileBusterBuild(build, options = {}) {
   const powerMultiplier = getBusterTuningMultiplier(sourceBuild.tuning.power);
   const rangeMultiplier = getBusterTuningMultiplier(sourceBuild.tuning.range);
   const rapidMultiplier = getBusterTuningMultiplier(sourceBuild.tuning.rapid);
+  const combatDepthLevel = getBusterCombatDepthLevel(options?.combatDepthLevel ?? 1);
+  const level10PowerScalar = Number.isFinite(Number(options?.level10PowerScalar))
+    ? Number(options.level10PowerScalar)
+    : BUSTER_LEVEL_10_POWER_SCALAR;
+  const resolvedLevel10PowerScalar = getBusterCombatDepthScalar(10, level10PowerScalar);
+  const combatDepthScalar = getBusterCombatDepthScalar(combatDepthLevel, resolvedLevel10PowerScalar);
   const tunedPower = emitter.basePower * powerMultiplier;
+  const depthScaledPower = tunedPower * combatDepthScalar;
   const rootRange = emitter.baseRange * rangeMultiplier;
   const childRange = rootRange * BUSTER_CHILD_RANGE_MULTIPLIER;
   const baseRapid = emitter.baseRapid * rapidMultiplier;
@@ -230,8 +251,17 @@ export function compileBusterBuild(build, options = {}) {
     outputPower: tunedPower,
     allocation: { root: tunedPower },
   }));
+  powerLedger.push(ledgerEntry({
+    stage: 'combat-depth',
+    moduleId: null,
+    scope: 'program',
+    inputPower: tunedPower,
+    multiplier: combatDepthScalar,
+    outputPower: depthScaledPower,
+    allocation: { root: depthScaledPower },
+  }));
 
-  let rootPacketPower = tunedPower;
+  let rootPacketPower = depthScaledPower;
   if (rootGuidance) {
     const inputPower = rootPacketPower;
     rootPacketPower *= rootGuidance.powerMultiplier;
@@ -291,14 +321,27 @@ export function compileBusterBuild(build, options = {}) {
   }
 
   const rawEffectivePower = carrierPowerRaw + terminalPowerRaw;
-  const effectivePowerCap = tunedPower * BUSTER_EFFECTIVE_POWER_CAP_MULTIPLIER;
-  const capMultiplier = rawEffectivePower > effectivePowerCap ? effectivePowerCap / rawEffectivePower : 1;
+  const effectivePowerCap = depthScaledPower * BUSTER_EFFECTIVE_POWER_CAP_MULTIPLIER;
+  const rawEffectiveMultiplier = depthScaledPower > 0 ? rawEffectivePower / depthScaledPower : 0;
+  const softCappedMultiplier = applyBusterPowerSoftCap(rawEffectiveMultiplier);
+  const capMultiplier = rawEffectiveMultiplier > 0
+    ? softCappedMultiplier / rawEffectiveMultiplier
+    : 1;
   const carrierPower = carrierPowerRaw * capMultiplier;
   const terminalTotalPower = terminalPowerRaw * capMultiplier;
   const effectivePower = carrierPower + terminalTotalPower;
   const capClipped = rawEffectivePower - effectivePower;
+  const powerSoftCap = {
+    active: rawEffectiveMultiplier > BUSTER_EFFECTIVE_POWER_CAP_MULTIPLIER,
+    knee: BUSTER_EFFECTIVE_POWER_CAP_MULTIPLIER,
+    asymptote: BUSTER_POWER_SOFT_CAP_ASYMPTOTE,
+    steepness: BUSTER_POWER_SOFT_CAP_STEEPNESS,
+    rawMultiplier: rawEffectiveMultiplier,
+    effectiveMultiplier: softCappedMultiplier,
+    compression: capClipped,
+  };
   powerLedger.push(ledgerEntry({
-    stage: 'effective-cap',
+    stage: 'power-soft-cap',
     moduleId: null,
     scope: trigger ? 'program' : 'root',
     inputPower: rawEffectivePower,
@@ -323,12 +366,60 @@ export function compileBusterBuild(build, options = {}) {
   const stagger = getImpactStagger(payloadConfiguration, emitter, perChildPower);
   const carrierStagger = getNativeCarrierStagger(emitter, carrierPower);
   const peakProjectileReservation = trigger ? Math.max(1, projectileCount) : Math.max(1, projectileCount);
+  const nominalRootLifetime = rootRange / emitter.projectileSpeed;
+  const nominalChildLifetime = childRange / emitter.projectileSpeed;
+  const triggerActivation = trigger ? {
+    event: trigger.event,
+    nominalTime: trigger.event === 'delay'
+      ? trigger.delay
+      : trigger.event === 'apex'
+        ? nominalRootLifetime * 0.5
+        : nominalRootLifetime,
+    nominalProgress: trigger.event === 'delay'
+      ? trigger.delay / nominalRootLifetime
+      : trigger.event === 'apex'
+        ? 0.5
+        : 1,
+    aimDependent: trigger.event === 'apex' || trigger.event === 'impact',
+    remainingNominalWindow: trigger.event === 'delay'
+      ? nominalRootLifetime - trigger.delay
+      : null,
+  } : null;
+  const nominalCarrierProjectileSeconds = trigger
+    ? Math.min(nominalRootLifetime, Math.max(0, triggerActivation.nominalTime))
+    : 0;
+  const projectileSecondsPerExecution = trigger
+    ? nominalCarrierProjectileSeconds + projectileCount * nominalChildLifetime
+    : projectileCount * nominalRootLifetime;
+  const occupancy = {
+    peakMovingProjectiles: peakProjectileReservation,
+    nominalRootLifetime,
+    nominalChildLifetime,
+    nominalCarrierProjectileSeconds,
+    projectileSecondsPerExecution,
+    estimatedSteadyMovingProjectiles: projectileSecondsPerExecution / cycleTime,
+  };
+  const trajectory = {
+    type: emitter.trajectory,
+    speed: emitter.projectileSpeed,
+    rootRange,
+    childRange,
+    nominalRootLifetime,
+    nominalChildLifetime,
+    trigger: triggerActivation,
+  };
   const stats = {
     basePower: emitter.basePower,
     tunedPower,
+    depthScaledPower,
+    combatDepthLevel,
+    combatDepthScalar,
+    level10PowerScalar: resolvedLevel10PowerScalar,
     effectivePower,
     rawEffectivePower,
     effectivePowerCap,
+    rawEffectiveMultiplier,
+    effectivePowerMultiplier: softCappedMultiplier,
     perChildPower,
     carrierPower,
     maxEnergy,
@@ -346,6 +437,10 @@ export function compileBusterBuild(build, options = {}) {
     stagger,
     carrierStagger,
     peakProjectileReservation,
+    programCapacityUsed: validation.semanticCapacityUsed,
+    programCapacityMaximum: BUSTER_CHASSIS_CAPACITY,
+    powerSoftCap,
+    occupancy,
     tuningMultipliers: {
       power: powerMultiplier,
       range: rangeMultiplier,
@@ -463,6 +558,7 @@ export function compileBusterBuild(build, options = {}) {
       moduleId: definition.id,
       moduleInstanceId: node.moduleInstanceId,
       energyCost: definition.energyCost,
+      semanticCapacity: definition.semanticCapacity ?? 1,
     };
   });
   const cycleEntries = sequences.ordered
@@ -488,11 +584,27 @@ export function compileBusterBuild(build, options = {}) {
     power: {
       basePower: emitter.basePower,
       tunedPower,
+      depthScaledPower,
+      combatDepthLevel,
+      combatDepthScalar,
+      level10PowerScalar: resolvedLevel10PowerScalar,
       effectivePowerCap,
+      rawEffectiveMultiplier,
+      effectivePowerMultiplier: softCappedMultiplier,
       rawEffectivePower,
       effectivePower,
       capClipped,
+      softCap: powerSoftCap,
       entries: powerLedger,
+    },
+    capacity: {
+      used: validation.semanticCapacityUsed,
+      maximum: BUSTER_CHASSIS_CAPACITY,
+      entries: energyEntries.map(({ nodeId, moduleId, semanticCapacity }) => ({
+        nodeId,
+        moduleId,
+        semanticCapacity,
+      })),
     },
   };
 
@@ -521,6 +633,13 @@ export function compileBusterBuild(build, options = {}) {
       cycleTime,
       triggerDelay: trigger?.delay ?? 0,
     },
+    trajectory,
+    occupancy,
+    powerSoftCap: powerSoftCap.active ? powerSoftCap : null,
+  };
+  const programOrder = {
+    root: sequences.root.map((node) => node.nodeId),
+    child: sequences.child.map((node) => node.nodeId),
   };
   const revision = getRevision(build, options);
   const description = createDescription({
@@ -547,6 +666,8 @@ export function compileBusterBuild(build, options = {}) {
     source: { build: sourceBuild, revision },
     sourceBuild,
     sourceRevision: revision,
+    warnings: validation.warnings,
+    programOrder,
     emitter: emitterConfiguration,
     rootGuidance: Boolean(rootGuidance),
     trigger: triggerConfiguration,
@@ -559,6 +680,8 @@ export function compileBusterBuild(build, options = {}) {
     childPower: terminalTotalPower,
     perChildPower,
     peakProjectileReservation,
+    trajectory,
+    occupancy,
     ledger,
     powerLedger,
     stats,

@@ -1,14 +1,28 @@
 export const BUSTER_SCHEMA_VERSION = 1;
-export const BUSTER_RULESET_VERSION = 'custom-buster-v0.1';
+export const BUSTER_RULESET_VERSION = 'custom-buster-v0.2';
 export const BUSTER_CHASSIS_CAPACITY = 5;
 export const BUSTER_TUNING_TOTAL = 16;
 export const BUSTER_TUNING_MIN = 1;
 export const BUSTER_TUNING_MAX = 10;
 export const BUSTER_CHILD_RANGE_MULTIPLIER = 0.65;
-export const BUSTER_EFFECTIVE_POWER_CAP_MULTIPLIER = 1.25;
+// Kept as a compatibility alias for the old hard-cap symbol. In v0.2 this is
+// the knee of a continuous soft cap rather than a maximum.
+export const BUSTER_POWER_SOFT_CAP_KNEE = 1.25;
+export const BUSTER_POWER_SOFT_CAP_ASYMPTOTE = 1.5;
+export const BUSTER_POWER_SOFT_CAP_STEEPNESS = 4;
+export const BUSTER_EFFECTIVE_POWER_CAP_MULTIPLIER = BUSTER_POWER_SOFT_CAP_KNEE;
+export const BUSTER_TRIGGER_WINDOW_WARNING_SECONDS = 0.1;
+export const BUSTER_TRIGGER_TIME_EPSILON = 1e-9;
 export const BUSTER_RECHARGE_DELAY = 0.65;
 export const BUSTER_RECHARGE_DURATION = 1.8;
 export const BUSTER_MAX_MOVING_PROJECTILES = 24;
+export const BUSTER_LEVEL_10_POWER_SCALAR = 1;
+export const BUSTER_BALANCE_SEARCH = Object.freeze({
+  level10PowerScalar: Object.freeze({ min: 1, max: 1.25, step: 0.01 }),
+  mortarPower: Object.freeze({ min: 12, max: 18, step: 0.5, preferred: 15 }),
+  ttkTolerance: 0.15,
+  dominanceMargin: 0.02,
+});
 
 function deepFreeze(value, seen = new Set()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return value;
@@ -22,6 +36,7 @@ function moduleDefinition(definition) {
     energyCost: 0,
     cycleDelay: 0,
     physical: true,
+    semanticCapacity: 1,
     compatibleEmitterTags: ['pulse', 'ballistic'],
     ...definition,
   });
@@ -41,6 +56,15 @@ export const CUSTOM_BUSTER_RULESET = deepFreeze({
   maxEnergyPerEnergyRating: 1,
   childRangeMultiplier: BUSTER_CHILD_RANGE_MULTIPLIER,
   effectivePowerCapMultiplier: BUSTER_EFFECTIVE_POWER_CAP_MULTIPLIER,
+  powerSoftCap: {
+    knee: BUSTER_POWER_SOFT_CAP_KNEE,
+    asymptote: BUSTER_POWER_SOFT_CAP_ASYMPTOTE,
+    steepness: BUSTER_POWER_SOFT_CAP_STEEPNESS,
+  },
+  triggerWindowWarningSeconds: BUSTER_TRIGGER_WINDOW_WARNING_SECONDS,
+  triggerTimeEpsilon: BUSTER_TRIGGER_TIME_EPSILON,
+  level10PowerScalar: BUSTER_LEVEL_10_POWER_SCALAR,
+  balanceSearch: BUSTER_BALANCE_SEARCH,
   rechargeDelay: BUSTER_RECHARGE_DELAY,
   rechargeDuration: BUSTER_RECHARGE_DURATION,
   maxMovingProjectiles: BUSTER_MAX_MOVING_PROJECTILES,
@@ -64,8 +88,8 @@ export const MEGA_BUSTER_BASE_PROFILE = deepFreeze({
   chassisId: 'mega-buster-fixed',
   emitterModuleId: 'pulseBolt',
   tuning: { power: 4, energy: 4, range: 4, rapid: 4 },
-  baseMaxEnergy: 9,
-  energyCost: 3,
+  baseMaxEnergy: 6,
+  energyCost: 2,
   socketCount: 4,
 });
 
@@ -85,7 +109,7 @@ export const BUSTER_MODULE_CATALOG = deepFreeze({
     baseRange: 6.9,
     baseRapid: 4.2,
     projectileSpeed: 9.5,
-    energyCost: 1,
+    energyCost: 2,
     trajectory: 'linear',
     nativePayload: 'pulse',
     emitterTags: ['projectile', 'pulse'],
@@ -98,7 +122,7 @@ export const BUSTER_MODULE_CATALOG = deepFreeze({
     baseRange: 6.2,
     baseRapid: 1.15,
     projectileSpeed: 5.8,
-    energyCost: 1,
+    energyCost: 3,
     trajectory: 'ballistic',
     nativePayload: 'ballistic',
     emitterTags: ['projectile', 'ballistic', 'mortar'],
@@ -107,8 +131,8 @@ export const BUSTER_MODULE_CATALOG = deepFreeze({
     id: 'pursuitGuidance',
     label: 'Pursuit Guidance',
     kind: 'modifier',
-    energyCost: 1,
-    cycleDelay: 0.05,
+    energyCost: 0,
+    cycleDelay: 0,
     powerMultiplier: 0.9,
     guidance: 'pursuit',
   }),
@@ -116,7 +140,7 @@ export const BUSTER_MODULE_CATALOG = deepFreeze({
     id: 'atApex',
     label: 'At Apex',
     kind: 'trigger',
-    energyCost: 1,
+    energyCost: 0,
     cycleDelay: 0.08,
     event: 'apex',
     delay: 0,
@@ -126,11 +150,12 @@ export const BUSTER_MODULE_CATALOG = deepFreeze({
   }),
   onImpact: moduleDefinition({
     id: 'onImpact',
-    label: 'On Impact',
+    label: 'Terminal Relay',
     kind: 'trigger',
-    energyCost: 1,
+    energyCost: 0,
     cycleDelay: 0.08,
     physical: false,
+    builtIn: true,
     event: 'impact',
     delay: 0,
     carrierAllocation: 0.2,
@@ -140,12 +165,14 @@ export const BUSTER_MODULE_CATALOG = deepFreeze({
     id: 'afterDelay',
     label: 'After Delay',
     kind: 'trigger',
-    energyCost: 1,
+    energyCost: 0,
     cycleDelay: 0.08,
+    physical: false,
+    builtIn: true,
     event: 'delay',
     delay: 0.6,
     carrierAllocation: 0,
-    childTransfer: 1.05,
+    childTransfer: 1.04,
   }),
   spread3: moduleDefinition({
     id: 'spread3',
@@ -168,12 +195,15 @@ export const BUSTER_MODULE_CATALOG = deepFreeze({
     pattern: 'radial',
     radialCount: 5,
     totalPowerMultiplier: 1.2,
+    childOnly: true,
   }),
   pulsePayload: moduleDefinition({
     id: 'pulsePayload',
     label: 'Native Pulse',
     kind: 'payload',
     physical: false,
+    builtIn: true,
+    semanticCapacity: 0,
     payload: 'pulse',
     replacesDirect: false,
   }),
@@ -208,4 +238,32 @@ export function getBusterTuningMultiplier(rating) {
 
 export function getBusterMaxEnergy(energyRating) {
   return 2 + energyRating;
+}
+
+export function applyBusterPowerSoftCap(rawMultiplier) {
+  const numeric = Number(rawMultiplier);
+  if (!Number.isFinite(numeric)) return 0;
+  const raw = Math.max(0, numeric);
+  if (raw <= BUSTER_POWER_SOFT_CAP_KNEE) return raw;
+  const excess = raw - BUSTER_POWER_SOFT_CAP_KNEE;
+  return BUSTER_POWER_SOFT_CAP_KNEE
+    + excess / (1 + BUSTER_POWER_SOFT_CAP_STEEPNESS * excess);
+}
+
+export function getBusterCombatDepthLevel(value = 1) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  return Math.max(1, Math.min(10, Math.round(numeric)));
+}
+
+export function getBusterCombatDepthScalar(
+  combatDepthLevel = 1,
+  level10Scalar = BUSTER_LEVEL_10_POWER_SCALAR,
+) {
+  const level = getBusterCombatDepthLevel(combatDepthLevel);
+  const endpoint = Number(level10Scalar);
+  const normalizedEndpoint = Number.isFinite(endpoint)
+    ? Math.max(1, Math.min(1.25, endpoint))
+    : BUSTER_LEVEL_10_POWER_SCALAR;
+  return 1 + ((level - 1) / 9) * (normalizedEndpoint - 1);
 }

@@ -783,14 +783,14 @@ export class CombatSystem {
     if (!releasedShot
       && !this.pendingCompiledBusterShot
       && fireRequested
-      && runtime.canFire(weaponKey)) {
+      && runtime.requestFire(weaponKey).ok) {
       const intent = {
         weaponKey,
         buildRevision,
         aimWorld: aimWorld.clone(),
         applyGroundAimMuzzleOffset,
         target: this.getTargetingLockTarget(),
-        noRewards: Boolean(this.game.busterTestRange?.active),
+        noRewards: Boolean(this.game.busterTestRange?.active || this.game.busterSandboxSession?.active),
       };
       if (poseReadyBeforeHold) {
         firingContext = this._createCompiledBusterFiringContext(intent);
@@ -815,7 +815,7 @@ export class CombatSystem {
         aimWorld,
         applyGroundAimMuzzleOffset,
         target: this.getTargetingLockTarget(),
-        noRewards: Boolean(this.game.busterTestRange?.active),
+        noRewards: Boolean(this.game.busterTestRange?.active || this.game.busterSandboxSession?.active),
       });
       const cycleTime = plan.stats?.cycleTime ?? plan.cycleTime ?? 0.24;
       player.holdProjectileFiringPose(
@@ -948,7 +948,6 @@ export class CombatSystem {
     this._clearLockOn();
     this._hideGrenadePreview();
 
-    const previousPlan = this.game.getActiveBusterPlan?.() ?? null;
     const changed = this.game.player.switchArmWeapon(slotIndex);
 
     if (!changed) {
@@ -957,11 +956,6 @@ export class CombatSystem {
 
     this._clearPendingAttacks();
     const nextPlan = this.game.getActiveBusterPlan?.() ?? null;
-    const previousKey = previousPlan?.weaponKey ?? previousPlan?.buildId;
-    const nextKey = nextPlan?.weaponKey ?? nextPlan?.buildId;
-    if (previousKey && previousKey !== nextKey) {
-      this.game.busterRuntime?.cancelBuild(previousKey, 'weaponSwitch');
-    }
     const swapSpeed = this.game.player.stats.swapSpeed ?? 0;
     this.swapTimer = Math.max(0.12, 0.34 * (1 - THREE.MathUtils.clamp(swapSpeed, 0, 0.65)));
     if (!nextPlan) this.getCurrentWeaponState();
@@ -1162,6 +1156,16 @@ export class CombatSystem {
                 ? 'arc'
                 : 'manual';
       const color = isMega ? '#7ee7ff' : '#f2c84b';
+      const energyCost = Math.max(0, Number(runtimeHud.energyCost ?? planStats.energyCost) || 0);
+      const shotsRemaining = energyCost > 0 ? Math.floor(runtimeHud.energy / energyCost) : 0;
+      const shotsPerMagazine = energyCost > 0 ? Math.floor(runtimeHud.maxEnergy / energyCost) : 0;
+      const resourceState = runtimeHud.recoveryLocked
+        ? 'RECOVERY'
+        : runtimeHud.cycleRemaining > 0
+          ? 'CYCLE'
+          : runtimeHud.blockReason === 'ENERGY'
+            ? 'ENERGY'
+            : 'READY';
       return {
         name: isMega ? 'Mega Buster' : weapon?.name ?? compiledPlan.name ?? 'Custom Buster',
         typeLabel: isMega ? 'Mega Buster' : 'Custom Buster',
@@ -1171,6 +1175,12 @@ export class CombatSystem {
         energyReserve: runtimeHud.energy,
         maxEnergyReserve: runtimeHud.maxEnergy,
         energyPercent: runtimeHud.energyPercent,
+        energyCost,
+        shotsRemaining,
+        shotsPerMagazine,
+        cycleRemaining: runtimeHud.cycleRemaining ?? 0,
+        recoveryLocked: Boolean(runtimeHud.recoveryLocked),
+        resourceState,
         output: 1,
         maxOutput: 1,
         outputPercent: 0,
@@ -1183,7 +1193,7 @@ export class CombatSystem {
         outputWarning: false,
         overheatState: false,
         activeWeaponType: isMega ? 'megaBuster' : 'customBusterArm',
-        status: runtimeHud.ready ? 'READY' : runtimeHud.blockReason === 'ENERGY' ? 'RECHARGING' : runtimeHud.blockReason,
+        status: resourceState,
         stats: {
           attack: Number((planStats.effectivePower ?? planStats.basePower ?? 0).toFixed(1)),
           energy: Math.round(planStats.maxEnergy ?? runtimeHud.maxEnergy ?? 0),

@@ -1,23 +1,45 @@
 import { RollSalvageStorage } from '../RollSalvageStorage.js';
 import {
   BUSTER_RECIPE_LIST,
+  LEGACY_AFTER_DELAY_RECIPE,
   getBusterRecipe,
   getRecipeDiscoveryState,
 } from './BusterRecipeCatalog.js';
 import {
   BUSTER_MODULE_LIST,
+  BUSTER_RULESET_VERSION,
   MEGA_BUSTER_CALIBRATION_CATALOG,
   getBusterModuleDefinition,
 } from './catalog.js';
 import { validateBusterBuild } from './validation.js';
+import {
+  BUSTER_LAB_LEGACY_STORAGE_KEY,
+  BUSTER_LAB_ENVELOPE_VERSION,
+  BUSTER_LAB_V1_IMPORT_CLAIM_KEY,
+  BusterLabConflictError,
+  createBusterLabEnvelope,
+  createBusterLabRecoveryBundle,
+  getBusterLabLockName,
+  getBusterLabStorageKeys,
+  inspectBusterLabStorageEvent,
+  parseBusterLabEnvelope,
+  resolveBusterLabLockManager,
+  resolveSaveContext,
+  rotateSaveContext,
+  withBusterLabLock,
+} from './BusterLabPersistence.js';
 
-export const BUSTER_LAB_STORAGE_KEY = 'ruinDigger.busterLab.v1';
-export const BUSTER_LAB_STORAGE_VERSION = 1;
-export const BUSTER_LAB_RULESET_VERSION = 'custom-buster-v0.1';
+// Compatibility export for callers that need to inspect or explicitly adopt
+// the old global payload. Durable v2 state uses context-scoped storageKeys.
+export const BUSTER_LAB_STORAGE_KEY = BUSTER_LAB_LEGACY_STORAGE_KEY;
+export const BUSTER_LAB_STORAGE_VERSION = BUSTER_LAB_ENVELOPE_VERSION;
+export const BUSTER_LAB_RULESET_VERSION = BUSTER_RULESET_VERSION;
 export const SECOND_BUSTER_CHASSIS_COST = 20;
 export const MAX_BUSTER_CHASSIS = 2;
+export const MAX_BUSTER_BLUEPRINTS = 8;
+export const LEGACY_BUSTER_INVENTORY_CAPACITY = 40;
 
-const NON_PHYSICAL_BUILTIN_MODULE_IDS = new Set(['onImpact', 'pulsePayload']);
+const NON_PHYSICAL_BUILTIN_MODULE_IDS = new Set(['onImpact', 'afterDelay', 'pulsePayload']);
 
 export const STARTER_BUSTER_IDS = Object.freeze({
   chassisId: 'chassis-a',
@@ -81,6 +103,35 @@ function sanitizeProgram(program = {}) {
   };
 }
 
+function getProgramNodesInGraphOrder(program = {}) {
+  const nodes = Array.isArray(program.nodes) ? program.nodes : [];
+  const edges = Array.isArray(program.edges) ? program.edges : [];
+  const nodeById = new Map(nodes.map((node) => [node.nodeId, node]));
+  const outgoing = new Map();
+  for (const edge of edges) {
+    if (!outgoing.has(edge.from)) outgoing.set(edge.from, new Map());
+    const ports = outgoing.get(edge.from);
+    if (!ports.has(edge.port)) ports.set(edge.port, edge.to);
+  }
+  const ordered = [];
+  const visited = new Set();
+  const visit = (nodeId) => {
+    if (!nodeId || visited.has(nodeId)) return;
+    const node = nodeById.get(nodeId);
+    if (!node) return;
+    visited.add(nodeId);
+    ordered.push(node);
+    const ports = outgoing.get(nodeId);
+    visit(ports?.get('next'));
+    visit(ports?.get('child'));
+  };
+  visit(program.rootNodeId);
+  // Invalid/disconnected blueprints still need a stable, lossless suggestion
+  // record. Valid programs are entirely ordered by their authored edges.
+  for (const node of nodes) visit(node.nodeId);
+  return ordered;
+}
+
 function sanitizeBuild(build) {
   if (!build || typeof build !== 'object') return null;
   const buildId = typeof build.buildId === 'string' ? build.buildId : '';
@@ -88,9 +139,11 @@ function sanitizeBuild(build) {
   if (!buildId || !chassisId) return null;
   const sanitized = {
     schemaVersion: build.schemaVersion ?? 1,
-    rulesetVersion: typeof build.rulesetVersion === 'string' && build.rulesetVersion
-      ? build.rulesetVersion
-      : BUSTER_LAB_RULESET_VERSION,
+    rulesetVersion: build.rulesetVersion === 'custom-buster-v0.1'
+      ? BUSTER_LAB_RULESET_VERSION
+      : typeof build.rulesetVersion === 'string' && build.rulesetVersion
+        ? build.rulesetVersion
+        : BUSTER_LAB_RULESET_VERSION,
     buildId,
     chassisId,
     tuning: normalizeTuning(build.tuning),
@@ -99,6 +152,115 @@ function sanitizeBuild(build) {
   if (typeof build.name === 'string' && build.name) sanitized.name = build.name;
   if (typeof build.label === 'string' && build.label) sanitized.label = build.label;
   return sanitized;
+}
+
+function sanitizeBlueprint(blueprint, { fallbackId = '' } = {}) {
+  if (!blueprint || typeof blueprint !== 'object') return null;
+  const blueprintId = typeof blueprint.blueprintId === 'string' && blueprint.blueprintId
+    ? blueprint.blueprintId
+    : typeof blueprint.id === 'string' && blueprint.id
+      ? blueprint.id
+      : fallbackId;
+  if (!blueprintId) return null;
+  const program = sanitizeProgram(blueprint.program ?? blueprint.source?.program);
+  // Blueprints describe behavior and tuning. Physical ownership is assigned
+  // only during materialization and can never leak into this source record.
+  for (const node of program.nodes) delete node.moduleInstanceId;
+  return {
+    blueprintId,
+    schemaVersion: blueprint.schemaVersion ?? blueprint.source?.schemaVersion ?? 1,
+    rulesetVersion: typeof blueprint.rulesetVersion === 'string' && blueprint.rulesetVersion
+      ? blueprint.rulesetVersion
+      : BUSTER_LAB_RULESET_VERSION,
+    name: typeof blueprint.name === 'string' && blueprint.name
+      ? blueprint.name.slice(0, 80)
+      : 'Untitled Blueprint',
+    tuning: normalizeTuning(blueprint.tuning ?? blueprint.source?.tuning),
+    program,
+    revision: Math.max(1, nonNegativeInteger(blueprint.revision, 1)),
+    sourceContextId: typeof blueprint.sourceContextId === 'string'
+      ? blueprint.sourceContextId
+      : null,
+    imported: Boolean(blueprint.imported),
+  };
+}
+
+function normalizeBlueprints(blueprints) {
+  const result = [];
+  const ids = new Set();
+  for (const raw of Array.isArray(blueprints) ? blueprints : []) {
+    const blueprint = sanitizeBlueprint(raw);
+    if (!blueprint || ids.has(blueprint.blueprintId) || result.length >= MAX_BUSTER_BLUEPRINTS) continue;
+    ids.add(blueprint.blueprintId);
+    result.push(blueprint);
+  }
+  return result;
+}
+
+function normalizeFabricationHistory(history, moduleInstances = []) {
+  const normalized = {};
+  for (const [moduleId, raw] of Object.entries(plainObject(history))) {
+    if (!getBusterModuleDefinition(moduleId) || !raw || typeof raw !== 'object') continue;
+    normalized[moduleId] = {
+      originalCrafts: nonNegativeInteger(raw.originalCrafts),
+      replicationCrafts: nonNegativeInteger(raw.replicationCrafts),
+      firstOriginalSequence: raw.firstOriginalSequence == null
+        ? null
+        : nonNegativeInteger(raw.firstOriginalSequence),
+    };
+  }
+  // A v1 fabricated instance is proof that the original named-part route was
+  // completed, so importing it unlocks replication without inventing parts.
+  for (const instance of moduleInstances) {
+    if (instance.origin !== 'fabricated' || !getBusterModuleDefinition(instance.moduleId)) continue;
+    const entry = normalized[instance.moduleId] ?? {
+      originalCrafts: 0,
+      replicationCrafts: 0,
+      firstOriginalSequence: null,
+    };
+    entry.originalCrafts = Math.max(1, entry.originalCrafts);
+    if (entry.firstOriginalSequence == null) {
+      entry.firstOriginalSequence = nonNegativeInteger(instance.fabricationSequence, 0);
+    }
+    normalized[instance.moduleId] = entry;
+  }
+  return normalized;
+}
+
+function sanitizeLegacyLocation(location) {
+  if (location?.kind === 'megaSocket') {
+    const socketIndex = Math.trunc(Number(location.socketIndex));
+    if (socketIndex >= 0 && socketIndex <= 3) return { kind: 'megaSocket', socketIndex };
+  }
+  return { kind: 'inventory' };
+}
+
+function normalizeLegacyBusterParts(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const records = [];
+  const ids = new Set();
+  for (const raw of Array.isArray(source.records) ? source.records : []) {
+    const legacyId = typeof raw?.legacyId === 'string' ? raw.legacyId : '';
+    const calibrationInstanceId = typeof raw?.calibrationInstanceId === 'string'
+      ? raw.calibrationInstanceId
+      : '';
+    if (!legacyId || !calibrationInstanceId || ids.has(legacyId)) continue;
+    ids.add(legacyId);
+    records.push({
+      legacyId,
+      legacyType: typeof raw.legacyType === 'string' ? raw.legacyType : null,
+      calibrationInstanceId,
+      item: plainObject(raw.item),
+      location: sanitizeLegacyLocation(raw.location),
+      starter: Boolean(raw.starter),
+      createdSequence: nonNegativeInteger(raw.createdSequence),
+    });
+  }
+  return {
+    records,
+    nextSequence: Math.max(1, nonNegativeInteger(source.nextSequence, 1)),
+    starterRegistered: Boolean(source.starterRegistered),
+  };
 }
 
 function sanitizeModuleInstance(module) {
@@ -121,6 +283,7 @@ function sanitizeModuleInstance(module) {
       : module.origin === 'debug'
         ? 'debug'
         : 'fabricated',
+    fabricationRoute: module.fabricationRoute === 'replication' ? 'replication' : 'original',
     fabricationSequence: nonNegativeInteger(module.fabricationSequence),
   };
 }
@@ -246,15 +409,23 @@ export function createDefaultBusterLabState() {
       snapshot: cloneJson(build),
     }],
     assignments: { slots: { 1: null, 2: null } },
+    blueprints: [],
+    nextBlueprintId: 1,
+    fabricationHistory: {},
     megaCalibrations: {
       instances: [],
       slots: [null, null, null, null],
       nextInstanceId: 1,
       revision: 1,
     },
+    legacyBusterParts: {
+      records: [],
+      nextSequence: 1,
+      starterRegistered: false,
+    },
     migrations: {
       starterChassisGranted: true,
-      applied: ['buster-lab-v1', 'starter-build-a-v1'],
+      applied: ['buster-lab-v1', 'starter-build-a-v1', 'buster-lab-state-v2'],
     },
     nextInstanceId: 1,
   };
@@ -327,7 +498,11 @@ function legacyMappedState(raw) {
     chassisDrafts: raw.chassisDrafts ?? raw.drafts ?? [],
     chassisRevisions: raw.chassisRevisions ?? raw.revisions ?? [],
     assignments: raw.assignments ?? {},
+    blueprints: raw.blueprints ?? [],
+    nextBlueprintId: raw.nextBlueprintId ?? 1,
+    fabricationHistory: raw.fabricationHistory ?? {},
     megaCalibrations: raw.megaCalibrations ?? raw.calibrations ?? {},
+    legacyBusterParts: raw.legacyBusterParts ?? {},
     migrations: raw.migrations ?? {},
     nextInstanceId: raw.nextInstanceId ?? 1,
   };
@@ -403,6 +578,7 @@ function sanitizeState(raw) {
   const chassisRevisions = (Array.isArray(source.chassisRevisions) ? source.chassisRevisions : [])
     .map(sanitizeRevision)
     .filter(Boolean);
+  const blueprints = normalizeBlueprints(source.blueprints);
 
   return {
     version: BUSTER_LAB_STORAGE_VERSION,
@@ -414,7 +590,11 @@ function sanitizeState(raw) {
     chassisDrafts,
     chassisRevisions,
     assignments: normalizeAssignments(source.assignments),
+    blueprints,
+    nextBlueprintId: Math.max(1, nonNegativeInteger(source.nextBlueprintId, 1)),
+    fabricationHistory: normalizeFabricationHistory(source.fabricationHistory, moduleInstances),
     megaCalibrations: normalizeMegaCalibrations(source.megaCalibrations),
+    legacyBusterParts: normalizeLegacyBusterParts(source.legacyBusterParts),
     migrations: plainObject(source.migrations),
     nextInstanceId: Math.max(1, nonNegativeInteger(source.nextInstanceId, 1)),
   };
@@ -487,6 +667,74 @@ function quarantineUnknownSavedBuilds(state) {
   return state;
 }
 
+function stripPhysicalInstanceFromAfterDelayNodes(build) {
+  if (!build?.program?.nodes) return;
+  for (const node of build.program.nodes) {
+    if (node.moduleId === 'afterDelay') node.moduleInstanceId = null;
+  }
+}
+
+function applyAfterDelayBuiltInMigration(state) {
+  if (state.migrations?.afterDelayBuiltInV2?.completed) return state;
+  const removed = state.moduleInstances.filter((entry) => entry.moduleId === 'afterDelay');
+  const fabricatedRefunded = removed.filter((entry) => entry.origin === 'fabricated').length;
+  const debugRemoved = removed.filter((entry) => entry.origin === 'debug').length;
+  state.moduleInstances = state.moduleInstances.filter((entry) => entry.moduleId !== 'afterDelay');
+
+  for (const collection of [state.chassisBuilds, state.chassisDrafts]) {
+    for (const build of collection) stripPhysicalInstanceFromAfterDelayNodes(build);
+  }
+  for (const revision of state.chassisRevisions) stripPhysicalInstanceFromAfterDelayNodes(revision.snapshot);
+  for (const blueprint of state.blueprints ?? []) stripPhysicalInstanceFromAfterDelayNodes(blueprint);
+
+  if (fabricatedRefunded > 0) {
+    state.rollSalvage.identifiedScrap += LEGACY_AFTER_DELAY_RECIPE.scrapCost * fabricatedRefunded;
+    const partId = 'clusterBurstSequencer';
+    const existing = state.rollSalvage.parts[partId] ?? {
+      id: partId,
+      name: 'Cluster Burst Sequencer',
+      family: 'Reaverbot Part',
+      aspect: null,
+      tier: 'common',
+      color: '#c7d0d6',
+      description: '',
+      craftingTags: [],
+      exampleUses: [],
+      quantity: 0,
+      lastSource: null,
+    };
+    existing.quantity += fabricatedRefunded;
+    state.rollSalvage.parts[partId] = existing;
+    if (!state.discovery.salvageTypes.includes(partId)) {
+      state.discovery.salvageTypes.push(partId);
+      state.discovery.history.push({
+        partId,
+        name: existing.name,
+        sequence: state.discovery.history.length + 1,
+        source: { migration: 'after-delay-built-in-v2' },
+      });
+    }
+  }
+
+  state.discovery.recipeHistory.afterDelay = {
+    ...(state.discovery.recipeHistory.afterDelay ?? {}),
+    recipeId: 'afterDelay',
+    retired: true,
+    retirementReason: 'built-in-v0.2',
+  };
+  state.migrations.afterDelayBuiltInV2 = {
+    completed: true,
+    totalRemoved: removed.length,
+    fabricatedRefunded,
+    debugRemoved,
+    refundedScrap: LEGACY_AFTER_DELAY_RECIPE.scrapCost * fabricatedRefunded,
+    refundedParts: fabricatedRefunded > 0 ? { clusterBurstSequencer: fabricatedRefunded } : {},
+  };
+  const applied = Array.isArray(state.migrations.applied) ? state.migrations.applied : [];
+  state.migrations.applied = [...new Set([...applied, 'after-delay-built-in-v2'])];
+  return state;
+}
+
 export function migrateBusterLabState(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new TypeError('Buster Lab save is not an object.');
@@ -497,7 +745,24 @@ export function migrateBusterLabState(raw) {
     throw new RangeError(`Buster Lab save version ${version} is newer than supported version ${BUSTER_LAB_STORAGE_VERSION}.`);
   }
   const mapped = version < BUSTER_LAB_STORAGE_VERSION ? legacyMappedState(raw) : raw;
-  return quarantineUnknownSavedBuilds(applyStarterMigration(sanitizeState(mapped)));
+  const state = quarantineUnknownSavedBuilds(
+    applyAfterDelayBuiltInMigration(applyStarterMigration(sanitizeState(mapped))),
+  );
+  if (version < BUSTER_LAB_STORAGE_VERSION
+    && !state.migrations.unlinkedLegacyCalibrationsV2) {
+    const linked = new Set((state.legacyBusterParts?.records ?? [])
+      .map((record) => record.calibrationInstanceId));
+    const unlinkedIds = state.megaCalibrations.instances
+      .map((instance) => instance.instanceId)
+      .filter((instanceId) => !linked.has(instanceId));
+    state.migrations.unlinkedLegacyCalibrationsV2 = {
+      permanent: true,
+      count: unlinkedIds.length,
+      instanceIds: unlinkedIds,
+      reason: 'v1-destructive-conversion-had-no-authoritative-item-snapshot',
+    };
+  }
+  return state;
 }
 
 function validateBuildGraph(build) {
@@ -523,6 +788,19 @@ export function validateBusterLabState(state) {
   if (!state || typeof state !== 'object') return ['Buster Lab state is missing.'];
   if (state.chassisInstances.length > MAX_BUSTER_CHASSIS) {
     errors.push(`Only ${MAX_BUSTER_CHASSIS} physical Buster chassis may exist.`);
+  }
+  if ((state.blueprints?.length ?? 0) > MAX_BUSTER_BLUEPRINTS) {
+    errors.push(`Only ${MAX_BUSTER_BLUEPRINTS} ownership-free blueprints may be stored.`);
+  }
+  const blueprintIds = new Set();
+  for (const blueprint of state.blueprints ?? []) {
+    if (!blueprint.blueprintId || blueprintIds.has(blueprint.blueprintId)) {
+      errors.push('Blueprint ids must be non-empty and unique.');
+    }
+    blueprintIds.add(blueprint.blueprintId);
+    if (blueprint.program.nodes.some((node) => node.moduleInstanceId)) {
+      errors.push(`Blueprint ${blueprint.blueprintId} contains a physical module assignment.`);
+    }
   }
   if (state.migrations.starterChassisGranted) {
     const quarantinedBuildIds = new Set((state.migrations.unknownModuleQuarantine ?? [])
@@ -648,6 +926,42 @@ export function validateBusterLabState(state) {
   if (Object.values(calibrationRatings).some((rating) => rating < 1 || rating > 10)) {
     errors.push('Installed Mega calibrations must keep every rating between 1 and 10.');
   }
+  const legacyRecords = state.legacyBusterParts?.records ?? [];
+  if (legacyRecords.filter((entry) => entry.location?.kind === 'inventory').length
+    > LEGACY_BUSTER_INVENTORY_CAPACITY) {
+    errors.push(`Legacy Buster shadow inventory exceeds ${LEGACY_BUSTER_INVENTORY_CAPACITY} records.`);
+  }
+  const legacyIds = new Set();
+  const linkedCalibrationIds = new Set();
+  const occupiedLegacySockets = new Set();
+  for (const record of legacyRecords) {
+    if (legacyIds.has(record.legacyId)) errors.push(`Duplicate legacy Buster record ${record.legacyId}.`);
+    legacyIds.add(record.legacyId);
+    if (linkedCalibrationIds.has(record.calibrationInstanceId)) {
+      errors.push(`Calibration ${record.calibrationInstanceId} is linked to multiple legacy Buster records.`);
+    }
+    linkedCalibrationIds.add(record.calibrationInstanceId);
+    const calibration = state.megaCalibrations.instances.find((entry) => (
+      entry.instanceId === record.calibrationInstanceId
+    ));
+    if (!calibration) {
+      errors.push(`Legacy Buster record ${record.legacyId} has no linked calibration.`);
+      continue;
+    }
+    if (record.legacyType && calibration.legacyType !== record.legacyType) {
+      errors.push(`Legacy Buster record ${record.legacyId} has a mismatched calibration type.`);
+    }
+    if (record.location?.kind === 'megaSocket') {
+      const socketIndex = record.location.socketIndex;
+      if (occupiedLegacySockets.has(socketIndex)) errors.push(`Multiple legacy Buster records use socket ${socketIndex}.`);
+      occupiedLegacySockets.add(socketIndex);
+      if (state.megaCalibrations.slots[socketIndex] !== record.calibrationInstanceId) {
+        errors.push(`Legacy Buster record ${record.legacyId} is not reciprocally linked to socket ${socketIndex}.`);
+      }
+    } else if (state.megaCalibrations.slots.includes(record.calibrationInstanceId)) {
+      errors.push(`Inventory legacy Buster record ${record.legacyId} has an installed calibration.`);
+    }
+  }
   return errors;
 }
 
@@ -656,6 +970,15 @@ export class BusterLabValidationError extends Error {
     super(errors.join(' '));
     this.name = 'BusterLabValidationError';
     this.errors = [...errors];
+  }
+}
+
+export class BusterLabOperationError extends Error {
+  constructor(reason, result = null) {
+    super(result?.error?.message ?? `Buster Lab operation failed: ${reason}.`);
+    this.name = 'BusterLabOperationError';
+    this.busterReason = reason || 'operation-failed';
+    this.result = result;
   }
 }
 
@@ -687,13 +1010,167 @@ function resolveDefaultStorage() {
   }
 }
 
+function resolveDefaultStorageEventTarget() {
+  try {
+    return typeof globalThis.window?.addEventListener === 'function'
+      ? globalThis.window
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export class BusterLabStorage {
-  constructor({ storage = resolveDefaultStorage(), idFactory = null } = {}) {
+  constructor({
+    storage = resolveDefaultStorage(),
+    idFactory = null,
+    saveContextId = null,
+    lockManager = undefined,
+    lockTimeoutMs = 5_000,
+    storageEventTarget = undefined,
+  } = {}) {
     this.storage = storage;
     this.idFactory = typeof idFactory === 'function' ? idFactory : null;
+    const context = resolveSaveContext(storage, { saveContextId, idFactory: this.idFactory });
+    this.saveContextId = context.saveContextId;
+    this.storageKeys = getBusterLabStorageKeys(this.saveContextId);
+    this.lockName = getBusterLabLockName(this.saveContextId);
+    this.lockManager = resolveBusterLabLockManager(lockManager);
+    this.lockTimeoutMs = Math.max(1, Math.trunc(Number(lockTimeoutMs)) || 5_000);
+    this._lockUnavailable = Boolean(storage && !this.lockManager
+      && (lockManager === null || typeof globalThis.window !== 'undefined'));
+    this.readOnly = this._lockUnavailable;
+    this.writePauseReason = this._lockUnavailable ? 'lock-unavailable' : null;
+    this.conflict = null;
+    this.storageEventTarget = storageEventTarget === undefined
+      ? resolveDefaultStorageEventTarget()
+      : storageEventTarget;
+    this._boundStorageEvent = (event) => this._handleStorageEvent(event);
+    this._storageListenerAttached = false;
+    this._pendingStorageEvents = [];
+    this._transactionDepth = 0;
+    this._disposed = false;
     this.state = null;
+    this.revision = 0;
+    this.writeId = null;
+    this.updatedAt = null;
     this.lastWarning = null;
     this.lastSaveSucceeded = null;
+    this.pendingLegacyAdoption = false;
+  }
+
+  static async open(options = {}) {
+    const lab = new BusterLabStorage(options);
+    await lab.open();
+    return lab;
+  }
+
+  async open() {
+    this._disposed = false;
+    let state;
+    if (this.readOnly) {
+      state = this.load();
+      this.lastWarning = this.lastWarning
+        ?? 'This browser does not provide the cross-tab lock required for durable Buster Lab writes. The Lab is read-only; export and sandbox testing remain available.';
+      state = attachWarning(this.state, this.lastWarning);
+    } else {
+      try {
+        state = await this._withLock(async () => this.load());
+      } catch (error) {
+        if (error?.code !== 'BUSTER_LAB_LOCK_TIMEOUT') throw error;
+        this.readOnly = true;
+        this.writePauseReason = 'lock-timeout';
+        state = this.load();
+        this._pauseWrites('lock-timeout', {
+          warning: 'Roll could not acquire the Buster Lab save lock within five seconds. Writes are paused; reload or export a recovery copy.',
+        });
+        state = attachWarning(this.state, this.lastWarning);
+      }
+    }
+    this._attachStorageListener();
+    return state;
+  }
+
+  _attachStorageListener() {
+    if (this._storageListenerAttached || this._disposed) return false;
+    if (typeof this.storageEventTarget?.addEventListener !== 'function') return false;
+    this.storageEventTarget.addEventListener('storage', this._boundStorageEvent);
+    this._storageListenerAttached = true;
+    return true;
+  }
+
+  _detachStorageListener() {
+    if (!this._storageListenerAttached) return false;
+    this.storageEventTarget?.removeEventListener?.('storage', this._boundStorageEvent);
+    this._storageListenerAttached = false;
+    return true;
+  }
+
+  dispose() {
+    this._disposed = true;
+    this._pendingStorageEvents.length = 0;
+    this._detachStorageListener();
+  }
+
+  _pauseWrites(reason, {
+    warning = null,
+    conflict = null,
+  } = {}) {
+    this.readOnly = true;
+    this.writePauseReason = reason;
+    this.conflict = conflict ? cloneJson(conflict) : null;
+    this.lastSaveSucceeded = false;
+    this.lastWarning = warning
+      ?? 'The Buster Lab save changed in another tab. Writes are paused; reload the Lab or export a recovery copy before continuing.';
+    return this.getPersistenceStatus();
+  }
+
+  _handleStorageEvent(event) {
+    if (this._disposed) return;
+    const inspected = inspectBusterLabStorageEvent(event, {
+      storageKey: this.storageKeys.main,
+      saveContextId: this.saveContextId,
+    });
+    if (!inspected.relevant) return;
+    if (event.storageArea && this.storage && event.storageArea !== this.storage) return;
+    if (!inspected.removed && !inspected.error
+      && inspected.envelope?.revision === this.revision
+      && inspected.envelope?.writeId === this.writeId) {
+      return;
+    }
+    if (this._transactionDepth > 0) {
+      this._pendingStorageEvents.push(inspected);
+      return;
+    }
+    this._applyStorageEventInspection(inspected);
+  }
+
+  _applyStorageEventInspection(inspected) {
+    const envelope = inspected.envelope;
+    if (!inspected.removed && !inspected.error
+      && envelope?.revision === this.revision
+      && envelope?.writeId === this.writeId) {
+      return false;
+    }
+    const conflict = {
+      expectedRevision: this.revision,
+      expectedWriteId: this.writeId,
+      actualRevision: envelope?.revision ?? (inspected.removed ? 0 : null),
+      actualWriteId: envelope?.writeId ?? null,
+      removed: Boolean(inspected.removed),
+      invalid: Boolean(inspected.error),
+      message: inspected.error?.message ?? null,
+    };
+    this._pauseWrites('external-conflict', { conflict });
+    return true;
+  }
+
+  _flushPendingStorageEvents() {
+    if (this._transactionDepth > 0 || this._pendingStorageEvents.length === 0) return;
+    const pending = this._pendingStorageEvents.splice(0);
+    for (const inspected of pending) {
+      if (inspected.relevant && this._applyStorageEventInspection(inspected)) break;
+    }
   }
 
   load() {
@@ -701,7 +1178,7 @@ export class BusterLabStorage {
     let serialized = null;
     if (this.storage) {
       try {
-        serialized = this.storage.getItem(BUSTER_LAB_STORAGE_KEY);
+        serialized = this.storage.getItem(this.storageKeys.main);
       } catch (error) {
         this.lastWarning = `Roll couldn't open the Buster Lab save (${error.message}). A safe starter lab is available for this session.`;
       }
@@ -711,10 +1188,16 @@ export class BusterLabStorage {
 
     if (serialized == null) {
       this._adoptState(createDefaultBusterLabState());
-      if (this.storage && !this.lastWarning) {
+      this.revision = 0;
+      this.writeId = null;
+      this.updatedAt = null;
+      this.pendingLegacyAdoption = Boolean(this.storage?.getItem?.(BUSTER_LAB_LEGACY_STORAGE_KEY));
+      if (this.pendingLegacyAdoption) {
+        this.lastWarning = 'Roll found an older Buster Lab payload. It remains untouched until the player explicitly confirms adoption into this campaign.';
+      }
+      if (this.storage && !this.lastWarning && !this.readOnly) {
         try {
-          this.storage.setItem(BUSTER_LAB_STORAGE_KEY, JSON.stringify(this.state));
-          this.lastSaveSucceeded = true;
+          this._persistCandidate(this.state, { allowMissing: true });
         } catch (error) {
           this.lastSaveSucceeded = false;
           this.lastWarning = `Roll couldn't create the Buster Lab save (${error.message}). A safe starter lab is available for this session.`;
@@ -724,8 +1207,10 @@ export class BusterLabStorage {
     }
 
     try {
-      const parsed = JSON.parse(serialized);
-      const migrated = migrateBusterLabState(parsed);
+      const envelope = parseBusterLabEnvelope(serialized, {
+        expectedSaveContextId: this.saveContextId,
+      });
+      const migrated = this.deserialize(envelope.state);
       const quarantined = migrated.migrations?.unknownModuleQuarantine ?? [];
       if (quarantined.length > 0) {
         const names = quarantined.map((entry) => entry.buildId).join(', ');
@@ -734,61 +1219,195 @@ export class BusterLabStorage {
       const errors = validateBusterLabState(migrated);
       if (errors.length > 0) throw new BusterLabValidationError(errors);
       this._adoptState(migrated);
-      const normalizedSerialized = JSON.stringify(migrated);
-      if ((parsed.version ?? 0) !== BUSTER_LAB_STORAGE_VERSION
-        || normalizedSerialized !== JSON.stringify(parsed)) {
-        try {
-          this.storage?.setItem(BUSTER_LAB_STORAGE_KEY, normalizedSerialized);
-        } catch (error) {
-          this.lastSaveSucceeded = false;
-          this.lastWarning = `Roll updated the Buster Lab data in memory, but couldn't save the migration (${error.message}).`;
-          return attachWarning(this.state, this.lastWarning);
-        }
+      this._adoptEnvelopeMetadata(envelope);
+      if (!this.readOnly && JSON.stringify(migrated) !== JSON.stringify(envelope.state)) {
+        const migrationWarning = this.lastWarning;
+        this._persistCandidate(migrated, {
+          expectedRevision: envelope.revision,
+          expectedWriteId: envelope.writeId,
+        });
+        this.lastWarning = migrationWarning;
       }
       this.lastSaveSucceeded = true;
     } catch (error) {
-      this._adoptState(createDefaultBusterLabState());
-      this.lastSaveSucceeded = false;
-      this.lastWarning = `Roll couldn't read the saved Buster Lab data (${error.message}). A safe starter lab was restored.`;
+      this._quarantineCorruptPayload(serialized, error);
+      const backup = this._tryReadEnvelope(this.storageKeys.backup);
+      if (backup.ok) {
+        this._adoptState(this.deserialize(backup.envelope.state));
+        this._adoptEnvelopeMetadata(backup.envelope);
+        if (!this.readOnly) {
+          try { this.storage?.setItem(this.storageKeys.main, backup.raw); } catch { /* Warning below remains actionable. */ }
+        }
+        this.lastSaveSucceeded = false;
+        this.lastWarning = `Roll quarantined unreadable Buster Lab data (${error.message}) and recovered the previous backup.`;
+      } else {
+        this._adoptState(createDefaultBusterLabState());
+        const fallbackEnvelope = createBusterLabEnvelope({
+          saveContextId: this.saveContextId,
+          state: this.state,
+          revision: 1,
+        });
+        this._adoptEnvelopeMetadata(fallbackEnvelope);
+        if (!this.readOnly) {
+          try { this.storage?.setItem(this.storageKeys.main, JSON.stringify(fallbackEnvelope)); } catch { /* Session fallback still works. */ }
+        }
+        this.lastSaveSucceeded = false;
+        this.lastWarning = `Roll couldn't read the saved Buster Lab data (${error.message}). A safe starter lab was restored; the corrupt payload was retained for recovery.`;
+      }
     }
     return attachWarning(this.state, this.lastWarning);
   }
 
   loadWithStatus() {
     const state = this.load();
-    return { state, warning: this.lastWarning };
+    return {
+      state,
+      warning: this.lastWarning,
+      saveContextId: this.saveContextId,
+      revision: this.revision,
+      writeId: this.writeId,
+      readOnly: this.readOnly,
+      writePauseReason: this.writePauseReason,
+      conflict: cloneJson(this.conflict),
+      pendingLegacyAdoption: this.pendingLegacyAdoption,
+    };
+  }
+
+  getPersistenceStatus() {
+    return {
+      saveContextId: this.saveContextId,
+      revision: this.revision,
+      writeId: this.writeId,
+      updatedAt: this.updatedAt,
+      readOnly: this.readOnly,
+      writePaused: Boolean(this.writePauseReason),
+      writePauseReason: this.writePauseReason,
+      conflict: cloneJson(this.conflict),
+      warning: this.lastWarning,
+      listenerAttached: this._storageListenerAttached,
+      canReload: Boolean(this.storage),
+      canExport: true,
+    };
+  }
+
+  /**
+   * Re-reads the context payload under its named lock. This is the sole path
+   * that clears a conflict/timeout write pause; merely dismissing the warning
+   * cannot make stale in-memory state writable again.
+   */
+  async reloadFromStorage() {
+    if (!this.storage) {
+      return {
+        ok: false,
+        reason: 'storage-unavailable',
+        state: this._ensureLoaded(),
+      };
+    }
+    if (!this.lockManager) {
+      this.readOnly = true;
+      this.writePauseReason = 'lock-unavailable';
+      const state = this.load();
+      this.lastWarning = this.lastWarning
+        ?? 'This browser does not provide the cross-tab lock required for durable Buster Lab writes. The Lab remains read-only.';
+      return {
+        ok: true,
+        state,
+        ...this.getPersistenceStatus(),
+      };
+    }
+    try {
+      const result = await this._withLock(async () => {
+        this.readOnly = false;
+        this.writePauseReason = null;
+        this.conflict = null;
+        const state = this.load();
+        return {
+          ok: true,
+          state,
+          ...this.getPersistenceStatus(),
+        };
+      });
+      return result;
+    } catch (error) {
+      const reason = error?.code === 'BUSTER_LAB_LOCK_TIMEOUT'
+        ? 'lock-timeout'
+        : 'reload-failed';
+      this._pauseWrites(reason, {
+        warning: reason === 'lock-timeout'
+          ? 'Roll could not acquire the Buster Lab save lock. Writes remain paused; reload or export a recovery copy.'
+          : `Roll couldn't reload the Buster Lab save (${error.message}). Writes remain paused.`,
+      });
+      return { ok: false, reason, error, state: this.state, ...this.getPersistenceStatus() };
+    }
+  }
+
+  reloadDurableState() {
+    return this.reloadFromStorage();
+  }
+
+  /** Returns both the current in-memory envelope and all context recovery keys. */
+  exportRecoveryData() {
+    const read = (key) => {
+      try { return this.storage?.getItem?.(key) ?? null; } catch { return null; }
+    };
+    const activeEnvelope = createBusterLabEnvelope({
+      saveContextId: this.saveContextId,
+      state: this.state ?? createDefaultBusterLabState(),
+      revision: this.revision,
+      writeId: this.writeId,
+      updatedAt: this.updatedAt,
+    });
+    const payload = createBusterLabRecoveryBundle({
+      saveContextId: this.saveContextId,
+      activeEnvelope,
+      main: read(this.storageKeys.main),
+      backup: read(this.storageKeys.backup),
+      corrupt: read(this.storageKeys.corrupt),
+    });
+    return {
+      ok: true,
+      payload,
+      serialized: JSON.stringify(payload, null, 2),
+    };
+  }
+
+  exportRecoverySnapshot() {
+    return this.exportRecoveryData();
   }
 
   serialize(state = this.state ?? createDefaultBusterLabState()) {
     const migrated = migrateBusterLabState(state);
     const errors = validateBusterLabState(migrated);
     if (errors.length > 0) throw new BusterLabValidationError(errors);
-    return JSON.stringify(migrated);
+    return JSON.stringify(createBusterLabEnvelope({
+      saveContextId: this.saveContextId,
+      state: migrated,
+      revision: this.revision,
+      writeId: this.writeId,
+      updatedAt: this.updatedAt,
+    }));
   }
 
   deserialize(serialized) {
-    const parsed = JSON.parse(serialized);
-    const state = migrateBusterLabState(parsed);
+    const parsed = typeof serialized === 'string' ? JSON.parse(serialized) : cloneJson(serialized);
+    const source = Number(parsed?.storageVersion) === BUSTER_LAB_ENVELOPE_VERSION && parsed?.state
+      ? parseBusterLabEnvelope(parsed, { expectedSaveContextId: this.saveContextId }).state
+      : parsed;
+    const state = migrateBusterLabState(source);
     const errors = validateBusterLabState(state);
     if (errors.length > 0) throw new BusterLabValidationError(errors);
     return state;
   }
 
   save(state = this.state ?? createDefaultBusterLabState()) {
-    const candidate = this.deserialize(JSON.stringify(state));
+    if (this.readOnly) throw new Error('The Buster Lab is read-only because durable locking is unavailable.');
+    const candidate = this.deserialize(state);
     this._persistCandidate(candidate);
     this._adoptState(candidate);
     return this.state;
   }
 
   reset() {
-    if (this.storage) {
-      try {
-        this.storage.removeItem(BUSTER_LAB_STORAGE_KEY);
-      } catch (error) {
-        this.lastWarning = `Roll couldn't clear the old Buster Lab save (${error.message}).`;
-      }
-    }
     const state = createDefaultBusterLabState();
     try {
       this._persistCandidate(state);
@@ -801,6 +1420,7 @@ export class BusterLabStorage {
 
   mutate(mutator) {
     const current = this._ensureLoaded();
+    if (this.readOnly) return { ok: false, reason: 'read-only', state: current };
     const candidate = cloneJson(current);
     try {
       const result = typeof mutator === 'function' ? mutator(candidate) : undefined;
@@ -811,7 +1431,11 @@ export class BusterLabStorage {
     } catch (error) {
       return {
         ok: false,
-        reason: error instanceof BusterLabValidationError ? 'invalid-state' : 'transaction-failed',
+        reason: error instanceof BusterLabValidationError
+          ? 'invalid-state'
+          : error instanceof BusterLabConflictError
+            ? 'conflict'
+            : 'transaction-failed',
         error,
         errors: error.errors ?? [],
         state: this.state,
@@ -821,6 +1445,214 @@ export class BusterLabStorage {
 
   transaction(mutator) {
     return this.mutate(mutator);
+  }
+
+  async transact({
+    operation = 'transaction',
+    expectedRevision = this.revision,
+    expectedWriteId = this.writeId,
+  } = {}, mutator) {
+    if (this.readOnly) return { ok: false, reason: 'read-only', state: this._ensureLoaded() };
+    this._transactionDepth += 1;
+    try {
+      return await this._withLock(async () => {
+        const latest = this._readCurrentEnvelope();
+        const actualRevision = latest?.revision ?? 0;
+        const actualWriteId = latest?.writeId ?? null;
+        if (expectedRevision != null && actualRevision !== expectedRevision) {
+          throw new BusterLabConflictError('The Buster Lab revision changed before commit.', {
+            expectedRevision,
+            actualRevision,
+            expectedWriteId,
+            actualWriteId,
+          });
+        }
+        if (expectedWriteId != null && actualWriteId !== expectedWriteId) {
+          throw new BusterLabConflictError('The Buster Lab write id changed before commit.', {
+            expectedRevision,
+            actualRevision,
+            expectedWriteId,
+            actualWriteId,
+          });
+        }
+        const base = latest ? this.deserialize(latest.state) : createDefaultBusterLabState();
+        const candidate = cloneJson(base);
+        const result = typeof mutator === 'function'
+          ? await mutator(candidate, { operation, revision: actualRevision, writeId: actualWriteId })
+          : undefined;
+        const normalized = this.deserialize(candidate);
+        const envelope = this._persistCandidate(normalized, {
+          expectedRevision: actualRevision,
+          expectedWriteId: actualWriteId,
+          allowMissing: latest == null,
+        });
+        this._adoptState(normalized);
+        this._adoptEnvelopeMetadata(envelope);
+        return { ok: true, operation, state: this.state, result, revision: this.revision, writeId: this.writeId };
+      });
+    } catch (error) {
+      const reason = error instanceof BusterLabConflictError
+        ? 'conflict'
+        : error?.code === 'BUSTER_LAB_LOCK_TIMEOUT'
+          ? 'lock-timeout'
+          : error instanceof BusterLabValidationError
+            ? 'invalid-state'
+            : error?.busterReason ?? 'transaction-failed';
+      if (reason === 'lock-timeout' || reason === 'conflict') {
+        this._pauseWrites(reason, {
+          warning: reason === 'lock-timeout'
+            ? 'Roll could not acquire the Buster Lab save lock. Writes are paused; reload or export a recovery copy.'
+            : 'The Buster Lab save changed before this transaction could commit. Writes are paused; reload or export a recovery copy.',
+          conflict: error instanceof BusterLabConflictError ? error : null,
+        });
+      }
+      return { ok: false, reason, operation, error, errors: error.errors ?? [], state: this.state };
+    } finally {
+      this._transactionDepth = Math.max(0, this._transactionDepth - 1);
+      this._flushPendingStorageEvents();
+    }
+  }
+
+  /**
+   * Runs one of the synchronous compatibility commands against the locked
+   * candidate only. The scratch store has no durable backend, so the outer
+   * transaction performs the sole persistent write after validation.
+   */
+  async _runAsyncCommand(operation, command, concurrency = {}) {
+    const transaction = await this.transact({
+      operation,
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const scratch = new BusterLabStorage({
+        storage: null,
+        idFactory: this.idFactory,
+        saveContextId: this.saveContextId,
+        lockManager: null,
+      });
+      scratch.state = state;
+      const result = command(scratch);
+      if (!result?.ok) throw new BusterLabOperationError(result?.reason, result);
+      const { state: _scratchState, ...safeResult } = result;
+      return safeResult;
+    });
+    if (!transaction.ok) return transaction;
+    return { ...transaction, ...transaction.result, state: transaction.state };
+  }
+
+  updateRollSalvageAsync(mutator, concurrency = {}) {
+    return this._runAsyncCommand('update-roll-salvage', (lab) => lab.updateRollSalvage(mutator), concurrency);
+  }
+
+  fabricateAsync(recipeOrId, options = {}, concurrency = {}) {
+    return this._runAsyncCommand('fabricate-module', (lab) => lab.fabricate(recipeOrId, options), concurrency);
+  }
+
+  grantDebugKitAsync(concurrency = {}) {
+    return this._runAsyncCommand('grant-debug-kit', (lab) => lab.grantDebugKit(), concurrency);
+  }
+
+  purchaseSecondChassisAsync(concurrency = {}) {
+    return this._runAsyncCommand('purchase-second-chassis', (lab) => lab.purchaseSecondChassis(), concurrency);
+  }
+
+  saveDraftAsync(draft, concurrency = {}) {
+    return this._runAsyncCommand('save-buster-draft', (lab) => lab.saveDraft(draft), concurrency);
+  }
+
+  saveBuildAsync(build, concurrency = {}) {
+    return this._runAsyncCommand('save-buster-build', (lab) => lab.saveBuild(build), concurrency);
+  }
+
+  assignBuildToSlotAsync(buildId, slotIndex, concurrency = {}) {
+    return this._runAsyncCommand(
+      'assign-buster-slot',
+      (lab) => lab.assignBuildToSlot(buildId, slotIndex),
+      concurrency,
+    );
+  }
+
+  setAssignmentsAsync(assignments, concurrency = {}) {
+    return this._runAsyncCommand('set-buster-assignments', (lab) => lab.setAssignments(assignments), concurrency);
+  }
+
+  setMegaCalibrationStateAsync(calibrations, concurrency = {}) {
+    return this._runAsyncCommand(
+      'set-mega-calibrations',
+      (lab) => lab.setMegaCalibrationState(calibrations),
+      concurrency,
+    );
+  }
+
+  setMegaCalibrationAsync(slotIndex, instanceId, concurrency = {}) {
+    return this._runAsyncCommand(
+      'set-mega-calibration',
+      (lab) => lab.setMegaCalibration(slotIndex, instanceId),
+      concurrency,
+    );
+  }
+
+  swapMegaCalibrationAsync(slotIndex, instanceId, options = {}, concurrency = {}) {
+    return this._runAsyncCommand(
+      'swap-mega-calibration',
+      (lab) => {
+        const slot = Math.trunc(Number(slotIndex));
+        const currentInstanceId = lab.state.megaCalibrations.slots[slot] ?? null;
+        const currentRecord = lab.state.legacyBusterParts.records
+          .find((record) => record.calibrationInstanceId === currentInstanceId);
+        const nextRecord = lab.state.legacyBusterParts.records
+          .find((record) => record.calibrationInstanceId === instanceId);
+
+        if (currentInstanceId && currentInstanceId !== instanceId) {
+          const removed = currentRecord
+            ? lab.moveLegacyBusterPart(currentRecord.legacyId, { kind: 'inventory' }, options)
+            : lab.setMegaCalibration(slot, null);
+          if (!removed.ok) return removed;
+        }
+        if (instanceId === currentInstanceId) {
+          return { ok: true, calibrations: cloneJson(lab.state.megaCalibrations), state: lab.state };
+        }
+        if (nextRecord) {
+          const installed = lab.moveLegacyBusterPart(
+            nextRecord.legacyId,
+            { kind: 'megaSocket', socketIndex: slot },
+            options,
+          );
+          return installed.ok
+            ? { ...installed, calibrations: cloneJson(lab.state.megaCalibrations) }
+            : installed;
+        }
+        const installed = lab.setMegaCalibration(slot, instanceId ?? null);
+        return installed.ok
+          ? { ...installed, calibrations: cloneJson(lab.state.megaCalibrations) }
+          : installed;
+      },
+      concurrency,
+    );
+  }
+
+  saveBlueprintAsync(source, options = {}, concurrency = {}) {
+    return this._runAsyncCommand(
+      'save-buster-blueprint',
+      (lab) => lab.saveBlueprint(source, options),
+      concurrency,
+    );
+  }
+
+  deleteBlueprintAsync(blueprintId, concurrency = {}) {
+    return this._runAsyncCommand(
+      'delete-buster-blueprint',
+      (lab) => lab.deleteBlueprint(blueprintId),
+      concurrency,
+    );
+  }
+
+  importBlueprintAsync(payload, concurrency = {}) {
+    return this._runAsyncCommand(
+      'import-buster-blueprint',
+      (lab) => lab.importBlueprint(payload),
+      concurrency,
+    );
   }
 
   createRollSalvageStorage({ autosave = true } = {}) {
@@ -859,12 +1691,27 @@ export class BusterLabStorage {
     if (!recipe) return { ok: false, reason: 'unknown-recipe', state: this._ensureLoaded() };
 
     const candidate = cloneJson(this._ensureLoaded());
+    const route = options.route === 'replication' ? 'replication' : 'original';
+    const history = candidate.fabricationHistory[recipe.moduleId] ?? {
+      originalCrafts: 0,
+      replicationCrafts: 0,
+      firstOriginalSequence: null,
+    };
+    if (route === 'replication' && history.originalCrafts < 1) {
+      return { ok: false, reason: 'replication-locked', recipeId: recipe.id, state: this.state };
+    }
+    const routeRecipe = route === 'replication'
+      ? {
+        id: recipe.id,
+        requirements: { identifiedScrap: recipe.scrapCost * 2, parts: {} },
+      }
+      : recipe;
     const roll = new RollSalvageStorage({
       ...candidate.rollSalvage,
       discoveredSalvageTypes: candidate.discovery.salvageTypes,
       discoveryHistory: candidate.discovery.history,
     });
-    const transaction = roll.transactRecipe(recipe, {
+    const transaction = roll.transactRecipe(routeRecipe, {
       createResult: () => {
         const instanceId = this._allocateInstanceId(candidate, 'module');
         return {
@@ -875,6 +1722,7 @@ export class BusterLabStorage {
           recipeId: recipe.id,
           name: recipe.name,
           origin: 'fabricated',
+          fabricationRoute: route,
           fabricationSequence: candidate.nextInstanceId - 1,
         };
       },
@@ -882,6 +1730,15 @@ export class BusterLabStorage {
     if (!transaction.ok) return { ...transaction, state: this.state };
 
     candidate.moduleInstances.push(transaction.result);
+    if (route === 'original') {
+      history.originalCrafts += 1;
+      if (history.firstOriginalSequence == null) {
+        history.firstOriginalSequence = transaction.result.fabricationSequence;
+      }
+    } else {
+      history.replicationCrafts += 1;
+    }
+    candidate.fabricationHistory[recipe.moduleId] = history;
     this._applyRollSnapshot(candidate, roll.serialize());
     try {
       const normalized = this.deserialize(JSON.stringify(candidate));
@@ -890,6 +1747,7 @@ export class BusterLabStorage {
       return {
         ok: true,
         recipeId: recipe.id,
+        route,
         module: cloneJson(transaction.result),
         instance: cloneJson(transaction.result),
         spent: transaction.spent,
@@ -950,10 +1808,24 @@ export class BusterLabStorage {
         discoveredSalvageTypes: state.discovery.salvageTypes,
         discoveryHistory: state.discovery.history,
       });
+      const debugRecipeBill = { identifiedScrap: 0, parts: {} };
       for (const recipe of BUSTER_RECIPE_LIST) {
+        debugRecipeBill.identifiedScrap += recipe.scrapCost;
         for (const partId of recipe.requiredPartIds) {
+          debugRecipeBill.parts[partId] = (debugRecipeBill.parts[partId] ?? 0)
+            + (recipe.parts[partId] ?? 1);
           roll.markPartDiscovered(partId, { debugKit: true, grantNumber }, { notify: false });
         }
+      }
+      roll.addIdentifiedScrap(debugRecipeBill.identifiedScrap);
+      for (const [partId, quantity] of Object.entries(debugRecipeBill.parts)) {
+        roll.addPart({
+          id: partId,
+          name: partId,
+          family: 'Debug Buster Lab Part',
+          tier: 'debug',
+          color: '#ffb14a',
+        }, quantity, { debugKit: true, grantNumber }, { notify: false });
       }
       this._applyRollSnapshot(state, roll.serialize());
 
@@ -982,9 +1854,240 @@ export class BusterLabStorage {
         calibrations,
         chassis: chassis ? cloneJson(chassis) : null,
         recipesRevealed: BUSTER_RECIPE_LIST.length,
+        resources: debugRecipeBill,
       };
     });
     return result.ok ? { ...result, ...result.result } : result;
+  }
+
+  saveBlueprint(source, options = {}) {
+    const current = this._ensureLoaded();
+    const requestedId = source?.blueprintId ?? options.blueprintId ?? null;
+    if (!requestedId && current.blueprints.length >= MAX_BUSTER_BLUEPRINTS) {
+      return { ok: false, reason: 'blueprint-limit', state: current };
+    }
+    const result = this.mutate((state) => {
+      let blueprintId = requestedId;
+      if (!blueprintId) {
+        do {
+          blueprintId = `blueprint-${state.nextBlueprintId++}`;
+        } while (state.blueprints.some((entry) => entry.blueprintId === blueprintId));
+      }
+      const index = state.blueprints.findIndex((entry) => entry.blueprintId === blueprintId);
+      if (index < 0 && state.blueprints.length >= MAX_BUSTER_BLUEPRINTS) {
+        throw new RangeError(`Only ${MAX_BUSTER_BLUEPRINTS} blueprints may be stored.`);
+      }
+      const prior = index >= 0 ? state.blueprints[index] : null;
+      const blueprint = sanitizeBlueprint({
+        ...source,
+        blueprintId,
+        revision: prior ? prior.revision + 1 : 1,
+      });
+      if (!blueprint) throw new TypeError('The blueprint source is invalid.');
+      if (index >= 0) state.blueprints[index] = blueprint;
+      else state.blueprints.push(blueprint);
+      return cloneJson(blueprint);
+    });
+    return result.ok ? { ...result, blueprint: result.result } : result;
+  }
+
+  deleteBlueprint(blueprintId) {
+    const current = this._ensureLoaded();
+    if (!current.blueprints.some((entry) => entry.blueprintId === blueprintId)) {
+      return { ok: false, reason: 'missing-blueprint', state: current };
+    }
+    return this.mutate((state) => {
+      state.blueprints = state.blueprints.filter((entry) => entry.blueprintId !== blueprintId);
+      return blueprintId;
+    });
+  }
+
+  exportBlueprint(blueprintId) {
+    const blueprint = this._ensureLoaded().blueprints.find((entry) => entry.blueprintId === blueprintId);
+    if (!blueprint) return { ok: false, reason: 'missing-blueprint' };
+    return {
+      ok: true,
+      payload: {
+        format: 'ruin-digger-buster-blueprint',
+        formatVersion: 1,
+        sourceContextId: this.saveContextId,
+        blueprint: cloneJson(blueprint),
+      },
+    };
+  }
+
+  importBlueprint(payload) {
+    const root = typeof payload === 'string' ? JSON.parse(payload) : cloneJson(payload);
+    const source = root?.blueprint ?? root;
+    return this.saveBlueprint({
+      ...source,
+      blueprintId: null,
+      imported: true,
+      sourceContextId: root?.sourceContextId ?? source?.sourceContextId ?? null,
+    });
+  }
+
+  getFabricationRoutes(recipeOrId, state = this._ensureLoaded()) {
+    const recipe = getBusterRecipe(recipeOrId);
+    if (!recipe) return [];
+    const discovery = getRecipeDiscoveryState(recipe, state.discovery);
+    if (!discovery?.fullyDiscovered) return [];
+    const roll = new RollSalvageStorage({
+      ...state.rollSalvage,
+      discoveredSalvageTypes: state.discovery.salvageTypes,
+      discoveryHistory: state.discovery.history,
+    });
+    const original = roll.canTransactRecipe(recipe);
+    const routes = [{
+      id: 'original',
+      label: 'Original fabrication',
+      requirements: cloneJson(original.requirements),
+      missing: cloneJson(original.missing),
+      affordable: original.ok,
+    }];
+    if ((state.fabricationHistory?.[recipe.moduleId]?.originalCrafts ?? 0) > 0) {
+      const replicationRecipe = {
+        id: recipe.id,
+        requirements: { identifiedScrap: recipe.scrapCost * 2, parts: {} },
+      };
+      const replication = roll.canTransactRecipe(replicationRecipe);
+      routes.push({
+        id: 'replication',
+        label: 'Roll replication',
+        requirements: cloneJson(replication.requirements),
+        missing: cloneJson(replication.missing),
+        affordable: replication.ok,
+      });
+    }
+    return routes;
+  }
+
+  suggestMaterialization(blueprintOrId, options = {}) {
+    return this._buildMaterializationSuggestion(this._ensureLoaded(), blueprintOrId, options, {
+      revision: this.revision,
+      writeId: this.writeId,
+    });
+  }
+
+  async confirmMaterialization(suggestion, { routeSelections = {} } = {}) {
+    if (!suggestion || suggestion.ok !== true) {
+      return { ok: false, reason: 'invalid-suggestion', state: this._ensureLoaded() };
+    }
+    return this.transact({
+      operation: 'materialize-blueprint',
+      expectedRevision: suggestion.baseRevision,
+      expectedWriteId: suggestion.baseWriteId,
+    }, (state) => {
+      const current = this._buildMaterializationSuggestion(
+        state,
+        suggestion.blueprintId,
+        { buildId: suggestion.buildId, chassisId: suggestion.chassisId },
+        { revision: suggestion.baseRevision, writeId: suggestion.baseWriteId },
+      );
+      if (!current.ok || current.blueprintRevision !== suggestion.blueprintRevision) {
+        throw new BusterLabConflictError('The blueprint or materialization target changed.');
+      }
+
+      const assignments = { ...current.assignments };
+      const roll = new RollSalvageStorage({
+        ...state.rollSalvage,
+        discoveredSalvageTypes: state.discovery.salvageTypes,
+        discoveryHistory: state.discovery.history,
+      });
+      const fabricated = [];
+      for (const request of current.requests) {
+        if (request.instanceId) continue;
+        if (request.discoveryLevel !== 'full') {
+          const error = new Error(`Recipe for ${request.moduleId} is not fully discovered.`);
+          error.code = 'RECIPE_REDACTED';
+          throw error;
+        }
+        const recipe = getBusterRecipe(request.recipeId);
+        if (!recipe) throw new Error(`No active recipe exists for ${request.moduleId}.`);
+        const routes = this._getCandidateFabricationRoutes(recipe, state, roll);
+        const affordable = routes.filter((route) => route.affordable);
+        let selected = routeSelections[request.nodeId] ?? routeSelections[request.moduleId] ?? null;
+        if (!selected && affordable.length === 1) selected = affordable[0].id;
+        if (!selected && affordable.length > 1) {
+          const error = new Error(`Choose an original or replication route for ${request.moduleId}.`);
+          error.code = 'ROUTE_CHOICE_REQUIRED';
+          throw error;
+        }
+        const route = routes.find((entry) => entry.id === selected);
+        if (!route?.affordable) {
+          const error = new Error(`The selected ${selected ?? 'fabrication'} route is unavailable for ${request.moduleId}.`);
+          error.code = 'ROUTE_UNAVAILABLE';
+          throw error;
+        }
+        const instanceId = this._allocateInstanceId(state, 'module');
+        const transaction = roll.transactRecipe(route.recipe, {
+          result: {
+            id: instanceId,
+            instanceId,
+            moduleInstanceId: instanceId,
+            moduleId: recipe.moduleId,
+            recipeId: recipe.id,
+            name: recipe.name,
+            origin: 'fabricated',
+            fabricationRoute: route.id,
+            fabricationSequence: state.nextInstanceId - 1,
+          },
+        });
+        if (!transaction.ok) throw transaction.error ?? new Error(`Could not fabricate ${request.moduleId}.`);
+        state.moduleInstances.push(transaction.result);
+        assignments[request.nodeId] = instanceId;
+        fabricated.push({ moduleId: recipe.moduleId, instanceId, route: route.id, spent: transaction.spent });
+        const history = state.fabricationHistory[recipe.moduleId] ?? {
+          originalCrafts: 0,
+          replicationCrafts: 0,
+          firstOriginalSequence: null,
+        };
+        if (route.id === 'original') {
+          history.originalCrafts += 1;
+          if (history.firstOriginalSequence == null) history.firstOriginalSequence = state.nextInstanceId - 1;
+        } else {
+          history.replicationCrafts += 1;
+        }
+        state.fabricationHistory[recipe.moduleId] = history;
+      }
+      this._applyRollSnapshot(state, roll.serialize());
+
+      const blueprint = state.blueprints.find((entry) => entry.blueprintId === current.blueprintId);
+      const build = {
+        schemaVersion: blueprint.schemaVersion,
+        rulesetVersion: BUSTER_LAB_RULESET_VERSION,
+        buildId: current.buildId,
+        chassisId: current.chassisId,
+        name: blueprint.name,
+        tuning: cloneJson(blueprint.tuning),
+        program: {
+          rootNodeId: blueprint.program.rootNodeId,
+          nodes: blueprint.program.nodes.map((node) => ({
+            nodeId: node.nodeId,
+            moduleId: node.moduleId,
+            moduleInstanceId: assignments[node.nodeId] ?? null,
+          })),
+          edges: cloneJson(blueprint.program.edges),
+        },
+      };
+      const buildIndex = state.chassisBuilds.findIndex((entry) => entry.buildId === build.buildId);
+      if (buildIndex >= 0) state.chassisBuilds[buildIndex] = build;
+      else state.chassisBuilds.push(build);
+      const draftIndex = state.chassisDrafts.findIndex((entry) => entry.buildId === build.buildId);
+      if (draftIndex >= 0) state.chassisDrafts[draftIndex] = cloneJson(build);
+      else state.chassisDrafts.push(cloneJson(build));
+      const revision = 1 + state.chassisRevisions
+        .filter((entry) => entry.buildId === build.buildId)
+        .reduce((maximum, entry) => Math.max(maximum, entry.revision), 0);
+      state.chassisRevisions.push({
+        revisionId: `${build.buildId}-r${revision}`,
+        buildId: build.buildId,
+        chassisId: build.chassisId,
+        revision,
+        snapshot: cloneJson(build),
+      });
+      return { build: cloneJson(build), fabricated };
+    });
   }
 
   purchaseSecondChassis() {
@@ -1174,6 +2277,303 @@ export class BusterLabStorage {
     });
   }
 
+  registerLegacyBusterPart(item, {
+    legacyType = item?.legacyType ?? item?.type ?? null,
+    location = { kind: 'inventory' },
+    starter = false,
+    occupiedInventoryCount = 0,
+  } = {}) {
+    const definition = MEGA_BUSTER_CALIBRATION_CATALOG[legacyType];
+    if (!definition) return { ok: false, reason: 'unsupported-legacy-type', state: this._ensureLoaded() };
+    const normalizedLocation = sanitizeLegacyLocation(location);
+    const current = this._ensureLoaded();
+    const claimedLegacyId = typeof item?.legacyBusterId === 'string' && item.legacyBusterId
+      ? item.legacyBusterId
+      : typeof item?.canonicalId === 'string' && item.canonicalId
+        ? item.canonicalId
+        : null;
+    const existing = claimedLegacyId
+      ? current.legacyBusterParts.records.find((entry) => entry.legacyId === claimedLegacyId)
+      : null;
+    if (existing) {
+      return {
+        ok: true,
+        created: false,
+        record: cloneJson(existing),
+        state: current,
+      };
+    }
+    if (normalizedLocation.kind === 'inventory'
+      && Math.max(0, nonNegativeInteger(occupiedInventoryCount))
+        + current.legacyBusterParts.records.filter((entry) => entry.location.kind === 'inventory').length
+        >= LEGACY_BUSTER_INVENTORY_CAPACITY) {
+      return { ok: false, reason: 'inventory-capacity', state: current };
+    }
+    const result = this.mutate((state) => {
+      const sequence = state.legacyBusterParts.nextSequence++;
+      const legacyId = `legacy-buster:${this.saveContextId}:${sequence}`;
+      const calibrationInstanceId = `${legacyId}:calibration`;
+      if (normalizedLocation.kind === 'megaSocket'
+        && state.megaCalibrations.slots[normalizedLocation.socketIndex] !== null) {
+        throw new RangeError(`Mega calibration socket ${normalizedLocation.socketIndex} is occupied.`);
+      }
+      state.megaCalibrations.instances.push({
+        instanceId: calibrationInstanceId,
+        legacyType,
+        name: definition.name,
+        bonuses: { ...definition.bonuses },
+      });
+      if (normalizedLocation.kind === 'megaSocket') {
+        state.megaCalibrations.slots[normalizedLocation.socketIndex] = calibrationInstanceId;
+        state.megaCalibrations.revision += 1;
+      }
+      const record = {
+        legacyId,
+        legacyType,
+        calibrationInstanceId,
+        item: { ...plainObject(item), canonicalId: legacyId },
+        location: normalizedLocation,
+        starter: Boolean(starter),
+        createdSequence: sequence,
+      };
+      state.legacyBusterParts.records.push(record);
+      if (starter) state.legacyBusterParts.starterRegistered = true;
+      return cloneJson(record);
+    });
+    return result.ok ? { ...result, record: result.result } : result;
+  }
+
+  ensureStarterPowerRaiserShadow(item = {}) {
+    const existing = this._ensureLoaded().legacyBusterParts.records.find((entry) => entry.starter);
+    if (existing) return { ok: true, created: false, record: cloneJson(existing), state: this.state };
+    // `starterRegistered` is an ever-granted campaign marker. A player who
+    // deliberately sells/scraps the canonical starter must not receive a new
+    // copy merely by toggling the feature flag or reloading the page.
+    if (this._ensureLoaded().legacyBusterParts.starterRegistered) {
+      return { ok: true, created: false, record: null, state: this.state };
+    }
+    const result = this.registerLegacyBusterPart({
+      ...item,
+      type: 'powerRaiser',
+      name: item.name ?? 'Power Raiser',
+      rarity: item.rarity ?? 'standard',
+    }, {
+      legacyType: 'powerRaiser',
+      location: { kind: 'megaSocket', socketIndex: 0 },
+      starter: true,
+    });
+    return result.ok ? { ...result, created: true } : result;
+  }
+
+  moveLegacyBusterPart(legacyId, location, { occupiedInventoryCount = 0 } = {}) {
+    const normalizedLocation = sanitizeLegacyLocation(location);
+    const current = this._ensureLoaded();
+    const record = current.legacyBusterParts.records.find((entry) => entry.legacyId === legacyId);
+    if (!record) return { ok: false, reason: 'missing-legacy-record', state: current };
+    if (normalizedLocation.kind === 'inventory' && record.location.kind !== 'inventory'
+      && nonNegativeInteger(occupiedInventoryCount)
+        + current.legacyBusterParts.records.filter((entry) => entry.location.kind === 'inventory').length
+        >= LEGACY_BUSTER_INVENTORY_CAPACITY) {
+      return { ok: false, reason: 'inventory-capacity', state: current };
+    }
+    return this.mutate((state) => {
+      const mutable = state.legacyBusterParts.records.find((entry) => entry.legacyId === legacyId);
+      const oldSocket = mutable.location.kind === 'megaSocket' ? mutable.location.socketIndex : null;
+      if (normalizedLocation.kind === 'megaSocket') {
+        const occupant = state.megaCalibrations.slots[normalizedLocation.socketIndex];
+        if (occupant !== null && occupant !== mutable.calibrationInstanceId) {
+          throw new RangeError(`Mega calibration socket ${normalizedLocation.socketIndex} is occupied.`);
+        }
+      }
+      if (oldSocket !== null && state.megaCalibrations.slots[oldSocket] === mutable.calibrationInstanceId) {
+        state.megaCalibrations.slots[oldSocket] = null;
+      }
+      if (normalizedLocation.kind === 'megaSocket') {
+        state.megaCalibrations.slots[normalizedLocation.socketIndex] = mutable.calibrationInstanceId;
+      }
+      if (JSON.stringify(mutable.location) !== JSON.stringify(normalizedLocation)) {
+        state.megaCalibrations.revision += 1;
+      }
+      mutable.location = normalizedLocation;
+      return cloneJson(mutable);
+    });
+  }
+
+  updateLegacyBusterItem(legacyId, updater) {
+    const current = this._ensureLoaded();
+    if (!current.legacyBusterParts.records.some((entry) => entry.legacyId === legacyId)) {
+      return { ok: false, reason: 'missing-legacy-record', state: current };
+    }
+    return this.mutate((state) => {
+      const record = state.legacyBusterParts.records.find((entry) => entry.legacyId === legacyId);
+      const next = typeof updater === 'function' ? updater(cloneJson(record.item)) : updater;
+      record.item = { ...plainObject(next), canonicalId: legacyId };
+      return cloneJson(record);
+    });
+  }
+
+  removeLegacyBusterPart(legacyId) {
+    const current = this._ensureLoaded();
+    if (!current.legacyBusterParts.records.some((entry) => entry.legacyId === legacyId)) {
+      return { ok: false, reason: 'missing-legacy-record', state: current };
+    }
+    return this.mutate((state) => {
+      const record = state.legacyBusterParts.records.find((entry) => entry.legacyId === legacyId);
+      state.legacyBusterParts.records = state.legacyBusterParts.records
+        .filter((entry) => entry.legacyId !== legacyId);
+      state.megaCalibrations.instances = state.megaCalibrations.instances
+        .filter((entry) => entry.instanceId !== record.calibrationInstanceId);
+      state.megaCalibrations.slots = state.megaCalibrations.slots
+        .map((entry) => entry === record.calibrationInstanceId ? null : entry);
+      state.megaCalibrations.revision += 1;
+      return cloneJson(record);
+    });
+  }
+
+  reconcileLegacyBusterParts({ locations = [], removals = [] } = {}, {
+    occupiedInventoryCount = 0,
+  } = {}) {
+    const current = this._ensureLoaded();
+    const removalIds = new Set((Array.isArray(removals) ? removals : [])
+      .filter((legacyId) => typeof legacyId === 'string' && legacyId));
+    const desiredLocations = new Map();
+    for (const entry of Array.isArray(locations) ? locations : []) {
+      if (!entry || typeof entry.legacyId !== 'string' || !entry.legacyId) continue;
+      if (removalIds.has(entry.legacyId)) continue;
+      desiredLocations.set(entry.legacyId, sanitizeLegacyLocation(entry.location));
+    }
+    const recordsById = new Map(current.legacyBusterParts.records
+      .map((record) => [record.legacyId, record]));
+    for (const legacyId of [...removalIds, ...desiredLocations.keys()]) {
+      if (!recordsById.has(legacyId)) {
+        return { ok: false, reason: 'missing-legacy-record', legacyId, state: current };
+      }
+    }
+
+    const projectedRecords = current.legacyBusterParts.records
+      .filter((record) => !removalIds.has(record.legacyId))
+      .map((record) => ({
+        ...record,
+        location: desiredLocations.get(record.legacyId) ?? record.location,
+      }));
+    const targetSockets = new Set();
+    for (const record of projectedRecords) {
+      if (record.location.kind !== 'megaSocket') continue;
+      if (targetSockets.has(record.location.socketIndex)) {
+        return { ok: false, reason: 'socket-occupied', state: current };
+      }
+      targetSockets.add(record.location.socketIndex);
+    }
+    const logicalInventoryCount = projectedRecords
+      .filter((record) => record.location.kind === 'inventory').length;
+    if (logicalInventoryCount + nonNegativeInteger(occupiedInventoryCount)
+      > LEGACY_BUSTER_INVENTORY_CAPACITY) {
+      return { ok: false, reason: 'inventory-capacity', state: current };
+    }
+
+    const result = this.mutate((state) => {
+      const affectedIds = new Set([...removalIds, ...desiredLocations.keys()]);
+      const affectedCalibrationIds = new Set(state.legacyBusterParts.records
+        .filter((record) => affectedIds.has(record.legacyId))
+        .map((record) => record.calibrationInstanceId));
+
+      // Clear every affected reciprocal socket before assigning any target so
+      // a two-way socket swap is one valid atomic operation.
+      state.megaCalibrations.slots = state.megaCalibrations.slots.map((instanceId) => (
+        affectedCalibrationIds.has(instanceId) ? null : instanceId
+      ));
+
+      const removedCalibrationIds = new Set(state.legacyBusterParts.records
+        .filter((record) => removalIds.has(record.legacyId))
+        .map((record) => record.calibrationInstanceId));
+      state.legacyBusterParts.records = state.legacyBusterParts.records
+        .filter((record) => !removalIds.has(record.legacyId));
+      state.megaCalibrations.instances = state.megaCalibrations.instances
+        .filter((entry) => !removedCalibrationIds.has(entry.instanceId));
+
+      for (const record of state.legacyBusterParts.records) {
+        const location = desiredLocations.get(record.legacyId);
+        if (!location) continue;
+        record.location = location;
+      }
+      for (const record of state.legacyBusterParts.records) {
+        if (record.location.kind !== 'megaSocket') continue;
+        const occupant = state.megaCalibrations.slots[record.location.socketIndex];
+        if (occupant !== null && occupant !== record.calibrationInstanceId) {
+          const error = new RangeError(`Mega calibration socket ${record.location.socketIndex} is occupied.`);
+          error.busterReason = 'socket-occupied';
+          throw error;
+        }
+        state.megaCalibrations.slots[record.location.socketIndex] = record.calibrationInstanceId;
+      }
+      if (affectedIds.size > 0) state.megaCalibrations.revision += 1;
+      return {
+        removedLegacyIds: [...removalIds],
+        movedLegacyIds: [...desiredLocations.keys()],
+      };
+    });
+    return result.ok ? { ...result, ...result.result } : result;
+  }
+
+  getLegacyBusterView({ featureEnabled = false } = {}) {
+    const records = this._ensureLoaded().legacyBusterParts.records;
+    return records.map((record) => ({
+      legacyId: record.legacyId,
+      legacyType: record.legacyType,
+      location: cloneJson(record.location),
+      item: featureEnabled ? null : cloneJson(record.item),
+      calibrationInstanceId: featureEnabled ? record.calibrationInstanceId : null,
+    }));
+  }
+
+  registerLegacyBusterPartAsync(item, options = {}, concurrency = {}) {
+    return this._runAsyncCommand(
+      'register-legacy-buster-part',
+      (lab) => lab.registerLegacyBusterPart(item, options),
+      concurrency,
+    );
+  }
+
+  ensureStarterPowerRaiserShadowAsync(item = {}, concurrency = {}) {
+    return this._runAsyncCommand(
+      'ensure-starter-power-raiser',
+      (lab) => lab.ensureStarterPowerRaiserShadow(item),
+      concurrency,
+    );
+  }
+
+  moveLegacyBusterPartAsync(legacyId, location, options = {}, concurrency = {}) {
+    return this._runAsyncCommand(
+      'move-legacy-buster-part',
+      (lab) => lab.moveLegacyBusterPart(legacyId, location, options),
+      concurrency,
+    );
+  }
+
+  updateLegacyBusterItemAsync(legacyId, updater, concurrency = {}) {
+    return this._runAsyncCommand(
+      'update-legacy-buster-item',
+      (lab) => lab.updateLegacyBusterItem(legacyId, updater),
+      concurrency,
+    );
+  }
+
+  removeLegacyBusterPartAsync(legacyId, concurrency = {}) {
+    return this._runAsyncCommand(
+      'remove-legacy-buster-part',
+      (lab) => lab.removeLegacyBusterPart(legacyId),
+      concurrency,
+    );
+  }
+
+  reconcileLegacyBusterPartsAsync(commands = {}, options = {}, concurrency = {}) {
+    return this._runAsyncCommand(
+      'reconcile-legacy-buster-parts',
+      (lab) => lab.reconcileLegacyBusterParts(commands, options),
+      concurrency,
+    );
+  }
+
   getOwnedModuleInstanceIds() {
     return this._ensureLoaded().moduleInstances.map((module) => module.instanceId);
   }
@@ -1182,12 +2582,266 @@ export class BusterLabStorage {
     return this._ensureLoaded();
   }
 
+  inspectLegacyV1() {
+    if (!this.storage) return { eligible: false, reason: 'storage-unavailable' };
+    const claimed = this.storage.getItem(BUSTER_LAB_V1_IMPORT_CLAIM_KEY);
+    if (claimed) {
+      let claim = null;
+      try { claim = JSON.parse(claimed); } catch { /* Preserve the blocking claim even if malformed. */ }
+      return { eligible: false, reason: 'already-claimed', claim };
+    }
+    const raw = this.storage.getItem(BUSTER_LAB_LEGACY_STORAGE_KEY);
+    if (!raw) return { eligible: false, reason: 'missing' };
+    try {
+      const state = migrateBusterLabState(JSON.parse(raw));
+      return {
+        eligible: true,
+        summary: {
+          identifiedScrap: state.rollSalvage.identifiedScrap,
+          namedPartCount: Object.values(state.rollSalvage.parts)
+            .reduce((total, part) => total + nonNegativeInteger(part.quantity), 0),
+          moduleCount: state.moduleInstances.length,
+          chassisCount: state.chassisInstances.length,
+          buildCount: state.chassisBuilds.length,
+          calibrationCount: state.megaCalibrations.instances.length,
+          afterDelayRefund: cloneJson(state.migrations.afterDelayBuiltInV2),
+        },
+      };
+    } catch (error) {
+      return { eligible: false, reason: 'corrupt', error };
+    }
+  }
+
+  async adoptLegacyV1({ confirmed = false } = {}) {
+    if (!confirmed) return { ok: false, reason: 'confirmation-required', preview: this.inspectLegacyV1() };
+    if (this.readOnly) return { ok: false, reason: 'read-only', state: this._ensureLoaded() };
+    const globalLock = 'ruinDigger:busterLab:v1-adoption';
+    try {
+      return await withBusterLabLock(this.lockManager, globalLock, async () => {
+        const preview = this.inspectLegacyV1();
+        if (!preview.eligible) return { ok: false, reason: preview.reason, preview };
+        const legacyRaw = this.storage.getItem(BUSTER_LAB_LEGACY_STORAGE_KEY);
+        const candidate = migrateBusterLabState(JSON.parse(legacyRaw));
+        const committed = await this._withLock(async () => {
+          const latest = this._readCurrentEnvelope();
+          const envelope = this._persistCandidate(candidate, {
+            expectedRevision: latest?.revision ?? 0,
+            expectedWriteId: latest?.writeId ?? null,
+            allowMissing: latest == null,
+          });
+          this._adoptState(candidate);
+          this._adoptEnvelopeMetadata(envelope);
+          this.storage.setItem(BUSTER_LAB_V1_IMPORT_CLAIM_KEY, JSON.stringify({
+            storageVersion: 1,
+            saveContextId: this.saveContextId,
+            adoptedAt: new Date().toISOString(),
+            sourceKey: BUSTER_LAB_LEGACY_STORAGE_KEY,
+          }));
+          this.pendingLegacyAdoption = false;
+          return { ok: true, state: this.state, revision: this.revision, writeId: this.writeId };
+        });
+        return committed;
+      }, { timeoutMs: this.lockTimeoutMs });
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error?.code === 'BUSTER_LAB_LOCK_TIMEOUT' ? 'lock-timeout' : 'transaction-failed',
+        error,
+        state: this.state,
+      };
+    }
+  }
+
+  async beginNewCampaign({ confirmed = false } = {}) {
+    if (!confirmed) return { ok: false, reason: 'confirmation-required' };
+    if (!this.storage) return { ok: false, reason: 'storage-unavailable' };
+    const nextContextId = rotateSaveContext(this.storage, { idFactory: this.idFactory });
+    this.saveContextId = nextContextId;
+    this.storageKeys = getBusterLabStorageKeys(nextContextId);
+    this.lockName = getBusterLabLockName(nextContextId);
+    this.state = null;
+    this.revision = 0;
+    this.writeId = null;
+    this.updatedAt = null;
+    await this.open();
+    return { ok: true, saveContextId: nextContextId, state: this.state };
+  }
+
   getClaimedModuleInstanceIds(options = {}) {
     return getClaimedModuleInstanceIds(this._ensureLoaded(), options);
   }
 
   _ensureLoaded() {
     return this.state ?? this.load();
+  }
+
+  _getCandidateFabricationRoutes(recipe, state, roll) {
+    const originalCheck = roll.canTransactRecipe(recipe);
+    const routes = [{ id: 'original', recipe, affordable: originalCheck.ok, check: originalCheck }];
+    if ((state.fabricationHistory?.[recipe.moduleId]?.originalCrafts ?? 0) > 0) {
+      const replicationRecipe = {
+        id: recipe.id,
+        requirements: { identifiedScrap: recipe.scrapCost * 2, parts: {} },
+      };
+      const replicationCheck = roll.canTransactRecipe(replicationRecipe);
+      routes.push({
+        id: 'replication',
+        recipe: replicationRecipe,
+        affordable: replicationCheck.ok,
+        check: replicationCheck,
+      });
+    }
+    return routes;
+  }
+
+  _buildMaterializationSuggestion(state, blueprintOrId, options = {}, metadata = {}) {
+    const blueprint = typeof blueprintOrId === 'string'
+      ? state.blueprints.find((entry) => entry.blueprintId === blueprintOrId)
+      : sanitizeBlueprint(blueprintOrId);
+    if (!blueprint) return { ok: false, reason: 'missing-blueprint' };
+
+    const existingBuild = options.buildId
+      ? state.chassisBuilds.find((entry) => entry.buildId === options.buildId)
+      : null;
+    const chassisId = options.chassisId
+      ?? existingBuild?.chassisId
+      ?? state.chassisInstances[0]?.chassisId
+      ?? null;
+    const chassis = state.chassisInstances.find((entry) => entry.chassisId === chassisId);
+    if (!chassis) return { ok: false, reason: 'missing-chassis', blueprintId: blueprint.blueprintId };
+    const buildId = options.buildId
+      ?? state.chassisBuilds.find((entry) => entry.chassisId === chassisId)?.buildId
+      ?? (chassisId === 'chassis-a' ? 'build-a' : 'build-b');
+
+    const claimed = new Set(getClaimedModuleInstanceIds(state, { excludeBuildId: buildId }));
+    const available = state.moduleInstances
+      .filter((entry) => !claimed.has(entry.instanceId))
+      .sort((a, b) => a.instanceId.localeCompare(b.instanceId));
+    const used = new Set();
+    const assignments = {};
+    const requests = [];
+    const blocked = [];
+    const planningState = cloneJson(state);
+    const roll = new RollSalvageStorage({
+      ...state.rollSalvage,
+      discoveredSalvageTypes: state.discovery.salvageTypes,
+      discoveryHistory: state.discovery.history,
+    });
+
+    for (const node of getProgramNodesInGraphOrder(blueprint.program)) {
+      const definition = getBusterModuleDefinition(node.moduleId);
+      if (!definition) {
+        blocked.push({ code: 'UNKNOWN_MODULE', nodeId: node.nodeId });
+        requests.push({ nodeId: node.nodeId, moduleId: null, discoveryLevel: 'unknown', unavailable: true });
+        continue;
+      }
+      if (!definition.physical || NON_PHYSICAL_BUILTIN_MODULE_IDS.has(node.moduleId)) {
+        assignments[node.nodeId] = null;
+        continue;
+      }
+      const owned = available.find((entry) => (
+        !used.has(entry.instanceId) && entry.moduleId === node.moduleId
+      ));
+      if (owned) {
+        used.add(owned.instanceId);
+        assignments[node.nodeId] = owned.instanceId;
+        requests.push({
+          nodeId: node.nodeId,
+          moduleId: node.moduleId,
+          displayName: definition.label,
+          instanceId: owned.instanceId,
+          discoveryLevel: 'owned',
+          routes: [],
+        });
+        continue;
+      }
+
+      const recipe = getBusterRecipe(node.moduleId);
+      const discovery = recipe ? getRecipeDiscoveryState(recipe, state.discovery) : null;
+      if (!recipe) {
+        blocked.push({ code: 'NO_ACTIVE_RECIPE', nodeId: node.nodeId, moduleId: node.moduleId });
+        requests.push({
+          nodeId: node.nodeId,
+          moduleId: discovery?.discovered ? node.moduleId : null,
+          displayName: discovery?.displayName ?? 'Unknown Buster Part',
+          discoveryLevel: discovery?.level ?? 'unknown',
+          unavailable: true,
+        });
+        continue;
+      }
+      if (!discovery?.fullyDiscovered) {
+        blocked.push({
+          code: discovery?.discovered ? 'RECIPE_PARTIAL' : 'RECIPE_UNKNOWN',
+          nodeId: node.nodeId,
+          moduleId: discovery?.discovered ? node.moduleId : null,
+        });
+        requests.push({
+          nodeId: node.nodeId,
+          moduleId: discovery?.discovered ? node.moduleId : null,
+          displayName: discovery?.displayName ?? 'Unknown Buster Part',
+          discoveryLevel: discovery?.level ?? 'unknown',
+          clue: discovery?.clue ?? null,
+          // No recipe id, ingredient ids, costs, or affordability escape this
+          // domain boundary before full discovery.
+          routes: [],
+        });
+        continue;
+      }
+      const candidateRoutes = this._getCandidateFabricationRoutes(recipe, planningState, roll);
+      const routes = candidateRoutes.map((route) => ({
+        id: route.id,
+        label: route.id === 'original' ? 'Original fabrication' : 'Roll replication',
+        requirements: cloneJson(route.check.requirements),
+        missing: cloneJson(route.check.missing),
+        affordable: route.affordable,
+      }));
+      const affordableCount = routes.filter((route) => route.affordable).length;
+      if (affordableCount === 0) blocked.push({ code: 'INSUFFICIENT_RESOURCES', nodeId: node.nodeId, moduleId: node.moduleId });
+      requests.push({
+        nodeId: node.nodeId,
+        moduleId: node.moduleId,
+        displayName: definition.label,
+        recipeId: recipe.id,
+        instanceId: null,
+        discoveryLevel: 'full',
+        routes,
+        requiresRouteChoice: affordableCount > 1,
+      });
+      // Suggestion affordability follows the same deterministic graph order as
+      // confirmation. Prefer an original route for the provisional ledger so
+      // its successful craft can unlock replication for a later copy of the
+      // same module within this one atomic materialization.
+      const plannedRoute = candidateRoutes.find((route) => route.id === 'original' && route.affordable)
+        ?? candidateRoutes.find((route) => route.affordable)
+        ?? null;
+      if (plannedRoute) {
+        const plannedTransaction = roll.transactRecipe(plannedRoute.recipe);
+        if (plannedTransaction.ok) {
+          const history = planningState.fabricationHistory[recipe.moduleId] ?? {
+            originalCrafts: 0,
+            replicationCrafts: 0,
+            firstOriginalSequence: null,
+          };
+          if (plannedRoute.id === 'original') history.originalCrafts += 1;
+          else history.replicationCrafts += 1;
+          planningState.fabricationHistory[recipe.moduleId] = history;
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      blueprintId: blueprint.blueprintId,
+      blueprintRevision: blueprint.revision,
+      buildId,
+      chassisId,
+      baseRevision: metadata.revision ?? this.revision,
+      baseWriteId: metadata.writeId ?? this.writeId,
+      assignments,
+      requests,
+      blocked,
+      canConfirm: blocked.length === 0,
+    };
   }
 
   _adoptState(nextState) {
@@ -1202,6 +2856,55 @@ export class BusterLabStorage {
     for (const key of Object.keys(this.state)) delete this.state[key];
     Object.assign(this.state, nextState);
     return this.state;
+  }
+
+  _adoptEnvelopeMetadata(envelope) {
+    this.revision = envelope?.revision ?? 0;
+    this.writeId = envelope?.writeId ?? null;
+    this.updatedAt = envelope?.updatedAt ?? null;
+  }
+
+  _tryReadEnvelope(key) {
+    try {
+      const raw = this.storage?.getItem(key);
+      if (!raw) return { ok: false, reason: 'missing' };
+      const envelope = parseBusterLabEnvelope(raw, { expectedSaveContextId: this.saveContextId });
+      // State validation is part of deciding whether a backup is safe.
+      this.deserialize(envelope.state);
+      return { ok: true, envelope, raw };
+    } catch (error) {
+      return { ok: false, reason: 'invalid', error };
+    }
+  }
+
+  _readCurrentEnvelope() {
+    if (!this.storage) return null;
+    const raw = this.storage.getItem(this.storageKeys.main);
+    if (!raw) return null;
+    const envelope = parseBusterLabEnvelope(raw, { expectedSaveContextId: this.saveContextId });
+    this.deserialize(envelope.state);
+    return envelope;
+  }
+
+  _quarantineCorruptPayload(raw, error) {
+    if (!this.storage || raw == null) return;
+    try {
+      this.storage.setItem(this.storageKeys.corrupt, JSON.stringify({
+        storageVersion: 1,
+        saveContextId: this.saveContextId,
+        capturedAt: new Date().toISOString(),
+        error: error?.message ?? String(error),
+        payload: String(raw),
+      }));
+    } catch {
+      // Recovery must never fail merely because quarantine storage is full.
+    }
+  }
+
+  _withLock(callback) {
+    return withBusterLabLock(this.lockManager, this.lockName, callback, {
+      timeoutMs: this.lockTimeoutMs,
+    });
   }
 
   _allocateInstanceId(state, kind) {
@@ -1250,15 +2953,62 @@ export class BusterLabStorage {
     }
   }
 
-  _persistCandidate(candidate) {
+  _persistCandidate(candidate, {
+    expectedRevision = this.revision,
+    expectedWriteId = this.writeId,
+    allowMissing = false,
+  } = {}) {
+    const normalized = this.deserialize(candidate);
     if (!this.storage) {
+      const envelope = createBusterLabEnvelope({
+        saveContextId: this.saveContextId,
+        state: normalized,
+        revision: Math.max(0, expectedRevision ?? 0) + 1,
+      });
+      this._adoptEnvelopeMetadata(envelope);
       this.lastSaveSucceeded = true;
-      return;
+      return envelope;
     }
     try {
-      this.storage.setItem(BUSTER_LAB_STORAGE_KEY, JSON.stringify(candidate));
+      const currentRaw = this.storage.getItem(this.storageKeys.main);
+      const current = currentRaw
+        ? parseBusterLabEnvelope(currentRaw, { expectedSaveContextId: this.saveContextId })
+        : null;
+      if (!current && !allowMissing && (expectedRevision ?? 0) !== 0) {
+        throw new BusterLabConflictError('The current Buster Lab payload disappeared before commit.', {
+          expectedRevision,
+          actualRevision: 0,
+          expectedWriteId,
+          actualWriteId: null,
+        });
+      }
+      if (current && expectedRevision != null && current.revision !== expectedRevision) {
+        throw new BusterLabConflictError('The Buster Lab revision changed before commit.', {
+          expectedRevision,
+          actualRevision: current.revision,
+          expectedWriteId,
+          actualWriteId: current.writeId,
+        });
+      }
+      if (current && expectedWriteId != null && current.writeId !== expectedWriteId) {
+        throw new BusterLabConflictError('The Buster Lab write id changed before commit.', {
+          expectedRevision,
+          actualRevision: current.revision,
+          expectedWriteId,
+          actualWriteId: current.writeId,
+        });
+      }
+      const envelope = createBusterLabEnvelope({
+        saveContextId: this.saveContextId,
+        state: normalized,
+        revision: (current?.revision ?? 0) + 1,
+      });
+      if (currentRaw) this.storage.setItem(this.storageKeys.backup, currentRaw);
+      this.storage.setItem(this.storageKeys.main, JSON.stringify(envelope));
+      this._adoptEnvelopeMetadata(envelope);
       this.lastSaveSucceeded = true;
       this.lastWarning = null;
+      return envelope;
     } catch (error) {
       this.lastSaveSucceeded = false;
       this.lastWarning = `Roll couldn't save the Buster Lab changes (${error.message}). No resources were spent.`;

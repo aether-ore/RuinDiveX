@@ -1,82 +1,78 @@
-# Custom Buster Implementation Notes
+# Custom Buster v0.2 Implementation Notes
 
-This document records the Custom Buster feature as it is implemented in the
-current prototype. It is a current-state reference, not a redesign proposal.
-Earlier planning and audit notes may describe alternative balance, persistence,
-or rollout choices; those alternatives are not missing behavior unless this
-document explicitly identifies a verified gap.
+This document records the Custom Buster feature as it exists in the current
+prototype on July 14, 2026. It is a factual implementation reference, not a
+design proposal. Planning documents and earlier audits may describe contracts
+that are not yet integrated; verified differences are listed under
+**Current limitations and release blockers**.
+
+## Current status
+
+The graph-v1 compiler, normalized battery rules, physical Lab economy,
+ownership-free blueprints, context-scoped storage, compiled projectile runtime,
+benchmark range, and disposable dungeon infrastructure are implemented.
+
+The v0.2 balance search does **not** currently produce a releasable selection.
+`runBusterBalanceSearch` evaluates all 338 authorized Power-scalar/Mortar-Power
+candidates and returns `releaseReady: false`. The nearest diagnostic candidate
+uses a level-10 scalar of `1.25` and Mortar Power `18`, but fails 89 of 90 hard
+comparisons. Consequently, the catalog deliberately remains at the unselected
+constants `BUSTER_LEVEL_10_POWER_SCALAR = 1.00` and Mortar Power `15`.
+
+`npm run test:buster` includes `tests/buster-balance.test.mjs`, whose assertions
+lock the matrix and the known blocked result. The separate strict command
+`npm run verify:buster-balance` exits unsuccessfully when `releaseReady` is
+false. The top-level `npm test` runs that strict command after the focused
+Buster suite, so ordinary CI is intentionally blocked at the balance gate.
 
 ## Feature boundary
 
-The feature is opt-in through URL parameters.
-
-| Parameter | Current effect |
+| URL parameter | Implemented effect |
 | --- | --- |
-| `busterLab=1` | Enables the complete integrated feature: Roll's Lab, persistent Roll salvage, recipes, physical chassis and modules, Mega Buster calibration, Custom Busters in normal combat, the shared battery runtime, HUD integration, and the test range. |
-| `busterLabDebug=1` | Preselects the Buster Lab page in Debug Tools when the main feature is enabled. It does not independently enable the feature. |
+| `?busterLab=1` | Enables the integrated physical Lab, unified Mega/Custom runtime, crafting, saved chassis, blueprints, HUD, and benchmark range. |
+| `?busterLab=sandbox` | Enables everything above and exposes the disposable dungeon sandbox path. |
+| `?busterLabDebug=1` | With either enabled Lab mode, exposes the persistent, repeatable debug-kit control. It does not enable the Lab by itself. |
+| Missing or any other `busterLab` value | Keeps legacy combat and arm behavior active. |
 
-With `busterLab=1` absent, the Buster compiler and Lab do not participate in
-gameplay. The existing equipment aggregation, Buster Output, legacy weapons,
-loot handling, Roll salvage session, and combat behavior remain on their legacy
-paths. The browser test named `feature flag off keeps the legacy Buster and Roll
-workshop path intact` protects this boundary.
+Feature-off combat still uses the legacy Buster Output, equipment aggregation,
+random damage, procs, and arm implementations. It is no longer a completely
+untouched code path: `Game.create` always opens the context-scoped Lab store so
+the starter record and legacy Buster shadow bridge cannot be duplicated by
+toggling the feature. With the feature off, authoritative shadow records are
+hydrated back into legacy inventory or Buster-upgrade sockets.
 
-`busterLab=1` is not a range-only or in-memory sandbox. It enables crafting,
-persistence, migration, and normal-game use together. Safe experimentation is
-provided by the no-reward test range and the repeatable Debug Tools grant.
+The browser test `feature-off and feature-on share one canonical starter Power
+Raiser without duplication` protects the toggle bridge and starter identity.
 
-## Source map and data flow
+## Source map
 
-The implementation separates authored build data from derived combat behavior.
-
-| Area | Source of truth |
+| Concern | Primary symbols/files |
 | --- | --- |
-| Versioned rules, module values, Mega calibration mappings | `src/buster/catalog.js` |
-| Canonical graph normalization and graph serialization | `src/buster/model.js` |
-| Graph, tuning, compatibility, Energy, and optional ownership validation | `src/buster/validation.js` |
-| Immutable plans, Power allocation, ledgers, previews, and runtime actions | `src/buster/compiler.js` |
-| Recipes and permanent discovery states | `src/buster/BusterRecipeCatalog.js` |
-| Roll resources, instances, builds, revisions, assignments, and local persistence | `src/buster/BusterLabStorage.js` |
-| Batteries, cadence, atomic projectile reservations, and execution identity | `src/buster/BusterRuntime.js` |
+| Ruleset, module values, Mega profile, calibration mapping | `CUSTOM_BUSTER_RULESET`, `BUSTER_MODULE_CATALOG`, and `MEGA_BUSTER_BASE_PROFILE` in `src/buster/catalog.js` |
+| Source cloning, normalization, serialization | `normalizeBusterBuild`, `serializeBusterBuild`, and `deserializeBusterBuild` in `src/buster/model.js` |
+| Structural and assignment validation | `validateBusterProgram`, `validateBusterBuild`, and `validateBusterAssignments` in `src/buster/validation.js` |
+| Immutable derived plans and Power allocation | `compileBusterBuild` in `src/buster/compiler.js` |
+| Recipes and reveal states | `BUSTER_RECIPES` and `getRecipeDiscoveryState` in `src/buster/BusterRecipeCatalog.js` |
+| Envelope, save contexts, locks, and conflicts | `src/buster/BusterLabPersistence.js` |
+| Roll resources, ownership, blueprints, materialization, and migrations | `BusterLabStorage` in `src/buster/BusterLabStorage.js` |
+| Batteries and projectile reservations | `BusterRuntime` in `src/buster/BusterRuntime.js` |
+| Per-execution stagger accounting | `src/buster/BusterStagger.js` |
 | Deterministic spread, cluster, and ballistic sampling | `src/buster/BusterTrajectory.js` |
-| Game/loadout integration and compiled action execution | `src/Game.js` |
-| Input, aiming, delayed muzzle release, and weapon switching | `src/CombatSystem.js` |
-| Reasoned projectile lifecycle and hit routing | `src/ProjectileSystem.js` |
-| Roll's editor, compiler results, recipes, debug grant, and HUD | `src/UIManager.js` and `index.html` |
+| Loadout, execution, explosions, range, sandbox, and shadow bridge | `src/Game.js` |
+| Delayed extended-muzzle release and unified firing input | `src/CombatSystem.js` |
+| Swept controlled-projectile lifecycle | `src/ProjectileSystem.js` |
+| Roll Lab, blueprint controls, benchmark controls, and HUD | `index.html`, `src/UIManager.js`, and `src/ui.css` |
+| Deterministic balance model | `src/buster/BusterBalanceGate.js` and `scripts/verify-buster-balance.mjs` |
 
-The production flow is:
+## Graph-v1 source model
 
-```text
-Roll editor controls
-  -> versioned source graph
-  -> normalize and validate
-  -> immutable compiled plan
-  -> BusterRuntime fire transaction
-  -> Game action executor
-  -> ProjectileSystem lifecycle
-  -> normal enemy damage, armor, rewards, and weak-point handling
-```
-
-Source graphs and the complete Lab snapshot--Roll resources and discovery,
-physical instances, assignments, Mega calibrations, and migrations--are
-persisted. Compiled plans, runtime battery values, reservations, projectiles,
-and range objects are derived or ephemeral.
-
-## Source graph and supported grammar
-
-The current source schema and ruleset are:
-
-```text
-schemaVersion: 1
-rulesetVersion: custom-buster-v0.1
-```
-
-A saved build has this shape:
+The source schema remains version 1; compiled behavior identifies ruleset
+`custom-buster-v0.2`.
 
 ```js
 {
   schemaVersion: 1,
-  rulesetVersion: "custom-buster-v0.1",
+  rulesetVersion: "custom-buster-v0.2",
   buildId,
   chassisId,
   tuning: { power, energy, range, rapid },
@@ -88,145 +84,214 @@ A saved build has this shape:
 }
 ```
 
-The Roll UI is not a free-form graph editor. It presents typed slots for an
-emitter, root Guidance, trigger, child Guidance, splitter, and payload. Game
-integration lowers those selections into the graph above. When there is no
-trigger, the lower strip continues the root scope. When a trigger exists, its
-single `child` edge starts the child scope.
+Physical builds carry `moduleInstanceId` values for physical nodes. Stored
+blueprints contain only tuning and program behavior; `sanitizeBlueprint`
+removes every physical instance ID. A blueprint therefore cannot claim
+ownership merely by being imported or edited.
 
-| Program form | Canonical UI-authored shape |
+Program meaning follows the authored `next` and `child` topology. Validation
+and compilation walk those edges and enforce grammar in traversal order; they
+do not compile by sorting modules into kinds. Normalization sorts detached node
+and edge arrays by stable identifiers for canonical serialization, but that
+does not change the graph's linked traversal order.
+
+Unknown module IDs remain in normalized source. Unknown saved production
+builds are removed from active saved builds, retained as invalid drafts, and
+unequipped; they are never silently replaced.
+
+### Supported program shapes
+
+| Form | Supported shape |
 | --- | --- |
-| Direct | Emitter -> optional Guidance -> optional Splitter -> optional Explosion override. Without an override, the emitter's native payload is implicit. |
-| Triggered | Emitter -> optional root Guidance -> Trigger, then one child edge to optional child Guidance -> optional Splitter -> optional Explosion or native payload. |
+| Bare direct | `Emitter`, using its implicit native payload |
+| Guided direct | `Emitter -> Pursuit Guidance`, then implicit native payload |
+| Split direct | `Emitter -> Guidance? -> Spread 3 -> Payload?` |
+| Explosive direct | `Emitter -> Guidance? -> Explosion` |
+| Split explosive direct | `Emitter -> Guidance? -> Spread 3 -> Explosion` |
+| Triggered | `Emitter -> root Guidance? -> Trigger`, with one `child` edge to `child Guidance? -> Splitter? -> Payload?` |
 
-Current validation enforces all of the following:
+An explicit `pulsePayload` node is equivalent to selecting the emitter's native
+payload and costs zero semantic capacity. `cluster5` is child-only, so direct
+Cluster and a root splitter before a trigger are invalid. Recursive triggers,
+multiple trigger depths, multiple splitters, and graph joins are not supported.
 
-- Schema and ruleset versions must match.
-- The four tuning ratings are integers from `1` through `10` and total exactly
-  `16` for a Workshop Chassis.
-- A graph contains at most five raw nodes, exactly one emitter, at most one
-  trigger, at most one splitter, and at most one Guidance modifier in each
-  scope.
-- The emitter is the root. Payload nodes are terminal. Only triggers may own a
-  `child` edge, and a trigger must own exactly one.
-- Graphs must be connected and acyclic, with valid ports, unique node IDs, no
-  duplicate edges, no joins, and no incoming edge to the root.
-- Module compatibility tags are enforced; notably, `atApex` requires the
-  Mortar emitter.
-- Physical modules require an instance ID. When ownership context is supplied,
-  each instance must exist and must not already be claimed by another saved
-  build.
-- Total program Energy cost cannot exceed Maximum Energy.
-- Unknown module IDs remain in the normalized source and produce structured
-  validation errors; they are never replaced with another module.
+### Validation contracts
 
-Validation errors use `{ code, path, moduleId, message }`. The Lab uses the same
-errors to disable Save, Equip, and Test while leaving invalid drafts editable.
+`validateBusterProgram` checks ownership-free structure. `validateBusterBuild`
+retains the physical instance checks used by saved builds.
+`validateBusterAssignments` checks chassis/module inventories and exclusivity
+across builds separately.
 
-`onImpact` and `pulsePayload` are non-physical built-in catalog nodes. They need
-no fabricated instance. They still appear as graph nodes when the UI needs an
-explicit trigger or native-payload child target, so the current five-node limit
-counts them whenever they are present. A native payload is otherwise allowed to
-remain implicit.
+Structural validation currently enforces:
 
-The public pure-build entry points are `normalizeBusterBuild`,
-`validateBusterBuild`, `compileBusterBuild`, `serializeBusterBuild`, and
-`deserializeBusterBuild`. Normalization is detached and canonical: nodes and
-edges are sorted for stable round trips while invalid values and unknown module
-IDs are preserved for diagnosis.
+- Schema 1 and ruleset `custom-buster-v0.2`.
+- Integer ratings from `1` through `10`, totaling exactly `16`.
+- One emitter at the root, at most one trigger, at most one splitter, and at
+  most one Guidance modifier in each scope.
+- A connected, acyclic graph with valid ports, unique node IDs, no joins, no
+  incoming root edge, and exactly one child edge from a trigger.
+- Grammar order for the root and child strips, terminal payloads, and module
+  compatibility, including Mortar-only `atApex` and child-only `cluster5`.
+- At most five semantic capacity points. Physical nodes and built-in triggers
+  cost one point; `pulsePayload` costs zero.
+- Energy cost no greater than Maximum Energy.
+- Physical instance existence, type match, local uniqueness, and exclusivity
+  across saved builds when physical validation is requested.
+- `afterDelay` is invalid when `0.60s` is greater than nominal carrier lifetime
+  plus epsilon. Exact equality is valid, and less than `0.10s` of remaining
+  window produces `TRIGGER_WINDOW_NARROW`.
 
-## Stat and Power contract
+Errors and warnings share the UI-safe shape
+`{ code, path, moduleId, message }`. Invalid drafts remain editable but cannot
+be saved, equipped, or run in the production-backed range.
 
-Workshop Chassis ratings use this weapon-local contract:
+## Unified stat and Power contract
+
+Workshop tuning uses:
 
 ```text
 rating multiplier = 0.72 + 0.07 x rating
-Power              = emitter base Power x Power multiplier
+Power              = emitter base Power x Power multiplier x depth scalar
 Maximum Energy     = 2 + Energy rating
 Range              = emitter base Range x Range multiplier
 Base Rapid         = emitter base Rapid x Rapid multiplier
-Cycle time         = 1 / Base Rapid + sum of module cycle delays
+Cycle time         = 1 / Base Rapid + module delays
 Child Range        = root Range x 0.65
 ```
 
-Power is deterministic pre-mitigation damage potential. The compiled packet is
-still processed by enemy armor and enemy-specific damage handling. Each target
-inside an Explosion receives that Explosion packet independently.
+`combatDepthLevel` is clamped and rounded to `1..10`. Encounter spawning calls
+`setBusterCombatDepthLevel`, which recompiles future plans. Existing executions
+retain the immutable plan captured when they fired. The scalar formula is
+implemented, but its current level-10 endpoint is `1.00`, so it presently adds
+no depth scaling.
 
-Guidance, trigger transfer, and splitter bonuses are applied through a Power
-ledger. Final effective Power is capped at `125%` of tuned emitter Power. When
-the cap applies, carrier and terminal packets are scaled proportionally before
-the terminal batch is divided among projectiles.
+Balanced Mega and Custom tuning is `4/4/4/4`. Both a neutral Mega and a bare
+Custom Pulse have Maximum Energy `6`, shot cost `2`, and three opening shots.
+The campaign's canonical starter Power Raiser adds `+2 PWR` to the Mega, making
+its live Power rating `6` and pulse Power `9.12` while leaving the fixed Mega
+program unmodifiable. Mortar costs `3`, so a balanced Mortar has two opening
+shots.
 
-Stagger is derived from the final packet:
-
-```text
-Pulse/native impact = min(0.18, packet Power x 0.01) seconds
-Mortar impact       = min(0.25, packet Power x 0.015) seconds
-Explosion           = min(0.30, packet Power x 0.015) seconds
-```
-
-Enemy status handling uses maximum-duration semantics. Several packets from one
-execution do not add their stagger durations numerically, although later hits
-can refresh the remaining duration and produce their normal hit reactions.
+Power is deterministic pre-mitigation damage potential. Armor, guards, and
+target-specific damage handling are applied after the compiled packet reaches
+combat. Explosion applies its allocated packet independently to every target
+inside radius `1.55`.
 
 ### Module catalog
 
-| Stable ID | Kind | Physical | Current compiled behavior |
-| --- | --- | --- | --- |
-| `pulseBolt` | Emitter | Yes | Base Power `8`, Range `6.9`, Rapid `4.2/s`, speed `9.5`, Energy `1`; linear native Pulse. |
-| `mortarShell` | Emitter | Yes | Base Power `15`, Range `6.2`, Rapid `1.15/s`, speed `5.8`, Energy `1`; ballistic native impact. |
-| `pursuitGuidance` | Modifier | Yes | Power x`0.90`, Energy `+1`, cycle `+0.05s`; root and child scopes acquire independently. |
-| `atApex` | Trigger | Yes | Energy `+1`, cycle `+0.08s`, `100%` child transfer; Mortar-compatible only. |
-| `onImpact` | Trigger | No | Energy `+1`, cycle `+0.08s`; `20%` carrier damage and `80%` child transfer on enemy contact or range end. |
-| `afterDelay` | Trigger | Yes | Fixed `0.60s`, Energy `+1`, cycle `+0.08s`, `105%` child transfer. |
-| `spread3` | Splitter | Yes | Three directions at `-0.14/0/+0.14` radians, `110%` aggregate Power, Energy `+1`, cycle `+0.08s`. |
-| `cluster5` | Splitter | Yes | Five deterministic radial directions, `120%` aggregate Power, Energy `+2`, cycle `+0.16s`. |
-| `pulsePayload` | Payload | No | Explicit native Pulse sentinel with no additional cost. |
-| `explosion` | Payload | Yes | Replaces direct damage with radius-`1.55` Explosion, Energy `+1`, cycle `+0.10s`. |
+| Stable ID | Ownership | Implemented v0.2 behavior |
+| --- | --- | --- |
+| `pulseBolt` | Physical | Power `8`, Range `6.9`, Rapid `4.2/s`, speed `9.5`, Energy `2`; linear native Pulse |
+| `mortarShell` | Physical | Power `15`, Range `6.2`, Rapid `1.15/s`, speed `5.8`, Energy `3`; ballistic native impact |
+| `pursuitGuidance` | Physical | Power x`0.90`; Energy `0`, cycle delay `0` |
+| `atApex` | Physical | `100%` child transfer; Energy `0`, cycle `+0.08s`; Mortar only |
+| `onImpact` | Built in | Displayed as **Terminal Relay**; `20%` carrier and `80%` child; Energy `0`, cycle `+0.08s`; contact or range termination |
+| `afterDelay` | Built in | Fixed `0.60s`, `104%` child transfer; Energy `0`, cycle `+0.08s` |
+| `spread3` | Physical | Three shots at `-0.14/0/+0.14` radians, `110%` aggregate Power; Energy `+1`, cycle `+0.08s` |
+| `cluster5` | Physical | Five deterministic radial children, `120%` aggregate Power; Energy `+2`, cycle `+0.16s`; child-only |
+| `pulsePayload` | Built in | Explicit native payload selection; no Energy, delay, or semantic capacity |
+| `explosion` | Physical | Replaces direct damage with radius-`1.55` Explosion; Energy `+1`, cycle `+0.10s` |
 
-Direct `cluster5` is currently legal and creates its radial batch at the muzzle.
-The compiler and UI do not restrict it to a trigger child branch.
+The compiler applies Guidance, trigger transfer, and splitter amplification in
+one Power ledger, then uses the continuous soft cap:
 
-At balanced `4/4/4/4` tuning, a bare Custom Pulse has Power `8`, Range `6.9`,
-Rapid `4.2/s`, Maximum Energy `6`, and cost `1`, so it can fire six shots from a
-full battery. The neutral Mega Buster has the same Power, Range, and Rapid, a
-base Maximum Energy of `9`, and cost `3`, giving it three shots. These are
-current catalog contracts rather than derived equipment bonuses.
+```text
+raw <= 1.25
+  ? raw
+  : 1.25 + (raw - 1.25) / (1 + 4 x (raw - 1.25))
+```
 
-`afterDelay` followed by `cluster5` produces `1.05 x 1.20 = 1.26` raw Power and
-is intentionally clipped to `1.25`. With no Guidance, the two emitters and two
-terminal choices (native or Explosion) yield four canonical UI combinations
-that reach this cap.
+The cap has knee `1.25` and asymptote `1.50`. Carrier and terminal allocations
+are compressed proportionally before a terminal batch is divided among its
+projectiles. The UI shows compression fields only when the raw multiplier is
+above the knee. No intended v0.2 catalog combination currently crosses it;
+After Delay plus Cluster reaches `1.248`.
 
-## Compiled plans
+### Immutable compiler output
 
-Compilation returns a deeply frozen derived plan. The plan contains:
+`compileBusterBuild(build, { combatDepthLevel })` returns a deeply frozen,
+derived plan containing:
 
-- Exact base, tuned, effective, carrier, terminal-batch, and per-projectile
-  Power.
-- Maximum Energy, Energy cost, Energy remaining, and shots per charge.
-- Native Rapid, final Rapid, base cycle time, module delays, and final cycle
-  time.
-- Root and child Range, speed, deterministic trajectory configuration, stagger,
-  projectile count, and peak projectile reservation.
-- Scope-sensitive Guidance, trigger, splitter, payload, packet, and preview
-  records.
-- Ordered action records whose `actionId` values include `emit-root`,
-  `emit-carrier`, `trigger-child`, and `emit-child`; their `type` values are
-  `emit` or `trigger`.
-- The normalized source build, build revision, complete Energy/cycle/Power
-  ledgers, and a plain-language firing description.
+- Exact base, tuned, depth-scaled, raw, effective, carrier, terminal-batch, and
+  per-projectile Power.
+- Maximum Energy, Energy cost, opening shots, Base Rapid, module delays, cycle
+  time, and final Rapid.
+- Root and child Range, projectile speed, deterministic trajectory data, and
+  nominal lifetimes.
+- Power, Energy, cycle, and capacity ledgers; warnings; semantic program order;
+  and a plain-language description.
+- An ordered action graph with execution IDs assigned later by the runtime.
+- Peak projectile reservation and nominal occupancy estimates.
+- Preview records used by the Lab and benchmark panel.
 
-The Power ledger records tuning, each modifier, trigger allocation, splitter
-amplification, cap clipping, and final projectile allocation. The same derived
-values drive unit tests and the Lab result panel; runtime code does not
-recalculate module balance from player state.
+Compiled plans are never persisted. Source graphs, tuning, revisions, and
+ownership are the durable inputs.
 
-## Mega Buster and loadout integration
+## Battery runtime and projectile lifecycle
 
-Feature-on loadout resolution uses logical entries rather than placing Custom
-Busters in the random-item type catalog:
+`BusterRuntime` keeps independent state per weapon key and separates
+side-effect-free `canFire` from stateful `requestFire`.
+
+- A successful shot alone spends Energy, starts cycle time, and resets the
+  `0.65s` recharge delay.
+- The active weapon does not recharge while fire remains held and the weapon
+  is unlocked.
+- A released or idle active weapon recharges at `maxEnergy / 1.8` per second
+  after the delay.
+- Inactive registered weapons recharge independently at half that speed.
+- Any held or tapped request with insufficient Energy sets `recoveryLocked`.
+  The lock clears only at full Energy; held input controls only whether combat
+  requests another shot afterward.
+- Failed Energy requests do not restart the delay.
+- Capacity rejection, spawn rejection, and thrown execution callbacks spend no
+  Energy. Spawn rejection restores prior battery and cycle state.
+
+The runtime atomically reserves each plan's peak moving-projectile batch
+against a global capacity of `24`. Every controlled projectile carries build
+revision, execution ID, action ID, trigger depth, reservation token, attack
+domain, and execution metadata. The reservation is released after the last
+controlled projectile in the execution is disposed.
+
+Controlled projectile updates perform swept collision and chronologically
+compare Delay, Apex, enemy impact, range/landing, and disposal within a frame.
+At an exact timestamp, Delay/Apex delivery wins before enemy impact, which wins
+before range and disposal. The shared ballistic sampler supports differing
+start and end elevations.
+
+If an Apex or Delay carrier contacts an enemy or reaches termination before its
+programmed trigger, it delivers the child branch immediately at that position,
+once, and suppresses the old full native-impact fallback. Terminal Relay
+delivers its branch on enemy contact or range end. Cancellation, reset, world
+clear, and sandbox teardown do not synthesize pending branches. Terrain-wall
+collision remains outside the compiled lifecycle.
+
+Guidance uses an explicit target lock first and otherwise stable target-ID
+tie-breaking. Root Guidance affects only the carrier; child Guidance reacquires
+independently. Spread, Cluster, and ballistic paths contain no runtime
+randomness.
+
+Registering a new plan revision or switching arms changes future shots only.
+In-flight executions retain their captured plan. Explicit destructive
+transitions such as reset, range entry/exit, invalidation with cancellation,
+and world clear still cancel matching executions by reason.
+
+### Stagger
+
+Each target/execution pair tracks its largest nominal stagger duration. A new
+positive-damage packet contributes only:
+
+```text
+additional = max(0, newDuration - previousLargest)
+newEnd      = max(currentEnd, hitTime + additional)
+```
+
+Equal or smaller packets add nothing; a later larger packet contributes the
+difference. Zero-damage hits do not advance the budget. Direct and Explosion
+packets share the same execution ledger.
+
+## Loadout, attack domain, and presentation
+
+Feature-on arm resolution uses:
 
 ```js
 { kind: "megaBuster" }
@@ -234,358 +299,388 @@ Busters in the random-item type catalog:
 { kind: "legacyItem", item }
 ```
 
-- Arm slot 1 is always the fixed left-arm Mega Buster.
-- Arm slots 2 and 3 may independently hold a saved physical Custom Buster or a
-  legacy special weapon.
-- Arm slot 4 remains the utility arm.
-- Custom chassis and modules do not enter random loot generation or generic
+- Slot 1 remains the fixed left-arm Mega Buster.
+- Slots 2 and 3 accept separate physical Custom builds or legacy special arms.
+- Slot 4 remains the utility arm.
+- Custom chassis and modules never enter random item generation or generic
   equipment aggregation.
 
-Mega and Custom plans bypass legacy Buster Output, legacy reload behavior,
-random player-damage rolling, generic Attack, random elements, criticals,
-generic Area/projectile-count bonuses, life steal, Chain Shock, and Explosive
-Finish. Compiled projectiles still retain player ownership, normal XP and loot,
-enemy armor, enemy-specific guard logic, and geometric direct-hit weak points.
+Unified Mega and Custom packets use attack domain `customBuster` with
+`suppressGenericOffense`. They do not call legacy random damage or inherit
+generic Attack, crit, Area, projectile-count, element, life-steal, Chain Shock,
+or Explosive Finish behavior. Player ownership, ordinary enemy damage, armor,
+guards, XP, loot, and direct geometric weak points remain active in production.
+Direct projectiles carry resolved part metadata; Explosion splash is body/AoE
+damage and does not precision-hit a weak point.
 
-Direct compiled projectiles pass resolved part and weak-point metadata through
-the normal damage path. Explosion splash does not resolve a projectile part or
-carry precision weak-point metadata; it is body-area damage, still processed by
-the enemy damage and armor path.
+Compiled explosions set `damagePlayer: false` and `triggerMines: false`. Their
+visual style is an orange expanding fiery sphere: three additive orange,
+amber, and hot-yellow spherical layers plus particle bursts. The same shared
+fiery visual helper is used by Reaverbot destruction. Legacy explosions keep
+their existing flat-ring presentation.
 
-Both Mega and Custom attacks currently use the descriptive attack-domain string
-`customBuster`; actual generic-offense suppression is separately enforced by
-the `suppressGenericOffense` metadata flag.
+Both Mega and Custom fire use a `0.18s` brace gate. Initial input stores a
+pending intent and extends the arm without spending Energy. Combat re-samples
+the live muzzle and releases only after the projectile pose is sustained at
+full extension, preventing a shot from appearing at the hip. Weapon changes,
+dodge, ledge cling, death, control locks, and range transitions clear a pending
+intent without spending Energy.
 
-### Mega calibration
+The unified HUD uses one `BAT` gauge, remaining/maximum shots, and
+`PWR / ENG / RNG / RPD / MAG` chips. It distinguishes `CYCLE`, `ENERGY`, and
+`RECOVERY`. Legacy arms retain their existing Energy/Output telemetry.
 
-The Mega base calibration ratings are balanced at `4/4/4/4` and it has four
-physical calibration sockets. Its battery has a separate normalized baseline
-of `9`, with each shot costing `3`; Energy calibrations add their rating bonus
-linearly above that baseline. A fresh feature-on save normally becomes
-`6/4/4/4` after its starter Power calibration is granted and installed. Every
-calibration rating remains capped at `10`.
+## Roll economy, recipes, and physical ownership
 
-| Legacy part type | Fixed rating bonus |
-| --- | --- |
-| `powerRaiser` | `+2 Power` |
-| `energyBattery` | `+2 Energy` |
-| `rangeBooster` | `+2 Range` |
-| `rapidFireUnit` | `+2 Rapid` |
-| `sniperScope` | `+1 Power, +1 Range` |
-| `heatSinkCore` | `+1 Energy, +1 Rapid` |
+A fresh context receives one Workshop Chassis A and one physical starter
+`pulseBolt` exactly once. Chassis B costs `20 identifiedScrap`; at most two
+physical chassis may exist. A physical module instance may be installed in
+only one saved build, and one physical build may occupy only one arm assignment.
+Retuning, rearrangement, installation, and removal do not consume salvage.
 
-On a successful cap-valid migration, feature initialization converts owned and
-installed legacy Buster Parts into calibration instances, preserves installed
-socket order where capacity permits, and removes the source items. Future
-Buster Part acquisitions are intercepted and converted instead of entering
-general inventory. Rarity, item level, and random rolls do not affect the fixed
-calibration. A starter Power calibration is granted once and installed into the
-first empty socket when one is available.
+### Active original recipes
 
-Migration is transactional. If the candidate installed calibrations would push
-any rating over `10`, validation rejects the mutation and the legacy source
-items remain unchanged.
+| Module | Named salvage | Identified scrap |
+| --- | --- | ---: |
+| `pulseBolt` | `revolvingPulseBarrel` | 6 |
+| `mortarShell` | `highAngleLaunchTube` | 8 |
+| `pursuitGuidance` | `behaviorChipPursuit` + `rubyOpticLens` | 12 |
+| `atApex` | `ballisticsLogicChip` | 8 |
+| `spread3` | `ammunitionFeedDrum` + `revolvingPulseBarrel` | 10 |
+| `cluster5` | `clusterBurstSequencer` | 12 |
+| `explosion` | `volatileOverloadCell` | 10 |
 
-This conversion is currently destructive. Calibration records do not preserve
-the source item's ID, rarity, level, or random-roll provenance, and no rollback
-path recreates those original items when the feature flag is removed.
+`afterDelay` has no active recipe; it is a built-in chassis instruction.
 
-## Battery runtime and projectile lifecycle
+Recipe discovery has permanent `unknown`, `hinted`, and `full` states. Unknown
+cards render only silhouettes. Discovering one component of a multi-part recipe
+renders its authored name/function and Roll clue while the cards and
+materialization routes withhold exact costs and ingredients. Discovering every
+required part type reveals the exact recipe permanently. One-part recipes move
+directly from unknown to full.
 
-`BusterRuntime` owns independent state for every registered weapon key. Current
-Custom plans use `buildId` as their weapon/resource key; Mega uses
-`megaBuster`. Resource state is not keyed separately by physical `chassisId`.
+Original fabrication remains available after the first craft. A successful
+non-debug original craft unlocks scrap-only replication of that module at twice
+the original scrap cost. Imported v1 fabricated instances also unlock their
+replication route; starter and debug instances do not. When both routes are
+affordable, materialization requires an explicit route choice. Requests are
+processed in deterministic order, so an earlier original craft in one atomic
+materialization may unlock replication for a later copy.
 
-After a successful shot:
+All fabrication and materialization resource changes use Roll's transactional
+recipe operation: named parts, identified scrap, ownership records, and build
+revision commit together or none commit.
 
-- The exact compiled Energy cost is deducted.
-- The compiled cycle timer starts.
-- Recharge is delayed by `0.65s`.
-- Recharge then adds `maxEnergy / 1.8` Energy per second.
+## Blueprints and materialization
 
-Recharge advances for every registered weapon, including inactive weapons, at
-the same full rate. Energy does not need to return to full before firing: held
-fire resumes as soon as the active weapon has enough partial Energy to pay the
-shot and its cycle timer is ready.
+The store retains up to eight blueprints. Blueprints have their own IDs and
+revisions, contain no physical instance IDs, and may be structurally compiled
+without ownership. The Lab can create one from a draft, select it, edit it,
+save a revision, delete it, prepare materialization, and confirm the result.
 
-The runtime permits at most `24` reserved moving Buster projectiles globally. A
-shot atomically reserves its compiled peak batch before spending Energy. If the
-reservation cannot be made, nothing spawns and no Energy is spent. Spawn
-rejection or an exception also rolls back Energy, cycle, recharge delay, and the
-reservation. A reservation remains attached to its execution until that
-execution's final controlled projectile is disposed.
+Known but undiscovered modules in an imported blueprint are retained as
+locked/redacted. Truly unknown IDs are retained and invalid. Materialization
+prepares a suggestion bound to the blueprint revision and storage
+`revision/writeId`, assigns available unclaimed instances first, and exposes
+fabrication routes only for fully discovered recipes. Confirmation rechecks the
+same versions and commits every craft, assignment, saved build, draft, and
+revision in one transaction.
 
-Every controlled projectile carries build revision, execution ID, action ID,
-trigger depth, reservation token, attack domain, and attack metadata. The
-controller receives advance, enemy-impact, range-end, apex-crossing, disposal,
-and world-clear events. Legacy projectiles keep their existing behavior when no
-controller is attached.
+The Lab exposes JSON blueprint export and file import. The storage transaction
+strips physical ownership and tags foreign provenance. Imported designs whose
+known modules have not been discovered remain locked/redacted but are eligible
+for the explicit full-catalog sandbox; truly unknown IDs remain invalid. There
+is no automatic cross-context application of a full Lab envelope.
 
-Current trigger behavior is:
+## Persistent debug kit
 
-- `onImpact` creates its child batch once on enemy contact or exact range end.
-- `afterDelay` samples the carrier position at the `0.60s` crossing and creates
-  its child batch once.
-- `atApex` uses the shared ballistic sampler to create its child batch at the
-  sampled apex.
-- If an Apex or Delay carrier contacts an enemy before its trigger, it applies
-  its native carrier payload and produces no child batch.
-- Terrain-wall collision is not part of this version.
+The Debug Tools grant is visible only with `busterLabDebug=1` and is repeatable.
+Each successful grant atomically adds:
 
-Spread, cluster, and ballistic samples contain no runtime randomness. Guidance
-honors an explicit lock first, otherwise reacquires the nearest valid target;
-controlled Buster projectiles use stable target-ID ordering to break equal
-distance ties. Root Guidance does not implicitly cross a trigger boundary, and
-child Guidance reacquires independently.
+- One debug-origin physical copy of each of the seven physical modules.
+- One debug-origin copy of each of the six Mega calibration types.
+- Chassis B and its draft if absent.
+- Full discovery for all active recipes.
+- The complete active original-recipe bill: `66 identifiedScrap`, two
+  `revolvingPulseBarrel` parts, and one of every other named ingredient.
 
-Ordinary weapon switching cancels reservations and controlled projectiles for
-the weapon being left. Registering a new revision for the same key cancels the
-old revision as `recompile`. Slot replacement, invalidation, reset, range entry,
-range exit, and world clear also have explicit cancellation paths. Cancellation
-does not invoke normal expiry payloads.
+Debug copies and resources persist. Debug-origin module instances do not unlock
+replication. The grant count is also persisted.
 
-### Firing animation timing
+## Storage envelope, durability, and migration
 
-Mega and Custom shots use a `0.18s` extension gate. The first unbraced input is
-stored as a pending firing intent and starts the projectile firing pose without
-spending Energy. Combat releases the shot only after the player's Buster pose is
-sustained and the extension time has elapsed.
+`BusterLabStorage.open` is awaited before `Game` initialization. Durable state
+uses this envelope:
 
-At release, combat reads the live extended muzzle again and recomputes the shot
-direction from that origin. This prevents a projectile from spawning at the hip
-position sampled before the animation. Tap fire remains queued through the
-extension; held fire keeps the arm braced so later cadence-ready shots do not
-repeat the wind-up. Shared pending-attack cancellation clears the intent on
-weapon changes, dodges, ledge clings, death, control locks, and range
-transitions without spending Energy.
-
-### Explosion behavior and visuals
-
-Compiled Explosion packets explicitly disable player damage and legacy mine
-triggering. The compiled path passes `visualStyle: "fierySphere"` to the shared
-Explosion resolver. It creates three additive orange/yellow spherical layers,
-expands and fades them through the timed-effect system, and adds orange and hot
-particle bursts. The visual reuses the same fiery-sphere vocabulary as
-Reaverbot destruction.
-
-The style is selected only by compiled Buster Explosions. Legacy explosions
-retain their flat ring visual and their existing gameplay behavior.
-
-## Roll economy, ownership, and persistence
-
-The durable feature slice is stored at:
-
-```text
-localStorage key: ruinDigger.busterLab.v1
-storage version: 1
+```js
+{
+  storageVersion: 2,
+  saveContextId,
+  revision,
+  writeId,
+  updatedAt,
+  state
+}
 ```
 
-There is one feature-on durable snapshot. `RollSalvageStorage` is created as a
-transactional facade over that snapshot; its autosave callback commits Roll's
-resource changes back through `BusterLabStorage`. It is not a second independent
-feature-on local-storage key.
+The active context ID lives at `ruinDigger.saveContext.v1`. Context-scoped keys
+are:
 
-| Persisted field | Contents |
+```text
+ruinDigger.busterLab.v2.<encoded saveContextId>
+ruinDigger.busterLab.v2.<encoded saveContextId>.backup
+ruinDigger.busterLab.v2.<encoded saveContextId>.corrupt
+```
+
+The old global `ruinDigger.busterLab.v1` payload is left untouched. The storage
+API can inspect it, require confirmation, adopt it under a global import lock,
+and record one global import claim.
+
+Browser writes require Web Locks under
+`ruinDigger:busterLab:<saveContextId>`. `transact` re-reads and verifies the
+expected revision and write ID inside the exclusive lock. Lock acquisition
+times out after five seconds; conflicts and timeouts put the current store into
+read-only mode. Without Web Locks, a browser Lab opens read-only. Node tests use
+a compatible in-memory lock manager.
+
+An open browser store also listens for changes to its context's main storage
+key. A different revision/write ID, removal, or malformed external payload
+pauses writes and records conflict details. Events received during a local
+transaction are queued until that transaction leaves its lock. The Lab can
+then reload the durable state or download an
+in-memory/main/backup/corrupt recovery bundle from its persistence controls.
+
+Before replacing the main payload, the previous envelope is copied to the
+context backup. An unreadable main payload is retained under the corrupt key;
+the loader restores a valid backup when possible or creates a safe starter Lab
+and exposes a warning. Unknown saved modules preserve their source draft while
+clearing unsafe assignments.
+
+### Persisted v2 state
+
+| Field | Contents |
 | --- | --- |
-| `rollSalvage` | Roll's identified scrap and named-part counts. |
-| `discovery` | Ever-discovered salvage types, discovery history, and permanent recipe reveal history. |
-| `moduleInstances` | Fabricated, starter, and debug physical module copies. |
-| `chassisInstances` | Workshop Chassis A and optional Chassis B. |
-| `chassisBuilds` | Last valid saved production source for each chassis. |
-| `chassisDrafts` | Current editable source, including invalid or unfinished drafts. |
-| `chassisRevisions` | Cloned source snapshots appended on successful saves. |
-| `assignments` | Build assignments for physical arm slots 2 and 3. |
-| `megaCalibrations` | Physical calibration instances, four socket assignments, ID counter, and revision. |
-| `migrations` | Starter/conversion flags, the debug grant marker and count, and unknown-module quarantine records. |
-| `nextInstanceId` | Stable allocator state for fabricated instances. |
+| `rollSalvage` | Roll's identified scrap and canonical named-part stockpile |
+| `discovery` | Ever-discovered salvage IDs, ordered history, and permanent recipe history |
+| `moduleInstances` | Starter, fabricated, replication, and debug physical module copies |
+| `chassisInstances` | Physical Chassis A and optional Chassis B |
+| `chassisBuilds` | Last valid production sources for physical chassis |
+| `chassisDrafts` | Editable physical drafts, including incomplete drafts |
+| `chassisRevisions` | Saved immutable source snapshots and revision numbers |
+| `assignments` | Physical Build A/B assignments for arm slots 2 and 3 |
+| `blueprints`, `nextBlueprintId` | Up to eight ownership-free source designs and allocator state |
+| `fabricationHistory` | Original/replication counts and first-original sequence per module |
+| `megaCalibrations` | Calibration instances, four sockets, allocator, and revision |
+| `legacyBusterParts` | Authoritative shadow Item records and reciprocal calibrations |
+| `migrations` | Starter, unknown-module, debug, After Delay, and import/migration markers |
+| `nextInstanceId` | Stable physical-module instance allocator |
 
-General inventory, legacy equipment, player level, dungeon progress, enemies,
-loot on the ground, and runtime weapon resources are deliberately not part of
-this partial save.
+Runtime batteries, compiled plans, projectiles, current enemies, dungeon
+progress, general inventory, and general equipment are not saved in this Lab
+slice. Legacy Buster Item snapshots are the deliberate exception needed by the
+toggle bridge.
 
-A fresh Lab grants exactly one Workshop Chassis A, one physical starter Pulse
-Bolt, and valid Build A source/revision. Chassis B costs `20` identified scrap,
-is capped to one additional chassis, and begins as an empty invalid Build B
-draft. Purchasing it is transactional.
+### Legacy shadow ownership
 
-Physical module instances can be referenced by only one saved build. Drafts are
-persisted even when an instance is missing or claimed elsewhere, but such a
-draft cannot be saved as a production revision, equipped, or tested. The editor
-selects an available matching instance automatically; it does not currently
-provide an explicit transfer operation or simulation using an unowned pattern.
+Each bridged legacy Buster Part has one authoritative record and one fixed
+linked calibration. IDs use
+`legacy-buster:<saveContextId>:<sequence>`. Feature-on initialization removes
+eligible live Items only after durable registration and exposes their linked
+calibrations. Feature-off startup hydrates the saved Item snapshot into its
+logical inventory or Buster-upgrade socket. Rarity, level, and random rolls
+remain on the Item snapshot but do not alter the calibration mapping.
 
-### Recipes
+Feature-off socket assignment, uninstallation, individual discard, rarity
+salvage, and Optimize Loadout first reconcile affected shadow locations or
+removals in one awaited storage transaction. The corresponding live inventory
+or socket mutation occurs only after that durable commit succeeds. Optimize
+also preserves physical Custom Busters already assigned to arm slots 2 and 3.
 
-| Module | Stable recipe ID | Named parts | Identified scrap |
-| --- | --- | --- | ---: |
-| `pulseBolt` | `pulse` | `revolvingPulseBarrel` | 6 |
-| `mortarShell` | `mortar` | `highAngleLaunchTube` | 8 |
-| `pursuitGuidance` | `pursuit` | `behaviorChipPursuit`, `rubyOpticLens` | 12 |
-| `atApex` | `apex` | `ballisticsLogicChip` | 8 |
-| `afterDelay` | `afterDelay` | `clusterBurstSequencer` | 8 |
-| `spread3` | `spread3` | `ammunitionFeedDrum`, `revolvingPulseBarrel` | 10 |
-| `cluster5` | `cluster5` | `clusterBurstSequencer` | 12 |
-| `explosion` | `explosion` | `volatileOverloadCell` | 10 |
+A feature-off world pickup for a legacy Buster Part remains pending in the
+world until its linked shadow Item and calibration commit durably. A failed
+commit leaves inventory and storage unchanged so collection can be retried. If
+the final live inventory slot fills while the lock is awaited, the committed
+exact Item moves to Roll's Migration Recovery and the world pickup completes,
+preventing a duplicate retry.
 
-All listed named-part quantities are one. `onImpact` and `pulsePayload` are
-built-in and have no fabrication recipe.
+The storage model enforces reciprocal socket links, four installed sockets,
+and at most 40 shadow inventory records. If feature-off hydration cannot fit an
+Item, it places it in the in-memory `busterMigrationRecovery` collection rather
+than expanding inventory capacity. The inventory UI renders that authoritative
+overflow as **Roll's Migration Recovery** and lets the player retrieve each Item
+when normal inventory space is available. The same durable shadow record
+reconstructs the recovery entry after reload. One canonical starter Power
+Raiser record is registered per context and begins in Mega socket 1 while the
+feature is on.
 
-Recipe reveal state is permanent:
+Already-destructively-converted v1 calibrations are retained without invented
+legacy Items. Migration stores their exact instance IDs and count under
+`unlinkedLegacyCalibrationsV2`, and the Lab presents a permanent warning that
+they remain feature-on-only.
 
-1. With no required part type ever discovered, the recipe card is an unknown
-   silhouette.
-2. Discovering some but not all required types reveals the authored name and
-   Roll clue while hiding exact requirements.
-3. Discovering every required type permanently reveals the bill of materials
-   and scrap cost, even after the parts are consumed.
+The one-time After Delay migration strips obsolete instance IDs from builds,
+drafts, revisions, and blueprints; removes physical After Delay instances;
+refunds each fabricated instance with one `clusterBurstSequencer` and 8 scrap;
+removes debug instances without refund; and persists exact counts so the refund
+cannot repeat. Its retired recipe history remains available for audit.
 
-A one-part recipe therefore moves directly from unknown to full. Fabrication
-checks and consumes every requirement in one transaction, and creates no module
-if validation, instance creation, or persistence fails. Additional copies use
-the complete named-part and scrap recipe again.
+## Roll Lab UI
 
-### Debug grant
+Roll's workshop contains top-level Salvage Analysis and Buster Lab tabs. The
+Lab currently exposes:
 
-Debug Tools exposes `Grant one of each Buster part` when the feature is enabled.
-Every activation atomically:
+- Mega, Build A, Build B, and stored blueprint selection.
+- Four tuning controls with remaining-point and semantic-capacity counts.
+- A structured root/child program strip whose options are filtered by recipe
+  reveal state.
+- Physical inventory, installed ownership, recipe-discovery cards, original
+  and replication routes, and Chassis B purchase.
+- Compiler-derived base/effective/per-child Power, projectile count, Energy,
+  shots per magazine, Rapid, Ranges, trigger, reservation, description, and
+  conditional soft-cap details.
+- Explicit save, equip, range, sandbox, blueprint, suggestion, and
+  materialization actions, with shared validation reasons.
+- Blueprint JSON import/export, full recovery export, durable-state reload,
+  confirmed v1 adoption, and confirmed New Campaign controls. New Campaign
+  rotates the save context and reloads the prototype; the old context remains
+  dormant for recovery.
+- Storage context/revision/read-only status and visible load or migration
+  warnings.
 
-- Adds one fresh physical copy of every recipe-backed v0.1 module.
-- Adds Chassis B and its empty draft if they do not already exist.
-- Adds one physical copy of every Mega calibration type.
-- Marks every recipe as fully discovered.
+## Production-backed benchmark range
 
-The grant is deliberately repeatable so both saved builds can own separate
-copies during testing. It does not change current scrap, named-part counts,
-saved builds, socket assignments, or arm assignments. Grant results and the
-grant counter persist in the Lab snapshot.
+`enterBusterTestRange` uses the production compiler, `BusterRuntime`, projectile
+system, damage path, and firing animation with an ephemeral weapon key. It
+supports one, two, or four targets and stationary, moving, armored, weak-point,
+or elite profiles at normalized depth 1, 5, or 10.
 
-### Recovery behavior
+The range tracks delivered and mitigated Power, Energy samples, opening
+magazine, projected 10s/30s output, peak occupancy, direct weak-point hits,
+stagger, misses, kills, and average TTK. It suppresses rewards. Exit clears
+range projectiles and dummies, disposes range resources, restores position,
+loadout, active slot, arena radius, workshop state, and the pre-range runtime
+resource snapshot.
 
-Unknown module IDs in a saved production build preserve the original source as
-an invalid draft, remove that build from production assignments, and force the
-active weapon back to the Mega Buster when necessary. A visible warning names
-the affected build.
+Range entry intentionally cancels the previously active weapon's in-flight
+execution rather than freezing and restoring those projectiles.
 
-Malformed JSON or otherwise invalid Lab state loads a safe starter Lab with a
-visible warning. The raw corrupt payload is not copied to a separate backup key;
-a later successful mutation can overwrite the original local-storage value.
+## Disposable dungeon sandbox
 
-The current persistence model has no player/profile or world identity, no
-top-level monotonic concurrency revision, and no cross-tab `storage` event
-handling. It therefore does not resolve concurrent writes from multiple tabs or
-associate the partial Lab save with a particular dungeon run.
+`?busterLab=sandbox` enables `captureWorldContext`, `activateWorldContext`,
+`createBusterSandboxContext`, and `disposeWorldContext` integration.
 
-## Lab UI, HUD, and test range
+Entering the sandbox captures the production world by identity, regenerates a
+fresh dungeon from the same layout seed, creates a fresh full-health player
+copy, fresh encounter systems, a separate `BusterRuntime`, and a separate
+enemy-ID allocator and 24-projectile budget. The sandbox begins at the dungeon
+entrance. The active game loop operates on the sandbox references, so the
+captured production timers, enemy allocator, enemies, batteries, projectiles,
+and executions do not receive catch-up time.
 
-When enabled, Roll's workshop has `Salvage Analysis` and `Buster Lab` top-level
-tabs. The Lab supplies selectors for Mega, Build A, and Build B, plus:
+Sandbox attacks carry no-reward metadata, and enemy death additionally checks
+the active sandbox session before XP or drops. The sandbox world owns separate
+inventory, loot, refractor, map-event, enemy, hazard, effect, and projectile
+collections, so mutations are discarded with the world. Manual exit or defeat
+clears projectiles and pending attacks, disposes enemies, player, animators,
+geometry, materials, and textures not shared with production, then restores
+the original world and reopens Roll's prior workshop state.
 
-- Four tuning controls and a remaining-point indicator.
-- Structured root and child program strips.
-- Physical module inventory with installed-build labels.
-- Recipe cards with silhouette, clue, or full-recipe states.
-- Mega calibration sockets.
-- A compiler result panel for base/effective/per-child Power, projectile count,
-  Energy cost, shots per charge, Rapid, root/child Range, trigger behavior,
-  reservation count, cap clipping, and firing description.
-- Explicit Save, Equip, and Test in Range actions with compiler-derived disabled
-  reasons.
-
-Program dropdowns currently enumerate the complete catalog even when a recipe
-card is still an unknown silhouette. Selecting an undiscovered/unowned module
-usually produces an invalid draft, but its name and function are not secret in
-the editor.
-
-The new-Buster HUD uses `PWR/ENG/RNG/RPD` and one battery gauge. Legacy arms
-continue to use their existing telemetry. Custom weapon descriptors report no
-generic equipment totals and identify themselves as compiled weapon-local
-weapons.
-
-`Test in Range` closes the workshop, creates one stationary and one lateral
-moving no-reward dummy, temporarily equips the valid draft under a test-specific
-weapon key, and uses the production compiler, battery runtime, projectile
-executor, damage path, and visuals. It snapshots existing Buster resource
-states, prevents loot and XP, and consumes no crafting materials.
-
-Exiting clears every range projectile, dummy, and scene resource, then restores
-position, facing, loadout, active arm, arena settings, workshop state, and the
-captured Buster battery/cycle state. Compiled executions active before range
-entry are cancelled rather than recreated afterward.
-
-## Intentional current contracts versus verified gaps
-
-The following are implemented and tested current rules. They are not incomplete
-merely because an earlier audit proposed alternatives:
-
-- The feature flag enables the whole integrated slice.
-- Source is persisted as a validated graph.
-- Bare Custom Pulse has six neutral shots while Mega has three.
-- Recharge resumes at the partial Energy threshold.
-- Inactive registered weapons recharge at full speed.
-- Switching and recompiling cancel matching in-flight executions.
-- Saved production builds enforce strict physical module ownership.
-- Duplicate fabrication repeats the full recipe.
-- Direct Cluster is legal.
-- The Lab uses one partial, feature-local durable snapshot.
-
-The following are verified implementation or coverage gaps in the current
-state. They are recorded here without prescribing a redesign:
-
-1. **Competing lifecycle events are not globally time-sorted.** Controlled
-   projectile updates process Apex, then Delay advance, then enemy collision,
-   then range end. Each trigger crossing is sampled, but a large timestep can
-   let a trigger win even when an impact or range end physically occurred first.
-   There are no competing-event parity tests at 30, 60, and 120 updates per
-   second.
-2. **Externally authored noncanonical graph order is not rejected.** The UI
-   emits a bounded canonical order, but the validator can accept a graph such as
-   Splitter before Guidance while the compiler finds modules by kind and applies
-   Guidance before Splitter.
-3. **Discovery secrecy is incomplete.** Unknown recipe cards are silhouettes,
-   while the editor dropdowns expose all current module names.
-4. **Legacy conversion has no rollback-focused coverage.** Successful
-   conversion is destructive and omits source provenance. A cap-invalid
-   migration is transactionally rejected but has no focused user-facing failure
-   path. Tests do not directly cover real installed/owned conversion,
-   cap-invalid migration, or future-acquisition interception.
-5. **Equipment-domain UX is incomplete.** Generic item comparisons still use
-   global power scores, level-up continues to present global Attack growth, and
-   Optimize Loadout can displace Custom Busters and return the player to Mega.
-6. **Persistence is single-profile and last-writer-wins.** There is no profile
-   identity, tab-conflict handling, or separate raw-corruption backup.
-7. **Combat-domain regression coverage is partial.** Direct Buster weak points
-   and guards lack focused browser coverage. Exact Explosion damage is tested
-   against inflated generic offense, but life steal, Chain Shock, and Explosive
-   Finish suppression are not each asserted independently. The current fixture
-   also sets `chainChance`, while production generic chain logic reads
-   `chainLightningChance`.
-8. **Cancellation coverage is indirect.** Pending muzzle-release cancellation
-   on weapon switch is tested, but there is no focused browser assertion for an
-   already in-flight controlled projectile being cancelled by ordinary switch
-   or recompile.
-9. **Sustained projectile occupancy is not previewed.** The compiler exposes
-   one execution's peak reservation, not estimated overlapping occupancy under
-   held fire. A capacity-blocked held input is reconsidered by combat on later
-   frames rather than using a separate retry throttle.
-10. **The attack-domain label is broader than its name.** Mega and Custom both
-    use `customBuster`; behavior remains correct because suppression does not
-    depend on that string.
-11. **Custom progression is fixed for this slice.** Workshop Chassis tuning is
-    fixed at 16 points and there is no chassis grade, proficiency, or other
-    deterministic Custom Buster scaling layer.
+The implementation regenerates deterministic encounter content; it does not
+clone the exact live-frame enemy state, which remains intentionally deferred.
 
 ## Verification coverage
 
-`npm run test:buster` currently runs 34 pure Node tests followed by seven
-single-worker Chromium tests.
+The ordinary Buster command currently runs:
 
-| Suite | Current coverage |
-| --- | --- |
-| `tests/buster-compiler.test.mjs` | Exact immutable catalog values, neutral compilation, Power allocation, clipping, payload replacement, compatibility, scope-sensitive Guidance, schema/tuning/capacity/Energy failures, graph integrity, ownership context, canonical round trips, and unknown-ID rejection. |
-| `tests/buster-lab-storage.test.mjs` | Recipe constants, discovery permanence, atomic Roll transactions, one-time starter grant, repeatable debug kits, fabrication and persistence rollback, Build B, exclusivity, serialization/migration, corrupt recovery, unknown-module quarantine, and Mega sockets. |
-| `tests/buster-runtime.test.mjs` | Recharge timing, held-fire resume, inactive recharge, atomic reservations, re-entrancy protection, rollback, resource snapshots, and deterministic trajectory helpers. |
-| `tests/buster-lab-runtime.spec.js` | Feature-off regression, debug grant UI, extended-muzzle release, Save/Equip/range restoration, production trigger and Explosion lifecycle, fiery-sphere visuals, corrupt-save warning, and unknown-module Mega fallback. |
+```text
+npm run test:buster
+  -> tests/buster-compiler.test.mjs
+  -> tests/buster-lab-storage.test.mjs
+  -> tests/buster-runtime.test.mjs
+  -> tests/buster-balance.test.mjs
+  -> tests/buster-lab-runtime.spec.js
+```
 
-The repository's `npm run check` script syntax-checks the Buster subsystem and
-its integration entry points. These checks confirm implementation consistency;
-they do not close the verified coverage gaps listed above.
+On July 14, 2026, `npm run check` passed and the focused suites passed all 74
+Node tests plus all 10 single-worker Chromium tests. The subsequent strict
+`npm run verify:buster-balance` command remains intentionally unsuccessful
+because the release gate described above does not pass.
+
+Adjacent verification also passed all 48 Reaverbot Node regressions and all
+five Roll-camp/pickup-floor Chromium regressions.
+
+These suites cover compiler constants and graph errors, structural/physical
+separation, semantic capacity, trigger reachability, Power allocation, recipe
+transactions and secrecy, debug grants, blueprints/materialization at the
+storage level, graph-ordered in-transaction replication, context rotation and
+conflicts, no-lock/timeout read-only recovery, shadow-capacity reservation,
+legacy layout reconciliation, After Delay migration, external storage-event
+write pausing and recovery export, normalized three-weapon batteries, stagger
+deltas, swept lifecycle ordering at 30/60/120 Hz, deterministic trajectories,
+direct weak-point resolution, feature-off behavior, extended-muzzle timing,
+core Lab range use, blueprint creation and original-route materialization
+through Roll's UI, durable world-pickup commit ordering and idempotent retry,
+sandbox pre-entry transaction barriers, enemy-ID isolation, write rejection,
+repeated teardown/restoration, compiled
+lifecycle programs, corruption, and unknown-module quarantine.
+
+The balance test verifies that the exhaustive search reports the current
+blocker; it does not claim the release gate passes. `npm run check` enumerates
+both `BusterBalanceGate.js` and its strict verifier, and the Buster barrel
+exports the balance model.
+
+## Current limitations and release blockers
+
+These are verified current facts and coverage limits.
+
+1. **The deterministic release gate fails.** The nearest authorized search
+   candidate is scalar `1.25`/Mortar `18`; it fails 89 of 90 comparisons. The
+   largest reported miss is level-10 direct Spread-Explosion room-clear time
+   `20.855263s` versus the standard Cannon fixture's `0.648649s`. No Cluster
+   fallback is authorized by the gate result.
+
+2. **Generic equipment comparison remains legacy-oriented.** Optimize Loadout
+   preserves existing Custom assignments and durably reconciles legacy Buster
+   sockets, but generic Item tooltips still use legacy `getPowerScore`. They do
+   not present a meaningful cross-domain comparison against a compiled Custom
+   Buster.
+
+3. **Sandbox coverage remains incomplete.** Browser coverage verifies distinct
+   world identities, the same layout seed, unchanged production
+   resources/storage/timers, pending-command entry barriers, independent enemy
+   IDs, rejected durable writes, workshop restoration, and three complete
+   entry/exit disposal cycles. It
+   does not cover defeat restoration, reward-generating combat, or asynchronous
+   asset races.
+
+4. **Benchmark preview output is partly estimated.** Before or outside a live
+   range run, 10s/30s output is `finalRapid x effectivePower x time` and does
+   not simulate magazine lock/recovery. The displayed magazine recovery does
+   include the `0.65s` delay plus proportional full-battery refill time. Live
+   range output is an extrapolation of delivered Power over elapsed test time.
+
+5. **The Lab remains a partial save.** It has a campaign context identity,
+    backups, corrupt quarantine, and locked writes, but not a general game-save
+    transaction. General inventory and world progression can still diverge
+    from the durable Lab bridge after unsupported live mutations.
+
+6. **Synchronous compatibility mutators remain public.** Production-facing
+    Game operations generally use awaited `*Async` adapters under the context
+    lock, but `BusterLabStorage` still exposes synchronous mutation methods for
+    compatibility and unit use; callers outside the Game integration can bypass
+    the awaited lock boundary.
+
+7. **Focused browser tests are still absent for several attack-domain claims.**
+    Pure/runtime tests cover direct weak-point resolution and metadata, but
+    there is no individual browser assertion for every suppressed generic proc,
+    Explosion body-only weak-point behavior, in-flight survival across a live
+    weapon switch/recompile, blueprint UI redaction for partial recipes, the
+    persistence import/export/adoption/New Campaign controls, or benchmark
+    metric parity.
+
+## Deferred families
+
+Terrain-wall collision, recursive triggers, additional splitters, Arc/Field/Mine
+modules, elements, criticals, random module affixes, chassis grades,
+proficiency, catalysts, beams, melee, drills, shields, cones, and a general
+full-game save remain outside this v0.2 implementation.

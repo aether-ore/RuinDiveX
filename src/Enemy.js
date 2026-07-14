@@ -170,6 +170,36 @@ const tempPoseRotation = new THREE.Euler();
 const statusColor = new THREE.Color();
 
 let nextEnemyId = 1;
+const defaultEnemyIdAllocator = {
+  allocate() {
+    return `enemy-${nextEnemyId++}`;
+  },
+};
+let activeEnemyIdAllocator = defaultEnemyIdAllocator;
+
+export function createEnemyIdAllocator(prefix = 'enemy', start = 1) {
+  let nextId = Math.max(1, Math.trunc(Number(start)) || 1);
+  return {
+    prefix: String(prefix || 'enemy'),
+    allocate() {
+      return `${this.prefix}-${nextId++}`;
+    },
+    snapshot() {
+      return nextId;
+    },
+  };
+}
+
+export function setActiveEnemyIdAllocator(allocator = null) {
+  activeEnemyIdAllocator = typeof allocator?.allocate === 'function'
+    ? allocator
+    : defaultEnemyIdAllocator;
+  return activeEnemyIdAllocator;
+}
+
+export function getActiveEnemyIdAllocator() {
+  return activeEnemyIdAllocator;
+}
 
 function getReaverbotPanelTexture() {
   if (!reaverbotPanelTexture) {
@@ -606,7 +636,7 @@ export class Enemy {
     this.typeKey = typeKey;
     this.type = { ...ENEMY_TYPES[typeKey], ...overrides };
     this.level = level;
-    this.id = `enemy-${nextEnemyId++}`;
+    this.id = activeEnemyIdAllocator.allocate();
     this.isElite = false;
     this.dead = false;
     this.disposed = false;

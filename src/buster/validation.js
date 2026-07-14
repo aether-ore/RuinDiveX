@@ -6,8 +6,11 @@ import {
   BUSTER_TUNING_MAX,
   BUSTER_TUNING_MIN,
   BUSTER_TUNING_TOTAL,
+  BUSTER_TRIGGER_TIME_EPSILON,
+  BUSTER_TRIGGER_WINDOW_WARNING_SECONDS,
   getBusterMaxEnergy,
   getBusterModuleDefinition,
+  getBusterTuningMultiplier,
 } from './catalog.js';
 import { deepFreezeBusterValue, normalizeBusterBuild } from './model.js';
 
@@ -31,6 +34,13 @@ function addError(errors, seenErrors, code, path, moduleId, message) {
   if (seenErrors.has(key)) return;
   seenErrors.add(key);
   errors.push(makeError(code, path, moduleId, message));
+}
+
+function addWarning(warnings, seenWarnings, code, path, moduleId, message) {
+  const key = `${code}\u0000${path}\u0000${moduleId ?? ''}`;
+  if (seenWarnings.has(key)) return;
+  seenWarnings.add(key);
+  warnings.push(makeError(code, path, moduleId, message));
 }
 
 function readContext(options) {
@@ -81,11 +91,16 @@ function hasCompatibleEmitterTag(definition, emitterDefinition) {
  * Validates a source graph without mutating it. Error paths always refer to the
  * caller's original array order, while `normalizedBuild` is deterministic.
  */
-export function validateBusterBuild(build, options = {}) {
+function validateBusterSource(build, options = {}, { validatePhysical = true } = {}) {
   const errors = [];
+  const warnings = [];
   const seenErrors = new Set();
+  const seenWarnings = new Set();
   const fail = (code, path, moduleId, message) => (
     addError(errors, seenErrors, code, path, moduleId, message)
+  );
+  const warn = (code, path, moduleId, message) => (
+    addWarning(warnings, seenWarnings, code, path, moduleId, message)
   );
 
   if (!isRecord(build)) {
@@ -94,6 +109,7 @@ export function validateBusterBuild(build, options = {}) {
       valid: false,
       ok: false,
       errors,
+      warnings,
       normalizedBuild: normalizeBusterBuild(build),
     });
   }
@@ -161,14 +177,6 @@ export function validateBusterBuild(build, options = {}) {
   }
   if (!Array.isArray(program.edges)) {
     fail('INVALID_EDGES', '/program/edges', null, 'program.edges must be an array.');
-  }
-  if (nodes.length > BUSTER_CHASSIS_CAPACITY) {
-    fail(
-      'CAPACITY_EXCEEDED',
-      '/program/nodes',
-      null,
-      `A chassis can hold at most ${BUSTER_CHASSIS_CAPACITY} program nodes.`,
-    );
   }
   if (!isNonEmptyString(program.rootNodeId)) {
     fail('INVALID_ROOT_NODE', '/program/rootNodeId', null, 'rootNodeId must be a non-empty string.');
@@ -333,8 +341,20 @@ export function validateBusterBuild(build, options = {}) {
   const knownNodes = nodes
     .map((node, index) => ({ node, index, definition: isRecord(node) ? getBusterModuleDefinition(node.moduleId) : null }))
     .filter(({ definition }) => Boolean(definition));
+  const semanticCapacityUsed = knownNodes.reduce(
+    (sum, { definition }) => sum + (definition.semanticCapacity ?? 1),
+    0,
+  );
+  if (semanticCapacityUsed > BUSTER_CHASSIS_CAPACITY) {
+    fail(
+      'CAPACITY_EXCEEDED',
+      '/program/nodes',
+      null,
+      `Program modules use ${semanticCapacityUsed} of ${BUSTER_CHASSIS_CAPACITY} semantic capacity points.`,
+    );
+  }
   for (const { node, index, definition } of knownNodes) {
-    if (definition.physical && !isNonEmptyString(node.moduleInstanceId)) {
+    if (validatePhysical && definition.physical && !isNonEmptyString(node.moduleInstanceId)) {
       fail(
         'MODULE_INSTANCE_REQUIRED',
         modulePath(index, '/moduleInstanceId'),
@@ -366,11 +386,11 @@ export function validateBusterBuild(build, options = {}) {
   const splitterNodes = knownNodes.filter(({ definition }) => definition.kind === 'splitter');
   if (triggerNodes.length > 1) {
     const second = triggerNodes[1];
-    fail('TOO_MANY_TRIGGERS', modulePath(second.index), second.definition.id, 'A v0.1 program can contain at most one trigger.');
+    fail('TOO_MANY_TRIGGERS', modulePath(second.index), second.definition.id, 'A v0.2 program can contain at most one trigger.');
   }
   if (splitterNodes.length > 1) {
     const second = splitterNodes[1];
-    fail('TOO_MANY_SPLITTERS', modulePath(second.index), second.definition.id, 'A v0.1 program can contain at most one splitter.');
+    fail('TOO_MANY_SPLITTERS', modulePath(second.index), second.definition.id, 'A v0.2 program can contain at most one splitter.');
   }
 
   for (const { node, index, definition } of knownNodes) {
@@ -442,6 +462,70 @@ export function validateBusterBuild(build, options = {}) {
     }
   }
 
+  for (const entry of splitterNodes) {
+    const scope = scopeByNodeId.get(entry.node.nodeId) ?? 'disconnected';
+    if (entry.definition.childOnly && scope === 'root') {
+      fail(
+        'CHILD_ONLY_MODULE',
+        modulePath(entry.index),
+        entry.definition.id,
+        `${entry.definition.label} may only appear in a trigger child branch.`,
+      );
+    }
+  }
+
+  const readChain = (startNode, stopAtTrigger = false) => {
+    const sequence = [];
+    const visited = new Set();
+    let current = startNode;
+    while (current && !visited.has(current.nodeId)) {
+      visited.add(current.nodeId);
+      sequence.push(current);
+      const definition = moduleByNodeId.get(current.nodeId);
+      if (stopAtTrigger && definition?.kind === 'trigger') break;
+      const nextEdge = getOutgoing(outgoing, current.nodeId, 'next')[0];
+      current = nextEdge ? nodeById.get(nextEdge.to) ?? null : null;
+    }
+    return sequence;
+  };
+  const rootStart = nodeById.get(program.rootNodeId) ?? null;
+  const rootSequence = readChain(rootStart, true);
+  const pathTrigger = rootSequence.find((node) => moduleByNodeId.get(node.nodeId)?.kind === 'trigger') ?? null;
+  const childStartEdge = pathTrigger ? getOutgoing(outgoing, pathTrigger.nodeId, 'child')[0] : null;
+  const childSequence = readChain(childStartEdge ? nodeById.get(childStartEdge.to) ?? null : null);
+
+  const enforceGrammar = (sequence, allowedKinds, scopeName) => {
+    let grammarIndex = 0;
+    for (const node of sequence) {
+      const definition = moduleByNodeId.get(node.nodeId);
+      if (!definition) continue;
+      let foundIndex = -1;
+      for (let index = grammarIndex; index < allowedKinds.length; index += 1) {
+        if (allowedKinds[index] === definition.kind) {
+          foundIndex = index;
+          break;
+        }
+      }
+      if (foundIndex < 0) {
+        fail(
+          'INVALID_MODULE_ORDER',
+          modulePath(nodeIndexById.get(node.nodeId)),
+          definition.id,
+          `${definition.label} cannot appear at this position in the ${scopeName} program strip.`,
+        );
+      } else {
+        grammarIndex = foundIndex + 1;
+      }
+    }
+  };
+
+  if (pathTrigger) {
+    enforceGrammar(rootSequence, ['emitter', 'modifier', 'trigger'], 'root');
+    enforceGrammar(childSequence, ['modifier', 'splitter', 'payload'], 'child');
+  } else {
+    enforceGrammar(rootSequence, ['emitter', 'modifier', 'splitter', 'payload'], 'root');
+  }
+
   const emitterDefinition = rootDefinition?.kind === 'emitter' ? rootDefinition : emitterNodes[0]?.definition ?? null;
   if (emitterDefinition) {
     for (const { index, definition } of knownNodes) {
@@ -456,7 +540,7 @@ export function validateBusterBuild(build, options = {}) {
     }
   }
 
-  const physicalContext = readContext(options);
+  const physicalContext = validatePhysical ? readContext(options) : null;
   if (physicalContext) {
     const owned = physicalContext.hasOwned
       ? idsToSet(physicalContext.candidate.ownedModuleInstanceIds)
@@ -501,11 +585,203 @@ export function validateBusterBuild(build, options = {}) {
     }
   }
 
+
+  if (emitterDefinition && allTuningRatingsValid) {
+    const delayEntry = triggerNodes.find(({ definition }) => definition.event === 'delay');
+    if (delayEntry) {
+      const rootRange = emitterDefinition.baseRange * getBusterTuningMultiplier(tuning.range);
+      const nominalLifetime = rootRange / emitterDefinition.projectileSpeed;
+      const remainingWindow = nominalLifetime - delayEntry.definition.delay;
+      if (delayEntry.definition.delay > nominalLifetime + BUSTER_TRIGGER_TIME_EPSILON) {
+        fail(
+          'TRIGGER_UNREACHABLE',
+          modulePath(delayEntry.index),
+          delayEntry.definition.id,
+          `${delayEntry.definition.label} fires at ${delayEntry.definition.delay.toFixed(2)}s, after the carrier's nominal ${nominalLifetime.toFixed(3)}s lifetime.`,
+        );
+      } else if (remainingWindow < BUSTER_TRIGGER_WINDOW_WARNING_SECONDS + BUSTER_TRIGGER_TIME_EPSILON) {
+        warn(
+          'TRIGGER_WINDOW_NARROW',
+          modulePath(delayEntry.index),
+          delayEntry.definition.id,
+          `${delayEntry.definition.label} has only ${Math.max(0, remainingWindow).toFixed(3)}s before nominal carrier expiry.`,
+        );
+      }
+    }
+  }
+
   return deepFreezeBusterValue({
     valid: errors.length === 0,
     ok: errors.length === 0,
     errors,
+    warnings,
+    semanticCapacityUsed,
     normalizedBuild: normalizeBusterBuild(build),
+  });
+}
+
+/**
+ * Structural validation for source graphs and ownership-free blueprints.
+ */
+export function validateBusterProgram(build, options = {}) {
+  return validateBusterSource(build, options, { validatePhysical: false });
+}
+
+/**
+ * Compatibility entry point for physical builds. Existing callers retain
+ * module-instance checks while compilation may use validateBusterProgram.
+ */
+export function validateBusterBuild(build, options = {}) {
+  return validateBusterSource(build, options, { validatePhysical: true });
+}
+
+/**
+ * Validates physical ownership independently from source-program legality.
+ * Collections accept arrays, maps, or id-keyed records so storage and editor
+ * layers do not need to expose their internal container type to this module.
+ */
+export function validateBusterAssignments({
+  builds = [],
+  chassisInventory,
+  moduleInventory,
+  assignments = {},
+} = {}) {
+  const errors = [];
+  const warnings = [];
+  const seenErrors = new Set();
+  const fail = (code, path, moduleId, message) => (
+    addError(errors, seenErrors, code, path, moduleId, message)
+  );
+  const collectionEntries = (value) => {
+    if (value instanceof Map) return [...value.entries()];
+    if (value instanceof Set) return [...value].map((entry) => [String(entry), entry]);
+    if (Array.isArray(value)) return value.map((entry, index) => [String(index), entry]);
+    if (isRecord(value)) return Object.entries(value);
+    return [];
+  };
+  const buildEntries = collectionEntries(builds);
+  const normalizedBuilds = [];
+  const buildById = new Map();
+  const chassisOwner = new Map();
+  const instanceOwner = new Map();
+
+  const chassisIds = chassisInventory === undefined
+    ? null
+    : new Set(collectionEntries(chassisInventory).map(([key, entry]) => (
+      isRecord(entry)
+        ? entry.chassisId ?? entry.id ?? key
+        : typeof entry === 'string'
+          ? entry
+          : key
+    )));
+  const moduleInstances = moduleInventory === undefined
+    ? null
+    : new Map(collectionEntries(moduleInventory).map(([key, entry]) => {
+      const instance = isRecord(entry)
+        ? entry
+        : { moduleInstanceId: typeof entry === 'string' ? entry : key };
+      return [instance.moduleInstanceId ?? instance.instanceId ?? instance.id ?? key, instance];
+    }));
+
+  for (const [entryKey, sourceBuild] of buildEntries) {
+    const path = `/builds/${entryKey}`;
+    const validation = validateBusterProgram(sourceBuild);
+    normalizedBuilds.push(validation.normalizedBuild);
+    for (const error of validation.errors) {
+      fail(error.code, `${path}${error.path}`, error.moduleId, error.message);
+    }
+    warnings.push(...validation.warnings.map((warning) => ({
+      ...warning,
+      path: `${path}${warning.path}`,
+    })));
+    const buildId = sourceBuild?.buildId;
+    if (isNonEmptyString(buildId)) {
+      if (buildById.has(buildId)) {
+        fail('DUPLICATE_BUILD_ID', `${path}/buildId`, null, `Build id "${buildId}" appears more than once.`);
+      } else {
+        buildById.set(buildId, sourceBuild);
+      }
+    }
+
+    const chassisId = sourceBuild?.chassisId;
+    if (isNonEmptyString(chassisId)) {
+      if (chassisIds && !chassisIds.has(chassisId)) {
+        fail('CHASSIS_NOT_OWNED', `${path}/chassisId`, null, `Chassis "${chassisId}" is not owned.`);
+      }
+      if (chassisOwner.has(chassisId)) {
+        fail('CHASSIS_ALREADY_CLAIMED', `${path}/chassisId`, null, `Chassis "${chassisId}" is already used by another build.`);
+      } else {
+        chassisOwner.set(chassisId, buildId ?? entryKey);
+      }
+    }
+
+    const nodes = Array.isArray(sourceBuild?.program?.nodes) ? sourceBuild.program.nodes : [];
+    nodes.forEach((node, nodeIndex) => {
+      const definition = getBusterModuleDefinition(node?.moduleId);
+      if (!definition?.physical) return;
+      const instanceId = node?.moduleInstanceId;
+      const instancePath = `${path}/program/nodes/${nodeIndex}/moduleInstanceId`;
+      if (!isNonEmptyString(instanceId)) {
+        fail(
+          'MODULE_INSTANCE_REQUIRED',
+          instancePath,
+          definition.id,
+          `${definition.label} requires a physical module instance.`,
+        );
+        return;
+      }
+      if (instanceOwner.has(instanceId)) {
+        fail(
+          'INSTANCE_ALREADY_CLAIMED',
+          instancePath,
+          definition.id,
+          `Module instance "${instanceId}" is already claimed by another build.`,
+        );
+      } else {
+        instanceOwner.set(instanceId, buildId ?? entryKey);
+      }
+      if (moduleInstances && !moduleInstances.has(instanceId)) {
+        fail(
+          'INSTANCE_NOT_OWNED',
+          instancePath,
+          definition.id,
+          `Module instance "${instanceId}" is not owned.`,
+        );
+      } else if (moduleInstances) {
+        const instance = moduleInstances.get(instanceId);
+        if (isNonEmptyString(instance.moduleId) && instance.moduleId !== definition.id) {
+          fail(
+            'INSTANCE_MODULE_MISMATCH',
+            instancePath,
+            definition.id,
+            `Module instance "${instanceId}" is ${instance.moduleId}, not ${definition.id}.`,
+          );
+        }
+      }
+    });
+  }
+
+  const assignedBuilds = new Map();
+  for (const [slot, assignment] of collectionEntries(assignments)) {
+    const buildId = isRecord(assignment) ? assignment.buildId : assignment;
+    if (!isNonEmptyString(buildId)) continue;
+    const path = `/assignments/${slot}`;
+    if (!buildById.has(buildId)) {
+      fail('ASSIGNED_BUILD_MISSING', path, null, `Assigned build "${buildId}" does not exist.`);
+    }
+    if (assignedBuilds.has(buildId)) {
+      fail('BUILD_ASSIGNED_MORE_THAN_ONCE', path, null, `Build "${buildId}" is already assigned to another slot.`);
+    } else {
+      assignedBuilds.set(buildId, slot);
+    }
+  }
+
+  return deepFreezeBusterValue({
+    valid: errors.length === 0,
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    normalizedBuilds,
   });
 }
 

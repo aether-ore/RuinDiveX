@@ -157,6 +157,10 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
     const carFront = new THREE.Vector3(0, 0, -1).applyQuaternion(carWorldQuaternion).setY(0).normalize();
     const doorOutward = new THREE.Vector3(1, 0, 0).applyQuaternion(carWorldQuaternion).setY(0).normalize();
     const rollForward = new THREE.Vector3(0, 0, 1).applyQuaternion(rollWorldQuaternion).setY(0).normalize();
+    const rollToCampInterior = horizontalDirection(
+      rollWorldPosition,
+      game.dungeon.campReturnPosition,
+    ).normalize();
     const workbenchFront = new THREE.Vector3(0, 0, -1)
       .applyQuaternion(workbenchWorldQuaternion)
       .setY(0)
@@ -177,8 +181,9 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
       .find(({ id }) => id === 'rollWorkshopWorkbenchCollision');
     const workshopCollisionZones = [supportCarCollision, workbenchCollision].filter(Boolean);
     const zoneRouteClearance = (zone) => {
-      const projectedHalfWidth = Math.abs(Math.cos(zone.rotationY)) * zone.halfWidth
-        + Math.abs(Math.sin(zone.rotationY)) * zone.halfDepth;
+      const padding = zone.playerCollisionPadding ?? 0;
+      const projectedHalfWidth = Math.abs(Math.cos(zone.rotationY)) * (zone.halfWidth + padding)
+        + Math.abs(Math.sin(zone.rotationY)) * (zone.halfDepth + padding);
       return game.dungeon.campReturnPosition.x - (zone.position.x + projectedHalfWidth);
     };
     const calls = [];
@@ -186,11 +191,9 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
       addParticleBurst: game.addParticleBurst,
       beginExpedition: game.beginExpedition,
       offerRuinReset: game.offerRuinReset,
-      processResearchScraps: game.processResearchScraps,
       setInventoryOpen: game.setInventoryOpen,
-      turnInScrapQuest: game.turnInScrapQuest,
       showToast: game.ui.showToast,
-      scraps: game.inventory.scraps,
+      unidentifiedScrap: game.inventory.unidentifiedScrap,
       ruinCompleted: game.ruinCompleted,
       expeditionAccepted: game.expeditionAccepted,
       inventoryOpen: game.inventoryOpen,
@@ -198,14 +201,14 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
     game.addParticleBurst = () => {};
     game.beginExpedition = () => calls.push('briefing');
     game.offerRuinReset = () => calls.push('debrief');
-    game.processResearchScraps = () => calls.push('research');
-    game.setInventoryOpen = () => calls.push('garage');
-    game.turnInScrapQuest = () => calls.push('quest');
+    game.setInventoryOpen = (open, options = {}) => calls.push(
+      open && options.mode === 'roll' ? 'workshop' : 'garage',
+    );
     game.ui.showToast = () => {};
 
-    const runScenario = ({ scraps, completed, accepted }) => {
+    const runScenario = ({ unidentified, completed, accepted }) => {
       calls.length = 0;
-      game.inventory.scraps = scraps;
+      game.inventory.unidentifiedScrap = unidentified;
       game.ruinCompleted = completed;
       game.expeditionAccepted = accepted;
       animator.inactivitySeconds = 12;
@@ -219,13 +222,11 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
       };
     };
 
-    const questRequired = game.getScrapQuestRequirement();
-    const researchRequired = game.getResearchProcessRequirement();
     const scenarios = {
-      debrief: runScenario({ scraps: 0, completed: true, accepted: true }),
-      briefing: runScenario({ scraps: questRequired, completed: false, accepted: false }),
-      research: runScenario({ scraps: researchRequired, completed: false, accepted: true }),
-      garage: runScenario({ scraps: 0, completed: false, accepted: true }),
+      debrief: runScenario({ unidentified: 0, completed: true, accepted: true }),
+      briefing: runScenario({ unidentified: 3, completed: false, accepted: false }),
+      identify: runScenario({ unidentified: 3, completed: false, accepted: true }),
+      workshop: runScenario({ unidentified: 0, completed: false, accepted: true }),
     };
 
     // NPC visuals are updated independently from the gameplay pause gate, so
@@ -251,15 +252,13 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
       addParticleBurst: original.addParticleBurst,
       beginExpedition: original.beginExpedition,
       offerRuinReset: original.offerRuinReset,
-      processResearchScraps: original.processResearchScraps,
       setInventoryOpen: original.setInventoryOpen,
-      turnInScrapQuest: original.turnInScrapQuest,
       ruinCompleted: original.ruinCompleted,
       expeditionAccepted: original.expeditionAccepted,
       inventoryOpen: original.inventoryOpen,
     });
     game.ui.showToast = original.showToast;
-    game.inventory.scraps = original.scraps;
+    game.inventory.unidentifiedScrap = original.unidentifiedScrap;
 
     return {
       loadError: roll.userData.modelLoadError ?? null,
@@ -285,6 +284,7 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
         .filter(({ id, label, action }) => /research/i.test(`${id} ${label} ${action}`))
         .map(({ id }) => id),
       action: interaction.action,
+      interactionRadius: interaction.interactionRadius,
       questBoardAction: game.dungeon.safeInteractables.find(({ id }) => id === 'questBoard')?.action,
       routeCenterX: game.dungeon.campReturnPosition.x,
       routeCenterZ: game.dungeon.campReturnPosition.z,
@@ -349,6 +349,7 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
         alignmentDot: doorToRoll.clone().normalize().dot(rollToWorkbench.clone().normalize()),
         doorOutwardDot: doorOutward.dot(doorToRoll.clone().normalize()),
         rollFacingWorkbenchDot: rollForward.dot(rollToWorkbench.clone().normalize()),
+        rollFacingCampInteriorDot: rollForward.dot(rollToCampInterior),
         workbenchFacingRollDot: workbenchFront.dot(workbenchToRoll),
       },
       workbench: {
@@ -399,6 +400,7 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
           halfDepth: workbenchCollision.halfDepth,
           verticalHalfHeight: workbenchCollision.verticalHalfHeight,
           rotationY: workbenchCollision.rotationY,
+          playerCollisionPadding: workbenchCollision.playerCollisionPadding,
           horizontalPositionError: Math.hypot(
             workbenchCollision.position.x - workbenchWorldPosition.x,
             workbenchCollision.position.z - workbenchWorldPosition.z,
@@ -439,7 +441,8 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
   expect(result.oldNpcInteractionIds).toEqual([]);
   expect(result.oldResearchInteractions).toEqual([]);
   expect(result.action).toBe('roll');
-  expect(result.questBoardAction).toBe('quest');
+  expect(result.interactionRadius).toBeCloseTo(2.4, 3);
+  expect(result.questBoardAction).toBeUndefined();
   expect(result.rollTargetModelHeight).toBeCloseTo(result.playerModelHeight, 2);
   expect(result.rollTargetModelHeight).toBeCloseTo(2.85, 2);
   expect(Math.abs(result.rollX - result.routeCenterX)).toBeGreaterThanOrEqual(3.55);
@@ -483,7 +486,7 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
   expect(result.supportCar.textureMipmaps).toBe(true);
 
   expect(result.workshop.localPosition).toEqual([-10, 0, -5.7]);
-  expect(result.workshop.yaw).toBeCloseTo(-Math.PI * 0.75, 5);
+  expect(result.workshop.yaw).toBeCloseTo(-Math.PI * 0.25, 5);
   expect(result.workshop.carRelativeToRoute[0]).toBeCloseTo(-10, 3);
   expect(result.workshop.carRelativeToRoute[1]).toBeCloseTo(-5.7, 3);
   expect(Math.abs(result.workshop.carFront[0])).toBeCloseTo(Math.SQRT1_2, 3);
@@ -501,6 +504,7 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
   expect(result.workshop.alignmentDot).toBeGreaterThan(0.999);
   expect(result.workshop.doorOutwardDot).toBeGreaterThan(0.999);
   expect(result.workshop.rollFacingWorkbenchDot).toBeGreaterThan(0.999);
+  expect(result.workshop.rollFacingCampInteriorDot).toBeGreaterThan(0.95);
   expect(result.workshop.workbenchFacingRollDot).toBeGreaterThan(0.999);
 
   expect(result.workbench.textureAssetsSettled).toBe(true);
@@ -537,13 +541,14 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
   expect(result.collision.supportCar.halfWidth).toBeCloseTo((56.2 / 143.5) * 3.6 + 0.12, 3);
   expect(result.collision.supportCar.halfDepth).toBeCloseTo((90.2 / 143.5) * 3.6 + 0.12, 3);
   expect(result.collision.supportCar.verticalHalfHeight).toBeCloseTo(1.8, 3);
-  expect(result.collision.supportCar.rotationY).toBeCloseTo(Math.PI * 0.75, 5);
+  expect(result.collision.supportCar.rotationY).toBeCloseTo(Math.PI * 0.25, 5);
   expect(result.collision.supportCar.horizontalPositionError).toBeCloseTo(0, 3);
   expect(result.collision.workbench.roomId).toBe('expeditionCamp');
   expect(result.collision.workbench.halfWidth).toBeCloseTo(1.1, 3);
   expect(result.collision.workbench.halfDepth).toBeCloseTo(0.41, 3);
   expect(result.collision.workbench.verticalHalfHeight).toBeCloseTo(0.55, 3);
-  expect(result.collision.workbench.rotationY).toBeCloseTo(Math.PI * 0.25, 5);
+  expect(result.collision.workbench.rotationY).toBeCloseTo(-Math.PI * 0.25, 5);
+  expect(result.collision.workbench.playerCollisionPadding).toBeCloseTo(0.42, 3);
   expect(result.collision.workbench.horizontalPositionError).toBeCloseTo(0, 3);
   expect(result.collision.minimumRouteClearance).toBeGreaterThanOrEqual(2.25);
 
@@ -556,8 +561,8 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
   expect(result.scenarios).toEqual({
     debrief: explainingScenario('Roll: Debrief', 'debrief'),
     briefing: explainingScenario('Roll: Expedition Briefing', 'briefing'),
-    research: explainingScenario('Roll: Process Scrap', 'research'),
-    garage: explainingScenario('Roll: Garage', 'garage'),
+    identify: explainingScenario('Roll: Identify 3 Scrap', 'workshop'),
+    workshop: explainingScenario('Roll: Workshop', 'workshop'),
   });
   expect(result.explainingTimeBeforePausedUpdate).toBe(0);
   expect(result.explainingTimeAfterPausedUpdate).toBeGreaterThan(0.45);
@@ -566,6 +571,139 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
   expect(result.stateAfterThinking).toBe('idle');
   expect(result.animationState).toBe('idle');
   expect(runtimeErrors).toEqual([]);
+});
+
+test('Roll identifies hidden recoveries and keeps the stockpile out of Mega Man inventory', async ({ page }) => {
+  await page.goto('/');
+  await expect
+    .poll(
+      async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
+      { timeout: 20_000 },
+    )
+    .toBe('true');
+
+  const result = await page.evaluate(async () => {
+    const { REAVERBOT_SALVAGE_MATERIALS } = await import('/src/reaverbots/ReaverbotSalvageCatalog.js');
+    const { game } = window;
+    game.stop();
+    game.inventory.unidentifiedScrap = 0;
+    game.inventory.unidentifiedRecoveries = [];
+    game.rollSalvageStorage.clear();
+    game.ui.lastScrapIdentification = null;
+
+    const source = {
+      aspect: 'body',
+      aspectLabel: 'Chassis / Locomotion',
+      moduleId: 'hopper',
+      moduleLabel: 'Spring Hopper',
+      enemyName: 'Test Reaverbot',
+    };
+    game.inventory.addUnidentifiedScrap(2, {
+      source,
+      recoverableParts: [{
+        ...REAVERBOT_SALVAGE_MATERIALS.temperedJumpSpring,
+        quantity: 1,
+        source,
+      }],
+    });
+
+    const readPanel = () => ({
+      mode: document.getElementById('inventory-panel')?.dataset.mode,
+      title: document.getElementById('inventory-panel-title')?.textContent,
+      headerCount: document.getElementById('unidentified-scrap-value')?.textContent,
+      serviceHidden: document.getElementById('roll-scrap-service')?.hidden,
+      awaiting: document.getElementById('roll-unidentified-value')?.textContent,
+      identified: document.getElementById('roll-identified-value')?.textContent,
+      parts: document.getElementById('roll-parts-value')?.textContent,
+      identifyDisabled: document.getElementById('roll-identify-scrap')?.disabled,
+      identifyLabel: document.getElementById('roll-identify-scrap')?.textContent,
+      result: document.getElementById('roll-identification-result')?.textContent,
+      partText: document.getElementById('material-inventory')?.textContent,
+      questText: document.getElementById('quest-log')?.textContent,
+    });
+
+    game.setInventoryOpen(true);
+    const megaManInventory = readPanel();
+    game.setInventoryOpen(false);
+
+    game.expeditionAccepted = true;
+    game.ruinCompleted = false;
+    const rollInteraction = game.dungeon.safeInteractables.find(({ id }) => id === 'rollCaskett');
+    game.dungeonController._activateSafeInteractable(rollInteraction);
+    const beforeIdentification = readPanel();
+
+    document.getElementById('roll-identify-scrap').click();
+    const afterIdentification = readPanel();
+    const storedPart = game.rollSalvageStorage.parts.temperedJumpSpring;
+    const stateAfterIdentification = {
+      unidentified: game.inventory.unidentifiedScrap,
+      recoveryBatches: game.inventory.unidentifiedRecoveries.length,
+      identifiedScrap: game.rollSalvageStorage.identifiedScrap,
+      partCount: game.rollSalvageStorage.getPartCount('temperedJumpSpring'),
+      partSource: storedPart?.lastSource?.moduleLabel,
+    };
+
+    game.setInventoryOpen(false);
+    game.setInventoryOpen(true);
+    const garageAfterIdentification = readPanel();
+
+    return {
+      megaManInventory,
+      beforeIdentification,
+      afterIdentification,
+      stateAfterIdentification,
+      garageAfterIdentification,
+    };
+  });
+
+  expect(result.megaManInventory).toMatchObject({
+    mode: 'garage',
+    title: 'Garage Loadout',
+    headerCount: '2',
+    serviceHidden: true,
+  });
+  expect(result.megaManInventory.questText).not.toContain('Scrap Contract');
+  expect(result.megaManInventory.questText).not.toContain('Research Processing');
+
+  expect(result.beforeIdentification).toMatchObject({
+    mode: 'roll',
+    title: "Roll's Workshop",
+    headerCount: '2',
+    serviceHidden: false,
+    awaiting: '2',
+    identified: '0',
+    parts: '0',
+    identifyDisabled: false,
+    identifyLabel: 'Identify All (2)',
+  });
+  expect(result.beforeIdentification.partText).not.toContain('Tempered Jump Spring');
+
+  expect(result.stateAfterIdentification).toEqual({
+    unidentified: 0,
+    recoveryBatches: 0,
+    identifiedScrap: 1,
+    partCount: 1,
+    partSource: 'Spring Hopper',
+  });
+  expect(result.afterIdentification).toMatchObject({
+    headerCount: '0',
+    serviceHidden: false,
+    awaiting: '0',
+    identified: '1',
+    parts: '1',
+    identifyDisabled: true,
+    identifyLabel: 'Nothing to Identify',
+  });
+  expect(result.afterIdentification.result).toContain('Intact part found: Tempered Jump Spring');
+  expect(result.afterIdentification.partText).toContain('Tempered Jump Spring');
+  expect(result.afterIdentification.partText).toContain('Spring Hopper');
+
+  expect(result.garageAfterIdentification).toMatchObject({
+    mode: 'garage',
+    title: 'Garage Loadout',
+    headerCount: '0',
+    serviceHidden: true,
+  });
 });
 
 test('the Support Car fallback remains when the imported model is unavailable', async ({ page }) => {
@@ -619,4 +757,160 @@ test('the Support Car fallback remains when the imported model is unavailable', 
     'expeditionSupportCarCollision',
     'rollWorkshopWorkbenchCollision',
   ]);
+});
+
+test('the workbench blocks the player while Roll remains usable across it', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => {
+    const group = window.game?.dungeon?.group;
+    const rollState = group?.getObjectByName('rollCaskettNpc')?.userData;
+    return Boolean(
+      window.game?.dungeonController
+      && group?.getObjectByName('rollWorkshopWorkbench')
+      && rollState?.rollAnimator
+      && rollState?.animationLibraryReady
+      && rollState?.animationAssetsSettled
+      && window.game?.dungeon?.safeInteractables?.some(({ id }) => id === 'rollCaskett'),
+    );
+  }, null, { timeout: 30_000 });
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const controller = game.dungeonController;
+    const group = game.dungeon.group;
+    const roll = group.getObjectByName('rollCaskettNpc');
+    const workbench = group.getObjectByName('rollWorkshopWorkbench');
+    const interaction = game.dungeon.safeInteractables.find(({ id }) => id === 'rollCaskett');
+    const collision = game.dungeon.solidZones
+      .find(({ id }) => id === 'rollWorkshopWorkbenchCollision');
+    const Vector3 = interaction.position.constructor;
+    const rollPosition = roll.getWorldPosition(new Vector3());
+    const workbenchPosition = workbench.getWorldPosition(new Vector3());
+    const outward = workbenchPosition.clone().sub(rollPosition).setY(0).normalize();
+    const floorY = collision.position.y - collision.verticalHalfHeight;
+    const playerRadius = game.player.radius;
+    const blockedPosition = workbenchPosition.clone().addScaledVector(
+      outward,
+      collision.halfDepth + playerRadius - 0.02,
+    ).setY(floorY);
+    const farSidePosition = workbenchPosition.clone().addScaledVector(
+      outward,
+      collision.halfDepth + playerRadius + 0.05,
+    ).setY(floorY);
+
+    const blockedByCapsuleCollision = controller._isPositionInsideSolidZone(blockedPosition);
+    const blockedPositionWalkable = controller.isPositionWalkable(blockedPosition);
+    const farSideOutsideCollision = !controller._isPositionInsideSolidZone(farSidePosition);
+    const farSideWalkable = controller.isPositionWalkable(farSidePosition);
+
+    const original = {
+      playerPosition: game.player.root.position.clone(),
+      lastSafePlayerPosition: controller.lastSafePlayerPosition.clone(),
+      playerVelocity: game.player.velocity.clone(),
+      jumpState: game.player.jumpState,
+      nearestInteractable: controller.nearestInteractable,
+      setInventoryOpen: game.setInventoryOpen,
+      addParticleBurst: game.addParticleBurst,
+      showToast: game.ui.showToast,
+      expeditionAccepted: game.expeditionAccepted,
+      ruinCompleted: game.ruinCompleted,
+      unidentifiedScrap: game.inventory.unidentifiedScrap,
+      animatorName: roll.userData.rollAnimator.currentName,
+    };
+
+    game.player.root.position.copy(farSidePosition);
+    controller.lastSafePlayerPosition.copy(farSidePosition);
+    game.player.velocity.set(0, 0, 0);
+    game.player.jumpState = 'Grounded';
+    game.player.root.position.copy(blockedPosition);
+    controller._constrainPlayerToWalkable();
+    const correctedPosition = game.player.root.position.clone();
+    const collisionCorrectionDistance = correctedPosition.distanceTo(blockedPosition);
+    const offsetX = correctedPosition.x - collision.position.x;
+    const offsetZ = correctedPosition.z - collision.position.z;
+    const cos = Math.cos(collision.rotationY);
+    const sin = Math.sin(collision.rotationY);
+    const localX = offsetX * cos + offsetZ * sin;
+    const localZ = -offsetX * sin + offsetZ * cos;
+    const bodyDistanceFromVisibleBench = Math.hypot(
+      Math.max(Math.abs(localX) - collision.halfWidth, 0),
+      Math.max(Math.abs(localZ) - collision.halfDepth, 0),
+    );
+
+    const nearestRollAt = (distance) => {
+      game.player.root.position.copy(rollPosition).addScaledVector(outward, distance).setY(floorY);
+      controller._updateNearestInteractable();
+      return controller.getNearestInteractable()?.target?.id === 'rollCaskett';
+    };
+    const rollAvailableAt239 = nearestRollAt(2.39);
+    const rollAvailableAt241 = nearestRollAt(2.41);
+
+    const calls = [];
+    game.expeditionAccepted = true;
+    game.ruinCompleted = false;
+    game.inventory.unidentifiedScrap = 0;
+    game.setInventoryOpen = (open, options = {}) => calls.push(
+      open && options.mode === 'roll' ? 'workshop' : 'garage',
+    );
+    game.addParticleBurst = () => {};
+    game.ui.showToast = () => {};
+    game.player.root.position.copy(farSidePosition);
+    controller._updateNearestInteractable();
+    const farSideDistanceToRoll = game.player.root.position.distanceTo(rollPosition);
+    const farSideNearest = controller.getNearestInteractable();
+    const activatedFromFarSide = controller.activateNearest();
+    const animatorAfterActivation = roll.userData.rollAnimator.currentName;
+
+    game.player.root.position.copy(original.playerPosition);
+    controller.lastSafePlayerPosition.copy(original.lastSafePlayerPosition);
+    game.player.velocity.copy(original.playerVelocity);
+    game.player.jumpState = original.jumpState;
+    controller.nearestInteractable = original.nearestInteractable;
+    game.setInventoryOpen = original.setInventoryOpen;
+    game.addParticleBurst = original.addParticleBurst;
+    game.ui.showToast = original.showToast;
+    game.expeditionAccepted = original.expeditionAccepted;
+    game.ruinCompleted = original.ruinCompleted;
+    game.inventory.unidentifiedScrap = original.unidentifiedScrap;
+    roll.userData.rollAnimator.play(original.animatorName ?? 'idle', { fade: 0 });
+
+    return {
+      playerRadius,
+      collisionPadding: collision.playerCollisionPadding,
+      blockedByCapsuleCollision,
+      blockedPositionWalkable,
+      farSideOutsideCollision,
+      farSideWalkable,
+      collisionCorrectionDistance,
+      bodyDistanceFromVisibleBench,
+      interactionRadius: interaction.interactionRadius,
+      farSideDistanceToRoll,
+      farSideNearestKind: farSideNearest?.kind ?? null,
+      farSideNearestId: farSideNearest?.target?.id ?? null,
+      activatedFromFarSide,
+      calls,
+      animatorAfterActivation,
+      rollAvailableAt239,
+      rollAvailableAt241,
+    };
+  });
+
+  expect(result.collisionPadding).toBeCloseTo(result.playerRadius, 3);
+  expect(result.blockedByCapsuleCollision).toBe(true);
+  expect(result.blockedPositionWalkable).toBe(false);
+  expect(result.farSideOutsideCollision).toBe(true);
+  expect(result.farSideWalkable).toBe(true);
+  expect(result.collisionCorrectionDistance).toBeGreaterThan(0.01);
+  expect(result.bodyDistanceFromVisibleBench).toBeGreaterThanOrEqual(result.playerRadius - 0.01);
+  expect(result.interactionRadius).toBeCloseTo(2.4, 3);
+  expect(result.farSideDistanceToRoll).toBeGreaterThan(2.2);
+  expect(result.farSideDistanceToRoll).toBeLessThan(result.interactionRadius);
+  expect(result.farSideNearestKind).toBe('safe');
+  expect(result.farSideNearestId).toBe('rollCaskett');
+  expect(result.activatedFromFarSide).toBe(true);
+  expect(result.calls).toEqual(['workshop']);
+  expect(result.animatorAfterActivation).toBe('explaining');
+  expect(result.rollAvailableAt239).toBe(true);
+  expect(result.rollAvailableAt241).toBe(false);
 });

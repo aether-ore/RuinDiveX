@@ -1139,7 +1139,12 @@ export class DungeonController {
   }
 
   _isPositionInsideSolidZone(position) {
-    return this.solidZones.some((zone) => isInsideZone(position, zone));
+    return this.solidZones.some((zone) => isInsideExpandedZone(
+      position,
+      zone,
+      Math.max(0, Number(zone.playerCollisionPadding) || 0),
+      0,
+    ));
   }
 
   isPositionInSafeZone(position) {
@@ -3528,7 +3533,10 @@ export class DungeonController {
 
     for (const safeInteractable of this.safeInteractables) {
       const distanceSq = playerPosition.distanceToSquared(safeInteractable.position);
-      if (distanceSq <= 2.0 * 2.0 && distanceSq < nearestDistanceSq) {
+      const interactionRadius = Number.isFinite(safeInteractable.interactionRadius)
+        ? Math.max(0, safeInteractable.interactionRadius)
+        : 2.0;
+      if (distanceSq <= interactionRadius * interactionRadius && distanceSq < nearestDistanceSq) {
         nearest = {
           kind: 'safe',
           target: safeInteractable,
@@ -3596,28 +3604,12 @@ export class DungeonController {
 
   _getSafeInteractablePrompt(interactable) {
     if (interactable.action === 'roll') {
-      const scraps = this.game.inventory?.scraps ?? 0;
-      const researchRequired = this.game.getResearchProcessRequirement?.() ?? Infinity;
       if (this.game.ruinCompleted) return `${interactable.label}: Debrief`;
       if (!this.game.expeditionAccepted) return `${interactable.label}: Expedition Briefing`;
-      if (scraps >= researchRequired) return `${interactable.label}: Process Scrap`;
-      return `${interactable.label}: Garage`;
-    }
-
-    if (interactable.action === 'quest') {
-      const required = this.game.getScrapQuestRequirement?.() ?? 0;
-      const scraps = this.game.inventory?.scraps ?? 0;
-      return scraps >= required
-        ? `${interactable.label}: Turn In`
-        : `${interactable.label}: Scrap ${scraps}/${required}`;
-    }
-
-    if (interactable.action === 'research') {
-      const required = this.game.getResearchProcessRequirement?.() ?? 0;
-      const scraps = this.game.inventory?.scraps ?? 0;
-      return scraps >= required
-        ? `${interactable.label}: Process`
-        : `${interactable.label}: Scrap ${scraps}/${required}`;
+      const unidentified = Math.max(0, Math.trunc(this.game.inventory?.unidentifiedScrap) || 0);
+      return unidentified > 0
+        ? `${interactable.label}: Identify ${unidentified} Scrap`
+        : `${interactable.label}: Workshop`;
     }
 
     if (interactable.action === 'resetRuin') {
@@ -3900,37 +3892,15 @@ export class DungeonController {
         interactable.object.userData.pendingInteractionAnimation = true;
       }
 
-      const scraps = this.game.inventory?.scraps ?? 0;
-      const researchRequired = this.game.getResearchProcessRequirement?.() ?? Infinity;
-
       if (this.game.ruinCompleted) {
         this.game.offerRuinReset?.();
       } else if (!this.game.expeditionAccepted) {
         this.game.beginExpedition?.({ position: interactable.position });
-      } else if (scraps >= researchRequired) {
-        this.game.processResearchScraps?.();
       } else {
-        this.game.setInventoryOpen?.(true);
-        this.game.ui?.showToast?.('Roll: garage systems online', '#6bdcff');
+        this.game.setInventoryOpen?.(true, { mode: 'roll' });
+        this.game.ui?.showToast?.('Roll: workshop and salvage analysis ready', '#6bdcff');
       }
       this.game.addParticleBurst(interactable.position, interactable.color ?? MECHANISM_COLOR, 10, 0.1);
-      return;
-    }
-
-    if (interactable.action === 'quest') {
-      this.game.turnInScrapQuest?.();
-      this.game.addParticleBurst(interactable.position, interactable.color ?? KEYCARD_COLOR, 10, 0.1);
-      return;
-    }
-
-    if (interactable.action === 'research') {
-      const processed = this.game.processResearchScraps?.();
-      this.game.addParticleBurst(
-        interactable.position,
-        processed ? interactable.color ?? SHRINE_COLOR : LOCKED_COLOR,
-        processed ? 16 : 8,
-        0.1,
-      );
       return;
     }
 

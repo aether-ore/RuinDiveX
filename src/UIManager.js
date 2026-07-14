@@ -424,11 +424,17 @@ export class UIManager {
     this.weaponStats = document.getElementById('weapon-stats');
     this.armHotbar = document.getElementById('arm-hotbar');
     this.goldValue = document.getElementById('gold-value');
-    this.scrapValue = document.getElementById('scrap-value');
-    this.researchValue = document.getElementById('research-value');
+    this.unidentifiedScrapValue = document.getElementById('unidentified-scrap-value');
     this.inventoryPanel = document.getElementById('inventory-panel');
+    this.inventoryPanelTitle = document.getElementById('inventory-panel-title');
     this.inventoryActions = document.getElementById('inventory-actions');
     this.materialInventory = document.getElementById('material-inventory');
+    this.rollScrapService = document.getElementById('roll-scrap-service');
+    this.rollUnidentifiedValue = document.getElementById('roll-unidentified-value');
+    this.rollIdentifiedValue = document.getElementById('roll-identified-value');
+    this.rollPartsValue = document.getElementById('roll-parts-value');
+    this.rollIdentifyButton = document.getElementById('roll-identify-scrap');
+    this.rollIdentificationResult = document.getElementById('roll-identification-result');
     this.inventoryItems = document.getElementById('inventory-items');
     this.equipmentSlots = document.getElementById('equipment-slots');
     this.garageWeaponSlots = document.getElementById('garage-weapon-slots');
@@ -458,6 +464,8 @@ export class UIManager {
     this.inventoryButton = document.getElementById('inventory-button');
     this.restartButton = document.getElementById('restart-button');
     this.toastTimer = 0;
+    this.inventoryMode = 'garage';
+    this.lastScrapIdentification = null;
     this.previousHealth = null;
     this.healthDamagePulseTimer = 0;
     this.poseDebugOpen = false;
@@ -511,11 +519,8 @@ export class UIManager {
     }
     this._renderWeaponTelemetry(weaponHud);
     this.goldValue.textContent = String(this.game.inventory.gold);
-    if (this.scrapValue) {
-      this.scrapValue.textContent = String(this.game.inventory.scraps ?? 0);
-    }
-    if (this.researchValue) {
-      this.researchValue.textContent = String(this.game.inventory.researchData ?? 0);
+    if (this.unidentifiedScrapValue) {
+      this.unidentifiedScrapValue.textContent = String(this.game.inventory.unidentifiedScrap ?? 0);
     }
     this._renderArmHotbar(weaponHud?.tabs);
     this._renderMinimap();
@@ -537,10 +542,21 @@ export class UIManager {
     this.gameOver.hidden = !this.game.isGameOver;
   }
 
-  setInventoryOpen(open) {
+  setInventoryOpen(open, { mode = 'garage' } = {}) {
+    this.inventoryMode = open && mode === 'roll' ? 'roll' : 'garage';
     this.root?.classList.toggle('is-inventory-open', open);
+    this.root?.classList.toggle('is-roll-workshop', open && this.inventoryMode === 'roll');
     this.inventoryPanel.hidden = !open;
-    this.inventoryButton.setAttribute('aria-pressed', String(open));
+    this.inventoryPanel.dataset.mode = this.inventoryMode;
+    if (this.inventoryPanelTitle) {
+      this.inventoryPanelTitle.textContent = this.inventoryMode === 'roll'
+        ? "Roll's Workshop"
+        : 'Garage Loadout';
+    }
+    if (this.rollScrapService) {
+      this.rollScrapService.hidden = this.inventoryMode !== 'roll';
+    }
+    this.inventoryButton?.setAttribute('aria-pressed', String(open));
 
     if (open) {
       this.renderInventory();
@@ -875,11 +891,57 @@ export class UIManager {
   }
 
   renderInventory() {
+    if (this.goldValue) this.goldValue.textContent = String(this.game.inventory.gold ?? 0);
+    if (this.unidentifiedScrapValue) {
+      this.unidentifiedScrapValue.textContent = String(this.game.inventory.unidentifiedScrap ?? 0);
+    }
     this._renderEquipment();
     this._renderQuestLog();
     this._renderInventoryActions();
+    this._renderRollScrapWorkshop();
     this._renderCraftingMaterials();
     this._renderInventoryItems();
+  }
+
+  setScrapIdentificationResult(result) {
+    this.lastScrapIdentification = result;
+    this._renderRollScrapWorkshop();
+  }
+
+  _renderRollScrapWorkshop() {
+    const unidentified = Math.max(
+      0,
+      Math.trunc(this.game.inventory.unidentifiedScrap) || 0,
+    );
+    const storage = this.game.rollSalvageStorage;
+    const identified = Math.max(0, Math.trunc(storage?.identifiedScrap) || 0);
+    const partCount = storage?.getStoredPartCount?.() ?? 0;
+
+    if (this.rollUnidentifiedValue) this.rollUnidentifiedValue.textContent = String(unidentified);
+    if (this.rollIdentifiedValue) this.rollIdentifiedValue.textContent = String(identified);
+    if (this.rollPartsValue) this.rollPartsValue.textContent = String(partCount);
+    if (this.rollIdentifyButton) {
+      this.rollIdentifyButton.disabled = unidentified <= 0;
+      this.rollIdentifyButton.textContent = unidentified > 0
+        ? `Identify All (${unidentified})`
+        : 'Nothing to Identify';
+    }
+
+    if (!this.rollIdentificationResult) return;
+    const result = this.lastScrapIdentification;
+    if (!result?.processed) {
+      this.rollIdentificationResult.textContent = unidentified > 0
+        ? `${unidentified} unidentified scrap awaiting Roll's inspection.`
+        : 'Bring unidentified Reaverbot scrap back from the ruins for Roll to inspect.';
+      return;
+    }
+
+    const partNames = result.recoveredParts
+      .map((part) => `${part.name}${part.quantity > 1 ? ` x${part.quantity}` : ''}`)
+      .join(', ');
+    this.rollIdentificationResult.textContent = result.partCount > 0
+      ? `Last analysis: ${result.scrapStored} crafting scrap stored. Intact part found: ${partNames}.`
+      : `Last analysis: ${result.scrapStored} crafting scrap stored; no intact parts recovered.`;
   }
 
   hideTooltip() {
@@ -1748,13 +1810,13 @@ export class UIManager {
 
   _renderCraftingMaterials() {
     if (!this.materialInventory) return;
-    const materials = this.game.inventory.getMaterials?.() ?? [];
+    const materials = this.game.rollSalvageStorage?.getParts?.() ?? [];
     this.materialInventory.innerHTML = '';
 
     if (materials.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'material-empty';
-      empty.textContent = 'No specific Reaverbot parts recovered';
+      empty.textContent = 'Roll has not identified any intact Reaverbot parts yet';
       this.materialInventory.appendChild(empty);
       return;
     }
@@ -1980,7 +2042,9 @@ export class UIManager {
 
       const action = button.dataset.action;
 
-      if (action === 'equip') {
+      if (action === 'identify-scrap') {
+        this.game.identifyReaverbotScrap?.();
+      } else if (action === 'equip') {
         this._equipInventoryItem(button.dataset.itemId);
       } else if (action === 'assign-arm-slot') {
         this._assignArmWeaponToSlot(button.dataset.itemId, Number(button.dataset.slotIndex));

@@ -88,11 +88,10 @@
 
       <section id="inventory-panel" class="inventory-panel" hidden>
         <header class="inventory-header">
-          <h1>Garage Loadout</h1>
+          <h1 id="inventory-panel-title">Garage Loadout</h1>
           <div class="garage-currency">
             <span>Zenny</span><strong id="gold-value">0</strong>
-            <span>Scrap</span><strong id="scrap-value">0</strong>
-            <span>Research</span><strong id="research-value">0</strong>
+            <span>Unidentified Scrap</span><strong id="unidentified-scrap-value">0</strong>
           </div>
           <button class="close-button" data-action="close">X</button>
         </header>
@@ -106,6 +105,30 @@
             <div id="equipment-slots" class="equipment-grid"></div>
           </section>
           <section>
+            <div id="roll-scrap-service" class="roll-scrap-service" hidden>
+              <div class="roll-service-heading">
+                <div>
+                  <span class="roll-service-eyebrow">Roll's Salvage Analysis</span>
+                  <h2>Reaverbot Scrap Stockpile</h2>
+                </div>
+                <button id="roll-identify-scrap" class="roll-identify-button" data-action="identify-scrap">
+                  Identify All
+                </button>
+              </div>
+              <p class="roll-service-copy">
+                Scrap stays unidentified until Roll examines it. Usable crafting scrap and rare intact parts remain here at the workshop.
+              </p>
+              <div class="roll-stockpile-summary" aria-label="Roll's Reaverbot salvage stockpile">
+                <div><span>Awaiting ID</span><strong id="roll-unidentified-value">0</strong></div>
+                <div><span>Crafting Scrap</span><strong id="roll-identified-value">0</strong></div>
+                <div><span>Stored Parts</span><strong id="roll-parts-value">0</strong></div>
+              </div>
+              <p id="roll-identification-result" class="roll-identification-result" role="status" aria-live="polite">
+                Bring unidentified Reaverbot scrap back from the ruins for Roll to inspect.
+              </p>
+              <h3 class="inventory-subheading">Identified Reaverbot Parts</h3>
+              <div id="material-inventory" class="material-inventory"></div>
+            </div>
             <div class="salvage-controls">
               <div class="inventory-title-row">
                 <h2>Salvage Inventory</h2>
@@ -113,8 +136,6 @@
               </div>
               <div id="inventory-actions" class="inventory-actions" aria-label="Inventory actions"></div>
             </div>
-            <h3 class="inventory-subheading">Recovered Reaverbot Materials</h3>
-            <div id="material-inventory" class="material-inventory"></div>
             <h3 class="inventory-subheading">Equipment Salvage</h3>
             <div id="inventory-items" class="inventory-list"></div>
           </section>

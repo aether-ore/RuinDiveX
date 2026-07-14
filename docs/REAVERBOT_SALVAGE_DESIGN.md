@@ -6,9 +6,9 @@ The salvage system turns the visible and behavioral identity of a procedural Rea
 
 The intended player thought process is:
 
-> “That one has spring legs. It can drop the Tempered Jump Springs I still need for Jump Springs.”
+> “That one has spring legs. Its scrap might contain the Tempered Jump Springs I still need; Roll can tell me.”
 
-This is implemented as a parallel system to generic `Reaverbot Scrap`. Generic scrap remains a currency for the existing quest board and research processor. Specific materials are stackable future crafting ingredients and do not consume equipment-inventory capacity.
+The field layer intentionally hides that specificity. Every salvage pickup is unidentified scrap, and the player Inventory exposes only an aggregate `unidentifiedScrap` count. Roll identifies the complete pending batch at her workshop and owns both the bulk `identifiedScrap` result and every named part she discovers. Salvage is a crafting stockpile, not Zenny, Research Data, or quest-board currency.
 
 ## Runtime Contract
 
@@ -22,47 +22,65 @@ Most spawned procedural Reaverbots receive a six-entry salvage profile derived f
 6. Defensive module
 7. Weak-point module
 
-Each entry maps to exactly one possible material. The same generated module always maps to the same material, so enemy recognition becomes useful knowledge.
+Each entry maps to exactly one possible named part. The same generated module always maps to the same part, so enemy recognition remains useful even though the field pickup itself is unidentified.
 
-Constructor Claw Reaverbots are the deliberate exception. Their claw is both their weapon and their active guard, so they have no generated defensive module or defensive-material entry. Their five-entry profile contains behavior, body, eye, weapon, and Claw Palm weak-point materials. Cosmetic side plating is not a defensive module and never adds a salvage roll.
+Constructor Claw Reaverbots are the deliberate exception. Their claw is both their weapon and their active guard, so they have no generated defensive module or defensive-part entry. Their five-entry profile contains behavior, body, eye, weapon, and Claw Palm weak-point candidates. Cosmetic side plating is not a defensive module and never adds a profile entry.
 
-On a normal defeat:
+The runtime contract is:
 
-- Each profile entry makes an independent material roll: six for ordinary Reaverbots, seven for native charge attackers, and five for Constructor Claw carriers.
-- If every roll fails, one body, weapon, rocket-boost, or defense material is guaranteed.
-- Elite Reaverbots yield at least two different materials.
-- Breaking the weak point before the kill substantially improves the weak-point material roll.
-- Destroying a breakable weapon adds `+15 percentage points` to that exact weapon material roll, independently of the weak-point bonus. Destroying a Constructor Claw therefore improves both its Claw Palm Recoil Servo and Serrated Claw Gear rolls when both break conditions are reported.
-- A Reaverbot that completes its own self-destruction follows the existing no-reward rule; destroying it before detonation yields normal salvage.
-- Materials appear as physical steel bolt, screw, or gear pickups with a subtle material-family halo. They stack automatically, record their most recent source module, and appear in the Garage under **Recovered Reaverbot Materials**.
+- Eligible salvage rewards appear in the field only as unidentified scrap. No pickup reveals or grants a named part directly.
+- A field pickup can carry multiple scrap units. Collecting it increments the Inventory-facing `unidentifiedScrap` count while its source-profile provenance remains hidden in the pending workshop batch.
+- Roll's workshop offers one **Identify All** action. It resolves every pending unit, clears the unidentified count, and writes all results to Roll's stockpile rather than back into the player Inventory.
+- Most recovered units add ordinary `identifiedScrap`. At most one unit from a qualifying Reaverbot recovery can instead become a rare named part, and its candidates come only from that source Reaverbot's salvage profile.
+- Breaking a weak point can improve the rare outcome for that profile's weak-point part. Destroying a breakable weapon can improve the matching weapon-part outcome. Neither event creates a named pickup in the field.
+- Elite and higher-threat Reaverbots may provide more identification opportunities or improve rare-part odds, but they still use the same unidentified-pickup and Roll-identification pipeline.
+- A Reaverbot that completes its own self-destruction follows the no-reward rule; destroying it before detonation can produce normal unidentified salvage.
 
-The bolt/screw/gear silhouette is intentionally cosmetic rather than a second crafting taxonomy. It makes mechanical salvage readable against the tall glowing crystal silhouette of refractor drops without asking the player to learn another material rule.
+The bolt/screw/gear silhouette is intentionally cosmetic rather than a second crafting taxonomy. A neutral treatment identifies it only as mechanical salvage and keeps it readable against tall glowing refractor crystals without leaking the hidden named-part result.
 
-## Drop Chances
+## Drop and Identification Chances
 
-| Generated aspect | Base chance | Design reason |
+Acquisition now has two separate gates:
+
+| Stage | Common result | Rare result |
+|---|---|---|
+| Field drop | One unidentified-scrap pickup carrying one or more units | None; named parts never drop in the field |
+| Roll's workshop | Bulk `identifiedScrap` in Roll's stockpile | A named part selected from that scrap's source profile |
+
+Field recovery uses these current rates:
+
+| Defeated Reaverbot | Unidentified-pickup chance | Scrap units in that pickup |
+|---|---:|---:|
+| Ordinary | 42% | 1, with an 18% chance of 1 extra |
+| Legacy heavy types (`gorubesshu`, `horokko`, `sharukurusu`) | 58% | 1, with an 18% chance of 1 extra |
+| Elite | 92% | 2, with an 18% chance of 1 extra |
+
+For a procedural Reaverbot, a successful field recovery also receives one hidden intact-part check. Its base chance is 7%, with the following additive modifiers before a 32% cap:
+
+- `+0.7 percentage points` per threat tier above Tier 1, capped at `+3.5 points`.
+- `+9 points` for an elite.
+- `+5.5 points` when its weak point was broken.
+- `+2.5 points` when a breakable weapon was destroyed.
+
+Passing that rare check does not open a global part table. It selects at most one candidate from only the behavior, body, eye, weapon, rocket-boost, defense, and weak-point entries actually present on the source Reaverbot. These aspect values are relative selection weights, not independent drop probabilities:
+
+| Generated aspect | Base selection weight | Design reason |
 |---|---:|---|
-| Weapon | 40% | Weapon hunting should be the most reliable crafting path. |
-| Body / locomotion | 34% | Supports recognizable traversal and mobility pursuits. |
-| Defense | 34% | Makes shielded and armored silhouettes valuable targets. |
-| Rocket boost | 32% | Makes the visible charge propulsion module a direct salvage target. |
-| Weak point | 22% | Valuable core components require correct combat execution. |
-| Behavior | 18% | Logic chips are specialized recipe gates rather than bulk metal. |
-| Ruby eye | 8% | The universal eye remains a rare ancient optical component. |
+| Weapon | 40 | Weapon hunting should be the most reliable named-part path. |
+| Body / locomotion | 34 | Supports recognizable traversal and mobility pursuits. |
+| Defense | 34 | Makes shielded and armored silhouettes valuable targets. |
+| Rocket boost | 32 | Makes the visible charge propulsion module a direct salvage signal. |
+| Weak point | 22 | Valuable core components reward correct combat execution. |
+| Behavior | 18 | Logic chips remain specialized recipe gates rather than bulk metal. |
+| Ruby eye | 8 | The universal eye remains a rare ancient optical component. |
 
-Modifiers:
+Breaking a weak point adds `62` selection weight only to its weak-point candidate. Destroying a weapon adds `50` selection weight only to the matching weapon candidate. These bonuses improve the appropriate result without making unrelated parts more likely. When Roll identifies the batch, the hidden named part consumes one unit from its recovery and all remaining units become `identifiedScrap`.
 
-- Threat tier adds `+1.8 percentage points` per tier above Tier 1, capped at `+12 points`.
-- Elite status adds `+14 points` to every aspect and guarantees at least two distinct materials.
-- Breaking the weak point adds `+34 points` to its material roll.
-- Destroying a weapon module adds `+15 points` to the matching weapon material roll.
-- Individual chances are capped at 95%.
+These rates are acquisition tuning, not final recipe costs. The named-part tables below define valid profile-specific identification outcomes, not direct field pickups. Recipe quantities remain the primary long-term pacing control once crafting is implemented.
 
-These are acquisition chances, not final recipe costs. Recipe quantities will be the primary long-term pacing control once crafting is implemented.
+## Behavior Parts
 
-## Behavior Materials
-
-| Reaverbot behavior | Possible material | Strong crafting signals | Example future uses |
+| Reaverbot behavior | Possible named part | Strong crafting signals | Example future uses |
 |---|---|---|---|
 | Pursuer | Behavior Chip: Pursuit | Tracking, speed, melee | Homing servos, dash weapons |
 | Shield Sentinel | Behavior Chip: Sentry | Guarding, counters, targeting | Shield counters, guard turrets |
@@ -75,9 +93,9 @@ These are acquisition chances, not final recipe costs. Recipe quantities will be
 | Pack Hunter | Pack-Link Transceiver | Coordination, flanking, signals | Drone control, synchronized volleys |
 | Ruin Duelist | Combat Prediction Chip | Counters, evasion, precision | Counter modules, precision melee arms |
 
-## Body and Locomotion Materials
+## Body and Locomotion Parts
 
-| Body plan / visible movement system | Possible material | Strong crafting signals | Example future uses |
+| Body plan / visible movement system | Possible named part | Strong crafting signals | Example future uses |
 |---|---|---|---|
 | Broad Biped | Heavy Servo Frame | Load, stability, frame strength | Heavy arm weapons, stability braces |
 | Needle Biped | Lightweight Servo Rod | Low inertia, speed, limbs | Dash skates, rapid mechanisms |
@@ -89,17 +107,17 @@ These are acquisition chances, not final recipe costs. Recipe quantities will be
 | Hovering Bell | Levitation Coil | Hovering, magnetic lift, aerial support | Hover boots, support drones |
 | Winged Relic | Aerofoil Servo | Flight steering, lightweight control | Air-dash vanes, guided projectiles |
 
-## Ruby Eye Material
+## Ruby Eye Part
 
-| Eye module | Possible material | Strong crafting signals | Example future uses |
+| Eye module | Possible named part | Strong crafting signals | Example future uses |
 |---|---|---|---|
 | Single Ruby Lens | Ruby Optic Lens | Ancient optics, lock-on, scanning | Lock-on optics, enemy scanners |
 
 The eye is universal, but its low acquisition chance keeps it from becoming meaningless vendor trash.
 
-## Weapon Materials
+## Weapon Parts
 
-| Weapon module | Possible material | Strong crafting signals | Example future uses |
+| Weapon module | Possible named part | Strong crafting signals | Example future uses |
 |---|---|---|---|
 | Rocket Lance | Rocket Boost Coupler | Rocket impulse, propulsion, charge alignment | Dash boosters, rocket lances |
 | Crushing Jaw | High-Torque Jaw Gear | Torque, gripping, crushing | Crusher arms, grappling tools |
@@ -118,17 +136,17 @@ The eye is universal, but its low acquisition chance keeps it from becoming mean
 | Horseshoe Tractor Magnet | Horseshoe Tractor Coil | Magnetic lift, tractor fields, launching | Lift Arms, magnetic launchers |
 | Overload Core | Volatile Overload Cell | Burst energy, instability, explosives | Burst cartridges, detonation drones |
 
-## Rocket-Boost Materials
+## Rocket-Boost Parts
 
-| Charge module | Possible material | Strong crafting signals | Example future uses |
+| Charge module | Possible named part | Strong crafting signals | Example future uses |
 |---|---|---|---|
 | Dorsal Spine Jet | Dorsal Rocket Combustor | Compact thrust, fire, quadruped charge | Boost modules, dash armor |
 | Twin Rocket Pack | Twin-Jet Thrust Manifold | Balanced paired thrust, back mounting | Jetpacks, dash skates |
 | Vectoring Belly Rocket | Vectoring Rocket Nozzle | Gimbaled impulse, aerial steering | Air dashes, guided launchers |
 
-## Defensive Materials
+## Defensive Parts
 
-| Defensive module | Possible material | Strong crafting signals | Example future uses |
+| Defensive module | Possible named part | Strong crafting signals | Example future uses |
 |---|---|---|---|
 | Directional Shield | Metal Shield Plating | Frontal protection, projectile blocking | Shield Arm, frontal armor |
 | Armored Skull | Reinforced Cranial Plate | Impact armor, curved plates | Impact helmets, ram armor |
@@ -142,9 +160,9 @@ The eye is universal, but its low acquisition chance keeps it from becoming mean
 | Phase Shell | Phase Oscillator | Timed intangibility, phase control | Phase dodges, flicker shields |
 | Reactive Plate | Reactive Armor Tile | Directional adaptation, sensors | Adaptive armor, counter shields |
 
-## Weak-Point Materials
+## Weak-Point Parts
 
-| Weak-point module | Possible material | Strong crafting signals | Example future uses |
+| Weak-point module | Possible named part | Strong crafting signals | Example future uses |
 |---|---|---|---|
 | Rear Battery | Ancient Battery Pack | Energy storage, weapon power | Energy tanks, weapon batteries |
 | Belly Core | Stabilized Belly Core | Jump balance, impact damping | Jump Springs, impact dampers |
@@ -160,7 +178,7 @@ The eye is universal, but its low acquisition chance keeps it from becoming mean
 
 ## Example Future Recipes
 
-Crafting is not implemented yet. These examples show how the current material vocabulary can support recognizable acquisition goals.
+Crafting is not implemented yet. These examples show how the current named-part vocabulary can support recognizable acquisition goals.
 
 ### Jump Springs
 
@@ -210,11 +228,11 @@ Resulting player goal: prioritize the flying support machine that visibly abduct
 
 ## Player Readability Rules
 
-- Material names should describe the visible source whenever possible.
-- A recipe should use at least one visually obvious source material and at most one rare universal material.
-- Behavior chips should gate a weapon's behavior, not provide its entire material cost.
-- Weak-point materials should reward correct counterplay and be more efficient than raw-health farming.
-- Common metal costs should come from body and defense materials; specialized functionality should come from weapons, behavior chips, and weak points.
+- Part names should describe the visible source whenever possible.
+- A recipe should use at least one visually obvious source part and at most one rare universal part.
+- Behavior chips should gate a weapon's behavior, not provide its entire part cost.
+- Weak-point parts should reward correct counterplay and be more efficient than raw-health farming.
+- Common metal costs should come from body and defense parts; specialized functionality should come from weapons, behavior chips, and weak points.
 - The red eye should remain valuable but should not appear in every recipe merely because every Reaverbot has one.
 
 ## Future Bestiary and Crafting UI
@@ -223,7 +241,7 @@ The runtime already exposes `window.getReaverbotSalvageCatalog()` and each proce
 
 Recommended additions:
 
-- A bestiary entry that reveals a material after it is collected once.
+- A bestiary entry that reveals a named part after Roll identifies it once.
 - Recipe tracking that marks matching enemy silhouettes or encounter rooms.
 - A “Known Sources” panel listing body plan, weapon, defense, and behavior sources.
 - Dungeon-generation weighting for tracked recipes, with a strict cap so desired enemies become more likely without becoming guaranteed.
@@ -233,10 +251,11 @@ Recommended additions:
 
 - Catalog, source mappings, roll chances: `src/reaverbots/ReaverbotSalvageCatalog.js`
 - Per-enemy five-, six-, or seven-part profile: `src/reaverbots/ReaverbotEnemy.js`
-- Death drops and source metadata: `src/Game.js`
-- Physical material pickups: `src/LootSystem.js`
-- Stack storage and future recipe consumption: `src/Inventory.js`
-- Garage material display: `index.html`, `src/UIManager.js`, `src/ui.css`
+- Field drop eligibility and hidden source-profile recovery metadata: `src/Game.js`
+- Physical unidentified-scrap pickups: `src/LootSystem.js`
+- Player-facing unidentified count and pending recovery handoff: `src/Inventory.js`
+- Roll-owned identified scrap, named-part stacks, and future recipe consumption: `src/RollSalvageStorage.js`
+- Roll workshop identification and stockpile display: `index.html`, `src/UIManager.js`, `src/ui.css`
 - Coverage and runtime tests: `tests/reaverbot-generation.test.mjs`, `tests/reaverbot-runtime.spec.js`
 
-When a new procedural module is added, the catalog completeness test will fail until a corresponding material source is added. This keeps future Reaverbot generation and future crafting content synchronized.
+When a new procedural module is added, the catalog completeness test will fail until a corresponding named-part source is added. This keeps future Reaverbot generation and future crafting content synchronized.

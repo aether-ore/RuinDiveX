@@ -67,7 +67,7 @@ Enemy pacing and room participation share a common navigation contract. Procedur
 
 Every generated weak point is now selected from a strict defense-specific pairing table, so it has a corresponding guard and a readable opening. Leg joints sit behind enlarged forward side plates and become lock-on targets only when those plates retract during recovery; eye shutters open with attacks; rear batteries reward flanking; and rotor counterweights appear only on the side opposite their shield. Defensive geometry intercepts projectile hits before weak-point bonus damage is evaluated. Lock-on and homing can aim at exposed weak points directly, and enough weak-point damage permanently breaks the linked defense with a module-specific consequence. Directional shields can fully nullify frontal buster shots, while flanking, attack windows, recovery windows, melee, and explosions provide explicit counters. Progression-critical bosses and keycard carriers are never assigned the self-destruct archetype.
 
-Procedural Reaverbots carry a module-derived salvage profile covering behavior, chassis, red eye, weapon, defense, and weak point; native charge attackers add a seventh rocket-boost material matching their visible propulsion rig. Normal defeats guarantee at least one corresponding physical crafting-material pickup, elites guarantee at least two different materials, and breaking a weak point greatly improves its specialized material chance. Material pickups use steel bolt, screw, and gear silhouettes so they remain distinct from glowing refractor crystals. These materials stack separately from equipment and retain their visible source—for example, Spring Hoppers yield Tempered Jump Springs and Pulse Cannon users can yield Revolving Pulse Barrels. The complete source tables, drop chances, and future recipe examples are in [the Reaverbot Salvage Design Guide](docs/REAVERBOT_SALVAGE_DESIGN.md).
+Procedural Reaverbots carry a hidden, module-derived salvage profile covering behavior, chassis, red eye, weapon, defense, and weak point; native charge attackers add a seventh rocket-boost entry matching their visible propulsion rig. Salvage found in the field is always a generic unidentified-scrap pickup, represented by steel bolt, screw, and gear silhouettes so it remains distinct from glowing refractor crystals. The player Inventory exposes only the aggregate `unidentifiedScrap` count. Roll identifies the entire pending batch at her workshop and owns the resulting stockpile: most recovered units become bulk `identifiedScrap`, while a rare unit becomes a named part drawn only from the source Reaverbot's profile. That preserves readable hunting goals—Spring Hoppers can reveal Tempered Jump Springs and Pulse Cannon users can reveal Revolving Pulse Barrels—without revealing named parts before Roll examines them. Salvage is not Zenny, Research Data, or quest-board currency. The complete source tables, identification rules, and future recipe examples are in [the Reaverbot Salvage Design Guide](docs/REAVERBOT_SALVAGE_DESIGN.md).
 
 ## Expedition Loop
 
@@ -75,11 +75,11 @@ The current prototype starts in a safe hub/camp approach, then pushes the player
 
 - Enter the ruin directly from camp, or use the camp ruin lift as a shortcut.
 - Clear Reaverbot rooms, collect keycards, open locked doors, cross or disable traps, and use override mechanisms.
-- Process recovered Reaverbot scrap at the camp research station for Research Data and Zenny.
+- Bring all recovered unidentified scrap to Roll; her workshop identifies the full batch and stores the resulting identified scrap and named parts.
 - Secure the Large Refractor in the shrine chamber.
 - Use the extraction pad to return to camp, or pay Zenny at camp to reset the current ruin layout.
 
-The Garage includes an Expedition Log that tracks the Large Refractor objective, required keycard route, ruin override console, Reaverbot scrap contract, and research processing.
+The Garage includes an Expedition Log that tracks the Large Refractor objective, required keycard route, and ruin override console. Roll's workshop separately presents the unidentified-scrap batch and her identified-scrap and named-part stockpile.
 
 ## Procedural Vertical Factory Rooms
 

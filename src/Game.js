@@ -10,6 +10,7 @@ import { MapEventSystem } from './MapEventSystem.js';
 import { Player } from './Player.js';
 import { ProjectileSystem } from './ProjectileSystem.js';
 import { RefractorPickupSystem } from './RefractorPickupSystem.js';
+import { RollSalvageStorage } from './RollSalvageStorage.js';
 import { UIManager } from './UIManager.js';
 import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
 import { getCombatTargetWorldPosition } from './reaverbots/CombatTarget.js';
@@ -17,10 +18,6 @@ import { rollReaverbotSalvageDrops } from './reaverbots/ReaverbotSalvageCatalog.
 
 const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
 const CAMERA_LOOK_OFFSET = new THREE.Vector3(0, 1.1, 0);
-const SCRAP_QUEST_BASE_REQUIREMENT = 5;
-const SCRAP_QUEST_REWARD = 95;
-const RESEARCH_PROCESS_BASE_REQUIREMENT = 3;
-const RESEARCH_PROCESS_REWARD = 42;
 const POSE_DEBUG_HANDLE_COLOR = 0xffd36f;
 const POSE_DEBUG_HANDLE_SELECTED_COLOR = 0xffffff;
 const POSE_DEBUG_DRAG_DEGREES_PER_PIXEL = 0.35;
@@ -182,7 +179,6 @@ export class Game {
     this.ruinCompleted = false;
     this.expeditionAccepted = false;
     this.expeditionActive = false;
-    this.scrapQuestTurnIns = 0;
     this.arenaRadius = 82;
     this.pointer = {
       x: window.innerWidth * 0.5,
@@ -307,6 +303,7 @@ export class Game {
     this.player.jumpPlatformLandingResolver = (context) => this._tryResolvePlatformLanding(context);
 
     this.inventory = new Inventory(54);
+    this.rollSalvageStorage = new RollSalvageStorage();
     const getPickupFloorElevation = (position) => (
       this.dungeonController?.getSurfaceElevationAt?.(position)
     );
@@ -735,7 +732,7 @@ export class Game {
     };
   }
 
-  setInventoryOpen(open) {
+  setInventoryOpen(open, { mode = 'garage' } = {}) {
     if (open && this.poseDebugOpen) {
       this.setPoseDebugOpen(false);
     }
@@ -751,7 +748,7 @@ export class Game {
       this.pointer.alternate = false;
       this.pointer.alternatePressed = false;
     }
-    this.ui.setInventoryOpen(open);
+    this.ui.setInventoryOpen(open, { mode });
   }
 
   setPoseDebugOpen(open) {
@@ -1149,72 +1146,29 @@ export class Game {
       });
     }
 
-    const scrapRequired = this.getScrapQuestRequirement();
-    const scraps = this.inventory.scraps ?? 0;
-    entries.push({
-      id: 'scrapQuest',
-      title: 'Reaverbot Scrap Contract',
-      status: scraps >= scrapRequired ? 'Ready to turn in' : `${scraps}/${scrapRequired} scraps`,
-      detail: `Quest Board reward: ${SCRAP_QUEST_REWARD + this.ruinFloor * 18 + this.scrapQuestTurnIns * 24}z`,
-      progress: Math.min(1, scraps / Math.max(1, scrapRequired)),
-      color: '#c7d0d6',
-    });
-
-    const researchRequired = this.getResearchProcessRequirement();
-    entries.push({
-      id: 'researchProcessing',
-      title: 'Ruin Research Processing',
-      status: scraps >= researchRequired ? 'Ready to process' : `${scraps}/${researchRequired} scraps`,
-      detail: `Research Data ${this.inventory.researchData ?? 0}`,
-      progress: Math.min(1, scraps / Math.max(1, researchRequired)),
-      color: '#7df8ff',
-    });
-
     return entries;
   }
 
-  getScrapQuestRequirement() {
-    return SCRAP_QUEST_BASE_REQUIREMENT + Math.floor(this.scrapQuestTurnIns * 1.5);
-  }
-
-  getResearchProcessRequirement() {
-    return RESEARCH_PROCESS_BASE_REQUIREMENT + Math.floor((this.inventory.researchData ?? 0) / 4);
-  }
-
-  processResearchScraps() {
-    const required = this.getResearchProcessRequirement();
-    const current = this.inventory.scraps ?? 0;
-
-    if (current < required) {
-      this.ui?.showToast?.(`Research needs ${required} scrap samples`, '#7df8ff');
-      return false;
+  identifyReaverbotScrap() {
+    const pending = Math.max(0, Math.trunc(this.inventory.unidentifiedScrap) || 0);
+    if (pending <= 0) {
+      this.ui?.showToast?.('Roll: no unidentified scrap to inspect', '#c7d0d6');
+      return null;
     }
 
-    const reward = RESEARCH_PROCESS_REWARD + this.ruinFloor * 8 + (this.inventory.researchData ?? 0) * 5;
-    this.inventory.scraps = current - required;
-    this.inventory.researchData = (this.inventory.researchData ?? 0) + 1;
-    this.inventory.gold += reward;
-    this.ui?.showToast?.(`Research data processed +${reward}z`, '#7df8ff');
+    const result = this.rollSalvageStorage.identifyRecoveries(
+      this.inventory.takeAllUnidentifiedScrap(),
+    );
+    const partMessage = result.partCount > 0
+      ? `; ${result.partCount} recoverable part${result.partCount === 1 ? '' : 's'} found`
+      : '';
+    this.ui?.showToast?.(
+      `Roll identified ${result.processed}: ${result.scrapStored} crafting scrap${partMessage}`,
+      result.partCount > 0 ? '#ffd66b' : '#7df8ff',
+    );
+    this.ui?.setScrapIdentificationResult?.(result);
     this.ui?.renderInventory?.();
-    return true;
-  }
-
-  turnInScrapQuest() {
-    const required = this.getScrapQuestRequirement();
-    const current = this.inventory.scraps ?? 0;
-
-    if (current < required) {
-      this.ui?.showToast?.(`Scrap quest: ${current}/${required} Reaverbot scraps`, '#ffd66b');
-      return false;
-    }
-
-    const reward = SCRAP_QUEST_REWARD + this.ruinFloor * 18 + this.scrapQuestTurnIns * 24;
-    this.inventory.scraps = current - required;
-    this.inventory.gold += reward;
-    this.scrapQuestTurnIns += 1;
-    this.ui?.showToast?.(`Scrap quest complete +${reward}z`, '#ffd66b');
-    this.ui?.renderInventory?.();
-    return true;
+    return result;
   }
 
   completeRuinObjective({ reward = 650, position = null } = {}) {
@@ -4751,7 +4705,6 @@ export class Game {
 
     this.refractors.rollEnemyDrop(enemy);
     this.dungeonController?.rollEnemyKeycardDrop?.(enemy);
-    this._rollEnemyModuleDrops(enemy);
     this._rollEnemyScrapDrop(enemy);
     this.lootSystem.rollDrop(enemy);
   }
@@ -4802,43 +4755,46 @@ export class Game {
       brokenWeaponModuleId: enemy.brokenWeaponModuleId ?? null,
     });
 
-    drops.forEach((drop, index) => {
-      const angle = random() * Math.PI * 2 + index * 1.7;
-      const distance = 0.32 + random() * 0.28;
-      const position = (enemy.deathDropPosition ?? enemy.root.position).clone();
-      position.x += Math.cos(angle) * distance;
-      position.y += 0.34 + index * 0.06;
-      position.z += Math.sin(angle) * distance;
-      const source = {
-        ...drop.source,
-        enemyName: enemy.genome.name,
-        enemySeed: enemy.genome.seed,
-      };
-      this.lootSystem.createMaterialPickup(drop, drop.quantity, position, source);
-    });
-
     enemy.lastSalvageDrops = drops;
     return drops;
   }
 
-  _rollEnemyScrapDrop(enemy) {
+  _rollEnemyScrapDrop(enemy, { random = Math.random } = {}) {
     const chance = enemy?.isElite
       ? 0.92
       : ['gorubesshu', 'horokko', 'sharukurusu'].includes(enemy?.typeKey)
         ? 0.58
         : 0.42;
 
-    if (Math.random() > chance) {
+    if (random() > chance) {
       return 0;
     }
 
-    const amount = (enemy?.isElite ? 2 : 1) + (Math.random() < 0.18 ? 1 : 0);
-    this.inventory.scraps = (this.inventory.scraps ?? 0) + amount;
-    tempVectorA.copy(enemy.deathDropPosition ?? enemy.root.position);
-    tempVectorA.y += 0.7;
-    this.addParticleBurst(tempVectorA, 0x9aa7ad, 10 + amount * 4, 0.11);
-    this.ui?.showToast?.(`Reaverbot Scrap +${amount}`, '#c7d0d6');
-    this.ui?.renderInventory?.();
+    const amount = (enemy?.isElite ? 2 : 1) + (random() < 0.18 ? 1 : 0);
+    const recoverableParts = this._rollEnemyModuleDrops(enemy, { random });
+    const position = (enemy.deathDropPosition ?? enemy.root.position).clone();
+    position.x += (random() - 0.5) * 0.5;
+    position.y += 0.34;
+    position.z += (random() - 0.5) * 0.5;
+    this.lootSystem.createUnidentifiedScrapPickup(amount, position, {
+      source: enemy?.genome ? {
+        enemyName: enemy.genome.name,
+        enemySeed: enemy.genome.seed,
+        threatTier: enemy.genome.threatTier ?? 1,
+        elite: Boolean(enemy.isElite),
+      } : {
+        enemyName: enemy?.type?.name ?? enemy?.typeKey ?? 'Reaverbot',
+        elite: Boolean(enemy?.isElite),
+      },
+      recoverableParts: recoverableParts.map((part) => ({
+        ...part,
+        source: {
+          ...part.source,
+          enemyName: enemy?.genome?.name ?? enemy?.type?.name ?? enemy?.typeKey ?? 'Reaverbot',
+          enemySeed: enemy?.genome?.seed ?? null,
+        },
+      })),
+    });
     return amount;
   }
 

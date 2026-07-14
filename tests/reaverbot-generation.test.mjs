@@ -29,6 +29,7 @@ import {
   setReaverbotDefenseVisualActive,
 } from '../src/reaverbots/ReaverbotVisualFactory.js';
 import { Inventory } from '../src/Inventory.js';
+import { RollSalvageStorage } from '../src/RollSalvageStorage.js';
 
 test('the same seed and context reproduce the same Reaverbot genome', () => {
   const options = {
@@ -289,7 +290,7 @@ test('charge genomes mount morphology-specific rocket rigs and never expose the 
   assert.ok(validateReaverbotGenome(nonCharge).errors.includes('charge-module-on-non-charge'));
 });
 
-test('rocket chargers roll their visible boost parts and can guarantee boost salvage', () => {
+test('rocket chargers can rarely recover either visible boost assembly without yielding multiple parts', () => {
   let charger = null;
   for (let variant = 0; variant < 300 && !charger; variant += 1) {
     const candidate = generateReaverbotGenome({
@@ -301,17 +302,25 @@ test('rocket chargers roll their visible boost parts and can guarantee boost sal
   }
   assert.ok(charger);
 
-  const allDrops = rollReaverbotSalvageDrops(charger, { random: () => 0 });
-  assert.ok(allDrops.some((drop) => drop.id === 'rocketBoostCoupler'));
-  assert.ok(allDrops.some((drop) => drop.source.aspect === 'charge'
-    && drop.source.moduleId === charger.modules.charge.id));
-
-  let rollIndex = 0;
-  const fallbackDrops = rollReaverbotSalvageDrops(charger, {
-    random: () => (rollIndex++ < 7 ? 0.999 : 0.55),
+  const sequenceRandom = (values) => {
+    let index = 0;
+    return () => values[index++] ?? values.at(-1);
+  };
+  const weaponDrop = rollReaverbotSalvageDrops(charger, {
+    random: sequenceRandom([0, 0.4]),
   });
-  assert.equal(fallbackDrops.length, 1);
-  assert.equal(fallbackDrops[0].source.aspect, 'charge');
+  assert.equal(weaponDrop.length, 1);
+  assert.equal(weaponDrop[0].id, 'rocketBoostCoupler');
+  assert.equal(weaponDrop[0].source.aspect, 'weapon');
+
+  const chargeDrop = rollReaverbotSalvageDrops(charger, {
+    random: sequenceRandom([0, 0.55]),
+  });
+  assert.equal(chargeDrop.length, 1);
+  assert.equal(chargeDrop[0].source.aspect, 'charge');
+  assert.equal(chargeDrop[0].source.moduleId, charger.modules.charge.id);
+
+  assert.deepEqual(rollReaverbotSalvageDrops(charger, { random: () => 0.999 }), []);
 });
 
 test('solo pack hunters remain valid while dependent controllers and self-destructors protect progression', () => {
@@ -1307,34 +1316,36 @@ test('every procedural Reaverbot aspect has a specific crafting material source'
   assert.equal(foundClawProfile, true);
 });
 
-test('module salvage is guaranteed, elites yield more variety, and breaking a weak point improves its recovery chance', () => {
+test('recoverable parts use a deterministic low-chance roll and never yield more than one part', () => {
   const genome = generateReaverbotGenome({
     seed: 'salvage-roll:pouncer',
     archetypeId: 'pouncer',
-    threatTier: 3,
+    threatTier: 1,
     encounterSize: 3,
   });
-  const noLuckyRolls = rollReaverbotSalvageDrops(genome, { random: () => 0.999 });
-  assert.equal(noLuckyRolls.length, 1);
-  assert.ok(['body', 'weapon', 'defense'].includes(noLuckyRolls[0].source.aspect));
 
-  const eliteRolls = rollReaverbotSalvageDrops(genome, {
-    random: () => 0.999,
+  const sequenceRandom = (values) => {
+    let index = 0;
+    return () => values[index++] ?? values.at(-1);
+  };
+  assert.deepEqual(rollReaverbotSalvageDrops(genome, { random: () => 0.07 }), []);
+
+  const luckyDrop = rollReaverbotSalvageDrops(genome, {
+    random: sequenceRandom([0.069999, 0]),
+  });
+  assert.equal(luckyDrop.length, 1);
+  assert.equal(luckyDrop[0].source.aspect, 'behavior');
+
+  assert.deepEqual(rollReaverbotSalvageDrops(genome, { random: () => 0.1 }), []);
+  const eliteDrop = rollReaverbotSalvageDrops(genome, {
+    random: sequenceRandom([0.1, 0.999]),
     isElite: true,
   });
-  assert.equal(eliteRolls.length, 2);
-  assert.equal(new Set(eliteRolls.map((drop) => drop.id)).size, 2);
-
-  const intactRolls = rollReaverbotSalvageDrops(genome, { random: () => 0.5 });
-  const brokenRolls = rollReaverbotSalvageDrops(genome, {
-    random: () => 0.5,
-    weakPointBroken: true,
-  });
-  assert.equal(intactRolls.some((drop) => drop.source.aspect === 'weakPoint'), false);
-  assert.equal(brokenRolls.some((drop) => drop.source.aspect === 'weakPoint'), true);
+  assert.equal(eliteDrop.length, 1);
+  assert.equal(eliteDrop[0].source.aspect, 'weakPoint');
 });
 
-test('destroying a claw independently improves its original weapon salvage roll', () => {
+test('breaking a weak point or weapon deterministically increases that part family weight', () => {
   let genome = null;
   for (let variant = 0; variant < 240 && !genome; variant += 1) {
     const candidate = generateReaverbotGenome({
@@ -1351,42 +1362,97 @@ test('destroying a claw independently improves its original weapon salvage roll'
     let index = 0;
     return () => values[index++] ?? values.at(-1);
   };
-  const rolls = [0.1, 0.99, 0.99, 0.5, 0.4];
-  const intact = rollReaverbotSalvageDrops(genome, {
-    random: sequenceRandom(rolls),
-  });
-  const clawBroken = rollReaverbotSalvageDrops(genome, {
-    random: sequenceRandom(rolls),
-    brokenWeaponModuleId: 'clawArm',
-  });
-  const bothBroken = rollReaverbotSalvageDrops(genome, {
-    random: sequenceRandom(rolls),
-    weakPointBroken: true,
-    brokenWeaponModuleId: 'clawArm',
-  });
 
-  assert.equal(intact.some((drop) => drop.source.aspect === 'weapon'), false);
-  assert.equal(intact.some((drop) => drop.source.aspect === 'weakPoint'), false);
-  assert.equal(clawBroken.some((drop) => drop.id === 'serratedClawGear'), true);
-  assert.equal(clawBroken.some((drop) => drop.id === 'clawPalmRecoilServo'), false);
-  assert.equal(bothBroken.some((drop) => drop.id === 'serratedClawGear'), true);
-  assert.equal(bothBroken.some((drop) => drop.id === 'clawPalmRecoilServo'), true);
+  const countAspect = (aspect, options = {}) => {
+    let count = 0;
+    for (let index = 0; index < 1000; index += 1) {
+      const drops = rollReaverbotSalvageDrops(genome, {
+        ...options,
+        random: sequenceRandom([0, (index + 0.5) / 1000]),
+      });
+      assert.ok(drops.length <= 1);
+      if (drops[0]?.source.aspect === aspect) count += 1;
+    }
+    return count;
+  };
+
+  const intactWeakPointCount = countAspect('weakPoint');
+  const brokenWeakPointCount = countAspect('weakPoint', { weakPointBroken: true });
+  assert.ok(brokenWeakPointCount > intactWeakPointCount + 200);
+
+  const intactWeaponCount = countAspect('weapon');
+  const brokenWeaponCount = countAspect('weapon', { brokenWeaponModuleId: 'clawArm' });
+  assert.ok(brokenWeaponCount > intactWeaponCount + 150);
 });
 
-test('specific Reaverbot materials stack and can be consumed atomically by future recipes', () => {
+test('unidentified scrap and its hidden recovery metadata transfer out of inventory atomically', () => {
   const inventory = new Inventory(4);
   const spring = REAVERBOT_SALVAGE_MATERIALS.temperedJumpSpring;
-  const chip = REAVERBOT_SALVAGE_MATERIALS.behaviorChipHunter;
-  inventory.addMaterial(spring, 2, { moduleId: 'hopper', moduleLabel: 'Spring Hopper' });
-  inventory.addMaterial(spring, 1, { moduleId: 'hopper', moduleLabel: 'Spring Hopper' });
-  inventory.addMaterial(chip, 1, { moduleId: 'pouncer', moduleLabel: 'Pouncer' });
+  inventory.addUnidentifiedScrap(3, {
+    source: { enemyId: 'hopper-1' },
+    recoverableParts: [{
+      ...spring,
+      quantity: 1,
+      source: { aspect: 'body', moduleId: 'hopper' },
+    }],
+  });
+  inventory.addUnidentifiedScrap(2, { source: { enemyId: 'crawler-1' } });
 
-  assert.equal(inventory.getMaterialCount('temperedJumpSpring'), 3);
-  assert.equal(inventory.getMaterials().length, 2);
-  assert.equal(inventory.hasMaterials({ temperedJumpSpring: 2, behaviorChipHunter: 1 }), true);
-  assert.equal(inventory.consumeMaterials({ temperedJumpSpring: 2, behaviorChipHunter: 1 }), true);
-  assert.equal(inventory.getMaterialCount('temperedJumpSpring'), 1);
-  assert.equal(inventory.getMaterialCount('behaviorChipHunter'), 0);
-  assert.equal(inventory.consumeMaterials({ temperedJumpSpring: 2 }), false);
-  assert.equal(inventory.getMaterialCount('temperedJumpSpring'), 1);
+  assert.equal(inventory.unidentifiedScrap, 5);
+  assert.equal(inventory.unidentifiedRecoveries.length, 2);
+
+  const transfer = inventory.takeAllUnidentifiedScrap();
+  assert.equal(transfer.total, 5);
+  assert.equal(transfer.recoveries.length, 2);
+  assert.equal(transfer.recoveries[0].recoverableParts[0].id, 'temperedJumpSpring');
+  assert.equal(inventory.unidentifiedScrap, 0);
+  assert.deepEqual(inventory.unidentifiedRecoveries, []);
+  assert.deepEqual(inventory.takeAllUnidentifiedScrap(), { total: 0, recoveries: [] });
+});
+
+test('Roll identifies recoveries into stockpiled scrap and owns atomic part storage for future recipes', () => {
+  const inventory = new Inventory(4);
+  const storage = new RollSalvageStorage();
+  const spring = REAVERBOT_SALVAGE_MATERIALS.temperedJumpSpring;
+  const chip = REAVERBOT_SALVAGE_MATERIALS.behaviorChipHunter;
+
+  inventory.addUnidentifiedScrap(3, {
+    source: { enemyId: 'hopper-1' },
+    recoverableParts: [{
+      ...spring,
+      quantity: 1,
+      source: { aspect: 'body', moduleId: 'hopper' },
+    }],
+  });
+  inventory.addUnidentifiedScrap(2, { source: { enemyId: 'crawler-1' } });
+
+  const identification = storage.identifyRecoveries(inventory.takeAllUnidentifiedScrap());
+  assert.deepEqual({
+    processed: identification.processed,
+    scrapStored: identification.scrapStored,
+    partCount: identification.partCount,
+  }, {
+    processed: 5,
+    scrapStored: 4,
+    partCount: 1,
+  });
+  assert.equal(storage.identifiedScrap, 4);
+  assert.equal(storage.getPartCount('temperedJumpSpring'), 1);
+  assert.deepEqual(identification.recoveredParts.map(({ id, quantity }) => ({ id, quantity })), [
+    { id: 'temperedJumpSpring', quantity: 1 },
+  ]);
+
+  storage.addPart(spring, 2, { moduleId: 'hopper' });
+  storage.addPart(chip, 1, { moduleId: 'pouncer' });
+  assert.equal(storage.getPartCount('temperedJumpSpring'), 3);
+  assert.equal(storage.getParts().length, 2);
+  assert.equal(storage.hasParts({ temperedJumpSpring: 2, behaviorChipHunter: 1 }), true);
+
+  assert.equal(storage.consumeParts({ temperedJumpSpring: 4, behaviorChipHunter: 1 }), false);
+  assert.equal(storage.getPartCount('temperedJumpSpring'), 3);
+  assert.equal(storage.getPartCount('behaviorChipHunter'), 1);
+
+  assert.equal(storage.consumeParts({ temperedJumpSpring: 2, behaviorChipHunter: 1 }), true);
+  assert.equal(storage.getPartCount('temperedJumpSpring'), 1);
+  assert.equal(storage.getPartCount('behaviorChipHunter'), 0);
 });

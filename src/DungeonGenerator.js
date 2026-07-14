@@ -49,7 +49,7 @@ const SUPPORT_CAR_HEIGHT = 3.6;
 const SUPPORT_CAR_SOURCE_HEIGHT = 143.5;
 const SUPPORT_CAR_HALF_WIDTH = (56.2 / SUPPORT_CAR_SOURCE_HEIGHT) * SUPPORT_CAR_HEIGHT;
 const SUPPORT_CAR_HALF_DEPTH = (90.2 / SUPPORT_CAR_SOURCE_HEIGHT) * SUPPORT_CAR_HEIGHT;
-const SUPPORT_CAR_YAW = -Math.PI * 0.75;
+const SUPPORT_CAR_YAW = -Math.PI * 0.25;
 const SUPPORT_CAR_CAMP_POSITION = Object.freeze({ x: -10, y: 0, z: -5.7 });
 const SUPPORT_CAR_FRONT_DOOR_LOCAL = Object.freeze({ x: SUPPORT_CAR_HALF_WIDTH, y: 1.45, z: -1.32 });
 const ROLL_WORKSHOP_LOCAL_POSITION = Object.freeze({ x: 2.15, y: 0, z: -1.32 });
@@ -57,6 +57,7 @@ const WORKBENCH_LOCAL_POSITION = Object.freeze({ x: 3.55, y: 0, z: -1.32 });
 const WORKBENCH_WIDTH = 2.2;
 const WORKBENCH_DEPTH = 0.82;
 const WORKBENCH_HEIGHT = 1.1;
+const ROLL_WORKBENCH_INTERACTION_RADIUS = 2.4;
 const WORKBENCH_SURFACE_TEXTURE_PATH = '/assets/textures/camp/roll-workbench-albedo.png';
 const WORKBENCH_BLUEPRINT_TEXTURE_PATH = '/assets/textures/camp/roll-workbench-blueprint.png';
 const COOLANT_RELAY_ROOM_FOOTPRINT = { width: 30, depth: 24 };
@@ -10522,14 +10523,7 @@ export class DungeonGenerator {
       position: position.clone().add(rollOffset),
       object: roll,
       color: 0xffd66b,
-    });
-    interactables.push({
-      id: 'questBoard',
-      label: 'Quest Board',
-      action: 'quest',
-      position: position.clone().add(new THREE.Vector3(1.45, 0, 0.2)),
-      object: board,
-      color: 0xffd66b,
+      interactionRadius: ROLL_WORKBENCH_INTERACTION_RADIUS,
     });
     interactables.push({
       id: 'ruinResetConsole',
@@ -10576,6 +10570,7 @@ export class DungeonGenerator {
       halfDepth: WORKBENCH_DEPTH * 0.5,
       verticalHalfHeight: WORKBENCH_HEIGHT * 0.5,
       rotationY: -(SUPPORT_CAR_YAW + Math.PI / 2),
+      playerCollisionPadding: PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
     });
 
     return { interactables, solidZones };

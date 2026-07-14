@@ -125,7 +125,8 @@ function createPickupMesh(item) {
 
   const rarity = RARITIES[item.rarity];
   const glow = item.glowColor ?? rarity.glow;
-  const isMaterial = item.pickupKind === 'material';
+  const isMaterial = item.pickupKind === 'material'
+    || item.pickupKind === 'unidentifiedScrap';
   const coreMaterial = new THREE.MeshStandardMaterial({
     color: isMaterial ? 0xa7afb2 : glow,
     emissive: glow,
@@ -331,6 +332,30 @@ export class LootSystem {
     return this.createPickup(item, position);
   }
 
+  createUnidentifiedScrapPickup(quantity, position, recovery = null) {
+    const amount = Math.max(1, Math.trunc(quantity) || 1);
+    const pickupIndex = this.nextMaterialPickupId++;
+    const item = {
+      id: `unidentified-reaverbot-scrap-${pickupIndex}`,
+      pickupKind: 'unidentifiedScrap',
+      scrapShape: SCRAP_PICKUP_SHAPES[(pickupIndex - 1) % SCRAP_PICKUP_SHAPES.length],
+      quantity: amount,
+      recovery: recovery ? {
+        source: recovery.source ? { ...recovery.source } : null,
+        recoverableParts: (recovery.recoverableParts ?? []).map((part) => ({
+          ...part,
+          source: part.source ? { ...part.source } : null,
+        })),
+      } : null,
+      name: `Unidentified Reaverbot Scrap +${amount}`,
+      category: 'Unidentified Recovery',
+      rarity: 'scrap',
+      color: '#c7d0d6',
+      glowColor: 0x9aa7ad,
+    };
+    return this.createPickup(item, position);
+  }
+
   update(dt, player, inventory) {
     const collected = [];
     const playerPosition = player.root.position;
@@ -361,12 +386,17 @@ export class LootSystem {
       const distance = pickup.object.position.distanceTo(playerPosition);
       if (distance <= pickupRadius) {
         const accepted = pickup.kind === 'material'
-          ? Boolean(inventory.addMaterial(
+          ? Boolean(inventory.addMaterial?.(
             pickup.item.material,
             pickup.item.quantity,
             pickup.item.source,
           ))
-          : inventory.addItem(pickup.item);
+          : pickup.kind === 'unidentifiedScrap'
+            ? Boolean(inventory.addUnidentifiedScrap?.(
+              pickup.item.quantity,
+              pickup.item.recovery,
+            ))
+            : inventory.addItem(pickup.item);
         if (accepted) {
           pickup.collected = true;
           pickup.object.visible = false;

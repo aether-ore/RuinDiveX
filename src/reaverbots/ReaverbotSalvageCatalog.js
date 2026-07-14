@@ -170,6 +170,22 @@ function chooseCandidate(candidates, random) {
   return candidates[Math.floor(roll * candidates.length)] ?? candidates[0];
 }
 
+function chooseWeightedCandidate(candidates, random, weightForCandidate) {
+  if (candidates.length === 0) return null;
+  const totalWeight = candidates.reduce(
+    (total, candidate) => total + Math.max(0, weightForCandidate(candidate)),
+    0,
+  );
+  if (totalWeight <= 0) return chooseCandidate(candidates, random);
+
+  let roll = Math.min(0.999999, Math.max(0, Number(random()) || 0)) * totalWeight;
+  for (const candidate of candidates) {
+    roll -= Math.max(0, weightForCandidate(candidate));
+    if (roll <= 0) return candidate;
+  }
+  return candidates.at(-1) ?? null;
+}
+
 function createDrop(candidate, quantity = 1) {
   return {
     ...candidate.material,
@@ -192,46 +208,28 @@ export function rollReaverbotSalvageDrops(genome, {
   const profile = createReaverbotSalvageProfile(genome);
   if (profile.length === 0) return [];
 
-  const tierBonus = Math.min(0.12, Math.max(0, (genome.threatTier ?? 1) - 1) * 0.018);
-  const eliteBonus = isElite ? 0.14 : 0;
-  const drops = [];
-  const droppedMaterialIds = new Set();
+  const tierBonus = Math.min(0.035, Math.max(0, (genome.threatTier ?? 1) - 1) * 0.007);
+  const recoveryChance = Math.min(
+    0.32,
+    0.07
+      + tierBonus
+      + (isElite ? 0.09 : 0)
+      + (weakPointBroken ? 0.055 : 0)
+      + (brokenWeaponModuleId ? 0.025 : 0),
+  );
+  if (random() >= recoveryChance) return [];
 
-  for (const candidate of profile) {
-    const aspect = REAVERBOT_SALVAGE_ASPECTS[candidate.aspect];
-    const breakBonus = candidate.aspect === 'weakPoint' && weakPointBroken ? 0.34 : 0;
-    const weaponBreakBonus = candidate.aspect === 'weapon'
+  const recovered = chooseWeightedCandidate(profile, random, (candidate) => {
+    const baseWeight = REAVERBOT_SALVAGE_ASPECTS[candidate.aspect]?.baseDropChance ?? 0.1;
+    const weakPointWeight = candidate.aspect === 'weakPoint' && weakPointBroken ? 0.62 : 0;
+    const brokenWeaponWeight = candidate.aspect === 'weapon'
       && candidate.moduleId === brokenWeaponModuleId
-      ? 0.15
+      ? 0.5
       : 0;
-    const chance = Math.min(0.95, aspect.baseDropChance + tierBonus + eliteBonus + breakBonus + weaponBreakBonus);
-    if (random() < chance) {
-      drops.push(createDrop(candidate));
-      droppedMaterialIds.add(candidate.materialId);
-    }
-  }
+    return baseWeight + weakPointWeight + brokenWeaponWeight;
+  });
 
-  if (drops.length === 0) {
-    const guaranteedPool = profile.filter((candidate) => (
-      candidate.aspect === 'body'
-      || candidate.aspect === 'weapon'
-      || candidate.aspect === 'charge'
-      || candidate.aspect === 'defense'
-    ));
-    const guaranteed = chooseCandidate(guaranteedPool.length > 0 ? guaranteedPool : profile, random);
-    if (guaranteed) {
-      drops.push(createDrop(guaranteed));
-      droppedMaterialIds.add(guaranteed.materialId);
-    }
-  }
-
-  if (isElite && drops.length < 2) {
-    const remaining = profile.filter((candidate) => !droppedMaterialIds.has(candidate.materialId));
-    const bonus = chooseCandidate(remaining, random);
-    if (bonus) drops.push(createDrop(bonus));
-  }
-
-  return drops;
+  return recovered ? [createDrop(recovered)] : [];
 }
 
 export function getReaverbotSalvageCatalogSummary() {

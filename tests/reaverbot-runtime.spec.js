@@ -733,7 +733,7 @@ test('paired guards protect leg joints and the rotor exposes its counterweight s
   }
 });
 
-test('procedural Reaverbot modules become stackable crafting-material pickups with visible sources', async ({ page }) => {
+test('Reaverbot scrap stays unidentified until Roll analyzes and stores it', async ({ page }) => {
   await page.goto('/?reaverbotSeed=module-salvage-runtime');
   await page.waitForFunction(() => Boolean(
     window.game
@@ -745,7 +745,8 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
     const game = window.game;
     game.stop();
     game.lootSystem.clear();
-    game.inventory.materials = {};
+    game.inventory.clear();
+    game.rollSalvageStorage.clear();
     for (const enemy of [...game.enemies]) {
       enemy.dispose?.();
       enemy.root.removeFromParent();
@@ -774,30 +775,85 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
       moduleId: candidate.moduleId,
       materialId: candidate.materialId,
     }));
-    const drops = game._rollEnemyModuleDrops(hopper, { random: () => 0 });
+
+    // Drop succeeds, the bonus raises the hidden batch to two units, and the
+    // rare-part roll selects the hopper body recovery. The field still exposes
+    // only one generic, unidentified pickup.
+    const rolls = [0, 0, 0, 0.2, 0.5, 0.5];
+    let rollIndex = 0;
+    const droppedAmount = game._rollEnemyScrapDrop(hopper, {
+      random: () => rolls[rollIndex++] ?? 0.5,
+    });
     const pickupCount = game.lootSystem.pickups.length;
-    const pickupShapes = game.lootSystem.pickups.map((pickup) => ({
-      itemShape: pickup.item.scrapShape,
-      visualShape: pickup.object.children[0]?.userData?.scrapShape,
-      partNames: pickup.object.children[0]?.children?.map((part) => part.name) ?? [],
-    }));
+    const pickup = game.lootSystem.pickups[0];
+    const pickupSnapshot = {
+      kind: pickup?.kind ?? null,
+      quantity: pickup?.item?.quantity ?? 0,
+      name: pickup?.item?.name ?? '',
+      itemShape: pickup?.item?.scrapShape ?? null,
+      visualShape: pickup?.object?.children?.[0]?.userData?.scrapShape ?? null,
+    };
+    const hiddenPart = pickup?.item?.recovery?.recoverableParts?.[0] ?? null;
     game.player.root.position.copy(hopper.root.position);
     const collected = game.lootSystem.update(0.016, game.player, game.inventory);
+    game.setInventoryOpen(true);
     game.ui.renderInventory();
+
+    const carriedSnapshot = {
+      unidentifiedScrap: game.inventory.unidentifiedScrap,
+      recoveryCount: game.inventory.unidentifiedRecoveries.length,
+      inventoryNotifier: document.getElementById('unidentified-scrap-value')?.textContent ?? '',
+      rollServiceHidden: document.getElementById('roll-scrap-service')?.hidden ?? false,
+      visibleStoredPartText: document.getElementById('material-inventory')?.textContent ?? '',
+    };
+
+    const identification = game.identifyReaverbotScrap();
+    game.setInventoryOpen(true, { mode: 'roll' });
+    game.ui.renderInventory();
+    const storedParts = game.rollSalvageStorage.getParts().map((part) => ({
+      id: part.id,
+      name: part.name,
+      quantity: part.quantity,
+      sourceModule: part.lastSource?.moduleLabel ?? null,
+      sourceEnemy: part.lastSource?.enemyName ?? null,
+    }));
+    const rollSnapshot = {
+      serviceHidden: document.getElementById('roll-scrap-service')?.hidden ?? true,
+      panelMode: document.getElementById('inventory-panel')?.dataset?.mode ?? '',
+      stockpileText: document.getElementById('roll-scrap-service')?.textContent ?? '',
+      partText: document.getElementById('material-inventory')?.textContent ?? '',
+    };
+
+    game.setInventoryOpen(true);
+    const garageSnapshot = {
+      serviceHidden: document.getElementById('roll-scrap-service')?.hidden ?? false,
+      panelMode: document.getElementById('inventory-panel')?.dataset?.mode ?? '',
+    };
 
     return {
       catalogMaterialCount: window.getReaverbotSalvageCatalog().materials.length,
       bodyPlan: hopper.genome.body.planId,
       mobilityLabel: hopper.genome.body.mobilityLabel,
       profile,
-      drops: drops.map((drop) => ({ id: drop.id, aspect: drop.source.aspect })),
+      droppedAmount,
       pickupCount,
-      pickupShapes,
+      pickupSnapshot,
+      hiddenPart: hiddenPart ? {
+        id: hiddenPart.id,
+        name: hiddenPart.name,
+        sourceModule: hiddenPart.source?.moduleLabel ?? null,
+      } : null,
       remainingPickups: game.lootSystem.pickups.length,
       collectedKinds: collected.map((pickup) => pickup.pickupKind),
-      springCount: game.inventory.getMaterialCount('temperedJumpSpring'),
-      materialCount: game.inventory.getMaterials().length,
-      materialUi: document.getElementById('material-inventory')?.textContent ?? '',
+      carriedSnapshot,
+      identification,
+      pendingAfterIdentification: game.inventory.unidentifiedScrap,
+      pendingRecoveriesAfterIdentification: game.inventory.unidentifiedRecoveries.length,
+      identifiedScrap: game.rollSalvageStorage.identifiedScrap,
+      storedPartCount: game.rollSalvageStorage.getStoredPartCount(),
+      storedParts,
+      rollSnapshot,
+      garageSnapshot,
     };
   });
 
@@ -809,19 +865,53 @@ test('procedural Reaverbot modules become stackable crafting-material pickups wi
     moduleId: 'hopper',
     materialId: 'temperedJumpSpring',
   });
-  expect(result.drops).toHaveLength(6);
-  expect(result.pickupCount).toBe(6);
-  expect([...new Set(result.pickupShapes.map((pickup) => pickup.itemShape))].sort()).toEqual(['bolt', 'gear', 'screw']);
-  expect(result.pickupShapes.every((pickup) => pickup.itemShape === pickup.visualShape)).toBe(true);
-  expect(result.pickupShapes.some((pickup) => pickup.partNames.includes('scrapBoltHead'))).toBe(true);
-  expect(result.pickupShapes.some((pickup) => pickup.partNames.includes('scrapScrewThread'))).toBe(true);
-  expect(result.pickupShapes.some((pickup) => pickup.partNames.includes('scrapGearTooth'))).toBe(true);
+  expect(result.droppedAmount).toBe(2);
+  expect(result.pickupCount).toBe(1);
+  expect(result.pickupSnapshot.kind).toBe('unidentifiedScrap');
+  expect(result.pickupSnapshot.quantity).toBe(2);
+  expect(result.pickupSnapshot.name).toBe('Unidentified Reaverbot Scrap +2');
+  expect(result.pickupSnapshot.itemShape).toBe(result.pickupSnapshot.visualShape);
+  expect(result.hiddenPart).toEqual({
+    id: 'temperedJumpSpring',
+    name: 'Tempered Jump Spring',
+    sourceModule: result.mobilityLabel,
+  });
   expect(result.remainingPickups).toBe(0);
-  expect(result.collectedKinds.every((kind) => kind === 'material')).toBe(true);
-  expect(result.springCount).toBe(1);
-  expect(result.materialCount).toBe(6);
-  expect(result.materialUi).toContain('Tempered Jump Spring');
-  expect(result.materialUi).toContain(result.mobilityLabel);
+  expect(result.collectedKinds).toEqual(['unidentifiedScrap']);
+  expect(result.carriedSnapshot).toMatchObject({
+    unidentifiedScrap: 2,
+    recoveryCount: 1,
+    inventoryNotifier: '2',
+    rollServiceHidden: true,
+  });
+  expect(result.carriedSnapshot.visibleStoredPartText).not.toContain(result.hiddenPart.name);
+  expect(result.identification).toMatchObject({
+    processed: 2,
+    scrapStored: 1,
+    partCount: 1,
+    identifiedScrap: 1,
+    storedPartCount: 1,
+  });
+  expect(result.pendingAfterIdentification).toBe(0);
+  expect(result.pendingRecoveriesAfterIdentification).toBe(0);
+  expect(result.identifiedScrap).toBe(1);
+  expect(result.storedPartCount).toBe(1);
+  expect(result.storedParts).toEqual([{
+    id: result.hiddenPart.id,
+    name: result.hiddenPart.name,
+    quantity: 1,
+    sourceModule: result.hiddenPart.sourceModule,
+    sourceEnemy: expect.any(String),
+  }]);
+  expect(result.rollSnapshot.serviceHidden).toBe(false);
+  expect(result.rollSnapshot.panelMode).toBe('roll');
+  expect(result.rollSnapshot.stockpileText).toContain('Crafting Scrap');
+  expect(result.rollSnapshot.stockpileText).toContain(result.hiddenPart.name);
+  expect(result.rollSnapshot.partText).toContain(result.hiddenPart.sourceModule);
+  expect(result.garageSnapshot).toEqual({
+    serviceHidden: true,
+    panelMode: 'garage',
+  });
 });
 
 test('rush enemies acquire from range and expose accelerating red attack warnings', async ({ page }) => {

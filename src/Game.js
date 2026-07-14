@@ -68,6 +68,8 @@ const ENEMY_DEATH_PART_LIMIT = 3;
 const MAX_ACTIVE_ENEMY_DEATH_EFFECTS = 6;
 const MAX_ACTIVE_PARTICLES = 220;
 const MAX_POOLED_PARTICLES = 220;
+const MAX_FLAMETHROWER_PARTICLES_PER_ENEMY = 48;
+const FLAMETHROWER_EFFECT_STALE_SECONDS = 0.12;
 const MAX_POOLED_HIT_EFFECTS = 48;
 const MAX_POOLED_DAMAGE_NUMBERS = 72;
 const MAX_SYNCHRONOUS_EXPLOSIONS = 8;
@@ -146,6 +148,7 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'activeHitEffects',
   'particlePool',
   'activeParticles',
+  'flamethrowerEffects',
   'pendingExplosions',
   'explosionDispatchDepth',
   'elapsedTime',
@@ -247,7 +250,30 @@ const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
 const tempMatrixA = new THREE.Matrix4();
 const tempColor = new THREE.Color();
+const tempFlameTransform = new THREE.Object3D();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+function createFlamethrowerConeGeometry(halfAngle = 0.8, segments = 18, startRatio = 0.025) {
+  const positions = [];
+  const safeSegments = Math.max(3, Math.trunc(segments));
+  const safeStartRatio = THREE.MathUtils.clamp(startRatio, 0, 0.95);
+  for (let i = 0; i < safeSegments; i += 1) {
+    const angle0 = THREE.MathUtils.lerp(-halfAngle, halfAngle, i / safeSegments);
+    const angle1 = THREE.MathUtils.lerp(-halfAngle, halfAngle, (i + 1) / safeSegments);
+    positions.push(0, 0, safeStartRatio);
+    positions.push(Math.sin(angle0), 0, Math.cos(angle0));
+    positions.push(Math.sin(angle1), 0, Math.cos(angle1));
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function flamethrowerParticleSeed(index, salt) {
+  const value = Math.sin((index + 1) * salt) * 43758.5453123;
+  return value - Math.floor(value);
+}
 const ENEMY_DEATH_SPHERE_GEOMETRY = new THREE.SphereGeometry(1, 16, 11);
 const ENEMY_DEATH_CORE_GEOMETRY = new THREE.IcosahedronGeometry(0.72, 1);
 const ENEMY_DEATH_PROXY_GEOMETRIES = [
@@ -467,6 +493,7 @@ export class Game {
     this.activeHitEffects = [];
     this.particlePool = [];
     this.activeParticles = [];
+    this.flamethrowerEffects = new Map();
     this.pendingExplosions = [];
     this.explosionDispatchDepth = 0;
     this.elapsedTime = 0;
@@ -2531,6 +2558,26 @@ export class Game {
     };
   }
 
+  refillBusterDebugBatteries() {
+    if (!this.busterLabDebugEnabled) {
+      return { ok: false, message: 'Launch with ?busterLabDebug=1 to use Buster runtime resets.' };
+    }
+    const runtime = this.busterRuntime;
+    if (!runtime) return { ok: false, message: 'The Buster runtime is unavailable.' };
+    const keys = [...runtime.states.keys()].filter((key) => runtime.plans.has(key));
+    let resetCount = 0;
+    for (const key of keys) {
+      if (runtime.resetWeapon(key)) resetCount += 1;
+    }
+    return resetCount > 0
+      ? {
+        ok: true,
+        message: `${resetCount} Buster batter${resetCount === 1 ? 'y' : 'ies'} refilled; active cycles and executions cleared.`,
+        resetCount,
+      }
+      : { ok: false, message: 'No compiled Buster batteries are registered in this world.' };
+  }
+
   async purchaseSecondBusterChassis() {
     if (!this.busterLabEnabled) return { ok: false, message: 'Enable the Buster Lab first.' };
     const result = await this._queueBusterStorageOperation(() => (
@@ -3538,7 +3585,10 @@ export class Game {
         : null,
       canSuggestMaterialization: Boolean(selectedBlueprint && !blueprintKnowledge?.invalid),
       sandboxEnabled: this.busterLabSandboxEnabled,
-      canSandbox: Boolean(this.busterLabSandboxEnabled && compiled?.ok),
+      canSandbox: Boolean(
+        this.busterLabSandboxEnabled
+        && (buildId === 'megaBuster' ? megaPlan : compiled?.ok),
+      ),
       benchmarkRange,
       build: selectedRecord ? { ...selectedRecord, draft: displayDraft, savedBuild } : null,
       tuningRemaining: draft ? 16 - tuningTotal : 0,
@@ -3636,6 +3686,7 @@ export class Game {
     this.activeHitEffects = [];
     this.particlePool = [];
     this.activeParticles = [];
+    this.flamethrowerEffects = new Map();
     this.pendingExplosions = [];
     this.explosionDispatchDepth = 0;
     this.elapsedTime = 0;
@@ -3822,6 +3873,9 @@ export class Game {
       return { ok: false, message: 'Launch with ?busterLab=sandbox to use the disposable dungeon.' };
     }
     if (this.busterSandboxSession?.active) return { ok: false, message: 'The Buster sandbox is already active.' };
+    if (this.busterTestRange?.active) {
+      return { ok: false, message: 'Exit the Buster Test Range before entering the disposable dungeon.' };
+    }
     if (this.busterGameCommandPending > 0 || this.busterStorageOperationPending > 0) {
       return {
         ok: false,
@@ -3846,6 +3900,8 @@ export class Game {
     const production = this.captureWorldContext('production');
     const inventoryWasOpen = this.inventoryOpen;
     const inventoryMode = this.ui?.inventoryMode ?? 'roll';
+    const debugWasOpen = this.poseDebugOpen;
+    const debugTab = this.ui?.poseDebugTab ?? 'buster';
     const sandbox = this.createBusterSandboxContext({ sourceWorld: production, plan });
     if (!sandbox) return { ok: false, message: 'The disposable dungeon could not be created.' };
     this.busterSandboxSession = {
@@ -3855,8 +3911,11 @@ export class Game {
       plan: sandbox.plan,
       inventoryWasOpen,
       inventoryMode,
+      debugWasOpen,
+      debugTab,
     };
     this.setInventoryOpen(false);
+    this.setPoseDebugOpen(false);
     this.keys.clear();
     this.pointer.primary = false;
     this.pointer.primaryPressed = false;
@@ -3876,17 +3935,23 @@ export class Game {
     this.keys.clear();
     this.pointer.primary = false;
     this.pointer.primaryPressed = false;
-    if (session.inventoryWasOpen) {
+    this.cameraController.snapTo(this.player);
+    if (session.debugWasOpen) {
+      this.setPoseDebugOpen(true);
+      this.ui?._selectPoseDebugTab?.(session.debugTab ?? 'buster');
+    } else if (session.inventoryWasOpen) {
       this.setInventoryOpen(true, { mode: session.inventoryMode });
       this.ui?._selectRollWorkshopTab?.('buster');
     }
-    this.cameraController.snapTo(this.player);
     this.ui.showToast('Production run restored; sandbox changes discarded', '#7df8ff');
     return true;
   }
 
   enterBusterTestRange(buildId = 'build-a') {
     if (!this.busterLabEnabled) return { ok: false, message: 'Enable the Buster Lab first.' };
+    if (this.busterSandboxSession?.active) {
+      return { ok: false, message: 'Exit the disposable Buster dungeon before entering the range.' };
+    }
     if (this.busterTestRange?.active) this.exitBusterTestRange();
     let plan = null;
     if (buildId === 'megaBuster') {
@@ -3982,6 +4047,8 @@ export class Game {
       arenaRadius: this.arenaRadius,
       inventoryWasOpen: this.inventoryOpen,
       inventoryMode: this.ui?.inventoryMode ?? 'roll',
+      debugWasOpen: this.poseDebugOpen,
+      debugTab: this.ui?.poseDebugTab ?? 'buster',
       runtimeResources,
       combatSwapTimer: this.combat.swapTimer,
     };
@@ -4001,6 +4068,7 @@ export class Game {
       resources: { floorGeometry, floorMaterial, railGeometry, railMaterial },
     };
     this.setInventoryOpen(false);
+    this.setPoseDebugOpen(false);
     this.keys.clear();
     this.pointer.primary = false;
     this.pointer.primaryPressed = false;
@@ -4050,7 +4118,12 @@ export class Game {
     this.player.switchArmWeapon(restore.activeArmIndex, true);
     this.combat.swapTimer = restore.combatSwapTimer;
     this.cameraController.snapTo(this.player);
-    if (restore.inventoryWasOpen) this.setInventoryOpen(true, { mode: restore.inventoryMode });
+    if (restore.debugWasOpen) {
+      this.setPoseDebugOpen(true);
+      this.ui?._selectPoseDebugTab?.(restore.debugTab ?? 'buster');
+    } else if (restore.inventoryWasOpen) {
+      this.setInventoryOpen(true, { mode: restore.inventoryMode });
+    }
     this.ui.showToast('Returned from the Buster Test Range', '#7df8ff');
     return true;
   }
@@ -4765,6 +4838,201 @@ export class Game {
     });
   }
 
+  _createFlamethrowerEffect(source, range, halfAngle, color, options = {}) {
+    const safeRange = Math.max(0.1, Number(range) || 4);
+    const startDistance = Math.max(0, Number(options.startDistance) || 0.12);
+    const cone = new THREE.Mesh(
+      createFlamethrowerConeGeometry(
+        halfAngle,
+        options.segments ?? 18,
+        startDistance / safeRange,
+      ),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: options.opacity ?? 0.32,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    // This is a flat overlay with no enclosed back face. Three.js otherwise
+    // renders transparent DoubleSide materials in two passes, doubling the
+    // cone's draw cost without changing its appearance.
+    cone.material.forceSinglePass = true;
+    const effectName = options.name ?? 'enemyFlamethrowerCone';
+    cone.name = effectName;
+    cone.renderOrder = 3;
+
+    const particleGeometry = new THREE.SphereGeometry(0.08, 6, 4);
+    const particleMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      transparent: true,
+      opacity: options.particleOpacity ?? 0.72,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const particles = new THREE.InstancedMesh(
+      particleGeometry,
+      particleMaterial,
+      MAX_FLAMETHROWER_PARTICLES_PER_ENEMY,
+    );
+    particles.name = `${effectName}Particles`;
+    particles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    particles.frustumCulled = false;
+    particles.renderOrder = 4;
+
+    const primaryColor = new THREE.Color(color);
+    const secondaryColor = new THREE.Color(options.secondaryColor ?? 0xffd36f);
+    const particleSeeds = [];
+    for (let i = 0; i < MAX_FLAMETHROWER_PARTICLES_PER_ENEMY; i += 1) {
+      const seed = {
+        phase: flamethrowerParticleSeed(i, 12.9898),
+        lateral: flamethrowerParticleSeed(i, 78.233) * 2 - 1,
+        lift: flamethrowerParticleSeed(i, 39.425),
+        scale: 0.72 + flamethrowerParticleSeed(i, 93.731) * 0.72,
+        speed: 0.74 + flamethrowerParticleSeed(i, 17.147) * 0.72,
+        hot: flamethrowerParticleSeed(i, 51.219) > 0.68,
+      };
+      particleSeeds.push(seed);
+      particles.setColorAt(i, seed.hot ? secondaryColor : primaryColor);
+    }
+    if (particles.instanceColor) particles.instanceColor.needsUpdate = true;
+
+    const root = new THREE.Group();
+    root.name = `${effectName}Effect`;
+    root.userData.flamethrowerEffect = true;
+    root.add(cone, particles);
+    this.scene.add(root);
+
+    const effect = {
+      source,
+      root,
+      cone,
+      particles,
+      particleSeeds,
+      primaryColor,
+      secondaryColor,
+      halfAngle,
+      range: safeRange,
+      elapsed: 0,
+      idleSeconds: 0,
+      touchedSinceHeartbeat: true,
+    };
+    this.flamethrowerEffects.set(source, effect);
+    return effect;
+  }
+
+  updateFlamethrowerEffect(source, dt, origin, direction, options = {}) {
+    if (!source || !origin || !direction || !this.scene) return null;
+    if (!(this.flamethrowerEffects instanceof Map)) this.flamethrowerEffects = new Map();
+
+    const range = Math.max(0.1, Number(options.range) || 4);
+    const halfAngle = THREE.MathUtils.clamp(Number(options.halfAngle) || 0.8, 0.05, Math.PI * 0.95);
+    const color = options.color ?? 0xff6a2e;
+    let effect = this.flamethrowerEffects.get(source);
+    if (!effect) {
+      effect = this._createFlamethrowerEffect(source, range, halfAngle, color, options);
+    }
+
+    tempVectorA.copy(direction);
+    tempVectorA.y = 0;
+    if (tempVectorA.lengthSq() <= 0.0001) tempVectorA.set(0, 0, 1);
+    tempVectorA.normalize();
+
+    effect.elapsed += Math.max(0, Number(dt) || 0);
+    effect.idleSeconds = 0;
+    effect.touchedSinceHeartbeat = true;
+    effect.range = range;
+    effect.root.position.copy(origin);
+    effect.root.rotation.set(0, Math.atan2(tempVectorA.x, tempVectorA.z), 0);
+    effect.cone.position.set(
+      0,
+      (Number.isFinite(options.groundY) ? options.groundY : source.root?.position?.y ?? origin.y) - origin.y + 0.052,
+      0,
+    );
+    effect.cone.scale.setScalar(range);
+    effect.cone.visible = options.coneVisible !== false;
+    effect.cone.material.color.set(color);
+    effect.cone.material.opacity = options.opacity ?? 0.32;
+
+    const particleCount = THREE.MathUtils.clamp(
+      Math.trunc(Number(options.particleCount) || 0),
+      0,
+      MAX_FLAMETHROWER_PARTICLES_PER_ENEMY,
+    );
+    const baseScale = Math.max(0.01, Number(options.baseScale) || 0.25);
+    const spread = Math.tan(halfAngle);
+    effect.particles.count = particleCount;
+    effect.particles.visible = particleCount > 0;
+    effect.particles.material.opacity = options.particleOpacity ?? 0.72;
+
+    for (let i = 0; i < particleCount; i += 1) {
+      const seed = effect.particleSeeds[i];
+      const phase = (seed.phase + effect.elapsed * seed.speed * 1.65) % 1;
+      const distance = range * (0.055 + phase * 0.945);
+      const width = spread * distance;
+      const lateralEnvelope = 0.3 + phase * 0.7;
+      const pulse = 0.72 + Math.sin(phase * Math.PI) * 0.72;
+
+      tempFlameTransform.position.set(
+        seed.lateral * width * lateralEnvelope,
+        0.22 + seed.lift * 0.58 + Math.sin((phase + seed.lift) * Math.PI * 2) * 0.1,
+        distance,
+      );
+      tempFlameTransform.rotation.set(
+        seed.lift * Math.PI,
+        seed.phase * Math.PI * 2 + effect.elapsed * 2.4,
+        seed.lateral * 0.45,
+      );
+      tempFlameTransform.scale.setScalar(baseScale * seed.scale * pulse);
+      tempFlameTransform.updateMatrix();
+      effect.particles.setMatrixAt(i, tempFlameTransform.matrix);
+    }
+    effect.particles.instanceMatrix.needsUpdate = true;
+    return effect;
+  }
+
+  endFlamethrowerEffect(source) {
+    const effect = this.flamethrowerEffects?.get?.(source);
+    if (!effect) return false;
+    this.flamethrowerEffects.delete(source);
+    effect.root.removeFromParent();
+    // InstancedMesh owns GPU-side instance matrix/color buffers in addition to
+    // its geometry and material. Dispose the instance object before releasing
+    // the ordinary render resources below so repeated attacks cannot leak them.
+    effect.particles.dispose?.();
+    this._disposeTimedEffectObject(effect.root);
+    return true;
+  }
+
+  _clearFlamethrowerEffects() {
+    if (!(this.flamethrowerEffects instanceof Map)) return;
+    for (const source of [...this.flamethrowerEffects.keys()]) {
+      this.endFlamethrowerEffect(source);
+    }
+  }
+
+  _updateFlamethrowerEffects(dt) {
+    if (!(this.flamethrowerEffects instanceof Map)) return;
+    for (const [source, effect] of [...this.flamethrowerEffects.entries()]) {
+      if (source?.dead || source?.disposed) {
+        this.endFlamethrowerEffect(source);
+        continue;
+      }
+      if (effect.touchedSinceHeartbeat) {
+        effect.touchedSinceHeartbeat = false;
+        effect.idleSeconds = 0;
+        continue;
+      }
+      effect.idleSeconds += Math.max(0, Number(dt) || 0);
+      if (effect.idleSeconds >= FLAMETHROWER_EFFECT_STALE_SECONDS) {
+        this.endFlamethrowerEffect(source);
+      }
+    }
+  }
+
   _isEnemyDeathPartVisible(object, root) {
     let current = object;
     while (current) {
@@ -5356,6 +5624,7 @@ export class Game {
     this._updateDamageNumbers(dt);
     this._updateHitEffects(dt);
     this._updateParticles(dt);
+    this._updateFlamethrowerEffects(gameplayActive ? gameplayDt : 0);
     this._updateTimedEffects(dt);
     if (this.poseDebugOpen && this.poseDebugSection === 'pose') {
       this._updatePoseDebugHandles();
@@ -6030,6 +6299,7 @@ export class Game {
       enemy.root.removeFromParent();
     }
     this.enemies.length = 0;
+    this._clearFlamethrowerEffects();
 
     this.projectiles?.clear?.();
     this.lootSystem?.clear?.();

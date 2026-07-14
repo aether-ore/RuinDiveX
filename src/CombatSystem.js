@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {
   getCombatTargetWorldPosition,
   getEnemyCombatTargets,
+  isCombatTargetLockRetainable,
   isCombatTargetValid,
 } from './reaverbots/CombatTarget.js';
 
@@ -612,8 +613,12 @@ export class CombatSystem {
       this.suppressPrimaryUntilRelease = false;
     }
 
+    const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
     if (player.animation?.isControlLocked?.() || player.isLedgeClinging?.()) {
-      this._suspendForControlLock(state, pointer);
+      this._suspendForControlLock(state, pointer, {
+        preserveLock: player.isDodgeRollInvulnerable?.() === true && !player.isLedgeClinging?.(),
+        lockProfile: profile,
+      });
       return;
     }
 
@@ -628,7 +633,6 @@ export class CombatSystem {
       return;
     }
 
-    const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
     this._updateSwordCombo(dt, state, profile);
     const primaryPressed = pointer.primaryPressed || (pointer.primary && !this.primaryWasDown);
     const lockOnPressed = pointer.lockOnPressed === true;
@@ -725,12 +729,6 @@ export class CombatSystem {
     const pointer = this.game.pointer;
     if (!pointer) return;
     if (this.suppressPrimaryUntilRelease && !pointer.primary) this.suppressPrimaryUntilRelease = false;
-    if (player.animation?.isControlLocked?.() || player.isLedgeClinging?.() || this.swapTimer > 0) {
-      this._suspendForControlLock(null, pointer);
-      return;
-    }
-
-    const lockOnPressed = pointer.lockOnPressed === true;
     const rootGuidance = (plan.actions ?? []).some((action) => (
       action.type === 'emit' && action.scope === 'root' && action.guidance
     ));
@@ -739,6 +737,17 @@ export class CombatSystem {
       homingRange: plan.stats?.rootRange ?? 6.9,
       lockTime: 0.32,
     };
+    if (player.animation?.isControlLocked?.() || player.isLedgeClinging?.() || this.swapTimer > 0) {
+      this._suspendForControlLock(null, pointer, {
+        preserveLock: player.isDodgeRollInvulnerable?.() === true
+          && !player.isLedgeClinging?.()
+          && this.swapTimer <= 0,
+        lockProfile,
+      });
+      return;
+    }
+
+    const lockOnPressed = pointer.lockOnPressed === true;
     this._updateLockOn(dt, pointer.aimWorld, lockProfile, {
       pressed: lockOnPressed,
       aiming: pointer.secondary,
@@ -917,7 +926,10 @@ export class CombatSystem {
     this.alternateWasDown = false;
   }
 
-  _suspendForControlLock(state = null, pointer = null) {
+  _suspendForControlLock(state = null, pointer = null, {
+    preserveLock = false,
+    lockProfile = null,
+  } = {}) {
     if (pointer) {
       pointer.primaryPressed = false;
       pointer.secondaryPressed = false;
@@ -928,7 +940,12 @@ export class CombatSystem {
     this._stopLaserBeam(true);
     this._stopDrillSpin();
     this._stopLiftArm(false);
-    this._clearLockOn();
+    this.manualAimOverrideActive = false;
+    if (preserveLock) {
+      this._maintainRetainedLock(lockProfile);
+    } else {
+      this._clearLockOn();
+    }
     this._hideGrenadePreview();
     this._clearPendingAttacks();
 
@@ -1041,7 +1058,7 @@ export class CombatSystem {
   }
 
   _isValidLockTarget(target) {
-    return isCombatTargetValid(target);
+    return isCombatTargetLockRetainable(target);
   }
 
   _getWeaponStateForItem(weapon) {
@@ -3484,6 +3501,22 @@ export class CombatSystem {
         this._detonateMine(mine);
       }
     }
+  }
+
+  _maintainRetainedLock(profile = null) {
+    const target = this.lockOn.target;
+    if (!target) {
+      return false;
+    }
+
+    const resolvedProfile = profile ?? this._getCurrentProfile();
+    if (!this._isValidLockTarget(target) || !this._isLockTargetInRange(target, resolvedProfile)) {
+      this._clearLockOn();
+      return false;
+    }
+
+    this._updateLockMarker();
+    return true;
   }
 
   _getMineLimit(profile) {

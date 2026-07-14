@@ -248,6 +248,9 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
   await expect(page.locator('#buster-debug-tab')).toBeVisible();
   await expect(page.locator('#buster-debug-tab')).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#buster-debug-view')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Enter Test Range' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Enter Sandbox', exact: true })).toBeDisabled();
+  await expect(page.locator('#buster-debug-test-status')).toContainText('Use ?busterLab=sandbox');
   await page.getByRole('button', { name: 'Grant one of each Buster part' }).click();
   await expect(page.locator('#buster-debug-status')).toContainText('1 kit granted');
 
@@ -365,6 +368,90 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
   await waitForGame(page);
   await page.evaluate(() => window.game.setPoseDebugOpen(true));
   await expect(page.locator('#buster-debug-status')).toContainText('2 kits granted');
+  expect(runtimeErrors).toEqual([]);
+});
+
+test('Debug Tools launches range and sandbox tests and restores its Buster tab', async ({ page }) => {
+  const runtimeErrors = collectRuntimeErrors(page);
+  await page.goto('/?busterLab=sandbox&busterLabDebug=1&reaverbotSeed=buster-debug-launcher');
+  await waitForGame(page);
+  await page.evaluate(() => window.game.setPoseDebugOpen(true));
+
+  await expect(page.locator('#buster-debug-view')).toBeVisible();
+  await expect(page.locator('#buster-debug-build')).toHaveValue('build-a');
+  await expect(page.getByRole('button', { name: 'Enter Test Range' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Enter Sandbox', exact: true })).toBeEnabled();
+
+  await page.locator('#buster-debug-build').selectOption('megaBuster');
+  await page.locator('#buster-debug-targets').selectOption('4');
+  await page.locator('#buster-debug-profile').selectOption('moving');
+  await page.locator('#buster-debug-depth').selectOption('5');
+  await expect(page.locator('#buster-debug-test-status')).toContainText('Mega Buster is ready');
+
+  const drained = await page.evaluate(() => {
+    const game = window.game;
+    const key = game.busterLabPlans.get('megaBuster').weaponKey;
+    const state = game.busterRuntime.states.get(key);
+    state.energy = 0;
+    state.cycleRemaining = 1;
+    state.recoveryLocked = true;
+    return { key, maxEnergy: state.maxEnergy };
+  });
+  await page.getByRole('button', { name: 'Refill Buster Batteries' }).click();
+  await expect.poll(() => page.evaluate((key) => {
+    const state = window.game.busterRuntime.states.get(key);
+    return {
+      energy: state.energy,
+      maxEnergy: state.maxEnergy,
+      cycleRemaining: state.cycleRemaining,
+      recoveryLocked: state.recoveryLocked,
+    };
+  }, drained.key)).toEqual({
+    energy: drained.maxEnergy,
+    maxEnergy: drained.maxEnergy,
+    cycleRemaining: 0,
+    recoveryLocked: false,
+  });
+
+  await page.getByRole('button', { name: 'Enter Test Range' }).click();
+  await page.waitForFunction(() => window.game.busterTestRange?.active === true);
+  await expect(page.locator('#pose-debug-panel')).toBeHidden();
+  const range = await page.evaluate(() => ({
+    buildId: window.game.busterTestRange.buildId,
+    config: window.game.busterTestRange.benchmarkConfig,
+    debugOpen: window.game.poseDebugOpen,
+  }));
+  expect(range).toEqual({
+    buildId: 'megaBuster',
+    config: { targetCount: 4, profile: 'moving', depthLevel: 5 },
+    debugOpen: false,
+  });
+
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.game.busterTestRange === null);
+  await expect(page.locator('#pose-debug-panel')).toBeVisible();
+  await expect(page.locator('#buster-debug-tab')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#buster-debug-build')).toHaveValue('megaBuster');
+
+  await page.getByRole('button', { name: 'Enter Sandbox', exact: true }).click();
+  await page.waitForFunction(() => window.game.busterSandboxSession?.active === true);
+  await expect(page.locator('#pose-debug-panel')).toBeHidden();
+  const sandbox = await page.evaluate(() => ({
+    buildId: window.game.busterSandboxSession.plan.buildId,
+    debugOpen: window.game.poseDebugOpen,
+    sandboxPlayer: window.game.player !== window.game.busterSandboxSession.production.values.player,
+  }));
+  expect(sandbox).toEqual({ buildId: 'megaBuster', debugOpen: false, sandboxPlayer: true });
+
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.game.busterSandboxSession === null);
+  await expect(page.locator('#pose-debug-panel')).toBeVisible();
+  await expect(page.locator('#buster-debug-tab')).toHaveAttribute('aria-selected', 'true');
+
+  await page.getByRole('button', { name: "Open Roll's Buster Lab" }).click();
+  await expect(page.locator('#pose-debug-panel')).toBeHidden();
+  await expect(page.locator('#inventory-panel')).toBeVisible();
+  await expect(page.locator('#buster-lab-view')).toBeVisible();
   expect(runtimeErrors).toEqual([]);
 });
 

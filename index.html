@@ -426,6 +426,67 @@
                 debug-origin copies never unlock scrap-only replication by themselves.
               </small>
             </section>
+            <section class="buster-debug-section" aria-labelledby="buster-debug-testing-heading">
+              <span class="roll-service-eyebrow">Production-backed testing</span>
+              <h2 id="buster-debug-testing-heading">Quick test launcher</h2>
+              <p>
+                Choose a Mega Buster, physical build, or blueprint. Range presets use ephemeral
+                resources; the disposable sandbox freezes and restores the production dungeon.
+              </p>
+              <div class="buster-debug-grid">
+                <label class="buster-debug-build-label">
+                  <span>Test weapon</span>
+                  <select id="buster-debug-build"></select>
+                </label>
+                <label>
+                  <span>Targets</span>
+                  <select id="buster-debug-targets">
+                    <option value="1">One</option>
+                    <option value="2">Two</option>
+                    <option value="4">Four</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Profile</span>
+                  <select id="buster-debug-profile">
+                    <option value="stationary">Stationary</option>
+                    <option value="moving">Moving</option>
+                    <option value="armored">Armored</option>
+                    <option value="weakPoint">Weak point</option>
+                    <option value="elite">Elite</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Depth</span>
+                  <select id="buster-debug-depth">
+                    <option value="1">Level 1</option>
+                    <option value="5">Level 5</option>
+                    <option value="10">Level 10</option>
+                  </select>
+                </label>
+              </div>
+              <div class="buster-debug-actions">
+                <button id="buster-debug-range" type="button" data-action="buster-debug-range">
+                  Enter Test Range
+                </button>
+                <button id="buster-debug-sandbox" type="button" data-action="buster-debug-sandbox">
+                  Enter Sandbox
+                </button>
+                <button id="buster-debug-open-lab" type="button" data-action="buster-debug-open-lab">
+                  Open Roll's Buster Lab
+                </button>
+                <button id="buster-debug-refill" type="button" data-action="buster-debug-refill">
+                  Refill Buster Batteries
+                </button>
+              </div>
+              <output id="buster-debug-test-status" class="buster-debug-status" aria-live="polite">
+                Select a weapon to begin testing.
+              </output>
+              <small>
+                Sandbox requires <code>?busterLab=sandbox</code>. Press Escape to leave either
+                test mode and return to the Debug Tools state that launched it.
+              </small>
+            </section>
           </div>
         </div>
       </section>

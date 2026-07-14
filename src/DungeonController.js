@@ -25,6 +25,8 @@ const PLAYER_RAIL_STALL_PROXIMITY = 0.42;
 const PLAYER_RAIL_STALL_TIME = 0.2;
 const PLAYER_RAIL_RECOVERY_NUDGE = 0.16;
 const RAMP_SUPPORT_CAPTURE_HEIGHT = PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.18;
+const NAVIGATION_CACHE_LIMIT = 4096;
+const FLOOR_ROUTE_FIELD_LIMIT = 12;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
   [-1, 0],
@@ -191,6 +193,10 @@ export class DungeonController {
     };
     this.lastSafeEnemyPositions = new Map();
     this.navigationCache = new Map();
+    this.navigationTopologyRevision = 0;
+    this.floorNavigationGraph = null;
+    this.navigationDoorStateSignature = this._getNavigationDoorStateSignature();
+    this.navigationTopologySources = this._getNavigationTopologySources();
     this.trapPulseTimer = 0;
     this.environmentalStoryToastTimer = 0;
     this.pendingRoomAnnouncements = [];
@@ -208,6 +214,7 @@ export class DungeonController {
       return;
     }
 
+    this._refreshNavigationTopology();
     this._updateRoomAnnouncements(dt);
     this._constrainPlayerToWalkable();
     this._updatePlayerAirborneRailRecovery(dt);
@@ -228,7 +235,83 @@ export class DungeonController {
     this._updateExtractionVisuals(dt);
     this._updateExpeditionEntryState();
     this._updateNearestInteractable();
+  }
+
+  _getNavigationDoorStateSignature() {
+    let signature = this.doors.length | 0;
+    for (let index = 0; index < this.doors.length; index += 1) {
+      signature = Math.imul(
+        signature ^ ((index + 1) * 2 + (this.doors[index]?.closed === true ? 1 : 0)),
+        16777619,
+      );
+    }
+    return signature;
+  }
+
+  _getNavigationTopologySources() {
+    return {
+      doors: this.doors,
+      doorCount: this.doors.length,
+      solidZones: this.solidZones,
+      solidZoneCount: this.solidZones.length,
+      aerialBoundaryZones: this.aerialBoundaryZones,
+      aerialBoundaryZoneCount: this.aerialBoundaryZones.length,
+      floorTiles: this.floorTiles,
+      floorTileCount: this.floorTiles.length,
+      platformingPlatforms: this.game?.platformingPlatforms,
+      platformingPlatformCount: this.game?.platformingPlatforms?.length ?? 0,
+      debugSpawnedPlatforms: this.game?.debugSpawnedPlatforms,
+      debugSpawnedPlatformCount: this.game?.debugSpawnedPlatforms?.length ?? 0,
+      debugLedgePlatform: this.game?.debugLedgePlatform,
+    };
+  }
+
+  _refreshNavigationTopology() {
+    const sources = this.navigationTopologySources;
+    const doorStateSignature = this._getNavigationDoorStateSignature();
+    const sourcesChanged = !sources
+      || sources.doors !== this.doors
+      || sources.doorCount !== this.doors.length
+      || sources.solidZones !== this.solidZones
+      || sources.solidZoneCount !== this.solidZones.length
+      || sources.aerialBoundaryZones !== this.aerialBoundaryZones
+      || sources.aerialBoundaryZoneCount !== this.aerialBoundaryZones.length
+      || sources.floorTiles !== this.floorTiles
+      || sources.floorTileCount !== this.floorTiles.length
+      || sources.platformingPlatforms !== this.game?.platformingPlatforms
+      || sources.platformingPlatformCount !== (this.game?.platformingPlatforms?.length ?? 0)
+      || sources.debugSpawnedPlatforms !== this.game?.debugSpawnedPlatforms
+      || sources.debugSpawnedPlatformCount !== (this.game?.debugSpawnedPlatforms?.length ?? 0)
+      || sources.debugLedgePlatform !== this.game?.debugLedgePlatform;
+
+    if (sourcesChanged || doorStateSignature !== this.navigationDoorStateSignature) {
+      if (sources?.floorTiles !== this.floorTiles || sources?.floorTileCount !== this.floorTiles.length) {
+        this.floorTilesByColumn = this._createFloorTileColumns(this.floorTiles);
+      }
+      this.invalidateNavigationTopology({ doorStateSignature });
+    }
+  }
+
+  /**
+   * Invalidates derived paths after a door, puzzle, or authored collision
+   * change. Callers which mutate topology outside this controller can use this
+   * hook; door open/close changes are also detected automatically.
+   */
+  invalidateNavigationTopology({ doorStateSignature = null } = {}) {
+    this.navigationTopologyRevision += 1;
     this.navigationCache.clear();
+    this.floorNavigationGraph = null;
+    this.navigationDoorStateSignature = doorStateSignature
+      ?? this._getNavigationDoorStateSignature();
+    this.navigationTopologySources = this._getNavigationTopologySources();
+  }
+
+  _cacheNavigationResult(key, value) {
+    if (!this.navigationCache.has(key) && this.navigationCache.size >= NAVIGATION_CACHE_LIMIT) {
+      const oldestKey = this.navigationCache.keys().next().value;
+      this.navigationCache.delete(oldestKey);
+    }
+    this.navigationCache.set(key, value);
   }
 
   _collectPlayerRailTopSurfaces() {
@@ -583,6 +666,8 @@ export class DungeonController {
       return null;
     }
 
+    this._refreshNavigationTopology();
+
     const delta = targetPosition.clone().sub(fromPosition);
     const distance = delta.length();
     if (distance <= 0.0001) {
@@ -840,12 +925,20 @@ export class DungeonController {
       return null;
     }
 
-    const cacheKey = `aerial:${startKey}>${goalKey}`;
+    const altitudeBand = Math.round((fromPosition.y ?? 0) / AERIAL_PATH_SAMPLE_SPACING);
+    const cacheKey = [
+      'aerial',
+      startKey,
+      goalKey,
+      altitudeBand,
+      Number(options.radius ?? 0).toFixed(2),
+      Number(options.verticalRadius ?? 0).toFixed(2),
+    ].join(':');
     let next = this.navigationCache.get(cacheKey);
-    if (next === undefined) {
+    if (!this.navigationCache.has(cacheKey)) {
       const path = this._findAerialTilePath(start, goal, fromPosition.y, options);
       next = path?.[1] ?? null;
-      this.navigationCache.set(cacheKey, next);
+      this._cacheNavigationResult(cacheKey, next);
     }
     if (!next) {
       return null;
@@ -1401,6 +1494,8 @@ export class DungeonController {
       return null;
     }
 
+    this._refreshNavigationTopology();
+
     const start = this.getFloorTileAt(fromPosition, { allowClosest: true });
     const goal = this.getFloorTileAt(targetPosition, { allowClosest: true });
     if (!start || !goal) {
@@ -1415,19 +1510,17 @@ export class DungeonController {
       return tempVectorC.lengthSq() > 0.0001 ? tempVectorC.normalize().clone() : null;
     }
 
-    const cacheKey = `${startKey}>${goalKey}`;
-    if (this.navigationCache.has(cacheKey)) {
-      const cached = this.navigationCache.get(cacheKey);
-      return cached ? cached.clone() : null;
+    const cacheKey = `ground:${startKey}>${goalKey}`;
+    let next = this.navigationCache.get(cacheKey);
+    if (!this.navigationCache.has(cacheKey)) {
+      const path = this._findFloorTilePath(start, goal, { nextHopOnly: true });
+      next = path?.[1] ?? null;
+      this._cacheNavigationResult(cacheKey, next);
     }
-
-    const path = this._findFloorTilePath(start, goal);
-    if (!path || path.length < 2) {
-      this.navigationCache.set(cacheKey, null);
+    if (!next) {
       return null;
     }
 
-    const next = path[1];
     const nextCenter = tempVectorA.set(
       next.x * this.tileSize,
       next.elevation ?? 0,
@@ -1437,12 +1530,10 @@ export class DungeonController {
     direction.y = 0;
 
     if (direction.lengthSq() <= 0.0001) {
-      this.navigationCache.set(cacheKey, null);
       return null;
     }
 
     direction.normalize();
-    this.navigationCache.set(cacheKey, direction.clone());
     return direction.clone();
   }
 
@@ -1750,45 +1841,117 @@ export class DungeonController {
     return this._isResolvedFloorPositionWalkable(tempVectorC);
   }
 
-  _findFloorTilePath(start, goal) {
-    if (!this._isFloorTileRuntimeWalkable(start) || !this._isFloorTileRuntimeWalkable(goal)) {
-      return null;
+  _ensureFloorNavigationGraph() {
+    this._refreshNavigationTopology();
+    if (this.floorNavigationGraph?.revision === this.navigationTopologyRevision) {
+      return this.floorNavigationGraph;
     }
-    const startKey = this._getFloorGraphKey(start);
-    const goalKey = this._getFloorGraphKey(goal);
-    const queue = [start];
-    const cameFrom = new Map([[startKey, null]]);
 
-    for (let cursor = 0; cursor < queue.length; cursor += 1) {
-      const current = queue[cursor];
-      const currentKey = this._getFloorGraphKey(current);
-      if (currentKey === goalKey) {
-        const path = [current];
-        let key = currentKey;
-        while (cameFrom.get(key)) {
-          const previous = cameFrom.get(key);
-          path.push(previous);
-          key = this._getFloorGraphKey(previous);
-        }
-        path.reverse();
-        return path;
+    const tilesByKey = new Map();
+    for (const tile of this.floorTiles) {
+      if (this._isFloorTileRuntimeWalkable(tile)) {
+        tilesByKey.set(this._getFloorGraphKey(tile), tile);
       }
+    }
 
+    // Build the expensive collision-filtered topology once. Route fields below
+    // can then serve every enemy pursuing the same goal without rescanning
+    // doors, platform blocks, and solid zones for every breadth-first step.
+    const predecessorsByKey = new Map();
+    for (const key of tilesByKey.keys()) {
+      predecessorsByKey.set(key, []);
+    }
+    for (const [fromKey, fromTile] of tilesByKey) {
       for (const [dx, dz] of CARDINAL_NEIGHBORS) {
-        for (const next of this.floorTilesByColumn.get(tileKey(current.x + dx, current.z + dz)) ?? []) {
-          const nextKey = this._getFloorGraphKey(next);
-          if (cameFrom.has(nextKey)
-            || !this._canEnemyTraverseFloorTiles(current, next)
-            || !this._isFloorTileRuntimeWalkable(next)) {
+        const column = this.floorTilesByColumn.get(tileKey(fromTile.x + dx, fromTile.z + dz));
+        if (!column) {
+          continue;
+        }
+        for (const toTile of column) {
+          const toKey = this._getFloorGraphKey(toTile);
+          if (!tilesByKey.has(toKey) || !this._canEnemyTraverseFloorTiles(fromTile, toTile)) {
             continue;
           }
-          cameFrom.set(nextKey, current);
-          queue.push(next);
+          predecessorsByKey.get(toKey).push(fromKey);
         }
       }
     }
 
-    return null;
+    this.floorNavigationGraph = {
+      revision: this.navigationTopologyRevision,
+      tilesByKey,
+      predecessorsByKey,
+      routeFields: new Map(),
+    };
+    return this.floorNavigationGraph;
+  }
+
+  _getFloorRouteField(goalKey, graph) {
+    if (graph.routeFields.has(goalKey)) {
+      const cached = graph.routeFields.get(goalKey);
+      graph.routeFields.delete(goalKey);
+      graph.routeFields.set(goalKey, cached);
+      return cached;
+    }
+
+    // Search backwards from the goal once. Each visited tile records the next
+    // forward hop, so all enemies targeting this tile share the same field and
+    // disconnected starts become a stable negative lookup.
+    const nextHopByKey = new Map([[goalKey, null]]);
+    const queue = [goalKey];
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const currentKey = queue[cursor];
+      for (const predecessorKey of graph.predecessorsByKey.get(currentKey) ?? []) {
+        if (nextHopByKey.has(predecessorKey)) {
+          continue;
+        }
+        nextHopByKey.set(predecessorKey, currentKey);
+        queue.push(predecessorKey);
+      }
+    }
+
+    if (graph.routeFields.size >= FLOOR_ROUTE_FIELD_LIMIT) {
+      const oldestGoalKey = graph.routeFields.keys().next().value;
+      graph.routeFields.delete(oldestGoalKey);
+    }
+    graph.routeFields.set(goalKey, nextHopByKey);
+    return nextHopByKey;
+  }
+
+  _findFloorTilePath(start, goal, { nextHopOnly = false } = {}) {
+    const startKey = this._getFloorGraphKey(start);
+    const goalKey = this._getFloorGraphKey(goal);
+    const graph = this._ensureFloorNavigationGraph();
+    if (!graph.tilesByKey.has(startKey) || !graph.tilesByKey.has(goalKey)) {
+      return null;
+    }
+
+    if (startKey === goalKey) {
+      return [graph.tilesByKey.get(startKey)];
+    }
+
+    const routeField = this._getFloorRouteField(goalKey, graph);
+    if (!routeField.has(startKey)) {
+      return null;
+    }
+
+    if (nextHopOnly) {
+      const nextKey = routeField.get(startKey);
+      return nextKey
+        ? [graph.tilesByKey.get(startKey), graph.tilesByKey.get(nextKey)]
+        : null;
+    }
+
+    const path = [graph.tilesByKey.get(startKey)];
+    let currentKey = startKey;
+    while (currentKey !== goalKey && path.length <= graph.tilesByKey.size) {
+      currentKey = routeField.get(currentKey);
+      if (!currentKey) {
+        return null;
+      }
+      path.push(graph.tilesByKey.get(currentKey));
+    }
+    return currentKey === goalKey ? path : null;
   }
 
   constrainEnemies() {
@@ -3962,9 +4125,13 @@ export class DungeonController {
   }
 
   _openDoor(door, message) {
+    const topologyChanged = door.closed === true;
     door.closed = false;
     door.locked = false;
     door.opened = true;
+    if (topologyChanged) {
+      this.invalidateNavigationTopology();
+    }
     const progressionDoor = this.progressionManager.getDoor(door.id);
     if (progressionDoor) {
       progressionDoor.isUnlocked = true;

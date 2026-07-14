@@ -117,6 +117,257 @@ test('aim and lock-on reticles are flat, screen-space HUD indicators', async ({ 
   expect(result.worldLockReticleAbsent).toBe(true);
 });
 
+test('lock-on survives covered weak points and the complete dodge roll', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=lock-retention-proof');
+  await page.waitForFunction(() => Boolean(
+    window.game?.player?._fbxAnimationLibraryLoaded
+    && window.spawnReaverbot,
+  ));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const combat = game.combat;
+    const player = game.player;
+    const Vector3 = player.root.position.constructor;
+    game.stop();
+
+    for (const existing of [...game.enemies]) {
+      existing.dispose?.();
+      existing.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+    game.projectiles.clear();
+
+    player.root.position.set(0, 0, 0);
+    player.lastMoveDirection.set(0, 0, 1);
+    player.velocity.set(0, 0, 0);
+    player.dead = false;
+    player.animation.dead = false;
+    player.animation.actionState = null;
+    player.animation.actionTimer = 0;
+    player.animation.actionDuration = 0;
+    player.animation.attackTimer = 0;
+    player.animation.hurtTimer = 0;
+    player.animation.cancelAttack();
+    game.camera.position.set(0, 3.2, -7);
+    game.camera.lookAt(0, 1.2, 5);
+    game.camera.updateMatrixWorld(true);
+
+    const enemy = window.spawnReaverbot({
+      archetypeId: 'shieldSentinel',
+      seed: 'lock-retention-sentinel',
+      position: new Vector3(0, 0, 5),
+    });
+    enemy.brain.weakPointExposed = true;
+    enemy.brain.defenseActive = false;
+    enemy.root.updateMatrixWorld(true);
+    const weakPoint = enemy.weakPointTarget;
+    const profile = combat._getStatefulProfile(
+      combat._getCurrentProfile(),
+      combat.getCurrentWeaponState(),
+    );
+    const originalSafeAreaCheck = game.isPlayerInSafeArea;
+    game.isPlayerInSafeArea = () => false;
+
+    Object.assign(combat.lockOn, {
+      target: weakPoint,
+      progress: 1,
+      manual: true,
+      movementLocked: true,
+      source: 'tab',
+    });
+    combat._updateLockOn(1 / 60, game.pointer.aimWorld, profile, {
+      pressed: false,
+      aiming: false,
+    });
+    const exposed = {
+      candidateListed: enemy.getCombatTargets().includes(weakPoint),
+      active: weakPoint.active,
+      target: combat.lockOn.target === weakPoint,
+      movement: combat.getMovementLockTarget() === weakPoint,
+      targeting: combat.getTargetingLockTarget() === weakPoint,
+    };
+
+    enemy.brain.weakPointExposed = false;
+    enemy.brain.defenseActive = true;
+    combat._updateLockOn(1 / 60, game.pointer.aimWorld, profile, {
+      pressed: false,
+      aiming: false,
+    });
+    const covered = {
+      candidateListed: enemy.getCombatTargets().includes(weakPoint),
+      active: weakPoint.active,
+      target: combat.lockOn.target === weakPoint,
+      progress: combat.lockOn.progress,
+      movement: combat.getMovementLockTarget() === weakPoint,
+      targeting: combat.getTargetingLockTarget() === weakPoint,
+    };
+
+    const movementOptions = {
+      arenaRadius: 100,
+      movementForward: new Vector3(0, 0, 1),
+      movementRight: new Vector3(1, 0, 0),
+      groundY: 0,
+      game,
+    };
+    game.pointer.primary = false;
+    game.pointer.primaryPressed = false;
+    game.pointer.secondary = false;
+    game.pointer.secondaryPressed = false;
+    game.pointer.lockOnPressed = false;
+    const rollStarted = player.tryDodgeRoll(new Set(['KeyW']), movementOptions);
+    const rollSamples = [];
+    let frames = 0;
+    while (player.animation.actionState === 'dodgeRoll' && frames < 240) {
+      player.update(1 / 120, new Set(), movementOptions);
+      combat.update(1 / 120);
+      rollSamples.push({
+        target: combat.lockOn.target === weakPoint,
+        movement: combat.getMovementLockTarget() === weakPoint,
+        targeting: combat.getTargetingLockTarget() === weakPoint,
+      });
+      frames += 1;
+    }
+    combat.update(1 / 60);
+    const afterRoll = {
+      target: combat.lockOn.target === weakPoint,
+      movement: combat.getMovementLockTarget() === weakPoint,
+      targeting: combat.getTargetingLockTarget() === weakPoint,
+    };
+
+    enemy.dead = true;
+    combat.update(1 / 60);
+    const deadClearsLock = combat.lockOn.target === null
+      && combat.getMovementLockTarget() === null
+      && combat.getTargetingLockTarget() === null;
+    game.isPlayerInSafeArea = originalSafeAreaCheck;
+
+    return {
+      exposed,
+      covered,
+      rollStarted,
+      frames,
+      rollSamples,
+      afterRoll,
+      deadClearsLock,
+    };
+  });
+
+  expect(result.exposed).toEqual({
+    candidateListed: true,
+    active: true,
+    target: true,
+    movement: true,
+    targeting: true,
+  });
+  expect(result.covered).toEqual({
+    candidateListed: false,
+    active: false,
+    target: true,
+    progress: 1,
+    movement: true,
+    targeting: true,
+  });
+  expect(result.rollStarted).toBe(true);
+  expect(result.frames).toBeGreaterThan(0);
+  expect(result.rollSamples.every((sample) => (
+    sample.target && sample.movement && sample.targeting
+  ))).toBe(true);
+  expect(result.afterRoll).toEqual({ target: true, movement: true, targeting: true });
+  expect(result.deadClearsLock).toBe(true);
+});
+
+test('unified Buster combat also retains a covered weak-point lock while rolling', async ({ page }) => {
+  await page.goto('/?busterLab=1&reaverbotSeed=unified-lock-retention-proof');
+  await page.waitForFunction(() => Boolean(
+    window.game?.busterLabPlans?.get('megaBuster')
+    && window.game?.player?._fbxAnimationLibraryLoaded
+    && window.spawnReaverbot,
+  ));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const combat = game.combat;
+    const player = game.player;
+    const Vector3 = player.root.position.constructor;
+    game.stop();
+    for (const existing of [...game.enemies]) {
+      existing.dispose?.();
+      existing.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+    game.projectiles.clear();
+    player.root.position.set(0, 0, 0);
+    player.lastMoveDirection.set(0, 0, 1);
+    player.velocity.set(0, 0, 0);
+    player.animation.actionState = null;
+    player.animation.actionTimer = 0;
+    player.animation.actionDuration = 0;
+    player.animation.attackTimer = 0;
+    player.animation.hurtTimer = 0;
+    player.animation.cancelAttack();
+    const enemy = window.spawnReaverbot({
+      archetypeId: 'shieldSentinel',
+      seed: 'unified-lock-retention-sentinel',
+      position: new Vector3(0, 0, 5),
+    });
+    enemy.brain.weakPointExposed = false;
+    enemy.brain.defenseActive = true;
+    const weakPoint = enemy.weakPointTarget;
+    Object.assign(combat.lockOn, {
+      target: weakPoint,
+      progress: 1,
+      manual: true,
+      movementLocked: true,
+      source: 'tab',
+    });
+    const originalSafeAreaCheck = game.isPlayerInSafeArea;
+    game.isPlayerInSafeArea = () => false;
+    game.pointer.primary = false;
+    game.pointer.primaryPressed = false;
+    game.pointer.secondary = false;
+    game.pointer.secondaryPressed = false;
+    game.pointer.lockOnPressed = false;
+    const movementOptions = {
+      arenaRadius: 100,
+      movementForward: new Vector3(0, 0, 1),
+      movementRight: new Vector3(1, 0, 0),
+      groundY: 0,
+      game,
+    };
+    const rollStarted = player.tryDodgeRoll(new Set(['KeyW']), movementOptions);
+    let retained = true;
+    let frames = 0;
+    while (player.animation.actionState === 'dodgeRoll' && frames < 240) {
+      player.update(1 / 120, new Set(), movementOptions);
+      combat.update(1 / 120);
+      retained = retained
+        && combat.lockOn.target === weakPoint
+        && combat.getMovementLockTarget() === weakPoint
+        && combat.getTargetingLockTarget() === weakPoint;
+      frames += 1;
+    }
+    combat.update(1 / 60);
+    const retainedAfterRoll = combat.lockOn.target === weakPoint
+      && combat.getMovementLockTarget() === weakPoint
+      && combat.getTargetingLockTarget() === weakPoint;
+    game.isPlayerInSafeArea = originalSafeAreaCheck;
+    return {
+      compiledPlanActive: game.getActiveBusterPlan()?.isMegaBuster === true,
+      rollStarted,
+      frames,
+      retained,
+      retainedAfterRoll,
+    };
+  });
+
+  expect(result.compiledPlanActive).toBe(true);
+  expect(result.rollStarted).toBe(true);
+  expect(result.frames).toBeGreaterThan(0);
+  expect(result.retained).toBe(true);
+  expect(result.retainedAfterRoll).toBe(true);
+});
+
 test('manual aim redirects shots while movement lock keeps target facing', async ({ page }) => {
   await page.goto('/?reaverbotSeed=locked-manual-aim-proof');
   await page.waitForFunction(() => Boolean(window.game?.combat && window.game?.player));

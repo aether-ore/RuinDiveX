@@ -313,6 +313,15 @@ guards, XP, loot, and direct geometric weak points remain active in production.
 Direct projectiles carry resolved part metadata; Explosion splash is body/AoE
 damage and does not precision-hit a weak point.
 
+Lock acquisition still requires a currently valid, exposed target. Once an
+exposed weak point is locked, closing armor or a defensive part does not clear
+or retarget that lock: facing, the marker, and projectile guidance continue to
+track the covered mechanism, while damage resolution continues to treat it as
+blocked rather than as an exposed weak-point hit. Dodge rolls also preserve the
+selected lock for their full duration. Enemy death or disposal, explicit
+unlock, weapon switching, safe-area entry, and leaving lock range still clear
+the lock normally.
+
 Compiled explosions set `damagePlayer: false` and `triggerMines: false`. Their
 visual style is an orange expanding fiery sphere: three additive orange,
 amber, and hot-yellow spherical layers plus particle bursts. The same shared
@@ -405,7 +414,11 @@ Each successful grant atomically adds:
   `revolvingPulseBarrel` parts, and one of every other named ingredient.
 
 Debug copies and resources persist. Debug-origin module instances do not unlock
-replication. The grant count is also persisted.
+replication. The grant count is also persisted. The same Debug Tools tab has a
+weapon/blueprint selector, benchmark target/profile/depth presets, direct Test
+Range and Sandbox launch actions, a Roll Lab shortcut, and a non-persistent
+battery/cycle reset. Enter Sandbox remains disabled unless the page was opened
+with `?busterLab=sandbox`.
 
 ## Storage envelope, durability, and migration
 
@@ -559,7 +572,8 @@ magazine, projected 10s/30s output, peak occupancy, direct weak-point hits,
 stagger, misses, kills, and average TTK. It suppresses rewards. Exit clears
 range projectiles and dummies, disposes range resources, restores position,
 loadout, active slot, arena radius, workshop state, and the pre-range runtime
-resource snapshot.
+resource snapshot. When launched from Debug Tools, it closes the paused editor
+for combat and restores the same Buster debug tab on exit.
 
 Range entry intentionally cancels the previously active weapon's in-flight
 execution rather than freezing and restoring those projectiles.
@@ -583,7 +597,8 @@ inventory, loot, refractor, map-event, enemy, hazard, effect, and projectile
 collections, so mutations are discarded with the world. Manual exit or defeat
 clears projectiles and pending attacks, disposes enemies, player, animators,
 geometry, materials, and textures not shared with production, then restores
-the original world and reopens Roll's prior workshop state.
+the original world and reopens Roll's prior workshop state. A sandbox launched
+from Debug Tools instead restores that Buster debug tab.
 
 The implementation regenerates deterministic encounter content; it does not
 clone the exact live-frame enemy state, which remains intentionally deferred.

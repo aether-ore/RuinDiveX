@@ -297,6 +297,12 @@ export class ReaverbotEnemy extends Enemy {
       root: this.visual.weakPoint.core,
       radius: genome.modules.weakPoint.radius,
       isWeakPointTarget: true,
+      // Exposure controls acquisition and damage, not ownership of an already
+      // established player lock. Closing armor may cover this point without
+      // making the selected mechanism cease to exist.
+      get retainLockWhenInactive() {
+        return !owner.weakPointBroken;
+      },
       get dead() {
         return owner.dead;
       },
@@ -916,6 +922,7 @@ export class ReaverbotEnemy extends Enemy {
 
   onDeath(game, meta = {}) {
     game?.cancelEnemyAttackRequest?.(this);
+    game?.endFlamethrowerEffect?.(this);
     this._removeTelegraphMarker();
     this._releaseTractorTarget('controller-death', game);
     if (this.affix?.id === 'explosiveCore' && !meta.selfDestruct) {
@@ -931,6 +938,7 @@ export class ReaverbotEnemy extends Enemy {
 
   dispose() {
     this._runtimeGame?.cancelEnemyAttackRequest?.(this);
+    this._runtimeGame?.endFlamethrowerEffect?.(this);
     this._removeTelegraphMarker();
     this._releaseTractorTarget('controller-dispose');
     this.clearExternalMotion?.('dispose');
@@ -1315,6 +1323,7 @@ export class ReaverbotEnemy extends Enemy {
           triggerMines: false,
         });
       }
+      if (kind === 'flamethrower') game.endFlamethrowerEffect?.(this);
       this._removeTelegraphMarker();
       brain.state = 'recovery';
       brain.stateTime = 0;
@@ -3185,17 +3194,17 @@ export class ReaverbotEnemy extends Enemy {
     const brain = this.brain;
     brain.tickTimer -= dt;
     this.visual.weapon.muzzle.getWorldPosition(tempA);
-    game.addGroundConeTelegraph(tempA, brain.attackDirection, this.stats.attackRange, 0.78, 0xff7b32, {
-      duration: 0.12,
-      opacity: 0.3,
-      name: 'generatedReaverbotFlamethrowerCone',
-    });
-    game.addDirectedParticleSpray(tempA, brain.attackDirection, 0xff6a2e, {
-      count: 10,
+    game.updateFlamethrowerEffect?.(this, dt, tempA, brain.attackDirection, {
       range: this.stats.attackRange,
       halfAngle: 0.78,
+      color: 0xff7b32,
+      secondaryColor: 0xffd36f,
+      opacity: 0.3,
+      particleOpacity: 0.7,
+      particleCount: 36,
       baseScale: 0.25,
-      pressure: 1,
+      groundY: this.root.position.y,
+      name: 'generatedReaverbotFlamethrowerCone',
     });
 
     if (brain.tickTimer > 0) return;

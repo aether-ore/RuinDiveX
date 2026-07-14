@@ -784,6 +784,7 @@ export class Enemy {
   }
 
   update(dt, game) {
+    this._runtimeGame = game;
     if (this.dead) {
       this._updateDeath(dt, game);
       this._updateHealthBar(game.camera);
@@ -1815,38 +1816,24 @@ export class Enemy {
 
     if (telegraphActive) {
       this._getGorubesshuFlameOrigin(tempPosition, attack.direction);
-
-      attack.telegraphTimer -= dt;
-      if (attack.telegraphTimer <= 0) {
-        attack.telegraphTimer = flameActive ? 0.065 : 0.08;
-        game.addGroundConeTelegraph(tempPosition, attack.direction, this.stats.attackRange * 1.04, 0.82, 0xff6a2e, {
-          duration: flameActive ? 0.18 : 0.12,
-          opacity: flameActive ? 0.34 : 0.18,
-          startDistance: 0.12,
-          name: 'gorubesshuFlamethrowerCone',
-        });
-      }
+      game.updateFlamethrowerEffect?.(this, dt, tempPosition, attack.direction, {
+        range: this.stats.attackRange * 1.04,
+        halfAngle: 0.82,
+        color: 0xff6a2e,
+        secondaryColor: 0xffd36f,
+        opacity: flameActive ? 0.34 : 0.18,
+        particleOpacity: 0.74,
+        particleCount: flameActive ? 48 : 0,
+        baseScale: 0.32,
+        startDistance: 0.12,
+        groundY: this.root.position.y,
+        name: 'gorubesshuFlamethrowerCone',
+      });
+    } else {
+      game.endFlamethrowerEffect?.(this);
     }
 
     if (flameActive) {
-      attack.particleTimer -= dt;
-      if (attack.particleTimer <= 0) {
-        attack.particleTimer = 0.03;
-        game.addDirectedParticleSpray(tempPosition, attack.direction, 0xff6a2e, {
-          count: 14,
-          range: this.stats.attackRange * 1.04,
-          halfAngle: 0.86,
-          baseScale: 0.32,
-          pressure: 1,
-        });
-        game.addDirectedParticleSpray(tempPosition, attack.direction, 0xffd36f, {
-          count: 5,
-          range: this.stats.attackRange * 0.82,
-          halfAngle: 0.62,
-          baseScale: 0.2,
-          pressure: 1,
-        });
-      }
 
       attack.tickTimer -= dt;
       if (attack.tickTimer <= 0) {
@@ -1856,6 +1843,7 @@ export class Enemy {
     }
 
     if (attack.timer >= attack.duration) {
+      game.endFlamethrowerEffect?.(this);
       attack.active = false;
       attack.timer = 0;
       attack.tickTimer = 0;
@@ -2143,6 +2131,7 @@ export class Enemy {
 
   onDeath(game) {
     game?.cancelEnemyAttackRequest?.(this);
+    game?.endFlamethrowerEffect?.(this);
     return game;
   }
 
@@ -2151,6 +2140,7 @@ export class Enemy {
     this.disposed = true;
     this.dead = true;
     this._runtimeGame?.cancelEnemyAttackRequest?.(this);
+    this._runtimeGame?.endFlamethrowerEffect?.(this);
     this.clearExternalMotion?.('dispose');
 
     const geometries = new Set();

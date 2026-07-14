@@ -42,6 +42,22 @@ export function isCombatTargetValid(target) {
   );
 }
 
+export function isCombatTargetLockRetainable(target) {
+  if (isCombatTargetValid(target)) {
+    return true;
+  }
+
+  const owner = getCombatTargetOwner(target);
+  return Boolean(
+    target?.retainLockWhenInactive === true
+    && target?.root
+    && !target.dead
+    && !owner?.dead
+    && !owner?.disposed
+    && owner?.root?.parent,
+  );
+}
+
 export function getEnemyCombatTargets(enemy) {
   const targets = enemy?.getCombatTargets?.();
   if (!Array.isArray(targets) || targets.length === 0) {

@@ -477,6 +477,15 @@ export class UIManager {
     this.busterDebugTabButton = document.getElementById('buster-debug-tab');
     this.busterDebugGrantButton = document.getElementById('buster-debug-grant');
     this.busterDebugStatus = document.getElementById('buster-debug-status');
+    this.busterDebugBuildSelect = document.getElementById('buster-debug-build');
+    this.busterDebugTargetSelect = document.getElementById('buster-debug-targets');
+    this.busterDebugProfileSelect = document.getElementById('buster-debug-profile');
+    this.busterDebugDepthSelect = document.getElementById('buster-debug-depth');
+    this.busterDebugRangeButton = document.getElementById('buster-debug-range');
+    this.busterDebugSandboxButton = document.getElementById('buster-debug-sandbox');
+    this.busterDebugOpenLabButton = document.getElementById('buster-debug-open-lab');
+    this.busterDebugRefillButton = document.getElementById('buster-debug-refill');
+    this.busterDebugTestStatus = document.getElementById('buster-debug-test-status');
     this.poseDebugAnimationSelect = document.getElementById('pose-debug-animation');
     this.poseDebugKeyframeSelect = document.getElementById('pose-debug-keyframe');
     this.poseDebugControls = document.getElementById('pose-debug-controls');
@@ -512,6 +521,7 @@ export class UIManager {
     this.healthDamagePulseTimer = 0;
     this.poseDebugOpen = false;
     this.poseDebugTab = this.game.busterLabDebugEnabled ? 'buster' : 'pose';
+    this.busterDebugSelectedBuildId = 'build-a';
     this.poseDebugControlsRendered = false;
     this.poseDebugFocusedJointName = null;
     this.poseDebugPresetAnimations = this._createPoseDebugAnimations();
@@ -669,23 +679,103 @@ export class UIManager {
   }
 
   _syncBusterDebugControls() {
-    const view = this.game.getBusterLabViewModel?.('build-a');
+    const catalogView = this.game.getBusterLabViewModel?.('build-a');
+    const candidates = [
+      { id: 'megaBuster', label: 'Mega Buster', available: true },
+      ...(catalogView?.builds ?? []).map((build) => ({
+        id: build.buildId,
+        label: `${build.label}${build.available ? '' : ' (no chassis)'}`,
+        available: build.available,
+      })),
+      ...(catalogView?.blueprints ?? []).map((blueprint) => ({
+        id: blueprint.blueprintId,
+        label: `Blueprint: ${blueprint.name}${blueprint.locked ? ' (sandbox only)' : ''}`,
+        available: true,
+      })),
+    ];
+    if (!candidates.some((entry) => entry.id === this.busterDebugSelectedBuildId && entry.available)) {
+      this.busterDebugSelectedBuildId = candidates.find((entry) => entry.id === 'build-a' && entry.available)?.id
+        ?? candidates.find((entry) => entry.available)?.id
+        ?? 'megaBuster';
+    }
+    if (this.busterDebugBuildSelect) {
+      const selectedId = this.busterDebugSelectedBuildId;
+      this.busterDebugBuildSelect.replaceChildren(...candidates.map((entry) => {
+        const option = document.createElement('option');
+        option.value = entry.id;
+        option.textContent = entry.label;
+        option.disabled = !entry.available;
+        return option;
+      }));
+      this.busterDebugBuildSelect.value = selectedId;
+      this.busterDebugBuildSelect.disabled = !catalogView;
+    }
+
+    const view = this.game.getBusterLabViewModel?.(this.busterDebugSelectedBuildId) ?? catalogView;
     if (this.busterDebugGrantButton) {
       this.busterDebugGrantButton.disabled = !this.game.busterLabDebugEnabled
         || Boolean(view?.persistence?.readOnly ?? view?.readOnly)
         || Boolean(this.game.busterSandboxSession?.active);
     }
-    if (!this.busterDebugStatus) return;
-    if (!view) {
-      this.busterDebugStatus.textContent = 'Enable ?busterLab=1&busterLabDebug=1 to use the Custom Buster testing kit.';
-      return;
+    if (this.busterDebugStatus) {
+      if (!view) {
+        this.busterDebugStatus.textContent = 'Enable ?busterLab=1&busterLabDebug=1 to use the Custom Buster testing kit.';
+      } else {
+        const count = view.debugGrantCount ?? 0;
+        const calibrationCount = view.mega?.availableCalibrations?.length ?? 0;
+        const buildBReady = Boolean(view.builds?.find((entry) => entry.buildId === 'build-b')?.available);
+        this.busterDebugStatus.textContent = count > 0
+          ? `${count} kit${count === 1 ? '' : 's'} granted | ${view.moduleInstances?.length ?? 0} physical modules | ${calibrationCount} Mega calibrations | Build B ${buildBReady ? 'ready' : 'missing'}`
+          : 'No debug kits granted in this save.';
+      }
     }
-    const count = view.debugGrantCount ?? 0;
-    const calibrationCount = view.mega?.availableCalibrations?.length ?? 0;
-    const buildBReady = Boolean(view.builds?.find((entry) => entry.buildId === 'build-b')?.available);
-    this.busterDebugStatus.textContent = count > 0
-      ? `${count} kit${count === 1 ? '' : 's'} granted | ${view.moduleInstances?.length ?? 0} physical modules | ${calibrationCount} Mega calibrations | Build B ${buildBReady ? 'ready' : 'missing'}`
-      : 'No debug kits granted in this save.';
+
+    const benchmark = view?.benchmarkRange?.config ?? this.game.busterBenchmarkOptions ?? {};
+    if (this.busterDebugTargetSelect) this.busterDebugTargetSelect.value = String(benchmark.targetCount ?? 1);
+    if (this.busterDebugProfileSelect) this.busterDebugProfileSelect.value = String(benchmark.profile ?? 'stationary');
+    if (this.busterDebugDepthSelect) this.busterDebugDepthSelect.value = String(benchmark.depthLevel ?? 1);
+
+    const sandboxActive = Boolean(this.game.busterSandboxSession?.active);
+    const rangeActive = Boolean(this.game.busterTestRange?.active);
+    const testModeActive = sandboxActive || rangeActive;
+    if (this.busterDebugRangeButton) {
+      this.busterDebugRangeButton.disabled = !this.game.busterLabDebugEnabled
+        || testModeActive
+        || !view?.canTest;
+    }
+    if (this.busterDebugSandboxButton) {
+      this.busterDebugSandboxButton.disabled = !this.game.busterLabDebugEnabled
+        || testModeActive
+        || !view?.canSandbox;
+      this.busterDebugSandboxButton.title = this.game.busterLabSandboxEnabled
+        ? ''
+        : 'Launch with ?busterLab=sandbox to enable the disposable dungeon.';
+    }
+    if (this.busterDebugOpenLabButton) this.busterDebugOpenLabButton.disabled = testModeActive;
+    if (this.busterDebugRefillButton) {
+      this.busterDebugRefillButton.disabled = !this.game.busterLabDebugEnabled
+        || (this.game.busterRuntime?.states?.size ?? 0) === 0;
+    }
+
+    if (!this.busterDebugTestStatus) return;
+    const selectedLabel = candidates.find((entry) => entry.id === this.busterDebugSelectedBuildId)?.label
+      ?? this.busterDebugSelectedBuildId;
+    if (!view) {
+      this.busterDebugTestStatus.textContent = 'Buster Lab testing is unavailable.';
+    } else if (sandboxActive) {
+      this.busterDebugTestStatus.textContent = 'Disposable sandbox active. Close Debug Tools and press Escape to restore production.';
+    } else if (rangeActive) {
+      this.busterDebugTestStatus.textContent = 'Benchmark range active. Close Debug Tools and press Escape to return.';
+    } else if (this.busterDebugSelectedBuildId !== 'megaBuster' && !view.validation?.valid) {
+      this.busterDebugTestStatus.textContent = view.validation?.errors?.[0]?.message
+        ?? `${selectedLabel} is not a valid test program yet.`;
+    } else if (view.selectedBlueprint?.locked) {
+      this.busterDebugTestStatus.textContent = `${selectedLabel} is redacted: full-catalog sandbox is available, but the production range remains locked.`;
+    } else if (!this.game.busterLabSandboxEnabled) {
+      this.busterDebugTestStatus.textContent = `${selectedLabel} is ready for the range. Use ?busterLab=sandbox to enable Enter Sandbox.`;
+    } else {
+      this.busterDebugTestStatus.textContent = `${selectedLabel} is ready for range or disposable-dungeon testing.`;
+    }
   }
 
   _syncPlatformDebugControls() {
@@ -2755,6 +2845,17 @@ export class UIManager {
       } else if (select.id === 'platform-debug-gravity') {
         this.game.setDebugGravityPreset?.(select.value);
         this._syncPlatformDebugControls();
+      } else if (select.id === 'buster-debug-build') {
+        this.busterDebugSelectedBuildId = select.value || 'build-a';
+        this._syncBusterDebugControls();
+      } else if (['buster-debug-targets', 'buster-debug-profile', 'buster-debug-depth'].includes(select.id)) {
+        const update = select.id === 'buster-debug-targets'
+          ? { targetCount: Number(select.value) }
+          : select.id === 'buster-debug-depth'
+            ? { depthLevel: Number(select.value) }
+            : { profile: select.value };
+        this.game.setBusterRangeBenchmarkOptions?.(update);
+        this._syncBusterDebugControls();
       }
     });
 
@@ -2800,6 +2901,39 @@ export class UIManager {
           {
             successMessage: 'Custom Buster test kit granted',
             failureMessage: 'Unable to grant Buster test kit',
+            render: false,
+            onSuccess: () => this._syncBusterDebugControls(),
+          },
+        );
+      } else if (action === 'buster-debug-range') {
+        this._runBusterLabAction(
+          () => this.game.enterBusterTestRange?.(this.busterDebugSelectedBuildId),
+          {
+            successMessage: 'Benchmark range active',
+            failureMessage: 'Selected Buster cannot enter the range',
+            render: false,
+            onSuccess: () => this._syncBusterDebugControls(),
+          },
+        );
+      } else if (action === 'buster-debug-sandbox') {
+        this._runBusterLabAction(
+          () => this.game.enterBusterSandbox?.(this.busterDebugSelectedBuildId),
+          {
+            successMessage: 'Disposable Buster dungeon active',
+            failureMessage: 'Selected Buster cannot enter the sandbox',
+            render: false,
+            onSuccess: () => this._syncBusterDebugControls(),
+          },
+        );
+      } else if (action === 'buster-debug-open-lab') {
+        this.game.setInventoryOpen(true, { mode: 'roll' });
+        this._selectRollWorkshopTab('buster');
+      } else if (action === 'buster-debug-refill') {
+        this._runBusterLabAction(
+          () => this.game.refillBusterDebugBatteries?.(),
+          {
+            successMessage: 'Buster batteries refilled',
+            failureMessage: 'Buster batteries could not be reset',
             render: false,
             onSuccess: () => this._syncBusterDebugControls(),
           },

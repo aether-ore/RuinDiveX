@@ -102,7 +102,8 @@ test('the v0.1 catalog publishes the exact immutable module constants', () => {
   assert.equal(Object.keys(MEGA_BUSTER_CALIBRATION_CATALOG).length, 6);
   assert.deepEqual(MEGA_BUSTER_CALIBRATION_CATALOG.sniperScope.bonuses, { power: 1, range: 1 });
   assert.deepEqual(MEGA_BUSTER_BASE_PROFILE.tuning, { power: 4, energy: 4, range: 4, rapid: 4 });
-  assert.equal(MEGA_BUSTER_BASE_PROFILE.energyCost, 2);
+  assert.equal(MEGA_BUSTER_BASE_PROFILE.baseMaxEnergy, 9);
+  assert.equal(MEGA_BUSTER_BASE_PROFILE.energyCost, 3);
   assert.equal(MEGA_BUSTER_BASE_PROFILE.socketCount, 4);
   assert.ok(Object.isFrozen(CUSTOM_BUSTER_RULESET));
   assert.ok(Object.isFrozen(MEGA_BUSTER_CALIBRATION_CATALOG.sniperScope.bonuses));

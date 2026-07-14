@@ -137,7 +137,7 @@ IDs are preserved for diagnosis.
 
 ## Stat and Power contract
 
-Workshop Chassis ratings use one shared weapon-local contract:
+Workshop Chassis ratings use this weapon-local contract:
 
 ```text
 rating multiplier = 0.72 + 0.07 x rating
@@ -190,9 +190,9 @@ The compiler and UI do not restrict it to a trigger child branch.
 
 At balanced `4/4/4/4` tuning, a bare Custom Pulse has Power `8`, Range `6.9`,
 Rapid `4.2/s`, Maximum Energy `6`, and cost `1`, so it can fire six shots from a
-full battery. The neutral Mega Buster has the same Power, Range, and Rapid but
-costs `2`, giving it three shots. These are current catalog contracts rather
-than derived equipment bonuses.
+full battery. The neutral Mega Buster has the same Power, Range, and Rapid, a
+base Maximum Energy of `9`, and cost `3`, giving it three shots. These are
+current catalog contracts rather than derived equipment bonuses.
 
 `afterDelay` followed by `cluster5` produces `1.05 x 1.20 = 1.26` raw Power and
 is intentionally clipped to `1.25`. With no Guidance, the two emitters and two
@@ -258,10 +258,12 @@ the `suppressGenericOffense` metadata flag.
 
 ### Mega calibration
 
-The Mega base profile is balanced at `4/4/4/4` and has four physical
-calibration sockets. A fresh feature-on save normally becomes `6/4/4/4` after
-its starter Power calibration is granted and installed. Every rating remains
-capped at `10`.
+The Mega base calibration ratings are balanced at `4/4/4/4` and it has four
+physical calibration sockets. Its battery has a separate normalized baseline
+of `9`, with each shot costing `3`; Energy calibrations add their rating bonus
+linearly above that baseline. A fresh feature-on save normally becomes
+`6/4/4/4` after its starter Power calibration is granted and installed. Every
+calibration rating remains capped at `10`.
 
 | Legacy part type | Fixed rating bonus |
 | --- | --- |

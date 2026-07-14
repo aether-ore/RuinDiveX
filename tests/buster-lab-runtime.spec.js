@@ -290,14 +290,14 @@ test('Mega and Custom Busters release only after the arm reaches its extended fi
     expect(shot.energyAfter).toBeCloseTo(shot.energyBefore - shot.energyCost, 8);
     expect(shot.pendingAfterRelease).toBe(false);
   }
-  expect(result.mega.energyCost).toBe(2);
+  expect(result.mega.energyCost).toBe(3);
   expect(result.custom.energyCost).toBe(1);
   expect(result.cancellation).toEqual({
     queuedBeforeSwitch: true,
     pendingAfterSwitch: false,
     shotsAfterSwitch: 0,
-    energyBefore: 6,
-    energyAfter: 6,
+    energyBefore: 9,
+    energyAfter: 9,
   });
   expect(runtimeErrors).toEqual([]);
 });
@@ -335,8 +335,8 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   expect(initial.canTest).toBe(true);
   expect(initial.starterModuleCount).toBe(1);
   expect(initial.starterPowerRaisers).toBe(0);
-  expect(initial.megaEnergy).toBe(6);
-  expect(initial.megaCost).toBe(2);
+  expect(initial.megaEnergy).toBe(9);
+  expect(initial.megaCost).toBe(3);
   expect(initial.megaShots).toBe(3);
   expect(initial.megaTuning).toEqual({ power: 6, energy: 4, range: 4, rapid: 4 });
   expect(initial.hud.unifiedBuster).toBe(true);

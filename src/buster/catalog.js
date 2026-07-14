@@ -64,7 +64,8 @@ export const MEGA_BUSTER_BASE_PROFILE = deepFreeze({
   chassisId: 'mega-buster-fixed',
   emitterModuleId: 'pulseBolt',
   tuning: { power: 4, energy: 4, range: 4, rapid: 4 },
-  energyCost: 2,
+  baseMaxEnergy: 9,
+  energyCost: 3,
   socketCount: 4,
 });
 

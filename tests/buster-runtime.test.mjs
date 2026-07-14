@@ -102,7 +102,7 @@ test('spawn rejection and thrown callbacks roll battery and reservation back', (
 
 test('resource snapshots restore every independent battery after a temporary range plan', () => {
   const runtime = new BusterRuntime({ executeShot: () => true });
-  runtime.equip(plan({ weaponKey: 'megaBuster', energyCost: 2 }));
+  runtime.equip(plan({ weaponKey: 'megaBuster', maxEnergy: 9, energyCost: 3 }));
   const megaShot = runtime.fire({ marker: 'mega' });
   runtime.releaseReservation(megaShot.execution.reservationToken);
   runtime.equip(plan({ weaponKey: 'build-a', energyCost: 1 }));
@@ -116,7 +116,7 @@ test('resource snapshots restore every independent battery after a temporary ran
   assert.equal(runtime.restoreResourceSnapshot(before), true);
 
   assert.equal(runtime.activeKey, 'build-a');
-  assert.equal(runtime.getHudState('megaBuster').energy, 4);
+  assert.equal(runtime.getHudState('megaBuster').energy, 6);
   assert.equal(runtime.getHudState('build-a').energy, 5);
   assert.equal(runtime.states.get('build-a').lastContext.marker, 'custom');
 });

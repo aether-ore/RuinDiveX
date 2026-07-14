@@ -2215,8 +2215,9 @@ export class Game {
     const rootRange = emitter.baseRange * rangeMultiplier;
     const baseRapid = emitter.baseRapid * rapidMultiplier;
     const cycleTime = 1 / baseRapid;
-    const maxEnergy = CUSTOM_BUSTER_RULESET.maxEnergyBase
-      + CUSTOM_BUSTER_RULESET.maxEnergyPerEnergyRating * tuning.energy;
+    const energyRatingDelta = tuning.energy - MEGA_BUSTER_BASE_PROFILE.tuning.energy;
+    const maxEnergy = MEGA_BUSTER_BASE_PROFILE.baseMaxEnergy
+      + CUSTOM_BUSTER_RULESET.maxEnergyPerEnergyRating * energyRatingDelta;
     const stagger = Math.min(0.18, power * 0.01);
     const stats = {
       ...compiled.stats,

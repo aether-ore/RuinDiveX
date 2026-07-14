@@ -12,6 +12,27 @@ import { ProjectileSystem } from './ProjectileSystem.js';
 import { RefractorPickupSystem } from './RefractorPickupSystem.js';
 import { RollSalvageStorage } from './RollSalvageStorage.js';
 import { UIManager } from './UIManager.js';
+import { BusterLabStorage } from './buster/BusterLabStorage.js';
+import { BUSTER_RECIPE_LIST, getRecipeDiscoveryState } from './buster/BusterRecipeCatalog.js';
+import { BusterRuntime } from './buster/BusterRuntime.js';
+import {
+  CUSTOM_BUSTER_RULESET,
+  MEGA_BUSTER_BASE_PROFILE,
+  MEGA_BUSTER_CALIBRATION_CATALOG,
+  getBusterModuleDefinition,
+  getBusterTuningMultiplier,
+} from './buster/catalog.js';
+import {
+  getClusterDirections,
+  getSpreadDirections,
+  sampleBallisticPoint,
+} from './buster/BusterTrajectory.js';
+import {
+  compileBusterBuild,
+  deepFreezeBusterValue,
+  serializeBusterBuild,
+  validateBusterBuild,
+} from './buster/index.js';
 import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
 import { getCombatTargetWorldPosition } from './reaverbots/CombatTarget.js';
 import { rollReaverbotSalvageDrops } from './reaverbots/ReaverbotSalvageCatalog.js';
@@ -81,6 +102,27 @@ const DEBUG_GRAVITY_PRESETS = Object.freeze({
   moon: 0.28,
 });
 
+const CUSTOM_BUSTER_ATTACK_META = Object.freeze({
+  attackDomain: 'customBuster',
+  suppressGenericOffense: true,
+});
+
+function isBusterLabFeatureEnabled() {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? '').get('busterLab') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function isBusterLabDebugPresetEnabled() {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? '').get('busterLabDebug') === '1';
+  } catch {
+    return false;
+  }
+}
+
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
@@ -123,6 +165,75 @@ function getBrowserDiagnosticAngleDelta(a, b) {
   }
 
   return Math.atan2(Math.sin(left - right), Math.cos(left - right));
+}
+
+function createBusterRangeDummy(id, position, { moving = false } = {}) {
+  const root = new THREE.Group();
+  root.name = `busterRangeDummy:${id}`;
+  root.position.copy(position);
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color: moving ? 0x6b7d8d : 0x7d6f62,
+    emissive: 0x102a35,
+    emissiveIntensity: 0.28,
+    metalness: 0.65,
+    roughness: 0.38,
+  });
+  const coreMaterial = new THREE.MeshStandardMaterial({
+    color: 0x7df8ff,
+    emissive: 0x42dff5,
+    emissiveIntensity: 0.9,
+    metalness: 0.25,
+    roughness: 0.25,
+  });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.62, 1.65, 16), bodyMaterial);
+  body.position.y = 0.86;
+  body.castShadow = true;
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.17, 14, 10), coreMaterial);
+  core.position.set(0, 1.12, -0.48);
+  root.add(body, core);
+  const home = position.clone();
+
+  return {
+    id,
+    typeKey: 'busterRangeDummy',
+    root,
+    radius: 0.58,
+    dead: false,
+    health: 9999,
+    stats: { maxHealth: 9999, armor: 0, experience: 0, damage: 0 },
+    moving,
+    elapsed: 0,
+    update(dt) {
+      this.elapsed += dt;
+      if (moving) root.position.x = home.x + Math.sin(this.elapsed * 1.35) * 2.2;
+    },
+    takeDamage(amount) {
+      const dealt = Math.max(0, Number(amount) || 0);
+      this.health = Math.max(1, this.health - dealt);
+      if (this.health <= 1) this.health = this.stats.maxHealth;
+      return dealt;
+    },
+    resolveProjectileHit(projectilePosition, projectileRadius) {
+      const center = root.position.clone().add(new THREE.Vector3(0, 1.05, 0));
+      if (center.distanceToSquared(projectilePosition) > (this.radius + projectileRadius) ** 2) return null;
+      const weakPointPosition = core.getWorldPosition(new THREE.Vector3());
+      const weakPointHit = weakPointPosition.distanceTo(projectilePosition) <= projectileRadius + 0.24;
+      return {
+        hitPartId: weakPointHit ? 'range-core' : 'range-body',
+        weakPointHit,
+        hitPosition: projectilePosition.clone(),
+      };
+    },
+    applyStatus() {},
+    onDeath() {},
+    dispose() {
+      root.removeFromParent();
+      body.geometry.dispose();
+      core.geometry.dispose();
+      bodyMaterial.dispose();
+      coreMaterial.dispose();
+    },
+  };
 }
 
 export class Game {
@@ -169,6 +280,13 @@ export class Game {
     this.elapsedTime = 0;
     this.hitStopTimer = 0;
     this.hitStopTimeScale = 1;
+    this.busterLabEnabled = isBusterLabFeatureEnabled();
+    this.busterLabDebugEnabled = this.busterLabEnabled && isBusterLabDebugPresetEnabled();
+    this.busterLabStorage = null;
+    this.busterLabState = null;
+    this.busterLabLoadWarning = null;
+    this.busterLabPlans = new Map();
+    this.busterTestRange = null;
     this.animationPreview = this._readAnimationPreviewFromUrl();
     this.roomPreview = this._readRoomPreviewFromUrl();
     this.inventoryOpen = false;
@@ -303,13 +421,31 @@ export class Game {
     this.player.jumpPlatformLandingResolver = (context) => this._tryResolvePlatformLanding(context);
 
     this.inventory = new Inventory(54);
-    this.rollSalvageStorage = new RollSalvageStorage();
+    if (this.busterLabEnabled) {
+      this.busterLabStorage = new BusterLabStorage();
+      this.busterLabState = this.busterLabStorage.load();
+      this.busterLabLoadWarning = this.busterLabStorage.lastWarning;
+      this.rollSalvageStorage = this.busterLabStorage.createRollSalvageStorage();
+    } else {
+      this.rollSalvageStorage = new RollSalvageStorage();
+    }
     const getPickupFloorElevation = (position) => (
       this.dungeonController?.getSurfaceElevationAt?.(position)
     );
     this.lootSystem = new LootSystem(this.scene, { getFloorElevation: getPickupFloorElevation });
     this.refractors = new RefractorPickupSystem(this.scene, { getFloorElevation: getPickupFloorElevation });
     this.projectiles = new ProjectileSystem(this);
+    this.busterRuntime = this.busterLabEnabled
+      ? new BusterRuntime({
+        executeShot: (execution) => this._executeCompiledBusterShot(execution),
+        cancelExecution: ({ token, reason }) => {
+          this.projectiles.cancelWhere(
+            (projectile) => projectile.reservationToken === token,
+            reason ?? 'busterCancelled',
+          );
+        },
+      })
+      : null;
     this.combat = new CombatSystem(this);
     this.player.onDodgeStarted = () => this.combat.cancelForDodge();
     this.player.onLedgeClingStarted = () => this.combat.cancelForLedgeCling();
@@ -329,6 +465,9 @@ export class Game {
     this.mapEvents = new MapEventSystem(this);
 
     this._addStarterItems();
+    if (this.busterLabEnabled) {
+      this._initializeBusterLabFeature();
+    }
     this.spawner.spawnInitialPack();
     this.ui.renderInventory();
     this._bindEvents();
@@ -778,7 +917,11 @@ export class Game {
   }
 
   setPoseDebugSection(section = 'pose') {
-    this.poseDebugSection = section === 'platforming' ? 'platforming' : 'pose';
+    this.poseDebugSection = section === 'platforming'
+      ? 'platforming'
+      : section === 'buster' && this.busterLabEnabled
+        ? 'buster'
+        : 'pose';
     this._setPoseDebugHandlesVisible(this.poseDebugOpen && this.poseDebugSection === 'pose');
     if (this.poseDebugSection !== 'pose') {
       this.player.externalRig?.setDebugPoseEnabled?.(false);
@@ -992,6 +1135,7 @@ export class Game {
   }
 
   getObjectiveText() {
+    if (this.busterTestRange?.active) return 'Buster Test Range — Escape to return';
     return this.dungeonController?.getObjectiveText?.()
       ?? (this.ruinCompleted ? 'Return to camp' : 'Explore ruin');
   }
@@ -1156,9 +1300,24 @@ export class Game {
       return null;
     }
 
-    const result = this.rollSalvageStorage.identifyRecoveries(
-      this.inventory.takeAllUnidentifiedScrap(),
-    );
+    const transfer = this.inventory.takeAllUnidentifiedScrap();
+    let result;
+    try {
+      result = this.rollSalvageStorage.identifyRecoveries(transfer);
+    } catch (error) {
+      this.inventory.unidentifiedScrap = transfer.total;
+      this.inventory.unidentifiedRecoveries = transfer.recoveries.map((recovery) => ({
+        quantity: recovery.quantity,
+        source: recovery.source ? { ...recovery.source } : null,
+        recoverableParts: (recovery.recoverableParts ?? []).map((part) => ({
+          ...part,
+          source: part.source ? { ...part.source } : null,
+        })),
+      }));
+      this.ui?.showToast?.('Roll could not save the analysis; no scrap was consumed', '#ff9f73');
+      this.ui?.renderInventory?.();
+      return { ok: false, error };
+    }
     const partMessage = result.partCount > 0
       ? `; ${result.partCount} recoverable part${result.partCount === 1 ? '' : 's'} found`
       : '';
@@ -1279,9 +1438,1249 @@ export class Game {
       type: type ?? undefined,
       rarity: rarity ?? undefined,
     });
+    if (this.busterLabEnabled && this._convertLegacyBusterPartItem(item, { futureAcquisition: true })) {
+      this.ui.renderInventory();
+      return item;
+    }
     this.inventory.addItem(item);
     this.ui.renderInventory();
     return item;
+  }
+
+  _initializeBusterLabFeature() {
+    this._migrateLegacyBusterParts();
+    this._recompileBusterPlans?.();
+    this._restoreCustomBusterAssignments();
+  }
+
+  _getBusterLabState() {
+    this.busterLabState = this.busterLabStorage?.state ?? this.busterLabState;
+    return this.busterLabState;
+  }
+
+  _refreshRollSalvageStorage() {
+    if (!this.busterLabStorage) return;
+    this.busterLabState = this.busterLabStorage.state;
+    this.rollSalvageStorage = this.busterLabStorage.createRollSalvageStorage();
+  }
+
+  _ensureMegaCalibrationState(state) {
+    const source = state.megaCalibrations && typeof state.megaCalibrations === 'object'
+      ? state.megaCalibrations
+      : {};
+    if (!Array.isArray(source.instances)) source.instances = [];
+    if (!Array.isArray(source.slots)) source.slots = [null, null, null, null];
+    source.slots = Array.from(
+      { length: MEGA_BUSTER_BASE_PROFILE.socketCount },
+      (_, index) => source.slots[index] ?? null,
+    );
+    source.nextInstanceId = Math.max(1, Math.trunc(Number(source.nextInstanceId)) || 1);
+    source.revision = Math.max(1, Math.trunc(Number(source.revision)) || 1);
+    state.megaCalibrations = source;
+    return source;
+  }
+
+  _appendMegaCalibration(state, legacyType, { preferredSlot = null } = {}) {
+    const definition = MEGA_BUSTER_CALIBRATION_CATALOG[legacyType];
+    if (!definition) return null;
+    const calibration = this._ensureMegaCalibrationState(state);
+    let instanceId = '';
+    do {
+      instanceId = `calibration-${calibration.nextInstanceId++}`;
+    } while (calibration.instances.some((entry) => entry.instanceId === instanceId));
+    const instance = {
+      instanceId,
+      legacyType,
+      name: definition.name,
+      bonuses: { ...definition.bonuses },
+    };
+    calibration.instances.push(instance);
+    if (Number.isInteger(preferredSlot)
+      && preferredSlot >= 0
+      && preferredSlot < MEGA_BUSTER_BASE_PROFILE.socketCount
+      && !calibration.slots[preferredSlot]) {
+      calibration.slots[preferredSlot] = instanceId;
+      calibration.revision += 1;
+    }
+    return instance;
+  }
+
+  _migrateLegacyBusterParts() {
+    const installed = (this.player.busterUpgradeSlots ?? [])
+      .map((item, slotIndex) => ({ item, slotIndex }))
+      .filter(({ item }) => Boolean(MEGA_BUSTER_CALIBRATION_CATALOG[item?.type]));
+    const inventoryParts = this.inventory.items
+      .filter((item) => Boolean(MEGA_BUSTER_CALIBRATION_CATALOG[item?.type]));
+    const state = this._getBusterLabState();
+    if (!state) return;
+
+    const alreadyMigrated = Boolean(state.migrations?.legacyBusterPartsConverted);
+    let conversionSucceeded = alreadyMigrated;
+    if (!alreadyMigrated) {
+      const result = this.busterLabStorage.mutate((candidate) => {
+        candidate.migrations = candidate.migrations && typeof candidate.migrations === 'object'
+          ? candidate.migrations
+          : {};
+        const calibration = this._ensureMegaCalibrationState(candidate);
+        for (const { item, slotIndex } of installed) {
+          this._appendMegaCalibration(candidate, item.type, { preferredSlot: slotIndex });
+        }
+        for (const item of inventoryParts) this._appendMegaCalibration(candidate, item.type);
+        if (!candidate.migrations.starterPowerCalibrationGranted) {
+          const starter = this._appendMegaCalibration(candidate, 'powerRaiser');
+          const firstEmpty = calibration.slots.findIndex((entry) => !entry);
+          if (starter && firstEmpty >= 0) {
+            calibration.slots[firstEmpty] = starter.instanceId;
+            calibration.revision += 1;
+          }
+          candidate.migrations.starterPowerCalibrationGranted = true;
+        }
+        candidate.migrations.legacyBusterPartsConverted = true;
+      });
+      conversionSucceeded = result.ok;
+      if (result.ok) this.busterLabState = result.state;
+    } else if (installed.length > 0 || inventoryParts.length > 0) {
+      const result = this.busterLabStorage.mutate((candidate) => {
+        for (const { item, slotIndex } of installed) {
+          this._appendMegaCalibration(candidate, item.type, { preferredSlot: slotIndex });
+        }
+        for (const item of inventoryParts) this._appendMegaCalibration(candidate, item.type);
+      });
+      conversionSucceeded = result.ok;
+      if (result.ok) this.busterLabState = result.state;
+    }
+
+    if (conversionSucceeded && (installed.length > 0 || inventoryParts.length > 0)) {
+      for (const { slotIndex } of installed) this.player.busterUpgradeSlots[slotIndex] = null;
+      const convertedIds = new Set(inventoryParts.map((item) => item.id));
+      this.inventory.items = this.inventory.items.filter((item) => !convertedIds.has(item.id));
+      this.player.recalculateStats();
+      this.player.updateWeaponVisualState?.();
+    }
+  }
+
+  _convertLegacyBusterPartItem(item, { futureAcquisition = false } = {}) {
+    if (!this.busterLabEnabled || !MEGA_BUSTER_CALIBRATION_CATALOG[item?.type] || !this.busterLabStorage) {
+      return false;
+    }
+    const result = this.busterLabStorage.mutate((state) => {
+      this._appendMegaCalibration(state, item.type);
+      state.migrations = state.migrations && typeof state.migrations === 'object' ? state.migrations : {};
+      if (futureAcquisition) state.migrations.futureCalibrationIntercepted = true;
+    });
+    if (!result.ok) return false;
+    this.busterLabState = result.state;
+    this._recompileMegaBusterPlan?.();
+    return true;
+  }
+
+  _getMegaCalibrationRatings(state = this._getBusterLabState()) {
+    const calibration = this._ensureMegaCalibrationState(state);
+    const ratings = { power: 4, energy: 4, range: 4, rapid: 4 };
+    for (const instanceId of calibration.slots) {
+      const instance = calibration.instances.find((entry) => entry.instanceId === instanceId);
+      for (const [stat, amount] of Object.entries(instance?.bonuses ?? {})) {
+        if (Object.hasOwn(ratings, stat)) ratings[stat] = Math.min(10, ratings[stat] + Number(amount || 0));
+      }
+    }
+    return ratings;
+  }
+
+  setMegaBusterCalibration(slotIndex, instanceId) {
+    if (!this.busterLabEnabled
+      || !Number.isInteger(slotIndex)
+      || slotIndex < 0
+      || slotIndex >= MEGA_BUSTER_BASE_PROFILE.socketCount) {
+      return { ok: false, message: 'Invalid Mega calibration socket.' };
+    }
+    const result = this.busterLabStorage.mutate((state) => {
+      const calibration = this._ensureMegaCalibrationState(state);
+      if (instanceId && !calibration.instances.some((entry) => entry.instanceId === instanceId)) {
+        throw new Error('That calibration is not in Roll’s stockpile.');
+      }
+      if (instanceId && calibration.slots.some((entry, index) => index !== slotIndex && entry === instanceId)) {
+        throw new Error('A physical calibration can occupy only one socket.');
+      }
+      const nextSlots = [...calibration.slots];
+      nextSlots[slotIndex] = instanceId || null;
+      const ratings = { power: 4, energy: 4, range: 4, rapid: 4 };
+      for (const id of nextSlots) {
+        const instance = calibration.instances.find((entry) => entry.instanceId === id);
+        for (const [stat, amount] of Object.entries(instance?.bonuses ?? {})) {
+          if (Object.hasOwn(ratings, stat)) ratings[stat] += Number(amount || 0);
+        }
+      }
+      if (Object.values(ratings).some((rating) => rating > 10)) {
+        throw new Error('That calibration would raise a Mega Buster rating above 10.');
+      }
+      calibration.slots = nextSlots;
+      calibration.revision += 1;
+    });
+    if (!result.ok) return { ok: false, message: result.error?.message ?? 'Calibration could not be installed.' };
+    this.busterLabState = result.state;
+    this.busterRuntime?.cancelBuild('megaBuster', 'recompile');
+    this._recompileMegaBusterPlan?.();
+    return { ok: true, message: 'Mega Buster calibration updated.' };
+  }
+
+  _createCustomBusterArmDescriptor(buildId) {
+    return {
+      id: `custom-buster:${buildId}`,
+      buildId,
+      kind: 'customBuster',
+      type: 'customBusterArm',
+      typeLabel: 'Custom Buster',
+      name: buildId === 'build-b' ? 'Custom Buster B' : 'Custom Buster A',
+      slot: 'weapon',
+      category: 'Arm Weapon',
+      weaponKind: 'projectile',
+      glowColor: 0xf2c84b,
+      color: '#f2c84b',
+      getStatTotals: () => ({}),
+      getPowerScore: () => 0,
+      getDisplayLines: () => ['Compiled weapon-local PWR / ENG / RNG / RPD'],
+    };
+  }
+
+  handleDisplacedCustomBuster(slotIndex, item, reason = 'slotReplaced') {
+    if (!this.busterLabEnabled || item?.type !== 'customBusterArm' || ![1, 2].includes(slotIndex)) {
+      return false;
+    }
+    const result = this.busterLabStorage.assignBuildToSlot(null, slotIndex);
+    if (result.ok) this.busterLabState = result.state;
+    this.busterRuntime?.cancelBuild(item.buildId, reason);
+    return true;
+  }
+
+  getResolvedArmSlot(slotIndex) {
+    const index = Math.max(0, Math.min(3, Math.trunc(Number(slotIndex)) || 0));
+    if (this.busterLabEnabled && index === 0) return { kind: 'megaBuster' };
+    const item = this.player.armHotbar[index] ?? null;
+    if (this.busterLabEnabled && item?.type === 'customBusterArm') {
+      return { kind: 'customBuster', buildId: item.buildId };
+    }
+    return item ? { kind: 'legacyItem', item } : null;
+  }
+
+  getBusterPlanForSlot(slotIndex) {
+    if (!this.busterLabEnabled) return null;
+    if (this.busterTestRange?.active && slotIndex === this.player.activeArmIndex) {
+      return this.busterTestRange.plan;
+    }
+    const resolved = this.getResolvedArmSlot(slotIndex);
+    if (resolved?.kind === 'megaBuster') return this.busterLabPlans.get('megaBuster') ?? null;
+    if (resolved?.kind === 'customBuster') return this.busterLabPlans.get(resolved.buildId) ?? null;
+    return null;
+  }
+
+  getActiveBusterPlan() {
+    return this.getBusterPlanForSlot(this.player.activeArmIndex);
+  }
+
+  _restoreCustomBusterAssignments() {
+    const assignments = this._getBusterLabState()?.assignments?.slots ?? {};
+    for (const slotIndex of [1, 2]) {
+      const buildId = assignments[String(slotIndex)] ?? assignments[slotIndex];
+      if (!buildId || !this.busterLabPlans.has(buildId)) continue;
+      const displaced = this.player.armHotbar[slotIndex];
+      if (displaced && displaced.type !== 'customBusterArm') this.inventory.addItem(displaced);
+      this.player.armHotbar[slotIndex] = this._createCustomBusterArmDescriptor(buildId);
+    }
+    if (!this.getActiveBusterPlan() && this.player.getActiveArmWeapon?.()?.type === 'customBusterArm') {
+      this.player.switchArmWeapon(0, true);
+    }
+  }
+
+  _getBusterBuildRecord(buildId, kind = 'draft') {
+    const state = this._getBusterLabState();
+    const list = kind === 'saved' ? state?.chassisBuilds : state?.chassisDrafts;
+    return list?.find((entry) => entry.buildId === buildId) ?? null;
+  }
+
+  _isBusterDraftSaved(buildId) {
+    const draft = this._getBusterBuildRecord(buildId, 'draft');
+    const saved = this._getBusterBuildRecord(buildId, 'saved');
+    return Boolean(draft && saved && serializeBusterBuild(draft) === serializeBusterBuild(saved));
+  }
+
+  _getProgramSelections(build) {
+    const selections = {
+      emitter: '',
+      rootModifier: '',
+      trigger: '',
+      childModifier: '',
+      splitter: '',
+      payload: 'pulsePayload',
+    };
+    const nodes = new Map((build?.program?.nodes ?? []).map((node) => [node.nodeId, node]));
+    const nextByNode = new Map();
+    const childByNode = new Map();
+    for (const edge of build?.program?.edges ?? []) {
+      if (edge.port === 'child') childByNode.set(edge.from, edge.to);
+      else if (edge.port === 'next') nextByNode.set(edge.from, edge.to);
+    }
+    let nodeId = build?.program?.rootNodeId;
+    let scope = 'root';
+    const visited = new Set();
+    while (nodeId && nodes.has(nodeId) && !visited.has(nodeId)) {
+      visited.add(nodeId);
+      const node = nodes.get(nodeId);
+      const definition = getBusterModuleDefinition(node.moduleId);
+      if (definition?.kind === 'emitter') selections.emitter = node.moduleId;
+      else if (definition?.kind === 'modifier') {
+        if (scope === 'root' && !selections.trigger) selections.rootModifier = node.moduleId;
+        else selections.childModifier = node.moduleId;
+      } else if (definition?.kind === 'trigger') {
+        selections.trigger = node.moduleId;
+        scope = 'child';
+        nodeId = childByNode.get(nodeId);
+        continue;
+      } else if (definition?.kind === 'splitter') selections.splitter = node.moduleId;
+      else if (definition?.kind === 'payload') selections.payload = node.moduleId;
+      nodeId = nextByNode.get(nodeId);
+    }
+    return selections;
+  }
+
+  _getModuleInstanceForProgram(moduleId, buildId, used, existingInstances = []) {
+    const definition = getBusterModuleDefinition(moduleId);
+    if (!definition?.physical) return null;
+    const state = this._getBusterLabState();
+    const claimed = new Set(this.busterLabStorage.getClaimedModuleInstanceIds({ excludeBuildId: buildId }));
+    const candidates = [
+      ...existingInstances.filter((entry) => entry.moduleId === moduleId),
+      ...(state?.moduleInstances ?? []).filter((entry) => entry.moduleId === moduleId),
+    ];
+    const instance = candidates.find((entry) => {
+      const id = entry.moduleInstanceId ?? entry.instanceId;
+      return id && !used.has(id) && !claimed.has(id);
+    });
+    const instanceId = instance?.moduleInstanceId ?? instance?.instanceId ?? null;
+    if (instanceId) used.add(instanceId);
+    return instanceId;
+  }
+
+  _buildProgramFromSelections(build, selections) {
+    const nodes = [];
+    const edges = [];
+    const usedInstances = new Set();
+    const existingInstances = (build?.program?.nodes ?? []).map((node) => ({
+      moduleId: node.moduleId,
+      moduleInstanceId: node.moduleInstanceId,
+    }));
+    const addNode = (nodeId, moduleId) => {
+      if (!moduleId) return null;
+      const node = {
+        nodeId,
+        moduleId,
+        moduleInstanceId: this._getModuleInstanceForProgram(
+          moduleId,
+          build.buildId,
+          usedInstances,
+          existingInstances,
+        ),
+      };
+      nodes.push(node);
+      return node;
+    };
+    const connect = (from, to, port = 'next') => {
+      if (from && to) edges.push({ from: from.nodeId, port, to: to.nodeId });
+    };
+
+    const emitter = addNode('emitter', selections.emitter);
+    let rootTail = emitter;
+    const rootModifier = addNode('root-modifier', selections.rootModifier);
+    connect(rootTail, rootModifier);
+    rootTail = rootModifier ?? rootTail;
+    const trigger = addNode('trigger', selections.trigger);
+    connect(rootTail, trigger);
+    if (trigger) rootTail = trigger;
+
+    let branchHead = null;
+    let branchTail = null;
+    const appendBranch = (node) => {
+      if (!node) return;
+      if (!branchHead) branchHead = node;
+      connect(branchTail, node);
+      branchTail = node;
+    };
+    appendBranch(addNode('child-modifier', selections.childModifier));
+    appendBranch(addNode('splitter', selections.splitter));
+    if (selections.payload === 'explosion') {
+      appendBranch(addNode('payload', 'explosion'));
+    } else if (trigger && !branchHead) {
+      appendBranch(addNode('payload', 'pulsePayload'));
+    } else if (trigger && selections.childModifier && !selections.splitter) {
+      appendBranch(addNode('payload', 'pulsePayload'));
+    }
+
+    if (trigger) connect(trigger, branchHead, 'child');
+    else connect(rootTail, branchHead);
+    return {
+      rootNodeId: emitter?.nodeId ?? null,
+      nodes,
+      edges,
+    };
+  }
+
+  updateBusterDraft(buildId, action = {}) {
+    if (!this.busterLabEnabled || buildId === 'megaBuster') return { ok: false, message: 'Select a Custom Buster chassis.' };
+    const draft = this._getBusterBuildRecord(buildId, 'draft');
+    if (!draft) return { ok: false, message: 'That Workshop Chassis has not been fabricated.' };
+    const next = JSON.parse(JSON.stringify(draft));
+    if (action.type === 'setTuning' && ['power', 'energy', 'range', 'rapid'].includes(action.stat)) {
+      next.tuning[action.stat] = Math.max(1, Math.min(10, Math.trunc(Number(action.value)) || 1));
+    } else if (action.type === 'setProgramSlot') {
+      const selections = this._getProgramSelections(next);
+      if (!Object.hasOwn(selections, action.slot)) return { ok: false, message: 'Unknown program slot.' };
+      selections[action.slot] = action.moduleId ?? '';
+      next.program = this._buildProgramFromSelections(next, selections);
+    } else {
+      return { ok: false, message: 'Unknown draft edit.' };
+    }
+    const result = this.busterLabStorage.saveDraft(next);
+    if (!result.ok) return { ok: false, message: result.error?.message ?? 'The draft could not be stored.' };
+    this.busterLabState = result.state;
+    return { ok: true, draft: result.draft ?? next };
+  }
+
+  fabricateBusterModule(moduleId) {
+    if (!this.busterLabEnabled) return { ok: false, message: 'Enable the Buster Lab first.' };
+    const recipe = BUSTER_RECIPE_LIST.find((entry) => entry.moduleId === moduleId);
+    if (!recipe) return { ok: false, message: 'Roll does not have a recipe for that function.' };
+    const discovery = getRecipeDiscoveryState(recipe, this._getBusterLabState()?.discovery);
+    if (!discovery?.fullyDiscovered) return { ok: false, message: 'Roll has not discovered the complete recipe yet.' };
+    const result = this.busterLabStorage.fabricateModule(recipe);
+    if (!result.ok) {
+      return { ok: false, message: result.reason === 'insufficient-resources' ? 'Roll is missing salvage for that recipe.' : 'Fabrication failed without consuming salvage.' };
+    }
+    this._refreshRollSalvageStorage();
+    return { ok: true, message: `${recipe.name} fabricated.`, instance: result.instance };
+  }
+
+  grantBusterLabDebugKit(mode = 'fullKit') {
+    if (!this.busterLabEnabled) return { ok: false, message: 'Enable the Buster Lab first.' };
+    if (mode !== 'fullKit') return { ok: false, message: 'Select the Full v0.1 testing kit first.' };
+    const result = this.busterLabStorage.grantDebugKit();
+    if (!result.ok) {
+      return {
+        ok: false,
+        message: result.error?.message ?? 'The debug kit could not be granted; no Lab data changed.',
+      };
+    }
+    this._refreshRollSalvageStorage();
+    const chassisMessage = result.chassis ? ', Build B' : '';
+    return {
+      ok: true,
+      message: `Debug kit ${result.grantNumber} granted: ${result.modules.length} modules, ${result.calibrations.length} Mega calibrations${chassisMessage}.`,
+      ...result,
+    };
+  }
+
+  purchaseSecondBusterChassis() {
+    if (!this.busterLabEnabled) return { ok: false, message: 'Enable the Buster Lab first.' };
+    const result = this.busterLabStorage.purchaseSecondChassis();
+    if (!result.ok) {
+      return { ok: false, message: result.reason === 'insufficient-scrap' ? 'Roll needs 20 identified scrap.' : 'Only two physical chassis are supported in v0.1.' };
+    }
+    this._refreshRollSalvageStorage();
+    return { ok: true, message: 'Workshop Chassis B fabricated.' };
+  }
+
+  equipCustomBuster(buildId, slotIndex) {
+    if (!this.busterLabEnabled || ![1, 2].includes(slotIndex)) return { ok: false, message: 'Custom Busters fit only in slots 2 and 3.' };
+    const draft = this._getBusterBuildRecord(buildId, 'draft');
+    const validation = draft
+      ? validateBusterBuild(draft, { context: this._getBusterValidationContext(buildId) })
+      : { valid: false, errors: [] };
+    if (!validation.valid) return { ok: false, message: validation.errors[0]?.message ?? 'The current draft is invalid.', errors: validation.errors };
+    if (!this._isBusterDraftSaved(buildId)) {
+      return { ok: false, message: 'Save this draft revision before equipping it.' };
+    }
+    if (!this.busterLabPlans.has(buildId) || !this._getBusterBuildRecord(buildId, 'saved')) {
+      return { ok: false, message: 'Save a valid compiled revision before equipping it.' };
+    }
+    const assignment = this.busterLabStorage.assignBuildToSlot(buildId, slotIndex);
+    if (!assignment.ok) return { ok: false, message: 'That build cannot be assigned to this slot.' };
+    const previous = this.player.armHotbar[slotIndex];
+    if (previous?.type === 'customBusterArm') {
+      if (previous.buildId !== buildId) this.busterRuntime?.cancelBuild(previous.buildId, 'slotReplaced');
+    } else if (previous) {
+      this.inventory.addItem(previous);
+    }
+    for (const otherSlot of [1, 2]) {
+      if (otherSlot !== slotIndex && this.player.armHotbar[otherSlot]?.buildId === buildId) {
+        this.player.armHotbar[otherSlot] = null;
+      }
+    }
+    const descriptor = this._createCustomBusterArmDescriptor(buildId);
+    this.player.armHotbar[slotIndex] = descriptor;
+    this.player.switchArmWeapon(slotIndex, true);
+    this.busterLabState = assignment.state;
+    this.busterRuntime.register(this.busterLabPlans.get(buildId));
+    return { ok: true, message: `${descriptor.name} equipped in slot ${slotIndex + 1}.` };
+  }
+
+  _executeCompiledBusterShot(execution) {
+    const { plan, context, reservationToken } = execution;
+    const actions = plan?.actions ?? [];
+    const rootAction = actions.find((action) => action.type === 'emit' && action.scope === 'root');
+    if (!rootAction || !context?.origin || !context?.direction) return false;
+
+    const executionState = {
+      activeProjectiles: 0,
+      released: false,
+      childAction: actions.find((action) => action.actionId === 'emit-child') ?? null,
+      trigger: actions.find((action) => action.type === 'trigger') ?? null,
+    };
+    const releaseIfFinished = () => {
+      if (!executionState.released && executionState.activeProjectiles <= 0) {
+        executionState.released = true;
+        this.busterRuntime?.releaseReservation(reservationToken);
+      }
+    };
+    const spawnAction = (action, origin, baseDirection, scope = action.scope) => {
+      if (!action) return 0;
+      const sourceDirection = baseDirection.clone?.()
+        ?? new THREE.Vector3(baseDirection.x, baseDirection.y, baseDirection.z);
+      if (sourceDirection.lengthSq() <= 0.000001) sourceDirection.set(0, 0, 1);
+      sourceDirection.normalize();
+      const rawDirections = action.splitter?.pattern === 'spread'
+        ? getSpreadDirections(sourceDirection, action.splitter.angles ?? action.splitter.angleOffsets ?? [])
+        : action.splitter?.pattern === 'radial'
+          ? getClusterDirections(sourceDirection, action.count ?? action.splitter.count ?? 5)
+          : Array.from({ length: Math.max(1, action.count ?? 1) }, () => ({
+            x: sourceDirection.x,
+            y: sourceDirection.y,
+            z: sourceDirection.z,
+          }));
+      const directions = rawDirections.map((entry) => new THREE.Vector3(entry.x, entry.y, entry.z).normalize());
+      let spawned = 0;
+
+      for (let index = 0; index < directions.length; index += 1) {
+        const direction = directions[index];
+        const controllerData = { action, elapsed: 0, pendingChild: null };
+        const controller = {
+          onEnemyImpact: ({ projectile }) => {
+            if (action.payload?.type === 'explosion') {
+              this._detonateCompiledBusterExplosion(projectile, action, context);
+              return { suppressDefaultDamage: true, suppressDefaultExplosion: true, dispose: true };
+            }
+            if (executionState.trigger?.event === 'impact' && action.actionId === 'emit-carrier') {
+              controllerData.pendingChild = {
+                reason: 'impact',
+                position: projectile.mesh.position.clone(),
+                direction: projectile.direction.clone(),
+              };
+              return { dispose: true };
+            }
+            return { dispose: true };
+          },
+          onRangeEnd: ({ projectile }) => {
+            if (action.payload?.type === 'explosion') {
+              this._detonateCompiledBusterExplosion(projectile, action, context);
+              return { suppressExpiry: true, allowCluster: false, reason: 'busterExplosion' };
+            }
+            if (executionState.trigger?.event === 'impact' && action.actionId === 'emit-carrier') {
+              controllerData.pendingChild = {
+                reason: 'impact',
+                position: projectile.mesh.position.clone(),
+                direction: projectile.direction.clone(),
+              };
+              return { suppressExpiry: true, allowCluster: false, reason: 'impact' };
+            }
+            return { suppressExpiry: true, allowCluster: false, reason: 'rangeEnd' };
+          },
+          onApexCrossing: ({ projectile }) => {
+            if (executionState.trigger?.event !== 'apex' || action.actionId !== 'emit-carrier') return null;
+            controllerData.pendingChild = {
+              reason: 'apexTrigger',
+              position: projectile.mesh.position.clone(),
+              direction: projectile.direction.clone(),
+            };
+            return { dispose: true, reason: 'apexTrigger' };
+          },
+          onAdvance: ({ projectile, dt, previousDistance, previousPosition, travel }) => {
+            if (executionState.trigger?.event !== 'delay' || action.actionId !== 'emit-carrier') return null;
+            const before = controllerData.elapsed;
+            const after = before + dt;
+            controllerData.elapsed = after;
+            const delay = executionState.trigger.delay ?? 0.6;
+            if (before < delay && after >= delay) {
+              const fraction = dt > 0 ? THREE.MathUtils.clamp((delay - before) / dt, 0, 1) : 0;
+              const crossingDistance = previousDistance + travel * fraction;
+              const crossingProgress = THREE.MathUtils.clamp(crossingDistance / Math.max(0.001, projectile.range), 0, 1);
+              projectile.mesh.position.copy(previousPosition).addScaledVector(projectile.direction, travel * fraction);
+              if (projectile.arcHeight > 0) {
+                projectile.mesh.position.y = sampleBallisticPoint({
+                  start: { x: 0, y: projectile.baseY, z: 0 },
+                  end: { x: 0, y: projectile.endY, z: 0 },
+                  arcHeight: projectile.arcHeight,
+                }, crossingProgress).y;
+              }
+              controllerData.pendingChild = {
+                reason: 'delayTrigger',
+                position: projectile.mesh.position.clone(),
+                direction: projectile.direction.clone(),
+              };
+              return { dispose: true, reason: 'delayTrigger' };
+            }
+            return null;
+          },
+          onDispose: ({ reason, projectile }) => {
+            executionState.activeProjectiles = Math.max(0, executionState.activeProjectiles - 1);
+            try {
+              const pending = controllerData.pendingChild;
+              if (pending && pending.reason === reason && executionState.childAction) {
+                controllerData.pendingChild = null;
+                spawnAction(
+                  executionState.childAction,
+                  pending.position,
+                  pending.direction,
+                  'child',
+                );
+              }
+            } finally {
+              projectile.controllerData = null;
+              releaseIfFinished();
+            }
+          },
+        };
+
+        const ballistic = action.trajectory === 'ballistic';
+        if (ballistic) direction.y = 0;
+        if (direction.lengthSq() <= 0.000001) direction.set(0, 0, 1);
+        direction.normalize();
+        const prematureCarrier = action.actionId === 'emit-carrier'
+          && executionState.trigger?.event !== 'impact';
+        const damage = prematureCarrier
+          ? action.power ?? 0
+          : action.damagePower ?? action.power ?? 0;
+        const stagger = prematureCarrier
+          ? action.moduleId === 'mortarShell'
+            ? Math.min(0.25, damage * 0.015)
+            : Math.min(0.18, damage * 0.01)
+          : action.stagger ?? 0;
+        const attackMeta = {
+          ...CUSTOM_BUSTER_ATTACK_META,
+          suppressRewards: Boolean(context.noRewards),
+          busterRange: Boolean(context.noRewards),
+        };
+        const projectile = this.projectiles.spawn({
+          owner: 'player',
+          position: origin,
+          direction,
+          speed: action.speed,
+          range: action.range,
+          radius: action.moduleId === 'mortarShell' ? 0.22 : 0.17,
+          damage,
+          color: plan.isMegaBuster ? 0x7ee7ff : 0xf2c84b,
+          source: this.player,
+          critical: false,
+          element: null,
+          pierce: 0,
+          explosiveRadius: 0,
+          explodeOnExpire: false,
+          armorBreakChance: 0,
+          armorPierce: 0,
+          stagger,
+          statusBuildup: 0,
+          chainChance: 0,
+          arcHeight: ballistic ? Math.max(1.15, action.range * 0.2) : 0,
+          endY: ballistic ? (context.aimPoint?.y ?? origin.y) : origin.y,
+          homingStrength: action.guidance ? 4.2 : 0,
+          homingRange: action.guidance ? action.range : 0,
+          target: action.guidance && scope === 'root' ? context.target : null,
+          freeHoming: Boolean(action.guidance),
+          visualType: action.moduleId === 'mortarShell' ? 'shell' : 'buster',
+          controller,
+          controllerData,
+          buildRevision: execution.buildRevision,
+          executionId: execution.executionId,
+          actionId: action.actionId,
+          triggerDepth: scope === 'child' ? 1 : 0,
+          reservationToken,
+          attackDomain: CUSTOM_BUSTER_ATTACK_META.attackDomain,
+          attackMeta,
+        });
+        if (projectile) {
+          executionState.activeProjectiles += 1;
+          spawned += 1;
+        }
+      }
+      return spawned;
+    };
+
+    try {
+      const spawned = spawnAction(rootAction, context.origin, context.direction, 'root');
+      if (spawned <= 0) {
+        releaseIfFinished();
+        return false;
+      }
+      this.addParticleBurst(context.origin, plan.isMegaBuster ? 0x7ee7ff : 0xf2c84b, 8, 0.1);
+      return true;
+    } catch (error) {
+      this.projectiles.cancelWhere(
+        (projectile) => projectile.reservationToken === reservationToken,
+        'spawnRejected',
+      );
+      releaseIfFinished();
+      console.error('Compiled Buster shot failed', error);
+      return false;
+    }
+  }
+
+  _detonateCompiledBusterExplosion(projectile, action, context) {
+    this.addExplosion(
+      projectile.mesh.position,
+      action.power ?? 0,
+      action.payload?.radius ?? 1.55,
+      0xff6a16,
+      {
+        source: this.player,
+        element: null,
+        critical: false,
+        stagger: action.stagger ?? 0,
+        armorBreakChance: 0,
+        armorPierce: 0,
+        statusBuildup: 0,
+        damagePlayer: false,
+        triggerMines: false,
+        visualStyle: 'fierySphere',
+        attackDomain: CUSTOM_BUSTER_ATTACK_META.attackDomain,
+        suppressGenericOffense: true,
+        suppressRewards: Boolean(context.noRewards),
+      },
+    );
+  }
+
+  _getBusterValidationContext(buildId) {
+    return {
+      ownedModuleInstanceIds: this.busterLabStorage?.getOwnedModuleInstanceIds?.() ?? [],
+      claimedModuleInstanceIds: this.busterLabStorage?.getClaimedModuleInstanceIds?.({ excludeBuildId: buildId }) ?? [],
+    };
+  }
+
+  _getBuildRevision(buildId) {
+    return (this._getBusterLabState()?.chassisRevisions ?? [])
+      .filter((entry) => entry.buildId === buildId)
+      .reduce((maximum, entry) => Math.max(maximum, Number(entry.revision) || 0), 0);
+  }
+
+  _compileCustomBusterBuild(build, { revision = null, test = false } = {}) {
+    if (!build) return { ok: false, errors: [{ code: 'MISSING_BUILD', path: '', moduleId: null, message: 'No build source is available.' }] };
+    const options = {
+      context: this._getBusterValidationContext(build.buildId),
+      revision: revision ?? this._getBuildRevision(build.buildId),
+      throwOnError: false,
+    };
+    const compiled = compileBusterBuild(build, options);
+    if (!compiled?.ok) return compiled;
+    if (!test) return compiled;
+    return Object.freeze({
+      ...compiled,
+      weaponKey: `test:${build.buildId}:${options.revision}`,
+      testRange: true,
+      name: `${build.name ?? build.buildId} Range Draft`,
+    });
+  }
+
+  _recompileMegaBusterPlan() {
+    const state = this._getBusterLabState();
+    if (!state) return null;
+    const calibration = this._ensureMegaCalibrationState(state);
+    const tuning = this._getMegaCalibrationRatings(state);
+    const source = {
+      schemaVersion: 1,
+      rulesetVersion: CUSTOM_BUSTER_RULESET.rulesetVersion,
+      buildId: MEGA_BUSTER_BASE_PROFILE.buildId,
+      chassisId: MEGA_BUSTER_BASE_PROFILE.chassisId,
+      tuning: { ...MEGA_BUSTER_BASE_PROFILE.tuning },
+      program: {
+        rootNodeId: 'mega-pulse',
+        nodes: [{
+          nodeId: 'mega-pulse',
+          moduleId: MEGA_BUSTER_BASE_PROFILE.emitterModuleId,
+          moduleInstanceId: 'mega-pulse-core',
+        }],
+        edges: [],
+      },
+    };
+    const compiled = compileBusterBuild(source, { revision: calibration.revision });
+    const emitter = getBusterModuleDefinition(MEGA_BUSTER_BASE_PROFILE.emitterModuleId);
+    const powerMultiplier = getBusterTuningMultiplier(tuning.power);
+    const rangeMultiplier = getBusterTuningMultiplier(tuning.range);
+    const rapidMultiplier = getBusterTuningMultiplier(tuning.rapid);
+    const power = emitter.basePower * powerMultiplier;
+    const rootRange = emitter.baseRange * rangeMultiplier;
+    const baseRapid = emitter.baseRapid * rapidMultiplier;
+    const cycleTime = 1 / baseRapid;
+    const maxEnergy = CUSTOM_BUSTER_RULESET.maxEnergyBase
+      + CUSTOM_BUSTER_RULESET.maxEnergyPerEnergyRating * tuning.energy;
+    const stagger = Math.min(0.18, power * 0.01);
+    const stats = {
+      ...compiled.stats,
+      tunedPower: power,
+      effectivePower: power,
+      rawEffectivePower: power,
+      effectivePowerCap: power * 1.25,
+      perChildPower: power,
+      carrierPower: 0,
+      maxEnergy,
+      energyCost: MEGA_BUSTER_BASE_PROFILE.energyCost,
+      energyRemaining: maxEnergy - MEGA_BUSTER_BASE_PROFILE.energyCost,
+      baseRapid,
+      cycleTime,
+      finalRapid: baseRapid,
+      rootRange,
+      childRange: rootRange * CUSTOM_BUSTER_RULESET.childRangeMultiplier,
+      shotsPerCharge: Math.floor(maxEnergy / MEGA_BUSTER_BASE_PROFILE.energyCost),
+      stagger,
+      tuningMultipliers: { power: powerMultiplier, range: rangeMultiplier, rapid: rapidMultiplier },
+    };
+    const action = {
+      ...compiled.actions[0],
+      power,
+      totalPower: power,
+      damagePower: power,
+      range: rootRange,
+      stagger,
+    };
+    const packets = {
+      ...compiled.packets,
+      root: {
+        ...compiled.packets.root,
+        power,
+        totalPower: power,
+        damagePower: power,
+        range: rootRange,
+      },
+    };
+    const powerLedger = [
+      {
+        stage: 'mega-calibration',
+        moduleId: MEGA_BUSTER_BASE_PROFILE.emitterModuleId,
+        scope: 'root',
+        inputPower: emitter.basePower,
+        multiplier: powerMultiplier,
+        outputPower: power,
+        allocation: { root: power },
+        capClipped: 0,
+      },
+      {
+        stage: 'effective-cap',
+        moduleId: null,
+        scope: 'root',
+        inputPower: power,
+        multiplier: 1,
+        outputPower: power,
+        allocation: { carrier: 0, terminalBatch: power },
+        capClipped: 0,
+      },
+      {
+        stage: 'projectile-allocation',
+        moduleId: null,
+        scope: 'root',
+        inputPower: power,
+        multiplier: 1,
+        outputPower: power,
+        allocation: { count: 1, each: power, total: power },
+        capClipped: 0,
+      },
+    ];
+    const ledger = {
+      energy: {
+        maxEnergy,
+        energyCost: MEGA_BUSTER_BASE_PROFILE.energyCost,
+        remaining: maxEnergy - MEGA_BUSTER_BASE_PROFILE.energyCost,
+        entries: [{
+          nodeId: 'mega-pulse',
+          moduleId: MEGA_BUSTER_BASE_PROFILE.emitterModuleId,
+          moduleInstanceId: 'mega-pulse-core',
+          energyCost: MEGA_BUSTER_BASE_PROFILE.energyCost,
+        }],
+      },
+      cycle: {
+        baseCycleTime: cycleTime,
+        moduleDelay: 0,
+        cycleTime,
+        entries: [],
+      },
+      power: {
+        basePower: emitter.basePower,
+        tunedPower: power,
+        effectivePowerCap: power * CUSTOM_BUSTER_RULESET.effectivePowerCapMultiplier,
+        rawEffectivePower: power,
+        effectivePower: power,
+        capClipped: 0,
+        entries: powerLedger,
+      },
+    };
+    const preview = {
+      ...compiled.preview,
+      packets,
+      damage: {
+        total: power,
+        carrier: 0,
+        terminalBatch: power,
+        perProjectile: power,
+        stagger,
+        radius: 0,
+      },
+      timing: { cycleTime, triggerDelay: 0 },
+    };
+    const plan = deepFreezeBusterValue({
+      ...compiled,
+      weaponKey: 'megaBuster',
+      buildId: 'megaBuster',
+      isMegaBuster: true,
+      revision: calibration.revision,
+      buildRevision: calibration.revision,
+      stats,
+      actions: [action],
+      packets,
+      ledger,
+      preview,
+      rootPower: power,
+      perChildPower: power,
+      childPower: power,
+      powerLedger,
+      description: `Fixed Mega Buster Pulse. ${stats.shotsPerCharge} shots per battery; weapon-local PWR / ENG / RNG / RPD.`,
+    });
+    this.busterLabPlans.set('megaBuster', plan);
+    this.busterRuntime?.register(plan);
+    return plan;
+  }
+
+  _recompileBusterPlans() {
+    if (!this.busterLabEnabled) return;
+    const previousKeys = [...this.busterLabPlans.keys()];
+    const nextPlans = new Map();
+    this.busterLabPlans = nextPlans;
+    this._recompileMegaBusterPlan();
+    for (const build of this._getBusterLabState()?.chassisBuilds ?? []) {
+      const compiled = this._compileCustomBusterBuild(build);
+      if (!compiled?.ok) continue;
+      nextPlans.set(build.buildId, compiled);
+      this.busterRuntime?.register(compiled);
+    }
+    for (const key of previousKeys) {
+      if (!nextPlans.has(key)) this.busterRuntime?.cancelBuild(key, 'invalidated');
+    }
+    this._quarantineInvalidBusterAssignments();
+  }
+
+  _quarantineInvalidBusterAssignments() {
+    const state = this._getBusterLabState();
+    const slots = state?.assignments?.slots ?? {};
+    const invalidSlots = [1, 2].filter((slotIndex) => {
+      const buildId = slots[String(slotIndex)] ?? slots[slotIndex];
+      return buildId && !this.busterLabPlans.has(buildId);
+    });
+    if (invalidSlots.length === 0) return;
+    const result = this.busterLabStorage.mutate((candidate) => {
+      candidate.assignments = candidate.assignments ?? { slots: {} };
+      candidate.assignments.slots = candidate.assignments.slots ?? {};
+      for (const slotIndex of invalidSlots) candidate.assignments.slots[String(slotIndex)] = null;
+    });
+    if (result.ok) this.busterLabState = result.state;
+    for (const slotIndex of invalidSlots) {
+      if (this.player.armHotbar[slotIndex]?.type === 'customBusterArm') this.player.armHotbar[slotIndex] = null;
+    }
+    if (this.player.getActiveArmWeapon?.()?.type === 'customBusterArm') this.player.switchArmWeapon(0, true);
+  }
+
+  saveBusterDraft(buildId) {
+    const draft = this._getBusterBuildRecord(buildId, 'draft');
+    if (!draft) return { ok: false, message: 'No draft exists for that chassis.' };
+    const validation = validateBusterBuild(draft, { context: this._getBusterValidationContext(buildId) });
+    if (!validation.valid) return { ok: false, message: validation.errors[0]?.message ?? 'The draft is invalid.', errors: validation.errors };
+    this.busterRuntime?.cancelBuild(buildId, 'recompile');
+    const result = this.busterLabStorage.saveBuild(draft);
+    if (!result.ok) return { ok: false, message: result.error?.message ?? 'The revision could not be saved.', errors: result.errors ?? [] };
+    this.busterLabState = result.state;
+    if (!(result.state.migrations?.unknownModuleQuarantine?.length > 0)) {
+      this.busterLabLoadWarning = null;
+    }
+    this._recompileBusterPlans();
+    return { ok: true, message: `${draft.name ?? buildId} revision ${this._getBuildRevision(buildId)} saved.` };
+  }
+
+  getBusterLabViewModel(selectedBuildId = 'build-a') {
+    if (!this.busterLabEnabled) return null;
+    const state = this._getBusterLabState();
+    const buildId = selectedBuildId === 'megaBuster' ? 'megaBuster' : selectedBuildId;
+    const chassisById = new Map((state.chassisInstances ?? []).map((entry) => [entry.chassisId, entry]));
+    const assignmentSlots = state.assignments?.slots ?? {};
+    const builds = ['build-a', 'build-b'].map((id, index) => {
+      const chassisId = index === 0 ? 'chassis-a' : 'chassis-b';
+      const saved = state.chassisBuilds?.find((entry) => entry.buildId === id) ?? null;
+      return {
+        buildId: id,
+        label: index === 0 ? 'Build A' : 'Build B',
+        chassisId,
+        available: chassisById.has(chassisId),
+        saved: Boolean(saved && this.busterLabPlans.has(id)),
+        equippedSlots: [1, 2].filter((slotIndex) => (
+          (assignmentSlots[String(slotIndex)] ?? assignmentSlots[slotIndex]) === id
+        )),
+      };
+    });
+    const selectedRecord = builds.find((entry) => entry.buildId === buildId) ?? null;
+    const draft = buildId === 'megaBuster' ? null : this._getBusterBuildRecord(buildId, 'draft');
+    const validation = draft
+      ? validateBusterBuild(draft, { context: this._getBusterValidationContext(buildId) })
+      : { valid: false, ok: false, errors: [] };
+    const compiled = validation.valid
+      ? this._compileCustomBusterBuild(draft, { revision: this._getBuildRevision(buildId) + 1 })
+      : null;
+    const savedBuild = buildId === 'megaBuster' ? null : this._getBusterBuildRecord(buildId, 'saved');
+    const claims = new Map();
+    for (const build of state.chassisBuilds ?? []) {
+      for (const node of build.program?.nodes ?? []) {
+        if (node.moduleInstanceId) claims.set(node.moduleInstanceId, build.buildId);
+      }
+    }
+    const moduleInstances = (state.moduleInstances ?? []).map((instance) => ({
+      ...instance,
+      name: getBusterModuleDefinition(instance.moduleId)?.label ?? instance.name ?? instance.moduleId,
+      installedBuildId: claims.get(instance.instanceId ?? instance.moduleInstanceId) ?? null,
+    }));
+    const recipeFunctions = {
+      pulseBolt: 'Rapid, deterministic Pulse emitter.',
+      mortarShell: 'Ballistic high-angle shell emitter.',
+      pursuitGuidance: 'Tracks a lock first, then the nearest stable target.',
+      atApex: 'Launches its child branch at a Mortar carrier’s apex.',
+      afterDelay: 'Launches its child branch after exactly 0.60 seconds.',
+      spread3: 'Splits a packet across three symmetric shots.',
+      cluster5: 'Splits a packet across five deterministic radial children.',
+      explosion: 'Replaces direct damage with a radius-1.55 blast.',
+    };
+    const recipes = BUSTER_RECIPE_LIST.map((recipe) => {
+      const discovery = getRecipeDiscoveryState(recipe, state.discovery);
+      const check = this.rollSalvageStorage.canTransactRecipe?.(recipe) ?? { ok: false };
+      const ingredientsLabel = Object.entries(recipe.parts).map(([partId, count]) => {
+        const partName = this.rollSalvageStorage.parts?.[partId]?.name ?? partId;
+        return `${partName}${count > 1 ? ` ×${count}` : ''}`;
+      }).join(' + ');
+      return {
+        ...discovery,
+        moduleId: discovery.moduleId ?? (discovery.level === 'unknown' ? null : recipe.moduleId),
+        discoveryState: discovery.level,
+        name: discovery.level === 'unknown' ? discovery.displayName : recipe.name,
+        function: discovery.level === 'unknown' ? '' : recipeFunctions[recipe.moduleId],
+        hint: discovery.rollClue,
+        parts: discovery.fullyDiscovered ? recipe.parts : null,
+        ingredientsLabel: discovery.fullyDiscovered ? ingredientsLabel : null,
+        scrapCost: discovery.fullyDiscovered ? recipe.scrapCost : null,
+        canFabricate: discovery.fullyDiscovered && check.ok,
+      };
+    });
+    const calibration = this._ensureMegaCalibrationState(state);
+    const calibrationSlots = calibration.slots.map((instanceId) => (
+      calibration.instances.find((entry) => entry.instanceId === instanceId) ?? null
+    ));
+    const megaPlan = this.busterLabPlans.get('megaBuster');
+    const tuningTotal = Object.values(draft?.tuning ?? {}).reduce((sum, value) => sum + Number(value || 0), 0);
+
+    return {
+      enabled: true,
+      debugPresetEnabled: this.busterLabDebugEnabled,
+      debugGrantCount: Math.max(0, Math.trunc(Number(state.migrations?.debugKitGrantCount)) || 0),
+      warning: this.busterLabLoadWarning ?? this.busterLabStorage.lastWarning ?? state.warning ?? null,
+      identifiedScrap: this.rollSalvageStorage.identifiedScrap,
+      builds,
+      build: selectedRecord ? { ...selectedRecord, draft, savedBuild } : null,
+      tuningRemaining: draft ? 16 - tuningTotal : 0,
+      programSelections: draft ? this._getProgramSelections(draft) : null,
+      programOptions: {
+        emitter: [
+          { value: '', label: 'Choose emitter' },
+          { value: 'pulseBolt', label: 'Pulse Bolt' },
+          { value: 'mortarShell', label: 'Mortar Shell' },
+        ],
+        rootModifier: [{ value: '', label: 'None' }, { value: 'pursuitGuidance', label: 'Pursuit Guidance' }],
+        trigger: [
+          { value: '', label: 'None (direct)' },
+          { value: 'atApex', label: 'At Apex' },
+          { value: 'onImpact', label: 'On Impact (built in)' },
+          { value: 'afterDelay', label: 'After 0.60s' },
+        ],
+        childModifier: [{ value: '', label: 'None' }, { value: 'pursuitGuidance', label: 'Pursuit Guidance' }],
+        splitter: [
+          { value: '', label: 'None' },
+          { value: 'spread3', label: 'Spread ×3' },
+          { value: 'cluster5', label: 'Cluster ×5' },
+        ],
+        payload: [{ value: 'pulsePayload', label: 'Native Pulse' }, { value: 'explosion', label: 'Explosion' }],
+      },
+      nodeCount: draft?.program?.nodes?.length ?? 0,
+      validation,
+      result: compiled?.ok ? compiled : null,
+      canSave: Boolean(selectedRecord?.available && validation.valid),
+      canEquip: Boolean(
+        validation.valid
+        && savedBuild
+        && this._isBusterDraftSaved(buildId)
+        && this.busterLabPlans.has(buildId)
+      ),
+      canTest: buildId === 'megaBuster' ? Boolean(megaPlan) : Boolean(validation.valid && compiled?.ok),
+      canBuySecondChassis: !chassisById.has('chassis-b') && this.rollSalvageStorage.identifiedScrap >= 20,
+      moduleInstances,
+      recipes,
+      mega: {
+        tuning: this._getMegaCalibrationRatings(state),
+        calibrationSlots,
+        availableCalibrations: calibration.instances,
+        result: megaPlan,
+      },
+    };
+  }
+
+  enterBusterTestRange(buildId = 'build-a') {
+    if (!this.busterLabEnabled) return { ok: false, message: 'Enable the Buster Lab first.' };
+    if (this.busterTestRange?.active) this.exitBusterTestRange();
+    let plan = null;
+    if (buildId === 'megaBuster') {
+      const mega = this.busterLabPlans.get('megaBuster');
+      if (mega) {
+        plan = deepFreezeBusterValue({
+          ...mega,
+          weaponKey: `test:megaBuster:${mega.revision}`,
+          testRange: true,
+        });
+      }
+    } else {
+      const draft = this._getBusterBuildRecord(buildId, 'draft');
+      const validation = draft
+        ? validateBusterBuild(draft, { context: this._getBusterValidationContext(buildId) })
+        : { valid: false, errors: [] };
+      if (!validation.valid) {
+        return { ok: false, message: validation.errors[0]?.message ?? 'The draft is not valid for testing.', errors: validation.errors };
+      }
+      const compiled = this._compileCustomBusterBuild(draft, {
+        revision: this._getBuildRevision(buildId) + 1,
+        test: true,
+      });
+      if (compiled?.ok) plan = compiled;
+    }
+    if (!plan) return { ok: false, message: 'The compiler could not produce a range plan.' };
+
+    const bayCenter = new THREE.Vector3(72, 0, -72);
+    const rangeGroup = new THREE.Group();
+    rangeGroup.name = 'busterTestRange';
+    const floorMaterial = new THREE.MeshStandardMaterial({
+      color: 0x27313a,
+      emissive: 0x0c2630,
+      emissiveIntensity: 0.2,
+      metalness: 0.65,
+      roughness: 0.5,
+    });
+    const floorGeometry = new THREE.BoxGeometry(16, 0.18, 22);
+    const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+    floor.position.copy(bayCenter).add(new THREE.Vector3(0, -0.12, 8));
+    floor.receiveShadow = true;
+    rangeGroup.add(floor);
+    const railMaterial = new THREE.MeshBasicMaterial({ color: 0x43dff5, transparent: true, opacity: 0.55 });
+    const railGeometry = new THREE.BoxGeometry(0.08, 0.08, 22);
+    for (const xOffset of [-7.7, 7.7]) {
+      const rail = new THREE.Mesh(railGeometry, railMaterial);
+      rail.position.copy(bayCenter).add(new THREE.Vector3(xOffset, 0.02, 8));
+      rangeGroup.add(rail);
+    }
+    const dummies = [
+      // Keep both targets inside a neutral-rating Mortar's 6.2-unit range so
+      // every v0.1 emitter can be meaningfully exercised in the bay.
+      createBusterRangeDummy('range-stationary', bayCenter.clone().add(new THREE.Vector3(-1.8, 0, 4.8))),
+      createBusterRangeDummy('range-moving', bayCenter.clone().add(new THREE.Vector3(0, 0, 5.2)), { moving: true }),
+    ];
+    for (const dummy of dummies) rangeGroup.add(dummy.root);
+    this.scene.add(rangeGroup);
+
+    const runtimeResources = this.busterRuntime.createResourceSnapshot();
+    const previousPlan = this.getActiveBusterPlan();
+    const previousWeaponKey = previousPlan?.weaponKey ?? previousPlan?.buildId ?? null;
+    this.combat?._clearPendingAttacks?.();
+    if (previousWeaponKey) this.busterRuntime.cancelBuild(previousWeaponKey, 'rangeEnter');
+    const restore = {
+      position: this.player.root.position.clone(),
+      rotationY: this.player.root.rotation.y,
+      lastMoveDirection: this.player.lastMoveDirection.clone(),
+      armHotbar: [...this.player.armHotbar],
+      activeArmIndex: this.player.activeArmIndex,
+      arenaRadius: this.arenaRadius,
+      inventoryWasOpen: this.inventoryOpen,
+      inventoryMode: this.ui?.inventoryMode ?? 'roll',
+      runtimeResources,
+      combatSwapTimer: this.combat.swapTimer,
+    };
+    this.busterTestRange = {
+      active: true,
+      buildId,
+      plan,
+      group: rangeGroup,
+      dummies,
+      restore,
+      resources: { floorGeometry, floorMaterial, railGeometry, railMaterial },
+    };
+    this.setInventoryOpen(false);
+    this.keys.clear();
+    this.pointer.primary = false;
+    this.pointer.primaryPressed = false;
+    this.arenaRadius = 160;
+    this.player.root.position.copy(bayCenter);
+    this.player.root.rotation.y = 0;
+    this.player.lastMoveDirection.set(0, 0, 1);
+    this.player.armHotbar[1] = this._createCustomBusterArmDescriptor(buildId);
+    this.player.switchArmWeapon(1, true);
+    this.combat.swapTimer = 0;
+    this.busterRuntime.register(plan);
+    this.busterRuntime.resetWeapon(plan.weaponKey);
+    this.busterRuntime.equip(plan);
+    this.cameraController.snapTo(this.player);
+    this.ui.showToast('Buster Test Range — press Escape to return to Roll', '#7df8ff');
+    return { ok: true, plan };
+  }
+
+  exitBusterTestRange() {
+    const range = this.busterTestRange;
+    if (!range?.active) return false;
+    this.combat?._clearPendingAttacks?.();
+    this.busterRuntime?.cancelBuild(range.plan.weaponKey, 'rangeExit');
+    this.projectiles.cancelWhere(
+      (projectile) => projectile.attackMeta?.busterRange || projectile.executionId?.startsWith?.(range.plan.weaponKey),
+      'rangeExit',
+    );
+    for (const dummy of range.dummies) dummy.dispose();
+    range.group.removeFromParent();
+    range.resources.floorGeometry.dispose();
+    range.resources.floorMaterial.dispose();
+    range.resources.railGeometry.dispose();
+    range.resources.railMaterial.dispose();
+    this.busterRuntime?.resetWeapon(range.plan.weaponKey, { remove: true });
+
+    const { restore } = range;
+    this.busterRuntime?.restoreResourceSnapshot(restore.runtimeResources);
+    this.busterTestRange = null;
+    this.player.armHotbar = [...restore.armHotbar];
+    this.arenaRadius = restore.arenaRadius;
+    this.player.root.position.copy(restore.position);
+    this.player.root.rotation.y = restore.rotationY;
+    this.player.lastMoveDirection.copy(restore.lastMoveDirection);
+    this.player.switchArmWeapon(restore.activeArmIndex, true);
+    this.combat.swapTimer = restore.combatSwapTimer;
+    this.cameraController.snapTo(this.player);
+    if (restore.inventoryWasOpen) this.setInventoryOpen(true, { mode: restore.inventoryMode });
+    this.ui.showToast('Returned from the Buster Test Range', '#7df8ff');
+    return true;
+  }
+
+  _updateBusterTestRange(dt) {
+    for (const dummy of this.busterTestRange?.dummies ?? []) dummy.update(dt);
+  }
+
+  getProjectileTargets() {
+    return this.busterTestRange?.active ? this.busterTestRange.dummies : this.enemies;
   }
 
   damageEnemy(enemy, amount, meta = {}) {
@@ -1349,12 +2748,16 @@ export class Game {
       this._applyEnemyStatusFromHit(enemy, dealt, meta);
     }
 
-    if (!meta.statusTick && meta.source === this.player && this.player.stats.lifeSteal > 0) {
+    if (!meta.statusTick
+      && !meta.suppressGenericOffense
+      && meta.source === this.player
+      && this.player.stats.lifeSteal > 0) {
       this.player.heal(dealt * this.player.stats.lifeSteal);
     }
 
     if (!meta.statusTick
       && !meta.chainProcessed
+      && !meta.suppressGenericOffense
       && meta.source === this.player
       && this.player.stats.chainLightningChance > 0
       && Math.random() < this.player.stats.chainLightningChance) {
@@ -2078,6 +3481,64 @@ export class Game {
     return part;
   }
 
+  _addFieryExplosionVisual(position, radius, {
+    kind = 'fieryExplosion',
+    name = 'fieryExplosion',
+    childNamePrefix = 'fieryExplosion',
+    life = ENEMY_DEATH_EXPLOSION_LIFE,
+    maxScale = 1.3,
+  } = {}) {
+    const explosion = new THREE.Group();
+    explosion.name = name;
+    explosion.position.copy(position);
+    explosion.userData.explosionVisual = 'fierySphere';
+    const addFireSphere = (geometry, color, opacity, childName) => {
+      const material = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      material.userData.fieryExplosionBaseOpacity = opacity;
+      const sphere = new THREE.Mesh(geometry, material);
+      sphere.name = childName;
+      explosion.add(sphere);
+      return sphere;
+    };
+    addFireSphere(
+      ENEMY_DEATH_SPHERE_GEOMETRY,
+      0xff6a16,
+      0.5,
+      `${childNamePrefix}FieryShell`,
+    );
+    addFireSphere(
+      ENEMY_DEATH_CORE_GEOMETRY,
+      0xffa21a,
+      0.78,
+      `${childNamePrefix}FlameCore`,
+    );
+    const hotCore = addFireSphere(
+      ENEMY_DEATH_SPHERE_GEOMETRY,
+      0xffe06a,
+      0.92,
+      `${childNamePrefix}HotCore`,
+    );
+    hotCore.scale.setScalar(0.42);
+    explosion.scale.setScalar(radius * 0.08);
+    this.scene.add(explosion);
+    const effect = {
+      kind,
+      object: explosion,
+      life,
+      maxLife: life,
+      radius,
+      maxScale,
+    };
+    this.timedEffects.push(effect);
+    return effect;
+  }
+
   addEnemyDeathEffect(enemy) {
     if (!enemy?.root || !this.scene) return false;
 
@@ -2104,35 +3565,12 @@ export class Game {
     const burstRadius = THREE.MathUtils.clamp(Math.max(size.x, size.y, size.z) * 0.32, 0.48, 1.25);
     const floorY = enemy.deathLandingPosition?.y ?? enemy.deathFloorY ?? enemy.root.position.y;
 
-    const explosion = new THREE.Group();
-    explosion.name = 'enemyDeathExplosion';
-    explosion.position.copy(center);
-    const addFireSphere = (geometry, color, opacity, name) => {
-      const material = new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      });
-      material.userData.enemyDeathBaseOpacity = opacity;
-      const sphere = new THREE.Mesh(geometry, material);
-      sphere.name = name;
-      explosion.add(sphere);
-      return sphere;
-    };
-    addFireSphere(ENEMY_DEATH_SPHERE_GEOMETRY, 0xff6a16, 0.5, 'enemyDeathExplosionFieryShell');
-    addFireSphere(ENEMY_DEATH_CORE_GEOMETRY, 0xffa21a, 0.78, 'enemyDeathExplosionFlameCore');
-    const hotCore = addFireSphere(ENEMY_DEATH_SPHERE_GEOMETRY, 0xffe06a, 0.92, 'enemyDeathExplosionHotCore');
-    hotCore.scale.setScalar(0.42);
-    explosion.scale.setScalar(burstRadius * 0.08);
-    this.scene.add(explosion);
-    this.timedEffects.push({
+    this._addFieryExplosionVisual(center, burstRadius, {
       kind: 'enemyDeathExplosion',
-      object: explosion,
+      name: 'enemyDeathExplosion',
+      childNamePrefix: 'enemyDeathExplosion',
       life: ENEMY_DEATH_EXPLOSION_LIFE,
-      maxLife: ENEMY_DEATH_EXPLOSION_LIFE,
-      radius: burstRadius,
+      maxScale: 1.3,
     });
 
     const debrisGroup = new THREE.Group();
@@ -2234,26 +3672,38 @@ export class Game {
   }
 
   _resolveExplosion(position, damage, radius = 2.2, color = 0xffb347, meta = {}) {
-    const wave = new THREE.Mesh(
-      new THREE.RingGeometry(radius * 0.15, radius, 36),
-      new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.52,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      }),
-    );
+    if (meta.visualStyle === 'fierySphere') {
+      this._addFieryExplosionVisual(position, radius, {
+        kind: 'busterExplosionSphere',
+        name: 'busterExplosionSphere',
+        childNamePrefix: 'busterExplosion',
+        life: 0.46,
+        maxScale: 1.08,
+      });
+      this.addParticleBurst(position, 0xff6a16, 8, 0.12);
+      this.addParticleBurst(position, 0xffd45a, 4, 0.08);
+    } else {
+      const wave = new THREE.Mesh(
+        new THREE.RingGeometry(radius * 0.15, radius, 36),
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.52,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
 
-    wave.name = 'explosionWave';
-    wave.position.copy(position);
-    wave.position.y += 0.08;
-    wave.rotation.x = -Math.PI / 2;
-    this.scene.add(wave);
-    this.timedEffects.push({ object: wave, life: 0.32, maxLife: 0.32, grow: true });
+      wave.name = 'explosionWave';
+      wave.position.copy(position);
+      wave.position.y += 0.08;
+      wave.rotation.x = -Math.PI / 2;
+      this.scene.add(wave);
+      this.timedEffects.push({ object: wave, life: 0.32, maxLife: 0.32, grow: true });
+    }
 
     if (meta.damageEnemies !== false) {
-      for (const enemy of this.enemies) {
+      for (const enemy of this.getProjectileTargets()) {
         if (enemy.dead) {
           continue;
         }
@@ -2264,7 +3714,7 @@ export class Game {
           const globalHitStopDuration = meta.globalHitStopDuration ?? meta.hitStopDuration ?? 0.1;
           this.damageEnemy(enemy, damage, {
             source: meta.source ?? this.player,
-            element: meta.element ?? 'fire',
+            element: Object.prototype.hasOwnProperty.call(meta, 'element') ? meta.element : 'fire',
             critical: meta.critical ?? false,
             stagger: meta.stagger ?? 0.28,
             armorBreakChance: meta.armorBreakChance ?? 0.12,
@@ -2276,6 +3726,9 @@ export class Game {
             enemyHitStopDuration,
             globalHitStopDuration,
             hitStopTimeScale: meta.hitStopTimeScale ?? 0.05,
+            attackDomain: meta.attackDomain,
+            suppressGenericOffense: Boolean(meta.suppressGenericOffense),
+            suppressRewards: Boolean(meta.suppressRewards),
           });
         }
       }
@@ -2399,27 +3852,43 @@ export class Game {
           groundY: playerGroundY,
           game: this,
         });
-        this.dungeonController.update(gameplayDt);
-        this.mapEvents.update(gameplayDt);
-        this.spawner.update(gameplayDt);
-        this._updateEnemies(gameplayDt);
-        this.dungeonController.constrainEnemies();
+        if (this.busterTestRange?.active) {
+          this._updateBusterTestRange(gameplayDt);
+        } else {
+          this.dungeonController.update(gameplayDt);
+          this.mapEvents.update(gameplayDt);
+          this.spawner.update(gameplayDt);
+          this._updateEnemies(gameplayDt);
+          this.dungeonController.constrainEnemies();
+        }
+        this.busterRuntime?.update(gameplayDt);
         this.combat.update(gameplayDt);
         this.projectiles.update(gameplayDt);
-        this._updateHazards(gameplayDt);
-        this._updatePendingExplosions();
-        this._updateDestructibles(gameplayDt);
+        if (!this.busterTestRange?.active) {
+          this._updateHazards(gameplayDt);
+          this._updatePendingExplosions();
+          this._updateDestructibles(gameplayDt);
+        }
 
-        const collected = this.lootSystem.update(gameplayDt, this.player, this.inventory);
+        const collected = this.busterTestRange?.active
+          ? []
+          : this.lootSystem.update(gameplayDt, this.player, this.inventory);
         for (const item of collected) {
-          this.ui.showLootToast(item);
+          if (this.busterLabEnabled && this._convertLegacyBusterPartItem(item, { futureAcquisition: true })) {
+            this.inventory.removeItem(item.id);
+            this.ui.showToast(`${item.typeLabel ?? item.name} converted to a Mega calibration`, '#7df8ff');
+          } else {
+            this.ui.showLootToast(item);
+          }
         }
 
         if (collected.length > 0) {
           this.ui.renderInventory();
         }
 
-        const collectedRefractors = this.refractors.update(gameplayDt, this.player, this.inventory);
+        const collectedRefractors = this.busterTestRange?.active
+          ? []
+          : this.refractors.update(gameplayDt, this.player, this.inventory);
         for (const refractor of collectedRefractors) {
           this.ui.showToast(`${refractor.label} +${refractor.value}z`, refractor.color);
         }
@@ -3576,7 +5045,9 @@ export class Game {
       '--reticle-color',
       `#${tempColor.set(weaponHud.color).getHexString()}`,
     );
-    const readiness = Math.min(weaponHud.energyPercent, weaponHud.outputPercent ?? 1);
+    const readiness = weaponHud.singleGauge
+      ? weaponHud.energyPercent
+      : Math.min(weaponHud.energyPercent, weaponHud.outputPercent ?? 1);
     this.aimReticle.style.setProperty('--reticle-opacity', readiness <= 0.2 ? '0.48' : '0.78');
 
     const scale = weaponHud.mode === 'Trap' || weaponHud.mode === 'Arc'
@@ -3673,6 +5144,17 @@ export class Game {
       if (event.code === 'Backquote') {
         event.preventDefault();
         this.setPoseDebugOpen(!this.poseDebugOpen);
+        return;
+      }
+
+      if (event.code === 'Escape' && this.busterTestRange?.active) {
+        event.preventDefault();
+        this.exitBusterTestRange();
+        return;
+      }
+
+      if (event.code === 'KeyI' && this.busterTestRange?.active) {
+        event.preventDefault();
         return;
       }
 
@@ -3918,7 +5400,9 @@ export class Game {
 
     this.inventory.addItem(starterMachineGun);
     this.inventory.addItem(starterDrill);
-    this.inventory.addItem(this.lootSystem.generateItem(1, { type: 'powerRaiser', rarity: 'standard' }));
+    if (!this.busterLabEnabled) {
+      this.inventory.addItem(this.lootSystem.generateItem(1, { type: 'powerRaiser', rarity: 'standard' }));
+    }
     this.inventory.addItem(this.lootSystem.generateItem(1, {
       type: 'flameArm',
       rarity: 'standard',
@@ -4316,17 +5800,21 @@ export class Game {
     for (const material of materials) material.dispose?.();
   }
 
-  _updateEnemyDeathExplosionEffect(effect, dt, progress) {
+  _updateFieryExplosionEffect(effect, dt, progress) {
     const age = 1 - progress;
     const expansion = THREE.MathUtils.smoothstep(age, 0, 0.72);
-    const scale = effect.radius * THREE.MathUtils.lerp(0.08, 1.3, expansion);
+    const scale = effect.radius * THREE.MathUtils.lerp(0.08, effect.maxScale ?? 1.3, expansion);
     const fade = Math.pow(progress, 1.35) * Math.min(1, age * 6 + 0.18);
     effect.object.scale.setScalar(scale);
     effect.object.rotation.y += dt * 2.4;
     effect.object.rotation.z += dt * 1.1;
     for (const child of effect.object.children) {
       if (child.material) {
-        child.material.opacity = (child.material.userData.enemyDeathBaseOpacity ?? 0.7) * fade;
+        child.material.opacity = (
+          child.material.userData.fieryExplosionBaseOpacity
+          ?? child.material.userData.enemyDeathBaseOpacity
+          ?? 0.7
+        ) * fade;
       }
     }
   }
@@ -4375,8 +5863,8 @@ export class Game {
       const progress = Math.max(0, effect.life / effect.maxLife);
       const reveal = THREE.MathUtils.smoothstep(1 - progress, 0, 0.78);
 
-      if (effect.kind === 'enemyDeathExplosion') {
-        this._updateEnemyDeathExplosionEffect(effect, dt, progress);
+      if (effect.object?.userData?.explosionVisual === 'fierySphere') {
+        this._updateFieryExplosionEffect(effect, dt, progress);
       } else if (effect.kind === 'enemyDeathParts') {
         this._updateEnemyDeathPartsEffect(effect, dt, progress);
       }
@@ -4694,12 +6182,15 @@ export class Game {
 
   _handleEnemyKilled(enemy, meta) {
     enemy.onDeath(this, meta);
-    if (meta.selfDestruct) {
+    if (meta.selfDestruct || meta.suppressRewards) {
       return;
     }
     this.player.addExperience(enemy.stats.experience);
 
-    if (meta.source === this.player && this.player.stats.explodeOnKillChance > 0 && Math.random() < this.player.stats.explodeOnKillChance) {
+    if (!meta.suppressGenericOffense
+      && meta.source === this.player
+      && this.player.stats.explodeOnKillChance > 0
+      && Math.random() < this.player.stats.explodeOnKillChance) {
       this.addExplosion(enemy.root.position, this.player.stats.attackDamage * 1.4, 1.9, 0xff8a42);
     }
 

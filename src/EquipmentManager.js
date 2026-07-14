@@ -10,6 +10,7 @@ import {
 
 const ARM_CANNON_TYPES = new Set([
   'busterArm',
+  'customBusterArm',
   'machineGunArm',
   'cannonArm',
   'mineArm',

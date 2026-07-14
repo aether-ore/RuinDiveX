@@ -19,6 +19,20 @@ Primary weapon stats follow the intended buster-part language:
 
 For the standard Buster Arm, Energy is not ammo. Buster shots are unlimited; Energy improves Output efficiency so the starting ENG 6 buster fires three rapid shots before Output is fully drained, with each additional 3 Energy adding another full shot to the burst.
 
+## Custom Buster Lab Preview
+
+Add `?busterLab=1` to the game URL to enable Roll's Custom Buster Lab and the unified `PWR / ENG / RNG / RPD` weapon model. Without the flag, the existing equipment, Buster Output, loot, and combat systems remain unchanged.
+
+- Slot 1 remains the fixed Mega Buster. Its four calibration sockets accept converted legacy Buster Parts and use the same battery runtime as Custom Busters.
+- Roll grants Build A with a Workshop Chassis and Pulse Bolt once. A second physical chassis and additional module copies can be fabricated from her identified Reaverbot scrap stockpile.
+- Build A and Build B can be tuned, programmed, compiled, saved, and assigned independently to special-weapon slots 2 and 3. Legacy special arms remain available in those slots.
+- The v0.1 module set supports Pulse and Mortar emitters, Pursuit Guidance, Apex/Impact/Delay triggers, Spread/Cluster splitting, and Pulse/Explosion payloads.
+- `Test in Range` runs the production Buster runtime against stationary and moving no-reward targets, then restores the prior position, loadout, projectiles, and weapon resources on exit.
+
+For unrestricted testing, open Debug Tools with the tilde key and choose the `Buster Lab` tab. `Grant one of each Buster part` adds a fresh copy of every physical v0.1 module and Mega calibration, reveals all recipes, and supplies Build B without changing scrap, salvage, builds, sockets, or assignments. The grant is repeatable for testing physical ownership across both builds. Add `busterLabDebug=1` to the URL to preselect this debug tab.
+
+The Lab's partial local save is stored under `ruinDigger.busterLab.v1`. It contains Roll's scrap stockpile, recipe discovery, fabricated chassis/modules, builds, assignments, and Mega calibrations; it intentionally does not save general inventory or dungeon progress.
+
 ## Controls
 
 - WASD or arrow keys move.
@@ -134,6 +148,7 @@ The app uses a browser import map for Three.js, so no package install is require
 - `src/Enemy.js`, `src/EliteEnemy.js`, `src/EnemySpawner.js` - legacy enemy contract, elite traits, seeded encounter spawning.
 - `src/reaverbots/` - procedural genome catalog and validator, seeded RNG, low-poly visual factory, target adapters, behavior state machines, defenses, weak points, and attacks.
 - `src/CombatSystem.js`, `src/ProjectileSystem.js` - current combat prototype and projectile behavior.
+- `src/buster/` - pure Custom Buster catalogs, graph validation/compiler, Roll fabrication persistence, deterministic trajectory helpers, and shared battery runtime.
 - `src/Inventory.js`, `src/EquipmentManager.js`, `src/UIManager.js` - salvage inventory, garage equipment, UI.
 - `src/ExternalModelRig.js` - segmented Mega Man Volnutt model rig, semantic rig application, buster arm pose, and action overlays.
 - `src/SemanticRigMapper.js`, `src/animation/LocomotionAnimator.js`, `src/animation/UpperBodyAimLayer.js`, `src/animation/CombatAnimator.js`, `src/animation/DamageAnimator.js`, `src/animation/DodgeRollAnimator.js`, `src/animation/JumpAnimator.js` - semantic pose mapping, authored walk/jog clips, upper-body aim/recoil, combat poses, damage recovery, dodge, and jump action layers for the external segmented rig.

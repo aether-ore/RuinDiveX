@@ -1,4 +1,8 @@
 import * as THREE from 'three';
+import {
+  getBallisticApexProgress,
+  sampleBallisticPoint,
+} from './buster/BusterTrajectory.js';
 import { PLAYER_TRAVERSAL_ENVELOPE } from './TraversalCapabilities.js';
 import {
   getCombatTargetOwner,
@@ -400,6 +404,15 @@ export class ProjectileSystem {
     mineLifetime = 5.5,
     mineArmDelay = 0.45,
     mineTriggerRadius = 1.05,
+    controller = null,
+    controllerData = null,
+    buildRevision = null,
+    executionId = null,
+    actionId = null,
+    triggerDepth = 0,
+    reservationToken = null,
+    attackDomain = null,
+    attackMeta = null,
   }) {
     const projectile = this._getProjectile();
     projectile.owner = owner;
@@ -445,6 +458,16 @@ export class ProjectileSystem {
     projectile.mineArmTimer = projectile.mineArmDelay;
     projectile.mineTriggerRadius = Math.max(radius, mineTriggerRadius);
     projectile.mineArmed = false;
+    projectile.controller = controller;
+    projectile.controllerData = controllerData;
+    projectile.buildRevision = buildRevision;
+    projectile.executionId = executionId;
+    projectile.actionId = actionId;
+    projectile.triggerDepth = Math.max(0, Math.trunc(triggerDepth) || 0);
+    projectile.reservationToken = reservationToken;
+    projectile.attackDomain = attackDomain;
+    projectile.attackMeta = attackMeta ? { ...attackMeta } : null;
+    projectile.apexCrossed = false;
     projectile.trailTimer = 0;
     projectile.distance = 0;
     projectile.baseY = position.y;
@@ -472,7 +495,15 @@ export class ProjectileSystem {
   update(dt) {
     for (let i = this.active.length - 1; i >= 0; i -= 1) {
       const projectile = this.active[i];
-      const travel = projectile.speed * dt;
+      // Exact range-end sampling is part of the compiled Buster lifecycle.
+      // Keep legacy projectiles on their original frame-step behavior when no
+      // controller is attached so the feature flag cannot perturb old arms.
+      const remainingRange = Number.isFinite(projectile.range)
+        ? Math.max(0, projectile.range - projectile.distance)
+        : Infinity;
+      const travel = projectile.controller
+        ? Math.min(projectile.speed * dt, remainingRange)
+        : projectile.speed * dt;
 
       projectile.playerHitCooldown = Math.max(0, projectile.playerHitCooldown - dt);
       projectile.remainingLifetime -= dt;
@@ -498,11 +529,59 @@ export class ProjectileSystem {
       }
 
       this._updateHoming(projectile, dt);
+      const previousPosition = projectile.mesh.position.clone();
+      const previousDistance = projectile.distance;
       projectile.mesh.position.addScaledVector(projectile.direction, travel);
+      const previousProgress = THREE.MathUtils.clamp(
+        (projectile.distance ?? 0) / Math.max(0.001, projectile.range),
+        0,
+        1,
+      );
       projectile.distance += travel;
       if (projectile.arcHeight > 0) {
         const progress = THREE.MathUtils.clamp(projectile.distance / Math.max(0.001, projectile.range), 0, 1);
-        projectile.mesh.position.y = THREE.MathUtils.lerp(projectile.baseY, projectile.endY, progress) + Math.sin(progress * Math.PI) * projectile.arcHeight;
+        if (projectile.controller) {
+          const trajectoryOptions = {
+            start: { x: 0, y: projectile.baseY, z: 0 },
+            end: { x: 0, y: projectile.endY, z: 0 },
+            arcHeight: projectile.arcHeight,
+          };
+          projectile.mesh.position.y = sampleBallisticPoint(trajectoryOptions, progress).y;
+          const apexProgress = getBallisticApexProgress(trajectoryOptions);
+          if (!projectile.apexCrossed && previousProgress <= apexProgress && progress >= apexProgress) {
+            projectile.apexCrossed = true;
+            const endPosition = projectile.mesh.position.clone();
+            const crossingAlpha = progress > previousProgress
+              ? THREE.MathUtils.clamp((apexProgress - previousProgress) / (progress - previousProgress), 0, 1)
+              : 0;
+            projectile.mesh.position.lerpVectors(previousPosition, endPosition, crossingAlpha);
+            projectile.mesh.position.y = sampleBallisticPoint(trajectoryOptions, apexProgress).y;
+            const apexResult = this._notifyController(projectile, 'onApexCrossing', {
+              progress,
+              apexProgress,
+              crossingAlpha,
+            });
+            if (apexResult?.dispose) {
+              this._deactivate(i, false, false, apexResult.emitEffect !== false, apexResult.reason ?? 'apex');
+              continue;
+            }
+            projectile.mesh.position.copy(endPosition);
+          }
+        } else {
+          projectile.mesh.position.y = THREE.MathUtils.lerp(projectile.baseY, projectile.endY, progress)
+            + Math.sin(progress * Math.PI) * projectile.arcHeight;
+        }
+      }
+
+      const advanceResult = this._notifyController(projectile, 'onAdvance', {
+        dt,
+        travel,
+        previousDistance,
+        previousPosition,
+      });
+      if (advanceResult?.dispose) {
+        this._deactivate(i, false, false, advanceResult.emitEffect !== false, advanceResult.reason ?? 'controller');
+        continue;
       }
       this._updateProjectileVisual(projectile, dt);
 
@@ -521,25 +600,50 @@ export class ProjectileSystem {
       }
 
       if (projectile.distance >= projectile.range) {
+        const rangeResult = this._notifyController(projectile, 'onRangeEnd', {
+          position: projectile.mesh.position,
+        });
+        if (rangeResult?.keepAlive) {
+          continue;
+        }
         if (projectile.landAsMine) {
           this._landMine(projectile);
         } else {
-          this._deactivate(i, true);
+          this._deactivate(
+            i,
+            rangeResult?.suppressExpiry ? false : true,
+            rangeResult?.allowCluster !== false,
+            rangeResult?.emitEffect !== false,
+            rangeResult?.reason ?? 'rangeEnd',
+          );
         }
       }
     }
   }
 
-  clear() {
+  clear(reason = 'worldClear') {
     for (let i = this.active.length - 1; i >= 0; i -= 1) {
-      this._deactivate(i, false, false, false);
+      this._notifyController(this.active[i], 'onWorldClear', { reason });
+      this._deactivate(i, false, false, false, reason);
     }
+  }
+
+  cancelWhere(predicate, reason = 'cancelled') {
+    let cancelled = 0;
+    for (let i = this.active.length - 1; i >= 0; i -= 1) {
+      const projectile = this.active[i];
+      if (typeof predicate === 'function' && !predicate(projectile)) continue;
+      this._deactivate(i, false, false, false, reason);
+      cancelled += 1;
+    }
+    return cancelled;
   }
 
   _checkEnemyHit(projectile) {
     const position = projectile.mesh.position;
 
-    for (const enemy of this.game.enemies) {
+    const targets = this.game.getProjectileTargets?.() ?? this.game.enemies;
+    for (const enemy of targets) {
       if (enemy.dead) {
         continue;
       }
@@ -557,7 +661,14 @@ export class ProjectileSystem {
         }
 
         projectile.hitEnemyIds.add(enemy.id);
-        this.game.damageEnemy(enemy, projectile.damage, {
+        const controllerResult = this._notifyController(projectile, 'onEnemyImpact', {
+          enemy,
+          resolvedPart,
+          position,
+        });
+
+        if (!controllerResult?.suppressDefaultDamage) {
+          this.game.damageEnemy(enemy, projectile.damage, {
           projectileHit: true,
           enemyHitStopDuration: projectile.visualType === 'drillHead'
             ? DRILL_PROJECTILE_ENEMY_HIT_STOP_DURATION
@@ -576,9 +687,12 @@ export class ProjectileSystem {
           hitPartId: resolvedPart?.hitPartId ?? null,
           weakPointHit: Boolean(resolvedPart?.weakPointHit),
           hitPosition: resolvedPart?.hitPosition ?? position.clone(),
+          attackDomain: projectile.attackDomain,
+          ...(projectile.attackMeta ?? {}),
         });
+        }
 
-        if (projectile.explosiveRadius > 0) {
+        if (projectile.explosiveRadius > 0 && !controllerResult?.suppressDefaultExplosion) {
           tempExplosionPosition.copy(position);
           this.game.addExplosion(tempExplosionPosition, projectile.damage * 0.62, projectile.explosiveRadius, projectile.mesh.material.color.getHex(), {
             source: projectile.source,
@@ -590,7 +704,17 @@ export class ProjectileSystem {
             stagger: projectile.stagger,
             enemyHitStopDuration: PROJECTILE_EXPLOSION_ENEMY_HIT_STOP_DURATION,
             globalHitStopDuration: 0,
+            attackDomain: projectile.attackDomain,
+            ...(projectile.attackMeta ?? {}),
           });
+        }
+
+        if (controllerResult?.keepAlive) {
+          return false;
+        }
+
+        if (controllerResult?.dispose !== undefined) {
+          return Boolean(controllerResult.dispose);
         }
 
         if (projectile.pierceRemaining <= 0) {
@@ -751,7 +875,36 @@ export class ProjectileSystem {
       pierceRemaining: 0,
       hitEnemyIds: new Set(),
       distance: 0,
+      controller: null,
+      controllerData: null,
+      buildRevision: null,
+      executionId: null,
+      actionId: null,
+      triggerDepth: 0,
+      reservationToken: null,
+      attackDomain: null,
+      attackMeta: null,
+      apexCrossed: false,
     };
+  }
+
+  _notifyController(projectile, eventName, details = {}) {
+    const handler = projectile?.controller?.[eventName];
+    if (typeof handler !== 'function') return null;
+    try {
+      return handler({
+        system: this,
+        game: this.game,
+        projectile,
+        eventName,
+        ...details,
+      }) ?? null;
+    } catch (error) {
+      console.error(`Projectile controller ${eventName} failed`, error);
+      return eventName === 'onDispose' || eventName === 'onWorldClear'
+        ? null
+        : { dispose: true, emitEffect: false, reason: 'controllerError' };
+    }
   }
 
   _updateHoming(projectile, dt) {
@@ -776,7 +929,8 @@ export class ProjectileSystem {
     let nearestDistanceSq = Math.max(1, projectile.homingRange || projectile.range) ** 2;
 
     if (!nearest) {
-      for (const enemy of this.game.enemies) {
+      const targets = this.game.getProjectileTargets?.() ?? this.game.enemies;
+      for (const enemy of targets) {
         if (enemy.dead || projectile.hitEnemyIds.has(enemy.id)) {
           continue;
         }
@@ -789,7 +943,13 @@ export class ProjectileSystem {
         );
         const distanceSq = projectile.mesh.position.distanceToSquared(tempPosition);
 
-        if (distanceSq < nearestDistanceSq) {
+        const candidateId = String(enemy.id ?? '');
+        const nearestId = String(nearest?.id ?? '\uffff');
+        const isCloser = projectile.controller
+          ? distanceSq < nearestDistanceSq - 0.000001
+            || (Math.abs(distanceSq - nearestDistanceSq) <= 0.000001 && candidateId < nearestId)
+          : distanceSq < nearestDistanceSq;
+        if (isCloser) {
           nearestDistanceSq = distanceSq;
           nearest = enemy;
         }
@@ -974,8 +1134,9 @@ export class ProjectileSystem {
     this.game.addParticleBurst(origin, color, 10, projectile.radius * 0.38);
   }
 
-  _deactivate(index, expired = false, allowCluster = true, emitEffect = true) {
+  _deactivate(index, expired = false, allowCluster = true, emitEffect = true, reason = null) {
     const projectile = this.active[index];
+    if (!projectile) return;
     this.active.splice(index, 1);
     if (expired && projectile.explodeOnExpire && projectile.explosiveRadius > 0) {
       tempExplosionPosition.copy(projectile.mesh.position);
@@ -989,6 +1150,8 @@ export class ProjectileSystem {
         enemyHitStopDuration: fromEnemy ? undefined : PROJECTILE_EXPLOSION_ENEMY_HIT_STOP_DURATION,
         globalHitStopDuration: fromEnemy ? undefined : 0,
         triggerMines: !fromEnemy,
+        attackDomain: projectile.attackDomain,
+        ...(projectile.attackMeta ?? {}),
       });
     }
     if (allowCluster) {
@@ -997,6 +1160,10 @@ export class ProjectileSystem {
     if (emitEffect) {
       this.game.addParticleBurst(projectile.mesh.position, projectile.mesh.material.color.getHex(), 10, projectile.radius);
     }
+    this._notifyController(projectile, 'onDispose', {
+      reason: reason ?? (expired ? 'expired' : 'impact'),
+      expired,
+    });
     projectile.mesh.visible = false;
     projectile.mesh.removeFromParent();
     projectile.source = null;
@@ -1022,6 +1189,16 @@ export class ProjectileSystem {
     projectile.mineArmTimer = 0.45;
     projectile.mineTriggerRadius = 1.05;
     projectile.mineArmed = false;
+    projectile.controller = null;
+    projectile.controllerData = null;
+    projectile.buildRevision = null;
+    projectile.executionId = null;
+    projectile.actionId = null;
+    projectile.triggerDepth = 0;
+    projectile.reservationToken = null;
+    projectile.attackDomain = null;
+    projectile.attackMeta = null;
+    projectile.apexCrossed = false;
     projectile.trailTimer = 0;
     projectile.busterShotRoll = 0;
     setBusterShotVisible(projectile, false);

@@ -22,6 +22,7 @@ const tempTrailMatrix = new THREE.Matrix4();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const RETICLE_LOCK_RADIUS_PIXELS = 17;
 const PROJECTILE_AIM_LOCK_BUFFER = 0.12;
+const COMPILED_BUSTER_EXTENSION_DURATION = 0.18;
 const LASER_TICK_INTERVAL = 0.1;
 const DRILL_TICK_INTERVAL = 0.12;
 const DRILL_PARTICLE_INTERVAL = 0.045;
@@ -520,6 +521,9 @@ export class CombatSystem {
     this.activeMines = [];
     this.pendingMeleeStrikes = [];
     this.pendingProjectileShots = [];
+    this.pendingCompiledBusterShot = null;
+    this.compiledBusterBraceWeaponKey = null;
+    this.compiledBusterBraceElapsed = 0;
     this.swordCombo = {
       weaponKey: null,
       awaitingFollowUp: false,
@@ -582,6 +586,14 @@ export class CombatSystem {
       this._stopLiftArm(false);
       this._clearLockOn();
       this._clearPendingAttacks();
+      return;
+    }
+
+    const compiledBusterPlan = this.game.busterLabEnabled
+      ? this.game.getActiveBusterPlan?.()
+      : null;
+    if (compiledBusterPlan) {
+      this._updateCompiledBusterCombat(dt, compiledBusterPlan);
       return;
     }
 
@@ -694,6 +706,189 @@ export class CombatSystem {
     this.alternateWasDown = pointer.alternate;
   }
 
+  _updateCompiledBusterCombat(dt, plan) {
+    const player = this.game.player;
+    const runtime = this.game.busterRuntime;
+    if (!this.game.busterTestRange?.active) {
+      this._updateWeaponStates(dt);
+      this._updateMines(dt);
+    }
+    this.swapTimer = Math.max(0, this.swapTimer - dt);
+    const state = runtime?.equip(plan);
+
+    if (!runtime || !state) return;
+    if (this.game.isPlayerInSafeArea?.() && !this.game.busterTestRange?.active) {
+      this._suspendForSafeArea();
+      return;
+    }
+
+    const pointer = this.game.pointer;
+    if (!pointer) return;
+    if (this.suppressPrimaryUntilRelease && !pointer.primary) this.suppressPrimaryUntilRelease = false;
+    if (player.animation?.isControlLocked?.() || player.isLedgeClinging?.() || this.swapTimer > 0) {
+      this._suspendForControlLock(null, pointer);
+      return;
+    }
+
+    const lockOnPressed = pointer.lockOnPressed === true;
+    const rootGuidance = (plan.actions ?? []).some((action) => (
+      action.type === 'emit' && action.scope === 'root' && action.guidance
+    ));
+    const lockProfile = {
+      lockOn: rootGuidance,
+      homingRange: plan.stats?.rootRange ?? 6.9,
+      lockTime: 0.32,
+    };
+    this._updateLockOn(dt, pointer.aimWorld, lockProfile, {
+      pressed: lockOnPressed,
+      aiming: pointer.secondary,
+    });
+    this.manualAimOverrideActive = this.isManualAimOverrideActive(pointer);
+    const aimWorld = this._getEffectiveAimWorld(
+      pointer.aimWorld ?? player.root.position,
+      this.manualAimOverrideActive,
+    );
+    const weaponKey = plan.weaponKey ?? plan.buildId ?? 'megaBuster';
+    const buildRevision = plan.revision ?? plan.buildRevision ?? 0;
+    const applyGroundAimMuzzleOffset = this._shouldApplyGroundAimMuzzleOffset();
+    this._updateCompiledBusterBraceReadiness(dt, weaponKey);
+
+    if (this.pendingCompiledBusterShot
+      && (this.pendingCompiledBusterShot.weaponKey !== weaponKey
+        || this.pendingCompiledBusterShot.buildRevision !== buildRevision)) {
+      this.pendingCompiledBusterShot = null;
+    }
+
+    const primaryPressed = pointer.primaryPressed || (pointer.primary && !this.primaryWasDown);
+    pointer.primaryPressed = false;
+    pointer.secondaryPressed = false;
+    pointer.lockOnPressed = false;
+    pointer.alternatePressed = false;
+
+    const fireRequested = (pointer.primary || primaryPressed) && !this.suppressPrimaryUntilRelease;
+    const poseReadyBeforeHold = this._isCompiledBusterPoseReady(weaponKey);
+    let startedExtension = false;
+    let releasedShot = false;
+    let firingContext = null;
+
+    if (this.pendingCompiledBusterShot && poseReadyBeforeHold) {
+      const pending = this.pendingCompiledBusterShot;
+      this.pendingCompiledBusterShot = null;
+      firingContext = this._createCompiledBusterFiringContext(pending);
+      const fired = runtime.fire(firingContext, weaponKey);
+      releasedShot = true;
+      if (fired.ok) this._playCompiledBusterShotAnimation(plan, firingContext);
+    }
+
+    if (!releasedShot
+      && !this.pendingCompiledBusterShot
+      && fireRequested
+      && runtime.canFire(weaponKey)) {
+      const intent = {
+        weaponKey,
+        buildRevision,
+        aimWorld: aimWorld.clone(),
+        applyGroundAimMuzzleOffset,
+        target: this.getTargetingLockTarget(),
+        noRewards: Boolean(this.game.busterTestRange?.active),
+      };
+      if (poseReadyBeforeHold) {
+        firingContext = this._createCompiledBusterFiringContext(intent);
+        const fired = runtime.fire(firingContext, weaponKey);
+        releasedShot = true;
+        if (fired.ok) this._playCompiledBusterShotAnimation(plan, firingContext);
+      } else {
+        this.pendingCompiledBusterShot = intent;
+        firingContext = this._createCompiledBusterFiringContext(intent);
+        this._playCompiledBusterShotAnimation(plan, firingContext);
+        startedExtension = true;
+      }
+    }
+
+    if (!startedExtension && (
+      pointer.primary
+      || pointer.secondary
+      || this.getMovementLockTarget()
+      || this.pendingCompiledBusterShot
+    )) {
+      const poseContext = firingContext ?? this._createCompiledBusterFiringContext({
+        aimWorld,
+        applyGroundAimMuzzleOffset,
+        target: this.getTargetingLockTarget(),
+        noRewards: Boolean(this.game.busterTestRange?.active),
+      });
+      const cycleTime = plan.stats?.cycleTime ?? plan.cycleTime ?? 0.24;
+      player.holdProjectileFiringPose(
+        this._getFacingAimWorld(poseContext.aimPoint),
+        Math.max(COMPILED_BUSTER_EXTENSION_DURATION, cycleTime + PROJECTILE_AIM_LOCK_BUFFER),
+        {
+          weaponKey,
+          continuous: true,
+          aimTargetPosition: poseContext.aimPoint,
+        },
+      );
+    }
+
+    this.primaryWasDown = pointer.primary;
+    this.alternateWasDown = pointer.alternate;
+  }
+
+  _updateCompiledBusterBraceReadiness(dt, weaponKey) {
+    const held = this.game.player.isProjectileAimHeld?.(weaponKey) === true;
+    if (this.compiledBusterBraceWeaponKey !== weaponKey) {
+      this.compiledBusterBraceWeaponKey = weaponKey;
+      this.compiledBusterBraceElapsed = 0;
+    }
+    if (held) {
+      this.compiledBusterBraceElapsed += Math.max(0, dt);
+    } else {
+      this.compiledBusterBraceElapsed = 0;
+    }
+  }
+
+  _isCompiledBusterPoseReady(weaponKey) {
+    return this.compiledBusterBraceWeaponKey === weaponKey
+      && this.compiledBusterBraceElapsed + 0.000001 >= COMPILED_BUSTER_EXTENSION_DURATION
+      && this.game.player.isProjectileAimSustained?.(weaponKey) === true;
+  }
+
+  _createCompiledBusterFiringContext(intent = {}) {
+    const player = this.game.player;
+    const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
+    const aimPoint = intent.aimWorld?.clone?.() ?? player.root.position.clone();
+    if (intent.applyGroundAimMuzzleOffset) {
+      aimPoint.y += origin.y - player.root.position.y;
+    }
+    const direction = aimPoint.clone().sub(origin);
+    if (direction.lengthSq() <= 0.001) direction.copy(player.lastMoveDirection);
+    if (direction.lengthSq() <= 0.001) direction.set(0, 0, 1);
+    direction.normalize();
+    return {
+      origin: origin.clone(),
+      direction,
+      aimPoint,
+      target: intent.target ?? null,
+      noRewards: Boolean(intent.noRewards),
+    };
+  }
+
+  _playCompiledBusterShotAnimation(plan, context) {
+    const cycleTime = plan.stats?.cycleTime ?? plan.cycleTime ?? 0.24;
+    const targetPoint = context.origin.clone().addScaledVector(
+      context.direction,
+      plan.stats?.rootRange ?? plan.rootRange ?? 6.9,
+    );
+    this.game.player.playProjectileShotAnimation(
+      COMPILED_BUSTER_EXTENSION_DURATION,
+      this._getFacingAimWorld(targetPoint),
+      cycleTime + PROJECTILE_AIM_LOCK_BUFFER,
+      {
+        weaponKey: plan.weaponKey ?? plan.buildId ?? 'megaBuster',
+        aimTargetPosition: targetPoint,
+      },
+    );
+  }
+
   _suspendForSafeArea(state = null) {
     const pointer = this.game.pointer;
     if (pointer) {
@@ -753,6 +948,7 @@ export class CombatSystem {
     this._clearLockOn();
     this._hideGrenadePreview();
 
+    const previousPlan = this.game.getActiveBusterPlan?.() ?? null;
     const changed = this.game.player.switchArmWeapon(slotIndex);
 
     if (!changed) {
@@ -760,9 +956,15 @@ export class CombatSystem {
     }
 
     this._clearPendingAttacks();
+    const nextPlan = this.game.getActiveBusterPlan?.() ?? null;
+    const previousKey = previousPlan?.weaponKey ?? previousPlan?.buildId;
+    const nextKey = nextPlan?.weaponKey ?? nextPlan?.buildId;
+    if (previousKey && previousKey !== nextKey) {
+      this.game.busterRuntime?.cancelBuild(previousKey, 'weaponSwitch');
+    }
     const swapSpeed = this.game.player.stats.swapSpeed ?? 0;
     this.swapTimer = Math.max(0.12, 0.34 * (1 - THREE.MathUtils.clamp(swapSpeed, 0, 0.65)));
-    this.getCurrentWeaponState();
+    if (!nextPlan) this.getCurrentWeaponState();
     return true;
   }
 
@@ -888,6 +1090,11 @@ export class CombatSystem {
 
   getEnergyLabel() {
     const player = this.game.player;
+    const compiledPlan = this.game.getActiveBusterPlan?.();
+    if (compiledPlan) {
+      const hud = this.game.busterRuntime?.getHudState(compiledPlan.weaponKey ?? compiledPlan.buildId);
+      return `${Math.floor(hud?.energy ?? compiledPlan.stats?.maxEnergy ?? 0)} / ${Math.round(hud?.maxEnergy ?? compiledPlan.stats?.maxEnergy ?? 0)}`;
+    }
     const state = this.getCurrentWeaponState();
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
 
@@ -932,6 +1139,67 @@ export class CombatSystem {
   getWeaponHudData() {
     const player = this.game.player;
     const weapon = player.getActiveArmWeapon?.() ?? player.equipment.get('weapon');
+    const compiledPlan = this.game.getActiveBusterPlan?.();
+    if (compiledPlan) {
+      const planStats = compiledPlan.stats ?? {};
+      const runtimeHud = this.game.busterRuntime?.getHudState(compiledPlan.weaponKey ?? compiledPlan.buildId) ?? {
+        energy: planStats.maxEnergy ?? 0,
+        maxEnergy: planStats.maxEnergy ?? 0,
+        energyPercent: 1,
+        ready: true,
+      };
+      const isMega = compiledPlan.weaponKey === 'megaBuster' || compiledPlan.isMegaBuster;
+      const compiledActions = compiledPlan.actions ?? [];
+      const compiledShape = compiledActions.some((action) => action.splitter?.pattern === 'radial')
+        ? 'cluster'
+        : compiledActions.some((action) => action.splitter?.pattern === 'spread')
+          ? 'spread'
+          : compiledActions.some((action) => action.payload?.type === 'explosion')
+            ? 'explosive'
+            : compiledActions.some((action) => action.guidance)
+              ? 'seeker'
+              : compiledPlan.emitter?.trajectory === 'ballistic'
+                ? 'arc'
+                : 'manual';
+      const color = isMega ? '#7ee7ff' : '#f2c84b';
+      return {
+        name: isMega ? 'Mega Buster' : weapon?.name ?? compiledPlan.name ?? 'Custom Buster',
+        typeLabel: isMega ? 'Mega Buster' : 'Custom Buster',
+        color,
+        energy: runtimeHud.energy,
+        maxEnergy: runtimeHud.maxEnergy,
+        energyReserve: runtimeHud.energy,
+        maxEnergyReserve: runtimeHud.maxEnergy,
+        energyPercent: runtimeHud.energyPercent,
+        output: 1,
+        maxOutput: 1,
+        outputPercent: 0,
+        singleGauge: true,
+        unifiedBuster: true,
+        reloadState: false,
+        cooldownState: runtimeHud.cycleRemaining > 0,
+        cannotFireReason: runtimeHud.blockReason,
+        energyWarning: runtimeHud.energyPercent <= 0.2,
+        outputWarning: false,
+        overheatState: false,
+        activeWeaponType: isMega ? 'megaBuster' : 'customBusterArm',
+        status: runtimeHud.ready ? 'READY' : runtimeHud.blockReason === 'ENERGY' ? 'RECHARGING' : runtimeHud.blockReason,
+        stats: {
+          attack: Number((planStats.effectivePower ?? planStats.basePower ?? 0).toFixed(1)),
+          energy: Math.round(planStats.maxEnergy ?? runtimeHud.maxEnergy ?? 0),
+          range: Number((planStats.rootRange ?? 0).toFixed(1)),
+          rapid: Number((planStats.finalRapid ?? (planStats.cycleTime > 0 ? 1 / planStats.cycleTime : 0)).toFixed(2)),
+        },
+        mode: isMega ? 'Fixed Pulse' : 'Compiled Program',
+        modeIndicator: {
+          shape: compiledShape,
+          mode: 'main',
+          color,
+          label: isMega ? 'Mega Buster fixed Pulse' : `${compiledPlan.description ?? 'Compiled Custom Buster program'}`,
+        },
+        tabs: this.getWeaponTabData(),
+      };
+    }
     const state = this.getCurrentWeaponState();
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
     const stats = this._getCombatStatsForProfile(profile, weapon);
@@ -1001,6 +1269,33 @@ export class CombatSystem {
           cooldownPercent: 0,
           readyState: 'EMPTY',
           readyLabel: 'Empty',
+        };
+      }
+
+      const compiledPlan = this.game.getBusterPlanForSlot?.(index);
+      if (compiledPlan) {
+        const stats = compiledPlan.stats ?? {};
+        const hud = this.game.busterRuntime?.getHudState(compiledPlan.weaponKey ?? compiledPlan.buildId);
+        const energy = hud?.energy ?? stats.maxEnergy ?? 0;
+        const maxEnergy = hud?.maxEnergy ?? stats.maxEnergy ?? 0;
+        const reason = hud?.blockReason ?? null;
+        return {
+          slot: index + 1,
+          name: index === 0 ? 'Mega Buster' : weapon.name ?? compiledPlan.name ?? 'Custom Buster',
+          shortName: index === 0 ? 'Mega' : 'Custom',
+          abbreviation: index === 0 ? 'B' : 'CB',
+          active: index === player.activeArmIndex,
+          energyPercent: maxEnergy > 0 ? THREE.MathUtils.clamp(energy / maxEnergy, 0, 1) : 0,
+          outputPercent: 0,
+          cooldownPercent: stats.cycleTime > 0 ? THREE.MathUtils.clamp((hud?.cycleRemaining ?? 0) / stats.cycleTime, 0, 1) : 0,
+          readyState: reason === 'ENERGY' ? 'NO_ENERGY' : reason === 'CYCLE' ? 'COOLDOWN' : 'READY',
+          readyLabel: reason === 'ENERGY' ? 'Recharge' : reason === 'CYCLE' ? 'Cycling' : 'Ready',
+          color: index === 0 ? '#7ee7ff' : '#f2c84b',
+          energy,
+          maxEnergy,
+          output: 0,
+          maxOutput: 0,
+          singleGauge: true,
         };
       }
 
@@ -2134,6 +2429,9 @@ export class CombatSystem {
   _clearPendingAttacks() {
     this.pendingMeleeStrikes.length = 0;
     this.pendingProjectileShots.length = 0;
+    this.pendingCompiledBusterShot = null;
+    this.compiledBusterBraceWeaponKey = null;
+    this.compiledBusterBraceElapsed = 0;
     this._cancelActiveSwordSweepTrail();
     this._resetSwordCombo();
     this.game.player.cancelSwordJumpSlashVisual?.({ cancelAttack: true });
@@ -3102,7 +3400,7 @@ export class CombatSystem {
       return;
     }
 
-    for (const enemy of this.game.enemies) {
+    for (const enemy of this.game.getProjectileTargets?.() ?? this.game.enemies) {
       if (enemy.dead) {
         continue;
       }
@@ -3309,7 +3607,7 @@ export class CombatSystem {
     let bestTarget = null;
     let bestScore = Infinity;
 
-    for (const enemy of this.game.enemies) {
+    for (const enemy of this.game.getProjectileTargets?.() ?? this.game.enemies) {
       if (enemy.dead) {
         continue;
       }
@@ -3371,7 +3669,7 @@ export class CombatSystem {
     let bestTarget = null;
     let nearestDistanceSq = Infinity;
 
-    for (const enemy of this.game.enemies) {
+    for (const enemy of this.game.getProjectileTargets?.() ?? this.game.enemies) {
       if (enemy.dead) {
         continue;
       }

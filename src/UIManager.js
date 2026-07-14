@@ -435,12 +435,30 @@ export class UIManager {
     this.rollPartsValue = document.getElementById('roll-parts-value');
     this.rollIdentifyButton = document.getElementById('roll-identify-scrap');
     this.rollIdentificationResult = document.getElementById('roll-identification-result');
+    this.rollWorkshopTabs = document.getElementById('roll-workshop-tabs');
+    this.rollSalvageView = document.getElementById('roll-salvage-view');
+    this.busterLabView = document.getElementById('buster-lab-view');
+    this.busterLabWarning = document.getElementById('buster-lab-warning');
+    this.busterBuyChassisButton = document.getElementById('buster-buy-chassis');
+    this.busterMegaPanel = document.getElementById('buster-mega-panel');
+    this.busterMegaCalibrations = document.getElementById('buster-mega-calibrations');
+    this.busterCustomEditor = document.getElementById('buster-custom-editor');
+    this.busterTuningRemaining = document.getElementById('buster-tuning-remaining');
+    this.busterProgramCapacity = document.getElementById('buster-program-capacity');
+    this.busterCompilerResult = document.getElementById('buster-compiler-result');
+    this.busterValidationErrors = document.getElementById('buster-validation-errors');
+    this.busterModuleInventory = document.getElementById('buster-module-inventory');
+    this.busterRecipeList = document.getElementById('buster-recipe-list');
+    this.busterRecipeScrap = document.getElementById('buster-recipe-scrap');
     this.inventoryItems = document.getElementById('inventory-items');
     this.equipmentSlots = document.getElementById('equipment-slots');
     this.garageWeaponSlots = document.getElementById('garage-weapon-slots');
     this.questLog = document.getElementById('quest-log');
     this.tooltip = document.getElementById('item-tooltip');
     this.poseDebugPanel = document.getElementById('pose-debug-panel');
+    this.busterDebugTabButton = document.getElementById('buster-debug-tab');
+    this.busterDebugGrantButton = document.getElementById('buster-debug-grant');
+    this.busterDebugStatus = document.getElementById('buster-debug-status');
     this.poseDebugAnimationSelect = document.getElementById('pose-debug-animation');
     this.poseDebugKeyframeSelect = document.getElementById('pose-debug-keyframe');
     this.poseDebugControls = document.getElementById('pose-debug-controls');
@@ -465,11 +483,13 @@ export class UIManager {
     this.restartButton = document.getElementById('restart-button');
     this.toastTimer = 0;
     this.inventoryMode = 'garage';
+    this.rollWorkshopTab = 'salvage';
+    this.busterLabSelectedBuildId = 'build-a';
     this.lastScrapIdentification = null;
     this.previousHealth = null;
     this.healthDamagePulseTimer = 0;
     this.poseDebugOpen = false;
-    this.poseDebugTab = 'pose';
+    this.poseDebugTab = this.game.busterLabDebugEnabled ? 'buster' : 'pose';
     this.poseDebugControlsRendered = false;
     this.poseDebugFocusedJointName = null;
     this.poseDebugPresetAnimations = this._createPoseDebugAnimations();
@@ -528,8 +548,10 @@ export class UIManager {
     this._renderBuffTray();
     if (this.poseDebugOpen && this.poseDebugTab === 'pose') {
       this._syncPoseDebugRigState();
-    } else if (this.poseDebugOpen) {
+    } else if (this.poseDebugOpen && this.poseDebugTab === 'platforming') {
       this._syncPlatformDebugControls();
+    } else if (this.poseDebugOpen && this.poseDebugTab === 'buster') {
+      this._syncBusterDebugControls();
     }
 
     if (this.toastTimer > 0) {
@@ -546,6 +568,10 @@ export class UIManager {
     this.inventoryMode = open && mode === 'roll' ? 'roll' : 'garage';
     this.root?.classList.toggle('is-inventory-open', open);
     this.root?.classList.toggle('is-roll-workshop', open && this.inventoryMode === 'roll');
+    this.root?.classList.toggle(
+      'is-buster-lab',
+      open && this.inventoryMode === 'roll' && this.rollWorkshopTab === 'buster',
+    );
     this.inventoryPanel.hidden = !open;
     this.inventoryPanel.dataset.mode = this.inventoryMode;
     if (this.inventoryPanelTitle) {
@@ -556,9 +582,13 @@ export class UIManager {
     if (this.rollScrapService) {
       this.rollScrapService.hidden = this.inventoryMode !== 'roll';
     }
+    if (this.rollWorkshopTabs) {
+      this.rollWorkshopTabs.hidden = !this.game.busterLabEnabled;
+    }
     this.inventoryButton?.setAttribute('aria-pressed', String(open));
 
     if (open) {
+      this._selectRollWorkshopTab(this.game.busterLabEnabled ? this.rollWorkshopTab : 'salvage', { render: false });
       this.renderInventory();
     } else {
       this.hideTooltip();
@@ -571,6 +601,9 @@ export class UIManager {
 
     if (this.poseDebugPanel) {
       this.poseDebugPanel.hidden = !open;
+    }
+    if (this.busterDebugTabButton) {
+      this.busterDebugTabButton.hidden = !this.game.busterLabEnabled;
     }
 
     if (open) {
@@ -586,7 +619,11 @@ export class UIManager {
   }
 
   _selectPoseDebugTab(tab = 'pose') {
-    this.poseDebugTab = tab === 'platforming' ? 'platforming' : 'pose';
+    this.poseDebugTab = tab === 'platforming'
+      ? 'platforming'
+      : tab === 'buster' && this.game.busterLabEnabled
+        ? 'buster'
+        : 'pose';
     for (const button of this.poseDebugPanel?.querySelectorAll('[data-debug-tab]') ?? []) {
       button.setAttribute('aria-selected', String(button.dataset.debugTab === this.poseDebugTab));
     }
@@ -600,10 +637,31 @@ export class UIManager {
     this.game.setPoseDebugSection?.(this.poseDebugTab);
     if (this.poseDebugTab === 'pose') {
       this._syncPoseDebugRigState();
-    } else {
+    } else if (this.poseDebugTab === 'platforming') {
       this.game.player.externalRig?.setDebugPoseEnabled?.(false);
       this._syncPlatformDebugControls();
+    } else {
+      this.game.player.externalRig?.setDebugPoseEnabled?.(false);
+      this._syncBusterDebugControls();
     }
+  }
+
+  _syncBusterDebugControls() {
+    const view = this.game.getBusterLabViewModel?.('build-a');
+    if (this.busterDebugGrantButton) {
+      this.busterDebugGrantButton.disabled = !this.game.busterLabEnabled;
+    }
+    if (!this.busterDebugStatus) return;
+    if (!view) {
+      this.busterDebugStatus.textContent = 'Enable ?busterLab=1 to use the Custom Buster testing kit.';
+      return;
+    }
+    const count = view.debugGrantCount ?? 0;
+    const calibrationCount = view.mega?.availableCalibrations?.length ?? 0;
+    const buildBReady = Boolean(view.builds?.find((entry) => entry.buildId === 'build-b')?.available);
+    this.busterDebugStatus.textContent = count > 0
+      ? `${count} kit${count === 1 ? '' : 's'} granted | ${view.moduleInstances?.length ?? 0} physical modules | ${calibrationCount} Mega calibrations | Build B ${buildBReady ? 'ready' : 'missing'}`
+      : 'No debug kits granted in this save.';
   }
 
   _syncPlatformDebugControls() {
@@ -899,6 +957,7 @@ export class UIManager {
     this._renderQuestLog();
     this._renderInventoryActions();
     this._renderRollScrapWorkshop();
+    this._renderBusterLab();
     this._renderCraftingMaterials();
     this._renderInventoryItems();
   }
@@ -942,6 +1001,254 @@ export class UIManager {
     this.rollIdentificationResult.textContent = result.partCount > 0
       ? `Last analysis: ${result.scrapStored} crafting scrap stored. Intact part found: ${partNames}.`
       : `Last analysis: ${result.scrapStored} crafting scrap stored; no intact parts recovered.`;
+  }
+
+  _selectRollWorkshopTab(tab = 'salvage', { render = true } = {}) {
+    const nextTab = this.game.busterLabEnabled && tab === 'buster' ? 'buster' : 'salvage';
+    this.rollWorkshopTab = nextTab;
+    this.root?.classList.toggle(
+      'is-buster-lab',
+      this.inventoryMode === 'roll' && nextTab === 'buster',
+    );
+    for (const button of this.rollWorkshopTabs?.querySelectorAll('[data-roll-tab]') ?? []) {
+      button.setAttribute('aria-selected', String(button.dataset.rollTab === nextTab));
+    }
+    if (this.rollSalvageView) this.rollSalvageView.hidden = nextTab !== 'salvage';
+    if (this.busterLabView) this.busterLabView.hidden = nextTab !== 'buster';
+    if (render && nextTab === 'buster') this._renderBusterLab();
+  }
+
+  _renderBusterLab() {
+    if (!this.busterLabView || !this.game.busterLabEnabled) return;
+    const view = this.game.getBusterLabViewModel?.(this.busterLabSelectedBuildId);
+    if (!view) return;
+
+    if (!view.build?.available && this.busterLabSelectedBuildId === 'build-b') {
+      this.busterLabSelectedBuildId = 'build-a';
+      return this._renderBusterLab();
+    }
+
+    const selectedId = this.busterLabSelectedBuildId;
+    for (const button of this.busterLabView.querySelectorAll('[data-action="buster-select-build"]')) {
+      const build = view.builds?.find((entry) => entry.buildId === button.dataset.buildId);
+      const isMega = button.dataset.buildId === 'megaBuster';
+      button.disabled = !isMega && !build?.available;
+      button.setAttribute('aria-selected', String(button.dataset.buildId === selectedId));
+      const slots = build?.equippedSlots?.length ? ` · S${build.equippedSlots.map((slot) => slot + 1).join('/')}` : '';
+      button.textContent = `${isMega ? 'Mega' : build?.label ?? button.textContent.split(' · ')[0]}${slots}`;
+    }
+
+    if (this.busterBuyChassisButton) {
+      this.busterBuyChassisButton.hidden = Boolean(view.builds?.find((entry) => entry.buildId === 'build-b')?.available);
+      this.busterBuyChassisButton.disabled = !view.canBuySecondChassis;
+    }
+    if (this.busterLabWarning) {
+      this.busterLabWarning.hidden = !view.warning;
+      this.busterLabWarning.textContent = view.warning ?? '';
+    }
+    if (this.busterRecipeScrap) {
+      this.busterRecipeScrap.textContent = `${view.identifiedScrap ?? 0} identified scrap`;
+    }
+
+    const megaSelected = selectedId === 'megaBuster';
+    if (this.busterMegaPanel) this.busterMegaPanel.hidden = !megaSelected;
+    if (this.busterCustomEditor) this.busterCustomEditor.hidden = megaSelected;
+    this._renderMegaBusterCalibration(view);
+
+    const draft = view.build?.draft;
+    if (!megaSelected && draft) {
+      for (const input of this.busterLabView.querySelectorAll('[data-buster-tuning]')) {
+        input.value = String(draft.tuning?.[input.dataset.busterTuning] ?? 1);
+        input.disabled = !view.build.available;
+      }
+      if (this.busterTuningRemaining) {
+        const remaining = view.tuningRemaining ?? (16 - Object.values(draft.tuning ?? {}).reduce((sum, value) => sum + Number(value || 0), 0));
+        this.busterTuningRemaining.textContent = `${remaining} point${Math.abs(remaining) === 1 ? '' : 's'} remaining`;
+        this.busterTuningRemaining.classList.toggle('is-invalid', remaining !== 0);
+      }
+      this._renderBusterProgramControls(view);
+    }
+
+    this._renderBusterCompilerResult(view, megaSelected);
+    this._renderBusterModuleInventory(view);
+    this._renderBusterRecipes(view);
+
+    for (const button of this.busterLabView.querySelectorAll('[data-action="buster-save"], [data-action="buster-equip"], [data-action="buster-test-range"]')) {
+      if (button.dataset.action === 'buster-save') button.disabled = megaSelected || !view.canSave;
+      if (button.dataset.action === 'buster-equip') button.disabled = megaSelected || !view.canEquip;
+      if (button.dataset.action === 'buster-test-range') button.disabled = !view.canTest;
+    }
+  }
+
+  _renderBusterProgramControls(view) {
+    const selections = view.programSelections ?? {};
+    const optionGroups = view.programOptions ?? {
+      emitter: [
+        { value: 'pulseBolt', label: 'Pulse Bolt' },
+        { value: 'mortarShell', label: 'Mortar Shell' },
+      ],
+      rootModifier: [{ value: '', label: 'None' }, { value: 'pursuitGuidance', label: 'Pursuit Guidance' }],
+      trigger: [
+        { value: '', label: 'None (direct)' },
+        { value: 'atApex', label: 'At Apex' },
+        { value: 'onImpact', label: 'On Impact' },
+        { value: 'afterDelay', label: 'After 0.60s' },
+      ],
+      childModifier: [{ value: '', label: 'None' }, { value: 'pursuitGuidance', label: 'Pursuit Guidance' }],
+      splitter: [
+        { value: '', label: 'None' },
+        { value: 'spread3', label: 'Spread ×3' },
+        { value: 'cluster5', label: 'Cluster ×5' },
+      ],
+      payload: [
+        { value: 'pulsePayload', label: 'Native Pulse' },
+        { value: 'explosion', label: 'Explosion' },
+      ],
+    };
+
+    for (const select of this.busterLabView.querySelectorAll('[data-buster-program]')) {
+      const slot = select.dataset.busterProgram;
+      const options = optionGroups[slot] ?? [];
+      select.replaceChildren(...options.map((option) => {
+        const element = document.createElement('option');
+        element.value = option.value ?? option.moduleId ?? '';
+        element.textContent = option.label ?? option.name ?? option.moduleId ?? 'None';
+        element.disabled = Boolean(option.disabled);
+        return element;
+      }));
+      select.value = selections[slot] ?? '';
+      select.disabled = !view.build?.available;
+    }
+    if (this.busterProgramCapacity) {
+      this.busterProgramCapacity.textContent = `${view.nodeCount ?? view.build?.draft?.program?.nodes?.length ?? 0} / 5 nodes`;
+    }
+  }
+
+  _renderBusterCompilerResult(view, megaSelected) {
+    const result = megaSelected ? view.mega?.result : view.result;
+    const stats = result?.stats ?? result ?? null;
+    if (this.busterCompilerResult) {
+      const triggerBehavior = result?.trigger
+        ? result.trigger.event === 'delay'
+          ? `After ${Number(result.trigger.delay ?? 0).toFixed(2)}s`
+          : result.trigger.event === 'apex'
+            ? 'At ballistic apex'
+            : 'On impact / range end'
+        : 'Direct';
+      const entries = stats ? [
+        ['Base PWR', stats.basePower],
+        ['Effective', stats.effectivePower],
+        ['Cap clipped', result?.ledger?.power?.capClipped ?? 0],
+        ['Per child', stats.perChildPower],
+        ['Projectiles', stats.projectileCount ?? result?.projectileCount],
+        ['Energy cost', stats.energyCost],
+        ['Shots / charge', stats.shotsPerCharge],
+        ['Rapid', stats.finalRapid],
+        ['Root range', stats.rootRange],
+        ['Child range', stats.childRange],
+        ['Trigger', triggerBehavior],
+        ['Reservation', result?.peakProjectileReservation ?? stats.peakProjectileReservation],
+      ] : [];
+      this.busterCompilerResult.replaceChildren(...entries.map(([label, value]) => {
+        const card = document.createElement('div');
+        card.className = 'buster-result-stat';
+        const normalized = typeof value === 'number'
+          ? Number(value.toFixed(Math.abs(value) < 10 ? 2 : 1))
+          : value ?? '—';
+        card.innerHTML = `<span>${label}</span><strong>${normalized}</strong>`;
+        return card;
+      }));
+      if (result?.description) {
+        const description = document.createElement('p');
+        description.className = 'buster-program-help';
+        description.textContent = result.description;
+        this.busterCompilerResult.appendChild(description);
+      }
+    }
+
+    if (this.busterValidationErrors) {
+      const errors = megaSelected ? [] : view.validation?.errors ?? [];
+      this.busterValidationErrors.replaceChildren(...errors.map((error) => {
+        const item = document.createElement('li');
+        item.textContent = error.message ?? error.code ?? 'Invalid program';
+        item.title = error.path ?? '';
+        return item;
+      }));
+    }
+  }
+
+  _renderBusterModuleInventory(view) {
+    if (!this.busterModuleInventory) return;
+    const instances = view.moduleInstances ?? [];
+    this.busterModuleInventory.replaceChildren(...instances.map((instance) => {
+      const card = document.createElement('article');
+      card.className = 'buster-module-card';
+      card.innerHTML = `
+        <strong>${instance.name ?? instance.moduleId}</strong>
+        <span>${instance.instanceId}</span>
+        <span>${instance.installedBuildId ? `Installed: ${instance.installedBuildId}` : 'Available'}</span>
+      `;
+      return card;
+    }));
+    if (instances.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'material-empty';
+      empty.textContent = 'No physical modules fabricated';
+      this.busterModuleInventory.appendChild(empty);
+    }
+  }
+
+  _renderBusterRecipes(view) {
+    if (!this.busterRecipeList) return;
+    this.busterRecipeList.replaceChildren(...(view.recipes ?? []).map((recipe) => {
+      const card = document.createElement('article');
+      const state = recipe.discoveryState ?? recipe.state ?? 'unknown';
+      card.className = `buster-recipe-card${state === 'unknown' ? ' is-unknown' : ''}`;
+      if (state === 'unknown') {
+        card.innerHTML = '<strong>Unknown module</strong><span>Silhouette — identify a compatible Reaverbot part.</span>';
+        return card;
+      }
+      const ingredients = recipe.ingredientsLabel
+        ?? Object.entries(recipe.parts ?? recipe.requirements ?? {}).map(([id, count]) => `${id} ×${count}`).join(' + ');
+      card.innerHTML = `
+        <strong>${recipe.name ?? recipe.moduleId}</strong>
+        <span>${recipe.function ?? recipe.description ?? ''}</span>
+        ${state === 'hinted' ? `<small class="buster-recipe-clue">${recipe.hint ?? recipe.rollLine ?? ''}</small>` : `<small>${ingredients} · ${recipe.scrapCost ?? 0} scrap</small>`}
+        <button type="button" data-action="buster-fabricate" data-module-id="${recipe.moduleId}" ${!recipe.canFabricate ? 'disabled' : ''}>Fabricate copy</button>
+      `;
+      return card;
+    }));
+  }
+
+  _renderMegaBusterCalibration(view) {
+    if (!this.busterMegaCalibrations || !view.mega) return;
+    const installed = view.mega.calibrationSlots ?? [];
+    const available = view.mega.availableCalibrations ?? [];
+    this.busterMegaCalibrations.replaceChildren(...[0, 1, 2, 3].map((slotIndex) => {
+      const label = document.createElement('label');
+      label.className = 'buster-calibration-slot';
+      const title = document.createElement('span');
+      title.textContent = `Socket ${slotIndex + 1}`;
+      const select = document.createElement('select');
+      select.dataset.busterCalibrationSlot = String(slotIndex);
+      const options = [{ instanceId: '', name: 'Empty' }, ...available];
+      select.replaceChildren(...options.map((entry) => {
+        const option = document.createElement('option');
+        option.value = entry.instanceId ?? '';
+        option.textContent = entry.name ?? entry.calibrationId ?? 'Calibration';
+        option.disabled = Boolean(
+          entry.instanceId
+          && installed.some((installedEntry, installedIndex) => (
+            installedIndex !== slotIndex
+            && (installedEntry?.instanceId ?? installedEntry) === entry.instanceId
+          ))
+        );
+        return option;
+      }));
+      select.value = installed[slotIndex]?.instanceId ?? installed[slotIndex] ?? '';
+      label.append(title, select);
+      return label;
+    }));
   }
 
   hideTooltip() {
@@ -1234,7 +1541,7 @@ export class UIManager {
         RELOADING: 'is-reloading',
       }[tab.readyState] ?? '';
 
-      slot.className = `arm-slot${tab.active ? ' is-active' : ''}${readyClass ? ` ${readyClass}` : ''}`;
+      slot.className = `arm-slot${tab.active ? ' is-active' : ''}${tab.singleGauge ? ' is-single-gauge' : ''}${readyClass ? ` ${readyClass}` : ''}`;
       slot.dataset.action = 'switch-arm-slot';
       slot.dataset.slotIndex = String(tab.slot - 1);
       slot.disabled = tab.readyState === 'EMPTY';
@@ -1284,13 +1591,17 @@ export class UIManager {
     const energyPercent = Math.round(data.energyPercent * 100);
     const outputPercent = Math.round((data.outputPercent ?? 1) * 100);
     const lowEnergy = data.energyPercent <= 0.2;
-    const lowOutput = (data.outputPercent ?? 1) <= 0.2;
+    const lowOutput = !data.singleGauge && (data.outputPercent ?? 1) <= 0.2;
+
+    this.weaponGauge?.classList.toggle('is-single-gauge', Boolean(data.singleGauge));
 
     this.weaponEnergyFill.style.height = `${energyPercent}%`;
     if (this.weaponOutputFill) {
       this.weaponOutputFill.style.height = `${outputPercent}%`;
     }
-    this.energyValue.textContent = `E ${Math.floor(data.energy)}/${Math.round(data.maxEnergy)} O ${outputPercent}%`;
+    this.energyValue.textContent = data.singleGauge
+      ? `BAT ${Math.floor(data.energy)}/${Math.round(data.maxEnergy)}`
+      : `E ${Math.floor(data.energy)}/${Math.round(data.maxEnergy)} O ${outputPercent}%`;
     this.weaponGauge?.classList.toggle('is-warning', lowEnergy || lowOutput || data.reloadState || data.overheatState);
     this.weaponEnergyTrack?.classList.toggle('is-energy-warning', Boolean(data.energyWarning));
     this.weaponOutputTrack?.classList.toggle('is-output-warning', Boolean(data.outputWarning));
@@ -1301,7 +1612,7 @@ export class UIManager {
     }
 
     const chips = [
-      ['ATK', data.stats.attack],
+      [data.unifiedBuster ? 'PWR' : 'ATK', data.stats.attack],
       ['ENG', data.stats.energy],
       ['RNG', data.stats.range],
       ['RPD', data.stats.rapid],
@@ -1425,20 +1736,31 @@ export class UIManager {
         continue;
       }
 
-      const totals = item.getStatTotals();
+      const compiledPlan = this.game.getBusterPlanForSlot?.(i) ?? null;
+      const compiledStats = compiledPlan?.stats ?? null;
+      const totals = compiledStats ? {
+        attackDamage: compiledStats.effectivePower ?? compiledStats.basePower ?? 0,
+        maxEnergy: compiledStats.maxEnergy ?? 0,
+        attackRange: compiledStats.rootRange ?? 0,
+        attackSpeed: compiledStats.finalRapid ?? 0,
+      } : item.getStatTotals();
       const chips = [
-        ['ATK', totals.attackDamage ?? 0],
+        [compiledPlan ? 'PWR' : 'ATK', totals.attackDamage ?? 0],
         ['ENG', totals.maxEnergy ?? 0],
         ['RNG', totals.attackRange ?? 0],
         ['RPD', totals.attackSpeed ?? 0],
       ].map(([label, value]) => `<span class="garage-stat-chip">${label} ${formatStatValue(label === 'RPD' ? 'attackSpeed' : label === 'ENG' ? 'maxEnergy' : label === 'RNG' ? 'attackRange' : 'attackDamage', value)}</span>`).join('');
 
-      card.style.borderColor = item.color;
+      const itemColor = item.color ?? (compiledPlan?.isMegaBuster ? '#7ee7ff' : '#f2c84b');
+      const itemMeta = compiledPlan
+        ? `${compiledPlan.isMegaBuster ? 'Fixed Pulse' : 'Compiled Custom Buster'} - revision ${compiledPlan.revision ?? 1}`
+        : `${RARITIES[item.rarity]?.label ?? 'Arm'} ${item.typeLabel} - Lv ${item.level}`;
+      card.style.borderColor = itemColor;
       card.innerHTML = `
         <span class="garage-weapon-index">${i + 1}</span>
         <span class="garage-weapon-main">
-          <strong class="garage-weapon-name" style="color: ${item.color}">${item.name}</strong>
-          <span class="garage-weapon-meta">${RARITIES[item.rarity].label} ${item.typeLabel} - Lv ${item.level}</span>
+          <strong class="garage-weapon-name" style="color: ${itemColor}">${compiledPlan?.isMegaBuster ? 'Mega Buster' : item.name}</strong>
+          <span class="garage-weapon-meta">${itemMeta}</span>
           <span class="garage-stat-grid">${chips}</span>
         </span>
       `;
@@ -2027,11 +2349,52 @@ export class UIManager {
         const removed = this.game.clearDebugPlatforms?.() ?? 0;
         this._syncPlatformDebugControls();
         this.showToast(`${removed} debug block${removed === 1 ? '' : 's'} cleared`);
+      } else if (action === 'buster-debug-grant') {
+        const result = this.game.grantBusterLabDebugKit?.();
+        this._syncBusterDebugControls();
+        this.showToast(
+          result?.message ?? (result?.ok ? 'Custom Buster test kit granted' : 'Unable to grant Buster test kit'),
+          result?.ok ? '#7df8ff' : '#ff9f73',
+        );
       }
     });
 
     this.restartButton.addEventListener('click', () => {
       window.location.reload();
+    });
+
+    this.inventoryPanel.addEventListener('change', (event) => {
+      const tuning = event.target.closest('[data-buster-tuning]');
+      if (tuning) {
+        this.game.updateBusterDraft?.(this.busterLabSelectedBuildId, {
+          type: 'setTuning',
+          stat: tuning.dataset.busterTuning,
+          value: Number(tuning.value),
+        });
+        this._renderBusterLab();
+        return;
+      }
+
+      const program = event.target.closest('[data-buster-program]');
+      if (program) {
+        this.game.updateBusterDraft?.(this.busterLabSelectedBuildId, {
+          type: 'setProgramSlot',
+          slot: program.dataset.busterProgram,
+          moduleId: program.value || null,
+        });
+        this._renderBusterLab();
+        return;
+      }
+
+      const calibration = event.target.closest('[data-buster-calibration-slot]');
+      if (calibration) {
+        const result = this.game.setMegaBusterCalibration?.(
+          Number(calibration.dataset.busterCalibrationSlot),
+          calibration.value || null,
+        );
+        if (!result?.ok) this.showToast(result?.message ?? 'Calibration could not be installed', '#ff9f73');
+        this._renderBusterLab();
+      }
     });
 
     this.inventoryPanel.addEventListener('click', (event) => {
@@ -2044,6 +2407,31 @@ export class UIManager {
 
       if (action === 'identify-scrap') {
         this.game.identifyReaverbotScrap?.();
+      } else if (action === 'roll-workshop-tab') {
+        this._selectRollWorkshopTab(button.dataset.rollTab);
+      } else if (action === 'buster-select-build') {
+        this.busterLabSelectedBuildId = button.dataset.buildId;
+        this._renderBusterLab();
+      } else if (action === 'buster-buy-chassis') {
+        const result = this.game.purchaseSecondBusterChassis?.();
+        this.showToast(result?.message ?? (result?.ok ? 'Workshop Chassis fabricated' : 'Unable to fabricate chassis'), result?.ok ? '#7df8ff' : '#ff9f73');
+        if (result?.ok) this.busterLabSelectedBuildId = 'build-b';
+        this._renderBusterLab();
+      } else if (action === 'buster-fabricate') {
+        const result = this.game.fabricateBusterModule?.(button.dataset.moduleId);
+        this.showToast(result?.message ?? (result?.ok ? 'Module fabricated' : 'Fabrication failed'), result?.ok ? '#7df8ff' : '#ff9f73');
+        this._renderBusterLab();
+      } else if (action === 'buster-save') {
+        const result = this.game.saveBusterDraft?.(this.busterLabSelectedBuildId);
+        this.showToast(result?.message ?? (result?.ok ? 'Buster revision saved' : 'Draft is invalid'), result?.ok ? '#7df8ff' : '#ff9f73');
+        this._renderBusterLab();
+      } else if (action === 'buster-equip') {
+        const result = this.game.equipCustomBuster?.(this.busterLabSelectedBuildId, Number(button.dataset.slotIndex));
+        this.showToast(result?.message ?? (result?.ok ? 'Custom Buster equipped' : 'Unable to equip Buster'), result?.ok ? '#7df8ff' : '#ff9f73');
+        this._renderBusterLab();
+      } else if (action === 'buster-test-range') {
+        const result = this.game.enterBusterTestRange?.(this.busterLabSelectedBuildId);
+        if (!result?.ok) this.showToast(result?.message ?? 'Draft cannot enter the range', '#ff9f73');
       } else if (action === 'equip') {
         this._equipInventoryItem(button.dataset.itemId);
       } else if (action === 'assign-arm-slot') {
@@ -2097,9 +2485,10 @@ export class UIManager {
     }
 
     let previous = null;
+    let preferredSlot = null;
 
     if (isArmWeapon(item)) {
-      const preferredSlot = isBusterArm(item)
+      preferredSlot = isBusterArm(item)
         ? 0
         : isUtilityArm(item)
           ? 3
@@ -2113,7 +2502,7 @@ export class UIManager {
       previous = this.game.player.equipment.equip(item);
     }
 
-    if (previous) {
+    if (previous && !this.game.handleDisplacedCustomBuster?.(preferredSlot, previous)) {
       this.game.inventory.addItem(previous);
     }
 
@@ -2132,7 +2521,7 @@ export class UIManager {
     }
 
     const previous = this.game.player.assignArmWeaponToSlot(slotIndex, item);
-    if (previous) {
+    if (previous && !this.game.handleDisplacedCustomBuster?.(slotIndex, previous)) {
       this.game.inventory.addItem(previous);
     }
 
@@ -2273,6 +2662,10 @@ export class UIManager {
       }
     }
 
+    for (const slotIndex of [1, 2]) {
+      const current = player.armHotbar[slotIndex];
+      this.game.handleDisplacedCustomBuster?.(slotIndex, current, 'loadoutOptimized');
+    }
     player.equipment.clear();
     player.setArmHotbar([buster, ...armLoadout].filter(Boolean));
     player.setUtilityArms(utilityLoadout, true);
@@ -2299,7 +2692,7 @@ export class UIManager {
     const seen = new Set();
 
     const addItem = (item) => {
-      if (!item || seen.has(item.id)) {
+      if (!item || item.type === 'customBusterArm' || seen.has(item.id)) {
         return;
       }
 

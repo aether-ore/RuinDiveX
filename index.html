@@ -106,6 +106,11 @@
           </section>
           <section>
             <div id="roll-scrap-service" class="roll-scrap-service" hidden>
+              <div id="roll-workshop-tabs" class="roll-workshop-tabs" role="tablist" aria-label="Roll workshop section" hidden>
+                <button type="button" role="tab" aria-selected="true" data-action="roll-workshop-tab" data-roll-tab="salvage">Salvage Analysis</button>
+                <button type="button" role="tab" aria-selected="false" data-action="roll-workshop-tab" data-roll-tab="buster">Buster Lab</button>
+              </div>
+              <div id="roll-salvage-view" data-roll-view="salvage">
               <div class="roll-service-heading">
                 <div>
                   <span class="roll-service-eyebrow">Roll's Salvage Analysis</span>
@@ -128,6 +133,99 @@
               </p>
               <h3 class="inventory-subheading">Identified Reaverbot Parts</h3>
               <div id="material-inventory" class="material-inventory"></div>
+              </div>
+
+              <section id="buster-lab-view" class="buster-lab" data-roll-view="buster" hidden aria-labelledby="buster-lab-heading">
+                <header class="buster-lab-header">
+                  <div>
+                    <span class="roll-service-eyebrow">Roll's Custom Buster Lab</span>
+                    <h2 id="buster-lab-heading">Program a physical Buster chassis</h2>
+                  </div>
+                  <div id="buster-lab-persistence" class="buster-lab-persistence">Workshop data is stored locally on this device.</div>
+                </header>
+                <p class="roll-service-copy">
+                  Only this workshop stockpile, discovered recipes, chassis, and saved Busters persist. General inventory and ruin progress do not.
+                </p>
+                <p id="buster-lab-warning" class="buster-lab-warning" role="alert" hidden></p>
+
+                <div class="buster-build-tabs" role="tablist" aria-label="Buster configuration">
+                  <button type="button" role="tab" data-action="buster-select-build" data-build-id="megaBuster">Mega</button>
+                  <button type="button" role="tab" data-action="buster-select-build" data-build-id="build-a">Build A</button>
+                  <button type="button" role="tab" data-action="buster-select-build" data-build-id="build-b">Build B</button>
+                  <button id="buster-buy-chassis" type="button" data-action="buster-buy-chassis">Build second chassis — 20 scrap</button>
+                </div>
+
+                <div id="buster-mega-panel" class="buster-mega-panel" hidden>
+                  <h3>Mega Buster calibration</h3>
+                  <p>Fixed Pulse shot · Energy cost 2 · four physical calibration sockets · ratings cap at 10.</p>
+                  <div id="buster-mega-calibrations" class="buster-mega-calibrations"></div>
+                </div>
+
+                <div id="buster-custom-editor" class="buster-custom-editor">
+                  <section class="buster-editor-card" aria-labelledby="buster-tuning-heading">
+                    <div class="buster-card-heading">
+                      <h3 id="buster-tuning-heading">Workshop Chassis</h3>
+                      <strong id="buster-tuning-remaining">0 points remaining</strong>
+                    </div>
+                    <div id="buster-tuning-controls" class="buster-tuning-controls">
+                      <label><span>PWR</span><input type="number" min="1" max="10" step="1" data-buster-tuning="power" /></label>
+                      <label><span>ENG</span><input type="number" min="1" max="10" step="1" data-buster-tuning="energy" /></label>
+                      <label><span>RNG</span><input type="number" min="1" max="10" step="1" data-buster-tuning="range" /></label>
+                      <label><span>RPD</span><input type="number" min="1" max="10" step="1" data-buster-tuning="rapid" /></label>
+                    </div>
+                  </section>
+
+                  <section class="buster-editor-card" aria-labelledby="buster-program-heading">
+                    <div class="buster-card-heading">
+                      <h3 id="buster-program-heading">Program strip</h3>
+                      <strong id="buster-program-capacity">0 / 5 nodes</strong>
+                    </div>
+                    <div class="buster-program-scope">
+                      <span class="buster-scope-label">Root</span>
+                      <label>Emitter<select data-buster-program="emitter"></select></label>
+                      <span aria-hidden="true">→</span>
+                      <label>Guidance<select data-buster-program="rootModifier"></select></label>
+                      <span aria-hidden="true">→</span>
+                      <label>Trigger<select data-buster-program="trigger"></select></label>
+                    </div>
+                    <div class="buster-program-scope is-child">
+                      <span class="buster-scope-label">Child / direct</span>
+                      <label>Guidance<select data-buster-program="childModifier"></select></label>
+                      <span aria-hidden="true">→</span>
+                      <label>Splitter<select data-buster-program="splitter"></select></label>
+                      <span aria-hidden="true">→</span>
+                      <label>Payload<select data-buster-program="payload"></select></label>
+                    </div>
+                    <p class="buster-program-help">With no trigger, the lower strip continues the root. A trigger creates one child branch; guidance inside it reacquires independently.</p>
+                  </section>
+                </div>
+
+                <div class="buster-lab-grid">
+                  <section class="buster-editor-card" aria-labelledby="buster-result-heading">
+                    <h3 id="buster-result-heading">Compiler result</h3>
+                    <div id="buster-compiler-result" class="buster-compiler-result"></div>
+                    <ul id="buster-validation-errors" class="buster-validation-errors" aria-live="polite"></ul>
+                    <div class="buster-actions">
+                      <button type="button" data-action="buster-save">Save revision</button>
+                      <button type="button" data-action="buster-equip" data-slot-index="1">Equip slot 2</button>
+                      <button type="button" data-action="buster-equip" data-slot-index="2">Equip slot 3</button>
+                      <button type="button" data-action="buster-test-range">Test in Range</button>
+                    </div>
+                  </section>
+                  <section class="buster-editor-card" aria-labelledby="buster-inventory-heading">
+                    <h3 id="buster-inventory-heading">Physical modules</h3>
+                    <div id="buster-module-inventory" class="buster-module-inventory"></div>
+                  </section>
+                </div>
+
+                <section class="buster-editor-card buster-recipes-card" aria-labelledby="buster-recipes-heading">
+                  <div class="buster-card-heading">
+                    <h3 id="buster-recipes-heading">Fabrication recipes</h3>
+                    <strong id="buster-recipe-scrap">0 identified scrap</strong>
+                  </div>
+                  <div id="buster-recipe-list" class="buster-recipe-list"></div>
+                </section>
+              </section>
             </div>
             <div class="salvage-controls">
               <div class="inventory-title-row">
@@ -156,6 +254,7 @@
           <div class="pose-debug-tabs" role="tablist" aria-label="Debug tool">
             <button role="tab" aria-selected="true" data-action="pose-debug-tab" data-debug-tab="pose">Pose</button>
             <button role="tab" aria-selected="false" data-action="pose-debug-tab" data-debug-tab="platforming">Platforming</button>
+            <button id="buster-debug-tab" role="tab" aria-selected="false" data-action="pose-debug-tab" data-debug-tab="buster" hidden>Buster Lab</button>
           </div>
           <div data-debug-view="pose">
             <p id="pose-debug-status" class="pose-debug-status">Tilde toggles this editor. World simulation is paused while it is open.</p>
@@ -216,6 +315,27 @@
                 <button data-action="platform-clear">Clear Blocks</button>
               </div>
               <output id="platform-debug-count" class="platform-debug-count">0 blocks</output>
+            </section>
+          </div>
+          <div id="buster-debug-view" class="buster-debug-view" data-debug-view="buster" hidden>
+            <section class="buster-debug-section" aria-labelledby="buster-debug-heading">
+              <span class="roll-service-eyebrow">Custom Buster v0.1</span>
+              <h2 id="buster-debug-heading">Complete testing kit</h2>
+              <p>
+                Grant one fresh physical copy of every craftable module, all six Mega calibrations,
+                full recipe discovery, and Build B if it is missing. Existing builds, sockets,
+                assignments, salvage, and scrap are not changed.
+              </p>
+              <button id="buster-debug-grant" type="button" data-action="buster-debug-grant">
+                Grant one of each Buster part
+              </button>
+              <output id="buster-debug-status" class="buster-debug-status" aria-live="polite">
+                No debug kits granted in this save.
+              </output>
+              <small>
+                This action is repeatable so both physical chassis can own separate copies. Built-in
+                Pulse and On Impact nodes do not require inventory instances.
+              </small>
             </section>
           </div>
         </div>

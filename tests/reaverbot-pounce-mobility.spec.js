@@ -176,12 +176,22 @@ test('pouncers replace ordinary locomotion with spring quadruped, paired spring,
     game.addExplosion = (position, damage, radius, color, options) => {
       explosionCalls.push({ position: position.clone(), damage, radius, color, options });
     };
+    // Prevent the broad apex overlap from interrupting the pounce, then allow
+    // a deterministic contact on the landing frame below.
+    shockPouncer.brain.attackHit = true;
     shockPouncer._updateCommitState(shockPouncer.genome.behavior.commitDuration * 0.5, game);
     const commitApexRise = shockPouncer.root.position.y - commitStart.y;
     const airborneCommitIgnoresGround = shockPouncer.shouldIgnoreGroundConstraint();
+    const originalTakeDamage = game.player.takeDamage;
+    game.player.takeDamage = () => 1;
+    shockPouncer.brain.attackHit = false;
     shockPouncer._updateCommitState(shockPouncer.genome.behavior.commitDuration * 0.51, game);
+    const landingContactStartedRetreat = Boolean(shockPouncer.contactRetreatMotion);
+    const landingImpactDamagePlayer = explosionCalls[0]?.options?.damagePlayer ?? null;
+    game.player.takeDamage = originalTakeDamage;
     game.addExplosion = originalAddExplosion;
     const completedAttackState = shockPouncer.brain.state;
+    shockPouncer.clearExternalMotion('cleared', game);
 
     const closePouncer = monoPogo;
     closePouncer.root.position.set(0, 0, 0);
@@ -264,6 +274,8 @@ test('pouncers replace ordinary locomotion with spring quadruped, paired spring,
         completedAttackState,
         explosionCount: explosionCalls.length,
         explosionRadius: explosionCalls[0]?.radius ?? 0,
+        landingContactStartedRetreat,
+        landingImpactDamagePlayer,
       },
       closeRangeState,
       closeRangeStateDuringHandoff,
@@ -321,6 +333,8 @@ test('pouncers replace ordinary locomotion with spring quadruped, paired spring,
   expect(result.shockPouncer.completedAttackState).toBe('recovery');
   expect(result.shockPouncer.explosionCount).toBe(1);
   expect(result.shockPouncer.explosionRadius).toBeCloseTo(2.35, 5);
+  expect(result.shockPouncer.landingContactStartedRetreat).toBe(true);
+  expect(result.shockPouncer.landingImpactDamagePlayer).toBe(false);
   expect(result.closeRangeStateDuringHandoff).toBe('position');
   expect(result.closeRangeState).toBe('telegraph');
   expect(result.closeRangeLandingTravel).toBeGreaterThanOrEqual(2.35);

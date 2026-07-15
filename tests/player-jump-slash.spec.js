@@ -47,14 +47,6 @@ const JUMP_SLASH_AERIAL_POSE = Object.freeze({
   rightKnee: Object.freeze({ pitch: -65.3, yaw: -0.1, roll: -1.2 }),
   rightAnkle: Object.freeze({ pitch: -2.9, yaw: 0.3, roll: 2.3 }),
 });
-const JUMP_SLASH_FALLBACK = Object.freeze({
-  motionLocal: Object.freeze([-0.512142, -0.852924, -0.101154]),
-  planeNormalLocal: Object.freeze([-0.820581, 0.451102, 0.350933]),
-  centerLocal: Object.freeze([-0.835155, 1.967038, 0.294638]),
-  range: 2.25,
-  arcHalfAngle: 1.857862,
-});
-
 async function openLoadedGame(page) {
   await page.goto('/');
   await page.waitForFunction(() => (
@@ -372,6 +364,33 @@ async function installJumpSlashHarness(page) {
           );
         };
 
+        const residentRibbonGeometryError = (mesh, ratio, handle) => {
+          const position = mesh?.geometry?.attributes?.position;
+          if (!position || !handle?.samples?.length) return Infinity;
+          let maximumError = 0;
+          for (let sampleIndex = 0; sampleIndex < handle.samples.length; sampleIndex += 1) {
+            const ribbonSample = handle.samples[sampleIndex];
+            const offset = sampleIndex * 2;
+            const renderedInner = new Vector3(
+              position.getX(offset),
+              position.getY(offset),
+              position.getZ(offset),
+            );
+            const renderedTip = new Vector3(
+              position.getX(offset + 1),
+              position.getY(offset + 1),
+              position.getZ(offset + 1),
+            );
+            const expectedInner = ribbonSample.base.clone().lerp(ribbonSample.tip, ratio);
+            maximumError = Math.max(
+              maximumError,
+              renderedInner.distanceTo(expectedInner),
+              renderedTip.distanceTo(ribbonSample.tip),
+            );
+          }
+          return maximumError;
+        };
+
         game.appendBeamBladeSweepTrail = (...args) => {
           const [handle, baseWorld, tipWorld, progress] = args;
           const result = originalAppend(...args);
@@ -383,6 +402,7 @@ async function installJumpSlashHarness(page) {
             let localSampleError = null;
             let worldMetadataError = null;
             let geometryError = null;
+            let residentGeometryError = null;
             if (accepted) {
               const expectedBaseLocal = baseWorld.clone();
               const expectedTipLocal = tipWorld.clone();
@@ -402,6 +422,10 @@ async function installJumpSlashHarness(page) {
                 ribbonGeometryError(handle.glow, 0.24, afterCount - 1, baseWorld, tipWorld),
                 ribbonGeometryError(handle.core, 0.76, afterCount - 1, baseWorld, tipWorld),
               );
+              residentGeometryError = Math.max(
+                residentRibbonGeometryError(handle.glow, 0.24, handle),
+                residentRibbonGeometryError(handle.core, 0.76, handle),
+              );
             }
             appends.push({
               id: getId(handle),
@@ -412,6 +436,8 @@ async function installJumpSlashHarness(page) {
               airborne: player.isJumpAirborne(),
               attackTimer: player.animation.attackTimer,
               rootY: player.root.position.y,
+              baseWorld: sample?.baseWorld?.toArray?.() ?? null,
+              tipWorld: sample?.tipWorld?.toArray?.() ?? null,
               baseWorldY: sample?.baseWorld?.y ?? null,
               tipWorldY: sample?.tipWorld?.y ?? null,
               residentBaseWorldYSpan: accepted
@@ -423,6 +449,7 @@ async function installJumpSlashHarness(page) {
               localSampleError,
               worldMetadataError,
               geometryError,
+              residentGeometryError,
               followRoot: handle.followObject === player.root,
               glowParentRoot: handle.glow?.parent === player.root,
               coreParentRoot: handle.core?.parent === player.root,
@@ -1189,6 +1216,9 @@ test('jump slash holds its falling lower body while the airborne upper slash com
         maximumLocalSampleError: Math.max(...samples.map((sample) => sample.localSampleError)),
         maximumWorldMetadataError: Math.max(...samples.map((sample) => sample.worldMetadataError)),
         maximumGeometryError: Math.max(...samples.map((sample) => sample.geometryError)),
+        maximumResidentGeometryError: Math.max(
+          ...samples.map((sample) => sample.residentGeometryError),
+        ),
         allFollowRoot: samples.every((sample) => (
           sample.followRoot
           && sample.glowParentRoot
@@ -1340,10 +1370,10 @@ test('jump slash holds its falling lower body while the airborne upper slash com
   expect(result.energySpent).toBe(result.expectedEnergyCost);
   expect(result.outputSpent).toBeCloseTo(result.expectedOutputCost, 6);
   expect(result.initialTrailState).toEqual({
-    progressSource: 'jumpSlashVisual',
+    progressSource: 'jumpSlashUpperBody',
     startProgress: JUMP_SLASH_TRAIL_START,
-    endProgress: JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
-    followRoot: true,
+    endProgress: JUMP_SLASH_TRAIL_END,
+    followRoot: false,
   });
 
   expect(result.windupFrames).toBeGreaterThan(80);
@@ -1418,27 +1448,10 @@ test('jump slash holds its falling lower body while the airborne upper slash com
   expect(result.strikes[0].activeTrailSampleCount).toBeGreaterThanOrEqual(2);
   expect(result.staticFallbackCount).toBe(0);
 
-  expect(result.begins).toHaveLength(2);
-  expect(result.begins.map((entry) => entry.id)).toEqual(
-    expect.arrayContaining(result.trailEpochs.map((entry) => entry.id)),
-  );
-  const fallBegin = result.begins.find((entry) => entry.trailMode === 'airborneFall');
-  const sweepBegins = result.begins.filter((entry) => entry.trailMode === 'liveBladeSweep');
-  expect(sweepBegins).toHaveLength(1);
-  for (const begin of sweepBegins) {
-    expect(begin).toEqual(expect.objectContaining({
-      color: JUMP_SLASH_TRAIL_COLOR,
-      coreColor: JUMP_SLASH_TRAIL_COLOR,
-      glowAdditive: true,
-      optionsFollowRoot: true,
-      handleFollowRoot: true,
-      glowParentRoot: true,
-      coreParentRoot: true,
-      trailSpace: 'followObjectLocal',
-    }));
-  }
-  expect(fallBegin).toEqual(expect.objectContaining({
-    phase: 'airborneHold',
+  expect(result.begins).toHaveLength(1);
+  const continuousBegin = result.begins[0];
+  expect(continuousBegin).toEqual(expect.objectContaining({
+    phase: 'airborneWindup',
     airborne: true,
     color: JUMP_SLASH_TRAIL_COLOR,
     coreColor: JUMP_SLASH_TRAIL_COLOR,
@@ -1453,42 +1466,31 @@ test('jump slash holds its falling lower body while the airborne upper slash com
     coreParentScene: true,
     trailSpace: 'world',
   }));
-  expect(result.trailEpochs).toHaveLength(2);
-  const airborneEpoch = result.trailEpochs.find((epoch) => (
-    epoch.allAirborne && epoch.trailModes.includes('liveBladeSweep')
-  ));
-  const fallEpoch = result.trailEpochs.find((epoch) => epoch.trailModes.includes('airborneFall'));
-  expect(airborneEpoch.count).toBeGreaterThan(10);
-  expect(airborneEpoch.minimumProgress).toBeGreaterThanOrEqual(JUMP_SLASH_TRAIL_START);
-  expect(airborneEpoch.minimumProgress).toBeLessThan(JUMP_SLASH_TRAIL_START + 0.01);
-  expect(airborneEpoch.maximumProgress).toBeGreaterThan(
-    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS - 0.01,
-  );
-  expect(airborneEpoch.maximumProgress).toBeLessThanOrEqual(
-    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS + 0.000001,
-  );
-  expect(fallEpoch.count).toBeGreaterThan(2);
-  expect(fallEpoch.allAirborne).toBe(true);
-  expect(fallEpoch.phases).toEqual(['airborneHold']);
-  expect(fallEpoch.minimumProgress).toBeCloseTo(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS, 8);
-  expect(fallEpoch.maximumProgress).toBeCloseTo(JUMP_SLASH_TRAIL_END, 8);
-  expect(fallEpoch.allWorldSpace).toBe(true);
-  expect(fallEpoch.visibleSamples).toBeGreaterThan(0);
-  expect(fallEpoch.firstBaseWorldY - fallEpoch.lastBaseWorldY).toBeGreaterThan(0.05);
-  expect(fallEpoch.firstTipWorldY - fallEpoch.lastTipWorldY).toBeGreaterThan(0.05);
-  expect(fallEpoch.maximumResidentBaseWorldYSpan).toBeLessThanOrEqual(3.400001);
-  expect(fallEpoch.maximumResidentTipWorldYSpan).toBeLessThanOrEqual(3.400001);
-  expect(airborneEpoch.allFollowRoot).toBe(true);
-  for (const epoch of result.trailEpochs) {
-    expect(epoch.maximumLocalSampleError).toBeLessThan(0.000001);
-    expect(epoch.maximumWorldMetadataError).toBeLessThan(0.000001);
-    expect(epoch.maximumGeometryError).toBeLessThan(0.00001);
-  }
-  expect(new Set([airborneEpoch.id, fallEpoch.id]).size).toBe(2);
+  expect(continuousBegin.trailMode).toBe('continuousJumpSlash');
+  expect(result.trailEpochs).toHaveLength(1);
+  const continuousEpoch = result.trailEpochs[0];
+  expect(continuousEpoch.id).toBe(continuousBegin.id);
+  expect(continuousEpoch.count).toBeGreaterThan(20);
+  expect(continuousEpoch.minimumProgress).toBeGreaterThanOrEqual(JUMP_SLASH_TRAIL_START);
+  expect(continuousEpoch.minimumProgress).toBeLessThan(JUMP_SLASH_TRAIL_START + 0.01);
+  expect(continuousEpoch.maximumProgress).toBeCloseTo(JUMP_SLASH_TRAIL_END, 8);
+  expect(continuousEpoch.phases).toEqual(['airborneWindup', 'airborneHold']);
+  expect(continuousEpoch.trailModes).toEqual(['continuousJumpSlash']);
+  expect(continuousEpoch.allWorldSpace).toBe(true);
+  expect(continuousEpoch.visibleSamples).toBeGreaterThan(0);
+  expect(continuousEpoch.firstBaseWorldY - continuousEpoch.lastBaseWorldY).toBeGreaterThan(0.05);
+  expect(continuousEpoch.firstTipWorldY - continuousEpoch.lastTipWorldY).toBeGreaterThan(0.05);
+  expect(continuousEpoch.maximumResidentBaseWorldYSpan).toBeLessThanOrEqual(3.400001);
+  expect(continuousEpoch.maximumResidentTipWorldYSpan).toBeLessThanOrEqual(3.400001);
+  expect(continuousEpoch.maximumLocalSampleError).toBeLessThan(0.000001);
+  expect(continuousEpoch.maximumWorldMetadataError).toBeLessThan(0.000001);
+  expect(continuousEpoch.maximumGeometryError).toBeLessThan(0.00001);
+  expect(continuousEpoch.maximumResidentGeometryError).toBeLessThan(0.00001);
   expect(result.crossHoldOrLandingSegments).toEqual([]);
   expect(result.samplesPastAirborneMatch).toBeGreaterThan(10);
   expect(result.samplesBeforeLandingSeam).toBe(0);
-  expect(result.finishes).toHaveLength(2);
+  expect(result.finishes).toHaveLength(1);
+  expect(result.finishes[0].id).toBe(continuousEpoch.id);
   expect(result.cancels).toHaveLength(0);
 
   expect(result.touchdown).toEqual(expect.objectContaining({
@@ -1746,6 +1748,9 @@ test('a long fall holds completed upper follow-through and frozen legs through t
         maximumResidentTipWorldYSpan: Math.max(
           ...samples.map((sample) => sample.residentTipWorldYSpan ?? 0),
         ),
+        maximumResidentGeometryError: Math.max(
+          ...samples.map((sample) => sample.residentGeometryError),
+        ),
         lastElapsed: samples[samples.length - 1]?.elapsed ?? null,
       };
     });
@@ -1863,29 +1868,29 @@ test('a long fall holds completed upper follow-through and frozen legs through t
   );
   expect(result.strikes[0].airborne).toBe(true);
   expect(result.staticFallbackCount).toBe(0);
-  expect(result.begins).toHaveLength(2);
-  expect(result.epochs).toHaveLength(2);
-  const windupEpoch = result.epochs.find((epoch) => (
-    epoch.allAirborne && epoch.trailModes.includes('liveBladeSweep')
-  ));
-  const fallEpoch = result.epochs.find((epoch) => epoch.trailModes.includes('airborneFall'));
-  expect(windupEpoch.count).toBeGreaterThan(10);
-  expect(windupEpoch.allRootLocal).toBe(true);
-  expect(fallEpoch.count).toBeGreaterThan(20);
-  expect(fallEpoch.allAirborne).toBe(true);
-  expect(fallEpoch.allWorldSpace).toBe(true);
-  expect(fallEpoch.visibleSamples).toBeGreaterThan(0);
-  expect(fallEpoch.postGameplaySamples).toBeGreaterThan(10);
-  expect(fallEpoch.firstBaseWorldY - fallEpoch.lastBaseWorldY).toBeGreaterThan(1);
-  expect(fallEpoch.firstTipWorldY - fallEpoch.lastTipWorldY).toBeGreaterThan(1);
-  expect(fallEpoch.maximumResidentBaseWorldYSpan).toBeLessThanOrEqual(3.400001);
-  expect(fallEpoch.maximumResidentTipWorldYSpan).toBeLessThanOrEqual(3.400001);
-  expect(result.touchdown.elapsed - fallEpoch.lastElapsed).toBeLessThanOrEqual(
+  expect(result.begins).toHaveLength(1);
+  expect(result.epochs).toHaveLength(1);
+  const continuousEpoch = result.epochs[0];
+  expect(continuousEpoch.id).toBe(result.begins[0].id);
+  expect(continuousEpoch.trailModes).toEqual(['continuousJumpSlash']);
+  expect(continuousEpoch.count).toBeGreaterThan(30);
+  expect(continuousEpoch.allAirborne).toBe(false);
+  expect(continuousEpoch.allGrounded).toBe(false);
+  expect(continuousEpoch.allWorldSpace).toBe(true);
+  expect(continuousEpoch.visibleSamples).toBeGreaterThan(0);
+  expect(continuousEpoch.postGameplaySamples).toBeGreaterThan(10);
+  expect(continuousEpoch.firstBaseWorldY - continuousEpoch.lastBaseWorldY).toBeGreaterThan(1);
+  expect(continuousEpoch.firstTipWorldY - continuousEpoch.lastTipWorldY).toBeGreaterThan(1);
+  expect(continuousEpoch.maximumResidentBaseWorldYSpan).toBeLessThanOrEqual(3.400001);
+  expect(continuousEpoch.maximumResidentTipWorldYSpan).toBeLessThanOrEqual(3.400001);
+  expect(continuousEpoch.maximumResidentGeometryError).toBeLessThan(0.00001);
+  expect(result.touchdown.elapsed - continuousEpoch.lastElapsed).toBeLessThanOrEqual(
     (2 / 240) + 0.000001,
   );
-  expect(result.anyCrossEpoch).toBe(false);
+  expect(result.anyCrossEpoch).toBe(true);
   expect(result.anyHoldProgressPastMatch).toBe(true);
-  expect(result.finishes).toHaveLength(2);
+  expect(result.finishes).toHaveLength(1);
+  expect(result.finishes[0].id).toBe(continuousEpoch.id);
   expect(result.cancels).toHaveLength(0);
 
   expect(result.touchdown.elapsed).toBeGreaterThanOrEqual(result.intendedAirTime - 0.000001);
@@ -1963,6 +1968,21 @@ test('touchdown before the split-body hold continues the blade trail without a f
     const accepted = probe.appends.filter((sample) => sample.accepted);
     const airborneSamples = accepted.filter((sample) => sample.airborne);
     const groundedSamples = accepted.filter((sample) => !sample.airborne);
+    const endpointStep = (from, to) => Math.max(
+      Math.hypot(...from.baseWorld.map((value, axis) => value - to.baseWorld[axis])),
+      Math.hypot(...from.tipWorld.map((value, axis) => value - to.tipWorld[axis])),
+    );
+    const firstGroundedIndex = accepted.findIndex((sample) => !sample.airborne);
+    const touchdownEndpointStep = endpointStep(
+      accepted[firstGroundedIndex - 1],
+      accepted[firstGroundedIndex],
+    );
+    const ordinaryEndpointSteps = [];
+    for (let index = 1; index < accepted.length; index += 1) {
+      if (index === firstGroundedIndex
+        || accepted[index - 1].airborne !== accepted[index].airborne) continue;
+      ordinaryEndpointSteps.push(endpointStep(accepted[index - 1], accepted[index]));
+    }
     for (let frame = 0; frame < 60; frame += 1) h.game._updateTimedEffects(1 / 60);
     return {
       started,
@@ -1972,6 +1992,15 @@ test('touchdown before the split-body hold continues the blade trail without a f
       groundedMinimumProgress: Math.min(...groundedSamples.map((sample) => sample.progress)),
       groundedMaximumProgress: Math.max(...groundedSamples.map((sample) => sample.progress)),
       groundedSampleCount: groundedSamples.length,
+      acceptedIds: [...new Set(accepted.map((sample) => sample.id))],
+      airborneIds: [...new Set(airborneSamples.map((sample) => sample.id))],
+      groundedIds: [...new Set(groundedSamples.map((sample) => sample.id))],
+      firstGroundedSampleElapsed: groundedSamples[0]?.elapsed ?? null,
+      touchdownEndpointStep,
+      maximumOrdinaryEndpointStep: Math.max(0, ...ordinaryEndpointSteps),
+      maximumResidentGeometryError: Math.max(
+        ...accepted.map((sample) => sample.residentGeometryError),
+      ),
       begins: probe.begins,
       finishes: probe.finishes,
       cancels: probe.cancels,
@@ -1997,8 +2026,18 @@ test('touchdown before the split-body hold continues the blade trail without a f
   expect(result.groundedMinimumProgress).toBeCloseTo(result.touchdown.upperProgress, 6);
   expect(result.groundedMinimumProgress - result.airborneMaximumProgress).toBeLessThan(0.01);
   expect(result.groundedMaximumProgress).toBeCloseTo(result.upperEndProgress, 6);
-  expect(result.begins).toHaveLength(2);
-  expect(result.finishes).toHaveLength(2);
+  expect(result.begins).toHaveLength(1);
+  expect(result.finishes).toHaveLength(1);
+  expect(result.acceptedIds).toEqual([result.begins[0].id]);
+  expect(result.airborneIds).toEqual([result.begins[0].id]);
+  expect(result.groundedIds).toEqual([result.begins[0].id]);
+  expect(result.finishes[0].id).toBe(result.begins[0].id);
+  expect(result.finishes[0].elapsed).toBeGreaterThanOrEqual(result.firstGroundedSampleElapsed);
+  expect(result.touchdownEndpointStep).toBeLessThanOrEqual(Math.max(
+    0.1,
+    result.maximumOrdinaryEndpointStep * 2.5,
+  ));
+  expect(result.maximumResidentGeometryError).toBeLessThan(0.00001);
   expect(result.cancels).toHaveLength(0);
   expect(result.remainingJumpSlashMeshes).toBe(0);
 });
@@ -2161,6 +2200,7 @@ test('a short touchdown during split-body follow-through neither pops nor rewind
     }
 
     const accepted = probe.appends.filter((sample) => sample.accepted);
+    const airborneSamples = accepted.filter((sample) => sample.airborne);
     const groundedSamples = accepted.filter((sample) => !sample.airborne);
     for (let frame = 0; frame < 60; frame += 1) h.game._updateTimedEffects(1 / 60);
     return {
@@ -2171,6 +2211,11 @@ test('a short touchdown during split-body follow-through neither pops nor rewind
       begins: probe.begins,
       finishes: probe.finishes,
       cancels: probe.cancels,
+      acceptedIds: [...new Set(accepted.map((sample) => sample.id))],
+      airborneIds: [...new Set(airborneSamples.map((sample) => sample.id))],
+      groundedIds: [...new Set(groundedSamples.map((sample) => sample.id))],
+      acceptedPhases: [...new Set(accepted.map((sample) => sample.phase))],
+      trailModes: [...new Set(accepted.map((sample) => sample.trailMode))],
       lowerBranchBoneCount: lowerBranchBones.length,
       cachedLowerBodyBoneCount: rig.root.userData.jumpSlashLowerBodyBoneCount ?? 0,
       recoveryMaximumUpperAngularStep,
@@ -2256,12 +2301,24 @@ test('a short touchdown during split-body follow-through neither pops nor rewind
   expect(result.lastRecovery.upperProgress).toBeCloseTo(result.lastRecovery.lowerProgress, 8);
   expect(result.lastRecovery.splitBody).toBe(false);
   expect(result.lastRecovery.hipsBlendWeight).toBeLessThan(0.001);
-  expect(result.begins).toHaveLength(3);
-  expect(result.finishes).toHaveLength(3);
+  expect(result.begins).toHaveLength(1);
+  expect(result.finishes).toHaveLength(1);
+  expect(result.acceptedIds).toEqual([result.begins[0].id]);
+  expect(result.airborneIds).toEqual([result.begins[0].id]);
+  expect(result.groundedIds).toEqual([result.begins[0].id]);
+  expect(result.finishes[0].id).toBe(result.begins[0].id);
+  expect(result.acceptedPhases).toEqual(expect.arrayContaining([
+    'airborneWindup',
+    'airborneHold',
+    'groundedRecovery',
+  ]));
+  expect(result.trailModes).toEqual(['continuousJumpSlash']);
   expect(result.cancels).toHaveLength(0);
   expect(result.groundedTrailCount).toBeGreaterThan(5);
-  expect(result.groundedTrailMinimumProgress).toBeGreaterThanOrEqual(
-    result.landingStartProgress - 0.000001,
+  expect(result.groundedTrailMinimumProgress).toBeLessThan(result.landingStartProgress);
+  expect(result.groundedTrailMinimumProgress).toBeCloseTo(
+    result.touchdown.upperBodyProgress,
+    6,
   );
   expect(result.groundedTrailMaximumProgress).toBeCloseTo(result.upperEndProgress, 6);
   expect(result.finalVisualActive).toBe(false);
@@ -2271,7 +2328,7 @@ test('a short touchdown during split-body follow-through neither pops nor rewind
   expect(result.remainingJumpSlashMeshes).toBe(0);
 });
 
-test('a coarse frame uses the fitted root-following arc only when a live ribbon lacks two samples', async ({ page }) => {
+test('a coarse frame keeps the same continuous ribbon until its next blade sample', async ({ page }) => {
   await openLoadedGame(page);
   await installJumpSlashHarness(page);
 
@@ -2282,10 +2339,17 @@ test('a coarse frame uses the fitted root-following arc only when a live ribbon 
     const probe = h.installProbe();
     const started = combat.tryPrimaryAttack(window.game.pointer.aimWorld);
 
-    // Cross the visual-start and hit thresholds in one update. Exactly one
-    // blade sample is insufficient for a ribbon, so the fitted plane is the
-    // deliberate low-FPS fallback.
+    // Cross the visual-start and hit thresholds in one update. The first
+    // sample cannot draw a ribbon yet, but it must not be replaced by another
+    // green effect or handle before the next blade observation arrives.
     h.tick(0.43);
+    const afterCoarseFrame = {
+      active: Boolean(combat.activeSwordSweepTrail),
+      handleId: probe.begins[0]?.id ?? null,
+      sampleCount: combat.activeSwordSweepTrail?.handle?.samples?.length ?? 0,
+      visible: Boolean(combat.activeSwordSweepTrail?.handle?.glow?.visible),
+    };
+    h.tick(1 / 30);
 
     return {
       swordIndex: h.swordIndex,
@@ -2299,55 +2363,43 @@ test('a coarse frame uses the fitted root-following arc only when a live ribbon 
       cancels: probe.cancels,
       staticFallbacks: probe.staticFallbacks,
       activeTrailAfterHit: Boolean(combat.activeSwordSweepTrail),
+      activeHandleSampleCount: combat.activeSwordSweepTrail?.handle?.samples?.length ?? 0,
+      activeGlowVisible: Boolean(combat.activeSwordSweepTrail?.handle?.glow?.visible),
+      afterCoarseFrame,
     };
   });
 
   expect(result.swordIndex).toBeGreaterThanOrEqual(0);
   expect(result.started).toBe(true);
   expect(result.stillAirborne).toBe(true);
-  expect(result.visualProgress).toBeCloseTo(JUMP_SLASH_STRIKE_PROGRESS, 4);
+  expect(result.visualProgress).toBeCloseTo(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS, 4);
   expect(result.strikes).toHaveLength(1);
   expect(result.strikes[0].activeTrailSampleCount).toBe(1);
   expect(result.begins).toHaveLength(1);
-  expect(result.acceptedAppends).toHaveLength(1);
-  expect(result.acceptedAppends[0]).toEqual(expect.objectContaining({
-    followRoot: true,
-    glowParentRoot: true,
-    coreParentRoot: true,
-    trailSpace: 'followObjectLocal',
+  expect(result.afterCoarseFrame).toEqual(expect.objectContaining({
+    active: true,
+    sampleCount: 1,
+    visible: false,
   }));
+  expect(result.acceptedAppends.length).toBeGreaterThanOrEqual(2);
+  expect(new Set(result.acceptedAppends.map((sample) => sample.id))).toEqual(
+    new Set([result.afterCoarseFrame.handleId]),
+  );
+  for (const sample of result.acceptedAppends) {
+    expect(sample).toEqual(expect.objectContaining({
+      followRoot: false,
+      glowParentScene: true,
+      coreParentScene: true,
+      trailSpace: 'world',
+      trailMode: 'continuousJumpSlash',
+    }));
+  }
   expect(result.finishes).toHaveLength(0);
-  expect(result.cancels).toHaveLength(1);
-  expect(result.activeTrailAfterHit).toBe(false);
-  expect(result.staticFallbacks).toHaveLength(1);
-
-  const fallback = result.staticFallbacks[0];
-  expect(fallback.airborne).toBe(true);
-  expect(fallback.followRoot).toBe(true);
-  expect(fallback.range).toBeCloseTo(JUMP_SLASH_FALLBACK.range, 6);
-  expect(fallback.arcHalfAngle).toBeCloseTo(JUMP_SLASH_FALLBACK.arcHalfAngle, 6);
-  for (let axis = 0; axis < 3; axis += 1) {
-    expect(fallback.motionLocal[axis]).toBeCloseTo(
-      JUMP_SLASH_FALLBACK.motionLocal[axis],
-      6,
-    );
-    expect(fallback.planeNormalLocal[axis]).toBeCloseTo(
-      JUMP_SLASH_FALLBACK.planeNormalLocal[axis],
-      6,
-    );
-    expect(fallback.centerLocal[axis]).toBeCloseTo(
-      JUMP_SLASH_FALLBACK.centerLocal[axis],
-      6,
-    );
-  }
-  expect(fallback.meshes).toHaveLength(2);
-  for (const mesh of fallback.meshes) {
-    expect(mesh.mode).toBe('authoredSlashPlane');
-    expect(mesh.parentRoot).toBe(true);
-    expect(mesh.outerRadius).toBeCloseTo(JUMP_SLASH_FALLBACK.range, 6);
-    expect(mesh.thetaStart).toBeCloseTo(JUMP_SLASH_FALLBACK.arcHalfAngle, 6);
-    expect(mesh.thetaLength).toBeCloseTo(-2 * JUMP_SLASH_FALLBACK.arcHalfAngle, 6);
-  }
+  expect(result.cancels).toHaveLength(0);
+  expect(result.activeTrailAfterHit).toBe(true);
+  expect(result.activeHandleSampleCount).toBeGreaterThanOrEqual(2);
+  expect(result.activeGlowVisible).toBe(true);
+  expect(result.staticFallbacks).toHaveLength(0);
 });
 
 test('jump slash preserves the captured moving-jump trajectory', async ({ page }) => {
@@ -2786,11 +2838,11 @@ test('lethal damage synchronously clears jump-slash combat state and live ribbon
       timer: 1,
     });
 
-    const countLiveJumpSlashMeshes = () => {
+    const countContinuousJumpSlashMeshes = () => {
       let count = 0;
       game.scene.traverse((object) => {
         if (object.userData?.slashClipKey === jumpSlash
-          && object.userData?.trailMode === 'liveBladeSweep') count += 1;
+          && object.userData?.trailMode === 'continuousJumpSlash') count += 1;
       });
       return count;
     };
@@ -2805,7 +2857,7 @@ test('lethal damage synchronously clears jump-slash combat state and live ribbon
       activeTrailSampleCount: activeHandle?.samples?.length ?? 0,
       activeTrailGlowParented: Boolean(activeHandle?.glow?.parent),
       activeTrailCoreParented: Boolean(activeHandle?.core?.parent),
-      liveMeshCount: countLiveJumpSlashMeshes(),
+      liveMeshCount: countContinuousJumpSlashMeshes(),
       combo: { ...combat.swordCombo },
       deathHookInstalled: typeof player.onDeathStarted === 'function',
     };
@@ -2838,7 +2890,7 @@ test('lethal damage synchronously clears jump-slash combat state and live ribbon
       pendingProjectileCount: combat.pendingProjectileShots.length,
       activeTrail: Boolean(combat.activeSwordSweepTrail),
       combo: { ...combat.swordCombo },
-      liveMeshCount: countLiveJumpSlashMeshes(),
+      liveMeshCount: countContinuousJumpSlashMeshes(),
       oldGlowParented: Boolean(activeHandle?.glow?.parent),
       oldCoreParented: Boolean(activeHandle?.core?.parent),
       trailCancelCalls: probe.cancels.length,

@@ -1052,7 +1052,114 @@ test('rush enemies acquire from range and expose accelerating red attack warning
   expect(result.minimumEncounterSize).toBeGreaterThanOrEqual(3);
 });
 
-test('attack pacing serializes enemies while rocket chargers travel slowly and retreat after impact', async ({ page }) => {
+test('near and far charge attacks travel the same distance at one constant speed', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=fixed-charge-speed-regression');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const Vector3 = game.player.root.position.constructor;
+    game.stop();
+    for (const enemy of [...game.enemies]) {
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+
+    const controller = game.dungeonController;
+    const originalWalkable = controller.isPositionWalkable;
+    const originalElevation = controller.getSurfaceElevationAt;
+    controller.isPositionWalkable = () => true;
+    controller.getSurfaceElevationAt = () => 0;
+
+    let charger = null;
+    for (let variant = 0; variant < 180 && !charger; variant += 1) {
+      const candidate = window.spawnReaverbot({
+        archetypeId: 'pursuer',
+        seed: `fixed-charge-speed:${variant}`,
+        position: new Vector3(0, 0, 0),
+      });
+      if (candidate.genome.modules.weapon.attackKind === 'charge') charger = candidate;
+      else {
+        game.enemies.splice(game.enemies.indexOf(candidate), 1);
+        candidate.dispose?.();
+        candidate.root.removeFromParent();
+      }
+    }
+    if (!charger) throw new Error('Unable to generate a fixed-speed charger');
+
+    const dt = 1 / 120;
+    const runCharge = (playerDistance) => {
+      charger.root.position.set(0, 0, 0);
+      charger.brain.state = 'position';
+      charger.brain.stateTime = 0;
+      charger.brain.attackHit = true;
+      charger.brain.contactCooldown = 0;
+      game.player.root.position.set(0, 0, playerDistance);
+      const directionToPlayer = game.player.root.position.clone()
+        .sub(charger.root.position)
+        .setY(0)
+        .normalize();
+      charger._beginTelegraph(game, directionToPlayer);
+      const plannedTarget = charger.brain.targetPosition.clone();
+      const plannedDistance = charger.root.position.distanceTo(plannedTarget);
+      const directionDot = charger.brain.attackDirection.dot(directionToPlayer);
+
+      charger.brain.state = 'commit';
+      charger.brain.stateTime = 0;
+      charger.brain.commitStart.copy(charger.root.position);
+      charger.brain.commitDistance = plannedDistance;
+      charger.brain.chargeDistanceTravelled = 0;
+      charger.brain.attackHit = true;
+      const start = charger.root.position.clone();
+      const speeds = [];
+      let elapsed = 0;
+      for (let frame = 0; frame < 360 && charger.brain.state === 'commit'; frame += 1) {
+        const before = charger.root.position.clone();
+        charger._updateCommitState(dt, game);
+        const travel = charger.root.position.distanceTo(before);
+        if (travel > 0.000001) speeds.push(travel / dt);
+        elapsed += dt;
+      }
+      return {
+        playerDistance,
+        plannedDistance,
+        actualDistance: charger.root.position.distanceTo(start),
+        directionDot,
+        elapsed,
+        state: charger.brain.state,
+        minimumSpeed: Math.min(...speeds),
+        maximumSpeed: Math.max(...speeds),
+        averageSpeed: speeds.reduce((sum, speed) => sum + speed, 0) / speeds.length,
+        passedPlayer: charger.root.position.distanceTo(start) > playerDistance,
+      };
+    };
+
+    const near = runCharge(1.5);
+    const far = runCharge(9.5);
+    controller.isPositionWalkable = originalWalkable;
+    controller.getSurfaceElevationAt = originalElevation;
+    charger.dispose?.();
+    charger.root.removeFromParent();
+    game.enemies.length = 0;
+    return { near, far };
+  });
+
+  for (const charge of [result.near, result.far]) {
+    expect(charge.plannedDistance).toBeCloseTo(12.5, 5);
+    expect(charge.actualDistance).toBeCloseTo(12.5, 5);
+    expect(charge.directionDot).toBeGreaterThan(0.999999);
+    expect(charge.state).toBe('recovery');
+    expect(charge.minimumSpeed).toBeGreaterThan(13.8);
+    expect(charge.maximumSpeed - charge.minimumSpeed).toBeLessThan(0.0001);
+  }
+  expect(result.near.passedPlayer).toBe(true);
+  expect(result.near.actualDistance).toBeCloseTo(result.far.actualDistance, 6);
+  expect(result.near.averageSpeed).toBeCloseTo(result.far.averageSpeed, 6);
+  expect(result.near.elapsed).toBeCloseTo(result.far.elapsed, 6);
+});
+
+test('attack pacing serializes enemies while fixed-speed rocket chargers retreat after impact', async ({ page }) => {
   await page.goto('/?reaverbotSeed=attack-pacing-rocket-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
@@ -1147,9 +1254,11 @@ test('attack pacing serializes enemies while rocket chargers travel slowly and r
     game.addParticleBurst = (position, color, count, scale) => {
       if (count === 2) jetTrailBursts.push({ position: position.clone(), color, scale });
     };
-    first._updateCommitState(chargeDuration * 0.35, game);
+    const earlyStepDuration = chargeDuration * 0.35;
+    first._updateCommitState(earlyStepDuration, game);
     game.addParticleBurst = originalParticleBurst;
-    const earlyTravelRatio = first.root.position.distanceTo(chargeStart) / 10;
+    const earlyTravelDistance = first.root.position.distanceTo(chargeStart);
+    const earlyTravelSpeed = earlyTravelDistance / earlyStepDuration;
     const nozzlePositions = first.visual.chargeModule.nozzles.map((nozzle) => nozzle.getWorldPosition(new Vector3()));
     first._animateVisual(1 / 60);
     const flameCount = first.visual.chargeModule.flames.filter((flame) => flame.visible).length;
@@ -1182,7 +1291,8 @@ test('attack pacing serializes enemies while rocket chargers travel slowly and r
       retreatBefore,
       retreatAfter,
       chargeDuration,
-      earlyTravelRatio,
+      earlyTravelSpeed,
+      expectedChargeSpeed: 12.5 / chargeDuration,
       chargeModuleId: first.genome.modules.charge?.id ?? null,
       nozzleCount: first.visual.chargeModule.nozzles.length,
       flameCount,
@@ -1199,7 +1309,7 @@ test('attack pacing serializes enemies while rocket chargers travel slowly and r
   expect(result.nextOwnerIndex).toBeGreaterThanOrEqual(1);
   expect(result.retreatAfter).toBeGreaterThan(result.retreatBefore);
   expect(result.chargeDuration).toBeGreaterThanOrEqual(0.9);
-  expect(result.earlyTravelRatio).toBeLessThan(0.4);
+  expect(result.earlyTravelSpeed).toBeCloseTo(result.expectedChargeSpeed, 6);
   expect(result.chargeModuleId).toBeTruthy();
   expect(result.nozzleCount).toBeGreaterThan(0);
   expect(result.flameCount).toBe(result.nozzleCount);

@@ -1384,8 +1384,41 @@ export class Game {
   }
 
   addEnemy(enemy) {
+    // A boss can append a minion while the enemy update loop is already in
+    // progress. Combat/projectiles run later in that same frame, so establish
+    // canonical game ownership before the minion's first update can occur.
+    enemy._runtimeGame = this;
     this.enemies.push(enemy);
     this.scene.add(enemy.root);
+  }
+
+  removeEnemy(enemy, { dispose = true } = {}) {
+    if (!enemy) return false;
+    enemy.root?.removeFromParent?.();
+    if (this._updatingEnemies) {
+      this._deferredEnemyRemovals ??= new Map();
+      const previous = this._deferredEnemyRemovals.get(enemy);
+      this._deferredEnemyRemovals.set(enemy, {
+        dispose: Boolean(dispose || previous?.dispose),
+      });
+      return true;
+    }
+    if (dispose) enemy.dispose?.();
+    const index = this.enemies.indexOf(enemy);
+    if (index >= 0) this.enemies.splice(index, 1);
+    return index >= 0;
+  }
+
+  _flushDeferredEnemyRemovals() {
+    if (!this._deferredEnemyRemovals?.size) return;
+    const removals = [...this._deferredEnemyRemovals.entries()];
+    this._deferredEnemyRemovals.clear();
+    for (const [enemy, options] of removals) {
+      if (options.dispose) enemy.dispose?.();
+      enemy.root?.removeFromParent?.();
+      const index = this.enemies.indexOf(enemy);
+      if (index >= 0) this.enemies.splice(index, 1);
+    }
   }
 
   damageJunkAtPosition(position, radius, amount, meta = {}) {
@@ -5835,6 +5868,9 @@ export class Game {
   }
 
   _resolveExplosion(position, damage, radius = 2.2, color = 0xffb347, meta = {}) {
+    const excludedEnemyIds = meta.excludedEnemyIds instanceof Set
+      ? meta.excludedEnemyIds
+      : new Set(Array.isArray(meta.excludedEnemyIds) ? meta.excludedEnemyIds : []);
     if (meta.visualStyle === 'fierySphere') {
       this._addFieryExplosionVisual(position, radius, {
         kind: 'busterExplosionSphere',
@@ -5867,7 +5903,7 @@ export class Game {
 
     if (meta.damageEnemies !== false) {
       for (const enemy of this.getProjectileTargets()) {
-        if (enemy.dead) {
+        if (enemy.dead || excludedEnemyIds.has(enemy.id)) {
           continue;
         }
 
@@ -7661,16 +7697,24 @@ export class Game {
   }
 
   _updateEnemies(dt) {
-    this._updateEnemyAttackDirector(dt);
-    for (let i = this.enemies.length - 1; i >= 0; i -= 1) {
-      const enemy = this.enemies[i];
-      enemy.update(dt, this);
+    this._updatingEnemies = true;
+    try {
+      this._updateEnemyAttackDirector(dt);
+      for (let i = this.enemies.length - 1; i >= 0; i -= 1) {
+        const enemy = this.enemies[i];
+        if (!enemy || this._deferredEnemyRemovals?.has(enemy)) continue;
+        enemy.update(dt, this);
+        if (this._deferredEnemyRemovals?.has(enemy)) continue;
 
-      if (enemy.dead && enemy.deathTimer <= 0) {
-        enemy.dispose?.();
-        enemy.root.removeFromParent();
-        this.enemies.splice(i, 1);
+        if (enemy.dead && enemy.deathTimer <= 0) {
+          enemy.dispose?.();
+          enemy.root.removeFromParent();
+          this.enemies.splice(i, 1);
+        }
       }
+    } finally {
+      this._updatingEnemies = false;
+      this._flushDeferredEnemyRemovals();
     }
   }
 
@@ -8400,11 +8444,14 @@ export class Game {
   _handleEnemyKilled(enemy, meta) {
     enemy.onDeath(this, meta);
     if (enemy.debugBoss) return;
-    if (meta.selfDestruct || meta.suppressRewards || this.busterSandboxSession?.active) {
+    if (this.busterSandboxSession?.active) {
       return;
     }
     if (enemy.isBoss && enemy.bossProfileId) {
       this._recordBossVictory(enemy);
+    }
+    if (meta.selfDestruct || meta.suppressRewards) {
+      return;
     }
     this.player.addExperience(enemy.stats.experience);
 

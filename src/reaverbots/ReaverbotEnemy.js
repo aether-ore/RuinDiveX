@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { Enemy } from '../Enemy.js';
 import {
+  findStraightBusterCapsuleHitFraction,
+  sphereIntersectsTargetCapsule,
+} from '../buster/BusterProjectileKernel.js';
+import {
   animateReaverbotVisual,
   createReaverbotVisual,
 } from './ReaverbotVisualFactory.js';
@@ -22,9 +26,9 @@ const WORLD_FORWARD = new THREE.Vector3(0, 0, 1);
 const RUSH_WARNING_COLOR_HEX = 0xff2020;
 const RUSH_WARNING_COLOR = new THREE.Color(RUSH_WARNING_COLOR_HEX);
 const CHARGE_INITIATION_RANGE = 10.5;
-const CHARGE_MAX_TRAVEL_DISTANCE = 12.5;
+const CHARGE_TRAVEL_DISTANCE = 12.5;
+const CHARGE_TRAVEL_SPEED = CHARGE_TRAVEL_DISTANCE / 0.9;
 const CHARGE_TRACK_LOCK_PROGRESS = 0.7;
-const CHARGE_MIN_COMMIT_DURATION = 0.9;
 const CHARGE_MIN_RECOVERY_DURATION = 1.25;
 const RUSH_WARNING_MIN_RATE = 2.2;
 const RUSH_WARNING_MAX_RATE = 10.5;
@@ -63,6 +67,18 @@ const MELEE_BODY_CONTACT_DAMAGE_SCALE = 0.32;
 const MELEE_BODY_CONTACT_KNOCKBACK = 0.86;
 const JAW_PLAYER_SEPARATION_BUFFER = 0.16;
 const JAW_OVERLAP_RECOVERY_SPEED_SCALE = 2.2;
+const DETONATOR_KNOCKBACK_DISTANCE = 4.2;
+const DETONATOR_KNOCKBACK_SPEED = 8.4;
+const DETONATOR_KNOCKBACK_MIN_DURATION = 0.38;
+const DETONATOR_KNOCKBACK_MAX_DURATION = 0.62;
+const DETONATOR_KNOCKBACK_ARC_HEIGHT = 0.48;
+const DETONATOR_GROUNDED_DURATION = 0.48;
+const DETONATOR_RELAUNCH_DURATION = 0.54;
+const DETONATOR_PLAYER_OVERLAP_GRACE = 0.12;
+const DETONATOR_GROUNDED_COLLISION_OFFSET = 0.38;
+const DETONATOR_WEAPONIZATION_HEALTH_FLOOR_RATIO = 0.08;
+const DETONATOR_DIRECTION_OFFSETS = Object.freeze([0, 0.3, -0.3, 0.58, -0.58]);
+const DETONATOR_DISTANCE_SCALES = Object.freeze([1, 0.82, 0.64, 0.46]);
 const PASSIVE_DEFENSES = new Set([
   'armoredSkull',
   'armoredBack',
@@ -212,6 +228,7 @@ export class ReaverbotEnemy extends Enemy {
       commitStart: new THREE.Vector3(),
       telegraphMarker: null,
       commitDistance: 0,
+      chargeDistanceTravelled: 0,
       pounceJumpHeight: genome.modules.weapon.pounceJumpHeight ?? 2.5,
       warningPhase: 0,
       warningBlinkRate: 0,
@@ -269,6 +286,7 @@ export class ReaverbotEnemy extends Enemy {
       clawPalmHits: 0,
       clawDestroyed: false,
       clawSpinProgress: 0,
+      detonatorKnockback: null,
       packAttackIdleTime: 0,
       packFlankRearBias: genome.archetypeId === 'packHunter'
         ? this.aiRandom.float(
@@ -380,6 +398,7 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   tryClaimExternalControl(owner, kind = 'external', options = {}) {
+    if (this.brain?.detonatorKnockback) return false;
     const claimed = super.tryClaimExternalControl(owner, kind, options);
     if (claimed) this._resetSpringMovementState({ cancelPounce: true });
     return claimed;
@@ -392,9 +411,23 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   startExternalBallisticMotion(owner, options = {}) {
+    if (this.brain?.detonatorKnockback) return false;
     const started = super.startExternalBallisticMotion(owner, options);
     if (started) this._resetSpringMovementState({ cancelPounce: true });
     return started;
+  }
+
+  clearExternalMotion(reason = 'cleared', game = null) {
+    const detonatorMotion = this.brain?.detonatorKnockback;
+    if (detonatorMotion) {
+      this.brain.detonatorKnockback = null;
+      if (reason !== 'death') this._restoreWeaponizedDetonatorVisual(detonatorMotion);
+    }
+    return super.clearExternalMotion(reason, game) || Boolean(detonatorMotion);
+  }
+
+  isExternalMotionActive() {
+    return super.isExternalMotionActive() || Boolean(this.brain?.detonatorKnockback);
   }
 
   _getEffectiveAttackKind() {
@@ -417,7 +450,7 @@ export class ReaverbotEnemy extends Enemy {
     if (state === 'telegraph') return this.genome.behavior.telegraphDuration;
     if (state === 'commit') {
       return this._getEffectiveAttackKind() === 'charge'
-        ? Math.max(CHARGE_MIN_COMMIT_DURATION, this.genome.behavior.commitDuration)
+        ? CHARGE_TRAVEL_DISTANCE / CHARGE_TRAVEL_SPEED
         : this.genome.behavior.commitDuration;
     }
     if (state === 'recovery') {
@@ -519,7 +552,17 @@ export class ReaverbotEnemy extends Enemy {
 
   takeDamage(amount, meta = {}) {
     const stateWhenHit = this.brain.state;
-    const dealt = super.takeDamage(amount, meta);
+    const redirectsDetonator = this._isWeaponizableSelfDetonator()
+      && amount > 0
+      && !meta.statusTick
+      && this._isPlayerOwnedHit(meta);
+    const weaponizationHealthFloor = redirectsDetonator
+      ? Math.min(this.health, Math.max(1, this.stats.maxHealth * DETONATOR_WEAPONIZATION_HEALTH_FLOOR_RATIO))
+      : 0;
+    const resolvedAmount = redirectsDetonator
+      ? Math.min(amount, Math.max(0, this.health - weaponizationHealthFloor))
+      : amount;
+    const dealt = super.takeDamage(resolvedAmount, meta);
 
     if (dealt > 0) {
       this.brain.alerted = true;
@@ -553,7 +596,21 @@ export class ReaverbotEnemy extends Enemy {
       this._beginClawGuard(stateWhenHit);
     }
 
+    if (redirectsDetonator && !this.dead) {
+      this._beginWeaponizedDetonatorKnockback(meta, this._runtimeGame);
+    }
+
     return dealt;
+  }
+
+  _isWeaponizableSelfDetonator() {
+    const weapon = this.genome?.modules?.weapon;
+    return !this.isBoss
+      && this.navigationMode === 'air'
+      && Boolean(
+        weapon?.attackKind === 'selfDestruct'
+        || weapon?.tags?.includes('selfDestruct'),
+      );
   }
 
   _isPlayerOwnedHit(meta = {}) {
@@ -569,6 +626,235 @@ export class ReaverbotEnemy extends Enemy {
       && !meta.statusTick
       && !meta.clawBreakSelfDamage
       && Boolean(meta.projectileHit || meta.directHit || meta.directContactHit);
+  }
+
+  _resolveDetonatorKnockbackDirection(meta = {}, game = this._runtimeGame) {
+    const playerPosition = game?.player?.root?.position;
+    const direction = new THREE.Vector3();
+    if (meta.knockbackDirection?.lengthSq?.() > 0.0001) {
+      direction.copy(meta.knockbackDirection).setY(0);
+    } else if (meta.hitPosition && playerPosition) {
+      direction.copy(meta.hitPosition).sub(playerPosition).setY(0);
+    } else if (playerPosition) {
+      direction.copy(this.root.position).sub(playerPosition).setY(0);
+    }
+    if (direction.lengthSq() <= 0.0001) {
+      direction.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
+    }
+    direction.normalize();
+
+    // Projectile metadata normally already points from MegaMan toward the hit,
+    // but reflected or authored attacks can supply the opposite convention.
+    // The detonator contract is always explicitly away from the player.
+    if (playerPosition) {
+      tempA.copy(this.root.position).sub(playerPosition).setY(0);
+      if (tempA.lengthSq() > 0.0001 && direction.dot(tempA.normalize()) < 0) {
+        direction.multiplyScalar(-1);
+      }
+    }
+    return direction;
+  }
+
+  _resolveWeaponizedDetonatorLanding(game, launchDirection, startCollisionOffset) {
+    const controller = game?.dungeonController;
+    if (!controller) return null;
+    const start = this.root.position;
+    const candidate = new THREE.Vector3();
+    const direction = new THREE.Vector3();
+    const arenaCandidate = new THREE.Vector3();
+
+    for (const angleOffset of DETONATOR_DIRECTION_OFFSETS) {
+      const cosine = Math.cos(angleOffset);
+      const sine = Math.sin(angleOffset);
+      direction.set(
+        launchDirection.x * cosine - launchDirection.z * sine,
+        0,
+        launchDirection.x * sine + launchDirection.z * cosine,
+      ).normalize();
+      for (const distanceScale of DETONATOR_DISTANCE_SCALES) {
+        candidate.copy(start).addScaledVector(
+          direction,
+          DETONATOR_KNOCKBACK_DISTANCE * distanceScale,
+        );
+        const guardedCandidate = controller.getEnemyArenaTarget?.(
+          this,
+          candidate,
+          arenaCandidate,
+        );
+        if (guardedCandidate) {
+          candidate.x = guardedCandidate.x;
+          candidate.z = guardedCandidate.z;
+        }
+        candidate.y = controller.getSurfaceElevationAt?.(candidate) ?? start.y;
+        tempA.copy(candidate).sub(start).setY(0);
+        const travel = tempA.length();
+        if (travel < 0.72 || tempA.dot(launchDirection) < travel * 0.42) continue;
+        if (controller.isPositionWalkable && !controller.isPositionWalkable(candidate)) continue;
+
+        tempB.copy(candidate);
+        tempB.y += DETONATOR_GROUNDED_COLLISION_OFFSET;
+        if (controller.isAerialPositionClear
+          && !controller.isAerialPositionClear(tempB, {
+            radius: Math.max(0.2, this.radius * 0.72),
+            verticalRadius: Math.max(0.3, this.radius * 0.82),
+          })) {
+          continue;
+        }
+        if (!this._isWeaponizedDetonatorFallPathClear(
+          game,
+          start,
+          candidate,
+          startCollisionOffset,
+        )) {
+          continue;
+        }
+        return candidate.clone();
+      }
+    }
+
+    // If every backwards tile is obstructed, an in-place drop is preferable
+    // to tunnelling through scenery. It is accepted only when the tile and the
+    // complete falling path are both valid.
+    candidate.copy(start);
+    candidate.y = controller.getSurfaceElevationAt?.(candidate) ?? start.y;
+    if ((!controller.isPositionWalkable || controller.isPositionWalkable(candidate))
+      && this._isWeaponizedDetonatorFallPathClear(
+        game,
+        start,
+        candidate,
+        startCollisionOffset,
+      )) {
+      return candidate.clone();
+    }
+    return null;
+  }
+
+  _isWeaponizedDetonatorFallPathClear(
+    game,
+    startRootPosition,
+    landingRootPosition,
+    startCollisionOffset = this.combatAimOffset,
+  ) {
+    const controller = game?.dungeonController;
+    if (!controller?.isAerialPositionClear) return true;
+    const travel = startRootPosition.distanceTo(landingRootPosition);
+    const steps = Math.max(10, Math.ceil(travel / 0.22));
+    const collisionOptions = {
+      radius: Math.max(0.2, this.radius * 0.72),
+      verticalRadius: Math.max(0.3, this.radius * 0.82),
+    };
+    for (let step = 0; step <= steps; step += 1) {
+      const progress = step / steps;
+      tempC.lerpVectors(startRootPosition, landingRootPosition, progress);
+      tempC.y += Math.sin(progress * Math.PI) * DETONATOR_KNOCKBACK_ARC_HEIGHT;
+      tempC.y += THREE.MathUtils.lerp(
+        startCollisionOffset,
+        DETONATOR_GROUNDED_COLLISION_OFFSET,
+        progress,
+      );
+      if (!controller.isAerialPositionClear(tempC, collisionOptions)) return false;
+    }
+    return true;
+  }
+
+  _beginWeaponizedDetonatorKnockback(meta = {}, game = this._runtimeGame) {
+    if (!game || this.dead || !this._isWeaponizableSelfDetonator()) return false;
+    const existingMotion = this.brain.detonatorKnockback;
+    const startCollisionOffset = existingMotion?.collisionOffset
+      ?? Math.max(DETONATOR_GROUNDED_COLLISION_OFFSET, this.combatAimOffset);
+    const launchDirection = this._resolveDetonatorKnockbackDirection(meta, game);
+    const landingPosition = this._resolveWeaponizedDetonatorLanding(
+      game,
+      launchDirection,
+      startCollisionOffset,
+    );
+    if (!landingPosition) return false;
+
+    // Tractor ownership, contact leaps, and authored attack commits cannot
+    // coexist with player weaponization. Release them at the actual hit point.
+    super.clearExternalMotion('weaponized-detonator-hit', game);
+    this._removeTelegraphMarker();
+    this._releaseTractorTarget('weaponized-detonator-hit', game);
+    game.cancelEnemyAttackRequest?.(this);
+    game.completeEnemyAttack?.(this);
+    game.endFlamethrowerEffect?.(this);
+    this.clearNavigationRecoveryTarget?.();
+    this.knockback.set(0, 0, 0);
+
+    const travel = flatDistance(this.root.position, landingPosition);
+    const duration = THREE.MathUtils.clamp(
+      travel / DETONATOR_KNOCKBACK_SPEED,
+      DETONATOR_KNOCKBACK_MIN_DURATION,
+      DETONATOR_KNOCKBACK_MAX_DURATION,
+    );
+    const baseVisualHover = existingMotion?.baseVisualHover
+      ?? this.visual.root.userData.baseHoverHeight
+      ?? this.visual.root.position.y;
+    const baseVisualRotation = existingMotion?.baseVisualRotation?.clone?.()
+      ?? this.visual.root.rotation.clone();
+    const groundSurfaceAtStart = game.dungeonController?.getSurfaceElevationAt?.(
+      this.root.position,
+    ) ?? this.root.position.y;
+    const relaunchRootLift = THREE.MathUtils.clamp(
+      this.root.position.y - groundSurfaceAtStart,
+      0.32,
+      0.55,
+    );
+    const relaunchPosition = landingPosition.clone();
+    relaunchPosition.y += relaunchRootLift;
+    const groundedVisualHeight = Math.min(0.14, Math.max(0.06, this.radius * 0.2));
+    const groundedRoll = this.visual.root.rotation.z + Math.PI;
+    const motion = {
+      redirectedByPlayer: true,
+      phase: 'falling',
+      phaseTime: 0,
+      duration,
+      groundedDuration: DETONATOR_GROUNDED_DURATION,
+      relaunchDuration: DETONATOR_RELAUNCH_DURATION,
+      startPosition: this.root.position.clone(),
+      landingPosition,
+      relaunchPosition,
+      launchDirection: launchDirection.clone(),
+      collisionOffset: startCollisionOffset,
+      fallStartCollisionOffset: startCollisionOffset,
+      baseVisualHover,
+      baseVisualRotation,
+      fallVisualStartY: this.visual.root.position.y,
+      fallVisualStartRoll: this.visual.root.rotation.z,
+      groundedVisualHeight,
+      groundedRoll,
+      playerCollisionArmed: true,
+      playerOverlapGraceRemaining: 0,
+      detonated: false,
+      redirectCount: (existingMotion?.redirectCount ?? 0) + 1,
+    };
+    tempA.copy(this.root.position);
+    tempA.y += startCollisionOffset;
+    const startsOverlappingPlayer = !game.player.dead
+      && sphereIntersectsTargetCapsule({
+        center: tempA,
+        radius: Math.max(0.2, this.radius * 0.72),
+        target: game.player,
+      });
+    if (startsOverlappingPlayer) {
+      motion.playerCollisionArmed = false;
+      motion.playerOverlapGraceRemaining = DETONATOR_PLAYER_OVERLAP_GRACE;
+    }
+
+    this.brain.detonatorKnockback = motion;
+    this.brain.state = 'recovery';
+    this.brain.stateTime = 0;
+    this.brain.moving = false;
+    this.brain.speedRatio = 0;
+    this.brain.attackFired = true;
+    this.brain.attackHit = false;
+    this.brain.cooldown = Math.max(this.brain.cooldown, this.stats.attackCooldown);
+    this.brain.contactCooldown = Math.max(
+      this.brain.contactCooldown,
+      duration + DETONATOR_GROUNDED_DURATION + DETONATOR_RELAUNCH_DURATION,
+    );
+    game.addParticleBurst?.(meta.hitPosition ?? this.root.position, this.genome.palette.emissive, 12, 0.1);
+    return true;
   }
 
   _beginClawGuard(resumeState = this.brain.state) {
@@ -772,6 +1058,7 @@ export class ReaverbotEnemy extends Enemy {
 
   shouldIgnoreGroundConstraint() {
     return super.shouldIgnoreGroundConstraint()
+      || Boolean(this.brain?.detonatorKnockback)
       || Boolean(this.brain?.tractorCrashPhase)
       || Boolean(this.brain?.coilBounceActive)
       || Boolean(this.brain?.clawVaultActive)
@@ -923,13 +1210,45 @@ export class ReaverbotEnemy extends Enemy {
     return player;
   }
 
+  _enterPostContactRecovery(game) {
+    super._enterPostContactRecovery(game);
+    const brain = this.brain;
+    if (!brain) return;
+    this._removeTelegraphMarker();
+    this._resetSpringMovementState({ cancelPounce: false });
+    brain.state = 'recovery';
+    brain.stateTime = 0;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.attackFired = true;
+    brain.attackHit = true;
+    brain.packAttackIdleTime = 0;
+    brain.contactCooldown = Math.max(
+      brain.contactCooldown,
+      this._getStateDuration('recovery'),
+    );
+  }
+
+  _updateContactRetreatVisual(dt) {
+    const brain = this.brain;
+    if (!brain) return;
+    brain.time += dt;
+    brain.moving = true;
+    brain.speedRatio = 1;
+    this._updateExposureAndDefense();
+    this._animateVisual(dt);
+  }
+
   onDeath(game, meta = {}) {
     game?.cancelEnemyAttackRequest?.(this);
     game?.endFlamethrowerEffect?.(this);
     this._removeTelegraphMarker();
     this._releaseTractorTarget('controller-death', game);
     if (this.affix?.id === 'explosiveCore' && !meta.selfDestruct) {
-      game.addExplosion(this.root.position, this.stats.damage * 2.2, 2.25, this.affix.color, { source: this });
+      game.addExplosion(this.root.position, this.stats.damage * 2.2, 2.25, this.affix.color, {
+        source: this,
+        suppressRewards: Boolean(meta.suppressRewards),
+      });
     }
     if (this.affix?.id === 'burningCore') {
       game.addFireZone(this.root.position, this.stats.damage * 0.5, 2.4, 1.25, { source: this });
@@ -958,6 +1277,290 @@ export class ReaverbotEnemy extends Enemy {
     for (const material of materials) material.dispose?.();
   }
 
+  _restoreWeaponizedDetonatorVisual(motion = null) {
+    if (!this.visual?.root) return;
+    const baseRotation = motion?.baseVisualRotation;
+    if (baseRotation) this.visual.root.rotation.copy(baseRotation);
+    else {
+      this.visual.root.rotation.x = 0;
+      this.visual.root.rotation.z = 0;
+    }
+    this.visual.root.position.y = motion?.baseVisualHover
+      ?? this.visual.root.userData.baseHoverHeight
+      ?? this.hoverHeight;
+  }
+
+  _applyWeaponizedDetonatorPhaseTransform(motion) {
+    if (motion.phase === 'falling') {
+      const progress = clamp01(motion.phaseTime / Math.max(0.01, motion.duration));
+      this.root.position.lerpVectors(motion.startPosition, motion.landingPosition, progress);
+      this.root.position.y += Math.sin(progress * Math.PI) * DETONATOR_KNOCKBACK_ARC_HEIGHT;
+      motion.collisionOffset = THREE.MathUtils.lerp(
+        motion.fallStartCollisionOffset,
+        DETONATOR_GROUNDED_COLLISION_OFFSET,
+        progress,
+      );
+      return;
+    }
+    if (motion.phase === 'grounded') {
+      this.root.position.copy(motion.landingPosition);
+      motion.collisionOffset = DETONATOR_GROUNDED_COLLISION_OFFSET;
+      return;
+    }
+    const progress = clamp01(
+      motion.phaseTime / Math.max(0.01, motion.relaunchDuration),
+    );
+    const eased = THREE.MathUtils.smootherstep(progress, 0, 1);
+    this.root.position.lerpVectors(motion.landingPosition, motion.relaunchPosition, eased);
+    motion.collisionOffset = THREE.MathUtils.lerp(
+      DETONATOR_GROUNDED_COLLISION_OFFSET,
+      Math.max(DETONATOR_GROUNDED_COLLISION_OFFSET, this.combatAimOffset),
+      eased,
+    );
+  }
+
+  _applyWeaponizedDetonatorVisual(motion) {
+    const visualRoot = this.visual?.root;
+    if (!visualRoot) return;
+    visualRoot.rotation.x = motion.baseVisualRotation.x;
+    visualRoot.rotation.y = motion.baseVisualRotation.y;
+    if (motion.phase === 'falling') {
+      const progress = THREE.MathUtils.smootherstep(
+        clamp01(motion.phaseTime / Math.max(0.01, motion.duration)),
+        0,
+        1,
+      );
+      visualRoot.position.y = THREE.MathUtils.lerp(
+        motion.fallVisualStartY,
+        motion.groundedVisualHeight,
+        progress,
+      );
+      visualRoot.rotation.z = THREE.MathUtils.lerp(
+        motion.fallVisualStartRoll,
+        motion.groundedRoll,
+        progress,
+      );
+      return;
+    }
+    if (motion.phase === 'grounded') {
+      visualRoot.position.y = motion.groundedVisualHeight;
+      visualRoot.rotation.z = motion.groundedRoll;
+      return;
+    }
+    const progress = THREE.MathUtils.smootherstep(
+      clamp01(motion.phaseTime / Math.max(0.01, motion.relaunchDuration)),
+      0,
+      1,
+    );
+    visualRoot.position.y = THREE.MathUtils.lerp(
+      motion.groundedVisualHeight,
+      motion.baseVisualHover,
+      progress,
+    );
+    visualRoot.rotation.z = THREE.MathUtils.lerp(
+      motion.groundedRoll,
+      motion.groundedRoll + Math.PI,
+      progress,
+    );
+  }
+
+  _findWeaponizedDetonatorImpact(
+    game,
+    startCenter,
+    endCenter,
+    { ignorePlayer = false } = {},
+  ) {
+    const collisionRadius = Math.max(0.2, this.radius * 0.72);
+    let earliest = null;
+    const consider = (target) => {
+      if (!target?.root || target.dead || target === this) return;
+      if (ignorePlayer && target === game.player) return;
+      const fraction = findStraightBusterCapsuleHitFraction(
+        startCenter,
+        endCenter,
+        target,
+        collisionRadius,
+      );
+      if (fraction == null) return;
+      const stableTargetId = String(target.id ?? (target === game.player ? 'player' : ''));
+      if (!earliest
+        || fraction < earliest.fraction - 0.000001
+        || (Math.abs(fraction - earliest.fraction) <= 0.000001
+          && stableTargetId < earliest.stableTargetId)) {
+        earliest = { target, fraction, stableTargetId };
+      }
+    };
+    for (const enemy of game.enemies ?? []) consider(enemy);
+    consider(game.player);
+    return earliest;
+  }
+
+  _detonateWeaponizedDetonator(game, impactTarget, impactPosition) {
+    const motion = this.brain?.detonatorKnockback;
+    if (!motion || motion.detonated || this.dead) return false;
+    motion.detonated = true;
+    motion.impactTargetId = impactTarget?.id ?? null;
+
+    const radius = this.genome.modules.weapon.explosiveRadius ?? 3;
+    const damage = this.stats.damage * 1.55;
+    const impact = {
+      position: impactPosition.clone(),
+      direction: motion.launchDirection.clone(),
+      damage,
+      radius,
+    };
+    // Boss shields receive the physical impact first. An absorbed response
+    // consumes that direct collision, while the surrounding blast remains
+    // active for the player and every other enemy in range.
+    const impactResult = impactTarget?.onWeaponizedDetonatorImpact?.(
+      this,
+      game,
+      impact,
+    ) ?? null;
+    const excludedEnemyIds = [this.id];
+    if ((impactResult?.absorbed || impactResult?.excludeFromExplosion)
+      && impactTarget?.id != null) {
+      excludedEnemyIds.push(impactTarget.id);
+    }
+
+    game.addExplosion(impactPosition, damage, radius, this.genome.palette.emissive, {
+      source: this,
+      attackKind: 'weaponizedDetonator',
+      weaponizedDetonator: true,
+      damageEnemies: true,
+      damagePlayer: true,
+      playerDamageScale: 1,
+      targetGeometry: 'verticalCapsule',
+      excludedEnemyIds,
+      suppressRewards: true,
+      triggerMines: false,
+      powerfulKnockback: true,
+      knockbackStrength: 1.18,
+    });
+    game.damageEnemy(this, this.health + this.stats.maxHealth, {
+      source: this,
+      attackKind: 'weaponizedDetonator',
+      weaponizedDetonator: true,
+      selfDestruct: true,
+      suppressRewards: true,
+      unblockable: true,
+      statusTick: true,
+    });
+    if (!this.dead) this.brain.detonatorKnockback = null;
+    this._removeTelegraphMarker();
+    return true;
+  }
+
+  _updateWeaponizedDetonatorKnockback(dt, game) {
+    const motion = this.brain.detonatorKnockback;
+    if (!motion || this.dead) return false;
+    let remaining = Math.max(0, dt);
+    let completedRelaunch = false;
+
+    // Substep the authored arc so a low frame rate cannot tunnel the launched
+    // capsule through a player, minion, or boss shield.
+    for (let iteration = 0; iteration < 256 && remaining > 0.000001; iteration += 1) {
+      const phaseDuration = motion.phase === 'falling'
+        ? motion.duration
+        : motion.phase === 'grounded'
+          ? motion.groundedDuration
+          : motion.relaunchDuration;
+      const phaseRemaining = Math.max(0, phaseDuration - motion.phaseTime);
+      if (phaseRemaining <= 0.000001) {
+        if (motion.phase === 'falling') {
+          motion.phase = 'grounded';
+          motion.phaseTime = 0;
+          this.root.position.copy(motion.landingPosition);
+          motion.collisionOffset = DETONATOR_GROUNDED_COLLISION_OFFSET;
+          continue;
+        }
+        if (motion.phase === 'grounded') {
+          motion.phase = 'relaunching';
+          motion.phaseTime = 0;
+          continue;
+        }
+        completedRelaunch = true;
+        break;
+      }
+
+      const step = Math.min(remaining, phaseRemaining, 1 / 60);
+      const previousRoot = this.root.position.clone();
+      const previousCenter = previousRoot.clone();
+      previousCenter.y += motion.collisionOffset;
+      const ignorePlayerForSegment = !motion.playerCollisionArmed;
+
+      motion.phaseTime += step;
+      this._applyWeaponizedDetonatorPhaseTransform(motion);
+      const currentCenter = this.root.position.clone();
+      currentCenter.y += motion.collisionOffset;
+
+      if (!motion.playerCollisionArmed) {
+        motion.playerOverlapGraceRemaining = Math.max(
+          0,
+          motion.playerOverlapGraceRemaining - step,
+        );
+        const stillOverlappingPlayer = !game.player.dead
+          && sphereIntersectsTargetCapsule({
+            center: currentCenter,
+            radius: Math.max(0.2, this.radius * 0.72),
+            target: game.player,
+          });
+        if (motion.playerOverlapGraceRemaining <= 0 && !stillOverlappingPlayer) {
+          motion.playerCollisionArmed = true;
+        }
+      }
+
+      const impact = this._findWeaponizedDetonatorImpact(
+        game,
+        previousCenter,
+        currentCenter,
+        { ignorePlayer: ignorePlayerForSegment },
+      );
+      if (impact) {
+        this.root.position.lerpVectors(previousRoot, this.root.position, impact.fraction);
+        tempA.lerpVectors(previousCenter, currentCenter, impact.fraction);
+        this._detonateWeaponizedDetonator(game, impact.target, tempA);
+        return true;
+      }
+
+      remaining -= step;
+      if (motion.phaseTime >= phaseDuration - 0.000001) {
+        if (motion.phase === 'falling') {
+          motion.phase = 'grounded';
+          motion.phaseTime = 0;
+          this.root.position.copy(motion.landingPosition);
+          motion.collisionOffset = DETONATOR_GROUNDED_COLLISION_OFFSET;
+        } else if (motion.phase === 'grounded') {
+          motion.phase = 'relaunching';
+          motion.phaseTime = 0;
+        } else {
+          completedRelaunch = true;
+          break;
+        }
+      }
+    }
+
+    this.brain.moving = false;
+    this.brain.speedRatio = 0;
+    this._updateExposureAndDefense();
+    this._animateVisual(dt);
+    this._applyWeaponizedDetonatorVisual(motion);
+
+    if (completedRelaunch) {
+      this.root.position.copy(motion.relaunchPosition);
+      this._restoreWeaponizedDetonatorVisual(motion);
+      this.brain.detonatorKnockback = null;
+      this.brain.state = 'position';
+      this.brain.stateTime = 0;
+      this.brain.moving = false;
+      this.brain.speedRatio = 0;
+      this.brain.attackFired = false;
+      this.brain.attackHit = false;
+      this.brain.cooldown = Math.max(this.brain.cooldown, this.stats.attackCooldown * 0.72);
+    }
+    return true;
+  }
+
   _updateCustomBehavior(dt, game) {
     const brain = this.brain;
     brain.time += dt;
@@ -968,6 +1571,11 @@ export class ReaverbotEnemy extends Enemy {
       game.addParticleBurst(tempA, this.genome.palette.emissive, 22, 0.14);
       game.addHitEffect(tempA, this.genome.palette.emissive, 0.85, { absolute: true });
       game.ui?.showToast?.(`${this.genome.modules.weakPoint.label} ruptured — defense disabled`, '#ffd36f');
+    }
+
+    if (brain.detonatorKnockback) {
+      this._updateWeaponizedDetonatorKnockback(dt, game);
+      return { handled: true, moving: false, moveAmount: 0 };
     }
 
     if (game.dungeonController?.isPlayerInSafeZone?.() || game.player.dead) {
@@ -985,6 +1593,11 @@ export class ReaverbotEnemy extends Enemy {
     }
 
     this._updatePersistentWeaponContact(dt, game);
+    if (this.contactRetreatMotion) {
+      this._updateExposureAndDefense();
+      this._animateVisual(dt);
+      return { handled: true, moving: false, moveAmount: 0 };
+    }
 
     const effectiveAttackKind = this._getEffectiveAttackKind();
     if (effectiveAttackKind === 'jawCombo') {
@@ -1177,7 +1790,10 @@ export class ReaverbotEnemy extends Enemy {
       tempG.copy(brain.attackDirection);
       tempH.copy(brain.targetPosition);
       brain.attackDirection.lerp(toPlayer, Math.min(1, dt * 4.2)).normalize();
-      brain.targetPosition.copy(this.root.position).addScaledVector(brain.attackDirection, brain.commitDistance);
+      brain.targetPosition.copy(this.root.position).addScaledVector(
+        brain.attackDirection,
+        CHARGE_TRAVEL_DISTANCE,
+      );
       if (this.navigationMode === 'ground') {
         brain.targetPosition.y = game.dungeonController?.getSurfaceElevationAt?.(brain.targetPosition)
           ?? brain.targetPosition.y;
@@ -1248,6 +1864,12 @@ export class ReaverbotEnemy extends Enemy {
       brain.jawHopTravel.fill(0);
       brain.tickTimer = 0;
       brain.commitStart.copy(this.root.position);
+      if (kind === 'charge') {
+        brain.commitDistance = this.navigationMode === 'air'
+          ? brain.commitStart.distanceTo(brain.targetPosition)
+          : flatDistance(brain.commitStart, brain.targetPosition);
+        brain.chargeDistanceTravelled = 0;
+      }
       if (kind === 'clawMoveset') {
         brain.attackDirection.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y)).normalize();
       }
@@ -1263,24 +1885,63 @@ export class ReaverbotEnemy extends Enemy {
     brain.moving = ['charge', 'pounce', 'jawCombo'].includes(kind);
     brain.speedRatio = brain.moving ? 1.4 : 0;
 
-    if (kind === 'charge' || kind === 'pounce') {
-      const eased = kind === 'pounce'
-        ? THREE.MathUtils.smoothstep(progress, 0.05, 0.9)
-        : THREE.MathUtils.smoothstep(progress, 0, 0.94);
+    const finishMovingCommit = () => {
+      this._removeTelegraphMarker();
+      brain.state = 'recovery';
+      brain.stateTime = 0;
+      brain.moving = false;
+      brain.speedRatio = 0;
+      brain.contactCooldown = Math.max(brain.contactCooldown, this._getStateDuration('recovery'));
+      game.completeEnemyAttack?.(this);
+    };
+
+    if (kind === 'charge') {
+      tempA.copy(brain.targetPosition).sub(this.root.position);
+      if (this.navigationMode !== 'air') tempA.setY(0);
+      const remainingDistance = tempA.length();
+      if (remainingDistance <= 0.0001) {
+        finishMovingCommit();
+        return;
+      }
+
+      const stepDistance = Math.min(
+        remainingDistance,
+        CHARGE_TRAVEL_SPEED * Math.max(0, dt),
+      );
+      if (stepDistance > 0) {
+        tempA.divideScalar(remainingDistance);
+        const nextX = this.root.position.x + tempA.x * stepDistance;
+        const nextY = this.root.position.y + tempA.y * stepDistance;
+        const nextZ = this.root.position.z + tempA.z * stepDistance;
+        if (!this._moveCommitAlongWalkablePath(game, nextX, nextZ, nextY)) {
+          finishMovingCommit();
+          return;
+        }
+        brain.chargeDistanceTravelled += stepDistance;
+      }
+
+      if (!this.genome.modules.weapon.continuousContactDamage) {
+        this._tryContactHit(game, 0.5);
+        if (this.contactRetreatMotion) return;
+      }
+      this._emitChargeJetTrail(dt, game);
+      if (stepDistance >= remainingDistance - 0.0001) {
+        finishMovingCommit();
+      }
+      return;
+    }
+
+    if (kind === 'pounce') {
+      const eased = THREE.MathUtils.smoothstep(progress, 0.05, 0.9);
       const nextX = THREE.MathUtils.lerp(brain.commitStart.x, brain.targetPosition.x, eased);
       const nextY = THREE.MathUtils.lerp(brain.commitStart.y, brain.targetPosition.y, eased);
       const nextZ = THREE.MathUtils.lerp(brain.commitStart.z, brain.targetPosition.z, eased);
-      const springPounce = kind === 'pounce' && this._usesSpringLocomotion();
+      const springPounce = this._usesSpringLocomotion();
       const moved = springPounce
         ? true
         : this._moveCommitAlongWalkablePath(game, nextX, nextZ, nextY);
       if (!moved) {
-        this._removeTelegraphMarker();
-        brain.state = 'recovery';
-        brain.stateTime = 0;
-        brain.moving = false;
-        brain.speedRatio = 0;
-        game.completeEnemyAttack?.(this);
+        finishMovingCommit();
         return;
       }
       if (springPounce) {
@@ -1295,10 +1956,29 @@ export class ReaverbotEnemy extends Enemy {
         );
       }
       if (!this.genome.modules.weapon.continuousContactDamage) {
-        this._tryContactHit(game, kind === 'pounce' ? 0.75 : 0.5);
+        const landedThisFrame = progress >= 1;
+        this._tryContactHit(game, 0.75);
+        if (this.contactRetreatMotion) {
+          // A direct hit on the landing frame still completes the pounce's
+          // authored ground impact. Contact recovery has already marked the
+          // attack as fired, so emit the visual/AOE shell without damaging the
+          // player a second time before beginning the backward leap.
+          if (landedThisFrame) {
+            const landingDamage = this.stats.damage
+              * (this.genome.modules.weapon.landingDamageScale ?? 1);
+            const landingRadius = this.genome.modules.weapon.landingRadius ?? 1.85;
+            game.addExplosion(this.root.position, landingDamage, landingRadius, this.genome.palette.emissive, {
+              source: this,
+              damageEnemies: false,
+              damagePlayer: false,
+              playerDamageScale: 1,
+              triggerMines: false,
+            });
+          }
+          return;
+        }
       }
-      if (kind === 'charge') this._emitChargeJetTrail(dt, game);
-      if (kind === 'pounce' && this.genome.modules.weapon.id === 'launchLeg') {
+      if (this.genome.modules.weapon.id === 'launchLeg') {
         this._emitLaunchLegJetTrail(dt, game);
       }
     } else if (kind === 'clawMoveset') {
@@ -1392,10 +2072,8 @@ export class ReaverbotEnemy extends Enemy {
     } else if (kind === 'pounce') {
       brain.targetPosition.addScaledVector(game.player.lastMoveDirection ?? WORLD_FORWARD, 0.9);
     } else if (kind === 'charge') {
-      brain.commitDistance = Math.min(
-        CHARGE_MAX_TRAVEL_DISTANCE,
-        Math.max(3, flatDistance(this.root.position, game.player.root.position) + 1.4),
-      );
+      brain.commitDistance = CHARGE_TRAVEL_DISTANCE;
+      brain.chargeDistanceTravelled = 0;
       brain.targetPosition.copy(this.root.position).addScaledVector(brain.attackDirection, brain.commitDistance);
     } else if (kind === 'selfDestruct' || kind === 'shockwave') {
       brain.targetPosition.copy(this.root.position);
@@ -1416,6 +2094,12 @@ export class ReaverbotEnemy extends Enemy {
     if (kind === 'pounce') {
       tempA.copy(brain.targetPosition).sub(this.root.position).setY(0);
       if (tempA.lengthSq() > 0.0001) brain.attackDirection.copy(tempA.normalize());
+    }
+
+    if (kind === 'charge') {
+      brain.commitDistance = this.navigationMode === 'air'
+        ? this.root.position.distanceTo(brain.targetPosition)
+        : flatDistance(this.root.position, brain.targetPosition);
     }
 
     const markerRadius = kind === 'selfDestruct'
@@ -1978,7 +2662,10 @@ export class ReaverbotEnemy extends Enemy {
         || this.brain.state === 'guard'
         || this.brain.state === 'recoil'))
       && this.brain.state !== 'commit';
-    if ((!continuousWeaponContact && !meleeBodyContact) || this.dead || game.player.dead) return;
+    if ((!continuousWeaponContact && !meleeBodyContact)
+      || this.dead
+      || game.player.dead
+      || this.isExternalMotionActive()) return;
     this.brain.contactCooldown = Math.max(0, this.brain.contactCooldown - dt);
     if (this.brain.contactCooldown > 0) return;
 
@@ -2010,6 +2697,7 @@ export class ReaverbotEnemy extends Enemy {
     });
     if (dealt > 0) {
       this.onHitPlayer(game.player, dealt);
+      this.beginContactRetreat(game, game.player);
       game.addHitEffect(game.player.root.position, RUSH_WARNING_COLOR_HEX, 0.68);
       game.requestHitStop?.(0.07, { timeScale: 0.08 });
     }
@@ -2050,6 +2738,7 @@ export class ReaverbotEnemy extends Enemy {
       this.brain.contactCooldown = this.genome.modules.weapon.bodyContactHitInterval
         ?? MELEE_BODY_CONTACT_INTERVAL;
       this.onHitPlayer(player, dealt);
+      this.beginContactRetreat(game, player);
       game.addHitEffect(player.root.position, this.genome.palette.emissive, 0.62);
       game.requestHitStop?.(0.065, { timeScale: 0.08 });
     }
@@ -3272,6 +3961,7 @@ export class ReaverbotEnemy extends Enemy {
     });
     if (dealt > 0) {
       this.onHitPlayer(game.player, dealt);
+      this.beginContactRetreat(game, game.player);
       game.addHitEffect(game.player.root.position, this.genome.palette.emissive, 0.58);
       game.requestHitStop?.(0.08, { timeScale: 0.05 });
     }
@@ -3583,11 +4273,7 @@ export class ReaverbotEnemy extends Enemy {
       tempG.copy(game.player.root.position).sub(this.root.position).setY(0);
       if (tempG.lengthSq() <= 0.0001) tempG.copy(WORLD_FORWARD);
       else tempG.normalize();
-      const prospectiveDistance = Math.min(
-        CHARGE_MAX_TRAVEL_DISTANCE,
-        Math.max(3, flatDistance(this.root.position, game.player.root.position) + 1.4),
-      );
-      tempF.copy(this.root.position).addScaledVector(tempG, prospectiveDistance);
+      tempF.copy(this.root.position).addScaledVector(tempG, CHARGE_TRAVEL_DISTANCE);
     } else {
       tempF.addScaledVector(game.player.lastMoveDirection ?? WORLD_FORWARD, 0.9);
     }
@@ -3912,7 +4598,9 @@ export class ReaverbotEnemy extends Enemy {
       springBounceProgress: brain.coilBounceActive
         ? clamp01(brain.coilBounceTime / Math.max(0.01, brain.coilBounceDuration))
         : 0,
-      chargeDirection: tempA.copy(brain.targetPosition).sub(brain.commitStart).normalize(),
+      chargeDirection: this._getEffectiveAttackKind() === 'charge'
+        ? brain.attackDirection
+        : tempA.copy(brain.targetPosition).sub(brain.commitStart).normalize(),
     });
     this._applyRushAttackWarning(dt);
   }

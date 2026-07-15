@@ -17,6 +17,11 @@ const GORUBESSHU_RIG_ROOT = 'gorubesshuRigRoot';
 const DEATH_SEQUENCE_DURATION = 1.25;
 const DEATH_LIMP_FALL_DURATION = 0.44;
 const DEATH_BODY_FADE_DURATION = 0.18;
+const CONTACT_RETREAT_DISTANCE = 2.8;
+const CONTACT_RETREAT_DURATION = 0.46;
+const CONTACT_RETREAT_MIN_ARC_HEIGHT = 0.82;
+const CONTACT_RETREAT_DIRECTION_OFFSETS = Object.freeze([0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05]);
+const CONTACT_RETREAT_DISTANCE_SCALES = Object.freeze([1, 0.82, 0.64, 0.46]);
 const GORUBESSHU_PART_GROUPS = {
   torso: 'gorubesshuTorsoPivot',
   head: 'gorubesshuHeadPivot',
@@ -167,6 +172,9 @@ const tempForward = new THREE.Vector3();
 const tempHitVector = new THREE.Vector3();
 const tempPoseOffset = new THREE.Vector3();
 const tempPoseRotation = new THREE.Euler();
+const tempRetreatDirection = new THREE.Vector3();
+const tempRetreatCandidate = new THREE.Vector3();
+const tempRetreatArcPoint = new THREE.Vector3();
 const statusColor = new THREE.Color();
 
 let nextEnemyId = 1;
@@ -671,6 +679,7 @@ export class Enemy {
     // trajectory even if the original carrier is destroyed.
     this.externalControl = null;
     this.externalBallisticMotion = null;
+    this.contactRetreatMotion = null;
     // Encounter ownership also carries a soft movement envelope. Dungeon
     // navigation uses it to keep enemies participating in their fight instead
     // of camping doorways or endlessly pressing against room geometry.
@@ -783,6 +792,192 @@ export class Enemy {
     this.navigationRecoveryTimer = 0;
   }
 
+  resolveContactRetreatLanding(game, player = game?.player, options = {}) {
+    if (!game || !player?.root?.position || !this.root?.position) return null;
+
+    const controller = game.dungeonController;
+    const start = this.root.position;
+    const playerPosition = player.root.position;
+    const requestedDirection = options.awayDirection;
+    if (requestedDirection?.isVector3) {
+      tempRetreatDirection.copy(requestedDirection).setY(0);
+    } else {
+      tempRetreatDirection.copy(start).sub(playerPosition).setY(0);
+    }
+    if (tempRetreatDirection.lengthSq() <= 0.0001) {
+      const attackDirection = this.brain?.attackDirection ?? this.sharukurusuState?.direction;
+      if (attackDirection?.isVector3) {
+        tempRetreatDirection.copy(attackDirection).setY(0).multiplyScalar(-1);
+      } else {
+        tempRetreatDirection.set(-Math.sin(this.root.rotation.y), 0, -Math.cos(this.root.rotation.y));
+      }
+    }
+    tempRetreatDirection.normalize();
+    const awayDirection = tempRetreatDirection.clone();
+
+    const desiredDistance = THREE.MathUtils.clamp(
+      options.distance ?? Math.max(CONTACT_RETREAT_DISTANCE, this.radius * 2.4 + 1.35),
+      1.4,
+      3.6,
+    );
+    const startPlayerDistanceSq = (
+      (start.x - playerPosition.x) ** 2 + (start.z - playerPosition.z) ** 2
+    );
+    const arena = this.encounterArena;
+    const arenaCenter = arena?.zoneCenter ?? arena?.center;
+    const currentSurfaceY = controller?.getSurfaceElevationAt?.(start) ?? start.y;
+    const aerialHeightOffset = this.navigationMode === 'air'
+      ? Math.max(this.hoverHeight ?? 0, start.y - currentSurfaceY)
+      : 0;
+    const arcHeight = Math.max(
+      CONTACT_RETREAT_MIN_ARC_HEIGHT,
+      options.arcHeight ?? CONTACT_RETREAT_MIN_ARC_HEIGHT + desiredDistance * 0.12,
+    );
+
+    const resolveCandidate = (direction, distance) => {
+      tempRetreatCandidate.copy(start).addScaledVector(direction, distance);
+      if (arenaCenter) {
+        tempRetreatCandidate.x = THREE.MathUtils.clamp(
+          tempRetreatCandidate.x,
+          arenaCenter.x - Math.max(0.5, arena.softHalfWidth ?? arena.halfWidth ?? 1),
+          arenaCenter.x + Math.max(0.5, arena.softHalfWidth ?? arena.halfWidth ?? 1),
+        );
+        tempRetreatCandidate.z = THREE.MathUtils.clamp(
+          tempRetreatCandidate.z,
+          arenaCenter.z - Math.max(0.5, arena.softHalfDepth ?? arena.halfDepth ?? 1),
+          arenaCenter.z + Math.max(0.5, arena.softHalfDepth ?? arena.halfDepth ?? 1),
+        );
+      }
+
+      const floorY = controller?.getSurfaceElevationAt?.(tempRetreatCandidate)
+        ?? tempRetreatCandidate.y;
+      if (this.navigationMode === 'air') {
+        const floorProbe = tempRetreatCandidate.clone().setY(floorY);
+        if (controller?.isPositionWalkable && !controller.isPositionWalkable(floorProbe)) return null;
+        tempRetreatCandidate.y = floorY + aerialHeightOffset;
+      } else {
+        tempRetreatCandidate.y = floorY;
+        const elevationDelta = tempRetreatCandidate.y - start.y;
+        if (elevationDelta > 1.2 || elevationDelta < -2.2) return null;
+      }
+
+      const travelX = tempRetreatCandidate.x - start.x;
+      const travelZ = tempRetreatCandidate.z - start.z;
+      const travelDistanceSq = travelX * travelX + travelZ * travelZ;
+      if (travelDistanceSq < 0.16
+        || travelX * awayDirection.x + travelZ * awayDirection.z <= 0.2) {
+        return null;
+      }
+      const candidatePlayerDistanceSq = (
+        (tempRetreatCandidate.x - playerPosition.x) ** 2
+        + (tempRetreatCandidate.z - playerPosition.z) ** 2
+      );
+      if (candidatePlayerDistanceSq <= startPlayerDistanceSq + 0.12) return null;
+
+      const footprintClear = controller?.isEnemyPositionClear
+        ? controller.isEnemyPositionClear(this, tempRetreatCandidate, { maximumElevationDelta: 1.2 })
+        : !controller?.isPositionWalkable || controller.isPositionWalkable(tempRetreatCandidate);
+      if (!footprintClear
+        || !this._isContactRetreatArcClear(game, tempRetreatCandidate, arcHeight)) {
+        return null;
+      }
+      return tempRetreatCandidate.clone();
+    };
+
+    for (const offset of CONTACT_RETREAT_DIRECTION_OFFSETS) {
+      const cos = Math.cos(offset);
+      const sin = Math.sin(offset);
+      const direction = new THREE.Vector3(
+        awayDirection.x * cos - awayDirection.z * sin,
+        0,
+        awayDirection.x * sin + awayDirection.z * cos,
+      ).normalize();
+      for (const distanceScale of CONTACT_RETREAT_DISTANCE_SCALES) {
+        const landing = resolveCandidate(direction, desiredDistance * distanceScale);
+        if (landing) return landing;
+      }
+    }
+
+    const desiredLanding = start.clone().addScaledVector(awayDirection, desiredDistance);
+    const nearest = controller?.findNearestEnemyClearPosition?.(this, desiredLanding, {
+      preferredPosition: desiredLanding,
+      maximumRadius: 2.2,
+      maximumElevationDelta: 1.2,
+    });
+    if (nearest) {
+      tempRetreatDirection.copy(nearest).sub(start).setY(0);
+      const nearestTravelDistance = tempRetreatDirection.length();
+      if (nearestTravelDistance > 0.0001) {
+        tempRetreatDirection.divideScalar(nearestTravelDistance);
+        // Re-run the nearest fallback through the exact same floor, arena,
+        // footprint, elevation, and arc validation as the authored probes.
+        // This prevents a fallback search from selecting another floor or an
+        // otherwise clear point over an unwalkable gap.
+        const landing = resolveCandidate(tempRetreatDirection, nearestTravelDistance);
+        if (landing) return landing;
+      }
+    }
+
+    return null;
+  }
+
+  _isContactRetreatArcClear(game, landingPosition, arcHeight) {
+    const controller = game?.dungeonController;
+    if (!controller?.isAerialPositionClear) return true;
+    const start = this.root.position;
+    const horizontalDistance = Math.hypot(
+      landingPosition.x - start.x,
+      landingPosition.z - start.z,
+    );
+    const collisionHeight = Math.max(0.8, this.collisionHeight ?? this.type.modelHeight ?? 1.6);
+    const centerOffset = collisionHeight * 0.5;
+    const steps = Math.max(8, Math.ceil(horizontalDistance / 0.24));
+    const collisionOptions = {
+      radius: Math.max(0.18, Math.min(0.86, this.radius * 0.72)),
+      verticalRadius: Math.max(0.3, collisionHeight * 0.4),
+    };
+    for (let step = 0; step <= steps; step += 1) {
+      const progress = step / steps;
+      tempRetreatArcPoint.lerpVectors(start, landingPosition, progress);
+      tempRetreatArcPoint.y += Math.sin(progress * Math.PI) * arcHeight + centerOffset;
+      if (!controller.isAerialPositionClear(tempRetreatArcPoint, collisionOptions)) return false;
+    }
+    return true;
+  }
+
+  beginContactRetreat(game = this._runtimeGame, player = game?.player) {
+    if (this.dead || !game || !player || this.contactRetreatMotion) return false;
+    this._enterPostContactRecovery(game);
+    if (this.externalControl || this.externalBallisticMotion) return false;
+
+    const landingPosition = this.resolveContactRetreatLanding(game, player);
+    if (!landingPosition) return false;
+    const horizontalDistance = Math.hypot(
+      landingPosition.x - this.root.position.x,
+      landingPosition.z - this.root.position.z,
+    );
+    this.clearNavigationRecoveryTarget();
+    this.knockback.set(0, 0, 0);
+    this.contactRetreatMotion = {
+      startPosition: this.root.position.clone(),
+      targetPosition: landingPosition.clone(),
+      elapsed: 0,
+      duration: THREE.MathUtils.clamp(
+        CONTACT_RETREAT_DURATION * Math.max(0.72, horizontalDistance / CONTACT_RETREAT_DISTANCE),
+        0.32,
+        0.56,
+      ),
+      arcHeight: Math.max(CONTACT_RETREAT_MIN_ARC_HEIGHT, 0.62 + horizontalDistance * 0.16),
+    };
+    return true;
+  }
+
+  _enterPostContactRecovery(game) {
+    this.attackCooldown = Math.max(this.attackCooldown, this.stats.attackCooldown);
+    this.postAttackRetreatTimer = Math.max(this.postAttackRetreatTimer, 0.62);
+    game?.completeEnemyAttack?.(this);
+  }
+
   update(dt, game) {
     this._runtimeGame = game;
     if (this.dead) {
@@ -837,9 +1032,11 @@ export class Enemy {
       this.gorubesshuBlockTimer = Math.max(0, this.gorubesshuBlockTimer - dt);
     }
 
+    const contactRetreatWasActive = Boolean(this.contactRetreatMotion);
     if (this._updateExternalMotion(dt, game)) {
       this.animation.update(dt, { moving: false, moveAmount: 0 });
       this._updateExternalModelVisual(dt, false);
+      if (contactRetreatWasActive) this._updateContactRetreatVisual?.(dt, game);
       this._updateHealthBar(game.camera);
       return;
     }
@@ -941,7 +1138,7 @@ export class Enemy {
   }
 
   tryClaimExternalControl(owner, kind = 'external', options = {}) {
-    if (!owner || this.dead || this.externalBallisticMotion) {
+    if (!owner || this.dead || this.externalBallisticMotion || this.contactRetreatMotion) {
       return false;
     }
 
@@ -998,7 +1195,11 @@ export class Enemy {
     onLand = null,
   } = {}) {
     const control = this.externalControl;
-    if (!control || control.owner !== owner || this.dead || this.externalBallisticMotion) {
+    if (!control
+      || control.owner !== owner
+      || this.dead
+      || this.externalBallisticMotion
+      || this.contactRetreatMotion) {
       return false;
     }
     if (!targetPosition?.isVector3 && !(
@@ -1058,6 +1259,14 @@ export class Enemy {
 
   clearExternalMotion(reason = 'cleared', game = null) {
     let cleared = false;
+    if (this.contactRetreatMotion) {
+      const motion = this.contactRetreatMotion;
+      this.contactRetreatMotion = null;
+      if (reason === 'dispose' || reason === 'reset') {
+        this.root.position.copy(motion.targetPosition);
+      }
+      cleared = true;
+    }
     if (this.externalBallisticMotion) {
       cleared = this.cancelExternalBallisticMotion(reason, game, {
         // Death must resolve where the enemy was actually struck. Snapping a
@@ -1076,14 +1285,36 @@ export class Enemy {
   }
 
   isExternalMotionActive() {
-    return Boolean(this.externalBallisticMotion || this.externalControl?.freeze);
+    return Boolean(
+      this.contactRetreatMotion
+      || this.externalBallisticMotion
+      || this.externalControl?.freeze,
+    );
   }
 
   shouldIgnoreGroundConstraint() {
-    return Boolean(this.externalBallisticMotion || this.externalControl?.ignoreGroundConstraint);
+    return Boolean(
+      this.contactRetreatMotion
+      || this.externalBallisticMotion
+      || this.externalControl?.ignoreGroundConstraint,
+    );
   }
 
   _updateExternalMotion(dt, game) {
+    const retreat = this.contactRetreatMotion;
+    if (retreat) {
+      retreat.elapsed = Math.min(retreat.duration, retreat.elapsed + Math.max(0, dt));
+      const progress = THREE.MathUtils.clamp(retreat.elapsed / retreat.duration, 0, 1);
+      this.root.position.lerpVectors(retreat.startPosition, retreat.targetPosition, progress);
+      this.root.position.y += Math.sin(progress * Math.PI) * retreat.arcHeight;
+      this.knockback.set(0, 0, 0);
+      if (progress >= 1) {
+        this.contactRetreatMotion = null;
+        this.root.position.copy(retreat.targetPosition);
+      }
+      return true;
+    }
+
     const motion = this.externalBallisticMotion;
     if (motion) {
       motion.elapsed = Math.min(motion.duration, motion.elapsed + Math.max(0, dt));
@@ -2209,6 +2440,7 @@ export class Enemy {
     this.onHitPlayer(game.player, dealt);
     game.addHitEffect(game.player.root.position, 0xff695c, 0.55);
     if (dealt > 0) {
+      this.beginContactRetreat(game, game.player);
       game.requestHitStop?.(0.08, { timeScale: 0.05 });
     }
   }

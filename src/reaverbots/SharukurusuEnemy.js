@@ -777,10 +777,15 @@ export class SharukurusuEnemy extends Enemy {
     tempDirection.copy(direction ?? state.direction).setY(0);
     if (tempDirection.lengthSq() <= 0.0001) tempDirection.set(0, 0, 1);
     tempDirection.normalize();
-    tempTarget.copy(this.root.position).addScaledVector(tempDirection, -2.6);
-    tempTarget.y = this._getGroundY(game, tempTarget);
-    if (game.dungeonController?.isPositionWalkable
-      && !game.dungeonController.isPositionWalkable(tempTarget)) {
+    tempTarget.copy(tempDirection).multiplyScalar(-1);
+    const safeLanding = this.resolveContactRetreatLanding(game, game.player, {
+      awayDirection: tempTarget,
+      distance: 2.6,
+      arcHeight: BACKFLIP_HEIGHT,
+    });
+    if (safeLanding) {
+      tempTarget.copy(safeLanding);
+    } else {
       tempTarget.copy(this.root.position);
       tempTarget.y = state.groundY;
     }
@@ -788,6 +793,18 @@ export class SharukurusuEnemy extends Enemy {
     state.targetPosition.copy(tempTarget);
     this._setSharukurusuState(SHARUKURUSU_STATES.Backflip, BACKFLIP_TIME);
     return true;
+  }
+
+  beginContactRetreat(game = this._runtimeGame, player = game?.player) {
+    if (this.dead
+      || !game
+      || !player
+      || !this.sharukurusuState
+      || this.sharukurusuState.mode === SHARUKURUSU_STATES.Backflip) {
+      return false;
+    }
+    this.attackCooldown = Math.max(this.attackCooldown, this.stats.attackCooldown);
+    return this._startSharukurusuBackflip(game, this.sharukurusuState.direction);
   }
 
   _getSharukurusuDrillContact(game) {
@@ -913,6 +930,7 @@ export class SharukurusuEnemy extends Enemy {
     state.hitPlayer = true;
     if (dealt > 0) {
       this.onHitPlayer(game.player, dealt);
+      this.beginContactRetreat(game, game.player);
       game.addHitEffect?.(contactPoint, 0xff365f, 0.82, { absolute: true });
       game.requestHitStop?.(0.1, { timeScale: 0.05 });
     }
@@ -1031,6 +1049,9 @@ export class SharukurusuEnemy extends Enemy {
         dt,
       );
       this._damagePlayerWithSharukurusuAttack(game, 'sharukurusuDrillCharge', 0.82, true);
+      if (state.mode === SHARUKURUSU_STATES.Backflip) {
+        return { handled: true, moving: moved, moveAmount: moved ? 1.8 : 0 };
+      }
       if (!moved || state.timer >= state.duration) {
         this.attackCooldown = this.stats.attackCooldown;
         this._startSharukurusuBackflip(game, state.direction);
@@ -1060,6 +1081,9 @@ export class SharukurusuEnemy extends Enemy {
       this._faceDirection(state.direction);
       if (progress >= 0.42) {
         this._damagePlayerWithSharukurusuAttack(game, 'sharukurusuDivingBlades', 1.18, true);
+        if (state.mode === SHARUKURUSU_STATES.Backflip) {
+          return { handled: true, moving: true, moveAmount: 1.8 };
+        }
       }
       if (progress >= 1) {
         this.root.position.copy(state.targetPosition);

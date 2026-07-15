@@ -549,6 +549,9 @@ test('every authored arena pattern respects its warning boundary and matching hi
       boss.bossState.transitionRemaining = 0;
       boss.bossState.interruptRemaining = 0;
       boss._ensureArenaConstructs(game);
+      if (profileId === 'overloadReliquary') {
+        boss.root.position.copy(boss._getOverloadArenaCenterTarget(game));
+      }
       boss._startSignaturePattern(game);
       const selected = boss.bossState.activeTelegraphs
         .filter((entry) => !entry.visualOnly)
@@ -621,7 +624,7 @@ test('every authored arena pattern respects its warning boundary and matching hi
   }
 });
 
-test('signature patterns expose authored pylon, feed-mode, and safe-sector mechanics', async ({ page }) => {
+test('signature patterns expose authored pylon, feed-mode, and raid-grid mechanics', async ({ page }) => {
   await page.goto('/?bossDebug=1&reaverbotSeed=boss-signature-pattern-fidelity');
   await waitForGame(page);
 
@@ -661,45 +664,35 @@ test('signature patterns expose authored pylon, feed-mode, and safe-sector mecha
     discard(feed);
 
     const overload = spawnPhaseTwo('overloadReliquary');
+    overload.root.position.copy(overload._getOverloadArenaCenterTarget(game));
     overload._startSignaturePattern(game);
-    const spherical = overload.bossState.activeTelegraphs
-      .find((entry) => entry.patternRole === 'sphericalPulse');
-    const floorRing = overload.bossState.activeTelegraphs
-      .find((entry) => entry.patternRole === 'floorRingPulse');
-    const sector = spherical.safeSectors[0];
-    const originalTakeDamage = game.player.takeDamage;
-    let safeDamageEvents = 0;
-    let unsafeDamageEvents = 0;
-    game.player.takeDamage = (amount) => {
-      if (amount > 0) safeDamageEvents += 1;
-      return amount;
-    };
-    game.player.root.position.copy(spherical.center).addScaledVector(sector.direction, 2);
-    overload._fireTelegraph(spherical, game);
-    game.player.takeDamage = (amount) => {
-      if (amount > 0) unsafeDamageEvents += 1;
-      return amount;
-    };
-    game.player.root.position.copy(spherical.center).addScaledVector(sector.direction, -2);
-    overload._fireTelegraph(spherical, game);
-    game.player.takeDamage = originalTakeDamage;
+    const raidTelegraphs = overload.bossState.activeTelegraphs
+      .filter((entry) => String(entry.patternRole ?? '').startsWith('overloadRaid'));
+    const waveA = raidTelegraphs.filter((entry) => entry.patternRole === 'overloadRaidWaveA');
+    const waveB = raidTelegraphs.filter((entry) => entry.patternRole === 'overloadRaidWaveB');
+    const raidCenters = raidTelegraphs.map((entry) => entry.center.clone());
+    const minX = Math.min(...raidCenters.map((center) => center.x));
+    const maxX = Math.max(...raidCenters.map((center) => center.x));
+    const minZ = Math.min(...raidCenters.map((center) => center.z));
+    const maxZ = Math.max(...raidCenters.map((center) => center.z));
     const overloadShape = {
-      sphericalKind: spherical.kind,
-      floorRingKind: floorRing.kind,
-      safeSectorCount: spherical.safeSectors.length,
-      safeDecorationCount: spherical.decorations.length,
-      safePylonCharged: sector.pylon.userData.bossChargeReferences > 0,
-      safeDamageEvents,
-      unsafeDamageEvents,
+      mode: overload.bossState.reliquary.mode,
+      count: raidTelegraphs.length,
+      allCircles: raidTelegraphs.every((entry) => entry.kind === 'circle'),
+      waveACount: waveA.length,
+      waveBCount: waveB.length,
+      waveWarnings: [...new Set(raidTelegraphs.map((entry) => entry.warning))].sort((a, b) => a - b),
+      xExtent: maxX - minX,
+      zExtent: maxZ - minZ,
+      distinctX: new Set(raidCenters.map((center) => center.x.toFixed(5))).size,
+      distinctZ: new Set(raidCenters.map((center) => center.z.toFixed(5))).size,
       counts: overload.getBossResourceCounts(game),
     };
-    const sectorObjects = overload.bossState.activeTelegraphs
-      .flatMap((entry) => entry.decorations ?? []);
-    const chargedPylons = [...overload.bossState.constructs];
-    overload._cancelBossArenaAttacks(game, 'safe-sector-test');
+    const raidObjects = raidTelegraphs.map((entry) => entry.object);
+    overload._cancelBossArenaAttacks(game, 'raid-grid-test');
     overloadShape.cleanup = {
-      sectorsDetached: sectorObjects.every((object) => object.parent === null),
-      pylonsDischarged: chargedPylons.every((pylon) => pylon.userData.bossChargeReferences === 0),
+      telegraphsDetached: raidObjects.every((object) => object.parent === null),
+      telegraphsRemaining: overload.bossState.activeTelegraphs.length,
     };
     discard(overload);
 
@@ -730,17 +723,410 @@ test('signature patterns expose authored pylon, feed-mode, and safe-sector mecha
   expect(result.feed.counts.telegraphs).toBeLessThanOrEqual(12);
 
   expect(result.overload).toMatchObject({
-    sphericalKind: 'circle',
-    floorRingKind: 'ring',
-    safeSectorCount: 1,
-    safeDecorationCount: 1,
-    safePylonCharged: true,
-    safeDamageEvents: 0,
-    unsafeDamageEvents: 1,
-    cleanup: { sectorsDetached: true, pylonsDischarged: true },
+    mode: 'raidCast',
+    count: 9,
+    allCircles: true,
+    waveACount: 5,
+    waveBCount: 4,
+    waveWarnings: [1.05, 1.82],
+    distinctX: 3,
+    distinctZ: 3,
+    cleanup: { telegraphsDetached: true, telegraphsRemaining: 0 },
   });
+  expect(result.overload.xExtent).toBeGreaterThan(5);
+  expect(result.overload.zExtent).toBeGreaterThan(5);
   expect(result.overload.counts.telegraphs).toBeLessThanOrEqual(12);
-  expect(result.overload.counts.constructs).toBeLessThanOrEqual(8);
+  expect(result.overload.counts.constructs).toBe(0);
+});
+
+test('Overload Reliquary flits, lays capped mines, summons detonators, and exposes a shield-break damage window', async ({ page }) => {
+  await page.goto('/?bossDebug=1&reaverbotSeed=overload-reliquary-moveset');
+  await waitForGame(page);
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    game.stop();
+    game.projectiles.clear('overload-reliquary-moveset-reset');
+    const boss = game.debugSpawnBoss('overloadReliquary').boss;
+    boss._runtimeGame = game;
+    boss.bossState.arenaCooldown = 999;
+    boss.bossState.transitionRemaining = 0;
+    boss.bossState.interruptRemaining = 0;
+    const reliquary = boss.bossState.reliquary;
+    reliquary.mineTimer = 999;
+    reliquary.minionTimer = 999;
+
+    const controller = game.dungeonController;
+    const originalIsEnemyPositionClear = controller.isEnemyPositionClear;
+    controller.isEnemyPositionClear = () => true;
+    reliquary.mode = 'flit';
+    reliquary.waypoint.copy(boss.root.position);
+    reliquary.waypoint.x += 4;
+    reliquary.waypointTimer = 1;
+    reliquary.waypointSerial = 2;
+    const flitOrigin = boss.root.position.clone();
+    const yawBeforeFirstFlit = boss.root.rotation.y;
+    boss._updatePositionState(0.2, game, game.player.root.position.clone().sub(boss.root.position), 4);
+    const afterFirstFlit = boss.root.position.clone();
+    const firstSpin = boss.root.rotation.y - yawBeforeFirstFlit;
+
+    reliquary.waypoint.copy(boss.root.position);
+    reliquary.waypoint.z -= 4;
+    reliquary.waypointTimer = 1;
+    reliquary.waypointSerial = 3;
+    const yawBeforeSecondFlit = boss.root.rotation.y;
+    boss._updatePositionState(0.2, game, game.player.root.position.clone().sub(boss.root.position), 4);
+    const afterSecondFlit = boss.root.position.clone();
+    const secondSpin = boss.root.rotation.y - yawBeforeSecondFlit;
+    controller.isEnemyPositionClear = originalIsEnemyPositionClear;
+    const firstHeading = afterFirstFlit.clone().sub(flitOrigin).setY(0).normalize();
+    const secondHeading = afterSecondFlit.clone().sub(afterFirstFlit).setY(0).normalize();
+    const flit = {
+      mode: reliquary.mode,
+      firstDistance: flitOrigin.distanceTo(afterFirstFlit),
+      secondDistance: afterFirstFlit.distanceTo(afterSecondFlit),
+      headingDot: firstHeading.dot(secondHeading),
+      firstSpin,
+      secondSpin,
+      moving: boss.brain.moving,
+      speedRatio: boss.brain.speedRatio,
+    };
+
+    boss._beginPhaseTwo();
+    boss.bossState.transitionRemaining = 0;
+    reliquary.mineTimer = 999;
+    reliquary.minionTimer = 999;
+    const phaseTwoHealth = boss.health;
+    const firstBlockMeta = { projectileHit: true, directHit: true, armorPierce: 999 };
+    const firstBlockedDamage = boss.takeDamage(11, firstBlockMeta);
+    const initialShield = {
+      phase: boss.bossState.phase,
+      active: reliquary.shieldActive,
+      hits: reliquary.shieldHits,
+      visible: boss.overloadShieldVisual.object.visible,
+      dealt: firstBlockedDamage,
+      healthLost: phaseTwoHealth - boss.health,
+      meta: firstBlockMeta,
+    };
+
+    const firstSpawnCount = boss._spawnOverloadDetonators(game, 10);
+    const secondSpawnCount = boss._spawnOverloadDetonators(game, 2);
+    const detonators = boss._getLiveOverloadDetonators();
+    const minions = {
+      firstSpawnCount,
+      secondSpawnCount,
+      liveCount: detonators.length,
+      ordinarySelfDestruct: detonators.every((enemy) => (
+        enemy.genome.archetypeId === 'aerialBomber'
+        && enemy.genome.modules.weapon.attackKind === 'selfDestruct'
+        && enemy.genome.modules.weapon.tags.includes('selfDestruct')
+        && enemy.isReliquaryDetonator === true
+        && enemy.summonerBoss === boss
+        && !enemy.isBoss
+      )),
+    };
+
+    detonators[2].brain.detonatorKnockback = { redirectedByPlayer: true };
+    boss.bossState.transitionRemaining = 0.5;
+    const transitionShieldImpact = boss.onWeaponizedDetonatorImpact(detonators[2], game, {
+      position: boss.root.position.clone(),
+    });
+    const transitionShield = {
+      active: reliquary.shieldActive,
+      hits: reliquary.shieldHits,
+    };
+    boss.bossState.transitionRemaining = 0;
+
+    detonators[0].brain.detonatorKnockback = { redirectedByPlayer: true };
+    detonators[1].brain.detonatorKnockback = { redirectedByPlayer: true };
+    const firstShieldImpact = boss.onWeaponizedDetonatorImpact(detonators[0], game, {
+      position: boss.root.position.clone(),
+    });
+    const shieldAfterFirstImpact = {
+      active: reliquary.shieldActive,
+      hits: reliquary.shieldHits,
+    };
+    const secondShieldImpact = boss.onWeaponizedDetonatorImpact(detonators[1], game, {
+      position: boss.root.position.clone(),
+    });
+    const shieldAfterSecondImpact = {
+      active: reliquary.shieldActive,
+      hits: reliquary.shieldHits,
+      breakCount: reliquary.shieldBreakCount,
+      stunRemaining: reliquary.shieldStunRemaining,
+      mode: reliquary.mode,
+      moving: boss.brain.moving,
+      defenseActive: boss.brain.defenseActive,
+    };
+
+    const stunPosition = boss.root.position.clone();
+    boss.update(0.25, game);
+    const stunHealth = boss.health;
+    const stunDamageMeta = { projectileHit: true, directHit: true, armorPierce: 999 };
+    const stunDamage = boss.takeDamage(11, stunDamageMeta);
+    const stun = {
+      flatMovement: Math.hypot(
+        boss.root.position.x - stunPosition.x,
+        boss.root.position.z - stunPosition.z,
+      ),
+      moving: boss.brain.moving,
+      dealt: stunDamage,
+      healthLost: stunHealth - boss.health,
+      vulnerableMeta: stunDamageMeta.overloadShieldStunVulnerable === true,
+      remaining: reliquary.shieldStunRemaining,
+    };
+
+    reliquary.shieldStunRemaining = 0.01;
+    boss.update(0.02, game);
+    const reformedHealth = boss.health;
+    const reformedBlockMeta = { projectileHit: true, directHit: true, armorPierce: 999 };
+    const reformedDamage = boss.takeDamage(11, reformedBlockMeta);
+    const reformed = {
+      active: reliquary.shieldActive,
+      hits: reliquary.shieldHits,
+      visible: boss.overloadShieldVisual.object.visible,
+      dealt: reformedDamage,
+      healthLost: reformedHealth - boss.health,
+      blockedMeta: reformedBlockMeta.overloadReliquaryShield === true,
+    };
+
+    boss._cancelBossArenaAttacks(game, 'blocked-center-proof-reset');
+    const blockedCenterTarget = boss._getOverloadArenaCenterTarget(game).clone();
+    boss.root.position.copy(blockedCenterTarget);
+    boss.root.position.x += 4;
+    reliquary.mode = 'raidApproach';
+    reliquary.raidApproachTimer = 0;
+    const originalRaidPositionClear = controller.isEnemyPositionClear;
+    controller.isEnemyPositionClear = () => false;
+    boss._updatePositionState(
+      2.36,
+      game,
+      game.player.root.position.clone().sub(boss.root.position),
+      4,
+    );
+    controller.isEnemyPositionClear = originalRaidPositionClear;
+    const blockedRaid = {
+      mode: reliquary.mode,
+      telegraphs: boss.bossState.activeTelegraphs.filter((entry) => (
+        String(entry.patternRole ?? '').startsWith('overloadRaid')
+      )).length,
+    };
+    boss._cancelBossArenaAttacks(game, 'blocked-center-proof-complete');
+
+    const mineDropResults = Array.from({ length: 8 }, () => boss._dropOverloadMine(game));
+    const mines = game.projectiles.active.filter((projectile) => (
+      projectile.source === boss && (projectile.landAsMine || projectile.landedMine)
+    ));
+    boss._removeTelegraphMarker?.();
+    const raidCount = boss._queueOverloadRaidPattern(game);
+    const telegraphObjects = boss.bossState.activeTelegraphs.map((entry) => entry.object);
+    const mineMeshes = mines.map((projectile) => projectile.mesh);
+    const minionRoots = detonators.map((enemy) => enemy.root);
+    const beforeCleanup = {
+      mineDropResults,
+      mineCount: mines.length,
+      raidCount,
+      telegraphCount: boss.bossState.activeTelegraphs.length,
+      summonCount: reliquary.summonedDetonators.size,
+    };
+
+    boss.dispose();
+    const cleanup = {
+      cleaned: boss.bossState.cleaned,
+      summonsRemaining: reliquary.summonedDetonators.size,
+      summonsRemovedFromGame: detonators.every((enemy) => !game.enemies.includes(enemy)),
+      summonRootsDetached: minionRoots.every((root) => root.parent === null),
+      minesRemaining: game.projectiles.active.filter((projectile) => projectile.source === boss).length,
+      mineMeshesDetached: mineMeshes.every((mesh) => mesh.parent === null),
+      telegraphsRemaining: boss.bossState.activeTelegraphs.length,
+      telegraphsDetached: telegraphObjects.every((object) => object.parent === null),
+      resources: boss.getBossResourceCounts(game),
+    };
+    boss.root.removeFromParent();
+    const bossIndex = game.enemies.indexOf(boss);
+    if (bossIndex >= 0) game.enemies.splice(bossIndex, 1);
+
+    return {
+      flit,
+      initialShield,
+      minions,
+      transitionShieldImpact,
+      transitionShield,
+      firstShieldImpact,
+      shieldAfterFirstImpact,
+      secondShieldImpact,
+      shieldAfterSecondImpact,
+      stun,
+      reformed,
+      blockedRaid,
+      beforeCleanup,
+      cleanup,
+    };
+  });
+
+  expect(result.flit.mode).toBe('flit');
+  expect(result.flit.firstDistance).toBeCloseTo(1.48, 5);
+  expect(result.flit.secondDistance).toBeCloseTo(1.48, 5);
+  expect(Math.abs(result.flit.headingDot)).toBeLessThan(0.01);
+  expect(result.flit.firstSpin).toBeGreaterThan(1);
+  expect(result.flit.secondSpin).toBeLessThan(-1);
+  expect(result.flit).toMatchObject({ moving: true, speedRatio: 1.85 });
+
+  expect(result.initialShield).toMatchObject({
+    phase: 2,
+    active: true,
+    hits: 2,
+    visible: true,
+    dealt: 0,
+    healthLost: 0,
+    meta: { shieldBlocked: true, damageNullified: true, overloadReliquaryShield: true },
+  });
+  expect(result.minions).toEqual({
+    firstSpawnCount: 3,
+    secondSpawnCount: 0,
+    liveCount: 3,
+    ordinarySelfDestruct: true,
+  });
+  expect(result.transitionShieldImpact).toMatchObject({
+    absorbed: true,
+    excludeFromExplosion: true,
+    shieldHit: false,
+    transitionProtected: true,
+    shieldHitsRemaining: 2,
+  });
+  expect(result.transitionShield).toEqual({ active: true, hits: 2 });
+  expect(result.firstShieldImpact).toMatchObject({
+    absorbed: true,
+    excludeFromExplosion: true,
+    shieldHit: true,
+    shieldBroken: false,
+    shieldHitsRemaining: 1,
+  });
+  expect(result.shieldAfterFirstImpact).toEqual({ active: true, hits: 1 });
+  expect(result.secondShieldImpact).toMatchObject({
+    absorbed: true,
+    excludeFromExplosion: true,
+    shieldHit: true,
+    shieldBroken: true,
+    shieldHitsRemaining: 0,
+  });
+  expect(result.shieldAfterSecondImpact).toMatchObject({
+    active: false,
+    hits: 0,
+    breakCount: 1,
+    stunRemaining: 4,
+    mode: 'shieldStun',
+    moving: false,
+    defenseActive: false,
+  });
+  expect(result.stun.flatMovement).toBeLessThan(0.0001);
+  expect(result.stun.moving).toBe(false);
+  expect(result.stun.dealt).toBeGreaterThan(0);
+  expect(result.stun.healthLost).toBeGreaterThan(0);
+  expect(result.stun.vulnerableMeta).toBe(true);
+  expect(result.stun.remaining).toBeCloseTo(3.75, 5);
+  expect(result.reformed).toEqual({
+    active: true,
+    hits: 2,
+    visible: true,
+    dealt: 0,
+    healthLost: 0,
+    blockedMeta: true,
+  });
+  expect(result.blockedRaid).toEqual({ mode: 'raidCast', telegraphs: 9 });
+  expect(result.beforeCleanup).toMatchObject({
+    mineDropResults: [true, true, true, true, true, true, false, false],
+    mineCount: 6,
+    raidCount: 9,
+    telegraphCount: 9,
+    summonCount: 3,
+  });
+  expect(result.cleanup).toEqual({
+    cleaned: true,
+    summonsRemaining: 0,
+    summonsRemovedFromGame: true,
+    summonRootsDetached: true,
+    minesRemaining: 0,
+    mineMeshesDetached: true,
+    telegraphsRemaining: 0,
+    telegraphsDetached: true,
+    resources: { projectiles: 0, telegraphs: 0, constructs: 0 },
+  });
+});
+
+test('Overload summon cleanup is update-loop safe and suppressed detonator kills still record boss victory', async ({ page }) => {
+  await page.goto('/?bossDebug=1&reaverbotSeed=overload-reliquary-deferred-cleanup');
+  await waitForGame(page);
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    game.stop();
+    game.projectiles.clear('overload-reliquary-deferred-cleanup-reset');
+    for (const enemy of [...game.enemies]) game.removeEnemy(enemy);
+    game.enemyAttackDirector.owner = null;
+    game.enemyAttackDirector.queue = [];
+    game.enemyAttackDirector.requestTimes.clear();
+
+    const boss = game.debugSpawnBoss('overloadReliquary').boss;
+    boss.debugBoss = false;
+    boss._runtimeGame = game;
+    boss.bossState.phase = 2;
+    boss.bossState.transitionRemaining = 0;
+    boss.bossState.interruptRemaining = 0;
+    boss.bossState.reliquary.shieldActive = false;
+    boss.bossState.reliquary.shieldStunRemaining = 1;
+    boss._spawnOverloadDetonators(game, 3);
+    const minions = boss._getLiveOverloadDetonators();
+    const trigger = minions[minions.length - 1];
+
+    let victories = 0;
+    let recordedProfile = null;
+    const originalRecordBossVictory = game._recordBossVictory;
+    game._recordBossVictory = (enemy) => {
+      victories += 1;
+      recordedProfile = enemy.bossProfileId;
+      return Promise.resolve({ ok: true });
+    };
+    boss.health = 1;
+    trigger.update = () => {
+      game.damageEnemy(boss, boss.stats.maxHealth * 10, {
+        source: trigger,
+        attackKind: 'weaponizedDetonator',
+        weaponizedDetonator: true,
+        suppressRewards: true,
+        armorPierce: 999,
+        unblockable: true,
+      });
+    };
+
+    game._updateEnemies(1 / 60);
+    const summary = {
+      bossDead: boss.dead,
+      victories,
+      recordedProfile,
+      minionsRemoved: minions.every((enemy) => !game.enemies.includes(enemy)),
+      minionRootsDetached: minions.every((enemy) => enemy.root.parent === null),
+      summonSetSize: boss.bossState.reliquary.summonedDetonators.size,
+      deferredRemovalCount: game._deferredEnemyRemovals?.size ?? 0,
+      updateFlagCleared: game._updatingEnemies === false,
+    };
+
+    game._recordBossVictory = originalRecordBossVictory;
+    boss.debugBoss = true;
+    game.removeEnemy(boss);
+    return summary;
+  });
+
+  expect(result).toEqual({
+    bossDead: true,
+    victories: 1,
+    recordedProfile: 'overloadReliquary',
+    minionsRemoved: true,
+    minionRootsDetached: true,
+    summonSetSize: 0,
+    deferredRemovalCount: 0,
+    updateFlagCleared: true,
+  });
 });
 
 test('authored arena patterns keep warning cadence and resource caps at 30, 60, and 120 Hz', async ({ page }) => {
@@ -771,6 +1157,9 @@ test('authored arena patterns keep warning cadence and resource caps at 30, 60, 
         boss.bossState.phase = 2;
         boss.bossState.transitionRemaining = 0;
         boss.bossState.interruptRemaining = 0;
+        if (profileId === 'overloadReliquary') {
+          boss.root.position.copy(boss._getOverloadArenaCenterTarget(game));
+        }
         game.player.root.position.copy(boss.root.position);
         game.player.root.position.z += 4;
         game.player.velocity?.set?.(0, 0, 0);
@@ -964,6 +1353,7 @@ test('player defeat immediately clears boss arena objects, projectiles, and atta
     boss._runtimeGame = game;
     boss.bossState.phase = 2;
     boss._ensureArenaConstructs(game);
+    boss.root.position.copy(boss._getOverloadArenaCenterTarget(game));
     boss._startSignaturePattern(game);
     const origin = boss.root.position.clone();
     const direction = game.player.root.position.clone().sub(origin).setY(0);
@@ -1116,7 +1506,7 @@ test('boss disposal releases named arena geometry and material resources without
   expect(result.before.namedArenaObjects.length).toBeGreaterThan(0);
   expect(result.before.trackedResources).toBeGreaterThan(0);
   expect(result.before.resources.telegraphs).toBeGreaterThan(0);
-  expect(result.before.resources.constructs).toBeGreaterThan(0);
+  expect(result.before.resources.constructs).toBe(0);
   expect(result.after).toEqual({
     resources: { projectiles: 0, telegraphs: 0, constructs: 0 },
     lingeringNames: [],

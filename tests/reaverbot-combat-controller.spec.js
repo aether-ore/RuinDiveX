@@ -634,6 +634,8 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
 
     const dungeonController = game.dungeonController;
     const originalWalkable = dungeonController.isPositionWalkable;
+    const originalEnemyPositionClear = dungeonController.isEnemyPositionClear;
+    const originalAerialPositionClear = dungeonController.isAerialPositionClear;
     const originalSurface = dungeonController.getSurfaceElevationAt;
     const originalSafeZone = dungeonController.isPlayerInSafeZone;
     const originalExplosion = game.addExplosion;
@@ -641,7 +643,28 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
     const originalHitEffect = game.addHitEffect;
     const originalHitStop = game.requestHitStop;
     const originalTakeDamage = game.player.takeDamage;
-    dungeonController.isPositionWalkable = () => true;
+    const originalRequestEnemyAttack = game.requestEnemyAttack;
+    const originalMoveSpeed = jaw.stats.moveSpeed;
+    const originalAttackCooldown = jaw.stats.attackCooldown;
+    const originalAiFloat = jaw.aiRandom.float;
+    const safeLandingChecks = [];
+    const isSafeDiagonalLanding = (position) => (
+      position.x < overlapPosition.x - 0.55
+      && position.z > overlapPosition.z + 1.25
+      && Math.abs(position.y - playerPosition.y) < 0.001
+    );
+    dungeonController.isPositionWalkable = (position) => (
+      position.distanceTo(overlapPosition) < 0.2 || isSafeDiagonalLanding(position)
+    );
+    dungeonController.isEnemyPositionClear = (_enemy, position) => {
+      const accepted = isSafeDiagonalLanding(position);
+      safeLandingChecks.push({
+        position: position.clone(),
+        accepted,
+      });
+      return accepted;
+    };
+    dungeonController.isAerialPositionClear = () => true;
     dungeonController.getSurfaceElevationAt = () => playerPosition.y;
     dungeonController.isPlayerInSafeZone = () => false;
 
@@ -672,26 +695,121 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
 
     jaw.root.position.copy(overlapPosition);
     jaw.root.rotation.y = Math.PI;
+    jaw.brain.state = 'position';
+    jaw.brain.stateTime = 0;
+    jaw.brain.cooldown = 0;
     jaw.brain.attackDirection.set(0, 0, -1);
     jaw.brain.contactCooldown = 0;
+    game.enemyAttackDirector.owner = jaw;
+    game.enemyAttackDirector.handoffTimer = 0;
 
     // The first rejected hit models dodge-roll invulnerability: it must not
     // consume the contact cooldown or emit impact feedback. The next frame can
     // then apply the real body hit, and the cooldown suppresses a duplicate.
+    const rejectedContactStart = jaw.root.position.clone();
     jaw._updatePersistentWeaponContact(0.016, game);
     const cooldownAfterRejectedContact = jaw.brain.contactCooldown;
     const hitEffectsAfterRejectedContact = hitEffects;
+    const motionAfterRejectedContact = Boolean(jaw.contactRetreatMotion);
+    const stateAfterRejectedContact = jaw.brain.state;
+    const travelAfterRejectedContact = jaw.root.position.distanceTo(rejectedContactStart);
+    const directorRetainedAfterRejectedContact = game.enemyAttackDirector.owner === jaw;
     jaw._updatePersistentWeaponContact(0.016, game);
     const cooldownAfterSuccessfulContact = jaw.brain.contactCooldown;
+    const stateAfterSuccessfulContact = jaw.brain.state;
+    const successfulRetreatStart = jaw.contactRetreatMotion?.startPosition.clone() ?? null;
+    const successfulRetreatTarget = jaw.contactRetreatMotion?.targetPosition.clone() ?? null;
+    const successfulRetreatDuration = jaw.contactRetreatMotion?.duration ?? 0;
+    const directorReleasedAfterSuccessfulContact = game.enemyAttackDirector.owner !== jaw;
     jaw._updatePersistentWeaponContact(0.016, game);
     const attemptsAfterImmediateRepeat = damageAttempts.length;
 
+    const awayFromPlayer = overlapPosition.clone().sub(playerPosition).setY(0).normalize();
+    const retreatDisplacement = successfulRetreatStart && successfulRetreatTarget
+      ? successfulRetreatTarget.clone().sub(successfulRetreatStart).setY(0)
+      : new Vector3();
+    const retreatBackwardDot = retreatDisplacement.lengthSq() > 0.0001
+      ? retreatDisplacement.clone().normalize().dot(awayFromPlayer)
+      : 0;
+    const retreatLateralTravel = Math.abs(retreatDisplacement.x);
+    const rejectedStraightLandingCount = safeLandingChecks.filter((check) => (
+      !check.accepted
+      && Math.abs(check.position.x - overlapPosition.x) < 0.05
+    )).length;
+    const retreatTargetWasClear = Boolean(
+      successfulRetreatTarget && isSafeDiagonalLanding(successfulRetreatTarget),
+    );
+    const retreatTargetWasWalkable = Boolean(
+      successfulRetreatTarget && dungeonController.isPositionWalkable(successfulRetreatTarget),
+    );
+
+    let maximumRetreatY = jaw.root.position.y;
+    let retreatElapsed = 0;
+    for (let frame = 0; frame < 80 && jaw.contactRetreatMotion; frame += 1) {
+      const step = Math.min(0.02, jaw.contactRetreatMotion.duration - jaw.contactRetreatMotion.elapsed);
+      jaw.update(Math.max(0.001, step), game);
+      retreatElapsed += Math.max(0.001, step);
+      maximumRetreatY = Math.max(maximumRetreatY, jaw.root.position.y);
+    }
+    const retreatFinished = !jaw.contactRetreatMotion;
+    const retreatLandingError = successfulRetreatTarget
+      ? jaw.root.position.distanceTo(successfulRetreatTarget)
+      : Infinity;
+    const retreatLandingGroundError = Math.abs(jaw.root.position.y - playerPosition.y);
+
+    // Recovery owns a complete no-attack window after the visible leap. Make
+    // its randomized cooldown deterministic, hold the fixture in range, and
+    // observe the first subsequent attack request instead of relying only on
+    // internal timer values.
+    jaw.stats.moveSpeed = 0;
+    jaw.stats.attackCooldown = 0.6;
+    jaw.aiRandom.float = () => 1;
+    const attackRequestTimes = [];
+    let timeAfterLanding = 0;
+    game.requestEnemyAttack = (enemy) => {
+      if (enemy === jaw) attackRequestTimes.push(timeAfterLanding);
+      return false;
+    };
+    const recoveryDuration = jaw._getStateDuration('recovery');
+    for (let frame = 0; frame < 160 && jaw.brain.state === 'recovery'; frame += 1) {
+      jaw.update(0.02, game);
+      timeAfterLanding += 0.02;
+    }
+    const attackRequestsDuringRecovery = attackRequestTimes.length;
+    const recoveryElapsed = timeAfterLanding;
+    const stateAfterRecovery = jaw.brain.state;
+    const cooldownAfterRecovery = jaw.brain.cooldown;
+    const cooldownObservationStart = timeAfterLanding;
+    const protectedCooldownWindow = Math.max(0, cooldownAfterRecovery * 0.72);
+    while (timeAfterLanding < cooldownObservationStart + protectedCooldownWindow) {
+      jaw.update(0.02, game);
+      timeAfterLanding += 0.02;
+    }
+    const attackRequestsBeforeCooldown = attackRequestTimes.length;
+    for (let frame = 0; frame < 100 && attackRequestTimes.length === 0; frame += 1) {
+      jaw.update(0.02, game);
+      timeAfterLanding += 0.02;
+    }
+    const firstAttackRequestAfterLanding = attackRequestTimes[0] ?? null;
+    const firstAttackRequestAfterRecovery = firstAttackRequestAfterLanding == null
+      ? null
+      : firstAttackRequestAfterLanding - recoveryElapsed;
+    game.requestEnemyAttack = originalRequestEnemyAttack;
+    jaw.stats.moveSpeed = originalMoveSpeed;
+    jaw.stats.attackCooldown = originalAttackCooldown;
+    jaw.aiRandom.float = originalAiFloat;
+
+    // The remaining assertions exercise the jaw's independent authored combo.
+    // Return it to the original overlap only after the retreat has physically
+    // landed and the post-contact recovery/cooldown proof is complete.
+    dungeonController.isPositionWalkable = () => true;
+    dungeonController.isEnemyPositionClear = originalEnemyPositionClear;
+    jaw.root.position.copy(overlapPosition);
     jaw.brain.state = 'commit';
     jaw.brain.contactCooldown = 0;
     jaw._updatePersistentWeaponContact(0.016, game);
     const attemptsDuringCommit = damageAttempts.length;
 
-    const originalEnemyPositionClear = dungeonController.isEnemyPositionClear;
     let radiusAwareRecoverySamples = 0;
     dungeonController.isEnemyPositionClear = () => {
       radiusAwareRecoverySamples += 1;
@@ -739,8 +857,36 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
       cooldownAfterRejectedContact,
       cooldownAfterSuccessfulContact,
       hitEffectsAfterRejectedContact,
+      motionAfterRejectedContact,
+      stateAfterRejectedContact,
+      travelAfterRejectedContact,
+      directorRetainedAfterRejectedContact,
+      stateAfterSuccessfulContact,
+      directorReleasedAfterSuccessfulContact,
       attemptsAfterImmediateRepeat,
       attemptsDuringCommit,
+      rejectedStraightLandingCount,
+      retreatBackwardDot,
+      retreatLateralTravel,
+      retreatTargetWasClear,
+      retreatTargetWasWalkable,
+      successfulRetreatDuration,
+      retreatElapsed,
+      maximumRetreatRise: maximumRetreatY - Math.max(
+        successfulRetreatStart?.y ?? playerPosition.y,
+        successfulRetreatTarget?.y ?? playerPosition.y,
+      ),
+      retreatFinished,
+      retreatLandingError,
+      retreatLandingGroundError,
+      recoveryDuration,
+      recoveryElapsed,
+      stateAfterRecovery,
+      cooldownAfterRecovery,
+      attackRequestsDuringRecovery,
+      attackRequestsBeforeCooldown,
+      firstAttackRequestAfterLanding,
+      firstAttackRequestAfterRecovery,
       hitEffects,
       radiusAwareRecoverySamples,
       blockedRecoveryMoved,
@@ -756,7 +902,13 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
     game.addParticleBurst = originalBurst;
     game.addHitEffect = originalHitEffect;
     game.requestHitStop = originalHitStop;
+    game.requestEnemyAttack = originalRequestEnemyAttack;
+    jaw.stats.moveSpeed = originalMoveSpeed;
+    jaw.stats.attackCooldown = originalAttackCooldown;
+    jaw.aiRandom.float = originalAiFloat;
     dungeonController.isPositionWalkable = originalWalkable;
+    dungeonController.isEnemyPositionClear = originalEnemyPositionClear;
+    dungeonController.isAerialPositionClear = originalAerialPositionClear;
     dungeonController.getSurfaceElevationAt = originalSurface;
     dungeonController.isPlayerInSafeZone = originalSafeZone;
     jaw.dispose?.();
@@ -768,9 +920,35 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
   expect(result.initialDistance).toBeLessThan(result.minimumSeparation);
   expect(result.cooldownAfterRejectedContact).toBe(0);
   expect(result.hitEffectsAfterRejectedContact).toBe(0);
+  expect(result.motionAfterRejectedContact).toBe(false);
+  expect(result.stateAfterRejectedContact).toBe('position');
+  expect(result.travelAfterRejectedContact).toBeLessThan(0.000001);
+  expect(result.directorRetainedAfterRejectedContact).toBe(true);
   expect(result.cooldownAfterSuccessfulContact).toBeGreaterThan(0.6);
+  expect(result.stateAfterSuccessfulContact).toBe('recovery');
+  expect(result.directorReleasedAfterSuccessfulContact).toBe(true);
   expect(result.attemptsAfterImmediateRepeat).toBe(2);
   expect(result.attemptsDuringCommit).toBe(2);
+  expect(result.rejectedStraightLandingCount).toBeGreaterThan(0);
+  expect(result.retreatBackwardDot).toBeGreaterThan(0.9);
+  expect(result.retreatLateralTravel).toBeGreaterThan(0.55);
+  expect(result.retreatTargetWasClear).toBe(true);
+  expect(result.retreatTargetWasWalkable).toBe(true);
+  expect(result.successfulRetreatDuration).toBeGreaterThan(0.3);
+  expect(result.retreatElapsed).toBeGreaterThanOrEqual(result.successfulRetreatDuration - 0.001);
+  expect(result.maximumRetreatRise).toBeGreaterThan(0.75);
+  expect(result.retreatFinished).toBe(true);
+  expect(result.retreatLandingError).toBeLessThan(0.000001);
+  expect(result.retreatLandingGroundError).toBeLessThan(0.000001);
+  expect(result.recoveryElapsed).toBeGreaterThanOrEqual(result.recoveryDuration - 0.02);
+  expect(result.stateAfterRecovery).toBe('position');
+  expect(result.cooldownAfterRecovery).toBeCloseTo(0.6, 5);
+  expect(result.attackRequestsDuringRecovery).toBe(0);
+  expect(result.attackRequestsBeforeCooldown).toBe(0);
+  expect(result.firstAttackRequestAfterLanding).not.toBeNull();
+  expect(result.firstAttackRequestAfterRecovery).toBeGreaterThanOrEqual(
+    result.cooldownAfterRecovery - 0.03,
+  );
   expect(result.radiusAwareRecoverySamples).toBeGreaterThan(0);
   expect(result.blockedRecoveryMoved).toBe(false);
   expect(result.blockedRecoveryTravel).toBeLessThan(0.001);

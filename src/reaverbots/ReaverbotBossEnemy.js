@@ -15,10 +15,19 @@ const SIGNATURE_INTEGRITY_SCALE = 0.24;
 const SIGNATURE_DAMAGE_MULTIPLIER = 1.5;
 const SIGNATURE_BREAK_INTERRUPT = 2;
 const BOSS_STAGGER_SCALE = 0.35;
+const OVERLOAD_SHIELD_HITS = 2;
+const OVERLOAD_SHIELD_STUN_DURATION = 4;
+const OVERLOAD_DETONATOR_CAP = 3;
+const OVERLOAD_MINE_CAP = 6;
+const OVERLOAD_FLIT_SPEED = 7.4;
+const OVERLOAD_RAID_APPROACH_SPEED = 9.2;
+const OVERLOAD_RAID_HOLD_DURATION = 2.35;
 const WORLD_FORWARD = new THREE.Vector3(0, 0, 1);
 const tempA = new THREE.Vector3();
 const tempB = new THREE.Vector3();
 const tempC = new THREE.Vector3();
+const tempD = new THREE.Vector3();
+const tempE = new THREE.Vector3();
 
 function cloneBossGenome(genome) {
   return {
@@ -145,6 +154,35 @@ function createSignatureAssembly(enemy) {
   return { group, outer, brace, core, materials: [housingMaterial, coreMaterial] };
 }
 
+function createOverloadShieldVisual(enemy) {
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x67f4d7,
+    emissive: 0x33ffd0,
+    emissiveIntensity: 1.35,
+    transparent: true,
+    opacity: 0.28,
+    roughness: 0.16,
+    metalness: 0.08,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  material.name = 'material_overloadReliquaryPhaseShield';
+  const geometry = new THREE.SphereGeometry(1, 28, 18);
+  const object = new THREE.Mesh(geometry, material);
+  object.name = 'overloadReliquaryPhaseShield';
+  object.position.y = enemy.collisionHeight * 0.5;
+  object.scale.set(
+    Math.max(1.2, enemy.radius * 1.62),
+    Math.max(1.35, enemy.collisionHeight * 0.62),
+    Math.max(1.2, enemy.radius * 1.62),
+  );
+  object.visible = false;
+  object.userData.overloadReliquaryShield = true;
+  enemy.root.add(object);
+  return { object, geometry, material, baseScale: object.scale.clone() };
+}
+
 function getPatternForProfile(profileId) {
   switch (profileId) {
     case 'pursuitRegent': return 'interceptLanes';
@@ -154,7 +192,7 @@ function getPatternForProfile(profileId) {
     case 'highAngleBastion': return 'craterSalvo';
     case 'clusterSalvoReliquary': return 'clusterLattice';
     case 'feedDrumArsenal': return 'feedCrossfire';
-    case 'overloadReliquary': return 'concentricPulse';
+    case 'overloadReliquary': return 'reliquaryRaid';
     default: return 'pulseFan';
   }
 }
@@ -193,7 +231,29 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       introShown: false,
       cleaned: false,
     };
+    this.bossState.reliquary = this.bossProfileId === 'overloadReliquary'
+      ? {
+        mode: 'flit',
+        waypoint: new THREE.Vector3(),
+        waypointTimer: 0,
+        waypointSerial: 0,
+        mineTimer: 0.65,
+        minionTimer: 1.8,
+        summonSerial: 0,
+        raidApproachTimer: 0,
+        raidHoldRemaining: 0,
+        shieldActive: false,
+        shieldHits: 0,
+        shieldHitsMax: OVERLOAD_SHIELD_HITS,
+        shieldStunRemaining: 0,
+        shieldBreakCount: 0,
+        summonedDetonators: new Set(),
+      }
+      : null;
     this.bossResources = createSharedBossResources(this.genome.palette.emissive);
+    this.overloadShieldVisual = this.bossProfileId === 'overloadReliquary'
+      ? createOverloadShieldVisual(this)
+      : null;
     this.authoredVisualState = this.bossProfileId === 'rubyOpticOracle' ? 'loading' : 'notApplicable';
     if (this.bossProfileId === 'rubyOpticOracle') this._loadPreferredAuthoredVisual();
   }
@@ -252,14 +312,26 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       isBossSignatureTarget: true,
       retainLockWhenInactive: true,
       get dead() { return owner.dead; },
-      get active() { return !owner.dead && !owner.signaturePartOverloaded; },
+      get active() {
+        return !owner.dead
+          && !owner.signaturePartOverloaded
+          && !owner._usesDetonatorShieldMechanic();
+      },
       getWorldPosition(out) { return owner.signatureVisual.core.getWorldPosition(out); },
     };
   }
 
+  _usesDetonatorShieldMechanic() {
+    return this.bossProfileId === 'overloadReliquary';
+  }
+
   getCombatTargets() {
     const targets = super.getCombatTargets();
-    if (!this.signaturePartOverloaded && !this.dead) targets.unshift(this.signatureTarget);
+    if (!this._usesDetonatorShieldMechanic()
+      && !this.signaturePartOverloaded
+      && !this.dead) {
+      targets.unshift(this.signatureTarget);
+    }
     const arenaTargets = this.bossState?.activeArenaNodes
       ?.filter((node) => node.active)
       .map((node) => node.target) ?? [];
@@ -291,7 +363,9 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         };
       }
     }
-    if (!this.signaturePartOverloaded && !this.dead) {
+    if (!this._usesDetonatorShieldMechanic()
+      && !this.signaturePartOverloaded
+      && !this.dead) {
       this.signatureVisual.core.getWorldPosition(tempA);
       tempB.copy(tempA).sub(start);
       const along = tempB.dot(direction);
@@ -329,7 +403,9 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         };
       }
     }
-    if (!this.signaturePartOverloaded && !this.dead) {
+    if (!this._usesDetonatorShieldMechanic()
+      && !this.signaturePartOverloaded
+      && !this.dead) {
       this.signatureVisual.core.getWorldPosition(tempA);
       tempB.copy(tempA).sub(origin);
       const vertical = Math.abs(tempB.y);
@@ -353,7 +429,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   _resolveSignaturePointHit(position, projectileRadius) {
-    if (this.signaturePartOverloaded || this.dead) return null;
+    if (this._usesDetonatorShieldMechanic() || this.signaturePartOverloaded || this.dead) return null;
     this.signatureVisual.core.getWorldPosition(tempA);
     const radius = projectileRadius + this.signatureTarget.radius;
     if (position.distanceToSquared(tempA) > radius * radius) return null;
@@ -386,6 +462,12 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       meta.bossInvulnerable = true;
       return 0;
     }
+    if ((this.bossState?.reliquary?.shieldStunRemaining ?? 0) > 0) {
+      // The shield-break knockdown is deliberately a damage window, unlike
+      // the generic signature interrupt (which remains invulnerable).
+      this.brain.defenseActive = false;
+      meta.overloadShieldStunVulnerable = true;
+    }
     if (!meta.bossScriptedDisplacement) {
       meta.knockbackDirection = null;
       meta.knockback = 0;
@@ -411,6 +493,20 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   takeDamage(amount, meta = {}) {
+    const reliquary = this.bossState?.reliquary;
+    if (this._usesDetonatorShieldMechanic()
+      && this.bossState.phase === 2
+      && reliquary?.shieldActive) {
+      meta.shieldBlocked = true;
+      meta.damageNullified = true;
+      meta.overloadReliquaryShield = true;
+      meta.knockbackDirection = null;
+      meta.knockback = 0;
+      if (!meta.hitPosition && this.overloadShieldVisual?.object) {
+        meta.hitPosition = this.overloadShieldVisual.object.getWorldPosition(new THREE.Vector3());
+      }
+      return 0;
+    }
     const arenaNode = this.bossState?.activeArenaNodes
       ?.find((node) => node.active && node.partId === meta.hitPartId);
     if (arenaNode) {
@@ -435,7 +531,10 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       && (meta.projectileHit || meta.directHit || meta.directContactHit)
       && !meta.explosionSplash
       && !meta.areaDamage;
-    if (directSignatureHit && dealt > 0 && !this.signaturePartOverloaded) {
+    if (!this._usesDetonatorShieldMechanic()
+      && directSignatureHit
+      && dealt > 0
+      && !this.signaturePartOverloaded) {
       this.signatureIntegrity = Math.max(0, this.signatureIntegrity - dealt);
       if (this.signatureIntegrity <= 0) this._overloadSignaturePart(meta);
     }
@@ -459,7 +558,8 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   _isControlLocked() {
     return super._isControlLocked()
       || (this.bossState?.transitionRemaining ?? 0) > 0
-      || (this.bossState?.interruptRemaining ?? 0) > 0;
+      || (this.bossState?.interruptRemaining ?? 0) > 0
+      || (this.bossState?.reliquary?.shieldStunRemaining ?? 0) > 0;
   }
 
   tryClaimExternalControl() { return false; }
@@ -478,6 +578,294 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     this._runtimeGame?.cancelEnemyAttackRequest?.(this);
     this._runtimeGame?.addParticleBurst?.(this.root.position, this.genome.palette.emissive, 38, 0.24);
     this._runtimeGame?.ui?.showBossPhaseTransition?.(this);
+    if (this._usesDetonatorShieldMechanic()) {
+      this._activateOverloadShield(this._runtimeGame, { initial: true });
+    }
+  }
+
+  _activateOverloadShield(game = this._runtimeGame, { initial = false } = {}) {
+    const reliquary = this.bossState?.reliquary;
+    if (!reliquary || this.dead) return false;
+    reliquary.shieldActive = true;
+    reliquary.shieldHits = reliquary.shieldHitsMax;
+    reliquary.shieldStunRemaining = 0;
+    reliquary.mode = 'flit';
+    reliquary.waypointTimer = 0;
+    reliquary.minionTimer = Math.min(reliquary.minionTimer, initial ? 1.15 : 0.8);
+    this.brain.state = 'position';
+    this.brain.stateTime = 0;
+    this.brain.defenseActive = true;
+    if (this.overloadShieldVisual?.object) this.overloadShieldVisual.object.visible = true;
+    game?.addParticleBurst?.(this.root.position, 0x68ffd7, initial ? 34 : 24, 0.18);
+    if (!initial) game?.ui?.showToast?.('Overload shield reformed — redirect the detonators', '#68ffd7');
+    return true;
+  }
+
+  _breakOverloadShield(game = this._runtimeGame, impactPosition = this.root.position) {
+    const reliquary = this.bossState?.reliquary;
+    if (!reliquary?.shieldActive) return false;
+    this._cancelBossArenaAttacks(game, 'overload-shield-break');
+    reliquary.shieldActive = false;
+    reliquary.shieldHits = 0;
+    reliquary.shieldStunRemaining = OVERLOAD_SHIELD_STUN_DURATION;
+    reliquary.shieldBreakCount += 1;
+    reliquary.mode = 'shieldStun';
+    this.signaturePartOverloaded = true;
+    this.brain.state = 'recovery';
+    this.brain.stateTime = 0;
+    this.brain.moving = false;
+    this.brain.speedRatio = 0;
+    this.brain.defenseActive = false;
+    this.knockback.set(0, 0, 0);
+    if (this.overloadShieldVisual?.object) this.overloadShieldVisual.object.visible = false;
+    game?.cancelEnemyAttackRequest?.(this);
+    game?.addParticleBurst?.(impactPosition, 0x68ffd7, 46, 0.25);
+    game?.addHitEffect?.(impactPosition, 0xffffff, 1.45, { absolute: true });
+    game?.combat?.transferLockOnTarget?.(this.signatureTarget, this);
+    game?.ui?.showToast?.('Overload shield ruptured — attack while it is stunned!', '#ffd36f');
+    return true;
+  }
+
+  onWeaponizedDetonatorImpact(detonator, game = this._runtimeGame, impact = {}) {
+    const reliquary = this.bossState?.reliquary;
+    const weapon = detonator?.genome?.modules?.weapon;
+    const launchedByPlayer = detonator?.brain?.detonatorKnockback?.redirectedByPlayer === true;
+    const ordinaryDetonator = weapon?.attackKind === 'selfDestruct'
+      && weapon?.tags?.includes?.('selfDestruct')
+      && !detonator?.isBoss;
+    if (!reliquary?.shieldActive
+      || this.bossState.phase !== 2
+      || !launchedByPlayer
+      || !ordinaryDetonator) {
+      return { absorbed: false, excludeFromExplosion: false };
+    }
+
+    if (this.bossState.transitionRemaining > 0) {
+      return {
+        absorbed: true,
+        excludeFromExplosion: true,
+        shieldHit: false,
+        transitionProtected: true,
+        shieldHitsRemaining: reliquary.shieldHits,
+      };
+    }
+
+    reliquary.shieldHits = Math.max(0, reliquary.shieldHits - 1);
+    const position = impact.position?.clone?.() ?? this.root.position.clone();
+    game?.addParticleBurst?.(position, 0x68ffd7, 26, 0.18);
+    game?.addHitEffect?.(position, 0x68ffd7, 1.05, { absolute: true });
+    if (reliquary.shieldHits <= 0) {
+      this._breakOverloadShield(game, position);
+    } else {
+      game?.ui?.showToast?.(
+        `Overload shield destabilized — ${reliquary.shieldHits} redirected detonator remaining`,
+        '#9fffe8',
+      );
+    }
+    return {
+      absorbed: true,
+      excludeFromExplosion: true,
+      shieldHit: true,
+      shieldBroken: !reliquary.shieldActive,
+      shieldHitsRemaining: reliquary.shieldHits,
+    };
+  }
+
+  _updatePositionState(dt, game, toPlayer, distance) {
+    if (!this._usesDetonatorShieldMechanic()) {
+      return super._updatePositionState(dt, game, toPlayer, distance);
+    }
+
+    const brain = this.brain;
+    const reliquary = this.bossState.reliquary;
+    brain.alerted = true;
+    brain.cooldown = Math.max(0, brain.cooldown - dt * this._getStatusAttackRateMultiplier());
+    brain.attackFired = true;
+    brain.attackHit = false;
+
+    if (reliquary.mode === 'raidApproach') {
+      reliquary.raidApproachTimer += dt;
+      const centerTarget = this._getOverloadArenaCenterTarget(game, tempD);
+      const moved = this._moveOverloadToward(centerTarget, dt, game, OVERLOAD_RAID_APPROACH_SPEED);
+      const centerDistance = Math.sqrt(flatDistanceSquared(this.root.position, centerTarget));
+      brain.moving = moved;
+      brain.speedRatio = moved ? 2.25 : 0;
+      this.root.rotation.y += dt * 11.5;
+      if (centerDistance <= 0.32
+        || (reliquary.raidApproachTimer >= 1.8 && centerDistance <= 1.15)
+        || reliquary.raidApproachTimer >= 2.35) {
+        this._queueOverloadRaidPattern(game);
+      }
+      return;
+    }
+
+    if (reliquary.mode === 'raidCast') {
+      reliquary.raidHoldRemaining = Math.max(0, reliquary.raidHoldRemaining - dt);
+      brain.moving = false;
+      brain.speedRatio = 0;
+      this.root.rotation.y += dt * 12.5;
+      const raidTelegraphsActive = this.bossState.activeTelegraphs.some((entry) => (
+        String(entry.patternRole ?? '').startsWith('overloadRaid')
+      ));
+      if (reliquary.raidHoldRemaining <= 0 && !raidTelegraphsActive) {
+        reliquary.mode = 'flit';
+        reliquary.waypointTimer = 0;
+      }
+      return;
+    }
+
+    reliquary.mode = 'flit';
+    reliquary.waypointTimer -= dt;
+    const waypointDistance = this.root.position.distanceTo(reliquary.waypoint);
+    if (reliquary.waypointTimer <= 0 || waypointDistance <= 0.45) {
+      this._selectOverloadFlitWaypoint(game);
+    }
+    const moved = this._moveOverloadToward(
+      reliquary.waypoint,
+      dt,
+      game,
+      OVERLOAD_FLIT_SPEED * (this.bossState.phase === 2 ? 1.12 : 1),
+    );
+    const spinDirection = reliquary.waypointSerial % 2 === 0 ? 1 : -1;
+    this.root.rotation.y += spinDirection * dt * (6.8 + Math.sin(this.bossState.elapsed * 5.7) * 1.9);
+    brain.moving = moved;
+    brain.speedRatio = moved ? 1.85 : 0;
+    if (!moved) reliquary.waypointTimer = 0;
+  }
+
+  _getOverloadArenaCenterTarget(game, target = new THREE.Vector3()) {
+    const center = this.encounterArena?.zoneCenter
+      ?? this.encounterArena?.center
+      ?? this.root.position;
+    target.copy(center);
+    const floorY = game?.dungeonController?.getSurfaceElevationAt?.(target) ?? target.y;
+    target.y = floorY + Math.max(1.3, this.hoverHeight ?? 1.15);
+    return target;
+  }
+
+  _selectOverloadFlitWaypoint(game) {
+    const reliquary = this.bossState.reliquary;
+    const arena = this.encounterArena;
+    const center = arena?.zoneCenter ?? arena?.center ?? this.root.position;
+    const halfWidth = Math.max(2.4, arena?.softHalfWidth ?? arena?.halfWidth ?? 6);
+    const halfDepth = Math.max(2.4, arena?.softHalfDepth ?? arena?.halfDepth ?? 6);
+    const controller = game?.dungeonController;
+
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      tempD.set(
+        center.x + this.aiRandom.float(-halfWidth * 0.76, halfWidth * 0.76),
+        center.y,
+        center.z + this.aiRandom.float(-halfDepth * 0.76, halfDepth * 0.76),
+      );
+      const arenaTarget = controller?.getEnemyArenaTarget?.(this, tempD, tempE);
+      if (arenaTarget) tempD.copy(arenaTarget);
+      const floorY = controller?.getSurfaceElevationAt?.(tempD) ?? center.y;
+      tempD.y = floorY + Math.max(1.3, this.hoverHeight ?? 1.15);
+      if (!controller?.isEnemyPositionClear || controller.isEnemyPositionClear(this, tempD)) {
+        reliquary.waypoint.copy(tempD);
+        reliquary.waypointTimer = this.aiRandom.float(0.58, 1.05);
+        reliquary.waypointSerial += 1;
+        return true;
+      }
+    }
+
+    this._getOverloadArenaCenterTarget(game, reliquary.waypoint);
+    reliquary.waypointTimer = 0.45;
+    reliquary.waypointSerial += 1;
+    return false;
+  }
+
+  _moveOverloadToward(target, dt, game, speed) {
+    tempA.copy(target).sub(this.root.position);
+    const distance = tempA.length();
+    if (distance <= 0.015) return false;
+    tempA.divideScalar(distance);
+    const step = Math.min(distance, Math.max(0, speed * dt));
+    tempB.copy(this.root.position).addScaledVector(tempA, step);
+    const controller = game?.dungeonController;
+    if (controller?.isEnemyPositionClear && !controller.isEnemyPositionClear(this, tempB)) {
+      return false;
+    }
+    this.root.position.copy(tempB);
+    return step > 0.0001;
+  }
+
+  _beginOverloadRaid(game) {
+    const reliquary = this.bossState.reliquary;
+    reliquary.mode = 'raidApproach';
+    reliquary.raidApproachTimer = 0;
+    reliquary.raidHoldRemaining = 0;
+    this.brain.state = 'position';
+    this.brain.stateTime = 0;
+    this._removeTelegraphMarker?.();
+    const centerTarget = this._getOverloadArenaCenterTarget(game, tempD);
+    if (Math.sqrt(flatDistanceSquared(this.root.position, centerTarget)) <= 0.32) {
+      this._queueOverloadRaidPattern(game);
+    }
+  }
+
+  _queueOverloadRaidPattern(game) {
+    const reliquary = this.bossState.reliquary;
+    const center = this.encounterArena?.zoneCenter
+      ?? this.encounterArena?.center
+      ?? this.root.position;
+    const halfWidth = Math.max(2.5, this.encounterArena?.softHalfWidth ?? 5.2);
+    const halfDepth = Math.max(2.5, this.encounterArena?.softHalfDepth ?? 5.2);
+    const spacingX = halfWidth * 0.55;
+    const spacingZ = halfDepth * 0.55;
+    const blastRadius = Math.max(1.45, Math.min(spacingX, spacingZ) * 0.62);
+    const offsets = [-1, 0, 1];
+    let queued = 0;
+    for (let xIndex = 0; xIndex < offsets.length; xIndex += 1) {
+      for (let zIndex = 0; zIndex < offsets.length; zIndex += 1) {
+        const target = new THREE.Vector3(
+          center.x + offsets[xIndex] * spacingX,
+          center.y,
+          center.z + offsets[zIndex] * spacingZ,
+        );
+        const firstWave = (xIndex + zIndex) % 2 === 0;
+        if (this._queueCircle(
+          game,
+          target,
+          blastRadius,
+          firstWave ? 1.05 : 1.82,
+          firstWave ? 1.02 : 1.12,
+          { patternRole: firstWave ? 'overloadRaidWaveA' : 'overloadRaidWaveB' },
+        )) {
+          queued += 1;
+        }
+      }
+    }
+    reliquary.mode = 'raidCast';
+    reliquary.raidHoldRemaining = OVERLOAD_RAID_HOLD_DURATION;
+    reliquary.raidApproachTimer = 0;
+    this.brain.moving = false;
+    this.brain.speedRatio = 0;
+    game?.addParticleBurst?.(this.root.position, this.genome.palette.emissive, 32, 0.2);
+    return queued;
+  }
+
+  _queueOverloadFieldBombardment(game) {
+    const center = this.encounterArena?.zoneCenter
+      ?? this.encounterArena?.center
+      ?? this.root.position;
+    const halfWidth = Math.max(2.5, this.encounterArena?.softHalfWidth ?? 5.2);
+    const halfDepth = Math.max(2.5, this.encounterArena?.softHalfDepth ?? 5.2);
+    const playerTarget = game.player.root.position.clone();
+    const targets = [playerTarget];
+    for (let index = 0; index < 4; index += 1) {
+      const angle = (index / 4) * Math.PI * 2 + this.bossState.patternIndex * 0.37;
+      targets.push(new THREE.Vector3(
+        center.x + Math.cos(angle) * halfWidth * 0.68,
+        center.y,
+        center.z + Math.sin(angle) * halfDepth * 0.68,
+      ));
+    }
+    targets.forEach((target, index) => {
+      this._queueCircle(game, target, index === 0 ? 1.65 : 1.45, 0.82 + index * 0.09, 0.78, {
+        patternRole: 'overloadFieldBlast',
+      });
+    });
   }
 
   _overloadSignaturePart(meta) {
@@ -525,22 +913,210 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     }
     state.transitionRemaining = Math.max(0, state.transitionRemaining - dt);
     state.interruptRemaining = Math.max(0, state.interruptRemaining - dt);
+    const reliquary = state.reliquary;
+    const shieldStunBefore = reliquary?.shieldStunRemaining ?? 0;
+    if (reliquary) {
+      reliquary.shieldStunRemaining = Math.max(0, reliquary.shieldStunRemaining - dt);
+      if (shieldStunBefore > 0
+        && reliquary.shieldStunRemaining <= 0
+        && state.phase === 2
+        && !this.dead) {
+        this._activateOverloadShield(game);
+      }
+      this._updateOverloadShieldVisual(dt);
+    }
     this._updateArenaObjects(dt, game);
-    if (state.transitionRemaining > 0 || state.interruptRemaining > 0 || game.player.dead) {
+    if (state.transitionRemaining > 0
+      || state.interruptRemaining > 0
+      || (reliquary?.shieldStunRemaining ?? 0) > 0
+      || game.player.dead) {
       this.brain.moving = false;
       this.knockback.set(0, 0, 0);
       return;
     }
+    if (reliquary) this._updateOverloadReliquaryAmbient(dt, game);
     state.arenaCooldown -= dt;
     if (state.arenaCooldown <= 0) {
       this._startSignaturePattern(game);
       const phaseScale = state.phase === 2 ? 0.76 : 1;
-      const weakenedScale = this.signaturePartOverloaded ? 1.34 : 1;
+      const weakenedScale = this.signaturePartOverloaded && !reliquary ? 1.34 : 1;
       state.arenaCooldown = (4.35 + this.aiRandom.float(0, 0.85)) * phaseScale * weakenedScale;
     }
   }
 
+  _updateOverloadShieldVisual(dt) {
+    const reliquary = this.bossState?.reliquary;
+    const shield = this.overloadShieldVisual;
+    if (!reliquary || !shield) return;
+    shield.object.visible = reliquary.shieldActive && !this.dead;
+    if (shield.object.visible) {
+      const pulse = 1 + Math.sin(this.bossState.elapsed * 8.5) * 0.045;
+      shield.object.scale.copy(shield.baseScale).multiplyScalar(pulse);
+      shield.object.rotation.y += dt * 1.8;
+      shield.object.rotation.z -= dt * 0.85;
+      shield.material.opacity = 0.22 + 0.09 * Math.sin(this.bossState.elapsed * 7.2) ** 2;
+      shield.material.emissiveIntensity = 1.1 + reliquary.shieldHits * 0.28;
+      this.brain.defenseActive = true;
+    } else if (reliquary.shieldStunRemaining > 0) {
+      this.brain.defenseActive = false;
+    }
+  }
+
+  _updateOverloadReliquaryAmbient(dt, game) {
+    const reliquary = this.bossState.reliquary;
+    this._pruneOverloadDetonators();
+    reliquary.mineTimer -= dt;
+    reliquary.minionTimer -= dt;
+
+    if (reliquary.mineTimer <= 0 && reliquary.mode === 'flit') {
+      this._dropOverloadMine(game);
+      reliquary.mineTimer = this.aiRandom.float(
+        this.bossState.phase === 2 ? 0.72 : 0.9,
+        this.bossState.phase === 2 ? 1.05 : 1.28,
+      );
+    }
+
+    if (reliquary.minionTimer <= 0) {
+      this._spawnOverloadDetonators(game, this.bossState.phase === 2 ? 2 : 1);
+      reliquary.minionTimer = this.aiRandom.float(
+        this.bossState.phase === 2 ? 4.6 : 7.1,
+        this.bossState.phase === 2 ? 5.8 : 8.7,
+      );
+    }
+  }
+
+  _dropOverloadMine(game) {
+    const activeProjectiles = game?.projectiles?.active ?? [];
+    const bossProjectiles = activeProjectiles.filter((projectile) => projectile.source === this);
+    const activeMines = bossProjectiles.filter((projectile) => projectile.landAsMine || projectile.landedMine);
+    if (bossProjectiles.length >= REAVERBOT_BOSS_LIMITS.projectiles
+      || activeMines.length >= OVERLOAD_MINE_CAP) {
+      return false;
+    }
+
+    const angle = this.aiRandom.float(-Math.PI, Math.PI);
+    const distance = this.aiRandom.float(0.8, 2.1);
+    tempA.copy(this.root.position);
+    tempA.x += Math.cos(angle) * distance;
+    tempA.z += Math.sin(angle) * distance;
+    const floorY = game.dungeonController?.getSurfaceElevationAt?.(tempA) ?? tempA.y;
+    tempA.y = floorY + 0.08;
+    tempB.copy(tempA).sub(this.root.position).setY(0);
+    const horizontalDistance = Math.max(0.35, tempB.length());
+    if (tempB.lengthSq() <= 0.0001) tempB.set(Math.cos(angle), 0, Math.sin(angle));
+    else tempB.normalize();
+    tempC.copy(this.root.position);
+    tempC.y += this.collisionHeight * 0.18;
+    const projectile = game.projectiles?.spawn?.({
+      owner: 'enemy',
+      position: tempC,
+      direction: tempB.clone(),
+      speed: 4.2,
+      range: horizontalDistance,
+      radius: 0.22,
+      damage: this.stats.damage * 0.72,
+      color: this.genome.palette.emissive,
+      source: this,
+      explosiveRadius: 2.15,
+      explodeOnExpire: true,
+      arcHeight: 0.38 + Math.max(0, this.root.position.y - floorY) * 0.16,
+      endY: floorY + 0.08,
+      visualType: 'grenade',
+      landAsMine: true,
+      mineLifetime: 7.2,
+      mineArmDelay: 0.42,
+      mineTriggerRadius: 1.35,
+    });
+    if (projectile) game.addParticleBurst?.(tempC, this.genome.palette.emissive, 7, 0.08);
+    return Boolean(projectile);
+  }
+
+  _getLiveOverloadDetonators() {
+    const reliquary = this.bossState?.reliquary;
+    if (!reliquary) return [];
+    return [...reliquary.summonedDetonators].filter((enemy) => enemy && !enemy.dead && enemy.root);
+  }
+
+  _pruneOverloadDetonators() {
+    const reliquary = this.bossState?.reliquary;
+    if (!reliquary) return;
+    for (const enemy of [...reliquary.summonedDetonators]) {
+      if (!enemy || enemy.dead || !enemy.root?.parent) reliquary.summonedDetonators.delete(enemy);
+    }
+  }
+
+  _spawnOverloadDetonators(game, requestedCount = 1) {
+    const reliquary = this.bossState?.reliquary;
+    if (!reliquary || !game?.spawner) return 0;
+    this._pruneOverloadDetonators();
+    let spawned = 0;
+    const available = Math.max(0, OVERLOAD_DETONATOR_CAP - this._getLiveOverloadDetonators().length);
+    const count = Math.min(available, Math.max(0, Math.floor(requestedCount)));
+    const center = this.encounterArena?.zoneCenter ?? this.encounterArena?.center ?? this.root.position;
+    for (let index = 0; index < count; index += 1) {
+      const serial = reliquary.summonSerial++;
+      const angle = (serial * 2.399963229728653) + this.aiRandom.float(-0.22, 0.22);
+      const spawnPosition = new THREE.Vector3(
+        center.x + Math.cos(angle) * this.aiRandom.float(3.2, 5.1),
+        center.y,
+        center.z + Math.sin(angle) * this.aiRandom.float(3.2, 5.1),
+      );
+      const floorY = game.dungeonController?.getSurfaceElevationAt?.(spawnPosition) ?? center.y;
+      spawnPosition.y = floorY + 1.55;
+      const minion = game.spawner.spawnEnemy('flying reaverbot', false, spawnPosition, {
+        seed: `${this.expeditionSpec?.seed ?? this.id}:overload-minion:${serial}`,
+        archetypeId: 'aerialBomber',
+        encounterSize: 2,
+        allowRandomElite: false,
+        healthMultiplier: this.bossState.phase === 2 ? 1.65 : 1.4,
+      });
+      if (!minion) continue;
+      minion.summonerBoss = this;
+      minion.isReliquaryDetonator = true;
+      minion.encounterId = this.encounterId;
+      if (this.encounterArena) {
+        minion.encounterArena = {
+          ...this.encounterArena,
+          center: this.encounterArena.center.clone(),
+          zoneCenter: this.encounterArena.zoneCenter.clone(),
+        };
+      }
+      const clearPosition = game.dungeonController?.findNearestEnemyClearPosition?.(
+        minion,
+        spawnPosition,
+        { preferredPosition: spawnPosition, maximumRadius: 3.2 },
+      );
+      if (clearPosition) minion.root.position.copy(clearPosition);
+      minion.brain.alerted = true;
+      minion.brain.cooldown = Math.max(minion.brain.cooldown, 0.85);
+      reliquary.summonedDetonators.add(minion);
+      game.addParticleBurst?.(minion.root.position, this.genome.palette.emissive, 18, 0.14);
+      spawned += 1;
+    }
+    return spawned;
+  }
+
+  _cleanupOverloadDetonators(game = this._runtimeGame) {
+    const reliquary = this.bossState?.reliquary;
+    if (!reliquary) return;
+    for (const enemy of [...reliquary.summonedDetonators]) {
+      if (!enemy) continue;
+      game?.cancelEnemyAttackRequest?.(enemy);
+      enemy.summonerBoss = null;
+      if (game?.removeEnemy) {
+        game.removeEnemy(enemy);
+      } else {
+        enemy.dispose?.();
+        enemy.root?.removeFromParent?.();
+        const index = game?.enemies?.indexOf?.(enemy) ?? -1;
+        if (index >= 0) game.enemies.splice(index, 1);
+      }
+    }
+    reliquary.summonedDetonators.clear();
+  }
+
   _ensureArenaConstructs(game) {
+    if (this._usesDetonatorShieldMechanic()) return;
     if (this.bossState.constructs.length) return;
     const center = this.encounterArena?.center ?? this.root.position;
     const count = this.bossProfileId === 'rubyOpticOracle' ? 4 : 3;
@@ -804,6 +1380,12 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     tempA.normalize();
     const phaseTwo = state.phase === 2;
     const weakened = this.signaturePartOverloaded;
+
+    if (this._usesDetonatorShieldMechanic()) {
+      if (state.patternIndex % 2 === 1) this._beginOverloadRaid(game);
+      else this._queueOverloadFieldBombardment(game);
+      return;
+    }
 
     if (pattern === 'interceptLanes') {
       this._queueLane(game, this.root.position, tempA, 12, 0.48, 0.75, 0.82, { projectile: true });
@@ -1077,6 +1659,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   getBossHudState() {
+    const reliquary = this.bossState.reliquary;
     return {
       profileId: this.bossProfileId,
       title: this.bossProfile?.title ?? this.genome.name,
@@ -1088,8 +1671,25 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       healthRatio: Math.max(0, this.health / this.stats.maxHealth),
       signatureIntegrity: this.signatureIntegrity,
       signatureIntegrityMax: this.signatureIntegrityMax,
-      signatureRatio: Math.max(0, this.signatureIntegrity / this.signatureIntegrityMax),
+      signatureRatio: reliquary
+        ? this.bossState.phase === 2
+          ? Math.max(0, reliquary.shieldHits / Math.max(1, reliquary.shieldHitsMax))
+          : 0
+        : Math.max(0, this.signatureIntegrity / this.signatureIntegrityMax),
       signaturePartOverloaded: this.signaturePartOverloaded,
+      shieldActive: reliquary?.shieldActive ?? false,
+      shieldHits: reliquary?.shieldHits ?? 0,
+      shieldHitsMax: reliquary?.shieldHitsMax ?? 0,
+      shieldStunRemaining: reliquary?.shieldStunRemaining ?? 0,
+      signatureStatus: reliquary
+        ? this.bossState.phase === 1
+          ? 'SHIELD DORMANT'
+          : reliquary.shieldActive
+          ? `SHIELD ${reliquary.shieldHits}/${reliquary.shieldHitsMax}`
+          : reliquary.shieldStunRemaining > 0
+            ? 'SHIELD BROKEN — STUNNED'
+            : 'SHIELD REFORMING'
+        : null,
     };
   }
 
@@ -1125,6 +1725,8 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   _cleanupBossArena(game = this._runtimeGame, reason = 'dispose') {
     if (this.bossState.cleaned) return;
     this.bossState.cleaned = true;
+    this._cleanupOverloadDetonators(game);
+    if (this.overloadShieldVisual?.object) this.overloadShieldVisual.object.visible = false;
     for (const entry of this.bossState.activeTelegraphs) this._clearTelegraphDecorations(entry);
     const telegraphObjects = new Set([
       ...this.bossState.activeTelegraphs.map((entry) => entry.object),
@@ -1155,6 +1757,12 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     this.signatureVisual?.outer?.geometry?.dispose?.();
     this.signatureVisual?.brace?.geometry?.dispose?.();
     this.signatureVisual?.core?.geometry?.dispose?.();
+    if (this.overloadShieldVisual) {
+      this.overloadShieldVisual.object.removeFromParent();
+      this.overloadShieldVisual.geometry.dispose?.();
+      this.overloadShieldVisual.material.dispose?.();
+      this.overloadShieldVisual = null;
+    }
     disposeSharedBossResources(this.bossResources);
     super.dispose();
   }

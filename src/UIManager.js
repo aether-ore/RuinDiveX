@@ -641,8 +641,13 @@ export class UIManager {
     if (this.bossHealthFill) this.bossHealthFill.style.transform = `scaleX(${Math.max(0, Math.min(1, state.healthRatio))})`;
     if (this.bossSignatureFill) this.bossSignatureFill.style.transform = `scaleX(${Math.max(0, Math.min(1, state.signatureRatio))})`;
     if (this.bossSignatureStatus) {
-      this.bossSignatureStatus.textContent = state.signaturePartOverloaded ? 'OVERLOADED' : 'ARMORED';
-      this.bossSignatureStatus.style.color = state.signaturePartOverloaded ? '#ff8f66' : '#ffd36f';
+      this.bossSignatureStatus.textContent = state.signatureStatus
+        ?? (state.signaturePartOverloaded ? 'OVERLOADED' : 'ARMORED');
+      this.bossSignatureStatus.style.color = state.shieldActive
+        ? '#68ffd7'
+        : state.shieldStunRemaining > 0
+          ? '#ffd36f'
+          : state.signaturePartOverloaded ? '#ff8f66' : '#ffd36f';
     }
   }
 

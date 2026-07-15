@@ -62,9 +62,8 @@ const SWORD_SLASH_TRAIL_PROFILES = Object.freeze({
     visualEnd: 16 / 24,
   }),
   [SWORD_JUMP_SLASH_CLIP]: Object.freeze({
-    // The live ribbon follows the authored wind-up only until the supplied
-    // falling-pose seam. A fitted residual plane covers low-frame fallbacks;
-    // landing continuation gets a fresh ribbon so no segment spans the hold.
+    // One rolling world-space ribbon follows the blade from wind-up through
+    // the airborne hold and touchdown without changing handles at either seam.
     motionLocal: Object.freeze([-0.512142, -0.852924, -0.101154]),
     planeNormalLocal: Object.freeze([-0.820581, 0.451102, 0.350933]),
     centerLocal: Object.freeze([-0.835155, 1.967038, 0.294638]),
@@ -5020,7 +5019,7 @@ export class CombatSystem {
     if (liveBladeTrailPending && !liveBladeTrailReady && !retainContinuousJumpSlashTrail) {
       this._cancelActiveSwordSweepTrail();
     }
-    if (!liveBladeTrailReady) {
+    if (!liveBladeTrailReady && !retainContinuousJumpSlashTrail) {
       this.game.addSlashEffect(player.root.position, direction, range, visual.color, {
         beamBlade,
         arcAngle: slashArcAngle,

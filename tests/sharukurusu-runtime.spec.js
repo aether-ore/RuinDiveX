@@ -606,6 +606,45 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
         if (sawBackflip && enemy.sharukurusuState.mode === 'ninjaRun') break;
       }
 
+      // A successful hit on the exact final dive frame must preserve the new
+      // backflip state. The old dive branch must not copy the freshly selected
+      // retreat target into the root or start a second backflip.
+      const finalDiveImpact = new Vector3(0, 0, 0);
+      const finalDiveHitsBefore = hits.length;
+      const originalDrillContact = enemy._getSharukurusuDrillContact;
+      const originalEnemyPositionClear = controller.isEnemyPositionClear;
+      const originalAerialPositionClear = controller.isAerialPositionClear;
+      let finalDiveMode = null;
+      let finalDiveRootError = Infinity;
+      let finalDiveBackflipStartError = Infinity;
+      let finalDiveLandingTravel = 0;
+      let finalDiveContactHits = 0;
+      try {
+        controller.isEnemyPositionClear = () => true;
+        controller.isAerialPositionClear = () => true;
+        enemy.root.position.set(0, 0, -1);
+        enemy.sharukurusuState.direction.set(0, 0, 1);
+        enemy.sharukurusuState.startPosition.copy(enemy.root.position);
+        enemy.sharukurusuState.targetPosition.copy(finalDiveImpact);
+        enemy._setSharukurusuState('diveAirborne', 1);
+        enemy.sharukurusuState.timer = 0.999;
+        player.root.position.copy(finalDiveImpact);
+        enemy._getSharukurusuDrillContact = () => enemy.root.position.clone();
+        enemy._updateCustomBehavior(0.001, game);
+        finalDiveMode = enemy.sharukurusuState.mode;
+        finalDiveRootError = enemy.root.position.distanceTo(finalDiveImpact);
+        finalDiveBackflipStartError = enemy.sharukurusuState.startPosition.distanceTo(finalDiveImpact);
+        finalDiveLandingTravel = enemy.sharukurusuState.targetPosition.distanceTo(finalDiveImpact);
+        finalDiveContactHits = hits.length - finalDiveHitsBefore;
+      } finally {
+        enemy._getSharukurusuDrillContact = originalDrillContact;
+        controller.isEnemyPositionClear = originalEnemyPositionClear;
+        controller.isAerialPositionClear = originalAerialPositionClear;
+        hits.length = finalDiveHitsBefore;
+      }
+      enemy.root.position.copy(finalDiveImpact);
+      enemy._setSharukurusuState('ninjaRun');
+
       const drillTip = new Vector3();
       enemy.sharukurusuRig.leftDrillTip.getWorldPosition(drillTip);
       player.root.position.set(drillTip.x, drillTip.y - 0.2, drillTip.z);
@@ -663,6 +702,11 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
         } : null,
         maximumBackflipY,
         maximumBackflipRotation,
+        finalDiveMode,
+        finalDiveRootError,
+        finalDiveBackflipStartError,
+        finalDiveLandingTravel,
+        finalDiveContactHits,
         clearDrillContact,
         blockedDrillContact,
         verticallySeparatedDrillContact,
@@ -707,6 +751,11 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
   expect(result.hit.knockbackDirectionLength).toBeGreaterThan(0.99);
   expect(result.maximumBackflipY).toBeGreaterThan(0.9);
   expect(result.maximumBackflipRotation).toBeGreaterThan(5.5);
+  expect(result.finalDiveMode).toBe('backflip');
+  expect(result.finalDiveRootError).toBeLessThan(0.000001);
+  expect(result.finalDiveBackflipStartError).toBeLessThan(0.000001);
+  expect(result.finalDiveLandingTravel).toBeGreaterThan(1);
+  expect(result.finalDiveContactHits).toBe(1);
   expect(result.clearDrillContact).toBe(true);
   expect(result.blockedDrillContact).toBe(false);
   expect(result.verticallySeparatedDrillContact).toBe(false);

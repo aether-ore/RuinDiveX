@@ -12,6 +12,26 @@ const JUMP_SLASH_ACTIVE_START = 24 / JUMP_SLASH_TOTAL_FRAMES;
 const JUMP_SLASH_AERIAL_POSE_PROGRESS = 32 / JUMP_SLASH_TOTAL_FRAMES;
 const JUMP_SLASH_END = 37 / JUMP_SLASH_TOTAL_FRAMES;
 const SWORD_SLASH_CLIP_KEYS = new Set(['swordForwardSlash', 'swordInwardSlash', 'swordJumpSlash']);
+const SWORD_INWARD_SLASH_CLIP = 'swordInwardSlash';
+const SWORD_INWARD_TERMINAL_BLEND_START = 16 / BEAM_BLADE_TOTAL_FRAMES;
+const SWORD_INWARD_TERMINAL_FULL_PROGRESS = 0.817;
+const SWORD_INWARD_TERMINAL_POSE_DEGREES = Object.freeze({
+  hips: Object.freeze({ pitch: 25.9, yaw: -69, roll: 14.9 }),
+  spine: Object.freeze({ pitch: 5.7, yaw: -5.7, roll: 0.6 }),
+  neck: Object.freeze({ pitch: 7.8, yaw: 9.7, roll: -2.8 }),
+  leftShoulder: Object.freeze({ pitch: 16.1, yaw: 6.1, roll: -13.9 }),
+  leftElbow: Object.freeze({ pitch: 4.8, yaw: 1.3, roll: 60.4 }),
+  leftWrist: Object.freeze({ pitch: -43.8, yaw: 11.5, roll: -7.1 }),
+  rightShoulder: Object.freeze({ pitch: 34.1, yaw: -9.7, roll: 26.5 }),
+  rightElbow: Object.freeze({ pitch: 4.4, yaw: -0.9, roll: -51.7 }),
+  rightWrist: Object.freeze({ pitch: -10.8, yaw: 17.1, roll: 76 }),
+  leftHip: Object.freeze({ pitch: 51.9, yaw: -1.9, roll: 21 }),
+  leftKnee: Object.freeze({ pitch: -68.2, yaw: -9.2, roll: -2.7 }),
+  leftAnkle: Object.freeze({ pitch: 13.9, yaw: -16.2, roll: 15.6 }),
+  rightHip: Object.freeze({ pitch: 46.2, yaw: 13.7, roll: -4.9 }),
+  rightKnee: Object.freeze({ pitch: -52.1, yaw: -9.2, roll: -9.8 }),
+  rightAnkle: Object.freeze({ pitch: 11.5, yaw: -3.6, roll: 9 }),
+});
 const PASSIVE_IDLE_HOLD_SECONDS = 20;
 const zeroEuler = new THREE.Euler();
 const tempVectorA = new THREE.Vector3();
@@ -23,12 +43,16 @@ const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
 const tempQuaternionC = new THREE.Quaternion();
 const localForwardZ = new THREE.Vector3(0, 0, 1);
+const localRightX = new THREE.Vector3(1, 0, 0);
 const LEFT_BUSTER_ELBOW_JOINT = 'leftElbow';
 const LEFT_BUSTER_WRIST_JOINT = 'leftWrist';
 const LEFT_BUSTER_HAND_MESH_TOKEN = 'HandMesh_L';
 const RIGHT_BUSTER_ELBOW_JOINT = 'rightElbow';
 const RIGHT_BUSTER_WRIST_JOINT = 'rightWrist';
 const RIGHT_BUSTER_HAND_MESH_TOKEN = 'HandMesh_R';
+const BEAM_SABER_GRIP_SAMPLE_PROGRESS = 0.4;
+const BEAM_SABER_GRIP_BONE_PATTERN = /^righthand(?:thumb|index|middle|ring|pinky)[123]$/;
+const BEAM_SABER_WRIST_LOCAL_POSITION = Object.freeze({ x: -0.05, y: 0.103, z: 0.03 });
 const DRILL_HAND_MESH_TOKEN = 'HandMesh_R';
 const BUSTER_CHAMBER_ROLL_SIGN = -1;
 const FREE_TURN_LOCOMOTION_THRESHOLD = 0.35;
@@ -262,6 +286,7 @@ export class SkeletalModelRig {
     this.beamBladeGroup = null;
     this.beamBladeActive = false;
     this.beamBladeColor = new THREE.Color(DEFAULT_BEAM_BLADE_COLOR);
+    this.beamSaberGripQuaternions = new Map();
     this.debugPoseEnabled = false;
     this.debugPoseOverrides = new Map();
     this.modelHeight = 1;
@@ -761,6 +786,7 @@ export class SkeletalModelRig {
     }
 
     this._normalizePassiveIdleShoulderTracks();
+    this._captureBeamSaberGripPose();
     this._captureBusterAirAimPose();
 
     const initialClip = this._firstAvailable('sideIdle', 'breathingIdle', 'idle', 'idle2', 'idle3', 'walking', 'running');
@@ -831,6 +857,7 @@ export class SkeletalModelRig {
       this._updateDrillArmVisual(dt);
       this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress, clipKey);
       this._applyJumpSlashAerialPose(jumpSlashAirbornePose, jumpSlashAirborneRootAnchor);
+      this._applyBeamSaberGripPose();
       return;
     }
 
@@ -884,6 +911,72 @@ export class SkeletalModelRig {
     this._applyGeneratedPowerKnockbackPose(state, actionProgress ?? 0, dt);
     this._applyLedgeRightArmPose(state, useRightArmForLedge);
     this._applyJumpSlashAerialPose(jumpSlashAirbornePose, jumpSlashAirborneRootAnchor);
+    this._applySwordInwardSlashTerminalPose(selectedClip, attackProgress);
+    this._applyBeamSaberGripPose();
+  }
+
+  _applySwordInwardSlashTerminalPose(clipKey, attackProgress) {
+    const active = clipKey === SWORD_INWARD_SLASH_CLIP && Number.isFinite(attackProgress);
+    const weight = active
+      ? THREE.MathUtils.smoothstep(
+        THREE.MathUtils.clamp(attackProgress, 0, 1),
+        SWORD_INWARD_TERMINAL_BLEND_START,
+        SWORD_INWARD_TERMINAL_FULL_PROGRESS,
+      )
+      : 0;
+    this.root.userData.swordInwardTerminalPoseWeight = weight;
+    if (weight <= 0) {
+      return false;
+    }
+
+    this._applyRawLocalPoseDegrees(
+      SWORD_INWARD_TERMINAL_POSE_DEGREES,
+      Object.keys(SWORD_INWARD_TERMINAL_POSE_DEGREES),
+      weight,
+    );
+    return true;
+  }
+
+  _captureBeamSaberGripPose() {
+    this.beamSaberGripQuaternions.clear();
+    const clip = this.animationClips.get('swordForwardSlash')
+      ?? this.animationClips.get('swordInwardSlash')
+      ?? this.animationClips.get('swordJumpSlash');
+    if (!clip?.tracks?.length || !(clip.duration > 0)) {
+      return false;
+    }
+
+    const sampleTime = clip.duration * BEAM_SABER_GRIP_SAMPLE_PROGRESS;
+    for (const track of clip.tracks) {
+      if (!track.name.endsWith('.quaternion')) {
+        continue;
+      }
+      const normalizedTarget = normalizeBoneName(this._getTrackTargetName(track.name));
+      if (!BEAM_SABER_GRIP_BONE_PATTERN.test(normalizedTarget)) {
+        continue;
+      }
+      const bone = this.bonesByName.get(normalizedTarget)?.[0];
+      if (!bone) {
+        continue;
+      }
+      const sampled = track.createInterpolant().evaluate(sampleTime);
+      this.beamSaberGripQuaternions.set(
+        bone,
+        new THREE.Quaternion(sampled[0], sampled[1], sampled[2], sampled[3]).normalize(),
+      );
+    }
+
+    this.root.userData.beamSaberGripBoneCount = this.beamSaberGripQuaternions.size;
+    return this.beamSaberGripQuaternions.size > 0;
+  }
+
+  _applyBeamSaberGripPose() {
+    if (!this.beamBladeActive || this.beamSaberGripQuaternions.size === 0) {
+      return;
+    }
+    for (const [bone, gripQuaternion] of this.beamSaberGripQuaternions) {
+      bone.quaternion.copy(gripQuaternion);
+    }
   }
 
   _buildBoneMap() {
@@ -988,7 +1081,7 @@ export class SkeletalModelRig {
     return true;
   }
 
-  _applyRawLocalPoseDegrees(poseDegrees = {}, jointNames = Object.keys(poseDegrees)) {
+  _applyRawLocalPoseDegrees(poseDegrees = {}, jointNames = Object.keys(poseDegrees), alpha = 1) {
     for (const jointName of jointNames) {
       const pose = poseDegrees[jointName];
       const joint = this.joints.get(jointName);
@@ -1002,7 +1095,7 @@ export class SkeletalModelRig {
         THREE.MathUtils.degToRad(pose.roll),
         joint.rotation.order,
       );
-      this._applyBoneRotation(joint, tempEuler, 1);
+      this._applyBoneRotation(joint, tempEuler, alpha);
     }
   }
 
@@ -2585,28 +2678,24 @@ export class SkeletalModelRig {
   }
 
   _createAndAttachBeamSaber() {
-    const elbow = this.joints.get(RIGHT_BUSTER_ELBOW_JOINT);
     const wrist = this.joints.get(RIGHT_BUSTER_WRIST_JOINT);
-    if (!elbow || !wrist) {
+    if (!wrist) {
       return false;
     }
 
-    elbow.updateMatrixWorld(true);
-    wrist.updateMatrixWorld(true);
-    elbow.getWorldPosition(tempVectorA);
-    wrist.getWorldPosition(tempVectorB);
-    tempVectorB.sub(tempVectorA);
-    if (tempVectorB.lengthSq() <= 0.000001) {
-      tempVectorB.set(0, 0, 1);
-    } else {
-      tempVectorB.normalize();
-    }
-
     const visual = createHeldBeamSaber(this.beamBladeColor);
-    tempQuaternionA.setFromUnitVectors(localForwardZ, tempVectorB);
-    wrist.getWorldQuaternion(tempQuaternionB).invert();
-    visual.weaponGroup.quaternion.copy(tempQuaternionB.multiply(tempQuaternionA)).normalize();
+    // The FBX hand's +X axis runs through the curled fist from pinky to thumb.
+    // Mount the hilt across that axis and center its grip in the palm. Aligning
+    // it to elbow -> wrist instead lays it lengthwise over the open fingers.
+    visual.weaponGroup.position.set(
+      BEAM_SABER_WRIST_LOCAL_POSITION.x,
+      BEAM_SABER_WRIST_LOCAL_POSITION.y,
+      BEAM_SABER_WRIST_LOCAL_POSITION.z,
+    );
+    visual.weaponGroup.quaternion.setFromUnitVectors(localForwardZ, localRightX);
     visual.weaponGroup.userData.heldJoint = RIGHT_BUSTER_WRIST_JOINT;
+    visual.weaponGroup.userData.gripAxis = 'wristLocal+X';
+    visual.weaponGroup.userData.gripPoseSource = 'swordForwardSlash';
     this._applyInverseRootScale(visual.weaponGroup);
     wrist.add(visual.weaponGroup);
 

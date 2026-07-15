@@ -4298,6 +4298,21 @@ export function animateReaverbotVisual(visual, {
   springBounceProgress = 0,
   chargeDirection = null,
 } = {}) {
+  const eyeRefocusActive = state === 'eyeRefocus';
+  const eyeRefocusProgress = eyeRefocusActive
+    ? THREE.MathUtils.clamp(stateProgress, 0, 1)
+    : 0;
+  const refocusShakeEnvelope = eyeRefocusActive
+    ? THREE.MathUtils.smoothstep(eyeRefocusProgress, 0.08, 0.2)
+      * (1 - THREE.MathUtils.smoothstep(eyeRefocusProgress, 0.68, 1))
+    : 0;
+  const refocusShake = eyeRefocusActive
+    ? Math.sin((eyeRefocusProgress - 0.08) * Math.PI * 8) * refocusShakeEnvelope
+    : 0;
+  const refocusImpactDip = eyeRefocusActive
+    ? -Math.sin(Math.min(1, eyeRefocusProgress / 0.32) * Math.PI) * 0.09
+      - Math.abs(refocusShake) * 0.018
+    : 0;
   const comboCycle = Math.min(2, Math.floor(stateProgress * 3));
   const comboLocalProgress = stateProgress >= 1
     ? 1
@@ -4568,6 +4583,7 @@ export function animateReaverbotVisual(visual, {
   }
 
   let jawWarning = 0;
+  let headTilt = refocusShake * 0.28;
   if (visual.weapon.jawUpperPivot && visual.weapon.jawLowerPivot) {
     let openness = 0.46;
     if (state === 'telegraph') {
@@ -4588,19 +4604,18 @@ export function animateReaverbotVisual(visual, {
     const jawAngle = THREE.MathUtils.lerp(0.035, 0.92, openness);
     visual.weapon.jawUpperPivot.rotation.x = -jawAngle;
     visual.weapon.jawLowerPivot.rotation.x = jawAngle;
-    const headTilt = state === 'commit'
-      ? (comboCycle % 2 === 0 ? -1 : 1) * Math.sin(comboLocalProgress * Math.PI) * 0.24
-      : 0;
-    const jawHeadAssembly = visual.frame.headAssembly ?? visual.frame.head;
-    jawHeadAssembly.rotation.z = THREE.MathUtils.lerp(
-      jawHeadAssembly.rotation.z,
-      headTilt,
-      Math.min(1, dt * 15),
-    );
-  } else {
-    const headAssembly = visual.frame.headAssembly ?? visual.frame.head;
-    headAssembly.rotation.z = THREE.MathUtils.lerp(headAssembly.rotation.z, 0, Math.min(1, dt * 10));
+    if (state === 'commit') {
+      headTilt += (comboCycle % 2 === 0 ? -1 : 1)
+        * Math.sin(comboLocalProgress * Math.PI)
+        * 0.24;
+    }
   }
+  const headAssembly = visual.frame.headAssembly ?? visual.frame.head;
+  headAssembly.rotation.z = THREE.MathUtils.lerp(
+    headAssembly.rotation.z,
+    headTilt,
+    Math.min(1, dt * (eyeRefocusActive ? 26 : visual.weapon.jawUpperPivot ? 15 : 10)),
+  );
 
   if (visual.weapon.tractorBeam) {
     const intensity = tractorBeamActive ? THREE.MathUtils.clamp(tractorBeamIntensity, 0.08, 1) : 0;
@@ -4645,7 +4660,23 @@ export function animateReaverbotVisual(visual, {
   const canineBob = state === 'commit' && (attackKind === 'jawCombo' || attackKind === 'pounce')
     ? 0
     : canineGait?.bob ?? 0;
-  visual.root.position.y = hoverHeight + hover + attackLift + recoveryReveal * 0.28 + canineBob;
+  const refocusOffsetResponse = Math.min(1, dt * (eyeRefocusActive ? 30 : 18));
+  visual.root.userData.eyeRefocusVisualYOffset = THREE.MathUtils.lerp(
+    visual.root.userData.eyeRefocusVisualYOffset ?? 0,
+    refocusImpactDip,
+    refocusOffsetResponse,
+  );
+  visual.root.position.x = THREE.MathUtils.lerp(
+    visual.root.position.x,
+    refocusShake * 0.08,
+    refocusOffsetResponse,
+  );
+  visual.root.position.y = hoverHeight
+    + hover
+    + attackLift
+    + recoveryReveal * 0.28
+    + canineBob
+    + visual.root.userData.eyeRefocusVisualYOffset;
   if (visual.weapon.clawSwingPivot) {
     // Palm counters knock the visible chassis off its feet while the enemy's
     // collision/navigation root remains fixed. The sine curve completes the
@@ -4673,7 +4704,24 @@ export function animateReaverbotVisual(visual, {
   visual.root.scale.y = genomeSafeScale(visual.root.scale.x * squashY);
 
   const eyePulse = 1.55 + Math.sin(time * (state === 'telegraph' ? 18 : 4.5)) * (state === 'telegraph' ? 0.7 : 0.22);
-  visual.eye.lens.material.emissiveIntensity = weakPointExposed ? Math.max(eyePulse, 2) : eyePulse;
+  const baseEyeIntensity = weakPointExposed ? Math.max(eyePulse, 2) : eyePulse;
+  let eyeIntensity = baseEyeIntensity;
+  if (eyeRefocusActive) {
+    const reacquired = THREE.MathUtils.smoothstep(eyeRefocusProgress, 0.38, 0.94);
+    const flickerEnvelope = THREE.MathUtils.smoothstep(eyeRefocusProgress, 0.14, 0.28)
+      * (1 - THREE.MathUtils.smoothstep(eyeRefocusProgress, 0.72, 0.9));
+    const flicker = THREE.MathUtils.smoothstep(
+      Math.sin(eyeRefocusProgress * Math.PI * 14) * 0.5 + 0.5,
+      0.3,
+      0.72,
+    );
+    const lockOnProgress = THREE.MathUtils.smoothstep(eyeRefocusProgress, 0.7, 0.94);
+    const lockOnFlash = Math.sin(lockOnProgress * Math.PI) * 0.72;
+    eyeIntensity = THREE.MathUtils.lerp(0.12, baseEyeIntensity, reacquired)
+      * (1 - flickerEnvelope * (1 - flicker) * 0.76)
+      + lockOnFlash;
+  }
+  visual.eye.lens.material.emissiveIntensity = Math.max(0.08, eyeIntensity);
   visual.weapon.group.scale.setScalar(
     visual.weapon.launchLegAssembly
       ? 1

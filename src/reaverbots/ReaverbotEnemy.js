@@ -27,9 +27,12 @@ const RUSH_WARNING_COLOR_HEX = 0xff2020;
 const RUSH_WARNING_COLOR = new THREE.Color(RUSH_WARNING_COLOR_HEX);
 const CHARGE_INITIATION_RANGE = 10.5;
 const CHARGE_TRAVEL_DISTANCE = 12.5;
-const CHARGE_TRAVEL_SPEED = CHARGE_TRAVEL_DISTANCE / 0.9;
+const CHARGE_TRAVEL_DURATION = 0.9;
+const CHARGE_TRAVEL_SPEED = CHARGE_TRAVEL_DISTANCE / CHARGE_TRAVEL_DURATION;
 const CHARGE_TRACK_LOCK_PROGRESS = 0.7;
 const CHARGE_MIN_RECOVERY_DURATION = 1.25;
+const RED_EYE_HIT_RADIUS = 0.18;
+const RED_EYE_REFOCUS_DURATION = 0.9;
 const RUSH_WARNING_MIN_RATE = 2.2;
 const RUSH_WARNING_MAX_RATE = 10.5;
 const TRACTOR_BEAM_COLOR = 0x68fff2;
@@ -218,6 +221,7 @@ export class ReaverbotEnemy extends Enemy {
       defenseActive: true,
       weakPointExposed: genome.modules.weakPoint.exposure === 'always'
         && genome.modules.defense?.id !== 'rotatingPlates',
+      eyeFlinchConsumed: false,
       attackFired: false,
       attackHit: false,
       effectTimer: 0,
@@ -437,6 +441,7 @@ export class ReaverbotEnemy extends Enemy {
 
   _getStateDuration(state = this.brain.state) {
     const weapon = this.genome.modules.weapon;
+    if (state === 'eyeRefocus') return RED_EYE_REFOCUS_DURATION;
     if (this._isClawCarrier()) {
       if (state === 'telegraph') return weapon.telegraphDuration ?? CLAW_TELEGRAPH_DURATION;
       if (state === 'guard') return brainSafeNumber(this.brain.clawGuardDuration, CLAW_GUARD_DURATION);
@@ -450,7 +455,7 @@ export class ReaverbotEnemy extends Enemy {
     if (state === 'telegraph') return this.genome.behavior.telegraphDuration;
     if (state === 'commit') {
       return this._getEffectiveAttackKind() === 'charge'
-        ? CHARGE_TRAVEL_DISTANCE / CHARGE_TRAVEL_SPEED
+        ? CHARGE_TRAVEL_DURATION
         : this.genome.behavior.commitDuration;
     }
     if (state === 'recovery') {
@@ -462,29 +467,86 @@ export class ReaverbotEnemy extends Enemy {
   }
 
   resolveProjectileHit(position, projectileRadius = 0.1) {
-    if (!this.brain.weakPointExposed || this.dead) {
-      return null;
+    if (this.dead) return null;
+
+    const weakPoint = this.genome.modules.weakPoint;
+    const eyeIsWeakPoint = weakPoint.id === 'eyeLens';
+    const normalEyeTargetable = !this.isBoss
+      && (!eyeIsWeakPoint || this.brain.weakPointExposed);
+    if (normalEyeTargetable) {
+      this.visual.eye.lens.getWorldPosition(tempA);
+      const eyeRadius = projectileRadius + (eyeIsWeakPoint
+        ? (weakPoint.radius ?? RED_EYE_HIT_RADIUS)
+        : RED_EYE_HIT_RADIUS);
+      if (position.distanceToSquared(tempA) <= eyeRadius * eyeRadius) {
+        return {
+          hitPartId: 'eyeLens',
+          weakPointHit: eyeIsWeakPoint,
+          redEyeHit: true,
+          hitPosition: tempA.clone(),
+        };
+      }
     }
 
+    if (!this.brain.weakPointExposed) return null;
     this.visual.weakPoint.core.getWorldPosition(tempA);
-    const hitRadius = projectileRadius + (this.genome.modules.weakPoint.radius ?? 0.2);
-    if (position.distanceToSquared(tempA) > hitRadius * hitRadius) {
-      return null;
-    }
+    const hitRadius = projectileRadius + (weakPoint.radius ?? 0.2);
+    if (position.distanceToSquared(tempA) > hitRadius * hitRadius) return null;
 
     return {
-      hitPartId: this.genome.modules.weakPoint.id,
+      hitPartId: weakPoint.id,
       weakPointHit: true,
+      redEyeHit: !this.isBoss && eyeIsWeakPoint,
       hitPosition: tempA.clone(),
     };
   }
 
   resolveLineHit(start, direction, range, width = 0.1, options = {}) {
-    if (!this.brain.weakPointExposed || this.dead) return null;
+    if (this.dead) return null;
+    const weakPoint = this.genome.modules.weakPoint;
+    const eyeIsWeakPoint = weakPoint.id === 'eyeLens';
+    const exposedPalmCounter = weakPoint.id === 'clawPalm'
+      && this.brain.state === 'telegraph';
+    let closestHit = null;
+
+    const considerLineSphere = (worldPosition, radius, hitData, bypassBodyOcclusion = false) => {
+      tempD.copy(worldPosition).sub(start);
+      const along = tempD.dot(direction);
+      if (along < 0 || along > range) return;
+      const perpendicularDistanceSq = Math.max(0, tempD.lengthSq() - along * along);
+      const hitRadius = width + radius;
+      if (perpendicularDistanceSq > hitRadius * hitRadius) return;
+
+      tempC.copy(this.root.position);
+      tempC.y += this.collisionHeight * 0.5;
+      const bodyCenterAlong = tempC.sub(start).dot(direction);
+      if (!bypassBodyOcclusion && along > bodyCenterAlong + hitRadius * 0.35) return;
+
+      if (!closestHit || along < closestHit.along) {
+        closestHit = {
+          along,
+          ...hitData,
+          hitPosition: worldPosition.clone(),
+        };
+      }
+    };
+
+    if (!this.isBoss && (!eyeIsWeakPoint || this.brain.weakPointExposed)) {
+      this.visual.eye.lens.getWorldPosition(tempA);
+      considerLineSphere(
+        tempA,
+        eyeIsWeakPoint ? (weakPoint.radius ?? RED_EYE_HIT_RADIUS) : RED_EYE_HIT_RADIUS,
+        {
+          hitPartId: 'eyeLens',
+          weakPointHit: eyeIsWeakPoint,
+          redEyeHit: true,
+        },
+      );
+    }
+
+    if (!this.brain.weakPointExposed) return closestHit;
     this.visual.weakPoint.core.getWorldPosition(tempA);
     tempB.copy(tempA).sub(start);
-    const exposedPalmCounter = this.genome.modules.weakPoint.id === 'clawPalm'
-      && this.brain.state === 'telegraph';
     if (options.projectExposedPalm && exposedPalmCounter) {
       tempC.copy(tempB).setY(0);
       const projectedAlong = tempC.dot(direction);
@@ -496,31 +558,28 @@ export class ReaverbotEnemy extends Enemy {
       if (projectedAlong >= 0
         && projectedAlong <= range + projectedHitRadius
         && projectedPerpendicularSq <= projectedHitRadius * projectedHitRadius) {
-        return {
+        const projectedHit = {
           along: projectedAlong,
-          hitPartId: this.genome.modules.weakPoint.id,
+          hitPartId: weakPoint.id,
           weakPointHit: true,
           hitPosition: tempA.clone(),
         };
+        return !closestHit || projectedHit.along < closestHit.along
+          ? projectedHit
+          : closestHit;
       }
     }
-    const along = tempB.dot(direction);
-    if (along < 0 || along > range) return null;
-    const perpendicularDistanceSq = Math.max(0, tempB.lengthSq() - along * along);
-    const hitRadius = width + (this.genome.modules.weakPoint.radius ?? 0.2);
-    if (perpendicularDistanceSq > hitRadius * hitRadius) return null;
-
-    tempC.copy(this.root.position);
-    tempC.y += this.collisionHeight * 0.5;
-    const bodyCenterAlong = tempC.sub(start).dot(direction);
-    if (!exposedPalmCounter && along > bodyCenterAlong + hitRadius * 0.35) return null;
-
-    return {
-      along,
-      hitPartId: this.genome.modules.weakPoint.id,
-      weakPointHit: true,
-      hitPosition: tempA.clone(),
-    };
+    considerLineSphere(
+      tempA,
+      weakPoint.radius ?? 0.2,
+      {
+        hitPartId: weakPoint.id,
+        weakPointHit: true,
+        redEyeHit: !this.isBoss && eyeIsWeakPoint,
+      },
+      exposedPalmCounter,
+    );
+    return closestHit;
   }
 
   resolveArcHit(origin, direction, range, halfAngle, options = {}) {
@@ -563,10 +622,21 @@ export class ReaverbotEnemy extends Enemy {
       ? Math.min(amount, Math.max(0, this.health - weaponizationHealthFloor))
       : amount;
     const dealt = super.takeDamage(resolvedAmount, meta);
+    const triggersEyeRefocus = dealt > 0
+      && !this.dead
+      && !this.isBoss
+      && !this.brain.eyeFlinchConsumed
+      && meta.redEyeHit === true
+      && !meta.statusTick
+      && this._isPlayerOwnedHit(meta)
+      && Boolean(
+        meta.projectileHit
+        || (meta.directHit && (meta.attackKind === 'beam' || meta.attackKind === 'rail')),
+      );
 
     if (dealt > 0) {
       this.brain.alerted = true;
-      this._handleControllerTagged(meta);
+      if (!triggersEyeRefocus) this._handleControllerTagged(meta);
     }
 
     const clawPalmCounter = this._isClawCarrier()
@@ -587,8 +657,13 @@ export class ReaverbotEnemy extends Enemy {
       }
     }
 
+    if (triggersEyeRefocus) {
+      this._beginRedEyeRefocus(meta, this._runtimeGame);
+    }
+
     if (dealt > 0
       && !this.dead
+      && !triggersEyeRefocus
       && this._isClawCarrier()
       && !this.brain.clawDestroyed
       && (stateWhenHit === 'position' || stateWhenHit === 'recovery')
@@ -596,11 +671,73 @@ export class ReaverbotEnemy extends Enemy {
       this._beginClawGuard(stateWhenHit);
     }
 
-    if (redirectsDetonator && !this.dead) {
+    if (redirectsDetonator && !this.dead && !triggersEyeRefocus) {
       this._beginWeaponizedDetonatorKnockback(meta, this._runtimeGame);
     }
 
     return dealt;
+  }
+
+  _beginRedEyeRefocus(meta = {}, game = this._runtimeGame) {
+    if (this.isBoss || this.dead || this.brain.eyeFlinchConsumed) return false;
+    const brain = this.brain;
+    brain.eyeFlinchConsumed = true;
+
+    if (brain.detonatorKnockback) {
+      this._restoreWeaponizedDetonatorVisual(brain.detonatorKnockback);
+      brain.detonatorKnockback = null;
+    }
+    this._removeTelegraphMarker();
+    this._releaseTractorTarget('red-eye-refocus', game);
+    this._resetSpringMovementState({ cancelPounce: false });
+    game?.cancelEnemyAttackRequest?.(this);
+    game?.completeEnemyAttack?.(this);
+    game?.endFlamethrowerEffect?.(this);
+    this.clearNavigationRecoveryTarget?.();
+    this.contactRetreatMotion = null;
+    this.knockback.set(0, 0, 0);
+
+    brain.state = 'eyeRefocus';
+    brain.stateTime = 0;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    brain.attackFired = true;
+    brain.attackHit = false;
+    brain.clawGuardTimeRemaining = 0;
+    brain.clawSpinProgress = 0;
+    brain.tractorBeamActive = false;
+    brain.tractorBeamIntensity = 0;
+    brain.cooldown = Math.max(brain.cooldown, RED_EYE_REFOCUS_DURATION);
+    brain.contactCooldown = Math.max(
+      brain.contactCooldown,
+      RED_EYE_REFOCUS_DURATION + this._getStateDuration('recovery'),
+    );
+
+    const impactPosition = new THREE.Vector3();
+    if (meta.hitPosition) impactPosition.copy(meta.hitPosition);
+    else this.visual.eye.lens.getWorldPosition(impactPosition);
+    game?.addParticleBurst?.(impactPosition, RUSH_WARNING_COLOR_HEX, 18, 0.12);
+    game?.addHitEffect?.(impactPosition, 0xffffff, 0.85, { absolute: true });
+    return true;
+  }
+
+  _updateEyeRefocusState(dt) {
+    const brain = this.brain;
+    brain.stateTime += dt;
+    brain.moving = false;
+    brain.speedRatio = 0;
+    this.knockback.set(0, 0, 0);
+    if (brain.stateTime < RED_EYE_REFOCUS_DURATION) return;
+
+    brain.state = 'recovery';
+    brain.stateTime = 0;
+    brain.attackFired = true;
+    brain.attackHit = false;
+    brain.cooldown = Math.max(brain.cooldown, this.stats.attackCooldown * 0.55);
+    brain.contactCooldown = Math.max(
+      brain.contactCooldown,
+      this._getStateDuration('recovery'),
+    );
   }
 
   _isWeaponizableSelfDetonator() {
@@ -1592,6 +1729,13 @@ export class ReaverbotEnemy extends Enemy {
       brain.packAttackIdleTime += dt;
     }
 
+    if (brain.state === 'eyeRefocus') {
+      this._updateEyeRefocusState(dt);
+      this._updateExposureAndDefense();
+      this._animateVisual(dt);
+      return { handled: true, moving: false, moveAmount: 0 };
+    }
+
     this._updatePersistentWeaponContact(dt, game);
     if (this.contactRetreatMotion) {
       this._updateExposureAndDefense();
@@ -1879,6 +2023,7 @@ export class ReaverbotEnemy extends Enemy {
   _updateCommitState(dt, game) {
     const brain = this.brain;
     const kind = this._getEffectiveAttackKind();
+    const stateTimeBeforeUpdate = brain.stateTime;
     brain.stateTime += dt;
     const duration = Math.max(0.08, this._getStateDuration('commit'));
     const progress = clamp01(brain.stateTime / duration);
@@ -1896,17 +2041,39 @@ export class ReaverbotEnemy extends Enemy {
     };
 
     if (kind === 'charge') {
+      // The dungeon's footprint constraint can roll a center-valid step back
+      // after this update. Measure retained displacement and keep time as an
+      // independent hard stop so a pinned charger cannot hold the attack lease.
+      const actualTravelDistance = this.navigationMode === 'air'
+        ? brain.commitStart.distanceTo(this.root.position)
+        : flatDistance(brain.commitStart, this.root.position);
+      brain.chargeDistanceTravelled = Math.max(
+        brain.chargeDistanceTravelled,
+        actualTravelDistance,
+      );
+
       tempA.copy(brain.targetPosition).sub(this.root.position);
       if (this.navigationMode !== 'air') tempA.setY(0);
       const remainingDistance = tempA.length();
-      if (remainingDistance <= 0.0001) {
+      const remainingChargeDistance = Math.max(
+        0,
+        CHARGE_TRAVEL_DISTANCE - brain.chargeDistanceTravelled,
+      );
+      const chargeTimeThisFrame = Math.min(
+        Math.max(0, dt),
+        Math.max(0, duration - stateTimeBeforeUpdate),
+      );
+      if (remainingDistance <= 0.0001
+        || remainingChargeDistance <= 0.0001
+        || chargeTimeThisFrame <= 0) {
         finishMovingCommit();
         return;
       }
 
       const stepDistance = Math.min(
         remainingDistance,
-        CHARGE_TRAVEL_SPEED * Math.max(0, dt),
+        remainingChargeDistance,
+        CHARGE_TRAVEL_SPEED * chargeTimeThisFrame,
       );
       if (stepDistance > 0) {
         tempA.divideScalar(remainingDistance);
@@ -1917,7 +2084,13 @@ export class ReaverbotEnemy extends Enemy {
           finishMovingCommit();
           return;
         }
-        brain.chargeDistanceTravelled += stepDistance;
+        const travelledAfterMove = this.navigationMode === 'air'
+          ? brain.commitStart.distanceTo(this.root.position)
+          : flatDistance(brain.commitStart, this.root.position);
+        brain.chargeDistanceTravelled = Math.max(
+          brain.chargeDistanceTravelled,
+          travelledAfterMove,
+        );
       }
 
       if (!this.genome.modules.weapon.continuousContactDamage) {
@@ -1925,7 +2098,9 @@ export class ReaverbotEnemy extends Enemy {
         if (this.contactRetreatMotion) return;
       }
       this._emitChargeJetTrail(dt, game);
-      if (stepDistance >= remainingDistance - 0.0001) {
+      if (stepDistance >= remainingDistance - 0.0001
+        || brain.chargeDistanceTravelled >= CHARGE_TRAVEL_DISTANCE - 0.0001
+        || brain.stateTime >= duration) {
         finishMovingCommit();
       }
       return;
@@ -2650,7 +2825,7 @@ export class ReaverbotEnemy extends Enemy {
 
   _updatePersistentWeaponContact(dt, game) {
     const weapon = this.genome.modules.weapon;
-    if (this.brain.state === 'recovery') return;
+    if (this.brain.state === 'recovery' || this.brain.state === 'eyeRefocus') return;
     const continuousWeaponContact = Boolean(weapon.continuousContactDamage);
     // Authored commit attacks own their strike frames. Body contact remains
     // live while positioning or telegraphing, but recovery always provides

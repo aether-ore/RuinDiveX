@@ -19,8 +19,24 @@ function createFloor(width = 9, tileSize = 2) {
   return { tiles, floorTiles, tileSize };
 }
 
-function createController({ solidZones = [] } = {}) {
-  const floor = createFloor();
+function createFloorFromTiles(floorTiles, tileSize = 2) {
+  const tiles = new Map();
+  for (const tile of floorTiles) {
+    const key = `${tile.x},${tile.z}`;
+    const current = tiles.get(key);
+    if (!current || (tile.elevation ?? 0) < (current.elevation ?? 0)) {
+      tiles.set(key, tile);
+    }
+  }
+  return { tiles, floorTiles, tileSize };
+}
+
+function createController({
+  solidZones = [],
+  doors = [],
+  aerialBoundaryZones = [],
+  floor = createFloor(),
+} = {}) {
   const game = {
     enemies: [],
     player: { radius: 0.42, root: { position: new THREE.Vector3() } },
@@ -30,7 +46,8 @@ function createController({ solidZones = [] } = {}) {
   const dungeon = {
     ...floor,
     solidZones,
-    doors: [],
+    doors,
+    aerialBoundaryZones,
     encounters: [],
     playerStart: new THREE.Vector3(),
   };
@@ -44,7 +61,9 @@ function createEnemy(position = new THREE.Vector3()) {
     id: 'arena-test-enemy',
     dead: false,
     radius: 0.58,
+    collisionHeight: 1.4,
     navigationMode: 'ground',
+    stats: { moveSpeed: 3.2 },
     root: { position: position.clone() },
     encounterArena: null,
     navigationRecoveryTarget: null,
@@ -56,6 +75,42 @@ function createEnemy(position = new THREE.Vector3()) {
   enemy.setNavigationRecoveryTarget = Enemy.prototype.setNavigationRecoveryTarget.bind(enemy);
   enemy.clearNavigationRecoveryTarget = Enemy.prototype.clearNavigationRecoveryTarget.bind(enemy);
   return enemy;
+}
+
+function createRailingTraversalFixture({
+  doors = [],
+  aerialBoundaryZones = [],
+} = {}) {
+  const floorTiles = [];
+  for (let x = -1; x <= 3; x += 1) {
+    for (let z = -1; z <= 1; z += 1) {
+      floorTiles.push({
+        x,
+        z,
+        elevation: x <= 0 ? 2 : 0,
+        level: x <= 0 ? 1 : 0,
+        surface: x <= 0 ? 'secondFloor' : 'floor',
+        roomId: 'railing-traversal-room',
+      });
+    }
+  }
+  const { controller } = createController({
+    floor: createFloorFromTiles(floorTiles),
+    doors,
+    aerialBoundaryZones,
+  });
+  controller.playerRailTopSurfaces = [{
+    id: 'enemy-railing-traversal-rail',
+    center: new THREE.Vector3(1, 2.68, 0),
+    halfWidth: 0.04,
+    halfDepth: 3,
+    topY: 2.715,
+    horizontal: false,
+  }];
+  const enemy = createEnemy(new THREE.Vector3(0.5, 2, 0));
+  const blockedPosition = new THREE.Vector3(0.9, 2, 0);
+  const desiredTarget = new THREE.Vector3(4, 0, 0);
+  return { controller, enemy, blockedPosition, desiredTarget };
 }
 
 test('legacy enemies receive the faster shared movement baseline', () => {
@@ -151,6 +206,114 @@ test('ground navigation side-steps partial-tile obstacles before contact', () =>
   assert.ok(Math.abs(direction.z) > 0.3);
   assert.ok(enemy.navigationRecoveryTarget);
   assert.equal(controller.isEnemyPositionClear(enemy, enemy.navigationRecoveryTarget), true);
+});
+
+test('ground traversal hops a catwalk railing to a clear lower floor', () => {
+  const { controller, enemy, blockedPosition, desiredTarget } = createRailingTraversalFixture();
+
+  assert.equal(controller.isEnemyPositionClear(enemy, blockedPosition), false);
+  const traversal = controller.resolveEnemyGroundTraversal(
+    enemy,
+    blockedPosition,
+    desiredTarget,
+  );
+
+  assert.ok(traversal);
+  assert.equal(traversal.kind, 'railing');
+  assert.equal(controller.isEnemyPositionClear(enemy, traversal.targetPosition), true);
+  assert.ok(traversal.targetPosition.x > 1.4, 'landing must clear the far side of the rail');
+  assert.ok(Math.abs(traversal.targetPosition.y) < 0.001);
+  assert.ok(traversal.arcHeight > 0.68, 'the hop arc must visibly clear the rail');
+  assert.ok(Number.isFinite(traversal.duration) && traversal.duration > 0);
+});
+
+test('ground traversal drops laterally from an industrial ramp', () => {
+  const floorTiles = [{
+    x: 0,
+    z: 0,
+    elevation: 1,
+    level: 0.5,
+    surface: 'industrialRamp',
+    rampStartElevation: 0,
+    rampEndElevation: 2,
+    rampDirectionX: 1,
+    rampDirectionZ: 0,
+    roomId: 'ramp-side-traversal-room',
+  }];
+  for (let x = -1; x <= 1; x += 1) {
+    for (let z = 1; z <= 3; z += 1) {
+      floorTiles.push({
+        x,
+        z,
+        elevation: 0,
+        level: 0,
+        surface: 'floor',
+        roomId: 'ramp-side-traversal-room',
+      });
+    }
+  }
+  const { controller } = createController({
+    floor: createFloorFromTiles(floorTiles),
+  });
+  const enemy = createEnemy(new THREE.Vector3(0.4, 1.4, 0.5));
+  const blockedPosition = new THREE.Vector3(0.4, 1.4, 0.9);
+  const desiredTarget = new THREE.Vector3(0.4, 0, 4);
+
+  assert.equal(controller.isEnemyPositionClear(enemy, blockedPosition), false);
+  const traversal = controller.resolveEnemyGroundTraversal(
+    enemy,
+    blockedPosition,
+    desiredTarget,
+  );
+
+  assert.ok(traversal);
+  assert.equal(traversal.kind, 'rampSide');
+  assert.equal(controller.isEnemyPositionClear(enemy, traversal.targetPosition), true);
+  assert.ok(traversal.targetPosition.z > 1.4, 'landing must clear the side edge of the ramp');
+  assert.ok(Math.abs(traversal.targetPosition.y) < 0.001);
+  assert.ok(traversal.arcHeight > 0);
+  assert.ok(Number.isFinite(traversal.duration) && traversal.duration > 0);
+});
+
+test('ground traversal cannot hop a railing through a boundary wall', () => {
+  const boundaryWall = {
+    id: 'enemy-railing-boundary-wall',
+    label: 'Dungeon boundary wall',
+    obstacleKind: 'boundaryWall',
+    position: new THREE.Vector3(1, 2, 0),
+    halfWidth: 0.08,
+    halfDepth: 3.5,
+    verticalHalfHeight: 2.5,
+    allowFlyOver: false,
+  };
+  const { controller, enemy, blockedPosition, desiredTarget } = createRailingTraversalFixture({
+    aerialBoundaryZones: [boundaryWall],
+  });
+
+  assert.equal(
+    controller.resolveEnemyGroundTraversal(enemy, blockedPosition, desiredTarget),
+    null,
+  );
+});
+
+test('ground traversal cannot hop a railing through a closed door', () => {
+  const closedDoor = {
+    id: 'enemy-railing-closed-door',
+    position: new THREE.Vector3(1, 0, 0),
+    alongX: true,
+    collisionHalfWidth: 0.08,
+    collisionHalfDepth: 3.5,
+    collisionHeight: 4.8,
+    closed: true,
+  };
+  const { controller, enemy, blockedPosition, desiredTarget } = createRailingTraversalFixture({
+    doors: [closedDoor],
+  });
+
+  assert.equal(
+    controller.resolveEnemyGroundTraversal(enemy, blockedPosition, desiredTarget),
+    null,
+  );
 });
 
 test('encounter spawning gives every generated enemy the same resolved arena envelope', () => {

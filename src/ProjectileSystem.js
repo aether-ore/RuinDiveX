@@ -1005,6 +1005,7 @@ export class ProjectileSystem {
     if (!controllerResult?.suppressDefaultDamage) {
       this.game.damageEnemy(enemy, projectile.damage, {
         projectileHit: true,
+        playerOwnedAttack: projectile.owner === 'player',
         enemyHitStopDuration: projectile.visualType === 'drillHead'
           ? DRILL_PROJECTILE_ENEMY_HIT_STOP_DURATION
           : PROJECTILE_ENEMY_HIT_STOP_DURATION,
@@ -1021,6 +1022,7 @@ export class ProjectileSystem {
         knockback: 2.1,
         hitPartId: resolvedPart?.hitPartId ?? null,
         weakPointHit: Boolean(resolvedPart?.weakPointHit),
+        redEyeHit: Boolean(resolvedPart?.redEyeHit),
         signaturePartHit: Boolean(resolvedPart?.signaturePartHit),
         bossArenaNodeHit: Boolean(resolvedPart?.bossArenaNodeHit),
         hitPosition: resolvedPart?.hitPosition ?? position.clone(),
@@ -1122,6 +1124,7 @@ export class ProjectileSystem {
         if (!controllerResult?.suppressDefaultDamage) {
           this.game.damageEnemy(enemy, projectile.damage, {
           projectileHit: true,
+          playerOwnedAttack: projectile.owner === 'player',
           enemyHitStopDuration: projectile.visualType === 'drillHead'
             ? DRILL_PROJECTILE_ENEMY_HIT_STOP_DURATION
             : PROJECTILE_ENEMY_HIT_STOP_DURATION,
@@ -1138,6 +1141,7 @@ export class ProjectileSystem {
           knockback: 2.1,
           hitPartId: resolvedPart?.hitPartId ?? null,
           weakPointHit: Boolean(resolvedPart?.weakPointHit),
+          redEyeHit: Boolean(resolvedPart?.redEyeHit),
           signaturePartHit: Boolean(resolvedPart?.signaturePartHit),
           bossArenaNodeHit: Boolean(resolvedPart?.bossArenaNodeHit),
           hitPosition: resolvedPart?.hitPosition ?? position.clone(),

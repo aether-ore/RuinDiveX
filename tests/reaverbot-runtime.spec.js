@@ -1159,6 +1159,204 @@ test('near and far charge attacks travel the same distance at one constant speed
   expect(result.near.elapsed).toBeCloseTo(result.far.elapsed, 6);
 });
 
+test('charge leases release by duration when pinned and by distance when unobstructed', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=charge-lease-termination-regression');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const Vector3 = game.player.root.position.constructor;
+    game.stop();
+    for (const enemy of [...game.enemies]) {
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    }
+    game.enemies.length = 0;
+
+    const resetDirector = () => {
+      game.enemyAttackDirector.owner = null;
+      game.enemyAttackDirector.queue.length = 0;
+      game.enemyAttackDirector.requestTimes.clear();
+      game.enemyAttackDirector.handoffTimer = 0;
+      game.enemyAttackDirector.time = 0;
+    };
+    const spawnCharger = (label, position) => {
+      for (let variant = 0; variant < 180; variant += 1) {
+        const candidate = window.spawnReaverbot({
+          archetypeId: 'pursuer',
+          seed: `${label}:${variant}`,
+          position,
+        });
+        if (candidate.genome.modules.weapon.attackKind === 'charge') return candidate;
+        const index = game.enemies.indexOf(candidate);
+        if (index >= 0) game.enemies.splice(index, 1);
+        candidate.dispose?.();
+        candidate.root.removeFromParent();
+      }
+      throw new Error(`Unable to generate charger for ${label}`);
+    };
+    const primeCharge = (charger, start, direction) => {
+      charger.root.position.copy(start);
+      charger.brain.state = 'position';
+      charger.brain.stateTime = 0;
+      charger.brain.attackHit = true;
+      charger.brain.contactCooldown = 0;
+      charger._beginTelegraph(game, direction);
+      const target = charger.brain.targetPosition.clone();
+      const plannedDistance = charger.root.position.distanceTo(target);
+      charger.brain.state = 'commit';
+      charger.brain.stateTime = 0;
+      charger.brain.commitStart.copy(charger.root.position);
+      charger.brain.commitDistance = plannedDistance;
+      charger.brain.chargeDistanceTravelled = 0;
+      charger.brain.attackHit = true;
+      return { target, plannedDistance };
+    };
+
+    resetDirector();
+    const controller = game.dungeonController;
+    const originalWalkable = controller.isPositionWalkable;
+    const originalElevation = controller.getSurfaceElevationAt;
+    controller.isPositionWalkable = () => true;
+    controller.getSurfaceElevationAt = () => 0;
+    game.player.root.position.set(0, 0, -20);
+
+    const pinned = spawnCharger('pinned-charge-lease', new Vector3(0, 0, 0));
+    const follower = spawnCharger('queued-charge-follower', new Vector3(3, 0, 0));
+    const chargeDirection = new Vector3(0, 0, 1);
+    const pinnedStart = new Vector3(0, 0, 0);
+    const pinnedPlan = primeCharge(pinned, pinnedStart, chargeDirection);
+    const pinnedDuration = pinned._getStateDuration('commit');
+    const dt = 1 / 120;
+    const originalPinnedMove = pinned._moveCommitAlongWalkablePath;
+    // Model a solid obstacle resolving the attempted charge back to its start:
+    // movement reports success, but the root never advances toward the target.
+    pinned._moveCommitAlongWalkablePath = () => true;
+
+    const pinnedLeaseClaimed = game.requestEnemyAttack(pinned);
+    const followerInitiallyQueued = !game.requestEnemyAttack(follower)
+      && game.enemyAttackDirector.queue.includes(follower);
+    let pinnedElapsed = 0;
+    let midCommitState = null;
+    let midCommitOwned = false;
+    let midCommitTravel = null;
+    while (pinned.brain.state === 'commit' && pinnedElapsed < pinnedDuration + 0.25) {
+      game._updateEnemyAttackDirector(dt);
+      game.requestEnemyAttack(follower);
+      pinned._updateCommitState(dt, game);
+      pinnedElapsed += dt;
+      if (midCommitState === null && pinnedElapsed >= pinnedDuration * 0.5) {
+        midCommitState = pinned.brain.state;
+        midCommitOwned = game.enemyAttackDirector.owner === pinned;
+        midCommitTravel = pinned.root.position.distanceTo(pinnedStart);
+      }
+    }
+    pinned._moveCommitAlongWalkablePath = originalPinnedMove;
+    const pinnedSummary = {
+      plannedDistance: pinnedPlan.plannedDistance,
+      duration: pinnedDuration,
+      elapsed: pinnedElapsed,
+      midCommitState,
+      midCommitOwned,
+      midCommitTravel,
+      actualTravel: pinned.root.position.distanceTo(pinnedStart),
+      state: pinned.brain.state,
+      leaseClaimed: pinnedLeaseClaimed,
+      leaseReleased: game.enemyAttackDirector.owner !== pinned,
+      requestCleared: !game.enemyAttackDirector.requestTimes.has(pinned)
+        && !game.enemyAttackDirector.queue.includes(pinned),
+    };
+
+    let followerHandoffElapsed = 0;
+    let followerClaimed = game.enemyAttackDirector.owner === follower;
+    while (!followerClaimed && followerHandoffElapsed < 1) {
+      game._updateEnemyAttackDirector(dt);
+      game.requestEnemyAttack(follower);
+      followerHandoffElapsed += dt;
+      followerClaimed = game.enemyAttackDirector.owner === follower;
+    }
+    const followerSummary = {
+      initiallyQueued: followerInitiallyQueued,
+      claimed: followerClaimed,
+      handoffElapsed: followerHandoffElapsed,
+      ownerIsFollower: game.enemyAttackDirector.owner === follower,
+    };
+
+    game.completeEnemyAttack(follower, 0);
+    resetDirector();
+    const clearStart = new Vector3(0, 0, 0);
+    const clearPlan = primeCharge(follower, clearStart, chargeDirection);
+    const normalClearDuration = follower._getStateDuration('commit');
+    const stretchedClearDuration = normalClearDuration * 2;
+    const originalGetStateDuration = follower._getStateDuration;
+    follower._getStateDuration = function getStretchedChargeDuration(state = this.brain.state) {
+      return state === 'commit'
+        ? stretchedClearDuration
+        : originalGetStateDuration.call(this, state);
+    };
+    const clearLeaseClaimed = game.requestEnemyAttack(follower);
+    let clearElapsed = 0;
+    while (follower.brain.state === 'commit' && clearElapsed < stretchedClearDuration + 0.25) {
+      game._updateEnemyAttackDirector(dt);
+      follower._updateCommitState(dt, game);
+      clearElapsed += dt;
+    }
+    follower._getStateDuration = originalGetStateDuration;
+    const clearSummary = {
+      plannedDistance: clearPlan.plannedDistance,
+      normalDuration: normalClearDuration,
+      stretchedDuration: stretchedClearDuration,
+      elapsed: clearElapsed,
+      actualTravel: follower.root.position.distanceTo(clearStart),
+      targetError: follower.root.position.distanceTo(clearPlan.target),
+      state: follower.brain.state,
+      leaseClaimed: clearLeaseClaimed,
+      leaseReleased: game.enemyAttackDirector.owner !== follower,
+      requestCleared: !game.enemyAttackDirector.requestTimes.has(follower)
+        && !game.enemyAttackDirector.queue.includes(follower),
+    };
+
+    controller.isPositionWalkable = originalWalkable;
+    controller.getSurfaceElevationAt = originalElevation;
+    for (const charger of [pinned, follower]) {
+      const index = game.enemies.indexOf(charger);
+      if (index >= 0) game.enemies.splice(index, 1);
+      charger.dispose?.();
+      charger.root.removeFromParent();
+    }
+    resetDirector();
+    return { pinned: pinnedSummary, follower: followerSummary, clear: clearSummary, dt };
+  });
+
+  expect(result.pinned.leaseClaimed).toBe(true);
+  expect(result.pinned.plannedDistance).toBeCloseTo(12.5, 5);
+  expect(result.pinned.midCommitState).toBe('commit');
+  expect(result.pinned.midCommitOwned).toBe(true);
+  expect(result.pinned.midCommitTravel).toBeLessThan(0.001);
+  expect(result.pinned.actualTravel).toBeLessThan(0.001);
+  expect(result.pinned.state).toBe('recovery');
+  expect(result.pinned.elapsed).toBeGreaterThanOrEqual(result.pinned.duration - result.dt);
+  expect(result.pinned.elapsed).toBeLessThanOrEqual(result.pinned.duration + result.dt * 2);
+  expect(result.pinned.leaseReleased).toBe(true);
+  expect(result.pinned.requestCleared).toBe(true);
+
+  expect(result.follower.initiallyQueued).toBe(true);
+  expect(result.follower.claimed).toBe(true);
+  expect(result.follower.ownerIsFollower).toBe(true);
+  expect(result.follower.handoffElapsed).toBeGreaterThanOrEqual(0.45);
+  expect(result.follower.handoffElapsed).toBeLessThan(0.55);
+
+  expect(result.clear.leaseClaimed).toBe(true);
+  expect(result.clear.plannedDistance).toBeCloseTo(12.5, 5);
+  expect(result.clear.actualTravel).toBeCloseTo(result.clear.plannedDistance, 5);
+  expect(result.clear.targetError).toBeLessThan(0.0001);
+  expect(result.clear.state).toBe('recovery');
+  expect(result.clear.elapsed).toBeCloseTo(result.clear.normalDuration, 2);
+  expect(result.clear.elapsed).toBeLessThan(result.clear.stretchedDuration - result.dt);
+  expect(result.clear.leaseReleased).toBe(true);
+  expect(result.clear.requestCleared).toBe(true);
+});
+
 test('attack pacing serializes enemies while fixed-speed rocket chargers retreat after impact', async ({ page }) => {
   await page.goto('/?reaverbotSeed=attack-pacing-rocket-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
@@ -1318,4 +1516,270 @@ test('attack pacing serializes enemies while fixed-speed rocket chargers retreat
   expect(result.interruptedState).toBe('recovery');
   expect(result.interruptedLeaseClaimed).toBe(true);
   expect(result.interruptedLeaseReleased).toBe(true);
+});
+
+test('a normal Reaverbot refocuses once when its canonical red eye is shot', async ({ page }) => {
+  await page.goto('/?bossDebug=1&reaverbotSeed=red-eye-refocus-runtime');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const Vector3 = game.player.root.position.constructor;
+    game.stop();
+
+    const resetDirector = () => {
+      const director = game.enemyAttackDirector;
+      director.owner = null;
+      director.handoffTimer = 0;
+      director.queue.length = 0;
+      director.requestTimes.clear();
+    };
+    const removeEnemy = (enemy) => {
+      if (!enemy) return;
+      enemy.dispose?.();
+      enemy.root?.removeFromParent?.();
+      const index = game.enemies.indexOf(enemy);
+      if (index >= 0) game.enemies.splice(index, 1);
+      if (game.activeReaverbotBoss === enemy) game.activeReaverbotBoss = null;
+    };
+    const clearEnemies = () => {
+      for (const enemy of [...game.enemies]) removeEnemy(enemy);
+      game.enemies.length = 0;
+      game.projectiles.clear();
+      resetDirector();
+    };
+    const fireEyeShot = (enemy, damage = 2) => {
+      game.projectiles.clear();
+      enemy.root.updateMatrixWorld(true);
+      const position = enemy.visual.eye.lens.getWorldPosition(new Vector3());
+      const direction = enemy.root.position.clone().sub(game.player.root.position).setY(0);
+      if (direction.lengthSq() <= 0.0001) direction.set(0, 0, 1);
+      else direction.normalize();
+      game.projectiles.spawn({
+        owner: 'player',
+        position,
+        direction,
+        speed: 0,
+        range: 1,
+        radius: 0.06,
+        damage,
+        source: game.player,
+        attackMeta: {
+          armorPierce: Number.POSITIVE_INFINITY,
+          unblockable: true,
+          playerOwnedAttack: true,
+        },
+      });
+      game.projectiles.update(1 / 60);
+    };
+
+    clearEnemies();
+    const controller = game.dungeonController;
+    const originalSafeZone = controller.isPlayerInSafeZone;
+    controller.isPlayerInSafeZone = () => false;
+
+    const spawnPosition = game.player.root.position.clone().add(new Vector3(0, 0, 5));
+    let enemy = null;
+    for (let variant = 0; variant < 180 && !enemy; variant += 1) {
+      const candidate = window.spawnReaverbot({
+        archetypeId: 'artillery',
+        seed: `red-eye-refocus:${variant}`,
+        position: spawnPosition,
+      });
+      if (candidate.genome.modules.weakPoint.id !== 'eyeLens') enemy = candidate;
+      else removeEnemy(candidate);
+    }
+    if (!enemy) throw new Error('Unable to generate an artillery Reaverbot with a separate weak point');
+
+    enemy._runtimeGame = game;
+    enemy.root.rotation.y = 0;
+    enemy.brain.defenseActive = false;
+    enemy.brain.weakPointExposed = false;
+    enemy.defenseDisabled = true;
+    enemy.root.updateMatrixWorld(true);
+
+    const eyePosition = enemy.visual.eye.lens.getWorldPosition(new Vector3());
+    const pointHit = enemy.resolveProjectileHit(eyePosition, 0.06);
+    const worldFront = new Vector3(0, 0, 1).applyQuaternion(enemy.root.quaternion).normalize();
+    const lineStart = eyePosition.clone().addScaledVector(worldFront, 1.4);
+    const lineHit = enemy.resolveLineHit(
+      lineStart,
+      worldFront.clone().multiplyScalar(-1),
+      3,
+      0.05,
+    );
+
+    const toPlayer = game.player.root.position.clone().sub(enemy.root.position).setY(0).normalize();
+    const firstLeaseClaimed = game.requestEnemyAttack(enemy);
+    enemy._beginTelegraph(game, toPlayer);
+    enemy._createTelegraphMarker(game, 0.8);
+    const firstMarker = enemy.brain.telegraphMarker;
+    const firstHealthBefore = enemy.health;
+    const positionBeforeRefocus = enemy.root.position.clone();
+    fireEyeShot(enemy);
+
+    const firstImpact = {
+      damageDealt: firstHealthBefore - enemy.health,
+      state: enemy.brain.state,
+      consumed: enemy.brain.eyeFlinchConsumed,
+      moving: enemy.brain.moving,
+      knockback: enemy.knockback.length(),
+      markerRemoved: Boolean(firstMarker) && !enemy.brain.telegraphMarker,
+      leaseReleased: game.enemyAttackDirector.owner !== enemy,
+      requestCleared: !game.enemyAttackDirector.requestTimes.has(enemy)
+        && !game.enemyAttackDirector.queue.includes(enemy),
+    };
+
+    const visualRootStartX = enemy.visual.root.position.x;
+    const visualRootStartY = enemy.visual.root.position.y;
+    const head = enemy.visual.frame.headAssembly ?? enemy.visual.frame.head;
+    const headStartRoll = head.rotation.z;
+    let peakVisualShake = 0;
+    let refocusFrames = 0;
+    let stationaryThroughout = true;
+    while (enemy.brain.state === 'eyeRefocus' && refocusFrames < 120) {
+      enemy.update(1 / 60, game);
+      peakVisualShake = Math.max(
+        peakVisualShake,
+        Math.abs(enemy.visual.root.position.x - visualRootStartX),
+        Math.abs(enemy.visual.root.position.y - visualRootStartY),
+        Math.abs(head.rotation.z - headStartRoll),
+      );
+      stationaryThroughout = stationaryThroughout
+        && !enemy.brain.moving
+        && enemy.knockback.lengthSq() < 0.000001;
+      refocusFrames += 1;
+    }
+    const refocus = {
+      duration: enemy._getStateDuration('eyeRefocus'),
+      frames: refocusFrames,
+      peakVisualShake,
+      stationaryThroughout,
+      positionDrift: enemy.root.position.distanceTo(positionBeforeRefocus),
+      exitState: enemy.brain.state,
+    };
+
+    game.projectiles.clear();
+    resetDirector();
+    enemy.hitStopTimer = 0;
+    enemy.statusEffects.stagger.duration = 0;
+    enemy.brain.state = 'position';
+    enemy.brain.stateTime = 0;
+    const secondLeaseClaimed = game.requestEnemyAttack(enemy);
+    enemy._beginTelegraph(game, toPlayer);
+    enemy._createTelegraphMarker(game, 0.8);
+    const secondMarker = enemy.brain.telegraphMarker;
+    const secondHealthBefore = enemy.health;
+    fireEyeShot(enemy);
+    const secondImpact = {
+      damageDealt: secondHealthBefore - enemy.health,
+      state: enemy.brain.state,
+      consumed: enemy.brain.eyeFlinchConsumed,
+      markerRetained: enemy.brain.telegraphMarker === secondMarker,
+      leaseRetained: game.enemyAttackDirector.owner === enemy,
+    };
+
+    removeEnemy(enemy);
+    resetDirector();
+    game.projectiles.clear();
+
+    const bossSpawn = game.debugSpawnBoss('revolvingFusillade');
+    const boss = bossSpawn.boss;
+    boss._runtimeGame = game;
+    boss.brain.state = 'telegraph';
+    boss.brain.stateTime = 0;
+    boss.brain.eyeFlinchConsumed = false;
+    boss.brain.weakPointExposed = false;
+    boss.root.updateMatrixWorld(true);
+    const bossEyePosition = boss.visual.eye.lens.getWorldPosition(new Vector3());
+    const bossResolvedEye = boss.resolveProjectileHit(bossEyePosition, 0.06);
+    const bossHealthBefore = boss.health;
+    const bossDamage = boss.takeDamage(2, {
+      source: game.player,
+      playerOwnedAttack: true,
+      projectileHit: true,
+      directHit: true,
+      redEyeHit: true,
+      hitPartId: 'eyeLens',
+      weakPointHit: false,
+      armorPierce: Number.POSITIVE_INFINITY,
+      unblockable: true,
+      hitPosition: bossEyePosition,
+    });
+    const bossGuard = {
+      spawned: bossSpawn.ok,
+      isBoss: boss.isBoss,
+      resolvedAsRedEye: Boolean(bossResolvedEye?.redEyeHit),
+      damageDealt: bossHealthBefore - boss.health,
+      returnedDamage: bossDamage,
+      state: boss.brain.state,
+      consumed: boss.brain.eyeFlinchConsumed,
+    };
+
+    removeEnemy(boss);
+    resetDirector();
+    game.projectiles.clear();
+    controller.isPlayerInSafeZone = originalSafeZone;
+
+    return {
+      weakPointId: pointHit ? enemy?.genome?.modules?.weakPoint?.id ?? null : null,
+      pointHit: pointHit && {
+        redEyeHit: pointHit.redEyeHit,
+        hitPartId: pointHit.hitPartId,
+        weakPointHit: pointHit.weakPointHit,
+      },
+      lineHit: lineHit && {
+        redEyeHit: lineHit.redEyeHit,
+        hitPartId: lineHit.hitPartId,
+        weakPointHit: lineHit.weakPointHit,
+      },
+      firstLeaseClaimed,
+      firstImpact,
+      refocus,
+      secondLeaseClaimed,
+      secondImpact,
+      bossGuard,
+    };
+  });
+
+  expect(result.weakPointId).not.toBe('eyeLens');
+  expect(result.pointHit).toEqual({ redEyeHit: true, hitPartId: 'eyeLens', weakPointHit: false });
+  expect(result.lineHit).toEqual({ redEyeHit: true, hitPartId: 'eyeLens', weakPointHit: false });
+  expect(result.firstLeaseClaimed).toBe(true);
+  expect(result.firstImpact.damageDealt).toBeGreaterThan(0);
+  expect(result.firstImpact).toMatchObject({
+    state: 'eyeRefocus',
+    consumed: true,
+    moving: false,
+    markerRemoved: true,
+    leaseReleased: true,
+    requestCleared: true,
+  });
+  expect(result.firstImpact.knockback).toBeLessThan(0.001);
+  expect(result.refocus.duration).toBeCloseTo(0.9, 5);
+  expect(result.refocus.frames).toBeGreaterThanOrEqual(50);
+  expect(result.refocus.frames).toBeLessThan(120);
+  expect(result.refocus.peakVisualShake).toBeGreaterThan(0.02);
+  expect(result.refocus.stationaryThroughout).toBe(true);
+  expect(result.refocus.positionDrift).toBeLessThan(0.001);
+  expect(result.refocus.exitState).toBe('recovery');
+
+  expect(result.secondLeaseClaimed).toBe(true);
+  expect(result.secondImpact.damageDealt).toBeGreaterThan(0);
+  expect(result.secondImpact).toMatchObject({
+    state: 'telegraph',
+    consumed: true,
+    markerRetained: true,
+    leaseRetained: true,
+  });
+
+  expect(result.bossGuard).toMatchObject({
+    spawned: true,
+    isBoss: true,
+    resolvedAsRedEye: false,
+    state: 'telegraph',
+    consumed: false,
+  });
+  expect(result.bossGuard.damageDealt).toBeGreaterThan(0);
+  expect(result.bossGuard.returnedDamage).toBeGreaterThan(0);
 });

@@ -24,6 +24,10 @@ const PLAYER_RAIL_LANDING_VERTICAL_TOLERANCE = 0.16;
 const PLAYER_RAIL_STALL_PROXIMITY = 0.42;
 const PLAYER_RAIL_STALL_TIME = 0.2;
 const PLAYER_RAIL_RECOVERY_NUDGE = 0.16;
+const ENEMY_GROUND_TRAVERSAL_MAX_DISTANCE = 3.4;
+const ENEMY_GROUND_TRAVERSAL_MAX_DROP = 3.2;
+const ENEMY_GROUND_TRAVERSAL_MAX_RISE = 0.65;
+const ENEMY_GROUND_TRAVERSAL_SAMPLE_SPACING = 0.24;
 const RAMP_SUPPORT_CAPTURE_HEIGHT = PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.18;
 const NAVIGATION_CACHE_LIMIT = 4096;
 const FLOOR_ROUTE_FIELD_LIMIT = 12;
@@ -82,6 +86,31 @@ function isInsideExpandedZone(position, zone, radius = 0, verticalRadius = radiu
   }
 
   return true;
+}
+
+function getRayAabbInterval2D(origin, direction, maxDistance, center, halfWidth, halfDepth) {
+  let near = 0;
+  let far = maxDistance;
+  for (const [originValue, directionValue, centerValue, halfExtent] of [
+    [origin.x, direction.x, center.x, halfWidth],
+    [origin.z, direction.z, center.z, halfDepth],
+  ]) {
+    const minimum = centerValue - halfExtent;
+    const maximum = centerValue + halfExtent;
+    if (Math.abs(directionValue) <= 0.000001) {
+      if (originValue < minimum || originValue > maximum) return null;
+      continue;
+    }
+    let entry = (minimum - originValue) / directionValue;
+    let exit = (maximum - originValue) / directionValue;
+    if (entry > exit) [entry, exit] = [exit, entry];
+    near = Math.max(near, entry);
+    far = Math.min(far, exit);
+    if (near > far) return null;
+  }
+  return far >= 0 && near <= maxDistance
+    ? { entry: Math.max(0, near), exit: Math.min(maxDistance, far) }
+    : null;
 }
 
 function tileKey(x, z) {
@@ -352,6 +381,9 @@ export class DungeonController {
         halfWidth: size.x * 0.5,
         halfDepth: size.z * 0.5,
         topY: bounds.max.y,
+        baseElevation: Number.isFinite(object.userData?.elevation)
+          ? object.userData.elevation
+          : null,
         horizontal: size.x >= size.z,
       });
     });
@@ -1607,6 +1639,8 @@ export class DungeonController {
     if (!arenaTarget) {
       return null;
     }
+    if (enemy.lastNavigationTarget?.copy) enemy.lastNavigationTarget.copy(arenaTarget);
+    else enemy.lastNavigationTarget = arenaTarget.clone();
 
     if (enemy.navigationMode === 'air') {
       return this.getAerialNavigationDirection(
@@ -1675,6 +1709,142 @@ export class DungeonController {
     }
     enemy.setNavigationRecoveryTarget?.(best.probe, 0.55);
     return best.direction;
+  }
+
+  _getEnemyRailCrossingDistance(enemy, origin, direction) {
+    let nearestExit = Infinity;
+    const padding = 0.1;
+    for (const surface of this.playerRailTopSurfaces ?? []) {
+      const baseMatches = Number.isFinite(surface.baseElevation)
+        ? Math.abs(surface.baseElevation - origin.y) <= 0.55
+        : surface.topY - origin.y >= 0.2 && surface.topY - origin.y <= 1.25;
+      if (!baseMatches) continue;
+      const interval = getRayAabbInterval2D(
+        origin,
+        direction,
+        ENEMY_GROUND_TRAVERSAL_MAX_DISTANCE,
+        surface.center,
+        surface.halfWidth + padding,
+        surface.halfDepth + padding,
+      );
+      if (!interval || interval.exit <= 0.04 || interval.exit >= nearestExit) continue;
+      nearestExit = interval.exit;
+    }
+    return Number.isFinite(nearestExit) ? nearestExit : null;
+  }
+
+  _isEnemyRampSideExit(origin, direction) {
+    const tile = this.getFloorTileAt(origin, { allowClosest: true });
+    if (tile?.surface !== 'industrialRamp') return false;
+    const rampX = Math.sign(tile.rampDirectionX ?? 0);
+    const rampZ = Math.sign(tile.rampDirectionZ ?? 0);
+    if (rampX === 0 && rampZ === 0) return false;
+    return Math.abs(direction.x * rampZ - direction.z * rampX) >= 0.58;
+  }
+
+  _isEnemyTraversalInsideArena(enemy, position) {
+    const arena = enemy.encounterArena;
+    if (!arena?.center) return true;
+    const center = arena.zoneCenter ?? arena.center;
+    const margin = Math.max(0.2, (enemy.radius ?? 0.42) * 0.5);
+    return Math.abs(position.x - center.x) <= Math.max(0.5, arena.halfWidth - margin)
+      && Math.abs(position.z - center.z) <= Math.max(0.5, arena.halfDepth - margin);
+  }
+
+  _isEnemyTraversalArcClear(enemy, start, landing, arcHeight) {
+    const horizontalDistance = Math.hypot(landing.x - start.x, landing.z - start.z);
+    const steps = Math.max(
+      8,
+      Math.ceil(horizontalDistance / ENEMY_GROUND_TRAVERSAL_SAMPLE_SPACING),
+    );
+    const collisionHeight = Math.max(
+      0.8,
+      enemy.collisionHeight ?? enemy.type?.modelHeight ?? 1.6,
+    );
+    const centerOffset = collisionHeight * 0.5;
+    const options = {
+      radius: Math.max(0.18, Math.min(0.86, (enemy.radius ?? 0.42) * 0.72)),
+      verticalRadius: Math.max(0.3, Math.min(1.2, collisionHeight * 0.4)),
+    };
+    const sample = new THREE.Vector3();
+    for (let index = 0; index <= steps; index += 1) {
+      const progress = index / steps;
+      sample.lerpVectors(start, landing, progress);
+      sample.y += Math.sin(progress * Math.PI) * arcHeight + centerOffset;
+      if (!this.isAerialPositionClear(sample, options)) return false;
+    }
+    return true;
+  }
+
+  resolveEnemyGroundTraversal(enemy, blockedPosition, desiredTarget = null) {
+    if (!enemy?.root?.position
+      || !blockedPosition
+      || enemy.dead
+      || enemy.isBoss
+      || enemy.navigationMode === 'air'
+      || (enemy.navigationTraversalCooldown ?? 0) > 0
+      || enemy.shouldIgnoreGroundConstraint?.()
+      || enemy.isAttackLeaseActive?.()
+      || enemy._isControlLocked?.()) {
+      return null;
+    }
+
+    const origin = enemy.root.position;
+    const directions = [];
+    const addDirection = (target) => {
+      if (!target) return;
+      const direction = target.clone().sub(origin).setY(0);
+      if (direction.lengthSq() <= 0.0001) return;
+      direction.normalize();
+      if (directions.some((candidate) => candidate.dot(direction) > 0.985)) return;
+      directions.push(direction);
+    };
+    addDirection(blockedPosition);
+    addDirection(desiredTarget ?? enemy.lastNavigationTarget);
+
+    for (const direction of directions) {
+      const railExit = this._getEnemyRailCrossingDistance(enemy, origin, direction);
+      const rampSide = railExit == null && this._isEnemyRampSideExit(origin, direction);
+      if (railExit == null && !rampSide) continue;
+
+      const minimumDistance = railExit == null
+        ? Math.max(1.05, (enemy.radius ?? 0.42) * 2.15)
+        : Math.max(
+          1.05,
+          railExit + (enemy.radius ?? 0.42) * 1.35 + 0.14,
+        );
+      for (let distance = minimumDistance;
+        distance <= ENEMY_GROUND_TRAVERSAL_MAX_DISTANCE + 0.001;
+        distance += 0.28) {
+        const landing = origin.clone().addScaledVector(direction, distance);
+        landing.y = this.getSurfaceElevationAt(landing);
+        const elevationDelta = landing.y - origin.y;
+        if (elevationDelta > ENEMY_GROUND_TRAVERSAL_MAX_RISE
+          || elevationDelta < -ENEMY_GROUND_TRAVERSAL_MAX_DROP
+          || (rampSide && elevationDelta > -0.18)
+          || !this._isEnemyTraversalInsideArena(enemy, landing)
+          || this.isPositionInSafeZone(landing)
+          || this._findPowerKnockbackBarrier(origin, landing, { ignoreVertical: true })
+          || !this.isEnemyPositionClear(enemy, landing)) {
+          continue;
+        }
+
+        const drop = Math.max(0, -elevationDelta);
+        const arcHeight = Math.max(0.92, 0.92 + drop * 0.46);
+        if (!this._isEnemyTraversalArcClear(enemy, origin, landing, arcHeight)) continue;
+        return {
+          targetPosition: landing,
+          arcHeight,
+          duration: THREE.MathUtils.clamp(
+            distance / 4.6 + drop * 0.035,
+            0.42,
+            0.78,
+          ),
+          kind: railExit == null ? 'rampSide' : 'railing',
+        };
+      }
+    }
+    return null;
   }
 
   shouldEnemyRecenter(enemy, threshold = 0.72) {
@@ -2012,6 +2182,7 @@ export class DungeonController {
         continue;
       }
 
+      const blockedPosition = position.clone();
       const fallback = this.lastSafeEnemyPositions.get(enemy.id);
       if (fallback && this.isEnemyPositionClear(enemy, fallback)) {
         position.copy(fallback);
@@ -2026,6 +2197,20 @@ export class DungeonController {
       }
 
       enemy.wallContactCount = (enemy.wallContactCount ?? 0) + 1;
+      const traversal = this.resolveEnemyGroundTraversal(
+        enemy,
+        blockedPosition,
+        enemy.lastNavigationTarget,
+      );
+      if (traversal && enemy.startNavigationTraversal?.(
+        traversal.targetPosition,
+        traversal,
+      )) {
+        enemy.wallContactCount = 0;
+        enemy.clearNavigationRecoveryTarget?.();
+        this.lastSafeEnemyPositions.set(enemy.id, position.clone());
+        continue;
+      }
       const inwardProbe = position.clone().lerp(
         enemy.encounterArena?.center ?? position,
         0.58,

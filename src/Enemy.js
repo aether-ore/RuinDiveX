@@ -20,6 +20,9 @@ const DEATH_BODY_FADE_DURATION = 0.18;
 const CONTACT_RETREAT_DISTANCE = 2.8;
 const CONTACT_RETREAT_DURATION = 0.46;
 const CONTACT_RETREAT_MIN_ARC_HEIGHT = 0.82;
+const NAVIGATION_TRAVERSAL_MIN_DURATION = 0.42;
+const NAVIGATION_TRAVERSAL_MAX_DURATION = 0.78;
+const NAVIGATION_TRAVERSAL_COOLDOWN = 0.8;
 const CONTACT_RETREAT_DIRECTION_OFFSETS = Object.freeze([0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05]);
 const CONTACT_RETREAT_DISTANCE_SCALES = Object.freeze([1, 0.82, 0.64, 0.46]);
 const GORUBESSHU_PART_GROUPS = {
@@ -680,6 +683,10 @@ export class Enemy {
     this.externalControl = null;
     this.externalBallisticMotion = null;
     this.contactRetreatMotion = null;
+    this.navigationTraversalMotion = null;
+    this.navigationTraversalCooldown = 0;
+    this.lastNavigationTraversalKind = null;
+    this.lastNavigationTarget = new THREE.Vector3();
     // Encounter ownership also carries a soft movement envelope. Dungeon
     // navigation uses it to keep enemies participating in their fight instead
     // of camping doorways or endlessly pressing against room geometry.
@@ -946,7 +953,11 @@ export class Enemy {
   }
 
   beginContactRetreat(game = this._runtimeGame, player = game?.player) {
-    if (this.dead || !game || !player || this.contactRetreatMotion) return false;
+    if (this.dead
+      || !game
+      || !player
+      || this.navigationTraversalMotion
+      || this.contactRetreatMotion) return false;
     this._enterPostContactRecovery(game);
     if (this.externalControl || this.externalBallisticMotion) return false;
 
@@ -972,6 +983,74 @@ export class Enemy {
     return true;
   }
 
+  startNavigationTraversal(targetPosition, {
+    duration = null,
+    arcHeight = 1.05,
+    kind = 'railing',
+  } = {}) {
+    if (this.dead
+      || this.isBoss
+      || this.navigationMode === 'air'
+      || this.navigationTraversalCooldown > 0
+      || this.externalControl
+      || this.shouldIgnoreGroundConstraint()
+      || this.isAttackLeaseActive?.()
+      || this._isControlLocked?.()) {
+      return false;
+    }
+    if (!targetPosition?.isVector3 && !(
+      Number.isFinite(targetPosition?.x)
+      && Number.isFinite(targetPosition?.y)
+      && Number.isFinite(targetPosition?.z)
+    )) {
+      return false;
+    }
+
+    const landing = new THREE.Vector3(
+      targetPosition.x,
+      targetPosition.y,
+      targetPosition.z,
+    );
+    const horizontalDistance = Math.hypot(
+      landing.x - this.root.position.x,
+      landing.z - this.root.position.z,
+    );
+    if (horizontalDistance < Math.max(0.42, this.radius * 0.72)) return false;
+
+    const resolvedDuration = Number.isFinite(duration)
+      ? THREE.MathUtils.clamp(
+        duration,
+        NAVIGATION_TRAVERSAL_MIN_DURATION,
+        NAVIGATION_TRAVERSAL_MAX_DURATION,
+      )
+      : THREE.MathUtils.clamp(
+        horizontalDistance / 4.6,
+        NAVIGATION_TRAVERSAL_MIN_DURATION,
+        NAVIGATION_TRAVERSAL_MAX_DURATION,
+      );
+    const resolvedArcHeight = Number.isFinite(arcHeight)
+      ? Math.max(0.72, arcHeight)
+      : 1.05;
+
+    this.clearNavigationRecoveryTarget();
+    this.knockback.set(0, 0, 0);
+    this.navigationTraversalMotion = {
+      startPosition: this.root.position.clone(),
+      targetPosition: landing,
+      elapsed: 0,
+      duration: resolvedDuration,
+      arcHeight: resolvedArcHeight,
+      kind,
+    };
+    this.lastNavigationTraversalKind = kind;
+    const directionX = landing.x - this.root.position.x;
+    const directionZ = landing.z - this.root.position.z;
+    if (directionX * directionX + directionZ * directionZ > 0.0001) {
+      this.root.rotation.y = Math.atan2(directionX, directionZ);
+    }
+    return true;
+  }
+
   _enterPostContactRecovery(game) {
     this.attackCooldown = Math.max(this.attackCooldown, this.stats.attackCooldown);
     this.postAttackRetreatTimer = Math.max(this.postAttackRetreatTimer, 0.62);
@@ -992,6 +1071,7 @@ export class Enemy {
         this.navigationRecoveryTarget = null;
       }
     }
+    this.navigationTraversalCooldown = Math.max(0, this.navigationTraversalCooldown - dt);
 
     this._updateStatusEffects(dt, game);
     if (this.dead) {
@@ -1138,7 +1218,11 @@ export class Enemy {
   }
 
   tryClaimExternalControl(owner, kind = 'external', options = {}) {
-    if (!owner || this.dead || this.externalBallisticMotion || this.contactRetreatMotion) {
+    if (!owner
+      || this.dead
+      || this.navigationTraversalMotion
+      || this.externalBallisticMotion
+      || this.contactRetreatMotion) {
       return false;
     }
 
@@ -1259,6 +1343,14 @@ export class Enemy {
 
   clearExternalMotion(reason = 'cleared', game = null) {
     let cleared = false;
+    if (this.navigationTraversalMotion) {
+      const motion = this.navigationTraversalMotion;
+      this.navigationTraversalMotion = null;
+      if (reason === 'dispose' || reason === 'reset') {
+        this.root.position.copy(motion.targetPosition);
+      }
+      cleared = true;
+    }
     if (this.contactRetreatMotion) {
       const motion = this.contactRetreatMotion;
       this.contactRetreatMotion = null;
@@ -1286,7 +1378,8 @@ export class Enemy {
 
   isExternalMotionActive() {
     return Boolean(
-      this.contactRetreatMotion
+      this.navigationTraversalMotion
+      || this.contactRetreatMotion
       || this.externalBallisticMotion
       || this.externalControl?.freeze,
     );
@@ -1294,13 +1387,44 @@ export class Enemy {
 
   shouldIgnoreGroundConstraint() {
     return Boolean(
-      this.contactRetreatMotion
+      this.navigationTraversalMotion
+      || this.contactRetreatMotion
       || this.externalBallisticMotion
       || this.externalControl?.ignoreGroundConstraint,
     );
   }
 
   _updateExternalMotion(dt, game) {
+    const traversal = this.navigationTraversalMotion;
+    if (traversal) {
+      traversal.elapsed = Math.min(
+        traversal.duration,
+        traversal.elapsed + Math.max(0, dt),
+      );
+      const progress = THREE.MathUtils.clamp(
+        traversal.elapsed / traversal.duration,
+        0,
+        1,
+      );
+      this.root.position.lerpVectors(
+        traversal.startPosition,
+        traversal.targetPosition,
+        progress,
+      );
+      this.root.position.y += Math.sin(progress * Math.PI) * traversal.arcHeight;
+      this.knockback.set(0, 0, 0);
+      if (progress >= 1) {
+        this.navigationTraversalMotion = null;
+        this.navigationTraversalCooldown = Math.max(
+          this.navigationTraversalCooldown,
+          NAVIGATION_TRAVERSAL_COOLDOWN,
+        );
+        this.root.position.copy(traversal.targetPosition);
+        this.clearNavigationRecoveryTarget();
+      }
+      return true;
+    }
+
     const retreat = this.contactRetreatMotion;
     if (retreat) {
       retreat.elapsed = Math.min(retreat.duration, retreat.elapsed + Math.max(0, dt));

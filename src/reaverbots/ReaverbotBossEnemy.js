@@ -6,6 +6,7 @@ import {
   disposeVisualTree,
   loadAuthoredRubyOpticOracleVisual,
 } from './AuthoredRubyOpticOracle.js';
+import { RubyOpticOracleEncounter } from './bosses/RubyOpticOracleEncounter.js';
 
 export { REAVERBOT_BOSS_LIMITS } from './ReaverbotBossCatalog.js';
 
@@ -254,6 +255,10 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     this.overloadShieldVisual = this.bossProfileId === 'overloadReliquary'
       ? createOverloadShieldVisual(this)
       : null;
+    this.specialEncounter = this.bossProfileId === 'rubyOpticOracle'
+      ? new RubyOpticOracleEncounter(this)
+      : null;
+    if (this.specialEncounter) this.signatureVisual.group.visible = false;
     this.authoredVisualState = this.bossProfileId === 'rubyOpticOracle' ? 'loading' : 'notApplicable';
     if (this.bossProfileId === 'rubyOpticOracle') this._loadPreferredAuthoredVisual();
   }
@@ -282,8 +287,12 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   _animateVisual(dt) {
+    const rubyVisualState = this.specialEncounter?.getVisualState?.() ?? null;
     if (this.authoredVisualState !== 'active') {
       super._animateVisual(dt);
+      if (rubyVisualState && this.visual?.root) {
+        this.visual.root.position.y = rubyVisualState.visualOffsetY;
+      }
       return;
     }
     const duration = this._getStateDuration(this.brain.state);
@@ -292,22 +301,31 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       dt,
       moving: this.brain.moving,
       speedRatio: this.brain.speedRatio,
-      state: this.brain.state,
+      state: rubyVisualState?.charging ? 'telegraph' : this.brain.state,
       stateProgress: Math.max(0, Math.min(1, this.brain.stateTime / Math.max(0.01, duration))),
-      defenseActive: this.brain.defenseActive,
-      weakPointExposed: this.brain.weakPointExposed,
+      defenseActive: rubyVisualState
+        ? rubyVisualState.shuttersClosed
+        : this.brain.defenseActive,
+      weakPointExposed: rubyVisualState?.weakPointExposed ?? this.brain.weakPointExposed,
+      ascensionActive: rubyVisualState?.ascensionActive ?? false,
+      ascensionProgress: rubyVisualState?.ascensionProgress ?? 0,
+      pupilIntensity: rubyVisualState?.pupilIntensity ?? 0,
     });
+    if (rubyVisualState && this.visual?.root) {
+      this.visual.root.position.y = rubyVisualState.visualOffsetY;
+    }
     this._applyRushAttackWarning(dt);
   }
 
   _createSignatureTarget() {
     const owner = this;
+    const usesRubyEye = this.bossProfileId === 'rubyOpticOracle';
     return {
       id: `${this.id}:signature:${this.bossProfileId}`,
       ownerEnemy: this,
       partId: `signature:${this.bossProfileId}`,
-      root: this.signatureVisual.core,
-      radius: Math.max(0.24, this.radius * 0.24),
+      root: usesRubyEye ? this.root : this.signatureVisual.core,
+      radius: usesRubyEye ? Math.max(0.46, this.radius * 0.4) : Math.max(0.24, this.radius * 0.24),
       isWeakPointTarget: true,
       isBossSignatureTarget: true,
       retainLockWhenInactive: true,
@@ -315,10 +333,16 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       get active() {
         return !owner.dead
           && !owner.signaturePartOverloaded
-          && !owner._usesDetonatorShieldMechanic();
+          && !owner._usesDetonatorShieldMechanic()
+          && !owner.specialEncounter?.isChannelCoreActive?.();
       },
-      getWorldPosition(out) { return owner.signatureVisual.core.getWorldPosition(out); },
+      getWorldPosition(out) { return owner._getSignatureWorldPosition(out); },
     };
+  }
+
+  _getSignatureWorldPosition(out = new THREE.Vector3()) {
+    if (this.specialEncounter) return this.specialEncounter.getEyePosition(out);
+    return this.signatureVisual.core.getWorldPosition(out);
   }
 
   _usesDetonatorShieldMechanic() {
@@ -332,6 +356,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       && !this.dead) {
       targets.unshift(this.signatureTarget);
     }
+    if (this.specialEncounter) targets.unshift(...this.specialEncounter.getCombatTargets());
     const arenaTargets = this.bossState?.activeArenaNodes
       ?.filter((node) => node.active)
       .map((node) => node.target) ?? [];
@@ -340,6 +365,8 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   resolveProjectileHit(position, projectileRadius = 0.1) {
+    const specialHit = this.specialEncounter?.resolveProjectileHit(position, projectileRadius);
+    if (specialHit) return specialHit;
     const arenaNode = this._resolveArenaNodePointHit(position, projectileRadius);
     if (arenaNode) return arenaNode;
     const signature = this._resolveSignaturePointHit(position, projectileRadius);
@@ -347,6 +374,8 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   resolveLineHit(start, direction, range, width = 0.1, options = {}) {
+    const specialHit = this.specialEncounter?.resolveLineHit(start, direction, range, width, options);
+    if (specialHit) return specialHit;
     for (const node of this.bossState?.activeArenaNodes ?? []) {
       if (!node.active) continue;
       node.object.getWorldPosition(tempA);
@@ -366,7 +395,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     if (!this._usesDetonatorShieldMechanic()
       && !this.signaturePartOverloaded
       && !this.dead) {
-      this.signatureVisual.core.getWorldPosition(tempA);
+      this._getSignatureWorldPosition(tempA);
       tempB.copy(tempA).sub(start);
       const along = tempB.dot(direction);
       const radius = width + this.signatureTarget.radius;
@@ -384,6 +413,8 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   resolveArcHit(origin, direction, range, halfAngle, options = {}) {
+    const specialHit = this.specialEncounter?.resolveArcHit(origin, direction, range, halfAngle, options);
+    if (specialHit) return specialHit;
     for (const node of this.bossState?.activeArenaNodes ?? []) {
       if (!node.active) continue;
       node.object.getWorldPosition(tempA);
@@ -406,7 +437,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     if (!this._usesDetonatorShieldMechanic()
       && !this.signaturePartOverloaded
       && !this.dead) {
-      this.signatureVisual.core.getWorldPosition(tempA);
+      this._getSignatureWorldPosition(tempA);
       tempB.copy(tempA).sub(origin);
       const vertical = Math.abs(tempB.y);
       tempB.y = 0;
@@ -430,7 +461,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
 
   _resolveSignaturePointHit(position, projectileRadius) {
     if (this._usesDetonatorShieldMechanic() || this.signaturePartOverloaded || this.dead) return null;
-    this.signatureVisual.core.getWorldPosition(tempA);
+    this._getSignatureWorldPosition(tempA);
     const radius = projectileRadius + this.signatureTarget.radius;
     if (position.distanceToSquared(tempA) > radius * radius) return null;
     return {
@@ -462,6 +493,17 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       meta.bossInvulnerable = true;
       return 0;
     }
+    if (this.specialEncounter?.isAscensionActive?.()
+      && meta.hitPartId !== this.specialEncounter.channelCorePartId) {
+      meta.bossInvulnerable = true;
+      meta.rubyAscensionFloorAttackBlocked = true;
+      return 0;
+    }
+    if (this.specialEncounter?.isShutterProtected?.()) {
+      meta.bossInvulnerable = true;
+      meta.rubyShuttersBlocked = true;
+      return 0;
+    }
     if ((this.bossState?.reliquary?.shieldStunRemaining ?? 0) > 0) {
       // The shield-break knockdown is deliberately a damage window, unlike
       // the generic signature interrupt (which remains invulnerable).
@@ -472,13 +514,57 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       meta.knockbackDirection = null;
       meta.knockback = 0;
     }
-    let adjusted = super.modifyDamageTaken(amount, meta);
-    if (meta.signaturePartHit
-      && (meta.projectileHit || meta.directHit || meta.directContactHit)
+    const directDamageHit = Boolean(
+      (meta.projectileHit || meta.directHit || meta.directContactHit)
       && !meta.explosionSplash
-      && !meta.areaDamage) {
+      && !meta.areaDamage,
+    );
+    const rubyWeakPointId = this.genome?.modules?.weakPoint?.id;
+    const rubyStaggerWeakPointHit = Boolean(
+      this.specialEncounter?.isSuccessStaggerActive?.()
+      && rubyWeakPointId
+      && meta.hitPartId === rubyWeakPointId,
+    );
+    const rubyStaggerTargetHit = Boolean(
+      this.specialEncounter?.isSuccessStaggerActive?.()
+      && directDamageHit
+      && (meta.signaturePartHit || meta.weakPointHit || rubyStaggerWeakPointHit),
+    );
+    const originalHitPartId = meta.hitPartId;
+    let adjusted;
+    if (this.specialEncounter) {
+      // The authored Ruby shutters own this defense window. The generic
+      // Reaverbot brain may still be in `position`, but that must not create an
+      // invisible armor block while the authored eye is visibly open.
+      const previousDefenseActive = this.brain.defenseActive;
+      this.brain.defenseActive = false;
+      // The authored success window is a total 1.65x vulnerability for both
+      // exposed targets. Resolve a rear-core hit through the body baseline so
+      // the generated weak-point multiplier cannot stack above that contract.
+      if (rubyStaggerWeakPointHit) meta.hitPartId = null;
+      try {
+        adjusted = super.modifyDamageTaken(amount, meta);
+      } finally {
+        meta.hitPartId = originalHitPartId;
+        this.brain.defenseActive = previousDefenseActive;
+      }
+    } else {
+      adjusted = super.modifyDamageTaken(amount, meta);
+    }
+    if (rubyStaggerWeakPointHit) {
+      meta.weakPointHit = true;
+      meta.hitPosition = meta.hitPosition
+        ?? this.visual?.weakPoint?.core?.getWorldPosition?.(new THREE.Vector3());
+    }
+    if (meta.signaturePartHit
+      && directDamageHit
+      && !rubyStaggerTargetHit) {
       adjusted *= SIGNATURE_DAMAGE_MULTIPLIER;
       meta.bossSignatureMultiplier = SIGNATURE_DAMAGE_MULTIPLIER;
+    }
+    if (rubyStaggerTargetHit) {
+      adjusted *= 1.65;
+      meta.rubyOracleStaggerMultiplier = 1.65;
     }
     if (this.bossState?.phase === 1) {
       const armor = Math.max(
@@ -507,6 +593,11 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       }
       return 0;
     }
+    if (this.specialEncounter?.handleLensImpact(amount, meta, this._runtimeGame)) {
+      meta.bossArenaNodeHit = true;
+      meta.damageNullified = true;
+      return 0;
+    }
     const arenaNode = this.bossState?.activeArenaNodes
       ?.find((node) => node.active && node.partId === meta.hitPartId);
     if (arenaNode) {
@@ -527,7 +618,13 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       return 0;
     }
     const dealt = super.takeDamage(amount, meta);
+    this.specialEncounter?.recordChannelDamage(dealt, meta, this._runtimeGame);
+    const rubyChannelCoreHit = Boolean(
+      this.specialEncounter
+      && meta.hitPartId === this.specialEncounter.channelCorePartId,
+    );
     const directSignatureHit = meta.signaturePartHit
+      && !rubyChannelCoreHit
       && (meta.projectileHit || meta.directHit || meta.directContactHit)
       && !meta.explosionSplash
       && !meta.areaDamage;
@@ -559,7 +656,19 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     return super._isControlLocked()
       || (this.bossState?.transitionRemaining ?? 0) > 0
       || (this.bossState?.interruptRemaining ?? 0) > 0
-      || (this.bossState?.reliquary?.shieldStunRemaining ?? 0) > 0;
+      || (this.bossState?.reliquary?.shieldStunRemaining ?? 0) > 0
+      || this.specialEncounter?.isMovementLocked?.() === true
+      || Boolean(this.specialEncounter?.attack);
+  }
+
+  _canBeginAttack(game) {
+    if (this.specialEncounter) return false;
+    return super._canBeginAttack(game);
+  }
+
+  shouldIgnoreGroundConstraint() {
+    return super.shouldIgnoreGroundConstraint()
+      || this.specialEncounter?.isAscensionActive?.() === true;
   }
 
   tryClaimExternalControl() { return false; }
@@ -578,6 +687,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     this._runtimeGame?.cancelEnemyAttackRequest?.(this);
     this._runtimeGame?.addParticleBurst?.(this.root.position, this.genome.palette.emissive, 38, 0.24);
     this._runtimeGame?.ui?.showBossPhaseTransition?.(this);
+    this.specialEncounter?.beginPhaseTwo(this._runtimeGame);
     if (this._usesDetonatorShieldMechanic()) {
       this._activateOverloadShield(this._runtimeGame, { initial: true });
     }
@@ -885,11 +995,16 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     this.knockback.set(0, 0, 0);
     const game = this._runtimeGame;
     game?.cancelEnemyAttackRequest?.(this);
-    this.signatureVisual.core.getWorldPosition(tempA);
+    this._getSignatureWorldPosition(tempA);
     game?.addParticleBurst?.(tempA, 0xffb347, 42, 0.24);
     game?.addHitEffect?.(tempA, 0xffd36f, 1.35, { absolute: true });
     game?.combat?.transferLockOnTarget?.(this.signatureTarget, this);
     game?.ui?.showToast?.('Signature housing overloaded — phase system weakened', '#ffd36f');
+  }
+
+  prePlayerUpdate(dt, game) {
+    if (this.dead || this.bossState?.cleaned) return;
+    this.specialEncounter?.prePlayerUpdate(dt, game);
   }
 
   update(dt, game) {
@@ -924,6 +1039,36 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         this._activateOverloadShield(game);
       }
       this._updateOverloadShieldVisual(dt);
+    }
+    if (this.specialEncounter) {
+      const specialPauseRemaining = Math.max(
+        state.transitionRemaining,
+        state.interruptRemaining,
+      );
+      if (specialPauseRemaining > 0) {
+        // Keep paths and ceremony visuals updating without allowing the
+        // encounter scheduler to start a new attack inside a boss-level lock.
+        this.specialEncounter.attackCooldown = Math.max(
+          this.specialEncounter.attackCooldown,
+          specialPauseRemaining + dt,
+        );
+      }
+      this.specialEncounter.update(dt, game);
+      if (game.player.dead) {
+        this.brain.moving = false;
+        this.knockback.set(0, 0, 0);
+        this._cleanupBossArena(game, 'defeat');
+        return;
+      }
+      if (state.transitionRemaining > 0
+        || state.interruptRemaining > 0
+        || this.specialEncounter.isMovementLocked()
+        || this.specialEncounter.attack
+        || game.player.dead) {
+        this.brain.moving = false;
+        this.knockback.set(0, 0, 0);
+      }
+      return;
     }
     this._updateArenaObjects(dt, game);
     if (state.transitionRemaining > 0
@@ -1116,6 +1261,10 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   _ensureArenaConstructs(game) {
+    if (this.specialEncounter) {
+      this.specialEncounter.initialize(game);
+      return;
+    }
     if (this._usesDetonatorShieldMechanic()) return;
     if (this.bossState.constructs.length) return;
     const center = this.encounterArena?.center ?? this.root.position;
@@ -1371,6 +1520,10 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   _startSignaturePattern(game) {
+    if (this.specialEncounter) {
+      this.specialEncounter.debugStartAttack('directBeam', game);
+      return;
+    }
     const state = this.bossState;
     const pattern = getPatternForProfile(this.bossProfileId);
     state.patternIndex += 1;
@@ -1530,6 +1683,10 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   _updateArenaObjects(dt, game) {
+    if (this.specialEncounter) {
+      this.specialEncounter.update(dt, game);
+      return;
+    }
     const state = this.bossState;
     for (let index = state.activeTelegraphs.length - 1; index >= 0; index -= 1) {
       const entry = state.activeTelegraphs[index];
@@ -1660,6 +1817,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
 
   getBossHudState() {
     const reliquary = this.bossState.reliquary;
+    const rubyHud = this.specialEncounter?.getHudState?.() ?? null;
     return {
       profileId: this.bossProfileId,
       title: this.bossProfile?.title ?? this.genome.name,
@@ -1681,7 +1839,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       shieldHits: reliquary?.shieldHits ?? 0,
       shieldHitsMax: reliquary?.shieldHitsMax ?? 0,
       shieldStunRemaining: reliquary?.shieldStunRemaining ?? 0,
-      signatureStatus: reliquary
+      signatureStatus: rubyHud?.signatureStatus ?? (reliquary
         ? this.bossState.phase === 1
           ? 'SHIELD DORMANT'
           : reliquary.shieldActive
@@ -1689,11 +1847,16 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
           : reliquary.shieldStunRemaining > 0
             ? 'SHIELD BROKEN — STUNNED'
             : 'SHIELD REFORMING'
-        : null,
+        : null),
+      ...(rubyHud ?? {}),
     };
   }
 
   getBossResourceCounts(game = this._runtimeGame) {
+    if (this.specialEncounter) {
+      const counts = this.specialEncounter.getResourceCounts();
+      return this.bossState.cleaned ? { projectiles: 0, telegraphs: 0, constructs: 0 } : counts;
+    }
     return {
       projectiles: game?.projectiles?.active?.filter?.((projectile) => projectile.source === this).length ?? 0,
       telegraphs: this.bossState.activeTelegraphs.length + (this.brain?.telegraphMarker ? 1 : 0),
@@ -1710,6 +1873,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
 
   _cancelBossArenaAttacks(game = this._runtimeGame, reason = 'interrupted') {
     if (!this.bossState || this.bossState.cleaned) return;
+    this.specialEncounter?.cancelCurrentAttack(game, reason);
     for (const entry of [...this.bossState.activeTelegraphs]) this._releaseTelegraph(entry);
     for (const hazard of this.bossState.activeHazards) disposeObject(hazard.object);
     for (const node of [...this.bossState.activeArenaNodes]) {
@@ -1725,6 +1889,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   _cleanupBossArena(game = this._runtimeGame, reason = 'dispose') {
     if (this.bossState.cleaned) return;
     this.bossState.cleaned = true;
+    this.specialEncounter?.dispose(game, reason);
     this._cleanupOverloadDetonators(game);
     if (this.overloadShieldVisual?.object) this.overloadShieldVisual.object.visible = false;
     for (const entry of this.bossState.activeTelegraphs) this._clearTelegraphDecorations(entry);
@@ -1764,6 +1929,11 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       this.overloadShieldVisual = null;
     }
     disposeSharedBossResources(this.bossResources);
+    if (this.authoredVisualState === 'active' && this.visual?.root) {
+      disposeVisualTree(this.visual.root);
+      this.visual.materials = {};
+      this.authoredVisualState = 'disposed';
+    }
     super.dispose();
   }
 }

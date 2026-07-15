@@ -12,6 +12,9 @@ const BOSS_PROFILE_IDS = [
 ];
 
 const BOSS_TEST_FRAME_RATES = [30, 60, 120];
+const GENERIC_ARENA_PATTERN_PROFILE_IDS = BOSS_PROFILE_IDS.filter(
+  (profileId) => profileId !== 'rubyOpticOracle',
+);
 
 async function waitForGame(page) {
   await page.waitForFunction(() => Boolean(window.game?.spawner && window.game?.ui));
@@ -609,9 +612,9 @@ test('every authored arena pattern respects its warning boundary and matching hi
     game.player.takeDamage = originalTakeDamage;
     game.projectiles.clear('telegraph-parity-complete');
     return summaries;
-  }, BOSS_PROFILE_IDS);
+  }, GENERIC_ARENA_PATTERN_PROFILE_IDS);
 
-  expect(results.map((entry) => entry.profileId)).toEqual(BOSS_PROFILE_IDS);
+  expect(results.map((entry) => entry.profileId)).toEqual(GENERIC_ARENA_PATTERN_PROFILE_IDS);
   for (const result of results) {
     expect(result.beforeBoundary, `${result.profileId} fired before its warning`).toBe(0);
     expect(result.warning, result.profileId).toBeGreaterThanOrEqual(
@@ -1225,10 +1228,10 @@ test('authored arena patterns keep warning cadence and resource caps at 30, 60, 
     game.addHitEffect = originalAddHitEffect;
     game.projectiles.clear('boss-frame-rate-complete');
     return results;
-  }, { profileIds: BOSS_PROFILE_IDS, frameRates: BOSS_TEST_FRAME_RATES });
+  }, { profileIds: GENERIC_ARENA_PATTERN_PROFILE_IDS, frameRates: BOSS_TEST_FRAME_RATES });
 
-  expect(summaries).toHaveLength(BOSS_PROFILE_IDS.length * BOSS_TEST_FRAME_RATES.length);
-  for (const profileId of BOSS_PROFILE_IDS) {
+  expect(summaries).toHaveLength(GENERIC_ARENA_PATTERN_PROFILE_IDS.length * BOSS_TEST_FRAME_RATES.length);
+  for (const profileId of GENERIC_ARENA_PATTERN_PROFILE_IDS) {
     const profileSummaries = summaries.filter((entry) => entry.profileId === profileId);
     expect(profileSummaries.map((entry) => entry.frameRate)).toEqual(BOSS_TEST_FRAME_RATES);
     const expectedPatternShape = profileSummaries[0].patternShape;

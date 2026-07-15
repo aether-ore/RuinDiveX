@@ -173,6 +173,7 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'hitStopTimeScale',
   'arenaRadius',
   'platformingPlatforms',
+  'dynamicPlatformingPlatforms',
   'platformingLedgeCandidates',
   'debugLedgeTester',
   'debugLedgeCandidates',
@@ -727,6 +728,7 @@ export class Game {
     this.debugLedgeCandidates = [];
     this.debugLedgePlatform = null;
     this.platformingPlatforms = [];
+    this.dynamicPlatformingPlatforms = [];
     this.platformingLedgeCandidates = [];
     this.debugSpawnedPlatforms = [];
     this.debugPlatformCounter = 0;
@@ -2014,17 +2016,41 @@ export class Game {
       return false;
     }
 
+    const departingBoss = this.activeReaverbotBoss;
+    const abandonedExpeditionId = !this.ruinCompleted
+      ? this.activeBossExpeditionSpec?.id
+      : null;
+    if (departingBoss) {
+      const encounter = this.dungeonController?.encounters?.find?.(
+        (candidate) => candidate.id === departingBoss.encounterId,
+      );
+      if (encounter && !encounter.cleared && !this.ruinCompleted) {
+        encounter.spawned = false;
+        encounter.enemyIds = [];
+        encounter.expeditionSpec = null;
+      }
+      departingBoss._cleanupBossArena?.(this, 'arena-exit');
+      this.removeEnemy(departingBoss);
+      if (this.activeReaverbotBoss === departingBoss) this.activeReaverbotBoss = null;
+      this.combat?._clearLockOn?.();
+    }
     this.player.root.position.copy(target);
     this.player.root.position.y = 0;
     this.player.lastMoveDirection.set(0, 0, 1);
     this.player.faceDirection(this.player.lastMoveDirection);
     this.expeditionActive = false;
-    if (!this.ruinCompleted) {
-      const abandonedExpeditionId = this.activeBossExpeditionSpec?.id;
+    if (!this.ruinCompleted && abandonedExpeditionId) {
       this._queueBusterStorageOperation(() => this.busterLabStorage?.completeBossExpedition?.(
         abandonedExpeditionId,
         { outcome: 'abandoned' },
       ));
+    }
+    if (!this.ruinCompleted) {
+      this.activeBossExpeditionSpec = null;
+      // Prepare a fresh attempt immediately. The storage abandonment is queued,
+      // so ignoring the still-active persisted record here avoids reusing its
+      // now-closed expedition id if the player promptly re-enters the ruin.
+      this._configureBossHuntEncounter(this.dungeon, { ignorePersistedActive: true });
     }
     this.dungeonController?.lastSafePlayerPosition?.copy?.(this.player.root.position);
     this.cameraController.snapTo(this.player);
@@ -2078,6 +2104,7 @@ export class Game {
     previousDungeon?.group?.removeFromParent?.();
     this.dungeon = dungeon;
     this.platformingPlatforms = [...(dungeon.platforms ?? [])];
+    this.dynamicPlatformingPlatforms = [];
     this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
@@ -4112,6 +4139,7 @@ export class Game {
     this.hitStopTimeScale = 1;
     this.arenaRadius = sourceWorld?.values?.arenaRadius ?? 82;
     this.platformingPlatforms = [];
+    this.dynamicPlatformingPlatforms = [];
     this.platformingLedgeCandidates = [];
     this.debugLedgeTester = null;
     this.debugLedgeCandidates = [];
@@ -6044,6 +6072,10 @@ export class Game {
       } else {
         this._updateAimFromPointer();
         const movementBasis = this._getPlayerMovementBasis();
+        for (const enemy of this.enemies) {
+          if (!enemy || enemy.dead || this._deferredEnemyRemovals?.has(enemy)) continue;
+          enemy.prePlayerUpdate?.(gameplayDt, this);
+        }
         const playerGroundY = this._getPlayerGroundY();
         this.player.update(gameplayDt, this.keys, {
           arenaRadius: this.arenaRadius,
@@ -6281,6 +6313,7 @@ export class Game {
     dungeon.layoutSeed = this.dungeonLayoutSeed;
     this.dungeon = dungeon;
     this.platformingPlatforms = [...(dungeon.platforms ?? [])];
+    this.dynamicPlatformingPlatforms = [];
     this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
     this.scene.add(dungeon.group);
@@ -6392,24 +6425,52 @@ export class Game {
   }
 
   getPlatformFloorElevation(position) {
-    let elevation = null;
+    return this.getPlatformSupport(position)?.elevation ?? null;
+  }
+
+  registerDynamicPlatformingSurface(surface) {
+    if (!surface || typeof surface !== 'object') {
+      return false;
+    }
+
+    this.dynamicPlatformingPlatforms ??= [];
+    if (!this.dynamicPlatformingPlatforms.includes(surface)) {
+      this.dynamicPlatformingPlatforms.push(surface);
+    }
+    return true;
+  }
+
+  unregisterDynamicPlatformingSurface(surface) {
+    const index = this.dynamicPlatformingPlatforms?.indexOf(surface) ?? -1;
+    if (index < 0) {
+      return false;
+    }
+
+    this.dynamicPlatformingPlatforms.splice(index, 1);
+    return true;
+  }
+
+  getPlatformSupport(position) {
+    let support = null;
     for (const platform of this._getPlatformingSurfaces()) {
       const candidate = this._getPlatformFloorElevation(platform, position);
-      if (Number.isFinite(candidate) && (!Number.isFinite(elevation) || candidate > elevation)) {
-        elevation = candidate;
+      if (Number.isFinite(candidate) && (!support || candidate > support.elevation)) {
+        support = { surface: platform, elevation: candidate };
       }
     }
-    return elevation;
+    return support;
   }
 
   _getPlatformFloorElevation(platform, position) {
-    if (!platform || !position) {
+    if (!platform || platform.enabled === false || !position) {
       return null;
     }
 
-    const insideX = Math.abs(position.x - platform.center.x) <= platform.halfWidth + 0.08;
-    const insideZ = Math.abs(position.z - platform.center.z) <= platform.halfDepth + 0.08;
-    if (!insideX || !insideZ || position.y < platform.topY - 0.5) {
+    const insideTop = typeof platform.containsTop === 'function'
+      ? Boolean(platform.containsTop(position, -0.08))
+      : Math.abs(position.x - platform.center.x) <= platform.halfWidth + 0.08
+        && Math.abs(position.z - platform.center.z) <= platform.halfDepth + 0.08;
+    if (!insideTop || position.y < platform.topY - 0.5) {
       return null;
     }
 
@@ -6427,7 +6488,7 @@ export class Game {
   }
 
   _isPositionInsidePlatformBlock(platform, position, margin = 0.08) {
-    if (!platform || !position) {
+    if (!platform || platform.enabled === false || !position) {
       return false;
     }
     if (platform.blocksBelow === false) {
@@ -6441,9 +6502,16 @@ export class Game {
   }
 
   _getPlatformingSurfaces() {
-    return this.debugLedgePlatform
-      ? [this.debugLedgePlatform, ...this.platformingPlatforms, ...this.debugSpawnedPlatforms]
-      : [...this.platformingPlatforms, ...this.debugSpawnedPlatforms];
+    const dynamicPlatforms = this.dynamicPlatformingPlatforms ?? [];
+    const surfaces = this.debugLedgePlatform
+      ? [
+        this.debugLedgePlatform,
+        ...this.platformingPlatforms,
+        ...dynamicPlatforms,
+        ...this.debugSpawnedPlatforms,
+      ]
+      : [...this.platformingPlatforms, ...dynamicPlatforms, ...this.debugSpawnedPlatforms];
+    return surfaces.filter((surface) => surface?.enabled !== false);
   }
 
   _rebuildPlatformingLedgeCandidates() {
@@ -6456,7 +6524,7 @@ export class Game {
   }
 
   _createPlatformLedgeCandidates(platform) {
-    if (!platform || platform.createsLedgeCandidates === false) {
+    if (!platform || platform.enabled === false || platform.createsLedgeCandidates === false) {
       return [];
     }
 
@@ -6504,6 +6572,11 @@ export class Game {
     if (Number.isFinite(platform.minimumHangRootY)) {
       for (const candidate of candidates) {
         candidate.minimumHangRootY = platform.minimumHangRootY;
+      }
+    }
+    if (platform.ledgeCatchMode != null) {
+      for (const candidate of candidates) {
+        candidate.ledgeCatchMode = platform.ledgeCatchMode;
       }
     }
     return Array.isArray(platform.ledgeEdges)
@@ -6559,13 +6632,10 @@ export class Game {
 
     const startY = Number.isFinite(jumpStartY) ? jumpStartY : root.position.y;
     let landingPlatform = null;
+    let landingSnapPosition = null;
     for (const platform of platforms) {
       const ledgeHeight = platform.topY - startY;
       if (ledgeHeight > jumpReachHeight * PLATFORM_NORMAL_JUMP_REACH_RATIO) {
-        continue;
-      }
-
-      if (!this._isInsidePlatformTop(platform, root.position, DEBUG_LEDGE_LANDING_INSET)) {
         continue;
       }
 
@@ -6581,8 +6651,22 @@ export class Game {
         }
       }
 
+      let snapPosition = null;
+      if (!this._isInsidePlatformTop(platform, root.position, DEBUG_LEDGE_LANDING_INSET)) {
+        snapPosition = platform.getLandingSnapPosition?.(root.position, {
+          player,
+          inset: DEBUG_LEDGE_LANDING_INSET,
+          previousRootY,
+        }) ?? null;
+        if (!snapPosition
+          || !this._isInsidePlatformTop(platform, snapPosition, DEBUG_LEDGE_LANDING_INSET)) {
+          continue;
+        }
+      }
+
       if (!landingPlatform || platform.topY > landingPlatform.topY) {
         landingPlatform = platform;
+        landingSnapPosition = snapPosition;
       }
     }
 
@@ -6590,6 +6674,10 @@ export class Game {
       return false;
     }
 
+    if (landingSnapPosition) {
+      root.position.x = landingSnapPosition.x;
+      root.position.z = landingSnapPosition.z;
+    }
     root.position.y = landingPlatform.topY;
     if (player.modelRoot) {
       player.modelRoot.position.y = 0;
@@ -6599,8 +6687,12 @@ export class Game {
   }
 
   _isInsidePlatformTop(platform, position, inset = 0) {
-    if (!platform || !position) {
+    if (!platform || platform.enabled === false || !position) {
       return false;
+    }
+
+    if (typeof platform.containsTop === 'function') {
+      return Boolean(platform.containsTop(position, inset));
     }
 
     return Math.abs(position.x - platform.center.x) <= Math.max(0, platform.halfWidth - inset)
@@ -6608,9 +6700,16 @@ export class Game {
   }
 
   _tryResolvePlatformLedgeCling(context = {}) {
+    const dynamicLedgeCandidates = (this.dynamicPlatformingPlatforms ?? [])
+      .filter((platform) => platform?.enabled !== false)
+      .flatMap((platform) => this._createPlatformLedgeCandidates(platform));
     return this._tryResolveDebugLedgeCling(
       context,
-      [...this.debugLedgeCandidates, ...this.platformingLedgeCandidates],
+      [
+        ...this.debugLedgeCandidates,
+        ...this.platformingLedgeCandidates,
+        ...dynamicLedgeCandidates,
+      ],
     );
   }
 
@@ -6692,7 +6791,8 @@ export class Game {
       if (ledgeHeight < PLATFORM_LEDGE_GRAB_HEIGHT_MIN || ledgeHeight > maximumGrabElevation) {
         continue;
       }
-      if (this._isForwardJumpClearingPlatformEdge({
+      const instantStep = ledge.ledgeCatchMode === 'instant-step';
+      if (!instantStep && this._isForwardJumpClearingPlatformEdge({
         player,
         root,
         ledge,
@@ -6716,7 +6816,7 @@ export class Game {
       }
 
       const minimumGrabElevation = reachHeight * PLATFORM_NORMAL_JUMP_REACH_RATIO;
-      if (ledgeHeight <= minimumGrabElevation && !exceptionalEdgeCatch) {
+      if (ledgeHeight <= minimumGrabElevation && !exceptionalEdgeCatch && !instantStep) {
         continue;
       }
 
@@ -6729,7 +6829,7 @@ export class Game {
           ledge,
           lateral,
           score,
-          autoClimb: exceptionalEdgeCatch && ledgeHeight <= minimumGrabElevation,
+          autoClimb: instantStep || (exceptionalEdgeCatch && ledgeHeight <= minimumGrabElevation),
         };
       }
     }

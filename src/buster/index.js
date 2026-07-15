@@ -11,4 +11,6 @@ export * from './BusterLabPersistence.js';
 export * from './BusterRuntime.js';
 export * from './BusterStagger.js';
 export * from './BusterTrajectory.js';
+export * from './BusterProjectileKernel.js';
+export * from './BusterBalanceSimulator.js';
 export * from './BusterBalanceGate.js';

@@ -1238,7 +1238,9 @@ export class Enemy {
     }
 
     if (type === 'stagger' || type === 'freeze') {
-      effect.duration = Math.max(effect.duration, duration);
+      effect.duration = type === 'stagger' && options.extend === true
+        ? effect.duration + duration
+        : Math.max(effect.duration, duration);
       return true;
     }
 

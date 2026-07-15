@@ -397,6 +397,9 @@ export class Player {
     this.bracedFireTargetValid = false;
     this.bracedFireTimer = 0;
     this.bracedBackpedalTimer = 0;
+    // Compiled free-fire may keep the arm extended without making that visual
+    // pose own tank turning or body facing.
+    this.bracedFireLocksFacing = true;
     this.movementLockTimer = 0;
     this.movementLockMultiplier = 1;
     this.dodgeDirection = new THREE.Vector3(0, 0, 1);
@@ -573,17 +576,22 @@ export class Player {
     const lateralTurnAttempt = Math.abs(rawLateralInput) > TANK_TURN_INPUT_THRESHOLD;
     const projectileAimInputHeld = movementOptions.projectileAimInputHeld === true;
 
-    if (lateralTurnAttempt && !projectileAimInputHeld && this.isProjectileAimHeld()) {
+    if (lateralTurnAttempt
+      && !projectileAimInputHeld
+      && this.bracedFireLocksFacing
+      && this.isProjectileAimHeld()) {
       this._releaseProjectileAim();
     }
 
     const bracedAiming = this.bracedFireTimer > 0 && this.bracedFireDirection.lengthSq() > 0.0001;
+    const bracedFacing = bracedAiming && this.bracedFireLocksFacing;
+    const bracedStrafing = bracedFacing && projectileAimInputHeld;
     const jumpAirborne = this.isJumpAirborne();
     const landingRecovering = this.jumpState === MML_JUMP_STATES.LandRecovery;
     const tankTurnInput = !lockOnActive ? THREE.MathUtils.clamp(rawLateralInput, -1, 1) : 0;
     const tankTurnActive = !lockOnActive
       && !attackFacing
-      && !bracedAiming
+      && !bracedFacing
       && lateralTurnAttempt
       && !jumpAirborne
       && !landingRecovering;
@@ -597,13 +605,15 @@ export class Player {
     if (moving) {
       moveVector.normalize();
       movingBackward = rawForwardInput < -0.35;
-      translating = lockOnActive || Math.abs(rawForwardInput) > 0.35;
-      strafeAmount = lockOnActive ? THREE.MathUtils.clamp(rawLateralInput, -1, 1) : 0;
+      translating = lockOnActive || bracedStrafing || Math.abs(rawForwardInput) > 0.35;
+      strafeAmount = (lockOnActive || bracedStrafing)
+        ? THREE.MathUtils.clamp(rawLateralInput, -1, 1)
+        : 0;
       moveAmount = translating && running ? PLAYER_RUN_ANIMATION_AMOUNT : 1;
 
       if (jumpAirborne) {
         this._resolveMovementDirection(moveVector, movementOptions);
-      } else if (lockOnActive) {
+      } else if (lockOnActive || bracedStrafing) {
         this._resolveMovementDirection(moveVector, movementOptions);
       } else {
         if (tankTurnActive) {
@@ -635,7 +645,9 @@ export class Player {
       this._resolveLockOnFacingDirection(lockOnPosition);
     }
 
-    const backpedaling = movingBackward || (lockOnActive && moveVector.y < -0.35) || (bracedAiming && this.bracedBackpedalTimer > 0 && moving);
+    const backpedaling = movingBackward
+      || ((lockOnActive || bracedStrafing) && moveVector.y < -0.35)
+      || (bracedFacing && this.bracedBackpedalTimer > 0 && moving);
     const tankTurnInPlace = tankTurnActive && !translating;
     const tankTurnTranslating = tankTurnActive && translating;
     const jumpMotionResult = this._updatePhysicalJumpAndMovement(dt, desiredMoveVelocity, {
@@ -672,7 +684,7 @@ export class Player {
       this.faceDirection(this.lastMoveDirection);
     } else if (!currentlyAirborne && !currentlyLandingRecovering && attackFacing) {
       this.faceDirection(this.attackFacingDirection);
-    } else if (!currentlyAirborne && !currentlyLandingRecovering && bracedAiming) {
+    } else if (!currentlyAirborne && !currentlyLandingRecovering && bracedFacing) {
       this.faceDirection(this.bracedFireDirection);
     }
 
@@ -2588,6 +2600,7 @@ export class Player {
     this.holdProjectileFiringPose(targetPosition, lockDuration, {
       weaponKey,
       aimTargetPosition: options.aimTargetPosition ?? targetPosition,
+      lockFacing: options.lockFacing,
     });
 
     if (!alreadyLocked) {
@@ -2604,10 +2617,12 @@ export class Player {
 
     this._attackWeaponKind = 'projectile';
     this._bracedFireWeaponKey = weaponKey;
+    this.bracedFireLocksFacing = options.lockFacing !== false;
 
     if (targetPosition) {
       this.beginProjectileAim(targetPosition, holdDuration, {
         aimTargetPosition: options.aimTargetPosition ?? targetPosition,
+        lockFacing: this.bracedFireLocksFacing,
       });
     } else {
       this.bracedFireTimer = Math.max(this.bracedFireTimer, holdDuration);
@@ -2623,6 +2638,7 @@ export class Player {
     this._bracedFireWeaponKey = null;
     this.bracedFireTimer = 0;
     this.bracedBackpedalTimer = 0;
+    this.bracedFireLocksFacing = true;
     this.bracedFireTargetValid = false;
   }
 
@@ -2680,6 +2696,7 @@ export class Player {
     this.guardDirection.copy(guardSourceDirection);
     this.bracedFireDirection.copy(guardSourceDirection);
     this.bracedFireTimer = Math.max(this.bracedFireTimer, MIN_BRACED_SHOT_TIME);
+    this.bracedFireLocksFacing = true;
     this.guardDuration = SHIELD_GUARD_DURATION;
     this.guardTimer = SHIELD_GUARD_DURATION;
     this.guardParryTimer = SHIELD_PARRY_WINDOW;
@@ -2698,6 +2715,8 @@ export class Player {
   }
 
   beginProjectileAim(targetPosition, duration = MIN_BRACED_SHOT_TIME, options = {}) {
+    const lockFacing = options.lockFacing !== false;
+    this.bracedFireLocksFacing = lockFacing;
     const aimTargetPosition = options.aimTargetPosition ?? targetPosition;
     if (aimTargetPosition) {
       this.bracedFireTargetWorld.copy(aimTargetPosition);
@@ -2719,12 +2738,15 @@ export class Player {
     this.bracedFireDirection.copy(worldForward);
     this.bracedFireTimer = Math.max(this.bracedFireTimer, duration);
 
-    const targetBehindMovement = this.lastMoveDirection.dot(this.bracedFireDirection) < -0.35;
-    this.bracedBackpedalTimer = targetBehindMovement
-      ? Math.max(this.bracedBackpedalTimer, Math.min(duration, 0.34))
-      : 0;
-
-    this.faceDirection(this.bracedFireDirection);
+    if (lockFacing) {
+      const targetBehindMovement = this.lastMoveDirection.dot(this.bracedFireDirection) < -0.35;
+      this.bracedBackpedalTimer = targetBehindMovement
+        ? Math.max(this.bracedBackpedalTimer, Math.min(duration, 0.34))
+        : 0;
+      this.faceDirection(this.bracedFireDirection);
+    } else {
+      this.bracedBackpedalTimer = 0;
+    }
   }
 
   recalculateStats() {

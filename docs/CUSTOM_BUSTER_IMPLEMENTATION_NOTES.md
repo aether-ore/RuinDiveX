@@ -12,18 +12,27 @@ The graph-v1 compiler, normalized battery rules, physical Lab economy,
 ownership-free blueprints, context-scoped storage, compiled projectile runtime,
 benchmark range, and disposable dungeon infrastructure are implemented.
 
-The v0.2 balance search does **not** currently produce a releasable selection.
-`runBusterBalanceSearch` evaluates all 338 authorized Power-scalar/Mortar-Power
-candidates and returns `releaseReady: false`. The nearest diagnostic candidate
-uses a level-10 scalar of `1.25` and Mortar Power `18`, but fails 89 of 90 hard
-comparisons. Consequently, the catalog deliberately remains at the unselected
-constants `BUSTER_LEVEL_10_POWER_SCALAR = 1.00` and Mortar Power `15`.
+The reconstructed balance gate now separates implementation correctness from
+the frozen catalog's gameplay verdict. Shared-kernel, simulator, detector, and
+contract-registry correctness pass. The production catalog remains frozen at
+`BUSTER_LEVEL_10_POWER_SCALAR = 1.00`, Mortar Power `15`, and Cluster Energy
+surcharge `+2`; no diagnostic candidate is selected, saved, or equipped.
 
-`npm run test:buster` includes `tests/buster-balance.test.mjs`, whose assertions
-lock the matrix and the known blocked result. The separate strict command
-`npm run verify:buster-balance` exits unsuccessfully when `releaseReady` is
-false. The top-level `npm test` runs that strict command after the focused
-Buster suite, so ordinary CI is intentionally blocked at the balance gate.
+The frozen catalog is **not release-ready**. `npm run verify:buster-balance`
+reports zero hard-correctness failures and three internal-role failures:
+
+- Spread-Explosion reaches two separated targets instead of direct
+  Explosion's one, but delivers `52.8` versus `64` Power over 10 seconds.
+- Delayed Cluster-Explosion and delayed plain Explosion both deliver zero hits
+  and zero output in their declared separated scenario; their compiled cycle
+  times are `1.2095652173913045s` and `1.0495652173913044s`, respectively.
+- The declared dominance check flags direct Spread-Explosion against direct
+  Explosion across its declared `spreadSeparated` and `single` scenarios.
+
+The 676-candidate scalar/Mortar/Cluster matrix is diagnostic-only and does not
+alter this verdict. `npm test` verifies implementation correctness and may stay
+green while the catalog is blocked. `npm run verify:release` requires both the
+ordinary tests and the strict frozen-catalog verifier.
 
 ## Feature boundary
 
@@ -41,6 +50,13 @@ the starter record and legacy Buster shadow bridge cannot be duplicated by
 toggling the feature. With the feature off, authoritative shadow records are
 hydrated back into legacy inventory or Buster-upgrade sockets.
 
+There is one deliberate live-combat exception to historical feature-off
+parity: legacy projectile Range is now profile-specific in every feature mode.
+Machine Gun and Cannon use resolved base `attackRange` with no implicit bonus.
+Missile uses `max(base attackRange + 1.8, homingRange)`. The contextual legacy
+balance fixtures report these same policies instead of applying `+1.8` to all
+three arms.
+
 The browser test `feature-off and feature-on share one canonical starter Power
 Raiser without duplication` protects the toggle bridge and starter identity.
 
@@ -51,18 +67,20 @@ Raiser without duplication` protects the toggle bridge and starter identity.
 | Ruleset, module values, Mega profile, calibration mapping | `CUSTOM_BUSTER_RULESET`, `BUSTER_MODULE_CATALOG`, and `MEGA_BUSTER_BASE_PROFILE` in `src/buster/catalog.js` |
 | Source cloning, normalization, serialization | `normalizeBusterBuild`, `serializeBusterBuild`, and `deserializeBusterBuild` in `src/buster/model.js` |
 | Structural and assignment validation | `validateBusterProgram`, `validateBusterBuild`, and `validateBusterAssignments` in `src/buster/validation.js` |
-| Immutable derived plans and Power allocation | `compileBusterBuild` in `src/buster/compiler.js` |
+| Immutable derived plans, resolved-tuning Mega compilation, Power allocation, and diagnostic overrides | `compileBusterBuild` and `compileMegaBusterPlan` in `src/buster/compiler.js` |
 | Recipes and reveal states | `BUSTER_RECIPES` and `getRecipeDiscoveryState` in `src/buster/BusterRecipeCatalog.js` |
 | Envelope, save contexts, locks, and conflicts | `src/buster/BusterLabPersistence.js` |
 | Roll resources, ownership, blueprints, materialization, and migrations | `BusterLabStorage` in `src/buster/BusterLabStorage.js` |
 | Batteries and projectile reservations | `BusterRuntime` in `src/buster/BusterRuntime.js` |
-| Per-execution stagger accounting | `src/buster/BusterStagger.js` |
+| Per-target/per-execution stagger grant ledger | `src/buster/BusterStagger.js` |
 | Deterministic spread, cluster, and ballistic sampling | `src/buster/BusterTrajectory.js` |
+| Shared numeric collision, swept-flight, Guidance, and event-order kernel | `src/buster/BusterProjectileKernel.js` |
 | Loadout, execution, explosions, range, sandbox, and shadow bridge | `src/Game.js` |
 | Delayed extended-muzzle release and unified firing input | `src/CombatSystem.js` |
-| Swept controlled-projectile lifecycle | `src/ProjectileSystem.js` |
+| Scene/projectile adapter for the shared swept lifecycle | `src/ProjectileSystem.js` |
 | Roll Lab, blueprint controls, benchmark controls, and HUD | `index.html`, `src/UIManager.js`, and `src/ui.css` |
-| Deterministic balance model | `src/buster/BusterBalanceGate.js` and `scripts/verify-buster-balance.mjs` |
+| Packet encounter simulation, fixtures, metrics, and rotation reports | `src/buster/BusterBalanceSimulator.js` |
+| Frozen-catalog contracts and strict verdict | `src/buster/BusterBalanceGate.js` and `scripts/verify-buster-balance.mjs` |
 
 ## Graph-v1 source model
 
@@ -174,8 +192,11 @@ shots.
 
 Power is deterministic pre-mitigation damage potential. Armor, guards, and
 target-specific damage handling are applied after the compiled packet reaches
-combat. Explosion applies its allocated packet independently to every target
-inside radius `1.55`.
+combat. A Custom Explosion applies its allocated packet independently to every
+production body capsule intersecting a radius-`1.55` sphere. This uses the
+shared vertical-capsule geometry rather than distance to an enemy's feet/root,
+and remains body-only: splash never receives weak-point amplification. Legacy
+Explosion collision is unchanged.
 
 ### Module catalog
 
@@ -227,6 +248,34 @@ derived plan containing:
 Compiled plans are never persisted. Source graphs, tuning, revisions, and
 ownership are the durable inputs.
 
+`compileMegaBusterPlan({ resolvedTuning, calibrationRevision,
+combatDepthLevel, level10PowerScalar })` sends the fixed Mega pulse through the
+same immutable compiler pipeline. The caller resolves owned calibrations
+upstream; this function never installs the starter Power Raiser itself.
+Consequently, resolved `4/4/4/4` tuning compiles to Power `8`, while the normal
+live `6/4/4/4` tuning compiles to `9.12`.
+
+Compiler balance overrides are diagnostic-only. The exact whitelist permits
+only finite positive `mortarShell.basePower` and nonnegative integer
+`cluster5.energyCost`. Overrides require `diagnosticContext: true`, are applied
+before validation, Energy, ledgers, stagger, occupancy, and derived statistics,
+and are recorded on the immutable plan with catalog and diagnostic values.
+Supplying a noncatalog `level10PowerScalar` is likewise diagnostic-only: it
+must be finite and positive, requires the same explicit context, and is recorded
+as a `ruleset.level10PowerScalar` override. The catalog scalar `1.00` remains a
+normal production input.
+
+`BusterRuntime` rejects such a plan unless its caller also supplies an explicit
+diagnostic context, preventing a sensitivity candidate from leaking into
+normal play.
+
+The benchmark-simulation cache includes `cacheScope`, build ID, source/build
+revision, combat depth, resolved level-10 scalar, resolved tuning, serialized
+source signature, scenario ID, and a canonical sorted list of diagnostic
+override records with module, field, catalog value, and diagnostic value. A
+diagnostic scalar or module candidate therefore cannot reuse a canonical
+production preview entry.
+
 ## Battery runtime and projectile lifecycle
 
 `BusterRuntime` keeps independent state per weapon key and separates
@@ -234,15 +283,18 @@ side-effect-free `canFire` from stateful `requestFire`.
 
 - A successful shot alone spends Energy, starts cycle time, and resets the
   `0.65s` recharge delay.
-- The active weapon does not recharge while fire remains held and the weapon
-  is unlocked.
-- A released or idle active weapon recharges at `maxEnergy / 1.8` per second
-  after the delay.
-- Inactive registered weapons recharge independently at half that speed.
+- Recharge becomes eligible only after **both** the current cycle and the
+  `0.65s` post-shot delay finish. If either boundary falls inside a timestep,
+  only the portion after both boundaries recharges; an exact-boundary firing
+  request is resolved before recharge.
+- Input style does not alter that clock. At the same release timestamps, tap
+  and held input have the same Energy economics.
+- Eligible active weapons recharge at `maxEnergy / 1.8` per second. Eligible
+  inactive registered weapons recharge independently at half that speed.
 - Any held or tapped request with insufficient Energy sets `recoveryLocked`.
   The lock clears only at full Energy; held input controls only whether combat
   requests another shot afterward.
-- Failed Energy requests do not restart the delay.
+- Failed Energy requests do not restart either boundary.
 - Capacity rejection, spawn rejection, and thrown execution callbacks spend no
   Energy. Spawn rejection restores prior battery and cycle state.
 
@@ -256,7 +308,22 @@ Controlled projectile updates perform swept collision and chronologically
 compare Delay, Apex, enemy impact, range/landing, and disposal within a frame.
 At an exact timestamp, Delay/Apex delivery wins before enemy impact, which wins
 before range and disposal. The shared ballistic sampler supports differing
-start and end elevations.
+start and end elevations. Trigger-spawned ballistic children retain the
+execution's original authored aim elevation; the carrier's trigger altitude is
+not substituted as the child's trajectory endpoint.
+
+When a carrier triggers partway through a frame, both production and the
+simulator immediately advance every spawned child through the carrier's unused
+frame remainder. This prevents a large frame from postponing child collision or
+Explosion delivery until the next render tick.
+
+The numeric work is centralized in `BusterProjectileKernel`: production's
+`ProjectileSystem` and the balance simulator both call the same vertical
+capsule body geometry, swept straight/ballistic intersection, Guidance target and
+stable-ID tie rules, steering, segment sampling, and chronological arbitration.
+Production remains the adapter for Three.js objects, callbacks, damage,
+visuals, pooling, reservations, and child creation; the simulator does not
+maintain an independent projectile-math implementation.
 
 If an Apex or Delay carrier contacts an enemy or reaches termination before its
 programmed trigger, it delivers the child branch immediately at that position,
@@ -266,9 +333,11 @@ clear, and sandbox teardown do not synthesize pending branches. Terrain-wall
 collision remains outside the compiled lifecycle.
 
 Guidance uses an explicit target lock first and otherwise stable target-ID
-tie-breaking. Root Guidance affects only the carrier; child Guidance reacquires
-independently. Spread, Cluster, and ballistic paths contain no runtime
-randomness.
+tie-breaking. Root Guidance retains its valid locked target on the carrier.
+Child Guidance does not inherit that lock across a trigger boundary; it
+reacquires independently, with the same stable tie rules and only inside its
+compiled homing Range. The simulator mirrors both scope rules. Spread, Cluster,
+and ballistic paths contain no runtime randomness.
 
 Registering a new plan revision or switching arms changes future shots only.
 In-flight executions retain their captured plan. Explicit destructive
@@ -277,17 +346,21 @@ and world clear still cancel matching executions by reason.
 
 ### Stagger
 
-Each target/execution pair tracks its largest nominal stagger duration. A new
-positive-damage packet contributes only:
+Each target/execution ledger entry records both `largestNominalDuration` and
+`totalGrantedDuration`. A positive-damage packet computes:
 
 ```text
-additional = max(0, newDuration - previousLargest)
-newEnd      = max(currentEnd, hitTime + additional)
+largest    = max(previousLargest, newDuration)
+additional = max(0, largest - previousTotalGranted)
+total      = previousTotalGranted + additional
 ```
 
-Equal or smaller packets add nothing; a later larger packet contributes the
-difference. Zero-damage hits do not advance the budget. Direct and Explosion
-packets share the same execution ledger.
+Combat extends the target's current stagger by exactly `additional`, instead
+of inferring a contribution from the status endpoint. Equal or smaller packets
+add nothing; a later larger packet grants the previously ungranted difference
+even when it arrives after the first status began. Zero-damage hits do not
+advance either ledger value. Direct and Explosion packets from the same
+execution share this target-specific budget.
 
 ## Loadout, attack domain, and presentation
 
@@ -333,7 +406,11 @@ pending intent and extends the arm without spending Energy. Combat re-samples
 the live muzzle and releases only after the projectile pose is sustained at
 full extension, preventing a shot from appearing at the hip. Weapon changes,
 dodge, ledge cling, death, control locks, and range transitions clear a pending
-intent without spending Energy.
+intent without spending Energy. The extension pose is independent from body
+locomotion: free primary fire permits normal tank turning and movement while
+projectiles remain active. Manual aim and retained lock-on deliberately keep
+aim-facing and use camera-relative strafing. Compiled cadence does not extend
+the body-facing lock or inherit the generic projectile stance linger.
 
 The unified HUD uses one `BAT` gauge, remaining/maximum shots, and
 `PWR / ENG / RNG / RPD / MAG` chips. It distinguishes `CYCLE`, `ENERGY`, and
@@ -560,6 +637,82 @@ Lab currently exposes:
 - Storage context/revision/read-only status and visible load or migration
   warnings.
 
+## Shared packet simulator and benchmark fixtures
+
+`simulateBusterEncounter` (an alias of
+`simulateBusterBalanceScenario`) consumes an ordered immutable compiled plan,
+uses a real diagnostic-capable `BusterRuntime`, and advances projectiles through
+the shared numeric kernel at an authoritative `1/120s` step. It simulates
+individual carrier, direct, split, trigger-child, and Explosion packets rather
+than multiplying aggregate Power by projectile count. Power conservation is
+checked before AoE fan-out; one Explosion packet may subsequently apply once
+to every eligible target capsule.
+
+The canonical fixture freezes these values:
+
+| Fixture value | Contract |
+| --- | --- |
+| Muzzle | `(0, 1.05, 0)` |
+| Body collider | Vertical capsule, radius `0.58`, height `1.80` |
+| Near / mid / far | `3.2 / 4.8 / 6.0` horizontal units |
+| Compact / separated chord | `1.20 / 2.50` units on an equal-radius arc |
+| Body aim height and offsets | `1.05`; center, `+/-0.29`, `+/-0.58` |
+| Weak point | Radius `0.24`, height `1.12`, forward offset `0.48` |
+| Weak-point aim offsets and multiplier | center, `+/-0.12`, `+/-0.24`; `2.4x` |
+
+Benchmark health and armor are also authored fixtures rather than generic
+dummy defaults. For `level` in `1..10`, they resolve as follows:
+
+| Profile | Health | Armor |
+| --- | --- | --- |
+| Ordinary | `24 x (1 + 0.16 x (level - 1))` | `0` |
+| Armored | `58 x (1 + 0.16 x (level - 1))` | `12 x (1 + 0.08 x (level - 1))` |
+| Elite | `43.2 x (1 + 0.18 x (level - 1))` | `10 x (1 + 0.10 x (level - 1))` |
+| Median procedural | `34 x (1 + 0.20 x (tier - 1)) x 1.12` | `8 x (1 + 0.12 x (tier - 1))` |
+| Weak point | Same as median procedural, plus authored direct-hit geometry and `2.4x` direct multiplier | Same as median procedural |
+
+For the procedural profiles, `tier = clamp(round(level), 1, 8)`. Production
+range dummies receive these exact resolved profile values from the shared
+scenario; their older fallback health/armor values are not used for benchmark
+fixtures.
+
+For chord `s` at distance `D`, the scenario builder uses
+`delta = 2 asin(s / 2D)` and non-overlapping equal-radius angular slots. It
+supports stationary, in-phase lateral, and one-stationary/one-lateral crossing
+motion. Unguided aim is sampled at muzzle release; Guidance updates each
+authoritative tick with production's stable target rules.
+
+Nonlethal scenarios drive fixed 10s/30s delivered-output contracts. Separate
+finite-health scenarios return TTK and room-clear results. Simulation results
+are immutable and use explicit `cleared`, `unresolved`, `invalid`, or
+`candidate-invalid` states rather than comparing infinities. Metrics include
+per-target packet transcripts, Energy timeline, mitigation, opening magazine,
+recovery, occupancy, misses, unique target coverage, direct weak-point hits,
+stagger grants, first impact, TTK/clear time, and pre-fan-out conservation.
+Armor applies the production fixture formula
+`delivered = incoming x 100 / (100 + armor)` and records the exact difference
+as mitigated Power. In lethal fixtures, death and room clear are timestamped at
+the precise lethal packet event within the frame, so TTK does not round up to
+the outer `1/120s` step.
+
+Both clocks are retained: release-relative values drive balance contracts,
+while input-relative values include the initial `0.18s` arm extension. Rotation
+reports split brace, swap, and combined transition-lock time.
+`simulateBusterRotation` reports 30s/60s feasible output lower bounds,
+best-single comparison, swaps, stable lexical tie resolution, termination
+metadata, and an explicit precision-tap input policy. The current strict report
+is `status: "bounded"`, `exact: false`, and `optimality: "unproven"`, so its
+`1.07427451` 60-second advantage ratio is report-only rather than a hard catalog
+judgment. Both the 30-second and 60-second searches reached `120001` processed
+transitions against the explicit `120000` transition bound before proving an
+exhaustive frontier. Moving rotation fixtures are rejected until delivery is
+recomputed for every absolute release rather than reusing a time-zero packet.
+
+The Lab's expected 10s/30s preview and benchmark expectation use this same
+packet/battery simulation against a stationary, unarmored, infinite-health
+midrange target. Live range measurements remain production observations and
+display their difference from the expectation.
+
 ## Production-backed benchmark range
 
 `enterBusterTestRange` uses the production compiler, `BusterRuntime`, projectile
@@ -568,8 +721,9 @@ supports one, two, or four targets and stationary, moving, armored, weak-point,
 or elite profiles at normalized depth 1, 5, or 10.
 
 The range tracks delivered and mitigated Power, Energy samples, opening
-magazine, projected 10s/30s output, peak occupancy, direct weak-point hits,
-stagger, misses, kills, and average TTK. It suppresses rewards. Exit clears
+magazine, simulator-expected and live-observed 10s/30s output, parity deltas,
+peak occupancy, direct weak-point hits, stagger, misses, kills, and average
+TTK. It suppresses rewards. Exit clears
 range projectiles and dummies, disposes range resources, restores position,
 loadout, active slot, arena radius, workshop state, and the pre-range runtime
 resource snapshot. When launched from Debug Tools, it closes the paused editor
@@ -603,56 +757,82 @@ from Debug Tools instead restores that Buster debug tab.
 The implementation regenerates deterministic encounter content; it does not
 clone the exact live-frame enemy state, which remains intentionally deferred.
 
-## Verification coverage
+## Verification coverage and command policy
 
-The ordinary Buster command currently runs:
+The command boundary intentionally distinguishes a correct implementation from
+a catalog whose authored role contracts pass:
 
 ```text
+npm run test:buster-simulation
+  -> compiler, runtime, shared-kernel, packet-simulator, detector, contract,
+     and headless-browser parity correctness
+
 npm run test:buster
-  -> tests/buster-compiler.test.mjs
-  -> tests/buster-lab-storage.test.mjs
-  -> tests/buster-runtime.test.mjs
-  -> tests/buster-balance.test.mjs
-  -> tests/buster-lab-runtime.spec.js
+  -> compiler, storage, runtime, kernel, simulator, balance-model, Lab runtime,
+     and headless-browser parity correctness
+
+npm test
+  -> syntax checks plus ordinary Buster and Reaverbot correctness suites
+
+npm run verify:buster-balance
+  -> strict frozen-catalog role verdict; currently exits unsuccessfully
+
+npm run verify:release
+  -> npm test, then the strict frozen-catalog verifier
 ```
 
-On July 14, 2026, `npm run check` passed and the focused suites passed all 74
-Node tests plus all 10 single-worker Chromium tests. The subsequent strict
-`npm run verify:buster-balance` command remains intentionally unsuccessful
-because the release gate described above does not pass.
+The Playwright checks run headlessly and do not require the Codex in-app
+browser. The strict verifier prints the stable sections `HARD CORRECTNESS`,
+`INTERNAL ROLE CONTRACTS`, `LEGACY CONTEXT REPORTS`, `SENSITIVITY DIAGNOSTICS`,
+and `RUNTIME POLICY WARNINGS`. Failed simulation-role entries retain their
+complete immutable actual and comparator transcripts in strict output, including
+release/input timestamps, projectile spawns, trigger reasons, packet recipients,
+Power, stagger, and Explosion fan-out; summaries do not replace this evidence.
 
-Adjacent verification also passed all 48 Reaverbot Node regressions and all
-five Roll-camp/pickup-floor Chromium regressions.
-
-These suites cover compiler constants and graph errors, structural/physical
+The focused suites cover compiler constants and graph errors, structural/physical
 separation, semantic capacity, trigger reachability, Power allocation, recipe
 transactions and secrecy, debug grants, blueprints/materialization at the
 storage level, graph-ordered in-transaction replication, context rotation and
 conflicts, no-lock/timeout read-only recovery, shadow-capacity reservation,
 legacy layout reconciliation, After Delay migration, external storage-event
-write pausing and recovery export, normalized three-weapon batteries, stagger
-deltas, swept lifecycle ordering at 30/60/120 Hz, deterministic trajectories,
-direct weak-point resolution, feature-off behavior, extended-muzzle timing,
-core Lab range use, blueprint creation and original-route materialization
-through Roll's UI, durable world-pickup commit ordering and idempotent retry,
-sandbox pre-entry transaction barriers, enemy-ID isolation, write rejection,
-repeated teardown/restoration, compiled
-lifecycle programs, corruption, and unknown-module quarantine.
+write pausing and recovery export, normalized batteries, input-independent
+recharge, full-only recovery unlock, stagger delta grants, shared capsule and
+swept-flight math, deterministic trajectories, diagnostic-plan isolation,
+explicit simulation states, non-overlapping benchmark geometry, Range-policy
+parity, neutral/live Mega compilation, Custom Explosion body-capsule collision,
+direct weak-point resolution, extended-muzzle timing, core Lab/range use,
+free-fire movement during live projectile persistence, blueprint
+materialization, sandbox isolation, corruption, and unknown-module quarantine.
 
-The balance test verifies that the exhaustive search reports the current
-blocker; it does not claim the release gate passes. `npm run check` enumerates
-both `BusterBalanceGate.js` and its strict verifier, and the Buster barrel
-exports the balance model.
+Headless production/simulator parity now also covers Pulse and Mortar at Range
+ratings `1/4/10` with both aim signs, large-frame guided Delay-Cluster delivery,
+root Guidance against a moving fixture, direct Spread-Explosion against the
+shared separated/off-axis fixture, Apex and Terminal Relay trigger timing and
+packets, and immutable in-flight completion across weapon switch/recompile.
+The latter test also proves that an explicit reasoned cancellation releases its
+reservation and cannot synthesize a pending child branch or damage packet.
+
+Mutation coverage demonstrates that hard correctness can fail independently of
+the role verdict, including pre-fan-out Power duplication and projectile-budget
+violations; malformed declarative contracts are rejected before evaluation.
+The balance test locks the 676 diagnostic candidates, the frozen production
+constants, the separate verdicts, and the known blocked role result. It does
+not claim that legacy reports can select or reject Custom-Buster constants.
 
 ## Current limitations and release blockers
 
 These are verified current facts and coverage limits.
 
-1. **The deterministic release gate fails.** The nearest authorized search
-   candidate is scalar `1.25`/Mortar `18`; it fails 89 of 90 comparisons. The
-   largest reported miss is level-10 direct Spread-Explosion room-clear time
-   `20.855263s` versus the standard Cannon fixture's `0.648649s`. No Cluster
-   fallback is authorized by the gate result.
+1. **The frozen catalog fails three internal role contracts.** Hard correctness
+   passes. Spread-Explosion widens separated coverage but delivers `52.8`
+   versus direct Explosion's `64` Power over 10 seconds; both delayed
+   Cluster-Explosion and its delayed plain comparator produce zero hits in the
+   authored separated scenario; and the declared-dominance check flags the
+   direct Spread-Explosion relationship over `spreadSeparated` and `single`.
+   These failures block
+   `verify:buster-balance`. The diagnostic 676-candidate matrix does not choose
+   a fallback, so scalar `1.00`, Mortar Power `15`, and Cluster surcharge `+2`
+   remain authoritative.
 
 2. **Generic equipment comparison remains legacy-oriented.** Optimize Loadout
    preserves existing Custom assignments and durably reconciles legacy Buster
@@ -668,11 +848,20 @@ These are verified current facts and coverage limits.
    does not cover defeat restoration, reward-generating combat, or asynchronous
    asset races.
 
-4. **Benchmark preview output is partly estimated.** Before or outside a live
-   range run, 10s/30s output is `finalRapid x effectivePower x time` and does
-   not simulate magazine lock/recovery. The displayed magazine recovery does
-   include the `0.65s` delay plus proportional full-battery refill time. Live
-   range output is an extrapolation of delivered Power over elapsed test time.
+4. **The current three-weapon rotation report is not proven exact.** The
+   event-driven search returns `status: "bounded"`, `exact: false`, and
+   `optimality: "unproven"` rather than silently claiming a completed optimum.
+   The current strict report has `329` output at 30 seconds, `547.88` at 60
+   seconds, `510` best-single output, an advantage ratio of `1.07427451`, and 8
+   swaps. Those swaps account for `1.62s` of brace time, `2.72s` of swap time,
+   and `4.34s` of combined transition-lock time. Its release/combat clock is
+   `59.82s` and its input/wall clock is `60s`. The 30s and 60s searches each
+   processed `120001` transitions and exceeded the `120000` bound before
+   exhausting the frontier, so the published output is a measured feasible
+   lower bound, not a proven optimum. The search also canonicalizes physical
+   state to six decimal places and omits consecutive no-fire swaps; its input
+   policy deliberately avoids insufficient requests. It remains an unresolved
+   runtime-policy limitation and a report-only value, not a hard role contract.
 
 5. **The Lab remains a partial save.** It has a campaign context identity,
     backups, corrupt quarantine, and locked writes, but not a general game-save
@@ -686,12 +875,16 @@ These are verified current facts and coverage limits.
     the awaited lock boundary.
 
 7. **Focused browser tests are still absent for several attack-domain claims.**
-    Pure/runtime tests cover direct weak-point resolution and metadata, but
-    there is no individual browser assertion for every suppressed generic proc,
-    Explosion body-only weak-point behavior, in-flight survival across a live
-    weapon switch/recompile, blueprint UI redaction for partial recipes, the
-    persistence import/export/adoption/New Campaign controls, or benchmark
-    metric parity.
+    Browser parity now covers profile-specific legacy Range, Custom capsule
+    Explosion inclusion, neutral/live Mega packet values, and direct range
+    weak-point amplification, moving root Guidance, separated/off-axis
+    Spread-Explosion coverage, Apex/Terminal lifecycle timing, and in-flight
+    survival plus explicit cancellation across a weapon switch/recompile. There
+    is still no individual browser assertion for every suppressed generic proc,
+    Explosion body-only weak-point behavior, blueprint UI redaction for partial
+    recipes, the persistence
+    import/export/adoption/New Campaign controls, or the full packet transcript
+    across every program/motion combination.
 
 ## Deferred families
 

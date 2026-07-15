@@ -5,6 +5,10 @@ import {
   BUSTER_LEVEL_10_POWER_SCALAR,
   BUSTER_POWER_SOFT_CAP_ASYMPTOTE,
   BUSTER_POWER_SOFT_CAP_STEEPNESS,
+  BUSTER_TUNING_MAX,
+  BUSTER_TUNING_MIN,
+  CUSTOM_BUSTER_RULESET,
+  MEGA_BUSTER_BASE_PROFILE,
   applyBusterPowerSoftCap,
   getBusterCombatDepthLevel,
   getBusterCombatDepthScalar,
@@ -15,14 +19,174 @@ import {
 import { deepFreezeBusterValue } from './model.js';
 import { validateBusterProgram } from './validation.js';
 
+const INTERNAL_RESOLVED_TUNING = Symbol('internalResolvedBusterTuning');
+const BALANCE_OVERRIDE_WHITELIST = Object.freeze({
+  mortarShell: Object.freeze({
+    basePower: (value) => Number.isFinite(value) && value > 0,
+  }),
+  cluster5: Object.freeze({
+    energyCost: (value) => Number.isInteger(value) && value >= 0,
+  }),
+});
+const TUNING_KEYS = Object.freeze(['power', 'energy', 'range', 'rapid']);
+
 export class BusterCompileError extends Error {
-  constructor(errors) {
+  constructor(errors, { warnings = [], diagnostic = null } = {}) {
     super(`Custom Buster compilation failed with ${errors.length} validation error${errors.length === 1 ? '' : 's'}.`);
     this.name = 'BusterCompileError';
     this.code = 'BUSTER_COMPILE_FAILED';
     this.errors = errors;
+    this.warnings = warnings;
+    if (diagnostic) this.diagnostic = diagnostic;
     Object.freeze(this);
   }
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function optionError(code, path, moduleId, message) {
+  return { code, path, moduleId: moduleId ?? null, message };
+}
+
+function readBalanceOverrides(options = {}) {
+  const errors = [];
+  const definitionOverrides = new Map();
+  const metadata = [];
+  let diagnosticRequested = false;
+  const source = options.balanceOverrides;
+  const hasAuthoredOverrides = source !== undefined && source !== null;
+
+  if (hasAuthoredOverrides && !isRecord(source)) {
+    errors.push(optionError(
+      'INVALID_BALANCE_OVERRIDES',
+      '/options/balanceOverrides',
+      null,
+      'balanceOverrides must be an object containing whitelisted diagnostic module fields.',
+    ));
+  } else if (isRecord(source)) {
+    const moduleIds = Object.keys(source);
+    if (moduleIds.length > 0 && options.diagnosticContext === true) {
+      diagnosticRequested = true;
+    }
+    if (moduleIds.length > 0 && options.diagnosticContext !== true) {
+      errors.push(optionError(
+        'DIAGNOSTIC_CONTEXT_REQUIRED',
+        '/options/diagnosticContext',
+        null,
+        'Balance overrides are diagnostic-only and require diagnosticContext: true.',
+      ));
+    }
+
+    for (const moduleId of moduleIds) {
+      const allowedFields = BALANCE_OVERRIDE_WHITELIST[moduleId];
+      const modulePath = `/options/balanceOverrides/${moduleId}`;
+      if (!allowedFields) {
+        errors.push(optionError(
+          'UNSUPPORTED_BALANCE_OVERRIDE',
+          modulePath,
+          moduleId,
+          `Module "${moduleId}" has no diagnostic balance overrides.`,
+        ));
+        continue;
+      }
+      const authoredFields = source[moduleId];
+      if (!isRecord(authoredFields)) {
+        errors.push(optionError(
+          'INVALID_BALANCE_OVERRIDE',
+          modulePath,
+          moduleId,
+          `Diagnostic overrides for "${moduleId}" must be an object.`,
+        ));
+        continue;
+      }
+
+      const resolvedFields = {};
+      for (const field of Object.keys(authoredFields)) {
+        const validate = allowedFields[field];
+        const fieldPath = `${modulePath}/${field}`;
+        if (!validate) {
+          errors.push(optionError(
+            'UNSUPPORTED_BALANCE_OVERRIDE',
+            fieldPath,
+            moduleId,
+            `Field "${moduleId}.${field}" cannot be overridden.`,
+          ));
+          continue;
+        }
+        const diagnosticValue = authoredFields[field];
+        if (!validate(diagnosticValue)) {
+          errors.push(optionError(
+            'INVALID_BALANCE_OVERRIDE',
+            fieldPath,
+            moduleId,
+            field === 'basePower'
+              ? `${moduleId}.${field} must be a finite number greater than zero.`
+              : `${moduleId}.${field} must be an integer greater than or equal to zero.`,
+          ));
+          continue;
+        }
+        const catalogValue = getBusterModuleDefinition(moduleId)[field];
+        resolvedFields[field] = diagnosticValue;
+        metadata.push({ moduleId, field, catalogValue, diagnosticValue });
+      }
+      if (Object.keys(resolvedFields).length > 0) definitionOverrides.set(moduleId, resolvedFields);
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(options, 'level10PowerScalar')) {
+    const diagnosticValue = options.level10PowerScalar;
+    if (!Number.isFinite(diagnosticValue) || diagnosticValue <= 0) {
+      diagnosticRequested = options.diagnosticContext === true;
+      errors.push(optionError(
+        'INVALID_BALANCE_OVERRIDE',
+        '/options/level10PowerScalar',
+        'ruleset',
+        'level10PowerScalar must be a finite number greater than zero.',
+      ));
+    } else if (diagnosticValue !== BUSTER_LEVEL_10_POWER_SCALAR) {
+      if (options.diagnosticContext !== true) {
+        errors.push(optionError(
+          'DIAGNOSTIC_CONTEXT_REQUIRED',
+          '/options/diagnosticContext',
+          'ruleset',
+          'A noncatalog level10PowerScalar is diagnostic-only and requires diagnosticContext: true.',
+        ));
+      } else {
+        diagnosticRequested = true;
+        metadata.push({
+          moduleId: 'ruleset',
+          field: 'level10PowerScalar',
+          catalogValue: BUSTER_LEVEL_10_POWER_SCALAR,
+          diagnosticValue,
+        });
+      }
+    }
+  }
+
+  const diagnostic = diagnosticRequested || metadata.length > 0
+    ? { overrideOnly: true, overrides: metadata }
+    : null;
+  return { errors, definitionOverrides, diagnostic };
+}
+
+function compileFailure(errors, warnings, options, diagnostic = null) {
+  const frozenErrors = deepFreezeBusterValue(errors);
+  const frozenWarnings = deepFreezeBusterValue(warnings ?? []);
+  const frozenDiagnostic = diagnostic ? deepFreezeBusterValue(diagnostic) : null;
+  if (options?.throwOnError === false) {
+    return deepFreezeBusterValue({
+      ok: false,
+      errors: frozenErrors,
+      warnings: frozenWarnings,
+      ...(frozenDiagnostic ? { diagnostic: frozenDiagnostic } : {}),
+    });
+  }
+  throw new BusterCompileError(frozenErrors, {
+    warnings: frozenWarnings,
+    diagnostic: frozenDiagnostic,
+  });
 }
 
 function buildGraph(build) {
@@ -42,7 +206,7 @@ function buildGraph(build) {
   };
 }
 
-function readSequences(build) {
+function readSequences(build, resolveDefinition = getBusterModuleDefinition) {
   const graph = buildGraph(build);
   const root = [];
   const child = [];
@@ -51,7 +215,7 @@ function readSequences(build) {
 
   while (current) {
     root.push(current);
-    const definition = getBusterModuleDefinition(current.moduleId);
+    const definition = resolveDefinition(current.moduleId);
     if (definition.kind === 'trigger') {
       triggerNode = current;
       break;
@@ -183,39 +347,42 @@ function getRevision(build, options) {
  * plan. Invalid builds throw BusterCompileError unless throwOnError is false.
  */
 export function compileBusterBuild(build, options = {}) {
+  const diagnostics = readBalanceOverrides(options);
+  if (diagnostics.errors.length > 0) {
+    return compileFailure(diagnostics.errors, [], options, diagnostics.diagnostic);
+  }
   const validation = validateBusterProgram(build, options);
   if (!validation.valid) {
-    if (options?.throwOnError === false) {
-      return deepFreezeBusterValue({
-        ok: false,
-        errors: validation.errors,
-        warnings: validation.warnings,
-      });
-    }
-    throw new BusterCompileError(validation.errors);
+    return compileFailure(validation.errors, validation.warnings, options, diagnostics.diagnostic);
   }
 
   const sourceBuild = validation.normalizedBuild;
-  const sequences = readSequences(sourceBuild);
+  const resolveDefinition = (moduleId) => {
+    const definition = getBusterModuleDefinition(moduleId);
+    const override = diagnostics.definitionOverrides.get(moduleId);
+    return definition && override ? { ...definition, ...override } : definition;
+  };
+  const sequences = readSequences(sourceBuild, resolveDefinition);
   const emitterNode = sequences.root[0];
-  const emitter = getBusterModuleDefinition(emitterNode.moduleId);
+  const emitter = resolveDefinition(emitterNode.moduleId);
   const triggerNode = sequences.triggerNode;
-  const trigger = triggerNode ? getBusterModuleDefinition(triggerNode.moduleId) : null;
-  const rootGuidanceNode = sequences.root.find((node) => getBusterModuleDefinition(node.moduleId).kind === 'modifier') ?? null;
-  const childGuidanceNode = sequences.child.find((node) => getBusterModuleDefinition(node.moduleId).kind === 'modifier') ?? null;
-  const rootGuidance = rootGuidanceNode ? getBusterModuleDefinition(rootGuidanceNode.moduleId) : null;
-  const childGuidance = childGuidanceNode ? getBusterModuleDefinition(childGuidanceNode.moduleId) : null;
-  const splitterNode = sequences.ordered.find((node) => getBusterModuleDefinition(node.moduleId).kind === 'splitter') ?? null;
-  const payloadNode = sequences.ordered.find((node) => getBusterModuleDefinition(node.moduleId).kind === 'payload') ?? null;
-  const splitter = splitterNode ? getBusterModuleDefinition(splitterNode.moduleId) : null;
-  const explicitPayload = payloadNode ? getBusterModuleDefinition(payloadNode.moduleId) : null;
+  const trigger = triggerNode ? resolveDefinition(triggerNode.moduleId) : null;
+  const rootGuidanceNode = sequences.root.find((node) => resolveDefinition(node.moduleId).kind === 'modifier') ?? null;
+  const childGuidanceNode = sequences.child.find((node) => resolveDefinition(node.moduleId).kind === 'modifier') ?? null;
+  const rootGuidance = rootGuidanceNode ? resolveDefinition(rootGuidanceNode.moduleId) : null;
+  const childGuidance = childGuidanceNode ? resolveDefinition(childGuidanceNode.moduleId) : null;
+  const splitterNode = sequences.ordered.find((node) => resolveDefinition(node.moduleId).kind === 'splitter') ?? null;
+  const payloadNode = sequences.ordered.find((node) => resolveDefinition(node.moduleId).kind === 'payload') ?? null;
+  const splitter = splitterNode ? resolveDefinition(splitterNode.moduleId) : null;
+  const explicitPayload = payloadNode ? resolveDefinition(payloadNode.moduleId) : null;
   const splitterConfiguration = getSplitterConfiguration(splitter);
   const triggerConfiguration = getTriggerConfiguration(trigger);
   const payloadConfiguration = getPayloadConfiguration(explicitPayload, emitter);
 
-  const powerMultiplier = getBusterTuningMultiplier(sourceBuild.tuning.power);
-  const rangeMultiplier = getBusterTuningMultiplier(sourceBuild.tuning.range);
-  const rapidMultiplier = getBusterTuningMultiplier(sourceBuild.tuning.rapid);
+  const resolvedTuning = options[INTERNAL_RESOLVED_TUNING] ?? sourceBuild.tuning;
+  const powerMultiplier = getBusterTuningMultiplier(resolvedTuning.power);
+  const rangeMultiplier = getBusterTuningMultiplier(resolvedTuning.range);
+  const rapidMultiplier = getBusterTuningMultiplier(resolvedTuning.rapid);
   const combatDepthLevel = getBusterCombatDepthLevel(options?.combatDepthLevel ?? 1);
   const level10PowerScalar = Number.isFinite(Number(options?.level10PowerScalar))
     ? Number(options.level10PowerScalar)
@@ -228,13 +395,13 @@ export function compileBusterBuild(build, options = {}) {
   const childRange = rootRange * BUSTER_CHILD_RANGE_MULTIPLIER;
   const baseRapid = emitter.baseRapid * rapidMultiplier;
   const baseCycleTime = 1 / baseRapid;
-  const maxEnergy = getBusterMaxEnergy(sourceBuild.tuning.energy);
+  const maxEnergy = getBusterMaxEnergy(resolvedTuning.energy);
   const energyCost = sequences.ordered.reduce(
-    (sum, node) => sum + getBusterModuleDefinition(node.moduleId).energyCost,
+    (sum, node) => sum + resolveDefinition(node.moduleId).energyCost,
     0,
   );
   const cycleDelay = sequences.ordered.reduce(
-    (sum, node) => sum + getBusterModuleDefinition(node.moduleId).cycleDelay,
+    (sum, node) => sum + resolveDefinition(node.moduleId).cycleDelay,
     0,
   );
   const cycleTime = baseCycleTime + cycleDelay;
@@ -552,7 +719,7 @@ export function compileBusterBuild(build, options = {}) {
   }
 
   const energyEntries = sequences.ordered.map((node) => {
-    const definition = getBusterModuleDefinition(node.moduleId);
+    const definition = resolveDefinition(node.moduleId);
     return {
       nodeId: node.nodeId,
       moduleId: definition.id,
@@ -565,7 +732,7 @@ export function compileBusterBuild(build, options = {}) {
     .map((node) => ({
       nodeId: node.nodeId,
       moduleId: node.moduleId,
-      delay: getBusterModuleDefinition(node.moduleId).cycleDelay,
+      delay: resolveDefinition(node.moduleId).cycleDelay,
     }))
     .filter((entry) => entry.delay > 0);
   const ledger = {
@@ -666,6 +833,7 @@ export function compileBusterBuild(build, options = {}) {
     source: { build: sourceBuild, revision },
     sourceBuild,
     sourceRevision: revision,
+    ...(diagnostics.diagnostic ? { diagnostic: diagnostics.diagnostic } : {}),
     warnings: validation.warnings,
     programOrder,
     emitter: emitterConfiguration,
@@ -688,5 +856,95 @@ export function compileBusterBuild(build, options = {}) {
     actions,
     preview,
     description,
+  });
+}
+
+/**
+ * Compile the fixed Mega Buster pulse through the same immutable execution
+ * pipeline as Custom Busters. `resolvedTuning` is supplied by the calibration
+ * owner; this helper deliberately does not assume or install a starter part.
+ */
+export function compileMegaBusterPlan(configuration = {}, legacyOptions = {}) {
+  const positionalTuning = isRecord(configuration)
+    && !Object.prototype.hasOwnProperty.call(configuration, 'resolvedTuning')
+    && TUNING_KEYS.every((key) => Object.prototype.hasOwnProperty.call(configuration, key));
+  let resolvedTuning;
+  let options;
+  if (positionalTuning) {
+    // Kept for callers from early v0.2 development; new integrations should
+    // use the explicit object form below.
+    resolvedTuning = configuration;
+    options = legacyOptions;
+  } else {
+    const {
+      resolvedTuning: authoredTuning = MEGA_BUSTER_BASE_PROFILE.tuning,
+      calibrationRevision,
+      ...compileOptions
+    } = isRecord(configuration) ? configuration : {};
+    resolvedTuning = authoredTuning;
+    options = {
+      ...compileOptions,
+      ...(calibrationRevision === undefined ? {} : { revision: calibrationRevision }),
+    };
+  }
+  const errors = [];
+  if (!isRecord(resolvedTuning)) {
+    errors.push(optionError(
+      'INVALID_MEGA_TUNING',
+      '/resolvedTuning',
+      null,
+      'Mega Buster tuning must contain four resolved ratings.',
+    ));
+  }
+  const tuning = {};
+  for (const key of TUNING_KEYS) {
+    const value = resolvedTuning?.[key];
+    if (!Number.isInteger(value) || value < BUSTER_TUNING_MIN || value > BUSTER_TUNING_MAX) {
+      errors.push(optionError(
+        'INVALID_MEGA_TUNING_RATING',
+        `/resolvedTuning/${key}`,
+        null,
+        `${key} must be an integer from ${BUSTER_TUNING_MIN} through ${BUSTER_TUNING_MAX}.`,
+      ));
+    } else {
+      tuning[key] = value;
+    }
+  }
+  if (errors.length > 0) return compileFailure(errors, [], options);
+
+  const source = {
+    schemaVersion: CUSTOM_BUSTER_RULESET.schemaVersion,
+    rulesetVersion: CUSTOM_BUSTER_RULESET.rulesetVersion,
+    buildId: MEGA_BUSTER_BASE_PROFILE.buildId,
+    chassisId: MEGA_BUSTER_BASE_PROFILE.chassisId,
+    tuning: { ...MEGA_BUSTER_BASE_PROFILE.tuning },
+    program: {
+      rootNodeId: 'mega-pulse',
+      nodes: [{
+        nodeId: 'mega-pulse',
+        moduleId: MEGA_BUSTER_BASE_PROFILE.emitterModuleId,
+        moduleInstanceId: 'mega-pulse-core',
+      }],
+      edges: [],
+    },
+  };
+  const compiled = compileBusterBuild(source, {
+    ...options,
+    [INTERNAL_RESOLVED_TUNING]: tuning,
+  });
+  if (!compiled?.ok) return compiled;
+
+  const stats = compiled.stats;
+  return deepFreezeBusterValue({
+    ...compiled,
+    weaponKey: MEGA_BUSTER_BASE_PROFILE.buildId,
+    buildId: MEGA_BUSTER_BASE_PROFILE.buildId,
+    isMegaBuster: true,
+    resolvedTuning: tuning,
+    preview: {
+      ...compiled.preview,
+      title: 'Mega Buster',
+    },
+    description: `Fixed Mega Buster Pulse. ${stats.shotsPerCharge} shots per battery; weapon-local PWR / ENG / RNG / RPD.`,
   });
 }

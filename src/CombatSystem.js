@@ -775,6 +775,9 @@ export class CombatSystem {
     pointer.alternatePressed = false;
 
     const fireRequested = (pointer.primary || primaryPressed) && !this.suppressPrimaryUntilRelease;
+    // Primary fire alone never owns locomotion. Manual aim and a retained
+    // movement lock deliberately keep aim-facing and use strafe movement.
+    const compiledAimLocksFacing = Boolean(pointer.secondary || this.getMovementLockTarget());
     const poseReadyBeforeHold = this._isCompiledBusterPoseReady(weaponKey);
     let startedExtension = false;
     let releasedShot = false;
@@ -786,7 +789,11 @@ export class CombatSystem {
       firingContext = this._createCompiledBusterFiringContext(pending);
       const fired = runtime.fire(firingContext, weaponKey);
       releasedShot = true;
-      if (fired.ok) this._playCompiledBusterShotAnimation(plan, firingContext);
+      if (fired.ok) {
+        this._playCompiledBusterShotAnimation(plan, firingContext, {
+          lockFacing: compiledAimLocksFacing,
+        });
+      }
     }
 
     if (!releasedShot
@@ -805,11 +812,17 @@ export class CombatSystem {
         firingContext = this._createCompiledBusterFiringContext(intent);
         const fired = runtime.fire(firingContext, weaponKey);
         releasedShot = true;
-        if (fired.ok) this._playCompiledBusterShotAnimation(plan, firingContext);
+        if (fired.ok) {
+          this._playCompiledBusterShotAnimation(plan, firingContext, {
+            lockFacing: compiledAimLocksFacing,
+          });
+        }
       } else {
         this.pendingCompiledBusterShot = intent;
         firingContext = this._createCompiledBusterFiringContext(intent);
-        this._playCompiledBusterShotAnimation(plan, firingContext);
+        this._playCompiledBusterShotAnimation(plan, firingContext, {
+          lockFacing: compiledAimLocksFacing,
+        });
         startedExtension = true;
       }
     }
@@ -826,14 +839,14 @@ export class CombatSystem {
         target: this.getTargetingLockTarget(),
         noRewards: Boolean(this.game.busterTestRange?.active || this.game.busterSandboxSession?.active),
       });
-      const cycleTime = plan.stats?.cycleTime ?? plan.cycleTime ?? 0.24;
       player.holdProjectileFiringPose(
         this._getFacingAimWorld(poseContext.aimPoint),
-        Math.max(COMPILED_BUSTER_EXTENSION_DURATION, cycleTime + PROJECTILE_AIM_LOCK_BUFFER),
+        COMPILED_BUSTER_EXTENSION_DURATION,
         {
           weaponKey,
           continuous: true,
           aimTargetPosition: poseContext.aimPoint,
+          lockFacing: compiledAimLocksFacing,
         },
       );
     }
@@ -881,8 +894,7 @@ export class CombatSystem {
     };
   }
 
-  _playCompiledBusterShotAnimation(plan, context) {
-    const cycleTime = plan.stats?.cycleTime ?? plan.cycleTime ?? 0.24;
+  _playCompiledBusterShotAnimation(plan, context, { lockFacing = true } = {}) {
     const targetPoint = context.origin.clone().addScaledVector(
       context.direction,
       plan.stats?.rootRange ?? plan.rootRange ?? 6.9,
@@ -890,10 +902,12 @@ export class CombatSystem {
     this.game.player.playProjectileShotAnimation(
       COMPILED_BUSTER_EXTENSION_DURATION,
       this._getFacingAimWorld(targetPoint),
-      cycleTime + PROJECTILE_AIM_LOCK_BUFFER,
+      COMPILED_BUSTER_EXTENSION_DURATION,
       {
         weaponKey: plan.weaponKey ?? plan.buildId ?? 'megaBuster',
         aimTargetPosition: targetPoint,
+        continuous: true,
+        lockFacing,
       },
     );
   }
@@ -2907,6 +2921,7 @@ export class CombatSystem {
     if (profile.special === 'lift') return profile.liftRange ?? 1.55;
     if (profile.melee) return baseRange;
     if (isBusterProfile(profile)) return baseRange;
+    if (profile.type === 'machineGunArm' || profile.type === 'cannonArm') return baseRange;
 
     return baseRange + 1.8;
   }

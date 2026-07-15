@@ -28,17 +28,22 @@ import {
   CUSTOM_BUSTER_RULESET,
   MEGA_BUSTER_BASE_PROFILE,
   MEGA_BUSTER_CALIBRATION_CATALOG,
-  getBusterCombatDepthScalar,
   getBusterModuleDefinition,
-  getBusterTuningMultiplier,
 } from './buster/catalog.js';
 import {
   getClusterDirections,
   getSpreadDirections,
   sampleBallisticPoint,
 } from './buster/BusterTrajectory.js';
+import { sphereIntersectsTargetCapsule } from './buster/BusterProjectileKernel.js';
+import {
+  BUSTER_BENCHMARK_FIXTURE,
+  createBusterBenchmarkScenario,
+  simulateBusterEncounter,
+} from './buster/BusterBalanceSimulator.js';
 import {
   compileBusterBuild,
+  compileMegaBusterPlan,
   deepFreezeBusterValue,
   serializeBusterBuild,
   validateBusterBuild,
@@ -240,7 +245,10 @@ function getBusterMagazineRecoveryTime(plan) {
   );
   if (maxEnergy <= 0 || energyCost <= 0 || shots <= 0) return 0;
   const spentEnergy = Math.min(maxEnergy, energyCost * shots);
-  return CUSTOM_BUSTER_RULESET.rechargeDelay
+  return Math.max(
+    CUSTOM_BUSTER_RULESET.rechargeDelay,
+    Math.max(0, Number(stats.cycleTime) || 0),
+  )
     + CUSTOM_BUSTER_RULESET.rechargeDuration * (spentEnergy / maxEnergy);
 }
 
@@ -315,16 +323,28 @@ function createBusterRangeDummy(id, position, {
   moving = false,
   profile = 'stationary',
   depthLevel = 1,
+  rotationY = 0,
+  motionRight = null,
+  motionPhase = 0,
+  facingOrigin = null,
+  benchmarkProfile = null,
 } = {}) {
   const normalizedDepth = [1, 5, 10].includes(Number(depthLevel)) ? Number(depthLevel) : 1;
   const armored = profile === 'armored';
   const elite = profile === 'elite';
   const weakPointProfile = profile === 'weakPoint';
-  const maxHealth = (60 + normalizedDepth * 12) * (elite ? 1.65 : armored ? 1.25 : 1);
-  const armor = armored ? 38 + normalizedDepth * 1.5 : elite ? 20 + normalizedDepth : 0;
+  const fallbackMaxHealth = (60 + normalizedDepth * 12) * (elite ? 1.65 : armored ? 1.25 : 1);
+  const fallbackArmor = armored ? 38 + normalizedDepth * 1.5 : elite ? 20 + normalizedDepth : 0;
+  const maxHealth = Number.isFinite(Number(benchmarkProfile?.health))
+    ? Math.max(1, Number(benchmarkProfile.health))
+    : fallbackMaxHealth;
+  const armor = Number.isFinite(Number(benchmarkProfile?.armor))
+    ? Math.max(0, Number(benchmarkProfile.armor))
+    : fallbackArmor;
   const root = new THREE.Group();
   root.name = `busterRangeDummy:${id}`;
   root.position.copy(position);
+  root.rotation.y = Number(rotationY) || 0;
   const bodyMaterial = new THREE.MeshStandardMaterial({
     color: armored ? 0x596978 : elite ? 0x9b5b45 : moving ? 0x6b7d8d : 0x7d6f62,
     emissive: 0x102a35,
@@ -339,19 +359,47 @@ function createBusterRangeDummy(id, position, {
     metalness: 0.25,
     roughness: 0.25,
   });
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.62, 1.65, 16), bodyMaterial);
-  body.position.y = 0.86;
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(
+    BUSTER_BENCHMARK_FIXTURE.targetRadius,
+    BUSTER_BENCHMARK_FIXTURE.targetHeight - BUSTER_BENCHMARK_FIXTURE.targetRadius * 2,
+    8,
+    16,
+  ), bodyMaterial);
+  body.position.y = BUSTER_BENCHMARK_FIXTURE.targetHeight * 0.5;
   body.castShadow = true;
-  const core = new THREE.Mesh(new THREE.SphereGeometry(weakPointProfile ? 0.25 : 0.17, 14, 10), coreMaterial);
-  core.position.set(0, 1.12, -0.48);
+  const core = new THREE.Mesh(new THREE.SphereGeometry(
+    weakPointProfile ? BUSTER_BENCHMARK_FIXTURE.weakPointRadius : 0.17,
+    14,
+    10,
+  ), coreMaterial);
+  core.position.set(
+    0,
+    BUSTER_BENCHMARK_FIXTURE.weakPointHeight,
+    -BUSTER_BENCHMARK_FIXTURE.weakPointForwardOffset,
+  );
   root.add(body, core);
   const home = position.clone();
+  const authoredMotionRight = motionRight
+    ? new THREE.Vector3(
+      Number(motionRight.x) || 0,
+      Number(motionRight.y) || 0,
+      Number(motionRight.z) || 0,
+    ).normalize()
+    : new THREE.Vector3(1, 0, 0);
+  const authoredFacingOrigin = facingOrigin
+    ? new THREE.Vector3(
+      Number(facingOrigin.x) || 0,
+      Number(facingOrigin.y) || 0,
+      Number(facingOrigin.z) || 0,
+    )
+    : null;
 
   return {
     id,
     typeKey: 'busterRangeDummy',
     root,
-    radius: 0.58,
+    radius: BUSTER_BENCHMARK_FIXTURE.targetRadius,
+    collisionHeight: BUSTER_BENCHMARK_FIXTURE.targetHeight,
     dead: false,
     health: maxHealth,
     stats: { maxHealth, armor, experience: 0, damage: 0 },
@@ -367,17 +415,33 @@ function createBusterRangeDummy(id, position, {
       kills: 0,
       clearTimes: [],
       lifeStartedAt: 0,
+      firstHitAt: null,
     },
     update(dt) {
       this.elapsed += dt;
-      if (moving) root.position.x = home.x + Math.sin(this.elapsed * 1.35) * 2.2;
+      if (moving) {
+        const displacement = Math.sin(
+          this.elapsed * BUSTER_BENCHMARK_FIXTURE.lateralRate + motionPhase,
+        ) * BUSTER_BENCHMARK_FIXTURE.lateralAmplitude;
+        root.position.copy(home).addScaledVector(authoredMotionRight, displacement);
+        if (authoredFacingOrigin) {
+          root.rotation.y = Math.atan2(
+            root.position.x - authoredFacingOrigin.x,
+            root.position.z - authoredFacingOrigin.z,
+          );
+        }
+      }
     },
     takeDamage(amount, meta = {}) {
       const incoming = Math.max(0, Number(amount) || 0);
+      const benchmarkIncoming = weakPointProfile && meta.weakPointHit
+        ? incoming * 2.4
+        : incoming;
       const effectiveArmor = Math.max(0, this.stats.armor - (meta.armorPierce ?? 0));
-      const dealt = incoming * (100 / (100 + effectiveArmor));
+      const dealt = benchmarkIncoming * (100 / (100 + effectiveArmor));
+      if (this.benchmark.firstHitAt == null) this.benchmark.firstHitAt = this.elapsed;
       this.benchmark.deliveredPower += dealt;
-      this.benchmark.mitigatedPower += Math.max(0, incoming - dealt);
+      this.benchmark.mitigatedPower += Math.max(0, benchmarkIncoming - dealt);
       this.benchmark.hitCount += 1;
       if (meta.weakPointHit) this.benchmark.weakPointHits += 1;
       this.health = Math.max(0, this.health - dealt);
@@ -390,13 +454,14 @@ function createBusterRangeDummy(id, position, {
       return dealt;
     },
     resolveProjectileHit(projectilePosition, projectileRadius) {
-      const center = root.position.clone().add(new THREE.Vector3(0, 1.05, 0));
-      if (center.distanceToSquared(projectilePosition) > (this.radius + projectileRadius) ** 2) return null;
+      if (!weakPointProfile) return null;
       const weakPointPosition = core.getWorldPosition(new THREE.Vector3());
-      const weakPointHit = weakPointPosition.distanceTo(projectilePosition) <= projectileRadius + 0.24;
+      const weakPointHit = weakPointPosition.distanceTo(projectilePosition)
+        <= projectileRadius + BUSTER_BENCHMARK_FIXTURE.weakPointRadius;
+      if (!weakPointHit) return null;
       return {
-        hitPartId: weakPointHit ? 'range-core' : 'range-body',
-        weakPointHit,
+        hitPartId: 'range-core',
+        weakPointHit: true,
         hitPosition: projectilePosition.clone(),
       };
     },
@@ -512,8 +577,12 @@ export class Game {
       targetCount: 1,
       profile: 'stationary',
       depthLevel: 1,
+      distanceBand: 'mid',
+      layout: 'compact',
+      aimOffset: 'center',
     };
     this.busterBenchmarkLastMetrics = null;
+    this.busterBenchmarkSimulationCache = new Map();
     this.busterStorageOperationQueue = Promise.resolve();
     this.busterGameCommandQueue = Promise.resolve();
     this.busterStorageOperationPending = 0;
@@ -2744,7 +2813,11 @@ export class Game {
                 position: projectile.mesh.position.clone(),
                 direction: projectile.direction.clone(),
               };
-              return { dispose: true, reason: 'delayTrigger' };
+              return {
+                dispose: true,
+                reason: 'delayTrigger',
+                consumedTime: dt * fraction,
+              };
             }
             return null;
           },
@@ -2862,6 +2935,7 @@ export class Game {
         damagePlayer: false,
         triggerMines: false,
         visualStyle: 'fierySphere',
+        targetGeometry: 'verticalCapsule',
         attackDomain: CUSTOM_BUSTER_ATTACK_META.attackDomain,
         suppressGenericOffense: true,
         suppressRewards: Boolean(context.noRewards),
@@ -2912,173 +2986,12 @@ export class Game {
     if (!state) return null;
     const calibration = this._ensureMegaCalibrationState(state);
     const tuning = this._getMegaCalibrationRatings(state);
-    const source = {
-      schemaVersion: 1,
-      rulesetVersion: CUSTOM_BUSTER_RULESET.rulesetVersion,
-      buildId: MEGA_BUSTER_BASE_PROFILE.buildId,
-      chassisId: MEGA_BUSTER_BASE_PROFILE.chassisId,
-      tuning: { ...MEGA_BUSTER_BASE_PROFILE.tuning },
-      program: {
-        rootNodeId: 'mega-pulse',
-        nodes: [{
-          nodeId: 'mega-pulse',
-          moduleId: MEGA_BUSTER_BASE_PROFILE.emitterModuleId,
-          moduleInstanceId: 'mega-pulse-core',
-        }],
-        edges: [],
-      },
-    };
-    const compiled = compileBusterBuild(source, {
-      revision: calibration.revision,
+    const plan = compileMegaBusterPlan({
+      resolvedTuning: tuning,
+      calibrationRevision: calibration.revision,
       combatDepthLevel: this.combatDepthLevel,
     });
-    const emitter = getBusterModuleDefinition(MEGA_BUSTER_BASE_PROFILE.emitterModuleId);
-    const powerMultiplier = getBusterTuningMultiplier(tuning.power);
-    const rangeMultiplier = getBusterTuningMultiplier(tuning.range);
-    const rapidMultiplier = getBusterTuningMultiplier(tuning.rapid);
-    const depthScalar = getBusterCombatDepthScalar(this.combatDepthLevel);
-    const power = Number((emitter.basePower * powerMultiplier * depthScalar).toFixed(12));
-    const rootRange = emitter.baseRange * rangeMultiplier;
-    const baseRapid = emitter.baseRapid * rapidMultiplier;
-    const cycleTime = 1 / baseRapid;
-    const energyRatingDelta = tuning.energy - MEGA_BUSTER_BASE_PROFILE.tuning.energy;
-    const maxEnergy = MEGA_BUSTER_BASE_PROFILE.baseMaxEnergy
-      + CUSTOM_BUSTER_RULESET.maxEnergyPerEnergyRating * energyRatingDelta;
-    const stagger = Math.min(0.18, power * 0.01);
-    const stats = {
-      ...compiled.stats,
-      tunedPower: power,
-      effectivePower: power,
-      rawEffectivePower: power,
-      effectivePowerCap: power * 1.25,
-      perChildPower: power,
-      carrierPower: 0,
-      maxEnergy,
-      energyCost: MEGA_BUSTER_BASE_PROFILE.energyCost,
-      energyRemaining: maxEnergy - MEGA_BUSTER_BASE_PROFILE.energyCost,
-      baseRapid,
-      cycleTime,
-      finalRapid: baseRapid,
-      rootRange,
-      childRange: rootRange * CUSTOM_BUSTER_RULESET.childRangeMultiplier,
-      shotsPerCharge: Math.floor(maxEnergy / MEGA_BUSTER_BASE_PROFILE.energyCost),
-      stagger,
-      tuningMultipliers: {
-        power: powerMultiplier,
-        range: rangeMultiplier,
-        rapid: rapidMultiplier,
-        depth: depthScalar,
-      },
-    };
-    const action = {
-      ...compiled.actions[0],
-      power,
-      totalPower: power,
-      damagePower: power,
-      range: rootRange,
-      stagger,
-    };
-    const packets = {
-      ...compiled.packets,
-      root: {
-        ...compiled.packets.root,
-        power,
-        totalPower: power,
-        damagePower: power,
-        range: rootRange,
-      },
-    };
-    const powerLedger = [
-      {
-        stage: 'mega-calibration',
-        moduleId: MEGA_BUSTER_BASE_PROFILE.emitterModuleId,
-        scope: 'root',
-        inputPower: emitter.basePower,
-        multiplier: powerMultiplier * depthScalar,
-        outputPower: power,
-        allocation: { root: power },
-        capClipped: 0,
-      },
-      {
-        stage: 'effective-cap',
-        moduleId: null,
-        scope: 'root',
-        inputPower: power,
-        multiplier: 1,
-        outputPower: power,
-        allocation: { carrier: 0, terminalBatch: power },
-        capClipped: 0,
-      },
-      {
-        stage: 'projectile-allocation',
-        moduleId: null,
-        scope: 'root',
-        inputPower: power,
-        multiplier: 1,
-        outputPower: power,
-        allocation: { count: 1, each: power, total: power },
-        capClipped: 0,
-      },
-    ];
-    const ledger = {
-      energy: {
-        maxEnergy,
-        energyCost: MEGA_BUSTER_BASE_PROFILE.energyCost,
-        remaining: maxEnergy - MEGA_BUSTER_BASE_PROFILE.energyCost,
-        entries: [{
-          nodeId: 'mega-pulse',
-          moduleId: MEGA_BUSTER_BASE_PROFILE.emitterModuleId,
-          moduleInstanceId: 'mega-pulse-core',
-          energyCost: MEGA_BUSTER_BASE_PROFILE.energyCost,
-        }],
-      },
-      cycle: {
-        baseCycleTime: cycleTime,
-        moduleDelay: 0,
-        cycleTime,
-        entries: [],
-      },
-      power: {
-        basePower: emitter.basePower,
-        tunedPower: power,
-        effectivePowerCap: power * CUSTOM_BUSTER_RULESET.effectivePowerCapMultiplier,
-        rawEffectivePower: power,
-        effectivePower: power,
-        capClipped: 0,
-        entries: powerLedger,
-      },
-    };
-    const preview = {
-      ...compiled.preview,
-      packets,
-      damage: {
-        total: power,
-        carrier: 0,
-        terminalBatch: power,
-        perProjectile: power,
-        stagger,
-        radius: 0,
-      },
-      timing: { cycleTime, triggerDelay: 0 },
-    };
-    const plan = deepFreezeBusterValue({
-      ...compiled,
-      weaponKey: 'megaBuster',
-      buildId: 'megaBuster',
-      isMegaBuster: true,
-      revision: calibration.revision,
-      buildRevision: calibration.revision,
-      stats,
-      actions: [action],
-      packets,
-      ledger,
-      preview,
-      rootPower: power,
-      perChildPower: power,
-      childPower: power,
-      powerLedger,
-      description: `Fixed Mega Buster Pulse. ${stats.shotsPerCharge} shots per battery; weapon-local PWR / ENG / RNG / RPD.`,
-    });
+    if (!plan?.ok) return null;
     this.busterLabPlans.set('megaBuster', plan);
     this.busterRuntime?.register(plan);
     return plan;
@@ -3365,9 +3278,77 @@ export class Game {
     const next = { ...this.busterBenchmarkOptions };
     if (update.targetCount != null) next.targetCount = [1, 2, 4].includes(Number(update.targetCount)) ? Number(update.targetCount) : 1;
     if (update.depthLevel != null) next.depthLevel = [1, 5, 10].includes(Number(update.depthLevel)) ? Number(update.depthLevel) : 1;
-    if (update.profile != null) next.profile = String(update.profile);
+    if (update.profile != null) {
+      const profile = String(update.profile);
+      next.profile = ['stationary', 'moving', 'armored', 'weakPoint', 'elite'].includes(profile)
+        ? profile
+        : 'stationary';
+    }
+    if (update.distanceBand != null) {
+      next.distanceBand = ['near', 'mid', 'far'].includes(String(update.distanceBand))
+        ? String(update.distanceBand)
+        : 'mid';
+    }
+    if (update.layout != null) next.layout = update.layout === 'separated' ? 'separated' : 'compact';
+    if (update.aimOffset != null) {
+      next.aimOffset = ['center', 'half-radius', 'edge'].includes(String(update.aimOffset))
+        ? String(update.aimOffset)
+        : 'center';
+    }
     this.busterBenchmarkOptions = next;
     return { ok: true, options: { ...next } };
+  }
+
+  _getCachedBusterBenchmarkSimulation(plan, scenarioOptions, cacheScope = 'range') {
+    if (!plan?.ok) return null;
+    const scenario = createBusterBenchmarkScenario({
+      ...scenarioOptions,
+      duration: 30,
+      nonlethal: true,
+    });
+    let sourceSignature = '';
+    try {
+      const source = plan.sourceBuild ?? plan.source?.build;
+      sourceSignature = source ? serializeBusterBuild(source) : '';
+    } catch {
+      sourceSignature = '';
+    }
+    const diagnosticOverrides = (plan.diagnostic?.overrides ?? [])
+      .map((entry) => ({
+        moduleId: entry.moduleId ?? null,
+        field: entry.field ?? null,
+        catalogValue: entry.catalogValue ?? null,
+        diagnosticValue: entry.diagnosticValue ?? null,
+      }))
+      .sort((left, right) => (
+        String(left.moduleId).localeCompare(String(right.moduleId))
+          || String(left.field).localeCompare(String(right.field))
+      ));
+    const cacheKey = JSON.stringify({
+      cacheScope,
+      buildId: plan.buildId,
+      revision: plan.sourceRevision ?? plan.buildRevision ?? plan.revision ?? 0,
+      combatDepthLevel: plan.stats?.combatDepthLevel ?? scenario.combatDepthLevel,
+      level10PowerScalar: plan.stats?.level10PowerScalar ?? 1,
+      resolvedTuning: plan.resolvedTuning ?? plan.stats?.tuning ?? null,
+      diagnosticOverrides,
+      sourceSignature,
+      scenarioId: scenario.id,
+    });
+    const cached = this.busterBenchmarkSimulationCache.get(cacheKey);
+    if (cached) return cached;
+    let simulation = null;
+    try {
+      simulation = simulateBusterEncounter(plan, scenario, { duration: 30 });
+    } catch (error) {
+      console.warn('Buster benchmark simulation failed', error);
+    }
+    if (!simulation) return null;
+    this.busterBenchmarkSimulationCache.set(cacheKey, simulation);
+    while (this.busterBenchmarkSimulationCache.size > 24) {
+      this.busterBenchmarkSimulationCache.delete(this.busterBenchmarkSimulationCache.keys().next().value);
+    }
+    return simulation;
   }
 
   getBusterLabViewModel(selectedBuildId = 'build-a') {
@@ -3511,37 +3492,134 @@ export class Game {
         program: { rootNodeId: null, nodes: [], edges: [] },
       }
       : draft;
+    const benchmarkDepthLevel = [1, 5, 10].includes(Number(this.busterBenchmarkOptions.depthLevel))
+      ? Number(this.busterBenchmarkOptions.depthLevel)
+      : 1;
     const benchmarkPlan = buildId === 'megaBuster'
-      ? megaPlan
+      ? compileMegaBusterPlan({
+        resolvedTuning: this._getMegaCalibrationRatings(state),
+        calibrationRevision: calibration.revision,
+        combatDepthLevel: benchmarkDepthLevel,
+      })
       : blueprintKnowledge?.locked
         ? null
-        : compiled?.ok ? compiled : null;
+        : validation.valid
+          ? this._compileCustomBusterBuild(draft, {
+            revision: selectedBlueprint?.revision ?? this._getBuildRevision(buildId) + 1,
+            combatDepthLevel: benchmarkDepthLevel,
+          })
+          : null;
     const benchmarkStats = benchmarkPlan?.stats ?? {};
-    const openingPower = Number(benchmarkStats.effectivePower ?? 0)
-      * Number(benchmarkStats.shotsPerCharge ?? 0);
     const measuredBenchmark = this.busterTestRange?.buildId === buildId
       ? this.busterTestRange.metrics
       : this.busterBenchmarkLastMetrics?.buildId === buildId
         ? this.busterBenchmarkLastMetrics
         : null;
-    const benchmarkRange = benchmarkPlan ? {
+    const benchmarkConfigKey = (config = {}) => JSON.stringify({
+      targetCount: Number(config.targetCount) || 1,
+      profile: config.profile ?? 'stationary',
+      depthLevel: Number(config.depthLevel) || 1,
+      distanceBand: config.distanceBand ?? 'mid',
+      layout: config.layout ?? 'compact',
+      aimOffset: config.aimOffset ?? 'center',
+    });
+    const measuredConfig = this.busterTestRange?.buildId === buildId
+      ? this.busterTestRange.benchmarkConfig
+      : measuredBenchmark?.config;
+    const measuredMatchesFixture = Boolean(
+      measuredBenchmark
+      && benchmarkConfigKey(measuredConfig) === benchmarkConfigKey(this.busterBenchmarkOptions),
+    );
+    const sustainedPreview = benchmarkPlan?.ok
+      ? this._getCachedBusterBenchmarkSimulation(benchmarkPlan, {
+        depthLevel: benchmarkDepthLevel,
+        targetCount: 1,
+        profile: 'ordinary',
+        motion: 'stationary',
+        distanceBand: 'mid',
+        layout: 'compact',
+        aimOffset: 'center',
+      }, 'lab-sustained-preview')
+      : null;
+    const expectedRange = benchmarkPlan?.ok
+      ? this._getCachedBusterBenchmarkSimulation(benchmarkPlan, {
+        ...this.busterBenchmarkOptions,
+        depthLevel: benchmarkDepthLevel,
+      }, 'production-range-parity')
+      : null;
+    const previewMetrics = sustainedPreview?.metrics ?? {};
+    const expectedMetrics = expectedRange?.metrics ?? {};
+    const measuredOutput10s = Number(measuredBenchmark?.output10s);
+    const measuredOutput30s = Number(measuredBenchmark?.output30s);
+    const expectedOutput10s = Number(expectedMetrics.output10s);
+    const expectedOutput30s = Number(expectedMetrics.output30s);
+    const parityDelta10s = measuredMatchesFixture
+      && Number.isFinite(measuredOutput10s)
+      && Number.isFinite(expectedOutput10s)
+      ? measuredOutput10s - expectedOutput10s
+      : null;
+    const parityDelta30s = measuredMatchesFixture
+      && Number.isFinite(measuredOutput30s)
+      && Number.isFinite(expectedOutput30s)
+      ? measuredOutput30s - expectedOutput30s
+      : null;
+    const benchmarkMetrics = {
+      deliveredPower: benchmarkStats.effectivePower ?? 0,
+      mitigation: measuredBenchmark?.mitigatedPower ?? expectedMetrics.mitigation ?? 0,
+      openingMagazine: previewMetrics.openingMagazinePower
+        ?? Number(benchmarkStats.effectivePower ?? 0) * Number(benchmarkStats.shotsPerCharge ?? 0),
+      recoveryTime: previewMetrics.recoveryTime ?? getBusterMagazineRecoveryTime(benchmarkPlan),
+      output10s: previewMetrics.output10s ?? 0,
+      output30s: previewMetrics.output30s ?? 0,
+      expectedOutput10s: expectedMetrics.output10s,
+      expectedOutput30s: expectedMetrics.output30s,
+      parityDelta10s,
+      parityDelta30s,
+      parityPercent10s: parityDelta10s != null && Math.abs(expectedOutput10s) > 0.000001
+        ? parityDelta10s / expectedOutput10s * 100
+        : null,
+      parityPercent30s: parityDelta30s != null && Math.abs(expectedOutput30s) > 0.000001
+        ? parityDelta30s / expectedOutput30s * 100
+        : null,
+      occupancy: expectedMetrics.peakOccupancy
+        ?? benchmarkPlan?.occupancy?.peakMovingProjectiles
+        ?? benchmarkPlan?.peakProjectileReservation
+        ?? 1,
+      uniqueTargetsDamagedPerTrigger: expectedMetrics.uniqueTargetsDamagedPerTrigger,
+      uniqueTargetsDamaged10s: expectedMetrics.uniqueTargetsDamaged10s,
+      weakPointResult: benchmarkPlan?.payload?.type === 'explosion'
+        ? 'Splash: body only'
+        : 'Direct eligible',
+      stagger: expectedMetrics.staggerGranted
+        ?? benchmarkPlan?.preview?.damage?.stagger
+        ?? benchmarkStats.stagger
+        ?? 0,
+      misses: expectedMetrics.misses ?? 0,
+      releaseToFirstImpact: expectedMetrics.releaseToFirstImpact,
+      inputToFirstImpact: expectedMetrics.inputToFirstImpact,
+      ...(measuredBenchmark ?? {}),
+    };
+    // Keep exact expected values and parity data authoritative when measured
+    // production metrics are overlaid onto the same result card.
+    benchmarkMetrics.expectedOutput10s = expectedMetrics.output10s;
+    benchmarkMetrics.expectedOutput30s = expectedMetrics.output30s;
+    benchmarkMetrics.parityDelta10s = parityDelta10s;
+    benchmarkMetrics.parityDelta30s = parityDelta30s;
+    benchmarkMetrics.parityPercent10s = benchmarkMetrics.parityPercent10s ?? null;
+    benchmarkMetrics.parityPercent30s = benchmarkMetrics.parityPercent30s ?? null;
+    const benchmarkRange = benchmarkPlan?.ok ? {
       configurable: !this.busterTestRange?.active,
       running: Boolean(this.busterTestRange?.active),
-      status: this.busterTestRange?.active ? 'Running production-backed benchmark' : 'Ready',
+      status: this.busterTestRange?.active
+        ? 'Running production-backed benchmark'
+        : measuredBenchmark && !measuredMatchesFixture
+          ? 'Ready — last live measurement used a different fixture'
+          : sustainedPreview
+            ? 'Ready — exact packet simulation cached'
+            : 'Preview unavailable',
       config: { ...this.busterBenchmarkOptions },
-      metrics: {
-        deliveredPower: benchmarkStats.effectivePower ?? 0,
-        mitigation: 0,
-        openingMagazine: openingPower,
-        recoveryTime: getBusterMagazineRecoveryTime(benchmarkPlan),
-        output10s: Number(benchmarkStats.finalRapid ?? 0) * Number(benchmarkStats.effectivePower ?? 0) * 10,
-        output30s: Number(benchmarkStats.finalRapid ?? 0) * Number(benchmarkStats.effectivePower ?? 0) * 30,
-        occupancy: benchmarkPlan.occupancy?.peakMovingProjectiles ?? benchmarkPlan.peakProjectileReservation ?? 1,
-        weakPointResult: benchmarkPlan.payload?.type === 'explosion' ? 'Splash: body only' : 'Direct eligible',
-        stagger: benchmarkPlan.preview?.damage?.stagger ?? benchmarkStats.stagger ?? 0,
-        misses: 0,
-        ...(measuredBenchmark ?? {}),
-      },
+      expectedStatus: expectedRange?.status ?? 'invalid',
+      metrics: benchmarkMetrics,
     } : null;
     const unlinkedMigration = state.migrations?.unlinkedLegacyCalibrationsV2;
     const permanentMigrationWarning = unlinkedMigration?.count > 0
@@ -3957,9 +4035,15 @@ export class Game {
     if (buildId === 'megaBuster') {
       const mega = this.busterLabPlans.get('megaBuster');
       if (mega) {
+        const rangeMega = compileMegaBusterPlan({
+          resolvedTuning: mega.resolvedTuning ?? this._getMegaCalibrationRatings(this._getBusterLabState()),
+          calibrationRevision: mega.revision,
+          combatDepthLevel: this.busterBenchmarkOptions.depthLevel,
+        });
+        if (!rangeMega?.ok) return { ok: false, message: 'The Mega Buster benchmark plan could not compile.' };
         plan = deepFreezeBusterValue({
-          ...mega,
-          weaponKey: `test:megaBuster:${mega.revision}`,
+          ...rangeMega,
+          weaponKey: `test:megaBuster:${rangeMega.revision}`,
           testRange: true,
         });
       }
@@ -4011,23 +4095,27 @@ export class Game {
       rangeGroup.add(rail);
     }
     const benchmarkConfig = { ...this.busterBenchmarkOptions };
-    const targetCount = [1, 2, 4].includes(benchmarkConfig.targetCount)
-      ? benchmarkConfig.targetCount
-      : 1;
-    const offsets = targetCount === 1
-      ? [0]
-      : targetCount === 2
-        ? [-1.65, 1.65]
-        : [-2.7, -0.9, 0.9, 2.7];
-    // Keep every target inside a neutral-rating Mortar's range so all v0.2
-    // emitter families can be measured against the same arrangement.
-    const dummies = offsets.map((xOffset, index) => createBusterRangeDummy(
-      `range-${benchmarkConfig.profile}-${index + 1}`,
-      bayCenter.clone().add(new THREE.Vector3(xOffset, 0, 4.9 + (index % 2) * 0.25)),
+    const benchmarkScenario = createBusterBenchmarkScenario({
+      ...benchmarkConfig,
+      duration: 30,
+      nonlethal: true,
+    });
+    const dummies = benchmarkScenario.targets.map((target, index) => createBusterRangeDummy(
+      `range-${benchmarkScenario.targetProfileId}-${index + 1}`,
+      bayCenter.clone().add(new THREE.Vector3(
+        target.root.position.x,
+        target.root.position.y,
+        target.root.position.z,
+      )),
       {
-        moving: benchmarkConfig.profile === 'moving',
-        profile: benchmarkConfig.profile,
-        depthLevel: benchmarkConfig.depthLevel,
+        moving: target.motion === 'lateral',
+        profile: benchmarkScenario.targetProfileId,
+        depthLevel: benchmarkScenario.combatDepthLevel,
+        rotationY: Math.atan2(target.forward.x, target.forward.z),
+        motionRight: target.right,
+        motionPhase: target.phase,
+        facingOrigin: bayCenter,
+        benchmarkProfile: benchmarkScenario.profile,
       },
     ));
     for (const dummy of dummies) rangeGroup.add(dummy.root);
@@ -4059,8 +4147,10 @@ export class Game {
       group: rangeGroup,
       dummies,
       benchmarkConfig,
+      benchmarkScenario,
       startedAt: this.elapsedTime,
       startExecutionCounter: this.busterRuntime.executionCounter,
+      firstReleaseAt: null,
       peakOccupancy: 0,
       energyTimeline: [],
       metrics: null,
@@ -4160,6 +4250,11 @@ export class Game {
       summary.stagger += metrics.stagger;
       summary.kills += metrics.kills;
       summary.clearTimes.push(...metrics.clearTimes);
+      if (metrics.firstHitAt != null) {
+        summary.firstHitAt = summary.firstHitAt == null
+          ? metrics.firstHitAt
+          : Math.min(summary.firstHitAt, metrics.firstHitAt);
+      }
       return summary;
     }, {
       deliveredPower: 0,
@@ -4169,8 +4264,13 @@ export class Game {
       stagger: 0,
       kills: 0,
       clearTimes: [],
+      firstHitAt: null,
     });
     const shotsFired = Math.max(0, this.busterRuntime.executionCounter - range.startExecutionCounter);
+    if (shotsFired > 0 && range.firstReleaseAt == null) range.firstReleaseAt = elapsed;
+    const releaseElapsed = range.firstReleaseAt == null
+      ? 0
+      : Math.max(0.001, elapsed - range.firstReleaseAt);
     const expectedPackets = shotsFired * Math.max(1, range.plan.projectileCount ?? 1);
     const averageClearTime = aggregate.clearTimes.length > 0
       ? aggregate.clearTimes.reduce((sum, value) => sum + value, 0) / aggregate.clearTimes.length
@@ -4180,13 +4280,17 @@ export class Game {
       mitigation: aggregate.mitigatedPower,
       openingMagazine: (range.plan.stats?.effectivePower ?? 0) * (range.plan.stats?.shotsPerCharge ?? 0),
       recoveryTime: getBusterMagazineRecoveryTime(range.plan),
-      output10s: aggregate.deliveredPower / elapsed * 10,
-      output30s: aggregate.deliveredPower / elapsed * 30,
+      output10s: releaseElapsed > 0 ? aggregate.deliveredPower / releaseElapsed * 10 : 0,
+      output30s: releaseElapsed > 0 ? aggregate.deliveredPower / releaseElapsed * 30 : 0,
       occupancy: range.peakOccupancy,
       weakPointResult: `${aggregate.weakPointHits} direct weak-point hit${aggregate.weakPointHits === 1 ? '' : 's'}`,
       stagger: aggregate.stagger,
       misses: Math.max(0, expectedPackets - aggregate.hitCount),
       ttk: averageClearTime,
+      releaseToFirstImpact: aggregate.firstHitAt == null || range.firstReleaseAt == null
+        ? null
+        : Math.max(0, aggregate.firstHitAt - range.firstReleaseAt),
+      inputToFirstImpact: aggregate.firstHitAt,
       kills: aggregate.kills,
       energyTimeline: [...range.energyTimeline],
     };
@@ -5416,7 +5520,10 @@ export class Game {
           continue;
         }
 
-        if (enemy.root.position.distanceTo(position) <= radius) {
+        const insideExplosion = meta.targetGeometry === 'verticalCapsule'
+          ? sphereIntersectsTargetCapsule({ center: position, radius, target: enemy })
+          : enemy.root.position.distanceTo(position) <= radius;
+        if (insideExplosion) {
           tempVectorA.copy(enemy.root.position).sub(position).setY(0).normalize();
           const enemyHitStopDuration = meta.enemyHitStopDuration ?? meta.hitStopDuration ?? 0.1;
           const globalHitStopDuration = meta.globalHitStopDuration ?? meta.hitStopDuration ?? 0.1;
@@ -8079,7 +8186,10 @@ export class Game {
 
     const staggerDuration = resolveBusterStaggerDuration(meta, enemy, dealt);
     if (staggerDuration > 0) {
-      enemy.applyStatus('stagger', { duration: staggerDuration });
+      enemy.applyStatus('stagger', {
+        duration: staggerDuration,
+        extend: Boolean(meta.busterExecutionStaggerLedger),
+      });
     }
   }
 

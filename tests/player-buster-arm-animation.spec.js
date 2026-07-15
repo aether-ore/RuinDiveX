@@ -8,7 +8,12 @@ async function openLoadedGame(page) {
       { timeout: 20_000 },
     )
     .toBe('true');
-  await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
+  await page.waitForFunction(() => (
+    window.game?.player?._fbxAnimationLibraryLoaded === true
+    && window.game.player._busterArmLoaded === true
+    && Boolean(window.game.player.externalRig?.megaBusterMuzzle)
+    && Boolean(window.game.player.externalRig?.megaBusterArmGroup)
+  ));
 }
 
 test('Mega Buster stays on the left while slot 2 and 3 weapons use the right arm', async ({ page }) => {

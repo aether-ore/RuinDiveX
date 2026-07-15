@@ -87,6 +87,14 @@ function hasCompatibleEmitterTag(definition, emitterDefinition) {
   return compatible.length === 0 || compatible.some((tag) => tags.has(tag));
 }
 
+function getValidationEnergyCost(definition, options) {
+  if (definition?.id !== 'cluster5' || options?.diagnosticContext !== true) {
+    return definition?.energyCost ?? 0;
+  }
+  const override = options?.balanceOverrides?.cluster5?.energyCost;
+  return Number.isInteger(override) && override >= 0 ? override : definition.energyCost;
+}
+
 /**
  * Validates a source graph without mutating it. Error paths always refer to the
  * caller's original array order, while `normalizedBuild` is deterministic.
@@ -573,7 +581,10 @@ function validateBusterSource(build, options = {}, { validatePhysical = true } =
   }
 
   if (!hasUnknownModule && allTuningRatingsValid) {
-    const energyCost = knownNodes.reduce((sum, { definition }) => sum + definition.energyCost, 0);
+    const energyCost = knownNodes.reduce(
+      (sum, { definition }) => sum + getValidationEnergyCost(definition, options),
+      0,
+    );
     const maxEnergy = getBusterMaxEnergy(tuning.energy);
     if (energyCost > maxEnergy) {
       fail(

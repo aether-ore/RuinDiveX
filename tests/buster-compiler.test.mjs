@@ -9,6 +9,7 @@ import {
   MEGA_BUSTER_CALIBRATION_CATALOG,
   applyBusterPowerSoftCap,
   compileBusterBuild,
+  compileMegaBusterPlan,
   deserializeBusterBuild,
   getBusterCombatDepthScalar,
   normalizeBusterBuild,
@@ -152,6 +153,32 @@ test('a neutral pulse emitter compiles to the base conformance values', () => {
   assert.ok(Object.isFrozen(plan.stats));
   assert.ok(Object.isFrozen(plan.actions[0].payload));
   assert.ok(!Object.isFrozen(source));
+});
+
+test('Mega plans compile from resolved tuning without assuming a starter calibration', () => {
+  const neutral = compileMegaBusterPlan({
+    resolvedTuning: { power: 4, energy: 4, range: 4, rapid: 4 },
+    calibrationRevision: 7,
+  });
+  assert.equal(neutral.isMegaBuster, true);
+  assert.equal(neutral.weaponKey, 'megaBuster');
+  assert.equal(neutral.revision, 7);
+  assert.equal(neutral.stats.effectivePower, 8);
+  assert.equal(neutral.stats.maxEnergy, 6);
+  assert.equal(neutral.stats.energyCost, 2);
+  assert.equal(neutral.stats.shotsPerCharge, 3);
+  assert.equal(neutral.stats.rootRange, 6.9);
+  assert.equal(neutral.stats.baseRapid, 4.2);
+  assert.deepEqual(neutral.resolvedTuning, { power: 4, energy: 4, range: 4, rapid: 4 });
+  assert.equal(Object.isFrozen(neutral), true);
+
+  const calibrated = compileMegaBusterPlan({
+    resolvedTuning: { power: 6, energy: 4, range: 4, rapid: 4 },
+  });
+  approximately(calibrated.stats.effectivePower, 9.12);
+  assert.equal(calibrated.stats.maxEnergy, 6);
+  assert.equal(calibrated.actions[0].power, calibrated.stats.effectivePower);
+  assert.equal(calibrated.packets.root.damagePower, calibrated.stats.effectivePower);
 });
 
 test('spread3 multiplies aggregate power before allocating three projectiles', () => {
@@ -475,14 +502,32 @@ test('After Delay rejects unreachable carriers and warns for a narrow valid wind
   assert.ok(Object.isFrozen(narrow.warnings));
 });
 
-test('soft-cap math and combat-depth scaling are deterministic and exposed in the ledger', () => {
+test('soft-cap math and diagnostic combat-depth scaling are deterministic and contained', () => {
   assert.equal(applyBusterPowerSoftCap(1.25), 1.25);
   approximately(applyBusterPowerSoftCap(1.26), 1.25 + 0.01 / 1.04);
   assert.ok(applyBusterPowerSoftCap(100) < 1.5);
   approximately(getBusterCombatDepthScalar(5, 1.18), 1.08);
   assert.equal(getBusterCombatDepthScalar(10, 1.18), 1.18);
 
-  const plan = compileBusterBuild(build([node('emitter', 'pulseBolt')]), {
+  const source = build([node('emitter', 'pulseBolt')]);
+  const canonical = compileBusterBuild(source, {
+    combatDepthLevel: 5,
+    level10PowerScalar: 1,
+  });
+  assert.equal(canonical.stats.combatDepthScalar, 1);
+  assert.equal(canonical.stats.effectivePower, 8);
+  assert.equal(canonical.diagnostic, undefined);
+
+  const unauthorized = compileBusterBuild(source, {
+    throwOnError: false,
+    combatDepthLevel: 5,
+    level10PowerScalar: 1.18,
+  });
+  assert.equal(unauthorized.ok, false);
+  assert.ok(unauthorized.errors.some((error) => error.code === 'DIAGNOSTIC_CONTEXT_REQUIRED'));
+
+  const plan = compileBusterBuild(source, {
+    diagnosticContext: true,
     combatDepthLevel: 5,
     level10PowerScalar: 1.18,
   });
@@ -492,6 +537,99 @@ test('soft-cap math and combat-depth scaling are deterministic and exposed in th
   approximately(plan.stats.effectivePower, 8 * 1.08);
   assert.equal(plan.ledger.power.entries[1].stage, 'combat-depth');
   assert.equal(plan.preview.powerSoftCap, null);
+  assert.equal(plan.diagnostic.overrideOnly, true);
+  assert.deepEqual(plan.diagnostic.overrides, [{
+    moduleId: 'ruleset',
+    field: 'level10PowerScalar',
+    catalogValue: 1,
+    diagnosticValue: 1.18,
+  }]);
+});
+
+test('diagnostic balance overrides are strict, immutable, and reflected throughout compilation', () => {
+  const source = build(
+    [
+      node('emitter', 'mortarShell'),
+      node('delay', 'afterDelay', null),
+      node('cluster', 'cluster5'),
+      node('payload', 'explosion'),
+    ],
+    [
+      edge('emitter', 'next', 'delay'),
+      edge('delay', 'child', 'cluster'),
+      edge('cluster', 'next', 'payload'),
+    ],
+  );
+  const plan = compileBusterBuild(source, {
+    diagnosticContext: true,
+    combatDepthLevel: 10,
+    level10PowerScalar: 1.18,
+    balanceOverrides: {
+      mortarShell: { basePower: 17 },
+      cluster5: { energyCost: 1 },
+    },
+  });
+
+  assert.equal(plan.diagnostic.overrideOnly, true);
+  assert.deepEqual(
+    plan.diagnostic.overrides.map(({ moduleId, field }) => [moduleId, field]),
+    [
+      ['mortarShell', 'basePower'],
+      ['cluster5', 'energyCost'],
+      ['ruleset', 'level10PowerScalar'],
+    ],
+  );
+  assert.equal(Object.isFrozen(plan.diagnostic.overrides), true);
+  assert.equal(plan.stats.basePower, 17);
+  assert.equal(plan.emitter.basePower, 17);
+  assert.equal(plan.stats.energyCost, 5);
+  assert.equal(plan.ledger.energy.energyCost, 5);
+  assert.equal(
+    plan.ledger.energy.entries.find((entry) => entry.moduleId === 'cluster5').energyCost,
+    1,
+  );
+  approximately(plan.stats.depthScaledPower, 17 * 1.18);
+
+  const withoutContext = compileBusterBuild(source, {
+    throwOnError: false,
+    balanceOverrides: { mortarShell: { basePower: 16 } },
+  });
+  assert.ok(withoutContext.errors.some((error) => error.code === 'DIAGNOSTIC_CONTEXT_REQUIRED'));
+
+  const unsupported = compileBusterBuild(source, {
+    throwOnError: false,
+    diagnosticContext: true,
+    balanceOverrides: { mortarShell: { baseRapid: 9 } },
+  });
+  assert.ok(unsupported.errors.some((error) => error.code === 'UNSUPPORTED_BALANCE_OVERRIDE'));
+
+  const invalidEnergy = compileBusterBuild(source, {
+    throwOnError: false,
+    diagnosticContext: true,
+    balanceOverrides: { cluster5: { energyCost: 3 } },
+  });
+  assert.ok(invalidEnergy.errors.some((error) => error.code === 'INSUFFICIENT_ENERGY'));
+  assert.equal(invalidEnergy.diagnostic.overrideOnly, true);
+  assert.deepEqual(invalidEnergy.diagnostic.overrides, [{
+    moduleId: 'cluster5',
+    field: 'energyCost',
+    catalogValue: 2,
+    diagnosticValue: 3,
+  }]);
+  assert.equal(Object.isFrozen(invalidEnergy.diagnostic), true);
+
+  assert.throws(
+    () => compileBusterBuild(source, {
+      diagnosticContext: true,
+      balanceOverrides: { cluster5: { energyCost: 3 } },
+    }),
+    (error) => {
+      assert.ok(error instanceof BusterCompileError);
+      assert.equal(error.diagnostic.overrideOnly, true);
+      assert.equal(error.diagnostic.overrides[0].diagnosticValue, 3);
+      return true;
+    },
+  );
 });
 
 test('normalization and serialization are canonical, pure, and retain unknown ids', () => {

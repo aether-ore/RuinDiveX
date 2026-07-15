@@ -3,6 +3,20 @@ import {
   getBallisticApexProgress,
   sampleBallisticPoint,
 } from './buster/BusterTrajectory.js';
+import {
+  BUSTER_PROJECTILE_EVENT_EPSILON,
+  BUSTER_PROJECTILE_GUIDANCE_STEP,
+  BUSTER_PROJECTILE_MAX_EVENTS_PER_FRAME,
+  chooseEarlierBusterProjectileEvent,
+  chooseEarlierBusterProjectileImpact,
+  chooseStableBusterGuidanceCandidate,
+  createBusterSegmentPositionSampler,
+  findSampledBusterCapsuleHitFraction,
+  findStraightBusterCapsuleHitFraction,
+  getBusterTargetCollisionHeight,
+  getPointToVerticalCapsuleAxisDistanceSquared,
+  steerBusterDirection,
+} from './buster/BusterProjectileKernel.js';
 import { PLAYER_TRAVERSAL_ENVELOPE } from './TraversalCapabilities.js';
 import {
   getCombatTargetOwner,
@@ -17,122 +31,11 @@ const BUSTER_SHOT_TEXTURE_SIZE = 128;
 const BUSTER_SHOT_ASPECT = 1.76;
 const BUSTER_SHOT_WIDTH_SCALE = 3.8;
 const BUSTER_SHOT_ROTATION_SPEED = 1.45;
-const CONTROLLED_EVENT_EPSILON = 0.000001;
-const CONTROLLED_MAX_EVENTS_PER_FRAME = 16;
 const tempPosition = new THREE.Vector3();
 const tempDirection = new THREE.Vector3();
 const tempExplosionPosition = new THREE.Vector3();
 const tempClusterDirection = new THREE.Vector3();
 let busterShotTextures = null;
-
-function getTargetCollisionHeight(target, fallbackHeight = 1.8) {
-  return Math.max(
-    (target?.radius ?? 0.42) * 2.2,
-    target?.collisionHeight ?? target?.type?.modelHeight ?? fallbackHeight,
-  );
-}
-
-function getProjectileCapsuleDistanceSquared(position, target, height) {
-  const radius = target?.radius ?? 0.42;
-  const bottom = (target?.root?.position?.y ?? 0) + radius;
-  const top = Math.max(bottom, (target?.root?.position?.y ?? 0) + height - radius);
-  tempPosition.set(
-    target?.root?.position?.x ?? 0,
-    THREE.MathUtils.clamp(position.y, bottom, top),
-    target?.root?.position?.z ?? 0,
-  );
-  return position.distanceToSquared(tempPosition);
-}
-
-function getProjectileCapsuleDistanceSquaredAt(position, target, height) {
-  const radius = target?.radius ?? 0.42;
-  const root = target?.root?.position ?? target?.position ?? { x: 0, y: 0, z: 0 };
-  const bottom = (root.y ?? 0) + radius;
-  const top = Math.max(bottom, (root.y ?? 0) + height - radius);
-  const closestY = THREE.MathUtils.clamp(position.y, bottom, top);
-  const dx = position.x - (root.x ?? 0);
-  const dy = position.y - closestY;
-  const dz = position.z - (root.z ?? 0);
-  return dx * dx + dy * dy + dz * dz;
-}
-
-function findStraightCapsuleHitFraction(start, end, target, projectileRadius, height) {
-  const collisionRadius = projectileRadius + (target?.radius ?? 0.42);
-  const radiusSq = collisionRadius * collisionRadius;
-  const samplePosition = (fraction) => ({
-    x: THREE.MathUtils.lerp(start.x, end.x, fraction),
-    y: THREE.MathUtils.lerp(start.y, end.y, fraction),
-    z: THREE.MathUtils.lerp(start.z, end.z, fraction),
-  });
-  const distanceAt = (fraction) => (
-    getProjectileCapsuleDistanceSquaredAt(samplePosition(fraction), target, height)
-  );
-
-  if (distanceAt(0) <= radiusSq) return 0;
-
-  // Squared distance from a line segment to a vertical capsule is convex.
-  // Find its minimum, then binary-search the first boundary crossing.
-  let minimumLow = 0;
-  let minimumHigh = 1;
-  for (let iteration = 0; iteration < 28; iteration += 1) {
-    const third = (minimumHigh - minimumLow) / 3;
-    const left = minimumLow + third;
-    const right = minimumHigh - third;
-    if (distanceAt(left) <= distanceAt(right)) minimumHigh = right;
-    else minimumLow = left;
-  }
-  const minimum = (minimumLow + minimumHigh) * 0.5;
-  if (distanceAt(minimum) > radiusSq + CONTROLLED_EVENT_EPSILON) return null;
-
-  let low = 0;
-  let high = minimum;
-  for (let iteration = 0; iteration < 32; iteration += 1) {
-    const middle = (low + high) * 0.5;
-    if (distanceAt(middle) <= radiusSq) high = middle;
-    else low = middle;
-  }
-  return high;
-}
-
-function findSampledCapsuleHitFraction(positionAt, target, projectileRadius, height) {
-  const collisionRadius = projectileRadius + (target?.radius ?? 0.42);
-  const radiusSq = collisionRadius * collisionRadius;
-  const isInside = (fraction) => (
-    getProjectileCapsuleDistanceSquaredAt(positionAt(fraction), target, height) <= radiusSq
-  );
-  if (isInside(0)) return 0;
-
-  const steps = 64;
-  let previous = 0;
-  for (let step = 1; step <= steps; step += 1) {
-    const fraction = step / steps;
-    if (!isInside(fraction)) {
-      previous = fraction;
-      continue;
-    }
-    let low = previous;
-    let high = fraction;
-    for (let iteration = 0; iteration < 32; iteration += 1) {
-      const middle = (low + high) * 0.5;
-      if (isInside(middle)) high = middle;
-      else low = middle;
-    }
-    return high;
-  }
-  return null;
-}
-
-function chooseEarlierControlledEvent(current, candidate) {
-  if (!candidate) return current;
-  if (!current) return candidate;
-  if (candidate.time < current.time - CONTROLLED_EVENT_EPSILON) return candidate;
-  if (Math.abs(candidate.time - current.time) <= CONTROLLED_EVENT_EPSILON) {
-    if (candidate.priority < current.priority) return candidate;
-    if (candidate.priority === current.priority
-      && String(candidate.stableId ?? '') < String(current.stableId ?? '')) return candidate;
-  }
-  return current;
-}
 
 function smoothstep(edge0, edge1, value) {
   const t = THREE.MathUtils.clamp((value - edge0) / (edge1 - edge0), 0, 1);
@@ -623,10 +526,7 @@ export class ProjectileSystem {
       }
 
       if (projectile.controller) {
-        const deactivated = this._updateControlledProjectile(projectile, dt);
-        if (!deactivated && this.active.includes(projectile)) {
-          this._updateProjectileVisual(projectile, dt);
-        }
+        this._advanceControlledProjectileFamily(projectile, dt);
         continue;
       }
 
@@ -723,26 +623,68 @@ export class ProjectileSystem {
     }
   }
 
+  _advanceControlledProjectileFamily(projectile, dt) {
+    if (!projectile?.controller || !this.active.includes(projectile)) {
+      return { deactivated: true, remainingTime: Math.max(0, dt) };
+    }
+    const executionId = projectile.executionId;
+    const reservationToken = projectile.reservationToken;
+    const triggerDepth = projectile.triggerDepth;
+    const activeBefore = new Set(this.active);
+    const outcome = this._updateControlledProjectile(projectile, dt);
+    const consumed = Math.max(0, Math.max(0, dt) - outcome.remainingTime);
+    if (!outcome.deactivated && this.active.includes(projectile) && consumed > 0) {
+      this._updateProjectileVisual(projectile, consumed);
+    }
+    if (!outcome.deactivated || outcome.remainingTime <= BUSTER_PROJECTILE_EVENT_EPSILON) {
+      return outcome;
+    }
+
+    // A trigger disposes its carrier from inside the controller's onDispose
+    // callback. Drain the unused part of this same frame through every child
+    // it spawned so a large frame cannot postpone delivery by one render tick.
+    const children = this.active.filter((candidate) => (
+      !activeBefore.has(candidate)
+      && candidate.controller
+      && candidate.executionId === executionId
+      && candidate.reservationToken === reservationToken
+      && candidate.triggerDepth > triggerDepth
+    ));
+    for (const child of children) {
+      this._advanceControlledProjectileFamily(child, outcome.remainingTime);
+    }
+    return outcome;
+  }
+
   _updateControlledProjectile(projectile, dt) {
     let remainingTime = Math.max(0, dt);
     let processedEvents = 0;
-    this._updateHoming(projectile, remainingTime);
-
-    while (remainingTime > CONTROLLED_EVENT_EPSILON
+    while (remainingTime > BUSTER_PROJECTILE_EVENT_EPSILON
       && this.active.includes(projectile)
-      && processedEvents < CONTROLLED_MAX_EVENTS_PER_FRAME) {
+      && processedEvents < BUSTER_PROJECTILE_MAX_EVENTS_PER_FRAME) {
       processedEvents += 1;
+      // Homing is integrated at the same authoritative cadence used by the
+      // pure simulator. Long browser frames therefore change neither target
+      // selection nor the gross guided path.
+      const guidanceSegmentTime = projectile.homingStrength > 0
+        ? Math.min(remainingTime, BUSTER_PROJECTILE_GUIDANCE_STEP)
+        : remainingTime;
+      this._updateHoming(projectile, guidanceSegmentTime);
       const speed = Math.max(0, projectile.speed);
       const remainingRange = Number.isFinite(projectile.range)
         ? Math.max(0, projectile.range - projectile.distance)
         : Infinity;
-      const timeToRange = speed > CONTROLLED_EVENT_EPSILON
+      const timeToRange = speed > BUSTER_PROJECTILE_EVENT_EPSILON
         ? remainingRange / speed
         : Infinity;
       const timeToDisposal = Number.isFinite(projectile.remainingLifetime)
         ? Math.max(0, projectile.remainingLifetime)
         : Infinity;
-      const segmentTime = Math.max(0, Math.min(remainingTime, timeToRange, timeToDisposal));
+      const segmentTime = Math.max(0, Math.min(
+        guidanceSegmentTime,
+        timeToRange,
+        timeToDisposal,
+      ));
       const previousPosition = projectile.mesh.position.clone();
       const previousDistance = projectile.distance;
       const previousProgress = THREE.MathUtils.clamp(
@@ -757,7 +699,6 @@ export class ProjectileSystem {
         0,
         1,
       );
-      const endPosition = previousPosition.clone().addScaledVector(projectile.direction, segmentTravel);
       const trajectoryOptions = projectile.arcHeight > 0
         ? {
           start: { x: 0, y: projectile.baseY, z: 0 },
@@ -765,19 +706,28 @@ export class ProjectileSystem {
           arcHeight: projectile.arcHeight,
         }
         : null;
-      if (trajectoryOptions) {
-        endPosition.y = sampleBallisticPoint(trajectoryOptions, endProgress).y;
-      }
+      const segmentPositionAt = createBusterSegmentPositionSampler({
+        start: previousPosition,
+        direction: projectile.direction,
+        travel: segmentTravel,
+        previousDistance,
+        range: projectile.range,
+        baseY: projectile.baseY,
+        endY: projectile.endY,
+        arcHeight: projectile.arcHeight,
+      });
+      const sampledEnd = segmentPositionAt(1);
+      const endPosition = previousPosition.clone().set(sampledEnd.x, sampledEnd.y, sampledEnd.z);
 
       let event = null;
       let apexProgress = null;
-      if (trajectoryOptions && !projectile.apexCrossed && endProgress + CONTROLLED_EVENT_EPSILON >= previousProgress) {
+      if (trajectoryOptions && !projectile.apexCrossed && endProgress + BUSTER_PROJECTILE_EVENT_EPSILON >= previousProgress) {
         apexProgress = getBallisticApexProgress(trajectoryOptions);
-        if (apexProgress + CONTROLLED_EVENT_EPSILON >= previousProgress
-          && apexProgress <= endProgress + CONTROLLED_EVENT_EPSILON) {
-          const progressSpan = Math.max(CONTROLLED_EVENT_EPSILON, endProgress - previousProgress);
+        if (apexProgress + BUSTER_PROJECTILE_EVENT_EPSILON >= previousProgress
+          && apexProgress <= endProgress + BUSTER_PROJECTILE_EVENT_EPSILON) {
+          const progressSpan = Math.max(BUSTER_PROJECTILE_EVENT_EPSILON, endProgress - previousProgress);
           const fraction = THREE.MathUtils.clamp((apexProgress - previousProgress) / progressSpan, 0, 1);
-          event = chooseEarlierControlledEvent(event, {
+          event = chooseEarlierBusterProjectileEvent(event, {
             type: 'apex',
             time: segmentTime * fraction,
             priority: 0,
@@ -789,17 +739,8 @@ export class ProjectileSystem {
 
       const positionAt = trajectoryOptions
         ? (fraction) => {
-          const sampled = previousPosition.clone().addScaledVector(
-            projectile.direction,
-            segmentTravel * fraction,
-          );
-          const sampledProgress = THREE.MathUtils.clamp(
-            (previousDistance + segmentTravel * fraction) / Math.max(0.001, projectile.range),
-            0,
-            1,
-          );
-          sampled.y = sampleBallisticPoint(trajectoryOptions, sampledProgress).y;
-          return sampled;
+          const sampled = segmentPositionAt(fraction);
+          return previousPosition.clone().set(sampled.x, sampled.y, sampled.z);
         }
         : null;
       const impact = this._findControlledEnemyImpact(
@@ -809,7 +750,7 @@ export class ProjectileSystem {
         positionAt,
       );
       if (impact) {
-        event = chooseEarlierControlledEvent(event, {
+        event = chooseEarlierBusterProjectileEvent(event, {
           ...impact,
           type: 'impact',
           time: segmentTime * impact.fraction,
@@ -817,16 +758,16 @@ export class ProjectileSystem {
           stableId: String(impact.enemy?.id ?? ''),
         });
       }
-      if (timeToRange <= remainingTime + CONTROLLED_EVENT_EPSILON) {
-        event = chooseEarlierControlledEvent(event, {
+      if (timeToRange <= guidanceSegmentTime + BUSTER_PROJECTILE_EVENT_EPSILON) {
+        event = chooseEarlierBusterProjectileEvent(event, {
           type: 'range',
           time: Math.max(0, timeToRange),
           priority: 2,
           stableId: 'range',
         });
       }
-      if (timeToDisposal <= remainingTime + CONTROLLED_EVENT_EPSILON) {
-        event = chooseEarlierControlledEvent(event, {
+      if (timeToDisposal <= guidanceSegmentTime + BUSTER_PROJECTILE_EVENT_EPSILON) {
+        event = chooseEarlierBusterProjectileEvent(event, {
           type: 'disposal',
           time: Math.max(0, timeToDisposal),
           priority: 3,
@@ -835,7 +776,7 @@ export class ProjectileSystem {
       }
 
       const advanceTime = event ? Math.min(segmentTime, Math.max(0, event.time)) : segmentTime;
-      const advanceFraction = segmentTime > CONTROLLED_EVENT_EPSILON
+      const advanceFraction = segmentTime > BUSTER_PROJECTILE_EVENT_EPSILON
         ? THREE.MathUtils.clamp(advanceTime / segmentTime, 0, 1)
         : 0;
       const advanceTravel = segmentTravel * advanceFraction;
@@ -863,6 +804,21 @@ export class ProjectileSystem {
         previousPosition,
       });
       if (advanceResult?.dispose) {
+        const controllerAdvanceTime = Number.isFinite(Number(advanceResult.consumedTime))
+          ? THREE.MathUtils.clamp(Number(advanceResult.consumedTime), 0, advanceTime)
+          : advanceTime;
+        if (controllerAdvanceTime + BUSTER_PROJECTILE_EVENT_EPSILON < advanceTime) {
+          const controllerFraction = segmentTime > BUSTER_PROJECTILE_EVENT_EPSILON
+            ? THREE.MathUtils.clamp(controllerAdvanceTime / segmentTime, 0, 1)
+            : 0;
+          const sampled = segmentPositionAt(controllerFraction);
+          projectile.mesh.position.set(sampled.x, sampled.y, sampled.z);
+          projectile.distance = previousDistance + segmentTravel * controllerFraction;
+          if (Number.isFinite(projectile.remainingLifetime)) {
+            projectile.remainingLifetime += advanceTime - controllerAdvanceTime;
+          }
+        }
+        remainingTime = Math.max(0, remainingTime - controllerAdvanceTime);
         this._deactivateProjectile(
           projectile,
           false,
@@ -870,11 +826,14 @@ export class ProjectileSystem {
           advanceResult.emitEffect !== false,
           advanceResult.reason ?? 'controller',
         );
-        return true;
+        return { deactivated: true, remainingTime };
       }
 
       remainingTime = Math.max(0, remainingTime - advanceTime);
-      if (!event) return false;
+      if (!event) {
+        if (remainingTime > BUSTER_PROJECTILE_EVENT_EPSILON) continue;
+        return { deactivated: false, remainingTime };
+      }
 
       if (event.type === 'apex') {
         projectile.apexCrossed = true;
@@ -891,7 +850,7 @@ export class ProjectileSystem {
             apexResult.emitEffect !== false,
             apexResult.reason ?? 'apex',
           );
-          return true;
+          return { deactivated: true, remainingTime };
         }
         continue;
       }
@@ -906,7 +865,7 @@ export class ProjectileSystem {
             impactResult.emitEffect !== false,
             impactResult.reason ?? 'impact',
           );
-          return true;
+          return { deactivated: true, remainingTime };
         }
         continue;
       }
@@ -915,10 +874,10 @@ export class ProjectileSystem {
         const rangeResult = this._notifyController(projectile, 'onRangeEnd', {
           position: projectile.mesh.position,
         });
-        if (rangeResult?.keepAlive) return false;
+        if (rangeResult?.keepAlive) return { deactivated: false, remainingTime };
         if (projectile.landAsMine) {
           this._landMine(projectile);
-          return false;
+          return { deactivated: false, remainingTime };
         }
         this._deactivateProjectile(
           projectile,
@@ -927,14 +886,17 @@ export class ProjectileSystem {
           rangeResult?.emitEffect !== false,
           rangeResult?.reason ?? 'rangeEnd',
         );
-        return true;
+        return { deactivated: true, remainingTime };
       }
 
       this._deactivateProjectile(projectile, true, true, true, 'expired');
-      return true;
+      return { deactivated: true, remainingTime };
     }
 
-    return !this.active.includes(projectile);
+    return {
+      deactivated: !this.active.includes(projectile),
+      remainingTime,
+    };
   }
 
   _findControlledEnemyImpact(projectile, start, end, positionAt = null) {
@@ -944,10 +906,10 @@ export class ProjectileSystem {
 
     for (const enemy of targets) {
       if (enemy.dead || projectile.hitEnemyIds.has(enemy.id)) continue;
-      const enemyHeight = getTargetCollisionHeight(enemy);
+      const enemyHeight = getBusterTargetCollisionHeight(enemy);
       const bodyFraction = positionAt
-        ? findSampledCapsuleHitFraction(positionAt, enemy, projectile.radius, enemyHeight)
-        : findStraightCapsuleHitFraction(
+        ? findSampledBusterCapsuleHitFraction(positionAt, enemy, projectile.radius, enemyHeight)
+        : findStraightBusterCapsuleHitFraction(
           start,
           end,
           enemy,
@@ -961,20 +923,16 @@ export class ProjectileSystem {
         pathPositionAt,
       );
       const fraction = resolvedImpact && (bodyFraction == null
-        || resolvedImpact.fraction <= bodyFraction + CONTROLLED_EVENT_EPSILON)
+        || resolvedImpact.fraction <= bodyFraction + BUSTER_PROJECTILE_EVENT_EPSILON)
         ? resolvedImpact.fraction
         : bodyFraction;
       if (fraction == null) continue;
-      const candidateId = String(enemy.id ?? '');
-      if (earliest
-        && fraction > earliest.fraction + CONTROLLED_EVENT_EPSILON) continue;
-      if (earliest
-        && Math.abs(fraction - earliest.fraction) <= CONTROLLED_EVENT_EPSILON
-        && candidateId >= String(earliest.enemy?.id ?? '')) continue;
+      const orderedCandidate = { enemy, fraction };
+      if (chooseEarlierBusterProjectileImpact(earliest, orderedCandidate) !== orderedCandidate) continue;
 
       const position = pathPositionAt(fraction);
       const resolvedPart = resolvedImpact
-        && Math.abs(resolvedImpact.fraction - fraction) <= CONTROLLED_EVENT_EPSILON
+        && Math.abs(resolvedImpact.fraction - fraction) <= BUSTER_PROJECTILE_EVENT_EPSILON
         ? resolvedImpact.resolvedPart
         : enemy.resolveProjectileHit?.(
           position,
@@ -1136,8 +1094,8 @@ export class ProjectileSystem {
         projectile.direction,
       ) ?? null;
       const radius = projectile.radius + enemy.radius;
-      const enemyHeight = getTargetCollisionHeight(enemy);
-      if (resolvedPart || getProjectileCapsuleDistanceSquared(position, enemy, enemyHeight) <= radius * radius) {
+      const enemyHeight = getBusterTargetCollisionHeight(enemy);
+      if (resolvedPart || getPointToVerticalCapsuleAxisDistanceSquared(position, enemy, enemyHeight) <= radius * radius) {
         if (projectile.hitEnemyIds.has(enemy.id)) {
           continue;
         }
@@ -1234,7 +1192,7 @@ export class ProjectileSystem {
     }
 
     const radius = (projectile.collisionRadius ?? projectile.radius) + player.radius;
-    if (getProjectileCapsuleDistanceSquared(
+    if (getPointToVerticalCapsuleAxisDistanceSquared(
       projectile.mesh.position,
       player,
       PLAYER_TRAVERSAL_ENVELOPE.standingHeight,
@@ -1408,34 +1366,32 @@ export class ProjectileSystem {
       return;
     }
 
-    let nearestDistanceSq = Math.max(1, projectile.homingRange || projectile.range) ** 2;
-
     if (!nearest) {
       const targets = this.game.getProjectileTargets?.() ?? this.game.enemies;
+      let guidanceCandidate = {
+        target: null,
+        stableId: '\uffff',
+        distanceSquared: Math.max(1, projectile.homingRange || projectile.range) ** 2,
+      };
       for (const enemy of targets) {
         if (enemy.dead || projectile.hitEnemyIds.has(enemy.id)) {
           continue;
         }
 
-        const enemyHeight = getTargetCollisionHeight(enemy);
+        const enemyHeight = getBusterTargetCollisionHeight(enemy);
         tempPosition.set(
           enemy.root.position.x,
           enemy.root.position.y + enemyHeight * 0.55,
           enemy.root.position.z,
         );
         const distanceSq = projectile.mesh.position.distanceToSquared(tempPosition);
-
-        const candidateId = String(enemy.id ?? '');
-        const nearestId = String(nearest?.id ?? '\uffff');
-        const isCloser = projectile.controller
-          ? distanceSq < nearestDistanceSq - 0.000001
-            || (Math.abs(distanceSq - nearestDistanceSq) <= 0.000001 && candidateId < nearestId)
-          : distanceSq < nearestDistanceSq;
-        if (isCloser) {
-          nearestDistanceSq = distanceSq;
-          nearest = enemy;
-        }
+        guidanceCandidate = chooseStableBusterGuidanceCandidate(guidanceCandidate, {
+          target: enemy,
+          stableId: String(enemy.id ?? ''),
+          distanceSquared: distanceSq,
+        }, { stableTies: Boolean(projectile.controller) });
       }
+      nearest = guidanceCandidate.target;
     }
 
     if (!nearest) {
@@ -1445,7 +1401,7 @@ export class ProjectileSystem {
     if (nearest?.isWeakPointTarget) {
       getCombatTargetWorldPosition(nearest, tempDirection).sub(projectile.mesh.position);
     } else {
-      const targetHeight = getTargetCollisionHeight(nearest);
+      const targetHeight = getBusterTargetCollisionHeight(nearest);
       tempDirection.set(
         nearest.root.position.x,
         nearest.root.position.y + targetHeight * 0.55,
@@ -1458,7 +1414,13 @@ export class ProjectileSystem {
     }
 
     tempDirection.normalize();
-    projectile.direction.lerp(tempDirection, THREE.MathUtils.clamp(projectile.homingStrength * dt, 0, 0.28)).normalize();
+    steerBusterDirection(
+      projectile.direction,
+      tempDirection,
+      projectile.homingStrength,
+      dt,
+      { out: projectile.direction },
+    );
   }
 
   _updateProjectileVisual(projectile, dt) {

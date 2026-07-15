@@ -23,6 +23,14 @@ function planKey(plan = {}) {
   return String(plan.weaponKey ?? plan.buildId ?? plan.id ?? 'megaBuster');
 }
 
+export class BusterDiagnosticPlanError extends Error {
+  constructor() {
+    super('Diagnostic-only Buster plans cannot be registered with a production runtime.');
+    this.name = 'BusterDiagnosticPlanError';
+    this.code = 'DIAGNOSTIC_PLAN_REJECTED';
+  }
+}
+
 export class BusterRuntime {
   constructor({
     projectileCapacity = DEFAULT_PROJECTILE_CAPACITY,
@@ -30,12 +38,14 @@ export class BusterRuntime {
     rechargeDuration = DEFAULT_RECHARGE_DURATION,
     executeShot = null,
     cancelExecution = null,
+    diagnosticContext = false,
   } = {}) {
     this.projectileCapacity = Math.max(1, Math.trunc(finite(projectileCapacity, DEFAULT_PROJECTILE_CAPACITY)));
     this.rechargeDelay = Math.max(0, finite(rechargeDelay, DEFAULT_RECHARGE_DELAY));
     this.rechargeDuration = Math.max(0.01, finite(rechargeDuration, DEFAULT_RECHARGE_DURATION));
     this.executeShot = typeof executeShot === 'function' ? executeShot : null;
     this.cancelExecution = typeof cancelExecution === 'function' ? cancelExecution : null;
+    this.diagnosticContext = diagnosticContext === true;
     this.plans = new Map();
     this.states = new Map();
     this.reservations = new Map();
@@ -44,19 +54,24 @@ export class BusterRuntime {
     this.reservationCounter = 0;
   }
 
-  equip(plan) {
+  equip(plan, options = {}) {
     if (!plan) {
       this.activeKey = null;
       return null;
     }
 
-    const state = this.register(plan);
+    const state = this.register(plan, options);
     this.activeKey = planKey(plan);
     return state;
   }
 
-  register(plan) {
+  register(plan, options = {}) {
     if (!plan) return null;
+    if (plan.diagnostic?.overrideOnly
+      && !this.diagnosticContext
+      && options.diagnosticContext !== true) {
+      throw new BusterDiagnosticPlanError();
+    }
 
     const key = planKey(plan);
     // Executions retain the immutable plan captured by fire(). Re-registering a
@@ -192,21 +207,22 @@ export class BusterRuntime {
         ? String(requestedKey)
         : null;
     }
-    const fireHeld = Boolean(options.fireHeld);
-
     for (const [key, state] of this.states) {
       const plan = this.plans.get(key);
       if (!plan) continue;
-      state.cycleRemaining = Math.max(0, state.cycleRemaining - elapsed);
+      const cycleBeforeUpdate = state.cycleRemaining;
       const delayBeforeUpdate = state.rechargeDelayRemaining;
+      state.cycleRemaining = Math.max(0, cycleBeforeUpdate - elapsed);
       state.rechargeDelayRemaining = Math.max(0, delayBeforeUpdate - elapsed);
-      const rechargeElapsed = delayBeforeUpdate > 0
-        ? Math.max(0, elapsed - delayBeforeUpdate)
-        : elapsed;
+      // The battery becomes eligible only after both gates from the last
+      // successful shot have elapsed. Input style never changes this clock.
+      const rechargeElapsed = Math.max(
+        0,
+        elapsed - Math.max(cycleBeforeUpdate, delayBeforeUpdate),
+      );
 
       const isActive = key === this.activeKey;
-      const heldPause = isActive && fireHeld && !state.recoveryLocked;
-      if (rechargeElapsed > 0 && state.energy < state.maxEnergy && !heldPause) {
+      if (rechargeElapsed > 0 && state.energy < state.maxEnergy) {
         const rechargeScale = isActive ? 1 : 0.5;
         state.energy = Math.min(
           state.maxEnergy,

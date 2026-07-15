@@ -423,7 +423,14 @@ test('Debug Tools launches range and sandbox tests and restores its Buster tab',
   }));
   expect(range).toEqual({
     buildId: 'megaBuster',
-    config: { targetCount: 4, profile: 'moving', depthLevel: 5 },
+    config: {
+      targetCount: 4,
+      profile: 'moving',
+      depthLevel: 5,
+      distanceBand: 'mid',
+      layout: 'compact',
+      aimOffset: 'center',
+    },
     debugOpen: false,
   });
 
@@ -618,6 +625,149 @@ test('Mega and Custom Busters release only after the arm reaches its extended fi
     energyBefore: 6,
     energyAfter: 6,
   });
+  expect(runtimeErrors).toEqual([]);
+});
+
+test('free Custom Buster fire does not lock tank movement to an in-flight shot', async ({ page }) => {
+  const runtimeErrors = collectRuntimeErrors(page);
+  await page.goto('/?busterLab=1&reaverbotSeed=buster-free-fire-movement');
+  await waitForGame(page);
+  await page.waitForFunction(() => window.game.player?._fbxAnimationLibraryLoaded === true);
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const rangeEntry = game.enterBusterTestRange('build-a');
+    if (!rangeEntry.ok) throw new Error(rangeEntry.message);
+
+    const { player, combat, busterRuntime: runtime, projectiles, pointer } = game;
+    const plan = game.busterTestRange.plan;
+    const weaponKey = plan.weaponKey;
+    const Vector3 = player.root.position.constructor;
+    const forward = new Vector3(0, 0, 1);
+    const right = new Vector3(1, 0, 0);
+    const rangeStart = player.root.position.clone();
+    const originalExecuteShot = runtime.executeShot;
+    const executions = [];
+
+    runtime.executeShot = (execution) => {
+      const fired = originalExecuteShot(execution);
+      if (fired) executions.push(execution);
+      return fired;
+    };
+
+    const movementOptions = () => ({
+      arenaRadius: game.arenaRadius,
+      movementForward: forward,
+      movementRight: right,
+      groundY: rangeStart.y,
+      aimWorld: pointer.aimWorld,
+      projectileAimInputHeld: Boolean(pointer.primary || pointer.secondary),
+      game,
+    });
+    const step = (input = new Set(), dt = 1 / 120) => {
+      player.update(dt, input, movementOptions());
+      runtime.update(dt, {
+        activeWeaponKey: weaponKey,
+        fireHeld: Boolean(pointer.primary),
+      });
+      combat.update(dt);
+      projectiles.update(dt);
+    };
+    const bodyForward = () => new Vector3(
+      Math.sin(player.root.rotation.y),
+      0,
+      Math.cos(player.root.rotation.y),
+    ).normalize();
+    const activeFor = (reservationToken) => projectiles.active.filter((projectile) => (
+      projectile.reservationToken === reservationToken
+    ));
+    const reset = () => {
+      projectiles.cancelWhere(
+        (projectile) => projectile.attackDomain === 'customBuster',
+        'freeFireMovementReset',
+      );
+      runtime.resetWeapon(weaponKey);
+      runtime.equip(plan);
+      combat._clearPendingAttacks();
+      combat._clearLockOn();
+      combat.primaryWasDown = false;
+      player._releaseProjectileAim();
+      player.animation.cancelAttack();
+      player.root.position.copy(rangeStart);
+      player.root.rotation.y = 0;
+      player.lastMoveDirection.copy(forward);
+      player.velocity.set(0, 0, 0);
+      player.jumpState = 'Grounded';
+      player._jumpGroundY = rangeStart.y;
+      pointer.primary = false;
+      pointer.primaryPressed = false;
+      pointer.secondary = false;
+      pointer.secondaryPressed = false;
+      pointer.lockOnPressed = false;
+      pointer.aimWorld.copy(rangeStart).add(new Vector3(0, 1.05, -12));
+    };
+    const runScenario = (holdPrimary) => {
+      reset();
+      const executionStart = executions.length;
+      pointer.primary = true;
+      pointer.primaryPressed = true;
+      step();
+      pointer.primary = holdPrimary;
+      pointer.primaryPressed = false;
+
+      let releaseElapsed = 1 / 120;
+      while (executions.length === executionStart && releaseElapsed < 0.6) {
+        step();
+        releaseElapsed += 1 / 120;
+      }
+      const execution = executions[executionStart];
+      if (!execution) throw new Error('The Custom Buster never released its queued shot.');
+      const reservationToken = execution.reservationToken;
+      const positionAtRelease = player.root.position.clone();
+      const facingAtRelease = bodyForward();
+      const projectileActiveAtRelease = activeFor(reservationToken).length > 0;
+      const reservationActiveAtRelease = runtime.getReservedProjectileCount() > 0;
+
+      for (let frame = 0; frame < 18; frame += 1) {
+        step(new Set(['KeyW', 'KeyD']));
+      }
+
+      const displacement = player.root.position.clone().sub(positionAtRelease);
+      return {
+        releaseElapsed,
+        projectileActiveAtRelease,
+        projectileActiveAfterMovement: activeFor(reservationToken).length > 0,
+        reservationActiveAtRelease,
+        reservationActiveAfterMovement: runtime.getReservedProjectileCount() > 0,
+        turnRadians: facingAtRelease.angleTo(bodyForward()),
+        lateralTravel: Math.abs(displacement.x),
+        forwardTravel: displacement.dot(facingAtRelease),
+        manualAim: pointer.secondary,
+        movementLockTarget: Boolean(combat.getMovementLockTarget()),
+      };
+    };
+
+    const held = runScenario(true);
+    const tapped = runScenario(false);
+    runtime.executeShot = originalExecuteShot;
+    pointer.primary = false;
+    pointer.primaryPressed = false;
+    game.exitBusterTestRange();
+    return { held, tapped };
+  });
+
+  for (const scenario of [result.held, result.tapped]) {
+    expect(scenario.releaseElapsed).toBeGreaterThanOrEqual(0.17);
+    expect(scenario.projectileActiveAtRelease).toBe(true);
+    expect(scenario.projectileActiveAfterMovement).toBe(true);
+    expect(scenario.reservationActiveAtRelease).toBe(true);
+    expect(scenario.reservationActiveAfterMovement).toBe(true);
+    expect(scenario.turnRadians).toBeGreaterThan(0.08);
+    expect(scenario.lateralTravel).toBeGreaterThan(0.01);
+    expect(scenario.manualAim).toBe(false);
+    expect(scenario.movementLockTarget).toBe(false);
+  }
   expect(runtimeErrors).toEqual([]);
 });
 
@@ -1429,25 +1579,39 @@ test('production projectile lifecycle runs Explosion, Delay, Impact, and Apex pr
     game.enterBusterTestRange('build-a');
     const impactTarget = game.busterTestRange.dummies[0];
     const impactHealth = impactTarget.health;
+    const childSpawnEvents = [];
+    const originalProjectileSpawn = game.projectiles.spawn;
+    game.projectiles.spawn = function recordBusterChildSpawn(options) {
+      const projectile = originalProjectileSpawn.call(this, options);
+      if (projectile && options.actionId === 'emit-child') {
+        childSpawnEvents.push({
+          reservationToken: options.reservationToken,
+          damage: options.damage,
+        });
+      }
+      return projectile;
+    };
     const impactShot = fireAt(impactTarget);
-    let impactChildren = [];
-    for (let step = 0; step < 180 && impactChildren.length === 0; step += 1) {
+    const impactToken = impactShot.execution.reservationToken;
+    let impactChildSpawns = [];
+    for (let step = 0; step < 180 && impactChildSpawns.length === 0; step += 1) {
       game.projectiles.update(1 / 180);
-      impactChildren = activeFor(impactShot.execution.reservationToken)
-        .filter((projectile) => projectile.actionId === 'emit-child');
+      impactChildSpawns = childSpawnEvents
+        .filter((event) => event.reservationToken === impactToken);
     }
     const impact = {
-      carrierDamage: impactHealth - impactTarget.health,
-      childCount: impactChildren.length,
-      childPowers: impactChildren.map((projectile) => projectile.damage),
+      deliveredDamage: impactHealth - impactTarget.health,
+      childCount: impactChildSpawns.length,
+      childPowers: impactChildSpawns.map((event) => event.damage),
     };
     game.busterRuntime.cancelBuild(game.busterTestRange.plan.weaponKey, 'range-end-proof');
     game.busterRuntime.resetWeapon(game.busterTestRange.plan.weaponKey);
     game.busterRuntime.equip(game.busterTestRange.plan);
     const rangeEndShot = fireAt(null, game.player.lastMoveDirection.clone().set(-1, 0, 0));
     game.projectiles.update(1);
-    impact.rangeEndChildCount = activeFor(rangeEndShot.execution.reservationToken)
-      .filter((projectile) => projectile.actionId === 'emit-child').length;
+    impact.rangeEndChildCount = childSpawnEvents
+      .filter((event) => event.reservationToken === rangeEndShot.execution.reservationToken).length;
+    game.projectiles.spawn = originalProjectileSpawn;
     game.exitBusterTestRange();
 
     install(makeBuild([
@@ -1512,7 +1676,7 @@ test('production projectile lifecycle runs Explosion, Delay, Impact, and Apex pr
   for (const power of result.delay.powers) expect(power).toBeCloseTo(9.984 / 5, 8);
   expect(result.delay.reservation).toBe(5);
   expect(result.delay.repeatDirections).toEqual(result.delay.firstDirections);
-  expect(result.impact.carrierDamage).toBeCloseTo(1.6, 8);
+  expect(result.impact.deliveredDamage).toBeCloseTo(1.6 + 7.04, 8);
   expect(result.impact.childCount).toBe(3);
   for (const power of result.impact.childPowers) expect(power).toBeCloseTo(7.04 / 3, 8);
   expect(result.impact.rangeEndChildCount).toBe(3);
@@ -1572,7 +1736,22 @@ test('unknown module ids preserve the invalid draft and force the Mega Buster fa
     localStorage.setItem(key, JSON.stringify(envelope));
   });
   await page.reload();
-  await waitForGame(page);
+  try {
+    await page.waitForFunction(
+      () => Boolean(window.game?.combat && window.game?.ui),
+      undefined,
+      { timeout: 15_000 },
+    );
+  } catch (error) {
+    const diagnostics = await page.evaluate(() => ({
+      gamePublished: Boolean(window.game),
+      documentState: document.readyState,
+      bodyText: document.body?.innerText?.slice(0, 240) ?? '',
+    }));
+    throw new Error(`Game reload did not finish: ${JSON.stringify({ diagnostics, runtimeErrors })}`, {
+      cause: error,
+    });
+  }
   await page.evaluate(() => window.game.setInventoryOpen(true, { mode: 'roll' }));
   await page.getByRole('tab', { name: 'Buster Lab' }).click();
   await expect(page.locator('#buster-lab-warning')).toContainText('Unknown Custom Buster modules');

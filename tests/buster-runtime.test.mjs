@@ -2,10 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
 
+import { CombatSystem } from '../src/CombatSystem.js';
 import { ProjectileSystem } from '../src/ProjectileSystem.js';
-import { BusterRuntime } from '../src/buster/BusterRuntime.js';
+import {
+  BusterDiagnosticPlanError,
+  BusterRuntime,
+} from '../src/buster/BusterRuntime.js';
 import {
   consumeBusterExecutionStagger,
+  consumeBusterExecutionStaggerContribution,
   createBusterExecutionStaggerLedger,
   resolveBusterStaggerDuration,
 } from '../src/buster/BusterStagger.js';
@@ -120,7 +125,7 @@ test('cycling Mega and two Custom weapons preserves three independent batteries'
   );
 
   runtime.update(1.65, { activeWeaponKey: 'megaBuster', fireHeld: true });
-  assert.equal(runtime.getHudState('megaBuster').energy, 4);
+  assert.equal(runtime.getHudState('megaBuster').energy, 6);
   assert.ok(Math.abs(runtime.getHudState('build-a').energy - (4 + (6 / 1.8) * 0.5)) < 1e-9);
   assert.ok(Math.abs(runtime.getHudState('build-b').energy - (4 + (6 / 1.8) * 0.5)) < 1e-9);
 
@@ -130,9 +135,66 @@ test('cycling Mega and two Custom weapons preserves three independent batteries'
     assert.equal(shot.ok, true);
     runtime.releaseReservation(shot.execution.reservationToken);
   }
-  assert.equal(runtime.getHudState('megaBuster').energy, 2);
+  assert.equal(runtime.getHudState('megaBuster').energy, 4);
   assert.ok(Math.abs(runtime.getHudState('build-a').energy - (2 + (6 / 1.8) * 0.5)) < 1e-9);
   assert.ok(Math.abs(runtime.getHudState('build-b').energy - (2 + (6 / 1.8) * 0.5)) < 1e-9);
+});
+
+test('recharge is input-independent and waits for both cycle and delay gates', () => {
+  const held = new BusterRuntime({ executeShot: () => true });
+  const released = new BusterRuntime({ executeShot: () => true });
+  for (const runtime of [held, released]) {
+    runtime.equip(plan({ cycleTime: 1, energyCost: 2 }));
+    const shot = runtime.fire();
+    runtime.releaseReservation(shot.execution.reservationToken);
+  }
+
+  held.update(0.8, { activeWeaponKey: 'build-a', fireHeld: true });
+  released.update(0.8, { activeWeaponKey: 'build-a', fireHeld: false });
+  assert.equal(held.getHudState().energy, 4);
+  assert.equal(released.getHudState().energy, 4);
+
+  held.update(0.3, { activeWeaponKey: 'build-a', fireHeld: true });
+  released.update(0.3, { activeWeaponKey: 'build-a', fireHeld: false });
+  const expected = 4 + (6 / 1.8) * 0.1;
+  assert.ok(Math.abs(held.getHudState().energy - expected) < 1e-9);
+  assert.ok(Math.abs(released.getHudState().energy - expected) < 1e-9);
+});
+
+test('cycle delay cannot create an Energy refund at the next legal release timestamp', () => {
+  for (const fireHeld of [false, true]) {
+    const runtime = new BusterRuntime({ executeShot: () => true });
+    runtime.equip(plan({ cycleTime: 0.95, energyCost: 2 }));
+    for (const expectedEnergy of [4, 2, 0]) {
+      const shot = runtime.fire();
+      assert.equal(shot.ok, true);
+      runtime.releaseReservation(shot.execution.reservationToken);
+      assert.equal(runtime.getHudState().energy, expectedEnergy);
+      runtime.update(0.95, { activeWeaponKey: 'build-a', fireHeld });
+      assert.equal(
+        runtime.getHudState().energy,
+        expectedEnergy,
+        'the cycle boundary itself must not include post-cycle recharge time',
+      );
+    }
+  }
+});
+
+test('production runtimes reject diagnostic plans unless explicitly authorized', () => {
+  const diagnosticPlan = {
+    ...plan(),
+    diagnostic: { overrideOnly: true, overrides: [] },
+  };
+  const production = new BusterRuntime();
+  assert.throws(
+    () => production.equip(diagnosticPlan),
+    (error) => error instanceof BusterDiagnosticPlanError && error.code === 'DIAGNOSTIC_PLAN_REJECTED',
+  );
+  assert.equal(production.plans.size, 0);
+
+  assert.ok(production.equip(diagnosticPlan, { diagnosticContext: true }));
+  const diagnosticRuntime = new BusterRuntime({ diagnosticContext: true });
+  assert.ok(diagnosticRuntime.equip(diagnosticPlan));
 });
 
 test('held and tapped insufficient requests enter the same recovery lock', () => {
@@ -289,6 +351,24 @@ test('execution stagger contributes only increases in the largest packet per tar
   assert.equal(consumeBusterExecutionStagger(ledger, second, 0.2, 5), 0.2);
   assert.equal(consumeBusterExecutionStagger(ledger, first, 0.3, 0), 0);
   assert.ok(Math.abs(consumeBusterExecutionStagger(ledger, first, 0.3, 5) - 0.1) < 1e-9);
+  assert.deepEqual(ledger.entriesByTarget.get('target:enemy-a'), {
+    largestNominalDuration: 0.3,
+    totalGrantedDuration: 0.3,
+  });
+
+  const exact = consumeBusterExecutionStaggerContribution(ledger, first, 0.31, 2);
+  assert.equal(exact.previousTotalGrantedDuration, 0.3);
+  assert.equal(exact.largestNominalDuration, 0.31);
+  assert.ok(Math.abs(exact.additionalDuration - 0.01) < 1e-9);
+  assert.equal(exact.totalGrantedDuration, 0.31);
+});
+
+test('legacy Machine Gun and Cannon have no hidden Range bonus while Missile keeps 1.8', () => {
+  const combat = Object.create(CombatSystem.prototype);
+  combat.game = { player: { stats: { attackRange: 6 } } };
+  assert.equal(combat._getProfileRange({ type: 'machineGunArm' }), 6);
+  assert.equal(combat._getProfileRange({ type: 'cannonArm' }), 6);
+  assert.equal(combat._getProfileRange({ type: 'missileArm', special: 'missile' }), 7.8);
 });
 
 test('stagger resolution leaves legacy packets unchanged and supports shared explosion metadata', () => {
@@ -371,7 +451,7 @@ test('Delay advance is chronologically arbitrated before a later swept impact', 
           const fraction = dt > 0 ? (0.3 - before) / dt : 0;
           projectile.mesh.position.copy(previousPosition).addScaledVector(projectile.direction, travel * fraction);
           events.push('delay');
-          return { dispose: true, reason: 'delayTrigger' };
+          return { dispose: true, reason: 'delayTrigger', consumedTime: dt * fraction };
         }
         return null;
       },
@@ -410,7 +490,7 @@ test('Delay arbitration is frame-rate stable at 30, 60, and 120 Hz', () => {
             const fraction = dt > 0 ? Math.max(0, Math.min(1, (0.3 - before) / dt)) : 0;
             projectile.mesh.position.copy(previousPosition).addScaledVector(projectile.direction, travel * fraction);
             events.push('delay');
-            return { dispose: true, reason: 'delayTrigger' };
+            return { dispose: true, reason: 'delayTrigger', consumedTime: dt * fraction };
           }
           return null;
         },
@@ -426,6 +506,120 @@ test('Delay arbitration is frame-rate stable at 30, 60, and 120 Hz', () => {
     }
     assert.deepEqual(events, ['delay', 'dispose:delayTrigger'], `${hz} Hz event order`);
     assert.equal(damage.length, 0, `${hz} Hz damage`);
+  }
+});
+
+test('triggered children consume the carrier remainder in the same production frame', () => {
+  const { system } = createProjectileHarness();
+  const carrierData = { elapsed: 0 };
+  let childElapsed = 0;
+  system.spawn({
+    owner: 'player',
+    position: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, 1),
+    speed: 10,
+    range: 20,
+    radius: 0.1,
+    damage: 0,
+    executionId: 'same-frame-execution',
+    reservationToken: 'same-frame-reservation',
+    actionId: 'emit-carrier',
+    triggerDepth: 0,
+    controller: {
+      onAdvance: ({ projectile, dt, travel, previousPosition }) => {
+        const before = carrierData.elapsed;
+        carrierData.elapsed += dt;
+        if (before < 0.01 && carrierData.elapsed >= 0.01) {
+          const fraction = (0.01 - before) / dt;
+          projectile.mesh.position.copy(previousPosition)
+            .addScaledVector(projectile.direction, travel * fraction);
+          return { dispose: true, reason: 'delayTrigger', consumedTime: dt * fraction };
+        }
+        return null;
+      },
+      onDispose: ({ system: projectileSystem, projectile, reason }) => {
+        if (reason !== 'delayTrigger') return;
+        projectileSystem.spawn({
+          owner: 'player',
+          position: projectile.mesh.position.clone(),
+          direction: projectile.direction.clone(),
+          speed: 10,
+          range: 20,
+          radius: 0.1,
+          damage: 0,
+          executionId: 'same-frame-execution',
+          reservationToken: 'same-frame-reservation',
+          actionId: 'emit-child',
+          triggerDepth: 1,
+          controller: {
+            onAdvance: ({ dt: childDt }) => {
+              childElapsed += childDt;
+            },
+          },
+        });
+      },
+    },
+  });
+
+  system.update(0.05);
+
+  assert.ok(Math.abs(childElapsed - 0.04) < 1e-9, `child advanced ${childElapsed} seconds`);
+  assert.equal(system.active.length, 1);
+  assert.equal(system.active[0].actionId, 'emit-child');
+  assert.ok(Math.abs(system.active[0].distance - 0.4) < 1e-9);
+});
+
+test('guided range and disposal boundaries survive guidance substeps at every frame rate', () => {
+  const boundaryTime = 0.02;
+  const frameSteps = [1 / 30, 1 / 60, 1 / 120, 0.35];
+
+  for (const boundary of ['range', 'disposal']) {
+    for (const frameStep of frameSteps) {
+      const { system } = createProjectileHarness();
+      const guidanceTarget = target(`guide-${boundary}-${frameStep}`, 100, 100);
+      const events = [];
+      let elapsed = 0;
+      system.spawn({
+        owner: 'player',
+        position: new THREE.Vector3(0, 1, 0),
+        direction: new THREE.Vector3(0, 0, 1),
+        speed: 10,
+        range: boundary === 'range' ? boundaryTime * 10 : 100,
+        lifetime: boundary === 'disposal' ? boundaryTime : Infinity,
+        radius: 0.1,
+        damage: 1,
+        homingStrength: 4.2,
+        target: guidanceTarget,
+        controller: {
+          onAdvance: ({ dt }) => {
+            elapsed += dt;
+          },
+          onRangeEnd: () => {
+            events.push('range');
+          },
+          onDispose: ({ reason }) => {
+            events.push(`dispose:${reason}`);
+          },
+        },
+      });
+
+      for (let frame = 0; frame < 10 && system.active.length > 0; frame += 1) {
+        system.update(frameStep);
+      }
+
+      assert.ok(
+        Math.abs(elapsed - boundaryTime) < 1e-9,
+        `${boundary} at dt=${frameStep} advanced ${elapsed} seconds`,
+      );
+      assert.deepEqual(
+        events,
+        boundary === 'range'
+          ? ['range', 'dispose:rangeEnd']
+          : ['dispose:expired'],
+        `${boundary} at dt=${frameStep} lifecycle`,
+      );
+      assert.equal(system.active.length, 0, `${boundary} at dt=${frameStep} deactivated`);
+    }
   }
 });
 

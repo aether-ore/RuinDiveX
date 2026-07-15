@@ -1455,6 +1455,28 @@ function createMaterials(genome) {
     scope: 'decor', moduleId: bodyId, slot: 'inlay', mapKey: profile.decor.dark,
     roughness: 0.46, metalness: 0.36,
   });
+  const bossDecor = profile.boss ? {
+    primary: mappedMaterial('material_generatedReaverbotBossDecorArmor', liftedPaletteColor(palette.primary, 0.32), {
+      scope: 'bossDecor', moduleId: genome.bossProfileId, slot: 'armor', mapKey: profile.boss.primary,
+    }),
+    secondary: mappedMaterial('material_generatedReaverbotBossDecorSecondary', liftedPaletteColor(palette.secondary, 0.42), {
+      scope: 'bossDecor', moduleId: genome.bossProfileId, slot: 'secondary', mapKey: profile.boss.secondary,
+    }),
+    trim: mappedMaterial('material_generatedReaverbotBossOrnateTrim', 0xffffff, {
+      scope: 'bossDecor', moduleId: genome.bossProfileId, slot: 'ornateTrim', mapKey: profile.boss.trim,
+      roughness: 0.42, metalness: 0.48,
+    }),
+    dark: decorDark,
+    emissive: mappedMaterial('material_generatedReaverbotBossDecorEmissive', palette.emissive, {
+      scope: 'bossDecor', moduleId: genome.bossProfileId, slot: 'emissive',
+      mapKey: profile.boss.emissive,
+      emissiveMapKey: profile.boss.emissive,
+      emissive: palette.emissive,
+      emissiveIntensity: 0.9,
+      roughness: 0.24,
+      metalness: 0.2,
+    }),
+  } : null;
 
   const materials = {
     primary: bodyPrimary,
@@ -1499,6 +1521,7 @@ function createMaterials(genome) {
         dark: decorDark,
         emissive: bodyGlow,
       },
+      bossDecor,
     },
   };
   return materials;
@@ -3684,6 +3707,55 @@ function addSurfaceGrammar(root, genome, frame, materials) {
   }
 }
 
+function createBossOrnaments(root, genome, frame, materials) {
+  if (!genome?.bossProfileId || !genome?.boss) return null;
+  const group = new THREE.Group();
+  group.name = `generatedReaverbotBossOrnaments_${genome.bossProfileId}`;
+  group.userData.bossProfileId = genome.bossProfileId;
+  const placements = genome.boss.ornamentPlacement ?? ['crown', 'weaponCollar', 'dorsalArch'];
+  const center = frame.anchors.center;
+  const eye = frame.anchors.eye;
+  const rear = frame.anchors.rearHigh ?? frame.anchors.rear;
+  for (const placement of placements) {
+    if (placement === 'crown') {
+      for (let index = -2; index <= 2; index += 1) {
+        const height = 0.24 + (2 - Math.abs(index)) * 0.08;
+        mesh(group, new THREE.ConeGeometry(0.055, height, 5), materials.trim,
+          'generatedReaverbotBossCeremonialCrownSpire',
+          [eye[0] + index * 0.16, eye[1] + 0.42 + height * 0.5, eye[2] - 0.04]);
+      }
+    } else if (placement === 'weaponCollar') {
+      mesh(group, new THREE.TorusGeometry(0.48, 0.055, 7, 24), materials.trim,
+        'generatedReaverbotBossWeaponCeremonialCollar',
+        [center[0], center[1] + 0.18, center[2] + 0.34], [Math.PI / 2, 0, 0]);
+    } else if (placement === 'dorsalArch') {
+      mesh(group, new THREE.TorusGeometry(0.62, 0.055, 7, 28, Math.PI), materials.trim,
+        'generatedReaverbotBossDorsalRuinArch',
+        [rear[0], rear[1] + 0.34, rear[2]], [0, 0, Math.PI / 2]);
+    } else if (placement === 'flankShrine') {
+      for (const side of [-1, 1]) {
+        box(group, materials.secondary, 'generatedReaverbotBossFlankShrine',
+          [0.12, 0.46, 0.22], [center[0] + side * 0.72, center[1] + 0.12, center[2]]);
+        mesh(group, new THREE.OctahedronGeometry(0.075), materials.emissive,
+          'generatedReaverbotBossFlankShrineRuby',
+          [center[0] + side * 0.72, center[1] + 0.18, center[2] - 0.13]);
+      }
+    } else if (placement === 'baseSkirt') {
+      mesh(group, new THREE.CylinderGeometry(0.78, 0.92, 0.16, 10, 1, true), materials.trim,
+        'generatedReaverbotBossCeremonialBaseSkirt',
+        [center[0], Math.max(0.18, center[1] - 0.62), center[2]]);
+    } else if (placement === 'shoulderFin') {
+      for (const side of [-1, 1]) {
+        mesh(group, new THREE.ConeGeometry(0.11, 0.52, 5), materials.primary,
+          'generatedReaverbotBossShoulderFin',
+          [center[0] + side * 0.68, center[1] + 0.38, center[2]], [0, 0, side * -0.42]);
+      }
+    }
+  }
+  root.add(group);
+  return group;
+}
+
 export function createReaverbotVisual(genome) {
   const materials = createMaterials(genome);
   const visualRoot = new THREE.Group();
@@ -3739,8 +3811,16 @@ export function createReaverbotVisual(genome) {
     materials.scopes.decor,
   );
   addSurfaceGrammar(visualRoot, genome, frame, materials.scopes.body);
+  const bossOrnaments = createBossOrnaments(
+    visualRoot,
+    genome,
+    frame,
+    materials.scopes.bossDecor ?? materials.scopes.decor,
+  );
   visualRoot.userData.meleeSilhouetteArmored = meleeArmor.enabled;
-  visualRoot.scale.setScalar(genome.body.proportions.overallScale);
+  visualRoot.scale.setScalar(
+    genome.body.proportions.overallScale * (genome.boss?.visualScale ?? 1),
+  );
   visualRoot.updateMatrixWorld(true);
 
   const bounds = new THREE.Box3().setFromObject(visualRoot);
@@ -3755,6 +3835,7 @@ export function createReaverbotVisual(genome) {
     defense,
     weakPoint,
     meleeArmor,
+    bossOrnaments,
     materials,
     bounds,
     size,

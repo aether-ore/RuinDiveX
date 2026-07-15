@@ -748,7 +748,10 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
           && rig.root.userData.jumpSlashAirborneRootAnchorActive
         );
         holdAllEquipmentVisible &&= Boolean(
-          rig.busterArmGroup?.visible && rig.beamBladeGroup?.visible
+          rig.beamBladeWeaponGroup?.visible
+          && rig.beamBladeHilt?.visible
+          && rig.beamBladeGroup?.visible
+          && !rig.busterArmGroup?.visible
         );
       }
 

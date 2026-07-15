@@ -14,10 +14,19 @@ import {
 } from '../src/buster/catalog.js';
 import {
   BUSTER_LAB_STORAGE_KEY,
+  BOSS_HUNT_REPEAT_REWARD_CHANCE,
   BusterLabStorage,
+  createDefaultBossHuntState,
   createDefaultBusterLabState,
+  getBossHuntRewardRoll,
   validateBusterLabState,
 } from '../src/buster/BusterLabStorage.js';
+import {
+  DEFAULT_BOSS_PROFILE_ID,
+  REAVERBOT_BOSS_PROFILE_IDS,
+  createBossExpeditionSpec,
+  resolveBossFeaturedMaterial,
+} from '../src/reaverbots/ReaverbotBossCatalog.js';
 import {
   MemoryLockManager,
   createBusterLabEnvelope,
@@ -457,6 +466,7 @@ test('serialization whitelists durable fields, adopts old saves, and visibly qua
   assert.deepEqual(Object.keys(persisted).sort(), [
     'assignments',
     'blueprints',
+    'bossHunts',
     'chassisBuilds',
     'chassisDrafts',
     'chassisInstances',
@@ -544,6 +554,279 @@ test('unknown module ids preserve the source draft while quarantining its saved 
   const persisted = JSON.parse(storage.getItem(lab.storageKeys.main)).state;
   assert.equal(persisted.chassisDrafts[0].program.nodes[0].moduleId, 'futureArcOrb');
   assert.equal(persisted.assignments.slots['1'], null);
+});
+
+test('Boss Hunt state defaults to Revolving Fusillade and quarantines unknown saved selections', () => {
+  assert.deepEqual(createDefaultBossHuntState(), {
+    selectedBossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    activeExpeditionId: null,
+    victoriesByProfile: {},
+    recordedExpeditions: {},
+    pendingRecoveries: [],
+    fallbackFromProfileId: null,
+    quarantinedRecoveryCount: 0,
+  });
+  const storage = new MemoryStorage();
+  const lab = new BusterLabStorage({ storage, saveContextId: 'boss-hunt-fallback' });
+  const state = createDefaultBusterLabState();
+  state.bossHunts.selectedBossProfileId = 'future-boss-profile';
+  storage.setItem(lab.storageKeys.main, JSON.stringify(createBusterLabEnvelope({
+    saveContextId: lab.saveContextId,
+    state,
+    revision: 1,
+  })));
+  const loaded = lab.load();
+  assert.equal(loaded.bossHunts.selectedBossProfileId, DEFAULT_BOSS_PROFILE_ID);
+  assert.equal(loaded.bossHunts.fallbackFromProfileId, 'future-boss-profile');
+  assert.match(lab.lastWarning, /Revolving Fusillade was selected instead/i);
+});
+
+test('Boss Hunt selection locks for an expedition and unlocks without changing the repeat target', async () => {
+  const lab = await BusterLabStorage.open({
+    storage: new MemoryStorage(),
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'boss-hunt-selection',
+  });
+  const selected = await lab.selectBossHunt('pursuitRegent');
+  assert.equal(selected.ok, true);
+  const expedition = createBossExpeditionSpec({
+    id: 'hunt-selection-1',
+    seed: 17,
+    depth: 4,
+    bossProfileId: 'pursuitRegent',
+  });
+  const locked = await lab.lockBossHuntForExpedition(expedition);
+  assert.equal(locked.ok, true);
+  assert.equal(lab.state.bossHunts.activeExpeditionId, expedition.id);
+  assert.equal((await lab.selectBossHunt('rubyOpticOracle')).reason, 'expedition-active');
+  const completed = await lab.completeBossExpedition(expedition.id, { outcome: 'defeat' });
+  assert.equal(completed.ok, true);
+  assert.equal(lab.state.bossHunts.activeExpeditionId, null);
+  assert.equal(lab.state.bossHunts.recordedExpeditions[expedition.id].status, 'defeat');
+  assert.equal(lab.state.bossHunts.selectedBossProfileId, 'pursuitRegent');
+  assert.equal((await lab.lockBossHuntForExpedition(expedition)).reason, 'expedition-closed');
+  assert.equal((await lab.selectBossHunt('rubyOpticOracle')).ok, true);
+});
+
+test('Boss Hunt loading quarantines recoveries that do not match the canonical advertised material', () => {
+  const storage = new MemoryStorage();
+  const lab = new BusterLabStorage({ storage, saveContextId: 'boss-hunt-recovery-quarantine' });
+  const state = createDefaultBusterLabState();
+  const expeditionId = 'corrupt-recovery-expedition';
+  const recoveryId = `boss-recovery:${expeditionId}`;
+  state.bossHunts.recordedExpeditions[expeditionId] = {
+    expeditionId,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    seed: 2,
+    depth: 1,
+    status: 'victory',
+    startedAt: null,
+    completedAt: new Date(0).toISOString(),
+    victoryIndex: 1,
+    signaturePartOverloaded: false,
+    reward: {
+      eligible: true,
+      queued: true,
+      recoveryId,
+      deterministicRoll: 0.2,
+      reason: 'first-clear',
+      identified: false,
+    },
+  };
+  state.bossHunts.victoriesByProfile[DEFAULT_BOSS_PROFILE_ID] = 1;
+  state.bossHunts.pendingRecoveries.push({
+    recoveryId,
+    expeditionId,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    victoryIndex: 1,
+    quantity: 1,
+    part: { id: 'rubyOpticLens', name: 'Injected wrong material' },
+  });
+  storage.setItem(lab.storageKeys.main, JSON.stringify(createBusterLabEnvelope({
+    saveContextId: lab.saveContextId,
+    state,
+    revision: 1,
+  })));
+
+  const loaded = lab.load();
+  assert.deepEqual(loaded.bossHunts.pendingRecoveries, []);
+  assert.equal(loaded.bossHunts.quarantinedRecoveryCount, 1);
+  assert.match(lab.lastWarning, /quarantined 1 Boss Recovery/i);
+  assert.equal(loaded.rollSalvage.parts.rubyOpticLens, undefined);
+});
+
+test('Boss victories are idempotent, guarantee first clears, and deterministically resolve repeats', async () => {
+  const storage = new MemoryStorage();
+  const lab = await BusterLabStorage.open({
+    storage,
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'boss-hunt-rewards',
+  });
+  const firstSpec = createBossExpeditionSpec({
+    id: 'hunt-reward-1',
+    seed: 1,
+    depth: 5,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+  });
+  assert.equal((await lab.lockBossHuntForExpedition(firstSpec)).ok, true);
+  const first = await lab.recordBossVictory({
+    expeditionId: firstSpec.id,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    signaturePartOverloaded: false,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.firstClear, true);
+  assert.equal(first.rewardQueued, true);
+  assert.equal(first.reward.reason, 'first-clear');
+  assert.equal(lab.state.bossHunts.victoriesByProfile[DEFAULT_BOSS_PROFILE_ID], 1);
+  assert.equal(lab.state.bossHunts.pendingRecoveries.length, 1);
+
+  const revisionAfterFirst = lab.revision;
+  const duplicate = await lab.recordBossVictory({
+    expeditionId: firstSpec.id,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    signaturePartOverloaded: true,
+  });
+  assert.equal(duplicate.ok, true);
+  assert.equal(duplicate.idempotent, true);
+  assert.equal(lab.revision, revisionAfterFirst);
+  assert.equal(lab.state.bossHunts.victoriesByProfile[DEFAULT_BOSS_PROFILE_ID], 1);
+  assert.equal(lab.state.bossHunts.pendingRecoveries.length, 1);
+
+  const identifiedFirst = await lab.identifyBossRecoveries();
+  const featured = resolveBossFeaturedMaterial(DEFAULT_BOSS_PROFILE_ID);
+  assert.equal(identifiedFirst.ok, true);
+  assert.equal(identifiedFirst.bossRecoveriesProcessed, 1);
+  assert.equal(lab.state.rollSalvage.parts[featured.id].quantity, 1);
+  assert.equal(lab.state.bossHunts.pendingRecoveries.length, 0);
+
+  const repeatSpec = createBossExpeditionSpec({
+    id: 'hunt-reward-2',
+    seed: 2,
+    depth: 5,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+  });
+  assert.equal((await lab.lockBossHuntForExpedition(repeatSpec)).ok, true);
+  const expectedRoll = getBossHuntRewardRoll({
+    saveContextId: lab.saveContextId,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    victoryIndex: 2,
+  });
+  const repeat = await lab.recordBossVictory({
+    expeditionId: repeatSpec.id,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+  });
+  assert.equal(repeat.ok, true);
+  assert.equal(repeat.firstClear, false);
+  assert.equal(repeat.reward.deterministicRoll, expectedRoll);
+  assert.equal(repeat.rewardQueued, expectedRoll < BOSS_HUNT_REPEAT_REWARD_CHANCE);
+
+  const overloadedSpec = createBossExpeditionSpec({
+    id: 'hunt-reward-3',
+    seed: 3,
+    depth: 5,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+  });
+  assert.equal((await lab.lockBossHuntForExpedition(overloadedSpec)).ok, true);
+  const overloaded = await lab.recordBossVictory({
+    expeditionId: overloadedSpec.id,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    signaturePartOverloaded: true,
+  });
+  assert.equal(overloaded.ok, true);
+  assert.equal(overloaded.rewardQueued, true);
+  assert.equal(overloaded.reward.reason, 'signature-overload');
+  assert.equal(lab.state.bossHunts.victoriesByProfile[DEFAULT_BOSS_PROFILE_ID], 3);
+});
+
+test('every boss kind guarantees its own canonical advertised material on first victory', async () => {
+  const lab = await BusterLabStorage.open({
+    storage: new MemoryStorage(),
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'boss-hunt-all-first-clears',
+  });
+  for (const [index, profileId] of REAVERBOT_BOSS_PROFILE_IDS.entries()) {
+    assert.equal((await lab.selectBossHunt(profileId)).ok, true);
+    const expedition = createBossExpeditionSpec({
+      id: `all-first-clears:${profileId}`,
+      seed: index + 1,
+      depth: 5,
+      bossProfileId: profileId,
+    });
+    assert.equal((await lab.lockBossHuntForExpedition(expedition)).ok, true);
+    const victory = await lab.recordBossVictory({
+      expeditionId: expedition.id,
+      bossProfileId: profileId,
+      signaturePartOverloaded: false,
+    });
+    assert.equal(victory.ok, true);
+    assert.equal(victory.firstClear, true);
+    assert.equal(victory.rewardQueued, true);
+    const recovery = lab.state.bossHunts.pendingRecoveries
+      .find((entry) => entry.expeditionId === expedition.id);
+    assert.equal(recovery?.part?.id, resolveBossFeaturedMaterial(profileId)?.id, profileId);
+  }
+  assert.equal(lab.state.bossHunts.pendingRecoveries.length, REAVERBOT_BOSS_PROFILE_IDS.length);
+});
+
+test('Boss Recovery identification is atomic with ordinary salvage and survives failed durable writes', async () => {
+  const storage = new MemoryStorage();
+  const lab = await BusterLabStorage.open({
+    storage,
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'boss-hunt-identification',
+  });
+  const expedition = createBossExpeditionSpec({
+    id: 'hunt-identification-1',
+    seed: 11,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+  });
+  await lab.lockBossHuntForExpedition(expedition);
+  await lab.recordBossVictory({
+    expeditionId: expedition.id,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+  });
+  const featured = resolveBossFeaturedMaterial(DEFAULT_BOSS_PROFILE_ID);
+
+  storage.failWrites = true;
+  const failed = await lab.identifyRecoveriesWithBossRewards({ total: 2, recoveries: [] });
+  assert.equal(failed.ok, false);
+  assert.equal(lab.state.bossHunts.pendingRecoveries.length, 1);
+  assert.equal(lab.state.rollSalvage.parts[featured.id], undefined);
+  assert.equal(lab.state.rollSalvage.identifiedScrap, 0);
+
+  storage.failWrites = false;
+  const committed = await lab.identifyRecoveriesWithBossRewards({ total: 2, recoveries: [] });
+  assert.equal(committed.ok, true);
+  assert.equal(committed.ordinaryProcessed, 2);
+  assert.equal(committed.bossRecoveriesProcessed, 1);
+  assert.equal(lab.state.rollSalvage.identifiedScrap, 2);
+  assert.equal(lab.state.rollSalvage.parts[featured.id].quantity, 1);
+  assert.equal(lab.state.bossHunts.pendingRecoveries.length, 0);
+  assert.equal(
+    lab.state.bossHunts.recordedExpeditions[expedition.id].reward.identified,
+    true,
+  );
+});
+
+test('read-only Boss Hunt victory leaves first-clear eligibility and recovery state untouched', async () => {
+  const storage = new MemoryStorage();
+  const lab = await BusterLabStorage.open({
+    storage,
+    lockManager: null,
+    saveContextId: 'boss-hunt-read-only',
+  });
+  const result = await lab.recordBossVictory({
+    expeditionId: 'read-only-victory',
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    signaturePartOverloaded: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'read-only');
+  assert.equal(result.firstClearEligible, true);
+  assert.deepEqual(lab.state.bossHunts.victoriesByProfile, {});
+  assert.deepEqual(lab.state.bossHunts.pendingRecoveries, []);
+  assert.equal(lab.state.bossHunts.recordedExpeditions['read-only-victory'], undefined);
 });
 
 test('Mega calibration sockets persist revisions and enforce physical exclusivity', () => {

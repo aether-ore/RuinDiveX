@@ -1,5 +1,11 @@
 import { RollSalvageStorage } from '../RollSalvageStorage.js';
 import {
+  DEFAULT_BOSS_PROFILE_ID,
+  getReaverbotBossProfile,
+  normalizeBossProfileId,
+  resolveBossFeaturedMaterial,
+} from '../reaverbots/ReaverbotBossCatalog.js';
+import {
   BUSTER_RECIPE_LIST,
   LEGACY_AFTER_DELAY_RECIPE,
   getBusterRecipe,
@@ -38,6 +44,7 @@ export const SECOND_BUSTER_CHASSIS_COST = 20;
 export const MAX_BUSTER_CHASSIS = 2;
 export const MAX_BUSTER_BLUEPRINTS = 8;
 export const LEGACY_BUSTER_INVENTORY_CAPACITY = 40;
+export const BOSS_HUNT_REPEAT_REWARD_CHANCE = 0.70;
 
 const NON_PHYSICAL_BUILTIN_MODULE_IDS = new Set(['onImpact', 'afterDelay', 'pulsePayload']);
 
@@ -64,6 +71,26 @@ function cloneJson(value, fallback = null) {
 function plainObject(value, fallback = {}) {
   const cloned = cloneJson(value, fallback);
   return cloned && typeof cloned === 'object' && !Array.isArray(cloned) ? cloned : fallback;
+}
+
+function stableHash01(value) {
+  const text = String(value ?? '');
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0) / 0x1_0000_0000;
+}
+
+export function getBossHuntRewardRoll({
+  saveContextId,
+  bossProfileId,
+  victoryIndex,
+} = {}) {
+  const profileId = normalizeBossProfileId(bossProfileId);
+  const index = Math.max(1, nonNegativeInteger(victoryIndex, 1));
+  return stableHash01(`${String(saveContextId ?? '')}:${profileId}:${index}`);
 }
 
 function normalizeTuning(tuning = {}) {
@@ -391,6 +418,18 @@ function secondChassisDraft() {
   };
 }
 
+export function createDefaultBossHuntState() {
+  return {
+    selectedBossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    activeExpeditionId: null,
+    victoriesByProfile: {},
+    recordedExpeditions: {},
+    pendingRecoveries: [],
+    fallbackFromProfileId: null,
+    quarantinedRecoveryCount: 0,
+  };
+}
+
 export function createDefaultBusterLabState() {
   const build = starterBuild();
   return {
@@ -423,6 +462,7 @@ export function createDefaultBusterLabState() {
       nextSequence: 1,
       starterRegistered: false,
     },
+    bossHunts: createDefaultBossHuntState(),
     migrations: {
       starterChassisGranted: true,
       applied: ['buster-lab-v1', 'starter-build-a-v1', 'buster-lab-state-v2'],
@@ -503,6 +543,7 @@ function legacyMappedState(raw) {
     fabricationHistory: raw.fabricationHistory ?? {},
     megaCalibrations: raw.megaCalibrations ?? raw.calibrations ?? {},
     legacyBusterParts: raw.legacyBusterParts ?? {},
+    bossHunts: raw.bossHunts ?? {},
     migrations: raw.migrations ?? {},
     nextInstanceId: raw.nextInstanceId ?? 1,
   };
@@ -560,6 +601,174 @@ function normalizeMegaCalibrations(calibrations) {
   };
 }
 
+function sanitizeBossRecoveryPart(part) {
+  if (!part || typeof part !== 'object' || typeof part.id !== 'string' || !part.id) return null;
+  return {
+    id: part.id,
+    name: typeof part.name === 'string' ? part.name : part.id,
+    family: typeof part.family === 'string' ? part.family : 'Reaverbot Part',
+    aspect: typeof part.aspect === 'string' ? part.aspect : null,
+    tier: typeof part.tier === 'string' ? part.tier : 'common',
+    color: typeof part.color === 'string' ? part.color : '#c7d0d6',
+    description: typeof part.description === 'string' ? part.description : '',
+    craftingTags: Array.isArray(part.craftingTags) ? cloneJson(part.craftingTags, []) : [],
+    exampleUses: Array.isArray(part.exampleUses) ? cloneJson(part.exampleUses, []) : [],
+    quantity: 1,
+    source: plainObject(part.source),
+  };
+}
+
+function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
+  if (!raw || typeof raw !== 'object') return null;
+  const expeditionId = typeof raw.expeditionId === 'string' && raw.expeditionId
+    ? raw.expeditionId
+    : fallbackExpeditionId;
+  if (!expeditionId) return null;
+  const rawProfileId = typeof raw.bossProfileId === 'string' ? raw.bossProfileId : '';
+  if (!getReaverbotBossProfile(rawProfileId)) return null;
+  const bossProfileId = rawProfileId;
+  const status = ['active', 'victory', 'defeat', 'abandoned'].includes(raw.status)
+    ? raw.status
+    : raw.completed
+      ? 'victory'
+      : 'active';
+  const reward = raw.reward && typeof raw.reward === 'object'
+    ? {
+      eligible: Boolean(raw.reward.eligible),
+      queued: Boolean(raw.reward.queued),
+      recoveryId: typeof raw.reward.recoveryId === 'string' ? raw.reward.recoveryId : null,
+      deterministicRoll: Number.isFinite(Number(raw.reward.deterministicRoll))
+        ? Number(raw.reward.deterministicRoll)
+        : null,
+      reason: typeof raw.reward.reason === 'string' ? raw.reward.reason : null,
+      identified: Boolean(raw.reward.identified),
+    }
+    : null;
+  return {
+    expeditionId,
+    bossProfileId,
+    invalidBossProfileId: rawProfileId && !getReaverbotBossProfile(rawProfileId)
+      ? rawProfileId
+      : null,
+    seed: typeof raw.seed === 'string' || Number.isFinite(Number(raw.seed)) ? raw.seed : null,
+    depth: Math.max(1, nonNegativeInteger(raw.depth, 1)),
+    status,
+    startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : null,
+    completedAt: typeof raw.completedAt === 'string' ? raw.completedAt : null,
+    victoryIndex: status === 'victory' ? Math.max(1, nonNegativeInteger(raw.victoryIndex, 1)) : null,
+    signaturePartOverloaded: Boolean(raw.signaturePartOverloaded),
+    reward,
+  };
+}
+
+function normalizeBossHunts(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const rawSelected = typeof source.selectedBossProfileId === 'string'
+    ? source.selectedBossProfileId
+    : DEFAULT_BOSS_PROFILE_ID;
+  const selectedBossProfileId = normalizeBossProfileId(rawSelected);
+
+  const victoriesByProfile = {};
+  for (const [rawProfileId, rawCount] of Object.entries(plainObject(source.victoriesByProfile))) {
+    if (!getReaverbotBossProfile(rawProfileId)) continue;
+    const count = nonNegativeInteger(rawCount);
+    if (count > 0) victoriesByProfile[rawProfileId] = count;
+  }
+
+  const recordedExpeditions = {};
+  let quarantinedBossProfileId = null;
+  const recordedSource = Array.isArray(source.recordedExpeditions)
+    ? source.recordedExpeditions.map((entry) => [entry?.expeditionId, entry])
+    : Object.entries(plainObject(source.recordedExpeditions));
+  for (const [key, raw] of recordedSource) {
+    const rawProfileId = typeof raw?.bossProfileId === 'string' ? raw.bossProfileId : '';
+    if (rawProfileId && !getReaverbotBossProfile(rawProfileId)) {
+      quarantinedBossProfileId ??= rawProfileId;
+      continue;
+    }
+    const record = sanitizeRecordedBossExpedition(raw, typeof key === 'string' ? key : '');
+    if (!record || recordedExpeditions[record.expeditionId]) continue;
+    recordedExpeditions[record.expeditionId] = record;
+  }
+
+  const pendingRecoveries = [];
+  const recoveryIds = new Set();
+  let quarantinedRecoveryCount = nonNegativeInteger(source.quarantinedRecoveryCount);
+  for (const raw of Array.isArray(source.pendingRecoveries) ? source.pendingRecoveries : []) {
+    const recoveryId = typeof raw?.recoveryId === 'string' && raw.recoveryId
+      ? raw.recoveryId
+      : '';
+    const expeditionId = typeof raw?.expeditionId === 'string' && raw.expeditionId
+      ? raw.expeditionId
+      : '';
+    const rawProfileId = typeof raw?.bossProfileId === 'string' ? raw.bossProfileId : '';
+    const bossProfile = getReaverbotBossProfile(rawProfileId);
+    if (!bossProfile) {
+      quarantinedBossProfileId ??= rawProfileId || 'unknown-recovery-profile';
+      quarantinedRecoveryCount += 1;
+      continue;
+    }
+    const recorded = recordedExpeditions[expeditionId];
+    const canonicalPart = resolveBossFeaturedMaterial(rawProfileId);
+    const part = sanitizeBossRecoveryPart(raw?.part ?? raw?.recoverableParts?.[0]);
+    if (!recoveryId
+      || !expeditionId
+      || !part
+      || !canonicalPart
+      || part.id !== canonicalPart.id
+      || recoveryIds.has(recoveryId)
+      || !recorded
+      || recorded.status !== 'victory'
+      || recorded.bossProfileId !== rawProfileId
+      || recorded.reward?.recoveryId !== recoveryId
+      || !recorded.reward?.eligible) {
+      quarantinedRecoveryCount += 1;
+      continue;
+    }
+    recoveryIds.add(recoveryId);
+    pendingRecoveries.push({
+      recoveryId,
+      expeditionId,
+      bossProfileId: rawProfileId,
+      victoryIndex: Math.max(1, nonNegativeInteger(raw.victoryIndex, 1)),
+      signaturePartOverloaded: Boolean(raw.signaturePartOverloaded),
+      deterministicRoll: Number.isFinite(Number(raw.deterministicRoll))
+        ? Number(raw.deterministicRoll)
+        : null,
+      queuedAt: typeof raw.queuedAt === 'string' ? raw.queuedAt : null,
+      quantity: 1,
+      part: {
+        ...cloneJson(canonicalPart),
+        quantity: 1,
+        source: {
+          ...plainObject(canonicalPart.source),
+          ...plainObject(part.source),
+        },
+      },
+    });
+  }
+
+  const requestedActiveId = typeof source.activeExpeditionId === 'string'
+    ? source.activeExpeditionId
+    : null;
+  const activeExpeditionId = requestedActiveId
+    && recordedExpeditions[requestedActiveId]?.status === 'active'
+    ? requestedActiveId
+    : Object.values(recordedExpeditions).find((entry) => entry.status === 'active')?.expeditionId ?? null;
+
+  return {
+    selectedBossProfileId,
+    activeExpeditionId,
+    victoriesByProfile,
+    recordedExpeditions,
+    pendingRecoveries,
+    fallbackFromProfileId: rawSelected !== selectedBossProfileId
+      ? rawSelected
+      : quarantinedBossProfileId,
+    quarantinedRecoveryCount,
+  };
+}
+
 function sanitizeState(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const normalizedRoll = sanitizeRollState(source.rollSalvage, source.discovery);
@@ -595,6 +804,7 @@ function sanitizeState(raw) {
     fabricationHistory: normalizeFabricationHistory(source.fabricationHistory, moduleInstances),
     megaCalibrations: normalizeMegaCalibrations(source.megaCalibrations),
     legacyBusterParts: normalizeLegacyBusterParts(source.legacyBusterParts),
+    bossHunts: normalizeBossHunts(source.bossHunts),
     migrations: plainObject(source.migrations),
     nextInstanceId: Math.max(1, nonNegativeInteger(source.nextInstanceId, 1)),
   };
@@ -962,6 +1172,45 @@ export function validateBusterLabState(state) {
       errors.push(`Inventory legacy Buster record ${record.legacyId} has an installed calibration.`);
     }
   }
+  const bossHunts = state.bossHunts;
+  if (!bossHunts || !getReaverbotBossProfile(bossHunts.selectedBossProfileId)) {
+    errors.push('Boss Hunt selection must reference a known boss profile.');
+  } else {
+    for (const [profileId, victories] of Object.entries(bossHunts.victoriesByProfile ?? {})) {
+      if (!getReaverbotBossProfile(profileId) || nonNegativeInteger(victories) !== victories) {
+        errors.push(`Boss Hunt victories for ${profileId} are invalid.`);
+      }
+    }
+    const recoveryIds = new Set();
+    for (const recovery of bossHunts.pendingRecoveries ?? []) {
+      if (!recovery.recoveryId || recoveryIds.has(recovery.recoveryId)) {
+        errors.push('Pending Boss Recovery ids must be non-empty and unique.');
+      }
+      recoveryIds.add(recovery.recoveryId);
+      if (!bossHunts.recordedExpeditions?.[recovery.expeditionId]) {
+        errors.push(`Boss Recovery ${recovery.recoveryId} has no recorded expedition.`);
+      }
+      const recoveryProfile = getReaverbotBossProfile(recovery.bossProfileId);
+      const canonicalPart = recoveryProfile
+        ? resolveBossFeaturedMaterial(recovery.bossProfileId)
+        : null;
+      const recorded = bossHunts.recordedExpeditions?.[recovery.expeditionId];
+      if (!recoveryProfile
+        || recovery.part?.id !== canonicalPart?.id
+        || recorded?.bossProfileId !== recovery.bossProfileId
+        || recorded?.status !== 'victory'
+        || recorded?.reward?.recoveryId !== recovery.recoveryId
+        || !recorded?.reward?.eligible) {
+        errors.push(`Boss Recovery ${recovery.recoveryId} has invalid material metadata.`);
+      }
+    }
+    if (bossHunts.activeExpeditionId) {
+      const active = bossHunts.recordedExpeditions?.[bossHunts.activeExpeditionId];
+      if (!active || active.status !== 'active') {
+        errors.push('Active Boss Hunt expedition must reference an active recorded expedition.');
+      }
+    }
+  }
   return errors;
 }
 
@@ -1211,10 +1460,19 @@ export class BusterLabStorage {
         expectedSaveContextId: this.saveContextId,
       });
       const migrated = this.deserialize(envelope.state);
+      if (migrated.bossHunts?.fallbackFromProfileId) {
+        this.lastWarning = `Roll couldn't find the saved Boss Hunt "${migrated.bossHunts.fallbackFromProfileId}". Revolving Fusillade was selected instead.`;
+      }
+      if ((migrated.bossHunts?.quarantinedRecoveryCount ?? 0) > 0) {
+        const count = migrated.bossHunts.quarantinedRecoveryCount;
+        const recoveryWarning = `Roll quarantined ${count} Boss Recover${count === 1 ? 'y' : 'ies'} whose saved material did not match the recorded hunt.`;
+        this.lastWarning = this.lastWarning ? `${this.lastWarning} ${recoveryWarning}` : recoveryWarning;
+      }
       const quarantined = migrated.migrations?.unknownModuleQuarantine ?? [];
       if (quarantined.length > 0) {
         const names = quarantined.map((entry) => entry.buildId).join(', ');
-        this.lastWarning = `Unknown Custom Buster modules were found in ${names}. Roll preserved the source as an invalid draft, cleared its arm assignment, and returned control to the Mega Buster.`;
+        const moduleWarning = `Unknown Custom Buster modules were found in ${names}. Roll preserved the source as an invalid draft, cleared its arm assignment, and returned control to the Mega Buster.`;
+        this.lastWarning = this.lastWarning ? `${this.lastWarning} ${moduleWarning}` : moduleWarning;
       }
       const errors = validateBusterLabState(migrated);
       if (errors.length > 0) throw new BusterLabValidationError(errors);
@@ -1590,6 +1848,462 @@ export class BusterLabStorage {
       (lab) => lab.setMegaCalibration(slotIndex, instanceId),
       concurrency,
     );
+  }
+
+  getBossHuntState() {
+    return cloneJson(this._ensureLoaded().bossHunts, createDefaultBossHuntState());
+  }
+
+  getActiveBossExpedition() {
+    const hunts = this._ensureLoaded().bossHunts;
+    return hunts.activeExpeditionId
+      ? cloneJson(hunts.recordedExpeditions[hunts.activeExpeditionId])
+      : null;
+  }
+
+  async selectBossHunt(bossProfileId, concurrency = {}) {
+    const profile = getReaverbotBossProfile(bossProfileId);
+    if (!profile) return { ok: false, reason: 'unknown-boss-profile', state: this._ensureLoaded() };
+    const current = this._ensureLoaded().bossHunts;
+    if (current.activeExpeditionId) {
+      return {
+        ok: false,
+        reason: 'expedition-active',
+        activeExpeditionId: current.activeExpeditionId,
+        state: this.state,
+      };
+    }
+    if (current.selectedBossProfileId === profile.id) {
+      return { ok: true, unchanged: true, bossProfileId: profile.id, state: this.state };
+    }
+    const transaction = await this.transact({
+      operation: 'select-boss-hunt',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      if (state.bossHunts.activeExpeditionId) {
+        throw new BusterLabOperationError('expedition-active');
+      }
+      state.bossHunts.selectedBossProfileId = profile.id;
+      state.bossHunts.fallbackFromProfileId = null;
+      return { bossProfileId: profile.id };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  selectBossHuntAsync(bossProfileId, concurrency = {}) {
+    return this.selectBossHunt(bossProfileId, concurrency);
+  }
+
+  async lockBossHuntForExpedition(expeditionSpec = {}, concurrency = {}) {
+    const expeditionId = typeof expeditionSpec.id === 'string' && expeditionSpec.id
+      ? expeditionSpec.id
+      : typeof expeditionSpec.expeditionId === 'string' && expeditionSpec.expeditionId
+        ? expeditionSpec.expeditionId
+        : '';
+    if (!expeditionId) return { ok: false, reason: 'invalid-expedition-id', state: this._ensureLoaded() };
+    const currentHunts = this._ensureLoaded().bossHunts;
+    const requestedProfileId = expeditionSpec.bossProfileId ?? currentHunts.selectedBossProfileId;
+    if (!getReaverbotBossProfile(requestedProfileId)) {
+      return { ok: false, reason: 'unknown-boss-profile', state: this.state };
+    }
+    const existing = currentHunts.recordedExpeditions[expeditionId];
+    if (existing) {
+      if (existing.bossProfileId !== requestedProfileId) {
+        return { ok: false, reason: 'expedition-profile-mismatch', expedition: cloneJson(existing), state: this.state };
+      }
+      if (existing.status !== 'active') {
+        return { ok: false, reason: 'expedition-closed', expedition: cloneJson(existing), state: this.state };
+      }
+      const requestedDepth = Math.max(1, nonNegativeInteger(expeditionSpec.depth, 1));
+      const requestedSeed = typeof expeditionSpec.seed === 'string' || Number.isFinite(Number(expeditionSpec.seed))
+        ? expeditionSpec.seed
+        : null;
+      if (existing.depth !== requestedDepth || existing.seed !== requestedSeed) {
+        return { ok: false, reason: 'expedition-spec-mismatch', expedition: cloneJson(existing), state: this.state };
+      }
+      return { ok: true, unchanged: true, expedition: cloneJson(existing), state: this.state };
+    }
+    if (currentHunts.activeExpeditionId) {
+      return {
+        ok: false,
+        reason: 'expedition-active',
+        activeExpeditionId: currentHunts.activeExpeditionId,
+        state: this.state,
+      };
+    }
+    if (requestedProfileId !== currentHunts.selectedBossProfileId) {
+      return {
+        ok: false,
+        reason: 'boss-selection-mismatch',
+        selectedBossProfileId: currentHunts.selectedBossProfileId,
+        requestedBossProfileId: requestedProfileId,
+        state: this.state,
+      };
+    }
+    const transaction = await this.transact({
+      operation: 'lock-boss-hunt-expedition',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const hunts = state.bossHunts;
+      const concurrentExisting = hunts.recordedExpeditions[expeditionId];
+      if (concurrentExisting) {
+        if (concurrentExisting.bossProfileId !== requestedProfileId) {
+          throw new BusterLabOperationError('expedition-profile-mismatch');
+        }
+        if (concurrentExisting.status !== 'active') {
+          throw new BusterLabOperationError('expedition-closed');
+        }
+        const concurrentDepth = Math.max(1, nonNegativeInteger(expeditionSpec.depth, 1));
+        const concurrentSeed = typeof expeditionSpec.seed === 'string' || Number.isFinite(Number(expeditionSpec.seed))
+          ? expeditionSpec.seed
+          : null;
+        if (concurrentExisting.depth !== concurrentDepth || concurrentExisting.seed !== concurrentSeed) {
+          throw new BusterLabOperationError('expedition-spec-mismatch');
+        }
+        return { expedition: cloneJson(concurrentExisting), unchanged: true };
+      }
+      if (hunts.activeExpeditionId) throw new BusterLabOperationError('expedition-active');
+      if (hunts.selectedBossProfileId !== requestedProfileId) {
+        throw new BusterLabOperationError('boss-selection-mismatch');
+      }
+      const expedition = {
+        expeditionId,
+        bossProfileId: requestedProfileId,
+        invalidBossProfileId: null,
+        seed: typeof expeditionSpec.seed === 'string' || Number.isFinite(Number(expeditionSpec.seed))
+          ? expeditionSpec.seed
+          : null,
+        depth: Math.max(1, nonNegativeInteger(expeditionSpec.depth, 1)),
+        status: 'active',
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        victoryIndex: null,
+        signaturePartOverloaded: false,
+        reward: null,
+      };
+      hunts.recordedExpeditions[expeditionId] = expedition;
+      hunts.activeExpeditionId = expeditionId;
+      return { expedition: cloneJson(expedition) };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  lockBossHuntForExpeditionAsync(expeditionSpec = {}, concurrency = {}) {
+    return this.lockBossHuntForExpedition(expeditionSpec, concurrency);
+  }
+
+  async clearActiveBossExpedition({ expeditionId = null, reason = 'defeat' } = {}, concurrency = {}) {
+    const hunts = this._ensureLoaded().bossHunts;
+    const targetId = expeditionId ?? hunts.activeExpeditionId;
+    if (!targetId || hunts.activeExpeditionId !== targetId) {
+      return { ok: true, unchanged: true, state: this.state };
+    }
+    const status = reason === 'abandoned' ? 'abandoned' : 'defeat';
+    const transaction = await this.transact({
+      operation: 'clear-boss-hunt-expedition',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const entry = state.bossHunts.recordedExpeditions[targetId];
+      if (entry?.status === 'active') {
+        entry.status = status;
+        entry.completedAt = new Date().toISOString();
+      }
+      if (state.bossHunts.activeExpeditionId === targetId) {
+        state.bossHunts.activeExpeditionId = null;
+      }
+      return { expedition: cloneJson(entry) };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  completeBossExpedition(expeditionId, { outcome = 'defeat', ...concurrency } = {}) {
+    return this.clearActiveBossExpedition({ expeditionId, reason: outcome }, concurrency);
+  }
+
+  unlockBossHuntAfterExpedition(expeditionId, options = {}) {
+    return this.completeBossExpedition(expeditionId, options);
+  }
+
+  async recordBossVictory({
+    expeditionId,
+    bossProfileId,
+    signaturePartOverloaded = false,
+    sandbox = false,
+    debugRewardOutcome = null,
+    allowDebugOverride = false,
+  } = {}, concurrency = {}) {
+    if (sandbox) {
+      return { ok: true, suppressed: true, reason: 'sandbox', rewardQueued: false, state: this._ensureLoaded() };
+    }
+    if (typeof expeditionId !== 'string' || !expeditionId) {
+      return { ok: false, reason: 'invalid-expedition-id', state: this._ensureLoaded() };
+    }
+    if (!getReaverbotBossProfile(bossProfileId)) {
+      return { ok: false, reason: 'unknown-boss-profile', state: this._ensureLoaded() };
+    }
+    const existing = this._ensureLoaded().bossHunts.recordedExpeditions[expeditionId];
+    if (existing?.status === 'victory') {
+      if (existing.bossProfileId !== bossProfileId) {
+        return { ok: false, reason: 'expedition-profile-mismatch', state: this.state };
+      }
+      return {
+        ok: true,
+        unchanged: true,
+        idempotent: true,
+        victoryIndex: existing.victoryIndex,
+        rewardQueued: Boolean(existing.reward?.queued),
+        reward: cloneJson(existing.reward),
+        state: this.state,
+      };
+    }
+    const activeExpeditionId = this._ensureLoaded().bossHunts.activeExpeditionId;
+    if (activeExpeditionId && activeExpeditionId !== expeditionId) {
+      return {
+        ok: false,
+        reason: 'expedition-active',
+        activeExpeditionId,
+        state: this.state,
+      };
+    }
+    if (this.readOnly) {
+      return {
+        ok: false,
+        reason: 'read-only',
+        rewardQueued: false,
+        firstClearEligible: (this.state.bossHunts.victoriesByProfile[bossProfileId] ?? 0) === 0,
+        state: this.state,
+      };
+    }
+    const featuredPart = resolveBossFeaturedMaterial(bossProfileId);
+    if (!featuredPart) return { ok: false, reason: 'missing-featured-material', state: this.state };
+
+    const transaction = await this.transact({
+      operation: 'record-boss-victory',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const hunts = state.bossHunts;
+      const prior = hunts.recordedExpeditions[expeditionId];
+      if (prior?.status === 'victory') {
+        if (prior.bossProfileId !== bossProfileId) {
+          throw new BusterLabOperationError('expedition-profile-mismatch');
+        }
+        return {
+          unchanged: true,
+          idempotent: true,
+          victoryIndex: prior.victoryIndex,
+          rewardQueued: Boolean(prior.reward?.queued),
+          reward: cloneJson(prior.reward),
+        };
+      }
+      if (hunts.activeExpeditionId && hunts.activeExpeditionId !== expeditionId) {
+        throw new BusterLabOperationError('expedition-active');
+      }
+      if (prior && prior.bossProfileId !== bossProfileId) {
+        throw new BusterLabOperationError('expedition-profile-mismatch');
+      }
+      const previousVictories = nonNegativeInteger(hunts.victoriesByProfile[bossProfileId]);
+      const victoryIndex = previousVictories + 1;
+      const firstClear = previousVictories === 0;
+      const deterministicRoll = getBossHuntRewardRoll({
+        saveContextId: this.saveContextId,
+        bossProfileId,
+        victoryIndex,
+      });
+      const forcedOutcome = allowDebugOverride && typeof debugRewardOutcome === 'boolean'
+        ? debugRewardOutcome
+        : null;
+      const rewardEligible = forcedOutcome ?? (
+        firstClear
+        || Boolean(signaturePartOverloaded)
+        || deterministicRoll < BOSS_HUNT_REPEAT_REWARD_CHANCE
+      );
+      const rewardReason = forcedOutcome != null
+        ? 'debug-override'
+        : firstClear
+          ? 'first-clear'
+          : signaturePartOverloaded
+            ? 'signature-overload'
+            : rewardEligible
+              ? 'repeat-roll'
+              : 'repeat-miss';
+      const recoveryId = rewardEligible ? `boss-recovery:${expeditionId}` : null;
+      const reward = {
+        eligible: rewardEligible,
+        queued: rewardEligible,
+        recoveryId,
+        deterministicRoll,
+        reason: rewardReason,
+        identified: false,
+      };
+      const completed = {
+        expeditionId,
+        bossProfileId,
+        invalidBossProfileId: null,
+        seed: prior?.seed ?? null,
+        depth: prior?.depth ?? 1,
+        status: 'victory',
+        startedAt: prior?.startedAt ?? null,
+        completedAt: new Date().toISOString(),
+        victoryIndex,
+        signaturePartOverloaded: Boolean(signaturePartOverloaded),
+        reward,
+      };
+      hunts.recordedExpeditions[expeditionId] = completed;
+      hunts.victoriesByProfile[bossProfileId] = victoryIndex;
+      if (hunts.activeExpeditionId === expeditionId) hunts.activeExpeditionId = null;
+      if (rewardEligible && !hunts.pendingRecoveries.some((entry) => entry.recoveryId === recoveryId)) {
+        hunts.pendingRecoveries.push({
+          recoveryId,
+          expeditionId,
+          bossProfileId,
+          victoryIndex,
+          signaturePartOverloaded: Boolean(signaturePartOverloaded),
+          deterministicRoll,
+          queuedAt: completed.completedAt,
+          quantity: 1,
+          part: {
+            ...cloneJson(featuredPart),
+            quantity: 1,
+            source: {
+              ...plainObject(featuredPart.source),
+              kind: 'bossHunt',
+              expeditionId,
+              bossProfileId,
+              victoryIndex,
+            },
+          },
+        });
+      }
+      return {
+        expedition: cloneJson(completed),
+        firstClear,
+        victoryIndex,
+        rewardQueued: rewardEligible,
+        reward: cloneJson(reward),
+      };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  recordBossVictoryAsync(result = {}, concurrency = {}) {
+    return this.recordBossVictory(result, concurrency);
+  }
+
+  getPendingBossRecoveryTransfer({ recoveryIds = null } = {}) {
+    const selectedIds = Array.isArray(recoveryIds) ? new Set(recoveryIds) : null;
+    const pending = this._ensureLoaded().bossHunts.pendingRecoveries
+      .filter((entry) => !selectedIds || selectedIds.has(entry.recoveryId));
+    return {
+      total: pending.length,
+      recoveries: pending.map((entry) => ({
+        id: entry.recoveryId,
+        recoveryId: entry.recoveryId,
+        quantity: 1,
+        source: {
+          kind: 'bossHunt',
+          expeditionId: entry.expeditionId,
+          bossProfileId: entry.bossProfileId,
+          victoryIndex: entry.victoryIndex,
+        },
+        recoverableParts: [{
+          ...cloneJson(entry.part),
+          quantity: 1,
+          source: cloneJson(entry.part.source),
+        }],
+      })),
+    };
+  }
+
+  async identifyRecoveriesWithBossRewards(ordinaryTransfer = {}, options = {}, concurrency = {}) {
+    const recoveryIds = Array.isArray(options.recoveryIds) ? new Set(options.recoveryIds) : null;
+    const ordinaryTotal = nonNegativeInteger(ordinaryTransfer?.total);
+    const ordinaryRecoveries = Array.isArray(ordinaryTransfer?.recoveries)
+      ? cloneJson(ordinaryTransfer.recoveries, [])
+      : [];
+    const availableBossRecoveries = this._ensureLoaded().bossHunts.pendingRecoveries
+      .filter((entry) => !recoveryIds || recoveryIds.has(entry.recoveryId));
+    if (ordinaryTotal <= 0 && availableBossRecoveries.length === 0) {
+      return { ok: false, reason: 'nothing-to-identify', state: this.state };
+    }
+    const transaction = await this.transact({
+      operation: 'identify-all-recoveries',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const bossRecoveries = state.bossHunts.pendingRecoveries
+        .filter((entry) => !recoveryIds || recoveryIds.has(entry.recoveryId));
+      const bossTransfer = {
+        total: bossRecoveries.length,
+        recoveries: bossRecoveries.map((entry) => ({
+          id: entry.recoveryId,
+          quantity: 1,
+          source: {
+            kind: 'bossHunt',
+            expeditionId: entry.expeditionId,
+            bossProfileId: entry.bossProfileId,
+            victoryIndex: entry.victoryIndex,
+          },
+          recoverableParts: [{
+            ...cloneJson(entry.part),
+            quantity: 1,
+            source: cloneJson(entry.part.source),
+          }],
+        })),
+      };
+      const roll = new RollSalvageStorage({
+        ...state.rollSalvage,
+        discoveredSalvageTypes: state.discovery.salvageTypes,
+        discoveryHistory: state.discovery.history,
+      });
+      const ordinaryResult = ordinaryTotal > 0
+        ? roll.identifyRecoveries({ total: ordinaryTotal, recoveries: ordinaryRecoveries })
+        : { processed: 0, scrapStored: 0, partCount: 0, recoveredParts: [] };
+      // Boss recoveries are resolved as their own batch inside the same durable
+      // transaction. An inconsistent ordinary transfer therefore cannot spend
+      // the reserved unit that represents a guaranteed named boss material.
+      const bossResult = bossTransfer.total > 0
+        ? roll.identifyRecoveries(bossTransfer)
+        : { processed: 0, scrapStored: 0, partCount: 0, recoveredParts: [] };
+      const recoveredParts = new Map();
+      for (const part of [...ordinaryResult.recoveredParts, ...bossResult.recoveredParts]) {
+        const prior = recoveredParts.get(part.id) ?? { ...part, quantity: 0 };
+        prior.quantity += nonNegativeInteger(part.quantity);
+        recoveredParts.set(part.id, prior);
+      }
+      const result = {
+        processed: ordinaryResult.processed + bossResult.processed,
+        scrapStored: ordinaryResult.scrapStored + bossResult.scrapStored,
+        partCount: ordinaryResult.partCount + bossResult.partCount,
+        recoveredParts: [...recoveredParts.values()],
+        identifiedScrap: roll.identifiedScrap,
+        storedPartCount: roll.getStoredPartCount(),
+      };
+      this._applyRollSnapshot(state, roll.serialize());
+      const consumedIds = new Set(bossRecoveries.map((entry) => entry.recoveryId));
+      state.bossHunts.pendingRecoveries = state.bossHunts.pendingRecoveries
+        .filter((entry) => !consumedIds.has(entry.recoveryId));
+      for (const entry of Object.values(state.bossHunts.recordedExpeditions)) {
+        if (entry.reward?.recoveryId && consumedIds.has(entry.reward.recoveryId)) {
+          entry.reward.queued = false;
+          entry.reward.identified = true;
+        }
+      }
+      return {
+        identification: result,
+        ordinaryProcessed: ordinaryTotal,
+        bossRecoveriesProcessed: bossTransfer.total,
+        bossRecoveryIds: [...consumedIds],
+      };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  identifyBossRecoveries(options = {}, concurrency = {}) {
+    return this.identifyRecoveriesWithBossRewards({}, options, concurrency);
   }
 
   swapMegaCalibrationAsync(slotIndex, instanceId, options = {}, concurrency = {}) {

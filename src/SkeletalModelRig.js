@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createHeldBeamSaber, tintHeldBeamSaber } from './BeamSaberVisual.js';
 
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 const BEAM_BLADE_TOTAL_FRAMES = 24;
@@ -255,6 +256,9 @@ export class SkeletalModelRig {
     this.drillArmActive = false;
     this.drillSpinning = false;
     this.drillColor = new THREE.Color(0xffd36f);
+    this.beamBladeWeaponGroup = null;
+    this.beamBladeHilt = null;
+    this.beamBladeEmitter = null;
     this.beamBladeGroup = null;
     this.beamBladeActive = false;
     this.beamBladeColor = new THREE.Color(DEFAULT_BEAM_BLADE_COLOR);
@@ -388,6 +392,9 @@ export class SkeletalModelRig {
     if (this.busterArmGroup?.parent) {
       this.busterArmGroup.parent.remove(this.busterArmGroup);
     }
+    if (this.beamBladeWeaponGroup?.parent) {
+      this.beamBladeWeaponGroup.parent.remove(this.beamBladeWeaponGroup);
+    }
 
     this._scaleBusterToForearm(busterObject, 'left');
     const leftBusterObject = busterObject.clone(true);
@@ -407,8 +414,7 @@ export class SkeletalModelRig {
     this.busterMuzzle = rightMount.muzzle;
     this.busterNeutralQuaternion.copy(rightMount.neutralQuaternion);
     this.busterMountedElbow = rightElbow;
-    this.beamBladeGroup = this._createBeamBladeGroup();
-    this.busterMuzzle.add(this.beamBladeGroup);
+    this._createAndAttachBeamSaber();
     this.setMegaBusterArmActive(this.megaBusterArmActive);
     this.setBusterArmActive(this.busterArmActive);
     this.setBeamBladeActive(this.beamBladeActive, this.beamBladeColor);
@@ -585,9 +591,6 @@ export class SkeletalModelRig {
 
     this._syncArmReplacementVisibility();
 
-    if (!this.busterArmActive && this.beamBladeGroup) {
-      this.beamBladeGroup.visible = false;
-    }
   }
 
   setMegaBusterArmActive(active) {
@@ -639,6 +642,9 @@ export class SkeletalModelRig {
       this._tintBeamBlade();
     }
 
+    if (this.beamBladeWeaponGroup) {
+      this.beamBladeWeaponGroup.visible = this.beamBladeActive;
+    }
     if (!this.beamBladeActive && this.beamBladeGroup) {
       this.beamBladeGroup.visible = false;
     }
@@ -2578,56 +2584,42 @@ export class SkeletalModelRig {
     return true;
   }
 
-  _createBeamBladeGroup() {
-    const group = new THREE.Group();
-    group.name = 'rigLaserBeamBlade';
-    group.visible = false;
+  _createAndAttachBeamSaber() {
+    const elbow = this.joints.get(RIGHT_BUSTER_ELBOW_JOINT);
+    const wrist = this.joints.get(RIGHT_BUSTER_WRIST_JOINT);
+    if (!elbow || !wrist) {
+      return false;
+    }
 
-    const glowMaterial = new THREE.MeshBasicMaterial({
-      color: this.beamBladeColor,
-      transparent: true,
-      opacity: 0.42,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    glowMaterial.name = 'material_rigLaserBeamBladeGlow';
+    elbow.updateMatrixWorld(true);
+    wrist.updateMatrixWorld(true);
+    elbow.getWorldPosition(tempVectorA);
+    wrist.getWorldPosition(tempVectorB);
+    tempVectorB.sub(tempVectorA);
+    if (tempVectorB.lengthSq() <= 0.000001) {
+      tempVectorB.set(0, 0, 1);
+    } else {
+      tempVectorB.normalize();
+    }
 
-    const coreMaterial = new THREE.MeshBasicMaterial({
-      color: this.beamBladeColor,
-      transparent: true,
-      opacity: 0.9,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    coreMaterial.name = 'material_rigLaserBeamBladeCore';
+    const visual = createHeldBeamSaber(this.beamBladeColor);
+    tempQuaternionA.setFromUnitVectors(localForwardZ, tempVectorB);
+    wrist.getWorldQuaternion(tempQuaternionB).invert();
+    visual.weaponGroup.quaternion.copy(tempQuaternionB.multiply(tempQuaternionA)).normalize();
+    visual.weaponGroup.userData.heldJoint = RIGHT_BUSTER_WRIST_JOINT;
+    this._applyInverseRootScale(visual.weaponGroup);
+    wrist.add(visual.weaponGroup);
 
-    const glow = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 1.35), glowMaterial);
-    glow.name = 'rigLaserBeamBladeGlow';
-    glow.position.z = 0.72;
-
-    const core = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.035, 1.28), coreMaterial);
-    core.name = 'rigLaserBeamBladeCore';
-    core.position.z = 0.7;
-
-    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.24, 8), glowMaterial);
-    tip.name = 'rigLaserBeamBladeTip';
-    tip.rotation.x = Math.PI / 2;
-    tip.position.z = 1.45;
-
-    group.add(glow, core, tip);
-    return group;
+    this.beamBladeWeaponGroup = visual.weaponGroup;
+    this.beamBladeHilt = visual.hilt;
+    this.beamBladeEmitter = visual.emitter;
+    this.beamBladeGroup = visual.bladeGroup;
+    this._tintBeamBlade();
+    return true;
   }
 
   _tintBeamBlade() {
-    if (!this.beamBladeGroup) {
-      return;
-    }
-
-    this.beamBladeGroup.traverse((object) => {
-      if (object.material?.color) {
-        object.material.color.copy(this.beamBladeColor);
-      }
-    });
+    tintHeldBeamSaber(this.beamBladeWeaponGroup, this.beamBladeColor);
   }
 
   _tintDrillArm() {
@@ -2672,7 +2664,10 @@ export class SkeletalModelRig {
       return;
     }
 
-    const active = this.busterArmActive && this.beamBladeActive && visible;
+    if (this.beamBladeWeaponGroup) {
+      this.beamBladeWeaponGroup.visible = this.beamBladeActive;
+    }
+    const active = this.beamBladeActive && visible;
     this.beamBladeGroup.visible = active;
 
     if (!active) {

@@ -11,6 +11,121 @@
   --charcoal: #0d141d;
 }
 
+/* Modular Reaverbot boss hunts */
+.boss-hud {
+  position: fixed;
+  left: 50%;
+  top: 4.4rem;
+  z-index: 42;
+  width: min(680px, 76vw);
+  transform: translateX(-50%);
+  padding: 0.65rem 0.9rem 0.7rem;
+  color: #fff1c2;
+  background: linear-gradient(180deg, rgba(18, 14, 13, 0.94), rgba(28, 20, 16, 0.84));
+  border: 1px solid rgba(225, 186, 104, 0.72);
+  box-shadow: 0 0 28px rgba(255, 106, 52, 0.2), inset 0 0 18px rgba(255, 205, 112, 0.06);
+  pointer-events: none;
+}
+
+.boss-hud-heading,
+.boss-signature-row,
+.boss-hunts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+#boss-hud-name { font-size: 0.95rem; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+#boss-hud-phase { color: #ffb45c; font: 700 0.7rem/1 monospace; letter-spacing: 0.14em; }
+.boss-health-track,
+.boss-signature-track {
+  position: relative;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid rgba(255, 225, 159, 0.28);
+}
+.boss-health-track { height: 0.72rem; margin-top: 0.46rem; }
+.boss-health-track > span,
+.boss-signature-track > span { display: block; width: 100%; height: 100%; transform-origin: left center; transition: transform 120ms linear; }
+.boss-health-track > span { background: linear-gradient(90deg, #8e251d, #ff5b35 62%, #ffd071); }
+.boss-phase-marker { position: absolute; left: 50%; top: -0.2rem; width: 2px; height: 1.1rem; background: #fff3c0; box-shadow: 0 0 5px #fff; }
+.boss-signature-row { margin-top: 0.44rem; color: #d8caa7; font: 650 0.66rem/1.2 monospace; text-transform: uppercase; letter-spacing: 0.08em; }
+.boss-signature-track { flex: 1; height: 0.34rem; }
+.boss-signature-track > span { background: linear-gradient(90deg, #9a5a27, #ffd36f); }
+#boss-signature-status { color: #ffd36f; min-width: 6.5rem; text-align: right; }
+
+.boss-intro-banner,
+.boss-victory-banner {
+  position: fixed;
+  left: 50%;
+  top: 28%;
+  z-index: 80;
+  transform: translate(-50%, -50%);
+  width: min(760px, 82vw);
+  padding: 1.15rem 1.6rem;
+  color: #fff0be;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  background: linear-gradient(90deg, transparent, rgba(30, 18, 12, 0.94) 18%, rgba(30, 18, 12, 0.94) 82%, transparent);
+  text-shadow: 0 0 14px rgba(255, 170, 80, 0.65);
+  pointer-events: none;
+}
+.boss-victory-banner { top: 35%; color: #ffd36f; }
+
+.boss-hunts { min-width: 0; }
+.boss-hunts-header { margin-bottom: 0.35rem; }
+.boss-hunts-header h2 { margin: 0.2rem 0 0; }
+#boss-hunts-lock-status { color: #70e9ff; font: 700 0.68rem/1.2 monospace; letter-spacing: 0.1em; }
+.boss-hunts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.72rem;
+  max-height: min(58vh, 650px);
+  overflow: auto;
+  padding: 0.2rem;
+}
+.boss-hunt-card {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 0.7rem;
+  min-height: 118px;
+  padding: 0.65rem;
+  color: #d9e5e9;
+  text-align: left;
+  background: linear-gradient(145deg, rgba(28, 35, 38, 0.96), rgba(22, 20, 18, 0.96));
+  border: 1px solid rgba(121, 166, 178, 0.3);
+}
+.boss-hunt-card:hover:not(:disabled),
+.boss-hunt-card.is-selected { border-color: #ffd36f; box-shadow: inset 0 0 18px rgba(255, 191, 88, 0.12); }
+.boss-hunt-card.is-selected { background: linear-gradient(145deg, rgba(51, 42, 26, 0.98), rgba(22, 20, 18, 0.96)); }
+.boss-hunt-card img { width: 72px; height: 72px; object-fit: cover; border: 1px solid rgba(255, 211, 111, 0.42); background: #101416; }
+.boss-hunt-card-body { min-width: 0; }
+.boss-hunt-card h3 { margin: 0; color: #fff0bd; font-size: 0.85rem; }
+.boss-hunt-card p { margin: 0.25rem 0; color: #aebbc0; font-size: 0.72rem; line-height: 1.35; }
+.boss-hunt-card strong { color: #ffd36f; font-size: 0.7rem; }
+.boss-hunt-recipes { grid-column: 1 / -1; color: #7edff1; font-size: 0.67rem; }
+
+.buster-recipe-hunts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.buster-recipe-hunts button {
+  padding: 0.3rem 0.45rem;
+  color: #91e8f5;
+  font-size: 0.67rem;
+  text-align: left;
+}
+
+@media (max-width: 700px) {
+  .boss-hud { width: 88vw; top: 3.4rem; }
+  .boss-hunts-grid { grid-template-columns: 1fr; }
+}
+
 * {
   box-sizing: border-box;
 }

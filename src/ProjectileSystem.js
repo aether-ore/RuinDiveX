@@ -409,6 +409,16 @@ export class ProjectileSystem {
     attackDomain = null,
     attackMeta = null,
   }) {
+    if (source?.isBoss) {
+      const sourceLimit = Math.max(1, Math.trunc(
+        source.bossProfile?.combat?.limits?.projectiles ?? 20,
+      ));
+      const activeFromSource = this.active.reduce(
+        (count, activeProjectile) => count + Number(activeProjectile.source === source),
+        0,
+      );
+      if (activeFromSource >= sourceLimit) return null;
+    }
     const projectile = this._getProjectile();
     projectile.owner = owner;
     projectile.direction.copy(direction).normalize();
@@ -1011,6 +1021,8 @@ export class ProjectileSystem {
         knockback: 2.1,
         hitPartId: resolvedPart?.hitPartId ?? null,
         weakPointHit: Boolean(resolvedPart?.weakPointHit),
+        signaturePartHit: Boolean(resolvedPart?.signaturePartHit),
+        bossArenaNodeHit: Boolean(resolvedPart?.bossArenaNodeHit),
         hitPosition: resolvedPart?.hitPosition ?? position.clone(),
         attackDomain: projectile.attackDomain,
         ...(projectile.attackMeta ?? {}),
@@ -1126,6 +1138,8 @@ export class ProjectileSystem {
           knockback: 2.1,
           hitPartId: resolvedPart?.hitPartId ?? null,
           weakPointHit: Boolean(resolvedPart?.weakPointHit),
+          signaturePartHit: Boolean(resolvedPart?.signaturePartHit),
+          bossArenaNodeHit: Boolean(resolvedPart?.bossArenaNodeHit),
           hitPosition: resolvedPart?.hitPosition ?? position.clone(),
           attackDomain: projectile.attackDomain,
           ...(projectile.attackMeta ?? {}),

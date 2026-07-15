@@ -1,4 +1,5 @@
 const SHARED_TEXTURE_ROOT = '/assets/textures/reaverbots/procedural/shared';
+const BOSS_TEXTURE_ROOT = '/assets/textures/reaverbots/bosses';
 
 function freezeTextureAsset(id, fileName, options = {}) {
   // Semantic UV regions select a deliberate subsection of the authored map.
@@ -8,7 +9,7 @@ function freezeTextureAsset(id, fileName, options = {}) {
   const isMask = Boolean(options.mask);
   return Object.freeze({
     id,
-    path: `${SHARED_TEXTURE_ROOT}/${fileName}`,
+    path: options.path ?? `${SHARED_TEXTURE_ROOT}/${fileName}`,
     type: isMask ? 'mask' : 'color',
     colorSpace: isMask ? 'none' : (options.colorSpace ?? 'srgb'),
     mask: options.mask ?? null,
@@ -27,7 +28,7 @@ function freezeTextureAsset(id, fileName, options = {}) {
  * String enum values are intentionally translated to THREE constants by the
  * visual loader, keeping this catalog deterministic and usable from Node tests.
  */
-export const REAVERBOT_TEXTURE_ASSETS = Object.freeze({
+const SHARED_REAVERBOT_TEXTURE_ASSETS = {
   armorPrimary: freezeTextureAsset('armorPrimary', 'armor_primary_tile.png'),
   armorSecondaryCircuit: freezeTextureAsset('armorSecondaryCircuit', 'armor_secondary_circuit_tile.png'),
   bladeMetal: freezeTextureAsset('bladeMetal', 'blade_metal_tile.png'),
@@ -46,7 +47,61 @@ export const REAVERBOT_TEXTURE_ASSETS = Object.freeze({
   }),
   trimAlloy: freezeTextureAsset('trimAlloy', 'trim_alloy_tile.png'),
   weaponHousing: freezeTextureAsset('weaponHousing', 'weapon_housing_tile.png'),
+};
+
+export const REAVERBOT_BOSS_TEXTURE_PROFILE_IDS = Object.freeze([
+  'pursuitRegent',
+  'rubyOpticOracle',
+  'ballisticsVizier',
+  'revolvingFusillade',
+  'highAngleBastion',
+  'clusterSalvoReliquary',
+  'feedDrumArsenal',
+  'overloadReliquary',
+]);
+
+function bossTextureAsset(profileId, assetId, fileName, options = {}) {
+  return freezeTextureAsset(assetId, fileName, {
+    ...options,
+    path: `${BOSS_TEXTURE_ROOT}/${profileId}/${fileName}`,
+  });
+}
+
+const bossTextureAssets = {};
+for (const profileId of REAVERBOT_BOSS_TEXTURE_PROFILE_IDS) {
+  bossTextureAssets[`${profileId}Primary`] = bossTextureAsset(profileId, `${profileId}Primary`, 'primary_armor.png');
+  bossTextureAssets[`${profileId}Secondary`] = bossTextureAsset(profileId, `${profileId}Secondary`, 'secondary_circuit_armor.png');
+  bossTextureAssets[`${profileId}Weapon`] = bossTextureAsset(profileId, `${profileId}Weapon`, 'weapon_housing.png');
+  bossTextureAssets[`${profileId}Trim`] = bossTextureAsset(profileId, `${profileId}Trim`, 'ornate_trim.png');
+  bossTextureAssets[`${profileId}Emissive`] = bossTextureAsset(profileId, `${profileId}Emissive`, 'emissive_mask.png', {
+    mask: 'luminance',
+    magFilter: 'linear',
+    minFilter: 'linearMipmapLinear',
+  });
+}
+bossTextureAssets.rubyOpticOracleEye = bossTextureAsset('rubyOpticOracle', 'rubyOpticOracleEye', 'ruby_lens.png');
+bossTextureAssets.overloadReliquaryEnergy = bossTextureAsset('overloadReliquary', 'overloadReliquaryEnergy', 'energy_field_mask.png', {
+  mask: 'luminance',
+  magFilter: 'linear',
+  minFilter: 'linearMipmapLinear',
 });
+
+export const REAVERBOT_TEXTURE_ASSETS = Object.freeze({
+  ...SHARED_REAVERBOT_TEXTURE_ASSETS,
+  ...bossTextureAssets,
+});
+
+export const REAVERBOT_BOSS_TEXTURE_PROFILES = Object.freeze(Object.fromEntries(
+  REAVERBOT_BOSS_TEXTURE_PROFILE_IDS.map((profileId) => [profileId, freezeProfile({
+    primary: `${profileId}Primary`,
+    secondary: `${profileId}Secondary`,
+    weapon: `${profileId}Weapon`,
+    trim: `${profileId}Trim`,
+    emissive: `${profileId}Emissive`,
+    ...(profileId === 'rubyOpticOracle' ? { eye: 'rubyOpticOracleEye' } : {}),
+    ...(profileId === 'overloadReliquary' ? { shieldEnergy: 'overloadReliquaryEnergy' } : {}),
+  })]),
+));
 
 function freezeProfile(slots) {
   return Object.freeze({ ...slots });
@@ -163,23 +218,44 @@ export function resolveReaverbotTextureProfile(genome) {
     : null;
   const weakPoint = requireProfile(REAVERBOT_WEAK_POINT_TEXTURE_PROFILES, genome?.modules?.weakPoint?.id, 'weak-point');
   const eye = requireProfile(REAVERBOT_EYE_TEXTURE_PROFILES, genome?.modules?.eye?.id, 'eye');
+  const boss = genome?.bossProfileId
+    ? REAVERBOT_BOSS_TEXTURE_PROFILES[genome.bossProfileId] ?? null
+    : null;
+  const preserveSharedMetalSlots = (profile) => {
+    const merged = { ...profile, ...(boss ?? {}) };
+    for (const [slot, assetId] of Object.entries(profile)) {
+      if (assetId === 'bladeMetal' || assetId === 'jointDark') merged[slot] = assetId;
+    }
+    return merged;
+  };
+  const resolvedBody = boss ? preserveSharedMetalSlots(body) : body;
+  const resolvedWeapon = boss ? preserveSharedMetalSlots(weapon) : weapon;
+  const resolvedCharge = charge && boss ? preserveSharedMetalSlots(charge) : charge;
+  const resolvedDefense = defense && boss ? preserveSharedMetalSlots(defense) : defense;
+  const resolvedWeakPoint = boss ? preserveSharedMetalSlots(weakPoint) : weakPoint;
+  const resolvedEye = boss
+    ? { ...eye, ...(boss.eye ? { eye: boss.eye } : {}), dark: eye.dark }
+    : eye;
   const materialSlots = Object.freeze({
     ...REAVERBOT_DECOR_TEXTURE_PROFILE,
-    ...body,
-    ...weapon,
-    ...(charge ?? {}),
-    ...(defense ?? {}),
-    ...weakPoint,
-    ...eye,
+    ...resolvedBody,
+    ...resolvedWeapon,
+    ...(resolvedCharge ?? {}),
+    ...(resolvedDefense ?? {}),
+    ...resolvedWeakPoint,
+    ...resolvedEye,
+    ...(boss ?? {}),
+    dark: 'jointDark',
   });
 
   return Object.freeze({
-    body,
-    weapon,
-    charge,
-    defense,
-    weakPoint,
-    eye,
+    body: resolvedBody,
+    weapon: resolvedWeapon,
+    charge: resolvedCharge,
+    defense: resolvedDefense,
+    weakPoint: resolvedWeakPoint,
+    eye: resolvedEye,
+    boss,
     decor: REAVERBOT_DECOR_TEXTURE_PROFILE,
     materialSlots,
   });

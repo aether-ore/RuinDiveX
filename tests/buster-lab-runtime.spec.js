@@ -47,7 +47,7 @@ test('feature-off and feature-on share one canonical starter Power Raiser withou
   expect(state.enabled).toBe(false);
   expect(state.runtime).toBe(null);
   expect(state.plan).toBe(null);
-  expect(state.rollTabsHidden).toBe(true);
+  expect(state.rollTabsHidden).toBe(false);
   expect(state.busterDebugTabHidden).toBe(true);
   expect(state.starterPowerRaisers).toBe(1);
   expect(state.starterIds).toEqual([state.shadow.legacyId]);
@@ -992,14 +992,14 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
       source: { enemyId: 'test-reaverbot' },
       recoverableParts: [{ id: 'rubyOpticLens', name: 'Ruby Optic Lens', quantity: 1 }],
     });
-    const originalUpdate = game.busterLabStorage.updateRollSalvageAsync;
-    game.busterLabStorage.updateRollSalvageAsync = async () => ({
+    const originalIdentify = game.busterLabStorage.identifyRecoveriesWithBossRewards;
+    game.busterLabStorage.identifyRecoveriesWithBossRewards = async () => ({
       ok: false,
       reason: 'transaction-failed',
       error: new Error('quota full'),
     });
     const result = await game.identifyReaverbotScrap();
-    game.busterLabStorage.updateRollSalvageAsync = originalUpdate;
+    game.busterLabStorage.identifyRecoveriesWithBossRewards = originalIdentify;
     return {
       ok: result.ok,
       unidentified: game.inventory.unidentifiedScrap,

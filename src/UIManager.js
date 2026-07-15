@@ -436,7 +436,13 @@ export class UIManager {
     this.rollIdentifyButton = document.getElementById('roll-identify-scrap');
     this.rollIdentificationResult = document.getElementById('roll-identification-result');
     this.rollWorkshopTabs = document.getElementById('roll-workshop-tabs');
+    this.rollBusterTab = document.getElementById('roll-buster-tab');
     this.rollSalvageView = document.getElementById('roll-salvage-view');
+    this.bossHuntsView = document.getElementById('boss-hunts-view');
+    this.bossHuntsGrid = document.getElementById('boss-hunts-grid');
+    this.bossHuntsLockStatus = document.getElementById('boss-hunts-lock-status');
+    this.bossHuntsWarning = document.getElementById('boss-hunts-warning');
+    this.bossHuntsRecoveryStatus = document.getElementById('boss-hunts-recovery-status');
     this.busterLabView = document.getElementById('buster-lab-view');
     this.busterLabWarning = document.getElementById('buster-lab-warning');
     this.busterLabPersistence = document.getElementById('buster-lab-persistence');
@@ -486,6 +492,20 @@ export class UIManager {
     this.busterDebugOpenLabButton = document.getElementById('buster-debug-open-lab');
     this.busterDebugRefillButton = document.getElementById('buster-debug-refill');
     this.busterDebugTestStatus = document.getElementById('buster-debug-test-status');
+    this.bossDebugTabButton = document.getElementById('boss-debug-tab');
+    this.bossDebugProfileSelect = document.getElementById('boss-debug-profile');
+    this.bossDebugPhaseSelect = document.getElementById('boss-debug-phase');
+    this.bossDebugIntegrityInput = document.getElementById('boss-debug-integrity');
+    this.bossDebugRewardSelect = document.getElementById('boss-debug-reward');
+    this.bossDebugStatus = document.getElementById('boss-debug-status');
+    this.bossHud = document.getElementById('boss-hud');
+    this.bossHudName = document.getElementById('boss-hud-name');
+    this.bossHudPhase = document.getElementById('boss-hud-phase');
+    this.bossHealthFill = document.getElementById('boss-health-fill');
+    this.bossSignatureFill = document.getElementById('boss-signature-fill');
+    this.bossSignatureStatus = document.getElementById('boss-signature-status');
+    this.bossIntroBanner = document.getElementById('boss-intro-banner');
+    this.bossVictoryBanner = document.getElementById('boss-victory-banner');
     this.poseDebugAnimationSelect = document.getElementById('pose-debug-animation');
     this.poseDebugKeyframeSelect = document.getElementById('pose-debug-keyframe');
     this.poseDebugControls = document.getElementById('pose-debug-controls');
@@ -509,6 +529,8 @@ export class UIManager {
     this.inventoryButton = document.getElementById('inventory-button');
     this.restartButton = document.getElementById('restart-button');
     this.toastTimer = 0;
+    this.bossIntroTimer = 0;
+    this.bossVictoryTimer = 0;
     this.inventoryMode = 'garage';
     this.rollWorkshopTab = 'salvage';
     this.busterLabSelectedBuildId = 'build-a';
@@ -578,10 +600,13 @@ export class UIManager {
     this._renderMinimap();
     this._renderMapEventPrompt();
     this._renderBuffTray();
+    this._renderBossHud(dt);
     if (this.poseDebugOpen && this.poseDebugTab === 'pose') {
       this._syncPoseDebugRigState();
     } else if (this.poseDebugOpen && this.poseDebugTab === 'platforming') {
       this._syncPlatformDebugControls();
+    } else if (this.poseDebugOpen && this.poseDebugTab === 'bosses') {
+      this._syncBossDebugControls();
     } else if (this.poseDebugOpen && this.poseDebugTab === 'buster') {
       this._syncBusterDebugControls();
     }
@@ -593,7 +618,59 @@ export class UIManager {
       }
     }
 
+    this.bossIntroTimer = Math.max(0, this.bossIntroTimer - dt);
+    this.bossVictoryTimer = Math.max(0, this.bossVictoryTimer - dt);
+    if (this.bossIntroBanner) this.bossIntroBanner.hidden = this.bossIntroTimer <= 0;
+    if (this.bossVictoryBanner) this.bossVictoryBanner.hidden = this.bossVictoryTimer <= 0;
+
     this.gameOver.hidden = !this.game.isGameOver;
+  }
+
+  _renderBossHud() {
+    if (!this.bossHud) return;
+    const boss = this.game.enemies?.find?.((enemy) => enemy.isBoss && !enemy.dead && enemy.getBossHudState);
+    const state = boss?.getBossHudState?.() ?? null;
+    this.bossHud.hidden = !state;
+    if (!state) return;
+    if (this.bossHudName) this.bossHudName.textContent = state.displayName ?? state.title;
+    if (this.bossHudPhase) {
+      this.bossHudPhase.textContent = state.transitionRemaining > 0
+        ? 'PHASE SHIFT'
+        : `PHASE ${state.phase === 2 ? 'II' : 'I'}`;
+    }
+    if (this.bossHealthFill) this.bossHealthFill.style.transform = `scaleX(${Math.max(0, Math.min(1, state.healthRatio))})`;
+    if (this.bossSignatureFill) this.bossSignatureFill.style.transform = `scaleX(${Math.max(0, Math.min(1, state.signatureRatio))})`;
+    if (this.bossSignatureStatus) {
+      this.bossSignatureStatus.textContent = state.signaturePartOverloaded ? 'OVERLOADED' : 'ARMORED';
+      this.bossSignatureStatus.style.color = state.signaturePartOverloaded ? '#ff8f66' : '#ffd36f';
+    }
+  }
+
+  showBossIntro(boss) {
+    if (!this.bossIntroBanner) return;
+    this.bossIntroBanner.textContent = `${boss.genome?.name ?? boss.bossProfile?.title ?? 'Ruin Core Boss'} · Signature Hunt`;
+    this.bossIntroTimer = 3.2;
+    this.bossIntroBanner.hidden = false;
+  }
+
+  showBossPhaseTransition(boss) {
+    if (!this.bossIntroBanner) return;
+    this.bossIntroBanner.textContent = `${boss.bossProfile?.title ?? 'Boss'} · Phase II`;
+    this.bossIntroTimer = 1.7;
+    this.bossIntroBanner.hidden = false;
+  }
+
+  showBossVictory(boss, {
+    material = null,
+    roleClue = null,
+    firstClear = false,
+    overload = false,
+  } = {}) {
+    if (!this.bossVictoryBanner) return;
+    const reward = material?.name ?? (roleClue ? `Unidentified ${roleClue}` : 'Unidentified Signature Material');
+    this.bossVictoryBanner.textContent = `${boss.bossProfile?.title ?? 'Boss'} defeated · ${firstClear ? 'Guaranteed ' : ''}${reward}${overload ? ' · Overloaded' : ''}`;
+    this.bossVictoryTimer = 4.2;
+    this.bossVictoryBanner.hidden = false;
   }
 
   setInventoryOpen(open, { mode = 'garage' } = {}) {
@@ -615,12 +692,13 @@ export class UIManager {
       this.rollScrapService.hidden = this.inventoryMode !== 'roll';
     }
     if (this.rollWorkshopTabs) {
-      this.rollWorkshopTabs.hidden = !this.game.busterLabEnabled;
+      this.rollWorkshopTabs.hidden = false;
     }
+    if (this.rollBusterTab) this.rollBusterTab.hidden = !this.game.busterLabEnabled;
     this.inventoryButton?.setAttribute('aria-pressed', String(open));
 
     if (open) {
-      this._selectRollWorkshopTab(this.game.busterLabEnabled ? this.rollWorkshopTab : 'salvage', { render: false });
+      this._selectRollWorkshopTab(this.rollWorkshopTab, { render: false });
       this.renderInventory();
     } else {
       this.hideTooltip();
@@ -637,6 +715,7 @@ export class UIManager {
     if (this.busterDebugTabButton) {
       this.busterDebugTabButton.hidden = !this.game.busterLabDebugEnabled;
     }
+    if (this.bossDebugTabButton) this.bossDebugTabButton.hidden = !this.game.bossDebugEnabled;
 
     if (open) {
       this._captureCurrentPoseDebugPose();
@@ -653,6 +732,8 @@ export class UIManager {
   _selectPoseDebugTab(tab = 'pose') {
     this.poseDebugTab = tab === 'platforming'
       ? 'platforming'
+      : tab === 'bosses' && this.game.bossDebugEnabled
+        ? 'bosses'
       : tab === 'buster' && this.game.busterLabEnabled
         ? 'buster'
         : 'pose';
@@ -672,6 +753,9 @@ export class UIManager {
     } else if (this.poseDebugTab === 'platforming') {
       this.game.player.externalRig?.setDebugPoseEnabled?.(false);
       this._syncPlatformDebugControls();
+    } else if (this.poseDebugTab === 'bosses') {
+      this.game.player.externalRig?.setDebugPoseEnabled?.(false);
+      this._syncBossDebugControls();
     } else {
       this.game.player.externalRig?.setDebugPoseEnabled?.(false);
       this._syncBusterDebugControls();
@@ -775,6 +859,36 @@ export class UIManager {
       this.busterDebugTestStatus.textContent = `${selectedLabel} is ready for the range. Use ?busterLab=sandbox to enable Enter Sandbox.`;
     } else {
       this.busterDebugTestStatus.textContent = `${selectedLabel} is ready for range or disposable-dungeon testing.`;
+    }
+  }
+
+  _syncBossDebugControls() {
+    const view = this.game.getBossHuntViewModel?.();
+    if (!view) return;
+    if (this.bossDebugProfileSelect) {
+      const current = this.bossDebugProfileSelect.value || view.selectedBossProfileId;
+      this.bossDebugProfileSelect.replaceChildren(...view.profiles.map((profile) => {
+        const option = document.createElement('option');
+        option.value = profile.id;
+        option.textContent = profile.title;
+        return option;
+      }));
+      this.bossDebugProfileSelect.value = view.profiles.some((entry) => entry.id === current)
+        ? current
+        : view.selectedBossProfileId;
+    }
+    const boss = this.game.enemies?.find?.((enemy) => enemy.isBoss && !enemy.dead);
+    if (boss && this.bossDebugPhaseSelect) this.bossDebugPhaseSelect.value = String(boss.bossState?.phase ?? 1);
+    if (boss && this.bossDebugIntegrityInput) {
+      this.bossDebugIntegrityInput.value = String(Math.round(
+        100 * (boss.signatureIntegrity ?? 0) / Math.max(1, boss.signatureIntegrityMax ?? 1),
+      ));
+    }
+    if (this.bossDebugStatus) {
+      const counts = boss?.getBossResourceCounts?.();
+      this.bossDebugStatus.textContent = boss
+        ? `${boss.genome?.name} · phase ${boss.bossState?.phase} · ${Math.round(boss.health)}/${Math.round(boss.stats.maxHealth)} HP · ${counts?.projectiles ?? 0}/20 projectiles · ${counts?.telegraphs ?? 0}/12 telegraphs · ${counts?.constructs ?? 0}/8 constructs`
+        : `Selected hunt: ${view.profiles.find((entry) => entry.id === view.selectedBossProfileId)?.title ?? view.selectedBossProfileId}`;
     }
   }
 
@@ -1071,6 +1185,7 @@ export class UIManager {
     this._renderQuestLog();
     this._renderInventoryActions();
     this._renderRollScrapWorkshop();
+    this._renderBossHunts();
     this._renderBusterLab();
     this._renderCraftingMaterials();
     this._renderInventoryItems();
@@ -1089,22 +1204,24 @@ export class UIManager {
     const storage = this.game.rollSalvageStorage;
     const identified = Math.max(0, Math.trunc(storage?.identifiedScrap) || 0);
     const partCount = storage?.getStoredPartCount?.() ?? 0;
+    const pendingBossRecoveries = this.game.busterLabStorage?.getPendingBossRecoveryTransfer?.()?.total ?? 0;
 
     if (this.rollUnidentifiedValue) this.rollUnidentifiedValue.textContent = String(unidentified);
     if (this.rollIdentifiedValue) this.rollIdentifiedValue.textContent = String(identified);
     if (this.rollPartsValue) this.rollPartsValue.textContent = String(partCount);
     if (this.rollIdentifyButton) {
-      this.rollIdentifyButton.disabled = unidentified <= 0;
-      this.rollIdentifyButton.textContent = unidentified > 0
-        ? `Identify All (${unidentified})`
+      const totalPending = unidentified + pendingBossRecoveries;
+      this.rollIdentifyButton.disabled = totalPending <= 0;
+      this.rollIdentifyButton.textContent = totalPending > 0
+        ? `Identify All (${totalPending})`
         : 'Nothing to Identify';
     }
 
     if (!this.rollIdentificationResult) return;
     const result = this.lastScrapIdentification;
     if (!result?.processed) {
-      this.rollIdentificationResult.textContent = unidentified > 0
-        ? `${unidentified} unidentified scrap awaiting Roll's inspection.`
+      this.rollIdentificationResult.textContent = unidentified + pendingBossRecoveries > 0
+        ? `${unidentified} unidentified scrap and ${pendingBossRecoveries} Boss Recover${pendingBossRecoveries === 1 ? 'y' : 'ies'} awaiting Roll's inspection.`
         : 'Bring unidentified Reaverbot scrap back from the ruins for Roll to inspect.';
       return;
     }
@@ -1117,8 +1234,66 @@ export class UIManager {
       : `Last analysis: ${result.scrapStored} crafting scrap stored; no intact parts recovered.`;
   }
 
+  _renderBossHunts() {
+    if (!this.bossHuntsGrid) return;
+    const view = this.game.getBossHuntViewModel?.();
+    if (!view) return;
+    if (this.bossHuntsLockStatus) {
+      this.bossHuntsLockStatus.textContent = view.locked ? 'LOCKED FOR EXPEDITION' : 'FREE SELECTION AT CAMP';
+      this.bossHuntsLockStatus.style.color = view.locked ? '#ffb45c' : '#70e9ff';
+    }
+    if (this.bossHuntsWarning) {
+      this.bossHuntsWarning.hidden = !view.warning;
+      this.bossHuntsWarning.textContent = view.warning ?? '';
+    }
+    if (this.bossHuntsRecoveryStatus) {
+      this.bossHuntsRecoveryStatus.textContent = view.pendingRecoveryCount > 0
+        ? `${view.pendingRecoveryCount} durable Boss Recover${view.pendingRecoveryCount === 1 ? 'y is' : 'ies are'} waiting for Roll's Identify All analysis.`
+        : 'No unexamined Boss Recoveries. First clears guarantee their featured material.';
+    }
+    const cards = (view.profiles ?? []).map((profile) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `boss-hunt-card${profile.selected ? ' is-selected' : ''}`;
+      button.dataset.action = 'boss-hunt-select';
+      button.dataset.bossProfileId = profile.id;
+      button.setAttribute('aria-pressed', String(profile.selected));
+      button.disabled = Boolean(view.locked || view.readOnly);
+
+      const portrait = document.createElement('img');
+      portrait.src = profile.portraitUrl;
+      portrait.alt = '';
+      portrait.loading = 'lazy';
+      portrait.addEventListener('error', () => { portrait.hidden = true; }, { once: true });
+      const body = document.createElement('span');
+      body.className = 'boss-hunt-card-body';
+      const title = document.createElement('h3');
+      title.textContent = profile.title;
+      const clue = document.createElement('p');
+      clue.textContent = profile.discovered
+        ? `${profile.material?.name ?? profile.roleClue} · owned ${profile.ownedCount ?? 0}`
+        : `Signature clue: ${profile.roleClue}`;
+      const status = document.createElement('strong');
+      status.textContent = `${profile.victoryCount} victor${profile.victoryCount === 1 ? 'y' : 'ies'} · ${profile.repeatStatus}`;
+      body.append(title, clue, status);
+      button.append(portrait, body);
+      if (profile.discovered && profile.linkedRecipes?.length) {
+        const recipes = document.createElement('span');
+        recipes.className = 'boss-hunt-recipes';
+        recipes.textContent = `Known recipes: ${profile.linkedRecipes.map((recipe) => recipe.name).join(', ')}`;
+        button.append(recipes);
+      }
+      return button;
+    });
+    this.bossHuntsGrid.replaceChildren(...cards);
+  }
+
   _selectRollWorkshopTab(tab = 'salvage', { render = true } = {}) {
-    const nextTab = this.game.busterLabEnabled && tab === 'buster' ? 'buster' : 'salvage';
+    const nextTab = tab === 'hunts'
+      ? 'hunts'
+      : this.game.busterLabEnabled && tab === 'buster'
+        ? 'buster'
+        : 'salvage';
     this.rollWorkshopTab = nextTab;
     this.root?.classList.toggle(
       'is-buster-lab',
@@ -1128,8 +1303,10 @@ export class UIManager {
       button.setAttribute('aria-selected', String(button.dataset.rollTab === nextTab));
     }
     if (this.rollSalvageView) this.rollSalvageView.hidden = nextTab !== 'salvage';
+    if (this.bossHuntsView) this.bossHuntsView.hidden = nextTab !== 'hunts';
     if (this.busterLabView) this.busterLabView.hidden = nextTab !== 'buster';
     if (render && nextTab === 'buster') this._renderBusterLab();
+    if (render && nextTab === 'hunts') this._renderBossHunts();
   }
 
   _renderBusterLab() {
@@ -1626,6 +1803,22 @@ export class UIManager {
         ? recipe.hint ?? recipe.rollLine ?? ''
         : `${ingredients} · ${recipe.scrapCost ?? 0} scrap`;
       card.append(title, description, details);
+
+      if (recipe.huntLinks?.length) {
+        const huntGroup = document.createElement('div');
+        huntGroup.className = 'buster-recipe-hunts';
+        for (const hunt of recipe.huntLinks) {
+          const huntButton = document.createElement('button');
+          huntButton.type = 'button';
+          huntButton.dataset.action = 'boss-hunt-open';
+          huntButton.dataset.bossProfileId = hunt.bossProfileId;
+          huntButton.textContent = hunt.materialName
+            ? `Hunt ${hunt.title}: ${hunt.materialName}`
+            : `Hunt clue — ${hunt.title}: ${hunt.roleClue}`;
+          huntGroup.appendChild(huntButton);
+        }
+        card.appendChild(huntGroup);
+      }
 
       if (!isPartial) {
         const routes = recipe.routes ?? recipe.fabricationRoutes ?? null;
@@ -2956,6 +3149,35 @@ export class UIManager {
             onSuccess: () => this._syncBusterDebugControls(),
           },
         );
+      } else if (action === 'boss-debug-select') {
+        this._runBusterLabAction(
+          () => this.game.selectBossHunt?.(this.bossDebugProfileSelect?.value),
+          { successMessage: 'Boss Hunt selected', failureMessage: 'Boss Hunt selection failed', render: false, onSuccess: () => this._syncBossDebugControls() },
+        );
+      } else if (action === 'boss-debug-spawn') {
+        const result = this.game.debugSpawnBoss?.(this.bossDebugProfileSelect?.value);
+        this.showToast(result?.message ?? 'Boss spawn requested', result?.ok ? '#ffd36f' : '#ff9f73');
+        this._syncBossDebugControls();
+      } else if (action === 'boss-debug-apply-phase') {
+        const result = this.game.debugConfigureBoss?.({
+          phase: Number(this.bossDebugPhaseSelect?.value),
+          signatureIntegrityPercent: Number(this.bossDebugIntegrityInput?.value),
+        });
+        this.showToast(result?.message ?? 'Boss state updated', result?.ok ? '#ffd36f' : '#ff9f73');
+        this._syncBossDebugControls();
+      } else if (action === 'boss-debug-simulate-reward') {
+        this._runBusterLabAction(
+          () => this.game.debugSimulateBossReward?.(this.bossDebugProfileSelect?.value, this.bossDebugRewardSelect?.value),
+          { successMessage: 'Boss reward outcome simulated', failureMessage: 'Reward simulation failed', render: false, onSuccess: () => this._syncBossDebugControls() },
+        );
+      } else if (action === 'boss-debug-reset-progress') {
+        this._runBusterLabAction(
+          () => this.game.debugResetBossHunts?.(),
+          { successMessage: 'Boss Hunt progress reset', failureMessage: 'Boss Hunt reset failed', render: false, onSuccess: () => this._syncBossDebugControls() },
+        );
+      } else if (action === 'boss-debug-gallery') {
+        const result = this.game.openBossGeometryGallery?.(this.bossDebugProfileSelect?.value);
+        this.showToast(result?.message ?? 'Boss gallery opened', result?.ok ? '#7df8ff' : '#ff9f73');
       }
     });
 
@@ -3053,6 +3275,27 @@ export class UIManager {
 
       if (action === 'identify-scrap') {
         this.game.identifyReaverbotScrap?.();
+      } else if (action === 'boss-hunt-select') {
+        this._runBusterLabAction(
+          () => this.game.selectBossHunt?.(button.dataset.bossProfileId),
+          {
+            successMessage: 'Boss Hunt selected',
+            failureMessage: 'Hunt is locked for the current expedition',
+            render: false,
+            onSuccess: () => this._renderBossHunts(),
+          },
+        );
+      } else if (action === 'boss-hunt-open') {
+        this._selectRollWorkshopTab('hunts');
+        this._runBusterLabAction(
+          () => this.game.selectBossHunt?.(button.dataset.bossProfileId),
+          {
+            successMessage: 'Boss Hunt selected',
+            failureMessage: 'Hunt is locked for the current expedition',
+            render: false,
+            onSuccess: () => this._renderBossHunts(),
+          },
+        );
       } else if (action === 'buster-export-recovery') {
         this._runBusterLabAction(
           () => this.game.exportBusterRecoveryData?.(),

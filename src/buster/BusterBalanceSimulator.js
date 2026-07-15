@@ -170,6 +170,18 @@ export function createBusterBenchmarkScenario(options = {}) {
   const chord = BUSTER_BENCHMARK_FIXTURE.chords[layout];
   const resolved = resolveProfileAndMotion(options.profile ?? options.targetProfileId, options.motion);
   const profile = resolveTargetProfile(resolved.profileId, level);
+  const authoredTargetHealth = Number.isFinite(Number(options.targetHealth))
+    ? Math.max(EPSILON, Number(options.targetHealth))
+    : profile.health;
+  const authoredTargetArmor = Number.isFinite(Number(options.targetArmor))
+    ? Math.max(0, Number(options.targetArmor))
+    : profile.armor;
+  const authoredTargetRadius = Number.isFinite(Number(options.targetRadius))
+    ? Math.max(0.05, Number(options.targetRadius))
+    : BUSTER_BENCHMARK_FIXTURE.targetRadius;
+  const authoredTargetHeight = Number.isFinite(Number(options.targetHeight))
+    ? Math.max(authoredTargetRadius * 2, Number(options.targetHeight))
+    : BUSTER_BENCHMARK_FIXTURE.targetHeight;
   const angles = targetAngles(targetCount, distance, chord);
   const nonlethal = options.nonlethal !== false;
   const targets = angles.map((angle, index) => {
@@ -186,17 +198,17 @@ export function createBusterBenchmarkScenario(options = {}) {
     return {
       id: `target-${String(index + 1).padStart(2, '0')}`,
       priority: index,
-      radius: BUSTER_BENCHMARK_FIXTURE.targetRadius,
-      collisionHeight: BUSTER_BENCHMARK_FIXTURE.targetHeight,
+      radius: authoredTargetRadius,
+      collisionHeight: authoredTargetHeight,
       root: { position: { ...home } },
       home,
       forward,
       right,
       motion: targetMotion,
       phase: resolved.motion === 'crossing' ? index * Math.PI : 0,
-      maxHealth: nonlethal ? Number.POSITIVE_INFINITY : profile.health,
-      health: nonlethal ? Number.POSITIVE_INFINITY : profile.health,
-      armor: profile.armor,
+      maxHealth: nonlethal ? Number.POSITIVE_INFINITY : authoredTargetHealth,
+      health: nonlethal ? Number.POSITIVE_INFINITY : authoredTargetHealth,
+      armor: authoredTargetArmor,
       hasWeakPoint: resolved.profileId === 'weakPoint',
       weakPointMultiplier: resolved.profileId === 'weakPoint' ? 2.4 : 1,
       dead: false,
@@ -218,6 +230,12 @@ export function createBusterBenchmarkScenario(options = {}) {
     targetCount,
     targetProfileId: resolved.profileId,
     profile,
+    authoredTarget: Object.freeze({
+      health: authoredTargetHealth,
+      armor: authoredTargetArmor,
+      radius: authoredTargetRadius,
+      collisionHeight: authoredTargetHeight,
+    }),
     distanceBand,
     distance,
     layout,

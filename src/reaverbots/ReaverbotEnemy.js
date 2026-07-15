@@ -307,7 +307,7 @@ export class ReaverbotEnemy extends Enemy {
         return owner.dead;
       },
       get active() {
-        return owner.brain.weakPointExposed;
+        return !owner.weakPointBroken && owner.brain.weakPointExposed;
       },
       getWorldPosition(out) {
         return owner.visual.weakPoint.core.getWorldPosition(out);
@@ -338,7 +338,10 @@ export class ReaverbotEnemy extends Enemy {
 
   getCombatTargets() {
     const targets = [this];
-    if (this.genome.modules.weakPoint.lockable && this.brain.weakPointExposed && !this.dead) {
+    if (this.genome.modules.weakPoint.lockable
+      && this.brain.weakPointExposed
+      && !this.weakPointBroken
+      && !this.dead) {
       targets.unshift(this.weakPointTarget);
     }
     return targets;

@@ -12009,7 +12009,7 @@ export class DungeonGenerator {
         roomId: 'bossRoom',
         id: 'bossEncounter',
         label: 'Ruin Core Boss',
-        roster: this._createEncounterRoster('boss'),
+        roster: ['proceduralBoss'],
         isBoss: true,
         bossRewardKeycardId: 'Shrine_Key',
       },
@@ -12024,7 +12024,7 @@ export class DungeonGenerator {
         }
         const roster = [...definition.roster];
         const enemyEffects = room.flavorEffects?.enemies;
-        if ((enemyEffects?.countMultiplier ?? 1) >= 1.05) {
+        if (!definition.isBoss && (enemyEffects?.countMultiplier ?? 1) >= 1.05) {
           const tags = enemyEffects?.favoredTags ?? [];
           const extraType = tags.some((tag) => tag.includes('turret') || tag.includes('sensor'))
             ? 'ranged'
@@ -12032,14 +12032,14 @@ export class DungeonGenerator {
               ? 'fast'
               : 'basic';
           roster.push(extraType);
-        } else if ((enemyEffects?.countMultiplier ?? 1) < 0.95 && roster.length > 2) {
+        } else if (!definition.isBoss && (enemyEffects?.countMultiplier ?? 1) < 0.95 && roster.length > 2) {
           roster.pop();
         }
-        const reinforcement = definition.isBoss
-          ? 'fast'
-          : roster.find((type) => type === 'fast' || type === 'basic' || type === 'horokko') ?? 'basic';
-        roster.push(reinforcement);
-        roster.sort((left, right) => Number(left === 'ranged') - Number(right === 'ranged'));
+        if (!definition.isBoss) {
+          const reinforcement = roster.find((type) => type === 'fast' || type === 'basic' || type === 'horokko') ?? 'basic';
+          roster.push(reinforcement);
+          roster.sort((left, right) => Number(left === 'ranged') - Number(right === 'ranged'));
+        }
         const pyramid = definition.id === 'keycardGuard'
           ? room.mechanicalPyramidCenter
           : null;

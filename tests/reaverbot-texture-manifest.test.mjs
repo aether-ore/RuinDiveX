@@ -15,6 +15,8 @@ import {
 import {
   REAVERBOT_BODY_TEXTURE_PROFILES,
   REAVERBOT_CHARGE_TEXTURE_PROFILES,
+  REAVERBOT_BOSS_TEXTURE_PROFILE_IDS,
+  REAVERBOT_BOSS_TEXTURE_PROFILES,
   REAVERBOT_DECOR_TEXTURE_PROFILE,
   REAVERBOT_DEFENSE_TEXTURE_PROFILES,
   REAVERBOT_EYE_TEXTURE_PROFILES,
@@ -23,6 +25,10 @@ import {
   REAVERBOT_WEAPON_TEXTURE_PROFILES,
   resolveReaverbotTextureProfile,
 } from '../src/reaverbots/ReaverbotTextureCatalog.js';
+import {
+  REAVERBOT_BOSS_PROFILE_IDS,
+  generateReaverbotBossGenome,
+} from '../src/reaverbots/ReaverbotBossCatalog.js';
 import {
   REAVERBOT_SEMANTIC_UV_LAYOUT,
   REAVERBOT_SEMANTIC_UV_REGIONS,
@@ -48,6 +54,20 @@ const EXPECTED_ASSET_KEYS = [
   'trimAlloy',
   'weaponHousing',
 ];
+const EXPECTED_BOSS_ASSET_KEYS = REAVERBOT_BOSS_TEXTURE_PROFILE_IDS.flatMap((profileId) => [
+  `${profileId}Primary`,
+  `${profileId}Secondary`,
+  `${profileId}Weapon`,
+  `${profileId}Trim`,
+  `${profileId}Emissive`,
+]).concat(['rubyOpticOracleEye', 'overloadReliquaryEnergy']);
+const EXPECTED_BOSS_TEXTURE_FILES = Object.freeze({
+  primary: 'primary_armor.png',
+  secondary: 'secondary_circuit_armor.png',
+  weapon: 'weapon_housing.png',
+  trim: 'ornate_trim.png',
+  emissive: 'emissive_mask.png',
+});
 const EXPECTED_BODY_KEYS = ['biped', 'lowBiped', 'quadruped', 'tripod', 'crawler', 'hopper', 'hoverBell', 'flyer'];
 const EXPECTED_WEAPON_KEYS = [
   'rocketLance',
@@ -111,8 +131,22 @@ function assertProfileReferences(profile, label) {
   }
 }
 
+function assertRuntimePng(bytes, label) {
+  assert.ok(bytes.length > 26, `${label} must not be empty or truncated`);
+  assert.ok(bytes.subarray(0, 8).equals(PNG_SIGNATURE), `${label} must have a PNG signature`);
+  assert.equal(bytes.toString('ascii', 12, 16), 'IHDR', `${label} must begin with an IHDR chunk`);
+  assert.equal(bytes.readUInt32BE(16), 256, `${label} width`);
+  assert.equal(bytes.readUInt32BE(20), 256, `${label} height`);
+  assert.equal(bytes[24], 8, `${label} must use 8-bit channels`);
+  assert.equal(bytes[25], 6, `${label} must be encoded as RGBA`);
+}
+
 test('texture profiles exactly cover every current procedural Reaverbot module id', () => {
-  assertExactKeySet(REAVERBOT_TEXTURE_ASSETS, EXPECTED_ASSET_KEYS, 'texture assets');
+  assertExactKeySet(
+    REAVERBOT_TEXTURE_ASSETS,
+    [...EXPECTED_ASSET_KEYS, ...EXPECTED_BOSS_ASSET_KEYS],
+    'texture assets',
+  );
   assertExactKeySet(REAVERBOT_BODY_TEXTURE_PROFILES, EXPECTED_BODY_KEYS, 'body profiles');
   assertExactKeySet(REAVERBOT_WEAPON_TEXTURE_PROFILES, EXPECTED_WEAPON_KEYS, 'weapon profiles');
   assertExactKeySet(REAVERBOT_CHARGE_TEXTURE_PROFILES, EXPECTED_CHARGE_KEYS, 'charge profiles');
@@ -128,7 +162,7 @@ test('texture profiles exactly cover every current procedural Reaverbot module i
   assert.deepEqual(sortedKeys(REAVERBOT_WEAK_POINT_TEXTURE_PROFILES), sortedKeys(REAVERBOT_WEAK_POINTS));
 });
 
-test('all profile and decor slots reference one of the nine declared assets', () => {
+test('all profile and decor slots reference a declared asset', () => {
   const profileFamilies = {
     body: REAVERBOT_BODY_TEXTURE_PROFILES,
     weapon: REAVERBOT_WEAPON_TEXTURE_PROFILES,
@@ -157,6 +191,10 @@ test('all profile and decor slots reference one of the nine declared assets', ()
     'shieldEnergy',
   ], 'decor slots');
   assertProfileReferences(REAVERBOT_DECOR_TEXTURE_PROFILE, 'decor');
+  assertExactKeySet(REAVERBOT_BOSS_TEXTURE_PROFILES, REAVERBOT_BOSS_TEXTURE_PROFILE_IDS, 'boss profiles');
+  for (const [profileId, profile] of Object.entries(REAVERBOT_BOSS_TEXTURE_PROFILES)) {
+    assertProfileReferences(profile, `boss.${profileId}`);
+  }
 });
 
 test('declared Reaverbot textures are non-empty clamped PNG maps with complete loader metadata', async () => {
@@ -164,7 +202,7 @@ test('declared Reaverbot textures are non-empty clamped PNG maps with complete l
   assert.equal(new Set(declaredPaths).size, declaredPaths.length, 'texture asset paths must be unique');
   for (const [key, asset] of Object.entries(REAVERBOT_TEXTURE_ASSETS)) {
     assert.equal(asset.id, key);
-    assert.match(asset.path, /^\/assets\/textures\/reaverbots\/procedural\/.+\.png$/);
+    assert.match(asset.path, /^\/assets\/textures\/reaverbots\/(?:procedural|bosses)\/.+\.png$/);
     assert.ok(['color', 'mask'].includes(asset.type));
     assert.ok(['srgb', 'none'].includes(asset.colorSpace));
     assert.equal(asset.wrapS, 'clampToEdge', `${key} must not tile horizontally`);
@@ -191,6 +229,102 @@ test('declared Reaverbot textures are non-empty clamped PNG maps with complete l
     assert.equal(bytes.toString('ascii', 12, 16), 'IHDR', `${key} must begin with an IHDR chunk`);
     assert.equal(bytes.readUInt32BE(16), 256, `${key} width`);
     assert.equal(bytes.readUInt32BE(20), 256, `${key} height`);
+    if (asset.path.includes('/bosses/')) {
+      assertRuntimePng(bytes, key);
+    }
+  }
+});
+
+test('all eight boss art profiles use authored 256px RGBA maps and portraits with no fallback paths', async () => {
+  assert.equal(REAVERBOT_BOSS_TEXTURE_PROFILE_IDS.length, 8);
+  assert.deepEqual(REAVERBOT_BOSS_TEXTURE_PROFILE_IDS, REAVERBOT_BOSS_PROFILE_IDS);
+  for (const profileId of REAVERBOT_BOSS_TEXTURE_PROFILE_IDS) {
+    const profile = REAVERBOT_BOSS_TEXTURE_PROFILES[profileId];
+    const profileRoot = `/assets/textures/reaverbots/bosses/${profileId}`;
+    for (const [slot, fileName] of Object.entries(EXPECTED_BOSS_TEXTURE_FILES)) {
+      const assetKey = profile[slot];
+      const asset = REAVERBOT_TEXTURE_ASSETS[assetKey];
+      assert.ok(asset, `${profileId}.${slot} must name a declared boss asset`);
+      assert.equal(asset.path, `${profileRoot}/${fileName}`, `${profileId}.${slot} must not use a fallback path`);
+    }
+
+    const portraitPath = `${profileRoot}/hunt-portrait.png`;
+    const portraitBytes = await readFile(path.join(REPO_ROOT, portraitPath.replace(/^[/\\]+/, '')));
+    assertRuntimePng(portraitBytes, `${profileId} portrait`);
+  }
+});
+
+test('boss overrides merge after ordinary profiles without leaking into ordinary enemies', () => {
+  const ordinary = {
+    body: { planId: 'crawler' },
+    modules: {
+      weapon: { id: 'pulseCannon' },
+      defense: { id: 'armoredCarapace' },
+      weakPoint: { id: 'ammoDrum' },
+      eye: { id: 'singleRubyLens' },
+    },
+  };
+  const ordinaryProfile = resolveReaverbotTextureProfile(ordinary);
+  assert.equal(ordinaryProfile.boss, null);
+  assert.equal(ordinaryProfile.body.primary, 'armorPrimary');
+  assert.equal(ordinaryProfile.weapon.weapon, 'weaponHousing');
+  assert.equal(ordinaryProfile.body.dark, 'jointDark');
+
+  for (const profileId of REAVERBOT_BOSS_TEXTURE_PROFILE_IDS) {
+    const genome = generateReaverbotBossGenome({ bossProfileId: profileId, seed: `textures:${profileId}`, threatTier: 5 });
+    const resolved = resolveReaverbotTextureProfile(genome);
+    const boss = REAVERBOT_BOSS_TEXTURE_PROFILES[profileId];
+    const authoredWeaponProfile = REAVERBOT_WEAPON_TEXTURE_PROFILES[genome.modules.weapon.id];
+    assert.strictEqual(resolved.boss, boss);
+    assert.equal(resolved.body.primary, boss.primary);
+    assert.equal(
+      resolved.weapon.weapon,
+      authoredWeaponProfile.weapon === 'bladeMetal' ? 'bladeMetal' : boss.weapon,
+    );
+    assert.equal(resolved.body.dark, 'jointDark');
+    assert.equal(resolved.weapon.dark, 'jointDark');
+    assert.equal(
+      resolved.eye.eye,
+      profileId === 'rubyOpticOracle' ? 'rubyOpticOracleEye' : 'eyeRedLens',
+    );
+    if (profileId === 'overloadReliquary') {
+      assert.equal(resolved.weapon.shieldEnergy, 'overloadReliquaryEnergy');
+    }
+  }
+});
+
+test('boss overrides preserve shared bladeMetal and jointDark semantic slots in every resolved scope', () => {
+  const genome = {
+    body: { planId: 'quadruped' },
+    modules: {
+      weapon: { id: 'rocketLance' },
+      charge: { id: 'spineJet' },
+      defense: { id: 'armoredCarapace' },
+      weakPoint: { id: 'coolingVents' },
+      eye: { id: 'singleRubyLens' },
+    },
+  };
+  const authoredScopes = {
+    body: REAVERBOT_BODY_TEXTURE_PROFILES.quadruped,
+    weapon: REAVERBOT_WEAPON_TEXTURE_PROFILES.rocketLance,
+    charge: REAVERBOT_CHARGE_TEXTURE_PROFILES.spineJet,
+    defense: REAVERBOT_DEFENSE_TEXTURE_PROFILES.armoredCarapace,
+    weakPoint: REAVERBOT_WEAK_POINT_TEXTURE_PROFILES.coolingVents,
+    eye: REAVERBOT_EYE_TEXTURE_PROFILES.singleRubyLens,
+  };
+
+  for (const profileId of REAVERBOT_BOSS_TEXTURE_PROFILE_IDS) {
+    const resolved = resolveReaverbotTextureProfile({ ...genome, bossProfileId: profileId });
+    for (const [scope, authored] of Object.entries(authoredScopes)) {
+      for (const [slot, assetId] of Object.entries(authored)) {
+        if (assetId !== 'bladeMetal' && assetId !== 'jointDark') continue;
+        assert.equal(
+          resolved[scope][slot],
+          assetId,
+          `${profileId}.${scope}.${slot} must preserve shared ${assetId}`,
+        );
+      }
+    }
   }
 });
 

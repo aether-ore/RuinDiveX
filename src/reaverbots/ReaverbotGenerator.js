@@ -112,7 +112,11 @@ function pickArchetype(rng, context) {
   return REAVERBOT_ARCHETYPES[id] ?? REAVERBOT_ARCHETYPES.pursuer;
 }
 
-function pickBodyPlan(rng, archetype) {
+function pickBodyPlan(rng, archetype, context = {}) {
+  if (context.bodyPlanId) {
+    const forced = REAVERBOT_BODY_PLANS[context.bodyPlanId];
+    if (forced && archetype.bodyPlans.includes(forced.id)) return forced;
+  }
   const compatible = archetype.bodyPlans
     .map((id) => REAVERBOT_BODY_PLANS[id])
     .filter(Boolean);
@@ -200,14 +204,32 @@ function createMobilityVariant(rng, archetype, body, context = {}, weapon = null
   };
 }
 
-function pickWeapon(rng, archetype, body) {
+function pickWeapon(rng, archetype, body, context = {}) {
+  if (context.weaponId) {
+    const forced = REAVERBOT_WEAPONS[context.weaponId];
+    if (forced && archetype.weapons.includes(forced.id) && hasBodyRequirements(forced, body)) {
+      return forced;
+    }
+  }
   const compatible = archetype.weapons
     .map((id) => REAVERBOT_WEAPONS[id])
     .filter((weapon) => weapon && hasBodyRequirements(weapon, body));
   return rng.pick(compatible) ?? REAVERBOT_WEAPONS.pulseCannon;
 }
 
-function createWeaponVariant(weapon, rng, archetype) {
+function createWeaponVariant(weapon, rng, archetype, context = {}) {
+  // The Overload Reliquary advertises and vents the same volatile core used by
+  // ordinary bombers, but its authored encounter controller owns detonation.
+  // Marking the generated payload here prevents the ordinary self-destruct
+  // behavior from becoming the boss's terminal attack.
+  if (weapon.id === 'overloadCore' && context.bossSafeOverload) {
+    return {
+      ...weapon,
+      attackKind: 'bossOverload',
+      bossSafe: true,
+      tags: [...weapon.tags.filter((tag) => tag !== 'selfDestruct'), 'bossOverload'],
+    };
+  }
   if (archetype.id === 'pouncer') {
     const integratedMobility = {
       mountRole: 'locomotion',
@@ -270,7 +292,13 @@ function createChargeModule(body, weapon, rng) {
   };
 }
 
-function pickDefense(rng, archetype, body) {
+function pickDefense(rng, archetype, body, context = {}) {
+  if (context.defenseId) {
+    const forced = REAVERBOT_DEFENSES[context.defenseId];
+    if (forced && archetype.defenses.includes(forced.id) && hasBodyRequirements(forced, body)) {
+      return forced;
+    }
+  }
   const compatible = archetype.defenses
     .map((id) => REAVERBOT_DEFENSES[id])
     .filter((defense) => defense
@@ -294,7 +322,11 @@ function mergeWeightedWeakPoints(archetype, defense, weapon) {
   return [...combined.entries()].map(([value, weight]) => ({ value, weight }));
 }
 
-function pickWeakPoint(rng, archetype, defense, weapon) {
+function pickWeakPoint(rng, archetype, defense, weapon, context = {}) {
+  if (context.weakPointId) {
+    const forced = REAVERBOT_WEAK_POINTS[context.weakPointId];
+    if (forced && archetype.weakPoints.includes(forced.id)) return forced;
+  }
   if (weapon.id === 'clawArm') return REAVERBOT_WEAK_POINTS.clawPalm;
   if (weapon.id === 'launchLeg') return REAVERBOT_WEAK_POINTS.legJoint;
   const options = mergeWeightedWeakPoints(archetype, defense, weapon);
@@ -424,23 +456,26 @@ function createBehavior(archetype, mobility, weapon, weakPoint, rng) {
 function buildCandidate(seed, threatTier, context, candidateIndex) {
   const rng = new SeededRandom(`${seed}:candidate:${candidateIndex}`);
   const archetype = pickArchetype(rng.fork('archetype'), context);
-  const body = pickBodyPlan(rng.fork('body'), archetype);
-  const weaponDefinition = pickWeapon(rng.fork('weapon'), archetype, body);
-  const weapon = createWeaponVariant(weaponDefinition, rng.fork('weaponVariant'), archetype);
+  const body = pickBodyPlan(rng.fork('body'), archetype, context);
+  const weaponDefinition = pickWeapon(rng.fork('weapon'), archetype, body, context);
+  const weapon = createWeaponVariant(weaponDefinition, rng.fork('weaponVariant'), archetype, context);
   const mobility = createMobilityVariant(rng.fork('mobility'), archetype, body, context, weapon);
   const charge = createChargeModule(body, weapon, rng.fork('chargeModule'));
   const defense = weapon.id === 'clawArm'
     ? null
     : weapon.id === 'launchLeg'
       ? REAVERBOT_DEFENSES.sidePlates
-      : pickDefense(rng.fork('defense'), archetype, body);
-  const weakPoint = pickWeakPoint(rng.fork('weakPoint'), archetype, defense, weapon);
+      : pickDefense(rng.fork('defense'), archetype, body, context);
+  const weakPoint = pickWeakPoint(rng.fork('weakPoint'), archetype, defense, weapon, context);
   const proportions = createProportions(rng.fork('proportions'), body);
   const behavior = createBehavior(archetype, mobility, weapon, weakPoint, rng.fork('behavior'));
   const stats = createStats(archetype, body, mobility, weapon, threatTier, proportions, context);
   const tier = clamp(Math.trunc(threatTier) || 1, 1, 8);
   const spent = archetype.threatCost + weapon.threatCost + (defense?.threatCost ?? 0) + Math.max(1, tier - 1);
-  const budget = 13 + tier * 3 + (context.elite ? 5 : 0);
+  const budget = 13
+    + tier * 3
+    + (context.elite ? 5 : 0)
+    + clamp(Math.trunc(context.bossBudgetBonus ?? 0), 0, 16);
   const palette = REAVERBOT_PALETTES[archetype.paletteId];
 
   const genome = {
@@ -491,6 +526,8 @@ function buildCandidate(seed, threatTier, context, candidateIndex) {
       elite: Boolean(context.elite),
       isBoss: Boolean(context.isBoss),
       keycardCarrier: Boolean(context.keycardCarrier),
+      ...(context.bossProfileId ? { bossProfileId: String(context.bossProfileId) } : {}),
+      ...(context.bossSafeOverload ? { bossSafeOverload: true } : {}),
     },
     tags: [...new Set([
       archetype.id,
@@ -670,7 +707,14 @@ export function validateReaverbotGenome(genome, { allowPendingBodyDefenseOverrid
   if ((defense?.uptime ?? 0) > 0.7) errors.push('defense-uptime-too-high');
   if ((genome?.threat?.spent ?? Infinity) > (genome?.threat?.budget ?? -Infinity)) errors.push('threat-budget-exceeded');
   if (genome?.archetypeId === 'tractorController' && (genome?.context?.encounterSize ?? 1) < 2) errors.push('tractor-controller-alone');
-  if (genome?.archetypeId === 'aerialBomber' && (genome?.context?.isBoss || genome?.context?.keycardCarrier)) errors.push('critical-self-destruct');
+  const bossSafeOverload = genome?.context?.bossSafeOverload
+    && genome?.context?.bossProfileId === 'overloadReliquary'
+    && weapon?.id === 'overloadCore'
+    && weaponPayload?.attackKind === 'bossOverload'
+    && weaponPayload?.bossSafe === true;
+  if (genome?.archetypeId === 'aerialBomber'
+    && (genome?.context?.isBoss || genome?.context?.keycardCarrier)
+    && !bossSafeOverload) errors.push('critical-self-destruct');
   if (genome?.archetypeId === 'tractorController' && (genome?.context?.isBoss || genome?.context?.keycardCarrier)) errors.push('critical-dependent-controller');
   if (weakPoint?.location === 'eye' && defense?.id === 'armoredSkull') warnings.push('eye-near-front-armor');
 

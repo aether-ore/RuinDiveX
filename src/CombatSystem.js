@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {
+  getCombatTargetOwner,
   getCombatTargetWorldPosition,
   getEnemyCombatTargets,
   isCombatTargetLockRetainable,
@@ -616,8 +617,7 @@ export class CombatSystem {
     const profile = this._getStatefulProfile(this._getCurrentProfile(), state);
     if (player.animation?.isControlLocked?.() || player.isLedgeClinging?.()) {
       this._suspendForControlLock(state, pointer, {
-        preserveLock: player.isDodgeRollInvulnerable?.() === true && !player.isLedgeClinging?.(),
-        lockProfile: profile,
+        preserveLock: true,
       });
       return;
     }
@@ -739,10 +739,7 @@ export class CombatSystem {
     };
     if (player.animation?.isControlLocked?.() || player.isLedgeClinging?.() || this.swapTimer > 0) {
       this._suspendForControlLock(null, pointer, {
-        preserveLock: player.isDodgeRollInvulnerable?.() === true
-          && !player.isLedgeClinging?.()
-          && this.swapTimer <= 0,
-        lockProfile,
+        preserveLock: true,
       });
       return;
     }
@@ -941,8 +938,7 @@ export class CombatSystem {
   }
 
   _suspendForControlLock(state = null, pointer = null, {
-    preserveLock = false,
-    lockProfile = null,
+    preserveLock = true,
   } = {}) {
     if (pointer) {
       pointer.primaryPressed = false;
@@ -956,7 +952,7 @@ export class CombatSystem {
     this._stopLiftArm(false);
     this.manualAimOverrideActive = false;
     if (preserveLock) {
-      this._maintainRetainedLock(lockProfile);
+      this._maintainRetainedLock();
     } else {
       this._clearLockOn();
     }
@@ -976,7 +972,6 @@ export class CombatSystem {
     this._stopLaserBeam(true);
     this._stopDrillSpin();
     this._stopLiftArm(false);
-    this._clearLockOn();
     this._hideGrenadePreview();
 
     const changed = this.game.player.switchArmWeapon(slotIndex);
@@ -1000,7 +995,7 @@ export class CombatSystem {
   }
 
   getMovementLockTarget() {
-    const target = this.lockOn.target;
+    const target = this._refreshRetainedLockTarget();
 
     if (!this.lockOn.movementLocked || !this._isValidLockTarget(target)) {
       return null;
@@ -1010,13 +1005,28 @@ export class CombatSystem {
   }
 
   getTargetingLockTarget() {
-    const target = this.lockOn.target;
+    const target = this._refreshRetainedLockTarget();
 
     if (this.lockOn.progress < 1 || !this._isValidLockTarget(target)) {
       return null;
     }
 
     return target;
+  }
+
+  transferLockOnTarget(fromTarget, toTarget) {
+    if (!fromTarget || !toTarget || this.lockOn.target !== fromTarget) return false;
+    const progress = this.lockOn.progress;
+    const movementLocked = this.lockOn.movementLocked;
+    const manual = this.lockOn.manual;
+    const source = this.lockOn.source;
+    this.lockOn.target = toTarget;
+    this.lockOn.progress = progress;
+    this.lockOn.movementLocked = movementLocked;
+    this.lockOn.manual = manual;
+    this.lockOn.source = source;
+    this._updateLockMarker();
+    return true;
   }
 
   isManualAimOverrideActive(pointer = this.game.pointer) {
@@ -3518,14 +3528,14 @@ export class CombatSystem {
     }
   }
 
-  _maintainRetainedLock(profile = null) {
-    const target = this.lockOn.target;
+  _maintainRetainedLock() {
+    const target = this._refreshRetainedLockTarget();
     if (!target) {
+      this._clearLockOn();
       return false;
     }
 
-    const resolvedProfile = profile ?? this._getCurrentProfile();
-    if (!this._isValidLockTarget(target) || !this._isLockTargetInRange(target, resolvedProfile)) {
+    if (!this._isValidLockTarget(target)) {
       this._clearLockOn();
       return false;
     }
@@ -3550,6 +3560,18 @@ export class CombatSystem {
       this.lockOn.skipTimer = Math.max(0, this.lockOn.skipTimer - dt);
       if (this.lockOn.skipTimer <= 0) {
         this.lockOn.skippedTargetId = null;
+      }
+    }
+
+    // Once a target has been selected, its lock is player-owned state. Range
+    // continues to constrain acquisition and projectile behavior, but it must
+    // not erase a live target merely because either combatant crosses a weapon
+    // boundary. If a destructible sub-target is gone, retain the same enemy by
+    // transferring to its body rather than dropping the lock altogether.
+    if (this.lockOn.target && (this.lockOn.progress >= 1 || this.lockOn.movementLocked)) {
+      const retainedTarget = this._refreshRetainedLockTarget();
+      if (!retainedTarget) {
+        this._clearLockOn();
       }
     }
 
@@ -3583,22 +3605,31 @@ export class CombatSystem {
     if (aiming && !this.reticleLockSuppressedUntilAimRelease) {
       const reticleCandidate = this._findReticleLockCandidate(profile);
       if (reticleCandidate) {
-        this.lockOn.target = reticleCandidate;
-        this.lockOn.progress = 1;
-        this.lockOn.manual = true;
-        this.lockOn.movementLocked = true;
-        this.lockOn.source = 'reticle';
+        const currentTarget = this.lockOn.target;
+        const currentIsCoveredPart = Boolean(
+          currentTarget
+          && this.lockOn.progress >= 1
+          && !isCombatTargetValid(currentTarget)
+          && isCombatTargetLockRetainable(currentTarget),
+        );
+        const sameOwner = currentIsCoveredPart
+          && this._haveSameLockOwner(currentTarget, reticleCandidate);
+        if (!sameOwner) {
+          this.lockOn.target = reticleCandidate;
+          this.lockOn.progress = 1;
+          this.lockOn.manual = true;
+          this.lockOn.movementLocked = true;
+          this.lockOn.source = 'reticle';
+        }
         this._updateLockMarker();
         return;
       }
     }
 
-    const currentTargetIsUsable = this._isValidLockTarget(this.lockOn.target)
-      && this._isLockTargetInRange(this.lockOn.target, profile);
-    if (currentTargetIsUsable
-      && (this.lockOn.movementLocked || this.lockOn.source === 'reticle')) {
+    const currentTargetIsRetainable = this._isValidLockTarget(this.lockOn.target);
+    if (currentTargetIsRetainable && this.lockOn.progress >= 1) {
       this.lockOn.progress = 1;
-      this.lockOn.manual = true;
+      this.lockOn.manual = Boolean(this.lockOn.movementLocked || this.lockOn.source === 'reticle');
       this._updateLockMarker();
       return;
     }
@@ -3609,7 +3640,19 @@ export class CombatSystem {
       return;
     }
 
-    const candidate = this._findLockCandidate(profile);
+    // An in-progress automatic acquisition is also sticky. Re-scoring the
+    // whole encounter every frame made close targets continually trade places
+    // and reset the acquisition meter before either could finish.
+    const currentAcquisitionTarget = this.lockOn.target;
+    const keepCurrentAcquisition = Boolean(
+      currentAcquisitionTarget
+      && isCombatTargetValid(currentAcquisitionTarget)
+      && currentAcquisitionTarget.id !== this.lockOn.skippedTargetId
+      && this._isLockTargetInRange(currentAcquisitionTarget, profile),
+    );
+    const candidate = keepCurrentAcquisition
+      ? currentAcquisitionTarget
+      : this._findLockCandidate(profile);
 
     if (!candidate) {
       this._clearLockOn();
@@ -3645,6 +3688,41 @@ export class CombatSystem {
     getCombatTargetWorldPosition(target, tempFlat).sub(player.root.position);
     tempFlat.y = 0;
     return tempFlat.lengthSq() > 0.001 && tempFlat.lengthSq() <= range * range;
+  }
+
+  _resolveRetainedLockTarget(target = this.lockOn.target) {
+    if (!target) {
+      return null;
+    }
+    if (isCombatTargetLockRetainable(target)) {
+      return target;
+    }
+
+    const owner = getCombatTargetOwner(target);
+    return owner && owner !== target && isCombatTargetLockRetainable(owner)
+      ? owner
+      : null;
+  }
+
+  _refreshRetainedLockTarget() {
+    const currentTarget = this.lockOn.target;
+    const retainedTarget = this._resolveRetainedLockTarget(currentTarget);
+    if (retainedTarget && retainedTarget !== currentTarget) {
+      this.lockOn.target = retainedTarget;
+    }
+    return retainedTarget;
+  }
+
+  _haveSameLockOwner(left, right) {
+    const leftOwner = getCombatTargetOwner(left);
+    const rightOwner = getCombatTargetOwner(right);
+    if (!leftOwner || !rightOwner) {
+      return false;
+    }
+    if (leftOwner === rightOwner) {
+      return true;
+    }
+    return Boolean(leftOwner.id && rightOwner.id && leftOwner.id === rightOwner.id);
   }
 
   _findReticleLockCandidate(profile) {
@@ -4162,6 +4240,8 @@ export class CombatSystem {
         attackKind: 'beam',
         hitPartId: hitInfo?.hitPartId ?? null,
         weakPointHit: Boolean(hitInfo?.weakPointHit),
+        signaturePartHit: Boolean(hitInfo?.signaturePartHit),
+        bossArenaNodeHit: Boolean(hitInfo?.bossArenaNodeHit),
         hitPosition: hitInfo?.hitPosition,
       });
     }
@@ -4371,6 +4451,8 @@ export class CombatSystem {
         attackKind: 'drill',
         hitPartId: hitInfo?.hitPartId ?? null,
         weakPointHit: Boolean(hitInfo?.weakPointHit),
+        signaturePartHit: Boolean(hitInfo?.signaturePartHit),
+        bossArenaNodeHit: Boolean(hitInfo?.bossArenaNodeHit),
         hitPosition: hitInfo?.hitPosition,
       });
     }
@@ -4420,6 +4502,8 @@ export class CombatSystem {
         attackKind: 'rail',
         hitPartId: hitInfo?.hitPartId ?? null,
         weakPointHit: Boolean(hitInfo?.weakPointHit),
+        signaturePartHit: Boolean(hitInfo?.signaturePartHit),
+        bossArenaNodeHit: Boolean(hitInfo?.bossArenaNodeHit),
         hitPosition: hitInfo?.hitPosition,
       });
       this.game.addHitEffect(enemy.root.position, color, 0.5);
@@ -4945,6 +5029,8 @@ export class CombatSystem {
           attackKind: 'melee',
           hitPartId: hitInfo?.hitPartId ?? null,
           weakPointHit: Boolean(hitInfo?.weakPointHit),
+          signaturePartHit: Boolean(hitInfo?.signaturePartHit),
+          bossArenaNodeHit: Boolean(hitInfo?.bossArenaNodeHit),
           hitPosition: hitInfo?.hitPosition,
         });
       }

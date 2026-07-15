@@ -62,6 +62,7 @@ test('Mega Buster stays on the left while slot 2 and 3 weapons use the right arm
         firingSide: rig.busterArmSide ?? null,
         megaVisible: isRendered(rig.megaBusterArmGroup),
         subweaponVisible: isRendered(rig.busterArmGroup),
+        beamSaberVisible: isRendered(rig.beamBladeWeaponGroup),
         originDistances: distanceToWrists(origin),
       };
     };
@@ -94,12 +95,14 @@ test('Mega Buster stays on the left while slot 2 and 3 weapons use the right arm
 
   expect(result.slot1.type).toBe('swordArm');
   expect(result.slot1.megaVisible).toBe(true);
-  expect(result.slot1.subweaponVisible).toBe(true);
+  expect(result.slot1.subweaponVisible).toBe(false);
+  expect(result.slot1.beamSaberVisible).toBe(true);
   expect(result.slot1.firingSide).toBe('right');
 
   expect(result.slot2.type).not.toBe('busterArm');
   expect(result.slot2.megaVisible).toBe(true);
   expect(result.slot2.subweaponVisible).toBe(true);
+  expect(result.slot2.beamSaberVisible).toBe(false);
   expect(result.slot2.firingSide).toBe('right');
   expect(result.slot2.originDistances.right).toBeLessThan(result.slot2.originDistances.left);
 

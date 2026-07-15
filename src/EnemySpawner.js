@@ -2,7 +2,14 @@ import * as THREE from 'three';
 import { EliteEnemy, ELITE_AFFIXES } from './EliteEnemy.js';
 import { Enemy } from './Enemy.js';
 import { ReaverbotEnemy } from './reaverbots/ReaverbotEnemy.js';
+import { ReaverbotBossEnemy } from './reaverbots/ReaverbotBossEnemy.js';
 import { SharukurusuEnemy } from './reaverbots/SharukurusuEnemy.js';
+import {
+  createBossExpeditionSpec,
+  generateReaverbotBossGenome,
+  getReaverbotBossProfile,
+  normalizeBossProfileId,
+} from './reaverbots/ReaverbotBossCatalog.js';
 import {
   createEncounterSlotSeed,
   generateReaverbotGenome,
@@ -213,9 +220,15 @@ export class EnemySpawner {
   }
 
   spawnEncounter(encounter) {
-    this.game.setBusterCombatDepthLevel?.(Math.round(this.getDifficulty()), {
+    const encounterDepth = encounter?.isBoss
+      ? Number(encounter?.expeditionSpec?.depth) || this.getDifficulty()
+      : this.getDifficulty();
+    this.game.setBusterCombatDepthLevel?.(Math.round(encounterDepth), {
       encounterId: encounter?.id ?? null,
     });
+    if (encounter?.isBoss) {
+      return this._spawnBossEncounter(encounter);
+    }
     const enemies = [];
     let tractorControllerCount = 0;
     const spawnPoints = encounter.spawnPoints?.length
@@ -286,6 +299,63 @@ export class EnemySpawner {
 
     this.game.dungeonController?.markEncounterSpawned?.(encounter.id, enemies);
     return enemies;
+  }
+
+  _spawnBossEncounter(encounter) {
+    const difficulty = this.getDifficulty();
+    const fallbackLevel = Math.max(1, Math.min(10, Math.round(difficulty)));
+    const profileId = normalizeBossProfileId(
+      encounter.bossProfileId
+        ?? encounter.expeditionSpec?.bossProfileId
+        ?? this.game.getSelectedBossProfileId?.(),
+    );
+    const seed = createEncounterSlotSeed(this.runSeed, encounter.id, 0);
+    const expeditionSpec = encounter.expeditionSpec
+      ?? this.game.getActiveBossExpeditionSpec?.()
+      ?? createBossExpeditionSpec({
+        bossProfileId: profileId,
+        seed,
+        depth: fallbackLevel,
+        id: `${this.runSeed}:${encounter.id}`,
+      });
+    const level = Math.max(1, Math.min(10, Math.round(
+      Number(expeditionSpec.depth) || fallbackLevel,
+    )));
+    const bossProfile = getReaverbotBossProfile(profileId);
+    const genome = generateReaverbotBossGenome({
+      bossProfileId: profileId,
+      seed: expeditionSpec.seed ?? seed,
+      threatTier: Math.max(1, Math.min(10, level)),
+      context: {
+        biome: 'industrial ruin',
+        roomArchetypeId: encounter.roomArchetypeId,
+        roomFlavorId: encounter.roomFlavorId,
+        favoredTags: encounter.enemyTags,
+        suppressedTags: encounter.enemySuppressedTags,
+        behaviorModifiers: encounter.enemyBehaviorModifiers,
+      },
+    });
+    const authoredSpawn = encounter.spawnPoints?.[0]?.clone?.()
+      ?? encounter.zone?.position?.clone?.()
+      ?? this.game.player.root.position.clone();
+    const spawnPoint = pullEncounterSpawnFromCorner(authoredSpawn, encounter.zone);
+    const boss = new ReaverbotBossEnemy(genome, level, { bossProfile, expeditionSpec });
+    boss.root.position.copy(spawnPoint);
+    boss.root.rotation.y = new SeededRandom(`${seed}:boss-facing`).float(-Math.PI, Math.PI);
+    boss.encounterId = encounter.id;
+    boss.expeditionSpec = expeditionSpec;
+    this.game.addEnemy(boss);
+    boss.root.position.copy(this._resolveEncounterSpawnPosition(encounter, boss, spawnPoint));
+
+    const controller = this.game.dungeonController;
+    const arenaCenter = encounter.zone?.position?.clone?.() ?? boss.root.position.clone();
+    arenaCenter.y = controller?.getSurfaceElevationAt?.(arenaCenter) ?? arenaCenter.y;
+    boss.setEncounterArena?.(encounter, arenaCenter);
+    this.game.activeReaverbotBoss = boss;
+    encounter.bossProfileId = profileId;
+    encounter.expeditionSpec = expeditionSpec;
+    this.game.dungeonController?.markEncounterSpawned?.(encounter.id, [boss]);
+    return [boss];
   }
 
   _resolveEncounterSpawnPosition(encounter, enemy, requestedPosition) {

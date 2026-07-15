@@ -1364,7 +1364,7 @@ export class Player {
     if (forceSwordArm && previewAttackKind === 'beamBlade') {
       this.externalRig?.setDrillArmActive?.(false);
       this.externalRig?.setBusterArmSide?.('right');
-      this.externalRig?.setBusterArmActive?.(true);
+      this.externalRig?.setBusterArmActive?.(false);
       this.externalRig?.setBeamBladeActive?.(true, this.getActiveWeaponGlowColor(this.weaponColor.getHex()));
     }
 
@@ -3606,6 +3606,7 @@ export class Player {
     const busterArmSide = this._getActiveBusterArmSide();
     const rightSubweaponActive = busterArmSide === 'right'
       && !drillActive
+      && !beamBladeActive
       && this.isUsingProjectileWeapon();
 
     this.externalRig?.setBusterArmSide?.(busterArmSide);

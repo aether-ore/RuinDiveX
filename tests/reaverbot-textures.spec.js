@@ -57,7 +57,7 @@ const EXPECTED_IDS = Object.freeze({
   ],
 });
 
-const TEXTURE_URL_FRAGMENT = '/assets/textures/reaverbots/procedural/';
+const TEXTURE_URL_FRAGMENT = '/assets/textures/reaverbots/';
 const EYE_TEXTURE_KEY = 'eyeRedLens';
 const EYE_TEXTURE_SHA256 = 'c02c6989943283794b3a25ea8c32b7f869346ef83f2161097409102528049392';
 
@@ -1073,13 +1073,13 @@ test('procedural Reaverbot modules load, share, assign, and render their authore
   await page.waitForTimeout(150);
   expect(failedTextureRequests).toEqual([]);
   expect(textureResponses.filter((response) => response.status >= 400)).toEqual([]);
-  const successfulTextureFiles = [...new Set(textureResponses
+  const successfulTexturePaths = [...new Set(textureResponses
     .filter((response) => response.status === 200)
-    .map((response) => new URL(response.url).pathname.split('/').at(-1)))].sort();
-  const diagnosticTextureFiles = Object.values(browserTextures.diagnostics)
-    .map((diagnostic) => diagnostic.assetPath.split('/').at(-1))
+    .map((response) => new URL(response.url).pathname))].sort();
+  const diagnosticTexturePaths = Object.values(browserTextures.diagnostics)
+    .map((diagnostic) => diagnostic.assetPath)
     .sort();
-  expect(successfulTextureFiles).toEqual(diagnosticTextureFiles);
+  expect(successfulTexturePaths).toEqual(diagnosticTexturePaths);
   expect(pageErrors).toEqual([]);
 
   const galleryScreenshot = await page.screenshot({ fullPage: false });

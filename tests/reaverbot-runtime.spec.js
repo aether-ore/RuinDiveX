@@ -741,7 +741,7 @@ test('Reaverbot scrap stays unidentified until Roll analyzes and stores it', asy
     && window.getReaverbotSalvageCatalog,
   ));
 
-  const result = await page.evaluate(() => {
+  const result = await page.evaluate(async () => {
     const game = window.game;
     game.stop();
     game.lootSystem.clear();
@@ -807,7 +807,7 @@ test('Reaverbot scrap stays unidentified until Roll analyzes and stores it', asy
       visibleStoredPartText: document.getElementById('material-inventory')?.textContent ?? '',
     };
 
-    const identification = game.identifyReaverbotScrap();
+    const identification = await game.identifyReaverbotScrap();
     game.setInventoryOpen(true, { mode: 'roll' });
     game.ui.renderInventory();
     const storedParts = game.rollSalvageStorage.getParts().map((part) => ({
@@ -999,7 +999,9 @@ test('rush enemies acquire from range and expose accelerating red attack warning
     const chargeCommitIntensity = charger.visual.materials.primary.emissiveIntensity;
 
     const minimumEncounterSize = Math.min(
-      ...game.dungeonController.encounters.map((encounter) => encounter.roster.length),
+      ...game.dungeonController.encounters
+        .filter((encounter) => !encounter.isBoss)
+        .map((encounter) => encounter.roster.length),
     );
 
     pouncer._removeTelegraphMarker();

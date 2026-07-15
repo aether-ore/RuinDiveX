@@ -88,6 +88,20 @@
       </div>
 
       <div id="loot-toast" role="status" aria-live="polite"></div>
+      <section id="boss-hud" class="boss-hud" hidden aria-live="polite">
+        <div class="boss-hud-heading">
+          <span id="boss-hud-name">Ruin Core Boss</span>
+          <span id="boss-hud-phase">PHASE I</span>
+        </div>
+        <div class="boss-health-track"><span id="boss-health-fill"></span><i class="boss-phase-marker"></i></div>
+        <div class="boss-signature-row">
+          <span>Signature Assembly</span>
+          <div class="boss-signature-track"><span id="boss-signature-fill"></span></div>
+          <strong id="boss-signature-status">ARMORED</strong>
+        </div>
+      </section>
+      <div id="boss-intro-banner" class="boss-intro-banner" hidden></div>
+      <div id="boss-victory-banner" class="boss-victory-banner" hidden></div>
       <div id="event-prompt" class="event-prompt" hidden></div>
       <div id="buff-tray" class="buff-tray" aria-label="Active field buffs"></div>
 
@@ -111,9 +125,10 @@
           </section>
           <section>
             <div id="roll-scrap-service" class="roll-scrap-service" hidden>
-              <div id="roll-workshop-tabs" class="roll-workshop-tabs" role="tablist" aria-label="Roll workshop section" hidden>
+              <div id="roll-workshop-tabs" class="roll-workshop-tabs" role="tablist" aria-label="Roll workshop section">
                 <button type="button" role="tab" aria-selected="true" data-action="roll-workshop-tab" data-roll-tab="salvage">Salvage Analysis</button>
-                <button type="button" role="tab" aria-selected="false" data-action="roll-workshop-tab" data-roll-tab="buster">Buster Lab</button>
+                <button type="button" role="tab" aria-selected="false" data-action="roll-workshop-tab" data-roll-tab="hunts">Boss Hunts</button>
+                <button id="roll-buster-tab" type="button" role="tab" aria-selected="false" data-action="roll-workshop-tab" data-roll-tab="buster">Buster Lab</button>
               </div>
               <div id="roll-salvage-view" data-roll-view="salvage">
               <div class="roll-service-heading">
@@ -139,6 +154,22 @@
               <h3 class="inventory-subheading">Identified Reaverbot Parts</h3>
               <div id="material-inventory" class="material-inventory"></div>
               </div>
+
+              <section id="boss-hunts-view" class="boss-hunts" data-roll-view="hunts" hidden aria-labelledby="boss-hunts-heading">
+                <header class="boss-hunts-header">
+                  <div>
+                    <span class="roll-service-eyebrow">Roll's Boss Hunts</span>
+                    <h2 id="boss-hunts-heading">Choose a signature-material expedition</h2>
+                  </div>
+                  <strong id="boss-hunts-lock-status">FREE SELECTION</strong>
+                </header>
+                <p class="roll-service-copy">
+                  The selected boss remains the expedition target until changed at camp. Entering the ruin locks the hunt; first victories guarantee the advertised signature recovery.
+                </p>
+                <p id="boss-hunts-warning" class="buster-lab-warning" role="alert" hidden></p>
+                <div id="boss-hunts-grid" class="boss-hunts-grid" role="group" aria-label="Available boss hunts"></div>
+                <p id="boss-hunts-recovery-status" class="roll-identification-result" role="status" aria-live="polite"></p>
+              </section>
 
               <section id="buster-lab-view" class="buster-lab" data-roll-view="buster" hidden aria-labelledby="buster-lab-heading">
                 <header class="buster-lab-header">
@@ -344,6 +375,7 @@
             <button role="tab" aria-selected="true" data-action="pose-debug-tab" data-debug-tab="pose">Pose</button>
             <button role="tab" aria-selected="false" data-action="pose-debug-tab" data-debug-tab="platforming">Platforming</button>
             <button id="buster-debug-tab" role="tab" aria-selected="false" data-action="pose-debug-tab" data-debug-tab="buster" hidden>Buster Lab</button>
+            <button id="boss-debug-tab" role="tab" aria-selected="false" data-action="pose-debug-tab" data-debug-tab="bosses" hidden>Boss Hunts</button>
           </div>
           <div data-debug-view="pose">
             <p id="pose-debug-status" class="pose-debug-status">Tilde toggles this editor. World simulation is paused while it is open.</p>
@@ -486,6 +518,27 @@
                 Sandbox requires <code>?busterLab=sandbox</code>. Press Escape to leave either
                 test mode and return to the Debug Tools state that launched it.
               </small>
+            </section>
+          </div>
+          <div id="boss-debug-view" class="buster-debug-view" data-debug-view="bosses" hidden>
+            <section class="buster-debug-section" aria-labelledby="boss-debug-heading">
+              <span class="roll-service-eyebrow">Modular boss diagnostics</span>
+              <h2 id="boss-debug-heading">Boss Hunt controls</h2>
+              <div class="buster-debug-grid">
+                <label class="buster-debug-build-label"><span>Boss profile</span><select id="boss-debug-profile"></select></label>
+                <label><span>Phase</span><select id="boss-debug-phase"><option value="1">Phase I</option><option value="2">Phase II</option></select></label>
+                <label><span>Signature integrity</span><input id="boss-debug-integrity" type="range" min="0" max="100" value="100" /></label>
+                <label><span>Reward simulation</span><select id="boss-debug-reward"><option value="first">First clear</option><option value="repeat">Repeat 70%</option><option value="overload">Repeat overloaded</option></select></label>
+              </div>
+              <div class="buster-debug-actions">
+                <button data-action="boss-debug-select">Select Hunt</button>
+                <button data-action="boss-debug-spawn">Spawn Boss Here</button>
+                <button data-action="boss-debug-apply-phase">Apply Phase / Integrity</button>
+                <button data-action="boss-debug-simulate-reward">Simulate Reward</button>
+                <button data-action="boss-debug-reset-progress">Reset Hunt Progress</button>
+                <button data-action="boss-debug-gallery">Open Texture / Geometry Gallery</button>
+              </div>
+              <output id="boss-debug-status" class="buster-debug-status" aria-live="polite">Choose a profile.</output>
             </section>
           </div>
         </div>

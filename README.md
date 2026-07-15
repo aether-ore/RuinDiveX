@@ -36,7 +36,7 @@ The Lab's partial local save is stored under `ruinDigger.busterLab.v1`. It conta
 ## Controls
 
 - WASD or arrow keys move.
-- Hold `Shift` while moving to jog.
+- Move normally to jog. Press `Ctrl` to toggle the original walk speed, and hold `Shift` while moving forward with walk mode off to sprint faster. Forward-left and forward-right arcs also sprint; Shift does not boost turning in place or backward movement.
 - `Space` jumps; jump direction follows the current movement input.
 - `Q` performs a short dodge roll in the current movement direction.
 - Mouse aims with the flat cyan screen reticle. Hold right mouse to aim through the reticle; entering aim preserves the reticle's current position.

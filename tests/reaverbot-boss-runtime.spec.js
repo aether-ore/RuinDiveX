@@ -17,6 +17,48 @@ async function waitForGame(page) {
   await page.waitForFunction(() => Boolean(window.game?.spawner && window.game?.ui));
 }
 
+test('Ruby Optic Oracle prefers the authored model and retains procedural fallback state', async ({ page }) => {
+  await page.goto('/?bossDebug=1&reaverbotSeed=authored-ruby-optic-oracle');
+  await waitForGame(page);
+
+  await page.evaluate(() => {
+    window.game.stop();
+    window.authoredRubyBoss = window.game.debugSpawnBoss('rubyOpticOracle').boss;
+  });
+  await page.waitForFunction(() => window.authoredRubyBoss?.authoredVisualState !== 'loading');
+
+  const result = await page.evaluate(() => {
+    const boss = window.authoredRubyBoss;
+    const output = {
+      state: boss.authoredVisualState,
+      modelMarker: boss.root.userData.authoredBossModel,
+      fallbackActive: boss.root.userData.authoredBossFallbackActive,
+      authoredRoot: boss.visual.root.userData.authoredRubyOpticOracle === true,
+      hasEye: Boolean(boss.visual.authoredEye),
+      hasMuzzle: Boolean(boss.visual.weapon.muzzle),
+      hasWeakPoint: Boolean(boss.visual.authoredWeakPoint),
+      shutterCount: boss.visual.authoredShutters?.length ?? 0,
+    };
+    boss.dispose();
+    boss.root.removeFromParent();
+    const index = window.game.enemies.indexOf(boss);
+    if (index >= 0) window.game.enemies.splice(index, 1);
+    delete window.authoredRubyBoss;
+    return output;
+  });
+
+  expect(result).toMatchObject({
+    state: 'active',
+    modelMarker: 'rubyOpticOracle',
+    fallbackActive: false,
+    authoredRoot: true,
+    hasEye: true,
+    hasMuzzle: true,
+    hasWeakPoint: true,
+    shutterCount: 8,
+  });
+});
+
 test('Boss Hunts stay available without the Buster Lab, redact materials, reveal discoveries, and lock on entry', async ({ page }) => {
   await page.goto('/?bossDebug=1&reaverbotSeed=boss-hunt-selector');
   await waitForGame(page);

@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { ReaverbotEnemy } from './ReaverbotEnemy.js';
 import { REAVERBOT_BOSS_LIMITS } from './ReaverbotBossCatalog.js';
+import {
+  animateAuthoredRubyOpticOracleVisual,
+  disposeVisualTree,
+  loadAuthoredRubyOpticOracleVisual,
+} from './AuthoredRubyOpticOracle.js';
 
 export { REAVERBOT_BOSS_LIMITS } from './ReaverbotBossCatalog.js';
 
@@ -189,6 +194,50 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       cleaned: false,
     };
     this.bossResources = createSharedBossResources(this.genome.palette.emissive);
+    this.authoredVisualState = this.bossProfileId === 'rubyOpticOracle' ? 'loading' : 'notApplicable';
+    if (this.bossProfileId === 'rubyOpticOracle') this._loadPreferredAuthoredVisual();
+  }
+
+  async _loadPreferredAuthoredVisual() {
+    const fallbackVisual = this.visual;
+    try {
+      const authoredVisual = await loadAuthoredRubyOpticOracleVisual(this);
+      if (this.disposed || this.dead) {
+        disposeVisualTree(authoredVisual.root);
+        return;
+      }
+      fallbackVisual.root.removeFromParent();
+      this.visual = authoredVisual;
+      this.root.add(authoredVisual.root);
+      this.authoredVisualState = 'active';
+      this.root.userData.authoredBossModel = 'rubyOpticOracle';
+      this.root.userData.authoredBossFallbackActive = false;
+      this._captureMaterialStates();
+      disposeVisualTree(fallbackVisual.root);
+    } catch (error) {
+      this.authoredVisualState = 'fallback';
+      this.root.userData.authoredBossFallbackActive = true;
+      console.warn('Could not load authored Ruby Optic Oracle; using procedural fallback.', error);
+    }
+  }
+
+  _animateVisual(dt) {
+    if (this.authoredVisualState !== 'active') {
+      super._animateVisual(dt);
+      return;
+    }
+    const duration = this._getStateDuration(this.brain.state);
+    animateAuthoredRubyOpticOracleVisual(this.visual, {
+      time: this.brain.time,
+      dt,
+      moving: this.brain.moving,
+      speedRatio: this.brain.speedRatio,
+      state: this.brain.state,
+      stateProgress: Math.max(0, Math.min(1, this.brain.stateTime / Math.max(0.01, duration))),
+      defenseActive: this.brain.defenseActive,
+      weakPointExposed: this.brain.weakPointExposed,
+    });
+    this._applyRushAttackWarning(dt);
   }
 
   _createSignatureTarget() {

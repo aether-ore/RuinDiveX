@@ -37,8 +37,12 @@ const SWORD_FORWARD_SLASH_CLIP = 'swordForwardSlash';
 const SWORD_FOLLOW_UP_SLASH_CLIP = 'swordInwardSlash';
 const SWORD_JUMP_SLASH_CLIP = 'swordJumpSlash';
 const SWORD_JUMP_SLASH_HIT_PROGRESS = 0.5;
-const SWORD_JUMP_SLASH_HOLD_PROGRESS = 32 / 56;
+const SWORD_JUMP_SLASH_AERIAL_END_PROGRESS = 28.5143 / 56;
 const SWORD_JUMP_SLASH_VISUAL_END = 37 / 56;
+const SWORD_JUMP_SLASH_FALL_TRAIL_MAX_SAMPLES = 100;
+const SWORD_JUMP_SLASH_FALL_TRAIL_MINIMUM_SAMPLE_DISTANCE = 0.035;
+const SWORD_JUMP_SLASH_FALL_TRAIL_MAXIMUM_LENGTH = 3.4;
+const SWORD_JUMP_SLASH_FALL_TRAIL_FADE_DURATION = 0.22;
 const SWORD_SLASH_TRAIL_PROFILES = Object.freeze({
   [SWORD_FORWARD_SLASH_CLIP]: Object.freeze({
     // Sampled from the authored FBX strike: model-right shoulder to the
@@ -69,7 +73,7 @@ const SWORD_SLASH_TRAIL_PROFILES = Object.freeze({
     arcAngle: 1.857862,
     visualStart: 24 / 56,
     hitProgress: SWORD_JUMP_SLASH_HIT_PROGRESS,
-    aerialVisualEnd: SWORD_JUMP_SLASH_HOLD_PROGRESS,
+    aerialVisualEnd: SWORD_JUMP_SLASH_AERIAL_END_PROGRESS,
     visualEnd: SWORD_JUMP_SLASH_VISUAL_END,
     liveBladeSweep: true,
     followPlayerRoot: true,
@@ -1988,7 +1992,17 @@ export class CombatSystem {
           slashClipKey,
         });
         if (slashClipKey === SWORD_JUMP_SLASH_CLIP) {
-          this._armSwordSweepTrail(slashClipKey, swordVisual.color);
+          this._armSwordSweepTrail(slashClipKey, swordVisual.color, {
+            trailPhase: 'continuousJumpSlash',
+            endProgress: SWORD_JUMP_SLASH_VISUAL_END,
+            progressSource: 'jumpSlashUpperBody',
+            followObject: null,
+            maxSamples: SWORD_JUMP_SLASH_FALL_TRAIL_MAX_SAMPLES,
+            rolling: true,
+            minimumSampleDistance: SWORD_JUMP_SLASH_FALL_TRAIL_MINIMUM_SAMPLE_DISTANCE,
+            maximumTrailLength: SWORD_JUMP_SLASH_FALL_TRAIL_MAXIMUM_LENGTH,
+            finishFadeDuration: SWORD_JUMP_SLASH_FALL_TRAIL_FADE_DURATION,
+          });
         }
       } else {
         player.playAttackAnimation(attackDuration, 'melee', targetPoint);
@@ -2116,9 +2130,13 @@ export class CombatSystem {
       return;
     }
 
+    const followObject = Object.prototype.hasOwnProperty.call(options, 'followObject')
+      ? (options.followObject?.isObject3D ? options.followObject : null)
+      : profile.followPlayerRoot ? this.game.player.root : null;
     this.activeSwordSweepTrail = {
       clipKey,
       color,
+      trailPhase: options.trailPhase ?? 'liveBladeSweep',
       startProgress: options.startProgress
         ?? profile.visualStart
         ?? profile.hitProgress
@@ -2129,8 +2147,12 @@ export class CombatSystem {
         ?? 1,
       progressSource: options.progressSource
         ?? (clipKey === SWORD_JUMP_SLASH_CLIP ? 'jumpSlashVisual' : 'attackTimer'),
-      followObject: options.followObject
-        ?? (profile.followPlayerRoot ? this.game.player.root : null),
+      followObject,
+      maxSamples: options.maxSamples,
+      rolling: Boolean(options.rolling),
+      minimumSampleDistance: options.minimumSampleDistance,
+      maximumTrailLength: options.maximumTrailLength,
+      finishFadeDuration: options.finishFadeDuration,
       previousProgress: null,
       previousBase: null,
       previousTip: null,
@@ -2138,15 +2160,15 @@ export class CombatSystem {
     };
   }
 
-  beginSwordJumpSlashLandingTrail(startProgress = SWORD_JUMP_SLASH_HOLD_PROGRESS) {
+  beginSwordJumpSlashLandingTrail(startProgress = SWORD_JUMP_SLASH_AERIAL_END_PROGRESS) {
     const active = this.activeSwordSweepTrail;
+    if (active?.clipKey === SWORD_JUMP_SLASH_CLIP && !active.handle?.finished) {
+      // The airborne and grounded portions intentionally share this exact
+      // handle. Its next world-space sample bridges touchdown without a gap.
+      return true;
+    }
     if (active) {
-      if (active.handle?.samples?.length >= 2) {
-        this.game.finishBeamBladeSweepTrail?.(active.handle);
-        this.activeSwordSweepTrail = null;
-      } else {
-        this._cancelActiveSwordSweepTrail();
-      }
+      this._cancelActiveSwordSweepTrail();
     }
 
     const trailProfile = SWORD_SLASH_TRAIL_PROFILES[SWORD_JUMP_SLASH_CLIP];
@@ -2156,27 +2178,42 @@ export class CombatSystem {
       return false;
     }
 
+    const upperBodyProgress = this.game.player.getSwordJumpSlashUpperBodyProgress?.()
+      ?? startProgress;
+    if (upperBodyProgress >= (trailProfile.visualEnd ?? 1) - 0.000001) {
+      return false;
+    }
+
     const clampedStart = THREE.MathUtils.clamp(
-      Math.max(trailProfile.visualStart ?? 0, startProgress),
+      Math.max(
+        trailProfile.visualStart ?? 0,
+        startProgress,
+      ),
       trailProfile.visualStart ?? 0,
-      trailProfile.aerialVisualEnd ?? trailProfile.visualEnd,
+      trailProfile.visualEnd ?? 1,
     );
     this._armSwordSweepTrail(
       SWORD_JUMP_SLASH_CLIP,
       this._getActiveWeaponVisual(weaponProfile).color,
       {
+        trailPhase: 'continuousJumpSlash',
         startProgress: clampedStart,
         endProgress: trailProfile.visualEnd,
-        progressSource: 'jumpSlashVisual',
+        progressSource: 'jumpSlashUpperBody',
+        followObject: null,
+        maxSamples: SWORD_JUMP_SLASH_FALL_TRAIL_MAX_SAMPLES,
+        rolling: true,
+        minimumSampleDistance: SWORD_JUMP_SLASH_FALL_TRAIL_MINIMUM_SAMPLE_DISTANCE,
+        maximumTrailLength: SWORD_JUMP_SLASH_FALL_TRAIL_MAXIMUM_LENGTH,
+        finishFadeDuration: SWORD_JUMP_SLASH_FALL_TRAIL_FADE_DURATION,
       },
     );
     const landingTrail = this.activeSwordSweepTrail;
     if (landingTrail
-      && this._captureSwordSweepTrailObservation(landingTrail, startProgress)
-      && startProgress >= landingTrail.startProgress) {
-      // Touchdown is the exact seam between the held aerial pose and the
-      // authored recovery. Seed it synchronously while that seam transform is
-      // still on the rig so a low-frame update cannot begin the ribbon late.
+      && this._captureSwordSweepTrailObservation(landingTrail, upperBodyProgress)
+      && upperBodyProgress >= landingTrail.startProgress) {
+      // This is only a recovery fallback when the original handle was lost.
+      // Seed it synchronously so a low-frame update cannot begin the trail late.
       this._appendSwordSweepTrailSample(
         landingTrail,
         landingTrail.previousBase,
@@ -2196,21 +2233,25 @@ export class CombatSystem {
     const player = this.game.player;
     const animation = player.animation;
     const useJumpSlashVisualProgress = active.progressSource === 'jumpSlashVisual';
+    const useJumpSlashUpperBodyProgress = active.progressSource === 'jumpSlashUpperBody';
     if (player.dead
       || !player.isSwordSlashAnimationActive?.(active.clipKey)
       || (!useJumpSlashVisualProgress
+        && !useJumpSlashUpperBodyProgress
         && (!Number.isFinite(animation?.attackDuration) || animation.attackDuration <= 0))) {
       this._cancelActiveSwordSweepTrail();
       return;
     }
 
-    const progress = useJumpSlashVisualProgress
-      ? player.getSwordJumpSlashVisualProgress?.()
-      : 1 - THREE.MathUtils.clamp(
-        animation.attackTimer / animation.attackDuration,
-        0,
-        1,
-      );
+    const progress = useJumpSlashUpperBodyProgress
+      ? player.getSwordJumpSlashUpperBodyProgress?.()
+      : useJumpSlashVisualProgress
+        ? player.getSwordJumpSlashVisualProgress?.()
+        : 1 - THREE.MathUtils.clamp(
+          animation.attackTimer / animation.attackDuration,
+          0,
+          1,
+        );
     if (!Number.isFinite(progress)) {
       this._cancelActiveSwordSweepTrail();
       return;
@@ -2262,8 +2303,11 @@ export class CombatSystem {
       active.previousTip = active.previousTip?.copy(tempTrailTip) ?? tempTrailTip.clone();
     }
 
-    if (progress >= active.endProgress) {
-      this.game.finishBeamBladeSweepTrail?.(active.handle);
+    const keepJumpSlashTrailAirborne = active.clipKey === SWORD_JUMP_SLASH_CLIP
+      && useJumpSlashUpperBodyProgress
+      && player.isJumpAirborne?.();
+    if (progress >= active.endProgress && !keepJumpSlashTrailAirborne) {
+      this.game.finishBeamBladeSweepTrail?.(active.handle, active.finishFadeDuration);
       this.activeSwordSweepTrail = null;
     }
   }
@@ -2300,9 +2344,14 @@ export class CombatSystem {
   _appendSwordSweepTrailSample(active, base, tip, progress) {
     active.handle ??= this.game.beginBeamBladeSweepTrail?.(active.color, {
       slashClipKey: active.clipKey,
+      trailPhase: active.trailPhase,
       startProgress: active.startProgress,
       endProgress: active.endProgress,
       followObject: active.followObject,
+      maxSamples: active.maxSamples,
+      rolling: active.rolling,
+      minimumSampleDistance: active.minimumSampleDistance,
+      maximumTrailLength: active.maximumTrailLength,
     }) ?? null;
     if (!active.handle) {
       return false;
@@ -4962,10 +5011,13 @@ export class CombatSystem {
     const slashVisualRange = beamBlade ? slashTrail?.visualRange ?? range : range;
 
     const liveBladeTrailPending = slashTrail?.liveBladeSweep
-      && this.activeSwordSweepTrail?.clipKey === slashClipKey;
+      && this.activeSwordSweepTrail?.clipKey === slashClipKey
+      && this.activeSwordSweepTrail?.trailPhase !== 'airborneFall';
     const liveBladeTrailReady = liveBladeTrailPending
       && this.activeSwordSweepTrail.handle?.samples?.length >= 2;
-    if (liveBladeTrailPending && !liveBladeTrailReady) {
+    const retainContinuousJumpSlashTrail = liveBladeTrailPending
+      && slashClipKey === SWORD_JUMP_SLASH_CLIP;
+    if (liveBladeTrailPending && !liveBladeTrailReady && !retainContinuousJumpSlashTrail) {
       this._cancelActiveSwordSweepTrail();
     }
     if (!liveBladeTrailReady) {

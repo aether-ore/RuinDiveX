@@ -4748,6 +4748,11 @@ export class Game {
   beginBeamBladeSweepTrail(color = 0xa8ff8a, options = {}) {
     const maxSamples = Math.max(8, options.maxSamples ?? 96);
     const followObject = options.followObject?.isObject3D ? options.followObject : null;
+    const rolling = Boolean(options.rolling);
+    const minimumSampleDistance = Math.max(0.001, options.minimumSampleDistance ?? 0.001);
+    const maximumTrailLength = Number.isFinite(options.maximumTrailLength)
+      ? Math.max(0.1, options.maximumTrailLength)
+      : null;
     const createRibbon = (name, innerRatio, opacity) => {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.BufferAttribute(
@@ -4784,7 +4789,7 @@ export class Game {
       mesh.frustumCulled = false;
       mesh.renderOrder = 7;
       Object.assign(mesh.userData, {
-        trailMode: 'liveBladeSweep',
+        trailMode: options.trailPhase ?? 'liveBladeSweep',
         slashClipKey: options.slashClipKey ?? null,
         innerRatio,
         sampleCount: 0,
@@ -4801,6 +4806,9 @@ export class Game {
       clipKey: options.slashClipKey ?? null,
       followObject,
       maxSamples,
+      rolling,
+      minimumSampleDistance,
+      maximumTrailLength,
       samples: [],
       finished: false,
       glow: createRibbon('laserBeamBladeSlashGlow', 0.24, 0.34),
@@ -4812,7 +4820,7 @@ export class Game {
     if (trail?.finished
       || !baseWorld?.isVector3
       || !tipWorld?.isVector3
-      || trail.samples.length >= trail.maxSamples) {
+      || (!trail.rolling && trail.samples.length >= trail.maxSamples)) {
       return false;
     }
 
@@ -4841,9 +4849,10 @@ export class Game {
     }
 
     const previous = trail.samples[trail.samples.length - 1];
+    const minimumSampleDistanceSquared = (trail.minimumSampleDistance ?? 0.001) ** 2;
     if (previous
-      && previous.base.distanceToSquared(sampleBase) < 0.000001
-      && previous.tip.distanceToSquared(sampleTip) < 0.000001) {
+      && previous.base.distanceToSquared(sampleBase) < minimumSampleDistanceSquared
+      && previous.tip.distanceToSquared(sampleTip) < minimumSampleDistanceSquared) {
       return false;
     }
 
@@ -4854,18 +4863,53 @@ export class Game {
       tipWorld: tipWorld.clone(),
       progress: Number.isFinite(progress) ? progress : null,
     };
+    if (trail.rolling && trail.samples.length >= trail.maxSamples) {
+      trail.samples.shift();
+    }
     trail.samples.push(sample);
-    const sampleIndex = trail.samples.length - 1;
+    if (trail.rolling && Number.isFinite(trail.maximumTrailLength)) {
+      let accumulatedLength = 0;
+      for (let index = trail.samples.length - 1; index > 0; index -= 1) {
+        const current = trail.samples[index];
+        const prior = trail.samples[index - 1];
+        const segmentLength = Math.max(
+          current.base.distanceTo(prior.base),
+          current.tip.distanceTo(prior.tip),
+        );
+        if (accumulatedLength + segmentLength > trail.maximumTrailLength) {
+          const boundaryRatio = segmentLength > 0
+            ? (trail.maximumTrailLength - accumulatedLength) / segmentLength
+            : 0;
+          const boundaryProgress = Number.isFinite(current.progress)
+            && Number.isFinite(prior.progress)
+            ? current.progress + (prior.progress - current.progress) * boundaryRatio
+            : current.progress;
+          const boundarySample = {
+            base: current.base.clone().lerp(prior.base, boundaryRatio),
+            tip: current.tip.clone().lerp(prior.tip, boundaryRatio),
+            baseWorld: current.baseWorld.clone().lerp(prior.baseWorld, boundaryRatio),
+            tipWorld: current.tipWorld.clone().lerp(prior.tipWorld, boundaryRatio),
+            progress: boundaryProgress,
+          };
+          trail.samples.splice(0, index, boundarySample);
+          break;
+        }
+        accumulatedLength += segmentLength;
+      }
+    }
 
     for (const mesh of [trail.glow, trail.core]) {
       const innerRatio = mesh.userData.innerRatio;
-      tempVectorA.copy(sample.base).lerp(sample.tip, innerRatio);
       const positions = mesh.geometry.attributes.position;
-      const offset = sampleIndex * 2;
-      positions.setXYZ(offset, tempVectorA.x, tempVectorA.y, tempVectorA.z);
-      positions.setXYZ(offset + 1, sample.tip.x, sample.tip.y, sample.tip.z);
+      for (let sampleIndex = 0; sampleIndex < trail.samples.length; sampleIndex += 1) {
+        const ribbonSample = trail.samples[sampleIndex];
+        tempVectorA.copy(ribbonSample.base).lerp(ribbonSample.tip, innerRatio);
+        const offset = sampleIndex * 2;
+        positions.setXYZ(offset, tempVectorA.x, tempVectorA.y, tempVectorA.z);
+        positions.setXYZ(offset + 1, ribbonSample.tip.x, ribbonSample.tip.y, ribbonSample.tip.z);
+      }
       positions.needsUpdate = true;
-      mesh.geometry.setDrawRange(0, Math.max(0, sampleIndex * 6));
+      mesh.geometry.setDrawRange(0, Math.max(0, (trail.samples.length - 1) * 6));
       mesh.userData.sampleCount = trail.samples.length;
       mesh.userData.firstSampleProgress = trail.samples[0]?.progress ?? null;
       mesh.userData.lastSampleProgress = sample.progress;
@@ -7336,6 +7380,15 @@ export class Game {
       if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'Tab') {
         event.preventDefault();
         this.pointer.lockOnPressed = true;
+        return;
+      }
+
+      if (!this.inventoryOpen
+        && !this.poseDebugOpen
+        && !event.repeat
+        && (event.code === 'ControlLeft' || event.code === 'ControlRight')) {
+        event.preventDefault();
+        this.player?.toggleWalkMode?.();
         return;
       }
 

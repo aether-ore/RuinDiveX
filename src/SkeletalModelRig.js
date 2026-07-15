@@ -9,7 +9,7 @@ const FORWARD_SLASH_ACTIVE_START = 0.36;
 const FORWARD_SLASH_END = 0.5;
 const JUMP_SLASH_TOTAL_FRAMES = 56;
 const JUMP_SLASH_ACTIVE_START = 24 / JUMP_SLASH_TOTAL_FRAMES;
-const JUMP_SLASH_AERIAL_POSE_PROGRESS = 32 / JUMP_SLASH_TOTAL_FRAMES;
+const JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS = 28.5143 / JUMP_SLASH_TOTAL_FRAMES;
 const JUMP_SLASH_END = 37 / JUMP_SLASH_TOTAL_FRAMES;
 const SWORD_SLASH_CLIP_KEYS = new Set(['swordForwardSlash', 'swordInwardSlash', 'swordJumpSlash']);
 const SWORD_INWARD_SLASH_CLIP = 'swordInwardSlash';
@@ -73,10 +73,17 @@ const GENERATED_POWER_KNOCKBACK_STATES = new Set([
 ]);
 const LEFT_BUSTER_AIM_JOINTS = Object.freeze(['leftShoulder', 'leftElbow', 'leftWrist']);
 const RIGHT_BUSTER_AIM_JOINTS = Object.freeze(['rightShoulder', 'rightElbow', 'rightWrist']);
+const SPRINT_PISTOL_RUN_POSE_JOINTS = Object.freeze([
+  ...RIGHT_BUSTER_AIM_JOINTS,
+  'leftShoulder',
+]);
 const RIGHT_LEDGE_ARM_JOINTS = RIGHT_BUSTER_AIM_JOINTS;
 const PISTOL_BUSTER_POSE_DEGREES = Object.freeze({
   leftElbow: Object.freeze({ pitch: -22.5, yaw: 1.5, roll: 111.5 }),
   leftWrist: Object.freeze({ pitch: 43, yaw: -7.5, roll: 4.5 }),
+});
+const SPRINT_RIGHT_WRIST_POSE_DEGREES = Object.freeze({
+  rightWrist: Object.freeze({ pitch: 0, yaw: 0, roll: 0 }),
 });
 const MEGA_BUSTER_ACTION_IDLE_POSE_DEGREES = Object.freeze({
   hips: Object.freeze({ pitch: -6.2, yaw: -43, roll: -4 }),
@@ -95,23 +102,32 @@ const MEGA_BUSTER_ACTION_IDLE_POSE_DEGREES = Object.freeze({
   rightKnee: Object.freeze({ pitch: -34, yaw: 7.7, roll: -0.4 }),
   rightAnkle: Object.freeze({ pitch: 19, yaw: 4.4, roll: -0.6 }),
 });
-const JUMP_SLASH_AERIAL_POSE_DEGREES = Object.freeze({
-  hips: Object.freeze({ pitch: 16.2, yaw: 10, roll: -5.6 }),
-  spine: Object.freeze({ pitch: -0.95, yaw: 1, roll: 0.9 }),
-  neck: Object.freeze({ pitch: 2.4, yaw: 2.2, roll: -6.6 }),
-  leftShoulder: Object.freeze({ pitch: 16.7, yaw: 2.6, roll: 34.5 }),
-  leftElbow: Object.freeze({ pitch: -18.3, yaw: 23.3, roll: 9.3 }),
-  leftWrist: Object.freeze({ pitch: 0.6, yaw: -22.3, roll: 6.8 }),
-  rightShoulder: Object.freeze({ pitch: 29.6, yaw: 23.2, roll: 5.7 }),
-  rightElbow: Object.freeze({ pitch: 5.6, yaw: 42.9, roll: 2.7 }),
-  rightWrist: Object.freeze({ pitch: -19.4, yaw: -2.2, roll: 49.7 }),
-  leftHip: Object.freeze({ pitch: 88, yaw: -10.5, roll: -7.5 }),
-  leftKnee: Object.freeze({ pitch: -96.5, yaw: 1.5, roll: 4.5 }),
-  leftAnkle: Object.freeze({ pitch: -12.6, yaw: 7.2, roll: 5.6 }),
-  rightHip: Object.freeze({ pitch: 88.4, yaw: -31.6, roll: -16.3 }),
-  rightKnee: Object.freeze({ pitch: -129.2, yaw: 10.8, roll: 4.6 }),
-  rightAnkle: Object.freeze({ pitch: -19.6, yaw: -2.3, roll: 0.9 }),
+const JUMP_SLASH_FALLING_POSE_DEGREES = Object.freeze({
+  hips: Object.freeze({ pitch: 10.5, yaw: -26.8, roll: 0.7 }),
+  spine: Object.freeze({ pitch: 2, yaw: -0.4, roll: 0.2 }),
+  neck: Object.freeze({ pitch: 0.2, yaw: 15, roll: -10.6 }),
+  leftShoulder: Object.freeze({ pitch: 52, yaw: 7.3, roll: 64.6 }),
+  leftElbow: Object.freeze({ pitch: 19.8, yaw: -34.7, roll: 38.5 }),
+  leftWrist: Object.freeze({ pitch: -8.9, yaw: 5.6, roll: -47.7 }),
+  rightShoulder: Object.freeze({ pitch: 42.3, yaw: 26.1, roll: -28.5 }),
+  rightElbow: Object.freeze({ pitch: 29.3, yaw: 45.1, roll: -25.5 }),
+  rightWrist: Object.freeze({ pitch: -12.5, yaw: -6.9, roll: 38.5 }),
+  leftHip: Object.freeze({ pitch: 54.5, yaw: -10, roll: 16.4 }),
+  leftKnee: Object.freeze({ pitch: -10.6, yaw: -8.2, roll: 2.6 }),
+  leftAnkle: Object.freeze({ pitch: -16.9, yaw: 1.8, roll: 0.4 }),
+  rightHip: Object.freeze({ pitch: 63.9, yaw: 5.8, roll: -3.9 }),
+  rightKnee: Object.freeze({ pitch: -65.3, yaw: -0.1, roll: -1.2 }),
+  rightAnkle: Object.freeze({ pitch: -2.9, yaw: 0.3, roll: 2.3 }),
 });
+const JUMP_SLASH_LOWER_BODY_POSE_JOINTS = Object.freeze([
+  'hips',
+  'leftHip',
+  'leftKnee',
+  'leftAnkle',
+  'rightHip',
+  'rightKnee',
+  'rightAnkle',
+]);
 const PASSIVE_IDLE_SHOULDER_JOINTS = Object.freeze(['leftShoulder', 'rightShoulder']);
 
 const RIG_BONE_ALIASES = {
@@ -271,6 +287,12 @@ export class SkeletalModelRig {
     this.megaBusterActionIdlePoseWasApplied = false;
     this.busterAirAimPose = new Map();
     this.rightBusterAimPose = new Map();
+    this.sprintPistolRunAimPose = new Map();
+    this.sprintPistolRunWristLocalPosition = new THREE.Vector3();
+    this.sprintPistolRunWristRootQuaternion = new THREE.Quaternion();
+    this.sprintPistolRunWristWorldTarget = new THREE.Vector3();
+    this.sprintPistolRunWristWorldQuaternion = new THREE.Quaternion();
+    this.sprintPistolRunWristAnchorReady = false;
     this.rightLedgeArmDownPose = new Map();
     this.busterMountedElbow = null;
     this.busterArmActive = false;
@@ -286,6 +308,7 @@ export class SkeletalModelRig {
     this.beamBladeGroup = null;
     this.beamBladeActive = false;
     this.beamBladeColor = new THREE.Color(DEFAULT_BEAM_BLADE_COLOR);
+    this.jumpSlashHeldBeamBladeTransform = null;
     this.beamSaberGripQuaternions = new Map();
     this.debugPoseEnabled = false;
     this.debugPoseOverrides = new Map();
@@ -295,7 +318,9 @@ export class SkeletalModelRig {
     this.animationActions = new Map();
     this.animationMetadata = new Map();
     this.jumpSlashAerialHipsPosition = null;
-    this.jumpSlashAerialSeamHipsPosition = null;
+    this.jumpSlashAerialLowerBodyQuaternions = new Map();
+    this.jumpSlashUpperBodyQuaternionInterpolants = new Map();
+    this.jumpSlashClipDuration = 0;
     this.jumpSlashAerialPoseRestoreTransforms = null;
     this.jumpSlashAirborneRootRestorePosition = null;
     this.footVertexSamples = [];
@@ -334,9 +359,30 @@ export class SkeletalModelRig {
   }
 
   clearJumpSlashAerialOverrides() {
+    const hadOverrides = Boolean(
+      this.jumpSlashAerialPoseRestoreTransforms
+      || this.jumpSlashAirborneRootRestorePosition,
+    );
     this.root.userData.jumpSlashAerialPoseActive = false;
+    this.root.userData.jumpSlashAerialPoseWeight = 0;
+    this.root.userData.jumpSlashLowerBodyPoseActive = false;
+    this.root.userData.jumpSlashLowerBodyPoseWeight = 0;
+    this.root.userData.jumpSlashUpperBodyOverrideActive = false;
+    this.root.userData.jumpSlashUpperBodyOverrideProgress = null;
+    this.root.userData.jumpSlashLandingHipsBlendActive = false;
+    this.root.userData.jumpSlashLandingHipsBlendWeight = 0;
     this.root.userData.jumpSlashAirborneRootAnchorActive = false;
-    return this._restoreJumpSlashAerialOverrides();
+    this.root.userData.jumpSlashBeamBladeHoldTransformActive = false;
+    this.jumpSlashHeldBeamBladeTransform = null;
+
+    // Cancellation can happen between rig updates. The restore cache contains
+    // the unmasked source pose for the current upper-body frame, whose legs may
+    // already be in the authored landing crouch. Keep the safe visible pose for
+    // this instant and let the next mixer evaluation replace it wholesale.
+    this.jumpSlashAerialPoseRestoreTransforms = null;
+    this.jumpSlashAirborneRootRestorePosition = null;
+    this.root.updateMatrixWorld(true);
+    return hadOverrides;
   }
 
   setDebugPoseOverrides(overrides = {}) {
@@ -716,7 +762,9 @@ export class SkeletalModelRig {
     this.animationActions.clear();
     this.animationMetadata.clear();
     this.jumpSlashAerialHipsPosition = null;
-    this.jumpSlashAerialSeamHipsPosition = null;
+    this.jumpSlashAerialLowerBodyQuaternions.clear();
+    this.jumpSlashUpperBodyQuaternionInterpolants.clear();
+    this.jumpSlashClipDuration = 0;
     this.jumpSlashAerialPoseRestoreTransforms = null;
     this.jumpSlashAirborneRootRestorePosition = null;
     this.availableAnimationNames = [];
@@ -741,6 +789,8 @@ export class SkeletalModelRig {
         rootYMode: entry.rootYMode,
       });
       if (key === 'swordJumpSlash') {
+        const fallingPoseTime = preparedClip.duration * JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS;
+        this.jumpSlashClipDuration = preparedClip.duration;
         const hipsPositionTrack = preparedClip.tracks.find((track) => (
           track.name.endsWith('.position') && this._isRootMotionTrack(track.name)
         ));
@@ -750,15 +800,33 @@ export class SkeletalModelRig {
             hipsPositionTrack.values[1],
             hipsPositionTrack.values[2],
           );
-          const seamValues = hipsPositionTrack.createInterpolant().evaluate(
-            preparedClip.duration * JUMP_SLASH_AERIAL_POSE_PROGRESS,
-          );
-          this.jumpSlashAerialSeamHipsPosition = new THREE.Vector3(
-            seamValues[0],
-            seamValues[1],
-            seamValues[2],
-          );
         }
+        for (const track of preparedClip.tracks) {
+          if (!track.name.endsWith('.quaternion')) {
+            continue;
+          }
+          const normalizedTarget = normalizeBoneName(this._getTrackTargetName(track.name));
+          const bone = (this.bonesByName.get(normalizedTarget) ?? [])
+            .slice()
+            .sort((a, b) => this._scoreBoneCandidate(b) - this._scoreBoneCandidate(a))[0];
+          if (!bone) {
+            continue;
+          }
+          if (this._isJumpSlashLowerBodyBone(bone)) {
+            const sampled = track.createInterpolant(new Float32Array(4)).evaluate(fallingPoseTime);
+            this.jumpSlashAerialLowerBodyQuaternions.set(
+              bone,
+              new THREE.Quaternion().fromArray(sampled).normalize(),
+            );
+          } else {
+            this.jumpSlashUpperBodyQuaternionInterpolants.set(
+              bone,
+              track.createInterpolant(new Float32Array(4)),
+            );
+          }
+        }
+        this.root.userData.jumpSlashLowerBodyBoneCount = this.jumpSlashAerialLowerBodyQuaternions.size;
+        this.root.userData.jumpSlashUpperBodyBoneCount = this.jumpSlashUpperBodyQuaternionInterpolants.size;
       }
       const action = this.mixer.clipAction(preparedClip, this.root);
       const looping = entry.loop ?? LOOPING_CLIP_KEYS.has(key);
@@ -812,12 +880,19 @@ export class SkeletalModelRig {
     attackKind = 'melee',
     lockOnActive = false,
     strafeAmount = 0,
+    forwardAmount = 0,
     turnAmount = 0,
     busterArmSide = this.busterArmSide,
     aimTargetWorld = null,
     useRightArmForLedge = false,
     jumpSlashAirbornePose = false,
+    jumpSlashAirbornePoseWeight = 0,
     jumpSlashAirborneRootAnchor = false,
+    jumpSlashUpperBodyOverride = false,
+    jumpSlashUpperBodyProgress = null,
+    jumpSlashSplitBodyLanding = false,
+    jumpSlashLandingHipsBlend = false,
+    jumpSlashBladeTransformHold = false,
     fallAnimationClipProgress = null,
     clipKey = null,
   } = {}) {
@@ -832,6 +907,9 @@ export class SkeletalModelRig {
       `buster:${this.busterArmSide}`,
       jumpSlashAirbornePose ? 'jumpSlashPose' : 'freePose',
       jumpSlashAirborneRootAnchor ? 'jumpSlashRootAnchor' : 'freeRootAnchor',
+      jumpSlashUpperBodyOverride ? 'jumpSlashUpperOverride' : 'freeUpperOverride',
+      jumpSlashSplitBodyLanding ? 'jumpSlashSplitLanding' : 'freeSplitLanding',
+      jumpSlashLandingHipsBlend ? 'jumpSlashHipsBlend' : 'freeHipsBlend',
       clipKey ? `clip:${clipKey}` : 'auto',
     ].join(':');
     if (rigState !== this.previousRigState) {
@@ -855,8 +933,22 @@ export class SkeletalModelRig {
       this._applyDebugPoseOverridesImmediate();
       this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
       this._updateDrillArmVisual(dt);
-      this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress, clipKey);
-      this._applyJumpSlashAerialPose(jumpSlashAirbornePose, jumpSlashAirborneRootAnchor);
+      this._updateBeamBladeVisual(
+        state === 'attacking' && attackKind === 'beamBlade',
+        jumpSlashUpperBodyProgress ?? attackProgress,
+        clipKey,
+        jumpSlashBladeTransformHold,
+      );
+      this._applyJumpSlashAerialPose(
+        jumpSlashAirbornePose,
+        jumpSlashAirborneRootAnchor,
+        jumpSlashAirbornePoseWeight,
+      );
+      this._applyJumpSlashLandingHipsBlend(jumpSlashLandingHipsBlend, attackProgress);
+      this._applyJumpSlashUpperBodyProgress(
+        jumpSlashUpperBodyOverride,
+        jumpSlashUpperBodyProgress,
+      );
       this._applyBeamSaberGripPose();
       return;
     }
@@ -874,6 +966,7 @@ export class SkeletalModelRig {
       attackKind,
       lockOnActive,
       strafeAmount,
+      forwardAmount,
       turnAmount,
       busterArmSide: this.busterArmSide,
       clipKey,
@@ -900,18 +993,43 @@ export class SkeletalModelRig {
       fallAnimationClipProgress,
     });
     this.mixer.update(dt);
+    const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
+    const sprintPistolRunPoseActive = selectedClip === 'sprint'
+      && busterAimActive
+      && this.busterArmSide === 'right';
+    const sprintRightWristPoseActive = selectedClip === 'sprint';
+    const sprintSwordRightWristPoseActive = sprintRightWristPoseActive && this.beamBladeActive;
+    this._applySprintPistolRunAimPose(sprintPistolRunPoseActive);
     if (this.busterArmSide === 'right') {
-      this._applyPistolBusterPoseCorrection();
+      this._applyPistolBusterPoseCorrection(sprintPistolRunPoseActive);
     }
     this._updateBusterArmLocalPose(dt, state, attackKind, attackProgress);
     this._updateDrillArmVisual(dt);
-    this._updateBeamBladeVisual(state === 'attacking' && attackKind === 'beamBlade', attackProgress, selectedClip);
-    const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
+    this._updateBeamBladeVisual(
+      state === 'attacking' && attackKind === 'beamBlade',
+      jumpSlashUpperBodyProgress ?? attackProgress,
+      selectedClip,
+      jumpSlashBladeTransformHold,
+    );
     this._applyBusterAimPose(busterAimActive, state, moving, aimTargetWorld);
     this._applyGeneratedPowerKnockbackPose(state, actionProgress ?? 0, dt);
     this._applyLedgeRightArmPose(state, useRightArmForLedge);
-    this._applyJumpSlashAerialPose(jumpSlashAirbornePose, jumpSlashAirborneRootAnchor);
+    this._applyJumpSlashAerialPose(
+      jumpSlashAirbornePose,
+      jumpSlashAirborneRootAnchor,
+      jumpSlashAirbornePoseWeight,
+    );
+    this._applyJumpSlashLandingHipsBlend(jumpSlashLandingHipsBlend, attackProgress);
+    this._applyJumpSlashUpperBodyProgress(
+      jumpSlashUpperBodyOverride,
+      jumpSlashUpperBodyProgress,
+    );
     this._applySwordInwardSlashTerminalPose(selectedClip, attackProgress);
+    this._applySprintRightWristOverride({
+      active: sprintRightWristPoseActive,
+      busterActive: sprintPistolRunPoseActive,
+      swordActive: sprintSwordRightWristPoseActive,
+    });
     this._applyBeamSaberGripPose();
   }
 
@@ -1122,34 +1240,44 @@ export class SkeletalModelRig {
     return restored;
   }
 
-  _applyJumpSlashAerialPose(poseActive = false, rootAnchorActive = false) {
+  _applyJumpSlashAerialPose(poseActive = false, rootAnchorActive = false, poseWeight = 0) {
     this.root.userData.jumpSlashAerialPoseActive = Boolean(poseActive);
+    this.root.userData.jumpSlashLowerBodyPoseActive = Boolean(poseActive);
+    const resolvedPoseWeight = poseActive
+      ? THREE.MathUtils.clamp(poseWeight, 0, 1)
+      : 0;
+    this.root.userData.jumpSlashAerialPoseWeight = resolvedPoseWeight;
+    this.root.userData.jumpSlashLowerBodyPoseWeight = resolvedPoseWeight;
     this.root.userData.jumpSlashAirborneRootAnchorActive = Boolean(rootAnchorActive);
     if (!poseActive && !rootAnchorActive) {
       return;
     }
 
     // The authored clip raises and compresses its hips as it travels. Physical
-    // jump simulation already owns that world-space arc, so pin translation
-    // throughout the aerial wind-up/hold and release it at touchdown. Once the
-    // wind-up reaches its seam, the supplied rest-relative rotations take over.
+    // jump simulation already owns that world-space arc, so pin translation.
+    // After the supplied identical frame, hold only the complete lower chain;
+    // the mixer remains free to carry the torso, arms, and sword through their
+    // authored follow-through without putting the boots into a landing pose.
     const hips = this.joints.get('hips');
-    if (poseActive && !this.jumpSlashAerialPoseRestoreTransforms) {
-      this.jumpSlashAerialPoseRestoreTransforms = new Map();
-      for (const jointName of Object.keys(JUMP_SLASH_AERIAL_POSE_DEGREES)) {
-        const joint = this.joints.get(jointName);
-        if (!joint) {
-          continue;
+    if (poseActive) {
+      this.jumpSlashAerialPoseRestoreTransforms ??= new Map();
+      const lowerBones = this.jumpSlashAerialLowerBodyQuaternions.size > 0
+        ? this.jumpSlashAerialLowerBodyQuaternions.keys()
+        : JUMP_SLASH_LOWER_BODY_POSE_JOINTS
+          .map((jointName) => this.joints.get(jointName))
+          .filter(Boolean);
+      for (const joint of lowerBones) {
+        const restoreTransform = this.jumpSlashAerialPoseRestoreTransforms.get(joint);
+        if (restoreTransform) {
+          restoreTransform.position.copy(joint.position);
+          restoreTransform.quaternion.copy(joint.quaternion);
+        } else {
+          this.jumpSlashAerialPoseRestoreTransforms.set(joint, {
+            joint,
+            position: joint.position.clone(),
+            quaternion: joint.quaternion.clone(),
+          });
         }
-        const position = joint.position.clone();
-        if (jointName === 'hips' && this.jumpSlashAerialSeamHipsPosition) {
-          position.copy(this.jumpSlashAerialSeamHipsPosition);
-        }
-        this.jumpSlashAerialPoseRestoreTransforms.set(jointName, {
-          joint,
-          position,
-          quaternion: joint.quaternion.clone(),
-        });
       }
     } else if (!poseActive && rootAnchorActive && hips) {
       this.jumpSlashAirborneRootRestorePosition = hips.position.clone();
@@ -1160,9 +1288,67 @@ export class SkeletalModelRig {
       hips.position.copy(anchoredHipsPosition);
     }
     if (poseActive) {
-      this._applyRawLocalPoseDegrees(JUMP_SLASH_AERIAL_POSE_DEGREES);
+      for (const [joint, quaternion] of this.jumpSlashAerialLowerBodyQuaternions) {
+        joint.quaternion.slerp(quaternion, resolvedPoseWeight);
+      }
+      this._applyRawLocalPoseDegrees(
+        JUMP_SLASH_FALLING_POSE_DEGREES,
+        JUMP_SLASH_LOWER_BODY_POSE_JOINTS,
+        resolvedPoseWeight,
+      );
     }
     this.root.updateMatrixWorld(true);
+  }
+
+  _applyJumpSlashUpperBodyProgress(active = false, progress = null) {
+    const resolvedProgress = Number.isFinite(progress)
+      ? THREE.MathUtils.clamp(progress, 0, 1)
+      : null;
+    const shouldApply = Boolean(active)
+      && resolvedProgress !== null
+      && this.jumpSlashClipDuration > 0
+      && this.jumpSlashUpperBodyQuaternionInterpolants.size > 0;
+    this.root.userData.jumpSlashUpperBodyOverrideActive = shouldApply;
+    this.root.userData.jumpSlashUpperBodyOverrideProgress = shouldApply
+      ? resolvedProgress
+      : null;
+    if (!shouldApply) {
+      return false;
+    }
+
+    const sampleTime = this.jumpSlashClipDuration * resolvedProgress;
+    for (const [joint, interpolant] of this.jumpSlashUpperBodyQuaternionInterpolants) {
+      const sampled = interpolant.evaluate(sampleTime);
+      joint.quaternion.set(sampled[0], sampled[1], sampled[2], sampled[3]).normalize();
+    }
+    this.root.updateMatrixWorld(true);
+    return true;
+  }
+
+  _applyJumpSlashLandingHipsBlend(active = false, progress = null) {
+    const hips = this.joints.get('hips');
+    const resolvedProgress = Number.isFinite(progress)
+      ? THREE.MathUtils.clamp(progress, 0, 1)
+      : JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS;
+    // The authored landing compresses the hips sharply just after the matching
+    // airborne frame. Release the aerial translation across the full grounded
+    // recovery so the feet can enter their landing pose without a torso snap.
+    const shouldBlend = Boolean(active && hips && this.jumpSlashAerialHipsPosition);
+    const blendWeight = shouldBlend
+      ? 1 - THREE.MathUtils.smoothstep(
+        resolvedProgress,
+        JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+        1,
+      )
+      : 0;
+    this.root.userData.jumpSlashLandingHipsBlendActive = shouldBlend;
+    this.root.userData.jumpSlashLandingHipsBlendWeight = blendWeight;
+    if (blendWeight <= 0) {
+      return false;
+    }
+    hips.position.lerp(this.jumpSlashAerialHipsPosition, blendWeight);
+    this.root.updateMatrixWorld(true);
+    return true;
   }
 
   _captureMegaBusterActionIdleArmAnchor() {
@@ -1718,6 +1904,7 @@ export class SkeletalModelRig {
   _captureBusterAirAimPose() {
     this.busterAirAimPose.clear();
     this.rightBusterAimPose.clear();
+    this.sprintPistolRunAimPose.clear();
     this.rightLedgeArmDownPose.clear();
     const clip = this.animationClips.get('pistolIdle') ?? this.animationClips.get('pistolJump');
     if (!clip) {
@@ -1764,6 +1951,66 @@ export class SkeletalModelRig {
     this.root.userData.busterAirAimPoseJointCount = this.busterAirAimPose.size;
     this.root.userData.rightBusterAimPoseJointCount = this.rightBusterAimPose.size;
     this.root.userData.rightLedgeArmDownPoseJointCount = this.rightLedgeArmDownPose.size;
+
+    const pistolRunClip = this.animationClips.get('pistolRun');
+    if (pistolRunClip?.duration > 0) {
+      const runSampleTime = Math.min(pistolRunClip.duration * 0.25, 0.25);
+      // The pistol-run clip supplies the planted firing arm and the off-hand
+      // shoulder carriage. The existing pistol correction below continues to
+      // own the left elbow/wrist, matching the final authored pistol-run pose.
+      for (const jointName of SPRINT_PISTOL_RUN_POSE_JOINTS) {
+        const track = this._findJointQuaternionTrack(pistolRunClip, jointName);
+        if (!track?.values || track.values.length < 4) continue;
+        const sampled = track.createInterpolant(new Float32Array(4)).evaluate(runSampleTime);
+        this.sprintPistolRunAimPose.set(
+          jointName,
+          new THREE.Quaternion().fromArray(sampled).normalize(),
+        );
+      }
+      this._captureSprintPistolRunWristAnchor(runSampleTime);
+    }
+    this.root.userData.sprintPistolRunAimPoseJointCount = this.sprintPistolRunAimPose.size;
+    this.root.userData.sprintPistolRunWristAnchorReady = this.sprintPistolRunWristAnchorReady;
+  }
+
+  _captureSprintPistolRunWristAnchor(sampleTime = 0) {
+    const action = this.animationActions.get('pistolRun');
+    const wrist = this.joints.get('rightWrist');
+    if (!action || !wrist) return false;
+
+    const savedBones = [...this.animatedBones].map((bone) => ({
+      bone,
+      position: bone.position.clone(),
+      quaternion: bone.quaternion.clone(),
+      scale: bone.scale.clone(),
+    }));
+    action.reset();
+    action.enabled = true;
+    action.setEffectiveWeight(1);
+    action.play();
+    action.time = Math.max(0, sampleTime);
+    this.mixer.update(0);
+    this.root.updateMatrixWorld(true);
+
+    wrist.getWorldPosition(this.sprintPistolRunWristLocalPosition);
+    this.root.worldToLocal(this.sprintPistolRunWristLocalPosition);
+    this.root.getWorldQuaternion(tempQuaternionA).invert();
+    wrist.getWorldQuaternion(tempQuaternionB);
+    this.sprintPistolRunWristRootQuaternion
+      .copy(tempQuaternionA)
+      .multiply(tempQuaternionB)
+      .normalize();
+
+    action.stop();
+    action.setEffectiveWeight(0);
+    for (const saved of savedBones) {
+      saved.bone.position.copy(saved.position);
+      saved.bone.quaternion.copy(saved.quaternion);
+      saved.bone.scale.copy(saved.scale);
+    }
+    this.root.updateMatrixWorld(true);
+    this.sprintPistolRunWristAnchorReady = true;
+    return true;
   }
 
   _normalizeShoulderTracksToReference(referenceKey, clipKeys = []) {
@@ -1801,6 +2048,27 @@ export class SkeletalModelRig {
         }
       }
     }
+  }
+
+  _isJumpSlashLowerBodyBone(bone) {
+    const hips = this.joints.get('hips');
+    const leftHip = this.joints.get('leftHip');
+    const rightHip = this.joints.get('rightHip');
+    if (!bone || !hips || !leftHip || !rightHip) {
+      return false;
+    }
+    if (bone === hips) {
+      return true;
+    }
+    for (let current = bone; current; current = current.parent) {
+      if (current === leftHip || current === rightHip) {
+        return true;
+      }
+      if (current === hips) {
+        break;
+      }
+    }
+    return false;
   }
 
   _findJointQuaternionTrack(clip, jointName) {
@@ -1974,7 +2242,7 @@ export class SkeletalModelRig {
       walk: 'walking',
       jog: 'running',
       run: 'running',
-      sprint: 'running',
+      sprint: 'sprint',
       backpedal: 'slowJogBackwards',
     };
 
@@ -2001,6 +2269,7 @@ export class SkeletalModelRig {
     attackKind = 'melee',
     lockOnActive = false,
     strafeAmount = 0,
+    forwardAmount = 0,
     turnAmount = 0,
     busterArmSide = this.busterArmSide,
     clipKey = null,
@@ -2011,6 +2280,7 @@ export class SkeletalModelRig {
     }
 
     const busterAimActive = projectileAiming || (lockOnActive && attackKind !== 'beamBlade');
+    const aimStrafing = busterAimActive && Math.abs(strafeAmount) > 0.35;
     const useRightBusterClips = busterAimActive && busterArmSide === 'right';
 
     if (state === 'attacking' && attackKind === 'beamBlade') {
@@ -2107,10 +2377,15 @@ export class SkeletalModelRig {
 
       if (shouldUseLocomotion) {
         if (backpedaling) {
-          if (lockOnActive && Math.abs(strafeAmount) > 0.35) {
+          if (aimStrafing) {
+            const useRunArc = running || moveAmount > 1.1;
             return strafeAmount < 0
-              ? this._firstAvailable('pistolWalkBackwardArc', 'pistolRunBackwardArc', 'pistolWalkBackward', 'pistolRunBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
-              : this._firstAvailable('pistolWalkBackwardArc2', 'pistolRunBackwardArc2', 'pistolWalkBackward', 'pistolRunBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
+              ? useRunArc
+                ? this._firstAvailable('pistolRunBackwardArc', 'pistolWalkBackwardArc', 'pistolRunBackward', 'pistolWalkBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+                : this._firstAvailable('pistolWalkBackwardArc', 'pistolRunBackwardArc', 'pistolWalkBackward', 'pistolRunBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+              : useRunArc
+                ? this._firstAvailable('pistolRunBackwardArc2', 'pistolWalkBackwardArc2', 'pistolRunBackward', 'pistolWalkBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+                : this._firstAvailable('pistolWalkBackwardArc2', 'pistolRunBackwardArc2', 'pistolWalkBackward', 'pistolRunBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
           }
 
           return running || moveAmount > 1.1
@@ -2118,10 +2393,21 @@ export class SkeletalModelRig {
             : this._firstAvailable('pistolWalkBackward', 'pistolRunBackward', 'slowJogBackwards', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
         }
 
-        if (lockOnActive && Math.abs(strafeAmount) > 0.35) {
+        if (aimStrafing) {
+          const diagonal = Math.abs(forwardAmount) > 0.35;
+          const useRunArc = running || moveAmount > 1.1;
+          if (!diagonal) {
+            return strafeAmount < 0
+              ? this._firstAvailable('pistolStrafe', 'leftStrafeWalking', 'leftStrafe', 'pistolWalkArc', 'pistolRunArc', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+              : this._firstAvailable('pistolStrafe2', 'rightStrafeWalking', 'rightStrafe', 'pistolWalkArc2', 'pistolRunArc2', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
+          }
           return strafeAmount < 0
-            ? this._firstAvailable('pistolStrafe', 'pistolWalkArc', 'pistolRunArc', 'leftStrafeWalking', 'leftStrafe', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
-            : this._firstAvailable('pistolStrafe2', 'pistolWalkArc2', 'pistolRunArc2', 'rightStrafeWalking', 'rightStrafe', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
+            ? useRunArc
+              ? this._firstAvailable('pistolRunArc', 'pistolWalkArc', 'pistolStrafe', 'leftStrafeWalking', 'pistolRun', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+              : this._firstAvailable('pistolWalkArc', 'pistolRunArc', 'pistolStrafe', 'leftStrafeWalking', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+            : useRunArc
+              ? this._firstAvailable('pistolRunArc2', 'pistolWalkArc2', 'pistolStrafe2', 'rightStrafeWalking', 'pistolRun', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+              : this._firstAvailable('pistolWalkArc2', 'pistolRunArc2', 'pistolStrafe2', 'rightStrafeWalking', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
         }
 
         if (running || state === 'running' || moveAmount > 1.1) {
@@ -2135,6 +2421,12 @@ export class SkeletalModelRig {
     }
 
     if (shouldUseLocomotion) {
+      if ((lockOnActive || busterAimActive) && Math.abs(strafeAmount) > 0.35) {
+        return strafeAmount < 0
+          ? this._firstAvailable('leftStrafeWalking', 'leftStrafe', 'leftCoverSneak', 'crouchedSneakLeft', 'leftTurn90', 'leftTurn', 'walking', 'breathingIdle', 'idle')
+          : this._firstAvailable('rightStrafeWalking', 'rightStrafe', 'rightCoverSneak', 'crouchedSneakRight', 'rightTurn90', 'rightTurn', 'walking', 'breathingIdle', 'idle');
+      }
+
       if (backpedaling) {
         return this._firstAvailable('slowJogBackwards', 'walking', 'strutWalking', 'breathingIdle', 'idle');
       }
@@ -2143,12 +2435,6 @@ export class SkeletalModelRig {
         return turnAmount < 0
           ? this._firstAvailable('leftTurn', 'leftTurn90', 'walking', 'strutWalking', 'running', 'breathingIdle', 'idle')
           : this._firstAvailable('rightTurn', 'rightTurn90', 'walking', 'strutWalking', 'running', 'breathingIdle', 'idle');
-      }
-
-      if (lockOnActive && Math.abs(strafeAmount) > 0.35) {
-        return strafeAmount < 0
-          ? this._firstAvailable('leftStrafeWalking', 'leftStrafe', 'leftCoverSneak', 'crouchedSneakLeft', 'leftTurn90', 'leftTurn', 'walking', 'breathingIdle', 'idle')
-          : this._firstAvailable('rightStrafeWalking', 'rightStrafe', 'rightCoverSneak', 'crouchedSneakRight', 'rightTurn90', 'rightTurn', 'walking', 'breathingIdle', 'idle');
       }
 
       if (running || state === 'running' || moveAmount > 1.1) {
@@ -2297,6 +2583,7 @@ export class SkeletalModelRig {
       || key === 'pistolStrafe2') {
       speed = THREE.MathUtils.clamp(moveAmount || 1, 0.68, 1.22);
     } else if (key === 'running'
+      || key === 'sprint'
       || key === 'pistolRun'
       || key === 'pistolRunBackward'
       || key === 'pistolRunArc'
@@ -2378,8 +2665,54 @@ export class SkeletalModelRig {
     bone.quaternion.slerp(targetQuaternion, THREE.MathUtils.clamp(alpha, 0, 1));
   }
 
-  _applyPistolBusterPoseCorrection() {
-    if (!this._isPistolClipKey(this.activeClipKey)) {
+  _applySprintPistolRunAimPose(active = false) {
+    this.root.userData.sprintPistolRunAimPoseActive = Boolean(active);
+    if (!active || this.sprintPistolRunAimPose.size === 0) return false;
+    for (const [jointName, quaternion] of this.sprintPistolRunAimPose) {
+      this.joints.get(jointName)?.quaternion.copy(quaternion);
+    }
+    if (this.sprintPistolRunWristAnchorReady) {
+      this.sprintPistolRunWristWorldTarget.copy(this.sprintPistolRunWristLocalPosition);
+      this.root.localToWorld(this.sprintPistolRunWristWorldTarget);
+      this.root.getWorldQuaternion(tempQuaternionA);
+      this.sprintPistolRunWristWorldQuaternion.copy(tempQuaternionA)
+        .multiply(this.sprintPistolRunWristRootQuaternion)
+        .normalize();
+      this._solveArmToWorldTarget(
+        'rightShoulder',
+        'rightElbow',
+        'rightWrist',
+        this.sprintPistolRunWristWorldTarget,
+        this.sprintPistolRunWristWorldQuaternion,
+        1,
+      );
+      this.joints.get('rightWrist')?.getWorldPosition(tempVectorB);
+      this.root.userData.sprintPistolRunWristAnchorError = tempVectorB.distanceTo(
+        this.sprintPistolRunWristWorldTarget,
+      );
+    }
+    return true;
+  }
+
+  _applySprintRightWristOverride({ active = false, busterActive = false, swordActive = false } = {}) {
+    const overrideActive = Boolean(active);
+    const busterOverrideActive = overrideActive && Boolean(busterActive);
+    const swordOverrideActive = overrideActive && Boolean(swordActive);
+    this.root.userData.sprintRightWristOverrideActive = overrideActive;
+    this.root.userData.sprintBusterRightWristOverrideActive = busterOverrideActive;
+    this.root.userData.sprintSwordRightWristOverrideActive = swordOverrideActive;
+    if (!overrideActive) return false;
+
+    // Sprint must not animate the wrist away from its neutral local rotation.
+    // Apply this after every other arm layer so all Sprint equipment poses share it.
+    this._applyRawLocalPoseDegrees(SPRINT_RIGHT_WRIST_POSE_DEGREES);
+    return true;
+  }
+
+  _applyPistolBusterPoseCorrection(allowSprintPose = false) {
+    const active = this._isPistolClipKey(this.activeClipKey) || allowSprintPose;
+    this.root.userData.pistolBusterPoseCorrectionActive = active;
+    if (!active) {
       return;
     }
 
@@ -2748,7 +3081,12 @@ export class SkeletalModelRig {
     this.drillBitSpin.scale.setScalar(pulse);
   }
 
-  _updateBeamBladeVisual(visible, attackProgress, clipKey = this.activeClipKey) {
+  _updateBeamBladeVisual(
+    visible,
+    attackProgress,
+    clipKey = this.activeClipKey,
+    freezeJumpSlashTransform = false,
+  ) {
     if (!this.beamBladeGroup) {
       return;
     }
@@ -2758,8 +3096,19 @@ export class SkeletalModelRig {
     }
     const active = this.beamBladeActive && visible;
     this.beamBladeGroup.visible = active;
+    this.root.userData.jumpSlashBeamBladeHoldTransformActive = Boolean(
+      active && freezeJumpSlashTransform,
+    );
 
     if (!active) {
+      this.jumpSlashHeldBeamBladeTransform = null;
+      return;
+    }
+
+    if (freezeJumpSlashTransform && this.jumpSlashHeldBeamBladeTransform) {
+      this.beamBladeGroup.position.copy(this.jumpSlashHeldBeamBladeTransform.position);
+      this.beamBladeGroup.quaternion.copy(this.jumpSlashHeldBeamBladeTransform.quaternion);
+      this.beamBladeGroup.scale.copy(this.jumpSlashHeldBeamBladeTransform.scale);
       return;
     }
 
@@ -2781,6 +3130,15 @@ export class SkeletalModelRig {
     const strike = Math.sin(sweep * Math.PI);
     this.beamBladeGroup.scale.set(1 + charge * 0.08 + strike * 0.18, 1 + charge * 0.08 + strike * 0.18, 0.78 + charge * 0.12 + strike * 0.28);
     this.beamBladeGroup.rotation.z = Math.sin(this.time * 22) * 0.018 * charge + Math.sin(this.time * 30) * 0.025 * strike;
+    if (freezeJumpSlashTransform) {
+      this.jumpSlashHeldBeamBladeTransform = {
+        position: this.beamBladeGroup.position.clone(),
+        quaternion: this.beamBladeGroup.quaternion.clone(),
+        scale: this.beamBladeGroup.scale.clone(),
+      };
+    } else {
+      this.jumpSlashHeldBeamBladeTransform = null;
+    }
   }
 
   _updateBusterArmLocalPose(dt, state, attackKind, attackProgress) {

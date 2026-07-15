@@ -1,5 +1,321 @@
 import { expect, test } from '@playwright/test';
 
+test('free aim uses directional strafing and Sprint keeps stable Buster and sword wrists', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=free-aim-strafe-sprint-pose');
+  await page.waitForFunction(() => Boolean(
+    window.game?.player?._fbxAnimationLibraryLoaded
+    && window.game?.player?._busterArmLoaded
+    && window.game?.player?.externalRig?.animationActions?.has('sprint'),
+  ));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const player = game.player;
+    const rig = player.externalRig;
+    game.stop();
+    player.activeArmIndex = 1;
+    player.updateWeaponVisualState();
+
+    const movementOptions = {
+      arenaRadius: 100,
+      movementForward: new player.root.position.constructor(0, 0, 1),
+      movementRight: new player.root.position.constructor(1, 0, 0),
+      lockOnTarget: null,
+      lockOnTargetPosition: null,
+      aimWorld: new player.root.position.constructor(0, 1.2, 12),
+      projectileAimInputHeld: true,
+      groundY: 0,
+      game,
+    };
+    const runPlayerTankInput = (codes) => {
+      player.root.position.set(0, 0, 0);
+      player.root.rotation.set(0, 0, 0);
+      player.velocity.set(0, 0, 0);
+      player.lastMoveDirection.set(0, 0, 1);
+      player.bracedFireTimer = 0;
+      player.bracedBackpedalTimer = 0;
+      player.bracedFireLocksFacing = false;
+      player.attackFacingTimer = 0;
+      player._attackWeaponKind = null;
+      player.animation.actionState = null;
+      player.animation.actionTimer = 0;
+      player.animation.attackTimer = 0;
+      player.walkModeEnabled = false;
+      player.update(1 / 60, new Set(codes), {
+        ...movementOptions,
+        aimWorld: null,
+        projectileAimInputHeld: false,
+      });
+      return {
+        clip: rig.activeClipKey,
+        speed: player.velocity.length(),
+        running: player.isRunning,
+        tankTurnActive: player.tankTurnActive,
+        tankTurnTranslating: player.tankTurnTranslating,
+      };
+    };
+    const tankSprint = {
+      jogForward: runPlayerTankInput(['KeyW']),
+      straight: runPlayerTankInput(['KeyW', 'ShiftLeft']),
+      arcLeft: runPlayerTankInput(['KeyW', 'KeyA', 'ShiftLeft']),
+      arcRight: runPlayerTankInput(['KeyW', 'KeyD', 'ShiftLeft']),
+      turnLeft: runPlayerTankInput(['KeyA', 'ShiftLeft']),
+      turnRight: runPlayerTankInput(['KeyD', 'ShiftLeft']),
+      backward: runPlayerTankInput(['KeyS', 'ShiftLeft']),
+      backwardArc: runPlayerTankInput(['KeyS', 'KeyA', 'ShiftLeft']),
+    };
+    const runPlayerAimInput = (codes) => {
+      player.root.position.set(0, 0, 0);
+      player.velocity.set(0, 0, 0);
+      player.lastMoveDirection.set(0, 0, 1);
+      player.bracedFireDirection.set(0, 0, 1);
+      player.bracedFireTargetWorld.set(0, 1.2, 12);
+      player.bracedFireTargetValid = true;
+      player.bracedFireTimer = 1;
+      player.bracedFireLocksFacing = true;
+      player._attackWeaponKind = 'projectile';
+      player.animation.actionState = null;
+      player.animation.actionTimer = 0;
+      player.animation.attackTimer = 0.5;
+      player.update(1 / 60, new Set(codes), movementOptions);
+      return {
+        clip: rig.activeClipKey,
+        translated: player.velocity.lengthSq() > 0.0001,
+        lockOnActive: Boolean(movementOptions.lockOnTarget),
+      };
+    };
+    const playerIntegrated = {
+      pureLeft: runPlayerAimInput(['KeyA']),
+      forwardLeft: runPlayerAimInput(['KeyW', 'KeyA']),
+      backwardRight: runPlayerAimInput(['KeyS', 'KeyD']),
+    };
+
+    const base = {
+      moving: true,
+      moveAmount: 1.55,
+      state: 'attacking',
+      projectileAiming: true,
+      running: true,
+      attackKind: 'projectile',
+      lockOnActive: false,
+      busterArmSide: 'right',
+    };
+    const select = (options) => {
+      rig.update(1 / 60, { ...base, ...options });
+      return rig.activeClipKey;
+    };
+
+    const pureLeft = select({ strafeAmount: -1, forwardAmount: 0, backpedaling: false });
+    const pureRight = select({ strafeAmount: 1, forwardAmount: 0, backpedaling: false });
+    const diagonalLeft = select({ strafeAmount: -1, forwardAmount: 1, backpedaling: false });
+    const diagonalRight = select({ strafeAmount: 1, forwardAmount: 1, backpedaling: false });
+    const backwardDiagonal = select({ strafeAmount: -1, forwardAmount: -1, backpedaling: true });
+
+    rig.update(1 / 60, {
+      ...base,
+      strafeAmount: 0,
+      forwardAmount: 1,
+      clipKey: 'sprint',
+    });
+    const hipsY = rig.joints.get('hips')?.getWorldPosition(new player.root.position.constructor()).y;
+    const wristY = rig.joints.get('rightWrist')?.getWorldPosition(new player.root.position.constructor()).y;
+    const muzzlePosition = rig.busterMuzzle?.getWorldPosition(new player.root.position.constructor());
+    const muzzleQuaternion = rig.busterMuzzle?.getWorldQuaternion(new player.root.quaternion.constructor());
+    const muzzleForward = muzzleQuaternion
+      ? new player.root.position.constructor(0, 0, 1).applyQuaternion(muzzleQuaternion).normalize()
+      : null;
+    const bodyForward = new player.root.position.constructor(
+      Math.sin(player.root.rotation.y),
+      0,
+      Math.cos(player.root.rotation.y),
+    ).normalize();
+    const rightWrist = rig.joints.get('rightWrist');
+    const expectedWrist = rig.restLocalQuaternions.get(rightWrist).clone();
+    const aimedSprint = {
+      clip: rig.activeClipKey,
+      poseActive: rig.root.userData.sprintPistolRunAimPoseActive,
+      correctionActive: rig.root.userData.pistolBusterPoseCorrectionActive,
+      poseJointCount: rig.root.userData.sprintPistolRunAimPoseJointCount,
+      wristAnchorReady: rig.root.userData.sprintPistolRunWristAnchorReady,
+      wristAnchorError: rig.root.userData.sprintPistolRunWristAnchorError,
+      firingWristAboveHips: Number.isFinite(hipsY) && Number.isFinite(wristY) && wristY > hipsY,
+      muzzleAboveHip: Number.isFinite(hipsY)
+        && Number.isFinite(muzzlePosition?.y)
+        && muzzlePosition.y > hipsY,
+      muzzleFacesForward: Boolean(muzzleForward) && muzzleForward.dot(bodyForward) > 0.5,
+      wristOverrideActive: rig.root.userData.sprintBusterRightWristOverrideActive,
+      wristOverrideError: rightWrist.quaternion.angleTo(expectedWrist),
+    };
+
+    const unaimedSprintInput = {
+      ...base,
+      projectileAiming: false,
+      attackKind: 'melee',
+      strafeAmount: 0,
+      forwardAmount: 1,
+      clipKey: 'sprint',
+    };
+    let maximumUnaimedWristError = 0;
+    let maximumUnaimedLocalAxis = 0;
+    for (let frame = 0; frame < 120; frame += 1) {
+      rig.update(1 / 60, unaimedSprintInput);
+      maximumUnaimedWristError = Math.max(
+        maximumUnaimedWristError,
+        rightWrist.quaternion.angleTo(expectedWrist),
+      );
+      const localRotation = rig.getCurrentDebugPoseDegrees(['rightWrist']).rightWrist;
+      maximumUnaimedLocalAxis = Math.max(
+        maximumUnaimedLocalAxis,
+        Math.abs(localRotation.pitch),
+        Math.abs(localRotation.yaw),
+        Math.abs(localRotation.roll),
+      );
+    }
+    const unaimedSprint = {
+      poseActive: rig.root.userData.sprintPistolRunAimPoseActive,
+      wristOverrideActive: rig.root.userData.sprintRightWristOverrideActive,
+      busterWristOverrideActive: rig.root.userData.sprintBusterRightWristOverrideActive,
+      maximumWristError: maximumUnaimedWristError,
+      maximumLocalAxis: maximumUnaimedLocalAxis,
+    };
+
+    rig.update(1 / 60, {
+      ...base,
+      strafeAmount: 0,
+      forwardAmount: 1,
+      busterArmSide: 'left',
+      clipKey: 'sprint',
+    });
+    const megaBusterSprint = {
+      leftAimActive: rig.root.userData.leftMegaBusterAimActive,
+      pistolRunPoseActive: rig.root.userData.sprintPistolRunAimPoseActive,
+      wristOverrideActive: rig.root.userData.sprintRightWristOverrideActive,
+      wristOverrideError: rightWrist.quaternion.angleTo(expectedWrist),
+    };
+
+    rig.setBeamBladeActive(true, 0xa8ff8a);
+    rig.update(1 / 60, {
+      ...base,
+      state: 'running',
+      projectileAiming: false,
+      attackKind: 'beamBlade',
+      strafeAmount: 0,
+      forwardAmount: 1,
+      busterArmSide: 'right',
+      clipKey: 'sprint',
+    });
+    const swordSprint = {
+      clip: rig.activeClipKey,
+      pistolRunPoseActive: rig.root.userData.sprintPistolRunAimPoseActive,
+      wristOverrideActive: rig.root.userData.sprintRightWristOverrideActive,
+      swordWristOverrideActive: rig.root.userData.sprintSwordRightWristOverrideActive,
+      wristOverrideError: rightWrist.quaternion.angleTo(expectedWrist),
+    };
+    rig.setBeamBladeActive(false);
+
+    return {
+      pureLeft,
+      pureRight,
+      diagonalLeft,
+      diagonalRight,
+      backwardDiagonal,
+      tankSprint,
+      playerIntegrated,
+      aimedSprint,
+      unaimedSprint,
+      megaBusterSprint,
+      swordSprint,
+    };
+  });
+
+  expect(result).toMatchObject({
+    pureLeft: 'pistolStrafe',
+    pureRight: 'pistolStrafe2',
+    diagonalLeft: 'pistolRunArc',
+    diagonalRight: 'pistolRunArc2',
+    backwardDiagonal: 'pistolRunBackwardArc',
+    tankSprint: {
+      jogForward: { clip: 'running', running: false },
+      straight: { clip: 'sprint', running: true },
+      arcLeft: {
+        clip: 'sprint',
+        running: true,
+        tankTurnActive: true,
+        tankTurnTranslating: true,
+      },
+      arcRight: {
+        clip: 'sprint',
+        running: true,
+        tankTurnActive: true,
+        tankTurnTranslating: true,
+      },
+      turnLeft: {
+        clip: 'leftTurn',
+        running: false,
+        tankTurnActive: true,
+        tankTurnTranslating: false,
+      },
+      turnRight: {
+        clip: 'rightTurn',
+        running: false,
+        tankTurnActive: true,
+        tankTurnTranslating: false,
+      },
+      backward: { clip: 'slowJogBackwards', running: false },
+      backwardArc: {
+        clip: 'slowJogBackwards',
+        running: false,
+        tankTurnActive: true,
+        tankTurnTranslating: true,
+      },
+    },
+    playerIntegrated: {
+      pureLeft: { clip: 'pistolStrafe', translated: true, lockOnActive: false },
+      forwardLeft: { clip: 'pistolRunArc', translated: true, lockOnActive: false },
+      backwardRight: { clip: 'pistolRunBackwardArc2', translated: true, lockOnActive: false },
+    },
+    aimedSprint: {
+      clip: 'sprint',
+      poseActive: true,
+      correctionActive: true,
+      poseJointCount: 4,
+      wristAnchorReady: true,
+      firingWristAboveHips: true,
+      muzzleAboveHip: true,
+      muzzleFacesForward: true,
+      wristOverrideActive: true,
+    },
+    unaimedSprint: {
+      poseActive: false,
+      wristOverrideActive: true,
+      busterWristOverrideActive: false,
+    },
+    megaBusterSprint: {
+      leftAimActive: true,
+      pistolRunPoseActive: false,
+      wristOverrideActive: true,
+    },
+    swordSprint: {
+      clip: 'sprint',
+      pistolRunPoseActive: false,
+      wristOverrideActive: true,
+      swordWristOverrideActive: true,
+    },
+  });
+  expect(result.aimedSprint.wristAnchorError).toBeLessThan(0.06);
+  expect(result.aimedSprint.wristOverrideError).toBeLessThan(0.00001);
+  expect(result.unaimedSprint.maximumWristError).toBeLessThan(0.00001);
+  expect(result.unaimedSprint.maximumLocalAxis).toBe(0);
+  expect(result.megaBusterSprint.wristOverrideError).toBeLessThan(0.00001);
+  expect(result.swordSprint.wristOverrideError).toBeLessThan(0.00001);
+  expect(result.tankSprint.arcLeft.speed).toBeCloseTo(result.tankSprint.straight.speed, 5);
+  expect(result.tankSprint.arcRight.speed).toBeCloseTo(result.tankSprint.straight.speed, 5);
+  expect(result.tankSprint.backward.speed).toBeCloseTo(result.tankSprint.jogForward.speed, 5);
+  expect(result.tankSprint.backwardArc.speed).toBeCloseTo(result.tankSprint.jogForward.speed, 5);
+  expect(result.tankSprint.turnLeft.speed).toBeCloseTo(0, 5);
+  expect(result.tankSprint.turnRight.speed).toBeCloseTo(0, 5);
+});
+
 test('aim and lock-on reticles are flat, screen-space HUD indicators', async ({ page }) => {
   await page.goto('/?reaverbotSeed=screen-targeting-ui-proof');
   await page.waitForFunction(() => Boolean(window.game?.combat && window.game?.player));

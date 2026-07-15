@@ -5,25 +5,47 @@ const OPENING_SLASH = 'swordForwardSlash';
 const JUMP_SLASH_DURATION = 0.86;
 const JUMP_SLASH_STRIKE_PROGRESS = 0.5;
 const JUMP_SLASH_TRAIL_START = 24 / 56;
+const JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS = 28.5143 / 56;
 const JUMP_SLASH_SEAM_PROGRESS = 32 / 56;
+const JUMP_SLASH_UPPER_BODY_END_PROGRESS = 37 / 56;
 const JUMP_SLASH_TRAIL_END = 37 / 56;
-const JUMP_SLASH_RECOVERY_DURATION = JUMP_SLASH_DURATION * (1 - JUMP_SLASH_SEAM_PROGRESS);
+const JUMP_SLASH_TRAIL_COLOR = 0xa8ff8a;
+const JUMP_SLASH_RECOVERY_DURATION = JUMP_SLASH_DURATION * (1 - JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS);
+const JUMP_SLASH_LOWER_BODY_JOINTS = Object.freeze([
+  'hips',
+  'leftHip',
+  'leftKnee',
+  'leftAnkle',
+  'rightHip',
+  'rightKnee',
+  'rightAnkle',
+]);
+const JUMP_SLASH_UPPER_BODY_JOINTS = Object.freeze([
+  'spine',
+  'neck',
+  'leftShoulder',
+  'leftElbow',
+  'leftWrist',
+  'rightShoulder',
+  'rightElbow',
+  'rightWrist',
+]);
 const JUMP_SLASH_AERIAL_POSE = Object.freeze({
-  hips: Object.freeze({ pitch: 16.2, yaw: 10, roll: -5.6 }),
-  spine: Object.freeze({ pitch: -0.95, yaw: 1, roll: 0.9 }),
-  neck: Object.freeze({ pitch: 2.4, yaw: 2.2, roll: -6.6 }),
-  leftShoulder: Object.freeze({ pitch: 16.7, yaw: 2.6, roll: 34.5 }),
-  leftElbow: Object.freeze({ pitch: -18.3, yaw: 23.3, roll: 9.3 }),
-  leftWrist: Object.freeze({ pitch: 0.6, yaw: -22.3, roll: 6.8 }),
-  rightShoulder: Object.freeze({ pitch: 29.6, yaw: 23.2, roll: 5.7 }),
-  rightElbow: Object.freeze({ pitch: 5.6, yaw: 42.9, roll: 2.7 }),
-  rightWrist: Object.freeze({ pitch: -19.4, yaw: -2.2, roll: 49.7 }),
-  leftHip: Object.freeze({ pitch: 88, yaw: -10.5, roll: -7.5 }),
-  leftKnee: Object.freeze({ pitch: -96.5, yaw: 1.5, roll: 4.5 }),
-  leftAnkle: Object.freeze({ pitch: -12.6, yaw: 7.2, roll: 5.6 }),
-  rightHip: Object.freeze({ pitch: 88.4, yaw: -31.6, roll: -16.3 }),
-  rightKnee: Object.freeze({ pitch: -129.2, yaw: 10.8, roll: 4.6 }),
-  rightAnkle: Object.freeze({ pitch: -19.6, yaw: -2.3, roll: 0.9 }),
+  hips: Object.freeze({ pitch: 10.5, yaw: -26.8, roll: 0.7 }),
+  spine: Object.freeze({ pitch: 2, yaw: -0.4, roll: 0.2 }),
+  neck: Object.freeze({ pitch: 0.2, yaw: 15, roll: -10.6 }),
+  leftShoulder: Object.freeze({ pitch: 52, yaw: 7.3, roll: 64.6 }),
+  leftElbow: Object.freeze({ pitch: 19.8, yaw: -34.7, roll: 38.5 }),
+  leftWrist: Object.freeze({ pitch: -8.9, yaw: 5.6, roll: -47.7 }),
+  rightShoulder: Object.freeze({ pitch: 42.3, yaw: 26.1, roll: -28.5 }),
+  rightElbow: Object.freeze({ pitch: 29.3, yaw: 45.1, roll: -25.5 }),
+  rightWrist: Object.freeze({ pitch: -12.5, yaw: -6.9, roll: 38.5 }),
+  leftHip: Object.freeze({ pitch: 54.5, yaw: -10, roll: 16.4 }),
+  leftKnee: Object.freeze({ pitch: -10.6, yaw: -8.2, roll: 2.6 }),
+  leftAnkle: Object.freeze({ pitch: -16.9, yaw: 1.8, roll: 0.4 }),
+  rightHip: Object.freeze({ pitch: 63.9, yaw: 5.8, roll: -3.9 }),
+  rightKnee: Object.freeze({ pitch: -65.3, yaw: -0.1, roll: -1.2 }),
+  rightAnkle: Object.freeze({ pitch: -2.9, yaw: 0.3, roll: 2.3 }),
 });
 const JUMP_SLASH_FALLBACK = Object.freeze({
   motionLocal: Object.freeze([-0.512142, -0.852924, -0.101154]),
@@ -42,7 +64,7 @@ async function openLoadedGame(page) {
 }
 
 async function installJumpSlashHarness(page) {
-  await page.evaluate(({ jumpSlash, targetPose }) => {
+  await page.evaluate(({ jumpSlash, matchProgress, seamProgress, targetPose }) => {
     window.__createJumpSlashHarness = (configuration = {}) => {
       const { game } = window;
       game.stop();
@@ -179,11 +201,12 @@ async function installJumpSlashHarness(page) {
         return { intendedAirTime, startingHeight, fallGravity };
       };
 
-      const poseError = () => {
+      const poseError = (jointNames = Object.keys(targetPose)) => {
         let maximum = 0;
         let missing = 0;
         const semanticBones = [];
-        for (const [jointName, pose] of Object.entries(targetPose)) {
+        for (const jointName of jointNames) {
+          const pose = targetPose[jointName];
           const joint = rig.joints.get(jointName);
           const rest = joint ? rig.restLocalQuaternions.get(joint) : null;
           if (!joint || !rest) {
@@ -208,6 +231,55 @@ async function installJumpSlashHarness(page) {
           missing,
           uniqueSemanticBones: new Set(semanticBones).size,
         };
+      };
+
+      const runtimeSourcePoseError = (
+        progress = seamProgress,
+        jointNames = Object.keys(targetPose),
+      ) => {
+        let maximum = 0;
+        let missing = 0;
+        const sampleTime = (clip?.duration ?? 0) * progress;
+        for (const jointName of jointNames) {
+          const joint = rig.joints.get(jointName);
+          const track = rig._findJointQuaternionTrack?.(clip, jointName);
+          if (!joint || !track?.values || track.values.length < 4) {
+            missing += 1;
+            continue;
+          }
+          const sampled = track.createInterpolant(new Float32Array(4)).evaluate(sampleTime);
+          const expected = new Quaternion().fromArray(sampled).normalize();
+          maximum = Math.max(
+            maximum,
+            joint.quaternion.angleTo(expected) * 180 / Math.PI,
+          );
+        }
+        return { maximum, missing };
+      };
+
+      const sourceTargetPoseError = (progress = matchProgress) => {
+        let maximum = 0;
+        let missing = 0;
+        const sampleTime = (clip?.duration ?? 0) * progress;
+        for (const [jointName, pose] of Object.entries(targetPose)) {
+          const joint = rig.joints.get(jointName);
+          const rest = joint ? rig.restLocalQuaternions.get(joint) : null;
+          const track = rig._findJointQuaternionTrack?.(clip, jointName);
+          if (!joint || !rest || !track?.values || track.values.length < 4) {
+            missing += 1;
+            continue;
+          }
+          const sampled = track.createInterpolant(new Float32Array(4)).evaluate(sampleTime);
+          const source = new Quaternion().fromArray(sampled).normalize();
+          const target = rest.clone().multiply(new Quaternion().setFromEuler(new Euler(
+            pose.pitch * Math.PI / 180,
+            pose.yaw * Math.PI / 180,
+            pose.roll * Math.PI / 180,
+            joint.rotation.order,
+          ))).normalize();
+          maximum = Math.max(maximum, source.angleTo(target) * 180 / Math.PI);
+        }
+        return { maximum, missing };
       };
 
       const actionProgress = () => (
@@ -245,6 +317,7 @@ async function installJumpSlashHarness(page) {
         const originalMelee = combat._meleeAttackDirection.bind(combat);
 
         game.beginBeamBladeSweepTrail = (...args) => {
+          const color = args[0];
           const options = args[1] ?? {};
           const handle = originalBegin(...args);
           if (options.slashClipKey === jumpSlash) {
@@ -256,10 +329,21 @@ async function installJumpSlashHarness(page) {
               airborne: player.isJumpAirborne(),
               startProgress: options.startProgress ?? null,
               endProgress: options.endProgress ?? null,
+              trailMode: handle?.glow?.userData?.trailMode ?? null,
+              color: handle?.glow?.material?.color?.getHex?.() ?? color ?? null,
+              coreColor: handle?.core?.material?.color?.getHex?.() ?? null,
+              glowAdditive: handle?.glow?.material?.blending === 2
+                && handle?.core?.material?.blending === 2,
+              rolling: Boolean(handle?.rolling),
+              maxSamples: handle?.maxSamples ?? null,
+              minimumSampleDistance: handle?.minimumSampleDistance ?? null,
+              maximumTrailLength: handle?.maximumTrailLength ?? null,
               optionsFollowRoot: options.followObject === player.root,
               handleFollowRoot: handle?.followObject === player.root,
               glowParentRoot: handle?.glow?.parent === player.root,
               coreParentRoot: handle?.core?.parent === player.root,
+              glowParentScene: handle?.glow?.parent === game.scene,
+              coreParentScene: handle?.core?.parent === game.scene,
               trailSpace: handle?.glow?.userData?.trailSpace ?? null,
             });
           }
@@ -290,12 +374,12 @@ async function installJumpSlashHarness(page) {
 
         game.appendBeamBladeSweepTrail = (...args) => {
           const [handle, baseWorld, tipWorld, progress] = args;
-          const beforeCount = handle?.samples?.length ?? 0;
           const result = originalAppend(...args);
           const afterCount = handle?.samples?.length ?? 0;
           if (handle?.clipKey === jumpSlash) {
-            const accepted = afterCount > beforeCount;
+            const accepted = Boolean(result);
             const sample = accepted ? handle.samples[afterCount - 1] : null;
+            const residentFirstSample = accepted ? handle.samples[0] : null;
             let localSampleError = null;
             let worldMetadataError = null;
             let geometryError = null;
@@ -326,14 +410,30 @@ async function installJumpSlashHarness(page) {
               progress: Number.isFinite(progress) ? progress : null,
               phase: player._jumpSlashVisualState?.phase ?? null,
               airborne: player.isJumpAirborne(),
+              attackTimer: player.animation.attackTimer,
               rootY: player.root.position.y,
+              baseWorldY: sample?.baseWorld?.y ?? null,
+              tipWorldY: sample?.tipWorld?.y ?? null,
+              residentBaseWorldYSpan: accepted
+                ? Math.abs((residentFirstSample?.baseWorld?.y ?? 0) - (sample?.baseWorld?.y ?? 0))
+                : null,
+              residentTipWorldYSpan: accepted
+                ? Math.abs((residentFirstSample?.tipWorld?.y ?? 0) - (sample?.tipWorld?.y ?? 0))
+                : null,
               localSampleError,
               worldMetadataError,
               geometryError,
               followRoot: handle.followObject === player.root,
               glowParentRoot: handle.glow?.parent === player.root,
               coreParentRoot: handle.core?.parent === player.root,
+              glowParentScene: handle.glow?.parent === game.scene,
+              coreParentScene: handle.core?.parent === game.scene,
               trailSpace: handle.glow?.userData?.trailSpace ?? null,
+              trailMode: handle.glow?.userData?.trailMode ?? null,
+              glowVisible: Boolean(handle.glow?.visible),
+              coreVisible: Boolean(handle.core?.visible),
+              glowDrawCount: handle.glow?.geometry?.drawRange?.count ?? 0,
+              coreDrawCount: handle.core?.geometry?.drawRange?.count ?? 0,
             });
           }
           return result;
@@ -348,6 +448,7 @@ async function installJumpSlashHarness(page) {
               progress: player.getSwordJumpSlashVisualProgress?.() ?? null,
               airborne: player.isJumpAirborne(),
               sampleCount: handle.samples?.length ?? 0,
+              trailMode: handle.glow?.userData?.trailMode ?? null,
             });
           }
           return originalFinish(handle, ...args);
@@ -361,6 +462,7 @@ async function installJumpSlashHarness(page) {
               phase: player._jumpSlashVisualState?.phase ?? null,
               progress: player.getSwordJumpSlashVisualProgress?.() ?? null,
               sampleCount: handle.samples?.length ?? 0,
+              trailMode: handle.glow?.userData?.trailMode ?? null,
             });
           }
           return originalCancel(handle, ...args);
@@ -448,6 +550,8 @@ async function installJumpSlashHarness(page) {
         beginNormalJump,
         beginFalling,
         poseError,
+        runtimeSourcePoseError,
+        sourceTargetPoseError,
         actionProgress,
         countJumpSlashMeshes,
         installProbe,
@@ -456,6 +560,8 @@ async function installJumpSlashHarness(page) {
     };
   }, {
     jumpSlash: JUMP_SLASH,
+    matchProgress: JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    seamProgress: JUMP_SLASH_SEAM_PROGRESS,
     targetPose: JUMP_SLASH_AERIAL_POSE,
   });
 }
@@ -463,7 +569,7 @@ async function installJumpSlashHarness(page) {
 test('jump slash keeps the full clip, strips horizontal root travel, and caches its source anchor', async ({ page }) => {
   await openLoadedGame(page);
 
-  const result = await page.evaluate(({ jumpSlash, seamProgress }) => {
+  const result = await page.evaluate(({ jumpSlash }) => {
     const rig = window.game.player.externalRig;
     const metadata = rig.animationMetadata.get(jumpSlash);
     const clip = rig.animationClips.get(jumpSlash);
@@ -483,7 +589,6 @@ test('jump slash keeps the full clip, strips horizontal root travel, and caches 
         range: values.length ? Math.max(...values) - Math.min(...values) : null,
       };
     });
-    const seamSample = hipsTrack?.createInterpolant?.().evaluate(clip.duration * seamProgress);
     return {
       metadata: metadata ? {
         loop: metadata.loop,
@@ -501,12 +606,10 @@ test('jump slash keeps the full clip, strips horizontal root travel, and caches 
         ? Array.from(hipsTrack.values.slice(0, 3))
         : null,
       cachedAnchor: rig.jumpSlashAerialHipsPosition?.toArray?.() ?? null,
-      cachedSeam: rig.jumpSlashAerialSeamHipsPosition?.toArray?.() ?? null,
-      seamSample: seamSample ? Array.from(seamSample) : null,
       restHips: rig.joints.get('hips')?.userData?.restLocalPosition?.toArray?.() ?? null,
       clampWhenFinished: action?.clampWhenFinished ?? null,
     };
-  }, { jumpSlash: JUMP_SLASH, seamProgress: JUMP_SLASH_SEAM_PROGRESS });
+  }, { jumpSlash: JUMP_SLASH });
 
   expect(result.metadata).toEqual({
     loop: false,
@@ -526,8 +629,73 @@ test('jump slash keeps the full clip, strips horizontal root travel, and caches 
   expect(result.axisStats[1].maximum).toBeCloseTo(result.axisStats[1].first, 6);
   expect(result.axisStats[1].range).toBeGreaterThan(0.5);
   expect(result.cachedAnchor).toEqual(result.sourceStart);
-  expect(result.cachedSeam).toEqual(result.seamSample);
   expect(result.cachedAnchor[1]).not.toBeCloseTo(result.restHips[1], 3);
+});
+
+test('a rolling blade trail retains its capped glow across one coarse fall sample', async ({ page }) => {
+  await openLoadedGame(page);
+
+  const result = await page.evaluate(() => {
+    const { game } = window;
+    game.stop();
+    const Vector3 = game.player.root.position.constructor;
+    const trail = game.beginBeamBladeSweepTrail(0xa8ff8a, {
+      trailPhase: 'airborneFall',
+      rolling: true,
+      maxSamples: 100,
+      minimumSampleDistance: 0.035,
+      maximumTrailLength: 3.4,
+    });
+    const acceptedFirst = game.appendBeamBladeSweepTrail(
+      trail,
+      new Vector3(0, 10, 0),
+      new Vector3(0, 10, 1.57),
+      28.5143 / 56,
+    );
+    const acceptedSecond = game.appendBeamBladeSweepTrail(
+      trail,
+      new Vector3(0, 0, 0),
+      new Vector3(0, 0, 1.57),
+      28.5143 / 56,
+    );
+    const first = trail.samples[0];
+    const last = trail.samples[trail.samples.length - 1];
+    const snapshot = {
+      acceptedFirst,
+      acceptedSecond,
+      sampleCount: trail.samples.length,
+      baseSpan: first.base.distanceTo(last.base),
+      tipSpan: first.tip.distanceTo(last.tip),
+      glowVisible: trail.glow.visible,
+      coreVisible: trail.core.visible,
+      glowDrawCount: trail.glow.geometry.drawRange.count,
+      coreDrawCount: trail.core.geometry.drawRange.count,
+      firstBaseY: first.base.y,
+      lastBaseY: last.base.y,
+    };
+    game.cancelBeamBladeSweepTrail(trail);
+    snapshot.cancelled = trail.finished;
+    snapshot.glowDetached = trail.glow.parent === null;
+    snapshot.coreDetached = trail.core.parent === null;
+    return snapshot;
+  });
+
+  expect(result).toEqual(expect.objectContaining({
+    acceptedFirst: true,
+    acceptedSecond: true,
+    sampleCount: 2,
+    glowVisible: true,
+    coreVisible: true,
+    glowDrawCount: 6,
+    coreDrawCount: 6,
+    lastBaseY: 0,
+    cancelled: true,
+    glowDetached: true,
+    coreDetached: true,
+  }));
+  expect(result.baseSpan).toBeCloseTo(3.4, 6);
+  expect(result.tipSpan).toBeCloseTo(3.4, 6);
+  expect(result.firstBaseY).toBeCloseTo(3.4, 6);
 });
 
 test('rising and falling attacks allow one standalone jump slash per airtime', async ({ page }) => {
@@ -644,14 +812,18 @@ test('rising and falling attacks allow one standalone jump slash per airtime', a
   expect(result.comboAfterFalling.awaitingFollowUp).toBe(false);
 });
 
-test('jump slash stages wind-up, held pose, and two root-local ribbon epochs through landing', async ({ page }) => {
+test('jump slash holds its falling lower body while the airborne upper slash completes', async ({ page }) => {
   await openLoadedGame(page);
   await installJumpSlashHarness(page);
 
   const result = await page.evaluate(({
+    matchProgress,
     seamProgress,
     trailStart,
     trailEnd,
+    upperEndProgress,
+    lowerBodyJoints,
+    upperBodyJoints,
   }) => {
     const h = window.__createJumpSlashHarness({
       dt: 1 / 240,
@@ -685,13 +857,43 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
     let windupMaximumHipsError = 0;
     let windupMaximumPoseError = 0;
     let windupAllRootAnchored = true;
-    let windupAllPoseMarkersOff = true;
+    let preHoldWindupFrames = 0;
+    let preHoldAllPoseMarkersOff = true;
     let holdFrames = 0;
+    let firstHoldProgress = null;
+    let minimumHoldProgress = 1;
+    let maximumHoldProgress = 0;
     let holdMaximumPoseError = 0;
+    let holdMaximumLowerPoseError = 0;
+    let holdMaximumUpperSourceError = 0;
+    let holdMaximumUpperSourceMissing = 0;
+    let holdMinimumUpperProgress = 1;
+    let holdMaximumUpperProgress = 0;
+    let holdUpperProgressMonotonic = true;
+    let previousHoldUpperProgress = matchProgress;
+    let upperEndReachedAt = null;
+    let upperContinuationStartedAt = null;
+    let firstHoldWeight = null;
+    let minimumHoldWeight = 1;
     let holdMaximumHipsError = 0;
     let holdMaximumActionError = 0;
+    let holdMaximumBonePositionDrift = 0;
+    let holdMaximumBoneQuaternionDrift = 0;
+    let holdBoneSnapshot = null;
+    let holdUpperJointSnapshot = null;
+    const holdMaximumUpperJointMotion = Object.fromEntries(
+      upperBodyJoints.map((jointName) => [jointName, 0]),
+    );
+    let holdMaximumBladePositionDrift = 0;
+    let holdMaximumBladeQuaternionDrift = 0;
+    let holdMaximumBladeScaleDrift = 0;
+    let holdBladeTransformSnapshot = null;
+    let firstHoldBladeTipLocal = null;
+    let holdMaximumBladeTipTravel = 0;
+    let lastAirborneHoldElapsed = null;
     let holdAllMarkersOn = true;
     let holdAllEquipmentVisible = true;
+    let airborneRecoveryFrames = 0;
     let semanticPoseCheck = null;
     let touchdown = null;
     let recoveryStartedAt = null;
@@ -699,12 +901,40 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
     let recoveryFrames = 0;
     let firstRecoveryProgress = null;
     let maximumRecoveryProgress = 0;
-    let previousRecoveryProgress = seamProgress;
+    let previousRecoveryProgress = matchProgress;
     let recoveryMonotonic = true;
     let allRecoveryBladeVisible = true;
     let maximumGroundedFootError = 0;
     let minimumLeftFootClearance = Infinity;
     let minimumRightFootClearance = Infinity;
+    let lastAirborneBodySnapshot = null;
+    let touchdownMaximumLowerAngularStep = null;
+    let touchdownMaximumUpperAngularStep = null;
+    let touchdownHipsPositionStep = null;
+    let recoverySawUpperOverride = false;
+    let recoverySawMergedBody = false;
+    const lowerBranchRoots = [rig.joints.get('leftHip'), rig.joints.get('rightHip')].filter(Boolean);
+    const isLowerBranchBone = (bone) => {
+      if (bone === rig.joints.get('hips')) return true;
+      for (let current = bone; current; current = current.parent) {
+        if (lowerBranchRoots.includes(current)) return true;
+        if (current === rig.joints.get('hips')) break;
+      }
+      return false;
+    };
+    const lowerBranchBones = [...rig.animatedBones].filter(isLowerBranchBone);
+    const snapshotBody = () => ({
+      hipsPosition: rig.joints.get('hips').position.clone(),
+      lower: lowerBranchBones.map((bone) => ({
+        bone,
+        quaternion: bone.quaternion.clone().normalize(),
+      })),
+      upper: upperBodyJoints.map((jointName) => ({
+        jointName,
+        quaternion: rig.joints.get(jointName).quaternion.clone().normalize(),
+      })),
+    });
+    const sourceTargetMatch = h.sourceTargetPoseError(matchProgress);
 
     for (let frame = 0; frame < 720; frame += 1) {
       const wasAirborne = player.isJumpAirborne();
@@ -727,25 +957,129 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
         );
         windupMaximumPoseError = Math.max(windupMaximumPoseError, h.poseError().maximum);
         windupAllRootAnchored &&= rig.root.userData.jumpSlashAirborneRootAnchorActive === true;
-        windupAllPoseMarkersOff &&= rig.root.userData.jumpSlashAerialPoseActive === false;
+        preHoldWindupFrames += 1;
+        preHoldAllPoseMarkersOff &&= rig.root.userData.jumpSlashAerialPoseActive === false;
       }
 
       if (visual && player.isJumpAirborne() && visual.phase === 'airborneHold') {
         const poseCheck = h.poseError();
+        const lowerPoseCheck = h.poseError(lowerBodyJoints);
+        const upperProgress = player.getSwordJumpSlashUpperBodyProgress();
+        const upperSourceError = h.runtimeSourcePoseError(upperProgress, upperBodyJoints);
+        const poseWeight = rig.root.userData.jumpSlashAerialPoseWeight ?? 0;
         semanticPoseCheck ??= poseCheck;
         holdFrames += 1;
+        firstHoldProgress ??= progress;
+        upperContinuationStartedAt ??= h.elapsed;
+        minimumHoldProgress = Math.min(minimumHoldProgress, progress);
+        maximumHoldProgress = Math.max(maximumHoldProgress, progress);
+        holdMinimumUpperProgress = Math.min(holdMinimumUpperProgress, upperProgress);
+        holdMaximumUpperProgress = Math.max(holdMaximumUpperProgress, upperProgress);
+        holdUpperProgressMonotonic &&= upperProgress + 0.000001 >= previousHoldUpperProgress;
+        previousHoldUpperProgress = upperProgress;
+        if (upperEndReachedAt === null && upperProgress >= upperEndProgress - 0.000001) {
+          upperEndReachedAt = h.elapsed;
+        }
+        firstHoldWeight ??= poseWeight;
+        minimumHoldWeight = Math.min(minimumHoldWeight, poseWeight);
         holdMaximumPoseError = Math.max(holdMaximumPoseError, poseCheck.maximum);
+        holdMaximumLowerPoseError = Math.max(
+          holdMaximumLowerPoseError,
+          lowerPoseCheck.maximum,
+        );
+        holdMaximumUpperSourceError = Math.max(
+          holdMaximumUpperSourceError,
+          upperSourceError.maximum,
+        );
+        holdMaximumUpperSourceMissing = Math.max(
+          holdMaximumUpperSourceMissing,
+          upperSourceError.missing,
+        );
         holdMaximumHipsError = Math.max(
           holdMaximumHipsError,
           rig.joints.get('hips').position.distanceTo(h.sourceStartHips),
         );
         holdMaximumActionError = Math.max(
           holdMaximumActionError,
-          Math.abs(h.actionProgress() - seamProgress),
+          Math.abs(h.actionProgress() - upperProgress),
         );
+        if (!holdBoneSnapshot) {
+          holdBoneSnapshot = lowerBranchBones.map((bone) => ({
+            bone,
+            position: bone.position.clone(),
+            quaternion: bone.quaternion.clone().normalize(),
+          }));
+        } else {
+          for (const entry of holdBoneSnapshot) {
+            const positionDrift = entry.bone.position.distanceTo(entry.position);
+            const quaternionDrift = entry.bone.quaternion.clone().normalize().angleTo(
+              entry.quaternion,
+            );
+            holdMaximumBonePositionDrift = Math.max(
+              holdMaximumBonePositionDrift,
+              positionDrift,
+            );
+            holdMaximumBoneQuaternionDrift = Math.max(
+              holdMaximumBoneQuaternionDrift,
+              quaternionDrift,
+            );
+          }
+        }
+        if (!holdUpperJointSnapshot) {
+          holdUpperJointSnapshot = new Map(upperBodyJoints.map((jointName) => [
+            jointName,
+            rig.joints.get(jointName).quaternion.clone().normalize(),
+          ]));
+        } else {
+          for (const jointName of upperBodyJoints) {
+            holdMaximumUpperJointMotion[jointName] = Math.max(
+              holdMaximumUpperJointMotion[jointName],
+              rig.joints.get(jointName).quaternion.clone().normalize().angleTo(
+                holdUpperJointSnapshot.get(jointName),
+              ) * 180 / Math.PI,
+            );
+          }
+        }
+        if (!holdBladeTransformSnapshot) {
+          holdBladeTransformSnapshot = {
+            position: rig.beamBladeGroup.position.clone(),
+            quaternion: rig.beamBladeGroup.quaternion.clone().normalize(),
+            scale: rig.beamBladeGroup.scale.clone(),
+          };
+        } else {
+          holdMaximumBladePositionDrift = Math.max(
+            holdMaximumBladePositionDrift,
+            rig.beamBladeGroup.position.distanceTo(holdBladeTransformSnapshot.position),
+          );
+          holdMaximumBladeQuaternionDrift = Math.max(
+            holdMaximumBladeQuaternionDrift,
+            rig.beamBladeGroup.quaternion.clone().normalize().angleTo(
+              holdBladeTransformSnapshot.quaternion,
+            ),
+          );
+          holdMaximumBladeScaleDrift = Math.max(
+            holdMaximumBladeScaleDrift,
+            rig.beamBladeGroup.scale.distanceTo(holdBladeTransformSnapshot.scale),
+          );
+        }
+        rig.beamBladeGroup.updateWorldMatrix(true, false);
+        player.root.updateWorldMatrix(true, false);
+        const bladeTipLocal = new (player.root.position.constructor)(0, 0, 1.57).applyMatrix4(
+          rig.beamBladeGroup.matrixWorld,
+        );
+        player.root.worldToLocal(bladeTipLocal);
+        firstHoldBladeTipLocal ??= bladeTipLocal.clone();
+        holdMaximumBladeTipTravel = Math.max(
+          holdMaximumBladeTipTravel,
+          bladeTipLocal.distanceTo(firstHoldBladeTipLocal),
+        );
+        lastAirborneBodySnapshot = snapshotBody();
+        lastAirborneHoldElapsed = h.elapsed;
         holdAllMarkersOn &&= Boolean(
           rig.root.userData.jumpSlashAerialPoseActive
+          && rig.root.userData.jumpSlashLowerBodyPoseActive
           && rig.root.userData.jumpSlashAirborneRootAnchorActive
+          && rig.root.userData.jumpSlashBeamBladeHoldTransformActive
         );
         holdAllEquipmentVisible &&= Boolean(
           rig.beamBladeWeaponGroup?.visible
@@ -755,17 +1089,39 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
         );
       }
 
+      if (visual?.phase === 'groundedRecovery' && player.isJumpAirborne()) {
+        airborneRecoveryFrames += 1;
+      }
+
       if (wasAirborne && !player.isJumpAirborne() && !touchdown) {
         const grounding = player.getExternalModelGroundingDiagnostics?.();
+        if (lastAirborneBodySnapshot) {
+          touchdownMaximumLowerAngularStep = Math.max(
+            ...lastAirborneBodySnapshot.lower.map(({ bone, quaternion }) => (
+              bone.quaternion.clone().normalize().angleTo(quaternion) * 180 / Math.PI
+            )),
+          );
+          touchdownMaximumUpperAngularStep = Math.max(
+            ...lastAirborneBodySnapshot.upper.map(({ jointName, quaternion }) => (
+              rig.joints.get(jointName).quaternion.clone().normalize().angleTo(quaternion)
+                * 180 / Math.PI
+            )),
+          );
+          touchdownHipsPositionStep = rig.joints.get('hips').position.distanceTo(
+            lastAirborneBodySnapshot.hipsPosition,
+          );
+        }
         touchdown = {
           elapsed: h.elapsed,
           phase: visual?.phase ?? null,
           visualProgress: progress,
+          upperBodyProgress: player.getSwordJumpSlashUpperBodyProgress(),
           actionProgress: h.actionProgress(),
           poseError: h.poseError().maximum,
           hipsDistanceFromAnchor: rig.joints.get('hips').position.distanceTo(h.sourceStartHips),
           poseMarker: rig.root.userData.jumpSlashAerialPoseActive,
           rootAnchorMarker: rig.root.userData.jumpSlashAirborneRootAnchorActive,
+          upperBodyOverrideMarker: rig.root.userData.jumpSlashUpperBodyOverrideActive,
           reason: grounding?.reason ?? null,
           beforeFootClearance: grounding?.beforeFootClearance ?? null,
           footClearance: grounding?.footClearance ?? null,
@@ -783,6 +1139,13 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
         recoveryMonotonic &&= progressNow + 0.000001 >= previousRecoveryProgress;
         previousRecoveryProgress = progressNow;
         allRecoveryBladeVisible &&= Boolean(rig.beamBladeGroup?.visible);
+        recoverySawUpperOverride ||= Boolean(
+          rig.root.userData.jumpSlashUpperBodyOverrideActive,
+        );
+        recoverySawMergedBody ||= Boolean(
+          !visual.splitBodyLandingActive
+          && progressNow >= upperEndProgress - 0.000001,
+        );
         const grounding = player.getExternalModelGroundingDiagnostics?.();
         maximumGroundedFootError = Math.max(
           maximumGroundedFootError,
@@ -822,6 +1185,7 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
         allAirborne: samples.every((sample) => sample.airborne),
         allGrounded: samples.every((sample) => !sample.airborne),
         phases: [...new Set(samples.map((sample) => sample.phase))],
+        trailModes: [...new Set(samples.map((sample) => sample.trailMode))],
         maximumLocalSampleError: Math.max(...samples.map((sample) => sample.localSampleError)),
         maximumWorldMetadataError: Math.max(...samples.map((sample) => sample.worldMetadataError)),
         maximumGeometryError: Math.max(...samples.map((sample) => sample.geometryError)),
@@ -831,6 +1195,30 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
           && sample.coreParentRoot
           && sample.trailSpace === 'followObjectLocal'
         )),
+        allWorldSpace: samples.every((sample) => (
+          !sample.followRoot
+          && sample.glowParentScene
+          && sample.coreParentScene
+          && sample.trailSpace === 'world'
+        )),
+        visibleSamples: samples.filter((sample) => (
+          sample.glowVisible
+          && sample.coreVisible
+          && sample.glowDrawCount > 0
+          && sample.coreDrawCount > 0
+        )).length,
+        postGameplaySamples: samples.filter((sample) => sample.attackTimer <= 0).length,
+        firstBaseWorldY: samples[0]?.baseWorldY ?? null,
+        lastBaseWorldY: samples[samples.length - 1]?.baseWorldY ?? null,
+        firstTipWorldY: samples[0]?.tipWorldY ?? null,
+        lastTipWorldY: samples[samples.length - 1]?.tipWorldY ?? null,
+        maximumResidentBaseWorldYSpan: Math.max(
+          ...samples.map((sample) => sample.residentBaseWorldYSpan ?? 0),
+        ),
+        maximumResidentTipWorldYSpan: Math.max(
+          ...samples.map((sample) => sample.residentTipWorldYSpan ?? 0),
+        ),
+        lastElapsed: samples[samples.length - 1]?.elapsed ?? null,
       };
     });
     const crossHoldOrLandingSegments = ids.filter((id) => {
@@ -838,8 +1226,8 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
       return samples.some((sample) => sample.airborne)
         && samples.some((sample) => !sample.airborne);
     });
-    const samplesPastAirborneSeam = accepted.filter((sample) => (
-      sample.airborne && sample.progress > seamProgress + 0.000001
+    const samplesPastAirborneMatch = accepted.filter((sample) => (
+      sample.airborne && sample.progress > matchProgress + 0.000001
     ));
     const samplesBeforeLandingSeam = accepted.filter((sample) => (
       !sample.airborne && sample.progress < seamProgress - 0.000001
@@ -863,13 +1251,38 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
       windupMaximumHipsError,
       windupMaximumPoseError,
       windupAllRootAnchored,
-      windupAllPoseMarkersOff,
+      preHoldWindupFrames,
+      preHoldAllPoseMarkersOff,
+      sourceTargetMatch,
       holdFrames,
+      firstHoldProgress,
+      minimumHoldProgress,
+      maximumHoldProgress,
       holdMaximumPoseError,
+      holdMaximumLowerPoseError,
+      holdMaximumUpperSourceError,
+      holdMaximumUpperSourceMissing,
+      holdMinimumUpperProgress,
+      holdMaximumUpperProgress,
+      holdUpperProgressMonotonic,
+      upperContinuationDuration: upperEndReachedAt === null
+        ? null
+        : upperEndReachedAt - upperContinuationStartedAt,
+      firstHoldWeight,
+      minimumHoldWeight,
       holdMaximumHipsError,
       holdMaximumActionError,
+      holdMaximumBonePositionDrift,
+      holdMaximumBoneQuaternionDrift,
+      holdMaximumUpperJointMotion,
+      holdMaximumBladePositionDrift,
+      holdMaximumBladeQuaternionDrift,
+      holdMaximumBladeScaleDrift,
+      holdMaximumBladeTipTravel,
+      lastAirborneHoldElapsed,
       holdAllMarkersOn,
       holdAllEquipmentVisible,
+      airborneRecoveryFrames,
       semanticPoseCheck,
       touchdown,
       recoveryFrames,
@@ -883,6 +1296,13 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
       maximumGroundedFootError,
       minimumLeftFootClearance,
       minimumRightFootClearance,
+      touchdownMaximumLowerAngularStep,
+      touchdownMaximumUpperAngularStep,
+      touchdownHipsPositionStep,
+      recoverySawUpperOverride,
+      recoverySawMergedBody,
+      lowerBranchBoneCount: lowerBranchBones.length,
+      cachedLowerBodyBoneCount: rig.root.userData.jumpSlashLowerBodyBoneCount ?? 0,
       strikes: probe.strikes.map((strike) => ({
         ...strike,
         delay: strike.elapsed - attackStartedAt,
@@ -893,7 +1313,7 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
       staticFallbackCount: probe.staticFallbacks.length,
       trailEpochs,
       crossHoldOrLandingSegments,
-      samplesPastAirborneSeam: samplesPastAirborneSeam.length,
+      samplesPastAirborneMatch: samplesPastAirborneMatch.length,
       samplesBeforeLandingSeam: samplesBeforeLandingSeam.length,
       finalJumpState: player.jumpState,
       finalVisualActive: player.isSwordJumpSlashVisualActive(),
@@ -905,9 +1325,13 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
       expectedTrailEnd: trailEnd,
     };
   }, {
+    matchProgress: JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
     seamProgress: JUMP_SLASH_SEAM_PROGRESS,
     trailStart: JUMP_SLASH_TRAIL_START,
     trailEnd: JUMP_SLASH_TRAIL_END,
+    upperEndProgress: JUMP_SLASH_UPPER_BODY_END_PROGRESS,
+    lowerBodyJoints: JUMP_SLASH_LOWER_BODY_JOINTS,
+    upperBodyJoints: JUMP_SLASH_UPPER_BODY_JOINTS,
   });
 
   expect(result.swordIndex).toBeGreaterThanOrEqual(0);
@@ -918,30 +1342,70 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
   expect(result.initialTrailState).toEqual({
     progressSource: 'jumpSlashVisual',
     startProgress: JUMP_SLASH_TRAIL_START,
-    endProgress: JUMP_SLASH_SEAM_PROGRESS,
+    endProgress: JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
     followRoot: true,
   });
 
   expect(result.windupFrames).toBeGreaterThan(80);
   expect(result.windupMonotonic).toBe(true);
-  expect(result.windupMaximumProgress).toBeGreaterThan(JUMP_SLASH_SEAM_PROGRESS - 0.01);
-  expect(result.windupMaximumProgress).toBeLessThan(JUMP_SLASH_SEAM_PROGRESS);
+  expect(result.windupMaximumProgress).toBeGreaterThan(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS - 0.01,
+  );
+  expect(result.windupMaximumProgress).toBeLessThan(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS);
   expect(result.windupMaximumActionSyncError).toBeLessThan(0.001);
   expect(result.windupMaximumHipsError).toBeLessThan(0.000001);
   expect(result.windupMaximumPoseError).toBeGreaterThan(5);
   expect(result.windupAllRootAnchored).toBe(true);
-  expect(result.windupAllPoseMarkersOff).toBe(true);
+  expect(result.preHoldWindupFrames).toBeGreaterThan(80);
+  expect(result.preHoldAllPoseMarkersOff).toBe(true);
+  expect(result.sourceTargetMatch).toEqual(expect.objectContaining({ missing: 0 }));
+  expect(result.sourceTargetMatch.maximum).toBeLessThan(0.1);
 
   expect(result.holdFrames).toBeGreaterThan(10);
-  expect(result.holdMaximumPoseError).toBeLessThan(0.1);
+  expect(result.firstHoldProgress).toBeCloseTo(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS, 8);
+  expect(result.minimumHoldProgress).toBeCloseTo(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS, 8);
+  expect(result.maximumHoldProgress).toBeCloseTo(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS, 8);
+  expect(result.holdMaximumPoseError).toBeGreaterThan(45);
+  expect(result.holdMaximumLowerPoseError).toBeLessThan(0.1);
+  expect(result.holdMaximumUpperSourceError).toBeLessThan(0.1);
+  expect(result.holdMaximumUpperSourceMissing).toBe(0);
+  expect(result.lowerBranchBoneCount).toBeGreaterThanOrEqual(9);
+  expect(result.cachedLowerBodyBoneCount).toBe(9);
+  expect(result.lowerBranchBoneCount).toBeGreaterThanOrEqual(result.cachedLowerBodyBoneCount);
+  expect(result.holdMinimumUpperProgress).toBeCloseTo(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    8,
+  );
+  expect(result.holdMaximumUpperProgress).toBeCloseTo(JUMP_SLASH_UPPER_BODY_END_PROGRESS, 8);
+  expect(result.holdUpperProgressMonotonic).toBe(true);
+  expect(Math.abs(
+    result.upperContinuationDuration
+      - JUMP_SLASH_DURATION * (JUMP_SLASH_UPPER_BODY_END_PROGRESS - JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS)
+  )).toBeLessThanOrEqual((2 / 240) + 0.000001);
+  expect(result.firstHoldWeight).toBeCloseTo(1, 6);
+  expect(result.minimumHoldWeight).toBeCloseTo(1, 6);
   expect(result.holdMaximumHipsError).toBeLessThan(0.000001);
-  expect(result.holdMaximumActionError).toBeLessThan(0.000001);
+  expect(result.holdMaximumActionError).toBeLessThan(0.001);
+  expect(result.holdMaximumBonePositionDrift).toBeLessThan(0.000001);
+  expect(result.holdMaximumBoneQuaternionDrift).toBeLessThan(0.000001);
+  expect(result.holdMaximumUpperJointMotion.rightShoulder).toBeGreaterThan(20);
+  expect(result.holdMaximumUpperJointMotion.rightElbow).toBeGreaterThan(15);
+  expect(result.holdMaximumUpperJointMotion.rightWrist).toBeGreaterThan(10);
+  expect(result.holdMaximumBladePositionDrift).toBeLessThan(0.000001);
+  expect(result.holdMaximumBladeQuaternionDrift).toBeLessThan(0.000001);
+  expect(result.holdMaximumBladeScaleDrift).toBeLessThan(0.000001);
+  expect(result.holdMaximumBladeTipTravel).toBeGreaterThan(0.5);
   expect(result.holdAllMarkersOn).toBe(true);
   expect(result.holdAllEquipmentVisible).toBe(true);
+  expect(result.airborneRecoveryFrames).toBe(0);
+  expect(result.touchdown.elapsed - result.lastAirborneHoldElapsed).toBeLessThanOrEqual(
+    (1 / 240) + 0.000001,
+  );
   expect(result.semanticPoseCheck).toEqual(expect.objectContaining({
     missing: 0,
     uniqueSemanticBones: 15,
   }));
+  expect(result.semanticPoseCheck.maximum).toBeLessThan(0.1);
 
   expect(result.strikes).toHaveLength(1);
   expect(result.strikes[0].delay).toBeCloseTo(
@@ -958,8 +1422,14 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
   expect(result.begins.map((entry) => entry.id)).toEqual(
     expect.arrayContaining(result.trailEpochs.map((entry) => entry.id)),
   );
-  for (const begin of result.begins) {
+  const fallBegin = result.begins.find((entry) => entry.trailMode === 'airborneFall');
+  const sweepBegins = result.begins.filter((entry) => entry.trailMode === 'liveBladeSweep');
+  expect(sweepBegins).toHaveLength(1);
+  for (const begin of sweepBegins) {
     expect(begin).toEqual(expect.objectContaining({
+      color: JUMP_SLASH_TRAIL_COLOR,
+      coreColor: JUMP_SLASH_TRAIL_COLOR,
+      glowAdditive: true,
       optionsFollowRoot: true,
       handleFollowRoot: true,
       glowParentRoot: true,
@@ -967,28 +1437,56 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
       trailSpace: 'followObjectLocal',
     }));
   }
+  expect(fallBegin).toEqual(expect.objectContaining({
+    phase: 'airborneHold',
+    airborne: true,
+    color: JUMP_SLASH_TRAIL_COLOR,
+    coreColor: JUMP_SLASH_TRAIL_COLOR,
+    glowAdditive: true,
+    rolling: true,
+    maxSamples: 100,
+    minimumSampleDistance: 0.035,
+    maximumTrailLength: 3.4,
+    optionsFollowRoot: false,
+    handleFollowRoot: false,
+    glowParentScene: true,
+    coreParentScene: true,
+    trailSpace: 'world',
+  }));
   expect(result.trailEpochs).toHaveLength(2);
-  const airborneEpoch = result.trailEpochs.find((epoch) => epoch.allAirborne);
-  const landingEpoch = result.trailEpochs.find((epoch) => epoch.allGrounded);
+  const airborneEpoch = result.trailEpochs.find((epoch) => (
+    epoch.allAirborne && epoch.trailModes.includes('liveBladeSweep')
+  ));
+  const fallEpoch = result.trailEpochs.find((epoch) => epoch.trailModes.includes('airborneFall'));
   expect(airborneEpoch.count).toBeGreaterThan(10);
   expect(airborneEpoch.minimumProgress).toBeGreaterThanOrEqual(JUMP_SLASH_TRAIL_START);
   expect(airborneEpoch.minimumProgress).toBeLessThan(JUMP_SLASH_TRAIL_START + 0.01);
-  expect(airborneEpoch.maximumProgress).toBeGreaterThan(JUMP_SLASH_SEAM_PROGRESS - 0.01);
-  expect(airborneEpoch.maximumProgress).toBeLessThanOrEqual(JUMP_SLASH_SEAM_PROGRESS + 0.000001);
-  expect(landingEpoch.count).toBeGreaterThan(5);
-  expect(landingEpoch.minimumProgress).toBeGreaterThanOrEqual(JUMP_SLASH_SEAM_PROGRESS - 0.000001);
-  expect(landingEpoch.minimumProgress).toBeLessThan(JUMP_SLASH_SEAM_PROGRESS + 0.01);
-  expect(landingEpoch.maximumProgress).toBeGreaterThan(JUMP_SLASH_TRAIL_END - 0.01);
-  expect(landingEpoch.maximumProgress).toBeLessThanOrEqual(JUMP_SLASH_TRAIL_END + 0.000001);
+  expect(airborneEpoch.maximumProgress).toBeGreaterThan(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS - 0.01,
+  );
+  expect(airborneEpoch.maximumProgress).toBeLessThanOrEqual(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS + 0.000001,
+  );
+  expect(fallEpoch.count).toBeGreaterThan(2);
+  expect(fallEpoch.allAirborne).toBe(true);
+  expect(fallEpoch.phases).toEqual(['airborneHold']);
+  expect(fallEpoch.minimumProgress).toBeCloseTo(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS, 8);
+  expect(fallEpoch.maximumProgress).toBeCloseTo(JUMP_SLASH_TRAIL_END, 8);
+  expect(fallEpoch.allWorldSpace).toBe(true);
+  expect(fallEpoch.visibleSamples).toBeGreaterThan(0);
+  expect(fallEpoch.firstBaseWorldY - fallEpoch.lastBaseWorldY).toBeGreaterThan(0.05);
+  expect(fallEpoch.firstTipWorldY - fallEpoch.lastTipWorldY).toBeGreaterThan(0.05);
+  expect(fallEpoch.maximumResidentBaseWorldYSpan).toBeLessThanOrEqual(3.400001);
+  expect(fallEpoch.maximumResidentTipWorldYSpan).toBeLessThanOrEqual(3.400001);
+  expect(airborneEpoch.allFollowRoot).toBe(true);
   for (const epoch of result.trailEpochs) {
-    expect(epoch.allFollowRoot).toBe(true);
     expect(epoch.maximumLocalSampleError).toBeLessThan(0.000001);
     expect(epoch.maximumWorldMetadataError).toBeLessThan(0.000001);
     expect(epoch.maximumGeometryError).toBeLessThan(0.00001);
   }
-  expect(airborneEpoch.id).not.toBe(landingEpoch.id);
+  expect(new Set([airborneEpoch.id, fallEpoch.id]).size).toBe(2);
   expect(result.crossHoldOrLandingSegments).toEqual([]);
-  expect(result.samplesPastAirborneSeam).toBe(0);
+  expect(result.samplesPastAirborneMatch).toBeGreaterThan(10);
   expect(result.samplesBeforeLandingSeam).toBe(0);
   expect(result.finishes).toHaveLength(2);
   expect(result.cancels).toHaveLength(0);
@@ -997,27 +1495,40 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
     phase: 'groundedRecovery',
     poseMarker: false,
     rootAnchorMarker: false,
+    upperBodyOverrideMarker: true,
     reason: 'jumpSlashLanding',
   }));
-  expect(result.touchdown.visualProgress).toBeCloseTo(JUMP_SLASH_SEAM_PROGRESS, 6);
-  expect(result.touchdown.actionProgress).toBeCloseTo(JUMP_SLASH_SEAM_PROGRESS, 4);
-  expect(result.touchdown.poseError).toBeGreaterThan(1);
-  expect(result.touchdown.hipsDistanceFromAnchor).toBeGreaterThan(0.1);
-  expect(Math.abs(result.touchdown.beforeFootClearance)).toBeLessThan(0.05);
+  expect(result.touchdown.visualProgress).toBeCloseTo(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    6,
+  );
+  expect(result.touchdown.upperBodyProgress).toBeCloseTo(JUMP_SLASH_UPPER_BODY_END_PROGRESS, 6);
+  expect(result.touchdown.actionProgress).toBeCloseTo(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    4,
+  );
+  expect(result.touchdown.poseError).toBeGreaterThan(45);
+  expect(result.touchdown.hipsDistanceFromAnchor).toBeLessThan(0.000001);
+  expect(result.touchdownMaximumLowerAngularStep).toBeLessThan(0.1);
+  expect(result.touchdownMaximumUpperAngularStep).toBeLessThan(0.1);
+  expect(result.touchdownHipsPositionStep).toBeLessThan(0.000001);
   expect(Math.abs(result.touchdown.footClearance)).toBeLessThan(0.005);
-  expect(Math.abs(result.touchdown.correction)).toBeLessThan(0.05);
 
   expect(result.recoveryFrames).toBeGreaterThan(40);
   expect(result.firstRecoveryProgress).toBeGreaterThanOrEqual(
-    JUMP_SLASH_SEAM_PROGRESS - 0.000001,
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS - 0.000001,
   );
-  expect(result.firstRecoveryProgress).toBeLessThan(JUMP_SLASH_SEAM_PROGRESS + 0.02);
+  expect(result.firstRecoveryProgress).toBeLessThan(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS + 0.02,
+  );
   expect(result.maximumRecoveryProgress).toBeGreaterThan(0.98);
   expect(result.recoveryMonotonic).toBe(true);
   expect(Math.abs(result.recoveryDuration - JUMP_SLASH_RECOVERY_DURATION)).toBeLessThanOrEqual(
     (2 / 240) + 0.000001,
   );
   expect(result.allRecoveryBladeVisible).toBe(true);
+  expect(result.recoverySawUpperOverride).toBe(true);
+  expect(result.recoverySawMergedBody).toBe(true);
   expect(result.maximumGroundedFootError).toBeLessThan(0.005);
   expect(result.minimumLeftFootClearance).toBeGreaterThanOrEqual(-0.005);
   expect(result.minimumRightFootClearance).toBeGreaterThanOrEqual(-0.005);
@@ -1030,11 +1541,15 @@ test('jump slash stages wind-up, held pose, and two root-local ribbon epochs thr
   expect(result.remainingJumpSlashMeshes).toBe(0);
 });
 
-test('a long fall holds frame 32 after gameplay timing and resumes one grounded recovery', async ({ page }) => {
+test('a long fall holds completed upper follow-through and frozen legs through touchdown', async ({ page }) => {
   await openLoadedGame(page);
   await installJumpSlashHarness(page);
 
-  const result = await page.evaluate(({ seamProgress }) => {
+  const result = await page.evaluate(({
+    matchProgress,
+    lowerBodyJoints,
+    upperBodyJoints,
+  }) => {
     const h = window.__createJumpSlashHarness({ dt: 1 / 240 });
     const { player, combat, rig, state } = h;
     const fall = h.beginFalling(1.1);
@@ -1053,19 +1568,29 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
     let previousWindupProgress = -Infinity;
     let holdFrames = 0;
     let holdMaximumPoseError = 0;
+    let holdMaximumLowerPoseError = 0;
+    let holdMaximumUpperSourceError = 0;
+    let holdMaximumUpperSourceMissing = 0;
     let holdMaximumHipsError = 0;
     let holdMaximumActionError = 0;
+    let holdMinimumProgress = 1;
+    let holdMaximumProgress = 0;
+    let holdMinimumUpperProgress = 1;
+    let holdMaximumUpperProgress = 0;
     let holdAllMarkersOn = true;
     let holdAllBladeVisible = true;
+    let lastAirborneHoldElapsed = null;
+    let airborneRecoveryFrames = 0;
     let postGameplayHoldFrames = 0;
     let postGameplayMaximumPoseError = 0;
+    let postGameplayMaximumLowerPoseError = 0;
     let touchdown = null;
     let recoveryStartedAt = null;
     let recoveryFinishedAt = null;
     let recoveryFrames = 0;
     let firstRecoveryProgress = null;
     let maximumRecoveryProgress = 0;
-    let previousRecoveryProgress = seamProgress;
+    let previousRecoveryProgress = matchProgress;
     let recoveryMonotonic = true;
     let allRecoveryBladeVisible = true;
     let maximumGroundedFootError = 0;
@@ -1089,25 +1614,51 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
 
       if (visual?.phase === 'airborneHold' && player.isJumpAirborne()) {
         const poseError = h.poseError().maximum;
+        const lowerPoseError = h.poseError(lowerBodyJoints).maximum;
+        const upperProgress = player.getSwordJumpSlashUpperBodyProgress();
         holdFrames += 1;
+        holdMinimumProgress = Math.min(holdMinimumProgress, progress);
+        holdMaximumProgress = Math.max(holdMaximumProgress, progress);
         holdMaximumPoseError = Math.max(holdMaximumPoseError, poseError);
+        holdMaximumLowerPoseError = Math.max(holdMaximumLowerPoseError, lowerPoseError);
+        const upperSourceError = h.runtimeSourcePoseError(upperProgress, upperBodyJoints);
+        holdMaximumUpperSourceError = Math.max(
+          holdMaximumUpperSourceError,
+          upperSourceError.maximum,
+        );
+        holdMaximumUpperSourceMissing = Math.max(
+          holdMaximumUpperSourceMissing,
+          upperSourceError.missing,
+        );
+        holdMinimumUpperProgress = Math.min(holdMinimumUpperProgress, upperProgress);
+        holdMaximumUpperProgress = Math.max(holdMaximumUpperProgress, upperProgress);
         holdMaximumHipsError = Math.max(
           holdMaximumHipsError,
           rig.joints.get('hips').position.distanceTo(h.sourceStartHips),
         );
         holdMaximumActionError = Math.max(
           holdMaximumActionError,
-          Math.abs(h.actionProgress() - seamProgress),
+          Math.abs(h.actionProgress() - upperProgress),
         );
         holdAllMarkersOn &&= Boolean(
           rig.root.userData.jumpSlashAerialPoseActive
+          && rig.root.userData.jumpSlashLowerBodyPoseActive
           && rig.root.userData.jumpSlashAirborneRootAnchorActive
         );
         holdAllBladeVisible &&= Boolean(rig.beamBladeGroup?.visible);
+        lastAirborneHoldElapsed = h.elapsed;
         if (player.animation.attackTimer <= 0) {
           postGameplayHoldFrames += 1;
           postGameplayMaximumPoseError = Math.max(postGameplayMaximumPoseError, poseError);
+          postGameplayMaximumLowerPoseError = Math.max(
+            postGameplayMaximumLowerPoseError,
+            lowerPoseError,
+          );
         }
+      }
+
+      if (visual?.phase === 'groundedRecovery' && player.isJumpAirborne()) {
+        airborneRecoveryFrames += 1;
       }
 
       if (wasAirborne && !player.isJumpAirborne() && !touchdown) {
@@ -1117,6 +1668,7 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
           phase: visual?.phase ?? null,
           attackTimer: player.animation.attackTimer,
           visualProgress: progress,
+          upperBodyProgress: player.getSwordJumpSlashUpperBodyProgress(),
           actionProgress: h.actionProgress(),
           poseError: h.poseError().maximum,
           hipsDistanceFromAnchor: rig.joints.get('hips').position.distanceTo(h.sourceStartHips),
@@ -1164,12 +1716,37 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
         maxProgress: Math.max(...samples.map((sample) => sample.progress)),
         allAirborne: samples.every((sample) => sample.airborne),
         allGrounded: samples.every((sample) => !sample.airborne),
+        trailModes: [...new Set(samples.map((sample) => sample.trailMode))],
         allRootLocal: samples.every((sample) => (
           sample.followRoot
           && sample.glowParentRoot
           && sample.coreParentRoot
           && sample.trailSpace === 'followObjectLocal'
         )),
+        allWorldSpace: samples.every((sample) => (
+          !sample.followRoot
+          && sample.glowParentScene
+          && sample.coreParentScene
+          && sample.trailSpace === 'world'
+        )),
+        visibleSamples: samples.filter((sample) => (
+          sample.glowVisible
+          && sample.coreVisible
+          && sample.glowDrawCount > 0
+          && sample.coreDrawCount > 0
+        )).length,
+        postGameplaySamples: samples.filter((sample) => sample.attackTimer <= 0).length,
+        firstBaseWorldY: samples[0]?.baseWorldY ?? null,
+        lastBaseWorldY: samples[samples.length - 1]?.baseWorldY ?? null,
+        firstTipWorldY: samples[0]?.tipWorldY ?? null,
+        lastTipWorldY: samples[samples.length - 1]?.tipWorldY ?? null,
+        maximumResidentBaseWorldYSpan: Math.max(
+          ...samples.map((sample) => sample.residentBaseWorldYSpan ?? 0),
+        ),
+        maximumResidentTipWorldYSpan: Math.max(
+          ...samples.map((sample) => sample.residentTipWorldYSpan ?? 0),
+        ),
+        lastElapsed: samples[samples.length - 1]?.elapsed ?? null,
       };
     });
     const anyCrossEpoch = ids.some((id) => {
@@ -1177,8 +1754,8 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
       return samples.some((sample) => sample.airborne)
         && samples.some((sample) => !sample.airborne);
     });
-    const anyHoldProgressPastSeam = accepted.some((sample) => (
-      sample.airborne && sample.progress > seamProgress + 0.000001
+    const anyHoldProgressPastMatch = accepted.some((sample) => (
+      sample.airborne && sample.progress > matchProgress + 0.000001
     ));
 
     for (let frame = 0; frame < 60; frame += 1) h.game._updateTimedEffects(1 / 60);
@@ -1191,19 +1768,28 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
       outputSpent: outputBefore - outputAfter,
       expectedEnergyCost: h.profile.energyCost,
       expectedOutputCost: h.expectedOutputCost,
-      progressSource: combat.activeSwordSweepTrail?.progressSource ?? null,
       windupFrames,
       windupMaximumProgress,
       windupMaximumHipsError,
       windupMonotonic,
       holdFrames,
       holdMaximumPoseError,
+      holdMaximumLowerPoseError,
+      holdMaximumUpperSourceError,
+      holdMaximumUpperSourceMissing,
       holdMaximumHipsError,
       holdMaximumActionError,
+      holdMinimumProgress,
+      holdMaximumProgress,
+      holdMinimumUpperProgress,
+      holdMaximumUpperProgress,
       holdAllMarkersOn,
       holdAllBladeVisible,
+      lastAirborneHoldElapsed,
+      airborneRecoveryFrames,
       postGameplayHoldFrames,
       postGameplayMaximumPoseError,
+      postGameplayMaximumLowerPoseError,
       touchdown,
       recoveryFrames,
       firstRecoveryProgress,
@@ -1224,7 +1810,7 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
       cancels: probe.cancels,
       epochs,
       anyCrossEpoch,
-      anyHoldProgressPastSeam,
+      anyHoldProgressPastMatch,
       finalJumpState: player.jumpState,
       finalVisualActive: player.isSwordJumpSlashVisualActive(),
       finalBladeVisible: rig.beamBladeGroup?.visible ?? false,
@@ -1232,7 +1818,11 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
       finalActiveTrail: Boolean(combat.activeSwordSweepTrail),
       remainingJumpSlashMeshes: h.countJumpSlashMeshes(),
     };
-  }, { seamProgress: JUMP_SLASH_SEAM_PROGRESS });
+  }, {
+    matchProgress: JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    lowerBodyJoints: JUMP_SLASH_LOWER_BODY_JOINTS,
+    upperBodyJoints: JUMP_SLASH_UPPER_BODY_JOINTS,
+  });
 
   expect(result.swordIndex).toBeGreaterThanOrEqual(0);
   expect(result.started).toBe(true);
@@ -1240,16 +1830,31 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
   expect(result.outputSpent).toBeCloseTo(result.expectedOutputCost, 6);
   expect(result.windupFrames).toBeGreaterThan(100);
   expect(result.windupMonotonic).toBe(true);
-  expect(result.windupMaximumProgress).toBeGreaterThan(JUMP_SLASH_SEAM_PROGRESS - 0.01);
+  expect(result.windupMaximumProgress).toBeGreaterThan(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS - 0.01,
+  );
+  expect(result.windupMaximumProgress).toBeLessThan(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS);
   expect(result.windupMaximumHipsError).toBeLessThan(0.000001);
   expect(result.holdFrames).toBeGreaterThan(100);
-  expect(result.holdMaximumPoseError).toBeLessThan(0.1);
+  expect(result.holdMaximumPoseError).toBeGreaterThan(45);
+  expect(result.holdMaximumLowerPoseError).toBeLessThan(0.1);
+  expect(result.holdMaximumUpperSourceError).toBeLessThan(0.1);
+  expect(result.holdMaximumUpperSourceMissing).toBe(0);
   expect(result.holdMaximumHipsError).toBeLessThan(0.000001);
-  expect(result.holdMaximumActionError).toBeLessThan(0.000001);
+  expect(result.holdMaximumActionError).toBeLessThan(0.001);
+  expect(result.holdMinimumProgress).toBeCloseTo(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS, 8);
+  expect(result.holdMaximumProgress).toBeCloseTo(JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS, 8);
+  expect(result.holdMinimumUpperProgress).toBeCloseTo(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    8,
+  );
+  expect(result.holdMaximumUpperProgress).toBeCloseTo(JUMP_SLASH_UPPER_BODY_END_PROGRESS, 8);
   expect(result.holdAllMarkersOn).toBe(true);
   expect(result.holdAllBladeVisible).toBe(true);
+  expect(result.airborneRecoveryFrames).toBe(0);
   expect(result.postGameplayHoldFrames).toBeGreaterThan(20);
-  expect(result.postGameplayMaximumPoseError).toBeLessThan(0.1);
+  expect(result.postGameplayMaximumPoseError).toBeGreaterThan(45);
+  expect(result.postGameplayMaximumLowerPoseError).toBeLessThan(0.1);
 
   expect(result.strikes).toHaveLength(1);
   expect(result.strikes[0].delay).toBeCloseTo(
@@ -1260,17 +1865,35 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
   expect(result.staticFallbackCount).toBe(0);
   expect(result.begins).toHaveLength(2);
   expect(result.epochs).toHaveLength(2);
-  expect(result.epochs.find((epoch) => epoch.allAirborne).count).toBeGreaterThan(10);
-  expect(result.epochs.find((epoch) => epoch.allGrounded).count).toBeGreaterThan(5);
-  for (const epoch of result.epochs) expect(epoch.allRootLocal).toBe(true);
+  const windupEpoch = result.epochs.find((epoch) => (
+    epoch.allAirborne && epoch.trailModes.includes('liveBladeSweep')
+  ));
+  const fallEpoch = result.epochs.find((epoch) => epoch.trailModes.includes('airborneFall'));
+  expect(windupEpoch.count).toBeGreaterThan(10);
+  expect(windupEpoch.allRootLocal).toBe(true);
+  expect(fallEpoch.count).toBeGreaterThan(20);
+  expect(fallEpoch.allAirborne).toBe(true);
+  expect(fallEpoch.allWorldSpace).toBe(true);
+  expect(fallEpoch.visibleSamples).toBeGreaterThan(0);
+  expect(fallEpoch.postGameplaySamples).toBeGreaterThan(10);
+  expect(fallEpoch.firstBaseWorldY - fallEpoch.lastBaseWorldY).toBeGreaterThan(1);
+  expect(fallEpoch.firstTipWorldY - fallEpoch.lastTipWorldY).toBeGreaterThan(1);
+  expect(fallEpoch.maximumResidentBaseWorldYSpan).toBeLessThanOrEqual(3.400001);
+  expect(fallEpoch.maximumResidentTipWorldYSpan).toBeLessThanOrEqual(3.400001);
+  expect(result.touchdown.elapsed - fallEpoch.lastElapsed).toBeLessThanOrEqual(
+    (2 / 240) + 0.000001,
+  );
   expect(result.anyCrossEpoch).toBe(false);
-  expect(result.anyHoldProgressPastSeam).toBe(false);
+  expect(result.anyHoldProgressPastMatch).toBe(true);
   expect(result.finishes).toHaveLength(2);
   expect(result.cancels).toHaveLength(0);
 
   expect(result.touchdown.elapsed).toBeGreaterThanOrEqual(result.intendedAirTime - 0.000001);
   expect(result.touchdown.elapsed).toBeLessThanOrEqual(
     result.intendedAirTime + (1 / 240) + 0.000001,
+  );
+  expect(result.touchdown.elapsed - result.lastAirborneHoldElapsed).toBeLessThanOrEqual(
+    (1 / 240) + 0.000001,
   );
   expect(result.touchdown).toEqual(expect.objectContaining({
     phase: 'groundedRecovery',
@@ -1279,17 +1902,22 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
     reason: 'jumpSlashLanding',
   }));
   expect(result.touchdown.attackTimer).toBeLessThanOrEqual(0);
-  expect(result.touchdown.visualProgress).toBeCloseTo(JUMP_SLASH_SEAM_PROGRESS, 6);
-  expect(result.touchdown.actionProgress).toBeCloseTo(JUMP_SLASH_SEAM_PROGRESS, 4);
-  expect(result.touchdown.poseError).toBeGreaterThan(1);
-  expect(result.touchdown.hipsDistanceFromAnchor).toBeGreaterThan(0.1);
-  expect(Math.abs(result.touchdown.beforeFootClearance)).toBeLessThan(0.05);
+  expect(result.touchdown.visualProgress).toBeCloseTo(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    6,
+  );
+  expect(result.touchdown.upperBodyProgress).toBeCloseTo(JUMP_SLASH_UPPER_BODY_END_PROGRESS, 6);
+  expect(result.touchdown.actionProgress).toBeCloseTo(
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    4,
+  );
+  expect(result.touchdown.poseError).toBeGreaterThan(45);
+  expect(result.touchdown.hipsDistanceFromAnchor).toBeLessThan(0.000001);
   expect(Math.abs(result.touchdown.footClearance)).toBeLessThan(0.005);
-  expect(Math.abs(result.touchdown.correction)).toBeLessThan(0.05);
 
   expect(result.recoveryFrames).toBeGreaterThan(40);
   expect(result.firstRecoveryProgress).toBeGreaterThanOrEqual(
-    JUMP_SLASH_SEAM_PROGRESS - 0.000001,
+    JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS - 0.000001,
   );
   expect(result.maximumRecoveryProgress).toBeGreaterThan(0.98);
   expect(result.recoveryMonotonic).toBe(true);
@@ -1302,6 +1930,343 @@ test('a long fall holds frame 32 after gameplay timing and resumes one grounded 
   expect(result.finalVisualActive).toBe(false);
   expect(result.finalBladeVisible).toBe(false);
   expect(result.finalPendingStrikeCount).toBe(0);
+  expect(result.finalActiveTrail).toBe(false);
+  expect(result.remainingJumpSlashMeshes).toBe(0);
+});
+
+test('touchdown before the split-body hold continues the blade trail without a frame gap', async ({ page }) => {
+  await openLoadedGame(page);
+  await installJumpSlashHarness(page);
+
+  const result = await page.evaluate(({ matchProgress, seamProgress, upperEndProgress }) => {
+    const h = window.__createJumpSlashHarness({ dt: 1 / 240 });
+    const { player, combat } = h;
+    const probe = h.installProbe();
+    const fall = h.beginFalling(0.41);
+    const started = combat.tryPrimaryAttack(window.game.pointer.aimWorld);
+    let touchdown = null;
+
+    for (let frame = 0; frame < 720; frame += 1) {
+      const wasAirborne = player.isJumpAirborne();
+      h.tick();
+      if (wasAirborne && !player.isJumpAirborne() && !touchdown) {
+        touchdown = {
+          elapsed: h.elapsed,
+          phase: player._jumpSlashVisualState?.phase ?? null,
+          lowerProgress: player.getSwordJumpSlashVisualProgress(),
+          upperProgress: player.getSwordJumpSlashUpperBodyProgress(),
+        };
+      }
+      if (touchdown && !player.isSwordJumpSlashVisualActive()) break;
+    }
+
+    const accepted = probe.appends.filter((sample) => sample.accepted);
+    const airborneSamples = accepted.filter((sample) => sample.airborne);
+    const groundedSamples = accepted.filter((sample) => !sample.airborne);
+    for (let frame = 0; frame < 60; frame += 1) h.game._updateTimedEffects(1 / 60);
+    return {
+      started,
+      intendedAirTime: fall.intendedAirTime,
+      touchdown,
+      airborneMaximumProgress: Math.max(...airborneSamples.map((sample) => sample.progress)),
+      groundedMinimumProgress: Math.min(...groundedSamples.map((sample) => sample.progress)),
+      groundedMaximumProgress: Math.max(...groundedSamples.map((sample) => sample.progress)),
+      groundedSampleCount: groundedSamples.length,
+      begins: probe.begins,
+      finishes: probe.finishes,
+      cancels: probe.cancels,
+      remainingJumpSlashMeshes: h.countJumpSlashMeshes(),
+      matchProgress,
+      seamProgress,
+      upperEndProgress,
+    };
+  }, {
+    matchProgress: JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    seamProgress: JUMP_SLASH_SEAM_PROGRESS,
+    upperEndProgress: JUMP_SLASH_UPPER_BODY_END_PROGRESS,
+  });
+
+  expect(result.started).toBe(true);
+  expect(result.touchdown.elapsed).toBeGreaterThanOrEqual(result.intendedAirTime - 0.000001);
+  expect(result.touchdown.phase).toBe('groundedRecovery');
+  expect(result.touchdown.lowerProgress).toBeLessThan(result.matchProgress);
+  expect(result.touchdown.upperProgress).toBeCloseTo(result.touchdown.lowerProgress, 8);
+  expect(result.groundedSampleCount).toBeGreaterThan(10);
+  expect(result.groundedMinimumProgress).toBeLessThan(result.matchProgress);
+  expect(result.groundedMinimumProgress).toBeLessThan(result.seamProgress);
+  expect(result.groundedMinimumProgress).toBeCloseTo(result.touchdown.upperProgress, 6);
+  expect(result.groundedMinimumProgress - result.airborneMaximumProgress).toBeLessThan(0.01);
+  expect(result.groundedMaximumProgress).toBeCloseTo(result.upperEndProgress, 6);
+  expect(result.begins).toHaveLength(2);
+  expect(result.finishes).toHaveLength(2);
+  expect(result.cancels).toHaveLength(0);
+  expect(result.remainingJumpSlashMeshes).toBe(0);
+});
+
+test('a short touchdown during split-body follow-through neither pops nor rewinds', async ({ page }) => {
+  await openLoadedGame(page);
+  await installJumpSlashHarness(page);
+
+  const result = await page.evaluate(({
+    matchProgress,
+    landingStartProgress,
+    upperEndProgress,
+    lowerBodyJoints,
+    upperBodyJoints,
+  }) => {
+    const h = window.__createJumpSlashHarness({ dt: 1 / 240 });
+    const { player, combat, rig } = h;
+    const probe = h.installProbe();
+    const fall = h.beginFalling(0.49);
+    const started = combat.tryPrimaryAttack(window.game.pointer.aimWorld);
+    const lowerBranchBones = [...rig.jumpSlashAerialLowerBodyQuaternions.keys()];
+    const snapshotBones = (bones) => bones.map((bone) => ({
+      bone,
+      quaternion: bone.quaternion.clone().normalize(),
+    }));
+    const snapshotJoints = (jointNames) => jointNames.map((jointName) => ({
+      jointName,
+      quaternion: rig.joints.get(jointName).quaternion.clone().normalize(),
+    }));
+    const maximumBoneStep = (snapshot) => Math.max(...snapshot.map(({ bone, quaternion }) => (
+      bone.quaternion.clone().normalize().angleTo(quaternion) * 180 / Math.PI
+    )));
+    const maximumJointStep = (snapshot) => Math.max(...snapshot.map(({ jointName, quaternion }) => (
+      rig.joints.get(jointName).quaternion.clone().normalize().angleTo(quaternion)
+        * 180 / Math.PI
+    )));
+
+    let lastAirborne = null;
+    let touchdown = null;
+    let previousRecovery = null;
+    let recoveryMaximumUpperAngularStep = 0;
+    let recoveryMaximumHipsPositionStep = 0;
+    let recoveryMaximumLowerSourceError = 0;
+    let recoveryMaximumUpperSourceError = 0;
+    let recoveryMaximumSourceMissing = 0;
+    let recoveryLowerProgressMonotonic = true;
+    let recoveryUpperProgressMonotonic = true;
+    let landingHipsBlendMonotonic = true;
+    let recoverySawSplitBody = false;
+    let merge = null;
+    for (let frame = 0; frame < 720; frame += 1) {
+      const wasAirborne = player.isJumpAirborne();
+      h.tick();
+      const visual = player._jumpSlashVisualState;
+      if (player.isJumpAirborne() && visual?.phase === 'airborneHold') {
+        lastAirborne = {
+          elapsed: h.elapsed,
+          lower: snapshotBones(lowerBranchBones),
+          upper: snapshotJoints(upperBodyJoints),
+          hipsPosition: rig.joints.get('hips').position.clone(),
+          upperBodyProgress: player.getSwordJumpSlashUpperBodyProgress(),
+        };
+      }
+      if (wasAirborne && !player.isJumpAirborne() && !touchdown) {
+        touchdown = {
+          elapsed: h.elapsed,
+          phase: visual?.phase ?? null,
+          visualProgress: visual?.visualProgress ?? null,
+          upperBodyProgress: player.getSwordJumpSlashUpperBodyProgress(),
+          actionProgress: h.actionProgress(),
+          lowerAngularStep: maximumBoneStep(lastAirborne.lower),
+          upperAngularStep: maximumJointStep(lastAirborne.upper),
+          hipsPositionStep: rig.joints.get('hips').position.distanceTo(
+            lastAirborne.hipsPosition,
+          ),
+          upperProgressStep: player.getSwordJumpSlashUpperBodyProgress()
+            - lastAirborne.upperBodyProgress,
+          upperOverrideActive: rig.root.userData.jumpSlashUpperBodyOverrideActive,
+          landingHipsBlendWeight: rig.root.userData.jumpSlashLandingHipsBlendWeight,
+        };
+      }
+      if (visual?.phase === 'groundedRecovery' && !player.isJumpAirborne()) {
+        const lowerProgress = visual.visualProgress;
+        const upperProgress = player.getSwordJumpSlashUpperBodyProgress();
+        const splitBody = Boolean(visual.splitBodyLandingActive);
+        const hipsBlendWeight = rig.root.userData.jumpSlashLandingHipsBlendWeight ?? 0;
+        const lowerSourceError = h.runtimeSourcePoseError(lowerProgress, lowerBodyJoints);
+        const upperSourceError = h.runtimeSourcePoseError(upperProgress, upperBodyJoints);
+        recoverySawSplitBody ||= splitBody;
+        if (splitBody) {
+          recoveryMaximumLowerSourceError = Math.max(
+            recoveryMaximumLowerSourceError,
+            lowerSourceError.maximum,
+          );
+          recoveryMaximumUpperSourceError = Math.max(
+            recoveryMaximumUpperSourceError,
+            upperSourceError.maximum,
+          );
+          recoveryMaximumSourceMissing = Math.max(
+            recoveryMaximumSourceMissing,
+            lowerSourceError.missing,
+            upperSourceError.missing,
+          );
+        }
+        if (previousRecovery) {
+          const lowerAngularStep = maximumBoneStep(previousRecovery.lower);
+          const upperAngularStep = maximumJointStep(previousRecovery.upper);
+          const hipsPositionStep = rig.joints.get('hips').position.distanceTo(
+            previousRecovery.hipsPosition,
+          );
+          if (previousRecovery.splitBody || splitBody) {
+            recoveryMaximumUpperAngularStep = Math.max(
+              recoveryMaximumUpperAngularStep,
+              upperAngularStep,
+            );
+          }
+          if (hipsPositionStep > recoveryMaximumHipsPositionStep) {
+            recoveryMaximumHipsPositionStep = hipsPositionStep;
+          }
+          recoveryLowerProgressMonotonic &&= (
+            lowerProgress + 0.000001 >= previousRecovery.lowerProgress
+          );
+          recoveryUpperProgressMonotonic &&= (
+            upperProgress + 0.000001 >= previousRecovery.upperProgress
+          );
+          landingHipsBlendMonotonic &&= (
+            hipsBlendWeight <= previousRecovery.hipsBlendWeight + 0.000001
+          );
+          if (previousRecovery.splitBody && !splitBody && !merge) {
+            merge = {
+              lowerAngularStep,
+              upperAngularStep,
+              hipsPositionStep,
+              lowerProgress,
+              upperProgress,
+              actionProgress: h.actionProgress(),
+              upperOverrideActive: rig.root.userData.jumpSlashUpperBodyOverrideActive,
+              hipsBlendActive: rig.root.userData.jumpSlashLandingHipsBlendActive,
+              hipsBlendWeight,
+              sourcePoseError: h.runtimeSourcePoseError(
+                lowerProgress,
+                [...lowerBodyJoints, ...upperBodyJoints],
+              ),
+            };
+          }
+        }
+        previousRecovery = {
+          lower: snapshotBones(lowerBranchBones),
+          upper: snapshotJoints(upperBodyJoints),
+          hipsPosition: rig.joints.get('hips').position.clone(),
+          lowerProgress,
+          upperProgress,
+          splitBody,
+          hipsBlendWeight,
+        };
+      }
+      if (touchdown && !player.isSwordJumpSlashVisualActive()) {
+        break;
+      }
+    }
+
+    const accepted = probe.appends.filter((sample) => sample.accepted);
+    const groundedSamples = accepted.filter((sample) => !sample.airborne);
+    for (let frame = 0; frame < 60; frame += 1) h.game._updateTimedEffects(1 / 60);
+    return {
+      intendedAirTime: fall.intendedAirTime,
+      started,
+      lastAirborne,
+      touchdown,
+      begins: probe.begins,
+      finishes: probe.finishes,
+      cancels: probe.cancels,
+      lowerBranchBoneCount: lowerBranchBones.length,
+      cachedLowerBodyBoneCount: rig.root.userData.jumpSlashLowerBodyBoneCount ?? 0,
+      recoveryMaximumUpperAngularStep,
+      recoveryMaximumHipsPositionStep,
+      recoveryMaximumLowerSourceError,
+      recoveryMaximumUpperSourceError,
+      recoveryMaximumSourceMissing,
+      recoveryLowerProgressMonotonic,
+      recoveryUpperProgressMonotonic,
+      landingHipsBlendMonotonic,
+      recoverySawSplitBody,
+      merge,
+      lastRecovery: previousRecovery ? {
+        lowerProgress: previousRecovery.lowerProgress,
+        upperProgress: previousRecovery.upperProgress,
+        splitBody: previousRecovery.splitBody,
+        hipsBlendWeight: previousRecovery.hipsBlendWeight,
+      } : null,
+      groundedTrailCount: groundedSamples.length,
+      groundedTrailMinimumProgress: groundedSamples.length
+        ? Math.min(...groundedSamples.map((sample) => sample.progress))
+        : null,
+      groundedTrailMaximumProgress: groundedSamples.length
+        ? Math.max(...groundedSamples.map((sample) => sample.progress))
+        : null,
+      finalVisualActive: player.isSwordJumpSlashVisualActive(),
+      finalHipsBlendActive: rig.root.userData.jumpSlashLandingHipsBlendActive,
+      finalHipsBlendWeight: rig.root.userData.jumpSlashLandingHipsBlendWeight,
+      finalActiveTrail: Boolean(combat.activeSwordSweepTrail),
+      remainingJumpSlashMeshes: h.countJumpSlashMeshes(),
+      matchProgress,
+      landingStartProgress,
+      upperEndProgress,
+    };
+  }, {
+    matchProgress: JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+    landingStartProgress: JUMP_SLASH_SEAM_PROGRESS,
+    upperEndProgress: JUMP_SLASH_UPPER_BODY_END_PROGRESS,
+    lowerBodyJoints: JUMP_SLASH_LOWER_BODY_JOINTS,
+    upperBodyJoints: JUMP_SLASH_UPPER_BODY_JOINTS,
+  });
+
+  expect(result.started).toBe(true);
+  expect(result.lastAirborne).not.toBeNull();
+  expect(result.touchdown.elapsed).toBeGreaterThanOrEqual(result.intendedAirTime - 0.000001);
+  expect(result.touchdown.phase).toBe('groundedRecovery');
+  expect(result.touchdown.visualProgress).toBeCloseTo(result.matchProgress, 8);
+  expect(result.touchdown.upperBodyProgress).toBeGreaterThan(result.matchProgress);
+  expect(result.touchdown.upperBodyProgress).toBeLessThan(result.upperEndProgress);
+  expect(result.touchdown.actionProgress).toBeCloseTo(result.matchProgress, 4);
+  expect(result.touchdown.lowerAngularStep).toBeLessThan(0.1);
+  expect(result.touchdown.upperAngularStep).toBeLessThan(5);
+  expect(result.touchdown.hipsPositionStep).toBeLessThan(0.000001);
+  expect(result.touchdown.upperProgressStep).toBeGreaterThanOrEqual(-0.000001);
+  expect(result.touchdown.upperOverrideActive).toBe(true);
+  expect(result.touchdown.landingHipsBlendWeight).toBeCloseTo(1, 6);
+  expect(result.lowerBranchBoneCount).toBe(9);
+  expect(result.cachedLowerBodyBoneCount).toBe(9);
+  expect(result.lowerBranchBoneCount).toBe(result.cachedLowerBodyBoneCount);
+  expect(result.recoverySawSplitBody).toBe(true);
+  expect(result.recoveryLowerProgressMonotonic).toBe(true);
+  expect(result.recoveryUpperProgressMonotonic).toBe(true);
+  expect(result.landingHipsBlendMonotonic).toBe(true);
+  expect(result.recoveryMaximumUpperAngularStep).toBeLessThan(5);
+  expect(result.recoveryMaximumHipsPositionStep).toBeLessThan(0.01);
+  expect(result.recoveryMaximumLowerSourceError).toBeLessThan(0.1);
+  expect(result.recoveryMaximumUpperSourceError).toBeLessThan(0.1);
+  expect(result.recoveryMaximumSourceMissing).toBe(0);
+  expect(result.merge).not.toBeNull();
+  expect(result.merge.lowerAngularStep).toBeLessThan(5);
+  expect(result.merge.upperAngularStep).toBeLessThan(5);
+  expect(result.merge.hipsPositionStep).toBeLessThan(0.01);
+  expect(result.merge.lowerProgress).toBeGreaterThanOrEqual(result.upperEndProgress - 0.000001);
+  expect(result.merge.lowerProgress).toBeCloseTo(result.merge.upperProgress, 6);
+  expect(result.merge.actionProgress).toBeCloseTo(result.merge.lowerProgress, 4);
+  expect(result.merge.upperOverrideActive).toBe(false);
+  expect(result.merge.hipsBlendActive).toBe(true);
+  expect(result.merge.hipsBlendWeight).toBeGreaterThan(0);
+  expect(result.merge.hipsBlendWeight).toBeLessThan(1);
+  expect(result.merge.sourcePoseError).toEqual(expect.objectContaining({ missing: 0 }));
+  expect(result.merge.sourcePoseError.maximum).toBeLessThan(0.1);
+  expect(result.lastRecovery.lowerProgress).toBeGreaterThan(0.98);
+  expect(result.lastRecovery.upperProgress).toBeCloseTo(result.lastRecovery.lowerProgress, 8);
+  expect(result.lastRecovery.splitBody).toBe(false);
+  expect(result.lastRecovery.hipsBlendWeight).toBeLessThan(0.001);
+  expect(result.begins).toHaveLength(3);
+  expect(result.finishes).toHaveLength(3);
+  expect(result.cancels).toHaveLength(0);
+  expect(result.groundedTrailCount).toBeGreaterThan(5);
+  expect(result.groundedTrailMinimumProgress).toBeGreaterThanOrEqual(
+    result.landingStartProgress - 0.000001,
+  );
+  expect(result.groundedTrailMaximumProgress).toBeCloseTo(result.upperEndProgress, 6);
+  expect(result.finalVisualActive).toBe(false);
+  expect(result.finalHipsBlendActive).toBe(false);
+  expect(result.finalHipsBlendWeight).toBe(0);
   expect(result.finalActiveTrail).toBe(false);
   expect(result.remainingJumpSlashMeshes).toBe(0);
 });
@@ -1457,6 +2422,112 @@ test('jump slash preserves the captured moving-jump trajectory', async ({ page }
     expect(result.attacked.finalPosition[axis]).toBeCloseTo(result.control.finalPosition[axis], 6);
     expect(result.attacked.finalVelocity[axis]).toBeCloseTo(result.control.finalVelocity[axis], 6);
   }
+});
+
+test('synchronous jump-slash cancellation does not reveal the hidden landing legs', async ({ page }) => {
+  await openLoadedGame(page);
+  await installJumpSlashHarness(page);
+
+  const result = await page.evaluate(({ upperEndProgress }) => {
+    const h = window.__createJumpSlashHarness({ dt: 1 / 240 });
+    const { game, player, combat, rig } = h;
+    h.beginFalling(1.1);
+    const started = combat.tryPrimaryAttack(game.pointer.aimWorld);
+
+    for (let frame = 0; frame < 240; frame += 1) {
+      h.tick();
+      if (player._jumpSlashVisualState?.phase === 'airborneHold'
+        && player.getSwordJumpSlashUpperBodyProgress() >= upperEndProgress - 0.000001) {
+        break;
+      }
+    }
+
+    // These source transforms are the later clip frame hidden beneath the
+    // frozen lower-body mask. A synchronous cancel must not expose them before
+    // the replacement animation gets its first mixer evaluation.
+    const restoreMap = rig.jumpSlashAerialPoseRestoreTransforms;
+    const heldLowerBody = [...(restoreMap?.keys() ?? [])].map((bone) => ({
+      bone,
+      position: bone.position.clone(),
+      quaternion: bone.quaternion.clone().normalize(),
+    }));
+    const hiddenMaximumPositionStep = Math.max(
+      0,
+      ...heldLowerBody.map(({ bone, position }) => (
+        restoreMap.get(bone).position.distanceTo(position)
+      )),
+    );
+    const hiddenMaximumAngularStep = Math.max(
+      0,
+      ...heldLowerBody.map(({ bone, quaternion }) => (
+        restoreMap.get(bone).quaternion.clone().normalize().angleTo(quaternion)
+          * 180 / Math.PI
+      )),
+    );
+    const beforeCancel = {
+      phase: player._jumpSlashVisualState?.phase ?? null,
+      upperProgress: player.getSwordJumpSlashUpperBodyProgress(),
+      lowerPoseActive: rig.root.userData.jumpSlashLowerBodyPoseActive,
+      restoreBoneCount: heldLowerBody.length,
+      bladeHoldActive: rig.root.userData.jumpSlashBeamBladeHoldTransformActive,
+      heldBladeTransformCached: Boolean(rig.jumpSlashHeldBeamBladeTransform),
+    };
+
+    const cancelled = player.cancelSwordJumpSlashVisual({ cancelAttack: true });
+    const maximumPositionStep = Math.max(
+      0,
+      ...heldLowerBody.map(({ bone, position }) => bone.position.distanceTo(position)),
+    );
+    const maximumAngularStep = Math.max(
+      0,
+      ...heldLowerBody.map(({ bone, quaternion }) => (
+        bone.quaternion.clone().normalize().angleTo(quaternion) * 180 / Math.PI
+      )),
+    );
+
+    return {
+      started,
+      cancelled,
+      beforeCancel,
+      hiddenMaximumPositionStep,
+      hiddenMaximumAngularStep,
+      maximumPositionStep,
+      maximumAngularStep,
+      visualActive: player.isSwordJumpSlashVisualActive(),
+      aerialPoseMarker: rig.root.userData.jumpSlashAerialPoseActive,
+      lowerPoseMarker: rig.root.userData.jumpSlashLowerBodyPoseActive,
+      rootAnchorMarker: rig.root.userData.jumpSlashAirborneRootAnchorActive,
+      bladeHoldMarker: rig.root.userData.jumpSlashBeamBladeHoldTransformActive,
+      heldBladeTransformCleared: rig.jumpSlashHeldBeamBladeTransform === null,
+      restoreMapCleared: rig.jumpSlashAerialPoseRestoreTransforms === null,
+    };
+  }, {
+    upperEndProgress: JUMP_SLASH_UPPER_BODY_END_PROGRESS,
+  });
+
+  expect(result.started).toBe(true);
+  expect(result.beforeCancel).toEqual(expect.objectContaining({
+    phase: 'airborneHold',
+    upperProgress: JUMP_SLASH_UPPER_BODY_END_PROGRESS,
+    lowerPoseActive: true,
+    bladeHoldActive: true,
+    heldBladeTransformCached: true,
+  }));
+  expect(result.beforeCancel.restoreBoneCount).toBeGreaterThanOrEqual(9);
+  expect(Math.max(
+    result.hiddenMaximumPositionStep,
+    result.hiddenMaximumAngularStep,
+  )).toBeGreaterThan(0.001);
+  expect(result.cancelled).toBe(true);
+  expect(result.visualActive).toBe(false);
+  expect(result.aerialPoseMarker).toBe(false);
+  expect(result.lowerPoseMarker).toBe(false);
+  expect(result.rootAnchorMarker).toBe(false);
+  expect(result.bladeHoldMarker).toBe(false);
+  expect(result.heldBladeTransformCleared).toBe(true);
+  expect(result.restoreMapCleared).toBe(true);
+  expect(result.maximumPositionStep).toBeLessThan(0.000001);
+  expect(result.maximumAngularStep).toBeLessThan(0.0001);
 });
 
 test('starting a ledge cling cancels the visual, root anchor, blade, trail, combo, and delayed hit', async ({ page }) => {

@@ -14,10 +14,14 @@ const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 const DEFAULT_SWORD_SLASH_CLIP = 'swordForwardSlash';
 const JUMP_SLASH_CLIP = 'swordJumpSlash';
 const JUMP_SLASH_TOTAL_FRAMES = 56;
-const JUMP_SLASH_AERIAL_POSE_FRAME = 32;
-const JUMP_SLASH_AERIAL_POSE_PROGRESS = JUMP_SLASH_AERIAL_POSE_FRAME / JUMP_SLASH_TOTAL_FRAMES;
+const JUMP_SLASH_FALLING_POSE_MATCH_FRAME = 28.5143;
+const JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS = JUMP_SLASH_FALLING_POSE_MATCH_FRAME / JUMP_SLASH_TOTAL_FRAMES;
+const JUMP_SLASH_UPPER_BODY_END_FRAME = 37;
+const JUMP_SLASH_UPPER_BODY_END_PROGRESS = JUMP_SLASH_UPPER_BODY_END_FRAME / JUMP_SLASH_TOTAL_FRAMES;
 const PLAYER_BASE_MOVE_SPEED = 6.2;
-const PLAYER_RUN_SPEED_MULTIPLIER = 1.68;
+const PLAYER_WALK_SPEED_MULTIPLIER = 1;
+const PLAYER_JOG_SPEED_MULTIPLIER = 1.68;
+const PLAYER_SPRINT_SPEED_MULTIPLIER = 2.25;
 const PLAYER_RUN_ANIMATION_AMOUNT = 1.55;
 
 const PLAYER_BASE_STATS = {
@@ -149,6 +153,7 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'pistolWalk', file: 'pistol walk.fbx', label: 'Pistol Walk', loop: true },
   { key: 'runToStop', file: 'run to stop.fbx', label: 'Run To Stop', loop: false },
   { key: 'running', file: 'running.fbx', label: 'Running', loop: true },
+  { key: 'sprint', file: 'Sprint.fbx', label: 'Sprint', loop: true },
   { key: 'slowJogBackwards', file: 'Slow Jog Backwards.fbx', label: 'Slow Jog Backwards', loop: true },
   { key: 'standToCover', file: 'stand to cover.fbx', label: 'Stand To Cover', loop: false },
   { key: 'standToCover2', file: 'stand to cover (2).fbx', label: 'Stand To Cover Alt', loop: false },
@@ -358,6 +363,7 @@ export class Player {
 
     this.baseStats = { ...PLAYER_BASE_STATS };
     this.stats = { ...PLAYER_BASE_STATS };
+    this.walkModeEnabled = false;
     this.health = this.stats.maxHealth;
     this.level = 1;
     this.experience = 0;
@@ -465,6 +471,11 @@ export class Player {
     this.temporaryStatBonuses = new Map();
 
     this._loadCharacterModel();
+  }
+
+  toggleWalkMode() {
+    this.walkModeEnabled = !this.walkModeEnabled;
+    return this.walkModeEnabled;
   }
 
   update(dt, input, arenaRadius = 32, movementOptions = {}) {
@@ -596,7 +607,9 @@ export class Player {
       && !jumpAirborne
       && !landingRecovering;
     let translating = false;
-    const running = moving && (input.has('ShiftLeft') || input.has('ShiftRight'));
+    const sprintInputHeld = input.has('ShiftLeft') || input.has('ShiftRight');
+    let sprinting = false;
+    let jogging = moving && !this.walkModeEnabled;
     let moveAmount = 0;
     let movingBackward = false;
     let strafeAmount = 0;
@@ -609,7 +622,12 @@ export class Player {
       strafeAmount = (lockOnActive || bracedStrafing)
         ? THREE.MathUtils.clamp(rawLateralInput, -1, 1)
         : 0;
-      moveAmount = translating && running ? PLAYER_RUN_ANIMATION_AMOUNT : 1;
+      sprinting = !this.walkModeEnabled
+        && sprintInputHeld
+        && translating
+        && rawForwardInput > 0.35;
+      jogging = !this.walkModeEnabled && !sprinting;
+      moveAmount = translating && (jogging || sprinting) ? PLAYER_RUN_ANIMATION_AMOUNT : 1;
 
       if (jumpAirborne) {
         this._resolveMovementDirection(moveVector, movementOptions);
@@ -630,8 +648,10 @@ export class Player {
       }
 
       const guardMoveMultiplier = this.isShieldGuarding() ? 0.72 : 1;
-      const runMultiplier = running ? PLAYER_RUN_SPEED_MULTIPLIER : 1;
-      const speed = this._getTunedForwardSpeed() * runMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
+      const locomotionMultiplier = this.walkModeEnabled
+        ? PLAYER_WALK_SPEED_MULTIPLIER
+        : sprinting ? PLAYER_SPRINT_SPEED_MULTIPLIER : PLAYER_JOG_SPEED_MULTIPLIER;
+      const speed = this._getTunedForwardSpeed() * locomotionMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
       if (jumpAirborne) {
         desiredMoveVelocity.copy(worldMoveDirection).multiplyScalar(speed);
       } else if (translating && !landingRecovering) {
@@ -668,7 +688,7 @@ export class Player {
     const visiblyMoving = moveAnimationAmount > 0.05;
     const visiblyRunning = visiblyMoving
       && translating
-      && running
+      && (jogging || sprinting)
       && !backpedaling
       && !this.isShieldGuarding()
       && this.movementLockMultiplier > 0.85;
@@ -676,7 +696,7 @@ export class Player {
     this.tankTurnActive = tankTurnActive;
     this.tankTurnAmount = tankTurnActive ? tankTurnInput : 0;
     this.tankTurnTranslating = tankTurnTranslating;
-    this.isRunning = visiblyRunning;
+    this.isRunning = visiblyRunning && sprinting;
 
     const currentlyAirborne = this.isJumpAirborne();
     const currentlyLandingRecovering = this.jumpState === MML_JUMP_STATES.LandRecovery;
@@ -713,8 +733,11 @@ export class Player {
       actionProgress: jumpAnimationProgress ?? landingVisualProgress ?? undefined,
       lockOnActive,
       strafeAmount,
+      forwardAmount: rawForwardInput,
       turnAmount: jumpDrivenAnimation ? 0 : freeTurnAmount,
-      clipKey: physicalLandingClipKey ?? (landingVisualState ? this._jumpLandingVisualClipKey : null),
+      clipKey: physicalLandingClipKey
+        ?? (landingVisualState ? this._jumpLandingVisualClipKey : null)
+        ?? (sprinting && externalMoving && !externalBackpedaling ? 'sprint' : null),
       physicalJump: jumpDrivenAnimation,
     });
 
@@ -1337,6 +1360,7 @@ export class Player {
     projectileAiming = false,
     lockOnActive = false,
     strafeAmount = 0,
+    forwardAmount = 0,
     turnAmount = 0,
     backpedaling = false,
     attackKind = null,
@@ -1371,6 +1395,7 @@ export class Player {
     this._updateExternalModelMotion(dt, moving, moveAmount, backpedaling, running, {
       lockOnActive,
       strafeAmount,
+      forwardAmount,
       turnAmount,
       projectileAiming,
       attackKind: previewAttackKind,
@@ -2425,6 +2450,8 @@ export class Player {
         recoveryDuration: 0,
         recoveryTimer: 0,
         visualProgress: 0,
+        upperBodyProgress: 0,
+        splitBodyLandingActive: false,
       };
     } else {
       this.cancelSwordJumpSlashVisual();
@@ -2438,6 +2465,11 @@ export class Player {
 
   getSwordJumpSlashVisualProgress() {
     return this._jumpSlashVisualState?.visualProgress ?? null;
+  }
+
+  getSwordJumpSlashUpperBodyProgress() {
+    const state = this._jumpSlashVisualState;
+    return state?.upperBodyProgress ?? state?.visualProgress ?? null;
   }
 
   cancelSwordJumpSlashVisual({ cancelAttack = false } = {}) {
@@ -2466,15 +2498,25 @@ export class Player {
       return false;
     }
 
-    // A very short drop can touch down before the wind-up reaches frame 32.
-    // Resume from the current authored frame in that case so touchdown never
-    // skips the initial motion the player was meant to see. Only a completed
-    // wind-up enters (and later exits) the supplied frame-32 falling hold.
-    state.recoveryStartProgress = THREE.MathUtils.clamp(
-      state.visualProgress,
-      0,
-      JUMP_SLASH_AERIAL_POSE_PROGRESS,
-    );
+    // Once the split pose is active, the legs have remained on the supplied
+    // frame-28.5143 falling pose even while the torso and sword continued.
+    // Begin their authored catch-up from that identical frame at touchdown;
+    // short drops that land before it still resume from their current frame.
+    state.recoveryStartProgress = state.phase === 'airborneHold'
+      ? JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS
+      : THREE.MathUtils.clamp(
+        state.visualProgress,
+        0,
+        JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+      );
+    state.upperBodyProgress = state.phase === 'airborneHold'
+      ? THREE.MathUtils.clamp(
+        state.upperBodyProgress ?? state.visualProgress,
+        JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+        JUMP_SLASH_UPPER_BODY_END_PROGRESS,
+      )
+      : state.recoveryStartProgress;
+    state.splitBodyLandingActive = state.phase === 'airborneHold';
     state.recoveryDuration = Math.max(
       0.05,
       state.duration * (1 - state.recoveryStartProgress),
@@ -2488,7 +2530,7 @@ export class Player {
       this.animation.attackTimer,
     );
     this.movementLockMultiplier = 0;
-    this.onSwordJumpSlashLandingRecoveryStarted?.(state.recoveryStartProgress);
+    this.onSwordJumpSlashLandingRecoveryStarted?.(state.upperBodyProgress);
     return true;
   }
 
@@ -2505,19 +2547,28 @@ export class Player {
 
     if (state.phase === 'airborneWindup') {
       state.visualProgress = Math.min(
-        JUMP_SLASH_AERIAL_POSE_PROGRESS,
+        JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
         state.visualProgress + (Math.max(0, dt) / state.duration),
       );
+      state.upperBodyProgress = state.visualProgress;
+      if (state.visualProgress >= JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS) {
+        state.phase = 'airborneHold';
+      }
       if (!this.isJumpAirborne()) {
         this._beginSwordJumpSlashLandingRecovery();
-      } else if (state.visualProgress >= JUMP_SLASH_AERIAL_POSE_PROGRESS) {
-        state.phase = 'airborneHold';
       }
       return;
     }
 
     if (state.phase === 'airborneHold') {
-      state.visualProgress = JUMP_SLASH_AERIAL_POSE_PROGRESS;
+      state.visualProgress = JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS;
+      state.upperBodyProgress = Math.min(
+        JUMP_SLASH_UPPER_BODY_END_PROGRESS,
+        Math.max(
+          JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+          state.upperBodyProgress ?? state.visualProgress,
+        ) + (Math.max(0, dt) / state.duration),
+      );
       if (!this.isJumpAirborne()) {
         this._beginSwordJumpSlashLandingRecovery();
       }
@@ -2536,6 +2587,22 @@ export class Player {
         1,
         recoveryProgress,
       );
+      if (state.splitBodyLandingActive) {
+        state.upperBodyProgress = Math.min(
+          JUMP_SLASH_UPPER_BODY_END_PROGRESS,
+          Math.max(
+            JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS,
+            state.upperBodyProgress ?? state.visualProgress,
+          ) + (Math.max(0, dt) / state.duration),
+        );
+        if (state.upperBodyProgress >= JUMP_SLASH_UPPER_BODY_END_PROGRESS - 0.000001
+          && state.visualProgress >= state.upperBodyProgress - 0.000001) {
+          state.splitBodyLandingActive = false;
+          state.upperBodyProgress = state.visualProgress;
+        }
+      } else {
+        state.upperBodyProgress = state.visualProgress;
+      }
       if (state.recoveryTimer <= 0) {
         state.phase = 'groundedHold';
         state.visualProgress = 1;
@@ -4192,12 +4259,34 @@ export class Player {
       : 0;
     const jumpSlashVisualState = this._jumpSlashVisualState;
     const jumpSlashVisualActive = Boolean(jumpSlashVisualState);
-    const jumpSlashAirbornePose = jumpSlashVisualState?.phase === 'airborneHold'
-      && this.isJumpAirborne();
+    const jumpSlashUpperBodyProgress = jumpSlashVisualActive
+      ? THREE.MathUtils.clamp(
+        jumpSlashVisualState.upperBodyProgress ?? jumpSlashVisualState.visualProgress,
+        0,
+        1,
+      )
+      : null;
+    const jumpSlashAirbornePose = Boolean(jumpSlashVisualState)
+      && this.isJumpAirborne()
+      && jumpSlashVisualState.visualProgress >= JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS
+      && (jumpSlashVisualState.phase === 'airborneWindup'
+        || jumpSlashVisualState.phase === 'airborneHold');
+    const jumpSlashAirbornePoseWeight = jumpSlashAirbornePose ? 1 : 0;
     const jumpSlashAirborneRootAnchor = Boolean(jumpSlashVisualState)
       && (jumpSlashVisualState.phase === 'airborneWindup'
         || jumpSlashVisualState.phase === 'airborneHold')
       && this.isJumpAirborne();
+    const jumpSlashSplitBodyLanding = Boolean(jumpSlashVisualState)
+      && !this.isJumpAirborne()
+      && jumpSlashVisualState.phase === 'groundedRecovery'
+      && jumpSlashVisualState.splitBodyLandingActive;
+    const jumpSlashLandingHipsBlend = Boolean(jumpSlashVisualState)
+      && !this.isJumpAirborne()
+      && jumpSlashVisualState.phase === 'groundedRecovery';
+    const jumpSlashUpperBodyOverride = jumpSlashSplitBodyLanding
+      && jumpSlashUpperBodyProgress > jumpSlashVisualState.visualProgress + 0.000001;
+    const jumpSlashBladeTransformHold = Boolean(jumpSlashVisualState)
+      && jumpSlashVisualState.visualProgress >= JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS;
     const attackKind = jumpSlashVisualActive
       ? 'beamBlade'
       : motionOptions.attackKind ?? this._attackWeaponKind;
@@ -4212,7 +4301,9 @@ export class Player {
     const projectileAiming = motionOptions.projectileAiming ?? (projectileAimLocked || (attackKind === 'projectile' && this.animation.attackTimer > 0));
     const sustainedProjectileAim = projectileAiming && this.animation.attackTimer <= 0;
     const attackProgress = jumpSlashVisualActive
-      ? THREE.MathUtils.clamp(jumpSlashVisualState.visualProgress, 0, 1)
+      ? (this.isJumpAirborne() && jumpSlashVisualState.phase === 'airborneHold'
+        ? jumpSlashUpperBodyProgress
+        : THREE.MathUtils.clamp(jumpSlashVisualState.visualProgress, 0, 1))
       : sustainedProjectileAim ? 1 : rawAttackProgress;
     const hurtProgress = this.animation.hurtTimer > 0
       ? 1 - THREE.MathUtils.clamp(this.animation.hurtTimer / 0.18, 0, 1)
@@ -4243,13 +4334,20 @@ export class Player {
       attackKind,
       lockOnActive: Boolean(motionOptions.lockOnActive),
       strafeAmount: motionOptions.strafeAmount ?? 0,
+      forwardAmount: motionOptions.forwardAmount ?? 0,
       turnAmount: motionOptions.turnAmount ?? 0,
       busterArmSide: motionOptions.busterArmSide ?? this._getActiveBusterArmSide(),
       aimTargetWorld: motionOptions.aimTargetWorld
         ?? (this.bracedFireTargetValid ? this.bracedFireTargetWorld : null),
       useRightArmForLedge: this._usesRightArmForLedge(),
       jumpSlashAirbornePose,
+      jumpSlashAirbornePoseWeight,
       jumpSlashAirborneRootAnchor,
+      jumpSlashUpperBodyOverride,
+      jumpSlashUpperBodyProgress,
+      jumpSlashSplitBodyLanding,
+      jumpSlashLandingHipsBlend,
+      jumpSlashBladeTransformHold,
       clipKey: swordSlashClipKey ?? motionOptions.clipKey,
     });
 

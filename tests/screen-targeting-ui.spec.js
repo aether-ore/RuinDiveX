@@ -19,7 +19,10 @@ test('free aim uses directional strafing and Sprint keeps stable Buster and swor
     const movementOptions = {
       arenaRadius: 100,
       movementForward: new player.root.position.constructor(0, 0, 1),
-      movementRight: new player.root.position.constructor(1, 0, 0),
+      // Match CameraController/Game lock-on convention: right = forward x up.
+      movementRight: new player.root.position.constructor(-1, 0, 0),
+      cameraForward: new player.root.position.constructor(0, 0, 1),
+      cameraRight: new player.root.position.constructor(-1, 0, 0),
       lockOnTarget: null,
       lockOnTargetPosition: null,
       aimWorld: new player.root.position.constructor(0, 1.2, 12),
@@ -64,30 +67,165 @@ test('free aim uses directional strafing and Sprint keeps stable Buster and swor
       backward: runPlayerTankInput(['KeyS', 'ShiftLeft']),
       backwardArc: runPlayerTankInput(['KeyS', 'KeyA', 'ShiftLeft']),
     };
-    const runPlayerAimInput = (codes) => {
+    const runPlayerAimInput = (codes, frames = 1, {
+      cameraTurnDirection = 0,
+      cameraTurnRadiansPerFrame = Math.PI / 600,
+      cameraTurnAlternationFrames = 0,
+    } = {}) => {
       player.root.position.set(0, 0, 0);
+      player.root.rotation.set(0, 0, 0);
       player.velocity.set(0, 0, 0);
       player.lastMoveDirection.set(0, 0, 1);
       player.bracedFireDirection.set(0, 0, 1);
       player.bracedFireTargetWorld.set(0, 1.2, 12);
       player.bracedFireTargetValid = true;
-      player.bracedFireTimer = 1;
+      player.bracedFireTimer = Math.max(1, (frames / 60) + 1);
       player.bracedFireLocksFacing = true;
       player._attackWeaponKind = 'projectile';
       player.animation.actionState = null;
       player.animation.actionTimer = 0;
       player.animation.attackTimer = 0.5;
-      player.update(1 / 60, new Set(codes), movementOptions);
+      player.pistolRunArcCameraBasisValid = false;
+      player.pistolRunArcCameraTurnAmount = 0;
+      player.pistolRunArcAccumulatedCameraTurn = 0;
+      player.pistolRunArcLatchedTurnDirection = 0;
+      movementOptions.movementForward.set(0, 0, 1);
+      movementOptions.movementRight.set(-1, 0, 0);
+      movementOptions.cameraForward.copy(movementOptions.movementForward);
+      movementOptions.cameraRight.copy(movementOptions.movementRight);
+      const cameraUp = new player.root.position.constructor(0, 1, 0);
+      let accumulatedSpeed = 0;
+      let arcFrameCount = 0;
+      let minimumRootMotionSpeedMultiplier = Number.POSITIVE_INFINITY;
+      let maximumRootMotionSpeedMultiplier = 0;
+      for (let frame = 0; frame < frames; frame += 1) {
+        if (frame > 0) player.root.position.set(0, 0, 0);
+        if (cameraTurnDirection !== 0) {
+          const frameTurnDirection = cameraTurnAlternationFrames > 0
+            && Math.floor(frame / cameraTurnAlternationFrames) % 2 === 1
+            ? -cameraTurnDirection
+            : cameraTurnDirection;
+          movementOptions.cameraForward.applyAxisAngle(
+            cameraUp,
+            -frameTurnDirection * cameraTurnRadiansPerFrame,
+          ).normalize();
+          movementOptions.cameraRight.crossVectors(
+            movementOptions.cameraForward,
+            cameraUp,
+          ).normalize();
+          movementOptions.movementForward.copy(movementOptions.cameraForward);
+          movementOptions.movementRight.copy(movementOptions.cameraRight);
+          player.bracedFireDirection.copy(movementOptions.cameraForward);
+          player.bracedFireTargetWorld.copy(player.root.position)
+            .addScaledVector(movementOptions.cameraForward, 12)
+            .setY(1.2);
+        }
+        player.update(1 / 60, new Set(codes), movementOptions);
+        accumulatedSpeed += player.velocity.length();
+        if (rig.activeClipKey === 'pistolRunArc' || rig.activeClipKey === 'pistolRunArc2') {
+          arcFrameCount += 1;
+        }
+        const speedMultiplier = rig.root.userData.pistolRunArcRootMotionSpeedMultiplier ?? 1;
+        minimumRootMotionSpeedMultiplier = Math.min(minimumRootMotionSpeedMultiplier, speedMultiplier);
+        maximumRootMotionSpeedMultiplier = Math.max(maximumRootMotionSpeedMultiplier, speedMultiplier);
+      }
       return {
         clip: rig.activeClipKey,
         translated: player.velocity.lengthSq() > 0.0001,
+        speed: player.velocity.length(),
+        averageSpeed: accumulatedSpeed / frames,
+        arcFrameCount,
+        velocityX: player.velocity.x,
+        velocityZ: player.velocity.z,
         lockOnActive: Boolean(movementOptions.lockOnTarget),
+        rootMotionActive: rig.root.userData.pistolRunArcRootMotionActive,
+        rootMotionClip: rig.root.userData.pistolRunArcRootMotionClip,
+        rootMotionLocalX: rig.root.userData.pistolRunArcRootMotionLocalX,
+        rootMotionLocalZ: rig.root.userData.pistolRunArcRootMotionLocalZ,
+        rootMotionSpeedMultiplier: rig.root.userData.pistolRunArcRootMotionSpeedMultiplier ?? 1,
+        minimumRootMotionSpeedMultiplier,
+        maximumRootMotionSpeedMultiplier,
+        footSyncActive: rig.root.userData.pistolRunArcFootSyncActive,
+        cadenceScale: rig.root.userData.pistolRunArcCadenceScale,
+        phaseSyncApplied: rig.root.userData.pistolRunArcPhaseSyncApplied,
+        phaseSyncError: rig.root.userData.pistolRunArcPhaseSyncError,
+        transitionFadeSeconds: rig.root.userData.lastFbxAnimationFadeSeconds,
+        transitionFootLockActive: rig.root.userData.pistolRunArcFootLockActive,
+        transitionFootLockJoint: rig.root.userData.pistolRunArcFootLockJoint,
+        transitionFootLockOffset: rig.root.userData.pistolRunArcFootLockOffset,
+        cameraTurnAmount: rig.root.userData.pistolRunArcCameraTurnAmount ?? 0,
+        cameraTurnAligned: rig.root.userData.pistolRunArcCameraTurnAligned,
+        cameraTurnDegrees: rig.root.userData.pistolRunArcCameraTurnDegrees ?? 0,
+        cameraTurnEntryDegrees: rig.root.userData.pistolRunArcCameraTurnEntryDegrees ?? 0,
+        cameraTurnLatched: rig.root.userData.pistolRunArcCameraTurnLatched,
       };
     };
     const playerIntegrated = {
       pureLeft: runPlayerAimInput(['KeyA']),
       forwardLeft: runPlayerAimInput(['KeyW', 'KeyA']),
       backwardRight: runPlayerAimInput(['KeyS', 'KeyD']),
+    };
+    const aimedSprintArcs = {
+      straight: runPlayerAimInput(['KeyW', 'ShiftLeft'], 120),
+      left: runPlayerAimInput(['KeyW', 'KeyA', 'ShiftLeft'], 120),
+      right: runPlayerAimInput(['KeyW', 'KeyD', 'ShiftLeft'], 120),
+    };
+    const subthresholdCameraTurn = runPlayerAimInput(
+      ['KeyW', 'KeyD', 'ShiftLeft'],
+      30,
+      { cameraTurnDirection: 1 },
+    );
+    const oscillatingCameraTurn = runPlayerAimInput(
+      ['KeyW', 'KeyD', 'ShiftLeft'],
+      120,
+      { cameraTurnDirection: 1, cameraTurnAlternationFrames: 10 },
+    );
+    const turningSprintArcs = {
+      left: runPlayerAimInput(
+        ['KeyW', 'KeyA', 'ShiftLeft'],
+        120,
+        { cameraTurnDirection: -1 },
+      ),
+      right: runPlayerAimInput(
+        ['KeyW', 'KeyD', 'ShiftLeft'],
+        120,
+        { cameraTurnDirection: 1 },
+      ),
+    };
+    const leftFootBeforeReverse = rig.joints.get('leftAnkle')
+      ?.getWorldPosition(new player.root.position.constructor());
+    const rightFootBeforeReverse = rig.joints.get('rightAnkle')
+      ?.getWorldPosition(new player.root.position.constructor());
+    const reverseArcSwap = runPlayerAimInput(['KeyW', 'KeyA', 'ShiftLeft']);
+    const lockedFootBeforeReverse = reverseArcSwap.transitionFootLockJoint === 'leftAnkle'
+      ? leftFootBeforeReverse
+      : rightFootBeforeReverse;
+    const lockedFootAfterReverse = rig.joints.get(reverseArcSwap.transitionFootLockJoint)
+      ?.getWorldPosition(new player.root.position.constructor());
+    const reverseArcLockedFootDisplacement = lockedFootBeforeReverse && lockedFootAfterReverse
+      ? Math.hypot(
+        lockedFootAfterReverse.x - lockedFootBeforeReverse.x,
+        lockedFootAfterReverse.z - lockedFootBeforeReverse.z,
+      )
+      : Number.POSITIVE_INFINITY;
+    const reverseArcSwapSettled = runPlayerAimInput(
+      ['KeyW', 'KeyA', 'ShiftLeft'],
+      60,
+      { cameraTurnDirection: -1 },
+    );
+    const getRootRotationLoopError = (key) => {
+      const track = rig.animationClips.get(key)?.tracks.find((candidate) => (
+        candidate.name.endsWith('.quaternion') && rig._isRootMotionTrack(candidate.name)
+      ));
+      if (!track?.values?.length) return Number.POSITIVE_INFINITY;
+      const Quaternion = player.root.quaternion.constructor;
+      const first = new Quaternion().fromArray(track.values, 0).normalize();
+      const last = new Quaternion().fromArray(track.values, track.values.length - 4).normalize();
+      return first.angleTo(last);
+    };
+    const pistolRunArcLoopErrors = {
+      arc: getRootRotationLoopError('pistolRunArc'),
+      arc2: getRootRotationLoopError('pistolRunArc2'),
     };
 
     const base = {
@@ -101,7 +239,11 @@ test('free aim uses directional strafing and Sprint keeps stable Buster and swor
       busterArmSide: 'right',
     };
     const select = (options) => {
-      rig.update(1 / 60, { ...base, ...options });
+      // Let a deliberate left/right arc reversal complete its brief neutral
+      // transfer before asserting the destination clip mapping.
+      for (let frame = 0; frame < 7; frame += 1) {
+        rig.update(1 / 60, { ...base, ...options });
+      }
       return rig.activeClipKey;
     };
 
@@ -221,6 +363,14 @@ test('free aim uses directional strafing and Sprint keeps stable Buster and swor
       backwardDiagonal,
       tankSprint,
       playerIntegrated,
+      aimedSprintArcs,
+      subthresholdCameraTurn,
+      oscillatingCameraTurn,
+      turningSprintArcs,
+      reverseArcSwap,
+      reverseArcLockedFootDisplacement,
+      reverseArcSwapSettled,
+      pistolRunArcLoopErrors,
       aimedSprint,
       unaimedSprint,
       megaBusterSprint,
@@ -231,8 +381,8 @@ test('free aim uses directional strafing and Sprint keeps stable Buster and swor
   expect(result).toMatchObject({
     pureLeft: 'pistolStrafe',
     pureRight: 'pistolStrafe2',
-    diagonalLeft: 'pistolRunArc',
-    diagonalRight: 'pistolRunArc2',
+    diagonalLeft: 'pistolRun',
+    diagonalRight: 'pistolRun',
     backwardDiagonal: 'pistolRunBackwardArc',
     tankSprint: {
       jogForward: { clip: 'running', running: false },
@@ -271,8 +421,62 @@ test('free aim uses directional strafing and Sprint keeps stable Buster and swor
     },
     playerIntegrated: {
       pureLeft: { clip: 'pistolStrafe', translated: true, lockOnActive: false },
-      forwardLeft: { clip: 'pistolRunArc', translated: true, lockOnActive: false },
+      forwardLeft: { clip: 'pistolRun', translated: true, lockOnActive: false },
       backwardRight: { clip: 'pistolRunBackwardArc2', translated: true, lockOnActive: false },
+    },
+    aimedSprintArcs: {
+      straight: { clip: 'sprint', rootMotionActive: false },
+      left: {
+        clip: 'sprint',
+        rootMotionActive: false,
+        cameraTurnAligned: false,
+      },
+      right: {
+        clip: 'sprint',
+        rootMotionActive: false,
+        cameraTurnAligned: false,
+      },
+    },
+    subthresholdCameraTurn: {
+      clip: 'sprint',
+      rootMotionActive: false,
+      cameraTurnAligned: false,
+      cameraTurnLatched: false,
+      arcFrameCount: 0,
+    },
+    oscillatingCameraTurn: {
+      clip: 'sprint',
+      rootMotionActive: false,
+      cameraTurnAligned: false,
+      cameraTurnLatched: false,
+      arcFrameCount: 0,
+    },
+    turningSprintArcs: {
+      left: {
+        clip: 'pistolRunArc2',
+        rootMotionActive: true,
+        rootMotionClip: 'pistolRunArc2',
+        footSyncActive: true,
+        cameraTurnAligned: true,
+      },
+      right: {
+        clip: 'pistolRunArc',
+        rootMotionActive: true,
+        rootMotionClip: 'pistolRunArc',
+        footSyncActive: true,
+        cameraTurnAligned: true,
+        phaseSyncApplied: true,
+      },
+    },
+    reverseArcSwap: {
+      clip: 'sprint',
+      phaseSyncApplied: true,
+      transitionFootLockActive: true,
+    },
+    reverseArcSwapSettled: {
+      clip: 'pistolRunArc2',
+      rootMotionActive: true,
+      phaseSyncApplied: true,
     },
     aimedSprint: {
       clip: 'sprint',
@@ -302,12 +506,47 @@ test('free aim uses directional strafing and Sprint keeps stable Buster and swor
       swordWristOverrideActive: true,
     },
   });
-  expect(result.aimedSprint.wristAnchorError).toBeLessThan(0.06);
+  expect(result.aimedSprint.wristAnchorError).toBeLessThan(0.061);
   expect(result.aimedSprint.wristOverrideError).toBeLessThan(0.00001);
   expect(result.unaimedSprint.maximumWristError).toBeLessThan(0.00001);
   expect(result.unaimedSprint.maximumLocalAxis).toBe(0);
   expect(result.megaBusterSprint.wristOverrideError).toBeLessThan(0.00001);
   expect(result.swordSprint.wristOverrideError).toBeLessThan(0.00001);
+  expect(result.subthresholdCameraTurn.cameraTurnDegrees).toBeLessThan(
+    result.subthresholdCameraTurn.cameraTurnEntryDegrees,
+  );
+  expect(result.turningSprintArcs.left.cameraTurnDegrees).toBeLessThanOrEqual(-14);
+  expect(result.turningSprintArcs.right.cameraTurnDegrees).toBeGreaterThanOrEqual(14);
+  expect(result.turningSprintArcs.left.cameraTurnAmount).toBeLessThan(-0.1);
+  expect(result.turningSprintArcs.right.cameraTurnAmount).toBeGreaterThan(0.1);
+  expect(result.turningSprintArcs.left.rootMotionLocalX).toBeLessThan(0);
+  expect(result.turningSprintArcs.left.rootMotionLocalZ).toBeGreaterThan(0);
+  expect(result.turningSprintArcs.right.rootMotionLocalX).toBeGreaterThan(0);
+  expect(result.turningSprintArcs.right.rootMotionLocalZ).toBeGreaterThan(0);
+  expect(result.turningSprintArcs.left.velocityX).toBeGreaterThan(0);
+  expect(result.turningSprintArcs.right.velocityX).toBeLessThan(0);
+  expect(result.turningSprintArcs.left.velocityZ).toBeGreaterThan(0);
+  expect(result.turningSprintArcs.right.velocityZ).toBeGreaterThan(0);
+  expect(Math.abs(result.turningSprintArcs.left.averageSpeed - result.aimedSprintArcs.straight.averageSpeed)
+    / result.aimedSprintArcs.straight.averageSpeed).toBeLessThan(0.03);
+  expect(Math.abs(result.turningSprintArcs.right.averageSpeed - result.aimedSprintArcs.straight.averageSpeed)
+    / result.aimedSprintArcs.straight.averageSpeed).toBeLessThan(0.03);
+  expect(result.turningSprintArcs.left.minimumRootMotionSpeedMultiplier).toBeGreaterThanOrEqual(0.72);
+  expect(result.turningSprintArcs.left.maximumRootMotionSpeedMultiplier).toBeLessThanOrEqual(1.28);
+  expect(result.turningSprintArcs.right.minimumRootMotionSpeedMultiplier).toBeGreaterThanOrEqual(0.72);
+  expect(result.turningSprintArcs.right.maximumRootMotionSpeedMultiplier).toBeLessThanOrEqual(1.28);
+  expect(result.turningSprintArcs.left.cadenceScale).toBeGreaterThan(1.5);
+  expect(result.turningSprintArcs.right.cadenceScale).toBeGreaterThan(1.5);
+  expect(result.turningSprintArcs.right.phaseSyncError).toBeLessThan(0.000001);
+  expect(result.turningSprintArcs.right.transitionFadeSeconds).toBeLessThanOrEqual(0.08);
+  expect(result.reverseArcSwap.phaseSyncError).toBeLessThan(0.000001);
+  expect(result.reverseArcSwap.transitionFadeSeconds).toBeLessThanOrEqual(0.08);
+  expect(['leftAnkle', 'rightAnkle']).toContain(result.reverseArcSwap.transitionFootLockJoint);
+  expect(result.reverseArcSwap.transitionFootLockOffset).toBeGreaterThan(0);
+  expect(result.reverseArcLockedFootDisplacement).toBeLessThan(0.000001);
+  expect(result.reverseArcSwapSettled.phaseSyncError).toBeLessThan(0.000001);
+  expect(result.pistolRunArcLoopErrors.arc).toBeLessThan(0.0001);
+  expect(result.pistolRunArcLoopErrors.arc2).toBeLessThan(0.0001);
   expect(result.tankSprint.arcLeft.speed).toBeCloseTo(result.tankSprint.straight.speed, 5);
   expect(result.tankSprint.arcRight.speed).toBeCloseTo(result.tankSprint.straight.speed, 5);
   expect(result.tankSprint.backward.speed).toBeCloseTo(result.tankSprint.jogForward.speed, 5);

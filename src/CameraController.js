@@ -51,6 +51,8 @@ export class CameraController {
     return {
       forward: this.movementForward,
       right: this.movementRight,
+      cameraForward: this.movementForward,
+      cameraRight: this.movementRight,
     };
   }
 

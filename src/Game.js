@@ -656,6 +656,8 @@ export class Game {
     this.lockOnMovementBasis = {
       forward: this.lockOnMovementForward,
       right: this.lockOnMovementRight,
+      cameraForward: this.cameraController.movementForward,
+      cameraRight: this.cameraController.movementRight,
       lockOnTarget: null,
       lockOnTargetPosition: this.lockOnMovementTargetPosition,
     };
@@ -6256,9 +6258,10 @@ export class Game {
 
   _getPlayerMovementBasis() {
     const lockOnTarget = this.combat?.getMovementLockTarget?.() ?? null;
+    const cameraBasis = this.cameraController.getMovementBasis(this.player.lastMoveDirection);
 
     if (!lockOnTarget?.root || lockOnTarget.dead) {
-      return this.cameraController.getMovementBasis(this.player.lastMoveDirection);
+      return cameraBasis;
     }
 
     getCombatTargetWorldPosition(lockOnTarget, this.lockOnMovementTargetPosition);
@@ -6266,11 +6269,13 @@ export class Game {
     this.lockOnMovementForward.y = 0;
 
     if (this.lockOnMovementForward.lengthSq() <= 0.0001) {
-      return this.cameraController.getMovementBasis(this.player.lastMoveDirection);
+      return cameraBasis;
     }
 
     this.lockOnMovementForward.normalize();
     this.lockOnMovementRight.crossVectors(this.lockOnMovementForward, WORLD_UP).normalize();
+    this.lockOnMovementBasis.cameraForward = cameraBasis.cameraForward;
+    this.lockOnMovementBasis.cameraRight = cameraBasis.cameraRight;
     this.lockOnMovementBasis.lockOnTarget = lockOnTarget;
     return this.lockOnMovementBasis;
   }

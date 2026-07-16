@@ -23,6 +23,15 @@ const PLAYER_WALK_SPEED_MULTIPLIER = 1;
 const PLAYER_JOG_SPEED_MULTIPLIER = 1.68;
 const PLAYER_SPRINT_SPEED_MULTIPLIER = 2.25;
 const PLAYER_RUN_ANIMATION_AMOUNT = 1.55;
+const PISTOL_RUN_ARC_ROOT_MOTION_BLEND_RATE = 14;
+const PISTOL_RUN_ARC_SPEED_PROFILE_MIN = 0.72;
+const PISTOL_RUN_ARC_SPEED_PROFILE_MAX = 1.28;
+const PISTOL_RUN_ARC_CAMERA_TURN_FULL_RATE = THREE.MathUtils.degToRad(120);
+const PISTOL_RUN_ARC_CAMERA_TURN_RESPONSE = 22;
+const PISTOL_RUN_ARC_CAMERA_TURN_ENTRY_ANGLE = THREE.MathUtils.degToRad(14);
+const PISTOL_RUN_ARC_CAMERA_TURN_ENTRY_RATE = 0.12;
+const PISTOL_RUN_ARC_CAMERA_TURN_EXIT_RATE = 0.06;
+const PISTOL_RUN_ARC_CAMERA_TURN_MAX_ACCUMULATION = THREE.MathUtils.degToRad(90);
 
 const PLAYER_BASE_STATS = {
   maxHealth: 160,
@@ -60,6 +69,10 @@ const horizontalVelocityDelta = new THREE.Vector3();
 const zeroMoveVelocity = new THREE.Vector3();
 const movementBasisForward = new THREE.Vector3();
 const movementBasisRight = new THREE.Vector3();
+const pistolRunArcLocalDelta = new THREE.Vector3();
+const pistolRunArcWorldDirection = new THREE.Vector3();
+const pistolRunArcFacingDirection = new THREE.Vector3();
+const pistolRunArcMotionSample = {};
 const ledgeMovementDirection = new THREE.Vector3();
 const ledgeFaceDirection = new THREE.Vector3();
 const ledgeAnchorPosition = new THREE.Vector3();
@@ -136,12 +149,12 @@ const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'pistolJump2', file: 'pistol jump (2).fbx', label: 'Pistol Jump Alt', loop: false },
   { key: 'pistolKneelToStand', file: 'pistol kneel to stand.fbx', label: 'Pistol Kneel To Stand', loop: false },
   { key: 'pistolKneelingIdle', file: 'pistol kneeling idle.fbx', label: 'Pistol Kneeling Idle', loop: true, preserveRootMotion: true },
-  { key: 'pistolRunArc', file: 'pistol run arc.fbx', label: 'Pistol Run Arc', loop: true },
-  { key: 'pistolRunArc2', file: 'pistol run arc (2).fbx', label: 'Pistol Run Arc Alt', loop: true },
-  { key: 'pistolRunBackwardArc', file: 'pistol run backward arc.fbx', label: 'Pistol Run Backward Arc', loop: true },
-  { key: 'pistolRunBackwardArc2', file: 'pistol run backward arc (2).fbx', label: 'Pistol Run Backward Arc Alt', loop: true },
+  { key: 'pistolRunArc', file: 'pistol run arc.fbx', label: 'Pistol Run Arc', loop: true, extractRootMotion: true, stabilizeRootRotationLoop: true },
+  { key: 'pistolRunArc2', file: 'pistol run arc (2).fbx', label: 'Pistol Run Arc Alt', loop: true, extractRootMotion: true, stabilizeRootRotationLoop: true },
+  { key: 'pistolRunBackwardArc', file: 'pistol run backward arc.fbx', label: 'Pistol Run Backward Arc', loop: true, extractRootMotion: true },
+  { key: 'pistolRunBackwardArc2', file: 'pistol run backward arc (2).fbx', label: 'Pistol Run Backward Arc Alt', loop: true, extractRootMotion: true },
   { key: 'pistolRunBackward', file: 'pistol run backward.fbx', label: 'Pistol Run Backward', loop: true },
-  { key: 'pistolRun', file: 'pistol run.fbx', label: 'Pistol Run', loop: true },
+  { key: 'pistolRun', file: 'pistol run.fbx', label: 'Pistol Run', loop: true, extractRootMotion: true },
   { key: 'pistolStandToKneel', file: 'pistol stand to kneel.fbx', label: 'Pistol Stand To Kneel', loop: false },
   { key: 'pistolStrafe', file: 'pistol strafe.fbx', label: 'Pistol Strafe', loop: true },
   { key: 'pistolStrafe2', file: 'pistol strafe (2).fbx', label: 'Pistol Strafe Alt', loop: true },
@@ -457,6 +470,15 @@ export class Player {
     this.tankTurnActive = false;
     this.tankTurnAmount = 0;
     this.tankTurnTranslating = false;
+    this.pistolRunArcMotionDirection = new THREE.Vector3();
+    this.pistolRunArcMotionClip = null;
+    this.pistolRunArcMotionSpeedMultiplier = 1;
+    this.pistolRunArcPreviousCameraForward = new THREE.Vector3(0, 0, 1);
+    this.pistolRunArcPreviousCameraRight = new THREE.Vector3(-1, 0, 0);
+    this.pistolRunArcCameraBasisValid = false;
+    this.pistolRunArcCameraTurnAmount = 0;
+    this.pistolRunArcAccumulatedCameraTurn = 0;
+    this.pistolRunArcLatchedTurnDirection = 0;
     this.guardDirection = new THREE.Vector3(0, 0, 1);
     this.guardTimer = 0;
     this.guardDuration = 0;
@@ -483,6 +505,11 @@ export class Player {
       movementOptions = arenaRadius;
       arenaRadius = movementOptions.arenaRadius ?? 32;
     }
+    const pistolRunArcCameraTurnAmount = this._updatePistolRunArcCameraTurnAmount(
+      dt,
+      movementOptions.cameraForward ?? movementOptions.movementForward,
+      movementOptions.cameraRight ?? movementOptions.movementRight,
+    );
 
     if (this.dead) {
       this.cancelSwordJumpSlashVisual({ cancelAttack: true });
@@ -613,6 +640,9 @@ export class Player {
     let moveAmount = 0;
     let movingBackward = false;
     let strafeAmount = 0;
+    let pistolRunArcMotionClip = null;
+    let resolvedLocomotionSpeed = 0;
+    const activeBusterArmSide = this._getActiveBusterArmSide();
     desiredMoveVelocity.set(0, 0, 0);
 
     if (moving) {
@@ -628,6 +658,13 @@ export class Player {
         && rawForwardInput > 0.35;
       jogging = !this.walkModeEnabled && !sprinting;
       moveAmount = translating && (jogging || sprinting) ? PLAYER_RUN_ANIMATION_AMOUNT : 1;
+      pistolRunArcMotionClip = this._resolvePistolRunArcMotionClip({
+        aiming: lockOnActive || bracedStrafing,
+        forwardAmount: rawForwardInput,
+        strafeAmount: rawLateralInput,
+        cameraTurnAmount: pistolRunArcCameraTurnAmount,
+        busterArmSide: activeBusterArmSide,
+      });
 
       if (jumpAirborne) {
         this._resolveMovementDirection(moveVector, movementOptions);
@@ -647,22 +684,51 @@ export class Player {
           .multiplyScalar(directionSign);
       }
 
+      const pistolArcNeutralTransferActive = Boolean(
+        this.externalRig?.root?.userData?.pistolRunArcNeutralTransferActive,
+      );
+      if (!jumpAirborne && pistolRunArcMotionClip && !pistolArcNeutralTransferActive) {
+        pistolRunArcFacingDirection.copy(lockOnActive && lockOnPosition
+          ? lockOnPosition
+          : this.bracedFireDirection);
+        if (lockOnActive && lockOnPosition) {
+          pistolRunArcFacingDirection.sub(this.root.position);
+        }
+        this._applyPistolRunArcRootMotionDirection(
+          pistolRunArcMotionClip,
+          dt,
+          pistolRunArcFacingDirection,
+        );
+      } else {
+        // The neutral pistol-run handoff already follows the player's regular
+        // input direction. Sampling the inactive destination arc here would
+        // restart that clip's root-motion profile on every transfer frame.
+        this._clearPistolRunArcRootMotion();
+      }
+
       const guardMoveMultiplier = this.isShieldGuarding() ? 0.72 : 1;
       const locomotionMultiplier = this.walkModeEnabled
         ? PLAYER_WALK_SPEED_MULTIPLIER
         : sprinting ? PLAYER_SPRINT_SPEED_MULTIPLIER : PLAYER_JOG_SPEED_MULTIPLIER;
       const speed = this._getTunedForwardSpeed() * locomotionMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
+      resolvedLocomotionSpeed = speed;
+      const strideSpeedMultiplier = this.pistolRunArcMotionClip
+        ? this.pistolRunArcMotionSpeedMultiplier
+        : 1;
       if (jumpAirborne) {
-        desiredMoveVelocity.copy(worldMoveDirection).multiplyScalar(speed);
+        desiredMoveVelocity.copy(worldMoveDirection).multiplyScalar(speed * strideSpeedMultiplier);
       } else if (translating && !landingRecovering) {
-        desiredMoveVelocity.copy(worldMoveDirection).multiplyScalar(speed);
+        desiredMoveVelocity.copy(worldMoveDirection).multiplyScalar(speed * strideSpeedMultiplier);
       }
 
       if (lockOnActive && !jumpAirborne) {
         this._resolveLockOnFacingDirection(lockOnPosition);
       }
     } else if (lockOnActive && !jumpAirborne) {
+      this._clearPistolRunArcRootMotion();
       this._resolveLockOnFacingDirection(lockOnPosition);
+    } else {
+      this._clearPistolRunArcRootMotion();
     }
 
     const backpedaling = movingBackward
@@ -737,7 +803,10 @@ export class Player {
       turnAmount: jumpDrivenAnimation ? 0 : freeTurnAmount,
       clipKey: physicalLandingClipKey
         ?? (landingVisualState ? this._jumpLandingVisualClipKey : null)
+        ?? (pistolRunArcMotionClip && externalMoving ? pistolRunArcMotionClip : null)
         ?? (sprinting && externalMoving && !externalBackpedaling ? 'sprint' : null),
+      busterArmSide: activeBusterArmSide,
+      locomotionSpeed: resolvedLocomotionSpeed,
       physicalJump: jumpDrivenAnimation,
     });
 
@@ -819,6 +888,213 @@ export class Player {
     } else {
       worldMoveDirection.normalize();
     }
+  }
+
+  _resolvePistolRunArcMotionClip({
+    aiming = false,
+    forwardAmount = 0,
+    strafeAmount = 0,
+    cameraTurnAmount = 0,
+    busterArmSide = 'left',
+  } = {}) {
+    const inputTurnDirection = Math.sign(strafeAmount);
+    const cameraTurnDirection = Math.sign(cameraTurnAmount);
+    const accumulatedTurnDirection = Math.sign(this.pistolRunArcAccumulatedCameraTurn);
+    const baseEligible = aiming
+      && !this.walkModeEnabled
+      && busterArmSide === 'right'
+      && this._attackWeaponKind !== 'beamBlade'
+      && forwardAmount > 0.35
+      && Math.abs(strafeAmount) > 0.35;
+    const directionAligned = inputTurnDirection !== 0
+      && cameraTurnDirection === inputTurnDirection;
+    const continuingLatchedArc = this.pistolRunArcLatchedTurnDirection === inputTurnDirection
+      && directionAligned
+      && Math.abs(cameraTurnAmount) >= PISTOL_RUN_ARC_CAMERA_TURN_EXIT_RATE;
+    const enteringArc = this.pistolRunArcLatchedTurnDirection === 0
+      && directionAligned
+      && accumulatedTurnDirection === inputTurnDirection
+      && Math.abs(cameraTurnAmount) >= PISTOL_RUN_ARC_CAMERA_TURN_ENTRY_RATE
+      && Math.abs(this.pistolRunArcAccumulatedCameraTurn) >= PISTOL_RUN_ARC_CAMERA_TURN_ENTRY_ANGLE;
+    const cameraTurnAligned = baseEligible && (continuingLatchedArc || enteringArc);
+    const latchedArcEnding = this.pistolRunArcLatchedTurnDirection === inputTurnDirection
+      && Math.abs(cameraTurnAmount) < PISTOL_RUN_ARC_CAMERA_TURN_EXIT_RATE;
+
+    if (cameraTurnAligned) {
+      this.pistolRunArcLatchedTurnDirection = inputTurnDirection;
+    } else if (!baseEligible
+      || this.pistolRunArcLatchedTurnDirection !== inputTurnDirection
+      || !directionAligned
+      || Math.abs(cameraTurnAmount) < PISTOL_RUN_ARC_CAMERA_TURN_EXIT_RATE) {
+      this.pistolRunArcLatchedTurnDirection = 0;
+      if (!directionAligned || !baseEligible || latchedArcEnding) {
+        this.pistolRunArcAccumulatedCameraTurn = 0;
+      }
+    }
+    if (this.externalRig?.root) {
+      this.externalRig.root.userData.pistolRunArcCameraTurnAmount = cameraTurnAmount;
+      this.externalRig.root.userData.pistolRunArcCameraTurnAligned = cameraTurnAligned;
+      this.externalRig.root.userData.pistolRunArcCameraTurnDegrees = THREE.MathUtils.radToDeg(
+        this.pistolRunArcAccumulatedCameraTurn,
+      );
+      this.externalRig.root.userData.pistolRunArcCameraTurnEntryDegrees = THREE.MathUtils.radToDeg(
+        PISTOL_RUN_ARC_CAMERA_TURN_ENTRY_ANGLE,
+      );
+      this.externalRig.root.userData.pistolRunArcCameraTurnLatched = this.pistolRunArcLatchedTurnDirection !== 0;
+    }
+    if (!cameraTurnAligned) {
+      return null;
+    }
+    // The two authored forward-arc FBXs are labeled opposite their visual lean.
+    const key = strafeAmount < 0 ? 'pistolRunArc2' : 'pistolRunArc';
+    return this.externalRig?.animationMetadata?.get(key)?.rootMotion ? key : null;
+  }
+
+  _updatePistolRunArcCameraTurnAmount(dt, cameraForward, cameraRight = null) {
+    movementBasisForward.copy(cameraForward ?? zeroMoveVelocity).setY(0);
+    if (movementBasisForward.lengthSq() <= 0.0001) {
+      this.pistolRunArcCameraBasisValid = false;
+      this.pistolRunArcCameraTurnAmount = 0;
+      this.pistolRunArcAccumulatedCameraTurn = 0;
+      this.pistolRunArcLatchedTurnDirection = 0;
+      return 0;
+    }
+    movementBasisForward.normalize();
+
+    movementBasisRight.copy(cameraRight ?? zeroMoveVelocity).setY(0);
+    if (movementBasisRight.lengthSq() <= 0.0001) {
+      movementBasisRight.set(-movementBasisForward.z, 0, movementBasisForward.x);
+    } else {
+      movementBasisRight.normalize();
+    }
+
+    if (!this.pistolRunArcCameraBasisValid) {
+      this.pistolRunArcPreviousCameraForward.copy(movementBasisForward);
+      this.pistolRunArcPreviousCameraRight.copy(movementBasisRight);
+      this.pistolRunArcCameraBasisValid = true;
+      this.pistolRunArcCameraTurnAmount = 0;
+      this.pistolRunArcAccumulatedCameraTurn = 0;
+      return 0;
+    }
+
+    const turnRadians = Math.atan2(
+      movementBasisForward.dot(this.pistolRunArcPreviousCameraRight),
+      movementBasisForward.dot(this.pistolRunArcPreviousCameraForward),
+    );
+    const turnRate = turnRadians / Math.max(0.0001, Math.abs(dt));
+    const targetTurnAmount = THREE.MathUtils.clamp(
+      turnRate / PISTOL_RUN_ARC_CAMERA_TURN_FULL_RATE,
+      -1,
+      1,
+    );
+    const turnDirection = Math.sign(turnRadians);
+    if (turnDirection !== 0) {
+      if (Math.sign(this.pistolRunArcAccumulatedCameraTurn) !== turnDirection) {
+        this.pistolRunArcAccumulatedCameraTurn = turnRadians;
+      } else {
+        this.pistolRunArcAccumulatedCameraTurn = THREE.MathUtils.clamp(
+          this.pistolRunArcAccumulatedCameraTurn + turnRadians,
+          -PISTOL_RUN_ARC_CAMERA_TURN_MAX_ACCUMULATION,
+          PISTOL_RUN_ARC_CAMERA_TURN_MAX_ACCUMULATION,
+        );
+      }
+    }
+    const response = 1 - Math.exp(-Math.max(0, dt) * PISTOL_RUN_ARC_CAMERA_TURN_RESPONSE);
+    this.pistolRunArcCameraTurnAmount = THREE.MathUtils.lerp(
+      this.pistolRunArcCameraTurnAmount,
+      targetTurnAmount,
+      response,
+    );
+    this.pistolRunArcPreviousCameraForward.copy(movementBasisForward);
+    this.pistolRunArcPreviousCameraRight.copy(movementBasisRight);
+    return this.pistolRunArcCameraTurnAmount;
+  }
+
+  _applyPistolRunArcRootMotionDirection(clipKey, dt, facingDirection) {
+    const localDelta = this.externalRig?.sampleLoopingRootMotionDelta?.(
+      clipKey,
+      dt,
+      pistolRunArcLocalDelta,
+      pistolRunArcMotionSample,
+    );
+    if (!localDelta) {
+      this._clearPistolRunArcRootMotion();
+      return false;
+    }
+    localDelta.y = 0;
+    if (localDelta.lengthSq() <= 0.000001) {
+      const motion = this.externalRig.animationMetadata.get(clipKey)?.rootMotion;
+      localDelta.set(motion?.totalX ?? 0, 0, motion?.totalZ ?? 0);
+    }
+    if (localDelta.lengthSq() <= 0.000001) {
+      this._clearPistolRunArcRootMotion();
+      return false;
+    }
+    // Mirror the swapped clip's authored lateral travel so animation lean and
+    // controls agree while retaining its forward cadence.
+    localDelta.x *= -1;
+    const authoredHorizontalDistance = Math.hypot(localDelta.x, localDelta.z);
+    const expectedHorizontalDistance = pistolRunArcMotionSample.expectedHorizontalDistance ?? 0;
+    this.pistolRunArcMotionSpeedMultiplier = expectedHorizontalDistance > 0.000001
+      ? THREE.MathUtils.clamp(
+        authoredHorizontalDistance / expectedHorizontalDistance,
+        PISTOL_RUN_ARC_SPEED_PROFILE_MIN,
+        PISTOL_RUN_ARC_SPEED_PROFILE_MAX,
+      )
+      : 1;
+    localDelta.normalize();
+
+    pistolRunArcFacingDirection.copy(facingDirection).setY(0);
+    if (pistolRunArcFacingDirection.lengthSq() <= 0.0001) {
+      pistolRunArcFacingDirection.copy(this.lastMoveDirection).setY(0);
+    }
+    if (pistolRunArcFacingDirection.lengthSq() <= 0.0001) {
+      pistolRunArcFacingDirection.set(0, 0, 1);
+    } else {
+      pistolRunArcFacingDirection.normalize();
+    }
+    movementBasisRight.set(
+      -pistolRunArcFacingDirection.z,
+      0,
+      pistolRunArcFacingDirection.x,
+    );
+    pistolRunArcWorldDirection
+      .copy(movementBasisRight)
+      .multiplyScalar(localDelta.x)
+      .addScaledVector(pistolRunArcFacingDirection, localDelta.z);
+    if (pistolRunArcWorldDirection.lengthSq() <= 0.0001) {
+      this._clearPistolRunArcRootMotion();
+      return false;
+    }
+    pistolRunArcWorldDirection.normalize();
+
+    if (this.pistolRunArcMotionClip !== clipKey
+      || this.pistolRunArcMotionDirection.lengthSq() <= 0.0001) {
+      this.pistolRunArcMotionDirection.copy(pistolRunArcWorldDirection);
+    } else {
+      this.pistolRunArcMotionDirection.lerp(
+        pistolRunArcWorldDirection,
+        Math.min(1, dt * PISTOL_RUN_ARC_ROOT_MOTION_BLEND_RATE),
+      ).normalize();
+    }
+    this.pistolRunArcMotionClip = clipKey;
+    worldMoveDirection.copy(this.pistolRunArcMotionDirection);
+    this.externalRig.root.userData.pistolRunArcRootMotionActive = true;
+    this.externalRig.root.userData.pistolRunArcRootMotionClip = clipKey;
+    this.externalRig.root.userData.pistolRunArcRootMotionLocalX = localDelta.x;
+    this.externalRig.root.userData.pistolRunArcRootMotionLocalZ = localDelta.z;
+    this.externalRig.root.userData.pistolRunArcRootMotionSpeedMultiplier = this.pistolRunArcMotionSpeedMultiplier;
+    return true;
+  }
+
+  _clearPistolRunArcRootMotion() {
+    this.pistolRunArcMotionClip = null;
+    this.pistolRunArcMotionDirection.set(0, 0, 0);
+    this.pistolRunArcMotionSpeedMultiplier = 1;
+    if (!this.externalRig?.root) return;
+    this.externalRig.root.userData.pistolRunArcRootMotionActive = false;
+    this.externalRig.root.userData.pistolRunArcRootMotionClip = null;
+    this.externalRig.root.userData.pistolRunArcRootMotionSpeedMultiplier = 1;
   }
 
   faceDirection(direction) {
@@ -4337,6 +4613,7 @@ export class Player {
       forwardAmount: motionOptions.forwardAmount ?? 0,
       turnAmount: motionOptions.turnAmount ?? 0,
       busterArmSide: motionOptions.busterArmSide ?? this._getActiveBusterArmSide(),
+      locomotionSpeed: motionOptions.locomotionSpeed ?? 0,
       aimTargetWorld: motionOptions.aimTargetWorld
         ?? (this.bracedFireTargetValid ? this.bracedFireTargetWorld : null),
       useRightArmForLedge: this._usesRightArmForLedge(),

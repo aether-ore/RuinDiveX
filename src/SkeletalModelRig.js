@@ -56,6 +56,12 @@ const BEAM_SABER_WRIST_LOCAL_POSITION = Object.freeze({ x: -0.05, y: 0.103, z: 0
 const DRILL_HAND_MESH_TOKEN = 'HandMesh_R';
 const BUSTER_CHAMBER_ROLL_SIGN = -1;
 const FREE_TURN_LOCOMOTION_THRESHOLD = 0.35;
+const PHASE_SYNCED_FORWARD_RUN_CLIP_KEYS = new Set(['sprint', 'pistolRun', 'pistolRunArc', 'pistolRunArc2']);
+const PISTOL_ARC_DIRECTION_SWAP_BLEND_SECONDS = 0.08;
+const PISTOL_ARC_NEUTRAL_TRANSFER_SECONDS = 0.08;
+const PISTOL_ARC_FOOT_LOCK_SECONDS = 0.1;
+const PISTOL_ARC_FOOT_LOCK_RELEASE_RATE = 4.5;
+const PISTOL_ARC_FOOT_LOCK_MAX_WORLD_OFFSET = 0.85;
 // Keep the launch handoff soft without washing out the fall clip's wide arm swing.
 const FORWARD_JUMP_PHASE_BLEND_SECONDS = 0.12;
 const FORWARD_JUMP_FALL_TRANSITION_SPEED = 1.5;
@@ -331,6 +337,18 @@ export class SkeletalModelRig {
     this._lastBackGroundClearance = null;
     this.activeAction = null;
     this.activeClipKey = null;
+    this.pistolArcFootLockJoint = null;
+    this.pistolArcFootLockTargetWorld = new THREE.Vector3();
+    this.pistolArcFootLockTimer = 0;
+    this.pistolArcVisualOffsetLocal = new THREE.Vector3();
+    this.pistolArcVisualOffsetApplied = false;
+    this.pistolArcPreviousLeftFootWorld = new THREE.Vector3();
+    this.pistolArcPreviousRightFootWorld = new THREE.Vector3();
+    this.pistolArcPreviousLeftFootMotion = 0;
+    this.pistolArcPreviousRightFootMotion = 0;
+    this.pistolArcPreviousFeetValid = false;
+    this.pistolArcQueuedClip = null;
+    this.pistolArcNeutralTransferTimer = 0;
     this.availableAnimationNames = [];
     this.usesFbxAnimationClips = true;
     this.previousRigState = 'idle';
@@ -787,6 +805,7 @@ export class SkeletalModelRig {
         preserveRootMotion: Boolean(entry.preserveRootMotion),
         lockRootY: Boolean(entry.lockRootY),
         rootYMode: entry.rootYMode,
+        stabilizeRootRotationLoop: Boolean(entry.stabilizeRootRotationLoop),
       });
       if (key === 'swordJumpSlash') {
         const fallingPoseTime = preparedClip.duration * JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS;
@@ -848,6 +867,7 @@ export class SkeletalModelRig {
         lockRootY: Boolean(entry.lockRootY),
         rootYMode: entry.rootYMode ?? null,
         extractRootMotion: Boolean(entry.extractRootMotion),
+        stabilizeRootRotationLoop: Boolean(entry.stabilizeRootRotationLoop),
         rootMotion,
       });
       this.availableAnimationNames.push(key);
@@ -883,6 +903,7 @@ export class SkeletalModelRig {
     forwardAmount = 0,
     turnAmount = 0,
     busterArmSide = this.busterArmSide,
+    locomotionSpeed = 0,
     aimTargetWorld = null,
     useRightArmForLedge = false,
     jumpSlashAirbornePose = false,
@@ -896,6 +917,7 @@ export class SkeletalModelRig {
     fallAnimationClipProgress = null,
     clipKey = null,
   } = {}) {
+    this._restorePistolArcVisualOffset();
     this.setBusterArmSide(busterArmSide);
     this.time += dt;
     const rigState = [
@@ -950,10 +972,14 @@ export class SkeletalModelRig {
         jumpSlashUpperBodyProgress,
       );
       this._applyBeamSaberGripPose();
+      this.pistolArcFootLockJoint = null;
+      this.pistolArcFootLockTimer = 0;
+      this.pistolArcVisualOffsetLocal.set(0, 0, 0);
+      this._recordPistolArcFootPositions();
       return;
     }
 
-    const selectedClip = this._selectAnimationClipKey({
+    const requestedClip = this._selectAnimationClipKey({
       moving,
       moveAmount,
       state,
@@ -971,6 +997,7 @@ export class SkeletalModelRig {
       busterArmSide: this.busterArmSide,
       clipKey,
     });
+    const selectedClip = this._resolvePistolArcDirectionTransitionClip(requestedClip, dt);
 
     const forwardJumpPhaseChange = this.activeClipKey === 'forwardJumpLaunch'
       && selectedClip === 'forwardJumpFall';
@@ -984,6 +1011,7 @@ export class SkeletalModelRig {
       state,
       moving,
       moveAmount,
+      locomotionSpeed,
       running,
       backpedaling,
       lockOnActive,
@@ -1031,6 +1059,132 @@ export class SkeletalModelRig {
       swordActive: sprintSwordRightWristPoseActive,
     });
     this._applyBeamSaberGripPose();
+    this._updatePistolArcFootLock(dt);
+  }
+
+  _restorePistolArcVisualOffset() {
+    if (!this.pistolArcVisualOffsetApplied) return;
+    this.root.position.sub(this.pistolArcVisualOffsetLocal);
+    this.pistolArcVisualOffsetApplied = false;
+    this.root.updateMatrixWorld(true);
+  }
+
+  _resolvePistolArcDirectionTransitionClip(requestedClip, dt) {
+    const requestedArc = requestedClip === 'pistolRunArc' || requestedClip === 'pistolRunArc2';
+    const activeArc = this.activeClipKey === 'pistolRunArc' || this.activeClipKey === 'pistolRunArc2';
+    const neutralAvailable = this.animationActions.has('pistolRun');
+
+    if (activeArc && requestedArc && this.activeClipKey !== requestedClip && neutralAvailable) {
+      this.pistolArcQueuedClip = requestedClip;
+      this.pistolArcNeutralTransferTimer = PISTOL_ARC_NEUTRAL_TRANSFER_SECONDS;
+      this.root.userData.pistolRunArcNeutralTransferActive = true;
+      this.root.userData.pistolRunArcNeutralTransferTarget = requestedClip;
+      return 'pistolRun';
+    }
+
+    if (this.activeClipKey === 'pistolRun' && this.pistolArcQueuedClip) {
+      if (!requestedArc) {
+        this.pistolArcQueuedClip = null;
+        this.pistolArcNeutralTransferTimer = 0;
+        this.root.userData.pistolRunArcNeutralTransferActive = false;
+        return requestedClip;
+      }
+      this.pistolArcQueuedClip = requestedClip;
+      this.pistolArcNeutralTransferTimer = Math.max(0, this.pistolArcNeutralTransferTimer - Math.max(0, dt));
+      if (this.pistolArcNeutralTransferTimer > 0) return 'pistolRun';
+      const targetClip = this.pistolArcQueuedClip;
+      this.pistolArcQueuedClip = null;
+      this.root.userData.pistolRunArcNeutralTransferActive = false;
+      return targetClip;
+    }
+
+    if (!requestedArc) {
+      this.pistolArcQueuedClip = null;
+      this.pistolArcNeutralTransferTimer = 0;
+      this.root.userData.pistolRunArcNeutralTransferActive = false;
+    }
+    return requestedClip;
+  }
+
+  _beginPistolArcFootLock() {
+    const leftFoot = this.joints.get('leftAnkle');
+    const rightFoot = this.joints.get('rightAnkle');
+    if (!this.pistolArcPreviousFeetValid || !leftFoot || !rightFoot) {
+      this.pistolArcFootLockJoint = null;
+      this.pistolArcFootLockTimer = 0;
+      return false;
+    }
+
+    const leftScore = this.pistolArcPreviousLeftFootWorld.y
+      + Math.min(0.3, this.pistolArcPreviousLeftFootMotion) * 0.5;
+    const rightScore = this.pistolArcPreviousRightFootWorld.y
+      + Math.min(0.3, this.pistolArcPreviousRightFootMotion) * 0.5;
+    const useLeftFoot = leftScore <= rightScore;
+    this.pistolArcFootLockJoint = useLeftFoot ? leftFoot : rightFoot;
+    this.pistolArcFootLockTargetWorld.copy(useLeftFoot
+      ? this.pistolArcPreviousLeftFootWorld
+      : this.pistolArcPreviousRightFootWorld);
+    this.pistolArcFootLockTimer = PISTOL_ARC_FOOT_LOCK_SECONDS;
+    this.root.userData.pistolRunArcFootLockJoint = useLeftFoot ? 'leftAnkle' : 'rightAnkle';
+    return true;
+  }
+
+  _updatePistolArcFootLock(dt) {
+    if (this.pistolArcFootLockTimer > 0 && this.pistolArcFootLockJoint) {
+      this.root.updateMatrixWorld(true);
+      this.pistolArcFootLockJoint.getWorldPosition(tempVectorA);
+      tempVectorB.copy(this.pistolArcFootLockTargetWorld).sub(tempVectorA);
+      tempVectorB.y = 0;
+      if (tempVectorB.length() > PISTOL_ARC_FOOT_LOCK_MAX_WORLD_OFFSET) {
+        tempVectorB.setLength(PISTOL_ARC_FOOT_LOCK_MAX_WORLD_OFFSET);
+      }
+
+      const parent = this.root.parent;
+      if (parent) {
+        parent.getWorldQuaternion(tempQuaternionA).invert();
+        tempVectorB.applyQuaternion(tempQuaternionA);
+        parent.getWorldScale(tempVectorC);
+        tempVectorB.x /= Math.max(0.0001, Math.abs(tempVectorC.x));
+        tempVectorB.y /= Math.max(0.0001, Math.abs(tempVectorC.y));
+        tempVectorB.z /= Math.max(0.0001, Math.abs(tempVectorC.z));
+      }
+      this.pistolArcVisualOffsetLocal.copy(tempVectorB);
+      this.pistolArcFootLockTimer = Math.max(0, this.pistolArcFootLockTimer - dt);
+      if (this.pistolArcFootLockTimer <= 0) this.pistolArcFootLockJoint = null;
+    } else if (this.pistolArcVisualOffsetLocal.lengthSq() > 0.000001) {
+      this.pistolArcVisualOffsetLocal.multiplyScalar(
+        Math.exp(-Math.max(0, dt) * PISTOL_ARC_FOOT_LOCK_RELEASE_RATE),
+      );
+      if (this.pistolArcVisualOffsetLocal.lengthSq() <= 0.000001) {
+        this.pistolArcVisualOffsetLocal.set(0, 0, 0);
+      }
+    }
+
+    if (this.pistolArcVisualOffsetLocal.lengthSq() > 0.000001) {
+      this.root.position.add(this.pistolArcVisualOffsetLocal);
+      this.pistolArcVisualOffsetApplied = true;
+      this.root.updateMatrixWorld(true);
+    }
+    this.root.userData.pistolRunArcFootLockActive = this.pistolArcFootLockTimer > 0;
+    this.root.userData.pistolRunArcFootLockOffset = this.pistolArcVisualOffsetLocal.length();
+    this._recordPistolArcFootPositions();
+  }
+
+  _recordPistolArcFootPositions() {
+    const leftFoot = this.joints.get('leftAnkle');
+    const rightFoot = this.joints.get('rightAnkle');
+    if (!leftFoot || !rightFoot) return false;
+    this.root.updateMatrixWorld(true);
+    leftFoot.getWorldPosition(tempVectorA);
+    rightFoot.getWorldPosition(tempVectorB);
+    if (this.pistolArcPreviousFeetValid) {
+      this.pistolArcPreviousLeftFootMotion = tempVectorA.distanceTo(this.pistolArcPreviousLeftFootWorld);
+      this.pistolArcPreviousRightFootMotion = tempVectorB.distanceTo(this.pistolArcPreviousRightFootWorld);
+    }
+    this.pistolArcPreviousLeftFootWorld.copy(tempVectorA);
+    this.pistolArcPreviousRightFootWorld.copy(tempVectorB);
+    this.pistolArcPreviousFeetValid = true;
+    return true;
   }
 
   _applySwordInwardSlashTerminalPose(clipKey, attackProgress) {
@@ -1730,6 +1884,13 @@ export class SkeletalModelRig {
       const deltaX = sourceTrack.values[last] - sourceTrack.values[0];
       const deltaY = sourceTrack.values[last + 1] - sourceTrack.values[1];
       const deltaZ = sourceTrack.values[last + 2] - sourceTrack.values[2];
+      let horizontalPathDistance = 0;
+      for (let index = 3; index < sourceTrack.values.length; index += 3) {
+        horizontalPathDistance += Math.hypot(
+          sourceTrack.values[index] - sourceTrack.values[index - 3],
+          sourceTrack.values[index + 2] - sourceTrack.values[index - 1],
+        );
+      }
       const distanceSq = (deltaX * deltaX) + (deltaY * deltaY) + (deltaZ * deltaZ);
       if (distanceSq <= selectedDistanceSq) {
         continue;
@@ -1748,6 +1909,7 @@ export class SkeletalModelRig {
         totalY: deltaY,
         totalZ: deltaZ,
         totalDistance: Math.sqrt(distanceSq),
+        horizontalPathDistance,
       };
     }
 
@@ -1802,10 +1964,71 @@ export class SkeletalModelRig {
     return target;
   }
 
+  sampleLoopingRootMotionDelta(key, deltaSeconds = 0, target = new THREE.Vector3(), sampleInfo = null) {
+    const normalizedKey = this._normalizeClipKey(key);
+    const data = this.animationMetadata.get(normalizedKey)?.rootMotion;
+    if (!data?.times?.length || !data?.values?.length) return null;
+
+    const duration = Math.max(0.001, data.duration);
+    const action = this.animationActions.get(normalizedKey);
+    const startTime = this.activeClipKey === normalizedKey && action
+      ? THREE.MathUtils.euclideanModulo(action.time, duration)
+      : 0;
+    const timeScale = this.activeClipKey === normalizedKey && action
+      ? Math.max(0.01, Math.abs(action.getEffectiveTimeScale?.() ?? 1))
+      : 1;
+    const unwrappedEndTime = startTime + Math.max(0, deltaSeconds) * timeScale;
+    const elapsedClipTime = Math.max(0, deltaSeconds) * timeScale;
+    const completedCycles = Math.floor(unwrappedEndTime / duration);
+    const endTime = THREE.MathUtils.euclideanModulo(unwrappedEndTime, duration);
+
+    this._sampleRootMotionPosition(data, startTime, tempVectorA);
+    this._sampleRootMotionPosition(data, endTime, tempVectorB);
+    target.copy(tempVectorB).sub(tempVectorA);
+    if (completedCycles > 0) {
+      target.x += data.totalX * completedCycles;
+      target.y += data.totalY * completedCycles;
+      target.z += data.totalZ * completedCycles;
+    }
+    if (sampleInfo) {
+      sampleInfo.timeScale = timeScale;
+      sampleInfo.elapsedClipTime = elapsedClipTime;
+      sampleInfo.expectedHorizontalDistance = (data.horizontalPathDistance ?? Math.hypot(data.totalX, data.totalZ))
+        * (elapsedClipTime / duration);
+    }
+    return target;
+  }
+
+  _sampleRootMotionPosition(data, time, target) {
+    const clampedTime = THREE.MathUtils.clamp(time, data.times[0], data.times[data.times.length - 1]);
+    let upperIndex = data.times.length - 1;
+    for (let index = 1; index < data.times.length; index += 1) {
+      if (data.times[index] >= clampedTime) {
+        upperIndex = index;
+        break;
+      }
+    }
+    const lowerIndex = Math.max(0, upperIndex - 1);
+    const lowerTime = data.times[lowerIndex];
+    const upperTime = data.times[upperIndex];
+    const alpha = upperTime > lowerTime
+      ? THREE.MathUtils.clamp((clampedTime - lowerTime) / (upperTime - lowerTime), 0, 1)
+      : 0;
+    const lowerOffset = lowerIndex * 3;
+    const upperOffset = upperIndex * 3;
+    target.set(
+      THREE.MathUtils.lerp(data.values[lowerOffset], data.values[upperOffset], alpha),
+      THREE.MathUtils.lerp(data.values[lowerOffset + 1], data.values[upperOffset + 1], alpha),
+      THREE.MathUtils.lerp(data.values[lowerOffset + 2], data.values[upperOffset + 2], alpha),
+    );
+    return target;
+  }
+
   _prepareAnimationClip(clip, key, {
     preserveRootMotion = false,
     lockRootY = false,
     rootYMode = null,
+    stabilizeRootRotationLoop = false,
   } = {}) {
     const lockRootYToRest = key === 'forwardJumpLaunch'
       || key === 'forwardJumpFall'
@@ -1816,6 +2039,7 @@ export class SkeletalModelRig {
         lockRootY,
         lockRootYToRest,
         rootYMode,
+        stabilizeRootRotationLoop,
       }))
       .filter(Boolean);
     const preparedClip = new THREE.AnimationClip(key, clip.duration, tracks);
@@ -1828,11 +2052,17 @@ export class SkeletalModelRig {
     lockRootY = false,
     lockRootYToRest = false,
     rootYMode = null,
+    stabilizeRootRotationLoop = false,
   } = {}) {
     const trackName = this._retargetAnimationTrackName(track.name);
     const property = trackName.slice(trackName.lastIndexOf('.') + 1);
+    const rootRotationTrack = property === 'quaternion' && this._isRootMotionTrack(trackName);
     const rootPositionTrack = property === 'position' && this._isRootMotionTrack(trackName);
     const preservesRootMotion = preserveRootMotion && rootPositionTrack;
+
+    if (rootRotationTrack && stabilizeRootRotationLoop) {
+      return this._stabilizeLoopingRootRotationTrack(track, trackName);
+    }
 
     if (!rootPositionTrack || preservesRootMotion) {
       const clonedTrack = track.clone();
@@ -1863,6 +2093,32 @@ export class SkeletalModelRig {
       values,
       track.getInterpolation(),
     );
+  }
+
+  _stabilizeLoopingRootRotationTrack(track, trackName) {
+    const stabilizedTrack = track.clone();
+    stabilizedTrack.name = trackName;
+    if (track.times.length < 2 || stabilizedTrack.values.length < 8) {
+      return stabilizedTrack;
+    }
+
+    const values = stabilizedTrack.values;
+    const firstTime = track.times[0];
+    const lastTime = track.times[track.times.length - 1];
+    const duration = Math.max(0.000001, lastTime - firstTime);
+    const start = new THREE.Quaternion().fromArray(values, 0).normalize();
+    const end = new THREE.Quaternion().fromArray(values, values.length - 4).normalize();
+    const inverseLoopDelta = start.clone().invert().multiply(end).invert();
+    const sample = new THREE.Quaternion();
+    const correction = new THREE.Quaternion();
+
+    for (let index = 0; index < track.times.length; index += 1) {
+      const alpha = THREE.MathUtils.clamp((track.times[index] - firstTime) / duration, 0, 1);
+      correction.identity().slerp(inverseLoopDelta, alpha);
+      sample.fromArray(values, index * 4).normalize().multiply(correction).normalize();
+      sample.toArray(values, index * 4);
+    }
+    return stabilizedTrack;
   }
 
   _getTrackRestLocalPosition(trackName = '') {
@@ -2401,13 +2657,9 @@ export class SkeletalModelRig {
               ? this._firstAvailable('pistolStrafe', 'leftStrafeWalking', 'leftStrafe', 'pistolWalkArc', 'pistolRunArc', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
               : this._firstAvailable('pistolStrafe2', 'rightStrafeWalking', 'rightStrafe', 'pistolWalkArc2', 'pistolRunArc2', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
           }
-          return strafeAmount < 0
-            ? useRunArc
-              ? this._firstAvailable('pistolRunArc', 'pistolWalkArc', 'pistolStrafe', 'leftStrafeWalking', 'pistolRun', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
-              : this._firstAvailable('pistolWalkArc', 'pistolRunArc', 'pistolStrafe', 'leftStrafeWalking', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
-            : useRunArc
-              ? this._firstAvailable('pistolRunArc2', 'pistolWalkArc2', 'pistolStrafe2', 'rightStrafeWalking', 'pistolRun', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
-              : this._firstAvailable('pistolWalkArc2', 'pistolRunArc2', 'pistolStrafe2', 'rightStrafeWalking', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
+          return useRunArc
+            ? this._firstAvailable('pistolRun', 'pistolWalk', 'walking', 'pistolIdle', 'breathingIdle', 'idle')
+            : this._firstAvailable('pistolWalk', 'pistolRun', 'walking', 'pistolIdle', 'breathingIdle', 'idle');
         }
 
         if (running || state === 'running' || moveAmount > 1.1) {
@@ -2519,14 +2771,33 @@ export class SkeletalModelRig {
     }
 
     const previousAction = this.activeAction;
+    const previousClipKey = this.activeClipKey;
+    const phaseSynchronizedPistolArc = Boolean(previousAction
+      && previousClipKey !== key
+      && PHASE_SYNCED_FORWARD_RUN_CLIP_KEYS.has(previousClipKey)
+      && PHASE_SYNCED_FORWARD_RUN_CLIP_KEYS.has(key));
+    let synchronizedPhase = null;
+    if (phaseSynchronizedPistolArc) {
+      const previousDuration = Math.max(0.001, previousAction.getClip?.()?.duration ?? 0);
+      synchronizedPhase = THREE.MathUtils.euclideanModulo(previousAction.time, previousDuration)
+        / previousDuration;
+      this._beginPistolArcFootLock();
+    }
+    const resolvedFadeSeconds = phaseSynchronizedPistolArc
+      ? Math.min(fadeSeconds, PISTOL_ARC_DIRECTION_SWAP_BLEND_SECONDS)
+      : fadeSeconds;
     action.reset();
+    if (synchronizedPhase !== null) {
+      const targetDuration = Math.max(0.001, action.getClip?.()?.duration ?? 0);
+      action.time = synchronizedPhase * targetDuration;
+    }
     action.enabled = true;
     action.setEffectiveWeight(1);
     action.play();
 
     if (previousAction) {
-      if (fadeSeconds > 0) {
-        previousAction.crossFadeTo(action, fadeSeconds, false);
+      if (resolvedFadeSeconds > 0) {
+        previousAction.crossFadeTo(action, resolvedFadeSeconds, false);
       } else {
         previousAction.stop();
       }
@@ -2535,10 +2806,20 @@ export class SkeletalModelRig {
     this.activeAction = action;
     this.activeClipKey = key;
     this.root.userData.activeFbxAnimationClip = key;
-    this.root.userData.lastFbxAnimationFadeSeconds = fadeSeconds;
+    this.root.userData.lastFbxAnimationFadeSeconds = resolvedFadeSeconds;
     this.root.userData.lastFbxAnimationTransition = previousAction
       ? `${previousAction.getClip?.()?.name ?? 'unknown'}->${key}`
       : `none->${key}`;
+    this.root.userData.pistolRunArcPhaseSyncApplied = phaseSynchronizedPistolArc;
+    this.root.userData.pistolRunArcPhaseSyncSourceClip = phaseSynchronizedPistolArc ? previousClipKey : null;
+    this.root.userData.pistolRunArcPhaseSyncTargetClip = phaseSynchronizedPistolArc ? key : null;
+    this.root.userData.pistolRunArcPhaseSyncSourcePhase = synchronizedPhase;
+    this.root.userData.pistolRunArcPhaseSyncTargetPhase = phaseSynchronizedPistolArc
+      ? action.time / Math.max(0.001, action.getClip?.()?.duration ?? 0)
+      : null;
+    this.root.userData.pistolRunArcPhaseSyncError = phaseSynchronizedPistolArc
+      ? Math.abs(this.root.userData.pistolRunArcPhaseSyncTargetPhase - synchronizedPhase)
+      : null;
     return true;
   }
 
@@ -2546,6 +2827,7 @@ export class SkeletalModelRig {
     state = 'idle',
     moving = false,
     moveAmount = 0,
+    locomotionSpeed = 0,
     running = false,
     backpedaling = false,
     turnAmount = 0,
@@ -2565,6 +2847,9 @@ export class SkeletalModelRig {
     const heldPoseProgress = this.animationMetadata.get(key)?.holdProgress;
     const heldAuthoredPose = state === 'lyingFlat' && Number.isFinite(heldPoseProgress);
     let speed = 1;
+    const footSyncedPistolArc = key === 'pistolRunArc'
+      || key === 'pistolRunArc2'
+      || (key === 'pistolRun' && this.root.userData.pistolRunArcNeutralTransferActive);
     if (generatedPowerKnockback || heldAuthoredPose) {
       speed = 0;
     } else if (key === 'walking'
@@ -2582,6 +2867,17 @@ export class SkeletalModelRig {
       || key === 'pistolStrafe'
       || key === 'pistolStrafe2') {
       speed = THREE.MathUtils.clamp(moveAmount || 1, 0.68, 1.22);
+    } else if (footSyncedPistolArc
+      && locomotionSpeed > 0) {
+      const rootMotion = this.animationMetadata.get(key)?.rootMotion;
+      this.root.getWorldScale(tempVectorA);
+      const horizontalModelScale = Math.max(0.0001, (Math.abs(tempVectorA.x) + Math.abs(tempVectorA.z)) * 0.5);
+      const authoredWorldSpeed = rootMotion?.horizontalPathDistance > 0
+        ? (rootMotion.horizontalPathDistance / Math.max(0.001, rootMotion.duration)) * horizontalModelScale
+        : 0;
+      speed = authoredWorldSpeed > 0.0001
+        ? THREE.MathUtils.clamp(locomotionSpeed / authoredWorldSpeed, 0.78, 2.6)
+        : THREE.MathUtils.clamp((moveAmount || 1.2) / 1.2, 0.78, 1.35);
     } else if (key === 'running'
       || key === 'sprint'
       || key === 'pistolRun'
@@ -2608,6 +2904,8 @@ export class SkeletalModelRig {
     }
 
     this.activeAction.setEffectiveTimeScale(speed);
+    this.root.userData.pistolRunArcFootSyncActive = footSyncedPistolArc;
+    this.root.userData.pistolRunArcCadenceScale = footSyncedPistolArc ? speed : 1;
 
     if (heldAuthoredPose) {
       const clipDuration = this.animationMetadata.get(key)?.duration ?? this.activeAction.getClip?.()?.duration ?? 0;

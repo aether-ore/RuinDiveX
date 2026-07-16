@@ -36,9 +36,33 @@ export const RUBY_ORACLE_TUNING = Object.freeze({
 });
 
 export const RUBY_ASCENSION_LAYOUT = Object.freeze({
-  lower: Object.freeze({ count: 3, radius: 4.7, height: 1.35, direction: 1, speed: 0.31, size: 1.55 }),
-  middle: Object.freeze({ count: 2, radius: 3.25, height: 3.2, direction: -1, speed: 0.42, size: 1.3 }),
-  upper: Object.freeze({ count: 1, radius: 1.65, height: 5.15, direction: 1, speed: 0.53, size: 1.05 }),
+  lower: Object.freeze({
+    count: 3,
+    radius: 4.7,
+    height: 1.35,
+    direction: 1,
+    speed: 0.31,
+    size: 1.55,
+    verticalAmplitude: 0,
+  }),
+  middle: Object.freeze({
+    count: 2,
+    radius: 3.25,
+    height: 3.2,
+    direction: -1,
+    speed: 0.42,
+    size: 1.3,
+    verticalAmplitude: 0,
+  }),
+  upper: Object.freeze({
+    count: 1,
+    radius: 1.65,
+    height: 5.15,
+    direction: 1,
+    speed: 0.53,
+    size: 1.05,
+    verticalAmplitude: 0,
+  }),
 });
 
 const PHASE_ONE_ATTACK_DECK = Object.freeze(['directBeam', 'singleLens', 'shutterFlash', 'directBeam']);
@@ -50,13 +74,13 @@ const PHASE_TWO_ATTACK_DECK = Object.freeze([
   'shutterFlash',
   'directBeam',
 ]);
-const ORDINARY_LAYOUTS = Object.freeze([
-  Object.freeze({ tier: 'lower', size: 1.55, radius: 4.7, height: 0.78, direction: 1, speed: 0.2, angle: 0.2 }),
-  Object.freeze({ tier: 'lower', size: 1.55, radius: 4.7, height: 0.78, direction: 1, speed: 0.2, angle: 0.2 + Math.PI * 2 / 3 }),
-  Object.freeze({ tier: 'lower', size: 1.55, radius: 4.7, height: 0.78, direction: 1, speed: 0.2, angle: 0.2 + Math.PI * 4 / 3 }),
-  Object.freeze({ tier: 'middle', size: 1.3, radius: 3.95, height: 0.84, direction: -1, speed: 0.17, angle: Math.PI * 0.5 }),
-  Object.freeze({ tier: 'middle', size: 1.3, radius: 3.95, height: 0.84, direction: -1, speed: 0.17, angle: Math.PI * 1.5 }),
-  Object.freeze({ tier: 'upper', size: 1.05, radius: 3.05, height: 0.9, direction: 1, speed: 0.23, angle: 0 }),
+export const RUBY_PLANETARIUM_LAYOUT = Object.freeze([
+  Object.freeze({ tier: 'lower', size: 1.55, radius: 4.9, height: 1.7, verticalAmplitude: 0.25, direction: 1, speed: 0.16, angle: 0.2 }),
+  Object.freeze({ tier: 'lower', size: 1.55, radius: 4.9, height: 1.7, verticalAmplitude: 0.25, direction: 1, speed: 0.16, angle: 0.2 + Math.PI * 2 / 3 }),
+  Object.freeze({ tier: 'lower', size: 1.55, radius: 4.9, height: 1.7, verticalAmplitude: 0.25, direction: 1, speed: 0.16, angle: 0.2 + Math.PI * 4 / 3 }),
+  Object.freeze({ tier: 'middle', size: 1.3, radius: 2.45, height: 4.05, verticalAmplitude: 0.3, direction: -1, speed: 0.21, angle: Math.PI * 0.5 }),
+  Object.freeze({ tier: 'middle', size: 1.3, radius: 2.45, height: 4.05, verticalAmplitude: 0.3, direction: -1, speed: 0.21, angle: Math.PI * 1.5 }),
+  Object.freeze({ tier: 'upper', size: 1.05, radius: 1.1, height: 6.65, verticalAmplitude: 0.2, direction: 1, speed: 0.27, angle: 0 }),
 ]);
 
 const CHANNEL_CORE_PART_PREFIX = 'rubyOracleChannelCore:';
@@ -82,6 +106,10 @@ function clamp01(value) {
 
 function flatDistance(a, b) {
   return Math.hypot(a.x - b.x, a.z - b.z);
+}
+
+function shortestAngleDelta(from, to) {
+  return Math.atan2(Math.sin(to - from), Math.cos(to - from));
 }
 
 function lineHit(point, start, direction, range, radius) {
@@ -136,6 +164,14 @@ function createObservatoryFixtures(center, ceilingY) {
     blending: THREE.AdditiveBlending,
   });
   ruby.name = 'material_rubyObservatoryEnergy';
+  const orbitGuide = new THREE.MeshBasicMaterial({
+    color: 0xff315f,
+    transparent: true,
+    opacity: 0.16,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  orbitGuide.name = 'material_rubyObservatoryPlanetariumGuide';
 
   const dais = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.38, 0.1, 48), dark);
   dais.name = 'rubyObservatoryCentralDais';
@@ -150,6 +186,21 @@ function createObservatoryFixtures(center, ceilingY) {
     ring.rotation.x = Math.PI * 0.5;
     ring.position.y = 0.055;
     root.add(ring);
+  }
+
+  const tierGuides = new Map();
+  for (const layout of RUBY_PLANETARIUM_LAYOUT) {
+    if (tierGuides.has(layout.tier)) continue;
+    tierGuides.set(layout.tier, layout);
+    const guide = new THREE.Mesh(
+      new THREE.TorusGeometry(layout.radius, 0.018, 6, 96),
+      orbitGuide,
+    );
+    guide.name = `rubyObservatoryPlanetariumRing_${layout.tier}`;
+    guide.rotation.x = Math.PI * 0.5;
+    guide.position.y = layout.height - Math.max(0.12, layout.size * 0.13);
+    guide.renderOrder = 3;
+    root.add(guide);
   }
 
   for (let index = 0; index < 12; index += 1) {
@@ -367,7 +418,7 @@ export class RubyOpticOracleEncounter {
     });
     this.channelMeter = createChannelMeter(game.scene);
 
-    this.lenses = ORDINARY_LAYOUTS.map((layout, index) => {
+    this.lenses = RUBY_PLANETARIUM_LAYOUT.map((layout, index) => {
       const lens = new RubyOrbitalLens({
         owner: this.owner,
         index,
@@ -379,6 +430,7 @@ export class RubyOpticOracleEncounter {
         orbitDirection: layout.direction,
         angularSpeed: layout.speed,
         angularPosition: layout.angle,
+        verticalAmplitude: layout.verticalAmplitude,
         onKnockedDown: (knockedLens, runtimeGame) => this._onLensKnockedDown(knockedLens, runtimeGame),
       });
       lens.ordinaryLayout = layout;
@@ -392,14 +444,7 @@ export class RubyOpticOracleEncounter {
       object.visible = false;
     });
 
-    tempA.copy(this.center).add(new THREE.Vector3(0, 0, 3.15));
-    tempA.y = game.dungeonController?.getSurfaceElevationAt?.(tempA) ?? this.floorY;
-    const clear = game.dungeonController?.findNearestEnemyClearPosition?.(
-      this.owner,
-      tempA,
-      { preferredPosition: tempA, maximumRadius: 2.2 },
-    );
-    this.owner.root.position.copy(clear ?? tempA);
+    this.owner.root.position.set(this.center.x, this.floorY, this.center.z);
     this.initialized = true;
     return true;
   }
@@ -414,6 +459,7 @@ export class RubyOpticOracleEncounter {
     if (!this.initialize(game) || this.disposed || this.owner.dead) return;
     const delta = Math.max(0, Number(dt) || 0);
     this._elapsed += delta;
+    this._updateOraclePose(delta, game);
     if (this.owner.bossState.phase === 2 && Number.isFinite(this.ascensionDue)) {
       this.ascensionDue = Math.max(0, this.ascensionDue - delta);
     }
@@ -457,6 +503,22 @@ export class RubyOpticOracleEncounter {
     this._updatePaths(delta, game);
     this._updateChannelMeter(game, delta);
     this.emitter?.update(delta, this.getEyePosition(tempA));
+  }
+
+  ownsBossPositioning() {
+    return true;
+  }
+
+  _updateOraclePose(dt, game = this.game) {
+    this.owner.root.position.x = this.center.x;
+    this.owner.root.position.z = this.center.z;
+    this.owner.brain.moving = false;
+    tempA.copy(game?.player?.root?.position ?? this.center).sub(this.owner.root.position).setY(0);
+    if (tempA.lengthSq() <= 0.0001) return;
+    const targetYaw = Math.atan2(tempA.x, tempA.z);
+    const turn = shortestAngleDelta(this.owner.root.rotation.y, targetYaw);
+    const maximumTurn = Math.max(0, Number(dt) || 0) * 8.5;
+    this.owner.root.rotation.y += THREE.MathUtils.clamp(turn, -maximumTurn, maximumTurn);
   }
 
   _updatePaths(dt, game) {
@@ -764,15 +826,21 @@ export class RubyOpticOracleEncounter {
     const fireAt = 1.65;
     if (attack.elapsed < lockAt) {
       this._copyPlayerAim(attack.target);
-      this._orientLens(attack.lenses[0], attack.target);
     } else if (!attack.locked) {
       attack.locked = true;
       attack.path.lock();
+    }
+    if (attack.elapsed <= fireAt + RUBY_ORACLE_TUNING.amplifiedBeam.fireTime) {
+      this._orientLens(attack.lenses[0], attack.target);
     }
     if (!attack.fired && attack.elapsed >= fireAt) {
       attack.fired = true;
       this.emitter?.setMode('attack');
       attack.path.fire(game);
+    }
+    if (!attack.lowered
+      && attack.elapsed >= fireAt + RUBY_ORACLE_TUNING.amplifiedBeam.fireTime) {
+      attack.lowered = true;
       attack.lenses[0].beginLowering();
     }
     if (attack.elapsed >= fireAt + 0.3 + 0.85) this._finishAttack(game);
@@ -840,10 +908,12 @@ export class RubyOpticOracleEncounter {
       tempA.normalize();
       attack.targets[0].copy(base).addScaledVector(tempA, 1.15);
       attack.targets[1].copy(base).addScaledVector(tempA, -1.15);
-      attack.lenses.forEach((lens, index) => this._orientLens(lens, attack.targets[index]));
     } else if (!attack.locked) {
       attack.locked = true;
       attack.paths.forEach((path) => path.lock());
+    }
+    if (attack.elapsed <= fireAt + 0.28) {
+      attack.lenses.forEach((lens, index) => this._orientLens(lens, attack.targets[index]));
     }
     if (!attack.fired && attack.elapsed >= fireAt) {
       attack.fired = true;
@@ -851,6 +921,9 @@ export class RubyOpticOracleEncounter {
       attack.paths.forEach((path) => {
         if (!path.complete) path.fire(game);
       });
+    }
+    if (!attack.lowered && attack.elapsed >= fireAt + 0.28) {
+      attack.lowered = true;
       attack.lenses.forEach((lens) => {
         if (lens.state !== RUBY_LENS_STATES.KNOCKED_DOWN) lens.beginLowering();
       });
@@ -974,19 +1047,22 @@ export class RubyOpticOracleEncounter {
     const fireAt = 1.72;
     if (attack.elapsed < lockAt) {
       this._copyPlayerAim(attack.target);
-      this._orientCascade(attack);
     } else if (!attack.locked) {
       attack.locked = true;
       [...attack.paths, attack.redirectPath].filter(Boolean).forEach((path) => {
         if (!path.complete) path.lock();
       });
     }
+    if (attack.elapsed <= fireAt + 0.32) this._orientCascade(attack);
     if (!attack.fired && attack.elapsed >= fireAt) {
       attack.fired = true;
       this.emitter?.setMode('attack');
       [...attack.paths, attack.redirectPath].filter(Boolean).forEach((path) => {
         if (!path.complete) path.fire(game);
       });
+    }
+    if (!attack.lowered && attack.elapsed >= fireAt + 0.32) {
+      attack.lowered = true;
       attack.lenses.forEach((lens) => {
         if (lens.state !== RUBY_LENS_STATES.KNOCKED_DOWN) lens.beginLowering();
       });
@@ -994,15 +1070,8 @@ export class RubyOpticOracleEncounter {
     if (attack.elapsed >= fireAt + 1.15) this._finishAttack(game);
   }
 
-  _startShutterFlash(game) {
-    const angle = (this.attackSerial * 2.399963229728653) % (Math.PI * 2);
-    tempA.set(
-      this.center.x + Math.cos(angle) * 3.4,
-      this.floorY,
-      this.center.z + Math.sin(angle) * 3.4,
-    );
-    tempA.y = game.dungeonController?.getSurfaceElevationAt?.(tempA) ?? this.floorY;
-    this._beginAttack('shutterFlash', { relocationTarget: tempA.clone(), flashed: false });
+  _startShutterFlash() {
+    this._beginAttack('shutterFlash', { flashed: false });
     this.emitter?.setMode('idle');
     return true;
   }
@@ -1031,11 +1100,6 @@ export class RubyOpticOracleEncounter {
         triggerMines: false,
       });
     }
-    if (attack.elapsed >= 0.32 && attack.elapsed <= 1.02) {
-      const alpha = Math.min(1, dt * 5.5);
-      this.owner.root.position.lerp(attack.relocationTarget, alpha);
-      this.owner.brain.moving = true;
-    }
     if (attack.elapsed >= 1.35) this._finishAttack(game, { cooldown: 3.5 });
   }
 
@@ -1060,6 +1124,7 @@ export class RubyOpticOracleEncounter {
         height: layout.height,
         direction: layout.direction,
         speed: layout.speed,
+        verticalAmplitude: layout.verticalAmplitude,
       }, RUBY_ORACLE_TUNING.ascension.initialDelay);
     });
     this.emitter?.setMode('overdrive');
@@ -1321,12 +1386,13 @@ export class RubyOpticOracleEncounter {
   _restoreOrdinaryLensLayout(blendSeconds = 0.8) {
     this.lenses.forEach((lens, index) => {
       lens.forceInert();
-      const layout = ORDINARY_LAYOUTS[index];
+      const layout = RUBY_PLANETARIUM_LAYOUT[index];
       lens.setOrbitLayout({
         radius: layout.radius,
         height: layout.height,
         direction: layout.direction,
         speed: layout.speed,
+        verticalAmplitude: layout.verticalAmplitude,
       }, blendSeconds);
     });
   }
@@ -1438,12 +1504,13 @@ export class RubyOpticOracleEncounter {
     this.channelMeter.root.visible = true;
     this.lenses.forEach((lens, index) => {
       lens.forceInert();
-      const layout = ORDINARY_LAYOUTS[index];
+      const layout = RUBY_PLANETARIUM_LAYOUT[index];
       lens.setOrbitLayout({
-        radius: layout.radius * 0.9,
-        height: layout.height + 0.9,
+        radius: layout.radius,
+        height: layout.height + 0.55,
         direction: layout.direction,
         speed: layout.speed * 0.55,
+        verticalAmplitude: layout.verticalAmplitude,
       }, 0.45);
       this.getEyePosition(tempD);
       this._orientLens(lens, tempD);

@@ -657,6 +657,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       || (this.bossState?.transitionRemaining ?? 0) > 0
       || (this.bossState?.interruptRemaining ?? 0) > 0
       || (this.bossState?.reliquary?.shieldStunRemaining ?? 0) > 0
+      || this.specialEncounter?.ownsBossPositioning?.() === true
       || this.specialEncounter?.isMovementLocked?.() === true
       || Boolean(this.specialEncounter?.attack);
   }

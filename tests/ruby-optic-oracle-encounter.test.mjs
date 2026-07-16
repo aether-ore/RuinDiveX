@@ -5,6 +5,7 @@ import {
   getRubyAscensionTraversalDiagnostics,
   RUBY_ASCENSION_LAYOUT,
   RUBY_ORACLE_TUNING,
+  RUBY_PLANETARIUM_LAYOUT,
 } from '../src/reaverbots/bosses/RubyOpticOracleEncounter.js';
 import {
   RUBY_LENS_STATES,
@@ -88,6 +89,41 @@ test('Ruby ascension layout stays within the shared traversal envelope at every 
   assert.ok(diagnostics.maximumRequiredHorizontalGap <= diagnostics.horizontalLimit);
   assert.ok(diagnostics.maximumRequiredVerticalRise <= diagnostics.verticalLimit);
   assert.ok(RUBY_ASCENSION_LAYOUT.upper.size * 2 >= diagnostics.minimumLandingWidth);
+});
+
+test('Ruby planetarium lanes remain airborne and separated throughout their orbit', () => {
+  const visualRadius = (layout) => layout.size * 0.97;
+  const positionAt = (layout, seconds) => {
+    const angle = layout.angle + layout.direction * layout.speed * seconds;
+    return new THREE.Vector3(
+      Math.cos(angle) * layout.radius,
+      layout.height + Math.sin(angle) * layout.verticalAmplitude,
+      Math.sin(angle) * layout.radius,
+    );
+  };
+  let minimumClearance = Infinity;
+  let minimumHeight = Infinity;
+  let maximumHeight = -Infinity;
+  for (let sample = 0; sample <= 1200; sample += 1) {
+    const seconds = sample * 0.1;
+    const positions = RUBY_PLANETARIUM_LAYOUT.map((layout) => positionAt(layout, seconds));
+    for (let index = 0; index < positions.length; index += 1) {
+      minimumHeight = Math.min(minimumHeight, positions[index].y);
+      maximumHeight = Math.max(maximumHeight, positions[index].y);
+      for (let other = index + 1; other < positions.length; other += 1) {
+        minimumClearance = Math.min(
+          minimumClearance,
+          positions[index].distanceTo(positions[other])
+            - visualRadius(RUBY_PLANETARIUM_LAYOUT[index])
+            - visualRadius(RUBY_PLANETARIUM_LAYOUT[other]),
+        );
+      }
+    }
+  }
+
+  assert.ok(minimumHeight > 1.3, `lowest inert lens was only ${minimumHeight.toFixed(3)} above the floor`);
+  assert.ok(maximumHeight - minimumHeight > 5, 'the inert formation must span the observatory vertically');
+  assert.ok(minimumClearance > 0.18, `ordinary lens clearance fell to ${minimumClearance.toFixed(3)}`);
 });
 
 test('Ruby tuning preserves the authored beam, interruption, and ultimate timing contract', () => {

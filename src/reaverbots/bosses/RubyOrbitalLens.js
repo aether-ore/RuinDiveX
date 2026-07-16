@@ -98,6 +98,7 @@ export class RubyOrbitalLens {
     orbitDirection = 1,
     angularSpeed = 0.3,
     angularPosition = 0,
+    verticalAmplitude = 0,
     onKnockedDown = null,
   } = {}) {
     this.owner = owner ?? null;
@@ -112,6 +113,7 @@ export class RubyOrbitalLens {
     this.orbitDirection = normalizedDirection(orbitDirection);
     this.angularSpeed = Math.max(0, Number(angularSpeed) || 0);
     this.angularPosition = Number(angularPosition) || 0;
+    this.verticalAmplitude = Math.max(0, Number(verticalAmplitude) || 0);
     this.platformCollider = null;
     this.combatTarget = null;
     this.supportingPlayer = false;
@@ -156,7 +158,7 @@ export class RubyOrbitalLens {
     this.radialAnchor.name = `rubyOrbitalLensAnchor_${this.index}`;
     this.radialAnchor.position.set(
       this.orbitRadius,
-      this.orbitHeight - this.platformSurfaceOffset,
+      this._getRadialAnchorHeight(),
       0,
     );
     this.orbitPivot.add(this.radialAnchor);
@@ -488,18 +490,28 @@ export class RubyOrbitalLens {
     return true;
   }
 
-  setOrbitLayout({ radius, height, direction, speed } = {}, blendSeconds = 0) {
+  setOrbitLayout({
+    radius,
+    height,
+    direction,
+    speed,
+    verticalAmplitude,
+  } = {}, blendSeconds = 0) {
     if (this.disposed) return false;
     const targetRadius = Number.isFinite(Number(radius)) ? Math.max(0, Number(radius)) : this.orbitRadius;
     const targetHeight = Number.isFinite(Number(height)) ? Number(height) : this.orbitHeight;
     const targetDirection = normalizedDirection(direction, this.orbitDirection);
     const targetSpeed = Number.isFinite(Number(speed)) ? Math.max(0, Number(speed)) : this.angularSpeed;
+    const targetVerticalAmplitude = Number.isFinite(Number(verticalAmplitude))
+      ? Math.max(0, Number(verticalAmplitude))
+      : this.verticalAmplitude;
     const duration = Math.max(0, Number(blendSeconds) || 0);
     if (duration <= 0) {
       this.orbitRadius = targetRadius;
       this.orbitHeight = targetHeight;
       this.orbitDirection = targetDirection;
       this.angularSpeed = targetSpeed;
+      this.verticalAmplitude = targetVerticalAmplitude;
       this._layoutBlend = null;
       return true;
     }
@@ -508,9 +520,11 @@ export class RubyOrbitalLens {
       duration,
       startRadius: this.orbitRadius,
       startHeight: this.orbitHeight,
+      startVerticalAmplitude: this.verticalAmplitude,
       startAngularVelocity: this.orbitDirection * this.angularSpeed,
       targetRadius,
       targetHeight,
+      targetVerticalAmplitude,
       targetAngularVelocity: targetDirection * targetSpeed,
     };
     return true;
@@ -620,6 +634,11 @@ export class RubyOrbitalLens {
       const alpha = smooth01(blend.elapsed / blend.duration);
       this.orbitRadius = THREE.MathUtils.lerp(blend.startRadius, blend.targetRadius, alpha);
       this.orbitHeight = THREE.MathUtils.lerp(blend.startHeight, blend.targetHeight, alpha);
+      this.verticalAmplitude = THREE.MathUtils.lerp(
+        blend.startVerticalAmplitude,
+        blend.targetVerticalAmplitude,
+        alpha,
+      );
       const velocity = THREE.MathUtils.lerp(
         blend.startAngularVelocity,
         blend.targetAngularVelocity,
@@ -630,6 +649,7 @@ export class RubyOrbitalLens {
       if (blend.elapsed >= blend.duration) {
         this.orbitRadius = blend.targetRadius;
         this.orbitHeight = blend.targetHeight;
+        this.verticalAmplitude = blend.targetVerticalAmplitude;
         this.orbitDirection = normalizedDirection(blend.targetAngularVelocity, this.orbitDirection);
         this.angularSpeed = Math.abs(blend.targetAngularVelocity);
         this._layoutBlend = null;
@@ -640,9 +660,15 @@ export class RubyOrbitalLens {
     this.orbitPivot.rotation.y = -this.angularPosition;
     this.radialAnchor.position.set(
       this.orbitRadius,
-      this.orbitHeight - this.platformSurfaceOffset,
+      this._getRadialAnchorHeight(),
       0,
     );
+  }
+
+  _getRadialAnchorHeight() {
+    return this.orbitHeight
+      + Math.sin(this.angularPosition) * this.verticalAmplitude
+      - this.platformSurfaceOffset;
   }
 
   _advanceState(dt) {

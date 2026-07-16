@@ -100,6 +100,206 @@ test('Ruby observatory installs six moving lens platforms and carries grounded s
   expect(result.resources.telegraphs).toBeLessThanOrEqual(12);
 });
 
+test('Ruby keeps a centered, player-facing planetarium whose live lenses anchor both phases', async ({ page }) => {
+  await openRubyEncounter(page, 'ruby-planetarium-orbits');
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const boss = window.rubyEncounterBoss;
+    const encounter = boss.specialEncounter;
+    const Vector3 = boss.root.position.constructor;
+    const up = new Vector3(0, 1, 0);
+    encounter.attackCooldown = Infinity;
+    encounter.ascensionDue = Infinity;
+    boss.bossState.transitionRemaining = 0;
+    boss.bossState.interruptRemaining = 0;
+
+    const snapshotFormation = () => {
+      const positions = encounter.lenses.map((lens) => lens.getWorldPosition(new Vector3()));
+      const heights = encounter.lenses.map((lens) => lens.platformCollider.topY - encounter.floorY);
+      let minimumClearance = Infinity;
+      for (let index = 0; index < encounter.lenses.length; index += 1) {
+        for (let other = index + 1; other < encounter.lenses.length; other += 1) {
+          minimumClearance = Math.min(
+            minimumClearance,
+            positions[index].distanceTo(positions[other])
+              - encounter.lenses[index].size * 0.97
+              - encounter.lenses[other].size * 0.97,
+          );
+        }
+      }
+      return {
+        positions,
+        minimumClearance,
+        minimumHeight: Math.min(...heights),
+        maximumHeight: Math.max(...heights),
+        minimumRadius: Math.min(...encounter.lenses.map((lens) => Math.hypot(
+          lens.platformCollider.center.x - encounter.center.x,
+          lens.platformCollider.center.z - encounter.center.z,
+        ))),
+        maximumRadius: Math.max(...encounter.lenses.map((lens) => Math.hypot(
+          lens.platformCollider.center.x - encounter.center.x,
+          lens.platformCollider.center.z - encounter.center.z,
+        ))),
+        inert: encounter.lenses.every((lens) => lens.state === 'INERT_PLATFORM'),
+        collidersEnabled: encounter.lenses.every((lens) => lens.platformCollider.enabled),
+        horizontal: encounter.lenses.every((lens) => (
+          up.clone().applyQuaternion(lens.tiltPivot.quaternion).dot(up) > 0.999
+        )),
+      };
+    };
+    const facingDot = () => {
+      const direction = game.player.root.position.clone().sub(boss.root.position).setY(0).normalize();
+      const forward = new Vector3(Math.sin(boss.root.rotation.y), 0, Math.cos(boss.root.rotation.y));
+      return forward.dot(direction);
+    };
+    const centerError = () => Math.hypot(
+      boss.root.position.x - encounter.center.x,
+      boss.root.position.z - encounter.center.z,
+    );
+    const advanceStableFormation = (seconds) => {
+      const start = snapshotFormation();
+      let minimumClearance = start.minimumClearance;
+      const frames = Math.ceil(seconds * 60);
+      for (let frame = 0; frame < frames; frame += 1) {
+        boss.prePlayerUpdate(1 / 60, game);
+        boss.update(1 / 60, game);
+        minimumClearance = Math.min(minimumClearance, snapshotFormation().minimumClearance);
+      }
+      const end = snapshotFormation();
+      return {
+        start,
+        end,
+        minimumClearance,
+        minimumMotion: Math.min(...start.positions.map((position, index) => (
+          position.distanceTo(end.positions[index])
+        ))),
+      };
+    };
+
+    game.player.root.position.set(encounter.center.x + 5, encounter.floorY, encounter.center.z - 3);
+    boss.update(0.6, game);
+    const phaseOneCenterError = centerError();
+    const phaseOneFacing = facingDot();
+    const phaseOne = advanceStableFormation(6);
+
+    encounter.debugStartAttack('singleLens', game);
+    const phaseOneLens = encounter.attack.lenses[0];
+    const phaseOnePath = encounter.attack.path;
+    const phaseOneLensBefore = phaseOneLens.getBeamJunctionPosition(new Vector3());
+    const phaseOneLayoutBefore = [
+      phaseOneLens.orbitRadius,
+      phaseOneLens.orbitHeight,
+      phaseOneLens.verticalAmplitude,
+    ];
+    boss.prePlayerUpdate(0.5, game);
+    boss.update(0.5, game);
+    const phaseOneLensAfter = phaseOneLens.getBeamJunctionPosition(new Vector3());
+    const phaseOneIncomingEnd = phaseOnePath.segments[0].getEnd(new Vector3());
+    const phaseOneOutgoingStart = phaseOnePath.segments[1].getStart(new Vector3());
+    const phaseOneBeam = {
+      moved: phaseOneLensBefore.distanceTo(phaseOneLensAfter),
+      incomingError: phaseOneIncomingEnd.distanceTo(phaseOneLensAfter),
+      outgoingError: phaseOneOutgoingStart.distanceTo(phaseOneLensAfter),
+      layoutDrift: Math.max(
+        Math.abs(phaseOneLens.orbitRadius - phaseOneLayoutBefore[0]),
+        Math.abs(phaseOneLens.orbitHeight - phaseOneLayoutBefore[1]),
+        Math.abs(phaseOneLens.verticalAmplitude - phaseOneLayoutBefore[2]),
+      ),
+    };
+    encounter.cancelCurrentAttack(game, 'planetarium-phase-one-complete');
+
+    boss.bossState.phase = 2;
+    encounter.beginPhaseTwo(game);
+    encounter.ascensionDue = Infinity;
+    encounter.attackCooldown = Infinity;
+    let phaseTransitionMinimumClearance = Infinity;
+    for (let frame = 0; frame < 180; frame += 1) {
+      boss.prePlayerUpdate(1 / 60, game);
+      boss.update(1 / 60, game);
+      phaseTransitionMinimumClearance = Math.min(
+        phaseTransitionMinimumClearance,
+        snapshotFormation().minimumClearance,
+      );
+    }
+    game.player.root.position.set(encounter.center.x - 4, encounter.floorY, encounter.center.z + 4);
+    boss.update(0.6, game);
+    const phaseTwoCenterError = centerError();
+    const phaseTwoFacing = facingDot();
+    const phaseTwo = advanceStableFormation(6);
+
+    encounter.debugStartAttack('refractionCascade', game);
+    const [firstLens, secondLens] = encounter.attack.lenses;
+    const incomingPath = encounter.attack.paths.find((path) => path.role.endsWith(':incoming'));
+    const outgoingPath = encounter.attack.paths.find((path) => path.role.endsWith(':outgoing'));
+    const firstBefore = firstLens.getBeamJunctionPosition(new Vector3());
+    const secondBefore = secondLens.getBeamJunctionPosition(new Vector3());
+    boss.prePlayerUpdate(0.5, game);
+    boss.update(0.5, game);
+    const firstAfter = firstLens.getBeamJunctionPosition(new Vector3());
+    const secondAfter = secondLens.getBeamJunctionPosition(new Vector3());
+    const phaseTwoBeam = {
+      firstMoved: firstBefore.distanceTo(firstAfter),
+      secondMoved: secondBefore.distanceTo(secondAfter),
+      eyeToFirstError: incomingPath.segments[0].getEnd(new Vector3()).distanceTo(firstAfter),
+      firstChainStartError: incomingPath.segments[1].getStart(new Vector3()).distanceTo(firstAfter),
+      secondChainEndError: incomingPath.segments[1].getEnd(new Vector3()).distanceTo(secondAfter),
+      outgoingStartError: outgoingPath.segments[0].getStart(new Vector3()).distanceTo(secondAfter),
+      junctionHeightDifference: Math.abs(firstAfter.y - secondAfter.y),
+      unselectedInert: encounter.lenses
+        .filter((lens) => lens !== firstLens && lens !== secondLens)
+        .every((lens) => lens.state === 'INERT_PLATFORM'),
+    };
+
+    return {
+      phaseOne: {
+        ...phaseOne,
+        centerError: phaseOneCenterError,
+        facing: phaseOneFacing,
+      },
+      phaseTwo: {
+        ...phaseTwo,
+        centerError: phaseTwoCenterError,
+        facing: phaseTwoFacing,
+      },
+      phaseTransitionMinimumClearance,
+      phaseOneBeam,
+      phaseTwoBeam,
+      planetariumGuideCount: encounter.observatory.root.children.filter((object) => (
+        object.name.startsWith('rubyObservatoryPlanetariumRing_')
+      )).length,
+    };
+  });
+
+  for (const phase of [result.phaseOne, result.phaseTwo]) {
+    expect(phase.start.inert).toBe(true);
+    expect(phase.end.inert).toBe(true);
+    expect(phase.end.collidersEnabled).toBe(true);
+    expect(phase.end.horizontal).toBe(true);
+    expect(phase.end.minimumHeight).toBeGreaterThan(1.3);
+    expect(phase.end.maximumHeight - phase.end.minimumHeight).toBeGreaterThan(5);
+    expect(phase.end.maximumRadius - phase.end.minimumRadius).toBeGreaterThan(3.6);
+    expect(phase.minimumClearance).toBeGreaterThan(0.15);
+    expect(phase.minimumMotion).toBeGreaterThan(0.5);
+    expect(phase.centerError).toBeLessThan(0.001);
+    expect(phase.facing).toBeGreaterThan(0.999);
+  }
+  expect(result.phaseTransitionMinimumClearance).toBeGreaterThan(0.15);
+  expect(result.phaseOneBeam.moved).toBeGreaterThan(0.1);
+  expect(result.phaseOneBeam.incomingError).toBeLessThan(0.001);
+  expect(result.phaseOneBeam.outgoingError).toBeLessThan(0.001);
+  expect(result.phaseOneBeam.layoutDrift).toBeLessThan(0.000001);
+  expect(result.phaseTwoBeam.firstMoved).toBeGreaterThan(0.1);
+  expect(result.phaseTwoBeam.secondMoved).toBeGreaterThan(0.1);
+  expect(result.phaseTwoBeam.eyeToFirstError).toBeLessThan(0.001);
+  expect(result.phaseTwoBeam.firstChainStartError).toBeLessThan(0.001);
+  expect(result.phaseTwoBeam.secondChainEndError).toBeLessThan(0.001);
+  expect(result.phaseTwoBeam.outgoingStartError).toBeLessThan(0.001);
+  expect(result.phaseTwoBeam.junctionHeightDifference).toBeGreaterThan(1.5);
+  expect(result.phaseTwoBeam.unselectedInert).toBe(true);
+  expect(result.planetariumGuideCount).toBe(3);
+});
+
 test('active mirrors accept point, line, and arc hits while splash is ignored and knockdown cancels the route', async ({ page }) => {
   await openRubyEncounter(page, 'ruby-mirror-interruption');
 

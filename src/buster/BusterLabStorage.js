@@ -19,6 +19,15 @@ import {
 } from './catalog.js';
 import { validateBusterBuild } from './validation.js';
 import {
+  ArmLoadout,
+  GearLoadout,
+  applyFabricatedRecipe,
+  createDefaultArmsGearState,
+  getEquipmentRecipeDefinition,
+  sanitizeArmsGearState,
+  validateArmsGearState,
+} from '../equipment/index.js';
+import {
   BUSTER_LAB_LEGACY_STORAGE_KEY,
   BUSTER_LAB_ENVELOPE_VERSION,
   BUSTER_LAB_V1_IMPORT_CLAIM_KEY,
@@ -26,8 +35,10 @@ import {
   createBusterLabEnvelope,
   createBusterLabRecoveryBundle,
   getBusterLabLockName,
+  getLegacyBusterLabV2StorageKeys,
   getBusterLabStorageKeys,
   inspectBusterLabStorageEvent,
+  parseLegacyBusterLabV2Envelope,
   parseBusterLabEnvelope,
   resolveBusterLabLockManager,
   resolveSaveContext,
@@ -447,7 +458,8 @@ export function createDefaultBusterLabState() {
       revision: 1,
       snapshot: cloneJson(build),
     }],
-    assignments: { slots: { 1: null, 2: null } },
+    assignments: { slots: { 1: null, 2: STARTER_BUSTER_IDS.buildId } },
+    armsGear: createDefaultArmsGearState(),
     blueprints: [],
     nextBlueprintId: 1,
     fabricationHistory: {},
@@ -538,6 +550,7 @@ function legacyMappedState(raw) {
     chassisDrafts: raw.chassisDrafts ?? raw.drafts ?? [],
     chassisRevisions: raw.chassisRevisions ?? raw.revisions ?? [],
     assignments: raw.assignments ?? {},
+    armsGear: raw.armsGear ?? null,
     blueprints: raw.blueprints ?? [],
     nextBlueprintId: raw.nextBlueprintId ?? 1,
     fabricationHistory: raw.fabricationHistory ?? {},
@@ -657,6 +670,8 @@ function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
     completedAt: typeof raw.completedAt === 'string' ? raw.completedAt : null,
     victoryIndex: status === 'victory' ? Math.max(1, nonNegativeInteger(raw.victoryIndex, 1)) : null,
     signaturePartOverloaded: Boolean(raw.signaturePartOverloaded),
+    sandbox: Boolean(raw.sandbox),
+    debug: Boolean(raw.debug),
     reward,
   };
 }
@@ -799,6 +814,7 @@ function sanitizeState(raw) {
     chassisDrafts,
     chassisRevisions,
     assignments: normalizeAssignments(source.assignments),
+    armsGear: sanitizeArmsGearState(source.armsGear),
     blueprints,
     nextBlueprintId: Math.max(1, nonNegativeInteger(source.nextBlueprintId, 1)),
     fabricationHistory: normalizeFabricationHistory(source.fabricationHistory, moduleInstances),
@@ -945,6 +961,107 @@ function applyAfterDelayBuiltInMigration(state) {
   return state;
 }
 
+function hasQualifyingRecordedBossVictory(state) {
+  const recordedVictories = Object.values(state?.bossHunts?.recordedExpeditions ?? {})
+    .filter((entry) => entry?.status === 'victory');
+  if (recordedVictories.length > 0) {
+    return recordedVictories.some((entry) => !entry.sandbox && !entry.debug);
+  }
+  // Older v2 payloads may contain only aggregate victory counts. Those were
+  // produced by normal campaign play, before debug provenance was recorded.
+  return Object.values(state?.bossHunts?.victoriesByProfile ?? {})
+    .some((count) => nonNegativeInteger(count) > 0);
+}
+
+function grantBarrierMilestoneInState(state) {
+  const loadout = new GearLoadout(state.armsGear.gear);
+  const alreadyOwned = loadout.isUnlocked('barrierGenerator');
+  const defenseWasLocked = !loadout.isSlotUnlocked('defense');
+  loadout.setDefenseUnlocked(true);
+  loadout.unlock('barrierGenerator');
+  // Ownership and equipment can become partially desynchronized in an older
+  // or repaired save. A qualifying milestone should fill an empty Defense
+  // slot even when the permanent Barrier entitlement already exists, without
+  // displacing an intentional Guard Projector choice or a later intentional
+  // unequip after the slot was already unlocked.
+  if (!loadout.getId('defense') && (!alreadyOwned || defenseWasLocked)) {
+    loadout.equip('barrierGenerator', 'defense');
+  }
+  state.armsGear.gear = loadout.snapshot();
+  return !alreadyOwned;
+}
+
+function synchronizeArmsGearAndAssignments(state, { adoptLegacyAssignments = false } = {}) {
+  const knownBuildIds = new Set(state.chassisBuilds.map((build) => build.buildId));
+  const armsGear = sanitizeArmsGearState(state.armsGear);
+  const arms = new ArmLoadout(armsGear.arms);
+
+  if (adoptLegacyAssignments) {
+    const legacySlots = plainObject(state.assignments?.slots);
+    const preferredBuildId = [legacySlots['2'], legacySlots['1'], STARTER_BUSTER_IDS.buildId]
+      .find((buildId) => typeof buildId === 'string' && knownBuildIds.has(buildId)) ?? null;
+    arms.equip('special1', { kind: 'fixedArm', armId: 'laserBeamBlade' });
+    arms.equip('special2', preferredBuildId
+      ? { kind: 'customBuster', buildId: preferredBuildId }
+      : null);
+    arms.equip('utility', { kind: 'fixedArm', armId: 'liftArm' });
+  } else {
+    for (const slot of ['special1', 'special2']) {
+      const selection = arms.get(slot);
+      if (selection?.kind === 'customBuster' && !knownBuildIds.has(selection.buildId)) {
+        arms.unequip(slot);
+      }
+    }
+  }
+
+  armsGear.arms = arms.snapshot();
+  state.armsGear = armsGear;
+  state.assignments = {
+    slots: {
+      1: arms.get('special1')?.kind === 'customBuster'
+        ? arms.get('special1').buildId
+        : null,
+      2: arms.get('special2')?.kind === 'customBuster'
+        ? arms.get('special2').buildId
+        : null,
+    },
+  };
+
+  if (hasQualifyingRecordedBossVictory(state)) {
+    grantBarrierMilestoneInState(state);
+  }
+  state.migrations.armsGearV1 = {
+    completed: true,
+    adoptedLegacyAssignments: Boolean(adoptLegacyAssignments),
+  };
+  const applied = Array.isArray(state.migrations.applied) ? state.migrations.applied : [];
+  state.migrations.applied = [...new Set([...applied, 'fixed-arms-gear-v1'])];
+  return state;
+}
+
+function ownsEquipmentRecipeOutput(armsGear, recipe) {
+  if (recipe.output.kind === 'arm') {
+    return armsGear.arms.ownedArmIds.includes(recipe.output.id);
+  }
+  return Boolean(armsGear.gear.records.some((record) => (
+    record.gearId === recipe.output.id && record.unlocked
+  )));
+}
+
+function applyArmLoadoutSnapshot(state, armSnapshot) {
+  state.armsGear.arms = armSnapshot;
+  state.assignments = {
+    slots: {
+      1: armSnapshot.slots.special1?.kind === 'customBuster'
+        ? armSnapshot.slots.special1.buildId
+        : null,
+      2: armSnapshot.slots.special2?.kind === 'customBuster'
+        ? armSnapshot.slots.special2.buildId
+        : null,
+    },
+  };
+}
+
 export function migrateBusterLabState(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new TypeError('Buster Lab save is not an object.');
@@ -955,9 +1072,11 @@ export function migrateBusterLabState(raw) {
     throw new RangeError(`Buster Lab save version ${version} is newer than supported version ${BUSTER_LAB_STORAGE_VERSION}.`);
   }
   const mapped = version < BUSTER_LAB_STORAGE_VERSION ? legacyMappedState(raw) : raw;
-  const state = quarantineUnknownSavedBuilds(
-    applyAfterDelayBuiltInMigration(applyStarterMigration(sanitizeState(mapped))),
-  );
+  let state = applyAfterDelayBuiltInMigration(applyStarterMigration(sanitizeState(mapped)));
+  state = quarantineUnknownSavedBuilds(state);
+  state = synchronizeArmsGearAndAssignments(state, {
+    adoptLegacyAssignments: version < BUSTER_LAB_STORAGE_VERSION,
+  });
   if (version < BUSTER_LAB_STORAGE_VERSION
     && !state.migrations.unlinkedLegacyCalibrationsV2) {
     const linked = new Set((state.legacyBusterParts?.records ?? [])
@@ -1211,6 +1330,21 @@ export function validateBusterLabState(state) {
       }
     }
   }
+
+  const armsGearValidation = validateArmsGearState(state.armsGear, {
+    knownCustomBuildIds: new Set(state.chassisBuilds.map((build) => build.buildId)),
+  });
+  errors.push(...armsGearValidation.errors.map((error) => (
+    `Arms/Gear ${error.path}: ${error.message}`
+  )));
+  for (const slot of ['1', '2']) {
+    const armSlot = slot === '1' ? 'special1' : 'special2';
+    const selection = state.armsGear?.arms?.slots?.[armSlot];
+    const expected = selection?.kind === 'customBuster' ? selection.buildId : null;
+    if ((state.assignments?.slots?.[slot] ?? null) !== expected) {
+      errors.push(`Custom Buster assignment ${slot} is not reciprocal with ${armSlot}.`);
+    }
+  }
   return errors;
 }
 
@@ -1283,6 +1417,7 @@ export class BusterLabStorage {
     const context = resolveSaveContext(storage, { saveContextId, idFactory: this.idFactory });
     this.saveContextId = context.saveContextId;
     this.storageKeys = getBusterLabStorageKeys(this.saveContextId);
+    this.legacyV2StorageKeys = getLegacyBusterLabV2StorageKeys(this.saveContextId);
     this.lockName = getBusterLabLockName(this.saveContextId);
     this.lockManager = resolveBusterLabLockManager(lockManager);
     this.lockTimeoutMs = Math.max(1, Math.trunc(Number(lockTimeoutMs)) || 5_000);
@@ -1306,6 +1441,7 @@ export class BusterLabStorage {
     this.lastWarning = null;
     this.lastSaveSucceeded = null;
     this.pendingLegacyAdoption = false;
+    this.pendingV2Adoption = false;
   }
 
   static async open(options = {}) {
@@ -1436,6 +1572,33 @@ export class BusterLabStorage {
     }
 
     if (serialized == null) {
+      // A failed/interrupted main write can leave the previous committed v3
+      // envelope only in the context backup. Prefer that authoritative v3
+      // recovery copy before considering retained v2 data or fresh defaults.
+      const backup = this._tryReadEnvelope(this.storageKeys.backup);
+      if (backup.ok) {
+        this._adoptState(this.deserialize(backup.envelope.state));
+        this._adoptEnvelopeMetadata(backup.envelope);
+        let restoredMain = false;
+        if (!this.readOnly) {
+          try {
+            this.storage?.setItem(this.storageKeys.main, backup.raw);
+            restoredMain = true;
+          } catch {
+            // The validated backup remains authoritative for this session and
+            // is retained under its recovery key for a later retry/export.
+          }
+        }
+        this.lastSaveSucceeded = false;
+        this.lastWarning = this.readOnly
+          ? 'Roll recovered the previous Buster Lab from its v3 backup for this read-only session; the missing main save was not rewritten.'
+          : restoredMain
+            ? 'Roll recovered the missing Buster Lab save from its previous v3 backup.'
+            : 'Roll recovered the previous Buster Lab from its v3 backup for this session, but could not restore the missing main save.';
+        return attachWarning(this.state, this.lastWarning);
+      }
+      const adoptedV2 = this._tryAdoptLegacyV2Envelope();
+      if (adoptedV2) return adoptedV2;
       this._adoptState(createDefaultBusterLabState());
       this.revision = 0;
       this.writeId = null;
@@ -1516,6 +1679,91 @@ export class BusterLabStorage {
     return attachWarning(this.state, this.lastWarning);
   }
 
+  _tryAdoptLegacyV2Envelope() {
+    if (!this.storage || !this.legacyV2StorageKeys?.main) return null;
+    const candidates = [
+      { key: this.legacyV2StorageKeys.main, label: 'main' },
+      { key: this.legacyV2StorageKeys.backup, label: 'backup' },
+    ];
+    let selected = null;
+    let lastError = null;
+    for (const candidate of candidates) {
+      try {
+        const raw = this.storage.getItem(candidate.key);
+        if (!raw) continue;
+        selected = {
+          ...candidate,
+          envelope: parseLegacyBusterLabV2Envelope(raw, {
+            expectedSaveContextId: this.saveContextId,
+          }),
+        };
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!selected) {
+      if (lastError) {
+        this.lastWarning = `Roll retained an unreadable v2 workshop save (${lastError.message}) and started a safe starter lab in v3.`;
+      }
+      return null;
+    }
+
+    let migrated;
+    try {
+      const legacyEnvelope = selected.envelope;
+      const source = cloneJson(legacyEnvelope.state, {});
+      source.migrations = plainObject(source.migrations);
+      source.migrations.v2EnvelopeAdoptionV3 = {
+        completed: true,
+        sourceVersion: 2,
+        sourceRevision: legacyEnvelope.revision,
+        sourceWriteId: legacyEnvelope.writeId,
+        sourceKey: selected.key,
+        recoveredFromBackup: selected.label === 'backup',
+      };
+      const applied = Array.isArray(source.migrations.applied) ? source.migrations.applied : [];
+      source.migrations.applied = [...new Set([...applied, 'workshop-envelope-v3'])];
+      migrated = this.deserialize(source);
+    } catch (error) {
+      this.pendingV2Adoption = false;
+      this.lastWarning = `Roll retained an unreadable v2 workshop save (${error.message}) and started a safe starter lab in v3.`;
+      return null;
+    }
+
+    this._adoptState(migrated);
+    this.revision = 0;
+    this.writeId = null;
+    this.updatedAt = null;
+    if (this.readOnly) {
+      this.pendingV2Adoption = true;
+      this.lastSaveSucceeded = false;
+      this.lastWarning = 'Roll loaded the retained v2 workshop for this session, but durable v3 adoption is pending while storage is read-only.';
+      return attachWarning(this.state, this.lastWarning);
+    }
+
+    try {
+      const envelope = this._persistCandidate(migrated, {
+        expectedRevision: 0,
+        expectedWriteId: null,
+        allowMissing: true,
+      });
+      this._adoptEnvelopeMetadata(envelope);
+      this.pendingV2Adoption = false;
+      this.lastSaveSucceeded = true;
+      this.lastWarning = selected.label === 'backup'
+        ? 'Roll recovered the previous workshop from its v2 backup and adopted it into fixed Arms & Gear. The v2 recovery copy was retained.'
+        : 'Roll adopted the previous workshop into the fixed Arms & Gear save. The v2 recovery copy was retained.';
+    } catch (error) {
+      // The migrated state remains authoritative for this session. Never turn
+      // a write failure into apparent data loss or a fresh default profile.
+      this.pendingV2Adoption = true;
+      this.lastSaveSucceeded = false;
+      this.lastWarning = `Roll loaded the v2 workshop, but could not finish its durable v3 adoption (${error.message}). The migrated session and v2 recovery copy remain intact.`;
+    }
+    return attachWarning(this.state, this.lastWarning);
+  }
+
   loadWithStatus() {
     const state = this.load();
     return {
@@ -1528,6 +1776,7 @@ export class BusterLabStorage {
       writePauseReason: this.writePauseReason,
       conflict: cloneJson(this.conflict),
       pendingLegacyAdoption: this.pendingLegacyAdoption,
+      pendingV2Adoption: this.pendingV2Adoption,
     };
   }
 
@@ -1545,6 +1794,7 @@ export class BusterLabStorage {
       listenerAttached: this._storageListenerAttached,
       canReload: Boolean(this.storage),
       canExport: true,
+      pendingV2Adoption: this.pendingV2Adoption,
     };
   }
 
@@ -1621,6 +1871,11 @@ export class BusterLabStorage {
       main: read(this.storageKeys.main),
       backup: read(this.storageKeys.backup),
       corrupt: read(this.storageKeys.corrupt),
+      previousV2: {
+        main: read(this.legacyV2StorageKeys.main),
+        backup: read(this.legacyV2StorageKeys.backup),
+        corrupt: read(this.legacyV2StorageKeys.corrupt),
+      },
     });
     return {
       ok: true,
@@ -1666,13 +1921,21 @@ export class BusterLabStorage {
   }
 
   reset() {
+    const current = this._ensureLoaded();
+    if (this.readOnly) {
+      this.lastSaveSucceeded = false;
+      this.lastWarning = 'Roll could not reset the Buster Lab while durable writes are paused. The current lab was left unchanged.';
+      return attachWarning(current, this.lastWarning);
+    }
     const state = createDefaultBusterLabState();
     try {
       this._persistCandidate(state);
+      this._adoptState(state);
     } catch (error) {
-      this.lastWarning = `Roll couldn't save the reset Buster Lab (${error.message}). A clean lab is available for this session.`;
+      this.lastSaveSucceeded = false;
+      this.lastWarning = `Roll couldn't save the reset Buster Lab (${error.message}). The current lab was left unchanged.`;
+      return attachWarning(current, this.lastWarning);
     }
-    this._adoptState(state);
     return attachWarning(this.state, this.lastWarning);
   }
 
@@ -1715,8 +1978,8 @@ export class BusterLabStorage {
     try {
       return await this._withLock(async () => {
         const latest = this._readCurrentEnvelope();
-        const actualRevision = latest?.revision ?? 0;
-        const actualWriteId = latest?.writeId ?? null;
+        const actualRevision = latest?.revision ?? (this.storage ? 0 : this.revision);
+        const actualWriteId = latest?.writeId ?? (this.storage ? null : this.writeId);
         if (expectedRevision != null && actualRevision !== expectedRevision) {
           throw new BusterLabConflictError('The Buster Lab revision changed before commit.', {
             expectedRevision,
@@ -1733,7 +1996,11 @@ export class BusterLabStorage {
             actualWriteId,
           });
         }
-        const base = latest ? this.deserialize(latest.state) : createDefaultBusterLabState();
+        const base = latest
+          ? this.deserialize(latest.state)
+          : this.storage
+            ? createDefaultBusterLabState()
+            : cloneJson(this._ensureLoaded());
         const candidate = cloneJson(base);
         const result = typeof mutator === 'function'
           ? await mutator(candidate, { operation, revision: actualRevision, writeId: actualWriteId })
@@ -1832,6 +2099,181 @@ export class BusterLabStorage {
 
   setAssignmentsAsync(assignments, concurrency = {}) {
     return this._runAsyncCommand('set-buster-assignments', (lab) => lab.setAssignments(assignments), concurrency);
+  }
+
+  getArmsGearState() {
+    return cloneJson(this._ensureLoaded().armsGear, createDefaultArmsGearState());
+  }
+
+  getArmLoadout() {
+    return cloneJson(this._ensureLoaded().armsGear.arms);
+  }
+
+  getGearLoadout() {
+    return cloneJson(this._ensureLoaded().armsGear.gear);
+  }
+
+  async equipArmLoadoutSlot(slot, selection, concurrency = {}) {
+    const current = this._ensureLoaded();
+    if (selection?.kind === 'customBuster'
+      && !current.chassisBuilds.some((build) => build.buildId === selection.buildId)) {
+      return { ok: false, reason: 'invalid-build', state: current };
+    }
+    const preview = new ArmLoadout(current.armsGear.arms);
+    const previewResult = selection == null
+      ? preview.unequip(slot)
+      : preview.equip(slot, selection);
+    if (!previewResult.ok) return { ...previewResult, state: current };
+    if (!previewResult.changed) {
+      return { ok: true, unchanged: true, changed: false, slot, state: current };
+    }
+
+    const transaction = await this.transact({
+      operation: 'equip-arm-loadout-slot',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      if (selection?.kind === 'customBuster'
+        && !state.chassisBuilds.some((build) => build.buildId === selection.buildId)) {
+        throw new BusterLabOperationError('invalid-build');
+      }
+      const loadout = new ArmLoadout(state.armsGear.arms);
+      const result = selection == null ? loadout.unequip(slot) : loadout.equip(slot, selection);
+      if (!result.ok) throw new BusterLabOperationError(result.reason, result);
+      applyArmLoadoutSnapshot(state, loadout.snapshot());
+      return { slot, selection: loadout.get(slot), changed: result.changed };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  equipArmLoadoutSlotAsync(slot, selection, concurrency = {}) {
+    return this.equipArmLoadoutSlot(slot, selection, concurrency);
+  }
+
+  async equipGearLoadoutSlot(slot, gearId, concurrency = {}) {
+    const current = this._ensureLoaded();
+    const preview = new GearLoadout(current.armsGear.gear);
+    const previewResult = gearId == null
+      ? preview.unequip(slot)
+      : preview.equip(gearId, slot);
+    if (!previewResult.ok) return { ...previewResult, state: current };
+    if (!previewResult.changed && (previewResult.displacedConflicts?.length ?? 0) === 0) {
+      return { ok: true, unchanged: true, changed: false, slot, state: current };
+    }
+
+    const transaction = await this.transact({
+      operation: 'equip-gear-loadout-slot',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const loadout = new GearLoadout(state.armsGear.gear);
+      const result = gearId == null ? loadout.unequip(slot) : loadout.equip(gearId, slot);
+      if (!result.ok) throw new BusterLabOperationError(result.reason, result);
+      state.armsGear.gear = loadout.snapshot();
+      return {
+        slot,
+        gearId: loadout.getId(slot),
+        changed: result.changed,
+        displacedConflicts: cloneJson(result.displacedConflicts, []),
+      };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  equipGearLoadoutSlotAsync(slot, gearId, concurrency = {}) {
+    return this.equipGearLoadoutSlot(slot, gearId, concurrency);
+  }
+
+  async fabricateEquipment(recipeId, concurrency = {}) {
+    const recipe = getEquipmentRecipeDefinition(recipeId);
+    const current = this._ensureLoaded();
+    if (!recipe) return { ok: false, reason: 'unknown-recipe', state: current };
+    if (current.armsGear.fabricatedRecipeIds.includes(recipe.id)) {
+      return { ok: false, reason: 'already-fabricated', recipeId: recipe.id, state: current };
+    }
+    if (ownsEquipmentRecipeOutput(current.armsGear, recipe)) {
+      return { ok: false, reason: 'already-owned', recipeId: recipe.id, state: current };
+    }
+    if (recipe.requiresDefenseUnlock
+      && !new GearLoadout(current.armsGear.gear).isSlotUnlocked('defense')) {
+      return { ok: false, reason: 'defense-locked', recipeId: recipe.id, state: current };
+    }
+    const previewRoll = new RollSalvageStorage({
+      ...current.rollSalvage,
+      discoveredSalvageTypes: current.discovery.salvageTypes,
+      discoveryHistory: current.discovery.history,
+    });
+    const affordability = previewRoll.canTransactRecipe(recipe);
+    if (!affordability.ok) {
+      return {
+        ok: false,
+        reason: 'insufficient-resources',
+        recipeId: recipe.id,
+        ...affordability,
+        state: current,
+      };
+    }
+
+    const transaction = await this.transact({
+      operation: 'fabricate-equipment',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      if (state.armsGear.fabricatedRecipeIds.includes(recipe.id)) {
+        throw new BusterLabOperationError('already-fabricated');
+      }
+      if (ownsEquipmentRecipeOutput(state.armsGear, recipe)) {
+        throw new BusterLabOperationError('already-owned');
+      }
+      if (recipe.requiresDefenseUnlock
+        && !new GearLoadout(state.armsGear.gear).isSlotUnlocked('defense')) {
+        throw new BusterLabOperationError('defense-locked');
+      }
+      const roll = new RollSalvageStorage({
+        ...state.rollSalvage,
+        discoveredSalvageTypes: state.discovery.salvageTypes,
+        discoveryHistory: state.discovery.history,
+      });
+      const spend = roll.transactRecipe(recipe);
+      if (!spend.ok) throw new BusterLabOperationError(spend.reason, spend);
+      const unlock = applyFabricatedRecipe(state.armsGear, recipe.id);
+      if (!unlock.ok) throw new BusterLabOperationError(unlock.reason, unlock);
+      state.armsGear = unlock.state;
+      this._applyRollSnapshot(state, roll.serialize());
+      return {
+        recipeId: recipe.id,
+        output: cloneJson(recipe.output),
+        spent: cloneJson(spend.spent),
+      };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  fabricateEquipmentAsync(recipeId, concurrency = {}) {
+    return this.fabricateEquipment(recipeId, concurrency);
+  }
+
+  async grantDefenseBarrier(concurrency = {}) {
+    const current = this._ensureLoaded();
+    const currentLoadout = new GearLoadout(current.armsGear.gear);
+    const needsSlotRepair = !currentLoadout.isSlotUnlocked('defense');
+    const needsGrant = !currentLoadout.isUnlocked('barrierGenerator');
+    if (!needsSlotRepair && !needsGrant) {
+      return { ok: true, unchanged: true, defenseUnlocked: true, state: current };
+    }
+    const transaction = await this.transact({
+      operation: 'grant-defense-barrier',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => ({
+      defenseUnlocked: true,
+      barrierGranted: grantBarrierMilestoneInState(state),
+    }));
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  grantDefenseBarrierAsync(concurrency = {}) {
+    return this.grantDefenseBarrier(concurrency);
   }
 
   setMegaCalibrationStateAsync(calibrations, concurrency = {}) {
@@ -2032,6 +2474,7 @@ export class BusterLabStorage {
     bossProfileId,
     signaturePartOverloaded = false,
     sandbox = false,
+    debug = false,
     debugRewardOutcome = null,
     allowDebugOverride = false,
   } = {}, concurrency = {}) {
@@ -2139,6 +2582,7 @@ export class BusterLabStorage {
         reason: rewardReason,
         identified: false,
       };
+      const debugVictory = Boolean(debug || allowDebugOverride);
       const completed = {
         expeditionId,
         bossProfileId,
@@ -2150,6 +2594,8 @@ export class BusterLabStorage {
         completedAt: new Date().toISOString(),
         victoryIndex,
         signaturePartOverloaded: Boolean(signaturePartOverloaded),
+        sandbox: false,
+        debug: debugVictory,
         reward,
       };
       hunts.recordedExpeditions[expeditionId] = completed;
@@ -2178,12 +2624,16 @@ export class BusterLabStorage {
           },
         });
       }
+      const barrierGranted = debugVictory ? false : grantBarrierMilestoneInState(state);
+      const defenseUnlocked = new GearLoadout(state.armsGear.gear).isSlotUnlocked('defense');
       return {
         expedition: cloneJson(completed),
         firstClear,
         victoryIndex,
         rewardQueued: rewardEligible,
         reward: cloneJson(reward),
+        defenseUnlocked,
+        barrierGranted,
       };
     });
     return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
@@ -2927,33 +3377,56 @@ export class BusterLabStorage {
     if (slot !== '1' && slot !== '2') {
       return { ok: false, reason: 'invalid-slot', state: current };
     }
-    if (buildId == null) {
-      return this.mutate((state) => {
-        state.assignments = {
-          ...state.assignments,
-          slots: { 1: null, 2: null, ...plainObject(state.assignments.slots), [slot]: null },
-        };
-        return cloneJson(state.assignments);
-      });
+    if (buildId != null && !current.chassisBuilds.some((entry) => entry.buildId === buildId)) {
+      return { ok: false, reason: 'invalid-build', state: current };
     }
-    const build = current.chassisBuilds.find((entry) => entry.buildId === buildId);
-    if (!build) return { ok: false, reason: 'invalid-build', state: current };
     return this.mutate((state) => {
-      const slots = { 1: null, 2: null, ...plainObject(state.assignments.slots) };
-      // One physical chassis cannot occupy both arm hotbar assignments.
-      for (const key of ['1', '2']) if (slots[key] === build.buildId) slots[key] = null;
-      slots[slot] = build.buildId;
-      state.assignments = {
-        ...state.assignments,
-        slots,
-      };
+      const armSlot = slot === '1' ? 'special1' : 'special2';
+      const otherArmSlot = slot === '1' ? 'special2' : 'special1';
+      const loadout = new ArmLoadout(state.armsGear.arms);
+      if (buildId == null) {
+        if (loadout.get(armSlot)?.kind === 'customBuster') loadout.unequip(armSlot);
+      } else {
+        if (loadout.get(otherArmSlot)?.kind === 'customBuster'
+          && loadout.get(otherArmSlot).buildId === buildId) {
+          loadout.unequip(otherArmSlot);
+        }
+        const equipped = loadout.equip(armSlot, { kind: 'customBuster', buildId });
+        if (!equipped.ok) throw new BusterLabOperationError(equipped.reason, equipped);
+      }
+      applyArmLoadoutSnapshot(state, loadout.snapshot());
       return cloneJson(state.assignments);
     });
   }
 
   setAssignments(assignments) {
+    const requestedAssignments = normalizeAssignments(assignments);
+    if (requestedAssignments.slots['1']
+      && requestedAssignments.slots['1'] === requestedAssignments.slots['2']) {
+      return { ok: false, reason: 'duplicate-assignment', state: this._ensureLoaded() };
+    }
     return this.mutate((state) => {
-      state.assignments = plainObject(assignments);
+      const requested = requestedAssignments;
+      const loadout = new ArmLoadout(state.armsGear.arms);
+      for (const slot of ['1', '2']) {
+        const armSlot = slot === '1' ? 'special1' : 'special2';
+        const otherArmSlot = slot === '1' ? 'special2' : 'special1';
+        const buildId = requested.slots[slot];
+        if (buildId == null) {
+          if (loadout.get(armSlot)?.kind === 'customBuster') loadout.unequip(armSlot);
+          continue;
+        }
+        if (!state.chassisBuilds.some((build) => build.buildId === buildId)) {
+          throw new BusterLabOperationError('invalid-build');
+        }
+        if (loadout.get(otherArmSlot)?.kind === 'customBuster'
+          && loadout.get(otherArmSlot).buildId === buildId) {
+          loadout.unequip(otherArmSlot);
+        }
+        const equipped = loadout.equip(armSlot, { kind: 'customBuster', buildId });
+        if (!equipped.ok) throw new BusterLabOperationError(equipped.reason, equipped);
+      }
+      applyArmLoadoutSnapshot(state, loadout.snapshot());
       return cloneJson(state.assignments);
     });
   }
@@ -3372,6 +3845,7 @@ export class BusterLabStorage {
     const nextContextId = rotateSaveContext(this.storage, { idFactory: this.idFactory });
     this.saveContextId = nextContextId;
     this.storageKeys = getBusterLabStorageKeys(nextContextId);
+    this.legacyV2StorageKeys = getLegacyBusterLabV2StorageKeys(nextContextId);
     this.lockName = getBusterLabLockName(nextContextId);
     this.state = null;
     this.revision = 0;

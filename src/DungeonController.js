@@ -40,6 +40,10 @@ const CARDINAL_NEIGHBORS = [
 const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
+const ENVIRONMENTAL_HEAT_TAG_ALIASES = Object.freeze({
+  steam_burst: 'furnaceVent',
+  hot_floor: 'fireFloor',
+});
 
 function getZoneLocalXZ(position, zone) {
   let x = position.x - zone.position.x;
@@ -1278,6 +1282,20 @@ export class DungeonController {
 
   isPlayerInSafeZone() {
     return this.isPositionInSafeZone(this.game.player.root.position);
+  }
+
+  isPlayerInCamp() {
+    return this._getRoomAtPosition(this.game.player.root.position)?.type === 'camp';
+  }
+
+  isPlayerAtRollWorkshop() {
+    const workshop = this.rollInteractable;
+    if (!workshop?.position) return false;
+    const interactionRadius = Number.isFinite(workshop.interactionRadius)
+      ? Math.max(0, workshop.interactionRadius)
+      : 2;
+    return this.game.player.root.position.distanceToSquared(workshop.position)
+      <= interactionRadius * interactionRadius;
   }
 
   _updateExpeditionEntryState() {
@@ -2960,6 +2978,13 @@ export class DungeonController {
       }
     }
 
+    // Reaching this correction path means grounded movement struck a closed
+    // door, wall, solid prop, or non-traversable rise. Jet Skates lose their
+    // boost on that impact before the capsule is projected back to safety.
+    if (this.game.player.jetSkateState?.active) {
+      this.game.player.cancelJetSkateBoost?.();
+    }
+
     tempVectorA.set(current.x, current.y, this.lastSafePlayerPosition.z);
     if (this.isPositionWalkable(tempVectorA) && !groundedRiseRequiresJumpAt(tempVectorA)) {
       current.copy(tempVectorA);
@@ -3037,7 +3062,18 @@ export class DungeonController {
       }
 
       if (isInsideZone(player.root.position, trap)) {
-        player.takeDamage((trap.damagePerSecond ?? 18) * dt);
+        const heatTags = [...new Set((trap.ambientHazardTags ?? [])
+          .map((tag) => ENVIRONMENTAL_HEAT_TAG_ALIASES[tag] ?? tag)
+          .filter((tag) => ['environmentalHeat', 'fireFloor', 'furnaceVent'].includes(tag)))];
+        player.takeIncomingHit({
+          amount: (trap.damagePerSecond ?? 18) * dt,
+          source: trap,
+          guardable: false,
+          reactionTier: 0,
+          hazardDomain: 'environment',
+          hazardTags: heatTags,
+          statusEffects: heatTags.length > 0 ? ['burn'] : [],
+        });
 
         if (pulseNow) {
           tempVectorA.copy(player.root.position);

@@ -88,6 +88,10 @@ const PASSIVE_DEFENSES = new Set([
   'armoredCarapace',
 ]);
 
+function isResolvedPlayerContact(result) {
+  return Boolean(result?.contacted && !result.dodged && !result.immune);
+}
+
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
 }
@@ -1342,7 +1346,12 @@ export class ReaverbotEnemy extends Enemy {
       player.applySlow?.(0.55, 1.5);
     }
     if (this.affix?.id === 'corrosive' && dealt > 0) {
-      player.takeDamage(Math.max(1, dealt * 0.22), this);
+      player.takeIncomingHit({
+        amount: Math.max(1, dealt * 0.22),
+        source: this,
+        guardable: false,
+        reactionTier: 0,
+      });
     }
     return player;
   }
@@ -2371,19 +2380,20 @@ export class ReaverbotEnemy extends Enemy {
       && inHeight
       && distance <= radius + (player.radius ?? 0.42)
       && this._hasClawAttackLineOfSight(game, this.root.position, player.root.position)) {
-      const dealt = player.takeDamage(
-        this.stats.damage * (weapon.horizontalSweepDamageScale ?? 1),
-        this,
-        {
-          attackKind: 'clawHorizontalSwipe',
-          powerfulKnockback: true,
-          knockbackDirection: tempA,
-          knockbackStrength: 1.12,
-        },
-      );
-      if (dealt > 0) {
-        directHitLanded = true;
-        this.onHitPlayer(player, dealt);
+      const hitResult = player.takeIncomingHit({
+        amount: this.stats.damage * (weapon.horizontalSweepDamageScale ?? 1),
+        source: this,
+        attackKind: 'clawHorizontalSwipe',
+        guardable: true,
+        reactionTier: 2,
+        knockbackDirection: tempA,
+        knockbackStrength: 1.12,
+      });
+      directHitLanded = isResolvedPlayerContact(hitResult);
+      if (hitResult.healthDamage > 0) {
+        this.onHitPlayer(player, hitResult.healthDamage);
+      }
+      if (directHitLanded) {
         game.addHitEffect?.(player.root.position, RUSH_WARNING_COLOR_HEX, 0.9);
         game.requestHitStop?.(0.11, { timeScale: 0.045 });
       }
@@ -2862,16 +2872,23 @@ export class ReaverbotEnemy extends Enemy {
     const radius = weapon.contactRadius ?? 1.65;
     if (tempC.length() > radius + game.player.radius) return;
 
-    this.brain.contactCooldown = weapon.contactHitInterval ?? 0.6;
     if (tempC.lengthSq() <= 0.0001) tempC.copy(this.brain.attackDirection);
     tempC.normalize();
-    const dealt = game.player.takeDamage(this.stats.damage * (weapon.contactDamageScale ?? 0.72), this, {
+    const hitResult = game.player.takeIncomingHit({
+      amount: this.stats.damage * (weapon.contactDamageScale ?? 0.72),
+      source: this,
       attackKind: 'rotorContact',
+      guardable: true,
+      reactionTier: 0,
       knockbackDirection: tempC,
       knockbackStrength: 0.78,
     });
-    if (dealt > 0) {
-      this.onHitPlayer(game.player, dealt);
+    const resolvedContact = isResolvedPlayerContact(hitResult);
+    if (hitResult.healthDamage > 0) {
+      this.onHitPlayer(game.player, hitResult.healthDamage);
+    }
+    if (resolvedContact) {
+      this.brain.contactCooldown = weapon.contactHitInterval ?? 0.6;
       this.beginContactRetreat(game, game.player);
       game.addHitEffect(game.player.root.position, RUSH_WARNING_COLOR_HEX, 0.68);
       game.requestHitStop?.(0.07, { timeScale: 0.08 });
@@ -2894,30 +2911,29 @@ export class ReaverbotEnemy extends Enemy {
       }
     }
     tempA.normalize();
-    const dealt = player.takeDamage(
-      this.stats.damage * (this.genome.modules.weapon.bodyContactDamageScale
+    const hitResult = player.takeIncomingHit({
+      amount: this.stats.damage * (this.genome.modules.weapon.bodyContactDamageScale
         ?? MELEE_BODY_CONTACT_DAMAGE_SCALE),
-      this,
-      {
-        attackKind: 'meleeBodyContact',
-        powerfulKnockback: true,
-        knockbackDirection: tempA,
-        knockbackStrength: this.genome.modules.weapon.bodyContactKnockback
-          ?? MELEE_BODY_CONTACT_KNOCKBACK,
-        // A shield can guard an authored swipe, but it must not turn standing
-        // inside a heavily armored machine into a stable position.
-        unblockable: true,
-      },
-    );
-    if (dealt > 0) {
+      source: this,
+      attackKind: 'meleeBodyContact',
+      guardable: false,
+      reactionTier: 2,
+      knockbackDirection: tempA,
+      knockbackStrength: this.genome.modules.weapon.bodyContactKnockback
+        ?? MELEE_BODY_CONTACT_KNOCKBACK,
+    });
+    const resolvedContact = isResolvedPlayerContact(hitResult);
+    if (hitResult.healthDamage > 0) {
+      this.onHitPlayer(player, hitResult.healthDamage);
+    }
+    if (resolvedContact) {
       this.brain.contactCooldown = this.genome.modules.weapon.bodyContactHitInterval
         ?? MELEE_BODY_CONTACT_INTERVAL;
-      this.onHitPlayer(player, dealt);
       this.beginContactRetreat(game, player);
       game.addHitEffect(player.root.position, this.genome.palette.emissive, 0.62);
       game.requestHitStop?.(0.065, { timeScale: 0.08 });
     }
-    return dealt > 0;
+    return resolvedContact;
   }
 
   _updateTractorController(dt, game) {
@@ -4082,9 +4098,18 @@ export class ReaverbotEnemy extends Enemy {
     if (Math.abs((game.player.root.position.y + 1) - tempA.y) > 1.35) return;
     tempB.divideScalar(distance);
     if (tempB.dot(brain.attackDirection) < Math.cos(0.78)) return;
-    const dealt = game.player.takeDamage(this.stats.damage, this);
-    this.onHitPlayer(game.player, dealt);
-    game.addHitEffect(game.player.root.position, 0xff6a2e, 0.42);
+    const hitResult = game.player.takeIncomingHit({
+      amount: this.stats.damage,
+      source: this,
+      guardable: true,
+      reactionTier: 0,
+    });
+    if (hitResult.healthDamage > 0) {
+      this.onHitPlayer(game.player, hitResult.healthDamage);
+    }
+    if (isResolvedPlayerContact(hitResult)) {
+      game.addHitEffect(game.player.root.position, 0xff6a2e, 0.42);
+    }
   }
 
   _fireBeam(game) {
@@ -4094,9 +4119,18 @@ export class ReaverbotEnemy extends Enemy {
     tempC.copy(game.player.root.position);
     tempC.y += 1;
     if (distanceToRay(tempC, tempA, tempB, this.stats.attackRange) <= game.player.radius + 0.48) {
-      const dealt = game.player.takeDamage(this.stats.damage, this);
-      this.onHitPlayer(game.player, dealt);
-      game.addHitEffect(game.player.root.position, this.genome.palette.emissive, 0.72);
+      const hitResult = game.player.takeIncomingHit({
+        amount: this.stats.damage,
+        source: this,
+        guardable: true,
+        reactionTier: 1,
+      });
+      if (hitResult.healthDamage > 0) {
+        this.onHitPlayer(game.player, hitResult.healthDamage);
+      }
+      if (isResolvedPlayerContact(hitResult)) {
+        game.addHitEffect(game.player.root.position, this.genome.palette.emissive, 0.72);
+      }
     }
   }
 
@@ -4128,14 +4162,20 @@ export class ReaverbotEnemy extends Enemy {
     if (tempC.lengthSq() <= 0.0001) tempC.copy(this.brain.attackDirection);
     tempC.normalize();
     const powerfulKnockback = attackKind === 'charge' || attackKind === 'pounce';
-    const dealt = game.player.takeDamage(this.stats.damage, this, {
+    const hitResult = game.player.takeIncomingHit({
+      amount: this.stats.damage,
+      source: this,
       attackKind,
-      powerfulKnockback,
+      guardable: true,
+      reactionTier: powerfulKnockback ? 2 : 1,
       knockbackDirection: tempC,
       knockbackStrength: attackKind === 'charge' ? 1.2 : attackKind === 'pounce' ? 1.08 : 1,
     });
-    if (dealt > 0) {
-      this.onHitPlayer(game.player, dealt);
+    const resolvedContact = isResolvedPlayerContact(hitResult);
+    if (hitResult.healthDamage > 0) {
+      this.onHitPlayer(game.player, hitResult.healthDamage);
+    }
+    if (resolvedContact) {
       this.beginContactRetreat(game, game.player);
       game.addHitEffect(game.player.root.position, this.genome.palette.emissive, 0.58);
       game.requestHitStop?.(0.08, { timeScale: 0.05 });
@@ -4927,8 +4967,15 @@ export class ReaverbotEnemy extends Enemy {
       this.affixTimers.surge -= dt;
       if (this.affixTimers.surge <= 0) {
         if (flatDistance(this.root.position, game.player.root.position) <= 2.1) {
-          const dealt = game.player.takeDamage(this.stats.damage * 0.22, this);
-          this.onHitPlayer(game.player, dealt);
+          const hitResult = game.player.takeIncomingHit({
+            amount: this.stats.damage * 0.22,
+            source: this,
+            guardable: true,
+            reactionTier: 1,
+          });
+          if (hitResult.healthDamage > 0) {
+            this.onHitPlayer(game.player, hitResult.healthDamage);
+          }
         }
         this.affixTimers.surge = 1.2;
       }

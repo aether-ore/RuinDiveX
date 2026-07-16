@@ -20,7 +20,7 @@ async function waitForRollAssets(page) {
   });
 }
 
-test('feature-off and feature-on share one canonical starter Power Raiser without duplication', async ({ page }) => {
+test('the canonical Buster Lab ignores the former feature query without duplicating starter calibration', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
   await page.goto('/?reaverbotSeed=buster-feature-off');
   await waitForGame(page);
@@ -44,16 +44,16 @@ test('feature-off and feature-on share one canonical starter Power Raiser withou
     };
   });
 
-  expect(state.enabled).toBe(false);
-  expect(state.runtime).toBe(null);
-  expect(state.plan).toBe(null);
+  expect(state.enabled).toBe(true);
+  expect(state.runtime).not.toBe(null);
+  expect(state.plan).not.toBe(null);
   expect(state.rollTabsHidden).toBe(false);
   expect(state.busterDebugTabHidden).toBe(true);
-  expect(state.starterPowerRaisers).toBe(1);
-  expect(state.starterIds).toEqual([state.shadow.legacyId]);
+  expect(state.starterPowerRaisers).toBe(0);
+  expect(state.starterIds).toEqual([]);
   expect(state.shadow.legacyType).toBe('powerRaiser');
   expect(state.shadow.location).toEqual({ kind: 'megaSocket', socketIndex: 0 });
-  expect(state.unifiedHud).toBe(false);
+  expect(state.unifiedHud).toBe(true);
 
   await page.goto('/?busterLab=1&reaverbotSeed=buster-feature-off');
   await waitForGame(page);
@@ -88,7 +88,7 @@ test('feature-off and feature-on share one canonical starter Power Raiser withou
     recordCount: window.game.busterLabStorage.state.legacyBusterParts.records
       .filter((entry) => entry.starter).length,
   }));
-  expect(toggledOff).toEqual({ ids: [state.shadow.legacyId], recordCount: 1 });
+  expect(toggledOff).toEqual({ ids: [], recordCount: 1 });
   expect(runtimeErrors).toEqual([]);
 });
 
@@ -325,7 +325,7 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
     clusterBurstSequencer: 1,
     volatileOverloadCell: 1,
   });
-  expect(first.assignments).toEqual({ 1: null, 2: null });
+  expect(first.assignments).toEqual({ 1: null, 2: 'build-a' });
 
   const mortarBattery = await page.evaluate(async () => {
     const { game } = window;
@@ -842,16 +842,16 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   expect(staleDraft.equip.message).toContain('Save this draft');
 
   await page.locator('[data-action="buster-save"]').click();
-  await page.locator('[data-action="buster-equip"][data-slot-index="1"]').click();
-  await expect.poll(() => page.evaluate(() => window.game.busterLabState.assignments.slots['1']))
+  await page.locator('[data-action="buster-equip"][data-slot-index="2"]').click();
+  await expect.poll(() => page.evaluate(() => window.game.busterLabState.assignments.slots['2']))
     .toBe('build-a');
 
   const equipped = await page.evaluate(() => ({
     activeSlot: window.game.player.activeArmIndex,
-    resolved: window.game.getResolvedArmSlot(1),
-    assignment: window.game.busterLabState.assignments.slots['1'],
+    resolved: window.game.getResolvedArmSlot(2),
+    assignment: window.game.busterLabState.assignments.slots['2'],
   }));
-  expect(equipped.activeSlot).toBe(1);
+  expect(equipped.activeSlot).toBe(2);
   expect(equipped.resolved).toEqual({ kind: 'customBuster', buildId: 'build-a' });
   expect(equipped.assignment).toBe('build-a');
 
@@ -860,17 +860,21 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   const persistedAssignment = await page.evaluate(() => {
     const { game } = window;
     const snapshot = {
-      resolved: game.getResolvedArmSlot(1),
-      assignment: game.busterLabState.assignments.slots['1'],
-      displacedSwordCount: game.inventory.items.filter((item) => item.type === 'swordArm').length,
+      resolved: game.getResolvedArmSlot(2),
+      assignment: game.busterLabState.assignments.slots['2'],
+      beamBladeSlot: game.getResolvedArmSlot(1),
+      beamBladeOwned: game.busterLabState.armsGear.unlockedFixedArmIds.includes('laserBeamBlade'),
+      legacySwordItemCount: game.inventory.items.filter((item) => item.type === 'swordArm').length,
     };
-    game.player.switchArmWeapon(1, true);
+    game.player.switchArmWeapon(2, true);
     game.setInventoryOpen(true, { mode: 'roll' });
     return snapshot;
   });
   expect(persistedAssignment.resolved).toEqual({ kind: 'customBuster', buildId: 'build-a' });
   expect(persistedAssignment.assignment).toBe('build-a');
-  expect(persistedAssignment.displacedSwordCount).toBeGreaterThanOrEqual(1);
+  expect(persistedAssignment.beamBladeSlot).toEqual({ kind: 'fixedArm', armId: 'laserBeamBlade' });
+  expect(persistedAssignment.beamBladeOwned).toBe(true);
+  expect(persistedAssignment.legacySwordItemCount).toBe(0);
   await page.getByRole('tab', { name: 'Buster Lab' }).click();
 
   await page.evaluate(() => {
@@ -961,28 +965,39 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
 
   const replacement = await page.evaluate(async () => {
     const { game } = window;
+    const fixedInventoryBefore = game.inventory.items.filter((item) => item?.fixedArmId).length;
     await game.equipCustomBuster('build-a', 2);
     const afterMove = {
-      oldSlot: game.player.armHotbar[1],
+      oldSlotArmId: game.player.armHotbar[1]?.fixedArmId,
       newSlotBuildId: game.player.armHotbar[2]?.buildId,
       assignments: { ...game.busterLabState.assignments.slots },
     };
-    await game.equipCustomBuster('build-a', 1);
-    const replacementArm = game.inventory.items.find((item) => item.type === 'machineGunArm');
-    await game.ui._assignArmWeaponToSlot(replacementArm.id, 1);
+    const originalIsFull = game.inventory.isFull;
+    game.inventory.isFull = () => true;
+    const fullInventoryReplacement = await game.equipCustomBuster('build-a', 1);
+    game.inventory.isFull = originalIsFull;
+    await game.equipArmLoadoutSlot('special1', {
+      kind: 'fixedArm',
+      armId: 'laserBeamBlade',
+    });
     const afterManual = {
       slotType: game.player.armHotbar[1]?.type,
+      fixedArmId: game.player.armHotbar[1]?.fixedArmId,
       assignment: game.busterLabState.assignments.slots['1'],
       customInventoryCount: game.inventory.items.filter((item) => item.type === 'customBusterArm').length,
+      fixedInventoryCount: game.inventory.items.filter((item) => item?.fixedArmId).length,
     };
-    return { afterMove, afterManual };
+    return { afterMove, afterManual, fixedInventoryBefore, fullInventoryReplacement };
   });
-  expect(replacement.afterMove.oldSlot).toBe(null);
+  expect(replacement.afterMove.oldSlotArmId).toBe('laserBeamBlade');
   expect(replacement.afterMove.newSlotBuildId).toBe('build-a');
   expect(replacement.afterMove.assignments).toEqual({ 1: null, 2: 'build-a' });
-  expect(replacement.afterManual.slotType).toBe('machineGunArm');
+  expect(replacement.fullInventoryReplacement.ok).toBe(true);
+  expect(replacement.afterManual.slotType).toBe('swordArm');
+  expect(replacement.afterManual.fixedArmId).toBe('laserBeamBlade');
   expect(replacement.afterManual.assignment).toBe(null);
   expect(replacement.afterManual.customInventoryCount).toBe(0);
+  expect(replacement.afterManual.fixedInventoryCount).toBe(replacement.fixedInventoryBefore);
 
   const failedAnalysis = await page.evaluate(async () => {
     const { game } = window;

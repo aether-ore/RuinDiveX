@@ -303,12 +303,14 @@ export class MapEventSystem {
   }
 
   _dropSalvage(event) {
-    const item = this.game.lootSystem.generateItem(this.game.player.level + 1);
     tempVector.copy(event.object.position);
     tempVector.y = 0.35;
     tempVector.x += (Math.random() - 0.5) * 0.8;
     tempVector.z += (Math.random() - 0.5) * 0.8;
-    this.game.lootSystem.createPickup(item, tempVector);
+    this.game.lootSystem.createUnidentifiedScrapPickup(1, tempVector, {
+      source: { kind: 'salvage-cache', eventId: event.id ?? null },
+      recoverableParts: [],
+    });
   }
 
   _spawnDefenseWave(event, count) {

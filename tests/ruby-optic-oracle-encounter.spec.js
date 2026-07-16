@@ -588,7 +588,7 @@ test('crossing, cascade, and Ascension expose their authored interruption and st
   expect(result.ascension.success.resources.telegraphs).toBeLessThanOrEqual(12);
 });
 
-test('failed Ascension deals a survivable 75-percent burst and reflects through all six lenses', async ({ page }) => {
+test('failed Ascension applies its 75-percent burst through Reinforced Armor and reflects through all six lenses', async ({ page }) => {
   await openRubyEncounter(page, 'ruby-ascension-failure');
 
   const result = await page.evaluate(() => {
@@ -638,8 +638,7 @@ test('failed Ascension deals a survivable 75-percent burst and reflects through 
   });
 
   expect(result.playerDead).toBe(false);
-  expect(result.healthRatio).toBeGreaterThanOrEqual(0.24);
-  expect(result.healthRatio).toBeLessThanOrEqual(0.27);
+  expect(result.healthRatio).toBeCloseTo(0.385, 5);
   expect(result.burstRecovery).toBeGreaterThan(1.2);
   expect(result.attackCleared).toBe(true);
   expect(result.reflectionPathCount).toBe(6);

@@ -361,16 +361,17 @@ export class RubyBeamPath {
     this._damageResolved = true;
     this.hitPlayer = true;
     this.hitSegmentIndex = closestHit.index;
-    this.dealtDamage = Math.max(0, safeNumber(player.takeDamage?.(
-      this.damage,
-      this.owner,
-      {
-        attackKind: `rubyBeam:${this.role}`,
-        bossAttackRole: this.role,
-        rubyBeamRole: this.role,
-        rubyBeamPath: true,
-      },
-    )));
+    const hitResult = player.takeIncomingHit({
+      amount: this.damage,
+      source: this.owner,
+      attackKind: `rubyBeam:${this.role}`,
+      bossAttackRole: this.role,
+      rubyBeamRole: this.role,
+      rubyBeamPath: true,
+      guardable: true,
+      reactionTier: 1,
+    });
+    this.dealtDamage = Math.max(0, safeNumber(hitResult.healthDamage));
     return true;
   }
 

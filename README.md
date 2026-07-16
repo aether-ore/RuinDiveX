@@ -4,7 +4,8 @@ A procedural Three.js third-person ruin-crawler prototype with Mega Man Legends-
 
 The equipment foundation now uses robotic part categories instead of fantasy RPG gear:
 
-- Arm Weapons: `Buster Arm`, `Sword Arm`, `Drill Arm`, `Shield Arm`, `Cannon Arm`, `Grenade Arm`, `Machine Gun Arm`, `Rail Buster Arm`, `Scatter Buster Arm`, `Homing Seeker Arm`, and elemental arm parts.
+- Arms: invariant `Mega Buster`; Special/Custom slots for `Laser Beam Blade`, authored Custom Busters, `Machine Gun Arm`, `Cannon Arm`, `Grenade Arm`, `Missile Arm`, and `Shining Laser`; Utility slot for `Lift Arm` or `Drill Arm`.
+- Gear: authored Armor, Helmet, Mobility, Defense, and two Utility Module slots. Gear has fixed effects rather than rarity, affixes, item levels, or randomized rolls.
 - Buster Parts: `Power Raiser`, `Range Booster`, `Rapid Fire Unit`, `Energy Battery`, `Sniper Scope`, and `Heat Sink Core`.
 - Armor and Sensor Gear: `Kevlar Jacket`, `Alloy Chest Plate`, `Refractor-Lined Armor`, `Utility Helmet`, and `Lock-On Visor`.
 - Mobility Gear: `Servo Boots`, `Jet Skates`, and `Magnetic Soles`.
@@ -42,13 +43,14 @@ The Lab's partial local save is stored under `ruinDigger.busterLab.v1`. It conta
 - Mouse aims with the flat cyan screen reticle. Hold right mouse to aim through the reticle; entering aim preserves the reticle's current position.
 - Hold left mouse to fire or swing the active arm weapon. The Sword Arm opens with a forward slash; release and press again during the sequence to spend another Energy charge and Servo Output on the optional legacy inward-slash follow-up.
 - `Tab` locks onto or releases a target. While locked, hold right mouse for manual reticle aim without dropping the movement lock.
-- `Z` uses a secondary arm function when available. With `Shield Arm` equipped, it raises a timed guard; early timing parries and staggers attackers. Otherwise it manually vents/reloads the active arm weapon when Energy is not full.
+- `Z` uses the active arm's secondary function (or manually vents/reloads when none is available).
+- `G` raises an equipped Guard Projector independently of the selected arm; early timing parries and staggers attackers.
 - Number keys `1` through `4` switch arm weapon slots.
 - `E` activates nearby camp, garage, quest, ruin lift, door, chest, mechanism, and field-device interactions.
 - `I` opens the Garage Loadout screen.
 - Arm weapon salvage in the Garage has `1`-`4` loadout buttons for assigning it directly to a hotbar slot.
 
-The current combat pass uses manual attacks, a four-slot arm hotbar, per-arm Energy, reload timers, swap delay, distinct arm projectile behaviors, Shield Arm secondary guarding/parrying, robotic status effects, elite armor weaknesses, temporary map-event buffs, and direct Garage hotbar assignment. Additional weapon-specific secondary functions and drag/drop polish are still future work.
+The current combat pass uses manual attacks, a four-slot arm hotbar, per-arm Energy/Output, fixed arm profiles, Guard Projector guarding/parrying, Barrier absorption, robotic status effects, elite armor weaknesses, and workshop-only Arms/Gear assignment.
 
 Implemented arm behavior examples include arcing explosive `Grenade Arm` shots, piercing `Rail Buster Arm` rounds, close-range `Scatter Buster Arm` spread fire, and `Homing Seeker Arm` rounds that curve toward nearby targets.
 
@@ -144,7 +146,7 @@ The app uses a browser import map for Three.js, so no package install is require
 - `src/MapEventSystem.js` - interactable ruin devices, temporary field buffs, risky event rewards.
 - `src/Player.js` - movement, health, stats, model animation, buster pose, and equipment hooks.
 - `src/ModularHumanoid.js` - procedural modular humanoid fallback character.
-- `src/LootSystem.js` and `src/Item.js` - robotic part generation, salvage rarity, affixes, pickups.
+- `src/LootSystem.js` and `src/equipment/` - unidentified scrap pickups plus authored fixed Arms/Gear catalogs and loadouts. `src/Item.js` is retained only as an unreferenced legacy source for old-save recovery tooling.
 - `src/Enemy.js`, `src/EliteEnemy.js`, `src/EnemySpawner.js` - legacy enemy contract, elite traits, seeded encounter spawning.
 - `src/reaverbots/` - procedural genome catalog and validator, seeded RNG, low-poly visual factory, target adapters, behavior state machines, defenses, weak points, and attacks.
 - `src/CombatSystem.js`, `src/ProjectileSystem.js` - current combat prototype and projectile behavior.

@@ -50,6 +50,10 @@ function flatDistanceSquared(a, b) {
   return x * x + z * z;
 }
 
+function isResolvedPlayerContact(result) {
+  return Boolean(result?.contacted && !result.dodged && !result.immune);
+}
+
 function lineContainsPoint(point, origin, direction, length, halfWidth) {
   tempA.copy(point).sub(origin).setY(0);
   const along = tempA.dot(direction);
@@ -1720,7 +1724,14 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       if (hazard.tick <= 0) {
         hazard.tick = 0.48;
         if (flatDistanceSquared(game.player.root.position, hazard.center) <= hazard.radius * hazard.radius) {
-          game.player.takeDamage(this.stats.damage * 0.22, this, { attackKind: 'bossCraterHazard' });
+          game.player.takeIncomingHit({
+            amount: this.stats.damage * 0.22,
+            source: this,
+            impactPosition: hazard.center,
+            attackKind: 'bossCraterHazard',
+            guardable: false,
+            reactionTier: 0,
+          });
         }
       }
       if (hazard.life <= 0) {
@@ -1772,8 +1783,17 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       if (entry.hazard) this._spawnCraterHazard(game, entry.center, entry.radius);
     }
     if (hits) {
-      const dealt = player.takeDamage(damage, this, { attackKind: `boss:${this.bossProfileId}` });
-      if (dealt > 0) game.addHitEffect?.(player.root.position, this.genome.palette.emissive, 0.8);
+      const hitResult = player.takeIncomingHit({
+        amount: damage,
+        source: this,
+        impactPosition: entry.kind === 'lane' ? entry.origin : entry.center,
+        attackKind: `boss:${this.bossProfileId}`,
+        guardable: true,
+        reactionTier: 1,
+      });
+      if (isResolvedPlayerContact(hitResult)) {
+        game.addHitEffect?.(player.root.position, this.genome.palette.emissive, 0.8);
+      }
     }
     if (entry.arenaNode?.active) {
       this._removeArenaNode(entry.arenaNode, game, { cancelTelegraphs: false, reason: 'fired' });

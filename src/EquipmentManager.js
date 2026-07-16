@@ -7,22 +7,16 @@ import {
   createSimpleHelmet,
   createSwordArm,
 } from './ModularHumanoid.js';
+import { getFixedArmDefinition, getGearDefinition } from './equipment/index.js';
 
 const ARM_CANNON_TYPES = new Set([
   'busterArm',
   'customBusterArm',
   'machineGunArm',
   'cannonArm',
-  'mineArm',
   'grenadeArm',
   'missileArm',
-  'railBusterArm',
-  'scatterBusterArm',
-  'homingSeekerArm',
   'laserArm',
-  'flameArm',
-  'iceSprayerArm',
-  'shockCoilArm',
 ]);
 
 const UTILITY_ARM_TYPES = new Set(['liftArm', 'drillArm']);
@@ -54,46 +48,43 @@ function getItemElementColor(item, fallbackColor) {
 }
 
 function getSwordBladeColor(item) {
-  if (!item || item.rarity === 'scrap' || item.rarity === 'standard') {
-    return DEFAULT_BEAM_BLADE_COLOR;
-  }
-
-  return getItemElementColor(item, item.glowColor ?? DEFAULT_BEAM_BLADE_COLOR);
+  return getItemElementColor(item, item?.glowColor ?? DEFAULT_BEAM_BLADE_COLOR);
 }
 
-export const EQUIPMENT_SLOTS = [
-  'weapon',
-  'offhand',
-  'head',
-  'chest',
-  'hands',
-  'feet',
-  'module1',
-  'module2',
-  'core',
-  'back',
-];
+export const EQUIPMENT_SLOTS = Object.freeze([
+  'armor',
+  'helmet',
+  'mobility',
+  'defense',
+  'utility1',
+  'utility2',
+]);
+
+const INTERNAL_EQUIPMENT_SLOTS = Object.freeze(['weapon', ...EQUIPMENT_SLOTS]);
+const LEGACY_SLOT_ALIASES = Object.freeze({
+  chest: 'armor',
+  head: 'helmet',
+  feet: 'mobility',
+  offhand: 'defense',
+  module1: 'utility1',
+  module2: 'utility2',
+});
 
 const VISUAL_ATTACHMENTS = {
   weapon: ['rightHand'],
-  offhand: ['leftHand'],
-  head: ['head'],
-  chest: ['chest', 'leftShoulder', 'rightShoulder'],
-  hands: ['leftHand', 'rightHand'],
-  feet: ['leftBoot', 'rightBoot'],
-  module1: ['leftHand'],
-  module2: ['rightHand'],
-  core: ['chest'],
-  back: ['back'],
+  defense: ['leftHand'],
+  helmet: ['head'],
+  armor: ['chest', 'leftShoulder', 'rightShoulder'],
+  mobility: ['leftBoot', 'rightBoot'],
+  utility1: ['leftHand'],
+  utility2: ['rightHand'],
 };
 
 function makeEquipmentMaterial(item, fallbackColor = 0xaab4bf) {
-  const isRelic = item?.rarity === 'legendary' || item?.rarity === 'ancient';
-
   return new THREE.MeshStandardMaterial({
     color: item?.glowColor ?? fallbackColor,
-    emissive: isRelic ? item.glowColor : 0x000000,
-    emissiveIntensity: isRelic ? 0.18 : 0,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
     roughness: 0.36,
     metalness: 0.45,
   });
@@ -211,13 +202,17 @@ export class EquipmentManager {
   constructor(player, humanoid) {
     this.player = player;
     this.humanoid = humanoid;
-    this.equipped = new Map(EQUIPMENT_SLOTS.map((slot) => [slot, null]));
-    this.visuals = new Map(EQUIPMENT_SLOTS.map((slot) => [slot, []]));
+    this.equipped = new Map(INTERNAL_EQUIPMENT_SLOTS.map((slot) => [slot, null]));
+    this.visuals = new Map(INTERNAL_EQUIPMENT_SLOTS.map((slot) => [slot, []]));
   }
 
   equip(item, preferredSlot = null) {
     const slot = this.resolveSlot(item, preferredSlot);
     const previous = this.equipped.get(slot) ?? null;
+    const valid = slot === 'weapon'
+      ? item?.type === 'customBusterArm' || Boolean(getFixedArmDefinition(item?.fixedArmId))
+      : Boolean(getGearDefinition(item?.gearId ?? item?.id)?.allowedSlots.includes(slot));
+    if (!valid) return null;
 
     this._clearVisual(slot);
     this.equipped.set(slot, item);
@@ -241,7 +236,7 @@ export class EquipmentManager {
   }
 
   get(slot) {
-    return this.equipped.get(slot) ?? null;
+    return this.equipped.get(LEGACY_SLOT_ALIASES[slot] ?? slot) ?? null;
   }
 
   getAll() {
@@ -249,19 +244,10 @@ export class EquipmentManager {
   }
 
   getStatBonuses() {
-    const bonuses = {};
-
-    for (const item of this.equipped.values()) {
-      if (!item) {
-        continue;
-      }
-
-      for (const [stat, value] of Object.entries(item.getStatTotals())) {
-        bonuses[stat] = (bonuses[stat] ?? 0) + value;
-      }
-    }
-
-    return bonuses;
+    // Fixed Arms and Gear resolve through authored, typed consumers on Player.
+    // Keeping this compatibility method empty prevents a catalog entry from
+    // quietly becoming another arbitrary additive stat bag.
+    return {};
   }
 
   getSummary() {
@@ -270,26 +256,28 @@ export class EquipmentManager {
   }
 
   clear() {
-    for (const slot of EQUIPMENT_SLOTS) {
+    for (const slot of INTERNAL_EQUIPMENT_SLOTS) {
       this.unequip(slot);
     }
   }
 
   resolveSlot(item, preferredSlot = null) {
-    if (preferredSlot && this.equipped.has(preferredSlot)) {
-      return preferredSlot;
+    const requested = LEGACY_SLOT_ALIASES[preferredSlot] ?? preferredSlot;
+    if (requested && this.equipped.has(requested)) {
+      return requested;
     }
 
-    if (item.slot === 'module') {
-      return this.get('module1') ? 'module2' : 'module1';
+    if (item.slot === 'module' || item.slot === 'utility') {
+      return this.get('utility1') ? 'utility2' : 'utility1';
     }
 
     if (item.slot === 'feet') {
-      return 'feet';
+      return 'mobility';
     }
 
-    if (this.equipped.has(item.slot)) {
-      return item.slot;
+    const directSlot = LEGACY_SLOT_ALIASES[item.slot] ?? item.slot;
+    if (this.equipped.has(directSlot)) {
+      return directSlot;
     }
 
     return 'weapon';
@@ -333,6 +321,38 @@ export class EquipmentManager {
 
   _createVisualObjects(slot, item) {
     const material = makeEquipmentMaterial(item);
+    const gearId = item?.gearId ?? item?.id;
+
+    if (gearId === 'guardProjector') {
+      const shield = createShieldArm(material);
+      shield.name = 'equipment_guardProjector';
+      shield.position.set(0, -0.08, 0.02);
+      return [shield];
+    }
+
+    if (gearId === 'gyroStabilizerHelmet') {
+      return [createSimpleHelmet(material)];
+    }
+
+    if (gearId === 'reinforcedArmorFrame') {
+      return [
+        createAlloyChestPlate(material),
+        createShoulderPad(material, 'left'),
+        createShoulderPad(material, 'right'),
+      ];
+    }
+
+    if (gearId === 'jumpSprings') {
+      return [createBootArmor(material, 'left'), createBootArmor(material, 'right')];
+    }
+
+    if (gearId === 'barrierGenerator'
+      || gearId === 'heatResistChip'
+      || gearId === 'jetSkates'
+      || gearId === 'targetScanner'
+      || gearId === 'fastSwapAdapter') {
+      return [createUtilityModuleVisual(material, slot === 'utility2' ? 'right' : 'left')];
+    }
 
     if (item.type === 'swordArm') {
       const arm = createSwordArm(material, { bladeColor: getSwordBladeColor(item) });
@@ -386,14 +406,14 @@ export class EquipmentManager {
       return [createBootArmor(material, 'left'), createBootArmor(material, 'right')];
     }
 
-    if (slot === 'core' || item.type === 'refractorCore') {
+    if (item.type === 'refractorCore') {
       return [createCoreVisual(material)];
     }
 
     if (UTILITY_TYPES.has(item.type)) {
-      return [createUtilityModuleVisual(material, slot === 'module1' ? 'left' : 'right')];
+      return [createUtilityModuleVisual(material, slot === 'utility1' ? 'left' : 'right')];
     }
 
-    return slot === 'back' ? [createBackBanner(material)] : [];
+    return [];
   }
 }

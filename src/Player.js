@@ -9,6 +9,14 @@ import { ExternalModelRig } from './ExternalModelRig.js';
 import { ModularHumanoid } from './ModularHumanoid.js';
 import { SkeletalModelRig } from './SkeletalModelRig.js';
 import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
+import {
+  ArmLoadout,
+  GearLoadout,
+  createFixedArmDescriptor,
+  getGearDefinition,
+  isHazardImmune,
+  resolveGearEffects,
+} from './equipment/index.js';
 
 const DEFAULT_BEAM_BLADE_COLOR = 0xa8ff8a;
 const DEFAULT_SWORD_SLASH_CLIP = 'swordForwardSlash';
@@ -327,7 +335,9 @@ function getJumpFallAnimationStartProgress(animationState) {
 }
 
 function isArmWeaponItem(item) {
-  return item?.slot === 'weapon' && item?.category === 'Arm Weapon';
+  return item?.slot === 'weapon'
+    && item?.category === 'Arm Weapon'
+    && (Boolean(item.fixedArmId) || item.type === 'customBusterArm');
 }
 
 function isBusterArmItem(item) {
@@ -373,6 +383,23 @@ export class Player {
 
     this.animation = new AnimationController(this.humanoid);
     this.equipment = new EquipmentManager(this, this.humanoid);
+    this.armLoadout = new ArmLoadout();
+    this.gearLoadout = new GearLoadout();
+    this.gearEffects = resolveGearEffects(this.gearLoadout);
+    this.barrier = {
+      capacity: 0,
+      current: 0,
+      rechargeDelayRemaining: 0,
+      broken: false,
+      recharging: false,
+    };
+    this.jetSkateState = {
+      windup: 0,
+      speed: 0,
+      active: false,
+      wasGrounded: true,
+    };
+    this.lastDamageResult = null;
 
     this.baseStats = { ...PLAYER_BASE_STATS };
     this.stats = { ...PLAYER_BASE_STATS };
@@ -385,6 +412,8 @@ export class Player {
     this.dead = false;
     this.slowTimer = 0;
     this.slowMultiplier = 1;
+    this.burnTimer = 0;
+    this.burnDamagePerSecond = 0;
     this.weaponColor = new THREE.Color(0xd7dde6);
     this.lastMoveDirection = new THREE.Vector3(0, 0, 1);
     this.attackFacingDirection = new THREE.Vector3(0, 0, 1);
@@ -492,12 +521,200 @@ export class Player {
     this.busterUpgradeSlots = [null, null, null, null];
     this.temporaryStatBonuses = new Map();
 
+    this.applyGearLoadoutState(this.gearLoadout.snapshot(), { refillBarrier: true });
+
     this._loadCharacterModel();
   }
 
   toggleWalkMode() {
     this.walkModeEnabled = !this.walkModeEnabled;
     return this.walkModeEnabled;
+  }
+
+  applyArmsGearState(armsGearState = {}, options = {}) {
+    this.applyArmLoadoutState(armsGearState.arms, options);
+    this.applyGearLoadoutState(armsGearState.gear, options);
+    return {
+      arms: this.armLoadout.snapshot(),
+      gear: this.gearLoadout.snapshot(),
+    };
+  }
+
+  applyArmLoadoutState(state = null, { resolveCustomBuster = null } = {}) {
+    this.armLoadout = new ArmLoadout(state);
+    const resolveSelection = (slot) => {
+      const selection = this.armLoadout.get(slot);
+      if (selection?.kind === 'megaBuster') return createFixedArmDescriptor('megaBuster');
+      if (selection?.kind === 'fixedArm') return createFixedArmDescriptor(selection.armId);
+      if (selection?.kind === 'customBuster') {
+        return resolveCustomBuster?.(selection.buildId) ?? null;
+      }
+      return null;
+    };
+
+    const previousActive = this.activeArmIndex;
+    this.armHotbar[0] = resolveSelection('megaBuster');
+    this.armHotbar[1] = resolveSelection('special1');
+    this.armHotbar[2] = resolveSelection('special2');
+    const utility = resolveSelection('utility');
+    this.utilityArms = utility ? [utility] : [];
+    this.activeUtilityArmIndex = 0;
+    this.armHotbar[UTILITY_ARM_SLOT_INDEX] = utility;
+    this.activeArmIndex = this.armHotbar[previousActive] ? previousActive : BUSTER_SLOT_INDEX;
+    const active = this.armHotbar[this.activeArmIndex];
+    if (active) this.equipment.equip(active, 'weapon');
+    else this.recalculateStats();
+    return this.armLoadout.snapshot();
+  }
+
+  applyGearLoadoutState(state = null, { refillBarrier = false } = {}) {
+    const previousBarrierCapacity = this.barrier?.capacity ?? 0;
+    this.gearLoadout = new GearLoadout(state);
+    this.gearEffects = resolveGearEffects(this.gearLoadout);
+
+    for (const slot of ['armor', 'helmet', 'mobility', 'defense', 'utility1', 'utility2']) {
+      const gearId = this.gearLoadout.getId(slot);
+      const definition = gearId ? getGearDefinition(gearId) : null;
+      if (definition) this.equipment.equip({ ...definition, gearId: definition.id }, slot);
+      else this.equipment.unequip(slot);
+    }
+
+    const capacity = this.gearEffects.barrier?.capacity ?? 0;
+    if (!this.barrier) {
+      this.barrier = {
+        capacity,
+        current: capacity,
+        rechargeDelayRemaining: 0,
+        broken: false,
+        recharging: false,
+      };
+    } else {
+      this.barrier.capacity = capacity;
+      if (capacity <= 0) {
+        this.barrier.current = 0;
+        this.barrier.rechargeDelayRemaining = 0;
+        this.barrier.broken = false;
+        this.barrier.recharging = false;
+      } else if (refillBarrier || previousBarrierCapacity !== capacity) {
+        this.refillBarrier();
+      } else {
+        this.barrier.current = THREE.MathUtils.clamp(this.barrier.current, 0, capacity);
+      }
+    }
+    this.recalculateStats();
+    return this.gearLoadout.snapshot();
+  }
+
+  getBarrierHudState() {
+    const capacity = this.barrier?.capacity ?? 0;
+    const current = THREE.MathUtils.clamp(this.barrier?.current ?? 0, 0, capacity);
+    const delay = Math.max(0, this.barrier?.rechargeDelayRemaining ?? 0);
+    return {
+      equipped: capacity > 0,
+      current,
+      capacity,
+      percent: capacity > 0 ? current / capacity : 0,
+      broken: Boolean(this.barrier?.broken),
+      recharging: Boolean(this.barrier?.recharging),
+      rechargeDelayRemaining: delay,
+      accessibleText: capacity <= 0
+        ? 'Barrier not equipped'
+        : `Barrier ${Math.ceil(current)} of ${capacity}${this.barrier?.broken ? ', broken' : this.barrier?.recharging ? ', recharging' : delay > 0 ? ', recharge delayed' : ''}`,
+    };
+  }
+
+  refillBarrier() {
+    const capacity = this.gearEffects?.barrier?.capacity ?? this.barrier?.capacity ?? 0;
+    this.barrier.capacity = capacity;
+    this.barrier.current = capacity;
+    this.barrier.rechargeDelayRemaining = 0;
+    this.barrier.broken = false;
+    this.barrier.recharging = false;
+    return this.getBarrierHudState();
+  }
+
+  _updateBarrierState(dt) {
+    const effect = this.gearEffects?.barrier;
+    if (!effect || !this.barrier || this.barrier.current >= effect.capacity) {
+      if (this.barrier) this.barrier.recharging = false;
+      return;
+    }
+    let remainingDt = Math.max(0, dt);
+    const delay = Math.max(0, this.barrier.rechargeDelayRemaining);
+    if (remainingDt <= delay) {
+      this.barrier.rechargeDelayRemaining = delay - remainingDt;
+      this.barrier.recharging = false;
+      return;
+    }
+    remainingDt -= delay;
+    this.barrier.rechargeDelayRemaining = 0;
+    this.barrier.recharging = true;
+    this.barrier.current = Math.min(
+      effect.capacity,
+      this.barrier.current + effect.rechargePerSecond * remainingDt,
+    );
+    if (this.barrier.current >= effect.capacity) {
+      this.barrier.broken = false;
+      this.barrier.recharging = false;
+    }
+  }
+
+  cancelJetSkateBoost() {
+    this.jetSkateState.windup = 0;
+    this.jetSkateState.speed = 0;
+    this.jetSkateState.active = false;
+  }
+
+  _updateJetSkateBoost(dt, {
+    sprintInputHeld = false,
+    moving = false,
+    translatingInput = false,
+    forwardInput = 0,
+  } = {}) {
+    const effect = this.gearEffects?.jetSkates;
+    const grounded = this.jumpState === MML_JUMP_STATES.Grounded;
+    const eligible = Boolean(effect
+      && grounded
+      && sprintInputHeld
+      && moving
+      && translatingInput
+      && forwardInput > 0.35
+      && !this.isShieldGuarding()
+      && !this.isDodgeRollInvulnerable()
+      && !this.dead);
+
+    if (!eligible) {
+      this.cancelJetSkateBoost();
+      this.jetSkateState.wasGrounded = grounded;
+      return null;
+    }
+
+    const previousWindup = this.jetSkateState.windup;
+    this.jetSkateState.windup += Math.max(0, dt);
+    if (this.jetSkateState.windup + 0.000001 < effect.windup) {
+      this.jetSkateState.wasGrounded = true;
+      return null;
+    }
+
+    const justActivated = !this.jetSkateState.active;
+    this.jetSkateState.active = true;
+    if (justActivated) {
+      const currentHorizontalSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+      const normalSprintSpeed = this._getTunedForwardSpeed() * PLAYER_SPRINT_SPEED_MULTIPLIER;
+      this.jetSkateState.speed = Math.min(
+        effect.maxSpeed,
+        Math.max(this.jetSkateState.speed, currentHorizontalSpeed, normalSprintSpeed),
+      );
+    }
+    const activeDt = previousWindup < effect.windup
+      ? Math.max(0, this.jetSkateState.windup - effect.windup)
+      : Math.max(0, dt);
+    this.jetSkateState.speed = Math.min(
+      effect.maxSpeed,
+      this.jetSkateState.speed + effect.acceleration * activeDt,
+    );
+    this.jetSkateState.wasGrounded = true;
+    return this.jetSkateState.speed;
   }
 
   update(dt, input, arenaRadius = 32, movementOptions = {}) {
@@ -510,6 +727,8 @@ export class Player {
       movementOptions.cameraForward ?? movementOptions.movementForward,
       movementOptions.cameraRight ?? movementOptions.movementRight,
     );
+
+    this._updateBarrierState(dt);
 
     if (this.dead) {
       this.cancelSwordJumpSlashVisual({ cancelAttack: true });
@@ -644,6 +863,12 @@ export class Player {
     let resolvedLocomotionSpeed = 0;
     const activeBusterArmSide = this._getActiveBusterArmSide();
     desiredMoveVelocity.set(0, 0, 0);
+    const jetSkateSpeed = this._updateJetSkateBoost(dt, {
+      sprintInputHeld,
+      moving,
+      translatingInput: Math.abs(rawForwardInput) > 0.35,
+      forwardInput: rawForwardInput,
+    });
 
     if (moving) {
       moveVector.normalize();
@@ -710,7 +935,11 @@ export class Player {
       const locomotionMultiplier = this.walkModeEnabled
         ? PLAYER_WALK_SPEED_MULTIPLIER
         : sprinting ? PLAYER_SPRINT_SPEED_MULTIPLIER : PLAYER_JOG_SPEED_MULTIPLIER;
-      const speed = this._getTunedForwardSpeed() * locomotionMultiplier * this.slowMultiplier * guardMoveMultiplier * this.movementLockMultiplier;
+      const normalSpeed = this._getTunedForwardSpeed() * locomotionMultiplier;
+      const speed = (jetSkateSpeed ?? normalSpeed)
+        * this.slowMultiplier
+        * guardMoveMultiplier
+        * this.movementLockMultiplier;
       resolvedLocomotionSpeed = speed;
       const strideSpeedMultiplier = this.pistolRunArcMotionClip
         ? this.pistolRunArcMotionSpeedMultiplier
@@ -1176,7 +1405,8 @@ export class Player {
   _getConfiguredJumpHeight() {
     const height = this._getJumpSetting('jumpHeight', DEFAULT_MML_JUMP_SETTINGS.jumpHeight);
     const multiplier = this._getJumpSetting('jumpHeightMultiplier', DEFAULT_MML_JUMP_SETTINGS.jumpHeightMultiplier);
-    return Math.max(0.05, height * multiplier);
+    const gearMultiplier = this.gearEffects?.jumpReachMultiplier ?? 1;
+    return Math.max(0.05, height * multiplier * gearMultiplier);
   }
 
   _getJumpTimeToApex() {
@@ -1342,16 +1572,23 @@ export class Player {
     const steppedOffGround = this.jumpState === MML_JUMP_STATES.Grounded
       && this.root.position.y - groundY > GROUNDED_STEP_DOWN_SNAP_HEIGHT;
     if (steppedOffGround) {
-      this.jumpState = MML_JUMP_STATES.Falling;
+      const jetLedgeLeap = Boolean(this.jetSkateState.active && this.gearEffects?.jetSkates);
+      this.jumpState = jetLedgeLeap ? MML_JUMP_STATES.Rising : MML_JUMP_STATES.Falling;
       this._coyoteTimer = Math.max(
         this._coyoteTimer,
         this._getJumpSetting('coyoteTime', DEFAULT_MML_JUMP_SETTINGS.coyoteTime),
       );
-      this.velocity.y = Math.min(0, this.velocity.y);
+      this.velocity.y = jetLedgeLeap
+        ? this.gearEffects.jetSkates.ledgeVerticalImpulse
+        : Math.min(0, this.velocity.y);
       this._jumpAirTimer = 0;
       this.jumpStartY = this.root.position.y;
       if (this.velocity.x * this.velocity.x + this.velocity.z * this.velocity.z > 0.0025) {
         this.jumpDirection.set(this.velocity.x, 0, this.velocity.z).normalize();
+      }
+      if (jetLedgeLeap) {
+        this.takeoffHorizontalVelocity.set(this.velocity.x, 0, this.velocity.z);
+        this.cancelJetSkateBoost();
       }
     }
 
@@ -1453,6 +1690,7 @@ export class Player {
       : MML_JUMP_STATES.Grounded;
     this.modelRoot.position.y = 0;
     this._jumpFallTransitionActive = false;
+    this.cancelJetSkateBoost();
     this._beginSwordJumpSlashLandingRecovery();
   }
 
@@ -1503,6 +1741,7 @@ export class Player {
     }
 
     this._cancelFiringPoseForDodge(cancelFiring);
+    this.cancelJetSkateBoost();
     this._cancelShieldGuardForDodge();
     this._resolveActionDirection(input, movementOptions, this.dodgeDirection);
     this.faceDirection(this.dodgeDirection);
@@ -1526,6 +1765,7 @@ export class Player {
     }
 
     this._cancelFiringPoseForDodge(cancelFiring);
+    this.cancelJetSkateBoost();
     this._cancelShieldGuardForDodge();
     this._resolveLateralActionDirection(lateral, movementOptions, this.dodgeDirection);
     this.faceDirection(this.dodgeDirection);
@@ -2479,7 +2719,7 @@ export class Player {
   getActiveWeaponGlowColor(fallback = 0x77e8ff) {
     const weapon = this.getActiveArmWeapon?.();
 
-    if (weapon?.type === 'swordArm' && (!weapon.rarity || weapon.rarity === 'scrap' || weapon.rarity === 'standard')) {
+    if (weapon?.type === 'swordArm') {
       return DEFAULT_BEAM_BLADE_COLOR;
     }
 
@@ -3008,16 +3248,16 @@ export class Player {
   }
 
   canUseShieldGuard() {
-    return this.equipment.get('offhand')?.type === 'shieldArm'
+    return Boolean(this.gearEffects?.guard)
       && this.guardCooldown <= 0
       && !this.dead
       && !this.isDodgeRollInvulnerable();
   }
 
   startShieldGuard(targetPosition = null) {
-    const shield = this.equipment.get('offhand');
+    const guard = this.gearEffects?.guard;
 
-    if (shield?.type !== 'shieldArm'
+    if (!guard
       || this.guardCooldown > 0
       || this.dead
       || this.isDodgeRollInvulnerable()) {
@@ -3040,17 +3280,18 @@ export class Player {
     this.bracedFireDirection.copy(guardSourceDirection);
     this.bracedFireTimer = Math.max(this.bracedFireTimer, MIN_BRACED_SHOT_TIME);
     this.bracedFireLocksFacing = true;
-    this.guardDuration = SHIELD_GUARD_DURATION;
-    this.guardTimer = SHIELD_GUARD_DURATION;
-    this.guardParryTimer = SHIELD_PARRY_WINDOW;
-    this.guardCooldown = SHIELD_GUARD_COOLDOWN;
+    this.guardDuration = guard.duration ?? SHIELD_GUARD_DURATION;
+    this.guardTimer = this.guardDuration;
+    this.guardParryTimer = guard.parryWindow ?? SHIELD_PARRY_WINDOW;
+    this.guardCooldown = guard.cooldown ?? SHIELD_GUARD_COOLDOWN;
     this.lastGuardResult = null;
+    this.cancelJetSkateBoost();
     this.faceDirection(this.guardDirection);
     return true;
   }
 
   isShieldGuarding() {
-    return this.guardTimer > 0 && this.equipment.get('offhand')?.type === 'shieldArm';
+    return this.guardTimer > 0 && Boolean(this.gearEffects?.guard);
   }
 
   isShieldParrying() {
@@ -3095,22 +3336,34 @@ export class Player {
   recalculateStats() {
     const previousMaxHealth = this.stats.maxHealth;
     const healthPercent = previousMaxHealth > 0 ? this.health / previousMaxHealth : 1;
-    const bonuses = this.equipment.getStatBonuses();
 
     this.stats = { ...this.baseStats };
 
-    for (const [stat, value] of Object.entries(bonuses)) {
-      this.stats[stat] = (this.stats[stat] ?? 0) + value;
-    }
-
-    if (this.activeArmIndex === BUSTER_SLOT_INDEX) {
-      for (const [stat, value] of Object.entries(this.getBusterUpgradeStatBonuses())) {
+    for (const buff of this.temporaryStatBonuses.values()) {
+      for (const [stat, value] of Object.entries(buff.bonuses)) {
         this.stats[stat] = (this.stats[stat] ?? 0) + value;
       }
     }
 
-    for (const buff of this.temporaryStatBonuses.values()) {
-      for (const [stat, value] of Object.entries(buff.bonuses)) {
+    const activeArm = this.getActiveArmWeapon?.();
+    const localStats = activeArm?.fixedArmId ? activeArm.localStats ?? {} : null;
+    if (localStats) {
+      for (const stat of [
+        'attackDamage',
+        'maxEnergy',
+        'attackRange',
+        'attackSpeed',
+        'areaDamage',
+        'armorBreakChance',
+      ]) {
+        if (Number.isFinite(localStats[stat])) this.stats[stat] = localStats[stat];
+      }
+    }
+
+    // Mega calibrations remain explicitly arm-local. No other fixed arm reads
+    // level attack growth, arbitrary item stats, or generic equipment bonuses.
+    if (activeArm?.fixedArmId === 'megaBuster') {
+      for (const [stat, value] of Object.entries(this.getBusterUpgradeStatBonuses())) {
         this.stats[stat] = (this.stats[stat] ?? 0) + value;
       }
     }
@@ -3433,68 +3686,194 @@ export class Player {
   }
 
   takeDamage(amount, source = null, damageContext = {}) {
-    if (this.dead) {
-      return 0;
+    const result = this.takeIncomingHit({
+      ...damageContext,
+      amount,
+      source,
+      direction: damageContext.direction ?? damageContext.knockbackDirection ?? null,
+      guardable: damageContext.guardable ?? !damageContext.unblockable,
+      reactionTier: damageContext.reactionTier ?? (
+        damageContext.continuous
+          ? 0
+          : damageContext.powerfulKnockback === true
+            || POWERFUL_KNOCKBACK_ATTACKS.has(damageContext.attackKind)
+            ? 2
+            : 1
+      ),
+    });
+    return result.healthDamage;
+  }
+
+  resolveIncomingHit(incomingHit = {}) {
+    return this.takeIncomingHit(incomingHit);
+  }
+
+  takeIncomingHit(incomingHit = {}) {
+    const amount = Math.max(0, Number(incomingHit.amount) || 0);
+    const source = incomingHit.source ?? null;
+    const result = {
+      contacted: false,
+      dodged: false,
+      guarded: false,
+      parried: false,
+      immune: false,
+      barrierDamage: 0,
+      healthDamage: 0,
+      resolvedReactionTier: 0,
+      statusEligible: false,
+    };
+
+    if (this.dead || amount <= 0 || this.isPowerKnockbackActive()) {
+      this.lastDamageResult = result;
+      return result;
     }
 
-    // A power hit owns the complete reaction through the final get-up frame.
-    // Ignoring damage here prevents follow-up attacks, hazards, and other
-    // powerful hits from draining health or relaunching an airborne player.
-    if (this.isPowerKnockbackActive()) {
-      return 0;
-    }
-
-    // Resolve dodge immunity before shield/parry, armor, statuses, hurt poses,
-    // or knockback. Callers can rely on zero meaning the attack had no gameplay
-    // effect during the roll.
+    result.contacted = true;
     if (this.isDodgeRollInvulnerable()) {
-      return 0;
+      result.dodged = true;
+      this.lastDamageResult = result;
+      return result;
     }
 
-    const damageOrigin = damageContext.impactPosition
-      ? { position: damageContext.impactPosition }
+    const hazardTags = Array.isArray(incomingHit.hazardTags)
+      ? incomingHit.hazardTags
+      : incomingHit.hazardTags
+        ? [incomingHit.hazardTags]
+        : [];
+    if (hazardTags.some((tag) => isHazardImmune(
+      this.gearEffects,
+      tag,
+      incomingHit.hazardDomain ?? 'unknown',
+    ))) {
+      result.immune = true;
+      this.lastDamageResult = result;
+      return result;
+    }
+
+    let damageOrigin = incomingHit.impactPosition
+      ? { position: incomingHit.impactPosition }
       : source;
-    const guardResult = damageContext.unblockable
+    if (!damageOrigin && incomingHit.direction) {
+      damageSourceDirection.set(
+        Number(incomingHit.direction.x) || 0,
+        Number(incomingHit.direction.y) || 0,
+        Number(incomingHit.direction.z) || 0,
+      );
+      if (damageSourceDirection.lengthSq() > 0.0001) {
+        // Incoming direction is the momentum direction (source toward player),
+        // so its inverse locates the side the hit arrived from for guarding.
+        damageSourceDirection.normalize().multiplyScalar(-1).add(this.root.position);
+        damageOrigin = { position: damageSourceDirection };
+      }
+    }
+    const guardResult = incomingHit.guardable === false
       ? { blocked: false, parried: false, reduction: 0 }
       : this._getShieldGuardResult(source, damageOrigin);
-    const guardedAmount = amount * (1 - guardResult.reduction);
-    const mitigated = guardedAmount * (100 / (100 + this.stats.armor));
+    result.guarded = guardResult.blocked;
+    result.parried = guardResult.parried;
+    if (guardResult.blocked) this.lastGuardResult = guardResult;
 
-    if (guardResult.blocked) {
-      this.lastGuardResult = guardResult;
+    let remainingDamage = amount * (1 - guardResult.reduction);
+    const barrierEffect = this.gearEffects?.barrier;
+    if (barrierEffect && this.barrier.current > 0 && remainingDamage > 0) {
+      result.barrierDamage = Math.min(this.barrier.current, remainingDamage);
+      this.barrier.current = Math.max(0, this.barrier.current - result.barrierDamage);
+      remainingDamage = Math.max(0, remainingDamage - result.barrierDamage);
+      this.barrier.broken = this.barrier.current <= 0;
+      this.barrier.recharging = false;
+      this.barrier.rechargeDelayRemaining = this.barrier.broken
+        ? barrierEffect.brokenDelay
+        : barrierEffect.rechargeDelay;
     }
 
-    this.health = Math.max(0, this.health - mitigated);
+    if (barrierEffect && this.barrier.current <= 0 && remainingDamage > 0) {
+      this.barrier.broken = true;
+      this.barrier.recharging = false;
+      this.barrier.rechargeDelayRemaining = barrierEffect.brokenDelay;
+    }
 
-    if (!guardResult.parried && mitigated > amount * 0.18) {
-      const heavyHitThreshold = Math.max(HEAVY_HIT_MIN_DAMAGE, this.stats.maxHealth * HEAVY_HIT_HEALTH_FRACTION);
+    if (remainingDamage > 0) {
+      result.healthDamage = remainingDamage * (this.gearEffects?.healthDamageMultiplier ?? 1);
+      this.health = Math.max(0, this.health - result.healthDamage);
+    }
+    result.statusEligible = result.healthDamage > 0;
+    if (result.statusEligible) {
+      this._applyIncomingStatusEffects(incomingHit.statusEffects);
+    }
 
+    const rawTier = THREE.MathUtils.clamp(Math.trunc(Number(incomingHit.reactionTier) || 0), 0, 3);
+    const minimumTier = THREE.MathUtils.clamp(
+      Math.trunc(Number(incomingHit.minimumReactionTier) || 0),
+      0,
+      3,
+    );
+    result.resolvedReactionTier = guardResult.blocked
+      ? 0
+      : Math.max(minimumTier, rawTier - (this.gearEffects?.reactionTierReduction ?? 0));
+
+    if (result.resolvedReactionTier > 0 && !this.isExternalMotionActive()) {
       this._captureDamageHitDirection(damageOrigin);
-
-      const powerfulAttack = damageContext.powerfulKnockback === true
-        || POWERFUL_KNOCKBACK_ATTACKS.has(damageContext.attackKind);
-      if (!this.isExternalMotionActive()
-        && !guardResult.blocked
-        && (powerfulAttack || mitigated >= heavyHitThreshold)) {
-        this._playKnockbackFall(damageOrigin, damageContext);
-      } else if (!this.isExternalMotionActive()) {
+      if (result.resolvedReactionTier >= 2) {
+        this._playKnockbackFall(damageOrigin, {
+          ...incomingHit,
+          knockbackDirection: incomingHit.knockbackDirection ?? incomingHit.direction,
+        });
+      } else {
         this.animation.playHurt();
       }
     }
 
-    if (source?.affix?.id === 'frostCore' && mitigated > 0.5) {
+    if (source?.affix?.id === 'frostCore' && result.healthDamage > 0.5) {
       this.applySlow(0.55, 1.5);
     }
 
-    if (this.health <= 0) {
-      this.dead = true;
-      this.cancelSwordJumpSlashVisual({ cancelAttack: true });
-      this.onDeathStarted?.();
-      this.clearExternalMotion('death');
-      this.animation.playDead();
-    }
+    this._handleHealthDepleted();
 
-    return mitigated;
+    this.lastDamageResult = result;
+    return result;
+  }
+
+  _applyIncomingStatusEffects(statusEffects) {
+    const effects = Array.isArray(statusEffects)
+      ? statusEffects
+      : statusEffects
+        ? [statusEffects]
+        : [];
+    for (const effect of effects) {
+      const id = typeof effect === 'string'
+        ? effect
+        : effect?.id ?? effect?.type;
+      if (id === 'burn' || id === 'burning') {
+        this.applyBurn(
+          typeof effect === 'object' ? effect.duration : undefined,
+          typeof effect === 'object' ? effect.damagePerSecond ?? effect.dps : undefined,
+        );
+      }
+    }
+  }
+
+  applyBurn(duration = 1.8, damagePerSecond = 2) {
+    if (this.dead) return false;
+    this.burnTimer = Math.max(this.burnTimer, Math.max(0, Number(duration) || 0));
+    this.burnDamagePerSecond = Math.max(
+      this.burnDamagePerSecond,
+      Math.max(0, Number(damagePerSecond) || 0),
+    );
+    return this.burnTimer > 0;
+  }
+
+  _handleHealthDepleted() {
+    if (this.health > 0 || this.dead) return false;
+    this.dead = true;
+    this.burnTimer = 0;
+    this.burnDamagePerSecond = 0;
+    this.cancelJetSkateBoost();
+    this.cancelSwordJumpSlashVisual({ cancelAttack: true });
+    this.onDeathStarted?.();
+    this.clearExternalMotion('death');
+    this.animation.playDead();
+    this.refillBarrier();
+    return true;
   }
 
   isPowerKnockbackActive() {
@@ -3514,6 +3893,7 @@ export class Player {
     }
 
     this.cancelSwordJumpSlashVisual({ cancelAttack: true });
+    this.cancelJetSkateBoost();
 
     if (damageContext.knockbackDirection?.lengthSq?.() > 0.0001) {
       this.knockbackFallDirection.copy(damageContext.knockbackDirection).setY(0);
@@ -3902,7 +4282,6 @@ export class Player {
       this.level += 1;
       this.experienceToNext = Math.round(this.experienceToNext * 1.35 + 15);
       this.baseStats.maxHealth += 10;
-      this.baseStats.attackDamage += 1.5;
       this.baseStats.pickupRadius += 0.04;
       this.recalculateStats();
       this.health = this.stats.maxHealth;
@@ -3967,6 +4346,19 @@ export class Player {
         this.slowMultiplier = 1;
       }
     }
+
+    if (this.burnTimer > 0 && !this.dead) {
+      const activeDt = Math.min(Math.max(0, dt), this.burnTimer);
+      this.burnTimer = Math.max(0, this.burnTimer - Math.max(0, dt));
+      const damage = this.burnDamagePerSecond
+        * activeDt
+        * (this.gearEffects?.healthDamageMultiplier ?? 1);
+      if (damage > 0) {
+        this.health = Math.max(0, this.health - damage);
+        this._handleHealthDepleted();
+      }
+      if (this.burnTimer <= 0) this.burnDamagePerSecond = 0;
+    }
   }
 
   _updateTemporaryStatBonuses(dt) {
@@ -4018,14 +4410,9 @@ export class Player {
       return { blocked: false, parried: false, reduction: 0 };
     }
 
-    const shieldStats = this.equipment.get('offhand')?.getStatTotals?.() ?? {};
-    const shieldArmor = shieldStats.armor ?? 0;
-    const guardBonus = THREE.MathUtils.clamp(shieldArmor * 0.012, 0, 0.18);
-    const parryBonus = THREE.MathUtils.clamp(this.stats.staggerResistance * 0.18, 0, 0.1);
-    const parried = this.isShieldParrying() && Boolean(source?.root);
-    const reduction = parried
-      ? THREE.MathUtils.clamp(0.86 + guardBonus + parryBonus, 0.86, 0.96)
-      : THREE.MathUtils.clamp(0.56 + guardBonus, 0.56, 0.78);
+    const guard = this.gearEffects.guard;
+    const parried = this.isShieldParrying();
+    const reduction = parried ? guard.parryReduction : guard.guardReduction;
 
     if (parried) {
       this._parrySource(source);
@@ -4053,9 +4440,9 @@ export class Player {
   }
 
   _parrySource(source) {
-    source.applyStatus?.('stagger', { duration: source.isElite ? 0.34 : 0.58 });
+    source?.applyStatus?.('stagger', { duration: source?.isElite ? 0.34 : 0.58 });
 
-    if (source.knockback?.addScaledVector && source.root?.position) {
+    if (source?.knockback?.addScaledVector && source.root?.position) {
       guardSourceDirection.copy(source.root.position).sub(this.root.position);
       guardSourceDirection.y = 0;
 

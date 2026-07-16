@@ -263,10 +263,20 @@ test('claw palm counters guard, interrupt, break, and replace the moveset withou
     const originalAerialPathClear = game.dungeonController.isAerialPathClear;
     game.dungeonController.isAerialPathClear = () => true;
     const originalTakeDamage = game.player.takeDamage;
+    const originalTakeIncomingHit = game.player.takeIncomingHit;
     const playerHits = [];
     game.player.takeDamage = (amount, source, meta = {}) => {
       playerHits.push({ amount, attackKind: meta.attackKind });
       return amount;
+    };
+    game.player.takeIncomingHit = (incomingHit = {}) => {
+      playerHits.push({ amount: incomingHit.amount, attackKind: incomingHit.attackKind });
+      return {
+        contacted: true,
+        dodged: false,
+        immune: false,
+        healthDamage: incomingHit.amount,
+      };
     };
 
     attacker.brain.state = 'commit';
@@ -361,6 +371,7 @@ test('claw palm counters guard, interrupt, break, and replace the moveset withou
     game.dungeonController.isAerialPathClear = originalAerialPathClear;
 
     game.player.takeDamage = originalTakeDamage;
+    game.player.takeIncomingHit = originalTakeIncomingHit;
     game.player.health = game.player.stats.maxHealth;
     const dodgeCrossingAngle = 1.1;
     const dodgeRadius = 4.55;
@@ -434,6 +445,7 @@ test('claw palm counters guard, interrupt, break, and replace the moveset withou
     };
     game.addExplosion = originalAddExplosion;
     game.player.takeDamage = originalTakeDamage;
+    game.player.takeIncomingHit = originalTakeIncomingHit;
 
     const disposalTrail = game.addClawSwipeTrailHazard(attacker.root.position, {
       source: attacker,

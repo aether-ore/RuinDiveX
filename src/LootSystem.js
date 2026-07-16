@@ -1,68 +1,28 @@
 import * as THREE from 'three';
-import {
-  AFFIX_POOL,
-  ITEM_TYPES,
-  Item,
-  LEGENDARY_ITEMS,
-  RARITIES,
-} from './Item.js';
+import { createFixedArmDescriptor } from './equipment/ArmCatalog.js';
+import { MEGA_BUSTER_CALIBRATION_CATALOG } from './buster/catalog.js';
+import { createMegaCalibrationShadow } from './buster/MegaCalibrationShadow.js';
 
-const ITEM_TYPE_KEYS = Object.keys(ITEM_TYPES);
-const RARITY_KEYS = Object.keys(RARITIES);
 const SCRAP_PICKUP_SHAPES = Object.freeze(['bolt', 'screw', 'gear']);
 const PICKUP_REST_HEIGHT = 0.35;
 const PICKUP_FALL_GRAVITY = 18;
-const MATERIAL_PREFIXES = {
-  'Arm Weapon': ['Alloy', 'Cobalt', 'Chrome', 'Tungsten', 'Industrial'],
-  'Buster Part': ['Refractor', 'Chrome', 'Cobalt', 'Ancient Circuit', 'Composite'],
-  Armor: ['Kevlar', 'Alloy', 'Ceramic', 'Carbon-Fiber', 'Reactive Alloy'],
-  'Sensor Gear': ['Composite', 'Titanium', 'Refractor', 'Industrial'],
-  'Mobility Gear': ['Alloy', 'Hydraulic', 'Servo', 'Magnetic', 'Titanium'],
-  'Utility Module': ['Ancient Circuit', 'Composite', 'Chrome', 'Industrial'],
-  'Refractor Core': ['Refractor', 'Ancient Circuit', 'Memory-Metal'],
-  Cartridge: ['Thermal', 'Cryo', 'Shock', 'Corrosive', 'Explosive'],
-};
+
+const LEGACY_RUNTIME_ARM_TO_FIXED_ID = Object.freeze({
+  busterArm: 'megaBuster',
+  swordArm: 'laserBeamBlade',
+  machineGunArm: 'machineGunArm',
+  cannonArm: 'cannonArm',
+  grenadeArm: 'grenadeArm',
+  missileArm: 'missileArm',
+  laserArm: 'shiningLaser',
+  liftArm: 'liftArm',
+  drillArm: 'drillArm',
+});
 
 function randomBetween(min, max) {
   return min + Math.random() * (max - min);
 }
 
-function randomInt(min, max) {
-  return Math.floor(randomBetween(min, max + 1));
-}
-
-function pickRandom(list) {
-  return list[Math.floor(Math.random() * list.length)];
-}
-
-function roundStat(stat, value) {
-  const integerStats = new Set([
-    'maxHealth',
-    'maxEnergy',
-    'attackDamage',
-    'armor',
-    'projectileCount',
-    'projectilePierce',
-    'fireDamage',
-    'iceDamage',
-    'corrosionDamage',
-  ]);
-  return integerStats.has(stat) ? Math.round(value) : Number(value.toFixed(3));
-}
-
-function weightedPick(entries, weightAccessor) {
-  const totalWeight = entries.reduce((total, entry) => total + weightAccessor(entry), 0);
-  let roll = Math.random() * totalWeight;
-
-  for (const entry of entries) {
-    roll -= weightAccessor(entry);
-    if (roll <= 0) {
-      return entry;
-    }
-  }
-
-  return entries[entries.length - 1];
-}
 
 function createMechanicalScrapCore(shape, material) {
   const core = new THREE.Group();
@@ -123,8 +83,7 @@ function createPickupMesh(item) {
   group.userData.item = item;
   group.userData.pickupKind = item.pickupKind ?? 'item';
 
-  const rarity = RARITIES[item.rarity];
-  const glow = item.glowColor ?? rarity.glow;
+  const glow = item.glowColor ?? item.color ?? 0x9aa7ad;
   const isMaterial = item.pickupKind === 'material'
     || item.pickupKind === 'unidentifiedScrap';
   const coreMaterial = new THREE.MeshStandardMaterial({
@@ -154,7 +113,7 @@ function createPickupMesh(item) {
   }
 
   const halo = new THREE.Mesh(new THREE.TorusGeometry(0.27, 0.018, 8, 24), haloMaterial);
-  halo.name = 'lootRarityHalo';
+  halo.name = 'lootPickupHalo';
   halo.rotation.x = Math.PI / 2;
 
   const shadow = new THREE.Mesh(
@@ -191,85 +150,39 @@ export class LootSystem {
     this.nextMaterialPickupId = 1;
   }
 
-  rollRarity(enemy = null) {
-    const eliteBonus = enemy?.isElite ? 2.8 : 1;
-    const timeBonus = enemy?.level ? Math.min(enemy.level * 0.04, 1.25) : 0;
-
-    return weightedPick(RARITY_KEYS, (rarityKey) => {
-      const base = RARITIES[rarityKey].weight;
-      const boost = rarityKey === 'scrap' ? 1 : eliteBonus + timeBonus;
-      return base * boost;
-    });
-  }
-
+  /**
+   * Compatibility bridge for old debug/migration callers. Production loot no
+   * longer creates randomized Items: curated arms resolve from the authored
+   * catalog, while legacy Buster calibration shadows are deterministic.
+   */
   generateItem(level = 1, options = {}) {
-    const type = options.type ?? pickRandom(ITEM_TYPE_KEYS);
-    const typeData = ITEM_TYPES[type] ?? ITEM_TYPES.busterArm;
-    const rarity = options.rarity ?? this.rollRarity(options.enemy);
-    const rarityData = RARITIES[rarity];
-    const scaledLevel = Math.max(1, level);
+    const type = options.type;
+    const fixedArmId = options.fixedArmId ?? LEGACY_RUNTIME_ARM_TO_FIXED_ID[type];
+    if (fixedArmId) return createFixedArmDescriptor(fixedArmId);
 
-    const legendaryTemplate = this._pickLegendaryTemplate(type, rarity);
-    const baseStats = options.baseStats ? { ...options.baseStats } : {};
-
-    if (!options.baseStats) {
-      for (const [stat, range] of Object.entries(typeData.baseStats)) {
-        const levelScale = 1 + scaledLevel * 0.055;
-        baseStats[stat] = roundStat(stat, randomBetween(range[0], range[1]) * rarityData.statMultiplier * levelScale);
-      }
-    }
-
-    const affixes = [
-      ...(legendaryTemplate?.forcedAffixes?.map((affix) => ({ ...affix })) ?? []),
-    ];
-
-    const [minAffixes, maxAffixes] = rarityData.affixRange;
-    const affixCount = options.affixCount ?? randomInt(minAffixes, maxAffixes);
-    const availableAffixes = AFFIX_POOL.filter((affix) => affix.slots.includes(typeData.slot));
-
-    while (affixes.length < affixCount && availableAffixes.length > 0) {
-      const affix = pickRandom(availableAffixes);
-
-      if (affixes.some((existing) => existing.id === affix.id)) {
-        continue;
-      }
-
-      const levelScale = 1 + scaledLevel * 0.035;
-      const value = roundStat(
-        affix.stat,
-        randomBetween(affix.range[0], affix.range[1]) * rarityData.statMultiplier * levelScale,
-      );
-
-      affixes.push({
-        id: affix.id,
-        label: affix.label,
-        stat: affix.stat,
-        value,
-        format: affix.format,
-        percent: affix.percent,
-        integer: affix.integer,
-        suffix: affix.suffix,
+    const calibration = MEGA_BUSTER_CALIBRATION_CATALOG[type];
+    if (calibration) {
+      return createMegaCalibrationShadow(type, {
+        name: options.name ?? calibration.name,
+        tags: ['buster', 'calibration'],
+        behavior: 'Legacy deterministic Mega Buster calibration shadow.',
+        localStats: options.localStats,
+        baseStats: options.baseStats,
       });
     }
 
-    const name = options.name ?? this._generateName(typeData, rarity, affixes, legendaryTemplate);
-    const value = Math.max(1, Math.round((scaledLevel * 10 + Object.keys(baseStats).length * 12 + affixes.length * 22) * rarityData.valueMultiplier));
-
-    return new Item({
-      name,
-      type,
-      slot: typeData.slot,
-      rarity,
-      level: scaledLevel,
-      category: typeData.category,
-      tags: typeData.tags,
-      behavior: typeData.behavior,
-      uniqueEffect: legendaryTemplate?.uniqueEffect,
-      baseStats,
-      affixes,
-      value,
-      weaponKind: typeData.weaponKind,
-    });
+    return {
+      id: `unidentified-scrap-debug-${this.nextMaterialPickupId++}`,
+      pickupKind: 'unidentifiedScrap',
+      quantity: 1,
+      recovery: null,
+      name: 'Unidentified Reaverbot Scrap +1',
+      category: 'Unidentified Recovery',
+      color: '#c7d0d6',
+      glowColor: 0x9aa7ad,
+      requestedLegacyType: type ?? null,
+      requestedLevel: level,
+    };
   }
 
   rollDrop(enemy) {
@@ -280,13 +193,19 @@ export class LootSystem {
       return null;
     }
 
-    const item = this.generateItem(enemy?.level ?? 1, { enemy });
     const position = (enemy.deathDropPosition ?? enemy.root.position).clone();
     position.y += 0.35;
     position.x += randomBetween(-0.45, 0.45);
     position.z += randomBetween(-0.45, 0.45);
 
-    return this.createPickup(item, position);
+    return this.createUnidentifiedScrapPickup(1, position, {
+      source: {
+        enemyName: enemy?.genome?.name ?? enemy?.type?.name ?? enemy?.typeKey ?? 'Reaverbot',
+        enemySeed: enemy?.genome?.seed ?? null,
+        elite: Boolean(enemy?.isElite),
+      },
+      recoverableParts: [],
+    });
   }
 
   createPickup(item, position) {
@@ -326,9 +245,8 @@ export class LootSystem {
       source: source ? { ...source } : null,
       name: `${material.name}${amount > 1 ? ` +${amount}` : ''}`,
       category: 'Crafting Material',
-      rarity: 'scrap',
-      color: material.color ?? RARITIES.scrap.color,
-      glowColor: new THREE.Color(material.color ?? RARITIES.scrap.color).getHex(),
+      color: material.color ?? '#c7d0d6',
+      glowColor: new THREE.Color(material.color ?? '#c7d0d6').getHex(),
     };
     return this.createPickup(item, position);
   }
@@ -350,7 +268,6 @@ export class LootSystem {
       } : null,
       name: `Unidentified Reaverbot Scrap +${amount}`,
       category: 'Unidentified Recovery',
-      rarity: 'scrap',
       color: '#c7d0d6',
       glowColor: 0x9aa7ad,
     };
@@ -447,39 +364,4 @@ export class LootSystem {
     this.nextMaterialPickupId = 1;
   }
 
-  _pickLegendaryTemplate(type, rarity) {
-    if (rarity !== 'legendary') {
-      return null;
-    }
-
-    const matching = LEGENDARY_ITEMS.filter((item) => item.type === type);
-    return matching.length > 0 && Math.random() < 0.7 ? pickRandom(matching) : null;
-  }
-
-  _generateName(typeData, rarity, affixes, legendaryTemplate) {
-    if (legendaryTemplate) {
-      return legendaryTemplate.name;
-    }
-
-    const rarityData = RARITIES[rarity];
-    const strongestAffix = affixes[0] ?? null;
-    const prefix = pickRandom(rarityData.namePrefixes ?? [rarityData.label]);
-    const materialOptions = MATERIAL_PREFIXES[typeData.category] ?? ['Composite', 'Alloy', 'Refractor'];
-    const material = pickRandom(materialOptions);
-    const suffix = strongestAffix?.suffix;
-
-    if (suffix && rarity !== 'scrap' && rarity !== 'standard') {
-      return `${prefix} ${typeData.label} ${suffix}`;
-    }
-
-    if (rarity === 'scrap') {
-      return `${prefix} ${typeData.label}`;
-    }
-
-    if (rarity === 'standard') {
-      return `${material} ${typeData.label}`;
-    }
-
-    return `${prefix} ${material} ${typeData.label}`;
-  }
 }

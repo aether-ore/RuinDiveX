@@ -59,6 +59,15 @@
         <span id="health-text" class="gauge-readout">120 / 120</span>
       </section>
 
+      <section id="barrier-hud" class="barrier-hud" hidden role="meter" aria-valuemin="0" aria-valuemax="40" aria-valuenow="40" aria-label="Barrier not equipped">
+        <div class="barrier-heading">
+          <span>BARRIER</span>
+          <strong id="barrier-status">READY</strong>
+        </div>
+        <div class="barrier-track" aria-hidden="true"><span id="barrier-fill"></span></div>
+        <span id="barrier-value" class="barrier-value">40 / 40</span>
+      </section>
+
       <div class="weapon-hud-cluster" aria-label="Weapon status">
         <div id="arm-hotbar" class="arm-hotbar" aria-label="Arm weapon tabs"></div>
 
@@ -116,12 +125,13 @@
         </header>
         <div class="inventory-layout">
           <section>
-            <h2>Arm Loadout</h2>
+            <h2>Arms</h2>
+            <p id="loadout-edit-status" class="loadout-edit-status" role="status"></p>
             <div id="garage-weapon-slots" class="garage-weapon-grid"></div>
+            <h2>Gear</h2>
+            <div id="equipment-slots" class="equipment-grid"></div>
             <h2>Expedition Log</h2>
             <div id="quest-log" class="quest-log"></div>
-            <h2>Equipped Parts</h2>
-            <div id="equipment-slots" class="equipment-grid"></div>
           </section>
           <section>
             <div id="roll-scrap-service" class="roll-scrap-service" hidden>
@@ -153,6 +163,9 @@
               </p>
               <h3 class="inventory-subheading">Identified Reaverbot Parts</h3>
               <div id="material-inventory" class="material-inventory"></div>
+              <h3 class="inventory-subheading">Roll's Equipment Fabrication</h3>
+              <p class="roll-service-copy">One-time recipes create permanent fixed-function Arms and Gear. Jump Springs begin locked and must be fabricated here.</p>
+              <div id="equipment-fabrication" class="equipment-fabrication" aria-label="Fixed equipment recipes"></div>
               </div>
 
               <section id="boss-hunts-view" class="boss-hunts" data-roll-view="hunts" hidden aria-labelledby="boss-hunts-heading">
@@ -347,14 +360,7 @@
                 </section>
               </section>
             </div>
-            <div class="salvage-controls">
-              <div class="inventory-title-row">
-                <h2>Salvage Inventory</h2>
-                <button class="optimize-button" data-action="optimize-equipment">Optimize</button>
-              </div>
-              <div id="inventory-actions" class="inventory-actions" aria-label="Inventory actions"></div>
-            </div>
-            <h3 class="inventory-subheading">Equipment Salvage</h3>
+            <h2 class="fixed-inventory-heading">Field Resources</h2>
             <div id="inventory-items" class="inventory-list"></div>
           </section>
         </div>

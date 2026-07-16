@@ -633,6 +633,8 @@ test('Roll identifies hidden recoveries and keeps the stockpile out of Mega Man 
     const beforeIdentification = readPanel();
 
     document.getElementById('roll-identify-scrap').click();
+    await game.ui.busterLabActionQueue;
+    await game.busterGameCommandQueue;
     const afterIdentification = readPanel();
     const storedPart = game.rollSalvageStorage.parts.temperedJumpSpring;
     const stateAfterIdentification = {

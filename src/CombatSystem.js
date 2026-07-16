@@ -426,9 +426,9 @@ const ARM_PROFILES = {
     drillLaunchOutputCost: 0.72,
     drillLaunchCooldown: 0.5,
     drillLaunchDamageMultiplier: 0.68,
-    drillLaunchRange: 5.3,
+    drillLaunchRange: 7.04,
     drillLaunchSpeed: 8.2,
-    armorBreakBonus: 0.28,
+    armorBreakBonus: 0,
     armorPierce: 10,
     stagger: 0.05,
     color: 0xffd36f,
@@ -475,7 +475,7 @@ function getWeaponElement(weapon, profile) {
 }
 
 function getSwordFallbackColor(weapon, profile) {
-  if (!weapon || weapon.rarity === 'scrap' || weapon.rarity === 'standard') {
+  if (!weapon || profile.type === 'swordArm') {
     return DEFAULT_BEAM_BLADE_COLOR;
   }
 
@@ -483,7 +483,7 @@ function getSwordFallbackColor(weapon, profile) {
 }
 
 function usesDefaultBeamBladeVisualColor(weapon, profile) {
-  return profile.type === 'swordArm' && (!weapon || weapon.rarity === 'scrap' || weapon.rarity === 'standard');
+  return profile.type === 'swordArm';
 }
 
 function isBusterProfile(profile) {
@@ -985,8 +985,7 @@ export class CombatSystem {
 
     this._clearPendingAttacks();
     const nextPlan = this.game.getActiveBusterPlan?.() ?? null;
-    const swapSpeed = this.game.player.stats.swapSpeed ?? 0;
-    this.swapTimer = Math.max(0.12, 0.34 * (1 - THREE.MathUtils.clamp(swapSpeed, 0, 0.65)));
+    this.swapTimer = this.game.player.gearEffects?.armSwapTransitionTime ?? 0.34;
     if (!nextPlan) this.getCurrentWeaponState();
     return true;
   }
@@ -1172,6 +1171,105 @@ export class CombatSystem {
     }
 
     return `${Math.floor(state.energy)} / ${Math.round(state.maxEnergy)}`;
+  }
+
+  getResolvedArmTelemetry(slotIndex = this.game.player.activeArmIndex) {
+    const player = this.game.player;
+    const weapon = player.armHotbar?.[slotIndex] ?? null;
+    if (!weapon) return null;
+    const round = (value, digits = 2) => Number(Number(value).toFixed(digits));
+    const compiledPlan = this.game.getBusterPlanForSlot?.(slotIndex) ?? null;
+    if (compiledPlan) {
+      const stats = compiledPlan.stats ?? {};
+      const energyCost = Math.max(0, Number(stats.energyCost) || 0);
+      const maxEnergy = Math.max(0, Number(stats.maxEnergy) || 0);
+      const cadence = Number(stats.finalRapid)
+        || (Number(stats.cycleTime) > 0 ? 1 / Number(stats.cycleTime) : 0);
+      const actionModes = [];
+      if (compiledPlan.emitter?.trajectory === 'ballistic') actionModes.push('Ballistic arc');
+      if (compiledPlan.actions?.some((action) => action.guidance)) actionModes.push('Guided');
+      if (compiledPlan.actions?.some((action) => action.splitter?.pattern === 'radial')) actionModes.push('Radial split');
+      else if (compiledPlan.actions?.some((action) => action.splitter?.pattern === 'spread')) actionModes.push('Spread split');
+      if (compiledPlan.actions?.some((action) => action.payload?.type === 'explosion')) actionModes.push('Explosive');
+      if (actionModes.length === 0) actionModes.push(slotIndex === 0 ? 'Pulse fire' : 'Compiled program');
+      return {
+        damage: round(stats.effectivePower ?? stats.basePower ?? 0, 1),
+        energyCapacity: round(maxEnergy, 1),
+        effectiveRange: `${round(stats.rootRange ?? 0, 2)}m`,
+        cadence: `${round(cadence, 2)}/s`,
+        modes: actionModes,
+        resourceUse: energyCost > 0
+          ? `${round(energyCost, 2)} Energy per execution · ${Math.floor(maxEnergy / energyCost)} per full charge`
+          : 'No per-shot Energy cost',
+      };
+    }
+
+    const profile = this._getProfileForWeapon(weapon);
+    const stats = isBusterProfile(profile)
+      ? { ...player.baseStats, ...this._getBusterStatTotals(weapon) }
+      : {
+        ...player.baseStats,
+        attackDamage: 0,
+        fireDamage: 0,
+        iceDamage: 0,
+        corrosionDamage: 0,
+        areaDamage: 0,
+        ...(weapon.localStats ?? {}),
+      };
+    const cooldown = this._getAttackCooldown(profile, stats);
+    const animationDuration = this._getAttackAnimationDuration(profile, stats);
+    const nominalDamage = Math.max(0,
+      (stats.attackDamage + stats.fireDamage + stats.iceDamage + (stats.corrosionDamage ?? 0))
+      * (1 + (stats.areaDamage ?? 0))
+      * (profile.damageMultiplier ?? 1));
+    const range = this._getProfileRange(profile, stats);
+    const rapidBase = Math.max(0.25, player.baseStats?.attackSpeed ?? 1.25);
+    const rapidModifier = THREE.MathUtils.clamp(
+      Math.sqrt(Math.max(0.25, stats.attackSpeed ?? rapidBase) / rapidBase),
+      0.65,
+      1.75,
+    );
+    const outputEfficiency = Math.max(0.01, weapon.mechanics?.outputEfficiency ?? 1);
+    const outputPerShot = Math.max(0, profile.outputDrainPerShot ?? 0) / rapidModifier / outputEfficiency;
+    const outputPerSecond = Math.max(0, profile.outputDrainPerSecond ?? 0) / rapidModifier / outputEfficiency;
+    const energyPerShot = Math.max(0, profile.energyCost ?? 0);
+    let damage = round(nominalDamage, 1);
+    let effectiveRange = `${round(range, 2)}m`;
+    let cadence = `${round(1 / Math.max(cooldown, profile.melee ? animationDuration : 0.0001), 2)}/s`;
+    let resourceUse = [
+      energyPerShot > 0 ? `${round(energyPerShot, 2)} Energy/shot` : null,
+      outputPerShot > 0 ? `${round(outputPerShot * 100, 1)}% Output/shot` : null,
+    ].filter(Boolean).join(' · ') || 'No per-shot resource cost';
+
+    if (profile.special === 'laser') {
+      damage = `${round(nominalDamage, 1)}-${round(nominalDamage * (1 + (profile.maxHeatDamageBonus ?? 1.65)), 1)}/tick`;
+      cadence = `${round(1 / LASER_TICK_INTERVAL, 1)} ticks/s`;
+      resourceUse = `${round(profile.energyDrainPerSecond ?? 0, 2)} Energy/s · ${round(outputPerSecond * 100, 1)}% Output/s`;
+    } else if (profile.special === 'drill') {
+      const contactDamage = THREE.MathUtils.clamp(
+        nominalDamage * 0.08,
+        1,
+        profile.drillEnemyDamageCap ?? 3,
+      );
+      const launchDamage = nominalDamage * (profile.drillLaunchDamageMultiplier ?? 0.68);
+      damage = `${round(contactDamage, 1)}/tick · ${round(launchDamage, 1)} launch`;
+      effectiveRange = `${round(range, 2)}m contact · ${round(this._getDrillLaunchRange(profile, stats), 2)}m launch`;
+      cadence = `${round(1 / (profile.drillTickInterval ?? DRILL_TICK_INTERVAL), 2)} ticks/s · ${round(1 / (profile.drillLaunchCooldown ?? 0.5), 2)} launches/s`;
+      resourceUse = `${round((profile.drillOutputDrainPerSecond ?? 0) / rapidModifier / outputEfficiency * 100, 1)}% Output/s · ${round((profile.drillLaunchOutputCost ?? 0) / rapidModifier / outputEfficiency * 100, 1)}% per launch`;
+    } else if (profile.special === 'lift') {
+      damage = 'Utility';
+      cadence = 'Continuous';
+      resourceUse = `Junk free · ${round((profile.liftEnemyOutputDrainPerSecond ?? 0) / rapidModifier / outputEfficiency * 100, 1)}% Output/s for enemies`;
+    }
+
+    return {
+      damage,
+      energyCapacity: Math.max(0, round(stats.maxEnergy ?? 0, 1)),
+      effectiveRange,
+      cadence,
+      modes: [this._getWeaponModeLabel(profile)],
+      resourceUse,
+    };
   }
 
   getWeaponHudData() {
@@ -1457,15 +1555,23 @@ export class CombatSystem {
       return true;
     }
 
-    const offhand = player.equipment.get('offhand');
-
-    if (offhand?.type === 'shieldArm' && player.startShieldGuard(aimWorld)) {
-      this.game.addHitEffect(player.root.position, 0x83f1ff, 0.7);
-      this.game.addParticleBurst(player.root.position.clone().add(new THREE.Vector3(0, 1.05, 0)), 0x83f1ff, 8, 0.14);
-      return true;
-    }
+    if (this.tryGuardAction(aimWorld)) return true;
 
     return false;
+  }
+
+  tryGuardAction(aimWorld) {
+    const player = this.game.player;
+    if (player.animation?.isControlLocked?.()) return false;
+    if (!player.canUseShieldGuard?.() || !player.startShieldGuard(aimWorld)) return false;
+    this.game.addHitEffect(player.root.position, 0x83f1ff, 0.7);
+    this.game.addParticleBurst(
+      player.root.position.clone().add(new THREE.Vector3(0, 1.05, 0)),
+      0x83f1ff,
+      8,
+      0.14,
+    );
+    return true;
   }
 
   _tryLaunchDrillHead(profile, state, aimWorld) {
@@ -1610,7 +1716,12 @@ export class CombatSystem {
 
       if (state.weaponOutput <= 0.001 || this.lift.breakTimer <= 0) {
         const damage = Math.max(3, (lifted.enemy.stats?.damage ?? 8) * 0.55);
-        player.takeDamage(damage, lifted.enemy);
+        player.takeIncomingHit({
+          amount: damage,
+          source: lifted.enemy,
+          guardable: true,
+          reactionTier: 1,
+        });
         this.game.addParticleBurst(player.root.position.clone().add(new THREE.Vector3(0, 1.15, 0)), 0xffd36f, 12, 0.12);
         state.cooldown = Math.max(state.cooldown, profile.outputVentDuration ?? 0.42);
         this._stopLiftArm(true);
@@ -2794,12 +2905,20 @@ export class CombatSystem {
     }
 
     const baseCost = Math.max(0, amount ?? profile.outputDrainPerShot ?? 0.08);
-    return baseCost / this._getRapidOutputModifier();
+    const efficiency = Math.max(
+      0.01,
+      this.game.player.getActiveArmWeapon?.()?.mechanics?.outputEfficiency ?? 1,
+    );
+    return baseCost / this._getRapidOutputModifier() / efficiency;
   }
 
   _getOutputDrainPerSecond(profile) {
     const baseDrain = Math.max(0, profile.outputDrainPerSecond ?? 0);
-    return baseDrain / this._getRapidOutputModifier();
+    const efficiency = Math.max(
+      0.01,
+      this.game.player.getActiveArmWeapon?.()?.mechanics?.outputEfficiency ?? 1,
+    );
+    return baseDrain / this._getRapidOutputModifier() / efficiency;
   }
 
   _getOutputRequiredToFire(profile) {
@@ -2968,7 +3087,7 @@ export class CombatSystem {
   _getProfileRange(profile, stats = this.game.player.stats) {
     const baseRange = stats.attackRange;
 
-    if (profile.type === 'swordArm') return this._getBeamBladeArcRange(profile);
+    if (profile.type === 'swordArm') return this._getBeamBladeArcRange(profile, stats);
     if (profile.special === 'drill') return this._getDrillContactRange(profile);
     if (profile.special === 'laser') return baseRange + 3.5;
     if (profile.special === 'rail') return baseRange + (profile.railRangeBonus ?? 2.4);
@@ -2984,10 +3103,10 @@ export class CombatSystem {
     return baseRange + 1.8;
   }
 
-  _getBeamBladeArcRange(profile = DEFAULT_PROFILE) {
+  _getBeamBladeArcRange(profile = DEFAULT_PROFILE, stats = this.game.player.stats) {
     const player = this.game.player;
     const basePlayerRange = player.baseStats?.attackRange ?? 6.2;
-    const gearRange = Math.max(0, (player.stats.attackRange ?? basePlayerRange) - basePlayerRange);
+    const gearRange = Math.max(0, (stats.attackRange ?? basePlayerRange) - basePlayerRange);
     const baseArcRange = profile.baseVisualRange ?? 2.25;
     const growth = profile.visualRangeGrowth ?? 0.24;
     const maxArcRange = profile.maxVisualRange ?? 4.4;
@@ -2999,10 +3118,10 @@ export class CombatSystem {
     return Math.max(0.55, profile.drillContactRange ?? 1.05);
   }
 
-  _getDrillLaunchRange(profile = DEFAULT_PROFILE) {
+  _getDrillLaunchRange(profile = DEFAULT_PROFILE, stats = this.game.player.stats) {
     const player = this.game.player;
     const basePlayerRange = player.baseStats?.attackRange ?? 6.2;
-    const gearRange = Math.max(0, (player.stats.attackRange ?? basePlayerRange) - basePlayerRange);
+    const gearRange = Math.max(0, (stats.attackRange ?? basePlayerRange) - basePlayerRange);
     const baseLaunchRange = profile.drillLaunchRange ?? 5.3;
     const rangeScale = profile.drillLaunchRangeGrowth ?? 1;
 

@@ -88,6 +88,10 @@ const tempLeftElbowWorld = new THREE.Vector3();
 const tempRightShoulderWorld = new THREE.Vector3();
 const tempRightElbowWorld = new THREE.Vector3();
 const tempSegmentDelta = new THREE.Vector3();
+
+function isResolvedPlayerContact(result) {
+  return Boolean(result?.contacted && !result.dodged && !result.immune);
+}
 const tempPointDelta = new THREE.Vector3();
 const tempLineSample = new THREE.Vector3();
 const tempLineDirection = new THREE.Vector3();
@@ -525,9 +529,18 @@ export class SharukurusuEnemy extends Enemy {
       this.affixTimers.surge -= dt;
       if (this.affixTimers.surge <= 0) {
         if (this.root.position.distanceTo(game.player.root.position) <= 2.1) {
-          game.player.takeDamage(this.stats.damage * 0.22, this);
-          game.player.applySlow(0.78, 0.5);
-          game.addHitEffect(game.player.root.position, this.affix.color, 0.48);
+          const hitResult = game.player.takeIncomingHit({
+            amount: this.stats.damage * 0.22,
+            source: this,
+            guardable: true,
+            reactionTier: 1,
+          });
+          if (hitResult.healthDamage > 0) {
+            game.player.applySlow(0.78, 0.5);
+          }
+          if (isResolvedPlayerContact(hitResult)) {
+            game.addHitEffect(game.player.root.position, this.affix.color, 0.48);
+          }
         }
         this.affixTimers.surge = 1.15;
       }
@@ -557,7 +570,12 @@ export class SharukurusuEnemy extends Enemy {
   onHitPlayer(player, dealt = 0) {
     if (this.affix?.id === 'frostCore' && dealt > 0) player.applySlow(0.55, 1.5);
     if (this.affix?.id === 'corrosive' && dealt > 0) {
-      player.takeDamage(Math.max(1, dealt * 0.22), this);
+      player.takeIncomingHit({
+        amount: Math.max(1, dealt * 0.22),
+        source: this,
+        guardable: false,
+        reactionTier: 0,
+      });
     }
     return player;
   }
@@ -921,20 +939,26 @@ export class SharukurusuEnemy extends Enemy {
     tempDirection.copy(game.player.root.position).sub(this.root.position).setY(0);
     if (tempDirection.lengthSq() <= 0.0001) tempDirection.copy(state.direction);
     tempDirection.normalize();
-    const dealt = game.player.takeDamage(this.stats.damage * damageScale, this, {
+    const hitResult = game.player.takeIncomingHit({
+      amount: this.stats.damage * damageScale,
+      source: this,
       attackKind,
-      powerfulKnockback,
+      guardable: true,
+      reactionTier: powerfulKnockback ? 2 : 1,
       knockbackDirection: tempDirection,
       knockbackStrength: attackKind === 'sharukurusuDivingBlades' ? 1.24 : 1.08,
     });
     state.hitPlayer = true;
-    if (dealt > 0) {
-      this.onHitPlayer(game.player, dealt);
+    const resolvedContact = isResolvedPlayerContact(hitResult);
+    if (hitResult.healthDamage > 0) {
+      this.onHitPlayer(game.player, hitResult.healthDamage);
+    }
+    if (resolvedContact) {
       this.beginContactRetreat(game, game.player);
       game.addHitEffect?.(contactPoint, 0xff365f, 0.82, { absolute: true });
       game.requestHitStop?.(0.1, { timeScale: 0.05 });
     }
-    return dealt;
+    return hitResult;
   }
 
   _interruptSharukurusuDive(game, meta = {}) {

@@ -642,7 +642,7 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
     const originalBurst = game.addParticleBurst;
     const originalHitEffect = game.addHitEffect;
     const originalHitStop = game.requestHitStop;
-    const originalTakeDamage = game.player.takeDamage;
+    const originalTakeIncomingHit = game.player.takeIncomingHit;
     const originalRequestEnemyAttack = game.requestEnemyAttack;
     const originalMoveSpeed = jaw.stats.moveSpeed;
     const originalAttackCooldown = jaw.stats.attackCooldown;
@@ -672,22 +672,33 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
     const successfulContacts = [];
     let rejectNextContact = true;
     let hitEffects = 0;
-    game.player.takeDamage = (amount, source, context = {}) => {
+    game.player.takeIncomingHit = (incomingHit = {}) => {
+      const { amount, source } = incomingHit;
       damageAttempts.push({
         amount,
         sourceIsJaw: source === jaw,
-        attackKind: context.attackKind,
-        powerfulKnockback: context.powerfulKnockback,
-        unblockable: context.unblockable,
-        knockbackStrength: context.knockbackStrength,
-        knockbackDirection: context.knockbackDirection?.clone?.() ?? null,
+        attackKind: incomingHit.attackKind,
+        reactionTier: incomingHit.reactionTier,
+        guardable: incomingHit.guardable,
+        knockbackStrength: incomingHit.knockbackStrength,
+        knockbackDirection: incomingHit.knockbackDirection?.clone?.() ?? null,
       });
       if (rejectNextContact) {
         rejectNextContact = false;
-        return 0;
+        return {
+          contacted: true,
+          dodged: true,
+          immune: false,
+          healthDamage: 0,
+        };
       }
-      successfulContacts.push(context.attackKind);
-      return amount;
+      successfulContacts.push(incomingHit.attackKind);
+      return {
+        contacted: true,
+        dodged: false,
+        immune: false,
+        healthDamage: amount,
+      };
     };
     game.addHitEffect = () => { hitEffects += 1; };
     game.requestHitStop = () => {};
@@ -897,7 +908,7 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
       finalDistance: jaw.root.position.distanceTo(playerPosition),
     };
 
-    game.player.takeDamage = originalTakeDamage;
+    game.player.takeIncomingHit = originalTakeIncomingHit;
     game.addExplosion = originalExplosion;
     game.addParticleBurst = originalBurst;
     game.addHitEffect = originalHitEffect;
@@ -956,8 +967,8 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
   expect(result.damageAttempts[1]).toMatchObject({
     sourceIsJaw: true,
     attackKind: 'meleeBodyContact',
-    powerfulKnockback: true,
-    unblockable: true,
+    reactionTier: 2,
+    guardable: false,
   });
   expect(result.damageAttempts[1].knockbackStrength).toBeGreaterThanOrEqual(0.85);
   expect(result.damageAttempts[1].knockbackDirectionLength).toBeGreaterThan(0.99);

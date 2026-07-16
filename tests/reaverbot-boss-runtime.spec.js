@@ -62,7 +62,7 @@ test('Ruby Optic Oracle prefers the authored model and retains procedural fallba
   });
 });
 
-test('Boss Hunts stay available without the Buster Lab, redact materials, reveal discoveries, and lock on entry', async ({ page }) => {
+test('Boss Hunts and the canonical Buster workshop redact materials, reveal discoveries, and lock on entry', async ({ page }) => {
   await page.goto('/?bossDebug=1&reaverbotSeed=boss-hunt-selector');
   await waitForGame(page);
 
@@ -90,9 +90,9 @@ test('Boss Hunts stay available without the Buster Lab, redact materials, reveal
     };
   });
 
-  expect(initial.busterEnabled).toBe(false);
+  expect(initial.busterEnabled).toBe(true);
   expect(initial.tabsHidden).toBe(false);
-  expect(initial.busterTabHidden).toBe(true);
+  expect(initial.busterTabHidden).toBe(false);
   expect(initial.profileIds).toEqual(BOSS_PROFILE_IDS);
   expect(initial.selected).toBe('revolvingFusillade');
   expect(initial.text).toContain('rapid pulse barrel');
@@ -540,7 +540,7 @@ test('every authored arena pattern respects its warning boundary and matching hi
   const results = await page.evaluate((profileIds) => {
     const game = window.game;
     game.stop();
-    const originalTakeDamage = game.player.takeDamage;
+    const originalTakeIncomingHit = game.player.takeIncomingHit;
     const summaries = [];
     for (const profileId of profileIds) {
       game.projectiles.clear('telegraph-parity-reset');
@@ -586,9 +586,20 @@ test('every authored arena pattern respects its warning boundary and matching hi
       }
 
       let damageEvents = 0;
-      game.player.takeDamage = (amount) => {
+      game.player.takeIncomingHit = (incomingHit = {}) => {
+        const amount = Math.max(0, Number(incomingHit.amount) || 0);
         if (amount > 0) damageEvents += 1;
-        return Math.max(0, amount);
+        return {
+          contacted: amount > 0,
+          dodged: false,
+          guarded: false,
+          parried: false,
+          immune: false,
+          barrierDamage: 0,
+          healthDamage: amount,
+          resolvedReactionTier: incomingHit.reactionTier ?? 0,
+          statusEligible: amount > 0,
+        };
       };
       boss._updateArenaObjects(Math.max(0, selected.warning - 0.01), game);
       const beforeBoundary = damageEvents;
@@ -609,7 +620,7 @@ test('every authored arena pattern respects its warning boundary and matching hi
       const index = game.enemies.indexOf(boss);
       if (index >= 0) game.enemies.splice(index, 1);
     }
-    game.player.takeDamage = originalTakeDamage;
+    game.player.takeIncomingHit = originalTakeIncomingHit;
     game.projectiles.clear('telegraph-parity-complete');
     return summaries;
   }, GENERIC_ARENA_PATTERN_PROFILE_IDS);

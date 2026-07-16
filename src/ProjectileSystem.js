@@ -37,6 +37,10 @@ const tempExplosionPosition = new THREE.Vector3();
 const tempClusterDirection = new THREE.Vector3();
 let busterShotTextures = null;
 
+function isResolvedPlayerContact(result) {
+  return Boolean(result?.contacted && !result.dodged && !result.immune);
+}
+
 function smoothstep(edge0, edge1, value) {
   const t = THREE.MathUtils.clamp((value - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
@@ -1215,14 +1219,26 @@ export class ProjectileSystem {
       player,
       PLAYER_TRAVERSAL_ENVELOPE.standingHeight,
     ) <= radius * radius) {
-      const dealt = player.takeDamage(projectile.damage, projectile.source, {
+      const hitResult = player.takeIncomingHit({
+        amount: projectile.damage,
+        source: projectile.source,
         impactPosition: projectile.mesh.position,
         attackKind: projectile.visualType,
+        guardable: projectile.attackMeta?.guardable ?? true,
+        reactionTier: projectile.attackMeta?.reactionTier ?? 1,
+        minimumReactionTier: projectile.attackMeta?.minimumReactionTier ?? 0,
+        direction: projectile.direction,
+        knockbackDirection: projectile.attackMeta?.knockbackDirection ?? projectile.direction,
+        knockbackStrength: projectile.attackMeta?.knockbackStrength,
+        statusEffects: projectile.attackMeta?.statusEffects ?? [],
       });
-      projectile.source?.onHitPlayer?.(player, dealt);
-      this.game.addDamageNumber(player.root.position, dealt, 0xff6b5e);
-      this.game.addHitEffect(player.root.position, 0xff6b5e, 0.45);
-      if (dealt > 0) {
+      const resolvedContact = isResolvedPlayerContact(hitResult);
+      if (hitResult.healthDamage > 0) {
+        projectile.source?.onHitPlayer?.(player, hitResult.healthDamage);
+        this.game.addDamageNumber(player.root.position, hitResult.healthDamage, 0xff6b5e);
+      }
+      if (resolvedContact) {
+        this.game.addHitEffect(player.root.position, 0xff6b5e, 0.45);
         this.game.requestHitStop?.(projectile.visualType === 'drillHead' ? 0.1 : 0.12, {
           timeScale: 0.05,
         });
@@ -1237,9 +1253,12 @@ export class ProjectileSystem {
           triggerMines: false,
         });
       }
-      projectile.playerHitCount += 1;
-      projectile.playerHitCooldown = projectile.hitInterval;
-      return !projectile.persistentOnPlayerHit || projectile.playerHitCount >= projectile.maxPlayerHits;
+      if (resolvedContact) {
+        projectile.playerHitCount += 1;
+        projectile.playerHitCooldown = projectile.hitInterval;
+      }
+      return !projectile.persistentOnPlayerHit
+        || (resolvedContact && projectile.playerHitCount >= projectile.maxPlayerHits);
     }
 
     return false;

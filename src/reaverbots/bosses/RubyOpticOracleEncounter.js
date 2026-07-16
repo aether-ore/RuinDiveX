@@ -1086,8 +1086,12 @@ export class RubyOpticOracleEncounter {
       if (distance <= 2.85 + game.player.radius) {
         if (distance <= 0.001) tempA.set(0, 0, 1);
         else tempA.divideScalar(distance);
-        game.player.takeDamage(this.owner.stats.damage * 0.46, this.owner, {
+        game.player.takeIncomingHit({
+          amount: this.owner.stats.damage * 0.46,
+          source: this.owner,
           attackKind: 'rubyOracleShutterFlash',
+          guardable: true,
+          reactionTier: 1,
           knockbackDirection: tempA,
           knockbackStrength: 0.72,
           impactPosition: this.owner.root.position.clone(),
@@ -1266,19 +1270,20 @@ export class RubyOpticOracleEncounter {
     if (this.attack?.type !== 'ascension') return false;
     this._cancelPaths('all-seeing-burst');
     const player = game.player;
-    const mitigationInverse = (100 + Math.max(0, player.stats?.armor ?? 0)) / 100;
     const rawDamage = player.stats.maxHealth
-      * RUBY_ORACLE_TUNING.ascension.failureDamageHealthScale
-      * mitigationInverse;
+      * RUBY_ORACLE_TUNING.ascension.failureDamageHealthScale;
     tempA.copy(this.center).sub(player.root.position).setY(0);
     if (tempA.lengthSq() <= 0.001) tempA.set(0, 0, 1);
     else tempA.normalize();
-    player.takeDamage(rawDamage, this.owner, {
+    player.takeIncomingHit({
+      amount: rawDamage,
+      source: this.owner,
       attackKind: 'rubyOracleAllSeeingBurst',
-      powerfulKnockback: true,
+      guardable: false,
+      reactionTier: 3,
+      minimumReactionTier: 2,
       knockbackDirection: tempA,
       knockbackStrength: 0.74,
-      unblockable: true,
       impactPosition: this.getEyePosition(tempB).clone(),
     });
     game.addExplosion?.(this.getEyePosition(tempA), 0, 8.5, 0xff164f, {

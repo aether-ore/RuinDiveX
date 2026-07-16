@@ -499,7 +499,7 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
       getEnemyNavigationDirection: controller.getEnemyNavigationDirection,
       isAerialPathClear: controller.isAerialPathClear,
       isPlayerInSafeZone: controller.isPlayerInSafeZone,
-      takeDamage: player.takeDamage,
+      takeIncomingHit: player.takeIncomingHit,
     };
     const hits = [];
     try {
@@ -511,9 +511,18 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
       controller.isAerialPathClear = () => true;
       controller.isPlayerInSafeZone = () => false;
       player.root.position.set(0, 0, 0);
-      player.takeDamage = (amount, source, context = {}) => {
-        hits.push({ amount, sourceId: source?.id, context: { ...context } });
-        return amount;
+      player.takeIncomingHit = (incomingHit = {}) => {
+        hits.push({
+          amount: incomingHit.amount,
+          sourceId: incomingHit.source?.id,
+          context: { ...incomingHit },
+        });
+        return {
+          contacted: true,
+          dodged: false,
+          immune: false,
+          healthDamage: incomingHit.amount,
+        };
       };
 
       enemy.root.position.set(0, 0, -6);
@@ -697,7 +706,7 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
         hitCount: hits.length,
         hit: hits[0] ? {
           attackKind: hits[0].context.attackKind,
-          powerfulKnockback: hits[0].context.powerfulKnockback,
+          reactionTier: hits[0].context.reactionTier,
           knockbackDirectionLength: hits[0].context.knockbackDirection?.length?.() ?? 0,
         } : null,
         maximumBackflipY,
@@ -723,7 +732,7 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
       controller.getEnemyNavigationDirection = originals.getEnemyNavigationDirection;
       controller.isAerialPathClear = originals.isAerialPathClear;
       controller.isPlayerInSafeZone = originals.isPlayerInSafeZone;
-      player.takeDamage = originals.takeDamage;
+      player.takeIncomingHit = originals.takeIncomingHit;
     }
   });
 
@@ -746,7 +755,7 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
   expect(result.hitCount).toBe(1);
   expect(result.hit).toMatchObject({
     attackKind: 'sharukurusuDrillCharge',
-    powerfulKnockback: true,
+    reactionTier: 2,
   });
   expect(result.hit.knockbackDirectionLength).toBeGreaterThan(0.99);
   expect(result.maximumBackflipY).toBeGreaterThan(0.9);

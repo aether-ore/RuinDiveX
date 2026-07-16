@@ -43,7 +43,7 @@ async function readLiveProfileRanges(page) {
   });
 }
 
-test('live legacy Range resolution is identical with the Buster Lab off and on', async ({ page }) => {
+test('live legacy Range resolution is identical with and without the obsolete Buster Lab query', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
   await page.goto('/?reaverbotSeed=buster-range-parity-off');
   await waitForGame(page);
@@ -58,14 +58,14 @@ test('live legacy Range resolution is identical with the Buster Lab off and on',
   const featureOn = await readLiveProfileRanges(page);
 
   expect(featureOff).toEqual({
-    featureEnabled: false,
+    featureEnabled: true,
     base: 6,
     machineGun: 6,
     cannon: 6,
     missileBase: 7.8,
     missileHoming: 9.4,
   });
-  expect(featureOn).toEqual({ ...featureOff, featureEnabled: true });
+  expect(featureOn).toEqual(featureOff);
   expect(runtimeErrors).toEqual([]);
 });
 

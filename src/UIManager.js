@@ -1,6 +1,17 @@
 import * as THREE from 'three';
-import { EQUIPMENT_SLOTS } from './EquipmentManager.js';
-import { formatStatValue, RARITIES, STAT_LABELS } from './Item.js';
+import {
+  ARM_GEAR_RECIPE_LIST,
+  ARM_LOADOUT_SLOTS,
+  FIXED_ARM_LIST,
+  GEAR_LIST,
+  GEAR_SLOTS,
+  canEquipFixedArmInSlot,
+  canEquipGearInSlot,
+  getFixedArmDefinition,
+  getGearDefinition,
+  getGearSlotDefinition,
+} from './equipment/index.js';
+import { REAVERBOT_SALVAGE_MATERIALS } from './reaverbots/ReaverbotSalvageCatalog.js';
 
 function formatTime(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -8,74 +19,86 @@ function formatTime(seconds) {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-function slotLabel(slot) {
-  return {
-    weapon: 'Arm Weapon',
-    offhand: 'Shield / Utility Arm',
-    head: 'Sensor Gear',
-    chest: 'Armor Frame',
-    hands: 'Buster Parts',
-    feet: 'Mobility Gear',
-    module: 'Utility Module',
-    module1: 'Utility Module I',
-    module2: 'Utility Module II',
-    core: 'Refractor Core',
-    back: 'Back Mount',
-  }[slot] ?? slot;
-}
-
-function isArmWeapon(item) {
-  return item?.slot === 'weapon' && item?.category === 'Arm Weapon';
-}
-
-function isBusterArm(item) {
-  return isArmWeapon(item) && item?.type === 'busterArm';
-}
-
-function isUtilityArm(item) {
-  return isArmWeapon(item) && (item?.type === 'liftArm' || item?.tags?.includes('utility'));
-}
-
-function isCombatArm(item) {
-  return isArmWeapon(item) && !isBusterArm(item) && !isUtilityArm(item);
-}
-
-function isBusterUpgrade(item) {
-  return item?.category === 'Buster Part';
-}
-
-function getItemPower(item) {
-  return item?.getPowerScore?.() ?? 0;
-}
-
-function compareByPower(a, b) {
-  const powerDiff = getItemPower(b) - getItemPower(a);
-  if (powerDiff !== 0) return powerDiff;
-
-  const levelDiff = (b?.level ?? 0) - (a?.level ?? 0);
-  if (levelDiff !== 0) return levelDiff;
-
-  return (b?.value ?? 0) - (a?.value ?? 0);
-}
-
 const OUTPUT_BEHAVIOR_LINES = {
   busterArm: 'Output: buster shots are unlimited, but Energy sets how many rapid shots fit in one burst.',
   liftArm: 'Output: lifting Junk is free; holding small Reaverbots drains Lift Output until they break free.',
   machineGunArm: 'Output: rapid fire spends small chunks; low Output widens spread and slows effective fire.',
   cannonArm: 'Output: heavy shells drain nearly all Chamber Output before it rebuilds.',
-  mineArm: 'Output: mine placement spends Arming Output, limiting rapid trap stacking.',
   missileArm: 'Output: missiles spend Lock Stability, and salvos demand a large stable charge.',
   grenadeArm: 'Output: each lob spends a heavy chunk of Throw Output.',
-  railBusterArm: 'Output: rail shots consume Capacitor Output before the next full-power line.',
-  scatterBusterArm: 'Output: spread bursts spend modest Output; low Output makes the burst less controlled.',
-  homingSeekerArm: 'Output: seeker rounds spend Tracking Output and lock quality weakens when low.',
   laserArm: 'Output: held beams drain Beam Stability very quickly and vent at empty.',
-  flameArm: 'Output: pressure drains while held; low pressure reduces cone range, force, and buildup.',
-  iceSprayerArm: 'Output: pressure drains while held; low pressure weakens icy gas range, damage, and freeze buildup.',
-  shockCoilArm: 'Output: chain shots spend Coil Output before the next stable discharge.',
   swordArm: 'Output: beam-blade slashes spend Servo Output, so heavy swings cannot be spammed.',
   drillArm: 'Output: held drilling drains Torque Output rapidly and does not recover until released; Z fires the drill head.',
 };
+
+const ARM_SLOT_LABELS = Object.freeze({
+  megaBuster: 'Mega Buster',
+  special1: 'Special / Custom Arm 1',
+  special2: 'Special / Custom Arm 2',
+  utility: 'Utility Arm',
+});
+
+const ARM_SLOT_INDEX = Object.freeze({
+  megaBuster: 0,
+  special1: 1,
+  special2: 2,
+  utility: 3,
+});
+
+const ARM_MODE_COPY = Object.freeze({
+  megaBuster: 'Pulse fire / arm-local calibrations',
+  laserBeamBlade: 'Three-hit combo / jump slash / beam trail / 18% area output',
+  machineGunArm: 'Sustained rapid fire',
+  cannonArm: 'Heavy shell / 26% area output',
+  grenadeArm: 'Arcing impact / cluster mode / 25% area output',
+  missileArm: 'Guided missile / full-lock salvo',
+  shiningLaser: 'Held beam / overload vent',
+  liftArm: 'Continuous lift / carry and throw',
+  drillArm: 'Contact drill / launched drill head / 39% armor break',
+});
+
+function formatTelemetryValue(value, digits = 3) {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (!Number.isFinite(Number(value))) return '-';
+  const number = Number(value);
+  return Number.isInteger(number) ? String(number) : number.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function getGearEffectCopy(gear) {
+  if (!gear?.effect) return gear?.description ?? '';
+  const effect = gear.effect;
+  switch (effect.id) {
+    case 'healthDamageMultiplier':
+      return `Health damage x${effect.multiplier.toFixed(2)}. Barrier damage is unchanged.`;
+    case 'reactionTierReduction':
+      return `Resolved reaction tier -${effect.tiers}. Damage is unchanged.`;
+    case 'jumpReachMultiplier':
+      return `Ordinary vertical jump reach x${effect.multiplier.toFixed(2)}. Run, dodge, and Jet Skate speed are unchanged.`;
+    case 'rechargingBarrier':
+      return `${effect.capacity} capacity / ${effect.rechargeDelay.toFixed(1)}s normal delay / ${effect.brokenDelay.toFixed(0)}s broken delay / ${effect.rechargePerSecond} per second recharge.`;
+    case 'guardProjector':
+      return `${effect.duration.toFixed(2)}s guard / ${effect.parryWindow.toFixed(2)}s parry / ${effect.cooldown.toFixed(2)}s cooldown / ${Math.round(effect.guardReduction * 100)}%/${Math.round(effect.parryReduction * 100)}% damage reduction.`;
+    case 'hazardImmunity':
+      return 'Immune to tagged environmental heat damage and burn only; enemy Thermal attacks remain harmful.';
+    case 'jetSkates':
+      return `${effect.windup.toFixed(2)}s Sprint wind-up / ${effect.acceleration} m/s^2 acceleration / ${effect.maxSpeed} m/s cap / +${effect.ledgeVerticalImpulse.toFixed(1)} m/s ledge impulse.`;
+    case 'targetScanner':
+      return `Cyan highlight on exposed weak points and intact breakable modules within ${effect.range}m and line of sight; no damage bonus.`;
+    case 'armSwapTransition':
+      return `${effect.transitionTime.toFixed(2)}s arm transition instead of ${effect.baseTransitionTime.toFixed(2)}s.`;
+    default:
+      return gear.description;
+  }
+}
 
 const POSE_DEBUG_JOINTS = [
   ['hips', 'Hips'],
@@ -376,22 +399,6 @@ const POSE_DEBUG_ANIMATION_PRESETS = [
   },
 ];
 
-function itemFitsSlot(item, slot) {
-  if (!item) {
-    return false;
-  }
-
-  if (slot === 'module1' || slot === 'module2') {
-    return item.slot === 'module';
-  }
-
-  if (slot === 'hands' && isBusterUpgrade(item)) {
-    return false;
-  }
-
-  return item.slot === slot;
-}
-
 export class UIManager {
   constructor(game) {
     this.game = game;
@@ -400,6 +407,10 @@ export class UIManager {
     this.healthGauge = document.getElementById('health-gauge');
     this.healthFill = document.getElementById('health-fill');
     this.healthText = document.getElementById('health-text');
+    this.barrierHud = document.getElementById('barrier-hud');
+    this.barrierFill = document.getElementById('barrier-fill');
+    this.barrierValue = document.getElementById('barrier-value');
+    this.barrierStatus = document.getElementById('barrier-status');
     this.timeValue = document.getElementById('time-value');
     this.enemyCount = document.getElementById('enemy-count');
     this.floorValue = document.getElementById('floor-value');
@@ -477,6 +488,8 @@ export class UIManager {
     this.inventoryItems = document.getElementById('inventory-items');
     this.equipmentSlots = document.getElementById('equipment-slots');
     this.garageWeaponSlots = document.getElementById('garage-weapon-slots');
+    this.loadoutEditStatus = document.getElementById('loadout-edit-status');
+    this.equipmentFabrication = document.getElementById('equipment-fabrication');
     this.questLog = document.getElementById('quest-log');
     this.tooltip = document.getElementById('item-tooltip');
     this.poseDebugPanel = document.getElementById('pose-debug-panel');
@@ -574,6 +587,7 @@ export class UIManager {
       'is-power-knockback',
       player.isPowerKnockbackActive?.() === true,
     );
+    this._renderBarrierHud();
     this.timeValue.textContent = formatTime(this.game.elapsedTime);
     this.enemyCount.textContent = String(this.game.enemies.filter((enemy) => !enemy.dead).length);
     if (this.floorValue) {
@@ -624,6 +638,36 @@ export class UIManager {
     if (this.bossVictoryBanner) this.bossVictoryBanner.hidden = this.bossVictoryTimer <= 0;
 
     this.gameOver.hidden = !this.game.isGameOver;
+  }
+
+  _renderBarrierHud() {
+    if (!this.barrierHud) return;
+    const state = this.game.player.getBarrierHudState?.() ?? null;
+    const equipped = Boolean(state?.equipped && Number(state.capacity) > 0);
+    this.barrierHud.hidden = !equipped;
+    if (!equipped) return;
+
+    const percent = Math.max(0, Math.min(1, Number(state.percent) || 0));
+    const delayed = Number(state.rechargeDelayRemaining) > 0;
+    this.barrierFill?.style.setProperty('transform', `scaleX(${percent})`);
+    if (this.barrierValue) {
+      this.barrierValue.textContent = `${Math.ceil(Number(state.current) || 0)} / ${Math.ceil(Number(state.capacity) || 0)}`;
+    }
+    if (this.barrierStatus) {
+      this.barrierStatus.textContent = state.broken
+        ? 'BROKEN'
+        : state.recharging
+          ? 'RECHARGING'
+          : delayed
+            ? `${Number(state.rechargeDelayRemaining).toFixed(1)}s`
+            : 'READY';
+    }
+    this.barrierHud.classList.toggle('is-broken', Boolean(state.broken));
+    this.barrierHud.classList.toggle('is-recharging', Boolean(state.recharging));
+    this.barrierHud.classList.toggle('is-delayed', !state.broken && delayed);
+    this.barrierHud.setAttribute('aria-label', state.accessibleText ?? `Barrier ${this.barrierValue?.textContent ?? ''}`);
+    this.barrierHud.setAttribute('aria-valuemax', String(Math.ceil(Number(state.capacity) || 0)));
+    this.barrierHud.setAttribute('aria-valuenow', String(Math.ceil(Number(state.current) || 0)));
   }
 
   _renderBossHud() {
@@ -1193,6 +1237,7 @@ export class UIManager {
     this._renderBossHunts();
     this._renderBusterLab();
     this._renderCraftingMaterials();
+    this._renderEquipmentFabrication();
     this._renderInventoryItems();
   }
 
@@ -2327,20 +2372,66 @@ export class UIManager {
 
   _renderEquipment() {
     this._renderGarageWeapons();
+    if (!this.equipmentSlots) return;
     this.equipmentSlots.innerHTML = '';
 
-    for (const slot of EQUIPMENT_SLOTS) {
-      const item = this.game.player.equipment.get(slot);
-      const slotElement = document.createElement('button');
-      slotElement.className = 'equipment-slot';
-      slotElement.dataset.slot = slot;
-      slotElement.dataset.action = item ? 'unequip' : 'empty';
-      slotElement.style.borderColor = item ? item.color : 'rgba(166,190,220,0.22)';
-      slotElement.innerHTML = `
-        <span class="slot-name">${slotLabel(slot)}</span>
-        <span class="slot-item" style="color: ${item?.color ?? '#aebbd0'}">${item?.name ?? 'Empty'}</span>
+    const canEdit = this.game.canEditArmsGear?.() === true;
+    const loadout = this.game.player.gearLoadout;
+    for (const slot of GEAR_SLOTS) {
+      const slotDefinition = getGearSlotDefinition(slot);
+      const slotUnlocked = loadout?.isSlotUnlocked?.(slot) ?? slot !== 'defense';
+      const gearId = loadout?.getId?.(slot) ?? null;
+      const gear = gearId ? getGearDefinition(gearId) : null;
+      const choices = GEAR_LIST.filter((candidate) => (
+        canEquipGearInSlot(candidate.id, slot) && loadout?.isUnlocked?.(candidate.id)
+      ));
+      const card = document.createElement('article');
+      card.className = [
+        'equipment-slot',
+        gear ? 'is-equipped' : 'is-empty',
+        slotUnlocked ? '' : 'is-locked',
+        canEdit ? '' : 'is-read-only',
+      ].filter(Boolean).join(' ');
+      card.dataset.slot = slot;
+
+      const optionMarkup = [
+        `<option value=""${gearId ? '' : ' selected'}>Empty</option>`,
+        ...choices.map((choice) => (
+          `<option value="${escapeHtml(choice.id)}"${choice.id === gearId ? ' selected' : ''}>${escapeHtml(choice.label)}</option>`
+        )),
+      ].join('');
+      const lockedCopy = slot === 'defense'
+        ? 'Locked - defeat a qualifying boss to receive the Barrier Generator.'
+        : 'This gear slot is locked.';
+      const emptyCopy = slot === 'mobility'
+        ? 'Empty - Jump Springs must be fabricated through Roll.'
+        : slot.startsWith('utility')
+          ? 'Empty - no utility module equipped.'
+          : 'Empty.';
+
+      card.innerHTML = `
+        <header class="fixed-slot-header">
+          <span class="slot-name">${escapeHtml(slotDefinition?.label ?? slot)}</span>
+          <span class="fixed-slot-state">${slotUnlocked ? gear ? 'EQUIPPED' : 'EMPTY' : 'LOCKED'}</span>
+        </header>
+        <strong class="slot-item">${escapeHtml(slotUnlocked ? gear?.label ?? 'Empty' : 'Defense milestone')}</strong>
+        <p class="fixed-effect-copy">${escapeHtml(slotUnlocked ? gear ? getGearEffectCopy(gear) : emptyCopy : lockedCopy)}</p>
+        <label class="fixed-loadout-select">
+          <span>Installed gear</span>
+          <select data-gear-loadout-slot="${escapeHtml(slot)}" ${!canEdit || !slotUnlocked ? 'disabled' : ''}>
+            ${optionMarkup}
+          </select>
+        </label>
+        <small class="fixed-owned-count">${slotUnlocked ? `${choices.length} unlocked choice${choices.length === 1 ? '' : 's'}` : 'Milestone not reached'}</small>
       `;
-      this.equipmentSlots.appendChild(slotElement);
+      this.equipmentSlots.appendChild(card);
+    }
+
+    if (this.loadoutEditStatus) {
+      this.loadoutEditStatus.classList.toggle('is-read-only', !canEdit);
+      this.loadoutEditStatus.textContent = canEdit
+        ? 'Workshop link active - Arms and Gear changes save to this campaign.'
+        : "Read-only - change Arms and Gear only at Roll's workshop or camp with writable campaign storage.";
     }
   }
 
@@ -2387,89 +2478,90 @@ export class UIManager {
     }
 
     this.garageWeaponSlots.innerHTML = '';
+    const canEdit = this.game.canEditArmsGear?.() === true;
+    const armLoadout = this.game.player.armLoadout;
+    const ownedArmIds = new Set(armLoadout?.snapshot?.().ownedArmIds ?? []);
+    const busterView = this.game.getBusterLabViewModel?.('build-a') ?? null;
+    const customBuilds = (busterView?.builds ?? []).filter((build) => build.available);
 
-    for (let i = 0; i < this.game.player.armHotbar.length; i += 1) {
-      const item = this.game.player.armHotbar[i];
-      const card = document.createElement('button');
-      card.className = `garage-weapon-card${i === this.game.player.activeArmIndex ? ' is-active' : ''}${item ? '' : ' is-empty'}`;
-      card.dataset.action = item ? 'switch-arm-slot' : 'empty';
-      card.dataset.slotIndex = String(i);
+    for (const slot of ARM_LOADOUT_SLOTS) {
+      const slotIndex = ARM_SLOT_INDEX[slot];
+      const selection = armLoadout?.get?.(slot)
+        ?? (slot === 'megaBuster' ? { kind: 'megaBuster' } : null);
+      const fixedArmId = selection?.kind === 'megaBuster'
+        ? 'megaBuster'
+        : selection?.kind === 'fixedArm'
+          ? selection.armId
+          : null;
+      const definition = fixedArmId ? getFixedArmDefinition(fixedArmId) : null;
+      const selectedBuild = customBuilds.find((build) => build.buildId === selection?.buildId);
+      const name = definition?.label
+        ?? selectedBuild?.label
+        ?? (selection?.kind === 'customBuster' ? `Custom Buster ${selection.buildId}` : 'Empty');
+      const resolved = this.game.combat?.getResolvedArmTelemetry?.(slotIndex) ?? null;
+      const telemetry = [
+        ['DMG', resolved?.damage],
+        ['ENG', resolved?.energyCapacity],
+        ['RNG', resolved?.effectiveRange],
+        ['CAD', resolved?.cadence],
+      ].filter(([, value]) => value !== null && value !== undefined && value !== '');
+      const chips = telemetry.length > 0
+        ? telemetry.map(([label, value]) => `<span class="garage-stat-chip"><b>${label}</b>${formatTelemetryValue(value)}</span>`).join('')
+        : '<span class="garage-stat-chip is-wide"><b>BEHAVIOR</b>Continuous utility</span>';
+      const modeCopy = definition
+        ? ARM_MODE_COPY[definition.id] ?? definition.description
+        : selection?.kind === 'customBuster'
+          ? resolved?.modes?.join(' / ') ?? 'Compiled authored module graph'
+          : 'No arm assigned';
+      const outputCopy = resolved?.resourceUse
+        ? `Resource: ${resolved.resourceUse}`
+        : definition
+          ? OUTPUT_BEHAVIOR_LINES[definition.runtimeType] ?? definition.description
+          : selection?.kind === 'customBuster'
+            ? 'Energy use, cycle timing, and delivery are resolved by this saved build.'
+            : "Choose an owned arm at Roll's workshop or camp.";
 
-      if (!item) {
-        card.innerHTML = `
-          <span class="garage-weapon-index">${i + 1}</span>
-          <span class="garage-weapon-main">
-            <strong class="garage-weapon-name">Empty</strong>
-            <span class="garage-weapon-meta">Arm slot</span>
-          </span>
-        `;
-        this.garageWeaponSlots.appendChild(card);
-        continue;
-      }
+      const fixedChoices = FIXED_ARM_LIST.filter((candidate) => (
+        candidate.id !== 'megaBuster'
+        && ownedArmIds.has(candidate.id)
+        && canEquipFixedArmInSlot(candidate.id, slot)
+      ));
+      const options = slot === 'megaBuster'
+        ? '<option value="megaBuster" selected>Mega Buster - invariant</option>'
+        : [
+          `<option value=""${selection ? '' : ' selected'}>Empty</option>`,
+          ...fixedChoices.map((candidate) => (
+            `<option value="fixed:${escapeHtml(candidate.id)}"${candidate.id === fixedArmId ? ' selected' : ''}>${escapeHtml(candidate.label)}</option>`
+          )),
+          ...(['special1', 'special2'].includes(slot) ? customBuilds.map((build) => (
+            `<option value="custom:${escapeHtml(build.buildId)}"${selection?.kind === 'customBuster' && selection.buildId === build.buildId ? ' selected' : ''}>Custom Buster - ${escapeHtml(build.label)}</option>`
+          )) : []),
+        ].join('');
 
-      const compiledPlan = this.game.getBusterPlanForSlot?.(i) ?? null;
-      const compiledStats = compiledPlan?.stats ?? null;
-      const totals = compiledStats ? {
-        attackDamage: compiledStats.effectivePower ?? compiledStats.basePower ?? 0,
-        maxEnergy: compiledStats.maxEnergy ?? 0,
-        attackRange: compiledStats.rootRange ?? 0,
-        attackSpeed: compiledStats.finalRapid ?? 0,
-      } : item.getStatTotals();
-      const chips = [
-        [compiledPlan ? 'PWR' : 'ATK', totals.attackDamage ?? 0],
-        ['ENG', totals.maxEnergy ?? 0],
-        ['RNG', totals.attackRange ?? 0],
-        ['RPD', totals.attackSpeed ?? 0],
-      ].map(([label, value]) => `<span class="garage-stat-chip">${label} ${formatStatValue(label === 'RPD' ? 'attackSpeed' : label === 'ENG' ? 'maxEnergy' : label === 'RNG' ? 'attackRange' : 'attackDamage', value)}</span>`).join('');
-
-      const itemColor = item.color ?? (compiledPlan?.isMegaBuster ? '#7ee7ff' : '#f2c84b');
-      const itemMeta = compiledPlan
-        ? `${compiledPlan.isMegaBuster ? 'Fixed Pulse' : 'Compiled Custom Buster'} - revision ${compiledPlan.revision ?? 1}`
-        : `${RARITIES[item.rarity]?.label ?? 'Arm'} ${item.typeLabel} - Lv ${item.level}`;
-      card.style.borderColor = itemColor;
+      const card = document.createElement('article');
+      card.className = [
+        'garage-weapon-card',
+        slotIndex === this.game.player.activeArmIndex ? 'is-active' : '',
+        selection ? '' : 'is-empty',
+        canEdit ? '' : 'is-read-only',
+      ].filter(Boolean).join(' ');
       card.innerHTML = `
-        <span class="garage-weapon-index">${i + 1}</span>
+        <button class="garage-arm-switch" type="button" data-action="switch-arm-slot" data-slot-index="${slotIndex}" ${selection ? '' : 'disabled'} aria-label="Switch to ${escapeHtml(ARM_SLOT_LABELS[slot])}">
+          <span class="garage-weapon-index">${slotIndex + 1}</span>
+        </button>
         <span class="garage-weapon-main">
-          <strong class="garage-weapon-name" style="color: ${itemColor}">${compiledPlan?.isMegaBuster ? 'Mega Buster' : item.name}</strong>
-          <span class="garage-weapon-meta">${itemMeta}</span>
-          <span class="garage-stat-grid">${chips}</span>
-        </span>
-      `;
-      this.garageWeaponSlots.appendChild(card);
-    }
-
-    for (let i = 0; i < (this.game.player.busterUpgradeSlots?.length ?? 0); i += 1) {
-      const item = this.game.player.busterUpgradeSlots[i];
-      const card = document.createElement('button');
-      card.className = `garage-weapon-card garage-buster-upgrade${item ? '' : ' is-empty'}`;
-      card.dataset.action = item ? 'unassign-buster-upgrade' : 'empty';
-      card.dataset.slotIndex = String(i);
-
-      if (!item) {
-        card.innerHTML = `
-          <span class="garage-weapon-index">B${i + 1}</span>
-          <span class="garage-weapon-main">
-            <strong class="garage-weapon-name">Empty</strong>
-            <span class="garage-weapon-meta">Buster upgrade slot</span>
+          <span class="fixed-slot-header">
+            <span class="slot-name">${escapeHtml(ARM_SLOT_LABELS[slot])}</span>
+            <span class="fixed-slot-state">${slotIndex === this.game.player.activeArmIndex ? 'ACTIVE' : selection ? 'READY' : 'EMPTY'}</span>
           </span>
-        `;
-        this.garageWeaponSlots.appendChild(card);
-        continue;
-      }
-
-      const totals = item.getStatTotals();
-      const chips = Object.entries(totals)
-        .slice(0, 3)
-        .map(([stat, value]) => `<span class="garage-stat-chip">${STAT_LABELS[stat] ?? stat} ${formatStatValue(stat, value)}</span>`)
-        .join('');
-
-      card.style.borderColor = item.color;
-      card.innerHTML = `
-        <span class="garage-weapon-index">B${i + 1}</span>
-        <span class="garage-weapon-main">
-          <strong class="garage-weapon-name" style="color: ${item.color}">${item.name}</strong>
-          <span class="garage-weapon-meta">${RARITIES[item.rarity].label} ${item.typeLabel} - Lv ${item.level}</span>
+          <strong class="garage-weapon-name">${escapeHtml(name)}</strong>
+          <span class="garage-weapon-meta">${escapeHtml(modeCopy)}</span>
           <span class="garage-stat-grid">${chips}</span>
+          <span class="garage-output-copy">${escapeHtml(outputCopy)}</span>
+          <label class="fixed-loadout-select">
+            <span>Installed arm</span>
+            <select data-arm-loadout-slot="${escapeHtml(slot)}" ${!canEdit || slot === 'megaBuster' ? 'disabled' : ''}>${options}</select>
+          </label>
         </span>
       `;
       this.garageWeaponSlots.appendChild(card);
@@ -2477,28 +2569,9 @@ export class UIManager {
   }
 
   _renderInventoryActions() {
-    if (!this.inventoryActions) {
-      return;
-    }
-
-    const rarityCounts = this.game.inventory.items.reduce((counts, item) => {
-      counts[item.rarity] = (counts[item.rarity] ?? 0) + 1;
-      return counts;
-    }, {});
-
-    this.inventoryActions.innerHTML = '';
-
-    for (const [rarityKey, rarity] of Object.entries(RARITIES)) {
-      const count = rarityCounts[rarityKey] ?? 0;
-      const button = document.createElement('button');
-      button.dataset.action = 'salvage-rarity';
-      button.dataset.rarity = rarityKey;
-      button.disabled = count === 0;
-      button.style.borderColor = rarity.color;
-      button.style.color = rarity.color;
-      button.textContent = `${rarity.label} (${count})`;
-      this.inventoryActions.appendChild(button);
-    }
+    if (!this.inventoryActions) return;
+    this.inventoryActions.replaceChildren();
+    this.inventoryActions.hidden = true;
   }
 
   _renderMinimap() {
@@ -2756,6 +2829,7 @@ export class UIManager {
   }
 
   _renderInventoryItems() {
+    if (!this.inventoryItems) return;
     this.inventoryItems.innerHTML = '';
     const recoveryItems = this.game.busterMigrationRecovery ?? [];
     if (recoveryItems.length > 0) {
@@ -2775,47 +2849,102 @@ export class UIManager {
       this.inventoryItems.appendChild(recovery);
     }
 
-    if (this.game.inventory.items.length === 0 && recoveryItems.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'inventory-empty';
-      empty.textContent = 'No salvage';
-      this.inventoryItems.appendChild(empty);
-      return;
-    }
+    const note = document.createElement('div');
+    note.className = 'fixed-inventory-note';
+    note.innerHTML = `
+      <strong>Fixed-function loadout</strong>
+      <span>Arms and Gear are permanent authored unlocks. Field inventory is reserved for Zenny, refractors, keycards, unidentified scrap, and named salvage.</span>
+    `;
+    this.inventoryItems.appendChild(note);
+  }
 
-    for (const item of this.game.inventory.items) {
-      const card = document.createElement('div');
-      card.className = 'inventory-item';
-      card.dataset.itemId = item.id;
-      card.style.borderColor = item.color;
-      const armSlotButtons = this._renderInventoryArmAssignmentButtons(item);
-      const busterUpgradeButtons = isBusterUpgrade(item)
-        ? `
-          <div class="arm-assignments" aria-label="Assign buster upgrade">
-            ${[0, 1, 2, 3].map((slotIndex) => `
-              <button
-                data-action="assign-buster-upgrade"
-                data-item-id="${item.id}"
-                data-slot-index="${slotIndex}"
-                title="Install into Buster upgrade slot ${slotIndex + 1}"
-              >B${slotIndex + 1}</button>
-            `).join('')}
-          </div>
-        `
+  _renderEquipmentFabrication() {
+    if (!this.equipmentFabrication) return;
+    const storage = this.game.rollSalvageStorage;
+    const state = this.game.player?.armLoadout && this.game.player?.gearLoadout
+      ? {
+        arms: this.game.player.armLoadout.snapshot?.(),
+        gear: this.game.player.gearLoadout.snapshot?.(),
+      }
+      : null;
+    const durableState = this.game.busterLabStorage?.getArmsGearState?.()
+      ?? this.game.busterLabState?.armsGear
+      ?? this.game._getBusterLabState?.()?.armsGear
+      ?? null;
+    const fabricated = new Set(durableState?.fabricatedRecipeIds ?? []);
+    const canEdit = this.game.canEditArmsGear?.() === true;
+    const defenseUnlocked = this.game.player.gearLoadout?.isSlotUnlocked?.('defense') === true;
+    this.equipmentFabrication.innerHTML = '';
+
+    for (const recipe of ARM_GEAR_RECIPE_LIST) {
+      const discoveredIds = recipe.requiredPartIds.filter((partId) => storage?.hasDiscoveredPart?.(partId));
+      const hasClue = discoveredIds.length > 0;
+      const fullyDiscovered = discoveredIds.length === recipe.requiredPartIds.length;
+      const complete = fabricated.has(recipe.id)
+        || (recipe.outputKind === 'arm'
+          ? state?.arms?.ownedArmIds?.includes(recipe.outputId)
+          : state?.gear?.records?.some((record) => record.gearId === recipe.outputId && record.unlocked));
+      const check = storage?.canTransactRecipe?.(recipe) ?? { ok: false, missing: {} };
+      const requiresDefense = recipe.requiresDefenseUnlock && !defenseUnlocked;
+      const output = recipe.outputKind === 'arm'
+        ? getFixedArmDefinition(recipe.outputId)
+        : getGearDefinition(recipe.outputId);
+      const card = document.createElement('article');
+      card.className = [
+        'equipment-recipe-card',
+        !hasClue ? 'is-unknown' : '',
+        hasClue && !fullyDiscovered ? 'is-clue' : '',
+        complete ? 'is-complete' : '',
+      ].filter(Boolean).join(' ');
+
+      const discoveredNames = discoveredIds.map((partId) => REAVERBOT_SALVAGE_MATERIALS[partId]?.name ?? partId);
+      const requirements = fullyDiscovered
+        ? recipe.requiredPartIds.map((partId) => {
+          const material = REAVERBOT_SALVAGE_MATERIALS[partId];
+          const owned = storage?.getPartCount?.(partId) ?? 0;
+          return `<li class="${owned >= 1 ? 'is-met' : 'is-missing'}"><span>${escapeHtml(material?.name ?? partId)}</span><strong>${owned}/1</strong></li>`;
+        }).join('')
         : '';
+      const title = hasClue ? output?.label ?? recipe.label : 'Unknown Fabrication Pattern';
+      const description = !hasClue
+        ? "Recover a related intact Reaverbot part to reveal Roll's clue."
+        : !fullyDiscovered
+          ? `Roll: "${discoveredNames.join(' and ')} should fit a ${recipe.outputKind === 'arm' ? 'specialized arm' : 'fixed-function gear'} assembly. Find the remaining component type${recipe.requiredPartIds.length - discoveredIds.length === 1 ? '' : 's'}."`
+        : recipe.outputKind === 'gear'
+          ? getGearEffectCopy(output)
+          : output?.description ?? 'Permanent authored equipment unlock.';
+      const unavailableReason = complete
+        ? 'Fabricated'
+        : requiresDefense
+          ? 'Defense milestone required'
+          : !fullyDiscovered
+            ? 'Recipe incomplete'
+            : !canEdit
+              ? 'Workshop read-only'
+              : !check.ok
+                ? 'Missing materials'
+                : 'Fabricate';
+
       card.innerHTML = `
-        <div class="item-main">
-          <strong style="color: ${item.color}">${item.name}</strong>
-          <span>${RARITIES[item.rarity].label} ${item.category} - ${item.typeLabel} - Lv ${item.level}</span>
+        <div class="equipment-recipe-mark" aria-hidden="true">${hasClue ? recipe.outputKind === 'arm' ? 'A' : 'G' : '?'}</div>
+        <div class="equipment-recipe-main">
+          <header>
+            <strong>${escapeHtml(title)}</strong>
+            <span>${complete ? 'PERMANENTLY UNLOCKED' : fullyDiscovered ? 'RECIPE COMPLETE' : hasClue ? "ROLL'S CLUE" : 'SILHOUETTE'}</span>
+          </header>
+          <p>${escapeHtml(description)}</p>
+          ${fullyDiscovered ? `
+            <ul class="equipment-recipe-requirements">
+              <li class="${(storage?.identifiedScrap ?? 0) >= recipe.scrapCost ? 'is-met' : 'is-missing'}"><span>Identified Scrap</span><strong>${storage?.identifiedScrap ?? 0}/${recipe.scrapCost}</strong></li>
+              ${requirements}
+            </ul>
+          ` : ''}
         </div>
-        <div class="item-actions">
-          <button data-action="equip" data-item-id="${item.id}">Equip</button>
-          ${armSlotButtons}
-          ${busterUpgradeButtons}
-          <button data-action="discard" data-item-id="${item.id}">Scrap</button>
-        </div>
+        <button type="button" data-action="fabricate-equipment" data-recipe-id="${escapeHtml(recipe.id)}" ${complete || requiresDefense || !fullyDiscovered || !canEdit || !check.ok ? 'disabled' : ''}>
+          ${escapeHtml(unavailableReason)}
+        </button>
       `;
-      this.inventoryItems.appendChild(card);
+      this.equipmentFabrication.appendChild(card);
     }
   }
 
@@ -2850,42 +2979,6 @@ export class UIManager {
       `;
       this.materialInventory.appendChild(card);
     }
-  }
-
-  _renderInventoryArmAssignmentButtons(item) {
-    if (!isArmWeapon(item)) {
-      return '';
-    }
-
-    const assignments = [];
-
-    if (isBusterArm(item)) {
-      assignments.push({ slotIndex: 0, label: 'B', title: 'Replace the fixed Buster slot' });
-    } else if (isUtilityArm(item)) {
-      assignments.push({ slotIndex: 3, label: 'U', title: 'Equip as a Utility Arm' });
-    } else if (isCombatArm(item)) {
-      assignments.push(
-        { slotIndex: 1, label: '2', title: 'Load into combat arm slot 2' },
-        { slotIndex: 2, label: '3', title: 'Load into combat arm slot 3' },
-      );
-    }
-
-    if (assignments.length === 0) {
-      return '';
-    }
-
-    return `
-      <div class="arm-assignments" aria-label="Assign arm weapon">
-        ${assignments.map((assignment) => `
-          <button
-            data-action="assign-arm-slot"
-            data-item-id="${item.id}"
-            data-slot-index="${assignment.slotIndex}"
-            title="${assignment.title}"
-          >${assignment.label}</button>
-        `).join('')}
-      </div>
-    `;
   }
 
   _runBusterLabAction(action, {
@@ -2948,6 +3041,37 @@ export class UIManager {
     return Object.fromEntries([...this.busterMaterializationSuggestion?.querySelectorAll(
       '[data-buster-materialization-module]',
     ) ?? []].map((select) => [select.dataset.busterMaterializationModule, select.value]));
+  }
+
+  _runArmsGearAction(action, {
+    successMessage = 'Loadout updated',
+    failureMessage = 'Loadout change failed',
+  } = {}) {
+    if (this.game.canEditArmsGear?.() !== true) {
+      this.showToast("Arms and Gear can only be changed at Roll's workshop or camp.", '#ff9f73');
+      this.renderInventory();
+      return Promise.resolve({ ok: false, reason: 'read-only' });
+    }
+
+    const execute = async () => {
+      try {
+        const result = await action?.();
+        if (result === false || result == null || result?.ok === false) {
+          this.showToast(result?.message ?? failureMessage, '#ff9f73');
+          return result ?? { ok: false };
+        }
+        this.showToast(result?.message ?? successMessage, '#7df8ff');
+        return result;
+      } catch (error) {
+        this.showToast(error?.message ?? failureMessage, '#ff9f73');
+        return { ok: false, error };
+      } finally {
+        this.renderInventory();
+      }
+    };
+    const queued = this.busterLabActionQueue.then(execute, execute);
+    this.busterLabActionQueue = queued.catch(() => null);
+    return queued;
   }
 
   _bindEvents() {
@@ -3211,6 +3335,34 @@ export class UIManager {
         event.target.value = '';
         return;
       }
+
+      const armLoadout = event.target.closest('[data-arm-loadout-slot]');
+      if (armLoadout) {
+        const rawValue = armLoadout.value;
+        const selection = rawValue.startsWith('fixed:')
+          ? { kind: 'fixedArm', armId: rawValue.slice('fixed:'.length) }
+          : rawValue.startsWith('custom:')
+            ? { kind: 'customBuster', buildId: rawValue.slice('custom:'.length) }
+            : null;
+        this._runArmsGearAction(
+          () => this.game.equipArmLoadoutSlot?.(armLoadout.dataset.armLoadoutSlot, selection),
+          { successMessage: 'Arm loadout saved', failureMessage: 'Arm could not be assigned' },
+        );
+        return;
+      }
+
+      const gearLoadout = event.target.closest('[data-gear-loadout-slot]');
+      if (gearLoadout) {
+        this._runArmsGearAction(
+          () => this.game.equipGearLoadoutSlot?.(
+            gearLoadout.dataset.gearLoadoutSlot,
+            gearLoadout.value || null,
+          ),
+          { successMessage: 'Gear loadout saved', failureMessage: 'Gear could not be installed' },
+        );
+        return;
+      }
+
       const tuning = event.target.closest('[data-buster-tuning]');
       if (tuning) {
         const result = this.game.updateBusterDraft?.(this.busterLabSelectedBuildId, {
@@ -3280,6 +3432,11 @@ export class UIManager {
 
       if (action === 'identify-scrap') {
         this.game.identifyReaverbotScrap?.();
+      } else if (action === 'fabricate-equipment') {
+        this._runArmsGearAction(
+          () => this.game.fabricateEquipment?.(button.dataset.recipeId),
+          { successMessage: 'Permanent equipment unlocked', failureMessage: 'Fabrication failed without consuming resources' },
+        );
       } else if (action === 'boss-hunt-select') {
         this._runBusterLabAction(
           () => this.game.selectBossHunt?.(button.dataset.bossProfileId),
@@ -3457,441 +3614,19 @@ export class UIManager {
             onSuccess: () => { this.pendingBusterMaterialization = null; },
           },
         );
-      } else if (action === 'equip') {
-        this._equipInventoryItem(button.dataset.itemId);
-      } else if (action === 'assign-arm-slot') {
-        this._assignArmWeaponToSlot(button.dataset.itemId, Number(button.dataset.slotIndex));
-      } else if (action === 'assign-buster-upgrade') {
-        this._assignBusterUpgradeToSlot(button.dataset.itemId, Number(button.dataset.slotIndex));
-      } else if (action === 'unassign-buster-upgrade') {
-        this._runBusterLabAction(
-          () => this.game.unassignLegacyBusterUpgrade?.(Number(button.dataset.slotIndex)),
-          {
-            successMessage: 'Buster Part returned to inventory',
-            failureMessage: 'Buster Part could not be removed',
-          },
-        );
       } else if (action === 'recover-migration-item') {
         const result = this.game.recoverLegacyMigrationItem?.(Number(button.dataset.recoveryIndex));
         this.showToast(result?.message ?? 'Migration recovery unavailable', result?.ok ? '#7df8ff' : '#ff9f73');
         this.renderInventory();
-      } else if (action === 'discard') {
-        this._discardInventoryItem(button.dataset.itemId);
-      } else if (action === 'salvage-rarity') {
-        this._salvageRarity(button.dataset.rarity);
-      } else if (action === 'optimize-equipment') {
-        this._optimizeEquipment();
       } else if (action === 'switch-arm-slot') {
         this.game.combat?.switchArmSlot(Number(button.dataset.slotIndex));
         this.renderInventory();
-      } else if (action === 'unequip') {
-        this._unequipSlot(button.dataset.slot);
       } else if (action === 'close') {
         this.game.setInventoryOpen(false);
-      }
-    });
-
-    this.inventoryPanel.addEventListener('mousemove', (event) => {
-      const itemCard = event.target.closest('.inventory-item');
-      const equipmentSlot = event.target.closest('.equipment-slot');
-
-      if (itemCard) {
-        const item = this.game.inventory.findItem(itemCard.dataset.itemId);
-        if (item) {
-          this._showTooltip(item, event.clientX, event.clientY);
-        }
-      } else if (equipmentSlot) {
-        const item = this.game.player.equipment.get(equipmentSlot.dataset.slot);
-        if (item) {
-          this._showTooltip(item, event.clientX, event.clientY);
-        } else {
-          this.hideTooltip();
-        }
-      } else {
-        this.hideTooltip();
       }
     });
 
     this.inventoryPanel.addEventListener('mouseleave', () => this.hideTooltip());
   }
 
-  async _equipInventoryItem(itemId) {
-    const pendingItem = this.game.inventory.findItem(itemId);
-    if (!pendingItem) return;
-    if (isBusterUpgrade(pendingItem)) {
-      await this._assignBusterUpgradeToSlot(itemId, this._getPreferredBusterUpgradeSlot());
-      return;
-    }
-    const customSlot = isArmWeapon(pendingItem)
-      ? (isBusterArm(pendingItem)
-        ? 0
-        : isUtilityArm(pendingItem)
-          ? 3
-          : this.game.player.activeArmIndex === 1 || this.game.player.activeArmIndex === 2
-            ? this.game.player.activeArmIndex
-            : 1)
-      : null;
-    const displaced = customSlot == null ? null : this.game.player.armHotbar[customSlot];
-    const durablyDisplacedCustom = displaced?.type === 'customBusterArm';
-    if (durablyDisplacedCustom) {
-      const committed = await this.game.handleDisplacedCustomBuster?.(customSlot, displaced);
-      if (!committed) {
-        this.showToast('The arm slot change could not be saved', '#ff9f73');
-        return;
-      }
-    }
-    const item = this.game.inventory.removeItem(itemId);
-    if (!item) {
-      return;
-    }
-
-    let previous = null;
-    let preferredSlot = null;
-
-    if (isArmWeapon(item)) {
-      preferredSlot = isBusterArm(item)
-        ? 0
-        : isUtilityArm(item)
-          ? 3
-          : this.game.player.activeArmIndex === 1 || this.game.player.activeArmIndex === 2
-            ? this.game.player.activeArmIndex
-            : 1;
-      previous = this.game.player.assignArmWeaponToSlot(preferredSlot, item);
-    } else if (isBusterUpgrade(item)) {
-      previous = this.game.player.assignBusterUpgradeToSlot(this._getPreferredBusterUpgradeSlot(), item);
-    } else {
-      previous = this.game.player.equipment.equip(item);
-    }
-
-    if (previous && !durablyDisplacedCustom) {
-      this.game.inventory.addItem(previous);
-    }
-
-    this.renderInventory();
-  }
-
-  async _assignArmWeaponToSlot(itemId, slotIndex) {
-    const pendingItem = this.game.inventory.findItem(itemId);
-    if (!pendingItem) return;
-    const displaced = this.game.player.armHotbar[slotIndex];
-    const durablyDisplacedCustom = displaced?.type === 'customBusterArm';
-    if (durablyDisplacedCustom) {
-      const committed = await this.game.handleDisplacedCustomBuster?.(slotIndex, displaced);
-      if (!committed) {
-        this.showToast('The arm slot change could not be saved', '#ff9f73');
-        return;
-      }
-    }
-    const item = this.game.inventory.removeItem(itemId);
-    if (!item) {
-      return;
-    }
-
-    if (!isArmWeapon(item)) {
-      this.game.inventory.addItem(item);
-      return;
-    }
-
-    const previous = this.game.player.assignArmWeaponToSlot(slotIndex, item);
-    if (previous && !durablyDisplacedCustom) {
-      this.game.inventory.addItem(previous);
-    }
-
-    const slotLabel = slotIndex === 0 ? 'Buster' : slotIndex === 3 ? 'Utility Arm' : `slot ${slotIndex + 1}`;
-    this.showToast(`${item.typeLabel} loaded in ${slotLabel}`, item.color);
-    this.renderInventory();
-  }
-
-  async _assignBusterUpgradeToSlot(itemId, slotIndex) {
-    const item = this.game.inventory.findItem(itemId);
-    if (!item || !isBusterUpgrade(item)) return;
-    const result = await this.game.assignLegacyBusterUpgrade?.(itemId, slotIndex);
-    if (!result?.ok) {
-      this.showToast(result?.message ?? 'The Buster Part move could not be saved', '#ff9f73');
-      return;
-    }
-    this.showToast(`${item.typeLabel} installed in Buster ${slotIndex + 1}`, item.color);
-    this.renderInventory();
-  }
-
-  _getPreferredBusterUpgradeSlot() {
-    const slots = this.game.player.busterUpgradeSlots ?? [];
-    const emptyIndex = slots.findIndex((item) => !item);
-
-    if (emptyIndex >= 0) {
-      return emptyIndex;
-    }
-
-    let weakestIndex = 0;
-    let weakestPower = Infinity;
-    for (let i = 0; i < slots.length; i += 1) {
-      const power = getItemPower(slots[i]);
-      if (power < weakestPower) {
-        weakestPower = power;
-        weakestIndex = i;
-      }
-    }
-
-    return weakestIndex;
-  }
-
-  _unequipSlot(slot) {
-    const item = this.game.player.equipment.unequip(slot);
-
-    if (!item) {
-      return;
-    }
-
-    if (!this.game.inventory.addItem(item)) {
-      this.game.player.equipment.equip(item, slot);
-    }
-
-    this.renderInventory();
-  }
-
-  async _discardInventoryItem(itemId) {
-    const result = await this.game.discardInventoryItem?.(itemId);
-    if (!result?.ok) this.showToast(result?.message ?? 'The item could not be discarded', '#ff9f73');
-    this.renderInventory();
-  }
-
-  async _salvageRarity(rarity) {
-    const result = await this.game.salvageInventoryRarity?.(rarity);
-    if (!result?.ok) {
-      this.showToast(result?.message ?? 'Nothing was salvaged', '#ff9f73');
-      return;
-    }
-    this.hideTooltip();
-    this.showToast(`Salvaged ${result.count} ${RARITIES[rarity]?.label ?? 'items'} for ${result.gained}z`);
-    this.renderInventory();
-  }
-
-  async _optimizeEquipment() {
-    const player = this.game.player;
-    const pool = this._collectOptimizationPool();
-    const usedItemIds = new Set();
-    const selectedSlots = new Map();
-    const preservedCustomSlots = new Map([1, 2]
-      .map((slotIndex) => [slotIndex, player.armHotbar[slotIndex]])
-      .filter(([, item]) => item?.type === 'customBusterArm'));
-
-    const takeBestForSlot = (slot) => {
-      const best = pool
-        .filter((item) => !usedItemIds.has(item.id) && itemFitsSlot(item, slot))
-        .sort(compareByPower)[0] ?? null;
-
-      if (best) {
-        usedItemIds.add(best.id);
-        selectedSlots.set(slot, best);
-      }
-    };
-
-    const buster = this.game.busterLabEnabled
-      ? player.armHotbar[0] ?? null
-      : pool
-        .filter((item) => isBusterArm(item))
-        .sort(compareByPower)
-        [0] ?? player.armHotbar[0] ?? null;
-    const armLoadout = pool
-      .filter((item) => isCombatArm(item))
-      .sort(compareByPower)
-      .slice(0, 2 - preservedCustomSlots.size);
-    const utilityLoadout = pool
-      .filter((item) => isUtilityArm(item))
-      .sort(compareByPower);
-    const busterUpgrades = pool
-      .filter((item) => isBusterUpgrade(item))
-      .sort(compareByPower)
-      .slice(0, player.busterUpgradeSlots?.length ?? 4);
-
-    if (buster) {
-      usedItemIds.add(buster.id);
-    }
-    for (const item of armLoadout) {
-      usedItemIds.add(item.id);
-    }
-    for (const item of utilityLoadout) {
-      usedItemIds.add(item.id);
-    }
-    for (const item of busterUpgrades) {
-      usedItemIds.add(item.id);
-    }
-
-    for (const slot of EQUIPMENT_SLOTS) {
-      if (slot !== 'weapon' && slot !== 'hands') {
-        takeBestForSlot(slot);
-      }
-    }
-
-    if (!this.game.busterLabEnabled) {
-      const committed = await this.game.commitLegacyBusterOptimization?.(busterUpgrades);
-      if (!committed?.ok) {
-        this.showToast(committed?.message ?? 'Optimize could not be saved', '#ff9f73');
-        return;
-      }
-    }
-    player.equipment.clear();
-    player.armHotbar[0] = buster;
-    let armIndex = 0;
-    for (const slotIndex of [1, 2]) {
-      player.armHotbar[slotIndex] = preservedCustomSlots.get(slotIndex) ?? armLoadout[armIndex++] ?? null;
-    }
-    player.setUtilityArms(utilityLoadout, true);
-    player.switchArmWeapon(0, true);
-    for (let i = 0; i < (player.busterUpgradeSlots?.length ?? 0); i += 1) {
-      player.assignBusterUpgradeToSlot(i, busterUpgrades[i] ?? null);
-    }
-
-    for (const [slot, item] of selectedSlots.entries()) {
-      player.equipment.equip(item, slot);
-    }
-
-    this.game.inventory.items = pool.filter((item) => !usedItemIds.has(item.id));
-    player.recalculateStats();
-    player.updateWeaponVisualState?.();
-
-    this.hideTooltip();
-    this.showToast('Loadout optimized');
-    this.renderInventory();
-  }
-
-  _collectOptimizationPool() {
-    const pool = [];
-    const seen = new Set();
-
-    const addItem = (item) => {
-      if (!item || item.type === 'customBusterArm' || seen.has(item.id)) {
-        return;
-      }
-
-      seen.add(item.id);
-      pool.push(item);
-    };
-
-    for (const item of this.game.player.equipment.equipped.values()) {
-      addItem(item);
-    }
-
-    for (const item of this.game.player.armHotbar) {
-      addItem(item);
-    }
-
-    for (const item of this.game.player.utilityArms ?? []) {
-      addItem(item);
-    }
-
-    for (const item of this.game.player.busterUpgradeSlots ?? []) {
-      addItem(item);
-    }
-
-    for (const item of this.game.inventory.items) {
-      addItem(item);
-    }
-
-    return pool;
-  }
-
-  _showTooltip(item, x, y) {
-    const equipped = this._getComparisonItem(item);
-    const diff = equipped ? item.getPowerScore() - equipped.getPowerScore() : null;
-    const diffLabel = diff === null
-      ? 'No equipped comparison'
-      : `${diff >= 0 ? '+' : ''}${diff.toFixed(1)} power`;
-
-    const statLines = item.getDisplayLines().map((line) => `<li>${line}</li>`).join('');
-    const totals = Object.entries(item.getStatTotals())
-      .map(([stat, value]) => `<li>${STAT_LABELS[stat] ?? stat}: ${formatStatValue(stat, value)}</li>`)
-      .join('');
-    const hotbarLine = this._getHotbarLine(item);
-    const outputLine = OUTPUT_BEHAVIOR_LINES[item.type] ?? '';
-
-    this.tooltip.innerHTML = `
-      <div class="tooltip-title" style="color: ${item.color}">${item.name}</div>
-      <div class="tooltip-subtitle">${RARITIES[item.rarity].label} - ${item.category} - ${slotLabel(item.slot)} - ${item.value}z</div>
-      ${item.behavior ? `<div class="tooltip-compare">${item.behavior}</div>` : ''}
-      ${outputLine ? `<div class="tooltip-compare">${outputLine}</div>` : ''}
-      ${hotbarLine ? `<div class="tooltip-compare">${hotbarLine}</div>` : ''}
-      <ul>${statLines}</ul>
-      <div class="tooltip-compare">${diffLabel}</div>
-      <details>
-        <summary>Totals</summary>
-        <ul>${totals}</ul>
-      </details>
-    `;
-
-    this.tooltip.hidden = false;
-    this.tooltip.style.left = `${Math.min(window.innerWidth - 320, x + 18)}px`;
-    this.tooltip.style.top = `${Math.min(window.innerHeight - 280, y + 18)}px`;
-  }
-
-  _getHotbarLine(item) {
-    if (isBusterUpgrade(item)) {
-      const assignedIndex = this.game.player.busterUpgradeSlots?.findIndex((slotItem) => slotItem?.id === item.id) ?? -1;
-      return assignedIndex >= 0
-        ? `Installed in Buster upgrade B${assignedIndex + 1}`
-        : 'Can be installed into Buster upgrade slots B1-B4';
-    }
-
-    if (!isArmWeapon(item)) {
-      return '';
-    }
-
-    const utilityIndex = this.game.player.utilityArms?.findIndex((slotItem) => slotItem?.id === item.id) ?? -1;
-    if (utilityIndex >= 0) {
-      return `Equipped Utility Arm ${utilityIndex + 1}; press 4 to cycle`;
-    }
-
-    const assignedIndex = this.game.player.armHotbar.findIndex((slotItem) => slotItem?.id === item.id);
-    if (assignedIndex >= 0) {
-      return `Loaded in arm slot ${assignedIndex + 1}`;
-    }
-
-    if (isBusterArm(item)) {
-      return 'Can replace the fixed Buster slot';
-    }
-
-    if (isUtilityArm(item)) {
-      return 'Can be equipped into the Utility Arm cycle';
-    }
-
-    return 'Can be loaded into combat arm slots 2-3';
-  }
-
-  _getComparisonItem(item) {
-    if (isBusterUpgrade(item)) {
-      const equipped = (this.game.player.busterUpgradeSlots ?? []).filter(Boolean);
-      if (equipped.length === 0) {
-        return null;
-      }
-
-      return equipped.sort((a, b) => getItemPower(a) - getItemPower(b))[0];
-    }
-
-    if (item.slot === 'module') {
-      const module1 = this.game.player.equipment.get('module1');
-      const module2 = this.game.player.equipment.get('module2');
-
-      if (!module1) return null;
-      if (!module2) return module1;
-      return module1.getPowerScore() < module2.getPowerScore() ? module1 : module2;
-    }
-
-    if (isArmWeapon(item)) {
-      const sameDomain = (candidate) => {
-        if (!candidate || candidate.type === 'customBusterArm') return false;
-        if (isBusterArm(item)) return isBusterArm(candidate);
-        if (isUtilityArm(item)) return isUtilityArm(candidate);
-        return isCombatArm(candidate);
-      };
-      const comparable = [
-        ...(this.game.player.armHotbar ?? []),
-        ...(this.game.player.utilityArms ?? []),
-      ].filter(sameDomain);
-      if (comparable.length === 0) return null;
-      return comparable.sort((a, b) => getItemPower(a) - getItemPower(b))[0];
-    }
-
-    const slot = this.game.player.equipment.resolveSlot(item);
-    return this.game.player.equipment.get(slot);
-  }
 }

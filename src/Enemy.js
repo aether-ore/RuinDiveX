@@ -38,6 +38,10 @@ let reaverbotPanelTexture = null;
 let horokkoModelPromise = null;
 let gorubesshuModelPromise = null;
 
+function isResolvedPlayerContact(result) {
+  return Boolean(result?.contacted && !result.dodged && !result.immune);
+}
+
 export const ENEMY_TYPES = {
   basic: {
     label: 'Servitor Reaverbot',
@@ -2257,9 +2261,18 @@ export class Enemy {
       return;
     }
 
-    const dealt = player.takeDamage(this.stats.damage * 0.22, this);
-    this.onHitPlayer(player, dealt);
-    game.addHitEffect(player.root.position, 0xff6a2e, 0.42);
+    const hitResult = player.takeIncomingHit({
+      amount: this.stats.damage * 0.22,
+      source: this,
+      guardable: true,
+      reactionTier: 0,
+    });
+    if (hitResult.healthDamage > 0) {
+      this.onHitPlayer(player, hitResult.healthDamage);
+    }
+    if (isResolvedPlayerContact(hitResult)) {
+      game.addHitEffect(player.root.position, 0xff6a2e, 0.42);
+    }
   }
 
   _getArmorReduction() {
@@ -2560,10 +2573,17 @@ export class Enemy {
       return;
     }
 
-    const dealt = game.player.takeDamage(this.stats.damage, this);
-    this.onHitPlayer(game.player, dealt);
-    game.addHitEffect(game.player.root.position, 0xff695c, 0.55);
-    if (dealt > 0) {
+    const hitResult = game.player.takeIncomingHit({
+      amount: this.stats.damage,
+      source: this,
+      guardable: true,
+      reactionTier: 1,
+    });
+    if (hitResult.healthDamage > 0) {
+      this.onHitPlayer(game.player, hitResult.healthDamage);
+    }
+    if (isResolvedPlayerContact(hitResult)) {
+      game.addHitEffect(game.player.root.position, 0xff695c, 0.55);
       this.beginContactRetreat(game, game.player);
       game.requestHitStop?.(0.08, { timeScale: 0.05 });
     }

@@ -184,7 +184,7 @@ test('fresh lab grants Build A and its physical Pulse Bolt exactly once', () => 
   assert.equal(first.chassisBuilds.length, 1);
   assert.equal(first.chassisDrafts.length, 1);
   assert.equal(first.chassisRevisions.length, 1);
-  assert.deepEqual(first.assignments.slots, { 1: null, 2: null });
+  assert.deepEqual(first.assignments.slots, { 1: null, 2: 'build-a' });
   assert.deepEqual(first.megaCalibrations, {
     instances: [],
     slots: [null, null, null, null],
@@ -239,7 +239,7 @@ test('repeatable debug kits atomically grant every physical part and one complet
     new Set(calibrationTypes),
   );
   assert.deepEqual(lab.state.megaCalibrations.slots, [null, null, null, null]);
-  assert.deepEqual(lab.state.assignments.slots, { 1: null, 2: null });
+  assert.deepEqual(lab.state.assignments.slots, { 1: null, 2: 'build-a' });
   assert.equal(lab.state.rollSalvage.identifiedScrap, 66);
   assert.equal(lab.state.rollSalvage.parts.revolvingPulseBarrel.quantity, 2);
   assert.equal(lab.state.rollSalvage.parts.clusterBurstSequencer.quantity, 1);
@@ -359,7 +359,7 @@ test('second chassis costs 20 scrap, creates only an invalid Build B draft, and 
   const draftB = lab.state.chassisDrafts.find((draft) => draft.buildId === 'build-b');
   assert.equal(draftB.program.rootNodeId, null);
   assert.deepEqual(draftB.program.nodes, []);
-  assert.deepEqual(lab.state.assignments.slots, { 1: null, 2: null });
+  assert.deepEqual(lab.state.assignments.slots, { 1: null, 2: 'build-a' });
 
   const again = lab.purchaseSecondChassis();
   assert.equal(again.ok, false);
@@ -458,12 +458,13 @@ test('serialization whitelists durable fields, adopts old saves, and visibly qua
   lab.save(state);
 
   const envelope = JSON.parse(storage.getItem(lab.storageKeys.main));
-  assert.equal(envelope.storageVersion, 2);
+  assert.equal(envelope.storageVersion, 3);
   assert.equal(envelope.saveContextId, lab.saveContextId);
   assert.ok(envelope.revision > 0);
   assert.ok(envelope.writeId);
   const persisted = envelope.state;
   assert.deepEqual(Object.keys(persisted).sort(), [
+    'armsGear',
     'assignments',
     'blueprints',
     'bossHunts',
@@ -496,7 +497,7 @@ test('serialization whitelists durable fields, adopts old saves, and visibly qua
   const adoption = await migratedLab.adoptLegacyV1({ confirmed: true });
   assert.equal(adoption.ok, true);
   const migrated = adoption.state;
-  assert.equal(migrated.version, 2);
+  assert.equal(migrated.version, 3);
   assert.equal(migrated.rollSalvage.identifiedScrap, 9);
   assert.equal(migrated.chassisInstances.length, 1);
   assert.equal(migrated.migrations.starterChassisGranted, true);

@@ -5581,11 +5581,14 @@ export class DungeonGenerator {
           totalLocalNodeCount: localTiles.length,
         });
       }
-      if (plan.level > 0) {
+      if (plan.requiredForProgression || plan.level > 0) {
         for (const point of plan.bridgePath) {
           const key = floorTileKey(point.x, point.z, plan.level);
           if (!reachable.has(key)) {
-            errors.push(`${plan.id} bridge tile ${key} is disconnected.`);
+            errors.push(
+              `${plan.id} ${plan.requiredForProgression ? 'required ' : ''}bridge tile ${key} `
+              + 'is disconnected under the base traversal envelope.',
+            );
             break;
           }
         }

@@ -207,9 +207,14 @@ test('locked beam anchors stay live, firing collision persists, and cancellation
       radius: 0.42,
       collisionHeight: 2.85,
       dead: false,
-      takeDamage(amount) {
+      takeIncomingHit({ amount }) {
         hitCount += 1;
-        return amount;
+        return {
+          contacted: true,
+          dodged: false,
+          immune: false,
+          healthDamage: amount,
+        };
       },
     },
   };

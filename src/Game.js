@@ -9,7 +9,6 @@ import {
   setActiveEnemyIdAllocator,
 } from './Enemy.js';
 import { Inventory } from './Inventory.js';
-import { Item } from './Item.js';
 import { LootSystem } from './LootSystem.js';
 import { MapEventSystem } from './MapEventSystem.js';
 import { Player } from './Player.js';
@@ -24,6 +23,7 @@ import {
 } from './buster/BusterLabStorage.js';
 import { BUSTER_RECIPE_LIST, getRecipeDiscoveryState } from './buster/BusterRecipeCatalog.js';
 import { BusterRuntime } from './buster/BusterRuntime.js';
+import { createMegaCalibrationShadow } from './buster/MegaCalibrationShadow.js';
 import {
   createBusterExecutionStaggerLedger,
   resolveBusterStaggerDuration,
@@ -54,7 +54,15 @@ import {
   validateBusterProgram,
 } from './buster/index.js';
 import { PLAYER_TRAVERSAL_CAPABILITIES } from './TraversalCapabilities.js';
-import { getCombatTargetWorldPosition } from './reaverbots/CombatTarget.js';
+import {
+  createDefaultArmsGearState,
+  createFixedArmDescriptor,
+  getEquipmentRecipeDefinition,
+} from './equipment/index.js';
+import {
+  getCombatTargetWorldPosition,
+  getEnemyCombatTargets,
+} from './reaverbots/CombatTarget.js';
 import { rollReaverbotSalvageDrops } from './reaverbots/ReaverbotSalvageCatalog.js';
 import {
   DEFAULT_BOSS_PROFILE_ID,
@@ -207,12 +215,9 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
 ]);
 
 function isBusterLabFeatureEnabled() {
-  try {
-    const mode = new URLSearchParams(globalThis.location?.search ?? '').get('busterLab');
-    return mode === '1' || mode === 'sandbox';
-  } catch {
-    return false;
-  }
+  // The Custom Buster is a canonical arm system. URL parameters now select
+  // diagnostics/sandbox behavior only; they no longer gate normal ownership.
+  return true;
 }
 
 function isBusterLabSandboxEnabled() {
@@ -688,6 +693,16 @@ export class Game {
     this.pointerNdc = new THREE.Vector2();
     this.aimReticle = null;
     this.aimReticleScale = 1;
+    this.targetScannerRaycaster = new THREE.Raycaster();
+    this.targetScannerMarkers = new Map();
+    this.targetScannerMarkerGeometry = new THREE.TorusGeometry(0.26, 0.025, 8, 24);
+    this.targetScannerMarkerMaterial = new THREE.MeshBasicMaterial({
+      color: 0x56f5ff,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+      depthWrite: false,
+    });
     this.poseDebugHandleGroup = new THREE.Group();
     this.poseDebugHandleGroup.name = 'poseDebugHandleGroup';
     this.poseDebugHandleGroup.visible = false;
@@ -1493,6 +1508,209 @@ export class Game {
     return Boolean(this.dungeonController?.isPlayerInSafeZone?.());
   }
 
+  canEditArmsGear() {
+    const atAuthorizedWorkshop = Boolean(
+      this.dungeonController?.isPlayerInCamp?.()
+      || this.dungeonController?.isPlayerAtRollWorkshop?.(),
+    );
+    return atAuthorizedWorkshop
+      && !this.busterSandboxSession?.active
+      && !this.busterTestRange?.active
+      && !this.busterLabStorage?.readOnly;
+  }
+
+  _applyPersistedArmsGear({ refillBarrier = false } = {}) {
+    const armsGear = this.busterLabStorage?.state?.armsGear
+      ?? this.busterLabState?.armsGear
+      ?? createDefaultArmsGearState();
+    this.busterLabState = this.busterLabStorage?.state ?? this.busterLabState;
+    this.player.applyArmsGearState(armsGear, {
+      resolveCustomBuster: (buildId) => (
+        this.busterLabPlans.has(buildId)
+          ? this._createCustomBusterArmDescriptor(buildId)
+          : null
+      ),
+      refillBarrier,
+    });
+    this._updateTargetScanner?.();
+    return armsGear;
+  }
+
+  async equipArmLoadoutSlot(slot, selection) {
+    if (!this.canEditArmsGear()) {
+      return { ok: false, reason: 'unsafe-area', message: 'Arms can be changed only with Roll at camp.' };
+    }
+    if (!this.busterLabStorage?.equipArmLoadoutSlot) {
+      return { ok: false, reason: 'storage-unavailable', message: 'The Arms workshop is unavailable.' };
+    }
+    const normalizedSelection = typeof selection === 'string'
+      ? { kind: 'fixedArm', armId: selection }
+      : selection;
+    const result = await this._queueBusterStorageOperation(() => (
+      this.busterLabStorage.equipArmLoadoutSlot(slot, normalizedSelection)
+    ));
+    if (!result?.ok) {
+      return { ...result, message: result?.reason === 'arm-not-owned' ? 'That Arm has not been fabricated.' : 'That Arm cannot use this slot.' };
+    }
+    this._applyPersistedArmsGear();
+    this.ui?.renderInventory?.();
+    return { ...result, message: 'Arm loadout updated.' };
+  }
+
+  async equipGearLoadoutSlot(slot, gearId) {
+    if (!this.canEditArmsGear()) {
+      return { ok: false, reason: 'unsafe-area', message: 'Gear can be changed only with Roll at camp.' };
+    }
+    if (!this.busterLabStorage?.equipGearLoadoutSlot) {
+      return { ok: false, reason: 'storage-unavailable', message: 'The Gear workshop is unavailable.' };
+    }
+    const result = await this._queueBusterStorageOperation(() => (
+      this.busterLabStorage.equipGearLoadoutSlot(slot, gearId || null)
+    ));
+    if (!result?.ok) {
+      return { ...result, message: result?.reason === 'gear-locked' ? 'Fabricate that Gear first.' : 'That Gear cannot use this slot.' };
+    }
+    this._applyPersistedArmsGear();
+    this.ui?.renderInventory?.();
+    return { ...result, message: 'Gear loadout updated.' };
+  }
+
+  async fabricateEquipment(recipeId) {
+    if (!this.canEditArmsGear()) {
+      return { ok: false, reason: 'unsafe-area', message: 'Roll can fabricate equipment only at camp.' };
+    }
+    const recipe = getEquipmentRecipeDefinition(recipeId);
+    if (!recipe || !this.busterLabStorage?.fabricateEquipment) {
+      return { ok: false, reason: 'unknown-recipe', message: 'Roll does not recognize that equipment recipe.' };
+    }
+    const result = await this._queueBusterStorageOperation(() => (
+      this.busterLabStorage.fabricateEquipment(recipe.id)
+    ));
+    if (!result?.ok) {
+      const message = result?.reason === 'already-fabricated' || result?.reason === 'already-owned'
+        ? `${recipe.label} is already unlocked.`
+        : result?.reason === 'insufficient-resources'
+          ? 'Roll is missing required scrap or named parts.'
+          : result?.reason === 'defense-locked'
+            ? 'Defeat a qualifying Boss before Roll can fabricate Defense Gear.'
+          : 'Fabrication could not be saved; nothing was consumed.';
+      return { ...result, message };
+    }
+    this._refreshRollSalvageStorage();
+    this._applyPersistedArmsGear();
+    this.ui?.showToast?.(`${recipe.label} fabricated`, '#7df8ff');
+    this.ui?.renderInventory?.();
+    return { ...result, message: `${recipe.label} permanently unlocked.` };
+  }
+
+  _hasTargetScannerLineOfSight(worldPosition) {
+    const origin = tempVectorA.copy(this.player.root.position);
+    origin.y += 1;
+    const direction = tempVectorB.copy(worldPosition).sub(origin);
+    const distance = direction.length();
+    if (distance <= 0.001) return true;
+    direction.multiplyScalar(1 / distance);
+    this.targetScannerRaycaster.set(origin, direction);
+    this.targetScannerRaycaster.near = 0.05;
+    this.targetScannerRaycaster.far = Math.max(0.05, distance - 0.08);
+    const occluders = (this.cameraOcclusionEntries ?? [])
+      .map((entry) => entry?.object)
+      .filter(Boolean);
+    if (occluders.length === 0) return true;
+
+    // Scanner LOS must consider every authored occlusion wall between the
+    // player and target. The camera's candidate list is only the most recent
+    // camera-to-player bin and is therefore not a valid world LOS set.
+    const originalMaterialSides = new Map();
+    for (const object of occluders) {
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (material && material.side !== THREE.DoubleSide && !originalMaterialSides.has(material)) {
+          originalMaterialSides.set(material, material.side);
+          material.side = THREE.DoubleSide;
+        }
+      }
+    }
+    try {
+      return this.targetScannerRaycaster.intersectObjects(occluders, false).length === 0;
+    } finally {
+      for (const [material, side] of originalMaterialSides) material.side = side;
+    }
+  }
+
+  _updateTargetScanner() {
+    const scanner = this.player.gearEffects?.targetScanner;
+    const eligible = new Map();
+    if (scanner && !this.player.dead) {
+      const playerPosition = this.player.root.position;
+      const rangeSq = scanner.range * scanner.range;
+      for (const enemy of this.enemies) {
+        if (!enemy || enemy.dead) continue;
+        for (const combatTarget of getEnemyCombatTargets(enemy)) {
+          if (!combatTarget?.isWeakPointTarget || combatTarget.active === false) continue;
+          const targetObject = combatTarget.root;
+          if (!targetObject?.getWorldPosition) continue;
+          targetObject.getWorldPosition(tempVectorC);
+          if (playerPosition.distanceToSquared(tempVectorC) <= rangeSq
+            && this._hasTargetScannerLineOfSight(tempVectorC)) {
+            eligible.set(targetObject, tempVectorC.clone());
+          }
+        }
+        const weakPoint = enemy.visual?.weakPoint?.core;
+        if (weakPoint && enemy.brain?.weakPointExposed && !enemy.weakPointBroken) {
+          weakPoint.getWorldPosition(tempVectorC);
+          if (playerPosition.distanceToSquared(tempVectorC) <= rangeSq
+            && this._hasTargetScannerLineOfSight(tempVectorC)) {
+            eligible.set(weakPoint, tempVectorC.clone());
+          }
+        }
+        if (enemy.brain?.clawDestroyed) continue;
+        enemy.root?.traverse?.((object) => {
+          if (!object.visible || !object.userData?.breakableWeaponPart) return;
+          object.getWorldPosition(tempVectorC);
+          if (playerPosition.distanceToSquared(tempVectorC) <= rangeSq
+            && this._hasTargetScannerLineOfSight(tempVectorC)) {
+            eligible.set(object, tempVectorC.clone());
+          }
+        });
+      }
+    }
+
+    for (const [target, markerSet] of this.targetScannerMarkers) {
+      if (eligible.has(target)) continue;
+      markerSet.reticle.removeFromParent();
+      markerSet.highlight.removeFromParent();
+      markerSet.highlight.geometry?.dispose?.();
+      markerSet.highlight.material?.dispose?.();
+      this.targetScannerMarkers.delete(target);
+    }
+    for (const [target, position] of eligible) {
+      let markerSet = this.targetScannerMarkers.get(target);
+      if (!markerSet) {
+        const reticle = new THREE.Mesh(
+          this.targetScannerMarkerGeometry,
+          this.targetScannerMarkerMaterial,
+        );
+        reticle.name = 'targetScannerCyanReticle';
+        reticle.renderOrder = 999;
+        const highlight = new THREE.BoxHelper(target, 0x55f4ff);
+        highlight.name = 'targetScannerCyanHighlight';
+        highlight.material.depthTest = false;
+        highlight.material.transparent = true;
+        highlight.material.opacity = 0.82;
+        highlight.renderOrder = 998;
+        this.scene.add(reticle, highlight);
+        markerSet = { reticle, highlight };
+        this.targetScannerMarkers.set(target, markerSet);
+      }
+      markerSet.reticle.position.copy(position);
+      markerSet.reticle.quaternion.copy(this.camera.quaternion);
+      markerSet.reticle.visible = true;
+      markerSet.highlight.update();
+      markerSet.highlight.visible = true;
+    }
+  }
+
   getNearestInteractable() {
     return this.dungeonController?.getNearestInteractable?.()
       ?? this.mapEvents?.getNearestInteractable?.()
@@ -1800,6 +2018,7 @@ export class Game {
       }
     }
     this.expeditionActive = true;
+    this.player.refillBarrier?.();
     this.player.root.position.copy(target);
     this.player.root.position.y = 0;
     this.player.lastMoveDirection.set(0, 0, 1);
@@ -2037,6 +2256,7 @@ export class Game {
       this.combat?._clearLockOn?.();
     }
     this.player.root.position.copy(target);
+    this.player.refillBarrier?.();
     this.player.root.position.y = 0;
     this.player.lastMoveDirection.set(0, 0, 1);
     this.player.faceDirection(this.player.lastMoveDirection);
@@ -2122,6 +2342,7 @@ export class Game {
     this.dungeonController = new DungeonController(this, dungeon);
 
     this.player.root.position.copy(dungeon.playerStart);
+    this.player.refillBarrier?.();
     this.player.lastMoveDirection.set(0, 0, 1);
     this.player.faceDirection(this.player.lastMoveDirection);
     this.cameraController.snapTo(this.player);
@@ -2140,27 +2361,18 @@ export class Game {
   }
 
   async generateLoot(type = null, rarity = null) {
-    const item = this.lootSystem.generateItem(this.player.level, {
-      type: type ?? undefined,
-      rarity: rarity ?? undefined,
+    const quantity = 1;
+    this.inventory.addUnidentifiedScrap(quantity, {
+      source: {
+        kind: 'debug-loot-command',
+        requestedType: type,
+        requestedRarity: rarity,
+      },
+      recoverableParts: [],
     });
-    if (MEGA_BUSTER_CALIBRATION_CATALOG[item?.type]) {
-      const converted = await this._convertLegacyBusterPartItem(item, { futureAcquisition: true });
-      if (!converted) {
-        this.ui?.showToast?.('The Buster Part could not be saved, so it was not granted.', '#ff9f73');
-        return null;
-      }
-      if (!this.busterLabEnabled && !this.inventory.addItem(item)) {
-        this.busterMigrationRecovery ??= [];
-        this.busterMigrationRecovery.push(item);
-        this.ui?.showToast?.(`${item.name} was placed in Roll's Migration Recovery.`, '#7df8ff');
-      }
-      this.ui.renderInventory();
-      return item;
-    }
-    this.inventory.addItem(item);
-    this.ui.renderInventory();
-    return item;
+    this.ui?.showToast?.('Unidentified Reaverbot Scrap +1', '#c7d0d6');
+    this.ui?.renderInventory?.();
+    return { pickupKind: 'unidentifiedScrap', quantity };
   }
 
   async _commitLegacyBusterPickup(item) {
@@ -2182,10 +2394,12 @@ export class Game {
   }
 
   _collectWorldItemDurably(item) {
-    if (!MEGA_BUSTER_CALIBRATION_CATALOG[item?.type]) {
-      return this.inventory.addItem(item);
+    if (MEGA_BUSTER_CALIBRATION_CATALOG[item?.type]) {
+      return this._collectWorldBusterPartDurably(item);
     }
-    return this._collectWorldBusterPartDurably(item);
+    // Fixed Arms/Gear are permanent catalog unlocks, never loose Item
+    // instances. Unknown legacy equipment pickups are intentionally rejected.
+    return false;
   }
 
   _collectWorldBusterPartDurably(item) {
@@ -2227,6 +2441,17 @@ export class Game {
 
   _snapshotLegacyBusterItem(item) {
     if (!item) return null;
+    if (item.legacySnapshot) {
+      return {
+        ...item.legacySnapshot,
+        id: item.id ?? item.legacySnapshot.id ?? null,
+        canonicalId: item.canonicalId ?? item.legacySnapshot.canonicalId ?? null,
+        legacyBusterId: item.legacyBusterId ?? item.legacySnapshot.legacyBusterId ?? null,
+        tags: [...(item.legacySnapshot.tags ?? [])],
+        baseStats: { ...(item.legacySnapshot.baseStats ?? {}) },
+        affixes: (item.legacySnapshot.affixes ?? []).map((entry) => ({ ...entry })),
+      };
+    }
     return {
       id: item.id ?? null,
       canonicalId: item.canonicalId ?? null,
@@ -2254,7 +2479,11 @@ export class Game {
     let hydrated = 0;
     for (const record of records) {
       if (!record?.item || !MEGA_BUSTER_CALIBRATION_CATALOG[record.legacyType]) continue;
-      const item = new Item({ ...record.item, id: record.legacyId });
+      const item = createMegaCalibrationShadow(record.legacyType, {
+        ...record.item,
+        id: record.legacyId,
+      });
+      if (!item) continue;
       item.canonicalId = record.legacyId;
       item.legacyBusterId = record.legacyId;
       if (record.starter) {
@@ -2410,52 +2639,6 @@ export class Game {
     return discarded
       ? { ok: true, item: discarded, gained: Math.max(1, Math.floor(discarded.value * 0.35)) }
       : { ok: false, message: 'That item is no longer available.' };
-  }
-
-  salvageInventoryRarity(rarity) {
-    return this._queueBusterGameCommand(() => this._salvageInventoryRarityNow(rarity));
-  }
-
-  async _salvageInventoryRarityNow(rarity) {
-    const matches = this.inventory.items.filter((item) => item.rarity === rarity);
-    if (matches.length === 0) return { ok: false, message: 'No matching items to salvage.' };
-    const removals = matches
-      .map((item) => this._getLegacyBusterRecordForItem(item)?.legacyId)
-      .filter(Boolean);
-    const committed = await this._commitLegacyBusterLayout({ removals });
-    if (!committed.ok) return { ok: false, message: 'Salvage could not be saved; no items were consumed.' };
-    let gained = 0;
-    let count = 0;
-    for (const item of matches) {
-      const discarded = this.inventory.discardItem(item.id);
-      if (!discarded) continue;
-      count += 1;
-      gained += Math.max(1, Math.floor(discarded.value * 0.35));
-    }
-    return { ok: true, count, gained };
-  }
-
-  commitLegacyBusterOptimization(selectedItems = []) {
-    return this._queueBusterGameCommand(() => this._commitLegacyBusterOptimizationNow(selectedItems));
-  }
-
-  async _commitLegacyBusterOptimizationNow(selectedItems = []) {
-    const selectedSockets = new Map();
-    selectedItems.forEach((item, socketIndex) => {
-      const record = this._getLegacyBusterRecordForItem(item);
-      if (record) selectedSockets.set(record.legacyId, socketIndex);
-    });
-    const locations = (this.busterLabStorage?.state?.legacyBusterParts?.records ?? [])
-      .map((record) => ({
-        legacyId: record.legacyId,
-        location: selectedSockets.has(record.legacyId)
-          ? { kind: 'megaSocket', socketIndex: selectedSockets.get(record.legacyId) }
-          : { kind: 'inventory' },
-      }));
-    const result = await this._commitLegacyBusterLayout({ locations });
-    return result.ok
-      ? { ok: true }
-      : { ok: false, message: 'Optimize could not commit its Buster Part layout.' };
   }
 
   _getBusterLabState() {
@@ -2724,8 +2907,6 @@ export class Game {
       glowColor: 0xf2c84b,
       color: '#f2c84b',
       getStatTotals: () => ({}),
-      getPowerScore: () => 0,
-      getDisplayLines: () => ['Compiled weapon-local PWR / ENG / RNG / RPD'],
     };
   }
 
@@ -2747,7 +2928,7 @@ export class Game {
     if (this.busterLabEnabled && item?.type === 'customBusterArm') {
       return { kind: 'customBuster', buildId: item.buildId };
     }
-    return item ? { kind: 'legacyItem', item } : null;
+    return item?.fixedArmId ? { kind: 'fixedArm', armId: item.fixedArmId } : null;
   }
 
   getBusterPlanForSlot(slotIndex) {
@@ -2769,14 +2950,15 @@ export class Game {
   }
 
   _restoreCustomBusterAssignments() {
-    const assignments = this._getBusterLabState()?.assignments?.slots ?? {};
-    for (const slotIndex of [1, 2]) {
-      const buildId = assignments[String(slotIndex)] ?? assignments[slotIndex];
-      if (!buildId || !this.busterLabPlans.has(buildId)) continue;
-      const displaced = this.player.armHotbar[slotIndex];
-      if (displaced && displaced.type !== 'customBusterArm') this.inventory.addItem(displaced);
-      this.player.armHotbar[slotIndex] = this._createCustomBusterArmDescriptor(buildId);
-    }
+    const armsGear = this._getBusterLabState()?.armsGear ?? createDefaultArmsGearState();
+    this.player.applyArmsGearState(armsGear, {
+      resolveCustomBuster: (buildId) => (
+        this.busterLabPlans.has(buildId)
+          ? this._createCustomBusterArmDescriptor(buildId)
+          : null
+      ),
+      refillBarrier: false,
+    });
     if (!this.getActiveBusterPlan() && this.player.getActiveArmWeapon?.()?.type === 'customBusterArm') {
       this.player.switchArmWeapon(0, true);
     }
@@ -3030,20 +3212,12 @@ export class Game {
     if (!this.busterLabPlans.has(buildId) || !this._getBusterBuildRecord(buildId, 'saved')) {
       return { ok: false, message: 'Save a valid compiled revision before equipping it.' };
     }
-    const previous = this.player.armHotbar[slotIndex];
-    if (previous && previous.type !== 'customBusterArm' && this.inventory.isFull()) {
-      return { ok: false, message: 'Inventory is full; clear a slot before replacing that arm.' };
-    }
     const assignment = await this._queueBusterStorageOperation(() => (
       this.busterLabStorage.assignBuildToSlotAsync(buildId, slotIndex)
     ));
     if (!assignment.ok) return { ok: false, message: 'That build cannot be assigned to this slot.' };
-    if (previous?.type === 'customBusterArm') {
-      // Existing executions retain their immutable compiled plan. Replacing a
-      // slot only changes which plan may launch the next shot.
-    } else if (previous) {
-      this.inventory.addItem(previous);
-    }
+    // Fixed Arms are permanent catalog unlocks, not inventory instances.
+    // Replacing a slot changes only the loadout reference.
     for (const otherSlot of [1, 2]) {
       if (otherSlot !== slotIndex && this.player.armHotbar[otherSlot]?.buildId === buildId) {
         this.player.armHotbar[otherSlot] = null;
@@ -4192,8 +4366,8 @@ export class Game {
     player.utilityArms = [...(sourcePlayer?.utilityArms ?? [])];
     player.activeUtilityArmIndex = sourcePlayer?.activeUtilityArmIndex ?? 0;
     player.busterUpgradeSlots = [...(sourcePlayer?.busterUpgradeSlots ?? player.busterUpgradeSlots)];
-    for (const [slot, item] of Object.entries(sourcePlayer?.equipment?.getAll?.() ?? {})) {
-      if (slot !== 'weapon' && item) player.equipment.equip(item, slot);
+    if (sourcePlayer?.gearLoadout?.snapshot) {
+      player.applyGearLoadoutState(sourcePlayer.gearLoadout.snapshot(), { refillBarrier: true });
     }
     player.recalculateStats();
     player.health = player.stats.maxHealth;
@@ -5291,6 +5465,8 @@ export class Game {
       target,
       source: options.source ?? null,
       element: options.element ?? 'fire',
+      hazardDomain: options.hazardDomain ?? null,
+      hazardTags: Array.isArray(options.hazardTags) ? [...options.hazardTags] : [],
       tickTimer: 0,
     });
   }
@@ -5974,15 +6150,17 @@ export class Game {
         tempVectorA.copy(this.player.lastMoveDirection).multiplyScalar(-1);
       }
       tempVectorA.normalize();
-      const dealt = this.player.takeDamage(damage * (meta.playerDamageScale ?? 0.35), meta.source ?? null, {
+      const hitResult = this.player.takeIncomingHit({
+        amount: damage * (meta.playerDamageScale ?? 0.35),
+        source: meta.source ?? null,
         impactPosition: position,
-        attackKind: meta.attackKind ?? 'explosion',
-        powerfulKnockback: meta.powerfulKnockback ?? true,
-        knockbackDirection: tempVectorA,
+        direction: tempVectorA,
+        guardable: !meta.unblockable,
+        reactionTier: meta.reactionTier ?? ((meta.powerfulKnockback ?? true) ? 2 : 1),
+        minimumReactionTier: meta.minimumReactionTier ?? 0,
         knockbackStrength: meta.knockbackStrength ?? 1.08,
-        unblockable: Boolean(meta.unblockable),
       });
-      if (dealt > 0) {
+      if (hitResult.contacted && !hitResult.dodged && !hitResult.immune) {
         this.requestHitStop(meta.playerHitStopDuration ?? meta.hitStopDuration ?? 0.11, {
           timeScale: meta.hitStopTimeScale ?? 0.05,
         });
@@ -6099,6 +6277,7 @@ export class Game {
           this._updateEnemies(gameplayDt);
           this.dungeonController.constrainEnemies();
         }
+        this._updateTargetScanner();
         const activeBusterPlan = this.getActiveBusterPlan?.();
         this.busterRuntime?.update(gameplayDt, {
           activeWeaponKey: activeBusterPlan?.weaponKey ?? activeBusterPlan?.buildId ?? null,
@@ -7518,6 +7697,12 @@ export class Game {
         return;
       }
 
+      if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'KeyG') {
+        event.preventDefault();
+        this.combat.tryGuardAction?.(this.pointer.aimWorld);
+        return;
+      }
+
       if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'Tab') {
         event.preventDefault();
         this.pointer.lockOnPressed = true;
@@ -7689,116 +7874,12 @@ export class Game {
   }
 
   _addStarterItems() {
-    const starterBuster = this.lootSystem.generateItem(1, {
-      type: 'busterArm',
-      rarity: 'standard',
-      name: 'Mega Buster',
-      affixCount: 0,
-      baseStats: {
-        attackDamage: 8,
-        maxEnergy: 6,
-        attackRange: 6.9,
-        attackSpeed: 0.1,
-      },
+    const armsGear = this.busterLabState?.armsGear ?? createDefaultArmsGearState();
+    this.player.applyArmsGearState(armsGear, {
+      resolveCustomBuster: (buildId) => this._createCustomBusterArmDescriptor(buildId),
+      refillBarrier: true,
     });
-    const starterSword = this.lootSystem.generateItem(1, {
-      type: 'swordArm',
-      rarity: 'scrap',
-      name: 'Rebuilt Laser Beam Blade',
-    });
-    const starterCannon = this.lootSystem.generateItem(1, {
-      type: 'cannonArm',
-      rarity: 'scrap',
-      name: 'Patched Cannon Arm',
-    });
-    const starterLift = this.lootSystem.generateItem(1, {
-      type: 'liftArm',
-      rarity: 'standard',
-      name: 'Lift Arm',
-      affixCount: 0,
-    });
-    const starterMachineGun = this.lootSystem.generateItem(1, {
-      type: 'machineGunArm',
-      rarity: 'scrap',
-      name: 'Rusted Machine Gun Arm',
-    });
-    const starterDrill = this.lootSystem.generateItem(1, {
-      type: 'drillArm',
-      rarity: Math.random() < 0.72 ? 'scrap' : 'standard',
-    });
-    const starterShield = this.lootSystem.generateItem(1, {
-      type: 'shieldArm',
-      rarity: 'standard',
-      name: 'Rebuilt Shield Arm',
-    });
-    const starterBoots = this.lootSystem.generateItem(1, {
-      type: 'servoBoots',
-      rarity: 'scrap',
-      name: 'Rebuilt Servo Boots',
-    });
-
-    this.player.setArmHotbar([starterBuster, starterSword, starterCannon]);
-    this.player.setUtilityArms([starterLift]);
     this.player.switchArmWeapon(0, true);
-    this.player.equipment.equip(starterShield, 'offhand');
-    this.player.equipment.equip(starterBoots);
-
-    this.inventory.addItem(starterMachineGun);
-    this.inventory.addItem(starterDrill);
-    const hasCanonicalStarter = Boolean(
-      this.busterLabStorage?.state?.legacyBusterParts?.records?.some((record) => record.starter),
-    );
-    if (!this.busterLabEnabled && !hasCanonicalStarter) {
-      this.inventory.addItem(this.lootSystem.generateItem(1, { type: 'powerRaiser', rarity: 'standard' }));
-    }
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'flameArm',
-      rarity: 'standard',
-      name: 'Calibrated Flame Arm',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'mineArm',
-      rarity: 'standard',
-      name: 'Calibrated Mine Layer Arm',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'missileArm',
-      rarity: 'standard',
-      name: 'Calibrated Missile Arm',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'grenadeArm',
-      rarity: 'standard',
-      name: 'Calibrated Grenade Arm',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'laserArm',
-      rarity: 'standard',
-      name: 'Calibrated Shining Laser',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'railBusterArm',
-      rarity: 'standard',
-      name: 'Calibrated Rail Buster Arm',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'iceSprayerArm',
-      rarity: 'standard',
-      name: 'Calibrated Ice Sprayer Arm',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'shockCoilArm',
-      rarity: 'standard',
-      name: 'Calibrated Shock Coil Arm',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, {
-      type: 'drillArm',
-      rarity: 'standard',
-      name: 'Calibrated Drill Arm',
-    }));
-    this.inventory.addItem(this.lootSystem.generateItem(1, { type: 'utilityHelmet', rarity: 'standard' }));
-    this.inventory.addItem(this.lootSystem.generateItem(2, { type: 'reactorChip', rarity: 'tuned' }));
-    this.inventory.addItem(this.lootSystem.generateItem(2, { type: 'kevlarJacket', rarity: 'standard' }));
   }
 
   _updateEnemies(dt) {
@@ -7956,13 +8037,19 @@ export class Game {
           tempVectorA.y = 0;
           if (tempVectorA.lengthSq() <= 0.0001) tempVectorA.copy(this.player.lastMoveDirection);
           tempVectorA.normalize();
-          const dealt = this.player.takeDamage(hazard.damage, hazard.source, {
+          const hitResult = this.player.takeIncomingHit({
+            amount: hazard.damage,
+            source: hazard.source,
             attackKind: 'clawSwipeTrail',
-            knockbackDirection: tempVectorA,
+            direction: tempVectorA,
+            guardable: true,
+            reactionTier: 1,
             knockbackStrength: 0.72,
           });
-          if (dealt > 0) {
-            hazard.source?.onHitPlayer?.(this.player, dealt);
+          if (hitResult.healthDamage > 0) {
+            hazard.source?.onHitPlayer?.(this.player, hitResult.healthDamage);
+          }
+          if (hitResult.contacted && !hitResult.dodged && !hitResult.immune) {
             this.addHitEffect(this.player.root.position, 0xff2020, 0.7);
             this.requestHitStop?.(0.07, { timeScale: 0.07 });
           }
@@ -8002,7 +8089,15 @@ export class Game {
           }
         }
       } else if (this.player.root.position.distanceTo(hazard.object.position) <= hazard.radius) {
-        this.player.takeDamage(hazard.damagePerSecond * dt);
+        this.player.takeIncomingHit({
+          amount: hazard.damagePerSecond * dt,
+          source: hazard.source ?? null,
+          guardable: false,
+          reactionTier: 0,
+          hazardDomain: hazard.hazardDomain,
+          hazardTags: hazard.hazardTags,
+          statusEffects: hazard.element === 'fire' ? ['burn'] : [],
+        });
       }
 
       if (hazard.duration <= 0) {
@@ -8595,6 +8690,12 @@ export class Game {
         return result;
       }
       this.bossHuntWarning = null;
+      if (result.defenseUnlocked) {
+        this._applyPersistedArmsGear({ refillBarrier: Boolean(result.barrierGranted) });
+      }
+      if (result.barrierGranted) {
+        this.ui?.showToast?.('Defense Gear unlocked · Barrier Generator equipped', '#7df8ff');
+      }
       if (result.rewardQueued || result.recovery || result.queuedRecovery) {
         this._playBossRecoveryPresentation(enemy, result);
       } else {

@@ -1,8 +1,9 @@
 export const BUSTER_LAB_LEGACY_STORAGE_KEY = 'ruinDigger.busterLab.v1';
-export const BUSTER_LAB_STORAGE_PREFIX = 'ruinDigger.busterLab.v2';
+export const BUSTER_LAB_V2_STORAGE_PREFIX = 'ruinDigger.busterLab.v2';
+export const BUSTER_LAB_STORAGE_PREFIX = 'ruinDigger.busterLab.v3';
 export const BUSTER_SAVE_CONTEXT_KEY = 'ruinDigger.saveContext.v1';
 export const BUSTER_LAB_V1_IMPORT_CLAIM_KEY = 'ruinDigger.busterLab.v1.importClaim';
-export const BUSTER_LAB_ENVELOPE_VERSION = 2;
+export const BUSTER_LAB_ENVELOPE_VERSION = 3;
 export const BUSTER_LAB_LOCK_TIMEOUT_MS = 5_000;
 
 function cloneJson(value, fallback = null) {
@@ -96,6 +97,19 @@ export function getBusterLabStorageKeys(saveContextId) {
   });
 }
 
+/** Returns the previous context-scoped keys for non-destructive v2 adoption. */
+export function getLegacyBusterLabV2StorageKeys(saveContextId) {
+  const contextId = sanitizeSaveContextId(saveContextId);
+  if (!contextId) throw new TypeError('A valid saveContextId is required.');
+  const encoded = encodeURIComponent(contextId);
+  const main = `${BUSTER_LAB_V2_STORAGE_PREFIX}.${encoded}`;
+  return Object.freeze({
+    main,
+    backup: `${main}.backup`,
+    corrupt: `${main}.corrupt`,
+  });
+}
+
 export function getBusterLabLockName(saveContextId) {
   const contextId = sanitizeSaveContextId(saveContextId);
   if (!contextId) throw new TypeError('A valid saveContextId is required.');
@@ -128,7 +142,7 @@ export function parseBusterLabEnvelope(value, { expectedSaveContextId = null } =
     throw new TypeError('Buster Lab envelope is not an object.');
   }
   if (Number(parsed.storageVersion) !== BUSTER_LAB_ENVELOPE_VERSION || !parsed.state) {
-    throw new TypeError('Buster Lab payload is not a v2 storage envelope.');
+    throw new TypeError('Buster Lab payload is not a v3 storage envelope.');
   }
   const contextId = sanitizeSaveContextId(parsed.saveContextId);
   if (!contextId) throw new TypeError('Buster Lab envelope has no valid save context.');
@@ -149,6 +163,37 @@ export function parseBusterLabEnvelope(value, { expectedSaveContextId = null } =
     writeId: parsed.writeId,
     updatedAt: parsed.updatedAt,
   });
+}
+
+/** Parses the retained v2 envelope without rewriting or deleting its source. */
+export function parseLegacyBusterLabV2Envelope(value, { expectedSaveContextId = null } = {}) {
+  const parsed = typeof value === 'string' ? JSON.parse(value) : cloneJson(value);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new TypeError('Buster Lab v2 envelope is not an object.');
+  }
+  if (Number(parsed.storageVersion) !== 2 || !parsed.state) {
+    throw new TypeError('Buster Lab payload is not a v2 storage envelope.');
+  }
+  const contextId = sanitizeSaveContextId(parsed.saveContextId);
+  if (!contextId) throw new TypeError('Buster Lab v2 envelope has no valid save context.');
+  if (expectedSaveContextId && contextId !== expectedSaveContextId) {
+    throw new RangeError(`Buster Lab save belongs to ${contextId}, not ${expectedSaveContextId}.`);
+  }
+  const revision = Math.trunc(Number(parsed.revision));
+  if (!Number.isFinite(revision) || revision < 0) {
+    throw new TypeError('Buster Lab v2 envelope has an invalid revision.');
+  }
+  if (typeof parsed.writeId !== 'string' || !parsed.writeId) {
+    throw new TypeError('Buster Lab v2 envelope has no write id.');
+  }
+  return {
+    storageVersion: 2,
+    saveContextId: contextId,
+    revision,
+    writeId: parsed.writeId,
+    updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
+    state: cloneJson(parsed.state, {}),
+  };
 }
 
 /**
@@ -186,13 +231,14 @@ export function createBusterLabRecoveryBundle({
   main = null,
   backup = null,
   corrupt = null,
+  previousV2 = null,
   exportedAt = null,
 } = {}) {
   const contextId = sanitizeSaveContextId(saveContextId);
   if (!contextId) throw new TypeError('A valid saveContextId is required.');
   return {
     format: 'ruin-digger-buster-lab-recovery',
-    formatVersion: 1,
+    formatVersion: 2,
     saveContextId: contextId,
     exportedAt: typeof exportedAt === 'string' && exportedAt
       ? exportedAt
@@ -202,6 +248,11 @@ export function createBusterLabRecoveryBundle({
       main: typeof main === 'string' ? main : null,
       backup: typeof backup === 'string' ? backup : null,
       corrupt: typeof corrupt === 'string' ? corrupt : null,
+      previousV2: {
+        main: typeof previousV2?.main === 'string' ? previousV2.main : null,
+        backup: typeof previousV2?.backup === 'string' ? previousV2.backup : null,
+        corrupt: typeof previousV2?.corrupt === 'string' ? previousV2.corrupt : null,
+      },
     },
   };
 }

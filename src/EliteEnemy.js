@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { Enemy } from './Enemy.js';
 
+function isResolvedPlayerContact(result) {
+  return Boolean(result?.contacted && !result.dodged && !result.immune);
+}
+
 export const ELITE_AFFIXES = [
   {
     id: 'burningCore',
@@ -119,9 +123,18 @@ export class EliteEnemy extends Enemy {
 
       if (this.surgeTimer <= 0) {
         if (this.root.position.distanceTo(game.player.root.position) <= 2.1) {
-          game.player.takeDamage(this.stats.damage * 0.22, this);
-          game.player.applySlow(0.78, 0.5);
-          game.addHitEffect(game.player.root.position, this.affix.color, 0.48);
+          const hitResult = game.player.takeIncomingHit({
+            amount: this.stats.damage * 0.22,
+            source: this,
+            guardable: true,
+            reactionTier: 1,
+          });
+          if (hitResult.healthDamage > 0) {
+            game.player.applySlow(0.78, 0.5);
+          }
+          if (isResolvedPlayerContact(hitResult)) {
+            game.addHitEffect(game.player.root.position, this.affix.color, 0.48);
+          }
         }
         this.surgeTimer = 1.15;
       }
@@ -158,12 +171,19 @@ export class EliteEnemy extends Enemy {
   }
 
   onHitPlayer(player, dealt = 0) {
+    if (dealt <= 0) return player;
+
     if (this.affix.id === 'frostCore') {
       player.applySlow(0.55, 1.5);
     }
 
     if (this.affix.id === 'corrosive') {
-      player.takeDamage(Math.max(1, dealt * 0.22), this);
+      player.takeIncomingHit({
+        amount: Math.max(1, dealt * 0.22),
+        source: this,
+        guardable: false,
+        reactionTier: 0,
+      });
     }
 
     return player;

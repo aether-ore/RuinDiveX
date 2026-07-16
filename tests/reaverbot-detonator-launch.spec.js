@@ -411,10 +411,21 @@ test('launched detonators use swept contact, friendly fire, player contact, and 
     playerPair.target.dispose?.();
     playerPair.target.root.removeFromParent();
     let playerDamage = 0;
-    const originalPlayerTakeDamage = game.player.takeDamage;
-    game.player.takeDamage = (amount) => {
+    const originalPlayerTakeIncomingHit = game.player.takeIncomingHit;
+    game.player.takeIncomingHit = (incomingHit = {}) => {
+      const amount = Math.max(0, Number(incomingHit.amount) || 0);
       playerDamage += amount;
-      return amount;
+      return {
+        contacted: amount > 0,
+        dodged: false,
+        guarded: false,
+        parried: false,
+        immune: false,
+        barrierDamage: 0,
+        healthDamage: amount,
+        resolvedReactionTier: incomingHit.reactionTier ?? 0,
+        statusEligible: amount > 0,
+      };
     };
     game.damageEnemy(playerPair.flyer, 1, {
       source: game.player,
@@ -426,7 +437,7 @@ test('launched detonators use swept contact, friendly fire, player contact, and 
     });
     game.player.root.position.copy(playerPair.flyer.root.position).add(new Vector3(0, -0.45, 2.45));
     playerPair.flyer.update(0.7, game);
-    game.player.takeDamage = originalPlayerTakeDamage;
+    game.player.takeIncomingHit = originalPlayerTakeIncomingHit;
     const playerSummary = {
       flyerDead: playerPair.flyer.dead,
       playerDamage,

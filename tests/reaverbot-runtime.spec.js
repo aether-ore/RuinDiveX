@@ -383,7 +383,7 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
 
     // The armed mine is a powerful hit and now correctly protects the player
     // through get-up. Reset that completed scenario before independently
-    // exercising shield impact-direction logic below.
+    // exercising Guard Projector impact-direction logic below.
     game.player.powerKnockbackState = null;
     game.player.powerKnockbackTimer = 0;
     game.player.powerKnockbackDuration = 0;
@@ -392,12 +392,16 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
     game.player.movementLockMultiplier = 1;
     game.player.animation.externalControlLocked = false;
 
-    const originalEquipmentGet = game.player.equipment.get;
-    game.player.equipment.get = function getRuntimeShield(slot) {
-      if (slot === 'offhand') {
-        return { type: 'shieldArm', getStatTotals: () => ({ armor: 0 }) };
-      }
-      return originalEquipmentGet.call(this, slot);
+    const originalGearEffects = game.player.gearEffects;
+    game.player.gearEffects = {
+      ...originalGearEffects,
+      guard: {
+        duration: 0.7,
+        parryWindow: 0.18,
+        cooldown: 0.82,
+        guardReduction: 0.6,
+        parryReduction: 0.9,
+      },
     };
     game.player.root.position.set(0, 0, 0);
     game.player.guardTimer = 1;
@@ -409,7 +413,7 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
     game.player.takeDamage(10, remoteSource, { impactPosition: new Vector3(0, 0, 2) });
     const impactGuardBlocked = game.player.lastGuardResult?.blocked === true;
     game.player.guardTimer = 0;
-    game.player.equipment.get = originalEquipmentGet;
+    game.player.gearEffects = originalGearEffects;
 
     game.player.health = game.player.stats.maxHealth;
     game.player.root.position.copy(miner.root.position);

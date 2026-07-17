@@ -945,7 +945,7 @@ test('manual aim redirects shots while movement lock keeps target facing', async
     game.camera.position.set(0, 3.2, -7);
     game.camera.lookAt(0, 1.25, 8);
     game.camera.updateMatrixWorld(true);
-    const enemy = game.spawner.spawnEnemy('basic', false, new Vector3(0, 0, 8), {
+    const enemy = game.spawner.spawnEnemy('basic', false, new Vector3(0, 0, 5.5), {
       allowRandomElite: false,
     });
     combat.lockOn.target = enemy;
@@ -1157,6 +1157,7 @@ test('free aim reticle acquisition initiates strafing lock without steering manu
 
   const result = await page.evaluate(async () => {
     const { Object3D, Vector3 } = await import('three');
+    const { createFixedArmDescriptor } = await import('./src/equipment/ArmCatalog.js');
     const { getCombatTargetWorldPosition } = await import('./src/reaverbots/CombatTarget.js');
     const game = window.game;
     const combat = game.combat;
@@ -1399,7 +1400,7 @@ test('free aim reticle acquisition initiates strafing lock without steering manu
 
     pointReticleAt(getCombatTargetWorldPosition(rightLockPoint, new Vector3()));
     updateCombat();
-    const missile = game.inventory.items.find((item) => item.type === 'missileArm');
+    const missile = createFixedArmDescriptor('missileArm');
     player.assignArmWeaponToSlot(1, missile);
     const missileState = combat.getCurrentWeaponState();
     missileState.cooldown = 0;

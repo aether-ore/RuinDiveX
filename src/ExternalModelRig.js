@@ -1288,6 +1288,7 @@ export class ExternalModelRig {
     attackProgress = 0,
     actionProgress = null,
     hurtProgress = 0,
+    hurtReactionTier = 0,
     damageHitLocal = null,
     projectileAiming = false,
     backpedaling = false,
@@ -1361,7 +1362,12 @@ export class ExternalModelRig {
     }
 
     if (state === 'hurt') {
-      this.damageAnimator.applyStandingFlinch(targets, hurtProgress, damageHitLocal);
+      this.damageAnimator.applyStandingFlinch(
+        targets,
+        hurtProgress,
+        damageHitLocal,
+        hurtReactionTier,
+      );
     }
 
     this._applyArmCarriagePositionTargets(positionTargets);

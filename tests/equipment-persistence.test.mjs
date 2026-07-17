@@ -16,6 +16,7 @@ import {
   DEFAULT_BOSS_PROFILE_ID,
   createBossExpeditionSpec,
 } from '../src/reaverbots/ReaverbotBossCatalog.js';
+import { GearLoadout } from '../src/equipment/index.js';
 
 class MemoryStorage {
   constructor() {
@@ -49,10 +50,7 @@ test('v3 defaults persist the exact authored starting Arms/Gear profile', () => 
   assert.equal(state.armsGear.schemaVersion, 1);
   assert.equal(state.armsGear.defenseUnlocked, false);
   assert.deepEqual(state.armsGear.unlockedFixedArmIds, ['laserBeamBlade', 'liftArm']);
-  assert.deepEqual(state.armsGear.unlockedGearIds, [
-    'reinforcedArmorFrame',
-    'gyroStabilizerHelmet',
-  ]);
+  assert.deepEqual(state.armsGear.unlockedGearIds, ['reinforcedArmorFrame']);
   assert.deepEqual(state.armsGear.armSlots, {
     special1: { kind: 'fixedArm', armId: 'laserBeamBlade' },
     special2: { kind: 'customBuster', buildId: 'build-a' },
@@ -60,13 +58,18 @@ test('v3 defaults persist the exact authored starting Arms/Gear profile', () => 
   });
   assert.deepEqual(state.armsGear.gearSlots, {
     armor: 'reinforcedArmorFrame',
-    helmet: 'gyroStabilizerHelmet',
+    helmet: null,
     mobility: null,
     defense: null,
     utility1: null,
     utility2: null,
   });
   assert.deepEqual(state.armsGear.fabricatedRecipeIds, []);
+  assert.equal(state.armsGear.gear.starterHelmetRetirementMigrationVersion, 1);
+  assert.equal(
+    state.armsGear.gear.records.find((record) => record.gearId === 'gyroStabilizerHelmet')?.unlocked,
+    false,
+  );
   assert.equal(
     state.armsGear.gear.records.find((record) => record.gearId === 'jumpSprings')?.unlocked,
     false,
@@ -130,13 +133,66 @@ test('partial v3 Arms/Gear repairs permanent starters without granting Jump Spri
   assert.deepEqual(repaired.armsGear.arms.ownedArmIds, ['laserBeamBlade', 'liftArm']);
   assert.deepEqual(
     repaired.armsGear.gear.records.filter((record) => record.unlocked).map((record) => record.gearId),
-    ['reinforcedArmorFrame', 'gyroStabilizerHelmet'],
+    ['reinforcedArmorFrame'],
   );
   assert.equal(
     repaired.armsGear.gear.records.find((record) => record.gearId === 'jumpSprings')?.unlocked,
     false,
   );
   assert.deepEqual(validateBusterLabState(repaired), []);
+});
+
+test('legacy starter Helmet is retired once while a future explicit unlock persists', async () => {
+  const storage = new MemoryStorage();
+  const lockManager = new MemoryLockManager();
+  const saveContextId = 'starter-helmet-retirement';
+  const legacy = createDefaultBusterLabState();
+  const legacyGear = legacy.armsGear.gear;
+  delete legacyGear.starterHelmetRetirementMigrationVersion;
+  legacyGear.records.find((record) => record.gearId === 'gyroStabilizerHelmet').unlocked = true;
+  legacyGear.slots.helmet = 'gyroStabilizerHelmet';
+  legacy.armsGear.unlockedGearIds = ['reinforcedArmorFrame', 'gyroStabilizerHelmet'];
+  legacy.armsGear.gearSlots.helmet = 'gyroStabilizerHelmet';
+
+  const lab = new BusterLabStorage({ storage, saveContextId, lockManager });
+  storage.setItem(lab.storageKeys.main, JSON.stringify(createBusterLabEnvelope({
+    saveContextId,
+    state: legacy,
+    revision: 4,
+    writeId: 'legacy-starter-helmet',
+  })));
+
+  const retired = lab.load();
+  assert.equal(retired.armsGear.gear.starterHelmetRetirementMigrationVersion, 1);
+  assert.equal(
+    retired.armsGear.gear.records.find((record) => record.gearId === 'gyroStabilizerHelmet')?.unlocked,
+    false,
+  );
+  assert.equal(retired.armsGear.gear.slots.helmet, null);
+  assert.deepEqual(retired.armsGear.unlockedGearIds, ['reinforcedArmorFrame']);
+  assert.equal(retired.armsGear.gearSlots.helmet, null);
+  assert.deepEqual(validateBusterLabState(retired), []);
+
+  const durableRetirement = JSON.parse(storage.getItem(lab.storageKeys.main)).state;
+  assert.deepEqual(durableRetirement.armsGear.gear, retired.armsGear.gear);
+  const reloadedRetirement = new BusterLabStorage({ storage, saveContextId, lockManager }).load();
+  assert.deepEqual(reloadedRetirement.armsGear.gear, retired.armsGear.gear);
+
+  const granted = await lab.transact({ operation: 'grant-future-gyro-helmet' }, (state) => {
+    const loadout = new GearLoadout(state.armsGear.gear);
+    assert.equal(loadout.unlock('gyroStabilizerHelmet').ok, true);
+    assert.equal(loadout.equip('gyroStabilizerHelmet', 'helmet').ok, true);
+    state.armsGear.gear = loadout.snapshot();
+  });
+  assert.equal(granted.ok, true);
+
+  const futureReload = new BusterLabStorage({ storage, saveContextId, lockManager }).load();
+  assert.equal(
+    futureReload.armsGear.gear.records.find((record) => record.gearId === 'gyroStabilizerHelmet')?.unlocked,
+    true,
+  );
+  assert.equal(futureReload.armsGear.gear.slots.helmet, 'gyroStabilizerHelmet');
+  assert.equal(futureReload.armsGear.gear.starterHelmetRetirementMigrationVersion, 1);
 });
 
 test('fabrication markers repair missing permanent output unlocks without auto-equipping', () => {
@@ -206,6 +262,7 @@ test('Jump Springs fabrication spends its exact bill once and persists unlocked 
 
   const funded = await lab.updateRollSalvageAsync((roll) => {
     roll.addIdentifiedScrap(24);
+    roll.addPart({ id: 'perfectedCompressionGreave', name: 'Perfected Compression Greave' }, 2);
     roll.addPart({ id: 'temperedJumpSpring', name: 'Tempered Jump Spring' }, 2);
     roll.addPart({ id: 'stabilizedBellyCore', name: 'Stabilized Belly Core' }, 2);
   });
@@ -216,9 +273,14 @@ test('Jump Springs fabrication spends its exact bill once and persists unlocked 
   assert.deepEqual(fabricated.spent, {
     identifiedScrap: 12,
     scrap: 12,
-    parts: { temperedJumpSpring: 1, stabilizedBellyCore: 1 },
+    parts: {
+      perfectedCompressionGreave: 1,
+      temperedJumpSpring: 1,
+      stabilizedBellyCore: 1,
+    },
   });
   assert.equal(lab.state.rollSalvage.identifiedScrap, 12);
+  assert.equal(lab.state.rollSalvage.parts.perfectedCompressionGreave.quantity, 1);
   assert.equal(lab.state.rollSalvage.parts.temperedJumpSpring.quantity, 1);
   assert.equal(lab.state.rollSalvage.parts.stabilizedBellyCore.quantity, 1);
   assert.deepEqual(lab.state.armsGear.fabricatedRecipeIds, ['jumpSprings']);
@@ -234,6 +296,7 @@ test('Jump Springs fabrication spends its exact bill once and persists unlocked 
   assert.equal(repeated.reason, 'already-fabricated');
   assert.equal(lab.revision, revisionAfterFabrication);
   assert.equal(lab.state.rollSalvage.identifiedScrap, 12);
+  assert.equal(lab.state.rollSalvage.parts.perfectedCompressionGreave.quantity, 1);
   assert.equal(lab.state.rollSalvage.parts.temperedJumpSpring.quantity, 1);
   assert.equal(lab.state.rollSalvage.parts.stabilizedBellyCore.quantity, 1);
 

@@ -568,6 +568,10 @@ export class DungeonController {
       return `Clear ${activeEncounter.label}`;
     }
 
+    if (this.game.ruinCompleted && this.dungeon?.replacesStandardDungeon) {
+      return 'Use the Reliquary Return Lift';
+    }
+
     if (this.game.ruinCompleted && this.shrine?.collected) {
       return 'Use extraction pad';
     }
@@ -657,8 +661,15 @@ export class DungeonController {
   }
 
   isPositionWalkable(position) {
-    if (Number.isFinite(this.game.getPlatformFloorElevation?.(position))) {
-      return true;
+    const platformElevation = this.game.getPlatformFloorElevation?.(position);
+    if (Number.isFinite(platformElevation)) {
+      tempVectorB.copy(position);
+      tempVectorB.y = platformElevation;
+      return this._isResolvedFloorPositionWalkable(tempVectorB);
+    }
+
+    if (this.game?.bossStageRuntime?.isTraversalVoid?.(position)) {
+      return false;
     }
 
     if (this.game.isPositionInsidePlatformBlock?.(position)) {
@@ -1415,6 +1426,8 @@ export class DungeonController {
   }
 
   getFloorElevationAt(position) {
+    const authoredOverride = this.game?.bossStageRuntime?.getFloorElevationOverride?.(position);
+    if (Number.isFinite(authoredOverride)) return authoredOverride;
     const tile = this.getFloorTileAt(position, {
       allowClosest: true,
       maxElevationAbove: 0.42,
@@ -1446,6 +1459,11 @@ export class DungeonController {
   }
 
   getSurfaceElevationAt(position) {
+    const authoredOverride = this.game?.bossStageRuntime?.getFloorElevationOverride?.(position);
+    if (Number.isFinite(authoredOverride)) {
+      const authoredPlatform = this.game.getPlatformFloorElevation?.(position);
+      return Number.isFinite(authoredPlatform) ? authoredPlatform : authoredOverride;
+    }
     // Elevated conveyor ramps can overlap a flat structural deck for several
     // tiles. Capture the nearby authored slope first so that flat deck support
     // cannot mask the rising surface and create a discontinuity at its edge.
@@ -1506,7 +1524,7 @@ export class DungeonController {
 
   _isPlayerJumping() {
     const player = this.game.player;
-    if (player?.isJumpAirborne?.()
+    if (player?.isPhysicalJumpActive?.()
       || player?.isDodgeRollAirborne?.()
       || player?.isPowerKnockbackAirborne?.()) {
       return true;
@@ -2526,6 +2544,12 @@ export class DungeonController {
     const tile = this.worldToTile(position);
 
     for (const room of this.dungeon?.rooms ?? []) {
+      if (Number.isFinite(room.minY) && position.y < room.minY) {
+        continue;
+      }
+      if (Number.isFinite(room.maxY) && position.y >= room.maxY) {
+        continue;
+      }
       const halfW = Math.floor((room.width ?? 1) / 2);
       const halfD = Math.floor((room.depth ?? 1) / 2);
       if (
@@ -2579,7 +2603,12 @@ export class DungeonController {
     }
 
     this.game.addParticleBurst(this.keySeeker.position, KEY_SEEKER_COLOR, 28, 0.18);
-    this.game.ui?.showToast?.('Key Seeker activated. Keycard signals added to minimap.', '#5ee77b');
+    this.game.ui?.showToast?.(
+      this.dungeon?.replacesStandardDungeon
+        ? 'Key Seeker activated. Reliquary route signal added to minimap.'
+        : 'Key Seeker activated. Keycard signals added to minimap.',
+      '#5ee77b',
+    );
   }
 
   _updateKeySeekerVisuals(dt) {
@@ -2610,6 +2639,12 @@ export class DungeonController {
   }
 
   getMinimapSnapshot() {
+    const authoredSnapshot = this.game?.bossStageRuntime?.getMinimapSnapshot?.(
+      this.game?.player?.root?.position,
+    );
+    if (authoredSnapshot) {
+      return authoredSnapshot;
+    }
     const minimap = this.progression?.minimap;
     if (!minimap) {
       return null;
@@ -2911,6 +2946,16 @@ export class DungeonController {
       return;
     }
 
+    // The Reliquary is a floorless platforming stage. Both ordinary jumps and
+    // authored vent launches must own their clear in-bounds arcs across its
+    // shaft; a miss is handled by the encounter's checkpoint fall recovery.
+    // Walls, doors, ceilings, and solid props still block the arc. One-way
+    // platform volumes remain passable from below so the descending landing
+    // resolver owns them.
+    if (playerJumping && this._canPreserveAuthoredVoidJump(current)) {
+      return;
+    }
+
     const surfaceY = this.getSurfaceElevationAt(current);
     const closestFloorTile = this.getFloorTileAt(current, { allowClosest: true });
     const closestFloorY = closestFloorTile
@@ -3003,6 +3048,28 @@ export class DungeonController {
 
     current.copy(this.lastSafePlayerPosition);
     this._syncPositionToFloor(current, { preservePlayerAction: true });
+  }
+
+  _canPreserveAuthoredVoidJump(position) {
+    const player = this.game?.player;
+    const stage = this.game?.bossStageRuntime;
+    if (!position
+      || !player?.isJumpAirborne?.()
+      || !stage?.isTraversalVoid?.(position)
+      || stage.isOutsideTraversalBounds?.(position) === true) {
+      return false;
+    }
+
+    const radius = Math.max(
+      0,
+      Number(player.radius) || PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+    );
+    const obstacle = this._getAerialBlockingObstacle(position, {
+      ignoreAirspace: true,
+      radius,
+      verticalRadius: radius,
+    });
+    return !obstacle || obstacle.kind === 'platform';
   }
 
   _updateKeycards(dt) {
@@ -3916,6 +3983,9 @@ export class DungeonController {
     }
 
     for (const safeInteractable of this.safeInteractables) {
+      if (safeInteractable.requiresRuinComplete && !this.game.ruinCompleted) {
+        continue;
+      }
       const distanceSq = playerPosition.distanceToSquared(safeInteractable.position);
       const interactionRadius = Number.isFinite(safeInteractable.interactionRadius)
         ? Math.max(0, safeInteractable.interactionRadius)
@@ -4014,6 +4084,10 @@ export class DungeonController {
       return this.game.ruinCompleted
         ? `${interactable.label}: Complete`
         : `${interactable.label}: Descend`;
+    }
+
+    if (interactable.action === 'extractRuin') {
+      return `${interactable.label}: Return to camp`;
     }
 
     return interactable.label;
@@ -4177,6 +4251,15 @@ export class DungeonController {
       encounter.cleared = true;
       this.game.ui?.showToast?.(`${encounter.label} cleared`, '#6bdcff');
 
+      if (encounter.isBoss && this.dungeon?.replacesStandardDungeon) {
+        this.game.bossStageRuntime?.setCompleted?.(true);
+        this.game.completeRuinObjective?.({
+          reward: 650,
+          position: this.dungeon.extractionPosition ?? encounter.zone.position,
+          label: 'Ascension Engine expedition complete',
+        });
+      }
+
       if (encounter.bossRewardKeycardId) {
         this._grantKeycard(encounter.bossRewardKeycardId, {
           position: encounter.zone.position,
@@ -4302,6 +4385,11 @@ export class DungeonController {
 
     if (interactable.action === 'enterRuin') {
       this.game.enterRuinFromCamp?.();
+      return;
+    }
+
+    if (interactable.action === 'extractRuin') {
+      this.game.extractToCamp?.();
       return;
     }
 

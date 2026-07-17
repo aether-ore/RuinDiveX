@@ -46,6 +46,11 @@ function equipUtility(loadout, gearId, slot = 'utility1') {
   assert.equal(loadout.equip(gearId, slot).ok, true);
 }
 
+function equipHelmet(loadout) {
+  assert.equal(loadout.unlock('gyroStabilizerHelmet').ok, true);
+  assert.equal(loadout.equip('gyroStabilizerHelmet', 'helmet').ok, true);
+}
+
 test('Barrier absorbs before Reinforced Armor and preserves exact overflow math', (t) => {
   const player = createPlayer(t, (loadout) => equipDefense(loadout, 'barrierGenerator'));
   const healthBefore = player.health;
@@ -67,11 +72,10 @@ test('Barrier absorbs before Reinforced Armor and preserves exact overflow math'
 });
 
 test('Armor changes health damage while Helmet independently changes reactions', (t) => {
-  const armorOnly = createPlayer(t, (loadout) => {
-    assert.equal(loadout.unequip('helmet').ok, true);
-  });
+  const armorOnly = createPlayer(t);
   const helmetOnly = createPlayer(t, (loadout) => {
     assert.equal(loadout.unequip('armor').ok, true);
+    equipHelmet(loadout);
   });
 
   const armored = armorOnly.takeIncomingHit({ amount: 10, reactionTier: 1 });
@@ -83,8 +87,53 @@ test('Armor changes health damage while Helmet independently changes reactions',
   assert.equal(stabilized.resolvedReactionTier, 0);
 });
 
-test('a fully absorbed Barrier hit still resolves Helmet momentum but not health-gated status', (t) => {
-  const player = createPlayer(t, (loadout) => equipDefense(loadout, 'barrierGenerator'));
+test('reaction tiers enter short flinch, longer braced push, and full knockdown states', (t) => {
+  const direction = new THREE.Vector3(0, 0, 1);
+  const light = createPlayer(t);
+  const braced = createPlayer(t);
+  const knockedDown = createPlayer(t);
+
+  const level1 = light.takeIncomingHit({
+    amount: 1,
+    reactionTier: 1,
+    knockbackDirection: direction,
+  });
+  assert.equal(level1.resolvedReactionTier, 1);
+  assert.equal(light.animation.hurtReactionTier, 1);
+  assert.equal(light.animation.hurtDuration, 0.18);
+  assert.equal(light.movementLockTimer, 0.18);
+  assert.equal(light.isPowerKnockbackActive(), false);
+  assert.equal(Math.hypot(light.velocity.x, light.velocity.z), 0);
+
+  const level2 = braced.takeIncomingHit({
+    amount: 1,
+    reactionTier: 2,
+    knockbackDirection: direction,
+    knockbackStrength: 1,
+  });
+  assert.equal(level2.resolvedReactionTier, 2);
+  assert.equal(braced.animation.hurtReactionTier, 2);
+  assert.equal(braced.animation.hurtDuration, 0.38);
+  assert.equal(braced.movementLockTimer, 0.38);
+  assert.equal(braced.isPowerKnockbackActive(), false);
+  assert.ok(Math.hypot(braced.velocity.x, braced.velocity.z) > 7);
+
+  const level3 = knockedDown.takeIncomingHit({
+    amount: 1,
+    reactionTier: 3,
+    knockbackDirection: direction,
+  });
+  assert.equal(level3.resolvedReactionTier, 3);
+  assert.equal(knockedDown.powerKnockbackState, 'KnockbackRising');
+  assert.equal(knockedDown.animation.externalControlLocked, true);
+  assert.equal(knockedDown.movementLockMultiplier, 0);
+});
+
+test('a fully absorbed Barrier hit still resolves equipped Helmet momentum but not health-gated status', (t) => {
+  const player = createPlayer(t, (loadout) => {
+    equipDefense(loadout, 'barrierGenerator');
+    equipHelmet(loadout);
+  });
 
   const result = player.takeIncomingHit({
     amount: 20,
@@ -174,6 +223,43 @@ test('crafted Jump Springs change only ordinary vertical reach from 1.65 to 2.14
 
   approximately(player.getJumpReachHeight(), 2.145);
   assert.equal(player.stats.moveSpeed, baseMoveSpeed);
+});
+
+test('authored traversal launches expose their ballistic reach only for the active arc', (t) => {
+  const player = createPlayer(t);
+  const ordinaryReach = player.getJumpReachHeight();
+  const verticalVelocity = 18;
+  const gravity = Math.abs(player.getJumpPhysicsDebug().gravity);
+  const ballisticReach = (verticalVelocity * verticalVelocity) / (2 * gravity);
+
+  assert.equal(player.launchFromTraversalMechanism({
+    verticalVelocity,
+    horizontalDirection: new THREE.Vector3(-1, 0, 0),
+    horizontalSpeed: 8,
+    sourceId: 'testTraversalVent',
+  }), true);
+  assert.equal(player.isTraversalMechanismLaunchActive(), true);
+  approximately(player.getJumpReachHeight(), ballisticReach);
+  approximately(
+    player.getTraversalMechanismLaunchDiagnostics().ballisticReachHeight,
+    ballisticReach,
+  );
+
+  player._landPhysicalJump(3.2);
+  assert.equal(player.isTraversalMechanismLaunchActive(), false);
+  assert.equal(player.getTraversalMechanismLaunchDiagnostics(), null);
+  approximately(player.getJumpReachHeight(), ordinaryReach);
+
+  assert.equal(player.launchFromTraversalMechanism({ verticalVelocity }), true);
+  player._startPhysicalJump();
+  assert.equal(player.isTraversalMechanismLaunchActive(), false);
+  approximately(player.getJumpReachHeight(), ordinaryReach);
+
+  assert.equal(player.launchFromTraversalMechanism({ verticalVelocity }), true);
+  assert.equal(player.clearExternalMotion('test-reset'), true);
+  assert.equal(player.isTraversalMechanismLaunchActive(), false);
+  assert.equal(player.root.userData.activeTraversalLaunchSourceId, null);
+  assert.equal(player.root.userData.lastTraversalLaunchEndReason, 'test-reset');
 });
 
 test('Heat Resist blocks tagged environmental heat but not enemy Thermal damage', (t) => {

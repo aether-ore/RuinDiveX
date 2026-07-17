@@ -309,6 +309,7 @@ test('solo Tractor Controller can lift and throw MegaMan, preserves his flight a
     const lockedWhileHeld = player.animation.externalControlLocked;
 
     const explosionEvents = [];
+    let impactReactionTier = 0;
     const originalAddExplosion = game.addExplosion;
     game.addExplosion = (position, damage, radius, color, meta = {}) => {
       if (meta.attackKind === 'tractorThrownPlayerImpact') {
@@ -323,7 +324,11 @@ test('solo Tractor Controller can lift and throw MegaMan, preserves his flight a
           unblockable: meta.unblockable,
         });
       }
-      return originalAddExplosion.call(game, position, damage, radius, color, meta);
+      const result = originalAddExplosion.call(game, position, damage, radius, color, meta);
+      if (meta.attackKind === 'tractorThrownPlayerImpact') {
+        impactReactionTier = player.lastDamageResult?.resolvedReactionTier ?? 0;
+      }
+      return result;
     };
 
     controller._updateTractorController(
@@ -349,7 +354,6 @@ test('solo Tractor Controller can lift and throw MegaMan, preserves his flight a
     }
     game.addExplosion = originalAddExplosion;
     const impactDamageTaken = healthBeforeImpact - player.health;
-    const impactKnockbackState = player.powerKnockbackState;
     const impactNearTarget = Boolean(ballisticLanding && explosionEvents[0])
       && Math.hypot(
         explosionEvents[0].position.x - ballisticLanding.x,
@@ -399,7 +403,8 @@ test('solo Tractor Controller can lift and throw MegaMan, preserves his flight a
       impactNearTarget,
       explosionEvents,
       impactDamageTaken,
-      impactKnockbackState,
+      impactReactionTier,
+      reactionTierReduction: player.gearEffects?.reactionTierReduction ?? 0,
       abortCommitEntry,
       releasedWhenAllyAppeared,
       safeDropStarted,
@@ -433,7 +438,8 @@ test('solo Tractor Controller can lift and throw MegaMan, preserves his flight a
   expect(result.explosionEvents[0].radius).toBeGreaterThanOrEqual(1.8);
   expect(result.explosionEvents[0].damage).toBeGreaterThanOrEqual(12);
   expect(result.impactDamageTaken).toBeGreaterThan(0);
-  expect(result.impactKnockbackState).not.toBeNull();
+  expect(result.reactionTierReduction).toBe(0);
+  expect(result.impactReactionTier).toBe(3);
   expect(result.abortCommitEntry).toEqual({
     telegraphStarted: true,
     claimed: true,

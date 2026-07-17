@@ -297,8 +297,10 @@ export const REAVERBOT_WEAPONS = Object.freeze({
   crusherJaw: {
     id: 'crusherJaw', label: 'Crushing Jaw', tags: ['melee', 'bite', 'combo', 'shockwave'], requires: ['forwardMount'], bodyPlans: ['quadruped'],
     attackKind: 'jawCombo', range: 3.6, preferredRange: 3.05, damageScale: 1.12, threatCost: 3,
-    comboCount: 3, strikeProgress: 0.72, strikeDamageScale: 0.78,
-    shockwaveRadius: 1.9, shockwaveDamageScale: 0.72, hopDistance: 1.25, minimumHopSeparation: 0.82,
+    comboCount: 3, strikeProgress: 0.72,
+    mouthContactRadius: 0.7, mouthContactDamageScale: 0.36, mouthContactHitInterval: 0.72,
+    mouthContactKnockback: 0.9, shockwaveRadius: 1.9, shockwaveDamageScale: 0.72,
+    hopDistance: 1.25, minimumHopSeparation: 0.82,
     telegraphDuration: 1.05, commitDuration: 2.1, recoveryDuration: 0.95, cooldownScale: 0.48,
     meleeArmorBonus: 28, healthScale: 1.24, moveSpeedScale: 1.18,
   },

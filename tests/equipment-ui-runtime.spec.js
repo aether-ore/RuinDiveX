@@ -45,6 +45,10 @@ test('Arms, Gear, fabrication discovery, and Barrier HUD expose fixed-function s
   await expect(gearCards.filter({ has: page.locator('[data-gear-loadout-slot="mobility"]') })).toContainText(
     'Jump Springs must be fabricated through Roll',
   );
+  const helmetCard = gearCards.filter({ has: page.locator('[data-gear-loadout-slot="helmet"]') });
+  await expect(helmetCard).toContainText('EMPTY');
+  await expect(helmetCard).toContainText('0 unlocked choices');
+  await expect(helmetCard.locator('[data-gear-loadout-slot="helmet"]')).toHaveValue('');
   const defenseCard = gearCards.filter({ has: page.locator('[data-gear-loadout-slot="defense"]') });
   await expect(defenseCard).toContainText('LOCKED');
   await expect(defenseCard).toContainText('defeat a qualifying boss');
@@ -73,7 +77,19 @@ test('Arms, Gear, fabrication discovery, and Barrier HUD expose fixed-function s
     });
     game.ui.renderInventory();
   });
+  await expect(jumpRecipe).toContainText("ROLL'S CLUE");
+  await expect(jumpRecipe).toContainText('Find the remaining component type');
+
+  await page.evaluate(() => {
+    const { game } = window;
+    game.rollSalvageStorage.addPart({
+      id: 'perfectedCompressionGreave',
+      name: 'Perfected Compression Greave',
+    });
+    game.ui.renderInventory();
+  });
   await expect(jumpRecipe).toContainText('RECIPE COMPLETE');
+  await expect(jumpRecipe).toContainText('Perfected Compression Greave');
   await expect(jumpRecipe).toContainText('Tempered Jump Spring');
   await expect(jumpRecipe).toContainText('Stabilized Belly Core');
   await expect(jumpRecipe).toContainText('0/12');
@@ -137,6 +153,96 @@ test('Arms, Gear, fabrication discovery, and Barrier HUD expose fixed-function s
     status: 'BROKEN',
     ariaNow: '0',
     ariaLabel: 'Barrier 0 of 40, broken',
+  });
+  expect(runtimeErrors).toEqual([]);
+});
+
+test('Garage Loadout uses its space for inventory and only shows actionable recovery', async ({ page }) => {
+  const runtimeErrors = await openReadyGame(page);
+
+  const desktop = await page.evaluate(() => {
+    const { game } = window;
+    game.setInventoryOpen(true, { mode: 'garage' });
+    game.ui.renderInventory();
+    const panel = document.getElementById('inventory-panel');
+    const layout = panel.querySelector('.inventory-layout');
+    const [inventorySection, workshopSection] = layout.children;
+    const layoutRect = layout.getBoundingClientRect();
+    const inventoryRect = inventorySection.getBoundingClientRect();
+    return {
+      text: panel.innerText,
+      recoveryHidden: document.getElementById('garage-migration-recovery').hidden,
+      workshopDisplay: getComputedStyle(workshopSection).display,
+      inventoryWidthRatio: inventoryRect.width / layoutRect.width,
+      armColumns: getComputedStyle(document.getElementById('garage-weapon-slots'))
+        .gridTemplateColumns.split(' ').filter(Boolean).length,
+      gearColumns: getComputedStyle(document.getElementById('equipment-slots'))
+        .gridTemplateColumns.split(' ').filter(Boolean).length,
+    };
+  });
+
+  expect(desktop.text).not.toContain('Field Resources');
+  expect(desktop.text).not.toContain('Fixed-function loadout');
+  expect(desktop.recoveryHidden).toBe(true);
+  expect(desktop.workshopDisplay).toBe('none');
+  expect(desktop.inventoryWidthRatio).toBeGreaterThan(0.95);
+  expect(desktop.armColumns).toBe(2);
+  expect(desktop.gearColumns).toBe(2);
+
+  const recovery = await page.evaluate(() => {
+    const { game } = window;
+    game.busterMigrationRecovery = [{
+      id: 'garage-layout-recovery',
+      name: 'Recovered Test Arm',
+    }];
+    game.ui.renderInventory();
+    const section = document.getElementById('garage-migration-recovery');
+    const button = section.querySelector('[data-action="recover-migration-item"]');
+    return {
+      hidden: section.hidden,
+      heading: section.querySelector('h2')?.textContent,
+      buttonText: button?.textContent.trim(),
+      buttonDisabled: button?.disabled,
+      buttonTabIndex: button?.tabIndex,
+    };
+  });
+
+  expect(recovery).toEqual({
+    hidden: false,
+    heading: "Roll's Migration Recovery",
+    buttonText: 'Recover Recovered Test Arm',
+    buttonDisabled: false,
+    buttonTabIndex: 0,
+  });
+
+  await page.setViewportSize({ width: 600, height: 700 });
+  const narrow = await page.evaluate(() => {
+    const { game } = window;
+    game.busterMigrationRecovery = [];
+    game.ui.renderInventory();
+    const panel = document.getElementById('inventory-panel');
+    const layout = panel.querySelector('.inventory-layout');
+    const inventorySection = layout.children[0];
+    return {
+      panelHasHorizontalOverflow: panel.scrollWidth > panel.clientWidth + 1,
+      layoutOverflowY: getComputedStyle(layout).overflowY,
+      inventoryOverflowY: getComputedStyle(inventorySection).overflowY,
+      armColumns: getComputedStyle(document.getElementById('garage-weapon-slots'))
+        .gridTemplateColumns.split(' ').filter(Boolean).length,
+      gearColumns: getComputedStyle(document.getElementById('equipment-slots'))
+        .gridTemplateColumns.split(' ').filter(Boolean).length,
+      closeVisible: document.querySelector('#inventory-panel [data-action="close"]')
+        .getBoundingClientRect().width > 0,
+    };
+  });
+
+  expect(narrow).toEqual({
+    panelHasHorizontalOverflow: false,
+    layoutOverflowY: 'auto',
+    inventoryOverflowY: 'visible',
+    armColumns: 1,
+    gearColumns: 1,
+    closeVisible: true,
   });
   expect(runtimeErrors).toEqual([]);
 });

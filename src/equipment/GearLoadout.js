@@ -8,8 +8,9 @@ import { resolveGearEffects } from './GearEffects.js';
 
 const DEFAULT_UNLOCKED_GEAR_IDS = Object.freeze([
   'reinforcedArmorFrame',
-  'gyroStabilizerHelmet',
 ]);
+
+const STARTER_HELMET_RETIREMENT_MIGRATION_VERSION = 1;
 
 const DEFAULT_UNLOCKED_SLOTS = Object.freeze([
   'armor',
@@ -21,7 +22,7 @@ const DEFAULT_UNLOCKED_SLOTS = Object.freeze([
 
 const DEFAULT_GEAR_SLOTS = Object.freeze({
   armor: 'reinforcedArmorFrame',
-  helmet: 'gyroStabilizerHelmet',
+  helmet: null,
   mobility: null,
   defense: null,
   utility1: null,
@@ -30,6 +31,7 @@ const DEFAULT_GEAR_SLOTS = Object.freeze({
 
 function cloneState(state) {
   return {
+    starterHelmetRetirementMigrationVersion: STARTER_HELMET_RETIREMENT_MIGRATION_VERSION,
     records: state.records.map((record) => ({ ...record })),
     unlockedSlots: [...state.unlockedSlots],
     slots: Object.fromEntries(GEAR_SLOTS.map((slot) => [slot, state.slots[slot] ?? null])),
@@ -47,6 +49,7 @@ function transitionResult(state, { ok, changed = false, reason = null, ...extra 
 export function createDefaultGearLoadout() {
   const unlocked = new Set(DEFAULT_UNLOCKED_GEAR_IDS);
   return {
+    starterHelmetRetirementMigrationVersion: STARTER_HELMET_RETIREMENT_MIGRATION_VERSION,
     records: GEAR_LIST.map((gear) => ({
       gearId: gear.id,
       unlocked: unlocked.has(gear.id),
@@ -61,6 +64,11 @@ export const createDefaultGearLoadoutState = createDefaultGearLoadout;
 export function sanitizeGearLoadout(rawState = null) {
   const defaults = createDefaultGearLoadout();
   const source = rawState && typeof rawState === 'object' ? rawState : defaults;
+  const starterHelmetRetirementMigrationVersion = Number(
+    source.starterHelmetRetirementMigrationVersion,
+  );
+  const retireLegacyStarterHelmet = !Number.isInteger(starterHelmetRetirementMigrationVersion)
+    || starterHelmetRetirementMigrationVersion < STARTER_HELMET_RETIREMENT_MIGRATION_VERSION;
   const recordSource = Array.isArray(source.records) ? source.records : defaults.records;
   const permanentStarterUnlocks = new Set(DEFAULT_UNLOCKED_GEAR_IDS);
   const sourceById = new Map(recordSource
@@ -72,7 +80,9 @@ export function sanitizeGearLoadout(rawState = null) {
       gearId: gear.id,
       // Starter Gear cannot be revoked by normal play. Repair missing or false
       // records without granting any fabricated Gear such as Jump Springs.
-      unlocked: permanentStarterUnlocks.has(gear.id) || Boolean(record?.unlocked),
+      unlocked: permanentStarterUnlocks.has(gear.id)
+        || ((gear.id !== 'gyroStabilizerHelmet' || !retireLegacyStarterHelmet)
+          && Boolean(record?.unlocked)),
     };
   });
   const unlockedGearIds = new Set(records
@@ -109,7 +119,12 @@ export function sanitizeGearLoadout(rawState = null) {
     if (gear.exclusiveGroup) exclusiveGroups.add(gear.exclusiveGroup);
   }
 
-  return { records, unlockedSlots, slots };
+  return {
+    starterHelmetRetirementMigrationVersion: STARTER_HELMET_RETIREMENT_MIGRATION_VERSION,
+    records,
+    unlockedSlots,
+    slots,
+  };
 }
 
 export const sanitizeGearLoadoutState = sanitizeGearLoadout;

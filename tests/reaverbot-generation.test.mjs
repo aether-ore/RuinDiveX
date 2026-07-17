@@ -19,6 +19,7 @@ import {
 } from '../src/reaverbots/ReaverbotCatalog.js';
 import {
   createReaverbotSalvageProfile,
+  REAVERBOT_BOSS_SALVAGE,
   REAVERBOT_SALVAGE_MATERIALS,
   REAVERBOT_SALVAGE_SOURCE_MAPS,
   rollReaverbotSalvageDrops,
@@ -740,7 +741,10 @@ test('revamped melee modules are armored, deterministic, and body-plan compatibl
         assert.deepEqual(weapon.bodyPlans, ['quadruped']);
         assert.equal(weapon.attackKind, 'jawCombo');
         assert.equal(weapon.comboCount, 3);
+        assert.ok(weapon.mouthContactRadius >= 0.65);
+        assert.ok(weapon.mouthContactDamageScale > 0);
         assert.ok(weapon.shockwaveRadius >= 1.8);
+        assert.ok(weapon.shockwaveDamageScale > 0);
         assert.ok(genome.behavior.telegraphDuration >= 1);
         assert.ok(genome.stats.moveSpeed > REAVERBOT_ARCHETYPES[archetypeId].baseStats.speed);
         const repeated = generateReaverbotGenome(options);
@@ -1275,7 +1279,7 @@ test('leg armor physically covers its paired joint until the plates retract', ()
   assert.equal(castTowardJoint()?.object.userData?.weakPoint, true);
 });
 
-test('every procedural Reaverbot aspect has a specific crafting material source', () => {
+test('every procedural Reaverbot aspect has a specific source while boss keystones stay excluded', () => {
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.behavior).sort(), Object.keys(REAVERBOT_ARCHETYPES).sort());
   assert.deepEqual(
     Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.body).sort(),
@@ -1286,7 +1290,19 @@ test('every procedural Reaverbot aspect has a specific crafting material source'
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.charge).sort(), Object.keys(REAVERBOT_CHARGE_MODULES).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.defense).sort(), Object.keys(REAVERBOT_DEFENSES).sort());
   assert.deepEqual(Object.keys(REAVERBOT_SALVAGE_SOURCE_MAPS.weakPoint).sort(), Object.keys(REAVERBOT_WEAK_POINTS).sort());
-  assert.equal(Object.keys(REAVERBOT_SALVAGE_MATERIALS).length, 62);
+  const proceduralMaterialIds = Object.values(REAVERBOT_SALVAGE_SOURCE_MAPS)
+    .flatMap((sourceMap) => Object.values(sourceMap))
+    .map((entry) => entry.id);
+  const bossMaterialIds = Object.values(REAVERBOT_BOSS_SALVAGE).map((entry) => entry.id);
+  assert.equal(new Set(proceduralMaterialIds).size, 62);
+  assert.deepEqual(bossMaterialIds, ['perfectedCompressionGreave']);
+  assert.equal(
+    Object.keys(REAVERBOT_SALVAGE_MATERIALS).length,
+    new Set([...proceduralMaterialIds, ...bossMaterialIds]).size,
+  );
+  assert.equal(proceduralMaterialIds.includes('perfectedCompressionGreave'), false);
+  assert.equal(REAVERBOT_SALVAGE_MATERIALS.perfectedCompressionGreave.tier, 'keystone');
+  assert.ok(REAVERBOT_SALVAGE_MATERIALS.perfectedCompressionGreave.craftingTags.includes('boss'));
   assert.equal(REAVERBOT_SALVAGE_MATERIALS.impactHorn, undefined);
 
   let foundClawProfile = false;

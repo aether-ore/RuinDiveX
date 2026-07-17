@@ -115,6 +115,23 @@ export const WEAK_POINT_SALVAGE = Object.freeze({
   clawPalm: material('clawPalmRecoilServo', 'Claw Palm Recoil Servo', 'weakPoint', 'rare', ['claw', 'recoil', 'counter'], ['countering claw arms', 'recoiling weapon guards'], 'A compact overload servo surrounding the exposed palm core, built to wrench the entire claw away from a well-placed hit.'),
 });
 
+/**
+ * Guaranteed signature recoveries exist in the shared material registry but
+ * deliberately do not participate in ordinary procedural source maps. This
+ * keeps progression keystones tied to their authored hunt transaction.
+ */
+export const REAVERBOT_BOSS_SALVAGE = Object.freeze({
+  perfectedCompressionGreave: material(
+    'perfectedCompressionGreave',
+    'Perfected Compression Greave',
+    'weapon',
+    'keystone',
+    ['jump', 'compression', 'rocket', 'leg', 'mobility', 'boss'],
+    ['Jump Springs', 'high-energy launch systems'],
+    'The Ascension Engine\'s intact four-seal compression spine, twin booster manifold, and claw-bearing drive housing. Roll can turn its controlled release into a permanent jump upgrade.',
+  ),
+});
+
 export const REAVERBOT_SALVAGE_SOURCE_MAPS = Object.freeze({
   behavior: BEHAVIOR_SALVAGE,
   body: BODY_SALVAGE,
@@ -126,8 +143,11 @@ export const REAVERBOT_SALVAGE_SOURCE_MAPS = Object.freeze({
 });
 
 export const REAVERBOT_SALVAGE_MATERIALS = Object.freeze(Object.fromEntries(
-  Object.values(REAVERBOT_SALVAGE_SOURCE_MAPS)
-    .flatMap((sourceMap) => Object.values(sourceMap))
+  [
+    ...Object.values(REAVERBOT_SALVAGE_SOURCE_MAPS)
+      .flatMap((sourceMap) => Object.values(sourceMap)),
+    ...Object.values(REAVERBOT_BOSS_SALVAGE),
+  ]
     .map((entry) => [entry.id, entry]),
 ));
 
@@ -240,5 +260,6 @@ export function getReaverbotSalvageCatalogSummary() {
       Object.fromEntries(Object.entries(sourceMap).map(([moduleId, salvage]) => [moduleId, salvage.id])),
     ])),
     materials: Object.values(REAVERBOT_SALVAGE_MATERIALS).map((entry) => ({ ...entry })),
+    bossOnlyMaterialIds: Object.values(REAVERBOT_BOSS_SALVAGE).map((entry) => entry.id),
   };
 }

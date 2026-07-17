@@ -58,6 +58,7 @@ import {
   createDefaultArmsGearState,
   createFixedArmDescriptor,
   getEquipmentRecipeDefinition,
+  getEquipmentRecipesForPart,
 } from './equipment/index.js';
 import {
   getCombatTargetWorldPosition,
@@ -65,13 +66,16 @@ import {
 } from './reaverbots/CombatTarget.js';
 import { rollReaverbotSalvageDrops } from './reaverbots/ReaverbotSalvageCatalog.js';
 import {
+  BOSS_EXPEDITION_SCHEMA_VERSION,
   DEFAULT_BOSS_PROFILE_ID,
   REAVERBOT_BOSS_PROFILES,
   createBossExpeditionSpec,
   getReaverbotBossFeaturedMaterial,
   getReaverbotBossProfile,
+  getReaverbotBossRewardMaterial,
   normalizeBossProfileId,
 } from './reaverbots/ReaverbotBossCatalog.js';
+import { ASCENSION_ENGINE_PROFILE_ID } from './reaverbots/bosses/AscensionEngineContract.js';
 import { hashSeed, SeededRandom } from './reaverbots/SeededRandom.js';
 
 const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
@@ -182,6 +186,7 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'arenaRadius',
   'platformingPlatforms',
   'dynamicPlatformingPlatforms',
+  'bossStageRuntime',
   'platformingLedgeCandidates',
   'debugLedgeTester',
   'debugLedgeCandidates',
@@ -632,11 +637,14 @@ export class Game {
     );
     this.activeBossExpeditionSpec = null;
     this.activeReaverbotBoss = null;
+    this.bossStageRuntime = null;
     this.bossHuntWarning = this.busterLabStorage?.state?.bossHunts?.fallbackFromProfileId
       ? `Unknown saved Boss Hunt “${this.busterLabStorage.state.bossHunts.fallbackFromProfileId}” was replaced with Revolving Fusillade.`
       : (this.busterLabStorage?.state?.bossHunts?.quarantinedRecoveryCount ?? 0) > 0
         ? `Roll quarantined ${this.busterLabStorage.state.bossHunts.quarantinedRecoveryCount} invalid Boss Recovery record(s).`
-        : null;
+        : (this.busterLabStorage?.state?.bossHunts?.quarantinedEncounterProgressCount ?? 0) > 0
+          ? `Roll quarantined ${this.busterLabStorage.state.bossHunts.quarantinedEncounterProgressCount} invalid Ascension checkpoint record(s).`
+          : null;
     this.largeRefractorsSecured = 0;
     this.ruinCompleted = false;
     this.expeditionAccepted = false;
@@ -766,6 +774,10 @@ export class Game {
     if (this.dungeon?.playerStart) {
       this.player.root.position.copy(this.dungeon.playerStart);
     }
+    if (this.dungeon?.playerStartFacing) {
+      this.player.lastMoveDirection.copy(this.dungeon.playerStartFacing).setY(0).normalize();
+      this.player.faceDirection(this.player.lastMoveDirection);
+    }
     const roomPreviewPosition = this._getRoomPreviewPosition();
     if (roomPreviewPosition) {
       this.player.root.position.copy(roomPreviewPosition);
@@ -813,6 +825,7 @@ export class Game {
     this.spawner = new EnemySpawner(this);
     this.ui = new UIManager(this);
     this.dungeonController = new DungeonController(this, this.dungeon);
+    this.bossStageRuntime?.mount?.(this);
     this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
       this.dungeonController.resolvePowerKnockbackTravel(fromPosition, position)
     );
@@ -1749,11 +1762,12 @@ export class Game {
       && persistedExpedition?.status === 'active'
       && persistedExpedition.bossProfileId === profileId) {
       this.activeBossExpeditionSpec = Object.freeze({
-        schemaVersion: 1,
+        schemaVersion: BOSS_EXPEDITION_SCHEMA_VERSION,
         id: persistedExpedition.expeditionId,
         seed: persistedExpedition.seed,
         depth: persistedExpedition.depth,
         bossProfileId: profileId,
+        encounterProgress: persistedExpedition.encounterProgress ?? null,
         seedLabel: `persisted:${persistedExpedition.expeditionId}`,
       });
       encounter.bossProfileId = profileId;
@@ -1798,11 +1812,15 @@ export class Game {
       pendingRecoveryCount: pendingRecoveries.filter((entry) => !entry.identified).length,
       activeExpedition: this.getActiveBossExpeditionSpec(),
       profiles: REAVERBOT_BOSS_PROFILES.map((profile) => {
-        const material = getReaverbotBossFeaturedMaterial(profile);
+        const material = getReaverbotBossRewardMaterial(profile);
         const discovered = Boolean(material && this.rollSalvageStorage?.hasDiscoveredPart?.(material.id));
         const linkedRecipes = material
-          ? BUSTER_RECIPE_LIST.filter((recipe) => Number(recipe.requirements?.parts?.[material.id] ?? 0) > 0)
-            .map((recipe) => ({ id: recipe.id, moduleId: recipe.moduleId, name: recipe.name ?? recipe.moduleId }))
+          ? [
+            ...BUSTER_RECIPE_LIST.filter((recipe) => Number(recipe.requirements?.parts?.[material.id] ?? 0) > 0)
+              .map((recipe) => ({ id: recipe.id, moduleId: recipe.moduleId, name: recipe.name ?? recipe.moduleId })),
+            ...getEquipmentRecipesForPart(material.id)
+              .map((recipe) => ({ id: recipe.id, outputId: recipe.outputId, name: recipe.label ?? recipe.outputId })),
+          ]
           : [];
         const victoryRecord = victories[profile.id];
         const victoryCount = Math.max(0, Math.trunc(
@@ -1819,7 +1837,11 @@ export class Game {
           linkedRecipes: discovered ? linkedRecipes : [],
           victoryCount,
           firstClearAvailable: victoryCount === 0,
-          repeatStatus: victoryCount === 0 ? 'First victory guaranteed' : 'Repeat recovery: 70% · overload guarantees',
+          repeatStatus: victoryCount === 0
+            ? 'First victory guaranteed'
+            : profile.id === ASCENSION_ENGINE_PROFILE_ID
+              ? `Repeat recovery: ${Math.round(BOSS_HUNT_REPEAT_REWARD_CHANCE * 100)}%`
+              : `Repeat recovery: ${Math.round(BOSS_HUNT_REPEAT_REWARD_CHANCE * 100)}% · overload guarantees`,
           portraitUrl: `./assets/textures/reaverbots/bosses/${profile.id}/hunt-portrait.png`,
         };
       }),
@@ -1831,13 +1853,25 @@ export class Game {
     const normalized = normalizeBossProfileId(profileId);
     if (normalized !== profileId) return { ok: false, reason: 'unknown-boss-profile' };
     if (this.busterLabStorage?.readOnly) return { ok: false, reason: 'read-only' };
+    const previousProfile = getReaverbotBossProfile(this.getSelectedBossProfileId());
     const result = this.busterLabStorage?.selectBossHunt
       ? await this._queueBusterStorageOperation(() => this.busterLabStorage.selectBossHunt(normalized))
       : { ok: true };
     if (!result?.ok) return result;
     this.selectedBossProfileId = normalized;
     this.activeBossExpeditionSpec = null;
-    this._configureBossHuntEncounter();
+    const nextProfile = getReaverbotBossProfile(normalized);
+    if ((previousProfile?.environmentId ?? null) !== (nextProfile?.environmentId ?? null)) {
+      this.resetDungeonLayout({
+        free: true,
+        message: `${nextProfile?.title ?? 'Boss Hunt'} environment prepared`,
+        advanceFloor: false,
+        regenerateSeed: false,
+        abandonExpedition: false,
+      });
+    } else {
+      this._configureBossHuntEncounter();
+    }
     this.ui?.renderInventory?.();
     return { ok: true, bossProfileId: normalized, state: result.state };
   }
@@ -1940,6 +1974,7 @@ export class Game {
         activeExpeditionId: null,
         fallbackFromProfileId: null,
         quarantinedRecoveryCount: 0,
+        quarantinedEncounterProgressCount: 0,
       };
       return { reset: true };
     });
@@ -1959,7 +1994,9 @@ export class Game {
     boss.debugGallery = true;
     boss.stats.damage = 0;
     boss.bossState.arenaCooldown = Number.POSITIVE_INFINITY;
-    boss.applyStatus?.('freeze', { duration: 3600 });
+    if (!boss.specialEncounter?.ownsBossPositioning?.()) {
+      boss.applyStatus?.('freeze', { duration: 3600 });
+    }
     this.setPoseDebugOpen?.(false);
     this.cameraController.snapTo?.(this.player);
     return { ok: true, boss, message: 'Boss texture and geometry gallery spawned in-world.' };
@@ -1968,6 +2005,10 @@ export class Game {
   getObjectiveText() {
     if (this.busterTestRange?.active) return 'Buster Test Range — Escape to return';
     if (this.busterSandboxSession?.active) return 'Disposable Buster Dungeon — Escape to return to Roll';
+    const bossObjective = !this.activeReaverbotBoss?.dead
+      ? this.activeReaverbotBoss?.specialEncounter?.getObjectiveText?.()
+      : null;
+    if (bossObjective) return bossObjective;
     return this.dungeonController?.getObjectiveText?.()
       ?? (this.ruinCompleted ? 'Return to camp' : 'Explore ruin');
   }
@@ -2021,7 +2062,9 @@ export class Game {
     this.player.refillBarrier?.();
     this.player.root.position.copy(target);
     this.player.root.position.y = 0;
-    this.player.lastMoveDirection.set(0, 0, 1);
+    this.player.lastMoveDirection.copy(
+      this.dungeon?.ruinEntryFacing ?? tempVectorA.set(0, 0, 1),
+    ).setY(0).normalize();
     this.player.faceDirection(this.player.lastMoveDirection);
     this.dungeonController?.lastSafePlayerPosition?.copy?.(this.player.root.position);
     this.cameraController.snapTo(this.player);
@@ -2210,7 +2253,11 @@ export class Game {
     return this._finishReaverbotScrapIdentification(result);
   }
 
-  completeRuinObjective({ reward = 650, position = null } = {}) {
+  completeRuinObjective({
+    reward = 650,
+    position = null,
+    label = 'Large Refractor secured',
+  } = {}) {
     if (this.ruinCompleted) {
       return false;
     }
@@ -2223,7 +2270,7 @@ export class Game {
       this.addParticleBurst(position, 0x7df8ff, 42, 0.24);
     }
 
-    this.ui?.showToast?.(`Large Refractor secured +${reward}z`, '#7df8ff');
+    this.ui?.showToast?.(`${label} +${reward}z`, '#7df8ff');
     this.ui?.renderInventory?.();
     return true;
   }
@@ -2258,7 +2305,9 @@ export class Game {
     this.player.root.position.copy(target);
     this.player.refillBarrier?.();
     this.player.root.position.y = 0;
-    this.player.lastMoveDirection.set(0, 0, 1);
+    this.player.lastMoveDirection.copy(
+      this.dungeon?.campReturnFacing ?? tempVectorA.set(0, 0, 1),
+    ).setY(0).normalize();
     this.player.faceDirection(this.player.lastMoveDirection);
     this.expeditionActive = false;
     if (!this.ruinCompleted && abandonedExpeditionId) {
@@ -2298,7 +2347,13 @@ export class Game {
     return true;
   }
 
-  resetDungeonLayout({ free = false, message = 'Ruin layout reset' } = {}) {
+  resetDungeonLayout({
+    free = false,
+    message = 'Ruin layout reset',
+    advanceFloor = true,
+    regenerateSeed = true,
+    abandonExpedition = true,
+  } = {}) {
     if (!free) {
       const cost = this.getRuinResetCost();
       if (this.inventory.gold < cost) {
@@ -2310,21 +2365,28 @@ export class Game {
 
     const previousDungeon = this.dungeon;
     const abandonedExpeditionId = this.activeBossExpeditionSpec?.id;
-    this._queueBusterStorageOperation(() => this.busterLabStorage?.clearActiveBossExpedition?.({
-      expeditionId: abandonedExpeditionId,
-      reason: 'abandoned',
-    }));
+    if (abandonExpedition) {
+      this._queueBusterStorageOperation(() => this.busterLabStorage?.clearActiveBossExpedition?.({
+        expeditionId: abandonedExpeditionId,
+        reason: 'abandoned',
+      }));
+    }
     this._clearDungeonRunState();
-    this.dungeonLayoutGeneration += 1;
-    this.dungeonLayoutSeed = `layout:${this.dungeonLayoutSeed}:reset:${this.dungeonLayoutGeneration}`;
+    this.bossStageRuntime?.dispose?.();
+    if (regenerateSeed) {
+      this.dungeonLayoutGeneration += 1;
+      this.dungeonLayoutSeed = `layout:${this.dungeonLayoutSeed}:reset:${this.dungeonLayoutGeneration}`;
+    }
     const dungeon = new DungeonGenerator({
       difficulty: this.ruinFloor,
       random: createDungeonRandom(this.dungeonLayoutSeed),
+      bossProfileId: this.getSelectedBossProfileId(),
     }).generate();
     dungeon.layoutSeed = this.dungeonLayoutSeed;
     for (const animator of previousDungeon?.npcAnimators ?? []) animator.dispose?.();
     previousDungeon?.group?.removeFromParent?.();
     this.dungeon = dungeon;
+    this.bossStageRuntime = dungeon.specialEnvironment ?? null;
     this.platformingPlatforms = [...(dungeon.platforms ?? [])];
     this.dynamicPlatformingPlatforms = [];
     this._rebuildPlatformingLedgeCandidates();
@@ -2340,17 +2402,20 @@ export class Game {
     this.activeBossExpeditionSpec = null;
     this._configureBossHuntEncounter(dungeon, { ignorePersistedActive: true });
     this.dungeonController = new DungeonController(this, dungeon);
+    this.bossStageRuntime?.mount?.(this);
 
     this.player.root.position.copy(dungeon.playerStart);
     this.player.refillBarrier?.();
-    this.player.lastMoveDirection.set(0, 0, 1);
+    this.player.lastMoveDirection.copy(
+      dungeon.playerStartFacing ?? tempVectorA.set(0, 0, 1),
+    ).setY(0).normalize();
     this.player.faceDirection(this.player.lastMoveDirection);
     this.cameraController.snapTo(this.player);
     this._updateDungeonRenderCulling(0, { force: true });
 
     this.spawner = new EnemySpawner(this);
     this.spawner.spawnInitialPack();
-    this.ruinFloor += 1;
+    if (advanceFloor) this.ruinFloor += 1;
     this.ruinCompleted = false;
     this.expeditionAccepted = false;
     this.expeditionActive = false;
@@ -4316,6 +4381,7 @@ export class Game {
     this.arenaRadius = sourceWorld?.values?.arenaRadius ?? 82;
     this.platformingPlatforms = [];
     this.dynamicPlatformingPlatforms = [];
+    this.bossStageRuntime = null;
     this.platformingLedgeCandidates = [];
     this.debugLedgeTester = null;
     this.debugLedgeCandidates = [];
@@ -6144,8 +6210,15 @@ export class Game {
       }
     }
 
-    if ((meta.damagePlayer ?? true) && this.player.root.position.distanceTo(position) <= radius && !this.player.dead) {
-      tempVectorA.copy(this.player.root.position).sub(position).setY(0);
+    const playerInsideExplosion = meta.targetGeometry === 'verticalCapsule'
+      ? sphereIntersectsTargetCapsule({ center: position, radius, target: this.player })
+      : this.player.root.position.distanceTo(position) <= radius;
+    if ((meta.damagePlayer ?? true) && playerInsideExplosion && !this.player.dead) {
+      if (meta.knockbackDirection?.lengthSq?.() > 0.0001) {
+        tempVectorA.copy(meta.knockbackDirection).setY(0);
+      } else {
+        tempVectorA.copy(this.player.root.position).sub(position).setY(0);
+      }
       if (tempVectorA.lengthSq() <= 0.0001) {
         tempVectorA.copy(this.player.lastMoveDirection).multiplyScalar(-1);
       }
@@ -6153,10 +6226,12 @@ export class Game {
       const hitResult = this.player.takeIncomingHit({
         amount: damage * (meta.playerDamageScale ?? 0.35),
         source: meta.source ?? null,
+        attackKind: meta.attackKind,
         impactPosition: position,
         direction: tempVectorA,
-        guardable: !meta.unblockable,
-        reactionTier: meta.reactionTier ?? ((meta.powerfulKnockback ?? true) ? 2 : 1),
+        knockbackDirection: tempVectorA,
+        guardable: meta.guardable ?? !meta.unblockable,
+        reactionTier: meta.reactionTier ?? 3,
         minimumReactionTier: meta.minimumReactionTier ?? 0,
         knockbackStrength: meta.knockbackStrength ?? 1.08,
       });
@@ -6252,6 +6327,7 @@ export class Game {
       } else {
         this._updateAimFromPointer();
         const movementBasis = this._getPlayerMovementBasis();
+        this.bossStageRuntime?.prePlayerUpdate?.(gameplayDt, this);
         for (const enemy of this.enemies) {
           if (!enemy || enemy.dead || this._deferredEnemyRemovals?.has(enemy)) continue;
           enemy.prePlayerUpdate?.(gameplayDt, this);
@@ -6493,9 +6569,11 @@ export class Game {
     const dungeon = new DungeonGenerator({
       difficulty: this.ruinFloor,
       random: createDungeonRandom(this.dungeonLayoutSeed),
+      bossProfileId: this._creatingBusterSandbox ? null : this.getSelectedBossProfileId(),
     }).generate();
     dungeon.layoutSeed = this.dungeonLayoutSeed;
     this.dungeon = dungeon;
+    this.bossStageRuntime = dungeon.specialEnvironment ?? null;
     this.platformingPlatforms = [...(dungeon.platforms ?? [])];
     this.dynamicPlatformingPlatforms = [];
     this._rebuildPlatformingLedgeCandidates();
@@ -6702,7 +6780,7 @@ export class Game {
     this.platformingLedgeCandidates = [
       ...this.platformingPlatforms,
       ...this.debugSpawnedPlatforms,
-    ].flatMap((platform) => (
+    ].filter((platform) => !platform?.dynamic).flatMap((platform) => (
       this._createPlatformLedgeCandidates(platform)
     ));
   }
@@ -8648,7 +8726,12 @@ export class Game {
       return;
     }
     if (enemy.isBoss && enemy.bossProfileId) {
-      this._recordBossVictory(enemy);
+      if (enemy.bossVictoryCommitted && enemy.pendingBossVictoryResult) {
+        this._presentBossVictoryResult(enemy, enemy.pendingBossVictoryResult);
+        enemy.pendingBossVictoryResult = null;
+      } else if (!enemy.bossVictoryCommitted) {
+        this._recordBossVictory(enemy);
+      }
     }
     if (meta.selfDestruct || meta.suppressRewards) {
       return;
@@ -8659,7 +8742,10 @@ export class Game {
       && meta.source === this.player
       && this.player.stats.explodeOnKillChance > 0
       && Math.random() < this.player.stats.explodeOnKillChance) {
-      this.addExplosion(enemy.root.position, this.player.stats.attackDamage * 1.4, 1.9, 0xff8a42);
+      this.addExplosion(enemy.root.position, this.player.stats.attackDamage * 1.4, 1.9, 0xff8a42, {
+        source: this.player,
+        damagePlayer: false,
+      });
     }
 
     this.refractors.rollEnemyDrop(enemy);
@@ -8668,18 +8754,62 @@ export class Game {
     this.lootSystem.rollDrop(enemy);
   }
 
-  async _recordBossVictory(enemy) {
+  async commitAscensionCheckpoint(enemy, checkpoint) {
+    if (enemy?.debugBoss) return { ok: true, debug: true, encounterProgress: checkpoint };
+    const expeditionId = enemy?.expeditionSpec?.id ?? this.activeBossExpeditionSpec?.id;
+    if (!expeditionId || !this.busterLabStorage?.recordBossCheckpoint) {
+      return { ok: false, reason: 'storage-unavailable' };
+    }
+    const result = await this._queueBusterStorageOperation(() => (
+      this.busterLabStorage.recordBossCheckpoint({
+        expeditionId,
+        bossProfileId: enemy.bossProfileId,
+        securedCheckpointIndex: checkpoint.securedCheckpointIndex,
+        securedCheckpointId: checkpoint.securedCheckpointId,
+        brokenSealIndex: checkpoint.brokenSealIndex,
+        sandbox: Boolean(this.busterSandboxSession?.active),
+        debug: false,
+      })
+    ));
+    if (!result?.ok) return result;
+    const encounterProgress = result.encounterProgress
+      ?? result.record?.encounterProgress
+      ?? result.checkpoint
+      ?? null;
+    if (encounterProgress) {
+      const nextSpec = Object.freeze({
+        ...(enemy.expeditionSpec ?? this.activeBossExpeditionSpec ?? {}),
+        encounterProgress,
+      });
+      enemy.expeditionSpec = nextSpec;
+      if (this.activeBossExpeditionSpec?.id === expeditionId) this.activeBossExpeditionSpec = nextSpec;
+      const encounter = this.dungeon?.encounters?.find?.((entry) => entry.expeditionSpec?.id === expeditionId);
+      if (encounter) encounter.expeditionSpec = nextSpec;
+    }
+    return result;
+  }
+
+  commitAscensionVictory(enemy) {
+    if (enemy?.debugBoss) return Promise.resolve({ ok: true, debug: true });
+    return this._recordBossVictory(enemy, { present: false, ascensionAtomic: true });
+  }
+
+  async _recordBossVictory(enemy, { present = true, ascensionAtomic = false } = {}) {
     const expeditionId = enemy.expeditionSpec?.id
       ?? this.activeBossExpeditionSpec?.id
       ?? `boss:${enemy.id}`;
-    if (!this.busterLabStorage?.recordBossVictory) return { ok: false, reason: 'storage-unavailable' };
+    const storageMethod = ascensionAtomic
+      ? this.busterLabStorage?.recordAscensionBossVictory
+      : this.busterLabStorage?.recordBossVictory;
+    if (!storageMethod) return { ok: false, reason: 'storage-unavailable' };
     try {
       const result = await this._queueBusterStorageOperation(() => (
-        this.busterLabStorage.recordBossVictory({
+        storageMethod.call(this.busterLabStorage, {
           expeditionId,
           bossProfileId: enemy.bossProfileId,
           signaturePartOverloaded: Boolean(enemy.signaturePartOverloaded),
           sandbox: Boolean(this.busterSandboxSession?.active),
+          debug: Boolean(enemy.debugBoss),
         })
       ));
       if (!result?.ok) {
@@ -8690,6 +8820,7 @@ export class Game {
         return result;
       }
       this.bossHuntWarning = null;
+      if (!present) return result;
       if (result.defenseUnlocked) {
         this._applyPersistedArmsGear({ refillBarrier: Boolean(result.barrierGranted) });
       }
@@ -8710,10 +8841,25 @@ export class Game {
     }
   }
 
+  _presentBossVictoryResult(enemy, result = {}) {
+    if (result.defenseUnlocked) {
+      this._applyPersistedArmsGear({ refillBarrier: Boolean(result.barrierGranted) });
+    }
+    if (result.barrierGranted) {
+      this.ui?.showToast?.('Defense Gear unlocked · Barrier Generator equipped', '#7df8ff');
+    }
+    if (result.rewardQueued || result.recovery || result.queuedRecovery) {
+      this._playBossRecoveryPresentation(enemy, result);
+    } else {
+      this.ui?.showToast?.(`${enemy.bossProfile?.title ?? 'Boss'} defeated · no intact signature material`, '#c7d0d6');
+    }
+    this.ui?.renderInventory?.();
+  }
+
   _playBossRecoveryPresentation(enemy, result = {}) {
     const position = (enemy.deathDropPosition ?? enemy.root.position).clone();
     position.y += 1.05;
-    const material = getReaverbotBossFeaturedMaterial(enemy.bossProfileId);
+    const material = getReaverbotBossRewardMaterial(enemy.bossProfileId);
     const mesh = new THREE.Mesh(
       new THREE.IcosahedronGeometry(0.34, 1),
       new THREE.MeshStandardMaterial({

@@ -102,12 +102,18 @@
           <span id="boss-hud-name">Ruin Core Boss</span>
           <span id="boss-hud-phase">PHASE I</span>
         </div>
-        <div class="boss-health-track"><span id="boss-health-fill"></span><i class="boss-phase-marker"></i></div>
+        <div id="boss-health-track" class="boss-health-track" role="progressbar" aria-label="Boss integrity" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+          <span id="boss-health-fill"></span>
+          <i class="boss-phase-marker" data-segment-marker="1" aria-hidden="true"></i>
+          <i class="boss-phase-marker" data-segment-marker="2" aria-hidden="true"></i>
+          <i class="boss-phase-marker" data-segment-marker="3" aria-hidden="true"></i>
+        </div>
         <div class="boss-signature-row">
-          <span>Signature Assembly</span>
+          <span id="boss-signature-label">Signature Assembly</span>
           <div class="boss-signature-track"><span id="boss-signature-fill"></span></div>
           <strong id="boss-signature-status">ARMORED</strong>
         </div>
+        <div id="boss-encounter-progress" class="boss-encounter-progress" hidden></div>
       </section>
       <div id="boss-intro-banner" class="boss-intro-banner" hidden></div>
       <div id="boss-victory-banner" class="boss-victory-banner" hidden></div>
@@ -132,6 +138,15 @@
             <div id="equipment-slots" class="equipment-grid"></div>
             <h2>Expedition Log</h2>
             <div id="quest-log" class="quest-log"></div>
+            <section
+              id="garage-migration-recovery"
+              class="garage-migration-recovery"
+              aria-labelledby="garage-migration-recovery-heading"
+              hidden
+            >
+              <h2 id="garage-migration-recovery-heading">Roll's Migration Recovery</h2>
+              <div id="inventory-items" class="inventory-list"></div>
+            </section>
           </section>
           <section>
             <div id="roll-scrap-service" class="roll-scrap-service" hidden>
@@ -360,8 +375,6 @@
                 </section>
               </section>
             </div>
-            <h2 class="fixed-inventory-heading">Field Resources</h2>
-            <div id="inventory-items" class="inventory-list"></div>
           </section>
         </div>
       </section>

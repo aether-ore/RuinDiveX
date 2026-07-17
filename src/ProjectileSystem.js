@@ -936,23 +936,54 @@ export class ProjectileSystem {
         enemy,
         pathPositionAt,
       );
-      const fraction = resolvedImpact && (bodyFraction == null
-        || resolvedImpact.fraction <= bodyFraction + BUSTER_PROJECTILE_EVENT_EPSILON)
-        ? resolvedImpact.fraction
-        : bodyFraction;
+      let exposedBodyPriorityHit = null;
+      if (bodyFraction != null
+        && resolvedImpact?.resolvedPart?.exposedWeakPointHit !== true
+        && typeof enemy.resolveLineHit === 'function') {
+        // A coarse body capsule can begin well in front of a detailed exposed
+        // collar. Look only a body-width ahead along the projectile's current
+        // sweep and promote an explicitly exposed weak point at the coarse
+        // surface. This keeps normal body occlusion intact for every hit that
+        // does not opt into the exposed-part contract.
+        const sweepDirection = end.clone().sub(start);
+        const segmentLength = sweepDirection.length();
+        if (segmentLength > BUSTER_PROJECTILE_EVENT_EPSILON) {
+          sweepDirection.divideScalar(segmentLength);
+          const lookAhead = Math.max(
+            segmentLength,
+            (Math.max(0.1, Number(enemy.radius) || 0.1) + projectile.radius) * 2.5,
+          );
+          const candidate = enemy.resolveLineHit(
+            start,
+            sweepDirection,
+            lookAhead,
+            projectile.radius,
+          );
+          if (candidate?.exposedWeakPointHit === true) exposedBodyPriorityHit = candidate;
+        }
+      }
+      const exposedWeakPointHit = resolvedImpact?.resolvedPart?.exposedWeakPointHit === true;
+      const fraction = exposedBodyPriorityHit
+        ? bodyFraction
+        : resolvedImpact && (bodyFraction == null
+          || exposedWeakPointHit
+          || resolvedImpact.fraction <= bodyFraction + BUSTER_PROJECTILE_EVENT_EPSILON)
+          ? resolvedImpact.fraction
+          : bodyFraction;
       if (fraction == null) continue;
       const orderedCandidate = { enemy, fraction };
       if (chooseEarlierBusterProjectileImpact(earliest, orderedCandidate) !== orderedCandidate) continue;
 
       const position = pathPositionAt(fraction);
-      const resolvedPart = resolvedImpact
-        && Math.abs(resolvedImpact.fraction - fraction) <= BUSTER_PROJECTILE_EVENT_EPSILON
-        ? resolvedImpact.resolvedPart
-        : enemy.resolveProjectileHit?.(
-          position,
-          projectile.radius,
-          projectile.direction,
-        ) ?? null;
+      const resolvedPart = exposedBodyPriorityHit
+        ?? (resolvedImpact
+          && Math.abs(resolvedImpact.fraction - fraction) <= BUSTER_PROJECTILE_EVENT_EPSILON
+          ? resolvedImpact.resolvedPart
+          : enemy.resolveProjectileHit?.(
+            position,
+            projectile.radius,
+            projectile.direction,
+          ) ?? null);
       earliest = { enemy, resolvedPart, position, fraction };
     }
 
@@ -1026,6 +1057,11 @@ export class ProjectileSystem {
         knockback: 2.1,
         hitPartId: resolvedPart?.hitPartId ?? null,
         weakPointHit: Boolean(resolvedPart?.weakPointHit),
+        exposedWeakPointHit: Boolean(resolvedPart?.exposedWeakPointHit),
+        ascensionSealHit: Boolean(resolvedPart?.ascensionSealHit),
+        ascensionSealIndex: Number.isInteger(resolvedPart?.ascensionSealIndex)
+          ? resolvedPart.ascensionSealIndex
+          : null,
         redEyeHit: Boolean(resolvedPart?.redEyeHit),
         signaturePartHit: Boolean(resolvedPart?.signaturePartHit),
         bossArenaNodeHit: Boolean(resolvedPart?.bossArenaNodeHit),
@@ -1225,7 +1261,8 @@ export class ProjectileSystem {
         impactPosition: projectile.mesh.position,
         attackKind: projectile.visualType,
         guardable: projectile.attackMeta?.guardable ?? true,
-        reactionTier: projectile.attackMeta?.reactionTier ?? 1,
+        reactionTier: projectile.attackMeta?.reactionTier
+          ?? (projectile.explosiveRadius > 0 ? 3 : 1),
         minimumReactionTier: projectile.attackMeta?.minimumReactionTier ?? 0,
         direction: projectile.direction,
         knockbackDirection: projectile.attackMeta?.knockbackDirection ?? projectile.direction,

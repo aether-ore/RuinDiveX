@@ -2,21 +2,20 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { REAVERBOT_BOSS_PROFILE_IDS } from '../src/reaverbots/ReaverbotBossCatalog.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASE_URL = process.env.BOSS_CAPTURE_URL ?? 'http://127.0.0.1:5174';
 const PORTRAIT_SIZE = 256;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const PROFILE_IDS = Object.freeze([
-  'pursuitRegent',
-  'rubyOpticOracle',
-  'ballisticsVizier',
-  'revolvingFusillade',
-  'highAngleBastion',
-  'clusterSalvoReliquary',
-  'feedDrumArsenal',
-  'overloadReliquary',
-]);
+const requestedProfileIds = process.argv.slice(2).filter(Boolean);
+const unknownProfileIds = requestedProfileIds.filter((profileId) => !REAVERBOT_BOSS_PROFILE_IDS.includes(profileId));
+if (unknownProfileIds.length > 0) {
+  throw new Error(`Unknown boss portrait profile(s): ${unknownProfileIds.join(', ')}`);
+}
+const PROFILE_IDS = requestedProfileIds.length > 0
+  ? requestedProfileIds
+  : REAVERBOT_BOSS_PROFILE_IDS;
 
 function validatePortraitPng(bytes, profileId) {
   if (bytes.length <= 26 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
@@ -77,6 +76,9 @@ try {
       const result = game.debugSpawnBoss(id);
       if (!result?.ok || !result.boss) return { ok: false, message: result?.message ?? result?.reason };
       const boss = result.boss;
+      for (const child of game.scene.children) {
+        child.visible = child === boss.root || child.isLight === true;
+      }
       boss.debugGallery = true;
       boss.bossState.arenaCooldown = Number.POSITIVE_INFINITY;
       boss.root.position.set(0, 0, 0);

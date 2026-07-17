@@ -63,7 +63,7 @@ export const ARM_GEAR_RECIPE_CATALOG = deepFreeze({
     id: 'jumpSprings',
     outputKind: 'gear',
     scrapCost: 12,
-    partIds: ['temperedJumpSpring', 'stabilizedBellyCore'],
+    partIds: ['perfectedCompressionGreave', 'temperedJumpSpring', 'stabilizedBellyCore'],
   }),
   machineGunArm: recipeDefinition({
     id: 'machineGunArm',

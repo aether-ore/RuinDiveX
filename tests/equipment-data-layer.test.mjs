@@ -185,6 +185,7 @@ test('gear catalog owns one explicit typed domain per first-release item', () =>
   assert.deepEqual(GEAR_CATALOG.gyroStabilizerHelmet.effect, {
     id: 'reactionTierReduction', tiers: 1,
   });
+  assert.equal(GEAR_CATALOG.gyroStabilizerHelmet.acquisition, 'future-recovery');
   assert.deepEqual(GEAR_CATALOG.jumpSprings.effect, {
     id: 'jumpReachMultiplier', multiplier: 1.3,
   });
@@ -221,12 +222,13 @@ test('gear catalog owns one explicit typed domain per first-release item', () =>
   assert.ok(Object.isFrozen(GEAR_CATALOG.barrierGenerator.effect));
 });
 
-test('default gear equips only Armor and Helmet while Jump Springs and Defense stay locked', () => {
+test('default gear equips only Armor while future Helmet, Jump Springs, and Defense stay locked', () => {
   const state = createDefaultGearLoadout();
+  assert.equal(state.starterHelmetRetirementMigrationVersion, 1);
   assert.deepEqual(state.unlockedSlots, ['armor', 'helmet', 'mobility', 'utility1', 'utility2']);
   assert.deepEqual(state.slots, {
     armor: 'reinforcedArmorFrame',
-    helmet: 'gyroStabilizerHelmet',
+    helmet: null,
     mobility: null,
     defense: null,
     utility1: null,
@@ -234,13 +236,41 @@ test('default gear equips only Armor and Helmet while Jump Springs and Defense s
   });
   assert.deepEqual(
     state.records.filter((record) => record.unlocked).map((record) => record.gearId),
-    ['reinforcedArmorFrame', 'gyroStabilizerHelmet'],
+    ['reinforcedArmorFrame'],
+  );
+  assert.deepEqual(
+    state.records.find((record) => record.gearId === 'gyroStabilizerHelmet'),
+    { gearId: 'gyroStabilizerHelmet', unlocked: false },
   );
   assert.deepEqual(
     state.records.find((record) => record.gearId === 'jumpSprings'),
     { gearId: 'jumpSprings', unlocked: false },
   );
   assert.equal(validateGearLoadout(state).valid, true);
+});
+
+test('legacy starter Helmet retirement is idempotent and a later explicit unlock survives sanitization', () => {
+  const legacy = createDefaultGearLoadout();
+  delete legacy.starterHelmetRetirementMigrationVersion;
+  legacy.records.find((record) => record.gearId === 'gyroStabilizerHelmet').unlocked = true;
+  legacy.slots.helmet = 'gyroStabilizerHelmet';
+
+  const retired = sanitizeGearLoadout(legacy);
+  assert.equal(retired.starterHelmetRetirementMigrationVersion, 1);
+  assert.deepEqual(
+    retired.records.find((record) => record.gearId === 'gyroStabilizerHelmet'),
+    { gearId: 'gyroStabilizerHelmet', unlocked: false },
+  );
+  assert.equal(retired.slots.helmet, null);
+  assert.deepEqual(sanitizeGearLoadout(retired), retired, 'retirement must not repeat or drift');
+
+  const unlocked = unlockGear(retired, 'gyroStabilizerHelmet');
+  assert.equal(unlocked.ok, true);
+  assert.equal(unlocked.changed, true);
+  const equipped = equipGearSlot(unlocked.state, 'helmet', 'gyroStabilizerHelmet');
+  assert.equal(equipped.ok, true);
+  assert.equal(equipped.state.slots.helmet, 'gyroStabilizerHelmet');
+  assert.deepEqual(sanitizeGearLoadout(equipped.state), equipped.state);
 });
 
 test('gear unlock, slot unlock, and equip transitions do not auto-equip fabricated gear', () => {
@@ -269,10 +299,18 @@ test('effect resolution keeps Armor, reactions, jumping, barrier, and utility do
   let state = createDefaultGearLoadout();
   let effects = resolveGearEffects(state);
   assert.equal(effects.healthDamageMultiplier, 0.82);
-  assert.equal(effects.reactionTierReduction, 1);
+  assert.equal(effects.reactionTierReduction, 0);
   assert.equal(effects.jumpReachMultiplier, 1);
   assert.equal(effects.defense, null);
   assert.equal(effects.armSwapTransitionTime, 0.34);
+
+  state = equipGearSlot(
+    unlockGear(state, 'gyroStabilizerHelmet').state,
+    'helmet',
+    'gyroStabilizerHelmet',
+  ).state;
+  effects = resolveGearEffects(state);
+  assert.equal(effects.reactionTierReduction, 1);
 
   state = equipGearSlot(unlockGear(state, 'jumpSprings').state, 'mobility', 'jumpSprings').state;
   state = unlockGearSlot(unlockGear(state, 'barrierGenerator').state, 'defense').state;
@@ -328,7 +366,7 @@ test('sanitization and validation reject malformed persisted gear and forbidden 
 
 test('recipe catalog contains the exact deterministic 12-row fabrication table', () => {
   const expected = [
-    ['jumpSprings', 'gear', 12, ['temperedJumpSpring', 'stabilizedBellyCore']],
+    ['jumpSprings', 'gear', 12, ['perfectedCompressionGreave', 'temperedJumpSpring', 'stabilizedBellyCore']],
     ['machineGunArm', 'arm', 12, ['revolvingPulseBarrel', 'ammunitionFeedDrum']],
     ['cannonArm', 'arm', 14, ['heavyServoFrame', 'threeAxisGyro', 'ancientBatteryPack']],
     ['grenadeArm', 'arm', 16, ['highAngleLaunchTube', 'ballisticsLogicChip', 'clusterBurstSequencer']],

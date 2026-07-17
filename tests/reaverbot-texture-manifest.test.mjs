@@ -26,6 +26,7 @@ import {
   resolveReaverbotTextureProfile,
 } from '../src/reaverbots/ReaverbotTextureCatalog.js';
 import {
+  REAVERBOT_BOSS_PROFILES,
   REAVERBOT_BOSS_PROFILE_IDS,
   generateReaverbotBossGenome,
 } from '../src/reaverbots/ReaverbotBossCatalog.js';
@@ -235,9 +236,13 @@ test('declared Reaverbot textures are non-empty clamped PNG maps with complete l
   }
 });
 
-test('all eight boss art profiles use authored 256px RGBA maps and portraits with no fallback paths', async () => {
+test('all semantic texture-backed boss art profiles use authored 256px RGBA maps and portraits with no fallback paths', async () => {
+  const expectedTextureProfileIds = REAVERBOT_BOSS_PROFILES
+    .filter((profile) => profile.visualProfileId)
+    .map((profile) => profile.visualProfileId);
   assert.equal(REAVERBOT_BOSS_TEXTURE_PROFILE_IDS.length, 8);
-  assert.deepEqual(REAVERBOT_BOSS_TEXTURE_PROFILE_IDS, REAVERBOT_BOSS_PROFILE_IDS);
+  assert.deepEqual(REAVERBOT_BOSS_TEXTURE_PROFILE_IDS, expectedTextureProfileIds);
+  assert.ok(REAVERBOT_BOSS_PROFILE_IDS.length > REAVERBOT_BOSS_TEXTURE_PROFILE_IDS.length);
   for (const profileId of REAVERBOT_BOSS_TEXTURE_PROFILE_IDS) {
     const profile = REAVERBOT_BOSS_TEXTURE_PROFILES[profileId];
     const profileRoot = `/assets/textures/reaverbots/bosses/${profileId}`;
@@ -250,6 +255,22 @@ test('all eight boss art profiles use authored 256px RGBA maps and portraits wit
 
     const portraitPath = `${profileRoot}/hunt-portrait.png`;
     const portraitBytes = await readFile(path.join(REPO_ROOT, portraitPath.replace(/^[/\\]+/, '')));
+    assertRuntimePng(portraitBytes, `${profileId} portrait`);
+  }
+});
+
+test('every Boss Hunt profile has a runtime-captured 256px RGBA portrait', async () => {
+  for (const profileId of REAVERBOT_BOSS_PROFILE_IDS) {
+    const portraitPath = path.join(
+      REPO_ROOT,
+      'assets',
+      'textures',
+      'reaverbots',
+      'bosses',
+      profileId,
+      'hunt-portrait.png',
+    );
+    const portraitBytes = await readFile(portraitPath);
     assertRuntimePng(portraitBytes, `${profileId} portrait`);
   }
 });
@@ -291,6 +312,29 @@ test('boss overrides merge after ordinary profiles without leaking into ordinary
       assert.equal(resolved.weapon.shieldEnergy, 'overloadReliquaryEnergy');
     }
   }
+});
+
+test('an explicit null visual profile keeps authored-geometry bosses on shared semantic maps', () => {
+  const ascension = generateReaverbotBossGenome({
+    bossProfileId: 'ascensionEngine',
+    seed: 'textures:ascension-engine',
+    threatTier: 5,
+  });
+  const resolvedAscension = resolveReaverbotTextureProfile(ascension);
+  assert.equal(ascension.visualProfileId, null);
+  assert.equal(resolvedAscension.boss, null);
+  assert.equal(resolvedAscension.body, REAVERBOT_BODY_TEXTURE_PROFILES[ascension.body.planId]);
+  assert.equal(resolvedAscension.weapon, REAVERBOT_WEAPON_TEXTURE_PROFILES[ascension.modules.weapon.id]);
+  assert.ok(
+    Object.values(resolvedAscension.materialSlots).every((assetId) => !assetId.startsWith('ascensionEngine')),
+  );
+
+  const textureBackedBoss = generateReaverbotBossGenome({
+    bossProfileId: 'revolvingFusillade',
+    seed: 'textures:explicit-opt-out',
+    threatTier: 5,
+  });
+  assert.equal(resolveReaverbotTextureProfile({ ...textureBackedBoss, visualProfileId: null }).boss, null);
 });
 
 test('boss overrides preserve shared bladeMetal and jointDark semantic slots in every resolved scope', () => {

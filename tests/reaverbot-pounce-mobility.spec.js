@@ -91,20 +91,50 @@ test('pouncers replace ordinary locomotion with spring quadruped, paired spring,
       enemy.brain.coilBounceCooldown = 0;
       enemy.brain.coilBounceTime = 0;
       const start = enemy.root.position.clone();
-      const started = enemy._moveByMode('approach', 0.016, game, new Vector3(1, 0, 0), 5);
+      const approachDistance = enemy._getAttackApproachRange() + 5;
+      const started = enemy._moveByMode(
+        'approach',
+        0.016,
+        game,
+        new Vector3(1, 0, 0),
+        approachDistance,
+      );
       const noInitialSlide = enemy.root.position.distanceTo(start) < 0.0001;
       const ignoresGround = enemy.shouldIgnoreGroundConstraint();
       const duration = enemy.brain.coilBounceDuration;
-      enemy._moveByMode('approach', duration * 0.5, game, new Vector3(1, 0, 0), 5);
+      enemy._moveByMode('approach', duration * 0.5, game, new Vector3(1, 0, 0), approachDistance);
       const apexRise = enemy.root.position.y - start.y;
       enemy._animateVisual(1);
       const tuckedInFlight = enemy.visual.frame.springMobility.airborne;
-      enemy._moveByMode('approach', duration * 0.5 + 0.02, game, new Vector3(1, 0, 0), 5);
+      enemy._moveByMode(
+        'approach',
+        duration * 0.5 + 0.02,
+        game,
+        new Vector3(1, 0, 0),
+        approachDistance,
+      );
       const landingTravel = Math.hypot(
         enemy.root.position.x - start.x,
         enemy.root.position.z - start.z,
       );
-      bounceResults.push({ started, noInitialSlide, ignoresGround, apexRise, tuckedInFlight, landingTravel });
+      enemy.brain.coilBounceActive = false;
+      enemy.brain.coilBounceCooldown = 0;
+      const heldInsideAttackRange = !enemy._moveByMode(
+        'approach',
+        0.016,
+        game,
+        new Vector3(1, 0, 0),
+        enemy._getAttackApproachRange() - 0.1,
+      );
+      bounceResults.push({
+        started,
+        noInitialSlide,
+        ignoresGround,
+        apexRise,
+        tuckedInFlight,
+        landingTravel,
+        heldInsideAttackRange,
+      });
     }
 
     quadruped.root.position.set(0, 0, 0);
@@ -310,6 +340,7 @@ test('pouncers replace ordinary locomotion with spring quadruped, paired spring,
     expect(bounce.apexRise).toBeGreaterThan(2.3);
     expect(bounce.tuckedInFlight).toBe(true);
     expect(bounce.landingTravel).toBeGreaterThan(1.5);
+    expect(bounce.heldInsideAttackRange).toBe(true);
   }
   expect(result.alternateBounceStarted).toBe(true);
   expect(result.alternateLandingZ).toBeGreaterThan(0.35);

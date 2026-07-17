@@ -1,9 +1,12 @@
 import { generateReaverbotGenome, validateReaverbotGenome } from './ReaverbotGenerator.js';
-import { REAVERBOT_SALVAGE_SOURCE_MAPS } from './ReaverbotSalvageCatalog.js';
+import {
+  REAVERBOT_SALVAGE_MATERIALS,
+  REAVERBOT_SALVAGE_SOURCE_MAPS,
+} from './ReaverbotSalvageCatalog.js';
 import { hashSeed, SeededRandom } from './SeededRandom.js';
 
 export const DEFAULT_BOSS_PROFILE_ID = 'revolvingFusillade';
-export const BOSS_EXPEDITION_SCHEMA_VERSION = 1;
+export const BOSS_EXPEDITION_SCHEMA_VERSION = 2;
 
 export const REAVERBOT_BOSS_STAT_SCALES = Object.freeze({
   health: 6.5,
@@ -40,15 +43,23 @@ function profile({
   overloadWeakening,
   arena,
   healthScale = REAVERBOT_BOSS_STAT_SCALES.health,
+  phaseThreshold = 0.5,
+  reward = null,
+  environmentId = null,
+  encounterControllerId = null,
+  displayName = null,
+  visualProfileId = id,
+  artStrategy = 'semanticTextures',
 }) {
   return deepFreeze({
     id,
     title,
     roleClue,
     featured,
+    reward,
     generation,
     combat: {
-      phaseThreshold: 0.5,
+      phaseThreshold,
       phaseTransitionSeconds: 1.1,
       signatureIntegrityHealthScale: 0.24,
       signatureDirectDamageMultiplier: 1.5,
@@ -63,7 +74,11 @@ function profile({
       limits: REAVERBOT_BOSS_LIMITS,
     },
     arena,
-    visualProfileId: id,
+    environmentId,
+    encounterControllerId,
+    displayName,
+    visualProfileId,
+    artStrategy,
   });
 }
 
@@ -74,6 +89,36 @@ const ARTILLERY_VARIANTS = Object.freeze([
 ]);
 
 export const REAVERBOT_BOSS_PROFILES = deepFreeze([
+  profile({
+    id: 'ascensionEngine',
+    title: 'The Ascension Engine',
+    displayName: 'VA-RUK 09 · The Ascension Engine',
+    roleClue: 'perfected compression greave',
+    featured: { aspect: 'weapon', moduleId: 'launchLeg' },
+    reward: { materialId: 'perfectedCompressionGreave', firstClearGuaranteed: true },
+    generation: {
+      intent: 'melee',
+      archetypeId: 'pouncer',
+      weaponId: 'launchLeg',
+      variants: [
+        { bodyPlanId: 'hopper', defenseId: 'sidePlates', weakPointId: 'legJoint' },
+      ],
+    },
+    phaseOne: ['foundryPounce', 'wallRebound', 'launchChain', 'boosterWash'],
+    phaseTwo: ['targetedPounce', 'doubleRebound', 'compressionSweep', 'skyfallBreaker', 'emergencyPogo'],
+    overloadWeakening: 'fourthSealCancelsEscapeLaunch',
+    arena: {
+      mechanicId: 'verticalTransitReliquary',
+      anchorKinds: ['launchVent', 'counterweight', 'momentumPlatform', 'sealStation', 'summit'],
+      segmentCount: 4,
+      benchmarkTraversalSeconds: 38,
+    },
+    phaseThreshold: 0.25,
+    environmentId: 'verticalTransitReliquary',
+    encounterControllerId: 'ascensionEngine',
+    visualProfileId: null,
+    artStrategy: 'authoredGeometry',
+  }),
   profile({
     id: 'pursuitRegent',
     title: 'Pursuit Regent',
@@ -221,6 +266,11 @@ const FEATURED_MATERIAL_BY_PROFILE_ID = new Map(REAVERBOT_BOSS_PROFILES.map((bos
   const material = REAVERBOT_SALVAGE_SOURCE_MAPS[aspect]?.[moduleId] ?? null;
   return [bossProfile.id, material ? deepFreeze({ ...material, source: { aspect, moduleId } }) : null];
 }));
+const REWARD_MATERIAL_BY_PROFILE_ID = new Map(REAVERBOT_BOSS_PROFILES.map((bossProfile) => {
+  const rewardMaterialId = bossProfile.reward?.materialId ?? null;
+  const rewardMaterial = rewardMaterialId ? REAVERBOT_SALVAGE_MATERIALS[rewardMaterialId] ?? null : null;
+  return [bossProfile.id, rewardMaterial ?? FEATURED_MATERIAL_BY_PROFILE_ID.get(bossProfile.id) ?? null];
+}));
 
 export function getReaverbotBossProfile(profileId) {
   return PROFILE_BY_ID.get(profileId) ?? null;
@@ -240,6 +290,16 @@ export function getReaverbotBossFeaturedMaterial(profileOrId) {
 
 export const resolveBossFeaturedMaterial = getReaverbotBossFeaturedMaterial;
 
+export function getReaverbotBossRewardMaterial(profileOrId) {
+  const bossProfile = typeof profileOrId === 'string'
+    ? getReaverbotBossProfile(profileOrId)
+    : profileOrId;
+  if (!bossProfile) return null;
+  return REWARD_MATERIAL_BY_PROFILE_ID.get(bossProfile.id) ?? null;
+}
+
+export const resolveBossRewardMaterial = getReaverbotBossRewardMaterial;
+
 export function createBossExpeditionSpec({
   bossProfileId = DEFAULT_BOSS_PROFILE_ID,
   seed = 'boss-hunt',
@@ -257,12 +317,14 @@ export function createBossExpeditionSpec({
     seed: resolvedSeed,
     depth: resolvedDepth,
     bossProfileId: resolvedBossProfileId,
+    encounterProgress: null,
   });
 }
 
 export function createBossDisplayName({ bossProfileId, seed, threatTier = 1 } = {}) {
   const bossProfile = getReaverbotBossProfile(bossProfileId);
   if (!bossProfile) return null;
+  if (bossProfile.displayName) return bossProfile.displayName;
   const rng = new SeededRandom(`${seed}:${bossProfile.id}:display-name`);
   const prefixes = ['OM', 'RA', 'UR', 'VA', 'ZA', 'TO', 'KA', 'MU'];
   const suffixes = ['RAK', 'GAR', 'ORA', 'VAN', 'ZUN', 'KIR', 'XEL', 'TUM'];
@@ -335,6 +397,7 @@ export function generateReaverbotBossGenome({
   const bossRng = new SeededRandom(`${seed}:${bossProfile.id}:boss`);
   const variant = bossRng.pick(bossProfile.generation.variants);
   const featuredMaterial = getReaverbotBossFeaturedMaterial(bossProfile);
+  const rewardMaterial = getReaverbotBossRewardMaterial(bossProfile);
   if (!variant || !featuredMaterial) {
     throw new Error(`Incomplete Reaverbot boss profile: ${bossProfile.id}`);
   }
@@ -343,7 +406,7 @@ export function generateReaverbotBossGenome({
     ...context,
     seed: `${seed}:${bossProfile.id}:genome`,
     threatTier,
-    intent: 'ranged',
+    intent: bossProfile.generation.intent ?? 'ranged',
     archetypeId: bossProfile.generation.archetypeId,
     bodyPlanId: variant.bodyPlanId,
     weaponId: bossProfile.generation.weaponId,
@@ -380,7 +443,7 @@ export function generateReaverbotBossGenome({
     label: `${bossProfile.title} Signature Assembly`,
     lockable: true,
     source: { ...bossProfile.featured },
-    materialId: featuredMaterial.id,
+    materialId: rewardMaterial?.id ?? featuredMaterial.id,
     integrity: round(maxHealth * bossProfile.combat.signatureIntegrityHealthScale),
     maxIntegrity: round(maxHealth * bossProfile.combat.signatureIntegrityHealthScale),
     damageMultiplier: bossProfile.combat.signatureDirectDamageMultiplier,
@@ -404,6 +467,9 @@ export function generateReaverbotBossGenome({
     phaseTwoMoves: [...bossProfile.combat.phaseTwo],
     overloadWeakening: bossProfile.combat.overloadWeakening,
     arena: { ...bossProfile.arena },
+    environmentId: bossProfile.environmentId,
+    encounterControllerId: bossProfile.encounterControllerId,
+    artStrategy: bossProfile.artStrategy,
     limits: { ...bossProfile.combat.limits },
     bossSafeOverload: Boolean(bossProfile.generation.bossSafeOverload),
   };

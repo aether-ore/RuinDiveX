@@ -370,6 +370,7 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
       powerfulKnockback: true,
       knockbackDirection: new Vector3(0, 0, 1),
     });
+    const directPowerReactionTier = player.lastDamageResult?.resolvedReactionTier ?? 0;
 
     const states = [];
     const animationStates = [];
@@ -510,10 +511,51 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
     player.root.position.copy(start);
     player.takeDamage(1, source, { attackKind: 'melee' });
     const lightHitStartedPowerKnockback = player.isPowerKnockbackActive();
+    player.update(1 / 60, new Set(), movementOptions);
+    const lightSpine = player.externalRig.joints.get('spine');
+    const lightSpineRest = player.externalRig.restLocalQuaternions.get(lightSpine);
+    const lightReactionPose = {
+      tier: player.externalRig.root.userData.standingHitReactionTier,
+      progress: player.externalRig.root.userData.standingHitReactionProgress,
+      spineAngle: lightSpine?.quaternion.angleTo(lightSpineRest) ?? 0,
+      state: player.animation.state,
+    };
+
+    player.animation.hurtTimer = 0;
+    player.animation.hurtDuration = 0;
+    player.animation.hurtReactionTier = 0;
+    player.movementLockTimer = 0;
+    player.root.position.copy(start);
+    player.velocity.set(0, 0, 0);
+    player.takeIncomingHit({
+      amount: 1,
+      source,
+      reactionTier: 2,
+      knockbackDirection: new Vector3(0, 0, 1),
+    });
+    player.update(1 / 60, new Set(), movementOptions);
+    const bracedSpine = player.externalRig.joints.get('spine');
+    const bracedSpineRest = player.externalRig.restLocalQuaternions.get(bracedSpine);
+    const bracedReactionPose = {
+      tier: player.externalRig.root.userData.standingHitReactionTier,
+      progress: player.externalRig.root.userData.standingHitReactionProgress,
+      spineAngle: bracedSpine?.quaternion.angleTo(bracedSpineRest) ?? 0,
+      state: player.animation.state,
+      firstFrameTravel: player.root.position.distanceTo(start),
+    };
+    for (let frame = 0; frame < 11; frame += 1) {
+      player.update(1 / 60, new Set(), movementOptions);
+    }
+    bracedReactionPose.activeAfterLightWindow = player.animation.hurtTimer > 0;
+    bracedReactionPose.totalTravel = player.root.position.distanceTo(start);
 
     player.powerKnockbackState = null;
     player.animation.externalControlLocked = false;
     player.animation.hurtTimer = 0;
+    player.animation.hurtDuration = 0;
+    player.animation.hurtReactionTier = 0;
+    player.movementLockTimer = 0;
+    player.velocity.set(0, 0, 0);
     player.root.position.copy(start);
     player.health = player.stats.maxHealth;
     const pouncer = window.spawnReaverbot({
@@ -525,6 +567,7 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
     pouncer._tryContactHit(game, 1);
     const pounceWiring = {
       attackKind: pouncer.genome.modules.weapon.attackKind,
+      reactionTier: player.lastDamageResult?.resolvedReactionTier ?? 0,
       state: player.powerKnockbackState,
     };
     pouncer.root.removeFromParent();
@@ -541,6 +584,7 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
       triggerMines: false,
     });
     const explosionWiringState = player.powerKnockbackState;
+    const explosionReactionTier = player.lastDamageResult?.resolvedReactionTier ?? 0;
     player.powerKnockbackState = null;
     player.animation.externalControlLocked = false;
 
@@ -571,15 +615,22 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
 
     return {
       knockbackSummary,
+      reactionTierReduction: player.gearEffects?.reactionTierReduction ?? 0,
+      directPowerReactionTier,
       lightHitStartedPowerKnockback,
+      lightReactionPose,
+      bracedReactionPose,
       pounceWiring,
       explosionWiringState,
+      explosionReactionTier,
       pastResolution: { mode: pastResolution?.mode, x: pastResolution?.position.x },
       beforeResolution: { mode: beforeResolution?.mode, x: beforeResolution?.position.x },
     };
   });
 
   expect(result.knockbackSummary.dealt).toBeGreaterThan(0);
+  expect(result.reactionTierReduction).toBe(0);
+  expect(result.directPowerReactionTier).toBe(3);
   expect(result.knockbackSummary.states).toEqual([
     'KnockbackRising',
     'AerialKnockbackFalling',
@@ -617,11 +668,27 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
   );
   expect(result.knockbackSummary.steepestContactDescentCameraLookY).toBeLessThan(-0.1);
   expect(result.lightHitStartedPowerKnockback).toBe(false);
+  expect(result.lightReactionPose).toMatchObject({ tier: 1, state: 'hurt' });
+  expect(result.lightReactionPose.progress).toBeGreaterThan(0);
+  expect(result.lightReactionPose.spineAngle).toBeGreaterThan(0.01);
+  expect(result.bracedReactionPose).toMatchObject({
+    tier: 2,
+    state: 'hurt',
+    activeAfterLightWindow: true,
+  });
+  expect(result.bracedReactionPose.progress).toBeGreaterThan(0);
+  expect(result.bracedReactionPose.spineAngle).toBeGreaterThan(0.02);
+  expect(result.bracedReactionPose.firstFrameTravel).toBeGreaterThan(0.05);
+  expect(result.bracedReactionPose.totalTravel).toBeGreaterThan(
+    result.bracedReactionPose.firstFrameTravel,
+  );
   expect(result.pounceWiring).toEqual({
     attackKind: 'pounce',
+    reactionTier: 3,
     state: 'KnockbackRising',
   });
   expect(result.explosionWiringState).toBe('KnockbackRising');
+  expect(result.explosionReactionTier).toBe(3);
   expect(result.pastResolution.mode).toBe('pastObstacle');
   expect(result.pastResolution.x).toBeGreaterThan(1);
   expect(result.beforeResolution.mode).toBe('beforeObstacle');

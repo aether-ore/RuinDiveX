@@ -6,6 +6,11 @@ import {
   disposeVisualTree,
   loadAuthoredRubyOpticOracleVisual,
 } from './AuthoredRubyOpticOracle.js';
+import {
+  animateAuthoredAscensionEngineVisual,
+  createAuthoredAscensionEngineVisual,
+} from './AuthoredAscensionEngine.js';
+import { AscensionEngineEncounter } from './bosses/AscensionEngineEncounter.js';
 import { RubyOpticOracleEncounter } from './bosses/RubyOpticOracleEncounter.js';
 
 export { REAVERBOT_BOSS_LIMITS } from './ReaverbotBossCatalog.js';
@@ -261,10 +266,36 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       : null;
     this.specialEncounter = this.bossProfileId === 'rubyOpticOracle'
       ? new RubyOpticOracleEncounter(this)
-      : null;
+      : this.bossProfileId === 'ascensionEngine'
+        ? new AscensionEngineEncounter(this)
+        : null;
     if (this.specialEncounter) this.signatureVisual.group.visible = false;
-    this.authoredVisualState = this.bossProfileId === 'rubyOpticOracle' ? 'loading' : 'notApplicable';
+    this.authoredVisualState = this.bossProfileId === 'rubyOpticOracle'
+      ? 'loading'
+      : this.bossProfileId === 'ascensionEngine'
+        ? 'installing'
+        : 'notApplicable';
     if (this.bossProfileId === 'rubyOpticOracle') this._loadPreferredAuthoredVisual();
+    if (this.bossProfileId === 'ascensionEngine') this._installAuthoredAscensionVisual();
+  }
+
+  _installAuthoredAscensionVisual() {
+    const fallbackVisual = this.visual;
+    try {
+      const authoredVisual = createAuthoredAscensionEngineVisual(this);
+      fallbackVisual.root.removeFromParent();
+      this.visual = authoredVisual;
+      this.root.add(authoredVisual.root);
+      this.authoredVisualState = 'active';
+      this.root.userData.authoredBossModel = 'ascensionEngine';
+      this.root.userData.authoredBossFallbackActive = false;
+      this._captureMaterialStates();
+      disposeVisualTree(fallbackVisual.root);
+    } catch (error) {
+      this.authoredVisualState = 'fallback';
+      this.root.userData.authoredBossFallbackActive = true;
+      console.warn('Could not build authored Ascension Engine; using procedural fallback.', error);
+    }
   }
 
   async _loadPreferredAuthoredVisual() {
@@ -291,11 +322,20 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   _animateVisual(dt) {
-    const rubyVisualState = this.specialEncounter?.getVisualState?.() ?? null;
+    const specialVisualState = this.specialEncounter?.getVisualState?.() ?? null;
+    if (this.bossProfileId === 'ascensionEngine' && this.authoredVisualState === 'active') {
+      animateAuthoredAscensionEngineVisual(this.visual, {
+        time: this.brain.time,
+        dt,
+        ...(specialVisualState ?? {}),
+      });
+      this._applyRushAttackWarning(dt);
+      return;
+    }
     if (this.authoredVisualState !== 'active') {
       super._animateVisual(dt);
-      if (rubyVisualState && this.visual?.root) {
-        this.visual.root.position.y = rubyVisualState.visualOffsetY;
+      if (specialVisualState?.visualOffsetY != null && this.visual?.root) {
+        this.visual.root.position.y = specialVisualState.visualOffsetY;
       }
       return;
     }
@@ -305,18 +345,18 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       dt,
       moving: this.brain.moving,
       speedRatio: this.brain.speedRatio,
-      state: rubyVisualState?.charging ? 'telegraph' : this.brain.state,
+      state: specialVisualState?.charging ? 'telegraph' : this.brain.state,
       stateProgress: Math.max(0, Math.min(1, this.brain.stateTime / Math.max(0.01, duration))),
-      defenseActive: rubyVisualState
-        ? rubyVisualState.shuttersClosed
+      defenseActive: specialVisualState
+        ? specialVisualState.shuttersClosed
         : this.brain.defenseActive,
-      weakPointExposed: rubyVisualState?.weakPointExposed ?? this.brain.weakPointExposed,
-      ascensionActive: rubyVisualState?.ascensionActive ?? false,
-      ascensionProgress: rubyVisualState?.ascensionProgress ?? 0,
-      pupilIntensity: rubyVisualState?.pupilIntensity ?? 0,
+      weakPointExposed: specialVisualState?.weakPointExposed ?? this.brain.weakPointExposed,
+      ascensionActive: specialVisualState?.ascensionActive ?? false,
+      ascensionProgress: specialVisualState?.ascensionProgress ?? 0,
+      pupilIntensity: specialVisualState?.pupilIntensity ?? 0,
     });
-    if (rubyVisualState && this.visual?.root) {
-      this.visual.root.position.y = rubyVisualState.visualOffsetY;
+    if (specialVisualState?.visualOffsetY != null && this.visual?.root) {
+      this.visual.root.position.y = specialVisualState.visualOffsetY;
     }
     this._applyRushAttackWarning(dt);
   }
@@ -338,6 +378,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         return !owner.dead
           && !owner.signaturePartOverloaded
           && !owner._usesDetonatorShieldMechanic()
+          && !owner.specialEncounter?.ownsSignatureTarget?.()
           && !owner.specialEncounter?.isChannelCoreActive?.();
       },
       getWorldPosition(out) { return owner._getSignatureWorldPosition(out); },
@@ -354,9 +395,13 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   getCombatTargets() {
-    const targets = super.getCombatTargets();
+    const ownsSpecialTargets = this.specialEncounter?.ownsSignatureTarget?.() === true;
+    const targets = ownsSpecialTargets
+      ? super.getCombatTargets().filter((target) => target !== this.weakPointTarget)
+      : super.getCombatTargets();
     if (!this._usesDetonatorShieldMechanic()
       && !this.signaturePartOverloaded
+      && !this.specialEncounter?.ownsSignatureTarget?.()
       && !this.dead) {
       targets.unshift(this.signatureTarget);
     }
@@ -368,11 +413,19 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     return targets;
   }
 
+  getLockOnTargets() {
+    if (this.specialEncounter?.ownsLockOnTargets?.() === true) {
+      return this.specialEncounter.getCombatTargets();
+    }
+    return this.getCombatTargets();
+  }
+
   resolveProjectileHit(position, projectileRadius = 0.1) {
     const specialHit = this.specialEncounter?.resolveProjectileHit(position, projectileRadius);
     if (specialHit) return specialHit;
     const arenaNode = this._resolveArenaNodePointHit(position, projectileRadius);
     if (arenaNode) return arenaNode;
+    if (this.specialEncounter?.ownsSignatureTarget?.()) return null;
     const signature = this._resolveSignaturePointHit(position, projectileRadius);
     return signature ?? super.resolveProjectileHit(position, projectileRadius);
   }
@@ -396,6 +449,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         };
       }
     }
+    if (this.specialEncounter?.ownsSignatureTarget?.()) return null;
     if (!this._usesDetonatorShieldMechanic()
       && !this.signaturePartOverloaded
       && !this.dead) {
@@ -438,6 +492,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         };
       }
     }
+    if (this.specialEncounter?.ownsSignatureTarget?.()) return null;
     if (!this._usesDetonatorShieldMechanic()
       && !this.signaturePartOverloaded
       && !this.dead) {
@@ -493,7 +548,13 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   }
 
   modifyDamageTaken(amount, meta = {}) {
-    if (this.bossState?.transitionRemaining > 0 || this.bossState?.interruptRemaining > 0) {
+    const specialAdjusted = this.specialEncounter?.adjustDamageTaken?.(amount, meta);
+    if (specialAdjusted != null) {
+      amount = Math.max(0, Number(specialAdjusted) || 0);
+      if (amount <= 0) return 0;
+    }
+    if (!meta.ascensionSegmentDamage
+      && (this.bossState?.transitionRemaining > 0 || this.bossState?.interruptRemaining > 0)) {
       meta.bossInvulnerable = true;
       return 0;
     }
@@ -570,7 +631,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       adjusted *= 1.65;
       meta.rubyOracleStaggerMultiplier = 1.65;
     }
-    if (this.bossState?.phase === 1) {
+    if (this.bossState?.phase === 1 && !this.specialEncounter?.ownsPhaseProgression?.()) {
       const armor = Math.max(
         0,
         this.stats.armor - this._getArmorReduction() - (meta.armorPierce ?? 0),
@@ -597,7 +658,11 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       }
       return 0;
     }
-    if (this.specialEncounter?.handleLensImpact(amount, meta, this._runtimeGame)) {
+    if (this.specialEncounter?.handlePartImpact?.(amount, meta, this._runtimeGame)) {
+      meta.damageNullified = true;
+      return 0;
+    }
+    if (this.specialEncounter?.handleLensImpact?.(amount, meta, this._runtimeGame)) {
       meta.bossArenaNodeHit = true;
       meta.damageNullified = true;
       return 0;
@@ -622,7 +687,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       return 0;
     }
     const dealt = super.takeDamage(amount, meta);
-    this.specialEncounter?.recordChannelDamage(dealt, meta, this._runtimeGame);
+    this.specialEncounter?.recordChannelDamage?.(dealt, meta, this._runtimeGame);
     const rubyChannelCoreHit = Boolean(
       this.specialEncounter
       && meta.hitPartId === this.specialEncounter.channelCorePartId,
@@ -639,7 +704,8 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       this.signatureIntegrity = Math.max(0, this.signatureIntegrity - dealt);
       if (this.signatureIntegrity <= 0) this._overloadSignaturePart(meta);
     }
-    if (!this.dead && this.bossState.phase === 1
+    if (!this.dead && !this.specialEncounter?.ownsPhaseProgression?.()
+      && this.bossState.phase === 1
       && this.health <= this.stats.maxHealth * PHASE_TWO_THRESHOLD + 1e-6) {
       this._beginPhaseTwo();
     }
@@ -673,7 +739,8 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
 
   shouldIgnoreGroundConstraint() {
     return super.shouldIgnoreGroundConstraint()
-      || this.specialEncounter?.isAscensionActive?.() === true;
+      || this.specialEncounter?.isAscensionActive?.() === true
+      || this.specialEncounter?.shouldIgnoreGroundConstraint?.() === true;
   }
 
   tryClaimExternalControl() { return false; }
@@ -1021,6 +1088,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
     const state = this.bossState;
     state.elapsed += dt;
     if (game.player.dead) {
+      if (this.specialEncounter?.handlePlayerDefeat?.(game)) return;
       this.brain.moving = false;
       this.knockback.set(0, 0, 0);
       this._cleanupBossArena(game, 'defeat');
@@ -1060,6 +1128,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       }
       this.specialEncounter.update(dt, game);
       if (game.player.dead) {
+        if (this.specialEncounter.handlePlayerDefeat?.(game)) return;
         this.brain.moving = false;
         this.knockback.set(0, 0, 0);
         this._cleanupBossArena(game, 'defeat');
@@ -1526,7 +1595,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
 
   _startSignaturePattern(game) {
     if (this.specialEncounter) {
-      this.specialEncounter.debugStartAttack('directBeam', game);
+      this.specialEncounter.debugStartAttack?.('directBeam', game);
       return;
     }
     const state = this.bossState;
@@ -1838,7 +1907,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
 
   getBossHudState() {
     const reliquary = this.bossState.reliquary;
-    const rubyHud = this.specialEncounter?.getHudState?.() ?? null;
+    const specialHud = this.specialEncounter?.getHudState?.() ?? null;
     return {
       profileId: this.bossProfileId,
       title: this.bossProfile?.title ?? this.genome.name,
@@ -1860,7 +1929,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       shieldHits: reliquary?.shieldHits ?? 0,
       shieldHitsMax: reliquary?.shieldHitsMax ?? 0,
       shieldStunRemaining: reliquary?.shieldStunRemaining ?? 0,
-      signatureStatus: rubyHud?.signatureStatus ?? (reliquary
+      signatureStatus: specialHud?.signatureStatus ?? (reliquary
         ? this.bossState.phase === 1
           ? 'SHIELD DORMANT'
           : reliquary.shieldActive
@@ -1869,7 +1938,7 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
             ? 'SHIELD BROKEN — STUNNED'
             : 'SHIELD REFORMING'
         : null),
-      ...(rubyHud ?? {}),
+      ...(specialHud ?? {}),
     };
   }
 

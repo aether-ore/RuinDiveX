@@ -11,6 +11,8 @@ The equipment foundation now uses robotic part categories instead of fantasy RPG
 - Mobility Gear: `Servo Boots`, `Jet Skates`, and `Magnetic Soles`.
 - Utility Salvage: `Reactor Chip`, `Capacitor Module`, `Targeting Chip`, `Energy Cartridge`, `Adapter Plug`, and `Refractor Core`.
 
+New campaigns start with the Reinforced Armor Frame equipped and the Helmet slot empty. A one-time loadout migration retires the former starter Gyro Stabilizer Helmet from existing saves; a later explicit Helmet unlock remains durable.
+
 Primary weapon stats follow the intended buster-part language:
 
 - `Attack`: single hit, shot, beam pulse, slash, or explosion impact.
@@ -50,7 +52,7 @@ The Lab's partial local save is stored under `ruinDigger.busterLab.v1`. It conta
 - `I` opens the Garage Loadout screen.
 - Arm weapon salvage in the Garage has `1`-`4` loadout buttons for assigning it directly to a hotbar slot.
 
-The current combat pass uses manual attacks, a four-slot arm hotbar, per-arm Energy/Output, fixed arm profiles, Guard Projector guarding/parrying, Barrier absorption, robotic status effects, elite armor weaknesses, and workshop-only Arms/Gear assignment.
+The current combat pass uses manual attacks, a four-slot arm hotbar, per-arm Energy/Output, fixed arm profiles, Guard Projector guarding/parrying, Barrier absorption, robotic status effects, elite armor weaknesses, and workshop-only Arms/Gear assignment. Incoming reactions have three authored levels: a short flinch, a longer braced shove, and a full airborne knockback/down/get-up sequence. Charges, player-damaging explosions, jaw snaps, and pounces use the third level.
 
 Implemented arm behavior examples include arcing explosive `Grenade Arm` shots, piercing `Rail Buster Arm` rounds, close-range `Scatter Buster Arm` spread fire, and `Homing Seeker Arm` rounds that curve toward nearby targets.
 
@@ -73,7 +75,7 @@ The ten behavior archetypes are:
 - `Ruin Duelist`: sidesteps at close range and alternates guarded positioning with committed melee, piston, or beam attacks.
 - `Rotor Hunter`: advances behind a rotating plate while its shared blade/flail assembly spins, alternating the guarded face with an opposite counterweight weak point.
 
-Close-range weapon modules now carry a deliberately heavier combat contract. Claw carriers mount a Reaverbot-sized two-link hydraulic arm, extend it into MegaMan's lane for three horizontal or vertical swipes, drag their chassis forward under its weight, and vault low obstacles along collision-checked arcs. Launch Leg pouncers balance on one enormous three-link kangaroo leg, compress its exposed knee shock stack, ignite paired high-hip rockets, and land on three long claws with a wider impact wave and substantially higher jump arc. Jaw carriers are quadruped-only armored hunters that circle, strafe, hold a two-piece bear-trap mouth open, and hop through three red-blinking shockwave bites. All melee-tagged generations receive substantial armor and extra health, while Rotor Hunter blades deal contact damage throughout positioning, telegraph, attack, and recovery rather than only during a charge.
+Close-range weapon modules now carry a deliberately heavier combat contract. Claw carriers mount a Reaverbot-sized two-link hydraulic arm, extend it into MegaMan's lane for three horizontal or vertical swipes, drag their chassis forward under its weight, and vault low obstacles along collision-checked arcs. Launch Leg pouncers balance on one enormous three-link kangaroo leg, compress its exposed knee shock stack, ignite paired high-hip rockets, and land on three long claws with a wider impact wave and substantially higher jump arc. Jaw carriers are quadruped-only armored hunters that circle, strafe, hold a two-piece bear-trap mouth open, and hop through three red-blinking shockwave bites. Their full hinge-to-muzzle volume deals contact damage, and each snap wave tests MegaMan's vertical collision capsule rather than only his ground-level root point. Approaching attackers stop at the outer edge of their valid attack envelope while cooldown or attack-director ownership resolves, so authored telegraphs and attacks take priority over incidental body contact. All melee-tagged generations receive substantial armor and extra health, while Rotor Hunter blades deal contact damage throughout positioning, telegraph, attack, and recovery rather than only during a charge.
 
 Air navigation is fully three-dimensional. Flyers ignore floor walkability, ledges, and railings, pursue along the most direct clear route, and climb over or route around actual walls, closed doors, platforms, and solid fixtures. Tractor Controllers use the same clearance system for both their own chassis and the full generated silhouette of their captive. A successful player hit briefly stalls their evasive flight; hitting one during an active abduction immediately drops and heavily damages both machines, leaves the Controller helpless on the floor, then lets a survivor relaunch. Blocked lift, carry, or throw paths are rejected before geometry can pass through the dungeon.
 
@@ -85,6 +87,12 @@ Every generated weak point is now selected from a strict defense-specific pairin
 
 Procedural Reaverbots carry a hidden, module-derived salvage profile covering behavior, chassis, red eye, weapon, defense, and weak point; native charge attackers add a seventh rocket-boost entry matching their visible propulsion rig. Salvage found in the field is always a generic unidentified-scrap pickup, represented by steel bolt, screw, and gear silhouettes so it remains distinct from glowing refractor crystals. The player Inventory exposes only the aggregate `unidentifiedScrap` count. Roll identifies the entire pending batch at her workshop and owns the resulting stockpile: most recovered units become bulk `identifiedScrap`, while a rare unit becomes a named part drawn only from the source Reaverbot's profile. That preserves readable hunting goals—Spring Hoppers can reveal Tempered Jump Springs and Pulse Cannon users can reveal Revolving Pulse Barrels—without revealing named parts before Roll examines them. Salvage is not Zenny, Research Data, or quest-board currency. The complete source tables, identification rules, and future recipe examples are in [the Reaverbot Salvage Design Guide](docs/REAVERBOT_SALVAGE_DESIGN.md).
 
+## Boss Hunt: VA-RUK 09
+
+`VA-RUK 09 · The Ascension Engine` is the dedicated Launch Leg Boss Hunt. Selecting it preserves the normal start zone, expedition camp, Roll, Support Car, garage, workshop, practice platforms, Key Seeker, and Ruin Lift, while replacing only the ordinary procedural ruin interior with the authored Vertical Transit Reliquary. No generic keycard, trap, conveyor, side-room, or ordinary interior encounter content is generated for that hunt. The Reliquary is a 64-unit-wide, 82-unit-tall dungeon-scale tower with three extended traversal chambers, a 68.5-unit ascent, and a 54-unit-diameter summit trial. Only sequence zero starts enabled; each registered boss impact activates its route surface and unlocks exactly the next launch vent, counterweight, bridge, or momentum platform, and the boss waits for MegaMan to reach that marked landing before advancing the route. Reaching each station exposes one of four Compression Seals. The first three seals create durable exact-order checkpoints, while the fourth seal and Perfected Compression Greave reward decision commit atomically before the boss dies. The summit vent uses an 18-unit vertical impulse and 8-unit horizontal guidance through the normal jump integrator, retaining air control for the radial landing.
+
+Roll uses the Greave with a Tempered Jump Spring, a Stabilized Belly Core, and 12 Identified Scrap to fabricate Jump Springs. Equipping them reveals four otherwise hidden mastery ledges in the Reliquary—one per segment—whose 3.82-unit rises bypass the original boss-impact chains and are deliberately outside ordinary jump reach. The full encounter, persistence, art, and QA contract is documented in [the Ascension Engine implementation notes](docs/ASCENSION_ENGINE_IMPLEMENTATION_NOTES.md).
+
 ## Expedition Loop
 
 The current prototype starts in a safe hub/camp approach, then pushes the player into a randomized ruin path:
@@ -95,7 +103,7 @@ The current prototype starts in a safe hub/camp approach, then pushes the player
 - Secure the Large Refractor in the shrine chamber.
 - Use the extraction pad to return to camp, or pay Zenny at camp to reset the current ruin layout.
 
-The Garage includes an Expedition Log that tracks the Large Refractor objective, required keycard route, and ruin override console. Roll's workshop separately presents the unidentified-scrap batch and her identified-scrap and named-part stockpile.
+The Garage includes an Expedition Log that tracks the Large Refractor objective, required keycard route, and ruin override console. Its loadout uses the full panel instead of reserving a blank field-resource column; the exceptional Roll migration-recovery list appears only when an actionable item is waiting. Roll's workshop separately presents the unidentified-scrap batch and her identified-scrap and named-part stockpile.
 
 ## Procedural Vertical Factory Rooms
 

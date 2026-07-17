@@ -893,6 +893,7 @@ export class SkeletalModelRig {
     attackProgress = 0,
     actionProgress = null,
     hurtProgress = 0,
+    hurtReactionTier = 0,
     damageHitLocal = null,
     projectileAiming = false,
     backpedaling = false,
@@ -922,6 +923,7 @@ export class SkeletalModelRig {
     this.time += dt;
     const rigState = [
       state,
+      `hurtTier:${hurtReactionTier}`,
       attackKind ?? '',
       moving ? 'moving' : 'still',
       projectileAiming ? 'aiming' : 'freeAim',
@@ -1040,6 +1042,13 @@ export class SkeletalModelRig {
       jumpSlashBladeTransformHold,
     );
     this._applyBusterAimPose(busterAimActive, state, moving, aimTargetWorld);
+    this._applyGeneratedStandingHitPose(
+      state,
+      hurtProgress,
+      damageHitLocal,
+      hurtReactionTier,
+      dt,
+    );
     this._applyGeneratedPowerKnockbackPose(state, actionProgress ?? 0, dt);
     this._applyLedgeRightArmPose(state, useRightArmForLedge);
     this._applyJumpSlashAerialPose(
@@ -3201,6 +3210,51 @@ export class SkeletalModelRig {
     apply('rightKnee', THREE.MathUtils.lerp(0.34 + 0.3 * flight, 0.04, flat));
     apply('leftAnkle', THREE.MathUtils.lerp(-0.08 * flight, 0, flat));
     apply('rightAnkle', THREE.MathUtils.lerp(-0.06 * flight, 0, flat));
+  }
+
+  _applyGeneratedStandingHitPose(
+    state,
+    progress = 0,
+    hitLocal = null,
+    reactionTier = 1,
+    dt = 0,
+  ) {
+    if (state !== 'hurt') {
+      this.root.userData.standingHitReactionTier = 0;
+      return;
+    }
+
+    const p = THREE.MathUtils.clamp(progress, 0, 1);
+    const brace = reactionTier >= 2 ? 1 : 0;
+    const settle = 1 - THREE.MathUtils.smoothstep(p, 0.42, 1);
+    const impact = Math.sin(p * Math.PI);
+    const side = THREE.MathUtils.clamp(Number(hitLocal?.x) || 0, -1, 1);
+    const forward = THREE.MathUtils.clamp(Number(hitLocal?.z) || 1, -1, 1);
+    const pitch = (-0.12 - brace * 0.18) * settle * Math.max(0.4, forward)
+      + (0.1 + brace * 0.1) * settle * Math.max(0, -forward);
+    const roll = (0.14 + brace * 0.1) * impact * (Math.abs(side) > 0.08 ? -side : 1);
+    const yaw = (0.08 + brace * 0.05) * impact * -side;
+    const alpha = THREE.MathUtils.clamp(this.stateTime * 18 + dt * 24, 0, 1);
+    const apply = (jointName, x, y = 0, z = 0) => {
+      const joint = this.joints.get(jointName);
+      if (!joint) return;
+      tempEuler.set(x, y, z, joint.rotation.order);
+      this._applyBoneRotation(joint, tempEuler, alpha);
+    };
+
+    apply('hips', pitch * 0.55, yaw * 0.45, roll * 0.45);
+    apply('spine', pitch, yaw, roll);
+    apply('neck', pitch * 1.08, yaw * 0.45, roll * 0.62);
+    apply('leftShoulder', -0.18 - brace * 0.15, -0.04 * side, 0.2 + brace * 0.15);
+    apply('rightShoulder', -0.18 - brace * 0.15, -0.04 * side, -0.2 - brace * 0.15);
+    apply('leftElbow', 0.12 + brace * 0.26);
+    apply('rightElbow', 0.12 + brace * 0.26);
+    apply('leftHip', 0.12 + brace * 0.18, 0, 0.06 + brace * 0.05);
+    apply('rightHip', 0.12 + brace * 0.18, 0, -0.06 - brace * 0.05);
+    apply('leftKnee', 0.12 + brace * 0.3);
+    apply('rightKnee', 0.12 + brace * 0.3);
+    this.root.userData.standingHitReactionTier = reactionTier;
+    this.root.userData.standingHitReactionProgress = p;
   }
 
   _isPistolClipKey(key) {

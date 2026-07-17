@@ -26,7 +26,17 @@ test('boss benchmark reports every profile at depths 1, 5, and 10', () => {
         } else {
           assert.equal(weapon.routeTtk, null, `${row.bossProfileId}/${planId} unresolved route TTK`);
         }
-        if (planId === 'directExplosion') {
+        if (row.bossProfileId === 'ascensionEngine') {
+          if (planId === 'directExplosion') {
+            assert.equal(weapon.route, 'unsupported');
+            assert.equal(weapon.status, 'unresolved');
+            assert.equal(weapon.routeTtk, null);
+          } else {
+            assert.equal(weapon.route, 'seal-sequence');
+            assert.equal(weapon.signatureRouteTtk, weapon.routeTtk);
+            assert.equal(weapon.bodyRouteTtk, null);
+          }
+        } else if (planId === 'directExplosion') {
           assert.equal(weapon.route, 'body-only');
           assert.equal(weapon.signatureRouteTtk, null);
           assert.equal(weapon.bodyRouteTtk, weapon.routeTtk);

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BUSTER_RECIPE_LIST } from '../src/buster/BusterRecipeCatalog.js';
+import { getEquipmentRecipesForPart } from '../src/equipment/EquipmentRecipeCatalog.js';
 import {
   BOSS_EXPEDITION_SCHEMA_VERSION,
   createBossDisplayName,
@@ -10,6 +11,7 @@ import {
   generateReaverbotBossGenome,
   getReaverbotBossFeaturedMaterial,
   getReaverbotBossProfile,
+  getReaverbotBossRewardMaterial,
   normalizeBossProfileId,
   REAVERBOT_BOSS_PROFILES,
   REAVERBOT_BOSS_PROFILE_IDS,
@@ -18,6 +20,7 @@ import { generateReaverbotGenome, validateReaverbotGenome } from '../src/reaverb
 import { REAVERBOT_SALVAGE_SOURCE_MAPS } from '../src/reaverbots/ReaverbotSalvageCatalog.js';
 
 const EXPECTED_PROFILE_IDS = [
+  'ascensionEngine',
   'pursuitRegent',
   'rubyOpticOracle',
   'ballisticsVizier',
@@ -30,8 +33,8 @@ const EXPECTED_PROFILE_IDS = [
 
 test('the boss catalog covers every unique named material in active Custom Buster recipes', () => {
   assert.deepEqual(REAVERBOT_BOSS_PROFILE_IDS, EXPECTED_PROFILE_IDS);
-  assert.equal(REAVERBOT_BOSS_PROFILES.length, 8);
-  assert.equal(new Set(REAVERBOT_BOSS_PROFILE_IDS).size, 8);
+  assert.equal(REAVERBOT_BOSS_PROFILES.length, 9);
+  assert.equal(new Set(REAVERBOT_BOSS_PROFILE_IDS).size, 9);
 
   const recipePartIds = new Set(BUSTER_RECIPE_LIST.flatMap((recipe) => recipe.requiredPartIds));
   const bossPartIds = new Set();
@@ -47,7 +50,12 @@ test('the boss catalog covers every unique named material in active Custom Buste
     assert.deepEqual(material.source, bossProfile.featured);
     bossPartIds.add(material.id);
   }
-  assert.deepEqual([...bossPartIds].sort(), [...recipePartIds].sort());
+  for (const partId of recipePartIds) {
+    assert.equal(bossPartIds.has(partId), true, `${partId} has a matching source boss`);
+  }
+  const ascensionReward = getReaverbotBossRewardMaterial('ascensionEngine');
+  assert.equal(ascensionReward?.id, 'perfectedCompressionGreave');
+  assert.deepEqual(getEquipmentRecipesForPart(ascensionReward.id).map((recipe) => recipe.id), ['jumpSprings']);
 });
 
 test('boss profile lookup and expedition descriptors are deterministic and quarantine unknown ids', () => {
@@ -77,7 +85,7 @@ test('boss profile lookup and expedition descriptors are deterministic and quara
   assert.equal(fallback.depth, 10);
 });
 
-test('all eight constrained boss genomes are deterministic, valid, and pin their advertised source aspect', () => {
+test('all constrained boss genomes are deterministic, valid, and pin their advertised source aspect', () => {
   for (const bossProfile of REAVERBOT_BOSS_PROFILES) {
     for (const seed of ['boss-seed:a', 'boss-seed:b', 'boss-seed:c']) {
       const options = { bossProfileId: bossProfile.id, seed, threatTier: 4 };
@@ -89,7 +97,7 @@ test('all eight constrained boss genomes are deterministic, valid, and pin their
       assert.equal(genome.context.isBoss, true);
       assert.equal(genome.context.elite, false);
       assert.equal(genome.boss.phase, 1);
-      assert.equal(genome.boss.phaseThreshold, 0.5);
+      assert.equal(genome.boss.phaseThreshold, bossProfile.combat.phaseThreshold);
       assert.equal(genome.boss.phaseTransitionSeconds, 1.1);
       assert.equal(genome.boss.staggerScale, 0.35);
       assert.equal(genome.boss.limits.projectiles, 20);
@@ -195,4 +203,3 @@ test('display names keep a stable functional epithet and generation rejects unkn
     /Unknown Reaverbot boss profile/,
   );
 });
-

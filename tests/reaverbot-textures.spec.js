@@ -89,6 +89,7 @@ test('procedural Reaverbot modules load, share, assign, and render their authore
   const structural = await page.evaluate(async (expectedIds) => {
     const THREE = await import('three');
     const catalog = await import('/src/reaverbots/ReaverbotCatalog.js');
+    const bossCatalog = await import('/src/reaverbots/ReaverbotBossCatalog.js');
     const textureCatalog = await import('/src/reaverbots/ReaverbotTextureCatalog.js');
     const textureLibrary = await import('/src/reaverbots/ReaverbotTextureLibrary.js');
     const { generateReaverbotGenome } = await import('/src/reaverbots/ReaverbotGenerator.js');
@@ -919,6 +920,9 @@ test('procedural Reaverbot modules load, share, assign, and render their authore
       eyeProofs,
       exemptionReasons: [...exemptionReasons].sort(),
       textureAssetKeys: Object.keys(textureCatalog.REAVERBOT_TEXTURE_ASSETS).sort(),
+      bossPortraitPaths: bossCatalog.REAVERBOT_BOSS_PROFILE_IDS
+        .map((profileId) => `/assets/textures/reaverbots/bosses/${profileId}/hunt-portrait.png`)
+        .sort(),
       cacheIdentity,
       sharedMaterialCount,
       twinMaterialCounts: [twinAMaterials.size, twinBMaterials.size],
@@ -1076,10 +1080,15 @@ test('procedural Reaverbot modules load, share, assign, and render their authore
   const successfulTexturePaths = [...new Set(textureResponses
     .filter((response) => response.status === 200)
     .map((response) => new URL(response.url).pathname))].sort();
+  const successfulPortraitPaths = successfulTexturePaths
+    .filter((path) => path.endsWith('/hunt-portrait.png'));
+  const successfulSemanticTexturePaths = successfulTexturePaths
+    .filter((path) => !path.endsWith('/hunt-portrait.png'));
   const diagnosticTexturePaths = Object.values(browserTextures.diagnostics)
     .map((diagnostic) => diagnostic.assetPath)
     .sort();
-  expect(successfulTexturePaths).toEqual(diagnosticTexturePaths);
+  expect(successfulSemanticTexturePaths).toEqual(diagnosticTexturePaths);
+  expect(successfulPortraitPaths).toEqual(structural.bossPortraitPaths);
   expect(pageErrors).toEqual([]);
 
   const galleryScreenshot = await page.screenshot({ fullPage: false });

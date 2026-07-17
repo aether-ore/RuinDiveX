@@ -221,6 +221,9 @@ const LEDGE_FREE_HANG_ROOT_OUTWARD_OFFSET = 0.34;
 const LEDGE_FREE_HANG_ROOT_VERTICAL_OFFSET = 0.8;
 const HEAVY_HIT_HEALTH_FRACTION = 0.16;
 const HEAVY_HIT_MIN_DAMAGE = 18;
+const LIGHT_FLINCH_DURATION = 0.18;
+const BRACED_FLINCH_DURATION = 0.38;
+const BRACED_FLINCH_PUSH_SPEED = 7.2;
 const POWER_KNOCKBACK_UPWARD_SPEED = 5.2;
 const POWER_KNOCKBACK_HORIZONTAL_SPEED = 5.4;
 const POWER_KNOCKBACK_GRAVITY = -12.5;
@@ -465,6 +468,7 @@ export class Player {
     this._jumpFallTransitionActive = false;
     this._jumpKind = 'forwardJump';
     this._jumpGroundY = this.root.position.y;
+    this._activeTraversalMechanismLaunch = null;
     this._forwardJumpTravelProgress = 0;
     this.jumpLedgeClingResolver = null;
     this.jumpPlatformLandingResolver = null;
@@ -760,6 +764,11 @@ export class Player {
 
     if (this.isPowerKnockbackActive()) {
       this._updatePowerKnockback(dt, arenaRadius, movementOptions);
+      return;
+    }
+
+    if (this.animation.hurtTimer > 0) {
+      this._updateStandingHitReaction(dt, arenaRadius, movementOptions);
       return;
     }
 
@@ -1378,6 +1387,143 @@ export class Player {
     return true;
   }
 
+  /**
+   * Enters the normal deterministic jump integrator with an authored impulse.
+   * Unlike external ballistic motion, ordinary air control remains available;
+   * traversal machinery therefore teaches the same steering used by Jump
+   * Springs instead of carrying the player along a locked cinematic arc.
+   */
+  launchFromTraversalMechanism({
+    verticalVelocity = 13.8,
+    horizontalDirection = null,
+    horizontalSpeed = null,
+    sourceId = 'traversalMechanism',
+  } = {}) {
+    if (this.dead
+      || this.externalControl
+      || this.externalBallisticMotion
+      || this.isPowerKnockbackActive?.()
+      || this.isLedgeClinging?.()) {
+      return false;
+    }
+
+    this._prepareForExternalControl();
+    this.animation.externalControlLocked = false;
+    this.cancelJetSkateBoost?.();
+    this._jumpBufferTimer = 0;
+    this._coyoteTimer = 0;
+    this._landingRecoveryTimer = 0;
+    this._jumpAirTimer = 0;
+    this._jumpFallTransitionActive = false;
+    this._jumpLandingVisualTimer = 0;
+    this._jumpLandingVisualState = null;
+    this._jumpLandingVisualClipKey = null;
+    this.jumpStartY = this.root.position.y;
+    this._jumpGroundY = this.root.position.y;
+    this.velocity.y = Math.max(0.1, Number(verticalVelocity) || 0.1);
+    const sourceKey = String(sourceId);
+    const launchGravity = Math.max(0.0001, Math.abs(this._getJumpGravity()));
+    this._activeTraversalMechanismLaunch = {
+      sourceId: sourceKey,
+      startY: this.jumpStartY,
+      verticalVelocity: this.velocity.y,
+      ballisticReachHeight: (this.velocity.y * this.velocity.y) / (2 * launchGravity),
+    };
+
+    if (horizontalDirection && Number.isFinite(Number(horizontalSpeed))) {
+      worldForward.set(
+        Number(horizontalDirection.x) || 0,
+        0,
+        Number(horizontalDirection.z) || 0,
+      );
+      if (worldForward.lengthSq() > 0.0001) {
+        worldForward.normalize();
+        this.velocity.x = worldForward.x * Math.max(0, Number(horizontalSpeed) || 0);
+        this.velocity.z = worldForward.z * Math.max(0, Number(horizontalSpeed) || 0);
+      }
+    }
+    this.takeoffHorizontalVelocity.set(this.velocity.x, 0, this.velocity.z);
+    if (this.takeoffHorizontalVelocity.lengthSq() > 0.0025) {
+      this.jumpDirection.copy(this.takeoffHorizontalVelocity).normalize();
+    } else {
+      this.jumpDirection.copy(this.lastMoveDirection);
+    }
+    this._jumpKind = 'forwardJump';
+    this.jumpState = MML_JUMP_STATES.Rising;
+    this.animation?.setState?.('forwardJump');
+    this.root.userData.activeTraversalLaunchSourceId = sourceKey;
+    this.root.userData.lastTraversalLaunchSourceId = sourceKey;
+    this.root.userData.lastTraversalLaunchEndReason = null;
+    return true;
+  }
+
+  isTraversalMechanismLaunchActive() {
+    return Boolean(this._activeTraversalMechanismLaunch && this.isJumpAirborne());
+  }
+
+  getTraversalMechanismLaunchDiagnostics() {
+    if (!this._activeTraversalMechanismLaunch) return null;
+    return { ...this._activeTraversalMechanismLaunch };
+  }
+
+  cancelTraversalMechanismLaunch(reason = 'cancelled') {
+    if (!this._activeTraversalMechanismLaunch) return false;
+    this._activeTraversalMechanismLaunch = null;
+    this.root.userData.activeTraversalLaunchSourceId = null;
+    this.root.userData.lastTraversalLaunchEndReason = String(reason);
+    return true;
+  }
+
+  restoreTraversalCheckpoint({
+    position,
+    facing = null,
+    healthFloorRatio = 0.5,
+    restoreHealth = true,
+    refillBarrier = true,
+  } = {}) {
+    if (!position?.isVector3 && !(
+      Number.isFinite(position?.x)
+      && Number.isFinite(position?.y)
+      && Number.isFinite(position?.z)
+    )) {
+      return false;
+    }
+
+    this.clearExternalMotion('checkpoint-reset');
+    this._prepareForExternalControl();
+    this.animation.externalControlLocked = false;
+    this.dead = false;
+    this.animation.dead = false;
+    this.health = restoreHealth
+      ? Math.max(
+        1,
+        this.health,
+        this.stats.maxHealth * THREE.MathUtils.clamp(Number(healthFloorRatio) || 0, 0, 1),
+      )
+      : Math.max(1, this.health);
+    this.burnTimer = 0;
+    this.burnDamagePerSecond = 0;
+    this.slowTimer = 0;
+    this.slowMultiplier = 1;
+    this.root.position.set(position.x, position.y, position.z);
+    this._jumpGroundY = position.y;
+    this.jumpStartY = position.y;
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this.velocity.set(0, 0, 0);
+    this.takeoffHorizontalVelocity.set(0, 0, 0);
+    this.animation.setState('idle');
+    if (facing) {
+      worldForward.set(Number(facing.x) || 0, 0, Number(facing.z) || 0);
+      if (worldForward.lengthSq() > 0.0001) {
+        worldForward.normalize();
+        this.lastMoveDirection.copy(worldForward);
+        this.faceDirection(worldForward);
+      }
+    }
+    if (refillBarrier) this.refillBarrier?.();
+    return true;
+  }
+
   isDodgeRollAirborne() {
     return this.animation?.actionState === 'dodgeRoll'
       && this.animation.getActionProgress() <= DODGE_ROLL_AIRBORNE_PROGRESS;
@@ -1489,6 +1635,7 @@ export class Player {
   }
 
   _startPhysicalJump() {
+    this.cancelTraversalMechanismLaunch('ordinary-jump');
     this._jumpBufferTimer = 0;
     this._coyoteTimer = 0;
     this._landingRecoveryTimer = 0;
@@ -1670,6 +1817,7 @@ export class Player {
   }
 
   _landPhysicalJump(groundY) {
+    this.cancelTraversalMechanismLaunch('landed');
     const resolvedGroundY = Number.isFinite(groundY) ? groundY : this._jumpGroundY;
     const damping = THREE.MathUtils.clamp(
       this._getJumpSetting('landingHorizontalDamping', DEFAULT_MML_JUMP_SETTINGS.landingHorizontalDamping),
@@ -1830,7 +1978,12 @@ export class Player {
   }
 
   getJumpReachHeight() {
-    return this._getConfiguredJumpHeight();
+    const configuredReach = this._getConfiguredJumpHeight();
+    if (!this.isTraversalMechanismLaunchActive()) return configuredReach;
+    return Math.max(
+      configuredReach,
+      this._activeTraversalMechanismLaunch.ballisticReachHeight,
+    );
   }
 
   getCameraFocusPosition(target = new THREE.Vector3()) {
@@ -2072,6 +2225,8 @@ export class Player {
       return false;
     }
 
+    this.cancelTraversalMechanismLaunch('ledge-cling');
+
     const normal = ledge.normal.clone();
     normal.y = 0;
     if (normal.lengthSq() <= 0.0001) {
@@ -2149,6 +2304,7 @@ export class Player {
       return false;
     }
 
+    this.cancelTraversalMechanismLaunch('ledge-step');
     this.root.position.copy(ledge.climbPosition);
     this.velocity.set(0, 0, 0);
     this.jumpState = MML_JUMP_STATES.Grounded;
@@ -3509,7 +3665,7 @@ export class Player {
   }
 
   clearExternalMotion(reason = 'cleared', game = null) {
-    let cleared = false;
+    let cleared = this.cancelTraversalMechanismLaunch(reason);
     if (this.externalBallisticMotion) {
       cleared = this.cancelExternalBallisticMotion(reason, game, {
         snapToTarget: reason === 'dispose' || reason === 'reset',
@@ -3533,6 +3689,7 @@ export class Player {
   }
 
   _prepareForExternalControl() {
+    this.cancelTraversalMechanismLaunch('external-control');
     this.cancelSwordJumpSlashVisual({ cancelAttack: true });
     this.velocity.set(0, 0, 0);
     this.takeoffHorizontalVelocity.set(0, 0, 0);
@@ -3564,6 +3721,8 @@ export class Player {
     this.animation.actionTimer = 0;
     this.animation.actionDuration = 0;
     this.animation.hurtTimer = 0;
+    this.animation.hurtDuration = 0;
+    this.animation.hurtReactionTier = 0;
     this.animation.cancelAttack?.();
     this.animation.externalControlLocked = true;
     this._attackWeaponKind = null;
@@ -3574,6 +3733,7 @@ export class Player {
   }
 
   _restoreAfterExternalMotion({ grounded = false, groundY = null } = {}) {
+    this.cancelTraversalMechanismLaunch('external-motion-restored');
     this.velocity.set(0, 0, 0);
     this.takeoffHorizontalVelocity.set(0, 0, 0);
     this.animation.externalControlLocked = false;
@@ -3697,7 +3857,7 @@ export class Player {
           ? 0
           : damageContext.powerfulKnockback === true
             || POWERFUL_KNOCKBACK_ATTACKS.has(damageContext.attackKind)
-            ? 2
+            ? 3
             : 1
       ),
     });
@@ -3813,13 +3973,16 @@ export class Player {
 
     if (result.resolvedReactionTier > 0 && !this.isExternalMotionActive()) {
       this._captureDamageHitDirection(damageOrigin);
-      if (result.resolvedReactionTier >= 2) {
+      if (result.resolvedReactionTier >= 3) {
         this._playKnockbackFall(damageOrigin, {
           ...incomingHit,
           knockbackDirection: incomingHit.knockbackDirection ?? incomingHit.direction,
         });
       } else {
-        this.animation.playHurt();
+        this._beginStandingHitReaction(result.resolvedReactionTier, damageOrigin, {
+          ...incomingHit,
+          knockbackDirection: incomingHit.knockbackDirection ?? incomingHit.direction,
+        });
       }
     }
 
@@ -3869,6 +4032,7 @@ export class Player {
     this.burnDamagePerSecond = 0;
     this.cancelJetSkateBoost();
     this.cancelSwordJumpSlashVisual({ cancelAttack: true });
+    this.cancelTraversalMechanismLaunch('death');
     this.onDeathStarted?.();
     this.clearExternalMotion('death');
     this.animation.playDead();
@@ -3885,6 +4049,71 @@ export class Player {
       || this.powerKnockbackState === POWER_KNOCKBACK_STATES.Falling;
   }
 
+  _beginStandingHitReaction(reactionTier, source = null, damageContext = {}) {
+    const tier = THREE.MathUtils.clamp(Math.trunc(Number(reactionTier) || 0), 1, 2);
+    const duration = tier >= 2 ? BRACED_FLINCH_DURATION : LIGHT_FLINCH_DURATION;
+    this.cancelSwordJumpSlashVisual({ cancelAttack: true });
+    this.cancelJetSkateBoost();
+    this._releaseProjectileAim();
+    this.animation.cancelAttack?.();
+    this.attackFacingTimer = 0;
+    this.bracedFireTimer = 0;
+    this.bracedBackpedalTimer = 0;
+    this.setMovementLock(duration, 0);
+
+    if (damageContext.knockbackDirection?.lengthSq?.() > 0.0001) {
+      this.knockbackFallDirection.copy(damageContext.knockbackDirection).setY(0);
+    } else if (source?.root?.position || source?.position) {
+      this.knockbackFallDirection.copy(this.root.position).sub(source.root?.position ?? source.position).setY(0);
+    } else {
+      this.knockbackFallDirection.copy(this.lastMoveDirection).multiplyScalar(-1).setY(0);
+    }
+    if (this.knockbackFallDirection.lengthSq() <= 0.0001) {
+      this.knockbackFallDirection.set(0, 0, -1);
+    } else {
+      this.knockbackFallDirection.normalize();
+    }
+
+    if (tier >= 2) {
+      const strength = THREE.MathUtils.clamp(Number(damageContext.knockbackStrength) || 1, 0.7, 1.5);
+      this.velocity.x = this.knockbackFallDirection.x * BRACED_FLINCH_PUSH_SPEED * strength;
+      this.velocity.z = this.knockbackFallDirection.z * BRACED_FLINCH_PUSH_SPEED * strength;
+    } else if (!this.isJumpAirborne()) {
+      this.velocity.x = 0;
+      this.velocity.z = 0;
+    }
+
+    this.lastMoveDirection.copy(this.knockbackFallDirection).multiplyScalar(-1);
+    this.faceDirection(this.lastMoveDirection);
+    return this.animation.playHurt(duration, { reactionTier: tier });
+  }
+
+  _updateStandingHitReaction(dt, arenaRadius, movementOptions = {}) {
+    const tier = this.animation.hurtReactionTier || 1;
+    this._updatePhysicalJumpAndMovement(dt, zeroMoveVelocity, {
+      arenaRadius,
+      movementOptions,
+    });
+    this.animation.update(dt, {
+      moving: false,
+      running: false,
+      moveAmount: 0,
+    });
+    this.updateWeaponVisualState();
+    this._updateExternalModelMotion(dt, false, 0, false, false, {
+      animationState: 'hurt',
+      projectileAiming: false,
+      lockOnActive: false,
+      strafeAmount: 0,
+      hurtReactionTier: tier,
+      skipAttackKindReset: true,
+    });
+    this.isRunning = false;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
+  }
+
   _playKnockbackFall(source = null, damageContext = {}) {
     // Keep the power-knockback entry point safe even if a future attack calls it
     // directly instead of routing through takeDamage().
@@ -3892,6 +4121,7 @@ export class Player {
       return false;
     }
 
+    this.cancelTraversalMechanismLaunch('power-knockback');
     this.cancelSwordJumpSlashVisual({ cancelAttack: true });
     this.cancelJetSkateBoost();
 
@@ -3940,6 +4170,8 @@ export class Player {
     this.animation.actionDuration = 0;
     this.animation.cancelAttack?.();
     this.animation.hurtTimer = 0;
+    this.animation.hurtDuration = 0;
+    this.animation.hurtReactionTier = 0;
     this.animation.externalControlLocked = true;
     this.lastMoveDirection.copy(this.knockbackFallDirection).multiplyScalar(-1);
     this.faceDirection(this.lastMoveDirection);
@@ -4589,6 +4821,7 @@ export class Player {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.cancelTraversalMechanismLaunch('dispose');
     this.root?.removeFromParent?.();
   }
 
@@ -4969,7 +5202,11 @@ export class Player {
         : THREE.MathUtils.clamp(jumpSlashVisualState.visualProgress, 0, 1))
       : sustainedProjectileAim ? 1 : rawAttackProgress;
     const hurtProgress = this.animation.hurtTimer > 0
-      ? 1 - THREE.MathUtils.clamp(this.animation.hurtTimer / 0.18, 0, 1)
+      ? 1 - THREE.MathUtils.clamp(
+        this.animation.hurtTimer / Math.max(0.001, this.animation.hurtDuration || LIGHT_FLINCH_DURATION),
+        0,
+        1,
+      )
       : 0;
     const fallAnimationClipProgress = animationState === 'land'
       ? actionProgress
@@ -4990,6 +5227,7 @@ export class Player {
       actionDuration: this.animation.actionDuration ?? 0,
       fallAnimationClipProgress,
       hurtProgress,
+      hurtReactionTier: motionOptions.hurtReactionTier ?? this.animation.hurtReactionTier ?? 0,
       damageHitLocal: this.damageHitLocalDirection,
       projectileAiming,
       backpedaling,

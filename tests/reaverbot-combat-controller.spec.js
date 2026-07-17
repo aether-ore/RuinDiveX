@@ -598,6 +598,608 @@ test('jaw triple hops stay player-facing, bounded, and in shockwave range', asyn
   expect(result.perCycleTravel.every((travel) => travel <= result.configuredHopDistance + 0.01)).toBe(true);
 });
 
+test('crusher jaw mouth contact and real snap shockwaves damage the player', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=jaw-damage-volume-regression');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const player = game.player;
+    const Vector3 = player.root.position.constructor;
+    game.stop();
+
+    const clearEnemies = () => {
+      for (const enemy of [...game.enemies]) {
+        enemy.dispose?.();
+        enemy.root.removeFromParent();
+      }
+      game.enemies.length = 0;
+    };
+    const removeEnemy = (enemy) => {
+      const index = game.enemies.indexOf(enemy);
+      if (index >= 0) game.enemies.splice(index, 1);
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    };
+    const spawnJaw = (seed, position) => {
+      for (let variant = 0; variant < 320; variant += 1) {
+        const enemy = window.spawnReaverbot({
+          archetypeId: 'pursuer',
+          seed: `${seed}:${variant}`,
+          position,
+        });
+        if (enemy.genome.modules.weapon.attackKind === 'jawCombo') return enemy;
+        removeEnemy(enemy);
+      }
+      throw new Error(`Could not generate jaw enemy for ${seed}`);
+    };
+
+    clearEnemies();
+    const originalPlayerPosition = player.root.position.clone();
+    const originalPlayerHealth = player.health;
+    const originalPlayerDead = player.dead;
+    const originalTakeIncomingHit = player.takeIncomingHit;
+    const originalAddExplosion = game.addExplosion;
+    const originalAddParticleBurst = game.addParticleBurst;
+    const dungeonController = game.dungeonController;
+    const originalWalkable = dungeonController.isPositionWalkable;
+    const originalEnemyPositionClear = dungeonController.isEnemyPositionClear;
+    const originalAerialPositionClear = dungeonController.isAerialPositionClear;
+    const originalSurface = dungeonController.getSurfaceElevationAt;
+    const originalSafeZone = dungeonController.isPlayerInSafeZone;
+    const floorY = originalPlayerPosition.y;
+    dungeonController.isPositionWalkable = () => true;
+    dungeonController.isEnemyPositionClear = () => true;
+    dungeonController.isAerialPositionClear = () => true;
+    dungeonController.getSurfaceElevationAt = () => floorY;
+    dungeonController.isPlayerInSafeZone = () => false;
+    game.addParticleBurst = () => {};
+
+    let activeJaw = null;
+    let playerHits = [];
+    const shockwaveCalls = [];
+    player.takeIncomingHit = (incomingHit = {}) => {
+      const hitResult = originalTakeIncomingHit.call(player, incomingHit);
+      playerHits.push({
+        attackKind: incomingHit.attackKind ?? null,
+        sourceIsJaw: incomingHit.source === activeJaw,
+        reactionTier: incomingHit.reactionTier ?? null,
+        minimumReactionTier: incomingHit.minimumReactionTier ?? 0,
+        knockbackStrength: incomingHit.knockbackStrength ?? null,
+        contacted: hitResult.contacted,
+        dodged: hitResult.dodged,
+        immune: hitResult.immune,
+        barrierDamage: hitResult.barrierDamage,
+        healthDamage: hitResult.healthDamage,
+      });
+      return hitResult;
+    };
+    game.addExplosion = function addRecordedExplosion(position, damage, radius, color, meta = {}) {
+      if (meta.attackKind === 'jawBiteShockwave') {
+        shockwaveCalls.push({
+          sourceIsJaw: meta.source === activeJaw,
+          damage,
+          radius,
+          damagePlayer: meta.damagePlayer,
+          targetGeometry: meta.targetGeometry ?? null,
+          reactionTier: meta.reactionTier ?? null,
+          knockbackStrength: meta.knockbackStrength ?? null,
+        });
+      }
+      return originalAddExplosion.call(this, position, damage, radius, color, meta);
+    };
+
+    const resetPlayer = (position) => {
+      player.clearExternalMotion?.('jaw-damage-volume-test-reset');
+      player.root.position.copy(position);
+      player.health = player.stats.maxHealth;
+      player.dead = false;
+      player.powerKnockbackState = null;
+      player.powerKnockbackTimer = 0;
+      player.powerKnockbackDuration = 0;
+      player.powerKnockbackLandingCommitted = false;
+      player.movementLockTimer = 0;
+      player.guardTimer = 0;
+      player.guardParryTimer = 0;
+      player.animation.externalControlLocked = false;
+      player.animation.hurtTimer = 0;
+      player.barrier.current = 0;
+      player.barrier.broken = player.barrier.capacity > 0;
+      playerHits = [];
+    };
+
+    const mouthJaw = spawnJaw(
+      'jaw-mouth-contact-regression',
+      originalPlayerPosition.clone().add(new Vector3(0, 0, 3)),
+    );
+    activeJaw = mouthJaw;
+    mouthJaw.root.rotation.y = Math.PI;
+    mouthJaw.brain.state = 'position';
+    mouthJaw.brain.stateTime = 0;
+    mouthJaw.brain.contactCooldown = 0;
+    mouthJaw.root.updateMatrixWorld(true);
+    const mouthHinge = mouthJaw.visual.weapon.group.getWorldPosition(new Vector3());
+    const mouthMuzzle = mouthJaw.visual.weapon.muzzle.getWorldPosition(new Vector3());
+    const mouthPosition = mouthHinge.clone().lerp(mouthMuzzle, 0.62);
+    mouthPosition.y = floorY;
+    resetPlayer(mouthPosition);
+    const bodyDistance = mouthJaw.root.position.clone().setY(0)
+      .distanceTo(player.root.position.clone().setY(0));
+    const bodyContactRadius = mouthJaw.radius + player.radius + 0.12;
+    const insideMouth = mouthJaw._isPlayerInsideJawMouth(player);
+    const mouthHealthBefore = player.health;
+    mouthJaw._updatePersistentWeaponContact(0.016, game);
+    const mouthContact = {
+      insideMouth,
+      bodyDistance,
+      bodyContactRadius,
+      hits: playerHits.map((hit) => ({ ...hit })),
+      healthLoss: mouthHealthBefore - player.health,
+      contactCooldown: mouthJaw.brain.contactCooldown,
+      state: mouthJaw.brain.state,
+      retreatStarted: Boolean(mouthJaw.contactRetreatMotion),
+    };
+    removeEnemy(mouthJaw);
+
+    const waveJaw = spawnJaw(
+      'jaw-shockwave-capsule-regression',
+      originalPlayerPosition.clone().add(new Vector3(0, 0, 3)),
+    );
+    activeJaw = waveJaw;
+    waveJaw.root.rotation.y = Math.PI;
+    waveJaw.root.updateMatrixWorld(true);
+    const waveHinge = waveJaw.visual.weapon.group.getWorldPosition(new Vector3());
+    const waveMuzzle = waveJaw.visual.weapon.muzzle.getWorldPosition(new Vector3());
+    const forward = waveMuzzle.clone().sub(waveHinge).setY(0).normalize();
+    const lateral = new Vector3(-forward.z, 0, forward.x);
+    const waveRadius = waveJaw.genome.modules.weapon.shockwaveRadius;
+    const lateralWavePosition = waveMuzzle.clone().addScaledVector(lateral, 2.1);
+    lateralWavePosition.y = floorY;
+    resetPlayer(lateralWavePosition);
+    const waveOrigin = new Vector3();
+    waveJaw._getJawShockwaveOrigin(game, waveOrigin);
+    const waveRootDistance = waveOrigin.distanceTo(player.root.position);
+    const lateralInsideMouth = waveJaw._isPlayerInsideJawMouth(player);
+    const waveHealthBefore = player.health;
+    const waveCallStart = shockwaveCalls.length;
+    waveJaw._performJawBite(game, 0);
+    const lateralWave = {
+      insideMouth: lateralInsideMouth,
+      rootDistance: waveRootDistance,
+      radius: waveRadius,
+      calls: shockwaveCalls.slice(waveCallStart),
+      hits: playerHits.map((hit) => ({ ...hit })),
+      healthLoss: waveHealthBefore - player.health,
+      visualCount: game.timedEffects.filter((effect) => effect.object?.name === 'explosionWave').length,
+    };
+
+    const outsidePosition = waveMuzzle.clone().addScaledVector(
+      lateral,
+      waveRadius + player.radius + 0.4,
+    );
+    outsidePosition.y = floorY;
+    resetPlayer(outsidePosition);
+    const outsideHealthBefore = player.health;
+    waveJaw._performJawBite(game, 1);
+    const outsideWave = {
+      insideMouth: waveJaw._isPlayerInsideJawMouth(player),
+      hits: playerHits.map((hit) => ({ ...hit })),
+      healthLoss: outsideHealthBefore - player.health,
+    };
+    removeEnemy(waveJaw);
+
+    const commitJaw = spawnJaw(
+      'jaw-normal-commit-damage-regression',
+      originalPlayerPosition.clone().add(new Vector3(0, 0, 3.6)),
+    );
+    activeJaw = commitJaw;
+    resetPlayer(originalPlayerPosition);
+    commitJaw.root.rotation.y = Math.PI;
+    commitJaw.brain.state = 'commit';
+    commitJaw.brain.stateTime = 0;
+    commitJaw.brain.attackDirection.set(0, 0, -1);
+    commitJaw.brain.comboStrikesFired = 0;
+    commitJaw.brain.jawHopTravel.fill(0);
+    const commitHealthBefore = player.health;
+    const commitCallStart = shockwaveCalls.length;
+    for (let frame = 0; frame < 120 && playerHits.length === 0; frame += 1) {
+      commitJaw._updateCustomBehavior(0.02, game);
+    }
+    const normalCommit = {
+      calls: shockwaveCalls.slice(commitCallStart),
+      hits: playerHits.map((hit) => ({ ...hit })),
+      healthLoss: commitHealthBefore - player.health,
+      strikesFired: commitJaw.brain.comboStrikesFired,
+    };
+    removeEnemy(commitJaw);
+
+    game._updateTimedEffects(1);
+    const lingeringShockwaveVisuals = game.timedEffects.filter(
+      (effect) => effect.object?.name === 'explosionWave',
+    ).length;
+
+    player.takeIncomingHit = originalTakeIncomingHit;
+    game.addExplosion = originalAddExplosion;
+    game.addParticleBurst = originalAddParticleBurst;
+    dungeonController.isPositionWalkable = originalWalkable;
+    dungeonController.isEnemyPositionClear = originalEnemyPositionClear;
+    dungeonController.isAerialPositionClear = originalAerialPositionClear;
+    dungeonController.getSurfaceElevationAt = originalSurface;
+    dungeonController.isPlayerInSafeZone = originalSafeZone;
+    player.clearExternalMotion?.('jaw-damage-volume-test-cleanup');
+    player.root.position.copy(originalPlayerPosition);
+    player.health = originalPlayerHealth;
+    player.dead = originalPlayerDead;
+    player.powerKnockbackState = null;
+    player.animation.externalControlLocked = false;
+    clearEnemies();
+
+    return {
+      mouthContact,
+      lateralWave,
+      outsideWave,
+      normalCommit,
+      lingeringShockwaveVisuals,
+    };
+  });
+
+  expect(result.mouthContact.insideMouth).toBe(true);
+  expect(result.mouthContact.bodyDistance).toBeGreaterThan(result.mouthContact.bodyContactRadius);
+  expect(result.mouthContact.hits).toHaveLength(1);
+  expect(result.mouthContact.hits[0]).toMatchObject({
+    attackKind: 'jawMouthContact',
+    sourceIsJaw: true,
+    reactionTier: 3,
+    contacted: true,
+    dodged: false,
+    immune: false,
+  });
+  expect(result.mouthContact.hits[0].barrierDamage + result.mouthContact.hits[0].healthDamage).toBeGreaterThan(0);
+  expect(result.mouthContact.healthLoss).toBeGreaterThan(0);
+  expect(result.mouthContact.contactCooldown).toBeGreaterThan(0.6);
+  expect(result.mouthContact.state).toBe('position');
+  expect(result.mouthContact.retreatStarted).toBe(false);
+
+  expect(result.lateralWave.insideMouth).toBe(false);
+  expect(result.lateralWave.rootDistance).toBeGreaterThan(result.lateralWave.radius);
+  expect(result.lateralWave.calls).toHaveLength(1);
+  expect(result.lateralWave.calls[0]).toMatchObject({
+    sourceIsJaw: true,
+    damagePlayer: true,
+    targetGeometry: 'verticalCapsule',
+    reactionTier: 3,
+  });
+  expect(result.lateralWave.hits).toHaveLength(1);
+  expect(result.lateralWave.hits[0]).toMatchObject({
+    attackKind: 'jawBiteShockwave',
+    sourceIsJaw: true,
+    reactionTier: 3,
+    contacted: true,
+    dodged: false,
+    immune: false,
+  });
+  expect(result.lateralWave.hits[0].barrierDamage + result.lateralWave.hits[0].healthDamage).toBeGreaterThan(0);
+  expect(result.lateralWave.healthLoss).toBeGreaterThan(0);
+  expect(result.lateralWave.visualCount).toBeGreaterThan(0);
+
+  expect(result.outsideWave.insideMouth).toBe(false);
+  expect(result.outsideWave.hits).toHaveLength(0);
+  expect(result.outsideWave.healthLoss).toBe(0);
+
+  expect(result.normalCommit.calls.length).toBeGreaterThanOrEqual(1);
+  expect(result.normalCommit.hits).toHaveLength(1);
+  expect(result.normalCommit.hits[0]).toMatchObject({
+    attackKind: 'jawBiteShockwave',
+    sourceIsJaw: true,
+    reactionTier: 3,
+    contacted: true,
+    dodged: false,
+    immune: false,
+  });
+  expect(result.normalCommit.hits[0].barrierDamage + result.normalCommit.hits[0].healthDamage).toBeGreaterThan(0);
+  expect(result.normalCommit.healthLoss).toBeGreaterThan(0);
+  expect(result.normalCommit.strikesFired).toBeGreaterThanOrEqual(1);
+  expect(result.lingeringShockwaveVisuals).toBe(0);
+});
+
+test('jaw AI holds its attack envelope and completes a natural three-snap lifecycle from mouth range', async ({ page }) => {
+  await page.goto('/?reaverbotSeed=jaw-natural-lifecycle-regression');
+  await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
+
+  const result = await page.evaluate(() => {
+    const game = window.game;
+    const player = game.player;
+    const Vector3 = player.root.position.constructor;
+    game.stop();
+
+    const removeEnemy = (enemy) => {
+      const index = game.enemies.indexOf(enemy);
+      if (index >= 0) game.enemies.splice(index, 1);
+      enemy.dispose?.();
+      enemy.root.removeFromParent();
+    };
+    const clearEnemies = () => {
+      for (const enemy of [...game.enemies]) removeEnemy(enemy);
+      game.enemies.length = 0;
+    };
+    const spawnMatching = (archetypeId, attackKind, seed, position) => {
+      for (let variant = 0; variant < 360; variant += 1) {
+        const enemy = window.spawnReaverbot({
+          archetypeId,
+          seed: `${seed}:${variant}`,
+          position,
+        });
+        if (enemy.genome.modules.weapon.attackKind === attackKind) return enemy;
+        removeEnemy(enemy);
+      }
+      throw new Error(`Could not generate ${archetypeId}/${attackKind}`);
+    };
+    const resetAttackDirector = () => {
+      const director = game.enemyAttackDirector;
+      if (!director) return;
+      director.owner = null;
+      director.queue.length = 0;
+      director.requestTimes.clear();
+      director.handoffTimer = 0;
+    };
+
+    clearEnemies();
+    resetAttackDirector();
+    const originalPlayerPosition = player.root.position.clone();
+    const originalPlayerHealth = player.health;
+    const originalPlayerDead = player.dead;
+    const originalTakeIncomingHit = player.takeIncomingHit;
+    const originalAddExplosion = game.addExplosion;
+    const originalAddParticleBurst = game.addParticleBurst;
+    const originalAddHitEffect = game.addHitEffect;
+    const originalRequestHitStop = game.requestHitStop;
+    const dungeonController = game.dungeonController;
+    const originalWalkable = dungeonController.isPositionWalkable;
+    const originalEnemyPositionClear = dungeonController.isEnemyPositionClear;
+    const originalAerialPositionClear = dungeonController.isAerialPositionClear;
+    const originalSurface = dungeonController.getSurfaceElevationAt;
+    const originalSafeZone = dungeonController.isPlayerInSafeZone;
+    const floorY = originalPlayerPosition.y;
+
+    dungeonController.isPositionWalkable = () => true;
+    dungeonController.isEnemyPositionClear = () => true;
+    dungeonController.isAerialPositionClear = () => true;
+    dungeonController.getSurfaceElevationAt = () => floorY;
+    dungeonController.isPlayerInSafeZone = () => false;
+    game.addParticleBurst = () => {};
+    game.addHitEffect = () => {};
+    game.requestHitStop = () => {};
+    player.dead = false;
+
+    const incomingHits = [];
+    player.takeIncomingHit = (incomingHit = {}) => {
+      incomingHits.push({
+        attackKind: incomingHit.attackKind ?? null,
+        reactionTier: incomingHit.reactionTier ?? null,
+        knockbackStrength: incomingHit.knockbackStrength ?? null,
+        sourceId: incomingHit.source?.id ?? null,
+      });
+      return {
+        contacted: true,
+        dodged: false,
+        immune: false,
+        barrierDamage: 0,
+        healthDamage: incomingHit.amount ?? 0,
+        resolvedReactionTier: incomingHit.reactionTier ?? 0,
+      };
+    };
+
+    // A jaw's locomotion policy still calls this an approach distance, but its
+    // authored strike volume already reaches MegaMan. Cooldown must hold that
+    // envelope, and the first ready frame must begin the telegraph in place.
+    const approachJaw = spawnMatching(
+      'pursuer',
+      'jawCombo',
+      'jaw-approach-envelope',
+      originalPlayerPosition.clone(),
+    );
+    const approachThreshold = Math.max(
+      2.65,
+      approachJaw.genome.behavior.preferredRange + 0.35,
+    );
+    const attackEnvelopeLimit = approachJaw.stats.attackRange + 0.5;
+    const approachDistance = Math.min(
+      attackEnvelopeLimit - 0.08,
+      Math.max(approachThreshold + 0.18, approachJaw.stats.attackRange + 0.1),
+    );
+    player.root.position.copy(originalPlayerPosition);
+    approachJaw.root.position.copy(originalPlayerPosition).add(new Vector3(0, 0, approachDistance));
+    // Start perpendicular to the attack lane so this scenario proves the AI
+    // does not translate into mouth/body contact while turning to telegraph.
+    approachJaw.root.rotation.y = 0;
+    approachJaw.brain.state = 'position';
+    approachJaw.brain.stateTime = 0;
+    approachJaw.brain.cooldown = 0.5;
+    approachJaw.brain.alerted = true;
+    approachJaw.brain.contactCooldown = 0;
+    const approachStart = approachJaw.root.position.clone();
+    const hitsBeforeApproach = incomingHits.length;
+    approachJaw.update(0.08, game);
+    const coolingState = approachJaw.brain.state;
+    const coolingTravel = approachJaw.root.position.distanceTo(approachStart);
+    const coolingMoving = approachJaw.brain.moving;
+    approachJaw.brain.cooldown = 0;
+    approachJaw.update(0.016, game);
+    const approachContract = {
+      distance: approachDistance,
+      approachThreshold,
+      attackEnvelopeLimit,
+      inAttackEnvelope: approachJaw._isAttackDistance(approachDistance),
+      coolingState,
+      coolingTravel,
+      coolingMoving,
+      readyState: approachJaw.brain.state,
+      readyTravel: approachJaw.root.position.distanceTo(approachStart),
+      readyMoving: approachJaw.brain.moving,
+      ownsAttackLease: game.enemyAttackDirector.owner === approachJaw,
+      incidentalContactHits: incomingHits.length - hitsBeforeApproach,
+    };
+    removeEnemy(approachJaw);
+    resetAttackDirector();
+
+    // Start the real controller in the visible mouth volume. A resolved mouth
+    // hit may set its own repeat cooldown, but it must not replace the authored
+    // position -> telegraph -> commit lifecycle with contact retreat/recovery.
+    const mouthJaw = spawnMatching(
+      'pursuer',
+      'jawCombo',
+      'jaw-mouth-natural-lifecycle',
+      originalPlayerPosition.clone().add(new Vector3(0, 0, 3)),
+    );
+    mouthJaw.root.rotation.y = Math.PI;
+    mouthJaw.root.updateMatrixWorld(true);
+    const mouthHinge = mouthJaw.visual.weapon.group.getWorldPosition(new Vector3());
+    const mouthMuzzle = mouthJaw.visual.weapon.muzzle.getWorldPosition(new Vector3());
+    const mouthPosition = mouthHinge.clone().lerp(mouthMuzzle, 0.62);
+    mouthPosition.y = floorY;
+    player.root.position.copy(mouthPosition);
+    mouthJaw.brain.state = 'position';
+    mouthJaw.brain.stateTime = 0;
+    mouthJaw.brain.cooldown = 0;
+    mouthJaw.brain.alerted = true;
+    mouthJaw.brain.attackFired = false;
+    mouthJaw.brain.attackHit = false;
+    mouthJaw.brain.comboStrikesFired = 0;
+    mouthJaw.brain.jawHopTravel.fill(0);
+    mouthJaw.brain.contactCooldown = 0;
+    resetAttackDirector();
+
+    const stateHistory = ['position'];
+    const snapCalls = [];
+    let contactRetreatStarted = false;
+    let recoverySnapCount = null;
+    game.addExplosion = (position, damage, radius, color, meta = {}) => {
+      if (meta.attackKind === 'jawBiteShockwave' && meta.source === mouthJaw) {
+        snapCalls.push({
+          damage,
+          radius,
+          reactionTier: meta.reactionTier ?? null,
+          knockbackStrength: meta.knockbackStrength ?? null,
+          targetGeometry: meta.targetGeometry ?? null,
+          damagePlayer: meta.damagePlayer,
+        });
+      }
+      return true;
+    };
+    const mouthHitStart = incomingHits.length;
+    const startsInsideMouth = mouthJaw._isPlayerInsideJawMouth(player);
+    const startingAttackDistance = mouthJaw.root.position.clone().setY(0)
+      .distanceTo(player.root.position.clone().setY(0));
+    for (let frame = 0; frame < 280; frame += 1) {
+      mouthJaw.update(0.02, game);
+      contactRetreatStarted ||= Boolean(mouthJaw.contactRetreatMotion);
+      if (stateHistory.at(-1) !== mouthJaw.brain.state) {
+        stateHistory.push(mouthJaw.brain.state);
+        if (mouthJaw.brain.state === 'recovery') recoverySnapCount = snapCalls.length;
+      }
+      if (mouthJaw.brain.state === 'recovery' && snapCalls.length === 3) break;
+    }
+    const mouthHits = incomingHits.slice(mouthHitStart)
+      .filter((hit) => hit.attackKind === 'jawMouthContact');
+    const lifecycle = {
+      startsInsideMouth,
+      startingAttackDistance,
+      startsInAttackEnvelope: mouthJaw._isAttackDistance(startingAttackDistance),
+      stateHistory,
+      mouthHits,
+      contactRetreatStarted,
+      snapCalls,
+      recoverySnapCount,
+      strikesFired: mouthJaw.brain.comboStrikesFired,
+      finalState: mouthJaw.brain.state,
+      attackLeaseReleased: game.enemyAttackDirector.owner !== mouthJaw,
+    };
+    removeEnemy(mouthJaw);
+    resetAttackDirector();
+
+    // Direct charge and pounce contacts share the same authored heavy-reaction
+    // contract as jaw snaps. Capture their production metadata without starting
+    // MegaMan's long knockdown simulation in this controller-focused test.
+    player.root.position.copy(originalPlayerPosition);
+    const heavyHitStart = incomingHits.length;
+    const charge = spawnMatching(
+      'pursuer',
+      'charge',
+      'charge-tier-three-contract',
+      originalPlayerPosition.clone().add(new Vector3(0, 0, 0.2)),
+    );
+    charge.brain.attackHit = false;
+    charge._tryContactHit(game, 1);
+    removeEnemy(charge);
+    resetAttackDirector();
+    const pounce = spawnMatching(
+      'pouncer',
+      'pounce',
+      'pounce-tier-three-contract',
+      originalPlayerPosition.clone().add(new Vector3(0, 0, 0.2)),
+    );
+    pounce.brain.attackHit = false;
+    pounce._tryContactHit(game, 1);
+    removeEnemy(pounce);
+    const heavyHits = incomingHits.slice(heavyHitStart)
+      .filter((hit) => hit.attackKind === 'charge' || hit.attackKind === 'pounce');
+
+    player.takeIncomingHit = originalTakeIncomingHit;
+    game.addExplosion = originalAddExplosion;
+    game.addParticleBurst = originalAddParticleBurst;
+    game.addHitEffect = originalAddHitEffect;
+    game.requestHitStop = originalRequestHitStop;
+    dungeonController.isPositionWalkable = originalWalkable;
+    dungeonController.isEnemyPositionClear = originalEnemyPositionClear;
+    dungeonController.isAerialPositionClear = originalAerialPositionClear;
+    dungeonController.getSurfaceElevationAt = originalSurface;
+    dungeonController.isPlayerInSafeZone = originalSafeZone;
+    player.root.position.copy(originalPlayerPosition);
+    player.health = originalPlayerHealth;
+    player.dead = originalPlayerDead;
+    resetAttackDirector();
+    clearEnemies();
+
+    return { approachContract, lifecycle, heavyHits };
+  });
+
+  expect(result.approachContract.distance).toBeGreaterThan(result.approachContract.approachThreshold);
+  expect(result.approachContract.distance).toBeLessThan(result.approachContract.attackEnvelopeLimit);
+  expect(result.approachContract.inAttackEnvelope).toBe(true);
+  expect(result.approachContract.coolingState).toBe('position');
+  expect(result.approachContract.coolingTravel).toBeLessThan(0.0001);
+  expect(result.approachContract.coolingMoving).toBe(false);
+  expect(result.approachContract.readyState).toBe('telegraph');
+  expect(result.approachContract.readyTravel).toBeLessThan(0.0001);
+  expect(result.approachContract.readyMoving).toBe(false);
+  expect(result.approachContract.ownsAttackLease).toBe(true);
+  expect(result.approachContract.incidentalContactHits).toBe(0);
+
+  expect(result.lifecycle.startsInsideMouth).toBe(true);
+  expect(result.lifecycle.startsInAttackEnvelope).toBe(true);
+  expect(result.lifecycle.stateHistory).toEqual(['position', 'telegraph', 'commit', 'recovery']);
+  expect(result.lifecycle.mouthHits.length).toBeGreaterThan(0);
+  expect(result.lifecycle.mouthHits.every((hit) => hit.reactionTier === 3)).toBe(true);
+  expect(result.lifecycle.contactRetreatStarted).toBe(false);
+  expect(result.lifecycle.snapCalls).toHaveLength(3);
+  expect(result.lifecycle.snapCalls.every((snap) => (
+    snap.reactionTier === 3
+    && snap.targetGeometry === 'verticalCapsule'
+    && snap.damagePlayer === true
+  ))).toBe(true);
+  expect(result.lifecycle.snapCalls[2].knockbackStrength).toBeGreaterThan(
+    result.lifecycle.snapCalls[0].knockbackStrength,
+  );
+  expect(result.lifecycle.recoverySnapCount).toBe(3);
+  expect(result.lifecycle.strikesFired).toBe(3);
+  expect(result.lifecycle.finalState).toBe('recovery');
+  expect(result.lifecycle.attackLeaseReleased).toBe(true);
+
+  expect(result.heavyHits).toHaveLength(2);
+  expect(result.heavyHits.map((hit) => hit.attackKind).sort()).toEqual(['charge', 'pounce']);
+  expect(result.heavyHits.every((hit) => hit.reactionTier === 3)).toBe(true);
+});
+
 test('jaw hinge overlap recovers before snapping and melee body contact forces knockback', async ({ page }) => {
   await page.goto('/?reaverbotSeed=jaw-hinge-overlap-regression');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));

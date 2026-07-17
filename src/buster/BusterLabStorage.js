@@ -1,10 +1,18 @@
 import { RollSalvageStorage } from '../RollSalvageStorage.js';
 import {
+  BOSS_EXPEDITION_SCHEMA_VERSION,
   DEFAULT_BOSS_PROFILE_ID,
   getReaverbotBossProfile,
   normalizeBossProfileId,
-  resolveBossFeaturedMaterial,
+  resolveBossRewardMaterial,
 } from '../reaverbots/ReaverbotBossCatalog.js';
+import {
+  ASCENSION_ENGINE_ENCOUNTER_REVISION,
+  ASCENSION_ENGINE_PROFILE_ID,
+  ASCENSION_RELIQUARY_CHECKPOINTS,
+  ASCENSION_RELIQUARY_SEGMENTS,
+} from '../reaverbots/bosses/AscensionEngineContract.js';
+import { REAVERBOT_SALVAGE_MATERIALS } from '../reaverbots/ReaverbotSalvageCatalog.js';
 import {
   BUSTER_RECIPE_LIST,
   LEGACY_AFTER_DELAY_RECIPE,
@@ -56,6 +64,7 @@ export const MAX_BUSTER_CHASSIS = 2;
 export const MAX_BUSTER_BLUEPRINTS = 8;
 export const LEGACY_BUSTER_INVENTORY_CAPACITY = 40;
 export const BOSS_HUNT_REPEAT_REWARD_CHANCE = 0.70;
+export const ASCENSION_ENGINE_PROGRESS_SCHEMA_VERSION = 1;
 
 const NON_PHYSICAL_BUILTIN_MODULE_IDS = new Set(['onImpact', 'afterDelay', 'pulsePayload']);
 
@@ -438,6 +447,7 @@ export function createDefaultBossHuntState() {
     pendingRecoveries: [],
     fallbackFromProfileId: null,
     quarantinedRecoveryCount: 0,
+    quarantinedEncounterProgressCount: 0,
   };
 }
 
@@ -631,6 +641,103 @@ function sanitizeBossRecoveryPart(part) {
   };
 }
 
+function getAscensionEncounterId() {
+  return getReaverbotBossProfile(ASCENSION_ENGINE_PROFILE_ID)?.environmentId
+    ?? 'verticalTransitReliquary';
+}
+
+function getAscensionSealId(index) {
+  const segment = ASCENSION_RELIQUARY_SEGMENTS[index];
+  return segment ? `ascensionSeal:${segment.id}` : null;
+}
+
+function getAscensionBrokenSealIds(checkpointIndex) {
+  return ASCENSION_RELIQUARY_SEGMENTS
+    .slice(0, checkpointIndex)
+    .map((_, index) => getAscensionSealId(index));
+}
+
+function arraysEqual(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * Canonical durable representation of an Ascension Engine checkpoint. The
+ * fourth seal is deliberately absent: breaking it and recording victory are
+ * one transaction, so a save can never claim a completed fight without its
+ * reward decision.
+ */
+export function createAscensionEngineEncounterProgress(checkpointIndex = 0) {
+  const index = checkpointIndex;
+  const checkpoint = ASCENSION_RELIQUARY_CHECKPOINTS[index];
+  if (typeof index !== 'number' || !Number.isInteger(index) || !checkpoint) return null;
+  return {
+    schemaVersion: ASCENSION_ENGINE_PROGRESS_SCHEMA_VERSION,
+    encounterId: getAscensionEncounterId(),
+    revision: ASCENSION_ENGINE_ENCOUNTER_REVISION,
+    securedCheckpointId: checkpoint.id,
+    securedCheckpointIndex: checkpoint.index,
+    brokenSealIds: getAscensionBrokenSealIds(index),
+  };
+}
+
+function sanitizeAscensionEngineEncounterProgress(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const index = raw.securedCheckpointIndex;
+  if (typeof index !== 'number' || !Number.isInteger(index)) return null;
+  const canonical = createAscensionEngineEncounterProgress(index);
+  if (!canonical
+    || Number(raw.schemaVersion) !== canonical.schemaVersion
+    || raw.encounterId !== canonical.encounterId
+    || Number(raw.revision) !== canonical.revision
+    || raw.securedCheckpointId !== canonical.securedCheckpointId
+    || !Array.isArray(raw.brokenSealIds)
+    || !arraysEqual(raw.brokenSealIds, canonical.brokenSealIds)) {
+    return null;
+  }
+  return canonical;
+}
+
+function getRecordedBossRewardMaterial(record) {
+  if (!record || record.status !== 'victory' || record.debug || record.sandbox) return null;
+  return REAVERBOT_SALVAGE_MATERIALS[record.reward?.materialId] ?? null;
+}
+
+function createPendingBossRecovery(record, material) {
+  const reward = record.reward;
+  return {
+    recoveryId: reward.recoveryId,
+    expeditionId: record.expeditionId,
+    bossProfileId: record.bossProfileId,
+    victoryIndex: record.victoryIndex,
+    signaturePartOverloaded: Boolean(record.signaturePartOverloaded),
+    deterministicRoll: reward.deterministicRoll,
+    queuedAt: record.completedAt,
+    quantity: 1,
+    part: {
+      ...cloneJson(material),
+      quantity: 1,
+      source: {
+        ...plainObject(material.source),
+        kind: 'bossHunt',
+        expeditionId: record.expeditionId,
+        bossProfileId: record.bossProfileId,
+        victoryIndex: record.victoryIndex,
+      },
+    },
+  };
+}
+
+function hasExplicitUnknownBossRewardMaterial(raw) {
+  const reward = raw?.reward;
+  if (!reward || typeof reward !== 'object'
+    || !Object.prototype.hasOwnProperty.call(reward, 'materialId')) {
+    return false;
+  }
+  return typeof reward.materialId !== 'string'
+    || !REAVERBOT_SALVAGE_MATERIALS[reward.materialId];
+}
+
 function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
   if (!raw || typeof raw !== 'object') return null;
   const expeditionId = typeof raw.expeditionId === 'string' && raw.expeditionId
@@ -640,12 +747,45 @@ function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
   const rawProfileId = typeof raw.bossProfileId === 'string' ? raw.bossProfileId : '';
   if (!getReaverbotBossProfile(rawProfileId)) return null;
   const bossProfileId = rawProfileId;
-  const status = ['active', 'victory', 'defeat', 'abandoned'].includes(raw.status)
+  const debug = Boolean(raw.debug);
+  const sandbox = Boolean(raw.sandbox);
+  const rawStatus = ['active', 'victory', 'defeat', 'abandoned'].includes(raw.status)
     ? raw.status
     : raw.completed
       ? 'victory'
       : 'active';
-  const reward = raw.reward && typeof raw.reward === 'object'
+  const encounterProgress = bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+    ? sanitizeAscensionEngineEncounterProgress(raw.encounterProgress)
+    : null;
+  const requiresActiveAscensionProgress = bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+    && rawStatus === 'active'
+    && !debug
+    && !sandbox;
+  const encounterProgressQuarantined = bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+    && (Boolean(raw.encounterProgressQuarantined)
+      || (raw.encounterProgress != null && !encounterProgress)
+      || (requiresActiveAscensionProgress && !encounterProgress));
+  const status = encounterProgressQuarantined && rawStatus === 'active'
+    ? 'abandoned'
+    : rawStatus;
+  const rewardMaterial = resolveBossRewardMaterial(bossProfileId);
+  const hasRecordedRewardMaterialId = raw.reward
+    && typeof raw.reward === 'object'
+    && Object.prototype.hasOwnProperty.call(raw.reward, 'materialId');
+  const recordedRewardMaterial = hasRecordedRewardMaterialId
+    ? REAVERBOT_SALVAGE_MATERIALS[raw.reward.materialId] ?? null
+    : rewardMaterial;
+  const reward = debug && status === 'victory'
+    ? {
+      eligible: false,
+      queued: false,
+      recoveryId: null,
+      deterministicRoll: null,
+      reason: 'debug-suppressed',
+      identified: false,
+      materialId: rewardMaterial?.id ?? null,
+    }
+    : raw.reward && typeof raw.reward === 'object'
     ? {
       eligible: Boolean(raw.reward.eligible),
       queued: Boolean(raw.reward.queued),
@@ -655,9 +795,13 @@ function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
         : null,
       reason: typeof raw.reward.reason === 'string' ? raw.reward.reason : null,
       identified: Boolean(raw.reward.identified),
+      // Older expedition records did not persist this field. The profile's
+      // canonical reward is the only safe migration source.
+      materialId: recordedRewardMaterial?.id ?? null,
     }
     : null;
   return {
+    schemaVersion: BOSS_EXPEDITION_SCHEMA_VERSION,
     expeditionId,
     bossProfileId,
     invalidBossProfileId: rawProfileId && !getReaverbotBossProfile(rawProfileId)
@@ -668,10 +812,17 @@ function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
     status,
     startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : null,
     completedAt: typeof raw.completedAt === 'string' ? raw.completedAt : null,
-    victoryIndex: status === 'victory' ? Math.max(1, nonNegativeInteger(raw.victoryIndex, 1)) : null,
-    signaturePartOverloaded: Boolean(raw.signaturePartOverloaded),
-    sandbox: Boolean(raw.sandbox),
-    debug: Boolean(raw.debug),
+    victoryIndex: status === 'victory' && !debug
+      ? Math.max(1, nonNegativeInteger(raw.victoryIndex, 1))
+      : null,
+    signaturePartOverloaded: bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+      ? false
+      : Boolean(raw.signaturePartOverloaded),
+    sandbox,
+    debug,
+    progressionSuppressed: debug ? Boolean(raw.progressionSuppressed) : false,
+    encounterProgress,
+    encounterProgressQuarantined,
     reward,
   };
 }
@@ -692,6 +843,11 @@ function normalizeBossHunts(value) {
 
   const recordedExpeditions = {};
   let quarantinedBossProfileId = null;
+  let quarantinedRecoveryCount = nonNegativeInteger(source.quarantinedRecoveryCount);
+  let quarantinedEncounterProgressCount = nonNegativeInteger(
+    source.quarantinedEncounterProgressCount,
+  );
+  const quarantinedRewardExpeditionIds = new Set();
   const recordedSource = Array.isArray(source.recordedExpeditions)
     ? source.recordedExpeditions.map((entry) => [entry?.expeditionId, entry])
     : Object.entries(plainObject(source.recordedExpeditions));
@@ -701,14 +857,42 @@ function normalizeBossHunts(value) {
       quarantinedBossProfileId ??= rawProfileId;
       continue;
     }
+    if (hasExplicitUnknownBossRewardMaterial(raw)) {
+      quarantinedRecoveryCount += 1;
+      const expeditionId = typeof raw?.expeditionId === 'string' && raw.expeditionId
+        ? raw.expeditionId
+        : (typeof key === 'string' ? key : '');
+      if (expeditionId) quarantinedRewardExpeditionIds.add(expeditionId);
+      continue;
+    }
     const record = sanitizeRecordedBossExpedition(raw, typeof key === 'string' ? key : '');
     if (!record || recordedExpeditions[record.expeditionId]) continue;
+    if (record.encounterProgressQuarantined && !raw?.encounterProgressQuarantined) {
+      quarantinedEncounterProgressCount += 1;
+    }
     recordedExpeditions[record.expeditionId] = record;
+  }
+
+  // Historical debug overrides used to increment the same counter as campaign
+  // clears. Remove their contribution during normalization so a debug summon
+  // can never consume the real first-clear guarantee.
+  for (const profileId of Object.keys(victoriesByProfile)) {
+    const profileVictories = Object.values(recordedExpeditions)
+      .filter((entry) => entry.bossProfileId === profileId && entry.status === 'victory');
+    const debugVictories = profileVictories.filter((entry) => (
+      (entry.debug || entry.sandbox) && !entry.progressionSuppressed
+    )).length;
+    const qualifyingVictories = profileVictories.filter((entry) => !entry.debug && !entry.sandbox).length;
+    const adjusted = Math.max(
+      qualifyingVictories,
+      nonNegativeInteger(victoriesByProfile[profileId]) - debugVictories,
+    );
+    if (adjusted > 0) victoriesByProfile[profileId] = adjusted;
+    else delete victoriesByProfile[profileId];
   }
 
   const pendingRecoveries = [];
   const recoveryIds = new Set();
-  let quarantinedRecoveryCount = nonNegativeInteger(source.quarantinedRecoveryCount);
   for (const raw of Array.isArray(source.pendingRecoveries) ? source.pendingRecoveries : []) {
     const recoveryId = typeof raw?.recoveryId === 'string' && raw.recoveryId
       ? raw.recoveryId
@@ -717,6 +901,7 @@ function normalizeBossHunts(value) {
       ? raw.expeditionId
       : '';
     const rawProfileId = typeof raw?.bossProfileId === 'string' ? raw.bossProfileId : '';
+    if (quarantinedRewardExpeditionIds.has(expeditionId)) continue;
     const bossProfile = getReaverbotBossProfile(rawProfileId);
     if (!bossProfile) {
       quarantinedBossProfileId ??= rawProfileId || 'unknown-recovery-profile';
@@ -724,43 +909,44 @@ function normalizeBossHunts(value) {
       continue;
     }
     const recorded = recordedExpeditions[expeditionId];
-    const canonicalPart = resolveBossFeaturedMaterial(rawProfileId);
+    const rewardMaterial = getRecordedBossRewardMaterial(recorded);
     const part = sanitizeBossRecoveryPart(raw?.part ?? raw?.recoverableParts?.[0]);
     if (!recoveryId
       || !expeditionId
       || !part
-      || !canonicalPart
-      || part.id !== canonicalPart.id
+      || !rewardMaterial
+      || part.id !== rewardMaterial.id
       || recoveryIds.has(recoveryId)
       || !recorded
       || recorded.status !== 'victory'
       || recorded.bossProfileId !== rawProfileId
       || recorded.reward?.recoveryId !== recoveryId
-      || !recorded.reward?.eligible) {
+      || !recorded.reward?.eligible
+      || !recorded.reward?.queued
+      || recorded.reward?.identified
+      || Math.max(1, nonNegativeInteger(raw.victoryIndex, 1)) !== recorded.victoryIndex) {
       quarantinedRecoveryCount += 1;
       continue;
     }
     recoveryIds.add(recoveryId);
-    pendingRecoveries.push({
-      recoveryId,
-      expeditionId,
-      bossProfileId: rawProfileId,
-      victoryIndex: Math.max(1, nonNegativeInteger(raw.victoryIndex, 1)),
-      signaturePartOverloaded: Boolean(raw.signaturePartOverloaded),
-      deterministicRoll: Number.isFinite(Number(raw.deterministicRoll))
-        ? Number(raw.deterministicRoll)
-        : null,
-      queuedAt: typeof raw.queuedAt === 'string' ? raw.queuedAt : null,
-      quantity: 1,
-      part: {
-        ...cloneJson(canonicalPart),
-        quantity: 1,
-        source: {
-          ...plainObject(canonicalPart.source),
-          ...plainObject(part.source),
-        },
-      },
-    });
+    pendingRecoveries.push(createPendingBossRecovery(recorded, rewardMaterial));
+  }
+
+  // The committed expedition reward is authoritative. If a pending entry was
+  // lost or quarantined, reconstruct it deterministically instead of losing a
+  // progression-critical first-clear material.
+  for (const recorded of Object.values(recordedExpeditions)) {
+    const rewardMaterial = getRecordedBossRewardMaterial(recorded);
+    if (!rewardMaterial
+      || !recorded.reward?.eligible
+      || !recorded.reward?.queued
+      || recorded.reward?.identified
+      || !recorded.reward?.recoveryId
+      || recoveryIds.has(recorded.reward.recoveryId)) {
+      continue;
+    }
+    recoveryIds.add(recorded.reward.recoveryId);
+    pendingRecoveries.push(createPendingBossRecovery(recorded, rewardMaterial));
   }
 
   const requestedActiveId = typeof source.activeExpeditionId === 'string'
@@ -781,6 +967,7 @@ function normalizeBossHunts(value) {
       ? rawSelected
       : quarantinedBossProfileId,
     quarantinedRecoveryCount,
+    quarantinedEncounterProgressCount,
   };
 }
 
@@ -1300,6 +1487,30 @@ export function validateBusterLabState(state) {
         errors.push(`Boss Hunt victories for ${profileId} are invalid.`);
       }
     }
+    for (const expedition of Object.values(bossHunts.recordedExpeditions ?? {})) {
+      if (expedition.schemaVersion !== BOSS_EXPEDITION_SCHEMA_VERSION) {
+        errors.push(`Boss Hunt expedition ${expedition.expeditionId} has an invalid schema version.`);
+      }
+      if (expedition.bossProfileId === ASCENSION_ENGINE_PROFILE_ID) {
+        if (expedition.encounterProgress
+          && !sanitizeAscensionEngineEncounterProgress(expedition.encounterProgress)) {
+          errors.push(`Boss Hunt expedition ${expedition.expeditionId} has invalid Ascension progress.`);
+        }
+        if (expedition.encounterProgressQuarantined && expedition.encounterProgress) {
+          errors.push(`Boss Hunt expedition ${expedition.expeditionId} cannot use quarantined Ascension progress.`);
+        }
+      } else if (expedition.encounterProgress) {
+        errors.push(`Boss Hunt expedition ${expedition.expeditionId} cannot store encounter progress.`);
+      }
+      if (expedition.reward
+        && !REAVERBOT_SALVAGE_MATERIALS[expedition.reward.materialId]) {
+        errors.push(`Boss Hunt expedition ${expedition.expeditionId} has an invalid reward material.`);
+      }
+      if ((expedition.debug || expedition.sandbox)
+        && (expedition.reward?.eligible || expedition.reward?.queued)) {
+        errors.push(`Debug Boss Hunt expedition ${expedition.expeditionId} cannot award progression.`);
+      }
+    }
     const recoveryIds = new Set();
     for (const recovery of bossHunts.pendingRecoveries ?? []) {
       if (!recovery.recoveryId || recoveryIds.has(recovery.recoveryId)) {
@@ -1309,17 +1520,16 @@ export function validateBusterLabState(state) {
       if (!bossHunts.recordedExpeditions?.[recovery.expeditionId]) {
         errors.push(`Boss Recovery ${recovery.recoveryId} has no recorded expedition.`);
       }
-      const recoveryProfile = getReaverbotBossProfile(recovery.bossProfileId);
-      const canonicalPart = recoveryProfile
-        ? resolveBossFeaturedMaterial(recovery.bossProfileId)
-        : null;
       const recorded = bossHunts.recordedExpeditions?.[recovery.expeditionId];
-      if (!recoveryProfile
-        || recovery.part?.id !== canonicalPart?.id
+      const rewardMaterial = getRecordedBossRewardMaterial(recorded);
+      if (!rewardMaterial
+        || recovery.part?.id !== rewardMaterial.id
         || recorded?.bossProfileId !== recovery.bossProfileId
         || recorded?.status !== 'victory'
         || recorded?.reward?.recoveryId !== recovery.recoveryId
-        || !recorded?.reward?.eligible) {
+        || !recorded?.reward?.eligible
+        || !recorded?.reward?.queued
+        || recorded?.reward?.identified) {
         errors.push(`Boss Recovery ${recovery.recoveryId} has invalid material metadata.`);
       }
     }
@@ -1630,6 +1840,11 @@ export class BusterLabStorage {
         const count = migrated.bossHunts.quarantinedRecoveryCount;
         const recoveryWarning = `Roll quarantined ${count} Boss Recover${count === 1 ? 'y' : 'ies'} whose saved material did not match the recorded hunt.`;
         this.lastWarning = this.lastWarning ? `${this.lastWarning} ${recoveryWarning}` : recoveryWarning;
+      }
+      if ((migrated.bossHunts?.quarantinedEncounterProgressCount ?? 0) > 0) {
+        const count = migrated.bossHunts.quarantinedEncounterProgressCount;
+        const progressWarning = `Roll quarantined ${count} invalid Ascension checkpoint record${count === 1 ? '' : 's'}; affected active hunts were abandoned so they can be restarted safely.`;
+        this.lastWarning = this.lastWarning ? `${this.lastWarning} ${progressWarning}` : progressWarning;
       }
       const quarantined = migrated.migrations?.unknownModuleQuarantine ?? [];
       if (quarantined.length > 0) {
@@ -2411,6 +2626,7 @@ export class BusterLabStorage {
         throw new BusterLabOperationError('boss-selection-mismatch');
       }
       const expedition = {
+        schemaVersion: BOSS_EXPEDITION_SCHEMA_VERSION,
         expeditionId,
         bossProfileId: requestedProfileId,
         invalidBossProfileId: null,
@@ -2423,6 +2639,12 @@ export class BusterLabStorage {
         completedAt: null,
         victoryIndex: null,
         signaturePartOverloaded: false,
+        sandbox: false,
+        debug: false,
+        progressionSuppressed: false,
+        encounterProgress: requestedProfileId === ASCENSION_ENGINE_PROFILE_ID
+          ? createAscensionEngineEncounterProgress(0)
+          : null,
         reward: null,
       };
       hunts.recordedExpeditions[expeditionId] = expedition;
@@ -2434,6 +2656,122 @@ export class BusterLabStorage {
 
   lockBossHuntForExpeditionAsync(expeditionSpec = {}, concurrency = {}) {
     return this.lockBossHuntForExpedition(expeditionSpec, concurrency);
+  }
+
+  async recordBossCheckpoint({
+    expeditionId,
+    bossProfileId = ASCENSION_ENGINE_PROFILE_ID,
+    securedCheckpointIndex,
+    securedCheckpointId,
+    brokenSealIndex,
+    sandbox = false,
+    debug = false,
+  } = {}, concurrency = {}) {
+    const targetProgress = createAscensionEngineEncounterProgress(securedCheckpointIndex);
+    if (typeof expeditionId !== 'string' || !expeditionId) {
+      return { ok: false, reason: 'invalid-expedition-id', state: this._ensureLoaded() };
+    }
+    if (bossProfileId !== ASCENSION_ENGINE_PROFILE_ID) {
+      return { ok: false, reason: 'unsupported-boss-checkpoint', state: this._ensureLoaded() };
+    }
+    if (!targetProgress || targetProgress.securedCheckpointIndex === 0) {
+      return { ok: false, reason: 'invalid-checkpoint', state: this._ensureLoaded() };
+    }
+    if (securedCheckpointId !== targetProgress.securedCheckpointId
+      || typeof brokenSealIndex !== 'number'
+      || !Number.isInteger(brokenSealIndex)
+      || brokenSealIndex !== targetProgress.securedCheckpointIndex - 1) {
+      return { ok: false, reason: 'checkpoint-contract-mismatch', state: this._ensureLoaded() };
+    }
+    if (sandbox || debug) {
+      return {
+        ok: true,
+        suppressed: true,
+        debug: Boolean(debug),
+        reason: sandbox ? 'sandbox' : 'debug',
+        encounterProgress: targetProgress,
+        state: this._ensureLoaded(),
+      };
+    }
+    const currentHunts = this._ensureLoaded().bossHunts;
+    const existing = currentHunts.recordedExpeditions[expeditionId];
+    if (!existing) return { ok: false, reason: 'expedition-not-locked', state: this.state };
+    if (existing.bossProfileId !== ASCENSION_ENGINE_PROFILE_ID) {
+      return { ok: false, reason: 'expedition-profile-mismatch', state: this.state };
+    }
+    if (existing.encounterProgressQuarantined) {
+      return { ok: false, reason: 'expedition-progress-quarantined', state: this.state };
+    }
+    if (existing.status !== 'active' || currentHunts.activeExpeditionId !== expeditionId) {
+      return { ok: false, reason: 'expedition-closed', state: this.state };
+    }
+    const currentProgress = sanitizeAscensionEngineEncounterProgress(existing.encounterProgress);
+    if (!currentProgress) {
+      return { ok: false, reason: 'expedition-progress-invalid', state: this.state };
+    }
+    if (targetProgress.securedCheckpointIndex === currentProgress.securedCheckpointIndex) {
+      return {
+        ok: true,
+        unchanged: true,
+        idempotent: true,
+        encounterProgress: cloneJson(currentProgress),
+        expedition: cloneJson(existing),
+        state: this.state,
+      };
+    }
+    if (targetProgress.securedCheckpointIndex < currentProgress.securedCheckpointIndex) {
+      return { ok: false, reason: 'checkpoint-regression', state: this.state };
+    }
+    if (targetProgress.securedCheckpointIndex !== currentProgress.securedCheckpointIndex + 1) {
+      return { ok: false, reason: 'checkpoint-out-of-order', state: this.state };
+    }
+    if (this.readOnly) return { ok: false, reason: 'read-only', state: this.state };
+
+    const transaction = await this.transact({
+      operation: 'record-boss-checkpoint',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const hunts = state.bossHunts;
+      const expedition = hunts.recordedExpeditions[expeditionId];
+      if (!expedition) throw new BusterLabOperationError('expedition-not-locked');
+      if (expedition.bossProfileId !== ASCENSION_ENGINE_PROFILE_ID) {
+        throw new BusterLabOperationError('expedition-profile-mismatch');
+      }
+      if (expedition.encounterProgressQuarantined) {
+        throw new BusterLabOperationError('expedition-progress-quarantined');
+      }
+      if (expedition.status !== 'active' || hunts.activeExpeditionId !== expeditionId) {
+        throw new BusterLabOperationError('expedition-closed');
+      }
+      const progress = sanitizeAscensionEngineEncounterProgress(expedition.encounterProgress);
+      if (!progress) throw new BusterLabOperationError('expedition-progress-invalid');
+      const targetIndex = targetProgress.securedCheckpointIndex;
+      if (targetIndex === progress.securedCheckpointIndex) {
+        return {
+          unchanged: true,
+          idempotent: true,
+          encounterProgress: cloneJson(progress),
+          expedition: cloneJson(expedition),
+        };
+      }
+      if (targetIndex < progress.securedCheckpointIndex) {
+        throw new BusterLabOperationError('checkpoint-regression');
+      }
+      if (targetIndex !== progress.securedCheckpointIndex + 1) {
+        throw new BusterLabOperationError('checkpoint-out-of-order');
+      }
+      expedition.encounterProgress = cloneJson(targetProgress);
+      return {
+        encounterProgress: cloneJson(targetProgress),
+        expedition: cloneJson(expedition),
+      };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  recordBossCheckpointAsync(checkpoint = {}, concurrency = {}) {
+    return this.recordBossCheckpoint(checkpoint, concurrency);
   }
 
   async clearActiveBossExpedition({ expeditionId = null, reason = 'defeat' } = {}, concurrency = {}) {
@@ -2477,9 +2815,16 @@ export class BusterLabStorage {
     debug = false,
     debugRewardOutcome = null,
     allowDebugOverride = false,
-  } = {}, concurrency = {}) {
+  } = {}, concurrency = {}, requirements = {}) {
     if (sandbox) {
-      return { ok: true, suppressed: true, reason: 'sandbox', rewardQueued: false, state: this._ensureLoaded() };
+      return {
+        ok: true,
+        suppressed: true,
+        reason: 'sandbox',
+        debug: false,
+        rewardQueued: false,
+        state: this._ensureLoaded(),
+      };
     }
     if (typeof expeditionId !== 'string' || !expeditionId) {
       return { ok: false, reason: 'invalid-expedition-id', state: this._ensureLoaded() };
@@ -2487,6 +2832,19 @@ export class BusterLabStorage {
     if (!getReaverbotBossProfile(bossProfileId)) {
       return { ok: false, reason: 'unknown-boss-profile', state: this._ensureLoaded() };
     }
+    const rewardMaterial = resolveBossRewardMaterial(bossProfileId);
+    if (!rewardMaterial) return { ok: false, reason: 'missing-reward-material', state: this.state };
+    const effectiveSignaturePartOverloaded = bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+      ? false
+      : Boolean(signaturePartOverloaded);
+    const debugVictory = Boolean(debug || allowDebugOverride);
+    const requiredAscensionCheckpointIndex = requirements.requiredAscensionCheckpointIndex
+      ?? (bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+        ? ASCENSION_RELIQUARY_CHECKPOINTS.length - 1
+        : null);
+    // Retained for call compatibility. Debug outcomes are now always
+    // progression-suppressed, regardless of a requested forced roll.
+    void debugRewardOutcome;
     const existing = this._ensureLoaded().bossHunts.recordedExpeditions[expeditionId];
     if (existing?.status === 'victory') {
       if (existing.bossProfileId !== bossProfileId) {
@@ -2499,8 +2857,92 @@ export class BusterLabStorage {
         victoryIndex: existing.victoryIndex,
         rewardQueued: Boolean(existing.reward?.queued),
         reward: cloneJson(existing.reward),
+        debug: Boolean(existing.debug),
+        suppressed: Boolean(existing.debug || existing.sandbox),
         state: this.state,
       };
+    }
+    if (debugVictory) {
+      if (this.readOnly) {
+        return {
+          ok: false,
+          reason: 'read-only',
+          debug: true,
+          suppressed: true,
+          rewardQueued: false,
+          state: this.state,
+        };
+      }
+      const transaction = await this.transact({
+        operation: 'record-debug-boss-victory',
+        expectedRevision: concurrency.expectedRevision ?? this.revision,
+        expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+      }, (state) => {
+        const hunts = state.bossHunts;
+        const prior = hunts.recordedExpeditions[expeditionId];
+        if (prior?.status === 'victory') {
+          if (prior.bossProfileId !== bossProfileId) {
+            throw new BusterLabOperationError('expedition-profile-mismatch');
+          }
+          return {
+            unchanged: true,
+            idempotent: true,
+            debug: Boolean(prior.debug),
+            suppressed: Boolean(prior.debug || prior.sandbox),
+            victoryIndex: prior.victoryIndex,
+            rewardQueued: false,
+            reward: cloneJson(prior.reward),
+          };
+        }
+        if (prior && prior.bossProfileId !== bossProfileId) {
+          throw new BusterLabOperationError('expedition-profile-mismatch');
+        }
+        const reward = {
+          eligible: false,
+          queued: false,
+          recoveryId: null,
+          deterministicRoll: null,
+          reason: 'debug-suppressed',
+          identified: false,
+          materialId: rewardMaterial.id,
+        };
+        const completed = {
+          schemaVersion: BOSS_EXPEDITION_SCHEMA_VERSION,
+          expeditionId,
+          bossProfileId,
+          invalidBossProfileId: null,
+          seed: prior?.seed ?? null,
+          depth: prior?.depth ?? 1,
+          status: 'victory',
+          startedAt: prior?.startedAt ?? null,
+          completedAt: new Date().toISOString(),
+          victoryIndex: null,
+          signaturePartOverloaded: false,
+          sandbox: false,
+          debug: true,
+          progressionSuppressed: true,
+          encounterProgress: bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+            ? prior?.encounterProgress ?? null
+            : null,
+          reward,
+        };
+        hunts.recordedExpeditions[expeditionId] = completed;
+        if (hunts.activeExpeditionId === expeditionId) hunts.activeExpeditionId = null;
+        const defenseUnlocked = new GearLoadout(state.armsGear.gear).isSlotUnlocked('defense');
+        return {
+          expedition: cloneJson(completed),
+          firstClear: false,
+          firstClearEligible: nonNegativeInteger(hunts.victoriesByProfile[bossProfileId]) === 0,
+          victoryIndex: null,
+          rewardQueued: false,
+          reward: cloneJson(reward),
+          defenseUnlocked,
+          barrierGranted: false,
+          debug: true,
+          suppressed: true,
+        };
+      });
+      return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
     }
     const activeExpeditionId = this._ensureLoaded().bossHunts.activeExpeditionId;
     if (activeExpeditionId && activeExpeditionId !== expeditionId) {
@@ -2520,11 +2962,21 @@ export class BusterLabStorage {
         state: this.state,
       };
     }
-    const featuredPart = resolveBossFeaturedMaterial(bossProfileId);
-    if (!featuredPart) return { ok: false, reason: 'missing-featured-material', state: this.state };
+
+    if (requiredAscensionCheckpointIndex != null) {
+      if (existing?.encounterProgressQuarantined) {
+        return { ok: false, reason: 'expedition-progress-quarantined', state: this.state };
+      }
+      const progress = sanitizeAscensionEngineEncounterProgress(existing?.encounterProgress);
+      if (bossProfileId !== ASCENSION_ENGINE_PROFILE_ID
+        || existing?.status !== 'active'
+        || progress?.securedCheckpointIndex !== requiredAscensionCheckpointIndex) {
+        return { ok: false, reason: 'final-checkpoint-not-secured', state: this.state };
+      }
+    }
 
     const transaction = await this.transact({
-      operation: 'record-boss-victory',
+      operation: requirements.operation ?? 'record-boss-victory',
       expectedRevision: concurrency.expectedRevision ?? this.revision,
       expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
     }, (state) => {
@@ -2548,6 +3000,17 @@ export class BusterLabStorage {
       if (prior && prior.bossProfileId !== bossProfileId) {
         throw new BusterLabOperationError('expedition-profile-mismatch');
       }
+      if (requiredAscensionCheckpointIndex != null) {
+        if (prior?.encounterProgressQuarantined) {
+          throw new BusterLabOperationError('expedition-progress-quarantined');
+        }
+        const progress = sanitizeAscensionEngineEncounterProgress(prior?.encounterProgress);
+        if (bossProfileId !== ASCENSION_ENGINE_PROFILE_ID
+          || prior?.status !== 'active'
+          || progress?.securedCheckpointIndex !== requiredAscensionCheckpointIndex) {
+          throw new BusterLabOperationError('final-checkpoint-not-secured');
+        }
+      }
       const previousVictories = nonNegativeInteger(hunts.victoriesByProfile[bossProfileId]);
       const victoryIndex = previousVictories + 1;
       const firstClear = previousVictories === 0;
@@ -2556,23 +3019,18 @@ export class BusterLabStorage {
         bossProfileId,
         victoryIndex,
       });
-      const forcedOutcome = allowDebugOverride && typeof debugRewardOutcome === 'boolean'
-        ? debugRewardOutcome
-        : null;
-      const rewardEligible = forcedOutcome ?? (
+      const rewardEligible = (
         firstClear
-        || Boolean(signaturePartOverloaded)
+        || effectiveSignaturePartOverloaded
         || deterministicRoll < BOSS_HUNT_REPEAT_REWARD_CHANCE
       );
-      const rewardReason = forcedOutcome != null
-        ? 'debug-override'
-        : firstClear
-          ? 'first-clear'
-          : signaturePartOverloaded
-            ? 'signature-overload'
-            : rewardEligible
-              ? 'repeat-roll'
-              : 'repeat-miss';
+      const rewardReason = firstClear
+        ? 'first-clear'
+        : effectiveSignaturePartOverloaded
+          ? 'signature-overload'
+          : rewardEligible
+            ? 'repeat-roll'
+            : 'repeat-miss';
       const recoveryId = rewardEligible ? `boss-recovery:${expeditionId}` : null;
       const reward = {
         eligible: rewardEligible,
@@ -2581,9 +3039,10 @@ export class BusterLabStorage {
         deterministicRoll,
         reason: rewardReason,
         identified: false,
+        materialId: rewardMaterial.id,
       };
-      const debugVictory = Boolean(debug || allowDebugOverride);
       const completed = {
+        schemaVersion: BOSS_EXPEDITION_SCHEMA_VERSION,
         expeditionId,
         bossProfileId,
         invalidBossProfileId: null,
@@ -2593,38 +3052,22 @@ export class BusterLabStorage {
         startedAt: prior?.startedAt ?? null,
         completedAt: new Date().toISOString(),
         victoryIndex,
-        signaturePartOverloaded: Boolean(signaturePartOverloaded),
+        signaturePartOverloaded: effectiveSignaturePartOverloaded,
         sandbox: false,
-        debug: debugVictory,
+        debug: false,
+        progressionSuppressed: false,
+        encounterProgress: bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+          ? prior?.encounterProgress ?? null
+          : null,
         reward,
       };
       hunts.recordedExpeditions[expeditionId] = completed;
       hunts.victoriesByProfile[bossProfileId] = victoryIndex;
       if (hunts.activeExpeditionId === expeditionId) hunts.activeExpeditionId = null;
       if (rewardEligible && !hunts.pendingRecoveries.some((entry) => entry.recoveryId === recoveryId)) {
-        hunts.pendingRecoveries.push({
-          recoveryId,
-          expeditionId,
-          bossProfileId,
-          victoryIndex,
-          signaturePartOverloaded: Boolean(signaturePartOverloaded),
-          deterministicRoll,
-          queuedAt: completed.completedAt,
-          quantity: 1,
-          part: {
-            ...cloneJson(featuredPart),
-            quantity: 1,
-            source: {
-              ...plainObject(featuredPart.source),
-              kind: 'bossHunt',
-              expeditionId,
-              bossProfileId,
-              victoryIndex,
-            },
-          },
-        });
+        hunts.pendingRecoveries.push(createPendingBossRecovery(completed, rewardMaterial));
       }
-      const barrierGranted = debugVictory ? false : grantBarrierMilestoneInState(state);
+      const barrierGranted = grantBarrierMilestoneInState(state);
       const defenseUnlocked = new GearLoadout(state.armsGear.gear).isSlotUnlocked('defense');
       return {
         expedition: cloneJson(completed),
@@ -2634,6 +3077,8 @@ export class BusterLabStorage {
         reward: cloneJson(reward),
         defenseUnlocked,
         barrierGranted,
+        debug: false,
+        suppressed: false,
       };
     });
     return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
@@ -2641,6 +3086,31 @@ export class BusterLabStorage {
 
   recordBossVictoryAsync(result = {}, concurrency = {}) {
     return this.recordBossVictory(result, concurrency);
+  }
+
+  recordAscensionBossVictory({
+    bossProfileId = ASCENSION_ENGINE_PROFILE_ID,
+    ...result
+  } = {}, concurrency = {}) {
+    if (bossProfileId !== ASCENSION_ENGINE_PROFILE_ID) {
+      return Promise.resolve({
+        ok: false,
+        reason: 'expedition-profile-mismatch',
+        state: this._ensureLoaded(),
+      });
+    }
+    return this.recordBossVictory({
+      ...result,
+      bossProfileId: ASCENSION_ENGINE_PROFILE_ID,
+      signaturePartOverloaded: false,
+    }, concurrency, {
+      operation: 'record-ascension-boss-victory',
+      requiredAscensionCheckpointIndex: ASCENSION_RELIQUARY_CHECKPOINTS.length - 1,
+    });
+  }
+
+  recordAscensionBossVictoryAsync(result = {}, concurrency = {}) {
+    return this.recordAscensionBossVictory(result, concurrency);
   }
 
   getPendingBossRecoveryTransfer({ recoveryIds = null } = {}) {

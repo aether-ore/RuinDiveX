@@ -91,6 +91,13 @@ const BUSTER_DEFAULT_STATS = Object.freeze({
   attackSpeed: 0.1,
 });
 
+function getEnemyLockOnTargets(enemy) {
+  const authoredTargets = enemy?.getLockOnTargets?.();
+  return Array.isArray(authoredTargets)
+    ? authoredTargets.filter(Boolean)
+    : getEnemyCombatTargets(enemy);
+}
+
 const ARM_PROFILES = {
   busterArm: {
     energyCost: 0,
@@ -3661,6 +3668,8 @@ export class CombatSystem {
     mine.group.removeFromParent();
     this.game._disposeTimedEffectObject?.(mine.group);
     this.game.addExplosion(position, mine.damage, mine.explosionRadius, mine.color, {
+      source: this.game.player,
+      damagePlayer: false,
       element: getPlayerElement(this.game.player.stats, { element: null }) ?? 'fire',
       armorBreakChance: mine.armorBreakChance,
       stagger: mine.stagger,
@@ -3861,11 +3870,20 @@ export class CombatSystem {
     if (!target) {
       return null;
     }
+
+    const owner = getCombatTargetOwner(target);
+    const authoredTargets = owner?.getLockOnTargets?.();
+    if (Array.isArray(authoredTargets)) {
+      if (authoredTargets.includes(target) && isCombatTargetLockRetainable(target)) {
+        return target;
+      }
+      return authoredTargets.find((candidate) => isCombatTargetLockRetainable(candidate)) ?? null;
+    }
+
     if (isCombatTargetLockRetainable(target)) {
       return target;
     }
 
-    const owner = getCombatTargetOwner(target);
     return owner && owner !== target && isCombatTargetLockRetainable(owner)
       ? owner
       : null;
@@ -3915,7 +3933,7 @@ export class CombatSystem {
         continue;
       }
 
-      for (const target of getEnemyCombatTargets(enemy)) {
+      for (const target of getEnemyLockOnTargets(enemy)) {
         if (!isCombatTargetValid(target)
           || target.id === this.lockOn.skippedTargetId
           || !this._isLockTargetInRange(target, profile)) {
@@ -3977,7 +3995,7 @@ export class CombatSystem {
         continue;
       }
 
-      for (const target of getEnemyCombatTargets(enemy)) {
+      for (const target of getEnemyLockOnTargets(enemy)) {
         if (!isCombatTargetValid(target) || target.id === this.lockOn.skippedTargetId) {
           continue;
         }

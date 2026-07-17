@@ -834,8 +834,10 @@ test('Reaverbot scrap stays unidentified until Roll analyzes and stores it', asy
       panelMode: document.getElementById('inventory-panel')?.dataset?.mode ?? '',
     };
 
+    const salvageCatalog = window.getReaverbotSalvageCatalog();
     return {
-      catalogMaterialCount: window.getReaverbotSalvageCatalog().materials.length,
+      catalogMaterialCount: salvageCatalog.materials.length,
+      bossOnlyMaterialIds: salvageCatalog.bossOnlyMaterialIds,
       bodyPlan: hopper.genome.body.planId,
       mobilityLabel: hopper.genome.body.mobilityLabel,
       profile,
@@ -861,7 +863,9 @@ test('Reaverbot scrap stays unidentified until Roll analyzes and stores it', asy
     };
   });
 
-  expect(result.catalogMaterialCount).toBe(62);
+  expect(result.catalogMaterialCount).toBe(63);
+  expect(result.bossOnlyMaterialIds).toEqual(['perfectedCompressionGreave']);
+  expect(result.profile.some((candidate) => candidate.materialId === 'perfectedCompressionGreave')).toBe(false);
   expect(result.bodyPlan).toBe('hopper');
   expect(result.profile).toHaveLength(6);
   expect(result.profile.find((candidate) => candidate.aspect === 'body')).toEqual({

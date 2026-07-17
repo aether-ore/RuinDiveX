@@ -97,7 +97,7 @@ export const GEAR_CATALOG = deepFreeze({
     slot: 'helmet',
     effect: { id: 'reactionTierReduction', tiers: 1 },
     description: 'Downgrades incoming reaction tier by one.',
-    acquisition: 'starter',
+    acquisition: 'future-recovery',
   }),
 
   jumpSprings: gearDefinition({

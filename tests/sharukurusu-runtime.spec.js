@@ -755,7 +755,7 @@ test('Sharukurusu sprints, spins both drill arms, charges once, and backflips aw
   expect(result.hitCount).toBe(1);
   expect(result.hit).toMatchObject({
     attackKind: 'sharukurusuDrillCharge',
-    reactionTier: 2,
+    reactionTier: 3,
   });
   expect(result.hit.knockbackDirectionLength).toBeGreaterThan(0.99);
   expect(result.maximumBackflipY).toBeGreaterThan(0.9);

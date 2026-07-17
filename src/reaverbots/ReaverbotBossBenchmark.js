@@ -9,6 +9,10 @@ import {
   generateReaverbotBossGenome,
   getReaverbotBossProfile,
 } from './ReaverbotBossCatalog.js';
+import {
+  ASCENSION_ENGINE_SEAL_COUNT,
+  ASCENSION_ENGINE_TUNING,
+} from './bosses/AscensionEngineContract.js';
 
 export const REAVERBOT_BOSS_BENCHMARK_LEVELS = Object.freeze([1, 5, 10]);
 export const REAVERBOT_BOSS_BENCHMARK_PLAN_IDS = Object.freeze([
@@ -50,6 +54,15 @@ function bodyRouteTime(rawTtk, profile) {
   if (!Number.isFinite(rawTtk)) return null;
   return rawTtk
     + BUSTER_BENCHMARK_FIXTURE.extensionDuration
+    + profile.combat.phaseTransitionSeconds;
+}
+
+function ascensionSealRouteTime(rawTtk, profile) {
+  if (!Number.isFinite(rawTtk)) return null;
+  const sealDamageShare = ASCENSION_ENGINE_SEAL_COUNT
+    * ASCENSION_ENGINE_TUNING.sealIntegrityHealthScale;
+  return rawTtk * sealDamageShare
+    + Math.max(0, Number(profile.arena?.benchmarkTraversalSeconds) || 0)
     + profile.combat.phaseTransitionSeconds;
 }
 
@@ -96,16 +109,27 @@ export function runReaverbotBossBenchmark({
         const plan = plans[planId];
         const simulation = simulateBusterEncounter(plan, scenario, { duration: durationSeconds });
         const idealTtk = simulation.metrics.singleTargetTtk;
-        const route = canDamageSignaturePart(plan) ? 'signature-overload' : 'body-only';
-        const routeTtk = route === 'signature-overload'
-          ? signatureRouteTime(idealTtk, profile)
-          : bodyRouteTime(idealTtk, profile);
+        const isAscensionEngine = profile.encounterControllerId === 'ascensionEngine';
+        const directSealDamage = canDamageSignaturePart(plan);
+        const route = isAscensionEngine
+          ? directSealDamage ? 'seal-sequence' : 'unsupported'
+          : directSealDamage ? 'signature-overload' : 'body-only';
+        const routeTtk = route === 'seal-sequence'
+          ? ascensionSealRouteTime(idealTtk, profile)
+          : route === 'signature-overload'
+            ? signatureRouteTime(idealTtk, profile)
+            : route === 'body-only'
+              ? bodyRouteTime(idealTtk, profile)
+              : null;
+        const status = route === 'unsupported' ? 'unresolved' : simulation.status;
         return [planId, Object.freeze({
-          status: simulation.status,
+          status,
           route,
           idealReleaseTtk: idealTtk,
           routeTtk: round(routeTtk),
-          signatureRouteTtk: route === 'signature-overload' ? round(routeTtk) : null,
+          signatureRouteTtk: route === 'signature-overload' || route === 'seal-sequence'
+            ? round(routeTtk)
+            : null,
           bodyRouteTtk: route === 'body-only' ? round(routeTtk) : null,
         })];
       }));

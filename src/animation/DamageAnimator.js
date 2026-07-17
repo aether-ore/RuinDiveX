@@ -6,38 +6,40 @@ export class DamageAnimator {
     this.mapper = mapper;
   }
 
-  applyStandingFlinch(targets, hurtProgress = 0, hitLocal = {}) {
+  applyStandingFlinch(targets, hurtProgress = 0, hitLocal = {}, reactionTier = 1) {
     if (!this.mapper) {
       return;
     }
 
     const progress = THREE.MathUtils.clamp(hurtProgress, 0, 1);
+    const brace = reactionTier >= 2 ? 1 : 0;
     const impact = Math.sin(progress * Math.PI);
     const settle = 1 - THREE.MathUtils.smoothstep(progress, 0.35, 1);
     const side = THREE.MathUtils.clamp(hitLocal.x ?? 0, -1, 1);
     const forward = THREE.MathUtils.clamp(hitLocal.z ?? 1, -1, 1);
     const frontHit = THREE.MathUtils.clamp(forward, 0, 1);
     const backHit = THREE.MathUtils.clamp(-forward, 0, 1);
-    const pitch = degrees(-8) * settle * Math.max(0.35, frontHit) + degrees(7) * settle * backHit;
-    const roll = degrees(8) * impact * (Math.abs(side) > 0.08 ? -side : 1);
-    const yaw = degrees(4.5) * impact * -side;
+    const pitch = degrees(-8 - brace * 9) * settle * Math.max(0.35, frontHit)
+      + degrees(7 + brace * 5) * settle * backHit;
+    const roll = degrees(8 + brace * 5) * impact * (Math.abs(side) > 0.08 ? -side : 1);
+    const yaw = degrees(4.5 + brace * 3) * impact * -side;
 
     this.mapper.addCorePose(targets, {
       spine: { pitch, yaw, roll },
       neck: { pitch: pitch * 1.05, yaw: yaw * 0.45, roll: roll * 0.62 },
     });
     this.mapper.addArmPose(targets, 'left', {
-      armForwardBack: -degrees(8) * settle + degrees(4) * side * impact,
-      armRaise: -degrees(8) * settle,
-      elbowBend: degrees(8) * settle,
+      armForwardBack: -degrees(8 + brace * 9) * settle + degrees(4) * side * impact,
+      armRaise: -degrees(8 + brace * 8) * settle,
+      elbowBend: degrees(8 + brace * 15) * settle,
     });
     this.mapper.addArmPose(targets, 'right', {
-      armForwardBack: -degrees(8) * settle + degrees(4) * side * impact,
-      armRaise: -degrees(8) * settle,
-      elbowBend: degrees(8) * settle,
+      armForwardBack: -degrees(8 + brace * 9) * settle + degrees(4) * side * impact,
+      armRaise: -degrees(8 + brace * 8) * settle,
+      elbowBend: degrees(8 + brace * 15) * settle,
     });
-    this.mapper.addLegPose(targets, 'left', { kneeBend: degrees(7) * settle });
-    this.mapper.addLegPose(targets, 'right', { kneeBend: degrees(7) * settle });
+    this.mapper.addLegPose(targets, 'left', { kneeBend: degrees(7 + brace * 14) * settle });
+    this.mapper.addLegPose(targets, 'right', { kneeBend: degrees(7 + brace * 14) * settle });
   }
 
   applyKnockbackFall(targets, state = 'knockbackFall', progress = 0) {

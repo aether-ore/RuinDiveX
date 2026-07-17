@@ -176,11 +176,25 @@ The eye is universal, but its low acquisition chance keeps it from becoming mean
 | Counterweight Core | Balanced Counterweight Core | Gyroscopic stability, spinning mass | Rotor weapons, stabilizers |
 | Claw Palm Core | Claw Palm Recoil Servo | Recoil, counter timing, articulated claws | Countering claw arms, recoiling weapon guards |
 
+## Implemented Boss-Hunt Keystone Recipe
+
+The Perfected Compression Greave is a Boss Hunt-only material. It exists in the shared material registry but not in ordinary procedural source maps, so defeating a random Launch Leg does not substitute for clearing VA-RUK 09 · The Ascension Engine. The first campaign clear guarantees a durable Boss Recovery, which Roll transfers into her named-part stockpile through **Identify All**.
+
+The current Jump Springs recipe consumes 12 Identified Scrap plus one each of:
+
+- Perfected Compression Greave — clear the Ascension Engine Boss Hunt.
+- Tempered Jump Spring — hunt Spring Hopper body plans.
+- Stabilized Belly Core — recover a Pouncer belly weak point.
+
+Fabrication permanently unlocks the Mobility gear but does not auto-equip it. Equipped Jump Springs increase vertical jump reach by 30% and activate the Vertical Transit Reliquary's four otherwise hidden mastery ledges. Those 3.82-unit rises are unreachable under the ordinary ledge envelope and let the player bypass each of the four encounter segments' original impact-gated route. See [the Ascension Engine implementation notes](ASCENSION_ENGINE_IMPLEMENTATION_NOTES.md) for the encounter and persistence contract.
+
 ## Example Future Recipes
 
-Crafting is not implemented yet. These examples show how the current named-part vocabulary can support recognizable acquisition goals.
+The sketches below are not current runtime recipes. They show how the named-part vocabulary could support additional acquisition goals.
 
-### Jump Springs
+### Jump Springs (superseded acquisition sketch)
+
+This older sketch predates the implemented Boss Hunt keystone recipe above and is retained only as design history. It is not the current bill of materials.
 
 - 3× Tempered Jump Spring — hunt Spring Hopper body plans.
 - 1× Behavior Chip: Hunter — hunt Pouncers.

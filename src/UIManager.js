@@ -12,6 +12,7 @@ import {
   getGearSlotDefinition,
 } from './equipment/index.js';
 import { REAVERBOT_SALVAGE_MATERIALS } from './reaverbots/ReaverbotSalvageCatalog.js';
+import { getReaverbotBossRewardMaterial } from './reaverbots/ReaverbotBossCatalog.js';
 
 function formatTime(seconds) {
   const mins = Math.floor(seconds / 60);
@@ -485,6 +486,7 @@ export class UIManager {
     this.busterBenchmarkPanel = document.getElementById('buster-benchmark-panel');
     this.busterBenchmarkStatus = document.getElementById('buster-benchmark-status');
     this.busterBenchmarkMetrics = document.getElementById('buster-benchmark-metrics');
+    this.garageMigrationRecovery = document.getElementById('garage-migration-recovery');
     this.inventoryItems = document.getElementById('inventory-items');
     this.equipmentSlots = document.getElementById('equipment-slots');
     this.garageWeaponSlots = document.getElementById('garage-weapon-slots');
@@ -514,9 +516,12 @@ export class UIManager {
     this.bossHud = document.getElementById('boss-hud');
     this.bossHudName = document.getElementById('boss-hud-name');
     this.bossHudPhase = document.getElementById('boss-hud-phase');
+    this.bossHealthTrack = document.getElementById('boss-health-track');
     this.bossHealthFill = document.getElementById('boss-health-fill');
+    this.bossSignatureLabel = document.getElementById('boss-signature-label');
     this.bossSignatureFill = document.getElementById('boss-signature-fill');
     this.bossSignatureStatus = document.getElementById('boss-signature-status');
+    this.bossEncounterProgress = document.getElementById('boss-encounter-progress');
     this.bossIntroBanner = document.getElementById('boss-intro-banner');
     this.bossVictoryBanner = document.getElementById('boss-victory-banner');
     this.poseDebugAnimationSelect = document.getElementById('pose-debug-animation');
@@ -675,23 +680,65 @@ export class UIManager {
     const boss = this.game.enemies?.find?.((enemy) => enemy.isBoss && !enemy.dead && enemy.getBossHudState);
     const state = boss?.getBossHudState?.() ?? null;
     this.bossHud.hidden = !state;
-    if (!state) return;
+    if (!state) {
+      this.bossHud.classList.remove('is-four-segment');
+      delete this.bossHud.dataset.encounterMode;
+      return;
+    }
+    const segmentCount = Math.max(0, Math.trunc(Number(state.segmentCount)) || 0);
+    const fourSegmentEncounter = segmentCount === 4;
+    this.bossHud.classList.toggle('is-four-segment', fourSegmentEncounter);
+    if (state.encounterMode) this.bossHud.dataset.encounterMode = state.encounterMode;
+    else delete this.bossHud.dataset.encounterMode;
     if (this.bossHudName) this.bossHudName.textContent = state.displayName ?? state.title;
     if (this.bossHudPhase) {
       this.bossHudPhase.textContent = state.transitionRemaining > 0
         ? 'PHASE SHIFT'
-        : `PHASE ${state.phase === 2 ? 'II' : 'I'}`;
+        : state.encounterModeLabel
+          ? String(state.encounterModeLabel).toUpperCase()
+          : `PHASE ${state.phase === 2 ? 'II' : 'I'}`;
     }
-    if (this.bossHealthFill) this.bossHealthFill.style.transform = `scaleX(${Math.max(0, Math.min(1, state.healthRatio))})`;
+    const healthRatio = Math.max(0, Math.min(1, Number(state.healthRatio) || 0));
+    if (this.bossHealthFill) this.bossHealthFill.style.transform = `scaleX(${healthRatio})`;
+    if (this.bossHealthTrack) {
+      this.bossHealthTrack.setAttribute('aria-valuenow', String(Math.round(healthRatio * 100)));
+      this.bossHealthTrack.setAttribute(
+        'aria-label',
+        fourSegmentEncounter ? `Boss integrity, ${segmentCount} Compression Seal segments` : 'Boss integrity',
+      );
+    }
+    if (this.bossSignatureLabel) {
+      this.bossSignatureLabel.textContent = state.signatureLabel
+        ?? (fourSegmentEncounter ? 'Compression Seal' : 'Signature Assembly');
+    }
     if (this.bossSignatureFill) this.bossSignatureFill.style.transform = `scaleX(${Math.max(0, Math.min(1, state.signatureRatio))})`;
     if (this.bossSignatureStatus) {
       this.bossSignatureStatus.textContent = state.signatureStatus
         ?? (state.signaturePartOverloaded ? 'OVERLOADED' : 'ARMORED');
-      this.bossSignatureStatus.style.color = state.shieldActive
-        ? '#68ffd7'
-        : state.shieldStunRemaining > 0
-          ? '#ffd36f'
-          : state.signaturePartOverloaded ? '#ff8f66' : '#ffd36f';
+      this.bossSignatureStatus.style.color = state.encounterMode === 'finalCharge'
+        ? '#ff8f66'
+        : state.shieldActive
+          ? '#68ffd7'
+          : state.shieldStunRemaining > 0
+            ? '#ffd36f'
+            : state.signaturePartOverloaded ? '#ff8f66' : '#ffd36f';
+    }
+    if (this.bossEncounterProgress) {
+      this.bossEncounterProgress.hidden = !fourSegmentEncounter;
+      if (fourSegmentEncounter) {
+        const cleared = Math.max(0, Math.min(segmentCount, Math.trunc(Number(state.segmentsCleared)) || 0));
+        const segment = Math.max(0, Math.min(segmentCount - 1, Math.trunc(Number(state.segmentIndex)) || 0));
+        const checkpoint = Math.max(0, Math.min(segmentCount - 1, Math.trunc(Number(state.securedCheckpoint)) || 0));
+        const details = [
+          `CHAMBER ${segment + 1}/${segmentCount}`,
+          `SEALS ${cleared}/${segmentCount}`,
+          `CHECKPOINT ${checkpoint + 1}/${segmentCount}`,
+        ];
+        if ((Number(state.finalChargeFailures) || 0) > 0) {
+          details.push(`METEORS ${Math.trunc(Number(state.finalChargeFailures))}`);
+        }
+        this.bossEncounterProgress.textContent = details.join(' · ');
+      }
     }
   }
 
@@ -1302,6 +1349,31 @@ export class UIManager {
         : 'No unexamined Boss Recoveries. First clears guarantee their featured material.';
     }
     const cards = (view.profiles ?? []).map((profile) => {
+      const catalogRewardMaterial = getReaverbotBossRewardMaterial(profile.id);
+      const rewardDiscovered = Boolean(
+        profile.rewardDiscovered === true
+        || (catalogRewardMaterial
+          && this.game.rollSalvageStorage?.hasDiscoveredPart?.(catalogRewardMaterial.id)),
+      );
+      const discovered = Boolean(profile.discovered || rewardDiscovered);
+      const material = rewardDiscovered
+        ? profile.rewardMaterial ?? catalogRewardMaterial
+        : profile.material;
+      const ownedCount = rewardDiscovered
+        ? profile.rewardOwnedCount
+          ?? this.game.rollSalvageStorage?.getPartCount?.(material?.id)
+          ?? 0
+        : profile.ownedCount ?? 0;
+      const linkedRecipes = discovered
+        ? [
+            ...(profile.linkedRecipes ?? []),
+            ...ARM_GEAR_RECIPE_LIST
+              .filter((recipe) => material && Number(recipe.requirements?.parts?.[material.id] ?? 0) > 0)
+              .map((recipe) => ({ id: recipe.id, name: recipe.label })),
+          ].filter((recipe, index, recipes) => (
+            recipes.findIndex((candidate) => candidate.id === recipe.id) === index
+          ))
+        : [];
       const button = document.createElement('button');
       button.type = 'button';
       button.className = `boss-hunt-card${profile.selected ? ' is-selected' : ''}`;
@@ -1320,17 +1392,17 @@ export class UIManager {
       const title = document.createElement('h3');
       title.textContent = profile.title;
       const clue = document.createElement('p');
-      clue.textContent = profile.discovered
-        ? `${profile.material?.name ?? profile.roleClue} · owned ${profile.ownedCount ?? 0}`
+      clue.textContent = discovered
+        ? `${material?.name ?? profile.roleClue} · owned ${ownedCount}`
         : `Signature clue: ${profile.roleClue}`;
       const status = document.createElement('strong');
       status.textContent = `${profile.victoryCount} victor${profile.victoryCount === 1 ? 'y' : 'ies'} · ${profile.repeatStatus}`;
       body.append(title, clue, status);
       button.append(portrait, body);
-      if (profile.discovered && profile.linkedRecipes?.length) {
+      if (linkedRecipes.length) {
         const recipes = document.createElement('span');
         recipes.className = 'boss-hunt-recipes';
-        recipes.textContent = `Known recipes: ${profile.linkedRecipes.map((recipe) => recipe.name).join(', ')}`;
+        recipes.textContent = `Known recipes: ${linkedRecipes.map((recipe) => recipe.name).join(', ')}`;
         button.append(recipes);
       }
       return button;
@@ -2599,7 +2671,16 @@ export class UIManager {
         room.isCurrent ? 'is-current' : '',
         `room-${room.roomType}`,
       ].filter(Boolean).join(' ');
+      const labelMarkup = snapshot.verticalStage && room.title
+        ? `<text
+            class="minimap-room-label"
+            x="${number(bounds.x + bounds.width * 0.5)}"
+            y="${number(bounds.z + bounds.depth * 0.56)}"
+            text-anchor="middle"
+          >${escapeHtml(room.title)}</text>`
+        : '';
       return `
+        <g>
         <rect
           class="${classes}"
           x="${number(bounds.x)}"
@@ -2608,7 +2689,9 @@ export class UIManager {
           height="${number(bounds.depth)}"
           rx="0.8"
           ry="0.8"
-        />`;
+        />
+        ${labelMarkup}
+        </g>`;
     }).join('');
     const hallwayMarkup = snapshot.hallways
       .filter((hallway) => hallway.from && hallway.to)
@@ -2830,13 +2913,15 @@ export class UIManager {
 
   _renderInventoryItems() {
     if (!this.inventoryItems) return;
-    this.inventoryItems.innerHTML = '';
+    this.inventoryItems.replaceChildren();
     const recoveryItems = this.game.busterMigrationRecovery ?? [];
+    if (this.garageMigrationRecovery) {
+      this.garageMigrationRecovery.hidden = recoveryItems.length === 0;
+    }
     if (recoveryItems.length > 0) {
-      const recovery = document.createElement('section');
+      const recovery = document.createElement('div');
       recovery.className = 'migration-recovery';
       recovery.innerHTML = `
-        <strong>Roll's Migration Recovery</strong>
         <span>${recoveryItems.length} authoritative item${recoveryItems.length === 1 ? '' : 's'} waiting for inventory space.</span>
         <div class="migration-recovery-items">
           ${recoveryItems.map((item, index) => `
@@ -2848,14 +2933,6 @@ export class UIManager {
       `;
       this.inventoryItems.appendChild(recovery);
     }
-
-    const note = document.createElement('div');
-    note.className = 'fixed-inventory-note';
-    note.innerHTML = `
-      <strong>Fixed-function loadout</strong>
-      <span>Arms and Gear are permanent authored unlocks. Field inventory is reserved for Zenny, refractors, keycards, unidentified scrap, and named salvage.</span>
-    `;
-    this.inventoryItems.appendChild(note);
   }
 
   _renderEquipmentFabrication() {

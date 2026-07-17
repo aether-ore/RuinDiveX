@@ -778,6 +778,7 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
 
   const initial = await page.evaluate(() => {
     const { game } = window;
+    game.player.root.position.copy(game.dungeon.campReturnPosition);
     game.setInventoryOpen(true, { mode: 'roll' });
     const view = game.getBusterLabViewModel('build-a');
     const mega = game.busterLabPlans.get('megaBuster');
@@ -859,6 +860,7 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
   await waitForGame(page);
   const persistedAssignment = await page.evaluate(() => {
     const { game } = window;
+    game.player.root.position.copy(game.dungeon.campReturnPosition);
     const snapshot = {
       resolved: game.getResolvedArmSlot(2),
       assignment: game.busterLabState.assignments.slots['2'],
@@ -976,7 +978,7 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
     game.inventory.isFull = () => true;
     const fullInventoryReplacement = await game.equipCustomBuster('build-a', 1);
     game.inventory.isFull = originalIsFull;
-    await game.equipArmLoadoutSlot('special1', {
+    const manualResult = await game.equipArmLoadoutSlot('special1', {
       kind: 'fixedArm',
       armId: 'laserBeamBlade',
     });
@@ -987,12 +989,27 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
       customInventoryCount: game.inventory.items.filter((item) => item.type === 'customBusterArm').length,
       fixedInventoryCount: game.inventory.items.filter((item) => item?.fixedArmId).length,
     };
-    return { afterMove, afterManual, fixedInventoryBefore, fullInventoryReplacement };
+    return {
+      afterMove,
+      afterManual,
+      fixedInventoryBefore,
+      fullInventoryReplacement,
+      manualResult: {
+        ok: manualResult.ok,
+        reason: manualResult.reason ?? null,
+        message: manualResult.message ?? null,
+      },
+    };
   });
   expect(replacement.afterMove.oldSlotArmId).toBe('laserBeamBlade');
   expect(replacement.afterMove.newSlotBuildId).toBe('build-a');
   expect(replacement.afterMove.assignments).toEqual({ 1: null, 2: 'build-a' });
   expect(replacement.fullInventoryReplacement.ok).toBe(true);
+  expect(replacement.manualResult).toEqual({
+    ok: true,
+    reason: null,
+    message: 'Arm loadout updated.',
+  });
   expect(replacement.afterManual.slotType).toBe('swordArm');
   expect(replacement.afterManual.fixedArmId).toBe('laserBeamBlade');
   expect(replacement.afterManual.assignment).toBe(null);

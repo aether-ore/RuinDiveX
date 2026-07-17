@@ -49,6 +49,8 @@ const SHARED_REAVERBOT_TEXTURE_ASSETS = {
   weaponHousing: freezeTextureAsset('weaponHousing', 'weapon_housing_tile.png'),
 };
 
+// This is the semantic five-map build manifest, not the complete boss roster.
+// Bosses with an authored-geometry art strategy use visualProfileId: null.
 export const REAVERBOT_BOSS_TEXTURE_PROFILE_IDS = Object.freeze([
   'pursuitRegent',
   'rubyOpticOracle',
@@ -218,8 +220,14 @@ export function resolveReaverbotTextureProfile(genome) {
     : null;
   const weakPoint = requireProfile(REAVERBOT_WEAK_POINT_TEXTURE_PROFILES, genome?.modules?.weakPoint?.id, 'weak-point');
   const eye = requireProfile(REAVERBOT_EYE_TEXTURE_PROFILES, genome?.modules?.eye?.id, 'eye');
-  const boss = genome?.bossProfileId
-    ? REAVERBOT_BOSS_TEXTURE_PROFILES[genome.bossProfileId] ?? null
+  // Boss identity and texture identity are deliberately separate. Authored
+  // geometry bosses opt out with an explicit null visualProfileId, while old
+  // callers that predate the field continue to resolve by bossProfileId.
+  const textureProfileId = Object.prototype.hasOwnProperty.call(genome ?? {}, 'visualProfileId')
+    ? genome.visualProfileId
+    : genome?.bossProfileId;
+  const boss = textureProfileId
+    ? REAVERBOT_BOSS_TEXTURE_PROFILES[textureProfileId] ?? null
     : null;
   const preserveSharedMetalSlots = (profile) => {
     const merged = { ...profile, ...(boss ?? {}) };

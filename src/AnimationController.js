@@ -42,6 +42,8 @@ export class AnimationController {
     this.attackDuration = 0.34;
     this.attackStyle = 'melee';
     this.hurtTimer = 0;
+    this.hurtDuration = 0;
+    this.hurtReactionTier = 0;
     this.dead = false;
     this.actionState = null;
     this.actionTimer = 0;
@@ -75,12 +77,14 @@ export class AnimationController {
     return true;
   }
 
-  playHurt(duration = 0.18) {
-    if (this.dead || this.isControlLocked()) {
+  playHurt(duration = 0.18, { reactionTier = 1 } = {}) {
+    if (this.dead || this.externalControlLocked || FULL_BODY_ACTION_STATES.has(this.actionState)) {
       return false;
     }
 
-    this.hurtTimer = duration;
+    this.hurtDuration = Math.max(0.001, duration);
+    this.hurtTimer = this.hurtDuration;
+    this.hurtReactionTier = THREE.MathUtils.clamp(Math.trunc(reactionTier), 1, 2);
     this.setState('hurt');
     return true;
   }
@@ -132,6 +136,8 @@ export class AnimationController {
     }
 
     this.hurtTimer = 0;
+    this.hurtDuration = 0;
+    this.hurtReactionTier = 0;
     this.attackTimer = 0;
     this.downedTimer = Math.max(0, downedHold);
     this._startFullBodyAction('knockbackFall', duration);
@@ -155,11 +161,13 @@ export class AnimationController {
   }
 
   isControlLocked() {
-    return this.externalControlLocked || FULL_BODY_ACTION_STATES.has(this.actionState);
+    return this.externalControlLocked
+      || FULL_BODY_ACTION_STATES.has(this.actionState)
+      || this.hurtTimer > 0;
   }
 
   isFullBodyActionActive() {
-    return this.isControlLocked();
+    return this.externalControlLocked || FULL_BODY_ACTION_STATES.has(this.actionState);
   }
 
   getActionProgress() {
@@ -196,10 +204,11 @@ export class AnimationController {
     }
 
     if (this.hurtTimer > 0) {
-      this.hurtTimer -= dt;
+      this.hurtTimer = Math.max(0, this.hurtTimer - dt);
       if (this.poseOutputEnabled) {
-        this._applyHurtPose(dt);
+        this._applyHurtPose(dt, this.hurtReactionTier);
       }
+      if (this.hurtTimer <= 0) this.hurtReactionTier = 0;
       return;
     }
 
@@ -450,15 +459,20 @@ export class AnimationController {
     lerpRotation(this.joints.get('rightAnkle'), 0.1 * stance, 0, -0.05 * stance, alpha);
   }
 
-  _applyHurtPose(dt) {
+  _applyHurtPose(dt, reactionTier = 1) {
     const alpha = Math.min(1, dt * 18);
-    const recoil = Math.sin(Math.max(0, this.hurtTimer) * 28) * 0.18;
+    const brace = reactionTier >= 2 ? 1 : 0;
+    const recoil = Math.sin(Math.max(0, this.hurtTimer) * 28) * (0.18 + brace * 0.08);
 
-    lerpRotation(this.joints.get('neck'), -0.18, 0, recoil, alpha);
-    lerpRotation(this.joints.get('leftShoulder'), -0.3, 0, 0.2, alpha);
-    lerpRotation(this.joints.get('rightShoulder'), -0.3, 0, -0.2, alpha);
-    lerpRotation(this.joints.get('leftHip'), 0.18, 0, 0, alpha);
-    lerpRotation(this.joints.get('rightHip'), 0.18, 0, 0, alpha);
+    lerpRotation(this.joints.get('hips'), -0.08 - brace * 0.14, 0, recoil * 0.28, alpha);
+    lerpRotation(this.joints.get('spine'), -0.12 - brace * 0.2, 0, recoil * 0.5, alpha);
+    lerpRotation(this.joints.get('neck'), -0.18 - brace * 0.08, 0, recoil, alpha);
+    lerpRotation(this.joints.get('leftShoulder'), -0.3 - brace * 0.18, 0, 0.2 + brace * 0.16, alpha);
+    lerpRotation(this.joints.get('rightShoulder'), -0.3 - brace * 0.18, 0, -0.2 - brace * 0.16, alpha);
+    lerpRotation(this.joints.get('leftHip'), 0.18 + brace * 0.18, 0, 0.08 * brace, alpha);
+    lerpRotation(this.joints.get('rightHip'), 0.18 + brace * 0.18, 0, -0.08 * brace, alpha);
+    lerpRotation(this.joints.get('leftKnee'), 0.1 + brace * 0.3, 0, 0, alpha);
+    lerpRotation(this.joints.get('rightKnee'), 0.1 + brace * 0.3, 0, 0, alpha);
   }
 
   _applyFullBodyActionPose(dt, state, progress) {

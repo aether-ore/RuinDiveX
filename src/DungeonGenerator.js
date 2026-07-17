@@ -11,6 +11,12 @@ import {
 } from './DungeonProgression.js';
 import { resolveIndustrialRoomMetadata } from './IndustrialRoomArchetypes.js';
 import { PLAYER_TRAVERSAL_ENVELOPE } from './TraversalCapabilities.js';
+import {
+  ASCENSION_ENGINE_PROFILE_ID,
+  ASCENSION_RELIQUARY_SCALE,
+  ASCENSION_RELIQUARY_SEGMENTS,
+} from './reaverbots/bosses/AscensionEngineContract.js';
+import { createVerticalTransitReliquary } from './reaverbots/bosses/VerticalTransitReliquary.js';
 
 const DEFAULT_TILE_SIZE = 2.8;
 const RUIN_TEXTURE_BASE_PATH = '/assets/textures/ruins/';
@@ -522,10 +528,16 @@ function addHallway(tiles, from, to) {
 }
 
 export class DungeonGenerator {
-  constructor({ tileSize = DEFAULT_TILE_SIZE, random = Math.random, difficulty = 1 } = {}) {
+  constructor({
+    tileSize = DEFAULT_TILE_SIZE,
+    random = Math.random,
+    difficulty = 1,
+    bossProfileId = null,
+  } = {}) {
     this.tileSize = tileSize;
     this.random = random;
     this.difficulty = Math.max(1, Math.trunc(difficulty) || 1);
+    this.bossProfileId = typeof bossProfileId === 'string' ? bossProfileId : null;
     this.textureLoader = new THREE.TextureLoader();
     this.fbxLoader = new FBXLoader();
     this.objLoader = new OBJLoader();
@@ -542,6 +554,10 @@ export class DungeonGenerator {
   }
 
   generate() {
+    if (this.bossProfileId === ASCENSION_ENGINE_PROFILE_ID) {
+      return this._generateAscensionEngineDungeon();
+    }
+
     let lastDungeon = null;
 
     for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -586,6 +602,670 @@ export class DungeonGenerator {
 
     const errors = lastDungeon?.progression?.validation?.errors ?? ['Unknown dungeon validation failure.'];
     throw new Error(`Unable to generate a solvable vertical dungeon after 12 attempts: ${errors.join(' | ')}`);
+  }
+
+  _generateAscensionEngineDungeon() {
+    const group = new THREE.Group();
+    group.name = 'ascensionEngineDedicatedDungeon';
+    group.userData.dedicatedBossWorld = true;
+    group.userData.bossProfileId = ASCENSION_ENGINE_PROFILE_ID;
+
+    const prepRoot = new THREE.Group();
+    prepRoot.name = 'ascensionReliquaryPreparationCamp';
+    group.add(prepRoot);
+
+    const prepMaterials = {
+      floor: new THREE.MeshStandardMaterial({
+        name: 'material_ascensionPrepFloor',
+        color: 0x27332f,
+        roughness: 0.88,
+        metalness: 0.18,
+        flatShading: true,
+      }),
+      trim: new THREE.MeshStandardMaterial({
+        name: 'material_ascensionPrepTrim',
+        color: 0xb28c45,
+        roughness: 0.46,
+        metalness: 0.76,
+        flatShading: true,
+      }),
+      dark: new THREE.MeshStandardMaterial({
+        name: 'material_ascensionPrepDark',
+        color: 0x151a1b,
+        roughness: 0.72,
+        metalness: 0.64,
+        flatShading: true,
+      }),
+      signal: new THREE.MeshStandardMaterial({
+        name: 'material_ascensionPrepSignal',
+        color: 0x5ee8ff,
+        emissive: 0x126579,
+        emissiveIntensity: 1.15,
+        roughness: 0.3,
+        metalness: 0.28,
+        flatShading: true,
+      }),
+    };
+    prepRoot.userData.authoredOwnedMaterials = new Set(Object.values(prepMaterials));
+
+    const addPrepBox = (name, size, position, materialRef = prepMaterials.dark) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), materialRef);
+      mesh.name = name;
+      mesh.position.set(...position);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      prepRoot.add(mesh);
+      return mesh;
+    };
+    const addPrepFrame = (name, width, depth, topY, centerZ) => {
+      const railWidth = 0.18;
+      const railHeight = 0.08;
+      const y = topY + railHeight * 0.5 + 0.002;
+      const halfX = width * 0.5 - railWidth * 0.5;
+      const halfZ = depth * 0.5 - railWidth * 0.5;
+      addPrepBox(`${name}North`, [width, railHeight, railWidth], [0, y, centerZ - halfZ], prepMaterials.trim);
+      addPrepBox(`${name}South`, [width, railHeight, railWidth], [0, y, centerZ + halfZ], prepMaterials.trim);
+      addPrepBox(`${name}West`, [railWidth, railHeight, depth - railWidth * 2], [-halfX, y, centerZ], prepMaterials.trim);
+      addPrepBox(`${name}East`, [railWidth, railHeight, depth - railWidth * 2], [halfX, y, centerZ], prepMaterials.trim);
+    };
+
+    const prepCenter = new THREE.Vector3(...ASCENSION_RELIQUARY_SCALE.preparationCampCenter);
+    const [prepWidth, prepThickness, prepDepth] = ASCENSION_RELIQUARY_SCALE.preparationCampSize;
+    addPrepBox(
+      'ascensionPreparationPad',
+      [prepWidth, prepThickness, prepDepth],
+      [prepCenter.x, prepCenter.y - prepThickness * 0.5, prepCenter.z],
+      prepMaterials.floor,
+    );
+    addPrepFrame('ascensionPreparationPadTrim', prepWidth, prepDepth, prepCenter.y, prepCenter.z);
+    for (const side of [-1, 1]) {
+      addPrepBox(
+        `ascensionPreparationRail_${side < 0 ? 'left' : 'right'}`,
+        [0.22, 1.05, prepDepth],
+        [side * (prepWidth * 0.5 - 0.11), 0.525, prepCenter.z],
+        prepMaterials.dark,
+      );
+    }
+    addPrepBox(
+      'ascensionPreparationRearRail',
+      [prepWidth, 1.05, 0.22],
+      [prepCenter.x, 0.525, prepCenter.z + prepDepth * 0.5 - 0.11],
+      prepMaterials.dark,
+    );
+
+    // This broken bridge frames the authored shaft entrance but deliberately
+    // stops short of it. The only valid transition out of the safe camp is the
+    // enterRuin interaction, which locks the selected Boss Hunt before moving
+    // the player to the Reliquary checkpoint.
+    addPrepBox(
+      'ascensionPreparationBrokenBridge',
+      [5.2, 0.32, 3.2],
+      [0, -0.16, prepCenter.z - prepDepth * 0.5 - 1.6],
+      prepMaterials.floor,
+    );
+    addPrepFrame(
+      'ascensionPreparationBrokenBridgeTrim',
+      5.2,
+      3.2,
+      0,
+      prepCenter.z - prepDepth * 0.5 - 1.6,
+    );
+
+    const entryGate = new THREE.Group();
+    entryGate.name = 'ascensionReliquaryEntryGate';
+    entryGate.position.set(0, 0, prepCenter.z - prepDepth * 0.5 + 1.2);
+    const gateBase = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.15, 1.32, 0.24, 12),
+      prepMaterials.dark,
+    );
+    gateBase.name = 'ascensionReliquaryEntryGateBase';
+    gateBase.position.y = 0.12;
+    gateBase.receiveShadow = true;
+    const gateRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.82, 0.1, 7, 24),
+      prepMaterials.signal,
+    );
+    gateRing.name = 'ascensionReliquaryEntryGateSignal';
+    gateRing.rotation.x = -Math.PI * 0.5;
+    gateRing.position.y = 0.27;
+    entryGate.add(gateBase, gateRing);
+    prepRoot.add(entryGate);
+
+    const createStaticPlatform = ({ id, center, width, depth, object }) => {
+      const descriptor = {
+        id,
+        environmentId: 'verticalTransitReliquary',
+        role: 'preparationCamp',
+        center: center.clone(),
+        halfWidth: width * 0.5,
+        halfDepth: depth * 0.5,
+        topY: center.y,
+        baseY: center.y - 0.5,
+        enabled: true,
+        active: true,
+        oneWay: true,
+        dynamic: false,
+        blocksBelow: false,
+        createsLedgeCandidates: false,
+        object,
+      };
+      descriptor.containsTop = (position, inset = 0) => (
+        Math.abs(position.x - descriptor.center.x)
+          <= Math.max(0, descriptor.halfWidth - Math.max(0, Number(inset) || 0))
+        && Math.abs(position.z - descriptor.center.z)
+          <= Math.max(0, descriptor.halfDepth - Math.max(0, Number(inset) || 0))
+      );
+      descriptor.getTopY = (position) => descriptor.containsTop(position) ? descriptor.topY : null;
+      return descriptor;
+    };
+
+    const prepPlatform = createStaticPlatform({
+      id: 'ascensionPreparationCampFloor',
+      center: prepCenter,
+      width: prepWidth,
+      depth: prepDepth,
+      object: prepRoot.getObjectByName('ascensionPreparationPad'),
+    });
+    const platforms = [prepPlatform];
+    const solidZones = [
+      {
+        id: 'ascensionPreparationRailCollision:left',
+        roomId: 'expeditionCamp',
+        position: new THREE.Vector3(-prepWidth * 0.5 + 0.11, 0.525, prepCenter.z),
+        halfWidth: 0.11,
+        halfDepth: prepDepth * 0.5,
+        verticalHalfHeight: 0.525,
+        obstacleKind: 'authoredReliquarySolid',
+      },
+      {
+        id: 'ascensionPreparationRailCollision:right',
+        roomId: 'expeditionCamp',
+        position: new THREE.Vector3(prepWidth * 0.5 - 0.11, 0.525, prepCenter.z),
+        halfWidth: 0.11,
+        halfDepth: prepDepth * 0.5,
+        verticalHalfHeight: 0.525,
+        obstacleKind: 'authoredReliquarySolid',
+      },
+      {
+        id: 'ascensionPreparationRailCollision:rear',
+        roomId: 'expeditionCamp',
+        position: new THREE.Vector3(prepCenter.x, 0.525, prepCenter.z + prepDepth * 0.5 - 0.11),
+        halfWidth: prepWidth * 0.5,
+        halfDepth: 0.11,
+        verticalHalfHeight: 0.525,
+        obstacleKind: 'authoredReliquarySolid',
+      },
+    ];
+
+    // The Ascension Engine replaces the ruin interior, never the established
+    // expedition exterior. Reuse the same authored hub/camp/entrance builders
+    // as a normal generated dungeon so Roll, the Support Car, garage,
+    // workbench, reset console, Key Seeker, practice platforms, and Ruin Lift
+    // remain exactly where players expect them.
+    prepRoot.visible = false;
+    prepRoot.removeFromParent();
+    platforms.length = 0;
+    solidZones.length = 0;
+    const exteriorRooms = [
+      { id: 'hubTown', type: 'hub', x: 0, z: -20, width: 11, depth: 7 },
+      { id: 'expeditionCamp', type: 'camp', x: 0, z: -11, width: 11, depth: 7 },
+      { id: 'entrance', type: 'entrance', x: 0, z: 0, width: 9, depth: 9 },
+    ];
+    this._assignRoomArchetypes(exteriorRooms);
+    const exteriorTiles = new Map();
+    for (const room of exteriorRooms) addRectRoom(exteriorTiles, room);
+    addHallway(exteriorTiles, exteriorRooms[0], exteriorRooms[1]);
+    addHallway(exteriorTiles, exteriorRooms[1], exteriorRooms[2]);
+    const exteriorFloorTiles = [...exteriorTiles.values()];
+    const exteriorMaterials = this._createMaterials();
+    for (const tile of exteriorFloorTiles) {
+      const visualOwner = new THREE.Group();
+      visualOwner.name = 'dungeonFloorTileVisual';
+      visualOwner.userData.cameraOcclusionOwner = true;
+      visualOwner.userData.roomId = tile.roomId ?? null;
+      const mesh = this._createFloorTileMesh(tile, exteriorMaterials);
+      mesh.name = `dungeonTile_${tile.type}_level${tile.level ?? 0}`;
+      mesh.userData.cameraOcclusionSurface = true;
+      mesh.userData.floorTile = {
+        x: tile.x,
+        z: tile.z,
+        roomId: tile.roomId ?? null,
+        level: tile.level ?? 0,
+        elevation: tile.elevation ?? 0,
+        surface: tile.surface ?? tile.type,
+      };
+      mesh.receiveShadow = true;
+      visualOwner.add(mesh);
+      this._addTileDetail(visualOwner, tile, exteriorMaterials);
+      group.add(visualOwner);
+    }
+    this._addSolidTraversalVolumes(group, exteriorFloorTiles, exteriorRooms, exteriorMaterials);
+    const exteriorOpenAirTileKeys = this._createOpenAirTileKeys(exteriorRooms);
+    const exteriorFloorTileLookup = this._createFloorTileLookup(exteriorFloorTiles);
+    this._addIndustrialFactoryFeatures(
+      group,
+      exteriorFloorTiles,
+      exteriorMaterials,
+      exteriorOpenAirTileKeys,
+      exteriorFloorTileLookup,
+    );
+    this._addIndustrialRoomSetpieces(
+      group,
+      exteriorRooms,
+      exteriorFloorTiles,
+      exteriorMaterials,
+      solidZones,
+    );
+    this._addVolumetricIndustrialPrefabs(
+      group,
+      exteriorRooms,
+      exteriorFloorTiles,
+      [],
+      exteriorMaterials,
+      solidZones,
+    );
+    this._addCeilings(
+      group,
+      exteriorTiles,
+      exteriorMaterials,
+      exteriorOpenAirTileKeys,
+      exteriorRooms,
+    );
+    const exteriorAerialBoundaryZones = this._addWalls(
+      group,
+      exteriorTiles,
+      exteriorMaterials,
+      exteriorOpenAirTileKeys,
+    );
+    this._addInvisibleOpenAirBounds(
+      group,
+      exteriorTiles,
+      exteriorMaterials,
+      exteriorOpenAirTileKeys,
+    );
+    const exteriorDoors = this._addDoors(
+      group,
+      exteriorRooms,
+      exteriorMaterials,
+      exteriorTiles,
+      [],
+      solidZones,
+      exteriorAerialBoundaryZones,
+    );
+    const exteriorLandmarks = this._addRoomLandmarks(
+      group,
+      exteriorRooms,
+      exteriorMaterials,
+      exteriorTiles,
+      exteriorFloorTiles,
+      solidZones,
+    );
+    platforms.push(
+      ...exteriorLandmarks.platforms,
+      ...this._createGeneratedPlatformSurfaces(exteriorFloorTiles),
+    );
+
+    const stageRoomTiles = Math.ceil(ASCENSION_RELIQUARY_SCALE.chamberDiameter / this.tileSize);
+    const stageCenterZ = 25;
+    const stageRooms = ASCENSION_RELIQUARY_SEGMENTS.map((segment) => ({
+      id: segment.id,
+      type: 'bossStage',
+      x: 0,
+      z: stageCenterZ,
+      width: stageRoomTiles,
+      depth: stageRoomTiles,
+      minY: segment.index === 0 ? ASCENSION_RELIQUARY_SCALE.floorDepth : segment.startHeight,
+      maxY: segment.index === ASCENSION_RELIQUARY_SEGMENTS.length - 1
+        ? ASCENSION_RELIQUARY_SCALE.shellHeight
+        : segment.checkpointHeight,
+      centerY: (segment.startHeight + segment.checkpointHeight) * 0.5,
+      verticalIndex: segment.index,
+      title: segment.title,
+      archetypeId: 'vertical_transit_reliquary',
+      archetype: segment.title,
+      specialEnvironmentId: 'verticalTransitReliquary',
+      ceilingHeight: null,
+      heightCategory: 'open-shaft',
+      purpose: 'A dungeon-scale Ascension Engine traversal and combat segment.',
+      mood: 'Open vertical transit ruins surrounding the Ascension Engine.',
+      environmentalStory: 'The transit machinery and guardian share one compression system.',
+    }));
+    const rooms = [...exteriorRooms, ...stageRooms];
+
+    const stage = createVerticalTransitReliquary({
+      room: stageRooms[0],
+      tileSize: this.tileSize,
+      seed: `${this.bossProfileId}:${this.difficulty}:dedicated-world`,
+    });
+    const dungeonAttachment = { group, platforms, solidZones };
+    stage.attachToDungeon(dungeonAttachment);
+
+    const initialCheckpoint = stage.getCheckpoint(0);
+    const ruinEntryPosition = initialCheckpoint.position.clone().setY(0);
+    const playerStart = this._tileToWorld(
+      exteriorRooms[0].x,
+      exteriorRooms[0].z,
+      exteriorTiles,
+    );
+    const campReturnPosition = this._tileToWorld(
+      exteriorRooms[1].x,
+      exteriorRooms[1].z,
+      exteriorTiles,
+    );
+    const summitPosition = stage.getSealStation(3)?.platform?.center?.clone?.()
+      ?? stage.center.clone().setY(ASCENSION_RELIQUARY_SEGMENTS[3].checkpointHeight);
+    const bossZonePosition = stage.center.clone().setY(0);
+    const bossEncounter = {
+      id: 'bossEncounter',
+      roomId: 'compressionFoundry',
+      label: 'VA-RUK 09 · The Ascension Engine',
+      roster: ['proceduralBoss'],
+      isBoss: true,
+      bossProfileId: ASCENSION_ENGINE_PROFILE_ID,
+      expeditionSpec: null,
+      specialEnvironmentId: 'verticalTransitReliquary',
+      roomArchetypeId: 'vertical_transit_reliquary',
+      roomFlavorId: null,
+      enemyTags: [],
+      enemySuppressedTags: [],
+      enemyBehaviorModifiers: [],
+      enemyHealthMultiplier: 1,
+      zone: {
+        id: 'bossEncounterZone',
+        roomId: 'compressionFoundry',
+        position: bossZonePosition,
+        halfWidth: ASCENSION_RELIQUARY_SCALE.playableRadius,
+        halfDepth: ASCENSION_RELIQUARY_SCALE.playableRadius,
+        active: true,
+      },
+      triggerZone: {
+        id: 'ascensionEngineEntryTrigger',
+        roomId: 'compressionFoundry',
+        position: ruinEntryPosition.clone().setY(0.8),
+        halfWidth: 3.8,
+        halfDepth: 2.4,
+        verticalHalfHeight: 2.2,
+        active: true,
+      },
+      spawnPoints: [stage.center.clone().setY(0)],
+      spawned: false,
+      cleared: false,
+      enemyIds: [],
+    };
+    const encounters = [bossEncounter];
+
+    const roomConnections = [
+      ['hubTown', 'expeditionCamp'],
+      ['expeditionCamp', 'entrance'],
+      ['entrance', 'compressionFoundry'],
+      ['compressionFoundry', 'brokenElevatorSpine'],
+      ['brokenElevatorSpine', 'suspendedMachinerySea'],
+      ['suspendedMachinerySea', 'summitTrial'],
+    ].map(([fromRoomId, toRoomId], index) => {
+      const exteriorLink = ['hubTown', 'expeditionCamp', 'entrance'].includes(fromRoomId)
+        && ['hubTown', 'expeditionCamp', 'entrance'].includes(toRoomId);
+      const entryLift = fromRoomId === 'entrance' && toRoomId === 'compressionFoundry';
+      const destinationSegment = ASCENSION_RELIQUARY_SEGMENTS.find((segment) => segment.id === toRoomId);
+      return {
+        id: `${fromRoomId}_${toRoomId}`,
+        fromRoomId,
+        toRoomId,
+        doorId: null,
+        routes: [{
+          id: `ascensionAuthoredRoute:${index}`,
+          connectorType: exteriorLink
+            ? 'groundCorridor'
+            : entryLift
+              ? 'bossHuntLift'
+              : 'authoredVerticalTransit',
+          level: exteriorLink || entryLift ? 0 : destinationSegment?.index ?? 0,
+          elevation: exteriorLink || entryLift ? 0 : destinationSegment?.startHeight ?? 0,
+          purpose: exteriorLink
+            ? 'expeditionExterior'
+            : entryLift
+              ? 'bossHuntEntry'
+              : 'checkpointAscent',
+          requiredForProgression: true,
+        }],
+      };
+    });
+    const mapCenters = new Map([
+      ['hubTown', { x: 0, z: 0 }],
+      ['expeditionCamp', { x: 0, z: 10 }],
+      ['entrance', { x: 0, z: 20 }],
+      ['compressionFoundry', { x: 0, z: 34 }],
+      ['brokenElevatorSpine', { x: 0, z: 48 }],
+      ['suspendedMachinerySea', { x: 0, z: 62 }],
+      ['summitTrial', { x: 0, z: 76 }],
+    ]);
+    const minimapRooms = rooms.map((room) => {
+      const center = mapCenters.get(room.id) ?? { x: 0, z: 0 };
+      const exterior = ['hub', 'camp', 'entrance'].includes(room.type);
+      const width = exterior ? room.width : 12;
+      const depth = exterior ? Math.min(7, room.depth) : 10;
+      return {
+        roomId: room.id,
+        roomType: room.type,
+        roomBounds2D: {
+          x: center.x - width * 0.5,
+          z: center.z - depth * 0.5,
+          width,
+          depth,
+        },
+        roomCenter2D: { ...center },
+        connectedRoomIds: roomConnections
+          .filter((connection) => connection.fromRoomId === room.id || connection.toRoomId === room.id)
+          .map((connection) => connection.fromRoomId === room.id
+            ? connection.toRoomId
+            : connection.fromRoomId),
+        progressionBand: Math.max(0, (room.verticalIndex ?? -1) + 1),
+        isInitialUnlockedArea: exterior,
+        containsKeycard: false,
+        containsChest: false,
+        containsBoss: room.id === 'compressionFoundry',
+        containsShrine: false,
+        ceilingHeight: null,
+        verticalTierCount: 1,
+        elevations: Number.isFinite(room.minY) && Number.isFinite(room.maxY)
+          ? [room.minY, room.maxY]
+          : [0],
+        minY: room.minY,
+        maxY: room.maxY,
+        verticalIndex: room.verticalIndex,
+        archetype: room.archetype,
+        purpose: room.purpose,
+      };
+    });
+    const minimap = {
+      projection: 'ascensionElevation',
+      bounds: { minX: -10, minZ: -6, width: 20, depth: 90 },
+      rooms: minimapRooms,
+      hallways: roomConnections.map((connection) => ({
+        hallwayId: connection.id,
+        fromRoomId: connection.fromRoomId,
+        toRoomId: connection.toRoomId,
+        doorId: null,
+        routes: connection.routes,
+      })),
+      markers: [],
+    };
+    const progression = {
+      kind: 'authoredBossWorld',
+      profileId: ASCENSION_ENGINE_PROFILE_ID,
+      entranceRoomId: 'hubTown',
+      ruinEntranceRoomId: 'compressionFoundry',
+      bossRoomId: 'compressionFoundry',
+      shrineRoomId: null,
+      keycards: [],
+      doors: [],
+      bands: rooms.map((room, index) => ({
+        bandId: index,
+        roomIds: [room.id],
+      })),
+      roomConnections,
+      keySeeker: exteriorLandmarks.keySeeker,
+      shrineKey: null,
+      boss: {
+        encounterId: bossEncounter.id,
+        roomId: bossEncounter.roomId,
+        rewardKeycardId: null,
+        mustDropShrineKey: false,
+      },
+      minimap,
+      validation: {
+        accepted: true,
+        authored: true,
+        errors: [],
+        warnings: ['Dedicated Ascension Engine world uses authored checkpoint progression.'],
+      },
+    };
+
+    const extractionRoot = new THREE.Group();
+    extractionRoot.name = 'ascensionReliquaryReturnLift';
+    extractionRoot.position.copy(summitPosition).add(new THREE.Vector3(0, 0.08, 18));
+    extractionRoot.visible = false;
+    const extractionRing = new THREE.Mesh(
+      new THREE.TorusGeometry(2.2, 0.14, 7, 40),
+      prepMaterials.signal,
+    );
+    extractionRing.name = 'ascensionReliquaryReturnLiftRing';
+    extractionRing.rotation.x = -Math.PI * 0.5;
+    const extractionBeam = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.1, 0.26, 7, 8),
+      prepMaterials.signal,
+    );
+    extractionBeam.name = 'ascensionReliquaryReturnLiftBeam';
+    extractionBeam.position.y = 3.5;
+    extractionRoot.add(extractionRing, extractionBeam);
+    group.add(extractionRoot);
+
+    const safeInteractables = [
+      ...exteriorLandmarks.safeInteractables,
+      {
+        id: 'ascensionReliquaryReturnLift',
+        label: 'Reliquary Return Lift',
+        action: 'extractRuin',
+        position: extractionRoot.position.clone(),
+        object: extractionRoot,
+        color: 0x7df8ff,
+        interactionRadius: 3.2,
+        requiresRuinComplete: true,
+      },
+    ];
+    const safeZones = this._createRoomZones(exteriorRooms, 'hub')
+      .concat(this._createRoomZones(exteriorRooms, 'camp'));
+
+    const rollAnchor = group.getObjectByName('rollCaskettNpc');
+    const supportCarAnchor = group.getObjectByName('expeditionSupportCar');
+    const workbenchAnchor = group.getObjectByName('rollWorkshopWorkbench');
+    const activateNpcAssets = () => {
+      if (rollAnchor
+        && !rollAnchor.userData.modelLoading
+        && !rollAnchor.userData.modelLoaded
+        && !rollAnchor.userData.modelLoadError) {
+        this._loadRollNpc(
+          rollAnchor,
+          exteriorLandmarks.npcAnimationMixers,
+          exteriorLandmarks.npcAnimators,
+        );
+      }
+      if (supportCarAnchor
+        && !supportCarAnchor.userData.modelLoading
+        && !supportCarAnchor.userData.modelLoaded
+        && !supportCarAnchor.userData.modelLoadError) {
+        this._loadSupportCar(supportCarAnchor);
+      }
+      if (workbenchAnchor
+        && !workbenchAnchor.userData.textureLoading
+        && !workbenchAnchor.userData.textureAssetsSettled) {
+        this._loadRollWorkbenchTextures(workbenchAnchor);
+      }
+    };
+
+    return {
+      dungeonKind: 'ascensionReliquary',
+      replacesStandardDungeon: true,
+      group,
+      rooms,
+      tiles: exteriorTiles,
+      floorTiles: exteriorFloorTiles,
+      verticalConnectors: roomConnections
+        .filter((connection) => connection.routes[0]?.connectorType === 'authoredVerticalTransit')
+        .map((connection, index) => ({
+        id: `ascensionVerticalConnector:${index}`,
+        fromRoomId: connection.fromRoomId,
+        toRoomId: connection.toRoomId,
+        connectorType: 'authoredVerticalTransit',
+        })),
+      connectionPlans: [],
+      verticalPortals: [],
+      roomArchetypes: rooms.map((room) => ({
+        id: room.id,
+        type: room.type,
+        archetype: room.archetype,
+        archetypeId: room.archetypeId,
+        flavor: null,
+        flavorId: null,
+        layoutVariant: room.specialEnvironmentId
+          ? 'dedicatedAscensionWorld'
+          : room.layoutVariant ?? room.type,
+        purpose: room.purpose,
+        mood: room.mood,
+        environmentalStory: room.environmentalStory,
+        ceilingHeight: null,
+        verticalPlan: {
+          minY: room.minY,
+          maxY: room.maxY,
+          centerY: room.centerY,
+          verticalIndex: room.verticalIndex,
+        },
+        specialEnvironmentId: room.specialEnvironmentId,
+        progressionBand: Math.max(0, (room.verticalIndex ?? -1) + 1),
+      })),
+      layoutVariant: {
+        id: 'dedicatedAscensionWorld',
+        profileId: ASCENSION_ENGINE_PROFILE_ID,
+        authored: true,
+      },
+      progression,
+      minimap,
+      doors: exteriorDoors,
+      keycards: [],
+      keySeeker: exteriorLandmarks.keySeeker,
+      chests: [],
+      mechanisms: [],
+      puzzleBlocks: [],
+      pressurePlates: [],
+      conveyorPuzzles: [],
+      platforms,
+      npcAnimationMixers: exteriorLandmarks.npcAnimationMixers,
+      npcAnimators: exteriorLandmarks.npcAnimators,
+      safeInteractables,
+      safeZones,
+      solidZones,
+      aerialBoundaryZones: exteriorAerialBoundaryZones,
+      encounters,
+      traps: [],
+      conveyors: [],
+      shrine: null,
+      tileSize: this.tileSize,
+      playerStart,
+      playerStartFacing: new THREE.Vector3(0, 0, 1),
+      campReturnPosition,
+      campReturnFacing: new THREE.Vector3(0, 0, 1),
+      ruinEntryPosition,
+      ruinEntryFacing: new THREE.Vector3(0, 0, -1),
+      ruinExitPosition: summitPosition.clone(),
+      extractionPosition: summitPosition.clone(),
+      enemySpawnPoints: [],
+      shrinePosition: summitPosition,
+      boundsRadius: 120,
+      renderCullGroups: [],
+      specialEnvironment: stage,
+      specialEnvironmentId: stage.id,
+      generationAttempts: 1,
+      activateNpcAssets,
+    };
   }
 
   _generateOnce() {
@@ -633,7 +1313,17 @@ export class DungeonGenerator {
       { id: 'keycardRoom', type: 'keycard', x: keycardX, z: keycardZ, width: 23, depth: 21 },
       { id: 'trapRoom', type: 'trap', x: trapX, z: trapZ, width: 17, depth: this._choose([15, 17]) },
       { id: 'conveyorRoom', type: 'conveyor', x: conveyorX, z: conveyorZ, width: 21, depth: 17 },
-      { id: 'bossRoom', type: 'boss', x: bossX, z: bossZ, width: 21, depth: 19 },
+      {
+        id: 'bossRoom',
+        type: 'boss',
+        x: bossX,
+        z: bossZ,
+        width: 21,
+        depth: 19,
+        specialEnvironmentId: this.bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+          ? 'verticalTransitReliquary'
+          : null,
+      },
       { id: 'shrineRoom', type: 'shrine', x: shrineX, z: shrineZ, width: 25, depth: 23 },
     ];
     const serverRoom = {
@@ -837,6 +1527,17 @@ export class DungeonGenerator {
     const verticalPortals = this._addVerticalConnectionPortals(group, connectionPlans, materials);
     const landmarks = this._addRoomLandmarks(group, rooms, materials, tiles, floorTiles, solidZones);
     landmarks.platforms.push(...this._createGeneratedPlatformSurfaces(floorTiles));
+    const specialEnvironmentRoom = rooms.find((room) => room.specialEnvironmentId === 'verticalTransitReliquary');
+    const specialEnvironment = specialEnvironmentRoom
+      ? createVerticalTransitReliquary({
+        room: specialEnvironmentRoom,
+        tileSize: this.tileSize,
+        seed: `${this.bossProfileId}:${this.difficulty}:${specialEnvironmentRoom.x}:${specialEnvironmentRoom.z}`,
+      })
+      : null;
+    if (specialEnvironment) {
+      specialEnvironment.attachToDungeon({ group, platforms: landmarks.platforms, solidZones });
+    }
     const encounters = this._createEncounterDefinitions(rooms, floorTiles, solidZones);
     const trapVisualsByRoom = new Map(landmarks.trapVisuals.map((entry) => [entry.roomId, entry.object]));
 
@@ -928,6 +1629,7 @@ export class DungeonGenerator {
         environmentalStory: room.environmentalStory ?? null,
         ceilingHeight: room.ceilingHeight ?? null,
         verticalPlan: room.verticalPlan ?? null,
+        specialEnvironmentId: room.specialEnvironmentId ?? null,
         progressionBand: PROGRESSION_ROOM_BANDS[room.id] ?? 0,
       })),
       layoutVariant,
@@ -960,6 +1662,8 @@ export class DungeonGenerator {
       shrinePosition: landmarks.shrine?.position?.clone?.() ?? this._tileToWorld(shrineRoom.x, shrineRoom.z, tiles),
       boundsRadius: this._calculateBoundsRadius(tiles),
       renderCullGroups,
+      specialEnvironment,
+      specialEnvironmentId: specialEnvironment?.id ?? null,
     };
   }
 
@@ -1265,6 +1969,28 @@ export class DungeonGenerator {
       room.machineryZones = metadata.archetype.requiredFeatures.filter((feature) => (
         feature.includes('machine') || feature.includes('tank') || feature.includes('reactor') || feature.includes('pump')
       ));
+      if (room.specialEnvironmentId === 'verticalTransitReliquary') {
+        room.archetypeId = 'vertical_transit_reliquary';
+        room.archetype = 'Vertical Transit Reliquary';
+        room.layoutVariantId = 'ascension_engine_launch_shaft';
+        room.layoutVariant = 'Four-chamber authored vertical pursuit shaft';
+        room.purpose = 'A dedicated traversal boss stage whose impact machinery constructs the ascent route.';
+        room.mood = 'A dark launch foundry opening upward through elevator ruins and suspended machinery.';
+        room.environmentalStory = 'Ancient transit machinery was built around the same compression technology as the guardian leg.';
+        room.heightCategory = 'open-shaft';
+        room.ceilingHeight = 26;
+        room.verticalPlan = {
+          archetype: 'authored_vertical_boss_stage',
+          intent: 'Four deterministic seal checkpoints climb to a dedicated summit.',
+          requestedTiers: [{ level: 0, elevation: 0 }],
+          tierMap: [],
+          platformNodes: [],
+          catwalkNodes: [],
+          stairConnectors: [],
+          rampConnectors: [],
+          traversalRoutes: [],
+        };
+      }
       room.exitSockets = [];
     }
   }
@@ -5701,7 +6427,7 @@ export class DungeonGenerator {
   }
 
   _markRoomCatwalks(tiles, room) {
-    if (!room || RUIN_OPEN_AIR_ROOM_TYPES.has(room.type)) {
+    if (!room || room.specialEnvironmentId || RUIN_OPEN_AIR_ROOM_TYPES.has(room.type)) {
       return;
     }
 
@@ -7538,6 +8264,9 @@ export class DungeonGenerator {
       if (room.type === 'hub' || room.type === 'camp') {
         continue;
       }
+      if (room.specialEnvironmentId) {
+        continue;
+      }
 
       const roomGroup = createRoomGroup(room);
       const halfW = Math.max(1.1, Math.floor(room.width / 2) * this.tileSize - 0.7);
@@ -8381,7 +9110,9 @@ export class DungeonGenerator {
       );
     };
 
-    for (const room of rooms.filter((candidate) => !RUIN_OPEN_AIR_ROOM_TYPES.has(candidate.type))) {
+    for (const room of rooms.filter((candidate) => (
+      !candidate.specialEnvironmentId && !RUIN_OPEN_AIR_ROOM_TYPES.has(candidate.type)
+    ))) {
       const centerX = room.x * this.tileSize;
       const centerZ = room.z * this.tileSize;
       const halfW = Math.floor(room.width / 2) * this.tileSize;
@@ -9034,8 +9765,11 @@ export class DungeonGenerator {
         continue;
       }
 
-      const ceiling = new THREE.Mesh(ceilingGeometry, materials.ceiling);
       const room = roomById.get(tile.roomId);
+      if (room?.specialEnvironmentId) {
+        continue;
+      }
+      const ceiling = new THREE.Mesh(ceilingGeometry, materials.ceiling);
       const ceilingHeight = room?.ceilingHeight ?? 8.4;
       ceiling.name = 'dungeonRoomCeiling';
       ceiling.position.set(
@@ -9782,6 +10516,9 @@ export class DungeonGenerator {
     const doors = [];
 
     for (const descriptor of descriptors) {
+      if (!descriptor.from || !descriptor.to) {
+        continue;
+      }
       const connectionPlan = connectionPlans.find((plan) => (
         plan.level === 0
         && plan.fromRoomId === descriptor.from.id
@@ -12065,6 +12802,7 @@ export class DungeonGenerator {
           roster,
           roomArchetypeId: room.archetypeId,
           roomFlavorId: room.flavorId,
+          specialEnvironmentId: room.specialEnvironmentId ?? null,
           enemyTags: enemyEffects?.favoredTags ?? [],
           enemySuppressedTags: enemyEffects?.suppressedTags ?? [],
           enemyHealthMultiplier: enemyEffects?.healthMultiplier ?? 1,

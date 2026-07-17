@@ -49,11 +49,51 @@
 .boss-health-track > span,
 .boss-signature-track > span { display: block; width: 100%; height: 100%; transform-origin: left center; transition: transform 120ms linear; }
 .boss-health-track > span { background: linear-gradient(90deg, #8e251d, #ff5b35 62%, #ffd071); }
-.boss-phase-marker { position: absolute; left: 50%; top: -0.2rem; width: 2px; height: 1.1rem; background: #fff3c0; box-shadow: 0 0 5px #fff; }
+.boss-phase-marker {
+  position: absolute;
+  top: -0.2rem;
+  display: none;
+  width: 2px;
+  height: 1.1rem;
+  background: #fff3c0;
+  box-shadow: 0 0 5px #fff;
+}
+.boss-phase-marker[data-segment-marker="1"] { left: 25%; }
+.boss-phase-marker[data-segment-marker="2"] { left: 50%; display: block; }
+.boss-phase-marker[data-segment-marker="3"] { left: 75%; }
+.boss-hud.is-four-segment .boss-phase-marker { display: block; }
 .boss-signature-row { margin-top: 0.44rem; color: #d8caa7; font: 650 0.66rem/1.2 monospace; text-transform: uppercase; letter-spacing: 0.08em; }
 .boss-signature-track { flex: 1; height: 0.34rem; }
 .boss-signature-track > span { background: linear-gradient(90deg, #9a5a27, #ffd36f); }
 #boss-signature-status { color: #ffd36f; min-width: 6.5rem; text-align: right; }
+.boss-encounter-progress {
+  margin-top: 0.42rem;
+  color: #c7b78f;
+  font: 650 0.62rem/1.2 monospace;
+  letter-spacing: 0.09em;
+  text-align: center;
+  text-transform: uppercase;
+}
+.boss-hud.is-four-segment {
+  border-color: rgba(238, 185, 91, 0.82);
+  box-shadow: 0 0 32px rgba(255, 106, 52, 0.25), inset 0 0 20px rgba(255, 205, 112, 0.08);
+}
+.boss-hud.is-four-segment .boss-hud-heading { align-items: flex-start; }
+.boss-hud.is-four-segment #boss-hud-phase {
+  max-width: 52%;
+  line-height: 1.25;
+  text-align: right;
+}
+.boss-hud.is-four-segment #boss-signature-status {
+  max-width: 19rem;
+  font-size: 0.61rem;
+  line-height: 1.25;
+}
+.boss-hud.is-four-segment[data-encounter-mode="punish"] #boss-hud-phase,
+.boss-hud.is-four-segment[data-encounter-mode="finalCharge"] #boss-hud-phase {
+  color: #ff8f66;
+  text-shadow: 0 0 8px rgba(255, 87, 48, 0.65);
+}
 
 .boss-intro-banner,
 .boss-victory-banner {
@@ -123,6 +163,9 @@
 
 @media (max-width: 700px) {
   .boss-hud { width: 88vw; top: 3.4rem; }
+  .boss-hud.is-four-segment .boss-signature-row { flex-wrap: wrap; }
+  .boss-hud.is-four-segment .boss-signature-track { order: 3; flex-basis: 100%; }
+  .boss-hud.is-four-segment #boss-signature-status { min-width: 0; max-width: 58%; }
   .boss-hunts-grid { grid-template-columns: 1fr; }
 }
 
@@ -441,6 +484,18 @@ button:focus-visible {
 
 .minimap-room.is-blocked {
   stroke-dasharray: 1.2 1;
+}
+
+.minimap-room-label {
+  fill: rgba(229, 216, 176, 0.88);
+  font-family: "Rajdhani", sans-serif;
+  font-size: 1.05px;
+  font-weight: 700;
+  letter-spacing: 0.08px;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: rgba(5, 9, 12, 0.9);
+  stroke-width: 0.22px;
 }
 
 .minimap-hallway {
@@ -1733,6 +1788,19 @@ button:focus-visible {
   padding-right: 4px;
 }
 
+.inventory-panel[data-mode="garage"] .inventory-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.inventory-panel[data-mode="garage"] .inventory-layout > section:last-child {
+  display: none;
+}
+
+.inventory-panel[data-mode="garage"] .garage-weapon-grid,
+.inventory-panel[data-mode="garage"] .equipment-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .inventory-layout > section:last-child {
   overflow-x: hidden;
   overflow-y: auto;
@@ -2018,7 +2086,6 @@ button:focus-visible {
 
 .is-buster-lab .inventory-layout > section:first-child,
 .is-buster-lab .salvage-controls,
-.is-buster-lab .fixed-inventory-heading,
 .is-buster-lab .inventory-layout > section:last-child > .inventory-subheading,
 .is-buster-lab #inventory-items {
   display: none;
@@ -2892,36 +2959,24 @@ button:focus-visible {
   text-align: right;
 }
 
-.fixed-inventory-heading {
-  margin-top: 14px;
-}
-
-.fixed-inventory-note {
-  display: grid;
-  gap: 5px;
-  padding: 12px;
-  border: 1px solid rgba(125, 248, 255, 0.24);
-  border-radius: 6px;
-  background: rgba(45, 153, 183, 0.08);
-}
-
-.fixed-inventory-note strong {
-  color: #7df8ff;
-  font-size: 12px;
-}
-
-.fixed-inventory-note span {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
 .inventory-list {
   display: grid;
   max-height: min(496px, calc(min(680px, calc(100vh - 32px)) - 184px));
   gap: 8px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.garage-migration-recovery {
+  margin-top: 16px;
+  padding-top: 2px;
+  border-top: 1px solid rgba(166, 190, 220, 0.16);
+}
+
+.garage-migration-recovery .inventory-list {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .inventory-item {
@@ -3550,6 +3605,17 @@ button:focus-visible {
     display: flex;
     flex-direction: column;
     overflow: auto;
+  }
+
+  .inventory-layout > section:first-child,
+  .inventory-layout > section:last-child {
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .inventory-panel[data-mode="garage"] .garage-weapon-grid,
+  .inventory-panel[data-mode="garage"] .equipment-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .inventory-list {

@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 const BOSS_PROFILE_IDS = [
+  'ascensionEngine',
   'pursuitRegent',
   'rubyOpticOracle',
   'ballisticsVizier',
@@ -13,7 +14,7 @@ const BOSS_PROFILE_IDS = [
 
 const BOSS_TEST_FRAME_RATES = [30, 60, 120];
 const GENERIC_ARENA_PATTERN_PROFILE_IDS = BOSS_PROFILE_IDS.filter(
-  (profileId) => profileId !== 'rubyOpticOracle',
+  (profileId) => profileId !== 'rubyOpticOracle' && profileId !== 'ascensionEngine',
 );
 
 async function waitForGame(page) {
@@ -1268,7 +1269,7 @@ test('authored arena patterns keep warning cadence and resource caps at 30, 60, 
   }
 });
 
-test('all eight live bosses sustain a simulated 60-second encounter within authored resource caps and clean up', async ({ page }) => {
+test('all nine live bosses sustain a simulated 60-second encounter within authored resource caps and clean up', async ({ page }) => {
   test.slow();
   await page.goto('/?bossDebug=1&reaverbotSeed=boss-performance-runtime');
   await waitForGame(page);

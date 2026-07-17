@@ -944,7 +944,7 @@ export class SharukurusuEnemy extends Enemy {
       source: this,
       attackKind,
       guardable: true,
-      reactionTier: powerfulKnockback ? 2 : 1,
+      reactionTier: powerfulKnockback ? 3 : 1,
       knockbackDirection: tempDirection,
       knockbackStrength: attackKind === 'sharukurusuDivingBlades' ? 1.24 : 1.08,
     });

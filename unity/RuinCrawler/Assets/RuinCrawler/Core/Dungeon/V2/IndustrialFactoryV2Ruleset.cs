@@ -4,11 +4,11 @@ namespace RuinCrawler.Core.Dungeon.V2
     {
         public const int MaximumGenerationAttempts = 12;
         public const int MaximumVariantBacktracksPerAttempt = 255;
-        public const int ContractVersion = 2;
+        public const int ContractVersion = 3;
         public const double MaximumCertifiedPhysicalTransition = 8.1d;
         public const string RulesetVersion = "industrial-factory-v2";
         public const string ProfileId = "industrial-factory-v2";
-        public const string ContentPackVersion = "industrial-factory-v2-contracts-v3-certified-placement";
+        public const string ContentPackVersion = "industrial-factory-v2-contracts-v4-authored-composition";
         public const string FactoryDistrictId = "district-factory";
         public const string WaterworksDistrictId = "district-waterworks";
         public const string HazardDistrictId = "district-hazard-undercroft";

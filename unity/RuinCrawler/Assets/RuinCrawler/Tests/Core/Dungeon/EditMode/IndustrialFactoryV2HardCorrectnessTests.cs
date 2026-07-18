@@ -110,20 +110,18 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void ValidatorRejectsMissingCredentialBarrierAndDeclaredBypass()
         {
             DungeonPlanV2 source = Generate("protected-boundary-negative-contract");
+            DungeonSurfacePlanV2 credentialBarrier = DungeonV2SemanticFixtureQueries.CredentialBarrier(source);
             DungeonPlanV2 missingBarrier = Rebuild(
                 source,
                 surfaces: source.Surfaces.Where(value => !string.Equals(
                     value.Id,
-                    "surface-credential-bulkhead",
+                    credentialBarrier.Id,
                     StringComparison.Ordinal)));
             IndustrialFactoryV2ValidationResult missingBarrierResult =
                 new IndustrialFactoryV2Validator().Validate(missingBarrier);
             AssertCode(missingBarrierResult.Errors, "PROTECTED_BOUNDARY_BYPASS");
 
-            DungeonTraversalEdgePlanV2 protectedEdge = source.TraversalEdges.Single(value =>
-                value.IsProtectedProgressionBoundary
-                && string.Equals(value.FromRegionId, "factory-credential-tower", StringComparison.Ordinal)
-                && string.Equals(value.ToRegionId, "factory-machine-core", StringComparison.Ordinal));
+            DungeonTraversalEdgePlanV2 protectedEdge = DungeonV2SemanticFixtureQueries.CredentialBoundary(source);
             var bypass = new DungeonTraversalEdgePlanV2(
                 "edge-test-credential-bypass",
                 protectedEdge.FromRegionId,
@@ -145,18 +143,24 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void SolverRejectsUndeclaredLowerRegionJumpToProtectedFarSide()
         {
             DungeonPlanV2 source = Generate("protected-lower-region-negative-contract");
+            DungeonTraversalEdgePlanV2 boundary = DungeonV2SemanticFixtureQueries.CredentialBoundary(source);
+            DungeonFallCatchmentPlanV2 hazardCatchment = DungeonV2SemanticFixtureQueries.HazardCatchment(source);
+            var referencedRailIds = new HashSet<string>(
+                source.FallExposures.SelectMany(value => value.RailConstraintSurfaceIds),
+                StringComparer.Ordinal);
             DungeonPlanV2 invalid = Rebuild(
                 source,
                 surfaces: source.Surfaces.Where(surface =>
                     !(surface.IsStructural
                         && !surface.IsWalkable
-                        && (string.Equals(surface.RegionId, "hazard-undercroft-basin", StringComparison.Ordinal)
-                            || string.Equals(surface.RegionId, "factory-machine-core", StringComparison.Ordinal)))));
+                        && !referencedRailIds.Contains(surface.Id)
+                        && (string.Equals(surface.RegionId, hazardCatchment.RegionId, StringComparison.Ordinal)
+                            || string.Equals(surface.RegionId, boundary.ToRegionId, StringComparison.Ordinal)))));
 
             DungeonProgressionSolveResultV2 result = new DungeonProgressionSolverV2().Solve(invalid);
             Assert.That(result.ProtectedBoundaryViolations.Any(value =>
-                value.Contains("from hazard-undercroft-basin", StringComparison.Ordinal)
-                && value.Contains("factory-machine-core", StringComparison.Ordinal)), Is.True,
+                value.Contains("from " + hazardCatchment.RegionId, StringComparison.Ordinal)
+                && value.Contains(boundary.ToRegionId, StringComparison.Ordinal)), Is.True,
                 string.Join(" | ", result.ProtectedBoundaryViolations));
         }
 
@@ -164,6 +168,7 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void ValidatorRejectsAlwaysAuthorizedRouteExitAcrossCredentialBoundary()
         {
             DungeonPlanV2 source = Generate("route-exit-negative-contract");
+            DungeonTraversalEdgePlanV2 boundary = DungeonV2SemanticFixtureQueries.CredentialBoundary(source);
             DungeonExplorationRoutePlanV2 recovery = source.Routes.Single(value =>
                 value.Role == DungeonRouteRoleV2.Recovery);
             DungeonExplorationRoutePlanV2 invalidRecovery = new DungeonExplorationRoutePlanV2(
@@ -171,11 +176,14 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 recovery.OrderedTraversalEdgeIds,
                 recovery.Role,
                 recovery.RequiredPredicate,
-                recovery.AuthorizedExits.Select(value => new DungeonAuthorizedExitPlanV2(
-                    value.Id,
-                    value.ExitRegionId,
-                    value.RejoinRegionId,
-                    DungeonAccessPredicateV2.Always)),
+                recovery.AuthorizedExits.Concat(new[]
+                {
+                    new DungeonAuthorizedExitPlanV2(
+                        "exit-test-credential-bypass",
+                        boundary.FromRegionId,
+                        boundary.ToRegionId,
+                        DungeonAccessPredicateV2.Always)
+                }),
                 recovery.EstimatedTraversalSeconds,
                 recovery.RiskBudget,
                 recovery.DiscoveryIds,
@@ -232,10 +240,10 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void FallValidatorRejectsHoledLandingFootprintEvenWhenSafeAnchorFits()
         {
             DungeonPlanV2 source = Generate("fall-hole-negative-contract");
-            DungeonFallCatchmentPlanV2 catchment = source.FallCatchments.Single(value =>
-                string.Equals(value.Id, "catchment-hazard-undercroft", StringComparison.Ordinal));
-            DungeonSurfacePlanV2 original = source.Surfaces.Single(value =>
-                value.Id == catchment.SafeSurfaceIds[0]);
+            DungeonFallCatchmentPlanV2 catchment = DungeonV2SemanticFixtureQueries.HazardCatchment(source);
+            DungeonSurfacePlanV2 original = DungeonV2SemanticFixtureQueries.PrimarySafeCatchmentSurface(
+                source,
+                catchment);
             DungeonAnchorPlanV2 safeAnchor = source.Anchors.Single(value => value.Id == catchment.SafeAnchorId);
             double minimumX = catchment.Volume.HorizontalVertices.Min(value => value.X);
             double maximumX = catchment.Volume.HorizontalVertices.Max(value => value.X);
@@ -280,29 +288,25 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void FallValidatorRejectsMissingAndTruncatedMovingPlatformSweep()
         {
             DungeonPlanV2 source = Generate("moving-platform-negative-contract");
-            DungeonSurfacePlanV2 platform = source.Surfaces.Single(value =>
-                string.Equals(
-                    value.Id,
-                    IndustrialFactoryV2Ruleset.ReservoirMovingPlatformSurfaceId,
-                    StringComparison.Ordinal));
-            DungeonFallExposurePlanV2 platformExposure = source.FallExposures.Single(value =>
-                string.Equals(value.SourceSurfaceId, platform.Id, StringComparison.Ordinal));
+            DungeonFallExposurePlanV2 platformExposure = source.FallExposures.First();
+            DungeonSurfacePlanV2 original = source.Surfaces.Single(value =>
+                string.Equals(value.Id, platformExposure.SourceSurfaceId, StringComparison.Ordinal));
+            var platform = new DungeonSurfacePlanV2(
+                original.Id,
+                original.ModuleInstanceId,
+                original.RegionId,
+                DungeonSurfaceKindV2.MovingPlatform,
+                original.Volume,
+                original.MaterialProfileId,
+                original.IsStructural,
+                original.IsWalkable,
+                original.ActivePredicate,
+                original.ControllerId,
+                original.Source);
 
             DungeonPlanV2 missing = Rebuild(
                 source,
-                surfaces: source.Surfaces.Concat(new[]
-                {
-                    new DungeonSurfacePlanV2(
-                        "surface-test-uncovered-moving-platform",
-                        platform.ModuleInstanceId,
-                        platform.RegionId,
-                        DungeonSurfaceKindV2.MovingPlatform,
-                        platform.Volume,
-                        platform.MaterialProfileId,
-                        true,
-                        true,
-                        platform.ActivePredicate)
-                }));
+                surfaces: source.Surfaces.Select(value => value.Id == platform.Id ? platform : value));
             AssertCode(new DungeonFallCoverageValidatorV2().Validate(missing), "MOVING_PLATFORM_SWEEP_UNCOVERED");
 
             DungeonConvexPrismV2 truncatedSource = Box(
@@ -317,7 +321,7 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 platformExposure.SourceRegionId,
                 platformExposure.SourceSurfaceId,
                 truncatedSource,
-                platformExposure.Causes,
+                platformExposure.Causes | DungeonFallExposureCauseV2.MovingSurfaceFailure,
                 platformExposure.MovementProfileVersion,
                 platformExposure.MaximumHorizontalDisplacement,
                 platformExposure.ConservativeFallVolume,
@@ -327,6 +331,7 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 platformExposure.ReactionEnvelopeId);
             DungeonPlanV2 truncated = Rebuild(
                 source,
+                surfaces: source.Surfaces.Select(value => value.Id == platform.Id ? platform : value),
                 exposures: source.FallExposures.Select(value =>
                     value.Id == platformExposure.Id ? truncatedExposure : value));
             AssertCode(new DungeonFallCoverageValidatorV2().Validate(truncated), "MOVING_PLATFORM_SWEEP_TRUNCATED");
@@ -405,7 +410,11 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 source.FluidNetworks,
                 controllers ?? source.EnvironmentControllers,
                 catchments ?? source.FallCatchments,
-                exposures ?? source.FallExposures);
+                exposures ?? source.FallExposures,
+                source.GameplayBeats,
+                source.AbstractRouteGraph,
+                source.BeatAssignments,
+                source.MiniDungeonCompositions);
         }
 
         private static DungeonSurfacePlanV2 ReplaceSurfaceVolume(

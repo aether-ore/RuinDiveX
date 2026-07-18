@@ -48,6 +48,13 @@ namespace RuinCrawler.Core.Dungeon.V2
             IndustrialFactoryV2Ruleset.StoredInReservoir
         };
 
+        private readonly IIndustrialFactoryV2ModuleCatalog moduleCatalog;
+
+        public IndustrialFactoryV2Validator(IIndustrialFactoryV2ModuleCatalog moduleCatalog = null)
+        {
+            this.moduleCatalog = moduleCatalog ?? IndustrialFactoryV2ModuleCatalog.Default;
+        }
+
         public IndustrialFactoryV2ValidationResult Validate(DungeonPlanV2 plan)
         {
             var errors = new List<IndustrialFactoryV2ValidationIssue>();
@@ -68,13 +75,24 @@ namespace RuinCrawler.Core.Dungeon.V2
                 Add(errors, "VOID_POLICY_INVALID", "/voidPolicy", "industrial-factory-v2 prohibits void fall destinations.");
             }
 
-            if (plan.MacroRoles.Count != 7 || plan.Regions.Count < 12 || plan.Regions.Count > 18)
+            if (plan.Modules.Count < DungeonPlanV2.MinimumModuleCount
+                || plan.Modules.Count > DungeonPlanV2.MaximumModuleCount
+                || plan.Regions.Count < DungeonPlanV2.MinimumRegionCount
+                || plan.Regions.Count > DungeonPlanV2.MaximumRegionCount)
             {
-                Add(errors, "SPATIAL_BUDGET_INVALID", "/regions", "The profile requires seven macro roles and 12-18 playable regions.");
+                Add(errors, "SPATIAL_BUDGET_INVALID", "/regions", "The profile requires 8-14 authored modules and 12-18 playable regions.");
             }
 
             foreach (IndustrialFactoryV2ValidationIssue issue in
-                DungeonCertifiedModulePlacementValidatorV2.Validate(plan))
+                DungeonCertifiedModulePlacementValidatorV2.Validate(plan, moduleCatalog))
+            {
+                errors.Add(issue);
+            }
+            foreach (IndustrialFactoryV2ValidationIssue issue in DungeonModuleEnvelopeValidatorV2.Validate(plan))
+            {
+                errors.Add(issue);
+            }
+            foreach (IndustrialFactoryV2ValidationIssue issue in DungeonAbstractRouteSocketValidatorV2.Validate(plan))
             {
                 errors.Add(issue);
             }
@@ -89,7 +107,7 @@ namespace RuinCrawler.Core.Dungeon.V2
             }
 
             ValidateDistrictSpan(plan, waterworks, 3, 3, "WATERWORKS_SPAN_INVALID", errors);
-            ValidateDistrictSpan(plan, hazard, 2, 2, "HAZARD_SPAN_INVALID", errors);
+            ValidateHazardDistrictSpan(plan, hazard, errors);
             ValidateWaterworks(plan, waterworks, errors);
             ValidateDiscoveries(plan, waterworks, hazard, errors);
             ValidateDamageFreeHazardExploration(plan, hazard, errors);
@@ -608,7 +626,7 @@ namespace RuinCrawler.Core.Dungeon.V2
                         break;
                     }
 
-                    if (index > 0 && !IsCertifiedHazardFreeSegment(
+                    if (index > 0 && !HasCertifiedHazardFreePath(
                         plan,
                         pair.Value[index - 1],
                         pair.Value[index],
@@ -647,7 +665,88 @@ namespace RuinCrawler.Core.Dungeon.V2
             }
         }
 
-        private static bool IsCertifiedHazardFreeSegment(
+        private static bool HasCertifiedHazardFreePath(
+            DungeonPlanV2 plan,
+            DungeonPoint3 from,
+            DungeonPoint3 to,
+            string regionId)
+        {
+            if (SegmentIsCertifiedHazardFree(plan, from, to, regionId))
+            {
+                return true;
+            }
+
+            DungeonRegionPlanV2 region = FindRegion(plan, regionId);
+            if (region == null)
+            {
+                return false;
+            }
+
+            // The hazard route is certified against the authored walkable
+            // surface union rather than against a straight line between two
+            // logical anchors. This permits an intentional safe route around a
+            // magma/electrical field, while capsule erosion and segment checks
+            // still reject narrow seams and corner cutting.
+            const double step = 0.25d;
+            int minimumX = (int)Math.Floor((region.Bounds.Minimum.X - from.X) / step) - 1;
+            int maximumX = (int)Math.Ceiling((region.Bounds.Maximum.X - from.X) / step) + 1;
+            int minimumZ = (int)Math.Floor((region.Bounds.Minimum.Z - from.Z) / step) - 1;
+            int maximumZ = (int)Math.Ceiling((region.Bounds.Maximum.Z - from.Z) / step) + 1;
+            var queue = new Queue<GridPoint>();
+            var visited = new HashSet<long>();
+            queue.Enqueue(new GridPoint(0, 0));
+            visited.Add(GridKey(0, 0));
+            int[] offsets = { -1, 0, 1 };
+            while (queue.Count > 0)
+            {
+                GridPoint current = queue.Dequeue();
+                var currentPoint = new DungeonPoint3(
+                    from.X + current.X * step,
+                    from.Y,
+                    from.Z + current.Z * step);
+                double deltaX = to.X - currentPoint.X;
+                double deltaZ = to.Z - currentPoint.Z;
+                if (deltaX * deltaX + deltaZ * deltaZ <= step * step * 2.01d
+                    && SegmentIsCertifiedHazardFree(plan, currentPoint, to, regionId))
+                {
+                    return true;
+                }
+
+                foreach (int offsetX in offsets)
+                foreach (int offsetZ in offsets)
+                {
+                    if (offsetX == 0 && offsetZ == 0)
+                    {
+                        continue;
+                    }
+
+                    int nextX = current.X + offsetX;
+                    int nextZ = current.Z + offsetZ;
+                    if (nextX < minimumX || nextX > maximumX
+                        || nextZ < minimumZ || nextZ > maximumZ
+                        || !visited.Add(GridKey(nextX, nextZ)))
+                    {
+                        continue;
+                    }
+
+                    var nextPoint = new DungeonPoint3(
+                        from.X + nextX * step,
+                        from.Y,
+                        from.Z + nextZ * step);
+                    if (!IsCertifiedHazardFreePoint(plan, nextPoint, regionId)
+                        || !SegmentIsCertifiedHazardFree(plan, currentPoint, nextPoint, regionId))
+                    {
+                        continue;
+                    }
+
+                    queue.Enqueue(new GridPoint(nextX, nextZ));
+                }
+            }
+
+            return false;
+        }
+
+        private static bool SegmentIsCertifiedHazardFree(
             DungeonPlanV2 plan,
             DungeonPoint3 from,
             DungeonPoint3 to,
@@ -656,7 +755,7 @@ namespace RuinCrawler.Core.Dungeon.V2
             double distance = Math.Sqrt(
                 (to.X - from.X) * (to.X - from.X)
                 + (to.Z - from.Z) * (to.Z - from.Z));
-            int samples = Math.Max(1, (int)Math.Ceiling(distance / 0.2d));
+            int samples = Math.Max(1, (int)Math.Ceiling(distance / 0.1d));
             for (int index = 0; index <= samples; index += 1)
             {
                 double t = index / (double)samples;
@@ -673,22 +772,32 @@ namespace RuinCrawler.Core.Dungeon.V2
             return true;
         }
 
+        private static long GridKey(int x, int z) => ((long)x << 32) ^ (uint)z;
+
+        private readonly struct GridPoint
+        {
+            public GridPoint(int x, int z)
+            {
+                X = x;
+                Z = z;
+            }
+
+            public int X { get; }
+            public int Z { get; }
+        }
+
         private static bool IsCertifiedHazardFreePoint(
             DungeonPlanV2 plan,
             DungeonPoint3 point,
             string regionId)
         {
-            bool hasFooting = plan.Surfaces.Any(surface =>
-                string.Equals(surface.RegionId, regionId, StringComparison.Ordinal)
-                && surface.IsWalkable
-                && surface.Kind != DungeonSurfaceKindV2.Hazard
-                && Math.Abs(point.Y - surface.Volume.MaximumY) <= HazardRouteGroundingTolerance
-                && DungeonProgressionSolverV2.PointInsideConvex(
-                    point.X,
-                    point.Z,
-                    surface.Volume.HorizontalVertices,
-                    TraversalProfilesV2.Dry.CapsuleRadius));
-            if (!hasFooting)
+            DungeonSurfacePlanV2[] footingSurfaces = plan.Surfaces.Where(surface =>
+                    string.Equals(surface.RegionId, regionId, StringComparison.Ordinal)
+                    && surface.IsWalkable
+                    && surface.Kind != DungeonSurfaceKindV2.Hazard
+                    && Math.Abs(point.Y - surface.Volume.MaximumY) <= HazardRouteGroundingTolerance)
+                .ToArray();
+            if (!CapsuleFootprintCoveredBySurfaceUnion(point, footingSurfaces))
             {
                 return false;
             }
@@ -705,7 +814,46 @@ namespace RuinCrawler.Core.Dungeon.V2
                     point.X,
                     point.Z,
                     surface.Volume.HorizontalVertices,
-                    -TraversalProfilesV2.Dry.CapsuleRadius));
+                        -TraversalProfilesV2.Dry.CapsuleRadius));
+        }
+
+        private static bool CapsuleFootprintCoveredBySurfaceUnion(
+            DungeonPoint3 point,
+            IReadOnlyList<DungeonSurfacePlanV2> surfaces)
+        {
+            if (surfaces.Count == 0)
+            {
+                return false;
+            }
+
+            // Surface seams are not holes. Certify the capsule footprint
+            // against the union of authored walkable polygons so a floor made
+            // from several baked prisms remains traversable around a shaft.
+            // The centre plus a dense deterministic circumference rejects real
+            // gaps while allowing exact shared edges.
+            const int circumferenceSamples = 32;
+            for (int sample = -1; sample < circumferenceSamples; sample += 1)
+            {
+                double x = point.X;
+                double z = point.Z;
+                if (sample >= 0)
+                {
+                    double angle = sample * Math.PI * 2d / circumferenceSamples;
+                    x += Math.Cos(angle) * TraversalProfilesV2.Dry.CapsuleRadius;
+                    z += Math.Sin(angle) * TraversalProfilesV2.Dry.CapsuleRadius;
+                }
+
+                if (!surfaces.Any(surface => DungeonProgressionSolverV2.PointInsideConvex(
+                    x,
+                    z,
+                    surface.Volume.HorizontalVertices,
+                    0d)))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private static bool SameHorizontalPoint(DungeonPoint3 a, DungeonPoint3 b)
@@ -849,6 +997,42 @@ namespace RuinCrawler.Core.Dungeon.V2
             if (district.RegionIds.Count < minimumRegions || macros.Count < minimumMacros)
             {
                 Add(errors, code, "/districts/" + district.Id, "District does not meet its region/macro span.");
+            }
+        }
+
+        private static void ValidateHazardDistrictSpan(
+            DungeonPlanV2 plan,
+            DungeonBiomeDistrictPlanV2 district,
+            ICollection<IndustrialFactoryV2ValidationIssue> errors)
+        {
+            DungeonRegionPlanV2[] regions = district.RegionIds
+                .Select(regionId => FindRegion(plan, regionId))
+                .Where(region => region != null)
+                .ToArray();
+            if (regions.Length < 2)
+            {
+                Add(errors, "HAZARD_SPAN_INVALID", "/districts/" + district.Id,
+                    "The Hazard Undercroft requires at least two authored playable regions.");
+                return;
+            }
+
+            var districtRegionIds = new HashSet<string>(district.RegionIds, StringComparer.Ordinal);
+            var owningModuleIds = new HashSet<string>(
+                regions.SelectMany(region => region.ModuleInstanceIds),
+                StringComparer.Ordinal);
+            bool spansMultipleModules = owningModuleIds.Count >= 2;
+            bool hasCertifiedMultiRegionVerticalComposition = plan.Modules.Any(module =>
+                owningModuleIds.Contains(module.Id)
+                && module.VerticalCompositionId != null
+                && module.RegionIds.Count(regionId => districtRegionIds.Contains(regionId)) >= 2
+                && plan.TraversalEdges.Any(edge =>
+                    districtRegionIds.Contains(edge.FromRegionId)
+                    && districtRegionIds.Contains(edge.ToRegionId)
+                    && !string.Equals(edge.FromRegionId, edge.ToRegionId, StringComparison.Ordinal)));
+            if (!spansMultipleModules && !hasCertifiedMultiRegionVerticalComposition)
+            {
+                Add(errors, "HAZARD_SPAN_INVALID", "/districts/" + district.Id,
+                    "The Hazard Undercroft must span multiple authored modules or one certified multi-region vertical composition with an internal traversal edge.");
             }
         }
 

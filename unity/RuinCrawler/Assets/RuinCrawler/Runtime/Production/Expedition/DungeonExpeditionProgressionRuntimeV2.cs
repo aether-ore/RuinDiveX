@@ -377,13 +377,13 @@ namespace RuinCrawler.Runtime.Expedition
 
             const string PickupName = "LargeRefractorPickupV2";
             Transform child = anchor.transform.Find(PickupName);
-            GameObject target = child != null ? child.gameObject : new GameObject(PickupName);
             if (child == null)
             {
-                target.transform.SetParent(anchor.transform, false);
+                error = "The authored machine-core reward anchor is missing its Large Refractor presentation.";
+                return false;
             }
 
-            target.transform.localPosition = Vector3.up * 0.65f;
+            GameObject target = child.gameObject;
             SphereCollider collider = target.GetComponent<SphereCollider>();
             if (collider == null)
             {
@@ -572,7 +572,6 @@ namespace RuinCrawler.Runtime.Expedition
         private Collider triggerCollider;
         private Renderer refractorRenderer;
         private TextMesh label;
-        private Material runtimeMaterial;
 
         public bool IsAvailable { get; private set; }
         public bool IsConsumed { get; private set; }
@@ -650,77 +649,20 @@ namespace RuinCrawler.Runtime.Expedition
             Transform visual = transform.Find("RefractorVisual");
             if (visual == null)
             {
-                GameObject visualObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                visualObject.name = "RefractorVisual";
-                visualObject.transform.SetParent(transform, false);
-                visualObject.transform.localPosition = Vector3.up * 0.15f;
-                visualObject.transform.localRotation = Quaternion.Euler(45f, 45f, 0f);
-                visualObject.transform.localScale = new Vector3(0.42f, 0.65f, 0.42f);
-                Collider visualCollider = visualObject.GetComponent<Collider>();
-                if (visualCollider != null)
-                {
-                    visualCollider.enabled = false;
-                    if (Application.isPlaying) Destroy(visualCollider);
-                    else DestroyImmediate(visualCollider);
-                }
-                visual = visualObject.transform;
+                throw new InvalidOperationException(
+                    "Large Refractor runtime requires the authored RefractorVisual child; runtime fallback art is prohibited.");
             }
 
             refractorRenderer = visual.GetComponent<Renderer>();
-            if (refractorRenderer != null && runtimeMaterial == null)
+            if (refractorRenderer == null || refractorRenderer.sharedMaterial == null
+                || refractorRenderer.sharedMaterial.shader == null)
             {
-                Shader shader = Shader.Find("Universal Render Pipeline/Lit")
-                    ?? Shader.Find("Standard");
-                if (shader != null)
-                {
-                    runtimeMaterial = new Material(shader)
-                    {
-                        name = "LargeRefractor_Runtime",
-                        color = new Color(0.16f, 0.9f, 1f, 1f)
-                    };
-                    if (runtimeMaterial.HasProperty("_BaseColor"))
-                    {
-                        runtimeMaterial.SetColor("_BaseColor", new Color(0.16f, 0.9f, 1f, 1f));
-                    }
-                    if (runtimeMaterial.HasProperty("_EmissionColor"))
-                    {
-                        runtimeMaterial.EnableKeyword("_EMISSION");
-                        runtimeMaterial.SetColor("_EmissionColor", new Color(0.04f, 0.65f, 1f, 1f) * 2.2f);
-                    }
-                    refractorRenderer.sharedMaterial = runtimeMaterial;
-                }
+                throw new InvalidOperationException(
+                    "The authored Large Refractor presentation has no valid renderer/material/shader.");
             }
 
             Transform labelTransform = transform.Find("RefractorLabel");
-            if (labelTransform == null)
-            {
-                var labelObject = new GameObject("RefractorLabel");
-                labelObject.transform.SetParent(transform, false);
-                labelObject.transform.localPosition = Vector3.up * 1.05f;
-                label = labelObject.AddComponent<TextMesh>();
-                label.anchor = TextAnchor.MiddleCenter;
-                label.alignment = TextAlignment.Center;
-                label.characterSize = 0.085f;
-                label.fontSize = 48;
-                label.color = new Color(0.7f, 1f, 1f, 1f);
-                label.text = "LARGE REFRACTOR";
-            }
-            else
-            {
-                label = labelTransform.GetComponent<TextMesh>();
-            }
-        }
-
-        private void OnDestroy()
-        {
-            if (runtimeMaterial == null)
-            {
-                return;
-            }
-
-            if (Application.isPlaying) Destroy(runtimeMaterial);
-            else DestroyImmediate(runtimeMaterial);
-            runtimeMaterial = null;
+            label = labelTransform != null ? labelTransform.GetComponent<TextMesh>() : null;
         }
     }
 

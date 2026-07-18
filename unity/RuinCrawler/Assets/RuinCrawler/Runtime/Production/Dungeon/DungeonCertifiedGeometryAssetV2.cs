@@ -134,9 +134,12 @@ namespace RuinCrawler.Runtime.Dungeon
         [SerializeField] private DungeonSurfaceKindV2 kind;
         [SerializeField] private CertifiedDungeonColliderKindV2 colliderKind;
         [SerializeField] private CertifiedPrismDataV2 volume;
+        [SerializeField] private CertifiedRampWedgeDataV2 rampWedge;
         [SerializeField] private bool isStructural;
         [SerializeField] private bool isWalkable;
         [SerializeField] private string materialProfileId;
+        [SerializeField] private CertifiedPredicateDataV2 activePredicate;
+        [SerializeField] private string controllerId;
 
         public CertifiedDungeonSurfaceGeometryV2 ToCore()
         {
@@ -146,9 +149,12 @@ namespace RuinCrawler.Runtime.Dungeon
                 kind,
                 colliderKind,
                 volume.ToCore(),
+                rampWedge?.ToCore(),
                 isStructural,
                 isWalkable,
-                materialProfileId);
+                materialProfileId,
+                activePredicate?.ToCore() ?? DungeonAccessPredicateV2.Always,
+                string.IsNullOrWhiteSpace(controllerId) ? null : controllerId);
         }
 
         public static CertifiedSurfaceDataV2 FromCore(CertifiedDungeonSurfaceGeometryV2 value)
@@ -160,9 +166,118 @@ namespace RuinCrawler.Runtime.Dungeon
                 kind = value.Kind,
                 colliderKind = value.ColliderKind,
                 volume = CertifiedPrismDataV2.FromCore(value.Volume),
+                rampWedge = CertifiedRampWedgeDataV2.FromCore(value.RampWedge),
                 isStructural = value.IsStructural,
                 isWalkable = value.IsWalkable,
-                materialProfileId = value.MaterialProfileId
+                materialProfileId = value.MaterialProfileId,
+                activePredicate = CertifiedPredicateDataV2.FromCore(value.ActivePredicate),
+                controllerId = value.ControllerId
+            };
+        }
+    }
+
+    [Serializable]
+    internal sealed class CertifiedPredicateDataV2
+    {
+        [SerializeField] private CertifiedPredicateClauseDataV2[] clauses =
+            Array.Empty<CertifiedPredicateClauseDataV2>();
+
+        public DungeonAccessPredicateV2 ToCore()
+        {
+            return new DungeonAccessPredicateV2(
+                Select(clauses, value => value.ToCore()));
+        }
+
+        public static CertifiedPredicateDataV2 FromCore(DungeonAccessPredicateV2 value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            return new CertifiedPredicateDataV2
+            {
+                clauses = Select(value.Clauses, CertifiedPredicateClauseDataV2.FromCore)
+            };
+        }
+
+        private static TResult[] Select<TSource, TResult>(
+            System.Collections.Generic.IReadOnlyList<TSource> values,
+            Func<TSource, TResult> selector)
+        {
+            var result = new TResult[values.Count];
+            for (int index = 0; index < values.Count; index += 1)
+                result[index] = selector(values[index]);
+            return result;
+        }
+
+        private static TResult[] Select<TSource, TResult>(
+            TSource[] values,
+            Func<TSource, TResult> selector)
+        {
+            values ??= Array.Empty<TSource>();
+            var result = new TResult[values.Length];
+            for (int index = 0; index < values.Length; index += 1)
+            {
+                if (values[index] == null)
+                    throw new InvalidOperationException("Certified predicate arrays may not contain null records.");
+                result[index] = selector(values[index]);
+            }
+            return result;
+        }
+    }
+
+    [Serializable]
+    internal sealed class CertifiedPredicateClauseDataV2
+    {
+        [SerializeField] private CertifiedPredicateConditionDataV2[] conditions =
+            Array.Empty<CertifiedPredicateConditionDataV2>();
+
+        public DungeonPredicateClauseV2 ToCore()
+        {
+            conditions ??= Array.Empty<CertifiedPredicateConditionDataV2>();
+            var result = new DungeonPredicateConditionV2[conditions.Length];
+            for (int index = 0; index < conditions.Length; index += 1)
+            {
+                if (conditions[index] == null)
+                    throw new InvalidOperationException("Certified predicate conditions may not contain null records.");
+                result[index] = conditions[index].ToCore();
+            }
+            return new DungeonPredicateClauseV2(result);
+        }
+
+        public static CertifiedPredicateClauseDataV2 FromCore(DungeonPredicateClauseV2 value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            var result = new CertifiedPredicateConditionDataV2[value.Conditions.Count];
+            for (int index = 0; index < result.Length; index += 1)
+                result[index] = CertifiedPredicateConditionDataV2.FromCore(value.Conditions[index]);
+            return new CertifiedPredicateClauseDataV2 { conditions = result };
+        }
+    }
+
+    [Serializable]
+    internal sealed class CertifiedPredicateConditionDataV2
+    {
+        [SerializeField] private DungeonPredicateConditionKindV2 kind;
+        [SerializeField] private string subjectId;
+        [SerializeField] private DungeonPredicateOperatorV2 predicateOperator;
+        [SerializeField] private string expectedValue;
+
+        public DungeonPredicateConditionV2 ToCore()
+        {
+            return new DungeonPredicateConditionV2(
+                kind,
+                subjectId,
+                predicateOperator,
+                string.IsNullOrWhiteSpace(expectedValue) ? null : expectedValue);
+        }
+
+        public static CertifiedPredicateConditionDataV2 FromCore(DungeonPredicateConditionV2 value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            return new CertifiedPredicateConditionDataV2
+            {
+                kind = value.Kind,
+                subjectId = value.SubjectId,
+                predicateOperator = value.Operator,
+                expectedValue = value.ExpectedValue
             };
         }
     }
@@ -242,6 +357,7 @@ namespace RuinCrawler.Runtime.Dungeon
         [SerializeField] private CertifiedPoint3DataV2 position;
         [SerializeField] private CertifiedPoint3DataV2 facing;
         [SerializeField] private string socketTag;
+        [SerializeField] private CertifiedConnectorApertureDataV2 aperture;
 
         public CertifiedDungeonConnectorGeometryV2 ToCore()
         {
@@ -251,7 +367,10 @@ namespace RuinCrawler.Runtime.Dungeon
                 kind,
                 position.ToCore(),
                 facing.ToCore(),
-                socketTag);
+                socketTag,
+                aperture != null
+                    ? aperture.ToCore()
+                    : BuildCompatibilityAperture());
         }
 
         public static CertifiedConnectorDataV2 FromCore(CertifiedDungeonConnectorGeometryV2 value)
@@ -263,7 +382,132 @@ namespace RuinCrawler.Runtime.Dungeon
                 kind = value.Kind,
                 position = CertifiedPoint3DataV2.FromCore(value.Position),
                 facing = CertifiedPoint3DataV2.FromCore(value.Facing),
-                socketTag = value.SocketTag
+                socketTag = value.SocketTag,
+                aperture = CertifiedConnectorApertureDataV2.FromCore(value.Aperture)
+            };
+        }
+
+        private DungeonConnectorApertureV2 BuildCompatibilityAperture()
+        {
+            // Old serialized assets are not accepted by schema 2, but keeping
+            // reconstruction total produces a useful stale-schema diagnostic
+            // instead of an unrelated null-reference failure in the inspector.
+            DungeonPoint3 point = position.ToCore();
+            DungeonPoint3 direction = facing.ToCore();
+            bool xFacing = Math.Abs(direction.X) >= Math.Abs(direction.Z);
+            double halfWidth = 1.25d;
+            double halfDepth = 0.125d;
+            DungeonConvexPrismV2 volume = xFacing
+                ? CertifiedPrismDataV2.Box(
+                    point.X - halfDepth, point.X + halfDepth,
+                    point.Y - 0.5d, point.Y + 3.15d,
+                    point.Z - halfWidth, point.Z + halfWidth)
+                : CertifiedPrismDataV2.Box(
+                    point.X - halfWidth, point.X + halfWidth,
+                    point.Y - 0.5d, point.Y + 3.15d,
+                    point.Z - halfDepth, point.Z + halfDepth);
+            return new DungeonConnectorApertureV2(
+                volume,
+                socketTag,
+                new[] { kind },
+                "cap-" + socketTag);
+        }
+    }
+
+    [Serializable]
+    internal sealed class CertifiedRampWedgeDataV2
+    {
+        [SerializeField] private CertifiedPrismDataV2 boundingVolume;
+        [SerializeField] private double lowSurfaceY;
+        [SerializeField] private double highSurfaceY;
+        [SerializeField] private CertifiedPoint3DataV2 riseDirection;
+
+        public CertifiedDungeonRampWedgeV2 ToCore()
+        {
+            return new CertifiedDungeonRampWedgeV2(
+                boundingVolume.ToCore(),
+                lowSurfaceY,
+                highSurfaceY,
+                riseDirection.ToCore());
+        }
+
+        public static CertifiedRampWedgeDataV2 FromCore(CertifiedDungeonRampWedgeV2 value)
+        {
+            return value == null
+                ? null
+                : new CertifiedRampWedgeDataV2
+                {
+                    boundingVolume = CertifiedPrismDataV2.FromCore(value.BoundingVolume),
+                    lowSurfaceY = value.LowSurfaceY,
+                    highSurfaceY = value.HighSurfaceY,
+                    riseDirection = CertifiedPoint3DataV2.FromCore(value.RiseDirection)
+                };
+        }
+    }
+
+    [Serializable]
+    internal sealed class CertifiedConnectorApertureDataV2
+    {
+        [SerializeField] private CertifiedPrismDataV2 localVolume;
+        [SerializeField] private string socketProfileId;
+        [SerializeField] private DungeonConnectorKindV2[] compatibleConnectorKinds =
+            Array.Empty<DungeonConnectorKindV2>();
+        [SerializeField] private string themedCapProfileId;
+        [SerializeField] private double floorElevation;
+        [SerializeField] private double floorSlopeDegrees;
+        [SerializeField] private CertifiedPrismDataV2 playerClearanceVolume;
+        [SerializeField] private CertifiedPrismDataV2 cameraClearanceVolume;
+        [SerializeField] private double seamDepth;
+        [SerializeField] private CertifiedPrismDataV2 approachVolume;
+        [SerializeField] private string navigationHandoffProfileId;
+        [SerializeField] private DungeonConnectorCapStateV2 capState;
+        [SerializeField] private string mechanismBindingId;
+        [SerializeField] private string exteriorGasketProfileId;
+        [SerializeField] private string verticalCompositionPortalId;
+
+        public DungeonConnectorApertureV2 ToCore()
+        {
+            return new DungeonConnectorApertureV2(
+                localVolume.ToCore(),
+                socketProfileId,
+                compatibleConnectorKinds,
+                themedCapProfileId,
+                floorElevation,
+                floorSlopeDegrees,
+                playerClearanceVolume.ToCore(),
+                cameraClearanceVolume.ToCore(),
+                seamDepth,
+                approachVolume.ToCore(),
+                navigationHandoffProfileId,
+                capState,
+                mechanismBindingId,
+                exteriorGasketProfileId,
+                verticalCompositionPortalId);
+        }
+
+        public static CertifiedConnectorApertureDataV2 FromCore(DungeonConnectorApertureV2 value)
+        {
+            if (value == null) return null;
+            var kinds = new DungeonConnectorKindV2[value.CompatibleConnectorKinds.Count];
+            for (int index = 0; index < kinds.Length; index += 1)
+                kinds[index] = value.CompatibleConnectorKinds[index];
+            return new CertifiedConnectorApertureDataV2
+            {
+                localVolume = CertifiedPrismDataV2.FromCore(value.LocalVolume),
+                socketProfileId = value.SocketProfileId,
+                compatibleConnectorKinds = kinds,
+                themedCapProfileId = value.ThemedCapProfileId,
+                floorElevation = value.FloorElevation,
+                floorSlopeDegrees = value.FloorSlopeDegrees,
+                playerClearanceVolume = CertifiedPrismDataV2.FromCore(value.PlayerClearanceVolume),
+                cameraClearanceVolume = CertifiedPrismDataV2.FromCore(value.CameraClearanceVolume),
+                seamDepth = value.SeamDepth,
+                approachVolume = CertifiedPrismDataV2.FromCore(value.ApproachVolume),
+                navigationHandoffProfileId = value.NavigationHandoffProfileId,
+                capState = value.CapState,
+                mechanismBindingId = value.MechanismBindingId,
+                exteriorGasketProfileId = value.ExteriorGasketProfileId,
+                verticalCompositionPortalId = value.VerticalCompositionPortalId
             };
         }
     }
@@ -297,6 +541,26 @@ namespace RuinCrawler.Runtime.Dungeon
                 minimumY = value.MinimumY,
                 maximumY = value.MaximumY
             };
+        }
+
+        internal static DungeonConvexPrismV2 Box(
+            double minimumX,
+            double maximumX,
+            double minimumY,
+            double maximumY,
+            double minimumZ,
+            double maximumZ)
+        {
+            return new DungeonConvexPrismV2(
+                new[]
+                {
+                    new DungeonPoint2V2(minimumX, minimumZ),
+                    new DungeonPoint2V2(maximumX, minimumZ),
+                    new DungeonPoint2V2(maximumX, maximumZ),
+                    new DungeonPoint2V2(minimumX, maximumZ)
+                },
+                minimumY,
+                maximumY);
         }
 
         private static TResult[] Select<TSource, TResult>(TSource[] source, Func<TSource, TResult> selector)

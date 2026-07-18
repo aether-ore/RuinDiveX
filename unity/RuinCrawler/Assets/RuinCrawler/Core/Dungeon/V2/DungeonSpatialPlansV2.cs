@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace RuinCrawler.Core.Dungeon.V2
 {
@@ -8,27 +9,19 @@ namespace RuinCrawler.Core.Dungeon.V2
         public DungeonMacroRolePlanV2(
             string id,
             DungeonMacroRoleKindV2 role,
-            IEnumerable<string> moduleInstanceIds,
-            int progressionOrder)
+            IEnumerable<string> moduleInstanceIds)
         {
-            if (progressionOrder < 0)
-            {
-                throw new ArgumentOutOfRangeException(nameof(progressionOrder));
-            }
-
             Id = DungeonV2Contract.RequireId(id, nameof(id));
             Role = role;
             ModuleInstanceIds = DungeonV2Contract.CopyCanonicalIds(
                 moduleInstanceIds,
                 nameof(moduleInstanceIds),
                 minimumCount: 1);
-            ProgressionOrder = progressionOrder;
         }
 
         public string Id { get; }
         public DungeonMacroRoleKindV2 Role { get; }
         public IReadOnlyList<string> ModuleInstanceIds { get; }
-        public int ProgressionOrder { get; }
     }
 
     public sealed class DungeonModuleInstancePlanV2
@@ -42,6 +35,33 @@ namespace RuinCrawler.Core.Dungeon.V2
             IEnumerable<string> regionIds,
             IEnumerable<string> connectorIds,
             IEnumerable<string> anchorIds)
+            : this(
+                id,
+                templateId,
+                contentHash,
+                macroRoleId,
+                bounds,
+                regionIds,
+                connectorIds,
+                anchorIds,
+                DungeonModuleTransformV2.Identity,
+                BuildCompatibilityBindings(regionIds))
+        {
+        }
+
+        public DungeonModuleInstancePlanV2(
+            string id,
+            string templateId,
+            string contentHash,
+            string macroRoleId,
+            DungeonBounds3 bounds,
+            IEnumerable<string> regionIds,
+            IEnumerable<string> connectorIds,
+            IEnumerable<string> anchorIds,
+            DungeonModuleTransformV2 transform,
+            IEnumerable<DungeonModuleRegionBindingV2> regionBindings,
+            string verticalCompositionId = null,
+            IEnumerable<string> verticalPortalConnectorIds = null)
         {
             Id = DungeonV2Contract.RequireId(id, nameof(id));
             TemplateId = DungeonV2Contract.RequireId(templateId, nameof(templateId));
@@ -51,6 +71,32 @@ namespace RuinCrawler.Core.Dungeon.V2
             RegionIds = DungeonV2Contract.CopyCanonicalIds(regionIds, nameof(regionIds), minimumCount: 1);
             ConnectorIds = DungeonV2Contract.CopyCanonicalIds(connectorIds, nameof(connectorIds));
             AnchorIds = DungeonV2Contract.CopyCanonicalIds(anchorIds, nameof(anchorIds));
+            Transform = transform;
+            VerticalCompositionId = DungeonV2Contract.OptionalId(verticalCompositionId, nameof(verticalCompositionId));
+            VerticalPortalConnectorIds = DungeonV2Contract.CopyCanonicalIds(
+                verticalPortalConnectorIds ?? Array.Empty<string>(),
+                nameof(verticalPortalConnectorIds));
+            foreach (string connectorId in VerticalPortalConnectorIds)
+            {
+                if (!ConnectorIds.Contains(connectorId))
+                    throw new ArgumentException("Vertical portal connectors must belong to the module.", nameof(verticalPortalConnectorIds));
+            }
+            if (VerticalPortalConnectorIds.Count > 0 && VerticalCompositionId == null)
+                throw new ArgumentException("Vertical portal connectors require a VerticalCompositionId.", nameof(verticalCompositionId));
+            RegionBindings = DungeonV2Contract.CopyCanonical(
+                regionBindings,
+                value => value.LocalRegionId,
+                nameof(regionBindings),
+                minimumCount: 1);
+            if (RegionBindings.Count != RegionIds.Count)
+                throw new ArgumentException("Every placed region requires exactly one local-region binding.", nameof(regionBindings));
+            var placed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (DungeonModuleRegionBindingV2 binding in RegionBindings)
+            {
+                if (!RegionIds.Contains(binding.PlacedRegionId)
+                    || !placed.Add(binding.PlacedRegionId))
+                    throw new ArgumentException("Region bindings must map one-to-one onto module region IDs.", nameof(regionBindings));
+            }
         }
 
         public string Id { get; }
@@ -61,6 +107,19 @@ namespace RuinCrawler.Core.Dungeon.V2
         public IReadOnlyList<string> RegionIds { get; }
         public IReadOnlyList<string> ConnectorIds { get; }
         public IReadOnlyList<string> AnchorIds { get; }
+        public DungeonModuleTransformV2 Transform { get; }
+        public IReadOnlyList<DungeonModuleRegionBindingV2> RegionBindings { get; }
+        public string VerticalCompositionId { get; }
+        public IReadOnlyList<string> VerticalPortalConnectorIds { get; }
+
+        private static IEnumerable<DungeonModuleRegionBindingV2> BuildCompatibilityBindings(
+            IEnumerable<string> regionIds)
+        {
+            if (regionIds == null) throw new ArgumentNullException(nameof(regionIds));
+            return regionIds.Select((regionId, index) => new DungeonModuleRegionBindingV2(
+                index == 0 ? IndustrialFactoryV2ModuleCatalog.LocalRegionId : "region-" + index,
+                regionId));
+        }
     }
 
     public sealed class DungeonModuleConnectorPlanV2
@@ -75,6 +134,31 @@ namespace RuinCrawler.Core.Dungeon.V2
             string socketTag,
             DungeonAccessPredicateV2 accessPredicate,
             DungeonSpatialRecordSourceV2 source = DungeonSpatialRecordSourceV2.AssemblyAddition)
+            : this(
+                id,
+                moduleInstanceId,
+                regionId,
+                kind,
+                position,
+                facing,
+                socketTag,
+                accessPredicate,
+                source,
+                null)
+        {
+        }
+
+        public DungeonModuleConnectorPlanV2(
+            string id,
+            string moduleInstanceId,
+            string regionId,
+            DungeonConnectorKindV2 kind,
+            DungeonPoint3 position,
+            DungeonPoint3 facing,
+            string socketTag,
+            DungeonAccessPredicateV2 accessPredicate,
+            DungeonSpatialRecordSourceV2 source,
+            DungeonConnectorApertureV2 aperture)
         {
             if (facing.Equals(DungeonPoint3.Zero))
             {
@@ -90,6 +174,11 @@ namespace RuinCrawler.Core.Dungeon.V2
             SocketTag = DungeonV2Contract.RequireId(socketTag, nameof(socketTag));
             AccessPredicate = accessPredicate ?? throw new ArgumentNullException(nameof(accessPredicate));
             Source = source;
+            Aperture = aperture;
+            if (source == DungeonSpatialRecordSourceV2.CertifiedModule && Aperture == null)
+                throw new ArgumentException("Certified module connectors require their exact transformed aperture.", nameof(aperture));
+            if (Aperture != null && !Aperture.Accepts(kind, SocketTag))
+                throw new ArgumentException("Connector kind/profile is incompatible with its aperture.", nameof(aperture));
         }
 
         public string Id { get; }
@@ -101,6 +190,8 @@ namespace RuinCrawler.Core.Dungeon.V2
         public string SocketTag { get; }
         public DungeonAccessPredicateV2 AccessPredicate { get; }
         public DungeonSpatialRecordSourceV2 Source { get; }
+        public DungeonConnectorApertureV2 Aperture { get; }
+        public string ThemedCapProfileId => Aperture?.ThemedCapProfileId;
     }
 
     public sealed class DungeonAnchorPlanV2

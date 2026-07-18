@@ -258,38 +258,36 @@ namespace RuinCrawler.Core.Dungeon.V2
             double outwardX,
             double outwardZ)
         {
-            DungeonRegionPlanV2 sourceRegion = plan.Regions.Single(value => value.Id == segment.SourceRegionId);
-            double sourceX = (sourceRegion.Bounds.Minimum.X + sourceRegion.Bounds.Maximum.X) * 0.5d;
-            double sourceZ = (sourceRegion.Bounds.Minimum.Z + sourceRegion.Bounds.Maximum.Z) * 0.5d;
-            double midpointX = (segment.Start.X + segment.End.X) * 0.5d;
-            double midpointZ = (segment.Start.Z + segment.End.Z) * 0.5d;
-
-            foreach (DungeonTraversalEdgePlanV2 edge in plan.TraversalEdges)
+            var pairedConnectorIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (DungeonAbstractRouteEdgeV2 edge in plan.AbstractRouteGraph.Edges)
             {
-                bool outgoing = string.Equals(edge.FromRegionId, segment.SourceRegionId, StringComparison.Ordinal);
-                bool incomingLanding = string.Equals(edge.ToRegionId, segment.SourceRegionId, StringComparison.Ordinal);
-                if ((!outgoing && !incomingLanding)
-                    || (outgoing && edge.Kind == DungeonConnectorKindV2.Drop))
+                pairedConnectorIds.Add(edge.FromConnectorId);
+                pairedConnectorIds.Add(edge.ToConnectorId);
+            }
+
+            var midpoint = new DungeonPoint2V2(
+                (segment.Start.X + segment.End.X) * 0.5d,
+                (segment.Start.Z + segment.End.Z) * 0.5d);
+            foreach (DungeonModuleConnectorPlanV2 connector in plan.Connectors)
+            {
+                DungeonConnectorApertureV2 aperture = connector.Aperture;
+                if (!string.Equals(connector.RegionId, segment.SourceRegionId, StringComparison.Ordinal)
+                    || aperture == null
+                    || segment.SurfaceTopY < aperture.LocalVolume.MinimumY - GeometryEpsilon
+                    || segment.SurfaceTopY > aperture.LocalVolume.MaximumY + GeometryEpsilon
+                    || connector.Facing.X * outwardX + connector.Facing.Z * outwardZ < 0.9d
+                    || !PointInsideConvex(segment.Start, aperture.LocalVolume.HorizontalVertices)
+                    || !PointInsideConvex(midpoint, aperture.LocalVolume.HorizontalVertices)
+                    || !PointInsideConvex(segment.End, aperture.LocalVolume.HorizontalVertices))
                 {
                     continue;
                 }
 
-                string otherId = outgoing ? edge.ToRegionId : edge.FromRegionId;
-                DungeonRegionPlanV2 other = plan.Regions.Single(value => value.Id == otherId);
-                double otherX = (other.Bounds.Minimum.X + other.Bounds.Maximum.X) * 0.5d;
-                double otherZ = (other.Bounds.Minimum.Z + other.Bounds.Maximum.Z) * 0.5d;
-                double directionX = otherX - sourceX;
-                double directionZ = otherZ - sourceZ;
-                double magnitude = Math.Sqrt(directionX * directionX + directionZ * directionZ);
-                if (magnitude <= GeometryEpsilon
-                    || (directionX * outwardX + directionZ * outwardZ) / magnitude < 0.5d
-                    || DistanceToBoundsXZ(midpointX, midpointZ, other.Bounds)
-                        > IndustrialFactoryV2Ruleset.MaximumCertifiedPhysicalTransition + GeometryEpsilon)
+                if (pairedConnectorIds.Contains(connector.Id)
+                    || aperture.CapState == DungeonConnectorCapStateV2.RequiredWhenUnused)
                 {
-                    continue;
+                    return true;
                 }
-
-                return true;
             }
 
             return false;

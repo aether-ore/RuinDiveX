@@ -14,7 +14,50 @@ namespace RuinCrawler.Core.Dungeon.V2
     public enum CertifiedDungeonColliderKindV2
     {
         Box,
-        ConvexMesh
+        ConvexMesh,
+        RampWedge
+    }
+
+    /// <summary>
+    /// Exact authored ramp contract. The bounding prism remains available to
+    /// broad-phase solvers while the high/low edge and rise direction preserve
+    /// the sloped collision surface for the Unity bake/runtime adapter.
+    /// </summary>
+    public sealed class CertifiedDungeonRampWedgeV2
+    {
+        public CertifiedDungeonRampWedgeV2(
+            DungeonConvexPrismV2 boundingVolume,
+            double lowSurfaceY,
+            double highSurfaceY,
+            DungeonPoint3 riseDirection)
+        {
+            DungeonV2Contract.RequireFinite(lowSurfaceY, nameof(lowSurfaceY));
+            DungeonV2Contract.RequireFinite(highSurfaceY, nameof(highSurfaceY));
+            if (highSurfaceY <= lowSurfaceY)
+                throw new ArgumentOutOfRangeException(nameof(highSurfaceY), "Ramp high edge must exceed its low edge.");
+            if (boundingVolume == null) throw new ArgumentNullException(nameof(boundingVolume));
+            if (lowSurfaceY < boundingVolume.MinimumY || highSurfaceY > boundingVolume.MaximumY)
+                throw new ArgumentException("Ramp surface heights must stay within the certified bounding prism.");
+            if (Math.Abs(riseDirection.Y) > 1e-9d)
+                throw new ArgumentException("Ramp rise direction must be horizontal.", nameof(riseDirection));
+            double magnitude = Math.Sqrt(
+                riseDirection.X * riseDirection.X + riseDirection.Z * riseDirection.Z);
+            if (magnitude <= 1e-9d)
+                throw new ArgumentException("Ramp rise direction may not be zero.", nameof(riseDirection));
+
+            BoundingVolume = boundingVolume;
+            LowSurfaceY = lowSurfaceY;
+            HighSurfaceY = highSurfaceY;
+            RiseDirection = new DungeonPoint3(
+                riseDirection.X / magnitude,
+                0d,
+                riseDirection.Z / magnitude);
+        }
+
+        public DungeonConvexPrismV2 BoundingVolume { get; }
+        public double LowSurfaceY { get; }
+        public double HighSurfaceY { get; }
+        public DungeonPoint3 RiseDirection { get; }
     }
 
     public sealed class CertifiedDungeonSurfaceGeometryV2
@@ -28,20 +71,57 @@ namespace RuinCrawler.Core.Dungeon.V2
             bool isStructural,
             bool isWalkable,
             string materialProfileId)
+            : this(
+                id,
+                regionId,
+                kind,
+                colliderKind,
+                volume,
+                null,
+                isStructural,
+                isWalkable,
+                materialProfileId,
+                DungeonAccessPredicateV2.Always,
+                null)
+        {
+        }
+
+        public CertifiedDungeonSurfaceGeometryV2(
+            string id,
+            string regionId,
+            DungeonSurfaceKindV2 kind,
+            CertifiedDungeonColliderKindV2 colliderKind,
+            DungeonConvexPrismV2 volume,
+            CertifiedDungeonRampWedgeV2 rampWedge,
+            bool isStructural,
+            bool isWalkable,
+            string materialProfileId,
+            DungeonAccessPredicateV2 activePredicate = null,
+            string controllerId = null)
         {
             if (kind == DungeonSurfaceKindV2.Walkable && !isWalkable)
             {
                 throw new ArgumentException("Walkable surface geometry must be marked walkable.", nameof(isWalkable));
             }
 
+            if (colliderKind == CertifiedDungeonColliderKindV2.RampWedge && rampWedge == null)
+                throw new ArgumentException("Ramp-wedge colliders require exact ramp geometry.", nameof(rampWedge));
+            if (colliderKind != CertifiedDungeonColliderKindV2.RampWedge && rampWedge != null)
+                throw new ArgumentException("Exact ramp geometry is only valid for RampWedge colliders.", nameof(rampWedge));
+            if (rampWedge != null && !PrismExactlyEqual(volume, rampWedge.BoundingVolume))
+                throw new ArgumentException("Ramp bounding volume must equal the surface volume.", nameof(volume));
+
             Id = DungeonV2Contract.RequireId(id, nameof(id));
             RegionId = DungeonV2Contract.RequireId(regionId, nameof(regionId));
             Kind = kind;
             ColliderKind = colliderKind;
             Volume = volume ?? throw new ArgumentNullException(nameof(volume));
+            RampWedge = rampWedge;
             IsStructural = isStructural;
             IsWalkable = isWalkable;
             MaterialProfileId = DungeonV2Contract.RequireId(materialProfileId, nameof(materialProfileId));
+            ActivePredicate = activePredicate ?? DungeonAccessPredicateV2.Always;
+            ControllerId = DungeonV2Contract.OptionalId(controllerId, nameof(controllerId));
         }
 
         public string Id { get; }
@@ -49,9 +129,26 @@ namespace RuinCrawler.Core.Dungeon.V2
         public DungeonSurfaceKindV2 Kind { get; }
         public CertifiedDungeonColliderKindV2 ColliderKind { get; }
         public DungeonConvexPrismV2 Volume { get; }
+        public CertifiedDungeonRampWedgeV2 RampWedge { get; }
         public bool IsStructural { get; }
         public bool IsWalkable { get; }
         public string MaterialProfileId { get; }
+        public DungeonAccessPredicateV2 ActivePredicate { get; }
+        public string ControllerId { get; }
+
+        private static bool PrismExactlyEqual(DungeonConvexPrismV2 left, DungeonConvexPrismV2 right)
+        {
+            if (left == null || right == null
+                || left.MinimumY != right.MinimumY
+                || left.MaximumY != right.MaximumY
+                || left.HorizontalVertices.Count != right.HorizontalVertices.Count)
+                return false;
+            for (int index = 0; index < left.HorizontalVertices.Count; index += 1)
+            {
+                if (!left.HorizontalVertices[index].Equals(right.HorizontalVertices[index])) return false;
+            }
+            return true;
+        }
     }
 
     public sealed class CertifiedDungeonRegionGeometryV2
@@ -111,6 +208,25 @@ namespace RuinCrawler.Core.Dungeon.V2
             DungeonPoint3 position,
             DungeonPoint3 facing,
             string socketTag)
+            : this(
+                id,
+                regionId,
+                kind,
+                position,
+                facing,
+                socketTag,
+                BuildDefaultAperture(position, facing, kind, socketTag))
+        {
+        }
+
+        public CertifiedDungeonConnectorGeometryV2(
+            string id,
+            string regionId,
+            DungeonConnectorKindV2 kind,
+            DungeonPoint3 position,
+            DungeonPoint3 facing,
+            string socketTag,
+            DungeonConnectorApertureV2 aperture)
         {
             if (facing == DungeonPoint3.Zero)
             {
@@ -123,6 +239,9 @@ namespace RuinCrawler.Core.Dungeon.V2
             Position = position;
             Facing = facing;
             SocketTag = DungeonV2Contract.RequireId(socketTag, nameof(socketTag));
+            Aperture = aperture ?? throw new ArgumentNullException(nameof(aperture));
+            if (!Aperture.Accepts(kind, SocketTag))
+                throw new ArgumentException("Connector kind/profile is incompatible with its certified aperture.", nameof(aperture));
         }
 
         public string Id { get; }
@@ -131,6 +250,50 @@ namespace RuinCrawler.Core.Dungeon.V2
         public DungeonPoint3 Position { get; }
         public DungeonPoint3 Facing { get; }
         public string SocketTag { get; }
+        public DungeonConnectorApertureV2 Aperture { get; }
+
+        private static DungeonConnectorApertureV2 BuildDefaultAperture(
+            DungeonPoint3 position,
+            DungeonPoint3 facing,
+            DungeonConnectorKindV2 kind,
+            string socketTag)
+        {
+            double halfWidth = 1.25d;
+            double halfDepth = 0.125d;
+            bool xFacing = Math.Abs(facing.X) >= Math.Abs(facing.Z);
+            DungeonConvexPrismV2 volume = xFacing
+                ? Box(position.X - halfDepth, position.X + halfDepth,
+                    position.Y - 0.5d, position.Y + 3.15d,
+                    position.Z - halfWidth, position.Z + halfWidth)
+                : Box(position.X - halfWidth, position.X + halfWidth,
+                    position.Y - 0.5d, position.Y + 3.15d,
+                    position.Z - halfDepth, position.Z + halfDepth);
+            return new DungeonConnectorApertureV2(
+                volume,
+                socketTag,
+                new[] { kind },
+                "cap-" + socketTag);
+        }
+
+        private static DungeonConvexPrismV2 Box(
+            double minimumX,
+            double maximumX,
+            double minimumY,
+            double maximumY,
+            double minimumZ,
+            double maximumZ)
+        {
+            return new DungeonConvexPrismV2(
+                new[]
+                {
+                    new DungeonPoint2V2(minimumX, minimumZ),
+                    new DungeonPoint2V2(maximumX, minimumZ),
+                    new DungeonPoint2V2(maximumX, maximumZ),
+                    new DungeonPoint2V2(minimumX, maximumZ)
+                },
+                minimumY,
+                maximumY);
+        }
     }
 
     public enum CertifiedDungeonGeometryValidationCodeV2
@@ -162,7 +325,7 @@ namespace RuinCrawler.Core.Dungeon.V2
     /// </summary>
     public sealed class CertifiedDungeonModuleGeometryV2
     {
-        public const int CurrentSchemaVersion = 1;
+        public const int CurrentSchemaVersion = 2;
 
         public CertifiedDungeonModuleGeometryV2(
             string templateId,
@@ -174,7 +337,14 @@ namespace RuinCrawler.Core.Dungeon.V2
             TemplateId = DungeonV2Contract.RequireId(templateId, nameof(templateId));
             Surfaces = DungeonV2Contract.CopyCanonical(surfaces, value => value.Id, nameof(surfaces), minimumCount: 1);
             Regions = DungeonV2Contract.CopyCanonical(regions, value => value.Id, nameof(regions), minimumCount: 1);
-            Anchors = DungeonV2Contract.CopyCanonical(anchors, value => value.Id, nameof(anchors));
+            // Anchor semantics such as entry/exit/safe are local to a region.
+            // Multi-region authored modules intentionally repeat those local
+            // IDs; placement prefixes the placed region, producing globally
+            // stable plan IDs without forcing author-facing name mangling.
+            Anchors = DungeonV2Contract.CopyCanonical(
+                anchors,
+                value => value.RegionId + "\u001f" + value.Id,
+                nameof(anchors));
             Connectors = DungeonV2Contract.CopyCanonical(connectors, value => value.Id, nameof(connectors));
             ValidateReferences();
             CanonicalContent = BuildCanonicalContent();
@@ -206,17 +376,27 @@ namespace RuinCrawler.Core.Dungeon.V2
                         + module.TemplateId + "'.");
             }
 
-            if (!string.Equals(module.ContentHash, ContentHash, StringComparison.Ordinal))
+            return new CertifiedDungeonGeometryValidationResultV2(
+                CertifiedDungeonGeometryValidationCodeV2.Valid,
+                "Certified geometry matches the module template. Combined revision identity is validated by the authored module registry.");
+        }
+
+        public CertifiedDungeonGeometryValidationResultV2 ValidateGeometryRevision(
+            string expectedGeometryRevisionHash)
+        {
+            expectedGeometryRevisionHash = DungeonV2Contract.RequireId(
+                expectedGeometryRevisionHash,
+                nameof(expectedGeometryRevisionHash));
+            if (!string.Equals(expectedGeometryRevisionHash, ContentHash, StringComparison.Ordinal))
             {
                 return new CertifiedDungeonGeometryValidationResultV2(
                     CertifiedDungeonGeometryValidationCodeV2.ContentHashMismatch,
-                    "Certified geometry for '" + TemplateId + "' is stale or belongs to a different content revision. "
-                        + "Plan expects " + module.ContentHash + ", bake provides " + ContentHash + ".");
+                    "Certified geometry for '" + TemplateId + "' is stale. Expected "
+                        + expectedGeometryRevisionHash + ", bake provides " + ContentHash + ".");
             }
-
             return new CertifiedDungeonGeometryValidationResultV2(
                 CertifiedDungeonGeometryValidationCodeV2.Valid,
-                "Certified geometry matches the module template and content hash.");
+                "Certified geometry revision matches.");
         }
 
         private void ValidateReferences()
@@ -258,7 +438,27 @@ namespace RuinCrawler.Core.Dungeon.V2
                 writer.Add(surface.IsStructural);
                 writer.Add(surface.IsWalkable);
                 writer.Add(surface.MaterialProfileId);
+                writer.Add(surface.ControllerId);
+                writer.Add(surface.ActivePredicate.Clauses.Count);
+                foreach (DungeonPredicateClauseV2 clause in surface.ActivePredicate.Clauses)
+                {
+                    writer.Add(clause.Conditions.Count);
+                    foreach (DungeonPredicateConditionV2 condition in clause.Conditions)
+                    {
+                        writer.Add((int)condition.Kind);
+                        writer.Add(condition.SubjectId);
+                        writer.Add((int)condition.Operator);
+                        writer.Add(condition.ExpectedValue);
+                    }
+                }
                 writer.Add(surface.Volume);
+                writer.Add(surface.RampWedge != null);
+                if (surface.RampWedge != null)
+                {
+                    writer.Add(surface.RampWedge.LowSurfaceY);
+                    writer.Add(surface.RampWedge.HighSurfaceY);
+                    writer.Add(surface.RampWedge.RiseDirection);
+                }
             }
 
             writer.Add(Regions.Count);
@@ -291,6 +491,23 @@ namespace RuinCrawler.Core.Dungeon.V2
                 writer.Add(connector.Position);
                 writer.Add(connector.Facing);
                 writer.Add(connector.SocketTag);
+                writer.Add(connector.Aperture.LocalVolume);
+                writer.Add(connector.Aperture.SocketProfileId);
+                writer.Add(connector.Aperture.ThemedCapProfileId);
+                writer.Add(connector.Aperture.FloorElevation);
+                writer.Add(connector.Aperture.FloorSlopeDegrees);
+                writer.Add(connector.Aperture.PlayerClearanceVolume);
+                writer.Add(connector.Aperture.CameraClearanceVolume);
+                writer.Add(connector.Aperture.SeamDepth);
+                writer.Add(connector.Aperture.ApproachVolume);
+                writer.Add(connector.Aperture.NavigationHandoffProfileId);
+                writer.Add((int)connector.Aperture.CapState);
+                writer.Add(connector.Aperture.MechanismBindingId);
+                writer.Add(connector.Aperture.ExteriorGasketProfileId);
+                writer.Add(connector.Aperture.VerticalCompositionPortalId);
+                writer.Add(connector.Aperture.CompatibleConnectorKinds.Count);
+                foreach (DungeonConnectorKindV2 kind in connector.Aperture.CompatibleConnectorKinds)
+                    writer.Add((int)kind);
             }
 
             return writer.ToString();

@@ -182,7 +182,8 @@ namespace RuinCrawler.Editor.DungeonV2
                         marker.Kind,
                         ToCorePoint(moduleRoot.transform.InverseTransformPoint(marker.transform.position)),
                         ToCoreVector(localFacing),
-                        marker.SocketTag);
+                        marker.SocketTag,
+                        BakeConnectorAperture(moduleRoot.transform, marker));
                     connectors.Add(connector);
                     ValidatePointInRegion(
                         connector.RegionId,
@@ -399,6 +400,7 @@ namespace RuinCrawler.Editor.DungeonV2
             {
                 CertifiedDungeonColliderKindV2 colliderKind;
                 DungeonConvexPrismV2 prism;
+                CertifiedDungeonRampWedgeV2 rampWedge = null;
                 if (collider is BoxCollider box)
                 {
                     colliderKind = CertifiedDungeonColliderKindV2.Box;
@@ -424,8 +426,19 @@ namespace RuinCrawler.Editor.DungeonV2
                         return;
                     }
 
-                    colliderKind = CertifiedDungeonColliderKindV2.ConvexMesh;
-                    prism = BakeMeshPrism(moduleRoot, meshCollider);
+                    DungeonRampGeometryAuthoringV2 ramp =
+                        marker.GetComponent<DungeonRampGeometryAuthoringV2>();
+                    if (ramp != null)
+                    {
+                        colliderKind = CertifiedDungeonColliderKindV2.RampWedge;
+                        rampWedge = BakeRampWedge(moduleRoot, meshCollider, ramp);
+                        prism = rampWedge.BoundingVolume;
+                    }
+                    else
+                    {
+                        colliderKind = CertifiedDungeonColliderKindV2.ConvexMesh;
+                        prism = BakeMeshPrism(moduleRoot, meshCollider);
+                    }
                 }
                 else
                 {
@@ -442,9 +455,12 @@ namespace RuinCrawler.Editor.DungeonV2
                     marker.Kind,
                     colliderKind,
                     prism,
+                    rampWedge,
                     marker.IsStructural,
                     marker.IsWalkable,
-                    marker.MaterialProfileId);
+                    marker.MaterialProfileId,
+                    marker.ActivePredicate,
+                    marker.ControllerId);
                 destination.Add(surface);
                 ValidatePrismInRegion(surface, marker.transform, regions, issues);
             }
@@ -506,6 +522,159 @@ namespace RuinCrawler.Editor.DungeonV2
                 points.Add(ToCorePoint(moduleLocal));
             }
 
+            return BuildVerticalPrism(points, requireExtrudedHullCorners: true);
+        }
+
+        private static CertifiedDungeonRampWedgeV2 BakeRampWedge(
+            Transform moduleRoot,
+            MeshCollider collider,
+            DungeonRampGeometryAuthoringV2 authoring)
+        {
+            Vector3[] vertices = collider.sharedMesh.vertices;
+            if (vertices == null || vertices.Length < 6)
+            {
+                throw new NonPrismaticGeometryException(
+                    "Certified ramp MeshCollider needs at least six vertices.");
+            }
+
+            var points = new List<DungeonPoint3>(vertices.Length);
+            foreach (Vector3 vertex in vertices)
+            {
+                points.Add(ToCorePoint(moduleRoot.InverseTransformPoint(
+                    collider.transform.TransformPoint(vertex))));
+            }
+
+            DungeonConvexPrismV2 bounding = BuildVerticalPrism(
+                points,
+                requireExtrudedHullCorners: false);
+            Vector3 unityRise = moduleRoot.InverseTransformDirection(
+                collider.transform.TransformDirection(authoring.LocalRiseDirection));
+            if (Mathf.Abs(unityRise.y) > 0.0001f)
+            {
+                throw new NonPrismaticGeometryException(
+                    "Ramp rise direction must be horizontal in module space.");
+            }
+
+            unityRise.y = 0f;
+            if (unityRise.sqrMagnitude <= 0.000001f)
+            {
+                throw new NonPrismaticGeometryException("Ramp rise direction may not be zero.");
+            }
+
+            unityRise.Normalize();
+            double lowY = ToCorePoint(moduleRoot.InverseTransformPoint(
+                collider.transform.TransformPoint(new Vector3(0f, authoring.LowSurfaceLocalY, 0f)))).Y;
+            double highY = ToCorePoint(moduleRoot.InverseTransformPoint(
+                collider.transform.TransformPoint(new Vector3(0f, authoring.HighSurfaceLocalY, 0f)))).Y;
+            if (highY <= lowY + GeometryTolerance)
+            {
+                throw new NonPrismaticGeometryException(
+                    "Ramp high surface must be above its low surface in module space.");
+            }
+
+            bool hasLow = points.Any(point => Math.Abs(point.Y - lowY) <= GeometryTolerance);
+            bool hasHigh = points.Any(point => Math.Abs(point.Y - highY) <= GeometryTolerance);
+            if (!hasLow || !hasHigh)
+            {
+                throw new NonPrismaticGeometryException(
+                    "Ramp mesh must contain vertices on both declared low and high surface edges.");
+            }
+
+            return new CertifiedDungeonRampWedgeV2(
+                bounding,
+                lowY,
+                highY,
+                ToCoreVector(unityRise));
+        }
+
+        private static DungeonConnectorApertureV2 BakeConnectorAperture(
+            Transform moduleRoot,
+            DungeonConnectorGeometryAuthoringV2 marker)
+        {
+            if (marker.CompatibleKinds == null || marker.CompatibleKinds.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Connector aperture must declare at least one compatible connector kind.");
+            }
+
+            if (string.IsNullOrWhiteSpace(marker.ThemedCapProfileId))
+            {
+                throw new InvalidOperationException(
+                    "Connector aperture must declare a themed cap profile ID.");
+            }
+
+            if (string.IsNullOrWhiteSpace(marker.NavigationHandoffProfileId))
+                throw new InvalidOperationException("Connector requires a navigation handoff profile ID.");
+            if (string.IsNullOrWhiteSpace(marker.ExteriorGasketProfileId))
+                throw new InvalidOperationException("Connector requires an exterior gasket profile ID.");
+            if (marker.CapState == DungeonConnectorCapStateV2.MechanismControlled
+                && string.IsNullOrWhiteSpace(marker.MechanismBindingId))
+                throw new InvalidOperationException("Mechanism-controlled connector requires a mechanism binding ID.");
+
+            DungeonConvexPrismV2 aperture = BakeLocalBoxPrism(
+                moduleRoot,
+                marker.transform,
+                marker.LocalApertureCenter,
+                marker.LocalApertureSize,
+                "Connector aperture");
+            DungeonConvexPrismV2 playerClearance = BakeLocalBoxPrism(
+                moduleRoot,
+                marker.transform,
+                marker.LocalPlayerClearanceCenter,
+                marker.LocalPlayerClearanceSize,
+                "Connector player clearance");
+            DungeonConvexPrismV2 cameraClearance = BakeLocalBoxPrism(
+                moduleRoot,
+                marker.transform,
+                marker.LocalCameraClearanceCenter,
+                marker.LocalCameraClearanceSize,
+                "Connector camera clearance");
+            DungeonConvexPrismV2 approach = BakeLocalBoxPrism(
+                moduleRoot,
+                marker.transform,
+                marker.LocalApproachCenter,
+                marker.LocalApproachSize,
+                "Connector approach volume");
+            double floorY = ToCorePoint(moduleRoot.InverseTransformPoint(
+                marker.transform.TransformPoint(new Vector3(0f, marker.FloorElevation, 0f)))).Y;
+
+            return new DungeonConnectorApertureV2(
+                aperture,
+                marker.SocketTag,
+                marker.CompatibleKinds,
+                marker.ThemedCapProfileId,
+                floorY,
+                marker.FloorSlopeDegrees,
+                playerClearance,
+                cameraClearance,
+                marker.SeamDepth,
+                approach,
+                marker.NavigationHandoffProfileId,
+                marker.CapState,
+                marker.MechanismBindingId,
+                marker.ExteriorGasketProfileId,
+                marker.VerticalCompositionPortalId);
+        }
+
+        private static DungeonConvexPrismV2 BakeLocalBoxPrism(
+            Transform moduleRoot,
+            Transform localRoot,
+            Vector3 center,
+            Vector3 size,
+            string label)
+        {
+            if (size.x <= 0f || size.y <= 0f || size.z <= 0f)
+                throw new InvalidOperationException(label + " size must be positive on every axis.");
+
+            Vector3 half = size * 0.5f;
+            var points = new List<DungeonPoint3>(8);
+            for (int x = -1; x <= 1; x += 2)
+            for (int y = -1; y <= 1; y += 2)
+            for (int z = -1; z <= 1; z += 2)
+            {
+                Vector3 local = center + Vector3.Scale(half, new Vector3(x, y, z));
+                points.Add(ToCorePoint(moduleRoot.InverseTransformPoint(localRoot.TransformPoint(local))));
+            }
             return BuildVerticalPrism(points, requireExtrudedHullCorners: true);
         }
 
@@ -735,76 +904,7 @@ namespace RuinCrawler.Editor.DungeonV2
 
     public static class DungeonCertifiedGeometryPrefabToolsV2
     {
-        [MenuItem("CONTEXT/DungeonModuleGeometryAuthoringV2/Bake Certified Geometry")]
-        private static void BakeFromContext(MenuCommand command)
-        {
-            var authoring = command.context as DungeonModuleGeometryAuthoringV2;
-            if (authoring == null)
-            {
-                return;
-            }
-
-            string prefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(authoring.gameObject);
-            if (string.IsNullOrWhiteSpace(prefabPath))
-            {
-                prefabPath = AssetDatabase.GetAssetPath(authoring.gameObject);
-            }
-
-            if (string.IsNullOrWhiteSpace(prefabPath))
-            {
-                Debug.LogError("Certified geometry must be baked from a saved prefab asset or prefab instance.", authoring);
-                return;
-            }
-
-            string directory = Path.GetDirectoryName(prefabPath)?.Replace('\\', '/');
-            string assetPath = directory + "/" + Path.GetFileNameWithoutExtension(prefabPath) + ".geometry-v2.asset";
-            DungeonCertifiedGeometryAssetV2 asset = AssetDatabase.LoadAssetAtPath<DungeonCertifiedGeometryAssetV2>(assetPath);
-            if (asset == null)
-            {
-                asset = ScriptableObject.CreateInstance<DungeonCertifiedGeometryAssetV2>();
-                AssetDatabase.CreateAsset(asset, assetPath);
-            }
-
-            bool isSceneInstance = PrefabUtility.IsPartOfPrefabInstance(authoring.gameObject)
-                && !PrefabUtility.IsPartOfPrefabAsset(authoring.gameObject);
-            GameObject editableRoot = authoring.gameObject;
-            GameObject loadedPrefabRoot = null;
-            if (isSceneInstance)
-            {
-                loadedPrefabRoot = PrefabUtility.LoadPrefabContents(prefabPath);
-                editableRoot = loadedPrefabRoot;
-            }
-
-            DungeonCertifiedGeometryBakeResultV2 result;
-            try
-            {
-                result = DungeonCertifiedGeometryBakerV2.BakeIntoAsset(editableRoot, asset);
-                if (result.IsValid && loadedPrefabRoot != null)
-                {
-                    PrefabUtility.SaveAsPrefabAsset(loadedPrefabRoot, prefabPath);
-                }
-            }
-            finally
-            {
-                if (loadedPrefabRoot != null)
-                {
-                    PrefabUtility.UnloadPrefabContents(loadedPrefabRoot);
-                }
-            }
-
-            if (!result.IsValid)
-            {
-                Debug.LogError(FormatIssues(result.Issues), authoring);
-                return;
-            }
-
-            AssetDatabase.SaveAssets();
-            Debug.Log(
-                "Baked certified geometry " + result.Geometry.ContentHash + " to " + assetPath + ".",
-                asset);
-        }
-
-        [MenuItem("CONTEXT/DungeonModuleGeometryAuthoringV2/Validate Certified Geometry")]
+        [MenuItem("CONTEXT/DungeonModuleGeometryAuthoringV2/Validate Authored Module")]
         private static void ValidateFromContext(MenuCommand command)
         {
             var authoring = command.context as DungeonModuleGeometryAuthoringV2;
@@ -813,15 +913,15 @@ namespace RuinCrawler.Editor.DungeonV2
                 return;
             }
 
-            DungeonCertifiedGeometryBakeResultV2 result =
-                DungeonCertifiedGeometryBakerV2.ValidateCurrentBake(authoring.gameObject);
+            DungeonAuthoredModuleValidationResultV2 result =
+                DungeonAuthoredModuleValidatorV2.Validate(authoring.gameObject, requireCurrentBake: true);
             if (!result.IsValid)
             {
-                Debug.LogError(FormatIssues(result.Issues), authoring);
+                Debug.LogError(DungeonAuthoredModuleLibraryBakerV2.Format(result.Issues), authoring);
             }
             else
             {
-                Debug.Log("Certified geometry is current: " + result.Geometry.ContentHash + ".", authoring);
+                Debug.Log("Authored module is current: " + result.Geometry.ContentHash + ".", authoring);
             }
         }
 
@@ -861,11 +961,11 @@ namespace RuinCrawler.Editor.DungeonV2
                     continue;
                 }
 
-                DungeonCertifiedGeometryBakeResultV2 validation =
-                    DungeonCertifiedGeometryPrefabToolsV2.ValidatePrefabAsset(path);
+                DungeonAuthoredModuleValidationResultV2 validation =
+                    DungeonAuthoredModuleLibraryBakerV2.ValidatePrefabAsset(path);
                 if (!validation.IsValid)
                 {
-                    failures.Add(path + "\n" + DungeonCertifiedGeometryPrefabToolsV2.FormatIssues(validation.Issues));
+                    failures.Add(path + "\n" + DungeonAuthoredModuleLibraryBakerV2.Format(validation.Issues));
                 }
             }
 

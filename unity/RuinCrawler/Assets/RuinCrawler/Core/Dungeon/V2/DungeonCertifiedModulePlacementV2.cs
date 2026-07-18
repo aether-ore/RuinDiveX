@@ -6,8 +6,9 @@ using System.Linq;
 namespace RuinCrawler.Core.Dungeon.V2
 {
     /// <summary>
-    /// Deterministic translation-only placement of a certified local module
-    /// bake into plan space. V2 currently permits no module rotation or scale.
+    /// Deterministic placement of a certified local module bake into plan
+    /// space. Only translation and discrete quarter-turn yaw are legal; scale
+    /// is intentionally absent from the contract.
     /// </summary>
     public sealed class DungeonCertifiedModulePlacementV2
     {
@@ -17,10 +18,25 @@ namespace RuinCrawler.Core.Dungeon.V2
             IReadOnlyDictionary<string, string> placedRegionIds,
             DungeonPoint3 translation,
             string hazardControllerId = null)
+            : this(
+                source,
+                moduleInstanceId,
+                placedRegionIds,
+                new DungeonModuleTransformV2(translation, 0),
+                hazardControllerId)
+        {
+        }
+
+        public DungeonCertifiedModulePlacementV2(
+            CertifiedDungeonModuleGeometryV2 source,
+            string moduleInstanceId,
+            IReadOnlyDictionary<string, string> placedRegionIds,
+            DungeonModuleTransformV2 transform,
+            string hazardControllerId = null)
         {
             Source = source ?? throw new ArgumentNullException(nameof(source));
             ModuleInstanceId = DungeonV2Contract.RequireId(moduleInstanceId, nameof(moduleInstanceId));
-            Translation = translation;
+            Transform = transform;
             if (placedRegionIds == null) throw new ArgumentNullException(nameof(placedRegionIds));
 
             var regionMap = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -43,7 +59,7 @@ namespace RuinCrawler.Core.Dungeon.V2
             Regions = Array.AsReadOnly(source.Regions.Select(value =>
                 new CertifiedDungeonRegionGeometryV2(
                     regionMap[value.Id],
-                    Translate(value.Bounds, translation),
+                    transform.TransformBounds(value.Bounds),
                     value.DistrictKind,
                     value.ElevationStratum,
                     PlacedNavigationRegionId(regionMap[value.Id], value.LocalNavigationRegionId))).ToArray());
@@ -53,12 +69,12 @@ namespace RuinCrawler.Core.Dungeon.V2
                     ModuleInstanceId,
                     regionMap[value.RegionId],
                     value.Kind,
-                    Translate(value.Volume, translation),
+                    transform.TransformPrism(value.Volume),
                     value.MaterialProfileId,
                     value.IsStructural,
                     value.IsWalkable,
-                    DungeonAccessPredicateV2.Always,
-                    value.Kind == DungeonSurfaceKindV2.Hazard ? hazardControllerId : null,
+                    value.ActivePredicate,
+                    value.ControllerId,
                     DungeonSpatialRecordSourceV2.CertifiedModule)).ToArray());
             Anchors = Array.AsReadOnly(source.Anchors.Select(value =>
                 new DungeonAnchorPlanV2(
@@ -66,7 +82,7 @@ namespace RuinCrawler.Core.Dungeon.V2
                     ModuleInstanceId,
                     regionMap[value.RegionId],
                     value.Kind,
-                    Translate(value.Position, translation),
+                    transform.TransformPoint(value.Position),
                     value.ProfileId,
                     DungeonSpatialRecordSourceV2.CertifiedModule)).ToArray());
             Connectors = Array.AsReadOnly(source.Connectors.Select(value =>
@@ -75,23 +91,31 @@ namespace RuinCrawler.Core.Dungeon.V2
                     ModuleInstanceId,
                     regionMap[value.RegionId],
                     value.Kind,
-                    Translate(value.Position, translation),
-                    value.Facing,
+                    transform.TransformPoint(value.Position),
+                    transform.TransformDirection(value.Facing),
                     value.SocketTag,
                     DungeonAccessPredicateV2.Always,
-                    DungeonSpatialRecordSourceV2.CertifiedModule)).ToArray());
+                    DungeonSpatialRecordSourceV2.CertifiedModule,
+                    TransformAperture(value.Aperture, transform))).ToArray());
             Bounds = Union(Regions.Select(value => value.Bounds));
         }
 
         public CertifiedDungeonModuleGeometryV2 Source { get; }
         public string ModuleInstanceId { get; }
         public IReadOnlyDictionary<string, string> RegionIds { get; }
-        public DungeonPoint3 Translation { get; }
+        public DungeonModuleTransformV2 Transform { get; }
+        public DungeonPoint3 Translation => Transform.Translation;
         public DungeonBounds3 Bounds { get; }
         public IReadOnlyList<CertifiedDungeonRegionGeometryV2> Regions { get; }
         public IReadOnlyList<DungeonSurfacePlanV2> Surfaces { get; }
         public IReadOnlyList<DungeonAnchorPlanV2> Anchors { get; }
         public IReadOnlyList<DungeonModuleConnectorPlanV2> Connectors { get; }
+
+        public IReadOnlyList<DungeonModuleRegionBindingV2> RegionBindings =>
+            Array.AsReadOnly(RegionIds
+                .OrderBy(value => value.Key, StringComparer.Ordinal)
+                .Select(value => new DungeonModuleRegionBindingV2(value.Key, value.Value))
+                .ToArray());
 
         public static DungeonCertifiedModulePlacementV2 PlaceSingleRegion(
             IndustrialFactoryV2ModuleDefinition definition,
@@ -126,6 +150,27 @@ namespace RuinCrawler.Core.Dungeon.V2
                 moduleInstanceId,
                 new Dictionary<string, string>(StringComparer.Ordinal) { { local.Id, placedRegionId } },
                 translation,
+                hazardControllerId);
+        }
+
+        public static DungeonCertifiedModulePlacementV2 Place(
+            IndustrialFactoryV2ModuleDefinition definition,
+            string moduleInstanceId,
+            IEnumerable<DungeonModuleRegionBindingV2> regionBindings,
+            DungeonModuleTransformV2 transform,
+            string hazardControllerId = null)
+        {
+            if (definition == null) throw new ArgumentNullException(nameof(definition));
+            if (regionBindings == null) throw new ArgumentNullException(nameof(regionBindings));
+            Dictionary<string, string> map = regionBindings.ToDictionary(
+                value => value.LocalRegionId,
+                value => value.PlacedRegionId,
+                StringComparer.Ordinal);
+            return new DungeonCertifiedModulePlacementV2(
+                definition.CertifiedGeometry,
+                moduleInstanceId,
+                map,
+                transform,
                 hazardControllerId);
         }
 
@@ -165,6 +210,28 @@ namespace RuinCrawler.Core.Dungeon.V2
                 value.MaximumY + translation.Y);
         }
 
+        private static DungeonConnectorApertureV2 TransformAperture(
+            DungeonConnectorApertureV2 aperture,
+            DungeonModuleTransformV2 transform)
+        {
+            return new DungeonConnectorApertureV2(
+                transform.TransformPrism(aperture.LocalVolume),
+                aperture.SocketProfileId,
+                aperture.CompatibleConnectorKinds,
+                aperture.ThemedCapProfileId,
+                aperture.FloorElevation + transform.Translation.Y,
+                aperture.FloorSlopeDegrees,
+                transform.TransformPrism(aperture.PlayerClearanceVolume),
+                transform.TransformPrism(aperture.CameraClearanceVolume),
+                aperture.SeamDepth,
+                transform.TransformPrism(aperture.ApproachVolume),
+                aperture.NavigationHandoffProfileId,
+                aperture.CapState,
+                aperture.MechanismBindingId,
+                aperture.ExteriorGasketProfileId,
+                aperture.VerticalCompositionPortalId);
+        }
+
         internal static bool BoundsEqual(DungeonBounds3 left, DungeonBounds3 right, double tolerance) =>
             PointEqual(left.Minimum, right.Minimum, tolerance) && PointEqual(left.Maximum, right.Maximum, tolerance);
 
@@ -181,13 +248,27 @@ namespace RuinCrawler.Core.Dungeon.V2
             {
                 return false;
             }
-            for (int index = 0; index < left.HorizontalVertices.Count; index += 1)
+            var matched = new bool[right.HorizontalVertices.Count];
+            for (int leftIndex = 0; leftIndex < left.HorizontalVertices.Count; leftIndex += 1)
             {
-                if (Math.Abs(left.HorizontalVertices[index].X - right.HorizontalVertices[index].X) > tolerance
-                    || Math.Abs(left.HorizontalVertices[index].Z - right.HorizontalVertices[index].Z) > tolerance)
+                DungeonPoint2V2 candidate = left.HorizontalVertices[leftIndex];
+                int match = -1;
+                for (int rightIndex = 0; rightIndex < right.HorizontalVertices.Count; rightIndex += 1)
+                {
+                    if (matched[rightIndex]) continue;
+                    DungeonPoint2V2 possible = right.HorizontalVertices[rightIndex];
+                    if (Math.Abs(candidate.X - possible.X) <= tolerance
+                        && Math.Abs(candidate.Z - possible.Z) <= tolerance)
+                    {
+                        match = rightIndex;
+                        break;
+                    }
+                }
+                if (match < 0)
                 {
                     return false;
                 }
+                matched[match] = true;
             }
             return true;
         }
@@ -218,13 +299,29 @@ namespace RuinCrawler.Core.Dungeon.V2
 
         public static IReadOnlyList<IndustrialFactoryV2ValidationIssue> Validate(DungeonPlanV2 plan)
         {
+            return Validate(plan, IndustrialFactoryV2ModuleCatalog.Default);
+        }
+
+        public static IReadOnlyList<IndustrialFactoryV2ValidationIssue> Validate(
+            DungeonPlanV2 plan,
+            IIndustrialFactoryV2ModuleCatalog catalog)
+        {
             if (plan == null) throw new ArgumentNullException(nameof(plan));
+            if (catalog == null) throw new ArgumentNullException(nameof(catalog));
             var errors = new List<IndustrialFactoryV2ValidationIssue>();
             foreach (DungeonModuleInstancePlanV2 module in plan.Modules)
             {
-                if (!IndustrialFactoryV2ModuleCatalog.TryGet(module.TemplateId, out IndustrialFactoryV2ModuleDefinition definition))
+                if (!catalog.TryGet(module.TemplateId, out IndustrialFactoryV2ModuleDefinition definition))
                 {
                     errors.Add(Issue("CERTIFIED_TEMPLATE_UNKNOWN", module.Id, "Unknown certified template '" + module.TemplateId + "'."));
+                    continue;
+                }
+                if (!string.Equals(module.ContentHash, definition.CombinedRevisionHash, StringComparison.Ordinal))
+                {
+                    errors.Add(Issue(
+                        "AUTHORED_COMBINED_REVISION_MISMATCH",
+                        module.Id,
+                        "Module combined revision does not match geometry + presentation + descriptor dependencies."));
                     continue;
                 }
                 ValidateModule(plan, module, definition.CertifiedGeometry, errors);
@@ -261,35 +358,31 @@ namespace RuinCrawler.Core.Dungeon.V2
             }
 
             var regionMap = new Dictionary<string, string>(StringComparer.Ordinal);
-            if (geometry.Regions.Count == 1)
+            foreach (DungeonModuleRegionBindingV2 binding in module.RegionBindings)
             {
-                regionMap.Add(geometry.Regions[0].Id, module.RegionIds[0]);
-            }
-            else
-            {
-                foreach (CertifiedDungeonRegionGeometryV2 local in geometry.Regions)
+                if (regionMap.ContainsKey(binding.LocalRegionId)
+                    || !geometry.Regions.Any(value => value.Id == binding.LocalRegionId)
+                    || !module.RegionIds.Contains(binding.PlacedRegionId))
                 {
-                    string id = module.Id + "/certified-region/" + local.Id;
-                    if (!module.RegionIds.Contains(id))
-                    {
-                        errors.Add(Issue("CERTIFIED_REGION_MISSING", module.Id, "Missing placed region for local ID '" + local.Id + "'."));
-                        return;
-                    }
-                    regionMap.Add(local.Id, id);
+                    errors.Add(Issue(
+                        "CERTIFIED_REGION_BINDING_MISMATCH",
+                        module.Id,
+                        "Region bindings must map each certified local region exactly once."));
+                    return;
                 }
+                regionMap.Add(binding.LocalRegionId, binding.PlacedRegionId);
+            }
+            if (regionMap.Count != geometry.Regions.Count)
+            {
+                errors.Add(Issue("CERTIFIED_REGION_MISSING", module.Id, "Placed region bindings do not cover the certified bake."));
+                return;
             }
 
-            CertifiedDungeonRegionGeometryV2 first = geometry.Regions[0];
-            DungeonRegionPlanV2 firstPlaced = plan.Regions.Single(value => value.Id == regionMap[first.Id]);
-            var translation = new DungeonPoint3(
-                firstPlaced.Bounds.Minimum.X - first.Bounds.Minimum.X,
-                firstPlaced.Bounds.Minimum.Y - first.Bounds.Minimum.Y,
-                firstPlaced.Bounds.Minimum.Z - first.Bounds.Minimum.Z);
             var placement = new DungeonCertifiedModulePlacementV2(
                 geometry,
                 module.Id,
                 regionMap,
-                translation,
+                module.Transform,
                 IndustrialFactoryV2Ruleset.HazardControllerId);
 
             if (!DungeonCertifiedModulePlacementV2.BoundsEqual(module.Bounds, placement.Bounds, GeometryTolerance))
@@ -318,15 +411,20 @@ namespace RuinCrawler.Core.Dungeon.V2
                     && actual.MaterialProfileId == expected.MaterialProfileId
                     && actual.IsStructural == expected.IsStructural
                     && actual.IsWalkable == expected.IsWalkable
-                    && string.Equals(actual.ControllerId, expected.ControllerId, StringComparison.Ordinal)
                     && PredicateEqual(actual.ActivePredicate, expected.ActivePredicate)
+                    && string.Equals(actual.ControllerId, expected.ControllerId, StringComparison.Ordinal)
                     && DungeonCertifiedModulePlacementV2.PrismEqual(actual.Volume, expected.Volume, GeometryTolerance),
                 "CERTIFIED_SURFACE_PLACEMENT_MISMATCH",
                 module.Id,
                 errors);
+            DungeonAnchorPlanV2[] selectedAnchors = plan.Anchors
+                .Where(value => value.ModuleInstanceId == module.Id
+                    && value.Source == DungeonSpatialRecordSourceV2.CertifiedModule)
+                .ToArray();
+            var selectedAnchorIds = new HashSet<string>(selectedAnchors.Select(value => value.Id), StringComparer.Ordinal);
             CompareExactSet(
-                plan.Anchors.Where(value => value.ModuleInstanceId == module.Id && value.Source == DungeonSpatialRecordSourceV2.CertifiedModule),
-                placement.Anchors,
+                selectedAnchors,
+                placement.Anchors.Where(value => selectedAnchorIds.Contains(value.Id)),
                 value => value.Id,
                 (actual, expected) => actual.RegionId == expected.RegionId
                     && actual.Kind == expected.Kind
@@ -342,12 +440,49 @@ namespace RuinCrawler.Core.Dungeon.V2
                 (actual, expected) => actual.RegionId == expected.RegionId
                     && actual.Kind == expected.Kind
                     && actual.SocketTag == expected.SocketTag
+                    && ApertureEqual(actual.Aperture, expected.Aperture)
                     && PredicateEqual(actual.AccessPredicate, expected.AccessPredicate)
                     && DungeonCertifiedModulePlacementV2.PointEqual(actual.Position, expected.Position, GeometryTolerance)
                     && DungeonCertifiedModulePlacementV2.PointEqual(actual.Facing, expected.Facing, GeometryTolerance),
                 "CERTIFIED_CONNECTOR_PLACEMENT_MISMATCH",
                 module.Id,
                 errors);
+        }
+
+        private static bool ApertureEqual(
+            DungeonConnectorApertureV2 left,
+            DungeonConnectorApertureV2 right)
+        {
+            if (ReferenceEquals(left, right)) return true;
+            if (left == null || right == null
+                || !string.Equals(left.SocketProfileId, right.SocketProfileId, StringComparison.Ordinal)
+                || !string.Equals(left.ThemedCapProfileId, right.ThemedCapProfileId, StringComparison.Ordinal)
+                || left.FloorElevation != right.FloorElevation
+                || left.FloorSlopeDegrees != right.FloorSlopeDegrees
+                || left.SeamDepth != right.SeamDepth
+                || left.CapState != right.CapState
+                || !string.Equals(left.NavigationHandoffProfileId, right.NavigationHandoffProfileId, StringComparison.Ordinal)
+                || !string.Equals(left.MechanismBindingId, right.MechanismBindingId, StringComparison.Ordinal)
+                || !string.Equals(left.ExteriorGasketProfileId, right.ExteriorGasketProfileId, StringComparison.Ordinal)
+                || !string.Equals(left.VerticalCompositionPortalId, right.VerticalCompositionPortalId, StringComparison.Ordinal)
+                || !left.CompatibleConnectorKinds.SequenceEqual(right.CompatibleConnectorKinds))
+                return false;
+            return DungeonCertifiedModulePlacementV2.PrismEqual(
+                left.LocalVolume,
+                right.LocalVolume,
+                GeometryTolerance)
+                && DungeonCertifiedModulePlacementV2.PrismEqual(
+                    left.PlayerClearanceVolume,
+                    right.PlayerClearanceVolume,
+                    GeometryTolerance)
+                && DungeonCertifiedModulePlacementV2.PrismEqual(
+                    left.CameraClearanceVolume,
+                    right.CameraClearanceVolume,
+                    GeometryTolerance)
+                && DungeonCertifiedModulePlacementV2.PrismEqual(
+                    left.ApproachVolume,
+                    right.ApproachVolume,
+                    GeometryTolerance);
         }
 
         private static void CompareExactSet<T>(

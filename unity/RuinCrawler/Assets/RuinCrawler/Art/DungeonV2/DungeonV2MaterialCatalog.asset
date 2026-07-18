@@ -1,0 +1,51 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d9a58e7060a94ac0be1dc6fb56f099b9, type: 3}
+  m_Name: DungeonV2MaterialCatalog
+  m_EditorClassIdentifier: RuinCrawler.Art.DungeonV2::RuinCrawler.Art.DungeonV2.DungeonV2MaterialCatalog
+  entries:
+  - roleId: factory.floor
+    material: {fileID: 2100000, guid: 783d5c8760cd2623fc96eae292637c4f, type: 2}
+  - roleId: factory.wall
+    material: {fileID: 2100000, guid: 79e7c4309d0b51332b80f0ebe44d70bb, type: 2}
+  - roleId: factory.ceiling
+    material: {fileID: 2100000, guid: c5653680a1119bfab43d7da247802561, type: 2}
+  - roleId: factory.catwalk
+    material: {fileID: 2100000, guid: 10c2c1dacb1776eae6ac3c0a1f191f9d, type: 2}
+  - roleId: factory.mechanism
+    material: {fileID: 2100000, guid: 82fd21ca621eafc209ad4535a9caae14, type: 2}
+  - roleId: waterworks.floor
+    material: {fileID: 2100000, guid: a03c9f54b76200d8ed388cf16303b608, type: 2}
+  - roleId: waterworks.wall-waterline
+    material: {fileID: 2100000, guid: 88346079ccb5dd1751385e39993f4f60, type: 2}
+  - roleId: waterworks.pipe-wall
+    material: {fileID: 2100000, guid: e58eda2277e08f26849b395e20b0466c, type: 2}
+  - roleId: waterworks.water-surface
+    material: {fileID: 2100000, guid: 6722e2a8fedd76ca3a8ec559636d17f2, type: 2}
+  - roleId: magma.floor
+    material: {fileID: 2100000, guid: 8f413cf1d3fc8e88e0fe059a326a0c57, type: 2}
+  - roleId: magma.safe-deck
+    material: {fileID: 2100000, guid: 524ffb2a662db892c8052d162a2b7aca, type: 2}
+  - roleId: magma.wall
+    material: {fileID: 2100000, guid: a810ce2c0f7eed62ab3f24633844641a, type: 2}
+  - roleId: magma.hazard-surface
+    material: {fileID: 2100000, guid: a4ed5846394b1b64411485470e07b64d, type: 2}
+  - roleId: electrical.floor
+    material: {fileID: 2100000, guid: b76acc30880b685bf41cf06058135a6f, type: 2}
+  - roleId: electrical.wall
+    material: {fileID: 2100000, guid: 223bb495b4003d80a05581624da24e58, type: 2}
+  - roleId: electrical.safe-deck
+    material: {fileID: 2100000, guid: 41699675ef86d84a6ac2ccdeb2719108, type: 2}
+  - roleId: electrical.live-panel
+    material: {fileID: 2100000, guid: 2d36013055956dd63fab2fe8ed642ec8, type: 2}
+  - roleId: electrical.grounded-panel
+    material: {fileID: 2100000, guid: f290241dc1b77da13d7f4576f4c84cb7, type: 2}

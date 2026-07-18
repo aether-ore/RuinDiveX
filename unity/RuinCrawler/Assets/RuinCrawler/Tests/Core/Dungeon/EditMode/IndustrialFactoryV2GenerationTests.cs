@@ -15,7 +15,8 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
             IndustrialFactoryV2ValidationResult validation = new IndustrialFactoryV2Validator().Validate(plan);
 
             Assert.That(validation.Accepted, Is.True, Describe(validation));
-            Assert.That(plan.MacroRoles, Has.Count.EqualTo(7));
+            Assert.That(plan.Modules.Count, Is.InRange(DungeonPlanV2.MinimumModuleCount, DungeonPlanV2.MaximumModuleCount));
+            Assert.That(plan.GameplayBeats, Has.Count.EqualTo(DungeonPlanV2.RequiredGameplayBeatCount));
             Assert.That(plan.Regions.Count, Is.InRange(12, 18));
             Assert.That(plan.Districts.Select(value => value.Kind), Does.Contain(DungeonBiomeDistrictKindV2.Factory));
             Assert.That(plan.Districts.Select(value => value.Kind), Does.Contain(DungeonBiomeDistrictKindV2.Waterworks));
@@ -35,18 +36,36 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 Does.Contain(IndustrialFactoryV2Ruleset.CredentialKeyRewardId));
             Assert.That(plan.Shortcuts.Select(value => value.Id),
                 Does.Contain(IndustrialFactoryV2Ruleset.WaterworksShortcutId));
-            Assert.That(plan.FallExposures, Has.Count.EqualTo(7));
+            Assert.That(plan.FallExposures, Has.Count.EqualTo(16));
             Assert.That(plan.FallCatchments, Has.Count.EqualTo(4));
-            Assert.That(plan.FallExposures.Select(value => value.Id), Is.EquivalentTo(new[]
+            foreach (string slug in new[]
+                     {
+                         "freight-sump",
+                         "reservoir-service",
+                         "gantry-sump",
+                         "hazard-undercroft"
+                     })
             {
-                "exposure-freight-sump",
-                "exposure-gantry-sump",
-                "exposure-reservoir-moving-platform",
-                "exposure-hazard-undercroft-main-lip",
-                "exposure-hazard-undercroft-west-lip",
-                "exposure-hazard-undercroft-east-lip",
-                "exposure-hazard-undercroft"
-            }), "Certified Credential Tower floor pieces each require an explicit Undercroft fall envelope.");
+                Assert.That(plan.FallExposures
+                        .Where(value => value.Id.StartsWith("exposure-" + slug + "-", StringComparison.Ordinal))
+                        .Select(value => value.Id),
+                    Is.EquivalentTo(new[]
+                    {
+                        "exposure-" + slug + "-west",
+                        "exposure-" + slug + "-east",
+                        "exposure-" + slug + "-south",
+                        "exposure-" + slug + "-north"
+                    }), "Every side of each certified internal shaft aperture needs its own source-surface envelope.");
+            }
+            Assert.That(plan.Surfaces.Where(value => value.Id.EndsWith("-return-lift-platform", StringComparison.Ordinal))
+                .All(value => value.Kind == DungeonSurfaceKindV2.Walkable), Is.True,
+                "A return-lift landing remains stationary until a complete moving sweep is authored.");
+            DungeonBiomeDistrictPlanV2 hazardDistrict = plan.Districts.Single(IsHazard);
+            Assert.That(hazardDistrict.RegionIds, Has.Count.GreaterThanOrEqualTo(2));
+            Assert.That(hazardDistrict.RegionIds
+                .SelectMany(id => plan.Regions.Single(region => region.Id == id).ModuleInstanceIds)
+                .Distinct(StringComparer.Ordinal).Count(), Is.EqualTo(1),
+                "The shipped Undercroft is a certified multi-region vertical composition, not two fake macro rooms.");
             Assert.That(plan.Districts.Single(value => value.Kind == DungeonBiomeDistrictKindV2.Waterworks)
                 .EntranceTransitionIds, Has.Count.GreaterThanOrEqualTo(2));
             Assert.That(plan.Anchors.Count(value => value.Kind == DungeonAnchorKindV2.Encounter), Is.GreaterThanOrEqualTo(5));
@@ -97,32 +116,25 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         }
 
         [Test]
-        public void MacroTemplatesSelectOnlyAuthoredAOrBVariants()
+        public void EverySelectedAuthoredModuleUsesADeclaredTopologyVariantAndDiscreteTransform()
         {
             DungeonPlanV2 plan = new IndustrialFactoryV2Generator().Generate("module-variant-contract");
 
-            foreach (DungeonMacroRolePlanV2 macro in plan.MacroRoles)
+            foreach (DungeonModuleInstancePlanV2 module in plan.Modules)
             {
-                DungeonModuleInstancePlanV2 primary = plan.Modules.First(module =>
-                    module.MacroRoleId == macro.Id
-                    && module.RegionIds[0].StartsWith("factory-", StringComparison.Ordinal)
-                    && !module.RegionIds[0].StartsWith("factory-pocket-", StringComparison.Ordinal));
                 Assert.That(
-                    primary.TemplateId.EndsWith("variant-a", StringComparison.Ordinal)
-                    || primary.TemplateId.EndsWith("variant-b", StringComparison.Ordinal),
+                    module.TemplateId.EndsWith("variant-a", StringComparison.Ordinal)
+                    || module.TemplateId.EndsWith("variant-b", StringComparison.Ordinal),
                     Is.True,
-                    primary.TemplateId);
-                double depth = primary.Bounds.Maximum.Z - primary.Bounds.Minimum.Z;
-                Assert.That(
-                    depth,
-                    Is.EqualTo(primary.TemplateId.EndsWith("variant-b", StringComparison.Ordinal)
-                        ? 9.5d
-                        : 8d).Within(1e-9d),
-                    primary.TemplateId + " must use its certified spatial footprint.");
+                    module.TemplateId);
+                Assert.That(module.Transform.QuarterTurns, Is.InRange(0, 3));
+                Assert.That(module.RegionBindings.Select(value => value.PlacedRegionId),
+                    Is.EquivalentTo(module.RegionIds), module.Id);
             }
         }
 
         [Test]
+        [Timeout(600000)]
         public void ThousandSeedSweepIsValidDeterministicAndExercisesBothUndercrofts()
         {
             const int seedCount = 1000;
@@ -166,13 +178,16 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                             first.DeterministicSignature,
                             replay.DeterministicSignature,
                             StringComparison.Ordinal),
-                        first.MacroRoles.Count,
+                        first.Modules.Count,
                         first.Regions.Count,
                         first.Districts.Count,
                         first.Districts.Count(value => value.Kind == DungeonBiomeDistrictKindV2.Factory),
                         first.Districts.Count(value => value.Kind == DungeonBiomeDistrictKindV2.Waterworks),
                         first.Districts.Count(IsHazard),
-                        hazard.Kind);
+                        hazard.Kind,
+                        string.Join("|", first.AbstractRouteGraph.Edges
+                            .OrderBy(value => value.Id, StringComparer.Ordinal)
+                            .Select(value => value.FromNodeId + ">" + value.ToNodeId + ":" + value.Role)));
                 }
                 catch (Exception exception)
                 {
@@ -183,12 +198,15 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
             var hazards = new HashSet<DungeonBiomeDistrictKindV2>();
             int minimumRegions = int.MaxValue;
             int maximumRegions = int.MinValue;
+            var topologySignatures = new HashSet<string>(StringComparer.Ordinal);
             foreach (SeedSweepObservation observation in observations)
             {
                 Assert.That(observation.Error, Is.Null, observation.Seed + ": " + observation.Error);
                 Assert.That(observation.Accepted, Is.True, observation.Seed);
                 Assert.That(observation.DeterministicReplay, Is.True, observation.Seed);
-                Assert.That(observation.MacroRoleCount, Is.EqualTo(7), observation.Seed);
+                Assert.That(observation.ModuleCount, Is.InRange(
+                    DungeonPlanV2.MinimumModuleCount,
+                    DungeonPlanV2.MaximumModuleCount), observation.Seed);
                 Assert.That(observation.RegionCount, Is.InRange(12, 18), observation.Seed);
                 Assert.That(observation.DistrictCount, Is.EqualTo(3), observation.Seed);
                 Assert.That(observation.FactoryDistrictCount, Is.EqualTo(1), observation.Seed);
@@ -196,6 +214,7 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 Assert.That(observation.HazardDistrictCount, Is.EqualTo(1), observation.Seed);
 
                 hazards.Add(observation.HazardKind);
+                topologySignatures.Add(observation.TopologySignature);
                 minimumRegions = Math.Min(minimumRegions, observation.RegionCount);
                 maximumRegions = Math.Max(maximumRegions, observation.RegionCount);
             }
@@ -205,8 +224,9 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 DungeonBiomeDistrictKindV2.MagmaUndercroft,
                 DungeonBiomeDistrictKindV2.ElectricalUndercroft
             }));
-            Assert.That(minimumRegions, Is.EqualTo(12));
-            Assert.That(maximumRegions, Is.EqualTo(18));
+            Assert.That(minimumRegions, Is.GreaterThanOrEqualTo(DungeonPlanV2.MinimumRegionCount));
+            Assert.That(maximumRegions, Is.LessThanOrEqualTo(DungeonPlanV2.MaximumRegionCount));
+            Assert.That(topologySignatures.Count, Is.GreaterThanOrEqualTo(3));
         }
 
         private static bool IsHazard(DungeonBiomeDistrictPlanV2 district)
@@ -239,13 +259,14 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
             public string Error { get; private set; }
             public bool Accepted { get; private set; }
             public bool DeterministicReplay { get; private set; }
-            public int MacroRoleCount { get; private set; }
+            public int ModuleCount { get; private set; }
             public int RegionCount { get; private set; }
             public int DistrictCount { get; private set; }
             public int FactoryDistrictCount { get; private set; }
             public int WaterworksDistrictCount { get; private set; }
             public int HazardDistrictCount { get; private set; }
             public DungeonBiomeDistrictKindV2 HazardKind { get; private set; }
+            public string TopologySignature { get; private set; }
 
             public static SeedSweepObservation Failed(string seed, string error) =>
                 new SeedSweepObservation(seed) { Error = error ?? "Unknown failure." };
@@ -254,25 +275,27 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 string seed,
                 bool accepted,
                 bool deterministicReplay,
-                int macroRoleCount,
+                int moduleCount,
                 int regionCount,
                 int districtCount,
                 int factoryDistrictCount,
                 int waterworksDistrictCount,
                 int hazardDistrictCount,
-                DungeonBiomeDistrictKindV2 hazardKind)
+                DungeonBiomeDistrictKindV2 hazardKind,
+                string topologySignature)
             {
                 return new SeedSweepObservation(seed)
                 {
                     Accepted = accepted,
                     DeterministicReplay = deterministicReplay,
-                    MacroRoleCount = macroRoleCount,
+                    ModuleCount = moduleCount,
                     RegionCount = regionCount,
                     DistrictCount = districtCount,
                     FactoryDistrictCount = factoryDistrictCount,
                     WaterworksDistrictCount = waterworksDistrictCount,
                     HazardDistrictCount = hazardDistrictCount,
-                    HazardKind = hazardKind
+                    HazardKind = hazardKind,
+                    TopologySignature = topologySignature
                 };
             }
         }

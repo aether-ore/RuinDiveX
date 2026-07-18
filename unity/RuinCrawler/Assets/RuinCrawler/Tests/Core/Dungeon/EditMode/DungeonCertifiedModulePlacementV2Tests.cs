@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
 using RuinCrawler.Core.Dungeon.V2;
+using RuinCrawler.Core.Dungeon.V2.Tests;
 
 namespace RuinCrawler.Core.Dungeon.Tests
 {
@@ -16,12 +17,16 @@ namespace RuinCrawler.Core.Dungeon.Tests
             Assert.That(plan.Connectors, Is.Not.Empty);
             Assert.That(plan.Connectors.All(value =>
                 value.Source == DungeonSpatialRecordSourceV2.CertifiedModule), Is.True);
-            Assert.That(plan.Modules.All(value => value.ConnectorIds.Count == 2), Is.True);
-            Assert.That(plan.Modules.All(value => value.RegionIds.Count == 1), Is.True);
+            Assert.That(plan.Modules.All(value => value.ConnectorIds.Count > 0), Is.True);
+            Assert.That(plan.Modules.All(value =>
+                value.RegionIds.Count == value.RegionBindings.Count
+                && value.RegionIds.Count >= 2), Is.True,
+                "Authored modules expose their complete multi-region bake through one-to-one bindings.");
             Assert.That(plan.Regions.All(value =>
                 value.Source == DungeonSpatialRecordSourceV2.CertifiedModule), Is.True);
-            Assert.That(plan.Surfaces.Any(value =>
-                value.Source == DungeonSpatialRecordSourceV2.AssemblyAddition), Is.True);
+            Assert.That(plan.Surfaces.All(value =>
+                value.Source == DungeonSpatialRecordSourceV2.CertifiedModule), Is.True,
+                "Production V2 may not synthesize traversal geometry outside the authored prefab bake.");
         }
 
         [Test]
@@ -55,21 +60,24 @@ namespace RuinCrawler.Core.Dungeon.Tests
         }
 
         [Test]
-        public void RemovedCertifiedAnchorIsRejectedEvenWhenModuleHashStillMatches()
+        public void ShiftedCertifiedAnchorIsRejectedEvenWhenModuleHashStillMatches()
         {
             DungeonPlanV2 source = new IndustrialFactoryV2Generator().Generate("certified-placement-missing-anchor");
             DungeonAnchorPlanV2 anchor = source.Anchors.First(value =>
                 value.Source == DungeonSpatialRecordSourceV2.CertifiedModule
                 && value.Kind == DungeonAnchorKindV2.Safe
                 && source.FallCatchments.All(catchment => catchment.SafeAnchorId != value.Id));
-            DungeonModuleInstancePlanV2 module = source.Modules.Single(value => value.Id == anchor.ModuleInstanceId);
-            DungeonModuleInstancePlanV2 changedModule = CopyModule(
-                module,
-                anchorIds: module.AnchorIds.Where(value => value != anchor.Id));
+            var shifted = new DungeonAnchorPlanV2(
+                anchor.Id,
+                anchor.ModuleInstanceId,
+                anchor.RegionId,
+                anchor.Kind,
+                new DungeonPoint3(anchor.Position.X + 0.001d, anchor.Position.Y, anchor.Position.Z),
+                anchor.ProfileId,
+                anchor.Source);
             DungeonPlanV2 invalid = Rebuild(
                 source,
-                modules: source.Modules.Select(value => value.Id == module.Id ? changedModule : value),
-                anchors: source.Anchors.Where(value => value.Id != anchor.Id));
+                anchors: source.Anchors.Select(value => value.Id == anchor.Id ? shifted : value));
 
             AssertCode(
                 DungeonCertifiedModulePlacementValidatorV2.Validate(invalid),
@@ -179,7 +187,8 @@ namespace RuinCrawler.Core.Dungeon.Tests
                 connector.Facing,
                 connector.SocketTag,
                 DungeonAccessPredicateV2.Never,
-                connector.Source);
+                connector.Source,
+                connector.Aperture);
 
             AssertCode(
                 DungeonCertifiedModulePlacementValidatorV2.Validate(Rebuild(
@@ -189,25 +198,25 @@ namespace RuinCrawler.Core.Dungeon.Tests
         }
 
         [Test]
-        public void CredentialTowerCertifiedBakeContainsNoFloorBehindCrumblePlate()
+        public void CredentialBeatCrumbleSurfaceBelongsToItsCertifiedBakeAndHasNoFloorBehindIt()
         {
-            foreach (IndustrialFactoryV2ModuleDefinition definition in
-                IndustrialFactoryV2ModuleCatalog.Definitions.Where(value =>
-                    value.TemplateId.StartsWith("factory-credentialtower-", System.StringComparison.Ordinal)))
-            {
-                Assert.That(definition.CertifiedGeometry.Surfaces.Select(value => value.Id),
-                    Does.Not.Contain("floor"), definition.TemplateId);
-                Assert.That(definition.CertifiedGeometry.Surfaces.Select(value => value.Id),
-                    Does.Contain("tower-floor-north"), definition.TemplateId);
-            }
-
             DungeonPlanV2 plan = new IndustrialFactoryV2Generator().Generate("credential-crumble-certified-gap");
+            DungeonRegionPlanV2 credentialRegion = DungeonV2SemanticFixtureQueries.RegionForBeat(
+                plan,
+                DungeonGameplayBeatKindV2.CredentialTower,
+                DungeonBiomeDistrictKindV2.Factory,
+                DungeonElevationStratumV2.Entry);
             DungeonSurfacePlanV2 crumble = plan.Surfaces.Single(value =>
-                value.Id == IndustrialFactoryV2Ruleset.CredentialCrumbleSurfaceId);
-            Assert.That(crumble.Source, Is.EqualTo(DungeonSpatialRecordSourceV2.AssemblyAddition));
+                string.Equals(value.RegionId, credentialRegion.Id, System.StringComparison.Ordinal)
+                && string.Equals(
+                    value.ControllerId,
+                    IndustrialFactoryV2Ruleset.CredentialCrumbleControllerId,
+                    System.StringComparison.Ordinal));
+            Assert.That(crumble.Source, Is.EqualTo(DungeonSpatialRecordSourceV2.CertifiedModule));
             Assert.That(plan.Surfaces.Where(value =>
                     value.ModuleInstanceId == crumble.ModuleInstanceId
                     && value.Source == DungeonSpatialRecordSourceV2.CertifiedModule)
+                .Where(value => value.Id != crumble.Id)
                 .Any(value => PrismContains(value.Volume, crumble.Volume)), Is.False);
         }
 
@@ -239,7 +248,11 @@ namespace RuinCrawler.Core.Dungeon.Tests
                 source.Bounds,
                 source.RegionIds,
                 connectorIds ?? source.ConnectorIds,
-                anchorIds ?? source.AnchorIds);
+                anchorIds ?? source.AnchorIds,
+                source.Transform,
+                source.RegionBindings,
+                source.VerticalCompositionId,
+                source.VerticalPortalConnectorIds);
         }
 
         private static DungeonPlanV2 Rebuild(
@@ -278,7 +291,11 @@ namespace RuinCrawler.Core.Dungeon.Tests
                 source.FluidNetworks,
                 source.EnvironmentControllers,
                 source.FallCatchments,
-                source.FallExposures);
+                source.FallExposures,
+                source.GameplayBeats,
+                source.AbstractRouteGraph,
+                source.BeatAssignments,
+                source.MiniDungeonCompositions);
         }
 
         private static void AssertCode(

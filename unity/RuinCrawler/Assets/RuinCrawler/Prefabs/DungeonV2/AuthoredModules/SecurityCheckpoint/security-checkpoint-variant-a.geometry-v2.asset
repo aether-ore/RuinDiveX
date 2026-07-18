@@ -1,0 +1,858 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 57cc5d95027ee8543888785a49dc4148, type: 3}
+  m_Name: security-checkpoint-variant-a.geometry-v2
+  m_EditorClassIdentifier: RuinCrawler.Runtime.Dungeon::RuinCrawler.Runtime.Dungeon.DungeonCertifiedGeometryAssetV2
+  schemaVersion: 2
+  templateId: security-checkpoint-variant-a
+  contentHash: sha256:84dddb1aec13d08d09601156723287983ed825cf98b8513924af0944eb057db4
+  canonicalContent: 2|29:security-checkpoint-variant-a|18|11:access-ramp|5:entry|1|2|1|1|12:factory-ramp|4|-5|-2|-1|-2|-1|2|-5|2|0|3|1|0|3|-1|0|0|7:ceiling|5:entry|0|0|1|0|15:factory-ceiling|4|-9.125|-9.125|9.125|-9.125|9.125|9.125|-9.125|9.125|9.75|10|0|19:credential-bulkhead|5:entry|7|0|1|0|27:factory-credential-bulkhead|4|-9.125|-1.25|-8.875|-1.25|-8.875|1.25|-9.125|1.25|3.65|10|0|18:credential-scanner|5:entry|7|0|1|0|28:machinery-credential-scanner|4|-8|-7.5|-6|-7.5|-6|-5|-8|-5|0.25|2.4|0|14:east-wall-left|5:entry|0|0|1|0|12:factory-wall|4|-9.125|-9.125|-8.875|-9.125|-8.875|-1.25|-9.125|-1.25|0|10|0|16:east-wall-lintel|5:entry|0|0|1|0|16:factory-bulkhead|4|-9.125|-1.25|-8.875|-1.25|-8.875|1.25|-9.125|1.25|3.65|10|0|15:east-wall-right|5:entry|0|0|1|0|12:factory-wall|4|-9.125|1.25|-8.875|1.25|-8.875|9.125|-9.125|9.125|0|10|0|11:entry-floor|5:entry|1|0|1|1|13:factory-floor|4|-9.125|-9.125|9.125|-9.125|9.125|9.125|-9.125|9.125|0|0.25|0|15:north-wall-left|5:entry|0|0|1|0|12:factory-wall|4|1.25|8.875|9.125|8.875|9.125|9.125|1.25|9.125|0|10|0|17:north-wall-lintel|5:entry|0|0|1|0|16:factory-bulkhead|4|-1.25|8.875|1.25|8.875|1.25|9.125|-1.25|9.125|3.65|10|0|16:north-wall-right|5:entry|0|0|1|0|12:factory-wall|4|-9.125|8.875|-1.25|8.875|-1.25|9.125|-9.125|9.125|0|10|0|14:security-booth|5:entry|7|0|1|0|24:machinery-security-booth|4|4|4|7.5|4|7.5|7.5|4|7.5|0.25|3.2|0|10:south-wall|5:entry|0|0|1|0|12:factory-wall|4|-9.125|-9.125|9.125|-9.125|9.125|-8.875|-9.125|-8.875|0|10|0|14:upper-platform|5:upper|1|0|1|1|15:factory-catwalk|4|-7|0|7|0|7|7|-7|7|2.75|3|0|13:upper-support|5:entry|7|0|1|0|15:factory-support|4|-0.5|0|0|0|0|7|-0.5|7|0|2.75|0|14:west-wall-left|5:entry|0|0|1|0|12:factory-wall|4|8.875|-9.125|9.125|-9.125|9.125|-1.25|8.875|-1.25|0|10|0|16:west-wall-lintel|5:entry|0|0|1|0|16:factory-bulkhead|4|8.875|-1.25|9.125|-1.25|9.125|1.25|8.875|1.25|3.65|10|0|15:west-wall-right|5:entry|0|0|1|0|12:factory-wall|4|8.875|1.25|9.125|1.25|9.125|9.125|8.875|9.125|0|10|0|2|5:entry|0|1|16:navigation-entry|-9.125|0|-9.125|9.125|10|9.125|5:upper|0|2|16:navigation-upper|-7|2.75|0|7|10|7|6|5:entry|5:entry|0|7|0.5|0|-1:|4:exit|5:entry|1|-7|0.5|0|-1:|8:landmark|5:entry|5|0|0.5|0|24:LockedSecurityEvacuation|9:mechanism|5:entry|4|0|0.5|-7|16:SecurityBulkhead|4:safe|5:entry|6|5|0.5|0|13:safe-reset-v2|5:spawn|5:entry|9|7|0.5|0|21:player-entry-spawn-v2|3|4:east|5:entry|1|-9|0.5|0|-1|0|0|26:industrial-bulkhead-3x4-v2|4|-9.2|-1.25|-8.8|-1.25|-8.8|1.25|-9.2|1.25|0|3.65|26:industrial-bulkhead-3x4-v2|26:cap-industrial-bulkhead-v2|0|0|4|-9.2|-1.25|-8.8|-1.25|-8.8|1.25|-9.2|1.25|0|3.65|4|-9.2|-1.25|-8.8|-1.25|-8.8|1.25|-9.2|1.25|0|3.65|0.25|4|-9.2|-1.25|-8.8|-1.25|-8.8|1.25|-9.2|1.25|0|3.65|45:navigation-handoff-industrial-bulkhead-3x4-v2|0|-1:|33:gasket-industrial-bulkhead-3x4-v2|-1:|2|0|1|5:north|5:entry|1|0|0.5|9|0|0|1|26:industrial-bulkhead-3x4-v2|4|-1.25|8.8|1.25|8.8|1.25|9.2|-1.25|9.2|0|3.65|26:industrial-bulkhead-3x4-v2|26:cap-industrial-bulkhead-v2|0|0|4|-1.25|8.8|1.25|8.8|1.25|9.2|-1.25|9.2|0|3.65|4|-1.25|8.8|1.25|8.8|1.25|9.2|-1.25|9.2|0|3.65|0.25|4|-1.25|8.8|1.25|8.8|1.25|9.2|-1.25|9.2|0|3.65|45:navigation-handoff-industrial-bulkhead-3x4-v2|0|-1:|33:gasket-industrial-bulkhead-3x4-v2|-1:|2|0|1|4:west|5:entry|1|9|0.5|0|1|0|0|26:industrial-bulkhead-3x4-v2|4|8.8|-1.25|9.2|-1.25|9.2|1.25|8.8|1.25|0|3.65|26:industrial-bulkhead-3x4-v2|26:cap-industrial-bulkhead-v2|0|0|4|8.8|-1.25|9.2|-1.25|9.2|1.25|8.8|1.25|0|3.65|4|8.8|-1.25|9.2|-1.25|9.2|1.25|8.8|1.25|0|3.65|0.25|4|8.8|-1.25|9.2|-1.25|9.2|1.25|8.8|1.25|0|3.65|45:navigation-handoff-industrial-bulkhead-3x4-v2|0|-1:|33:gasket-industrial-bulkhead-3x4-v2|-1:|2|0|1|
+  surfaces:
+  - id: access-ramp
+    regionId: entry
+    kind: 1
+    colliderKind: 2
+    volume:
+      horizontalVertices:
+      - x: -5
+        z: -2
+      - x: -1
+        z: -2
+      - x: -1
+        z: 2
+      - x: -5
+        z: 2
+      minimumY: 0
+      maximumY: 3
+    rampWedge:
+      boundingVolume:
+        horizontalVertices:
+        - x: -5
+          z: -2
+        - x: -1
+          z: -2
+        - x: -1
+          z: 2
+        - x: -5
+          z: 2
+        minimumY: 0
+        maximumY: 3
+      lowSurfaceY: 0
+      highSurfaceY: 3
+      riseDirection:
+        x: -1
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 1
+    materialProfileId: factory-ramp
+  - id: ceiling
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -9.125
+        z: -9.125
+      - x: 9.125
+        z: -9.125
+      - x: 9.125
+        z: 9.125
+      - x: -9.125
+        z: 9.125
+      minimumY: 9.75
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-ceiling
+  - id: credential-bulkhead
+    regionId: entry
+    kind: 7
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -9.125
+        z: -1.25
+      - x: -8.875
+        z: -1.25
+      - x: -8.875
+        z: 1.25
+      - x: -9.125
+        z: 1.25
+      minimumY: 3.65
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-credential-bulkhead
+  - id: credential-scanner
+    regionId: entry
+    kind: 7
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -8
+        z: -7.5
+      - x: -6
+        z: -7.5
+      - x: -6
+        z: -5
+      - x: -8
+        z: -5
+      minimumY: 0.25
+      maximumY: 2.4
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: machinery-credential-scanner
+  - id: east-wall-left
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -9.125
+        z: -9.125
+      - x: -8.875
+        z: -9.125
+      - x: -8.875
+        z: -1.25
+      - x: -9.125
+        z: -1.25
+      minimumY: 0
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-wall
+  - id: east-wall-lintel
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -9.125
+        z: -1.25
+      - x: -8.875
+        z: -1.25
+      - x: -8.875
+        z: 1.25
+      - x: -9.125
+        z: 1.25
+      minimumY: 3.65
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-bulkhead
+  - id: east-wall-right
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -9.125
+        z: 1.25
+      - x: -8.875
+        z: 1.25
+      - x: -8.875
+        z: 9.125
+      - x: -9.125
+        z: 9.125
+      minimumY: 0
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-wall
+  - id: entry-floor
+    regionId: entry
+    kind: 1
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -9.125
+        z: -9.125
+      - x: 9.125
+        z: -9.125
+      - x: 9.125
+        z: 9.125
+      - x: -9.125
+        z: 9.125
+      minimumY: 0
+      maximumY: 0.25
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 1
+    materialProfileId: factory-floor
+  - id: north-wall-left
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: 1.25
+        z: 8.875
+      - x: 9.125
+        z: 8.875
+      - x: 9.125
+        z: 9.125
+      - x: 1.25
+        z: 9.125
+      minimumY: 0
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-wall
+  - id: north-wall-lintel
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -1.25
+        z: 8.875
+      - x: 1.25
+        z: 8.875
+      - x: 1.25
+        z: 9.125
+      - x: -1.25
+        z: 9.125
+      minimumY: 3.65
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-bulkhead
+  - id: north-wall-right
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -9.125
+        z: 8.875
+      - x: -1.25
+        z: 8.875
+      - x: -1.25
+        z: 9.125
+      - x: -9.125
+        z: 9.125
+      minimumY: 0
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-wall
+  - id: security-booth
+    regionId: entry
+    kind: 7
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: 4
+        z: 4
+      - x: 7.5
+        z: 4
+      - x: 7.5
+        z: 7.5
+      - x: 4
+        z: 7.5
+      minimumY: 0.25
+      maximumY: 3.2
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: machinery-security-booth
+  - id: south-wall
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -9.125
+        z: -9.125
+      - x: 9.125
+        z: -9.125
+      - x: 9.125
+        z: -8.875
+      - x: -9.125
+        z: -8.875
+      minimumY: 0
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-wall
+  - id: upper-platform
+    regionId: upper
+    kind: 1
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -7
+        z: 0
+      - x: 7
+        z: 0
+      - x: 7
+        z: 7
+      - x: -7
+        z: 7
+      minimumY: 2.75
+      maximumY: 3
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 1
+    materialProfileId: factory-catwalk
+  - id: upper-support
+    regionId: entry
+    kind: 7
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -0.5
+        z: 0
+      - x: 0
+        z: 0
+      - x: 0
+        z: 7
+      - x: -0.5
+        z: 7
+      minimumY: 0
+      maximumY: 2.75
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-support
+  - id: west-wall-left
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: 8.875
+        z: -9.125
+      - x: 9.125
+        z: -9.125
+      - x: 9.125
+        z: -1.25
+      - x: 8.875
+        z: -1.25
+      minimumY: 0
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-wall
+  - id: west-wall-lintel
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: 8.875
+        z: -1.25
+      - x: 9.125
+        z: -1.25
+      - x: 9.125
+        z: 1.25
+      - x: 8.875
+        z: 1.25
+      minimumY: 3.65
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-bulkhead
+  - id: west-wall-right
+    regionId: entry
+    kind: 0
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: 8.875
+        z: 1.25
+      - x: 9.125
+        z: 1.25
+      - x: 9.125
+        z: 9.125
+      - x: 8.875
+        z: 9.125
+      minimumY: 0
+      maximumY: 10
+    rampWedge:
+      boundingVolume:
+        horizontalVertices: []
+        minimumY: 0
+        maximumY: 0
+      lowSurfaceY: 0
+      highSurfaceY: 0
+      riseDirection:
+        x: 0
+        y: 0
+        z: 0
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-wall
+  regions:
+  - id: entry
+    minimum:
+      x: -9.125
+      y: 0
+      z: -9.125
+    maximum:
+      x: 9.125
+      y: 10
+      z: 9.125
+    districtKind: 0
+    elevationStratum: 1
+    localNavigationRegionId: navigation-entry
+  - id: upper
+    minimum:
+      x: -7
+      y: 2.75
+      z: 0
+    maximum:
+      x: 7
+      y: 10
+      z: 7
+    districtKind: 0
+    elevationStratum: 2
+    localNavigationRegionId: navigation-upper
+  anchors:
+  - id: entry
+    regionId: entry
+    kind: 0
+    position:
+      x: 7
+      y: 0.5
+      z: 0
+    profileId: 
+  - id: exit
+    regionId: entry
+    kind: 1
+    position:
+      x: -7
+      y: 0.5
+      z: 0
+    profileId: 
+  - id: landmark
+    regionId: entry
+    kind: 5
+    position:
+      x: 0
+      y: 0.5
+      z: 0
+    profileId: LockedSecurityEvacuation
+  - id: mechanism
+    regionId: entry
+    kind: 4
+    position:
+      x: 0
+      y: 0.5
+      z: -7
+    profileId: SecurityBulkhead
+  - id: safe
+    regionId: entry
+    kind: 6
+    position:
+      x: 5
+      y: 0.5
+      z: 0
+    profileId: safe-reset-v2
+  - id: spawn
+    regionId: entry
+    kind: 9
+    position:
+      x: 7
+      y: 0.5
+      z: 0
+    profileId: player-entry-spawn-v2
+  connectors:
+  - id: east
+    regionId: entry
+    kind: 1
+    position:
+      x: -9
+      y: 0.5
+      z: 0
+    facing:
+      x: -1
+      y: 0
+      z: 0
+    socketTag: industrial-bulkhead-3x4-v2
+    aperture:
+      localVolume:
+        horizontalVertices:
+        - x: -9.2
+          z: -1.25
+        - x: -8.8
+          z: -1.25
+        - x: -8.8
+          z: 1.25
+        - x: -9.2
+          z: 1.25
+        minimumY: 0
+        maximumY: 3.65
+      socketProfileId: industrial-bulkhead-3x4-v2
+      compatibleConnectorKinds: 0000000001000000
+      themedCapProfileId: cap-industrial-bulkhead-v2
+      floorElevation: 0
+      floorSlopeDegrees: 0
+      playerClearanceVolume:
+        horizontalVertices:
+        - x: -9.2
+          z: -1.25
+        - x: -8.8
+          z: -1.25
+        - x: -8.8
+          z: 1.25
+        - x: -9.2
+          z: 1.25
+        minimumY: 0
+        maximumY: 3.65
+      cameraClearanceVolume:
+        horizontalVertices:
+        - x: -9.2
+          z: -1.25
+        - x: -8.8
+          z: -1.25
+        - x: -8.8
+          z: 1.25
+        - x: -9.2
+          z: 1.25
+        minimumY: 0
+        maximumY: 3.65
+      seamDepth: 0.25
+      approachVolume:
+        horizontalVertices:
+        - x: -9.2
+          z: -1.25
+        - x: -8.8
+          z: -1.25
+        - x: -8.8
+          z: 1.25
+        - x: -9.2
+          z: 1.25
+        minimumY: 0
+        maximumY: 3.65
+      navigationHandoffProfileId: navigation-handoff-industrial-bulkhead-3x4-v2
+      capState: 0
+      mechanismBindingId: 
+      exteriorGasketProfileId: gasket-industrial-bulkhead-3x4-v2
+      verticalCompositionPortalId: 
+  - id: north
+    regionId: entry
+    kind: 1
+    position:
+      x: 0
+      y: 0.5
+      z: 9
+    facing:
+      x: 0
+      y: 0
+      z: 1
+    socketTag: industrial-bulkhead-3x4-v2
+    aperture:
+      localVolume:
+        horizontalVertices:
+        - x: -1.25
+          z: 8.8
+        - x: 1.25
+          z: 8.8
+        - x: 1.25
+          z: 9.2
+        - x: -1.25
+          z: 9.2
+        minimumY: 0
+        maximumY: 3.65
+      socketProfileId: industrial-bulkhead-3x4-v2
+      compatibleConnectorKinds: 0000000001000000
+      themedCapProfileId: cap-industrial-bulkhead-v2
+      floorElevation: 0
+      floorSlopeDegrees: 0
+      playerClearanceVolume:
+        horizontalVertices:
+        - x: -1.25
+          z: 8.8
+        - x: 1.25
+          z: 8.8
+        - x: 1.25
+          z: 9.2
+        - x: -1.25
+          z: 9.2
+        minimumY: 0
+        maximumY: 3.65
+      cameraClearanceVolume:
+        horizontalVertices:
+        - x: -1.25
+          z: 8.8
+        - x: 1.25
+          z: 8.8
+        - x: 1.25
+          z: 9.2
+        - x: -1.25
+          z: 9.2
+        minimumY: 0
+        maximumY: 3.65
+      seamDepth: 0.25
+      approachVolume:
+        horizontalVertices:
+        - x: -1.25
+          z: 8.8
+        - x: 1.25
+          z: 8.8
+        - x: 1.25
+          z: 9.2
+        - x: -1.25
+          z: 9.2
+        minimumY: 0
+        maximumY: 3.65
+      navigationHandoffProfileId: navigation-handoff-industrial-bulkhead-3x4-v2
+      capState: 0
+      mechanismBindingId: 
+      exteriorGasketProfileId: gasket-industrial-bulkhead-3x4-v2
+      verticalCompositionPortalId: 
+  - id: west
+    regionId: entry
+    kind: 1
+    position:
+      x: 9
+      y: 0.5
+      z: 0
+    facing:
+      x: 1
+      y: 0
+      z: 0
+    socketTag: industrial-bulkhead-3x4-v2
+    aperture:
+      localVolume:
+        horizontalVertices:
+        - x: 8.8
+          z: -1.25
+        - x: 9.2
+          z: -1.25
+        - x: 9.2
+          z: 1.25
+        - x: 8.8
+          z: 1.25
+        minimumY: 0
+        maximumY: 3.65
+      socketProfileId: industrial-bulkhead-3x4-v2
+      compatibleConnectorKinds: 0000000001000000
+      themedCapProfileId: cap-industrial-bulkhead-v2
+      floorElevation: 0
+      floorSlopeDegrees: 0
+      playerClearanceVolume:
+        horizontalVertices:
+        - x: 8.8
+          z: -1.25
+        - x: 9.2
+          z: -1.25
+        - x: 9.2
+          z: 1.25
+        - x: 8.8
+          z: 1.25
+        minimumY: 0
+        maximumY: 3.65
+      cameraClearanceVolume:
+        horizontalVertices:
+        - x: 8.8
+          z: -1.25
+        - x: 9.2
+          z: -1.25
+        - x: 9.2
+          z: 1.25
+        - x: 8.8
+          z: 1.25
+        minimumY: 0
+        maximumY: 3.65
+      seamDepth: 0.25
+      approachVolume:
+        horizontalVertices:
+        - x: 8.8
+          z: -1.25
+        - x: 9.2
+          z: -1.25
+        - x: 9.2
+          z: 1.25
+        - x: 8.8
+          z: 1.25
+        minimumY: 0
+        maximumY: 3.65
+      navigationHandoffProfileId: navigation-handoff-industrial-bulkhead-3x4-v2
+      capState: 0
+      mechanismBindingId: 
+      exteriorGasketProfileId: gasket-industrial-bulkhead-3x4-v2
+      verticalCompositionPortalId: 

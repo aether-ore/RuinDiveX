@@ -106,7 +106,13 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 Is.EqualTo(first.Districts.Select(value => value.Id).OrderBy(value => value, StringComparer.Ordinal)));
             Assert.That(first.DeterministicSignature, Is.EqualTo(second.DeterministicSignature));
             Assert.That(first, Is.EqualTo(second));
-            Assert.That(first.MacroRoles.Count, Is.EqualTo(7));
+            Assert.That(first.GameplayBeats, Has.Count.EqualTo(DungeonPlanV2.RequiredGameplayBeatCount),
+                "Seven is a gameplay-beat budget, not a fixed room or ownership-group count.");
+            Assert.That(first.Modules.Count,
+                Is.InRange(DungeonPlanV2.MinimumModuleCount, DungeonPlanV2.MaximumModuleCount));
+            Assert.That(first.MacroRoles.SelectMany(value => value.ModuleInstanceIds),
+                Is.EquivalentTo(first.Modules.Select(value => value.Id)),
+                "Compatibility ownership groups must cover modules without defining route order.");
             Assert.That(first.Regions.Count, Is.EqualTo(12));
             Assert.That(first.Districts.Single(value => value.Kind == DungeonBiomeDistrictKindV2.Waterworks).RegionIds,
                 Has.Count.EqualTo(3));
@@ -269,8 +275,7 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 macros.Add(new DungeonMacroRolePlanV2(
                     macroId,
                     roleKinds[index],
-                    modules.Where(module => module.MacroRoleId == macroId).Select(module => module.Id),
-                    index));
+                    modules.Where(module => module.MacroRoleId == macroId).Select(module => module.Id)));
             }
 
             var districts = new List<DungeonBiomeDistrictPlanV2>
@@ -283,6 +288,33 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                     hazardRegions)
             };
 
+            var gameplayBeats = new[]
+            {
+                Beat("beat-security", DungeonGameplayBeatKindV2.SecurityEntrance),
+                Beat("beat-assembly", DungeonGameplayBeatKindV2.AssemblyFloor, "beat-security"),
+                Beat("beat-freight", DungeonGameplayBeatKindV2.BrokenFreightShaft, "beat-assembly"),
+                Beat("beat-nest", DungeonGameplayBeatKindV2.NestWarehouse, "beat-assembly"),
+                Beat("beat-sorting", DungeonGameplayBeatKindV2.SortingGantry, "beat-freight", "beat-nest"),
+                Beat("beat-credential", DungeonGameplayBeatKindV2.CredentialTower, "beat-sorting"),
+                Beat("beat-core", DungeonGameplayBeatKindV2.MachineCore, "beat-credential")
+            };
+            var graph = new DungeonAbstractRouteGraphV2(
+                modules.Select(module => new DungeonAbstractRouteNodeV2(
+                    module.Id,
+                    DistrictKindForRegion(
+                        regions.Single(region => region.ModuleInstanceIds.Contains(module.Id)),
+                        districts),
+                    transitionOnly: false)),
+                Array.Empty<DungeonAbstractRouteEdgeV2>());
+            var beatAssignments = gameplayBeats.Select(beat =>
+            {
+                DungeonMacroRoleKindV2 role = RoleForBeat(beat.Kind);
+                string macroId = macroIds[Array.IndexOf(roleKinds, role)];
+                return new DungeonGameplayBeatAssignmentV2(
+                    beat.Id,
+                    modules.Where(module => module.MacroRoleId == macroId).Select(module => module.Id));
+            }).ToArray();
+
             if (reverseInputs)
             {
                 macros.Reverse();
@@ -292,8 +324,8 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
             }
 
             return new DungeonPlanV2(
-                2,
-                1,
+                DungeonPlanV2.CurrentSchemaVersion,
+                IndustrialFactoryV2Ruleset.ContractVersion,
                 "industrial-factory-v2",
                 "industrial-factory-v2",
                 "contracts-v1",
@@ -320,7 +352,45 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 Array.Empty<DungeonFluidNetworkPlanV2>(),
                 Array.Empty<DungeonEnvironmentControllerPlanV2>(),
                 Array.Empty<DungeonFallCatchmentPlanV2>(),
-                Array.Empty<DungeonFallExposurePlanV2>());
+                Array.Empty<DungeonFallExposurePlanV2>(),
+                gameplayBeats,
+                graph,
+                beatAssignments,
+                Array.Empty<DungeonMiniDungeonCompositionGrammarV2>());
+        }
+
+        private static DungeonGameplayBeatPlanV2 Beat(
+            string id,
+            DungeonGameplayBeatKindV2 kind,
+            params string[] prerequisites) =>
+            new DungeonGameplayBeatPlanV2(id, kind, prerequisites);
+
+        private static DungeonBiomeDistrictKindV2 DistrictKindForRegion(
+            DungeonRegionPlanV2 region,
+            IEnumerable<DungeonBiomeDistrictPlanV2> districts) =>
+            districts.Single(district => district.RegionIds.Contains(region.Id)).Kind;
+
+        private static DungeonMacroRoleKindV2 RoleForBeat(DungeonGameplayBeatKindV2 beat)
+        {
+            switch (beat)
+            {
+                case DungeonGameplayBeatKindV2.SecurityEntrance:
+                    return DungeonMacroRoleKindV2.SecurityEntrance;
+                case DungeonGameplayBeatKindV2.AssemblyFloor:
+                    return DungeonMacroRoleKindV2.AssemblyFloor;
+                case DungeonGameplayBeatKindV2.BrokenFreightShaft:
+                    return DungeonMacroRoleKindV2.BrokenFreightShaft;
+                case DungeonGameplayBeatKindV2.SortingGantry:
+                    return DungeonMacroRoleKindV2.SortingGantry;
+                case DungeonGameplayBeatKindV2.NestWarehouse:
+                    return DungeonMacroRoleKindV2.NestWarehouse;
+                case DungeonGameplayBeatKindV2.CredentialTower:
+                    return DungeonMacroRoleKindV2.CredentialTower;
+                case DungeonGameplayBeatKindV2.MachineCore:
+                    return DungeonMacroRoleKindV2.MachineCore;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(beat), beat, "Unknown gameplay beat.");
+            }
         }
 
         private static DungeonBiomeDistrictPlanV2 District(

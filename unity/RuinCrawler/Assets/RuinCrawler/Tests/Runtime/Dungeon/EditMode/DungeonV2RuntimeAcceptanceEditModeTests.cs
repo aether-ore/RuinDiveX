@@ -72,21 +72,38 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             DungeonSceneBuilderV2 builder = host.AddComponent<DungeonSceneBuilderV2>();
             try
             {
-                DungeonPlanV2 plan = new IndustrialFactoryV2Generator()
-                    .Generate("industrial-factory-v2-mechanism-editmode");
+                DungeonPlanV2 plan = GeneratePlanWithCertifiedTraversalMechanisms();
+                DungeonSurfacePlanV2[] movingSurfaces = plan.Surfaces
+                    .Where(surface => surface.Source == DungeonSpatialRecordSourceV2.CertifiedModule
+                        && surface.Kind == DungeonSurfaceKindV2.MovingPlatform)
+                    .OrderBy(surface => surface.Id, StringComparer.Ordinal)
+                    .ToArray();
+                DungeonSurfacePlanV2[] crumbleSurfaces = plan.Surfaces
+                    .Where(surface => surface.Source == DungeonSpatialRecordSourceV2.CertifiedModule
+                        && surface.IsWalkable
+                        && string.Equals(
+                            surface.ControllerId,
+                            IndustrialFactoryV2Ruleset.CredentialCrumbleControllerId,
+                            StringComparison.Ordinal))
+                    .OrderBy(surface => surface.Id, StringComparer.Ordinal)
+                    .ToArray();
                 Assert.That(builder.TryBuild(plan, null, null, out string error), Is.True, error);
 
-                DungeonMovingPlatformRuntimeV2 moving = builder.CurrentInstance.Root
+                DungeonMovingPlatformRuntimeV2[] movingRuntimes = builder.CurrentInstance.Root
                     .GetComponentsInChildren<DungeonMovingPlatformRuntimeV2>(true)
-                    .Single();
-                DungeonCrumbleSurfaceRuntimeV2 crumble = builder.CurrentInstance.Root
+                    .OrderBy(value => value.name, StringComparer.Ordinal)
+                    .ToArray();
+                DungeonCrumbleSurfaceRuntimeV2[] crumbleRuntimes = builder.CurrentInstance.Root
                     .GetComponentsInChildren<DungeonCrumbleSurfaceRuntimeV2>(true)
-                    .Single();
+                    .OrderBy(value => value.name, StringComparer.Ordinal)
+                    .ToArray();
+                Assert.That(movingRuntimes, Has.Length.EqualTo(movingSurfaces.Length));
+                Assert.That(crumbleRuntimes, Has.Length.EqualTo(crumbleSurfaces.Length));
+                DungeonMovingPlatformRuntimeV2 moving = movingRuntimes[0];
+                DungeonCrumbleSurfaceRuntimeV2 crumble = crumbleRuntimes[0];
                 GameObject root = builder.CurrentInstance.Root;
 
-                Assert.That(plan.Surfaces.Single(surface =>
-                        surface.Id == IndustrialFactoryV2Ruleset.ReservoirMovingPlatformSurfaceId)
-                    .Kind, Is.EqualTo(DungeonSurfaceKindV2.MovingPlatform));
+                Assert.That(movingSurfaces[0].Kind, Is.EqualTo(DungeonSurfaceKindV2.MovingPlatform));
                 Assert.That(moving.CurrentOffset, Is.EqualTo(0f).Within(0.00001f));
                 Assert.That(moving.GetComponent<Rigidbody>(), Is.Not.Null);
                 Assert.That(moving.GetComponentInChildren<DungeonMovingPlatformRiderRelayV2>(true),
@@ -113,6 +130,36 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
                 builder.TearDown();
                 UnityEngine.Object.DestroyImmediate(host);
             }
+        }
+
+        private static DungeonPlanV2 GeneratePlanWithCertifiedTraversalMechanisms()
+        {
+            const int deterministicCandidateCount = 24;
+            var generator = new IndustrialFactoryV2Generator();
+            for (int index = 0; index < deterministicCandidateCount; index += 1)
+            {
+                DungeonPlanV2 candidate = generator.Generate(
+                    "industrial-factory-v2-runtime-mechanisms-" + index);
+                bool hasMovingPlatform = candidate.Surfaces.Any(surface =>
+                    surface.Source == DungeonSpatialRecordSourceV2.CertifiedModule
+                    && surface.Kind == DungeonSurfaceKindV2.MovingPlatform);
+                bool hasCredentialCrumble = candidate.Surfaces.Any(surface =>
+                    surface.Source == DungeonSpatialRecordSourceV2.CertifiedModule
+                    && surface.IsWalkable
+                    && string.Equals(
+                        surface.ControllerId,
+                        IndustrialFactoryV2Ruleset.CredentialCrumbleControllerId,
+                        StringComparison.Ordinal));
+                if (hasMovingPlatform && hasCredentialCrumble)
+                {
+                    return candidate;
+                }
+            }
+
+            Assert.Fail(
+                "No deterministic authored candidate exposed both a certified MovingPlatform surface "
+                + "and a certified walkable surface governed by the credential crumble controller.");
+            return null;
         }
 
         [Test]

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="2" testcasecount="5" result="Passed" total="5" passed="5" failed="0" inconclusive="0" skipped="0" asserts="0" engine-version="3.5.0.0" clr-version="4.0.30319.42000" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.1753672">
+  <test-suite type="TestSuite" id="1000" name="RuinCrawler" fullname="RuinCrawler" runstate="Runnable" testcasecount="309" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.175367" total="5" passed="5" failed="0" inconclusive="0" skipped="0" asserts="0">
+    <properties>
+      <property name="platform" value="EditMode" />
+    </properties>
+    <test-suite type="Assembly" id="1374" name="RuinCrawler.Runtime.Dungeon.EditorTests.dll" fullname="C:/Users/K/Documents/New Three.js Practice/unity/RuinCrawler/Library/ScriptAssemblies/RuinCrawler.Runtime.Dungeon.EditorTests.dll" runstate="Runnable" testcasecount="36" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.155028" total="5" passed="5" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="27044" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+        <property name="EditorOnly" value="True" />
+      </properties>
+      <test-suite type="TestSuite" id="1375" name="RuinCrawler" fullname="RuinCrawler" runstate="Runnable" testcasecount="36" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.153882" total="5" passed="5" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-suite type="TestSuite" id="1376" name="Runtime" fullname="RuinCrawler.Runtime" runstate="Runnable" testcasecount="36" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.153518" total="5" passed="5" failed="0" inconclusive="0" skipped="0" asserts="0">
+          <properties />
+          <test-suite type="TestSuite" id="1377" name="Dungeon" fullname="RuinCrawler.Runtime.Dungeon" runstate="Runnable" testcasecount="36" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.153173" total="5" passed="5" failed="0" inconclusive="0" skipped="0" asserts="0">
+            <properties />
+            <test-suite type="TestSuite" id="1378" name="Tests" fullname="RuinCrawler.Runtime.Dungeon.Tests" runstate="Runnable" testcasecount="36" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.152867" total="5" passed="5" failed="0" inconclusive="0" skipped="0" asserts="0">
+              <properties />
+              <test-suite type="TestFixture" id="1348" name="DungeonSourceGlbExtractorV2Tests" fullname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests" classname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests" runstate="Runnable" testcasecount="5" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.151842" total="5" passed="5" failed="0" inconclusive="0" skipped="0" asserts="0">
+                <properties />
+                <test-case id="1349" name="ExtractedPropManifest_MapsEverySemanticSourceNodeToOwnedOutput" fullname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests.ExtractedPropManifest_MapsEverySemanticSourceNodeToOwnedOutput" methodname="ExtractedPropManifest_MapsEverySemanticSourceNodeToOwnedOutput" classname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests" runstate="Runnable" seed="1206352654" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.098047" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-suite type="ParameterizedMethod" id="1353" name="ExtractedPropManifest_PinsSourceProvenanceAndOutputShape" fullname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests.ExtractedPropManifest_PinsSourceProvenanceAndOutputShape" classname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests" runstate="Runnable" testcasecount="3" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.041811" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+                  <properties />
+                  <test-case id="1350" name="ExtractedPropManifest_PinsSourceProvenanceAndOutputShape(&quot;server_crypt_source&quot;,&quot;3ddb2f4c6cb711435f90b50523a850fb8771d821f1600cb63122d397b671603e&quot;,167316L,253,9)" fullname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests.ExtractedPropManifest_PinsSourceProvenanceAndOutputShape(&quot;server_crypt_source&quot;,&quot;3ddb2f4c6cb711435f90b50523a850fb8771d821f1600cb63122d397b671603e&quot;,167316L,253,9)" methodname="ExtractedPropManifest_PinsSourceProvenanceAndOutputShape" classname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests" runstate="Runnable" seed="222796582" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.014140" asserts="0">
+                    <properties>
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1351" name="ExtractedPropManifest_PinsSourceProvenanceAndOutputShape(&quot;coolant_works_source&quot;,&quot;55dd5c2cf3ea0b3abb988a964852190a8f1c7b392f31b246ad0ff3b88c87e3bf&quot;,229912L,295,58)" fullname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests.ExtractedPropManifest_PinsSourceProvenanceAndOutputShape(&quot;coolant_works_source&quot;,&quot;55dd5c2cf3ea0b3abb988a964852190a8f1c7b392f31b246ad0ff3b88c87e3bf&quot;,229912L,295,58)" methodname="ExtractedPropManifest_PinsSourceProvenanceAndOutputShape" classname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests" runstate="Runnable" seed="263666419" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.010192" asserts="0">
+                    <properties>
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1352" name="ExtractedPropManifest_PinsSourceProvenanceAndOutputShape(&quot;machine_factory_source&quot;,&quot;f8a11494076230fd566340c25bc512a07f8848dd43ae506b522d254eb5f890ee&quot;,312120L,416,102)" fullname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests.ExtractedPropManifest_PinsSourceProvenanceAndOutputShape(&quot;machine_factory_source&quot;,&quot;f8a11494076230fd566340c25bc512a07f8848dd43ae506b522d254eb5f890ee&quot;,312120L,416,102)" methodname="ExtractedPropManifest_PinsSourceProvenanceAndOutputShape" classname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests" runstate="Runnable" seed="1056847080" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.008849" asserts="0">
+                    <properties>
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                </test-suite>
+                <test-case id="1354" name="MachineFactory_CoolantSolidsRemainOpaqueWhileLiquidUsesWaterSurface" fullname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests.MachineFactory_CoolantSolidsRemainOpaqueWhileLiquidUsesWaterSurface" methodname="MachineFactory_CoolantSolidsRemainOpaqueWhileLiquidUsesWaterSurface" classname="RuinCrawler.Runtime.Dungeon.Tests.DungeonSourceGlbExtractorV2Tests" runstate="Runnable" seed="1416467711" result="Passed" start-time="2026-07-18 13:07:17Z" end-time="2026-07-18 13:07:17Z" duration="0.001419" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                  <output><![CDATA[<b><color=#2EA3FF>MCP-FOR-UNITY</color></b>: [TestRunnerNoThrottle] Restored Interaction Mode after test run.
+Saving results to: C:/Users/K/AppData/LocalLow/DefaultCompany/RuinCrawler\TestResults.xml
+]]></output>
+                </test-case>
+              </test-suite>
+            </test-suite>
+          </test-suite>
+        </test-suite>
+      </test-suite>
+    </test-suite>
+  </test-suite>
+</test-run>

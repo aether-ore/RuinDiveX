@@ -25,6 +25,7 @@ namespace RuinCrawler.Runtime.Expedition
     {
         [SerializeField] private TextAsset contractPack;
         [SerializeField] private DungeonSceneBuilderV2 dungeonBuilderV2;
+        [SerializeField] private DungeonAuthoredModuleRegistryV2 authoredModuleRegistry;
         [SerializeField] private ReaverbotSpawner reaverbotSpawner;
         [SerializeField] private BossHuntCoordinator bossHuntCoordinator;
         [SerializeField] private DungeonExpeditionProgressionRuntimeV2 dungeonProgressionV2;
@@ -193,10 +194,31 @@ namespace RuinCrawler.Runtime.Expedition
 
         private bool TryBuildV2(out string error)
         {
+            if (!DungeonAuthoredModuleRegistryV2.TryResolveProductionCatalog(
+                    authoredModuleRegistry,
+                    out DungeonAuthoredModuleRegistryV2 resolvedRegistry,
+                    out DungeonAuthoredModuleCatalogV2 authoredCatalog,
+                    out error))
+            {
+                error = "Latest authored Dungeon V2 content is unavailable: " + error
+                    + " No legacy dungeon will be substituted.";
+                return false;
+            }
+
+            authoredModuleRegistry = resolvedRegistry;
+            IIndustrialFactoryV2ModuleCatalog moduleCatalog = authoredCatalog;
+            dungeonBuilderV2.ConfigureAuthoredModuleRegistry(
+                resolvedRegistry,
+                allowResourceFallback: false);
+            Debug.Log(
+                "[RuinCrawler Dungeon] Building the latest validated authored module library.",
+                this);
+
             DungeonPlanV2 plan;
             try
             {
-                plan = new IndustrialFactoryV2Generator().Generate(resolvedSeed, resolvedDifficulty);
+                plan = new IndustrialFactoryV2Generator(moduleCatalog)
+                    .Generate(resolvedSeed, resolvedDifficulty);
             }
             catch (Exception exception)
             {

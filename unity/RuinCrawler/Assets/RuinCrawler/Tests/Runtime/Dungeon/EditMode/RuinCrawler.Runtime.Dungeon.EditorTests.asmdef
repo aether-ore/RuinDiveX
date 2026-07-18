@@ -3,6 +3,7 @@
   "rootNamespace": "RuinCrawler.Runtime.Dungeon.Tests",
   "references": [
     "RuinCrawler.Runtime.Dungeon",
+    "RuinCrawler.Art.DungeonV2",
     "RuinCrawler.Editor.DungeonV2",
     "RuinCrawler.Runtime",
     "RuinCrawler.Core.Dungeon",

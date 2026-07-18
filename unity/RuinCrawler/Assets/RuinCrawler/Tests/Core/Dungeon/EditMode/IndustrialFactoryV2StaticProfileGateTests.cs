@@ -21,8 +21,16 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void RemovingCertifiedPerimeterRailExposesAnUnregisteredBoundary()
         {
             DungeonPlanV2 source = new IndustrialFactoryV2Generator().Generate("derived-edge-rail-negative");
-            DungeonSurfacePlanV2 rail = source.Surfaces.Single(value =>
-                value.Id == "surface-rail-factory-security-entrance-south");
+            var exposureRailIds = new HashSet<string>(
+                source.FallExposures.SelectMany(value => value.RailConstraintSurfaceIds),
+                StringComparer.Ordinal);
+            DungeonSurfacePlanV2 rail = source.Surfaces.First(value =>
+                value.Kind == DungeonSurfaceKindV2.Rail
+                && !exposureRailIds.Contains(value.Id)
+                && source.Surfaces.Any(walkable =>
+                    string.Equals(walkable.RegionId, value.RegionId, StringComparison.Ordinal)
+                    && walkable.IsStructural
+                    && walkable.IsWalkable));
             DungeonPlanV2 invalid = Rebuild(
                 source,
                 surfaces: source.Surfaces.Where(value => value.Id != rail.Id));
@@ -36,16 +44,18 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void DropBoundaryMustBeCoveredByExposureFromItsActualWalkableSurface()
         {
             DungeonPlanV2 source = new IndustrialFactoryV2Generator().Generate("derived-edge-exposure-negative");
-            DungeonFallExposurePlanV2 exposure = source.FallExposures.Single(value =>
-                value.Id == "exposure-freight-sump");
+            DungeonFallExposurePlanV2 exposure = source.FallExposures.First(value =>
+                source.Surfaces.Count(surface =>
+                    string.Equals(surface.RegionId, value.SourceRegionId, StringComparison.Ordinal)
+                    && surface.IsWalkable) > 1);
             DungeonSurfacePlanV2 foreignSource = source.Surfaces.First(value =>
                 value.RegionId == exposure.SourceRegionId
                 && value.IsWalkable
                 && value.Id != exposure.SourceSurfaceId);
-            DungeonSurfacePlanV2 certifiedRail = source.Surfaces.Single(value =>
-                value.Id == "surface-certified-factory-broken-freight-shaft-north-rail");
-            DungeonSurfacePlanV2 safeDropContinuation = source.Surfaces.Single(value =>
-                value.Id == "surface-water-freight-sump");
+            DungeonFallCatchmentPlanV2 catchment = source.FallCatchments.Single(value =>
+                exposure.RequiredCatchmentIds.Contains(value.Id));
+            DungeonSurfacePlanV2 safeDropContinuation =
+                DungeonV2SemanticFixtureQueries.PrimarySafeCatchmentSurface(source, catchment);
             DungeonSurfacePlanV2 loweredContinuation = ReplaceVolume(
                 safeDropContinuation,
                 new DungeonConvexPrismV2(
@@ -68,7 +78,6 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
             DungeonPlanV2 invalid = Rebuild(
                 source,
                 surfaces: source.Surfaces
-                    .Where(value => value.Id != certifiedRail.Id)
                     .Select(value => value.Id == safeDropContinuation.Id ? loweredContinuation : value),
                 exposures: source.FallExposures.Select(value => value.Id == exposure.Id ? redirected : value));
 
@@ -82,8 +91,8 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         {
             DungeonPlanV2 source = new IndustrialFactoryV2Generator().Generate(
                 "derived-moving-platform-exposure-negative");
-            DungeonSurfacePlanV2 platform = source.Surfaces.Single(value =>
-                value.Id == IndustrialFactoryV2Ruleset.ReservoirMovingPlatformSurfaceId);
+            DungeonSurfacePlanV2 platform = source.Surfaces.First(value =>
+                value.Id.EndsWith("-return-lift-platform", StringComparison.Ordinal));
             var unregisteredPlatform = new DungeonSurfacePlanV2(
                 "surface-test-unregistered-moving-platform",
                 platform.ModuleInstanceId,
@@ -127,8 +136,16 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
             DungeonPlanV2 invalid = Rebuild(
                 source,
                 surfaces: source.Surfaces
-                    .Where(value => !waitingIslandIds.Contains(value.Id))
-                    .Select(value => value.Id == hazard.Id ? oversized : value));
+                    .Select(value => value.Id == hazard.Id
+                        ? oversized
+                        : !waitingIslandIds.Contains(value.Id)
+                            ? value
+                            : ReplaceVolume(
+                                value,
+                                new DungeonConvexPrismV2(
+                                    value.Volume.HorizontalVertices,
+                                    value.Volume.MinimumY - 2d,
+                                    value.Volume.MaximumY - 2d))));
 
             AssertCode(
                 new IndustrialFactoryV2StaticProfileValidator().Validate(invalid),
@@ -350,7 +367,11 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 source.FluidNetworks,
                 source.EnvironmentControllers,
                 source.FallCatchments,
-                exposures ?? source.FallExposures);
+                exposures ?? source.FallExposures,
+                source.GameplayBeats,
+                source.AbstractRouteGraph,
+                source.BeatAssignments,
+                source.MiniDungeonCompositions);
         }
 
         private static DungeonConvexPrismV2 Box(

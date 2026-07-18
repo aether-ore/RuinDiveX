@@ -1,0 +1,2528 @@
+{
+    "schemaVersion": 1,
+    "profileId": "industrial-factory-v2",
+    "extractorVersion": "dungeon-source-glb-extractor-v2.1",
+    "sources": [
+        {
+            "id": "coolant_works_source",
+            "theme": "Waterworks",
+            "sourceAssetPath": "Packages/com.ruincrawler.source-assets/models/rooms/industrial_coolant_relay_puzzle_room.glb",
+            "sourceAssetGuid": "43dee715bcb07384981f016975132e73",
+            "sourceSha256": "55dd5c2cf3ea0b3abb988a964852190a8f1c7b392f31b246ad0ff3b88c87e3bf",
+            "sourceByteLength": 229912,
+            "sourceMeshNodeCount": 295,
+            "outputPrefabPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/coolant_works_source.prefab",
+            "outputs": [
+                {
+                    "outputObjectName": "central_pressure_core_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/central_pressure_core_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Machinery",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "central_pressure_core_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "central_refractor_regulator_crystal",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/central_refractor_regulator_crystal.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "central_refractor_regulator_crystal"
+                    ]
+                },
+                {
+                    "outputObjectName": "coolant_works_source_Emissive_WaterworksPipes_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/coolant_works_source_Emissive_WaterworksPipes_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "amber_flow_line_segment_0",
+                        "amber_flow_line_segment_1",
+                        "amber_flow_line_segment_2",
+                        "amber_flow_line_segment_3",
+                        "amber_source_tank_B_status_light",
+                        "dormant_reaverbot_socket_0_red_eye",
+                        "dormant_reaverbot_socket_1_red_eye",
+                        "dormant_reaverbot_socket_2_red_eye",
+                        "dormant_reaverbot_socket_3_red_eye",
+                        "green_waste_overflow_tank_bottom_cap",
+                        "green_waste_overflow_tank_feed_pipe",
+                        "green_waste_overflow_tank_glass_outer",
+                        "green_waste_overflow_tank_status_light",
+                        "green_waste_overflow_tank_top_cap",
+                        "overflow_drain_line_segment_0",
+                        "overflow_drain_line_segment_1",
+                        "overflow_drain_line_segment_2",
+                        "red_eye_surveillance_node_0",
+                        "red_eye_surveillance_node_1",
+                        "red_eye_surveillance_node_2",
+                        "red_eye_surveillance_node_3",
+                        "red_eye_surveillance_node_4",
+                        "red_eye_surveillance_node_5",
+                        "teal_flow_line_segment_0",
+                        "teal_flow_line_segment_1",
+                        "teal_flow_line_segment_2",
+                        "teal_flow_line_segment_3",
+                        "teal_source_tank_A_status_light",
+                        "violet_flow_line_segment_0",
+                        "violet_flow_line_segment_1",
+                        "violet_flow_line_segment_2",
+                        "violet_flow_line_segment_3",
+                        "violet_source_tank_C_status_light"
+                    ]
+                },
+                {
+                    "outputObjectName": "coolant_works_source_Emissive_WaterworksSurface_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/coolant_works_source_Emissive_WaterworksSurface_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksSurface.mat",
+                    "zone": "Emissive",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "amber_source_tank_B_liquid_volume",
+                        "central_coolant_liquid",
+                        "green_waste_overflow_tank_liquid_volume",
+                        "teal_source_tank_A_liquid_volume",
+                        "violet_source_tank_C_liquid_volume"
+                    ]
+                },
+                {
+                    "outputObjectName": "coolant_works_source_Machinery_WaterworksPipes_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/coolant_works_source_Machinery_WaterworksPipes_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Machinery",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "amber_source_tank_B_bottom_cap",
+                        "amber_source_tank_B_feed_pipe",
+                        "amber_source_tank_B_glass_outer",
+                        "amber_source_tank_B_top_cap",
+                        "central_glass_pressure_chamber",
+                        "central_pressure_ring_x_0.75",
+                        "central_pressure_ring_x_1.4",
+                        "central_pressure_ring_x_2.05",
+                        "central_pressure_ring_z_0.75",
+                        "central_pressure_ring_z_1.4",
+                        "central_pressure_ring_z_2.05",
+                        "central_top_pressure_cap",
+                        "dormant_reaverbot_socket_0",
+                        "dormant_reaverbot_socket_1",
+                        "dormant_reaverbot_socket_2",
+                        "dormant_reaverbot_socket_3",
+                        "overhead_pipe_arch_0_drop_to_core",
+                        "overhead_pipe_arch_0_left",
+                        "overhead_pipe_arch_1_drop_to_core",
+                        "overhead_pipe_arch_1_left",
+                        "overhead_pipe_arch_2_drop_to_core",
+                        "overhead_pipe_arch_2_left",
+                        "teal_source_tank_A_bottom_cap",
+                        "teal_source_tank_A_feed_pipe",
+                        "teal_source_tank_A_glass_outer",
+                        "teal_source_tank_A_top_cap",
+                        "violet_source_tank_C_bottom_cap",
+                        "violet_source_tank_C_feed_pipe",
+                        "violet_source_tank_C_glass_outer",
+                        "violet_source_tank_C_top_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "coolant_works_source_Props_WaterworksFloor_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/coolant_works_source_Props_WaterworksFloor_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksFloor.mat",
+                    "zone": "Props",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "east_upper_service_walkway_mesh_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "coolant_works_source_Props_WaterworksPipes_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/coolant_works_source_Props_WaterworksPipes_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "lowered_coolant_service_pit",
+                        "north_control_balcony_mesh_base",
+                        "north_exit_header",
+                        "pit_north_warning_stripe_0",
+                        "pit_north_warning_stripe_1",
+                        "pit_north_warning_stripe_10",
+                        "pit_north_warning_stripe_11",
+                        "pit_north_warning_stripe_2",
+                        "pit_north_warning_stripe_3",
+                        "pit_north_warning_stripe_4",
+                        "pit_north_warning_stripe_5",
+                        "pit_north_warning_stripe_6",
+                        "pit_north_warning_stripe_7",
+                        "pit_north_warning_stripe_8",
+                        "pit_north_warning_stripe_9",
+                        "pit_south_warning_stripe_0",
+                        "pit_south_warning_stripe_1",
+                        "pit_south_warning_stripe_10",
+                        "pit_south_warning_stripe_11",
+                        "pit_south_warning_stripe_2",
+                        "pit_south_warning_stripe_3",
+                        "pit_south_warning_stripe_4",
+                        "pit_south_warning_stripe_5",
+                        "pit_south_warning_stripe_6",
+                        "pit_south_warning_stripe_7",
+                        "pit_south_warning_stripe_8",
+                        "pit_south_warning_stripe_9",
+                        "south_entry_header",
+                        "west_reward_chest_base",
+                        "west_reward_chest_lid"
+                    ]
+                },
+                {
+                    "outputObjectName": "coolant_works_source_Structural_WaterworksFloor_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/coolant_works_source_Structural_WaterworksFloor_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksFloor.mat",
+                    "zone": "Structural",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "bridge_left_rail",
+                        "bridge_right_rail",
+                        "central_over_pit_bridge_grate_x_0",
+                        "central_over_pit_bridge_grate_x_1",
+                        "central_over_pit_bridge_grate_x_2",
+                        "central_over_pit_bridge_grate_x_3",
+                        "central_over_pit_bridge_grate_z_0",
+                        "central_over_pit_bridge_grate_z_1",
+                        "central_over_pit_bridge_grate_z_2",
+                        "central_over_pit_bridge_grate_z_3",
+                        "central_over_pit_bridge_grate_z_4",
+                        "central_over_pit_bridge_grate_z_5",
+                        "central_over_pit_bridge_grate_z_6",
+                        "central_over_pit_bridge_grate_z_7",
+                        "central_over_pit_bridge_grate_z_8",
+                        "central_over_pit_bridge_grate_z_9",
+                        "central_over_pit_bridge_mesh_base",
+                        "east_access_stairs_left_rail",
+                        "east_access_stairs_right_rail",
+                        "east_access_stairs_step_0",
+                        "east_access_stairs_step_1",
+                        "east_access_stairs_step_10",
+                        "east_access_stairs_step_11",
+                        "east_access_stairs_step_12",
+                        "east_access_stairs_step_13",
+                        "east_access_stairs_step_14",
+                        "east_access_stairs_step_15",
+                        "east_access_stairs_step_2",
+                        "east_access_stairs_step_3",
+                        "east_access_stairs_step_4",
+                        "east_access_stairs_step_5",
+                        "east_access_stairs_step_6",
+                        "east_access_stairs_step_7",
+                        "east_access_stairs_step_8",
+                        "east_access_stairs_step_9",
+                        "east_floor_slab",
+                        "east_upper_service_walkway_grate_x_0",
+                        "east_upper_service_walkway_grate_x_1",
+                        "east_upper_service_walkway_grate_x_2",
+                        "east_upper_service_walkway_grate_x_3",
+                        "east_upper_service_walkway_grate_z_0",
+                        "east_upper_service_walkway_grate_z_1",
+                        "east_upper_service_walkway_grate_z_10",
+                        "east_upper_service_walkway_grate_z_11",
+                        "east_upper_service_walkway_grate_z_12",
+                        "east_upper_service_walkway_grate_z_13",
+                        "east_upper_service_walkway_grate_z_14",
+                        "east_upper_service_walkway_grate_z_2",
+                        "east_upper_service_walkway_grate_z_3",
+                        "east_upper_service_walkway_grate_z_4",
+                        "east_upper_service_walkway_grate_z_5",
+                        "east_upper_service_walkway_grate_z_6",
+                        "east_upper_service_walkway_grate_z_7",
+                        "east_upper_service_walkway_grate_z_8",
+                        "east_upper_service_walkway_grate_z_9",
+                        "east_walkway_inner_rail",
+                        "east_walkway_outer_rail",
+                        "east_walkway_support_0",
+                        "east_walkway_support_1",
+                        "east_walkway_support_2",
+                        "east_walkway_support_3",
+                        "floor_panel_seam_x_0",
+                        "floor_panel_seam_x_1",
+                        "floor_panel_seam_x_10",
+                        "floor_panel_seam_x_11",
+                        "floor_panel_seam_x_12",
+                        "floor_panel_seam_x_13",
+                        "floor_panel_seam_x_14",
+                        "floor_panel_seam_x_2",
+                        "floor_panel_seam_x_3",
+                        "floor_panel_seam_x_4",
+                        "floor_panel_seam_x_5",
+                        "floor_panel_seam_x_6",
+                        "floor_panel_seam_x_7",
+                        "floor_panel_seam_x_8",
+                        "floor_panel_seam_x_9",
+                        "floor_panel_seam_z_0",
+                        "floor_panel_seam_z_1",
+                        "floor_panel_seam_z_10",
+                        "floor_panel_seam_z_11",
+                        "floor_panel_seam_z_2",
+                        "floor_panel_seam_z_3",
+                        "floor_panel_seam_z_4",
+                        "floor_panel_seam_z_5",
+                        "floor_panel_seam_z_6",
+                        "floor_panel_seam_z_7",
+                        "floor_panel_seam_z_8",
+                        "floor_panel_seam_z_9",
+                        "north_floor_slab",
+                        "service_pit_stairs_left_rail",
+                        "service_pit_stairs_right_rail",
+                        "service_pit_stairs_step_0",
+                        "service_pit_stairs_step_1",
+                        "service_pit_stairs_step_2",
+                        "service_pit_stairs_step_3",
+                        "service_pit_stairs_step_4",
+                        "service_pit_stairs_step_5",
+                        "south_floor_slab",
+                        "west_floor_slab"
+                    ]
+                },
+                {
+                    "outputObjectName": "coolant_works_source_Structural_WaterworksWall_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/coolant_works_source_Structural_WaterworksWall_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksWall.mat",
+                    "zone": "Structural",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "east_lower_trim",
+                        "east_upper_trim",
+                        "east_wall",
+                        "north_balcony_inner_rail",
+                        "north_balcony_outer_rail",
+                        "north_balcony_support_0",
+                        "north_balcony_support_1",
+                        "north_balcony_support_2",
+                        "north_balcony_support_3",
+                        "north_control_balcony_grate_x_0",
+                        "north_control_balcony_grate_x_1",
+                        "north_control_balcony_grate_x_10",
+                        "north_control_balcony_grate_x_11",
+                        "north_control_balcony_grate_x_12",
+                        "north_control_balcony_grate_x_13",
+                        "north_control_balcony_grate_x_14",
+                        "north_control_balcony_grate_x_15",
+                        "north_control_balcony_grate_x_2",
+                        "north_control_balcony_grate_x_3",
+                        "north_control_balcony_grate_x_4",
+                        "north_control_balcony_grate_x_5",
+                        "north_control_balcony_grate_x_6",
+                        "north_control_balcony_grate_x_7",
+                        "north_control_balcony_grate_x_8",
+                        "north_control_balcony_grate_x_9",
+                        "north_control_balcony_grate_z_0",
+                        "north_control_balcony_grate_z_1",
+                        "north_control_balcony_grate_z_2",
+                        "north_control_balcony_grate_z_3",
+                        "north_lower_trim",
+                        "north_upper_trim",
+                        "north_wall_left",
+                        "north_wall_puzzle_monitor_A",
+                        "north_wall_puzzle_monitor_A_red_lock",
+                        "north_wall_puzzle_monitor_B",
+                        "north_wall_puzzle_monitor_B_red_lock",
+                        "north_wall_puzzle_monitor_C",
+                        "north_wall_puzzle_monitor_C_red_lock",
+                        "north_wall_right",
+                        "south_lower_trim",
+                        "south_upper_trim",
+                        "south_wall_left",
+                        "south_wall_right",
+                        "west_lower_trim",
+                        "west_upper_trim",
+                        "west_wall"
+                    ]
+                },
+                {
+                    "outputObjectName": "north_locked_exit_gate_energy_bar_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/north_locked_exit_gate_energy_bar_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "north_locked_exit_gate_energy_bar_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "north_locked_exit_gate_energy_bar_2",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/north_locked_exit_gate_energy_bar_2.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "north_locked_exit_gate_energy_bar_2"
+                    ]
+                },
+                {
+                    "outputObjectName": "north_locked_exit_gate_energy_bar_3",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/north_locked_exit_gate_energy_bar_3.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "north_locked_exit_gate_energy_bar_3"
+                    ]
+                },
+                {
+                    "outputObjectName": "north_locked_exit_gate_frame_left",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/north_locked_exit_gate_frame_left.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "north_locked_exit_gate_frame_left"
+                    ]
+                },
+                {
+                    "outputObjectName": "north_locked_exit_gate_frame_right",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/north_locked_exit_gate_frame_right.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "north_locked_exit_gate_frame_right"
+                    ]
+                },
+                {
+                    "outputObjectName": "north_locked_exit_gate_top_frame",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/north_locked_exit_gate_top_frame.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "north_locked_exit_gate_top_frame"
+                    ]
+                },
+                {
+                    "outputObjectName": "optional_reward_console_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/optional_reward_console_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "optional_reward_console_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "optional_reward_console_red_button",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/optional_reward_console_red_button.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "optional_reward_console_red_button"
+                    ]
+                },
+                {
+                    "outputObjectName": "optional_reward_console_screen",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/optional_reward_console_screen.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "optional_reward_console_screen"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_A_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_A_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_A_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_A_red_button",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_A_red_button.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_A_red_button"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_A_screen",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_A_screen.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_A_screen"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_B_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_B_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_B_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_B_red_button",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_B_red_button.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_B_red_button"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_B_screen",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_B_screen.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_B_screen"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_C_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_C_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_C_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_C_red_button",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_C_red_button.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_C_red_button"
+                    ]
+                },
+                {
+                    "outputObjectName": "terminal_valve_C_screen",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/terminal_valve_C_screen.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "terminal_valve_C_screen"
+                    ]
+                },
+                {
+                    "outputObjectName": "upper_master_pressure_console_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/upper_master_pressure_console_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Machinery",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "upper_master_pressure_console_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "upper_master_pressure_console_red_button",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/upper_master_pressure_console_red_button.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Machinery",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "upper_master_pressure_console_red_button"
+                    ]
+                },
+                {
+                    "outputObjectName": "upper_master_pressure_console_screen",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/upper_master_pressure_console_screen.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "upper_master_pressure_console_screen"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_A_teal_west_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_A_teal_west_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_A_teal_west_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_A_teal_west_direction_marker",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_A_teal_west_direction_marker.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_A_teal_west_direction_marker"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_A_teal_west_rotating_valve_ring",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_A_teal_west_rotating_valve_ring.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_A_teal_west_rotating_valve_ring"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_A_teal_west_terminal_panel",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_A_teal_west_terminal_panel.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_A_teal_west_terminal_panel"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_A_teal_west_tower",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_A_teal_west_tower.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_A_teal_west_tower"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_A_teal_west_valve_bar_x",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_A_teal_west_valve_bar_x.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_A_teal_west_valve_bar_x"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_A_teal_west_valve_bar_z",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_A_teal_west_valve_bar_z.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_A_teal_west_valve_bar_z"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_B_amber_east_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_B_amber_east_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_B_amber_east_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_B_amber_east_direction_marker",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_B_amber_east_direction_marker.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_B_amber_east_direction_marker"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_B_amber_east_rotating_valve_ring",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_B_amber_east_rotating_valve_ring.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_B_amber_east_rotating_valve_ring"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_B_amber_east_terminal_panel",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_B_amber_east_terminal_panel.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_B_amber_east_terminal_panel"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_B_amber_east_tower",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_B_amber_east_tower.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_B_amber_east_tower"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_B_amber_east_valve_bar_x",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_B_amber_east_valve_bar_x.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_B_amber_east_valve_bar_x"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_B_amber_east_valve_bar_z",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_B_amber_east_valve_bar_z.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_B_amber_east_valve_bar_z"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_C_violet_south_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_C_violet_south_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_C_violet_south_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_C_violet_south_direction_marker",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_C_violet_south_direction_marker.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_C_violet_south_direction_marker"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_C_violet_south_rotating_valve_ring",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_C_violet_south_rotating_valve_ring.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_C_violet_south_rotating_valve_ring"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_C_violet_south_terminal_panel",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_C_violet_south_terminal_panel.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_C_violet_south_terminal_panel"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_C_violet_south_tower",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_C_violet_south_tower.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_C_violet_south_tower"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_C_violet_south_valve_bar_x",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_C_violet_south_valve_bar_x.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_C_violet_south_valve_bar_x"
+                    ]
+                },
+                {
+                    "outputObjectName": "valve_C_violet_south_valve_bar_z",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/valve_C_violet_south_valve_bar_z.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "valve_C_violet_south_valve_bar_z"
+                    ]
+                },
+                {
+                    "outputObjectName": "west_optional_reward_gate_energy_bar_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/west_optional_reward_gate_energy_bar_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "west_optional_reward_gate_energy_bar_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "west_optional_reward_gate_energy_bar_2",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/west_optional_reward_gate_energy_bar_2.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "west_optional_reward_gate_energy_bar_2"
+                    ]
+                },
+                {
+                    "outputObjectName": "west_optional_reward_gate_energy_bar_3",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/west_optional_reward_gate_energy_bar_3.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "west_optional_reward_gate_energy_bar_3"
+                    ]
+                },
+                {
+                    "outputObjectName": "west_optional_reward_gate_frame_left",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/west_optional_reward_gate_frame_left.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "west_optional_reward_gate_frame_left"
+                    ]
+                },
+                {
+                    "outputObjectName": "west_optional_reward_gate_frame_right",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/west_optional_reward_gate_frame_right.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "west_optional_reward_gate_frame_right"
+                    ]
+                },
+                {
+                    "outputObjectName": "west_optional_reward_gate_top_frame",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/west_optional_reward_gate_top_frame.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "west_optional_reward_gate_top_frame"
+                    ]
+                },
+                {
+                    "outputObjectName": "west_reward_large_refractor_shard",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/coolant_works_source/west_reward_large_refractor_shard.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "west_reward_large_refractor_shard"
+                    ]
+                }
+            ]
+        },
+        {
+            "id": "machine_factory_source",
+            "theme": "Factory",
+            "sourceAssetPath": "Packages/com.ruincrawler.source-assets/models/rooms/industrial_machine_factory_room.glb",
+            "sourceAssetGuid": "319b1407f2bf584469864034fd132f65",
+            "sourceSha256": "f8a11494076230fd566340c25bc512a07f8848dd43ae506b522d254eb5f890ee",
+            "sourceByteLength": 312120,
+            "sourceMeshNodeCount": 416,
+            "outputPrefabPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/machine_factory_source.prefab",
+            "outputs": [
+                {
+                    "outputObjectName": "machine_factory_source_Emissive_FactoryConduit_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/machine_factory_source_Emissive_FactoryConduit_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Emissive",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "amber_hydraulic_tank_3_status_light",
+                        "cyan_coolant_tank_1_status_light",
+                        "green_reactor_fluid_tank_2_status_light",
+                        "north_status_monitor_0",
+                        "north_status_monitor_1",
+                        "north_status_monitor_2",
+                        "north_status_monitor_3",
+                        "north_status_monitor_4",
+                        "north_status_monitor_red_dot_0",
+                        "north_status_monitor_red_dot_1",
+                        "north_status_monitor_red_dot_2",
+                        "north_status_monitor_red_dot_3",
+                        "north_status_monitor_red_dot_4",
+                        "press_machine_1_red_status_left",
+                        "press_machine_1_red_status_right",
+                        "press_machine_2_red_status_left",
+                        "press_machine_2_red_status_right",
+                        "press_machine_3_red_status_left",
+                        "press_machine_3_red_status_right",
+                        "reaverbot_chassis_1_red_eye_core",
+                        "reaverbot_chassis_2_red_eye_core",
+                        "red_eye_surveillance_node_0",
+                        "red_eye_surveillance_node_1",
+                        "red_eye_surveillance_node_2",
+                        "red_eye_surveillance_node_3",
+                        "red_eye_surveillance_node_4",
+                        "red_eye_surveillance_node_5",
+                        "violet_process_tank_4_status_light"
+                    ]
+                },
+                {
+                    "outputObjectName": "machine_factory_source_Emissive_WaterworksSurface_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/machine_factory_source_Emissive_WaterworksSurface_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksSurface.mat",
+                    "zone": "Emissive",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "amber_hydraulic_tank_3_liquid_core",
+                        "cyan_coolant_tank_1_liquid_core",
+                        "green_reactor_fluid_tank_2_liquid_core",
+                        "violet_process_tank_4_liquid_core"
+                    ]
+                },
+                {
+                    "outputObjectName": "machine_factory_source_Machinery_FactoryConduit_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/machine_factory_source_Machinery_FactoryConduit_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Machinery",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "amber_hydraulic_tank_3_bottom_cap",
+                        "amber_hydraulic_tank_3_glass_cylinder",
+                        "amber_hydraulic_tank_3_top_cap",
+                        "central_assembly_conveyor_belt_base",
+                        "central_assembly_conveyor_roller_0",
+                        "central_assembly_conveyor_roller_1",
+                        "central_assembly_conveyor_roller_2",
+                        "central_assembly_conveyor_roller_3",
+                        "central_assembly_conveyor_roller_4",
+                        "central_assembly_conveyor_roller_5",
+                        "central_assembly_conveyor_roller_6",
+                        "central_assembly_conveyor_roller_7",
+                        "central_assembly_conveyor_roller_8",
+                        "central_assembly_conveyor_teal_arrow_0",
+                        "central_assembly_conveyor_teal_arrow_1",
+                        "central_assembly_conveyor_teal_arrow_2",
+                        "central_assembly_conveyor_teal_arrow_3",
+                        "central_assembly_conveyor_teal_arrow_4",
+                        "central_assembly_conveyor_teal_arrow_5",
+                        "central_assembly_conveyor_teal_arrow_6",
+                        "central_assembly_conveyor_teal_arrow_7",
+                        "cyan_coolant_tank_1_bottom_cap",
+                        "cyan_coolant_tank_1_glass_cylinder",
+                        "cyan_coolant_tank_1_top_cap",
+                        "green_reactor_fluid_tank_2_bottom_cap",
+                        "green_reactor_fluid_tank_2_glass_cylinder",
+                        "green_reactor_fluid_tank_2_top_cap",
+                        "left_scrap_return_conveyor_belt_base",
+                        "left_scrap_return_conveyor_roller_0",
+                        "left_scrap_return_conveyor_roller_1",
+                        "left_scrap_return_conveyor_roller_2",
+                        "left_scrap_return_conveyor_roller_3",
+                        "left_scrap_return_conveyor_roller_4",
+                        "left_scrap_return_conveyor_roller_5",
+                        "left_scrap_return_conveyor_roller_6",
+                        "left_scrap_return_conveyor_teal_arrow_0",
+                        "left_scrap_return_conveyor_teal_arrow_1",
+                        "left_scrap_return_conveyor_teal_arrow_2",
+                        "left_scrap_return_conveyor_teal_arrow_3",
+                        "left_scrap_return_conveyor_teal_arrow_4",
+                        "left_scrap_return_conveyor_teal_arrow_5",
+                        "press_machine_1_left_leg",
+                        "press_machine_1_press_plate",
+                        "press_machine_1_right_leg",
+                        "press_machine_1_top_housing",
+                        "press_machine_2_left_leg",
+                        "press_machine_2_press_plate",
+                        "press_machine_2_right_leg",
+                        "press_machine_2_top_housing",
+                        "press_machine_3_left_leg",
+                        "press_machine_3_press_plate",
+                        "press_machine_3_right_leg",
+                        "press_machine_3_top_housing",
+                        "reaverbot_chassis_1_left_leg_frame",
+                        "reaverbot_chassis_1_right_leg_frame",
+                        "reaverbot_chassis_1_suspension_cable",
+                        "reaverbot_chassis_1_torso_shell",
+                        "reaverbot_chassis_2_left_leg_frame",
+                        "reaverbot_chassis_2_right_leg_frame",
+                        "reaverbot_chassis_2_suspension_cable",
+                        "reaverbot_chassis_2_torso_shell",
+                        "right_parts_feed_conveyor_belt_base",
+                        "right_parts_feed_conveyor_roller_0",
+                        "right_parts_feed_conveyor_roller_1",
+                        "right_parts_feed_conveyor_roller_2",
+                        "right_parts_feed_conveyor_roller_3",
+                        "right_parts_feed_conveyor_roller_4",
+                        "right_parts_feed_conveyor_roller_5",
+                        "right_parts_feed_conveyor_roller_6",
+                        "right_parts_feed_conveyor_teal_arrow_0",
+                        "right_parts_feed_conveyor_teal_arrow_1",
+                        "right_parts_feed_conveyor_teal_arrow_2",
+                        "right_parts_feed_conveyor_teal_arrow_3",
+                        "right_parts_feed_conveyor_teal_arrow_4",
+                        "right_parts_feed_conveyor_teal_arrow_5",
+                        "violet_process_tank_4_bottom_cap",
+                        "violet_process_tank_4_glass_cylinder",
+                        "violet_process_tank_4_top_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "machine_factory_source_Props_FactoryConduit_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/machine_factory_source_Props_FactoryConduit_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "entry_hazard_stripes_stripe_0",
+                        "entry_hazard_stripes_stripe_1",
+                        "entry_hazard_stripes_stripe_2",
+                        "entry_hazard_stripes_stripe_3",
+                        "entry_hazard_stripes_stripe_4",
+                        "entry_hazard_stripes_stripe_5",
+                        "entry_hazard_stripes_stripe_6",
+                        "entry_hazard_stripes_stripe_7",
+                        "entry_hazard_stripes_stripe_8",
+                        "entry_hazard_stripes_stripe_9",
+                        "north_service_hazard_stripes_stripe_0",
+                        "north_service_hazard_stripes_stripe_1",
+                        "north_service_hazard_stripes_stripe_10",
+                        "north_service_hazard_stripes_stripe_11",
+                        "north_service_hazard_stripes_stripe_2",
+                        "north_service_hazard_stripes_stripe_3",
+                        "north_service_hazard_stripes_stripe_4",
+                        "north_service_hazard_stripes_stripe_5",
+                        "north_service_hazard_stripes_stripe_6",
+                        "north_service_hazard_stripes_stripe_7",
+                        "north_service_hazard_stripes_stripe_8",
+                        "north_service_hazard_stripes_stripe_9",
+                        "overhead_crane_cable",
+                        "south_factory_door_header"
+                    ]
+                },
+                {
+                    "outputObjectName": "machine_factory_source_Structural_FactoryCatwalk_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/machine_factory_source_Structural_FactoryCatwalk_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryCatwalk.mat",
+                    "zone": "Structural",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "central_cross_bridge_grate_x_0",
+                        "central_cross_bridge_grate_x_1",
+                        "central_cross_bridge_grate_x_10",
+                        "central_cross_bridge_grate_x_11",
+                        "central_cross_bridge_grate_x_12",
+                        "central_cross_bridge_grate_x_13",
+                        "central_cross_bridge_grate_x_14",
+                        "central_cross_bridge_grate_x_15",
+                        "central_cross_bridge_grate_x_16",
+                        "central_cross_bridge_grate_x_17",
+                        "central_cross_bridge_grate_x_18",
+                        "central_cross_bridge_grate_x_19",
+                        "central_cross_bridge_grate_x_2",
+                        "central_cross_bridge_grate_x_20",
+                        "central_cross_bridge_grate_x_3",
+                        "central_cross_bridge_grate_x_4",
+                        "central_cross_bridge_grate_x_5",
+                        "central_cross_bridge_grate_x_6",
+                        "central_cross_bridge_grate_x_7",
+                        "central_cross_bridge_grate_x_8",
+                        "central_cross_bridge_grate_x_9",
+                        "central_cross_bridge_grate_z_0",
+                        "central_cross_bridge_grate_z_1",
+                        "central_cross_bridge_grate_z_2",
+                        "central_cross_bridge_grate_z_3",
+                        "central_cross_bridge_mesh_base",
+                        "cross_bridge_north_rail",
+                        "cross_bridge_south_rail",
+                        "east_catwalk_inner_rail",
+                        "east_catwalk_support_0",
+                        "east_catwalk_support_1",
+                        "east_catwalk_support_2",
+                        "east_catwalk_support_3",
+                        "east_service_catwalk_grate_x_0",
+                        "east_service_catwalk_grate_x_1",
+                        "east_service_catwalk_grate_x_2",
+                        "east_service_catwalk_grate_x_3",
+                        "east_service_catwalk_grate_z_0",
+                        "east_service_catwalk_grate_z_1",
+                        "east_service_catwalk_grate_z_10",
+                        "east_service_catwalk_grate_z_11",
+                        "east_service_catwalk_grate_z_12",
+                        "east_service_catwalk_grate_z_13",
+                        "east_service_catwalk_grate_z_14",
+                        "east_service_catwalk_grate_z_2",
+                        "east_service_catwalk_grate_z_3",
+                        "east_service_catwalk_grate_z_4",
+                        "east_service_catwalk_grate_z_5",
+                        "east_service_catwalk_grate_z_6",
+                        "east_service_catwalk_grate_z_7",
+                        "east_service_catwalk_grate_z_8",
+                        "east_service_catwalk_grate_z_9",
+                        "east_service_catwalk_mesh_base",
+                        "factory_floor_slab",
+                        "floor_panel_seam_x_0",
+                        "floor_panel_seam_x_1",
+                        "floor_panel_seam_x_10",
+                        "floor_panel_seam_x_11",
+                        "floor_panel_seam_x_12",
+                        "floor_panel_seam_x_13",
+                        "floor_panel_seam_x_14",
+                        "floor_panel_seam_x_2",
+                        "floor_panel_seam_x_3",
+                        "floor_panel_seam_x_4",
+                        "floor_panel_seam_x_5",
+                        "floor_panel_seam_x_6",
+                        "floor_panel_seam_x_7",
+                        "floor_panel_seam_x_8",
+                        "floor_panel_seam_x_9",
+                        "floor_panel_seam_z_0",
+                        "floor_panel_seam_z_1",
+                        "floor_panel_seam_z_10",
+                        "floor_panel_seam_z_2",
+                        "floor_panel_seam_z_3",
+                        "floor_panel_seam_z_4",
+                        "floor_panel_seam_z_5",
+                        "floor_panel_seam_z_6",
+                        "floor_panel_seam_z_7",
+                        "floor_panel_seam_z_8",
+                        "floor_panel_seam_z_9",
+                        "north_catwalk_inner_rail",
+                        "north_catwalk_outer_rail",
+                        "north_overhead_gantry_catwalk_grate_x_0",
+                        "north_overhead_gantry_catwalk_grate_x_1",
+                        "north_overhead_gantry_catwalk_grate_x_10",
+                        "north_overhead_gantry_catwalk_grate_x_11",
+                        "north_overhead_gantry_catwalk_grate_x_12",
+                        "north_overhead_gantry_catwalk_grate_x_13",
+                        "north_overhead_gantry_catwalk_grate_x_14",
+                        "north_overhead_gantry_catwalk_grate_x_15",
+                        "north_overhead_gantry_catwalk_grate_x_16",
+                        "north_overhead_gantry_catwalk_grate_x_17",
+                        "north_overhead_gantry_catwalk_grate_x_18",
+                        "north_overhead_gantry_catwalk_grate_x_2",
+                        "north_overhead_gantry_catwalk_grate_x_3",
+                        "north_overhead_gantry_catwalk_grate_x_4",
+                        "north_overhead_gantry_catwalk_grate_x_5",
+                        "north_overhead_gantry_catwalk_grate_x_6",
+                        "north_overhead_gantry_catwalk_grate_x_7",
+                        "north_overhead_gantry_catwalk_grate_x_8",
+                        "north_overhead_gantry_catwalk_grate_x_9",
+                        "north_overhead_gantry_catwalk_grate_z_0",
+                        "north_overhead_gantry_catwalk_grate_z_1",
+                        "north_overhead_gantry_catwalk_grate_z_2",
+                        "north_overhead_gantry_catwalk_grate_z_3",
+                        "north_overhead_gantry_catwalk_mesh_base",
+                        "west_catwalk_inner_rail",
+                        "west_catwalk_support_0",
+                        "west_catwalk_support_1",
+                        "west_catwalk_support_2",
+                        "west_catwalk_support_3",
+                        "west_service_catwalk_grate_x_0",
+                        "west_service_catwalk_grate_x_1",
+                        "west_service_catwalk_grate_x_2",
+                        "west_service_catwalk_grate_x_3",
+                        "west_service_catwalk_grate_z_0",
+                        "west_service_catwalk_grate_z_1",
+                        "west_service_catwalk_grate_z_10",
+                        "west_service_catwalk_grate_z_11",
+                        "west_service_catwalk_grate_z_12",
+                        "west_service_catwalk_grate_z_13",
+                        "west_service_catwalk_grate_z_14",
+                        "west_service_catwalk_grate_z_2",
+                        "west_service_catwalk_grate_z_3",
+                        "west_service_catwalk_grate_z_4",
+                        "west_service_catwalk_grate_z_5",
+                        "west_service_catwalk_grate_z_6",
+                        "west_service_catwalk_grate_z_7",
+                        "west_service_catwalk_grate_z_8",
+                        "west_service_catwalk_grate_z_9",
+                        "west_service_catwalk_mesh_base",
+                        "west_stair_left_rail",
+                        "west_stair_right_rail",
+                        "west_stair_step_0",
+                        "west_stair_step_1",
+                        "west_stair_step_10",
+                        "west_stair_step_11",
+                        "west_stair_step_12",
+                        "west_stair_step_13",
+                        "west_stair_step_14",
+                        "west_stair_step_15",
+                        "west_stair_step_2",
+                        "west_stair_step_3",
+                        "west_stair_step_4",
+                        "west_stair_step_5",
+                        "west_stair_step_6",
+                        "west_stair_step_7",
+                        "west_stair_step_8",
+                        "west_stair_step_9"
+                    ]
+                },
+                {
+                    "outputObjectName": "machine_factory_source_Structural_FactoryConduit_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/machine_factory_source_Structural_FactoryConduit_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Structural",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "amber_hydraulic_tank_3_pipe_to_wall",
+                        "cyan_coolant_tank_1_pipe_to_wall",
+                        "east_wall_pipe_y1.05",
+                        "east_wall_pipe_y1.45",
+                        "green_reactor_fluid_tank_2_pipe_to_wall",
+                        "north_wall_pipe_0",
+                        "north_wall_pipe_1",
+                        "north_wall_pipe_2",
+                        "violet_process_tank_4_pipe_to_wall",
+                        "west_wall_pipe_y1.05",
+                        "west_wall_pipe_y1.45"
+                    ]
+                },
+                {
+                    "outputObjectName": "machine_factory_source_Structural_FactoryWall_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/machine_factory_source_Structural_FactoryWall_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryWall.mat",
+                    "zone": "Structural",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "central_assembly_conveyor_left_rail",
+                        "central_assembly_conveyor_right_rail",
+                        "east_factory_wall",
+                        "east_lower_machine_trim",
+                        "east_upper_machine_trim",
+                        "left_scrap_return_conveyor_left_rail",
+                        "left_scrap_return_conveyor_right_rail",
+                        "north_factory_wall",
+                        "north_gantry_support_0",
+                        "north_gantry_support_1",
+                        "north_gantry_support_2",
+                        "north_gantry_support_3",
+                        "north_gantry_support_4",
+                        "north_gantry_support_5",
+                        "north_lower_machine_trim",
+                        "north_upper_machine_trim",
+                        "overhead_crane_rail_left",
+                        "overhead_crane_rail_right",
+                        "right_parts_feed_conveyor_left_rail",
+                        "right_parts_feed_conveyor_right_rail",
+                        "south_factory_wall_left",
+                        "south_factory_wall_right",
+                        "south_lower_machine_trim",
+                        "south_upper_machine_trim",
+                        "west_factory_wall",
+                        "west_lower_machine_trim",
+                        "west_upper_machine_trim"
+                    ]
+                },
+                {
+                    "outputObjectName": "overhead_crane_hook_block",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/overhead_crane_hook_block.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "overhead_crane_hook_block"
+                    ]
+                },
+                {
+                    "outputObjectName": "overhead_crane_trolley",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/overhead_crane_trolley.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "overhead_crane_trolley"
+                    ]
+                },
+                {
+                    "outputObjectName": "press_machine_1_hydraulic_piston",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/press_machine_1_hydraulic_piston.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Machinery",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "press_machine_1_hydraulic_piston"
+                    ]
+                },
+                {
+                    "outputObjectName": "press_machine_2_hydraulic_piston",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/press_machine_2_hydraulic_piston.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Machinery",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "press_machine_2_hydraulic_piston"
+                    ]
+                },
+                {
+                    "outputObjectName": "press_machine_3_hydraulic_piston",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/press_machine_3_hydraulic_piston.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Machinery",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "press_machine_3_hydraulic_piston"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_base_column",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_base_column.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_base_column"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_claw_finger_-1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_claw_finger_-1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_claw_finger_-1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_claw_finger_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_claw_finger_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_claw_finger_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_claw_palm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_claw_palm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_claw_palm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_elbow_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_elbow_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_elbow_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_lower_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_lower_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_lower_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_rotator_cap",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_rotator_cap.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_rotator_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_shoulder_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_shoulder_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_shoulder_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_upper_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_upper_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_upper_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_1_wrist_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_1_wrist_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_1_wrist_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_base_column",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_base_column.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_base_column"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_claw_finger_-1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_claw_finger_-1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_claw_finger_-1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_claw_finger_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_claw_finger_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_claw_finger_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_claw_palm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_claw_palm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_claw_palm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_elbow_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_elbow_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_elbow_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_lower_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_lower_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_lower_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_rotator_cap",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_rotator_cap.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_rotator_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_shoulder_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_shoulder_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_shoulder_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_upper_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_upper_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_upper_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_2_wrist_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_2_wrist_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_2_wrist_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_base_column",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_base_column.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_base_column"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_claw_finger_-1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_claw_finger_-1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_claw_finger_-1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_claw_finger_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_claw_finger_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_claw_finger_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_claw_palm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_claw_palm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_claw_palm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_elbow_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_elbow_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_elbow_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_lower_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_lower_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_lower_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_rotator_cap",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_rotator_cap.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_rotator_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_shoulder_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_shoulder_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_shoulder_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_upper_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_upper_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_upper_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_3_wrist_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_3_wrist_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_3_wrist_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_base_column",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_base_column.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_base_column"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_claw_finger_-1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_claw_finger_-1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_claw_finger_-1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_claw_finger_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_claw_finger_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_claw_finger_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_claw_palm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_claw_palm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_claw_palm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_elbow_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_elbow_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_elbow_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_lower_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_lower_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_lower_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_rotator_cap",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_rotator_cap.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_rotator_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_shoulder_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_shoulder_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_shoulder_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_upper_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_upper_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_upper_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_4_wrist_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_4_wrist_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_4_wrist_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_base_column",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_base_column.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_base_column"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_claw_finger_-1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_claw_finger_-1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_claw_finger_-1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_claw_finger_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_claw_finger_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_claw_finger_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_claw_palm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_claw_palm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_claw_palm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_elbow_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_elbow_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_elbow_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_lower_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_lower_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_lower_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_rotator_cap",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_rotator_cap.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_rotator_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_shoulder_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_shoulder_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_shoulder_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_upper_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_upper_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_upper_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_5_wrist_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_5_wrist_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_5_wrist_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_base_column",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_base_column.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_base_column"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_claw_finger_-1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_claw_finger_-1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_claw_finger_-1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_claw_finger_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_claw_finger_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_claw_finger_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_claw_palm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_claw_palm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_claw_palm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_elbow_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_elbow_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_elbow_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_lower_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_lower_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_lower_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_rotator_cap",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_rotator_cap.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_rotator_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_shoulder_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_shoulder_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_shoulder_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_upper_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_upper_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_upper_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_6_wrist_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_6_wrist_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_6_wrist_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_base_column",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_base_column.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_base_column"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_claw_finger_-1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_claw_finger_-1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_claw_finger_-1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_claw_finger_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_claw_finger_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_claw_finger_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_claw_palm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_claw_palm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_claw_palm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_elbow_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_elbow_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_elbow_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_lower_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_lower_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_lower_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_rotator_cap",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_rotator_cap.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_rotator_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_shoulder_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_shoulder_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_shoulder_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_upper_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_upper_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_upper_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_7_wrist_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_7_wrist_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_7_wrist_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_base_column",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_base_column.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_base_column"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_claw_finger_-1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_claw_finger_-1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_claw_finger_-1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_claw_finger_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_claw_finger_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_claw_finger_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_claw_palm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_claw_palm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_claw_palm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_elbow_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_elbow_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_elbow_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_lower_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_lower_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_lower_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_rotator_cap",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_rotator_cap.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_rotator_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_shoulder_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_shoulder_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_shoulder_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_upper_hydraulic_arm",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_upper_hydraulic_arm.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_upper_hydraulic_arm"
+                    ]
+                },
+                {
+                    "outputObjectName": "robot_arm_8_wrist_joint",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/robot_arm_8_wrist_joint.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "robot_arm_8_wrist_joint"
+                    ]
+                },
+                {
+                    "outputObjectName": "small_refractor_power_shard_0",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/small_refractor_power_shard_0.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "small_refractor_power_shard_0"
+                    ]
+                },
+                {
+                    "outputObjectName": "small_refractor_power_shard_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/small_refractor_power_shard_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "small_refractor_power_shard_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "small_refractor_power_shard_2",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/small_refractor_power_shard_2.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "small_refractor_power_shard_2"
+                    ]
+                },
+                {
+                    "outputObjectName": "small_refractor_power_shard_3",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/small_refractor_power_shard_3.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "small_refractor_power_shard_3"
+                    ]
+                },
+                {
+                    "outputObjectName": "south_console_button_0",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/south_console_button_0.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "south_console_button_0"
+                    ]
+                },
+                {
+                    "outputObjectName": "south_console_button_1",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/south_console_button_1.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "south_console_button_1"
+                    ]
+                },
+                {
+                    "outputObjectName": "south_console_button_2",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/south_console_button_2.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "south_console_button_2"
+                    ]
+                },
+                {
+                    "outputObjectName": "south_console_button_3",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/south_console_button_3.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "south_console_button_3"
+                    ]
+                },
+                {
+                    "outputObjectName": "south_control_console_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/south_control_console_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "south_control_console_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "south_control_console_main_screen",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/machine_factory_source/south_control_console_main_screen.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "south_control_console_main_screen"
+                    ]
+                }
+            ]
+        },
+        {
+            "id": "server_crypt_source",
+            "theme": "Factory",
+            "sourceAssetPath": "Packages/com.ruincrawler.source-assets/models/rooms/alien_server_room_example.glb",
+            "sourceAssetGuid": "d18d0bc5c99fe644597b7c53f1eb952a",
+            "sourceSha256": "3ddb2f4c6cb711435f90b50523a850fb8771d821f1600cb63122d397b671603e",
+            "sourceByteLength": 167316,
+            "sourceMeshNodeCount": 253,
+            "outputPrefabPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/server_crypt_source.prefab",
+            "outputs": [
+                {
+                    "outputObjectName": "central_refractor_memory_crystal",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/central_refractor_memory_crystal.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "central_refractor_memory_crystal"
+                    ]
+                },
+                {
+                    "outputObjectName": "entry_control_console_base",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/entry_control_console_base.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "entry_control_console_base"
+                    ]
+                },
+                {
+                    "outputObjectName": "entry_control_console_red_button",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/entry_control_console_red_button.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "entry_control_console_red_button"
+                    ]
+                },
+                {
+                    "outputObjectName": "entry_control_console_screen",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/entry_control_console_screen.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Emissive",
+                    "isMechanism": true,
+                    "sourceNodePaths": [
+                        "entry_control_console_screen"
+                    ]
+                },
+                {
+                    "outputObjectName": "server_crypt_source_Emissive_FactoryConduit_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/server_crypt_source_Emissive_FactoryConduit_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Emissive",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "central_energy_ring_y1.05",
+                        "central_energy_ring_y2.05",
+                        "central_energy_ring_y2.85",
+                        "central_energy_ring_z1.05",
+                        "central_energy_ring_z2.05",
+                        "central_energy_ring_z2.85",
+                        "central_vertical_energy_core",
+                        "server_10_red_sensor_eye",
+                        "server_11_red_sensor_eye",
+                        "server_12_red_sensor_eye",
+                        "server_13_red_sensor_eye",
+                        "server_14_red_sensor_eye",
+                        "server_15_red_sensor_eye",
+                        "server_16_red_sensor_eye",
+                        "server_1_red_sensor_eye",
+                        "server_2_red_sensor_eye",
+                        "server_3_red_sensor_eye",
+                        "server_4_red_sensor_eye",
+                        "server_5_red_sensor_eye",
+                        "server_6_red_sensor_eye",
+                        "server_7_red_sensor_eye",
+                        "server_8_red_sensor_eye",
+                        "server_9_red_sensor_eye"
+                    ]
+                },
+                {
+                    "outputObjectName": "server_crypt_source_Machinery_FactoryConduit_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/server_crypt_source_Machinery_FactoryConduit_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Machinery",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "server_10_base",
+                        "server_10_body",
+                        "server_10_rear_cable",
+                        "server_10_stone_face",
+                        "server_10_teal_data_window",
+                        "server_10_top_cap",
+                        "server_11_base",
+                        "server_11_body",
+                        "server_11_rear_cable",
+                        "server_11_stone_face",
+                        "server_11_teal_data_window",
+                        "server_11_top_cap",
+                        "server_12_base",
+                        "server_12_body",
+                        "server_12_rear_cable",
+                        "server_12_stone_face",
+                        "server_12_teal_data_window",
+                        "server_12_top_cap",
+                        "server_13_base",
+                        "server_13_body",
+                        "server_13_rear_cable",
+                        "server_13_stone_face",
+                        "server_13_teal_data_window",
+                        "server_13_top_cap",
+                        "server_14_base",
+                        "server_14_body",
+                        "server_14_rear_cable",
+                        "server_14_stone_face",
+                        "server_14_teal_data_window",
+                        "server_14_top_cap",
+                        "server_15_base",
+                        "server_15_body",
+                        "server_15_rear_cable",
+                        "server_15_stone_face",
+                        "server_15_teal_data_window",
+                        "server_15_top_cap",
+                        "server_16_base",
+                        "server_16_body",
+                        "server_16_rear_cable",
+                        "server_16_stone_face",
+                        "server_16_teal_data_window",
+                        "server_16_top_cap",
+                        "server_1_base",
+                        "server_1_body",
+                        "server_1_rear_cable",
+                        "server_1_stone_face",
+                        "server_1_teal_data_window",
+                        "server_1_top_cap",
+                        "server_2_base",
+                        "server_2_body",
+                        "server_2_rear_cable",
+                        "server_2_stone_face",
+                        "server_2_teal_data_window",
+                        "server_2_top_cap",
+                        "server_3_base",
+                        "server_3_body",
+                        "server_3_rear_cable",
+                        "server_3_stone_face",
+                        "server_3_teal_data_window",
+                        "server_3_top_cap",
+                        "server_4_base",
+                        "server_4_body",
+                        "server_4_rear_cable",
+                        "server_4_stone_face",
+                        "server_4_teal_data_window",
+                        "server_4_top_cap",
+                        "server_5_base",
+                        "server_5_body",
+                        "server_5_rear_cable",
+                        "server_5_stone_face",
+                        "server_5_teal_data_window",
+                        "server_5_top_cap",
+                        "server_6_base",
+                        "server_6_body",
+                        "server_6_rear_cable",
+                        "server_6_stone_face",
+                        "server_6_teal_data_window",
+                        "server_6_top_cap",
+                        "server_7_base",
+                        "server_7_body",
+                        "server_7_rear_cable",
+                        "server_7_stone_face",
+                        "server_7_teal_data_window",
+                        "server_7_top_cap",
+                        "server_8_base",
+                        "server_8_body",
+                        "server_8_rear_cable",
+                        "server_8_stone_face",
+                        "server_8_teal_data_window",
+                        "server_8_top_cap",
+                        "server_9_base",
+                        "server_9_body",
+                        "server_9_rear_cable",
+                        "server_9_stone_face",
+                        "server_9_teal_data_window",
+                        "server_9_top_cap"
+                    ]
+                },
+                {
+                    "outputObjectName": "server_crypt_source_Props_FactoryConduit_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/server_crypt_source_Props_FactoryConduit_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                    "zone": "Props",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "central_octa_pedestal",
+                        "central_octa_upper_ring",
+                        "data_mote_suspension_0",
+                        "data_mote_suspension_1",
+                        "data_mote_suspension_2",
+                        "data_mote_suspension_3",
+                        "floating_data_mote_0",
+                        "floating_data_mote_1",
+                        "floating_data_mote_2",
+                        "floating_data_mote_3",
+                        "south_door_header"
+                    ]
+                },
+                {
+                    "outputObjectName": "server_crypt_source_Structural_FactoryCatwalk_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/server_crypt_source_Structural_FactoryCatwalk_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryCatwalk.mat",
+                    "zone": "Structural",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "catwalk_support_column_0",
+                        "catwalk_support_column_1",
+                        "catwalk_support_column_2",
+                        "catwalk_support_column_3",
+                        "catwalk_support_column_4",
+                        "east_catwalk_rail_11.35",
+                        "east_catwalk_rail_9.95",
+                        "east_upper_catwalk_grate_xbar_0",
+                        "east_upper_catwalk_grate_xbar_1",
+                        "east_upper_catwalk_grate_xbar_2",
+                        "east_upper_catwalk_grate_xbar_3",
+                        "east_upper_catwalk_grate_zbar_0",
+                        "east_upper_catwalk_grate_zbar_1",
+                        "east_upper_catwalk_grate_zbar_10",
+                        "east_upper_catwalk_grate_zbar_11",
+                        "east_upper_catwalk_grate_zbar_2",
+                        "east_upper_catwalk_grate_zbar_3",
+                        "east_upper_catwalk_grate_zbar_4",
+                        "east_upper_catwalk_grate_zbar_5",
+                        "east_upper_catwalk_grate_zbar_6",
+                        "east_upper_catwalk_grate_zbar_7",
+                        "east_upper_catwalk_grate_zbar_8",
+                        "east_upper_catwalk_grate_zbar_9",
+                        "east_upper_catwalk_thin_mesh_base",
+                        "floor_data_cable_0_0",
+                        "floor_data_cable_0_1",
+                        "floor_data_cable_0_2",
+                        "floor_data_cable_1_0",
+                        "floor_data_cable_1_1",
+                        "floor_data_cable_1_2",
+                        "floor_data_cable_2_0",
+                        "floor_data_cable_2_1",
+                        "floor_data_cable_2_2",
+                        "floor_data_cable_3_0",
+                        "floor_data_cable_3_1",
+                        "floor_data_cable_3_2",
+                        "floor_seam_x_0",
+                        "floor_seam_x_1",
+                        "floor_seam_x_10",
+                        "floor_seam_x_11",
+                        "floor_seam_x_2",
+                        "floor_seam_x_3",
+                        "floor_seam_x_4",
+                        "floor_seam_x_5",
+                        "floor_seam_x_6",
+                        "floor_seam_x_7",
+                        "floor_seam_x_8",
+                        "floor_seam_x_9",
+                        "floor_seam_z_0",
+                        "floor_seam_z_1",
+                        "floor_seam_z_2",
+                        "floor_seam_z_3",
+                        "floor_seam_z_4",
+                        "floor_seam_z_5",
+                        "floor_seam_z_6",
+                        "floor_seam_z_7",
+                        "floor_seam_z_8",
+                        "main_floor_slab",
+                        "north_catwalk_rail_-6.55",
+                        "north_catwalk_rail_-7.95",
+                        "north_upper_catwalk_grate_xbar_0",
+                        "north_upper_catwalk_grate_xbar_1",
+                        "north_upper_catwalk_grate_xbar_10",
+                        "north_upper_catwalk_grate_xbar_11",
+                        "north_upper_catwalk_grate_xbar_12",
+                        "north_upper_catwalk_grate_xbar_13",
+                        "north_upper_catwalk_grate_xbar_14",
+                        "north_upper_catwalk_grate_xbar_2",
+                        "north_upper_catwalk_grate_xbar_3",
+                        "north_upper_catwalk_grate_xbar_4",
+                        "north_upper_catwalk_grate_xbar_5",
+                        "north_upper_catwalk_grate_xbar_6",
+                        "north_upper_catwalk_grate_xbar_7",
+                        "north_upper_catwalk_grate_xbar_8",
+                        "north_upper_catwalk_grate_xbar_9",
+                        "north_upper_catwalk_grate_zbar_0",
+                        "north_upper_catwalk_grate_zbar_1",
+                        "north_upper_catwalk_grate_zbar_2",
+                        "north_upper_catwalk_grate_zbar_3",
+                        "north_upper_catwalk_thin_mesh_base",
+                        "stair_left_rail",
+                        "stair_right_rail",
+                        "stair_step_0",
+                        "stair_step_1",
+                        "stair_step_10",
+                        "stair_step_11",
+                        "stair_step_2",
+                        "stair_step_3",
+                        "stair_step_4",
+                        "stair_step_5",
+                        "stair_step_6",
+                        "stair_step_7",
+                        "stair_step_8",
+                        "stair_step_9"
+                    ]
+                },
+                {
+                    "outputObjectName": "server_crypt_source_Structural_FactoryWall_StaticGroup",
+                    "meshAssetPath": "Assets/RuinCrawler/Art/DungeonV2/ImportedProps/server_crypt_source/server_crypt_source_Structural_FactoryWall_StaticGroup.asset",
+                    "materialAssetPath": "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryWall.mat",
+                    "zone": "Structural",
+                    "isMechanism": false,
+                    "sourceNodePaths": [
+                        "east_lower_wall_trim",
+                        "east_upper_wall_trim",
+                        "east_wall",
+                        "north_back_wall",
+                        "north_lower_wall_trim",
+                        "north_upper_wall_trim",
+                        "north_wall_data_screen_0",
+                        "north_wall_data_screen_1",
+                        "north_wall_data_screen_2",
+                        "north_wall_data_screen_3",
+                        "north_wall_red_status_0",
+                        "north_wall_red_status_1",
+                        "north_wall_red_status_2",
+                        "north_wall_red_status_3",
+                        "south_front_wall_left",
+                        "south_front_wall_right",
+                        "south_lower_wall_trim",
+                        "south_upper_wall_trim",
+                        "wall_red_eye_node_0",
+                        "wall_red_eye_node_1",
+                        "wall_red_eye_node_2",
+                        "wall_red_eye_node_3",
+                        "west_lower_wall_trim",
+                        "west_upper_wall_trim",
+                        "west_wall"
+                    ]
+                }
+            ]
+        }
+    ]
+}

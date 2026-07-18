@@ -11,37 +11,27 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void ProtectedBoundaryRejectsOffCenterGateFrameSlit()
         {
             DungeonPlanV2 source = Generate("physical-off-center-frame-slit");
-            DungeonSurfacePlanV2 gate = source.Surfaces.Single(value =>
-                string.Equals(value.Id, "surface-credential-bulkhead", StringComparison.Ordinal));
-            double minimumX = gate.Volume.HorizontalVertices.Min(value => value.X);
-            double maximumX = gate.Volume.HorizontalVertices.Max(value => value.X);
-            double minimumZ = gate.Volume.HorizontalVertices.Min(value => value.Z);
-            double maximumZ = gate.Volume.HorizontalVertices.Max(value => value.Z);
-            var centerFrame = CopySurface(
-                gate,
-                "surface-test-credential-frame-center",
-                Box(minimumX, maximumX, gate.Volume.MinimumY, gate.Volume.MaximumY, minimumZ, 1.2d));
-            var northFrame = CopySurface(
-                gate,
-                "surface-test-credential-frame-north",
-                Box(minimumX, maximumX, gate.Volume.MinimumY, gate.Volume.MaximumY, 2.5d, maximumZ));
+            DungeonTraversalEdgePlanV2 boundary = DungeonV2SemanticFixtureQueries.CredentialBoundary(source);
+            DungeonSurfacePlanV2 gate = DungeonV2SemanticFixtureQueries.CredentialBarrier(source);
+            DungeonSurfacePlanV2[] splitFrame = SplitBarrierLeavingSlit(gate, 1.2d);
             DungeonPlanV2 invalid = Rebuild(
                 source,
                 source.Surfaces
                     .Where(value => !string.Equals(value.Id, gate.Id, StringComparison.Ordinal))
-                    .Concat(new[] { centerFrame, northFrame }));
+                    .Concat(splitFrame));
 
-            AssertProtectedBypass(invalid, "factory-credential-tower", "factory-machine-core");
+            AssertProtectedBypass(invalid, boundary.FromRegionId, boundary.ToRegionId);
         }
 
         [Test]
         public void ProtectedBoundaryRejectsJumpableGateTop()
         {
             DungeonPlanV2 source = Generate("physical-jumpable-gate-top");
-            DungeonSurfacePlanV2 gate = source.Surfaces.Single(value =>
-                string.Equals(value.Id, "surface-credential-bulkhead", StringComparison.Ordinal));
-            DungeonSurfacePlanV2 sourceFloor = source.Surfaces.Single(value =>
-                string.Equals(value.Id, "surface-factory-credential-tower", StringComparison.Ordinal));
+            DungeonTraversalEdgePlanV2 boundary = DungeonV2SemanticFixtureQueries.CredentialBoundary(source);
+            DungeonSurfacePlanV2 gate = DungeonV2SemanticFixtureQueries.CredentialBarrier(source);
+            DungeonSurfacePlanV2 sourceFloor = DungeonV2SemanticFixtureQueries.PrimaryWalkableSurface(
+                source,
+                boundary.FromRegionId);
             double jumpableTop = sourceFloor.Volume.MaximumY
                 + TraversalProfilesV2.Flooded.JumpHeight - 0.1d;
             DungeonSurfacePlanV2 lowGate = CopySurface(
@@ -56,36 +46,35 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                     gate.Volume.HorizontalVertices.Max(value => value.Z)));
             DungeonPlanV2 invalid = Rebuild(
                 source,
-                source.Surfaces
-                    .Where(value => !string.Equals(
-                        value.Id,
-                        "surface-credential-upper-bulkhead",
-                        StringComparison.Ordinal))
-                    .Select(value => value.Id == gate.Id ? lowGate : value));
+                source.Surfaces.Select(value => value.Id == gate.Id ? lowGate : value));
 
-            AssertProtectedBypass(invalid, "factory-credential-tower", "factory-machine-core");
+            AssertProtectedBypass(invalid, boundary.FromRegionId, boundary.ToRegionId);
         }
 
         [Test]
         public void ProtectedBoundaryRejectsLowerTunnelAscentWhenHatchIsMissing()
         {
             DungeonPlanV2 source = Generate("physical-lower-tunnel-ascent");
+            DungeonTraversalEdgePlanV2 boundary = DungeonV2SemanticFixtureQueries.CredentialBoundary(source);
+            DungeonRegionPlanV2 hazardLanding = DungeonV2SemanticFixtureQueries.HazardLandingRegion(source);
+            DungeonSurfacePlanV2[] separatorSurfaces = source.Surfaces
+                .Where(value => value.IsStructural
+                    && !value.IsWalkable
+                    && (string.Equals(value.RegionId, hazardLanding.Id, StringComparison.Ordinal)
+                        || string.Equals(value.RegionId, boundary.ToRegionId, StringComparison.Ordinal)))
+                .Where(value => HorizontalGap(value.Volume, source.Regions.Single(region =>
+                        string.Equals(region.Id, boundary.ToRegionId, StringComparison.Ordinal)).Bounds)
+                    <= TraversalProfilesV2.Flooded.CapsuleRadius * 2d)
+                .Select(value => value)
+                .ToArray();
+            Assert.That(separatorSurfaces, Is.Not.Empty,
+                "The lower-to-far-side adjacency must be sealed by authored structure before mutation.");
             DungeonPlanV2 invalid = Rebuild(
                 source,
-                source.Surfaces.Where(value => !string.Equals(
-                        value.Id,
-                        "surface-undercroft-credential-hatch",
-                        StringComparison.Ordinal)
-                    && !string.Equals(
-                        value.Id,
-                        "surface-rail-hazard-undercroft-basin-north",
-                        StringComparison.Ordinal)
-                    && !string.Equals(
-                        value.Id,
-                        "surface-rail-factory-machine-core-south",
-                        StringComparison.Ordinal)));
+                source.Surfaces.Where(value => !separatorSurfaces.Any(separator =>
+                    string.Equals(separator.Id, value.Id, StringComparison.Ordinal))));
 
-            AssertProtectedBypass(invalid, "hazard-undercroft-basin", "factory-machine-core");
+            AssertProtectedBypass(invalid, hazardLanding.Id, boundary.ToRegionId);
         }
 
         [Test]
@@ -93,21 +82,25 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         {
             DungeonPlanV2 plan = Generate("physical-benign-in-band-transition");
             DungeonProgressionSolveResultV2 result = new DungeonProgressionSolverV2().Solve(plan);
+            DungeonTraversalEdgePlanV2 boundary = DungeonV2SemanticFixtureQueries.CredentialBoundary(plan);
 
             Assert.That(result.ProtectedBoundaryViolations, Is.Empty,
                 string.Join(" | ", result.ProtectedBoundaryViolations));
             Assert.That(plan.TraversalEdges.Any(value =>
                 !value.IsProtectedProgressionBoundary
-                && string.Equals(value.FromRegionId, "factory-nest-warehouse", StringComparison.Ordinal)
-                && string.Equals(value.ToRegionId, "factory-credential-tower", StringComparison.Ordinal)), Is.True);
+                && (string.Equals(value.FromRegionId, boundary.FromRegionId, StringComparison.Ordinal)
+                    || string.Equals(value.ToRegionId, boundary.FromRegionId, StringComparison.Ordinal))), Is.True,
+                "The pre-gate region must remain connected inside its authorized progression band.");
         }
 
         [Test]
         public void ElevatedHazardInSameHorizontalFootprintDoesNotPoisonGroundRoute()
         {
             DungeonPlanV2 source = Generate("hazard-cross-stratum-elevated");
-            DungeonSurfacePlanV2 basinFloor = source.Surfaces.Single(value =>
-                string.Equals(value.Id, "surface-hazard-undercroft-basin", StringComparison.Ordinal));
+            DungeonFallCatchmentPlanV2 catchment = DungeonV2SemanticFixtureQueries.HazardCatchment(source);
+            DungeonSurfacePlanV2 basinFloor = DungeonV2SemanticFixtureQueries.PrimarySafeCatchmentSurface(
+                source,
+                catchment);
             var elevatedHazard = new DungeonSurfacePlanV2(
                 "surface-test-elevated-hazard",
                 basinFloor.ModuleInstanceId,
@@ -139,21 +132,19 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void CrossStratumWalkablePrismCannotSatisfyGroundFooting()
         {
             DungeonPlanV2 source = Generate("hazard-cross-stratum-footing");
-            DungeonSurfacePlanV2 basinFloor = source.Surfaces.Single(value =>
-                string.Equals(value.Id, "surface-hazard-undercroft-basin", StringComparison.Ordinal));
-            DungeonSurfacePlanV2 displacedFloor = CopySurface(
-                basinFloor,
-                basinFloor.Id,
-                Box(
-                    basinFloor.Volume.HorizontalVertices.Min(value => value.X),
-                    basinFloor.Volume.HorizontalVertices.Max(value => value.X),
-                    basinFloor.Volume.MinimumY - 4d,
-                    basinFloor.Volume.MaximumY - 4d,
-                    basinFloor.Volume.HorizontalVertices.Min(value => value.Z),
-                    basinFloor.Volume.HorizontalVertices.Max(value => value.Z)));
+            DungeonFallCatchmentPlanV2 catchment = DungeonV2SemanticFixtureQueries.HazardCatchment(source);
+            var safeSurfaceIds = new HashSet<string>(catchment.SafeSurfaceIds, StringComparer.Ordinal);
             DungeonPlanV2 invalid = Rebuild(
                 source,
-                source.Surfaces.Select(value => value.Id == basinFloor.Id ? displacedFloor : value));
+                source.Surfaces.Select(value => !safeSurfaceIds.Contains(value.Id)
+                    ? value
+                    : CopySurface(
+                        value,
+                        value.Id,
+                        new DungeonConvexPrismV2(
+                            value.Volume.HorizontalVertices,
+                            value.Volume.MinimumY - 4d,
+                            value.Volume.MaximumY - 4d))));
 
             IndustrialFactoryV2ValidationResult result = new IndustrialFactoryV2Validator().Validate(invalid);
             Assert.That(result.Errors.Select(value => value.Code),
@@ -197,6 +188,60 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 source.ControllerId);
         }
 
+        private static DungeonSurfacePlanV2[] SplitBarrierLeavingSlit(
+            DungeonSurfacePlanV2 barrier,
+            double slitWidth)
+        {
+            double minimumX = barrier.Volume.HorizontalVertices.Min(value => value.X);
+            double maximumX = barrier.Volume.HorizontalVertices.Max(value => value.X);
+            double minimumZ = barrier.Volume.HorizontalVertices.Min(value => value.Z);
+            double maximumZ = barrier.Volume.HorizontalVertices.Max(value => value.Z);
+            double spanX = maximumX - minimumX;
+            double spanZ = maximumZ - minimumZ;
+            if (spanX >= spanZ)
+            {
+                double slitCenter = minimumX + spanX * 0.35d;
+                return new[]
+                {
+                    CopySurface(barrier, barrier.Id + "-left", Box(
+                        minimumX, slitCenter - slitWidth * 0.5d,
+                        barrier.Volume.MinimumY, barrier.Volume.MaximumY, minimumZ, maximumZ)),
+                    CopySurface(barrier, barrier.Id + "-right", Box(
+                        slitCenter + slitWidth * 0.5d, maximumX,
+                        barrier.Volume.MinimumY, barrier.Volume.MaximumY, minimumZ, maximumZ))
+                };
+            }
+
+            double zSlitCenter = minimumZ + spanZ * 0.35d;
+            return new[]
+            {
+                CopySurface(barrier, barrier.Id + "-south", Box(
+                    minimumX, maximumX, barrier.Volume.MinimumY, barrier.Volume.MaximumY,
+                    minimumZ, zSlitCenter - slitWidth * 0.5d)),
+                CopySurface(barrier, barrier.Id + "-north", Box(
+                    minimumX, maximumX, barrier.Volume.MinimumY, barrier.Volume.MaximumY,
+                    zSlitCenter + slitWidth * 0.5d, maximumZ))
+            };
+        }
+
+        private static double HorizontalGap(DungeonConvexPrismV2 prism, DungeonBounds3 bounds)
+        {
+            double gapX = AxisGap(
+                prism.HorizontalVertices.Min(value => value.X),
+                prism.HorizontalVertices.Max(value => value.X),
+                bounds.Minimum.X,
+                bounds.Maximum.X);
+            double gapZ = AxisGap(
+                prism.HorizontalVertices.Min(value => value.Z),
+                prism.HorizontalVertices.Max(value => value.Z),
+                bounds.Minimum.Z,
+                bounds.Maximum.Z);
+            return Math.Sqrt(gapX * gapX + gapZ * gapZ);
+        }
+
+        private static double AxisGap(double firstMin, double firstMax, double secondMin, double secondMax) =>
+            Math.Max(0d, Math.Max(firstMin, secondMin) - Math.Min(firstMax, secondMax));
+
         private static DungeonPlanV2 Rebuild(
             DungeonPlanV2 source,
             IEnumerable<DungeonSurfacePlanV2> surfaces)
@@ -230,7 +275,11 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 source.FluidNetworks,
                 source.EnvironmentControllers,
                 source.FallCatchments,
-                source.FallExposures);
+                source.FallExposures,
+                source.GameplayBeats,
+                source.AbstractRouteGraph,
+                source.BeatAssignments,
+                source.MiniDungeonCompositions);
         }
 
         private static DungeonConvexPrismV2 Box(

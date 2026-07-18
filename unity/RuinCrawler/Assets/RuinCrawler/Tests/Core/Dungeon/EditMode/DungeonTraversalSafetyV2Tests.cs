@@ -29,7 +29,7 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         [Test]
         public void GeneratedJumpAndDropGeometryRespectsReservedMargins()
         {
-            DungeonPlanV2 plan = new IndustrialFactoryV2Generator().Generate("traversal-margin-golden");
+            DungeonPlanV2 plan = GenerateWithJumpOrDrop("traversal-margin-golden");
             DungeonTraversalEdgePlanV2[] certifiedEdges = plan.TraversalEdges
                 .Where(value => value.Kind == DungeonConnectorKindV2.Jump
                     || value.Kind == DungeonConnectorKindV2.Drop)
@@ -100,13 +100,18 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         [Test]
         public void GeometryValidatorRejectsGeneratedDropBeyondSixUnits()
         {
-            DungeonPlanV2 source = new IndustrialFactoryV2Generator().Generate("safe-drop-negative");
-            DungeonRegionPlanV2 from = source.Regions.Single(value => value.Id == "factory-broken-freight-shaft");
-            DungeonRegionPlanV2 to = source.Regions.Single(value => value.Id == "water-freight-sump");
-            DungeonAnchorPlanV2 fromAnchor = source.Anchors.First(value =>
-                value.RegionId == from.Id && value.Kind == DungeonAnchorKindV2.Entry);
-            DungeonAnchorPlanV2 toAnchor = source.Anchors.First(value =>
-                value.RegionId == to.Id && value.Kind == DungeonAnchorKindV2.Entry);
+            DungeonPlanV2 source = GenerateWithJumpOrDrop("safe-drop-negative", requireDrop: true);
+            DungeonTraversalEdgePlanV2 authoredDrop = source.TraversalEdges.First(value =>
+                value.Kind == DungeonConnectorKindV2.Drop);
+            DungeonRegionPlanV2 from = source.Regions.Single(value => value.Id == authoredDrop.FromRegionId);
+            DungeonRegionPlanV2 to = source.Regions.Single(value => value.Id == authoredDrop.ToRegionId);
+            DungeonAnchorPlanV2 fromAnchor = source.Anchors.Single(value => value.Id == authoredDrop.FromAnchorId);
+            DungeonAnchorPlanV2 toAnchor = source.Anchors.Single(value => value.Id == authoredDrop.ToAnchorId);
+            Assert.That(
+                DungeonTraversalGeometryV2.TryMeasure(source, authoredDrop, out DungeonTraversalEdgeGeometryV2 geometry),
+                Is.True);
+            double displacement = DungeonTraversalUtilizationPolicyV2.SafeDropDistance
+                - geometry.VerticalDrop + 0.01d;
             var unsafeDrop = new DungeonTraversalEdgePlanV2(
                 "edge-test-drop-over-budget",
                 from.Id,
@@ -121,7 +126,7 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 traversalEdges: source.TraversalEdges.Concat(new[] { unsafeDrop }),
                 anchors: source.Anchors.Select(value =>
                     value.Id == toAnchor.Id
-                        ? ShiftAnchorY(value, -1.01d)
+                        ? ShiftAnchorY(value, -displacement)
                         : value),
                 surfaces: source.Surfaces.Select(value =>
                     value.RegionId == to.Id && value.IsWalkable && value.Kind != DungeonSurfaceKindV2.Hazard
@@ -129,8 +134,8 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                             value,
                             new DungeonConvexPrismV2(
                                 value.Volume.HorizontalVertices,
-                                value.Volume.MinimumY - 1.01d,
-                                value.Volume.MaximumY - 1.01d))
+                                value.Volume.MinimumY - displacement,
+                                value.Volume.MaximumY - displacement))
                         : value));
 
             IReadOnlyList<IndustrialFactoryV2ValidationIssue> issues =
@@ -222,10 +227,10 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void ExactTerminalProofRejectsNarrowColliderHoleBetweenGridLocations()
         {
             DungeonPlanV2 source = new IndustrialFactoryV2Generator().Generate("exact-terminal-hole-negative");
-            DungeonFallCatchmentPlanV2 catchment = source.FallCatchments.Single(value =>
-                value.Id == "catchment-hazard-undercroft");
-            DungeonSurfacePlanV2 original = source.Surfaces.Single(value =>
-                value.Id == catchment.SafeSurfaceIds[0]);
+            DungeonFallCatchmentPlanV2 catchment = DungeonV2SemanticFixtureQueries.HazardCatchment(source);
+            DungeonSurfacePlanV2 original = DungeonV2SemanticFixtureQueries.PrimarySafeCatchmentSurface(
+                source,
+                catchment);
             double minimumX = catchment.Volume.HorizontalVertices.Min(value => value.X);
             double maximumX = catchment.Volume.HorizontalVertices.Max(value => value.X);
             double minimumZ = catchment.Volume.HorizontalVertices.Min(value => value.Z);
@@ -276,8 +281,7 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         public void ExactTerminalProofRejectsCatchmentErasedByCapsuleErosion()
         {
             DungeonPlanV2 source = new IndustrialFactoryV2Generator().Generate("capsule-erosion-negative");
-            DungeonFallCatchmentPlanV2 catchment = source.FallCatchments.Single(value =>
-                value.Id == "catchment-hazard-undercroft");
+            DungeonFallCatchmentPlanV2 catchment = DungeonV2SemanticFixtureQueries.HazardCatchment(source);
             DungeonAnchorPlanV2 anchor = source.Anchors.Single(value => value.Id == catchment.SafeAnchorId);
             double minimumZ = catchment.Volume.HorizontalVertices.Min(value => value.Z);
             double maximumZ = catchment.Volume.HorizontalVertices.Max(value => value.Z);
@@ -310,6 +314,25 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
         private static string Describe(IEnumerable<IndustrialFactoryV2ValidationIssue> issues)
         {
             return string.Join(" | ", issues.Select(value => value.ToString()));
+        }
+
+        private static DungeonPlanV2 GenerateWithJumpOrDrop(
+            string seedPrefix,
+            bool requireDrop = false)
+        {
+            for (int index = 0; index < 64; index += 1)
+            {
+                DungeonPlanV2 plan = new IndustrialFactoryV2Generator().Generate(seedPrefix + "-" + index);
+                if (plan.TraversalEdges.Any(value => requireDrop
+                        ? value.Kind == DungeonConnectorKindV2.Drop
+                        : value.Kind == DungeonConnectorKindV2.Jump
+                            || value.Kind == DungeonConnectorKindV2.Drop))
+                {
+                    return plan;
+                }
+            }
+
+            throw new AssertionException("The deterministic authored corpus contains no required jump/drop fixture.");
         }
 
         private static DungeonPlanV2 Rebuild(
@@ -348,7 +371,11 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                 source.FluidNetworks,
                 source.EnvironmentControllers,
                 catchments ?? source.FallCatchments,
-                source.FallExposures);
+                source.FallExposures,
+                source.GameplayBeats,
+                source.AbstractRouteGraph,
+                source.BeatAssignments,
+                source.MiniDungeonCompositions);
         }
 
         private static DungeonSurfacePlanV2 ReplaceSurfaceVolume(

@@ -113,7 +113,8 @@ namespace RuinCrawler.Production.Tests
                         ExpeditionFlowController.CreateBeginExpeditionTransaction(
                             session.Snapshot,
                             "acceptance-v2-scene-expedition",
-                            "acceptance-v2-scene-seed");
+                            "acceptance-v2-scene-seed",
+                            IndustrialFactoryV2ModuleCatalog.Default);
                     Assert.That(planned.Success, Is.True, planned.Message ?? planned.FailureCode);
                     Assert.That(session.Commit("acceptance-v2-scene-entry", planned.State).Success, Is.True);
                 }
@@ -330,7 +331,8 @@ namespace RuinCrawler.Production.Tests
             WorkshopTransactionResult begun = ExpeditionFlowController.CreateBeginExpeditionTransaction(
                 selected.State,
                 expeditionId,
-                runSeed);
+                runSeed,
+                IndustrialFactoryV2ModuleCatalog.Default);
             Assert.That(begun.Success, Is.True);
             Assert.That(session.Commit("acceptance-seed-resumable-expedition", begun.State).Success, Is.True);
 
@@ -373,7 +375,8 @@ namespace RuinCrawler.Production.Tests
             WorkshopTransactionResult begun = ExpeditionFlowController.CreateBeginExpeditionTransaction(
                 session.Snapshot,
                 expeditionId,
-                runSeed);
+                runSeed,
+                IndustrialFactoryV2ModuleCatalog.Default);
             Assert.That(begun.Success, Is.True);
             Assert.That(session.Commit("acceptance-seed-defeat-expedition", begun.State).Success, Is.True);
 
@@ -483,7 +486,8 @@ namespace RuinCrawler.Production.Tests
                 ExpeditionFlowController.CreateBeginExpeditionTransaction(
                     selected,
                     "acceptance-expedition",
-                    "acceptance-seed");
+                    "acceptance-seed",
+                    IndustrialFactoryV2ModuleCatalog.Default);
             Assert.That(planned.Success, Is.True);
             Assert.That(session.Commit("acceptance-begin-expedition", planned.State).Success, Is.True);
             yield return null;
@@ -543,7 +547,8 @@ namespace RuinCrawler.Production.Tests
             WorkshopTransactionResult departure = ExpeditionFlowController.CreateBeginExpeditionTransaction(
                 selected.State,
                 expeditionId,
-                runSeed);
+                runSeed,
+                IndustrialFactoryV2ModuleCatalog.Default);
             Assert.That(departure.Success, Is.True);
             Assert.That(
                 session.Commit("acceptance-begin-boss-expedition", departure.State).Success,

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="2" testcasecount="3" result="Passed" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0" engine-version="3.5.0.0" clr-version="4.0.30319.42000" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.0713987">
+  <test-suite type="TestSuite" id="1000" name="RuinCrawler" fullname="RuinCrawler" runstate="Runnable" testcasecount="310" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.071399" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+    <properties>
+      <property name="platform" value="EditMode" />
+    </properties>
+    <test-suite type="Assembly" id="1200" name="RuinCrawler.Core.Dungeon.EditorTests.dll" fullname="C:/Users/K/Documents/New Three.js Practice/unity/RuinCrawler/Library/ScriptAssemblies/RuinCrawler.Core.Dungeon.EditorTests.dll" runstate="Runnable" testcasecount="96" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.065303" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="5368" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+        <property name="EditorOnly" value="True" />
+      </properties>
+      <test-suite type="TestSuite" id="1201" name="RuinCrawler" fullname="RuinCrawler" runstate="Runnable" testcasecount="96" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.065019" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-suite type="TestSuite" id="1202" name="Core" fullname="RuinCrawler.Core" runstate="Runnable" testcasecount="96" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.064879" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+          <properties />
+          <test-suite type="TestSuite" id="1203" name="Dungeon" fullname="RuinCrawler.Core.Dungeon" runstate="Runnable" testcasecount="96" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.064750" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+            <properties />
+            <test-suite type="TestSuite" id="1204" name="Tests" fullname="RuinCrawler.Core.Dungeon.Tests" runstate="Runnable" testcasecount="11" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.063974" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+              <properties />
+              <test-suite type="TestFixture" id="1098" name="IndustrialFactoryV2CertifiedModuleCatalogTests" fullname="RuinCrawler.Core.Dungeon.Tests.IndustrialFactoryV2CertifiedModuleCatalogTests" classname="RuinCrawler.Core.Dungeon.Tests.IndustrialFactoryV2CertifiedModuleCatalogTests" runstate="Runnable" testcasecount="3" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.063301" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+                <properties />
+                <test-case id="1099" name="CatalogContainsTwelveAuthoredFamiliesWithTwoTopologyVariants" fullname="RuinCrawler.Core.Dungeon.Tests.IndustrialFactoryV2CertifiedModuleCatalogTests.CatalogContainsTwelveAuthoredFamiliesWithTwoTopologyVariants" methodname="CatalogContainsTwelveAuthoredFamiliesWithTwoTopologyVariants" classname="RuinCrawler.Core.Dungeon.Tests.IndustrialFactoryV2CertifiedModuleCatalogTests" runstate="Runnable" seed="2001001315" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.051831" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1101" name="EveryFixtureGeometryIsMultiRegionSealedAndUsesExactPortalPayloads" fullname="RuinCrawler.Core.Dungeon.Tests.IndustrialFactoryV2CertifiedModuleCatalogTests.EveryFixtureGeometryIsMultiRegionSealedAndUsesExactPortalPayloads" methodname="EveryFixtureGeometryIsMultiRegionSealedAndUsesExactPortalPayloads" classname="RuinCrawler.Core.Dungeon.Tests.IndustrialFactoryV2CertifiedModuleCatalogTests" runstate="Runnable" seed="1397109058" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.003051" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1100" name="ProductionCatalogCanBeInjectedFromBakedDefinitions" fullname="RuinCrawler.Core.Dungeon.Tests.IndustrialFactoryV2CertifiedModuleCatalogTests.ProductionCatalogCanBeInjectedFromBakedDefinitions" methodname="ProductionCatalogCanBeInjectedFromBakedDefinitions" classname="RuinCrawler.Core.Dungeon.Tests.IndustrialFactoryV2CertifiedModuleCatalogTests" runstate="Runnable" seed="395033" result="Passed" start-time="2026-07-18 13:55:46Z" end-time="2026-07-18 13:55:46Z" duration="0.000972" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                  <output><![CDATA[<b><color=#2EA3FF>MCP-FOR-UNITY</color></b>: [TestRunnerNoThrottle] Restored Interaction Mode after test run.
+Saving results to: C:/Users/K/AppData/LocalLow/DefaultCompany/RuinCrawler\TestResults.xml
+]]></output>
+                </test-case>
+              </test-suite>
+            </test-suite>
+          </test-suite>
+        </test-suite>
+      </test-suite>
+    </test-suite>
+  </test-suite>
+</test-run>

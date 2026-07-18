@@ -7,6 +7,13 @@ using UnityEngine.SceneManagement;
 
 namespace RuinCrawler.Runtime.Persistence
 {
+    public interface IIndustrialFactoryV2AuthoredCatalogProvider
+    {
+        bool TryBuildProductionCatalog(
+            out IIndustrialFactoryV2ModuleCatalog catalog,
+            out string error);
+    }
+
     [DefaultExecutionOrder(-800)]
     public sealed class ExpeditionFlowController : MonoBehaviour
     {
@@ -16,6 +23,7 @@ namespace RuinCrawler.Runtime.Persistence
         public const int IndustrialFactoryV2StandardDifficulty = 1;
         public const int IndustrialFactoryV2BossHuntDifficulty = 3;
         [SerializeField] private CampaignSession campaignSession;
+        [SerializeField] private ScriptableObject authoredModuleRegistryAsset;
         [SerializeField] private string campScene = "Camp";
         [SerializeField] private string expeditionScene = "Expedition";
         [SerializeField] private string testRangeScene = "TestRange";
@@ -73,10 +81,31 @@ namespace RuinCrawler.Runtime.Persistence
                 ? DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")
                 : runSeed.Trim();
             string expeditionId = "expedition-" + Guid.NewGuid().ToString("N");
+            ScriptableObject resolvedRegistry = authoredModuleRegistryAsset != null
+                ? authoredModuleRegistryAsset
+                : Resources.Load<ScriptableObject>("DungeonV2/DungeonAuthoredModuleRegistryV2");
+            string catalogError = null;
+            if (!(resolvedRegistry is IIndustrialFactoryV2AuthoredCatalogProvider provider)
+                || !provider.TryBuildProductionCatalog(
+                    out IIndustrialFactoryV2ModuleCatalog moduleCatalog,
+                    out catalogError))
+            {
+                catalogError ??= "Missing authored Dungeon V2 registry provider. "
+                    + "The latest authored dungeon is the only expedition path and has no legacy fallback.";
+                Debug.LogError("[RuinCrawler Expedition] " + catalogError, this);
+                return false;
+            }
+
+            authoredModuleRegistryAsset = resolvedRegistry;
+            Debug.Log(
+                "[RuinCrawler Expedition] Using the latest validated authored Dungeon V2 library.",
+                this);
+
             WorkshopTransactionResult planned = CreateBeginExpeditionTransaction(
                 campaignSession.Snapshot,
                 expeditionId,
-                seed);
+                seed,
+                moduleCatalog);
             if (!planned.Success)
             {
                 Debug.LogWarning("[RuinCrawler Expedition] " + (planned.Message ?? planned.FailureCode));
@@ -141,18 +170,27 @@ namespace RuinCrawler.Runtime.Persistence
         public static WorkshopTransactionResult CreateBeginExpeditionTransaction(
             CampaignStateV1 source,
             string expeditionId,
-            string runSeed)
+            string runSeed,
+            IIndustrialFactoryV2ModuleCatalog moduleCatalog)
         {
             if (source == null)
             {
                 throw new ArgumentNullException(nameof(source));
+            }
+            if (moduleCatalog == null)
+            {
+                return WorkshopTransactionResult.Failed(
+                    source,
+                    "authored-dungeon-catalog-required",
+                    "industrial-factory-v2 production departure requires the validated authored module catalog.");
             }
 
             DungeonPlanV2 plan;
             IndustrialFactoryV2GenerationResult generation;
             try
             {
-                generation = new IndustrialFactoryV2Generator().GenerateResult(
+                var generator = new IndustrialFactoryV2Generator(moduleCatalog);
+                generation = generator.GenerateResult(
                     runSeed,
                     new IndustrialFactoryV2GenerationOptions(
                         ResolveIndustrialFactoryV2GenerationDifficulty(source)));

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -11,7 +12,7 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
 {
     public sealed class DungeonCertifiedBuilderValidationV2Tests
     {
-        private readonly List<Object> ownedObjects = new List<Object>();
+        private readonly List<UnityEngine.Object> ownedObjects = new List<UnityEngine.Object>();
 
         [TearDown]
         public void TearDown()
@@ -20,7 +21,7 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             {
                 if (ownedObjects[index] != null)
                 {
-                    Object.DestroyImmediate(ownedObjects[index]);
+                    UnityEngine.Object.DestroyImmediate(ownedObjects[index]);
                 }
             }
 
@@ -28,19 +29,45 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
         }
 
         [Test]
-        public void BuilderResolvesEveryPlacedModuleBeforeCreatingSceneGeometry()
+        public void AuthoredRegistryResolvesEveryPlacedModuleFromPureDescriptors()
         {
             DungeonPlanV2 plan = new IndustrialFactoryV2Generator().Generate("builder-certified-registry");
-            DungeonCertifiedGeometryRegistryV2 registry = CreateRegistry(
+            DungeonAuthoredModuleRegistryV2 registry = CreateRegistry(
                 plan.Modules.Select(module => IndustrialFactoryV2ModuleCatalog.Require(module.TemplateId)).Distinct());
-            GameObject host = Own(new GameObject("CertifiedBuilderHost"));
-            DungeonSceneBuilderV2 builder = host.AddComponent<DungeonSceneBuilderV2>();
-            builder.ConfigureCertifiedGeometryRegistry(registry, true, false);
 
-            Assert.That(builder.TryBuild(plan, null, null, out string error), Is.True, error);
-            Assert.That(builder.CertifiedModuleCount, Is.EqualTo(plan.Modules.Count));
-            Assert.That(builder.GeneratedRoot, Is.Not.Null);
-            builder.TearDown();
+            foreach (DungeonModuleInstancePlanV2 module in plan.Modules)
+                Assert.That(registry.TryResolve(module, out _, out _, out string error), Is.True, error);
+            Assert.That(registry.TryBuildPureCatalog(out DungeonAuthoredModuleCatalogV2 catalog, out var errors),
+                Is.True,
+                string.Join("\n", errors));
+            Assert.That(catalog.Definitions.Count, Is.EqualTo(plan.Modules
+                .Select(value => value.TemplateId).Distinct().Count()));
+        }
+
+        [Test]
+        public void AuthoredRegistryRejectsAnyNonCurrentContentPackIdentity()
+        {
+            DungeonAuthoredModuleRegistryV2 registry =
+                Own(ScriptableObject.CreateInstance<DungeonAuthoredModuleRegistryV2>());
+
+            ArgumentException exception = Assert.Throws<ArgumentException>(() =>
+                registry.Configure(
+                    Array.Empty<DungeonAuthoredModuleEntryV2>(),
+                    authoredContractVersion: 3,
+                    authoredContentPackId: "industrial-factory-v2-contracts-stale"));
+
+            Assert.That(exception.Message, Does.Contain(IndustrialFactoryV2Ruleset.ContentPackVersion));
+
+            typeof(DungeonAuthoredModuleRegistryV2)
+                .GetField("contentPackId",
+                    System.Reflection.BindingFlags.Instance
+                    | System.Reflection.BindingFlags.NonPublic)
+                ?.SetValue(registry, "serialized-stale-pack");
+            Assert.That(registry.ValidateCatalogCoverage(out IReadOnlyList<string> errors), Is.False);
+            Assert.That(errors.Any(value =>
+                    value.Contains(IndustrialFactoryV2Ruleset.ContentPackVersion)),
+                Is.True,
+                string.Join("\n", errors));
         }
 
         [Test]
@@ -49,22 +76,22 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             DungeonPlanV2 plan = new IndustrialFactoryV2Generator().Generate("builder-certified-rejection");
             GameObject host = Own(new GameObject("CertifiedBuilderHost"));
             DungeonSceneBuilderV2 builder = host.AddComponent<DungeonSceneBuilderV2>();
-            builder.ConfigureCertifiedGeometryRegistry(null, true, false);
+            builder.ConfigureAuthoredModuleRegistry(null, allowResourceFallback: false);
 
             LogAssert.Expect(LogType.Error, new Regex(
-                @"\[RuinCrawler Dungeon V2\].*certified module registry is missing"));
+                @"\[RuinCrawler Dungeon V2\].*Missing authored module registry"));
             Assert.That(builder.TryBuild(plan, null, null, out string missingError), Is.False);
-            Assert.That(missingError, Does.Contain("registry is missing"));
+            Assert.That(missingError, Does.Contain("Missing authored module registry"));
             Assert.That(builder.GeneratedRoot, Is.Null);
 
             IndustrialFactoryV2ModuleDefinition first =
                 IndustrialFactoryV2ModuleCatalog.Require(plan.Modules[0].TemplateId);
-            DungeonCertifiedGeometryRegistryV2 incomplete = CreateRegistry(new[] { first });
-            builder.ConfigureCertifiedGeometryRegistry(incomplete, true, false);
+            DungeonAuthoredModuleRegistryV2 incomplete = CreateRegistry(new[] { first });
+            builder.ConfigureAuthoredModuleRegistry(incomplete, allowResourceFallback: false);
             LogAssert.Expect(LogType.Error, new Regex(
-                @"\[RuinCrawler Dungeon V2\].*No certified geometry asset is registered"));
+                @"\[RuinCrawler Dungeon V2\].*failed production coverage"));
             Assert.That(builder.TryBuild(plan, null, null, out string incompleteError), Is.False);
-            Assert.That(incompleteError, Does.Contain("No certified geometry asset is registered"));
+            Assert.That(incompleteError, Does.Contain("failed production coverage"));
             Assert.That(builder.GeneratedRoot, Is.Null);
         }
 
@@ -91,11 +118,11 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             DungeonPlanV2 invalid = RebuildWithSurfaces(
                 source,
                 source.Surfaces.Select(value => value.Id == original.Id ? shifted : value));
-            DungeonCertifiedGeometryRegistryV2 registry = CreateRegistry(
-                source.Modules.Select(module => IndustrialFactoryV2ModuleCatalog.Require(module.TemplateId)).Distinct());
+            DungeonAuthoredModuleRegistryV2 registry = CreateRegistry(
+                IndustrialFactoryV2ModuleCatalog.Definitions);
             GameObject host = Own(new GameObject("CertifiedBuilderHost"));
             DungeonSceneBuilderV2 builder = host.AddComponent<DungeonSceneBuilderV2>();
-            builder.ConfigureCertifiedGeometryRegistry(registry, true, false);
+            builder.ConfigureAuthoredModuleRegistry(registry, allowResourceFallback: false);
 
             LogAssert.Expect(LogType.Error, new Regex(
                 @"\[RuinCrawler Dungeon V2\].*CERTIFIED_SURFACE_PLACEMENT_MISMATCH"));
@@ -104,21 +131,44 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             Assert.That(builder.GeneratedRoot, Is.Null);
         }
 
-        private DungeonCertifiedGeometryRegistryV2 CreateRegistry(
+        private DungeonAuthoredModuleRegistryV2 CreateRegistry(
             IEnumerable<IndustrialFactoryV2ModuleDefinition> definitions)
         {
-            DungeonCertifiedGeometryRegistryV2 registry =
-                Own(ScriptableObject.CreateInstance<DungeonCertifiedGeometryRegistryV2>());
-            var assets = new List<DungeonCertifiedGeometryAssetV2>();
+            DungeonAuthoredModuleRegistryV2 registry =
+                Own(ScriptableObject.CreateInstance<DungeonAuthoredModuleRegistryV2>());
+            var entries = new List<DungeonAuthoredModuleEntryV2>();
             foreach (IndustrialFactoryV2ModuleDefinition definition in definitions)
             {
                 DungeonCertifiedGeometryAssetV2 asset =
                     Own(ScriptableObject.CreateInstance<DungeonCertifiedGeometryAssetV2>());
                 asset.Store(definition.CertifiedGeometry);
-                assets.Add(asset);
+                DungeonAuthoredModuleDescriptorAssetV2 descriptor =
+                    Own(ScriptableObject.CreateInstance<DungeonAuthoredModuleDescriptorAssetV2>());
+                descriptor.Store(
+                    definition.TemplateId,
+                    definition.DescriptorId,
+                    definition.VariantId,
+                    definition.Composition,
+                    definition.CompatibleMacroRoles,
+                    definition.TopologyEdges,
+                    definition.VerticalCompositionId);
+                GameObject prefabToken = Own(new GameObject("Prefab_" + definition.TemplateId));
+                var entry = new DungeonAuthoredModuleEntryV2();
+                entry.Configure(
+                    definition.TemplateId,
+                    definition.DescriptorId,
+                    definition.Composition.Archetype.ToString(),
+                    prefabToken,
+                    descriptor,
+                    asset,
+                    descriptor.DescriptorRevisionHash,
+                    definition.GeometryRevisionHash,
+                    definition.PresentationDependencyHash,
+                    definition.CombinedRevisionHash);
+                entries.Add(entry);
             }
 
-            registry.Configure(assets);
+            registry.Configure(entries);
             return registry;
         }
 
@@ -155,10 +205,14 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
                 source.FluidNetworks,
                 source.EnvironmentControllers,
                 source.FallCatchments,
-                source.FallExposures);
+                source.FallExposures,
+                source.GameplayBeats,
+                source.AbstractRouteGraph,
+                source.BeatAssignments,
+                source.MiniDungeonCompositions);
         }
 
-        private T Own<T>(T target) where T : Object
+        private T Own<T>(T target) where T : UnityEngine.Object
         {
             ownedObjects.Add(target);
             return target;

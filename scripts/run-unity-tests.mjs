@@ -264,8 +264,9 @@ async function main() {
       '-testPlatform', mode,
       '-testResults', resultsPath,
       '-logFile', '-',
-      '-quit',
     ];
+    // Unity's Test Framework owns Editor shutdown after -runTests. Passing
+    // -quit here can terminate Unity 6 before it writes the NUnit result file.
     const command = [editor, ...unityArguments].map(quoteForDisplay).join(' ');
 
     if (options.printCommand) {

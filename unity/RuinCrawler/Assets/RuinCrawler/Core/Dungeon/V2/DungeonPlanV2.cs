@@ -1,18 +1,21 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 
 namespace RuinCrawler.Core.Dungeon.V2
 {
     /// <summary>
-    /// Immutable schema-2 dungeon source. Construction canonicalizes unordered
+    /// Immutable schema-3 dungeon source. Construction canonicalizes unordered
     /// arrays and rejects broken ownership or cross-reference contracts.
     /// </summary>
     public sealed class DungeonPlanV2 : IEquatable<DungeonPlanV2>
     {
-        public const int CurrentSchemaVersion = 2;
-        public const int RequiredMacroRoleCount = 7;
+        public const int CurrentSchemaVersion = 3;
+        public const int RequiredGameplayBeatCount = 7;
+        public const int MinimumModuleCount = 8;
+        public const int MaximumModuleCount = 14;
         public const int MinimumRegionCount = 12;
         public const int MaximumRegionCount = 18;
 
@@ -45,11 +48,15 @@ namespace RuinCrawler.Core.Dungeon.V2
             IEnumerable<DungeonFluidNetworkPlanV2> fluidNetworks,
             IEnumerable<DungeonEnvironmentControllerPlanV2> environmentControllers,
             IEnumerable<DungeonFallCatchmentPlanV2> fallCatchments,
-            IEnumerable<DungeonFallExposurePlanV2> fallExposures)
+            IEnumerable<DungeonFallExposurePlanV2> fallExposures,
+            IEnumerable<DungeonGameplayBeatPlanV2> gameplayBeats = null,
+            DungeonAbstractRouteGraphV2 abstractRouteGraph = null,
+            IEnumerable<DungeonGameplayBeatAssignmentV2> beatAssignments = null,
+            IEnumerable<DungeonMiniDungeonCompositionGrammarV2> miniDungeonCompositions = null)
         {
             if (schemaVersion != CurrentSchemaVersion)
             {
-                throw new ArgumentOutOfRangeException(nameof(schemaVersion), schemaVersion, "DungeonPlanV2 requires schema 2.");
+                throw new ArgumentOutOfRangeException(nameof(schemaVersion), schemaVersion, "DungeonPlanV2 requires schema 3.");
             }
 
             if (contractVersion <= 0)
@@ -116,6 +123,22 @@ namespace RuinCrawler.Core.Dungeon.V2
                 fallExposures,
                 value => value.Id,
                 nameof(fallExposures));
+            if (gameplayBeats == null) throw new ArgumentNullException(nameof(gameplayBeats));
+            if (abstractRouteGraph == null) throw new ArgumentNullException(nameof(abstractRouteGraph));
+            if (beatAssignments == null) throw new ArgumentNullException(nameof(beatAssignments));
+            GameplayBeats = DungeonV2Contract.CopyCanonical(
+                gameplayBeats,
+                value => value.Id,
+                nameof(gameplayBeats));
+            AbstractRouteGraph = abstractRouteGraph;
+            BeatAssignments = DungeonV2Contract.CopyCanonical(
+                beatAssignments,
+                value => value.BeatId,
+                nameof(beatAssignments));
+            MiniDungeonCompositions = DungeonV2Contract.CopyCanonical(
+                miniDungeonCompositions ?? Array.Empty<DungeonMiniDungeonCompositionGrammarV2>(),
+                value => value.Id,
+                nameof(miniDungeonCompositions));
 
             ValidateAggregate();
             DeterministicSignature = BuildDeterministicSignature();
@@ -150,6 +173,10 @@ namespace RuinCrawler.Core.Dungeon.V2
         public IReadOnlyList<DungeonEnvironmentControllerPlanV2> EnvironmentControllers { get; }
         public IReadOnlyList<DungeonFallCatchmentPlanV2> FallCatchments { get; }
         public IReadOnlyList<DungeonFallExposurePlanV2> FallExposures { get; }
+        public IReadOnlyList<DungeonGameplayBeatPlanV2> GameplayBeats { get; }
+        public DungeonAbstractRouteGraphV2 AbstractRouteGraph { get; }
+        public IReadOnlyList<DungeonGameplayBeatAssignmentV2> BeatAssignments { get; }
+        public IReadOnlyList<DungeonMiniDungeonCompositionGrammarV2> MiniDungeonCompositions { get; }
         public string DeterministicSignature { get; }
 
         public bool Equals(DungeonPlanV2 other)
@@ -163,16 +190,20 @@ namespace RuinCrawler.Core.Dungeon.V2
 
         private void ValidateAggregate()
         {
-            RequireCount(MacroRoles.Count, RequiredMacroRoleCount, nameof(MacroRoles));
+            if (MacroRoles.Count == 0)
+                throw new ArgumentException("At least one compatibility ownership group is required.", nameof(MacroRoles));
             if (Regions.Count < MinimumRegionCount || Regions.Count > MaximumRegionCount)
             {
                 throw new ArgumentException("DungeonPlanV2 requires 12-18 playable regions.", nameof(Regions));
             }
+            if (Modules.Count < MinimumModuleCount || Modules.Count > MaximumModuleCount)
+                throw new ArgumentException("DungeonPlanV2 requires 8-14 authored module instances.", nameof(Modules));
 
             RequireCount(Districts.Count, 3, nameof(Districts));
             RequireReference(Regions, EntranceRegionId, value => value.Id, nameof(EntranceRegionId));
             RequireReference(Regions, ExtractionRegionId, value => value.Id, nameof(ExtractionRegionId));
             ValidateMacroRoles();
+            ValidateGenerationAuthority();
             ValidateDistricts();
             ValidateModulesRegionsAnchors();
             ValidateTraversalAndDiscoveries();
@@ -180,19 +211,98 @@ namespace RuinCrawler.Core.Dungeon.V2
             ValidateFallContracts();
         }
 
+        private void ValidateGenerationAuthority()
+        {
+            RequireCount(GameplayBeats.Count, RequiredGameplayBeatCount, nameof(GameplayBeats));
+            var kinds = new HashSet<DungeonGameplayBeatKindV2>();
+            var beatIds = new HashSet<string>(GameplayBeats.Select(value => value.Id), StringComparer.Ordinal);
+            foreach (DungeonGameplayBeatPlanV2 beat in GameplayBeats)
+            {
+                if (!kinds.Add(beat.Kind))
+                    throw new ArgumentException("Gameplay beat kinds must be unique.", nameof(GameplayBeats));
+                foreach (string prerequisiteId in beat.PrerequisiteBeatIds)
+                {
+                    if (!beatIds.Contains(prerequisiteId) || prerequisiteId == beat.Id)
+                        throw new ArgumentException("Gameplay beat prerequisite is missing or self-referential.", nameof(GameplayBeats));
+                }
+            }
+            foreach (DungeonGameplayBeatKindV2 kind in Enum.GetValues(typeof(DungeonGameplayBeatKindV2)))
+            {
+                if (!kinds.Contains(kind))
+                    throw new ArgumentException("Missing gameplay beat: " + kind, nameof(GameplayBeats));
+            }
+
+            var resolved = new HashSet<string>(StringComparer.Ordinal);
+            bool progressed;
+            do
+            {
+                progressed = false;
+                foreach (DungeonGameplayBeatPlanV2 beat in GameplayBeats)
+                {
+                    if (resolved.Contains(beat.Id)
+                        || beat.PrerequisiteBeatIds.Any(value => !resolved.Contains(value))) continue;
+                    resolved.Add(beat.Id);
+                    progressed = true;
+                }
+            } while (progressed);
+            if (resolved.Count != GameplayBeats.Count)
+                throw new ArgumentException("Gameplay beat partial order contains a cycle.", nameof(GameplayBeats));
+
+            var moduleIds = new HashSet<string>(Modules.Select(value => value.Id), StringComparer.Ordinal);
+            var routeNodeIds = new HashSet<string>(AbstractRouteGraph.Nodes.Select(value => value.Id), StringComparer.Ordinal);
+            if (!routeNodeIds.SetEquals(moduleIds))
+                throw new ArgumentException("Abstract route nodes must map one-to-one to selected module instances.", nameof(AbstractRouteGraph));
+
+            var assignedBeatIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (DungeonGameplayBeatAssignmentV2 assignment in BeatAssignments)
+            {
+                if (!beatIds.Contains(assignment.BeatId) || !assignedBeatIds.Add(assignment.BeatId))
+                    throw new ArgumentException("Each known gameplay beat requires exactly one assignment record.", nameof(BeatAssignments));
+                foreach (string moduleId in assignment.ModuleInstanceIds)
+                {
+                    if (!moduleIds.Contains(moduleId))
+                        throw new ArgumentException("Beat assignment references an unknown module.", nameof(BeatAssignments));
+                }
+            }
+            if (!assignedBeatIds.SetEquals(beatIds))
+                throw new ArgumentException("Every gameplay beat must be assigned to one or more modules.", nameof(BeatAssignments));
+
+            if (MiniDungeonCompositions.Count > DungeonMiniDungeonCompositionGrammarV2.MaximumCompositionsPerPlan)
+                throw new ArgumentException("At most one mini-dungeon composition is allowed.", nameof(MiniDungeonCompositions));
+            foreach (DungeonMiniDungeonCompositionGrammarV2 composition in MiniDungeonCompositions)
+            {
+                foreach (string moduleId in composition.ModuleInstanceIds)
+                {
+                    if (!moduleIds.Contains(moduleId))
+                        throw new ArgumentException("Mini-dungeon composition references an unknown module.", nameof(MiniDungeonCompositions));
+                }
+                if (!routeNodeIds.Contains(composition.RewardBranchNodeId)
+                    || !routeNodeIds.Contains(composition.EntryNodeId)
+                    || !routeNodeIds.Contains(composition.CriticalExitNodeId)
+                    || composition.RouteDecisionNodeIds.Any(value => !routeNodeIds.Contains(value)))
+                    throw new ArgumentException("Mini-dungeon route nodes must belong to the abstract route graph.", nameof(MiniDungeonCompositions));
+                DungeonAbstractRouteEdgeV2 rejoin = AbstractRouteGraph.Edges.SingleOrDefault(value =>
+                    string.Equals(value.Id, composition.LoopOrRejoinEdgeId, StringComparison.Ordinal));
+                if (rejoin == null
+                    || !composition.ModuleInstanceIds.Contains(rejoin.FromNodeId)
+                    || !composition.ModuleInstanceIds.Contains(rejoin.ToNodeId))
+                    throw new ArgumentException(
+                        "Mini-dungeon loop/rejoin edge must connect two modules inside the composition.",
+                        nameof(MiniDungeonCompositions));
+                if (!composition.VerticalMechanism)
+                    throw new ArgumentException("Mini-dungeon mechanism must be vertical.", nameof(MiniDungeonCompositions));
+            }
+        }
+
         private void ValidateMacroRoles()
         {
-            var roles = new HashSet<DungeonMacroRoleKindV2>();
-            var orders = new HashSet<int>();
+            var ownedModules = new HashSet<string>(StringComparer.Ordinal);
             foreach (DungeonMacroRolePlanV2 macro in MacroRoles)
             {
-                if (!roles.Add(macro.Role) || !orders.Add(macro.ProgressionOrder))
-                {
-                    throw new ArgumentException("Macro roles and progression orders must be unique.", nameof(MacroRoles));
-                }
-
                 foreach (string moduleId in macro.ModuleInstanceIds)
                 {
+                    if (!ownedModules.Add(moduleId))
+                        throw new ArgumentException("Compatibility ownership groups may not share a module.", nameof(MacroRoles));
                     DungeonModuleInstancePlanV2 module = RequireReference(
                         Modules,
                         moduleId,
@@ -201,22 +311,8 @@ namespace RuinCrawler.Core.Dungeon.V2
                     RequireEqual(macro.Id, module.MacroRoleId, "Macro/module ownership mismatch.", nameof(MacroRoles));
                 }
             }
-
-            foreach (DungeonMacroRoleKindV2 role in Enum.GetValues(typeof(DungeonMacroRoleKindV2)))
-            {
-                if (!roles.Contains(role))
-                {
-                    throw new ArgumentException("Missing macro role: " + role, nameof(MacroRoles));
-                }
-            }
-
-            for (int order = 0; order < RequiredMacroRoleCount; order += 1)
-            {
-                if (!orders.Contains(order))
-                {
-                    throw new ArgumentException("Progression orders must be the canonical range 0-6.", nameof(MacroRoles));
-                }
-            }
+            if (!ownedModules.SetEquals(Modules.Select(value => value.Id)))
+                throw new ArgumentException("Every module must belong to exactly one compatibility ownership group.", nameof(MacroRoles));
         }
 
         private void ValidateDistricts()
@@ -288,9 +384,13 @@ namespace RuinCrawler.Core.Dungeon.V2
                 throw new ArgumentException("District membership must cover every region exactly once.", nameof(Districts));
             }
 
-            RequireDistinctMacroCount(factory.RegionIds, 1, nameof(Districts));
-            RequireDistinctMacroCount(waterworks.RegionIds, 3, nameof(Districts));
-            RequireDistinctMacroCount(hazard.RegionIds, 2, nameof(Districts));
+            RequireDistinctModuleCount(factory.RegionIds, 1, nameof(Districts));
+            RequireDistinctModuleCount(waterworks.RegionIds, 3, nameof(Districts));
+            // A Hazard Undercroft may be one authored multi-region vertical
+            // composition or a socket-connected subgraph. Region-count and
+            // certified-portal validation prove the former without inventing
+            // two fixed macro-room instances.
+            RequireDistinctModuleCount(hazard.RegionIds, 1, nameof(Districts));
         }
 
         private void ValidateModulesRegionsAnchors()
@@ -634,18 +734,19 @@ namespace RuinCrawler.Core.Dungeon.V2
             return count;
         }
 
-        private void RequireDistinctMacroCount(IEnumerable<string> regionIds, int minimum, string parameterName)
+        private void RequireDistinctModuleCount(IEnumerable<string> regionIds, int minimum, string parameterName)
         {
-            var macroIds = new HashSet<string>(StringComparer.Ordinal);
+            var moduleIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (string regionId in regionIds)
             {
                 DungeonRegionPlanV2 region = RequireReference(Regions, regionId, value => value.Id, parameterName);
-                macroIds.Add(region.MacroRoleId);
+                foreach (string moduleId in region.ModuleInstanceIds)
+                    moduleIds.Add(moduleId);
             }
 
-            if (macroIds.Count < minimum)
+            if (moduleIds.Count < minimum)
             {
-                throw new ArgumentException("District spans fewer macro roles than required.", parameterName);
+                throw new ArgumentException("District spans fewer authored modules than required.", parameterName);
             }
         }
 
@@ -692,8 +793,49 @@ namespace RuinCrawler.Core.Dungeon.V2
             foreach (DungeonMacroRolePlanV2 macro in MacroRoles)
             {
                 writer.Add((int)macro.Role);
-                writer.Add(macro.ProgressionOrder);
                 AddStrings(writer, macro.ModuleInstanceIds);
+            }
+
+            AddIds(writer, GameplayBeats, value => value.Id);
+            foreach (DungeonGameplayBeatPlanV2 beat in GameplayBeats)
+            {
+                writer.Add((int)beat.Kind);
+                AddStrings(writer, beat.PrerequisiteBeatIds);
+            }
+
+            AddIds(writer, AbstractRouteGraph.Nodes, value => value.Id);
+            foreach (DungeonAbstractRouteNodeV2 node in AbstractRouteGraph.Nodes)
+            {
+                writer.Add((int)node.District);
+                writer.Add(node.TransitionOnly);
+            }
+            AddIds(writer, AbstractRouteGraph.Edges, value => value.Id);
+            foreach (DungeonAbstractRouteEdgeV2 edge in AbstractRouteGraph.Edges)
+            {
+                writer.Add(edge.FromNodeId);
+                writer.Add(edge.ToNodeId);
+                writer.Add((int)edge.Role);
+                writer.Add(edge.Bidirectional);
+                writer.Add(edge.FromConnectorId);
+                writer.Add(edge.ToConnectorId);
+            }
+
+            AddIds(writer, BeatAssignments, value => value.BeatId);
+            foreach (DungeonGameplayBeatAssignmentV2 assignment in BeatAssignments)
+                AddStrings(writer, assignment.ModuleInstanceIds);
+
+            AddIds(writer, MiniDungeonCompositions, value => value.Id);
+            foreach (DungeonMiniDungeonCompositionGrammarV2 composition in MiniDungeonCompositions)
+            {
+                AddStrings(writer, composition.ModuleInstanceIds);
+                AddStrings(writer, composition.RouteDecisionNodeIds);
+                writer.Add(composition.EntryNodeId);
+                writer.Add(composition.CriticalExitNodeId);
+                writer.Add(composition.MechanismTargetId);
+                writer.Add((int)composition.MechanismKind);
+                writer.Add(composition.VerticalMechanism);
+                writer.Add(composition.RewardBranchNodeId);
+                writer.Add(composition.LoopOrRejoinEdgeId);
             }
 
             AddIds(writer, Modules, value => value.Id);
@@ -704,7 +846,17 @@ namespace RuinCrawler.Core.Dungeon.V2
                 writer.Add(module.MacroRoleId);
                 writer.Add(module.Bounds.Minimum);
                 writer.Add(module.Bounds.Maximum);
+                writer.Add(module.Transform.Translation);
+                writer.Add(module.Transform.QuarterTurns);
+                writer.Add(module.VerticalCompositionId);
+                AddStrings(writer, module.VerticalPortalConnectorIds);
                 AddStrings(writer, module.RegionIds);
+                writer.Add(module.RegionBindings.Count);
+                foreach (DungeonModuleRegionBindingV2 binding in module.RegionBindings)
+                {
+                    writer.Add(binding.LocalRegionId);
+                    writer.Add(binding.PlacedRegionId);
+                }
                 AddStrings(writer, module.ConnectorIds);
                 AddStrings(writer, module.AnchorIds);
             }
@@ -763,6 +915,27 @@ namespace RuinCrawler.Core.Dungeon.V2
                 writer.Add(connector.Position);
                 writer.Add(connector.Facing);
                 writer.Add(connector.SocketTag);
+                writer.Add(connector.Aperture != null);
+                if (connector.Aperture != null)
+                {
+                    writer.Add(connector.Aperture.LocalVolume);
+                    writer.Add(connector.Aperture.SocketProfileId);
+                    writer.Add(connector.Aperture.ThemedCapProfileId);
+                    writer.Add(connector.Aperture.FloorElevation);
+                    writer.Add(connector.Aperture.FloorSlopeDegrees);
+                    writer.Add(connector.Aperture.PlayerClearanceVolume);
+                    writer.Add(connector.Aperture.CameraClearanceVolume);
+                    writer.Add(connector.Aperture.SeamDepth);
+                    writer.Add(connector.Aperture.ApproachVolume);
+                    writer.Add(connector.Aperture.NavigationHandoffProfileId);
+                    writer.Add((int)connector.Aperture.CapState);
+                    writer.Add(connector.Aperture.MechanismBindingId);
+                    writer.Add(connector.Aperture.ExteriorGasketProfileId);
+                    writer.Add(connector.Aperture.VerticalCompositionPortalId);
+                    writer.Add(connector.Aperture.CompatibleConnectorKinds.Count);
+                    foreach (DungeonConnectorKindV2 kind in connector.Aperture.CompatibleConnectorKinds)
+                        writer.Add((int)kind);
+                }
                 AddPredicate(writer, connector.AccessPredicate);
             }
 
@@ -1067,6 +1240,23 @@ namespace RuinCrawler.Core.Dungeon.V2
             Add(point.X);
             Add(point.Y);
             Add(point.Z);
+        }
+
+        public void Add(DungeonConvexPrismV2 prism)
+        {
+            if (prism == null)
+            {
+                Add(-1);
+                return;
+            }
+            Add(prism.HorizontalVertices.Count);
+            foreach (DungeonPoint2V2 point in prism.HorizontalVertices)
+            {
+                Add(point.X);
+                Add(point.Z);
+            }
+            Add(prism.MinimumY);
+            Add(prism.MaximumY);
         }
 
         public override string ToString() => builder.ToString();

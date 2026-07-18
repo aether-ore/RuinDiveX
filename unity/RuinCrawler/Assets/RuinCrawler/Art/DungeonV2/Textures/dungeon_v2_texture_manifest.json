@@ -1,0 +1,960 @@
+{
+    "schemaVersion":  1,
+    "profileId":  "industrial-factory-v2",
+    "generator":  "scripts/build-dungeon-v2-textures.ps1",
+    "generatorVersion":  "1.0.0",
+    "runtimeSize":  256,
+    "shippingStatus":  "development-only-pending-provenance-clearance",
+    "sources":  [
+                    {
+                        "id":  "factory-master",
+                        "path":  "Assets/RuinCrawler/Art/SourceMasters/DungeonV2/industrial_factory_tilesheet.png",
+                        "width":  1254,
+                        "height":  1254,
+                        "sha256":  "21AFE098D962220C1049AB719BFB6C957DDDF7EF638F1D917F15B09F26A07075",
+                        "provenance":  "Supplied by the project owner on 2026-07-18; original creator, generation workflow, prompt, license, and redistribution grant were not supplied."
+                    },
+                    {
+                        "id":  "waterworks-master",
+                        "path":  "Assets/RuinCrawler/Art/SourceMasters/DungeonV2/waterworks_tilesheet.png",
+                        "width":  1254,
+                        "height":  1254,
+                        "sha256":  "7415DEDB77F08012055F5FBF278DFB6ED992FFC7B0ABE80B785EE9A95BAF9981",
+                        "provenance":  "Supplied by the project owner on 2026-07-18; original creator, generation workflow, prompt, license, and redistribution grant were not supplied."
+                    },
+                    {
+                        "id":  "magma-master",
+                        "path":  "Assets/RuinCrawler/Art/SourceMasters/DungeonV2/magma_factory_tilesheet.png",
+                        "width":  1254,
+                        "height":  1254,
+                        "sha256":  "F3FF37B818F21B5AA83C0BE751B11C68C99E257783CE39F9A99006A12A54C76E",
+                        "provenance":  "Supplied by the project owner on 2026-07-18; original creator, generation workflow, prompt, license, and redistribution grant were not supplied."
+                    },
+                    {
+                        "id":  "electrical-master",
+                        "path":  "Assets/RuinCrawler/Art/SourceMasters/DungeonV2/electrical_factory_tilesheet.png",
+                        "width":  1254,
+                        "height":  1254,
+                        "sha256":  "EA1DE9E52DA75E1D147E8C4BB35F4B547B456FCA96700A760E4C1CB6CECC8EA1",
+                        "provenance":  "Supplied by the project owner on 2026-07-18; original creator, generation workflow, prompt, license, and redistribution grant were not supplied."
+                    },
+                    {
+                        "id":  "environmental-decals-master",
+                        "path":  "Assets/RuinCrawler/Art/SourceMasters/DungeonV2/environment_storytelling_decals_master.png",
+                        "width":  1536,
+                        "height":  1024,
+                        "sha256":  "96B072C804838489B76434A76DB1273DB42410C9459388487B5B3405FF61CC68",
+                        "provenance":  "Generated for this project with built-in OpenAI imagegen on 2026-07-18; tool run exec-dbfd62d6-16fa-459a-b41f-fbc70447682d.png. Exact concise prompt is recorded in the DungeonV2 provenance document."
+                    }
+                ],
+    "maps":  [
+                 {
+                     "id":  "factory-floor-plate",
+                     "role":  "factory.floor",
+                     "sourceId":  "factory-master",
+                     "sourceRect":  [
+                                        10,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Factory/floor_plate.png",
+                     "guid":  "f17f79b38f2d0fdba042bcc8c8dcb985",
+                     "sha256":  "BCAB88640BE14E9A4ABB2547A5BAC496C165697BE82A5A034E934143B2C257EE",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "factory-wall-panel",
+                     "role":  "factory.wall",
+                     "sourceId":  "factory-master",
+                     "sourceRect":  [
+                                        322,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Factory/wall_panel.png",
+                     "guid":  "22b3c7d5b905e8739a071da5c837c68f",
+                     "sha256":  "99568E8C51638084822C5E61E1756190C7861FE59C81C2DF68DBB7C151D716F9",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "factory-ceiling-hatch",
+                     "role":  "factory.ceiling",
+                     "sourceId":  "factory-master",
+                     "sourceRect":  [
+                                        634,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Factory/ceiling_hatch.png",
+                     "guid":  "696cf88da554ce1420a9f23fc5e03b28",
+                     "sha256":  "A65D513E99F47C51C78ADB06BC4992724401B15DD1F688BD4371295A059B9872",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "factory-catwalk-grate",
+                     "role":  "factory.catwalk",
+                     "sourceId":  "factory-master",
+                     "sourceRect":  [
+                                        10,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Factory/catwalk_grate.png",
+                     "guid":  "993c675713d01bafdef831cd83c83853",
+                     "sha256":  "E5F464CB44E657F2392267127EC68A9AF2B15A407CEB9F6BD6F24F2858CE4AAE",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "factory-hazard-deck",
+                     "role":  "factory.hazard-border",
+                     "sourceId":  "factory-master",
+                     "sourceRect":  [
+                                        322,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Factory/hazard_deck.png",
+                     "guid":  "6bd0de3081415680ab32e35fe5c37bb4",
+                     "sha256":  "83689398B082344FB6611E6233737370C06472B7F5ED82CC9350A0A015867CEF",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "factory-conduit-panel",
+                     "role":  "factory.mechanism",
+                     "sourceId":  "factory-master",
+                     "sourceRect":  [
+                                        946,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Factory/conduit_panel.png",
+                     "guid":  "0b0d124b745c6cb2203fe237842a3bb2",
+                     "sha256":  "AECAE8FD82123191353245CCD04C3AAAF301D7FA2E1C2A539AD554E9A8472FD0",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "factory-conduit-emission",
+                     "role":  "factory.mechanism-emission",
+                     "sourceId":  "factory-master",
+                     "sourceRect":  [
+                                        946,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Factory/conduit_emission.png",
+                     "guid":  "2491ff28fbc6b31754686ef022a11499",
+                     "sha256":  "BE7A909533646AEF808AEEC4625333B826F0CED37F3734A530802D8109ADCC19",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "Linear",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "CyanEmissionMask"
+                 },
+                 {
+                     "id":  "waterworks-surface",
+                     "role":  "waterworks.water-surface",
+                     "sourceId":  "waterworks-master",
+                     "sourceRect":  [
+                                        10,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Waterworks/water_surface.png",
+                     "guid":  "713679e7638d1be43dece42254eef907",
+                     "sha256":  "BD3B3A9E08A309CE790C3AD5DC01A8C832036FF4E35741EF4E073A89EA57CC9F",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "waterworks-deep-surface",
+                     "role":  "waterworks.water-detail",
+                     "sourceId":  "waterworks-master",
+                     "sourceRect":  [
+                                        322,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Waterworks/water_deep.png",
+                     "guid":  "3942204de1b2baabbd1a46a2bd4c9605",
+                     "sha256":  "BAD3F6B126DAE9198A9CC2C94A516E6DE1BF77EB7F8FA91A18A6B3439C3BD34F",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "waterworks-wet-floor",
+                     "role":  "waterworks.floor",
+                     "sourceId":  "waterworks-master",
+                     "sourceRect":  [
+                                        634,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Waterworks/wet_floor.png",
+                     "guid":  "6deed9d0ce841d7a107bb95ff246f2dd",
+                     "sha256":  "4348318426E261C8136244A313E613249EDE3D99A052A0BBD4D53358AD018414",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "waterworks-waterline-wall",
+                     "role":  "waterworks.wall-waterline",
+                     "sourceId":  "waterworks-master",
+                     "sourceRect":  [
+                                        10,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Waterworks/waterline_wall.png",
+                     "guid":  "c181634c2a2191e231e6c1b6b67bd60c",
+                     "sha256":  "2458B39294CAAD6A32C64AB1683CEC650BFE6E71A7F1D5BBA9A6054CCF1FAA73",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "waterworks-pipe-wall",
+                     "role":  "waterworks.pipe-wall",
+                     "sourceId":  "waterworks-master",
+                     "sourceRect":  [
+                                        322,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Waterworks/pipe_wall.png",
+                     "guid":  "7c043b92a7eb500d0dfc4911edf1e1c4",
+                     "sha256":  "1ED56A0A565F0E7285BCDADC127A7792BC5518F0290BD11FE98B0440256DB086",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "waterworks-valve-console",
+                     "role":  "waterworks.mechanism",
+                     "sourceId":  "waterworks-master",
+                     "sourceRect":  [
+                                        946,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Waterworks/valve_console.png",
+                     "guid":  "3c35d30050ffef7850dcd7ad2cd9f76d",
+                     "sha256":  "1834CE5C501BCCEB670C5164C5382555E3009BE9F681E1E31D6E1AAAF2241A50",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "waterworks-grate",
+                     "role":  "waterworks.catwalk",
+                     "sourceId":  "waterworks-master",
+                     "sourceRect":  [
+                                        10,
+                                        634,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Waterworks/grate.png",
+                     "guid":  "ebded0f38eaa0b7c05f893ac9b176fe3",
+                     "sha256":  "BA2BED606822E99E1B1B0D332ADEBAC1E8F3B17CF9503FFF29278566C6FC1040",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "waterworks-puddle",
+                     "role":  "waterworks.puddle",
+                     "sourceId":  "waterworks-master",
+                     "sourceRect":  [
+                                        322,
+                                        946,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Waterworks/puddle.png",
+                     "guid":  "41e4109f4940268e8516dad898872138",
+                     "sha256":  "A0D83788F21B0E9379078BF24250B67649566FB3E08DD7FD25570ED9413CDDCB",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "magma-crust",
+                     "role":  "magma.floor",
+                     "sourceId":  "magma-master",
+                     "sourceRect":  [
+                                        10,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Magma/crust.png",
+                     "guid":  "5e5b885a4e3aa2c7a1cc1f6cbeae5498",
+                     "sha256":  "59F5E19E67D26DEC6ED2A5097056E9485D43B489940E54FAD25BFD58609E6B1D",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "magma-surface",
+                     "role":  "magma.hazard-surface",
+                     "sourceId":  "magma-master",
+                     "sourceRect":  [
+                                        322,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Magma/magma_surface.png",
+                     "guid":  "9af39fb617a0a8458da56721ac35c4a0",
+                     "sha256":  "290F3B6863074CB1BD41D15450D11540A4F6C39362AEFA827899F0BA8E3D15BB",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "magma-surface-emission",
+                     "role":  "magma.hazard-emission",
+                     "sourceId":  "magma-master",
+                     "sourceRect":  [
+                                        322,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Magma/magma_emission.png",
+                     "guid":  "c7473eae301e1164c0d5c0a91f33d2e2",
+                     "sha256":  "D189EFA6BB7C84011FEB875FE28306E73FB314BC9C0BEF05EBFF642BEA57FE36",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "Linear",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "HeatEmissionMask"
+                 },
+                 {
+                     "id":  "magma-safe-deck",
+                     "role":  "magma.safe-deck",
+                     "sourceId":  "magma-master",
+                     "sourceRect":  [
+                                        322,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Magma/safe_deck.png",
+                     "guid":  "465237d656a82cfb79257cf4481f5153",
+                     "sha256":  "B2FA83813AA2E835CCF45496FA3A1041306190210305CE46E7C348A14F3FF40F",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "magma-furnace-wall",
+                     "role":  "magma.wall",
+                     "sourceId":  "magma-master",
+                     "sourceRect":  [
+                                        634,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Magma/furnace_wall.png",
+                     "guid":  "6e557aa7c4dea37c91939ef0cd2ac8e9",
+                     "sha256":  "DB0149AF763D470E5F665BFC661CA7733257AC80A90BC85C961AB603F26C6521",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "magma-furnace-grate",
+                     "role":  "magma.furnace-grate",
+                     "sourceId":  "magma-master",
+                     "sourceRect":  [
+                                        946,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Magma/furnace_grate.png",
+                     "guid":  "e5617490304a20d79ab19a2d27978597",
+                     "sha256":  "ED9AB38038E05B47AACD0376A160C7D777BE8D8B4C143F5C66B8954DD02FF986",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "magma-hazard-border",
+                     "role":  "magma.hazard-border",
+                     "sourceId":  "magma-master",
+                     "sourceRect":  [
+                                        634,
+                                        946,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Magma/hazard_border.png",
+                     "guid":  "b5d14d4afdc812b68356bc9d64d6f338",
+                     "sha256":  "DEEB89173CD88D119EE608F8CC9228F91E2319485794671A20D263F38E2AD56B",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "electrical-floor-panel",
+                     "role":  "electrical.floor",
+                     "sourceId":  "electrical-master",
+                     "sourceRect":  [
+                                        10,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Electrical/floor_panel.png",
+                     "guid":  "f10e37a503171bd0fd3daafee172b845",
+                     "sha256":  "1713240716A8F6070A8CC1017135BD92F5099183162129E05455794C355CD288",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "electrical-conduit",
+                     "role":  "electrical.conduit",
+                     "sourceId":  "electrical-master",
+                     "sourceRect":  [
+                                        322,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Electrical/conduit.png",
+                     "guid":  "b2b27650e0b4ed750dfe7ac699674a66",
+                     "sha256":  "C2485BB83201ACD24A75B8CA24982783C7F837E5D9292AAB1945528122C4A72E",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "electrical-live-panel",
+                     "role":  "electrical.live-panel",
+                     "sourceId":  "electrical-master",
+                     "sourceRect":  [
+                                        634,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Electrical/live_panel.png",
+                     "guid":  "00338daf3a408ad1dc7d4eaa461fafe4",
+                     "sha256":  "B405A6401E128701B946F27071001E3FC0B2A82542B58065CA849FF181AC1CBC",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "electrical-live-emission",
+                     "role":  "electrical.live-emission",
+                     "sourceId":  "electrical-master",
+                     "sourceRect":  [
+                                        634,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Electrical/live_emission.png",
+                     "guid":  "99275896b7f99fae0de2b3f36e77c001",
+                     "sha256":  "8BB25FC82078B2906F3C0528AFA6D834181112BDF7B12DF43F2522874077D3AF",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "Linear",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "CyanEmissionMask"
+                 },
+                 {
+                     "id":  "electrical-grounded-grid",
+                     "role":  "electrical.grounded-panel",
+                     "sourceId":  "electrical-master",
+                     "sourceRect":  [
+                                        946,
+                                        10,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Electrical/grounded_grid.png",
+                     "guid":  "44e63bdcd59bb74388f908d6c4303a4a",
+                     "sha256":  "B92987F3653D86CC9583BEFA2A5426428F89FAF0CF8662578C419CD052BA9327",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "electrical-safe-deck",
+                     "role":  "electrical.safe-deck",
+                     "sourceId":  "electrical-master",
+                     "sourceRect":  [
+                                        322,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Electrical/safe_deck.png",
+                     "guid":  "04c9e3c7bcdcf449605c8622ce924b50",
+                     "sha256":  "BEC8BE24B7E0AD01335BB85BC7E595704715256154AD61A21FE2C958683BA9B8",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Repeat",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "electrical-coil-wall",
+                     "role":  "electrical.wall",
+                     "sourceId":  "electrical-master",
+                     "sourceRect":  [
+                                        634,
+                                        322,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Electrical/coil_wall.png",
+                     "guid":  "678b18ab78c2fb9882c8ea13d6ad7088",
+                     "sha256":  "D57DA2B12AB2C7C3C599A56E38B893D1299E808B8AA130F77487DE339270AFFC",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "electrical-mechanism",
+                     "role":  "electrical.mechanism",
+                     "sourceId":  "electrical-master",
+                     "sourceRect":  [
+                                        946,
+                                        946,
+                                        300,
+                                        300
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Electrical/mechanism.png",
+                     "guid":  "cf8166ba7bacf5b8c5a38ec660d5b20a",
+                     "sha256":  "72BBEF1CFE0D667C914536B5F9A744FE004C62540A6531555F6FEA3D31C7DC71",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "Opaque"
+                 },
+                 {
+                     "id":  "decal-oily-rust-leak",
+                     "role":  "decal.factory-oil-rust",
+                     "sourceId":  "environmental-decals-master",
+                     "sourceRect":  [
+                                        0,
+                                        0,
+                                        512,
+                                        512
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Decals/oily_rust_leak.png",
+                     "guid":  "2f5bf9460a683584182187b6e974ce74",
+                     "sha256":  "D1DB54B3AAC3F90082533EFB28E298237B34ABE440C7970DDF104B5E833BD509",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "GrayBackgroundToAlpha"
+                 },
+                 {
+                     "id":  "decal-mineral-waterline",
+                     "role":  "decal.waterworks-mineral",
+                     "sourceId":  "environmental-decals-master",
+                     "sourceRect":  [
+                                        512,
+                                        0,
+                                        512,
+                                        512
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Decals/mineral_waterline.png",
+                     "guid":  "ca380ab0ae44723ca337376cbd4db542",
+                     "sha256":  "F1D4F6804F341A24C411EBB3B5E2D5498C18CB4E921B692560B43A5289252169",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "GrayBackgroundToAlpha"
+                 },
+                 {
+                     "id":  "decal-furnace-scorch",
+                     "role":  "decal.magma-scorch",
+                     "sourceId":  "environmental-decals-master",
+                     "sourceRect":  [
+                                        1024,
+                                        0,
+                                        512,
+                                        512
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Decals/furnace_scorch.png",
+                     "guid":  "639c90552040b83c5d6a333bdd604666",
+                     "sha256":  "9EF427207CA69D5DAFF91D4B024B4055F6FFAB18970E0B0E6163E900B0A84F29",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "GrayBackgroundToAlpha"
+                 },
+                 {
+                     "id":  "decal-electrical-arc-burn",
+                     "role":  "decal.electrical-arc",
+                     "sourceId":  "environmental-decals-master",
+                     "sourceRect":  [
+                                        0,
+                                        512,
+                                        512,
+                                        512
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Decals/electrical_arc_burn.png",
+                     "guid":  "69e75619f466ae2eb8e66679942dca1d",
+                     "sha256":  "55B299A5934F783A99AE3EB4B46BA09346F33D4F917A7FBB1E51D8889BDF5AD1",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "GrayBackgroundToAlpha"
+                 },
+                 {
+                     "id":  "decal-reaverbot-scrape",
+                     "role":  "decal.reaverbot-scrape",
+                     "sourceId":  "environmental-decals-master",
+                     "sourceRect":  [
+                                        512,
+                                        512,
+                                        512,
+                                        512
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Decals/reaverbot_scrape.png",
+                     "guid":  "f818d84a98d9ba0bf1b21c2dd11f49ed",
+                     "sha256":  "A2C83B64F055B55DEEE0404677F8D55DD7CB10028FFF9E27F167E194F04E971F",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "GrayBackgroundToAlpha"
+                 },
+                 {
+                     "id":  "decal-cable-grease",
+                     "role":  "decal.cable-grease",
+                     "sourceId":  "environmental-decals-master",
+                     "sourceRect":  [
+                                        1024,
+                                        512,
+                                        512,
+                                        512
+                                    ],
+                     "output":  "Assets/RuinCrawler/Art/DungeonV2/Textures/Decals/cable_grease.png",
+                     "guid":  "b11a95d687edcd569a1a83b825bab451",
+                     "sha256":  "B3D6677776251E6890BEB01BD319C85381CC18B1B68E399B1153D4FD70D88B2F",
+                     "width":  256,
+                     "height":  256,
+                     "colorSpace":  "sRGB",
+                     "wrapMode":  "Clamp",
+                     "alphaMode":  "GrayBackgroundToAlpha"
+                 }
+             ],
+    "materials":  [
+                      {
+                          "id":  "factory-floor",
+                          "role":  "factory.floor",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryFloor.mat",
+                          "guid":  "783d5c8760cd2623fc96eae292637c4f",
+                          "sha256":  "F80D00C11AA27D23D134BC9AA58CD5791E4530BBD474DB3A2B837099B1076315",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "factory-floor-plate",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "factory-wall",
+                          "role":  "factory.wall",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryWall.mat",
+                          "guid":  "79e7c4309d0b51332b80f0ebe44d70bb",
+                          "sha256":  "C21097B30E8E82EA825C960F6DA6139033C94AAC23652E47CB36248E7D1E3705",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "factory-wall-panel",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "factory-ceiling",
+                          "role":  "factory.ceiling",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryCeiling.mat",
+                          "guid":  "c5653680a1119bfab43d7da247802561",
+                          "sha256":  "18657FAC54A49516A5BF95E4C9E9A7C098110FFB999D36E9959C9C81CFBA80F6",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "factory-ceiling-hatch",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "factory-catwalk",
+                          "role":  "factory.catwalk",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryCatwalk.mat",
+                          "guid":  "10c2c1dacb1776eae6ac3c0a1f191f9d",
+                          "sha256":  "49FD76CFF2ADFEB7071E124EB91B273EC41D379F614A8C0D50C9EB7328B76808",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "factory-catwalk-grate",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "factory-conduit",
+                          "role":  "factory.mechanism",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/FactoryConduit.mat",
+                          "guid":  "82fd21ca621eafc209ad4535a9caae14",
+                          "sha256":  "89799CD266D081F354DE263FA546358539C214D4B5B8E2F916F2D927176360C0",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "factory-conduit-panel",
+                          "emissionMapId":  "factory-conduit-emission",
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "waterworks-floor",
+                          "role":  "waterworks.floor",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksFloor.mat",
+                          "guid":  "a03c9f54b76200d8ed388cf16303b608",
+                          "sha256":  "06718CAB6AF292CCEDEEBB3284753AF550DCB033728749C6BDCBA79E24D62EB1",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "waterworks-wet-floor",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "waterworks-wall",
+                          "role":  "waterworks.wall-waterline",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksWall.mat",
+                          "guid":  "88346079ccb5dd1751385e39993f4f60",
+                          "sha256":  "883A7E1C8E07BF95DA87145ED517754D61E828E5F6E6F767F34A4BBF47F2528B",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "waterworks-waterline-wall",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "waterworks-pipes",
+                          "role":  "waterworks.pipe-wall",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksPipes.mat",
+                          "guid":  "e58eda2277e08f26849b395e20b0466c",
+                          "sha256":  "118BF8B2A4AAB2B93372B316C13FA5CEF5A3AB680E0A1C4D1922762B3722E4EA",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "waterworks-pipe-wall",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "waterworks-surface",
+                          "role":  "waterworks.water-surface",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/WaterworksSurface.mat",
+                          "guid":  "6722e2a8fedd76ca3a8ec559636d17f2",
+                          "sha256":  "CFDD6F9902FF59A343CA3704F1D1A046689DC43F34AD77C50451C4EA90016ACC",
+                          "shader":  "Ruin/WaterSurface",
+                          "kind":  "Water",
+                          "mainMapId":  "waterworks-surface",
+                          "emissionMapId":  null,
+                          "detailMapId":  "waterworks-deep-surface"
+                      },
+                      {
+                          "id":  "magma-floor",
+                          "role":  "magma.floor",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/MagmaCrust.mat",
+                          "guid":  "8f413cf1d3fc8e88e0fe059a326a0c57",
+                          "sha256":  "CF92E8A93A327AD02D631384FE2FF8111A9B4754279C0B6C0372B16585E5F6C1",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "magma-crust",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "magma-safe-deck",
+                          "role":  "magma.safe-deck",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/MagmaSafeDeck.mat",
+                          "guid":  "524ffb2a662db892c8052d162a2b7aca",
+                          "sha256":  "1FF23B81A02FCF3E38B540EE761A31932CDB46466EFB99FCDF965221B5956F57",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "magma-safe-deck",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "magma-wall",
+                          "role":  "magma.wall",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/MagmaWall.mat",
+                          "guid":  "a810ce2c0f7eed62ab3f24633844641a",
+                          "sha256":  "D3113F137BF1168C9FB5045C3E89688408D98997AED3D4B711993D1B5427F494",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "magma-furnace-wall",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "magma-surface",
+                          "role":  "magma.hazard-surface",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/MagmaSurface.mat",
+                          "guid":  "a4ed5846394b1b64411485470e07b64d",
+                          "sha256":  "4786D76B8F6266A3CABC618E6E75CB268DB68DFCB6FCF84225001CE2D42CDD6C",
+                          "shader":  "Ruin/MagmaSurface",
+                          "kind":  "Magma",
+                          "mainMapId":  "magma-surface",
+                          "emissionMapId":  "magma-surface-emission",
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "electrical-floor",
+                          "role":  "electrical.floor",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/ElectricalFloor.mat",
+                          "guid":  "b76acc30880b685bf41cf06058135a6f",
+                          "sha256":  "2D26BB6E502F6B6152FD0EB999AB224EC2D12C027D85127791751B2D5C270865",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "electrical-floor-panel",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "electrical-wall",
+                          "role":  "electrical.wall",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/ElectricalWall.mat",
+                          "guid":  "223bb495b4003d80a05581624da24e58",
+                          "sha256":  "18E3C8F4568A90F0F78D3D394D885700BE316FDF57A0193958224088DC96FF07",
+                          "shader":  "Ruin/IndustrialLit",
+                          "kind":  "Industrial",
+                          "mainMapId":  "electrical-coil-wall",
+                          "emissionMapId":  null,
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "electrical-safe-panel",
+                          "role":  "electrical.safe-deck",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/ElectricalSafePanel.mat",
+                          "guid":  "41699675ef86d84a6ac2ccdeb2719108",
+                          "sha256":  "9C3B345DA3CE7C1EC30EEEBB346047A53EFCF33D4D4E2E51002D00DD9323F9BE",
+                          "shader":  "Ruin/ElectricPanel",
+                          "kind":  "Electric",
+                          "mainMapId":  "electrical-safe-deck",
+                          "emissionMapId":  "electrical-live-emission",
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "electrical-live-panel",
+                          "role":  "electrical.live-panel",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/ElectricalLivePanel.mat",
+                          "guid":  "2d36013055956dd63fab2fe8ed642ec8",
+                          "sha256":  "3A0B8B1FFC1E8F220DE595ABF6903550D1B5EF157E1D7067D9A569A636554E60",
+                          "shader":  "Ruin/ElectricPanel",
+                          "kind":  "Electric",
+                          "mainMapId":  "electrical-live-panel",
+                          "emissionMapId":  "electrical-live-emission",
+                          "detailMapId":  null
+                      },
+                      {
+                          "id":  "electrical-grounded-panel",
+                          "role":  "electrical.grounded-panel",
+                          "output":  "Assets/RuinCrawler/Art/DungeonV2/Materials/ElectricalGroundedPanel.mat",
+                          "guid":  "f290241dc1b77da13d7f4576f4c84cb7",
+                          "sha256":  "270358561382134519750F637E698345E93C669917F3B791DDC51E19CC7D7C36",
+                          "shader":  "Ruin/ElectricPanel",
+                          "kind":  "Electric",
+                          "mainMapId":  "electrical-grounded-grid",
+                          "emissionMapId":  "electrical-live-emission",
+                          "detailMapId":  null
+                      }
+                  ],
+    "materialCatalog":  {
+                            "output":  "Assets/RuinCrawler/Art/DungeonV2/DungeonV2MaterialCatalog.asset",
+                            "guid":  "23f5f32df9fe9a2efdacd7e386ed61bc",
+                            "sha256":  "FE4A0F9EE4CE752AC24324F1A2CE4DFD3253A781AB7A91FFA51CEE98D82CC00B",
+                            "entryCount":  18
+                        }
+}

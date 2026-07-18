@@ -78,12 +78,22 @@ namespace RuinCrawler.Core.Dungeon.V2.Tests
                     exposure.Id);
             }
 
-            DungeonFallExposurePlanV2 moving = plan.FallExposures.Single(value =>
-                value.Id == "exposure-reservoir-moving-platform");
+            DungeonFallExposurePlanV2[] moving = plan.FallExposures.Where(value =>
+                    (value.Causes & DungeonFallExposureCauseV2.MovingSurfaceFailure) != 0)
+                .ToArray();
+            foreach (DungeonFallExposurePlanV2 exposure in moving)
+            {
+                Assert.That(
+                    exposure.ConservativeFallVolume.MaximumY,
+                    Is.GreaterThanOrEqualTo(
+                        exposure.SourceVolume.MaximumY + TraversalProfilesV2.Flooded.JumpHeight - 1e-9d),
+                    exposure.Id);
+            }
+
             Assert.That(
-                moving.ConservativeFallVolume.MaximumY,
-                Is.GreaterThanOrEqualTo(
-                    moving.SourceVolume.MaximumY + TraversalProfilesV2.Flooded.JumpHeight - 1e-9d));
+                plan.Surfaces.Any(value => value.Kind == DungeonSurfaceKindV2.MovingPlatform),
+                Is.EqualTo(moving.Length > 0),
+                "A moving authored traversal surface and its failure exposure must enter the plan together.");
         }
 
         [Test]

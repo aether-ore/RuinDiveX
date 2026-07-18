@@ -16,8 +16,10 @@ namespace RuinCrawler.Runtime.Persistence.Tests
             Assert.That(parameters, Is.Not.Null);
             Assert.That(
                 parameters.Length,
-                Is.EqualTo(3),
-                "The entry seam must not expose a profile selection or feature flag.");
+                Is.EqualTo(4),
+                "The entry seam must require a validated authored catalog without exposing a profile selection or feature flag.");
+            Assert.That(parameters[3].IsOptional, Is.False,
+                "Production departure may not silently fall back to the Core fixture catalog.");
             Assert.That(
                 typeof(ExpeditionFlowController).GetField("enableIndustrialFactoryV2",
                     System.Reflection.BindingFlags.Instance
@@ -33,7 +35,8 @@ namespace RuinCrawler.Runtime.Persistence.Tests
             WorkshopTransactionResult result = ExpeditionFlowController.CreateBeginExpeditionTransaction(
                 source,
                 "expedition-v2-only",
-                seed);
+                seed,
+                IndustrialFactoryV2ModuleCatalog.Default);
             DungeonPlanV2 plan = new IndustrialFactoryV2Generator().Generate(seed);
 
             Assert.That(result.Success, Is.True, result.Message ?? result.FailureCode);
@@ -63,7 +66,8 @@ namespace RuinCrawler.Runtime.Persistence.Tests
             WorkshopTransactionResult result = ExpeditionFlowController.CreateBeginExpeditionTransaction(
                 source,
                 "expedition-boss",
-                seed);
+                seed,
+                IndustrialFactoryV2ModuleCatalog.Default);
             DungeonPlanV2 plan = new IndustrialFactoryV2Generator().Generate(
                 seed,
                 ExpeditionFlowController.IndustrialFactoryV2BossHuntDifficulty);
@@ -82,6 +86,21 @@ namespace RuinCrawler.Runtime.Persistence.Tests
                 ExpeditionFlowController.ResolveIndustrialFactoryV2GenerationDifficulty(source),
                 Is.EqualTo(3),
                 "Re-entry must retain Boss Hunt generation difficulty even if selection UI state is repaired.");
+        }
+
+        [Test]
+        public void EntryTransactionRejectsMissingAuthoredCatalog()
+        {
+            CampaignStateV1 source = CampaignStateV1.CreateDefault("v2-missing-catalog");
+            WorkshopTransactionResult result = ExpeditionFlowController.CreateBeginExpeditionTransaction(
+                source,
+                "expedition-missing-catalog",
+                "missing-catalog-seed",
+                null);
+
+            Assert.That(result.Success, Is.False);
+            Assert.That(result.FailureCode, Is.EqualTo("authored-dungeon-catalog-required"));
+            Assert.That(result.State, Is.SameAs(source));
         }
     }
 }

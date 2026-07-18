@@ -2,7 +2,7 @@
 
 Status: **production gameplay systems implemented; parity, presentation, and release integration in progress**
 
-Last verified: **2026-07-17**
+Last verified: **2026-07-18**
 
 The browser game remains the behavioral and data source of truth. The Unity
 project is a parallel port at `unity/RuinCrawler`; it is playable as a
@@ -153,15 +153,34 @@ parity work.
 ### Procedural dungeons
 
 `industrial-factory-v2` is the only Unity dungeon profile and is immediately
-available from the Camp departure interaction. There is no profile selector,
-fallback generator, feature flag, or staged-access gate. The Expedition scene
-contains only `DungeonSceneBuilderV2`, which consumes a pure, immutable,
-deterministic plan with exactly seven macro roles, 12-18 playable regions, and
-exactly three
-districts: Factory, cross-room Waterworks, and either Magma Processing or
-Electrical Distribution. Its `VoidPolicyV2` is `Prohibited`; the technical
-fallback plane is diagnostic recovery outside accepted fall envelopes, not an
-authored traversal destination.
+available from the Camp departure interaction. There is no V1 profile or
+player-facing profile selector. The current production entrance remains on the
+existing V2 staging presentation until the complete authored room registry
+passes its cutover gate; this keeps entry, death re-entry, and reload re-entry
+usable while the replacement library is being authored. The staging switch is
+not a second dungeon profile. Once the authored switch is enabled, missing,
+stale, or incomplete authored content fails visibly and never falls back to
+staging geometry.
+
+The replacement plan contract is schema `3`, contract version `3`, and content
+pack `industrial-factory-v2-contracts-v4-authored-composition`. Generation now
+starts from seven required gameplay beats and their partial-order constraints,
+not seven fixed room instances. It builds a variable abstract route graph,
+selects authored module descriptors, embeds exact connector pairs with discrete
+quarter-turn transforms, and only then derives gameplay records. Accepted plans
+budget 8-14 authored module instances and 12-18 playable regions. A module may
+host more than one beat, a beat may span more than one module, and a mini-dungeon
+is a validated 3-5-module graph composition rather than a monolithic room.
+
+Every accepted plan still contains exactly three districts: Factory,
+cross-room Waterworks, and either Magma Processing or Electrical Distribution.
+Its `VoidPolicyV2` is `Prohibited`; the technical fallback plane is diagnostic
+recovery outside accepted fall envelopes, not an authored traversal
+destination. Independently selected module envelopes may not overlap in plan
+view. Horizontal overlap is legal only inside one certified vertical
+composition with an exact paired vertical portal; ordinary lower modules are
+placed from DropShaft, Stairwell, LiftShaft, or FloodedTunnel socket transforms,
+never by copying another room's centre.
 
 V2 adds stable records for modules, regions, districts, typed predicates,
 routes and authorized exits, discoveries, shortcuts, surfaces, fluid zones
@@ -177,21 +196,40 @@ The registered reaction envelope, water cushioning depth, moving-platform
 sweeps, crumble states, and structural-bottom clearance are part of the same
 proof.
 
-Thirty generated Unity module prefabs cover A/B spatial variants for all
-Factory, Waterworks, Magma, Electrical, and optional-pocket templates. Each
-prefab has a Core-readable certified geometry asset and SHA-256 content hash.
-Placed module records are translated directly from those baked prisms,
-connectors, and anchors and retain explicit `CertifiedModule` provenance;
-gameplay-only additions are labeled separately. The registry, placement
-validator, and build gate reject missing, shifted, removed, unknown, stale, or
-mismatched module records before V2 assembly. The runtime extrudes the accepted
-plan's certified convex surfaces so collision and authoritative traversal
-geometry share the same plan-level source.
+The authored-library target is twelve archetype families with two genuinely
+topology-distinct variants each. A prefab is the spatial and presentation
+authoring truth; the bake produces an immutable Core descriptor, and the
+registry binds descriptor, geometry, presentation-dependency, combined hashes,
+and prefab reference. The production bake command validates authored prefabs
+and never creates or overwrites them. The former mass-prefab command has been
+reduced to a transient, unsaved preview bootstrap and is not a production
+content path.
 
-This placement contract is version `2` in content pack
-`industrial-factory-v2-contracts-v3-certified-placement`; older generated
-registries intentionally fail freshness/identity checks rather than being
-silently reused.
+The full 24-prefab authored library and its visual captures are **not yet
+complete**, so the authored cutover remains off. Security Checkpoint variant A
+is the first accepted authored module: its sealed two-level shell, supported
+gallery/ramp, exact sockets, semantic presentation, and certified geometry pass
+the current bake-and-validate gate. The other 23 variants and the full capture
+manifest remain outstanding. The existing mass-generated
+module assets are retained only to keep the single V2 expedition playable
+during this atomic replacement; they will be deleted with the flat-material
+assembly path only after every authored variant passes composition, enclosure,
+texture, connector, traversal, and gameplay-camera capture gates.
+
+Dungeon art now has a deterministic source-to-runtime build: 36 hashed 256x256
+RGBA maps, 18 semantic shared materials, Built-in-pipeline industrial, water,
+magma, and electric shaders, and a generated six-cell environmental decal
+master with recorded provenance. `com.unity.probuilder` is pinned to `6.1.2`
+for shell/UV authoring and `com.unity.cloud.gltfast` to `6.19.0` for Editor GLB
+import. The project still uses the Built-in Render Pipeline; the URP package is
+present only as a compile-time soft dependency required by glTFast 6.19.0 when
+ProBuilder also installs Shader Graph. No render-pipeline asset is assigned.
+The deterministic editor extractor has completed a clean Unity import for the
+server, coolant-relay, and machine-factory GLBs: 169 presentation mesh assets
+and three project-owned prop-library prefabs were produced from 964 source
+nodes, with source hashes and node mappings recorded in the generated manifest.
+The focused extractor suite passes 5/5. Gameplay-camera acceptance remains
+pending as the props are composed into the remaining authored room prefabs.
 
 The player uses the shared double-precision V2 ballistic kernel. It integrates
 exact kinematics, splits at the apex, and captures the flooded profile at
@@ -625,11 +663,15 @@ role-specific maps with gameplay-distance QA, while certified plan geometry
 remains authoritative. Their provenance and shipping rights are not yet
 cleared, so they remain development/reference-only assets.
 
-Imported GLB files still use `DefaultImporter` and are not directly usable as
-Unity models. Add a pinned glTF importer or a documented deterministic
-conversion pipeline before relying on authored GLB rooms or the Ruby Optic
-Oracle. Authored room GLBs may decorate a validated plan, but they must never
-become the authoritative traversal or collision source.
+The project now pins glTFast for Editor import and includes a deterministic
+extractor for the three existing industrial room GLBs. Extracted meshes are
+presentation-only project assets: semantic node names are retained, mechanisms
+stay separate, static meshes are grouped by zone/material, normals and UV0 are
+rebuilt, and imported collision is discarded. Certified authored prefab
+geometry remains the only traversal and collision source. A clean extraction
+run has completed and its focused Edit Mode suite passes; gameplay-distance
+inspection is still required before the prop libraries count as accepted room
+content.
 
 ## Port manifest and visual evidence
 
@@ -674,21 +716,21 @@ current Expedition acceptance captures.
   grayboxes, shared combat, weak-point windows, salvage, and cleanup, but not
   every source archetype's full locomotion, attack, defense-break, audio, and
   VFX behavior.
-- `industrial-factory-v2` now has the playable key/controller, reversible
+- `industrial-factory-v2` has the playable key/controller, reversible
   Waterworks, hazard district, reward, final guardian, Refractor, extraction,
-  persistence, and re-entry loop. Its current 30 module variants are deliberate
-  gameplay grayboxes; broader authored room silhouettes, moving/crumbling
-  platform variety, encounter ecology, and final texture dressing remain art
-  and content expansion rather than missing V2 contracts. The dungeon remains
-  immediately playable while operator timing, visual, performance, and release
-  checks continue.
+  persistence, and re-entry loop. Its current generated modules are staging
+  content and do **not** satisfy the authored-room definition of done. The
+  production replacement still requires all 24 topology-distinct, sealed,
+  textured, environmentally composed prefabs, their baked descriptors, visual
+  captures, and the final atomic cutover/removal of staging assets.
 - Boss Hunts have deterministic selection, generated/adapted boss seams,
   phases, HUD, rewards, persistence, and cleanup. Signature-part overload and
   the complete authored mechanics/presentation for each boss remain.
 - The Support Car and Test Range flows exist. The campaign transaction pieces
   for camp-to-dungeon-to-discovery/Refractor-to-re-entry are connected, but the
-  complete long-form real-save loop and the 12-18 / 18-25 / 25-35 minute
-  representative playtest budgets still need a final operator acceptance pass.
+  complete long-form real-save loop and the initial 12-18 minute expedition
+  target still need a final operator acceptance pass. Longer expedition budgets
+  are deferred until named expedition-length profiles exist.
 - HUD, workshop, and pause/status UI share the implemented mechanical theme and
   code-derived dialogue gradient. Accessibility review, narrow-viewport
   behavior, and gameplay-distance visual QA are still in progress. The pause
@@ -701,7 +743,8 @@ current Expedition acceptance captures.
 - The Unity save is schema 2. Atomicity, backup recovery, conflicts, repair,
   incompatible-active-dungeon reset, and unknown-ID quarantine are covered by
   focused tests.
-- Authored GLB assets still need an importer/conversion decision.
+- Extracted GLB prop libraries still need placement and gameplay-distance
+  acceptance inside the authored room variants; they do not define collision.
 - Rights and provenance for Mega Man-derived models, animations, and curated
   assets remain unresolved. Treat this Unity project as
   **development-only** until distribution clearance is complete.

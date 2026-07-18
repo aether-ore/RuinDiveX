@@ -822,6 +822,7 @@ namespace RuinCrawler.Runtime.Dungeon
     {
         private readonly List<DungeonLocalNavigationRuntimeV2> localNavigation =
             new List<DungeonLocalNavigationRuntimeV2>();
+        private readonly List<GameObject> authoredModules = new List<GameObject>();
 
         internal DungeonSceneInstanceV2(
             GameObject root,
@@ -843,6 +844,7 @@ namespace RuinCrawler.Runtime.Dungeon
         public DungeonLayeredMinimapComponentV2 Minimap { get; }
         public DungeonFallbackRecoveryV2 Fallback { get; }
         public IReadOnlyList<DungeonLocalNavigationRuntimeV2> LocalNavigation => localNavigation;
+        public IReadOnlyList<GameObject> AuthoredModules => authoredModules;
         public int SurfaceCount { get; internal set; }
         public int FluidZoneCount { get; internal set; }
         public int RegionCount { get; internal set; }
@@ -855,6 +857,11 @@ namespace RuinCrawler.Runtime.Dungeon
             {
                 localNavigation.Add(navigation);
             }
+        }
+
+        internal void AddAuthoredModule(GameObject module)
+        {
+            if (module != null) authoredModules.Add(module);
         }
 
         internal void ReleaseNavigationData()

@@ -52,7 +52,7 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             DungeonCertifiedGeometryBakeResultV2 result = DungeonCertifiedGeometryBakerV2.Bake(root);
 
             Assert.That(result.IsValid, Is.True, JoinIssues(result));
-            Assert.That(result.Geometry.SchemaVersion, Is.EqualTo(1));
+            Assert.That(result.Geometry.SchemaVersion, Is.EqualTo(2));
             Assert.That(result.Geometry.ContentHash, Does.StartWith("sha256:"));
             Assert.That(result.Geometry.Surfaces, Has.Count.EqualTo(1));
             Assert.That(result.Geometry.Anchors, Has.Count.EqualTo(1));
@@ -99,6 +99,63 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             Assert.That(reordered.Geometry.ContentHash, Is.EqualTo(firstHash));
             Assert.That(reordered.Geometry.Surfaces.Select(value => value.Id),
                 Is.EqualTo(new[] { "surface-a", "surface-b" }));
+        }
+
+        [Test]
+        public void ExactConnectorCertificationRoundTripsEveryPortalField()
+        {
+            CreateBoxSurface(
+                "floor-surface",
+                "region-entry",
+                Vector3.up * 0.5f,
+                new Vector3(8f, 1f, 8f));
+            DungeonConnectorGeometryAuthoringV2 marker = CreateConnector(
+                "north-socket",
+                "region-entry",
+                new Vector3(0f, 1f, 4f),
+                Quaternion.identity);
+            marker.ConfigureAperture(
+                new Vector3(0f, 1.5f, 0f),
+                new Vector3(3f, 4f, 0.5f),
+                new[] { DungeonConnectorKindV2.Ground, DungeonConnectorKindV2.Door },
+                "cap-industrial-bulkhead-v2");
+            marker.ConfigureCertification(
+                0f,
+                3f,
+                new Vector3(0f, 1.5f, 0f),
+                new Vector3(2.75f, 3.5f, 0.75f),
+                new Vector3(0f, 2f, 0f),
+                new Vector3(4f, 5f, 1.25f),
+                0.35f,
+                new Vector3(0f, 1.5f, -2f),
+                new Vector3(4f, 4f, 4f),
+                "navigation-industrial-bulkhead-v2",
+                DungeonConnectorCapStateV2.MechanismControlled,
+                null,
+                "mechanism-bulkhead-v2",
+                "gasket-industrial-bulkhead-v2",
+                "vertical-portal-a");
+
+            DungeonCertifiedGeometryBakeResultV2 baked =
+                DungeonCertifiedGeometryBakerV2.BakeIntoAsset(root, asset);
+
+            Assert.That(baked.IsValid, Is.True, JoinIssues(baked));
+            Assert.That(asset.TryRead(out CertifiedDungeonModuleGeometryV2 rebuilt, out string error),
+                Is.True,
+                error);
+            DungeonConnectorApertureV2 aperture = rebuilt.Connectors.Single().Aperture;
+            Assert.That(aperture.FloorSlopeDegrees, Is.EqualTo(3d));
+            Assert.That(aperture.SeamDepth, Is.EqualTo(0.35d).Within(1e-6));
+            Assert.That(aperture.NavigationHandoffProfileId,
+                Is.EqualTo("navigation-industrial-bulkhead-v2"));
+            Assert.That(aperture.CapState, Is.EqualTo(DungeonConnectorCapStateV2.MechanismControlled));
+            Assert.That(aperture.MechanismBindingId, Is.EqualTo("mechanism-bulkhead-v2"));
+            Assert.That(aperture.ExteriorGasketProfileId, Is.EqualTo("gasket-industrial-bulkhead-v2"));
+            Assert.That(aperture.VerticalCompositionPortalId, Is.EqualTo("vertical-portal-a"));
+            Assert.That(aperture.PlayerClearanceVolume, Is.Not.Null);
+            Assert.That(aperture.CameraClearanceVolume, Is.Not.Null);
+            Assert.That(aperture.ApproachVolume, Is.Not.Null);
+            Assert.That(rebuilt.ContentHash, Is.EqualTo(baked.Geometry.ContentHash));
         }
 
         [Test]
@@ -151,6 +208,38 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             Assert.That(result.Geometry.Surfaces.Single().ColliderKind,
                 Is.EqualTo(CertifiedDungeonColliderKindV2.ConvexMesh));
             UnityEngine.Object.DestroyImmediate(collider.sharedMesh);
+        }
+
+        [Test]
+        public void CertifiedRampWedgePreservesSlopeInsteadOfFlatteningToABox()
+        {
+            GameObject surface = new GameObject("CertifiedRamp");
+            surface.transform.SetParent(root.transform, false);
+            Mesh mesh = CreateRampWedgeMesh();
+            MeshCollider collider = surface.AddComponent<MeshCollider>();
+            collider.sharedMesh = mesh;
+            collider.convex = true;
+            surface.AddComponent<DungeonRampGeometryAuthoringV2>()
+                .Configure(0f, 2f, Vector3.right);
+            surface.AddComponent<DungeonSurfaceGeometryAuthoringV2>().Configure(
+                "access-ramp",
+                "region-entry",
+                DungeonSurfaceKindV2.Walkable,
+                true,
+                true,
+                "factory-ramp");
+
+            DungeonCertifiedGeometryBakeResultV2 result = DungeonCertifiedGeometryBakerV2.Bake(root);
+
+            Assert.That(result.IsValid, Is.True, JoinIssues(result));
+            CertifiedDungeonSurfaceGeometryV2 ramp = result.Geometry.Surfaces.Single();
+            Assert.That(ramp.ColliderKind, Is.EqualTo(CertifiedDungeonColliderKindV2.RampWedge));
+            Assert.That(ramp.RampWedge, Is.Not.Null);
+            Assert.That(ramp.RampWedge.LowSurfaceY, Is.EqualTo(0d).Within(1e-9));
+            Assert.That(ramp.RampWedge.HighSurfaceY, Is.EqualTo(2d).Within(1e-9));
+            Assert.That(ramp.RampWedge.RiseDirection.X, Is.EqualTo(-1d).Within(1e-6),
+                "Unity +X converts to Core -X.");
+            UnityEngine.Object.DestroyImmediate(mesh);
         }
 
         [Test]
@@ -211,7 +300,7 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
         }
 
         [Test]
-        public void CoreModuleValidationRejectsTemplateAndHashDrift()
+        public void CoreModuleValidationChecksTemplateWhileRegistryOwnsCombinedRevision()
         {
             CreateBoxSurface(
                 "floor-surface",
@@ -243,7 +332,9 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
                 new[] { "region-entry" },
                 Array.Empty<string>(),
                 Array.Empty<string>());
-            Assert.That(geometry.ValidateModuleInstance(staleModule).Code,
+            Assert.That(geometry.ValidateModuleInstance(staleModule).IsValid, Is.True,
+                "Geometry validates shape/template only; the authored registry validates combined revisions.");
+            Assert.That(geometry.ValidateGeometryRevision("sha256:stale").Code,
                 Is.EqualTo(CertifiedDungeonGeometryValidationCodeV2.ContentHashMismatch));
 
             var wrongTemplate = new DungeonModuleInstancePlanV2(
@@ -312,7 +403,11 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             marker.Configure(id, regionId, DungeonAnchorKindV2.Safe, "safe-reset-v2");
         }
 
-        private void CreateConnector(string id, string regionId, Vector3 position, Quaternion rotation)
+        private DungeonConnectorGeometryAuthoringV2 CreateConnector(
+            string id,
+            string regionId,
+            Vector3 position,
+            Quaternion rotation)
         {
             GameObject connectorObject = new GameObject("Connector_" + id);
             connectorObject.transform.SetParent(root.transform, false);
@@ -321,6 +416,7 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
             DungeonConnectorGeometryAuthoringV2 marker =
                 connectorObject.AddComponent<DungeonConnectorGeometryAuthoringV2>();
             marker.Configure(id, regionId, DungeonConnectorKindV2.Ground, "factory-ground-v2");
+            return marker;
         }
 
         private static Mesh CreateBoxMesh()
@@ -345,6 +441,31 @@ namespace RuinCrawler.Runtime.Dungeon.Tests
                 1, 2, 6, 1, 6, 5,
                 2, 3, 7, 2, 7, 6,
                 3, 0, 4, 3, 4, 7
+            };
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        private static Mesh CreateRampWedgeMesh()
+        {
+            var mesh = new Mesh { name = "CertifiedRampWedgeMesh" };
+            mesh.vertices = new[]
+            {
+                new Vector3(-2f, 0f, -1f),
+                new Vector3(-2f, 0f, 1f),
+                new Vector3(2f, 0f, -1f),
+                new Vector3(2f, 0f, 1f),
+                new Vector3(2f, 2f, -1f),
+                new Vector3(2f, 2f, 1f)
+            };
+            mesh.triangles = new[]
+            {
+                0, 2, 3, 0, 3, 1,
+                0, 4, 2,
+                1, 3, 5,
+                0, 1, 5, 0, 5, 4,
+                2, 4, 5, 2, 5, 3
             };
             mesh.RecalculateNormals();
             mesh.RecalculateBounds();

@@ -20,6 +20,10 @@ namespace RuinCrawler.Runtime.Player
         [SerializeField] private float maximumPitch = 48f;
         [SerializeField] private float aimRecenterDuration = 0.42f;
         [SerializeField] private float aimRecenterResponse = 18f;
+        [Header("Interior shell collision")]
+        [SerializeField] private LayerMask collisionMask = ~0;
+        [SerializeField, Min(0.05f)] private float collisionProbeRadius = 0.28f;
+        [SerializeField, Min(0f)] private float collisionPadding = 0.08f;
 
         private InputAction lookAction;
         private float yaw;
@@ -27,6 +31,7 @@ namespace RuinCrawler.Runtime.Player
         private float aimRecenterRemaining;
         private bool manualAimWasHeld;
         private ProductionPlayerController playerController;
+        private readonly RaycastHit[] collisionHits = new RaycastHit[24];
 
         public float OrbitYaw => yaw;
         public bool IsAimModeActive => lockOn != null
@@ -43,6 +48,16 @@ namespace RuinCrawler.Runtime.Player
                 : null;
             yaw = followTarget != null ? followTarget.eulerAngles.y : transform.eulerAngles.y;
             BindInput();
+        }
+
+        public void ConfigureInteriorCollision(
+            LayerMask mask,
+            float probeRadius = 0.28f,
+            float padding = 0.08f)
+        {
+            collisionMask = mask;
+            collisionProbeRadius = Mathf.Max(0.05f, probeRadius);
+            collisionPadding = Mathf.Max(0f, padding);
         }
 
         private void OnEnable()
@@ -115,11 +130,55 @@ namespace RuinCrawler.Runtime.Player
                                  + Vector3.up * SourceGameplayContract.CameraLookHeight
                                  + target.forward * SourceGameplayContract.CameraLookAhead;
             Vector3 desiredPosition = lookTarget + orbit * new Vector3(0f, height * 0.18f, -distance);
-            transform.position = Vector3.Lerp(
+            desiredPosition = ClampInsideShell(lookTarget, desiredPosition);
+            Vector3 smoothedPosition = Vector3.Lerp(
                 transform.position,
                 desiredPosition,
                 1f - Mathf.Exp(-response * Time.deltaTime));
+            transform.position = ClampInsideShell(lookTarget, smoothedPosition);
             transform.rotation = Quaternion.LookRotation(lookTarget - transform.position, Vector3.up);
+        }
+
+        private Vector3 ClampInsideShell(Vector3 lookTarget, Vector3 candidate)
+        {
+            Vector3 displacement = candidate - lookTarget;
+            float requestedDistance = displacement.magnitude;
+            if (requestedDistance <= 0.0001f) return candidate;
+
+            Vector3 direction = displacement / requestedDistance;
+            int hitCount = Physics.SphereCastNonAlloc(
+                lookTarget,
+                collisionProbeRadius,
+                direction,
+                collisionHits,
+                requestedDistance,
+                collisionMask,
+                QueryTriggerInteraction.Ignore);
+            float nearest = requestedDistance;
+            for (int index = 0; index < hitCount; index += 1)
+            {
+                Collider collider = collisionHits[index].collider;
+                if (collider == null || collider.isTrigger || IsPlayerCollider(collider.transform)) continue;
+                nearest = Mathf.Min(nearest, collisionHits[index].distance);
+            }
+            if (nearest >= requestedDistance) return candidate;
+
+            // Exterior containment wins over the preferred camera distance in
+            // a narrow doorway or low ceiling. Enforcing the preference past
+            // the hit plane would put the camera outside the certified shell.
+            float resolvedDistance = Mathf.Clamp(
+                nearest - collisionPadding,
+                0.05f,
+                requestedDistance);
+            return lookTarget + direction * resolvedDistance;
+        }
+
+        private bool IsPlayerCollider(Transform candidate)
+        {
+            if (candidate == null || target == null) return false;
+            return candidate == target
+                   || candidate.IsChildOf(target)
+                   || target.IsChildOf(candidate);
         }
     }
 }

@@ -34,31 +34,24 @@ alter this verdict. `npm test` verifies implementation correctness and may stay
 green while the catalog is blocked. `npm run verify:release` requires both the
 ordinary tests and the strict frozen-catalog verifier.
 
-## Feature boundary
+## Runtime and diagnostic boundary
 
 | URL parameter | Implemented effect |
 | --- | --- |
-| `?busterLab=1` | Enables the integrated physical Lab, unified Mega/Custom runtime, crafting, saved chassis, blueprints, HUD, and benchmark range. |
-| `?busterLab=sandbox` | Enables everything above and exposes the disposable dungeon sandbox path. |
-| `?busterLabDebug=1` | With either enabled Lab mode, exposes the persistent, repeatable debug-kit control. It does not enable the Lab by itself. |
-| Missing or any other `busterLab` value | Keeps legacy combat and arm behavior active. |
+| Missing, `?busterLab=1`, or any other non-sandbox value | Uses the canonical integrated physical Lab, unified Mega/Custom runtime, crafting, saved chassis, blueprints, HUD, and benchmark range. The `1` value remains compatible with old links but is not required. |
+| `?busterLab=sandbox` | Uses the canonical runtime and additionally exposes the disposable dungeon sandbox path. |
+| `?busterLabDebug=1` | Exposes the persistent, repeatable debug-kit control and preselects its debug tab. It does not change normal ownership rules outside explicit debug actions. |
 
-Feature-off combat still uses the legacy Buster Output, equipment aggregation,
-random damage, procs, and arm implementations. It is no longer a completely
-untouched code path: `Game.create` always opens the context-scoped Lab store so
-the starter record and legacy Buster shadow bridge cannot be duplicated by
-toggling the feature. With the feature off, authoritative shadow records are
-hydrated back into legacy inventory or Buster-upgrade sockets.
+`Game.create` always opens the context-scoped Lab store. The legacy Buster
+Output, equipment aggregation, random damage, proc, and arm adapters remain as
+migration compatibility code, but URL parameters no longer select them as the
+normal combat runtime. Their shadow records still protect exact legacy Item
+identity and prevent starter duplication during adoption.
 
-There is one deliberate live-combat exception to historical feature-off
-parity: legacy projectile Range is now profile-specific in every feature mode.
-Machine Gun and Cannon use resolved base `attackRange` with no implicit bonus.
-Missile uses `max(base attackRange + 1.8, homingRange)`. The contextual legacy
-balance fixtures report these same policies instead of applying `+1.8` to all
-three arms.
-
-The browser test `feature-off and feature-on share one canonical starter Power
-Raiser without duplication` protects the toggle bridge and starter identity.
+Legacy projectile Range is profile-specific: Machine Gun and Cannon use the
+resolved base `attackRange` with no implicit bonus, while Missile uses
+`max(base attackRange + 1.8, homingRange)`. Compatibility fixtures retain those
+policies while canonical combat uses compiled Buster plans.
 
 ## Source map
 
@@ -517,14 +510,15 @@ The active context ID lives at `ruinDigger.saveContext.v1`. Context-scoped keys
 are:
 
 ```text
-ruinDigger.busterLab.v2.<encoded saveContextId>
-ruinDigger.busterLab.v2.<encoded saveContextId>.backup
-ruinDigger.busterLab.v2.<encoded saveContextId>.corrupt
+ruinDigger.busterLab.v3.<encoded saveContextId>
+ruinDigger.busterLab.v3.<encoded saveContextId>.backup
+ruinDigger.busterLab.v3.<encoded saveContextId>.corrupt
 ```
 
-The old global `ruinDigger.busterLab.v1` payload is left untouched. The storage
-API can inspect it, require confirmation, adopt it under a global import lock,
-and record one global import claim.
+The old global `ruinDigger.busterLab.v1` payload and context-scoped v2 envelopes
+are left untouched. The storage API can inspect them, require confirmation or
+perform the defined v2 adoption, adopt under the appropriate lock, and record
+the migration without deleting the source recovery copy.
 
 Browser writes require Web Locks under
 `ruinDigger:busterLab:<saveContextId>`. `transact` re-reads and verifies the
@@ -574,19 +568,19 @@ toggle bridge.
 
 Each bridged legacy Buster Part has one authoritative record and one fixed
 linked calibration. IDs use
-`legacy-buster:<saveContextId>:<sequence>`. Feature-on initialization removes
+`legacy-buster:<saveContextId>:<sequence>`. Canonical initialization removes
 eligible live Items only after durable registration and exposes their linked
-calibrations. Feature-off startup hydrates the saved Item snapshot into its
+calibrations. The legacy compatibility adapter hydrates the saved Item snapshot into its
 logical inventory or Buster-upgrade socket. Rarity, level, and random rolls
 remain on the Item snapshot but do not alter the calibration mapping.
 
-Feature-off socket assignment, uninstallation, individual discard, rarity
+Legacy-adapter socket assignment, uninstallation, individual discard, rarity
 salvage, and Optimize Loadout first reconcile affected shadow locations or
 removals in one awaited storage transaction. The corresponding live inventory
 or socket mutation occurs only after that durable commit succeeds. Optimize
 also preserves physical Custom Busters already assigned to arm slots 2 and 3.
 
-A feature-off world pickup for a legacy Buster Part remains pending in the
+A legacy-adapter world pickup for a Buster Part remains pending in the
 world until its linked shadow Item and calibration commit durably. A failed
 commit leaves inventory and storage unchanged so collection can be retried. If
 the final live inventory slot fills while the lock is awaited, the committed
@@ -594,19 +588,19 @@ exact Item moves to Roll's Migration Recovery and the world pickup completes,
 preventing a duplicate retry.
 
 The storage model enforces reciprocal socket links, four installed sockets,
-and at most 40 shadow inventory records. If feature-off hydration cannot fit an
+and at most 40 shadow inventory records. If legacy-adapter hydration cannot fit an
 Item, it places it in the in-memory `busterMigrationRecovery` collection rather
 than expanding inventory capacity. The inventory UI renders that authoritative
 overflow as **Roll's Migration Recovery** and lets the player retrieve each Item
 when normal inventory space is available. The same durable shadow record
 reconstructs the recovery entry after reload. One canonical starter Power
-Raiser record is registered per context and begins in Mega socket 1 while the
-feature is on.
+Raiser record is registered per context and begins in Mega socket 1 in the
+canonical runtime.
 
 Already-destructively-converted v1 calibrations are retained without invented
 legacy Items. Migration stores their exact instance IDs and count under
 `unlinkedLegacyCalibrationsV2`, and the Lab presents a permanent warning that
-they remain feature-on-only.
+they remain canonical-runtime-only.
 
 The one-time After Delay migration strips obsolete instance IDs from builds,
 drafts, revisions, and blueprints; removes physical After Delay instances;

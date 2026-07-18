@@ -1,0 +1,22 @@
+{
+  "name": "RuinCrawler.Runtime.BossHunts.PlayModeTests",
+  "rootNamespace": "RuinCrawler.Runtime.BossHunts.Tests",
+  "references": [
+    "RuinCrawler.Runtime.BossHunts",
+    "RuinCrawler.Runtime.Reaverbots",
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Core.Foundation",
+    "RuinCrawler.Core.Campaign",
+    "RuinCrawler.Core.Reaverbots"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}

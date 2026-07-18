@@ -1,0 +1,23 @@
+{
+  "name": "RuinCrawler.UI",
+  "rootNamespace": "RuinCrawler.UI",
+  "references": [
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Runtime.BossHunts",
+    "RuinCrawler.Core.Foundation",
+    "RuinCrawler.Core.Campaign",
+    "RuinCrawler.Core.Buster",
+    "RuinCrawler.Core.Dungeon",
+    "RuinCrawler.Runtime.Dungeon",
+    "Unity.InputSystem"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

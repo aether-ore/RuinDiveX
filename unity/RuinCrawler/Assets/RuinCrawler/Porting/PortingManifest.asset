@@ -1,0 +1,66 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5c4f090dc01adbb49b89d9c6569ed973, type: 3}
+  m_Name: PortingManifest
+  m_EditorClassIdentifier: RuinCrawler.Port::RuinCrawler.Port.Porting.PortingManifest
+  sourceProject: Three.js Ruin Crawler
+  sourceRevision: threejs-working-tree-2026-07-17
+  generatedUtc: 2026-07-18T00:02:12.0464938Z
+  entries:
+  - id: player.volnutt.prototype
+    kind: character
+    sourceAssetPath: assets/models/Mega Man Volnutt.fbx
+    unityAssetPath: Packages/com.ruincrawler.source-assets/models/Mega Man Volnutt.fbx
+    status: animated-graybox
+    notes: Imported, height-normalized, and driven by exact-skeleton Generic clips.
+      Rights review required before distribution.
+  - id: player.volnutt.animations.core
+    kind: animation-set
+    sourceAssetPath: assets/models/animations
+    unityAssetPath: Assets/RuinCrawler/Animation/VolnuttPrototype.controller
+    status: integrated
+    notes: Combat-ready Action Idle hands off to foot-planted Breathing Idle after
+      20 seconds; walk, jog, sprint, jump rise/fall/land, and a masked source-authored
+      left-Buster aim overlay are integrated. CharacterController owns root motion.
+  - id: player.volnutt.mega_buster
+    kind: equipment-model
+    sourceAssetPath: assets/models/Mega Man Volnutt Buster US.obj
+    unityAssetPath: Packages/com.ruincrawler.source-assets/models/Mega Man Volnutt
+      Buster US.obj
+    status: integrated
+    notes: Invariant Mega Buster replaces HandMesh_L, follows the animated left forearm,
+      and owns the projectile muzzle. Rights review required before distribution.
+  - id: enemy.sharukurusu.target
+    kind: enemy
+    sourceAssetPath: assets/models/reaverbots/Sharukurusu.obj
+    unityAssetPath: Packages/com.ruincrawler.source-assets/models/reaverbots/Sharukurusu.obj
+    status: graybox
+    notes: Imported as a static target prefab; production Reaverbot behavior is not
+      yet ported.
+  - id: environment.ruins.floor_plain
+    kind: texture
+    sourceAssetPath: assets/textures/ruins/floor_plain.png
+    unityAssetPath: Packages/com.ruincrawler.source-assets/textures/ruins/floor_plain.png
+    status: integrated
+    notes: Point-filtered material used in PortingSandbox.
+  - id: environment.ruins.wall_industrial
+    kind: texture
+    sourceAssetPath: assets/textures/ruins/wall_macro_industrial.png
+    unityAssetPath: Packages/com.ruincrawler.source-assets/textures/ruins/wall_macro_industrial.png
+    status: integrated
+    notes: Point-filtered material used in PortingSandbox.
+  - id: logic.seeded_random
+    kind: deterministic-kernel
+    sourceAssetPath: src/reaverbots/SeededRandom.js
+    unityAssetPath: Assets/RuinCrawler/Runtime/Determinism/SeededRandom.cs
+    status: parity-tested
+    notes: String-seed FNV/mulberry32 behavior ported bit-for-bit.

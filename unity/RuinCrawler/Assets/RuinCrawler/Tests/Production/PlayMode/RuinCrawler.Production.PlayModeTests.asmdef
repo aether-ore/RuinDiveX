@@ -1,0 +1,33 @@
+{
+  "name": "RuinCrawler.Production.PlayModeTests",
+  "rootNamespace": "RuinCrawler.Production.Tests",
+  "references": [
+    "RuinCrawler.Port",
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Runtime.BossHunts",
+    "RuinCrawler.Runtime.Dungeon",
+    "RuinCrawler.Runtime.Reaverbots",
+    "RuinCrawler.Runtime.Expedition",
+    "RuinCrawler.UI",
+    "RuinCrawler.Core.Foundation",
+    "RuinCrawler.Core.Buster",
+    "RuinCrawler.Core.Campaign",
+    "RuinCrawler.Core.Dungeon",
+    "RuinCrawler.Core.Reaverbots",
+    "Unity.InputSystem"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

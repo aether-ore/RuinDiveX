@@ -1,0 +1,21 @@
+{
+  "name": "RuinCrawler.Runtime",
+  "rootNamespace": "RuinCrawler.Runtime",
+  "references": [
+    "RuinCrawler.Port",
+    "RuinCrawler.Core.Foundation",
+    "RuinCrawler.Core.Buster",
+    "RuinCrawler.Core.Campaign",
+    "RuinCrawler.Core.Dungeon",
+    "Unity.InputSystem"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

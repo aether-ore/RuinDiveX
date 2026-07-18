@@ -1,0 +1,23 @@
+{
+  "name": "RuinCrawler.Port.EditorTests",
+  "rootNamespace": "RuinCrawler.Port.Tests",
+  "references": [
+    "RuinCrawler.Port"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

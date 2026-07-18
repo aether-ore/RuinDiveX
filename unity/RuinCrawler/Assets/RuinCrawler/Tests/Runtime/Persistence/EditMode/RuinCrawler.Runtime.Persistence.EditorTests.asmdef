@@ -1,0 +1,20 @@
+{
+  "name": "RuinCrawler.Runtime.Persistence.EditorTests",
+  "rootNamespace": "RuinCrawler.Runtime.Persistence.Tests",
+  "references": [
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Core.Campaign",
+    "RuinCrawler.Core.Dungeon",
+    "RuinCrawler.Core.Foundation"
+  ],
+  "includePlatforms": ["Editor"],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}

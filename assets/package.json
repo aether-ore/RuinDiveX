@@ -1,0 +1,15 @@
+{
+  "name": "com.ruincrawler.source-assets",
+  "version": "0.1.0",
+  "displayName": "Ruin Crawler Source Assets",
+  "description": "The existing Three.js models, textures, animation clips, and source art exposed to the Unity port without duplicating the files.",
+  "unity": "6000.0",
+  "author": {
+    "name": "Ruin Crawler Project"
+  },
+  "keywords": [
+    "ruin-crawler",
+    "source-assets",
+    "threejs-port"
+  ]
+}

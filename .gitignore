@@ -21,6 +21,26 @@ build/
 .vite/
 playwright-report/
 test-results/
+/unity-test-results.xml
+/artifacts/unity-tests/*.xml
 
 # Local Codex/session scratch data
 .agents/
+
+# Unity generated state (the authored Unity project lives in unity/RuinCrawler)
+unity/RuinCrawler/[Ll]ibrary/
+unity/RuinCrawler/[Tt]emp/
+unity/RuinCrawler/[Oo]bj/
+unity/RuinCrawler/[Ll]ogs/
+unity/RuinCrawler/[Uu]ser[Ss]ettings/
+unity/RuinCrawler/[Mm]emoryCaptures/
+unity/RuinCrawler/[Rr]ecordings/
+unity/RuinCrawler/[Bb]uild/
+unity/RuinCrawler/[Bb]uilds/
+unity/RuinCrawler/.vs/
+unity/RuinCrawler/*.csproj
+unity/RuinCrawler/*.sln
+
+# Reproducible local clone used for Unity MCP development/inspection. The
+# installed package itself is pinned in the Unity project manifest.
+unity/ThirdParty/unity-mcp/

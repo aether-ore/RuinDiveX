@@ -1,0 +1,17 @@
+{
+  "name": "RuinCrawler.Editor.DungeonV2",
+  "rootNamespace": "RuinCrawler.Editor.DungeonV2",
+  "references": [
+    "RuinCrawler.Runtime.Dungeon",
+    "RuinCrawler.Core.Dungeon"
+  ],
+  "includePlatforms": ["Editor"],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

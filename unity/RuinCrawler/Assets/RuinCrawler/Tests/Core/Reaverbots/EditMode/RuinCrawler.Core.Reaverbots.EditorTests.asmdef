@@ -1,0 +1,23 @@
+{
+  "name": "RuinCrawler.Core.Reaverbots.EditorTests",
+  "rootNamespace": "RuinCrawler.Core.Reaverbots.Tests",
+  "references": [
+    "RuinCrawler.Core.Reaverbots"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

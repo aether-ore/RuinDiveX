@@ -1,0 +1,22 @@
+{
+  "name": "RuinCrawler.Runtime.Dungeon.PlayModeTests",
+  "rootNamespace": "RuinCrawler.Runtime.Dungeon.Tests",
+  "references": [
+    "RuinCrawler.Runtime.Dungeon",
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Core.Dungeon",
+    "RuinCrawler.Core.Foundation",
+    "RuinCrawler.Core.Campaign",
+    "Unity.AI.Navigation"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}

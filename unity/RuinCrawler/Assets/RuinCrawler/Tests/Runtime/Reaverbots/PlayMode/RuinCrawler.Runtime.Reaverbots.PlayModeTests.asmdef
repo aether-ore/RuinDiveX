@@ -1,0 +1,24 @@
+{
+  "name": "RuinCrawler.Runtime.Reaverbots.PlayModeTests",
+  "rootNamespace": "RuinCrawler.Runtime.Reaverbots.Tests",
+  "references": [
+    "RuinCrawler.Runtime.Reaverbots",
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Core.Foundation",
+    "RuinCrawler.Core.Reaverbots"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

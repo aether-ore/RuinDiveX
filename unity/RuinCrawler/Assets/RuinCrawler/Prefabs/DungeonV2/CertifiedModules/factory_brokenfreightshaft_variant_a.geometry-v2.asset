@@ -1,0 +1,139 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 57cc5d95027ee8543888785a49dc4148, type: 3}
+  m_Name: factory_brokenfreightshaft_variant_a.geometry-v2
+  m_EditorClassIdentifier: RuinCrawler.Runtime.Dungeon::RuinCrawler.Runtime.Dungeon.DungeonCertifiedGeometryAssetV2
+  schemaVersion: 1
+  templateId: factory-brokenfreightshaft-variant-a
+  contentHash: sha256:acc0f202514822f552dda19871bfba4dcebb5ad9d0d1d0ea31b97250709dba17
+  canonicalContent: 1|36:factory-brokenfreightshaft-variant-a|3|5:floor|6:region|1|0|1|1|13:factory-floor|4|-5|-4|5|-4|5|4|-5|4|0|0.25|10:north-rail|6:region|6|0|1|0|12:factory-rail|4|-4|3.75|4|3.75|4|4|-4|4|0.25|1.25|10:south-rail|6:region|6|0|1|0|12:factory-rail|4|-4|-4|4|-4|4|-3.75|-4|-3.75|0.25|1.25|1|6:region|0|1|10:navigation|-5|0|-4|5|5|4|3|5:entry|6:region|0|-4|0.5|0|-1:|4:exit|6:region|1|4|0.5|0|-1:|4:safe|6:region|6|0|0.5|0|13:safe-reset-v2|2|4:east|6:region|0|5|0.5|0|1|0|0|17:factory-ground-v2|4:west|6:region|0|-5|0.5|0|-1|0|0|17:factory-ground-v2|
+  surfaces:
+  - id: floor
+    regionId: region
+    kind: 1
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -5
+        z: -4
+      - x: 5
+        z: -4
+      - x: 5
+        z: 4
+      - x: -5
+        z: 4
+      minimumY: 0
+      maximumY: 0.25
+    isStructural: 1
+    isWalkable: 1
+    materialProfileId: factory-floor
+  - id: north-rail
+    regionId: region
+    kind: 6
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -4
+        z: 3.75
+      - x: 4
+        z: 3.75
+      - x: 4
+        z: 4
+      - x: -4
+        z: 4
+      minimumY: 0.25
+      maximumY: 1.25
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-rail
+  - id: south-rail
+    regionId: region
+    kind: 6
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -4
+        z: -4
+      - x: 4
+        z: -4
+      - x: 4
+        z: -3.75
+      - x: -4
+        z: -3.75
+      minimumY: 0.25
+      maximumY: 1.25
+    isStructural: 1
+    isWalkable: 0
+    materialProfileId: factory-rail
+  regions:
+  - id: region
+    minimum:
+      x: -5
+      y: 0
+      z: -4
+    maximum:
+      x: 5
+      y: 5
+      z: 4
+    districtKind: 0
+    elevationStratum: 1
+    localNavigationRegionId: navigation
+  anchors:
+  - id: entry
+    regionId: region
+    kind: 0
+    position:
+      x: -4
+      y: 0.5
+      z: 0
+    profileId: 
+  - id: exit
+    regionId: region
+    kind: 1
+    position:
+      x: 4
+      y: 0.5
+      z: 0
+    profileId: 
+  - id: safe
+    regionId: region
+    kind: 6
+    position:
+      x: 0
+      y: 0.5
+      z: 0
+    profileId: safe-reset-v2
+  connectors:
+  - id: east
+    regionId: region
+    kind: 0
+    position:
+      x: 5
+      y: 0.5
+      z: 0
+    facing:
+      x: 1
+      y: 0
+      z: 0
+    socketTag: factory-ground-v2
+  - id: west
+    regionId: region
+    kind: 0
+    position:
+      x: -5
+      y: 0.5
+      z: 0
+    facing:
+      x: -1
+      y: 0
+      z: 0
+    socketTag: factory-ground-v2

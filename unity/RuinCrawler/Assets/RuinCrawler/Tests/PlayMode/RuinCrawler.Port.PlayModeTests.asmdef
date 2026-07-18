@@ -1,0 +1,19 @@
+{
+  "name": "RuinCrawler.Port.PlayModeTests",
+  "rootNamespace": "RuinCrawler.Port.Tests",
+  "references": [
+    "RuinCrawler.Port"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

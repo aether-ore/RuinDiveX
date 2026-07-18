@@ -1,0 +1,20 @@
+{
+  "name": "RuinCrawler.Runtime.BossHunts",
+  "rootNamespace": "RuinCrawler.Runtime.BossHunts",
+  "references": [
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Runtime.Reaverbots",
+    "RuinCrawler.Core.Foundation",
+    "RuinCrawler.Core.Campaign",
+    "RuinCrawler.Core.Reaverbots"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

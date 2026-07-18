@@ -1,0 +1,23 @@
+{
+  "name": "RuinCrawler.Runtime.Expedition",
+  "rootNamespace": "RuinCrawler.Runtime.Expedition",
+  "references": [
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Runtime.Dungeon",
+    "RuinCrawler.Runtime.Reaverbots",
+    "RuinCrawler.Runtime.BossHunts",
+    "RuinCrawler.Core.Campaign",
+    "RuinCrawler.Core.Dungeon",
+    "RuinCrawler.Core.Reaverbots",
+    "RuinCrawler.Core.Foundation"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

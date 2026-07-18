@@ -24,7 +24,7 @@ For the standard Buster Arm, Energy is not ammo. Buster shots are unlimited; Ene
 
 ## Custom Buster Lab Preview
 
-Add `?busterLab=1` to the game URL to enable Roll's Custom Buster Lab and the unified `PWR / ENG / RNG / RPD` weapon model. Without the flag, the existing equipment, Buster Output, loot, and combat systems remain unchanged.
+Roll's Custom Buster Lab and the unified `PWR / ENG / RNG / RPD` weapon model are part of normal gameplay; no URL flag is required. The legacy `?busterLab=1` value is accepted for old links, while `?busterLab=sandbox` additionally exposes the disposable dungeon test range.
 
 - Slot 1 remains the fixed Mega Buster. Its four calibration sockets accept converted legacy Buster Parts and use the same battery runtime as Custom Busters.
 - Roll grants Build A with a Workshop Chassis and Pulse Bolt once. A second physical chassis and additional module copies can be fabricated from her identified Reaverbot scrap stockpile.
@@ -34,7 +34,7 @@ Add `?busterLab=1` to the game URL to enable Roll's Custom Buster Lab and the un
 
 For unrestricted testing, open Debug Tools with the tilde key and choose the `Buster Lab` tab. `Grant one of each Buster part` adds a fresh copy of every physical v0.1 module and Mega calibration, reveals all recipes, and supplies Build B without changing scrap, salvage, builds, sockets, or assignments. The grant is repeatable for testing physical ownership across both builds. Add `busterLabDebug=1` to the URL to preselect this debug tab.
 
-The Lab's partial local save is stored under `ruinDigger.busterLab.v1`. It contains Roll's scrap stockpile, recipe discovery, fabricated chassis/modules, builds, assignments, and Mega calibrations; it intentionally does not save general inventory or dungeon progress.
+The workshop uses context-scoped v3 envelopes under `ruinDigger.busterLab.v3.<encoded saveContextId>` with backup and corrupt-recovery siblings. It contains Roll's scrap stockpile, recipe discovery, fabricated chassis/modules, builds, assignments, Mega calibrations, fixed Arms & Gear, and Boss Hunt state; general dungeon runtime state remains outside this store. The old global v1 and context-scoped v2 payloads are retained for explicit, non-destructive migration.
 
 ## Controls
 
@@ -132,6 +132,68 @@ Interactable field devices now spawn around the arena:
 - `Cooling Vent` reduces reload/cooldown pressure and creates a temporary cooling field.
 - `Refractor Pylon` adds thermal, cryo, shock, or corrosive output for a short duration.
 - `Salvage Cache` drops a robotic part and may spawn an elite guardian.
+
+## Unity Port (In Progress)
+
+The Unity `6000.5.4f1` project at `unity/RuinCrawler` now has production
+`Boot`, `Camp`, `Expedition`, and `TestRange` scenes in addition to the
+disposable `PortingSandbox`. It reuses the root assets and versioned catalog
+pack through a local package and currently implements:
+
+- Input System tank controls (`W`/`S` throttle, `A`/`D` turn), a custom camera
+  that continuously follows behind Mega Man and accelerates its settle on
+  manual aim, a straight target-aligned left Mega Buster pose, typed
+  damage/health, sticky body and weak-point lock-on,
+  player/target/Buster/Boss HUD, and the 20-second Action-to-Breathing idle
+  contract;
+- a themed UI Toolkit HUD and Roll workshop plus an `Escape`/Start
+  pause-status menu with Map, Items, Equipment, Options, and Back navigation,
+  live campaign/player readouts, and gameplay suppression while open;
+- the compiled Mega Buster plus the pure Custom Buster compiler, battery,
+  reservation, trajectory, collision, and chronological projectile kernels;
+- deterministic schema-3 Reaverbot genomes, semantic low-poly runtime bodies,
+  shared combat, weak points, unidentified salvage, and pooling;
+- the sole, immediately accessible deterministic `industrial-factory-v2`
+  dungeon with seven macro roles, 12-18 regions,
+  Factory/Waterworks/Hazard districts, certified module geometry, solid-floor
+  catchments, reversible water routing, magma/electric hazards, layered
+  minimap/Key Seeker, curated discoveries, Large Refractor extraction, and
+  deterministic teardown; the Support Car and Roll's departure action create
+  or resume this dungeon directly without a profile selector or feature flag;
+- a Unity-only atomic schema-2 campaign save, a grounded full-size Roll with `F`/X
+  workshop interaction, fabrication and loadouts, direct normal-dungeon and
+  Test Range/Support Car flow, deterministic re-entry after reload or defeat,
+  automatic reset of incompatible active dungeon state without removing
+  campaign ownership, explicit reward-safe expedition abandonment, and Boss
+  Hunts with phases, HUD, rewards, and idempotent victory commits.
+
+The Three.js implementation remains authoritative while scene-level behavior,
+presentation, full dungeon interaction, authored enemy/boss mechanics, visual
+QA, long-session cleanup, and the combined release gate are completed.
+The supplied Doni Arts mechanical UI surfaces and pause-menu mockup remain
+development/reference assets until redistribution rights are confirmed; the
+runtime dialogue gradient is code-derived rather than copied from the mockup.
+
+With the Unity Editor closed, run the headless Unity suites from the repository
+root:
+
+```powershell
+npm run test:unity:edit
+npm run test:unity:play
+npm run test:unity
+npm run verify:unity-port
+```
+
+`verify:unity-port` checks generated-contract freshness, then runs both Unity
+test platforms. It intentionally does not change the browser
+`verify:release` gate. Use `npm run test:unity:edit -- --print-command` to
+inspect the resolved Editor command without launching Unity; set
+`UNITY_EDITOR_PATH` or pass `--editor` when Unity Hub is installed elsewhere.
+
+See [Unity Port and Unity MCP Setup](docs/UNITY_PORTING.md) for exact scene
+responsibilities, production controls, contract export/rebuild commands, test
+assemblies and results, MCP configuration, asset/GUID policy, and honest
+remaining gaps.
 
 ## Run
 

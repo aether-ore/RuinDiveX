@@ -1,0 +1,120 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 57cc5d95027ee8543888785a49dc4148, type: 3}
+  m_Name: factory_machinecore_variant_b.geometry-v2
+  m_EditorClassIdentifier: RuinCrawler.Runtime.Dungeon::RuinCrawler.Runtime.Dungeon.DungeonCertifiedGeometryAssetV2
+  schemaVersion: 1
+  templateId: factory-machinecore-variant-b
+  contentHash: sha256:c9ead00fd08d2712c0590625a2f7637f9701ad432fec6f152e0acfd5b3fdea7f
+  canonicalContent: 1|29:factory-machinecore-variant-b|2|5:floor|6:region|1|0|1|1|13:factory-floor|4|-5|-4.75|5|-4.75|5|4.75|-5|4.75|0|0.25|17:machine-core-dais|6:region|1|0|1|1|17:factory-core-dais|4|-2|-2|2|-2|2|2|-2|2|0.25|0.75|1|6:region|0|1|10:navigation|-5|0|-4.75|5|5|4.75|3|5:entry|6:region|0|-4|0.5|0|-1:|4:exit|6:region|1|4|0.5|0|-1:|4:safe|6:region|6|0|0.5|0|13:safe-reset-v2|2|4:east|6:region|0|5|0.5|0|1|0|0|17:factory-ground-v2|4:west|6:region|0|-5|0.5|0|-1|0|0|17:factory-ground-v2|
+  surfaces:
+  - id: floor
+    regionId: region
+    kind: 1
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -5
+        z: -4.75
+      - x: 5
+        z: -4.75
+      - x: 5
+        z: 4.75
+      - x: -5
+        z: 4.75
+      minimumY: 0
+      maximumY: 0.25
+    isStructural: 1
+    isWalkable: 1
+    materialProfileId: factory-floor
+  - id: machine-core-dais
+    regionId: region
+    kind: 1
+    colliderKind: 0
+    volume:
+      horizontalVertices:
+      - x: -2
+        z: -2
+      - x: 2
+        z: -2
+      - x: 2
+        z: 2
+      - x: -2
+        z: 2
+      minimumY: 0.25
+      maximumY: 0.75
+    isStructural: 1
+    isWalkable: 1
+    materialProfileId: factory-core-dais
+  regions:
+  - id: region
+    minimum:
+      x: -5
+      y: 0
+      z: -4.75
+    maximum:
+      x: 5
+      y: 5
+      z: 4.75
+    districtKind: 0
+    elevationStratum: 1
+    localNavigationRegionId: navigation
+  anchors:
+  - id: entry
+    regionId: region
+    kind: 0
+    position:
+      x: -4
+      y: 0.5
+      z: 0
+    profileId: 
+  - id: exit
+    regionId: region
+    kind: 1
+    position:
+      x: 4
+      y: 0.5
+      z: 0
+    profileId: 
+  - id: safe
+    regionId: region
+    kind: 6
+    position:
+      x: 0
+      y: 0.5
+      z: 0
+    profileId: safe-reset-v2
+  connectors:
+  - id: east
+    regionId: region
+    kind: 0
+    position:
+      x: 5
+      y: 0.5
+      z: 0
+    facing:
+      x: 1
+      y: 0
+      z: 0
+    socketTag: factory-ground-v2
+  - id: west
+    regionId: region
+    kind: 0
+    position:
+      x: -5
+      y: 0.5
+      z: 0
+    facing:
+      x: -1
+      y: 0
+      z: 0
+    socketTag: factory-ground-v2

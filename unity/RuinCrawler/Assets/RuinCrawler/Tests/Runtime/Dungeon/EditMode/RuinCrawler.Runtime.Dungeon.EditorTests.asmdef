@@ -1,0 +1,21 @@
+{
+  "name": "RuinCrawler.Runtime.Dungeon.EditorTests",
+  "rootNamespace": "RuinCrawler.Runtime.Dungeon.Tests",
+  "references": [
+    "RuinCrawler.Runtime.Dungeon",
+    "RuinCrawler.Editor.DungeonV2",
+    "RuinCrawler.Runtime",
+    "RuinCrawler.Core.Dungeon",
+    "RuinCrawler.Core.Foundation"
+  ],
+  "includePlatforms": ["Editor"],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}

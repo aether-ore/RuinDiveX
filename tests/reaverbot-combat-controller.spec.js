@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('revamped melee, persistent rotors, direct flight, and Tractor Controllers execute their combat contracts', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=melee-controller-runtime-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=melee-controller-runtime-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -292,7 +292,7 @@ test('revamped melee, persistent rotors, direct flight, and Tractor Controllers 
 });
 
 test('Tractor Controller hardening preserves viable squads, reachable cargo, and readable carries', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=tractor-hardening-runtime-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=tractor-hardening-runtime-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -498,7 +498,7 @@ test('Tractor Controller hardening preserves viable squads, reachable cargo, and
 });
 
 test('jaw triple hops stay player-facing, bounded, and in shockwave range', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=jaw-hop-regression');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=jaw-hop-regression');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -599,7 +599,7 @@ test('jaw triple hops stay player-facing, bounded, and in shockwave range', asyn
 });
 
 test('crusher jaw mouth contact and real snap shockwaves damage the player', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=jaw-damage-volume-regression');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=jaw-damage-volume-regression');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -903,7 +903,7 @@ test('crusher jaw mouth contact and real snap shockwaves damage the player', asy
 });
 
 test('jaw AI holds its attack envelope and completes a natural three-snap lifecycle from mouth range', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=jaw-natural-lifecycle-regression');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=jaw-natural-lifecycle-regression');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -989,9 +989,9 @@ test('jaw AI holds its attack envelope and completes a natural three-snap lifecy
       };
     };
 
-    // A jaw's locomotion policy still calls this an approach distance, but its
-    // authored strike volume already reaches MegaMan. Cooldown must hold that
-    // envelope, and the first ready frame must begin the telegraph in place.
+    // A jaw's chassis is deliberately outside the authored attack envelope,
+    // while its assembled world-space contact point is inside it. Positioning
+    // must measure from that visible mouth rather than advancing the root.
     const approachJaw = spawnMatching(
       'pursuer',
       'jawCombo',
@@ -1003,15 +1003,24 @@ test('jaw AI holds its attack envelope and completes a natural three-snap lifecy
       approachJaw.genome.behavior.preferredRange + 0.35,
     );
     const attackEnvelopeLimit = approachJaw.stats.attackRange + 0.5;
-    const approachDistance = Math.min(
+    const desiredContactDistance = Math.min(
       attackEnvelopeLimit - 0.08,
       Math.max(approachThreshold + 0.18, approachJaw.stats.attackRange + 0.1),
     );
     player.root.position.copy(originalPlayerPosition);
-    approachJaw.root.position.copy(originalPlayerPosition).add(new Vector3(0, 0, approachDistance));
-    // Start perpendicular to the attack lane so this scenario proves the AI
-    // does not translate into mouth/body contact while turning to telegraph.
-    approachJaw.root.rotation.y = 0;
+    approachJaw.root.position.copy(originalPlayerPosition);
+    approachJaw.root.rotation.y = Math.PI;
+    approachJaw.root.updateMatrixWorld(true);
+    const localJawReach = approachJaw._getJawContactPoint(new Vector3())
+      .sub(approachJaw.root.position)
+      .setY(0)
+      .length();
+    const rootDistance = desiredContactDistance + localJawReach;
+    approachJaw.root.position.copy(originalPlayerPosition).add(new Vector3(0, 0, rootDistance));
+    approachJaw.root.updateMatrixWorld(true);
+    const contactPoint = approachJaw._getJawContactPoint(new Vector3());
+    const contactDistance = contactPoint.clone().setY(0)
+      .distanceTo(player.root.position.clone().setY(0));
     approachJaw.brain.state = 'position';
     approachJaw.brain.stateTime = 0;
     approachJaw.brain.cooldown = 0.5;
@@ -1026,10 +1035,13 @@ test('jaw AI holds its attack envelope and completes a natural three-snap lifecy
     approachJaw.brain.cooldown = 0;
     approachJaw.update(0.016, game);
     const approachContract = {
-      distance: approachDistance,
+      rootDistance,
+      contactDistance,
+      contactPointFinite: contactPoint.toArray().every(Number.isFinite),
       approachThreshold,
       attackEnvelopeLimit,
-      inAttackEnvelope: approachJaw._isAttackDistance(approachDistance),
+      rootInAttackEnvelope: approachJaw._isAttackDistance(rootDistance),
+      contactInAttackEnvelope: approachJaw._isAttackDistance(contactDistance),
       coolingState,
       coolingTravel,
       coolingMoving,
@@ -1163,9 +1175,12 @@ test('jaw AI holds its attack envelope and completes a natural three-snap lifecy
     return { approachContract, lifecycle, heavyHits };
   });
 
-  expect(result.approachContract.distance).toBeGreaterThan(result.approachContract.approachThreshold);
-  expect(result.approachContract.distance).toBeLessThan(result.approachContract.attackEnvelopeLimit);
-  expect(result.approachContract.inAttackEnvelope).toBe(true);
+  expect(result.approachContract.contactPointFinite).toBe(true);
+  expect(result.approachContract.rootDistance).toBeGreaterThan(result.approachContract.attackEnvelopeLimit);
+  expect(result.approachContract.rootInAttackEnvelope).toBe(false);
+  expect(result.approachContract.contactDistance).toBeGreaterThan(result.approachContract.approachThreshold);
+  expect(result.approachContract.contactDistance).toBeLessThan(result.approachContract.attackEnvelopeLimit);
+  expect(result.approachContract.contactInAttackEnvelope).toBe(true);
   expect(result.approachContract.coolingState).toBe('position');
   expect(result.approachContract.coolingTravel).toBeLessThan(0.0001);
   expect(result.approachContract.coolingMoving).toBe(false);
@@ -1201,7 +1216,7 @@ test('jaw AI holds its attack envelope and completes a natural three-snap lifecy
 });
 
 test('jaw hinge overlap recovers before snapping and melee body contact forces knockback', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=jaw-hinge-overlap-regression');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=jaw-hinge-overlap-regression');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -1581,7 +1596,7 @@ test('jaw hinge overlap recovers before snapping and melee body contact forces k
 });
 
 test('Tractor Controllers evade, break interrupted abductions, crash and relaunch while coil legs truly bounce', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=controller-crash-coil-bounce-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=controller-crash-coil-bounce-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -1827,7 +1842,7 @@ test('Tractor Controllers evade, break interrupted abductions, crash and relaunc
 });
 
 test('articulated claw carriers drag into MegaMan\'s lane and vault low obstacles', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=constructor-claw-drag-vault-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=constructor-claw-drag-vault-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('ordinary grounded enemies hop a railing to a lower floor and bosses remain excluded', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=enemy-railing-traversal-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=enemy-railing-traversal-proof');
   await page.waitForFunction(() => Boolean(
     window.game?.spawner
     && window.game?.dungeonController

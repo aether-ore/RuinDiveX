@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('machine press collision follows its visible legs and leaves access ramps clear', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const result = await page.evaluate(async () => {

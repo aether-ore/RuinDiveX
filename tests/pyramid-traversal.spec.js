@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('pyramid tiers stay grounded, guardians trigger at the summit, and the keycard remains shielded', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=pyramid-runtime-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=pyramid-runtime-proof');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const result = await page.evaluate(() => {
@@ -179,7 +179,7 @@ test('pyramid tiers stay grounded, guardians trigger at the summit, and the keyc
 });
 
 test('tall architectural wall faces occlude globally without hiding their walkable tops', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=global-wall-occlusion-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=global-wall-occlusion-proof');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const result = await page.evaluate(() => {
@@ -260,7 +260,7 @@ test('tall architectural wall faces occlude globally without hiding their walkab
 });
 
 test('door threshold wall wings occlude independently in pyramid and conveyor rooms', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=threshold-wall-occlusion-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=threshold-wall-occlusion-proof');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const result = await page.evaluate(() => {

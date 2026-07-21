@@ -1,0 +1,711 @@
+{
+  "schemaVersion": 2,
+  "accepted": true,
+  "manifestId": "ruindivex-overworld-voxel-faces-v1",
+  "rawGeneratorArtifactDirectory": "assets/art-source/overworld/voxel",
+  "rawGeneratorArtifactPolicy": "untouched-native-output",
+  "rawGeneratorMinimumAxisPixels": 1024,
+  "canonicalSourceDirectory": "assets/art-source/overworld/voxel/source-1024",
+  "canonicalSourceSize": 1024,
+  "canonicalization": "center-square-crop-and-high-quality-resample",
+  "runtimeDerivedFrom": "canonical-source-1024",
+  "runtimeSize": 256,
+  "assetCount": 23,
+  "familyCount": 7,
+  "facadeCount": 2,
+  "oppositeEdgeMaxChannelDelta": 0,
+  "rawGeneratorArtifactsPreserved": true,
+  "canonicalAndRuntimeDerivativesVerified": true,
+  "entries": [
+    {
+      "id": "meadow:top",
+      "source": "meadow-grass-top.png",
+      "runtime": "meadow-grass-top.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "9b9906ba7aa916d57c5b0fa211ff02bee326fcb9be828ff2f5dc9179a15cd9a2",
+      "canonicalSourceSha256": "d8299400efebe1a98561e081712f21d06266ccfff30c53a87ff943b80d9aa5c2",
+      "runtimeSha256": "55b07b44d6e7caf939cb4e5bdc1b842a40519f73252344b1f8fe8743f0dff9d0",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 150,
+        "horizontalMeanChannelDelta": 19.282562466772994,
+        "verticalMeanChannelDelta": 19.1866028708134
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "meadow:side",
+      "source": "meadow-grass-side.png",
+      "runtime": "meadow-grass-side.png",
+      "rawGeneratorArtifactSize": [
+        1536,
+        1024
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "240b63f2081e23a57fd1999b00ccc6ebff484fb22d989a14b1a2ef8130ebf249",
+      "canonicalSourceSha256": "412c51e4b7f73998349f3da6a3990935cd98b0de54f0cf3d1dc0b43c3a4312b5",
+      "runtimeSha256": "50daacc1c844fefdf367e44fbc739a3b373deb3436bb07743ac9037d8d6d83a0",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 123,
+        "horizontalMeanChannelDelta": 16.159505208333332,
+        "verticalMeanChannelDelta": 27.5283203125
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "meadow:bottom",
+      "source": "meadow-soil-bottom.png",
+      "runtime": "meadow-grass-bottom.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "71ad32e2d67dc48fe99d3d4a00f114c0556278b55771ef9c380d48b698bd8f43",
+      "canonicalSourceSha256": "2c89eb5ee69d2e71e36bde7cbcc81fa38736bfc4fae25bd2f84f1ccd966337ec",
+      "runtimeSha256": "1b453512c1ad2df0e7b7f299c019095a9770a82fdcc235c34197b681b4085761",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 75,
+        "horizontalMeanChannelDelta": 8.807814992025518,
+        "verticalMeanChannelDelta": 9.466507177033494
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "trail:top",
+      "source": "worn-trail-top.png",
+      "runtime": "worn-trail-earth-top.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "4f979119d45fc98ac8b1ea51b42dc85a3ebafab961949eb1d2e4ac24fb35ff86",
+      "canonicalSourceSha256": "d2755cbff866787f0d840077fa09ed334d69394490c1d27220ad92287b30ecd2",
+      "runtimeSha256": "144cc9482864f7a99ac447da04a442cd1f553b4e601afebfdf04606c5386510e",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 96,
+        "horizontalMeanChannelDelta": 13.049175970228601,
+        "verticalMeanChannelDelta": 11.608452950558213
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "trail:side",
+      "source": "worn-trail-side.png",
+      "runtime": "worn-trail-earth-side.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "aa67d566c5eb94b6943eae57d91441a15da40b5026954d40d79a4212dbf6baab",
+      "canonicalSourceSha256": "a57ad26e1db991794875ebc7b395576543f94fde7fa4659d3e02fdc80cca1dbd",
+      "runtimeSha256": "c1756ab0f7fa5d06d876c4972884b4795c1c1d2d266fcaed4e433d48cd074fba",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 78,
+        "horizontalMeanChannelDelta": 6.884370015948964,
+        "verticalMeanChannelDelta": 7.373737373737374
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "trail:bottom",
+      "source": "worn-trail-bottom.png",
+      "runtime": "worn-trail-earth-bottom.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "70021456af88380388642cba217307b921392520218451cc35a1474c8de0bb59",
+      "canonicalSourceSha256": "fc2b00ac1a14152ac93ff829291d67b7d1bef7a56a6ef55691015b6af240596c",
+      "runtimeSha256": "fcc475ee77058057b8429d46b05c257aba80b4fec45878bc336bfc574a5a6b5c",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 80,
+        "horizontalMeanChannelDelta": 7.60233918128655,
+        "verticalMeanChannelDelta": 7.444178628389155
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "stone:top",
+      "source": "hill-stone-top.png",
+      "runtime": "exposed-hill-stone-top.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "43ddf070f2b587c61f4f7fd911e38b3748e5f94686147a182266d14a480250f3",
+      "canonicalSourceSha256": "fb4b84261bc5cabf0ec3ea028f96e40973b067c1b491c277893637a5d91c83fb",
+      "runtimeSha256": "ee5776d1a74fe618a07ff452573dfd99d8b3d7e62474d57d38348cb84c8b181b",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 79,
+        "horizontalMeanChannelDelta": 8.944444444444445,
+        "verticalMeanChannelDelta": 8.283359914938861
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "stone:side",
+      "source": "hill-stone-side.png",
+      "runtime": "exposed-hill-stone-side.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "2a779f679d62fdf906ec79c908f49034488b4b7e0ef50fc874d1cf52cb04ab02",
+      "canonicalSourceSha256": "d1d699dff1b16738ea9db6676b70269c4faf168abf9bc4d803a18cf773238780",
+      "runtimeSha256": "a5c8c16270b15e09e5ddcb721efac2c47c1802c475d14456cde489e4ca5784f8",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 85,
+        "horizontalMeanChannelDelta": 6.37745879851143,
+        "verticalMeanChannelDelta": 6.211589580010632
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "stone:bottom",
+      "source": "hill-stone-bottom.png",
+      "runtime": "exposed-hill-stone-bottom.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "0f597d368e99ebdc9cc523eabf197396d63fadc2fe84b794f950e68d918f38eb",
+      "canonicalSourceSha256": "c6720752d0b0707a4a5feed29dddb7543987fac5e47947a41c560f7b93287c66",
+      "runtimeSha256": "5a35d4fe162dda1fe508dc263e5d14bbf4d29d0ca1343134efa3296d8b699160",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 38,
+        "horizontalMeanChannelDelta": 3.3181818181818183,
+        "verticalMeanChannelDelta": 3.1289207868155238
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "bark:top",
+      "source": "tree-bark-top.png",
+      "runtime": "tree-bark-top.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "9aa2f09ca85f82cbee526c94c22ee751d27cf701fa035ce74d82bba129bd55e7",
+      "canonicalSourceSha256": "4654b873405fdb88d8e51b851a7429759f01f7f31dbe6382714cdc67c78d25fe",
+      "runtimeSha256": "fc351a0aab34431c09e42a4d14f4b696bbe8d46112931b0473ec40b53819d5c8",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 46,
+        "horizontalMeanChannelDelta": 4.2947900053163215,
+        "verticalMeanChannelDelta": 4.792929292929293
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "bark:side",
+      "source": "tree-bark-side.png",
+      "runtime": "tree-bark-side.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "7ef2d3627f0d38a8e61a73ad9ec0b97d07aa5905d6948773c8e1d44047b2a512",
+      "canonicalSourceSha256": "ce0e66873791a9616240a119292de7e8f80c14453fbbf790e73a14be8f82612c",
+      "runtimeSha256": "4bce388a09bef01a0450dc528c6d6db7389d5ce0004855073bc0c76043d1257f",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 77,
+        "horizontalMeanChannelDelta": 6.680754917597023,
+        "verticalMeanChannelDelta": 4.807814992025518
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "bark:bottom",
+      "source": "tree-bark-bottom.png",
+      "runtime": "tree-bark-bottom.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "523978c6a5ecfd6829ba8ee539bfe45576b38e5f61e83a4e65ab4bc0fcec1b5f",
+      "canonicalSourceSha256": "111c79b6131e63ae371b906530dccbd0c1837a84b492ebf175c6b09bd5732e44",
+      "runtimeSha256": "716c4fceea94d5b99315cb30f19414b37fd262a1c859b22edcbade71cf7d784f",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 67,
+        "horizontalMeanChannelDelta": 4.92849548112706,
+        "verticalMeanChannelDelta": 5.653907496012759
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "leaves:top",
+      "source": "leaf-canopy-top.png",
+      "runtime": "leaf-canopy-top.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "20f2269018f74d8e68ecf63744baa13bbe456075b0089a8ba75b496f598c533c",
+      "canonicalSourceSha256": "2f9528e9ba2fea61f3b7806599b0ac0a2e0493926ecfe6e0101b9ecf03ca1062",
+      "runtimeSha256": "52232149d72450ba4d9894f37a5431d5b4219707bf118c151990811cf1d52f8b",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 134,
+        "horizontalMeanChannelDelta": 7.2240829346092506,
+        "verticalMeanChannelDelta": 7.411483253588517
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "leaves:side",
+      "source": "leaf-canopy-side.png",
+      "runtime": "leaf-canopy-side.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "eaeae51af26fb0f73132858ee037a45af7eb46f562e8d7cda16a09598eff1af5",
+      "canonicalSourceSha256": "cdd3189cd83e8214d16f0317d5dbbcb17af303f0a60f8d5571f488ef9a547bd7",
+      "runtimeSha256": "6890ddc1ad0027f8c16541907b2038582a7d6c6435158d30c9a8bb7e56a46a1f",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 101,
+        "horizontalMeanChannelDelta": 7.968367889420521,
+        "verticalMeanChannelDelta": 8.26608187134503
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "leaves:bottom",
+      "source": "leaf-canopy-bottom.png",
+      "runtime": "leaf-canopy-bottom.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "b1aeb66bb1ef293112fac54b9a80ccad2ffbf788fd9738bcedfb3817f03427d8",
+      "canonicalSourceSha256": "58a61b8f71ead3de8a8558dcd933d08ab007508030f082f4b5ae7382e674ea03",
+      "runtimeSha256": "0b4a6095ec4889f254ff6b36f4eb885357a6bf128c6fe3d836085f824ed61950",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 38,
+        "horizontalMeanChannelDelta": 3.3298777246145668,
+        "verticalMeanChannelDelta": 3.014354066985646
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "houseWall:top",
+      "source": "house-wall-top.png",
+      "runtime": "weathered-house-wall-top.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "cd9c3bbe862fcdbe85ff5d9e0ed53beb90b4477f70a6f918beea75e432a9f3ae",
+      "canonicalSourceSha256": "88113d8ca57ead8b41f80fd4318c55b4f2ed84e088fc70a6c7fd92ced889d355",
+      "runtimeSha256": "12df70caab734c84fa2a98bdda0cf38929004695fda6df18b3a7f452790b4ef4",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 77,
+        "horizontalMeanChannelDelta": 5.771398192450824,
+        "verticalMeanChannelDelta": 8.182349813928761
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "houseWall:side",
+      "source": "house-wall-side.png",
+      "runtime": "weathered-house-wall-side.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "ce1ef1e43a6d7aebcb410e6c7915bfdde9a62481d05e7c155b30758b3b26675b",
+      "canonicalSourceSha256": "0187282a5e407d096e35cdf7a11ddef544fe3b6e9f777ebdf09b90a262c96059",
+      "runtimeSha256": "257f070c3bd04d070cf1423c0b759f008c30f65d4fb41ebdd62d50d80baf90a5",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 121,
+        "horizontalMeanChannelDelta": 5.2083997873471555,
+        "verticalMeanChannelDelta": 29.210792131844762
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "houseWall:bottom",
+      "source": "house-wall-bottom.png",
+      "runtime": "weathered-house-wall-bottom.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "2e43cb1606f78b2e038163c518745e9785d08574526476e4521ad61186d174ba",
+      "canonicalSourceSha256": "29ae20c74c0c3e114c2fb2d2cadebe80e8bbde3278761a79e2450c7400de4fc5",
+      "runtimeSha256": "313d4074421b77b2833044d158d744b1d4215391b1243531a0673de2e3aa16e2",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 62,
+        "horizontalMeanChannelDelta": 7.825093035619352,
+        "verticalMeanChannelDelta": 13.876661350345561
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "roof:top",
+      "source": "shingle-roof-top.png",
+      "runtime": "weathered-shingle-roof-top.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "134e4cb9b0df9d27a83f5d218dfe910f8e94a51aabf1188cc5af9792b7fec2f6",
+      "canonicalSourceSha256": "11f2b52ebb4f53acb7ca2af37d60e361f8d46cf77a1788f993e0a13a841ecb1d",
+      "runtimeSha256": "07819c189c40b938d278f37bd83b31af917dc0ad12c2fb7cf2f26f39052965bb",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 118,
+        "horizontalMeanChannelDelta": 8.507442849548113,
+        "verticalMeanChannelDelta": 23.048644338118024
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "roof:side",
+      "source": "shingle-roof-side.png",
+      "runtime": "weathered-shingle-roof-side.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "225b7fde7fc94f8dc62a9b2a2480175d6e15319b6cf2eb042ba6e5606921bbb4",
+      "canonicalSourceSha256": "2266f99f3a7fbeaab9f9322e1b79653123e29e13f28aa0798f48ac9f4c09367f",
+      "runtimeSha256": "b314247baacb7ec7228fbf150cef6f9885b30700b193db6c43c8f1077819997e",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 98,
+        "horizontalMeanChannelDelta": 7.4529505582137165,
+        "verticalMeanChannelDelta": 3.656299840510367
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "roof:bottom",
+      "source": "shingle-roof-bottom.png",
+      "runtime": "weathered-shingle-roof-bottom.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "8ddbefee24b227e34eb9d3602e373c36860e4c04c2e7892d7f708f563bc129d8",
+      "canonicalSourceSha256": "50ed164cc1849e15c28172b4b534e6be9322a25a0396f0a67ac670cd4da5d21f",
+      "runtimeSha256": "26adabb80ce9723896fac6ea12be3f0aad851b9663fee902c4d2d04ade6bb63e",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 41,
+        "horizontalMeanChannelDelta": 6.288676236044657,
+        "verticalMeanChannelDelta": 7.121743753322701
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "facade:woodenDoor",
+      "source": "wooden-door-facade.png",
+      "runtime": "wooden-door-facade.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "e7c2cf7d9f987b8d81b5a954501cb566d9880e72448d683461e4caad6ff90dd0",
+      "canonicalSourceSha256": "9b3eceaefb8b563ecab3d128237340903e4eaed9b4752b5c0f5844ada7ceab9e",
+      "runtimeSha256": "60554be3e265cd2404c1824afb560d1bf51740b85d6bc4fa667a9fe97aac3621",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 87,
+        "horizontalMeanChannelDelta": 13.678628389154705,
+        "verticalMeanChannelDelta": 19.36629452418926
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    },
+    {
+      "id": "facade:mullionedWindow",
+      "source": "mullioned-window-facade.png",
+      "runtime": "mullioned-window-facade.png",
+      "rawGeneratorArtifactSize": [
+        1254,
+        1254
+      ],
+      "canonicalSourceSize": [
+        1024,
+        1024
+      ],
+      "runtimeSize": [
+        256,
+        256
+      ],
+      "rawGeneratorArtifactSha256": "091330a0560c2d82879245a9000162922b1e7f53461fba6a2f09c281f770008c",
+      "canonicalSourceSha256": "68fb0f371d85d294e766f9c05e0709a5c9915974ec4071cc0aa590600387f41a",
+      "runtimeSha256": "740d17327e4ff7fcc68c7449bd11c6f1e1566023be559713d5a908fc70932b69",
+      "sourceOppositeEdgeContinuity": {
+        "maxChannelDelta": 78,
+        "horizontalMeanChannelDelta": 38.045986177565126,
+        "verticalMeanChannelDelta": 35.422115895800104
+      },
+      "runtimeOppositeEdgeContinuity": {
+        "maxChannelDelta": 0,
+        "horizontalMeanChannelDelta": 0,
+        "verticalMeanChannelDelta": 0
+      }
+    }
+  ]
+}

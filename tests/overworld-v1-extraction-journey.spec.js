@@ -1,0 +1,169 @@
+import { expect, test } from '@playwright/test';
+import {
+  beginBossExpedition,
+  readWorldDiagnostics,
+  waitForWorld,
+} from './helpers/overworld-runtime.js';
+import {
+  activatePublicInteractable,
+  clearPublicEncounter,
+  collectPublicKeycard,
+  findById,
+  readPublicV1JourneyState,
+} from './helpers/public-v1-journey.js';
+
+// Curated from genuine deterministic V1 generation. This layout retains all
+// authored progression/encounters while giving the Nest its minimum three
+// ordinary Reaverbots, keeping a real full-combat acceptance run bounded.
+const JOURNEY_SEED = 'overworld-v1-public-extraction-easy-110';
+
+test.use({ viewport: { width: 640, height: 360 } });
+
+test.describe('overworld to streamed V1 public-input completion journey', () => {
+  test('walks the authored ruin, fights, unlocks, secures the Refractor, and extracts', async ({ page }) => {
+    test.setTimeout(1_200_000);
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(`console: ${message.text()}`);
+    });
+
+    await page.goto(`/?dungeonSeed=${JOURNEY_SEED}&reaverbotSeed=${JOURNEY_SEED}`);
+    await waitForWorld(page, 'overworld');
+    const overworld = await readWorldDiagnostics(page);
+    await beginBossExpedition(page, 'revolvingFusillade');
+    const dungeon = await readWorldDiagnostics(page);
+    expect(dungeon).toMatchObject({ worldKind: 'dungeon', transitionState: 'dungeon' });
+
+    // The only mutating operations below are ordinary movement, jump, dodge,
+    // interact, weapon-select, lock-on, fire, and modal input. The public
+    // snapshot is detached and read-only; it only selects physical goals and
+    // verifies what a player actually accomplished.
+    let state = await readPublicV1JourneyState(page);
+    if (state.keySeeker && !state.keySeeker.activated) {
+      await activatePublicInteractable(page, state.keySeeker.id, {
+        targetPosition: state.keySeeker.position,
+        targetRadius: 2.1,
+        expectedState: (next) => next.keySeeker?.activated === true,
+      });
+    }
+
+    await clearPublicEncounter(page, 'enemyNest');
+    await clearPublicEncounter(page, 'keycardGuard');
+
+    state = await readPublicV1JourneyState(page);
+    const alpha = findById(state.keycards, 'Keycard_Alpha');
+    await collectPublicKeycard(page, 'Keycard_Alpha', alpha.position, { timeout: 180_000 });
+    await expect.poll(async () => (
+      (await readPublicV1JourneyState(page, { includeGeometry: false }))
+        .ownedKeys.includes('Keycard_Alpha')
+    ), { timeout: 15_000 }).toBe(true);
+
+    state = await readPublicV1JourneyState(page);
+    const alphaDoor = findById(state.doors, 'Door_Alpha');
+    await activatePublicInteractable(page, alphaDoor.id, {
+      targetPosition: alphaDoor.position,
+      targetRadius: 2.45,
+      expectedState: (next) => !findById(next.doors, 'Door_Alpha').closed,
+    });
+
+    // These authored combat/sub-zone branches are physically traversed rather
+    // than silently skipped en route to the Beta chest.
+    await clearPublicEncounter(page, 'trapAmbush');
+    await clearPublicEncounter(page, 'coolantRelayDefense');
+    state = await readPublicV1JourneyState(page);
+    const coolantConsole = state.mechanisms.find(({ id }) => id === 'coolantRelayMasterConsole');
+    expect(coolantConsole).toBeTruthy();
+    if (!coolantConsole.activated) {
+      await activatePublicInteractable(page, coolantConsole.id, {
+        targetPosition: coolantConsole.position,
+        targetRadius: 2.1,
+        expectedState: (next) => findById(next.mechanisms, coolantConsole.id).activated,
+      });
+    }
+
+    state = await readPublicV1JourneyState(page);
+    const betaChest = state.chests.find(({ guaranteedKeycardId }) => (
+      guaranteedKeycardId === 'Keycard_Beta'
+    ));
+    expect(betaChest).toBeTruthy();
+    await activatePublicInteractable(page, betaChest.id, {
+      targetPosition: betaChest.position,
+      targetRadius: 2.05,
+      expectedState: (next) => next.ownedKeys.includes('Keycard_Beta'),
+      timeout: 180_000,
+    });
+
+    state = await readPublicV1JourneyState(page);
+    const betaDoor = findById(state.doors, 'Door_Beta');
+    await activatePublicInteractable(page, betaDoor.id, {
+      targetPosition: betaDoor.position,
+      targetRadius: 2.45,
+      expectedState: (next) => !findById(next.doors, 'Door_Beta').closed,
+      timeout: 180_000,
+    });
+
+    await clearPublicEncounter(page, 'conveyorGuard', { timeout: 240_000 });
+    await expect.poll(async () => (
+      (await readPublicV1JourneyState(page, { includeGeometry: false }))
+        .keycards.some(({ keycardId }) => keycardId === 'Keycard_Gamma')
+    ), { timeout: 15_000 }).toBe(true);
+    state = await readPublicV1JourneyState(page);
+    const gamma = findById(state.keycards, 'Keycard_Gamma');
+    await collectPublicKeycard(page, 'Keycard_Gamma', gamma.position, { timeout: 180_000 });
+    await expect.poll(async () => (
+      (await readPublicV1JourneyState(page, { includeGeometry: false }))
+        .ownedKeys.includes('Keycard_Gamma')
+    ), { timeout: 15_000 }).toBe(true);
+
+    state = await readPublicV1JourneyState(page);
+    const gammaDoor = findById(state.doors, 'Door_Gamma');
+    await activatePublicInteractable(page, gammaDoor.id, {
+      targetPosition: gammaDoor.position,
+      targetRadius: 2.45,
+      expectedState: (next) => !findById(next.doors, 'Door_Gamma').closed,
+      timeout: 180_000,
+    });
+
+    await clearPublicEncounter(page, 'bossEncounter', { timeout: 300_000 });
+    await expect.poll(async () => (
+      (await readPublicV1JourneyState(page, { includeGeometry: false }))
+        .ownedKeys.includes('Shrine_Key')
+    ), { timeout: 20_000 }).toBe(true);
+
+    state = await readPublicV1JourneyState(page);
+    const shrineDoor = findById(state.doors, 'Door_Shrine');
+    await activatePublicInteractable(page, shrineDoor.id, {
+      targetPosition: shrineDoor.position,
+      targetRadius: 2.45,
+      expectedState: (next) => !findById(next.doors, 'Door_Shrine').closed,
+      timeout: 180_000,
+    });
+
+    state = await readPublicV1JourneyState(page);
+    expect(state.shrine).toBeTruthy();
+    await activatePublicInteractable(page, state.shrine.id, {
+      targetPosition: state.shrine.position,
+      targetRadius: 2.8,
+      expectedState: (next) => next.shrine.collected && next.ruinCompleted,
+      timeout: 180_000,
+    });
+    await expect.poll(async () => (
+      (await readPublicV1JourneyState(page, { includeGeometry: false }))
+        .nearestInteractable?.kind
+    ), { timeout: 15_000 }).toBe('extraction');
+    await page.keyboard.press('KeyE');
+    await waitForWorld(page, 'overworld', { timeout: 75_000 });
+
+    const returned = await readWorldDiagnostics(page);
+    expect(returned).toMatchObject({
+      worldKind: 'overworld',
+      transitionState: 'overworld',
+      planHash: overworld.planHash,
+      generationCount: dungeon.generationCount + 1,
+      disposalCount: dungeon.disposalCount + 1,
+    });
+    expect(returned.activeRootId).not.toBe(dungeon.activeRootId);
+    expect(errors).toEqual([]);
+  });
+});

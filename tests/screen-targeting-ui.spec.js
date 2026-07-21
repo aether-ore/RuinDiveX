@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('free aim uses directional strafing and Sprint keeps stable Buster and sword wrists', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=free-aim-strafe-sprint-pose');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=free-aim-strafe-sprint-pose');
   await page.waitForFunction(() => Boolean(
     window.game?.player?._fbxAnimationLibraryLoaded
     && window.game?.player?._busterArmLoaded
@@ -556,7 +556,7 @@ test('free aim uses directional strafing and Sprint keeps stable Buster and swor
 });
 
 test('aim and lock-on reticles are flat, screen-space HUD indicators', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=screen-targeting-ui-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=screen-targeting-ui-proof');
   await page.waitForFunction(() => Boolean(window.game?.combat && window.game?.player));
 
   const result = await page.evaluate(async () => {
@@ -673,7 +673,7 @@ test('aim and lock-on reticles are flat, screen-space HUD indicators', async ({ 
 });
 
 test('lock-on survives covered weak points and the complete dodge roll', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=lock-retention-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=lock-retention-proof');
   await page.waitForFunction(() => Boolean(
     window.game?.player?._fbxAnimationLibraryLoaded
     && window.spawnReaverbot,
@@ -833,7 +833,7 @@ test('lock-on survives covered weak points and the complete dodge roll', async (
 });
 
 test('unified Buster combat also retains a covered weak-point lock while rolling', async ({ page }) => {
-  await page.goto('/?busterLab=1&reaverbotSeed=unified-lock-retention-proof');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=unified-lock-retention-proof');
   await page.waitForFunction(() => Boolean(
     window.game?.busterLabPlans?.get('megaBuster')
     && window.game?.player?._fbxAnimationLibraryLoaded
@@ -924,7 +924,7 @@ test('unified Buster combat also retains a covered weak-point lock while rolling
 });
 
 test('manual aim redirects shots while movement lock keeps target facing', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=locked-manual-aim-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=locked-manual-aim-proof');
   await page.waitForFunction(() => Boolean(window.game?.combat && window.game?.player));
 
   const result = await page.evaluate(async () => {
@@ -1152,7 +1152,7 @@ test('manual aim redirects shots while movement lock keeps target facing', async
 });
 
 test('free aim reticle acquisition initiates strafing lock without steering manual fire', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=free-aim-reticle-lock-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=free-aim-reticle-lock-proof');
   await page.waitForFunction(() => Boolean(window.game?.combat && window.game?.player));
 
   const result = await page.evaluate(async () => {
@@ -1614,7 +1614,7 @@ test('free aim reticle acquisition initiates strafing lock without steering manu
 });
 
 test('entering pointer lock preserves the existing reticle position', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=pointer-lock-reticle-continuity');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=pointer-lock-reticle-continuity');
   await page.waitForFunction(() => Boolean(window.game?.renderer?.domElement));
 
   const result = await page.evaluate(() => {

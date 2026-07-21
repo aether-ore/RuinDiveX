@@ -22,7 +22,7 @@ async function waitForGame(page) {
 }
 
 test('Ruby Optic Oracle prefers the authored model and retains procedural fallback state', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=authored-ruby-optic-oracle');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=authored-ruby-optic-oracle');
   await waitForGame(page);
 
   await page.evaluate(() => {
@@ -64,7 +64,7 @@ test('Ruby Optic Oracle prefers the authored model and retains procedural fallba
 });
 
 test('Boss Hunts and the canonical Buster workshop redact materials, reveal discoveries, and lock on entry', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-hunt-selector');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-hunt-selector');
   await waitForGame(page);
 
   const initial = await page.evaluate(() => {
@@ -167,7 +167,7 @@ test('Boss Hunts and the canonical Buster workshop redact materials, reveal disc
 });
 
 test('boss ExpeditionSpec depth owns runtime level, threat tier, and combat depth', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-expedition-depth');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-expedition-depth');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -219,7 +219,7 @@ test('boss ExpeditionSpec depth owns runtime level, threat tier, and combat dept
 });
 
 test('boss phase clamp, signature overload, direct-only integrity, and lock transfer use live combat objects', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-signature-runtime');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-signature-runtime');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -375,7 +375,7 @@ test('boss phase clamp, signature overload, direct-only integrity, and lock tran
 });
 
 test('phase transition and signature overload cancel active arena offense and hold boss control', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-interrupt-cancellation');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-interrupt-cancellation');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -535,7 +535,7 @@ test('phase transition and signature overload cancel active arena offense and ho
 });
 
 test('every authored arena pattern respects its warning boundary and matching hit geometry', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-telegraph-parity');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-telegraph-parity');
   await waitForGame(page);
 
   const results = await page.evaluate((profileIds) => {
@@ -640,7 +640,7 @@ test('every authored arena pattern respects its warning boundary and matching hi
 });
 
 test('signature patterns expose authored pylon, feed-mode, and raid-grid mechanics', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-signature-pattern-fidelity');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-signature-pattern-fidelity');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -755,7 +755,7 @@ test('signature patterns expose authored pylon, feed-mode, and raid-grid mechani
 });
 
 test('Overload Reliquary flits, lays capped mines, summons detonators, and exposes a shield-break damage window', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=overload-reliquary-moveset');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=overload-reliquary-moveset');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -1070,7 +1070,7 @@ test('Overload Reliquary flits, lays capped mines, summons detonators, and expos
 });
 
 test('Overload summon cleanup is update-loop safe and suppressed detonator kills still record boss victory', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=overload-reliquary-deferred-cleanup');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=overload-reliquary-deferred-cleanup');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -1145,7 +1145,7 @@ test('Overload summon cleanup is update-loop safe and suppressed detonator kills
 });
 
 test('authored arena patterns keep warning cadence and resource caps at 30, 60, and 120 Hz', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-frame-rate-parity');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-frame-rate-parity');
   await waitForGame(page);
 
   const summaries = await page.evaluate(({ profileIds, frameRates }) => {
@@ -1271,7 +1271,7 @@ test('authored arena patterns keep warning cadence and resource caps at 30, 60, 
 
 test('all nine live bosses sustain a simulated 60-second encounter within authored resource caps and clean up', async ({ page }) => {
   test.slow();
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-performance-runtime');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-performance-runtime');
   await waitForGame(page);
 
   const summaries = await page.evaluate((profileIds) => {
@@ -1357,7 +1357,7 @@ test('all nine live bosses sustain a simulated 60-second encounter within author
 });
 
 test('player defeat immediately clears boss arena objects, projectiles, and attack ownership', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-player-defeat-cleanup');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-player-defeat-cleanup');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -1450,7 +1450,7 @@ test('player defeat immediately clears boss arena objects, projectiles, and atta
 });
 
 test('boss disposal releases named arena geometry and material resources without scene remnants', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=boss-resource-disposal');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=boss-resource-disposal');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {

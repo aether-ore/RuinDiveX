@@ -455,6 +455,15 @@ export class UIManager {
     this.bossHuntsLockStatus = document.getElementById('boss-hunts-lock-status');
     this.bossHuntsWarning = document.getElementById('boss-hunts-warning');
     this.bossHuntsRecoveryStatus = document.getElementById('boss-hunts-recovery-status');
+    this.bossExpeditionModal = document.getElementById('boss-expedition-modal');
+    this.bossExpeditionGrid = document.getElementById('boss-expedition-grid');
+    this.bossExpeditionStatus = document.getElementById('boss-expedition-status');
+    this.bossExpeditionError = document.getElementById('boss-expedition-error');
+    this.bossExpeditionBeginButton = this.bossExpeditionModal?.querySelector('[data-action="begin-expedition"]') ?? null;
+    this.expeditionAbandonModal = document.getElementById('expedition-abandon-modal');
+    this.expeditionAbandonDescription = document.getElementById('expedition-abandon-description');
+    this.expeditionAbandonStatus = document.getElementById('expedition-abandon-status');
+    this.expeditionAbandonError = document.getElementById('expedition-abandon-error');
     this.busterLabView = document.getElementById('buster-lab-view');
     this.busterLabWarning = document.getElementById('buster-lab-warning');
     this.busterLabPersistence = document.getElementById('buster-lab-persistence');
@@ -556,6 +565,15 @@ export class UIManager {
     this.busterLabReadOnly = false;
     this.pendingBusterMaterialization = null;
     this.busterLabActionQueue = Promise.resolve();
+    this.bossExpeditionStagedProfileId = null;
+    this.bossExpeditionLoading = false;
+    this.bossExpeditionLoadingMessage = '';
+    this.bossExpeditionErrorMessage = '';
+    this.bossExpeditionStagePending = false;
+    this.expeditionAbandonLoading = false;
+    this.expeditionAbandonLoadingMessage = '';
+    this.expeditionAbandonErrorMessage = '';
+    this.worldModalReturnFocus = null;
     this.lastScrapIdentification = null;
     this.previousHealth = null;
     this.healthDamagePulseTimer = 0;
@@ -767,6 +785,375 @@ export class UIManager {
     this.bossVictoryBanner.textContent = `${boss.bossProfile?.title ?? 'Boss'} defeated · ${firstClear ? 'Guaranteed ' : ''}${reward}${overload ? ' · Overloaded' : ''}`;
     this.bossVictoryTimer = 4.2;
     this.bossVictoryBanner.hidden = false;
+  }
+
+  openBossExpeditionPrompt({ stagedProfileId = null, error = '', loading = false } = {}) {
+    const view = this.game.getBossHuntViewModel?.() ?? { profiles: [] };
+    const availableProfileIds = new Set((view.profiles ?? []).map((profile) => profile.id));
+    // The persisted Boss Hunt is a preference, not a staged transaction.
+    // Opening the ruin-door prompt must begin with no pending choice so the
+    // enabled state of Begin Expedition cannot diverge from Game's state.
+    this.bossExpeditionStagedProfileId = availableProfileIds.has(stagedProfileId)
+      ? stagedProfileId
+      : null;
+    this.bossExpeditionLoading = Boolean(loading);
+    this.bossExpeditionLoadingMessage = this.bossExpeditionLoading ? 'Preparing dungeon generation…' : '';
+    this.bossExpeditionErrorMessage = String(error?.message ?? error ?? '');
+    this.bossExpeditionStagePending = false;
+    this._captureWorldModalFocus();
+    if (this.expeditionAbandonModal) {
+      this.expeditionAbandonModal.hidden = true;
+      this.expeditionAbandonModal.setAttribute('aria-hidden', 'true');
+    }
+    if (this.bossExpeditionModal) {
+      this.bossExpeditionModal.hidden = false;
+      this.bossExpeditionModal.setAttribute('aria-hidden', 'false');
+    }
+    this._syncWorldModalRootState();
+    this.renderBossExpeditionPrompt({ view });
+    this._focusWorldModal(
+      this.bossExpeditionModal,
+      this.bossExpeditionStagedProfileId
+        ? '.boss-hunt-card[aria-pressed="true"]'
+        : '[data-boss-profile-id]',
+    );
+    return { ok: true, stagedProfileId: this.bossExpeditionStagedProfileId };
+  }
+
+  closeBossExpeditionPrompt({ restoreFocus = true } = {}) {
+    if (this.bossExpeditionModal) {
+      this.bossExpeditionModal.hidden = true;
+      this.bossExpeditionModal.setAttribute('aria-hidden', 'true');
+    }
+    this.bossExpeditionLoading = false;
+    this.bossExpeditionLoadingMessage = '';
+    this.bossExpeditionErrorMessage = '';
+    this.bossExpeditionStagePending = false;
+    this.bossExpeditionStagedProfileId = null;
+    if (this.bossExpeditionModal) {
+      this.bossExpeditionModal.dataset.stagedBossProfileId = '';
+      this.bossExpeditionModal.setAttribute('aria-busy', 'false');
+    }
+    this._syncWorldModalRootState();
+    if (restoreFocus) this._restoreWorldModalFocus();
+  }
+
+  renderBossExpeditionPrompt({
+    view = this.game.getBossHuntViewModel?.(),
+    stagedProfileId,
+    loading,
+    error,
+    message,
+  } = {}) {
+    if (!this.bossExpeditionModal || !this.bossExpeditionGrid) return;
+    if (stagedProfileId !== undefined) this.bossExpeditionStagedProfileId = stagedProfileId || null;
+    if (loading !== undefined) this.bossExpeditionLoading = Boolean(loading);
+    if (error !== undefined) this.bossExpeditionErrorMessage = String(error?.message ?? error ?? '');
+    if (message !== undefined) this.bossExpeditionLoadingMessage = String(message ?? '');
+
+    const profiles = view?.profiles ?? [];
+    if (!profiles.some((profile) => profile.id === this.bossExpeditionStagedProfileId)) {
+      this.bossExpeditionStagedProfileId = null;
+    }
+    const busy = this.bossExpeditionLoading || this.bossExpeditionStagePending;
+    const selectionBlocked = Boolean(view?.locked || view?.readOnly || busy);
+    const cards = profiles.map((profile) => this._createBossHuntCard(profile, {
+      action: 'stage-boss-expedition',
+      selected: profile.id === this.bossExpeditionStagedProfileId,
+      disabled: selectionBlocked,
+    }));
+    this.bossExpeditionGrid.replaceChildren(...cards);
+    this.bossExpeditionModal.dataset.stagedBossProfileId = this.bossExpeditionStagedProfileId ?? '';
+    this.bossExpeditionModal.setAttribute('aria-busy', String(busy));
+
+    const selectedProfile = profiles.find((profile) => profile.id === this.bossExpeditionStagedProfileId) ?? null;
+    if (this.bossExpeditionStatus) {
+      this.bossExpeditionStatus.textContent = this.bossExpeditionLoading
+        ? this.bossExpeditionLoadingMessage || 'Generating the selected dungeon. Please wait…'
+        : this.bossExpeditionStagePending
+          ? 'Staging Boss Hunt selection…'
+          : view?.locked
+            ? 'A Boss Hunt is already locked for the active expedition.'
+            : view?.readOnly
+              ? 'Boss Hunt storage is read-only. An expedition cannot begin.'
+              : selectedProfile
+                ? `${selectedProfile.title} staged. Begin Expedition when ready.`
+                : 'Select a Boss Hunt to continue.';
+    }
+    if (this.bossExpeditionError) {
+      const alertMessage = this.bossExpeditionErrorMessage || String(view?.warning ?? '');
+      this.bossExpeditionError.hidden = !alertMessage;
+      this.bossExpeditionError.textContent = alertMessage;
+    }
+    if (this.bossExpeditionBeginButton) {
+      this.bossExpeditionBeginButton.disabled = Boolean(
+        !selectedProfile || selectionBlocked,
+      );
+    }
+    for (const cancelButton of this.bossExpeditionModal.querySelectorAll(
+      '[data-action="cancel-expedition"], [data-action="dismiss-expedition"]',
+    )) {
+      cancelButton.disabled = busy;
+    }
+  }
+
+  setBossExpeditionLoading(loading, message = '') {
+    this.bossExpeditionLoading = Boolean(loading);
+    this.bossExpeditionLoadingMessage = typeof message === 'object'
+      ? String(message?.message ?? '')
+      : String(message ?? '');
+    if (this.bossExpeditionLoading) this.bossExpeditionErrorMessage = '';
+    this.renderBossExpeditionPrompt();
+  }
+
+  setBossExpeditionError(error) {
+    this.bossExpeditionLoading = false;
+    this.bossExpeditionLoadingMessage = '';
+    this.bossExpeditionErrorMessage = String(error?.message ?? error ?? 'Unable to begin the expedition.');
+    this.renderBossExpeditionPrompt();
+  }
+
+  openDungeonAbandonPrompt({ description = '', expeditionLabel = '' } = {}) {
+    this.expeditionAbandonLoading = false;
+    this.expeditionAbandonLoadingMessage = '';
+    this.expeditionAbandonErrorMessage = '';
+    this._captureWorldModalFocus();
+    if (this.bossExpeditionModal) {
+      this.bossExpeditionModal.hidden = true;
+      this.bossExpeditionModal.setAttribute('aria-hidden', 'true');
+    }
+    if (this.expeditionAbandonModal) {
+      this.expeditionAbandonModal.hidden = false;
+      this.expeditionAbandonModal.setAttribute('aria-hidden', 'false');
+    }
+    if (this.expeditionAbandonDescription) {
+      this.expeditionAbandonDescription.textContent = description || (
+        expeditionLabel
+          ? `Leaving ${expeditionLabel} ends this run. Unsecured dungeon progress and uncollected rewards will be lost.`
+          : 'Returning through the entrance ends this run. Unsecured dungeon progress and uncollected rewards will be lost.'
+      );
+    }
+    this._syncWorldModalRootState();
+    this.renderDungeonAbandonPrompt();
+    this._focusWorldModal(this.expeditionAbandonModal, '[data-action="cancel-abandon-expedition"]');
+    return { ok: true };
+  }
+
+  closeDungeonAbandonPrompt({ restoreFocus = true } = {}) {
+    if (this.expeditionAbandonModal) {
+      this.expeditionAbandonModal.hidden = true;
+      this.expeditionAbandonModal.setAttribute('aria-hidden', 'true');
+      this.expeditionAbandonModal.setAttribute('aria-busy', 'false');
+    }
+    this.expeditionAbandonLoading = false;
+    this.expeditionAbandonLoadingMessage = '';
+    this.expeditionAbandonErrorMessage = '';
+    this._syncWorldModalRootState();
+    if (restoreFocus) this._restoreWorldModalFocus();
+  }
+
+  renderDungeonAbandonPrompt({ loading, error, message } = {}) {
+    if (!this.expeditionAbandonModal) return;
+    if (loading !== undefined) this.expeditionAbandonLoading = Boolean(loading);
+    if (error !== undefined) this.expeditionAbandonErrorMessage = String(error?.message ?? error ?? '');
+    if (message !== undefined) this.expeditionAbandonLoadingMessage = String(message ?? '');
+    this.expeditionAbandonModal.setAttribute('aria-busy', String(this.expeditionAbandonLoading));
+    if (this.expeditionAbandonStatus) {
+      this.expeditionAbandonStatus.textContent = this.expeditionAbandonLoading
+        ? this.expeditionAbandonLoadingMessage || 'Returning to the overworld…'
+        : 'You can cancel and continue exploring.';
+    }
+    if (this.expeditionAbandonError) {
+      this.expeditionAbandonError.hidden = !this.expeditionAbandonErrorMessage;
+      this.expeditionAbandonError.textContent = this.expeditionAbandonErrorMessage;
+    }
+    for (const button of this.expeditionAbandonModal.querySelectorAll('button')) {
+      button.disabled = this.expeditionAbandonLoading;
+    }
+  }
+
+  setDungeonAbandonLoading(loading, message = '') {
+    this.expeditionAbandonLoading = Boolean(loading);
+    this.expeditionAbandonLoadingMessage = typeof message === 'object'
+      ? String(message?.message ?? '')
+      : String(message ?? '');
+    if (this.expeditionAbandonLoading) this.expeditionAbandonErrorMessage = '';
+    this.renderDungeonAbandonPrompt();
+  }
+
+  setDungeonAbandonError(error) {
+    this.expeditionAbandonLoading = false;
+    this.expeditionAbandonLoadingMessage = '';
+    this.expeditionAbandonErrorMessage = String(error?.message ?? error ?? 'Unable to return to camp.');
+    this.renderDungeonAbandonPrompt();
+  }
+
+  isWorldModalOpen() {
+    return Boolean(
+      (this.bossExpeditionModal && !this.bossExpeditionModal.hidden)
+      || (this.expeditionAbandonModal && !this.expeditionAbandonModal.hidden),
+    );
+  }
+
+  _captureWorldModalFocus() {
+    if (!this.isWorldModalOpen()) {
+      const activeElement = document.activeElement;
+      this.worldModalReturnFocus = activeElement && activeElement !== document.body
+        ? activeElement
+        : null;
+    }
+    try {
+      document.exitPointerLock?.();
+    } catch {
+      // Pointer lock is best-effort; the modal remains fully usable without it.
+    }
+  }
+
+  _syncWorldModalRootState() {
+    this.root?.classList.toggle('is-world-modal-open', this.isWorldModalOpen());
+  }
+
+  _focusWorldModal(modal, preferredSelector = '') {
+    queueMicrotask(() => {
+      if (!modal || modal.hidden) return;
+      const preferred = preferredSelector ? modal.querySelector(preferredSelector) : null;
+      (preferred ?? modal).focus?.({ preventScroll: true });
+    });
+  }
+
+  _restoreWorldModalFocus() {
+    const target = this.worldModalReturnFocus;
+    this.worldModalReturnFocus = null;
+    if (target?.isConnected) target.focus?.({ preventScroll: true });
+  }
+
+  _trapWorldModalFocus(event, modal) {
+    const controls = [...modal.querySelectorAll(
+      'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    )].filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+    if (!controls.length) {
+      event.preventDefault();
+      modal.focus?.();
+      return;
+    }
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    } else if (!modal.contains(document.activeElement)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  _worldActionSucceeded(result) {
+    return result !== false && result?.ok !== false;
+  }
+
+  _worldActionFailureMessage(result, fallback) {
+    return String(result?.message ?? result?.error?.message ?? fallback);
+  }
+
+  async _stageBossExpedition(profileId) {
+    if (!profileId || this.bossExpeditionLoading || this.bossExpeditionStagePending) return;
+    if (typeof this.game.stageBossExpedition !== 'function') {
+      this.setBossExpeditionError('Boss Hunt staging is unavailable.');
+      return;
+    }
+    this.bossExpeditionStagePending = true;
+    this.bossExpeditionErrorMessage = '';
+    this.renderBossExpeditionPrompt();
+    try {
+      const result = await this.game.stageBossExpedition(profileId);
+      if (!this._worldActionSucceeded(result)) {
+        this.bossExpeditionErrorMessage = this._worldActionFailureMessage(result, 'That Boss Hunt could not be staged.');
+      } else {
+        this.bossExpeditionStagedProfileId = result?.stagedProfileId ?? result?.profileId ?? profileId;
+      }
+    } catch (error) {
+      this.bossExpeditionErrorMessage = error?.message ?? 'That Boss Hunt could not be staged.';
+    } finally {
+      this.bossExpeditionStagePending = false;
+      this.renderBossExpeditionPrompt();
+    }
+  }
+
+  async _confirmBossExpedition() {
+    if (!this.bossExpeditionStagedProfileId || this.bossExpeditionLoading) return;
+    if (typeof this.game.confirmBossExpedition !== 'function') {
+      this.setBossExpeditionError('Dungeon loading is unavailable.');
+      return;
+    }
+    this.setBossExpeditionLoading(true, 'Generating the selected dungeon. Please wait…');
+    try {
+      const result = await this.game.confirmBossExpedition();
+      if (!this._worldActionSucceeded(result)) {
+        this.setBossExpeditionError(this._worldActionFailureMessage(result, 'The dungeon could not be prepared.'));
+        return;
+      }
+      this.closeBossExpeditionPrompt({ restoreFocus: false });
+    } catch (error) {
+      this.setBossExpeditionError(error);
+    }
+  }
+
+  async _cancelBossExpeditionPrompt() {
+    if (this.bossExpeditionLoading || this.bossExpeditionStagePending) return;
+    if (typeof this.game.cancelBossExpeditionPrompt !== 'function') {
+      this.setBossExpeditionError('Boss selection cannot be closed right now.');
+      return;
+    }
+    try {
+      const result = await this.game.cancelBossExpeditionPrompt();
+      if (!this._worldActionSucceeded(result)) {
+        this.setBossExpeditionError(this._worldActionFailureMessage(result, 'Boss selection cannot be closed right now.'));
+        return;
+      }
+      this.closeBossExpeditionPrompt();
+    } catch (error) {
+      this.setBossExpeditionError(error);
+    }
+  }
+
+  async _confirmDungeonAbandon() {
+    if (this.expeditionAbandonLoading) return;
+    if (typeof this.game.confirmDungeonAbandon !== 'function') {
+      this.setDungeonAbandonError('The camp return route is unavailable.');
+      return;
+    }
+    this.setDungeonAbandonLoading(true, 'Ending the expedition and rebuilding camp…');
+    try {
+      const result = await this.game.confirmDungeonAbandon();
+      if (!this._worldActionSucceeded(result)) {
+        this.setDungeonAbandonError(this._worldActionFailureMessage(result, 'The expedition could not be abandoned.'));
+        return;
+      }
+      this.closeDungeonAbandonPrompt({ restoreFocus: false });
+    } catch (error) {
+      this.setDungeonAbandonError(error);
+    }
+  }
+
+  async _cancelDungeonAbandon() {
+    if (this.expeditionAbandonLoading) return;
+    if (typeof this.game.cancelDungeonAbandon !== 'function') {
+      this.setDungeonAbandonError('The expedition prompt cannot be closed right now.');
+      return;
+    }
+    try {
+      const result = await this.game.cancelDungeonAbandon();
+      if (!this._worldActionSucceeded(result)) {
+        this.setDungeonAbandonError(this._worldActionFailureMessage(result, 'The expedition prompt cannot be closed right now.'));
+        return;
+      }
+      this.closeDungeonAbandonPrompt();
+    } catch (error) {
+      this.setDungeonAbandonError(error);
+    }
   }
 
   setInventoryOpen(open, { mode = 'garage' } = {}) {
@@ -1348,66 +1735,76 @@ export class UIManager {
         ? `${view.pendingRecoveryCount} durable Boss Recover${view.pendingRecoveryCount === 1 ? 'y is' : 'ies are'} waiting for Roll's Identify All analysis.`
         : 'No unexamined Boss Recoveries. First clears guarantee their featured material.';
     }
-    const cards = (view.profiles ?? []).map((profile) => {
-      const catalogRewardMaterial = getReaverbotBossRewardMaterial(profile.id);
-      const rewardDiscovered = Boolean(
-        profile.rewardDiscovered === true
-        || (catalogRewardMaterial
-          && this.game.rollSalvageStorage?.hasDiscoveredPart?.(catalogRewardMaterial.id)),
-      );
-      const discovered = Boolean(profile.discovered || rewardDiscovered);
-      const material = rewardDiscovered
-        ? profile.rewardMaterial ?? catalogRewardMaterial
-        : profile.material;
-      const ownedCount = rewardDiscovered
-        ? profile.rewardOwnedCount
-          ?? this.game.rollSalvageStorage?.getPartCount?.(material?.id)
-          ?? 0
-        : profile.ownedCount ?? 0;
-      const linkedRecipes = discovered
-        ? [
-            ...(profile.linkedRecipes ?? []),
-            ...ARM_GEAR_RECIPE_LIST
-              .filter((recipe) => material && Number(recipe.requirements?.parts?.[material.id] ?? 0) > 0)
-              .map((recipe) => ({ id: recipe.id, name: recipe.label })),
-          ].filter((recipe, index, recipes) => (
-            recipes.findIndex((candidate) => candidate.id === recipe.id) === index
-          ))
-        : [];
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = `boss-hunt-card${profile.selected ? ' is-selected' : ''}`;
-      button.dataset.action = 'boss-hunt-select';
-      button.dataset.bossProfileId = profile.id;
-      button.setAttribute('aria-pressed', String(profile.selected));
-      button.disabled = Boolean(view.locked || view.readOnly);
-
-      const portrait = document.createElement('img');
-      portrait.src = profile.portraitUrl;
-      portrait.alt = '';
-      portrait.loading = 'lazy';
-      portrait.addEventListener('error', () => { portrait.hidden = true; }, { once: true });
-      const body = document.createElement('span');
-      body.className = 'boss-hunt-card-body';
-      const title = document.createElement('h3');
-      title.textContent = profile.title;
-      const clue = document.createElement('p');
-      clue.textContent = discovered
-        ? `${material?.name ?? profile.roleClue} · owned ${ownedCount}`
-        : `Signature clue: ${profile.roleClue}`;
-      const status = document.createElement('strong');
-      status.textContent = `${profile.victoryCount} victor${profile.victoryCount === 1 ? 'y' : 'ies'} · ${profile.repeatStatus}`;
-      body.append(title, clue, status);
-      button.append(portrait, body);
-      if (linkedRecipes.length) {
-        const recipes = document.createElement('span');
-        recipes.className = 'boss-hunt-recipes';
-        recipes.textContent = `Known recipes: ${linkedRecipes.map((recipe) => recipe.name).join(', ')}`;
-        button.append(recipes);
-      }
-      return button;
-    });
+    const cards = (view.profiles ?? []).map((profile) => this._createBossHuntCard(profile, {
+      action: 'boss-hunt-select',
+      selected: profile.selected,
+      disabled: Boolean(view.locked || view.readOnly),
+    }));
     this.bossHuntsGrid.replaceChildren(...cards);
+  }
+
+  _createBossHuntCard(profile, {
+    action = 'boss-hunt-select',
+    selected = Boolean(profile?.selected),
+    disabled = false,
+  } = {}) {
+    const catalogRewardMaterial = getReaverbotBossRewardMaterial(profile.id);
+    const rewardDiscovered = Boolean(
+      profile.rewardDiscovered === true
+      || (catalogRewardMaterial
+        && this.game.rollSalvageStorage?.hasDiscoveredPart?.(catalogRewardMaterial.id)),
+    );
+    const discovered = Boolean(profile.discovered || rewardDiscovered);
+    const material = rewardDiscovered
+      ? profile.rewardMaterial ?? catalogRewardMaterial
+      : profile.material;
+    const ownedCount = rewardDiscovered
+      ? profile.rewardOwnedCount
+        ?? this.game.rollSalvageStorage?.getPartCount?.(material?.id)
+        ?? 0
+      : profile.ownedCount ?? 0;
+    const linkedRecipes = discovered
+      ? [
+          ...(profile.linkedRecipes ?? []),
+          ...ARM_GEAR_RECIPE_LIST
+            .filter((recipe) => material && Number(recipe.requirements?.parts?.[material.id] ?? 0) > 0)
+            .map((recipe) => ({ id: recipe.id, name: recipe.label })),
+        ].filter((recipe, index, recipes) => (
+          recipes.findIndex((candidate) => candidate.id === recipe.id) === index
+        ))
+      : [];
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `boss-hunt-card${selected ? ' is-selected' : ''}`;
+    button.dataset.action = action;
+    button.dataset.bossProfileId = profile.id;
+    button.setAttribute('aria-pressed', String(selected));
+    button.disabled = disabled;
+
+    const portrait = document.createElement('img');
+    portrait.src = profile.portraitUrl;
+    portrait.alt = '';
+    portrait.loading = 'lazy';
+    portrait.addEventListener('error', () => { portrait.hidden = true; }, { once: true });
+    const body = document.createElement('span');
+    body.className = 'boss-hunt-card-body';
+    const title = document.createElement('h3');
+    title.textContent = profile.title;
+    const clue = document.createElement('p');
+    clue.textContent = discovered
+      ? `${material?.name ?? profile.roleClue} · owned ${ownedCount}`
+      : `Signature clue: ${profile.roleClue}`;
+    const status = document.createElement('strong');
+    status.textContent = `${profile.victoryCount} victor${profile.victoryCount === 1 ? 'y' : 'ies'} · ${profile.repeatStatus}`;
+    body.append(title, clue, status);
+    button.append(portrait, body);
+    if (linkedRecipes.length) {
+      const recipes = document.createElement('span');
+      recipes.className = 'boss-hunt-recipes';
+      recipes.textContent = `Known recipes: ${linkedRecipes.map((recipe) => recipe.name).join(', ')}`;
+      button.append(recipes);
+    }
+    return button;
   }
 
   _selectRollWorkshopTab(tab = 'salvage', { render = true } = {}) {
@@ -3152,6 +3549,57 @@ export class UIManager {
   }
 
   _bindEvents() {
+    this.bossExpeditionModal?.addEventListener('click', (event) => {
+      if (event.target === this.bossExpeditionModal) {
+        this._cancelBossExpeditionPrompt();
+        return;
+      }
+      const button = event.target.closest('button');
+      if (!button || button.disabled) return;
+      const action = button.dataset.action;
+      if (action === 'stage-boss-expedition') {
+        this._stageBossExpedition(button.dataset.bossProfileId);
+      } else if (action === 'begin-expedition') {
+        this._confirmBossExpedition();
+      } else if (action === 'cancel-expedition' || action === 'dismiss-expedition') {
+        this._cancelBossExpeditionPrompt();
+      }
+    });
+
+    this.expeditionAbandonModal?.addEventListener('click', (event) => {
+      if (event.target === this.expeditionAbandonModal) {
+        this._cancelDungeonAbandon();
+        return;
+      }
+      const button = event.target.closest('button');
+      if (!button || button.disabled) return;
+      const action = button.dataset.action;
+      if (action === 'confirm-abandon-expedition') {
+        this._confirmDungeonAbandon();
+      } else if (action === 'cancel-abandon-expedition' || action === 'dismiss-abandon-expedition') {
+        this._cancelDungeonAbandon();
+      }
+    });
+
+    document.addEventListener('keydown', (event) => {
+      const activeModal = this.bossExpeditionModal && !this.bossExpeditionModal.hidden
+        ? this.bossExpeditionModal
+        : this.expeditionAbandonModal && !this.expeditionAbandonModal.hidden
+          ? this.expeditionAbandonModal
+          : null;
+      if (!activeModal) return;
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (activeModal === this.bossExpeditionModal) this._cancelBossExpeditionPrompt();
+        else this._cancelDungeonAbandon();
+        return;
+      }
+      if (event.key === 'Tab') this._trapWorldModalFocus(event, activeModal);
+      event.stopPropagation();
+    }, true);
+
     this.inventoryButton?.addEventListener('click', () => {
       this.game.setInventoryOpen(!this.game.inventoryOpen);
     });

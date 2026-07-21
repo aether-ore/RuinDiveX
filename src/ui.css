@@ -147,6 +147,174 @@
 .boss-hunt-card strong { color: #ffd36f; font-size: 0.7rem; }
 .boss-hunt-recipes { grid-column: 1 / -1; color: #7edff1; font-size: 0.67rem; }
 
+/* World transition prompts */
+.world-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 160;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background:
+    radial-gradient(circle at 50% 32%, rgba(41, 72, 82, 0.26), transparent 48%),
+    rgba(3, 8, 12, 0.82);
+  backdrop-filter: blur(7px);
+  pointer-events: auto;
+}
+
+.world-modal[hidden] {
+  display: none;
+}
+
+.world-modal-panel {
+  width: min(940px, calc(100vw - 2rem));
+  max-height: min(820px, calc(100vh - 2rem));
+  overflow: hidden;
+  color: #e8f2f4;
+  background:
+    linear-gradient(135deg, rgba(34, 45, 48, 0.98), rgba(14, 19, 22, 0.99)),
+    #11171a;
+  border: 1px solid rgba(255, 211, 111, 0.62);
+  border-radius: 10px;
+  box-shadow:
+    0 30px 100px rgba(0, 0, 0, 0.74),
+    inset 0 0 40px rgba(88, 212, 230, 0.045);
+}
+
+.world-modal-header,
+.world-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.05rem;
+  border-color: rgba(142, 183, 194, 0.2);
+}
+
+.world-modal-header {
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+
+.world-modal-footer {
+  border-top-width: 1px;
+  border-top-style: solid;
+}
+
+.world-modal-header h1 {
+  margin: 0.15rem 0 0;
+  color: #fff0bd;
+  font-size: clamp(1.08rem, 2.2vw, 1.5rem);
+  letter-spacing: 0.02em;
+}
+
+.world-modal-eyebrow {
+  color: #70e9ff;
+  font: 700 0.66rem/1.2 monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.world-modal-close {
+  flex: 0 0 auto;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border-radius: 6px;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.world-modal-copy,
+.world-modal-error {
+  margin: 0;
+  padding: 0.82rem 1.05rem 0;
+  color: #b7c8cd;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.world-modal-error {
+  margin: 0.75rem 1.05rem 0;
+  padding: 0.62rem 0.75rem;
+  color: #ffd0bd;
+  background: rgba(113, 31, 22, 0.34);
+  border: 1px solid rgba(255, 125, 92, 0.48);
+  border-radius: 6px;
+}
+
+.boss-expedition-grid {
+  max-height: min(56vh, 590px);
+  margin: 0.75rem 0.85rem;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+}
+
+.boss-expedition-grid .boss-hunt-card.is-selected {
+  outline: 2px solid rgba(255, 211, 111, 0.76);
+  outline-offset: 1px;
+}
+
+.world-modal-status {
+  min-height: 1.25rem;
+  margin: 0;
+  color: #9fc7cf;
+  font: 650 0.72rem/1.35 monospace;
+}
+
+.world-modal-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.world-modal-actions button {
+  min-height: 2.5rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 6px;
+  font-weight: 800;
+}
+
+.world-modal-actions button:disabled,
+.world-modal[aria-busy="true"] .boss-hunt-card {
+  cursor: wait;
+  opacity: 0.54;
+}
+
+.world-modal-primary {
+  color: #172022;
+  background: linear-gradient(180deg, #ffe298, #dca73c);
+  border-color: #fff0bd;
+}
+
+.world-modal-primary:hover:not(:disabled),
+.world-modal-primary:focus-visible {
+  color: #111719;
+  background: linear-gradient(180deg, #fff1c5, #f1bd50);
+}
+
+.world-modal-danger {
+  color: #ffe0d2;
+  background: rgba(139, 42, 28, 0.42);
+  border-color: rgba(255, 128, 93, 0.68);
+}
+
+.expedition-abandon-panel {
+  width: min(560px, calc(100vw - 2rem));
+}
+
+.expedition-abandon-panel .world-modal-footer {
+  align-items: flex-end;
+  margin-top: 0.9rem;
+}
+
+#ui-root.is-world-modal-open .screen-aim-reticle,
+#ui-root.is-world-modal-open .screen-lock-on-indicator,
+#ui-root.is-world-modal-open .event-prompt {
+  opacity: 0;
+}
+
 .buster-recipe-hunts {
   display: flex;
   flex-wrap: wrap;
@@ -167,6 +335,19 @@
   .boss-hud.is-four-segment .boss-signature-track { order: 3; flex-basis: 100%; }
   .boss-hud.is-four-segment #boss-signature-status { min-width: 0; max-width: 58%; }
   .boss-hunts-grid { grid-template-columns: 1fr; }
+  .world-modal-header,
+  .world-modal-footer {
+    align-items: stretch;
+  }
+  .world-modal-footer {
+    flex-direction: column;
+  }
+  .world-modal-actions {
+    width: 100%;
+  }
+  .world-modal-actions button {
+    flex: 1 1 9rem;
+  }
 }
 
 * {

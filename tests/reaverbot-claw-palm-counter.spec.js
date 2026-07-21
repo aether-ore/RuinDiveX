@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('claw palm counters guard, interrupt, break, and replace the moveset without changing salvage identity', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=claw-palm-counter-runtime');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=claw-palm-counter-runtime');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

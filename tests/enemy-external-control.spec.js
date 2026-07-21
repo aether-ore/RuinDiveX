@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('enemy external control is exclusive and target-owned throws survive their carrier', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=external-control-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=external-control-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -282,7 +282,7 @@ test('enemy external control is exclusive and target-owned throws survive their 
 });
 
 test('player external control freezes input, owns collision constraints, and lands target-owned throws', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=player-external-control-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=player-external-control-proof');
   await page.waitForFunction(() => Boolean(window.game?.player));
 
   const result = await page.evaluate(() => {

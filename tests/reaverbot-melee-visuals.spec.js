@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('live melee Reaverbots expose independent armor silhouettes while keeping their red eye language readable', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/?reaverbotSeed=melee-visual-runtime-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=melee-visual-runtime-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

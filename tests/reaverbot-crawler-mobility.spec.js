@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('crawler artillery use layered chassis with articulated legs or driven wheel bogies', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/?reaverbotSeed=crawler-mobility-visual-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=crawler-mobility-visual-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

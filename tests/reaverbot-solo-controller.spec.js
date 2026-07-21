@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('solo Tractor Controller chooses MegaMan only after allies fall, then flips, zigzags, and leaves a dodgeable fixed beam', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=solo-controller-approach-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=solo-controller-approach-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -209,7 +209,7 @@ test('solo Tractor Controller chooses MegaMan only after allies fall, then flips
 });
 
 test('solo Tractor Controller can lift and throw MegaMan, preserves his flight after dying, and aborts when an ally appears', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=solo-controller-player-throw-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=solo-controller-player-throw-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

@@ -21,7 +21,7 @@ const FOLLOW_UP_TERMINAL_POSE_DEGREES = Object.freeze({
 });
 
 test('sword attack buffers the legacy inward slash after the new forward opener', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => (
     window.game?.player?._fbxAnimationLibraryLoaded === true
     && window.game?.player?._busterArmLoaded === true
@@ -207,7 +207,7 @@ test('sword attack buffers the legacy inward slash after the new forward opener'
 });
 
 test('each sword combo stage leaves a trail matching its authored sweep plane', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => (
     window.game?.player?._fbxAnimationLibraryLoaded === true
     && window.game?.player?._busterArmLoaded === true
@@ -343,7 +343,7 @@ test('each sword combo stage leaves a trail matching its authored sweep plane', 
 });
 
 test('sword follow-up completes in its authored outward guard without crossing the player body', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => (
     window.game?.player?._fbxAnimationLibraryLoaded === true
     && window.game?.player?._busterArmLoaded === true
@@ -563,7 +563,7 @@ test('sword follow-up completes in its authored outward guard without crossing t
 });
 
 test('sword follow-up does not play when the opener spends the remaining energy', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(({ openingSlash, followUpSlash }) => {
@@ -658,7 +658,7 @@ test('sword follow-up does not play when the opener spends the remaining energy'
 });
 
 test('manually reloading cancels the pending sword follow-up', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {

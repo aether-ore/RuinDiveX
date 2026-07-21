@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('airborne enemy drops fall to their local floor before hovering', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),

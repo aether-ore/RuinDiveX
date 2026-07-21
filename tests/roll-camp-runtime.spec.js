@@ -18,7 +18,7 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
     if (message.type() === 'error') runtimeErrors.push(message.text());
   });
 
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect(page.locator('canvas')).toHaveCount(1);
   await page.waitForFunction(() => {
     const dungeonGroup = window.game?.dungeon?.group;
@@ -574,7 +574,7 @@ test('Roll owns the camp services, animates contextually, and stays clear of the
 });
 
 test('Roll identifies hidden recoveries and keeps the stockpile out of Mega Man inventory', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -713,7 +713,7 @@ test('the Support Car fallback remains when the imported model is unavailable', 
     route.abort('failed')
   ));
 
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => {
     const group = window.game?.dungeon?.group;
     const supportCar = group?.getObjectByName('expeditionSupportCar');
@@ -762,7 +762,7 @@ test('the Support Car fallback remains when the imported model is unavailable', 
 });
 
 test('the workbench blocks the player while Roll remains usable across it', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => {
     const group = window.game?.dungeon?.group;
     const rollState = group?.getObjectByName('rollCaskettNpc')?.userData;

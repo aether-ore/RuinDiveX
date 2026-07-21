@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('quadruped Reaverbots use an articulated canine gait and modular jaw silhouettes', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/?reaverbotSeed=quadruped-canine-runtime-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=quadruped-canine-runtime-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

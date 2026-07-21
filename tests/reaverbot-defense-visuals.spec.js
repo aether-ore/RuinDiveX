@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('quadruped eyelids and the cross-body claw brace read as distinct defenses', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/?reaverbotSeed=defense-pose-visual-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=defense-pose-visual-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

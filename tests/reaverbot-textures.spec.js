@@ -83,7 +83,7 @@ test('procedural Reaverbot modules load, share, assign, and render their authore
   });
 
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/?reaverbotSeed=texture-runtime-browser-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=texture-runtime-browser-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const structural = await page.evaluate(async (expectedIds) => {

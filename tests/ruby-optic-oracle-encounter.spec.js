@@ -5,7 +5,7 @@ async function waitForGame(page) {
 }
 
 async function openRubyEncounter(page, seed) {
-  await page.goto(`/?bossDebug=1&reaverbotSeed=${seed}`);
+  await page.goto(`/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=${seed}`);
   await waitForGame(page);
   await page.evaluate(() => {
     const game = window.game;

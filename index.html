@@ -567,6 +567,101 @@
         <h1>Defeated</h1>
         <button id="restart-button">Restart</button>
       </section>
+
+      <section
+        id="boss-expedition-modal"
+        class="world-modal boss-expedition-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="boss-expedition-heading"
+        aria-describedby="boss-expedition-description"
+        aria-hidden="true"
+        aria-busy="false"
+        data-overworld-boss-modal
+        data-staged-boss-profile-id=""
+        tabindex="-1"
+        hidden
+      >
+        <div class="world-modal-panel boss-expedition-panel">
+          <header class="world-modal-header">
+            <div>
+              <span class="world-modal-eyebrow">Ruin Door · Boss Hunt Terminal</span>
+              <h1 id="boss-expedition-heading">Choose an expedition target</h1>
+            </div>
+            <button
+              type="button"
+              class="world-modal-close"
+              data-action="dismiss-expedition"
+              aria-label="Close boss selection"
+            >×</button>
+          </header>
+          <p id="boss-expedition-description" class="world-modal-copy">
+            Select a Boss Hunt, review its recovery clue, then begin the expedition. The ruin will not load until you confirm.
+          </p>
+          <p id="boss-expedition-error" class="world-modal-error" role="alert" hidden></p>
+          <div
+            id="boss-expedition-grid"
+            class="boss-hunts-grid boss-expedition-grid"
+            role="group"
+            aria-label="Boss Hunt expedition targets"
+          ></div>
+          <footer class="world-modal-footer">
+            <p id="boss-expedition-status" class="world-modal-status" role="status" aria-live="polite">
+              Select a Boss Hunt to continue.
+            </p>
+            <div class="world-modal-actions">
+              <button type="button" data-action="cancel-expedition">Cancel</button>
+              <button type="button" class="world-modal-primary" data-action="begin-expedition" disabled>
+                Begin Expedition
+              </button>
+            </div>
+          </footer>
+        </div>
+      </section>
+
+      <section
+        id="expedition-abandon-modal"
+        class="world-modal expedition-abandon-modal"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="expedition-abandon-heading"
+        aria-describedby="expedition-abandon-description"
+        aria-hidden="true"
+        aria-busy="false"
+        data-expedition-abandon-modal
+        tabindex="-1"
+        hidden
+      >
+        <div class="world-modal-panel expedition-abandon-panel">
+          <header class="world-modal-header">
+            <div>
+              <span class="world-modal-eyebrow">Sealed Ruin Entrance</span>
+              <h1 id="expedition-abandon-heading">Abandon this expedition?</h1>
+            </div>
+            <button
+              type="button"
+              class="world-modal-close"
+              data-action="dismiss-abandon-expedition"
+              aria-label="Continue exploring the dungeon"
+            >×</button>
+          </header>
+          <p id="expedition-abandon-description" class="world-modal-copy">
+            Returning through the entrance ends this run. Unsecured dungeon progress and uncollected rewards will be lost.
+          </p>
+          <p id="expedition-abandon-error" class="world-modal-error" role="alert" hidden></p>
+          <footer class="world-modal-footer">
+            <p id="expedition-abandon-status" class="world-modal-status" role="status" aria-live="polite">
+              You can cancel and continue exploring.
+            </p>
+            <div class="world-modal-actions">
+              <button type="button" data-action="cancel-abandon-expedition">Continue Expedition</button>
+              <button type="button" class="world-modal-danger" data-action="confirm-abandon-expedition">
+                Abandon and Return to Camp
+              </button>
+            </div>
+          </footer>
+        </div>
+      </section>
     </div>
 
     <script type="module" src="./src/main.js"></script>

@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('pouncers replace ordinary locomotion with spring quadruped, paired spring, or mono-pogo rigs', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/?reaverbotSeed=pounce-spring-mobility-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=pounce-spring-mobility-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

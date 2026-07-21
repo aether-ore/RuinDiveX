@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('player hits weaponize aerial self-detonators with a safe fall, re-vector, and recovery', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=weaponized-detonator-motion-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=weaponized-detonator-motion-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -261,7 +261,7 @@ test('player hits weaponize aerial self-detonators with a safe fall, re-vector, 
 });
 
 test('launched detonators use swept contact, friendly fire, player contact, and boss absorption exactly once', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=weaponized-detonator-impact-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=weaponized-detonator-impact-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

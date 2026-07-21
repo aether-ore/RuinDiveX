@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 async function prepareSharukurusu(page, { two = false } = {}) {
-  await page.goto('/?reaverbotSeed=sharukurusu-runtime');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=sharukurusu-runtime');
   await page.waitForFunction(() => Boolean(window.game && window.spawnCuratedReaverbot));
   await page.evaluate(({ twoInstances }) => {
     const { game } = window;
@@ -356,7 +356,7 @@ test('Sharukurusu keeps its authored ruby-eye texture on its combat-facing side'
 });
 
 test('generated keycard encounter preserves Sharukurusu elite and authored-asset contracts', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=sharukurusu-encounter');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=sharukurusu-encounter');
   await page.waitForFunction(() => Boolean(window.game?.spawner && window.game?.dungeonController));
   await page.evaluate(async () => {
     const { game } = window;

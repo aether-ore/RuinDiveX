@@ -233,6 +233,10 @@ export class DungeonController {
     this.trapPulseTimer = 0;
     this.environmentalStoryToastTimer = 0;
     this.pendingRoomAnnouncements = [];
+    this.disposed = false;
+    this.runtimeRoot = new THREE.Group();
+    this.runtimeRoot.name = 'dungeonControllerRuntimeRoot';
+    (dungeon?.group ?? game?.activeWorldBundle?.root ?? game?.scene)?.add?.(this.runtimeRoot);
 
     if (game?.player?.root) {
       this.lastSafePlayerPosition.copy(game.player.root.position);
@@ -240,6 +244,17 @@ export class DungeonController {
 
     this._bindConveyorVisuals();
     this._initializeConveyorPuzzles();
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.nearestInteractable = null;
+    this.pendingRoomAnnouncements.length = 0;
+    this.navigationCache.clear();
+    this.lastSafeEnemyPositions.clear();
+    // Keep the runtime root attached until the world-bundle resource pass.
+    // That pass owns and disposes every generated pickup geometry/material.
   }
 
   update(dt) {
@@ -1310,6 +1325,10 @@ export class DungeonController {
   }
 
   _updateExpeditionEntryState() {
+    if (this.game?.usesStreamedWorldLifecycle) {
+      this.game.expeditionActive = this.game.worldKind === 'dungeon';
+      return;
+    }
     if (this.game.ruinCompleted) {
       return;
     }
@@ -2383,7 +2402,7 @@ export class DungeonController {
     const floorPosition = position.clone();
     floorPosition.y = this.getFloorElevationAt(position);
     object.position.set(floorPosition.x, floorPosition.y + 0.42, floorPosition.z);
-    this.game.scene.add(object);
+    this.runtimeRoot.add(object);
     const definition = keycardId ? this.progressionManager.getKeycard(keycardId) : null;
 
     const keycard = {
@@ -3877,7 +3896,7 @@ export class DungeonController {
     let nearestDistanceSq = Infinity;
 
     for (const door of this.doors) {
-      if (!door.closed) {
+      if (!door.closed || door.interactionDisabled) {
         continue;
       }
 
@@ -4088,6 +4107,10 @@ export class DungeonController {
 
     if (interactable.action === 'extractRuin') {
       return `${interactable.label}: Return to camp`;
+    }
+
+    if (interactable.action === 'abandonRuin') {
+      return `${interactable.label}: Abandon expedition`;
     }
 
     return interactable.label;
@@ -4390,6 +4413,11 @@ export class DungeonController {
 
     if (interactable.action === 'extractRuin') {
       this.game.extractToCamp?.();
+      return;
+    }
+
+    if (interactable.action === 'abandonRuin') {
+      this.game.openDungeonAbandonPrompt?.();
       return;
     }
 

@@ -21,7 +21,7 @@ async function selectAscensionHunt(page) {
 }
 
 test('selected Ascension Engine hunt builds the authored Vertical Transit Reliquary contract', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-reliquary-runtime');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-reliquary-runtime');
   await waitForGame(page);
 
   expect(await selectAscensionHunt(page)).toMatchObject({
@@ -674,7 +674,7 @@ test('selected Ascension Engine hunt builds the authored Vertical Transit Reliqu
 });
 
 test('the first Ascension vent carries the real player onto the foundry middle landing', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-first-vent-transition');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-first-vent-transition');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -819,7 +819,7 @@ test('the first Ascension vent carries the real player onto the foundry middle l
 });
 
 test('board-triggered Ascension lifts return and rearm after the rider falls off', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-lift-fall-retry');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-lift-fall-retry');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -1013,7 +1013,7 @@ test('board-triggered Ascension lifts return and rearm after the rider falls off
 
 test('the complete Ascension route is executable through live impacts, traversal, seals, and summit victory', async ({ page }) => {
   test.setTimeout(60_000);
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-complete-live-route');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-complete-live-route');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -2160,7 +2160,7 @@ test('the complete Ascension route is executable through live impacts, traversal
 });
 
 test('summit punish expiry resumes Phase II without replaying the summit transition', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-summit-punish-resume');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-summit-punish-resume');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -2538,7 +2538,7 @@ test('summit punish expiry resumes Phase II without replaying the summit transit
 });
 
 test('Ascension entry and extraction preserve the original hub, camp, and NPC services', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-exterior-transition');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-exterior-transition');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -2593,7 +2593,7 @@ test('Ascension entry and extraction preserve the original hub, camp, and NPC se
 });
 
 test('only the selected Ascension hunt replaces the procedural dungeon interior', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-selection-routing');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-selection-routing');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -2661,7 +2661,7 @@ test('only the selected Ascension hunt replaces the procedural dungeon interior'
 });
 
 test('authored Ascension Engine exposes four seal anchors, blocks body damage, and cleans transient resources', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-authored-runtime');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-authored-runtime');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -2907,7 +2907,7 @@ test('authored Ascension Engine exposes four seal anchors, blocks body damage, a
 });
 
 test('shaft falls preserve combat resources, supported checkpoint corners stay valid, and defeat restores resources', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-checkpoint-lifecycle');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-checkpoint-lifecycle');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -3076,7 +3076,7 @@ test('shaft falls preserve combat resources, supported checkpoint corners stay v
 });
 
 test('debug Ascension fallback stage is wholly removed from a generic dungeon on boss disposal', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-owned-stage-cleanup');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-owned-stage-cleanup');
   await waitForGame(page);
 
   const result = await page.evaluate(async () => {
@@ -3187,7 +3187,7 @@ test('debug Ascension fallback stage is wholly removed from a generic dungeon on
 });
 
 test('missing persistence bridges fail closed for checkpoint and final-seal commits', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-missing-commit-bridges');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-missing-commit-bridges');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 
@@ -3307,7 +3307,7 @@ test('missing persistence bridges fail closed for checkpoint and final-seal comm
 });
 
 test('debug seal hits commit in order, remove exact health quarters, and begin phase two after seal three', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ascension-seal-order-runtime');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ascension-seal-order-runtime');
   await waitForGame(page);
   expect((await selectAscensionHunt(page)).ok).toBe(true);
 

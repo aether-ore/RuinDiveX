@@ -48,7 +48,7 @@ const JUMP_SLASH_AERIAL_POSE = Object.freeze({
   rightAnkle: Object.freeze({ pitch: -2.9, yaw: 0.3, roll: 2.3 }),
 });
 async function openLoadedGame(page) {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => (
     window.game?.player?._fbxAnimationLibraryLoaded === true
     && window.game?.player?._busterArmLoaded === true

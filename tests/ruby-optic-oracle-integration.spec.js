@@ -5,7 +5,7 @@ async function waitForGame(page) {
 }
 
 test('Ruby encounter owns movement, shutter defense, interrupt scheduling, and channel stagger damage', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ruby-integration-ownership');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ruby-integration-ownership');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -141,7 +141,7 @@ test('Ruby encounter owns movement, shutter defense, interrupt scheduling, and c
 });
 
 test('arena extraction disposes and removes the live Ruby boss and prepares a fresh encounter attempt', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ruby-integration-extraction');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ruby-integration-extraction');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -195,7 +195,7 @@ test('arena extraction disposes and removes the live Ruby boss and prepares a fr
 });
 
 test('worst-aligned Ascension lenses retain two routes and a real fall can recover onto the staircase', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ruby-worst-alignment-recovery');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ruby-worst-alignment-recovery');
   await waitForGame(page);
 
   const result = await page.evaluate(async () => {
@@ -599,7 +599,7 @@ test('worst-aligned Ascension lenses retain two routes and a real fall can recov
 
 test('Ruby phase-two scheduler stays within caps at 30, 60, and 120 Hz and releases scene-owned resources', async ({ page }) => {
   test.slow();
-  await page.goto('/?bossDebug=1&reaverbotSeed=ruby-phase-two-stress');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ruby-phase-two-stress');
   await waitForGame(page);
 
   const runs = await page.evaluate(() => {
@@ -821,7 +821,7 @@ test('Ruby phase-two scheduler stays within caps at 30, 60, and 120 Hz and relea
 });
 
 test('Ruby defeat, retry, and boss death clean the encounter in the same frame', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=ruby-death-retry-cleanup');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=ruby-death-retry-cleanup');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {

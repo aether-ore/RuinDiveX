@@ -50,3 +50,18 @@ const server = createServer(async (request, response) => {
 server.listen(port, '127.0.0.1', () => {
   process.stdout.write(`http://127.0.0.1:${port}/\n`);
 });
+
+let shuttingDown = false;
+const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  // Playwright owns isolated development servers. Close persistent browser
+  // connections as part of teardown so Windows test runs do not remain alive
+  // after their last test has already completed.
+  server.closeAllConnections?.();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 1_000).unref();
+};
+
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);

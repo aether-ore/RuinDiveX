@@ -1806,10 +1806,7 @@ export class ReaverbotEnemy extends Enemy {
       return { handled: true, moving: false, moveAmount: 0 };
     }
 
-    tempA.copy(game.player.root.position).sub(this.root.position).setY(0);
-    const distance = tempA.length();
-    if (distance > 0.001) tempA.divideScalar(distance);
-    else tempA.copy(WORLD_FORWARD);
+    const distance = this._getAttackVectorToPlayer(game, tempA);
 
     if (brain.state !== 'commit'
       || !['charge', 'pounce', 'clawMoveset'].includes(effectiveAttackKind)) {
@@ -2664,6 +2661,32 @@ export class ReaverbotEnemy extends Enemy {
       bodyClearance,
       mouthClearance,
     );
+  }
+
+  _getJawContactPoint(target = new THREE.Vector3()) {
+    if (this.genome.modules.weapon.attackKind !== 'jawCombo'
+      || !this.visual?.weapon?.muzzle) {
+      return target.copy(this.root.position);
+    }
+    this.root.updateMatrixWorld(true);
+    return this.visual.weapon.muzzle.getWorldPosition(target);
+  }
+
+  _getAttackVectorToPlayer(game, target = new THREE.Vector3()) {
+    if (this._getEffectiveAttackKind() === 'jawCombo') {
+      // Crusher jaws project well beyond the chassis origin. Their positioning
+      // envelope must therefore begin at the assembled mouth's actual contact
+      // point; measuring from the root makes the quadruped keep advancing after
+      // its visible weapon is already close enough to begin the snap telegraph.
+      this._getJawContactPoint(tempG);
+      target.copy(game.player.root.position).sub(tempG).setY(0);
+    } else {
+      target.copy(game.player.root.position).sub(this.root.position).setY(0);
+    }
+    const distance = target.length();
+    if (distance > 0.001) target.divideScalar(distance);
+    else target.copy(WORLD_FORWARD);
+    return distance;
   }
 
   _resolveJawPlayerOverlap(dt, game) {

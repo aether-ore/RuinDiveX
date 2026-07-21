@@ -77,6 +77,16 @@ import {
 } from './reaverbots/ReaverbotBossCatalog.js';
 import { ASCENSION_ENGINE_PROFILE_ID } from './reaverbots/bosses/AscensionEngineContract.js';
 import { hashSeed, SeededRandom } from './reaverbots/SeededRandom.js';
+import {
+  OverworldController,
+  assertLoadedWorldBundle,
+  assembleOverworld,
+  createAuthoredOverworldPlan,
+  createLoadedWorldBundle,
+  createWorldLifecycleState,
+  disposeOverworldFacade,
+  validateMountedRuntimeStateHost,
+} from './overworld/index.js';
 
 const POSE_DEBUG_CAMERA_DEFAULT_DISTANCE = 8.3;
 const CAMERA_LOOK_OFFSET = new THREE.Vector3(0, 1.1, 0);
@@ -106,7 +116,15 @@ const CAMERA_WALL_OCCLUSION_TARGET_HEIGHT = 1.25;
 const DUNGEON_RENDER_CULL_UPDATE_INTERVAL = 0.2;
 const DUNGEON_RENDER_CULL_HIDE_DISTANCE = 68;
 const DUNGEON_RENDER_CULL_SHOW_DISTANCE = 54;
+// The overworld fog is fully opaque at 115m. Never remove a streamed chunk
+// while it can still be seen through clear air; the show distance retains
+// hysteresis so walking along a chunk boundary cannot flicker geometry. Keep
+// these separate from the legacy values so streamed-world support cannot
+// silently change Dungeon Generation V1's render behavior.
+const OVERWORLD_RENDER_CULL_HIDE_DISTANCE = 116;
+const OVERWORLD_RENDER_CULL_SHOW_DISTANCE = 104;
 const CAMERA_OCCLUSION_BIN_SIZE = 11.2;
+const STREAMED_DUNGEON_DOOR_HEIGHT = 15.6;
 const DEBUG_LEDGE_CUBE_WIDTH = 3;
 const DEBUG_LEDGE_CUBE_DEPTH = 3;
 const DEBUG_LEDGE_CUBE_HEIGHT = 3;
@@ -217,7 +235,181 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'reaverbotSeedLabel',
   'reaverbotGeneration',
   'reaverbotRunSeed',
+  'activeWorldBundle',
+  'overworldController',
+  'worldKind',
+  'transitionState',
+  'worldLifecycle',
+  'worldGenerationCount',
+  'worldDisposalCount',
+  'lastWorldDisposalStats',
 ]);
+
+function readStartupWorldMode(roomPreview = null) {
+  try {
+    const params = new URLSearchParams(globalThis.location?.search ?? '');
+    if (roomPreview || params.has('roomPreview') || params.get('startupWorld') === 'dungeon') {
+      return 'dungeon';
+    }
+  } catch {
+    // Browser URL state is optional in isolated unit environments.
+  }
+  return 'overworld';
+}
+
+class OverworldRuntimeController {
+  constructor(game, facade) {
+    this.game = game;
+    this.dungeon = facade;
+    this.facade = facade;
+    this.core = new OverworldController({ plan: facade.plan, facade });
+    this.plan = facade.plan;
+    this.safeInteractables = facade.safeInteractables ?? [];
+    this.nearestInteractable = null;
+    this.lastSafePlayerPosition = new THREE.Vector3().copy(facade.playerStart);
+    this.npcAnimationMixers = facade.npcAnimationMixers ?? [];
+    this.npcAnimators = facade.npcAnimators ?? [];
+    this.keycardCount = 0;
+  }
+
+  update() {
+    const position = this.game?.player?.root?.position;
+    if (!position) return;
+    const interaction = this.core.update(position);
+    this.nearestInteractable = interaction ? {
+      kind: 'safe',
+      target: interaction,
+      label: interaction.action === 'openBossHuntSelection'
+        ? 'Sealed Ruin Door: Choose Boss Hunt'
+        : interaction.action === 'roll'
+          ? `${interaction.label}: Workshop`
+          : interaction.label,
+      color: interaction.color,
+    } : null;
+    this.facade.updateLighting?.(position);
+  }
+
+  resolvePlayerMovement(fromPosition) {
+    const player = this.game?.player;
+    if (!player?.root || !fromPosition) return;
+    if (player.shouldIgnoreGroundConstraint?.() || player.isPowerKnockbackActive?.()) return;
+    const target = player.root.position.clone();
+    const resolved = this.core.resolveMovement(fromPosition, target, {
+      maximumStep: this.plan.dimensions.groundedStepAllowance,
+    });
+    if (resolved.blocked || resolved.slid) {
+      player.root.position.x = resolved.position.x;
+      player.root.position.z = resolved.position.z;
+      if (resolved.blocked) player.cancelJetSkateBoost?.();
+    }
+    const height = this.core.getHeightAt(player.root.position.x, player.root.position.z);
+    if (Number.isFinite(height) && !player.isJumpAirborne?.()) player.root.position.y = height;
+    if (!resolved.blocked) this.lastSafePlayerPosition.copy(player.root.position);
+  }
+
+  getNearestInteractable() {
+    return this.nearestInteractable;
+  }
+
+  activateNearest() {
+    const interaction = this.nearestInteractable?.target;
+    if (!interaction) return false;
+    if (interaction.action === 'openBossHuntSelection') {
+      this.game.openBossExpeditionPrompt?.();
+      return true;
+    }
+    if (interaction.action === 'roll') {
+      interaction.object?.userData?.rollAnimator?.noteInteraction?.();
+      this.game.setInventoryOpen?.(true, { mode: 'roll' });
+      this.game.ui?.showToast?.(
+        this.game.lastExpeditionSummary
+          ? `Roll: ${this.game.lastExpeditionSummary}`
+          : 'Roll: workshop and Boss Hunt support ready',
+        '#6bdcff',
+      );
+      return true;
+    }
+    return false;
+  }
+
+  getObjectiveText() {
+    return 'Choose a Boss Hunt at the sealed ruin door';
+  }
+
+  getMinimapSnapshot() {
+    return null;
+  }
+
+  getKeycardHudLabel() {
+    return 'Camp';
+  }
+
+  // The authored overworld is a peaceful expedition staging area. Treat the
+  // entire bundle as a safe zone so combat cannot leave projectiles, mines, or
+  // other host-owned transient effects waiting for the streamed dungeon.
+  isPlayerInSafeZone() {
+    return true;
+  }
+
+  getFloorElevationAt(position) {
+    return this.core.getHeightAt(position?.x, position?.z) ?? 0;
+  }
+
+  getSurfaceElevationAt(position) {
+    return this.getFloorElevationAt(position);
+  }
+
+  getRampSurfaceElevationAt() {
+    return null;
+  }
+
+  getPlayerRailSupportElevation() {
+    return null;
+  }
+
+  isPositionWalkable(position) {
+    return this.core.isPositionWalkable(position);
+  }
+
+  resolvePowerKnockbackTravel(fromPosition, position) {
+    const result = this.core.resolveMovement(fromPosition, position, { maximumStep: 1.4 });
+    return result.blocked ? { blocked: true, position: result.position.clone?.() ?? new THREE.Vector3(
+      result.position.x,
+      result.position.y,
+      result.position.z,
+    ) } : null;
+  }
+
+  resolvePowerKnockbackLanding(position) {
+    const height = this.core.getHeightAt(position.x, position.z);
+    return {
+      position: Number.isFinite(height) ? position.clone().setY(height) : this.lastSafePlayerPosition.clone(),
+      mode: Number.isFinite(height) ? 'overworldTerrain' : 'overworldLastSafe',
+    };
+  }
+
+  isPlayerAtRollWorkshop() {
+    const roll = this.safeInteractables.find(({ action }) => action === 'roll');
+    return Boolean(roll && this.game.player.root.position.distanceToSquared(roll.position) <= (roll.interactionRadius ?? 2.4) ** 2);
+  }
+
+  getUnspawnedEncounterAt() {
+    return null;
+  }
+
+  constrainEnemies() {}
+
+  updateNpcVisuals(dt, { allowAmbient = true } = {}) {
+    for (const animator of this.npcAnimators) animator?.update?.(dt, { allowAmbient });
+    const animated = new Set(this.npcAnimators.map(({ mixer }) => mixer));
+    for (const mixer of this.npcAnimationMixers) if (!animated.has(mixer)) mixer?.update?.(dt);
+  }
+
+  dispose() {
+    this.core.dispose();
+    this.nearestInteractable = null;
+  }
+}
 
 function isBusterLabFeatureEnabled() {
   // The Custom Buster is a canonical arm system. URL parameters now select
@@ -625,6 +817,31 @@ export class Game {
     this.combatDepthLevel = 1;
     this.animationPreview = this._readAnimationPreviewFromUrl();
     this.roomPreview = this._readRoomPreviewFromUrl();
+    this.startupWorldMode = readStartupWorldMode(this.roomPreview);
+    this.usesStreamedWorldLifecycle = this.startupWorldMode === 'overworld';
+    this.worldKind = this.startupWorldMode;
+    this.worldLifecycle = createWorldLifecycleState(this.startupWorldMode);
+    this.transitionState = this.worldLifecycle.state;
+    this.activeWorldBundle = null;
+    this.overworldPlan = this.usesStreamedWorldLifecycle ? createAuthoredOverworldPlan() : null;
+    this.overworldController = null;
+    this.worldGenerationCount = 0;
+    this.worldDisposalCount = 0;
+    this.lastWorldDisposalStats = null;
+    this.worldLifecycleEventLog = [Object.freeze({
+      sequence: 0,
+      event: 'initialized',
+      state: this.transitionState,
+      worldKind: this.worldKind,
+      generationCount: 0,
+      disposalCount: 0,
+    })];
+    this.worldLifecycleEventSequence = 1;
+    this.worldTransitionInFlight = null;
+    this.hostEventBindingPasses = 0;
+    this.hostEventListenerRegistrations = 0;
+    this.stagedBossProfileId = null;
+    this.lastExpeditionSummary = null;
     this.inventoryOpen = false;
     this.poseDebugOpen = false;
     this.isGameOver = false;
@@ -824,7 +1041,13 @@ export class Game {
     );
     this.spawner = new EnemySpawner(this);
     this.ui = new UIManager(this);
-    this.dungeonController = new DungeonController(this, this.dungeon);
+    this.dungeonController = this.worldKind === 'overworld'
+      ? new OverworldRuntimeController(this, this.dungeon)
+      : new DungeonController(this, this.dungeon);
+    this.overworldController = this.worldKind === 'overworld'
+      ? this.dungeonController.core
+      : null;
+    if (this.activeWorldBundle) this.activeWorldBundle.controller = this.dungeonController;
     this.bossStageRuntime?.mount?.(this);
     this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
       this.dungeonController.resolvePowerKnockbackTravel(fromPosition, position)
@@ -832,7 +1055,7 @@ export class Game {
     this.player.powerKnockbackLandingResolver = ({ position, direction, originPosition }) => (
       this.dungeonController.resolvePowerKnockbackLanding(position, direction, originPosition)
     );
-    this.mapEvents = new MapEventSystem(this);
+    this.mapEvents = this._createMapEventSystemForWorld();
 
     this._addStarterItems();
     if (this.busterLabEnabled && !deferBusterLabInitialization) {
@@ -840,7 +1063,7 @@ export class Game {
     } else if (!this.busterLabEnabled && !deferBusterLabInitialization) {
       this._hydrateLegacyBusterShadowItems();
     }
-    this.spawner.spawnInitialPack();
+    if (this.worldKind === 'dungeon') this.spawner.spawnInitialPack();
     this.ui.renderInventory();
     this._bindEvents();
     this._syncAnimationPreviewDataset();
@@ -1848,6 +2071,1074 @@ export class Game {
     };
   }
 
+  _transitionWorldLifecycleTo(nextState) {
+    if (!this.worldLifecycle) {
+      this.worldLifecycle = createWorldLifecycleState(this.transitionState ?? this.worldKind);
+    }
+    const previousState = this.transitionState;
+    this.transitionState = this.worldLifecycle.transitionTo(nextState);
+    this._recordWorldLifecycleEvent('transition', {
+      from: previousState,
+      to: this.transitionState,
+    });
+    return this.transitionState;
+  }
+
+  _recordWorldLifecycleEvent(event, details = {}) {
+    if (!Array.isArray(this.worldLifecycleEventLog)) this.worldLifecycleEventLog = [];
+    const entry = Object.freeze({
+      sequence: this.worldLifecycleEventSequence ?? this.worldLifecycleEventLog.length,
+      event,
+      ...details,
+      worldKind: this.worldKind,
+      generationCount: this.worldGenerationCount,
+      disposalCount: this.worldDisposalCount,
+    });
+    this.worldLifecycleEventSequence = entry.sequence + 1;
+    this.worldLifecycleEventLog.push(entry);
+    if (this.worldLifecycleEventLog.length > 64) {
+      this.worldLifecycleEventLog.splice(0, this.worldLifecycleEventLog.length - 64);
+    }
+    return entry;
+  }
+
+  openBossExpeditionPrompt() {
+    if (!this.usesStreamedWorldLifecycle
+      || this.worldKind !== 'overworld'
+      || this.transitionState !== 'overworld') {
+      return { ok: false, reason: 'wrong-world' };
+    }
+    this.stagedBossProfileId = null;
+    this.keys.clear();
+    this.ui?.openBossExpeditionPrompt?.();
+    return { ok: true };
+  }
+
+  async stageBossExpedition(profileId) {
+    if (!this.usesStreamedWorldLifecycle
+      || this.worldKind !== 'overworld'
+      || this.transitionState !== 'overworld') {
+      return { ok: false, reason: 'wrong-world' };
+    }
+    const normalized = normalizeBossProfileId(profileId);
+    if (normalized !== profileId) return { ok: false, reason: 'unknown-boss-profile' };
+    this.stagedBossProfileId = normalized;
+    return { ok: true, stagedProfileId: normalized };
+  }
+
+  cancelBossExpeditionPrompt() {
+    if (this.transitionState !== 'overworld') return { ok: false, reason: 'transition-active' };
+    this.stagedBossProfileId = null;
+    return { ok: true };
+  }
+
+  _prepareStreamedDungeonFacade(bundle) {
+    const dungeon = bundle.facade;
+    for (const name of ['minimalHubTown', 'minimalExpeditionCamp']) {
+      const obsolete = dungeon.group?.getObjectByName?.(name);
+      if (obsolete) {
+        obsolete.visible = false;
+        obsolete.userData.streamedExteriorDisabled = true;
+      }
+    }
+    const obsoleteActions = new Set(['garage', 'roll', 'resetRuin', 'enterRuin', 'expedition']);
+    dungeon.safeInteractables = (dungeon.safeInteractables ?? [])
+      .filter(({ action }) => !obsoleteActions.has(action));
+    dungeon.solidZones = (dungeon.solidZones ?? []).filter(({ id }) => (
+      id !== 'expeditionSupportCarCollision' && id !== 'rollWorkshopWorkbenchCollision'
+    ));
+    // The legacy exterior camp's four practice decks are authored outside the
+    // ruin entrance and are irrelevant once V1 is streamed as an interior-only
+    // bundle. Unlike Roll and the Support Car they are attached directly to the
+    // dungeon root, so hiding the legacy camp group alone leaves their meshes
+    // and collision volumes behind. Remove their runtime collision and hide the
+    // matching bodies/lips without changing DungeonGenerator itself.
+    const obsoleteCampPlatformIds = new Set(
+      (dungeon.platforms ?? [])
+        .filter(({ id }) => /^camp(?:LowJump|HighClimb|HighGap|Return)/.test(id ?? ''))
+        .map(({ id }) => id),
+    );
+    if (obsoleteCampPlatformIds.size) {
+      dungeon.platforms = (dungeon.platforms ?? [])
+        .filter(({ id }) => !obsoleteCampPlatformIds.has(id));
+      dungeon.group?.traverse?.((object) => {
+        if (![...obsoleteCampPlatformIds].some((id) => object.name?.startsWith(id))) return;
+        object.visible = false;
+        object.userData.streamedExteriorDisabled = true;
+      });
+    }
+
+    let entranceDoor = dungeon.doors?.find?.(({ id }) => id === 'entranceDoor') ?? null;
+    if (entranceDoor) {
+      entranceDoor.closed = true;
+      entranceDoor.opened = false;
+      entranceDoor.locked = true;
+      entranceDoor.interactionDisabled = true;
+      entranceDoor.collisionHeight = STREAMED_DUNGEON_DOOR_HEIGHT;
+      for (const panel of [entranceDoor.leftPanel, entranceDoor.rightPanel]) {
+        if (!panel) continue;
+        panel.scale.y = STREAMED_DUNGEON_DOOR_HEIGHT / 4.8;
+        panel.position.y = STREAMED_DUNGEON_DOOR_HEIGHT * 0.5;
+      }
+      entranceDoor.object.userData.streamedEntranceSeal = true;
+      entranceDoor.object.userData.closed = true;
+    }
+
+    const spawn = dungeon.ruinEntryPosition?.clone?.()
+      ?? dungeon.playerStart?.clone?.()
+      ?? new THREE.Vector3();
+    // Conventional V1 already exposes a tested, authored spawn in the centre
+    // of its entrance chamber. Do not replace it with a point just inside the
+    // exterior threshold: that connector contains elevation transitions that
+    // can strand a newly streamed-in player before they reach the chamber.
+    // Retaining the authored spawn also leaves the V1 door, threshold wings,
+    // and their colliders on the actual room boundary instead of opening it.
+    const entryFacing = dungeon.ruinEntryFacing?.clone?.()
+      ?? new THREE.Vector3(0, 0, 1);
+    entryFacing.setY(0);
+    if (entryFacing.lengthSq() <= 0.0001) entryFacing.set(0, 0, 1);
+    entryFacing.normalize();
+
+    {
+      // Streamed play starts at the authored safe checkpoint, while V1's
+      // original entrance door can be separated from that checkpoint by its
+      // now-disabled exterior camp connector. Put one visible, full-height
+      // seal directly behind every streamed spawn so the door the player sees,
+      // collides with, and uses to return is always the same physical object.
+      const specializedEntry = dungeon.dungeonKind === 'ascensionReliquary';
+      const sealPosition = spawn.clone().addScaledVector(entryFacing, -2.55);
+      const yaw = Math.atan2(entryFacing.x, entryFacing.z);
+      const seal = new THREE.Group();
+      seal.name = specializedEntry
+        ? 'streamedAscensionEntranceSeal'
+        : 'streamedDungeonEntranceSeal';
+      seal.position.copy(sealPosition);
+      seal.rotation.y = yaw;
+      seal.userData.streamedEntranceSeal = true;
+      seal.userData.closed = true;
+      // The streamed seal is intentionally wide enough to close the entire
+      // entrance-room cross section. Treat it as one camera-occlusion owner so
+      // a camera placed outside/behind the seal never leaves an opaque wing
+      // between itself and MegaMan.
+      seal.userData.cameraOcclusionOwner = true;
+      const frameMaterial = new THREE.MeshStandardMaterial({
+        color: 0x43545f, roughness: 0.56, metalness: 0.48,
+      });
+      const panelMaterial = new THREE.MeshStandardMaterial({
+        color: 0x1f303a, roughness: 0.62, metalness: 0.5,
+      });
+      const entranceRoom = dungeon.rooms?.find?.(({ id }) => id === (dungeon.entranceRoomId ?? 'entrance'))
+        ?? dungeon.rooms?.find?.(({ id }) => id === 'entrance')
+        ?? null;
+      const crossTileCount = Math.abs(entryFacing.z) >= Math.abs(entryFacing.x)
+        ? entranceRoom?.width
+        : entranceRoom?.depth;
+      const sealCrossWidth = specializedEntry
+        ? 7.4
+        : Math.max(12, (crossTileCount ?? 9) * (dungeon.tileSize ?? 5.6));
+      const slab = new THREE.Mesh(
+        new THREE.BoxGeometry(6.4, STREAMED_DUNGEON_DOOR_HEIGHT, 0.5),
+        panelMaterial,
+      );
+      slab.name = 'streamedAscensionEntranceSlab';
+      slab.position.y = STREAMED_DUNGEON_DOOR_HEIGHT * 0.5;
+      slab.castShadow = true;
+      slab.receiveShadow = true;
+      seal.add(slab);
+      const wingWidth = Math.max(0, (sealCrossWidth - 6.4) * 0.5);
+      if (wingWidth > 0.01) {
+        for (const side of [-1, 1]) {
+          const wing = new THREE.Mesh(
+            new THREE.BoxGeometry(wingWidth, STREAMED_DUNGEON_DOOR_HEIGHT, 0.5),
+            frameMaterial,
+          );
+          wing.name = 'streamedEntranceSealWing';
+          wing.position.set(side * (3.2 + wingWidth * 0.5), STREAMED_DUNGEON_DOOR_HEIGHT * 0.5, 0);
+          wing.castShadow = true;
+          wing.receiveShadow = true;
+          seal.add(wing);
+        }
+      }
+      for (const x of [-3.45, 3.45]) {
+        const post = new THREE.Mesh(
+          new THREE.BoxGeometry(0.48, STREAMED_DUNGEON_DOOR_HEIGHT + 0.8, 0.72),
+          frameMaterial,
+        );
+        post.position.set(x, STREAMED_DUNGEON_DOOR_HEIGHT * 0.5, 0);
+        post.castShadow = true;
+        seal.add(post);
+      }
+      for (const y of [2.4, 5.1, 7.8, 10.5, 13.2]) {
+        const rib = new THREE.Mesh(new THREE.BoxGeometry(6.1, 0.16, 0.12), frameMaterial);
+        rib.position.set(0, y, 0.31);
+        seal.add(rib);
+      }
+      dungeon.group.add(seal);
+      const collision = {
+        id: specializedEntry
+          ? 'streamedAscensionEntranceSealCollision'
+          : 'streamedDungeonEntranceSealCollision',
+        roomId: specializedEntry ? 'ascensionReliquary' : (dungeon.entranceRoomId ?? 'entrance'),
+        label: 'sealed entrance',
+        position: sealPosition.clone().setY(sealPosition.y + STREAMED_DUNGEON_DOOR_HEIGHT * 0.5),
+        halfWidth: sealCrossWidth * 0.5,
+        halfDepth: 0.38,
+        verticalHalfHeight: STREAMED_DUNGEON_DOOR_HEIGHT * 0.5,
+        rotationY: yaw,
+      };
+      dungeon.solidZones.push(collision);
+      entranceDoor = {
+        id: specializedEntry
+          ? 'streamedAscensionEntranceDoor'
+          : 'streamedDungeonEntranceDoor',
+        label: 'Sealed Entrance',
+        position: sealPosition.clone(),
+        baseY: sealPosition.y,
+        object: seal,
+        closed: true,
+        opened: false,
+        locked: true,
+        interactionDisabled: true,
+        collisionHeight: STREAMED_DUNGEON_DOOR_HEIGHT,
+      };
+      dungeon.doors.push(entranceDoor);
+    }
+    const sealPosition = entranceDoor?.position?.clone?.() ?? spawn.clone();
+    const inward = spawn.clone().sub(sealPosition).setY(0);
+    if (inward.lengthSq() <= 0.0001) inward.copy(entryFacing);
+    inward.normalize();
+    const entryReturnAnchor = sealPosition.clone().addScaledVector(inward, 0.9);
+    entryReturnAnchor.y = entranceDoor?.baseY ?? spawn.y;
+    // Abandonment is available only at the physical inside face of the sealed
+    // entrance. The player must walk back to it; spawning in the entrance
+    // chamber never opens the confirmation by itself.
+    dungeon.safeInteractables.push({
+      id: 'streamedDungeonEntranceReturn',
+      label: 'Sealed Entrance',
+      action: 'abandonRuin',
+      position: entryReturnAnchor.clone(),
+      object: entranceDoor?.object ?? dungeon.group,
+      color: 0x7df8ff,
+      interactionRadius: 1.35,
+    });
+    bundle.entrySpawn = spawn;
+    bundle.entryFacing = entryFacing;
+    bundle.entranceDoor = entranceDoor;
+    bundle.entryReturnAnchor = entryReturnAnchor;
+    bundle.collisionData = dungeon.solidZones;
+    return bundle;
+  }
+
+  _disposeWorldBundle(bundle, reason = 'world-transition', {
+    clearRunState = bundle === this.activeWorldBundle,
+  } = {}) {
+    if (!bundle || bundle.disposed) return this.lastWorldDisposalStats;
+    if (clearRunState) this._clearDungeonRunState();
+    bundle.controller?.dispose?.();
+    bundle.facade?.specialEnvironment?.dispose?.();
+    for (const animator of bundle.npcAnimators) animator.dispose?.();
+    const disposedOwners = new Set([
+      bundle.controller,
+      bundle.facade?.specialEnvironment,
+      ...bundle.npcAnimators,
+    ]);
+    for (const resource of bundle.disposableResources) {
+      if (!disposedOwners.has(resource)) resource?.dispose?.();
+    }
+    bundle.root?.removeFromParent?.();
+    const stats = bundle.worldKind === 'overworld'
+      ? disposeOverworldFacade(bundle.facade)
+      : this._disposeDetachedDungeonResources(bundle.root);
+    bundle.disposed = true;
+    this.worldDisposalCount += 1;
+    this.lastWorldDisposalStats = Object.freeze({ reason, worldKind: bundle.worldKind, ...stats });
+    this._recordWorldLifecycleEvent('bundle-disposed', {
+      disposedWorldKind: bundle.worldKind,
+      reason,
+    });
+    this.lastDungeonResourceDisposalStats = this.lastWorldDisposalStats;
+    return this.lastWorldDisposalStats;
+  }
+
+  _installRuntimeControllerForBundle(bundle) {
+    const controller = bundle.controller ?? (bundle.worldKind === 'overworld'
+      ? new OverworldRuntimeController(this, bundle.facade)
+      : new DungeonController(this, bundle.facade));
+    bundle.controller = controller;
+    return this._activateRuntimeControllerForBundle(bundle);
+  }
+
+  _activateRuntimeControllerForBundle(bundle) {
+    assertLoadedWorldBundle(bundle, { requireController: true });
+    const controller = bundle.controller;
+    if (!controller) throw new Error(`World bundle ${bundle.worldKind} has no runtime controller.`);
+    this.dungeonController = controller;
+    this.overworldController = bundle.worldKind === 'overworld' ? controller.core : null;
+    this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
+      this.dungeonController.resolvePowerKnockbackTravel(fromPosition, position)
+    );
+    this.player.powerKnockbackLandingResolver = ({ position, direction, originPosition }) => (
+      this.dungeonController.resolvePowerKnockbackLanding(position, direction, originPosition)
+    );
+    return controller;
+  }
+
+  _disposeUncommittedWorldCandidate(bundle) {
+    if (!bundle || bundle.disposed) return null;
+    bundle.controller?.dispose?.();
+    bundle.facade?.specialEnvironment?.dispose?.();
+    for (const animator of bundle.npcAnimators) animator.dispose?.();
+    const disposedOwners = new Set([
+      bundle.controller,
+      bundle.facade?.specialEnvironment,
+      ...bundle.npcAnimators,
+    ]);
+    for (const resource of bundle.disposableResources) {
+      if (!disposedOwners.has(resource)) resource?.dispose?.();
+    }
+    bundle.root?.removeFromParent?.();
+    const stats = bundle.worldKind === 'overworld'
+      ? disposeOverworldFacade(bundle.facade)
+      : this._disposeDetachedDungeonResources(bundle.root);
+    bundle.disposed = true;
+    return stats;
+  }
+
+  _placePersistentPlayer(position, facing) {
+    this.player.root.position.copy(position);
+    this.player.velocity?.set?.(0, 0, 0);
+    this.player.lastMoveDirection.copy(facing ?? tempVectorA.set(0, 0, 1)).setY(0);
+    if (this.player.lastMoveDirection.lengthSq() < 0.0001) this.player.lastMoveDirection.set(0, 0, 1);
+    this.player.lastMoveDirection.normalize();
+    this.player.faceDirection(this.player.lastMoveDirection);
+    this.dungeonController?.lastSafePlayerPosition?.copy?.(this.player.root.position);
+    this.cameraController.snapTo(this.player);
+  }
+
+  _animateExteriorDungeonDoorOpening(bundle, { durationMs = 360 } = {}) {
+    const slab = bundle?.root?.getObjectByName?.('overworldDungeonDoorSlab');
+    if (!slab) return Promise.resolve(null);
+    const startY = slab.position.y;
+    const lift = 5.8;
+    slab.userData.transitionOpening = true;
+    return new Promise((resolve) => {
+      const started = performance.now();
+      const step = (now) => {
+        const amount = THREE.MathUtils.clamp((now - started) / durationMs, 0, 1);
+        const eased = 1 - (1 - amount) ** 3;
+        slab.position.y = startY + lift * eased;
+        if (amount >= 1) {
+          resolve({ slab, startY });
+          return;
+        }
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+  }
+
+  async confirmBossExpedition() {
+    if (this.worldTransitionInFlight) return this.worldTransitionInFlight;
+    if (!this.stagedBossProfileId) return { ok: false, reason: 'no-staged-profile' };
+    if (this.worldKind !== 'overworld' || this.transitionState !== 'overworld') {
+      return { ok: false, reason: 'wrong-world' };
+    }
+    const profileId = this.stagedBossProfileId;
+    const previousBundle = this.activeWorldBundle;
+    const previousProfileId = this.getSelectedBossProfileId();
+    const previousExpeditionSpec = this.activeBossExpeditionSpec;
+    const previousSpawner = this.spawner;
+    const previousMapEvents = this.mapEvents;
+    const previousPlayerPosition = this.player.root.position.clone();
+    const previousPlayerFacing = this.player.lastMoveDirection.clone();
+    const previousPlayerVelocity = this.player.velocity?.clone?.() ?? null;
+    const previousExpeditionAccepted = this.expeditionAccepted;
+    const previousExpeditionActive = this.expeditionActive;
+    const previousRuinCompleted = this.ruinCompleted;
+    this.worldTransitionInFlight = (async () => {
+      this._transitionWorldLifecycleTo('enteringDungeon');
+      let candidate = null;
+      let candidateMounted = false;
+      let lockedExpeditionId = null;
+      let exteriorDoorAnimation = null;
+      let committed = false;
+      try {
+        const selection = await this.selectBossHunt(profileId);
+        if (!selection?.ok) throw new Error(selection?.message ?? 'Boss Hunt selection could not be saved.');
+        // Retain the raw candidate before preparation. If the adapter rejects
+        // it, the catch path can still release every detached V1 resource.
+        candidate = this._createLegacyDungeonWorldCandidate({ bossProfileId: profileId });
+        candidate = this._prepareStreamedDungeonFacade(candidate);
+        this.activeBossExpeditionSpec = null;
+        const encounter = this._configureBossHuntEncounter(candidate.facade, { ignorePersistedActive: true });
+        if (!encounter?.expeditionSpec) throw new Error('The selected boss encounter could not be configured.');
+        candidate.controller = new DungeonController(this, candidate.facade);
+
+        // Candidate generation, streamed-adapter validation, boss setup, and
+        // controller construction have all succeeded while the overworld is
+        // still mounted. Lock the durable expedition now, before animating the
+        // exterior door or swapping either world root. Any later failure uses
+        // the compensation path below and restores the intact overworld.
+        const lock = this.busterLabStorage?.lockBossHuntForExpedition
+          ? await this._queueBusterStorageOperation(() => (
+            this.busterLabStorage.lockBossHuntForExpedition(encounter.expeditionSpec)
+          ))
+          : { ok: true };
+        if (!lock?.ok) throw new Error(lock?.message ?? `Boss Hunt lock failed: ${lock?.reason ?? 'unknown'}`);
+        lockedExpeditionId = encounter.expeditionSpec.id;
+
+        exteriorDoorAnimation = await this._animateExteriorDungeonDoorOpening(previousBundle);
+        // Overworld combat is suppressed, but clear all bundle-local host
+        // transients at the commit boundary as a second line of ownership
+        // defense. Nothing from camp may resume inside the dungeon.
+        this._clearDungeonRunState();
+        // Mount and fully initialize the candidate while the intact overworld
+        // remains available for rollback. Detaching retains every object and
+        // GPU resource, but guarantees the scene never renders both worlds
+        // while the durable expedition lock is awaited.
+        previousBundle?.root?.removeFromParent?.();
+        this._assignMountedWorldBundle(candidate, { incrementGeneration: false });
+        candidateMounted = true;
+        this._installRuntimeControllerForBundle(candidate);
+        this.bossStageRuntime?.mount?.(this);
+        this._placePersistentPlayer(candidate.entrySpawn, candidate.entryFacing);
+        this.spawner = new EnemySpawner(this);
+        this.mapEvents = this._createMapEventSystemForWorld();
+        this.spawner.spawnInitialPack();
+        this._collectCameraOcclusionWalls();
+        this._collectDungeonRenderCullGroups();
+        this._rebuildDebugLedgeTester(candidate.entrySpawn);
+        this._updateDungeonRenderCulling(0, { force: true });
+        this.ruinCompleted = false;
+        this.expeditionAccepted = true;
+        this.expeditionActive = true;
+        this.stagedBossProfileId = null;
+        this._transitionWorldLifecycleTo('dungeon');
+        committed = true;
+        this.worldGenerationCount += 1;
+        try {
+          this._disposeWorldBundle(previousBundle, 'enter-dungeon', { clearRunState: false });
+        } catch (cleanupError) {
+          this._recordWorldLifecycleEvent('post-commit-cleanup-error', {
+            phase: 'enter-dungeon',
+            message: cleanupError?.message ?? String(cleanupError),
+          });
+        }
+        try {
+          this.ui?.renderInventory?.();
+        } catch (uiError) {
+          this._recordWorldLifecycleEvent('post-commit-ui-error', {
+            phase: 'enter-dungeon',
+            message: uiError?.message ?? String(uiError),
+          });
+        }
+        return { ok: true, worldKind: 'dungeon', bossProfileId: profileId };
+      } catch (error) {
+        if (committed) {
+          this._recordWorldLifecycleEvent('post-commit-transition-error', {
+            phase: 'enter-dungeon',
+            message: error?.message ?? String(error),
+          });
+          return {
+            ok: true,
+            worldKind: 'dungeon',
+            bossProfileId: profileId,
+            warning: error?.message ?? String(error),
+          };
+        }
+        if (exteriorDoorAnimation?.slab && previousBundle && !previousBundle.disposed) {
+          exteriorDoorAnimation.slab.position.y = exteriorDoorAnimation.startY;
+          exteriorDoorAnimation.slab.userData.transitionOpening = false;
+        }
+        if (candidateMounted) this._clearDungeonRunState();
+        if (candidate) {
+          try {
+            this._disposeUncommittedWorldCandidate(candidate);
+          } catch (cleanupError) {
+            this._recordWorldLifecycleEvent('rollback-cleanup-error', {
+              phase: 'enter-dungeon',
+              message: cleanupError?.message ?? String(cleanupError),
+            });
+          }
+        }
+        if (previousBundle && !previousBundle.disposed) {
+          this._assignMountedWorldBundle(previousBundle, { incrementGeneration: false });
+          this._activateRuntimeControllerForBundle(previousBundle);
+          this.spawner = previousSpawner;
+          this.mapEvents = previousMapEvents;
+          this._placePersistentPlayer(previousPlayerPosition, previousPlayerFacing);
+          if (previousPlayerVelocity && this.player.velocity) {
+            this.player.velocity.copy(previousPlayerVelocity);
+          }
+          this._collectCameraOcclusionWalls();
+          this._collectDungeonRenderCullGroups();
+          this._updateDungeonRenderCulling(0, { force: true });
+        }
+        this.expeditionAccepted = previousExpeditionAccepted;
+        this.expeditionActive = previousExpeditionActive;
+        this.ruinCompleted = previousRuinCompleted;
+        this.activeBossExpeditionSpec = previousExpeditionSpec;
+        // The mounted overworld and authoritative lifecycle are restored
+        // before best-effort durable compensation. A storage outage can be
+        // diagnosed, but can never leave the game stuck in enteringDungeon.
+        this._transitionWorldLifecycleTo('overworld');
+        this.worldKind = 'overworld';
+        const rollbackWarnings = [];
+        if (lockedExpeditionId && this.busterLabStorage?.completeBossExpedition) {
+          try {
+            const compensation = await this._queueBusterStorageOperation(() => (
+              this.busterLabStorage.completeBossExpedition(
+                lockedExpeditionId,
+                { outcome: 'abandoned' },
+              )
+            ));
+            if (!compensation?.ok) {
+              throw new Error(compensation?.message ?? 'Expedition lock compensation failed.');
+            }
+          } catch (compensationError) {
+            const message = compensationError?.message ?? String(compensationError);
+            rollbackWarnings.push(message);
+            this._recordWorldLifecycleEvent('rollback-compensation-error', {
+              phase: 'expedition-lock',
+              message,
+            });
+          }
+        }
+        if (this.getSelectedBossProfileId() !== previousProfileId) {
+          try {
+            const compensation = await this.selectBossHunt(previousProfileId);
+            if (!compensation?.ok) {
+              throw new Error(compensation?.message ?? 'Boss selection compensation failed.');
+            }
+          } catch (compensationError) {
+            const message = compensationError?.message ?? String(compensationError);
+            rollbackWarnings.push(message);
+            this._recordWorldLifecycleEvent('rollback-compensation-error', {
+              phase: 'boss-selection',
+              message,
+            });
+            // Keep the active in-memory overworld consistent even if durable
+            // storage is temporarily unavailable.
+            this.selectedBossProfileId = previousProfileId;
+          }
+        }
+        this.activeBossExpeditionSpec = previousExpeditionSpec;
+        return {
+          ok: false,
+          reason: 'transition-failed',
+          message: error?.message ?? String(error),
+          error,
+          rollbackWarnings,
+        };
+      } finally {
+        this.worldTransitionInFlight = null;
+      }
+    })();
+    return this.worldTransitionInFlight;
+  }
+
+  openDungeonAbandonPrompt() {
+    if (this.worldKind !== 'dungeon' || this.transitionState !== 'dungeon') {
+      return { ok: false, reason: 'wrong-world' };
+    }
+    this.keys.clear();
+    const profile = getReaverbotBossProfile(this.getSelectedBossProfileId());
+    this.ui?.openDungeonAbandonPrompt?.({
+      expeditionLabel: profile?.title ?? 'Boss Hunt',
+      description: 'Abandon this expedition and return to Roll? Dungeon-local progress will be lost.',
+    });
+    return { ok: true };
+  }
+
+  cancelDungeonAbandon() {
+    return this.transitionState === 'dungeon'
+      ? { ok: true }
+      : { ok: false, reason: 'transition-active' };
+  }
+
+  async _returnToStreamedOverworld({ outcome = 'abandoned' } = {}) {
+    if (this.worldTransitionInFlight) return this.worldTransitionInFlight;
+    if (this.worldKind !== 'dungeon' || this.transitionState !== 'dungeon') {
+      return { ok: false, reason: 'wrong-world' };
+    }
+    const previousBundle = this.activeWorldBundle;
+    const previousSpawner = this.spawner;
+    const previousMapEvents = this.mapEvents;
+    const previousPlayerPosition = this.player.root.position.clone();
+    const previousPlayerFacing = this.player.lastMoveDirection.clone();
+    const previousPlayerVelocity = this.player.velocity?.clone?.() ?? null;
+    const previousExpeditionAccepted = this.expeditionAccepted;
+    const previousExpeditionActive = this.expeditionActive;
+    const previousRuinCompleted = this.ruinCompleted;
+    const previousExpeditionSpec = this.activeBossExpeditionSpec;
+    const previousExpeditionSummary = this.lastExpeditionSummary;
+    this.worldTransitionInFlight = (async () => {
+      this._transitionWorldLifecycleTo('returningOverworld');
+      let candidate = null;
+      let committed = false;
+      try {
+        if (outcome === 'extracted' && previousBundle?.pendingBossVictoryCommit) {
+          const victory = await previousBundle.pendingBossVictoryCommit;
+          if (victory && !victory.ok) {
+            throw new Error(victory.message ?? 'Boss recovery must be saved before extraction.');
+          }
+        }
+        // Candidate construction and controller validation happen before any
+        // dungeon-local state or durable expedition record is released.
+        candidate = this._createOverworldWorldBundle();
+        candidate.controller = new OverworldRuntimeController(this, candidate.facade);
+        assertLoadedWorldBundle(candidate, { requireController: true });
+
+        // Keep only one world root visible while the candidate is initialized.
+        // The detached dungeon remains intact and can be remounted if any
+        // controller, NPC, collision, or storage step fails.
+        previousBundle?.root?.removeFromParent?.();
+        this._assignMountedWorldBundle(candidate, { incrementGeneration: false });
+        this._installRuntimeControllerForBundle(candidate);
+        candidate.facade.activateNpcAssets?.();
+        this._placePersistentPlayer(candidate.facade.campReturnPosition, candidate.facade.campReturnFacing);
+        this.spawner = new EnemySpawner(this);
+        this.mapEvents = this._createMapEventSystemForWorld();
+        this.expeditionAccepted = false;
+        this.expeditionActive = false;
+        this.ruinCompleted = false;
+        this._collectCameraOcclusionWalls();
+        this._collectDungeonRenderCullGroups();
+        this._updateDungeonRenderCulling(0, { force: true });
+
+        // The durable abandonment write is the last fallible operation. Until
+        // it succeeds, the detached dungeon bundle and exact player state are
+        // still available for a lossless rollback.
+        if (outcome === 'abandoned' && this.activeBossExpeditionSpec?.id
+          && this.busterLabStorage?.completeBossExpedition) {
+          const result = await this._queueBusterStorageOperation(() => (
+            this.busterLabStorage.completeBossExpedition(
+              this.activeBossExpeditionSpec.id,
+              { outcome: 'abandoned' },
+            )
+          ));
+          if (!result?.ok) throw new Error(result?.message ?? 'The abandoned expedition could not be recorded.');
+        }
+
+        // Storage and candidate setup have succeeded. Commit the authoritative
+        // lifecycle first; cleanup and UI work after this point can no longer
+        // attempt to roll back to a bundle that may already be disposed.
+        this.activeBossExpeditionSpec = null;
+        this.lastExpeditionSummary = outcome === 'extracted'
+          ? 'Expedition complete. Recovered resources are secured.'
+          : 'Expedition abandoned. Dungeon-local progress was released.';
+        this._transitionWorldLifecycleTo('overworld');
+        committed = true;
+        this.worldGenerationCount += 1;
+        try {
+          this._clearDungeonRunState();
+          this._disposeWorldBundle(previousBundle, `return-overworld:${outcome}`, { clearRunState: false });
+        } catch (cleanupError) {
+          this._recordWorldLifecycleEvent('post-commit-cleanup-error', {
+            phase: `return-overworld:${outcome}`,
+            message: cleanupError?.message ?? String(cleanupError),
+          });
+        }
+        try {
+          this.ui?.showToast?.('Returned to expedition camp', '#6bdcff');
+          this.ui?.renderInventory?.();
+        } catch (uiError) {
+          this._recordWorldLifecycleEvent('post-commit-ui-error', {
+            phase: `return-overworld:${outcome}`,
+            message: uiError?.message ?? String(uiError),
+          });
+        }
+        return { ok: true, worldKind: 'overworld', outcome };
+      } catch (error) {
+        if (committed) {
+          this._recordWorldLifecycleEvent('post-commit-transition-error', {
+            phase: `return-overworld:${outcome}`,
+            message: error?.message ?? String(error),
+          });
+          return {
+            ok: true,
+            worldKind: 'overworld',
+            outcome,
+            warning: error?.message ?? String(error),
+          };
+        }
+        if (candidate) {
+          try {
+            this._disposeUncommittedWorldCandidate(candidate);
+          } catch (cleanupError) {
+            this._recordWorldLifecycleEvent('rollback-cleanup-error', {
+              phase: `return-overworld:${outcome}`,
+              message: cleanupError?.message ?? String(cleanupError),
+            });
+          }
+        }
+        if (previousBundle && !previousBundle.disposed) {
+          this._assignMountedWorldBundle(previousBundle, { incrementGeneration: false });
+          this._activateRuntimeControllerForBundle(previousBundle);
+          this.spawner = previousSpawner;
+          this.mapEvents = previousMapEvents;
+          this._placePersistentPlayer(previousPlayerPosition, previousPlayerFacing);
+          if (previousPlayerVelocity && this.player.velocity) {
+            this.player.velocity.copy(previousPlayerVelocity);
+          }
+          this._collectCameraOcclusionWalls();
+          this._collectDungeonRenderCullGroups();
+          this._updateDungeonRenderCulling(0, { force: true });
+        }
+        this.expeditionAccepted = previousExpeditionAccepted;
+        this.expeditionActive = previousExpeditionActive;
+        this.ruinCompleted = previousRuinCompleted;
+        this.activeBossExpeditionSpec = previousExpeditionSpec;
+        this.lastExpeditionSummary = previousExpeditionSummary;
+        this._transitionWorldLifecycleTo('dungeon');
+        this.worldKind = 'dungeon';
+        return { ok: false, reason: 'transition-failed', message: error?.message ?? String(error), error };
+      } finally {
+        this.worldTransitionInFlight = null;
+      }
+    })();
+    return this.worldTransitionInFlight;
+  }
+
+  confirmDungeonAbandon() {
+    return this._returnToStreamedOverworld({ outcome: 'abandoned' });
+  }
+
+  getWorldTransitionDiagnostics() {
+    const rendererInfo = this.renderer?.info ?? {};
+    const activeRoot = this.activeWorldBundle?.root ?? null;
+    const mountedRuntime = validateMountedRuntimeStateHost(this);
+    const ownership = {
+      activeRootObjectCount: 0,
+      activeRootMeshCount: 0,
+      activeRootLightCount: 0,
+      sceneObjectCount: 0,
+      scenePlayerRootCount: 0,
+      sceneActiveWorldRootCount: 0,
+      sceneWorldRootCount: 0,
+      sceneWorldRootIds: [],
+      controllerRuntimeRootCount: 0,
+      npcAnimatorCount: this.activeWorldBundle?.npcAnimators?.length ?? 0,
+      npcMixerCount: this.activeWorldBundle?.facade?.npcAnimationMixers?.length ?? 0,
+      collisionEntryCount: this.activeWorldBundle?.collisionData?.length ?? 0,
+      cullingEntryCount: this.activeWorldBundle?.cullingData?.length ?? 0,
+      disposableResourceCount: this.activeWorldBundle?.disposableResources?.length ?? 0,
+      gameHostEventBindingPasses: this.hostEventBindingPasses,
+      gameHostEventListenerRegistrations: this.hostEventListenerRegistrations,
+      activeControllerCount: this.activeWorldBundle?.controller === this.dungeonController ? 1 : 0,
+      mountedRuntimeContractAccepted: mountedRuntime.accepted,
+      mountedEnemyCount: this.enemies?.length ?? 0,
+      mountedHazardCount: this.hazards?.length ?? 0,
+      mountedProjectileCount: this.projectiles?.active?.length ?? 0,
+      mountedMineCount: this.combat?.activeMines?.length ?? 0,
+      mountedLootCount: this.lootSystem?.pickups?.length ?? 0,
+      mountedRefractorCount: this.refractors?.pickups?.length ?? 0,
+    };
+    activeRoot?.traverse?.((object) => {
+      ownership.activeRootObjectCount += 1;
+      if (object.isMesh) ownership.activeRootMeshCount += 1;
+      if (object.isLight) ownership.activeRootLightCount += 1;
+      if (object.name === 'dungeonControllerRuntimeRoot') ownership.controllerRuntimeRootCount += 1;
+    });
+    this.scene?.traverse?.((object) => {
+      ownership.sceneObjectCount += 1;
+      if (object.name === 'playerRoot') ownership.scenePlayerRootCount += 1;
+      if (object === activeRoot) ownership.sceneActiveWorldRootCount += 1;
+      if (object.userData?.worldRootId && ['overworld', 'dungeon'].includes(object.userData?.worldKind)) {
+        ownership.sceneWorldRootCount += 1;
+        ownership.sceneWorldRootIds.push(object.userData.worldRootId);
+      }
+    });
+    const registeredSurfaceKindsByOwner = {};
+    for (const entry of this.cameraOcclusionEntries) {
+      const owner = entry?.owner ?? entry?.object;
+      const ownerId = owner?.userData?.occlusionOwnerId ?? owner?.name ?? owner?.uuid ?? 'unknown';
+      const surfaceName = entry?.object?.name ?? '';
+      const kind = surfaceName.includes('instancedWalls')
+        ? 'house-wall'
+        : surfaceName.includes('instancedRoof')
+          ? 'house-roof'
+          : surfaceName.startsWith('overworldTreeCanopies-')
+            ? 'tree-canopy'
+            : surfaceName.startsWith('overworldTreeTrunks-')
+              ? 'tree-trunk'
+              : 'structural-surface';
+      const kinds = registeredSurfaceKindsByOwner[ownerId] ?? new Set();
+      kinds.add(kind);
+      registeredSurfaceKindsByOwner[ownerId] = kinds;
+    }
+    const serializedSurfaceKinds = Object.fromEntries(Object.entries(registeredSurfaceKindsByOwner)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([ownerId, kinds]) => [ownerId, [...kinds].sort()]));
+    return {
+      worldKind: this.worldKind,
+      transitionState: this.transitionState,
+      activeRootId: this.activeWorldBundle?.root?.userData?.worldRootId
+        ?? this.activeWorldBundle?.root?.uuid
+        ?? null,
+      planHash: this.activeWorldBundle?.planHash ?? null,
+      generationCount: this.worldGenerationCount,
+      disposalCount: this.worldDisposalCount,
+      lastDisposalStats: this.lastWorldDisposalStats,
+      renderer: {
+        calls: rendererInfo.render?.calls ?? 0,
+        triangles: rendererInfo.render?.triangles ?? 0,
+        geometries: rendererInfo.memory?.geometries ?? 0,
+        textures: rendererInfo.memory?.textures ?? 0,
+      },
+      occlusion: {
+        entryCount: this.cameraOcclusionEntries.length,
+        hiddenOwnerCount: this.cameraOcclusionHiddenOwners.size,
+        hiddenOwnerIds: [...this.cameraOcclusionHiddenOwners]
+          .map((owner) => owner?.userData?.occlusionOwnerId ?? owner?.name ?? owner?.uuid ?? 'unknown')
+          .sort(),
+        registeredSurfaceKindsByOwner: serializedSurfaceKinds,
+      },
+      ownership,
+      entryReturnAnchor: this.activeWorldBundle?.entryReturnAnchor?.toArray?.() ?? null,
+      eventLog: this.worldLifecycleEventLog.map((entry) => ({ ...entry })),
+    };
+  }
+
+  /**
+   * Returns a detached, serializable view of the currently streamed V1 ruin.
+   *
+   * This is intentionally a read-only public contract for physical journey
+   * automation and diagnostics. Callers can choose destinations from the
+   * accepted dungeon data, but cannot retain a live THREE object or mutate
+   * player, combat, progression, encounter, or mechanism state through the
+   * returned value. All state changes in a journey must still arrive through
+   * the same keyboard and mouse input used by a player.
+   */
+  getPublicDungeonJourneyDiagnostics({ includeGeometry = true } = {}) {
+    if (this.worldKind !== 'dungeon' || !this.dungeon || !this.dungeonController) {
+      return null;
+    }
+
+    const plainPosition = (value) => value ? {
+      x: Number(value.x ?? 0),
+      y: Number(value.y ?? 0),
+      z: Number(value.z ?? 0),
+    } : null;
+    const controller = this.dungeonController;
+    const dungeon = this.dungeon;
+    const playerPosition = plainPosition(this.player?.root?.position);
+    const cameraForwardVector = this.camera
+      ? this.camera.getWorldDirection(new THREE.Vector3()).setY(0)
+      : new THREE.Vector3(0, 0, 1);
+    if (cameraForwardVector.lengthSq() <= 0.0001) cameraForwardVector.set(0, 0, 1);
+    cameraForwardVector.normalize();
+    const cameraRightVector = new THREE.Vector3(
+      -cameraForwardVector.z,
+      0,
+      cameraForwardVector.x,
+    );
+    const nearest = controller.getNearestInteractable?.() ?? null;
+    const lockTarget = this.combat?.lockOn?.target ?? null;
+    const lockOwner = lockTarget
+      ? this.enemies.find((enemy) => (
+        enemy === lockTarget
+        || getEnemyCombatTargets(enemy).includes(lockTarget)
+      )) ?? null
+      : null;
+    const lockPosition = lockTarget
+      ? plainPosition(getCombatTargetWorldPosition(lockTarget, new THREE.Vector3()))
+      : null;
+    const floorTiles = includeGeometry
+      ? (dungeon.floorTiles ?? []).map((tile, index) => ({
+        index,
+        x: Number(tile.x ?? 0),
+        z: Number(tile.z ?? 0),
+        level: Number(tile.level ?? 0),
+        elevation: Number(tile.elevation ?? 0),
+        roomId: tile.roomId ?? null,
+        type: tile.type ?? 'floor',
+        surface: tile.surface ?? tile.type ?? 'floor',
+        rampStartElevation: Number.isFinite(tile.rampStartElevation)
+          ? Number(tile.rampStartElevation)
+          : null,
+        rampEndElevation: Number.isFinite(tile.rampEndElevation)
+          ? Number(tile.rampEndElevation)
+          : null,
+        rampDirectionX: Number(tile.rampDirectionX ?? 0),
+        rampDirectionZ: Number(tile.rampDirectionZ ?? 0),
+        groundedStepTransitionHeight: Number(tile.groundedStepTransitionHeight ?? 0),
+        isPlatformingSurface: Boolean(tile.isPlatformingSurface),
+        isLedgeSurface: Boolean(tile.isLedgeSurface),
+        allowsGroundedDropLanding: Boolean(tile.allowsGroundedDropLanding),
+        requiredTraversalAction: tile.requiredTraversalAction ?? null,
+        ledgeEdges: Array.isArray(tile.ledgeEdges) ? [...tile.ledgeEdges] : [],
+        platformGroupId: tile.platformGroupId ?? null,
+        platformPurpose: tile.platformPurpose ?? null,
+      }))
+      : [];
+    const solidZones = includeGeometry
+      ? (dungeon.solidZones ?? []).map((zone) => ({
+        id: zone.id ?? null,
+        position: plainPosition(zone.position),
+        halfWidth: Number(zone.halfWidth ?? 0),
+        halfDepth: Number(zone.halfDepth ?? 0),
+        verticalHalfHeight: Number.isFinite(zone.verticalHalfHeight)
+          ? Number(zone.verticalHalfHeight)
+          : null,
+        rotationY: Number(zone.rotationY ?? 0),
+        active: zone.active !== false,
+      }))
+      : [];
+    const platforms = includeGeometry
+      ? [
+        ...(this.platformingPlatforms ?? []),
+        ...(this.dynamicPlatformingPlatforms ?? []),
+      ].filter((platform) => platform?.enabled !== false).map((platform) => ({
+        id: platform.id ?? null,
+        center: plainPosition(platform.center),
+        halfWidth: Number(platform.halfWidth ?? 0),
+        halfDepth: Number(platform.halfDepth ?? 0),
+        topY: Number(platform.topY ?? 0),
+        blocksBelow: platform.blocksBelow !== false,
+        requiredTraversalAction: platform.requiredTraversalAction ?? null,
+        ledgeEdges: Array.isArray(platform.ledgeEdges) ? [...platform.ledgeEdges] : [],
+      }))
+      : [];
+    const doors = (dungeon.doors ?? []).map((door) => ({
+      id: door.id,
+      label: door.label,
+      fromRoomId: door.fromRoomId ?? null,
+      toRoomId: door.toRoomId ?? null,
+      position: plainPosition(door.position),
+      graphBlockingPosition: plainPosition(door.graphBlockingPosition),
+      collisionHalfWidth: Number(
+        door.collisionHalfWidth ?? (door.alongX ? 0.16 : (dungeon.tileSize ?? 2.8) * 0.48),
+      ),
+      collisionHalfDepth: Number(
+        door.collisionHalfDepth ?? (door.alongX ? (dungeon.tileSize ?? 2.8) * 0.48 : 0.16),
+      ),
+      collisionHeight: Number(door.collisionHeight ?? 4.8),
+      closed: door.closed === true,
+      opened: door.opened === true,
+    }));
+    const encounters = (controller.encounters ?? []).map((encounter) => ({
+      id: encounter.id,
+      roomId: encounter.roomId,
+      isBoss: Boolean(encounter.isBoss),
+      spawned: Boolean(encounter.spawned),
+      cleared: Boolean(encounter.cleared),
+      zone: {
+        position: plainPosition(encounter.zone?.position),
+        halfWidth: Number(encounter.zone?.halfWidth ?? 0),
+        halfDepth: Number(encounter.zone?.halfDepth ?? 0),
+      },
+      triggerZone: encounter.triggerZone ? {
+        position: plainPosition(encounter.triggerZone.position),
+        halfWidth: Number(encounter.triggerZone.halfWidth ?? 0),
+        halfDepth: Number(encounter.triggerZone.halfDepth ?? 0),
+      } : null,
+      enemyIds: [...(encounter.enemyIds ?? [])],
+    }));
+    const activeWeapon = this.player?.getActiveArmWeapon?.() ?? null;
+    const enemies = (this.enemies ?? []).map((enemy) => ({
+      id: enemy.id,
+      encounterId: enemy.encounterId ?? null,
+      dead: Boolean(enemy.dead),
+      isBoss: Boolean(enemy.isBoss),
+      health: Number(enemy.health ?? 0),
+      maxHealth: Number(enemy.stats?.maxHealth ?? enemy.maxHealth ?? 0),
+      position: plainPosition(enemy.root?.position),
+    }));
+    const keycards = (controller.keycards ?? []).map((keycard) => ({
+      id: keycard.id,
+      keycardId: keycard.keycardId,
+      collected: Boolean(keycard.collected),
+      position: plainPosition(keycard.position),
+    }));
+    const chests = (controller.chests ?? []).map((chest) => ({
+      id: chest.id,
+      guaranteedKeycardId: chest.guaranteedKeycardId ?? null,
+      opened: Boolean(chest.opened),
+      position: plainPosition(chest.position),
+    }));
+    const mechanisms = (controller.mechanisms ?? []).map((mechanism) => ({
+      id: mechanism.id,
+      label: mechanism.label,
+      activated: Boolean(mechanism.activated),
+      position: plainPosition(mechanism.position),
+    }));
+    const traps = (controller.traps ?? []).map((trap) => ({
+      id: trap.id,
+      label: trap.label,
+      active: trap.active !== false,
+      position: plainPosition(trap.position),
+    }));
+    const snapshot = {
+      worldKind: this.worldKind,
+      transitionState: this.transitionState,
+      player: {
+        position: playerPosition,
+        rotationY: Number(this.player?.root?.rotation?.y ?? 0),
+        health: Number(this.player?.health ?? 0),
+        maxHealth: Number(this.player?.stats?.maxHealth ?? this.player?.maxHealth ?? 0),
+        barrier: {
+          capacity: Number(this.player?.barrier?.capacity ?? 0),
+          current: Number(this.player?.barrier?.current ?? 0),
+          broken: Boolean(this.player?.barrier?.broken),
+          recharging: Boolean(this.player?.barrier?.recharging),
+        },
+        jumpState: this.player?.jumpState ?? null,
+        ledgeClinging: Boolean(this.player?.isLedgeClinging?.()),
+        dead: Boolean(this.player?.dead),
+        movementBasis: {
+          forward: plainPosition(cameraForwardVector),
+          right: plainPosition(cameraRightVector),
+        },
+      },
+      activeWeapon: activeWeapon ? {
+        slotIndex: Number(this.player?.activeArmIndex ?? 0),
+        id: activeWeapon.id ?? null,
+        type: activeWeapon.type ?? null,
+        label: activeWeapon.name ?? activeWeapon.typeLabel ?? null,
+      } : null,
+      tileSize: Number(dungeon.tileSize ?? 2.8),
+      floorTiles,
+      solidZones,
+      platforms,
+      doors,
+      encounters,
+      enemies,
+      keycards,
+      chests,
+      mechanisms,
+      traps,
+      keySeeker: controller.keySeeker ? {
+        id: controller.keySeeker.id,
+        activated: Boolean(controller.keySeeker.activated),
+        position: plainPosition(controller.keySeeker.position),
+      } : null,
+      shrine: controller.shrine ? {
+        id: controller.shrine.id ?? 'largeRefractor',
+        collected: Boolean(controller.shrine.collected),
+        position: plainPosition(controller.shrine.position),
+      } : null,
+      ownedKeys: [...(controller.progressionManager?.collectedKeycardIds ?? [])],
+      ruinCompleted: Boolean(this.ruinCompleted),
+      nearestInteractable: nearest ? {
+        kind: nearest.kind ?? null,
+        label: nearest.label ?? null,
+        targetId: nearest.target?.id ?? null,
+        targetPosition: plainPosition(nearest.target?.position),
+      } : null,
+      lock: {
+        targetId: lockTarget?.id ?? null,
+        ownerEnemyId: lockOwner?.id ?? null,
+        ownerEncounterId: lockOwner?.encounterId ?? null,
+        targetPosition: lockPosition,
+        movementLocked: Boolean(this.combat?.lockOn?.movementLocked),
+        progress: Number(this.combat?.lockOn?.progress ?? 0),
+      },
+    };
+
+    return structuredClone(snapshot);
+  }
+
   async selectBossHunt(profileId) {
     if (this.expeditionActive) return { ok: false, reason: 'expedition-locked' };
     const normalized = normalizeBossProfileId(profileId);
@@ -1861,7 +3152,10 @@ export class Game {
     this.selectedBossProfileId = normalized;
     this.activeBossExpeditionSpec = null;
     const nextProfile = getReaverbotBossProfile(normalized);
-    if ((previousProfile?.environmentId ?? null) !== (nextProfile?.environmentId ?? null)) {
+    if (this.usesStreamedWorldLifecycle && this.worldKind === 'overworld') {
+      // Boss cards in the overworld only persist the staged profile. No V1
+      // dungeon exists yet, so there is nothing to regenerate or mutate.
+    } else if ((previousProfile?.environmentId ?? null) !== (nextProfile?.environmentId ?? null)) {
       this.resetDungeonLayout({
         free: true,
         message: `${nextProfile?.title ?? 'Boss Hunt'} environment prepared`,
@@ -2005,6 +3299,7 @@ export class Game {
   getObjectiveText() {
     if (this.busterTestRange?.active) return 'Buster Test Range — Escape to return';
     if (this.busterSandboxSession?.active) return 'Disposable Buster Dungeon — Escape to return to Roll';
+    if (this.worldKind === 'overworld') return 'Choose a Boss Hunt at the sealed ruin door';
     const bossObjective = !this.activeReaverbotBoss?.dead
       ? this.activeReaverbotBoss?.specialEncounter?.getObjectiveText?.()
       : null;
@@ -2075,6 +3370,16 @@ export class Game {
   }
 
   getQuestLogEntries() {
+    if (this.worldKind === 'overworld') {
+      return [{
+        id: 'overworldBossHunt',
+        title: 'Boss Hunt Expedition',
+        status: 'Choose at the ruin door',
+        detail: 'Meet Roll at camp, then select and confirm a Boss Hunt at the sealed ruin entrance.',
+        progress: 0.12,
+        color: '#7df8ff',
+      }];
+    }
     const controller = this.dungeonController;
     const entries = [];
     const shrine = controller?.shrine ?? null;
@@ -2276,6 +3581,11 @@ export class Game {
   }
 
   extractToCamp() {
+    if (this.usesStreamedWorldLifecycle && this.worldKind === 'dungeon') {
+      return this._returnToStreamedOverworld({
+        outcome: this.ruinCompleted ? 'extracted' : 'abandoned',
+      });
+    }
     const target = this.dungeon?.campReturnPosition?.clone?.()
       ?? this.dungeon?.playerStart?.clone?.()
       ?? null;
@@ -2354,6 +3664,10 @@ export class Game {
     regenerateSeed = true,
     abandonExpedition = true,
   } = {}) {
+    if (this.usesStreamedWorldLifecycle) {
+      this.ui?.showToast?.('Choose a new Boss Hunt at the sealed ruin door', '#6bdcff');
+      return false;
+    }
     if (!free) {
       const cost = this.getRuinResetCost();
       if (this.inventory.gold < cost) {
@@ -2391,7 +3705,17 @@ export class Game {
     this.dynamicPlatformingPlatforms = [];
     this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
-    this.scene.add(dungeon.group);
+    (this.activeWorldBundle?.worldKind === 'dungeon'
+      ? this.activeWorldBundle.root
+      : this.scene).add(dungeon.group);
+    if (this.activeWorldBundle?.worldKind === 'dungeon') {
+      this.activeWorldBundle.facade = dungeon;
+      this.activeWorldBundle.npcAnimators = dungeon.npcAnimators ?? [];
+      this.activeWorldBundle.collisionData = dungeon.solidZones ?? [];
+      this.activeWorldBundle.cullingData = dungeon.renderCullGroups ?? [];
+      this.activeWorldBundle.disposableResources = dungeon.disposableResources ?? [];
+      this.activeWorldBundle.planHash = `v1:${this.dungeonLayoutSeed}:${this.getSelectedBossProfileId()}`;
+    }
     dungeon.activateNpcAssets?.();
     this.lastDungeonResourceDisposalStats = this._disposeDetachedDungeonResources(
       previousDungeon?.group,
@@ -2402,6 +3726,9 @@ export class Game {
     this.activeBossExpeditionSpec = null;
     this._configureBossHuntEncounter(dungeon, { ignorePersistedActive: true });
     this.dungeonController = new DungeonController(this, dungeon);
+    if (this.activeWorldBundle?.worldKind === 'dungeon') {
+      this.activeWorldBundle.controller = this.dungeonController;
+    }
     this.bossStageRuntime?.mount?.(this);
 
     this.player.root.position.copy(dungeon.playerStart);
@@ -4353,6 +5680,11 @@ export class Game {
     this.scene.name = 'busterSandboxScene';
     this.scene.background = new THREE.Color(0x171712);
     this.scene.fog = new THREE.Fog(0x171712, 24, 58);
+    this.worldKind = 'dungeon';
+    this.worldLifecycle = createWorldLifecycleState('dungeon');
+    this.transitionState = this.worldLifecycle.state;
+    this.activeWorldBundle = null;
+    this.overworldController = null;
     this.enemies = [];
     this.enemyIdAllocator = createEnemyIdAllocator('sandbox-enemy');
     setActiveEnemyIdAllocator(this.enemyIdAllocator);
@@ -5481,7 +6813,7 @@ export class Game {
       group.add(ribbon);
     }
 
-    this.scene.add(group);
+    (this.activeWorldBundle?.root ?? this.scene).add(group);
     tempVectorA.copy(this.player.root.position).sub(group.position);
     const initialDistance = Math.hypot(tempVectorA.x, tempVectorA.z);
     this.hazards.push({
@@ -6318,7 +7650,11 @@ export class Game {
   _loop() {
     const dt = Math.min(this.clock.getDelta(), 0.05);
     const gameplayDt = this._consumeHitStopDt(dt);
-    const gameplayActive = !this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver;
+    const gameplayActive = !this.inventoryOpen
+      && !this.poseDebugOpen
+      && !this.isGameOver
+      && !this.ui?.isWorldModalOpen?.()
+      && (this.transitionState === 'overworld' || this.transitionState === 'dungeon');
 
     if (gameplayActive) {
       this.elapsedTime += gameplayDt;
@@ -6333,6 +7669,9 @@ export class Game {
           enemy.prePlayerUpdate?.(gameplayDt, this);
         }
         const playerGroundY = this._getPlayerGroundY();
+        const overworldMovementOrigin = this.worldKind === 'overworld'
+          ? this.player.root.position.clone()
+          : null;
         this.player.update(gameplayDt, this.keys, {
           arenaRadius: this.arenaRadius,
           movementForward: movementBasis.forward,
@@ -6344,14 +7683,19 @@ export class Game {
           groundY: playerGroundY,
           game: this,
         });
+        if (overworldMovementOrigin) {
+          this.dungeonController?.resolvePlayerMovement?.(overworldMovementOrigin);
+        }
         if (this.busterTestRange?.active) {
           this._updateBusterTestRange(gameplayDt);
+        } else if (this.worldKind === 'overworld') {
+          this.dungeonController?.update?.(gameplayDt);
         } else {
-          this.dungeonController.update(gameplayDt);
-          this.mapEvents.update(gameplayDt);
-          this.spawner.update(gameplayDt);
+          this.dungeonController?.update?.(gameplayDt);
+          this.mapEvents?.update?.(gameplayDt);
+          this.spawner?.update?.(gameplayDt);
           this._updateEnemies(gameplayDt);
-          this.dungeonController.constrainEnemies();
+          this.dungeonController?.constrainEnemies?.();
         }
         this._updateTargetScanner();
         const activeBusterPlan = this.getActiveBusterPlan?.();
@@ -6535,10 +7879,55 @@ export class Game {
     return this.lockOnMovementBasis;
   }
 
-  _buildWorld() {
+  _createMapEventSystemForWorld() {
+    if (this.worldKind !== 'dungeon') {
+      return {
+        events: [],
+        update() {},
+        getNearestInteractable() { return null; },
+        activateNearest() { return false; },
+      };
+    }
+    const system = new MapEventSystem(this);
+    for (const event of system.events ?? []) {
+      if (event.object && this.activeWorldBundle?.root) this.activeWorldBundle.root.attach(event.object);
+    }
+    return system;
+  }
+
+  _createOverworldWorldBundle() {
+    const plan = this.overworldPlan ?? createAuthoredOverworldPlan();
+    this.overworldPlan = plan;
+    const facade = assembleOverworld(plan, { renderer: this.renderer });
+    const root = facade.root;
+    root.userData.worldRootId = root.uuid;
+    return createLoadedWorldBundle({
+      worldKind: 'overworld',
+      root,
+      facade,
+      controller: null,
+      lighting: facade.lighting,
+      npcAnimators: facade.npcAnimators,
+      collisionData: facade.solidZones,
+      cullingData: facade.renderCullGroups,
+      disposableResources: facade.disposableResources ?? [],
+      planHash: plan.planHash,
+      disposed: false,
+    });
+  }
+
+  _createLegacyDungeonWorldCandidate({
+    bossProfileId = this.getSelectedBossProfileId(),
+    layoutSeed = this.dungeonLayoutSeed,
+  } = {}) {
+    const root = new THREE.Group();
+    root.name = 'dungeonWorldRoot';
+    root.userData.worldKind = 'dungeon';
+    root.userData.worldRootId = root.uuid;
+
     const hemi = new THREE.HemisphereLight(0xd8e6ff, 0x34251d, 1.8);
     hemi.name = 'arenaHemisphereLight';
-    this.scene.add(hemi);
+    root.add(hemi);
 
     const key = new THREE.DirectionalLight(0xffffff, 2.2);
     key.name = 'arenaKeyLight';
@@ -6549,7 +7938,7 @@ export class Game {
     key.shadow.camera.right = 18;
     key.shadow.camera.top = 18;
     key.shadow.camera.bottom = -18;
-    this.scene.add(key);
+    root.add(key);
 
     const underlay = new THREE.Mesh(
       new THREE.PlaneGeometry(this.arenaRadius * 2.5, this.arenaRadius * 2.5),
@@ -6559,31 +7948,89 @@ export class Game {
     underlay.rotation.x = -Math.PI / 2;
     underlay.position.y = -0.09;
     underlay.receiveShadow = true;
-    this.scene.add(underlay);
+    root.add(underlay);
 
     const grid = new THREE.GridHelper(this.arenaRadius * 2.2, 64, 0x43515a, 0x283138);
     grid.name = 'ruinConstructionGrid';
     grid.position.y = 0.014;
-    this.scene.add(grid);
+    root.add(grid);
 
     const dungeon = new DungeonGenerator({
       difficulty: this.ruinFloor,
-      random: createDungeonRandom(this.dungeonLayoutSeed),
-      bossProfileId: this._creatingBusterSandbox ? null : this.getSelectedBossProfileId(),
+      random: createDungeonRandom(layoutSeed),
+      bossProfileId: this._creatingBusterSandbox ? null : bossProfileId,
     }).generate();
-    dungeon.layoutSeed = this.dungeonLayoutSeed;
-    this.dungeon = dungeon;
-    this.bossStageRuntime = dungeon.specialEnvironment ?? null;
-    this.platformingPlatforms = [...(dungeon.platforms ?? [])];
+    dungeon.layoutSeed = layoutSeed;
+    root.add(dungeon.group);
+    return createLoadedWorldBundle({
+      worldKind: 'dungeon',
+      root,
+      facade: dungeon,
+      controller: null,
+      lighting: root,
+      npcAnimators: dungeon.npcAnimators ?? [],
+      collisionData: dungeon.solidZones ?? [],
+      cullingData: dungeon.renderCullGroups ?? [],
+      disposableResources: dungeon.disposableResources ?? [],
+      planHash: `v1:${layoutSeed}:${bossProfileId ?? 'standard'}`,
+      bossProfileId,
+      disposed: false,
+    });
+  }
+
+  _assignMountedWorldBundle(bundle, { incrementGeneration = true } = {}) {
+    assertLoadedWorldBundle(bundle);
+    const outgoingRoot = this.activeWorldBundle?.root;
+    if (outgoingRoot && outgoingRoot !== bundle.root) outgoingRoot.removeFromParent?.();
+    const conflictingRoots = this.scene.children.filter((object) => (
+      object !== bundle.root
+      && object.userData?.worldRootId
+      && ['overworld', 'dungeon'].includes(object.userData?.worldKind)
+    ));
+    if (conflictingRoots.length > 0) {
+      throw new Error(`World root exclusivity violated: ${conflictingRoots.map((root) => root.name).join(', ')}`);
+    }
+    this.activeWorldBundle = bundle;
+    this.worldKind = bundle.worldKind;
+    this.dungeon = bundle.facade;
+    this.scene.add(bundle.root);
+    this.scene.background = bundle.facade.backgroundColor?.clone?.()
+      ?? new THREE.Color(0x171712);
+    this.scene.fog = bundle.facade.fog?.clone?.()
+      ?? new THREE.Fog(0x171712, 24, 58);
+    if (incrementGeneration) this.worldGenerationCount += 1;
+    this.bossStageRuntime = bundle.worldKind === 'dungeon'
+      ? bundle.facade.specialEnvironment ?? null
+      : null;
+    this.platformingPlatforms = bundle.worldKind === 'dungeon'
+      ? [...(bundle.facade.platforms ?? [])]
+      : [];
     this.dynamicPlatformingPlatforms = [];
     this._rebuildPlatformingLedgeCandidates();
-    this.arenaRadius = dungeon.boundsRadius ?? this.arenaRadius;
-    this.scene.add(dungeon.group);
-    if (!this._creatingBusterSandbox) dungeon.activateNpcAssets?.();
+    this.arenaRadius = bundle.facade.boundsRadius ?? this.arenaRadius;
+  }
+
+  _buildWorld() {
+    const useOverworld = this.usesStreamedWorldLifecycle && !this._creatingBusterSandbox;
+    const bundle = useOverworld
+      ? this._createOverworldWorldBundle()
+      : this._createLegacyDungeonWorldCandidate({
+        bossProfileId: this._creatingBusterSandbox ? null : this.getSelectedBossProfileId(),
+      });
+    this._assignMountedWorldBundle(bundle);
+    if (bundle.worldKind === 'dungeon') {
+      if (!this._creatingBusterSandbox) bundle.facade.activateNpcAssets?.();
+      this._configureBossHuntEncounter(bundle.facade);
+      this._rebuildDebugLedgeTester(bundle.facade.playerStart);
+    } else {
+      bundle.facade.activateNpcAssets?.();
+      this.debugLedgeTester?.removeFromParent?.();
+      this.debugLedgeTester = null;
+      this.debugLedgeCandidates = [];
+      this.debugLedgePlatform = null;
+    }
     this._collectCameraOcclusionWalls();
     this._collectDungeonRenderCullGroups();
-    this._rebuildDebugLedgeTester(dungeon.playerStart);
-    this._configureBossHuntEncounter(dungeon);
 
   }
 
@@ -6678,7 +8125,7 @@ export class Game {
     });
 
     this.debugLedgeTester = group;
-    this.scene.add(group);
+    (this.activeWorldBundle?.root ?? this.scene).add(group);
   }
 
   getDebugLedgeFloorElevation(position) {
@@ -7142,6 +8589,14 @@ export class Game {
     this.combat?._clearLockOn?.();
     this.combat?._clearPendingAttacks?.();
     this.combat?._clearMines?.();
+    this.activeReaverbotBoss = null;
+    this._deferredEnemyRemovals?.clear?.();
+    // Drop host references, but leave the tester attached to its outgoing
+    // world root so that bundle disposal can still discover its resources.
+    this.debugLedgeTester = null;
+    this.debugLedgeCandidates = [];
+    this.debugLedgePlatform = null;
+    this.lastDebugLedgeClingId = null;
     this.pendingExplosions.length = 0;
     this.explosionDispatchDepth = 0;
     if (this.enemyAttackDirector) {
@@ -7220,6 +8675,7 @@ export class Game {
     const geometries = new Set();
     const materials = new Set();
     const textures = new Set();
+    const renderTargets = new Set();
     const collectMaterial = (material) => {
       if (!material || materials.has(material)) {
         return;
@@ -7255,9 +8711,12 @@ export class Game {
       if (object.skeleton?.boneTexture?.isTexture) {
         textures.add(object.skeleton.boneTexture);
       }
+      for (const target of [object.shadow?.map, object.shadow?.mapPass]) {
+        if (target?.isWebGLRenderTarget) renderTargets.add(target);
+      }
     });
 
-    return { geometries, materials, textures };
+    return { geometries, materials, textures, renderTargets };
   }
 
   _disposeDetachedDungeonResources(detachedRoot) {
@@ -7271,6 +8730,9 @@ export class Game {
       preservedGeometryCount: 0,
       preservedMaterialCount: 0,
       preservedTextureCount: 0,
+      renderTargetCount: 0,
+      disposedRenderTargetCount: 0,
+      preservedRenderTargetCount: 0,
     };
     if (!detachedRoot) {
       return emptyStats;
@@ -7297,6 +8759,7 @@ export class Game {
     const geometryResult = disposeUnreferenced(owned.geometries, live.geometries);
     const materialResult = disposeUnreferenced(owned.materials, live.materials);
     const textureResult = disposeUnreferenced(owned.textures, live.textures);
+    const renderTargetResult = disposeUnreferenced(owned.renderTargets, live.renderTargets);
 
     return {
       geometryCount: owned.geometries.size,
@@ -7305,9 +8768,12 @@ export class Game {
       disposedGeometryCount: geometryResult.disposedCount,
       disposedMaterialCount: materialResult.disposedCount,
       disposedTextureCount: textureResult.disposedCount,
+      renderTargetCount: owned.renderTargets.size,
+      disposedRenderTargetCount: renderTargetResult.disposedCount,
       preservedGeometryCount: geometryResult.preservedCount,
       preservedMaterialCount: materialResult.preservedCount,
       preservedTextureCount: textureResult.preservedCount,
+      preservedRenderTargetCount: renderTargetResult.preservedCount,
     };
   }
 
@@ -7362,16 +8828,24 @@ export class Game {
     this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
     this.cameraOcclusionOwnerByObject = new WeakMap();
 
-    this.dungeon?.group?.traverse?.((object) => {
+    const worldRoot = this.activeWorldBundle?.root ?? this.dungeon?.group;
+    worldRoot?.traverse?.((object) => {
       const isWall = object.name === 'dungeonBoundaryWall'
         || object.name === 'factoryBasementRetainingWall'
         || object.name === 'factoryBasementEntryBackdrop'
         || object.name === 'factoryBasementEntryRevealWall';
-      if (!isWall && object.userData?.cameraOcclusionSurface !== true) {
+      let declaredOwner = object;
+      while (declaredOwner && declaredOwner !== worldRoot) {
+        if (declaredOwner.userData?.cameraOcclusionOwner) break;
+        declaredOwner = declaredOwner.parent;
+      }
+      const hasDeclaredOwner = Boolean(declaredOwner?.userData?.cameraOcclusionOwner);
+      if ((!object.isMesh && !object.isInstancedMesh)
+        || (!isWall && object.userData?.cameraOcclusionSurface !== true && !hasDeclaredOwner)) {
         return;
       }
-      let owner = object;
-      while (owner.parent && owner.parent !== this.dungeon.group) {
+      let owner = hasDeclaredOwner ? declaredOwner : object;
+      while (!hasDeclaredOwner && owner.parent && owner.parent !== worldRoot) {
         if (owner.userData?.cameraOcclusionOwner) {
           break;
         }
@@ -7506,7 +8980,19 @@ export class Game {
         descriptor.group.visible = true;
       }
     }
-    this.dungeonRenderCullGroups = [...(this.dungeon?.renderCullGroups ?? [])];
+    this.dungeonRenderCullGroups = [...(this.dungeon?.renderCullGroups ?? [])].map((entry) => {
+      if (entry?.group) return entry;
+      const center = entry?.userData?.cullCenter;
+      const radius = Number(entry?.userData?.cullRadius) || 20;
+      return {
+        group: entry,
+        minX: (center?.x ?? 0) - radius,
+        maxX: (center?.x ?? 0) + radius,
+        minZ: (center?.z ?? 0) - radius,
+        maxZ: (center?.z ?? 0) + radius,
+        drawObjectCount: entry?.geometry?.groups?.length ?? 1,
+      };
+    });
     this.dungeonRenderCullAccumulator = 0;
   }
 
@@ -7536,6 +9022,12 @@ export class Game {
       return;
     }
     this.dungeonRenderCullAccumulator = 0;
+    const hideDistance = this.worldKind === 'overworld'
+      ? OVERWORLD_RENDER_CULL_HIDE_DISTANCE
+      : DUNGEON_RENDER_CULL_HIDE_DISTANCE;
+    const showDistance = this.worldKind === 'overworld'
+      ? OVERWORLD_RENDER_CULL_SHOW_DISTANCE
+      : DUNGEON_RENDER_CULL_SHOW_DISTANCE;
     let visibleGroupCount = 0;
     let hiddenGroupCount = 0;
     let hiddenObjectCount = 0;
@@ -7550,9 +9042,9 @@ export class Game {
         this._distanceToRenderCullBounds(this.player.root.position, descriptor),
         this._distanceToRenderCullBounds(this.camera.position, descriptor),
       );
-      if (renderGroup.visible && distance > DUNGEON_RENDER_CULL_HIDE_DISTANCE) {
+      if (renderGroup.visible && distance > hideDistance) {
         renderGroup.visible = false;
-      } else if (!renderGroup.visible && distance < DUNGEON_RENDER_CULL_SHOW_DISTANCE) {
+      } else if (!renderGroup.visible && distance < showDistance) {
         renderGroup.visible = true;
       }
       renderGroup.userData.distanceCulled = !renderGroup.visible;
@@ -7645,7 +9137,11 @@ export class Game {
   }
 
   _isGameplayPointerLockAllowed() {
-    return !this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver;
+    return !this.inventoryOpen
+      && !this.poseDebugOpen
+      && !this.isGameOver
+      && !this.ui?.isWorldModalOpen?.()
+      && (this.transitionState === 'overworld' || this.transitionState === 'dungeon');
   }
 
   _requestGameplayPointerLock() {
@@ -7722,7 +9218,13 @@ export class Game {
   }
 
   _bindEvents() {
-    window.addEventListener('keydown', (event) => {
+    this.hostEventBindingPasses += 1;
+    const listen = (target, type, listener, options) => {
+      target.addEventListener(type, listener, options);
+      this.hostEventListenerRegistrations += 1;
+    };
+
+    listen(window, 'keydown', (event) => {
       if (event.code === 'Backquote') {
         event.preventDefault();
         this.setPoseDebugOpen(!this.poseDebugOpen);
@@ -7840,7 +9342,7 @@ export class Game {
       this.keys.add(event.code);
     });
 
-    window.addEventListener('keyup', (event) => {
+    listen(window, 'keyup', (event) => {
       if (event.code === 'KeyZ') {
         this.pointer.alternate = false;
         return;
@@ -7849,7 +9351,7 @@ export class Game {
       this.keys.delete(event.code);
     });
 
-    window.addEventListener('blur', () => {
+    listen(window, 'blur', () => {
       this.keys.clear();
       this.pointer.primary = false;
       this.pointer.primaryPressed = false;
@@ -7860,9 +9362,9 @@ export class Game {
       this.pointer.alternatePressed = false;
     });
 
-    document.addEventListener('pointerlockchange', () => this._handlePointerLockChange());
+    listen(document, 'pointerlockchange', () => this._handlePointerLockChange());
 
-    document.addEventListener('mousemove', (event) => {
+    listen(document, 'mousemove', (event) => {
       if (!this.pointerLocked || this.poseDebugOpen) {
         return;
       }
@@ -7870,7 +9372,7 @@ export class Game {
       this._updatePointerFromMouseEvent(event);
     });
 
-    document.addEventListener('mousedown', (event) => {
+    listen(document, 'mousedown', (event) => {
       if (!this.pointerLocked || this.poseDebugOpen || !this._isGameplayPointerLockAllowed()) {
         return;
       }
@@ -7880,7 +9382,7 @@ export class Game {
       }
     });
 
-    document.addEventListener('mouseup', (event) => {
+    listen(document, 'mouseup', (event) => {
       if (!this.pointerLocked || this.poseDebugOpen) {
         return;
       }
@@ -7890,7 +9392,7 @@ export class Game {
       }
     });
 
-    this.renderer.domElement.addEventListener('pointermove', (event) => {
+    listen(this.renderer.domElement, 'pointermove', (event) => {
       if (!this.pointerLocked) {
         this._updatePointerFromMouseEvent(event);
       }
@@ -7900,7 +9402,7 @@ export class Game {
       }
     });
 
-    this.renderer.domElement.addEventListener('pointerdown', (event) => {
+    listen(this.renderer.domElement, 'pointerdown', (event) => {
       if (this.poseDebugOpen) {
         event.preventDefault();
         try {
@@ -7917,7 +9419,7 @@ export class Game {
       this._setCombatMouseButton(event.button, true);
     });
 
-    window.addEventListener('pointerup', (event) => {
+    listen(window, 'pointerup', (event) => {
       if (this.poseDebugOpen) {
         this._handlePoseDebugPointerUp(event);
         return;
@@ -7926,11 +9428,11 @@ export class Game {
       this._setCombatMouseButton(event.button, false);
     });
 
-    this.renderer.domElement.addEventListener('contextmenu', (event) => {
+    listen(this.renderer.domElement, 'contextmenu', (event) => {
       event.preventDefault();
     });
 
-    this.renderer.domElement.addEventListener('wheel', (event) => {
+    listen(this.renderer.domElement, 'wheel', (event) => {
       if (!this.poseDebugOpen) {
         return;
       }
@@ -7944,7 +9446,7 @@ export class Game {
       );
     }, { passive: false });
 
-    window.addEventListener('resize', () => {
+    listen(window, 'resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -8730,7 +10232,7 @@ export class Game {
         this._presentBossVictoryResult(enemy, enemy.pendingBossVictoryResult);
         enemy.pendingBossVictoryResult = null;
       } else if (!enemy.bossVictoryCommitted) {
-        this._recordBossVictory(enemy);
+        this._trackBossVictoryCommit(this._recordBossVictory(enemy), this.activeWorldBundle);
       }
     }
     if (meta.selfDestruct || meta.suppressRewards) {
@@ -8791,10 +10293,27 @@ export class Game {
 
   commitAscensionVictory(enemy) {
     if (enemy?.debugBoss) return Promise.resolve({ ok: true, debug: true });
-    return this._recordBossVictory(enemy, { present: false, ascensionAtomic: true });
+    return this._trackBossVictoryCommit(
+      this._recordBossVictory(enemy, { present: false, ascensionAtomic: true }),
+      this.activeWorldBundle,
+    );
   }
 
-  async _recordBossVictory(enemy, { present = true, ascensionAtomic = false } = {}) {
+  _trackBossVictoryCommit(promise, bundle = this.activeWorldBundle) {
+    if (!bundle) return Promise.resolve(promise);
+    const tracked = Promise.resolve(promise).then((result) => {
+      bundle.bossVictoryCommitResult = result;
+      return result;
+    });
+    bundle.pendingBossVictoryCommit = tracked;
+    return tracked;
+  }
+
+  async _recordBossVictory(enemy, {
+    present = true,
+    ascensionAtomic = false,
+    originBundle = this.activeWorldBundle,
+  } = {}) {
     const expeditionId = enemy.expeditionSpec?.id
       ?? this.activeBossExpeditionSpec?.id
       ?? `boss:${enemy.id}`;
@@ -8816,11 +10335,16 @@ export class Game {
         this.bossHuntWarning = result?.reason === 'read-only'
           ? 'Boss recovery could not be committed while storage is read-only. First-clear eligibility was preserved.'
           : 'Boss recovery could not be committed; this expedition remains eligible for recovery.';
-        this.ui?.showToast?.(this.bossHuntWarning, '#ff9f73');
+        if (this.activeWorldBundle === originBundle && !originBundle?.disposed) {
+          this.ui?.showToast?.(this.bossHuntWarning, '#ff9f73');
+        }
         return result;
       }
       this.bossHuntWarning = null;
-      if (!present) return result;
+      if (!present
+        || this.activeWorldBundle !== originBundle
+        || originBundle?.disposed
+        || this.worldKind !== 'dungeon') return result;
       if (result.defenseUnlocked) {
         this._applyPersistedArmsGear({ refillBarrier: Boolean(result.barrierGranted) });
       }
@@ -8836,7 +10360,9 @@ export class Game {
       return result;
     } catch (error) {
       this.bossHuntWarning = 'Boss recovery could not be saved. First-clear eligibility was preserved.';
-      this.ui?.showToast?.(this.bossHuntWarning, '#ff9f73');
+      if (this.activeWorldBundle === originBundle && !originBundle?.disposed) {
+        this.ui?.showToast?.(this.bossHuntWarning, '#ff9f73');
+      }
       return { ok: false, reason: 'transaction-failed', error };
     }
   }
@@ -8874,7 +10400,7 @@ export class Game {
     );
     mesh.name = 'bossRecoveryPresentationPickup';
     mesh.position.copy(position);
-    this.scene.add(mesh);
+    (this.activeWorldBundle?.root ?? this.scene).add(mesh);
     this.timedEffects.push({
       object: mesh,
       kind: 'bossRecoveryPresentation',

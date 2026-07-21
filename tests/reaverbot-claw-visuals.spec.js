@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('claw palm rig presents its counter, cross-body guard, recoil, and destroyed states without a defense mesh', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/?reaverbotSeed=claw-palm-visual-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=claw-palm-visual-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(async () => {

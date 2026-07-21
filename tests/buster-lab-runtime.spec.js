@@ -22,7 +22,7 @@ async function waitForRollAssets(page) {
 
 test('the canonical Buster Lab ignores the former feature query without duplicating starter calibration', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?reaverbotSeed=buster-feature-off');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=buster-feature-off');
   await waitForGame(page);
   await waitForRollAssets(page);
 
@@ -55,7 +55,7 @@ test('the canonical Buster Lab ignores the former feature query without duplicat
   expect(state.shadow.location).toEqual({ kind: 'megaSocket', socketIndex: 0 });
   expect(state.unifiedHud).toBe(true);
 
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-feature-off');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-feature-off');
   await waitForGame(page);
   await waitForRollAssets(page);
   const featureOn = await page.evaluate(() => {
@@ -79,7 +79,7 @@ test('the canonical Buster Lab ignores the former feature query without duplicat
   expect(featureOn.energy).toBe(6);
   expect(featureOn.cost).toBe(2);
 
-  await page.goto('/?reaverbotSeed=buster-feature-off');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=buster-feature-off');
   await waitForGame(page);
   const toggledOff = await page.evaluate(() => ({
     ids: window.game.inventory.items
@@ -94,7 +94,7 @@ test('the canonical Buster Lab ignores the former feature query without duplicat
 
 test('Buster Part world pickups remain live until their durable ownership commit succeeds', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-durable-pickup');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-durable-pickup');
   await waitForGame(page);
 
   const result = await page.evaluate(async () => {
@@ -240,7 +240,7 @@ test('Buster Part world pickups remain live until their durable ownership commit
 
 test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&busterLabDebug=1&reaverbotSeed=buster-debug-kit');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&busterLabDebug=1&reaverbotSeed=buster-debug-kit');
   await waitForGame(page);
   await page.evaluate(() => window.game.setPoseDebugOpen(true));
 
@@ -373,7 +373,7 @@ test('Debug Tools grants a repeatable complete Buster Lab testing kit', async ({
 
 test('Debug Tools launches range and sandbox tests and restores its Buster tab', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=sandbox&busterLabDebug=1&reaverbotSeed=buster-debug-launcher');
+  await page.goto('/?startupWorld=dungeon&busterLab=sandbox&busterLabDebug=1&reaverbotSeed=buster-debug-launcher');
   await waitForGame(page);
   await page.evaluate(() => window.game.setPoseDebugOpen(true));
 
@@ -464,7 +464,7 @@ test('Debug Tools launches range and sandbox tests and restores its Buster tab',
 
 test('Mega and Custom Busters release only after the arm reaches its extended firing pose', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-extension-timing');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-extension-timing');
   await waitForGame(page);
   await page.waitForFunction(() => window.game.player?._fbxAnimationLibraryLoaded === true);
 
@@ -630,7 +630,7 @@ test('Mega and Custom Busters release only after the arm reaches its extended fi
 
 test('free Custom Buster fire does not lock tank movement to an in-flight shot', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-free-fire-movement');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-free-fire-movement');
   await waitForGame(page);
   await page.waitForFunction(() => window.game.player?._fbxAnimationLibraryLoaded === true);
 
@@ -773,7 +773,7 @@ test('free Custom Buster fire does not lock tank movement to an in-flight shot',
 
 test('Roll can save, equip, fire, and safely exit the starter Custom Buster range', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-lab-runtime');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-lab-runtime');
   await waitForGame(page);
 
   const initial = await page.evaluate(() => {
@@ -1045,7 +1045,7 @@ test('Roll can save, equip, fire, and safely exit the starter Custom Buster rang
 
 test('Roll UI stores ownership-free blueprints and atomically materializes an original route', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&busterLabDebug=1&reaverbotSeed=buster-blueprint-ui');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&busterLabDebug=1&reaverbotSeed=buster-blueprint-ui');
   await waitForGame(page);
   await page.evaluate(() => window.game.setInventoryOpen(true, { mode: 'roll' }));
   await page.getByRole('tab', { name: 'Buster Lab' }).click();
@@ -1158,7 +1158,7 @@ test('Roll UI stores ownership-free blueprints and atomically materializes an or
 
 test('full-catalog sandbox isolates ids, rejects durable writes, and remains leak-free across reuse', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=sandbox&busterLabDebug=1&reaverbotSeed=buster-sandbox-freeze');
+  await page.goto('/?startupWorld=dungeon&busterLab=sandbox&busterLabDebug=1&reaverbotSeed=buster-sandbox-freeze');
   await waitForGame(page);
 
   const result = await page.evaluate(async () => {
@@ -1440,7 +1440,7 @@ test('full-catalog sandbox isolates ids, rejects durable writes, and remains lea
 
 test('production projectile lifecycle runs Explosion, Delay, Impact, and Apex programs deterministically', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-lifecycle-runtime');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-lifecycle-runtime');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -1728,7 +1728,7 @@ test('corrupt local Lab data is quarantined with a visible warning and safe Mega
     }));
     localStorage.setItem(`ruinDigger.busterLab.v2.${encodeURIComponent(saveContextId)}`, '{not valid json');
   });
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-corrupt-save');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-corrupt-save');
   await waitForGame(page);
   await page.evaluate(() => window.game.setInventoryOpen(true, { mode: 'roll' }));
   await page.getByRole('tab', { name: 'Buster Lab' }).click();
@@ -1749,7 +1749,7 @@ test('corrupt local Lab data is quarantined with a visible warning and safe Mega
 
 test('unknown module ids preserve the invalid draft and force the Mega Buster fallback', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-unknown-module');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-unknown-module');
   await waitForGame(page);
   await page.waitForFunction(() => (
     window.game?.dungeon?.group?.getObjectByName('rollCaskettNpc')?.userData?.animationAssetsSettled === true

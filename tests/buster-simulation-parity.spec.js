@@ -45,7 +45,7 @@ async function readLiveProfileRanges(page) {
 
 test('live legacy Range resolution is identical with and without the obsolete Buster Lab query', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?reaverbotSeed=buster-range-parity-off');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=buster-range-parity-off');
   await waitForGame(page);
   const featureOff = await readLiveProfileRanges(page);
   // Let Roll's queued local FBX requests settle before navigating. Chromium
@@ -53,7 +53,7 @@ test('live legacy Range resolution is identical with and without the obsolete Bu
   // unrelated to the Range contract being compared here.
   await waitForRollAssets(page);
 
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-range-parity-on');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-range-parity-on');
   await waitForGame(page);
   const featureOn = await readLiveProfileRanges(page);
 
@@ -71,7 +71,7 @@ test('live legacy Range resolution is identical with and without the obsolete Bu
 
 test('Custom Explosion uses capsule distance while the same legacy blast retains root distance', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-explosion-capsule-parity');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-explosion-capsule-parity');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -127,7 +127,7 @@ test('Custom Explosion uses capsule distance while the same legacy blast retains
 
 test('neutral and live Mega action packets match their compiled and displayed Power', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-mega-packet-parity');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-mega-packet-parity');
   await waitForGame(page);
 
   const result = await page.evaluate(async () => {
@@ -181,7 +181,7 @@ test('neutral and live Mega action packets match their compiled and displayed Po
 
 test('the production range weak point applies 2.4x direct packet damage', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-range-weak-point-parity');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-range-weak-point-parity');
   await waitForGame(page);
 
   const result = await page.evaluate(() => {
@@ -237,7 +237,7 @@ test('the production range weak point applies 2.4x direct packet damage', async 
 
 test('large-frame guided Delay-Cluster lifecycle matches the shared simulator', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-guided-large-frame-parity');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-guided-large-frame-parity');
   await waitForGame(page);
 
   const result = await page.evaluate(async () => {
@@ -342,7 +342,7 @@ test('large-frame guided Delay-Cluster lifecycle matches the shared simulator', 
 
 test('Pulse and Mortar packets match at Range ratings 1, 4, and 10 for both aim signs', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-range-rating-parity');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-range-rating-parity');
   await waitForGame(page);
 
   const rows = await page.evaluate(async () => {
@@ -468,7 +468,7 @@ test('Pulse and Mortar packets match at Range ratings 1, 4, and 10 for both aim 
 
 test('root Guidance and direct Spread-Explosion match shared moving and off-axis fixtures', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-guidance-spread-shared-fixtures');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-guidance-spread-shared-fixtures');
   await waitForGame(page);
 
   const result = await page.evaluate(async () => {
@@ -693,7 +693,7 @@ test('root Guidance and direct Spread-Explosion match shared moving and off-axis
 
 test('Apex and Terminal Relay production lifecycle matches simulator timing and packets', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-trigger-lifecycle-parity');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-trigger-lifecycle-parity');
   await waitForGame(page);
 
   const rows = await page.evaluate(async () => {
@@ -849,7 +849,7 @@ test('Apex and Terminal Relay production lifecycle matches simulator timing and 
 
 test('in-flight executions survive switch and recompile while explicit cancellation tears down', async ({ page }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('/?busterLab=1&reaverbotSeed=buster-inflight-revision-parity');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=buster-inflight-revision-parity');
   await waitForGame(page);
 
   const result = await page.evaluate(async () => {

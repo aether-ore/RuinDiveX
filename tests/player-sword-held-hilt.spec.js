@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('laser sword is a modeled right-hand weapon and its live trail starts at the hilt emitter', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => (
     window.game?.player?._fbxAnimationLibraryLoaded === true
     && window.game?.player?._busterArmLoaded === true

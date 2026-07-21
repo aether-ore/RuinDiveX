@@ -1,0 +1,135 @@
+{
+  "id": "ruindivex-overworld-voxel-faces-v1",
+  "revision": 2,
+  "sourceArt": {
+    "rawGeneratorArtifactDirectory": "assets/art-source/overworld/voxel",
+    "rawGeneratorArtifactPolicy": "untouched-native-output",
+    "rawGeneratorMinimumAxisPixels": 1024,
+    "canonicalSourceDirectory": "assets/art-source/overworld/voxel/source-1024",
+    "canonicalSourceSize": 1024,
+    "canonicalization": "center-square-crop-and-high-quality-resample",
+    "runtimeDerivedFrom": "canonical-source-1024",
+    "provenanceValidation": "assets/textures/overworld/voxel/voxel-texture-validation.json"
+  },
+  "runtimeSize": 256,
+  "boxMaterialOrder": [
+    "positiveX",
+    "negativeX",
+    "positiveY",
+    "negativeY",
+    "positiveZ",
+    "negativeZ"
+  ],
+  "families": {
+    "meadow": {
+      "id": "meadow",
+      "top": "/assets/textures/overworld/voxel/meadow-grass-top.png",
+      "side": "/assets/textures/overworld/voxel/meadow-grass-side.png",
+      "bottom": "/assets/textures/overworld/voxel/meadow-grass-bottom.png",
+      "sixFaces": {
+        "positiveX": "/assets/textures/overworld/voxel/meadow-grass-side.png",
+        "negativeX": "/assets/textures/overworld/voxel/meadow-grass-side.png",
+        "positiveY": "/assets/textures/overworld/voxel/meadow-grass-top.png",
+        "negativeY": "/assets/textures/overworld/voxel/meadow-grass-bottom.png",
+        "positiveZ": "/assets/textures/overworld/voxel/meadow-grass-side.png",
+        "negativeZ": "/assets/textures/overworld/voxel/meadow-grass-side.png"
+      }
+    },
+    "trail": {
+      "id": "trail",
+      "top": "/assets/textures/overworld/voxel/worn-trail-earth-top.png",
+      "side": "/assets/textures/overworld/voxel/worn-trail-earth-side.png",
+      "bottom": "/assets/textures/overworld/voxel/worn-trail-earth-bottom.png",
+      "sixFaces": {
+        "positiveX": "/assets/textures/overworld/voxel/worn-trail-earth-side.png",
+        "negativeX": "/assets/textures/overworld/voxel/worn-trail-earth-side.png",
+        "positiveY": "/assets/textures/overworld/voxel/worn-trail-earth-top.png",
+        "negativeY": "/assets/textures/overworld/voxel/worn-trail-earth-bottom.png",
+        "positiveZ": "/assets/textures/overworld/voxel/worn-trail-earth-side.png",
+        "negativeZ": "/assets/textures/overworld/voxel/worn-trail-earth-side.png"
+      }
+    },
+    "stone": {
+      "id": "stone",
+      "top": "/assets/textures/overworld/voxel/exposed-hill-stone-top.png",
+      "side": "/assets/textures/overworld/voxel/exposed-hill-stone-side.png",
+      "bottom": "/assets/textures/overworld/voxel/exposed-hill-stone-bottom.png",
+      "sixFaces": {
+        "positiveX": "/assets/textures/overworld/voxel/exposed-hill-stone-side.png",
+        "negativeX": "/assets/textures/overworld/voxel/exposed-hill-stone-side.png",
+        "positiveY": "/assets/textures/overworld/voxel/exposed-hill-stone-top.png",
+        "negativeY": "/assets/textures/overworld/voxel/exposed-hill-stone-bottom.png",
+        "positiveZ": "/assets/textures/overworld/voxel/exposed-hill-stone-side.png",
+        "negativeZ": "/assets/textures/overworld/voxel/exposed-hill-stone-side.png"
+      }
+    },
+    "bark": {
+      "id": "bark",
+      "top": "/assets/textures/overworld/voxel/tree-bark-top.png",
+      "side": "/assets/textures/overworld/voxel/tree-bark-side.png",
+      "bottom": "/assets/textures/overworld/voxel/tree-bark-bottom.png",
+      "sixFaces": {
+        "positiveX": "/assets/textures/overworld/voxel/tree-bark-side.png",
+        "negativeX": "/assets/textures/overworld/voxel/tree-bark-side.png",
+        "positiveY": "/assets/textures/overworld/voxel/tree-bark-top.png",
+        "negativeY": "/assets/textures/overworld/voxel/tree-bark-bottom.png",
+        "positiveZ": "/assets/textures/overworld/voxel/tree-bark-side.png",
+        "negativeZ": "/assets/textures/overworld/voxel/tree-bark-side.png"
+      }
+    },
+    "leaves": {
+      "id": "leaves",
+      "top": "/assets/textures/overworld/voxel/leaf-canopy-top.png",
+      "side": "/assets/textures/overworld/voxel/leaf-canopy-side.png",
+      "bottom": "/assets/textures/overworld/voxel/leaf-canopy-bottom.png",
+      "sixFaces": {
+        "positiveX": "/assets/textures/overworld/voxel/leaf-canopy-side.png",
+        "negativeX": "/assets/textures/overworld/voxel/leaf-canopy-side.png",
+        "positiveY": "/assets/textures/overworld/voxel/leaf-canopy-top.png",
+        "negativeY": "/assets/textures/overworld/voxel/leaf-canopy-bottom.png",
+        "positiveZ": "/assets/textures/overworld/voxel/leaf-canopy-side.png",
+        "negativeZ": "/assets/textures/overworld/voxel/leaf-canopy-side.png"
+      }
+    },
+    "houseWall": {
+      "id": "houseWall",
+      "top": "/assets/textures/overworld/voxel/weathered-house-wall-top.png",
+      "side": "/assets/textures/overworld/voxel/weathered-house-wall-side.png",
+      "bottom": "/assets/textures/overworld/voxel/weathered-house-wall-bottom.png",
+      "sixFaces": {
+        "positiveX": "/assets/textures/overworld/voxel/weathered-house-wall-side.png",
+        "negativeX": "/assets/textures/overworld/voxel/weathered-house-wall-side.png",
+        "positiveY": "/assets/textures/overworld/voxel/weathered-house-wall-top.png",
+        "negativeY": "/assets/textures/overworld/voxel/weathered-house-wall-bottom.png",
+        "positiveZ": "/assets/textures/overworld/voxel/weathered-house-wall-side.png",
+        "negativeZ": "/assets/textures/overworld/voxel/weathered-house-wall-side.png"
+      }
+    },
+    "roof": {
+      "id": "roof",
+      "top": "/assets/textures/overworld/voxel/weathered-shingle-roof-top.png",
+      "side": "/assets/textures/overworld/voxel/weathered-shingle-roof-side.png",
+      "bottom": "/assets/textures/overworld/voxel/weathered-shingle-roof-bottom.png",
+      "sixFaces": {
+        "positiveX": "/assets/textures/overworld/voxel/weathered-shingle-roof-side.png",
+        "negativeX": "/assets/textures/overworld/voxel/weathered-shingle-roof-side.png",
+        "positiveY": "/assets/textures/overworld/voxel/weathered-shingle-roof-top.png",
+        "negativeY": "/assets/textures/overworld/voxel/weathered-shingle-roof-bottom.png",
+        "positiveZ": "/assets/textures/overworld/voxel/weathered-shingle-roof-side.png",
+        "negativeZ": "/assets/textures/overworld/voxel/weathered-shingle-roof-side.png"
+      }
+    }
+  },
+  "facades": {
+    "woodenDoor": "/assets/textures/overworld/voxel/wooden-door-facade.png",
+    "mullionedWindow": "/assets/textures/overworld/voxel/mullioned-window-facade.png"
+  },
+  "runtime": {
+    "colorSpace": "srgb",
+    "wrapS": "repeat",
+    "wrapT": "repeat",
+    "generateMipmaps": true,
+    "anisotropicFiltering": true,
+    "repeatWorldMetres": 1.5
+  }
+}

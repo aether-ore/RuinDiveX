@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('large conveyor-room ramps keep grounded support across overlapping platform seams', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=conveyor-ramp-runtime-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=conveyor-ramp-runtime-proof');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const result = await page.evaluate(() => {
@@ -107,7 +107,7 @@ test('large conveyor-room ramps keep grounded support across overlapping platfor
 });
 
 test('high conveyor scaffolding permits a railing jump to the distant floor below', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=conveyor-high-rail-jump-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=conveyor-high-rail-jump-proof');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const result = await page.evaluate(() => {
@@ -214,7 +214,7 @@ test('high conveyor scaffolding permits a railing jump to the distant floor belo
 
 test('conveyor scaffolding wins ramp conflicts without leaving partial slopes or support intrusions', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const results = await page.evaluate(async () => {

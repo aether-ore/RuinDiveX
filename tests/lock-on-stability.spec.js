@@ -10,7 +10,7 @@ async function waitForLockTestGame(page) {
 }
 
 test('manual body lock survives sustained combat, target-list refreshes, and range excursions', async ({ page }) => {
-  await page.goto('/?busterLab=1&reaverbotSeed=manual-lock-stability');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=manual-lock-stability');
   await waitForLockTestGame(page);
 
   const result = await page.evaluate(() => {
@@ -156,7 +156,7 @@ test('manual body lock survives sustained combat, target-list refreshes, and ran
 });
 
 test('covered weak-point lock survives reticle refresh and a range-crossing dodge roll', async ({ page }) => {
-  await page.goto('/?busterLab=1&reaverbotSeed=covered-lock-stability');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=covered-lock-stability');
   await waitForLockTestGame(page);
 
   const result = await page.evaluate(() => {
@@ -299,7 +299,7 @@ test('covered weak-point lock survives reticle refresh and a range-crossing dodg
 });
 
 test('boss signature lock remains stable and transfers to the body after overload', async ({ page }) => {
-  await page.goto('/?busterLab=1&bossDebug=1&reaverbotSeed=boss-lock-stability');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&bossDebug=1&reaverbotSeed=boss-lock-stability');
   await waitForLockTestGame(page);
 
   const result = await page.evaluate(() => {
@@ -407,7 +407,7 @@ test('boss signature lock remains stable and transfers to the body after overloa
 });
 
 test('manual lock persists through arm swaps and full-body recovery, then transfers on weak-point break', async ({ page }) => {
-  await page.goto('/?busterLab=1&reaverbotSeed=lock-action-lifecycle');
+  await page.goto('/?startupWorld=dungeon&busterLab=1&reaverbotSeed=lock-action-lifecycle');
   await waitForLockTestGame(page);
 
   const result = await page.evaluate(async () => {

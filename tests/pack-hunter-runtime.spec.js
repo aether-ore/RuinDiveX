@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('Pack Hunters accept side and rear flanks and force an in-range attack after 15 seconds', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

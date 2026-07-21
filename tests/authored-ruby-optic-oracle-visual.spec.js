@@ -5,7 +5,7 @@ async function waitForGame(page) {
 }
 
 test('authored Ruby pivots, combat anchors, scoped materials, and textures stay coherent', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=authored-ruby-pivot-regression');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=authored-ruby-pivot-regression');
   await waitForGame(page);
 
   await page.evaluate(() => {

@@ -6,7 +6,7 @@ async function openReadyGame(page) {
   page.on('console', (message) => {
     if (message.type() === 'error') runtimeErrors.push(message.text());
   });
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => Boolean(
     window.game?.busterLabStorage?.state?.armsGear
     && window.game?.dungeonController

@@ -9,7 +9,7 @@ test('loads the ruin scene and performs a fixed-height jump', async ({ page }) =
     }
   });
 
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect(page.locator('canvas')).toHaveCount(1);
 
   const container = page.locator('#game-container');
@@ -35,7 +35,7 @@ test('loads the ruin scene and performs a fixed-height jump', async ({ page }) =
 });
 
 test('standing and moving hops share the forward-jump animation flow', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {
@@ -222,7 +222,7 @@ test('standing and moving hops share the forward-jump animation flow', async ({ 
 });
 
 test('airborne firing layers the buster arm over jump motion and dodge cancels firing', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {
@@ -338,7 +338,7 @@ test('airborne firing layers the buster arm over jump motion and dodge cancels f
 });
 
 test('powerful hits use a distinct airborne knockback arc and resolve walkable landings', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {
@@ -696,7 +696,7 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
 });
 
 test('power knockback prevents airborne juggling and darkens the health gauge through get-up', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(async () => {
@@ -827,7 +827,7 @@ test('power knockback prevents airborne juggling and darkens the health gauge th
 });
 
 test('debug ledge cube is a solid 3x3x3 block with a default-height grab ledge', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect(page.locator('canvas')).toHaveCount(1);
 
   const container = page.locator('#game-container');
@@ -934,7 +934,7 @@ test('debug ledge cube is a solid 3x3x3 block with a default-height grab ledge',
 
 test('ledge climb anchors the left hand through the baked FBX push-off', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect(page.locator('canvas')).toHaveCount(1);
 
   const container = page.locator('#game-container');
@@ -1228,7 +1228,7 @@ test('ledge climb anchors the left hand through the baked FBX push-off', async (
 
 test('camp platforms reserve ledge grabs for rises above normal jump reach', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {
@@ -1446,7 +1446,7 @@ test('camp platforms reserve ledge grabs for rises above normal jump reach', asy
 
 test('platform debug menu scales jump reach, moon gravity, and spawned blocks', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   await page.keyboard.press('Backquote');
@@ -1613,7 +1613,7 @@ test('platform debug menu scales jump reach, moon gravity, and spawned blocks', 
 });
 
 test('dodge roll is shorter and crosses short gaps during its opening quarter', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {
@@ -1718,7 +1718,7 @@ test('dodge roll is shorter and crosses short gaps during its opening quarter', 
 });
 
 test('a descending edge contact catches low ledges without making normal jumps sticky', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {
@@ -1926,7 +1926,7 @@ test('a descending edge contact catches low ledges without making normal jumps s
 
 test('pressing S from a ledge plays the wall jump and hands off to falling', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {
@@ -2052,7 +2052,7 @@ test('pressing S from a ledge plays the wall jump and hands off to falling', asy
 
 test('generated factory rooms expose validated vertical plans and elevation-matched portals', async ({ page }) => {
   test.setTimeout(45000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   const container = page.locator('#game-container');
   await expect
     .poll(
@@ -2196,7 +2196,7 @@ test('generated factory rooms expose validated vertical plans and elevation-matc
 
 test('industrial rooms and connectors use solid volumetric prefabs, large slopes, and a keycard pyramid', async ({ page }) => {
   test.setTimeout(45000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -2586,7 +2586,7 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
 
 test('conveyor consoles, sealed vault, refractor sanctum, and grand keycard pyramid hold across seeds', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -2829,7 +2829,7 @@ test('conveyor consoles, sealed vault, refractor sanctum, and grand keycard pyra
 
 test('solid architectural decks preserve carved underpasses and deterministic progression routes', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -2954,7 +2954,7 @@ test('solid architectural decks preserve carved underpasses and deterministic pr
 
 test('trap basement remains a purposeful drop space while the bonus vault reward stays on its focal dais', async ({ page }) => {
   test.setTimeout(45000);
-  await page.goto('/?roomPreview=trapRoom&roomPreviewLevel=0&roomPreviewFacing=north');
+  await page.goto('/?startupWorld=dungeon&roomPreview=trapRoom&roomPreviewLevel=0&roomPreviewFacing=north');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -3242,7 +3242,7 @@ test('trap basement remains a purposeful drop space while the bonus vault reward
 
 test('ramps and macro walls preserve tiled texel density without repeated slab seams', async ({ page }) => {
   test.setTimeout(45000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -3503,7 +3503,7 @@ test('ramps and macro walls preserve tiled texel density without repeated slab s
 
 test('static dungeon chunks cull by distance while floor occlusion and important objects remain safe', async ({ page }) => {
   test.setTimeout(45000);
-  await page.goto('/?roomPreview=trapRoom&roomPreviewLevel=0&roomPreviewFacing=north');
+  await page.goto('/?startupWorld=dungeon&roomPreview=trapRoom&roomPreviewLevel=0&roomPreviewFacing=north');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -3730,7 +3730,7 @@ test('static dungeon chunks cull by distance while floor occlusion and important
 
 test('dungeon reset disposes detached GPU resources while preserving live shared assets', async ({ page }) => {
   test.setTimeout(45000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -3841,7 +3841,7 @@ test('dungeon reset disposes detached GPU resources while preserving live shared
 
 test('elevated drops and effects stay on their tier while lore announcements are preserved', async ({ page }) => {
   test.setTimeout(30000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -3926,7 +3926,7 @@ test('elevated drops and effects stay on their tier while lore announcements are
 
 test('procedural vertical solver accepts a deterministic seed sweep', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -3964,7 +3964,7 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
 
 test('server room keeps one clear perimeter ramp while its upper socket remains reachable', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -4088,7 +4088,7 @@ test('server room keeps one clear perimeter ramp while its upper socket remains 
 
 test('generated jump platforms support landing and block their unsupported underside', async ({ page }) => {
   test.setTimeout(30000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -4136,7 +4136,7 @@ test('generated jump platforms support landing and block their unsupported under
 
 test('critical closed doors remain physical choke points for their deeper rooms', async ({ page }) => {
   test.setTimeout(45000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -4248,7 +4248,7 @@ test('critical closed doors remain physical choke points for their deeper rooms'
 
 test('every generated door is anchored in a sealed room threshold across seeds', async ({ page }) => {
   test.setTimeout(60000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -4355,7 +4355,7 @@ test('every generated door is anchored in a sealed room threshold across seeds',
 
 test('upper connection sockets are reachable from inside their owning rooms', async ({ page }) => {
   test.setTimeout(45000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -4409,7 +4409,7 @@ test('upper connection sockets are reachable from inside their owning rooms', as
 });
 
 test('sword arm slashes preserve body facing and strike forward', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.player?._fbxAnimationLibraryLoaded === true);
 
   const result = await page.evaluate(() => {
@@ -4472,7 +4472,7 @@ test('sword arm slashes preserve body facing and strike forward', async ({ page 
 });
 
 test('weapon output regeneration waits half a second after firing, not while aiming', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => window.game?.combat && window.game?.player);
 
   const result = await page.evaluate(() => {
@@ -4516,7 +4516,7 @@ test('weapon output regeneration waits half a second after firing, not while aim
 
 test('default buster stays level on the same tier and aims up at an upper lock target', async ({ page }) => {
   test.setTimeout(30000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -4618,7 +4618,7 @@ test('default buster stays level on the same tier and aims up at an upper lock t
 
 test('projectile collision and homing preserve vertical separation', async ({ page }) => {
   test.setTimeout(30000);
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),

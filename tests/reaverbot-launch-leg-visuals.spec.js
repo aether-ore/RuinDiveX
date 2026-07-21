@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('Launch Leg pouncers carry a massive mirrored kangaroo leg with rocket-assisted jump power', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/?reaverbotSeed=launch-leg-visual-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=launch-leg-visual-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(async () => {

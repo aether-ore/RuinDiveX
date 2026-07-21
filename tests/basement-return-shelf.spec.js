@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('the basement return ledge is one solid impassable block without a center seam', async ({ page }) => {
-  await page.goto('/?roomPreview=trapRoom&roomPreviewLevel=-1&roomPreviewFacing=north');
+  await page.goto('/?startupWorld=dungeon&roomPreview=trapRoom&roomPreviewLevel=-1&roomPreviewFacing=north');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const result = await page.evaluate(() => {

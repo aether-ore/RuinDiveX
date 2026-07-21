@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('clustered mines detonate once each without recursive duplicates', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=mine-recursion-guard');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=mine-recursion-guard');
   await page.waitForFunction(() => Boolean(window.game?.combat));
 
   const result = await page.evaluate(() => {
@@ -68,7 +68,7 @@ test('clustered mines detonate once each without recursive duplicates', async ({
 });
 
 test('combat-owned fire zones and refractor pickups release GPU resources', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=combat-resource-cleanup');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=combat-resource-cleanup');
   await page.waitForFunction(() => Boolean(window.game?.refractors));
 
   const result = await page.evaluate(() => {
@@ -154,7 +154,7 @@ test('combat-owned fire zones and refractor pickups release GPU resources', asyn
 });
 
 test('death presentation stays staged, animated, and within the pack-wipe budget', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=death-effect-budget');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=death-effect-budget');
   await page.waitForFunction(() => Boolean(window.game?.spawner));
 
   const result = await page.evaluate(() => {

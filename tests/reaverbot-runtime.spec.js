@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('procedural Reaverbots integrate with encounters, targeting, defenses, and persistent projectiles', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot && window.getReaverbotCatalog));
 
   const result = await page.evaluate(() => {
@@ -230,7 +230,7 @@ test('procedural Reaverbots integrate with encounters, targeting, defenses, and 
 });
 
 test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and mines work at runtime', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=runtime-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=runtime-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const snapshotSeededEncounter = () => page.evaluate(() => {
@@ -492,7 +492,7 @@ test('run seeds, line hits, guarded posture, path clamps, telegraph cleanup, and
 });
 
 test('paired guards protect leg joints and the rotor exposes its counterweight side', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=paired-defense-runtime');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=paired-defense-runtime');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -738,7 +738,7 @@ test('paired guards protect leg joints and the rotor exposes its counterweight s
 });
 
 test('Reaverbot scrap stays unidentified until Roll analyzes and stores it', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=module-salvage-runtime');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=module-salvage-runtime');
   await page.waitForFunction(() => Boolean(
     window.game
     && window.spawnReaverbot
@@ -923,7 +923,7 @@ test('Reaverbot scrap stays unidentified until Roll analyzes and stores it', asy
 });
 
 test('rush enemies acquire from range and expose accelerating red attack warnings', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?startupWorld=dungeon');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -1061,7 +1061,7 @@ test('rush enemies acquire from range and expose accelerating red attack warning
 });
 
 test('near and far charge attacks travel the same distance at one constant speed', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=fixed-charge-speed-regression');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=fixed-charge-speed-regression');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -1168,7 +1168,7 @@ test('near and far charge attacks travel the same distance at one constant speed
 });
 
 test('charge leases release by duration when pinned and by distance when unobstructed', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=charge-lease-termination-regression');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=charge-lease-termination-regression');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -1366,7 +1366,7 @@ test('charge leases release by duration when pinned and by distance when unobstr
 });
 
 test('attack pacing serializes enemies while fixed-speed rocket chargers retreat after impact', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=attack-pacing-rocket-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=attack-pacing-rocket-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {
@@ -1527,7 +1527,7 @@ test('attack pacing serializes enemies while fixed-speed rocket chargers retreat
 });
 
 test('a normal Reaverbot refocuses once when its canonical red eye is shot', async ({ page }) => {
-  await page.goto('/?bossDebug=1&reaverbotSeed=red-eye-refocus-runtime');
+  await page.goto('/?startupWorld=dungeon&bossDebug=1&reaverbotSeed=red-eye-refocus-runtime');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

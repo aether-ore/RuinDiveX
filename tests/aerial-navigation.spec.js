@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('aerial navigation ignores ground rules while routing over or around true obstacles', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=aerial-navigation-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=aerial-navigation-proof');
   await page.waitForFunction(() => Boolean(window.game?.dungeonController));
 
   const result = await page.evaluate(() => {
@@ -235,7 +235,7 @@ test('aerial navigation ignores ground rules while routing over or around true o
 });
 
 test('aerial Reaverbots use full-volume range, cargo sweeps, and validated throw arcs', async ({ page }) => {
-  await page.goto('/?reaverbotSeed=aerial-hardening-proof');
+  await page.goto('/?startupWorld=dungeon&reaverbotSeed=aerial-hardening-proof');
   await page.waitForFunction(() => Boolean(window.game && window.spawnReaverbot));
 
   const result = await page.evaluate(() => {

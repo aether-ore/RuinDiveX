@@ -73,6 +73,7 @@ const moveVector = new THREE.Vector2();
 const worldForward = new THREE.Vector3();
 const worldMoveDirection = new THREE.Vector3();
 const desiredMoveVelocity = new THREE.Vector3();
+const debugNoclipVelocity = new THREE.Vector3();
 const horizontalVelocityDelta = new THREE.Vector3();
 const zeroMoveVelocity = new THREE.Vector3();
 const movementBasisForward = new THREE.Vector3();
@@ -487,6 +488,7 @@ export class Player {
     this.takeoffEnvironmentTraversalProfile = null;
     this.jumpState = MML_JUMP_STATES.Grounded;
     this.velocity = new THREE.Vector3();
+    this.debugNoclipEnabled = false;
     this.takeoffHorizontalVelocity = new THREE.Vector3();
     this._jumpBufferTimer = 0;
     this._coyoteTimer = this.jumpSettings.coyoteTime;
@@ -1592,6 +1594,106 @@ export class Player {
     return Math.max(0, this._getJumpSetting('forwardSpeed', DEFAULT_MML_JUMP_SETTINGS.forwardSpeed))
       * statScale
       * environmentMultiplier;
+  }
+
+  setDebugNoclipEnabled(enabled, { position = null } = {}) {
+    const nextEnabled = enabled === true;
+    this.clearExternalMotion('debug-noclip');
+    this._prepareForExternalControl();
+    this.animation.externalControlLocked = false;
+    this.debugNoclipEnabled = nextEnabled;
+    this.root.userData.debugNoclipEnabled = nextEnabled;
+
+    if (position && [position.x, position.y, position.z].every(Number.isFinite)) {
+      this.root.position.set(position.x, position.y, position.z);
+    }
+
+    this.jumpStartY = this.root.position.y;
+    this._jumpGroundY = this.root.position.y;
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this.velocity.set(0, 0, 0);
+    this.takeoffHorizontalVelocity.set(0, 0, 0);
+    this.animation.setState('idle');
+    return this.debugNoclipEnabled;
+  }
+
+  updateDebugNoclip(dt, input = new Set(), movementOptions = {}) {
+    if (!this.debugNoclipEnabled) return false;
+
+    this._updateBarrierState(dt);
+    if (this.dead) {
+      this.animation.update(dt);
+      return true;
+    }
+
+    this._updateSwordJumpSlashVisualState(dt);
+    this._updateStatusEffects(dt);
+    this._updateTemporaryStatBonuses(dt);
+    this._updateBracedFireState(dt);
+    this._updateShieldGuardState(dt);
+    this._updateMovementLockState(dt);
+    this._updateAttackFacingState(dt);
+
+    moveVector.set(0, 0);
+    if (input.has('KeyW') || input.has('ArrowUp')) moveVector.y += 1;
+    if (input.has('KeyS') || input.has('ArrowDown')) moveVector.y -= 1;
+    if (input.has('KeyA') || input.has('ArrowLeft')) moveVector.x -= 1;
+    if (input.has('KeyD') || input.has('ArrowRight')) moveVector.x += 1;
+    const verticalInput = (input.has('Space') ? 1 : 0)
+      - (input.has('ControlLeft') || input.has('ControlRight') || input.has('KeyC') ? 1 : 0);
+    const horizontalMoving = moveVector.lengthSq() > 0;
+    debugNoclipVelocity.set(0, 0, 0);
+    if (horizontalMoving) {
+      moveVector.normalize();
+      this._resolveMovementDirection(moveVector, movementOptions);
+      debugNoclipVelocity.copy(worldMoveDirection).setY(0);
+    }
+    debugNoclipVelocity.y = verticalInput;
+    const moving = debugNoclipVelocity.lengthSq() > 0;
+    const boosted = input.has('ShiftLeft') || input.has('ShiftRight');
+    if (moving) {
+      debugNoclipVelocity.normalize().multiplyScalar(
+        boosted
+          ? Number(movementOptions.boostSpeed) || 22
+          : Number(movementOptions.speed) || 9,
+      );
+      this.root.position.addScaledVector(debugNoclipVelocity, Math.max(0, dt));
+      if (horizontalMoving) {
+        this.lastMoveDirection.copy(debugNoclipVelocity).setY(0).normalize();
+        this.faceDirection(this.lastMoveDirection);
+      }
+    }
+
+    this.velocity.set(0, 0, 0);
+    this.takeoffHorizontalVelocity.set(0, 0, 0);
+    this.jumpStartY = this.root.position.y;
+    this._jumpGroundY = this.root.position.y;
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this.isRunning = moving && boosted;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
+    const moveAmount = horizontalMoving ? (boosted ? PLAYER_RUN_ANIMATION_AMOUNT : 1) : 0;
+    this.animation.update(dt, {
+      moving: horizontalMoving,
+      running: horizontalMoving && boosted,
+      moveAmount,
+    });
+    this.updateWeaponVisualState();
+    this._updateExternalModelMotion(
+      dt,
+      horizontalMoving,
+      moveAmount,
+      moveVector.y < -0.35,
+      horizontalMoving && boosted,
+      {
+        lockOnActive: false,
+        strafeAmount: moveVector.x,
+        forwardAmount: moveVector.y,
+        locomotionSpeed: moving ? debugNoclipVelocity.length() : 0,
+      },
+    );
+    return true;
   }
 
   _getConfiguredJumpHeight() {
@@ -4045,7 +4147,8 @@ export class Player {
 
   shouldIgnoreGroundConstraint() {
     return Boolean(
-      this.ladderTraversal
+      this.debugNoclipEnabled
+      || this.ladderTraversal
       || this.externalBallisticMotion
       || this.externalControl?.ignoreGroundConstraint,
     );

@@ -668,6 +668,7 @@ export class DungeonController {
   }
 
   _updatePlayerAirborneRailRecovery(dt) {
+    if (this.game?.player?.debugNoclipEnabled) return;
     const state = this.playerRailRecoveryState;
     const player = this.game?.player;
     const position = player?.root?.position;
@@ -3731,6 +3732,7 @@ export class DungeonController {
     const player = this.game.player;
     const playerRoot = player.root;
     const playerRadius = player.radius ?? 0.42;
+    const playerCanPush = player.debugNoclipEnabled !== true;
 
     for (const block of this.puzzleBlocks) {
       if (!block?.object || block.locked) {
@@ -3743,10 +3745,10 @@ export class DungeonController {
 
       const minDistance = (block.radius ?? 0.58) + playerRadius + 0.08;
       const distance = tempVectorB.length();
-      if (distance > 0.001 && distance < minDistance) {
+      if (playerCanPush && distance > 0.001 && distance < minDistance) {
         tempVectorB.normalize();
         block.position.addScaledVector(tempVectorB, Math.min(1.6 * dt, minDistance - distance + 0.02));
-      } else if (distance <= 0.001 && player.lastMoveDirection?.lengthSq?.() > 0.0001) {
+      } else if (playerCanPush && distance <= 0.001 && player.lastMoveDirection?.lengthSq?.() > 0.0001) {
         tempVectorB.copy(player.lastMoveDirection).normalize();
         block.position.addScaledVector(tempVectorB, 1.2 * dt);
       }
@@ -3776,7 +3778,7 @@ export class DungeonController {
         continue;
       }
 
-      if (isInsideZone(playerRoot.position, conveyor)) {
+      if (!this.game.player.debugNoclipEnabled && isInsideZone(playerRoot.position, conveyor)) {
         playerRoot.position.addScaledVector(conveyor.direction, conveyor.speed * dt);
       }
 
@@ -4149,10 +4151,12 @@ export class DungeonController {
     const radius = plate.radius ?? 0.9;
     const radiusSq = radius * radius;
 
-    tempVectorA.copy(this.game.player.root.position);
-    tempVectorA.y = plate.position.y;
-    if (tempVectorA.distanceToSquared(plate.position) <= radiusSq) {
-      return true;
+    if (!this.game.player.debugNoclipEnabled) {
+      tempVectorA.copy(this.game.player.root.position);
+      tempVectorA.y = plate.position.y;
+      if (tempVectorA.distanceToSquared(plate.position) <= radiusSq) {
+        return true;
+      }
     }
 
     for (const block of this.puzzleBlocks) {

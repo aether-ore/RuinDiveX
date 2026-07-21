@@ -459,6 +459,7 @@ class AutomaticTransitControllerV2 extends RuntimeMechanismControllerV2 {
     const carriesPlayer = Boolean(
       surface
       && playerPosition
+      && this.game?.player?.debugNoclipEnabled !== true
       && Math.abs(playerPosition.x - previousCenter.x) <= surface.halfWidth + 0.08
       && Math.abs(playerPosition.z - previousCenter.z) <= surface.halfDepth + 0.08
       && playerPosition.y >= previousTopY - 0.16
@@ -581,7 +582,8 @@ class CrumbleControllerV2 extends RuntimeMechanismControllerV2 {
     if (!surface || !object || !this.game?.player?.root) return;
 
     const playerPosition = this.game.player.root.position;
-    const playerOnSurface = surface.enabled !== false
+    const playerOnSurface = this.game.player.debugNoclipEnabled !== true
+      && surface.enabled !== false
       && Math.abs(playerPosition.x - surface.center.x) <= surface.halfWidth
       && Math.abs(playerPosition.z - surface.center.z) <= surface.halfDepth
       && playerPosition.y >= surface.topY - 0.2
@@ -1549,6 +1551,8 @@ export class DungeonRuntimeV2 {
       playerYaw: Number.isFinite(playerYaw) ? playerYaw : null,
       jumpState: player?.jumpState ?? null,
       verticalVelocity: Number.isFinite(player?.velocity?.y) ? player.velocity.y : null,
+      debugNoclipEnabled: player?.debugNoclipEnabled === true,
+      debugNoclipExitMode: this.game?.debugNoclipLastExitMode ?? null,
       cameraPosition: cameraPosition ? {
         x: cameraPosition.x,
         y: cameraPosition.y,
@@ -1738,8 +1742,10 @@ export class DungeonRuntimeV2 {
     this._syncSemanticRoomPackBindings();
     this._updateRegionVisit();
     this._updateCameraStructuralRayAudit();
-    this._updateSafeAnchor();
-    this._applyRecoverySafeguard();
+    if (this.game?.player?.debugNoclipEnabled !== true) {
+      this._updateSafeAnchor();
+      this._applyRecoverySafeguard();
+    }
     this._syncExternalCompletionState();
     this._syncSystemObjectiveActions();
     this._syncConditionalRewardVisibility();

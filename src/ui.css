@@ -3333,6 +3333,31 @@ button:focus-visible {
   letter-spacing: 0;
 }
 
+.platform-debug-toggle {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid rgba(125, 248, 255, 0.38);
+  border-radius: 5px;
+  color: var(--ink);
+  background: rgba(4, 9, 15, 0.78);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.platform-debug-toggle[aria-pressed="true"] {
+  border-color: rgba(125, 248, 255, 0.9);
+  color: #08121c;
+  background: #7df8ff;
+  box-shadow: 0 0 14px rgba(125, 248, 255, 0.28);
+}
+
+.platform-debug-help {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .platform-debug-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

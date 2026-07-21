@@ -46,6 +46,8 @@ test('V2 per-frame browser readiness sync never expands the full runtime diagnos
     dungeonRecoverySafeguardActivations: '3',
     cameraOcclusionPolicy: 'opaque-ray-hide',
     cameraOcclusionHiddenCount: '0',
+    debugNoclipEnabled: 'false',
+    debugNoclipExitMode: 'not-used',
     cameraContainmentAdjustments: '0',
   });
   assert.equal(dataset.frameHeartbeat, undefined,

@@ -163,6 +163,8 @@ const DEBUG_GRAVITY_PRESETS = Object.freeze({
   normal: 1,
   moon: 0.28,
 });
+const DEBUG_NOCLIP_SPEED = 9;
+const DEBUG_NOCLIP_BOOST_SPEED = 22;
 
 const CUSTOM_BUSTER_ATTACK_META = Object.freeze({
   attackDomain: 'customBuster',
@@ -856,6 +858,9 @@ export class Game {
     this.debugPlatformCounter = 0;
     this.debugJumpHeightPreset = 'normal';
     this.debugGravityPreset = 'normal';
+    this.debugNoclipEnabled = false;
+    this.debugNoclipReturnPosition = new THREE.Vector3();
+    this.debugNoclipLastExitMode = 'not-used';
     this.poseDebugSection = 'pose';
     this.debugSpawnedPlatformGroup = new THREE.Group();
     this.debugSpawnedPlatformGroup.name = 'debugSpawnedPlatformGroup';
@@ -1311,6 +1316,8 @@ export class Game {
         this._usesAcceptedV2OpaqueCameraOcclusion() ? 'opaque-ray-hide' : 'containment',
       );
       setIfChanged('cameraOcclusionHiddenCount', String(hiddenOwnerCount + hiddenInstanceCount));
+      setIfChanged('debugNoclipEnabled', String(this.debugNoclipEnabled === true));
+      setIfChanged('debugNoclipExitMode', this.debugNoclipLastExitMode ?? 'not-used');
       setIfChanged(
         'cameraContainmentAdjustments',
         String(this.dungeon?.environmentRuntime?.cameraContainmentAdjustments ?? 0),
@@ -1405,6 +1412,8 @@ export class Game {
     dataset.debugGravityScale = formatBrowserDiagnosticNumber(platformDebug?.gravityScale);
     dataset.debugJumpHeight = formatBrowserDiagnosticNumber(platformDebug?.jumpHeight);
     dataset.debugSpawnedPlatformCount = String(this.debugSpawnedPlatforms?.length ?? 0);
+    dataset.debugNoclipEnabled = String(this.debugNoclipEnabled === true);
+    dataset.debugNoclipExitMode = this.debugNoclipLastExitMode ?? 'not-used';
   }
 
   _getAnimationPreviewLegTelemetry() {
@@ -1528,6 +1537,89 @@ export class Game {
     return this.getPlatformDebugState();
   }
 
+  _resolveDebugNoclipExitPosition() {
+    const current = this.player?.root?.position;
+    const controller = this.dungeonController;
+    if (!current || !controller) {
+      return {
+        position: this.debugNoclipReturnPosition.clone(),
+        mode: 'saved-safe-position',
+      };
+    }
+
+    const candidates = [];
+    const platformSupport = this.getPlatformSupport?.(current, { horizontalMargin: 0 });
+    if (Number.isFinite(platformSupport?.elevation)
+      && current.y - platformSupport.elevation <= 3) {
+      candidates.push({
+        position: current.clone().setY(platformSupport.elevation),
+        mode: 'current-platform',
+      });
+    }
+    const floorTile = controller.getFloorTileAt?.(current, {
+      allowClosest: false,
+      maxVerticalGap: 3,
+      maxElevationAbove: 0.6,
+    });
+    if (floorTile) {
+      const probe = current.clone().setY(Number(floorTile.elevation) || 0);
+      const elevation = controller.getSurfaceElevationAt?.(probe);
+      if (Number.isFinite(elevation)) {
+        candidates.push({
+          position: current.clone().setY(elevation),
+          mode: 'current-floor',
+        });
+      }
+    }
+    candidates.sort((a, b) => (
+      Math.abs(a.position.y - current.y) - Math.abs(b.position.y - current.y)
+    ));
+    const currentLanding = candidates.find(({ position }) => (
+      controller.isPositionWalkable?.(position) === true
+    ));
+    if (currentLanding) return currentLanding;
+
+    const saved = this.debugNoclipReturnPosition.lengthSq() > 0
+      ? this.debugNoclipReturnPosition
+      : controller.lastSafePlayerPosition ?? this.dungeon?.playerStart ?? current;
+    return {
+      position: saved.clone(),
+      mode: 'saved-safe-position',
+    };
+  }
+
+  setDebugNoclipEnabled(enabled) {
+    const nextEnabled = enabled === true;
+    if (!this.player || nextEnabled === this.debugNoclipEnabled) {
+      return this.getPlatformDebugState();
+    }
+
+    this.keys.clear();
+    if (nextEnabled) {
+      const safePosition = this.dungeonController?.lastSafePlayerPosition;
+      this.debugNoclipReturnPosition.copy(
+        safePosition?.isVector3 ? safePosition : this.player.root.position,
+      );
+      this.debugNoclipEnabled = true;
+      this.debugNoclipLastExitMode = 'active';
+      this.player.setDebugNoclipEnabled?.(true);
+    } else {
+      const exit = this._resolveDebugNoclipExitPosition();
+      this.debugNoclipEnabled = false;
+      this.debugNoclipLastExitMode = exit.mode;
+      this.player.setDebugNoclipEnabled?.(false, { position: exit.position });
+      if (this.dungeonController?.lastSafePlayerPosition) {
+        this.dungeonController.lastSafePlayerPosition.copy(exit.position);
+        this.dungeonController.pendingPlayerJumpOffLanding = null;
+      }
+    }
+    return this.getPlatformDebugState();
+  }
+
+  toggleDebugNoclip() {
+    return this.setDebugNoclipEnabled(!this.debugNoclipEnabled);
+  }
+
   getPlatformDebugState() {
     const jump = this.player.getJumpPhysicsDebug();
     return {
@@ -1540,6 +1632,16 @@ export class Game {
       minimumGrabElevation: jump.jumpHeight * PLATFORM_NORMAL_JUMP_REACH_RATIO,
       maximumGrabElevation: jump.jumpHeight * PLATFORM_LEDGE_MAX_REACH_RATIO,
       spawnedPlatformCount: this.debugSpawnedPlatforms.length,
+      noclipEnabled: this.debugNoclipEnabled,
+      noclipSpeed: DEBUG_NOCLIP_SPEED,
+      noclipBoostSpeed: DEBUG_NOCLIP_BOOST_SPEED,
+      noclipExitMode: this.debugNoclipLastExitMode,
+      noclipControls: {
+        move: 'WASD',
+        ascend: 'Space',
+        descend: 'Ctrl or C',
+        boost: 'Shift',
+      },
     };
   }
 
@@ -2579,6 +2681,7 @@ export class Game {
     regenerateSeed = true,
     abandonExpedition = true,
   } = {}) {
+    if (this.debugNoclipEnabled) this.setDebugNoclipEnabled(false);
     if (!free) {
       const cost = this.getRuinResetCost();
       if (this.inventory.gold < cost) {
@@ -4680,6 +4783,7 @@ export class Game {
 
   createBusterSandboxContext({ sourceWorld, plan } = {}) {
     if (!sourceWorld || !plan) return null;
+    if (this.debugNoclipEnabled) this.setDebugNoclipEnabled(false);
     this._resetWorldContextFieldsForSandbox(sourceWorld);
     this.dungeonLayoutSeed = sourceWorld.layoutSeed ?? this.dungeonLayoutSeed;
     this._creatingBusterSandbox = true;
@@ -4852,6 +4956,10 @@ export class Game {
   exitBusterSandbox(reason = 'sandboxExit') {
     const session = this.busterSandboxSession;
     if (!session?.active) return false;
+    // The sandbox owns a different Player instance. Clear noclip while that
+    // player and its collision controller are still active so the restored
+    // production Player cannot inherit a stale Game-level flight flag.
+    if (this.debugNoclipEnabled) this.setDebugNoclipEnabled(false);
     const currentSandbox = this.captureWorldContext('busterSandbox');
     this.disposeWorldContext(currentSandbox, reason, { preserveContext: session.production });
     this.activateWorldContext(session.production);
@@ -6581,8 +6689,7 @@ export class Game {
           if (!enemy || enemy.dead || this._deferredEnemyRemovals?.has(enemy)) continue;
           enemy.prePlayerUpdate?.(gameplayDt, this);
         }
-        const playerGroundY = this._getPlayerGroundY();
-        this.player.update(gameplayDt, this.keys, {
+        const playerMovementOptions = {
           arenaRadius: this.arenaRadius,
           movementForward: movementBasis.forward,
           movementRight: movementBasis.right,
@@ -6590,9 +6697,20 @@ export class Game {
           lockOnTargetPosition: movementBasis.lockOnTargetPosition,
           aimWorld: this.pointer.aimWorld,
           projectileAimInputHeld: Boolean(this.pointer.primary || this.pointer.secondary),
-          groundY: playerGroundY,
           game: this,
-        });
+        };
+        if (this.debugNoclipEnabled) {
+          this.player.updateDebugNoclip(gameplayDt, this.keys, {
+            ...playerMovementOptions,
+            speed: DEBUG_NOCLIP_SPEED,
+            boostSpeed: DEBUG_NOCLIP_BOOST_SPEED,
+          });
+        } else {
+          this.player.update(gameplayDt, this.keys, {
+            ...playerMovementOptions,
+            groundY: this._getPlayerGroundY(),
+          });
+        }
         if (this.busterTestRange?.active) {
           this._updateBusterTestRange(gameplayDt);
         } else {
@@ -7870,6 +7988,7 @@ export class Game {
   }
 
   _applyThirdPersonCameraContainmentPolicy() {
+    if (this.debugNoclipEnabled) return false;
     if (this._usesAcceptedV2OpaqueCameraOcclusion()) return false;
     return this.dungeon?.environmentRuntime?.constrainThirdPersonCamera?.(
       this.camera,
@@ -8305,12 +8424,20 @@ export class Game {
         && !event.repeat
         && (event.code === 'ControlLeft' || event.code === 'ControlRight')) {
         event.preventDefault();
+        if (this.debugNoclipEnabled) {
+          this.keys.add(event.code);
+          return;
+        }
         this.player?.toggleWalkMode?.();
         return;
       }
 
       if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'Space') {
         event.preventDefault();
+        if (this.debugNoclipEnabled) {
+          this.keys.add(event.code);
+          return;
+        }
         const movementBasis = this._getPlayerMovementBasis();
 
         if (this.player?.isLedgeClinging?.()) {

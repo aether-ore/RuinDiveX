@@ -530,6 +530,7 @@ export class UIManager {
     this.poseDebugOutput = document.getElementById('pose-debug-output');
     this.poseDebugStatus = document.getElementById('pose-debug-status');
     this.platformDebugView = document.getElementById('platform-debug-view');
+    this.platformDebugNoclip = document.getElementById('platform-debug-noclip');
     this.platformDebugJumpHeight = document.getElementById('platform-debug-jump-height');
     this.platformDebugGravity = document.getElementById('platform-debug-gravity');
     this.platformDebugApex = document.getElementById('platform-debug-apex');
@@ -996,6 +997,10 @@ export class UIManager {
 
     if (this.platformDebugJumpHeight) this.platformDebugJumpHeight.value = state.jumpHeightPreset;
     if (this.platformDebugGravity) this.platformDebugGravity.value = state.gravityPreset;
+    if (this.platformDebugNoclip) {
+      this.platformDebugNoclip.setAttribute('aria-pressed', String(state.noclipEnabled));
+      this.platformDebugNoclip.textContent = `Noclip: ${state.noclipEnabled ? 'On' : 'Off'}`;
+    }
     if (this.platformDebugApex) this.platformDebugApex.textContent = state.jumpHeight.toFixed(2);
     if (this.platformDebugApexTime) this.platformDebugApexTime.textContent = `${state.timeToApex.toFixed(2)}s`;
     if (this.platformDebugGrabMin) this.platformDebugGrabMin.textContent = state.minimumGrabElevation.toFixed(2);
@@ -3313,6 +3318,15 @@ export class UIManager {
         this._deletePoseDebugKeyframe();
       } else if (action === 'platform-spawn') {
         this._spawnPlatformDebugBlock();
+      } else if (action === 'platform-debug-noclip') {
+        const state = this.game.toggleDebugNoclip?.();
+        this._syncPlatformDebugControls();
+        this.showToast(
+          state?.noclipEnabled
+            ? 'Noclip enabled: close Debug Tools to fly'
+            : `Noclip disabled (${state?.noclipExitMode ?? 'safe return'})`,
+          state?.noclipEnabled ? '#7df8ff' : '#c8d4e3',
+        );
       } else if (action === 'platform-clear') {
         const removed = this.game.clearDebugPlatforms?.() ?? 0;
         this._syncPlatformDebugControls();

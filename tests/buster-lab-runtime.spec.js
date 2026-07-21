@@ -1246,6 +1246,13 @@ test('full-catalog sandbox isolates ids, rejects durable writes, and remains lea
       debugGrantCount: game.busterLabState.migrations.debugKitGrantCount ?? 0,
     };
 
+    const sandboxNoclipState = game.setDebugNoclipEnabled(true);
+    const sandboxNoclip = {
+      gameEnabled: game.debugNoclipEnabled,
+      playerEnabled: game.player.debugNoclipEnabled,
+      menuStateEnabled: sandboxNoclipState.noclipEnabled,
+    };
+
     game.player.root.position.addScalar(17);
     game.player.health = 1;
     game.player.experience += 9000;
@@ -1289,6 +1296,8 @@ test('full-catalog sandbox isolates ids, rejects durable writes, and remains lea
         && sandboxProjectiles.active.length === 0
         && sandboxEnemies.length === 0,
       sessionCleared: game.busterSandboxSession === null,
+      noclipDisabled: game.debugNoclipEnabled === false
+        && game.player.debugNoclipEnabled === false,
     };
 
     const repeatedCycles = [];
@@ -1334,6 +1343,7 @@ test('full-catalog sandbox isolates ids, rejects durable writes, and remains lea
       entered: entered.ok,
       sessionActive: Boolean(session?.active),
       isolated,
+      sandboxNoclip,
       rejectedWrites,
       exited,
       submittedBeforeExit: {
@@ -1367,6 +1377,11 @@ test('full-catalog sandbox isolates ids, rejects durable writes, and remains lea
   });
   expect(result.entered).toBe(true);
   expect(result.sessionActive).toBe(true);
+  expect(result.sandboxNoclip).toEqual({
+    gameEnabled: true,
+    playerEnabled: true,
+    menuStateEnabled: true,
+  });
   expect(result.isolated).toEqual({
     scene: true,
     player: true,
@@ -1417,6 +1432,7 @@ test('full-catalog sandbox isolates ids, rejects durable writes, and remains lea
     workshopMode: 'roll',
     sandboxDisposed: true,
     sessionCleared: true,
+    noclipDisabled: true,
   });
   expect(result.repeatedCycles).toHaveLength(3);
   for (const [index, cycle] of result.repeatedCycles.entries()) {

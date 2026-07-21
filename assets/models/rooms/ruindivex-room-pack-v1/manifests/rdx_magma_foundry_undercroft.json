@@ -1,0 +1,1475 @@
+{
+  "schemaVersion": 1,
+  "roomId": "rdx_magma_foundry_undercroft",
+  "glb": "../glb/rdx_magma_foundry_undercroft.glb",
+  "units": "meters",
+  "upAxis": "Y",
+  "forwardAxis": "-Z",
+  "originPolicy": "entry-tier origin; do not recenter from aggregate bounds",
+  "archetype": "hazard_processing_room",
+  "topologyVariant": "magma_foundry_undercroft",
+  "districts": [
+    "hazard_magma"
+  ],
+  "bounds": {
+    "min": [
+      -17,
+      -4,
+      -18
+    ],
+    "max": [
+      17,
+      13,
+      18
+    ]
+  },
+  "sockets": [
+    {
+      "id": "entry_south",
+      "nodeName": "SOCKET_ENTRY_SOUTH",
+      "type": "hazard_door",
+      "elevation": 0.0,
+      "position": [
+        0,
+        0,
+        18
+      ],
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "exit_north",
+      "nodeName": "SOCKET_EXIT_NORTH",
+      "type": "hazard_door",
+      "elevation": 0.0,
+      "position": [
+        0,
+        0,
+        -18
+      ],
+      "forward": [
+        0,
+        0,
+        -1
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "service_west",
+      "nodeName": "SOCKET_SERVICE_WEST",
+      "type": "service_ramp",
+      "elevation": -3.2,
+      "position": [
+        -17,
+        -3.2,
+        5
+      ],
+      "forward": [
+        -1,
+        0,
+        0
+      ],
+      "aperture": [
+        4.2,
+        4.1
+      ]
+    }
+  ],
+  "collisionPolicy": "Use manifest collision volumes and node extras; do not derive traversal collision from every visible mesh AABB.",
+  "gameplayPurpose": "An explorable lower foundry with a damage-free island route, a heat-resistance reward branch, enemies, and a permanent exit.",
+  "hazard": {
+    "profile": "magma_floor_v1",
+    "damagePerSecond": 12,
+    "pulseSeconds": 0.25,
+    "entryGraceSeconds": 0.5,
+    "node": "HAZARD_MAGMA_BASIN"
+  },
+  "criticalRouteDamageFree": true,
+  "fallCatchments": [
+    {
+      "id": "magma_safe_landing",
+      "destinationNode": "WALK_SAFE_ISLAND_00",
+      "nominalPadWidth": 4.4,
+      "escape": "island_route_to_control_deck"
+    }
+  ],
+  "traversalEdges": [
+    {
+      "from": "entry_deck",
+      "to": "WALK_SAFE_ISLAND_00",
+      "kind": "authoredDrop"
+    },
+    {
+      "from": "WALK_SAFE_ISLAND_00",
+      "to": "WALK_SAFE_ISLAND_04",
+      "via": [
+        "WALK_SAFE_ISLAND_01",
+        "WALK_SAFE_ISLAND_02",
+        "WALK_SAFE_ISLAND_03"
+      ],
+      "damageFree": true
+    },
+    {
+      "from": "WALK_SAFE_ISLAND_04",
+      "to": "control_deck",
+      "kind": "stairs"
+    },
+    {
+      "from": "WALK_SAFE_ISLAND_01",
+      "to": "heat_reward_branch",
+      "via": [
+        "WALK_SAFE_ISLAND_05",
+        "WALK_SAFE_ISLAND_06"
+      ],
+      "optional": true
+    }
+  ],
+  "collisionVolumes": [
+    {
+      "nodeName": "SHELL_FLOOR_BOTTOM",
+      "shape": "box",
+      "center": [
+        0,
+        -4.25,
+        0
+      ],
+      "size": [
+        34,
+        0.5,
+        36
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_CEILING",
+      "shape": "box",
+      "center": [
+        0,
+        13.2,
+        0
+      ],
+      "size": [
+        34,
+        0.4,
+        36
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_NORTH_0_LEFT",
+      "shape": "box",
+      "center": [
+        -9.8,
+        4.5,
+        -18.0
+      ],
+      "size": [
+        14.4,
+        17.0,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_NORTH_0",
+      "shape": "box",
+      "center": [
+        0,
+        9.05,
+        -18.0
+      ],
+      "size": [
+        5.2,
+        7.9,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_NORTH_RIGHT",
+      "shape": "box",
+      "center": [
+        9.8,
+        4.5,
+        -18.0
+      ],
+      "size": [
+        14.4,
+        17.0,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_SOUTH_0_LEFT",
+      "shape": "box",
+      "center": [
+        -9.8,
+        4.5,
+        18.0
+      ],
+      "size": [
+        14.4,
+        17.0,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_SOUTH_0",
+      "shape": "box",
+      "center": [
+        0,
+        9.05,
+        18.0
+      ],
+      "size": [
+        5.2,
+        7.9,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_SOUTH_RIGHT",
+      "shape": "box",
+      "center": [
+        9.8,
+        4.5,
+        18.0
+      ],
+      "size": [
+        14.4,
+        17.0,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_WEST_0_LEFT",
+      "shape": "box",
+      "center": [
+        -17.0,
+        4.5,
+        -7.550000000000001
+      ],
+      "size": [
+        0.45,
+        17.0,
+        20.9
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_WEST_0",
+      "shape": "box",
+      "center": [
+        -17.0,
+        7.449999999999999,
+        5
+      ],
+      "size": [
+        0.45,
+        11.1,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_WEST_RIGHT",
+      "shape": "box",
+      "center": [
+        -17.0,
+        4.5,
+        12.55
+      ],
+      "size": [
+        0.45,
+        17.0,
+        10.9
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_EAST_RIGHT",
+      "shape": "box",
+      "center": [
+        17.0,
+        4.5,
+        0.0
+      ],
+      "size": [
+        0.45,
+        17.0,
+        36.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "WALK_ENTRY_FOUNDRY_DECK",
+      "shape": "box",
+      "center": [
+        0,
+        -0.05,
+        14.1
+      ],
+      "size": [
+        13.0,
+        0.4,
+        7.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_FOUNDRY_DECK_-5.5_-2.7",
+      "shape": "box",
+      "center": [
+        -5.46,
+        -1.95,
+        11.363999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_FOUNDRY_DECK_-5.5_2.7",
+      "shape": "box",
+      "center": [
+        -5.46,
+        -1.95,
+        16.836
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_FOUNDRY_DECK_5.5_-2.7",
+      "shape": "box",
+      "center": [
+        5.46,
+        -1.95,
+        11.363999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_FOUNDRY_DECK_5.5_2.7",
+      "shape": "box",
+      "center": [
+        5.46,
+        -1.95,
+        16.836
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_FOUNDRY_DECK_N",
+      "shape": "box",
+      "center": [
+        0,
+        0.47500000000000003,
+        10.5
+      ],
+      "size": [
+        13.0,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_FOUNDRY_DECK_W",
+      "shape": "box",
+      "center": [
+        -6.5,
+        0.47500000000000003,
+        14.1
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_FOUNDRY_DECK_E",
+      "shape": "box",
+      "center": [
+        6.5,
+        0.47500000000000003,
+        14.1
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_NORTH_CONTROL_DECK",
+      "shape": "box",
+      "center": [
+        0,
+        -0.05,
+        -14.0
+      ],
+      "size": [
+        12.0,
+        0.4,
+        7.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_CONTROL_DECK_-5.0_-2.9",
+      "shape": "box",
+      "center": [
+        -5.04,
+        -1.95,
+        -16.85
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_CONTROL_DECK_-5.0_2.9",
+      "shape": "box",
+      "center": [
+        -5.04,
+        -1.95,
+        -11.15
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_CONTROL_DECK_5.0_-2.9",
+      "shape": "box",
+      "center": [
+        5.04,
+        -1.95,
+        -16.85
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_CONTROL_DECK_5.0_2.9",
+      "shape": "box",
+      "center": [
+        5.04,
+        -1.95,
+        -11.15
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_CONTROL_DECK_S",
+      "shape": "box",
+      "center": [
+        0,
+        0.47500000000000003,
+        -10.25
+      ],
+      "size": [
+        12.0,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_CONTROL_DECK_W",
+      "shape": "box",
+      "center": [
+        -6.0,
+        0.47500000000000003,
+        -14.0
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_CONTROL_DECK_E",
+      "shape": "box",
+      "center": [
+        6.0,
+        0.47500000000000003,
+        -14.0
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_SAFE_ISLAND_00",
+      "shape": "box",
+      "center": [
+        -7.5,
+        -3.15,
+        8.0
+      ],
+      "size": [
+        4.4,
+        0.45,
+        4.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_00_-1.8_-1.7",
+      "shape": "box",
+      "center": [
+        -9.348,
+        -5.05,
+        6.327999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_00_-1.8_1.7",
+      "shape": "box",
+      "center": [
+        -9.348,
+        -5.05,
+        9.672
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_00_1.8_-1.7",
+      "shape": "box",
+      "center": [
+        -5.652,
+        -5.05,
+        6.327999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_00_1.8_1.7",
+      "shape": "box",
+      "center": [
+        -5.652,
+        -5.05,
+        9.672
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SAFE_ISLAND_01",
+      "shape": "box",
+      "center": [
+        -2.0,
+        -2.65,
+        4.0
+      ],
+      "size": [
+        4.4,
+        0.45,
+        4.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_01_-1.8_-1.7",
+      "shape": "box",
+      "center": [
+        -3.848,
+        -4.55,
+        2.328
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_01_-1.8_1.7",
+      "shape": "box",
+      "center": [
+        -3.848,
+        -4.55,
+        5.672000000000001
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_01_1.8_-1.7",
+      "shape": "box",
+      "center": [
+        -0.1519999999999999,
+        -4.55,
+        2.328
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_01_1.8_1.7",
+      "shape": "box",
+      "center": [
+        -0.1519999999999999,
+        -4.55,
+        5.672000000000001
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SAFE_ISLAND_02",
+      "shape": "box",
+      "center": [
+        3.5,
+        -2.2,
+        0.0
+      ],
+      "size": [
+        4.4,
+        0.45,
+        4.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_02_-1.8_-1.7",
+      "shape": "box",
+      "center": [
+        1.652,
+        -4.1,
+        -1.6720000000000002
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_02_-1.8_1.7",
+      "shape": "box",
+      "center": [
+        1.652,
+        -4.1,
+        1.6720000000000002
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_02_1.8_-1.7",
+      "shape": "box",
+      "center": [
+        5.348,
+        -4.1,
+        -1.6720000000000002
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_02_1.8_1.7",
+      "shape": "box",
+      "center": [
+        5.348,
+        -4.1,
+        1.6720000000000002
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SAFE_ISLAND_03",
+      "shape": "box",
+      "center": [
+        7.5,
+        -1.55,
+        -5.0
+      ],
+      "size": [
+        4.4,
+        0.45,
+        4.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_03_-1.8_-1.7",
+      "shape": "box",
+      "center": [
+        5.652,
+        -3.45,
+        -6.672000000000001
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_03_-1.8_1.7",
+      "shape": "box",
+      "center": [
+        5.652,
+        -3.45,
+        -3.328
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_03_1.8_-1.7",
+      "shape": "box",
+      "center": [
+        9.348,
+        -3.45,
+        -6.672000000000001
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_03_1.8_1.7",
+      "shape": "box",
+      "center": [
+        9.348,
+        -3.45,
+        -3.328
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SAFE_ISLAND_04",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.85,
+        -9.0
+      ],
+      "size": [
+        4.4,
+        0.45,
+        4.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_04_-1.8_-1.7",
+      "shape": "box",
+      "center": [
+        1.152,
+        -2.75,
+        -10.672
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_04_-1.8_1.7",
+      "shape": "box",
+      "center": [
+        1.152,
+        -2.75,
+        -7.327999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_04_1.8_-1.7",
+      "shape": "box",
+      "center": [
+        4.848,
+        -2.75,
+        -10.672
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_04_1.8_1.7",
+      "shape": "box",
+      "center": [
+        4.848,
+        -2.75,
+        -7.327999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SAFE_ISLAND_05",
+      "shape": "box",
+      "center": [
+        -8.5,
+        -2.5,
+        -3.5
+      ],
+      "size": [
+        4.4,
+        0.45,
+        4.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_05_-1.8_-1.7",
+      "shape": "box",
+      "center": [
+        -10.348,
+        -4.4,
+        -5.172000000000001
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_05_-1.8_1.7",
+      "shape": "box",
+      "center": [
+        -10.348,
+        -4.4,
+        -1.8279999999999998
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_05_1.8_-1.7",
+      "shape": "box",
+      "center": [
+        -6.652,
+        -4.4,
+        -5.172000000000001
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_05_1.8_1.7",
+      "shape": "box",
+      "center": [
+        -6.652,
+        -4.4,
+        -1.8279999999999998
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SAFE_ISLAND_06",
+      "shape": "box",
+      "center": [
+        -11.0,
+        -1.4,
+        -8.0
+      ],
+      "size": [
+        4.4,
+        0.45,
+        4.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_06_-1.8_-1.7",
+      "shape": "box",
+      "center": [
+        -12.848,
+        -3.3,
+        -9.672
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_06_-1.8_1.7",
+      "shape": "box",
+      "center": [
+        -12.848,
+        -3.3,
+        -6.327999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_06_1.8_-1.7",
+      "shape": "box",
+      "center": [
+        -9.152,
+        -3.3,
+        -9.672
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SAFE_ISLAND_06_1.8_1.7",
+      "shape": "box",
+      "center": [
+        -9.152,
+        -3.3,
+        -6.327999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_00",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.57,
+        -10.21
+      ],
+      "size": [
+        3.4,
+        0.1,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_01",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.52,
+        -10.63
+      ],
+      "size": [
+        3.4,
+        0.2,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_02",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.47,
+        -11.05
+      ],
+      "size": [
+        3.4,
+        0.30000000000000004,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_03",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.42,
+        -11.47
+      ],
+      "size": [
+        3.4,
+        0.4,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_04",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.37,
+        -11.89
+      ],
+      "size": [
+        3.4,
+        0.5,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_05",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.31999999999999995,
+        -12.31
+      ],
+      "size": [
+        3.4,
+        0.6000000000000001,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_06",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.26999999999999996,
+        -12.73
+      ],
+      "size": [
+        3.4,
+        0.7000000000000001,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_07",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.21999999999999997,
+        -13.15
+      ],
+      "size": [
+        3.4,
+        0.8,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_08",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.16999999999999998,
+        -13.57
+      ],
+      "size": [
+        3.4,
+        0.9,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_MAGMA_EXIT_ASCENT_STEP_09",
+      "shape": "box",
+      "center": [
+        3.0,
+        -0.12,
+        -13.99
+      ],
+      "size": [
+        3.4,
+        1.0,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_WEST_SAFE_SERVICE",
+      "shape": "box",
+      "center": [
+        -14.1,
+        -3.15,
+        5
+      ],
+      "size": [
+        5.7,
+        0.35,
+        7.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_SAFE_SERVICE_-2.4_-2.7",
+      "shape": "box",
+      "center": [
+        -16.494,
+        -5.05,
+        2.34
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_SAFE_SERVICE_-2.4_2.7",
+      "shape": "box",
+      "center": [
+        -16.494,
+        -5.05,
+        7.66
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_SAFE_SERVICE_2.4_-2.7",
+      "shape": "box",
+      "center": [
+        -11.706,
+        -5.05,
+        2.34
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_SAFE_SERVICE_2.4_2.7",
+      "shape": "box",
+      "center": [
+        -11.706,
+        -5.05,
+        7.66
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_SAFE_SERVICE_N",
+      "shape": "box",
+      "center": [
+        -14.1,
+        -2.625,
+        1.5
+      ],
+      "size": [
+        5.7,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_SAFE_SERVICE_S",
+      "shape": "box",
+      "center": [
+        -14.1,
+        -2.625,
+        8.5
+      ],
+      "size": [
+        5.7,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_SAFE_SERVICE_E",
+      "shape": "box",
+      "center": [
+        -11.25,
+        -2.625,
+        5
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "FIXTURE_FOUNDRY_FURNACE_-10.5",
+      "shape": "cylinder",
+      "center": [
+        -10.5,
+        1.2,
+        -11.5
+      ],
+      "radius": 2.1,
+      "height": 6.2,
+      "semantic": "furnace"
+    },
+    {
+      "nodeName": "FIXTURE_FOUNDRY_FURNACE_10.5",
+      "shape": "cylinder",
+      "center": [
+        10.5,
+        1.2,
+        -11.5
+      ],
+      "radius": 2.1,
+      "height": 6.2,
+      "semantic": "furnace"
+    },
+    {
+      "nodeName": "CONSOLE_COOLING_BYPASS",
+      "shape": "box",
+      "center": [
+        0,
+        0.95,
+        -12.2
+      ],
+      "size": [
+        3.4,
+        2.0,
+        1.6
+      ],
+      "rotationY": 0.0,
+      "semantic": "console"
+    }
+  ]
+}

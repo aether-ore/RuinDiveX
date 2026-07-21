@@ -1,0 +1,1862 @@
+{
+  "schemaVersion": 1,
+  "roomId": "rdx_waterworks_freight_sump",
+  "glb": "../glb/rdx_waterworks_freight_sump.glb",
+  "units": "meters",
+  "upAxis": "Y",
+  "forwardAxis": "-Z",
+  "originPolicy": "entry-tier origin; do not recenter from aggregate bounds",
+  "archetype": "fluid_tank_chamber",
+  "topologyVariant": "freight_sump_exchange",
+  "districts": [
+    "factory",
+    "waterworks"
+  ],
+  "bounds": {
+    "min": [
+      -19,
+      -5.3,
+      -21
+    ],
+    "max": [
+      19,
+      14.5,
+      21
+    ]
+  },
+  "sockets": [
+    {
+      "id": "entry_south",
+      "nodeName": "SOCKET_ENTRY_SOUTH",
+      "type": "pressure_door",
+      "elevation": 0.0,
+      "position": [
+        0,
+        0,
+        21
+      ],
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "exit_north",
+      "nodeName": "SOCKET_EXIT_NORTH",
+      "type": "pressure_door",
+      "elevation": 0.0,
+      "position": [
+        0,
+        0,
+        -21
+      ],
+      "forward": [
+        0,
+        0,
+        -1
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "drain_tunnel_east",
+      "nodeName": "SOCKET_DRAIN_TUNNEL_EAST",
+      "type": "drain_tunnel",
+      "elevation": -4.8,
+      "position": [
+        19,
+        -4.8,
+        7
+      ],
+      "forward": [
+        1,
+        0,
+        0
+      ],
+      "aperture": [
+        4.2,
+        4.1
+      ]
+    },
+    {
+      "id": "gantry_exit_west",
+      "nodeName": "SOCKET_GANTRY_EXIT_WEST",
+      "type": "catwalk_bridge",
+      "elevation": 4.95,
+      "position": [
+        -19,
+        4.95,
+        -7
+      ],
+      "forward": [
+        -1,
+        0,
+        0
+      ],
+      "aperture": [
+        4.2,
+        4.1
+      ]
+    }
+  ],
+  "collisionPolicy": "Use manifest collision volumes and node extras; do not derive traversal collision from every visible mesh AABB.",
+  "gameplayPurpose": "A multi-region Waterworks room whose flooded, drained, and redirected states reveal different discoveries and exits.",
+  "regions": [
+    "entry_catwalk",
+    "freight_sump",
+    "pump_deck",
+    "drain_tunnel",
+    "upper_gantry"
+  ],
+  "fluidNetwork": {
+    "id": "freight_gantry_network",
+    "profile": "factory_water_v1",
+    "basinBottomY": -4.82,
+    "stableStates": {
+      "FreightSumpFilled": {
+        "freightLevelY": -1.55,
+        "storedLevelY": null,
+        "gantryLevelY": null
+      },
+      "StoredInReservoir": {
+        "freightLevelY": null,
+        "storedLevelY": 3.2,
+        "gantryLevelY": null
+      },
+      "GantrySumpFilled": {
+        "freightLevelY": null,
+        "storedLevelY": null,
+        "gantryLevelY": 2.1
+      }
+    },
+    "conservedVolumeUnits": 1,
+    "masterConsoleNode": "CONSOLE_MASTER_ROUTING"
+  },
+  "discoveries": [
+    {
+      "id": "submerged_salvage_cache",
+      "availableWhen": "FreightSumpFilled"
+    },
+    {
+      "id": "drained_tunnel_cache",
+      "availableWhen": "StoredInReservoir"
+    },
+    {
+      "id": "gantry_high_route",
+      "availableWhen": "GantrySumpFilled"
+    }
+  ],
+  "fallCatchments": [
+    {
+      "id": "freight_sump",
+      "destinationY": -4.82,
+      "deepWaterCushion": true,
+      "escape": "WALK_BASIN_RETURN_*"
+    }
+  ],
+  "traversalEdges": [
+    {
+      "from": "entry_catwalk",
+      "to": "freight_sump",
+      "kind": "authoredDrop"
+    },
+    {
+      "from": "freight_sump",
+      "to": "entry_catwalk",
+      "kind": "permanentStairs"
+    },
+    {
+      "from": "freight_sump",
+      "to": "drain_tunnel",
+      "predicate": "water:StoredInReservoir"
+    },
+    {
+      "from": "freight_sump",
+      "to": "upper_gantry",
+      "predicate": "water:GantrySumpFilled",
+      "profile": "flooded"
+    },
+    {
+      "from": "freight_sump",
+      "to": "submerged_salvage_cache",
+      "predicate": "water:FreightSumpFilled"
+    }
+  ],
+  "collisionVolumes": [
+    {
+      "nodeName": "SHELL_FLOOR_BOTTOM",
+      "shape": "box",
+      "center": [
+        0,
+        -5.55,
+        0
+      ],
+      "size": [
+        38,
+        0.5,
+        42
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_CEILING",
+      "shape": "box",
+      "center": [
+        0,
+        14.7,
+        0
+      ],
+      "size": [
+        38,
+        0.4,
+        42
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_NORTH_0_LEFT",
+      "shape": "box",
+      "center": [
+        -10.8,
+        4.6000000000000005,
+        -21.0
+      ],
+      "size": [
+        16.4,
+        19.8,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_NORTH_0",
+      "shape": "box",
+      "center": [
+        0,
+        9.8,
+        -21.0
+      ],
+      "size": [
+        5.2,
+        9.4,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_NORTH_RIGHT",
+      "shape": "box",
+      "center": [
+        10.799999999999999,
+        4.6000000000000005,
+        -21.0
+      ],
+      "size": [
+        16.4,
+        19.8,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_SOUTH_0_LEFT",
+      "shape": "box",
+      "center": [
+        -10.8,
+        4.6000000000000005,
+        21.0
+      ],
+      "size": [
+        16.4,
+        19.8,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_SOUTH_0",
+      "shape": "box",
+      "center": [
+        0,
+        9.8,
+        21.0
+      ],
+      "size": [
+        5.2,
+        9.4,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_SOUTH_RIGHT",
+      "shape": "box",
+      "center": [
+        10.799999999999999,
+        4.6000000000000005,
+        21.0
+      ],
+      "size": [
+        16.4,
+        19.8,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_WEST_0_LEFT",
+      "shape": "box",
+      "center": [
+        -19.0,
+        4.6000000000000005,
+        -15.05
+      ],
+      "size": [
+        0.45,
+        19.8,
+        11.9
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_WEST_0",
+      "shape": "box",
+      "center": [
+        -19.0,
+        12.275,
+        -7
+      ],
+      "size": [
+        0.45,
+        4.450000000000001,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_WEST_RIGHT",
+      "shape": "box",
+      "center": [
+        -19.0,
+        4.6000000000000005,
+        8.049999999999999
+      ],
+      "size": [
+        0.45,
+        19.8,
+        25.9
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_EAST_0_LEFT",
+      "shape": "box",
+      "center": [
+        19.0,
+        4.6000000000000005,
+        -8.05
+      ],
+      "size": [
+        0.45,
+        19.8,
+        25.9
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_EAST_0",
+      "shape": "box",
+      "center": [
+        19.0,
+        7.4,
+        7
+      ],
+      "size": [
+        0.45,
+        14.200000000000001,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_EAST_RIGHT",
+      "shape": "box",
+      "center": [
+        19.0,
+        4.6000000000000005,
+        15.05
+      ],
+      "size": [
+        0.45,
+        19.8,
+        11.9
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "WALK_SUMP_BOTTOM",
+      "shape": "box",
+      "center": [
+        0,
+        -5.05,
+        0
+      ],
+      "size": [
+        31.0,
+        0.45,
+        32.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ENTRY_CATWALK",
+      "shape": "box",
+      "center": [
+        0,
+        -0.05,
+        16.8
+      ],
+      "size": [
+        13.0,
+        0.35,
+        8.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_CATWALK_-5.5_-3.0",
+      "shape": "box",
+      "center": [
+        -5.46,
+        -1.95,
+        13.760000000000002
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_CATWALK_-5.5_3.0",
+      "shape": "box",
+      "center": [
+        -5.46,
+        -1.95,
+        19.84
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_CATWALK_5.5_-3.0",
+      "shape": "box",
+      "center": [
+        5.46,
+        -1.95,
+        13.760000000000002
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_CATWALK_5.5_3.0",
+      "shape": "box",
+      "center": [
+        5.46,
+        -1.95,
+        19.84
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_CATWALK_N",
+      "shape": "box",
+      "center": [
+        0,
+        0.47500000000000003,
+        12.8
+      ],
+      "size": [
+        13.0,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_CATWALK_W",
+      "shape": "box",
+      "center": [
+        -6.5,
+        0.47500000000000003,
+        16.8
+      ],
+      "size": [
+        0.12,
+        1.05,
+        8.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_CATWALK_E",
+      "shape": "box",
+      "center": [
+        6.5,
+        0.47500000000000003,
+        16.8
+      ],
+      "size": [
+        0.12,
+        1.05,
+        8.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_NORTH_PUMP_DECK",
+      "shape": "box",
+      "center": [
+        0,
+        -0.05,
+        -16.4
+      ],
+      "size": [
+        14.0,
+        0.35,
+        8.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_PUMP_DECK_-5.9_-3.2",
+      "shape": "box",
+      "center": [
+        -5.88,
+        -1.95,
+        -19.63
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_PUMP_DECK_-5.9_3.2",
+      "shape": "box",
+      "center": [
+        -5.88,
+        -1.95,
+        -13.169999999999998
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_PUMP_DECK_5.9_-3.2",
+      "shape": "box",
+      "center": [
+        5.88,
+        -1.95,
+        -19.63
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_PUMP_DECK_5.9_3.2",
+      "shape": "box",
+      "center": [
+        5.88,
+        -1.95,
+        -13.169999999999998
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_PUMP_DECK_S",
+      "shape": "box",
+      "center": [
+        0,
+        0.47500000000000003,
+        -12.149999999999999
+      ],
+      "size": [
+        14.0,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_PUMP_DECK_W",
+      "shape": "box",
+      "center": [
+        -7.0,
+        0.47500000000000003,
+        -16.4
+      ],
+      "size": [
+        0.12,
+        1.05,
+        8.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_PUMP_DECK_E",
+      "shape": "box",
+      "center": [
+        7.0,
+        0.47500000000000003,
+        -16.4
+      ],
+      "size": [
+        0.12,
+        1.05,
+        8.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_WEST_GANTRY",
+      "shape": "box",
+      "center": [
+        -15.3,
+        4.9,
+        -7
+      ],
+      "size": [
+        7.1,
+        0.35,
+        11.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_GANTRY_-3.0_-4.2",
+      "shape": "box",
+      "center": [
+        -18.282,
+        3.0000000000000004,
+        -11.18
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_GANTRY_-3.0_4.2",
+      "shape": "box",
+      "center": [
+        -18.282,
+        3.0000000000000004,
+        -2.8200000000000003
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_GANTRY_3.0_-4.2",
+      "shape": "box",
+      "center": [
+        -12.318000000000001,
+        3.0000000000000004,
+        -11.18
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_GANTRY_3.0_4.2",
+      "shape": "box",
+      "center": [
+        -12.318000000000001,
+        3.0000000000000004,
+        -2.8200000000000003
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_GANTRY_N",
+      "shape": "box",
+      "center": [
+        -15.3,
+        5.425000000000001,
+        -12.5
+      ],
+      "size": [
+        7.1,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_GANTRY_S",
+      "shape": "box",
+      "center": [
+        -15.3,
+        5.425000000000001,
+        -1.5
+      ],
+      "size": [
+        7.1,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_GANTRY_E",
+      "shape": "box",
+      "center": [
+        -11.75,
+        5.425000000000001,
+        -7
+      ],
+      "size": [
+        0.12,
+        1.05,
+        11.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_EAST_SERVICE_DECK",
+      "shape": "box",
+      "center": [
+        15.0,
+        -0.05,
+        5
+      ],
+      "size": [
+        7.5,
+        0.35,
+        15.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_EAST_SERVICE_DECK_-3.1_-5.7",
+      "shape": "box",
+      "center": [
+        11.85,
+        -1.95,
+        -0.7000000000000002
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_EAST_SERVICE_DECK_-3.1_5.7",
+      "shape": "box",
+      "center": [
+        11.85,
+        -1.95,
+        10.7
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_EAST_SERVICE_DECK_3.1_-5.7",
+      "shape": "box",
+      "center": [
+        18.15,
+        -1.95,
+        -0.7000000000000002
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_EAST_SERVICE_DECK_3.1_5.7",
+      "shape": "box",
+      "center": [
+        18.15,
+        -1.95,
+        10.7
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_EAST_SERVICE_DECK_N",
+      "shape": "box",
+      "center": [
+        15.0,
+        0.47500000000000003,
+        -2.5
+      ],
+      "size": [
+        7.5,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_EAST_SERVICE_DECK_S",
+      "shape": "box",
+      "center": [
+        15.0,
+        0.47500000000000003,
+        12.5
+      ],
+      "size": [
+        7.5,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_EAST_SERVICE_DECK_W",
+      "shape": "box",
+      "center": [
+        11.25,
+        0.47500000000000003,
+        5
+      ],
+      "size": [
+        0.12,
+        1.05,
+        15.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_SUMP_ISLAND_0",
+      "shape": "box",
+      "center": [
+        -8,
+        -3.8,
+        6
+      ],
+      "size": [
+        4.2,
+        0.35,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_0_-1.8_-1.6",
+      "shape": "box",
+      "center": [
+        -9.764,
+        -5.699999999999999,
+        4.404
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_0_-1.8_1.6",
+      "shape": "box",
+      "center": [
+        -9.764,
+        -5.699999999999999,
+        7.596
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_0_1.8_-1.6",
+      "shape": "box",
+      "center": [
+        -6.236,
+        -5.699999999999999,
+        4.404
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_0_1.8_1.6",
+      "shape": "box",
+      "center": [
+        -6.236,
+        -5.699999999999999,
+        7.596
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SUMP_ISLAND_1",
+      "shape": "box",
+      "center": [
+        7,
+        -2.6,
+        1
+      ],
+      "size": [
+        4.2,
+        0.35,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_1_-1.8_-1.6",
+      "shape": "box",
+      "center": [
+        5.236,
+        -4.5,
+        -0.5960000000000001
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_1_-1.8_1.6",
+      "shape": "box",
+      "center": [
+        5.236,
+        -4.5,
+        2.596
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_1_1.8_-1.6",
+      "shape": "box",
+      "center": [
+        8.764,
+        -4.5,
+        -0.5960000000000001
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_1_1.8_1.6",
+      "shape": "box",
+      "center": [
+        8.764,
+        -4.5,
+        2.596
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SUMP_ISLAND_2",
+      "shape": "box",
+      "center": [
+        -3,
+        -1.2,
+        -8
+      ],
+      "size": [
+        4.2,
+        0.35,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_2_-1.8_-1.6",
+      "shape": "box",
+      "center": [
+        -4.764,
+        -3.0999999999999996,
+        -9.596
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_2_-1.8_1.6",
+      "shape": "box",
+      "center": [
+        -4.764,
+        -3.0999999999999996,
+        -6.404
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_2_1.8_-1.6",
+      "shape": "box",
+      "center": [
+        -1.236,
+        -3.0999999999999996,
+        -9.596
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_2_1.8_1.6",
+      "shape": "box",
+      "center": [
+        -1.236,
+        -3.0999999999999996,
+        -6.404
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "WALK_SUMP_ISLAND_3",
+      "shape": "box",
+      "center": [
+        8.5,
+        0.25,
+        -9
+      ],
+      "size": [
+        4.2,
+        0.35,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_3_-1.8_-1.6",
+      "shape": "box",
+      "center": [
+        6.736,
+        -1.65,
+        -10.596
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_3_-1.8_1.6",
+      "shape": "box",
+      "center": [
+        6.736,
+        -1.65,
+        -7.404
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_3_1.8_-1.6",
+      "shape": "box",
+      "center": [
+        10.264,
+        -1.65,
+        -10.596
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_SUMP_ISLAND_3_1.8_1.6",
+      "shape": "box",
+      "center": [
+        10.264,
+        -1.65,
+        -7.404
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "FIXTURE_RESERVOIR_-5.2",
+      "shape": "cylinder",
+      "center": [
+        -5.2,
+        2.1,
+        -17.5
+      ],
+      "radius": 1.65,
+      "height": 4.3,
+      "semantic": "tank"
+    },
+    {
+      "nodeName": "FIXTURE_RESERVOIR_0",
+      "shape": "cylinder",
+      "center": [
+        0,
+        2.1,
+        -17.5
+      ],
+      "radius": 1.65,
+      "height": 4.3,
+      "semantic": "tank"
+    },
+    {
+      "nodeName": "FIXTURE_RESERVOIR_5.2",
+      "shape": "cylinder",
+      "center": [
+        5.2,
+        2.1,
+        -17.5
+      ],
+      "radius": 1.65,
+      "height": 4.3,
+      "semantic": "tank"
+    },
+    {
+      "nodeName": "FIXTURE_MAIN_PUMP",
+      "shape": "cylinder",
+      "center": [
+        11.5,
+        1.1,
+        -13.5
+      ],
+      "radius": 1.7,
+      "height": 3.0,
+      "semantic": "pump"
+    },
+    {
+      "nodeName": "CONSOLE_MASTER_ROUTING",
+      "shape": "box",
+      "center": [
+        0,
+        0.85,
+        -12.9
+      ],
+      "size": [
+        3.4,
+        1.8,
+        1.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "console"
+    },
+    {
+      "nodeName": "CONSOLE_VALVE_0",
+      "shape": "cylinder",
+      "center": [
+        -3.3,
+        0.9,
+        -10.2
+      ],
+      "radius": 0.48,
+      "height": 1.8,
+      "semantic": "console"
+    },
+    {
+      "nodeName": "CONSOLE_VALVE_1",
+      "shape": "cylinder",
+      "center": [
+        0,
+        0.9,
+        -10.2
+      ],
+      "radius": 0.48,
+      "height": 1.8,
+      "semantic": "console"
+    },
+    {
+      "nodeName": "CONSOLE_VALVE_2",
+      "shape": "cylinder",
+      "center": [
+        3.3,
+        0.9,
+        -10.2
+      ],
+      "radius": 0.48,
+      "height": 1.8,
+      "semantic": "console"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_00",
+      "shape": "box",
+      "center": [
+        12.0,
+        -4.66,
+        12.225
+      ],
+      "size": [
+        3.4,
+        0.32,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_01",
+      "shape": "box",
+      "center": [
+        12.0,
+        -4.5,
+        12.675
+      ],
+      "size": [
+        3.4,
+        0.64,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_02",
+      "shape": "box",
+      "center": [
+        12.0,
+        -4.34,
+        13.125
+      ],
+      "size": [
+        3.4,
+        0.96,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_03",
+      "shape": "box",
+      "center": [
+        12.0,
+        -4.180000000000001,
+        13.575
+      ],
+      "size": [
+        3.4,
+        1.28,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_04",
+      "shape": "box",
+      "center": [
+        12.0,
+        -4.0200000000000005,
+        14.025
+      ],
+      "size": [
+        3.4,
+        1.6,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_05",
+      "shape": "box",
+      "center": [
+        12.0,
+        -3.8600000000000003,
+        14.475
+      ],
+      "size": [
+        3.4,
+        1.92,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_06",
+      "shape": "box",
+      "center": [
+        12.0,
+        -3.7,
+        14.925
+      ],
+      "size": [
+        3.4,
+        2.24,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_07",
+      "shape": "box",
+      "center": [
+        12.0,
+        -3.54,
+        15.375
+      ],
+      "size": [
+        3.4,
+        2.56,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_08",
+      "shape": "box",
+      "center": [
+        12.0,
+        -3.3800000000000003,
+        15.825
+      ],
+      "size": [
+        3.4,
+        2.88,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_09",
+      "shape": "box",
+      "center": [
+        12.0,
+        -3.22,
+        16.275
+      ],
+      "size": [
+        3.4,
+        3.2,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_10",
+      "shape": "box",
+      "center": [
+        12.0,
+        -3.0600000000000005,
+        16.725
+      ],
+      "size": [
+        3.4,
+        3.52,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_11",
+      "shape": "box",
+      "center": [
+        12.0,
+        -2.9000000000000004,
+        17.175
+      ],
+      "size": [
+        3.4,
+        3.84,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_12",
+      "shape": "box",
+      "center": [
+        12.0,
+        -2.74,
+        17.625
+      ],
+      "size": [
+        3.4,
+        4.16,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_13",
+      "shape": "box",
+      "center": [
+        12.0,
+        -2.58,
+        18.075
+      ],
+      "size": [
+        3.4,
+        4.48,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_BASIN_RETURN_STEP_14",
+      "shape": "box",
+      "center": [
+        12.0,
+        -2.4200000000000004,
+        18.525
+      ],
+      "size": [
+        3.4,
+        4.8,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_00",
+      "shape": "box",
+      "center": [
+        -14.0,
+        0.28500000000000003,
+        1.77
+      ],
+      "size": [
+        3.2,
+        0.33,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_01",
+      "shape": "box",
+      "center": [
+        -14.0,
+        0.45,
+        1.31
+      ],
+      "size": [
+        3.2,
+        0.66,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_02",
+      "shape": "box",
+      "center": [
+        -14.0,
+        0.615,
+        0.8499999999999999
+      ],
+      "size": [
+        3.2,
+        0.99,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_03",
+      "shape": "box",
+      "center": [
+        -14.0,
+        0.78,
+        0.3899999999999999
+      ],
+      "size": [
+        3.2,
+        1.32,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_04",
+      "shape": "box",
+      "center": [
+        -14.0,
+        0.9450000000000001,
+        -0.07000000000000028
+      ],
+      "size": [
+        3.2,
+        1.6500000000000001,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_05",
+      "shape": "box",
+      "center": [
+        -14.0,
+        1.1099999999999999,
+        -0.5300000000000002
+      ],
+      "size": [
+        3.2,
+        1.98,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_06",
+      "shape": "box",
+      "center": [
+        -14.0,
+        1.275,
+        -0.9900000000000002
+      ],
+      "size": [
+        3.2,
+        2.31,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_07",
+      "shape": "box",
+      "center": [
+        -14.0,
+        1.44,
+        -1.4500000000000002
+      ],
+      "size": [
+        3.2,
+        2.64,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_08",
+      "shape": "box",
+      "center": [
+        -14.0,
+        1.605,
+        -1.9100000000000001
+      ],
+      "size": [
+        3.2,
+        2.97,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_09",
+      "shape": "box",
+      "center": [
+        -14.0,
+        1.77,
+        -2.37
+      ],
+      "size": [
+        3.2,
+        3.3000000000000003,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_10",
+      "shape": "box",
+      "center": [
+        -14.0,
+        1.935,
+        -2.83
+      ],
+      "size": [
+        3.2,
+        3.6300000000000003,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_11",
+      "shape": "box",
+      "center": [
+        -14.0,
+        2.1,
+        -3.29
+      ],
+      "size": [
+        3.2,
+        3.96,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_12",
+      "shape": "box",
+      "center": [
+        -14.0,
+        2.265,
+        -3.75
+      ],
+      "size": [
+        3.2,
+        4.29,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_13",
+      "shape": "box",
+      "center": [
+        -14.0,
+        2.43,
+        -4.21
+      ],
+      "size": [
+        3.2,
+        4.62,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_GANTRY_ASCENT_STEP_14",
+      "shape": "box",
+      "center": [
+        -14.0,
+        2.595,
+        -4.67
+      ],
+      "size": [
+        3.2,
+        4.95,
+        0.46
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_DRAIN_TUNNEL",
+      "shape": "box",
+      "center": [
+        16.5,
+        -4.82,
+        7
+      ],
+      "size": [
+        5.0,
+        0.3,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    }
+  ]
+}

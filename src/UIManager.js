@@ -2551,12 +2551,14 @@ export class UIManager {
 
     this.garageWeaponSlots.innerHTML = '';
     const canEdit = this.game.canEditArmsGear?.() === true;
+    const canEditUtility = this.game.canEditUtilityArm?.() === true;
     const armLoadout = this.game.player.armLoadout;
     const ownedArmIds = new Set(armLoadout?.snapshot?.().ownedArmIds ?? []);
     const busterView = this.game.getBusterLabViewModel?.('build-a') ?? null;
     const customBuilds = (busterView?.builds ?? []).filter((build) => build.available);
 
     for (const slot of ARM_LOADOUT_SLOTS) {
+      const slotCanEdit = canEdit || (slot === 'utility' && canEditUtility);
       const slotIndex = ARM_SLOT_INDEX[slot];
       const selection = armLoadout?.get?.(slot)
         ?? (slot === 'megaBuster' ? { kind: 'megaBuster' } : null);
@@ -2615,7 +2617,7 @@ export class UIManager {
         'garage-weapon-card',
         slotIndex === this.game.player.activeArmIndex ? 'is-active' : '',
         selection ? '' : 'is-empty',
-        canEdit ? '' : 'is-read-only',
+        slotCanEdit ? '' : 'is-read-only',
       ].filter(Boolean).join(' ');
       card.innerHTML = `
         <button class="garage-arm-switch" type="button" data-action="switch-arm-slot" data-slot-index="${slotIndex}" ${selection ? '' : 'disabled'} aria-label="Switch to ${escapeHtml(ARM_SLOT_LABELS[slot])}">
@@ -2632,7 +2634,7 @@ export class UIManager {
           <span class="garage-output-copy">${escapeHtml(outputCopy)}</span>
           <label class="fixed-loadout-select">
             <span>Installed arm</span>
-            <select data-arm-loadout-slot="${escapeHtml(slot)}" ${!canEdit || slot === 'megaBuster' ? 'disabled' : ''}>${options}</select>
+            <select data-arm-loadout-slot="${escapeHtml(slot)}" ${!slotCanEdit || slot === 'megaBuster' ? 'disabled' : ''}>${options}</select>
           </label>
         </span>
       `;
@@ -3123,8 +3125,11 @@ export class UIManager {
   _runArmsGearAction(action, {
     successMessage = 'Loadout updated',
     failureMessage = 'Loadout change failed',
+    allowUtilityFieldSwap = false,
   } = {}) {
-    if (this.game.canEditArmsGear?.() !== true) {
+    const canEdit = this.game.canEditArmsGear?.() === true
+      || (allowUtilityFieldSwap && this.game.canEditUtilityArm?.() === true);
+    if (!canEdit) {
       this.showToast("Arms and Gear can only be changed at Roll's workshop or camp.", '#ff9f73');
       this.renderInventory();
       return Promise.resolve({ ok: false, reason: 'read-only' });
@@ -3415,6 +3420,7 @@ export class UIManager {
 
       const armLoadout = event.target.closest('[data-arm-loadout-slot]');
       if (armLoadout) {
+        const slot = armLoadout.dataset.armLoadoutSlot;
         const rawValue = armLoadout.value;
         const selection = rawValue.startsWith('fixed:')
           ? { kind: 'fixedArm', armId: rawValue.slice('fixed:'.length) }
@@ -3422,8 +3428,12 @@ export class UIManager {
             ? { kind: 'customBuster', buildId: rawValue.slice('custom:'.length) }
             : null;
         this._runArmsGearAction(
-          () => this.game.equipArmLoadoutSlot?.(armLoadout.dataset.armLoadoutSlot, selection),
-          { successMessage: 'Arm loadout saved', failureMessage: 'Arm could not be assigned' },
+          () => this.game.equipArmLoadoutSlot?.(slot, selection),
+          {
+            successMessage: slot === 'utility' ? 'Utility Arm ready' : 'Arm loadout saved',
+            failureMessage: 'Arm could not be assigned',
+            allowUtilityFieldSwap: slot === 'utility',
+          },
         );
         return;
       }

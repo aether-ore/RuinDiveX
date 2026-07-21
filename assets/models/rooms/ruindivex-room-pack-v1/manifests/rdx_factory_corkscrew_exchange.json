@@ -1,0 +1,1278 @@
+{
+  "schemaVersion": 1,
+  "roomId": "rdx_factory_corkscrew_exchange",
+  "glb": "../glb/rdx_factory_corkscrew_exchange.glb",
+  "units": "meters",
+  "upAxis": "Y",
+  "forwardAxis": "-Z",
+  "originPolicy": "entry-tier origin; do not recenter from aggregate bounds",
+  "archetype": "large_mini_dungeon_room",
+  "topologyVariant": "corkscrew_exchange",
+  "districts": [
+    "factory"
+  ],
+  "bounds": {
+    "min": [
+      -18,
+      -4.2,
+      -17
+    ],
+    "max": [
+      18,
+      15.5,
+      17
+    ]
+  },
+  "sockets": [
+    {
+      "id": "entry_south",
+      "nodeName": "SOCKET_ENTRY_SOUTH",
+      "type": "factory_door",
+      "elevation": 0.0,
+      "position": [
+        0,
+        0,
+        17
+      ],
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "exit_east_mid",
+      "nodeName": "SOCKET_EXIT_EAST_MID",
+      "type": "upper_factory_door",
+      "elevation": 3.2,
+      "position": [
+        18,
+        3.2,
+        0
+      ],
+      "forward": [
+        1,
+        0,
+        0
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "exit_north_high",
+      "nodeName": "SOCKET_EXIT_NORTH_HIGH",
+      "type": "upper_factory_door",
+      "elevation": 6.4,
+      "position": [
+        0,
+        6.4,
+        -17
+      ],
+      "forward": [
+        0,
+        0,
+        -1
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "exit_west_top",
+      "nodeName": "SOCKET_EXIT_WEST_TOP",
+      "type": "upper_factory_door",
+      "elevation": 9.6,
+      "position": [
+        -18,
+        9.6,
+        0
+      ],
+      "forward": [
+        -1,
+        0,
+        0
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    }
+  ],
+  "collisionPolicy": "Use manifest collision volumes and node extras; do not derive traversal collision from every visible mesh AABB.",
+  "gameplayPurpose": "A room-scale discrete corkscrew lift connects three exit heights while failed movement reveals a playable lower recovery floor.",
+  "regions": [
+    "entry_apron",
+    "corkscrew_platform",
+    "recovery_floor",
+    "east_mid_ledge",
+    "north_high_ledge",
+    "west_top_ledge"
+  ],
+  "platformPurposes": {
+    "MECH_GEAR_PLATFORM": "CriticalTraverse",
+    "WALK_WEST_TOP_LEDGE": "OptionalReward",
+    "WALK_LOWER_CATCHMENT": "RecoveryCatchment"
+  },
+  "mechanisms": [
+    {
+      "id": "corkscrew_exchange",
+      "controller": "discrete_corkscrew_platform_v1",
+      "stableStops": [
+        {
+          "id": "south_entry",
+          "height": 0.7,
+          "yawDegrees": 0,
+          "deployedBridge": "SOUTH"
+        },
+        {
+          "id": "east_mid",
+          "height": 3.9,
+          "yawDegrees": 90,
+          "deployedBridge": "EAST"
+        },
+        {
+          "id": "north_high",
+          "height": 7.1,
+          "yawDegrees": 180,
+          "deployedBridge": "NORTH"
+        },
+        {
+          "id": "west_top",
+          "height": 10.3,
+          "yawDegrees": 270,
+          "deployedBridge": "WEST"
+        }
+      ]
+    }
+  ],
+  "fallCatchments": [
+    {
+      "id": "gear_lower_floor",
+      "source": "central_opening",
+      "destinationY": -3.72,
+      "escape": "WALK_LOWER_RETURN_*",
+      "damageFreeExit": true
+    }
+  ],
+  "traversalEdges": [
+    {
+      "from": "entry_apron",
+      "to": "corkscrew_platform",
+      "predicate": "stop:south_entry"
+    },
+    {
+      "from": "corkscrew_platform",
+      "to": "east_mid_ledge",
+      "predicate": "stop:east_mid"
+    },
+    {
+      "from": "corkscrew_platform",
+      "to": "north_high_ledge",
+      "predicate": "stop:north_high"
+    },
+    {
+      "from": "corkscrew_platform",
+      "to": "west_top_ledge",
+      "predicate": "stop:west_top"
+    },
+    {
+      "from": "corkscrew_platform",
+      "to": "recovery_floor",
+      "kind": "fallCatchment"
+    },
+    {
+      "from": "recovery_floor",
+      "to": "entry_apron",
+      "kind": "permanentStairs"
+    }
+  ],
+  "collisionVolumes": [
+    {
+      "nodeName": "SHELL_FLOOR_BOTTOM",
+      "shape": "box",
+      "center": [
+        0,
+        -4.45,
+        0
+      ],
+      "size": [
+        36,
+        0.5,
+        34
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_CEILING",
+      "shape": "box",
+      "center": [
+        0,
+        15.7,
+        0
+      ],
+      "size": [
+        36,
+        0.4,
+        34
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_NORTH_0_LEFT",
+      "shape": "box",
+      "center": [
+        -10.3,
+        5.6499999999999995,
+        -17.0
+      ],
+      "size": [
+        15.4,
+        19.7,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_NORTH_0",
+      "shape": "box",
+      "center": [
+        0,
+        13.5,
+        -17.0
+      ],
+      "size": [
+        5.2,
+        4.0,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_NORTH_RIGHT",
+      "shape": "box",
+      "center": [
+        10.3,
+        5.6499999999999995,
+        -17.0
+      ],
+      "size": [
+        15.4,
+        19.7,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_SOUTH_0_LEFT",
+      "shape": "box",
+      "center": [
+        -10.3,
+        5.6499999999999995,
+        17.0
+      ],
+      "size": [
+        15.4,
+        19.7,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_SOUTH_0",
+      "shape": "box",
+      "center": [
+        0,
+        10.3,
+        17.0
+      ],
+      "size": [
+        5.2,
+        10.4,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_SOUTH_RIGHT",
+      "shape": "box",
+      "center": [
+        10.3,
+        5.6499999999999995,
+        17.0
+      ],
+      "size": [
+        15.4,
+        19.7,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_WEST_0_LEFT",
+      "shape": "box",
+      "center": [
+        -18.0,
+        5.6499999999999995,
+        -9.8
+      ],
+      "size": [
+        0.45,
+        19.7,
+        14.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_WEST_0",
+      "shape": "box",
+      "center": [
+        -18.0,
+        15.1,
+        0
+      ],
+      "size": [
+        0.45,
+        0.8000000000000007,
+        5.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_WEST_RIGHT",
+      "shape": "box",
+      "center": [
+        -18.0,
+        5.6499999999999995,
+        9.8
+      ],
+      "size": [
+        0.45,
+        19.7,
+        14.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_EAST_0_LEFT",
+      "shape": "box",
+      "center": [
+        18.0,
+        5.6499999999999995,
+        -9.8
+      ],
+      "size": [
+        0.45,
+        19.7,
+        14.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_EAST_0",
+      "shape": "box",
+      "center": [
+        18.0,
+        11.9,
+        0
+      ],
+      "size": [
+        0.45,
+        7.200000000000001,
+        5.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_EAST_RIGHT",
+      "shape": "box",
+      "center": [
+        18.0,
+        5.6499999999999995,
+        9.8
+      ],
+      "size": [
+        0.45,
+        19.7,
+        14.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "WALK_ENTRY_APRON",
+      "shape": "box",
+      "center": [
+        0,
+        -0.05,
+        12.7
+      ],
+      "size": [
+        11.5,
+        0.35,
+        8.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_APRON_-4.8_-3.1",
+      "shape": "box",
+      "center": [
+        -4.83,
+        -1.95,
+        9.584
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_APRON_-4.8_3.1",
+      "shape": "box",
+      "center": [
+        -4.83,
+        -1.95,
+        15.815999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_APRON_4.8_-3.1",
+      "shape": "box",
+      "center": [
+        4.83,
+        -1.95,
+        9.584
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_APRON_4.8_3.1",
+      "shape": "box",
+      "center": [
+        4.83,
+        -1.95,
+        15.815999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_APRON_W",
+      "shape": "box",
+      "center": [
+        -5.75,
+        0.47500000000000003,
+        12.7
+      ],
+      "size": [
+        0.12,
+        1.05,
+        8.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_APRON_E",
+      "shape": "box",
+      "center": [
+        5.75,
+        0.47500000000000003,
+        12.7
+      ],
+      "size": [
+        0.12,
+        1.05,
+        8.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_EAST_MID_LEDGE",
+      "shape": "box",
+      "center": [
+        14.1,
+        3.15,
+        0
+      ],
+      "size": [
+        7.6,
+        0.35,
+        10.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_EAST_MID_LEDGE_-3.2_-3.8",
+      "shape": "box",
+      "center": [
+        10.908,
+        1.25,
+        -3.8
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_EAST_MID_LEDGE_-3.2_3.8",
+      "shape": "box",
+      "center": [
+        10.908,
+        1.25,
+        3.8
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_EAST_MID_LEDGE_3.2_-3.8",
+      "shape": "box",
+      "center": [
+        17.291999999999998,
+        1.25,
+        -3.8
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_EAST_MID_LEDGE_3.2_3.8",
+      "shape": "box",
+      "center": [
+        17.291999999999998,
+        1.25,
+        3.8
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_EAST_MID_LEDGE_N",
+      "shape": "box",
+      "center": [
+        14.1,
+        3.675,
+        -5.0
+      ],
+      "size": [
+        7.6,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_EAST_MID_LEDGE_S",
+      "shape": "box",
+      "center": [
+        14.1,
+        3.675,
+        5.0
+      ],
+      "size": [
+        7.6,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_EAST_MID_LEDGE_W",
+      "shape": "box",
+      "center": [
+        10.3,
+        3.675,
+        0
+      ],
+      "size": [
+        0.12,
+        1.05,
+        10.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_NORTH_HIGH_LEDGE",
+      "shape": "box",
+      "center": [
+        0,
+        6.35,
+        -13.2
+      ],
+      "size": [
+        11.0,
+        0.35,
+        7.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_HIGH_LEDGE_-4.6_-2.8",
+      "shape": "box",
+      "center": [
+        -4.62,
+        4.449999999999999,
+        -16.012
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_HIGH_LEDGE_-4.6_2.8",
+      "shape": "box",
+      "center": [
+        -4.62,
+        4.449999999999999,
+        -10.387999999999998
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_HIGH_LEDGE_4.6_-2.8",
+      "shape": "box",
+      "center": [
+        4.62,
+        4.449999999999999,
+        -16.012
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_HIGH_LEDGE_4.6_2.8",
+      "shape": "box",
+      "center": [
+        4.62,
+        4.449999999999999,
+        -10.387999999999998
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_HIGH_LEDGE_S",
+      "shape": "box",
+      "center": [
+        0,
+        6.875,
+        -9.5
+      ],
+      "size": [
+        11.0,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_HIGH_LEDGE_W",
+      "shape": "box",
+      "center": [
+        -5.5,
+        6.875,
+        -13.2
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_HIGH_LEDGE_E",
+      "shape": "box",
+      "center": [
+        5.5,
+        6.875,
+        -13.2
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.4
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_WEST_TOP_LEDGE",
+      "shape": "box",
+      "center": [
+        -14.0,
+        9.55,
+        0
+      ],
+      "size": [
+        7.8,
+        0.35,
+        10.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_TOP_LEDGE_-3.3_-3.8",
+      "shape": "box",
+      "center": [
+        -17.276,
+        7.65,
+        -3.8
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_TOP_LEDGE_-3.3_3.8",
+      "shape": "box",
+      "center": [
+        -17.276,
+        7.65,
+        3.8
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_TOP_LEDGE_3.3_-3.8",
+      "shape": "box",
+      "center": [
+        -10.724,
+        7.65,
+        -3.8
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_WEST_TOP_LEDGE_3.3_3.8",
+      "shape": "box",
+      "center": [
+        -10.724,
+        7.65,
+        3.8
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_TOP_LEDGE_N",
+      "shape": "box",
+      "center": [
+        -14.0,
+        10.075000000000001,
+        -5.0
+      ],
+      "size": [
+        7.8,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_TOP_LEDGE_S",
+      "shape": "box",
+      "center": [
+        -14.0,
+        10.075000000000001,
+        5.0
+      ],
+      "size": [
+        7.8,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_WEST_TOP_LEDGE_E",
+      "shape": "box",
+      "center": [
+        -10.1,
+        10.075000000000001,
+        0
+      ],
+      "size": [
+        0.12,
+        1.05,
+        10.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_LOWER_CATCHMENT",
+      "shape": "box",
+      "center": [
+        0,
+        -3.95,
+        0
+      ],
+      "size": [
+        25.0,
+        0.45,
+        24.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "recoveryCatchment"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_00",
+      "shape": "box",
+      "center": [
+        8.0,
+        -3.5650000000000004,
+        7.21
+      ],
+      "size": [
+        3.2,
+        0.31,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_01",
+      "shape": "box",
+      "center": [
+        8.0,
+        -3.41,
+        7.63
+      ],
+      "size": [
+        3.2,
+        0.62,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_02",
+      "shape": "box",
+      "center": [
+        8.0,
+        -3.2550000000000003,
+        8.05
+      ],
+      "size": [
+        3.2,
+        0.9299999999999999,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_03",
+      "shape": "box",
+      "center": [
+        8.0,
+        -3.1,
+        8.47
+      ],
+      "size": [
+        3.2,
+        1.24,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_04",
+      "shape": "box",
+      "center": [
+        8.0,
+        -2.9450000000000003,
+        8.89
+      ],
+      "size": [
+        3.2,
+        1.55,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_05",
+      "shape": "box",
+      "center": [
+        8.0,
+        -2.79,
+        9.31
+      ],
+      "size": [
+        3.2,
+        1.8599999999999999,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_06",
+      "shape": "box",
+      "center": [
+        8.0,
+        -2.6350000000000002,
+        9.73
+      ],
+      "size": [
+        3.2,
+        2.17,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_07",
+      "shape": "box",
+      "center": [
+        8.0,
+        -2.4800000000000004,
+        10.15
+      ],
+      "size": [
+        3.2,
+        2.48,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_08",
+      "shape": "box",
+      "center": [
+        8.0,
+        -2.325,
+        10.57
+      ],
+      "size": [
+        3.2,
+        2.79,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_09",
+      "shape": "box",
+      "center": [
+        8.0,
+        -2.17,
+        10.99
+      ],
+      "size": [
+        3.2,
+        3.1,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_10",
+      "shape": "box",
+      "center": [
+        8.0,
+        -2.015,
+        11.41
+      ],
+      "size": [
+        3.2,
+        3.41,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_LOWER_RETURN_STEP_11",
+      "shape": "box",
+      "center": [
+        8.0,
+        -1.8600000000000003,
+        11.83
+      ],
+      "size": [
+        3.2,
+        3.7199999999999998,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "MECH_SCREW_COLUMN",
+      "shape": "cylinder",
+      "center": [
+        0,
+        4.7,
+        0
+      ],
+      "radius": 1.15,
+      "height": 15.2,
+      "semantic": "mechanismSupport"
+    },
+    {
+      "nodeName": "MECH_CONTROL_PEDESTAL",
+      "shape": "cylinder",
+      "center": [
+        0,
+        1.65,
+        0
+      ],
+      "radius": 0.72,
+      "height": 1.8,
+      "semantic": "console"
+    },
+    {
+      "nodeName": "MECH_BRIDGE_SOUTH",
+      "shape": "box",
+      "center": [
+        0,
+        1.05,
+        7.5
+      ],
+      "size": [
+        3.2,
+        0.3,
+        6.3
+      ],
+      "rotationY": 0.0,
+      "semantic": "movingSurface"
+    },
+    {
+      "nodeName": "MECH_BRIDGE_EAST",
+      "shape": "box",
+      "center": [
+        7.5,
+        1.05,
+        0
+      ],
+      "size": [
+        6.3,
+        0.3,
+        3.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "movingSurface"
+    },
+    {
+      "nodeName": "MECH_BRIDGE_NORTH",
+      "shape": "box",
+      "center": [
+        0,
+        1.05,
+        -7.5
+      ],
+      "size": [
+        3.2,
+        0.3,
+        6.3
+      ],
+      "rotationY": 0.0,
+      "semantic": "movingSurface"
+    },
+    {
+      "nodeName": "MECH_BRIDGE_WEST",
+      "shape": "box",
+      "center": [
+        -7.5,
+        1.05,
+        0
+      ],
+      "size": [
+        6.3,
+        0.3,
+        3.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "movingSurface"
+    },
+    {
+      "nodeName": "SUPPORT_TOWER_-9.6_-8.5",
+      "shape": "box",
+      "center": [
+        -9.6,
+        5.6,
+        -8.5
+      ],
+      "size": [
+        0.65,
+        11.2,
+        0.65
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_TOWER_-9.6_8.5",
+      "shape": "box",
+      "center": [
+        -9.6,
+        5.6,
+        8.5
+      ],
+      "size": [
+        0.65,
+        11.2,
+        0.65
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_TOWER_9.6_-8.5",
+      "shape": "box",
+      "center": [
+        9.6,
+        5.6,
+        -8.5
+      ],
+      "size": [
+        0.65,
+        11.2,
+        0.65
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_TOWER_9.6_8.5",
+      "shape": "box",
+      "center": [
+        9.6,
+        5.6,
+        8.5
+      ],
+      "size": [
+        0.65,
+        11.2,
+        0.65
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "packId": "ruindivex-threejs-room-pack-v1",
+  "status": "passed",
+  "reports": [
+    {
+      "roomId": "rdx_factory_corkscrew_exchange",
+      "bytes": 365284,
+      "sha256": "a1e1f878319029c1accbbed8913d2a1c3c0b89c3a8db07222c0875cf3831e330",
+      "nodes": 101,
+      "meshes": 85,
+      "materials": 6,
+      "embeddedImages": 6,
+      "sockets": 4,
+      "collisionVolumes": 68,
+      "traversalEdges": 6,
+      "bounds": {
+        "min": [
+          -18,
+          -4.2,
+          -17
+        ],
+        "max": [
+          18,
+          15.5,
+          17
+        ]
+      }
+    },
+    {
+      "roomId": "rdx_waterworks_freight_sump",
+      "bytes": 422032,
+      "sha256": "004ce0d1bfe7e300d0cc6ee087a81a25ff834a3168ffec4b1ed9a26b76a5e122",
+      "nodes": 124,
+      "meshes": 110,
+      "materials": 7,
+      "embeddedImages": 7,
+      "sockets": 4,
+      "collisionVolumes": 106,
+      "traversalEdges": 5,
+      "bounds": {
+        "min": [
+          -19,
+          -5.3,
+          -21
+        ],
+        "max": [
+          19,
+          14.5,
+          21
+        ]
+      }
+    },
+    {
+      "roomId": "rdx_magma_foundry_undercroft",
+      "bytes": 375784,
+      "sha256": "27aef325fc96a7ac0df52ff83e7f30fba402581cea656b0b5dd8e362bb0594f5",
+      "nodes": 98,
+      "meshes": 87,
+      "materials": 6,
+      "embeddedImages": 6,
+      "sockets": 3,
+      "collisionVolumes": 84,
+      "traversalEdges": 4,
+      "bounds": {
+        "min": [
+          -17,
+          -4,
+          -18
+        ],
+        "max": [
+          17,
+          13,
+          18
+        ]
+      }
+    },
+    {
+      "roomId": "rdx_electric_transformer_undercroft",
+      "bytes": 525380,
+      "sha256": "d6480898dab56e7384d96d5c88118819fd7008a5493a50efeaad95e8aec1553e",
+      "nodes": 132,
+      "meshes": 119,
+      "materials": 8,
+      "embeddedImages": 8,
+      "sockets": 3,
+      "collisionVolumes": 86,
+      "traversalEdges": 5,
+      "bounds": {
+        "min": [
+          -17,
+          -3.8,
+          -18
+        ],
+        "max": [
+          17,
+          13.5,
+          18
+        ]
+      }
+    }
+  ]
+}

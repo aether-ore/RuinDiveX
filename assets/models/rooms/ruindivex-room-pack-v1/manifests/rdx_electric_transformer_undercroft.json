@@ -1,0 +1,1515 @@
+{
+  "schemaVersion": 1,
+  "roomId": "rdx_electric_transformer_undercroft",
+  "glb": "../glb/rdx_electric_transformer_undercroft.glb",
+  "units": "meters",
+  "upAxis": "Y",
+  "forwardAxis": "-Z",
+  "originPolicy": "entry-tier origin; do not recenter from aggregate bounds",
+  "archetype": "hazard_processing_room",
+  "topologyVariant": "electric_transformer_undercroft",
+  "districts": [
+    "hazard_electric"
+  ],
+  "bounds": {
+    "min": [
+      -17,
+      -3.8,
+      -18
+    ],
+    "max": [
+      17,
+      13.5,
+      18
+    ]
+  },
+  "sockets": [
+    {
+      "id": "entry_south",
+      "nodeName": "SOCKET_ENTRY_SOUTH",
+      "type": "hazard_door",
+      "elevation": 0.0,
+      "position": [
+        0,
+        0,
+        18
+      ],
+      "forward": [
+        0,
+        0,
+        1
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "exit_north",
+      "nodeName": "SOCKET_EXIT_NORTH",
+      "type": "hazard_door",
+      "elevation": 0.0,
+      "position": [
+        0,
+        0,
+        -18
+      ],
+      "forward": [
+        0,
+        0,
+        -1
+      ],
+      "aperture": [
+        5.2,
+        5.1
+      ]
+    },
+    {
+      "id": "upper_east",
+      "nodeName": "SOCKET_UPPER_EAST",
+      "type": "upper_maintenance_door",
+      "elevation": 4.2,
+      "position": [
+        17,
+        4.2,
+        -5
+      ],
+      "forward": [
+        1,
+        0,
+        0
+      ],
+      "aperture": [
+        4.2,
+        4.1
+      ]
+    }
+  ],
+  "collisionPolicy": "Use manifest collision volumes and node extras; do not derive traversal collision from every visible mesh AABB.",
+  "gameplayPurpose": "A cycling electrical sub-dungeon with a permanently safe insulated route, a timing-reward branch, grounding controls, and an upper shortcut.",
+  "hazard": {
+    "profile": "electric_floor_cycle_v1",
+    "damagePerSecond": 9,
+    "cycleSeconds": 3.5,
+    "safeSeconds": 1.25,
+    "chargingSeconds": 0.75,
+    "energizedSeconds": 1.5,
+    "panelPrefix": "HAZARD_ELECTRIC_PANEL_"
+  },
+  "criticalRouteDamageFree": true,
+  "controller": {
+    "id": "electric_cycle",
+    "consoleNode": "CONSOLE_GROUNDING_ARRAY",
+    "stableStates": [
+      "cycling",
+      "grounded"
+    ]
+  },
+  "fallCatchments": [
+    {
+      "id": "electric_safe_landing",
+      "destinationNode": "WALK_INSULATED_PAD_00",
+      "nominalPadWidth": 3.15,
+      "escape": "insulated_route_to_switch_deck"
+    }
+  ],
+  "traversalEdges": [
+    {
+      "from": "entry_deck",
+      "to": "WALK_INSULATED_PAD_00",
+      "kind": "stairs"
+    },
+    {
+      "from": "WALK_INSULATED_PAD_00",
+      "to": "WALK_INSULATED_PAD_08",
+      "via": [
+        "WALK_INSULATED_PAD_01",
+        "WALK_INSULATED_PAD_02",
+        "WALK_INSULATED_PAD_03",
+        "WALK_INSULATED_PAD_04",
+        "WALK_INSULATED_PAD_05",
+        "WALK_INSULATED_PAD_06",
+        "WALK_INSULATED_PAD_07"
+      ],
+      "damageFree": true
+    },
+    {
+      "from": "WALK_INSULATED_PAD_08",
+      "to": "switch_deck",
+      "kind": "stairs"
+    },
+    {
+      "from": "WALK_INSULATED_PAD_00",
+      "to": "timing_reward_branch",
+      "predicate": "electric:safe_or_timed",
+      "optional": true
+    },
+    {
+      "from": "switch_deck",
+      "to": "upper_gallery",
+      "kind": "stairs"
+    }
+  ],
+  "collisionVolumes": [
+    {
+      "nodeName": "SHELL_FLOOR_BOTTOM",
+      "shape": "box",
+      "center": [
+        0,
+        -4.05,
+        0
+      ],
+      "size": [
+        34,
+        0.5,
+        36
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_CEILING",
+      "shape": "box",
+      "center": [
+        0,
+        13.7,
+        0
+      ],
+      "size": [
+        34,
+        0.4,
+        36
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_NORTH_0_LEFT",
+      "shape": "box",
+      "center": [
+        -9.8,
+        4.8500000000000005,
+        -18.0
+      ],
+      "size": [
+        14.4,
+        17.3,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_NORTH_0",
+      "shape": "box",
+      "center": [
+        0,
+        9.3,
+        -18.0
+      ],
+      "size": [
+        5.2,
+        8.4,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_NORTH_RIGHT",
+      "shape": "box",
+      "center": [
+        9.8,
+        4.8500000000000005,
+        -18.0
+      ],
+      "size": [
+        14.4,
+        17.3,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_SOUTH_0_LEFT",
+      "shape": "box",
+      "center": [
+        -9.8,
+        4.8500000000000005,
+        18.0
+      ],
+      "size": [
+        14.4,
+        17.3,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_SOUTH_0",
+      "shape": "box",
+      "center": [
+        0,
+        9.3,
+        18.0
+      ],
+      "size": [
+        5.2,
+        8.4,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_SOUTH_RIGHT",
+      "shape": "box",
+      "center": [
+        9.8,
+        4.8500000000000005,
+        18.0
+      ],
+      "size": [
+        14.4,
+        17.3,
+        0.45
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_WEST_RIGHT",
+      "shape": "box",
+      "center": [
+        -17.0,
+        4.8500000000000005,
+        0.0
+      ],
+      "size": [
+        0.45,
+        17.3,
+        36.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_EAST_0_LEFT",
+      "shape": "box",
+      "center": [
+        17.0,
+        4.8500000000000005,
+        -12.55
+      ],
+      "size": [
+        0.45,
+        17.3,
+        10.9
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_DOOR_HEADER_EAST_0",
+      "shape": "box",
+      "center": [
+        17.0,
+        11.4,
+        -5
+      ],
+      "size": [
+        0.45,
+        4.200000000000001,
+        4.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "SHELL_WALL_EAST_RIGHT",
+      "shape": "box",
+      "center": [
+        17.0,
+        4.8500000000000005,
+        7.549999999999999
+      ],
+      "size": [
+        0.45,
+        17.3,
+        20.9
+      ],
+      "rotationY": 0.0,
+      "semantic": "shell"
+    },
+    {
+      "nodeName": "WALK_ENTRY_INSULATED_DECK",
+      "shape": "box",
+      "center": [
+        0,
+        -0.05,
+        14.1
+      ],
+      "size": [
+        13,
+        0.4,
+        7.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_INSULATED_DECK_-5.5_-2.7",
+      "shape": "box",
+      "center": [
+        -5.46,
+        -1.95,
+        11.363999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_INSULATED_DECK_-5.5_2.7",
+      "shape": "box",
+      "center": [
+        -5.46,
+        -1.95,
+        16.836
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_INSULATED_DECK_5.5_-2.7",
+      "shape": "box",
+      "center": [
+        5.46,
+        -1.95,
+        11.363999999999999
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_ENTRY_INSULATED_DECK_5.5_2.7",
+      "shape": "box",
+      "center": [
+        5.46,
+        -1.95,
+        16.836
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_INSULATED_DECK_N",
+      "shape": "box",
+      "center": [
+        0,
+        0.47500000000000003,
+        10.5
+      ],
+      "size": [
+        13,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_INSULATED_DECK_W",
+      "shape": "box",
+      "center": [
+        -6.5,
+        0.47500000000000003,
+        14.1
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_ENTRY_INSULATED_DECK_E",
+      "shape": "box",
+      "center": [
+        6.5,
+        0.47500000000000003,
+        14.1
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.2
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_NORTH_SWITCH_DECK",
+      "shape": "box",
+      "center": [
+        0,
+        -0.05,
+        -14.0
+      ],
+      "size": [
+        13,
+        0.4,
+        7.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_SWITCH_DECK_-5.5_-2.9",
+      "shape": "box",
+      "center": [
+        -5.46,
+        -1.95,
+        -16.85
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_SWITCH_DECK_-5.5_2.9",
+      "shape": "box",
+      "center": [
+        -5.46,
+        -1.95,
+        -11.15
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_SWITCH_DECK_5.5_-2.9",
+      "shape": "box",
+      "center": [
+        5.46,
+        -1.95,
+        -16.85
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_NORTH_SWITCH_DECK_5.5_2.9",
+      "shape": "box",
+      "center": [
+        5.46,
+        -1.95,
+        -11.15
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_SWITCH_DECK_S",
+      "shape": "box",
+      "center": [
+        0,
+        0.47500000000000003,
+        -10.25
+      ],
+      "size": [
+        13,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_SWITCH_DECK_W",
+      "shape": "box",
+      "center": [
+        -6.5,
+        0.47500000000000003,
+        -14.0
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_NORTH_SWITCH_DECK_E",
+      "shape": "box",
+      "center": [
+        6.5,
+        0.47500000000000003,
+        -14.0
+      ],
+      "size": [
+        0.12,
+        1.05,
+        7.5
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_UPPER_EAST_GALLERY",
+      "shape": "box",
+      "center": [
+        14.2,
+        4.15,
+        -5
+      ],
+      "size": [
+        6.0,
+        0.35,
+        12.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_UPPER_EAST_GALLERY_-2.5_-4.6",
+      "shape": "box",
+      "center": [
+        11.68,
+        2.2500000000000004,
+        -9.56
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_UPPER_EAST_GALLERY_-2.5_4.6",
+      "shape": "box",
+      "center": [
+        11.68,
+        2.2500000000000004,
+        -0.4399999999999995
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_UPPER_EAST_GALLERY_2.5_-4.6",
+      "shape": "box",
+      "center": [
+        16.72,
+        2.2500000000000004,
+        -9.56
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "SUPPORT_WALK_UPPER_EAST_GALLERY_2.5_4.6",
+      "shape": "box",
+      "center": [
+        16.72,
+        2.2500000000000004,
+        -0.4399999999999995
+      ],
+      "size": [
+        0.24,
+        3.8,
+        0.24
+      ],
+      "rotationY": 0.0,
+      "semantic": "support"
+    },
+    {
+      "nodeName": "RAIL_WALK_UPPER_EAST_GALLERY_N",
+      "shape": "box",
+      "center": [
+        14.2,
+        4.675000000000001,
+        -11.0
+      ],
+      "size": [
+        6.0,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_UPPER_EAST_GALLERY_S",
+      "shape": "box",
+      "center": [
+        14.2,
+        4.675000000000001,
+        1.0
+      ],
+      "size": [
+        6.0,
+        1.05,
+        0.12
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "RAIL_WALK_UPPER_EAST_GALLERY_W",
+      "shape": "box",
+      "center": [
+        11.2,
+        4.675000000000001,
+        -5
+      ],
+      "size": [
+        0.12,
+        1.05,
+        12.0
+      ],
+      "rotationY": 0.0,
+      "semantic": "rail"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_00",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -3.18,
+        8.8
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_01",
+      "shape": "box",
+      "center": [
+        -4.4,
+        -3.18,
+        8.8
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_02",
+      "shape": "box",
+      "center": [
+        -4.4,
+        -3.18,
+        4.4
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_03",
+      "shape": "box",
+      "center": [
+        0,
+        -3.18,
+        4.4
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_04",
+      "shape": "box",
+      "center": [
+        0,
+        -3.18,
+        0
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_05",
+      "shape": "box",
+      "center": [
+        4.4,
+        -3.18,
+        0
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_06",
+      "shape": "box",
+      "center": [
+        4.4,
+        -3.18,
+        -4.4
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_07",
+      "shape": "box",
+      "center": [
+        8.8,
+        -3.18,
+        -4.4
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_INSULATED_PAD_08",
+      "shape": "box",
+      "center": [
+        8.8,
+        -3.18,
+        -8.8
+      ],
+      "size": [
+        3.15,
+        0.38,
+        3.15
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_TIMING_REWARD_PAD_00",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -3.12,
+        -4.4
+      ],
+      "size": [
+        3.1,
+        0.5,
+        3.1
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_TIMING_REWARD_PAD_01",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -3.12,
+        -8.8
+      ],
+      "size": [
+        3.1,
+        0.5,
+        3.1
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_TIMING_REWARD_PAD_02",
+      "shape": "box",
+      "center": [
+        -4.4,
+        -3.12,
+        -8.8
+      ],
+      "size": [
+        3.1,
+        0.5,
+        3.1
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_00",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -2.8000000000000003,
+        8.91
+      ],
+      "size": [
+        3.2,
+        0.3,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_01",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -2.6500000000000004,
+        9.33
+      ],
+      "size": [
+        3.2,
+        0.6,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_02",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -2.5,
+        9.75
+      ],
+      "size": [
+        3.2,
+        0.8999999999999999,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_03",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -2.35,
+        10.17
+      ],
+      "size": [
+        3.2,
+        1.2,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_04",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -2.2,
+        10.59
+      ],
+      "size": [
+        3.2,
+        1.5,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_05",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -2.0500000000000003,
+        11.01
+      ],
+      "size": [
+        3.2,
+        1.7999999999999998,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_06",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -1.9000000000000001,
+        11.43
+      ],
+      "size": [
+        3.2,
+        2.1,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_07",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -1.7500000000000002,
+        11.85
+      ],
+      "size": [
+        3.2,
+        2.4,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_08",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -1.6000000000000003,
+        12.27
+      ],
+      "size": [
+        3.2,
+        2.6999999999999997,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_ENTRY_DESCENT_STEP_09",
+      "shape": "box",
+      "center": [
+        -8.8,
+        -1.4500000000000002,
+        12.69
+      ],
+      "size": [
+        3.2,
+        3.0,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_00",
+      "shape": "box",
+      "center": [
+        8.8,
+        -2.8000000000000003,
+        -8.91
+      ],
+      "size": [
+        3.2,
+        0.3,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_01",
+      "shape": "box",
+      "center": [
+        8.8,
+        -2.6500000000000004,
+        -9.33
+      ],
+      "size": [
+        3.2,
+        0.6,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_02",
+      "shape": "box",
+      "center": [
+        8.8,
+        -2.5,
+        -9.75
+      ],
+      "size": [
+        3.2,
+        0.8999999999999999,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_03",
+      "shape": "box",
+      "center": [
+        8.8,
+        -2.35,
+        -10.17
+      ],
+      "size": [
+        3.2,
+        1.2,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_04",
+      "shape": "box",
+      "center": [
+        8.8,
+        -2.2,
+        -10.59
+      ],
+      "size": [
+        3.2,
+        1.5,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_05",
+      "shape": "box",
+      "center": [
+        8.8,
+        -2.0500000000000003,
+        -11.01
+      ],
+      "size": [
+        3.2,
+        1.7999999999999998,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_06",
+      "shape": "box",
+      "center": [
+        8.8,
+        -1.9000000000000001,
+        -11.43
+      ],
+      "size": [
+        3.2,
+        2.1,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_07",
+      "shape": "box",
+      "center": [
+        8.8,
+        -1.7500000000000002,
+        -11.85
+      ],
+      "size": [
+        3.2,
+        2.4,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_08",
+      "shape": "box",
+      "center": [
+        8.8,
+        -1.6000000000000003,
+        -12.27
+      ],
+      "size": [
+        3.2,
+        2.6999999999999997,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_EXIT_ASCENT_STEP_09",
+      "shape": "box",
+      "center": [
+        8.8,
+        -1.4500000000000002,
+        -12.69
+      ],
+      "size": [
+        3.2,
+        3.0,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_00",
+      "shape": "box",
+      "center": [
+        11.8,
+        0.36,
+        1.79
+      ],
+      "size": [
+        3.0,
+        0.32,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_01",
+      "shape": "box",
+      "center": [
+        11.8,
+        0.52,
+        1.37
+      ],
+      "size": [
+        3.0,
+        0.64,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_02",
+      "shape": "box",
+      "center": [
+        11.8,
+        0.6799999999999999,
+        0.95
+      ],
+      "size": [
+        3.0,
+        0.96,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_03",
+      "shape": "box",
+      "center": [
+        11.8,
+        0.8400000000000001,
+        0.53
+      ],
+      "size": [
+        3.0,
+        1.28,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_04",
+      "shape": "box",
+      "center": [
+        11.8,
+        1.0,
+        0.1100000000000001
+      ],
+      "size": [
+        3.0,
+        1.6,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_05",
+      "shape": "box",
+      "center": [
+        11.8,
+        1.16,
+        -0.31000000000000005
+      ],
+      "size": [
+        3.0,
+        1.92,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_06",
+      "shape": "box",
+      "center": [
+        11.8,
+        1.32,
+        -0.73
+      ],
+      "size": [
+        3.0,
+        2.24,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_07",
+      "shape": "box",
+      "center": [
+        11.8,
+        1.48,
+        -1.15
+      ],
+      "size": [
+        3.0,
+        2.56,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_08",
+      "shape": "box",
+      "center": [
+        11.8,
+        1.64,
+        -1.5699999999999998
+      ],
+      "size": [
+        3.0,
+        2.88,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_09",
+      "shape": "box",
+      "center": [
+        11.8,
+        1.8,
+        -1.9899999999999998
+      ],
+      "size": [
+        3.0,
+        3.2,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_10",
+      "shape": "box",
+      "center": [
+        11.8,
+        1.96,
+        -2.41
+      ],
+      "size": [
+        3.0,
+        3.52,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_11",
+      "shape": "box",
+      "center": [
+        11.8,
+        2.12,
+        -2.83
+      ],
+      "size": [
+        3.0,
+        3.84,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "WALK_ELECTRIC_UPPER_ASCENT_STEP_12",
+      "shape": "box",
+      "center": [
+        11.8,
+        2.2800000000000002,
+        -3.25
+      ],
+      "size": [
+        3.0,
+        4.16,
+        0.42
+      ],
+      "rotationY": 0.0,
+      "semantic": "walkable"
+    },
+    {
+      "nodeName": "FIXTURE_TRANSFORMER_CORE_0",
+      "shape": "cylinder",
+      "center": [
+        -12,
+        1.2,
+        2
+      ],
+      "radius": 1.6,
+      "height": 6.6,
+      "semantic": "transformer"
+    },
+    {
+      "nodeName": "FIXTURE_TRANSFORMER_CORE_1",
+      "shape": "cylinder",
+      "center": [
+        12,
+        1.2,
+        2
+      ],
+      "radius": 1.6,
+      "height": 6.6,
+      "semantic": "transformer"
+    },
+    {
+      "nodeName": "FIXTURE_TRANSFORMER_CORE_2",
+      "shape": "cylinder",
+      "center": [
+        -12,
+        1.2,
+        -10
+      ],
+      "radius": 1.6,
+      "height": 6.6,
+      "semantic": "transformer"
+    },
+    {
+      "nodeName": "FIXTURE_TRANSFORMER_CORE_3",
+      "shape": "cylinder",
+      "center": [
+        12,
+        1.2,
+        -10
+      ],
+      "radius": 1.6,
+      "height": 6.6,
+      "semantic": "transformer"
+    },
+    {
+      "nodeName": "CONSOLE_GROUNDING_ARRAY",
+      "shape": "box",
+      "center": [
+        0,
+        0.95,
+        -12.0
+      ],
+      "size": [
+        3.8,
+        2.0,
+        1.6
+      ],
+      "rotationY": 0.0,
+      "semantic": "console"
+    }
+  ]
+}

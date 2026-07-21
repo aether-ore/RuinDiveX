@@ -804,8 +804,10 @@ export class SkeletalModelRig {
       const preparedClip = this._prepareAnimationClip(clip, key, {
         preserveRootMotion: Boolean(entry.preserveRootMotion),
         lockRootY: Boolean(entry.lockRootY),
+        lockRootYToRest: Boolean(entry.lockRootYToRest),
         rootYMode: entry.rootYMode,
         stabilizeRootRotationLoop: Boolean(entry.stabilizeRootRotationLoop),
+        normalizeRootRotationToRest: Boolean(entry.normalizeRootRotationToRest),
       });
       if (key === 'swordJumpSlash') {
         const fallingPoseTime = preparedClip.duration * JUMP_SLASH_FALLING_POSE_MATCH_PROGRESS;
@@ -865,9 +867,11 @@ export class SkeletalModelRig {
         duration: preparedClip.duration,
         preserveRootMotion: Boolean(entry.preserveRootMotion),
         lockRootY: Boolean(entry.lockRootY),
+        lockRootYToRest: Boolean(entry.lockRootYToRest),
         rootYMode: entry.rootYMode ?? null,
         extractRootMotion: Boolean(entry.extractRootMotion),
         stabilizeRootRotationLoop: Boolean(entry.stabilizeRootRotationLoop),
+        normalizeRootRotationToRest: Boolean(entry.normalizeRootRotationToRest),
         rootMotion,
       });
       this.availableAnimationNames.push(key);
@@ -2036,19 +2040,23 @@ export class SkeletalModelRig {
   _prepareAnimationClip(clip, key, {
     preserveRootMotion = false,
     lockRootY = false,
+    lockRootYToRest = false,
     rootYMode = null,
     stabilizeRootRotationLoop = false,
+    normalizeRootRotationToRest = false,
   } = {}) {
-    const lockRootYToRest = key === 'forwardJumpLaunch'
+    const shouldLockRootYToRest = lockRootYToRest
+      || key === 'forwardJumpLaunch'
       || key === 'forwardJumpFall'
       || key === 'forwardJumpLanding';
     const tracks = clip.tracks
       .map((track) => this._prepareAnimationTrack(track, {
         preserveRootMotion,
         lockRootY,
-        lockRootYToRest,
+        lockRootYToRest: shouldLockRootYToRest,
         rootYMode,
         stabilizeRootRotationLoop,
+        normalizeRootRotationToRest,
       }))
       .filter(Boolean);
     const preparedClip = new THREE.AnimationClip(key, clip.duration, tracks);
@@ -2062,6 +2070,7 @@ export class SkeletalModelRig {
     lockRootYToRest = false,
     rootYMode = null,
     stabilizeRootRotationLoop = false,
+    normalizeRootRotationToRest = false,
   } = {}) {
     const trackName = this._retargetAnimationTrackName(track.name);
     const property = trackName.slice(trackName.lastIndexOf('.') + 1);
@@ -2069,8 +2078,16 @@ export class SkeletalModelRig {
     const rootPositionTrack = property === 'position' && this._isRootMotionTrack(trackName);
     const preservesRootMotion = preserveRootMotion && rootPositionTrack;
 
-    if (rootRotationTrack && stabilizeRootRotationLoop) {
-      return this._stabilizeLoopingRootRotationTrack(track, trackName);
+    if (rootRotationTrack) {
+      let preparedRootRotation = track.clone();
+      preparedRootRotation.name = trackName;
+      if (normalizeRootRotationToRest) {
+        preparedRootRotation = this._normalizeRootRotationTrackToRest(preparedRootRotation, trackName);
+      }
+      if (stabilizeRootRotationLoop) {
+        preparedRootRotation = this._stabilizeLoopingRootRotationTrack(preparedRootRotation, trackName);
+      }
+      return preparedRootRotation;
     }
 
     if (!rootPositionTrack || preservesRootMotion) {
@@ -2130,6 +2147,28 @@ export class SkeletalModelRig {
     return stabilizedTrack;
   }
 
+  _normalizeRootRotationTrackToRest(track, trackName) {
+    const normalizedTrack = track.clone();
+    normalizedTrack.name = trackName;
+    const values = normalizedTrack.values;
+    const restQuaternion = this._getTrackRestLocalQuaternion(trackName);
+    if (!restQuaternion || values.length < 4) return normalizedTrack;
+
+    const sourceStart = new THREE.Quaternion().fromArray(values, 0).normalize();
+    const correction = restQuaternion.clone().normalize().multiply(sourceStart.clone().invert());
+    const sample = new THREE.Quaternion();
+    const previous = new THREE.Quaternion();
+    for (let index = 0; index < values.length; index += 4) {
+      sample.fromArray(values, index).normalize().premultiply(correction).normalize();
+      if (index > 0 && previous.dot(sample) < 0) {
+        sample.set(-sample.x, -sample.y, -sample.z, -sample.w);
+      }
+      sample.toArray(values, index);
+      previous.copy(sample);
+    }
+    return normalizedTrack;
+  }
+
   _getTrackRestLocalPosition(trackName = '') {
     const targetName = this._getTrackTargetName(trackName);
     const normalized = normalizeBoneName(targetName);
@@ -2148,6 +2187,26 @@ export class SkeletalModelRig {
 
     const targetObject = this.root.getObjectByName?.(targetName);
     return targetObject?.userData?.restLocalPosition ?? null;
+  }
+
+  _getTrackRestLocalQuaternion(trackName = '') {
+    const targetName = this._getTrackTargetName(trackName);
+    const normalized = normalizeBoneName(targetName);
+    const candidates = this.bonesByName.get(normalized);
+
+    if (candidates?.length) {
+      const bone = candidates
+        .slice()
+        .sort((a, b) => this._scoreBoneCandidate(b) - this._scoreBoneCandidate(a))[0];
+      return this.restLocalQuaternions.get(bone) ?? bone?.quaternion ?? null;
+    }
+
+    if (normalized === normalizeBoneName(this.root.name) || normalized.includes('armature')) {
+      return this.root.quaternion;
+    }
+
+    const targetObject = this.root.getObjectByName?.(targetName);
+    return targetObject?.quaternion ?? null;
   }
 
   _normalizePassiveIdleShoulderTracks() {
@@ -2861,6 +2920,8 @@ export class SkeletalModelRig {
       || (key === 'pistolRun' && this.root.userData.pistolRunArcNeutralTransferActive);
     if (generatedPowerKnockback || heldAuthoredPose) {
       speed = 0;
+    } else if (key === 'climbingLadder') {
+      speed = moving ? THREE.MathUtils.clamp(moveAmount, -1.25, 1.25) : 0;
     } else if (key === 'walking'
       || key === 'strutWalking'
       || key === 'leftTurn'

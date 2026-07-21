@@ -13,6 +13,7 @@ import {
 import {
   createEncounterSlotSeed,
   generateReaverbotGenome,
+  validateReaverbotGenomeAgainstGenerationPolicy,
 } from './reaverbots/ReaverbotGenerator.js';
 import { hashSeed, SeededRandom } from './reaverbots/SeededRandom.js';
 
@@ -28,6 +29,40 @@ const TYPE_WEIGHTS = [
 const MIN_ENCOUNTER_CORNER_BAND = 2.4;
 const ENCOUNTER_CORNER_BAND_RATIO = 0.22;
 const ENCOUNTER_CORNER_ESCAPE_MARGIN = 0.85;
+export const EXACT_PLAN_OWNED_SPAWN_MODE = 'exact-plan-owned';
+export const PLAN_Y_SPAWN_GROUNDING_MODE = 'plan-y';
+
+function isFinitePosition(position) {
+  return position
+    && Number.isFinite(position.x)
+    && Number.isFinite(position.y)
+    && Number.isFinite(position.z);
+}
+
+function assertExactPlanOwnedSpawnContract(encounter, spawnPoints) {
+  if (encounter?.spawnPlacementMode !== EXACT_PLAN_OWNED_SPAWN_MODE) return false;
+  if (!((typeof encounter.seed === 'number' && Number.isFinite(encounter.seed))
+    || (typeof encounter.seed === 'string' && encounter.seed.length > 0))) {
+    throw new Error(`Encounter ${encounter.id ?? '(unknown)'} exact plan-owned spawns require a deterministic encounter seed.`);
+  }
+  if (encounter.spawnGroundingMode !== PLAN_Y_SPAWN_GROUNDING_MODE) {
+    throw new Error(
+      `Encounter ${encounter.id ?? '(unknown)'} exact plan-owned spawns require spawnGroundingMode "${PLAN_Y_SPAWN_GROUNDING_MODE}".`,
+    );
+  }
+  if (!Array.isArray(spawnPoints) || spawnPoints.length === 0
+    || spawnPoints.some((point) => !isFinitePosition(point))) {
+    throw new Error(`Encounter ${encounter.id ?? '(unknown)'} exact plan-owned spawns require finite authored spawn points.`);
+  }
+  if (!Array.isArray(encounter.spawnSurfaceIds)
+    || encounter.spawnSurfaceIds.length !== spawnPoints.length
+    || encounter.spawnSurfaceIds.some((surfaceId) => typeof surfaceId !== 'string' || !surfaceId)) {
+    throw new Error(
+      `Encounter ${encounter.id ?? '(unknown)'} exact plan-owned spawns require one declared surface ID per spawn point.`,
+    );
+  }
+  return true;
+}
 
 function getEncounterCornerBand(zone) {
   if (!zone?.position) return 0;
@@ -160,21 +195,33 @@ export class EnemySpawner {
     const difficulty = this.getDifficulty();
     const level = Math.max(1, Math.floor(difficulty));
     const eliteChance = Math.min(0.26, 0.035 + difficulty * 0.015);
+    const generationPolicy = options.generationPolicy ?? null;
+    if (generationPolicy?.elitePolicy === 'forbid' && forceElite) {
+      throw new Error(`Encounter generation policy ${generationPolicy.id ?? '<missing>'} forbids an elite override.`);
+    }
     const spawnSerial = this.spawnSerial++;
     const seed = options.seed
       ?? hashSeed(`${this.runSeed}:ambient:${spawnSerial}`);
     const rng = new SeededRandom(`${seed}:spawn`);
     typeKey = typeKey ?? weightedType(() => rng.next());
-    const isElite = forceElite || (options.allowRandomElite !== false && rng.chance(eliteChance));
+    const allowRandomElite = generationPolicy?.elitePolicy === 'forbid'
+      ? false
+      : options.allowRandomElite !== false;
+    const isElite = forceElite || (allowRandomElite && rng.chance(eliteChance));
     const curatedType = String(typeKey).startsWith('legacy:')
       ? String(typeKey).slice('legacy:'.length)
       : typeKey;
     const useCurated = options.curated === true
       || String(typeKey).startsWith('legacy:')
       || curatedType === 'sharukurusu';
+    const generationContext = generationPolicy?.generationContext ?? {};
+    let generationPolicyValidation = null;
     let enemy;
 
     if (useCurated) {
+      if (generationPolicy) {
+        throw new Error(`Encounter generation policy ${generationPolicy.id ?? '<missing>'} cannot target a curated enemy.`);
+      }
       enemy = curatedType === 'sharukurusu'
         ? new SharukurusuEnemy(level, {
           eliteAffix: isElite
@@ -189,7 +236,11 @@ export class EnemySpawner {
         seed,
         threatTier: Math.max(1, Math.min(8, level)),
         intent: typeKey,
-        archetypeId: options.archetypeId,
+        archetypeId: generationContext.archetypeId ?? options.archetypeId,
+        bodyPlanId: generationContext.bodyPlanId ?? options.bodyPlanId,
+        weaponId: generationContext.weaponId ?? options.weaponId,
+        defenseId: generationContext.defenseId ?? options.defenseId,
+        weakPointId: generationContext.weakPointId ?? options.weakPointId,
         biome: options.biome ?? 'industrial ruin',
         roomArchetypeId: options.roomArchetypeId,
         roomFlavorId: options.roomFlavorId,
@@ -203,8 +254,29 @@ export class EnemySpawner {
         isBoss: Boolean(options.isBoss),
         keycardCarrier: Boolean(options.keycardCarrier),
       });
+      if (generationPolicy) {
+        generationPolicyValidation = validateReaverbotGenomeAgainstGenerationPolicy(genome, generationPolicy);
+        if (!generationPolicyValidation.valid) {
+          throw new Error(`Encounter generation policy ${generationPolicy.id ?? '<missing>'} produced an unsafe Reaverbot: ${generationPolicyValidation.errors.join(', ')}`);
+        }
+      }
       const affix = isElite ? ELITE_AFFIXES[rng.int(0, ELITE_AFFIXES.length - 1)] : null;
       enemy = new ReaverbotEnemy(genome, level, { eliteAffix: affix });
+    }
+
+    if (generationPolicy && generationPolicyValidation) {
+      enemy.planOwnedGenerationPolicy = Object.freeze({
+        id: generationPolicy.id,
+        slotIndex: generationPolicy.slotIndex,
+        elitePolicy: generationPolicy.elitePolicy,
+        protectedTraversalLinkIds: Object.freeze([
+          ...(generationPolicy.protectedTraversalLinkIds ?? []),
+        ]),
+        generationContext: Object.freeze({ ...generationContext }),
+        capabilities: generationPolicyValidation.capabilities,
+        verified: true,
+      });
+      enemy.root.userData.planOwnedGenerationPolicyId = generationPolicy.id;
     }
 
     enemy.root.position.copy(position
@@ -234,20 +306,37 @@ export class EnemySpawner {
     const spawnPoints = encounter.spawnPoints?.length
       ? encounter.spawnPoints
       : [encounter.zone.position];
+    const exactPlanOwnedSpawns = assertExactPlanOwnedSpawnContract(encounter, spawnPoints);
     const roster = encounter.roster?.length ? encounter.roster : ['basic', 'fast', 'ranged'];
+    const eliteSlots = new Set(
+      Array.isArray(encounter.eliteSlots)
+        ? encounter.eliteSlots.filter((index) => Number.isInteger(index) && index >= 0)
+        : [],
+    );
+    // Legacy encounters retain their run-seed behavior. Accepted V2 plans own
+    // their encounter seed so unrelated ambient spawning cannot perturb them.
+    const encounterSeed = exactPlanOwnedSpawns ? encounter.seed : this.runSeed;
+    const slotGenerationPolicies = exactPlanOwnedSpawns && Array.isArray(encounter.slotGenerationPolicies)
+      ? encounter.slotGenerationPolicies
+      : [];
 
     for (let i = 0; i < roster.length; i += 1) {
-      const seed = createEncounterSlotSeed(this.runSeed, encounter.id, i);
-      const slotRandom = new SeededRandom(`${seed}:position`);
-      const authoredSpawnPoint = spawnPoints[i % spawnPoints.length].clone();
-      authoredSpawnPoint.x += (slotRandom.next() - 0.5) * 0.65;
-      authoredSpawnPoint.z += (slotRandom.next() - 0.5) * 0.65;
-      const spawnPoint = pullEncounterSpawnFromCorner(
-        authoredSpawnPoint,
-        encounter.zone,
-      );
-      const forceElite = (encounter.keycardDropId && i === 0) || (encounter.isBoss && i === 0);
+      const seed = createEncounterSlotSeed(encounterSeed, encounter.id, i);
+      const spawnPointIndex = i % spawnPoints.length;
+      const authoredSpawnPoint = spawnPoints[spawnPointIndex].clone();
+      let spawnPoint = authoredSpawnPoint;
+      if (!exactPlanOwnedSpawns) {
+        const slotRandom = new SeededRandom(`${seed}:position`);
+        authoredSpawnPoint.x += (slotRandom.next() - 0.5) * 0.65;
+        authoredSpawnPoint.z += (slotRandom.next() - 0.5) * 0.65;
+        spawnPoint = pullEncounterSpawnFromCorner(authoredSpawnPoint, encounter.zone);
+      }
+      const forceElite = encounter.forceEliteAll === true
+        || eliteSlots.has(i)
+        || (encounter.keycardDropId && i === 0)
+        || (encounter.isBoss && i === 0);
       const keycardCarrier = Boolean(encounter.keycardDropId && i === 0);
+      const generationPolicy = slotGenerationPolicies.find((policy) => policy?.slotIndex === i) ?? null;
       const enemy = this.spawnEnemy(roster[i], forceElite, spawnPoint, {
         seed,
         encounterSize: roster.length,
@@ -260,6 +349,7 @@ export class EnemySpawner {
         excludedArchetypes: tractorControllerCount > 0 ? ['tractorController'] : [],
         isBoss: Boolean(encounter.isBoss && i === 0),
         keycardCarrier,
+        generationPolicy,
       });
       enemy.encounterId = encounter.id;
       const controller = this.game.dungeonController;
@@ -268,6 +358,18 @@ export class EnemySpawner {
         enemy,
         spawnPoint,
       ));
+      if (exactPlanOwnedSpawns) {
+        enemy.planOwnedSpawn = Object.freeze({
+          encounterId: encounter.id,
+          spawnPointIndex,
+          surfaceId: encounter.spawnSurfaceIds[spawnPointIndex],
+          position: Object.freeze({
+            x: spawnPoint.x,
+            y: spawnPoint.y,
+            z: spawnPoint.z,
+          }),
+        });
+      }
       const rawArenaCenter = encounter.zone?.position?.clone?.();
       if (rawArenaCenter) {
         rawArenaCenter.y = enemy.navigationMode === 'air'
@@ -309,7 +411,12 @@ export class EnemySpawner {
         ?? encounter.expeditionSpec?.bossProfileId
         ?? this.game.getSelectedBossProfileId?.(),
     );
-    const seed = createEncounterSlotSeed(this.runSeed, encounter.id, 0);
+    const authoredSpawn = encounter.spawnPoints?.[0]?.clone?.()
+      ?? encounter.zone?.position?.clone?.()
+      ?? this.game.player.root.position.clone();
+    const exactPlanOwnedSpawns = assertExactPlanOwnedSpawnContract(encounter, [authoredSpawn]);
+    const encounterSeed = exactPlanOwnedSpawns ? encounter.seed : this.runSeed;
+    const seed = createEncounterSlotSeed(encounterSeed, encounter.id, 0);
     const expeditionSpec = encounter.expeditionSpec
       ?? this.game.getActiveBossExpeditionSpec?.()
       ?? createBossExpeditionSpec({
@@ -335,10 +442,9 @@ export class EnemySpawner {
         behaviorModifiers: encounter.enemyBehaviorModifiers,
       },
     });
-    const authoredSpawn = encounter.spawnPoints?.[0]?.clone?.()
-      ?? encounter.zone?.position?.clone?.()
-      ?? this.game.player.root.position.clone();
-    const spawnPoint = pullEncounterSpawnFromCorner(authoredSpawn, encounter.zone);
+    const spawnPoint = exactPlanOwnedSpawns
+      ? authoredSpawn
+      : pullEncounterSpawnFromCorner(authoredSpawn, encounter.zone);
     const boss = new ReaverbotBossEnemy(genome, level, { bossProfile, expeditionSpec });
     boss.root.position.copy(spawnPoint);
     boss.root.rotation.y = new SeededRandom(`${seed}:boss-facing`).float(-Math.PI, Math.PI);
@@ -346,6 +452,14 @@ export class EnemySpawner {
     boss.expeditionSpec = expeditionSpec;
     this.game.addEnemy(boss);
     boss.root.position.copy(this._resolveEncounterSpawnPosition(encounter, boss, spawnPoint));
+    if (exactPlanOwnedSpawns) {
+      boss.planOwnedSpawn = Object.freeze({
+        encounterId: encounter.id,
+        spawnPointIndex: 0,
+        surfaceId: encounter.spawnSurfaceIds[0],
+        position: Object.freeze({ x: spawnPoint.x, y: spawnPoint.y, z: spawnPoint.z }),
+      });
+    }
 
     const controller = this.game.dungeonController;
     const arenaCenter = encounter.zone?.position?.clone?.() ?? boss.root.position.clone();
@@ -359,6 +473,16 @@ export class EnemySpawner {
   }
 
   _resolveEncounterSpawnPosition(encounter, enemy, requestedPosition) {
+    if (encounter?.spawnPlacementMode === EXACT_PLAN_OWNED_SPAWN_MODE) {
+      // Clearance and surface ownership were already proven by the V2 plan
+      // validator. Runtime sanitizers must not silently rewrite accepted plan
+      // coordinates; plan-y also forbids an implicit vertical re-grounding.
+      assertExactPlanOwnedSpawnContract(encounter, encounter.spawnPoints);
+      if (!isFinitePosition(requestedPosition)) {
+        throw new Error(`Encounter ${encounter.id ?? '(unknown)'} supplied a non-finite exact spawn position.`);
+      }
+      return requestedPosition.clone();
+    }
     const zone = encounter?.zone;
     const controller = this.game.dungeonController;
     const safeRequest = pullEncounterSpawnFromCorner(requestedPosition, zone);

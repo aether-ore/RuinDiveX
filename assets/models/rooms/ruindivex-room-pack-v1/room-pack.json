@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "packId": "ruindivex-threejs-room-pack-v1",
+  "rooms": [
+    {
+      "roomId": "rdx_factory_corkscrew_exchange",
+      "glb": "glb/rdx_factory_corkscrew_exchange.glb",
+      "manifest": "manifests/rdx_factory_corkscrew_exchange.json",
+      "preview": "previews/rdx_factory_corkscrew_exchange.png",
+      "districts": [
+        "factory"
+      ],
+      "archetype": "large_mini_dungeon_room"
+    },
+    {
+      "roomId": "rdx_waterworks_freight_sump",
+      "glb": "glb/rdx_waterworks_freight_sump.glb",
+      "manifest": "manifests/rdx_waterworks_freight_sump.json",
+      "preview": "previews/rdx_waterworks_freight_sump.png",
+      "districts": [
+        "factory",
+        "waterworks"
+      ],
+      "archetype": "fluid_tank_chamber"
+    },
+    {
+      "roomId": "rdx_magma_foundry_undercroft",
+      "glb": "glb/rdx_magma_foundry_undercroft.glb",
+      "manifest": "manifests/rdx_magma_foundry_undercroft.json",
+      "preview": "previews/rdx_magma_foundry_undercroft.png",
+      "districts": [
+        "hazard_magma"
+      ],
+      "archetype": "hazard_processing_room"
+    },
+    {
+      "roomId": "rdx_electric_transformer_undercroft",
+      "glb": "glb/rdx_electric_transformer_undercroft.glb",
+      "manifest": "manifests/rdx_electric_transformer_undercroft.json",
+      "preview": "previews/rdx_electric_transformer_undercroft.png",
+      "districts": [
+        "hazard_electric"
+      ],
+      "archetype": "hazard_processing_room"
+    }
+  ]
+}

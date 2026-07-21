@@ -1,0 +1,41 @@
+{
+  "validator": "Khronos glTF Validator",
+  "reports": [
+    {
+      "file": "rdx_electric_transformer_undercroft.glb",
+      "bytes": 525380,
+      "errors": 0,
+      "warnings": 0,
+      "infos": 0,
+      "hints": 0,
+      "messages": []
+    },
+    {
+      "file": "rdx_factory_corkscrew_exchange.glb",
+      "bytes": 365284,
+      "errors": 0,
+      "warnings": 0,
+      "infos": 0,
+      "hints": 0,
+      "messages": []
+    },
+    {
+      "file": "rdx_magma_foundry_undercroft.glb",
+      "bytes": 375784,
+      "errors": 0,
+      "warnings": 0,
+      "infos": 0,
+      "hints": 0,
+      "messages": []
+    },
+    {
+      "file": "rdx_waterworks_freight_sump.glb",
+      "bytes": 422032,
+      "errors": 0,
+      "warnings": 0,
+      "infos": 0,
+      "hints": 0,
+      "messages": []
+    }
+  ]
+}

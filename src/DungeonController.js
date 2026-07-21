@@ -3,6 +3,7 @@ import {
   DungeonProgressionManager,
   SHRINE_KEY_ID,
 } from './DungeonProgression.js';
+import { REAVERBOT_SALVAGE_MATERIALS } from './reaverbots/ReaverbotSalvageCatalog.js';
 import { PLAYER_TRAVERSAL_ENVELOPE } from './TraversalCapabilities.js';
 
 const KEYCARD_COLOR = 0xffd66b;
@@ -31,6 +32,7 @@ const ENEMY_GROUND_TRAVERSAL_SAMPLE_SPACING = 0.24;
 const RAMP_SUPPORT_CAPTURE_HEIGHT = PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.18;
 const NAVIGATION_CACHE_LIMIT = 4096;
 const FLOOR_ROUTE_FIELD_LIMIT = 12;
+const V2_COLLISION_BIN_SIZE = 12;
 const CARDINAL_NEIGHBORS = [
   [1, 0],
   [-1, 0],
@@ -73,15 +75,31 @@ function zoneLocalToWorld(zone, x, y, z) {
   );
 }
 
+function getVerticalCylinderRadius(zone) {
+  if (zone?.collisionShape !== 'cylinder' && zone?.shape !== 'cylinder') {
+    return null;
+  }
+  const radius = Number(zone.collisionRadius ?? zone.radius);
+  return Number.isFinite(radius) && radius >= 0 ? radius : null;
+}
+
 function isInsideExpandedZone(position, zone, radius = 0, verticalRadius = radius) {
-  if (!position || !zone?.position) {
+  if (!position || !zone?.position || zone.active === false || zone.enabled === false) {
     return false;
   }
 
-  const local = getZoneLocalXZ(position, zone);
-  if (Math.abs(local.x) > (zone.halfWidth ?? 0) + radius
-    || Math.abs(local.z) > (zone.halfDepth ?? 0) + radius) {
-    return false;
+  const cylinderRadius = getVerticalCylinderRadius(zone);
+  if (cylinderRadius != null) {
+    const dx = position.x - zone.position.x;
+    const dz = position.z - zone.position.z;
+    const expandedRadius = cylinderRadius + Math.max(0, Number(radius) || 0);
+    if (dx * dx + dz * dz > expandedRadius * expandedRadius) return false;
+  } else {
+    const local = getZoneLocalXZ(position, zone);
+    if (Math.abs(local.x) > (zone.halfWidth ?? 0) + radius
+      || Math.abs(local.z) > (zone.halfDepth ?? 0) + radius) {
+      return false;
+    }
   }
 
   if (Number.isFinite(zone.verticalHalfHeight)) {
@@ -121,7 +139,48 @@ function tileKey(x, z) {
   return `${x},${z}`;
 }
 
+function collisionBinKey(x, z) {
+  return `${x}:${z}`;
+}
+
+function getZoneWorldAabbXZ(zone) {
+  if (!zone?.position) {
+    return null;
+  }
+  const cylinderRadius = getVerticalCylinderRadius(zone);
+  if (cylinderRadius != null) {
+    return {
+      minX: zone.position.x - cylinderRadius,
+      maxX: zone.position.x + cylinderRadius,
+      minZ: zone.position.z - cylinderRadius,
+      maxZ: zone.position.z + cylinderRadius,
+    };
+  }
+  if (!Number.isFinite(zone.halfWidth) || !Number.isFinite(zone.halfDepth)) return null;
+  const rotation = Number(zone.rotationY) || 0;
+  const cos = Math.abs(Math.cos(rotation));
+  const sin = Math.abs(Math.sin(rotation));
+  const halfX = cos * zone.halfWidth + sin * zone.halfDepth;
+  const halfZ = sin * zone.halfWidth + cos * zone.halfDepth;
+  return {
+    minX: zone.position.x - halfX,
+    maxX: zone.position.x + halfX,
+    minZ: zone.position.z - halfZ,
+    maxZ: zone.position.z + halfZ,
+  };
+}
+
 function isInsideZone(position, zone) {
+  const cylinderRadius = getVerticalCylinderRadius(zone);
+  if (cylinderRadius != null) {
+    const dx = position.x - zone.position.x;
+    const dz = position.z - zone.position.z;
+    if (dx * dx + dz * dz > cylinderRadius * cylinderRadius) return false;
+    if (Number.isFinite(zone.verticalHalfHeight)) {
+      return Math.abs((position.y ?? 0) - (zone.position.y ?? 0)) <= zone.verticalHalfHeight;
+    }
+    return true;
+  }
   let localX = position.x - zone.position.x;
   let localZ = position.z - zone.position.z;
 
@@ -192,6 +251,7 @@ export class DungeonController {
     this.keycards = dungeon?.keycards ?? [];
     this.chests = dungeon?.chests ?? [];
     this.mechanisms = dungeon?.mechanisms ?? [];
+    this.ladders = dungeon?.ladders ?? [];
     this.puzzleBlocks = dungeon?.puzzleBlocks ?? [];
     this.pressurePlates = dungeon?.pressurePlates ?? [];
     this.npcAnimationMixers = dungeon?.npcAnimationMixers ?? [];
@@ -207,9 +267,20 @@ export class DungeonController {
     this.conveyorPuzzles = dungeon?.conveyorPuzzles ?? [];
     this.conveyorPuzzleById = new Map(this.conveyorPuzzles.map((puzzle) => [puzzle.id, puzzle]));
     this.shrine = dungeon?.shrine ?? null;
+    this.extractionPosition = dungeon?.extractionPosition ?? this.shrine?.position ?? null;
     this.keySeeker = dungeon?.keySeeker ?? dungeon?.progression?.keySeeker ?? null;
     this.progression = dungeon?.progression ?? null;
     this.progressionManager = new DungeonProgressionManager(this.progression);
+    this.dungeonV2Runtime = dungeon?.generationMode === 'v2'
+      ? dungeon?.environmentRuntime ?? dungeon?.specialEnvironment ?? null
+      : null;
+    this.dungeonV2Actions = dungeon?.generationMode === 'v2'
+      ? [...(dungeon?.plan?.actions ?? [])]
+      : [];
+    this.dungeonV2ActionById = new Map(this.dungeonV2Actions.map((action) => [action.id, action]));
+    this._v2CollisionSpatialIndex = null;
+    this._v2CollisionSpatialQueryStats = null;
+    this._rebuildV2CollisionSpatialIndex();
     this.keycardCount = this.progressionManager.getNormalKeycardCount();
     this.discoveredRoomIds = new Set(['hubTown', 'expeditionCamp', 'entrance']);
     this.visitedRoomIds = new Set(['hubTown', 'expeditionCamp', 'entrance']);
@@ -270,6 +341,88 @@ export class DungeonController {
     this._updateNearestInteractable();
   }
 
+  _rebuildV2CollisionSpatialIndex() {
+    if (this.dungeon?.generationMode !== 'v2') {
+      this._v2CollisionSpatialIndex = null;
+      this._v2CollisionSpatialQueryStats = null;
+      return;
+    }
+    const binSize = V2_COLLISION_BIN_SIZE;
+    const build = (zones) => {
+      const bins = new Map();
+      const unindexed = [];
+      for (const zone of zones) {
+        const bounds = getZoneWorldAabbXZ(zone);
+        if (!bounds) {
+          unindexed.push(zone);
+          continue;
+        }
+        const minX = Math.floor(bounds.minX / binSize);
+        const maxX = Math.floor(bounds.maxX / binSize);
+        const minZ = Math.floor(bounds.minZ / binSize);
+        const maxZ = Math.floor(bounds.maxZ / binSize);
+        for (let x = minX; x <= maxX; x += 1) {
+          for (let z = minZ; z <= maxZ; z += 1) {
+            const key = collisionBinKey(x, z);
+            const bucket = bins.get(key) ?? [];
+            bucket.push(zone);
+            bins.set(key, bucket);
+          }
+        }
+      }
+      return { bins, unindexed };
+    };
+    this._v2CollisionSpatialIndex = {
+      binSize,
+      solid: build(this.solidZones),
+      aerial: build(this.aerialBoundaryZones),
+    };
+    this._v2CollisionSpatialQueryStats = {
+      binSize,
+      totalSolidZoneCount: this.solidZones.length,
+      totalAerialZoneCount: this.aerialBoundaryZones.length,
+      solidBinCount: this._v2CollisionSpatialIndex.solid.bins.size,
+      aerialBinCount: this._v2CollisionSpatialIndex.aerial.bins.size,
+      queryCount: 0,
+      candidateTests: 0,
+      bruteForceEquivalentTests: 0,
+      lastCandidateCount: 0,
+      maximumCandidateCount: 0,
+    };
+  }
+
+  _queryCollisionZones(kind, position, radius = 0) {
+    const source = kind === 'aerial' ? this.aerialBoundaryZones : this.solidZones;
+    const index = this._v2CollisionSpatialIndex?.[kind];
+    if (!index || !position) return source;
+    const binSize = this._v2CollisionSpatialIndex.binSize;
+    const extent = Math.max(0, Number(radius) || 0);
+    const minX = Math.floor((position.x - extent) / binSize);
+    const maxX = Math.floor((position.x + extent) / binSize);
+    const minZ = Math.floor((position.z - extent) / binSize);
+    const maxZ = Math.floor((position.z + extent) / binSize);
+    const candidates = new Set(index.unindexed);
+    for (let x = minX; x <= maxX; x += 1) {
+      for (let z = minZ; z <= maxZ; z += 1) {
+        for (const zone of index.bins.get(collisionBinKey(x, z)) ?? []) candidates.add(zone);
+      }
+    }
+    const result = [...candidates];
+    const stats = this._v2CollisionSpatialQueryStats;
+    stats.queryCount += 1;
+    stats.candidateTests += result.length;
+    stats.bruteForceEquivalentTests += source.length;
+    stats.lastCandidateCount = result.length;
+    stats.maximumCandidateCount = Math.max(stats.maximumCandidateCount, result.length);
+    return result;
+  }
+
+  getSpatialQueryDiagnostics() {
+    return this._v2CollisionSpatialQueryStats
+      ? { ...this._v2CollisionSpatialQueryStats }
+      : null;
+  }
+
   _getNavigationDoorStateSignature() {
     let signature = this.doors.length | 0;
     for (let index = 0; index < this.doors.length; index += 1) {
@@ -320,6 +473,12 @@ export class DungeonController {
     if (sourcesChanged || doorStateSignature !== this.navigationDoorStateSignature) {
       if (sources?.floorTiles !== this.floorTiles || sources?.floorTileCount !== this.floorTiles.length) {
         this.floorTilesByColumn = this._createFloorTileColumns(this.floorTiles);
+      }
+      if (sources?.solidZones !== this.solidZones
+        || sources?.solidZoneCount !== this.solidZones.length
+        || sources?.aerialBoundaryZones !== this.aerialBoundaryZones
+        || sources?.aerialBoundaryZoneCount !== this.aerialBoundaryZones.length) {
+        this._rebuildV2CollisionSpatialIndex();
       }
       this.invalidateNavigationTopology({ doorStateSignature });
     }
@@ -627,6 +786,10 @@ export class DungeonController {
       return true;
     }
 
+    if (interactable.kind === 'ladder') {
+      return this.game.player?.mountLadder?.(interactable.target) === true;
+    }
+
     if (interactable.kind === 'trap') {
       this._activateTrap(interactable.target);
       return true;
@@ -637,9 +800,14 @@ export class DungeonController {
       return true;
     }
 
+    if (interactable.kind === 'keycard') {
+      return this._collectKeycard(interactable.target, {
+        position: interactable.target.position,
+      });
+    }
+
     if (interactable.kind === 'keySeeker') {
-      this._activateKeySeeker();
-      return true;
+      return this._activateKeySeeker();
     }
 
     if (interactable.kind === 'shrine') {
@@ -660,8 +828,65 @@ export class DungeonController {
     return false;
   }
 
-  isPositionWalkable(position) {
-    const platformElevation = this.game.getPlatformFloorElevation?.(position);
+  _findDungeonV2ActionId({ explicitId = null, effectOp = null, targetId = null, type = null } = {}) {
+    if (!this.dungeonV2Runtime) return null;
+    if (explicitId && this.dungeonV2ActionById.has(explicitId)) return explicitId;
+    const action = this.dungeonV2Actions.find((candidate) => (
+      (!type || candidate.type === type)
+      && (!effectOp || (candidate.effects ?? []).some((effect) => (
+        effect.op === effectOp
+        && (effect.rewardId ?? effect.gateId ?? effect.encounterId ?? effect.objectiveId ?? effect.extractionId)
+          === targetId
+      )))
+    ));
+    return action?.id ?? null;
+  }
+
+  _runDungeonV2Action(actionId, { position = null } = {}) {
+    if (!actionId || !this.dungeonV2Runtime) return null;
+    return this.dungeonV2Runtime.activateAction(actionId, {
+      actionId,
+      game: this.game,
+      controller: this,
+      hasKey: (keyId) => this.progressionManager.hasKeycard(keyId),
+      grantKey: (keyId) => this._grantKeycard(keyId, { position }),
+    });
+  }
+
+  _showDungeonV2ActionFailure(result, label = 'Interaction') {
+    if (!result || result.ok) return;
+    const message = result.reason === 'conditions-not-met'
+      ? `${label}: requirements not met`
+      : `${label}: unavailable (${result.reason ?? 'invalid action'})`;
+    this.game.ui?.showToast?.(message, '#ffb347');
+  }
+
+  _getPlayerPlatformFloorElevation(position) {
+    const retainedSupport = this.game.getPlayerPlatformFloorElevation?.(position);
+    return Number.isFinite(retainedSupport)
+      ? retainedSupport
+      : this.game.getPlatformFloorElevation?.(position);
+  }
+
+  isPositionWalkable(position, { retainGroundedPlayerSupport = false } = {}) {
+    const rampElevation = this.getRampSurfaceElevationAt(position);
+    if (Number.isFinite(rampElevation)) {
+      tempVectorB.copy(position);
+      tempVectorB.y = rampElevation;
+      const landingElevation = retainGroundedPlayerSupport
+        ? this._getPlayerPlatformFloorElevation(tempVectorB)
+        : this.game.getPlatformFloorElevation?.(tempVectorB);
+      const overlapsReachableLanding = Number.isFinite(landingElevation)
+        && landingElevation >= rampElevation - 0.001
+        && landingElevation - rampElevation <= RAMP_SUPPORT_CAPTURE_HEIGHT + 0.001;
+      return this._isResolvedFloorPositionWalkable(tempVectorB, {
+        ignorePlatformBlock: overlapsReachableLanding,
+      });
+    }
+
+    const platformElevation = retainGroundedPlayerSupport
+      ? this._getPlayerPlatformFloorElevation(position)
+      : this.game.getPlatformFloorElevation?.(position);
     if (Number.isFinite(platformElevation)) {
       tempVectorB.copy(position);
       tempVectorB.y = platformElevation;
@@ -849,7 +1074,7 @@ export class DungeonController {
       return { kind: 'ceiling', zone: null };
     }
 
-    for (const zone of this.aerialBoundaryZones) {
+    for (const zone of this._queryCollisionZones('aerial', position, options.radius)) {
       if (isInsideExpandedZone(position, zone, options.radius, options.verticalRadius)) {
         return { kind: 'boundaryWall', zone };
       }
@@ -865,7 +1090,7 @@ export class DungeonController {
       }
     }
 
-    for (const zone of this.solidZones) {
+    for (const zone of this._queryCollisionZones('solid', position, options.radius)) {
       if (isInsideExpandedZone(position, zone, options.radius, options.verticalRadius)) {
         return { kind: zone.obstacleKind ?? 'solid', zone: { allowFlyOver: true, ...zone } };
       }
@@ -921,12 +1146,13 @@ export class DungeonController {
   }
 
   _createAerialDoorZone(door) {
-    const baseY = door.baseY ?? door.position.y ?? 0;
+    const collisionPosition = door.collisionPosition ?? door.position;
+    const baseY = door.baseY ?? collisionPosition?.y ?? 0;
     const height = door.collisionHeight ?? 4.8;
     return {
       id: `aerialDoor_${door.id}`,
       obstacleKind: 'closedDoor',
-      position: new THREE.Vector3(door.position.x, baseY + height * 0.5, door.position.z),
+      position: new THREE.Vector3(collisionPosition.x, baseY + height * 0.5, collisionPosition.z),
       halfWidth: door.collisionHalfWidth ?? (door.alongX ? 0.16 : this.tileSize * 0.48),
       halfDepth: door.collisionHalfDepth ?? (door.alongX ? this.tileSize * 0.48 : 0.16),
       verticalHalfHeight: height * 0.5,
@@ -1170,7 +1396,7 @@ export class DungeonController {
 
   _getPowerKnockbackBarrierAt(position, playerRadius, ignoreVertical = false) {
     const verticalRadius = ignoreVertical ? Infinity : 0;
-    for (const zone of this.aerialBoundaryZones) {
+    for (const zone of this._queryCollisionZones('aerial', position, playerRadius)) {
       if (isInsideExpandedZone(position, zone, playerRadius, verticalRadius)) {
         return { kind: 'boundaryWall', source: zone };
       }
@@ -1188,7 +1414,7 @@ export class DungeonController {
       }
     }
 
-    for (const zone of this.solidZones) {
+    for (const zone of this._queryCollisionZones('solid', position, playerRadius)) {
       if (!this._isHardPowerKnockbackBarrier(zone)) {
         continue;
       }
@@ -1212,7 +1438,11 @@ export class DungeonController {
     return POWER_KNOCKBACK_BARRIER_LABEL_PATTERN.test(descriptor);
   }
 
-  _isResolvedFloorPositionWalkable(position) {
+  _isResolvedFloorPositionWalkable(position, { ignorePlatformBlock = false } = {}) {
+    if (this._isPositionBelowUncapturableV2Stair(position)) {
+      return false;
+    }
+
     for (const door of this.doors) {
       if (!door.closed) {
         continue;
@@ -1227,24 +1457,57 @@ export class DungeonController {
       return false;
     }
 
-    if (this.game.isPositionInsidePlatformBlock?.(position)) {
+    if (!ignorePlatformBlock && this.game.isPositionInsidePlatformBlock?.(position)) {
       return false;
     }
 
     return true;
   }
 
+  _isPositionBelowUncapturableV2Stair(position) {
+    if (this.dungeon?.generationMode !== 'v2'
+      || !position
+      || typeof this.dungeon.getExactStairSurfaceAt !== 'function') {
+      return false;
+    }
+
+    const stair = this.dungeon.getExactStairSurfaceAt(position, {
+      maxVerticalGap: Infinity,
+      tolerance: 0.025,
+    });
+    if (!stair || !Number.isFinite(stair.elevation)) {
+      return false;
+    }
+    if (stair.blocksBelow === false
+      || (Number.isFinite(stair.minimumStructuralY)
+        && position.y < stair.minimumStructuralY - PLAYER_STEP_OFF_FALL_HEIGHT)) {
+      return false;
+    }
+
+    // V2 stairs are closed, load-bearing inclines and never decorative roofs
+    // over a second walkable route.  A grounded capsule may acquire a stair
+    // only through the ordinary per-frame rise envelope.  If it enters the
+    // same X/Z footprint from the side beneath a remote part of the incline,
+    // accepting the overlapping base floor lets it walk through the solid
+    // stair and arrive underneath the upper landing.  Reject that floor
+    // support instead of snapping upward: the normal axis correction keeps
+    // the player on the last physically reachable side of the stair.
+    return stair.elevation - (position.y ?? stair.elevation)
+      > RAMP_SUPPORT_CAPTURE_HEIGHT + 0.001;
+  }
+
   _isPositionInsideClosedDoor(position, door) {
-    if (!position || !door?.position) {
+    const collisionPosition = door?.collisionPosition ?? door?.position;
+    if (!position || !collisionPosition) {
       return false;
     }
     const playerRadius = this.game?.player?.radius ?? PLAYER_TRAVERSAL_ENVELOPE.collisionRadius;
     const halfWidth = (door.collisionHalfWidth ?? (door.alongX ? 0.16 : this.tileSize * 0.48)) + playerRadius;
     const halfDepth = (door.collisionHalfDepth ?? (door.alongX ? this.tileSize * 0.48 : 0.16)) + playerRadius;
-    const baseY = door.baseY ?? door.position.y ?? 0;
+    const baseY = door.baseY ?? collisionPosition.y ?? 0;
     const height = door.collisionHeight ?? 4.8;
-    return Math.abs(position.x - door.position.x) <= halfWidth
-      && Math.abs(position.z - door.position.z) <= halfDepth
+    return Math.abs(position.x - collisionPosition.x) <= halfWidth
+      && Math.abs(position.z - collisionPosition.z) <= halfDepth
       && (position.y ?? 0) >= baseY - PLAYER_STEP_OFF_FALL_HEIGHT
       && (position.y ?? 0) <= baseY + height;
   }
@@ -1254,7 +1517,13 @@ export class DungeonController {
     if (Number.isFinite(platformElevation)) {
       target.copy(position);
       target.y = platformElevation;
-      return target;
+      // V2 decks are exposed through the compatibility platform collection.
+      // A closed gate can overlap an otherwise valid deck at a portal seam,
+      // so platform support alone does not make an airborne landing legal.
+      // Keep this branch under the same door/solid-volume ownership check as
+      // floor-tile landings; otherwise each jump frame can advance the saved
+      // position through a closed progression barrier.
+      return this._isResolvedFloorPositionWalkable(target) ? target : null;
     }
 
     const floorTile = this.getFloorTileAt(position, { allowClosest: true });
@@ -1279,7 +1548,7 @@ export class DungeonController {
   }
 
   _isPositionInsideSolidZone(position) {
-    return this.solidZones.some((zone) => isInsideExpandedZone(
+    return this._queryCollisionZones('solid', position).some((zone) => isInsideExpandedZone(
       position,
       zone,
       Math.max(0, Number(zone.playerCollisionPadding) || 0),
@@ -1401,6 +1670,12 @@ export class DungeonController {
     const y = position.y ?? 0;
 
     for (const tile of column) {
+      if (this.dungeon?.generationMode === 'v2'
+        && tile.surface === 'industrialRamp'
+        && tile.surfaceId
+        && this.dungeon.isPositionOnExactStairSurface?.(tile.surfaceId, position, 0.025) !== true) {
+        continue;
+      }
       const elevation = this._getTileElevationAtPosition(tile, position);
       if (elevation - y > maxElevationAbove) {
         continue;
@@ -1436,6 +1711,21 @@ export class DungeonController {
   }
 
   getRampSurfaceElevationAt(position) {
+    if (this.dungeon?.generationMode === 'v2') {
+      // V2 stair meshes are closed load-bearing inclines, not decoration over
+      // a usable underpass. Their footprints can overlap the room's base-floor
+      // tiles, but a different playable floor (and its own stair) can also be
+      // authored directly above or below the same X/Z column. Exact horizontal
+      // containment therefore is not sufficient proof of support: capture only
+      // a slope close enough to be reached by one ordinary grounded step. This
+      // still lets a continuously walked incline win over its hidden base-floor
+      // tiles without teleporting the player between stacked regions.
+      return this.dungeon.getExactStairSurfaceElevationAt?.(position, {
+        maxVerticalGap: RAMP_SUPPORT_CAPTURE_HEIGHT,
+        tolerance: 0.025,
+      }) ?? null;
+    }
+
     const { x, z } = this.worldToTile(position);
     const column = this.floorTilesByColumn.get(tileKey(x, z));
     if (!column?.length) {
@@ -1458,10 +1748,12 @@ export class DungeonController {
     return nearestElevation;
   }
 
-  getSurfaceElevationAt(position) {
+  getSurfaceElevationAt(position, { retainGroundedPlayerSupport = false } = {}) {
     const authoredOverride = this.game?.bossStageRuntime?.getFloorElevationOverride?.(position);
     if (Number.isFinite(authoredOverride)) {
-      const authoredPlatform = this.game.getPlatformFloorElevation?.(position);
+      const authoredPlatform = retainGroundedPlayerSupport
+        ? this._getPlayerPlatformFloorElevation(position)
+        : this.game.getPlatformFloorElevation?.(position);
       return Number.isFinite(authoredPlatform) ? authoredPlatform : authoredOverride;
     }
     // Elevated conveyor ramps can overlap a flat structural deck for several
@@ -1471,7 +1763,9 @@ export class DungeonController {
     if (Number.isFinite(rampElevation)) {
       return rampElevation;
     }
-    const platformElevation = this.game.getPlatformFloorElevation?.(position);
+    const platformElevation = retainGroundedPlayerSupport
+      ? this._getPlayerPlatformFloorElevation(position)
+      : this.game.getPlatformFloorElevation?.(position);
     return Number.isFinite(platformElevation)
       ? platformElevation
       : this.getFloorElevationAt(position);
@@ -1498,6 +1792,14 @@ export class DungeonController {
 
     if (!isRamp) {
       return tile.elevation ?? 0;
+    }
+
+    if (this.dungeon?.generationMode === 'v2') {
+      const exact = this.dungeon.getExactStairSurfaceAt?.(position, {
+        maxVerticalGap: Infinity,
+        tolerance: 0.025,
+      });
+      if (exact?.surfaceId === tile.surfaceId) return exact.elevation;
     }
 
     const directionX = Math.sign(tile.rampDirectionX ?? 0);
@@ -1534,7 +1836,10 @@ export class DungeonController {
     return actionState === 'neutralJump' || actionState === 'forwardJump' || actionState === 'wallJump';
   }
 
-  _syncPositionToFloor(position, { preservePlayerAction = false } = {}) {
+  _syncPositionToFloor(position, {
+    preservePlayerAction = false,
+    retainGroundedPlayerSupport = false,
+  } = {}) {
     if (preservePlayerAction && this._isPlayerPreservingVerticalMotion()) {
       return;
     }
@@ -1545,7 +1850,9 @@ export class DungeonController {
       return;
     }
 
-    const platformElevation = this.game.getPlatformFloorElevation?.(position);
+    const platformElevation = retainGroundedPlayerSupport
+      ? this._getPlayerPlatformFloorElevation(position)
+      : this.game.getPlatformFloorElevation(position);
     if (Number.isFinite(platformElevation)) {
       position.y = platformElevation;
       return;
@@ -1920,7 +2227,7 @@ export class DungeonController {
       0.18,
       Math.min(0.86, options.radius ?? (enemy.radius ?? 0.42) * 0.78),
     );
-    for (const zone of this.solidZones) {
+    for (const zone of this._queryCollisionZones('solid', position, clearanceRadius)) {
       if (isInsideExpandedZone(position, zone, clearanceRadius, 0.12)) {
         return false;
       }
@@ -2043,6 +2350,14 @@ export class DungeonController {
   }
 
   _isFloorTileRuntimeWalkable(tile) {
+    // Grounded Reaverbots use the permanently safe authored route. Keeping
+    // tagged hazard tiles out of their navigation graph also prevents a cached
+    // route from becoming lethal when an electrical surface changes phase.
+    // Flyers use the separate aerial collision path and are not constrained by
+    // this floor-graph filter.
+    if (tile?.hazardTag) {
+      return false;
+    }
     tempVectorC.set(tile.x * this.tileSize, tile.elevation ?? 0, tile.z * this.tileSize);
     return this._isResolvedFloorPositionWalkable(tempVectorC);
   }
@@ -2438,16 +2753,40 @@ export class DungeonController {
     }
 
     const keycardId = keycard.keycardId ?? keycard.id;
-    const collected = this._grantKeycard(keycardId, {
-      position: position ?? keycard.position,
+    const pickupPosition = position ?? keycard.position;
+    const wasVisible = keycard.object?.visible !== false;
+    const v2ActionId = this._findDungeonV2ActionId({
+      explicitId: keycard.actionId,
+      effectOp: 'collectReward',
+      targetId: keycard.id,
     });
+    const actionResult = this._runDungeonV2Action(v2ActionId, { position: pickupPosition });
+    if (actionResult && !actionResult.ok) {
+      // A rejected plan action is not a pickup. Preserve the physical card so
+      // satisfying the authored condition can be followed by a normal retry.
+      keycard.collected = false;
+      if (keycard.object) keycard.object.visible = wasVisible;
+      this._showDungeonV2ActionFailure(actionResult, keycard.displayName ?? 'Keycard');
+      return false;
+    }
+    const alreadyOwned = this.progressionManager.hasKeycard(keycardId);
+    const grantSucceeded = alreadyOwned
+      || this._grantKeycard(keycardId, { position: pickupPosition });
+    const ownsExactKeycard = this.progressionManager.hasKeycard(keycardId);
+    if (!grantSucceeded || !ownsExactKeycard) {
+      // Keep the physical card retryable if the authoritative inventory does
+      // not report ownership after the shared plan action returns.
+      keycard.collected = false;
+      if (keycard.object) keycard.object.visible = wasVisible;
+      return false;
+    }
 
     keycard.collected = true;
     if (keycard.object) {
       keycard.object.visible = false;
     }
 
-    return collected;
+    return true;
   }
 
   _getCollectedInventorySet() {
@@ -2479,8 +2818,10 @@ export class DungeonController {
 
       for (const connection of connections) {
         const nextRoomId = connection.fromRoomId === roomId
+          && connection.direction !== 'reverse-only'
           ? connection.toRoomId
           : connection.toRoomId === roomId
+            && connection.direction !== 'forward-only'
             ? connection.fromRoomId
             : null;
 
@@ -2593,7 +2934,27 @@ export class DungeonController {
 
   _activateKeySeeker() {
     if (!this.keySeeker || this.keySeeker.activated) {
-      return;
+      return false;
+    }
+
+    const requiresAuthoritativeV2Action = this.dungeon?.generationMode === 'v2';
+    const v2ActionId = this._findDungeonV2ActionId({
+      explicitId: this.keySeeker.actionId ?? this.keySeeker.id,
+      type: 'key-seeker',
+    });
+    const actionResult = this._runDungeonV2Action(v2ActionId, {
+      position: this.keySeeker.position,
+    });
+    if ((requiresAuthoritativeV2Action && actionResult?.ok !== true)
+      || (!requiresAuthoritativeV2Action && actionResult && !actionResult.ok)) {
+      const failureResult = actionResult ?? {
+        ok: false,
+        reason: this.dungeonV2Runtime
+          ? 'missing-plan-action'
+          : 'runtime-action-unavailable',
+      };
+      this._showDungeonV2ActionFailure(failureResult, this.keySeeker.label ?? 'Key Seeker');
+      return false;
     }
 
     this.keySeeker.activated = true;
@@ -2609,6 +2970,7 @@ export class DungeonController {
         : 'Key Seeker activated. Keycard signals added to minimap.',
       '#5ee77b',
     );
+    return true;
   }
 
   _updateKeySeekerVisuals(dt) {
@@ -2712,7 +3074,7 @@ export class DungeonController {
           : this.progressionManager.hasKeycard(door.requiredKeycardId)
             ? 'usableDoor'
             : 'lockedDoor',
-        door.position,
+        door.collisionPosition ?? door.position,
         {
           id: door.id,
           roomId: door.toRoomId,
@@ -2811,10 +3173,11 @@ export class DungeonController {
       });
     }
 
-    if (this.shrine && this.discoveredRoomIds.has('shrineRoom')) {
+    const shrineRoomId = this.progression?.shrineRoomId ?? this.shrine?.roomId ?? null;
+    if (this.shrine && shrineRoomId && this.discoveredRoomIds.has(shrineRoomId)) {
       addMarker('shrine', this.shrine.position, {
         id: this.shrine.id,
-        roomId: 'shrineRoom',
+        roomId: shrineRoomId,
         label: 'Large Refractor',
         priority: 88,
       });
@@ -2932,6 +3295,17 @@ export class DungeonController {
       return;
     }
 
+    // Player owns a ladder's exact top and bottom exit placement. Player.update
+    // can finish the climb immediately before this controller's two constraint
+    // passes; accepting both passes prevents a valid dismount from snapping
+    // back to the last safe position recorded at the opposite end.
+    if (this.game.player.isClimbingLadder?.()
+      || this.game.player.consumeLadderDismountConstraintHandoff?.()) {
+      this.lastSafePlayerPosition.copy(current);
+      this.pendingPlayerJumpOffLanding = null;
+      return;
+    }
+
     // Tractor beams and player-owned ballistic throws have exclusive control
     // of the root until they release or land. Normal floor correction during
     // that window would snap the player out of the beam or flatten the arc.
@@ -2956,7 +3330,17 @@ export class DungeonController {
       return;
     }
 
-    const surfaceY = this.getSurfaceElevationAt(current);
+    // A V2 fall is never an exterior void: it is an accepted trajectory from
+    // a plan aperture to a registered, playable catchment. Preserve the
+    // player's airborne motion only while the root is inside that volume.
+    // The normal constraint path remains authoritative everywhere else.
+    if (playerJumping && this._canPreserveV2AuthorizedFall(current)) {
+      return;
+    }
+
+    const surfaceY = this.getSurfaceElevationAt(current, {
+      retainGroundedPlayerSupport: true,
+    });
     const closestFloorTile = this.getFloorTileAt(current, { allowClosest: true });
     const closestFloorY = closestFloorTile
       ? this._getTileElevationAtPosition(closestFloorTile, current)
@@ -2979,27 +3363,49 @@ export class DungeonController {
     }
     const groundedRiseRequiresJumpAt = (position) => {
       const tile = this.getFloorTileAt(position, { allowClosest: true });
-      const candidateY = this.getSurfaceElevationAt(position);
+      const candidateY = this.getSurfaceElevationAt(position, {
+        retainGroundedPlayerSupport: true,
+      });
+      const exactV2Stair = this.dungeon?.generationMode === 'v2'
+        ? this.dungeon.getExactStairSurfaceAt?.(position, {
+          maxVerticalGap: RAMP_SUPPORT_CAPTURE_HEIGHT,
+          tolerance: 0.025,
+        })
+        : null;
       const allowedRise = this._getGroundedStepTransitionHeight(
         this.lastSafePlayerPosition,
         position,
         PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.05,
       );
       return !playerJumping
+        && !exactV2Stair
         && tile?.surface !== 'industrialRamp'
         && candidateY - this.lastSafePlayerPosition.y > allowedRise;
     };
 
-    if (this.isPositionWalkable(current) && !groundedRiseRequiresJumpAt(current)) {
+    const isAirborneSeparatedFromSupport = (position) => {
+      if (!playerJumping) return false;
+      const candidateY = this.getSurfaceElevationAt(position, {
+        retainGroundedPlayerSupport: true,
+      });
+      return position.y - candidateY > PLAYER_STEP_OFF_FALL_HEIGHT + 0.001;
+    };
+
+    if (this.isPositionWalkable(current, { retainGroundedPlayerSupport: true })
+      && !groundedRiseRequiresJumpAt(current)
+      && !isAirborneSeparatedFromSupport(current)) {
       const steppingOffElevatedSurface = !playerJumping
         && current.y - surfaceY > groundedStepTransitionHeight;
       if (!steppingOffElevatedSurface) {
         const authoredGroundedStep = !playerJumping
           && groundedStepTransitionHeight > PLAYER_STEP_OFF_FALL_HEIGHT + 0.01
           && Math.abs(current.y - surfaceY) <= groundedStepTransitionHeight + 0.01;
-        this._syncPositionToFloor(current, { preservePlayerAction: !authoredGroundedStep });
+        this._syncPositionToFloor(current, {
+          preservePlayerAction: !authoredGroundedStep,
+          retainGroundedPlayerSupport: true,
+        });
+        this.lastSafePlayerPosition.copy(current);
       }
-      this.lastSafePlayerPosition.copy(current);
       if (!playerJumping) {
         this.pendingPlayerJumpOffLanding = null;
       }
@@ -3008,7 +3414,7 @@ export class DungeonController {
 
     if (!playerJumping && this.pendingPlayerJumpOffLanding) {
       current.copy(this.pendingPlayerJumpOffLanding);
-      this._syncPositionToFloor(current);
+      this._syncPositionToFloor(current, { retainGroundedPlayerSupport: true });
       this.lastSafePlayerPosition.copy(current);
       this.pendingPlayerJumpOffLanding = null;
       return;
@@ -3018,7 +3424,6 @@ export class DungeonController {
       const jumpLanding = this._getWalkableJumpOffLanding(current, tempVectorB);
       if (jumpLanding) {
         this.pendingPlayerJumpOffLanding = jumpLanding.clone();
-        this.lastSafePlayerPosition.copy(current);
         return;
       }
     }
@@ -3031,23 +3436,65 @@ export class DungeonController {
     }
 
     tempVectorA.set(current.x, current.y, this.lastSafePlayerPosition.z);
-    if (this.isPositionWalkable(tempVectorA) && !groundedRiseRequiresJumpAt(tempVectorA)) {
+    if (this.isPositionWalkable(tempVectorA, { retainGroundedPlayerSupport: true })
+      && !groundedRiseRequiresJumpAt(tempVectorA)
+      && !isAirborneSeparatedFromSupport(tempVectorA)) {
       current.copy(tempVectorA);
-      this._syncPositionToFloor(current, { preservePlayerAction: true });
+      this._syncPositionToFloor(current, {
+        preservePlayerAction: true,
+        retainGroundedPlayerSupport: true,
+      });
       this.lastSafePlayerPosition.copy(current);
       return;
     }
 
     tempVectorA.set(this.lastSafePlayerPosition.x, current.y, current.z);
-    if (this.isPositionWalkable(tempVectorA) && !groundedRiseRequiresJumpAt(tempVectorA)) {
+    if (this.isPositionWalkable(tempVectorA, { retainGroundedPlayerSupport: true })
+      && !groundedRiseRequiresJumpAt(tempVectorA)
+      && !isAirborneSeparatedFromSupport(tempVectorA)) {
       current.copy(tempVectorA);
-      this._syncPositionToFloor(current, { preservePlayerAction: true });
+      this._syncPositionToFloor(current, {
+        preservePlayerAction: true,
+        retainGroundedPlayerSupport: true,
+      });
       this.lastSafePlayerPosition.copy(current);
       return;
     }
 
+    if (this.dungeon?.kind === 'DungeonV2'
+      && current.y < this.lastSafePlayerPosition.y - PLAYER_STEP_OFF_FALL_HEIGHT
+      && !this.dungeon.environmentRuntime?.isAuthorizedFallTrajectory?.(current)) {
+      this.dungeon.environmentRuntime?.reportUnauthorizedFallCorrection?.(
+        current,
+        'walkability-corrected-unowned-fall',
+      );
+    }
     current.copy(this.lastSafePlayerPosition);
-    this._syncPositionToFloor(current, { preservePlayerAction: true });
+    this._syncPositionToFloor(current, {
+      preservePlayerAction: true,
+      retainGroundedPlayerSupport: true,
+    });
+  }
+
+  _canPreserveV2AuthorizedFall(position) {
+    const player = this.game?.player;
+    const runtime = this.dungeon?.environmentRuntime;
+    if (!position
+      || !player?.isJumpAirborne?.()
+      || !runtime?.isAuthorizedFallTrajectory?.(position)) {
+      return false;
+    }
+
+    const radius = Math.max(
+      0,
+      Number(player.radius) || PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+    );
+    const obstacle = this._getAerialBlockingObstacle(position, {
+      ignoreAirspace: true,
+      radius,
+      verticalRadius: radius,
+    });
+    return !obstacle || obstacle.kind === 'platform';
   }
 
   _canPreserveAuthoredVoidJump(position) {
@@ -3084,7 +3531,10 @@ export class DungeonController {
       }
 
       keycard.object.rotation.y += dt * 1.6;
-      keycard.object.position.y = keycard.position.y + 0.42 + Math.sin(this.game.elapsedTime * 4.2) * 0.08;
+      const visualRestY = Number.isFinite(keycard.visualRestY)
+        ? keycard.visualRestY
+        : keycard.position.y + 0.42;
+      keycard.object.position.y = visualRestY + Math.sin(this.game.elapsedTime * 4.2) * 0.08;
       const protectingEncounter = keycard.protectedByEncounterId
         ? this.encounters.find((encounter) => encounter.id === keycard.protectedByEncounterId)
         : null;
@@ -3102,7 +3552,20 @@ export class DungeonController {
         continue;
       }
 
-      if (playerPosition.distanceToSquared(keycard.position) > 1.45 * 1.45) {
+      // Ordinary V2 credentials use the same dependable walk-over collection
+      // as their V1 counterparts. The plan-owned action is still the only
+      // authority that records the reward and grants the exact key; proximity
+      // merely invokes that shared contract. Keep the radius close to the
+      // physical pedestal so seeing and reaching the card precedes collection.
+      const authoredRadius = Number.isFinite(keycard.interactionRadius)
+        ? Math.max(0.5, keycard.interactionRadius)
+        : 1.45;
+      const pickupRadius = this.dungeonV2Runtime
+        && keycard.actionId
+        && keycard.spawnMode === 'Pedestal'
+        ? Math.min(1.45, authoredRadius)
+        : authoredRadius;
+      if (playerPosition.distanceToSquared(keycard.position) > pickupRadius * pickupRadius) {
         continue;
       }
 
@@ -3119,6 +3582,12 @@ export class DungeonController {
     let trapPulseUsed = false;
 
     for (const trap of this.traps) {
+      // V2 hazard integration is owned by DungeonRuntimeV2 so pulse/grace
+      // accumulation remains frame-chunk invariant. Running the legacy trap
+      // loop as well would apply the same environmental damage twice.
+      if (trap.v2HazardId) {
+        continue;
+      }
       if (!trap.active) {
         continue;
       }
@@ -3129,16 +3598,18 @@ export class DungeonController {
       }
 
       if (isInsideZone(player.root.position, trap)) {
-        const heatTags = [...new Set((trap.ambientHazardTags ?? [])
-          .map((tag) => ENVIRONMENTAL_HEAT_TAG_ALIASES[tag] ?? tag)
-          .filter((tag) => ['environmentalHeat', 'fireFloor', 'furnaceVent'].includes(tag)))];
+        const normalizedHazardTags = [...new Set((trap.ambientHazardTags ?? [])
+          .map((tag) => ENVIRONMENTAL_HEAT_TAG_ALIASES[tag] ?? tag))];
+        const heatTags = normalizedHazardTags
+          .filter((tag) => ['environmentalHeat', 'fireFloor', 'furnaceVent'].includes(tag));
+        const hazardTags = trap.v2HazardId ? normalizedHazardTags : heatTags;
         player.takeIncomingHit({
           amount: (trap.damagePerSecond ?? 18) * dt,
           source: trap,
           guardable: false,
           reactionTier: 0,
           hazardDomain: 'environment',
-          hazardTags: heatTags,
+          hazardTags,
           statusEffects: heatTags.length > 0 ? ['burn'] : [],
         });
 
@@ -3231,7 +3702,19 @@ export class DungeonController {
 
   _getTrapTiming(trap) {
     if (!trap?.active) {
-      return { live: false, telegraph: false, phase: 0 };
+      return {
+        live: false,
+        telegraph: trap?.v2HazardPhase === 'charging',
+        phase: trap?.v2HazardPhase ?? 0,
+      };
+    }
+
+    if (trap.v2HazardId) {
+      return {
+        live: true,
+        telegraph: false,
+        phase: trap.v2HazardPhase ?? 'active',
+      };
     }
 
     const interval = Math.max(0.5, trap.pulseInterval ?? 1.55);
@@ -3795,7 +4278,10 @@ export class DungeonController {
 
       const baseY = door.baseY ?? 0;
       const alpha = Math.min(1, dt * 8);
-      if (door.leftPanel && door.rightPanel && door.slidingAxis) {
+      if (door.closedPosition && door.openPosition) {
+        const target = door.closed ? door.closedPosition : door.openPosition;
+        door.object.position.lerp(target, alpha);
+      } else if (door.leftPanel && door.rightPanel && door.slidingAxis) {
         door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, baseY, alpha);
         const openOffset = door.closed ? 0 : (door.slidingOpenOffset ?? this.tileSize * 0.42);
         const axis = door.slidingAxis;
@@ -3810,7 +4296,9 @@ export class DungeonController {
           alpha,
         );
       } else {
-        const targetY = baseY + (door.closed ? 0 : DOOR_OPEN_Y);
+        const targetY = door.closed
+          ? (door.closedY ?? baseY)
+          : (door.openY ?? baseY + DOOR_OPEN_Y);
         door.object.position.y = THREE.MathUtils.lerp(door.object.position.y, targetY, alpha);
       }
 
@@ -3846,7 +4334,8 @@ export class DungeonController {
   }
 
   _updateExtractionVisuals(dt) {
-    const pad = this.shrine?.object?.getObjectByName?.('largeRefractorExtractionPad');
+    const pad = this.shrine?.extractionObject
+      ?? this.shrine?.object?.getObjectByName?.('largeRefractorExtractionPad');
     if (!pad?.visible) {
       return;
     }
@@ -3865,7 +4354,8 @@ export class DungeonController {
   }
 
   _setExtractionPadVisible(visible) {
-    const pad = this.shrine?.object?.getObjectByName?.('largeRefractorExtractionPad');
+    const pad = this.shrine?.extractionObject
+      ?? this.shrine?.object?.getObjectByName?.('largeRefractorExtractionPad');
     if (pad) {
       pad.visible = visible;
     }
@@ -3881,8 +4371,12 @@ export class DungeonController {
         continue;
       }
 
-      const distanceSq = playerPosition.distanceToSquared(door.position);
-      if (distanceSq <= 2.45 * 2.45 && distanceSq < nearestDistanceSq) {
+      const interactionPosition = door.interactionPosition ?? door.position;
+      const distanceSq = playerPosition.distanceToSquared(interactionPosition);
+      const interactionRadius = Number.isFinite(door.interactionRadius)
+        ? Math.max(0.5, door.interactionRadius)
+        : 2.45;
+      if (distanceSq <= interactionRadius * interactionRadius && distanceSq < nearestDistanceSq) {
         const encounter = door.encounterId
           ? this.encounters.find((candidate) => candidate.id === door.encounterId)
           : null;
@@ -3919,7 +4413,10 @@ export class DungeonController {
       }
 
       const distanceSq = playerPosition.distanceToSquared(mechanism.position);
-      if (distanceSq <= 2.1 * 2.1 && distanceSq < nearestDistanceSq) {
+      const interactionRadius = Number.isFinite(mechanism.interactionRadius)
+        ? Math.max(0.5, mechanism.interactionRadius)
+        : 2.1;
+      if (distanceSq <= interactionRadius * interactionRadius && distanceSq < nearestDistanceSq) {
         const blockedEncounter = this._getMechanismBlockingEncounter(mechanism);
         nearest = {
           kind: 'mechanism',
@@ -3935,8 +4432,40 @@ export class DungeonController {
       }
     }
 
+    if (!this.game.player?.isClimbingLadder?.()) {
+      for (const ladder of this.ladders) {
+        const anchors = [
+          ladder.bottomMountPosition ?? ladder.bottomExit ?? ladder.position,
+          ladder.topMountPosition ?? ladder.topExit,
+        ].filter(Boolean);
+        let ladderDistanceSq = Infinity;
+        for (const anchor of anchors) {
+          const dx = playerPosition.x - Number(anchor.x ?? 0);
+          const dy = playerPosition.y - Number(anchor.y ?? ladder.bottomY ?? 0);
+          const dz = playerPosition.z - Number(anchor.z ?? 0);
+          ladderDistanceSq = Math.min(ladderDistanceSq, dx * dx + dy * dy + dz * dz);
+        }
+        const interactionRadius = Number.isFinite(ladder.mountRadius)
+          ? Math.max(0.5, ladder.mountRadius)
+          : 1.8;
+        if (ladderDistanceSq <= interactionRadius * interactionRadius
+          && ladderDistanceSq < nearestDistanceSq) {
+          nearest = {
+            kind: 'ladder',
+            target: ladder,
+            label: `Climb ${ladder.label ?? 'ladder'}`,
+            color: MECHANISM_COLOR,
+          };
+          nearestDistanceSq = ladderDistanceSq;
+        }
+      }
+    }
+
     for (const trap of this.traps) {
-      if (!trap.active) {
+      // Authored V2 floor hazards are traversal surfaces, not keycard-scanned
+      // legacy trap relays. Their phases are controlled only by the plan-owned
+      // environment runtime.
+      if (!trap.active || trap.v2HazardId) {
         continue;
       }
 
@@ -3958,7 +4487,10 @@ export class DungeonController {
       }
 
       const distanceSq = playerPosition.distanceToSquared(chest.position);
-      if (distanceSq <= 2.05 * 2.05 && distanceSq < nearestDistanceSq) {
+      const interactionRadius = Number.isFinite(chest.interactionRadius)
+        ? Math.max(0.5, chest.interactionRadius)
+        : 2.05;
+      if (distanceSq <= interactionRadius * interactionRadius && distanceSq < nearestDistanceSq) {
         nearest = {
           kind: 'chest',
           target: chest,
@@ -3969,9 +4501,44 @@ export class DungeonController {
       }
     }
 
+    for (const keycard of this.keycards) {
+      if (keycard.collected
+        || !this.dungeonV2Runtime
+        || !keycard.actionId
+        || keycard.spawnMode !== 'Pedestal') {
+        continue;
+      }
+
+      const distanceSq = playerPosition.distanceToSquared(keycard.position);
+      const interactionRadius = Number.isFinite(keycard.interactionRadius)
+        ? Math.max(0.5, keycard.interactionRadius)
+        : 2.2;
+      if (distanceSq <= interactionRadius * interactionRadius && distanceSq < nearestDistanceSq) {
+        const protectingEncounter = keycard.protectedByEncounterId
+          ? this.encounters.find((encounter) => encounter.id === keycard.protectedByEncounterId)
+          : null;
+        const protectedByEncounter = Boolean(protectingEncounter && !protectingEncounter.cleared);
+        const unavailable = keycard.available === false;
+        nearest = {
+          kind: 'keycard',
+          target: keycard,
+          label: protectedByEncounter
+            ? `${keycard.displayName}: Clear ${protectingEncounter.label}`
+            : unavailable
+              ? `${keycard.displayName}: Requirements Not Met`
+              : `Collect ${keycard.displayName}`,
+          color: protectedByEncounter || unavailable ? LOCKED_COLOR : KEY_SEEKER_COLOR,
+        };
+        nearestDistanceSq = distanceSq;
+      }
+    }
+
     if (this.keySeeker && !this.keySeeker.activated) {
       const distanceSq = playerPosition.distanceToSquared(this.keySeeker.position);
-      if (distanceSq <= 2.1 * 2.1 && distanceSq < nearestDistanceSq) {
+      const interactionRadius = Number.isFinite(this.keySeeker.interactionRadius)
+        ? Math.max(0.5, this.keySeeker.interactionRadius)
+        : 2.1;
+      if (distanceSq <= interactionRadius * interactionRadius && distanceSq < nearestDistanceSq) {
         nearest = {
           kind: 'keySeeker',
           target: this.keySeeker,
@@ -4004,7 +4571,11 @@ export class DungeonController {
     if (this.shrine && !this.shrine.collected) {
       const distanceSq = playerPosition.distanceToSquared(this.shrine.position);
       const shrineDoor = this.doors.find((door) => door.id === 'Door_Shrine');
-      if (distanceSq <= 2.8 * 2.8 && distanceSq < nearestDistanceSq && !shrineDoor?.closed) {
+      const shrineInteractionRadius = Number.isFinite(this.shrine.interactionRadius)
+        ? Math.max(0, this.shrine.interactionRadius)
+        : 2.8;
+      if (distanceSq <= shrineInteractionRadius * shrineInteractionRadius
+        && distanceSq < nearestDistanceSq && !shrineDoor?.closed) {
         nearest = {
           kind: 'shrine',
           target: this.shrine,
@@ -4015,8 +4586,13 @@ export class DungeonController {
     }
 
     if (this.shrine?.collected && this.game.ruinCompleted) {
-      const distanceSq = playerPosition.distanceToSquared(this.shrine.position);
-      if (distanceSq <= 3.0 * 3.0 && distanceSq < nearestDistanceSq) {
+      const extractionPosition = this.extractionPosition ?? this.shrine.position;
+      const distanceSq = playerPosition.distanceToSquared(extractionPosition);
+      const extractionInteractionRadius = Number.isFinite(this.shrine.extractionInteractionRadius)
+        ? Math.max(0, this.shrine.extractionInteractionRadius)
+        : 3;
+      if (distanceSq <= extractionInteractionRadius * extractionInteractionRadius
+        && distanceSq < nearestDistanceSq) {
         nearest = {
           kind: 'extraction',
           target: this.shrine,
@@ -4132,6 +4708,37 @@ export class DungeonController {
       return;
     }
 
+    const v2ActionId = this._findDungeonV2ActionId({
+      explicitId: door.v2ActionId ?? door.actionId,
+      effectOp: 'openGate',
+      targetId: door.id,
+    });
+    const wasClosed = door.closed === true;
+    const actionResult = this._runDungeonV2Action(v2ActionId, {
+      position: door.interactionPosition ?? door.position,
+    });
+    if (actionResult) {
+      if (!actionResult.ok) {
+        this._showDungeonV2ActionFailure(actionResult, door.label ?? 'Gate');
+        this._pulseDoor(door, LOCKED_COLOR);
+        return;
+      }
+      // The plan action is authoritative and commits the gate state. Restore
+      // the pre-action flag only long enough for the compatibility facade to
+      // run its normal visual/navigation transition exactly once.
+      if (wasClosed) door.closed = true;
+      const requiredName = this.progressionManager.getKeycardDisplayName(door.requiredKeycardId);
+      this._openDoor(
+        door,
+        door.isShrineDoor
+          ? 'Shrine access granted.'
+          : door.requiresKeycard
+            ? `${door.label} unlocked with ${requiredName}.`
+            : `${door.label} opened.`,
+      );
+      return;
+    }
+
     if (door.requiresKeycard && !pressureReady) {
       const requiredName = this.progressionManager.getKeycardDisplayName(door.requiredKeycardId);
       this._openDoor(door, door.isShrineDoor ? 'Shrine access granted.' : `${door.label} unlocked with ${requiredName}.`);
@@ -4151,6 +4758,23 @@ export class DungeonController {
     if (blockedEncounter) {
       this.game.ui?.showToast?.(`Clear ${blockedEncounter.label} before using this console`, '#ffb347');
       this.game.addParticleBurst(mechanism.position, LOCKED_COLOR, 12, 0.12);
+      return;
+    }
+
+    const v2ActionId = this._findDungeonV2ActionId({
+      explicitId: mechanism.v2ActionId ?? mechanism.actionId ?? mechanism.id,
+    });
+    const actionResult = this._runDungeonV2Action(v2ActionId, {
+      position: mechanism.position,
+    });
+    if (actionResult) {
+      if (!actionResult.ok) {
+        this._showDungeonV2ActionFailure(actionResult, mechanism.label ?? 'Mechanism');
+        return;
+      }
+      mechanism.activated = true;
+      this.game.addParticleBurst(mechanism.position, MECHANISM_COLOR, 18, 0.14);
+      this.game.ui?.showToast?.(`${mechanism.label ?? 'Mechanism'} operated`, '#6bdcff');
       return;
     }
 
@@ -4184,7 +4808,7 @@ export class DungeonController {
   }
 
   _activateTrap(trap) {
-    if (!trap?.active) {
+    if (!trap?.active || trap.v2HazardId) {
       return;
     }
 
@@ -4204,14 +4828,67 @@ export class DungeonController {
       return;
     }
 
+    const v2ActionId = this._findDungeonV2ActionId({
+      explicitId: chest.actionId,
+      effectOp: 'collectReward',
+      targetId: chest.id,
+    });
+    const actionResult = this._runDungeonV2Action(v2ActionId, { position: chest.position });
+    if (actionResult && !actionResult.ok) {
+      this._showDungeonV2ActionFailure(actionResult, chest.label ?? 'Ruin cache');
+      return;
+    }
+
     chest.opened = true;
     chest.object.userData.opened = true;
 
-    this.game.refractors?.rollChestDrop?.(chest.position, {
-      count: chest.rareBoost ? 5 : 4,
-      bonusValue: chest.rareBoost ? 4 : 1,
-      rareBoost: chest.rareBoost,
-    });
+    const salvageBundle = chest.salvageBundle;
+    const isPlanOwnedSalvageCache = this.dungeon?.generationMode === 'v2'
+      && salvageBundle
+      && Number.isFinite(salvageBundle.unidentifiedScrap)
+      && Array.isArray(salvageBundle.recoverableParts);
+    if (isPlanOwnedSalvageCache) {
+      const recoverableParts = salvageBundle.recoverableParts.map((entry) => {
+        const material = REAVERBOT_SALVAGE_MATERIALS[entry.materialId];
+        if (!material) {
+          this.dungeonV2Runtime?.errors?.push?.({
+            code: 'v2-cache-salvage-material-missing',
+            rewardId: chest.id,
+            materialId: entry.materialId,
+          });
+          return null;
+        }
+        return {
+          ...material,
+          quantity: Math.max(1, Math.trunc(entry.quantity) || 1),
+          source: {
+            kind: 'dungeon-v2-authored-cache',
+            rewardId: chest.id,
+            rewardSeed: chest.seed ?? null,
+          },
+        };
+      }).filter(Boolean);
+      const pickupPosition = chest.position.clone();
+      pickupPosition.y = this.getFloorElevationAt(pickupPosition) + 0.35;
+      this.game.lootSystem?.createUnidentifiedScrapPickup?.(
+        Math.max(1, Math.trunc(salvageBundle.unidentifiedScrap) || 1),
+        pickupPosition,
+        {
+          source: {
+            kind: 'dungeon-v2-authored-cache',
+            rewardId: chest.id,
+            rewardSeed: chest.seed ?? null,
+          },
+          recoverableParts,
+        },
+      );
+    } else {
+      this.game.refractors?.rollChestDrop?.(chest.position, {
+        count: chest.rareBoost ? 5 : 4,
+        bonusValue: chest.rareBoost ? 4 : 1,
+        rareBoost: chest.rareBoost,
+      });
+    }
 
     let keycardCollected = false;
     if (chest.guaranteedKeycardId && !chest.keycardClaimed) {
@@ -4229,7 +4906,12 @@ export class DungeonController {
 
     this.game.addParticleBurst(chest.position, keycardCollected ? KEY_SEEKER_COLOR : KEYCARD_COLOR, keycardCollected ? 28 : 18, 0.16);
     if (!keycardCollected) {
-      this.game.ui?.showToast?.('Ruin chest opened: refractors', '#ffd66b');
+      this.game.ui?.showToast?.(
+        isPlanOwnedSalvageCache
+          ? 'Reaverbot recovery secured: bring it to Roll'
+          : 'Ruin chest opened: refractors',
+        '#ffd66b',
+      );
     }
   }
 
@@ -4249,6 +4931,19 @@ export class DungeonController {
       }
 
       encounter.cleared = true;
+      const completionActionId = this._findDungeonV2ActionId({
+        explicitId: encounter.completionActionId,
+        effectOp: 'completeEncounter',
+        targetId: encounter.id,
+      });
+      const completionResult = this._runDungeonV2Action(completionActionId, {
+        position: encounter.zone?.position,
+      });
+      if (completionResult && !completionResult.ok) {
+        encounter.cleared = false;
+        this._showDungeonV2ActionFailure(completionResult, encounter.label ?? 'Encounter');
+        continue;
+      }
       this.game.ui?.showToast?.(`${encounter.label} cleared`, '#6bdcff');
 
       if (encounter.isBoss && this.dungeon?.replacesStandardDungeon) {
@@ -4319,6 +5014,19 @@ export class DungeonController {
       return;
     }
 
+    const v2ActionId = this._findDungeonV2ActionId({
+      explicitId: this.shrine.actionId,
+      effectOp: 'collectReward',
+      targetId: this.shrine.id,
+    });
+    const actionResult = this._runDungeonV2Action(v2ActionId, {
+      position: this.shrine.position,
+    });
+    if (actionResult && !actionResult.ok) {
+      this._showDungeonV2ActionFailure(actionResult, 'Large Refractor');
+      return;
+    }
+
     this.shrine.collected = true;
     const refractor = this.shrine.object?.getObjectByName?.('largeRefractorObjective');
     if (refractor) {
@@ -4337,7 +5045,25 @@ export class DungeonController {
       return;
     }
 
-    this.game.addParticleBurst(this.shrine.position, MECHANISM_COLOR, 20, 0.16);
+    const v2ActionId = this._findDungeonV2ActionId({
+      explicitId: this.progression?.extractionActionId,
+      effectOp: 'extract',
+      targetId: 'extraction.main',
+    });
+    const actionResult = this._runDungeonV2Action(v2ActionId, {
+      position: this.extractionPosition ?? this.shrine?.position,
+    });
+    if (actionResult && !actionResult.ok) {
+      this._showDungeonV2ActionFailure(actionResult, 'Extraction');
+      return;
+    }
+
+    this.game.addParticleBurst(
+      this.extractionPosition ?? this.shrine.position,
+      MECHANISM_COLOR,
+      20,
+      0.16,
+    );
     this.game.extractToCamp?.();
   }
 
@@ -4435,6 +5161,7 @@ export class DungeonController {
 
   _openDoor(door, message) {
     const topologyChanged = door.closed === true;
+    door.setOpen?.(true);
     door.closed = false;
     door.locked = false;
     door.opened = true;
@@ -4451,7 +5178,7 @@ export class DungeonController {
   }
 
   _pulseDoor(door, color) {
-    tempVectorB.copy(door.position);
+    tempVectorB.copy(door.collisionPosition ?? door.position);
     tempVectorB.y = (door.baseY ?? 0) + 0.9;
     this.game.addParticleBurst(tempVectorB, color, 16, 0.12);
   }

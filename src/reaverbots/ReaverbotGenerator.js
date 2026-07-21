@@ -15,6 +15,19 @@ import { hashSeed, SeededRandom } from './SeededRandom.js';
 const SCHEMA_VERSION = 3;
 const CANDIDATE_COUNT = 8;
 const GLOBAL_REAVERBOT_MOVE_SPEED_SCALE = 1.22;
+const PLAYER_DISPLACEMENT_CAPABILITIES_BY_ATTACK_KIND = Object.freeze({
+  // ReaverbotEnemy._updateFlamethrower applies a reaction-tier-zero hit and
+  // supplies neither a knockback direction nor an external-control request.
+  // It is therefore suitable for an enemy authored beside mandatory narrow
+  // traversal. Unlisted attack kinds fail closed instead of being assumed
+  // safe merely because their roster label sounds harmless.
+  flamethrower: Object.freeze({
+    maximumReactionTier: 0,
+    powerfulKnockback: false,
+    externalPlayerControl: false,
+    routeEjecting: false,
+  }),
+});
 const NAME_PREFIXES = ['AR', 'BA', 'DA', 'GA', 'KA', 'KO', 'MU', 'NA', 'OM', 'RA', 'SA', 'TO', 'UR', 'VA', 'ZA'];
 const NAME_SUFFIXES = ['EN', 'GAR', 'KIR', 'MOL', 'ORA', 'RAK', 'TUM', 'VAN', 'XEL', 'ZUN'];
 const SPRING_MOBILITY_IDS = new Set(['springQuadruped', 'pairedSprings', 'monoPogo', 'launchLeg']);
@@ -753,6 +766,82 @@ export function generateReaverbotGenome({
   }
 
   return genome;
+}
+
+export function describeReaverbotPlayerDisplacementCapabilities(genome) {
+  const attackKind = genome?.modules?.weapon?.attackKind ?? null;
+  const known = PLAYER_DISPLACEMENT_CAPABILITIES_BY_ATTACK_KIND[attackKind];
+  return Object.freeze({
+    attackKind,
+    maximumReactionTier: known?.maximumReactionTier ?? null,
+    powerfulKnockback: known?.powerfulKnockback ?? true,
+    externalPlayerControl: known?.externalPlayerControl ?? true,
+    routeEjecting: known?.routeEjecting ?? true,
+    verified: Boolean(known),
+  });
+}
+
+export function validateReaverbotGenomeAgainstGenerationPolicy(genome, policy) {
+  const errors = [];
+  const context = policy?.generationContext;
+  const capabilityContract = policy?.capabilityContract;
+  const capabilities = describeReaverbotPlayerDisplacementCapabilities(genome);
+  const expected = [
+    ['archetypeId', genome?.archetypeId],
+    ['bodyPlanId', genome?.body?.planId],
+    ['weaponId', genome?.modules?.weapon?.id],
+    ['defenseId', genome?.modules?.defense?.id],
+    ['weakPointId', genome?.modules?.weakPoint?.id],
+  ];
+
+  if (!policy || typeof policy.id !== 'string' || !policy.id.trim()) {
+    errors.push('generation-policy-id-missing');
+  }
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    errors.push('generation-context-missing');
+  } else {
+    for (const [field, actual] of expected) {
+      if (typeof context[field] !== 'string' || !context[field].trim()) {
+        errors.push(`generation-context-${field}-missing`);
+      } else if (actual !== context[field]) {
+        errors.push(`generated-${field}-mismatch`);
+      }
+    }
+  }
+
+  if (!capabilityContract || typeof capabilityContract !== 'object' || Array.isArray(capabilityContract)) {
+    errors.push('capability-contract-missing');
+  } else {
+    const permitted = capabilityContract.permittedAttackKinds;
+    if (!Array.isArray(permitted) || !permitted.length || !permitted.includes(capabilities.attackKind)) {
+      errors.push('attack-kind-not-permitted');
+    }
+    if (!capabilities.verified) errors.push('attack-displacement-capability-unverified');
+    if (!Number.isFinite(capabilityContract.maximumPlayerReactionTier)) {
+      errors.push('maximum-player-reaction-tier-missing');
+    } else if (capabilities.maximumReactionTier == null
+      || capabilities.maximumReactionTier > capabilityContract.maximumPlayerReactionTier) {
+      errors.push('player-reaction-tier-exceeds-contract');
+    }
+    for (const flag of ['powerfulKnockback', 'externalPlayerControl', 'routeEjecting']) {
+      if (capabilityContract[flag] !== false) errors.push(`${flag}-must-be-forbidden`);
+    }
+    if (capabilityContract.powerfulKnockback === false && capabilities.powerfulKnockback) {
+      errors.push('powerful-knockback-forbidden');
+    }
+    if (capabilityContract.externalPlayerControl === false && capabilities.externalPlayerControl) {
+      errors.push('external-player-control-forbidden');
+    }
+    if (capabilityContract.routeEjecting === false && capabilities.routeEjecting) {
+      errors.push('route-ejecting-attack-forbidden');
+    }
+  }
+
+  return Object.freeze({
+    valid: errors.length === 0,
+    errors: Object.freeze(errors),
+    capabilities,
+  });
 }
 
 export function createEncounterSlotSeed(runSeed, encounterId, slotIndex) {

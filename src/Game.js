@@ -2,7 +2,15 @@ import * as THREE from 'three';
 import { CombatSystem } from './CombatSystem.js';
 import { CameraController } from './CameraController.js';
 import { DungeonController } from './DungeonController.js';
-import { DungeonGenerator } from './DungeonGenerator.js';
+import {
+  DUNGEON_GENERATION_MODE,
+  DUNGEON_V2_FIXTURE,
+  DUNGEON_WORLD_KIND,
+  createDungeonGenerator,
+  readDungeonGenerationRequest,
+  resolveDungeonGenerationMode,
+} from './DungeonGeneratorFactory.js';
+import { preloadSemanticRoomPackV1 } from './dungeon-v2/SemanticRoomPackPresentationV1.js';
 import { EnemySpawner } from './EnemySpawner.js';
 import {
   createEnemyIdAllocator,
@@ -104,9 +112,14 @@ const MAX_POOLED_DAMAGE_NUMBERS = 72;
 const MAX_SYNCHRONOUS_EXPLOSIONS = 8;
 const CAMERA_WALL_OCCLUSION_TARGET_HEIGHT = 1.25;
 const DUNGEON_RENDER_CULL_UPDATE_INTERVAL = 0.2;
-const DUNGEON_RENDER_CULL_HIDE_DISTANCE = 68;
-const DUNGEON_RENDER_CULL_SHOW_DISTANCE = 54;
+// The third-person camera can inspect structure out to 120m. Render culling
+// must begin beyond that proof range, with hysteresis also outside it, so an
+// accepted enclosed V2 wall can never disappear into clear space on camera.
+const DUNGEON_RENDER_CULL_HIDE_DISTANCE = 132;
+const DUNGEON_RENDER_CULL_SHOW_DISTANCE = 124;
+const DUNGEON_RENDER_CULL_MINIMUM_V2_HIDE_DISTANCE = 128;
 const CAMERA_OCCLUSION_BIN_SIZE = 11.2;
+const CAMERA_OCCLUSION_EXCLUDED_ROLE_PATTERN = /(?:telegraph|signal|halo|route-marker|water-volume)/i;
 const DEBUG_LEDGE_CUBE_WIDTH = 3;
 const DEBUG_LEDGE_CUBE_DEPTH = 3;
 const DEBUG_LEDGE_CUBE_HEIGHT = 3;
@@ -131,6 +144,12 @@ const PLATFORM_LEDGE_MAX_REACH_RATIO = PLAYER_TRAVERSAL_CAPABILITIES.ledgeGrabHe
 const PLATFORM_LEDGE_IDEAL_REACH_RATIO = 1.94;
 const DEBUG_LEDGE_LANDING_INSET = 0.08;
 const PLATFORM_LANDING_VERTICAL_TOLERANCE = 0.42;
+const PLATFORM_SUPPORT_EDGE_MARGIN = 0.08;
+// A grounded capsule still owns its current deck while part of its footprint
+// overlaps the edge.  Resolving support from the root point alone lets a tiny
+// rail/corner correction select a completely different playable floor below
+// and turns that horizontal correction into a vertical room warp.
+const PLATFORM_PARTIAL_CONTACT_EPSILON = 0.02;
 const DEBUG_LEDGE_HANG_ROOT_DROP = 3.35;
 const DEBUG_LEDGE_HANG_OFFSET = 0.42;
 const DEBUG_LEDGE_CLIMB_INSET = 0.82;
@@ -200,6 +219,7 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'cameraOcclusionHits',
   'cameraOcclusionOwnerByObject',
   'cameraOcclusionHiddenOwners',
+  'cameraOcclusionHiddenInstances',
   'cameraOcclusionOwnerBaseVisibility',
   'dungeonRenderCullGroups',
   'dungeonRenderCullAccumulator',
@@ -218,6 +238,35 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'reaverbotGeneration',
   'reaverbotRunSeed',
 ]);
+
+function isOpaqueCameraOcclusionSurface(object) {
+  const userData = object?.userData ?? {};
+  const role = String(
+    userData.v2StructuralRole
+    ?? userData.v2PresentationRole
+    ?? userData.v2GameplayRole
+    ?? '',
+  );
+  if (
+    userData.cameraOcclusionExcluded === true
+    || userData.v2CameraOcclusionPolicy === 'exclude'
+    || userData.v2WaterVolumePresentation === true
+    || userData.v2UnderwaterVisibility != null
+    || userData.v2CollisionPolicy === 'nonblocking-presentation'
+    || CAMERA_OCCLUSION_EXCLUDED_ROLE_PATTERN.test(role)
+  ) {
+    return false;
+  }
+  const materials = (Array.isArray(object?.material) ? object.material : [object?.material])
+    .filter(Boolean);
+  return materials.length > 0 && materials.every((material) => (
+    material.visible !== false
+    && material.transparent !== true
+    && (Number.isFinite(material.opacity) ? material.opacity : 1) >= 0.999
+    && material.depthWrite !== false
+    && material.colorWrite !== false
+  ));
+}
 
 function isBusterLabFeatureEnabled() {
   // The Custom Buster is a canonical arm system. URL parameters now select
@@ -253,7 +302,10 @@ function isBossDebugEnabled() {
 function readDungeonLayoutSeed() {
   try {
     const params = new URLSearchParams(globalThis.location?.search ?? '');
-    const authored = params.get('dungeonSeed') ?? params.get('reaverbotSeed');
+    const v2Seed = String(params.get('dungeonGen') ?? '').toLowerCase() === 'v2'
+      ? params.get('v2Seed') ?? params.get('seed')
+      : null;
+    const authored = params.get('dungeonSeed') ?? v2Seed ?? params.get('reaverbotSeed');
     if (authored) return `layout:${authored}`;
   } catch {
     // Fall through to a per-run seed outside browser environments.
@@ -513,6 +565,19 @@ function createBusterRangeDummy(id, position, {
 
 export class Game {
   static async create(options = {}) {
+    const dungeonGenerationRequest = options.dungeonGenerationRequest
+      ?? readDungeonGenerationRequest();
+    if (dungeonGenerationRequest.mode === DUNGEON_GENERATION_MODE.V2
+      && dungeonGenerationRequest.fixture === DUNGEON_V2_FIXTURE.Golden) {
+      // V2 assembly is intentionally synchronous so dungeon resets retain the
+      // existing Game/DungeonController contract.  Load the authored room
+      // templates before constructing Game, then require every later reset to
+      // clone this cache.  A failed GLB/manifest contract rejects startup and
+      // never substitutes a primitive room or the legacy generator.
+      const preloader = options.semanticRoomPackPreloader
+        ?? preloadSemanticRoomPackV1;
+      await preloader();
+    }
     const busterLabStorage = options.busterLabStorage
       ?? await BusterLabStorage.open(options.busterLabStorageOptions ?? {});
     const openingWarning = busterLabStorage.lastWarning;
@@ -536,7 +601,12 @@ export class Game {
     // A successful starter-grant write must not erase a warning explaining
     // that the payload loaded immediately before it was recovered/quarantined.
     if (openingWarning) busterLabStorage.lastWarning = openingWarning;
-    const game = new Game({ ...options, busterLabStorage, deferBusterLabInitialization: true });
+    const game = new Game({
+      ...options,
+      dungeonGenerationRequest,
+      busterLabStorage,
+      deferBusterLabInitialization: true,
+    });
     if (game.busterLabEnabled) {
       await game._initializeBusterLabFeature();
     } else {
@@ -550,6 +620,7 @@ export class Game {
     container = document.getElementById('game-container'),
     busterLabStorage = null,
     deferBusterLabInitialization = false,
+    dungeonGenerationRequest = null,
   } = {}) {
     this.container = container;
     this.scene = new THREE.Scene();
@@ -594,6 +665,29 @@ export class Game {
     this.pendingExplosions = [];
     this.explosionDispatchDepth = 0;
     this.elapsedTime = 0;
+    // Monotonic render-loop heartbeat used by public browser journeys to prove
+    // that input (especially jumping) never wedges the animation loop.
+    this.frameHeartbeat = 0;
+    this.lastFrameDelta = 0;
+    this.framePerformanceDiagnostics = {
+      sampleCount: 0,
+      lastFrameMs: 0,
+      maximumFrameMs: 0,
+      lastFrameStartGapMs: 0,
+      maximumFrameStartGapMs: 0,
+      lastHeartbeat: 0,
+      slowFrameCount: 0,
+      phases: {},
+    };
+    this._lastFramePerformanceStartAt = null;
+    this.platformQueryDiagnostics = {
+      queryCount: 0,
+      candidateTests: 0,
+      maximumCandidatesPerQuery: 0,
+      totalDurationMs: 0,
+      maximumDurationMs: 0,
+      byKind: {},
+    };
     this.hitStopTimer = 0;
     this.hitStopTimeScale = 1;
     this.busterLabEnabled = isBusterLabFeatureEnabled();
@@ -631,6 +725,8 @@ export class Game {
     this.ruinFloor = 1;
     this.dungeonLayoutGeneration = 0;
     this.dungeonLayoutSeed = readDungeonLayoutSeed();
+    this.dungeonGenerationRequest = dungeonGenerationRequest
+      ?? readDungeonGenerationRequest();
     this.selectedBossProfileId = normalizeBossProfileId(
       this.busterLabStorage?.state?.bossHunts?.selectedBossProfileId
         ?? DEFAULT_BOSS_PROFILE_ID,
@@ -683,6 +779,7 @@ export class Game {
     this.cameraOcclusionHits = [];
     this.cameraOcclusionOwnerByObject = new WeakMap();
     this.cameraOcclusionHiddenOwners = new Set();
+    this.cameraOcclusionHiddenInstances = new Map();
     this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
     this.dungeonRenderCullGroups = [];
     this.dungeonRenderCullAccumulator = 0;
@@ -969,6 +1066,33 @@ export class Game {
     if (!this.roomPreview || !this.dungeon) {
       return null;
     }
+    const semanticRoomPlacement = this.dungeon.plan?.semanticRoomPackPlacements?.find((placement) => (
+      placement.roomId === this.roomPreview.roomId
+      || placement.placementId === this.roomPreview.roomId
+    ));
+    if (semanticRoomPlacement) {
+      const entrySocket = semanticRoomPlacement.sockets?.find(({ isPlacementEntry }) => isPlacementEntry)
+        ?? semanticRoomPlacement.entrySocketWorld;
+      const position = entrySocket?.worldPosition ?? entrySocket?.position;
+      const outward = entrySocket?.worldForward ?? entrySocket?.forward;
+      if (position && outward) {
+        // The socket marker sits on the aperture plane.  Preview from a full
+        // body-width inside the authored room so the player never starts in a
+        // cap/frame collider, and face toward the room rather than exterior
+        // connector space.  This is a developer preview only; acceptance
+        // journeys still begin at the public dungeon entrance.
+        const interiorDepth = 1.6;
+        if (!Number.isFinite(this.roomPreview.facingX) || !Number.isFinite(this.roomPreview.facingZ)) {
+          this.roomPreview.facingX = -outward.x;
+          this.roomPreview.facingZ = -outward.z;
+        }
+        return new THREE.Vector3(
+          position.x - outward.x * interiorDepth,
+          position.y + 0.05,
+          position.z - outward.z * interiorDepth,
+        );
+      }
+    }
     const room = this.dungeon.rooms.find((candidate) => candidate.id === this.roomPreview.roomId);
     if (!room) {
       return null;
@@ -1138,6 +1262,62 @@ export class Game {
     }
 
     const dataset = this.container.dataset;
+    const generationMode = this.dungeon?.generationMode
+      ?? this.dungeonGenerationRequest?.mode
+      ?? DUNGEON_GENERATION_MODE.Legacy;
+    if (generationMode === DUNGEON_GENERATION_MODE.V2) {
+      // V2 public journeys consume the frozen, deep-cloned diagnostics bridge.
+      // Mirroring the legacy telemetry contract into dozens of live DOM
+      // attributes every render frame makes Playwright/browser mutation work
+      // dominate the actual game loop. Keep only readiness and stable mode
+      // fields in the DOM; heartbeat, physical movement, structure,
+      // progression, and navigation evidence remains bridge-owned.
+      const setIfChanged = (key, value) => {
+        if (dataset[key] !== value) dataset[key] = value;
+      };
+      setIfChanged('browserTestReady', 'true');
+      setIfChanged('dungeonGenerationMode', generationMode);
+      setIfChanged('dungeonFixture', this.dungeon?.fixture
+        ?? this.dungeonGenerationRequest?.fixture
+        ?? DUNGEON_V2_FIXTURE.Golden);
+      setIfChanged('dungeonPlanId', this.dungeon?.plan?.id ?? 'unavailable');
+      setIfChanged(
+        'dungeonValidationStatus',
+        this.dungeon?.validation?.accepted === false
+          ? 'rejected'
+          : this.dungeon?.validation?.accepted === true
+            ? 'accepted'
+            : 'not-applicable',
+      );
+      setIfChanged(
+        'dungeonRecoverySafeguardActivations',
+        String(
+          this.dungeon?.environmentRuntime?.safeguardActivations
+          ?? this.dungeon?.recoverySafeguard?.activationCount
+          ?? 0,
+        ),
+      );
+      // Keep a deliberately small live camera contract in the DOM so an
+      // actual browser run can distinguish camera-ray occlusion from the old
+      // containment behavior. These counters are derived from the completed
+      // camera phase immediately above; they never walk the plan/runtime graph.
+      let hiddenInstanceCount = 0;
+      for (const instances of this.cameraOcclusionHiddenInstances?.values?.() ?? []) {
+        hiddenInstanceCount += instances?.size ?? 0;
+      }
+      const hiddenOwnerCount = this.cameraOcclusionHiddenOwners?.size ?? 0;
+      setIfChanged(
+        'cameraOcclusionPolicy',
+        this._usesAcceptedV2OpaqueCameraOcclusion() ? 'opaque-ray-hide' : 'containment',
+      );
+      setIfChanged('cameraOcclusionHiddenCount', String(hiddenOwnerCount + hiddenInstanceCount));
+      setIfChanged(
+        'cameraContainmentAdjustments',
+        String(this.dungeon?.environmentRuntime?.cameraContainmentAdjustments ?? 0),
+      );
+      return;
+    }
+
     const player = this.player;
     const animation = player?.animation;
     const rig = player?.externalRig;
@@ -1149,10 +1329,14 @@ export class Game {
     const actionProgress = animation?.getActionProgress?.();
     const grounding = player?.getExternalModelGroundingDiagnostics?.() ?? null;
     const ledge = player?.getLedgeClingDiagnostics?.() ?? null;
+    const ladder = player?.getLadderTraversalDiagnostics?.() ?? null;
+    const environmentTraversal = player?.getEnvironmentalTraversalDiagnostics?.() ?? null;
     const playerYaw = player?.root?.rotation?.y;
     const cameraYaw = this.cameraController?.yaw;
 
     dataset.browserTestReady = 'true';
+    dataset.frameHeartbeat = String(this.frameHeartbeat);
+    dataset.lastFrameDelta = formatBrowserDiagnosticNumber(this.lastFrameDelta);
     dataset.gameElapsed = formatBrowserDiagnosticNumber(this.elapsedTime);
     dataset.canvasCount = String(this.container.querySelectorAll?.('canvas').length ?? 0);
     dataset.playerAnimationState = animation?.state ?? 'none';
@@ -1160,7 +1344,9 @@ export class Game {
     dataset.playerActionProgress = formatBrowserDiagnosticNumber(actionProgress);
     dataset.playerActionDuration = formatBrowserDiagnosticNumber(animation?.actionDuration);
     dataset.playerActionTimer = formatBrowserDiagnosticNumber(animation?.actionTimer);
+    dataset.playerRootX = formatBrowserDiagnosticNumber(player?.root?.position?.x);
     dataset.playerRootY = formatBrowserDiagnosticNumber(player?.root?.position?.y);
+    dataset.playerRootZ = formatBrowserDiagnosticNumber(player?.root?.position?.z);
     dataset.playerYaw = formatBrowserDiagnosticNumber(playerYaw);
     dataset.playerTankTurnActive = player?.tankTurnActive ? 'true' : 'false';
     dataset.playerTankTurnTranslating = player?.tankTurnTranslating ? 'true' : 'false';
@@ -1184,6 +1370,33 @@ export class Game {
     dataset.playerLedgeProgress = formatBrowserDiagnosticNumber(ledge?.progress);
     dataset.playerLedgeInputToward = ledge?.inputToward ? 'true' : 'false';
     dataset.playerLedgeTopY = formatBrowserDiagnosticNumber(ledge?.topY);
+    dataset.playerLadderState = ladder?.state ?? (player?.isClimbingLadder?.() ? 'climbing' : 'none');
+    dataset.playerLadderId = ladder?.ladderId ?? 'none';
+    dataset.playerLadderHeight = formatBrowserDiagnosticNumber(ladder?.height);
+    dataset.playerLadderBottomY = formatBrowserDiagnosticNumber(ladder?.bottomY);
+    dataset.playerLadderTopY = formatBrowserDiagnosticNumber(ladder?.topY);
+    dataset.playerFloodedTraversal = environmentTraversal?.flooded ? 'true' : 'false';
+    dataset.playerFloodedTakeoffCaptured = environmentTraversal?.takeoffCaptured ? 'true' : 'false';
+    dataset.playerEnvironmentMovementMultiplier = formatBrowserDiagnosticNumber(environmentTraversal?.movementMultiplier);
+    dataset.playerEnvironmentJumpHeight = formatBrowserDiagnosticNumber(environmentTraversal?.jumpHeight);
+    dataset.playerEnvironmentGravityScale = formatBrowserDiagnosticNumber(environmentTraversal?.gravityScale);
+    dataset.dungeonGenerationMode = generationMode;
+    dataset.dungeonFixture = this.dungeon?.fixture
+      ?? this.dungeonGenerationRequest?.fixture
+      ?? DUNGEON_V2_FIXTURE.Golden;
+    dataset.dungeonPlanId = this.dungeon?.plan?.id ?? 'legacy';
+    dataset.dungeonValidationStatus = this.dungeon?.validation?.accepted === false
+      ? 'rejected'
+      : this.dungeon?.validation?.accepted === true
+        ? 'accepted'
+        : 'not-applicable';
+    dataset.dungeonRecoverySafeguardActivations = String(
+      this.dungeon?.runtimeDiagnostics?.recoverySafeguardActivations
+      ?? this.dungeon?.recoverySafeguard?.activationCount
+      ?? this.dungeon?.specialEnvironment?.getDiagnostics?.()?.recoverySafeguardActivations
+      ?? this.dungeon?.specialEnvironment?.getDiagnostics?.()?.safeguardActivations
+      ?? 0,
+    );
     dataset.debugLedgeCount = String(this.debugLedgeCandidates?.length ?? 0);
     dataset.debugLastLedgeClingId = this.lastDebugLedgeClingId ?? 'none';
     dataset.debugLastLedgeLandingId = this.lastDebugLedgeLandingId ?? 'none';
@@ -1532,6 +1745,12 @@ export class Game {
       && !this.busterLabStorage?.readOnly;
   }
 
+  canEditUtilityArm() {
+    return !this.busterSandboxSession?.active
+      && !this.busterTestRange?.active
+      && !this.busterLabStorage?.readOnly;
+  }
+
   _applyPersistedArmsGear({ refillBarrier = false } = {}) {
     const armsGear = this.busterLabStorage?.state?.armsGear
       ?? this.busterLabState?.armsGear
@@ -1550,7 +1769,8 @@ export class Game {
   }
 
   async equipArmLoadoutSlot(slot, selection) {
-    if (!this.canEditArmsGear()) {
+    const fieldUtilitySwap = slot === 'utility' && this.canEditUtilityArm();
+    if (!fieldUtilitySwap && !this.canEditArmsGear()) {
       return { ok: false, reason: 'unsafe-area', message: 'Arms can be changed only with Roll at camp.' };
     }
     if (!this.busterLabStorage?.equipArmLoadoutSlot) {
@@ -1567,7 +1787,12 @@ export class Game {
     }
     this._applyPersistedArmsGear();
     this.ui?.renderInventory?.();
-    return { ...result, message: 'Arm loadout updated.' };
+    return {
+      ...result,
+      message: fieldUtilitySwap
+        ? 'Utility Arm swapped for field use.'
+        : 'Arm loadout updated.',
+    };
   }
 
   async equipGearLoadoutSlot(slot, gearId) {
@@ -2377,7 +2602,14 @@ export class Game {
       this.dungeonLayoutGeneration += 1;
       this.dungeonLayoutSeed = `layout:${this.dungeonLayoutSeed}:reset:${this.dungeonLayoutGeneration}`;
     }
-    const dungeon = new DungeonGenerator({
+    const dungeon = createDungeonGenerator({
+      mode: this.dungeonGenerationRequest.mode,
+      worldKind: this.busterSandboxSession?.active
+        ? DUNGEON_WORLD_KIND.Sandbox
+        : DUNGEON_WORLD_KIND.Standard,
+      fixture: this.dungeonGenerationRequest.fixture,
+      undercroftType: this.dungeonGenerationRequest.undercroftType,
+      seed: this.dungeonLayoutSeed,
       difficulty: this.ruinFloor,
       random: createDungeonRandom(this.dungeonLayoutSeed),
       bossProfileId: this.getSelectedBossProfileId(),
@@ -2398,7 +2630,10 @@ export class Game {
     );
     this._collectCameraOcclusionWalls();
     this._collectDungeonRenderCullGroups();
-    this._rebuildDebugLedgeTester(dungeon.playerStart);
+    this._rebuildDebugLedgeTester(
+      dungeon.playerStart,
+      { enabled: this.dungeonGenerationRequest.mode !== DUNGEON_GENERATION_MODE.V2 },
+    );
     this.activeBossExpeditionSpec = null;
     this._configureBossHuntEncounter(dungeon, { ignorePersistedActive: true });
     this.dungeonController = new DungeonController(this, dungeon);
@@ -4396,6 +4631,7 @@ export class Game {
     this.cameraOcclusionHits = [];
     this.cameraOcclusionOwnerByObject = new WeakMap();
     this.cameraOcclusionHiddenOwners = new Set();
+    this.cameraOcclusionHiddenInstances = new Map();
     this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
     this.dungeonRenderCullGroups = [];
     this.dungeonRenderCullAccumulator = 0;
@@ -6316,7 +6552,19 @@ export class Game {
   }
 
   _loop() {
+    const frameStartedAt = globalThis.performance?.now?.() ?? Date.now();
+    const previousFrameStartedAt = this._lastFramePerformanceStartAt;
+    this._lastFramePerformanceStartAt = frameStartedAt;
+    const phaseDurations = {};
+    let phaseStartedAt = frameStartedAt;
+    const finishPhase = (name) => {
+      const now = globalThis.performance?.now?.() ?? Date.now();
+      phaseDurations[name] = now - phaseStartedAt;
+      phaseStartedAt = now;
+    };
     const dt = Math.min(this.clock.getDelta(), 0.05);
+    this.frameHeartbeat += 1;
+    this.lastFrameDelta = dt;
     const gameplayDt = this._consumeHitStopDt(dt);
     const gameplayActive = !this.inventoryOpen && !this.poseDebugOpen && !this.isGameOver;
 
@@ -6327,6 +6575,7 @@ export class Game {
       } else {
         this._updateAimFromPointer();
         const movementBasis = this._getPlayerMovementBasis();
+        this.bossStageRuntime?.update?.(gameplayDt, this);
         this.bossStageRuntime?.prePlayerUpdate?.(gameplayDt, this);
         for (const enemy of this.enemies) {
           if (!enemy || enemy.dead || this._deferredEnemyRemovals?.has(enemy)) continue;
@@ -6400,6 +6649,7 @@ export class Game {
         }
       }
     }
+    finishPhase('gameplay');
 
     this.dungeonController?.updateNpcVisuals(dt, {
       allowAmbient: gameplayActive && !this.animationPreview?.active,
@@ -6414,12 +6664,63 @@ export class Game {
     } else if (this.poseDebugOpen) {
       this.poseDebugHandleGroup.visible = false;
     }
+    finishPhase('ambientEffects');
     this._updateCamera(dt);
+    // Accepted V2 shells use the same full-distance orbit policy as V1: an
+    // opaque wall/catwalk crossing the desired camera ray is hidden below,
+    // rather than pulling the camera forward against that wall. Containment
+    // remains the safety fallback whenever validation or enclosure metadata
+    // is absent, so a malformed shell can never silently expose clear space.
+    this._applyThirdPersonCameraContainmentPolicy();
+    finishPhase('camera');
     this._updateDungeonRenderCulling(dt);
+    finishPhase('renderCulling');
     this._updateCameraWallOcclusion();
+    finishPhase('cameraOcclusion');
     this.ui.update(dt);
+    finishPhase('ui');
     this._syncBrowserTestDataset();
+    finishPhase('browserDiagnostics');
     this.renderer.render(this.scene, this.camera);
+    finishPhase('render');
+    this._recordFramePerformance({
+      frameStartedAt,
+      previousFrameStartedAt,
+      phaseDurations,
+    });
+  }
+
+  _recordFramePerformance({ frameStartedAt, previousFrameStartedAt, phaseDurations }) {
+    const diagnostics = this.framePerformanceDiagnostics;
+    if (!diagnostics) return;
+    const frameEndedAt = globalThis.performance?.now?.() ?? Date.now();
+    const frameDurationMs = Math.max(0, frameEndedAt - frameStartedAt);
+    const frameStartGapMs = Number.isFinite(previousFrameStartedAt)
+      ? Math.max(0, frameStartedAt - previousFrameStartedAt)
+      : 0;
+    diagnostics.sampleCount += 1;
+    diagnostics.lastFrameMs = frameDurationMs;
+    diagnostics.maximumFrameMs = Math.max(diagnostics.maximumFrameMs, frameDurationMs);
+    diagnostics.lastFrameStartGapMs = frameStartGapMs;
+    diagnostics.maximumFrameStartGapMs = Math.max(
+      diagnostics.maximumFrameStartGapMs,
+      frameStartGapMs,
+    );
+    diagnostics.lastHeartbeat = this.frameHeartbeat;
+    if (frameDurationMs >= 250 || frameStartGapMs >= 250) diagnostics.slowFrameCount += 1;
+    for (const [name, durationMs] of Object.entries(phaseDurations)) {
+      const phase = diagnostics.phases[name] ?? {
+        sampleCount: 0,
+        lastDurationMs: 0,
+        maximumDurationMs: 0,
+        totalDurationMs: 0,
+      };
+      phase.sampleCount += 1;
+      phase.lastDurationMs = durationMs;
+      phase.maximumDurationMs = Math.max(phase.maximumDurationMs, durationMs);
+      phase.totalDurationMs += durationMs;
+      diagnostics.phases[name] = phase;
+    }
   }
 
   _getPlayerGroundY() {
@@ -6433,9 +6734,22 @@ export class Game {
       return rampElevation;
     }
 
-    const platformElevation = this.getPlatformFloorElevation?.(position);
+    const platformElevation = this.getPlayerPlatformFloorElevation?.(position)
+      ?? this.getPlatformFloorElevation?.(position);
     if (Number.isFinite(platformElevation)) {
       return platformElevation;
+    }
+
+    // V2 fall apertures are plan-owned holes. Once their temporary support is
+    // absent (for example, after a crumble surface collapses), resolve the
+    // physical ground to the authored catchment instead of allowing the
+    // legacy nearest-floor lookup to invent a floor at the source elevation.
+    // Dynamic platforms intentionally take precedence so an armed crumble
+    // floor remains solid until its controller disables that support.
+    const authoredFallGroundY = this.dungeon?.environmentRuntime
+      ?.getAuthorizedFallGroundY?.(position);
+    if (Number.isFinite(authoredFallGroundY)) {
+      return authoredFallGroundY;
     }
 
     const railElevation = this.dungeonController?.getPlayerRailSupportElevation?.(position);
@@ -6551,25 +6865,41 @@ export class Game {
     key.shadow.camera.bottom = -18;
     this.scene.add(key);
 
-    const underlay = new THREE.Mesh(
-      new THREE.PlaneGeometry(this.arenaRadius * 2.5, this.arenaRadius * 2.5),
-      new THREE.MeshStandardMaterial({ color: 0x171b1d, roughness: 0.96, metalness: 0 }),
-    );
-    underlay.name = 'ruinVoidUnderlay';
-    underlay.rotation.x = -Math.PI / 2;
-    underlay.position.y = -0.09;
-    underlay.receiveShadow = true;
-    this.scene.add(underlay);
+    const worldKind = this._creatingBusterSandbox
+      ? DUNGEON_WORLD_KIND.Sandbox
+      : DUNGEON_WORLD_KIND.Standard;
+    const bossProfileId = this._creatingBusterSandbox ? null : this.getSelectedBossProfileId();
+    const generationMode = resolveDungeonGenerationMode({
+      mode: this.dungeonGenerationRequest.mode,
+      worldKind,
+      bossProfileId,
+    });
+    if (generationMode !== DUNGEON_GENERATION_MODE.V2) {
+      const underlay = new THREE.Mesh(
+        new THREE.PlaneGeometry(this.arenaRadius * 2.5, this.arenaRadius * 2.5),
+        new THREE.MeshStandardMaterial({ color: 0x171b1d, roughness: 0.96, metalness: 0 }),
+      );
+      underlay.name = 'ruinVoidUnderlay';
+      underlay.rotation.x = -Math.PI / 2;
+      underlay.position.y = -0.09;
+      underlay.receiveShadow = true;
+      this.scene.add(underlay);
 
-    const grid = new THREE.GridHelper(this.arenaRadius * 2.2, 64, 0x43515a, 0x283138);
-    grid.name = 'ruinConstructionGrid';
-    grid.position.y = 0.014;
-    this.scene.add(grid);
+      const grid = new THREE.GridHelper(this.arenaRadius * 2.2, 64, 0x43515a, 0x283138);
+      grid.name = 'ruinConstructionGrid';
+      grid.position.y = 0.014;
+      this.scene.add(grid);
+    }
 
-    const dungeon = new DungeonGenerator({
+    const dungeon = createDungeonGenerator({
+      mode: generationMode,
+      worldKind,
+      fixture: this.dungeonGenerationRequest.fixture,
+      undercroftType: this.dungeonGenerationRequest.undercroftType,
+      seed: this.dungeonLayoutSeed,
       difficulty: this.ruinFloor,
       random: createDungeonRandom(this.dungeonLayoutSeed),
-      bossProfileId: this._creatingBusterSandbox ? null : this.getSelectedBossProfileId(),
+      bossProfileId,
     }).generate();
     dungeon.layoutSeed = this.dungeonLayoutSeed;
     this.dungeon = dungeon;
@@ -6582,15 +6912,20 @@ export class Game {
     if (!this._creatingBusterSandbox) dungeon.activateNpcAssets?.();
     this._collectCameraOcclusionWalls();
     this._collectDungeonRenderCullGroups();
-    this._rebuildDebugLedgeTester(dungeon.playerStart);
+    this._rebuildDebugLedgeTester(
+      dungeon.playerStart,
+      { enabled: generationMode !== DUNGEON_GENERATION_MODE.V2 },
+    );
     this._configureBossHuntEncounter(dungeon);
 
   }
 
-  _rebuildDebugLedgeTester(origin = new THREE.Vector3()) {
+  _rebuildDebugLedgeTester(origin = new THREE.Vector3(), { enabled = true } = {}) {
     this.debugLedgeTester?.removeFromParent?.();
     this.debugLedgeCandidates = [];
     this.debugLedgePlatform = null;
+    this.debugLedgeTester = null;
+    if (!enabled) return;
 
     const base = origin?.clone?.() ?? new THREE.Vector3();
     const center = base.clone().add(new THREE.Vector3(
@@ -6686,8 +7021,24 @@ export class Game {
     return this._getPlatformFloorElevation(platform, position);
   }
 
-  getPlatformFloorElevation(position) {
-    return this.getPlatformSupport(position)?.elevation ?? null;
+  getPlatformFloorElevation(position, options = {}) {
+    return this.getPlatformSupport(position, options)?.elevation ?? null;
+  }
+
+  getPlayerPlatformFloorElevation(position) {
+    const player = this.player;
+    const airborne = player?.isJumpAirborne?.() === true
+      || player?.isPhysicalJumpActive?.() === true
+      || player?.isDodgeRollAirborne?.() === true
+      || player?.isPowerKnockbackAirborne?.() === true;
+    const playerRadius = Math.max(0, Number(player?.radius) || 0);
+    const horizontalMargin = airborne
+      ? PLATFORM_SUPPORT_EDGE_MARGIN
+      : Math.max(
+          PLATFORM_SUPPORT_EDGE_MARGIN,
+          playerRadius - PLATFORM_PARTIAL_CONTACT_EPSILON,
+        );
+    return this.getPlatformFloorElevation(position, { horizontalMargin });
   }
 
   registerDynamicPlatformingSurface(surface) {
@@ -6712,26 +7063,34 @@ export class Game {
     return true;
   }
 
-  getPlatformSupport(position) {
+  getPlatformSupport(position, { horizontalMargin = PLATFORM_SUPPORT_EDGE_MARGIN } = {}) {
+    const queryStartedAt = globalThis.performance?.now?.() ?? Date.now();
     let support = null;
-    for (const platform of this._getPlatformingSurfaces()) {
-      const candidate = this._getPlatformFloorElevation(platform, position);
+    const surfaces = this._getPlatformingSurfaces();
+    for (const platform of surfaces) {
+      const candidate = this._getPlatformFloorElevation(platform, position, {
+        horizontalMargin,
+      });
       if (Number.isFinite(candidate) && (!support || candidate > support.elevation)) {
         support = { surface: platform, elevation: candidate };
       }
     }
+    this._recordPlatformQuery?.('support', surfaces.length, queryStartedAt);
     return support;
   }
 
-  _getPlatformFloorElevation(platform, position) {
+  _getPlatformFloorElevation(platform, position, {
+    horizontalMargin = PLATFORM_SUPPORT_EDGE_MARGIN,
+  } = {}) {
     if (!platform || platform.enabled === false || !position) {
       return null;
     }
 
+    const margin = Math.max(0, Number(horizontalMargin) || 0);
     const insideTop = typeof platform.containsTop === 'function'
-      ? Boolean(platform.containsTop(position, -0.08))
-      : Math.abs(position.x - platform.center.x) <= platform.halfWidth + 0.08
-        && Math.abs(position.z - platform.center.z) <= platform.halfDepth + 0.08;
+      ? Boolean(platform.containsTop(position, -margin))
+      : Math.abs(position.x - platform.center.x) <= platform.halfWidth + margin
+        && Math.abs(position.z - platform.center.z) <= platform.halfDepth + margin;
     if (!insideTop || position.y < platform.topY - 0.5) {
       return null;
     }
@@ -6744,9 +7103,19 @@ export class Game {
   }
 
   isPositionInsidePlatformBlock(position, margin = 0.08) {
-    return this._getPlatformingSurfaces().some((platform) => (
-      this._isPositionInsidePlatformBlock(platform, position, margin)
-    ));
+    const queryStartedAt = globalThis.performance?.now?.() ?? Date.now();
+    const surfaces = this._getPlatformingSurfaces();
+    let candidateTests = 0;
+    let blocked = false;
+    for (const platform of surfaces) {
+      candidateTests += 1;
+      if (this._isPositionInsidePlatformBlock(platform, position, margin)) {
+        blocked = true;
+        break;
+      }
+    }
+    this._recordPlatformQuery?.('block', candidateTests, queryStartedAt);
+    return blocked;
   }
 
   _isPositionInsidePlatformBlock(platform, position, margin = 0.08) {
@@ -6759,8 +7128,15 @@ export class Game {
 
     const insideX = Math.abs(position.x - platform.center.x) <= platform.halfWidth + margin;
     const insideZ = Math.abs(position.z - platform.center.z) <= platform.halfDepth + margin;
+    // Plan-owned V2 surfaces describe an actual finite collision slab.  Treating
+    // that slab as an infinite column below topY makes an upper catwalk block
+    // unrelated playable floors and ladder landings several metres beneath it.
+    // Older platform records that do not declare baseY retain their historical
+    // blocking behavior.
+    const aboveBase = !Number.isFinite(platform.baseY)
+      || position.y >= platform.baseY - margin;
     const belowTop = position.y < platform.topY - 0.05;
-    return insideX && insideZ && belowTop;
+    return insideX && insideZ && aboveBase && belowTop;
   }
 
   _getPlatformingSurfaces() {
@@ -6774,6 +7150,40 @@ export class Game {
       ]
       : [...this.platformingPlatforms, ...dynamicPlatforms, ...this.debugSpawnedPlatforms];
     return surfaces.filter((surface) => surface?.enabled !== false);
+  }
+
+  _recordPlatformQuery(kind, candidateTests, queryStartedAt) {
+    const diagnostics = this.platformQueryDiagnostics;
+    if (!diagnostics) return;
+    const durationMs = Math.max(
+      0,
+      (globalThis.performance?.now?.() ?? Date.now()) - queryStartedAt,
+    );
+    const normalizedCandidateTests = Math.max(0, Number(candidateTests) || 0);
+    diagnostics.queryCount += 1;
+    diagnostics.candidateTests += normalizedCandidateTests;
+    diagnostics.maximumCandidatesPerQuery = Math.max(
+      diagnostics.maximumCandidatesPerQuery,
+      normalizedCandidateTests,
+    );
+    diagnostics.totalDurationMs += durationMs;
+    diagnostics.maximumDurationMs = Math.max(diagnostics.maximumDurationMs, durationMs);
+    const kindDiagnostics = diagnostics.byKind[kind] ?? {
+      queryCount: 0,
+      candidateTests: 0,
+      maximumCandidatesPerQuery: 0,
+      totalDurationMs: 0,
+      maximumDurationMs: 0,
+    };
+    kindDiagnostics.queryCount += 1;
+    kindDiagnostics.candidateTests += normalizedCandidateTests;
+    kindDiagnostics.maximumCandidatesPerQuery = Math.max(
+      kindDiagnostics.maximumCandidatesPerQuery,
+      normalizedCandidateTests,
+    );
+    kindDiagnostics.totalDurationMs += durationMs;
+    kindDiagnostics.maximumDurationMs = Math.max(kindDiagnostics.maximumDurationMs, durationMs);
+    diagnostics.byKind[kind] = kindDiagnostics;
   }
 
   _rebuildPlatformingLedgeCandidates() {
@@ -6877,8 +7287,12 @@ export class Game {
   }
 
   _tryResolvePlatformLanding(context = {}) {
-    return this._tryResolveDebugPlatformLanding(context, this._getPlatformingSurfaces())
+    const queryStartedAt = globalThis.performance?.now?.() ?? Date.now();
+    const surfaces = this._getPlatformingSurfaces();
+    const resolved = this._tryResolveDebugPlatformLanding(context, surfaces)
       || this.dungeonController?.tryResolvePlayerRailLanding?.(context) === true;
+    this._recordPlatformQuery?.('landing', surfaces.length, queryStartedAt);
+    return resolved;
   }
 
   _tryResolveDebugPlatformLanding({
@@ -6962,17 +7376,21 @@ export class Game {
   }
 
   _tryResolvePlatformLedgeCling(context = {}) {
+    const queryStartedAt = globalThis.performance?.now?.() ?? Date.now();
     const dynamicLedgeCandidates = (this.dynamicPlatformingPlatforms ?? [])
       .filter((platform) => platform?.enabled !== false)
       .flatMap((platform) => this._createPlatformLedgeCandidates(platform));
-    return this._tryResolveDebugLedgeCling(
+    const candidates = [
+      ...this.debugLedgeCandidates,
+      ...this.platformingLedgeCandidates,
+      ...dynamicLedgeCandidates,
+    ];
+    const resolved = this._tryResolveDebugLedgeCling(
       context,
-      [
-        ...this.debugLedgeCandidates,
-        ...this.platformingLedgeCandidates,
-        ...dynamicLedgeCandidates,
-      ],
+      candidates,
     );
+    this._recordPlatformQuery?.('ledge', candidates.length, queryStartedAt);
+    return resolved;
   }
 
   _isExceptionalPlatformEdgeCatch({
@@ -7348,12 +7766,24 @@ export class Game {
     );
   }
 
-  _collectCameraOcclusionWalls() {
+  _restoreCameraOcclusionState() {
     for (const owner of this.cameraOcclusionHiddenOwners) {
       owner.visible = this.cameraOcclusionOwnerBaseVisibility.get(owner) ?? true;
     }
-
     this.cameraOcclusionHiddenOwners.clear();
+    for (const [object, matrices] of this.cameraOcclusionHiddenInstances ?? []) {
+      if (!object?.isInstancedMesh) continue;
+      for (const [instanceId, matrix] of matrices) {
+        if (instanceId >= 0 && instanceId < object.count) object.setMatrixAt(instanceId, matrix);
+      }
+      object.instanceMatrix.needsUpdate = true;
+    }
+    this.cameraOcclusionHiddenInstances?.clear?.();
+  }
+
+  _collectCameraOcclusionWalls() {
+    this._restoreCameraOcclusionState();
+
     this.cameraOcclusionEntries.length = 0;
     this.cameraOcclusionBins.clear();
     this.cameraOcclusionCandidateSet.clear();
@@ -7370,6 +7800,13 @@ export class Game {
       if (!isWall && object.userData?.cameraOcclusionSurface !== true) {
         return;
       }
+      // V2 water volumes, route/hazard telegraphs, pickup halos, and any
+      // translucent presentation are deliberately readable through the
+      // camera. Even if a fixture accidentally carries the surface marker,
+      // it cannot enter the opaque wall ray set.
+      if (!isOpaqueCameraOcclusionSurface(object)) {
+        return;
+      }
       let owner = object;
       while (owner.parent && owner.parent !== this.dungeon.group) {
         if (owner.userData?.cameraOcclusionOwner) {
@@ -7378,6 +7815,12 @@ export class Game {
         owner = owner.parent;
       }
       if (!owner.userData?.cameraOcclusionOwner) {
+        owner = object;
+      }
+      // Native V1 rooms are instanced for performance. A misplaced marker on
+      // the placement root must never hide an entire chamber; the assembler
+      // supplies the smallest independently hideable mesh/batch instead.
+      if (owner.isGroup && owner.userData?.v2PlacementId) {
         owner = object;
       }
       this.cameraOcclusionOwnerBaseVisibility.set(owner, owner.visible);
@@ -7404,11 +7847,38 @@ export class Game {
     });
   }
 
-  _updateCameraWallOcclusion() {
-    for (const owner of this.cameraOcclusionHiddenOwners) {
-      owner.visible = this.cameraOcclusionOwnerBaseVisibility.get(owner) ?? true;
+  _usesAcceptedV2OpaqueCameraOcclusion() {
+    const runtimeValidationErrors = this.dungeon?.runtimeValidationErrors;
+    if (
+      this.dungeon?.generationMode !== 'v2'
+      // DungeonGeneratorV2 attaches the accepted validator result directly to
+      // the compatibility facade. Progression is plan-owned gameplay data and
+      // deliberately has no nested validation object in the live runtime.
+      || this.dungeon?.validation?.accepted !== true
+      // Missing runtime error accounting is not equivalent to an error-free
+      // shell. Keep containment as the fail-closed policy unless the assembler
+      // supplied the authoritative mutable error collection and it is empty.
+      || !Array.isArray(runtimeValidationErrors)
+      || runtimeValidationErrors.length > 0
+    ) {
+      return false;
     }
-    this.cameraOcclusionHiddenOwners.clear();
+    return this.cameraOcclusionEntries.some(({ object }) => (
+      object?.userData?.v2CameraOcclusionClass === 'opaque-enclosure'
+      && isOpaqueCameraOcclusionSurface(object)
+    ));
+  }
+
+  _applyThirdPersonCameraContainmentPolicy() {
+    if (this._usesAcceptedV2OpaqueCameraOcclusion()) return false;
+    return this.dungeon?.environmentRuntime?.constrainThirdPersonCamera?.(
+      this.camera,
+      this.player,
+    ) === true;
+  }
+
+  _updateCameraWallOcclusion() {
+    this._restoreCameraOcclusionState();
 
     if (!this.cameraOcclusionEntries.length || !this.player?.root) {
       return;
@@ -7493,6 +7963,31 @@ export class Game {
         }
       }
       for (const hit of hits) {
+        if (
+          hit.object?.isInstancedMesh
+          && hit.object.userData?.v2CameraOcclusionInstanceMode === 'per-instance'
+        ) {
+          if (!Number.isInteger(hit.instanceId) || hit.instanceId < 0 || hit.instanceId >= hit.object.count) {
+            continue;
+          }
+          let hidden = this.cameraOcclusionHiddenInstances.get(hit.object);
+          if (!hidden) {
+            hidden = new Map();
+            this.cameraOcclusionHiddenInstances.set(hit.object, hidden);
+          }
+          if (!hidden.has(hit.instanceId)) {
+            const originalMatrix = new THREE.Matrix4();
+            hit.object.getMatrixAt(hit.instanceId, originalMatrix);
+            hidden.set(hit.instanceId, originalMatrix);
+            const hiddenMatrix = originalMatrix.clone();
+            for (const index of [0, 1, 2, 4, 5, 6, 8, 9, 10]) {
+              hiddenMatrix.elements[index] = 0;
+            }
+            hit.object.setMatrixAt(hit.instanceId, hiddenMatrix);
+            hit.object.instanceMatrix.needsUpdate = true;
+          }
+          continue;
+        }
         const owner = this.cameraOcclusionOwnerByObject.get(hit.object) ?? hit.object;
         owner.visible = false;
         this.cameraOcclusionHiddenOwners.add(owner);
@@ -7550,12 +8045,28 @@ export class Game {
         this._distanceToRenderCullBounds(this.player.root.position, descriptor),
         this._distanceToRenderCullBounds(this.camera.position, descriptor),
       );
-      if (renderGroup.visible && distance > DUNGEON_RENDER_CULL_HIDE_DISTANCE) {
+      const minimumHideDistance = this.dungeon?.generationMode === 'v2'
+        ? DUNGEON_RENDER_CULL_MINIMUM_V2_HIDE_DISTANCE
+        : 0;
+      const hideDistance = Math.max(
+        minimumHideDistance,
+        Number(descriptor.hideDistance) || DUNGEON_RENDER_CULL_HIDE_DISTANCE,
+      );
+      const showDistance = Math.min(
+        hideDistance - 0.1,
+        Math.max(
+          this.dungeon?.generationMode === 'v2' ? 120.1 : 0,
+          Number(descriptor.showDistance) || DUNGEON_RENDER_CULL_SHOW_DISTANCE,
+        ),
+      );
+      if (renderGroup.visible && distance > hideDistance) {
         renderGroup.visible = false;
-      } else if (!renderGroup.visible && distance < DUNGEON_RENDER_CULL_SHOW_DISTANCE) {
+      } else if (!renderGroup.visible && distance < showDistance) {
         renderGroup.visible = true;
       }
       renderGroup.userData.distanceCulled = !renderGroup.visible;
+      renderGroup.userData.renderCullHideDistance = hideDistance;
+      renderGroup.userData.renderCullShowDistance = showDistance;
       const drawObjectCount = descriptor.drawObjectCount ?? descriptor.objectCount ?? 0;
       if (renderGroup.visible) {
         visibleGroupCount += 1;
@@ -7573,6 +8084,8 @@ export class Game {
       visibleDrawObjectCount,
       hiddenDrawObjectCount,
       totalDrawObjectCount: visibleDrawObjectCount + hiddenDrawObjectCount,
+      maximumCameraProofDistance: 120,
+      minimumV2HideDistance: DUNGEON_RENDER_CULL_MINIMUM_V2_HIDE_DISTANCE,
     };
   }
 

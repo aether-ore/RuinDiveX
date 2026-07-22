@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CombatSystem } from './CombatSystem.js';
 import { CameraController } from './CameraController.js';
 import { DungeonController } from './DungeonController.js';
+import { DungeonConnectorLiftRuntime } from './DungeonConnectorLiftRuntime.js';
 import { DungeonGenerator } from './DungeonGenerator.js';
 import { EnemySpawner } from './EnemySpawner.js';
 import {
@@ -204,6 +205,7 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'arenaRadius',
   'platformingPlatforms',
   'dynamicPlatformingPlatforms',
+  'connectorLiftRuntime',
   'bossStageRuntime',
   'platformingLedgeCandidates',
   'debugLedgeTester',
@@ -979,6 +981,7 @@ export class Game {
     this.debugLedgePlatform = null;
     this.platformingPlatforms = [];
     this.dynamicPlatformingPlatforms = [];
+    this.connectorLiftRuntime = null;
     this.platformingLedgeCandidates = [];
     this.debugSpawnedPlatforms = [];
     this.debugPlatformCounter = 0;
@@ -1056,6 +1059,7 @@ export class Game {
       ? this.dungeonController.core
       : null;
     if (this.activeWorldBundle) this.activeWorldBundle.controller = this.dungeonController;
+    this._activateConnectorLiftRuntimeForBundle(this.activeWorldBundle);
     this.bossStageRuntime?.mount?.(this);
     this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
       this.dungeonController.resolvePowerKnockbackTravel(fromPosition, position)
@@ -2517,6 +2521,10 @@ export class Game {
   } = {}) {
     if (!bundle || bundle.disposed) return this.lastWorldDisposalStats;
     if (clearRunState) this._clearDungeonRunState();
+    bundle.connectorLiftRuntime?.dispose?.();
+    if (this.connectorLiftRuntime === bundle.connectorLiftRuntime) {
+      this.connectorLiftRuntime = null;
+    }
     bundle.controller?.dispose?.();
     bundle.facade?.specialEnvironment?.dispose?.();
     for (const animator of bundle.npcAnimators) animator.dispose?.();
@@ -2563,11 +2571,68 @@ export class Game {
     this.player.powerKnockbackLandingResolver = ({ position, direction, originPosition }) => (
       this.dungeonController.resolvePowerKnockbackLanding(position, direction, originPosition)
     );
+    this._activateConnectorLiftRuntimeForBundle(bundle);
     return controller;
+  }
+
+  _activateConnectorLiftRuntimeForBundle(bundle = this.activeWorldBundle) {
+    const previous = this.connectorLiftRuntime;
+    const nextFacade = bundle?.worldKind === 'dungeon' ? bundle.facade : null;
+    let next = bundle?.connectorLiftRuntime ?? null;
+
+    if (next?.disposed) {
+      next = null;
+      bundle.connectorLiftRuntime = null;
+    }
+    if (!next && (nextFacade?.connectorLifts?.length ?? 0) > 0) {
+      next = new DungeonConnectorLiftRuntime(this, nextFacade);
+      bundle.connectorLiftRuntime = next;
+    }
+    if (previous && previous !== next) previous.unmount?.();
+    this.connectorLiftRuntime = next;
+    next?.mount?.(this);
+    return next;
+  }
+
+  _replaceConnectorLiftRuntimeForDungeon(dungeon = this.dungeon) {
+    const previous = this.connectorLiftRuntime;
+    previous?.dispose?.();
+    if (this.activeWorldBundle?.connectorLiftRuntime === previous) {
+      this.activeWorldBundle.connectorLiftRuntime = null;
+    }
+    this.connectorLiftRuntime = null;
+    if (this.worldKind !== 'dungeon' || (dungeon?.connectorLifts?.length ?? 0) === 0) {
+      return null;
+    }
+    const runtime = new DungeonConnectorLiftRuntime(this, dungeon);
+    runtime.mount(this);
+    this.connectorLiftRuntime = runtime;
+    if (this.activeWorldBundle?.worldKind === 'dungeon') {
+      this.activeWorldBundle.connectorLiftRuntime = runtime;
+    }
+    return runtime;
+  }
+
+  requestConnectorLift(liftId, endpoint) {
+    return this.connectorLiftRuntime?.requestLift?.(liftId, endpoint)
+      ?? { ok: false, reason: 'connector-lift-runtime-unavailable' };
+  }
+
+  getConnectorLiftDiagnostics() {
+    return this.connectorLiftRuntime?.getDiagnostics?.() ?? Object.freeze({
+      mounted: false,
+      disposed: false,
+      liftCount: 0,
+      lifts: Object.freeze([]),
+    });
   }
 
   _disposeUncommittedWorldCandidate(bundle) {
     if (!bundle || bundle.disposed) return null;
+    bundle.connectorLiftRuntime?.dispose?.();
+    if (this.connectorLiftRuntime === bundle.connectorLiftRuntime) {
+      this.connectorLiftRuntime = null;
+    }
     bundle.controller?.dispose?.();
     bundle.facade?.specialEnvironment?.dispose?.();
     for (const animator of bundle.npcAnimators) animator.dispose?.();
@@ -4264,6 +4329,7 @@ export class Game {
     if (this.activeWorldBundle?.worldKind === 'dungeon') {
       this.activeWorldBundle.controller = this.dungeonController;
     }
+    this._replaceConnectorLiftRuntimeForDungeon(dungeon);
     this.bossStageRuntime?.mount?.(this);
 
     this.player.root.position.copy(dungeon.playerStart);
@@ -6245,6 +6311,7 @@ export class Game {
     this.arenaRadius = sourceWorld?.values?.arenaRadius ?? 82;
     this.platformingPlatforms = [];
     this.dynamicPlatformingPlatforms = [];
+    this.connectorLiftRuntime = null;
     this.bossStageRuntime = null;
     this.platformingLedgeCandidates = [];
     this.debugLedgeTester = null;
@@ -6352,6 +6419,7 @@ export class Game {
       this.combat.beginSwordJumpSlashLandingTrail(startProgress)
     );
     this.dungeonController = new DungeonController(this, this.dungeon);
+    this._replaceConnectorLiftRuntimeForDungeon(this.dungeon);
     this.player.jumpLedgeClingResolver = (context) => this._tryResolvePlatformLedgeCling(context);
     this.player.jumpPlatformLandingResolver = (context) => this._tryResolvePlatformLanding(context);
     this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
@@ -6404,6 +6472,7 @@ export class Game {
     this.lootSystem?.clear?.();
     this.refractors?.clear?.();
     for (const animator of this.dungeon?.npcAnimators ?? []) animator.dispose?.();
+    context.values.connectorLiftRuntime?.dispose?.();
     this.player.dispose?.();
 
     for (const geometry of owned.geometries) {
@@ -8196,6 +8265,7 @@ export class Game {
         this._updateAimFromPointer();
         const movementBasis = this._getPlayerMovementBasis();
         this.bossStageRuntime?.prePlayerUpdate?.(gameplayDt, this);
+        this.connectorLiftRuntime?.prePlayerUpdate?.(gameplayDt, this);
         for (const enemy of this.enemies) {
           if (!enemy || enemy.dead || this._deferredEnemyRemovals?.has(enemy)) continue;
           enemy.prePlayerUpdate?.(gameplayDt, this);
@@ -8753,7 +8823,9 @@ export class Game {
         ...this.debugSpawnedPlatforms,
       ]
       : [...this.platformingPlatforms, ...dynamicPlatforms, ...this.debugSpawnedPlatforms];
-    return surfaces.filter((surface) => surface?.enabled !== false);
+    // A moving surface remains in the facade compatibility collection while
+    // its runtime also registers it dynamically. Query each object once.
+    return [...new Set(surfaces)].filter((surface) => surface?.enabled !== false);
   }
 
   _rebuildPlatformingLedgeCandidates() {

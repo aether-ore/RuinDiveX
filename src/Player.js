@@ -101,9 +101,20 @@ const PLAYER_MODEL_MTL = 'Mega Man Volnutt.mtl';
 const PLAYER_MODEL_OBJ = 'Mega Man Volnutt.obj';
 const BUSTER_MODEL_MTL = 'Mega Man Volnutt Buster US.mtl';
 const BUSTER_MODEL_OBJ = 'Mega Man Volnutt Buster US.obj';
-const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
+export const PLAYER_FBX_ANIMATION_DEFINITIONS = Object.freeze([
   { key: 'breathingIdle', file: 'Breathing Idle.fbx', label: 'Breathing Idle', loop: true, preserveRootMotion: true },
-  { key: 'climbingLadder', file: 'Climbing Ladder.fbx', label: 'Climbing Ladder', loop: true },
+  {
+    key: 'climbingLadder',
+    file: 'Climbing Ladder.fbx',
+    label: 'Climbing Ladder',
+    loop: true,
+    // World-space height belongs to the ladder traversal controller. The FBX
+    // may contain Mixamo hip translation and a reversed root-space heading;
+    // both must be removed or the rendered body drifts away from its collider.
+    lockRootY: true,
+    lockRootYToRest: true,
+    normalizeRootRotationToRest: true,
+  },
   { key: 'coverToStand', file: 'cover to stand.fbx', label: 'Cover To Stand', loop: false },
   { key: 'coverToStand2', file: 'cover to stand (2).fbx', label: 'Cover To Stand Alt', loop: false },
   { key: 'crouchedSneakLeft', file: 'crouched sneaking left.fbx', label: 'Crouched Sneak Left', loop: true },
@@ -213,6 +224,11 @@ const LEDGE_WALL_JUMP_FALL_VERTICAL_VELOCITY = -1.2;
 const LEDGE_CLIMB_HAND_RELEASE_PROGRESS = 0.82;
 const LEDGE_CLIMB_HAND_RELEASE_END_PROGRESS = 0.94;
 const LEDGE_TOWARD_INPUT_DOT = 0.38;
+const LADDER_CLIMB_SPEED = 3.1;
+const LADDER_EXIT_EPSILON = 0.035;
+const LADDER_DEFAULT_MOUNT_RADIUS = 1.8;
+const LADDER_MIN_BODY_CLEARANCE = 0.35;
+const LADDER_MAX_BODY_CLEARANCE = 0.65;
 // These values define the authored hand contact, not a visual root offset. A
 // small outward bias keeps the wrist joints on the player-facing side of the
 // ledge while the hand meshes still wrap over its top edge.
@@ -435,6 +451,8 @@ export class Player {
     this._jumpLandingVisualClipKey = null;
     this._lastExternalModelGrounding = null;
     this.ledgeCling = null;
+    this.ladderTraversal = null;
+    this.ladderDismountHandoff = null;
     this.ledgeWallJumpDirection = new THREE.Vector3(0, 0, -1);
     this.ledgeWallJumpStartPosition = new THREE.Vector3();
     this.ledgeWallJumpGroundY = 0;
@@ -747,6 +765,19 @@ export class Player {
     this._updateSwordJumpSlashVisualState(dt);
 
     if (this._updateExternalMotion(dt, movementOptions.game ?? null)) {
+      return;
+    }
+
+    if (this.isClimbingLadder()) {
+      // A ladder owns the player's root, but expedition timers and damage-over-
+      // time still advance normally while ordinary locomotion is suppressed.
+      this._updateStatusEffects(dt);
+      this._updateTemporaryStatBonuses(dt);
+      this._updateBracedFireState(dt);
+      this._updateShieldGuardState(dt);
+      this._updateMovementLockState(dt);
+      this._updateAttackFacingState(dt);
+      this._updateLadderTraversal(dt, input);
       return;
     }
 
@@ -1951,6 +1982,18 @@ export class Player {
   }
 
   tryJump(input = new Set(), movementOptions = {}) {
+    if (this.isClimbingLadder()) {
+      // Space must never choose an exit and teleport out of the middle of a
+      // shaft. Caged connector ladders consume it; explicitly open ladders may
+      // opt into a controlled fall that begins at the current root position.
+      if (this.ladderTraversal?.allowJumpRelease === true
+        && this.ladderTraversal?.caged !== true) {
+        return this.releaseLadderToFall('jump-release');
+      }
+      this.root.userData.lastLadderJumpResult = 'ignored-in-caged-shaft';
+      return true;
+    }
+
     if (this.isLedgeClinging()) {
       return this._tryLedgeJump(input, movementOptions);
     }
@@ -2214,6 +2257,354 @@ export class Player {
       jumpReachHeight: this.getJumpReachHeight(state),
       previousRootY,
     }) === true;
+  }
+
+  isClimbingLadder() {
+    return Boolean(this.ladderTraversal);
+  }
+
+  _resolveLadderEndpoint(ladder, endpoint, center, bottomY, topY) {
+    const fallbackY = endpoint === 'top' ? topY : bottomY;
+    const exit = endpoint === 'top' ? ladder.topExit : ladder.bottomExit;
+    const mount = endpoint === 'top' ? ladder.topMountPosition : ladder.bottomMountPosition;
+    const source = mount ?? exit ?? {};
+    return new THREE.Vector3(
+      Number.isFinite(Number(source?.x)) ? Number(source.x) : center.x,
+      Number.isFinite(Number(source?.y)) ? Number(source.y) : fallbackY,
+      Number.isFinite(Number(source?.z)) ? Number(source.z) : center.z,
+    );
+  }
+
+  _resolveLadderExit(ladder, endpoint, center, fallbackY) {
+    const source = (endpoint === 'top' ? ladder.topExit : ladder.bottomExit) ?? {};
+    return new THREE.Vector3(
+      Number.isFinite(Number(source?.x)) ? Number(source.x) : center.x,
+      Number.isFinite(Number(source?.y)) ? Number(source.y) : fallbackY,
+      Number.isFinite(Number(source?.z)) ? Number(source.z) : center.z,
+    );
+  }
+
+  _resolveLadderHorizontalDirection(direction, fallback) {
+    const resolved = new THREE.Vector3(
+      Number(direction?.x),
+      0,
+      Number(direction?.z),
+    );
+    if (!Number.isFinite(resolved.x)
+      || !Number.isFinite(resolved.z)
+      || resolved.lengthSq() <= 0.0001) {
+      return fallback.clone();
+    }
+    return resolved.normalize();
+  }
+
+  mountLadder(ladder = {}, { endpoint = 'auto' } = {}) {
+    if (this.dead
+      || this.isClimbingLadder()
+      || this.isJumpAirborne?.()
+      || this.isLedgeClinging?.()
+      || this.isPowerKnockbackActive()
+      || this.isExternalMotionActive()) {
+      return false;
+    }
+
+    const rawCenter = ladder.center ?? ladder.position ?? {};
+    const bottomY = Number(ladder.bottomY);
+    const topY = Number(ladder.topY);
+    if (!Number.isFinite(Number(rawCenter.x))
+      || !Number.isFinite(Number(rawCenter.z))
+      || !Number.isFinite(bottomY)
+      || !Number.isFinite(topY)
+      || topY <= bottomY + 0.5) {
+      return false;
+    }
+
+    const rawFacingX = Number(ladder.facing?.x);
+    const rawFacingZ = Number(ladder.facing?.z);
+    const facing = new THREE.Vector3(
+      Number.isFinite(rawFacingX) ? rawFacingX : 0,
+      0,
+      Number.isFinite(rawFacingZ) ? rawFacingZ : 1,
+    );
+    if (facing.lengthSq() <= 0.0001) facing.set(0, 0, 1);
+    else facing.normalize();
+
+    const rawPlaneNormalX = Number(ladder.planeNormal?.x);
+    const rawPlaneNormalZ = Number(ladder.planeNormal?.z);
+    const planeNormal = new THREE.Vector3(
+      Number.isFinite(rawPlaneNormalX) ? rawPlaneNormalX : -facing.x,
+      0,
+      Number.isFinite(rawPlaneNormalZ) ? rawPlaneNormalZ : -facing.z,
+    );
+    if (planeNormal.lengthSq() <= 0.0001) planeNormal.copy(facing).multiplyScalar(-1);
+    else planeNormal.normalize();
+
+    const bodyClearance = Number.isFinite(Number(ladder.bodyClearance))
+      ? Number(ladder.bodyClearance)
+      : 0.42;
+    if (bodyClearance < LADDER_MIN_BODY_CLEARANCE
+      || bodyClearance > LADDER_MAX_BODY_CLEARANCE
+      || facing.dot(planeNormal) > -0.98) {
+      return false;
+    }
+
+    const providedPlaneCenter = ladder.planeCenter;
+    const planeCenterX = Number.isFinite(Number(providedPlaneCenter?.x))
+      ? Number(providedPlaneCenter.x)
+      : Number(rawCenter.x) - planeNormal.x * bodyClearance;
+    const planeCenterZ = Number.isFinite(Number(providedPlaneCenter?.z))
+      ? Number(providedPlaneCenter.z)
+      : Number(rawCenter.z) - planeNormal.z * bodyClearance;
+    const center = new THREE.Vector3(
+      planeCenterX + planeNormal.x * bodyClearance,
+      0,
+      planeCenterZ + planeNormal.z * bodyClearance,
+    );
+    const declaredCenterError = Math.hypot(
+      Number(rawCenter.x) - center.x,
+      Number(rawCenter.z) - center.z,
+    );
+    if (declaredCenterError > 0.015) {
+      return false;
+    }
+
+    const bottomMount = this._resolveLadderEndpoint(ladder, 'bottom', center, bottomY, topY);
+    const topMount = this._resolveLadderEndpoint(ladder, 'top', center, bottomY, topY);
+    const bottomDistanceSq = this.root.position.distanceToSquared(bottomMount);
+    const topDistanceSq = this.root.position.distanceToSquared(topMount);
+    const resolvedEndpoint = endpoint === 'bottom' || endpoint === 'top'
+      ? endpoint
+      : bottomDistanceSq <= topDistanceSq ? 'bottom' : 'top';
+    const mountDistanceSq = resolvedEndpoint === 'top' ? topDistanceSq : bottomDistanceSq;
+    const mountRadius = Number.isFinite(Number(ladder.mountRadius))
+      ? Math.max(0.5, Number(ladder.mountRadius))
+      : LADDER_DEFAULT_MOUNT_RADIUS;
+    if (mountDistanceSq > mountRadius * mountRadius) {
+      return false;
+    }
+
+    const bottomExit = this._resolveLadderExit(ladder, 'bottom', center, bottomY);
+    const topExit = this._resolveLadderExit(ladder, 'top', center, topY);
+    const outward = planeNormal.clone();
+    const bottomExitFacing = this._resolveLadderHorizontalDirection(
+      ladder.bottomExitFacing,
+      outward,
+    );
+    const topExitFacing = this._resolveLadderHorizontalDirection(
+      ladder.topExitFacing,
+      outward,
+    );
+
+    this._prepareForExternalControl();
+    this.animation.externalControlLocked = true;
+    this.ladderDismountHandoff = null;
+    this.ladderTraversal = {
+      id: String(ladder.id ?? 'ladder'),
+      label: String(ladder.label ?? 'Ladder'),
+      centerX: center.x,
+      centerZ: center.z,
+      planeCenterX,
+      planeCenterZ,
+      planeNormal,
+      bodyClearance,
+      bottomY,
+      topY,
+      bottomExit,
+      topExit,
+      bottomExitFacing,
+      topExitFacing,
+      facing,
+      caged: ladder.caged !== false,
+      allowJumpRelease: ladder.allowJumpRelease === true,
+      mountEndpoint: resolvedEndpoint,
+      elapsed: 0,
+      lastDirection: 0,
+    };
+    this.root.position.set(
+      center.x,
+      resolvedEndpoint === 'top' ? topY : bottomY,
+      center.z,
+    );
+    this.velocity.set(0, 0, 0);
+    this.faceDirection(facing);
+    this.lastMoveDirection.copy(facing);
+    this.animation.setState('climbingLadder');
+    this.root.userData.activeLadderId = this.ladderTraversal.id;
+    this.root.userData.lastLadderMountEndpoint = resolvedEndpoint;
+    this.root.userData.lastLadderJumpResult = null;
+    return true;
+  }
+
+  dismountLadder(endpoint) {
+    const state = this.ladderTraversal;
+    if (!state || (endpoint !== 'top' && endpoint !== 'bottom')) return false;
+    const exit = endpoint === 'top' ? state.topExit : state.bottomExit;
+    const exitFacing = endpoint === 'top' ? state.topExitFacing : state.bottomExitFacing;
+    const ladderId = state.id;
+
+    this.ladderTraversal = null;
+    this.root.position.copy(exit);
+    this.jumpStartY = exit.y;
+    this._jumpGroundY = exit.y;
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this.velocity.set(0, 0, 0);
+    this.takeoffHorizontalVelocity.set(0, 0, 0);
+    // DungeonController performs two walkability passes per frame. This exact
+    // landing-only handoff lets both passes establish the authored exit as the
+    // new safe anchor without ever treating a mid-shaft point as safe ground.
+    this.ladderDismountHandoff = {
+      ladderId,
+      endpoint,
+      position: exit.clone(),
+      remainingPasses: 2,
+    };
+    this.animation.externalControlLocked = false;
+    this.animation.setState('idle');
+    this.modelRoot.position.y = 0;
+    if (exitFacing.lengthSq() > 0.0001) {
+      this.faceDirection(exitFacing);
+      this.lastMoveDirection.copy(exitFacing);
+    }
+    this.root.userData.activeLadderId = null;
+    this.root.userData.lastLadderExitId = ladderId;
+    this.root.userData.lastLadderExitEndpoint = endpoint;
+    return true;
+  }
+
+  consumeLadderDismountConstraintHandoff() {
+    const handoff = this.ladderDismountHandoff;
+    if (!handoff || handoff.remainingPasses <= 0) {
+      this.ladderDismountHandoff = null;
+      return null;
+    }
+    handoff.remainingPasses -= 1;
+    return {
+      ladderId: handoff.ladderId,
+      endpoint: handoff.endpoint,
+      position: handoff.position.clone(),
+    };
+  }
+
+  releaseLadderToFall(reason = 'released') {
+    const state = this.ladderTraversal;
+    if (!state) return false;
+    this.ladderTraversal = null;
+    this.ladderDismountHandoff = null;
+    this.animation.externalControlLocked = false;
+    this.jumpStartY = this.root.position.y;
+    this._jumpGroundY = state.bottomY;
+    this.jumpState = MML_JUMP_STATES.Falling;
+    this.velocity.set(
+      state.planeNormal.x * 1.15,
+      Math.min(-1.1, this.velocity.y),
+      state.planeNormal.z * 1.15,
+    );
+    this.takeoffHorizontalVelocity.set(this.velocity.x, 0, this.velocity.z);
+    this.animation.setState('fall');
+    this.root.userData.activeLadderId = null;
+    this.root.userData.lastLadderExitReason = String(reason);
+    return true;
+  }
+
+  cancelLadderTraversal(reason = 'cancelled', {
+    snapToExit = false,
+    transitionToFall = true,
+  } = {}) {
+    const state = this.ladderTraversal;
+    if (!state) return false;
+    if (snapToExit) {
+      const endpoint = this.root.position.y >= (state.bottomY + state.topY) * 0.5
+        ? 'top'
+        : 'bottom';
+      return this.dismountLadder(endpoint);
+    }
+    if (transitionToFall) {
+      return this.releaseLadderToFall(reason);
+    }
+
+    this.ladderTraversal = null;
+    this.ladderDismountHandoff = null;
+    this.animation.externalControlLocked = false;
+    this.root.userData.activeLadderId = null;
+    this.root.userData.lastLadderExitReason = String(reason);
+    return true;
+  }
+
+  getLadderTraversalDiagnostics() {
+    const state = this.ladderTraversal;
+    if (!state) return null;
+    worldForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y));
+    const towardPlane = new THREE.Vector3(
+      state.planeCenterX - this.root.position.x,
+      0,
+      state.planeCenterZ - this.root.position.z,
+    );
+    const towardPlaneLength = towardPlane.length();
+    return {
+      state: 'climbing',
+      id: state.id,
+      ladderId: state.id,
+      mountEndpoint: state.mountEndpoint,
+      bottomY: state.bottomY,
+      topY: state.topY,
+      height: this.root.position.y,
+      lastDirection: state.lastDirection,
+      planeCenter: { x: state.planeCenterX, z: state.planeCenterZ },
+      planeNormal: { x: state.planeNormal.x, z: state.planeNormal.z },
+      bodyClearance: state.bodyClearance,
+      signedPlaneClearance: (this.root.position.x - state.planeCenterX) * state.planeNormal.x
+        + (this.root.position.z - state.planeCenterZ) * state.planeNormal.z,
+      facingAlignment: towardPlaneLength > 0.0001
+        ? worldForward.dot(towardPlane) / towardPlaneLength
+        : 1,
+    };
+  }
+
+  _updateLadderTraversal(dt, input = new Set()) {
+    const state = this.ladderTraversal;
+    if (!state) return;
+    const up = input.has('KeyW') || input.has('ArrowUp');
+    const down = input.has('KeyS') || input.has('ArrowDown');
+    const direction = (up ? 1 : 0) - (down ? 1 : 0);
+    const safeDt = THREE.MathUtils.clamp(Number(dt) || 0, 0, 0.05);
+
+    // Exact plane ownership is intentional. Collision, animation and camera
+    // all see the same root path even if another runtime tried to nudge it.
+    this.root.position.x = state.centerX;
+    this.root.position.z = state.centerZ;
+    this.root.position.y = THREE.MathUtils.clamp(
+      this.root.position.y + direction * LADDER_CLIMB_SPEED * safeDt,
+      state.bottomY,
+      state.topY,
+    );
+    state.elapsed += safeDt;
+    state.lastDirection = direction;
+
+    if (direction > 0 && this.root.position.y >= state.topY - LADDER_EXIT_EPSILON) {
+      this.dismountLadder('top');
+      return;
+    }
+    if (direction < 0 && this.root.position.y <= state.bottomY + LADDER_EXIT_EPSILON) {
+      this.dismountLadder('bottom');
+      return;
+    }
+
+    this.faceDirection(state.facing);
+    this.lastMoveDirection.copy(state.facing);
+    this.animation.setState('climbingLadder');
+    this.updateWeaponVisualState();
+    this._updateExternalModelMotion(safeDt, direction !== 0, Math.abs(direction), false, false, {
+      animationState: 'climbingLadder',
+      clipKey: 'climbingLadder',
+      playbackRate: direction,
+      lockOnActive: false,
+      strafeAmount: 0,
+      skipAttackKindReset: true,
+    });
+    this.isRunning = false;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
   }
 
   isLedgeClinging() {
@@ -3666,6 +4057,16 @@ export class Player {
 
   clearExternalMotion(reason = 'cleared', game = null) {
     let cleared = this.cancelTraversalMechanismLaunch(reason);
+    if (this.ladderTraversal) {
+      const preserveAtCurrentPosition = reason === 'dispose'
+        || reason === 'reset'
+        || reason === 'checkpoint-reset'
+        || reason === 'world-dispose';
+      cleared = this.cancelLadderTraversal(reason, {
+        snapToExit: false,
+        transitionToFall: !preserveAtCurrentPosition,
+      }) || cleared;
+    }
     if (this.externalBallisticMotion) {
       cleared = this.cancelExternalBallisticMotion(reason, game, {
         snapToTarget: reason === 'dispose' || reason === 'reset',
@@ -3681,14 +4082,21 @@ export class Player {
   }
 
   isExternalMotionActive() {
-    return Boolean(this.externalBallisticMotion || this.externalControl?.freeze);
+    return Boolean(this.ladderTraversal || this.externalBallisticMotion || this.externalControl?.freeze);
   }
 
   shouldIgnoreGroundConstraint() {
-    return Boolean(this.externalBallisticMotion || this.externalControl?.ignoreGroundConstraint);
+    return Boolean(
+      this.ladderTraversal
+      || this.externalBallisticMotion
+      || this.externalControl?.ignoreGroundConstraint,
+    );
   }
 
   _prepareForExternalControl() {
+    this.ladderTraversal = null;
+    this.ladderDismountHandoff = null;
+    this.root.userData.activeLadderId = null;
     this.cancelTraversalMechanismLaunch('external-control');
     this.cancelSwordJumpSlashVisual({ cancelAttack: true });
     this.velocity.set(0, 0, 0);
@@ -3955,6 +4363,14 @@ export class Player {
     if (remainingDamage > 0) {
       result.healthDamage = remainingDamage * (this.gearEffects?.healthDamageMultiplier ?? 1);
       this.health = Math.max(0, this.health - result.healthDamage);
+    }
+    if (result.barrierDamage > 0 || result.healthDamage > 0) {
+      // Damage releases the exact current shaft point into ordinary falling;
+      // it never chooses a remote top/bottom landing for the player.
+      this.cancelLadderTraversal('damage', {
+        snapToExit: false,
+        transitionToFall: true,
+      });
     }
     result.statusEligible = result.healthDamage > 0;
     if (result.statusEligible) {
@@ -4821,7 +5237,7 @@ export class Player {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    this.cancelTraversalMechanismLaunch('dispose');
+    this.clearExternalMotion('dispose');
     this.root?.removeFromParent?.();
   }
 
@@ -5251,6 +5667,7 @@ export class Player {
       jumpSlashLandingHipsBlend,
       jumpSlashBladeTransformHold,
       clipKey: swordSlashClipKey ?? motionOptions.clipKey,
+      playbackRate: motionOptions.playbackRate,
     });
 
     if (swordSlashClipKey === JUMP_SLASH_CLIP && !this.isJumpAirborne()) {

@@ -3925,8 +3925,8 @@ test('elevated drops and effects stay on their tier while lore announcements are
 });
 
 test('procedural vertical solver accepts a deterministic seed sweep', async ({ page }) => {
-  test.setTimeout(60000);
-  await page.goto('/?startupWorld=dungeon');
+  test.setTimeout(90000);
+  await page.goto('/?startupWorld=dungeon&dungeonSeed=connector-c');
   await expect
     .poll(
       async () => page.locator('#game-container').getAttribute('data-browser-test-ready'),
@@ -3943,13 +3943,180 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
       const random = () => (
         (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296
       );
-      const dungeon = new DungeonGenerator({ random }).generate();
+      let dungeon;
+      try {
+        dungeon = new DungeonGenerator({ random }).generate();
+      } catch (error) {
+        throw new Error(`deterministic connector seed ${seed} failed: ${error.message}`);
+      }
+      const variedPlans = dungeon.connectionPlans.filter((plan) => plan.connectorVariant);
+      const variedConnectionIds = new Set(variedPlans.map((plan) => plan.id));
+      const specialSurfaces = new Set(['industrialRamp', 'upperConnectionBridge']);
+      const pointInsideRoom = (point, room) => {
+        const halfWidth = Math.floor(room.width / 2);
+        const halfDepth = Math.floor(room.depth / 2);
+        return point.x >= room.x - halfWidth && point.x <= room.x + halfWidth
+          && point.z >= room.z - halfDepth && point.z <= room.z + halfDepth;
+      };
+      const modifiedRoomTiles = dungeon.floorTiles.filter((tile) => (
+        variedConnectionIds.has(tile.connectionId)
+        && specialSurfaces.has(tile.surface)
+        && dungeon.rooms.some((room) => pointInsideRoom(tile, room))
+      ));
+      const flatBufferChecks = variedPlans.flatMap((plan) => [
+        ...(plan.connectorVariant.pathContract.sourceFlatBufferPath ?? []),
+        ...(plan.connectorVariant.pathContract.destinationFlatBufferPath ?? []),
+      ].map((point) => {
+        const tile = dungeon.tiles.get(`${point.x},${point.z}`);
+        return Boolean(
+          tile
+          && Math.abs(tile.elevation ?? 0) <= 0.05
+          && !specialSurfaces.has(tile.surface),
+        );
+      }));
+      const connectorAssembly = dungeon.progression.validation.connectorAssembly;
+      const roomById = new Map(dungeon.rooms.map((room) => [room.id, room]));
+      const interiorPlans = dungeon.connectionPlans.filter((plan) => (
+        !['hub', 'camp'].includes(roomById.get(plan.fromRoomId)?.type)
+        && !['hub', 'camp'].includes(roomById.get(plan.toRoomId)?.type)
+      ));
+      const classicPlans = interiorPlans.filter((plan) => (
+        !plan.connectorVariant
+        && plan.connectorPresentation?.overlayFamily === 'v1_service_bay'
+      ));
+      let decorativeArchVisualCount = 0;
+      const decorativeArchVisualCounts = new Map();
+      const classicFurnishingVisuals = new Map();
+      dungeon.group.traverse((object) => {
+        if (object.userData?.connectorDecorativeArch) {
+          decorativeArchVisualCount += 1;
+          const connectorId = object.userData.connectorId;
+          decorativeArchVisualCounts.set(
+            connectorId,
+            (decorativeArchVisualCounts.get(connectorId) ?? 0) + 1,
+          );
+        }
+        if (object.userData?.classicV1CorridorFurnishing) {
+          const connectorId = object.userData.connectorId;
+          const visuals = classicFurnishingVisuals.get(connectorId) ?? [];
+          visuals.push({
+            serviceBeatId: object.userData.serviceBeatId,
+            keepsTravelEnvelopeClear: object.userData.keepsTravelEnvelopeClear,
+          });
+          classicFurnishingVisuals.set(connectorId, visuals);
+        }
+      });
+      const plannedDecorativeArchCount = interiorPlans.reduce((sum, plan) => (
+        sum + (plan.decorativeArchBeats?.length ?? 0)
+      ), 0);
+      const interiorArchCoverageAccepted = interiorPlans.every((plan) => {
+        const arches = [...(plan.decorativeArchBeats ?? [])].sort((a, b) => a.pathIndex - b.pathIndex);
+        const requiredCount = Math.min(2, plan.galleryCrossSections?.length ?? 0);
+        const maximumSpacing = plan.connectorVariant?.decoration?.archSpacingTiles ?? 3;
+        return arches.length >= requiredCount
+          && arches.length === (decorativeArchVisualCounts.get(plan.id) ?? 0)
+          && arches.every((arch) => arch.internalClearWidthMeters >= 5.6)
+          && arches.every((arch) => arch.minimumLaneHeadroomMeters >= 3.15)
+          && arches.slice(1).every((arch, index) => (
+            arch.pathIndex - arches[index].pathIndex <= maximumSpacing
+          ));
+      });
+      const classicCorridorCoverageAccepted = classicPlans.every((plan) => {
+        const serviceBeats = plan.classicV1ServiceBeats ?? [];
+        const plannedBeatIds = serviceBeats
+          .map((beat) => beat.id)
+          .sort();
+        const visuals = classicFurnishingVisuals.get(plan.id) ?? [];
+        const visualBeatIds = visuals.map((visual) => visual.serviceBeatId).sort();
+        return plan.connectorPresentation?.baseFamily === 'v1_arch_corridor'
+          && plan.connectorPresentation?.overlayFamily === 'v1_service_bay'
+          && plan.connectorPresentation?.preservesV1Corridor === true
+          && plannedBeatIds.length > 0
+          && serviceBeats.every((beat) => {
+            const serviceDistance = Math.hypot(
+              beat.servicePoint.x - beat.galleryCenter.x,
+              beat.servicePoint.z - beat.galleryCenter.z,
+            ) * dungeon.tileSize;
+            return ['pump', 'water_tank'].includes(beat.serviceKind)
+              && Number.isFinite(beat.fencePoint?.x)
+              && Number.isFinite(beat.fencePoint?.z)
+              && Number.isFinite(beat.girderPoint?.x)
+              && Number.isFinite(beat.girderPoint?.z)
+              && beat.girderWidthMeters >= 5.6
+              && beat.keepsTravelEnvelopeClear === true
+              && beat.minimumTravelClearanceMeters > 0
+              && serviceDistance - beat.serviceHalfExtentMeters + 1e-6
+                >= beat.travelEnvelopeHalfWidthMeters;
+          })
+          && JSON.stringify(plannedBeatIds) === JSON.stringify(visualBeatIds)
+          && visuals.every((visual) => visual.keepsTravelEnvelopeClear === true);
+      });
+      const upperGalleryChecks = connectorAssembly.checks.filter((check) => check.level > 0);
+      const upperPlans = interiorPlans.filter((plan) => plan.level > 0);
+      const upperPortalCoverageAccepted = upperPlans.every((plan) => (
+        [plan.fromSocket, plan.toSocket].every((socket) => {
+          const portal = dungeon.verticalPortals.find((candidate) => (
+            candidate.id === socket.id && candidate.connectionId === plan.id
+          ));
+          return portal?.portalSpan >= 5.6
+            && portal.object?.userData?.verticalPortal?.portalSpan === portal.portalSpan
+            && portal.object?.userData?.verticalPortal?.connectionId === plan.id;
+        })
+      ));
       generated.push({
         seed,
         accepted: dungeon.progression.validation.accepted,
         errors: dungeon.progression.validation.errors,
         matchedConnections: dungeon.progression.validation.platformability.matchedConnectionCount,
         platforms: dungeon.progression.validation.platformability.platformNodeCount,
+        roomIds: dungeon.rooms.map(({ id }) => id).sort(),
+        connectorVariants: variedPlans.map((plan) => plan.connectorVariantId),
+        newConnectorsPreserveV1Presentation: variedPlans.every((plan) => (
+          plan.connectorPresentation?.baseFamily === 'v1_arch_corridor'
+          && plan.connectorPresentation?.overlayFamily === plan.connectorVariant?.visualFamily
+          && plan.connectorPresentation?.preservesV1Corridor === true
+        )),
+        classicCorridorCount: classicPlans.length,
+        classicCorridorCoverageAccepted,
+        specialVariantCount: variedPlans.length,
+        elevationConnectorCount: variedPlans.filter((plan) => (
+          plan.connectorVariant.elevationChange !== false
+          && plan.connectorVariant.traversalKind !== 'walk'
+        )).length,
+        modifiedRoomTileCount: modifiedRoomTiles.length,
+        flatBuffersRemainFlat: flatBufferChecks.every(Boolean),
+        assembledConnectorCount: connectorAssembly.checkedConnectorCount,
+        assembledGalleryCount: connectorAssembly.checkedGalleryCount,
+        minimumGalleryWidthTiles: Math.min(
+          ...connectorAssembly.checks.map((check) => check.minimumGalleryWidthTiles),
+        ),
+        upperGalleryCount: upperGalleryChecks.length,
+        upperGalleryCoverageAccepted: upperGalleryChecks.every((check) => (
+          check.galleryCrossSectionCount > 0
+          && check.minimumGalleryWidthTiles >= 3
+          && check.decorativeArchCount > 0
+        )),
+        upperPlanCount: upperPlans.length,
+        upperPortalCount: dungeon.verticalPortals.length,
+        upperPortalCoverageAccepted,
+        interiorArchCoverageAccepted,
+        plannedDecorativeArchCount,
+        decorativeArchVisualCount,
+        wideDoorCoverageAccepted: dungeon.doors
+          .filter((door) => door.connectionPlanId)
+          .every((door) => (
+            door.thresholdPortalSpan >= 5.6
+            && (door.alongX ? door.collisionHalfDepth : door.collisionHalfWidth) * 2
+              >= door.thresholdPortalSpan
+          )),
+        assembledLadderCount: dungeon.ladders.length,
+        plannedLadderCount: variedPlans.filter((plan) => (
+          plan.connectorVariant.traversalKind === 'ladder'
+        )).length * 2,
+        assembledLiftCount: dungeon.connectorLifts.length,
+        plannedLiftCount: variedPlans.filter((plan) => (
+          plan.connectorVariant.traversalKind === 'automatic_lift'
+        )).length,
       });
       dungeon.group.clear();
     }
@@ -3960,6 +4127,56 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
   expect(results.every((result) => result.accepted && result.errors.length === 0)).toBe(true);
   expect(results.every((result) => result.matchedConnections >= 14)).toBe(true);
   expect(results.every((result) => result.platforms >= 11)).toBe(true);
+  const expectedRoomIds = [
+    'alienServerRoom',
+    'bonusVault',
+    'bossRoom',
+    'conveyorRoom',
+    'coolantRelayRoom',
+    'enemyNest',
+    'entrance',
+    'expeditionCamp',
+    'hubTown',
+    'keycardRoom',
+    'machineFactoryRoom',
+    'shrineRoom',
+    'trapRoom',
+  ].sort();
+  expect(results.every((result) => (
+    JSON.stringify(result.roomIds) === JSON.stringify(expectedRoomIds)
+  ))).toBe(true);
+  expect(results.every((result) => result.elevationConnectorCount > 0)).toBe(true);
+  expect(results.every((result) => (
+    result.classicCorridorCount > 0
+    && result.classicCorridorCoverageAccepted
+    && result.specialVariantCount > 0
+    && result.newConnectorsPreserveV1Presentation
+  ))).toBe(true);
+  expect(results.every((result) => result.modifiedRoomTileCount === 0)).toBe(true);
+  expect(results.every((result) => result.flatBuffersRemainFlat)).toBe(true);
+  expect(results.every((result) => (
+    result.assembledGalleryCount > 0
+    && result.minimumGalleryWidthTiles >= 3
+    && result.upperGalleryCount > 0
+    && result.upperGalleryCoverageAccepted
+    && result.upperPlanCount > 0
+    && result.upperPortalCount === result.upperPlanCount * 2
+    && result.upperPortalCoverageAccepted
+    && result.interiorArchCoverageAccepted
+    && result.plannedDecorativeArchCount === result.decorativeArchVisualCount
+    && result.wideDoorCoverageAccepted
+  ))).toBe(true);
+  expect(results.every((result) => (
+    result.assembledConnectorCount === result.connectorVariants.length
+    && result.assembledLadderCount === result.plannedLadderCount
+    && result.assembledLiftCount === result.plannedLiftCount
+  ))).toBe(true);
+  const generatedVariantSet = new Set(results.flatMap((result) => result.connectorVariants));
+  expect(generatedVariantSet).toEqual(new Set([
+    'crested_slope_v1',
+    'ladder_gallery_v1',
+    'automatic_lift_gallery_v1',
+  ]));
 });
 
 test('server room keeps one clear perimeter ramp while its upper socket remains reachable', async ({ page }) => {
@@ -4194,9 +4411,9 @@ test('critical closed doors remain physical choke points for their deeper rooms'
     }
 
     // Seed 1 deterministically exposes broad routes around late critical
-    // doors. Remove the whole doorway tile (a stronger blocker than the
-    // runtime collider), leave every other door open, and verify that the
-    // target room center is disconnected from the dungeon start.
+    // doors. Remove the complete widened portal cross-section (a stronger
+    // blocker than the runtime collider), leave every other door open, and
+    // verify that the target room center is disconnected from the start.
     const { DungeonGenerator } = await import('/src/DungeonGenerator.js');
     let state = 1;
     const random = () => (
@@ -4211,10 +4428,12 @@ test('critical closed doors remain physical choke points for their deeper rooms'
       const doorX = Math.round(door.graphBlockingPosition.x / dungeon.tileSize);
       const doorZ = Math.round(door.graphBlockingPosition.z / dungeon.tileSize);
       const doorElevation = door.exitElevation ?? door.baseY ?? 0;
+      const portalHalfSpanTiles = (door.thresholdPortalSpan ?? dungeon.tileSize) / dungeon.tileSize * 0.5;
       const floorWithoutDoorway = dungeon.floorTiles.filter((tile) => (
         !(
-          tile.x === doorX
-          && tile.z === doorZ
+          (door.alongX
+            ? tile.x === doorX && Math.abs(tile.z - doorZ) <= portalHalfSpanTiles + 0.01
+            : tile.z === doorZ && Math.abs(tile.x - doorX) <= portalHalfSpanTiles + 0.01)
           && Math.abs((tile.elevation ?? 0) - doorElevation) <= 0.1
         )
         && !generator._isFloorTileBlockedBySolidZone(tile, dungeon.solidZones)

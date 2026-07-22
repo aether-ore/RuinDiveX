@@ -192,6 +192,8 @@ export class DungeonController {
     this.keycards = dungeon?.keycards ?? [];
     this.chests = dungeon?.chests ?? [];
     this.mechanisms = dungeon?.mechanisms ?? [];
+    this.ladders = dungeon?.ladders ?? [];
+    this.connectorLifts = dungeon?.connectorLifts ?? [];
     this.puzzleBlocks = dungeon?.puzzleBlocks ?? [];
     this.pressurePlates = dungeon?.pressurePlates ?? [];
     this.npcAnimationMixers = dungeon?.npcAnimationMixers ?? [];
@@ -249,6 +251,13 @@ export class DungeonController {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    const activeLadderId = this.game?.player?.ladderTraversal?.id;
+    if (activeLadderId && this.ladders.some(({ id }) => String(id) === activeLadderId)) {
+      this.game.player.cancelLadderTraversal?.('world-dispose', {
+        snapToExit: false,
+        transitionToFall: false,
+      });
+    }
     this.nearestInteractable = null;
     this.pendingRoomAnnouncements.length = 0;
     this.navigationCache.clear();
@@ -640,6 +649,19 @@ export class DungeonController {
     if (interactable.kind === 'mechanism') {
       this._activateMechanism(interactable.target);
       return true;
+    }
+
+    if (interactable.kind === 'ladder') {
+      return this.game.player?.mountLadder?.(interactable.target, {
+        endpoint: interactable.endpoint,
+      }) === true;
+    }
+
+    if (interactable.kind === 'connectorLift') {
+      return this.game.requestConnectorLift?.(
+        interactable.target.liftId,
+        interactable.target.endpoint,
+      )?.ok === true;
     }
 
     if (interactable.kind === 'trap') {
@@ -2951,6 +2973,22 @@ export class DungeonController {
       return;
     }
 
+    // The player root is intentionally suspended between two authored floors
+    // while climbing. Never promote that transient shaft point to the general
+    // recovery anchor. Only a completed endpoint handoff may become safe.
+    if (this.game.player.isClimbingLadder?.()) {
+      this.pendingPlayerJumpOffLanding = null;
+      return;
+    }
+
+    const ladderLandingHandoff = this.game.player.consumeLadderDismountConstraintHandoff?.();
+    if (ladderLandingHandoff?.position) {
+      current.copy(ladderLandingHandoff.position);
+      this.lastSafePlayerPosition.copy(current);
+      this.pendingPlayerJumpOffLanding = null;
+      return;
+    }
+
     // Tractor beams and player-owned ballistic throws have exclusive control
     // of the root until they release or land. Normal floor correction during
     // that window would snap the player out of the beam or flatten the arc.
@@ -3951,6 +3989,71 @@ export class DungeonController {
           color: blockedEncounter ? LOCKED_COLOR : MECHANISM_COLOR,
         };
         nearestDistanceSq = distanceSq;
+      }
+    }
+
+    if (!this.game.player?.isClimbingLadder?.()) {
+      for (const ladder of this.ladders) {
+        if (!ladder || ladder.disabled === true) continue;
+        const endpointAnchors = [
+          {
+            endpoint: 'bottom',
+            position: ladder.bottomMountPosition ?? ladder.bottomExit ?? ladder.position,
+          },
+          {
+            endpoint: 'top',
+            position: ladder.topMountPosition ?? ladder.topExit,
+          },
+        ].filter(({ position }) => position);
+        let nearestEndpoint = null;
+        let ladderDistanceSq = Infinity;
+        for (const candidate of endpointAnchors) {
+          const anchor = candidate.position;
+          const dx = playerPosition.x - Number(anchor.x ?? 0);
+          const dy = playerPosition.y - Number(
+            anchor.y ?? (candidate.endpoint === 'top' ? ladder.topY : ladder.bottomY) ?? 0,
+          );
+          const dz = playerPosition.z - Number(anchor.z ?? 0);
+          const distanceSq = dx * dx + dy * dy + dz * dz;
+          if (distanceSq < ladderDistanceSq) {
+            ladderDistanceSq = distanceSq;
+            nearestEndpoint = candidate.endpoint;
+          }
+        }
+        const interactionRadius = Number.isFinite(Number(ladder.mountRadius))
+          ? Math.max(0.5, Number(ladder.mountRadius))
+          : 1.8;
+        if (nearestEndpoint
+          && ladderDistanceSq <= interactionRadius * interactionRadius
+          && ladderDistanceSq < nearestDistanceSq) {
+          nearest = {
+            kind: 'ladder',
+            target: ladder,
+            endpoint: nearestEndpoint,
+            label: `${nearestEndpoint === 'top' ? 'Climb down' : 'Climb'} ${ladder.label ?? 'ladder'}`,
+            color: MECHANISM_COLOR,
+          };
+          nearestDistanceSq = ladderDistanceSq;
+        }
+      }
+    }
+
+    for (const lift of this.connectorLifts) {
+      for (const control of lift?.controls ?? []) {
+        if (!control?.position) continue;
+        const distanceSq = playerPosition.distanceToSquared(control.position);
+        const interactionRadius = Number.isFinite(Number(control.interactionRadius))
+          ? Math.max(0.5, Number(control.interactionRadius))
+          : 1.55;
+        if (distanceSq <= interactionRadius * interactionRadius && distanceSq < nearestDistanceSq) {
+          nearest = {
+            kind: 'connectorLift',
+            target: control,
+            label: control.label ?? `Call ${lift.label ?? 'lift'}`,
+            color: MECHANISM_COLOR,
+          };
+          nearestDistanceSq = distanceSq;
+        }
       }
     }
 

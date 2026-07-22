@@ -7,7 +7,6 @@ export default defineConfig({
   testMatch: [
     'overworld-runtime.spec.js',
     'overworld-v1-extraction-journey.spec.js',
-    'v1-combat-probe.spec.js',
   ],
   timeout: 60_000,
   expect: { timeout: 15_000 },

@@ -613,6 +613,148 @@ test('Boss Hunt selection locks for an expedition and unlocks without changing t
   assert.equal((await lab.selectBossHunt('rubyOpticOracle')).ok, true);
 });
 
+test('Boss Hunt locks persist an exact dungeon layout seed and reject non-identical replay specs', async () => {
+  const lab = await BusterLabStorage.open({
+    storage: new MemoryStorage(),
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'boss-hunt-layout-seed',
+  });
+  const expedition = {
+    ...createBossExpeditionSpec({
+      id: 'layout-seed-expedition',
+      seed: 818,
+      depth: 3,
+      bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    }),
+    dungeonLayoutSeed: 'layout:authored-overworld-entry-818',
+  };
+
+  const locked = await lab.lockBossHuntForExpedition(expedition);
+  assert.equal(locked.ok, true);
+  assert.equal(locked.expedition.dungeonLayoutSeed, expedition.dungeonLayoutSeed);
+  assert.equal(lab.getActiveBossExpedition().dungeonLayoutSeed, expedition.dungeonLayoutSeed);
+
+  const idempotent = await lab.lockBossHuntForExpedition(expedition);
+  assert.equal(idempotent.ok, true);
+  assert.equal(idempotent.unchanged, true);
+  assert.equal(idempotent.expedition.dungeonLayoutSeed, expedition.dungeonLayoutSeed);
+
+  const mismatch = await lab.lockBossHuntForExpedition({
+    ...expedition,
+    dungeonLayoutSeed: 'layout:different-dungeon',
+  });
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.reason, 'expedition-spec-mismatch');
+  assert.equal(lab.getActiveBossExpedition().dungeonLayoutSeed, expedition.dungeonLayoutSeed);
+});
+
+test('legacy active Boss Hunts deterministically migrate and persist a restart layout seed', () => {
+  const storage = new MemoryStorage();
+  const saveContextId = 'legacy-active-layout-migration';
+  const lab = new BusterLabStorage({ storage, saveContextId });
+  const state = createDefaultBusterLabState();
+  const expeditionId = 'legacy-active-expedition';
+  state.bossHunts.activeExpeditionId = expeditionId;
+  state.bossHunts.recordedExpeditions[expeditionId] = {
+    schemaVersion: 2,
+    expeditionId,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    seed: 1919,
+    depth: 2,
+    status: 'active',
+    startedAt: new Date(0).toISOString(),
+    completedAt: null,
+    reward: null,
+  };
+  storage.setItem(lab.storageKeys.main, JSON.stringify(createBusterLabEnvelope({
+    saveContextId,
+    state,
+    revision: 1,
+  })));
+
+  const expectedLayoutSeed = `layout:resume:${expeditionId}`;
+  const loaded = lab.load();
+  assert.equal(
+    loaded.bossHunts.recordedExpeditions[expeditionId].dungeonLayoutSeed,
+    expectedLayoutSeed,
+  );
+  const persisted = JSON.parse(storage.getItem(lab.storageKeys.main));
+  assert.equal(
+    persisted.state.bossHunts.recordedExpeditions[expeditionId].dungeonLayoutSeed,
+    expectedLayoutSeed,
+  );
+  const reloaded = new BusterLabStorage({ storage, saveContextId }).load();
+  assert.equal(
+    reloaded.bossHunts.recordedExpeditions[expeditionId].dungeonLayoutSeed,
+    expectedLayoutSeed,
+  );
+});
+
+test('restarting an active Boss Hunt atomically resets progress and preserves its exact identity', async () => {
+  const storage = new MemoryStorage();
+  const lab = await BusterLabStorage.open({
+    storage,
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'boss-hunt-restart',
+  });
+  assert.equal((await lab.selectBossHunt('ascensionEngine')).ok, true);
+  const expedition = {
+    ...createBossExpeditionSpec({
+      id: 'restart-ascension-expedition',
+      seed: 1441,
+      depth: 5,
+      bossProfileId: 'ascensionEngine',
+    }),
+    dungeonLayoutSeed: 'layout:restart-ascension-golden',
+  };
+  assert.equal((await lab.lockBossHuntForExpedition(expedition)).ok, true);
+  assert.equal((await lab.recordBossCheckpoint({
+    expeditionId: expedition.id,
+    bossProfileId: 'ascensionEngine',
+    securedCheckpointIndex: 1,
+    securedCheckpointId: 'ascensionCheckpoint:compressionFoundry',
+    brokenSealIndex: 0,
+  })).ok, true);
+
+  const before = lab.getActiveBossExpedition();
+  const revisionBeforeMismatch = lab.revision;
+  const wrongId = await lab.restartActiveBossExpedition({
+    ...expedition,
+    id: 'another-expedition',
+  });
+  assert.equal(wrongId.reason, 'active-expedition-mismatch');
+  const wrongSpec = await lab.restartActiveBossExpedition({
+    ...expedition,
+    seed: Number(expedition.seed) + 1,
+  });
+  assert.equal(wrongSpec.reason, 'expedition-spec-mismatch');
+  assert.equal(lab.revision, revisionBeforeMismatch);
+  assert.deepEqual(lab.getActiveBossExpedition().encounterProgress, before.encounterProgress);
+
+  const restarted = await lab.restartActiveBossExpedition(expedition);
+  assert.equal(restarted.ok, true);
+  assert.deepEqual(restarted.expedition.encounterProgress, createAscensionEngineEncounterProgress(0));
+  assert.equal(restarted.expedition.restartCount, 1);
+  assert.equal(typeof restarted.expedition.restartedAt, 'string');
+  for (const field of ['expeditionId', 'bossProfileId', 'seed', 'depth', 'dungeonLayoutSeed']) {
+    assert.equal(restarted.expedition[field], before[field], field);
+    assert.equal(lab.getActiveBossExpedition()[field], before[field], field);
+  }
+  assert.equal(lab.state.bossHunts.activeExpeditionId, expedition.id);
+  assert.deepEqual(
+    lab.getActiveBossExpedition().encounterProgress,
+    createAscensionEngineEncounterProgress(0),
+  );
+  const reloaded = new BusterLabStorage({
+    storage,
+    saveContextId: 'boss-hunt-restart',
+  }).load().bossHunts.recordedExpeditions[expedition.id];
+  assert.equal(reloaded.restartCount, 1);
+  assert.equal(reloaded.restartedAt, restarted.expedition.restartedAt);
+  assert.equal(reloaded.dungeonLayoutSeed, expedition.dungeonLayoutSeed);
+  assert.deepEqual(reloaded.encounterProgress, createAscensionEngineEncounterProgress(0));
+});
+
 test('Ascension checkpoints are exact-next, idempotent, and final victory commits reward atomically', async () => {
   const storage = new MemoryStorage();
   const lab = await BusterLabStorage.open({
@@ -637,6 +779,9 @@ test('Ascension checkpoints are exact-next, idempotent, and final victory commit
     locked.expedition.encounterProgress.schemaVersion,
     ASCENSION_ENGINE_PROGRESS_SCHEMA_VERSION,
   );
+  const initialRestart = await lab.restartActiveBossExpedition(locked.expedition);
+  assert.equal(initialRestart.ok, true);
+  assert.equal(initialRestart.expedition.restartCount, 1);
   assert.equal(createAscensionEngineEncounterProgress('1'), null);
   assert.equal(createAscensionEngineEncounterProgress(1.9), null);
   assert.equal((await lab.recordBossCheckpoint({
@@ -729,18 +874,52 @@ test('Ascension checkpoints are exact-next, idempotent, and final victory commit
   assert.equal(victory.firstClear, true);
   assert.equal(victory.reward.materialId, 'perfectedCompressionGreave');
   assert.equal(victory.expedition.encounterProgress.securedCheckpointIndex, 3);
-  assert.equal(lab.state.bossHunts.activeExpeditionId, null);
+  assert.equal(victory.expedition.dungeonLayoutSeed, locked.expedition.dungeonLayoutSeed);
+  assert.equal(victory.expedition.restartCount, 1);
+  assert.equal(victory.expedition.restartedAt, initialRestart.expedition.restartedAt);
+  assert.equal(lab.state.bossHunts.activeExpeditionId, expedition.id);
   assert.equal(lab.state.bossHunts.pendingRecoveries[0].part.id, 'perfectedCompressionGreave');
 
-  const reloaded = new BusterLabStorage({
+  const resumedLab = await BusterLabStorage.open({
     storage,
+    lockManager: new MemoryLockManager(),
     saveContextId: 'ascension-checkpoint-contract',
-  }).load();
+  });
+  const reloaded = resumedLab.state;
+  assert.equal(reloaded.bossHunts.activeExpeditionId, expedition.id);
   assert.equal(reloaded.bossHunts.recordedExpeditions[expedition.id].schemaVersion, 2);
+  assert.equal(reloaded.bossHunts.recordedExpeditions[expedition.id].restartCount, 1);
+  assert.equal(
+    reloaded.bossHunts.recordedExpeditions[expedition.id].restartedAt,
+    initialRestart.expedition.restartedAt,
+  );
   assert.deepEqual(
     reloaded.bossHunts.recordedExpeditions[expedition.id].encounterProgress,
     persistedProgress,
   );
+  assert.equal((await resumedLab.selectBossHunt(DEFAULT_BOSS_PROFILE_ID)).reason, 'expedition-active');
+
+  const unresolvedVictory = resumedLab.getActiveBossExpedition();
+  const restartedVictory = await resumedLab.restartActiveBossExpedition({
+    id: unresolvedVictory.expeditionId,
+    bossProfileId: unresolvedVictory.bossProfileId,
+    seed: unresolvedVictory.seed,
+    depth: unresolvedVictory.depth,
+    dungeonLayoutSeed: unresolvedVictory.dungeonLayoutSeed,
+  });
+  assert.equal(restartedVictory.ok, true);
+  assert.equal(restartedVictory.expedition.status, 'victory');
+  assert.deepEqual(restartedVictory.expedition.reward, unresolvedVictory.reward);
+  assert.deepEqual(restartedVictory.expedition.encounterProgress, persistedProgress);
+  assert.equal(restartedVictory.expedition.victoryIndex, unresolvedVictory.victoryIndex);
+  assert.equal(restartedVictory.expedition.completedAt, unresolvedVictory.completedAt);
+
+  const release = await resumedLab.completeBossExpedition(expedition.id, { outcome: 'abandoned' });
+  assert.equal(release.ok, true);
+  assert.equal(resumedLab.state.bossHunts.activeExpeditionId, null);
+  assert.equal(resumedLab.state.bossHunts.recordedExpeditions[expedition.id].status, 'victory');
+  assert.deepEqual(resumedLab.state.bossHunts.recordedExpeditions[expedition.id].reward, victory.reward);
+  assert.equal((await resumedLab.selectBossHunt(DEFAULT_BOSS_PROFILE_ID)).ok, true);
 });
 
 test('generic Boss victory cannot convert Ascension overload into a guaranteed repeat recovery', async () => {
@@ -783,6 +962,10 @@ test('generic Boss victory cannot convert Ascension overload into a guaranteed r
   assert.equal(first.ok, true);
   assert.equal(first.reward.reason, 'first-clear');
   assert.equal(first.expedition.signaturePartOverloaded, false);
+  assert.equal((await lab.completeBossExpedition(
+    'ascension-overload-first-clear',
+    { outcome: 'abandoned' },
+  )).ok, true);
 
   await lockAndSecureSummit('ascension-overload-repeat', 11);
   const repeatRoll = getBossHuntRewardRoll({
@@ -1040,6 +1223,7 @@ test('Boss victories are idempotent, guarantee first clears, and deterministical
   assert.equal(identifiedFirst.bossRecoveriesProcessed, 1);
   assert.equal(lab.state.rollSalvage.parts[featured.id].quantity, 1);
   assert.equal(lab.state.bossHunts.pendingRecoveries.length, 0);
+  assert.equal((await lab.completeBossExpedition(firstSpec.id, { outcome: 'abandoned' })).ok, true);
 
   const repeatSpec = createBossExpeditionSpec({
     id: 'hunt-reward-2',
@@ -1061,6 +1245,7 @@ test('Boss victories are idempotent, guarantee first clears, and deterministical
   assert.equal(repeat.firstClear, false);
   assert.equal(repeat.reward.deterministicRoll, expectedRoll);
   assert.equal(repeat.rewardQueued, expectedRoll < BOSS_HUNT_REPEAT_REWARD_CHANCE);
+  assert.equal((await lab.completeBossExpedition(repeatSpec.id, { outcome: 'abandoned' })).ok, true);
 
   const overloadedSpec = createBossExpeditionSpec({
     id: 'hunt-reward-3',
@@ -1161,6 +1346,7 @@ test('every boss kind guarantees its own canonical advertised material on first 
     const recovery = lab.state.bossHunts.pendingRecoveries
       .find((entry) => entry.expeditionId === expedition.id);
     assert.equal(recovery?.part?.id, resolveBossRewardMaterial(profileId)?.id, profileId);
+    assert.equal((await lab.completeBossExpedition(expedition.id, { outcome: 'abandoned' })).ok, true);
   }
   assert.equal(lab.state.bossHunts.pendingRecoveries.length, REAVERBOT_BOSS_PROFILE_IDS.length);
 });

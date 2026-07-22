@@ -213,6 +213,11 @@ test('every staged Boss Hunt profile has deterministic generation and its canoni
       ({ expeditionId }) => expeditionId === expedition.id,
     );
     assert.equal(recovery?.part?.id, resolveBossRewardMaterial(profileId)?.id, profileId);
+    assert.equal(
+      (await lab.completeBossExpedition(expedition.id, { outcome: 'extracted' })).ok,
+      true,
+      `${profileId} extraction must release the durable expedition before selecting another hunt`,
+    );
   }
 });
 

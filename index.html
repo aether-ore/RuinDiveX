@@ -662,6 +662,49 @@
           </footer>
         </div>
       </section>
+
+      <section
+        id="interrupted-expedition-modal"
+        class="world-modal interrupted-expedition-modal"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="interrupted-expedition-heading"
+        aria-describedby="interrupted-expedition-description"
+        aria-hidden="true"
+        aria-busy="false"
+        data-interrupted-expedition-modal
+        data-expedition-id=""
+        data-boss-profile-id=""
+        data-expedition-status=""
+        tabindex="-1"
+        hidden
+      >
+        <div class="world-modal-panel interrupted-expedition-panel">
+          <header class="world-modal-header">
+            <div>
+              <span class="world-modal-eyebrow">Interrupted Boss Hunt</span>
+              <h1 id="interrupted-expedition-heading">Expedition interrupted</h1>
+            </div>
+          </header>
+          <p id="interrupted-expedition-description" class="world-modal-copy">
+            A Boss Hunt was active when the game closed. Dungeon-local progress was not retained, but you can re-enter from the ruin entrance or abandon the expedition.
+          </p>
+          <p id="interrupted-expedition-error" class="world-modal-error" role="alert" hidden></p>
+          <footer class="world-modal-footer">
+            <p id="interrupted-expedition-status" class="world-modal-status" role="status" aria-live="polite">
+              Choose how to resolve the interrupted expedition.
+            </p>
+            <div class="world-modal-actions">
+              <button type="button" class="world-modal-danger" data-action="abandon-interrupted-expedition">
+                Abandon Expedition
+              </button>
+              <button type="button" class="world-modal-primary" data-action="resume-interrupted-expedition">
+                Re-enter from Beginning
+              </button>
+            </div>
+          </footer>
+        </div>
+      </section>
     </div>
 
     <script type="module" src="./src/main.js"></script>

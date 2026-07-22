@@ -326,6 +326,37 @@ export const beginBossExpedition = async (page, requestedProfileId = null) => {
 
 export const beginFirstBossExpedition = (page) => beginBossExpedition(page);
 
+export const waitForInterruptedExpeditionPrompt = async (page) => {
+  const modal = page.locator('[data-interrupted-expedition-modal]');
+  await expect(modal).toBeVisible();
+  await expect(modal).toHaveAttribute('aria-hidden', 'false');
+  await expect(modal).toHaveAttribute('data-expedition-id', /\S+/);
+  await expect(modal).toHaveAttribute('data-boss-profile-id', /\S+/);
+  await expect(modal.locator('[data-action="resume-interrupted-expedition"]')).toBeEnabled();
+  await expect(modal.locator('[data-action="abandon-interrupted-expedition"]')).toBeEnabled();
+  return modal;
+};
+
+export const resumeInterruptedExpedition = async (page, { doubleSubmit = false } = {}) => {
+  const modal = await waitForInterruptedExpeditionPrompt(page);
+  const button = modal.locator('[data-action="resume-interrupted-expedition"]');
+  await button.click();
+  if (doubleSubmit) {
+    // Force a second public click while the first asynchronous transaction is
+    // in flight. The runtime must share that transaction rather than generate
+    // or lock a second dungeon attempt.
+    await button.click({ force: true }).catch(() => {});
+  }
+  await waitForWorld(page, 'dungeon', { timeout: 60_000 });
+};
+
+export const abandonInterruptedExpedition = async (page) => {
+  const modal = await waitForInterruptedExpeditionPrompt(page);
+  await modal.locator('[data-action="abandon-interrupted-expedition"]').click();
+  await waitForWorld(page, 'overworld', { timeout: 60_000 });
+  await expect(modal).toBeHidden();
+};
+
 export const openDungeonAbandonModalThroughEntrance = async (page) => {
   const diagnostics = await readWorldDiagnostics(page);
   const anchor = diagnostics.entryReturnAnchor;

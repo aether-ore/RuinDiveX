@@ -728,6 +728,21 @@ function createPendingBossRecovery(record, material) {
   };
 }
 
+const MAX_DUNGEON_LAYOUT_SEED_LENGTH = 512;
+
+function createMigratedDungeonLayoutSeed(expeditionId) {
+  return `layout:resume:${expeditionId}`;
+}
+
+function sanitizeDungeonLayoutSeed(value, expeditionId) {
+  if (typeof value === 'string'
+    && value.trim().length > 0
+    && value.length <= MAX_DUNGEON_LAYOUT_SEED_LENGTH) {
+    return value;
+  }
+  return createMigratedDungeonLayoutSeed(expeditionId);
+}
+
 function hasExplicitUnknownBossRewardMaterial(raw) {
   const reward = raw?.reward;
   if (!reward || typeof reward !== 'object'
@@ -808,9 +823,18 @@ function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
       ? rawProfileId
       : null,
     seed: typeof raw.seed === 'string' || Number.isFinite(Number(raw.seed)) ? raw.seed : null,
+    // V1 layout generation uses a separate seeded stream from the boss. Older
+    // expedition rows did not retain it, so give them a stable, serializable
+    // restart layout instead of silently using a new per-launch random seed.
+    dungeonLayoutSeed: sanitizeDungeonLayoutSeed(
+      raw.dungeonLayoutSeed ?? raw.layoutSeed,
+      expeditionId,
+    ),
     depth: Math.max(1, nonNegativeInteger(raw.depth, 1)),
     status,
     startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : null,
+    restartedAt: typeof raw.restartedAt === 'string' ? raw.restartedAt : null,
+    restartCount: nonNegativeInteger(raw.restartCount),
     completedAt: typeof raw.completedAt === 'string' ? raw.completedAt : null,
     victoryIndex: status === 'victory' && !debug
       ? Math.max(1, nonNegativeInteger(raw.victoryIndex, 1))
@@ -953,7 +977,7 @@ function normalizeBossHunts(value) {
     ? source.activeExpeditionId
     : null;
   const activeExpeditionId = requestedActiveId
-    && recordedExpeditions[requestedActiveId]?.status === 'active'
+    && ['active', 'victory'].includes(recordedExpeditions[requestedActiveId]?.status)
     ? requestedActiveId
     : Object.values(recordedExpeditions).find((entry) => entry.status === 'active')?.expeditionId ?? null;
 
@@ -1491,6 +1515,11 @@ export function validateBusterLabState(state) {
       if (expedition.schemaVersion !== BOSS_EXPEDITION_SCHEMA_VERSION) {
         errors.push(`Boss Hunt expedition ${expedition.expeditionId} has an invalid schema version.`);
       }
+      if (typeof expedition.dungeonLayoutSeed !== 'string'
+        || expedition.dungeonLayoutSeed.trim().length === 0
+        || expedition.dungeonLayoutSeed.length > MAX_DUNGEON_LAYOUT_SEED_LENGTH) {
+        errors.push(`Boss Hunt expedition ${expedition.expeditionId} has an invalid dungeon layout seed.`);
+      }
       if (expedition.bossProfileId === ASCENSION_ENGINE_PROFILE_ID) {
         if (expedition.encounterProgress
           && !sanitizeAscensionEngineEncounterProgress(expedition.encounterProgress)) {
@@ -1535,8 +1564,8 @@ export function validateBusterLabState(state) {
     }
     if (bossHunts.activeExpeditionId) {
       const active = bossHunts.recordedExpeditions?.[bossHunts.activeExpeditionId];
-      if (!active || active.status !== 'active') {
-        errors.push('Active Boss Hunt expedition must reference an active recorded expedition.');
+      if (!active || !['active', 'victory'].includes(active.status)) {
+        errors.push('Active Boss Hunt expedition must reference an unresolved active or victory expedition.');
       }
     }
   }
@@ -2561,6 +2590,10 @@ export class BusterLabStorage {
     if (!expeditionId) return { ok: false, reason: 'invalid-expedition-id', state: this._ensureLoaded() };
     const currentHunts = this._ensureLoaded().bossHunts;
     const requestedProfileId = expeditionSpec.bossProfileId ?? currentHunts.selectedBossProfileId;
+    const requestedLayoutSeed = sanitizeDungeonLayoutSeed(
+      expeditionSpec.dungeonLayoutSeed,
+      expeditionId,
+    );
     if (!getReaverbotBossProfile(requestedProfileId)) {
       return { ok: false, reason: 'unknown-boss-profile', state: this.state };
     }
@@ -2576,7 +2609,9 @@ export class BusterLabStorage {
       const requestedSeed = typeof expeditionSpec.seed === 'string' || Number.isFinite(Number(expeditionSpec.seed))
         ? expeditionSpec.seed
         : null;
-      if (existing.depth !== requestedDepth || existing.seed !== requestedSeed) {
+      if (existing.depth !== requestedDepth
+        || existing.seed !== requestedSeed
+        || existing.dungeonLayoutSeed !== requestedLayoutSeed) {
         return { ok: false, reason: 'expedition-spec-mismatch', expedition: cloneJson(existing), state: this.state };
       }
       return { ok: true, unchanged: true, expedition: cloneJson(existing), state: this.state };
@@ -2616,7 +2651,9 @@ export class BusterLabStorage {
         const concurrentSeed = typeof expeditionSpec.seed === 'string' || Number.isFinite(Number(expeditionSpec.seed))
           ? expeditionSpec.seed
           : null;
-        if (concurrentExisting.depth !== concurrentDepth || concurrentExisting.seed !== concurrentSeed) {
+        if (concurrentExisting.depth !== concurrentDepth
+          || concurrentExisting.seed !== concurrentSeed
+          || concurrentExisting.dungeonLayoutSeed !== requestedLayoutSeed) {
           throw new BusterLabOperationError('expedition-spec-mismatch');
         }
         return { expedition: cloneJson(concurrentExisting), unchanged: true };
@@ -2633,6 +2670,7 @@ export class BusterLabStorage {
         seed: typeof expeditionSpec.seed === 'string' || Number.isFinite(Number(expeditionSpec.seed))
           ? expeditionSpec.seed
           : null,
+        dungeonLayoutSeed: requestedLayoutSeed,
         depth: Math.max(1, nonNegativeInteger(expeditionSpec.depth, 1)),
         status: 'active',
         startedAt: new Date().toISOString(),
@@ -2656,6 +2694,85 @@ export class BusterLabStorage {
 
   lockBossHuntForExpeditionAsync(expeditionSpec = {}, concurrency = {}) {
     return this.lockBossHuntForExpedition(expeditionSpec, concurrency);
+  }
+
+  async restartActiveBossExpedition(expeditionSpec = {}, concurrency = {}) {
+    const expeditionId = typeof expeditionSpec.id === 'string' && expeditionSpec.id
+      ? expeditionSpec.id
+      : typeof expeditionSpec.expeditionId === 'string' && expeditionSpec.expeditionId
+        ? expeditionSpec.expeditionId
+        : '';
+    if (!expeditionId) {
+      return { ok: false, reason: 'invalid-expedition-id', state: this._ensureLoaded() };
+    }
+
+    const currentHunts = this._ensureLoaded().bossHunts;
+    if (currentHunts.activeExpeditionId !== expeditionId) {
+      return {
+        ok: false,
+        reason: 'active-expedition-mismatch',
+        activeExpeditionId: currentHunts.activeExpeditionId,
+        state: this.state,
+      };
+    }
+
+    const hasExpectation = (field) => Object.prototype.hasOwnProperty.call(expeditionSpec, field);
+    const transaction = await this.transact({
+      operation: 'restart-active-boss-expedition',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const hunts = state.bossHunts;
+      if (hunts.activeExpeditionId !== expeditionId) {
+        throw new BusterLabOperationError('active-expedition-mismatch');
+      }
+      const expedition = hunts.recordedExpeditions[expeditionId];
+      if (!expedition || !['active', 'victory'].includes(expedition.status)) {
+        throw new BusterLabOperationError('expedition-closed');
+      }
+      if (hasExpectation('bossProfileId')
+        && expeditionSpec.bossProfileId !== expedition.bossProfileId) {
+        throw new BusterLabOperationError('expedition-profile-mismatch');
+      }
+      const expectedSeed = hasExpectation('seed')
+        ? (typeof expeditionSpec.seed === 'string' || Number.isFinite(Number(expeditionSpec.seed))
+          ? expeditionSpec.seed
+          : null)
+        : expedition.seed;
+      const expectedDepth = hasExpectation('depth')
+        ? Math.max(1, nonNegativeInteger(expeditionSpec.depth, 1))
+        : expedition.depth;
+      const expectedLayoutSeed = hasExpectation('dungeonLayoutSeed')
+        ? sanitizeDungeonLayoutSeed(expeditionSpec.dungeonLayoutSeed, expeditionId)
+        : expedition.dungeonLayoutSeed;
+      if (expectedSeed !== expedition.seed
+        || expectedDepth !== expedition.depth
+        || expectedLayoutSeed !== expedition.dungeonLayoutSeed) {
+        throw new BusterLabOperationError('expedition-spec-mismatch');
+      }
+
+      // An unresolved victory is awaiting Refractor recovery/extraction, not
+      // another boss attempt. Re-entering it must preserve the committed
+      // reward and final checkpoint. Only an active attempt restarts combat.
+      if (expedition.status === 'active') {
+        expedition.encounterProgress = expedition.bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+          ? createAscensionEngineEncounterProgress(0)
+          : null;
+        expedition.encounterProgressQuarantined = false;
+        expedition.completedAt = null;
+        expedition.victoryIndex = null;
+        expedition.signaturePartOverloaded = false;
+        expedition.reward = null;
+      }
+      expedition.restartCount = nonNegativeInteger(expedition.restartCount) + 1;
+      expedition.restartedAt = new Date().toISOString();
+      return { expedition: cloneJson(expedition) };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  restartActiveBossExpeditionAsync(expeditionSpec = {}, concurrency = {}) {
+    return this.restartActiveBossExpedition(expeditionSpec, concurrency);
   }
 
   async recordBossCheckpoint({
@@ -2912,9 +3029,13 @@ export class BusterLabStorage {
           bossProfileId,
           invalidBossProfileId: null,
           seed: prior?.seed ?? null,
+          dungeonLayoutSeed: prior?.dungeonLayoutSeed
+            ?? createMigratedDungeonLayoutSeed(expeditionId),
           depth: prior?.depth ?? 1,
           status: 'victory',
           startedAt: prior?.startedAt ?? null,
+          restartedAt: prior?.restartedAt ?? null,
+          restartCount: nonNegativeInteger(prior?.restartCount),
           completedAt: new Date().toISOString(),
           victoryIndex: null,
           signaturePartOverloaded: false,
@@ -2927,7 +3048,6 @@ export class BusterLabStorage {
           reward,
         };
         hunts.recordedExpeditions[expeditionId] = completed;
-        if (hunts.activeExpeditionId === expeditionId) hunts.activeExpeditionId = null;
         const defenseUnlocked = new GearLoadout(state.armsGear.gear).isSlotUnlocked('defense');
         return {
           expedition: cloneJson(completed),
@@ -3047,9 +3167,13 @@ export class BusterLabStorage {
         bossProfileId,
         invalidBossProfileId: null,
         seed: prior?.seed ?? null,
+        dungeonLayoutSeed: prior?.dungeonLayoutSeed
+          ?? createMigratedDungeonLayoutSeed(expeditionId),
         depth: prior?.depth ?? 1,
         status: 'victory',
         startedAt: prior?.startedAt ?? null,
+        restartedAt: prior?.restartedAt ?? null,
+        restartCount: nonNegativeInteger(prior?.restartCount),
         completedAt: new Date().toISOString(),
         victoryIndex,
         signaturePartOverloaded: effectiveSignaturePartOverloaded,
@@ -3063,7 +3187,6 @@ export class BusterLabStorage {
       };
       hunts.recordedExpeditions[expeditionId] = completed;
       hunts.victoriesByProfile[bossProfileId] = victoryIndex;
-      if (hunts.activeExpeditionId === expeditionId) hunts.activeExpeditionId = null;
       if (rewardEligible && !hunts.pendingRecoveries.some((entry) => entry.recoveryId === recoveryId)) {
         hunts.pendingRecoveries.push(createPendingBossRecovery(completed, rewardMaterial));
       }

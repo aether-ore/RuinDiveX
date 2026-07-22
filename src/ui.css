@@ -300,13 +300,21 @@
   border-color: rgba(255, 128, 93, 0.68);
 }
 
-.expedition-abandon-panel {
+.expedition-abandon-panel,
+.interrupted-expedition-panel {
   width: min(560px, calc(100vw - 2rem));
 }
 
-.expedition-abandon-panel .world-modal-footer {
-  align-items: flex-end;
+.expedition-abandon-panel .world-modal-footer,
+.interrupted-expedition-panel .world-modal-footer {
+  flex-direction: column;
+  align-items: stretch;
   margin-top: 0.9rem;
+}
+
+.expedition-abandon-panel .world-modal-actions,
+.interrupted-expedition-panel .world-modal-actions {
+  width: 100%;
 }
 
 #ui-root.is-world-modal-open .screen-aim-reticle,

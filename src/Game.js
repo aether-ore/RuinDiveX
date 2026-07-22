@@ -453,6 +453,10 @@ function readDungeonLayoutSeed() {
   return `layout:${Date.now()}:${Math.random()}`;
 }
 
+function isInterruptedExpeditionRecord(record) {
+  return Boolean(record && ['active', 'victory'].includes(record.status));
+}
+
 function createDungeonRandom(seed) {
   const random = new SeededRandom(hashSeed(String(seed)));
   return () => random.next();
@@ -735,6 +739,7 @@ export class Game {
       game._hydrateLegacyBusterShadowItems();
     }
     game.ui?.renderInventory?.();
+    game.initializeInterruptedExpeditionRecovery();
     return game;
   }
 
@@ -838,6 +843,9 @@ export class Game {
     })];
     this.worldLifecycleEventSequence = 1;
     this.worldTransitionInFlight = null;
+    this.interruptedExpeditionRecoveryInFlight = null;
+    this.interruptedExpeditionRecoveryState = 'none';
+    this.interruptedExpeditionRecovery = null;
     this.hostEventBindingPasses = 0;
     this.hostEventListenerRegistrations = 0;
     this.stagedBossProfileId = null;
@@ -1975,14 +1983,17 @@ export class Game {
     return `expedition:${this.busterLabStorage?.saveContextId ?? 'prototype'}:${profileId}:${randomId}`;
   }
 
-  _configureBossHuntEncounter(dungeon = this.dungeon, { ignorePersistedActive = false } = {}) {
+  _configureBossHuntEncounter(dungeon = this.dungeon, {
+    ignorePersistedActive = false,
+    restartFromBeginning = false,
+  } = {}) {
     const encounter = dungeon?.encounters?.find?.((candidate) => candidate.isBoss);
     if (!encounter) return null;
     const profileId = this.getSelectedBossProfileId();
     const profile = getReaverbotBossProfile(profileId);
     const persistedExpedition = this.busterLabStorage?.getActiveBossExpedition?.();
     if (!ignorePersistedActive
-      && persistedExpedition?.status === 'active'
+      && isInterruptedExpeditionRecord(persistedExpedition)
       && persistedExpedition.bossProfileId === profileId) {
       this.activeBossExpeditionSpec = Object.freeze({
         schemaVersion: BOSS_EXPEDITION_SCHEMA_VERSION,
@@ -1990,7 +2001,12 @@ export class Game {
         seed: persistedExpedition.seed,
         depth: persistedExpedition.depth,
         bossProfileId: profileId,
-        encounterProgress: persistedExpedition.encounterProgress ?? null,
+        dungeonLayoutSeed: persistedExpedition.dungeonLayoutSeed
+          ?? dungeon?.layoutSeed
+          ?? this.dungeonLayoutSeed,
+        encounterProgress: restartFromBeginning
+          ? null
+          : persistedExpedition.encounterProgress ?? null,
         seedLabel: `persisted:${persistedExpedition.expeditionId}`,
       });
       encounter.bossProfileId = profileId;
@@ -2009,6 +2025,7 @@ export class Game {
           depth: Math.max(1, Math.min(10, Math.round(this.ruinFloor ?? 1))),
           id: this._createBossExpeditionAttemptId(profileId),
         }),
+        dungeonLayoutSeed: dungeon?.layoutSeed ?? this.dungeonLayoutSeed,
         seedLabel: specSeed,
       };
     }
@@ -2020,6 +2037,163 @@ export class Game {
 
   getActiveBossExpeditionSpec() {
     return this.activeBossExpeditionSpec ?? this._configureBossHuntEncounter()?.expeditionSpec ?? null;
+  }
+
+  initializeInterruptedExpeditionRecovery() {
+    if (!this.usesStreamedWorldLifecycle
+      || this.worldKind !== 'overworld'
+      || this.transitionState !== 'overworld') {
+      return { ok: true, prompted: false, reason: 'not-streamed-overworld' };
+    }
+    const record = this.busterLabStorage?.getActiveBossExpedition?.() ?? null;
+    if (!isInterruptedExpeditionRecord(record)) {
+      this.interruptedExpeditionRecovery = null;
+      this.interruptedExpeditionRecoveryState = 'none';
+      return { ok: true, prompted: false, reason: 'no-active-expedition' };
+    }
+
+    const profileId = normalizeBossProfileId(record.bossProfileId);
+    if (profileId !== record.bossProfileId) {
+      return { ok: false, prompted: false, reason: 'invalid-boss-profile' };
+    }
+    const dungeonLayoutSeed = String(
+      record.dungeonLayoutSeed
+        ?? `layout:resume:${this.busterLabStorage?.saveContextId ?? 'prototype'}:${record.expeditionId}`,
+    );
+    const profile = getReaverbotBossProfile(profileId);
+    this.selectedBossProfileId = profileId;
+    this.activeBossExpeditionSpec = Object.freeze({
+      schemaVersion: BOSS_EXPEDITION_SCHEMA_VERSION,
+      id: record.expeditionId,
+      seed: record.seed,
+      depth: record.depth,
+      bossProfileId: profileId,
+      dungeonLayoutSeed,
+      encounterProgress: record.encounterProgress ?? null,
+      seedLabel: `persisted:${record.expeditionId}`,
+    });
+    const wasPrompting = this.interruptedExpeditionRecoveryState === 'prompting'
+      && this.interruptedExpeditionRecovery?.expeditionId === record.expeditionId;
+    this.interruptedExpeditionRecovery = Object.freeze({
+      expeditionId: record.expeditionId,
+      bossProfileId: profileId,
+      expeditionStatus: record.status,
+      dungeonLayoutSeed,
+      expeditionLabel: profile?.title ?? 'Boss Hunt',
+    });
+    this.interruptedExpeditionRecoveryState = 'prompting';
+    this.expeditionAccepted = false;
+    this.expeditionActive = false;
+    this.stagedBossProfileId = null;
+    if (!wasPrompting) {
+      this._recordWorldLifecycleEvent('interrupted-expedition-detected', {
+        expeditionId: record.expeditionId,
+        bossProfileId: profileId,
+        dungeonLayoutSeedHash: hashSeed(dungeonLayoutSeed),
+      });
+    }
+    this.ui?.openInterruptedExpeditionPrompt?.({
+      expeditionId: record.expeditionId,
+      bossProfileId: profileId,
+      expeditionStatus: record.status,
+      expeditionLabel: profile?.title ?? 'Boss Hunt',
+    });
+    return {
+      ok: true,
+      prompted: true,
+      expeditionId: record.expeditionId,
+      bossProfileId: profileId,
+    };
+  }
+
+  getInterruptedExpeditionRecoveryDiagnostics() {
+    const recovery = this.interruptedExpeditionRecovery;
+    return {
+      state: this.interruptedExpeditionRecoveryState,
+      pending: recovery ? {
+        expeditionId: recovery.expeditionId,
+        bossProfileId: recovery.bossProfileId,
+        expeditionStatus: recovery.expeditionStatus,
+        dungeonLayoutSeed: recovery.dungeonLayoutSeed,
+        dungeonLayoutSeedHash: hashSeed(recovery.dungeonLayoutSeed),
+      } : null,
+    };
+  }
+
+  _resolveInterruptedExpeditionPromptAfterExternalChange(reason = 'already-resolved') {
+    const expeditionId = this.interruptedExpeditionRecovery?.expeditionId ?? null;
+    this.interruptedExpeditionRecovery = null;
+    this.interruptedExpeditionRecoveryState = 'none';
+    this.interruptedExpeditionRecoveryInFlight = null;
+    this.activeBossExpeditionSpec = null;
+    this.stagedBossProfileId = null;
+    this.expeditionAccepted = false;
+    this.expeditionActive = false;
+    this.ui?.closeInterruptedExpeditionPrompt?.({ restoreFocus: false });
+    this.ui?.renderInventory?.();
+    this._recordWorldLifecycleEvent('interrupted-expedition-resolved-externally', {
+      expeditionId,
+      reason,
+    });
+    return {
+      ok: true,
+      resolved: true,
+      reason,
+      worldKind: this.worldKind,
+    };
+  }
+
+  _reloadInterruptedExpeditionStateAfterExternalConflict() {
+    const storage = this.busterLabStorage;
+    const persistence = storage?.getPersistenceStatus?.();
+    if (!['external-conflict', 'conflict'].includes(persistence?.writePauseReason)) return null;
+    if (typeof storage.reloadFromStorage !== 'function') {
+      return Promise.resolve({
+        ok: false,
+        reason: 'storage-reload-unavailable',
+        message: 'The expedition save changed in another window and could not be reloaded.',
+      });
+    }
+    return storage.reloadFromStorage().then((result) => {
+      if (result?.ok) {
+        this._reconcileBusterLabRuntimeAfterReload();
+        this.ui?.renderInventory?.();
+      }
+      return result;
+    });
+  }
+
+  _reconcileBusterLabRuntimeAfterReload() {
+    if (!this.busterLabStorage) return;
+    this.busterLabLoadWarning = this.busterLabStorage.lastWarning;
+    this._refreshRollSalvageStorage();
+    this.selectedBossProfileId = normalizeBossProfileId(
+      this.busterLabStorage.state?.bossHunts?.selectedBossProfileId
+        ?? DEFAULT_BOSS_PROFILE_ID,
+    );
+    this._recompileBusterPlans();
+    this._restoreCustomBusterAssignments();
+  }
+
+  _refreshInterruptedExpeditionPromptIfIdentityChanged(expectedExpeditionId, record) {
+    if (!expectedExpeditionId
+      || !isInterruptedExpeditionRecord(record)
+      || record.expeditionId === expectedExpeditionId) {
+      return null;
+    }
+    this.initializeInterruptedExpeditionRecovery();
+    this._recordWorldLifecycleEvent('interrupted-expedition-identity-changed', {
+      expectedExpeditionId,
+      actualExpeditionId: record.expeditionId,
+      bossProfileId: record.bossProfileId,
+    });
+    return {
+      ok: false,
+      changed: true,
+      reason: 'interrupted-expedition-changed',
+      expeditionId: record.expeditionId,
+      message: 'The active Boss Hunt changed in another window. Review the updated expedition before choosing again.',
+    };
   }
 
   getBossHuntViewModel() {
@@ -2107,6 +2281,15 @@ export class Game {
       || this.worldKind !== 'overworld'
       || this.transitionState !== 'overworld') {
       return { ok: false, reason: 'wrong-world' };
+    }
+    const interrupted = this.busterLabStorage?.getActiveBossExpedition?.();
+    if (isInterruptedExpeditionRecord(interrupted)) {
+      this.initializeInterruptedExpeditionRecovery();
+      return {
+        ok: false,
+        reason: 'interrupted-expedition-active',
+        message: 'Resolve the interrupted expedition before choosing another Boss Hunt.',
+      };
     }
     this.stagedBossProfileId = null;
     this.keys.clear();
@@ -2437,6 +2620,349 @@ export class Game {
     });
   }
 
+  async resumeInterruptedExpedition() {
+    if (this.interruptedExpeditionRecoveryInFlight) {
+      return this.interruptedExpeditionRecoveryInFlight;
+    }
+    if (this.worldTransitionInFlight) return this.worldTransitionInFlight;
+    if (!this.usesStreamedWorldLifecycle
+      || this.worldKind !== 'overworld'
+      || this.transitionState !== 'overworld') {
+      return { ok: false, reason: 'wrong-world' };
+    }
+    const promptedExpeditionId = this.interruptedExpeditionRecovery?.expeditionId ?? null;
+    const conflictReload = this._reloadInterruptedExpeditionStateAfterExternalConflict();
+    if (conflictReload) {
+      const refreshed = await conflictReload;
+      if (!refreshed?.ok) {
+        return {
+          ok: false,
+          reason: refreshed?.reason ?? 'storage-reload-failed',
+          message: refreshed?.message
+            ?? refreshed?.warning
+            ?? 'The updated expedition save could not be reloaded.',
+        };
+      }
+    }
+    const persisted = this.busterLabStorage?.getActiveBossExpedition?.();
+    if (!isInterruptedExpeditionRecord(persisted)) {
+      return this._resolveInterruptedExpeditionPromptAfterExternalChange('already-resolved');
+    }
+    const changedPrompt = this._refreshInterruptedExpeditionPromptIfIdentityChanged(
+      promptedExpeditionId,
+      persisted,
+    );
+    if (changedPrompt) return changedPrompt;
+    const profileId = normalizeBossProfileId(persisted.bossProfileId);
+    if (profileId !== persisted.bossProfileId) {
+      return { ok: false, reason: 'invalid-boss-profile' };
+    }
+    const layoutSeed = String(
+      persisted.dungeonLayoutSeed
+        ?? `layout:resume:${this.busterLabStorage?.saveContextId ?? 'prototype'}:${persisted.expeditionId}`,
+    );
+    const expeditionDepth = Math.max(1, Math.min(10, Math.round(Number(persisted.depth) || 1)));
+    const previousBundle = this.activeWorldBundle;
+    const previousProfileId = this.getSelectedBossProfileId();
+    const previousLayoutSeed = this.dungeonLayoutSeed;
+    const previousRuinFloor = this.ruinFloor;
+    const previousExpeditionSpec = this.activeBossExpeditionSpec;
+    const previousSpawner = this.spawner;
+    const previousMapEvents = this.mapEvents;
+    const previousPlayerPosition = this.player.root.position.clone();
+    const previousPlayerFacing = this.player.lastMoveDirection.clone();
+    const previousPlayerVelocity = this.player.velocity?.clone?.() ?? null;
+    const previousExpeditionAccepted = this.expeditionAccepted;
+    const previousExpeditionActive = this.expeditionActive;
+    const previousRuinCompleted = this.ruinCompleted;
+
+    const transaction = (async () => {
+      this.interruptedExpeditionRecoveryState = 'restarting';
+      this._recordWorldLifecycleEvent('interrupted-expedition-restart-began', {
+        expeditionId: persisted.expeditionId,
+        bossProfileId: profileId,
+      });
+      this._transitionWorldLifecycleTo('enteringDungeon');
+      let candidate = null;
+      let candidateMounted = false;
+      let exteriorDoorAnimation = null;
+      let committed = false;
+      try {
+        this.selectedBossProfileId = profileId;
+        this.ruinFloor = expeditionDepth;
+        candidate = this._createLegacyDungeonWorldCandidate({
+          bossProfileId: profileId,
+          layoutSeed,
+          difficulty: expeditionDepth,
+        });
+        candidate = this._prepareStreamedDungeonFacade(candidate);
+        this.activeBossExpeditionSpec = null;
+        let encounter = this._configureBossHuntEncounter(candidate.facade, {
+          restartFromBeginning: persisted.status === 'active',
+        });
+        if (!encounter?.expeditionSpec
+          || encounter.expeditionSpec.id !== persisted.expeditionId) {
+          throw new Error('The interrupted boss encounter could not be reconstructed.');
+        }
+        candidate.controller = new DungeonController(this, candidate.facade);
+
+        exteriorDoorAnimation = await this._animateExteriorDungeonDoorOpening(previousBundle);
+        this._clearDungeonRunState();
+        this.keys.clear();
+        previousBundle?.root?.removeFromParent?.();
+        this._assignMountedWorldBundle(candidate, { incrementGeneration: false });
+        candidateMounted = true;
+        this._installRuntimeControllerForBundle(candidate);
+        this.bossStageRuntime?.mount?.(this);
+        this._placePersistentPlayer(candidate.entrySpawn, candidate.entryFacing);
+        this.spawner = new EnemySpawner(this);
+        this.mapEvents = this._createMapEventSystemForWorld();
+        this.spawner.spawnInitialPack();
+        this._collectCameraOcclusionWalls();
+        this._collectDungeonRenderCullGroups();
+        this._rebuildDebugLedgeTester(candidate.entrySpawn);
+        this._updateDungeonRenderCulling(0, { force: true });
+
+        // Reset the durable attempt only after every fallible generation,
+        // controller, mount, spawn, and camera step has succeeded. A failure
+        // before this point leaves the exact stored checkpoint untouched.
+        if (!this.busterLabStorage?.restartActiveBossExpedition) {
+          throw new Error('Interrupted expedition recovery is unavailable.');
+        }
+        const restarted = await this._queueBusterStorageOperation(() => (
+          this.busterLabStorage.restartActiveBossExpedition({
+            expeditionId: persisted.expeditionId,
+            bossProfileId: profileId,
+            seed: persisted.seed,
+            depth: expeditionDepth,
+            dungeonLayoutSeed: layoutSeed,
+          })
+        ));
+        if (!restarted?.ok) {
+          throw new Error(
+            restarted?.message
+              ?? `The interrupted expedition could not be restarted (${restarted?.reason ?? 'unknown'}).`,
+          );
+        }
+        this.dungeonLayoutSeed = layoutSeed;
+        this.ruinCompleted = false;
+        this.expeditionAccepted = true;
+        this.expeditionActive = true;
+        this.stagedBossProfileId = null;
+        this.interruptedExpeditionRecovery = null;
+        this.interruptedExpeditionRecoveryState = 'none';
+        this._transitionWorldLifecycleTo('dungeon');
+        committed = true;
+        this.worldGenerationCount += 1;
+        this._recordWorldLifecycleEvent('interrupted-expedition-restarted', {
+          expeditionId: persisted.expeditionId,
+          bossProfileId: profileId,
+          dungeonLayoutSeedHash: hashSeed(layoutSeed),
+        });
+        try {
+          this._disposeWorldBundle(previousBundle, 'restart-interrupted-expedition', {
+            clearRunState: false,
+          });
+        } catch (cleanupError) {
+          this._recordWorldLifecycleEvent('post-commit-cleanup-error', {
+            phase: 'restart-interrupted-expedition',
+            message: cleanupError?.message ?? String(cleanupError),
+          });
+        }
+        this.ui?.renderInventory?.();
+        return {
+          ok: true,
+          worldKind: 'dungeon',
+          expeditionId: persisted.expeditionId,
+          bossProfileId: profileId,
+        };
+      } catch (error) {
+        if (committed) {
+          return {
+            ok: true,
+            worldKind: 'dungeon',
+            expeditionId: persisted.expeditionId,
+            bossProfileId: profileId,
+            warning: error?.message ?? String(error),
+          };
+        }
+        if (exteriorDoorAnimation?.slab && previousBundle && !previousBundle.disposed) {
+          exteriorDoorAnimation.slab.position.y = exteriorDoorAnimation.startY;
+          exteriorDoorAnimation.slab.userData.transitionOpening = false;
+        }
+        if (candidateMounted) this._clearDungeonRunState();
+        if (candidate) {
+          try {
+            this._disposeUncommittedWorldCandidate(candidate);
+          } catch (cleanupError) {
+            this._recordWorldLifecycleEvent('rollback-cleanup-error', {
+              phase: 'restart-interrupted-expedition',
+              message: cleanupError?.message ?? String(cleanupError),
+            });
+          }
+        }
+        if (previousBundle && !previousBundle.disposed) {
+          this._assignMountedWorldBundle(previousBundle, { incrementGeneration: false });
+          this._activateRuntimeControllerForBundle(previousBundle);
+          this.spawner = previousSpawner;
+          this.mapEvents = previousMapEvents;
+          this._placePersistentPlayer(previousPlayerPosition, previousPlayerFacing);
+          if (previousPlayerVelocity && this.player.velocity) {
+            this.player.velocity.copy(previousPlayerVelocity);
+          }
+          this._collectCameraOcclusionWalls();
+          this._collectDungeonRenderCullGroups();
+          this._updateDungeonRenderCulling(0, { force: true });
+        }
+        this.selectedBossProfileId = previousProfileId;
+        this.dungeonLayoutSeed = previousLayoutSeed;
+        this.ruinFloor = previousRuinFloor;
+        this.expeditionAccepted = previousExpeditionAccepted;
+        this.expeditionActive = previousExpeditionActive;
+        this.ruinCompleted = previousRuinCompleted;
+        this.activeBossExpeditionSpec = previousExpeditionSpec;
+        this.interruptedExpeditionRecoveryState = 'prompting';
+        this._transitionWorldLifecycleTo('overworld');
+        this.worldKind = 'overworld';
+        const conflictReload = this._reloadInterruptedExpeditionStateAfterExternalConflict();
+        if (conflictReload) await conflictReload;
+        const durableExpedition = this.busterLabStorage?.getActiveBossExpedition?.();
+        if (!isInterruptedExpeditionRecord(durableExpedition)) {
+          return this._resolveInterruptedExpeditionPromptAfterExternalChange(
+            'resolved-during-restart',
+          );
+        }
+        const changedPrompt = this._refreshInterruptedExpeditionPromptIfIdentityChanged(
+          promptedExpeditionId,
+          durableExpedition,
+        );
+        if (changedPrompt) return changedPrompt;
+        this._recordWorldLifecycleEvent('interrupted-expedition-restart-failed', {
+          expeditionId: persisted.expeditionId,
+          message: error?.message ?? String(error),
+        });
+        return {
+          ok: false,
+          reason: 'transition-failed',
+          message: error?.message ?? String(error),
+          error,
+        };
+      } finally {
+        this.worldTransitionInFlight = null;
+        this.interruptedExpeditionRecoveryInFlight = null;
+      }
+    })();
+    this.interruptedExpeditionRecoveryInFlight = transaction;
+    this.worldTransitionInFlight = transaction;
+    return transaction;
+  }
+
+  async abandonInterruptedExpedition() {
+    if (this.interruptedExpeditionRecoveryInFlight) {
+      return this.interruptedExpeditionRecoveryInFlight;
+    }
+    if (!this.usesStreamedWorldLifecycle
+      || this.worldKind !== 'overworld'
+      || this.transitionState !== 'overworld') {
+      return { ok: false, reason: 'wrong-world' };
+    }
+    const promptedExpeditionId = this.interruptedExpeditionRecovery?.expeditionId ?? null;
+    const conflictReload = this._reloadInterruptedExpeditionStateAfterExternalConflict();
+    if (conflictReload) {
+      const refreshed = await conflictReload;
+      if (!refreshed?.ok) {
+        return {
+          ok: false,
+          reason: refreshed?.reason ?? 'storage-reload-failed',
+          message: refreshed?.message
+            ?? refreshed?.warning
+            ?? 'The updated expedition save could not be reloaded.',
+        };
+      }
+    }
+    const persisted = this.busterLabStorage?.getActiveBossExpedition?.();
+    if (!isInterruptedExpeditionRecord(persisted)) {
+      return this._resolveInterruptedExpeditionPromptAfterExternalChange('already-resolved');
+    }
+    const changedPrompt = this._refreshInterruptedExpeditionPromptIfIdentityChanged(
+      promptedExpeditionId,
+      persisted,
+    );
+    if (changedPrompt) return changedPrompt;
+    const transaction = (async () => {
+      this.interruptedExpeditionRecoveryState = 'abandoning';
+      this._recordWorldLifecycleEvent('interrupted-expedition-abandon-began', {
+        expeditionId: persisted.expeditionId,
+        bossProfileId: persisted.bossProfileId,
+      });
+      try {
+        if (!this.busterLabStorage?.completeBossExpedition) {
+          throw new Error('Interrupted expedition abandonment is unavailable.');
+        }
+        const result = await this._queueBusterStorageOperation(() => (
+          this.busterLabStorage.completeBossExpedition(
+            persisted.expeditionId,
+            { outcome: 'abandoned' },
+          )
+        ));
+        if (!result?.ok) {
+          throw new Error(
+            result?.message
+              ?? `The expedition could not be abandoned (${result?.reason ?? 'unknown'}).`,
+          );
+        }
+        this.activeBossExpeditionSpec = null;
+        this.interruptedExpeditionRecovery = null;
+        this.interruptedExpeditionRecoveryState = 'none';
+        this.stagedBossProfileId = null;
+        this.expeditionAccepted = false;
+        this.expeditionActive = false;
+        this.ruinCompleted = false;
+        this.lastExpeditionSummary = 'Interrupted expedition abandoned. A new Boss Hunt can now be selected.';
+        this._recordWorldLifecycleEvent('interrupted-expedition-abandoned', {
+          expeditionId: persisted.expeditionId,
+          bossProfileId: persisted.bossProfileId,
+        });
+        this.ui?.renderInventory?.();
+        return {
+          ok: true,
+          worldKind: 'overworld',
+          expeditionId: persisted.expeditionId,
+          outcome: 'abandoned',
+        };
+      } catch (error) {
+        this.interruptedExpeditionRecoveryState = 'prompting';
+        const conflictReload = this._reloadInterruptedExpeditionStateAfterExternalConflict();
+        if (conflictReload) await conflictReload;
+        const durableExpedition = this.busterLabStorage?.getActiveBossExpedition?.();
+        if (!isInterruptedExpeditionRecord(durableExpedition)) {
+          return this._resolveInterruptedExpeditionPromptAfterExternalChange(
+            'resolved-during-abandonment',
+          );
+        }
+        const changedPrompt = this._refreshInterruptedExpeditionPromptIfIdentityChanged(
+          promptedExpeditionId,
+          durableExpedition,
+        );
+        if (changedPrompt) return changedPrompt;
+        this._recordWorldLifecycleEvent('interrupted-expedition-abandon-failed', {
+          expeditionId: persisted.expeditionId,
+          message: error?.message ?? String(error),
+        });
+        return {
+          ok: false,
+          reason: 'storage-failed',
+          message: error?.message ?? String(error),
+          error,
+        };
+      } finally {
+        this.interruptedExpeditionRecoveryInFlight = null;
+      }
+    })();
+    this.interruptedExpeditionRecoveryInFlight = transaction;
+    return transaction;
+  }
+
   async confirmBossExpedition() {
     if (this.worldTransitionInFlight) return this.worldTransitionInFlight;
     if (!this.stagedBossProfileId) return { ok: false, reason: 'no-staged-profile' };
@@ -2706,18 +3232,24 @@ export class Game {
         this._collectDungeonRenderCullGroups();
         this._updateDungeonRenderCulling(0, { force: true });
 
-        // The durable abandonment write is the last fallible operation. Until
-        // it succeeds, the detached dungeon bundle and exact player state are
-        // still available for a lossless rollback.
-        if (outcome === 'abandoned' && this.activeBossExpeditionSpec?.id
+        // Releasing the durable run marker is the last fallible operation.
+        // Victory records remain locked until physical extraction or explicit
+        // abandonment, so closing after the boss still offers recovery.
+        const durableExpeditionId = this.activeBossExpeditionSpec?.id
+          ?? this.busterLabStorage?.getActiveBossExpedition?.()?.expeditionId
+          ?? null;
+        if (['abandoned', 'extracted'].includes(outcome)
+          && durableExpeditionId
           && this.busterLabStorage?.completeBossExpedition) {
           const result = await this._queueBusterStorageOperation(() => (
             this.busterLabStorage.completeBossExpedition(
-              this.activeBossExpeditionSpec.id,
-              { outcome: 'abandoned' },
+              durableExpeditionId,
+              { outcome },
             )
           ));
-          if (!result?.ok) throw new Error(result?.message ?? 'The abandoned expedition could not be recorded.');
+          if (!result?.ok) {
+            throw new Error(result?.message ?? 'The expedition return could not be recorded.');
+          }
         }
 
         // Storage and candidate setup have succeeded. Commit the authoritative
@@ -2896,6 +3428,7 @@ export class Game {
       },
       ownership,
       entryReturnAnchor: this.activeWorldBundle?.entryReturnAnchor?.toArray?.() ?? null,
+      interruptedExpeditionRecovery: this.getInterruptedExpeditionRecoveryDiagnostics(),
       eventLog: this.worldLifecycleEventLog.map((entry) => ({ ...entry })),
     };
   }
@@ -3595,9 +4128,9 @@ export class Game {
     }
 
     const departingBoss = this.activeReaverbotBoss;
-    const abandonedExpeditionId = !this.ruinCompleted
-      ? this.activeBossExpeditionSpec?.id
-      : null;
+    const departingExpeditionId = this.activeBossExpeditionSpec?.id
+      ?? this.busterLabStorage?.getActiveBossExpedition?.()?.expeditionId
+      ?? null;
     if (departingBoss) {
       const encounter = this.dungeonController?.encounters?.find?.(
         (candidate) => candidate.id === departingBoss.encounterId,
@@ -3620,10 +4153,10 @@ export class Game {
     ).setY(0).normalize();
     this.player.faceDirection(this.player.lastMoveDirection);
     this.expeditionActive = false;
-    if (!this.ruinCompleted && abandonedExpeditionId) {
+    if (departingExpeditionId) {
       this._queueBusterStorageOperation(() => this.busterLabStorage?.completeBossExpedition?.(
-        abandonedExpeditionId,
-        { outcome: 'abandoned' },
+        departingExpeditionId,
+        { outcome: this.ruinCompleted ? 'extracted' : 'abandoned' },
       ));
     }
     if (!this.ruinCompleted) {
@@ -3632,6 +4165,8 @@ export class Game {
       // so ignoring the still-active persisted record here avoids reusing its
       // now-closed expedition id if the player promptly re-enters the ruin.
       this._configureBossHuntEncounter(this.dungeon, { ignorePersistedActive: true });
+    } else {
+      this.activeBossExpeditionSpec = null;
     }
     this.dungeonController?.lastSafePlayerPosition?.copy?.(this.player.root.position);
     this.cameraController.snapTo(this.player);
@@ -3714,7 +4249,7 @@ export class Game {
       this.activeWorldBundle.collisionData = dungeon.solidZones ?? [];
       this.activeWorldBundle.cullingData = dungeon.renderCullGroups ?? [];
       this.activeWorldBundle.disposableResources = dungeon.disposableResources ?? [];
-      this.activeWorldBundle.planHash = `v1:${this.dungeonLayoutSeed}:${this.getSelectedBossProfileId()}`;
+      this.activeWorldBundle.planHash = `v1:${this.dungeonLayoutSeed}:depth:${this.ruinFloor}:${this.getSelectedBossProfileId()}`;
     }
     dungeon.activateNpcAssets?.();
     this.lastDungeonResourceDisposalStats = this._disposeDetachedDungeonResources(
@@ -5130,10 +5665,7 @@ export class Game {
   async reloadBusterLabDurableState() {
     const result = await this.busterLabStorage?.reloadDurableState?.();
     if (!result?.ok) return { ok: false, message: 'The durable Lab state could not be reloaded.' };
-    this.busterLabLoadWarning = this.busterLabStorage.lastWarning;
-    this._refreshRollSalvageStorage();
-    this._recompileBusterPlans();
-    this._restoreCustomBusterAssignments();
+    this._reconcileBusterLabRuntimeAfterReload();
     return { ok: true, message: this.busterLabStorage.readOnly
       ? 'Lab reloaded in read-only mode.'
       : 'Durable Lab state reloaded; writes resumed.' };
@@ -7919,6 +8451,7 @@ export class Game {
   _createLegacyDungeonWorldCandidate({
     bossProfileId = this.getSelectedBossProfileId(),
     layoutSeed = this.dungeonLayoutSeed,
+    difficulty = this.ruinFloor,
   } = {}) {
     const root = new THREE.Group();
     root.name = 'dungeonWorldRoot';
@@ -7956,7 +8489,7 @@ export class Game {
     root.add(grid);
 
     const dungeon = new DungeonGenerator({
-      difficulty: this.ruinFloor,
+      difficulty,
       random: createDungeonRandom(layoutSeed),
       bossProfileId: this._creatingBusterSandbox ? null : bossProfileId,
     }).generate();
@@ -7972,7 +8505,7 @@ export class Game {
       collisionData: dungeon.solidZones ?? [],
       cullingData: dungeon.renderCullGroups ?? [],
       disposableResources: dungeon.disposableResources ?? [],
-      planHash: `v1:${layoutSeed}:${bossProfileId ?? 'standard'}`,
+      planHash: `v1:${layoutSeed}:depth:${difficulty}:${bossProfileId ?? 'standard'}`,
       bossProfileId,
       disposed: false,
     });

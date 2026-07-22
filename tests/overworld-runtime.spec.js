@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import {
   OVERWORLD_OBJECT_NAMES,
+  abandonInterruptedExpedition,
   abandonExpeditionThroughEntrance,
   attachRuntimeErrorCapture,
   beginBossExpedition,
@@ -9,7 +10,9 @@ import {
   openDungeonAbandonModalThroughEntrance,
   openExteriorBossModal,
   readWorldDiagnostics,
+  resumeInterruptedExpedition,
   waitForOverworldAssetsSettled,
+  waitForInterruptedExpeditionPrompt,
   waitForWorld,
   walkToNamedObject,
   walkToWorldPosition,
@@ -94,6 +97,45 @@ const RETURN_ROLLBACK_FAILURES = Object.freeze([
 ]);
 
 const PLAYER_COLLISION_RADIUS = 0.42;
+
+const readInterruptedExpeditionSnapshot = (page) => page.evaluate(() => {
+  const { game } = window;
+  const active = game.busterLabStorage?.getActiveBossExpedition?.() ?? null;
+  const hunts = game.busterLabStorage?.getBossHuntState?.() ?? {};
+  const records = Object.values(hunts.recordedExpeditions ?? {});
+  const journey = game.worldKind === 'dungeon'
+    ? game.getPublicDungeonJourneyDiagnostics?.({ includeGeometry: false }) ?? null
+    : null;
+  const entranceDoor = game.activeWorldBundle?.entranceDoor ?? null;
+  return structuredClone({
+    world: game.getWorldTransitionDiagnostics?.() ?? null,
+    selectedBossProfileId: game.getSelectedBossProfileId?.() ?? null,
+    storageRevision: game.busterLabStorage?.revision ?? null,
+    storageWriteId: game.busterLabStorage?.writeId ?? null,
+    active,
+    activeExpeditionId: hunts.activeExpeditionId ?? null,
+    activeRecordIds: records
+      .filter(({ status }) => status === 'active')
+      .map(({ expeditionId }) => expeditionId)
+      .sort(),
+    pendingRecoveries: hunts.pendingRecoveries ?? [],
+    playerPosition: game.player?.root?.position?.toArray?.() ?? null,
+    authoredEntry: game.dungeon?.ruinEntryPosition?.toArray?.()
+      ?? game.dungeon?.playerStart?.toArray?.()
+      ?? null,
+    entranceDoor: entranceDoor ? {
+      closed: Boolean(entranceDoor.closed),
+      collisionHeight: entranceDoor.collisionHeight ?? null,
+    } : null,
+    localState: journey ? {
+      ownedKeys: journey.ownedKeys ?? [],
+      keycards: (journey.keycards ?? []).map(({ id, collected }) => ({ id, collected })),
+      chests: (journey.chests ?? []).map(({ id, opened }) => ({ id, opened })),
+      encounters: (journey.encounters ?? []).map(({ id, cleared }) => ({ id, cleared })),
+      mechanisms: (journey.mechanisms ?? []).map(({ id, activated }) => ({ id, activated })),
+    } : null,
+  });
+});
 
 const horizontalDistance = (left, right) => Math.hypot(left.x - right.x, left.z - right.z);
 
@@ -654,6 +696,602 @@ test.describe('voxel overworld acceptance', () => {
     expect(diagnostics.ownership.sceneWorldRootCount).toBe(1);
     expect(diagnostics.ownership.sceneWorldRootIds).toEqual([diagnostics.activeRootId]);
     expect(runtimeErrors).toEqual([]);
+  });
+
+  test('closing and reopening during a durable expedition requires an explicit restart and rebuilds the same V1 run from its beginning', async ({ page, context }) => {
+    test.setTimeout(150_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-restart&reaverbotSeed=interrupted-expedition-restart';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+    await beginBossExpedition(page, 'revolvingFusillade');
+
+    const entered = await readInterruptedExpeditionSnapshot(page);
+    expect(entered.active).toMatchObject({
+      status: 'active',
+      bossProfileId: 'revolvingFusillade',
+      dungeonLayoutSeed: 'layout:interrupted-expedition-restart',
+    });
+    expect(entered.activeRecordIds).toEqual([entered.active.expeditionId]);
+    expect(entered.world.planHash).toBeTruthy();
+
+    // Leave the authored entrance using ordinary input so restart must prove
+    // it returned to the beginning instead of retaining an in-memory position.
+    await page.keyboard.down('KeyW');
+    try {
+      await page.waitForTimeout(2_500);
+    } finally {
+      await page.keyboard.up('KeyW');
+    }
+    const departedPosition = await page.evaluate(() => window.game.player.root.position.toArray());
+    expect(Math.hypot(
+      departedPosition[0] - entered.authoredEntry[0],
+      departedPosition[2] - entered.authoredEntry[2],
+    )).toBeGreaterThan(2);
+
+    // Closing the page and creating another page in the same browser context
+    // preserves real browser storage without mutating campaign state in test.
+    await page.close();
+    const reopened = await context.newPage();
+    const reopenedErrors = attachRuntimeErrorCapture(reopened);
+    await reopened.goto(startupUrl);
+    await waitForWorld(reopened, 'overworld');
+    const modal = await waitForInterruptedExpeditionPrompt(reopened);
+    await expect(reopened.locator('[data-overworld-boss-modal]')).toBeHidden();
+    expect(await reopened.evaluate(() => document.activeElement?.dataset?.action ?? null))
+      .toBe('resume-interrupted-expedition');
+
+    // There is intentionally no third choice: backdrop and Escape must not
+    // silently discard or bypass the durable expedition decision.
+    await modal.click({ position: { x: 4, y: 4 } });
+    await reopened.keyboard.press('Escape');
+    await expect(modal).toBeVisible();
+
+    const prompting = await readInterruptedExpeditionSnapshot(reopened);
+    expect(prompting.active).toEqual(entered.active);
+    expect(prompting.activeRecordIds).toEqual([entered.active.expeditionId]);
+    expect(prompting.world).toMatchObject({
+      worldKind: 'overworld',
+      transitionState: 'overworld',
+    });
+
+    await resumeInterruptedExpedition(reopened, { doubleSubmit: true });
+    const restarted = await readInterruptedExpeditionSnapshot(reopened);
+    expect(restarted.world).toMatchObject({
+      worldKind: 'dungeon',
+      transitionState: 'dungeon',
+      planHash: entered.world.planHash,
+    });
+    expect(restarted.selectedBossProfileId).toBe(entered.selectedBossProfileId);
+    expect(restarted.active).toMatchObject({
+      expeditionId: entered.active.expeditionId,
+      bossProfileId: entered.active.bossProfileId,
+      seed: entered.active.seed,
+      depth: entered.active.depth,
+      dungeonLayoutSeed: entered.active.dungeonLayoutSeed,
+      status: 'active',
+      startedAt: entered.active.startedAt,
+      restartCount: (entered.active.restartCount ?? 0) + 1,
+    });
+    expect(restarted.active.restartedAt).toEqual(expect.any(String));
+    expect(restarted.activeRecordIds).toEqual([entered.active.expeditionId]);
+    // The two rapid clicks must collapse to one durable restart transaction.
+    expect(restarted.storageRevision).toBe(entered.storageRevision + 1);
+    expect(restarted.storageWriteId).not.toBe(entered.storageWriteId);
+    expect(restarted.playerPosition[0]).toBeCloseTo(restarted.authoredEntry[0], 3);
+    expect(restarted.playerPosition[1]).toBeCloseTo(restarted.authoredEntry[1], 3);
+    expect(restarted.playerPosition[2]).toBeCloseTo(restarted.authoredEntry[2], 3);
+    expect(Math.hypot(
+      restarted.playerPosition[0] - departedPosition[0],
+      restarted.playerPosition[2] - departedPosition[2],
+    )).toBeGreaterThan(2);
+    expect(restarted.entranceDoor).toMatchObject({ closed: true });
+    expect(restarted.entranceDoor.collisionHeight).toBeGreaterThan(12);
+    expect(restarted.localState.ownedKeys).toEqual([]);
+    expect(restarted.localState.keycards.every(({ collected }) => !collected)).toBe(true);
+    expect(restarted.localState.chests.every(({ opened }) => !opened)).toBe(true);
+    expect(restarted.localState.encounters.every(({ cleared }) => !cleared)).toBe(true);
+    expect(restarted.localState.mechanisms.every(({ activated }) => !activated)).toBe(true);
+    await expect(modal).toBeHidden();
+    expect([...runtimeErrors, ...reopenedErrors]).toEqual([]);
+  });
+
+  test('abandoning an interrupted expedition clears its durable lock and permits a different Boss Hunt', async ({ page, context }) => {
+    test.setTimeout(150_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-abandon&reaverbotSeed=interrupted-expedition-abandon';
+    const abandonedProfileId = 'revolvingFusillade';
+    const replacementProfileId = 'pursuitRegent';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+    await beginBossExpedition(page, abandonedProfileId);
+    const entered = await readInterruptedExpeditionSnapshot(page);
+    expect(entered.active).toMatchObject({
+      status: 'active',
+      bossProfileId: abandonedProfileId,
+    });
+
+    await page.close();
+    const reopened = await context.newPage();
+    const reopenedErrors = attachRuntimeErrorCapture(reopened);
+    await reopened.goto(startupUrl);
+    await waitForWorld(reopened, 'overworld');
+    await waitForInterruptedExpeditionPrompt(reopened);
+    const beforeAbandon = await readWorldDiagnostics(reopened);
+
+    await abandonInterruptedExpedition(reopened);
+    const abandoned = await reopened.evaluate((expeditionId) => {
+      const { game } = window;
+      const hunts = game.busterLabStorage.getBossHuntState();
+      return structuredClone({
+        world: game.getWorldTransitionDiagnostics(),
+        locked: game.getBossHuntViewModel().locked,
+        selectedBossProfileId: game.getSelectedBossProfileId(),
+        active: game.busterLabStorage.getActiveBossExpedition(),
+        activeExpeditionId: hunts.activeExpeditionId,
+        abandonedRecord: hunts.recordedExpeditions[expeditionId] ?? null,
+      });
+    }, entered.active.expeditionId);
+    expect(abandoned.world).toMatchObject({
+      worldKind: 'overworld',
+      transitionState: 'overworld',
+      activeRootId: beforeAbandon.activeRootId,
+      generationCount: beforeAbandon.generationCount,
+      disposalCount: beforeAbandon.disposalCount,
+    });
+    expect(abandoned.active).toBeNull();
+    expect(abandoned.activeExpeditionId).toBeNull();
+    expect(abandoned.locked).toBe(false);
+    expect(abandoned.selectedBossProfileId).toBe(abandonedProfileId);
+    expect(abandoned.abandonedRecord).toMatchObject({
+      expeditionId: entered.active.expeditionId,
+      bossProfileId: abandonedProfileId,
+      status: 'abandoned',
+    });
+
+    await beginBossExpedition(reopened, replacementProfileId);
+    const replacement = await readInterruptedExpeditionSnapshot(reopened);
+    expect(replacement.world).toMatchObject({
+      worldKind: 'dungeon',
+      transitionState: 'dungeon',
+    });
+    expect(replacement.selectedBossProfileId).toBe(replacementProfileId);
+    expect(replacement.active).toMatchObject({
+      status: 'active',
+      bossProfileId: replacementProfileId,
+      dungeonLayoutSeed: 'layout:interrupted-expedition-abandon',
+    });
+    expect(replacement.active.expeditionId).not.toBe(entered.active.expeditionId);
+    expect(replacement.activeRecordIds).toEqual([replacement.active.expeditionId]);
+    expect([...runtimeErrors, ...reopenedErrors]).toEqual([]);
+  });
+
+  test('an interrupted-expedition rebuild failure leaves the mandatory prompt, durable lock, and overworld intact', async ({ page, context }) => {
+    test.setTimeout(120_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-rollback&reaverbotSeed=interrupted-expedition-rollback';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+    await beginBossExpedition(page, 'revolvingFusillade');
+    const entered = await readInterruptedExpeditionSnapshot(page);
+
+    await page.close();
+    const reopened = await context.newPage();
+    const reopenedErrors = attachRuntimeErrorCapture(reopened);
+    await reopened.goto(startupUrl);
+    await waitForWorld(reopened, 'overworld');
+    const modal = await waitForInterruptedExpeditionPrompt(reopened);
+    const before = await readInterruptedExpeditionSnapshot(reopened);
+
+    // Fault injection is confined to this rollback contract; the resolution
+    // itself is still initiated through the same public button as a player.
+    await reopened.evaluate(() => {
+      window.game._createLegacyDungeonWorldCandidate = () => {
+        throw new Error('Injected interrupted V1 rebuild failure');
+      };
+    });
+    await modal.locator('[data-action="resume-interrupted-expedition"]').click();
+    await expect(reopened.locator('#interrupted-expedition-error'))
+      .toContainText('Injected interrupted V1 rebuild failure');
+    await expect.poll(async () => (await readWorldDiagnostics(reopened)).transitionState)
+      .toBe('overworld');
+
+    const after = await readInterruptedExpeditionSnapshot(reopened);
+    expect(after.world).toMatchObject({
+      worldKind: 'overworld',
+      transitionState: 'overworld',
+      activeRootId: before.world.activeRootId,
+      planHash: before.world.planHash,
+      generationCount: before.world.generationCount,
+      disposalCount: before.world.disposalCount,
+    });
+    expect(after.active).toEqual(entered.active);
+    expect(after.activeRecordIds).toEqual([entered.active.expeditionId]);
+    expect(after.storageRevision).toBe(before.storageRevision);
+    expect(after.storageWriteId).toBe(before.storageWriteId);
+    expect(after.world.eventLog.map(({ event }) => event))
+      .toContain('interrupted-expedition-restart-failed');
+    await expect(modal).toBeVisible();
+    await expect(modal.locator('[data-action="resume-interrupted-expedition"]')).toBeEnabled();
+    await expect(modal.locator('[data-action="abandon-interrupted-expedition"]')).toBeEnabled();
+    expect([...runtimeErrors, ...reopenedErrors]).toEqual([]);
+  });
+
+  test('a mounted-candidate failure before the durable restart write preserves the exact checkpoint and restart counters', async ({ page, context }) => {
+    test.setTimeout(150_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-post-mount-rollback&reaverbotSeed=interrupted-expedition-post-mount-rollback';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+    await beginBossExpedition(page, 'ascensionEngine');
+
+    const checkpoint = await page.evaluate(async () => {
+      const { game } = window;
+      const expedition = game.busterLabStorage.getActiveBossExpedition();
+      return game.busterLabStorage.recordBossCheckpoint({
+        expeditionId: expedition.expeditionId,
+        bossProfileId: expedition.bossProfileId,
+        securedCheckpointIndex: 1,
+        securedCheckpointId: 'ascensionCheckpoint:compressionFoundry',
+        brokenSealIndex: 0,
+      });
+    });
+    expect(checkpoint).toMatchObject({ ok: true });
+    const checkpointed = await readInterruptedExpeditionSnapshot(page);
+    expect(checkpointed.active.encounterProgress).toMatchObject({
+      securedCheckpointIndex: 1,
+      securedCheckpointId: 'ascensionCheckpoint:compressionFoundry',
+    });
+
+    await page.close();
+    const reopened = await context.newPage();
+    const reopenedErrors = attachRuntimeErrorCapture(reopened);
+    await reopened.goto(startupUrl);
+    await waitForWorld(reopened, 'overworld');
+    const modal = await waitForInterruptedExpeditionPrompt(reopened);
+    const before = await readInterruptedExpeditionSnapshot(reopened);
+    expect(before.active).toEqual(checkpointed.active);
+
+    await reopened.evaluate(() => {
+      const { game } = window;
+      const originalInstall = game._installRuntimeControllerForBundle.bind(game);
+      game._installRuntimeControllerForBundle = (bundle) => {
+        if (bundle?.worldKind === 'dungeon') {
+          throw new Error('Injected post-mount controller installation failure');
+        }
+        return originalInstall(bundle);
+      };
+    });
+    await modal.locator('[data-action="resume-interrupted-expedition"]').click();
+    await expect(reopened.locator('#interrupted-expedition-error'))
+      .toContainText('Injected post-mount controller installation failure');
+    await expect.poll(async () => (await readWorldDiagnostics(reopened)).transitionState)
+      .toBe('overworld');
+
+    const after = await readInterruptedExpeditionSnapshot(reopened);
+    expect(after.world).toMatchObject({
+      worldKind: 'overworld',
+      transitionState: 'overworld',
+      activeRootId: before.world.activeRootId,
+      planHash: before.world.planHash,
+      generationCount: before.world.generationCount,
+      disposalCount: before.world.disposalCount,
+    });
+    expect(after.active).toEqual(before.active);
+    expect(after.active.encounterProgress).toEqual(checkpointed.active.encounterProgress);
+    expect(after.active.restartCount).toBe(checkpointed.active.restartCount);
+    expect(after.storageRevision).toBe(before.storageRevision);
+    expect(after.storageWriteId).toBe(before.storageWriteId);
+    await expect(modal).toBeVisible();
+    expect([...runtimeErrors, ...reopenedErrors]).toEqual([]);
+  });
+
+  test('an interrupted depth-four expedition reconstructs the same depth-aware V1 plan', async ({ page, context }) => {
+    test.setTimeout(150_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-depth-four&reaverbotSeed=interrupted-expedition-depth-four';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+
+    // This is fixture setup for a later-floor durable contract. Expedition
+    // entry and recovery themselves still run only through public modal input.
+    await page.evaluate(() => {
+      window.game.ruinFloor = 4;
+    });
+    await beginBossExpedition(page, 'revolvingFusillade');
+    const entered = await readInterruptedExpeditionSnapshot(page);
+    expect(entered.active).toMatchObject({
+      depth: 4,
+      dungeonLayoutSeed: 'layout:interrupted-expedition-depth-four',
+    });
+    expect(entered.world.planHash)
+      .toBe('v1:layout:interrupted-expedition-depth-four:depth:4:revolvingFusillade');
+
+    await page.close();
+    const reopened = await context.newPage();
+    const reopenedErrors = attachRuntimeErrorCapture(reopened);
+    await reopened.goto(startupUrl);
+    await waitForWorld(reopened, 'overworld');
+    await waitForInterruptedExpeditionPrompt(reopened);
+    await resumeInterruptedExpedition(reopened);
+    const restarted = await readInterruptedExpeditionSnapshot(reopened);
+    const generated = await reopened.evaluate(() => ({
+      ruinFloor: window.game.ruinFloor,
+      layoutSeed: window.game.dungeon.layoutSeed,
+      bossProfileId: window.game.dungeon.encounters.find(({ isBoss }) => isBoss)?.bossProfileId ?? null,
+      expeditionDepth: window.game.dungeon.encounters.find(({ isBoss }) => isBoss)?.expeditionSpec?.depth ?? null,
+    }));
+    expect(restarted.world.planHash).toBe(entered.world.planHash);
+    expect(restarted.active).toMatchObject({
+      expeditionId: entered.active.expeditionId,
+      bossProfileId: entered.active.bossProfileId,
+      seed: entered.active.seed,
+      depth: 4,
+      dungeonLayoutSeed: entered.active.dungeonLayoutSeed,
+    });
+    expect(generated).toEqual({
+      ruinFloor: 4,
+      layoutSeed: 'layout:interrupted-expedition-depth-four',
+      bossProfileId: 'revolvingFusillade',
+      expeditionDepth: 4,
+    });
+    expect([...runtimeErrors, ...reopenedErrors]).toEqual([]);
+  });
+
+  test('a committed boss victory still prompts after reload and abandonment preserves its recovery while unlocking selection', async ({ page, context }) => {
+    test.setTimeout(150_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-victory&reaverbotSeed=interrupted-expedition-victory';
+    const profileId = 'revolvingFusillade';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+    await beginBossExpedition(page, profileId);
+
+    // A full boss fight is covered by the V1 journey. Here the real durable
+    // victory command creates the narrow post-victory/pre-extraction fixture.
+    const victory = await page.evaluate(async () => {
+      const { game } = window;
+      const expedition = game.busterLabStorage.getActiveBossExpedition();
+      return game.busterLabStorage.recordBossVictory({
+        expeditionId: expedition.expeditionId,
+        bossProfileId: expedition.bossProfileId,
+        signaturePartOverloaded: false,
+      });
+    });
+    expect(victory).toMatchObject({ ok: true, firstClear: true, rewardQueued: true });
+    const victorious = await readInterruptedExpeditionSnapshot(page);
+    expect(victorious.active).toMatchObject({
+      status: 'victory',
+      bossProfileId: profileId,
+    });
+    expect(victorious.activeExpeditionId).toBe(victorious.active.expeditionId);
+    expect(victorious.pendingRecoveries).toHaveLength(1);
+
+    await page.close();
+    const reopened = await context.newPage();
+    const reopenedErrors = attachRuntimeErrorCapture(reopened);
+    await reopened.goto(startupUrl);
+    await waitForWorld(reopened, 'overworld');
+    const modal = await waitForInterruptedExpeditionPrompt(reopened);
+    await expect(modal).toHaveAttribute('data-expedition-id', victorious.active.expeditionId);
+    const beforeAbandon = await readInterruptedExpeditionSnapshot(reopened);
+    expect(beforeAbandon.active).toEqual(victorious.active);
+
+    await abandonInterruptedExpedition(reopened);
+    const abandoned = await reopened.evaluate((expeditionId) => {
+      const { game } = window;
+      const hunts = game.busterLabStorage.getBossHuntState();
+      return structuredClone({
+        activeExpeditionId: hunts.activeExpeditionId,
+        record: hunts.recordedExpeditions[expeditionId],
+        pendingRecoveries: hunts.pendingRecoveries,
+        victoryCount: hunts.victoriesByProfile.revolvingFusillade ?? 0,
+        locked: game.getBossHuntViewModel().locked,
+      });
+    }, victorious.active.expeditionId);
+    expect(abandoned.activeExpeditionId).toBeNull();
+    expect(abandoned.record).toEqual(victorious.active);
+    expect(abandoned.pendingRecoveries).toEqual(victorious.pendingRecoveries);
+    expect(abandoned.victoryCount).toBe(1);
+    expect(abandoned.locked).toBe(false);
+
+    const bossModal = await openExteriorBossModal(reopened);
+    await expect(bossModal).toBeVisible();
+    const cancel = bossModal.locator('[data-action="cancel-expedition"]');
+    await expect(cancel).toHaveCount(1);
+    await cancel.click();
+    await expect(bossModal).toBeHidden();
+    expect([...runtimeErrors, ...reopenedErrors]).toEqual([]);
+  });
+
+  test('a stale recovery prompt reloads durable state after another tab abandons the expedition', async ({ page, context }) => {
+    test.setTimeout(150_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-cross-tab&reaverbotSeed=interrupted-expedition-cross-tab';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+    await beginBossExpedition(page, 'revolvingFusillade');
+    await page.close();
+
+    const resolver = await context.newPage();
+    const resolverErrors = attachRuntimeErrorCapture(resolver);
+    await resolver.goto(startupUrl);
+    await waitForWorld(resolver, 'overworld');
+    await waitForInterruptedExpeditionPrompt(resolver);
+
+    const stale = await context.newPage();
+    const staleErrors = attachRuntimeErrorCapture(stale);
+    await stale.goto(startupUrl);
+    await waitForWorld(stale, 'overworld');
+    const staleModal = await waitForInterruptedExpeditionPrompt(stale);
+    const staleBefore = await readWorldDiagnostics(stale);
+    await stale.evaluate(() => {
+      window.__interruptedReloadRefs = {
+        labState: window.game.busterLabState,
+        rollSalvageStorage: window.game.rollSalvageStorage,
+        busterLabPlans: window.game.busterLabPlans,
+      };
+    });
+
+    await abandonInterruptedExpedition(resolver);
+    await stale.waitForFunction(() => (
+      window.game.busterLabStorage.getPersistenceStatus().writePauseReason === 'external-conflict'
+    ));
+    await staleModal.locator('[data-action="resume-interrupted-expedition"]').click();
+    await expect(staleModal).toBeHidden();
+
+    const staleAfter = await readWorldDiagnostics(stale);
+    expect(staleAfter).toMatchObject({
+      worldKind: 'overworld',
+      transitionState: 'overworld',
+      activeRootId: staleBefore.activeRootId,
+      planHash: staleBefore.planHash,
+      generationCount: staleBefore.generationCount,
+      disposalCount: staleBefore.disposalCount,
+    });
+    expect(staleAfter.eventLog.map(({ event }) => event))
+      .toContain('interrupted-expedition-resolved-externally');
+    expect(await stale.evaluate(() => (
+      window.game.busterLabStorage.getActiveBossExpedition()
+    ))).toBeNull();
+    expect(await stale.evaluate(() => ({
+      stateMatchesDurable: window.game.busterLabState === window.game.busterLabStorage.state,
+      salvageStorageRebuilt: window.game.rollSalvageStorage
+        !== window.__interruptedReloadRefs.rollSalvageStorage,
+      busterPlansRecompiled: !window.game.busterLabEnabled
+        || window.game.busterLabPlans !== window.__interruptedReloadRefs.busterLabPlans,
+      selectedBossProfileId: window.game.getSelectedBossProfileId(),
+      durableBossProfileId: window.game.busterLabStorage.state.bossHunts.selectedBossProfileId,
+    }))).toEqual({
+      stateMatchesDurable: true,
+      salvageStorageRebuilt: true,
+      busterPlansRecompiled: true,
+      selectedBossProfileId: 'revolvingFusillade',
+      durableBossProfileId: 'revolvingFusillade',
+    });
+    expect([...runtimeErrors, ...resolverErrors, ...staleErrors]).toEqual([]);
+  });
+
+  test('a stale prompt cannot abandon a replacement Boss Hunt created in another tab', async ({ page, context }) => {
+    test.setTimeout(180_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-replaced&reaverbotSeed=interrupted-expedition-replaced';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+    await beginBossExpedition(page, 'revolvingFusillade');
+    await page.close();
+
+    const resolver = await context.newPage();
+    const resolverErrors = attachRuntimeErrorCapture(resolver);
+    await resolver.goto(startupUrl);
+    await waitForWorld(resolver, 'overworld');
+    const resolverPrompt = await waitForInterruptedExpeditionPrompt(resolver);
+    const originalExpeditionId = await resolverPrompt.getAttribute('data-expedition-id');
+
+    const stale = await context.newPage();
+    const staleErrors = attachRuntimeErrorCapture(stale);
+    await stale.goto(startupUrl);
+    await waitForWorld(stale, 'overworld');
+    const staleModal = await waitForInterruptedExpeditionPrompt(stale);
+    await expect(staleModal).toHaveAttribute('data-expedition-id', originalExpeditionId);
+
+    await abandonInterruptedExpedition(resolver);
+    await beginBossExpedition(resolver, 'pursuitRegent');
+    const replacement = await readInterruptedExpeditionSnapshot(resolver);
+    expect(replacement.active).toMatchObject({
+      status: 'active',
+      bossProfileId: 'pursuitRegent',
+    });
+    expect(replacement.active.expeditionId).not.toBe(originalExpeditionId);
+
+    await stale.waitForFunction(() => (
+      window.game.busterLabStorage.getPersistenceStatus().writePauseReason === 'external-conflict'
+    ));
+    await staleModal.locator('[data-action="abandon-interrupted-expedition"]').click();
+
+    await expect(staleModal).toBeVisible();
+    await expect(staleModal).toHaveAttribute('data-expedition-id', replacement.active.expeditionId);
+    await expect(staleModal).toHaveAttribute('data-boss-profile-id', 'pursuitRegent');
+    await expect(stale.locator('#interrupted-expedition-error'))
+      .toContainText('changed in another window');
+    const refreshed = await readInterruptedExpeditionSnapshot(stale);
+    expect(refreshed.world).toMatchObject({
+      worldKind: 'overworld',
+      transitionState: 'overworld',
+    });
+    expect(refreshed.active).toEqual(replacement.active);
+    expect(refreshed.activeExpeditionId).toBe(replacement.active.expeditionId);
+    expect(refreshed.selectedBossProfileId).toBe('pursuitRegent');
+    expect(refreshed.world.eventLog.map(({ event }) => event))
+      .toContain('interrupted-expedition-identity-changed');
+    expect([...runtimeErrors, ...resolverErrors, ...staleErrors]).toEqual([]);
+  });
+
+  test('a simultaneous cross-tab abandonment resolves a restart already rebuilding its dungeon', async ({ page, context }) => {
+    test.setTimeout(180_000);
+    const runtimeErrors = attachRuntimeErrorCapture(page);
+    const startupUrl = '/?dungeonSeed=interrupted-expedition-cross-tab-race&reaverbotSeed=interrupted-expedition-cross-tab-race';
+    await page.goto(startupUrl);
+    await waitForWorld(page, 'overworld');
+    await beginBossExpedition(page, 'revolvingFusillade');
+    await page.close();
+
+    const resolver = await context.newPage();
+    const resolverErrors = attachRuntimeErrorCapture(resolver);
+    await resolver.goto(startupUrl);
+    await waitForWorld(resolver, 'overworld');
+    await waitForInterruptedExpeditionPrompt(resolver);
+
+    const stale = await context.newPage();
+    const staleErrors = attachRuntimeErrorCapture(stale);
+    await stale.goto(startupUrl);
+    await waitForWorld(stale, 'overworld');
+    const staleModal = await waitForInterruptedExpeditionPrompt(stale);
+    const staleBefore = await readWorldDiagnostics(stale);
+
+    // Hold the stale tab at its last durable operation. This preserves the
+    // public UI flow while deterministically placing the other tab's abandon
+    // after candidate assembly and before the restart commit.
+    await stale.evaluate(() => {
+      const storage = window.game.busterLabStorage;
+      const originalRestart = storage.restartActiveBossExpedition.bind(storage);
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      window.__interruptedExpeditionRace = { entered: false, release };
+      storage.restartActiveBossExpedition = async (...args) => {
+        window.__interruptedExpeditionRace.entered = true;
+        await gate;
+        return originalRestart(...args);
+      };
+    });
+    await staleModal.locator('[data-action="resume-interrupted-expedition"]').click();
+    await stale.waitForFunction(() => window.__interruptedExpeditionRace?.entered === true);
+
+    await abandonInterruptedExpedition(resolver);
+    await stale.waitForFunction(() => (
+      window.game.busterLabStorage.getPersistenceStatus().writePauseReason === 'external-conflict'
+    ));
+    await stale.evaluate(() => window.__interruptedExpeditionRace.release());
+
+    await stale.waitForFunction(() => (
+      window.game.worldKind === 'overworld'
+      && window.game.transitionState === 'overworld'
+    ));
+    await expect(staleModal).toBeHidden();
+    const staleAfter = await readWorldDiagnostics(stale);
+    expect(staleAfter).toMatchObject({
+      worldKind: 'overworld',
+      transitionState: 'overworld',
+      activeRootId: staleBefore.activeRootId,
+      planHash: staleBefore.planHash,
+      generationCount: staleBefore.generationCount,
+    });
+    expect(staleAfter.eventLog.map(({ event }) => event))
+      .toContain('interrupted-expedition-resolved-externally');
+    expect(await stale.evaluate(() => (
+      window.game.busterLabStorage.getActiveBossExpedition()
+    ))).toBeNull();
+    expect([...runtimeErrors, ...resolverErrors, ...staleErrors]).toEqual([]);
   });
 
   test('a streamed conventional V1 expedition begins on its authored entrance floor and walks inward without jumping', async ({ page }) => {

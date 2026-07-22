@@ -464,6 +464,10 @@ export class UIManager {
     this.expeditionAbandonDescription = document.getElementById('expedition-abandon-description');
     this.expeditionAbandonStatus = document.getElementById('expedition-abandon-status');
     this.expeditionAbandonError = document.getElementById('expedition-abandon-error');
+    this.interruptedExpeditionModal = document.getElementById('interrupted-expedition-modal');
+    this.interruptedExpeditionDescription = document.getElementById('interrupted-expedition-description');
+    this.interruptedExpeditionStatus = document.getElementById('interrupted-expedition-status');
+    this.interruptedExpeditionError = document.getElementById('interrupted-expedition-error');
     this.busterLabView = document.getElementById('buster-lab-view');
     this.busterLabWarning = document.getElementById('buster-lab-warning');
     this.busterLabPersistence = document.getElementById('buster-lab-persistence');
@@ -573,6 +577,12 @@ export class UIManager {
     this.expeditionAbandonLoading = false;
     this.expeditionAbandonLoadingMessage = '';
     this.expeditionAbandonErrorMessage = '';
+    this.interruptedExpeditionLoading = false;
+    this.interruptedExpeditionLoadingMessage = '';
+    this.interruptedExpeditionErrorMessage = '';
+    this.interruptedExpeditionId = null;
+    this.interruptedExpeditionBossProfileId = null;
+    this.interruptedExpeditionStatusValue = null;
     this.worldModalReturnFocus = null;
     this.lastScrapIdentification = null;
     this.previousHealth = null;
@@ -988,10 +998,115 @@ export class UIManager {
     this.renderDungeonAbandonPrompt();
   }
 
+  openInterruptedExpeditionPrompt({
+    expeditionId = '',
+    bossProfileId = '',
+    expeditionStatus = 'active',
+    expeditionLabel = 'Boss Hunt',
+  } = {}) {
+    this.interruptedExpeditionLoading = false;
+    this.interruptedExpeditionLoadingMessage = '';
+    this.interruptedExpeditionErrorMessage = '';
+    this.interruptedExpeditionId = String(expeditionId ?? '') || null;
+    this.interruptedExpeditionBossProfileId = String(bossProfileId ?? '') || null;
+    this.interruptedExpeditionStatusValue = expeditionStatus === 'victory' ? 'victory' : 'active';
+    this._captureWorldModalFocus();
+    if (this.bossExpeditionModal) {
+      this.bossExpeditionModal.hidden = true;
+      this.bossExpeditionModal.setAttribute('aria-hidden', 'true');
+    }
+    if (this.expeditionAbandonModal) {
+      this.expeditionAbandonModal.hidden = true;
+      this.expeditionAbandonModal.setAttribute('aria-hidden', 'true');
+    }
+    if (this.interruptedExpeditionModal) {
+      this.interruptedExpeditionModal.hidden = false;
+      this.interruptedExpeditionModal.setAttribute('aria-hidden', 'false');
+      this.interruptedExpeditionModal.dataset.expeditionId = this.interruptedExpeditionId ?? '';
+      this.interruptedExpeditionModal.dataset.bossProfileId = this.interruptedExpeditionBossProfileId ?? '';
+      this.interruptedExpeditionModal.dataset.expeditionStatus = this.interruptedExpeditionStatusValue;
+    }
+    if (this.interruptedExpeditionDescription) {
+      this.interruptedExpeditionDescription.textContent = this.interruptedExpeditionStatusValue === 'victory'
+        ? `${expeditionLabel} was defeated, but the expedition ended before you returned to camp. The victory and its reward remain secured; re-entering starts at the ruin entrance.`
+        : `${expeditionLabel} was active when the game closed. Dungeon-local progress was not retained. Re-entering starts the expedition again from the ruin entrance.`;
+    }
+    this._syncWorldModalRootState();
+    this.renderInterruptedExpeditionPrompt();
+    this._focusWorldModal(
+      this.interruptedExpeditionModal,
+      '[data-action="resume-interrupted-expedition"]',
+    );
+    return {
+      ok: true,
+      expeditionId: this.interruptedExpeditionId,
+      bossProfileId: this.interruptedExpeditionBossProfileId,
+    };
+  }
+
+  closeInterruptedExpeditionPrompt({ restoreFocus = false } = {}) {
+    if (this.interruptedExpeditionModal) {
+      this.interruptedExpeditionModal.hidden = true;
+      this.interruptedExpeditionModal.setAttribute('aria-hidden', 'true');
+      this.interruptedExpeditionModal.setAttribute('aria-busy', 'false');
+      this.interruptedExpeditionModal.dataset.expeditionId = '';
+      this.interruptedExpeditionModal.dataset.bossProfileId = '';
+      this.interruptedExpeditionModal.dataset.expeditionStatus = '';
+    }
+    this.interruptedExpeditionLoading = false;
+    this.interruptedExpeditionLoadingMessage = '';
+    this.interruptedExpeditionErrorMessage = '';
+    this.interruptedExpeditionId = null;
+    this.interruptedExpeditionBossProfileId = null;
+    this.interruptedExpeditionStatusValue = null;
+    this._syncWorldModalRootState();
+    if (restoreFocus) this._restoreWorldModalFocus();
+    else this.worldModalReturnFocus = null;
+  }
+
+  renderInterruptedExpeditionPrompt({ loading, error, message } = {}) {
+    if (!this.interruptedExpeditionModal) return;
+    if (loading !== undefined) this.interruptedExpeditionLoading = Boolean(loading);
+    if (error !== undefined) this.interruptedExpeditionErrorMessage = String(error?.message ?? error ?? '');
+    if (message !== undefined) this.interruptedExpeditionLoadingMessage = String(message ?? '');
+    this.interruptedExpeditionModal.setAttribute('aria-busy', String(this.interruptedExpeditionLoading));
+    if (this.interruptedExpeditionStatus) {
+      this.interruptedExpeditionStatus.textContent = this.interruptedExpeditionLoading
+        ? this.interruptedExpeditionLoadingMessage || 'Resolving the interrupted expedition...'
+        : 'Re-enter from the beginning, or abandon this Boss Hunt and return to camp.';
+    }
+    if (this.interruptedExpeditionError) {
+      this.interruptedExpeditionError.hidden = !this.interruptedExpeditionErrorMessage;
+      this.interruptedExpeditionError.textContent = this.interruptedExpeditionErrorMessage;
+    }
+    for (const button of this.interruptedExpeditionModal.querySelectorAll('button')) {
+      button.disabled = this.interruptedExpeditionLoading;
+    }
+  }
+
+  setInterruptedExpeditionLoading(loading, message = '') {
+    this.interruptedExpeditionLoading = Boolean(loading);
+    this.interruptedExpeditionLoadingMessage = typeof message === 'object'
+      ? String(message?.message ?? '')
+      : String(message ?? '');
+    if (this.interruptedExpeditionLoading) this.interruptedExpeditionErrorMessage = '';
+    this.renderInterruptedExpeditionPrompt();
+  }
+
+  setInterruptedExpeditionError(error) {
+    this.interruptedExpeditionLoading = false;
+    this.interruptedExpeditionLoadingMessage = '';
+    this.interruptedExpeditionErrorMessage = String(
+      error?.message ?? error ?? 'Unable to resolve the interrupted expedition.',
+    );
+    this.renderInterruptedExpeditionPrompt();
+  }
+
   isWorldModalOpen() {
     return Boolean(
       (this.bossExpeditionModal && !this.bossExpeditionModal.hidden)
-      || (this.expeditionAbandonModal && !this.expeditionAbandonModal.hidden),
+      || (this.expeditionAbandonModal && !this.expeditionAbandonModal.hidden)
+      || (this.interruptedExpeditionModal && !this.interruptedExpeditionModal.hidden),
     );
   }
 
@@ -1153,6 +1268,50 @@ export class UIManager {
       this.closeDungeonAbandonPrompt();
     } catch (error) {
       this.setDungeonAbandonError(error);
+    }
+  }
+
+  async _resumeInterruptedExpedition() {
+    if (this.interruptedExpeditionLoading) return;
+    if (typeof this.game.resumeInterruptedExpedition !== 'function') {
+      this.setInterruptedExpeditionError('Expedition recovery is unavailable.');
+      return;
+    }
+    this.setInterruptedExpeditionLoading(true, 'Rebuilding the dungeon from its entrance...');
+    try {
+      const result = await this.game.resumeInterruptedExpedition();
+      if (!this._worldActionSucceeded(result)) {
+        this.setInterruptedExpeditionError(this._worldActionFailureMessage(
+          result,
+          'The interrupted expedition could not be rebuilt.',
+        ));
+        return;
+      }
+      this.closeInterruptedExpeditionPrompt({ restoreFocus: false });
+    } catch (error) {
+      this.setInterruptedExpeditionError(error);
+    }
+  }
+
+  async _abandonInterruptedExpedition() {
+    if (this.interruptedExpeditionLoading) return;
+    if (typeof this.game.abandonInterruptedExpedition !== 'function') {
+      this.setInterruptedExpeditionError('Expedition abandonment is unavailable.');
+      return;
+    }
+    this.setInterruptedExpeditionLoading(true, 'Abandoning the interrupted expedition...');
+    try {
+      const result = await this.game.abandonInterruptedExpedition();
+      if (!this._worldActionSucceeded(result)) {
+        this.setInterruptedExpeditionError(this._worldActionFailureMessage(
+          result,
+          'The interrupted expedition could not be abandoned.',
+        ));
+        return;
+      }
+      this.closeInterruptedExpeditionPrompt({ restoreFocus: false });
+    } catch (error) {
+      this.setInterruptedExpeditionError(error);
     }
   }
 
@@ -3581,17 +3740,31 @@ export class UIManager {
       }
     });
 
+    this.interruptedExpeditionModal?.addEventListener('click', (event) => {
+      const button = event.target.closest('button');
+      if (!button || button.disabled) return;
+      const action = button.dataset.action;
+      if (action === 'resume-interrupted-expedition') {
+        this._resumeInterruptedExpedition();
+      } else if (action === 'abandon-interrupted-expedition') {
+        this._abandonInterruptedExpedition();
+      }
+    });
+
     document.addEventListener('keydown', (event) => {
-      const activeModal = this.bossExpeditionModal && !this.bossExpeditionModal.hidden
-        ? this.bossExpeditionModal
-        : this.expeditionAbandonModal && !this.expeditionAbandonModal.hidden
-          ? this.expeditionAbandonModal
-          : null;
+      const activeModal = this.interruptedExpeditionModal && !this.interruptedExpeditionModal.hidden
+        ? this.interruptedExpeditionModal
+        : this.bossExpeditionModal && !this.bossExpeditionModal.hidden
+          ? this.bossExpeditionModal
+          : this.expeditionAbandonModal && !this.expeditionAbandonModal.hidden
+            ? this.expeditionAbandonModal
+            : null;
       if (!activeModal) return;
 
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
+        if (activeModal === this.interruptedExpeditionModal) return;
         if (activeModal === this.bossExpeditionModal) this._cancelBossExpeditionPrompt();
         else this._cancelDungeonAbandon();
         return;

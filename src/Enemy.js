@@ -2232,12 +2232,12 @@ export class Enemy {
   _getGorubesshuFlameOrigin(target, direction) {
     if (this.gorubesshuRig?.muzzle) {
       this.gorubesshuRig.muzzle.getWorldPosition(target);
-      target.y = Math.max(target.y, 0.52);
+      target.y = Math.max(target.y, this.root.position.y + 0.52);
       return target;
     }
 
     target.copy(this.root.position).addScaledVector(direction, 0.72);
-    target.y = 0.58;
+    target.y = this.root.position.y + 0.58;
     return target;
   }
 
@@ -2484,7 +2484,7 @@ export class Enemy {
       this.gorubesshuRig.shieldArm.getWorldPosition(impact);
       tempForward.set(Math.sin(this.root.rotation.y), 0, Math.cos(this.root.rotation.y)).normalize();
       impact.addScaledVector(tempForward, 0.34);
-      impact.y = Math.max(impact.y, 0.78);
+      impact.y = Math.max(impact.y, this.root.position.y + 0.78);
       return impact;
     }
 

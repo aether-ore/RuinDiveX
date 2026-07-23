@@ -18,12 +18,47 @@ const BEAM_BLADE_APPROACH_RADIUS = 1.65;
 const BEAM_BLADE_REPOSITION_DISTANCE = 2.35;
 const BEAM_BLADE_RETREAT_DISTANCE = 0.45;
 const COMBAT_DAMAGE_WATCHDOG_MILLISECONDS = 6_500;
+// Tank steering advances in frame-sized angular increments. Use one shared
+// dead zone for explicit facing and locomotion so a heading accepted by the
+// walker cannot make orientToward oscillate forever just outside 0.11 radians.
+const ROUTE_FACING_TOLERANCE = 0.14;
 const CARDINAL_NEIGHBORS = Object.freeze([
   [1, 0],
   [-1, 0],
   [0, 1],
   [0, -1],
 ]);
+
+/**
+ * Decide whether combat must seek a new authored firing lane. A retained lock
+ * on an aerial target already inside the real three-dimensional Buster range
+ * is immediately attackable even after the damage watchdog expires; routing
+ * again at that point only walks away from a valid shot. Grounded stalled
+ * targets retain the existing Beam Blade/reposition policy.
+ */
+export const shouldRepositionPublicCombatTarget = ({
+  hasLockedEnemy,
+  movementLocked,
+  targetDistance,
+  targetHeight,
+  useBeamBlade,
+  hasDamageStalled,
+  forceBeamBladeFallback,
+}) => {
+  const retainedAerialBusterTarget = hasLockedEnemy
+    && movementLocked
+    && Math.abs(targetHeight) > 1.8
+    && Math.hypot(targetDistance, targetHeight) <= MEGA_BUSTER_MAXIMUM_RANGE;
+  const preferredDistance = useBeamBlade
+    ? BEAM_BLADE_REPOSITION_DISTANCE
+    : MEGA_BUSTER_REPOSITION_DISTANCE;
+  return !hasLockedEnemy
+    || !movementLocked
+    || (targetDistance > preferredDistance && !retainedAerialBusterTarget)
+    || (hasDamageStalled
+      && !forceBeamBladeFallback
+      && !retainedAerialBusterTarget);
+};
 
 const distance2d = (left, right) => Math.hypot(left.x - right.x, left.z - right.z);
 
@@ -97,6 +132,7 @@ const resolveTraversalAction = (from, to) => {
     Number(from.groundedStepTransitionHeight) || 0,
     Number(to.groundedStepTransitionHeight) || 0,
   );
+  const connectionId = from.connectionId ?? to.connectionId ?? null;
 
   if (Math.abs(rise) <= groundedAllowance) {
     return {
@@ -105,21 +141,22 @@ const resolveTraversalAction = (from, to) => {
         : 'walk',
       rise,
       cost: 1 + Math.abs(rise) * 0.18,
+      connectionId,
     };
   }
 
   if (rise > 0 && rise <= MAXIMUM_DIRECTED_JUMP_RISE) {
-    return { action: 'jump', rise, cost: 2.4 + rise };
+    return { action: 'jump', rise, cost: 2.4 + rise, connectionId };
   }
 
   if (rise > 0
     && rise <= MAXIMUM_LEDGE_CLIMB_RISE
     && (to.isPlatformingSurface || to.isLedgeSurface)) {
-    return { action: 'ledge_climb', rise, cost: 4.2 + rise };
+    return { action: 'ledge_climb', rise, cost: 4.2 + rise, connectionId };
   }
 
   if (rise < 0 && Math.abs(rise) <= MAXIMUM_SAFE_DROP) {
-    return { action: 'drop', rise, cost: 2.8 + Math.abs(rise) * 0.35 };
+    return { action: 'drop', rise, cost: 2.8 + Math.abs(rise) * 0.35, connectionId };
   }
 
   return null;
@@ -159,6 +196,7 @@ const edgeIsClear = (from, to, state, traversal) => {
 const buildFloorGraph = (state) => {
   const nodes = [];
   const columns = new Map();
+  const nodesByFloorKey = new Map();
   for (const tile of state.floorTiles) {
     const point = {
       x: tile.x * state.tileSize,
@@ -179,8 +217,9 @@ const buildFloorGraph = (state) => {
     const column = columns.get(key) ?? [];
     column.push(node);
     columns.set(key, column);
+    if (tile.floorKey) nodesByFloorKey.set(tile.floorKey, node);
   }
-  return { nodes, columns };
+  return { nodes, columns, nodesByFloorKey };
 };
 
 const nearestPhysicallyReachableNode = (nodes, point, state, maximumDistance) => {
@@ -227,7 +266,22 @@ const nearestPhysicallyReachableNode = (nodes, point, state, maximumDistance) =>
   // already standing on the adjacent authored catwalk. A same-cell center is
   // safe as a graph origin; unlike the old nearest-node fallback this cannot
   // begin across a missing tile, pedestal, wall, or connector gap.
-  return candidates.find(({ score }) => score <= state.tileSize * 0.55)?.node ?? null;
+  const sameCell = candidates.find(({ score }) => score <= state.tileSize * 0.55)?.node;
+  if (sameCell) return sameCell;
+
+  // Combat knockback can leave the player standing on the clear edge of an
+  // authored machinery deck whose broad below-platform volume masks every
+  // nearby tile centre from the conservative support sampler. Permit a short,
+  // same-elevation, collision-clear approach to a real floor node. The route
+  // executor still has to walk this segment with normal input; this only gives
+  // A* an anchor and cannot move the player across a wall, closed door, or a
+  // multi-tile gap.
+  return candidates.find(({ node }) => (
+    distance2d(point, node.point) <= state.tileSize * 1.65
+    && Math.abs((point.y ?? node.point.y) - node.point.y)
+      <= MAXIMUM_GROUNDED_RISE + 0.08
+    && segmentIsClear(point, node.point, state)
+  ))?.node ?? null;
 };
 
 const pointInsideGoalZone = (point, zone) => (
@@ -338,6 +392,35 @@ export const planPublicFloorRoute = (state, target, {
         });
       }
     }
+
+    for (const link of current.traversalLinks ?? []) {
+      const next = graph.nodesByFloorKey.get(link.toFloorKey);
+      if (!next || closed.has(next.nodeIndex)) continue;
+      const rise = next.point.y - current.point.y;
+      const traversal = {
+        action: link.action,
+        rise,
+        cost: link.action === 'ladder' ? 8 : 10,
+        connectionId: link.connectionId
+          ?? current.connectionId
+          ?? next.connectionId
+          ?? null,
+        linkId: link.id,
+        targetId: link.targetId,
+        explicitMechanism: true,
+      };
+      const nextCost = costByNode.get(current.nodeIndex) + traversal.cost;
+      if (nextCost >= (costByNode.get(next.nodeIndex) ?? Infinity)) continue;
+      costByNode.set(next.nodeIndex, nextCost);
+      cameFrom.set(next.nodeIndex, {
+        nodeIndex: current.nodeIndex,
+        traversal,
+      });
+      open.push({
+        node: next,
+        score: nextCost + routeHeuristic(next, target),
+      });
+    }
   }
 
   if (!goal) {
@@ -354,10 +437,15 @@ export const planPublicFloorRoute = (state, target, {
       point: node.point,
       action: edge.traversal.action,
       rise: edge.traversal.rise,
+      connectionId: edge.traversal.connectionId ?? null,
+      linkId: edge.traversal.linkId ?? null,
+      targetId: edge.traversal.targetId ?? null,
+      explicitMechanism: edge.traversal.explicitMechanism === true,
       tile: {
         index: node.index,
         roomId: node.roomId,
         surface: node.surface,
+        connectionId: node.connectionId ?? null,
         requiredTraversalAction: node.requiredTraversalAction,
       },
     });
@@ -367,9 +455,38 @@ export const planPublicFloorRoute = (state, target, {
     point: start.point,
     action: 'start',
     rise: 0,
-    tile: { index: start.index, roomId: start.roomId, surface: start.surface },
+    connectionId: start.connectionId ?? null,
+    tile: {
+      index: start.index,
+      roomId: start.roomId,
+      surface: start.surface,
+      connectionId: start.connectionId ?? null,
+    },
   });
-  return reversed.reverse();
+  const route = reversed.reverse();
+  const liveStartDistance = distance2d(state.player.position, start.point);
+  const liveStartRise = start.point.y - state.player.position.y;
+  if (liveStartDistance > 0.35 || Math.abs(liveStartRise) > 0.18) {
+    // The graph origin is only a collision-checked reachable floor centre; it
+    // is not permission to pretend the live player is already standing there.
+    // Keeping both points in the route makes the public-input driver physically
+    // walk onto that support before following any subsequent graph edge.
+    route[0].action = 'walk';
+    route[0].rise = liveStartRise;
+    route.unshift({
+      point: { ...state.player.position },
+      action: 'start',
+      rise: 0,
+      connectionId: null,
+      tile: {
+        index: null,
+        roomId: null,
+        surface: 'live_player_origin',
+        connectionId: null,
+      },
+    });
+  }
+  return route;
 };
 
 const simplifyRoute = (route) => {
@@ -455,7 +572,7 @@ const orientToward = async (page, target, { timeout = 4_000 } = {}) => {
   while (Date.now() - started < timeout) {
     const state = await readPublicV1JourneyState(page, { includeGeometry: false });
     last = steeringFor(state, target);
-    if (Math.abs(last.turnError) <= 0.11) return last;
+    if (Math.abs(last.turnError) <= ROUTE_FACING_TOLERANCE) return last;
     await holdKeys(
       page,
       [turnKeyFor(last)],
@@ -498,7 +615,7 @@ const walkToWaypoint = async (page, target, {
       bestTurnError = Infinity;
       lastProgressAt = Date.now();
     }
-    if (Math.abs(last.turnError) > 0.14) {
+    if (Math.abs(last.turnError) > ROUTE_FACING_TOLERANCE) {
       const angularError = Math.abs(last.turnError);
       if (angularError + 0.02 < bestTurnError) {
         bestTurnError = angularError;
@@ -559,6 +676,112 @@ const walkToWaypoint = async (page, target, {
 };
 
 const performTraversalAction = async (page, step) => {
+  if (step.action === 'ladder') {
+    let state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    const ladder = state.connectorLadders.find(({ id }) => id === step.targetId);
+    if (!ladder) throw new Error(`Missing public ladder contract ${step.targetId}.`);
+    const ascending = step.rise > 0;
+    const mountPosition = ascending ? ladder.bottomMountPosition : ladder.topMountPosition;
+    if (!mountPosition) throw new Error(`Ladder ${ladder.id} has no public mount anchor.`);
+    await walkToWaypoint(page, mountPosition, { stopDistance: 0.68, timeout: 30_000 });
+
+    const mountStarted = Date.now();
+    while (Date.now() - mountStarted < 8_000) {
+      state = await readPublicV1JourneyState(page, { includeGeometry: false });
+      if (state.player.ladderTraversal?.ladderId === ladder.id) break;
+      if (state.nearestInteractable?.kind === 'ladder'
+        && state.nearestInteractable.targetId === ladder.id) {
+        await page.keyboard.press('KeyE');
+        await page.waitForTimeout(160);
+        continue;
+      }
+      await orientToward(page, mountPosition);
+      await holdKeys(page, ['KeyW'], 90);
+    }
+    state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    if (state.player.ladderTraversal?.ladderId !== ladder.id) {
+      throw new Error(`Could not mount public ladder ${ladder.id}.`);
+    }
+
+    const climbKey = ascending ? 'KeyW' : 'KeyS';
+    await page.keyboard.down(climbKey);
+    try {
+      await expect.poll(async () => {
+        const current = await readPublicV1JourneyState(page, { includeGeometry: false });
+        return current.player.ladderTraversal === null
+          && Math.abs(current.player.position.y - step.point.y) <= 0.45;
+      // The 14 m climb is frame-driven. Under WebGL combat-test load the
+      // nominal 4.5 s traversal can take materially longer in wall-clock time;
+      // abandoning it after nine seconds leaves the player suspended between
+      // authored floors, where a legitimate route cannot be replanned. Keep
+      // holding the normal climb input until a generous mechanism-local guard
+      // expires; the enclosing route/test deadlines remain authoritative.
+      }, { timeout: 30_000 }).toBe(true);
+    } finally {
+      await page.keyboard.up(climbKey).catch(() => {});
+    }
+    await page.waitForTimeout(180);
+    return;
+  }
+
+  if (step.action === 'automatic_lift') {
+    let state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    let lift = state.connectorLifts.find(({ id }) => id === step.targetId);
+    if (!lift?.center) throw new Error(`Missing public lift contract ${step.targetId}.`);
+    const sourceElevation = step.point.y - step.rise;
+    const destinationElevation = step.point.y;
+    const approachX = state.player.position.x - lift.center.x;
+    const approachZ = state.player.position.z - lift.center.z;
+    const approachLength = Math.hypot(approachX, approachZ);
+    if (approachLength <= 0.001) {
+      throw new Error(`Lift ${lift.id} source landing has no approach vector.`);
+    }
+    const directionX = approachX / approachLength;
+    const directionZ = approachZ / approachLength;
+    const edgeDistance = Math.min(
+      Math.abs(directionX) > 0.001 ? lift.halfWidth / Math.abs(directionX) : Infinity,
+      Math.abs(directionZ) > 0.001 ? lift.halfDepth / Math.abs(directionZ) : Infinity,
+    );
+    const boardPoint = {
+      x: lift.center.x + directionX * Math.max(0.4, edgeDistance - 0.72),
+      y: sourceElevation,
+      z: lift.center.z + directionZ * Math.max(0.4, edgeDistance - 0.72),
+    };
+    await orientToward(page, boardPoint);
+    await expect.poll(async () => {
+      state = await readPublicV1JourneyState(page, { includeGeometry: false });
+      lift = state.connectorLifts.find(({ id }) => id === step.targetId);
+      return Boolean(
+        lift
+        && Math.abs(lift.currentElevation - sourceElevation) <= 0.08
+        && lift.phase === 'dwelling',
+      );
+    }, { timeout: 30_000 }).toBe(true);
+
+    await walkToWaypoint(page, boardPoint, { stopDistance: 0.58, timeout: 4_000 });
+    await expect.poll(async () => {
+      state = await readPublicV1JourneyState(page, { includeGeometry: false });
+      lift = state.connectorLifts.find(({ id }) => id === step.targetId);
+      return Boolean(
+        lift
+        && Math.abs(state.player.position.x - lift.center.x) <= lift.halfWidth - 0.2
+        && Math.abs(state.player.position.z - lift.center.z) <= lift.halfDepth - 0.2
+        && Math.abs(state.player.position.y - lift.currentElevation) <= 0.32,
+      );
+    }, { timeout: 3_000 }).toBe(true);
+    await expect.poll(async () => {
+      state = await readPublicV1JourneyState(page, { includeGeometry: false });
+      lift = state.connectorLifts.find(({ id }) => id === step.targetId);
+      return Boolean(
+        lift
+        && Math.abs(lift.currentElevation - destinationElevation) <= 0.08
+        && Math.abs(state.player.position.y - destinationElevation) <= 0.42,
+      );
+    }, { timeout: 15_000 }).toBe(true);
+    await page.waitForTimeout(180);
+    return;
+  }
+
   await orientToward(page, step.point);
   const movementKeys = ['KeyW'];
   if (step.action === 'drop') {
@@ -604,6 +827,7 @@ export const followPublicFloorRoute = async (page, target, {
   let lastFailure = null;
   let lastRoute = null;
   let traversedActions = [];
+  const traversedConnectorIds = new Set();
 
   try {
     for (let attempt = 0; attempt <= maximumReplans && Date.now() - started < timeout; attempt += 1) {
@@ -641,23 +865,45 @@ export const followPublicFloorRoute = async (page, target, {
             timeout: 90_000,
           });
         }
-        for (const step of route.slice(1)) {
+        const routeSteps = route.slice(1);
+        for (let stepIndex = 0; stepIndex < routeSteps.length; stepIndex += 1) {
+          const step = routeSteps[stepIndex];
+          const previousStep = route[stepIndex];
+          const nextStep = routeSteps[stepIndex + 1] ?? null;
           if (Date.now() - started >= timeout) throw new Error('Overall public route timeout.');
-          if (step.action === 'jump' || step.action === 'ledge_climb' || step.action === 'drop') {
+          if (['jump', 'ledge_climb', 'drop', 'ladder', 'automatic_lift', 'ramp'].includes(step.action)) {
             traversedActions.push(step.action);
+          }
+          if (['jump', 'ledge_climb', 'drop', 'ladder', 'automatic_lift'].includes(step.action)) {
             await performTraversalAction(page, step);
           }
+          const ordinaryIntermediateWalk = nextStep !== null
+            && step.action === 'walk'
+            && nextStep.action === 'walk'
+            && (previousStep.action === 'walk' || previousStep.action === 'start');
           await walkToWaypoint(page, step.point, {
             // V1 floor nodes are 2.8m apart, but pillars, arch feet, pedestals,
             // and rail posts can make an otherwise connected tile center
             // physically unoccupiable. Crossing within 2.05m of an
             // intermediate center still advances into the same cardinal cell
             // without skipping the next traversal edge.
-            stopDistance: step === route.at(-1) ? stopDistance : 2.05,
+            // A 2.8m floor cell may have an unoccupiable machinery/rail centre.
+            // Permit 2.55m only across a plain walk chain; final goals and every
+            // point adjacent to a jump, ramp, drop, ladder, or lift stay strict
+            // so an action can never start before its physical source endpoint.
+            stopDistance: stepIndex === routeSteps.length - 1
+              ? stopDistance
+              : ordinaryIntermediateWalk ? 2.55 : 0.78,
             timeout: step.action === 'ledge_climb' ? 60_000 : 90_000,
           });
+          if (step.connectionId) traversedConnectorIds.add(step.connectionId);
         }
-        return { route, traversedActions, replans: attempt };
+        return {
+          route,
+          traversedActions,
+          traversedConnectorIds: [...traversedConnectorIds],
+          replans: attempt,
+        };
       } catch (error) {
         lastFailure = error;
         await releaseKeys(page);
@@ -671,9 +917,204 @@ export const followPublicFloorRoute = async (page, target, {
   throw new Error(`Public floor route failed: ${JSON.stringify({
     target,
     traversedActions,
+    traversedConnectorIds: [...traversedConnectorIds],
     lastRoute,
     reason: lastFailure?.message ?? String(lastFailure),
   })}`);
+};
+
+const publicFloorAnchor = (state, floorKey) => {
+  if (!floorKey) return null;
+  const floor = state.floorTiles?.find((candidate) => candidate.floorKey === floorKey);
+  return floor ? {
+    x: floor.x * state.tileSize,
+    y: floor.elevation,
+    z: floor.z * state.tileSize,
+  } : null;
+};
+
+const publicSocketAnchor = (state, socket, elevation) => {
+  if (!socket) return null;
+  return publicFloorAnchor(state, socket.floorKey) ?? {
+    x: Number(socket.x) * state.tileSize,
+    y: Number.isFinite(elevation) ? elevation : Number(socket.elevation ?? socket.y ?? 0),
+    z: Number(socket.z) * state.tileSize,
+  };
+};
+
+const publicLinkedMechanismAnchors = (state, targetId, action, sourceElevation, destinationElevation) => {
+  const floorsByKey = new Map(
+    (state.floorTiles ?? []).map((floor) => [floor.floorKey, floor]),
+  );
+  const linkedFloors = [];
+  for (const floor of state.floorTiles ?? []) {
+    for (const link of floor.traversalLinks ?? []) {
+      if (link.targetId !== targetId || link.action !== action) continue;
+      linkedFloors.push(floor);
+      const destination = floorsByKey.get(link.toFloorKey);
+      if (destination) linkedFloors.push(destination);
+    }
+  }
+  const unique = [...new Map(linkedFloors.map((floor) => [floor.floorKey, floor])).values()];
+  const closestTo = (elevation) => unique
+    .map((floor) => ({ floor, delta: Math.abs(floor.elevation - elevation) }))
+    .sort((left, right) => left.delta - right.delta || left.floor.index - right.floor.index)[0]
+    ?.floor ?? null;
+  const sourceFloor = closestTo(sourceElevation);
+  const destinationFloor = closestTo(destinationElevation);
+  if (!sourceFloor || !destinationFloor || sourceFloor.floorKey === destinationFloor.floorKey) return null;
+  return {
+    source: publicFloorAnchor(state, sourceFloor.floorKey),
+    destination: publicFloorAnchor(state, destinationFloor.floorKey),
+  };
+};
+
+const resolvePublicConnectorAnchors = (state, connectorRoute) => {
+  const connectionId = connectorRoute.connectionId;
+  const sourceElevation = Number(connectorRoute.sourceElevation ?? 0);
+  const destinationElevation = Number(connectorRoute.destinationElevation ?? sourceElevation);
+  const traversalKind = connectorRoute.traversalKind;
+
+  if (traversalKind === 'slope') {
+    return {
+      expectedAction: 'ramp',
+      source: publicSocketAnchor(state, connectorRoute.sourceSocket, sourceElevation),
+      destination: publicSocketAnchor(
+        state,
+        connectorRoute.destinationSocket,
+        destinationElevation,
+      ),
+    };
+  }
+
+  if (traversalKind === 'ladder') {
+    const ladder = state.connectorLadders?.find((candidate) => (
+      candidate.connectionId === connectionId
+    ));
+    if (!ladder) throw new Error(`Connector ${connectionId} has no public ladder contract.`);
+    const sourceIsBottom = Math.abs(sourceElevation - ladder.bottomY)
+      <= Math.abs(sourceElevation - ladder.topY);
+    return {
+      expectedAction: 'ladder',
+      source: sourceIsBottom ? ladder.bottomExit : ladder.topExit,
+      destination: sourceIsBottom ? ladder.topExit : ladder.bottomExit,
+    };
+  }
+
+  if (traversalKind === 'automatic_lift') {
+    const lift = state.connectorLifts?.find((candidate) => (
+      candidate.connectionId === connectionId
+    ));
+    if (!lift) throw new Error(`Connector ${connectionId} has no public lift contract.`);
+    const anchors = publicLinkedMechanismAnchors(
+      state,
+      lift.id,
+      'automatic_lift',
+      sourceElevation,
+      destinationElevation,
+    );
+    if (!anchors) {
+      throw new Error(`Connector ${connectionId} has no linked public lift landing anchors.`);
+    }
+    return { expectedAction: 'automatic_lift', ...anchors };
+  }
+
+  throw new Error(
+    `Connector ${connectionId} traversal kind ${String(traversalKind)} is not elevation-changing.`,
+  );
+};
+
+const assertPublicConnectorLeg = (result, connectionId, expectedAction, label) => {
+  if (!result?.traversedConnectorIds?.includes(connectionId)) {
+    throw new Error(`${label} did not physically traverse connector ${connectionId}.`);
+  }
+  if (!result?.traversedActions?.includes(expectedAction)) {
+    throw new Error(`${label} did not perform ${expectedAction} on connector ${connectionId}.`);
+  }
+};
+
+/**
+ * Physically reaches one accepted connector endpoint, traverses the mechanism
+ * in its planned direction, and traverses it again in reverse. The default
+ * executor is the same public keyboard/mouse route follower used by full V1
+ * journeys; the optional executor hook exists only for deterministic unit
+ * harnesses around this orchestration contract.
+ */
+export const traversePublicConnectorBothWays = async (page, connectorRoute, {
+  targetRadius = 0.9,
+  maximumTargetVerticalDifference = 0.55,
+  stopDistance = 0.72,
+  approachTimeout = 150_000,
+  legTimeout = 180_000,
+  maximumReplans = 5,
+  routeFollower = followPublicFloorRoute,
+} = {}) => {
+  if (!connectorRoute?.connectionId) {
+    throw new TypeError('A public connector route with a stable connectionId is required.');
+  }
+  const state = await readPublicV1JourneyState(page);
+  const acceptedRoute = state.connectorRoutes?.find((candidate) => (
+    candidate.connectionId === connectorRoute.connectionId
+  ));
+  if (!acceptedRoute) {
+    throw new Error(`Connector ${connectorRoute.connectionId} is absent from public diagnostics.`);
+  }
+  const { source, destination, expectedAction } = resolvePublicConnectorAnchors(
+    state,
+    acceptedRoute,
+  );
+  if (!source || !destination) {
+    throw new Error(`Connector ${acceptedRoute.connectionId} has incomplete public anchors.`);
+  }
+  const routeOptions = {
+    targetRadius,
+    maximumTargetVerticalDifference,
+    stopDistance,
+    maximumReplans,
+  };
+  const approach = await routeFollower(page, source, {
+    ...routeOptions,
+    timeout: approachTimeout,
+  });
+  const forward = await routeFollower(page, destination, {
+    ...routeOptions,
+    timeout: legTimeout,
+  });
+  assertPublicConnectorLeg(
+    forward,
+    acceptedRoute.connectionId,
+    expectedAction,
+    'Forward connector leg',
+  );
+  const reverse = await routeFollower(page, source, {
+    ...routeOptions,
+    timeout: legTimeout,
+  });
+  assertPublicConnectorLeg(
+    reverse,
+    acceptedRoute.connectionId,
+    expectedAction,
+    'Reverse connector leg',
+  );
+
+  const returnedState = await readPublicV1JourneyState(page, { includeGeometry: false });
+  const horizontalError = distance2d(returnedState.player.position, source);
+  const verticalError = Math.abs(returnedState.player.position.y - source.y);
+  if (horizontalError > targetRadius || verticalError > maximumTargetVerticalDifference) {
+    throw new Error(`Connector ${acceptedRoute.connectionId} did not return to its source endpoint.`);
+  }
+
+  return {
+    connectionId: acceptedRoute.connectionId,
+    traversalKind: acceptedRoute.traversalKind,
+    expectedAction,
+    sourceAnchor: { ...source },
+    destinationAnchor: { ...destination },
+    approach,
+    forward,
+    reverse,
+    returnedPosition: { ...returnedState.player.position },
+  };
 };
 
 const creepUntilInteractable = async (page, targetId, targetPosition, {
@@ -781,7 +1222,10 @@ const triggerPublicEncounter = async (page, encounterId, timeout) => {
     maximumTargetVerticalDifference: (zone.verticalHalfHeight ?? 2) + 1.2,
     goalZone: zone,
     stopDistance: 0.8,
-    timeout: Math.min(timeout, 150_000),
+    // The caller owns the encounter-stage deadline. Capping a physical
+    // approach here made a still-solvable journey fail before its declared
+    // budget, especially when a vertical connector preceded the trigger.
+    timeout,
   });
   await expect.poll(async () => {
     state = await readPublicV1JourneyState(page, { includeGeometry: false });
@@ -799,6 +1243,49 @@ const liveEncounterEnemies = (state, encounterId) => {
     && enemy.health > 0
     && (ids.has(enemy.id) || enemy.encounterId === encounterId)
   ));
+};
+
+/**
+ * Plan a collision-bound firing-lane route when exactly one encounter enemy
+ * remains. The target can be airborne above the authored floor (the Enemy Nest
+ * flyer idles roughly 1.65 m high), so the route ends on a clear floor node in
+ * weapon range instead of trying to occupy the enemy's live position.
+ *
+ * The returned route is diagnostic data only. Its executor still has to walk
+ * every edge with normal keyboard input and can never cross a wall or gate.
+ */
+export const planPublicFinalEnemyPursuitRoute = (state, encounterId) => {
+  const encounter = findById(state.encounters, encounterId);
+  const enemies = liveEncounterEnemies(state, encounterId);
+  if (enemies.length !== 1) return null;
+
+  const enemy = enemies[0];
+  const maximumTargetVerticalDifference = Math.max(
+    2.1,
+    Math.abs(enemy.position.y - state.player.position.y) + 0.35,
+  );
+  const route = planPublicFloorRoute(state, enemy.position, {
+    targetRadius: MEGA_BUSTER_APPROACH_RADIUS,
+    maximumTargetVerticalDifference,
+    requireClearSight: true,
+    goalPredicate: (node) => node.roomId === encounter.roomId,
+  });
+  return {
+    encounterId,
+    enemyId: enemy.id,
+    targetPosition: { ...enemy.position },
+    maximumTargetVerticalDifference,
+    route,
+  };
+};
+
+const lockedEncounterEnemy = (state, encounterId) => {
+  const enemies = liveEncounterEnemies(state, encounterId);
+  const ownerEnemyId = state.lock?.ownerEnemyId;
+  const targetId = String(state.lock?.targetId ?? '');
+  return enemies.find(({ id }) => id === ownerEnemyId)
+    ?? enemies.find(({ id }) => targetId === id || targetId.startsWith(`${id}:`))
+    ?? null;
 };
 
 const buildEncounterPatrolPoints = (state, encounterId) => {
@@ -848,6 +1335,214 @@ const buildEncounterPatrolPoints = (state, encounterId) => {
     ));
 };
 
+const buildEnemyAdjacentPatrolPoints = (state, encounterId, targetRadius) => {
+  const encounter = findById(state.encounters, encounterId);
+  const graph = buildFloorGraph(state);
+  const enemies = liveEncounterEnemies(state, encounterId);
+  const maximumDistance = Math.max(2, targetRadius - 0.25);
+  const selected = new Map();
+
+  for (const enemy of enemies) {
+    const nearest = graph.nodes
+      .filter((node) => node.roomId === encounter.roomId)
+      .map((node) => ({
+        node,
+        horizontalDistance: distance2d(node.point, enemy.position),
+        verticalDistance: Math.abs(node.point.y - enemy.position.y),
+      }))
+      .filter(({ horizontalDistance, verticalDistance }) => (
+        horizontalDistance <= maximumDistance && verticalDistance <= 3.2
+      ))
+      .sort((left, right) => (
+        left.horizontalDistance + left.verticalDistance * 1.4
+        - (right.horizontalDistance + right.verticalDistance * 1.4)
+        || left.node.index - right.node.index
+      ))
+      .slice(0, 4);
+    for (const { node } of nearest) {
+      selected.set(node.index, Object.freeze({
+        id: `enemy-adjacent:${encounterId}:${enemy.id}:${node.index}`,
+        point: Object.freeze({ ...node.point }),
+        elevation: node.point.y,
+        tileIndex: node.index,
+        liveEnemyId: enemy.id,
+      }));
+    }
+  }
+
+  return [...selected.values()];
+};
+
+const chaseUnlockedEncounterTarget = async (
+  page,
+  encounterId,
+  preferredEnemyId,
+  {
+    stopDistance = 2.15,
+    timeout = 45_000,
+  } = {},
+) => {
+  const started = Date.now();
+  let bestDistance = Infinity;
+  let lastProgressAt = Date.now();
+  let jumpCount = 0;
+  let doglegKey = 'KeyA';
+
+  while (Date.now() - started < timeout) {
+    const state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    if (findById(state.encounters, encounterId).cleared) return true;
+    const enemies = liveEncounterEnemies(state, encounterId);
+    const target = enemies.find(({ id }) => id === preferredEnemyId)
+      ?? [...enemies].sort((left, right) => (
+        distance2d(left.position, state.player.position)
+        - distance2d(right.position, state.player.position)
+      ))[0];
+    if (!target?.position) return true;
+    if (state.lock.movementLocked) return true;
+    if (state.player.ledgeClinging || state.player.jumpState !== 'Grounded') {
+      await page.waitForTimeout(240);
+      continue;
+    }
+
+    const steering = steeringFor(state, target.position);
+    const verticalDifference = Math.abs(target.position.y - state.player.position.y);
+    if (steering.distance <= stopDistance && verticalDifference <= 1.8) {
+      await orientToward(page, target.position, { timeout: 3_000 }).catch(() => {});
+      return true;
+    }
+    if (steering.distance + 0.08 < bestDistance) {
+      bestDistance = steering.distance;
+      lastProgressAt = Date.now();
+    }
+    if (Math.abs(steering.turnError) > 0.14) {
+      await holdKeys(
+        page,
+        [turnKeyFor(steering)],
+        Math.min(130, Math.max(35, Math.abs(steering.turnError) * 250)),
+      );
+      continue;
+    }
+    if (Date.now() - lastProgressAt > 2_200 && jumpCount < 3) {
+      // The V1 credential pyramid uses authored half-height tier lips that are
+      // obvious to a player but are not all represented as floor-graph edges.
+      // A forward jump is the normal way to clear one after walking stalls.
+      await page.keyboard.down('KeyW');
+      try {
+        await page.keyboard.press('Space');
+        await page.waitForTimeout(1_100);
+      } finally {
+        await page.keyboard.up('KeyW').catch(() => {});
+      }
+      jumpCount += 1;
+      bestDistance = Infinity;
+      lastProgressAt = Date.now();
+      continue;
+    }
+    if (Date.now() - lastProgressAt > 2_200) {
+      // Walk a short alternating dogleg around a pyramid support, then resume
+      // direct pursuit. This remains collision-bound public locomotion.
+      await holdKeys(page, [doglegKey], 360);
+      await holdKeys(page, ['KeyW'], 520);
+      doglegKey = doglegKey === 'KeyA' ? 'KeyD' : 'KeyA';
+      bestDistance = Infinity;
+      lastProgressAt = Date.now();
+      continue;
+    }
+    await holdKeys(page, ['KeyW'], Math.min(300, Math.max(110, steering.distance * 42)));
+  }
+  return false;
+};
+
+const pursueFinalLiveEncounterEnemy = async (page, encounterId, timeout) => {
+  const started = Date.now();
+  const pursuitWindow = Math.min(timeout, 60_000);
+
+  while (Date.now() - started < pursuitWindow) {
+    const geometryState = await readPublicV1JourneyState(page);
+    let pursuit = null;
+    try {
+      pursuit = planPublicFinalEnemyPursuitRoute(geometryState, encounterId);
+    } catch {
+      // A flyer may cross behind machinery between snapshots, temporarily
+      // leaving no clear static firing lane. Keep pursuing its live position
+      // through ordinary input and try the authored graph again next cycle.
+      const liveTarget = liveEncounterEnemies(geometryState, encounterId)[0];
+      if (liveTarget?.position) {
+        await chaseUnlockedEncounterTarget(page, encounterId, liveTarget.id, {
+          stopDistance: MEGA_BUSTER_APPROACH_RADIUS,
+          timeout: Math.min(12_000, pursuitWindow - (Date.now() - started)),
+        });
+      }
+      continue;
+    }
+    if (!pursuit) return false;
+
+    const firingLane = pursuit.route.at(-1)?.point;
+    if (!firingLane) return false;
+    const routeBudget = Math.min(35_000, pursuitWindow - (Date.now() - started));
+    if (routeBudget <= 0) break;
+    try {
+      // Follow the static, collision-checked authored floor lane selected from
+      // the latest snapshot. The enemy may continue moving, so failure or an
+      // obsolete lane simply causes another live replan below.
+      await followPublicFloorRoute(page, firingLane, {
+        targetRadius: 0.85,
+        maximumTargetVerticalDifference: 0.6,
+        stopDistance: 0.78,
+        timeout: routeBudget,
+        maximumReplans: 3,
+      });
+    } catch {
+      // A moving target can invalidate a firing lane while it is being walked.
+      // Continue with a short direct public-input chase, then rebuild the lane
+      // from a fresh geometry snapshot rather than treating this as fatal.
+    }
+
+    let state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    if (findById(state.encounters, encounterId).cleared) return true;
+    const liveTargets = liveEncounterEnemies(state, encounterId);
+    if (liveTargets.length !== 1) return false;
+    if (lockedEncounterEnemy(state, encounterId)) return true;
+
+    const remaining = pursuitWindow - (Date.now() - started);
+    if (remaining <= 0) break;
+    await chaseUnlockedEncounterTarget(page, encounterId, liveTargets[0].id, {
+      stopDistance: MEGA_BUSTER_APPROACH_RADIUS,
+      timeout: Math.min(12_000, remaining),
+    });
+
+    // Tab can be consumed by hit recovery. Keep facing the sole live target and
+    // retry ordinary lock-on while the outer caller's held Buster fire continues
+    // to use that same aim. If lock still does not acquire, loop and route to a
+    // newly computed firing lane instead of falling back to a finite patrol.
+    const acquireStarted = Date.now();
+    const acquireWindow = Math.min(
+      12_000,
+      pursuitWindow - (Date.now() - started),
+    );
+    while (Date.now() - acquireStarted < acquireWindow) {
+      state = await readPublicV1JourneyState(page, { includeGeometry: false });
+      if (findById(state.encounters, encounterId).cleared) return true;
+      const target = liveEncounterEnemies(state, encounterId)[0];
+      if (!target?.position) return true;
+      if (lockedEncounterEnemy(state, encounterId)) return true;
+      if (state.player.ledgeClinging || state.player.jumpState !== 'Grounded') {
+        await page.waitForTimeout(260);
+        continue;
+      }
+      const horizontalDistance = distance2d(state.player.position, target.position);
+      const verticalDifference = Math.abs(target.position.y - state.player.position.y);
+      if (horizontalDistance > MEGA_BUSTER_MAXIMUM_RANGE + 0.35
+        || verticalDifference > 2.25) break;
+      await orientToward(page, target.position, { timeout: 3_000 }).catch(() => {});
+      await page.keyboard.press('Tab');
+      await page.waitForTimeout(420);
+    }
+  }
+
+  return false;
+};
+
 const approachRetainedLockTarget = async (
   page,
   encounterId,
@@ -855,6 +1550,14 @@ const approachRetainedLockTarget = async (
   timeout,
 ) => {
   const started = Date.now();
+  // The approach radius is the preferred firing position, not permission to
+  // overlap an enemy body or authored railing. A retained grounded Blade
+  // target inside the weapon's real reposition window is already actionable;
+  // hand it back to the outer attack loop instead of walking forever toward
+  // an unoccupiable 1.65 m center-to-center point.
+  const actionableRadius = targetRadius <= BEAM_BLADE_APPROACH_RADIUS + 0.01
+    ? BEAM_BLADE_REPOSITION_DISTANCE
+    : targetRadius;
   let bestDistance = Infinity;
   let lastProgressAt = Date.now();
   let strafeKey = 'KeyD';
@@ -864,8 +1567,7 @@ const approachRetainedLockTarget = async (
     const state = await readPublicV1JourneyState(page, { includeGeometry: false });
     const encounter = findById(state.encounters, encounterId);
     if (encounter.cleared) return true;
-    const enemies = liveEncounterEnemies(state, encounterId);
-    const target = enemies.find(({ id }) => id === state.lock.ownerEnemyId);
+    const target = lockedEncounterEnemy(state, encounterId);
     if (!state.lock.movementLocked || !target?.position) return false;
 
     const distance = distance2d(state.player.position, target.position);
@@ -875,7 +1577,8 @@ const approachRetainedLockTarget = async (
       player: state.player.position,
       target: target.position,
     };
-    if (distance <= targetRadius) return true;
+    const verticalDifference = Math.abs(target.position.y - state.player.position.y);
+    if (distance <= actionableRadius && verticalDifference <= 1.8) return true;
     if (distance + 0.08 < bestDistance) {
       bestDistance = distance;
       lastProgressAt = Date.now();
@@ -914,9 +1617,105 @@ const routeIntoWeaponRange = async (
   patrolVisits = new Map(),
 ) => {
   const started = Date.now();
-  let state = await readPublicV1JourneyState(page, { includeGeometry: false });
-  const retainedEnemy = liveEncounterEnemies(state, encounterId)
-    .find(({ id }) => id === state.lock.ownerEnemyId);
+  const canUseUnlockedGuardBlade = (currentState) => {
+    if (encounterId !== 'keycardGuard') return false;
+    return liveEncounterEnemies(currentState, encounterId).some((candidate) => (
+      distance2d(candidate.position, currentState.player.position)
+        <= BEAM_BLADE_REPOSITION_DISTANCE
+      && Math.abs(candidate.position.y - currentState.player.position.y) <= 1.8
+    ));
+  };
+  let state = await readPublicV1JourneyState(page);
+  // Floor geometry is immutable for this combat approach, while enemy and
+  // player positions continue to move. Retain one cloned authored geometry
+  // snapshot so later enemy-adjacent patrol selection does not accidentally
+  // run against the metadata-only snapshots (whose floorTiles are empty).
+  const routeGeometryState = state;
+  const initialEnemies = liveEncounterEnemies(state, encounterId);
+  if (encounterId === 'enemyNest'
+    && initialEnemies.length === 1
+    && !state.lock.movementLocked) {
+    // Once only one target remains, never abandon it for a finite generic room
+    // patrol. Repeatedly route to a collision-clear authored firing lane and
+    // reacquire through normal Tab input. Returning here yields to the outer
+    // real-combat loop, which attacks or invokes this live pursuit again until
+    // the encounter's authoritative deadline/death/clear condition resolves.
+    await pursueFinalLiveEncounterEnemy(page, encounterId, timeout);
+    return;
+  }
+  if (encounterId === 'keycardGuard') {
+    const directTarget = liveEncounterEnemies(state, encounterId)
+      .find(({ id }) => id === enemy?.id)
+      ?? liveEncounterEnemies(state, encounterId)[0];
+    if (directTarget?.position) {
+      try {
+        // The credential pyramid is a traversal arena: two guards occupy its
+        // authored raised tiers, outside reliable starter-Buster line of
+        // sight from the surrounding floor. Walk the real floor graph to the
+        // target's current tier before spending time on repeated Tab presses.
+        // This uses ordinary public movement and cannot cross a gate, wall,
+        // missing support, or unmodelled vertical transition.
+        await followPublicFloorRoute(page, directTarget.position, {
+          targetRadius: 2.45,
+          maximumTargetVerticalDifference: 1.8,
+          stopDistance: 0.82,
+          // Do not spend a full minute pathing while every pyramid guard is
+          // free to attack. A human abandons a stale pursuit quickly, dodges,
+          // and takes a nearer firing lane.
+          timeout: Math.min(18_000, timeout),
+          maximumReplans: 3,
+          goalPredicate: (node) => node.roomId === 'keycardRoom',
+        });
+        state = await readPublicV1JourneyState(page, { includeGeometry: false });
+        const reachedTarget = liveEncounterEnemies(state, encounterId)
+          .sort((left, right) => (
+            distance2d(left.position, state.player.position)
+            - distance2d(right.position, state.player.position)
+          ))[0];
+        if (reachedTarget?.position
+          && distance2d(reachedTarget.position, state.player.position) <= 3.1
+          && Math.abs(reachedTarget.position.y - state.player.position.y) <= 1.8) {
+          await orientToward(page, reachedTarget.position, { timeout: 4_000 }).catch(() => {});
+          return;
+        }
+      } catch {
+        // Fall through to the ordinary lock-on/patrol strategy. A moving
+        // enemy can invalidate a perfectly legal route while it is followed.
+      }
+    }
+    state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    const chaseTarget = liveEncounterEnemies(state, encounterId)
+      .find(({ id }) => id === enemy?.id)
+      ?? liveEncounterEnemies(state, encounterId)[0];
+    if (chaseTarget?.position && await chaseUnlockedEncounterTarget(
+      page,
+      encounterId,
+      chaseTarget.id,
+      { timeout: Math.min(14_000, timeout) },
+    )) {
+      return;
+    }
+  }
+  if (encounterId === 'enemyNest' && !state.lock.movementLocked) {
+    const directTarget = liveEncounterEnemies(state, encounterId)
+      .find(({ id }) => id === enemy?.id)
+      ?? liveEncounterEnemies(state, encounterId)[0];
+    const sameLevel = directTarget?.position
+      && Math.abs(directTarget.position.y - state.player.position.y) <= 1.8;
+    if (sameLevel && await chaseUnlockedEncounterTarget(
+      page,
+      encounterId,
+      directTarget.id,
+      {
+        stopDistance: targetRadius <= BEAM_BLADE_APPROACH_RADIUS + 0.01
+          ? BEAM_BLADE_REPOSITION_DISTANCE
+          : targetRadius,
+        timeout: Math.min(8_000, timeout),
+      },
+    )) return;
+    state = await readPublicV1JourneyState(page, { includeGeometry: false });
+  }
+  const retainedEnemy = lockedEncounterEnemy(state, encounterId);
   if (state.lock.movementLocked && retainedEnemy) {
     if (await approachRetainedLockTarget(page, encounterId, targetRadius, timeout)) return;
   }
@@ -932,9 +1731,13 @@ const routeIntoWeaponRange = async (
     // necessary; otherwise the driver walks away from enemies already visible
     // and inside Buster range merely because its first press landed in stun.
     const acquireInPlaceStarted = Date.now();
+    // A moving Reaverbot can remain hidden behind one of the Nest's authored
+    // machines indefinitely.  Keep the ordinary in-place Tab attempt short so
+    // the public-input driver still has time to walk to a different firing
+    // lane instead of treating one obstructed viewpoint as a combat timeout.
     const acquireInPlaceWindow = encounterId === 'enemyNest'
-      ? 45_000
-      : encounterId === 'keycardGuard' ? 20_000 : 5_500;
+      ? 2_500
+      : encounterId === 'keycardGuard' ? 12_000 : 5_500;
     const visibleTarget = liveEncounterEnemies(state, encounterId)
       .find(({ id }) => id === enemy?.id)
       ?? liveEncounterEnemies(state, encounterId)[0];
@@ -943,8 +1746,7 @@ const routeIntoWeaponRange = async (
     }
     while (Date.now() - acquireInPlaceStarted < acquireInPlaceWindow) {
       state = await readPublicV1JourneyState(page, { includeGeometry: false });
-      const acquiredHere = liveEncounterEnemies(state, encounterId)
-        .find(({ id }) => id === state.lock.ownerEnemyId);
+      const acquiredHere = lockedEncounterEnemy(state, encounterId);
       if (state.lock.movementLocked && acquiredHere) {
         if (await approachRetainedLockTarget(page, encounterId, targetRadius, timeout)) return;
         break;
@@ -956,29 +1758,45 @@ const routeIntoWeaponRange = async (
       await page.keyboard.press('Tab');
       await page.waitForTimeout(460);
     }
+    if (!state.lock.movementLocked && canUseUnlockedGuardBlade(state)) return;
   }
 
-  // Static patrol routes use tank controls, so release a retained target that
-  // could not be approached through the room's real collision in twelve
-  // seconds. The next destination is an authored floor node, never a moving
-  // enemy coordinate.
+  // Static patrol routes use tank controls, so try to release a retained
+  // target before selecting another authored floor node. Hit recovery can
+  // consume Tab for this whole short window; in that case yield to the outer
+  // combat loop instead of manufacturing a premature fatal condition. The
+  // authoritative encounter deadline and death checks still bound failure.
   const lockReleaseStarted = Date.now();
   while (state.lock.movementLocked && Date.now() - lockReleaseStarted < 6_000) {
     await page.keyboard.press('Tab');
     await page.waitForTimeout(360);
     state = await readPublicV1JourneyState(page, { includeGeometry: false });
   }
-  if (state.lock.movementLocked) throw new Error(`Could not release stale movement lock for ${encounterId}.`);
+  if (state.lock.movementLocked) return;
 
   if (!patrolPoints.length) throw new Error(`No static authored patrol points for ${encounterId}.`);
   const attempted = new Set();
+  let patrolSweep = 0;
   let lastFailure = null;
-  while (Date.now() - started < Math.min(timeout, 75_000)) {
+  const patrolBudget = encounterId === 'keycardGuard' ? 45_000 : 75_000;
+  while (Date.now() - started < Math.min(timeout, patrolBudget)) {
     state = await readPublicV1JourneyState(page, { includeGeometry: false });
     const enemies = liveEncounterEnemies(state, encounterId);
     if (!enemies.length || findById(state.encounters, encounterId).cleared) return;
     const preferred = enemies.find(({ id }) => id === enemy?.id) ?? enemies[0];
-    const candidates = patrolPoints
+    const currentPatrolPoints = [
+      ...buildEnemyAdjacentPatrolPoints({
+        ...routeGeometryState,
+        player: state.player,
+        enemies: state.enemies,
+        encounters: state.encounters,
+        doors: state.doors,
+      }, encounterId, targetRadius),
+      ...patrolPoints,
+    ].filter((patrol, index, entries) => (
+      index === entries.findIndex((candidate) => candidate.id === patrol.id)
+    ));
+    const candidates = currentPatrolPoints
       .filter(({ id }) => !attempted.has(id))
       .map((patrol) => {
         const enemyProximity = Math.min(...enemies.map((candidate) => (
@@ -1012,7 +1830,16 @@ const routeIntoWeaponRange = async (
         };
       })
       .sort((left, right) => left.score - right.score || left.patrol.id.localeCompare(right.patrol.id));
-    const next = candidates[0]?.patrol;
+    let next = candidates[0]?.patrol;
+    if (!next && patrolSweep < 2) {
+      // Patrol points are authored floor destinations, not one-shot state.
+      // Enemies continue moving while the player visits them, so repeat a
+      // bounded sweep using the accumulated visit penalty and current enemy
+      // positions.  This remains real locomotion through room collision.
+      attempted.clear();
+      patrolSweep += 1;
+      continue;
+    }
     if (!next) break;
     attempted.add(next.id);
     patrolVisits.set(next.id, (patrolVisits.get(next.id) ?? 0) + 1);
@@ -1021,7 +1848,12 @@ const routeIntoWeaponRange = async (
       await followPublicFloorRoute(page, next.point, {
         targetRadius: state.tileSize * 0.42,
         maximumTargetVerticalDifference: 0.55,
-        stopDistance: 0.72,
+        // Enemy-adjacent patrol nodes are firing-lane hints, not interaction
+        // anchors. V1 machinery and rail feet can make their exact tile centre
+        // unoccupiable while the player is already on the same adjacent floor
+        // cell. Stop within one bounded tile-width, then let the real Tab lock
+        // and weapon-distance checks below decide whether the lane is useful.
+        stopDistance: state.tileSize * 1.12,
         timeout: Math.min(40_000, timeout - (Date.now() - started)),
         maximumReplans: 2,
       });
@@ -1041,8 +1873,7 @@ const routeIntoWeaponRange = async (
     let patrolAcquired = false;
     while (Date.now() - patrolAcquireStarted < 5_500) {
       state = await readPublicV1JourneyState(page, { includeGeometry: false });
-      patrolAcquired = liveEncounterEnemies(state, encounterId)
-        .some(({ id }) => id === state.lock.ownerEnemyId);
+      patrolAcquired = Boolean(lockedEncounterEnemy(state, encounterId));
       if (state.lock.movementLocked && patrolAcquired) break;
       if (state.player.ledgeClinging || state.player.jumpState !== 'Grounded') {
         await page.waitForTimeout(320);
@@ -1050,6 +1881,27 @@ const routeIntoWeaponRange = async (
       }
       await page.keyboard.press('Tab');
       await page.waitForTimeout(460);
+    }
+    if (!state.lock.movementLocked && patrolFaceTarget?.id) {
+      // The enemy can move several metres while the player follows its cloned
+      // adjacent-floor hint. If the hint itself was valid but Tab is now just
+      // outside lock range, continue toward that same live target through the
+      // normal collision-bound chase before abandoning this firing lane.
+      const chaseBudget = Math.min(
+        8_000,
+        timeout - (Date.now() - started),
+        Math.max(0, Math.min(timeout, patrolBudget) - (Date.now() - started)),
+      );
+      const chaseRadius = targetRadius <= BEAM_BLADE_APPROACH_RADIUS + 0.01
+        ? BEAM_BLADE_REPOSITION_DISTANCE
+        : targetRadius;
+      if (chaseBudget > 0 && await chaseUnlockedEncounterTarget(
+        page,
+        encounterId,
+        patrolFaceTarget.id,
+        { stopDistance: chaseRadius, timeout: chaseBudget },
+      )) return;
+      state = await readPublicV1JourneyState(page, { includeGeometry: false });
     }
     if (state.lock.movementLocked && patrolAcquired
       && await approachRetainedLockTarget(
@@ -1059,12 +1911,26 @@ const routeIntoWeaponRange = async (
         timeout - (Date.now() - started),
       )) return;
 
+    if (!state.lock.movementLocked && canUseUnlockedGuardBlade(state)) {
+      if (patrolFaceTarget?.position) {
+        await orientToward(page, patrolFaceTarget.position, { timeout: 4_000 }).catch(() => {});
+      }
+      return;
+    }
+
     if (state.lock.movementLocked) {
       await page.keyboard.press('Tab');
       await page.waitForTimeout(360);
     }
   }
 
+  if (encounterId === 'keycardGuard' || encounterId === 'enemyNest') {
+    // Knockback and moving enemies can invalidate every cloned pyramid/Nest
+    // patrol route before its target is reacquired. Return to the authoritative
+    // outer combat loop for a fresh live snapshot; its real damage, timeout,
+    // death, and encounter-clear checks remain the acceptance authority.
+    return;
+  }
   throw new Error(`Static authored patrol could not acquire ${encounterId}: ${lastFailure ?? 'no reachable patrol point'}`);
 };
 
@@ -1095,9 +1961,130 @@ const dodgeWithPublicInput = async (page, directionKey) => {
   }
 };
 
+const clearPublicKeycardGuard = async (page, {
+  timeout,
+  combatPointer,
+}) => {
+  const started = Date.now();
+  let lastDamageAt = started;
+  let lastTotalHealth = Infinity;
+  let bestTargetDistance = Infinity;
+  let lastApproachProgressAt = started;
+  let strafeKey = 'KeyD';
+  let lastDodgeAt = 0;
+  let approachSteps = 0;
+  let lastState = null;
+
+  await selectMegaBuster(page);
+  while (Date.now() - started < timeout) {
+    lastState = await readPublicV1JourneyState(page, { includeGeometry: false });
+    const encounter = findById(lastState.encounters, 'keycardGuard');
+    if (encounter.cleared) return lastState;
+    if (lastState.player.dead || lastState.player.health <= 0) {
+      throw new Error('Player died during public combat in keycardGuard.');
+    }
+
+    const enemies = liveEncounterEnemies(lastState, 'keycardGuard');
+    if (!enemies.length) {
+      await page.waitForTimeout(250);
+      continue;
+    }
+    const totalHealth = enemies.reduce((sum, enemy) => sum + enemy.health, 0);
+    if (totalHealth + 0.01 < lastTotalHealth) lastDamageAt = Date.now();
+    lastTotalHealth = totalHealth;
+
+    const lockedTarget = lockedEncounterEnemy(lastState, 'keycardGuard');
+    const target = lockedTarget ?? [...enemies].sort((left, right) => (
+      distance2d(left.position, lastState.player.position)
+        + Math.abs(left.position.y - lastState.player.position.y) * 1.3
+      - (distance2d(right.position, lastState.player.position)
+        + Math.abs(right.position.y - lastState.player.position.y) * 1.3)
+    ))[0];
+    const targetDistance = distance2d(target.position, lastState.player.position);
+    const targetHeight = target.position.y - lastState.player.position.y;
+    if (targetDistance + 0.08 < bestTargetDistance) {
+      bestTargetDistance = targetDistance;
+      lastApproachProgressAt = Date.now();
+    }
+
+    const healthRatio = lastState.player.health / Math.max(1, lastState.player.maxHealth);
+    if (healthRatio < 0.8 && Date.now() - lastDodgeAt > 3_600) {
+      await dodgeWithPublicInput(page, strafeKey);
+      strafeKey = strafeKey === 'KeyD' ? 'KeyA' : 'KeyD';
+      lastDodgeAt = Date.now();
+      continue;
+    }
+
+    if (!lockedTarget) {
+      await orientToward(page, target.position, { timeout: 2_600 }).catch(() => {});
+      // Tab remains the authoritative acquisition input. A short retry after
+      // physically facing the nearest guard handles hit recovery consuming a
+      // press without turning this into a private lock-on probe.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await page.keyboard.press('Tab');
+        await page.waitForTimeout(300);
+        const acquisition = await readPublicV1JourneyState(page, { includeGeometry: false });
+        if (acquisition.lock.movementLocked
+          && lockedEncounterEnemy(acquisition, 'keycardGuard')) break;
+      }
+    }
+
+    const acquired = await readPublicV1JourneyState(page, { includeGeometry: false });
+    const acquiredTarget = lockedEncounterEnemy(acquired, 'keycardGuard');
+    const activeTarget = acquiredTarget ?? target;
+    const activeDistance = distance2d(activeTarget.position, acquired.player.position);
+    const activeHeight = activeTarget.position.y - acquired.player.position.y;
+    const bladeRange = activeDistance <= 2.55 && Math.abs(activeHeight) <= 1.9;
+
+    if (bladeRange) {
+      await selectBeamBlade(page);
+      await orientToward(page, activeTarget.position, { timeout: 2_000 }).catch(() => {});
+      for (let strike = 0; strike < 3; strike += 1) {
+        await page.mouse.click(combatPointer.x, combatPointer.y);
+        await page.waitForTimeout(strike === 0 ? 930 : 980);
+      }
+      lastDamageAt = Date.now();
+      bestTargetDistance = Infinity;
+      continue;
+    }
+
+    await selectMegaBuster(page);
+    await page.mouse.down({ button: 'left' });
+    try {
+      // Keep the normal Buster active while climbing the credential pyramid.
+      // If a tier lip stops forward progress, the next step is a standard
+      // forward jump—not a graph teleport or injected ledge state.
+      const stalled = Date.now() - lastApproachProgressAt > 1_700
+        || Date.now() - lastDamageAt > COMBAT_DAMAGE_WATCHDOG_MILLISECONDS;
+      await page.keyboard.down('KeyW');
+      try {
+        if (stalled || Math.abs(activeHeight) > 1.9 || approachSteps % 4 === 3) {
+          await page.keyboard.press('Space');
+          await page.waitForTimeout(1_060);
+        } else {
+          await page.waitForTimeout(Math.min(620, Math.max(280, activeDistance * 52)));
+        }
+      } finally {
+        await page.keyboard.up('KeyW').catch(() => {});
+      }
+    } finally {
+      await page.mouse.up({ button: 'left' }).catch(() => {});
+    }
+    approachSteps += 1;
+    if (targetDistance > MEGA_BUSTER_MAXIMUM_RANGE || Math.abs(targetHeight) > 2.6) {
+      bestTargetDistance = Infinity;
+      lastApproachProgressAt = Date.now();
+    }
+    await page.waitForTimeout(140);
+  }
+
+  throw new Error(`Public combat timed out in keycardGuard: ${JSON.stringify(lastState)}`);
+};
+
 export const clearPublicEncounter = async (page, encounterId, {
   timeout = 210_000,
 } = {}) => {
+  if (encounterId === 'keycardGuard') timeout = Math.max(timeout, 420_000);
   await triggerPublicEncounter(page, encounterId, timeout);
   const patrolState = await readPublicV1JourneyState(page);
   const patrolPoints = buildEncounterPatrolPoints(patrolState, encounterId);
@@ -1106,13 +2093,31 @@ export const clearPublicEncounter = async (page, encounterId, {
     throw new Error(`Encounter ${encounterId} has no clear authored floor patrol points.`);
   }
   const canvas = page.locator('canvas');
-  await canvas.click({ position: { x: 520, y: 340 } });
+  const canvasBounds = await canvas.boundingBox();
+  if (!canvasBounds) throw new Error('Public combat canvas has no visible bounds.');
+  const combatPointer = {
+    x: canvasBounds.x + canvasBounds.width * 0.5,
+    y: canvasBounds.y + canvasBounds.height * 0.5,
+  };
+  await page.mouse.click(combatPointer.x, combatPointer.y);
+  if (encounterId === 'keycardGuard') {
+    try {
+      return await clearPublicKeycardGuard(page, { timeout, combatPointer });
+    } finally {
+      await page.mouse.up({ button: 'left' }).catch(() => {});
+      await releaseKeys(page, ['KeyW', 'KeyS', 'KeyA', 'KeyD']);
+      const finalState = await readPublicV1JourneyState(page, { includeGeometry: false })
+        .catch(() => null);
+      if (finalState?.lock?.movementLocked) await page.keyboard.press('Tab').catch(() => {});
+    }
+  }
   await selectMegaBuster(page);
 
   const started = Date.now();
   let lastDamageAt = Date.now();
   let previousHealth = Infinity;
   let strafeKey = 'KeyD';
+  let lastDefensiveDodgeAt = 0;
   let lastState = null;
 
   try {
@@ -1133,11 +2138,13 @@ export const clearPublicEncounter = async (page, encounterId, {
       if (totalHealth + 0.01 < previousHealth) lastDamageAt = Date.now();
       previousHealth = totalHealth;
 
-      const lockedEnemy = enemies.find(({ id }) => id === lastState.lock.ownerEnemyId);
+      const lockedEnemy = lockedEncounterEnemy(lastState, encounterId);
       const target = lockedEnemy
         ?? [...enemies].sort((left, right) => (
           distance2d(left.position, lastState.player.position)
-          - distance2d(right.position, lastState.player.position)
+            + Math.abs(left.position.y - lastState.player.position.y) * 2
+          - (distance2d(right.position, lastState.player.position)
+            + Math.abs(right.position.y - lastState.player.position.y) * 2)
         ))[0];
       const targetDistance = target?.position
         ? distance2d(target.position, lastState.player.position)
@@ -1145,6 +2152,18 @@ export const clearPublicEncounter = async (page, encounterId, {
       const targetHeight = target?.position
         ? target.position.y - lastState.player.position.y
         : Infinity;
+      const healthRatio = lastState.player.health / Math.max(1, lastState.player.maxHealth);
+      if (encounterId === 'keycardGuard'
+        && healthRatio < 0.72
+        && Date.now() - lastDefensiveDodgeAt > 4_200) {
+        // The pyramid roster can attack throughout route replanning. Use the
+        // player's normal invulnerable lateral dodge before committing to the
+        // next pursuit or firing window instead of standing still until 35% HP.
+        await dodgeWithPublicInput(page, strafeKey);
+        strafeKey = strafeKey === 'KeyD' ? 'KeyA' : 'KeyD';
+        lastDefensiveDodgeAt = Date.now();
+        continue;
+      }
       // A grounded enemy is not automatically a safe melee target. In the
       // Nest, railings and large bodies can block the final metre even while
       // the same enemy is plainly inside the starter Buster's authored range.
@@ -1152,15 +2171,30 @@ export const clearPublicEncounter = async (page, encounterId, {
       // at contact distance; otherwise retain the ranged difficulty-one arm.
       const hasDamageStalled = Date.now() - lastDamageAt
         > COMBAT_DAMAGE_WATCHDOG_MILLISECONDS;
-      const useBeamBlade = !hasDamageStalled
-        && Math.abs(targetHeight) <= 1.8
-        && targetDistance <= BEAM_BLADE_REPOSITION_DISTANCE;
-      const needsReposition = !lockedEnemy
-        || !lastState.lock.movementLocked
-        || targetDistance > (useBeamBlade
-          ? BEAM_BLADE_REPOSITION_DISTANCE
-          : MEGA_BUSTER_REPOSITION_DISTANCE)
-        || hasDamageStalled;
+      const groundedTarget = Math.abs(targetHeight) <= 1.8;
+      // A stalled grounded target is exactly when the ordinary Beam Blade is
+      // useful: route into its real range and perform its public-input combo.
+      // The previous negated watchdog could never select the blade after an
+      // armored Nest target stopped taking reliable Buster damage.
+      // The Nest's large pods and armored targets can defeat a stationary
+      // Buster lane. After the real damage watchdog expires, close through
+      // ordinary movement and use the starter Beam Blade rather than resetting
+      // the watchdog without dealing damage. keycardGuard has its own combat
+      // traversal routine above and remains excluded from this generic path.
+      const forceBeamBladeFallback = hasDamageStalled
+        && groundedTarget
+        && encounterId !== 'keycardGuard';
+      const useBeamBlade = groundedTarget
+        && (forceBeamBladeFallback || targetDistance <= BEAM_BLADE_REPOSITION_DISTANCE);
+      const needsReposition = shouldRepositionPublicCombatTarget({
+        hasLockedEnemy: Boolean(lockedEnemy),
+        movementLocked: lastState.lock.movementLocked,
+        targetDistance,
+        targetHeight,
+        useBeamBlade,
+        hasDamageStalled,
+        forceBeamBladeFallback,
+      });
 
       if (needsReposition) {
         // Acquire every new target with the starter Buster's authored 6.9 m
@@ -1169,27 +2203,97 @@ export const clearPublicEncounter = async (page, encounterId, {
         // with the 2.8 m blade profile spent most of the journey walking to a
         // moving enemy before Tab was even allowed to select it.
         await selectMegaBuster(page);
-        await routeIntoWeaponRange(
-          page,
-          encounterId,
-          target,
-          timeout - (Date.now() - started),
-          hasDamageStalled && encounterId !== 'enemyNest'
-            ? Math.min(3.55, useBeamBlade
-              ? BEAM_BLADE_APPROACH_RADIUS
-              : MEGA_BUSTER_APPROACH_RADIUS)
-            : useBeamBlade ? BEAM_BLADE_APPROACH_RADIUS : MEGA_BUSTER_APPROACH_RADIUS,
-          patrolPoints,
-          patrolVisits,
-        );
+        // Both authored traversal arenas expect ordinary run-and-gun play.
+        // Keep the selected Buster firing while collision-bound movement seeks
+        // a better lane instead of granting every Nest target a long idle
+        // patrol window; try/finally below always releases the mouse button.
+        const attackWhileRepositioning = encounterId === 'keycardGuard'
+          || encounterId === 'enemyNest';
+        if (attackWhileRepositioning) await page.mouse.down({ button: 'left' });
+        try {
+          // The credential pyramid is an active combat traversal space. Keep
+          // firing the ordinary Buster while walking its real floors instead
+          // of granting every guard a long uncontested route-planning window.
+          await routeIntoWeaponRange(
+            page,
+            encounterId,
+            target,
+            timeout - (Date.now() - started),
+            hasDamageStalled
+              ? Math.min(3.55, useBeamBlade
+                ? BEAM_BLADE_APPROACH_RADIUS
+                : MEGA_BUSTER_APPROACH_RADIUS)
+              : useBeamBlade ? BEAM_BLADE_APPROACH_RADIUS : MEGA_BUSTER_APPROACH_RADIUS,
+            patrolPoints,
+            patrolVisits,
+          );
+        } finally {
+          if (attackWhileRepositioning) await page.mouse.up({ button: 'left' }).catch(() => {});
+        }
         const positioned = await readPublicV1JourneyState(page, { includeGeometry: false });
         if (!positioned.lock.movementLocked) {
+          const unlockedTargets = liveEncounterEnemies(positioned, encounterId);
+          const unlockedBladeTarget = (encounterId === 'keycardGuard'
+            || (encounterId === 'enemyNest' && unlockedTargets.length === 1))
+            ? unlockedTargets
+              .filter((candidate) => (
+                Math.abs(candidate.position.y - positioned.player.position.y) <= 1.8
+              ))
+              .sort((left, right) => (
+                distance2d(left.position, positioned.player.position)
+                - distance2d(right.position, positioned.player.position)
+              ))[0]
+            : null;
+          const unlockedBladeDistance = unlockedBladeTarget?.position
+            ? distance2d(unlockedBladeTarget.position, positioned.player.position)
+            : Infinity;
+          if (unlockedBladeDistance <= BEAM_BLADE_REPOSITION_DISTANCE) {
+            let closeState = positioned;
+            for (let attempt = 0; attempt < 6 && !closeState.lock.movementLocked; attempt += 1) {
+              // At contact distance, acquire the guard before swinging so the
+              // normal combat controller—not a stale diagnostic position—owns
+              // aim while knockback and enemy sidesteps occur.
+              await page.keyboard.press('Tab');
+              await page.waitForTimeout(320);
+              closeState = await readPublicV1JourneyState(page, { includeGeometry: false });
+            }
+            await selectBeamBlade(page);
+            // Once real locomotion has reached the credential-pyramid melee
+            // lane, finish a short ordinary blade sequence instead of
+            // restarting the entire patrol search after every two swings.
+            // Enemies remain free to move and retaliate; every strike is still
+            // issued through the normal mouse input and authored recovery.
+            for (let combo = 0; combo < 5; combo += 1) {
+              const bladeState = await readPublicV1JourneyState(page, { includeGeometry: false });
+              if (findById(bladeState.encounters, encounterId).cleared) return bladeState;
+              const liveBladeTargets = liveEncounterEnemies(bladeState, encounterId);
+              const nearbyTarget = lockedEncounterEnemy(bladeState, encounterId)
+                ?? liveBladeTargets
+                .filter((candidate) => (
+                  Math.abs(candidate.position.y - bladeState.player.position.y) <= 1.8
+                ))
+                .sort((left, right) => (
+                  distance2d(left.position, bladeState.player.position)
+                  - distance2d(right.position, bladeState.player.position)
+                ))[0];
+              if (!nearbyTarget?.position
+                || distance2d(nearbyTarget.position, bladeState.player.position) > 3.1) break;
+              await orientToward(page, nearbyTarget.position, { timeout: 3_000 }).catch(() => {});
+              await page.mouse.click(combatPointer.x, combatPointer.y);
+              await page.waitForTimeout(930);
+              await page.mouse.click(combatPointer.x, combatPointer.y);
+              await page.waitForTimeout(980);
+            }
+            lastDamageAt = Date.now();
+            continue;
+          }
           await page.keyboard.press('Tab');
           await page.waitForTimeout(420);
         }
-        // A route/lock cycle gets one real firing window before the damage
-        // watchdog decides that a wall or moving target invalidated the shot.
-        lastDamageAt = Date.now();
+        // Do not reset the damage watchdog merely because a route/lock cycle
+        // completed. Only a real enemy-health decrease above advances it; this
+        // keeps a healthy final target in active pursuit rather than repeatedly
+        // granting failed movement cycles a fresh no-damage window.
         continue;
       }
 
@@ -1218,24 +2322,30 @@ export const clearPublicEncounter = async (page, encounterId, {
         // authored 0.86 s opener/follow-up can resolve them at contact range.
         // Repeating after the real recovery window avoids the former 6.5 s
         // idle gap while still driving only normal attack clicks.
-        await page.mouse.click(520, 340);
+        await page.mouse.click(combatPointer.x, combatPointer.y);
         // The authored opener locks controls for 0.826 s. A click at 0.62 s
         // was explicitly cleared by CombatSystem's control-lock path and never
         // became the intended follow-up; 0.93 s is inside its combo grace.
         await page.waitForTimeout(930);
-        await page.mouse.click(520, 340);
+        await page.mouse.click(combatPointer.x, combatPointer.y);
         await page.waitForTimeout(980);
       } else {
         await selectMegaBuster(page);
+        const defensiveStrafe = encounterId === 'keycardGuard' ? strafeKey : null;
+        if (defensiveStrafe) await page.keyboard.down(defensiveStrafe);
         await page.mouse.down({ button: 'left' });
         try {
           // A longer stationary burst gives the non-homing starter pulses time
           // to intercept aerial enemies instead of moving their origin around
           // the target between every shot.
-          await page.waitForTimeout(MEGA_BUSTER_BURST_MILLISECONDS);
+          await page.waitForTimeout(
+            encounterId === 'keycardGuard' ? 3_200 : MEGA_BUSTER_BURST_MILLISECONDS,
+          );
         } finally {
           await page.mouse.up({ button: 'left' }).catch(() => {});
+          if (defensiveStrafe) await page.keyboard.up(defensiveStrafe).catch(() => {});
         }
+        if (defensiveStrafe) strafeKey = strafeKey === 'KeyD' ? 'KeyA' : 'KeyD';
       }
 
       // Keep a valid firing position. Defensive movement is health-triggered

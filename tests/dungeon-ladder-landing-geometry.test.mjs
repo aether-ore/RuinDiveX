@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as THREE from 'three';
 import { DungeonGenerator } from '../src/DungeonGenerator.js';
 import {
   DUNGEON_CONNECTOR_VARIANT_IDS,
@@ -7,113 +8,198 @@ import {
 } from '../src/DungeonConnectorVariants.js';
 
 const TILE_SIZE = 2.8;
+const PATH_TILE_COUNT = 33;
 
-function createMinimumLadderPlan() {
-  const bridgePath = Array.from({ length: 11 }, (_, x) => ({ x, z: 0 }));
+function createLadderPlan(direction) {
+  const sourceElevation = direction === 'ascending' ? 0 : 14;
+  const destinationElevation = direction === 'ascending' ? 14 : 0;
+  const bridgePath = Array.from({ length: PATH_TILE_COUNT }, (_, x) => ({ x, z: 0 }));
   const plan = {
-    id: 'minimum-safe-ladder-gallery',
-    logicalConnectionId: 'room-a_room-b',
+    id: `ladder-${direction}`,
+    logicalConnectionId: `room-a_room-b_ladder_${direction}`,
     fromRoomId: 'room-a',
     toRoomId: 'room-b',
     connectorType: 'ground_corridor',
     level: 0,
-    elevation: 0,
+    elevation: sourceElevation,
+    sourceElevation,
+    destinationElevation,
+    elevationDelta: destinationElevation - sourceElevation,
+    direction,
     fullPath: bridgePath.map((point) => ({ ...point })),
     bridgePath: bridgePath.map((point) => ({ ...point })),
     connectorVariantConstraints: {
       roomFootprints: [],
       endpointFlatBufferTiles: 2,
     },
-    fromSocket: { id: 'room-a-exit', x: 0, z: 0 },
-    toSocket: { id: 'room-b-entrance', x: 10, z: 0 },
+    fromSocket: {
+      id: 'room-a-exit',
+      roomId: 'room-a',
+      x: 0,
+      z: 0,
+      elevation: sourceElevation,
+    },
+    toSocket: {
+      id: 'room-b-entrance',
+      roomId: 'room-b',
+      x: PATH_TILE_COUNT - 1,
+      z: 0,
+      elevation: destinationElevation,
+    },
   };
   plan.connectorVariant = createDungeonConnectorVariantContract(
     plan,
     DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
-    { tileSize: TILE_SIZE },
+    { tileSize: TILE_SIZE, sourceElevation, destinationElevation, direction },
   );
   plan.connectorVariantId = DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY;
   return plan;
 }
 
-function uniqueProjectionCount(tiles, direction) {
-  return new Set(tiles.map((tile) => (
-    tile.x * direction.x + tile.z * direction.z
-  ))).size;
-}
-
-test('minimum safe ladder span realizes clear 2x2 landings and uncovered apertures', () => {
-  const plan = createMinimumLadderPlan();
-  const mechanismIndexes = plan.connectorVariant.mechanisms.map(({ pathIndex }) => pathIndex);
-  assert.deepEqual(mechanismIndexes, [3, 7]);
-  assert.equal(mechanismIndexes[1] - mechanismIndexes[0], 4);
-
+function realizePlan(plan) {
   const tiles = new Map(plan.bridgePath.map((point) => [
     `${point.x},${point.z}`,
-    { ...point, type: 'hallway', elevation: 0, level: 0 },
+    {
+      ...point,
+      type: 'hallway',
+      elevation: plan.sourceElevation,
+      level: plan.sourceElevation / 14,
+    },
   ]));
-  // A room-owned column on one side proves widening selects the free side
-  // instead of mutating an authored room footprint.
-  const authoredRoomTile = {
-    x: 3,
-    z: 1,
-    type: 'floor',
-    elevation: 0,
-    level: 0,
-    roomId: 'authored-room-sentinel',
-  };
-  tiles.set('3,1', authoredRoomTile);
-  const floorTiles = [...tiles.values()];
   const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  generator._addConnectorExplorationSpaces(tiles, [], [plan]);
+  const floorTiles = generator._applyConnectorTraversalSurfaces(
+    tiles,
+    [plan],
+    [...tiles.values()],
+  );
+  return { generator, tiles, floorTiles };
+}
 
-  generator._applyConnectorTraversalSurfaces(tiles, [plan], floorTiles);
+function uniqueProjectionCount(tiles, direction) {
+  return new Set(tiles.map((tile) => tile.x * direction.x + tile.z * direction.z)).size;
+}
 
-  assert.equal(plan.ladderContracts.length, 2);
-  for (const ladder of plan.ladderContracts) {
+for (const direction of ['ascending', 'descending']) {
+  test(`${direction} ladder uses one clear 14m shaft with visible 3x3 landings`, () => {
+    const plan = createLadderPlan(direction);
+    const { generator, tiles, floorTiles } = realizePlan(plan);
+
+    assert.equal(plan.elevationDelta, direction === 'ascending' ? 14 : -14);
+    assert.equal(plan.ladderContracts.length, 1);
+    const ladder = plan.ladderContracts[0];
+    assert.equal(ladder.direction, direction);
+    assert.equal(ladder.topY - ladder.bottomY, 14);
     assert.equal(ladder.caged, true);
-    assert.equal(ladder.landingWidthTiles, 2);
-    assert.equal(ladder.landingDepthTiles, 2);
-    assert.equal(ladder.landingWidthMeters, TILE_SIZE * 2);
-    assert.equal(ladder.landingDepthMeters, TILE_SIZE * 2);
+    assert.equal(ladder.landingWidthTiles, 3);
+    assert.equal(ladder.landingDepthTiles, 3);
+    assert.equal(ladder.landingWidthMeters, TILE_SIZE * 3);
+    assert.equal(ladder.landingDepthMeters, TILE_SIZE * 3);
+    assert.equal(ladder.bottomLandingTiles.length, 9);
+    assert.equal(ladder.topLandingTiles.length, 9);
     assert.equal(ladder.bottomMountPosition.distanceTo(ladder.bottomExit), 0);
     assert.equal(ladder.topMountPosition.distanceTo(ladder.topExit), 0);
 
-    const facing = { x: ladder.facing.x, z: ladder.facing.z };
+    const facing = { x: ladder.planeNormal.x, z: ladder.planeNormal.z };
     const tangent = { x: -facing.z, z: facing.x };
     for (const [endpoint, landingTiles] of [
       ['bottom', ladder.bottomLandingTiles],
       ['top', ladder.topLandingTiles],
     ]) {
-      assert.equal(landingTiles.length, 4, `${endpoint} landing must own four physical tiles`);
-      assert.equal(new Set(landingTiles.map(({ floorKey }) => floorKey)).size, 4);
-      assert.equal(uniqueProjectionCount(landingTiles, facing), 2);
-      assert.equal(uniqueProjectionCount(landingTiles, tangent), 2);
-      for (const landingTile of landingTiles) {
-        const physicalTile = floorTiles.find((candidate) => (
-          candidate.x === landingTile.x
-          && candidate.z === landingTile.z
-          && Math.abs((candidate.elevation ?? 0) - landingTile.elevation) <= 0.05
-        ));
-        assert.ok(physicalTile, `${endpoint} landing tile must exist in the collision/render floor list`);
-        assert.ok(
-          tiles.has(`${landingTile.x},${landingTile.z}`),
-          `${endpoint} landing tile must also extend the enclosed structural shell`,
-        );
-        assert.equal(physicalTile.connectorId, plan.id);
-        assert.equal(physicalTile.noEnemySpawn, true);
-        assert.equal(physicalTile.roomId ?? null, null);
+      assert.equal(new Set(landingTiles.map(({ floorKey }) => floorKey)).size, 9);
+      assert.equal(uniqueProjectionCount(landingTiles, facing), 3);
+      assert.equal(uniqueProjectionCount(landingTiles, tangent), 3);
+      for (const landing of landingTiles) {
+        assert.ok(tiles.has(`${landing.x},${landing.z}`), `${endpoint} shell tile is missing`);
+        assert.ok(floorTiles.some((floor) => (
+          generator._getFloorTileGraphKey(floor) === landing.floorKey
+          && floor.connectionId === plan.id
+          && floor.noEnemySpawn === true
+        )), `${endpoint} landing has no matching physical floor`);
       }
     }
 
-    const coveringTiles = floorTiles.filter((candidate) => (
-      candidate.x === ladder.apertureGridPoint.x
-      && candidate.z === ladder.apertureGridPoint.z
-      && (candidate.elevation ?? 0) > ladder.bottomY + 0.05
-    ));
-    assert.deepEqual(coveringTiles, [], 'no elevated floor tile may cover a ladder aperture');
-  }
+    assert.equal(
+      floorTiles.some((floor) => (
+        floor.x === ladder.apertureGridPoint.x
+        && floor.z === ladder.apertureGridPoint.z
+        && floor.connectionId === plan.id
+      )),
+      false,
+      'no tile at any elevation may cover the ladder aperture',
+    );
+    assert.equal(tiles.get(`${ladder.apertureGridPoint.x},${ladder.apertureGridPoint.z}`)?.structuralEnvelopeOnly, true);
 
-  assert.equal(tiles.get('3,1'), authoredRoomTile);
-  assert.equal(authoredRoomTile.roomId, 'authored-room-sentinel');
-  assert.equal(authoredRoomTile.connectorId, undefined);
-});
+    const floorByKey = new Map(floorTiles.map((floor) => [
+      generator._getFloorTileGraphKey(floor),
+      floor,
+    ]));
+    const bottomLandingFloors = ladder.bottomLandingTiles.map(({ floorKey }) => floorByKey.get(floorKey));
+    const topLandingFloors = ladder.topLandingTiles.map(({ floorKey }) => floorByKey.get(floorKey));
+    assert.equal(
+      bottomLandingFloors.reduce((count, floor) => count + (floor.openRetainingWallEdges?.length ?? 0), 0),
+      1,
+      'the lower landing keeps one unobstructed ladder access lane',
+    );
+    assert.equal(
+      topLandingFloors.reduce((count, floor) => count + (floor.openRetainingWallEdges?.length ?? 0), 0),
+      1,
+      'the upper landing keeps one unobstructed ladder access lane',
+    );
+    assert.equal(
+      topLandingFloors.reduce((count, floor) => count + (floor.forcedRetainingWallEdges?.length ?? 0), 0),
+      2,
+      'the two upper-aperture flanks are explicitly guard-railed',
+    );
+
+    const railMaterial = new THREE.MeshBasicMaterial();
+    const railGroup = new THREE.Group();
+    generator._addFactoryRailRuns(
+      railGroup,
+      floorTiles,
+      generator._createFloorTileLookup(floorTiles),
+      { factoryRail: railMaterial },
+    );
+    const railRuns = railGroup.children.filter((object) => object.name === 'factoryCatwalkRailRun');
+    const edgeMidpoint = (floor, edge) => {
+      const [dx, dz] = edge.split(',').map(Number);
+      return new THREE.Vector3(
+        (floor.x + dx * 0.5) * TILE_SIZE,
+        floor.elevation + 0.68,
+        (floor.z + dz * 0.5) * TILE_SIZE,
+      );
+    };
+    const railAt = (point) => railRuns.some((rail) => (
+      new THREE.Box3().setFromObject(rail).distanceToPoint(point) <= 0.01
+    ));
+    const openFloor = topLandingFloors.find((floor) => floor.openRetainingWallEdges?.length);
+    assert.equal(railAt(edgeMidpoint(openFloor, openFloor.openRetainingWallEdges[0])), false);
+    for (const guardedFloor of topLandingFloors.filter((floor) => (
+      floor.forcedRetainingWallEdges?.length
+    ))) {
+      assert.equal(
+        railAt(edgeMidpoint(guardedFloor, guardedFloor.forcedRetainingWallEdges[0])),
+        true,
+      );
+    }
+    railGroup.traverse((object) => object.geometry?.dispose?.());
+    railMaterial.dispose();
+
+    if (direction === 'ascending') {
+      assert.equal(ladder.bottomMountPosition.y, plan.sourceElevation);
+      assert.equal(ladder.topMountPosition.y, plan.destinationElevation);
+    } else {
+      assert.equal(ladder.topMountPosition.y, plan.sourceElevation);
+      assert.equal(ladder.bottomMountPosition.y, plan.destinationElevation);
+    }
+
+    const validation = generator._validateConnectorTraversalAssembly({
+      floorTiles,
+      tiles,
+      rooms: [],
+      connectionPlans: [plan],
+    });
+    assert.equal(validation.accepted, true, validation.errors.join('\n'));
+    assert.ok(validation.details.checks[0].minimumGalleryWidthTiles >= 3);
+  });
+}

@@ -382,6 +382,50 @@ test('stagger resolution leaves legacy packets unchanged and supports shared exp
   assert.equal(resolveBusterStaggerDuration(explosion, target, 8), 0.26);
 });
 
+test('cluster projectiles retain floor-relative origins at signed elevations', () => {
+  for (const floorY of [0, -14, 14]) {
+    const { system } = createProjectileHarness();
+    const parent = system.spawn({
+      owner: 'player',
+      position: new THREE.Vector3(2, floorY, 3),
+      direction: new THREE.Vector3(0, 0, 1),
+      speed: 8,
+      range: 6,
+      radius: 0.22,
+      damage: 8,
+      endY: floorY,
+      visualType: 'grenade',
+      clusterCount: 3,
+    });
+
+    system._spawnClusterProjectiles(parent);
+    const clusters = system.active.filter((projectile) => projectile !== parent);
+    assert.equal(clusters.length, 3);
+    assert.ok(clusters.every((projectile) => (
+      Math.abs((projectile.mesh.position.y - floorY) - 0.18) < 0.000001
+    )));
+    assert.ok(clusters.every((projectile) => (
+      Math.abs((projectile.endY - floorY) - 0.12) < 0.000001
+    )));
+  }
+
+  const { system } = createProjectileHarness();
+  const parent = system.spawn({
+    owner: 'player',
+    position: new THREE.Vector3(2, -9, 3),
+    direction: new THREE.Vector3(0, 0, 1),
+    speed: 8,
+    range: 6,
+    radius: 0.22,
+    damage: 8,
+    endY: -14,
+    visualType: 'grenade',
+    clusterCount: 1,
+  });
+  system._spawnClusterProjectiles(parent);
+  assert.equal(system.active.find((projectile) => projectile !== parent).mesh.position.y, -9);
+});
+
 test('controlled projectiles use swept collision and choose the earliest target deterministically', () => {
   const farther = target('farther', 0, 8);
   const nearer = target('nearer', 0, 5);

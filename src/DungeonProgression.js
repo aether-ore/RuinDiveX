@@ -199,7 +199,14 @@ function createRoomConnections(roomById, connectionPlans = []) {
           connectorType: plan.connectorType,
           level: plan.level,
           elevation: plan.elevation,
+          sourceElevation: plan.sourceElevation ?? plan.fromSocket?.elevation ?? plan.elevation,
+          destinationElevation: plan.destinationElevation ?? plan.toSocket?.elevation ?? plan.elevation,
+          elevationDelta: plan.elevationDelta ?? 0,
+          direction: plan.direction ?? 'level',
+          connectorVariantId: plan.connectorVariantId ?? null,
           purpose: plan.purpose,
+          routeClassification: plan.routeClassification
+            ?? (plan.purpose === 'optional_branch' ? 'optional_branch' : 'main_route'),
           requiredForProgression: plan.requiredForProgression,
           explorationBeats: (plan.explorationBeats ?? []).map((beat) => ({ ...beat })),
           fromSocket: { ...plan.fromSocket },
@@ -245,6 +252,10 @@ function createMinimapData({ rooms, roomConnections, doors, keycards, chests, ke
     rooms: rooms.map((room) => ({
       roomId: room.id,
       roomType: room.type,
+      baseElevation: Number(room.baseElevation ?? 0),
+      minY: Number(room.minY ?? room.baseElevation ?? 0),
+      maxY: Number(room.maxY ?? room.baseElevation ?? 0),
+      ceilingY: Number.isFinite(room.ceilingY) ? room.ceilingY : null,
       roomBounds2D: roomBounds2D(room),
       roomCenter2D: roomCenter2D(room),
       connectedRoomIds: roomConnections
@@ -259,6 +270,9 @@ function createMinimapData({ rooms, roomConnections, doors, keycards, chests, ke
       ceilingHeight: room.ceilingHeight ?? null,
       verticalTierCount: room.numberOfVerticalTiers ?? 1,
       elevations: (room.localTierMap ?? []).map((tier) => tier.elevation),
+      localElevations: (room.localTierMap ?? []).map((tier) => (
+        Number(tier.elevation ?? room.baseElevation ?? 0) - Number(room.baseElevation ?? 0)
+      )),
       archetype: room.archetype ?? room.type,
       purpose: room.purpose ?? null,
     })),
@@ -268,6 +282,13 @@ function createMinimapData({ rooms, roomConnections, doors, keycards, chests, ke
       toRoomId: connection.toRoomId,
       doorId: connection.doorId,
       routes: connection.routes,
+      elevationTransfers: connection.routes.map((route) => ({
+        routeId: route.id,
+        sourceElevation: route.sourceElevation,
+        destinationElevation: route.destinationElevation,
+        elevationDelta: route.elevationDelta,
+        direction: route.direction,
+      })),
     })),
     markers: [
       ...doors.map((door) => ({
@@ -535,8 +556,15 @@ export class DungeonValidator {
         errors.push(`${connection.id} has no required physical traversal route.`);
       }
       for (const route of routes) {
-        if (Math.abs((route.fromSocket?.elevation ?? 0) - (route.toSocket?.elevation ?? 0)) > 0.001) {
-          errors.push(`${route.id} connects mismatched portal elevations.`);
+        const socketDelta = Number(route.toSocket?.elevation ?? 0)
+          - Number(route.fromSocket?.elevation ?? 0);
+        if (Math.abs(socketDelta - Number(route.elevationDelta ?? 0)) > 0.001) {
+          errors.push(`${route.id} socket elevations do not match its signed connector contract.`);
+        }
+        const verticalFamily = ['crested_slope_v1', 'ladder_gallery_v1', 'automatic_lift_gallery_v1']
+          .includes(route.connectorVariantId);
+        if (!verticalFamily && Math.abs(socketDelta) > 0.001) {
+          errors.push(`${route.id} changes elevation without a vertical connector family.`);
         }
         if (route.fromSocket?.roomId !== connection.fromRoomId
           || route.toSocket?.roomId !== connection.toRoomId) {

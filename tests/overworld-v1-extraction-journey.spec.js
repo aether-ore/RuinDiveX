@@ -10,6 +10,7 @@ import {
   collectPublicKeycard,
   findById,
   readPublicV1JourneyState,
+  traversePublicConnectorBothWays,
 } from './helpers/public-v1-journey.js';
 
 // Curated from genuine deterministic V1 generation. This layout retains all
@@ -17,11 +18,44 @@ import {
 // ordinary Reaverbots, keeping a real full-combat acceptance run bounded.
 const JOURNEY_SEED = 'overworld-v1-public-extraction-easy-110';
 
+const traverseSeedConnectorBothWays = async (page, {
+  fromRoomId,
+  toRoomId,
+  traversalKind,
+  direction,
+  expectedAction,
+}) => {
+  const state = await readPublicV1JourneyState(page);
+  const route = state.connectorRoutes.find((candidate) => (
+    candidate.fromRoomId === fromRoomId
+    && candidate.toRoomId === toRoomId
+    && candidate.traversalKind === traversalKind
+    && candidate.direction === direction
+  ));
+  expect(route, `${fromRoomId} -> ${toRoomId} ${direction} ${traversalKind}`).toBeTruthy();
+  expect(route.elevationDelta).toBe(direction === 'ascending' ? 14 : -14);
+
+  const result = await traversePublicConnectorBothWays(page, route);
+  expect(result).toMatchObject({
+    connectionId: route.connectionId,
+    traversalKind,
+    expectedAction,
+  });
+  for (const leg of [result.forward, result.reverse]) {
+    expect(leg.traversedConnectorIds).toContain(route.connectionId);
+    expect(leg.traversedActions).toContain(expectedAction);
+  }
+  return result;
+};
+
 test.use({ viewport: { width: 640, height: 360 } });
 
 test.describe('overworld to streamed V1 public-input completion journey', () => {
   test('walks the authored ruin, fights, unlocks, secures the Refractor, and extracts', async ({ page }) => {
-    test.setTimeout(1_200_000);
+    // Stage-level movement/combat deadlines are the acceptance authority. This
+    // watchdog exceeds their combined legal envelope so it cannot pre-empt a
+    // still-valid public-input run.
+    test.setTimeout(6_000_000);
     const errors = [];
     page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
     page.on('console', (message) => {
@@ -48,7 +82,38 @@ test.describe('overworld to streamed V1 public-input completion journey', () => 
       });
     }
 
-    await clearPublicEncounter(page, 'enemyNest');
+    const trappedFirstConnection = state.connectorTrackTraps.filter(({ connectionId }) => (
+      connectionId === 'enemyNest_keycardRoom_ground'
+    ));
+    expect(trappedFirstConnection.length).toBeGreaterThanOrEqual(1);
+    expect(trappedFirstConnection.length).toBeLessThanOrEqual(3);
+    expect(state.connectorTrackTrapRuntime).toMatchObject({
+      mounted: true,
+      visualAcceptancePassed: true,
+    });
+    expect(state.connectorTrackTrapRuntime.traps
+      .filter(({ id }) => trappedFirstConnection.some((trap) => trap.id === id))
+      .every((trap) => trap.visualReady && trap.visualAttached && trap.damageEnabled)).toBe(true);
+    const trappedTravelBefore = new Map(state.connectorTrackTrapRuntime.traps.map((trap) => (
+      [trap.id, trap.distanceTravelledMeters]
+    )));
+
+    // This real seed's first progression edge is an ascending ladder. Exercise
+    // it in both directions before clearing either encounter, then continue the
+    // same expedition from the source-side Enemy Nest landing.
+    await traverseSeedConnectorBothWays(page, {
+      fromRoomId: 'enemyNest',
+      toRoomId: 'keycardRoom',
+      traversalKind: 'ladder',
+      direction: 'ascending',
+      expectedAction: 'ladder',
+    });
+    state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    expect(state.connectorTrackTrapRuntime.traps
+      .filter(({ id }) => trappedFirstConnection.some((trap) => trap.id === id))
+      .every((trap) => trap.distanceTravelledMeters > trappedTravelBefore.get(trap.id))).toBe(true);
+
+    await clearPublicEncounter(page, 'enemyNest', { timeout: 480_000 });
     await clearPublicEncounter(page, 'keycardGuard');
 
     state = await readPublicV1JourneyState(page);
@@ -65,6 +130,14 @@ test.describe('overworld to streamed V1 public-input completion journey', () => 
       targetPosition: alphaDoor.position,
       targetRadius: 2.45,
       expectedState: (next) => !findById(next.doors, 'Door_Alpha').closed,
+    });
+
+    await traverseSeedConnectorBothWays(page, {
+      fromRoomId: 'keycardRoom',
+      toRoomId: 'trapRoom',
+      traversalKind: 'slope',
+      direction: 'descending',
+      expectedAction: 'ramp',
     });
 
     // These authored combat/sub-zone branches are physically traversed rather
@@ -103,6 +176,14 @@ test.describe('overworld to streamed V1 public-input completion journey', () => 
       timeout: 180_000,
     });
 
+    await traverseSeedConnectorBothWays(page, {
+      fromRoomId: 'trapRoom',
+      toRoomId: 'conveyorRoom',
+      traversalKind: 'ladder',
+      direction: 'descending',
+      expectedAction: 'ladder',
+    });
+
     await clearPublicEncounter(page, 'conveyorGuard', { timeout: 240_000 });
     await expect.poll(async () => (
       (await readPublicV1JourneyState(page, { includeGeometry: false }))
@@ -123,6 +204,14 @@ test.describe('overworld to streamed V1 public-input completion journey', () => 
       targetRadius: 2.45,
       expectedState: (next) => !findById(next.doors, 'Door_Gamma').closed,
       timeout: 180_000,
+    });
+
+    await traverseSeedConnectorBothWays(page, {
+      fromRoomId: 'conveyorRoom',
+      toRoomId: 'bossRoom',
+      traversalKind: 'automatic_lift',
+      direction: 'ascending',
+      expectedAction: 'automatic_lift',
     });
 
     await clearPublicEncounter(page, 'bossEncounter', { timeout: 300_000 });

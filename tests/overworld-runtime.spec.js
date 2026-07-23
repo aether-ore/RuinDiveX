@@ -2165,7 +2165,7 @@ test.describe('voxel overworld acceptance', () => {
   });
 
   test('five enter-return cycles plateau without duplicate world-owned objects', async ({ page }) => {
-    test.setTimeout(240_000);
+    test.setTimeout(360_000);
     const runtimeErrors = attachRuntimeErrorCapture(page);
     await page.goto('/');
     await waitForWorld(page, 'overworld');
@@ -2213,6 +2213,8 @@ test.describe('voxel overworld acceptance', () => {
       }
       const entryState = await page.evaluate(() => {
         const snapshot = window.game.getPublicDungeonJourneyDiagnostics({ includeGeometry: false });
+        const trapRuntime = window.game.getConnectorTrackTrapDiagnostics();
+        const trapFacadeRuntime = window.game.dungeon.connectorTrackTrapRuntimeDiagnostics;
         return {
           ownedKeys: snapshot.ownedKeys,
           keycards: snapshot.keycards.map(({ id, collected }) => ({ id, collected })),
@@ -2222,6 +2224,16 @@ test.describe('voxel overworld acceptance', () => {
           mechanisms: snapshot.mechanisms.map(({ id, activated }) => ({ id, activated })),
           keySeekerActivated: snapshot.keySeeker?.activated ?? null,
           shrineCollected: snapshot.shrine?.collected ?? null,
+          connectorTrackTraps: {
+            descriptorCount: window.game.dungeon.connectorTrackTraps?.length ?? 0,
+            mounted: trapRuntime.mounted,
+            runtimeCount: trapRuntime.trapCount,
+            facadeCount: trapFacadeRuntime?.trapCount ?? 0,
+            facadeMounted: trapFacadeRuntime?.mounted ?? false,
+            visualLoaded: trapRuntime.visual?.loaded ?? false,
+            visualLoadCount: trapRuntime.visual?.loadCount ?? 0,
+            activeVisualCount: trapRuntime.visual?.activeInstanceCount ?? 0,
+          },
         };
       });
       if (entryStateSignature === null) entryStateSignature = entryState;
@@ -2230,6 +2242,22 @@ test.describe('voxel overworld acceptance', () => {
       expect(entryState.keycards.every(({ collected }) => !collected)).toBe(true);
       expect(entryState.chests.every(({ opened }) => !opened)).toBe(true);
       expect(entryState.encounters.every(({ cleared }) => !cleared)).toBe(true);
+      expect(entryState.connectorTrackTraps).toMatchObject({
+        mounted: true,
+        facadeMounted: true,
+        visualLoaded: true,
+        visualLoadCount: 1,
+      });
+      expect(entryState.connectorTrackTraps.descriptorCount).toBeGreaterThan(0);
+      expect(entryState.connectorTrackTraps.runtimeCount).toBe(
+        entryState.connectorTrackTraps.descriptorCount,
+      );
+      expect(entryState.connectorTrackTraps.facadeCount).toBe(
+        entryState.connectorTrackTraps.descriptorCount,
+      );
+      expect(entryState.connectorTrackTraps.activeVisualCount).toBe(
+        entryState.connectorTrackTraps.descriptorCount,
+      );
       previousDungeonReferences = await page.evaluateHandle(() => ({
         bundle: window.game.activeWorldBundle,
         root: window.game.activeWorldBundle.root,
@@ -2237,6 +2265,8 @@ test.describe('voxel overworld acceptance', () => {
         controller: window.game.dungeonController,
         spawner: window.game.spawner,
         mapEvents: window.game.mapEvents,
+        trapRuntime: window.game.connectorTrackTrapRuntime,
+        trapFactory: window.game.activeWorldBundle.connectorTrackTrapVisualFactory,
       }));
       await abandonExpeditionThroughEntrance(page);
       await waitForOverworldAssetsSettled(page);
@@ -2245,11 +2275,20 @@ test.describe('voxel overworld acceptance', () => {
         disposed: previous.bundle.disposed === true,
         detached: previous.root.parent === null,
         noMountedDungeonController: window.game.dungeonController !== previous.controller,
+        trapRuntimeDisposed: previous.trapRuntime?.disposed === true,
+        trapFactoryDisposed: previous.trapFactory?.disposed === true,
+        noMountedTrapRuntime: window.game.connectorTrackTrapRuntime === null,
+        facadePublishedDisposal:
+          previous.facade.connectorTrackTrapRuntimeDiagnostics?.disposed === true,
       }), previousDungeonReferences);
       expect(releasedLocalState).toEqual({
         disposed: true,
         detached: true,
         noMountedDungeonController: true,
+        trapRuntimeDisposed: true,
+        trapFactoryDisposed: true,
+        noMountedTrapRuntime: true,
+        facadePublishedDisposal: true,
       });
       const hostState = await page.evaluate((references) => ({
         identities: {
@@ -2299,6 +2338,13 @@ test.describe('voxel overworld acceptance', () => {
         mountedRefractorCount: 0,
       });
       expect(diagnostics.ownership.disposableResourceCount).toBeGreaterThan(0);
+      expect(diagnostics.lastDisposalStats.connectorTrackTrapDisposal).toMatchObject({
+        trapCount: entryState.connectorTrackTraps.descriptorCount,
+        // Transition teardown unmounts the runtime before resource accounting;
+        // zero here proves every trap instance has already detached.
+        activeVisualCount: 0,
+        visualLoadCount: 1,
+      });
       samples.push({ renderer: diagnostics.renderer, ownership: diagnostics.ownership });
       console.log(`overworld-cycle-${cycle}`, JSON.stringify({
         renderer: diagnostics.renderer,

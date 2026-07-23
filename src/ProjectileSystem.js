@@ -1611,7 +1611,7 @@ export class ProjectileSystem {
     }
 
     const origin = projectile.mesh.position.clone();
-    origin.y = Math.max(0.18, projectile.endY + 0.08);
+    origin.y = Math.max(origin.y, projectile.endY + 0.18);
     const count = projectile.clusterCount;
     const baseAngle = Math.atan2(projectile.direction.x, projectile.direction.z);
     const color = projectile.mesh.material.color.getHex();

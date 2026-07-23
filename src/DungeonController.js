@@ -29,6 +29,10 @@ const ENEMY_GROUND_TRAVERSAL_MAX_DROP = 3.2;
 const ENEMY_GROUND_TRAVERSAL_MAX_RISE = 0.65;
 const ENEMY_GROUND_TRAVERSAL_SAMPLE_SPACING = 0.24;
 const RAMP_SUPPORT_CAPTURE_HEIGHT = PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.18;
+const PLAYER_GROUNDED_SUPPORT_CAPTURE_HEIGHT = Math.max(
+  PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.18,
+  PLAYER_TRAVERSAL_ENVELOPE.groundedStepDownHeight + 0.18,
+);
 const NAVIGATION_CACHE_LIMIT = 4096;
 const FLOOR_ROUTE_FIELD_LIMIT = 12;
 const CARDINAL_NEIGHBORS = [
@@ -943,16 +947,36 @@ export class DungeonController {
 
   _getAerialCeilingHeight(position) {
     const room = this._getRoomAtPosition(position);
+    if (Number.isFinite(room?.ceilingY)) {
+      return room.ceilingY;
+    }
     if (Number.isFinite(room?.ceilingHeight)) {
-      return room.ceilingHeight;
+      return Number(room.baseElevation ?? room.floorElevation ?? 0) + room.ceilingHeight;
     }
     if (room?.ceilingHeight === null) {
       return Infinity;
     }
 
     const tile = this.worldToTile(position);
-    if (this.tiles.has(tileKey(tile.x, tile.z)) || this.floorTilesByColumn.has(tileKey(tile.x, tile.z))) {
-      return 8.4;
+    const key = tileKey(tile.x, tile.z);
+    const structuralTile = this.tiles.get(key);
+    if (Number.isFinite(structuralTile?.connectorCeilingY)) {
+      return structuralTile.connectorCeilingY;
+    }
+
+    const column = this.floorTilesByColumn.get(key) ?? [];
+    const nearestFloor = column.reduce((nearest, candidate) => {
+      if (!nearest) return candidate;
+      return Math.abs(Number(candidate.elevation ?? 0) - position.y)
+        < Math.abs(Number(nearest.elevation ?? 0) - position.y)
+        ? candidate
+        : nearest;
+    }, null);
+    if (Number.isFinite(nearestFloor?.connectorCeilingY)) {
+      return nearestFloor.connectorCeilingY;
+    }
+    if (structuralTile || nearestFloor) {
+      return Number(nearestFloor?.elevation ?? structuralTile?.elevation ?? 0) + 8.4;
     }
     return Infinity;
   }
@@ -1469,6 +1493,41 @@ export class DungeonController {
   getFloorElevationAt(position) {
     const authoredOverride = this.game?.bossStageRuntime?.getFloorElevationOverride?.(position);
     if (Number.isFinite(authoredOverride)) return authoredOverride;
+
+    const player = this.game?.player;
+    const isGroundedPlayerQuery = position === player?.root?.position
+      && !this._isPlayerJumping()
+      && !player?.isClimbingLadder?.();
+    if (isGroundedPlayerQuery) {
+      const support = this._getConnectedGroundedFloorSupport(
+        position,
+        this.lastSafePlayerPosition,
+      );
+      if (support) {
+        return support.elevation;
+      }
+
+      // A lower floor sharing this X/Z is not grounded support. The only
+      // exception is an explicitly authored walk-off aperture, which returns
+      // the lower height so Player can enter its Falling state on the next
+      // update. The controller still refuses to commit that lower floor as a
+      // safe anchor until the airborne landing has actually occurred.
+      const lowerTile = this.getFloorTileAt(position, {
+        allowClosest: true,
+        maxElevationAbove: 0.05,
+      });
+      if (lowerTile?.allowsGroundedDropLanding === true) {
+        const lowerY = this._getTileElevationAtPosition(lowerTile, position);
+        const drop = position.y - lowerY;
+        if (drop > PLAYER_STEP_OFF_FALL_HEIGHT
+          && drop <= PLAYER_TRAVERSAL_ENVELOPE.safeDropHeight) {
+          return lowerY;
+        }
+      }
+
+      return Number.isFinite(position.y) ? position.y : this.lastSafePlayerPosition.y;
+    }
+
     const tile = this.getFloorTileAt(position, {
       allowClosest: true,
       maxElevationAbove: 0.42,
@@ -1519,8 +1578,12 @@ export class DungeonController {
   }
 
   _getGroundedStepTransitionHeight(fromPosition, toPosition, fallback) {
-    const fromTile = this.getFloorTileAt(fromPosition, { allowClosest: true });
-    const toTile = this.getFloorTileAt(toPosition, { allowClosest: true });
+    const fromTile = this.getFloorTileAt(fromPosition, {
+      maxVerticalGap: Math.max(1.45, fallback),
+    });
+    const toTile = this.getFloorTileAt(toPosition, {
+      maxVerticalGap: Math.max(1.45, fallback),
+    });
     return Math.max(
       fallback,
       Number(fromTile?.groundedStepTransitionHeight) || 0,
@@ -1575,7 +1638,124 @@ export class DungeonController {
     return actionState === 'neutralJump' || actionState === 'forwardJump' || actionState === 'wallJump';
   }
 
-  _syncPositionToFloor(position, { preservePlayerAction = false } = {}) {
+  _areGroundedFloorSupportsConnected(fromTile, toTile) {
+    if (!fromTile || !toTile) {
+      return false;
+    }
+    if (this._getFloorGraphKey(fromTile) === this._getFloorGraphKey(toTile)) {
+      return true;
+    }
+
+    const dx = Math.abs(fromTile.x - toTile.x);
+    const dz = Math.abs(fromTile.z - toTile.z);
+    if (dx + dz === 1) {
+      return this._canEnemyTraverseFloorTiles(fromTile, toTile);
+    }
+    if (dx !== 1 || dz !== 1) {
+      return false;
+    }
+
+    // A diagonal frame step is valid only when one of its cardinal corner
+    // supports exists at the same physical layer. This avoids using diagonal
+    // proximity to bridge two stacked, disconnected floors.
+    const intermediateColumns = [
+      this.floorTilesByColumn.get(tileKey(fromTile.x, toTile.z)),
+      this.floorTilesByColumn.get(tileKey(toTile.x, fromTile.z)),
+    ];
+    return intermediateColumns.some((column) => column?.some((intermediate) => (
+      this._canEnemyTraverseFloorTiles(fromTile, intermediate)
+      && this._canEnemyTraverseFloorTiles(intermediate, toTile)
+    )));
+  }
+
+  _getConnectedGroundedFloorSupport(position, originPosition = null) {
+    if (!position) {
+      return null;
+    }
+
+    const origin = originPosition ?? position;
+    const originTile = this.getFloorTileAt(origin, {
+      maxVerticalGap: PLAYER_GROUNDED_SUPPORT_CAPTURE_HEIGHT,
+    });
+    const centerTile = this.worldToTile(position);
+    const playerRadius = Math.max(
+      0,
+      Number(this.game?.player?.radius) || PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+    );
+    const halfTile = this.tileSize * 0.5;
+    const candidates = [];
+
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        const columnX = centerTile.x + dx;
+        const columnZ = centerTile.z + dz;
+        const column = this.floorTilesByColumn.get(tileKey(columnX, columnZ));
+        if (!column?.length) {
+          continue;
+        }
+
+        const horizontalX = Math.max(
+          0,
+          Math.abs(position.x - columnX * this.tileSize) - halfTile,
+        );
+        const horizontalZ = Math.max(
+          0,
+          Math.abs(position.z - columnZ * this.tileSize) - halfTile,
+        );
+        const horizontalDistanceSq = horizontalX * horizontalX + horizontalZ * horizontalZ;
+        if (horizontalDistanceSq > playerRadius * playerRadius + 1e-6) {
+          continue;
+        }
+
+        for (const tile of column) {
+          const elevation = this._getTileElevationAtPosition(tile, position);
+          const transitionHeight = Math.max(
+            PLAYER_GROUNDED_SUPPORT_CAPTURE_HEIGHT,
+            Number(originTile?.groundedStepTransitionHeight) || 0,
+            Number(tile.groundedStepTransitionHeight) || 0,
+          );
+          const verticalDistance = Math.abs(elevation - position.y);
+          if (verticalDistance > transitionHeight + 0.01) {
+            continue;
+          }
+          const direct = columnX === centerTile.x && columnZ === centerTile.z;
+          if (originTile
+            ? !this._areGroundedFloorSupportsConnected(originTile, tile)
+            : !direct) {
+            continue;
+          }
+
+          if (!this._isResolvedFloorPositionWalkable({
+            x: position.x,
+            y: elevation,
+            z: position.z,
+          })) {
+            continue;
+          }
+          candidates.push({
+            tile,
+            elevation,
+            direct,
+            verticalDistance,
+            horizontalDistanceSq,
+          });
+        }
+      }
+    }
+
+    candidates.sort((left, right) => (
+      left.verticalDistance - right.verticalDistance
+      || Number(right.direct) - Number(left.direct)
+      || left.horizontalDistanceSq - right.horizontalDistanceSq
+      || this._getFloorGraphKey(left.tile).localeCompare(this._getFloorGraphKey(right.tile))
+    ));
+    return candidates[0] ?? null;
+  }
+
+  _syncPositionToFloor(position, {
+    preservePlayerAction = false,
+    allowClosest = true,
+  } = {}) {
     if (preservePlayerAction && this._isPlayerPreservingVerticalMotion()) {
       return;
     }
@@ -1592,7 +1772,10 @@ export class DungeonController {
       return;
     }
 
-    const floorTile = this.getFloorTileAt(position, { allowClosest: true });
+    const floorTile = this.getFloorTileAt(position, {
+      allowClosest,
+      maxVerticalGap: PLAYER_GROUNDED_SUPPORT_CAPTURE_HEIGHT,
+    });
     if (floorTile) {
       position.y = this._getTileElevationAtPosition(floorTile, position);
     }
@@ -2043,7 +2226,10 @@ export class DungeonController {
   }
 
   _getFloorGraphKey(tile) {
-    return `${tile.x},${tile.z}@${Number(tile.level ?? 0).toFixed(2)}`;
+    // `level` is presentation/planning metadata and is not guaranteed to be
+    // unique once whole authored rooms move vertically. Runtime topology must
+    // distinguish physical support layers by absolute world elevation.
+    return `${tile.x},${tile.z}@y${Number(tile.elevation ?? 0).toFixed(3)}`;
   }
 
   _getFloorConnectionElevation(tile, dx, dz) {
@@ -2964,6 +3150,8 @@ export class DungeonController {
     const playerRoot = this.game.player.root;
     const current = playerRoot.position;
     const playerJumping = this._isPlayerJumping();
+    const playerFalling = this.game.player.isJumpAirborne?.() === true
+      && (this.game.player.velocity?.y ?? 1) <= 0;
 
     // Ledge actions intentionally pass through the obstacle footprint while
     // the hands stay planted. Player owns the complete root path until the
@@ -3013,7 +3201,38 @@ export class DungeonController {
       return;
     }
 
-    const surfaceY = this.getSurfaceElevationAt(current);
+    const groundedFloorSupport = !playerJumping
+      ? this._getConnectedGroundedFloorSupport(current, this.lastSafePlayerPosition)
+      : null;
+    const platformSupportY = this.game.getPlatformFloorElevation?.(current);
+    const railSupportY = this.getPlayerRailSupportElevation(current);
+    const authoredSupportY = this.game?.bossStageRuntime?.getFloorElevationOverride?.(current);
+    const hasGroundedSupport = playerJumping
+      || Boolean(groundedFloorSupport)
+      || Number.isFinite(platformSupportY)
+      || Number.isFinite(railSupportY)
+      || Number.isFinite(authoredSupportY);
+    const surfaceY = !playerJumping && Number.isFinite(platformSupportY)
+      ? platformSupportY
+      : !playerJumping && Number.isFinite(railSupportY)
+        ? railSupportY
+        : !playerJumping && groundedFloorSupport
+          ? groundedFloorSupport.elevation
+          : this.getSurfaceElevationAt(current);
+    const explicitSupportY = Number.isFinite(platformSupportY)
+      ? platformSupportY
+      : Number.isFinite(railSupportY)
+        ? railSupportY
+        : Number.isFinite(authoredSupportY)
+          ? authoredSupportY
+          : groundedFloorSupport?.elevation;
+    const currentPositionWalkable = Number.isFinite(explicitSupportY)
+      ? this._isResolvedFloorPositionWalkable({
+          x: current.x,
+          y: explicitSupportY,
+          z: current.z,
+        })
+      : this.isPositionWalkable(current);
     const closestFloorTile = this.getFloorTileAt(current, { allowClosest: true });
     const closestFloorY = closestFloorTile
       ? this._getTileElevationAtPosition(closestFloorTile, current)
@@ -3024,6 +3243,9 @@ export class DungeonController {
       PLAYER_STEP_OFF_FALL_HEIGHT,
     );
     const authoredGroundedDrop = !playerJumping
+      && !groundedFloorSupport
+      && !Number.isFinite(platformSupportY)
+      && !Number.isFinite(railSupportY)
       && closestFloorTile?.allowsGroundedDropLanding === true
       && current.y - closestFloorY > groundedStepTransitionHeight
       && current.y - closestFloorY <= PLAYER_TRAVERSAL_ENVELOPE.safeDropHeight
@@ -3033,6 +3255,22 @@ export class DungeonController {
     if (authoredGroundedDrop) {
       this.pendingPlayerJumpOffLanding = null;
       return;
+    }
+    if (playerJumping) {
+      const jumpLanding = this._getWalkableJumpOffLanding(current, tempVectorB);
+      if (jumpLanding && this._isResolvedFloorPositionWalkable(current)) {
+        // A normal jump reaches 1.65 m while the grounded floor lookup captures
+        // support only within 1.45 m. Preserve the complete rising arc whenever
+        // a legal authored landing remains below; otherwise the generic recovery
+        // path snaps the player to lastSafePlayerPosition near the apex and makes
+        // the jump appear permanently capped after entering elevated geometry.
+        // Only a descending player may stage that landing for later commitment.
+        // Rising positions must never become recovery anchors.
+        if (playerFalling) {
+          this.pendingPlayerJumpOffLanding = jumpLanding.clone();
+        }
+        return;
+      }
     }
     const groundedRiseRequiresJumpAt = (position) => {
       const tile = this.getFloorTileAt(position, { allowClosest: true });
@@ -3047,17 +3285,30 @@ export class DungeonController {
         && candidateY - this.lastSafePlayerPosition.y > allowedRise;
     };
 
-    if (this.isPositionWalkable(current) && !groundedRiseRequiresJumpAt(current)) {
+    if (hasGroundedSupport
+      && currentPositionWalkable
+      && !groundedRiseRequiresJumpAt(current)) {
       const steppingOffElevatedSurface = !playerJumping
         && current.y - surfaceY > groundedStepTransitionHeight;
       if (!steppingOffElevatedSurface) {
         const authoredGroundedStep = !playerJumping
           && groundedStepTransitionHeight > PLAYER_STEP_OFF_FALL_HEIGHT + 0.01
           && Math.abs(current.y - surfaceY) <= groundedStepTransitionHeight + 0.01;
-        this._syncPositionToFloor(current, { preservePlayerAction: !authoredGroundedStep });
+        this._syncPositionToFloor(current, {
+          preservePlayerAction: !authoredGroundedStep,
+          allowClosest: false,
+        });
       }
-      this.lastSafePlayerPosition.copy(current);
       if (!playerJumping) {
+        // Capsule overlap may retain support just beyond a tile edge, but that
+        // tolerance must not ratchet the safe anchor progressively into empty
+        // space. Commit only a direct floor, platform, rail, or authored floor.
+        if (groundedFloorSupport?.direct
+          || Number.isFinite(platformSupportY)
+          || Number.isFinite(railSupportY)
+          || Number.isFinite(authoredSupportY)) {
+          this.lastSafePlayerPosition.copy(current);
+        }
         this.pendingPlayerJumpOffLanding = null;
       }
       return;
@@ -3065,19 +3316,10 @@ export class DungeonController {
 
     if (!playerJumping && this.pendingPlayerJumpOffLanding) {
       current.copy(this.pendingPlayerJumpOffLanding);
-      this._syncPositionToFloor(current);
+      this._syncPositionToFloor(current, { allowClosest: false });
       this.lastSafePlayerPosition.copy(current);
       this.pendingPlayerJumpOffLanding = null;
       return;
-    }
-
-    if (playerJumping) {
-      const jumpLanding = this._getWalkableJumpOffLanding(current, tempVectorB);
-      if (jumpLanding) {
-        this.pendingPlayerJumpOffLanding = jumpLanding.clone();
-        this.lastSafePlayerPosition.copy(current);
-        return;
-      }
     }
 
     // Reaching this correction path means grounded movement struck a closed
@@ -3088,23 +3330,41 @@ export class DungeonController {
     }
 
     tempVectorA.set(current.x, current.y, this.lastSafePlayerPosition.z);
-    if (this.isPositionWalkable(tempVectorA) && !groundedRiseRequiresJumpAt(tempVectorA)) {
+    if (this._getConnectedGroundedFloorSupport(tempVectorA, this.lastSafePlayerPosition)
+      && this.isPositionWalkable(tempVectorA)
+      && !groundedRiseRequiresJumpAt(tempVectorA)) {
       current.copy(tempVectorA);
-      this._syncPositionToFloor(current, { preservePlayerAction: true });
-      this.lastSafePlayerPosition.copy(current);
+      this._syncPositionToFloor(current, { preservePlayerAction: true, allowClosest: false });
+      if (!playerJumping) {
+        this.lastSafePlayerPosition.copy(current);
+      }
       return;
     }
 
     tempVectorA.set(this.lastSafePlayerPosition.x, current.y, current.z);
-    if (this.isPositionWalkable(tempVectorA) && !groundedRiseRequiresJumpAt(tempVectorA)) {
+    if (this._getConnectedGroundedFloorSupport(tempVectorA, this.lastSafePlayerPosition)
+      && this.isPositionWalkable(tempVectorA)
+      && !groundedRiseRequiresJumpAt(tempVectorA)) {
       current.copy(tempVectorA);
-      this._syncPositionToFloor(current, { preservePlayerAction: true });
-      this.lastSafePlayerPosition.copy(current);
+      this._syncPositionToFloor(current, { preservePlayerAction: true, allowClosest: false });
+      if (!playerJumping) {
+        this.lastSafePlayerPosition.copy(current);
+      }
+      return;
+    }
+
+    if (playerJumping) {
+      // Horizontal collision recovery must not collapse an ordinary jump or
+      // promote a transient airborne point to the persistent safe anchor.
+      // Return to the last legal X/Z while preserving Player's vertical state,
+      // velocity, and configured apex.
+      current.x = this.lastSafePlayerPosition.x;
+      current.z = this.lastSafePlayerPosition.z;
       return;
     }
 
     current.copy(this.lastSafePlayerPosition);
-    this._syncPositionToFloor(current, { preservePlayerAction: true });
+    this._syncPositionToFloor(current, { preservePlayerAction: true, allowClosest: false });
   }
 
   _canPreserveAuthoredVoidJump(position) {
@@ -3649,7 +3909,20 @@ export class DungeonController {
     }
 
     const { x, z } = this._parseTileKey(key);
-    return this.tileToWorld(x, z, new THREE.Vector3());
+    // Conveyor keys are intentionally 2D legacy identifiers. Once a complete
+    // authored room is translated, resolving those keys against world Y=0 can
+    // select an unrelated lower support layer. Keep the puzzle on the same
+    // absolute room layer as its authored spawner/receiver instead.
+    const elevationHint = Number(
+      puzzle.spawner?.position?.y
+        ?? puzzle.target?.position?.y
+        ?? 0,
+    );
+    return new THREE.Vector3(
+      x * this.tileSize,
+      this.getTileElevation(x, z, elevationHint),
+      z * this.tileSize,
+    );
   }
 
   _parseTileKey(key) {

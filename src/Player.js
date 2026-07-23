@@ -3200,7 +3200,7 @@ export class Player {
 
     if (hand) {
       hand.getWorldPosition(origin);
-      origin.y = Math.max(origin.y, 1);
+      origin.y = Math.max(origin.y, this.root.position.y + 1);
       return origin;
     }
 
@@ -3212,7 +3212,7 @@ export class Player {
       const drillTipPosition = this.externalRig?.getDrillTipWorldPosition?.(new THREE.Vector3());
 
       if (drillTipPosition) {
-        drillTipPosition.y = Math.max(drillTipPosition.y, 0.9);
+        drillTipPosition.y = Math.max(drillTipPosition.y, this.root.position.y + 0.9);
         return drillTipPosition;
       }
     }
@@ -3223,7 +3223,7 @@ export class Player {
     );
 
     if (muzzlePosition) {
-      muzzlePosition.y = Math.max(muzzlePosition.y, 1);
+      muzzlePosition.y = Math.max(muzzlePosition.y, this.root.position.y + 1);
       return muzzlePosition;
     }
 

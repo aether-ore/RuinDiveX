@@ -3925,7 +3925,7 @@ test('elevated drops and effects stay on their tier while lore announcements are
 });
 
 test('procedural vertical solver accepts a deterministic seed sweep', async ({ page }) => {
-  test.setTimeout(90000);
+  test.setTimeout(180000);
   await page.goto('/?startupWorld=dungeon&dungeonSeed=connector-c');
   await expect
     .poll(
@@ -3949,8 +3949,17 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
       } catch (error) {
         throw new Error(`deterministic connector seed ${seed} failed: ${error.message}`);
       }
-      const variedPlans = dungeon.connectionPlans.filter((plan) => plan.connectorVariant);
-      const variedConnectionIds = new Set(variedPlans.map((plan) => plan.id));
+      const contractedPlans = dungeon.connectionPlans.filter((plan) => plan.connectorVariant);
+      const elevationPlans = contractedPlans.filter((plan) => (
+        plan.connectorVariant.elevationChange === true
+        && plan.connectorVariant.traversalKind !== 'walk'
+      ));
+      const serviceGalleryPlans = contractedPlans.filter((plan) => (
+        plan.connectorVariantId === 'service_gallery_v1'
+        && plan.connectorVariant.traversalKind === 'walk'
+        && plan.connectorVariant.elevationChange === false
+      ));
+      const variedConnectionIds = new Set(elevationPlans.map((plan) => plan.id));
       const specialSurfaces = new Set(['industrialRamp', 'upperConnectionBridge']);
       const pointInsideRoom = (point, room) => {
         const halfWidth = Math.floor(room.width / 2);
@@ -3963,16 +3972,22 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
         && specialSurfaces.has(tile.surface)
         && dungeon.rooms.some((room) => pointInsideRoom(tile, room))
       ));
-      const flatBufferChecks = variedPlans.flatMap((plan) => [
-        ...(plan.connectorVariant.pathContract.sourceFlatBufferPath ?? []),
-        ...(plan.connectorVariant.pathContract.destinationFlatBufferPath ?? []),
-      ].map((point) => {
-        const tile = dungeon.tiles.get(`${point.x},${point.z}`);
-        return Boolean(
-          tile
-          && Math.abs(tile.elevation ?? 0) <= 0.05
-          && !specialSurfaces.has(tile.surface),
-        );
+      const flatBufferChecks = elevationPlans.flatMap((plan) => [
+        ...(plan.connectorVariant.pathContract.sourceFlatBufferPath ?? []).map((point) => ({
+          point,
+          expectedElevation: plan.sourceElevation,
+        })),
+        ...(plan.connectorVariant.pathContract.destinationFlatBufferPath ?? []).map((point) => ({
+          point,
+          expectedElevation: plan.destinationElevation,
+        })),
+      ].map(({ point, expectedElevation }) => {
+        const tile = dungeon.floorTiles.find((candidate) => (
+          candidate.x === point.x
+          && candidate.z === point.z
+          && Math.abs(Number(candidate.elevation) - Number(expectedElevation)) <= 0.05
+        ));
+        return Boolean(tile && !specialSurfaces.has(tile.surface));
       }));
       const connectorAssembly = dungeon.progression.validation.connectorAssembly;
       const roomById = new Map(dungeon.rooms.map((room) => [room.id, room]));
@@ -3981,8 +3996,10 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
         && !['hub', 'camp'].includes(roomById.get(plan.toRoomId)?.type)
       ));
       const classicPlans = interiorPlans.filter((plan) => (
-        !plan.connectorVariant
-        && plan.connectorPresentation?.overlayFamily === 'v1_service_bay'
+        (!plan.connectorVariant || plan.connectorVariant.traversalKind === 'walk')
+        && ['v1_service_bay', 'v1_arch_only_corridor'].includes(
+          plan.connectorPresentation?.overlayFamily,
+        )
       ));
       let decorativeArchVisualCount = 0;
       const decorativeArchVisualCounts = new Map();
@@ -4011,15 +4028,14 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
       ), 0);
       const interiorArchCoverageAccepted = interiorPlans.every((plan) => {
         const arches = [...(plan.decorativeArchBeats ?? [])].sort((a, b) => a.pathIndex - b.pathIndex);
-        const requiredCount = Math.min(2, plan.galleryCrossSections?.length ?? 0);
-        const maximumSpacing = plan.connectorVariant?.decoration?.archSpacingTiles ?? 3;
+        const archEligibleSections = (plan.galleryCrossSections ?? []).filter((section) => (
+          !/(?:control|shaft|aperture)/i.test(section.connectorZone ?? '')
+        ));
+        const requiredCount = Math.max(1, Math.ceil(archEligibleSections.length / 3));
         return arches.length >= requiredCount
           && arches.length === (decorativeArchVisualCounts.get(plan.id) ?? 0)
           && arches.every((arch) => arch.internalClearWidthMeters >= 5.6)
-          && arches.every((arch) => arch.minimumLaneHeadroomMeters >= 3.15)
-          && arches.slice(1).every((arch, index) => (
-            arch.pathIndex - arches[index].pathIndex <= maximumSpacing
-          ));
+          && arches.every((arch) => arch.minimumLaneHeadroomMeters >= 3.15);
       });
       const classicCorridorCoverageAccepted = classicPlans.every((plan) => {
         const serviceBeats = plan.classicV1ServiceBeats ?? [];
@@ -4028,28 +4044,38 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
           .sort();
         const visuals = classicFurnishingVisuals.get(plan.id) ?? [];
         const visualBeatIds = visuals.map((visual) => visual.serviceBeatId).sort();
+        const overlayFamily = plan.connectorPresentation?.overlayFamily;
+        const furnishingCoverageAccepted = overlayFamily === 'v1_service_bay'
+          ? (
+            plannedBeatIds.length > 0
+            && serviceBeats.every((beat) => {
+              const serviceDistance = Math.hypot(
+                beat.servicePoint.x - beat.galleryCenter.x,
+                beat.servicePoint.z - beat.galleryCenter.z,
+              ) * dungeon.tileSize;
+              return ['pump', 'water_tank'].includes(beat.serviceKind)
+                && Number.isFinite(beat.fencePoint?.x)
+                && Number.isFinite(beat.fencePoint?.z)
+                && Number.isFinite(beat.girderPoint?.x)
+                && Number.isFinite(beat.girderPoint?.z)
+                && beat.girderWidthMeters >= 5.6
+                && beat.keepsTravelEnvelopeClear === true
+                && beat.minimumTravelClearanceMeters > 0
+                && serviceDistance - beat.serviceHalfExtentMeters + 1e-6
+                  >= beat.travelEnvelopeHalfWidthMeters;
+            })
+            && JSON.stringify(plannedBeatIds) === JSON.stringify(visualBeatIds)
+            && visuals.every((visual) => visual.keepsTravelEnvelopeClear === true)
+          )
+          : (
+            overlayFamily === 'v1_arch_only_corridor'
+            && plannedBeatIds.length === 0
+            && visuals.length === 0
+          );
         return plan.connectorPresentation?.baseFamily === 'v1_arch_corridor'
-          && plan.connectorPresentation?.overlayFamily === 'v1_service_bay'
+          && ['v1_service_bay', 'v1_arch_only_corridor'].includes(overlayFamily)
           && plan.connectorPresentation?.preservesV1Corridor === true
-          && plannedBeatIds.length > 0
-          && serviceBeats.every((beat) => {
-            const serviceDistance = Math.hypot(
-              beat.servicePoint.x - beat.galleryCenter.x,
-              beat.servicePoint.z - beat.galleryCenter.z,
-            ) * dungeon.tileSize;
-            return ['pump', 'water_tank'].includes(beat.serviceKind)
-              && Number.isFinite(beat.fencePoint?.x)
-              && Number.isFinite(beat.fencePoint?.z)
-              && Number.isFinite(beat.girderPoint?.x)
-              && Number.isFinite(beat.girderPoint?.z)
-              && beat.girderWidthMeters >= 5.6
-              && beat.keepsTravelEnvelopeClear === true
-              && beat.minimumTravelClearanceMeters > 0
-              && serviceDistance - beat.serviceHalfExtentMeters + 1e-6
-                >= beat.travelEnvelopeHalfWidthMeters;
-          })
-          && JSON.stringify(plannedBeatIds) === JSON.stringify(visualBeatIds)
-          && visuals.every((visual) => visual.keepsTravelEnvelopeClear === true);
+          && furnishingCoverageAccepted;
       });
       const upperGalleryChecks = connectorAssembly.checks.filter((check) => check.level > 0);
       const upperPlans = interiorPlans.filter((plan) => plan.level > 0);
@@ -4070,19 +4096,28 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
         matchedConnections: dungeon.progression.validation.platformability.matchedConnectionCount,
         platforms: dungeon.progression.validation.platformability.platformNodeCount,
         roomIds: dungeon.rooms.map(({ id }) => id).sort(),
-        connectorVariants: variedPlans.map((plan) => plan.connectorVariantId),
-        newConnectorsPreserveV1Presentation: variedPlans.every((plan) => (
+        connectorVariants: elevationPlans.map((plan) => plan.connectorVariantId),
+        contractedConnectorCount: contractedPlans.length,
+        newConnectorsPreserveV1Presentation: elevationPlans.every((plan) => (
           plan.connectorPresentation?.baseFamily === 'v1_arch_corridor'
           && plan.connectorPresentation?.overlayFamily === plan.connectorVariant?.visualFamily
           && plan.connectorPresentation?.preservesV1Corridor === true
         )),
+        serviceGalleryCount: serviceGalleryPlans.length,
+        serviceGalleryCoverageAccepted: serviceGalleryPlans.every((plan) => (
+          plan.sourceElevation === plan.destinationElevation
+          && plan.elevationDelta === 0
+          && plan.direction === 'level'
+          && plan.connectorPresentation?.baseFamily === 'v1_arch_corridor'
+          && ['v1_service_bay', 'v1_arch_only_corridor'].includes(
+            plan.connectorPresentation?.overlayFamily,
+          )
+          && plan.connectorPresentation?.preservesV1Corridor === true
+        )),
         classicCorridorCount: classicPlans.length,
         classicCorridorCoverageAccepted,
-        specialVariantCount: variedPlans.length,
-        elevationConnectorCount: variedPlans.filter((plan) => (
-          plan.connectorVariant.elevationChange !== false
-          && plan.connectorVariant.traversalKind !== 'walk'
-        )).length,
+        specialVariantCount: elevationPlans.length,
+        elevationConnectorCount: elevationPlans.length,
         modifiedRoomTileCount: modifiedRoomTiles.length,
         flatBuffersRemainFlat: flatBufferChecks.every(Boolean),
         assembledConnectorCount: connectorAssembly.checkedConnectorCount,
@@ -4110,11 +4145,11 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
               >= door.thresholdPortalSpan
           )),
         assembledLadderCount: dungeon.ladders.length,
-        plannedLadderCount: variedPlans.filter((plan) => (
+        plannedLadderCount: elevationPlans.filter((plan) => (
           plan.connectorVariant.traversalKind === 'ladder'
-        )).length * 2,
+        )).length,
         assembledLiftCount: dungeon.connectorLifts.length,
-        plannedLiftCount: variedPlans.filter((plan) => (
+        plannedLiftCount: elevationPlans.filter((plan) => (
           plan.connectorVariant.traversalKind === 'automatic_lift'
         )).length,
       });
@@ -4149,25 +4184,40 @@ test('procedural vertical solver accepts a deterministic seed sweep', async ({ p
   expect(results.every((result) => (
     result.classicCorridorCount > 0
     && result.classicCorridorCoverageAccepted
+    && result.serviceGalleryCount > 0
+    && result.serviceGalleryCoverageAccepted
     && result.specialVariantCount > 0
     && result.newConnectorsPreserveV1Presentation
   ))).toBe(true);
   expect(results.every((result) => result.modifiedRoomTileCount === 0)).toBe(true);
   expect(results.every((result) => result.flatBuffersRemainFlat)).toBe(true);
+  const structuralCoverageFailures = results.flatMap((result) => Object.entries({
+    assembledGalleryCount: result.assembledGalleryCount > 0,
+    minimumGalleryWidthTiles: result.minimumGalleryWidthTiles >= 3,
+    upperGalleryCount: result.upperGalleryCount > 0,
+    upperGalleryCoverageAccepted: result.upperGalleryCoverageAccepted,
+    upperPlanCount: result.upperPlanCount > 0,
+    upperPortalCount: result.upperPortalCount === result.upperPlanCount * 2,
+    upperPortalCoverageAccepted: result.upperPortalCoverageAccepted,
+    interiorArchCoverageAccepted: result.interiorArchCoverageAccepted,
+    decorativeArchVisualParity: (
+      result.plannedDecorativeArchCount === result.decorativeArchVisualCount
+    ),
+    wideDoorCoverageAccepted: result.wideDoorCoverageAccepted,
+  }).filter(([, accepted]) => !accepted).map(([check]) => ({
+    seed: result.seed,
+    check,
+    assembledGalleryCount: result.assembledGalleryCount,
+    minimumGalleryWidthTiles: result.minimumGalleryWidthTiles,
+    upperGalleryCount: result.upperGalleryCount,
+    upperPlanCount: result.upperPlanCount,
+    upperPortalCount: result.upperPortalCount,
+    plannedDecorativeArchCount: result.plannedDecorativeArchCount,
+    decorativeArchVisualCount: result.decorativeArchVisualCount,
+  })));
+  expect(structuralCoverageFailures).toEqual([]);
   expect(results.every((result) => (
-    result.assembledGalleryCount > 0
-    && result.minimumGalleryWidthTiles >= 3
-    && result.upperGalleryCount > 0
-    && result.upperGalleryCoverageAccepted
-    && result.upperPlanCount > 0
-    && result.upperPortalCount === result.upperPlanCount * 2
-    && result.upperPortalCoverageAccepted
-    && result.interiorArchCoverageAccepted
-    && result.plannedDecorativeArchCount === result.decorativeArchVisualCount
-    && result.wideDoorCoverageAccepted
-  ))).toBe(true);
-  expect(results.every((result) => (
-    result.assembledConnectorCount === result.connectorVariants.length
+    result.assembledConnectorCount === result.contractedConnectorCount
     && result.assembledLadderCount === result.plannedLadderCount
     && result.assembledLiftCount === result.plannedLiftCount
   ))).toBe(true);

@@ -3,6 +3,8 @@ import { CombatSystem } from './CombatSystem.js';
 import { CameraController } from './CameraController.js';
 import { DungeonController } from './DungeonController.js';
 import { DungeonConnectorLiftRuntime } from './DungeonConnectorLiftRuntime.js';
+import { DungeonConnectorTrapRuntime } from './DungeonConnectorTrapRuntime.js';
+import { DungeonConnectorTrapVisualFactory } from './DungeonConnectorTrapVisualFactory.js';
 import { DungeonGenerator } from './DungeonGenerator.js';
 import { EnemySpawner } from './EnemySpawner.js';
 import {
@@ -206,6 +208,7 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'platformingPlatforms',
   'dynamicPlatformingPlatforms',
   'connectorLiftRuntime',
+  'connectorTrackTrapRuntime',
   'bossStageRuntime',
   'platformingLedgeCandidates',
   'debugLedgeTester',
@@ -982,6 +985,7 @@ export class Game {
     this.platformingPlatforms = [];
     this.dynamicPlatformingPlatforms = [];
     this.connectorLiftRuntime = null;
+    this.connectorTrackTrapRuntime = null;
     this.platformingLedgeCandidates = [];
     this.debugSpawnedPlatforms = [];
     this.debugPlatformCounter = 0;
@@ -1060,6 +1064,7 @@ export class Game {
       : null;
     if (this.activeWorldBundle) this.activeWorldBundle.controller = this.dungeonController;
     this._activateConnectorLiftRuntimeForBundle(this.activeWorldBundle);
+    this._activateConnectorTrackTrapRuntimeForBundle(this.activeWorldBundle);
     this.bossStageRuntime?.mount?.(this);
     this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
       this.dungeonController.resolvePowerKnockbackTravel(fromPosition, position)
@@ -1396,6 +1401,7 @@ export class Game {
     dataset.playerActionDuration = formatBrowserDiagnosticNumber(animation?.actionDuration);
     dataset.playerActionTimer = formatBrowserDiagnosticNumber(animation?.actionTimer);
     dataset.playerRootY = formatBrowserDiagnosticNumber(player?.root?.position?.y);
+    dataset.playerJumpState = player?.jumpState ?? 'unknown';
     dataset.playerYaw = formatBrowserDiagnosticNumber(playerYaw);
     dataset.playerTankTurnActive = player?.tankTurnActive ? 'true' : 'false';
     dataset.playerTankTurnTranslating = player?.tankTurnTranslating ? 'true' : 'false';
@@ -1427,6 +1433,11 @@ export class Game {
     dataset.debugGravityScale = formatBrowserDiagnosticNumber(platformDebug?.gravityScale);
     dataset.debugJumpHeight = formatBrowserDiagnosticNumber(platformDebug?.jumpHeight);
     dataset.debugSpawnedPlatformCount = String(this.debugSpawnedPlatforms?.length ?? 0);
+    dataset.connectorTrackTrapMounted = this.connectorTrackTrapRuntime?.mounted ? 'true' : 'false';
+    dataset.connectorTrackTrapCount = String(this.connectorTrackTrapRuntime?.traps?.length ?? 0);
+    dataset.connectorTrackTrapVisualCount = String(
+      this.activeWorldBundle?.connectorTrackTrapVisualFactory?.instances?.size ?? 0,
+    );
   }
 
   _getAnimationPreviewLegTelemetry() {
@@ -2521,6 +2532,16 @@ export class Game {
   } = {}) {
     if (!bundle || bundle.disposed) return this.lastWorldDisposalStats;
     if (clearRunState) this._clearDungeonRunState();
+    const connectorTrackTrapDisposal = Object.freeze({
+      trapCount: bundle.connectorTrackTrapRuntime?.traps?.length ?? 0,
+      activeVisualCount: bundle.connectorTrackTrapVisualFactory?.instances?.size ?? 0,
+      visualLoadCount: bundle.connectorTrackTrapVisualFactory?.loadCount ?? 0,
+    });
+    bundle.connectorTrackTrapRuntime?.dispose?.();
+    bundle.connectorTrackTrapVisualFactory?.dispose?.();
+    if (this.connectorTrackTrapRuntime === bundle.connectorTrackTrapRuntime) {
+      this.connectorTrackTrapRuntime = null;
+    }
     bundle.connectorLiftRuntime?.dispose?.();
     if (this.connectorLiftRuntime === bundle.connectorLiftRuntime) {
       this.connectorLiftRuntime = null;
@@ -2542,7 +2563,12 @@ export class Game {
       : this._disposeDetachedDungeonResources(bundle.root);
     bundle.disposed = true;
     this.worldDisposalCount += 1;
-    this.lastWorldDisposalStats = Object.freeze({ reason, worldKind: bundle.worldKind, ...stats });
+    this.lastWorldDisposalStats = Object.freeze({
+      reason,
+      worldKind: bundle.worldKind,
+      ...stats,
+      connectorTrackTrapDisposal,
+    });
     this._recordWorldLifecycleEvent('bundle-disposed', {
       disposedWorldKind: bundle.worldKind,
       reason,
@@ -2572,6 +2598,7 @@ export class Game {
       this.dungeonController.resolvePowerKnockbackLanding(position, direction, originPosition)
     );
     this._activateConnectorLiftRuntimeForBundle(bundle);
+    this._activateConnectorTrackTrapRuntimeForBundle(bundle);
     return controller;
   }
 
@@ -2627,8 +2654,145 @@ export class Game {
     });
   }
 
+  _isStandardLegacyDungeonFacade(facade) {
+    return Boolean(
+      facade
+      && facade.dungeonKind !== 'ascensionReliquary'
+      && !facade.specialEnvironment
+      && Array.isArray(facade.connectorTrackTraps),
+    );
+  }
+
+  async _prepareConnectorTrackTrapVisualAcceptanceForBundle(bundle) {
+    const facade = bundle?.worldKind === 'dungeon' ? bundle.facade : null;
+    if (!this._isStandardLegacyDungeonFacade(facade)
+      || (facade.connectorTrackTraps?.length ?? 0) === 0) {
+      return Object.freeze({ required: false, accepted: true, trapCount: 0 });
+    }
+
+    let runtime = bundle.connectorTrackTrapRuntime ?? null;
+    if (!runtime || runtime.disposed) {
+      const visualFactory = new DungeonConnectorTrapVisualFactory();
+      runtime = new DungeonConnectorTrapRuntime(this, facade, {
+        visualFactory,
+        visualRoot: facade.group,
+        ownsVisualFactory: true,
+      });
+      bundle.connectorTrackTrapVisualFactory = visualFactory;
+      bundle.connectorTrackTrapRuntime = runtime;
+    }
+    runtime.mount(this, {
+      visualFactory: bundle.connectorTrackTrapVisualFactory ?? runtime.visualFactory,
+      visualRoot: facade.group,
+    });
+    try {
+      await runtime.whenVisualsReady({ requireVisualAcceptance: true });
+    } catch (error) {
+      this._recordWorldLifecycleEvent('connector-track-trap-visual-acceptance-failed', {
+        message: error?.message ?? String(error),
+        trapCount: facade.connectorTrackTraps.length,
+      });
+      throw error;
+    }
+    return Object.freeze({
+      required: true,
+      accepted: true,
+      trapCount: facade.connectorTrackTraps.length,
+    });
+  }
+
+  _activateConnectorTrackTrapRuntimeForBundle(bundle = this.activeWorldBundle) {
+    const previous = this.connectorTrackTrapRuntime;
+    const nextFacade = bundle?.worldKind === 'dungeon' ? bundle.facade : null;
+    const eligible = this._isStandardLegacyDungeonFacade(nextFacade)
+      && (nextFacade.connectorTrackTraps?.length ?? 0) > 0;
+    let next = eligible ? bundle?.connectorTrackTrapRuntime ?? null : null;
+
+    if (next?.disposed) {
+      next = null;
+      bundle.connectorTrackTrapRuntime = null;
+      bundle.connectorTrackTrapVisualFactory = null;
+    }
+    if (!next && eligible) {
+      const visualFactory = new DungeonConnectorTrapVisualFactory();
+      next = new DungeonConnectorTrapRuntime(this, nextFacade, {
+        visualFactory,
+        visualRoot: nextFacade.group,
+        ownsVisualFactory: true,
+      });
+      bundle.connectorTrackTrapVisualFactory = visualFactory;
+      bundle.connectorTrackTrapRuntime = next;
+    }
+    if (previous && previous !== next) previous.unmount?.();
+    this.connectorTrackTrapRuntime = next;
+    next?.mount?.(this, {
+      visualFactory: bundle?.connectorTrackTrapVisualFactory ?? next?.visualFactory,
+      visualRoot: nextFacade?.group,
+    });
+    return next;
+  }
+
+  _replaceConnectorTrackTrapRuntimeForDungeon(dungeon = this.dungeon) {
+    const previous = this.connectorTrackTrapRuntime;
+    previous?.dispose?.();
+    if (this.activeWorldBundle?.connectorTrackTrapRuntime === previous) {
+      this.activeWorldBundle.connectorTrackTrapRuntime = null;
+      this.activeWorldBundle.connectorTrackTrapVisualFactory = null;
+    }
+    this.connectorTrackTrapRuntime = null;
+    if (
+      this.worldKind !== 'dungeon'
+      || !this._isStandardLegacyDungeonFacade(dungeon)
+      || (dungeon?.connectorTrackTraps?.length ?? 0) === 0
+    ) {
+      return null;
+    }
+    const visualFactory = new DungeonConnectorTrapVisualFactory();
+    const runtime = new DungeonConnectorTrapRuntime(this, dungeon, {
+      visualFactory,
+      visualRoot: dungeon.group,
+      ownsVisualFactory: true,
+    });
+    runtime.mount(this);
+    this.connectorTrackTrapRuntime = runtime;
+    if (this.activeWorldBundle?.worldKind === 'dungeon') {
+      this.activeWorldBundle.connectorTrackTrapRuntime = runtime;
+      this.activeWorldBundle.connectorTrackTrapVisualFactory = visualFactory;
+    }
+    return runtime;
+  }
+
+  getConnectorTrackTrapDiagnostics() {
+    const runtime = this.connectorTrackTrapRuntime;
+    const runtimeDiagnostics = runtime?.getDiagnostics?.() ?? Object.freeze({
+      mounted: false,
+      disposed: false,
+      trapCount: 0,
+      invalidDescriptorCount: 0,
+      traps: Object.freeze([]),
+    });
+    const visualFactory = this.activeWorldBundle?.connectorTrackTrapVisualFactory
+      ?? runtime?.visualFactory
+      ?? null;
+    return Object.freeze({
+      ...runtimeDiagnostics,
+      visual: visualFactory?.getDiagnostics?.() ?? Object.freeze({
+        loaded: false,
+        loadCount: 0,
+        activeInstanceCount: 0,
+        loadError: null,
+        disposed: false,
+      }),
+    });
+  }
+
   _disposeUncommittedWorldCandidate(bundle) {
     if (!bundle || bundle.disposed) return null;
+    bundle.connectorTrackTrapRuntime?.dispose?.();
+    bundle.connectorTrackTrapVisualFactory?.dispose?.();
+    if (this.connectorTrackTrapRuntime === bundle.connectorTrackTrapRuntime) {
+      this.connectorTrackTrapRuntime = null;
+    }
     bundle.connectorLiftRuntime?.dispose?.();
     if (this.connectorLiftRuntime === bundle.connectorLiftRuntime) {
       this.connectorLiftRuntime = null;
@@ -2761,6 +2925,11 @@ export class Game {
           difficulty: expeditionDepth,
         });
         candidate = this._prepareStreamedDungeonFacade(candidate);
+        // A trapped connector is accepted only after the supplied OBJ/PNG is
+        // actually mounted on every plan-owned hazard. Do this while the
+        // intact overworld is still available for rollback and before durable
+        // expedition state is changed.
+        await this._prepareConnectorTrackTrapVisualAcceptanceForBundle(candidate);
         this.activeBossExpeditionSpec = null;
         let encounter = this._configureBossHuntEncounter(candidate.facade, {
           restartFromBeginning: persisted.status === 'active',
@@ -3060,6 +3229,10 @@ export class Game {
         // it, the catch path can still release every detached V1 resource.
         candidate = this._createLegacyDungeonWorldCandidate({ bossProfileId: profileId });
         candidate = this._prepareStreamedDungeonFacade(candidate);
+        // Loading/mounting the authored rotor is part of candidate acceptance,
+        // not a best-effort post-commit decoration. Failure leaves the camp
+        // and its closed door intact and never locks a Boss Hunt.
+        await this._prepareConnectorTrackTrapVisualAcceptanceForBundle(candidate);
         this.activeBossExpeditionSpec = null;
         const encounter = this._configureBossHuntEncounter(candidate.facade, { ignorePersistedActive: true });
         if (!encounter?.expeditionSpec) throw new Error('The selected boss encounter could not be configured.');
@@ -3568,6 +3741,25 @@ export class Game {
         ledgeEdges: Array.isArray(tile.ledgeEdges) ? [...tile.ledgeEdges] : [],
         platformGroupId: tile.platformGroupId ?? null,
         platformPurpose: tile.platformPurpose ?? null,
+        connectionId: tile.connectionId ?? tile.connectorId ?? null,
+        floorKey: String(
+          tile.floorKey
+            ?? `${Number(tile.x ?? 0)},${Number(tile.z ?? 0)}@y${Number(tile.elevation ?? 0).toFixed(3)}`,
+        ),
+        traversalLinks: (tile.traversalLinks ?? []).map((link) => ({
+          id: String(link.id ?? ''),
+          action: String(link.action ?? ''),
+          connectionId: link.connectionId
+            ?? tile.connectionId
+            ?? tile.connectorId
+            ?? null,
+          targetId: String(
+            link.targetId
+              ?? link.id?.replace?.(/:(?:forward|reverse)$/, '')
+              ?? '',
+          ),
+          toFloorKey: String(link.toFloorKey ?? ''),
+        })),
       }))
       : [];
     const solidZones = includeGeometry
@@ -3634,6 +3826,20 @@ export class Game {
       enemyIds: [...(encounter.enemyIds ?? [])],
     }));
     const activeWeapon = this.player?.getActiveArmWeapon?.() ?? null;
+    const activeWeaponState = this.combat?.getCurrentWeaponState?.() ?? null;
+    const projectileOrigin = this.player?.getProjectileOrigin?.()
+      ?? this.player?.getAttackOrigin?.()
+      ?? null;
+    const activePlayerProjectiles = (this.projectiles?.active ?? [])
+      .filter((projectile) => projectile?.owner === 'player')
+      .map((projectile) => ({
+        position: plainPosition(projectile.mesh?.position),
+        direction: plainPosition(projectile.direction),
+        visible: projectile.mesh?.visible === true,
+        attachedToScene: projectile.mesh?.parent === this.scene,
+        visualType: projectile.visualType ?? null,
+        distance: Number(projectile.distance ?? 0),
+      }));
     const enemies = (this.enemies ?? []).map((enemy) => ({
       id: enemy.id,
       encounterId: enemy.encounterId ?? null,
@@ -3667,6 +3873,114 @@ export class Game {
       active: trap.active !== false,
       position: plainPosition(trap.position),
     }));
+    const connectorLadders = (dungeon.ladders ?? []).map((ladder) => ({
+      id: String(ladder.id ?? ''),
+      connectionId: ladder.connectionId ?? null,
+      direction: ladder.direction ?? null,
+      bottomY: Number(ladder.bottomY ?? 0),
+      topY: Number(ladder.topY ?? 0),
+      bottomMountPosition: plainPosition(ladder.bottomMountPosition ?? ladder.bottomExit),
+      topMountPosition: plainPosition(ladder.topMountPosition ?? ladder.topExit),
+      bottomExit: plainPosition(ladder.bottomExit),
+      topExit: plainPosition(ladder.topExit),
+      mountRadius: Number(ladder.mountRadius ?? 0),
+    }));
+    const liftRuntimeById = new Map(
+      (this.getConnectorLiftDiagnostics?.().lifts ?? []).map((lift) => [lift.id, lift]),
+    );
+    const connectorLifts = (dungeon.connectorLifts ?? []).map((lift) => {
+      const runtime = liftRuntimeById.get(lift.id) ?? null;
+      return {
+        id: String(lift.id ?? ''),
+        connectionId: lift.connectionId ?? null,
+        direction: lift.direction ?? null,
+        center: plainPosition(lift.center),
+        sourceElevation: Number(lift.progressionSourceElevation ?? lift.initialElevation ?? 0),
+        destinationElevation: Number(lift.progressionDestinationElevation ?? 0),
+        bottomElevation: Number(lift.bottomElevation ?? 0),
+        topElevation: Number(lift.topElevation ?? 0),
+        currentElevation: Number(runtime?.currentElevation ?? lift.currentElevation ?? 0),
+        currentEndpoint: runtime?.currentEndpoint ?? null,
+        targetEndpoint: runtime?.targetEndpoint ?? null,
+        phase: runtime?.phase ?? lift.phase ?? null,
+        halfWidth: Number(lift.surface?.halfWidth ?? (Number(lift.platformWidthMeters ?? 0) * 0.5)),
+        halfDepth: Number(lift.surface?.halfDepth ?? (Number(lift.platformDepthMeters ?? 0) * 0.5)),
+        landingSills: (lift.landingSills ?? []).map((sill) => ({
+          id: String(sill.id ?? ''),
+          endpoint: sill.endpoint ?? null,
+          progressionRole: sill.progressionRole ?? null,
+          position: plainPosition(sill.center),
+          halfWidth: Number(sill.halfWidth ?? 0),
+          halfDepth: Number(sill.halfDepth ?? 0),
+          topY: Number(sill.topY ?? 0),
+          spanMeters: Number(sill.spanMeters ?? 0),
+          bridgeDepthMeters: Number(sill.bridgeDepthMeters ?? 0),
+          purpose: sill.purpose ?? null,
+        })),
+        controls: (lift.controls ?? []).map((control) => ({
+          id: String(control.id ?? ''),
+          endpoint: control.endpoint ?? null,
+          position: plainPosition(control.position),
+          interactionRadius: Number(control.interactionRadius ?? 0),
+        })),
+      };
+    });
+    const connectorTrackTraps = (dungeon.connectorTrackTraps ?? []).map((trap) => ({
+      id: String(trap.id ?? ''),
+      connectionId: trap.connectionId ?? null,
+      connectorVariantId: trap.connectorVariantId ?? null,
+      connectorDirection: trap.connectorDirection ?? null,
+      floorElevation: Number(trap.floorElevation ?? 0),
+      trackStart: plainPosition(trap.trackStart),
+      trackEnd: plainPosition(trap.trackEnd),
+      warningVolume: trap.warningVolume ? {
+        center: plainPosition(trap.warningVolume.center),
+        halfSize: plainPosition(trap.warningVolume.halfSize),
+      } : null,
+    }));
+    const connectorTrackTrapRuntime = this.getConnectorTrackTrapDiagnostics?.() ?? null;
+    const plainSocket = (socket) => socket ? {
+      id: socket.id ?? null,
+      roomId: socket.roomId ?? null,
+      role: socket.role ?? null,
+      x: Number(socket.x ?? 0),
+      y: Number(socket.y ?? socket.elevation ?? 0),
+      z: Number(socket.z ?? 0),
+      elevation: Number(socket.elevation ?? socket.y ?? 0),
+      facingX: Number(socket.facingX ?? 0),
+      facingZ: Number(socket.facingZ ?? 0),
+      floorKey: socket.floorKey ?? null,
+    } : null;
+    const plainEndpoint = (endpoint) => endpoint ? {
+      role: endpoint.role ?? null,
+      socketId: endpoint.socketId ?? null,
+      roomId: endpoint.roomId ?? null,
+      elevation: Number(endpoint.elevation ?? endpoint.position?.y ?? 0),
+      position: plainPosition(endpoint.position),
+    } : null;
+    const connectorRoutes = (dungeon.connectionPlans ?? []).map((plan) => ({
+      connectionId: String(plan.id ?? ''),
+      logicalConnectionId: plan.logicalConnectionId ?? null,
+      fromRoomId: plan.fromRoomId ?? null,
+      toRoomId: plan.toRoomId ?? null,
+      connectorType: plan.connectorType ?? null,
+      connectorVariantId: plan.connectorVariantId ?? null,
+      traversalKind: plan.connectorVariant?.traversalKind ?? 'service_gallery',
+      direction: plan.direction ?? 'level',
+      sourceElevation: Number(plan.sourceElevation ?? plan.elevation ?? 0),
+      destinationElevation: Number(plan.destinationElevation ?? plan.elevation ?? 0),
+      elevationDelta: Number(plan.elevationDelta ?? 0),
+      sourceSocket: plainSocket(plan.fromSocket),
+      destinationSocket: plainSocket(plan.toSocket),
+      higherEndpoint: plainEndpoint(plan.higherEndpoint),
+      lowerEndpoint: plainEndpoint(plan.lowerEndpoint),
+      path: includeGeometry
+        ? (plan.bridgePath ?? []).map((point) => ({
+          x: Number(point.x ?? 0),
+          z: Number(point.z ?? 0),
+        }))
+        : [],
+    }));
     const snapshot = {
       worldKind: this.worldKind,
       transitionState: this.transitionState,
@@ -3683,7 +3997,9 @@ export class Game {
         },
         jumpState: this.player?.jumpState ?? null,
         ledgeClinging: Boolean(this.player?.isLedgeClinging?.()),
+        ladderTraversal: this.player?.getLadderTraversalDiagnostics?.() ?? null,
         dead: Boolean(this.player?.dead),
+        projectileOrigin: plainPosition(projectileOrigin),
         movementBasis: {
           forward: plainPosition(cameraForwardVector),
           right: plainPosition(cameraRightVector),
@@ -3694,7 +4010,12 @@ export class Game {
         id: activeWeapon.id ?? null,
         type: activeWeapon.type ?? null,
         label: activeWeapon.name ?? activeWeapon.typeLabel ?? null,
+        energy: Number(activeWeaponState?.energy ?? 0),
+        maxEnergy: Number(activeWeaponState?.maxEnergy ?? 0),
+        weaponOutput: Number(activeWeaponState?.weaponOutput ?? 0),
+        maxWeaponOutput: Number(activeWeaponState?.maxWeaponOutput ?? 0),
       } : null,
+      activePlayerProjectiles,
       tileSize: Number(dungeon.tileSize ?? 2.8),
       floorTiles,
       solidZones,
@@ -3706,6 +4027,23 @@ export class Game {
       chests,
       mechanisms,
       traps,
+      connectorRoutes,
+      connectorLadders,
+      connectorLifts,
+      connectorTrackTraps,
+      connectorTrackTrapRuntime: connectorTrackTrapRuntime ? {
+        mounted: Boolean(connectorTrackTrapRuntime.mounted),
+        trapCount: Number(connectorTrackTrapRuntime.trapCount ?? 0),
+        visualAcceptancePassed: connectorTrackTrapRuntime.visualAcceptancePassed ?? null,
+        traps: (connectorTrackTrapRuntime.traps ?? []).map((trap) => ({
+          id: String(trap.id ?? ''),
+          currentPosition: plainPosition(trap.currentPosition),
+          distanceTravelledMeters: Number(trap.distanceTravelledMeters ?? 0),
+          visualReady: Boolean(trap.visualReady),
+          visualAttached: Boolean(trap.visualAttached),
+          damageEnabled: Boolean(trap.damageEnabled),
+        })),
+      } : null,
       keySeeker: controller.keySeeker ? {
         id: controller.keySeeker.id,
         activated: Boolean(controller.keySeeker.activated),
@@ -3722,7 +4060,14 @@ export class Game {
         kind: nearest.kind ?? null,
         label: nearest.label ?? null,
         targetId: nearest.target?.id ?? null,
-        targetPosition: plainPosition(nearest.target?.position),
+        endpoint: nearest.endpoint ?? nearest.target?.endpoint ?? null,
+        targetPosition: plainPosition(
+          nearest.target?.position
+            ?? (nearest.kind === 'ladder'
+              ? nearest.target?.[`${nearest.endpoint}MountPosition`]
+                ?? nearest.target?.[`${nearest.endpoint}Exit`]
+              : null),
+        ),
       } : null,
       lock: {
         targetId: lockTarget?.id ?? null,
@@ -4297,6 +4642,10 @@ export class Game {
       bossProfileId: this.getSelectedBossProfileId(),
     }).generate();
     dungeon.layoutSeed = this.dungeonLayoutSeed;
+    // Release asynchronous trap visuals and their shared OBJ resources while
+    // the old dungeon root is still intact. This prevents a late asset load
+    // from attaching to a root whose geometry has already been disposed.
+    this._replaceConnectorTrackTrapRuntimeForDungeon(null);
     for (const animator of previousDungeon?.npcAnimators ?? []) animator.dispose?.();
     previousDungeon?.group?.removeFromParent?.();
     this.dungeon = dungeon;
@@ -4330,6 +4679,7 @@ export class Game {
       this.activeWorldBundle.controller = this.dungeonController;
     }
     this._replaceConnectorLiftRuntimeForDungeon(dungeon);
+    this._replaceConnectorTrackTrapRuntimeForDungeon(dungeon);
     this.bossStageRuntime?.mount?.(this);
 
     this.player.root.position.copy(dungeon.playerStart);
@@ -6312,6 +6662,7 @@ export class Game {
     this.platformingPlatforms = [];
     this.dynamicPlatformingPlatforms = [];
     this.connectorLiftRuntime = null;
+    this.connectorTrackTrapRuntime = null;
     this.bossStageRuntime = null;
     this.platformingLedgeCandidates = [];
     this.debugLedgeTester = null;
@@ -8266,6 +8617,7 @@ export class Game {
         const movementBasis = this._getPlayerMovementBasis();
         this.bossStageRuntime?.prePlayerUpdate?.(gameplayDt, this);
         this.connectorLiftRuntime?.prePlayerUpdate?.(gameplayDt, this);
+        this.connectorTrackTrapRuntime?.prePlayerUpdate?.(gameplayDt, this);
         for (const enemy of this.enemies) {
           if (!enemy || enemy.dead || this._deferredEnemyRemovals?.has(enemy)) continue;
           enemy.prePlayerUpdate?.(gameplayDt, this);
@@ -8543,27 +8895,37 @@ export class Game {
     key.shadow.camera.bottom = -18;
     root.add(key);
 
-    const underlay = new THREE.Mesh(
-      new THREE.PlaneGeometry(this.arenaRadius * 2.5, this.arenaRadius * 2.5),
-      new THREE.MeshStandardMaterial({ color: 0x171b1d, roughness: 0.96, metalness: 0 }),
-    );
-    underlay.name = 'ruinVoidUnderlay';
-    underlay.rotation.x = -Math.PI / 2;
-    underlay.position.y = -0.09;
-    underlay.receiveShadow = true;
-    root.add(underlay);
-
-    const grid = new THREE.GridHelper(this.arenaRadius * 2.2, 64, 0x43515a, 0x283138);
-    grid.name = 'ruinConstructionGrid';
-    grid.position.y = 0.014;
-    root.add(grid);
-
     const dungeon = new DungeonGenerator({
       difficulty,
       random: createDungeonRandom(layoutSeed),
       bossProfileId: this._creatingBusterSandbox ? null : bossProfileId,
     }).generate();
     dungeon.layoutSeed = layoutSeed;
+
+    // The historical underlay was a world-sized opaque plane just below Y=0.
+    // It cuts through signed subterranean rooms and makes a downward ladder,
+    // lift, or slope appear to terminate in a false solid floor. Standard V1
+    // layouts are now enclosed by their authored room/connector shells, so no
+    // masking plane may sit between elevation bands. Keep the legacy backdrop
+    // only for dedicated specialized boss worlds whose authored staging still
+    // owns that presentation contract.
+    if (dungeon.dungeonKind === 'ascensionReliquary' || dungeon.specialEnvironment) {
+      const underlay = new THREE.Mesh(
+        new THREE.PlaneGeometry(this.arenaRadius * 2.5, this.arenaRadius * 2.5),
+        new THREE.MeshStandardMaterial({ color: 0x171b1d, roughness: 0.96, metalness: 0 }),
+      );
+      underlay.name = 'ruinVoidUnderlay';
+      underlay.rotation.x = -Math.PI / 2;
+      underlay.position.y = -0.09;
+      underlay.receiveShadow = true;
+      root.add(underlay);
+
+      const grid = new THREE.GridHelper(this.arenaRadius * 2.2, 64, 0x43515a, 0x283138);
+      grid.name = 'ruinConstructionGrid';
+      grid.position.y = 0.014;
+      root.add(grid);
+    }
+
     root.add(dungeon.group);
     return createLoadedWorldBundle({
       worldKind: 'dungeon',
@@ -8766,8 +9128,22 @@ export class Game {
     let support = null;
     for (const platform of this._getPlatformingSurfaces()) {
       const candidate = this._getPlatformFloorElevation(platform, position);
-      if (Number.isFinite(candidate) && (!support || candidate > support.elevation)) {
-        support = { surface: platform, elevation: candidate };
+      if (!Number.isFinite(candidate)) {
+        continue;
+      }
+      const verticalDistance = Math.abs(Number(position?.y ?? candidate) - candidate);
+      const dynamic = platform.dynamic === true;
+      if (!support
+        || verticalDistance < support.verticalDistance - 0.0001
+        || (Math.abs(verticalDistance - support.verticalDistance) <= 0.0001
+          && dynamic
+          && !support.dynamic)) {
+        support = {
+          surface: platform,
+          elevation: candidate,
+          verticalDistance,
+          dynamic,
+        };
       }
     }
     return support;
@@ -8803,13 +9179,23 @@ export class Game {
     if (!platform || platform.enabled === false || !position) {
       return false;
     }
-    if (platform.blocksBelow === false) {
-      return false;
-    }
 
     const insideX = Math.abs(position.x - platform.center.x) <= platform.halfWidth + margin;
     const insideZ = Math.abs(position.z - platform.center.z) <= platform.halfDepth + margin;
     const belowTop = position.y < platform.topY - 0.05;
+    if (platform.blocksBelow === false) {
+      const collisionThickness = Number(platform.collisionThicknessMeters);
+      if (!Number.isFinite(collisionThickness) || collisionThickness <= 0) {
+        return false;
+      }
+      const baseY = Number.isFinite(platform.baseY)
+        ? platform.baseY
+        : platform.topY - collisionThickness;
+      return insideX
+        && insideZ
+        && belowTop
+        && position.y > baseY + 0.05;
+    }
     return insideX && insideZ && belowTop;
   }
 

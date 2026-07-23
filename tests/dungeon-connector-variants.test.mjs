@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   DUNGEON_CONNECTOR_CLEARANCE,
+  DUNGEON_CONNECTOR_ELEVATION_POLICY,
   DUNGEON_CONNECTOR_VARIANT_IDS,
   DUNGEON_CONNECTOR_VARIANT_ORDER,
   assignDungeonConnectorVariants,
@@ -10,10 +11,11 @@ import {
   deriveDungeonConnectorSafeSpan,
   findLongestConnectorStraightRun,
   isDungeonConnectorVariantEligible,
+  planDungeonConnectorVariantAssignments,
   validateDungeonConnectorVariantAssignments,
 } from '../src/DungeonConnectorVariants.js';
 
-const makePath = (offsetZ = 0, length = 13) => Array.from(
+const makePath = (offsetZ = 0, length = 25) => Array.from(
   { length },
   (_, x) => ({ x, z: offsetZ }),
 );
@@ -36,7 +38,30 @@ const makePlan = (id, offsetZ, overrides = {}) => {
   };
 };
 
-test('connector assignment is deterministic, balanced, and does not consume a supplied RNG', () => {
+function makeExplicitAssignedPlan(plan, variantId, sourceElevation, destinationElevation) {
+  const direction = destinationElevation > sourceElevation ? 'ascending' : 'descending';
+  const assigned = {
+    ...structuredClone(plan),
+    elevation: sourceElevation,
+    sourceElevation,
+    destinationElevation,
+    elevationDelta: destinationElevation - sourceElevation,
+    direction,
+    fromSocket: { ...plan.fromSocket, elevation: sourceElevation, y: sourceElevation },
+    toSocket: { ...plan.toSocket, elevation: destinationElevation, y: destinationElevation },
+  };
+  assigned.connectorVariant = createDungeonConnectorVariantContract(assigned, variantId, {
+    sourceElevation,
+    destinationElevation,
+    direction,
+  });
+  assigned.connectorVariantId = variantId;
+  assigned.higherEndpoint = assigned.connectorVariant.higherEndpoint;
+  assigned.lowerEndpoint = assigned.connectorVariant.lowerEndpoint;
+  return assigned;
+}
+
+test('connector assignment is deterministic, bounded, and does not consume a supplied RNG', () => {
   const plans = Array.from({ length: 12 }, (_, index) => makePlan(`route-${index}`, index * 3));
   const snapshot = structuredClone(plans);
   let randomCalls = 0;
@@ -47,28 +72,104 @@ test('connector assignment is deterministic, balanced, and does not consume a su
   assert.deepEqual(first, second);
   assert.deepEqual(plans, snapshot, 'input plans must not be mutated');
   assert.equal(randomCalls, 0, 'variant assignment must not read the generator random stream');
-  assert.deepEqual(
-    new Set(first.map((plan) => plan.connectorVariantId)),
-    new Set(DUNGEON_CONNECTOR_VARIANT_ORDER),
-  );
+  const elevationPlans = first.filter((plan) => plan.connectorVariant?.elevationChange);
+  assert.ok(elevationPlans.length >= 3 && elevationPlans.length <= 5);
+  assert.deepEqual(new Set(elevationPlans.map((plan) => plan.connectorVariantId)), new Set([
+    DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT,
+  ]));
+  assert.deepEqual(new Set(elevationPlans.map((plan) => plan.direction)), new Set([
+    'ascending',
+    'descending',
+  ]));
+  assert.ok(first.some((plan) => (
+    plan.connectorVariantId === DUNGEON_CONNECTOR_VARIANT_IDS.SERVICE_GALLERY
+  )));
   assert.equal(validateDungeonConnectorVariantAssignments(plans, first).ok, true);
 });
 
-test('scarce real-layout spans always produce distinct elevation-changing connectors', () => {
+test('mandatory families stay on main-route edges while extra transfers prefer optional branches', () => {
+  const mainPlans = Array.from({ length: 5 }, (_, index) => makePlan(`main-${index}`, index * 4, {
+    fromRoomId: `main-room-${index}`,
+    toRoomId: `main-room-${index + 1}`,
+    requiredForProgression: true,
+    purpose: 'critical_route',
+  }));
+  const optionalPlans = [
+    makePlan('optional-a', 28, {
+      fromRoomId: 'main-room-1',
+      toRoomId: 'optional-room-a',
+      // V1 keeps this true as a physical-route invariant. Classification is
+      // the authoritative main/branch distinction for connector planning.
+      requiredForProgression: true,
+      purpose: 'optional_branch',
+      routeClassification: 'optional_branch',
+    }),
+    makePlan('optional-b', 32, {
+      fromRoomId: 'main-room-3',
+      toRoomId: 'optional-room-b',
+      requiredForProgression: true,
+      purpose: 'optional_branch',
+      routeClassification: 'optional_branch',
+    }),
+  ];
+  const plans = [...mainPlans, ...optionalPlans];
+  const result = planDungeonConnectorVariantAssignments(plans, {
+    elevationConnectorCount: 5,
+    initialRoomElevations: { 'main-room-0': 0 },
+  });
+  assert.equal(result.diagnostics.accepted, true, result.diagnostics.errors.join('\n'));
+  assert.equal(result.diagnostics.selectedElevationConnectorCount, 5);
+  assert.deepEqual(
+    new Set(result.diagnostics.optionalBranchElevationConnectorIds),
+    new Set(['optional-a', 'optional-b']),
+  );
+  assert.equal(result.diagnostics.mainRouteElevationConnectorIds.length, 3);
+
+  const elevationPlans = result.connectionPlans.filter((plan) => (
+    plan.connectorVariant?.elevationChange === true
+  ));
+  for (const variantId of [
+    DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT,
+  ]) {
+    assert.ok(elevationPlans.some((plan) => (
+      plan.connectorVariantId === variantId && plan.routeClassification !== 'optional_branch'
+    )), `${variantId} must be represented on the main route`);
+  }
+  assert.equal(validateDungeonConnectorVariantAssignments(plans, result.connectionPlans).ok, true);
+
+  const invalid = structuredClone(result.connectionPlans);
+  const slope = invalid.find((plan) => (
+    plan.connectorVariantId === DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE
+  ));
+  slope.requiredForProgression = false;
+  slope.purpose = 'optional_branch';
+  slope.routeClassification = 'optional_branch';
+  const invalidResult = validateDungeonConnectorVariantAssignments(plans, invalid);
+  assert.equal(invalidResult.ok, false);
+  assert.ok(invalidResult.errors.some((error) => (
+    error.includes('crested_slope_v1') && error.includes('main-route edge')
+  )));
+});
+
+test('scarce layouts are rejected rather than pretending to satisfy elevation coverage', () => {
   for (const count of [1, 2, 3]) {
     const plans = Array.from({ length: count }, (_, index) => (
       makePlan(`scarce-${count}-${index}`, index * 3)
     ));
-    const assigned = assignDungeonConnectorVariants(plans);
-    const variants = assigned.map((plan) => plan.connectorVariantId);
-    assert.equal(variants.length, count);
-    assert.equal(new Set(variants).size, count);
-    assert.equal(
-      variants.includes(DUNGEON_CONNECTOR_VARIANT_IDS.SERVICE_GALLERY),
-      false,
-      'a scarce safe span must add traversal variety rather than another flat hall',
-    );
-    assert.equal(validateDungeonConnectorVariantAssignments(plans, assigned).ok, true);
+    const result = planDungeonConnectorVariantAssignments(plans);
+    if (count < 3) {
+      assert.equal(result.diagnostics.accepted, false);
+      assert.ok(result.diagnostics.errors.some((error) => error.includes('at least 3')));
+      assert.equal(validateDungeonConnectorVariantAssignments(plans, result.connectionPlans).ok, false);
+    } else {
+      assert.equal(result.diagnostics.accepted, true, result.diagnostics.errors.join('\n'));
+      assert.equal(result.diagnostics.selectedElevationConnectorCount, 3);
+      assert.equal(validateDungeonConnectorVariantAssignments(plans, result.connectionPlans).ok, true);
+    }
   }
 });
 
@@ -86,8 +187,17 @@ test('assignment preserves every room endpoint and both authored paths', () => {
   for (let index = 0; index < plans.length; index += 1) {
     assert.deepEqual(assigned[index].fullPath, plans[index].fullPath);
     assert.deepEqual(assigned[index].bridgePath, plans[index].bridgePath);
-    assert.deepEqual(assigned[index].fromSocket, plans[index].fromSocket);
-    assert.deepEqual(assigned[index].toSocket, plans[index].toSocket);
+    for (const [resolved, original] of [
+      [assigned[index].fromSocket, plans[index].fromSocket],
+      [assigned[index].toSocket, plans[index].toSocket],
+    ]) {
+      assert.equal(resolved.id, original.id);
+      assert.equal(resolved.x, original.x);
+      assert.equal(resolved.z, original.z);
+      assert.equal(resolved.facingX, original.facingX);
+      assert.equal(resolved.facingZ, original.facingZ);
+      assert.equal(resolved.y, resolved.elevation);
+    }
     assert.notStrictEqual(assigned[index].fullPath, plans[index].fullPath);
     assert.notStrictEqual(assigned[index].fromSocket, plans[index].fromSocket);
     assert.equal(assigned[index].connectorVariant.preservesRoomGeometry, true);
@@ -136,6 +246,20 @@ test('variant spans exclude every authored room footprint and reserve two flat s
   }
 
   for (const variantId of DUNGEON_CONNECTOR_VARIANT_ORDER) {
+    if (variantId === DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE) {
+      assert.throws(
+        () => createDungeonConnectorVariantContract(plan, variantId),
+        /needs 13 exterior straight tiles/,
+      );
+      continue;
+    }
+    if (variantId === DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT) {
+      assert.throws(
+        () => createDungeonConnectorVariantContract(plan, variantId),
+        /needs 10 exterior straight tiles/,
+      );
+      continue;
+    }
     const contract = createDungeonConnectorVariantContract(plan, variantId);
     assert.deepEqual(contract.pathContract.selectedSafePath, safeSpan.selectedSafePath);
     assert.deepEqual(contract.pathContract.sourceFlatBufferPath, safeSpan.sourceFlatBufferPath);
@@ -199,20 +323,25 @@ test('elevation variants reserve a flat 3x3 elbow before a straight transfer beg
   );
 });
 
-test('only long, ground-level, interior V1 corridors receive variants', () => {
+test('only long interior V1 ground corridors receive variants regardless of absolute room elevation', () => {
   const eligible = makePlan('eligible', 0);
   const cases = [
     eligible,
     makePlan('short', 1, { bridgePath: makePath(1, 6) }),
     makePlan('upper', 2, { connectorType: 'upper_catwalk_bridge', level: 1, elevation: 4.05 }),
+    makePlan('elevated-ground', 5, { elevation: 14 }),
     makePlan('camp', 3, { fromRoomId: 'expeditionCamp' }),
     makePlan('disabled', 4, { allowConnectorVariant: false }),
   ];
   assert.equal(isDungeonConnectorVariantEligible(eligible), true);
-  assert.deepEqual(cases.map((plan) => isDungeonConnectorVariantEligible(plan)), [true, false, false, false, false]);
+  assert.deepEqual(cases.map((plan) => isDungeonConnectorVariantEligible(plan)), [true, false, false, true, false, false]);
   const assigned = assignDungeonConnectorVariants(cases);
   assert.ok(assigned[0].connectorVariant);
-  for (const plan of assigned.slice(1)) assert.equal(plan.connectorVariant, null);
+  assert.equal(assigned[1].connectorVariant, null);
+  assert.equal(assigned[2].connectorVariant, null);
+  assert.ok(assigned[3].connectorVariant);
+  assert.equal(assigned[4].connectorVariant, null);
+  assert.equal(assigned[5].connectorVariant, null);
 });
 
 test('longest-run detection handles an authored cardinal turn', () => {
@@ -229,16 +358,17 @@ test('longest-run detection handles an authored cardinal turn', () => {
   });
 });
 
-test('ladder contract owns aligned mounting, two unobstructed apertures, and clear landings', () => {
+test('ladder contract owns one signed 14 metre transfer with unobstructed landings', () => {
   const contract = createDungeonConnectorVariantContract(
     makePlan('ladder-route', 0),
     DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
   );
   assert.equal(Object.isFrozen(contract), true);
   assert.equal(contract.traversalKind, 'ladder');
-  assert.equal(contract.mechanisms.length, 2);
-  assert.equal(contract.apertures.length, 2);
-  assert.ok(contract.landings.length >= 6);
+  assert.equal(contract.mechanisms.length, 1);
+  assert.equal(contract.apertures.length, 1);
+  assert.ok(contract.landings.length >= 4);
+  assert.equal(contract.elevationDelta, 14);
   for (const ladder of contract.mechanisms) {
     assert.equal(ladder.animationId, 'climbingLadder');
     assert.equal(ladder.snapPlayerToLadderPlane, true);
@@ -268,20 +398,68 @@ test('automatic lift contract cannot strand a player waiting for a console', () 
   assert.equal(lift.automatic, true);
   assert.equal(lift.requiresConsole, false);
   assert.equal(lift.recallMode, 'automatic_return_after_dwell');
+  assert.equal(lift.requiresRecallControls, true);
   assert.equal(lift.carrySupportedPlayer, true);
   assert.equal(contract.sweptVolumes.length, 1);
-  assert.equal(contract.construction.removeCeilingAcrossSweptVolume, false);
-  assert.equal(contract.construction.shaftCeilingMode, 'enclosed_above_rider_clearance');
+  assert.equal(contract.construction.removeCeilingAcrossSweptVolume, true);
+  assert.equal(contract.construction.shaftCeilingMode, 'enclosed_above_upper_landing');
   assert.ok(contract.construction.minimumShaftCeilingClearanceMeters >= 3.6);
-  assert.ok(contract.apertures[0].widthMeters > lift.platformWidthMeters);
-  assert.ok(contract.apertures[0].depthMeters > lift.platformDepthMeters);
+  assert.equal(lift.topElevation - lift.bottomElevation, 14);
+  assert.equal(lift.platformWidthMeters, 8.4);
+  assert.equal(lift.platformDepthMeters, 8.4);
+  assert.equal(lift.shaftWidthMeters, 11.2);
+  assert.equal(lift.shaftDepthMeters, 11.2);
+  assert.equal(contract.apertures[0].widthMeters, 11.2);
+  assert.equal(contract.apertures[0].depthMeters, 11.2);
+  assert.equal(Object.isFrozen(contract.liftShaft), true);
+  assert.equal(Object.isFrozen(contract.liftShaft.center), true);
+  assert.equal(Object.isFrozen(contract.liftShaft.gridColumns), true);
+  assert.equal(Object.isFrozen(contract.landingSills), true);
+  assert.equal(contract.liftShaft.gridColumns.length, 16);
+  assert.equal(contract.liftShaft.endPathIndex - contract.liftShaft.startPathIndex, 3);
+  assert.deepEqual(
+    {
+      x: contract.apertures[0].center.x,
+      z: contract.apertures[0].center.z,
+    },
+    {
+      x: contract.liftShaft.center.x,
+      z: contract.liftShaft.center.z,
+    },
+  );
+  assert.deepEqual(
+    {
+      x: contract.sweptVolumes[0].center.x,
+      z: contract.sweptVolumes[0].center.z,
+    },
+    {
+      x: contract.liftShaft.center.x,
+      z: contract.liftShaft.center.z,
+    },
+  );
+  assert.equal(contract.landingSills.length, 2);
+  assert.deepEqual(new Set(contract.landingSills.map(({ endpoint }) => endpoint)), new Set([
+    'bottom',
+    'top',
+  ]));
+  for (const sill of contract.landingSills) {
+    assert.equal(Object.isFrozen(sill), true);
+    assert.equal(Object.isFrozen(sill.center), true);
+    assert.equal(Object.isFrozen(sill.supportPosts), true);
+    assert.equal(sill.blocksBelow, false);
+    assert.equal(sill.thicknessMeters, 0.28);
+    assert.equal(sill.supportPosts.length, 2);
+    assert.ok(sill.supportPosts.every((post) => (
+      Object.isFrozen(post)
+      && Object.isFrozen(post.center)
+      && Object.isFrozen(post.size)
+      && post.blocksPlayer === true
+    )));
+  }
+  assert.doesNotThrow(() => JSON.stringify(contract));
   assert.ok(lift.pathIndex >= contract.pathContract.selectedStraightRun.startIndex);
   assert.ok(lift.pathIndex <= contract.pathContract.selectedStraightRun.endIndex);
-  assert.ok(
-    lift.topElevation - lift.bottomElevation
-      <= contract.construction.slopedReturn.minimumRunTiles
-        * contract.construction.slopedReturn.maximumRisePerTileMeters,
-  );
+  assert.equal(contract.construction.provideSlopedReturnToBaseElevation, false);
 });
 
 test('slope and service contracts require V1 structures and safe continuous surfaces', () => {
@@ -292,8 +470,15 @@ test('slope and service contracts require V1 structures and safe continuous surf
   assert.equal(slope.construction.surfaceStyle, 'v1_tiled_industrial_ramp');
   assert.equal(slope.construction.noFloatingSlabs, true);
   assert.equal(slope.construction.continuousWithLandings, true);
-  assert.ok(slope.construction.ascent.maximumRisePerTileMeters <= 0.5);
-  assert.ok((slope.construction.ascent.minimumRunTiles * 2) + 1 <= findLongestConnectorStraightRun(plan.bridgePath).lengthTiles);
+  assert.equal(slope.construction.switchback, true);
+  assert.equal(slope.construction.flights.length, 2);
+  assert.equal(slope.construction.returnsToSourceElevation, false);
+  for (const flight of slope.construction.flights) {
+    assert.equal(flight.segmentCount, 13);
+    assert.equal(flight.widthTiles, 3);
+    assert.equal(flight.riseMeters, 7);
+    assert.equal(flight.risePerSegmentMeters, DUNGEON_CONNECTOR_CLEARANCE.maximumSlopeRisePerTileMeters);
+  }
   assert.equal(service.traversalKind, 'walk');
   assert.equal(service.construction.supportStyle, 'v1_catwalk_posts_and_cross_braces');
   assert.equal(service.construction.railingStyle, 'v1_industrial_railing');
@@ -337,6 +522,205 @@ test('assignment validation rejects narrow galleries and missing decorative arch
   const decorationResult = validateDungeonConnectorVariantAssignments(plans, undecorated);
   assert.equal(decorationResult.ok, false);
   assert.ok(decorationResult.errors.some((error) => error.includes('V1 decorative arch treatment')));
+});
+
+test('all elevation families expose mirrored ascending and descending endpoint contracts', () => {
+  for (const variantId of [
+    DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT,
+  ]) {
+    for (const [direction, destinationElevation] of [
+      ['ascending', 21],
+      ['descending', -7],
+    ]) {
+      const contract = createDungeonConnectorVariantContract(
+        makePlan(`${variantId}-${direction}`, 0),
+        variantId,
+        { sourceElevation: 7, destinationElevation, direction },
+      );
+      const expectedDelta = direction === 'ascending' ? 14 : -14;
+      assert.equal(contract.sourceElevation, 7);
+      assert.equal(contract.destinationElevation, destinationElevation);
+      assert.equal(contract.elevationDelta, expectedDelta);
+      assert.equal(contract.direction, direction);
+      assert.equal(contract.sourceEndpoint.y, 7);
+      assert.equal(contract.destinationEndpoint.y, destinationElevation);
+      assert.equal(contract.higherEndpoint.elevation, Math.max(7, destinationElevation));
+      assert.equal(contract.lowerEndpoint.elevation, Math.min(7, destinationElevation));
+      assert.deepEqual(
+        contract.pathContract.orderedSourceToDestinationPath,
+        makePlan('unused', 0).bridgePath,
+      );
+    }
+  }
+});
+
+test('service galleries are explicitly level and reject a nonzero destination delta', () => {
+  const plan = makePlan('level-service', 0);
+  const contract = createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.SERVICE_GALLERY,
+    { sourceElevation: -14, direction: 'level' },
+  );
+  assert.equal(contract.sourceElevation, -14);
+  assert.equal(contract.destinationElevation, -14);
+  assert.equal(contract.elevationDelta, 0);
+  assert.equal(contract.direction, 'level');
+  assert.equal(contract.higherEndpoint, null);
+  assert.equal(contract.lowerEndpoint, null);
+  assert.throws(() => createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.SERVICE_GALLERY,
+    { sourceElevation: 0, destinationElevation: 14 },
+  ), /zero elevation delta/);
+});
+
+test('planner returns immutable room elevations without mutating rooms or plans', () => {
+  const plans = Array.from({ length: 9 }, (_, index) => makePlan(`chain-${index}`, index * 3, {
+    fromRoomId: `room-${index}`,
+    toRoomId: `room-${index + 1}`,
+    requiredForProgression: true,
+  }));
+  const snapshot = structuredClone(plans);
+  const result = planDungeonConnectorVariantAssignments(plans, {
+    elevationConnectorCount: 5,
+    initialRoomElevations: { 'room-0': 0 },
+  });
+  assert.equal(result.diagnostics.accepted, true, result.diagnostics.errors.join('\n'));
+  assert.ok(result.diagnostics.selectedElevationConnectorCount >= 3);
+  assert.ok(result.diagnostics.selectedElevationConnectorCount <= 5);
+  assert.ok(result.diagnostics.verticalSpanMeters <= 56);
+  assert.equal(Object.isFrozen(result.roomElevations), true);
+  assert.deepEqual(plans, snapshot);
+
+  for (const plan of result.connectionPlans) {
+    assert.equal(plan.fromSocket.elevation, result.roomElevations[plan.fromRoomId]);
+    assert.equal(plan.toSocket.elevation, result.roomElevations[plan.toRoomId]);
+    if (plan.connectorVariantId === DUNGEON_CONNECTOR_VARIANT_IDS.SERVICE_GALLERY) {
+      assert.equal(plan.elevationDelta, 0);
+      assert.equal(plan.sourceElevation, plan.destinationElevation);
+    } else {
+      assert.equal(Math.abs(plan.elevationDelta), DUNGEON_CONNECTOR_ELEVATION_POLICY.transferElevationMeters);
+    }
+  }
+});
+
+test('planner rejects an impossible vertical span and root-path transfer budget', () => {
+  const plans = Array.from({ length: 6 }, (_, index) => makePlan(`bounded-${index}`, index * 3, {
+    fromRoomId: `bounded-room-${index}`,
+    toRoomId: `bounded-room-${index + 1}`,
+    requiredForProgression: true,
+  }));
+  const spanRejected = planDungeonConnectorVariantAssignments(plans, {
+    elevationConnectorCount: 3,
+    initialRoomElevations: { 'bounded-room-0': 0 },
+    maximumDungeonVerticalSpanMeters: 13,
+  });
+  assert.equal(spanRejected.diagnostics.accepted, false);
+  assert.ok(spanRejected.diagnostics.errors.some((error) => (
+    error.includes('vertical-span limits')
+  )));
+
+  const pathRejected = planDungeonConnectorVariantAssignments(plans, {
+    elevationConnectorCount: 3,
+    initialRoomElevations: { 'bounded-room-0': 0 },
+    maximumElevationTransfersPerRootPath: 2,
+  });
+  assert.equal(pathRejected.diagnostics.accepted, false);
+  assert.ok(pathRejected.diagnostics.errors.some((error) => (
+    error.includes('vertical-span limits')
+  )));
+});
+
+test('planner rejects a merged room whose level shortcut conflicts with three signed transfers', () => {
+  const plans = Array.from({ length: 3 }, (_, index) => makePlan(`merge-chain-${index}`, index * 3, {
+    fromRoomId: `merge-room-${index}`,
+    toRoomId: `merge-room-${index + 1}`,
+    requiredForProgression: true,
+  }));
+  const shortPath = makePath(18, 6);
+  plans.push(makePlan('merge-level-shortcut', 18, {
+    fromRoomId: 'merge-room-0',
+    toRoomId: 'merge-room-3',
+    fullPath: shortPath,
+    bridgePath: shortPath,
+    requiredForProgression: true,
+  }));
+
+  const result = planDungeonConnectorVariantAssignments(plans, {
+    elevationConnectorCount: 3,
+    initialRoomElevations: { 'merge-room-0': 0 },
+  });
+  assert.equal(result.diagnostics.accepted, false);
+  assert.ok(result.diagnostics.errors.some((error) => (
+    error.includes('No signed connector assignment')
+  )));
+});
+
+test('assignment validation independently enforces the 56m span and four-transfer path limits', () => {
+  const independent = Array.from({ length: 5 }, (_, index) => makePlan(`span-${index}`, index * 3, {
+    fromRoomId: `span-source-${index}`,
+    toRoomId: `span-destination-${index}`,
+  }));
+  const spanningAssignments = [
+    makeExplicitAssignedPlan(independent[0], DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE, 0, 14),
+    makeExplicitAssignedPlan(independent[1], DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY, 0, -14),
+    makeExplicitAssignedPlan(independent[2], DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT, 70, 84),
+    makeExplicitAssignedPlan(independent[3], DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY, 28, 42),
+    makeExplicitAssignedPlan(independent[4], DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY, 56, 42),
+  ];
+  const spanValidation = validateDungeonConnectorVariantAssignments(
+    independent,
+    spanningAssignments,
+  );
+  assert.equal(spanValidation.ok, false);
+  assert.ok(spanValidation.errors.some((error) => error.includes('56 metre')));
+  assert.equal(spanValidation.errors.some((error) => error.includes('root-to-leaf')), false);
+
+  const chain = Array.from({ length: 5 }, (_, index) => makePlan(`path-${index}`, index * 3, {
+    fromRoomId: `path-room-${index}`,
+    toRoomId: `path-room-${index + 1}`,
+  }));
+  const pathElevations = [0, 14, 28, 42, 56, 42];
+  const pathVariants = [
+    DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+  ];
+  const pathAssignments = chain.map((plan, index) => makeExplicitAssignedPlan(
+    plan,
+    pathVariants[index],
+    pathElevations[index],
+    pathElevations[index + 1],
+  ));
+  const pathValidation = validateDungeonConnectorVariantAssignments(chain, pathAssignments);
+  assert.equal(pathValidation.ok, false);
+  assert.ok(pathValidation.errors.some((error) => error.includes('root-to-leaf')));
+  assert.equal(pathValidation.errors.some((error) => error.includes('56 metre')), false);
+});
+
+test('parallel upper V1 routes keep their paired ground connection level', () => {
+  const plans = Array.from({ length: 6 }, (_, index) => makePlan(`parallel-${index}`, index * 3, {
+    fromRoomId: `parallel-room-${index}`,
+    toRoomId: `parallel-room-${index + 1}`,
+  }));
+  plans.push(makePlan('parallel-upper', 30, {
+    fromRoomId: 'parallel-room-2',
+    toRoomId: 'parallel-room-3',
+    connectorType: 'upper_catwalk_bridge',
+    level: 1,
+    elevation: 4.05,
+  }));
+  const result = planDungeonConnectorVariantAssignments(plans, { elevationConnectorCount: 3 });
+  const pairedGround = result.connectionPlans.find((plan) => plan.id === 'parallel-2');
+  const upper = result.connectionPlans.find((plan) => plan.id === 'parallel-upper');
+  assert.equal(pairedGround.connectorVariantId, DUNGEON_CONNECTOR_VARIANT_IDS.SERVICE_GALLERY);
+  assert.equal(pairedGround.elevationDelta, 0);
+  assert.equal(upper.connectorVariant, null);
+  assert.equal(upper.elevationDelta, 0);
 });
 
 test('contracts remain serializable and contain no renderer objects or predicates', () => {

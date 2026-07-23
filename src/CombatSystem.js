@@ -84,6 +84,22 @@ const BUSTER_ENERGY_PER_EXTRA_SHOT = 3;
 const BUSTER_MIN_BURST_SHOTS = 1;
 const BUSTER_DEFAULT_SHOT_COOLDOWN = 0.24;
 const WEAPON_OUTPUT_REGEN_DELAY_AFTER_FIRE = 0.5;
+
+export function clampWeaponOriginToPlayerHeight(origin, playerRootY, minimumLocalHeight) {
+  origin.y = Math.max(origin.y, playerRootY + minimumLocalHeight);
+  return origin;
+}
+
+export function resolveCombatSurfaceHeight(
+  position,
+  surfaceElevation,
+  localOffset = 0,
+  fallbackY = position.y,
+) {
+  const baseElevation = Number.isFinite(surfaceElevation) ? surfaceElevation : fallbackY;
+  return baseElevation + localOffset;
+}
+
 const BUSTER_DEFAULT_STATS = Object.freeze({
   attackDamage: 8,
   maxEnergy: BUSTER_BASE_ENERGY,
@@ -1611,7 +1627,7 @@ export class CombatSystem {
 
     const color = profile.color ?? 0xffd36f;
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-    origin.y = Math.max(origin.y, 0.95);
+    clampWeaponOriginToPlayerHeight(origin, player.root.position.y, 0.95);
     const launchRange = this._getDrillLaunchRange(profile);
     const targetPoint = player.root.position.clone().addScaledVector(tempDirection, launchRange);
     const damageRoll = this._rollPlayerDamage(profile);
@@ -4160,17 +4176,28 @@ export class CombatSystem {
     const element = getPlayerElement(player.stats, profile);
     const color = getElementColor(element, profile.color ?? 0xff9f43);
     const targetPoint = this._getClampedAimPoint(aimWorld, player.stats.attackRange + 0.8);
+    const targetSurfaceElevation = this.game.dungeonController?.getSurfaceElevationAt?.(targetPoint);
 
     preview.position.copy(targetPoint);
-    preview.position.y = 0.035;
+    preview.position.y = resolveCombatSurfaceHeight(
+      targetPoint,
+      targetSurfaceElevation,
+      0.035,
+      player.root.position.y,
+    );
     preview.scale.setScalar(radius);
     preview.material.color.set(color);
     preview.visible = true;
 
     tempStart.copy(player.getProjectileOrigin?.() ?? player.getAttackOrigin());
-    tempStart.y = Math.max(tempStart.y, 1.05);
+    clampWeaponOriginToPlayerHeight(tempStart, player.root.position.y, 1.05);
     tempEnd.copy(targetPoint);
-    tempEnd.y = 0.14;
+    tempEnd.y = resolveCombatSurfaceHeight(
+      targetPoint,
+      targetSurfaceElevation,
+      0.14,
+      player.root.position.y,
+    );
     tempFlat.copy(tempEnd).sub(player.root.position);
     tempFlat.y = 0;
 
@@ -4231,7 +4258,11 @@ export class CombatSystem {
     );
     ring.name = 'missileSalvoLockPulse';
     ring.position.copy(targetPosition);
-    ring.position.y = 0.08;
+    ring.position.y = resolveCombatSurfaceHeight(
+      targetPosition,
+      this.game.dungeonController?.getSurfaceElevationAt?.(targetPosition),
+      0.08,
+    );
     ring.rotation.x = -Math.PI / 2;
     this.game.scene.add(ring);
     this.game.timedEffects.push({ object: ring, life: 0.28, maxLife: 0.28, grow: true });
@@ -4437,7 +4468,12 @@ export class CombatSystem {
     const player = this.game.player;
     const color = profile.color ?? 0xbff5ff;
     const blastPosition = origin.clone();
-    blastPosition.y = 0.08;
+    blastPosition.y = resolveCombatSurfaceHeight(
+      origin,
+      this.game.dungeonController?.getSurfaceElevationAt?.(origin),
+      0.08,
+      player.root.position.y,
+    );
     const damageRoll = this._rollPlayerDamage(profile);
     const heatCurve = THREE.MathUtils.smoothstep(heat, 0, 1);
     const bothOverflow = options.reason === 'both';
@@ -4478,7 +4514,7 @@ export class CombatSystem {
     );
     ring.name = 'shiningLaserOverflowPulse';
     ring.position.copy(position);
-    ring.position.y = 0.075;
+    ring.position.y -= 0.005;
     ring.rotation.x = -Math.PI / 2;
     ring.scale.setScalar(radius);
     this.game.scene.add(ring);
@@ -4554,7 +4590,7 @@ export class CombatSystem {
     const color = profile.color ?? 0xffd36f;
     const targetPoint = player.root.position.clone().addScaledVector(tempDirection, range);
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-    origin.y = Math.max(origin.y, 0.9);
+    clampWeaponOriginToPlayerHeight(origin, player.root.position.y, 0.9);
     const outputPercent = this._getOutputPercent(state);
 
     this.drill.active = true;
@@ -4610,7 +4646,7 @@ export class CombatSystem {
     const width = profile.drillWidth ?? 0.5;
     const color = profile.color ?? 0xffd36f;
     const attackOrigin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-    attackOrigin.y = Math.max(attackOrigin.y, 0.9);
+    clampWeaponOriginToPlayerHeight(attackOrigin, player.root.position.y, 0.9);
     const candidates = this._getLineHitCandidates(attackOrigin, direction, range, width, {
       projectExposedPalm: true,
     });
@@ -4659,7 +4695,7 @@ export class CombatSystem {
   _railAttackDirection(direction, profile) {
     const player = this.game.player;
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-    origin.y = Math.max(origin.y, 1.05);
+    clampWeaponOriginToPlayerHeight(origin, player.root.position.y, 1.05);
     const range = player.stats.attackRange + (profile.railRangeBonus ?? 2.4);
     const color = profile.color ?? 0xcff9ff;
     const maxHits = Math.max(1, Math.round(player.stats.projectilePierce + (profile.pierceBonus ?? 0) + 1));
@@ -4858,7 +4894,7 @@ export class CombatSystem {
       state.weaponOutput = 0;
       state.cooldown = Math.max(state.cooldown, profile.outputVentDuration ?? 0.72);
       const ventOrigin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-      ventOrigin.y = Math.max(ventOrigin.y, 0.9);
+      clampWeaponOriginToPlayerHeight(ventOrigin, player.root.position.y, 0.9);
       this.game.addParticleBurst(ventOrigin, color, 12, 0.12);
     }
   }
@@ -4911,7 +4947,7 @@ export class CombatSystem {
     const range = player.stats.attackRange + 0.8;
     const primary = this._findChainPrimary(direction, aimWorld, range);
     const origin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-    origin.y = Math.max(origin.y, 1.05);
+    clampWeaponOriginToPlayerHeight(origin, player.root.position.y, 1.05);
     const color = profile.color ?? 0xa6f7ff;
 
     if (!primary) {
@@ -4975,7 +5011,7 @@ export class CombatSystem {
   _drillAttackDirection(direction, profile) {
     const player = this.game.player;
     const visualOrigin = player.getProjectileOrigin?.() ?? player.getAttackOrigin();
-    visualOrigin.y = Math.max(visualOrigin.y, 0.9);
+    clampWeaponOriginToPlayerHeight(visualOrigin, player.root.position.y, 0.9);
     const range = this._getDrillContactRange(profile);
     const width = profile.drillWidth ?? 0.42;
     const color = profile.color ?? 0xffd36f;

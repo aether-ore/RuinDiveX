@@ -6,6 +6,10 @@ import { DungeonConnectorLiftRuntime } from './DungeonConnectorLiftRuntime.js';
 import { DungeonConnectorTrapRuntime } from './DungeonConnectorTrapRuntime.js';
 import { DungeonConnectorTrapVisualFactory } from './DungeonConnectorTrapVisualFactory.js';
 import { DungeonGenerator } from './DungeonGenerator.js';
+import {
+  INDUSTRIAL_DUNGEON_FAMILY_ID,
+  resolveDungeonFamilyId,
+} from './DungeonFamilies.js';
 import { EnemySpawner } from './EnemySpawner.js';
 import {
   createEnemyIdAllocator,
@@ -67,7 +71,10 @@ import {
   getCombatTargetWorldPosition,
   getEnemyCombatTargets,
 } from './reaverbots/CombatTarget.js';
-import { rollReaverbotSalvageDrops } from './reaverbots/ReaverbotSalvageCatalog.js';
+import {
+  REAVERBOT_SALVAGE_MATERIALS,
+  rollReaverbotSalvageDrops,
+} from './reaverbots/ReaverbotSalvageCatalog.js';
 import {
   BOSS_EXPEDITION_SCHEMA_VERSION,
   DEFAULT_BOSS_PROFILE_ID,
@@ -115,7 +122,6 @@ const FLAMETHROWER_EFFECT_STALE_SECONDS = 0.12;
 const MAX_POOLED_HIT_EFFECTS = 48;
 const MAX_POOLED_DAMAGE_NUMBERS = 72;
 const MAX_SYNCHRONOUS_EXPLOSIONS = 8;
-const CAMERA_WALL_OCCLUSION_TARGET_HEIGHT = 1.25;
 const DUNGEON_RENDER_CULL_UPDATE_INTERVAL = 0.2;
 const DUNGEON_RENDER_CULL_HIDE_DISTANCE = 68;
 const DUNGEON_RENDER_CULL_SHOW_DISTANCE = 54;
@@ -127,6 +133,46 @@ const DUNGEON_RENDER_CULL_SHOW_DISTANCE = 54;
 const OVERWORLD_RENDER_CULL_HIDE_DISTANCE = 116;
 const OVERWORLD_RENDER_CULL_SHOW_DISTANCE = 104;
 const CAMERA_OCCLUSION_BIN_SIZE = 11.2;
+// Camera visibility is a world-wide playability rule. Authored content should
+// set cameraOcclusionSurface explicitly, but procedural and legacy architecture
+// still needs a safe semantic fallback so a missed room-specific flag cannot
+// leave the camera staring into a wall. Keep this focused on static surfaces;
+// actors, pickups, and effects are intentionally not inferred here.
+const CAMERA_OCCLUSION_ARCHITECTURE_NAME_PATTERN = /(?:wall|backdrop|retaining|partition|bulkhead|barrier|cavern|infill|floor|ceiling|deck|ramp|catwalk|platform|bridge|stair|previewcap)/i;
+const CAMERA_OCCLUSION_ARCHITECTURE_ROLE_PATTERN = /(?:wall|backdrop|retaining|partition|bulkhead|barrier|cavern|floor|ceiling|deck|ramp|catwalk|platform|bridge|stair|architectural)/i;
+const CAMERA_OCCLUSION_WALL_NAME_PATTERN = /(?:wall|backdrop|retaining|partition|bulkhead|barrier)/i;
+const CAMERA_OCCLUSION_WALL_ROLE_PATTERN = /(?:wall|backdrop|retaining|partition|bulkhead|barrier)/i;
+// A single hidden 2.8m wall bay is not a sufficient cutout when the camera is
+// embedded in, or immediately behind, a continuous wall run. Clear the struck
+// bay plus its immediate neighbours while keeping the cutout spatially bounded.
+const CAMERA_WALL_OCCLUSION_PROXIMITY = 3.4;
+// Ray-hit cutouts must cover more than a named wall bay. A camera outside the
+// enclosure can see the vertical sides of ceilings, ramps, and floor masses as
+// one continuous wall, so clear a two-bay radius around any architectural hit.
+const CAMERA_ARCHITECTURE_HIT_CUTOUT_RADIUS = 5.6;
+const CAMERA_OCCLUSION_FORWARD_MAX_DISTANCE = 24;
+const CAMERA_OCCLUSION_PLAYER_CLEARANCE = 0.4;
+// A supported floor can have a walkable horizontal top and still present a
+// several-metre vertical face to a lower camera. Treat that mass as an
+// occluder only while its height actually crosses the camera-to-player view
+// band. This preserves lower floors that are visible beneath the player.
+const CAMERA_OCCLUSION_SIGHTLINE_HEIGHT_CLEARANCE = 0.18;
+// Floors, ramps, and other architectural masses only participate in the
+// near-camera pass when the camera is actually contained by, or grazing, them.
+// This catches thick rock slabs that present as walls without hiding the floor
+// normally supporting the player.
+const CAMERA_ARCHITECTURE_CONTAINMENT_PROXIMITY = 0.24;
+const CAMERA_OCCLUSION_TARGET_PROBES = Object.freeze([
+  Object.freeze({ lateral: 0, height: 1.25 }),
+  Object.freeze({ lateral: -0.8, height: 1.25 }),
+  Object.freeze({ lateral: 0.8, height: 1.25 }),
+  Object.freeze({ lateral: 0, height: 2.15 }),
+]);
+const CAMERA_OCCLUSION_FALLBACK_MATERIAL = new THREE.MeshBasicMaterial({
+  name: 'cameraOcclusionFallbackMaterial',
+  visible: false,
+  side: THREE.DoubleSide,
+});
 const STREAMED_DUNGEON_DOOR_HEIGHT = 15.6;
 const DEBUG_LEDGE_CUBE_WIDTH = 3;
 const DEBUG_LEDGE_CUBE_DEPTH = 3;
@@ -170,6 +216,48 @@ const CUSTOM_BUSTER_ATTACK_META = Object.freeze({
   attackDomain: 'customBuster',
   suppressGenericOffense: true,
 });
+
+function getCameraOcclusionSemanticRole(object) {
+  return [
+    object.userData?.architectureRole,
+    object.userData?.obstacleKind,
+    object.userData?.collisionRole,
+    object.userData?.surfaceRole,
+  ].filter(Boolean).join(' ');
+}
+
+function getCameraOcclusionSurfaceClass(object, wallSurface = false) {
+  if (wallSurface) return 'wall';
+  const semantic = `${object?.name ?? ''} ${getCameraOcclusionSemanticRole(object)}`;
+  if (/(?:ceiling|roof|overhead)/i.test(semantic)) return 'ceiling';
+  if (/(?:floor|deck|platform|bridge|catwalk|ramp|stair|walkable)/i.test(semantic)) {
+    return 'walkable';
+  }
+  return 'architecture';
+}
+
+function isCameraOcclusionWallSurface(object) {
+  if (!object?.isMesh && !object?.isInstancedMesh) return false;
+  const semanticRole = getCameraOcclusionSemanticRole(object);
+  return object.userData?.cameraOcclusionWall === true
+    || CAMERA_OCCLUSION_WALL_NAME_PATTERN.test(object.name ?? '')
+    || CAMERA_OCCLUSION_WALL_ROLE_PATTERN.test(semanticRole);
+}
+
+function isCameraOcclusionArchitectureSurface(object) {
+  if (!object?.isMesh && !object?.isInstancedMesh) return false;
+  // A wall is never allowed to opt out. Legacy false/excluded flags remain
+  // meaningful for non-wall decoration only.
+  if (isCameraOcclusionWallSurface(object)) return true;
+  if (object.userData?.cameraOcclusionExcluded === true
+    || object.userData?.cameraOcclusionSurface === false) {
+    return false;
+  }
+  if (object.userData?.cameraOcclusionSurface === true) return true;
+  const semanticRole = getCameraOcclusionSemanticRole(object);
+  return CAMERA_OCCLUSION_ARCHITECTURE_NAME_PATTERN.test(object.name ?? '')
+    || CAMERA_OCCLUSION_ARCHITECTURE_ROLE_PATTERN.test(semanticRole);
+}
 
 // Renderer, camera, input, UI and durable Lab storage are host-owned. Everything
 // here is swapped as one disposable gameplay world for the Buster sandbox.
@@ -218,11 +306,19 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'debugSpawnedPlatformGroup',
   'cameraOcclusionEntries',
   'cameraOcclusionBins',
+  'cameraOcclusionWallProximityBins',
+  'cameraOcclusionProximityRecordByKey',
+  'cameraOcclusionWallProximityCandidateKeys',
+  'cameraOcclusionExpandedVerticalRecordKeys',
+  'cameraOcclusionExpandedSurfaceRecordKeys',
+  'cameraOcclusionForwardVerticalHits',
   'cameraOcclusionCandidateSet',
   'cameraOcclusionCandidateObjects',
   'cameraOcclusionHits',
   'cameraOcclusionOwnerByObject',
   'cameraOcclusionHiddenOwners',
+  'cameraOcclusionHiddenInstances',
+  'cameraOcclusionHiddenInstanceKeys',
   'cameraOcclusionOwnerBaseVisibility',
   'dungeonRenderCullGroups',
   'dungeonRenderCullAccumulator',
@@ -260,6 +356,15 @@ function readStartupWorldMode(roomPreview = null) {
     // Browser URL state is optional in isolated unit environments.
   }
   return 'overworld';
+}
+
+function readDungeonFamilySelection() {
+  try {
+    const requested = new URLSearchParams(globalThis.location?.search ?? '').get('dungeonFamily');
+    return resolveDungeonFamilyId(requested);
+  } catch {
+    return resolveDungeonFamilyId(null);
+  }
 }
 
 class OverworldRuntimeController {
@@ -338,7 +443,7 @@ class OverworldRuntimeController {
   }
 
   getObjectiveText() {
-    return 'Choose a Boss Hunt at the sealed ruin door';
+    return 'Choose a Boss Hunt or visit Roll';
   }
 
   getMinimapSnapshot() {
@@ -489,7 +594,11 @@ const tempVectorA = new THREE.Vector3();
 const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
+const tempVectorE = new THREE.Vector3();
+const tempVectorF = new THREE.Vector3();
 const tempMatrixA = new THREE.Matrix4();
+const tempCameraOcclusionViewProjection = new THREE.Matrix4();
+const tempCameraOcclusionFrustum = new THREE.Frustum();
 const tempColor = new THREE.Color();
 const tempFlameTransform = new THREE.Object3D();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
@@ -827,6 +936,9 @@ export class Game {
     this.combatDepthLevel = 1;
     this.animationPreview = this._readAnimationPreviewFromUrl();
     this.roomPreview = this._readRoomPreviewFromUrl();
+    const dungeonFamilySelection = readDungeonFamilySelection();
+    this.dungeonFamilyId = dungeonFamilySelection.dungeonFamilyId;
+    this.dungeonFamilyFallback = dungeonFamilySelection.fallback;
     this.startupWorldMode = readStartupWorldMode(this.roomPreview);
     this.usesStreamedWorldLifecycle = this.startupWorldMode === 'overworld';
     this.worldKind = this.startupWorldMode;
@@ -908,11 +1020,19 @@ export class Game {
     this.cameraOcclusionRaycaster = new THREE.Raycaster();
     this.cameraOcclusionEntries = [];
     this.cameraOcclusionBins = new Map();
+    this.cameraOcclusionWallProximityBins = new Map();
+    this.cameraOcclusionProximityRecordByKey = new Map();
+    this.cameraOcclusionWallProximityCandidateKeys = new Set();
+    this.cameraOcclusionExpandedVerticalRecordKeys = new Set();
+    this.cameraOcclusionExpandedSurfaceRecordKeys = new Set();
+    this.cameraOcclusionForwardVerticalHits = [];
     this.cameraOcclusionCandidateSet = new Set();
     this.cameraOcclusionCandidateObjects = [];
     this.cameraOcclusionHits = [];
     this.cameraOcclusionOwnerByObject = new WeakMap();
     this.cameraOcclusionHiddenOwners = new Set();
+    this.cameraOcclusionHiddenInstances = [];
+    this.cameraOcclusionHiddenInstanceKeys = new Set();
     this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
     this.dungeonRenderCullGroups = [];
     this.dungeonRenderCullAccumulator = 0;
@@ -1199,9 +1319,11 @@ export class Game {
     }[params.get('roomPreviewFacing')];
     return {
       roomId,
+      anchorId: params.get('roomPreviewAnchor'),
       level: levelParam !== null && Number.isFinite(levelValue) ? levelValue : null,
       facingX: facing?.x,
       facingZ: facing?.z,
+      facingExplicit: Boolean(facing),
     };
   }
 
@@ -1211,7 +1333,70 @@ export class Game {
     }
     const room = this.dungeon.rooms.find((candidate) => candidate.id === this.roomPreview.roomId);
     if (!room) {
+      const matchingConnections = this.dungeon.progression?.roomConnections?.filter((candidate) => (
+        candidate.connectorId === this.roomPreview.roomId
+      )) ?? [];
+      const connection = matchingConnections.find((candidate) => !candidate.doorId && !candidate.shortcut)
+        ?? matchingConnections[0];
+      if (connection) {
+        const fromRoom = this.dungeon.rooms.find((candidate) => candidate.id === connection.fromRoomId);
+        const toRoom = this.dungeon.rooms.find((candidate) => candidate.id === connection.toRoomId);
+        if (fromRoom && toRoom) {
+          const segmentStart = { x: fromRoom.x, z: fromRoom.z };
+          const segmentEnd = fromRoom.x !== toRoom.x && fromRoom.z !== toRoom.z
+            ? { x: toRoom.x, z: fromRoom.z }
+            : { x: toRoom.x, z: toRoom.z };
+          const deltaX = segmentEnd.x - segmentStart.x;
+          const deltaZ = segmentEnd.z - segmentStart.z;
+          const distance = Math.hypot(deltaX, deltaZ) || 1;
+          const facingX = deltaX / distance;
+          const facingZ = deltaZ / distance;
+          if (!Number.isFinite(this.roomPreview.facingX) || !Number.isFinite(this.roomPreview.facingZ)) {
+            this.roomPreview.facingX = facingX;
+            this.roomPreview.facingZ = facingZ;
+          }
+          return new THREE.Vector3(
+            ((segmentStart.x + segmentEnd.x) * 0.5 + facingX * 1.5) * this.dungeon.tileSize,
+            Number(
+              connection.routes?.[0]?.sourceElevation
+              ?? fromRoom.baseElevation
+              ?? 0,
+            ),
+            ((segmentStart.z + segmentEnd.z) * 0.5 + facingZ * 1.5) * this.dungeon.tileSize,
+          );
+        }
+      }
       return null;
+    }
+    const previewAnchor = this.roomPreview.anchorId
+      ? room.previewAnchors?.[this.roomPreview.anchorId]
+      : null;
+    if (Number.isFinite(previewAnchor?.x) && Number.isFinite(previewAnchor?.z)) {
+      if (!this.roomPreview.facingExplicit) {
+        this.roomPreview.facingX = previewAnchor.facingX ?? 0;
+        this.roomPreview.facingZ = previewAnchor.facingZ ?? -1;
+      }
+      return new THREE.Vector3(
+        previewAnchor.x * this.dungeon.tileSize,
+        previewAnchor.y ?? room.baseElevation ?? 0,
+        previewAnchor.z * this.dungeon.tileSize,
+      );
+    }
+    if (!Number.isFinite(this.roomPreview.level)
+      && Number.isFinite(room.previewPosition?.x)
+      && Number.isFinite(room.previewPosition?.z)) {
+      if (!this.roomPreview.facingExplicit && room.previewFacing) {
+        this.roomPreview.facingX = room.previewFacing.x;
+        this.roomPreview.facingZ = room.previewFacing.z;
+      } else if (!Number.isFinite(this.roomPreview.facingX) || !Number.isFinite(this.roomPreview.facingZ)) {
+        this.roomPreview.facingX = room.previewFacing?.x ?? 0;
+        this.roomPreview.facingZ = room.previewFacing?.z ?? -1;
+      }
+      return new THREE.Vector3(
+        room.previewPosition.x * this.dungeon.tileSize,
+        room.previewPosition.y ?? room.baseElevation ?? 0,
+        room.previewPosition.z * this.dungeon.tileSize,
+      );
     }
     const halfW = Math.floor(room.width / 2);
     const halfD = Math.floor(room.depth / 2);
@@ -1223,7 +1408,12 @@ export class Game {
           && Math.abs(tile.z - room.z) <= halfD
         )
       ))
-      .filter((tile) => tile.surface !== 'industrialRamp');
+      .filter((tile) => (
+        tile.surfaceRole !== 'ramp'
+          && tile.surfaceRole !== 'hazard-floor'
+          && tile.surface !== 'industrialRamp'
+          && tile.surface !== 'deepMagma'
+      ));
     const desiredLevel = this.roomPreview.level;
     candidates.sort((a, b) => {
       if (Number.isFinite(desiredLevel)) {
@@ -2016,6 +2206,7 @@ export class Game {
         seed: persistedExpedition.seed,
         depth: persistedExpedition.depth,
         bossProfileId: profileId,
+        dungeonFamilyId: persistedExpedition.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
         dungeonLayoutSeed: persistedExpedition.dungeonLayoutSeed
           ?? dungeon?.layoutSeed
           ?? this.dungeonLayoutSeed,
@@ -2039,6 +2230,7 @@ export class Game {
           seed: specSeed,
           depth: Math.max(1, Math.min(10, Math.round(this.ruinFloor ?? 1))),
           id: this._createBossExpeditionAttemptId(profileId),
+          dungeonFamilyId: dungeon?.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
         }),
         dungeonLayoutSeed: dungeon?.layoutSeed ?? this.dungeonLayoutSeed,
         seedLabel: specSeed,
@@ -3642,6 +3834,7 @@ export class Game {
       .map(([ownerId, kinds]) => [ownerId, [...kinds].sort()]));
     return {
       worldKind: this.worldKind,
+      dungeonFamilyId: this.activeWorldBundle?.facade?.dungeonFamilyId ?? null,
       transitionState: this.transitionState,
       activeRootId: this.activeWorldBundle?.root?.userData?.worldRootId
         ?? this.activeWorldBundle?.root?.uuid
@@ -3659,6 +3852,7 @@ export class Game {
       occlusion: {
         entryCount: this.cameraOcclusionEntries.length,
         hiddenOwnerCount: this.cameraOcclusionHiddenOwners.size,
+        hiddenInstanceCount: this.cameraOcclusionHiddenInstances.length,
         hiddenOwnerIds: [...this.cameraOcclusionHiddenOwners]
           .map((owner) => owner?.userData?.occlusionOwnerId ?? owner?.name ?? owner?.uuid ?? 'unknown')
           .sort(),
@@ -3858,6 +4052,10 @@ export class Game {
     const chests = (controller.chests ?? []).map((chest) => ({
       id: chest.id,
       guaranteedKeycardId: chest.guaranteedKeycardId ?? null,
+      rewardPartId: chest.rewardPartId ?? null,
+      rewardPersistenceKey: chest.rewardPersistenceKey ?? null,
+      rewardPending: Boolean(chest.rewardPending),
+      rewardClaimed: Boolean(chest.rewardClaimed),
       opened: Boolean(chest.opened),
       position: plainPosition(chest.position),
     }));
@@ -3965,6 +4163,10 @@ export class Game {
       toRoomId: plan.toRoomId ?? null,
       connectorType: plan.connectorType ?? null,
       connectorVariantId: plan.connectorVariantId ?? null,
+      ...(plan.connectorThemeId ? { connectorThemeId: plan.connectorThemeId } : {}),
+      ...(plan.connectorPresentation ? {
+        connectorPresentation: structuredClone(plan.connectorPresentation),
+      } : {}),
       traversalKind: plan.connectorVariant?.traversalKind ?? 'service_gallery',
       direction: plan.direction ?? 'level',
       sourceElevation: Number(plan.sourceElevation ?? plan.elevation ?? 0),
@@ -3983,6 +4185,11 @@ export class Game {
     }));
     const snapshot = {
       worldKind: this.worldKind,
+      dungeonFamilyId: dungeon.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
+      dungeonFamilyFallback: this.dungeonFamilyFallback
+        ? { ...this.dungeonFamilyFallback }
+        : null,
+      roomModuleIds: [...(dungeon.roomModuleIds ?? dungeon.rooms?.map(({ id }) => id) ?? [])],
       transitionState: this.transitionState,
       player: {
         position: playerPosition,
@@ -5043,6 +5250,48 @@ export class Game {
     if (!this.busterLabStorage) return;
     this.busterLabState = this.busterLabStorage.state;
     this.rollSalvageStorage = this.busterLabStorage.createRollSalvageStorage({ autosave: false });
+  }
+
+  claimAuthoredDungeonPart(partId, source = {}) {
+    const material = REAVERBOT_SALVAGE_MATERIALS[partId] ?? null;
+    if (!material) return Promise.resolve({ ok: false, reason: 'unknown-part' });
+    if (this.rollSalvageStorage?.hasDiscoveredPart?.(partId)) {
+      return Promise.resolve({ ok: true, claimed: false, alreadyClaimed: true, material });
+    }
+
+    const recoverySource = {
+      kind: 'authoredDungeonChest',
+      dungeonFamilyId: this.dungeon?.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
+      roomModuleId: this.dungeon?.roomModuleIds?.[0] ?? null,
+      ...source,
+    };
+    if (!this.busterLabStorage) {
+      const stored = this.rollSalvageStorage?.addPart?.(material, 1, recoverySource) ?? null;
+      return Promise.resolve({
+        ok: Boolean(stored),
+        claimed: Boolean(stored),
+        alreadyClaimed: false,
+        material,
+      });
+    }
+
+    return this._queueBusterStorageOperation(() => (
+      this.busterLabStorage.updateRollSalvageAsync((roll) => {
+        if (roll.hasDiscoveredPart(partId)) return { claimed: false, alreadyClaimed: true };
+        roll.addPart(material, 1, recoverySource);
+        return { claimed: true, alreadyClaimed: false };
+      })
+    )).then((committed) => {
+      if (!committed?.ok) return committed ?? { ok: false, reason: 'transaction-failed' };
+      this._refreshRollSalvageStorage();
+      this.ui?.renderInventory?.();
+      return {
+        ok: true,
+        claimed: true,
+        alreadyClaimed: false,
+        material,
+      };
+    });
   }
 
   _ensureMegaCalibrationState(state) {
@@ -6673,11 +6922,19 @@ export class Game {
     this.debugSpawnedPlatformGroup.name = 'busterSandboxDebugPlatforms';
     this.cameraOcclusionEntries = [];
     this.cameraOcclusionBins = new Map();
+    this.cameraOcclusionWallProximityBins = new Map();
+    this.cameraOcclusionProximityRecordByKey = new Map();
+    this.cameraOcclusionWallProximityCandidateKeys = new Set();
+    this.cameraOcclusionExpandedVerticalRecordKeys = new Set();
+    this.cameraOcclusionExpandedSurfaceRecordKeys = new Set();
+    this.cameraOcclusionForwardVerticalHits = [];
     this.cameraOcclusionCandidateSet = new Set();
     this.cameraOcclusionCandidateObjects = [];
     this.cameraOcclusionHits = [];
     this.cameraOcclusionOwnerByObject = new WeakMap();
     this.cameraOcclusionHiddenOwners = new Set();
+    this.cameraOcclusionHiddenInstances = [];
+    this.cameraOcclusionHiddenInstanceKeys = new Set();
     this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
     this.dungeonRenderCullGroups = [];
     this.dungeonRenderCullAccumulator = 0;
@@ -8874,7 +9131,13 @@ export class Game {
     bossProfileId = this.getSelectedBossProfileId(),
     layoutSeed = this.dungeonLayoutSeed,
     difficulty = this.ruinFloor,
+    dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
   } = {}) {
+    const dungeonFamilySelection = resolveDungeonFamilyId(dungeonFamilyId);
+    const resolvedDungeonFamilyId = dungeonFamilySelection.dungeonFamilyId;
+    if (dungeonFamilySelection.fallback) {
+      this.dungeonFamilyFallback ??= dungeonFamilySelection.fallback;
+    }
     const root = new THREE.Group();
     root.name = 'dungeonWorldRoot';
     root.userData.worldKind = 'dungeon';
@@ -8899,6 +9162,8 @@ export class Game {
       difficulty,
       random: createDungeonRandom(layoutSeed),
       bossProfileId: this._creatingBusterSandbox ? null : bossProfileId,
+      dungeonFamilyId: resolvedDungeonFamilyId,
+      roomPreviewId: this.roomPreview?.roomId ?? null,
     }).generate();
     dungeon.layoutSeed = layoutSeed;
 
@@ -8939,6 +9204,7 @@ export class Game {
       disposableResources: dungeon.disposableResources ?? [],
       planHash: `v1:${layoutSeed}:depth:${difficulty}:${bossProfileId ?? 'standard'}`,
       bossProfileId,
+      dungeonFamilyId: resolvedDungeonFamilyId,
       disposed: false,
     });
   }
@@ -8981,6 +9247,7 @@ export class Game {
       ? this._createOverworldWorldBundle()
       : this._createLegacyDungeonWorldCandidate({
         bossProfileId: this._creatingBusterSandbox ? null : this.getSelectedBossProfileId(),
+        dungeonFamilyId: this.dungeonFamilyId,
       });
     this._assignMountedWorldBundle(bundle);
     if (bundle.worldKind === 'dungeon') {
@@ -9133,8 +9400,16 @@ export class Game {
       }
       const verticalDistance = Math.abs(Number(position?.y ?? candidate) - candidate);
       const dynamic = platform.dynamic === true;
+      const reachableAuthoredStepUp = platform.authoredRoomSurface === true
+        && platform.surfaceRole === 'stair-tread'
+        && candidate >= Number(position?.y ?? candidate) - 0.08
+        && candidate <= Number(position?.y ?? candidate) + 0.5;
+      const replacesLowerBaseSupport = reachableAuthoredStepUp
+        && (!support?.reachableAuthoredStepUp || candidate > support.elevation + 0.0001);
       if (!support
-        || verticalDistance < support.verticalDistance - 0.0001
+        || replacesLowerBaseSupport
+        || (!support.reachableAuthoredStepUp
+          && verticalDistance < support.verticalDistance - 0.0001)
         || (Math.abs(verticalDistance - support.verticalDistance) <= 0.0001
           && dynamic
           && !support.dynamic)) {
@@ -9143,6 +9418,7 @@ export class Game {
           elevation: candidate,
           verticalDistance,
           dynamic,
+          reachableAuthoredStepUp,
         };
       }
     }
@@ -9805,7 +10081,47 @@ export class Game {
     );
   }
 
+  _restoreCameraOcclusionHiddenInstances() {
+    this.cameraOcclusionHiddenInstances ??= [];
+    this.cameraOcclusionHiddenInstanceKeys ??= new Set();
+    const touched = new Set();
+    for (const entry of this.cameraOcclusionHiddenInstances) {
+      if (!entry?.object?.setMatrixAt || !Number.isInteger(entry.instanceId)) continue;
+      entry.object.setMatrixAt(entry.instanceId, entry.matrix);
+      touched.add(entry.object);
+    }
+    for (const object of touched) {
+      object.instanceMatrix.needsUpdate = true;
+    }
+    this.cameraOcclusionHiddenInstances.length = 0;
+    this.cameraOcclusionHiddenInstanceKeys.clear();
+  }
+
+  _hideCameraOcclusionInstance(hit) {
+    this.cameraOcclusionHiddenInstances ??= [];
+    this.cameraOcclusionHiddenInstanceKeys ??= new Set();
+    if (!hit?.object?.isInstancedMesh
+      || hit.object.userData?.cameraOcclusionPerInstance !== true
+      || !Number.isInteger(hit.instanceId)) {
+      return false;
+    }
+    const key = `${hit.object.uuid}:${hit.instanceId}`;
+    if (this.cameraOcclusionHiddenInstanceKeys.has(key)) return true;
+    const originalMatrix = new THREE.Matrix4();
+    hit.object.getMatrixAt(hit.instanceId, originalMatrix);
+    this.cameraOcclusionHiddenInstances.push({
+      object: hit.object,
+      instanceId: hit.instanceId,
+      matrix: originalMatrix,
+    });
+    this.cameraOcclusionHiddenInstanceKeys.add(key);
+    hit.object.setMatrixAt(hit.instanceId, tempMatrixA.makeScale(0, 0, 0));
+    hit.object.instanceMatrix.needsUpdate = true;
+    return true;
+  }
+
   _collectCameraOcclusionWalls() {
+    this._restoreCameraOcclusionHiddenInstances();
     for (const owner of this.cameraOcclusionHiddenOwners) {
       owner.visible = this.cameraOcclusionOwnerBaseVisibility.get(owner) ?? true;
     }
@@ -9813,18 +10129,54 @@ export class Game {
     this.cameraOcclusionHiddenOwners.clear();
     this.cameraOcclusionEntries.length = 0;
     this.cameraOcclusionBins.clear();
+    this.cameraOcclusionWallProximityBins ??= new Map();
+    this.cameraOcclusionWallProximityBins.clear();
+    this.cameraOcclusionProximityRecordByKey ??= new Map();
+    this.cameraOcclusionProximityRecordByKey.clear();
+    this.cameraOcclusionWallProximityCandidateKeys ??= new Set();
+    this.cameraOcclusionWallProximityCandidateKeys.clear();
+    this.cameraOcclusionExpandedVerticalRecordKeys ??= new Set();
+    this.cameraOcclusionExpandedVerticalRecordKeys.clear();
+    this.cameraOcclusionExpandedSurfaceRecordKeys ??= new Set();
+    this.cameraOcclusionExpandedSurfaceRecordKeys.clear();
+    this.cameraOcclusionForwardVerticalHits ??= [];
+    this.cameraOcclusionForwardVerticalHits.length = 0;
     this.cameraOcclusionCandidateSet.clear();
     this.cameraOcclusionCandidateObjects.length = 0;
     this.cameraOcclusionHits.length = 0;
     this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
     this.cameraOcclusionOwnerByObject = new WeakMap();
 
+    const addWallProximityRecord = (record) => {
+      this.cameraOcclusionProximityRecordByKey.set(record.key, record);
+      const minBinX = Math.floor(record.bounds.min.x / CAMERA_OCCLUSION_BIN_SIZE);
+      const maxBinX = Math.floor(record.bounds.max.x / CAMERA_OCCLUSION_BIN_SIZE);
+      const minBinZ = Math.floor(record.bounds.min.z / CAMERA_OCCLUSION_BIN_SIZE);
+      const maxBinZ = Math.floor(record.bounds.max.z / CAMERA_OCCLUSION_BIN_SIZE);
+      for (let binX = minBinX; binX <= maxBinX; binX += 1) {
+        for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
+          const binKey = `${binX},${binZ}`;
+          const bin = this.cameraOcclusionWallProximityBins.get(binKey) ?? [];
+          bin.push(record);
+          this.cameraOcclusionWallProximityBins.set(binKey, bin);
+        }
+      }
+    };
+    const proximityInstanceMatrix = new THREE.Matrix4();
+    const proximityWorldMatrix = new THREE.Matrix4();
+    const proximityBounds = new THREE.Box3();
+
     const worldRoot = this.activeWorldBundle?.root ?? this.dungeon?.group;
+    // Authored sequences can mirror and translate a complete child room after
+    // that room has assembled its instanced walls. Occlusion collection runs
+    // before the first render, so those parent transforms are not guaranteed
+    // to have propagated into each child's matrixWorld yet. Resolve the full
+    // hierarchy now; otherwise the visible combined-map walls and their
+    // camera-occlusion bounds occupy different parts of the world.
+    worldRoot?.updateWorldMatrix?.(true, true);
     worldRoot?.traverse?.((object) => {
-      const isWall = object.name === 'dungeonBoundaryWall'
-        || object.name === 'factoryBasementRetainingWall'
-        || object.name === 'factoryBasementEntryBackdrop'
-        || object.name === 'factoryBasementEntryRevealWall';
+      const isArchitectureSurface = isCameraOcclusionArchitectureSurface(object);
+      const isWallSurface = isCameraOcclusionWallSurface(object);
       let declaredOwner = object;
       while (declaredOwner && declaredOwner !== worldRoot) {
         if (declaredOwner.userData?.cameraOcclusionOwner) break;
@@ -9832,8 +10184,49 @@ export class Game {
       }
       const hasDeclaredOwner = Boolean(declaredOwner?.userData?.cameraOcclusionOwner);
       if ((!object.isMesh && !object.isInstancedMesh)
-        || (!isWall && object.userData?.cameraOcclusionSurface !== true && !hasDeclaredOwner)) {
+        || (!isArchitectureSurface && !hasDeclaredOwner)) {
         return;
+      }
+      const inferredSurface = isArchitectureSurface
+        && object.userData?.cameraOcclusionSurface !== true;
+      if (isArchitectureSurface) {
+        object.userData.cameraOcclusionSurface = true;
+        object.userData.cameraOcclusionWall = isWallSurface;
+        object.userData.cameraOcclusionLabelSource ??= inferredSurface
+          ? 'shared-semantic-contract'
+          : 'authored';
+        object.userData.cameraOcclusionInferredSurface ||= inferredSurface;
+        // A stale room-authored exemption must never defeat the universal wall
+        // rule. Preserve the audit trail without leaving the wall exempt.
+        if (isWallSurface && object.userData.cameraOcclusionExcluded === true) {
+          object.userData.cameraOcclusionOverrodeExemption = true;
+          delete object.userData.cameraOcclusionExcluded;
+        }
+      }
+      // Instanced architectural batches must disappear one panel at a time.
+      // Hiding an entire wall batch recreates the same readability problem on
+      // the opposite side of a room and exposes large exterior voids.
+      if (inferredSurface
+        && object.isInstancedMesh
+        && object.userData.cameraOcclusionPerInstance !== false) {
+        object.userData.cameraOcclusionPerInstance = true;
+      }
+      // Three.js raycasting dereferences the material slot declared by every
+      // geometry group. A malformed mesh must not be able to terminate the
+      // global animation loop merely because the camera ray reaches it. Asset
+      // preflight still reports the bad slot; the runtime supplies a safe slot
+      // so a wall never becomes exempt from camera occlusion.
+      if (Array.isArray(object.material) && (object.geometry?.groups ?? []).some((group) => (
+        !object.material[group.materialIndex]
+      ))) {
+        const repairedMaterials = [...object.material];
+        const fallbackMaterial = repairedMaterials.find(Boolean)
+          ?? CAMERA_OCCLUSION_FALLBACK_MATERIAL;
+        for (const group of object.geometry?.groups ?? []) {
+          repairedMaterials[group.materialIndex] ??= fallbackMaterial;
+        }
+        object.material = repairedMaterials;
+        object.userData.cameraOcclusionMaterialGroupsRepaired = true;
       }
       let owner = hasDeclaredOwner ? declaredOwner : object;
       while (!hasDeclaredOwner && owner.parent && owner.parent !== worldRoot) {
@@ -9851,9 +10244,42 @@ export class Game {
         object,
         owner,
         bounds,
+        wallSurface: isWallSurface,
+        surfaceClass: getCameraOcclusionSurfaceClass(object, isWallSurface),
       };
       this.cameraOcclusionEntries.push(entry);
       this.cameraOcclusionOwnerByObject.set(object, owner);
+      // Keep exact per-instance bounds for every architectural surface. Walls
+      // use these records to form a small multi-panel visibility cutout; other
+      // surfaces use them only to recover from the camera entering solid mass.
+      if (isArchitectureSurface) {
+        if (object.isInstancedMesh
+          && object.userData?.cameraOcclusionPerInstance === true) {
+          object.geometry.computeBoundingBox?.();
+          const localBounds = object.geometry.boundingBox;
+          if (localBounds) {
+            for (let instanceId = 0; instanceId < object.count; instanceId += 1) {
+              object.getMatrixAt(instanceId, proximityInstanceMatrix);
+              proximityWorldMatrix.multiplyMatrices(object.matrixWorld, proximityInstanceMatrix);
+              addWallProximityRecord({
+                entry,
+                instanceId,
+                bounds: proximityBounds.copy(localBounds)
+                  .applyMatrix4(proximityWorldMatrix)
+                  .clone(),
+                key: `${object.uuid}:${instanceId}`,
+              });
+            }
+          }
+        } else {
+          addWallProximityRecord({
+            entry,
+            instanceId: null,
+            bounds,
+            key: object.uuid,
+          });
+        }
+      }
       const minBinX = Math.floor(bounds.min.x / CAMERA_OCCLUSION_BIN_SIZE);
       const maxBinX = Math.floor(bounds.max.x / CAMERA_OCCLUSION_BIN_SIZE);
       const minBinZ = Math.floor(bounds.min.z / CAMERA_OCCLUSION_BIN_SIZE);
@@ -9869,11 +10295,368 @@ export class Game {
     });
   }
 
+  _shouldHideCameraAdjacentBounds(
+    bounds,
+    cameraPosition,
+    cameraForward,
+    proximity = CAMERA_WALL_OCCLUSION_PROXIMITY,
+  ) {
+    bounds.clampPoint(cameraPosition, tempVectorF);
+    tempVectorD.copy(tempVectorF).sub(cameraPosition);
+    const distance = tempVectorD.length();
+    if (distance > proximity) return false;
+    return distance <= 0.001
+      || tempVectorD.multiplyScalar(1 / distance).dot(cameraForward) >= -0.2;
+  }
+
+  _hideCameraAdjacentWallRecord(record) {
+    const { entry } = record;
+    const object = entry.object;
+    if (Number.isInteger(record.instanceId)) {
+      this._hideCameraOcclusionInstance({ object, instanceId: record.instanceId });
+      return;
+    }
+    entry.owner.visible = false;
+    this.cameraOcclusionHiddenOwners.add(entry.owner);
+  }
+
+  _forEachCameraOcclusionProximityRecord(position, radius, callback) {
+    this.cameraOcclusionWallProximityCandidateKeys.clear();
+    const minBinX = Math.floor((position.x - radius) / CAMERA_OCCLUSION_BIN_SIZE);
+    const maxBinX = Math.floor((position.x + radius) / CAMERA_OCCLUSION_BIN_SIZE);
+    const minBinZ = Math.floor((position.z - radius) / CAMERA_OCCLUSION_BIN_SIZE);
+    const maxBinZ = Math.floor((position.z + radius) / CAMERA_OCCLUSION_BIN_SIZE);
+    for (let binX = minBinX; binX <= maxBinX; binX += 1) {
+      for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
+        for (const record of this.cameraOcclusionWallProximityBins.get(`${binX},${binZ}`) ?? []) {
+          if (this.cameraOcclusionWallProximityCandidateKeys.has(record.key)) continue;
+          this.cameraOcclusionWallProximityCandidateKeys.add(record.key);
+          callback(record);
+        }
+      }
+    }
+  }
+
+  _isCameraOcclusionVerticalRecord(record) {
+    if (record?.entry?.wallSurface) return true;
+    if (!record?.bounds) return false;
+    const width = record.bounds.max.x - record.bounds.min.x;
+    const height = record.bounds.max.y - record.bounds.min.y;
+    const depth = record.bounds.max.z - record.bounds.min.z;
+    return height >= 1.2
+      && Math.min(width, depth) <= 0.8
+      && height >= Math.min(width, depth) * 2;
+  }
+
+  _getCameraOcclusionProximityRecord(object, instanceId = null) {
+    if (!object) return null;
+    const key = Number.isInteger(instanceId)
+      ? `${object.uuid}:${instanceId}`
+      : object.uuid;
+    return this.cameraOcclusionProximityRecordByKey?.get(key) ?? null;
+  }
+
+  _expandCameraOcclusionVerticalRecord(record, worldPoint) {
+    if (!record || !worldPoint || !this._isCameraOcclusionVerticalRecord(record)) return false;
+    this.cameraOcclusionExpandedVerticalRecordKeys ??= new Set();
+    if (this.cameraOcclusionExpandedVerticalRecordKeys.has(record.key)) return false;
+    this.cameraOcclusionExpandedVerticalRecordKeys.add(record.key);
+    this._hideCameraOcclusionArchitectureNeighborhood(worldPoint, {
+      seedEntry: record.entry,
+      verticalOnly: true,
+    });
+    return true;
+  }
+
+  _expandCameraOcclusionSurfaceHit(record, worldPoint) {
+    if (!record || !worldPoint) return false;
+    if (this._isCameraOcclusionVerticalRecord(record)) {
+      return this._expandCameraOcclusionVerticalRecord(record, worldPoint);
+    }
+    this.cameraOcclusionExpandedSurfaceRecordKeys ??= new Set();
+    if (this.cameraOcclusionExpandedSurfaceRecordKeys.has(record.key)) return false;
+    this.cameraOcclusionExpandedSurfaceRecordKeys.add(record.key);
+    this._hideCameraOcclusionArchitectureNeighborhood(worldPoint, {
+      seedEntry: record.entry,
+    });
+    return true;
+  }
+
+  _hideCameraOcclusionArchitectureNeighborhood(worldPoint, {
+    radius = CAMERA_ARCHITECTURE_HIT_CUTOUT_RADIUS,
+    seedEntry = null,
+    verticalOnly = false,
+  } = {}) {
+    if (!worldPoint) return;
+    this._forEachCameraOcclusionProximityRecord(worldPoint, radius, (record) => {
+      if (record.bounds.distanceToPoint(worldPoint) > radius) return;
+      if (verticalOnly && !this._isCameraOcclusionVerticalRecord(record)) return;
+      if (seedEntry && !verticalOnly) {
+        const seedClass = seedEntry.surfaceClass ?? 'architecture';
+        if (record.entry.surfaceClass !== seedClass) return;
+      }
+      this._hideCameraAdjacentWallRecord(record);
+    });
+  }
+
+  _hideCameraAdjacentWalls() {
+    if (!this.camera?.position) return;
+    const cameraPosition = this.camera.position;
+    const cameraForward = tempVectorE.set(0, 0, -1)
+      .applyQuaternion(this.camera.quaternion)
+      .normalize();
+    const playerFocus = tempVectorA.copy(this.player.root.position);
+    playerFocus.y += 1.25;
+    const maximumInterveningDistance = Math.max(
+      0,
+      cameraPosition.distanceTo(playerFocus) - CAMERA_OCCLUSION_PLAYER_CLEARANCE,
+    );
+
+    let cameraContainingRecord = null;
+    this._forEachCameraOcclusionProximityRecord(
+      cameraPosition,
+      CAMERA_WALL_OCCLUSION_PROXIMITY,
+      (record) => {
+        const proximity = record.entry.wallSurface
+          ? CAMERA_WALL_OCCLUSION_PROXIMITY
+          : CAMERA_ARCHITECTURE_CONTAINMENT_PROXIMITY;
+        if (!this._shouldHideCameraAdjacentBounds(
+          record.bounds,
+          cameraPosition,
+          cameraForward,
+          proximity,
+        )) {
+          return;
+        }
+        const containmentDistance = record.bounds.distanceToPoint(cameraPosition);
+        // Proximity recovery may clear a wall surrounding or beside the camera,
+        // but it must not remove architecture whose nearest point is beyond the
+        // player. Such a wall is visible background, not an intervening panel.
+        if (containmentDistance > CAMERA_ARCHITECTURE_CONTAINMENT_PROXIMITY
+          && tempVectorD.copy(tempVectorF).sub(cameraPosition).dot(cameraForward)
+            > maximumInterveningDistance) {
+          return;
+        }
+        if (containmentDistance <= CAMERA_ARCHITECTURE_CONTAINMENT_PROXIMITY) {
+          if (!cameraContainingRecord
+            || (this._isCameraOcclusionVerticalRecord(record)
+              && !this._isCameraOcclusionVerticalRecord(cameraContainingRecord))) {
+            cameraContainingRecord = record;
+          }
+        }
+        this._hideCameraAdjacentWallRecord(record);
+      },
+    );
+    if (cameraContainingRecord) {
+      const verticalOnly = this._isCameraOcclusionVerticalRecord(cameraContainingRecord);
+      this._hideCameraOcclusionArchitectureNeighborhood(cameraPosition, {
+        seedEntry: cameraContainingRecord.entry,
+        verticalOnly,
+      });
+    }
+  }
+
+  _hideCameraInterveningVerticalArchitecture() {
+    if (!this.camera?.position || !this.player?.root?.position) return;
+    const cameraPosition = this.camera.position;
+    const playerFocus = tempVectorA.copy(this.player.root.position);
+    playerFocus.y += 1.25;
+    const cameraToPlayer = tempVectorB.copy(playerFocus).sub(cameraPosition);
+    const playerDistance = cameraToPlayer.length();
+    cameraToPlayer.y = 0;
+    const horizontalPlayerDistance = cameraToPlayer.length();
+    const maximumInterveningDistance = horizontalPlayerDistance
+      - CAMERA_OCCLUSION_PLAYER_CLEARANCE;
+    if (maximumInterveningDistance <= 0.08) return;
+    cameraToPlayer.multiplyScalar(1 / horizontalPlayerDistance);
+
+    // Occlusion runs before renderer.render(), so force the inverse view matrix
+    // to match the camera controller's position from this same frame.
+    this.camera.updateMatrixWorld(true);
+    tempCameraOcclusionViewProjection.multiplyMatrices(
+      this.camera.projectionMatrix,
+      this.camera.matrixWorldInverse,
+    );
+    tempCameraOcclusionFrustum.setFromProjectionMatrix(tempCameraOcclusionViewProjection);
+
+    const halfVerticalSpan = Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5))
+      * playerDistance;
+    const corridorRadius = Math.max(
+      CAMERA_OCCLUSION_BIN_SIZE,
+      halfVerticalSpan * Math.max(1, this.camera.aspect),
+    );
+    const minBinX = Math.floor(
+      (Math.min(cameraPosition.x, playerFocus.x) - corridorRadius) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const maxBinX = Math.floor(
+      (Math.max(cameraPosition.x, playerFocus.x) + corridorRadius) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const minBinZ = Math.floor(
+      (Math.min(cameraPosition.z, playerFocus.z) - corridorRadius) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const maxBinZ = Math.floor(
+      (Math.max(cameraPosition.z, playerFocus.z) + corridorRadius) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+
+    this.cameraOcclusionWallProximityCandidateKeys.clear();
+    for (let binX = minBinX; binX <= maxBinX; binX += 1) {
+      for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
+        for (const record of this.cameraOcclusionWallProximityBins.get(`${binX},${binZ}`) ?? []) {
+          if (this.cameraOcclusionWallProximityCandidateKeys.has(record.key)) continue;
+          this.cameraOcclusionWallProximityCandidateKeys.add(record.key);
+          if (!tempCameraOcclusionFrustum.intersectsBox(record.bounds)) {
+            continue;
+          }
+
+          record.bounds.getCenter(tempVectorD);
+          record.bounds.getSize(tempVectorF).multiplyScalar(0.5);
+          const centerDepth = tempVectorD.sub(cameraPosition).dot(cameraToPlayer);
+          const projectedHalfDepth = Math.abs(cameraToPlayer.x) * tempVectorF.x
+            + Math.abs(cameraToPlayer.z) * tempVectorF.z;
+          const nearDepth = centerDepth - projectedHalfDepth;
+          const farDepth = centerDepth + projectedHalfDepth;
+          if (farDepth < 0.04 || nearDepth > maximumInterveningDistance) continue;
+
+          if (!this._isCameraOcclusionVerticalRecord(record)) {
+            // Do not classify an entire mesh by its top face. Opening-room
+            // foundation tiles are walkable on top but their 3.2m-deep sides
+            // are vertical architecture. Hide one only when the view band
+            // passes through its vertical volume; a floor wholly below that
+            // band remains rendered.
+            const centerLateralDistance = Math.abs(
+              -cameraToPlayer.z * tempVectorD.x + cameraToPlayer.x * tempVectorD.z,
+            );
+            const projectedHalfLateral = Math.abs(cameraToPlayer.z) * tempVectorF.x
+              + Math.abs(cameraToPlayer.x) * tempVectorF.z;
+            if (centerLateralDistance - projectedHalfLateral
+              > CAMERA_ARCHITECTURE_HIT_CUTOUT_RADIUS) {
+              continue;
+            }
+            const clippedNearDepth = THREE.MathUtils.clamp(
+              nearDepth,
+              0.04,
+              maximumInterveningDistance,
+            );
+            const clippedFarDepth = THREE.MathUtils.clamp(
+              farDepth,
+              0.04,
+              maximumInterveningDistance,
+            );
+            const nearSightlineY = THREE.MathUtils.lerp(
+              cameraPosition.y,
+              playerFocus.y,
+              clippedNearDepth / horizontalPlayerDistance,
+            );
+            const farSightlineY = THREE.MathUtils.lerp(
+              cameraPosition.y,
+              playerFocus.y,
+              clippedFarDepth / horizontalPlayerDistance,
+            );
+            const minimumSightlineY = Math.min(nearSightlineY, farSightlineY)
+              - CAMERA_OCCLUSION_SIGHTLINE_HEIGHT_CLEARANCE;
+            const maximumSightlineY = Math.max(nearSightlineY, farSightlineY)
+              + CAMERA_OCCLUSION_SIGHTLINE_HEIGHT_CLEARANCE;
+            if (record.bounds.max.y < minimumSightlineY
+              || record.bounds.min.y > maximumSightlineY) {
+              continue;
+            }
+          }
+
+          // The complete visible architectural field in front of the player
+          // is the occluder. Do not reduce it to one ray hit or a fixed-radius
+          // hole. Height intersection keeps unrelated lower floors intact.
+          this._hideCameraAdjacentWallRecord(record);
+        }
+      }
+    }
+  }
+
+  _hideCameraForwardArchitecture() {
+    if (!this.camera?.position || !this.player?.root?.position) return;
+    const cameraPosition = this.camera.position;
+    const cameraForward = tempVectorE.set(0, 0, -1)
+      .applyQuaternion(this.camera.quaternion)
+      .normalize();
+    const playerFocus = tempVectorA.copy(this.player.root.position);
+    playerFocus.y += 1.25;
+    const playerDistance = cameraPosition.distanceTo(playerFocus);
+    const maxDistance = Math.min(
+      CAMERA_OCCLUSION_FORWARD_MAX_DISTANCE,
+      playerDistance - CAMERA_OCCLUSION_PLAYER_CLEARANCE,
+    );
+    if (maxDistance <= 0.08) return;
+
+    const forwardEnd = tempVectorF.copy(cameraPosition)
+      .addScaledVector(cameraForward, maxDistance);
+    const minBinX = Math.floor(
+      Math.min(cameraPosition.x, forwardEnd.x) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const maxBinX = Math.floor(
+      Math.max(cameraPosition.x, forwardEnd.x) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const minBinZ = Math.floor(
+      Math.min(cameraPosition.z, forwardEnd.z) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const maxBinZ = Math.floor(
+      Math.max(cameraPosition.z, forwardEnd.z) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+
+    this.cameraOcclusionRaycaster.set(cameraPosition, cameraForward);
+    this.cameraOcclusionWallProximityCandidateKeys.clear();
+    this.cameraOcclusionForwardVerticalHits ??= [];
+    let forwardHitCount = 0;
+    for (let binX = minBinX; binX <= maxBinX; binX += 1) {
+      for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
+        for (const record of this.cameraOcclusionWallProximityBins.get(`${binX},${binZ}`) ?? []) {
+          if (this.cameraOcclusionWallProximityCandidateKeys.has(record.key)) continue;
+          this.cameraOcclusionWallProximityCandidateKeys.add(record.key);
+          // This recovery ray exists for the wall-fills-the-frame failure. Do
+          // not let a walkable slab beneath the camera win the closest-hit test
+          // and disappear even though it does not block the player.
+          if (!this._isCameraOcclusionVerticalRecord(record)) continue;
+          const boundsHit = this.cameraOcclusionRaycaster.ray.intersectBox(
+            record.bounds,
+            tempVectorD,
+          );
+          if (!boundsHit) continue;
+          const hitDistance = boundsHit.distanceTo(cameraPosition);
+          if (hitDistance < 0.04
+            || hitDistance > maxDistance) {
+            continue;
+          }
+          const forwardHit = this.cameraOcclusionForwardVerticalHits[forwardHitCount] ?? {
+            record: null,
+            distance: 0,
+            point: new THREE.Vector3(),
+          };
+          forwardHit.record = record;
+          forwardHit.distance = hitDistance;
+          forwardHit.point.copy(boundsHit);
+          this.cameraOcclusionForwardVerticalHits[forwardHitCount] = forwardHit;
+          forwardHitCount += 1;
+        }
+      }
+    }
+    this.cameraOcclusionForwardVerticalHits.length = forwardHitCount;
+    this.cameraOcclusionForwardVerticalHits.sort((a, b) => a.distance - b.distance);
+    // Clear every vertical layer along the center view, not merely the closest
+    // panel. Distinct-record deduplication avoids repeated neighborhood work
+    // across probes without imposing any quantity limit on intervening walls.
+    for (const forwardHit of this.cameraOcclusionForwardVerticalHits) {
+      this._expandCameraOcclusionVerticalRecord(forwardHit.record, forwardHit.point);
+    }
+  }
+
   _updateCameraWallOcclusion() {
+    this._restoreCameraOcclusionHiddenInstances();
     for (const owner of this.cameraOcclusionHiddenOwners) {
       owner.visible = this.cameraOcclusionOwnerBaseVisibility.get(owner) ?? true;
     }
     this.cameraOcclusionHiddenOwners.clear();
+    this.cameraOcclusionExpandedVerticalRecordKeys ??= new Set();
+    this.cameraOcclusionExpandedVerticalRecordKeys.clear();
+    this.cameraOcclusionExpandedSurfaceRecordKeys ??= new Set();
+    this.cameraOcclusionExpandedSurfaceRecordKeys.clear();
 
     if (!this.cameraOcclusionEntries.length || !this.player?.root) {
       return;
@@ -9885,15 +10668,13 @@ export class Game {
     } else {
       tempVectorC.normalize();
     }
-    // Cast only through MegaMan's silhouette. Materials are made temporarily
-    // double-sided for these geometry tests so a camera outside a room can see
-    // the back face of an intervening wall without resorting to a proximity
-    // rule that hides nearby, unobstructing architecture.
-    const targetOffsets = [0, -0.42, 0.42];
-    for (const offset of targetOffsets) {
+    // Wall visibility is deliberately limited to the camera-to-player
+    // silhouette. Proximity, the camera-forward direction, and the rest of the
+    // viewport must not make unrelated architecture disappear.
+    for (const probe of CAMERA_OCCLUSION_TARGET_PROBES) {
       tempVectorA.copy(this.player.root.position)
-        .addScaledVector(tempVectorC, offset);
-      tempVectorA.y += CAMERA_WALL_OCCLUSION_TARGET_HEIGHT;
+        .addScaledVector(tempVectorC, probe.lateral);
+      tempVectorA.y += probe.height;
       tempVectorB.copy(tempVectorA).sub(this.camera.position);
       const distance = tempVectorB.length();
       if (distance <= 0.001) {
@@ -9915,7 +10696,8 @@ export class Game {
         for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
           for (const entry of this.cameraOcclusionBins.get(`${binX},${binZ}`) ?? []) {
             if (
-              this.cameraOcclusionCandidateSet.has(entry)
+              !entry.wallSurface
+              || this.cameraOcclusionCandidateSet.has(entry)
               || entry.bounds.max.x < minX
               || entry.bounds.min.x > maxX
               || entry.bounds.max.y < minY
@@ -9935,6 +10717,26 @@ export class Game {
       this.cameraOcclusionRaycaster.near = 0.08;
       this.cameraOcclusionRaycaster.far = Math.max(0.08, distance - 0.08);
       this.cameraOcclusionHits.length = 0;
+      // Thin, non-instanced wall meshes can be missed on a triangle edge even
+      // when their authored box crosses the viewing segment. Keep an exact
+      // segment/AABB fallback for walls only. Floors, ramps, supports, ceilings,
+      // and other nearby architecture never participate in this rule.
+      for (const entry of this.cameraOcclusionCandidateSet) {
+        if (!entry.wallSurface
+          || (entry.object.isInstancedMesh
+            && entry.object.userData?.cameraOcclusionPerInstance === true)) {
+          continue;
+        }
+        const boundsHit = this.cameraOcclusionRaycaster.ray.intersectBox(
+          entry.bounds,
+          tempVectorD,
+        );
+        if (boundsHit
+          && boundsHit.distanceTo(this.camera.position) <= this.cameraOcclusionRaycaster.far) {
+          entry.owner.visible = false;
+          this.cameraOcclusionHiddenOwners.add(entry.owner);
+        }
+      }
       const originalMaterialSides = new Map();
       for (const object of this.cameraOcclusionCandidateObjects) {
         const materials = Array.isArray(object.material) ? object.material : [object.material];
@@ -9958,6 +10760,12 @@ export class Game {
         }
       }
       for (const hit of hits) {
+        const hitRecord = this._getCameraOcclusionProximityRecord(
+          hit.object,
+          hit.instanceId,
+        );
+        if (!hitRecord?.entry?.wallSurface) continue;
+        if (this._hideCameraOcclusionInstance(hit)) continue;
         const owner = this.cameraOcclusionOwnerByObject.get(hit.object) ?? hit.object;
         owner.visible = false;
         this.cameraOcclusionHiddenOwners.add(owner);

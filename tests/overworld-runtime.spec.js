@@ -485,6 +485,21 @@ test.describe('voxel overworld acceptance', () => {
 
     const diagnostics = await readWorldDiagnostics(page);
     const root = await getActiveRootSummary(page);
+    const sealedRefinery = await page.evaluate(() => {
+      const game = window.game;
+      const refinery = game.activeWorldBundle?.root?.getObjectByName('highlandMagmaRefinery');
+      const descendants = [];
+      refinery?.traverse?.((object) => descendants.push(object));
+      return {
+        exists: Boolean(refinery),
+        sealed: refinery?.userData?.sealedLandmark === true,
+        stableInteractionId: refinery?.userData?.stableInteractionId ?? null,
+        hasInteraction: game.overworldPlan?.interactions?.some(({ id }) => id === 'highlandMagmaRefinery') ?? false,
+        closurePlateCount: descendants.filter(({ name }) => name?.startsWith('highlandRefineryClosurePlate:')).length,
+        smokeCount: descendants.filter(({ name }) => name?.startsWith('highlandRefinerySmoke:')).length,
+        warningLightIntensity: descendants.find(({ name }) => name === 'highlandRefineryPortalLight')?.intensity ?? null,
+      };
+    });
 
     expect(diagnostics).toMatchObject({
       worldKind: 'overworld',
@@ -514,6 +529,15 @@ test.describe('voxel overworld acceptance', () => {
     expect(root.rootName).toBe(OVERWORLD_OBJECT_NAMES.root);
     expect(root.rootId).toBe(diagnostics.activeRootId);
     expect(root.planHash).toBe(diagnostics.planHash);
+    expect(sealedRefinery).toMatchObject({
+      exists: true,
+      sealed: true,
+      stableInteractionId: null,
+      hasInteraction: false,
+      closurePlateCount: 2,
+      smokeCount: 0,
+      warningLightIntensity: 0.7,
+    });
     for (const objectName of [
       OVERWORLD_OBJECT_NAMES.door,
       OVERWORLD_OBJECT_NAMES.roll,
@@ -2474,18 +2498,12 @@ test.describe('voxel overworld acceptance', () => {
     expect(runtimeErrors).toEqual([]);
   });
 
-  test('camera occlusion follows the camera-to-player segment rather than player collision', async ({ page }) => {
+  test('camera occlusion leaves nearby non-wall overworld geometry visible', async ({ page }) => {
     test.setTimeout(300_000);
     const runtimeErrors = attachRuntimeErrorCapture(page);
     await page.goto('/');
     await waitForWorld(page, 'overworld');
     await waitForOverworldAssetsSettled(page);
-
-    const plan = await page.evaluate(() => structuredClone({
-      trails: window.game.overworldPlan.trails,
-    }));
-    const forestTrail = plan.trails.find(({ id }) => id === 'forest-cabin-loop')?.points;
-    expect(forestTrail, 'the authored forest trail must be available to the public-input route').toBeTruthy();
 
     // This is the same short-segment traversal used by the full no-jump trail
     // journey above. Long tank-control targets are inherently unstable because
@@ -2553,9 +2571,9 @@ test.describe('voxel overworld acceptance', () => {
     // intersecting the camera-to-player segment.
     expect((await readWorldDiagnostics(page)).occlusion.hiddenOwnerCount).toBe(0);
 
-    // Walk around the east side using ordinary movement. Once north of the
-    // mound, continued northward travel puts the follow camera inside the mound
-    // while the player's own capsule remains completely clear of it.
+    // Walk around the east side using ordinary movement. Even when continued
+    // travel puts the follow camera inside the mound, proximity to this
+    // non-wall mass must not make it disappear.
     // Keep the east-side waypoint beyond the Support Car's rotated collision
     // envelope. The previous x=9 route aimed directly through the vehicle and
     // could fail before the camera-occlusion behavior was exercised.
@@ -2568,46 +2586,19 @@ test.describe('voxel overworld acceptance', () => {
     ]);
     const crossing = await walkToWorldPosition(page, { x: 0, z: -16.5 }, {
       timeout: 15_000,
-      // The camera is deliberately intersecting the mound in this band, so
-      // its follow basis can rotate while the owner disappears. The sample is
-      // accepted by observed segment occlusion, not by touching an arbitrary
-      // sub-metre coordinate behind the mound.
+      // The camera deliberately intersects the mound in this band. This probes
+      // proximity without treating non-wall geometry as a wall occluder.
       stopDistance: 2.25,
       stepMilliseconds: 30,
       sampleOcclusion: true,
     });
-    expect(crossing.maximumHiddenOwnerCount).toBeGreaterThan(0);
+    expect(crossing.maximumHiddenOwnerCount).toBe(0);
 
     await walkAuthoredPath([{ x: 0, z: -27 }], { stopDistance: 1.3 });
     await expect.poll(async () => (
       (await readWorldDiagnostics(page)).occlusion.hiddenOwnerCount
     )).toBe(0);
 
-    // The highland connector terminates at the second forest-loop point, so
-    // this remains on authored walkable terrain and bypasses the mound without
-    // crossing Roll, the workbench, or the Support Car. Continue on the exact
-    // forest loop, then use the same short cabin-perimeter waypoints exercised
-    // by the all-landmarks no-jump journey. The physical assertion targets a
-    // trunk batch because normal camera/player heights are below the authored
-    // canopy bottoms; cabin and canopy participation are proven by the
-    // registration assertions above rather than a contrived intersection.
-    await walkAuthoredPath([forestTrail[1]]);
-    const forestSample = await walkAuthoredPath([
-      ...forestTrail.slice(2, 4),
-      { x: -43, z: -31 },
-      { x: -50, z: -31 },
-      { x: -50, z: -41 },
-      { x: -43, z: -41 },
-      { x: -43, z: -47 },
-    ], { sampleOcclusion: true });
-    expect(forestSample.sampledHiddenOwnerIds.some(
-      (ownerId) => ownerId.startsWith('forest-trunks-'),
-    )).toBe(true);
-
-    await walkAuthoredPath([{ x: -43, z: -52 }], { stopDistance: 1.3 });
-    await expect.poll(async () => (
-      (await readWorldDiagnostics(page)).occlusion.hiddenOwnerCount
-    )).toBe(0);
     expect(runtimeErrors).toEqual([]);
   });
 });

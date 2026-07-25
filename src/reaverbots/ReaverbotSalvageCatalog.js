@@ -121,6 +121,15 @@ export const WEAK_POINT_SALVAGE = Object.freeze({
  * keeps progression keystones tied to their authored hunt transaction.
  */
 export const REAVERBOT_BOSS_SALVAGE = Object.freeze({
+  perfectedCrucibleNozzle: material(
+    'perfectedCrucibleNozzle',
+    'Perfected Crucible Nozzle',
+    'weapon',
+    'keystone',
+    ['fire', 'pressure', 'ceramic', 'boss'],
+    ['flamethrower arms', 'thermal pressure systems'],
+    'The Crucible Warden\'s intact pressure-balanced ceramic nozzle and rotary fuel collar.',
+  ),
   perfectedCompressionGreave: material(
     'perfectedCompressionGreave',
     'Perfected Compression Greave',
@@ -129,6 +138,22 @@ export const REAVERBOT_BOSS_SALVAGE = Object.freeze({
     ['jump', 'compression', 'rocket', 'leg', 'mobility', 'boss'],
     ['Jump Springs', 'high-energy launch systems'],
     'The Ascension Engine\'s intact four-seal compression spine, twin booster manifold, and claw-bearing drive housing. Roll can turn its controlled release into a permanent jump upgrade.',
+  ),
+});
+
+/**
+ * Authored ruin recoveries share Roll's physical-parts inventory and recipe
+ * discovery UI, but never enter procedural Reaverbot drop source maps.
+ */
+export const AUTHORED_RUIN_SALVAGE = Object.freeze({
+  oldDrill: material(
+    'oldDrill',
+    'Old Drill',
+    'weapon',
+    'unique',
+    ['drill', 'excavation', 'ancient', 'utility-arm'],
+    ['Drill Arm'],
+    'A scarred Digger drill head built around a much older refinery coupling. Roll can rebuild its torque path into a ruin-clearing utility arm.',
   ),
 });
 
@@ -147,6 +172,7 @@ export const REAVERBOT_SALVAGE_MATERIALS = Object.freeze(Object.fromEntries(
     ...Object.values(REAVERBOT_SALVAGE_SOURCE_MAPS)
       .flatMap((sourceMap) => Object.values(sourceMap)),
     ...Object.values(REAVERBOT_BOSS_SALVAGE),
+    ...Object.values(AUTHORED_RUIN_SALVAGE),
   ]
     .map((entry) => [entry.id, entry]),
 ));

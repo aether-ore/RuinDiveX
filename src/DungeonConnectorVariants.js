@@ -1936,23 +1936,34 @@ function propagateRoomElevations(connectionPlans, deltaByConnectionId, initialRo
 function countMaximumElevationTransfersOnRootPath(connectionPlans, selectedIds) {
   const groundPlans = collectGroundPlans(connectionPlans);
   const destinationIds = new Set(groundPlans.map((plan) => plan.toRoomId));
-  const counts = new Map();
+  const roots = [...new Set(groundPlans
+    .map((plan) => plan.fromRoomId)
+    .filter((roomId) => !destinationIds.has(roomId)))];
+  const outgoing = new Map();
   for (const plan of groundPlans) {
-    if (!destinationIds.has(plan.fromRoomId)) counts.set(plan.fromRoomId, 0);
+    const entries = outgoing.get(plan.fromRoomId) ?? [];
+    entries.push(plan);
+    outgoing.set(plan.fromRoomId, entries);
   }
-  let changed = true;
-  for (let pass = 0; pass <= groundPlans.length && changed; pass += 1) {
-    changed = false;
-    for (const plan of groundPlans) {
-      if (!counts.has(plan.fromRoomId)) continue;
-      const nextCount = counts.get(plan.fromRoomId) + (selectedIds.has(plan.id) ? 1 : 0);
-      if (!counts.has(plan.toRoomId) || nextCount > counts.get(plan.toRoomId)) {
-        counts.set(plan.toRoomId, nextCount);
-        changed = true;
-      }
+  let maximum = 0;
+  const visit = (roomId, count, visitedRooms) => {
+    maximum = Math.max(maximum, count);
+    for (const plan of outgoing.get(roomId) ?? []) {
+      // Shortcuts and direct returns deliberately close loops. A root-to-leaf
+      // progression path is a simple room path; revisiting the hub must not
+      // inflate the transfer count once per cycle.
+      if (visitedRooms.has(plan.toRoomId)) continue;
+      const nextVisited = new Set(visitedRooms);
+      nextVisited.add(plan.toRoomId);
+      visit(
+        plan.toRoomId,
+        count + (selectedIds.has(plan.id) ? 1 : 0),
+        nextVisited,
+      );
     }
-  }
-  return counts.size ? Math.max(...counts.values()) : 0;
+  };
+  for (const root of roots) visit(root, 0, new Set([root]));
+  return maximum;
 }
 
 function chooseSignedElevationAssignments(connectionPlans, candidates, collectionHash, options) {

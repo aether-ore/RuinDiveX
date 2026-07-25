@@ -1,0 +1,671 @@
+{
+  "schema": "ruindivex-texture-provenance/v1",
+  "generator": "OpenAI image_gen built-in tool",
+  "masterDimensions": [
+    3072,
+    3072
+  ],
+  "grid": {
+    "columns": 3,
+    "rows": 3,
+    "cellSize": [
+      1024,
+      1024
+    ],
+    "gutters": 0
+  },
+  "macroScaleMeters": 2.8,
+  "unityAssetsReused": false,
+  "masters": [
+    {
+      "family": "walls",
+      "sourceRun": "exec-9c01cc8c-7f8a-40ca-a6fa-7f4057e2c6ac.png",
+      "sourceHash": "8301abced436a9939e3a287a0a5c1c7c05ac8c39a030a65d04b09028fa583be9",
+      "master": "assets/textures/magma-refinery/masters/walls-master.png",
+      "masterHash": "c0d805cc1111ba70889c3c5fbd622df9ea69978fcdf62af0420cdfd88a92bb6e",
+      "approval": "accepted-for-magma-refinery-v1",
+      "cells": [
+        {
+          "index": 0,
+          "row": 0,
+          "column": 0,
+          "label": "cell-01",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-01-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-01-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-01-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-01-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-01-emission.png"
+          }
+        },
+        {
+          "index": 1,
+          "row": 0,
+          "column": 1,
+          "label": "cell-02",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-02-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-02-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-02-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-02-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-02-emission.png"
+          }
+        },
+        {
+          "index": 2,
+          "row": 0,
+          "column": 2,
+          "label": "cell-03",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-03-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-03-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-03-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-03-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-03-emission.png"
+          }
+        },
+        {
+          "index": 3,
+          "row": 1,
+          "column": 0,
+          "label": "cell-04",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-04-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-04-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-04-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-04-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-04-emission.png"
+          }
+        },
+        {
+          "index": 4,
+          "row": 1,
+          "column": 1,
+          "label": "cell-05",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-05-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-05-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-05-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-05-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-05-emission.png"
+          }
+        },
+        {
+          "index": 5,
+          "row": 1,
+          "column": 2,
+          "label": "cell-06",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-06-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-06-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-06-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-06-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-06-emission.png"
+          }
+        },
+        {
+          "index": 6,
+          "row": 2,
+          "column": 0,
+          "label": "cell-07",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-07-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-07-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-07-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-07-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-07-emission.png"
+          }
+        },
+        {
+          "index": 7,
+          "row": 2,
+          "column": 1,
+          "label": "cell-08",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-08-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-08-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-08-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-08-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-08-emission.png"
+          }
+        },
+        {
+          "index": 8,
+          "row": 2,
+          "column": 2,
+          "label": "cell-09",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/walls/cell-09-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/walls/cell-09-height.png",
+            "normal": "assets/textures/magma-refinery/cells/walls/cell-09-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/walls/cell-09-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/walls/cell-09-emission.png"
+          }
+        }
+      ]
+    },
+    {
+      "family": "floors",
+      "sourceRun": "exec-0a16ef0c-d6ab-4880-a222-4611490e6c5a.png",
+      "sourceHash": "55092cd83927dbaceed758c326661f7c855c2f204ef8414dcf10bf3547715635",
+      "master": "assets/textures/magma-refinery/masters/floors-master.png",
+      "masterHash": "d166a5c6e4cff120c70af9496022c81a8bba8253938685e6929a17a98de4ff87",
+      "approval": "accepted-for-magma-refinery-v1",
+      "cells": [
+        {
+          "index": 0,
+          "row": 0,
+          "column": 0,
+          "label": "cell-01",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-01-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-01-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-01-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-01-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-01-emission.png"
+          }
+        },
+        {
+          "index": 1,
+          "row": 0,
+          "column": 1,
+          "label": "cell-02",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-02-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-02-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-02-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-02-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-02-emission.png"
+          }
+        },
+        {
+          "index": 2,
+          "row": 0,
+          "column": 2,
+          "label": "cell-03",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-03-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-03-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-03-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-03-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-03-emission.png"
+          }
+        },
+        {
+          "index": 3,
+          "row": 1,
+          "column": 0,
+          "label": "cell-04",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-04-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-04-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-04-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-04-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-04-emission.png"
+          }
+        },
+        {
+          "index": 4,
+          "row": 1,
+          "column": 1,
+          "label": "cell-05",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-05-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-05-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-05-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-05-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-05-emission.png"
+          }
+        },
+        {
+          "index": 5,
+          "row": 1,
+          "column": 2,
+          "label": "cell-06",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-06-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-06-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-06-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-06-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-06-emission.png"
+          }
+        },
+        {
+          "index": 6,
+          "row": 2,
+          "column": 0,
+          "label": "cell-07",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-07-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-07-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-07-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-07-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-07-emission.png"
+          }
+        },
+        {
+          "index": 7,
+          "row": 2,
+          "column": 1,
+          "label": "cell-08",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-08-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-08-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-08-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-08-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-08-emission.png"
+          }
+        },
+        {
+          "index": 8,
+          "row": 2,
+          "column": 2,
+          "label": "cell-09",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/floors/cell-09-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/floors/cell-09-height.png",
+            "normal": "assets/textures/magma-refinery/cells/floors/cell-09-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/floors/cell-09-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/floors/cell-09-emission.png"
+          }
+        }
+      ]
+    },
+    {
+      "family": "machinery",
+      "sourceRun": "exec-6871dd51-672d-4d30-93d5-dd7d780c29d1.png",
+      "sourceHash": "0ec7a951f1c00fe27f4e68f692f5521f3a247fa066c1c9b6b748b3187acc0ee7",
+      "master": "assets/textures/magma-refinery/masters/machinery-master.png",
+      "masterHash": "f9e6d755486387475398786e8aeb34fc34d8f4b6dc0a890f44163738dcf6c99c",
+      "approval": "accepted-for-magma-refinery-v1",
+      "cells": [
+        {
+          "index": 0,
+          "row": 0,
+          "column": 0,
+          "label": "cell-01",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-01-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-01-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-01-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-01-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-01-emission.png"
+          }
+        },
+        {
+          "index": 1,
+          "row": 0,
+          "column": 1,
+          "label": "cell-02",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-02-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-02-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-02-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-02-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-02-emission.png"
+          }
+        },
+        {
+          "index": 2,
+          "row": 0,
+          "column": 2,
+          "label": "cell-03",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-03-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-03-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-03-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-03-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-03-emission.png"
+          }
+        },
+        {
+          "index": 3,
+          "row": 1,
+          "column": 0,
+          "label": "cell-04",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-04-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-04-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-04-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-04-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-04-emission.png"
+          }
+        },
+        {
+          "index": 4,
+          "row": 1,
+          "column": 1,
+          "label": "cell-05",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-05-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-05-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-05-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-05-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-05-emission.png"
+          }
+        },
+        {
+          "index": 5,
+          "row": 1,
+          "column": 2,
+          "label": "cell-06",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-06-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-06-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-06-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-06-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-06-emission.png"
+          }
+        },
+        {
+          "index": 6,
+          "row": 2,
+          "column": 0,
+          "label": "cell-07",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-07-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-07-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-07-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-07-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-07-emission.png"
+          }
+        },
+        {
+          "index": 7,
+          "row": 2,
+          "column": 1,
+          "label": "cell-08",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-08-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-08-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-08-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-08-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-08-emission.png"
+          }
+        },
+        {
+          "index": 8,
+          "row": 2,
+          "column": 2,
+          "label": "cell-09",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/machinery/cell-09-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/machinery/cell-09-height.png",
+            "normal": "assets/textures/magma-refinery/cells/machinery/cell-09-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/machinery/cell-09-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/machinery/cell-09-emission.png"
+          }
+        }
+      ]
+    },
+    {
+      "family": "decals",
+      "sourceRun": "exec-78691e1b-b817-4716-bc78-36982de15be7.png",
+      "sourceHash": "cf2ad9b851afa6478453dd3ca89093b168d69d9d366984745c9a96ebf2e4fde2",
+      "master": "assets/textures/magma-refinery/masters/decals-master.png",
+      "masterHash": "8060130bd277e8c2d21b9ab721370af4597a76c2e8574b5046135f07500a0c50",
+      "approval": "accepted-for-magma-refinery-v1",
+      "cells": [
+        {
+          "index": 0,
+          "row": 0,
+          "column": 0,
+          "label": "cell-01",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-01-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-01-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-01-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-01-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-01-emission.png"
+          }
+        },
+        {
+          "index": 1,
+          "row": 0,
+          "column": 1,
+          "label": "cell-02",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-02-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-02-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-02-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-02-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-02-emission.png"
+          }
+        },
+        {
+          "index": 2,
+          "row": 0,
+          "column": 2,
+          "label": "cell-03",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-03-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-03-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-03-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-03-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-03-emission.png"
+          }
+        },
+        {
+          "index": 3,
+          "row": 1,
+          "column": 0,
+          "label": "cell-04",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-04-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-04-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-04-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-04-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-04-emission.png"
+          }
+        },
+        {
+          "index": 4,
+          "row": 1,
+          "column": 1,
+          "label": "cell-05",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-05-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-05-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-05-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-05-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-05-emission.png"
+          }
+        },
+        {
+          "index": 5,
+          "row": 1,
+          "column": 2,
+          "label": "cell-06",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-06-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-06-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-06-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-06-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-06-emission.png"
+          }
+        },
+        {
+          "index": 6,
+          "row": 2,
+          "column": 0,
+          "label": "cell-07",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-07-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-07-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-07-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-07-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-07-emission.png"
+          }
+        },
+        {
+          "index": 7,
+          "row": 2,
+          "column": 1,
+          "label": "cell-08",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-08-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-08-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-08-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-08-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-08-emission.png"
+          }
+        },
+        {
+          "index": 8,
+          "row": 2,
+          "column": 2,
+          "label": "cell-09",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/decals/cell-09-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/decals/cell-09-height.png",
+            "normal": "assets/textures/magma-refinery/cells/decals/cell-09-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/decals/cell-09-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/decals/cell-09-emission.png"
+          }
+        }
+      ]
+    },
+    {
+      "family": "seamless",
+      "sourceRun": "exec-ddca60d9-eafb-42b2-8be4-da6243585ca1.png",
+      "sourceHash": "9cf0a43ae17bc4d5728aa5a56510a4a078fdd34bc1881a8c78672a2ac24bfb07",
+      "master": "assets/textures/magma-refinery/masters/seamless-master.png",
+      "masterHash": "c659d5d743c9981eb7deb13159099fddfd102e58082e24e46f51a61b4caa4d5a",
+      "approval": "accepted-for-magma-refinery-v1",
+      "cells": [
+        {
+          "index": 0,
+          "row": 0,
+          "column": 0,
+          "label": "basalt",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/basalt-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/basalt-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/basalt-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/basalt-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/basalt-emission.png"
+          }
+        },
+        {
+          "index": 1,
+          "row": 0,
+          "column": 1,
+          "label": "magma",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/magma-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/magma-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/magma-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/magma-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/magma-emission.png"
+          }
+        },
+        {
+          "index": 2,
+          "row": 0,
+          "column": 2,
+          "label": "blackened-metal",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/blackened-metal-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/blackened-metal-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/blackened-metal-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/blackened-metal-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/blackened-metal-emission.png"
+          }
+        },
+        {
+          "index": 3,
+          "row": 1,
+          "column": 0,
+          "label": "ceramic",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/ceramic-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/ceramic-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/ceramic-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/ceramic-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/ceramic-emission.png"
+          }
+        },
+        {
+          "index": 4,
+          "row": 1,
+          "column": 1,
+          "label": "rails",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/rails-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/rails-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/rails-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/rails-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/rails-emission.png"
+          }
+        },
+        {
+          "index": 5,
+          "row": 1,
+          "column": 2,
+          "label": "chains",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/chains-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/chains-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/chains-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/chains-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/chains-emission.png"
+          }
+        },
+        {
+          "index": 6,
+          "row": 2,
+          "column": 0,
+          "label": "oxidized-bronze",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/oxidized-bronze-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/oxidized-bronze-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/oxidized-bronze-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/oxidized-bronze-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/oxidized-bronze-emission.png"
+          }
+        },
+        {
+          "index": 7,
+          "row": 2,
+          "column": 1,
+          "label": "service-grate",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/service-grate-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/service-grate-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/service-grate-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/service-grate-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/service-grate-emission.png"
+          }
+        },
+        {
+          "index": 8,
+          "row": 2,
+          "column": 2,
+          "label": "ash-mineral-stone",
+          "maps": {
+            "albedo": "assets/textures/magma-refinery/cells/seamless/ash-mineral-stone-albedo.png",
+            "height": "assets/textures/magma-refinery/cells/seamless/ash-mineral-stone-height.png",
+            "normal": "assets/textures/magma-refinery/cells/seamless/ash-mineral-stone-normal.png",
+            "roughness": "assets/textures/magma-refinery/cells/seamless/ash-mineral-stone-roughness.png",
+            "emission": "assets/textures/magma-refinery/cells/seamless/ash-mineral-stone-emission.png"
+          }
+        }
+      ]
+    }
+  ],
+  "conceptBoard": {
+    "sourceRun": "exec-eb319cf7-1a07-4bcd-aaed-f76ec1abf289.png",
+    "sourceHash": "8d64784d833e53f30cae807564a074aa21c6e138bb5a77cfb0d5ca4e4bf5424e",
+    "asset": "assets/concepts/magma-refinery/magma-refinery-concept-board.png",
+    "assetHash": "ee8faa808c77dd417204a44e1e965f52850c1cc3d00540d4bb62a2ce1a4174bb",
+    "approval": "visual-direction-reference"
+  },
+  "promptRecord": {
+    "walls": "Exact 3x3 no-gutter basalt refinery wall atlas; flat PBR scan; one 2.8 m bay per cell.",
+    "floors": "Exact 3x3 no-gutter refinery floor/deck atlas; orthographic top-down PBR scan.",
+    "machinery": "Exact 3x3 no-gutter furnace machinery atlas; flat PBR scan.",
+    "decals": "Exact 3x3 no-gutter excavation decal atlas; no readable language.",
+    "seamless": "Exact 3x3 no-gutter repeat atlas for basalt, magma, metal, ceramic, rails, chains and variants.",
+    "concept": "Ancient refinery visual-language board with shrine, wings, connectors and Warden."
+  }
+}

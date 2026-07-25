@@ -1,5 +1,41 @@
 import { expect, test } from '@playwright/test';
 
+test('legacy Magma URLs fall back to Industrial without resolving retired rooms or assets', async ({ page }) => {
+  const runtimeErrors = [];
+  const retiredAssetRequests = [];
+  page.on('pageerror', (error) => runtimeErrors.push(error.message));
+  page.on('request', (request) => {
+    if (/assets\/models\/magma-refinery\/(rooms|connectors)\//i.test(request.url())) {
+      retiredAssetRequests.push(request.url());
+    }
+  });
+
+  await page.goto('/?startupWorld=dungeon&dungeonFamily=magma-refinery-v1&roomPreview=ember-crown-shrine-concourse');
+  await page.waitForFunction(() => document.getElementById('game-container')?.dataset.browserTestReady === 'true');
+  const result = await page.evaluate(() => {
+    window.game.stop();
+    return {
+      family: window.game.dungeon?.dungeonFamilyId,
+      fallback: window.game.dungeonFamilyFallback,
+      previewResolved: Boolean(window.game._getRoomPreviewPosition()),
+      roomIds: window.game.dungeon?.rooms?.map(({ id }) => id) ?? [],
+      hasFacilityState: Object.prototype.hasOwnProperty.call(window.game.dungeon ?? {}, 'facilityState'),
+    };
+  });
+
+  expect(result.family).toBe('industrial-v1');
+  expect(result.fallback).toMatchObject({
+    requestedDungeonFamilyId: 'magma-refinery-v1',
+    dungeonFamilyId: 'industrial-v1',
+    reason: 'retired-dungeon-family',
+  });
+  expect(result.previewResolved).toBe(false);
+  expect(result.roomIds).not.toContain('ember-crown-shrine-concourse');
+  expect(result.hasFacilityState).toBe(false);
+  expect(retiredAssetRequests).toEqual([]);
+  expect(runtimeErrors).toEqual([]);
+});
+
 test('loads the ruin scene and performs a fixed-height jump', async ({ page }) => {
   const runtimeErrors = [];
   page.on('pageerror', (error) => runtimeErrors.push(error.message));
@@ -3501,7 +3537,7 @@ test('ramps and macro walls preserve tiled texel density without repeated slab s
   ))).toBe(true);
 });
 
-test('static dungeon chunks cull by distance while floor occlusion and important objects remain safe', async ({ page }) => {
+test('static dungeon chunks cull by distance while non-wall architecture remains visible', async ({ page }) => {
   test.setTimeout(45000);
   await page.goto('/?startupWorld=dungeon&roomPreview=trapRoom&roomPreviewLevel=0&roomPreviewFacing=north');
   await expect
@@ -3585,15 +3621,19 @@ test('static dungeon chunks cull by distance while floor occlusion and important
     for (let current = bridgeEntry.owner; current; current = current.parent) {
       current.visible = true;
     }
-    const bridgePosition = bridgeEntry.object.getWorldPosition(bridgeEntry.object.position.clone());
-    game.player.root.position.set(bridgePosition.x, dropSpaceElevation, bridgePosition.z - 4);
-    game.camera.position.set(bridgePosition.x, 2.5, bridgePosition.z + 4);
+    const bridgePosition = bridgeEntry.bounds.getCenter(bridgeEntry.object.position.clone());
+    game.player.root.position.copy(bridgePosition);
+    game.camera.position.copy(bridgePosition);
+    game.player.root.position.y = dropSpaceElevation;
+    game.camera.position.y = bridgeEntry.bounds.max.y + 2.5;
     game.camera.lookAt(game.player.root.position.x, -1.95, game.player.root.position.z);
     game.camera.updateMatrixWorld(true);
     game._updateCameraWallOcclusion();
+    game._updateCameraWallOcclusion();
     const bridgeFloorOccluded = bridgeEntry.owner.visible === false;
-    game.camera.position.set(bridgePosition.x, 2.5, bridgePosition.z + 4);
-    game.player.root.position.set(bridgePosition.x, 0, bridgePosition.z + 3);
+    game.player.root.position.copy(game.camera.position);
+    game.player.root.position.y = bridgeEntry.bounds.max.y;
+    game.player.root.position.z += 1;
     game.camera.lookAt(game.player.root.position.x, 1.25, game.player.root.position.z);
     game.camera.updateMatrixWorld(true);
     game._updateCameraWallOcclusion();
@@ -3682,6 +3722,19 @@ test('static dungeon chunks cull by distance while floor occlusion and important
       nearGroupRestored,
       farCullStats,
       cameraOcclusionEntryCount: game.cameraOcclusionEntries.length,
+      cameraOcclusionWallEntryCount: game.cameraOcclusionEntries.filter((entry) => (
+        entry.wallSurface === true
+      )).length,
+      unlabelledCameraOcclusionWallCount: game.cameraOcclusionEntries.filter((entry) => (
+        entry.wallSurface === true
+          && (entry.object.userData.cameraOcclusionSurface !== true
+            || entry.object.userData.cameraOcclusionWall !== true)
+      )).length,
+      exemptCameraOcclusionWallCount: game.cameraOcclusionEntries.filter((entry) => (
+        entry.wallSurface === true
+          && (entry.object.userData.cameraOcclusionExcluded === true
+            || entry.object.userData.cameraOcclusionSurface === false)
+      )).length,
       floorOcclusionEntryCount: game.cameraOcclusionEntries.filter((entry) => (
         entry.object.userData.floorTile
       )).length,
@@ -3720,11 +3773,14 @@ test('static dungeon chunks cull by distance while floor occlusion and important
   );
   expect(result.farCullStats.totalDrawObjectCount).toBe(result.cullDrawObjectCount);
   expect(result.cameraOcclusionEntryCount).toBeGreaterThan(1000);
+  expect(result.cameraOcclusionWallEntryCount).toBeGreaterThan(100);
+  expect(result.unlabelledCameraOcclusionWallCount).toBe(0);
+  expect(result.exemptCameraOcclusionWallCount).toBe(0);
   expect(result.floorOcclusionEntryCount).toBeGreaterThan(1000);
   expect(result.cameraOcclusionBinCount).toBeGreaterThan(50);
-  expect(result.bridgeFloorOccluded).toBe(true);
+  expect(result.bridgeFloorOccluded).toBe(false);
   expect(result.bridgeFloorRestored).toBe(true);
-  expect(result.architecturalMassOccluded).toBe(true);
+  expect(result.architecturalMassOccluded).toBe(false);
   expect(result.architecturalMassRestored).toBe(true);
 });
 

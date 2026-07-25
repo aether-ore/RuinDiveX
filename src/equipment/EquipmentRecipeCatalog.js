@@ -99,7 +99,7 @@ export const ARM_GEAR_RECIPE_CATALOG = deepFreeze({
     id: 'drillArm',
     outputKind: 'arm',
     scrapCost: 14,
-    partIds: ['torqueJawGear', 'heavyServoFrame', 'serratedClawGear'],
+    partIds: ['oldDrill', 'torqueJawGear', 'heavyServoFrame', 'serratedClawGear'],
   }),
   guardProjector: recipeDefinition({
     id: 'guardProjector',

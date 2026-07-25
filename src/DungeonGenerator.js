@@ -27,8 +27,25 @@ import {
   ASCENSION_RELIQUARY_SEGMENTS,
 } from './reaverbots/bosses/AscensionEngineContract.js';
 import { createVerticalTransitReliquary } from './reaverbots/bosses/VerticalTransitReliquary.js';
+import { INDUSTRIAL_DUNGEON_FAMILY_ID } from './DungeonFamilies.js';
+import {
+  DUNGEON_GENERATION_REQUIREMENTS,
+  INDUSTRIAL_DUNGEON_GENERATION_CONTRACT_ID,
+  validateDungeonGenerationSpatialContract,
+} from './DungeonGenerationRequirements.js';
+import {
+  MAGMA_REFINERY_OPENING_MODULE_ID,
+} from './magma/MagmaRefineryOpeningRoom.js';
+import {
+  generateMagmaRefineryOpeningSequence,
+  MAGMA_REFINERY_OPENING_SEQUENCE_ID,
+} from './magma/MagmaRefineryOpeningSequence.js';
+import {
+  generateMagmaLinearDiggerExcavationRoom,
+  MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID,
+} from './magma/MagmaLinearDiggerExcavationRoom.js';
 
-const DEFAULT_TILE_SIZE = 2.8;
+const DEFAULT_TILE_SIZE = DUNGEON_GENERATION_REQUIREMENTS.tileSizeMeters;
 const RUIN_TEXTURE_BASE_PATH = '/assets/textures/ruins/';
 const RUIN_ROOM_MODEL_BASE_PATH = '/assets/models/rooms/';
 const ALIEN_SERVER_ROOM_MODEL = `${RUIN_ROOM_MODEL_BASE_PATH}alien_server_room_example.glb`;
@@ -88,7 +105,7 @@ const RUIN_WALL_FACE_OFFSET = 0.006;
 const RUIN_WALL_TILE_OVERLAP = 0.014;
 const RUIN_WALL_TILE_ROWS = 6;
 const RUIN_CEILING_THICKNESS = 0.12;
-const RUIN_DOOR_HEIGHT = 4.8;
+const RUIN_DOOR_HEIGHT = DUNGEON_GENERATION_REQUIREMENTS.minimumDoorHeightMeters;
 const RUIN_DOOR_OPEN_Y = -5.3;
 const RUIN_FACTORY_ELEVATION = 1.05;
 const RUIN_OVERHEAD_GANTRY_HEIGHT = 4.35;
@@ -103,7 +120,7 @@ const RUIN_THIRD_FLOOR_ELEVATION = 7.25;
 const RUIN_RAIL_HEIGHT = 0.68;
 const RUIN_RAIL_THICKNESS = 0.07;
 const RUIN_RAMP_MAX_STEP = 0.55;
-const CONNECTOR_GALLERY_MIN_WIDTH_TILES = 3;
+const CONNECTOR_GALLERY_MIN_WIDTH_TILES = DUNGEON_GENERATION_REQUIREMENTS.minimumConnectorWidthTiles;
 const CONNECTOR_GALLERY_SIDE_TILES = Math.floor(CONNECTOR_GALLERY_MIN_WIDTH_TILES / 2);
 const CONNECTOR_GALLERY_ALCOVE_SIDE_TILES = 2;
 const CONNECTOR_DECORATIVE_ARCH_INTERVAL_TILES = 3;
@@ -723,11 +740,15 @@ export class DungeonGenerator {
     random = Math.random,
     difficulty = 1,
     bossProfileId = null,
+    dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
+    roomPreviewId = null,
   } = {}) {
     this.tileSize = tileSize;
     this.random = random;
     this.difficulty = Math.max(1, Math.trunc(difficulty) || 1);
     this.bossProfileId = typeof bossProfileId === 'string' ? bossProfileId : null;
+    this.roomPreviewId = typeof roomPreviewId === 'string' ? roomPreviewId : null;
+    this.dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID;
     this.textureLoader = new THREE.TextureLoader();
     this.fbxLoader = new FBXLoader();
     this.objLoader = new OBJLoader();
@@ -743,7 +764,32 @@ export class DungeonGenerator {
     return values[Math.floor(this.random() * values.length)];
   }
 
+  _connectorDecorativeArchWidthTiles() {
+    return CONNECTOR_DECORATIVE_ARCH_WIDTH_TILES;
+  }
+
+  _connectorMinimumClearWidthMeters() {
+    return CONNECTOR_MINIMUM_CLEAR_WIDTH_METERS;
+  }
+
   generate() {
+    if (this.roomPreviewId === MAGMA_REFINERY_OPENING_MODULE_ID
+      || this.roomPreviewId === MAGMA_REFINERY_OPENING_SEQUENCE_ID) {
+      return generateMagmaRefineryOpeningSequence({
+        random: this.random,
+        tileSize: this.tileSize,
+        textureLoader: this.textureLoader,
+      });
+    }
+
+    if (this.roomPreviewId === MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID) {
+      return generateMagmaLinearDiggerExcavationRoom({
+        random: this.random,
+        tileSize: this.tileSize,
+        textureLoader: this.textureLoader,
+      });
+    }
+
     if (this.bossProfileId === ASCENSION_ENGINE_PROFILE_ID) {
       return this._generateAscensionEngineDungeon();
     }
@@ -786,6 +832,12 @@ export class DungeonGenerator {
             this._loadRollWorkbenchTextures(workbench);
           }
         };
+        lastDungeon.dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID;
+        lastDungeon.roomModuleIds = lastDungeon.rooms.map((room) => room.id);
+        lastDungeon.spatialGenerationDiagnostics = validateDungeonGenerationSpatialContract(lastDungeon, {
+          contractId: INDUSTRIAL_DUNGEON_GENERATION_CONTRACT_ID,
+          requireSignedElevationComposition: false,
+        });
         return lastDungeon;
       }
     }
@@ -3981,7 +4033,7 @@ export class DungeonGenerator {
         connectorZone: section.connectorZone,
       }));
       plan.decorativeArchBeats = archCandidates.map((section, index) => {
-        const widthMeters = this.tileSize * CONNECTOR_DECORATIVE_ARCH_WIDTH_TILES;
+        const widthMeters = this.tileSize * this._connectorDecorativeArchWidthTiles();
         return finalizeConnectorDecorativeArchBeat({
           id: `${plan.id}:decorative-arch:${index}`,
           pathIndex: section.pathIndex ?? index * 3,
@@ -4821,8 +4873,9 @@ export class DungeonGenerator {
         }
         for (let index = 0; index < decorativeArchBeats.length; index += 1) {
           const beat = decorativeArchBeats[index];
-          if (beat.internalClearWidthMeters + 1e-6 < CONNECTOR_MINIMUM_CLEAR_WIDTH_METERS) {
-            errors.push(`${beat.id} narrows the gallery below ${CONNECTOR_MINIMUM_CLEAR_WIDTH_METERS}m.`);
+          const minimumClearWidth = this._connectorMinimumClearWidthMeters();
+          if (beat.internalClearWidthMeters + 1e-6 < minimumClearWidth) {
+            errors.push(`${beat.id} narrows the gallery below ${minimumClearWidth}m.`);
           }
           if (beat.clearHeightMeters + 1e-6 < PLAYER_TRAVERSAL_ENVELOPE.headClearance
             || beat.minimumLaneHeadroomMeters + 1e-6
@@ -5135,8 +5188,9 @@ export class DungeonGenerator {
         if (previous && beat.pathIndex - previous.pathIndex > maximumSpacing) {
           errors.push(`${plan.id} leaves more than ${maximumSpacing} tiles between decorative arches.`);
         }
-        if (beat.internalClearWidthMeters + 1e-6 < CONNECTOR_MINIMUM_CLEAR_WIDTH_METERS) {
-          errors.push(`${beat.id} narrows the gallery below ${CONNECTOR_MINIMUM_CLEAR_WIDTH_METERS}m.`);
+        const minimumClearWidth = this._connectorMinimumClearWidthMeters();
+        if (beat.internalClearWidthMeters + 1e-6 < minimumClearWidth) {
+          errors.push(`${beat.id} narrows the gallery below ${minimumClearWidth}m.`);
         }
         if (beat.clearHeightMeters + 1e-6 < PLAYER_TRAVERSAL_ENVELOPE.headClearance) {
           errors.push(`${beat.id} lacks player headroom at elevation ${beat.floorElevation}.`);
@@ -5538,7 +5592,7 @@ export class DungeonGenerator {
         const section = crossSections.find((crossSection) => crossSection.pathIndex === pathIndex)
           ?.sections?.[0];
         const direction = section?.direction ?? getCardinalDirections(path, pathIndex)[0] ?? { x: 0, z: 1 };
-        const widthMeters = this.tileSize * CONNECTOR_DECORATIVE_ARCH_WIDTH_TILES;
+        const widthMeters = this.tileSize * this._connectorDecorativeArchWidthTiles();
         return {
           id: `${plan.id}:decorative-arch:${beatIndex}`,
           pathIndex,
@@ -5621,7 +5675,7 @@ export class DungeonGenerator {
               z: girderArch.gridPoint.z + section.direction.z * 0.72,
             } : { ...section.galleryCenter },
             girderPathIndex: girderArch?.pathIndex ?? crossSection.pathIndex,
-            girderWidthMeters: this.tileSize * CONNECTOR_DECORATIVE_ARCH_WIDTH_TILES,
+            girderWidthMeters: this.tileSize * this._connectorDecorativeArchWidthTiles(),
             keepsTravelEnvelopeClear: true,
           });
         }
@@ -8005,7 +8059,7 @@ export class DungeonGenerator {
       connection.decorativeArchBeats = [...new Set(selectedArchIndexes)].map((pathIndex, index) => {
         const section = crossSections.find((candidate) => candidate.pathIndex === pathIndex)
           ?.sections?.[0];
-        const widthMeters = this.tileSize * CONNECTOR_DECORATIVE_ARCH_WIDTH_TILES;
+        const widthMeters = this.tileSize * this._connectorDecorativeArchWidthTiles();
         const beat = {
           id: `${connection.id}:decorative-arch:${index}`,
           pathIndex,

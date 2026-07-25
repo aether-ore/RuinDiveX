@@ -788,6 +788,24 @@ test('the overworld controller resolves ground, bounds, blocking, and nearest in
   assert.equal(controller.blockerHash.size, 0);
 });
 
+test('the sealed highland refinery is grounded scenery with no interaction target', () => {
+  const plan = createAuthoredOverworldPlan();
+  const controller = new OverworldController({ plan });
+  const landmark = plan.landmarks.find(({ id }) => id === 'highlandMagmaRefinery');
+  const interaction = plan.interactions.find(({ id }) => id === 'highlandMagmaRefinery');
+  const anchor = plan.anchors.magmaRefineryExterior;
+  const floor = getTerrainCell(plan, anchor.x, anchor.z, { world: true });
+
+  assert.equal(floor.surfaceId, 'trail');
+  assert.equal(landmark.kind, 'sealedRefineryLandmark');
+  assert.equal(landmark.label, 'Ancient Refinery — Sealed');
+  assert.equal(landmark.y, floor.height, 'the visible gate base must sit on the approach terrain');
+  assert.equal(anchor.y, floor.height, 'the scenery inspection anchor must sit on the same terrain');
+  assert.equal(interaction, undefined, 'the retired refinery must not register an interaction');
+  assert.equal(controller.isPositionWalkable(anchor), true);
+  assert.equal(controller.getNearestInteractable(anchor), null);
+});
+
 test('all 36 core chunks are greedy meshes with at most six material draws', () => {
   const plan = createAuthoredOverworldPlan();
   let maximumQuadCount = 0;

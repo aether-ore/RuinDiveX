@@ -1236,6 +1236,103 @@ function addCamp(root, plan, library, occlusionOwners) {
   return { campRoot, doorGroup, supportCar, roll, workbench, sharedAssets };
 }
 
+function addHighlandMagmaRefinery(root, plan, occlusionOwners) {
+  const landmark = plan.landmarks.find(({ id }) => id === 'highlandMagmaRefinery');
+  if (!landmark) return null;
+  const refinery = new THREE.Group();
+  refinery.name = 'highlandMagmaRefinery';
+  refinery.position.set(landmark.x, landmark.y, landmark.z);
+  refinery.userData.sealedLandmark = true;
+  refinery.userData.cameraOcclusionOwner = true;
+  refinery.userData.occlusionOwnerId = landmark.id;
+
+  const basalt = new THREE.MeshStandardMaterial({ name: 'highlandRefineryBasalt', color: 0x231b18, roughness: 0.94, metalness: 0.02, flatShading: true });
+  const metal = new THREE.MeshStandardMaterial({ name: 'highlandRefineryMetal', color: 0x4a3228, roughness: 0.58, metalness: 0.72, flatShading: true });
+  const sealLight = new THREE.MeshStandardMaterial({ name: 'highlandRefinerySealedWarning', color: 0x5a2a24, emissive: 0x2b0805, emissiveIntensity: 0.42, roughness: 0.72, metalness: 0.28 });
+
+  // The entrance is a cut into the highland slope. Keep all foreground pieces
+  // at threshold height so the player never has to climb onto architecture or
+  // push the camera through a decorative mound to reach the interaction.
+  const rearWorks = new THREE.Mesh(new THREE.BoxGeometry(12, 6.6, 5.2), basalt);
+  rearWorks.name = 'highlandRefineryRearWorks';
+  rearWorks.position.set(0, 3.3, 0.1);
+  rearWorks.castShadow = true;
+  rearWorks.receiveShadow = true;
+  refinery.add(rearWorks);
+
+  const landing = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.34, 5.5), metal);
+  landing.name = 'highlandRefineryGroundLanding';
+  landing.position.set(0, 0.17, 6.15);
+  landing.castShadow = true;
+  landing.receiveShadow = true;
+  refinery.add(landing);
+
+  for (const side of [-1, 1]) {
+    const portalPier = new THREE.Mesh(new THREE.BoxGeometry(2.2, 5.6, 2.2), basalt);
+    portalPier.name = `highlandRefineryPortalPier:${side}`;
+    portalPier.position.set(side * 3.6, 2.8, 3.7);
+    portalPier.castShadow = true;
+    portalPier.receiveShadow = true;
+    refinery.add(portalPier);
+  }
+  const lintel = new THREE.Mesh(new THREE.BoxGeometry(9.4, 1.3, 2.2), basalt);
+  lintel.name = 'highlandRefineryPortalLintel';
+  lintel.position.set(0, 5.25, 3.7);
+  lintel.castShadow = true;
+  refinery.add(lintel);
+
+  const gate = new THREE.Mesh(new THREE.BoxGeometry(4.8, 4.5, 0.34), metal);
+  gate.name = 'highlandRefineryGate';
+  gate.position.set(0, 2.25, 4.82);
+  gate.castShadow = true;
+  refinery.add(gate);
+
+  for (const rotationZ of [-0.62, 0.62]) {
+    const closurePlate = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.42, 0.28), metal);
+    closurePlate.name = `highlandRefineryClosurePlate:${rotationZ < 0 ? 'left' : 'right'}`;
+    closurePlate.position.set(0, 2.25, 5.04);
+    closurePlate.rotation.z = rotationZ;
+    closurePlate.castShadow = true;
+    refinery.add(closurePlate);
+  }
+
+  const threshold = new THREE.Mesh(new THREE.BoxGeometry(5.4, 0.2, 2.4), metal);
+  threshold.name = 'highlandRefineryThreshold';
+  threshold.position.set(0, 0.28, 5.2);
+  threshold.receiveShadow = true;
+  refinery.add(threshold);
+
+  const frameParts = [
+    { name: 'left', size: [0.16, 4.15, 0.12], position: [-2.28, 2.3, 5.03] },
+    { name: 'right', size: [0.16, 4.15, 0.12], position: [2.28, 2.3, 5.03] },
+    { name: 'header', size: [4.72, 0.16, 0.12], position: [0, 4.32, 5.03] },
+  ];
+  for (const part of frameParts) {
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(...part.size), sealLight);
+    frame.name = `highlandRefineryEmberFrame:${part.name}`;
+    frame.position.set(...part.position);
+    refinery.add(frame);
+  }
+  for (const side of [-1, 1]) {
+    const chimney = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 1.15, 8.5, 10), metal);
+    chimney.name = `highlandRefineryChimney:${side}`;
+    chimney.position.set(side * 4.1, 7.1, -0.8);
+    chimney.castShadow = true;
+    refinery.add(chimney);
+  }
+  const signal = new THREE.Mesh(new THREE.TorusGeometry(0.72, 0.14, 8, 24), sealLight);
+  signal.name = 'highlandRefineryEmberSeal';
+  signal.position.set(0, 6.35, 4.84);
+  refinery.add(signal);
+  const portalLight = new THREE.PointLight(0x8a3028, 0.7, 5, 2);
+  portalLight.name = 'highlandRefineryPortalLight';
+  portalLight.position.set(0, 3.1, 6.1);
+  refinery.add(portalLight);
+  root.add(refinery);
+  occlusionOwners.push(refinery);
+  return refinery;
+}
+
 function addLighting(root, plan) {
   const lighting = new THREE.Group();
   lighting.name = 'overworldLighting';
@@ -1490,6 +1587,7 @@ export function assembleOverworld(plan = createAuthoredOverworldPlan(), {
   const terrainAssembly = addTerrain(root, plan, library);
   addTrees(root, plan, library, occlusionOwners, terrainAssembly.renderCullGroups, sharedGeometries);
   addHouses(root, plan, library, occlusionOwners, sharedGeometries);
+  addHighlandMagmaRefinery(root, plan, occlusionOwners);
   const camp = addCamp(root, plan, library, occlusionOwners);
   const lighting = addLighting(root, plan);
   const facade = makeCompatibilityFacade(

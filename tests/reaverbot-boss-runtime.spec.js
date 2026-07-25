@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 const BOSS_PROFILE_IDS = [
+  'crucibleWarden',
   'ascensionEngine',
   'pursuitRegent',
   'rubyOpticOracle',
@@ -127,7 +128,7 @@ test('Boss Hunts and the canonical Buster workshop redact materials, reveal disc
 
   const lockState = await page.evaluate(async () => {
     const game = window.game;
-    const selected = await game.selectBossHunt('rubyOpticOracle');
+    const selected = await game.selectBossHunt('crucibleWarden');
     const entered = await game.enterRuinFromCamp();
     const firstExpeditionId = game.busterLabStorage.state.bossHunts.activeExpeditionId;
     const rejected = await game.selectBossHunt('highAngleBastion');
@@ -143,6 +144,8 @@ test('Boss Hunts and the canonical Buster workshop redact materials, reveal disc
       selectedBossProfileId: game.getSelectedBossProfileId(),
       activeExpeditionId: game.busterLabStorage.state.bossHunts.activeExpeditionId,
       encounterProfileId: game.dungeon.encounters.find((entry) => entry.isBoss)?.bossProfileId,
+      dungeonFamilyId: game.dungeon.dungeonFamilyId,
+      hasMagmaFacilityState: Object.prototype.hasOwnProperty.call(game.dungeon, 'facilityState'),
       lockLabel: document.getElementById('boss-hunts-lock-status').textContent,
       disabledCards: [...document.querySelectorAll('[data-action="boss-hunt-select"]')]
         .every((card) => card.disabled),
@@ -155,8 +158,10 @@ test('Boss Hunts and the canonical Buster workshop redact materials, reveal disc
   expect(lockState.selected.ok).toBe(true);
   expect(lockState.entered).toBe(true);
   expect(lockState.rejected).toMatchObject({ ok: false, reason: 'expedition-locked' });
-  expect(lockState.selectedBossProfileId).toBe('rubyOpticOracle');
-  expect(lockState.encounterProfileId).toBe('rubyOpticOracle');
+  expect(lockState.selectedBossProfileId).toBe('crucibleWarden');
+  expect(lockState.encounterProfileId).toBe('crucibleWarden');
+  expect(lockState.dungeonFamilyId).toBe('industrial-v1');
+  expect(lockState.hasMagmaFacilityState).toBe(false);
   expect(lockState.activeExpeditionId).toBeTruthy();
   expect(lockState.lockLabel).toContain('LOCKED');
   expect(lockState.disabledCards).toBe(true);

@@ -517,7 +517,7 @@ export const LINKED_WEAK_POINT_WEIGHTS = Object.freeze({
   armorShutters: [['eyeLens', 8]],
   armoredBack: [['bellyCore', 8]],
   armoredCarapace: [['ammoDrum', 6], ['rearBattery', 5], ['bellyCore', 2]],
-  rotatingPlates: [['counterweightCore', 10]],
+  rotatingPlates: [['counterweightCore', 10], ['coolingVents', 7]],
   energyMembrane: [['emitterCore', 5], ['overloadCore', 5], ['eyeLens', 3]],
   phaseShell: [['eyeLens', 5], ['overloadCore', 6]],
   armoredSkull: [['rearBattery', 8]],

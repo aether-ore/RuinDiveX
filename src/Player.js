@@ -4277,7 +4277,7 @@ export class Player {
   }
 
   takeIncomingHit(incomingHit = {}) {
-    const amount = Math.max(0, Number(incomingHit.amount) || 0);
+    let amount = Math.max(0, Number(incomingHit.amount) || 0);
     const source = incomingHit.source ?? null;
     const result = {
       contacted: false,
@@ -4285,6 +4285,7 @@ export class Player {
       guarded: false,
       parried: false,
       immune: false,
+      resisted: false,
       barrierDamage: 0,
       healthDamage: 0,
       resolvedReactionTier: 0,
@@ -4308,14 +4309,21 @@ export class Player {
       : incomingHit.hazardTags
         ? [incomingHit.hazardTags]
         : [];
-    if (hazardTags.some((tag) => isHazardImmune(
+    const hazardImmune = hazardTags.some((tag) => isHazardImmune(
       this.gearEffects,
       tag,
       incomingHit.hazardDomain ?? 'unknown',
-    ))) {
-      result.immune = true;
-      this.lastDamageResult = result;
-      return result;
+    ));
+    if (hazardImmune) {
+      const partialMultiplier = Number(incomingHit.hazardImmunityDamageMultiplier);
+      if (Number.isFinite(partialMultiplier) && partialMultiplier > 0) {
+        amount *= THREE.MathUtils.clamp(partialMultiplier, 0, 1);
+        result.resisted = true;
+      } else {
+        result.immune = true;
+        this.lastDamageResult = result;
+        return result;
+      }
     }
 
     let damageOrigin = incomingHit.impactPosition
@@ -5239,6 +5247,10 @@ export class Player {
     this.disposed = true;
     this.clearExternalMotion('dispose');
     this.root?.removeFromParent?.();
+  }
+
+  isImmuneToHazard(hazardTag, hazardDomain = 'environment') {
+    return isHazardImmune(this.gearEffects, hazardTag, hazardDomain);
   }
 
   _useExternalCharacterModel(model, { source = 'obj' } = {}) {

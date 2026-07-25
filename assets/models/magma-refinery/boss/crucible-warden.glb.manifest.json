@@ -1,0 +1,29 @@
+{
+  "schema": "ruindivex-boss-asset/v1",
+  "assetId": "crucible-warden",
+  "kind": "boss",
+  "dimensions": {
+    "width": 8.4,
+    "depth": 8.4,
+    "height": 6
+  },
+  "encounterUse": "industrial-v1-boss-gallery",
+  "exportFile": "crucible-warden.glb",
+  "exportHash": "9371cf4379b7abfe7e6639af64e03a5dcd4d01cc51b2f1ee58f87d6f1c15ab7e",
+  "rig": {
+    "armature": "CrucibleWardenArmature",
+    "bones": [
+      "root",
+      "leg_0",
+      "leg_1",
+      "leg_2"
+    ]
+  },
+  "semanticParts": [
+    "flameNozzle",
+    "rotatingArmor",
+    "coolingVentWeakPoint",
+    "zoneController"
+  ],
+  "dungeonFamilyDependency": null
+}

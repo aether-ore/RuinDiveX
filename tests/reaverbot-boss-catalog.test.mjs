@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import test from 'node:test';
 
+import { resolveDungeonFamilyId } from '../src/DungeonFamilies.js';
 import { BUSTER_RECIPE_LIST } from '../src/buster/BusterRecipeCatalog.js';
 import { getEquipmentRecipesForPart } from '../src/equipment/EquipmentRecipeCatalog.js';
 import {
@@ -20,6 +22,7 @@ import { generateReaverbotGenome, validateReaverbotGenome } from '../src/reaverb
 import { REAVERBOT_SALVAGE_SOURCE_MAPS } from '../src/reaverbots/ReaverbotSalvageCatalog.js';
 
 const EXPECTED_PROFILE_IDS = [
+  'crucibleWarden',
   'ascensionEngine',
   'pursuitRegent',
   'rubyOpticOracle',
@@ -33,8 +36,8 @@ const EXPECTED_PROFILE_IDS = [
 
 test('the boss catalog covers every unique named material in active Custom Buster recipes', () => {
   assert.deepEqual(REAVERBOT_BOSS_PROFILE_IDS, EXPECTED_PROFILE_IDS);
-  assert.equal(REAVERBOT_BOSS_PROFILES.length, 9);
-  assert.equal(new Set(REAVERBOT_BOSS_PROFILE_IDS).size, 9);
+  assert.equal(REAVERBOT_BOSS_PROFILES.length, 10);
+  assert.equal(new Set(REAVERBOT_BOSS_PROFILE_IDS).size, 10);
 
   const recipePartIds = new Set(BUSTER_RECIPE_LIST.flatMap((recipe) => recipe.requiredPartIds));
   const bossPartIds = new Set();
@@ -56,6 +59,32 @@ test('the boss catalog covers every unique named material in active Custom Buste
   const ascensionReward = getReaverbotBossRewardMaterial('ascensionEngine');
   assert.equal(ascensionReward?.id, 'perfectedCompressionGreave');
   assert.deepEqual(getEquipmentRecipesForPart(ascensionReward.id).map((recipe) => recipe.id), ['jumpSprings']);
+});
+
+test('the retired Magma family falls back to Industrial while its Warden remains a normal hunt', () => {
+  const resolved = resolveDungeonFamilyId('magma-refinery-v1');
+  assert.equal(resolved.dungeonFamilyId, 'industrial-v1');
+  assert.deepEqual(resolved.fallback, {
+    requestedDungeonFamilyId: 'magma-refinery-v1',
+    dungeonFamilyId: 'industrial-v1',
+    reason: 'retired-dungeon-family',
+  });
+
+  const expedition = createBossExpeditionSpec({
+    bossProfileId: 'crucibleWarden',
+    dungeonFamilyId: 'magma-refinery-v1',
+    seed: 'retired-family-compatibility',
+  });
+  assert.equal(expedition.dungeonFamilyId, 'industrial-v1');
+  assert.equal(expedition.dungeonFamilyFallback?.reason, 'retired-dungeon-family');
+  assert.equal(getReaverbotBossProfile('crucibleWarden')?.environmentId, null);
+  assert.equal(getReaverbotBossProfile('crucibleWarden')?.encounterControllerId, null);
+  assert.equal(getReaverbotBossRewardMaterial('crucibleWarden')?.id, 'perfectedCrucibleNozzle');
+
+  assert.equal(existsSync(new URL('../src/magma', import.meta.url)), false);
+  assert.equal(existsSync(new URL('../assets/models/magma-refinery/rooms', import.meta.url)), false);
+  assert.equal(existsSync(new URL('../assets/models/magma-refinery/connectors', import.meta.url)), false);
+  assert.equal(existsSync(new URL('../assets/models/magma-refinery/boss/crucible-warden.glb', import.meta.url)), true);
 });
 
 test('boss profile lookup and expedition descriptors are deterministic and quarantine unknown ids', () => {

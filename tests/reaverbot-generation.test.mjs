@@ -18,6 +18,7 @@ import {
   REAVERBOT_WEAPONS,
 } from '../src/reaverbots/ReaverbotCatalog.js';
 import {
+  AUTHORED_RUIN_SALVAGE,
   createReaverbotSalvageProfile,
   REAVERBOT_BOSS_SALVAGE,
   REAVERBOT_SALVAGE_MATERIALS,
@@ -1294,13 +1295,16 @@ test('every procedural Reaverbot aspect has a specific source while boss keyston
     .flatMap((sourceMap) => Object.values(sourceMap))
     .map((entry) => entry.id);
   const bossMaterialIds = Object.values(REAVERBOT_BOSS_SALVAGE).map((entry) => entry.id);
+  const authoredRuinMaterialIds = Object.values(AUTHORED_RUIN_SALVAGE).map((entry) => entry.id);
   assert.equal(new Set(proceduralMaterialIds).size, 62);
-  assert.deepEqual(bossMaterialIds, ['perfectedCompressionGreave']);
+  assert.deepEqual(bossMaterialIds, ['perfectedCrucibleNozzle', 'perfectedCompressionGreave']);
+  assert.deepEqual(authoredRuinMaterialIds, ['oldDrill']);
   assert.equal(
     Object.keys(REAVERBOT_SALVAGE_MATERIALS).length,
-    new Set([...proceduralMaterialIds, ...bossMaterialIds]).size,
+    new Set([...proceduralMaterialIds, ...bossMaterialIds, ...authoredRuinMaterialIds]).size,
   );
   assert.equal(proceduralMaterialIds.includes('perfectedCompressionGreave'), false);
+  assert.equal(proceduralMaterialIds.includes('oldDrill'), false);
   assert.equal(REAVERBOT_SALVAGE_MATERIALS.perfectedCompressionGreave.tier, 'keystone');
   assert.ok(REAVERBOT_SALVAGE_MATERIALS.perfectedCompressionGreave.craftingTags.includes('boss'));
   assert.equal(REAVERBOT_SALVAGE_MATERIALS.impactHorn, undefined);

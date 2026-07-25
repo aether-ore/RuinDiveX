@@ -1,4 +1,5 @@
 import { RollSalvageStorage } from '../RollSalvageStorage.js';
+import { resolveDungeonFamilyId } from '../DungeonFamilies.js';
 import {
   BOSS_EXPEDITION_SCHEMA_VERSION,
   DEFAULT_BOSS_PROFILE_ID,
@@ -743,6 +744,19 @@ function sanitizeDungeonLayoutSeed(value, expeditionId) {
   return createMigratedDungeonLayoutSeed(expeditionId);
 }
 
+function sanitizeDungeonFamilyId(value) {
+  return resolveDungeonFamilyId(value).dungeonFamilyId;
+}
+
+function sanitizeDungeonFamilyFallback(value, rawFamilyId) {
+  const resolved = resolveDungeonFamilyId(rawFamilyId);
+  if (resolved.fallback) return resolved.fallback;
+  if (!value || typeof value !== 'object' || typeof value.requestedDungeonFamilyId !== 'string') {
+    return null;
+  }
+  return resolveDungeonFamilyId(value.requestedDungeonFamilyId).fallback;
+}
+
 function hasExplicitUnknownBossRewardMaterial(raw) {
   const reward = raw?.reward;
   if (!reward || typeof reward !== 'object'
@@ -829,6 +843,12 @@ function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
     dungeonLayoutSeed: sanitizeDungeonLayoutSeed(
       raw.dungeonLayoutSeed ?? raw.layoutSeed,
       expeditionId,
+    ),
+    // Missing legacy values intentionally remain industrial-v1.
+    dungeonFamilyId: sanitizeDungeonFamilyId(raw.dungeonFamilyId),
+    dungeonFamilyFallback: sanitizeDungeonFamilyFallback(
+      raw.dungeonFamilyFallback,
+      raw.dungeonFamilyId,
     ),
     depth: Math.max(1, nonNegativeInteger(raw.depth, 1)),
     status,
@@ -2594,6 +2614,8 @@ export class BusterLabStorage {
       expeditionSpec.dungeonLayoutSeed,
       expeditionId,
     );
+    const requestedDungeonFamily = resolveDungeonFamilyId(expeditionSpec.dungeonFamilyId);
+    const requestedDungeonFamilyId = requestedDungeonFamily.dungeonFamilyId;
     if (!getReaverbotBossProfile(requestedProfileId)) {
       return { ok: false, reason: 'unknown-boss-profile', state: this.state };
     }
@@ -2611,7 +2633,8 @@ export class BusterLabStorage {
         : null;
       if (existing.depth !== requestedDepth
         || existing.seed !== requestedSeed
-        || existing.dungeonLayoutSeed !== requestedLayoutSeed) {
+        || existing.dungeonLayoutSeed !== requestedLayoutSeed
+        || existing.dungeonFamilyId !== requestedDungeonFamilyId) {
         return { ok: false, reason: 'expedition-spec-mismatch', expedition: cloneJson(existing), state: this.state };
       }
       return { ok: true, unchanged: true, expedition: cloneJson(existing), state: this.state };
@@ -2653,7 +2676,8 @@ export class BusterLabStorage {
           : null;
         if (concurrentExisting.depth !== concurrentDepth
           || concurrentExisting.seed !== concurrentSeed
-          || concurrentExisting.dungeonLayoutSeed !== requestedLayoutSeed) {
+          || concurrentExisting.dungeonLayoutSeed !== requestedLayoutSeed
+          || concurrentExisting.dungeonFamilyId !== requestedDungeonFamilyId) {
           throw new BusterLabOperationError('expedition-spec-mismatch');
         }
         return { expedition: cloneJson(concurrentExisting), unchanged: true };
@@ -2671,6 +2695,8 @@ export class BusterLabStorage {
           ? expeditionSpec.seed
           : null,
         dungeonLayoutSeed: requestedLayoutSeed,
+        dungeonFamilyId: requestedDungeonFamilyId,
+        dungeonFamilyFallback: requestedDungeonFamily.fallback,
         depth: Math.max(1, nonNegativeInteger(expeditionSpec.depth, 1)),
         status: 'active',
         startedAt: new Date().toISOString(),
@@ -2745,9 +2771,13 @@ export class BusterLabStorage {
       const expectedLayoutSeed = hasExpectation('dungeonLayoutSeed')
         ? sanitizeDungeonLayoutSeed(expeditionSpec.dungeonLayoutSeed, expeditionId)
         : expedition.dungeonLayoutSeed;
+      const expectedDungeonFamilyId = hasExpectation('dungeonFamilyId')
+        ? sanitizeDungeonFamilyId(expeditionSpec.dungeonFamilyId)
+        : expedition.dungeonFamilyId;
       if (expectedSeed !== expedition.seed
         || expectedDepth !== expedition.depth
-        || expectedLayoutSeed !== expedition.dungeonLayoutSeed) {
+        || expectedLayoutSeed !== expedition.dungeonLayoutSeed
+        || expectedDungeonFamilyId !== expedition.dungeonFamilyId) {
         throw new BusterLabOperationError('expedition-spec-mismatch');
       }
 

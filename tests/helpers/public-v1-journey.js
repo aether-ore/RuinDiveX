@@ -582,7 +582,7 @@ const orientToward = async (page, target, { timeout = 4_000 } = {}) => {
   throw new Error(`Could not face public route waypoint: ${JSON.stringify({ target, last })}`);
 };
 
-const walkToWaypoint = async (page, target, {
+export const walkToWaypoint = async (page, target, {
   stopDistance = 0.72,
   timeout = 8_000,
 } = {}) => {

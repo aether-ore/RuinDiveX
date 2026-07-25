@@ -12,6 +12,10 @@ import {
 } from './AuthoredAscensionEngine.js';
 import { AscensionEngineEncounter } from './bosses/AscensionEngineEncounter.js';
 import { RubyOpticOracleEncounter } from './bosses/RubyOpticOracleEncounter.js';
+import {
+  animateAuthoredCrucibleWardenVisual,
+  loadAuthoredCrucibleWardenVisual,
+} from './AuthoredCrucibleWarden.js';
 
 export { REAVERBOT_BOSS_LIMITS } from './ReaverbotBossCatalog.js';
 
@@ -195,6 +199,7 @@ function createOverloadShieldVisual(enemy) {
 
 function getPatternForProfile(profileId) {
   switch (profileId) {
+    case 'crucibleWarden': return 'crucibleLanes';
     case 'pursuitRegent': return 'interceptLanes';
     case 'rubyOpticOracle': return 'mirrorRoutes';
     case 'ballisticsVizier': return 'impactGrid';
@@ -270,12 +275,12 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         ? new AscensionEngineEncounter(this)
         : null;
     if (this.specialEncounter) this.signatureVisual.group.visible = false;
-    this.authoredVisualState = this.bossProfileId === 'rubyOpticOracle'
+    this.authoredVisualState = ['rubyOpticOracle', 'crucibleWarden'].includes(this.bossProfileId)
       ? 'loading'
       : this.bossProfileId === 'ascensionEngine'
         ? 'installing'
         : 'notApplicable';
-    if (this.bossProfileId === 'rubyOpticOracle') this._loadPreferredAuthoredVisual();
+    if (['rubyOpticOracle', 'crucibleWarden'].includes(this.bossProfileId)) this._loadPreferredAuthoredVisual();
     if (this.bossProfileId === 'ascensionEngine') this._installAuthoredAscensionVisual();
   }
 
@@ -301,7 +306,9 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
   async _loadPreferredAuthoredVisual() {
     const fallbackVisual = this.visual;
     try {
-      const authoredVisual = await loadAuthoredRubyOpticOracleVisual(this);
+      const authoredVisual = this.bossProfileId === 'crucibleWarden'
+        ? await loadAuthoredCrucibleWardenVisual(this)
+        : await loadAuthoredRubyOpticOracleVisual(this);
       if (this.disposed || this.dead) {
         disposeVisualTree(authoredVisual.root);
         return;
@@ -310,14 +317,14 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
       this.visual = authoredVisual;
       this.root.add(authoredVisual.root);
       this.authoredVisualState = 'active';
-      this.root.userData.authoredBossModel = 'rubyOpticOracle';
+      this.root.userData.authoredBossModel = this.bossProfileId;
       this.root.userData.authoredBossFallbackActive = false;
       this._captureMaterialStates();
       disposeVisualTree(fallbackVisual.root);
     } catch (error) {
       this.authoredVisualState = 'fallback';
       this.root.userData.authoredBossFallbackActive = true;
-      console.warn('Could not load authored Ruby Optic Oracle; using procedural fallback.', error);
+      console.warn(`Could not load authored ${this.bossProfileId}; using procedural fallback.`, error);
     }
   }
 
@@ -328,6 +335,17 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         time: this.brain.time,
         dt,
         ...(specialVisualState ?? {}),
+      });
+      this._applyRushAttackWarning(dt);
+      return;
+    }
+    if (this.bossProfileId === 'crucibleWarden' && this.authoredVisualState === 'active') {
+      animateAuthoredCrucibleWardenVisual(this.visual, {
+        time: this.brain.time,
+        dt,
+        state: this.brain.state,
+        defenseActive: this.brain.defenseActive,
+        weakPointExposed: this.brain.weakPointExposed || this.signaturePartOverloaded,
       });
       this._applyRushAttackWarning(dt);
       return;
@@ -1639,6 +1657,35 @@ export class ReaverbotBossEnemy extends ReaverbotEnemy {
         predicted.x += (index - 1.5) * 1.15;
         this._queueCircle(game, predicted, 1.05, 0.82 + index * 0.1, 0.72);
       }
+      return;
+    }
+    if (pattern === 'crucibleLanes') {
+      const laneCount = phaseTwo && !weakened ? 2 : 1;
+      for (let index = 0; index < laneCount; index += 1) {
+        const angle = ((state.patternIndex + index * 2) % 3) * (Math.PI * 2 / 3);
+        tempB.set(Math.sin(angle), 0, Math.cos(angle));
+        this._queueLane(game, center, tempB, 13.5, 1.05, 0.9 + index * 0.16, 0.92, {
+          hazard: true,
+          patternRole: 'heatedSlagLane',
+        });
+      }
+      const safeAngle = ((state.patternIndex + 1) % 6) * (Math.PI / 3);
+      const sectorTarget = center.clone();
+      sectorTarget.x += Math.sin(safeAngle) * 7.2;
+      sectorTarget.z += Math.cos(safeAngle) * 7.2;
+      this._queueCircle(game, sectorTarget, phaseTwo ? 2.1 : 2.8, phaseTwo ? 0.78 : 1.05, 0.7, {
+        projectile: true,
+        patternRole: phaseTwo ? 'alternatingOuterFurnaceSector' : 'stableOuterRingSector',
+      });
+      tempC.copy(tempA).applyAxisAngle(
+        THREE.Object3D.DEFAULT_UP,
+        ((state.patternIndex % 5) - 2) * 0.22,
+      );
+      this._queueLane(game, this.root.position, tempC, 12.5, 0.48, phaseTwo ? 0.62 : 0.82, 0.58, {
+        projectile: true,
+        followOrigin: this.root,
+        patternRole: 'controlledFlameSweep',
+      });
       return;
     }
     if (pattern === 'pulseFan') {

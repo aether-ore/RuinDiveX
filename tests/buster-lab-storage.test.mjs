@@ -632,6 +632,7 @@ test('Boss Hunt locks persist an exact dungeon layout seed and reject non-identi
   const locked = await lab.lockBossHuntForExpedition(expedition);
   assert.equal(locked.ok, true);
   assert.equal(locked.expedition.dungeonLayoutSeed, expedition.dungeonLayoutSeed);
+  assert.equal(locked.expedition.dungeonFamilyId, 'industrial-v1');
   assert.equal(lab.getActiveBossExpedition().dungeonLayoutSeed, expedition.dungeonLayoutSeed);
 
   const idempotent = await lab.lockBossHuntForExpedition(expedition);
@@ -646,6 +647,14 @@ test('Boss Hunt locks persist an exact dungeon layout seed and reject non-identi
   assert.equal(mismatch.ok, false);
   assert.equal(mismatch.reason, 'expedition-spec-mismatch');
   assert.equal(lab.getActiveBossExpedition().dungeonLayoutSeed, expedition.dungeonLayoutSeed);
+
+  const retiredFamilyCompatibility = await lab.lockBossHuntForExpedition({
+    ...expedition,
+    dungeonFamilyId: 'magma-refinery-v1',
+  });
+  assert.equal(retiredFamilyCompatibility.ok, true);
+  assert.equal(retiredFamilyCompatibility.unchanged, true);
+  assert.equal(retiredFamilyCompatibility.expedition.dungeonFamilyId, 'industrial-v1');
 });
 
 test('legacy active Boss Hunts deterministically migrate and persist a restart layout seed', () => {
@@ -659,6 +668,7 @@ test('legacy active Boss Hunts deterministically migrate and persist a restart l
     schemaVersion: 2,
     expeditionId,
     bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    dungeonFamilyId: 'magma-refinery-v1',
     seed: 1919,
     depth: 2,
     status: 'active',
@@ -678,6 +688,11 @@ test('legacy active Boss Hunts deterministically migrate and persist a restart l
     loaded.bossHunts.recordedExpeditions[expeditionId].dungeonLayoutSeed,
     expectedLayoutSeed,
   );
+  assert.equal(loaded.bossHunts.recordedExpeditions[expeditionId].dungeonFamilyId, 'industrial-v1');
+  assert.equal(
+    loaded.bossHunts.recordedExpeditions[expeditionId].dungeonFamilyFallback?.reason,
+    'retired-dungeon-family',
+  );
   const persisted = JSON.parse(storage.getItem(lab.storageKeys.main));
   assert.equal(
     persisted.state.bossHunts.recordedExpeditions[expeditionId].dungeonLayoutSeed,
@@ -687,6 +702,10 @@ test('legacy active Boss Hunts deterministically migrate and persist a restart l
   assert.equal(
     reloaded.bossHunts.recordedExpeditions[expeditionId].dungeonLayoutSeed,
     expectedLayoutSeed,
+  );
+  assert.equal(
+    reloaded.bossHunts.recordedExpeditions[expeditionId].dungeonFamilyFallback?.requestedDungeonFamilyId,
+    'magma-refinery-v1',
   );
 });
 

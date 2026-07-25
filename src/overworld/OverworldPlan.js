@@ -338,10 +338,11 @@ function createHouseDefinitions() {
   ];
 }
 
-function createLandmarks() {
+function createLandmarks({ magmaRefineryGroundY = 12 } = {}) {
   return [
     { id: 'camp-clearing', kind: 'camp', label: 'Expedition Camp', x: 0, y: 0, z: 0 },
     { id: 'overworldDungeonDoor', kind: 'dungeonDoor', label: 'Sealed Ruin Door', x: 0, y: 0, z: -8 },
+    { id: 'highlandMagmaRefinery', kind: 'sealedRefineryLandmark', label: 'Ancient Refinery — Sealed', x: 50, y: magmaRefineryGroundY, z: -52 },
     { id: 'expeditionSupportCar', kind: 'supportCar', label: 'Support Car', x: 7.5, y: 0, z: -5.6, yaw: Math.PI * 0.25 },
     { id: 'rollCaskettNpc', kind: 'npc', label: 'Roll', x: 4.2, y: 0, z: -4.2, yaw: -Math.PI * 0.5 },
     { id: 'rollWorkshopWorkbench', kind: 'workbench', label: 'Roll Workshop', x: 5.7, y: 0, z: -4, yaw: -Math.PI * 0.25 },
@@ -783,10 +784,14 @@ export function computeOverworldPlanHash(plan) {
 export function createAuthoredOverworldPlan() {
   const trails = createTrailDefinitions();
   const houses = createHouseDefinitions();
-  const landmarks = createLandmarks();
   const visualTerrainData = createBaseTerrain();
   stampHousePads(visualTerrainData, houses);
   const trailCellIndices = stampTrails(visualTerrainData, trails);
+  // Seat the refinery's gate on the switchback approach, not the higher rock
+  // beneath the landmark's rear center. This embeds the mound into the slope
+  // while keeping the visible threshold and player interaction grounded.
+  const magmaRefineryGroundY = getVisualHeight(visualTerrainData, 50, -47.8);
+  const landmarks = createLandmarks({ magmaRefineryGroundY });
   const trees = createTrees(visualTerrainData, trails, houses);
   const terrain = copyCoreTerrain(visualTerrainData);
   const visualTerrain = {
@@ -805,6 +810,7 @@ export function createAuthoredOverworldPlan() {
     playerStart: { id: 'overworld-player-start', x: 0, y: 0, z: -0.75, facingX: 0, facingZ: -1 },
     campReturn: { id: 'overworld-camp-return', x: 0, y: 0, z: 0.75, facingX: 0, facingZ: -1 },
     dungeonDoorExterior: { id: 'overworld-door-exterior', x: 0, y: 0, z: -6.65, facingX: 0, facingZ: -1 },
+    magmaRefineryExterior: { id: 'magma-refinery-exterior', x: 50, y: magmaRefineryGroundY, z: -47.8, facingX: 0, facingZ: -1 },
     roll: { id: 'overworld-roll-anchor', x: 4.2, y: 0, z: -4.2, facingX: -1, facingZ: 0 },
     supportCar: { id: 'overworld-support-car-anchor', x: 7.5, y: 0, z: -4.1, facingX: -0.707, facingZ: -0.707 },
   };
@@ -1065,7 +1071,7 @@ export function validateOverworldPlan(plan) {
     }
   }
 
-  for (const requiredAnchor of ['playerStart', 'campReturn', 'dungeonDoorExterior', 'roll', 'supportCar']) {
+  for (const requiredAnchor of ['playerStart', 'campReturn', 'dungeonDoorExterior', 'magmaRefineryExterior', 'roll', 'supportCar']) {
     if (!plan?.anchors?.[requiredAnchor]) errors.push(`missing-anchor:${requiredAnchor}`);
   }
   for (const requiredInteraction of ['overworldDungeonDoor', 'rollCaskett', 'rollWorkshopWorkbench']) {

@@ -1,4 +1,5 @@
 import { generateReaverbotGenome, validateReaverbotGenome } from './ReaverbotGenerator.js';
+import { resolveDungeonFamilyId } from '../DungeonFamilies.js';
 import {
   REAVERBOT_SALVAGE_MATERIALS,
   REAVERBOT_SALVAGE_SOURCE_MAPS,
@@ -88,7 +89,35 @@ const ARTILLERY_VARIANTS = Object.freeze([
   Object.freeze({ bodyPlanId: 'crawler', defenseId: 'armoredCarapace', weakPointId: 'ammoDrum' }),
 ]);
 
+export const CRUCIBLE_WARDEN_BOSS_PROFILE = deepFreeze(profile({
+    id: 'crucibleWarden',
+    title: 'Crucible Warden',
+    roleClue: 'perfected crucible nozzle',
+    featured: { aspect: 'weapon', moduleId: 'flameNozzle' },
+    reward: { materialId: 'perfectedCrucibleNozzle', firstClearGuaranteed: true },
+    generation: {
+      intent: 'areaControl',
+      archetypeId: 'zoneController',
+      weaponId: 'flameNozzle',
+      variants: [
+        { bodyPlanId: 'tripod', defenseId: 'rotatingPlates', weakPointId: 'coolingVents' },
+      ],
+    },
+    phaseOne: ['singleSlagLane', 'furnaceSector', 'controlledFlameSweep'],
+    phaseTwo: ['doubleSlagLane', 'alternatingOuterSector', 'compressedSafeWindow'],
+    overloadWeakening: 'coolingVentOverloadOpensStaggerWindow',
+    arena: {
+      mechanicId: 'industrialCrucibleLanes',
+      anchorKinds: ['telegraphedLane', 'stableOuterSector', 'coolingVent'],
+    },
+    environmentId: null,
+    encounterControllerId: null,
+    visualProfileId: 'crucibleWarden',
+    artStrategy: 'authoredGeometryWithSemanticFallback',
+  }));
+
 export const REAVERBOT_BOSS_PROFILES = deepFreeze([
+  CRUCIBLE_WARDEN_BOSS_PROFILE,
   profile({
     id: 'ascensionEngine',
     title: 'The Ascension Engine',
@@ -259,14 +288,15 @@ export const REAVERBOT_BOSS_PROFILES = deepFreeze([
   }),
 ]);
 
-const PROFILE_BY_ID = new Map(REAVERBOT_BOSS_PROFILES.map((entry) => [entry.id, entry]));
+const ALL_BOSS_PROFILES = REAVERBOT_BOSS_PROFILES;
+const PROFILE_BY_ID = new Map(ALL_BOSS_PROFILES.map((entry) => [entry.id, entry]));
 export const REAVERBOT_BOSS_PROFILE_IDS = Object.freeze(REAVERBOT_BOSS_PROFILES.map((entry) => entry.id));
-const FEATURED_MATERIAL_BY_PROFILE_ID = new Map(REAVERBOT_BOSS_PROFILES.map((bossProfile) => {
+const FEATURED_MATERIAL_BY_PROFILE_ID = new Map(ALL_BOSS_PROFILES.map((bossProfile) => {
   const { aspect, moduleId } = bossProfile.featured;
   const material = REAVERBOT_SALVAGE_SOURCE_MAPS[aspect]?.[moduleId] ?? null;
   return [bossProfile.id, material ? deepFreeze({ ...material, source: { aspect, moduleId } }) : null];
 }));
-const REWARD_MATERIAL_BY_PROFILE_ID = new Map(REAVERBOT_BOSS_PROFILES.map((bossProfile) => {
+const REWARD_MATERIAL_BY_PROFILE_ID = new Map(ALL_BOSS_PROFILES.map((bossProfile) => {
   const rewardMaterialId = bossProfile.reward?.materialId ?? null;
   const rewardMaterial = rewardMaterialId ? REAVERBOT_SALVAGE_MATERIALS[rewardMaterialId] ?? null : null;
   return [bossProfile.id, rewardMaterial ?? FEATURED_MATERIAL_BY_PROFILE_ID.get(bossProfile.id) ?? null];
@@ -305,10 +335,12 @@ export function createBossExpeditionSpec({
   seed = 'boss-hunt',
   depth = 1,
   id = null,
+  dungeonFamilyId = 'industrial-v1',
 } = {}) {
   const resolvedBossProfileId = normalizeBossProfileId(bossProfileId);
   const resolvedSeed = hashSeed(seed);
   const resolvedDepth = Math.max(1, Math.min(10, Math.round(Number(depth) || 1)));
+  const dungeonFamily = resolveDungeonFamilyId(dungeonFamilyId);
   return Object.freeze({
     schemaVersion: BOSS_EXPEDITION_SCHEMA_VERSION,
     id: id == null || id === ''
@@ -317,6 +349,8 @@ export function createBossExpeditionSpec({
     seed: resolvedSeed,
     depth: resolvedDepth,
     bossProfileId: resolvedBossProfileId,
+    dungeonFamilyId: dungeonFamily.dungeonFamilyId,
+    dungeonFamilyFallback: dungeonFamily.fallback,
     encounterProgress: null,
   });
 }

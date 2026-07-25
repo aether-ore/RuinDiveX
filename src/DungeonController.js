@@ -125,6 +125,10 @@ function tileKey(x, z) {
   return `${x},${z}`;
 }
 
+function isRampSurface(tile) {
+  return tile?.surfaceRole === 'ramp' || tile?.surface === 'industrialRamp';
+}
+
 function isInsideZone(position, zone) {
   let localX = position.x - zone.position.x;
   let localZ = position.z - zone.position.z;
@@ -195,6 +199,12 @@ export class DungeonController {
     this.doors = dungeon?.doors ?? [];
     this.keycards = dungeon?.keycards ?? [];
     this.chests = dungeon?.chests ?? [];
+    for (const chest of this.chests) {
+      if (chest.rewardPartId && game?.rollSalvageStorage?.hasDiscoveredPart?.(chest.rewardPartId)) {
+        chest.opened = true;
+        if (chest.object?.userData) chest.object.userData.opened = true;
+      }
+    }
     this.mechanisms = dungeon?.mechanisms ?? [];
     this.ladders = dungeon?.ladders ?? [];
     this.connectorLifts = dungeon?.connectorLifts ?? [];
@@ -1545,7 +1555,7 @@ export class DungeonController {
     let nearestElevation = null;
     let nearestDistance = Infinity;
     for (const tile of column) {
-      if (tile.surface !== 'industrialRamp') {
+      if (!isRampSurface(tile)) {
         continue;
       }
       const elevation = this._getTileElevationAtPosition(tile, position);
@@ -1596,7 +1606,7 @@ export class DungeonController {
       return 0;
     }
 
-    const isRamp = tile.surface === 'industrialRamp'
+    const isRamp = isRampSurface(tile)
       && Number.isFinite(tile.rampStartElevation)
       && Number.isFinite(tile.rampEndElevation);
 
@@ -1995,7 +2005,7 @@ export class DungeonController {
 
   _isEnemyRampSideExit(origin, direction) {
     const tile = this.getFloorTileAt(origin, { allowClosest: true });
-    if (tile?.surface !== 'industrialRamp') return false;
+    if (!isRampSurface(tile)) return false;
     const rampX = Math.sign(tile.rampDirectionX ?? 0);
     const rampZ = Math.sign(tile.rampDirectionZ ?? 0);
     if (rampX === 0 && rampZ === 0) return false;
@@ -2233,7 +2243,7 @@ export class DungeonController {
   }
 
   _getFloorConnectionElevation(tile, dx, dz) {
-    if (tile?.surface !== 'industrialRamp'
+    if (!isRampSurface(tile)
       || !Number.isFinite(tile.rampStartElevation)
       || !Number.isFinite(tile.rampEndElevation)) {
       return tile?.elevation ?? 0;
@@ -2257,7 +2267,7 @@ export class DungeonController {
     const directionZ = Math.sign(toTile.z - fromTile.z);
     const fromElevation = this._getFloorConnectionElevation(fromTile, directionX, directionZ);
     const toElevation = this._getFloorConnectionElevation(toTile, -directionX, -directionZ);
-    const usesRamp = fromTile.surface === 'industrialRamp' || toTile.surface === 'industrialRamp';
+    const usesRamp = isRampSurface(fromTile) || isRampSurface(toTile);
     const baseMaximumRise = usesRamp
       ? PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.12
       : PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile;
@@ -2950,7 +2960,7 @@ export class DungeonController {
     }
 
     for (const chest of this.chests) {
-      if (chest.opened) {
+      if (chest.opened || chest.rewardPending) {
         continue;
       }
 
@@ -3281,7 +3291,7 @@ export class DungeonController {
         PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.05,
       );
       return !playerJumping
-        && tile?.surface !== 'industrialRamp'
+        && !isRampSurface(tile)
         && candidateY - this.lastSafePlayerPosition.y > allowedRise;
     };
 
@@ -3457,7 +3467,19 @@ export class DungeonController {
           hazardDomain: 'environment',
           hazardTags: heatTags,
           statusEffects: heatTags.length > 0 ? ['burn'] : [],
+          hazardImmunityDamageMultiplier: trap.hazardImmunityDamageMultiplier,
         });
+
+        if (Number.isFinite(Number(trap.movementMultiplier))) {
+          const heatResistant = heatTags.some((tag) => (
+            player.isImmuneToHazard?.(tag, 'environment') === true
+          ));
+          const movementMultiplier = heatResistant
+            && Number.isFinite(Number(trap.heatResistantMovementMultiplier))
+            ? Number(trap.heatResistantMovementMultiplier)
+            : Number(trap.movementMultiplier);
+          player.applySlow?.(THREE.MathUtils.clamp(movementMultiplier, 0.05, 1), Math.max(0.08, dt * 2));
+        }
 
         if (pulseNow) {
           tempVectorA.copy(player.root.position);
@@ -4331,7 +4353,7 @@ export class DungeonController {
     }
 
     for (const trap of this.traps) {
-      if (!trap.active) {
+      if (!trap.active || trap.interactive === false) {
         continue;
       }
 
@@ -4357,7 +4379,11 @@ export class DungeonController {
         nearest = {
           kind: 'chest',
           target: chest,
-          label: chest.guaranteedKeycardId ? 'Open Keycard Chest' : 'Open Ruin Chest',
+          label: chest.guaranteedKeycardId
+            ? 'Open Keycard Chest'
+            : chest.rewardLabel
+              ? `Open ${chest.rewardLabel} Cache`
+              : 'Open Ruin Chest',
           color: chest.guaranteedKeycardId ? KEY_SEEKER_COLOR : KEYCARD_COLOR,
         };
         nearestDistanceSq = distanceSq;
@@ -4599,7 +4625,12 @@ export class DungeonController {
   }
 
   _activateChest(chest) {
-    if (!chest || chest.opened) {
+    if (!chest || chest.opened || chest.rewardPending) {
+      return;
+    }
+
+    if (chest.rewardPartId) {
+      this._activatePartRewardChest(chest);
       return;
     }
 
@@ -4630,6 +4661,33 @@ export class DungeonController {
     if (!keycardCollected) {
       this.game.ui?.showToast?.('Ruin chest opened: refractors', '#ffd66b');
     }
+  }
+
+  _activatePartRewardChest(chest) {
+    chest.rewardPending = true;
+    const finish = (result) => {
+      chest.rewardPending = false;
+      if (!result?.ok) {
+        this.game.ui?.showToast?.('The recovery could not be saved; the cache remains sealed', '#ff9f73');
+        return;
+      }
+      chest.opened = true;
+      chest.object.userData.opened = true;
+      chest.rewardClaimed = true;
+      this.game.addParticleBurst(chest.position, KEY_SEEKER_COLOR, 30, 0.18);
+      this.game.ui?.showToast?.(
+        result.alreadyClaimed
+          ? `${chest.rewardLabel ?? 'Unique component'} already recovered`
+          : `Recovered ${chest.rewardLabel ?? 'unique crafting component'}`,
+        '#ffd66b',
+      );
+    };
+    Promise.resolve(this.game.claimAuthoredDungeonPart?.(chest.rewardPartId, {
+      chestId: chest.id,
+      persistenceKey: chest.rewardPersistenceKey ?? null,
+    }))
+      .then(finish)
+      .catch(() => finish({ ok: false, reason: 'transaction-failed' }));
   }
 
   _updateEncounters() {

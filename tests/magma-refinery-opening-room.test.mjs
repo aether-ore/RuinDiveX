@@ -16,6 +16,14 @@ class StubTextureLoader {
   }
 }
 
+function pointInsideSolidZone(point, zone) {
+  const padding = Number(zone.playerCollisionPadding ?? 0);
+  return Math.abs(point.x - zone.position.x) <= zone.halfWidth + padding
+    && Math.abs(point.z - zone.position.z) <= zone.halfDepth + padding
+    && (!Number.isFinite(zone.verticalHalfHeight)
+      || Math.abs(point.y - zone.position.y) <= zone.verticalHalfHeight);
+}
+
 test('approved Magma opening plan is deterministic and seed-varied only in authored dressing', () => {
   const first = createMagmaRefineryOpeningPlan({ seed: 'opening-seed-a' });
   const repeated = createMagmaRefineryOpeningPlan({ seed: 'opening-seed-a' });
@@ -47,6 +55,13 @@ test('approved Magma opening plan preserves traversal and texture contracts', ()
   assert.equal(plan.jump.streamWidthMeters, 4.2);
   assert.equal(plan.jump.airGapMeters, 2.4);
   assert.equal(plan.jump.airGapMeters < PLAYER_TRAVERSAL_ENVELOPE.maximumHorizontalJumpDistance, true);
+  const jumpBendLava = plan.floorTiles.find((tile) => tile.x === 2 && tile.z === 1);
+  assert.equal(jumpBendLava?.surface, 'deepMagma');
+  assert.equal(
+    plan.rockInfill.some((rock) => rock.id === 'cavern-infill-2-1'),
+    false,
+    'the required jump launch must not overlap a basalt infill collider',
+  );
   assert.deepEqual(plan.jump.recoveryRouteIds, ['lava-west-ramp-out', 'lava-east-ramp-out']);
   assert.equal(rampRouteIds.has('lava-west-ramp-out'), true);
   assert.equal(rampRouteIds.has('lava-east-ramp-out'), true);
@@ -196,6 +211,26 @@ test('Magma opening assembly uses tiled texture UVs, matching collision, and fun
       || /SideWall|PreviewCap|^(?:north|south|east|west)-cavern-/.test(mesh.name)
   ));
   assert.equal(structuralSupports.length > 20, true);
+  for (const landing of dungeon.rampLandings) {
+    for (let x = landing.minX; x <= landing.maxX; x += 1) {
+      for (let z = landing.minZ; z <= landing.maxZ; z += 1) {
+        const floorPoint = new THREE.Vector3(
+          x * dungeon.tileSize,
+          landing.elevation + 0.08,
+          z * dungeon.tileSize,
+        );
+        const supportBlockers = dungeon.solidZones.filter((zone) => (
+          zone.obstacleKind === 'magmaOpeningCatwalkSupport'
+            && pointInsideSolidZone(floorPoint, zone)
+        ));
+        assert.deepEqual(
+          supportBlockers.map((zone) => zone.id),
+          [],
+          `${landing.id} contains structural support collision at ${x},${z}`,
+        );
+      }
+    }
+  }
   assert.equal(structuralFoundations.length > 40, true);
   assert.equal(basaltColumns.length, plan.rockInfill.length);
   assert.equal(basaltColumns.every((column) => (

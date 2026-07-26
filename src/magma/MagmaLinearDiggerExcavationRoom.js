@@ -627,8 +627,14 @@ export function createMagmaLinearDiggerExcavationPlan({
       previewPosition: { x: 0, y: 0, z: 15 },
       previewFacing: { x: 0, z: -1 },
       previewAnchors: {
+        flightATop: { x: -1, y: UPPER_ELEVATION, z: -6, facingX: -1, facingZ: 0 },
+        flightAMidpoint: { x: -9, y: -3.5, z: -6, facingX: -1, facingZ: 0 },
+        flightABottom: { x: -17, y: MIDDLE_ELEVATION, z: -6, facingX: -1, facingZ: 0 },
         flightADescent: { x: -14, y: -6.192308, z: -6, facingX: -1, facingZ: 0 },
         flightAEndLanding: { x: -17, y: MIDDLE_ELEVATION, z: -6, facingX: -1, facingZ: 0 },
+        flightBTop: { x: 11, y: MIDDLE_ELEVATION, z: -22, facingX: -1, facingZ: 0 },
+        flightBMidpoint: { x: 3, y: -10.5, z: -22, facingX: -1, facingZ: 0 },
+        flightBBottom: { x: -5, y: LOWER_ELEVATION, z: -22, facingX: -1, facingZ: 0 },
         flightBDescent: { x: -2, y: -13.192308, z: -22, facingX: -1, facingZ: 0 },
         flightBEndLanding: { x: -5, y: LOWER_ELEVATION, z: -22, facingX: -1, facingZ: 0 },
       },
@@ -941,7 +947,14 @@ function addCeilingRuns(parent, plan, materials, aerialOnlyZones) {
   }
 }
 
-function addLevelEnclosure(parent, plan, materials, solidZones, aerialOnlyZones) {
+function addLevelEnclosure(
+  parent,
+  plan,
+  materials,
+  solidZones,
+  aerialOnlyZones,
+  omittedBoundaryWallKeys = new Set(),
+) {
   const occupancyByBand = new Map();
   const tileByBandCell = new Map();
   const rampCellKeys = new Set(
@@ -1002,6 +1015,7 @@ function addLevelEnclosure(parent, plan, materials, solidZones, aerialOnlyZones)
       for (const direction of directions) {
         const neighborKey = cellKey(x + direction.dx, z + direction.dz);
         if (occupancy.has(neighborKey)) continue;
+        if (omittedBoundaryWallKeys.has(`${x},${z}:${direction.side}`)) continue;
         const opensIntoRamp = (rampTilesByCell.get(neighborKey) ?? []).some((ramp) => {
           const rampDirectionX = Math.sign(ramp.rampDirectionX ?? 0);
           const rampDirectionZ = Math.sign(ramp.rampDirectionZ ?? 0);
@@ -1758,6 +1772,7 @@ function createEncounter(id, label, roomId, center, halfWidth, halfDepth, roster
 export function assembleMagmaLinearDiggerExcavationRoom(plan, {
   textureLoader = new THREE.TextureLoader(),
   omittedSocketFrameIds = [],
+  omittedBoundaryWallKeys = [],
 } = {}) {
   if (plan?.moduleId !== MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID) {
     throw new Error(`Expected ${MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID} plan.`);
@@ -1819,7 +1834,14 @@ export function assembleMagmaLinearDiggerExcavationRoom(plan, {
   }
 
   addLava(group, plan, materials, traps);
-  addLevelEnclosure(group, plan, materials, solidZones, aerialOnlyZones);
+  addLevelEnclosure(
+    group,
+    plan,
+    materials,
+    solidZones,
+    aerialOnlyZones,
+    new Set(omittedBoundaryWallKeys),
+  );
   addRampAssemblies(group, plan, materials, solidZones, aerialOnlyZones);
   addBridgeRailings(group, plan, materials, solidZones);
   addDiggerMachinery(group, plan, materials, solidZones);

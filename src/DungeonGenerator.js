@@ -44,6 +44,10 @@ import {
   generateMagmaLinearDiggerExcavationRoom,
   MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID,
 } from './magma/MagmaLinearDiggerExcavationRoom.js';
+import {
+  generateMagmaRefractorAssayLabRoom,
+  MAGMA_REFRACTOR_ASSAY_LAB_MODULE_ID,
+} from './magma/MagmaRefractorAssayLabRoom.js';
 
 const DEFAULT_TILE_SIZE = DUNGEON_GENERATION_REQUIREMENTS.tileSizeMeters;
 const RUIN_TEXTURE_BASE_PATH = '/assets/textures/ruins/';
@@ -784,6 +788,14 @@ export class DungeonGenerator {
 
     if (this.roomPreviewId === MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID) {
       return generateMagmaLinearDiggerExcavationRoom({
+        random: this.random,
+        tileSize: this.tileSize,
+        textureLoader: this.textureLoader,
+      });
+    }
+
+    if (this.roomPreviewId === MAGMA_REFRACTOR_ASSAY_LAB_MODULE_ID) {
+      return generateMagmaRefractorAssayLabRoom({
         random: this.random,
         tileSize: this.tileSize,
         textureLoader: this.textureLoader,

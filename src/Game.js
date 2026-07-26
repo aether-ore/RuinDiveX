@@ -211,6 +211,8 @@ const DEBUG_GRAVITY_PRESETS = Object.freeze({
   normal: 1,
   moon: 0.28,
 });
+const DEBUG_NO_CLIP_SPEED = 14;
+const DEBUG_NO_CLIP_BOOST_SPEED = 34;
 
 const CUSTOM_BUSTER_ATTACK_META = Object.freeze({
   attackDomain: 'customBuster',
@@ -1111,6 +1113,10 @@ export class Game {
     this.debugPlatformCounter = 0;
     this.debugJumpHeightPreset = 'normal';
     this.debugGravityPreset = 'normal';
+    this.debugNoClipEnabled = false;
+    this.debugNoClipRestorePosition = null;
+    this.debugNoClipRestoreWorldGeneration = 0;
+    this.debugNoClipLastRestoreSource = 'none';
     this.poseDebugSection = 'pose';
     this.debugSpawnedPlatformGroup = new THREE.Group();
     this.debugSpawnedPlatformGroup.name = 'debugSpawnedPlatformGroup';
@@ -1623,6 +1629,8 @@ export class Game {
     dataset.debugGravityScale = formatBrowserDiagnosticNumber(platformDebug?.gravityScale);
     dataset.debugJumpHeight = formatBrowserDiagnosticNumber(platformDebug?.jumpHeight);
     dataset.debugSpawnedPlatformCount = String(this.debugSpawnedPlatforms?.length ?? 0);
+    dataset.debugNoClipEnabled = this.debugNoClipEnabled ? 'true' : 'false';
+    dataset.debugNoClipRestoreSource = this.debugNoClipLastRestoreSource ?? 'none';
     dataset.connectorTrackTrapMounted = this.connectorTrackTrapRuntime?.mounted ? 'true' : 'false';
     dataset.connectorTrackTrapCount = String(this.connectorTrackTrapRuntime?.traps?.length ?? 0);
     dataset.connectorTrackTrapVisualCount = String(
@@ -1751,6 +1759,88 @@ export class Game {
     return this.getPlatformDebugState();
   }
 
+  _getDebugNoClipLanding() {
+    const controller = this.dungeonController;
+    const current = this.player?.root?.position;
+    if (!controller || !current) return null;
+
+    const candidate = current.clone();
+    const authoredY = this.bossStageRuntime?.getFloorElevationOverride?.(candidate);
+    const platformY = this.getPlatformFloorElevation?.(candidate);
+    const railY = controller.getPlayerRailSupportElevation?.(candidate);
+    const directSurfaceY = typeof controller.getFloorTileAt !== 'function'
+      ? controller.getSurfaceElevationAt?.(candidate)
+      : null;
+    const tile = controller.getFloorTileAt?.(candidate, {
+      allowClosest: true,
+      maxElevationAbove: 0.42,
+    });
+    const tileY = tile
+      ? controller._getTileElevationAtPosition?.(tile, candidate)
+      : null;
+    const isLandingBelow = (value) => Number.isFinite(value) && value <= current.y + 0.42;
+    const surfaceY = isLandingBelow(platformY)
+      ? platformY
+      : isLandingBelow(railY)
+        ? railY
+        : isLandingBelow(authoredY)
+          ? authoredY
+          : isLandingBelow(directSurfaceY)
+            ? directSurfaceY
+            : tileY;
+
+    if (Number.isFinite(surfaceY)) {
+      candidate.y = surfaceY;
+      if (controller.isPositionWalkable?.(candidate)) {
+        return { position: candidate, source: 'current-surface' };
+      }
+    }
+
+    const sameWorldRestore = this.debugNoClipRestoreWorldGeneration === this.worldGenerationCount
+      ? this.debugNoClipRestorePosition
+      : null;
+    const safeAnchor = sameWorldRestore ?? controller.lastSafePlayerPosition;
+    if (safeAnchor) {
+      return { position: safeAnchor.clone(), source: 'safe-anchor' };
+    }
+    return null;
+  }
+
+  setDebugNoClipEnabled(enabled) {
+    const next = Boolean(enabled);
+    if (!this.player || next === this.debugNoClipEnabled) {
+      return this.getPlatformDebugState();
+    }
+
+    this.keys.clear();
+    if (next) {
+      this.debugNoClipRestorePosition = (
+        this.dungeonController?.lastSafePlayerPosition ?? this.player.root.position
+      ).clone();
+      this.debugNoClipRestoreWorldGeneration = this.worldGenerationCount;
+      this.debugNoClipLastRestoreSource = 'none';
+      this.debugNoClipEnabled = true;
+      this.player.setNoClipEnabled?.(true, { game: this });
+    } else {
+      const landing = this._getDebugNoClipLanding();
+      if (landing?.position) {
+        this.player.root.position.copy(landing.position);
+        this.dungeonController?.lastSafePlayerPosition?.copy?.(landing.position);
+        if (this.dungeonController) {
+          this.dungeonController.pendingPlayerJumpOffLanding = null;
+        }
+      }
+      this.debugNoClipEnabled = false;
+      this.debugNoClipLastRestoreSource = landing?.source ?? 'safe-anchor';
+      this.player.setNoClipEnabled?.(false, {
+        game: this,
+        groundY: landing?.position?.y ?? this.player.root.position.y,
+      });
+    }
+
+    return this.getPlatformDebugState();
+  }
+
   getPlatformDebugState() {
     const jump = this.player.getJumpPhysicsDebug();
     return {
@@ -1763,6 +1853,8 @@ export class Game {
       minimumGrabElevation: jump.jumpHeight * PLATFORM_NORMAL_JUMP_REACH_RATIO,
       maximumGrabElevation: jump.jumpHeight * PLATFORM_LEDGE_MAX_REACH_RATIO,
       spawnedPlatformCount: this.debugSpawnedPlatforms.length,
+      noClipEnabled: this.debugNoClipEnabled,
+      noClipLastRestoreSource: this.debugNoClipLastRestoreSource,
     };
   }
 
@@ -3866,6 +3958,71 @@ export class Game {
   }
 
   /**
+   * Returns the small detached state needed by public-input locomotion.
+   *
+   * The complete journey contract below intentionally includes every room,
+   * floor, collider, encounter, and connector. Rebuilding that full snapshot
+   * for each tank-steering pulse can stall a large authored dungeon. This
+   * player-only view keeps ordinary keyboard journeys responsive while
+   * remaining read-only and exposing no live THREE objects.
+   */
+  getPublicDungeonPlayerJourneyDiagnostics() {
+    if (this.worldKind !== 'dungeon' || !this.dungeon || !this.dungeonController) {
+      return null;
+    }
+
+    const plainPosition = (value) => value ? {
+      x: Number(value.x ?? 0),
+      y: Number(value.y ?? 0),
+      z: Number(value.z ?? 0),
+    } : null;
+    const cameraForwardVector = this.camera
+      ? this.camera.getWorldDirection(new THREE.Vector3()).setY(0)
+      : new THREE.Vector3(0, 0, 1);
+    if (cameraForwardVector.lengthSq() <= 0.0001) cameraForwardVector.set(0, 0, 1);
+    cameraForwardVector.normalize();
+    const cameraRightVector = new THREE.Vector3(
+      -cameraForwardVector.z,
+      0,
+      cameraForwardVector.x,
+    );
+    const lockTarget = this.combat?.lockOn?.target ?? null;
+    const projectileOrigin = this.player?.getProjectileOrigin?.()
+      ?? this.player?.getAttackOrigin?.()
+      ?? null;
+
+    return structuredClone({
+      worldKind: this.worldKind,
+      transitionState: this.transitionState,
+      player: {
+        position: plainPosition(this.player?.root?.position),
+        rotationY: Number(this.player?.root?.rotation?.y ?? 0),
+        health: Number(this.player?.health ?? 0),
+        maxHealth: Number(this.player?.stats?.maxHealth ?? this.player?.maxHealth ?? 0),
+        barrier: {
+          capacity: Number(this.player?.barrier?.capacity ?? 0),
+          current: Number(this.player?.barrier?.current ?? 0),
+          broken: Boolean(this.player?.barrier?.broken),
+          recharging: Boolean(this.player?.barrier?.recharging),
+        },
+        jumpState: this.player?.jumpState ?? null,
+        ledgeClinging: Boolean(this.player?.isLedgeClinging?.()),
+        ladderTraversal: this.player?.getLadderTraversalDiagnostics?.() ?? null,
+        dead: Boolean(this.player?.dead),
+        projectileOrigin: plainPosition(projectileOrigin),
+        movementBasis: {
+          forward: plainPosition(cameraForwardVector),
+          right: plainPosition(cameraRightVector),
+        },
+      },
+      lock: {
+        targetId: lockTarget?.id ?? null,
+        movementLocked: Boolean(this.combat?.lockOn?.movementLocked),
+      },
+    });
+  }
+
+  /**
    * Returns a detached, serializable view of the currently streamed V1 ruin.
    *
    * This is intentionally a read-only public contract for physical journey
@@ -3919,6 +4076,11 @@ export class Game {
         roomId: tile.roomId ?? null,
         type: tile.type ?? 'floor',
         surface: tile.surface ?? tile.type ?? 'floor',
+        surfaceRole: tile.surfaceRole ?? null,
+        rampRouteId: tile.rampRouteId ?? null,
+        rampSegmentIndex: Number.isFinite(tile.rampSegmentIndex)
+          ? Number(tile.rampSegmentIndex)
+          : null,
         rampStartElevation: Number.isFinite(tile.rampStartElevation)
           ? Number(tile.rampStartElevation)
           : null,
@@ -4251,6 +4413,11 @@ export class Game {
           damageEnabled: Boolean(trap.damageEnabled),
         })),
       } : null,
+      walkabilityCollisions: (controller.playerWalkabilityCollisionEvents ?? []).map((event) => ({
+        ...event,
+        position: plainPosition(event.position),
+        lastSafePosition: plainPosition(event.lastSafePosition),
+      })),
       keySeeker: controller.keySeeker ? {
         id: controller.keySeeker.id,
         activated: Boolean(controller.keySeeker.activated),
@@ -8872,18 +9039,20 @@ export class Game {
       } else {
         this._updateAimFromPointer();
         const movementBasis = this._getPlayerMovementBasis();
-        this.bossStageRuntime?.prePlayerUpdate?.(gameplayDt, this);
-        this.connectorLiftRuntime?.prePlayerUpdate?.(gameplayDt, this);
-        this.connectorTrackTrapRuntime?.prePlayerUpdate?.(gameplayDt, this);
-        for (const enemy of this.enemies) {
-          if (!enemy || enemy.dead || this._deferredEnemyRemovals?.has(enemy)) continue;
-          enemy.prePlayerUpdate?.(gameplayDt, this);
+        if (!this.debugNoClipEnabled) {
+          this.bossStageRuntime?.prePlayerUpdate?.(gameplayDt, this);
+          this.connectorLiftRuntime?.prePlayerUpdate?.(gameplayDt, this);
+          this.connectorTrackTrapRuntime?.prePlayerUpdate?.(gameplayDt, this);
+          for (const enemy of this.enemies) {
+            if (!enemy || enemy.dead || this._deferredEnemyRemovals?.has(enemy)) continue;
+            enemy.prePlayerUpdate?.(gameplayDt, this);
+          }
         }
         const playerGroundY = this._getPlayerGroundY();
         const overworldMovementOrigin = this.worldKind === 'overworld'
           ? this.player.root.position.clone()
           : null;
-        this.player.update(gameplayDt, this.keys, {
+        const playerMovementOptions = {
           arenaRadius: this.arenaRadius,
           movementForward: movementBasis.forward,
           movementRight: movementBasis.right,
@@ -8893,8 +9062,17 @@ export class Game {
           projectileAimInputHeld: Boolean(this.pointer.primary || this.pointer.secondary),
           groundY: playerGroundY,
           game: this,
-        });
-        if (overworldMovementOrigin) {
+        };
+        if (this.debugNoClipEnabled) {
+          this.player.updateNoClip?.(gameplayDt, this.keys, {
+            ...playerMovementOptions,
+            speed: DEBUG_NO_CLIP_SPEED,
+            boostSpeed: DEBUG_NO_CLIP_BOOST_SPEED,
+          });
+        } else {
+          this.player.update(gameplayDt, this.keys, playerMovementOptions);
+        }
+        if (overworldMovementOrigin && !this.debugNoClipEnabled) {
           this.dungeonController?.resolvePlayerMovement?.(overworldMovementOrigin);
         }
         if (this.busterTestRange?.active) {
@@ -11090,6 +11268,7 @@ export class Game {
 
       if (!this.inventoryOpen
         && !this.poseDebugOpen
+        && !this.debugNoClipEnabled
         && !event.repeat
         && (event.code === 'ControlLeft' || event.code === 'ControlRight')) {
         event.preventDefault();
@@ -11097,7 +11276,11 @@ export class Game {
         return;
       }
 
-      if (!this.inventoryOpen && !this.poseDebugOpen && !event.repeat && event.code === 'Space') {
+      if (!this.inventoryOpen
+        && !this.poseDebugOpen
+        && !this.debugNoClipEnabled
+        && !event.repeat
+        && event.code === 'Space') {
         event.preventDefault();
         const movementBasis = this._getPlayerMovementBasis();
 

@@ -68,11 +68,18 @@ function addRect(target, minX, maxX, minZ, maxZ) {
 
 function createFloorPlan() {
   const lavaCells = new Set();
-  for (let z = -12; z <= 4; z += 1) {
+  // Carry the stream one row north of the jump ledges. Without this row the
+  // player can simply walk around the launch and landing through z=5, making
+  // the approved lava jump optional.
+  for (let z = -12; z <= 5; z += 1) {
     const centerX = lavaCenterXAt(z);
     lavaCells.add(`${centerX},${z}`);
     lavaCells.add(`${centerX + 1},${z}`);
   }
+  // Keep the diagonal bend beneath the required opening jump continuous.
+  // Leaving (2,1) empty generated a basalt infill column on the launch lip and
+  // gave airborne ground correction no authored lava surface beneath the gap.
+  lavaCells.add('2,1');
 
   const groundCells = new Set();
   addRect(groundCells, -4, 4, 5, 11);
@@ -84,7 +91,10 @@ function createFloorPlan() {
     const centerX = lavaCenterXAt(z);
     addRect(groundCells, centerX + 2, Math.min(13, centerX + 7), z, z);
   }
-  addRect(groundCells, -2, 9, -11, -6);
+  // This lower shelf belongs to the east bank. Extending it west of the
+  // two-wide stream leaves a sealed-off twelve-tile island with no authored
+  // access, so begin it at the stream's east edge.
+  addRect(groundCells, 4, 9, -11, -6);
   addRect(groundCells, 8, 10, -12, -12);
   for (const cell of lavaCells) groundCells.delete(cell);
 
@@ -934,6 +944,15 @@ function addCatwalkStructure(group, plan, materials, solidZones) {
       ? Math.min(tile.rampStartElevation, tile.rampEndElevation) - 0.22
       : tile.elevation - 0.18;
     if (topY <= baseY + 0.2) continue;
+    const crossesPropFreeLanding = plan.rampLandings.some((landing) => (
+      tile.x >= landing.minX
+        && tile.x <= landing.maxX
+        && tile.z >= landing.minZ
+        && tile.z <= landing.maxZ
+        && baseY <= landing.elevation + 0.05
+        && topY > landing.elevation + 0.05
+    ));
+    if (crossesPropFreeLanding) continue;
     const support = addBox(group, {
       name: `catwalkSupport_${tile.x}_${tile.z}`,
       width: 0.24,

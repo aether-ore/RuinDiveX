@@ -232,6 +232,9 @@ export class DungeonController {
     this.nearestInteractable = null;
     this.lastSafePlayerPosition = new THREE.Vector3();
     this.pendingPlayerJumpOffLanding = null;
+    this.playerWalkabilityCollisionSerial = 0;
+    this.playerWalkabilityCollisionEvents = [];
+    this.lastPlayerWalkabilityCollisionContact = null;
     this.playerRailTopSurfaces = this._collectPlayerRailTopSurfaces();
     this.playerRailRecoveryState = {
       initialized: false,
@@ -2679,6 +2682,25 @@ export class DungeonController {
       position: position ?? keycard.position,
     });
 
+    if (collected) {
+      const definition = this.progressionManager.getKeycard(keycardId);
+      const opensDoorIdsOnCollect = Array.isArray(keycard.opensDoorIdsOnCollect)
+        ? keycard.opensDoorIdsOnCollect
+        : Array.isArray(definition?.opensDoorIdsOnCollect)
+          ? definition.opensDoorIdsOnCollect
+          : [];
+      for (const doorId of new Set(opensDoorIdsOnCollect.filter(Boolean))) {
+        const door = this.doors.find((candidate) => candidate.id === doorId);
+        if (!door?.closed) {
+          continue;
+        }
+        this._openDoor(
+          door,
+          `${door.label ?? 'Bulkhead'} opened by ${definition?.displayName ?? keycard.displayName ?? 'credential'}.`,
+        );
+      }
+    }
+
     keycard.collected = true;
     if (keycard.object) {
       keycard.object.visible = false;
@@ -3157,6 +3179,11 @@ export class DungeonController {
   }
 
   _constrainPlayerToWalkable() {
+    if (this.game?.debugNoClipEnabled) {
+      this.pendingPlayerJumpOffLanding = null;
+      return;
+    }
+
     const playerRoot = this.game.player.root;
     const current = playerRoot.position;
     const playerJumping = this._isPlayerJumping();
@@ -3335,6 +3362,7 @@ export class DungeonController {
     // Reaching this correction path means grounded movement struck a closed
     // door, wall, solid prop, or non-traversable rise. Jet Skates lose their
     // boost on that impact before the capsule is projected back to safety.
+    this._recordPlayerWalkabilityCollision(current, closestFloorTile);
     if (this.game.player.jetSkateState?.active) {
       this.game.player.cancelJetSkateBoost?.();
     }
@@ -3375,6 +3403,72 @@ export class DungeonController {
 
     current.copy(this.lastSafePlayerPosition);
     this._syncPositionToFloor(current, { preservePlayerAction: true, allowClosest: false });
+  }
+
+  _recordPlayerWalkabilityCollision(position, floorTile = null) {
+    const elapsed = Number(this.game?.elapsedTime ?? 0);
+    const closedDoor = this.doors.find((door) => (
+      door.closed && this._isPositionInsideClosedDoor(position, door)
+    ));
+    const solidZone = closedDoor ? null : this.solidZones.find((zone) => (
+      zone?.active !== false
+      && isInsideExpandedZone(
+        position,
+        zone,
+        Math.max(0, Number(zone.playerCollisionPadding) || 0),
+        0,
+      )
+    ));
+    const platformBlocked = !closedDoor
+      && !solidZone
+      && this.game.isPositionInsidePlatformBlock?.(position) === true;
+    const kind = closedDoor
+      ? 'closedDoor'
+      : solidZone
+        ? (solidZone.obstacleKind ?? 'solidZone')
+        : platformBlocked
+          ? 'platformBlock'
+          : 'walkabilityCorrection';
+    const sourceId = closedDoor?.id ?? solidZone?.id ?? null;
+    const previous = this.lastPlayerWalkabilityCollisionContact;
+    const continuingSameContact = previous
+      && previous.kind === kind
+      && previous.sourceId === sourceId
+      && elapsed - previous.elapsed <= 0.22;
+    this.lastPlayerWalkabilityCollisionContact = { kind, sourceId, elapsed };
+    if (continuingSameContact) return;
+
+    const event = {
+      serial: ++this.playerWalkabilityCollisionSerial,
+      elapsed,
+      kind,
+      sourceId,
+      position: {
+        x: Number(position.x ?? 0),
+        y: Number(position.y ?? 0),
+        z: Number(position.z ?? 0),
+      },
+      lastSafePosition: {
+        x: Number(this.lastSafePlayerPosition.x ?? 0),
+        y: Number(this.lastSafePlayerPosition.y ?? 0),
+        z: Number(this.lastSafePlayerPosition.z ?? 0),
+      },
+      floorKey: floorTile?.floorKey
+        ?? (floorTile
+          ? `${Number(floorTile.x ?? 0)},${Number(floorTile.z ?? 0)}@y${Number(floorTile.elevation ?? 0).toFixed(3)}`
+          : null),
+      roomId: floorTile?.roomId ?? null,
+    };
+    this.playerWalkabilityCollisionEvents.push(event);
+    if (this.playerWalkabilityCollisionEvents.length > 200) {
+      this.playerWalkabilityCollisionEvents.shift();
+    }
+
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('ruindivex:player-walkability-collision', {
+        detail: { ...event },
+      }));
+    }
   }
 
   _canPreserveAuthoredVoidJump(position) {

@@ -1,6 +1,8 @@
 import { expect } from '@playwright/test';
 
 const PLAYER_RADIUS = 0.42;
+const PLAYER_BODY_HEIGHT = 2.85;
+const PLAYER_FOOT_CLEARANCE = 0.08;
 const MAXIMUM_GROUNDED_RISE = 0.67;
 const MAXIMUM_DIRECTED_JUMP_RISE = 1.617;
 const MAXIMUM_LEDGE_CLIMB_RISE = 3.564;
@@ -21,7 +23,11 @@ const COMBAT_DAMAGE_WATCHDOG_MILLISECONDS = 6_500;
 // Tank steering advances in frame-sized angular increments. Use one shared
 // dead zone for explicit facing and locomotion so a heading accepted by the
 // walker cannot make orientToward oscillate forever just outside 0.11 radians.
-const ROUTE_FACING_TOLERANCE = 0.14;
+// A single tank-turn frame can be roughly 0.18 radians under a loaded WebGL
+// browser. A narrower dead zone makes short A/D pulses bounce forever across
+// the desired heading without ever permitting W movement.
+const ROUTE_FACING_TOLERANCE = 0.22;
+const ROUTE_WALK_FACING_TOLERANCE = 0.42;
 const CARDINAL_NEIGHBORS = Object.freeze([
   [1, 0],
   [-1, 0],
@@ -79,6 +85,25 @@ export const readPublicV1JourneyState = (page, { includeGeometry = true } = {}) 
   }, { includeGeometry })
 );
 
+/**
+ * Read only the detached player/lock state needed for real-input locomotion.
+ * Large combined rooms can contain thousands of floor and collision records;
+ * steering must not rebuild those arrays every animation pulse.
+ */
+export const readPublicDungeonPlayerJourneyState = (page) => (
+  page.evaluate(() => {
+    const getter = window.game?.getPublicDungeonPlayerJourneyDiagnostics;
+    const legacyGetter = window.game?.getPublicDungeonJourneyDiagnostics;
+    const state = typeof getter === 'function'
+      ? getter.call(window.game)
+      : typeof legacyGetter === 'function'
+        ? legacyGetter.call(window.game, { includeGeometry: false })
+        : null;
+    if (!state) throw new Error('The public player journey requires an attached dungeon.');
+    return state;
+  })
+);
+
 const zoneContains = (point, zone, radius = PLAYER_RADIUS) => {
   if (!zone?.position || zone.active === false) return false;
   const dx = point.x - zone.position.x;
@@ -90,7 +115,11 @@ const zoneContains = (point, zone, radius = PLAYER_RADIUS) => {
   if (Math.abs(localX) > zone.halfWidth + radius
     || Math.abs(localZ) > zone.halfDepth + radius) return false;
   if (zone.verticalHalfHeight == null) return true;
-  return Math.abs(point.y - zone.position.y) <= zone.verticalHalfHeight + 1.43;
+  const playerBottom = point.y + PLAYER_FOOT_CLEARANCE;
+  const playerTop = point.y + PLAYER_BODY_HEIGHT;
+  const zoneBottom = zone.position.y - zone.verticalHalfHeight;
+  const zoneTop = zone.position.y + zone.verticalHalfHeight;
+  return zoneTop > playerBottom && zoneBottom < playerTop;
 };
 
 const doorContains = (point, door, radius = PLAYER_RADIUS) => {
@@ -99,6 +128,7 @@ const doorContains = (point, door, radius = PLAYER_RADIUS) => {
   if (!position) return false;
   return Math.abs(point.x - position.x) <= door.collisionHalfWidth + radius
     && Math.abs(point.z - position.z) <= door.collisionHalfDepth + radius
+    && point.y >= position.y - 0.2
     && point.y <= position.y + door.collisionHeight + 0.2;
 };
 
@@ -111,7 +141,7 @@ const platformContains = (point, platform, radius = PLAYER_RADIUS) => (
 );
 
 const connectionElevation = (tile, dx, dz) => {
-  if (tile.surface !== 'industrialRamp'
+  if (!(tile.surfaceRole === 'ramp' || tile.surface === 'industrialRamp')
     || tile.rampStartElevation == null
     || tile.rampEndElevation == null) return tile.elevation;
   const along = dx * Math.sign(tile.rampDirectionX)
@@ -135,13 +165,18 @@ const resolveTraversalAction = (from, to) => {
   const connectionId = from.connectionId ?? to.connectionId ?? null;
 
   if (Math.abs(rise) <= groundedAllowance) {
+    const rampRouteId = from.rampRouteId ?? to.rampRouteId ?? null;
     return {
-      action: from.surface === 'industrialRamp' || to.surface === 'industrialRamp'
+      action: from.surfaceRole === 'ramp'
+        || to.surfaceRole === 'ramp'
+        || from.surface === 'industrialRamp'
+        || to.surface === 'industrialRamp'
         ? 'ramp'
         : 'walk',
       rise,
       cost: 1 + Math.abs(rise) * 0.18,
       connectionId,
+      rampRouteId,
     };
   }
 
@@ -155,7 +190,9 @@ const resolveTraversalAction = (from, to) => {
     return { action: 'ledge_climb', rise, cost: 4.2 + rise, connectionId };
   }
 
-  if (rise < 0 && Math.abs(rise) <= MAXIMUM_SAFE_DROP) {
+  if (rise < 0
+    && Math.abs(rise) <= MAXIMUM_SAFE_DROP
+    && to.allowsGroundedDropLanding === true) {
     return { action: 'drop', rise, cost: 2.8 + Math.abs(rise) * 0.35, connectionId };
   }
 
@@ -198,6 +235,10 @@ const buildFloorGraph = (state) => {
   const columns = new Map();
   const nodesByFloorKey = new Map();
   for (const tile of state.floorTiles) {
+    // Mandatory public journeys must never silently substitute damaging magma
+    // for an authored jump, bridge, or dry route. Dedicated hazard tests can
+    // drive into magma explicitly with keyboard input instead.
+    if (tile.surface === 'deepMagma' || tile.surfaceRole === 'hazard-floor') continue;
     const point = {
       x: tile.x * state.tileSize,
       y: tile.elevation,
@@ -441,12 +482,16 @@ export const planPublicFloorRoute = (state, target, {
       linkId: edge.traversal.linkId ?? null,
       targetId: edge.traversal.targetId ?? null,
       explicitMechanism: edge.traversal.explicitMechanism === true,
+      rampRouteId: edge.traversal.rampRouteId ?? node.rampRouteId ?? null,
       tile: {
         index: node.index,
         roomId: node.roomId,
         surface: node.surface,
         connectionId: node.connectionId ?? null,
         requiredTraversalAction: node.requiredTraversalAction,
+        surfaceRole: node.surfaceRole ?? null,
+        rampRouteId: edge.traversal.rampRouteId ?? node.rampRouteId ?? null,
+        rampSegmentIndex: node.rampSegmentIndex ?? null,
       },
     });
     cursor = edge.nodeIndex;
@@ -460,6 +505,9 @@ export const planPublicFloorRoute = (state, target, {
       index: start.index,
       roomId: start.roomId,
       surface: start.surface,
+      surfaceRole: start.surfaceRole ?? null,
+      rampRouteId: start.rampRouteId ?? null,
+      rampSegmentIndex: start.rampSegmentIndex ?? null,
       connectionId: start.connectionId ?? null,
     },
   });
@@ -545,6 +593,27 @@ const holdKeys = async (page, keys, duration) => {
   return keys;
 };
 
+const holdKeysForAnimationFrames = async (page, keys, frameCount = 1) => {
+  for (const key of keys) await page.keyboard.down(key);
+  try {
+    await page.evaluate((count) => new Promise((resolve) => {
+      if (typeof requestAnimationFrame !== 'function') {
+        resolve();
+        return;
+      }
+      const step = () => {
+        count -= 1;
+        if (count <= 0) resolve();
+        else requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    }), Math.max(1, Math.floor(frameCount)));
+  } finally {
+    for (const key of keys) await page.keyboard.up(key).catch(() => {});
+  }
+  return keys;
+};
+
 const turnKeyFor = (steering) => (steering.turnError > 0 ? 'KeyA' : 'KeyD');
 
 const releaseKeys = async (page, keys = ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'Space']) => {
@@ -566,17 +635,20 @@ const finishPublicLedgeClimbIfNeeded = async (page, state) => {
   return readPublicV1JourneyState(page);
 };
 
-const orientToward = async (page, target, { timeout = 4_000 } = {}) => {
+const orientToward = async (page, target, {
+  timeout = 30_000,
+  tolerance = ROUTE_FACING_TOLERANCE,
+} = {}) => {
   const started = Date.now();
   let last = null;
   while (Date.now() - started < timeout) {
-    const state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    const state = await readPublicDungeonPlayerJourneyState(page);
     last = steeringFor(state, target);
-    if (Math.abs(last.turnError) <= ROUTE_FACING_TOLERANCE) return last;
+    if (Math.abs(last.turnError) <= tolerance) return last;
     await holdKeys(
       page,
       [turnKeyFor(last)],
-      Math.min(145, Math.max(35, Math.abs(last.turnError) * 290)),
+      Math.min(650, Math.max(120, Math.abs(last.turnError) * 600)),
     );
   }
   throw new Error(`Could not face public route waypoint: ${JSON.stringify({ target, last })}`);
@@ -595,7 +667,7 @@ export const walkToWaypoint = async (page, target, {
   let stepJumpCount = 0;
   let last = null;
   while (Date.now() - started < timeout) {
-    const state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    const state = await readPublicDungeonPlayerJourneyState(page);
     if (state.player.ledgeClinging || state.player.jumpState !== 'Grounded') {
       await page.waitForTimeout(220);
       continue;
@@ -615,17 +687,24 @@ export const walkToWaypoint = async (page, target, {
       bestTurnError = Infinity;
       lastProgressAt = Date.now();
     }
-    if (Math.abs(last.turnError) > ROUTE_FACING_TOLERANCE) {
+    if (Math.abs(last.turnError) > ROUTE_WALK_FACING_TOLERANCE) {
       const angularError = Math.abs(last.turnError);
       if (angularError + 0.02 < bestTurnError) {
         bestTurnError = angularError;
         lastProgressAt = Date.now();
       }
-      await holdKeys(
-        page,
-        [turnKeyFor(last)],
-        Math.min(135, Math.max(32, Math.abs(last.turnError) * 260)),
-      );
+      if (angularError <= 0.65) {
+        // One rendered tank-turn frame is approximately 0.135--0.18 rad. A
+        // frame-sized correction near the locomotion gate avoids oscillating
+        // across a narrow ramp while still guaranteeing a real input frame.
+        await holdKeysForAnimationFrames(page, [turnKeyFor(last)], 1);
+      } else {
+        await holdKeys(
+          page,
+          [turnKeyFor(last)],
+          Math.min(650, Math.max(120, angularError * 600)),
+        );
+      }
       continue;
     }
     const waypointRise = (target.y ?? state.player.position.y) - state.player.position.y;
@@ -651,15 +730,14 @@ export const walkToWaypoint = async (page, target, {
       continue;
     }
     if (Date.now() - lastProgressAt > 2_400
-      && state.player.position.y < 0.65
-      && (target.y ?? 0) < 0.65
+      && Math.abs((target.y ?? state.player.position.y) - state.player.position.y) < 0.65
       && detourCount < 3) {
       // V1's authored pyramid supports and arch feet are not all represented
       // by the high-level route grid. Take one short tank-control dogleg,
       // alternating sides on retries, then reorient to the same verified floor
       // waypoint. This is ordinary walking and remains fully collision bound.
-      await holdKeys(page, [detourTurnKey], 420);
-      await holdKeys(page, ['KeyW'], 620);
+      await holdKeys(page, [detourTurnKey], 220);
+      await holdKeys(page, ['KeyW'], 300);
       detourTurnKey = detourTurnKey === 'KeyA' ? 'KeyD' : 'KeyA';
       detourCount += 1;
       bestDistance = Infinity;
@@ -670,9 +748,50 @@ export const walkToWaypoint = async (page, target, {
     if (Date.now() - lastProgressAt > 8_000) {
       throw new Error(`Public-input walk stalled: ${JSON.stringify({ target, last })}`);
     }
-    await holdKeys(page, ['KeyW'], Math.min(260, Math.max(80, last.distance * 48)));
+    const angularError = Math.abs(last.turnError);
+    const remainingDistance = Math.max(0, last.distance - stopDistance);
+    const forwardMilliseconds = angularError > 0.18
+      ? 120
+      : angularError > 0.08
+        ? 220
+        : Math.min(620, Math.max(180, remainingDistance * 105));
+    await holdKeys(page, ['KeyW'], forwardMilliseconds);
   }
   throw new Error(`Public-input walk timed out: ${JSON.stringify({ target, last })}`);
+};
+
+/**
+ * Perform one ordinary forward jump after tank-steering toward a world-space
+ * landing. This is intentionally input-only; the returned detached public
+ * state is evidence of where the authored controller actually landed.
+ */
+export const performPublicDirectedJump = async (page, target, {
+  preRunMilliseconds = 0,
+  forwardHoldMilliseconds = 720,
+  settleTimeout = 5_000,
+} = {}) => {
+  // Heavy authored rooms can render slowly enough that each detached public
+  // state sample spans several frames. Give the real tank-turn input time to
+  // settle instead of treating browser load as a failed jump setup.
+  await orientToward(page, target, { timeout: 90_000, tolerance: 0.32 });
+  await page.keyboard.down('KeyW');
+  try {
+    if (preRunMilliseconds > 0) {
+      await page.waitForTimeout(preRunMilliseconds);
+    }
+    await page.keyboard.down('Space');
+    await page.waitForTimeout(100);
+    await page.keyboard.up('Space');
+    await page.waitForTimeout(forwardHoldMilliseconds);
+  } finally {
+    await page.keyboard.up('Space').catch(() => {});
+    await page.keyboard.up('KeyW').catch(() => {});
+  }
+  await expect.poll(async () => {
+    const state = await readPublicDungeonPlayerJourneyState(page);
+    return state.player.jumpState === 'Grounded' && !state.player.ledgeClinging;
+  }, { timeout: settleTimeout }).toBe(true);
+  return readPublicDungeonPlayerJourneyState(page);
 };
 
 const performTraversalAction = async (page, step) => {
@@ -698,7 +817,7 @@ const performTraversalAction = async (page, step) => {
       await orientToward(page, mountPosition);
       await holdKeys(page, ['KeyW'], 90);
     }
-    state = await readPublicV1JourneyState(page, { includeGeometry: false });
+    state = await readPublicDungeonPlayerJourneyState(page);
     if (state.player.ladderTraversal?.ladderId !== ladder.id) {
       throw new Error(`Could not mount public ladder ${ladder.id}.`);
     }
@@ -707,7 +826,7 @@ const performTraversalAction = async (page, step) => {
     await page.keyboard.down(climbKey);
     try {
       await expect.poll(async () => {
-        const current = await readPublicV1JourneyState(page, { includeGeometry: false });
+        const current = await readPublicDungeonPlayerJourneyState(page);
         return current.player.ladderTraversal === null
           && Math.abs(current.player.position.y - step.point.y) <= 0.45;
       // The 14 m climb is frame-driven. Under WebGL combat-test load the
@@ -822,6 +941,7 @@ export const followPublicFloorRoute = async (page, target, {
   stopDistance = 0.78,
   timeout = 150_000,
   maximumReplans = 5,
+  onRampMilestone = null,
 } = {}) => {
   const started = Date.now();
   let lastFailure = null;
@@ -858,7 +978,7 @@ export const followPublicFloorRoute = async (page, target, {
         // that node, so the public executor must actually walk onto it before
         // consuming route.slice(1); silently skipping it makes every later
         // waypoint originate from a position the player never occupied.
-        const liveBeforeStart = await readPublicV1JourneyState(page, { includeGeometry: false });
+        const liveBeforeStart = await readPublicDungeonPlayerJourneyState(page);
         if (distance2d(liveBeforeStart.player.position, route[0].point) > 0.78) {
           await walkToWaypoint(page, route[0].point, {
             stopDistance: 0.72,
@@ -866,11 +986,45 @@ export const followPublicFloorRoute = async (page, target, {
           });
         }
         const routeSteps = route.slice(1);
+        const rampGroups = [];
+        for (let routeIndex = 0; routeIndex < routeSteps.length; routeIndex += 1) {
+          const routeStep = routeSteps[routeIndex];
+          if (routeStep.action !== 'ramp' || !routeStep.rampRouteId) continue;
+          const previousGroup = rampGroups.at(-1);
+          if (previousGroup
+            && previousGroup.rampRouteId === routeStep.rampRouteId
+            && previousGroup.lastIndex === routeIndex - 1) {
+            previousGroup.lastIndex = routeIndex;
+            previousGroup.stepIndexes.push(routeIndex);
+          } else {
+            rampGroups.push({
+              rampRouteId: routeStep.rampRouteId,
+              firstIndex: routeIndex,
+              lastIndex: routeIndex,
+              stepIndexes: [routeIndex],
+            });
+          }
+        }
+        const rampGroupByStepIndex = new Map();
+        for (const group of rampGroups) {
+          group.middleIndex = group.stepIndexes[Math.floor((group.stepIndexes.length - 1) * 0.5)];
+          for (const routeIndex of group.stepIndexes) rampGroupByStepIndex.set(routeIndex, group);
+        }
         for (let stepIndex = 0; stepIndex < routeSteps.length; stepIndex += 1) {
           const step = routeSteps[stepIndex];
           const previousStep = route[stepIndex];
           const nextStep = routeSteps[stepIndex + 1] ?? null;
+          const rampGroup = rampGroupByStepIndex.get(stepIndex) ?? null;
           if (Date.now() - started >= timeout) throw new Error('Overall public route timeout.');
+          if (rampGroup?.firstIndex === stepIndex && onRampMilestone) {
+            await onRampMilestone({
+              stage: 'entrance',
+              rampRouteId: rampGroup.rampRouteId,
+              point: { ...previousStep.point },
+              roomId: previousStep.tile?.roomId ?? step.tile?.roomId ?? null,
+              direction: step.point.y >= previousStep.point.y ? 'ascending' : 'descending',
+            });
+          }
           if (['jump', 'ledge_climb', 'drop', 'ladder', 'automatic_lift', 'ramp'].includes(step.action)) {
             traversedActions.push(step.action);
           }
@@ -896,6 +1050,26 @@ export const followPublicFloorRoute = async (page, target, {
               : ordinaryIntermediateWalk ? 2.55 : 0.78,
             timeout: step.action === 'ledge_climb' ? 60_000 : 90_000,
           });
+          if (rampGroup && onRampMilestone) {
+            if (rampGroup.middleIndex === stepIndex) {
+              await onRampMilestone({
+                stage: 'middle',
+                rampRouteId: rampGroup.rampRouteId,
+                point: { ...step.point },
+                roomId: step.tile?.roomId ?? null,
+                direction: step.point.y >= previousStep.point.y ? 'ascending' : 'descending',
+              });
+            }
+            if (rampGroup.lastIndex === stepIndex) {
+              await onRampMilestone({
+                stage: 'end',
+                rampRouteId: rampGroup.rampRouteId,
+                point: { ...step.point },
+                roomId: step.tile?.roomId ?? null,
+                direction: step.point.y >= previousStep.point.y ? 'ascending' : 'descending',
+              });
+            }
+          }
           if (step.connectionId) traversedConnectorIds.add(step.connectionId);
         }
         return {
@@ -1097,7 +1271,7 @@ export const traversePublicConnectorBothWays = async (page, connectorRoute, {
     'Reverse connector leg',
   );
 
-  const returnedState = await readPublicV1JourneyState(page, { includeGeometry: false });
+  const returnedState = await readPublicDungeonPlayerJourneyState(page);
   const horizontalError = distance2d(returnedState.player.position, source);
   const verticalError = Math.abs(returnedState.player.position.y - source.y);
   if (horizontalError > targetRadius || verticalError > maximumTargetVerticalDifference) {
@@ -1212,7 +1386,7 @@ export const collectPublicKeycard = async (page, keycardId, targetPosition, {
 
 const encounterGoalZone = (encounter) => encounter.triggerZone ?? encounter.zone;
 
-const triggerPublicEncounter = async (page, encounterId, timeout) => {
+const triggerPublicEncounter = async (page, encounterId, timeout, onRampMilestone = null) => {
   let state = await readPublicV1JourneyState(page);
   let encounter = findById(state.encounters, encounterId);
   if (encounter.cleared || encounter.spawned) return encounter;
@@ -1226,6 +1400,7 @@ const triggerPublicEncounter = async (page, encounterId, timeout) => {
     // approach here made a still-solvable journey fail before its declared
     // budget, especially when a vertical connector preceded the trigger.
     timeout,
+    onRampMilestone,
   });
   await expect.poll(async () => {
     state = await readPublicV1JourneyState(page, { includeGeometry: false });
@@ -2083,9 +2258,10 @@ const clearPublicKeycardGuard = async (page, {
 
 export const clearPublicEncounter = async (page, encounterId, {
   timeout = 210_000,
+  onRampMilestone = null,
 } = {}) => {
   if (encounterId === 'keycardGuard') timeout = Math.max(timeout, 420_000);
-  await triggerPublicEncounter(page, encounterId, timeout);
+  await triggerPublicEncounter(page, encounterId, timeout, onRampMilestone);
   const patrolState = await readPublicV1JourneyState(page);
   const patrolPoints = buildEncounterPatrolPoints(patrolState, encounterId);
   const patrolVisits = new Map();
@@ -2106,7 +2282,7 @@ export const clearPublicEncounter = async (page, encounterId, {
     } finally {
       await page.mouse.up({ button: 'left' }).catch(() => {});
       await releaseKeys(page, ['KeyW', 'KeyS', 'KeyA', 'KeyD']);
-      const finalState = await readPublicV1JourneyState(page, { includeGeometry: false })
+      const finalState = await readPublicDungeonPlayerJourneyState(page)
         .catch(() => null);
       if (finalState?.lock?.movementLocked) await page.keyboard.press('Tab').catch(() => {});
     }
@@ -2356,7 +2532,7 @@ export const clearPublicEncounter = async (page, encounterId, {
   } finally {
     await page.mouse.up({ button: 'left' }).catch(() => {});
     await releaseKeys(page, ['KeyW', 'KeyS', 'KeyA', 'KeyD']);
-    const finalState = await readPublicV1JourneyState(page, { includeGeometry: false }).catch(() => null);
+    const finalState = await readPublicDungeonPlayerJourneyState(page).catch(() => null);
     if (finalState?.lock?.movementLocked) await page.keyboard.press('Tab').catch(() => {});
   }
   throw new Error(`Public combat timed out in ${encounterId}: ${JSON.stringify(lastState)}`);

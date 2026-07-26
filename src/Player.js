@@ -419,6 +419,7 @@ export class Player {
       wasGrounded: true,
     };
     this.lastDamageResult = null;
+    this.noClipEnabled = false;
 
     this.baseStats = { ...PLAYER_BASE_STATS };
     this.stats = { ...PLAYER_BASE_STATS };
@@ -2257,6 +2258,80 @@ export class Player {
       jumpReachHeight: this.getJumpReachHeight(state),
       previousRootY,
     }) === true;
+  }
+
+  setNoClipEnabled(enabled, { game = null, groundY = null } = {}) {
+    const next = Boolean(enabled);
+    if (next === this.noClipEnabled) return this.noClipEnabled;
+
+    if (next) {
+      this.clearExternalMotion('no-clip', game);
+      this._prepareForExternalControl();
+      this.animation.externalControlLocked = false;
+      this.noClipEnabled = true;
+      this.root.rotation.x = 0;
+      this.root.rotation.z = 0;
+      this.animation.setState('idle');
+    } else {
+      this.noClipEnabled = false;
+      this._restoreAfterExternalMotion({
+        grounded: true,
+        groundY: Number.isFinite(groundY) ? groundY : this.root.position.y,
+      });
+      this.modelRoot.position.y = 0;
+    }
+    return this.noClipEnabled;
+  }
+
+  updateNoClip(dt, input, movementOptions = {}) {
+    if (!this.noClipEnabled || this.dead) return;
+
+    this._updateBarrierState(dt);
+    const forward = movementOptions.movementForward ?? worldForward.set(0, 0, 1);
+    const right = movementOptions.movementRight ?? desiredMoveVelocity.set(1, 0, 0);
+    worldMoveDirection.set(0, 0, 0);
+    if (input.has('KeyW') || input.has('ArrowUp')) worldMoveDirection.add(forward);
+    if (input.has('KeyS') || input.has('ArrowDown')) worldMoveDirection.sub(forward);
+    if (input.has('KeyD') || input.has('ArrowRight')) worldMoveDirection.add(right);
+    if (input.has('KeyA') || input.has('ArrowLeft')) worldMoveDirection.sub(right);
+    worldMoveDirection.y = 0;
+
+    const horizontalMoving = worldMoveDirection.lengthSq() > 0.0001;
+    if (horizontalMoving) worldMoveDirection.normalize();
+    const vertical = (input.has('Space') ? 1 : 0)
+      - ((input.has('ControlLeft') || input.has('ControlRight')) ? 1 : 0);
+    worldMoveDirection.y = vertical;
+    const moving = worldMoveDirection.lengthSq() > 0.0001;
+    if (moving) {
+      worldMoveDirection.normalize();
+      const boosting = input.has('ShiftLeft') || input.has('ShiftRight');
+      const speed = boosting
+        ? Number(movementOptions.boostSpeed) || 34
+        : Number(movementOptions.speed) || 14;
+      this.root.position.addScaledVector(worldMoveDirection, speed * Math.max(0, dt));
+    }
+
+    if (horizontalMoving) {
+      this.lastMoveDirection.set(worldMoveDirection.x, 0, worldMoveDirection.z).normalize();
+      this.faceDirection(this.lastMoveDirection);
+    }
+    this.velocity.set(0, 0, 0);
+    this.takeoffHorizontalVelocity.set(0, 0, 0);
+    this.jumpState = MML_JUMP_STATES.Grounded;
+    this.isRunning = moving;
+    this.tankTurnActive = false;
+    this.tankTurnAmount = 0;
+    this.tankTurnTranslating = false;
+    this.animation.update(dt, {
+      moving,
+      running: moving,
+      moveAmount: moving ? PLAYER_RUN_ANIMATION_AMOUNT : 0,
+    });
+    this.updateWeaponVisualState();
+    this._updateExternalModelMotion(dt, moving, moving ? PLAYER_RUN_ANIMATION_AMOUNT : 0, false, moving, {
+      lockOnActive: false,
+      strafeAmount: 0,
+    });
   }
 
   isClimbingLadder() {
@@ -4291,6 +4366,12 @@ export class Player {
       resolvedReactionTier: 0,
       statusEligible: false,
     };
+
+    if (this.noClipEnabled) {
+      result.immune = true;
+      this.lastDamageResult = result;
+      return result;
+    }
 
     if (this.dead || amount <= 0 || this.isPowerKnockbackActive()) {
       this.lastDamageResult = result;

@@ -1,0 +1,109 @@
+{
+  "url": "/?startupWorld=dungeon&roomPreview=magma-breached-freight-adit&dungeonSeed=combined-magma-final-public-qa-20260726&qaRevision=combined-magma-final-public-journey-v1-20260726",
+  "completedAt": "2026-07-26T09:40:54.412Z",
+  "entries": [
+    {
+      "sequence": 1,
+      "kind": "milestone-00-natural-entry",
+      "requestedAtMilliseconds": 5043,
+      "capturedAtMilliseconds": 5172,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-40-42-933Z\\001-milestone-00-natural-entry-0005s.jpg",
+      "player": {
+        "position": {
+          "x": 0,
+          "y": 0,
+          "z": 22.4
+        },
+        "rotationY": 3.141592653589793,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.13901322101870942,
+          "y": 2.0217906678267936,
+          "z": 21.37822117790576
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -0.00006747159842967825,
+            "y": 0,
+            "z": -0.9999999977237916
+          },
+          "right": {
+            "x": 0.9999999977237916,
+            "y": 0,
+            "z": -0.00006747159842967825
+          }
+        }
+      },
+      "collision": null,
+      "metadata": {}
+    },
+    {
+      "sequence": 2,
+      "kind": "milestone-01-opening-lava-jump-result",
+      "requestedAtMilliseconds": 11118,
+      "capturedAtMilliseconds": 11203,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-40-42-933Z\\002-milestone-01-opening-lava-jump-result-0011s.jpg",
+      "player": {
+        "position": {
+          "x": 7.536738707767508,
+          "y": -2.8,
+          "z": 4.220250043347342
+        },
+        "rotationY": 1.7751226530426214,
+        "health": 152.72004000215065,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": 7.382943181186894,
+          "y": -1.4215519408012027,
+          "z": 3.771810562523115
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 0.9794487308137368,
+            "y": 0,
+            "z": -0.2016932911808425
+          },
+          "right": {
+            "x": 0.2016932911808425,
+            "y": 0,
+            "z": 0.9794487308137368
+          }
+        }
+      },
+      "collision": null,
+      "metadata": {
+        "target": {
+          "x": 10.75,
+          "y": 0,
+          "z": 5.6
+        },
+        "actual": {
+          "x": 7.497265482702294,
+          "y": -2.8,
+          "z": 4.228392236663828
+        }
+      }
+    }
+  ]
+}

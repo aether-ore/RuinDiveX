@@ -417,6 +417,20 @@
             <textarea id="pose-debug-output" class="pose-debug-output" readonly></textarea>
           </div>
           <div id="platform-debug-view" class="platform-debug-view" data-debug-view="platforming" hidden>
+            <section class="platform-debug-section" aria-labelledby="platform-noclip-heading">
+              <h2 id="platform-noclip-heading">Traversal Override</h2>
+              <button
+                id="platform-debug-no-clip"
+                class="platform-debug-no-clip"
+                type="button"
+                data-action="platform-toggle-no-clip"
+                aria-pressed="false"
+              >No Clip: Off</button>
+              <output id="platform-debug-no-clip-status" class="platform-debug-no-clip-status" aria-live="polite">
+                Normal collision and gravity are active.
+              </output>
+              <small>WASD moves, Space rises, Ctrl descends, and Shift boosts speed. Close this menu to fly.</small>
+            </section>
             <section class="platform-debug-section" aria-labelledby="platform-jump-heading">
               <h2 id="platform-jump-heading">Jump Physics</h2>
               <div class="platform-debug-grid">

@@ -1,0 +1,273 @@
+{
+  "url": "/?startupWorld=dungeon&roomPreview=magma-breached-freight-adit&dungeonSeed=combined-magma-final-public-qa-20260726&qaRevision=combined-magma-final-public-journey-v1-20260726",
+  "startedAt": "2026-07-26T09:15:12.250Z",
+  "entries": [
+    {
+      "sequence": 1,
+      "kind": "milestone-00-natural-entry",
+      "requestedAtMilliseconds": 30911,
+      "capturedAtMilliseconds": 39519,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-15-12-047Z\\001-milestone-00-natural-entry-0031s.jpg",
+      "player": {
+        "position": {
+          "x": 0,
+          "y": 0,
+          "z": 22.4
+        },
+        "rotationY": 3.141592653589793,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.13958613616265092,
+          "y": 2.0138341154029837,
+          "z": 21.378367675009123
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -0.0005166436214353899,
+            "y": 0,
+            "z": -0.9999998665396752
+          },
+          "right": {
+            "x": 0.9999998665396752,
+            "y": 0,
+            "z": -0.0005166436214353899
+          }
+        }
+      },
+      "collision": null,
+      "metadata": {}
+    },
+    {
+      "sequence": 2,
+      "kind": "milestone-01-opening-lava-jump-landed",
+      "requestedAtMilliseconds": 161854,
+      "capturedAtMilliseconds": 166870,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-15-12-047Z\\002-milestone-01-opening-lava-jump-landed-0162s.jpg",
+      "player": {
+        "position": {
+          "x": 9.1729015734467,
+          "y": 0,
+          "z": 4.444204541361298
+        },
+        "rotationY": 1.7915926535897948,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": 9.455646604374175,
+          "y": 1.2686238040845377,
+          "z": 3.967556845362345
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 0.975719080256339,
+            "y": 0,
+            "z": -0.21902574374653744
+          },
+          "right": {
+            "x": 0.21902574374653744,
+            "y": 0,
+            "z": 0.975719080256339
+          }
+        }
+      },
+      "collision": null,
+      "metadata": {}
+    },
+    {
+      "sequence": 3,
+      "kind": "collision",
+      "requestedAtMilliseconds": 262938,
+      "capturedAtMilliseconds": 269114,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-15-12-047Z\\003-collision-001-walkabilitycorrection.jpg",
+      "player": {
+        "position": {
+          "x": 18.11066519255216,
+          "y": -2.8,
+          "z": 9.95556315514091
+        },
+        "rotationY": 0.8465926535897947,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": 18.526353022278233,
+          "y": -1.3527897874062322,
+          "z": 10.091865364834284
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 0.7768762497020815,
+            "y": 0,
+            "z": 0.629653311472932
+          },
+          "right": {
+            "x": -0.629653311472932,
+            "y": 0,
+            "z": 0.7768762497020815
+          }
+        }
+      },
+      "collision": {
+        "serial": 1,
+        "elapsed": 21.700600000024018,
+        "kind": "walkabilityCorrection",
+        "sourceId": null,
+        "position": {
+          "x": 17.889702151705695,
+          "y": -2.8,
+          "z": 10.40940249503116
+        },
+        "lastSafePosition": {
+          "x": 17.15565543974117,
+          "y": -2.8,
+          "z": 9.760114096356059
+        },
+        "floorKey": "6,4@y0.000",
+        "roomId": "magma-breached-freight-adit"
+      },
+      "metadata": null
+    },
+    {
+      "sequence": 4,
+      "kind": "milestone-ramp-lava-east-ramp-out-ascending-entrance",
+      "requestedAtMilliseconds": 363504,
+      "capturedAtMilliseconds": 372663,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-15-12-047Z\\004-milestone-ramp-lava-east-ramp-out-ascending-entrance-0364s.jpg",
+      "player": {
+        "position": {
+          "x": 16.29714766655269,
+          "y": -2.8,
+          "z": 2.2809970826969406
+        },
+        "rotationY": 3.816592653589792,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": 15.753754116653486,
+          "y": -1.5408051793238386,
+          "z": 2.2451429397615694
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -0.623031378313335,
+            "y": 0,
+            "z": -0.7821968432798654
+          },
+          "right": {
+            "x": 0.7821968432798654,
+            "y": 0,
+            "z": -0.623031378313335
+          }
+        }
+      },
+      "collision": null,
+      "metadata": {
+        "stage": "entrance",
+        "rampRouteId": "lava-east-ramp-out",
+        "point": {
+          "x": 16.799999999999997,
+          "y": -2.8,
+          "z": 2.8
+        },
+        "roomId": "magma-breached-freight-adit",
+        "direction": "ascending"
+      }
+    },
+    {
+      "sequence": 5,
+      "kind": "milestone-ramp-lava-east-ramp-out-ascending-middle",
+      "requestedAtMilliseconds": 744419,
+      "capturedAtMilliseconds": 753526,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-15-12-047Z\\005-milestone-ramp-lava-east-ramp-out-ascending-middle-0744s.jpg",
+      "player": {
+        "position": {
+          "x": 13.72010276290491,
+          "y": -1.1322258719000833,
+          "z": -8.6066447685995
+        },
+        "rotationY": 3.276592653589793,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": 13.272463303092207,
+          "y": 0.12696895302723143,
+          "z": -8.916775359893359
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -0.13459030746020986,
+            "y": 0,
+            "z": -0.9909013316863421
+          },
+          "right": {
+            "x": 0.9909013316863421,
+            "y": 0,
+            "z": -0.13459030746020986
+          }
+        }
+      },
+      "collision": null,
+      "metadata": {
+        "stage": "middle",
+        "rampRouteId": "lava-east-ramp-out",
+        "point": {
+          "x": 14,
+          "y": -1.1666666666666665,
+          "z": -8.399999999999999
+        },
+        "roomId": "magma-breached-freight-adit",
+        "direction": "ascending"
+      }
+    }
+  ]
+}

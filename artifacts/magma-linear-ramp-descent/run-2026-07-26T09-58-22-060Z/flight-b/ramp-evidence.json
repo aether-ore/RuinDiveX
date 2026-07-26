@@ -1,0 +1,151 @@
+{
+  "url": "/?startupWorld=dungeon&roomPreview=magma-linear-digger-excavation&roomPreviewAnchor=flightBTop&roomPreviewFacing=west&dungeonSeed=linear-ramp-descent-flight-b&qaRevision=linear-digger-ramp-descent-only-v1-20260726",
+  "routeId": "digger-descent-flight-b",
+  "completedAt": "2026-07-26T09:58:50.837Z",
+  "entries": [
+    {
+      "label": "top",
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-linear-ramp-descent\\run-2026-07-26T09-58-22-060Z\\flight-b\\01-top.png",
+      "player": {
+        "position": {
+          "x": 30.799999999999997,
+          "y": -7,
+          "z": -61.599999999999994
+        },
+        "rotationY": -1.5707963267948966,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": 29.77820831094051,
+          "y": -4.977328052059292,
+          "z": -61.461013177033834
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -0.9999999991010784,
+            "y": 0,
+            "z": 0.000042400983020890905
+          },
+          "right": {
+            "x": -0.000042400983020890905,
+            "y": 0,
+            "z": -0.9999999991010784
+          }
+        }
+      },
+      "metadata": {
+        "expected": {
+          "x": 30.799999999999997,
+          "y": -7,
+          "z": -61.599999999999994
+        }
+      }
+    },
+    {
+      "label": "midpoint",
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-linear-ramp-descent\\run-2026-07-26T09-58-22-060Z\\flight-b\\02-midpoint.png",
+      "player": {
+        "position": {
+          "x": 8.193676180168104,
+          "y": -10.5396776916694,
+          "z": -61.599999999999994
+        },
+        "rotationY": -1.5707963267948966,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": 7.996327162527223,
+          "y": -9.145063875930575,
+          "z": -61.3494821988668
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -1,
+            "y": 0,
+            "z": -1.0387178396060887e-10
+          },
+          "right": {
+            "x": 1.0387178396060887e-10,
+            "y": 0,
+            "z": -1
+          }
+        }
+      },
+      "metadata": {
+        "expected": {
+          "x": 8.399999999999999,
+          "y": -10.5,
+          "z": -61.599999999999994
+        }
+      }
+    },
+    {
+      "label": "bottom",
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-linear-ramp-descent\\run-2026-07-26T09-58-22-060Z\\flight-b\\03-bottom.png",
+      "player": {
+        "position": {
+          "x": -13.80637253990354,
+          "y": -14,
+          "z": -61.599999999999994
+        },
+        "rotationY": -1.5707963267948966,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -14.146299102665749,
+          "y": -12.652949373302373,
+          "z": -61.46101383957012
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -1,
+            "y": 0,
+            "z": -7.703890547642574e-15
+          },
+          "right": {
+            "x": 7.703890547642574e-15,
+            "y": 0,
+            "z": -1
+          }
+        }
+      },
+      "metadata": {
+        "expected": {
+          "x": -14,
+          "y": -14,
+          "z": -61.599999999999994
+        }
+      }
+    }
+  ]
+}

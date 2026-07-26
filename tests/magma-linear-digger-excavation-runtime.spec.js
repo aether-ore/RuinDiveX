@@ -315,76 +315,70 @@ test('Linear Digger Excavation preview loads, advances frames, and remains physi
   await page.evaluate(() => window.game.stop());
 });
 
-test('first descent has a flat open landing and a public-input route into the middle excavation', async ({ page }) => {
-  const runtimeErrors = [];
-  page.on('pageerror', (error) => runtimeErrors.push(error.message));
-  page.on('console', (message) => {
-    if (message.type() === 'error') runtimeErrors.push(message.text());
+for (const ramp of [
+  {
+    routeId: 'digger-descent-flight-a',
+    anchor: 'flightATop',
+    bottomX: -17 * 2.8,
+    bottomY: -7,
+  },
+  {
+    routeId: 'digger-descent-flight-b',
+    anchor: 'flightBTop',
+    bottomX: -5 * 2.8,
+    bottomY: -14,
+  },
+]) {
+  test(`${ramp.routeId} descends from its upper landing to its lower landing`, async ({ page }) => {
+    const runtimeErrors = [];
+    page.on('pageerror', (error) => runtimeErrors.push(error.message));
+    page.on('console', (message) => {
+      if (message.type() === 'error') runtimeErrors.push(message.text());
+    });
+    await page.addInitScript(() => {
+      window.__linearRampWalkabilityCollisions = [];
+      window.addEventListener('ruindivex:player-walkability-collision', (event) => {
+        window.__linearRampWalkabilityCollisions.push(structuredClone(event.detail));
+      });
+    });
+    await page.goto(
+      '/?startupWorld=dungeon&roomPreview=magma-linear-digger-excavation'
+        + `&roomPreviewAnchor=${ramp.anchor}&roomPreviewFacing=west`
+        + `&dungeonSeed=${ramp.routeId}-downhill-runtime`,
+    );
+    await page.waitForFunction(() => (
+      document.getElementById('game-container')?.dataset.browserTestReady === 'true'
+    ));
+    await page.waitForTimeout(1200);
+    await page.locator('canvas').click({ position: { x: 640, y: 360 } });
+    await page.evaluate(() => {
+      window.__linearRampWalkabilityCollisions.length = 0;
+    });
+    const readPlayer = () => page.evaluate(() => (
+      window.game.getPublicDungeonPlayerJourneyDiagnostics().player.position
+    ));
+
+    const deadline = Date.now() + 20_000;
+    await page.keyboard.down('KeyW');
+    try {
+      while (Date.now() < deadline) {
+        await page.waitForTimeout(120);
+        const player = await readPlayer();
+        if (player.x <= ramp.bottomX + 0.8 && player.y <= ramp.bottomY + 0.35) break;
+      }
+    } finally {
+      await page.keyboard.up('KeyW');
+    }
+
+    const landing = await readPlayer();
+    const collisions = await page.evaluate(() => window.__linearRampWalkabilityCollisions);
+    expect(landing.x).toBeLessThanOrEqual(ramp.bottomX + 0.8);
+    expect(landing.y).toBeCloseTo(ramp.bottomY, 1);
+    expect(collisions).toEqual([]);
+    expect(runtimeErrors).toEqual([]);
+    await page.evaluate(() => window.game.stop());
   });
-  await page.goto(
-    '/?startupWorld=dungeon&roomPreview=magma-linear-digger-excavation'
-      + '&roomPreviewAnchor=flightADescent&dungeonSeed=wall-collision-sweep',
-  );
-  await page.waitForFunction(() => (
-    document.getElementById('game-container')?.dataset.browserTestReady === 'true'
-  ));
-  await page.waitForTimeout(1200);
-  await page.locator('canvas').click({ position: { x: 640, y: 360 } });
-  const readPlayer = () => page.evaluate(() => (
-    window.game.getPublicDungeonJourneyDiagnostics({ includeGeometry: false }).player.position
-  ));
-  const start = await readPlayer();
-
-  await page.keyboard.down('KeyW');
-  await page.waitForTimeout(6200);
-  await page.keyboard.up('KeyW');
-  const landing = await readPlayer();
-  expect(landing.x).toBeLessThan(start.x - 9);
-  expect(landing.y).toBeCloseTo(-7, 2);
-
-  await page.keyboard.down('KeyD');
-  await page.waitForTimeout(1300);
-  await page.keyboard.up('KeyD');
-  await page.keyboard.down('KeyW');
-  await page.waitForTimeout(4000);
-  await page.keyboard.up('KeyW');
-  const chamber = await readPlayer();
-  expect(chamber.z).toBeLessThan(landing.z - 4);
-  expect(chamber.y).toBeCloseTo(-7, 2);
-  expect(runtimeErrors).toEqual([]);
-  await page.evaluate(() => window.game.stop());
-});
-
-test('second descent remains unobstructed where the lava passes beneath it', async ({ page }) => {
-  const runtimeErrors = [];
-  page.on('pageerror', (error) => runtimeErrors.push(error.message));
-  page.on('console', (message) => {
-    if (message.type() === 'error') runtimeErrors.push(message.text());
-  });
-  await page.goto(
-    '/?startupWorld=dungeon&roomPreview=magma-linear-digger-excavation'
-      + '&roomPreviewAnchor=flightBDescent&roomPreviewFacing=east'
-      + '&dungeonSeed=wall-collision-sweep',
-  );
-  await page.waitForFunction(() => (
-    document.getElementById('game-container')?.dataset.browserTestReady === 'true'
-  ));
-  await page.waitForTimeout(1200);
-  await page.locator('canvas').click({ position: { x: 640, y: 360 } });
-  const readPlayer = () => page.evaluate(() => (
-    window.game.getPublicDungeonJourneyDiagnostics({ includeGeometry: false }).player.position
-  ));
-  const start = await readPlayer();
-
-  await page.keyboard.down('KeyW');
-  await page.waitForTimeout(8000);
-  await page.keyboard.up('KeyW');
-  const rampProgress = await readPlayer();
-  expect(rampProgress.x).toBeGreaterThan(start.x + 9);
-  expect(rampProgress.y).toBeGreaterThan(start.y + 1);
-  expect(runtimeErrors).toEqual([]);
-  await page.evaluate(() => window.game.stop());
-});
+}
 
 test('only bored-wall panels crossing the camera-to-player silhouette clear', async ({ page }) => {
   await page.goto('/?startupWorld=dungeon&roomPreview=magma-linear-digger-excavation&dungeonSeed=linear-runtime');

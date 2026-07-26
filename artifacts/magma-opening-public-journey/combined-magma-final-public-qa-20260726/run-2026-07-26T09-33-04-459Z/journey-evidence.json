@@ -1,0 +1,52 @@
+{
+  "url": "/?startupWorld=dungeon&roomPreview=magma-breached-freight-adit&dungeonSeed=combined-magma-final-public-qa-20260726&qaRevision=combined-magma-final-public-journey-v1-20260726",
+  "completedAt": "2026-07-26T09:36:06.354Z",
+  "entries": [
+    {
+      "sequence": 1,
+      "kind": "milestone-00-natural-entry",
+      "requestedAtMilliseconds": 33848,
+      "capturedAtMilliseconds": 42548,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-33-04-459Z\\001-milestone-00-natural-entry-0034s.jpg",
+      "player": {
+        "position": {
+          "x": 0,
+          "y": 0,
+          "z": 22.4
+        },
+        "rotationY": 3.141592653589793,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.13958617945157042,
+          "y": 2.013833422652181,
+          "z": 21.378367689660397
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -0.0005166817237233134,
+            "y": 0,
+            "z": -0.9999998665199894
+          },
+          "right": {
+            "x": 0.9999998665199894,
+            "y": 0,
+            "z": -0.0005166817237233134
+          }
+        }
+      },
+      "collision": null,
+      "metadata": {}
+    }
+  ]
+}

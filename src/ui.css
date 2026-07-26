@@ -3522,6 +3522,41 @@ button:focus-visible {
   letter-spacing: 0;
 }
 
+.platform-debug-no-clip {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid rgba(125, 248, 255, 0.42);
+  border-radius: 5px;
+  color: var(--ink);
+  background: rgba(13, 37, 49, 0.86);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.platform-debug-no-clip[aria-pressed="true"] {
+  border-color: rgba(255, 211, 111, 0.84);
+  color: #fff0b8;
+  background: rgba(112, 69, 16, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(255, 211, 111, 0.18);
+}
+
+.platform-debug-no-clip-status {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.platform-debug-section small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .platform-debug-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

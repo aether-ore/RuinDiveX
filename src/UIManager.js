@@ -543,6 +543,8 @@ export class UIManager {
     this.poseDebugOutput = document.getElementById('pose-debug-output');
     this.poseDebugStatus = document.getElementById('pose-debug-status');
     this.platformDebugView = document.getElementById('platform-debug-view');
+    this.platformDebugNoClip = document.getElementById('platform-debug-no-clip');
+    this.platformDebugNoClipStatus = document.getElementById('platform-debug-no-clip-status');
     this.platformDebugJumpHeight = document.getElementById('platform-debug-jump-height');
     this.platformDebugGravity = document.getElementById('platform-debug-gravity');
     this.platformDebugApex = document.getElementById('platform-debug-apex');
@@ -1542,6 +1544,19 @@ export class UIManager {
 
     if (this.platformDebugJumpHeight) this.platformDebugJumpHeight.value = state.jumpHeightPreset;
     if (this.platformDebugGravity) this.platformDebugGravity.value = state.gravityPreset;
+    if (this.platformDebugNoClip) {
+      this.platformDebugNoClip.setAttribute('aria-pressed', String(state.noClipEnabled));
+      this.platformDebugNoClip.textContent = `No Clip: ${state.noClipEnabled ? 'On' : 'Off'}`;
+    }
+    if (this.platformDebugNoClipStatus) {
+      this.platformDebugNoClipStatus.textContent = state.noClipEnabled
+        ? 'Collision and gravity are disabled. Close this menu to fly.'
+        : state.noClipLastRestoreSource === 'current-surface'
+          ? 'Normal collision restored on the surface below the flight position.'
+          : state.noClipLastRestoreSource === 'safe-anchor'
+            ? 'Normal collision restored at the last safe grounded position.'
+            : 'Normal collision and gravity are active.';
+    }
     if (this.platformDebugApex) this.platformDebugApex.textContent = state.jumpHeight.toFixed(2);
     if (this.platformDebugApexTime) this.platformDebugApexTime.textContent = `${state.timeToApex.toFixed(2)}s`;
     if (this.platformDebugGrabMin) this.platformDebugGrabMin.textContent = state.minimumGrabElevation.toFixed(2);
@@ -3929,6 +3944,13 @@ export class UIManager {
         this._deletePoseDebugKeyframe();
       } else if (action === 'platform-spawn') {
         this._spawnPlatformDebugBlock();
+      } else if (action === 'platform-toggle-no-clip') {
+        const state = this.game.setDebugNoClipEnabled?.(!this.game.debugNoClipEnabled);
+        this._syncPlatformDebugControls();
+        this.showToast(
+          state?.noClipEnabled ? 'No Clip enabled' : 'No Clip disabled',
+          state?.noClipEnabled ? '#ffd36f' : '#7df8ff',
+        );
       } else if (action === 'platform-clear') {
         const removed = this.game.clearDebugPlatforms?.() ?? 0;
         this._syncPlatformDebugControls();

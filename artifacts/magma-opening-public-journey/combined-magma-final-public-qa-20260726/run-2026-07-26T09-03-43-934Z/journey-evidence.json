@@ -1,0 +1,321 @@
+{
+  "url": "/?startupWorld=dungeon&roomPreview=magma-breached-freight-adit&dungeonSeed=combined-magma-final-public-qa-20260726&qaRevision=combined-magma-final-public-journey-v1-20260726",
+  "completedAt": "2026-07-26T09:06:39.897Z",
+  "entries": [
+    {
+      "sequence": 1,
+      "kind": "milestone-00-natural-entry",
+      "requestedAtMilliseconds": 32051,
+      "capturedAtMilliseconds": 40869,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-03-43-934Z\\001-milestone-00-natural-entry-0032s.jpg",
+      "player": {
+        "position": {
+          "x": 0,
+          "y": 0,
+          "z": 22.4
+        },
+        "rotationY": 3.141592653589793,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.13958613616265092,
+          "y": 2.0138341154029837,
+          "z": 21.378367675009123
+        },
+        "movementBasis": {
+          "forward": {
+            "x": -0.0005166436214353899,
+            "y": 0,
+            "z": -0.9999998665396752
+          },
+          "right": {
+            "x": 0.9999998665396752,
+            "y": 0,
+            "z": -0.0005166436214353899
+          }
+        }
+      },
+      "collision": null
+    },
+    {
+      "sequence": 2,
+      "kind": "interval-001",
+      "requestedAtMilliseconds": 60882,
+      "capturedAtMilliseconds": 70375,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-03-43-934Z\\002-interval-001-0061s.jpg",
+      "player": {
+        "position": {
+          "x": 3.8610664283517757e-16,
+          "y": 0,
+          "z": 19.247199999999992
+        },
+        "rotationY": 3.141592653589793,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.3379318239107185,
+          "y": 1.305977109541887,
+          "z": 19.303792353711067
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 1.550571646861785e-7,
+            "y": 0,
+            "z": -0.9999999999999879
+          },
+          "right": {
+            "x": 0.9999999999999879,
+            "y": 0,
+            "z": 1.550571646861785e-7
+          }
+        }
+      },
+      "collision": null
+    },
+    {
+      "sequence": 3,
+      "kind": "interval-002",
+      "requestedAtMilliseconds": 80899,
+      "capturedAtMilliseconds": 90372,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-03-43-934Z\\003-interval-002-0081s.jpg",
+      "player": {
+        "position": {
+          "x": 9.458926947254324e-16,
+          "y": 0,
+          "z": 14.676199999999987
+        },
+        "rotationY": 3.141592653589793,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.4029223554425255,
+          "y": 1.2625711920884293,
+          "z": 14.304608774375422
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 6.222745849274466e-11,
+            "y": 0,
+            "z": -0.9999999999999999
+          },
+          "right": {
+            "x": 0.9999999999999999,
+            "y": 0,
+            "z": 6.222745849274466e-11
+          }
+        }
+      },
+      "collision": null
+    },
+    {
+      "sequence": 4,
+      "kind": "interval-003",
+      "requestedAtMilliseconds": 100900,
+      "capturedAtMilliseconds": 109601,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-03-43-934Z\\004-interval-003-0101s.jpg",
+      "player": {
+        "position": {
+          "x": 9.458926947254324e-16,
+          "y": 0,
+          "z": 14.676199999999987
+        },
+        "rotationY": 2.7365926535897938,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.2292835560602228,
+          "y": 1.2137247405588747,
+          "z": 14.265550359117757
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 0.13126169471048532,
+            "y": 0,
+            "z": -0.9913477530623305
+          },
+          "right": {
+            "x": 0.9913477530623305,
+            "y": 0,
+            "z": 0.13126169471048532
+          }
+        }
+      },
+      "collision": null
+    },
+    {
+      "sequence": 5,
+      "kind": "interval-004",
+      "requestedAtMilliseconds": 120904,
+      "capturedAtMilliseconds": 128880,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-03-43-934Z\\005-interval-004-0121s.jpg",
+      "player": {
+        "position": {
+          "x": 9.458926947254324e-16,
+          "y": 0,
+          "z": 14.676199999999987
+        },
+        "rotationY": 2.466592653589794,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.09043414487591539,
+          "y": 1.2490656648874685,
+          "z": 14.154890576585673
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 0.42713369632166065,
+            "y": 0,
+            "z": -0.9041884789503766
+          },
+          "right": {
+            "x": 0.9041884789503766,
+            "y": 0,
+            "z": 0.42713369632166065
+          }
+        }
+      },
+      "collision": null
+    },
+    {
+      "sequence": 6,
+      "kind": "interval-005",
+      "requestedAtMilliseconds": 140919,
+      "capturedAtMilliseconds": 149479,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-03-43-934Z\\006-interval-005-0141s.jpg",
+      "player": {
+        "position": {
+          "x": 9.458926947254324e-16,
+          "y": 0,
+          "z": 14.676199999999987
+        },
+        "rotationY": 2.8715926535897935,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.23335364680156517,
+          "y": 1.2294264398099892,
+          "z": 14.265063986802685
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 0.5168099879854975,
+            "y": 0,
+            "z": -0.8561001321798929
+          },
+          "right": {
+            "x": 0.8561001321798929,
+            "y": 0,
+            "z": 0.5168099879854975
+          }
+        }
+      },
+      "collision": null
+    },
+    {
+      "sequence": 7,
+      "kind": "interval-006",
+      "requestedAtMilliseconds": 160925,
+      "capturedAtMilliseconds": 168452,
+      "screenshotPath": "C:\\Users\\K\\Documents\\New Three.js Practice\\artifacts\\magma-opening-public-journey\\combined-magma-final-public-qa-20260726\\run-2026-07-26T09-03-43-934Z\\007-interval-006-0161s.jpg",
+      "player": {
+        "position": {
+          "x": 9.458926947254324e-16,
+          "y": 0,
+          "z": 14.676199999999987
+        },
+        "rotationY": 3.141592653589793,
+        "health": 160,
+        "maxHealth": 160,
+        "barrier": {
+          "capacity": 0,
+          "current": 0,
+          "broken": false,
+          "recharging": false
+        },
+        "jumpState": "Grounded",
+        "ledgeClinging": false,
+        "ladderTraversal": null,
+        "dead": false,
+        "projectileOrigin": {
+          "x": -0.3912234833841625,
+          "y": 1.248325827737895,
+          "z": 14.319474207227035
+        },
+        "movementBasis": {
+          "forward": {
+            "x": 0.23155853597141562,
+            "y": 0,
+            "z": -0.9728209724398291
+          },
+          "right": {
+            "x": 0.9728209724398291,
+            "y": 0,
+            "z": 0.23155853597141562
+          }
+        }
+      },
+      "collision": null
+    }
+  ]
+}

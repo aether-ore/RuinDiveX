@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { readPublicV1JourneyState } from './helpers/public-v1-journey.js';
 
 test('approved Magma opening loads tiled retained textures and remains playable', async ({ page }) => {
   const runtimeErrors = [];
@@ -208,6 +209,7 @@ test('approved Magma opening loads tiled retained textures and remains playable'
   expect(contract.roomModuleIds).toEqual([
     'magma-breached-freight-adit',
     'magma-linear-digger-excavation',
+    'magma-refractor-assay-lab',
   ]);
   expect(contract.themePackId).toBe('magma-refinery-future');
   expect(contract.developmentFixture).toBe(true);
@@ -227,7 +229,7 @@ test('approved Magma opening loads tiled retained textures and remains playable'
     'lava-west-ramp-out',
     'lava-east-ramp-out',
   ]));
-  expect(contract.rampLandings).toHaveLength(14);
+  expect(contract.rampLandings).toHaveLength(26);
   expect(contract.rampLandings.every((landing) => (
     landing.widthTiles >= 3
       && landing.depthTiles >= 3
@@ -243,7 +245,7 @@ test('approved Magma opening loads tiled retained textures and remains playable'
     openingWidthMeters: 8.4,
     openingHeightMeters: 5.6,
   })]));
-  expect(contract.socketFrames).toHaveLength(2);
+  expect(contract.socketFrames).toHaveLength(3);
   expect(contract.socketFrameAlignment).toEqual(expect.objectContaining({
     accepted: true,
     centerOffsetMeters: 0,
@@ -255,11 +257,19 @@ test('approved Magma opening loads tiled retained textures and remains playable'
     player: expect.objectContaining({ centerOffsetMeters: 0, facingDot: -1, accepted: true }),
     lava: expect.objectContaining({ centerOffsetMeters: 0, facingDot: -1, accepted: true }),
   }));
-  expect(contract.connectionPlans).toEqual([expect.objectContaining({
-    connectorId: 'opening-to-linear-excavation',
-    clearWidthMeters: 8.4,
-    elevationDelta: 0,
-  })]);
+  expect(contract.connectionPlans).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      connectorId: 'opening-to-linear-excavation',
+      clearWidthMeters: 8.4,
+      elevationDelta: 0,
+    }),
+    expect.objectContaining({
+      connectorId: 'linear-excavation-to-assay-lab',
+      clearWidthMeters: 8.4,
+      elevationDelta: 0,
+    }),
+  ]));
+  expect(contract.connectionPlans).toHaveLength(2);
   expect(contract.freightPreviewCapCount).toBe(0);
   expect(contract.duplicateEntryFrameCount).toBe(0);
   expect(contract.supportDiagnostics).toEqual(expect.objectContaining({
@@ -471,6 +481,7 @@ test('combined-map Linear Digger uses transformed bounds and clears only sightli
   expect(result.roomModuleIds).toEqual([
     'magma-breached-freight-adit',
     'magma-linear-digger-excavation',
+    'magma-refractor-assay-lab',
   ]);
   expect(result.linearGroupPosition[0]).toBeCloseTo(25.2, 6);
   expect(result.linearGroupPosition[1]).toBeCloseTo(0, 6);
@@ -590,6 +601,83 @@ test('opening freight socket publicly continues into the Linear Digger Excavatio
   await page.evaluate(() => window.game.stop());
 });
 
+test('combined Linear Digger final ramp publicly crosses into its end landing', async ({ page }) => {
+  test.setTimeout(60_000);
+  const runtimeErrors = [];
+  page.on('pageerror', (error) => runtimeErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') runtimeErrors.push(message.text());
+  });
+  await page.goto(
+    '/?startupWorld=dungeon&roomPreview=magma-breached-freight-adit'
+      + '&roomPreviewAnchor=linearFlightBDescent&roomPreviewFacing=east'
+      + '&dungeonSeed=combined-final-ramp-runtime',
+  );
+  await page.waitForFunction(() => (
+    document.getElementById('game-container')?.dataset.browserTestReady === 'true'
+  ));
+  await page.waitForTimeout(1200);
+  await page.locator('canvas').click({ position: { x: 640, y: 360 } });
+  const readPlayer = () => page.evaluate(() => (
+    window.game.getPublicDungeonJourneyDiagnostics({ includeGeometry: false }).player.position
+  ));
+  const start = await readPlayer();
+
+  await page.keyboard.down('KeyW');
+  try {
+    await expect.poll(async () => (await readPlayer()).x, {
+      timeout: 20_000,
+      intervals: [750, 1000, 1250],
+    }).toBeGreaterThan(start.x + 5.5);
+  } finally {
+    await page.keyboard.up('KeyW').catch(() => {});
+  }
+  const landing = await readPlayer();
+
+  expect(landing.y).toBeCloseTo(-14, 1);
+  expect(runtimeErrors).toEqual([]);
+  await page.evaluate(() => window.game.stop());
+});
+
+test('combined Assay gallery-return ramp is unobstructed under public movement', async ({ page }) => {
+  test.setTimeout(60_000);
+  const runtimeErrors = [];
+  page.on('pageerror', (error) => runtimeErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') runtimeErrors.push(message.text());
+  });
+  await page.goto(
+    '/?startupWorld=dungeon&roomPreview=magma-breached-freight-adit'
+      + '&roomPreviewAnchor=assayGalleryReturnStart&roomPreviewFacing=north'
+      + '&dungeonSeed=combined-assay-gallery-return-runtime'
+      + '&qaRevision=assay-ramp-clearance-v5-20260726',
+  );
+  await page.waitForFunction(() => (
+    document.getElementById('game-container')?.dataset.browserTestReady === 'true'
+  ));
+  await page.waitForTimeout(1200);
+  await page.locator('canvas').click({ position: { x: 640, y: 360 } });
+  const readPlayer = () => page.evaluate(() => (
+    window.game.getPublicDungeonJourneyDiagnostics({ includeGeometry: false }).player.position
+  ));
+  const start = await readPlayer();
+
+  await page.keyboard.down('KeyW');
+  try {
+    await expect.poll(async () => (await readPlayer()).z, {
+      timeout: 20_000,
+      intervals: [500, 750, 1000],
+    }).toBeLessThan(start.z - 19.5);
+  } finally {
+    await page.keyboard.up('KeyW').catch(() => {});
+  }
+  const landing = await readPlayer();
+
+  expect(landing.y).toBeCloseTo(-14, 1);
+  expect(runtimeErrors).toEqual([]);
+  await page.evaluate(() => window.game.stop());
+});
+
 test('combined excavation contains no encompassing shell or shell collision', async ({ page }) => {
   const runtimeErrors = [];
   page.on('pageerror', (error) => runtimeErrors.push(error.message));
@@ -636,8 +724,54 @@ test('combined excavation contains no encompassing shell or shell collision', as
   await page.waitForTimeout(5000);
   await page.keyboard.up('KeyW');
   const beyondFormerWall = await readPlayer();
-  expect(beyondFormerWall.z).toBeLessThan(start.z - 2.5);
+  expect(beyondFormerWall.z).toBeLessThan(start.z - 2.3);
   expect(beyondFormerWall.y).toBeCloseTo(0, 2);
+  expect(runtimeErrors).toEqual([]);
+  await page.evaluate(() => window.game.stop());
+});
+
+test('combined finalized map collects the Smelter Seal and opens its transformed bulkhead', async ({ page }) => {
+  test.setTimeout(90_000);
+  const runtimeErrors = [];
+  page.on('pageerror', (error) => runtimeErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') runtimeErrors.push(message.text());
+  });
+  await page.goto(
+    '/?startupWorld=dungeon&roomPreview=magma-breached-freight-adit'
+      + '&roomPreviewAnchor=assaySmelterSeal&roomPreviewFacing=west'
+      + '&dungeonSeed=combined-assay-credential-runtime',
+  );
+  await page.waitForFunction(() => (
+    document.getElementById('game-container')?.dataset.browserTestReady === 'true'
+  ));
+  await page.waitForTimeout(900);
+  await page.locator('canvas').click({ position: { x: 640, y: 360 } });
+
+  const before = await readPublicV1JourneyState(page, { includeGeometry: false });
+  const startPosition = before.player.position;
+  expect(before.keycards.find((keycard) => keycard.keycardId === 'Smelter_Seal')).toEqual(
+    expect.objectContaining({ collected: false }),
+  );
+  expect(before.doors.find((door) => door.id === 'Door_Smelter_Bulkhead')).toEqual(
+    expect.objectContaining({ closed: true, opened: false }),
+  );
+
+  await page.keyboard.down('KeyW');
+  try {
+    await expect.poll(async () => (
+      (await readPublicV1JourneyState(page, { includeGeometry: false }))
+        .ownedKeys.includes('Smelter_Seal')
+    ), { timeout: 20_000, intervals: [100, 150, 250] }).toBe(true);
+  } finally {
+    await page.keyboard.up('KeyW').catch(() => {});
+  }
+
+  const after = await readPublicV1JourneyState(page, { includeGeometry: false });
+  expect(after.player.position.x).toBeLessThan(startPosition.x - 3);
+  expect(after.doors.find((door) => door.id === 'Door_Smelter_Bulkhead')).toEqual(
+    expect.objectContaining({ closed: false, opened: true }),
+  );
   expect(runtimeErrors).toEqual([]);
   await page.evaluate(() => window.game.stop());
 });

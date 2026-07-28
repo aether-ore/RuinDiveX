@@ -3252,7 +3252,7 @@ export class SkeletalModelRig {
   }
 
   _applyGeneratedPowerKnockbackPose(state, progress = 0, dt = 0) {
-    if (!['knockbackLaunch', 'aerialKnockbackFall', 'backLanding', 'downed'].includes(state)) {
+    if (!['knockbackLaunch', 'aerialKnockbackFall', 'backLanding', 'lyingFlat', 'downed'].includes(state)) {
       return;
     }
 
@@ -3284,10 +3284,13 @@ export class SkeletalModelRig {
     apply('rightShoulder', THREE.MathUtils.lerp(-0.52, 0, flat), 0.08 * (1 - flat), THREE.MathUtils.lerp(-0.72, -0.08, flat));
     apply('leftElbow', THREE.MathUtils.lerp(0.24 + 0.3 * bounce, 0.05, flat));
     apply('rightElbow', THREE.MathUtils.lerp(0.24 + 0.24 * bounce, 0.06, flat));
-    apply('leftHip', THREE.MathUtils.lerp(0.28 + 0.3 * flight, 0, flat), 0, THREE.MathUtils.lerp(0.12, 0.04, flat));
-    apply('rightHip', THREE.MathUtils.lerp(0.2 + 0.22 * flight, 0, flat), 0, THREE.MathUtils.lerp(-0.12, -0.04, flat));
-    apply('leftKnee', THREE.MathUtils.lerp(0.42 + 0.38 * flight, 0.04, flat));
-    apply('rightKnee', THREE.MathUtils.lerp(0.34 + 0.3 * flight, 0.04, flat));
+    // Keep the airborne legs trailing with a loose, asymmetric bend. The old
+    // 37-46 degree knee fold pulled both boots toward the torso and reproduced
+    // the inverted-knee silhouette of the held knockdown clip while airborne.
+    apply('leftHip', THREE.MathUtils.lerp(0.16 + 0.14 * flight, 0, flat), 0, THREE.MathUtils.lerp(0.1, 0.04, flat));
+    apply('rightHip', THREE.MathUtils.lerp(0.1 + 0.1 * flight, 0, flat), 0, THREE.MathUtils.lerp(-0.1, -0.04, flat));
+    apply('leftKnee', THREE.MathUtils.lerp(0.16 + 0.14 * flight, 0.04, flat));
+    apply('rightKnee', THREE.MathUtils.lerp(0.12 + 0.1 * flight, 0.04, flat));
     apply('leftAnkle', THREE.MathUtils.lerp(-0.08 * flight, 0, flat));
     apply('rightAnkle', THREE.MathUtils.lerp(-0.06 * flight, 0, flat));
   }

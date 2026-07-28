@@ -213,7 +213,7 @@ test('Linear Digger Excavation preview loads, advances frames, and remains physi
   expect(contract.dungeonFamilyId).toBe('industrial-v1');
   expect(contract.dungeonKind).toBe('magmaLinearDiggerExcavationDevelopmentFixture');
   expect(contract.developmentFixture).toBe(true);
-  expect(contract.playerStart).toEqual([0, 0, 42]);
+  expect(contract.playerStart).toEqual([0, 0.84, 42]);
   expect(contract.meshCount).toBeGreaterThan(120);
   expect(contract.meshCount).toBeLessThan(170);
   expect(contract.tiledMeshCount).toBe(contract.meshCount);
@@ -243,8 +243,8 @@ test('Linear Digger Excavation preview loads, advances frames, and remains physi
   expect(contract.trapCount).toBe(82);
   expect(contract.encounterCount).toBe(2);
   expect(contract.rampFlights).toEqual([
-    expect.objectContaining({ sourceElevation: 0, destinationElevation: -7, segmentCount: 13, widthTiles: 3 }),
-    expect.objectContaining({ sourceElevation: -7, destinationElevation: -14, segmentCount: 13, widthTiles: 3 }),
+    expect.objectContaining({ sourceElevation: 0.84, destinationElevation: -6.16, segmentCount: 13, widthTiles: 3, raisedCriticalCatwalk: true }),
+    expect.objectContaining({ sourceElevation: -6.16, destinationElevation: -13.16, segmentCount: 13, widthTiles: 3, raisedCriticalCatwalk: true }),
   ]);
   expect(contract.rampLandings).toHaveLength(4);
   expect(contract.rampLandings.every((landing) => (
@@ -306,7 +306,7 @@ test('Linear Digger Excavation preview loads, advances frames, and remains physi
   expect(movement.position[2]).toBeLessThan(start[2] - 0.5);
   expect(movement.position.every(Number.isFinite)).toBe(true);
   expect(movement.health).toBeGreaterThan(0);
-  expect(movement.publicState.player.position.y).toBeCloseTo(0, 2);
+  expect(movement.publicState.player.position.y).toBeCloseTo(0.84, 2);
 
   expect(textureRequests.length).toBeGreaterThanOrEqual(36);
   expect(textureRequests.every(({ status }) => status === 200)).toBe(true);
@@ -320,13 +320,13 @@ for (const ramp of [
     routeId: 'digger-descent-flight-a',
     anchor: 'flightATop',
     bottomX: -17 * 2.8,
-    bottomY: -7,
+    bottomY: -6.16,
   },
   {
     routeId: 'digger-descent-flight-b',
     anchor: 'flightBTop',
     bottomX: -5 * 2.8,
-    bottomY: -14,
+    bottomY: -13.16,
   },
 ]) {
   test(`${ramp.routeId} descends from its upper landing to its lower landing`, async ({ page }) => {
@@ -358,7 +358,10 @@ for (const ramp of [
       window.game.getPublicDungeonPlayerJourneyDiagnostics().player.position
     ));
 
-    const deadline = Date.now() + 20_000;
+    // The fully authored excavation fixture can render below real time under
+    // headless software GL. Keep the public-input journey bounded, but allow
+    // enough wall time for the game clock to traverse the complete 13-bay run.
+    const deadline = Date.now() + 45_000;
     await page.keyboard.down('KeyW');
     try {
       while (Date.now() < deadline) {
@@ -379,6 +382,70 @@ for (const ramp of [
     await page.evaluate(() => window.game.stop());
   });
 }
+
+test('combined raised critical catwalk permits grounded walk-on and walk-off without ledge safety', async ({ page }) => {
+  const runtimeErrors = [];
+  page.on('pageerror', (error) => runtimeErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') runtimeErrors.push(message.text());
+  });
+  await page.addInitScript(() => {
+    window.__catwalkTransitionCollisions = [];
+    window.addEventListener('ruindivex:player-walkability-collision', (event) => {
+      window.__catwalkTransitionCollisions.push(structuredClone(event.detail));
+    });
+  });
+  await page.goto(
+    '/?startupWorld=dungeon&roomPreview=magma-breached-freight-adit'
+      + '&roomPreviewAnchor=linearCriticalCatwalkSideStep&roomPreviewFacing=east'
+      + '&dungeonSeed=grounded-catwalk-transition-v5',
+  );
+  await page.waitForFunction(() => (
+    document.getElementById('game-container')?.dataset.browserTestReady === 'true'
+  ));
+  await page.waitForTimeout(1200);
+  await page.locator('canvas').click({ position: { x: 640, y: 360 } });
+  await page.evaluate(() => {
+    window.__catwalkTransitionCollisions.length = 0;
+  });
+  const readPlayer = () => page.evaluate(() => ({
+    position: window.game.getPublicDungeonPlayerJourneyDiagnostics().player.position,
+    jumpState: document.getElementById('game-container')?.dataset.playerJumpState,
+  }));
+  const start = await readPlayer();
+
+  const walkUntil = async (key, predicate) => {
+    const deadline = Date.now() + 12_000;
+    await page.keyboard.down(key);
+    try {
+      while (Date.now() < deadline) {
+        await page.waitForTimeout(100);
+        const player = await readPlayer();
+        if (predicate(player.position)) return player;
+      }
+    } finally {
+      await page.keyboard.up(key);
+    }
+    return readPlayer();
+  };
+
+  const onCatwalk = await walkUntil(
+    'KeyW',
+    (position) => position.x > start.position.x + 2,
+  );
+  expect(onCatwalk.position.y).toBeCloseTo(0.84, 1);
+  expect(onCatwalk.jumpState).toBe('Grounded');
+
+  const offCatwalk = await walkUntil(
+    'KeyS',
+    (position) => position.x < start.position.x + 0.5,
+  );
+  expect(offCatwalk.position.y).toBeCloseTo(0, 1);
+  expect(offCatwalk.jumpState).toBe('Grounded');
+  expect(await page.evaluate(() => window.__catwalkTransitionCollisions)).toEqual([]);
+  expect(runtimeErrors).toEqual([]);
+  await page.evaluate(() => window.game.stop());
+});
 
 test('only bored-wall panels crossing the camera-to-player silhouette clear', async ({ page }) => {
   await page.goto('/?startupWorld=dungeon&roomPreview=magma-linear-digger-excavation&dungeonSeed=linear-runtime');

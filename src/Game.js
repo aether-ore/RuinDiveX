@@ -9675,6 +9675,94 @@ export class Game {
     ].filter((platform) => !platform?.dynamic).flatMap((platform) => (
       this._createPlatformLedgeCandidates(platform)
     ));
+    this.platformingLedgeCandidates.push(...this._createLavaExitLedgeCandidates());
+  }
+
+  _createLavaExitLedgeCandidates() {
+    const floorTiles = this.dungeon?.floorTiles ?? [];
+    const tileSize = Number(this.dungeon?.tileSize) || 2.8;
+    if (!floorTiles.some((tile) => tile.surface === 'deepMagma')) return [];
+
+    const cellKey = (x, z) => `${x},${z}`;
+    const lavaByCell = new Map();
+    const walkableByCell = new Map();
+    for (const tile of floorTiles) {
+      const target = tile.surface === 'deepMagma' ? lavaByCell : walkableByCell;
+      if (tile.surfaceRole === 'hazard-floor' && tile.surface !== 'deepMagma') continue;
+      if (tile.surface !== 'deepMagma' && tile.walkable === false) continue;
+      const key = cellKey(tile.x, tile.z);
+      const entries = target.get(key) ?? [];
+      entries.push(tile);
+      target.set(key, entries);
+    }
+
+    const edgeSpecs = [
+      { edge: 'front', dx: 0, dz: -1, nx: 0, nz: -1, axisX: 1, axisZ: 0 },
+      { edge: 'back', dx: 0, dz: 1, nx: 0, nz: 1, axisX: 1, axisZ: 0 },
+      { edge: 'left', dx: -1, dz: 0, nx: -1, nz: 0, axisX: 0, axisZ: 1 },
+      { edge: 'right', dx: 1, dz: 0, nx: 1, nz: 0, axisX: 0, axisZ: 1 },
+    ];
+    const controller = this.dungeonController;
+    const getTileY = (tile, position) => {
+      const resolved = controller?._getTileElevationAtPosition?.(tile, position);
+      return Number.isFinite(resolved) ? resolved : Number(tile.elevation) || 0;
+    };
+    const maximumClimbRise = PLAYER_TRAVERSAL_CAPABILITIES.jumpHeight
+      * PLAYER_TRAVERSAL_CAPABILITIES.ledgeGrabHeightRatio;
+    const candidates = [];
+    const seen = new Set();
+
+    for (const tile of floorTiles) {
+      if (tile.surface === 'deepMagma'
+        || tile.surfaceRole === 'hazard-floor'
+        || tile.walkable === false
+        || tile.surfaceRole === 'ramp') {
+        continue;
+      }
+      for (const spec of edgeSpecs) {
+        const adjacentKey = cellKey(tile.x + spec.dx, tile.z + spec.dz);
+        const lavaTiles = lavaByCell.get(adjacentKey) ?? [];
+        if (!lavaTiles.length) continue;
+
+        const edgeCenter = new THREE.Vector3(
+          (tile.x + spec.dx * 0.5) * tileSize,
+          Number(tile.elevation) || 0,
+          (tile.z + spec.dz * 0.5) * tileSize,
+        );
+        const topY = getTileY(tile, edgeCenter);
+        const connectingFloor = (walkableByCell.get(adjacentKey) ?? []).some((neighbor) => {
+          const neighborY = getTileY(neighbor, edgeCenter);
+          return Math.abs(neighborY - topY) <= 0.55;
+        });
+        if (connectingFloor) continue;
+
+        let lavaY = -Infinity;
+        for (const lavaTile of lavaTiles) {
+          const candidateY = getTileY(lavaTile, edgeCenter);
+          if (candidateY <= topY - 0.18 && candidateY > lavaY) lavaY = candidateY;
+        }
+        const rise = topY - lavaY;
+        if (!Number.isFinite(lavaY) || rise > maximumClimbRise + 0.05) continue;
+
+        const id = `lava-exit-${tile.roomId ?? 'room'}-${tile.x}-${tile.z}-${spec.edge}-${topY.toFixed(3)}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        candidates.push({
+          id,
+          edge: spec.edge,
+          roomId: tile.roomId ?? null,
+          center: edgeCenter.setY(topY),
+          normal: new THREE.Vector3(spec.nx, 0, spec.nz),
+          axis: new THREE.Vector3(spec.axisX, 0, spec.axisZ),
+          halfSpan: Math.max(0.5, tileSize * 0.5 - 0.18),
+          topY,
+          approachSurfaceY: lavaY,
+          hazardSurface: 'deepMagma',
+          sourceHazardTileKey: adjacentKey,
+        });
+      }
+    }
+    return candidates;
   }
 
   _createPlatformLedgeCandidates(platform) {
@@ -9983,7 +10071,8 @@ export class Game {
           ledge,
           lateral,
           score,
-          autoClimb: instantStep || (exceptionalEdgeCatch && ledgeHeight <= minimumGrabElevation),
+          autoClimb: instantStep
+            || (exceptionalEdgeCatch && ledgeHeight <= minimumGrabElevation),
         };
       }
     }

@@ -5,6 +5,7 @@ import {
   generateMagmaRefineryOpeningSequence,
   MAGMA_REFINERY_OPENING_SEQUENCE_ID,
 } from '../src/magma/MagmaRefineryOpeningSequence.js';
+import { CRITICAL_CATWALK_RISE } from '../src/magma/MagmaLinearDiggerExcavationRoom.js';
 import { PLAYER_TRAVERSAL_ENVELOPE } from '../src/TraversalCapabilities.js';
 
 class StubTextureLoader {
@@ -57,7 +58,7 @@ function collectSafeFloorsReachableFromPlayerStart(dungeon) {
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       for (const candidate of byColumn.get(`${current.x + dx},${current.z + dz}`) ?? []) {
         if (Math.abs(candidate.elevation - current.elevation)
-          > PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.02) continue;
+          > Math.max(PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile, CRITICAL_CATWALK_RISE) + 0.02) continue;
         const key = floorTileKey(candidate);
         if (reachable.has(key)) continue;
         reachable.add(key);
@@ -106,6 +107,23 @@ test('approved Magma opening, excavation, and Assay Lab share exact player and l
   assert.equal(dungeon.connectionPlans[0].clearWidthMeters, 8.4);
   assert.equal(dungeon.connectionPlans[1].clearWidthMeters, 8.4);
   assert.equal(dungeon.connectionPlans[1].sourceElevation, -14);
+  assert.equal(dungeon.criticalCatwalk.length, 11);
+  assert.equal(dungeon.criticalCatwalk.every((segment) => (
+    Math.min(segment.widthTiles, segment.depthTiles) >= 3
+  )), true);
+  assert.equal(dungeon.criticalCatwalkCells.length > 200, true);
+  for (const cell of dungeon.criticalCatwalkCells) {
+    const center = new THREE.Vector3(
+      cell.x * dungeon.tileSize,
+      cell.elevation + 0.9,
+      cell.z * dungeon.tileSize,
+    );
+    assert.deepEqual(
+      dungeon.solidZones.filter((zone) => pointInsideSolidZone(center, zone)).map((zone) => zone.id),
+      [],
+      `combined critical catwalk cell ${cell.x},${cell.z}@${cell.elevation} is obstructed`,
+    );
+  }
 
   const floorKeys = dungeon.floorTiles.map((tile) => `${tile.x},${tile.z}@${tile.elevation}`);
   assert.equal(new Set(floorKeys).size, floorKeys.length, 'the joined threshold contains stacked floor tiles');
@@ -117,10 +135,14 @@ test('approved Magma opening, excavation, and Assay Lab share exact player and l
   );
   for (const x of [8, 9, 10]) {
     assert.ok(dungeon.floorTiles.find((tile) => (
-      tile.x === x && tile.z === -12 && tile.elevation === 0 && tile.surface !== 'deepMagma'
+      tile.x === x && tile.z === -12
+        && Math.abs(tile.elevation - CRITICAL_CATWALK_RISE * 0.25) < 0.001
+        && tile.rampRouteId === 'critical-catwalk-entry-rise'
     )));
     assert.ok(dungeon.floorTiles.find((tile) => (
-      tile.x === x && tile.z === -13 && tile.elevation === 0 && tile.surface !== 'deepMagma'
+      tile.x === x && tile.z === -13
+        && Math.abs(tile.elevation - CRITICAL_CATWALK_RISE * 0.75) < 0.001
+        && tile.rampRouteId === 'critical-catwalk-entry-rise'
     )));
   }
 
@@ -169,14 +191,14 @@ test('approved Magma opening, excavation, and Assay Lab share exact player and l
   });
   assert.deepEqual(openingRoom.previewAnchors.linearFlightBDescent, {
     x: 11,
-    y: -13.192308,
+    y: -12.352308,
     z: -51,
     facingX: 1,
     facingZ: 0,
   });
   assert.deepEqual(openingRoom.previewAnchors.linearFlightBEndLanding, {
     x: 14,
-    y: -14,
+    y: -13.16,
     z: -51,
     facingX: 1,
     facingZ: 0,
@@ -228,7 +250,7 @@ test('approved Magma opening, excavation, and Assay Lab share exact player and l
   for (const z of [-52, -51, -50]) {
     const rampExitBlockers = new Set();
     for (let x = 11.5; x <= 13.5; x += 0.035) {
-      const point = new THREE.Vector3(x * dungeon.tileSize, -14, z * dungeon.tileSize);
+      const point = new THREE.Vector3(x * dungeon.tileSize, -13.16, z * dungeon.tileSize);
       for (const zone of dungeon.solidZones) {
         if (pointInsideSolidZone(point, zone)) rampExitBlockers.add(zone.id);
       }
@@ -242,7 +264,7 @@ test('approved Magma opening, excavation, and Assay Lab share exact player and l
   for (const z of [-52, -51, -50]) {
     const endLandingBlockers = new Set();
     for (let x = 13.5; x <= 18.25; x += 0.035) {
-      const point = new THREE.Vector3(x * dungeon.tileSize, -14, z * dungeon.tileSize);
+      const point = new THREE.Vector3(x * dungeon.tileSize, -13.16, z * dungeon.tileSize);
       for (const zone of dungeon.solidZones) {
         if (pointInsideSolidZone(point, zone)) endLandingBlockers.add(zone.id);
       }

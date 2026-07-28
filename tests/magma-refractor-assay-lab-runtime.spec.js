@@ -119,7 +119,7 @@ test('Refractor Assay Lab preview loads its complete authored contract and keeps
   expect(contract.playerStart).toEqual([33.599999999999994, 0, 50.4]);
   expect(contract.floorTileCount).toBeGreaterThan(1_000);
   expect(contract.walkableFloorTileCount).toBeGreaterThan(800);
-  expect(contract.floorElevations).toEqual(expect.arrayContaining([-8.4, -5.6, -2.8, 0, 2.8]));
+  expect(contract.floorElevations).toEqual(expect.arrayContaining([-8.6, -5.6, -3, -2.8, 0, 2.8]));
   expect(contract.rampRouteIds).toEqual([
     'assay-entry-descent',
     'assay-rear-rise',

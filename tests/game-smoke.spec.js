@@ -413,10 +413,12 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
     let maximumY = player.root.position.y;
     let previousFallingY = Infinity;
     let maximumFallingRise = 0;
+    let maximumSettledAerialKneeAngle = 0;
     let stayedAirborneBelowOriginalFloor = false;
     let lyingFlatPitch = 0;
     let lyingFlatBodyAngle = 0;
     let minimumLyingFlatKneeAngle = Infinity;
+    let maximumSettledLyingFlatKneeAngle = 0;
     let maximumLyingFlatBackClearance = 0;
     let lyingFlatFrameCount = 0;
     let aerialAnimationWhileLyingFlat = false;
@@ -458,6 +460,17 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
             cameraDirection.y,
           );
         }
+        if (player.externalRig.stateTime >= 0.12) {
+          const leftKnee = player.externalRig.joints.get('leftKnee');
+          const rightKnee = player.externalRig.joints.get('rightKnee');
+          const restLeftKnee = player.externalRig.restLocalQuaternions.get(leftKnee);
+          const restRightKnee = player.externalRig.restLocalQuaternions.get(rightKnee);
+          maximumSettledAerialKneeAngle = Math.max(
+            maximumSettledAerialKneeAngle,
+            leftKnee && restLeftKnee ? leftKnee.quaternion.angleTo(restLeftKnee) : 0,
+            rightKnee && restRightKnee ? rightKnee.quaternion.angleTo(restRightKnee) : 0,
+          );
+        }
       }
       if (state === 'BackLanding' && landingContactClearance === null) {
         landingContactClearance = diagnostics.backClearance;
@@ -493,11 +506,20 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
         }
         const leftKnee = player.externalRig.joints.get('leftKnee');
         const restLeftKnee = player.externalRig.restLocalQuaternions.get(leftKnee);
+        const rightKnee = player.externalRig.joints.get('rightKnee');
+        const restRightKnee = player.externalRig.restLocalQuaternions.get(rightKnee);
         if (leftKnee && restLeftKnee) {
-          minimumLyingFlatKneeAngle = Math.min(
-            minimumLyingFlatKneeAngle,
-            leftKnee.quaternion.angleTo(restLeftKnee),
-          );
+          const leftKneeAngle = leftKnee.quaternion.angleTo(restLeftKnee);
+          minimumLyingFlatKneeAngle = Math.min(minimumLyingFlatKneeAngle, leftKneeAngle);
+          if (player.externalRig.stateTime >= 0.12) {
+            maximumSettledLyingFlatKneeAngle = Math.max(
+              maximumSettledLyingFlatKneeAngle,
+              leftKneeAngle,
+              rightKnee && restRightKnee
+                ? rightKnee.quaternion.angleTo(restRightKnee)
+                : 0,
+            );
+          }
         }
       }
       jumpFallStateSeen ||= player.animation.state === 'fall' || player.animation.state === 'forwardJumpFall';
@@ -516,10 +538,12 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
       finalY: player.root.position.y,
       backwardTravel: player.root.position.z - start.z,
       maximumFallingRise,
+      maximumSettledAerialKneeAngle,
       stayedAirborneBelowOriginalFloor,
       lyingFlatPitch,
       lyingFlatBodyAngle,
       minimumLyingFlatKneeAngle,
+      maximumSettledLyingFlatKneeAngle,
       maximumLyingFlatBackClearance,
       lyingFlatFrameCount,
       aerialAnimationWhileLyingFlat,
@@ -679,11 +703,13 @@ test('powerful hits use a distinct airborne knockback arc and resolve walkable l
   expect(result.knockbackSummary.maximumY).toBeGreaterThan(result.knockbackSummary.startY + 0.9);
   expect(result.knockbackSummary.backwardTravel).toBeGreaterThan(2);
   expect(result.knockbackSummary.maximumFallingRise).toBeLessThanOrEqual(0.0001);
+  expect(result.knockbackSummary.maximumSettledAerialKneeAngle).toBeLessThan(0.34);
   expect(result.knockbackSummary.stayedAirborneBelowOriginalFloor).toBe(true);
   expect(result.knockbackSummary.finalY).toBeCloseTo(result.knockbackSummary.startY - 1.5, 3);
   expect(result.knockbackSummary.lyingFlatPitch).toBeLessThan(0.05);
   expect(result.knockbackSummary.lyingFlatBodyAngle).toBeGreaterThan(0.7);
   expect(result.knockbackSummary.minimumLyingFlatKneeAngle).toBeLessThan(0.2);
+  expect(result.knockbackSummary.maximumSettledLyingFlatKneeAngle).toBeLessThan(0.12);
   expect(result.knockbackSummary.maximumLyingFlatBackClearance).toBeLessThanOrEqual(0.002);
   expect(result.knockbackSummary.lyingFlatFrameCount).toBeGreaterThan(10);
   expect(result.knockbackSummary.aerialAnimationWhileLyingFlat).toBe(false);

@@ -596,7 +596,8 @@ test('opening freight socket publicly continues into the Linear Digger Excavatio
   await page.keyboard.up('KeyW');
   const insideExcavation = await readPlayer();
   expect(insideExcavation.z).toBeLessThan(start.z - 3);
-  expect(insideExcavation.y).toBeCloseTo(0, 2);
+  expect(insideExcavation.y).toBeGreaterThan(0.1);
+  expect(insideExcavation.y).toBeLessThanOrEqual(0.84);
   expect(runtimeErrors).toEqual([]);
   await page.evaluate(() => window.game.stop());
 });
@@ -634,7 +635,7 @@ test('combined Linear Digger final ramp publicly crosses into its end landing', 
   }
   const landing = await readPlayer();
 
-  expect(landing.y).toBeCloseTo(-14, 1);
+  expect(landing.y).toBeCloseTo(-13.16, 1);
   expect(runtimeErrors).toEqual([]);
   await page.evaluate(() => window.game.stop());
 });

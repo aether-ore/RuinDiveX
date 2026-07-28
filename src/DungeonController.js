@@ -1756,12 +1756,60 @@ export class DungeonController {
       }
     }
 
+    // Once the capsule center crosses into an adjacent authored floor cell,
+    // prefer that direct support over the edge of the cell it is leaving.
+    // Otherwise the overlap radius keeps selecting the old elevation until
+    // the capsule meets the raised deck's side, making legal grounded step
+    // transitions behave like an impassable ledge in both directions.
     candidates.sort((left, right) => (
-      left.verticalDistance - right.verticalDistance
-      || Number(right.direct) - Number(left.direct)
+      Number(right.direct) - Number(left.direct)
+      || left.verticalDistance - right.verticalDistance
       || left.horizontalDistanceSq - right.horizontalDistanceSq
       || this._getFloorGraphKey(left.tile).localeCompare(this._getFloorGraphKey(right.tile))
     ));
+    return candidates[0] ?? null;
+  }
+
+  _getGroundedFloorCellHandoff(position, originPosition) {
+    if (!position || !originPosition) {
+      return null;
+    }
+
+    const originTile = this.getFloorTileAt(originPosition, {
+      maxVerticalGap: 1.45,
+    });
+    if (!originTile) {
+      return null;
+    }
+
+    const destinationCell = this.worldToTile(position);
+    if (destinationCell.x === originTile.x && destinationCell.z === originTile.z) {
+      return null;
+    }
+
+    const destinationColumn = this.floorTilesByColumn.get(
+      tileKey(destinationCell.x, destinationCell.z),
+    );
+    if (!destinationColumn?.length) {
+      return null;
+    }
+
+    const candidates = destinationColumn
+      .filter((tile) => this._areGroundedFloorSupportsConnected(originTile, tile))
+      .map((tile) => ({
+        tile,
+        elevation: this._getTileElevationAtPosition(tile, position),
+      }))
+      .filter(({ elevation }) => this._isResolvedFloorPositionWalkable({
+        x: position.x,
+        y: elevation,
+        z: position.z,
+      }))
+      .sort((left, right) => (
+        Math.abs(left.elevation - originPosition.y) - Math.abs(right.elevation - originPosition.y)
+        || this._getFloorGraphKey(left.tile).localeCompare(this._getFloorGraphKey(right.tile))
+      ));
+
     return candidates[0] ?? null;
   }
 
@@ -3236,6 +3284,18 @@ export class DungeonController {
     // resolver owns them.
     if (playerJumping && this._canPreserveAuthoredVoidJump(current)) {
       return;
+    }
+
+    // Commit a connected floor-cell elevation as soon as the capsule center
+    // crosses that cell boundary. This is the grounded equivalent of a stair
+    // handoff: it lets authored low deck edges be walked in either direction
+    // and prevents the departing cell's overlap radius from acting as hidden
+    // ledge safety.
+    const groundedFloorCellHandoff = !playerJumping
+      ? this._getGroundedFloorCellHandoff(current, this.lastSafePlayerPosition)
+      : null;
+    if (groundedFloorCellHandoff) {
+      current.y = groundedFloorCellHandoff.elevation;
     }
 
     const groundedFloorSupport = !playerJumping

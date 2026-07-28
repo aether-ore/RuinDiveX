@@ -3,7 +3,7 @@ import { PLAYER_TRAVERSAL_ENVELOPE } from '../TraversalCapabilities.js';
 import { applyWorldTiledUVs } from './MagmaRefineryOpeningRoom.js';
 
 export const MAGMA_REFRACTOR_ASSAY_LAB_MODULE_ID = 'magma-refractor-assay-lab';
-export const MAGMA_REFRACTOR_ASSAY_LAB_TOPOLOGY_REVISION = 1;
+export const MAGMA_REFRACTOR_ASSAY_LAB_TOPOLOGY_REVISION = 2;
 export const SMELTER_SEAL_ID = 'Smelter_Seal';
 export const SMELTER_BULKHEAD_DOOR_ID = 'Door_Smelter_Bulkhead';
 
@@ -13,7 +13,8 @@ const ROOM_DEPTH_TILES = 41;
 const MAIN_FLOOR_OFFSET = -5.6;
 const DAIS_OFFSET = -2.8;
 const GALLERY_OFFSET = 2.8;
-const LAVA_BASIN_OFFSET = -8.4;
+const LAVA_INLET_OFFSET = -3;
+const LAVA_BASIN_OFFSET = -8.6;
 const CHAMBER_HEADROOM = 14;
 const SOCKET_HEIGHT = 5.6;
 const SOLID_FLOOR_THICKNESS = 0.4;
@@ -345,12 +346,13 @@ function createFloorPlan(baseElevation) {
     ...overrides,
   });
   for (let z = 15; z <= 20; z += 1) {
-    for (const x of [-1, 0]) pushLava(x, z, baseElevation + DAIS_OFFSET, { lavaSection: 'inlet' });
+    for (const x of [-1, 0]) pushLava(x, z, baseElevation + LAVA_INLET_OFFSET, { lavaSection: 'inlet' });
   }
   for (let z = 12; z <= 14; z += 1) {
     const index = 14 - z;
-    const start = baseElevation + DAIS_OFFSET - (index * 1.8666667);
-    const end = start - 1.8666667;
+    const cascadeStep = (LAVA_INLET_OFFSET - LAVA_BASIN_OFFSET) / 3;
+    const start = baseElevation + LAVA_INLET_OFFSET - (index * cascadeStep);
+    const end = start - cascadeStep;
     for (const x of [-1, 0]) pushLava(x, z, (start + end) * 0.5, {
       lavaSection: 'cascade',
       rampStartElevation: fixed(start),
@@ -486,7 +488,7 @@ export function createMagmaRefractorAssayLabPlan({
       kind: 'environmental-spine',
       x: -0.5,
       z: 20,
-      elevation: baseElevation + DAIS_OFFSET,
+      elevation: baseElevation + LAVA_INLET_OFFSET,
       facingX: 0,
       facingZ: 1,
       widthMeters: 4.2,

@@ -99,6 +99,16 @@ function transformRampLanding(landing) {
   };
 }
 
+function transformCriticalCatwalkSegment(segment) {
+  return {
+    ...segment,
+    minX: transformTileX(segment.maxX),
+    maxX: transformTileX(segment.minX),
+    minZ: transformTileZ(segment.minZ),
+    maxZ: transformTileZ(segment.maxZ),
+  };
+}
+
 function transformSocketFrame(frame) {
   return {
     ...frame,
@@ -279,8 +289,26 @@ function transformAssayMinimapRoom(room) {
 
 function isDuplicateLinearSeamTile(tile) {
   if (tile.z !== 17) return false;
-  return (tile.surface === 'deepMagma' && (tile.x === 6 || tile.x === 7))
-    || (tile.surface !== 'deepMagma' && tile.x >= -1 && tile.x <= 1);
+  return tile.surface === 'deepMagma' && (tile.x === 6 || tile.x === 7);
+}
+
+function isOpeningPlayerSeamTile(tile) {
+  return tile.surface !== 'deepMagma'
+    && tile.z === -12
+    && tile.x >= 8
+    && tile.x <= 10;
+}
+
+function hideOpeningPlayerSeamFloors(group) {
+  group.traverse((object) => {
+    if (!object.isMesh || !object.name.startsWith('magmaOpeningFloor_')) return;
+    const match = /^magmaOpeningFloor_(-?\d+)_(-?\d+)_/.exec(object.name);
+    if (!match) return;
+    if (isOpeningPlayerSeamTile({ x: Number(match[1]), z: Number(match[2]), surface: 'floor' })) {
+      object.visible = false;
+      object.userData.replacedByRaisedLinearCatwalkRamp = true;
+    }
+  });
 }
 
 function hideDuplicateLinearSeamInstances(group, linearPlan) {
@@ -298,10 +326,18 @@ function hideDuplicateLinearSeamInstances(group, linearPlan) {
       && tile.surface !== 'deepMagma'
       && tile.surfaceRole !== 'bridge'
       && tile.surface !== 'ancientCeramicFloor'
+      && tile.criticalCatwalk !== true
   ));
   hideIndices(
     'linearExcavationBoredBasaltFloors',
     ordinaryFloors,
+    (tile) => tile.z === 17 && tile.x >= -1 && tile.x <= 1,
+  );
+  hideIndices(
+    'linearExcavationCriticalCatwalkFloors',
+    linearPlan.floorTiles.filter((tile) => (
+      tile.criticalCatwalk === true && tile.surfaceRole !== 'ramp'
+    )),
     (tile) => tile.z === 17 && tile.x >= -1 && tile.x <= 1,
   );
   hideIndices(
@@ -321,7 +357,10 @@ function createDuplicateAssaySeamTileKeys(linearPlan, assayPlan) {
     return localFloorTileKey(transformed);
   }));
   return new Set(assayPlan.floorTiles
-    .filter((tile) => transformedLinearKeys.has(localFloorTileKey(transformAssayFloorTile(tile))))
+    .filter((tile) => (
+      transformedLinearKeys.has(localFloorTileKey(transformAssayFloorTile(tile)))
+        || (tile.surface !== 'deepMagma' && tile.z === 20 && tile.x >= 11 && tile.x <= 13)
+    ))
     .map(localFloorTileKey));
 }
 
@@ -335,7 +374,7 @@ function hideDuplicateAssaySeamInstances(group, duplicateTileKeys) {
   const duplicateColumns = new Set([...duplicateTileKeys].map((key) => key.split('@')[0]));
   group.traverse((object) => {
     if (!object.isInstancedMesh
-      || !/^(?:assayLabBoredFloors|assayLabLavaTiles)/.test(object.name)) {
+      || !/^(?:assayLabBoredFloors|assayLabCeramicFloors|assayLabServiceFloors|assayLabLavaTiles)/.test(object.name)) {
       return;
     }
     for (let index = 0; index < object.count; index += 1) {
@@ -430,8 +469,14 @@ export function generateMagmaRefineryOpeningSequence({
   });
   const duplicateAssaySeamTileKeys = createDuplicateAssaySeamTileKeys(linearPlan, assayPlan);
 
+  hideOpeningPlayerSeamFloors(opening.group);
   hideDuplicateLinearSeamInstances(linear.group, linearPlan);
   hideDuplicateAssaySeamInstances(assay.group, duplicateAssaySeamTileKeys);
+  // The second standalone Assay excavation brace occupies the exact footprint
+  // of the connected Linear end landing. The joined module owns that seam, so
+  // retire both the brace and its collider in the combined fixture.
+  const connectedAssayBrace = assay.group.getObjectByName('assayDiggerBrace2');
+  if (connectedAssayBrace) connectedAssayBrace.visible = false;
   linear.group.scale.x = -1;
   linear.group.position.set(
     LINEAR_OFFSET_TILES.x * TILE_SIZE,
@@ -472,7 +517,7 @@ export function generateMagmaRefineryOpeningSequence({
     .filter((tile) => !isDuplicateAssaySeamTile(tile, duplicateAssaySeamTileKeys))
     .map(transformAssayFloorTile);
   const floorTiles = [
-    ...opening.floorTiles.map((tile) => ({ ...tile })),
+    ...opening.floorTiles.filter((tile) => !isOpeningPlayerSeamTile(tile)).map((tile) => ({ ...tile })),
     ...transformedLinearFloorTiles,
     ...transformedAssayFloorTiles,
   ];
@@ -491,6 +536,14 @@ export function generateMagmaRefineryOpeningSequence({
       ...(opening.rooms[0].previewAnchors ?? {}),
       shellBoundaryCrossing: { x: 8, y: 0, z: -4, facingX: 0, facingZ: -1 },
       excavationThreshold: { x: 9, y: 0, z: -11, facingX: 0, facingZ: -1 },
+      linearCriticalCatwalkEntry: transformedLinearRoom.previewAnchors?.criticalCatwalkEntry,
+      linearCriticalCatwalkWestTurn: transformedLinearRoom.previewAnchors?.criticalCatwalkWestTurn,
+      linearCriticalCatwalkSideStep: transformedLinearRoom.previewAnchors?.criticalCatwalkSideStep,
+      linearWorkClutterUpper: transformedLinearRoom.previewAnchors?.workClutterUpper,
+      linearCriticalCatwalkMiddle: transformedLinearRoom.previewAnchors?.criticalCatwalkMiddle,
+      linearCriticalCatwalkDeepTurn: transformedLinearRoom.previewAnchors?.criticalCatwalkDeepTurn,
+      linearWorkClutterMiddle: transformedLinearRoom.previewAnchors?.workClutterMiddle,
+      linearCriticalCatwalkAssayApproach: transformedLinearRoom.previewAnchors?.criticalCatwalkAssayApproach,
       linearFlightBDescent: transformedLinearRoom.previewAnchors?.flightBDescent,
       linearFlightBEndLanding: transformedLinearRoom.previewAnchors?.flightBEndLanding,
       assayReveal: transformedAssayRoom.previewAnchors?.revealTerrace,
@@ -511,12 +564,16 @@ export function generateMagmaRefineryOpeningSequence({
   const solidZones = [
     ...opening.solidZones,
     ...linear.solidZones.map((zone) => transformZone(zone, 'linear/')),
-    ...assay.solidZones.map((zone) => transformAssayZone(zone, 'assay/')),
+    ...assay.solidZones
+      .filter((zone) => !zone.id.startsWith('assayDiggerBrace2'))
+      .map((zone) => transformAssayZone(zone, 'assay/')),
   ];
   const aerialBoundaryZones = [
     ...opening.aerialBoundaryZones,
     ...linear.aerialBoundaryZones.map((zone) => transformZone(zone, 'linear/')),
-    ...assay.aerialBoundaryZones.map((zone) => transformAssayZone(zone, 'assay/')),
+    ...assay.aerialBoundaryZones
+      .filter((zone) => !zone.id.startsWith('assayDiggerBrace2'))
+      .map((zone) => transformAssayZone(zone, 'assay/')),
   ];
   const transformedLinearTraps = linear.traps
     .filter((trap) => !/_6_17$|_7_17$/.test(trap.id))
@@ -725,6 +782,11 @@ export function generateMagmaRefineryOpeningSequence({
       ...linear.rampLandings.map(transformRampLanding),
       ...assay.rampLandings.map(transformAssayRampLanding),
     ],
+    criticalCatwalk: linear.criticalCatwalk.map(transformCriticalCatwalkSegment),
+    criticalCatwalkCells: linear.criticalCatwalkCells.map((cell) => ({
+      ...transformFloorTile(cell),
+      segmentIds: [...cell.segmentIds],
+    })),
     socketFrames: [
       ...opening.socketFrames.map((frame) => ({ ...frame })),
       ...transformedLinearFrames,

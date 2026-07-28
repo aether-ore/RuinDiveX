@@ -156,7 +156,7 @@ test('Refractor Assay Lab plan is deterministic, seed-varied, and signed-elevati
   });
   assert.equal(signed.baseElevation, -14);
   assert.equal(signed.room.baseElevation, -14);
-  assert.equal(signed.room.minY, -22.4);
+  assert.equal(signed.room.minY, -22.6);
   assert.deepEqual(signed.room.verticalPlan.localWalkableTiers, [-19.6, -16.8, -14, -11.2]);
   assert.deepEqual(signed.room.verticalPlan.requiredRouteElevationSequence, [
     -14, -19.6, -16.8, -19.6, -14,
@@ -172,8 +172,8 @@ test('Refractor Assay Lab plan is deterministic, seed-varied, and signed-elevati
   );
   assert.equal(sockets.get('assay-lab-entry-socket').elevation, -14);
   assert.equal(sockets.get('assay-lab-ember-crown-socket').elevation, -14);
-  assert.equal(sockets.get('assay-lab-lava-inlet').elevation, -16.8);
-  assert.equal(sockets.get('assay-lab-lava-outlet').elevation, -22.4);
+  assert.equal(sockets.get('assay-lab-lava-inlet').elevation, -17);
+  assert.equal(sockets.get('assay-lab-lava-outlet').elevation, -22.6);
   assert.equal(sockets.get('assay-lab-lava-inlet').continuityTag, 'magma-refinery-lava-spine');
   assert.equal(sockets.get('assay-lab-lava-outlet').continuityTag, 'magma-refinery-lava-spine');
   assert.equal([...sockets.values()].every((socket) => socket.widthMeters >= 4.2), true);

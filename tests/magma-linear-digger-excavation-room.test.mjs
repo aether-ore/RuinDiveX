@@ -3,6 +3,7 @@ import test from 'node:test';
 import * as THREE from 'three';
 import {
   assembleMagmaLinearDiggerExcavationRoom,
+  CRITICAL_CATWALK_RISE,
   createMagmaLinearDiggerExcavationPlan,
   MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID,
   OLD_DRILL_CHEST_ID,
@@ -52,6 +53,41 @@ function hasSafeRoute(plan, start, destination) {
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       for (const candidate of byColumn.get(`${current.x + dx},${current.z + dz}`) ?? []) {
         if (Math.abs(candidate.elevation - current.elevation)
+          > Math.max(PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile, CRITICAL_CATWALK_RISE) + 0.02) continue;
+        const key = nodeKey(candidate);
+        if (visited.has(key)) continue;
+        visited.add(key);
+        queue.push(candidate);
+      }
+    }
+  }
+  return false;
+}
+
+function hasCriticalCatwalkRoute(plan, start, destination) {
+  const floors = safeFloorTiles(plan).filter((tile) => (
+    tile.criticalCatwalk === true || tile.surfaceRole === 'ramp'
+  ));
+  const byColumn = new Map();
+  for (const tile of floors) {
+    const key = `${tile.x},${tile.z}`;
+    const column = byColumn.get(key) ?? [];
+    column.push(tile);
+    byColumn.set(key, column);
+  }
+  const startTile = floors.find((tile) => (
+    tile.x === start.x && tile.z === start.z && Math.abs(tile.elevation - start.elevation) < 0.01
+  ));
+  const destinationKey = `${destination.x},${destination.z}@${destination.elevation.toFixed(3)}`;
+  assert.ok(startTile, `missing critical catwalk start ${JSON.stringify(start)}`);
+  const queue = [startTile];
+  const visited = new Set([nodeKey(startTile)]);
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (nodeKey(current) === destinationKey) return true;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      for (const candidate of byColumn.get(`${current.x + dx},${current.z + dz}`) ?? []) {
+        if (Math.abs(candidate.elevation - current.elevation)
           > PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.02) continue;
         const key = nodeKey(candidate);
         if (visited.has(key)) continue;
@@ -84,7 +120,7 @@ test('Linear Digger Excavation keeps the approved topology while varying authore
   )), true);
 
   for (const plan of variants) {
-    assert.deepEqual(plan.room.verticalPlan.requiredRouteElevationSequence, [0, -7, -14]);
+    assert.deepEqual(plan.room.verticalPlan.requiredRouteElevationSequence, [0.84, -6.16, -13.16]);
     assert.equal(plan.activeOptionalChamberIds.length, 2);
     assert.equal(plan.reward.chestId, OLD_DRILL_CHEST_ID);
     assert.equal(plan.reward.itemId, OLD_DRILL_ITEM_ID);
@@ -94,6 +130,36 @@ test('Linear Digger Excavation keeps the approved topology while varying authore
     assert.equal(plan.clearanceContract.minimumChamberHeadroomMeters, 11.2);
     assert.equal(plan.sockets.filter((socket) => socket.kind === 'player').length, 2);
     assert.equal(plan.sockets.filter((socket) => socket.kind === 'environmental-spine').length, 2);
+    assert.equal(plan.criticalCatwalk.length, 11);
+    assert.equal(plan.criticalCatwalk.every((segment) => (
+      Math.min(segment.widthTiles, segment.depthTiles) >= 3
+        && segment.supported === true
+        && segment.collisionBacked === true
+        && segment.propFree === true
+        && segment.catwalkRiseMeters === CRITICAL_CATWALK_RISE
+        && Math.abs(segment.elevation - segment.structuralBaseElevation - CRITICAL_CATWALK_RISE) < 0.001
+    )), true);
+    assert.equal(plan.criticalCatwalkRailRuns.length, 5);
+    assert.equal(plan.criticalCatwalkRailRuns.every((run) => (
+      Math.abs(run.clearWidthMeters - 8.4) < 0.001
+        && run.catwalkRiseMeters === CRITICAL_CATWALK_RISE
+        && run.landingClearancePreserved === true
+        && run.junctionClearancePreserved === true
+    )), true);
+    const criticalCatwalkTiles = plan.floorTiles.filter((tile) => tile.criticalCatwalk === true);
+    assert.equal(criticalCatwalkTiles.length > 200, true);
+    assert.equal(criticalCatwalkTiles.every((tile) => (
+      tile.groundedStepTransitionHeight >= CRITICAL_CATWALK_RISE
+        && tile.groundedCatwalkTransition === true
+        && tile.ledgeSafetyExempt === true
+    )), true);
+    assert.equal(plan.dressing.cavernFormations.length, 12);
+    assert.equal(plan.dressing.cavernFormations.filter((item) => item.kind === 'stalagmite').length, 6);
+    assert.equal(plan.dressing.cavernFormations.filter((item) => item.kind === 'stalactite').length, 6);
+    assert.equal(plan.dressing.boulders.length, 7);
+    assert.equal(plan.dressing.workVehicles.filter((item) => item.kind === 'minecart').length, 2);
+    assert.equal(plan.dressing.workVehicles.filter((item) => item.kind === 'trolley').length, 2);
+    assert.equal(plan.dressing.pickaxes.length, 5);
   }
 });
 
@@ -141,34 +207,30 @@ test('Linear Digger Excavation has a safe broad route through both signed descen
     for (const routeId of ['digger-descent-flight-a', 'digger-descent-flight-b']) {
       const source = plan.rampLandings.find((landing) => (
         landing.routeId === routeId
-          && landing.elevation === (routeId.endsWith('-a') ? 0 : -7)
+          && landing.elevation === (routeId.endsWith('-a') ? 0.84 : -6.16)
       ));
       const destination = plan.rampLandings.find((landing) => (
         landing.routeId === routeId
-          && landing.elevation === (routeId.endsWith('-a') ? -7 : -14)
+          && landing.elevation === (routeId.endsWith('-a') ? -6.16 : -13.16)
       ));
       assert.ok(source && destination);
-      for (let z = source.minZ; z <= source.maxZ; z += 1) {
-        for (let step = 1; step <= 2; step += 1) {
-          assert.ok(plan.floorTiles.find((tile) => (
-            tile.x === source.maxX + step
-              && tile.z === z
-              && tile.surface !== 'deepMagma'
-              && tile.surfaceRole !== 'ramp'
-              && Math.abs(tile.elevation - source.elevation) < 0.001
-          )), `${routeId} source faces a wall instead of a forward landing route`);
-        }
-      }
-      for (let z = destination.minZ; z <= destination.maxZ; z += 1) {
-        for (let step = 1; step <= 2; step += 1) {
-          assert.ok(plan.floorTiles.find((tile) => (
-            tile.x === destination.minX - step
-              && tile.z === z
-              && tile.surface !== 'deepMagma'
-              && tile.surfaceRole !== 'ramp'
-              && Math.abs(tile.elevation - destination.elevation) < 0.001
-          )), `${routeId} terminates at a wall instead of a forward landing route`);
-        }
+      for (const landing of [source, destination]) {
+        const approachTiles = plan.floorTiles.filter((tile) => (
+          tile.surface !== 'deepMagma'
+            && tile.surfaceRole !== 'ramp'
+            && Math.abs(tile.elevation - landing.elevation) < 0.001
+            && (
+              (tile.x >= landing.minX && tile.x <= landing.maxX
+                && (tile.z === landing.minZ - 1 || tile.z === landing.maxZ + 1))
+              || (tile.z >= landing.minZ && tile.z <= landing.maxZ
+                && (tile.x === landing.minX - 1 || tile.x === landing.maxX + 1))
+            )
+        ));
+        assert.equal(
+          approachTiles.length >= 3,
+          true,
+          `${landing.id} must join a three-wide raised catwalk approach`,
+        );
       }
     }
 
@@ -186,16 +248,51 @@ test('Linear Digger Excavation has a safe broad route through both signed descen
       )), false, `${rubble.id} intrudes on a required 3x3 landing buffer`);
     }
 
+    const groundedClutter = [
+      ...plan.dressing.cavernFormations.filter((item) => item.kind === 'stalagmite'),
+      ...plan.dressing.boulders,
+      ...plan.dressing.workVehicles,
+    ];
+    for (const prop of groundedClutter) {
+      const propX = prop.x / plan.tileSize;
+      const propZ = prop.z / plan.tileSize;
+      assert.equal(rampTiles.some((tile) => (
+        Math.abs(tile.x - propX) <= 1.25
+          && Math.abs(tile.z - propZ) <= 1.25
+      )), false, `${prop.id} intrudes on a ramp travel lane`);
+      assert.equal(plan.rampLandings.some((landing) => (
+        propX >= landing.minX - 1.25 && propX <= landing.maxX + 1.25
+          && propZ >= landing.minZ - 1.25 && propZ <= landing.maxZ + 1.25
+      )), false, `${prop.id} intrudes on a required landing buffer`);
+      assert.equal(plan.floorTiles.some((tile) => (
+        tile.criticalCatwalk === true
+          && Math.abs(tile.x - propX) <= 1.25
+          && Math.abs(tile.z - propZ) <= 1.25
+      )), false, `${prop.id} intrudes on the raised critical catwalk`);
+    }
+
     assert.equal(hasSafeRoute(
       plan,
-      { x: 0, z: 15, elevation: 0 },
-      { x: -8, z: -15, elevation: -14 },
+      { x: 0, z: 15, elevation: 0.84 },
+      { x: -8, z: -15, elevation: -13.16 },
     ), true, `seed ${index} lacks a safe entrance-to-Assay route`);
     assert.equal(hasSafeRoute(
       plan,
-      { x: 0, z: 15, elevation: 0 },
+      { x: 0, z: 15, elevation: 0.84 },
       { x: 13, z: 4, elevation: 0 },
     ), true, `seed ${index} cannot reach the Old Drill cache`);
+    assert.equal(hasCriticalCatwalkRoute(
+      plan,
+      { x: 0, z: 15, elevation: 0.84 },
+      { x: -8, z: -15, elevation: -13.16 },
+    ), true, `seed ${index} lacks a continuous critical catwalk through both ramps`);
+    assert.equal(plan.rampLandings.every((landing) => (
+      plan.criticalCatwalkCells.some((cell) => (
+        cell.elevation === landing.elevation
+          && cell.x >= landing.minX && cell.x <= landing.maxX
+          && cell.z >= landing.minZ && cell.z <= landing.maxZ
+      ))
+    )), true, `seed ${index} has a ramp landing outside the critical catwalk`);
   }
 });
 
@@ -246,6 +343,25 @@ test('assembly is enclosed, collision-backed, locally occludable, supported, and
   assert.equal(dungeon.moduleManifestDiagnostics.minimumChamberHeadroomMeters, 11.2);
   assert.equal(dungeon.moduleManifestDiagnostics.untexturedVoidCellCount, 0);
   assert.equal(dungeon.moduleManifestDiagnostics.exteriorVoidVisible, false);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkSegmentCount, 11);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkMinimumWidthTiles, 3);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkConnectsEveryRamp, true);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkRailRunCount, 5);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkRaisedSurface, true);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkRiseMeters, CRITICAL_CATWALK_RISE);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkSocketTransitionRampCount, 2);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkGroundedTransitionHeight, 0.89);
+  assert.equal(dungeon.moduleManifestDiagnostics.criticalCatwalkLedgeSafetyExempt, true);
+  assert.deepEqual(dungeon.moduleManifestDiagnostics.excavationClutter, {
+    cavernFormationCount: 12,
+    stalagmiteCount: 6,
+    stalactiteCount: 6,
+    boulderCount: 7,
+    minecartCount: 2,
+    trolleyCount: 2,
+    pickaxeCount: 5,
+    requiredRouteClear: true,
+  });
   assert.equal(dungeon.solidZones.length > 300, true);
   assert.equal(dungeon.moduleManifestDiagnostics.collisionParity.accepted, true);
   assert.equal(dungeon.solidZones.every((zone) => zone.playerCollisionPadding >= 0.42), true);
@@ -261,6 +377,17 @@ test('assembly is enclosed, collision-backed, locally occludable, supported, and
   assert.equal(dungeon.supportDiagnostics.structuralSupportCount > 30, true);
   assert.equal(dungeon.supportDiagnostics.supportDatumViolationCount, 0);
   assert.equal(dungeon.supportDiagnostics.unresolvedElevatedFootprintCount, 0);
+  assert.equal(meshes.filter((mesh) => mesh.userData.cavernFormation === true).reduce(
+    (count, mesh) => count + mesh.count,
+    0,
+  ), 12);
+  assert.equal(meshes.filter((mesh) => mesh.userData.proceduralShape === 'excavated-boulder').reduce(
+    (count, mesh) => count + mesh.count,
+    0,
+  ), 7);
+  assert.equal(dungeon.solidZones.filter((zone) => (
+    /(?:stalagmite|stalactite|excavationBoulder|diggerMinecart|diggerToolTrolley)/.test(zone.obstacleKind)
+  )).length, 23);
 
   assert.equal(meshes.some((mesh) => (
     /CavernBackdrop|cavernBackdrop/i.test(mesh.name)
@@ -296,13 +423,20 @@ test('assembly is enclosed, collision-backed, locally occludable, supported, and
       && wall.userData.cameraOcclusionExcluded !== true
   )), true, 'every authored excavation wall must carry the universal camera label');
   const raisedFloorOccluders = meshes.filter((mesh) => mesh.name.endsWith('Floors'));
-  assert.equal(raisedFloorOccluders.length, 3);
+  assert.equal(raisedFloorOccluders.length, 4);
   assert.equal(raisedFloorOccluders.every((mesh) => (
     mesh.isInstancedMesh
       && mesh.userData.cameraOcclusionPerInstance === true
       && mesh.userData.cameraOcclusionSurface === true
       && mesh.userData.maximumBaySpan === 1
   )), true, 'raised floor bays must disappear individually when they block the camera');
+  const criticalCatwalkMesh = meshes.find((mesh) => (
+    mesh.name === 'linearExcavationCriticalCatwalkFloors'
+  ));
+  assert.ok(criticalCatwalkMesh);
+  assert.equal(criticalCatwalkMesh.userData.architectureRole, 'raised-critical-catwalk');
+  assert.equal(criticalCatwalkMesh.userData.criticalCatwalkRouteId, 'linear-excavation-critical-route');
+  assert.equal(criticalCatwalkMesh.userData.collisionBacked, true);
   assert.equal(meshes.length < 200, true, 'local batching should keep the fixture below the draw-call regression ceiling');
   assert.equal(meshes.every((mesh) => mesh.userData.worldUvTiled === true), true);
   for (const mesh of meshes) {
@@ -339,6 +473,13 @@ test('every exposed floor boundary and ramp edge has capsule-safe authored colli
   const safeKeysByElevation = new Set(safeTiles.map((tile) => (
     `${tile.x},${tile.z}@${tile.elevation.toFixed(3)}`
   )));
+  const safeTilesByColumn = new Map();
+  for (const tile of safeTiles) {
+    const key = `${tile.x},${tile.z}`;
+    const column = safeTilesByColumn.get(key) ?? [];
+    column.push(tile);
+    safeTilesByColumn.set(key, column);
+  }
   const rampColumns = new Set(plan.floorTiles
     .filter((tile) => tile.surfaceRole === 'ramp')
     .map((tile) => `${tile.x},${tile.z}`));
@@ -360,6 +501,9 @@ test('every exposed floor boundary and ramp edge has capsule-safe authored colli
   for (const tile of safeTiles) {
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       if (safeKeysByElevation.has(`${tile.x + dx},${tile.z + dz}@${tile.elevation.toFixed(3)}`)) continue;
+      if ((safeTilesByColumn.get(`${tile.x + dx},${tile.z + dz}`) ?? []).some((neighbor) => (
+        Math.abs(neighbor.elevation - tile.elevation) <= CRITICAL_CATWALK_RISE + 0.001
+      ))) continue;
       if (rampColumns.has(`${tile.x + dx},${tile.z + dz}`)) continue;
       if (magmaColumns.has(`${tile.x + dx},${tile.z + dz}`)) continue;
       if (socketBoundary(tile, dx, dz)) continue;

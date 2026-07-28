@@ -49,7 +49,7 @@ test('approved Magma opening plan preserves traversal and texture contracts', ()
   assert.equal(room.width >= 13, true);
   assert.equal(room.depth >= 13, true);
   assert.equal(room.verticalPlan.highestTierReachableWithoutJump, true);
-  assert.equal(walkableElevations.has(-2.8), true);
+  assert.equal(walkableElevations.has(-3), true);
   assert.equal(walkableElevations.has(5.6), true);
 
   assert.equal(plan.jump.streamWidthMeters, 4.2);

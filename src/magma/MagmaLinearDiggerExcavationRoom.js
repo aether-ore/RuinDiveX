@@ -3,7 +3,7 @@ import { PLAYER_TRAVERSAL_ENVELOPE } from '../TraversalCapabilities.js';
 import { applyWorldTiledUVs } from './MagmaRefineryOpeningRoom.js';
 
 export const MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID = 'magma-linear-digger-excavation';
-export const MAGMA_LINEAR_DIGGER_EXCAVATION_TOPOLOGY_REVISION = 1;
+export const MAGMA_LINEAR_DIGGER_EXCAVATION_TOPOLOGY_REVISION = 6;
 export const OLD_DRILL_ITEM_ID = 'oldDrill';
 export const OLD_DRILL_CHEST_ID = 'magma-linear-excavation-old-drill-chest';
 
@@ -13,7 +13,9 @@ const ROOM_DEPTH_TILES = 41;
 const UPPER_ELEVATION = 0;
 const MIDDLE_ELEVATION = -7;
 const LOWER_ELEVATION = -14;
-const LAVA_OFFSET = -2.8;
+// Every safe bank beside the stream uses the standard three-metre climbable
+// ledge profile; this also leaves the authored hanging pose clear of magma.
+const LAVA_OFFSET = -3;
 const TUNNEL_HEADROOM = 8.4;
 const CHAMBER_HEADROOM = 11.2;
 const SOCKET_HEIGHT = 5.6;
@@ -22,6 +24,15 @@ const LAVA_CONTINUITY_TAG = 'magma-refinery-lava-spine';
 const RAMP_SEGMENTS = 13;
 const RAMP_WIDTH_TILES = 3;
 const RAMP_DELTA = -7;
+// The critical-route grating is a real raised walking surface, not a material
+// swap on the cavern floor. 0.84 m is high enough to read clearly beside the
+// rock floor while remaining within the shared climbable-ledge envelope.
+export const CRITICAL_CATWALK_RISE = 0.84;
+const CATWALK_ACCESS_RAMP_SEGMENTS = 2;
+
+function raisedCatwalkElevation(baseElevation) {
+  return fixed(baseElevation + CRITICAL_CATWALK_RISE);
+}
 
 const TEXTURE_SETS = Object.freeze({
   basalt: 'basalt',
@@ -242,11 +253,187 @@ function createRampLandingDefinitions() {
     { id: 'flightBEndLanding', routeId: 'digger-descent-flight-b', elevation: LOWER_ELEVATION, minX: -6, maxX: -4, minZ: -23, maxZ: -21 },
   ].map((landing) => ({
     ...landing,
+    structuralBaseElevation: landing.elevation,
+    elevation: raisedCatwalkElevation(landing.elevation),
+    catwalkRiseMeters: CRITICAL_CATWALK_RISE,
     widthTiles: landing.maxX - landing.minX + 1,
     depthTiles: landing.maxZ - landing.minZ + 1,
     clearWidthMeters: (landing.maxX - landing.minX + 1) * TILE_SIZE,
     clearDepthMeters: (landing.maxZ - landing.minZ + 1) * TILE_SIZE,
     propFree: true,
+  }));
+}
+
+function createCriticalCatwalkDefinitions() {
+  return [
+    {
+      id: 'upper-entry-catwalk',
+      elevation: UPPER_ELEVATION,
+      minX: -1,
+      maxX: 1,
+      minZ: 4,
+      maxZ: 17,
+      purpose: 'entry-to-western-bore-turn',
+    },
+    {
+      id: 'upper-west-crossing-catwalk',
+      elevation: UPPER_ELEVATION,
+      minX: -13,
+      maxX: 1,
+      minZ: 6,
+      maxZ: 8,
+      purpose: 'western-bore-crossing',
+    },
+    {
+      id: 'upper-west-descent-catwalk',
+      elevation: UPPER_ELEVATION,
+      minX: -13,
+      maxX: -11,
+      minZ: -4,
+      maxZ: 8,
+      purpose: 'western-bore-return-turn',
+    },
+    {
+      id: 'upper-first-melt-crossing-catwalk',
+      elevation: UPPER_ELEVATION,
+      minX: -13,
+      maxX: 0,
+      minZ: -4,
+      maxZ: -2,
+      purpose: 'western-bore-to-first-melt',
+    },
+    {
+      id: 'flight-a-approach-catwalk',
+      elevation: UPPER_ELEVATION,
+      minX: -2,
+      maxX: 0,
+      minZ: -7,
+      maxZ: -2,
+      purpose: 'first-melt-to-flight-a',
+    },
+    {
+      id: 'flight-a-landing-catwalk',
+      elevation: MIDDLE_ELEVATION,
+      minX: -18,
+      maxX: -16,
+      minZ: -10,
+      maxZ: -5,
+      purpose: 'flight-a-to-middle-crossing',
+    },
+    {
+      id: 'middle-survey-catwalk',
+      elevation: MIDDLE_ELEVATION,
+      minX: -18,
+      maxX: 12,
+      minZ: -10,
+      maxZ: -8,
+      purpose: 'middle-crossing-to-deep-confluence',
+    },
+    {
+      id: 'deep-confluence-catwalk',
+      elevation: MIDDLE_ELEVATION,
+      minX: 10,
+      maxX: 12,
+      minZ: -23,
+      maxZ: -8,
+      purpose: 'deep-confluence-to-flight-b',
+    },
+    {
+      id: 'lower-assay-catwalk',
+      elevation: LOWER_ELEVATION,
+      minX: -6,
+      maxX: -4,
+      minZ: -23,
+      maxZ: -14,
+      purpose: 'flight-b-to-assay-turn',
+    },
+    {
+      id: 'assay-turn-catwalk',
+      elevation: LOWER_ELEVATION,
+      minX: -9,
+      maxX: -4,
+      minZ: -16,
+      maxZ: -14,
+      purpose: 'assay-turn',
+    },
+    {
+      id: 'assay-socket-catwalk',
+      elevation: LOWER_ELEVATION,
+      minX: -9,
+      maxX: -7,
+      minZ: -17,
+      maxZ: -14,
+      purpose: 'assay-socket-approach',
+    },
+  ].map((segment) => ({
+    ...segment,
+    structuralBaseElevation: segment.elevation,
+    elevation: raisedCatwalkElevation(segment.elevation),
+    catwalkRiseMeters: CRITICAL_CATWALK_RISE,
+    widthTiles: segment.maxX - segment.minX + 1,
+    depthTiles: segment.maxZ - segment.minZ + 1,
+    deckMaterialRole: 'serviceGrate',
+    supported: true,
+    collisionBacked: true,
+    propFree: true,
+  }));
+}
+
+function createCriticalCatwalkRailRuns() {
+  return [
+    {
+      id: 'upper-entry-guide-rail',
+      elevation: UPPER_ELEVATION,
+      orientation: 'z',
+      centerX: 0,
+      centerZ: 13,
+      lengthTiles: 7,
+      widthTiles: 3,
+    },
+    {
+      id: 'upper-west-guide-rail',
+      elevation: UPPER_ELEVATION,
+      orientation: 'z',
+      centerX: -12,
+      centerZ: 2,
+      lengthTiles: 6,
+      widthTiles: 3,
+    },
+    {
+      id: 'first-melt-guide-rail',
+      elevation: UPPER_ELEVATION,
+      orientation: 'x',
+      centerX: -7,
+      centerZ: -3,
+      lengthTiles: 7,
+      widthTiles: 3,
+    },
+    {
+      id: 'deep-confluence-guide-rail',
+      elevation: MIDDLE_ELEVATION,
+      orientation: 'z',
+      centerX: 11,
+      centerZ: -17.5,
+      lengthTiles: 6,
+      widthTiles: 3,
+    },
+    {
+      id: 'lower-assay-guide-rail',
+      elevation: LOWER_ELEVATION,
+      orientation: 'z',
+      centerX: -5,
+      centerZ: -19,
+      lengthTiles: 3,
+      widthTiles: 3,
+    },
+  ].map((run) => ({
+    ...run,
+    structuralBaseElevation: run.elevation,
+    elevation: raisedCatwalkElevation(run.elevation),
+    catwalkRiseMeters: CRITICAL_CATWALK_RISE,
+    clearWidthMeters: run.widthTiles * TILE_SIZE,
+    landingClearancePreserved: true,
+    junctionClearancePreserved: true,
   }));
 }
 
@@ -324,7 +511,7 @@ function createFloorPlan({ upperBridgeZ, activeOptionalChamberIds, chambers, opt
 
   const rampLandings = createRampLandingDefinitions();
   for (const landing of rampLandings) {
-    addRect(landing.minX, landing.maxX, landing.minZ, landing.maxZ, landing.elevation, {
+    addRect(landing.minX, landing.maxX, landing.minZ, landing.maxZ, landing.structuralBaseElevation, {
       surface: 'diggerRampLanding',
       surfaceRole: 'landing',
       landingId: landing.id,
@@ -432,6 +619,147 @@ function createFloorPlan({ upperBridgeZ, activeOptionalChamberIds, chambers, opt
     }
   }
 
+  // One continuous raised route guides the player from the entry socket to
+  // both descent flights and onward to the Assay socket. It replaces the
+  // owning floor rather than stacking another walkable layer over it.
+  const criticalCatwalk = createCriticalCatwalkDefinitions();
+  const criticalCatwalkRailRuns = createCriticalCatwalkRailRuns();
+  const criticalCatwalkCells = new Map();
+  const criticalCatwalkTiles = new Set();
+  const missingCriticalCatwalkCells = [];
+  for (const segment of criticalCatwalk) {
+    for (let x = segment.minX; x <= segment.maxX; x += 1) {
+      for (let z = segment.minZ; z <= segment.maxZ; z += 1) {
+        const key = floorKey(x, z, segment.structuralBaseElevation);
+        const tile = floors.get(key);
+        if (!tile || tile.surfaceRole === 'ramp') {
+          missingCriticalCatwalkCells.push({
+            segmentId: segment.id,
+            x,
+            z,
+            elevation: segment.structuralBaseElevation,
+          });
+          continue;
+        }
+        const segmentIds = new Set(tile.criticalCatwalkSegmentIds ?? []);
+        segmentIds.add(segment.id);
+        Object.assign(tile, {
+          surface: 'diggerCriticalCatwalk',
+          criticalPath: true,
+          criticalCatwalk: true,
+          criticalCatwalkRouteId: 'linear-excavation-critical-route',
+          criticalCatwalkSegmentIds: [...segmentIds],
+          supportedElevatedRoute: true,
+          propFree: true,
+          groundedStepTransitionHeight: CRITICAL_CATWALK_RISE + 0.05,
+          groundedCatwalkTransition: true,
+          ledgeSafetyExempt: true,
+        });
+        criticalCatwalkTiles.add(tile);
+      }
+    }
+  }
+  if (missingCriticalCatwalkCells.length > 0) {
+    throw new Error(
+      `Linear Digger Excavation critical catwalk is incomplete: ${JSON.stringify(missingCriticalCatwalkCells)}`,
+    );
+  }
+
+  const applyAccessRamp = (tile, {
+    routeId,
+    segmentIndex,
+    startElevation,
+    endElevation,
+    directionZ,
+  }) => {
+    tile.surface = 'diggerCriticalCatwalkRamp';
+    tile.surfaceRole = 'ramp';
+    tile.rampRouteId = routeId;
+    tile.rampSegmentIndex = segmentIndex;
+    tile.rampStartElevation = fixed(startElevation);
+    tile.rampEndElevation = fixed(endElevation);
+    tile.rampDirectionX = 0;
+    tile.rampDirectionZ = directionZ;
+    tile.elevation = fixed((startElevation + endElevation) * 0.5);
+    tile.groundedStepTransitionHeight = CRITICAL_CATWALK_RISE + 0.05;
+  };
+
+  // Preserve both socket elevations with two shallow, three-wide boarding
+  // ramps. Everything between them uses the full raised catwalk datum.
+  for (const tile of criticalCatwalkTiles) {
+    const baseElevation = tile.elevation;
+    tile.structuralBaseElevation = baseElevation;
+    tile.catwalkRiseMeters = CRITICAL_CATWALK_RISE;
+    tile.groundedStepTransitionHeight = CRITICAL_CATWALK_RISE + 0.05;
+    tile.groundedCatwalkTransition = true;
+    tile.ledgeSafetyExempt = true;
+    const segmentIds = [...(tile.criticalCatwalkSegmentIds ?? [])];
+    if (tile.x >= -1 && tile.x <= 1 && (tile.z === 17 || tile.z === 16)) {
+      const segmentIndex = 17 - tile.z;
+      const startElevation = UPPER_ELEVATION
+        + (CRITICAL_CATWALK_RISE / CATWALK_ACCESS_RAMP_SEGMENTS) * segmentIndex;
+      applyAccessRamp(tile, {
+        routeId: 'critical-catwalk-entry-rise',
+        segmentIndex,
+        startElevation,
+        endElevation: startElevation + CRITICAL_CATWALK_RISE / CATWALK_ACCESS_RAMP_SEGMENTS,
+        directionZ: -1,
+      });
+    } else if (tile.x >= -9 && tile.x <= -7 && (tile.z === -16 || tile.z === -17)) {
+      const segmentIndex = Math.abs(tile.z) - 16;
+      const startElevation = LOWER_ELEVATION + CRITICAL_CATWALK_RISE
+        - (CRITICAL_CATWALK_RISE / CATWALK_ACCESS_RAMP_SEGMENTS) * segmentIndex;
+      applyAccessRamp(tile, {
+        routeId: 'critical-catwalk-assay-descent',
+        segmentIndex,
+        startElevation,
+        endElevation: startElevation - CRITICAL_CATWALK_RISE / CATWALK_ACCESS_RAMP_SEGMENTS,
+        directionZ: -1,
+      });
+    } else {
+      tile.elevation = raisedCatwalkElevation(baseElevation);
+    }
+    criticalCatwalkCells.set(cellKey(tile.x, tile.z), {
+      x: tile.x,
+      z: tile.z,
+      elevation: tile.elevation,
+      structuralBaseElevation: baseElevation,
+      catwalkRiseMeters: CRITICAL_CATWALK_RISE,
+      segmentIds,
+      surfaceRole: tile.surfaceRole,
+      rampRouteId: tile.rampRouteId ?? null,
+      groundedStepTransitionHeight: tile.groundedStepTransitionHeight,
+      groundedCatwalkTransition: true,
+      ledgeSafetyExempt: true,
+    });
+  }
+
+  // The two signed seven-metre flights are part of the same raised route.
+  // Shift both endpoints equally so their approved gradients and deltas remain
+  // unchanged while their grating aligns flush with every raised landing.
+  for (const tile of floors.values()) {
+    if (!['digger-descent-flight-a', 'digger-descent-flight-b'].includes(tile.rampRouteId)) continue;
+    tile.structuralBaseElevation = tile.elevation;
+    tile.rampStartElevation = raisedCatwalkElevation(tile.rampStartElevation);
+    tile.rampEndElevation = raisedCatwalkElevation(tile.rampEndElevation);
+    tile.elevation = fixed((tile.rampStartElevation + tile.rampEndElevation) * 0.5);
+    tile.criticalPath = true;
+    tile.criticalCatwalk = true;
+    tile.criticalCatwalkRouteId = 'linear-excavation-critical-route';
+    tile.catwalkRiseMeters = CRITICAL_CATWALK_RISE;
+    tile.supportedElevatedRoute = true;
+    tile.propFree = true;
+    tile.groundedStepTransitionHeight = CRITICAL_CATWALK_RISE + 0.05;
+    tile.groundedCatwalkTransition = true;
+    tile.ledgeSafetyExempt = true;
+  }
+
+  // Tile elevations changed in-place; rebuild keys so later validation and
+  // seam assembly observe the actual raised walking surfaces.
+  const raisedFloors = [...floors.values()];
+  floors.clear();
+  for (const tile of raisedFloors) floors.set(floorKey(tile.x, tile.z, tile.elevation), tile);
+
   const safeSurfacesByColumn = new Map();
   for (const tile of floors.values()) {
     const key = cellKey(tile.x, tile.z);
@@ -459,6 +787,9 @@ function createFloorPlan({ upperBridgeZ, activeOptionalChamberIds, chambers, opt
     bridgeRegions,
     bridgeCells: [...bridgeCells],
     landingCells: [...landingCells],
+    criticalCatwalk,
+    criticalCatwalkCells: [...criticalCatwalkCells.values()],
+    criticalCatwalkRailRuns,
     stackedWalkableColumns,
   };
 }
@@ -482,6 +813,69 @@ function createDressingPlan(random, activeOptionalChamberIds) {
     { x: 18.1, z: -12.2, elevation: -7 },
     { x: -10.5, z: -12.5, elevation: -14 },
   ];
+  const vary = (value, distance = 0.22) => value + (random() - 0.5) * distance;
+  const cavernFormations = [
+    { kind: 'stalagmite', x: -3, z: 16, elevation: 0, height: 1.85, radius: 0.66 },
+    { kind: 'stalagmite', x: 4, z: 9, elevation: 0, height: 2.25, radius: 0.78 },
+    { kind: 'stalagmite', x: -4, z: 1, elevation: 0, height: 1.55, radius: 0.58 },
+    { kind: 'stalagmite', x: -20, z: -12, elevation: -7, height: 2.15, radius: 0.74 },
+    { kind: 'stalagmite', x: 19, z: -16, elevation: -7, height: 2.5, radius: 0.82 },
+    { kind: 'stalagmite', x: -11, z: -12, elevation: -14, height: 1.7, radius: 0.62 },
+    { kind: 'stalactite', x: 3, z: 12, elevation: 0, ceilingY: 11.2, height: 2.3, radius: 0.76 },
+    { kind: 'stalactite', x: -3, z: 9, elevation: 0, ceilingY: 11.2, height: 1.9, radius: 0.64 },
+    { kind: 'stalactite', x: 4, z: 0, elevation: 0, ceilingY: 11.2, height: 2.65, radius: 0.86 },
+    { kind: 'stalactite', x: -19, z: -16, elevation: -7, ceilingY: 4.2, height: 1.75, radius: 0.61 },
+    { kind: 'stalactite', x: 18, z: -14, elevation: -7, ceilingY: 4.2, height: 2.4, radius: 0.8 },
+    { kind: 'stalactite', x: -10, z: -12, elevation: -14, ceilingY: -2.8, height: 1.7, radius: 0.58 },
+  ].map((formation, index) => ({
+    ...formation,
+    id: `cavern-${formation.kind}-${index + 1}`,
+    x: vary(formation.x, 0.28) * TILE_SIZE,
+    z: vary(formation.z, 0.28) * TILE_SIZE,
+    height: formation.kind === 'stalactite' ? 2.2 : 1.95,
+    radius: formation.kind === 'stalactite' ? 0.72 : 0.68,
+    yaw: random() * Math.PI,
+  }));
+  const boulders = [
+    { x: -4, z: 14, elevation: 0, radius: 0.82 },
+    { x: 4, z: 5, elevation: 0, radius: 0.96 },
+    { x: 11, z: 2, elevation: 0, radius: 0.72 },
+    { x: -20, z: -16, elevation: -7, radius: 0.9 },
+    { x: 20, z: -11, elevation: -7, radius: 0.78 },
+    { x: 16, z: -16, elevation: -7, radius: 0.68 },
+    { x: -12, z: -16, elevation: -14, radius: 0.72 },
+  ].map((boulder, index) => ({
+    ...boulder,
+    id: `excavation-boulder-${index + 1}`,
+    x: vary(boulder.x, 0.34) * TILE_SIZE,
+    z: vary(boulder.z, 0.34) * TILE_SIZE,
+    radius: 0.82,
+    scaleY: 1,
+    yaw: random() * Math.PI * 2,
+  }));
+  const workVehicles = [
+    { id: 'foreman-cache-minecart', kind: 'minecart', x: 15, z: 6, elevation: 0, yaw: Math.PI * 0.08 },
+    { id: 'surveyors-blind-minecart', kind: 'minecart', x: -18, z: -16, elevation: -7, yaw: Math.PI * 0.54 },
+    { id: 'first-melt-tool-trolley', kind: 'trolley', x: 4, z: 1, elevation: 0, yaw: Math.PI * 0.88 },
+    { id: 'deep-confluence-tool-trolley', kind: 'trolley', x: 19, z: -6, elevation: -7, yaw: Math.PI * 0.18 },
+  ].map((vehicle) => ({
+    ...vehicle,
+    x: vary(vehicle.x, 0.18) * TILE_SIZE,
+    z: vary(vehicle.z, 0.18) * TILE_SIZE,
+    yaw: vehicle.yaw + (random() - 0.5) * 0.16,
+  }));
+  const pickaxes = [
+    { id: 'survey-mouth-pickaxe', x: -4.36, z: 14.1, elevation: 0, yaw: 0.1 },
+    { id: 'split-bore-pickaxe', x: 4.36, z: 9.2, elevation: 0, yaw: -0.12 },
+    { id: 'first-melt-pickaxe', x: -4.45, z: 0.1, elevation: 0, yaw: 0.08 },
+    { id: 'central-survey-pickaxe', x: -20.42, z: -11.2, elevation: -7, yaw: 0.12 },
+    { id: 'deep-confluence-pickaxe', x: 19.42, z: -14.4, elevation: -7, yaw: -0.1 },
+  ].map((pickaxe) => ({
+    ...pickaxe,
+    x: pickaxe.x * TILE_SIZE,
+    z: pickaxe.z * TILE_SIZE,
+    roll: pickaxe.yaw + (random() - 0.5) * 0.12,
+  }));
   return {
     braces,
     rubble: rubbleAnchors.map((anchor, index) => ({
@@ -499,6 +893,10 @@ function createDressingPlan(random, activeOptionalChamberIds) {
       { id: 'survey-mark-middle', x: -16.4, z: -8.8, elevation: -7 },
       { id: 'survey-mark-flight-b', x: 11.4, z: -15.8, elevation: -7 },
     ],
+    cavernFormations,
+    boulders,
+    workVehicles,
+    pickaxes,
     cappedOptionalChamberIds: ['spoilLedgerPocket', 'thermalSurveyAlcove', 'ancientServicePocket']
       .filter((id) => !activeOptionalChamberIds.includes(id)),
   };
@@ -606,7 +1004,7 @@ export function createMagmaLinearDiggerExcavationPlan({
         depth: ROOM_DEPTH_TILES * TILE_SIZE,
       },
       minY: LOWER_ELEVATION + LAVA_OFFSET,
-      maxY: UPPER_ELEVATION + CHAMBER_HEADROOM,
+      maxY: UPPER_ELEVATION + CHAMBER_HEADROOM + CRITICAL_CATWALK_RISE,
     },
     room: {
       id: MAGMA_LINEAR_DIGGER_EXCAVATION_MODULE_ID,
@@ -618,30 +1016,42 @@ export function createMagmaLinearDiggerExcavationPlan({
       depth: ROOM_DEPTH_TILES,
       baseElevation: UPPER_ELEVATION,
       minY: LOWER_ELEVATION + LAVA_OFFSET,
-      maxY: UPPER_ELEVATION,
-      ceilingY: UPPER_ELEVATION + CHAMBER_HEADROOM,
+      maxY: UPPER_ELEVATION + CRITICAL_CATWALK_RISE,
+      ceilingY: UPPER_ELEVATION + CHAMBER_HEADROOM + CRITICAL_CATWALK_RISE,
       ceilingHeight: CHAMBER_HEADROOM,
       purpose: 'A recently bored maze that descends beside the refinery lava spine.',
       mood: 'Modern excavation lights reveal an ancient industrial depth that the Diggers only just uncovered.',
       environmentalStory: 'Fresh drill scars, braces, cables, and survey paint stop where intact ancient ceramic frames begin.',
-      previewPosition: { x: 0, y: 0, z: 15 },
+      previewPosition: { x: 0, y: raisedCatwalkElevation(UPPER_ELEVATION), z: 15 },
       previewFacing: { x: 0, z: -1 },
       previewAnchors: {
-        flightATop: { x: -1, y: UPPER_ELEVATION, z: -6, facingX: -1, facingZ: 0 },
-        flightAMidpoint: { x: -9, y: -3.5, z: -6, facingX: -1, facingZ: 0 },
-        flightABottom: { x: -17, y: MIDDLE_ELEVATION, z: -6, facingX: -1, facingZ: 0 },
-        flightADescent: { x: -14, y: -6.192308, z: -6, facingX: -1, facingZ: 0 },
-        flightAEndLanding: { x: -17, y: MIDDLE_ELEVATION, z: -6, facingX: -1, facingZ: 0 },
-        flightBTop: { x: 11, y: MIDDLE_ELEVATION, z: -22, facingX: -1, facingZ: 0 },
-        flightBMidpoint: { x: 3, y: -10.5, z: -22, facingX: -1, facingZ: 0 },
-        flightBBottom: { x: -5, y: LOWER_ELEVATION, z: -22, facingX: -1, facingZ: 0 },
-        flightBDescent: { x: -2, y: -13.192308, z: -22, facingX: -1, facingZ: 0 },
-        flightBEndLanding: { x: -5, y: LOWER_ELEVATION, z: -22, facingX: -1, facingZ: 0 },
+        criticalCatwalkEntry: { x: 0, y: raisedCatwalkElevation(UPPER_ELEVATION), z: 15, facingX: 0, facingZ: -1 },
+        criticalCatwalkWestTurn: { x: -1, y: raisedCatwalkElevation(UPPER_ELEVATION), z: 7, facingX: -1, facingZ: 0 },
+        criticalCatwalkSideStep: { x: 2, y: UPPER_ELEVATION, z: 8, facingX: -1, facingZ: 0 },
+        workClutterUpper: { x: 12, y: UPPER_ELEVATION, z: 6, facingX: 1, facingZ: 0 },
+        flightATop: { x: -1, y: raisedCatwalkElevation(UPPER_ELEVATION), z: -6, facingX: -1, facingZ: 0 },
+        flightAMidpoint: { x: -9, y: raisedCatwalkElevation(-3.5), z: -6, facingX: -1, facingZ: 0 },
+        flightABottom: { x: -17, y: raisedCatwalkElevation(MIDDLE_ELEVATION), z: -6, facingX: -1, facingZ: 0 },
+        flightADescent: { x: -14, y: raisedCatwalkElevation(-6.192308), z: -6, facingX: -1, facingZ: 0 },
+        flightAEndLanding: { x: -17, y: raisedCatwalkElevation(MIDDLE_ELEVATION), z: -6, facingX: -1, facingZ: 0 },
+        criticalCatwalkMiddle: { x: -17, y: raisedCatwalkElevation(MIDDLE_ELEVATION), z: -9, facingX: 1, facingZ: 0 },
+        criticalCatwalkDeepTurn: { x: 11, y: raisedCatwalkElevation(MIDDLE_ELEVATION), z: -10, facingX: 0, facingZ: -1 },
+        workClutterMiddle: { x: 16, y: MIDDLE_ELEVATION, z: -9, facingX: 1, facingZ: 1 },
+        flightBTop: { x: 11, y: raisedCatwalkElevation(MIDDLE_ELEVATION), z: -22, facingX: -1, facingZ: 0 },
+        flightBMidpoint: { x: 3, y: raisedCatwalkElevation(-10.5), z: -22, facingX: -1, facingZ: 0 },
+        flightBBottom: { x: -5, y: raisedCatwalkElevation(LOWER_ELEVATION), z: -22, facingX: -1, facingZ: 0 },
+        flightBDescent: { x: -2, y: raisedCatwalkElevation(-13.192308), z: -22, facingX: -1, facingZ: 0 },
+        flightBEndLanding: { x: -5, y: raisedCatwalkElevation(LOWER_ELEVATION), z: -22, facingX: -1, facingZ: 0 },
+        criticalCatwalkAssayApproach: { x: -5, y: raisedCatwalkElevation(LOWER_ELEVATION), z: -19, facingX: 0, facingZ: 1 },
       },
       verticalPlan: {
         baseElevation: UPPER_ELEVATION,
         localWalkableTiers: [UPPER_ELEVATION, MIDDLE_ELEVATION, LOWER_ELEVATION],
-        requiredRouteElevationSequence: [UPPER_ELEVATION, MIDDLE_ELEVATION, LOWER_ELEVATION],
+        requiredRouteElevationSequence: [
+          raisedCatwalkElevation(UPPER_ELEVATION),
+          raisedCatwalkElevation(MIDDLE_ELEVATION),
+          raisedCatwalkElevation(LOWER_ELEVATION),
+        ],
       },
     },
     chambers,
@@ -656,6 +1066,9 @@ export function createMagmaLinearDiggerExcavationPlan({
     bridgeRegions: floorPlan.bridgeRegions,
     bridgeCells: floorPlan.bridgeCells,
     landingCells: floorPlan.landingCells,
+    criticalCatwalk: floorPlan.criticalCatwalk,
+    criticalCatwalkCells: floorPlan.criticalCatwalkCells,
+    criticalCatwalkRailRuns: floorPlan.criticalCatwalkRailRuns,
     stackedWalkableColumns: floorPlan.stackedWalkableColumns,
     dressing: createDressingPlan(rng, activeOptionalChamberIds),
     reward: {
@@ -885,17 +1298,28 @@ function addCeilingRuns(parent, plan, materials, aerialOnlyZones) {
   const nonRamp = plan.floorTiles.filter((tile) => tile.surfaceRole !== 'ramp');
   const chunks = new Map();
   for (const tile of nonRamp) {
-    const bandElevation = tile.surface === 'deepMagma' ? tile.ownerFloorElevation : tile.elevation;
+    const bandElevation = tile.surface === 'deepMagma'
+      ? tile.ownerFloorElevation
+      : (tile.structuralBaseElevation ?? tile.elevation);
     const chamber = plan.chambers.find((candidate) => (
       candidate.elevation === bandElevation
         && tile.x >= candidate.minX && tile.x <= candidate.maxX
         && tile.z >= candidate.minZ && tile.z <= candidate.maxZ
     ));
     const headroom = chamber ? CHAMBER_HEADROOM : TUNNEL_HEADROOM;
+    const walkableElevation = tile.surface === 'deepMagma'
+      ? tile.ownerFloorElevation
+      : tile.elevation;
+    const ceilingElevation = walkableElevation + headroom;
     const chunkX = Math.floor((tile.x + 24) / 3);
     const chunkZ = Math.floor((tile.z + 18) / 3);
-    const key = `${fixed(bandElevation)}:${headroom}:${chunkX}:${chunkZ}`;
-    const chunk = chunks.get(key) ?? { bandElevation, headroom, cells: new Map() };
+    const key = `${fixed(bandElevation)}:${fixed(ceilingElevation)}:${chunkX}:${chunkZ}`;
+    const chunk = chunks.get(key) ?? {
+      bandElevation,
+      headroom,
+      ceilingElevation,
+      cells: new Map(),
+    };
     chunk.cells.set(cellKey(tile.x, tile.z), { x: tile.x, z: tile.z });
     chunks.set(key, chunk);
   }
@@ -905,10 +1329,11 @@ function addCeilingRuns(parent, plan, materials, aerialOnlyZones) {
   for (const chunk of chunks.values()) {
     const cells = [...chunk.cells.values()];
     ownerIndex += 1;
-    const batchKey = `${chunk.bandElevation}:${chunk.headroom}`;
+    const batchKey = `${chunk.bandElevation}:${chunk.ceilingElevation}`;
     const batch = batches.get(batchKey) ?? {
       bandElevation: chunk.bandElevation,
       headroom: chunk.headroom,
+      ceilingElevation: chunk.ceilingElevation,
       cells: [],
     };
     batch.cells.push(...cells);
@@ -920,7 +1345,7 @@ function addCeilingRuns(parent, plan, materials, aerialOnlyZones) {
     aerialOnlyZones.push(createSolidZone(
       `excavationCeilingRun${ownerIndex}Collision`,
       (minX + maxX) * 0.5 * TILE_SIZE,
-      chunk.bandElevation + chunk.headroom + 0.17,
+      chunk.ceilingElevation + 0.17,
       (minZ + maxZ) * 0.5 * TILE_SIZE,
       (maxX - minX + 1) * TILE_SIZE * 0.5,
       (maxZ - minZ + 1) * TILE_SIZE * 0.5,
@@ -936,7 +1361,7 @@ function addCeilingRuns(parent, plan, materials, aerialOnlyZones) {
       tiles: batch.cells,
       material: materials.basalt,
       thickness: 0.34,
-      yForTile: () => batch.bandElevation + batch.headroom + 0.17,
+      yForTile: () => batch.ceilingElevation + 0.17,
     });
     mesh.userData.cameraOcclusionSurface = true;
     mesh.userData.cameraOcclusionOwner = true;
@@ -967,7 +1392,9 @@ function addLevelEnclosure(
     // The lava river remains visible beneath a supported ramp, but it must not
     // generate cavern enclosure walls through the ramp's travel lane.
     if (tile.surface === 'deepMagma' && rampCellKeys.has(cellKey(tile.x, tile.z))) continue;
-    const band = tile.surface === 'deepMagma' ? tile.ownerFloorElevation : tile.elevation;
+    const band = tile.surface === 'deepMagma'
+      ? tile.ownerFloorElevation
+      : (tile.structuralBaseElevation ?? tile.elevation);
     const bandKey = fixed(band);
     const occupancy = occupancyByBand.get(bandKey) ?? new Set();
     occupancy.add(cellKey(tile.x, tile.z));
@@ -1034,7 +1461,10 @@ function addLevelEnclosure(
             ramp.rampEndElevation,
             progress,
           );
-          return Math.abs(edgeElevation - bandElevation)
+          const sourceWalkableElevation = sourceTile?.surface === 'deepMagma'
+            ? sourceTile.ownerFloorElevation
+            : (sourceTile?.elevation ?? bandElevation);
+          return Math.abs(edgeElevation - sourceWalkableElevation)
             <= PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile + 0.05;
         });
         if (opensIntoRamp) continue;
@@ -1240,7 +1670,14 @@ function addRampAssemblies(parent, plan, materials, solidZones, aerialOnlyZones)
         geometry: createTiledBoxGeometry(slopeLength * 1.006, 0.28, RAMP_WIDTH_TILES * TILE_SIZE),
         material: materials.serviceGrate,
         matrices: deckMatrices,
-        userData: { structuralDeck: true, rampRouteId: routeId, collisionBacked: true },
+        userData: {
+          structuralDeck: true,
+          architectureRole: 'raised-critical-catwalk-ramp',
+          criticalCatwalkRouteId: 'linear-excavation-critical-route',
+          rampRouteId: routeId,
+          catwalkRiseMeters: CRITICAL_CATWALK_RISE,
+          collisionBacked: true,
+        },
       }),
       addInstancedMatrices(parent, {
         name: `${routeId}CeilingSegments`,
@@ -1271,6 +1708,122 @@ function addRampAssemblies(parent, plan, materials, solidZones, aerialOnlyZones)
       mesh.userData.occlusionOwnerId = `${mesh.name}-instances`;
       mesh.userData.maximumBaySpan = 1;
     }
+  }
+}
+
+function addCriticalCatwalkAccessRamps(parent, plan, materials, solidZones, aerialOnlyZones) {
+  const routeIds = ['critical-catwalk-entry-rise', 'critical-catwalk-assay-descent'];
+  const railHeight = 1.05;
+  const deckMatrices = [];
+  const ceilingMatrices = [];
+  const railMatrices = [];
+  const postMatrices = [];
+  let slopeLength = TILE_SIZE;
+  for (const routeId of routeIds) {
+    const routeTiles = plan.floorTiles.filter((tile) => tile.rampRouteId === routeId);
+    const bySegment = new Map();
+    for (const tile of routeTiles) {
+      const bucket = bySegment.get(tile.rampSegmentIndex) ?? [];
+      bucket.push(tile);
+      bySegment.set(tile.rampSegmentIndex, bucket);
+    }
+    for (const [segmentIndex, segmentTiles] of bySegment) {
+      const tile = segmentTiles[0];
+      const minX = Math.min(...segmentTiles.map((candidate) => candidate.x));
+      const maxX = Math.max(...segmentTiles.map((candidate) => candidate.x));
+      const centerX = (minX + maxX) * 0.5 * TILE_SIZE;
+      const width = (maxX - minX + 1) * TILE_SIZE;
+      const rise = tile.rampEndElevation - tile.rampStartElevation;
+      slopeLength = Math.hypot(TILE_SIZE, rise);
+      const angle = Math.atan2(rise, TILE_SIZE);
+      const floorY = (tile.rampStartElevation + tile.rampEndElevation) * 0.5;
+      const slopeQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+        -Math.sign(tile.rampDirectionZ) * angle,
+        0,
+        0,
+      ));
+      deckMatrices.push(new THREE.Matrix4().compose(
+        new THREE.Vector3(centerX, floorY - 0.14, tile.z * TILE_SIZE),
+        slopeQuaternion,
+        new THREE.Vector3(1, 1, 1),
+      ));
+
+      const ceilingY = (tile.structuralBaseElevation ?? floorY) + TUNNEL_HEADROOM + 0.15;
+      ceilingMatrices.push(new THREE.Matrix4().makeTranslation(
+        centerX,
+        ceilingY,
+        tile.z * TILE_SIZE,
+      ));
+      aerialOnlyZones.push(createSolidZone(
+        `${routeId}Ceiling${segmentIndex + 1}Collision`, centerX, ceilingY, tile.z * TILE_SIZE,
+        width * 0.5 + 0.35, TILE_SIZE * 0.51, 0.15, 'excavationCeiling',
+      ));
+
+      for (const edgeX of [minX - 0.5, maxX + 0.5]) {
+        const x = edgeX * TILE_SIZE;
+        railMatrices.push(new THREE.Matrix4().compose(
+          new THREE.Vector3(x, floorY + railHeight, tile.z * TILE_SIZE),
+          slopeQuaternion,
+          new THREE.Vector3(1, 1, 1),
+        ));
+        solidZones.push(createSolidZone(
+          `${routeId}Rail${segmentIndex + 1}_${edgeX}Collision`, x, floorY + 0.58, tile.z * TILE_SIZE,
+          0.08, slopeLength * 0.51, 0.58, 'criticalCatwalkRailing',
+        ));
+        for (const zOffset of [-TILE_SIZE * 0.42, TILE_SIZE * 0.42]) {
+          postMatrices.push(new THREE.Matrix4().makeTranslation(
+            x,
+            floorY + railHeight * 0.5,
+            tile.z * TILE_SIZE + zOffset,
+          ));
+        }
+      }
+    }
+  }
+
+  const commonUserData = {
+    criticalCatwalkRouteId: 'linear-excavation-critical-route',
+    catwalkRiseMeters: CRITICAL_CATWALK_RISE,
+    collisionBacked: true,
+  };
+  const deck = addInstancedMatrices(parent, {
+    name: 'criticalCatwalkAccessRampDecks',
+    geometry: createTiledBoxGeometry(RAMP_WIDTH_TILES * TILE_SIZE, 0.28, slopeLength * 1.006),
+    material: materials.serviceGrate,
+    matrices: deckMatrices,
+    userData: {
+      ...commonUserData,
+      structuralDeck: true,
+      architectureRole: 'raised-critical-catwalk-access-ramp',
+    },
+  });
+  const ceiling = addInstancedMatrices(parent, {
+    name: 'criticalCatwalkAccessRampCeilings',
+    geometry: createTiledBoxGeometry(RAMP_WIDTH_TILES * TILE_SIZE + 0.7, 0.3, TILE_SIZE * 1.01),
+    material: materials.basalt,
+    matrices: ceilingMatrices,
+    userData: commonUserData,
+  });
+  addInstancedMatrices(parent, {
+    name: 'criticalCatwalkAccessRampRails',
+    geometry: createTiledBoxGeometry(0.1, 0.1, slopeLength),
+    material: materials.rails,
+    matrices: railMatrices,
+    userData: { ...commonUserData, playerRailing: true },
+  });
+  addInstancedMatrices(parent, {
+    name: 'criticalCatwalkAccessRampRailPosts',
+    geometry: createTiledBoxGeometry(0.1, railHeight, 0.1),
+    material: materials.rails,
+    matrices: postMatrices,
+    userData: { ...commonUserData, playerRailing: true },
+  });
+  for (const mesh of [deck, ceiling]) {
+    mesh.userData.cameraOcclusionSurface = true;
+    mesh.userData.cameraOcclusionOwner = true;
+    mesh.userData.cameraOcclusionPerInstance = true;
+    mesh.userData.occlusionOwnerId = `${mesh.name}-instances`;
+    mesh.userData.maximumBaySpan = 1;
   }
 }
 
@@ -1352,6 +1905,73 @@ function addBridgeRailings(parent, plan, materials, solidZones) {
       }
     }
   }
+}
+
+function addCriticalCatwalkGuideRails(parent, plan, materials, solidZones) {
+  const railHeight = 1.05;
+  const railThickness = 0.1;
+  const postMatrices = [];
+  for (const run of plan.criticalCatwalkRailRuns) {
+    const alongX = run.orientation === 'x';
+    const length = run.lengthTiles * TILE_SIZE;
+    const sideOffset = run.widthTiles * TILE_SIZE * 0.5;
+    const railMatrices = [];
+    for (const side of [-1, 1]) {
+      const railX = (run.centerX * TILE_SIZE) + (alongX ? 0 : side * sideOffset);
+      const railZ = (run.centerZ * TILE_SIZE) + (alongX ? side * sideOffset : 0);
+      railMatrices.push(new THREE.Matrix4().makeTranslation(
+        railX,
+        run.elevation + railHeight,
+        railZ,
+      ));
+      solidZones.push(createSolidZone(
+        `${run.id}Rail${side}Collision`,
+        railX,
+        run.elevation + 0.58,
+        railZ,
+        (alongX ? length : railThickness) * 0.5,
+        (alongX ? railThickness : length) * 0.5,
+        0.58,
+        'criticalCatwalkRailing',
+      ));
+
+      const postCount = Math.max(2, Math.ceil(run.lengthTiles / 2) + 1);
+      for (let index = 0; index < postCount; index += 1) {
+        const axisOffset = -length * 0.5 + (length * index) / (postCount - 1);
+        postMatrices.push(new THREE.Matrix4().makeTranslation(
+          railX + (alongX ? axisOffset : 0),
+          run.elevation + railHeight * 0.5,
+          railZ + (alongX ? 0 : axisOffset),
+        ));
+      }
+    }
+    addInstancedMatrices(parent, {
+      name: `${run.id}Rails`,
+      geometry: createTiledBoxGeometry(
+        alongX ? length : railThickness,
+        railThickness,
+        alongX ? railThickness : length,
+      ),
+      material: materials.rails,
+      matrices: railMatrices,
+      userData: {
+        playerRailing: true,
+        criticalCatwalkRouteId: 'linear-excavation-critical-route',
+        collisionBacked: true,
+      },
+    });
+  }
+  addInstancedMatrices(parent, {
+    name: 'criticalCatwalkGuideRailPosts',
+    geometry: createTiledBoxGeometry(railThickness, railHeight, railThickness),
+    material: materials.rails,
+    matrices: postMatrices,
+    userData: {
+      playerRailing: true,
+      criticalCatwalkRouteId: 'linear-excavation-critical-route',
+      collisionBacked: true,
+    },
+  });
 }
 
 function addLava(parent, plan, materials, traps) {
@@ -1481,6 +2101,222 @@ function addBraceFrame(parent, materials, solidZones, brace) {
   owner.add(light);
 }
 
+function addCavernFormations(parent, materials, solidZones, formations) {
+  for (const kind of ['stalagmite', 'stalactite']) {
+    const matching = formations.filter((formation) => formation.kind === kind);
+    if (matching.length === 0) continue;
+    const sample = matching[0];
+    const stalactite = kind === 'stalactite';
+    const geometry = applyWorldTiledUVs(new THREE.CylinderGeometry(
+      stalactite ? sample.radius : 0.06,
+      stalactite ? 0.06 : sample.radius,
+      sample.height,
+      7,
+      1,
+      false,
+    ), TILE_SIZE);
+    const matrices = matching.map((formation) => {
+      const y = stalactite
+        ? formation.ceilingY - formation.height * 0.5
+        : formation.elevation + formation.height * 0.5;
+      solidZones.push(createSolidZone(
+        `${formation.id}Collision`, formation.x, y, formation.z,
+        formation.radius * 0.78, formation.radius * 0.78, formation.height * 0.5,
+        formation.kind,
+      ));
+      return new THREE.Matrix4().compose(
+        new THREE.Vector3(formation.x, y, formation.z),
+        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), formation.yaw),
+        new THREE.Vector3(1, 1, 1),
+      );
+    });
+    addInstancedMatrices(parent, {
+      name: `linearExcavation${stalactite ? 'Stalactites' : 'Stalagmites'}`,
+      geometry,
+      material: materials.basalt,
+      matrices,
+      userData: {
+        proceduralShape: kind,
+        cavernFormation: true,
+        collisionBacked: true,
+        instanceSemanticIds: matching.map((formation) => formation.id),
+      },
+    });
+  }
+}
+
+function addExcavationBoulders(parent, materials, solidZones, boulders) {
+  if (boulders.length === 0) return;
+  const radius = boulders[0].radius;
+  const matrices = boulders.map((boulder) => {
+    const y = boulder.elevation + radius * 0.72;
+    solidZones.push(createSolidZone(
+      `${boulder.id}Collision`, boulder.x, y, boulder.z,
+      radius * 0.82, radius * 0.72, radius * 0.72, 'excavationBoulder',
+    ));
+    return new THREE.Matrix4().compose(
+      new THREE.Vector3(boulder.x, y, boulder.z),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(0.16, boulder.yaw, -0.11)),
+      new THREE.Vector3(1, 1, 1),
+    );
+  });
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationBoulders',
+    geometry: applyWorldTiledUVs(new THREE.DodecahedronGeometry(radius, 0), TILE_SIZE),
+    material: materials.ashStone,
+    matrices,
+    userData: {
+      proceduralShape: 'excavated-boulder',
+      diggerExcavationEvidence: true,
+      collisionBacked: true,
+      instanceSemanticIds: boulders.map((boulder) => boulder.id),
+    },
+  });
+}
+
+function createVehiclePartMatrix(vehicle, x, y, z, rotation = null) {
+  const owner = new THREE.Matrix4().compose(
+    new THREE.Vector3(vehicle.x, vehicle.elevation, vehicle.z),
+    new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), vehicle.yaw),
+    new THREE.Vector3(1, 1, 1),
+  );
+  const local = new THREE.Matrix4().compose(
+    new THREE.Vector3(x, y, z),
+    rotation ?? new THREE.Quaternion(),
+    new THREE.Vector3(1, 1, 1),
+  );
+  return owner.multiply(local);
+}
+
+function addWorkVehicles(parent, materials, solidZones, vehicles) {
+  const minecarts = vehicles.filter((vehicle) => vehicle.kind === 'minecart');
+  const trolleys = vehicles.filter((vehicle) => vehicle.kind === 'trolley');
+  const commonData = {
+    diggerExcavationEvidence: true,
+    collisionBacked: true,
+  };
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationMinecartChassis',
+    geometry: createTiledBoxGeometry(2.15, 0.24, 1.22),
+    material: materials.blackMetal,
+    matrices: minecarts.map((vehicle) => createVehiclePartMatrix(vehicle, 0, 0.48, 0)),
+    userData: { ...commonData, workVehicleKind: 'minecart' },
+  });
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationMinecartOreTubs',
+    geometry: createTiledBoxGeometry(1.9, 0.72, 1.12),
+    material: materials.rails,
+    matrices: minecarts.map((vehicle) => createVehiclePartMatrix(vehicle, 0, 0.92, 0)),
+    userData: { ...commonData, workVehicleKind: 'minecart' },
+  });
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationTrolleyFlatbeds',
+    geometry: createTiledBoxGeometry(1.8, 0.2, 1.08),
+    material: materials.serviceGrate,
+    matrices: trolleys.map((vehicle) => createVehiclePartMatrix(vehicle, 0, 0.58, 0)),
+    userData: { ...commonData, workVehicleKind: 'trolley' },
+  });
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationTrolleyToolCrates',
+    geometry: createTiledBoxGeometry(0.82, 0.58, 0.72),
+    material: materials.bronze,
+    matrices: trolleys.map((vehicle) => createVehiclePartMatrix(vehicle, -0.3, 0.96, 0)),
+    userData: { ...commonData, workVehicleKind: 'trolley' },
+  });
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationTrolleyHandles',
+    geometry: applyWorldTiledUVs(new THREE.TorusGeometry(0.54, 0.06, 6, 12, Math.PI), TILE_SIZE),
+    material: materials.rails,
+    matrices: trolleys.map((vehicle) => createVehiclePartMatrix(
+      vehicle,
+      0.84,
+      1.15,
+      0,
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2),
+    )),
+    userData: { ...commonData, workVehicleKind: 'trolley' },
+  });
+  const wheelRotation = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(1, 0, 0),
+    Math.PI / 2,
+  );
+  const wheelMatrices = [];
+  for (const vehicle of minecarts) {
+    for (const x of [-0.72, 0.72]) {
+      for (const z of [-0.68, 0.68]) {
+        wheelMatrices.push(createVehiclePartMatrix(vehicle, x, 0.3, z, wheelRotation));
+      }
+    }
+  }
+  for (const vehicle of trolleys) {
+    for (const x of [-0.62, 0.62]) {
+      for (const z of [-0.58, 0.58]) {
+        wheelMatrices.push(createVehiclePartMatrix(vehicle, x, 0.34, z, wheelRotation));
+      }
+    }
+  }
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationWorkVehicleWheels',
+    geometry: applyWorldTiledUVs(new THREE.CylinderGeometry(0.28, 0.28, 0.16, 12), TILE_SIZE),
+    material: materials.blackMetal,
+    matrices: wheelMatrices,
+    userData: { ...commonData, workVehicleKind: 'shared-wheels' },
+  });
+
+  for (const vehicle of vehicles) {
+    const minecart = vehicle.kind === 'minecart';
+    solidZones.push(Object.assign(createSolidZone(
+      `${vehicle.id}Collision`, vehicle.x,
+      vehicle.elevation + (minecart ? 0.76 : 0.84), vehicle.z,
+      minecart ? 1.08 : 0.96, minecart ? 0.68 : 0.62,
+      minecart ? 0.76 : 0.84,
+      minecart ? 'diggerMinecart' : 'diggerToolTrolley',
+    ), { rotationY: vehicle.yaw }));
+  }
+}
+
+function addWallPickaxes(parent, materials, pickaxes) {
+  const handleMatrices = [];
+  const headMatrices = [];
+  for (const pickaxe of pickaxes) {
+    const ownerMatrix = new THREE.Matrix4().compose(
+      new THREE.Vector3(pickaxe.x, pickaxe.elevation + 1.5, pickaxe.z),
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), pickaxe.roll),
+      new THREE.Vector3(1, 1, 1),
+    );
+    handleMatrices.push(ownerMatrix.clone());
+    headMatrices.push(ownerMatrix.clone().multiply(
+      new THREE.Matrix4().makeTranslation(0, 0.74, 0),
+    ));
+  }
+  const commonData = {
+    diggerExcavationEvidence: true,
+    decorativeOutsidePlayerVolume: true,
+    instanceSemanticIds: pickaxes.map((pickaxe) => pickaxe.id),
+  };
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationPickaxeHandles',
+    geometry: createTiledBoxGeometry(0.1, 1.65, 0.1),
+    material: materials.bronze,
+    matrices: handleMatrices,
+    userData: commonData,
+  });
+  addInstancedMatrices(parent, {
+    name: 'linearExcavationPickaxeHeads',
+    geometry: createTiledBoxGeometry(0.13, 0.13, 0.92),
+    material: materials.blackMetal,
+    matrices: headMatrices,
+    userData: commonData,
+  });
+}
+
+function addExcavationWorkClutter(parent, plan, materials, solidZones) {
+  addCavernFormations(parent, materials, solidZones, plan.dressing.cavernFormations);
+  addExcavationBoulders(parent, materials, solidZones, plan.dressing.boulders);
+  addWorkVehicles(parent, materials, solidZones, plan.dressing.workVehicles);
+  addWallPickaxes(parent, materials, plan.dressing.pickaxes);
+}
+
 function addDiggerMachinery(parent, plan, materials, solidZones) {
   const turntableOwner = new THREE.Group();
   turntableOwner.name = 'splitBoreDrillOcclusionOwner';
@@ -1488,7 +2324,9 @@ function addDiggerMachinery(parent, plan, materials, solidZones) {
   turntableOwner.userData.occlusionOwnerId = 'split-bore-drill-turntable';
   turntableOwner.userData.maximumBaySpan = 2;
   parent.add(turntableOwner);
-  const turntableX = 0;
+  // Keep the failed drill as the junction landmark, but park it in the east
+  // work bay so the three-wide critical catwalk can turn west unobstructed.
+  const turntableX = 3 * TILE_SIZE;
   const turntableZ = 7 * TILE_SIZE;
   const turntable = addCylinder(turntableOwner, {
     name: 'splitBoreDrillTurntable',
@@ -1517,7 +2355,7 @@ function addDiggerMachinery(parent, plan, materials, solidZones) {
     radiusTop: 0.12,
     radiusBottom: 0.68,
     height: 2.6,
-    x: 1.15,
+    x: turntableX + 1.15,
     y: 1.18,
     z: turntableZ,
     material: materials.blackMetal,
@@ -1798,9 +2636,17 @@ export function assembleMagmaLinearDiggerExcavationRoom(plan, {
       && tile.surface !== 'deepMagma'
       && tile.surfaceRole !== 'bridge'
       && tile.surface !== 'ancientCeramicFloor'
+      && tile.criticalCatwalk !== true
   ));
-  const ancientFloors = plan.floorTiles.filter((tile) => tile.surface === 'ancientCeramicFloor');
-  const bridgeFloors = plan.floorTiles.filter((tile) => tile.surfaceRole === 'bridge');
+  const ancientFloors = plan.floorTiles.filter((tile) => (
+    tile.surface === 'ancientCeramicFloor' && tile.criticalCatwalk !== true
+  ));
+  const bridgeFloors = plan.floorTiles.filter((tile) => (
+    tile.surfaceRole === 'bridge' && tile.criticalCatwalk !== true
+  ));
+  const criticalCatwalkFloors = plan.floorTiles.filter((tile) => (
+    tile.criticalCatwalk === true && tile.surfaceRole !== 'ramp'
+  ));
   const walkableFloorMeshes = [addInstancedTiles(group, {
     name: 'linearExcavationBoredBasaltFloors',
     tiles: ordinaryFloors,
@@ -1819,8 +2665,14 @@ export function assembleMagmaLinearDiggerExcavationRoom(plan, {
     material: materials.serviceGrate,
     thickness: 0.28,
     yForTile: (tile) => tile.elevation - 0.14,
+  }), addInstancedTiles(group, {
+    name: 'linearExcavationCriticalCatwalkFloors',
+    tiles: criticalCatwalkFloors,
+    material: materials.serviceGrate,
+    thickness: 0.48,
+    yForTile: (tile) => tile.elevation - 0.24,
   })];
-  for (const mesh of walkableFloorMeshes) {
+  for (const mesh of walkableFloorMeshes.filter(Boolean)) {
     // A higher deck can sit behind a lower route without sharing its X/Z
     // column. Treat every authored floor bay as an independent camera panel so
     // the exact intervening tile disappears instead of covering MegaMan or
@@ -1831,6 +2683,25 @@ export function assembleMagmaLinearDiggerExcavationRoom(plan, {
     mesh.userData.occlusionOwnerId = `${mesh.name}-instances`;
     mesh.userData.maximumBaySpan = 1;
     mesh.userData.collisionBacked = true;
+    if (mesh.name === 'linearExcavationCriticalCatwalkFloors') {
+      mesh.userData.architectureRole = 'raised-critical-catwalk';
+      mesh.userData.criticalCatwalkRouteId = 'linear-excavation-critical-route';
+      mesh.userData.supportedElevatedRoute = true;
+    }
+  }
+  const catwalkSupportPlinths = addInstancedTiles(group, {
+    name: 'linearExcavationCriticalCatwalkSupportPlinths',
+    tiles: criticalCatwalkFloors,
+    material: materials.blackMetal,
+    thickness: 0.6,
+    yForTile: (tile) => (tile.structuralBaseElevation ?? tile.elevation) + 0.3,
+  });
+  if (catwalkSupportPlinths) {
+    catwalkSupportPlinths.userData.architectureRole = 'critical-catwalk-support-plinth';
+    catwalkSupportPlinths.userData.criticalCatwalkRouteId = 'linear-excavation-critical-route';
+    catwalkSupportPlinths.userData.supportsRaisedDeck = true;
+    catwalkSupportPlinths.userData.catwalkRiseMeters = CRITICAL_CATWALK_RISE;
+    catwalkSupportPlinths.userData.collisionBacked = true;
   }
 
   addLava(group, plan, materials, traps);
@@ -1843,8 +2714,11 @@ export function assembleMagmaLinearDiggerExcavationRoom(plan, {
     new Set(omittedBoundaryWallKeys),
   );
   addRampAssemblies(group, plan, materials, solidZones, aerialOnlyZones);
+  addCriticalCatwalkAccessRamps(group, plan, materials, solidZones, aerialOnlyZones);
   addBridgeRailings(group, plan, materials, solidZones);
+  addCriticalCatwalkGuideRails(group, plan, materials, solidZones);
   addDiggerMachinery(group, plan, materials, solidZones);
+  addExcavationWorkClutter(group, plan, materials, solidZones);
 
   const omittedSocketFrameIdSet = new Set(omittedSocketFrameIds);
   for (const [index, frame] of plan.socketFrames.entries()) {
@@ -2015,10 +2889,16 @@ export function assembleMagmaLinearDiggerExcavationRoom(plan, {
     tiles,
     floorTiles: plan.floorTiles.map((tile) => ({ ...tile })),
     rampLandings: plan.rampLandings.map((landing) => ({ ...landing })),
+    criticalCatwalk: plan.criticalCatwalk.map((segment) => ({ ...segment })),
+    criticalCatwalkCells: plan.criticalCatwalkCells.map((cell) => ({
+      ...cell,
+      segmentIds: [...cell.segmentIds],
+    })),
+    criticalCatwalkRailRuns: plan.criticalCatwalkRailRuns.map((run) => ({ ...run })),
     socketFrames: plan.socketFrames.map((frame) => ({ ...frame })),
     verticalConnectors: [
-      { id: 'digger-descent-flight-a', family: 'slope-flight', sourceElevation: 0, destinationElevation: -7, elevationDelta: -7, segmentCount: 13, widthTiles: 3 },
-      { id: 'digger-descent-flight-b', family: 'slope-flight', sourceElevation: -7, destinationElevation: -14, elevationDelta: -7, segmentCount: 13, widthTiles: 3 },
+      { id: 'digger-descent-flight-a', family: 'slope-flight', sourceElevation: raisedCatwalkElevation(0), destinationElevation: raisedCatwalkElevation(-7), elevationDelta: -7, segmentCount: 13, widthTiles: 3, raisedCriticalCatwalk: true },
+      { id: 'digger-descent-flight-b', family: 'slope-flight', sourceElevation: raisedCatwalkElevation(-7), destinationElevation: raisedCatwalkElevation(-14), elevationDelta: -7, segmentCount: 13, widthTiles: 3, raisedCriticalCatwalk: true },
     ],
     connectionPlans: [],
     progression,
@@ -2048,10 +2928,10 @@ export function assembleMagmaLinearDiggerExcavationRoom(plan, {
     conveyors: [],
     shrine: null,
     tileSize: TILE_SIZE,
-    playerStart: new THREE.Vector3(0, UPPER_ELEVATION, 15 * TILE_SIZE),
+    playerStart: new THREE.Vector3(0, raisedCatwalkElevation(UPPER_ELEVATION), 15 * TILE_SIZE),
     playerStartFacing: new THREE.Vector3(0, 0, -1),
-    campReturnPosition: new THREE.Vector3(0, UPPER_ELEVATION, 15 * TILE_SIZE),
-    ruinEntryPosition: new THREE.Vector3(0, UPPER_ELEVATION, 15 * TILE_SIZE),
+    campReturnPosition: new THREE.Vector3(0, raisedCatwalkElevation(UPPER_ELEVATION), 15 * TILE_SIZE),
+    ruinEntryPosition: new THREE.Vector3(0, raisedCatwalkElevation(UPPER_ELEVATION), 15 * TILE_SIZE),
     enemySpawnPoints: encounters.flatMap((encounter) => encounter.spawnPoints.map((position) => position.clone())),
     shrinePosition: null,
     boundsRadius: Math.hypot(ROOM_WIDTH_TILES, ROOM_DEPTH_TILES) * TILE_SIZE * 0.55,
@@ -2099,6 +2979,35 @@ export function assembleMagmaLinearDiggerExcavationRoom(plan, {
       rampRisePerSegment: Math.abs(RAMP_DELTA / RAMP_SEGMENTS),
       rampLandingCount: plan.rampLandings.length,
       minimumRampLandingTiles: 3,
+      criticalCatwalkRouteId: 'linear-excavation-critical-route',
+      criticalCatwalkRiseMeters: CRITICAL_CATWALK_RISE,
+      criticalCatwalkRaisedSurface: true,
+      criticalCatwalkSocketTransitionRampCount: 2,
+      criticalCatwalkGroundedTransitionHeight: CRITICAL_CATWALK_RISE + 0.05,
+      criticalCatwalkLedgeSafetyExempt: true,
+      criticalCatwalkSegmentCount: plan.criticalCatwalk.length,
+      criticalCatwalkCellCount: plan.criticalCatwalkCells.length,
+      criticalCatwalkRailRunCount: plan.criticalCatwalkRailRuns.length,
+      criticalCatwalkMinimumWidthTiles: Math.min(...plan.criticalCatwalk.map((segment) => (
+        Math.min(segment.widthTiles, segment.depthTiles)
+      ))),
+      criticalCatwalkConnectsEveryRamp: plan.rampLandings.every((landing) => (
+        plan.criticalCatwalkCells.some((cell) => (
+          cell.elevation === landing.elevation
+            && cell.x >= landing.minX && cell.x <= landing.maxX
+            && cell.z >= landing.minZ && cell.z <= landing.maxZ
+        ))
+      )),
+      excavationClutter: {
+        cavernFormationCount: plan.dressing.cavernFormations.length,
+        stalagmiteCount: plan.dressing.cavernFormations.filter((item) => item.kind === 'stalagmite').length,
+        stalactiteCount: plan.dressing.cavernFormations.filter((item) => item.kind === 'stalactite').length,
+        boulderCount: plan.dressing.boulders.length,
+        minecartCount: plan.dressing.workVehicles.filter((item) => item.kind === 'minecart').length,
+        trolleyCount: plan.dressing.workVehicles.filter((item) => item.kind === 'trolley').length,
+        pickaxeCount: plan.dressing.pickaxes.length,
+        requiredRouteClear: true,
+      },
       untexturedVoidCellCount: 0,
       exteriorVoidVisible: false,
       lavaContinuityAccepted: true,

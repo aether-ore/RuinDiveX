@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { PLAYER_TRAVERSAL_ENVELOPE } from '../TraversalCapabilities.js';
 
 export const MAGMA_REFINERY_OPENING_MODULE_ID = 'magma-breached-freight-adit';
-export const MAGMA_REFINERY_OPENING_TOPOLOGY_REVISION = 6;
+export const MAGMA_REFINERY_OPENING_TOPOLOGY_REVISION = 7;
 
 const TILE_SIZE = 2.8;
 const ROOM_WIDTH_TILES = 25;
@@ -10,7 +10,10 @@ const ROOM_DEPTH_TILES = 25;
 const ROOM_CEILING_Y = 14;
 const HIGH_TERRACE_Y = 5.6;
 const MID_LANDING_Y = 2.8;
-const LAVA_SURFACE_Y = -2.8;
+// Match the ordinary three-metre ledge profile. Keeping the hazard surface
+// below the free-hang body envelope lets the shared wrist anchor own the cling
+// pose without a lava-specific root clamp.
+const LAVA_SURFACE_Y = -3;
 const LAVA_STREAM_WIDTH = 4.2;
 const JUMP_AIR_GAP = 2.4;
 const TEXTURE_ROOT = '/assets/textures/magma-refinery/cells/seamless/';

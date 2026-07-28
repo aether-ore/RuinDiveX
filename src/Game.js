@@ -7,6 +7,10 @@ import { DungeonConnectorTrapRuntime } from './DungeonConnectorTrapRuntime.js';
 import { DungeonConnectorTrapVisualFactory } from './DungeonConnectorTrapVisualFactory.js';
 import { DungeonGenerator } from './DungeonGenerator.js';
 import {
+  INDUSTRIAL_SUPPLEMENT_PREVIEW_PROFILE_ID,
+  INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID,
+} from './dungeon-augmentation/IndustrialExtensionHost.js';
+import {
   INDUSTRIAL_DUNGEON_FAMILY_ID,
   resolveDungeonFamilyId,
 } from './DungeonFamilies.js';
@@ -565,8 +569,100 @@ function readDungeonLayoutSeed() {
   return `layout:${Date.now()}:${Math.random()}`;
 }
 
+export function resolveDungeonAugmentationProfileId(requested) {
+  const normalized = typeof requested === 'string'
+    ? requested.trim().toLowerCase()
+    : '';
+  if (!normalized || ['0', 'off', 'disabled', 'none'].includes(normalized)) return null;
+  // Keep only the explicit immutable v1 profile ID on the compatibility
+  // profile. Boolean-style opt-ins select the current, visibly expanded
+  // preview; committed v1 expeditions reconstruct from their saved profile ID.
+  if (normalized === INDUSTRIAL_SUPPLEMENT_PREVIEW_PROFILE_ID) {
+    return INDUSTRIAL_SUPPLEMENT_PREVIEW_PROFILE_ID;
+  }
+  if ([
+    '1',
+    'true',
+    'on',
+    '2',
+    'preview',
+    'expanded',
+    INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID,
+  ].includes(normalized)) return INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID;
+  return null;
+}
+
+function readDungeonAugmentationProfileId() {
+  try {
+    const requested = new URLSearchParams(globalThis.location?.search ?? '')
+      .get('dungeonAugmentation');
+    return resolveDungeonAugmentationProfileId(requested);
+  } catch {
+    // The sidecar is optional. Non-browser hosts remain on the legacy path.
+  }
+  return null;
+}
+
+export function createLegacyDungeonBasePlanHash({
+  layoutSeed,
+  difficulty,
+  bossProfileId,
+  dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
+} = {}) {
+  const legacyHash = `v1:${layoutSeed}:depth:${difficulty}:${bossProfileId ?? 'standard'}`;
+  const familyId = typeof dungeonFamilyId === 'string' && dungeonFamilyId.trim()
+    ? dungeonFamilyId.trim()
+    : INDUSTRIAL_DUNGEON_FAMILY_ID;
+  // Industrial V1's established hash is save- and test-facing identity. Keep
+  // it byte-for-byte stable while ensuring every future parent family occupies
+  // a distinct base-plan namespace.
+  return familyId === INDUSTRIAL_DUNGEON_FAMILY_ID
+    ? legacyHash
+    : `${legacyHash}:family:${familyId}`;
+}
+
+export function resolveDungeonAugmentationGenerationRequest(
+  committedDungeonAugmentation,
+  defaultProfileId = null,
+) {
+  const isCommittedRun = committedDungeonAugmentation !== undefined;
+  return Object.freeze({
+    isCommittedRun,
+    augmentationProfileId: isCommittedRun
+      ? committedDungeonAugmentation?.profileId ?? null
+      : defaultProfileId,
+    committedAugmentationIdentity: isCommittedRun
+      ? committedDungeonAugmentation
+      : null,
+  });
+}
+
 function isInterruptedExpeditionRecord(record) {
   return Boolean(record && ['active', 'victory'].includes(record.status));
+}
+
+export function resolveCommittedDungeonGenerationSpec(
+  committedExpedition,
+  fallback = {},
+) {
+  if (!isInterruptedExpeditionRecord(committedExpedition)) {
+    return Object.freeze({ ...fallback });
+  }
+  return Object.freeze({
+    ...fallback,
+    bossProfileId: committedExpedition.bossProfileId ?? fallback.bossProfileId,
+    layoutSeed: committedExpedition.dungeonLayoutSeed ?? fallback.layoutSeed,
+    difficulty: Math.max(
+      1,
+      Math.min(10, Math.round(Number(committedExpedition.depth) || Number(fallback.difficulty) || 1)),
+    ),
+    dungeonFamilyId: committedExpedition.dungeonFamilyId
+      ?? fallback.dungeonFamilyId
+      ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
+    // Explicit null is important: a committed legacy run must remain
+    // augmentation-off even when the current URL opts new runs into a profile.
+    dungeonAugmentation: committedExpedition.dungeonAugmentation ?? null,
+  });
 }
 
 function createDungeonRandom(seed) {
@@ -975,6 +1071,7 @@ export class Game {
     this.ruinFloor = 1;
     this.dungeonLayoutGeneration = 0;
     this.dungeonLayoutSeed = readDungeonLayoutSeed();
+    this.dungeonAugmentationProfileId = readDungeonAugmentationProfileId();
     this.selectedBossProfileId = normalizeBossProfileId(
       this.busterLabStorage?.state?.bossHunts?.selectedBossProfileId
         ?? DEFAULT_BOSS_PROFILE_ID,
@@ -2283,6 +2380,8 @@ export class Game {
   _configureBossHuntEncounter(dungeon = this.dungeon, {
     ignorePersistedActive = false,
     restartFromBeginning = false,
+    overridePersistedDungeonAugmentation = false,
+    dungeonAugmentation = null,
   } = {}) {
     const encounter = dungeon?.encounters?.find?.((candidate) => candidate.isBoss);
     if (!encounter) return null;
@@ -2302,6 +2401,9 @@ export class Game {
         dungeonLayoutSeed: persistedExpedition.dungeonLayoutSeed
           ?? dungeon?.layoutSeed
           ?? this.dungeonLayoutSeed,
+        dungeonAugmentation: overridePersistedDungeonAugmentation
+          ? dungeonAugmentation
+          : persistedExpedition.dungeonAugmentation ?? null,
         encounterProgress: restartFromBeginning
           ? null
           : persistedExpedition.encounterProgress ?? null,
@@ -2325,6 +2427,7 @@ export class Game {
           dungeonFamilyId: dungeon?.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
         }),
         dungeonLayoutSeed: dungeon?.layoutSeed ?? this.dungeonLayoutSeed,
+        dungeonAugmentation: dungeon?.augmentationIdentity ?? null,
         seedLabel: specSeed,
       };
     }
@@ -2367,7 +2470,9 @@ export class Game {
       seed: record.seed,
       depth: record.depth,
       bossProfileId: profileId,
+      dungeonFamilyId: record.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
       dungeonLayoutSeed,
+      dungeonAugmentation: record.dungeonAugmentation ?? null,
       encounterProgress: record.encounterProgress ?? null,
       seedLabel: `persisted:${record.expeditionId}`,
     });
@@ -2376,8 +2481,10 @@ export class Game {
     this.interruptedExpeditionRecovery = Object.freeze({
       expeditionId: record.expeditionId,
       bossProfileId: profileId,
+      dungeonFamilyId: record.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
       expeditionStatus: record.status,
       dungeonLayoutSeed,
+      dungeonAugmentation: record.dungeonAugmentation ?? null,
       expeditionLabel: profile?.title ?? 'Boss Hunt',
     });
     this.interruptedExpeditionRecoveryState = 'prompting';
@@ -2396,6 +2503,7 @@ export class Game {
       bossProfileId: profileId,
       expeditionStatus: record.status,
       expeditionLabel: profile?.title ?? 'Boss Hunt',
+      resetOrAbandonRequired: record.dungeonAugmentation?.resetOrAbandonRequired === true,
     });
     return {
       ok: true,
@@ -2412,9 +2520,11 @@ export class Game {
       pending: recovery ? {
         expeditionId: recovery.expeditionId,
         bossProfileId: recovery.bossProfileId,
+        dungeonFamilyId: recovery.dungeonFamilyId,
         expeditionStatus: recovery.expeditionStatus,
         dungeonLayoutSeed: recovery.dungeonLayoutSeed,
         dungeonLayoutSeedHash: hashSeed(recovery.dungeonLayoutSeed),
+        dungeonAugmentation: recovery.dungeonAugmentation ?? null,
       } : null,
     };
   }
@@ -3133,7 +3243,7 @@ export class Game {
     });
   }
 
-  async resumeInterruptedExpedition() {
+  async resumeInterruptedExpedition({ resetToCurrentContent = false } = {}) {
     if (this.interruptedExpeditionRecoveryInFlight) {
       return this.interruptedExpeditionRecoveryInFlight;
     }
@@ -3179,6 +3289,7 @@ export class Game {
     const previousProfileId = this.getSelectedBossProfileId();
     const previousLayoutSeed = this.dungeonLayoutSeed;
     const previousRuinFloor = this.ruinFloor;
+    const previousDungeonFamilyId = this.dungeonFamilyId;
     const previousExpeditionSpec = this.activeBossExpeditionSpec;
     const previousSpawner = this.spawner;
     const previousMapEvents = this.mapEvents;
@@ -3191,10 +3302,15 @@ export class Game {
 
     const transaction = (async () => {
       this.interruptedExpeditionRecoveryState = 'restarting';
-      this._recordWorldLifecycleEvent('interrupted-expedition-restart-began', {
-        expeditionId: persisted.expeditionId,
-        bossProfileId: profileId,
-      });
+      this._recordWorldLifecycleEvent(
+        resetToCurrentContent
+          ? 'interrupted-expedition-content-reset-began'
+          : 'interrupted-expedition-restart-began',
+        {
+          expeditionId: persisted.expeditionId,
+          bossProfileId: profileId,
+        },
+      );
       this._transitionWorldLifecycleTo('enteringDungeon');
       let candidate = null;
       let candidateMounted = false;
@@ -3203,10 +3319,15 @@ export class Game {
       try {
         this.selectedBossProfileId = profileId;
         this.ruinFloor = expeditionDepth;
+        this.dungeonFamilyId = persisted.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID;
         candidate = this._createLegacyDungeonWorldCandidate({
           bossProfileId: profileId,
           layoutSeed,
           difficulty: expeditionDepth,
+          dungeonFamilyId: persisted.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
+          dungeonAugmentation: resetToCurrentContent
+            ? undefined
+            : persisted.dungeonAugmentation ?? null,
         });
         candidate = this._prepareStreamedDungeonFacade(candidate);
         // A trapped connector is accepted only after the supplied OBJ/PNG is
@@ -3215,8 +3336,10 @@ export class Game {
         // expedition state is changed.
         await this._prepareConnectorTrackTrapVisualAcceptanceForBundle(candidate);
         this.activeBossExpeditionSpec = null;
-        let encounter = this._configureBossHuntEncounter(candidate.facade, {
+        const encounter = this._configureBossHuntEncounter(candidate.facade, {
           restartFromBeginning: persisted.status === 'active',
+          overridePersistedDungeonAugmentation: resetToCurrentContent,
+          dungeonAugmentation: candidate.facade.augmentationIdentity ?? null,
         });
         if (!encounter?.expeditionSpec
           || encounter.expeditionSpec.id !== persisted.expeditionId) {
@@ -3244,17 +3367,31 @@ export class Game {
         // Reset the durable attempt only after every fallible generation,
         // controller, mount, spawn, and camera step has succeeded. A failure
         // before this point leaves the exact stored checkpoint untouched.
-        if (!this.busterLabStorage?.restartActiveBossExpedition) {
-          throw new Error('Interrupted expedition recovery is unavailable.');
-        }
+        const recoveryOperation = resetToCurrentContent
+          ? this.busterLabStorage?.resetActiveBossExpeditionDungeonContent
+          : this.busterLabStorage?.restartActiveBossExpedition;
+        if (!recoveryOperation) throw new Error('Interrupted expedition recovery is unavailable.');
         const restarted = await this._queueBusterStorageOperation(() => (
-          this.busterLabStorage.restartActiveBossExpedition({
-            expeditionId: persisted.expeditionId,
-            bossProfileId: profileId,
-            seed: persisted.seed,
-            depth: expeditionDepth,
-            dungeonLayoutSeed: layoutSeed,
-          })
+          resetToCurrentContent
+            ? recoveryOperation.call(this.busterLabStorage, {
+                expeditionId: persisted.expeditionId,
+                bossProfileId: profileId,
+                seed: persisted.seed,
+                depth: expeditionDepth,
+                dungeonLayoutSeed: layoutSeed,
+                dungeonFamilyId: persisted.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
+                expectedDungeonAugmentation: persisted.dungeonAugmentation ?? null,
+                dungeonAugmentation: candidate.facade.augmentationIdentity ?? null,
+              })
+            : recoveryOperation.call(this.busterLabStorage, {
+                expeditionId: persisted.expeditionId,
+                bossProfileId: profileId,
+                seed: persisted.seed,
+                depth: expeditionDepth,
+                dungeonLayoutSeed: layoutSeed,
+                dungeonFamilyId: persisted.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
+                dungeonAugmentation: persisted.dungeonAugmentation ?? null,
+              })
         ));
         if (!restarted?.ok) {
           throw new Error(
@@ -3272,11 +3409,16 @@ export class Game {
         this._transitionWorldLifecycleTo('dungeon');
         committed = true;
         this.worldGenerationCount += 1;
-        this._recordWorldLifecycleEvent('interrupted-expedition-restarted', {
-          expeditionId: persisted.expeditionId,
-          bossProfileId: profileId,
-          dungeonLayoutSeedHash: hashSeed(layoutSeed),
-        });
+        this._recordWorldLifecycleEvent(
+          resetToCurrentContent
+            ? 'interrupted-expedition-content-reset'
+            : 'interrupted-expedition-restarted',
+          {
+            expeditionId: persisted.expeditionId,
+            bossProfileId: profileId,
+            dungeonLayoutSeedHash: hashSeed(layoutSeed),
+          },
+        );
         try {
           this._disposeWorldBundle(previousBundle, 'restart-interrupted-expedition', {
             clearRunState: false,
@@ -3293,6 +3435,7 @@ export class Game {
           worldKind: 'dungeon',
           expeditionId: persisted.expeditionId,
           bossProfileId: profileId,
+          contentReset: resetToCurrentContent,
         };
       } catch (error) {
         if (committed) {
@@ -3335,6 +3478,7 @@ export class Game {
         this.selectedBossProfileId = previousProfileId;
         this.dungeonLayoutSeed = previousLayoutSeed;
         this.ruinFloor = previousRuinFloor;
+        this.dungeonFamilyId = previousDungeonFamilyId;
         this.expeditionAccepted = previousExpeditionAccepted;
         this.expeditionActive = previousExpeditionActive;
         this.ruinCompleted = previousRuinCompleted;
@@ -3355,10 +3499,28 @@ export class Game {
           durableExpedition,
         );
         if (changedPrompt) return changedPrompt;
-        this._recordWorldLifecycleEvent('interrupted-expedition-restart-failed', {
-          expeditionId: persisted.expeditionId,
-          message: error?.message ?? String(error),
-        });
+        this._recordWorldLifecycleEvent(
+          resetToCurrentContent
+            ? 'interrupted-expedition-content-reset-failed'
+            : 'interrupted-expedition-restart-failed',
+          {
+            expeditionId: persisted.expeditionId,
+            message: error?.message ?? String(error),
+          },
+        );
+        const augmentationIncompatible = error?.resetOrAbandonRequired === true
+          || error?.code === 'DUNGEON_AUGMENTATION_INCOMPATIBLE_CONTENT';
+        if (augmentationIncompatible) {
+          return {
+            ok: false,
+            reason: 'incompatible-dungeon-augmentation',
+            status: 'incompatible-content',
+            resetOrAbandonRequired: true,
+            compatibility: error?.compatibility ?? null,
+            message: error?.message ?? String(error),
+            error,
+          };
+        }
         return {
           ok: false,
           reason: 'transition-failed',
@@ -3373,6 +3535,10 @@ export class Game {
     this.interruptedExpeditionRecoveryInFlight = transaction;
     this.worldTransitionInFlight = transaction;
     return transaction;
+  }
+
+  resetInterruptedExpeditionToCurrentContent() {
+    return this.resumeInterruptedExpedition({ resetToCurrentContent: true });
   }
 
   async abandonInterruptedExpedition() {
@@ -3941,6 +4107,18 @@ export class Game {
         geometries: rendererInfo.memory?.geometries ?? 0,
         textures: rendererInfo.memory?.textures ?? 0,
       },
+      dungeonAugmentation: this.activeWorldBundle?.worldKind === 'dungeon' ? {
+        status: this.dungeon?.augmentationStatus ?? 'disabled',
+        profileId: this.dungeon?.augmentationIdentity?.profileId ?? null,
+        basePlanHash: this.dungeon?.basePlanHash ?? null,
+        augmentationPlanHash: this.dungeon?.augmentationPlanHash ?? null,
+        effectivePlanHash: this.dungeon?.effectivePlanHash
+          ?? this.activeWorldBundle?.planHash
+          ?? null,
+        themeRevisions: this.dungeon?.augmentationIdentity?.themeRevisions ?? [],
+        diagnostics: this.dungeon?.augmentationDiagnostics ?? null,
+        metrics: this.dungeon?.augmentationMetrics ?? null,
+      } : null,
       occlusion: {
         entryCount: this.cameraOcclusionEntries.length,
         hiddenOwnerCount: this.cameraOcclusionHiddenOwners.size,
@@ -5004,18 +5182,33 @@ export class Game {
         reason: 'abandoned',
       }));
     }
+    // Reset keeps the same world root alive, so the debug ledge tester is not
+    // covered by outgoing-bundle disposal. Release its five geometries before
+    // _clearDungeonRunState drops the host reference.
+    this._disposeDebugLedgeTester();
     this._clearDungeonRunState();
     this.bossStageRuntime?.dispose?.();
     if (regenerateSeed) {
       this.dungeonLayoutGeneration += 1;
       this.dungeonLayoutSeed = `layout:${this.dungeonLayoutSeed}:reset:${this.dungeonLayoutGeneration}`;
     }
+    const basePlanHash = createLegacyDungeonBasePlanHash({
+      layoutSeed: this.dungeonLayoutSeed,
+      difficulty: this.ruinFloor,
+      bossProfileId: this.getSelectedBossProfileId(),
+      dungeonFamilyId: this.dungeonFamilyId,
+    });
     const dungeon = new DungeonGenerator({
       difficulty: this.ruinFloor,
       random: createDungeonRandom(this.dungeonLayoutSeed),
       bossProfileId: this.getSelectedBossProfileId(),
+      augmentationProfileId: this.dungeonAugmentationProfileId,
+      augmentationSeed: this.dungeonLayoutSeed,
+      basePlanHash,
     }).generate();
     dungeon.layoutSeed = this.dungeonLayoutSeed;
+    dungeon.basePlanHash ??= basePlanHash;
+    dungeon.effectivePlanHash ??= basePlanHash;
     // Release asynchronous trap visuals and their shared OBJ resources while
     // the old dungeon root is still intact. This prevents a late asset load
     // from attaching to a root whose geometry has already been disposed.
@@ -5037,7 +5230,7 @@ export class Game {
       this.activeWorldBundle.collisionData = dungeon.solidZones ?? [];
       this.activeWorldBundle.cullingData = dungeon.renderCullGroups ?? [];
       this.activeWorldBundle.disposableResources = dungeon.disposableResources ?? [];
-      this.activeWorldBundle.planHash = `v1:${this.dungeonLayoutSeed}:depth:${this.ruinFloor}:${this.getSelectedBossProfileId()}`;
+      this.activeWorldBundle.planHash = dungeon.effectivePlanHash;
     }
     dungeon.activateNpcAssets?.();
     this.lastDungeonResourceDisposalStats = this._disposeDetachedDungeonResources(
@@ -9310,6 +9503,7 @@ export class Game {
     layoutSeed = this.dungeonLayoutSeed,
     difficulty = this.ruinFloor,
     dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
+    dungeonAugmentation = undefined,
   } = {}) {
     const dungeonFamilySelection = resolveDungeonFamilyId(dungeonFamilyId);
     const resolvedDungeonFamilyId = dungeonFamilySelection.dungeonFamilyId;
@@ -9336,14 +9530,32 @@ export class Game {
     key.shadow.camera.bottom = -18;
     root.add(key);
 
+    const basePlanHash = createLegacyDungeonBasePlanHash({
+      layoutSeed,
+      difficulty,
+      bossProfileId,
+      dungeonFamilyId: resolvedDungeonFamilyId,
+    });
+    const augmentationRequest = resolveDungeonAugmentationGenerationRequest(
+      dungeonAugmentation,
+      this.dungeonAugmentationProfileId,
+    );
     const dungeon = new DungeonGenerator({
       difficulty,
       random: createDungeonRandom(layoutSeed),
       bossProfileId: this._creatingBusterSandbox ? null : bossProfileId,
       dungeonFamilyId: resolvedDungeonFamilyId,
       roomPreviewId: this.roomPreview?.roomId ?? null,
+      augmentationProfileId: augmentationRequest.augmentationProfileId,
+      // This is the parent layout seed. The sidecar derives and persists its
+      // own fork without ever treating the derived value as a new root seed.
+      augmentationSeed: layoutSeed,
+      basePlanHash,
+      committedAugmentationIdentity: augmentationRequest.committedAugmentationIdentity,
     }).generate();
     dungeon.layoutSeed = layoutSeed;
+    dungeon.basePlanHash ??= basePlanHash;
+    dungeon.effectivePlanHash ??= basePlanHash;
 
     // The historical underlay was a world-sized opaque plane just below Y=0.
     // It cuts through signed subterranean rooms and makes a downward ladder,
@@ -9380,7 +9592,7 @@ export class Game {
       collisionData: dungeon.solidZones ?? [],
       cullingData: dungeon.renderCullGroups ?? [],
       disposableResources: dungeon.disposableResources ?? [],
-      planHash: `v1:${layoutSeed}:depth:${difficulty}:${bossProfileId ?? 'standard'}`,
+      planHash: dungeon.effectivePlanHash,
       bossProfileId,
       dungeonFamilyId: resolvedDungeonFamilyId,
       disposed: false,
@@ -9421,12 +9633,26 @@ export class Game {
 
   _buildWorld() {
     const useOverworld = this.usesStreamedWorldLifecycle && !this._creatingBusterSandbox;
+    const committedExpedition = this.busterLabStorage?.getActiveBossExpedition?.() ?? null;
+    const dungeonGenerationSpec = resolveCommittedDungeonGenerationSpec(
+      this._creatingBusterSandbox ? null : committedExpedition,
+      {
+        bossProfileId: this._creatingBusterSandbox ? null : this.getSelectedBossProfileId(),
+        layoutSeed: this.dungeonLayoutSeed,
+        difficulty: this.ruinFloor,
+        dungeonFamilyId: this.dungeonFamilyId,
+        dungeonAugmentation: undefined,
+      },
+    );
     const bundle = useOverworld
       ? this._createOverworldWorldBundle()
-      : this._createLegacyDungeonWorldCandidate({
-        bossProfileId: this._creatingBusterSandbox ? null : this.getSelectedBossProfileId(),
-        dungeonFamilyId: this.dungeonFamilyId,
-      });
+      : this._createLegacyDungeonWorldCandidate(dungeonGenerationSpec);
+    if (!useOverworld && isInterruptedExpeditionRecord(committedExpedition)) {
+      this.selectedBossProfileId = normalizeBossProfileId(dungeonGenerationSpec.bossProfileId);
+      this.dungeonLayoutSeed = dungeonGenerationSpec.layoutSeed;
+      this.ruinFloor = dungeonGenerationSpec.difficulty;
+      this.dungeonFamilyId = dungeonGenerationSpec.dungeonFamilyId;
+    }
     this._assignMountedWorldBundle(bundle);
     if (bundle.worldKind === 'dungeon') {
       if (!this._creatingBusterSandbox) bundle.facade.activateNpcAssets?.();
@@ -9445,7 +9671,7 @@ export class Game {
   }
 
   _rebuildDebugLedgeTester(origin = new THREE.Vector3()) {
-    this.debugLedgeTester?.removeFromParent?.();
+    this._disposeDebugLedgeTester();
     this.debugLedgeCandidates = [];
     this.debugLedgePlatform = null;
 
@@ -9536,6 +9762,17 @@ export class Game {
 
     this.debugLedgeTester = group;
     (this.activeWorldBundle?.root ?? this.scene).add(group);
+  }
+
+  _disposeDebugLedgeTester() {
+    const tester = this.debugLedgeTester;
+    if (!tester) return null;
+    tester.removeFromParent?.();
+    const stats = this._disposeDetachedDungeonResources(tester);
+    this.debugLedgeTester = null;
+    this.debugLedgeCandidates = [];
+    this.debugLedgePlatform = null;
+    return stats;
   }
 
   getDebugLedgeFloorElevation(position) {

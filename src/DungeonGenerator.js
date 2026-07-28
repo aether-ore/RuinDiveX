@@ -48,6 +48,22 @@ import {
   generateMagmaRefractorAssayLabRoom,
   MAGMA_REFRACTOR_ASSAY_LAB_MODULE_ID,
 } from './magma/MagmaRefractorAssayLabRoom.js';
+import { augmentDungeonDraft } from './dungeon-augmentation/planner.js';
+import {
+  createDungeonAugmentationSaveIdentity,
+  validateCommittedDungeonAugmentationIdentity,
+} from './dungeon-augmentation/identity.js';
+import {
+  createIndustrialAugmentationHost,
+  createIndustrialBaseDraft,
+} from './dungeon-augmentation/IndustrialDraftAdapter.js';
+import {
+  createIndustrialSupplementRewardTiles,
+  materializeIndustrialOverlay,
+} from './dungeon-augmentation/IndustrialOverlayMaterializer.js';
+import { createIndustrialThemeAdapter } from './dungeon-augmentation/ThemeAdapters.js';
+import { assembleDungeonSupplement } from './dungeon-augmentation/DungeonSupplementAssembler.js';
+import { mergeDungeonFacade } from './dungeon-augmentation/DungeonFacadeOverlay.js';
 
 const DEFAULT_TILE_SIZE = DUNGEON_GENERATION_REQUIREMENTS.tileSizeMeters;
 const RUIN_TEXTURE_BASE_PATH = '/assets/textures/ruins/';
@@ -133,6 +149,12 @@ const CONNECTOR_GALLERY_PORTAL_WIDTH_TILES = 2.45;
 const CONNECTOR_DECORATIVE_ARCH_COLUMN_HALF_SIZE = 0.5;
 const CONNECTOR_MINIMUM_CLEAR_WIDTH_METERS = 5.6;
 const CONNECTOR_DECORATIVE_ARCH_HEADROOM_MARGIN = 0.25;
+const CONNECTOR_APERTURE_VERTICAL_MARGIN = 0.08;
+// New runs may try several independently forked overlay plans without consuming
+// another value from Industrial V1's accepted RNG tape. More attempts make an
+// explicit preview opt-in reliably visible while retaining exact-base fallback
+// for layouts whose complete physical envelope cannot host a safe supplement.
+const DUNGEON_AUGMENTATION_MAX_REALIZATION_ATTEMPTS = 8;
 const CONNECTOR_CLASSIC_SERVICE_OFFSET_TILES = 2;
 const CONNECTOR_CLASSIC_FENCE_OFFSET_TILES = 2.46;
 const OPTIONAL_V1_BRANCH_CONNECTION_IDS = new Set([
@@ -550,6 +572,7 @@ function applyTileOptions(tile, options = {}) {
     'rampPointIndex',
     'rampPointCount',
     'noEnemySpawn',
+    'augmentationOwnerId',
   ]) {
     if (options[key] !== undefined) {
       tile[key] = options[key];
@@ -738,6 +761,16 @@ function addHallway(tiles, from, to) {
   }
 }
 
+export class DungeonAugmentationIncompatibleContentError extends Error {
+  constructor(message, compatibility = null) {
+    super(message);
+    this.name = 'DungeonAugmentationIncompatibleContentError';
+    this.code = 'DUNGEON_AUGMENTATION_INCOMPATIBLE_CONTENT';
+    this.compatibility = compatibility;
+    this.resetOrAbandonRequired = true;
+  }
+}
+
 export class DungeonGenerator {
   constructor({
     tileSize = DEFAULT_TILE_SIZE,
@@ -746,12 +779,27 @@ export class DungeonGenerator {
     bossProfileId = null,
     dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
     roomPreviewId = null,
+    augmentationProfileId = null,
+    augmentationSeed = null,
+    basePlanHash = null,
+    committedAugmentationIdentity = null,
   } = {}) {
     this.tileSize = tileSize;
     this.random = random;
     this.difficulty = Math.max(1, Math.trunc(difficulty) || 1);
     this.bossProfileId = typeof bossProfileId === 'string' ? bossProfileId : null;
     this.roomPreviewId = typeof roomPreviewId === 'string' ? roomPreviewId : null;
+    this.augmentationProfileId = typeof augmentationProfileId === 'string'
+      ? augmentationProfileId
+      : null;
+    this.augmentationSeed = augmentationSeed == null ? null : String(augmentationSeed);
+    this.basePlanHash = typeof basePlanHash === 'string' && basePlanHash
+      ? basePlanHash
+      : null;
+    this.committedAugmentationIdentity = committedAugmentationIdentity
+      && typeof committedAugmentationIdentity === 'object'
+      ? committedAugmentationIdentity
+      : null;
     this.dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID;
     this.textureLoader = new THREE.TextureLoader();
     this.fbxLoader = new FBXLoader();
@@ -766,6 +814,130 @@ export class DungeonGenerator {
 
   _choose(values) {
     return values[Math.floor(this.random() * values.length)];
+  }
+
+  _planIndustrialDungeonAugmentation({ rooms, connectionPlans }) {
+    const committedIdentity = this.committedAugmentationIdentity;
+    const profileId = committedIdentity?.profileId ?? this.augmentationProfileId;
+    // This branch is deliberately before snapshotting, hashing, or seed
+    // derivation. The default Industrial path makes no sidecar calls at all.
+    if (!profileId && !committedIdentity) return null;
+    const planningStartedAt = globalThis.performance?.now?.() ?? Date.now();
+    const withPlanningTime = (diagnostics) => ({
+      ...diagnostics,
+      planningTimeMs: Math.max(
+        0,
+        (globalThis.performance?.now?.() ?? Date.now()) - planningStartedAt,
+      ),
+    });
+
+    const baseDraft = createIndustrialBaseDraft({
+      rooms,
+      connectionPlans,
+      basePlanHash: this.basePlanHash,
+      tileSize: this.tileSize,
+      difficulty: this.difficulty,
+    });
+    const host = createIndustrialAugmentationHost({
+      basePlanHash: baseDraft.basePlanHash,
+      baseDraft,
+      rooms,
+      connectionPlans,
+      tileSize: this.tileSize,
+    });
+    const result = augmentDungeonDraft({
+      baseDraft,
+      extensionRegions: host.extensionRegions,
+      profileId,
+      layoutSeed: this.augmentationSeed ?? baseDraft.basePlanHash,
+      augmentationSeed: committedIdentity?.seed
+        ?? this.augmentationPlanSeedOverride
+        ?? null,
+      difficulty: this.difficulty,
+    });
+
+    if (result.status !== 'applied') {
+      if (committedIdentity) {
+        const compatibility = validateCommittedDungeonAugmentationIdentity(
+          committedIdentity,
+          null,
+        );
+        throw new DungeonAugmentationIncompatibleContentError(
+          'This saved expedition requires generated dungeon content that is no longer available. Reset or abandon the expedition to continue.',
+          compatibility,
+        );
+      }
+      return {
+        status: 'unchanged',
+        baseDraft,
+        host,
+        result,
+        diagnostics: withPlanningTime(result.diagnostics),
+      };
+    }
+
+    const identity = createDungeonAugmentationSaveIdentity(result.overlayPlan);
+    const compatibility = committedIdentity
+      ? validateCommittedDungeonAugmentationIdentity(committedIdentity, identity)
+      : {
+          compatible: true,
+          status: 'new-augmentation',
+          resetOrAbandonRequired: false,
+          errors: [],
+        };
+    if (committedIdentity && !compatibility.compatible) {
+      throw new DungeonAugmentationIncompatibleContentError(
+        'The saved dungeon augmentation does not match the installed theme revision or generated plan. Reset or abandon the expedition to continue.',
+        compatibility,
+      );
+    }
+
+    const materialized = materializeIndustrialOverlay({
+      rooms,
+      connectionPlans,
+      overlayPlan: result.overlayPlan,
+      extensionRegions: host.extensionRegions,
+      tileSize: this.tileSize,
+    });
+    if (!materialized.diagnostics.accepted) {
+      if (committedIdentity) {
+        throw new DungeonAugmentationIncompatibleContentError(
+          'The saved dungeon augmentation could not be reconstructed. Reset or abandon the expedition to continue.',
+          {
+            compatible: false,
+            status: 'incompatible-content',
+            resetOrAbandonRequired: true,
+            errors: materialized.diagnostics.errors,
+          },
+        );
+      }
+      return {
+        status: 'unchanged',
+        baseDraft,
+        host,
+        result,
+        diagnostics: withPlanningTime({
+          ...result.diagnostics,
+          accepted: false,
+          reason: 'industrial-materialization-failed',
+          errors: materialized.diagnostics.errors,
+        }),
+      };
+    }
+
+    return {
+      status: 'applied',
+      baseDraft,
+      host,
+      result,
+      identity,
+      compatibility,
+      materialized,
+      diagnostics: withPlanningTime({
+        ...result.diagnostics,
+        industrialMaterialization: materialized.diagnostics,
+      }),
+    };
   }
 
   _connectorDecorativeArchWidthTiles() {
@@ -806,56 +978,373 @@ export class DungeonGenerator {
       return this._generateAscensionEngineDungeon();
     }
 
-    let lastDungeon = null;
+    if (this.augmentationProfileId || this.committedAugmentationIdentity) {
+      return this._generateIndustrialDungeonWithAugmentationReplay();
+    }
+    return this._generateAcceptedIndustrialDungeon();
+  }
+
+  _finalizeAcceptedIndustrialDungeon(dungeon, generationAttempts) {
+    dungeon.generationAttempts = generationAttempts;
+    const rollAnchor = dungeon.group.getObjectByName('rollCaskettNpc');
+    const supportCarAnchor = dungeon.group.getObjectByName('expeditionSupportCar');
+    const workbench = dungeon.group.getObjectByName('rollWorkshopWorkbench');
+    dungeon.activateNpcAssets = () => {
+      if (
+        rollAnchor
+        && !rollAnchor.userData.modelLoading
+        && !rollAnchor.userData.modelLoaded
+        && !rollAnchor.userData.modelLoadError
+      ) {
+        this._loadRollNpc(
+          rollAnchor,
+          dungeon.npcAnimationMixers,
+          dungeon.npcAnimators,
+        );
+      }
+      if (
+        supportCarAnchor
+        && !supportCarAnchor.userData.modelLoading
+        && !supportCarAnchor.userData.modelLoaded
+        && !supportCarAnchor.userData.modelLoadError
+      ) {
+        this._loadSupportCar(supportCarAnchor);
+      }
+      if (
+        workbench
+        && !workbench.userData.textureLoading
+        && !workbench.userData.textureAssetsSettled
+      ) {
+        this._loadRollWorkbenchTextures(workbench);
+      }
+    };
+    dungeon.dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID;
+    dungeon.roomModuleIds = dungeon.rooms.map((room) => room.id);
+    dungeon.spatialGenerationDiagnostics = validateDungeonGenerationSpatialContract(dungeon, {
+      contractId: INDUSTRIAL_DUNGEON_GENERATION_CONTRACT_ID,
+      requireSignedElevationComposition: false,
+    });
+    return dungeon;
+  }
+
+  _generateAcceptedIndustrialDungeon({ captureAcceptedRandomTape = false } = {}) {
+    const sourceRandom = this.random;
+    let lastErrors = ['Unknown dungeon validation failure.'];
 
     for (let attempt = 0; attempt < 12; attempt += 1) {
-      lastDungeon = this._generateOnce();
-      if (lastDungeon.progression?.validation?.accepted) {
-        lastDungeon.generationAttempts = attempt + 1;
-        const rollAnchor = lastDungeon.group.getObjectByName('rollCaskettNpc');
-        const supportCarAnchor = lastDungeon.group.getObjectByName('expeditionSupportCar');
-        const workbench = lastDungeon.group.getObjectByName('rollWorkshopWorkbench');
-        lastDungeon.activateNpcAssets = () => {
-          if (
-            rollAnchor
-            && !rollAnchor.userData.modelLoading
-            && !rollAnchor.userData.modelLoaded
-            && !rollAnchor.userData.modelLoadError
-          ) {
-            this._loadRollNpc(
-              rollAnchor,
-              lastDungeon.npcAnimationMixers,
-              lastDungeon.npcAnimators,
-            );
-          }
-          if (
-            supportCarAnchor
-            && !supportCarAnchor.userData.modelLoading
-            && !supportCarAnchor.userData.modelLoaded
-            && !supportCarAnchor.userData.modelLoadError
-          ) {
-            this._loadSupportCar(supportCarAnchor);
-          }
-          if (
-            workbench
-            && !workbench.userData.textureLoading
-            && !workbench.userData.textureAssetsSettled
-          ) {
-            this._loadRollWorkbenchTextures(workbench);
-          }
+      const randomTape = [];
+      if (captureAcceptedRandomTape) {
+        this.random = () => {
+          const value = sourceRandom();
+          randomTape.push(value);
+          return value;
         };
-        lastDungeon.dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID;
-        lastDungeon.roomModuleIds = lastDungeon.rooms.map((room) => room.id);
-        lastDungeon.spatialGenerationDiagnostics = validateDungeonGenerationSpatialContract(lastDungeon, {
-          contractId: INDUSTRIAL_DUNGEON_GENERATION_CONTRACT_ID,
-          requireSignedElevationComposition: false,
-        });
-        return lastDungeon;
       }
+      let dungeon;
+      try {
+        dungeon = this._generateOnce();
+      } finally {
+        this.random = sourceRandom;
+      }
+      if (dungeon.progression?.validation?.accepted) {
+        const acceptedDungeon = this._finalizeAcceptedIndustrialDungeon(dungeon, attempt + 1);
+        return captureAcceptedRandomTape
+          ? { dungeon: acceptedDungeon, randomTape }
+          : acceptedDungeon;
+      }
+      lastErrors = dungeon.progression?.validation?.errors ?? lastErrors;
+      this._disposeGeneratedDungeonCandidate(dungeon);
     }
 
-    const errors = lastDungeon?.progression?.validation?.errors ?? ['Unknown dungeon validation failure.'];
-    throw new Error(`Unable to generate a solvable vertical dungeon after 12 attempts: ${errors.join(' | ')}`);
+    throw new Error(
+      `Unable to generate a solvable vertical dungeon after 12 attempts: ${lastErrors.join(' | ')}`,
+    );
+  }
+
+  _collectGeneratedDungeonResources(dungeon) {
+    const geometries = new Set();
+    const materials = new Set();
+    const textures = new Set();
+    const collectMaterial = (material) => {
+      if (!material) return;
+      materials.add(material);
+      for (const value of Object.values(material)) {
+        if (value?.isTexture) textures.add(value);
+      }
+    };
+    dungeon?.group?.traverse?.((object) => {
+      if (object.geometry) geometries.add(object.geometry);
+      for (const material of (Array.isArray(object.material)
+        ? object.material
+        : [object.material])) {
+        collectMaterial(material);
+      }
+      if (object.skeleton?.boneTexture?.isTexture) textures.add(object.skeleton.boneTexture);
+    });
+    // A failed generation attempt can throw after the material library is
+    // created but before every material has been attached to a mesh. Walk the
+    // explicit library too so those attempt-owned resources are not leaked.
+    const visitedMaterialSources = new Set();
+    const collectMaterialSource = (value) => {
+      if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
+      if (value.isTexture) {
+        textures.add(value);
+        return;
+      }
+      if (value.isMaterial) {
+        collectMaterial(value);
+        return;
+      }
+      if (visitedMaterialSources.has(value)) return;
+      visitedMaterialSources.add(value);
+      if (Array.isArray(value)) {
+        value.forEach(collectMaterialSource);
+        return;
+      }
+      if (value instanceof Map || value instanceof Set) {
+        value.forEach(collectMaterialSource);
+        return;
+      }
+      Object.values(value).forEach(collectMaterialSource);
+    };
+    collectMaterialSource(dungeon?.materials);
+    return { geometries, materials, textures };
+  }
+
+  _disposeGeneratedDungeonCandidate(dungeon, preservedDungeon = null) {
+    if (!dungeon || dungeon === preservedDungeon) return;
+    if (dungeon.group?.userData) dungeon.group.userData.generationCandidateDisposed = true;
+    const preserved = this._collectGeneratedDungeonResources(preservedDungeon);
+    // The generator-level cache owns these textures across attempts. Rejected
+    // candidates may dispose their materials and geometry, but disposing a
+    // cached texture here would make the next attempt reuse an invalid GPU
+    // resource without reloading it.
+    for (const texture of this.textureCache.values()) preserved.textures.add(texture);
+    for (const animator of dungeon.npcAnimators ?? []) animator.dispose?.();
+    dungeon.specialEnvironment?.dispose?.();
+    // Fragment disposal owns its detached supplement subtree. Collect the
+    // remaining parent-assembled resources only after those roots are gone so
+    // the outer cleanup never disposes the same geometry twice.
+    for (const resource of dungeon.disposableResources ?? []) resource?.dispose?.();
+    const owned = this._collectGeneratedDungeonResources(dungeon);
+    dungeon.group?.removeFromParent?.();
+    for (const geometry of owned.geometries) {
+      if (!preserved.geometries.has(geometry)) geometry.dispose?.();
+    }
+    for (const material of owned.materials) {
+      if (!preserved.materials.has(material)) material.dispose?.();
+    }
+    for (const texture of owned.textures) {
+      if (!preserved.textures.has(texture)) texture.dispose?.();
+    }
+  }
+
+  _isDisposedGenerationCandidateObject(object) {
+    for (let current = object; current; current = current.parent) {
+      if (current.userData?.generationCandidateDisposed === true) return true;
+    }
+    return false;
+  }
+
+  _disposeDetachedObjectResources(root) {
+    const geometries = new Set();
+    const materials = new Set();
+    const textures = new Set();
+    root?.traverse?.((object) => {
+      if (object.geometry) geometries.add(object.geometry);
+      for (const material of (Array.isArray(object.material)
+        ? object.material
+        : [object.material])) {
+        if (!material) continue;
+        materials.add(material);
+        for (const value of Object.values(material)) {
+          if (value?.isTexture) textures.add(value);
+        }
+      }
+    });
+    for (const geometry of geometries) geometry.dispose?.();
+    for (const material of materials) material.dispose?.();
+    for (const texture of textures) texture.dispose?.();
+    root?.clear?.();
+  }
+
+  _generateIndustrialDungeonWithAugmentationReplay() {
+    const requestedProfileId = this.augmentationProfileId;
+    const committedIdentity = this.committedAugmentationIdentity;
+    const sourceRandom = this.random;
+    let baseResult;
+
+    this.augmentationProfileId = null;
+    this.committedAugmentationIdentity = null;
+    try {
+      baseResult = this._generateAcceptedIndustrialDungeon({
+        captureAcceptedRandomTape: true,
+      });
+    } finally {
+      this.augmentationProfileId = requestedProfileId;
+      this.committedAugmentationIdentity = committedIdentity;
+      this.random = sourceRandom;
+    }
+
+    const { dungeon: baseDungeon, randomTape } = baseResult;
+    const originalPlanSeedOverride = this.augmentationPlanSeedOverride;
+    const rejectionRecords = [];
+    const maximumRealizationAttempts = committedIdentity
+      ? 1
+      : DUNGEON_AUGMENTATION_MAX_REALIZATION_ATTEMPTS;
+    for (let realizationAttempt = 0;
+      realizationAttempt < maximumRealizationAttempts;
+      realizationAttempt += 1) {
+      this.augmentationPlanSeedOverride = committedIdentity?.seed
+        ?? (realizationAttempt === 0
+          ? null
+          : `realization:${this.augmentationSeed ?? this.basePlanHash}:${requestedProfileId}:${realizationAttempt}`);
+      let replayCursor = 0;
+      let augmentedDungeon = null;
+      let replayFailure = null;
+      this.random = () => {
+        if (replayCursor >= randomTape.length) {
+          throw new Error(
+            `Dungeon augmentation replay exceeded the accepted parent RNG tape (${randomTape.length} calls).`,
+          );
+        }
+        const value = randomTape[replayCursor];
+        replayCursor += 1;
+        return value;
+      };
+      try {
+        augmentedDungeon = this._generateOnce();
+      } catch (error) {
+        replayFailure = error;
+      } finally {
+        this.random = sourceRandom;
+      }
+
+      const replayConsumedExactly = replayCursor === randomTape.length;
+      const expectedEarlyAugmentationRejection = new Set([
+        'DUNGEON_AUGMENTATION_PLANNING_UNCHANGED',
+        'DUNGEON_AUGMENTATION_CONNECTOR_PREFLIGHT_FAILED',
+      ]).has(replayFailure?.code);
+      const augmentationAccepted = Boolean(
+        !replayFailure
+        && replayConsumedExactly
+        && augmentedDungeon?.augmentationStatus === 'applied'
+        && augmentedDungeon.progression?.validation?.accepted,
+      );
+      if (augmentationAccepted) {
+        this.augmentationPlanSeedOverride = originalPlanSeedOverride;
+        this._finalizeAcceptedIndustrialDungeon(
+          augmentedDungeon,
+          baseDungeon.generationAttempts,
+        );
+        augmentedDungeon.augmentationReplayDiagnostics = {
+          accepted: true,
+          realizationAttempts: realizationAttempt + 1,
+          randomCallCount: randomTape.length,
+          consumedRandomCallCount: replayCursor,
+          parentGenerationAttempts: baseDungeon.generationAttempts,
+        };
+        this._disposeGeneratedDungeonCandidate(baseDungeon, augmentedDungeon);
+        return augmentedDungeon;
+      }
+
+      const rejectedErrors = [
+        ...(
+          augmentedDungeon?.augmentationDiagnostics?.errors
+          ?? replayFailure?.augmentationDiagnostics?.errors
+          ?? []
+        ).map((entry) => (
+          typeof entry === 'string'
+            ? entry
+            : entry?.message ?? JSON.stringify(entry)
+        )),
+        ...(augmentedDungeon?.progression?.validation?.errors ?? []),
+        ...(replayFailure ? [replayFailure.message ?? String(replayFailure)] : []),
+        ...(!replayConsumedExactly && !expectedEarlyAugmentationRejection ? [
+          `Dungeon augmentation replay consumed ${replayCursor} of ${randomTape.length} parent RNG values.`,
+        ] : []),
+      ];
+      rejectionRecords.push({
+        realizationAttempt: realizationAttempt + 1,
+        augmentationPlanHash: augmentedDungeon?.augmentationPlanHash ?? null,
+        status: augmentedDungeon?.augmentationStatus
+          ?? replayFailure?.augmentationDiagnostics?.status
+          ?? 'unchanged',
+        reason: augmentedDungeon?.augmentationDiagnostics?.reason
+          ?? replayFailure?.augmentationDiagnostics?.reason
+          ?? null,
+        diagnostics: augmentedDungeon?.augmentationDiagnostics
+          ?? replayFailure?.augmentationDiagnostics
+          ?? null,
+        consumedRandomCallCount: replayCursor,
+        expectedEarlyAugmentationRejection,
+        errors: rejectedErrors,
+      });
+      this._disposeGeneratedDungeonCandidate(augmentedDungeon, baseDungeon);
+      if (committedIdentity) {
+        this.augmentationPlanSeedOverride = originalPlanSeedOverride;
+        this._disposeGeneratedDungeonCandidate(baseDungeon);
+        if (replayFailure instanceof DungeonAugmentationIncompatibleContentError) {
+          throw replayFailure;
+        }
+        throw new DungeonAugmentationIncompatibleContentError(
+          'The saved dungeon augmentation failed physical walkability validation. Reset or abandon the expedition to continue.',
+          {
+            compatible: false,
+            status: 'incompatible-content',
+            resetOrAbandonRequired: true,
+            errors: rejectedErrors,
+          },
+        );
+      }
+      const nonRetryablePlanningReasons = new Set([
+        'augmentation-disabled',
+        'profile-not-found',
+        'profile-not-allowed',
+        'no-eligible-regions',
+        'invalid-input',
+        'base-draft-mutated',
+      ]);
+      if ((!replayConsumedExactly && !expectedEarlyAugmentationRejection)
+        || nonRetryablePlanningReasons.has(rejectionRecords.at(-1)?.reason)) break;
+    }
+    this.augmentationPlanSeedOverride = originalPlanSeedOverride;
+
+    baseDungeon.augmentationStatus = 'unchanged';
+    baseDungeon.augmentationDiagnostics = {
+      schema: 'ruindivex-dungeon-augmentation-diagnostics/v1',
+      accepted: true,
+      requested: true,
+      reason: 'physical-validation-fallback',
+      profileId: requestedProfileId,
+      basePlanHash: baseDungeon.basePlanHash ?? this.basePlanHash,
+      augmentationPlanHash: null,
+      effectivePlanHash: baseDungeon.basePlanHash ?? this.basePlanHash,
+      errors: [],
+      warnings: [
+        'The supplemental overlay was rejected; the accepted authored parent dungeon was retained unchanged.',
+      ],
+      rejectedOverlay: {
+        augmentationPlanHash: rejectionRecords.at(-1)?.augmentationPlanHash ?? null,
+        randomCallCount: randomTape.length,
+        consumedRandomCallCount:
+          rejectionRecords.at(-1)?.consumedRandomCallCount ?? 0,
+        realizationAttempts: rejectionRecords.length,
+        errors: rejectionRecords.at(-1)?.errors ?? [],
+        attempts: rejectionRecords,
+      },
+    };
+    baseDungeon.augmentationReplayDiagnostics = {
+      accepted: false,
+      fallbackToAcceptedBase: true,
+      randomCallCount: randomTape.length,
+      consumedRandomCallCount:
+        rejectionRecords.at(-1)?.consumedRandomCallCount ?? 0,
+      parentGenerationAttempts: baseDungeon.generationAttempts,
+      realizationAttempts: rejectionRecords.length,
+      errors: rejectionRecords.at(-1)?.errors ?? [],
+    };
+    return baseDungeon;
   }
 
   _generateAscensionEngineDungeon() {
@@ -1524,6 +2013,13 @@ export class DungeonGenerator {
   }
 
   _generateOnce() {
+    let generationCandidateGroup = null;
+    let materials = null;
+    let dungeonSupplementFragment = null;
+    let dungeonSupplementThemeSession = null;
+    let generationCandidateNpcAnimators = [];
+    let generationCandidateSpecialEnvironment = null;
+    try {
     const tiles = new Map();
     const side = this.random() < 0.5 ? -1 : 1;
     const secondarySide = this.random() < 0.65 ? -side : side;
@@ -1629,7 +2125,7 @@ export class DungeonGenerator {
       width: this._choose([13, 15]),
       depth: 13,
     };
-    const rooms = [...mainRooms, serverRoom, machineFactoryRoom, coolantRelayRoom, bonusVault];
+    let rooms = [...mainRooms, serverRoom, machineFactoryRoom, coolantRelayRoom, bonusVault];
     this._assignRoomArchetypes(rooms);
     const unvariedConnectionPlans = this._createElevationConnectionPlans(rooms);
     const maximumConnectorAssignmentAttempts = 48;
@@ -1681,7 +2177,7 @@ export class DungeonGenerator {
         `No collision-free connector family assignment was found in ${maximumConnectorAssignmentAttempts} deterministic attempts.`,
       );
     }
-    const connectionPlans = connectorFootprintReservation.connectionPlans;
+    let connectionPlans = connectorFootprintReservation.connectionPlans;
     for (const room of rooms) {
       room.plannedBaseElevation = Number(connectorPlanning.roomElevations[room.id] ?? 0);
     }
@@ -1689,9 +2185,52 @@ export class DungeonGenerator {
       unvariedConnectionPlans,
       connectionPlans,
     );
+    let dungeonAugmentation = this._planIndustrialDungeonAugmentation({
+      rooms,
+      connectionPlans,
+    });
+    if (dungeonAugmentation?.status === 'unchanged') {
+      // A rejected renderer-free plan does not need a complete duplicate base
+      // scene. The replay wrapper retains the already accepted parent dungeon
+      // and either tries another isolated augmentation seed or falls back.
+      const planningError = new Error(
+        `Dungeon augmentation planning returned unchanged (${dungeonAugmentation.diagnostics?.reason ?? 'unknown'}).`,
+      );
+      planningError.code = 'DUNGEON_AUGMENTATION_PLANNING_UNCHANGED';
+      planningError.augmentationDiagnostics = dungeonAugmentation.diagnostics;
+      throw planningError;
+    }
+    let supplementAssemblyStartedAt = null;
+    let supplementAssemblyValidation = {
+      accepted: true,
+      errors: [],
+      warnings: [],
+      details: { requested: dungeonAugmentation?.status === 'applied' },
+    };
+    if (dungeonAugmentation?.status === 'applied') {
+      rooms = dungeonAugmentation.materialized.rooms;
+      connectionPlans = dungeonAugmentation.materialized.connectionPlans;
+    }
+    const tileConnectionPlans = connectionPlans.filter((plan) => (
+      !plan.isSupplementGraphConnection
+    ));
+    const legacyConnectionPlans = connectionPlans.filter((plan) => (
+      !plan.isDungeonSupplement
+    ));
 
     for (const room of rooms) {
       addRectRoom(tiles, room);
+    }
+    if (dungeonAugmentation?.status === 'applied') {
+      for (const reward of createIndustrialSupplementRewardTiles(
+        rooms.filter((room) => room.isDungeonSupplement),
+        this.tileSize,
+      )) {
+        setTile(tiles, reward.x, reward.z, 'chest', {
+          roomId: reward.roomId,
+          forceType: true,
+        });
+      }
     }
 
     const keycardRoom = rooms.find((room) => room.id === 'keycardRoom');
@@ -1736,27 +2275,34 @@ export class DungeonGenerator {
       forceType: true,
     });
 
-    this._stampConnectionPlans(tiles, connectionPlans);
-    this._addConnectorExplorationSpaces(tiles, rooms, connectionPlans);
+    this._stampConnectionPlans(tiles, tileConnectionPlans);
+    // Physical supplement branches are real Industrial galleries. They must
+    // receive the same three-lane footprint, elevation surfaces, and envelope
+    // validation as authored connections; graph-only padding records remain
+    // excluded because their parent logical connection owns that shell.
+    this._addConnectorExplorationSpaces(tiles, rooms, tileConnectionPlans);
 
-    this._applyIndustrialFactoryLayout(tiles, rooms, connectionPlans);
+    this._applyIndustrialFactoryLayout(tiles, rooms, legacyConnectionPlans);
     const conveyorPuzzleValidation = this._applyConveyorPuzzleTemplates(tiles, rooms);
     const solidZones = this._createSolidCollisionZones(rooms);
     let floorTiles = [
       ...tiles.values(),
-      ...this._createFactoryLevelTiles(tiles, rooms, connectionPlans, solidZones),
+      ...this._createFactoryLevelTiles(tiles, rooms, tileConnectionPlans, solidZones),
     ];
     const roomElevationCommit = this._commitResolvedRoomElevations({
       rooms,
       tiles,
       floorTiles,
-      connectionPlans,
+      connectionPlans: legacyConnectionPlans,
       solidZones,
     });
-    floorTiles = this._applyConnectorTraversalSurfaces(tiles, connectionPlans, floorTiles);
+    floorTiles = this._applyConnectorTraversalSurfaces(tiles, tileConnectionPlans, floorTiles);
     const floorIdentityNormalization = canonicalizeAbsoluteFloorTiles(floorTiles);
     floorTiles = floorIdentityNormalization.floorTiles;
-    const connectorTrapSeed = connectionPlans.map((plan) => [
+    const connectorTrackTrapEligiblePlans = connectionPlans.filter((plan) => (
+      !plan.isDungeonSupplement && !plan.isPaddedByDungeonSupplement
+    ));
+    const connectorTrapSeed = connectorTrackTrapEligiblePlans.map((plan) => [
       plan.id,
       plan.connectorVariantId ?? 'level',
       plan.sourceElevation,
@@ -1767,34 +2313,127 @@ export class DungeonGenerator {
       plan.toSocket?.z,
     ].join(':')).join('|');
     const connectorTrackTrapGlobalExclusions = createDungeonConnectorTrackTrapGlobalExclusions(
-      connectionPlans,
+      connectorTrackTrapEligiblePlans,
       rooms,
       { tileSizeMeters: this.tileSize },
     );
-    const connectorTrackTrapPlanning = planDungeonConnectorTrackTraps(connectionPlans, {
+    const connectorTrackTrapPlanning = planDungeonConnectorTrackTraps(
+      connectorTrackTrapEligiblePlans,
+      {
       seed: connectorTrapSeed,
       tileSizeMeters: this.tileSize,
-      bayCandidatesByConnectionId: new Map(connectionPlans.map((plan) => [
+      bayCandidatesByConnectionId: new Map(connectorTrackTrapEligiblePlans.map((plan) => [
         plan.id,
         plan.flatBayCandidates ?? [],
       ])),
       extraExclusionVolumesByConnectionId: connectorTrackTrapGlobalExclusions,
-    });
+      },
+    );
     const connectorAssemblyValidation = this._validateConnectorTraversalAssembly({
       floorTiles,
       tiles,
       rooms,
-      connectionPlans,
+      connectionPlans: tileConnectionPlans,
     });
     floorTiles = this._enforceGeneratedWalkability(floorTiles, rooms);
-    this._finalizeRoomVerticalPlans(rooms, floorTiles, connectionPlans);
-    const progressionAccessValidation = this._validateProgressionAccess(floorTiles, tiles, rooms, connectionPlans);
+    this._finalizeRoomVerticalPlans(rooms, floorTiles, legacyConnectionPlans);
+    const progressionAccessValidation = this._validateProgressionAccess(
+      floorTiles,
+      tiles,
+      rooms,
+      legacyConnectionPlans,
+    );
     const coolantWalkabilityValidation = this._validateCoolantRoomWalkability(floorTiles, tiles, rooms, solidZones);
     const floorTileLookup = this._createFloorTileLookup(floorTiles);
 
-    const group = new THREE.Group();
+    if (dungeonAugmentation?.status === 'applied') {
+      // Prove every supplemental threshold has a floor, a bidirectional
+      // approach, global reachability, and a carved wall aperture before any
+      // Three.js object or material is created. A second validation later also
+      // includes solid zones contributed by assembled authored setpieces.
+      const preflightOpenAirTileKeys = this._createOpenAirTileKeys(rooms);
+      const preflightConnectorWallOpenings = this._createConnectorWallOpeningMap(
+        connectionPlans,
+      );
+      const preflightBoundaryWallRuns = this._collectBoundaryWallRuns(
+        tiles,
+        preflightOpenAirTileKeys,
+        rooms,
+        preflightConnectorWallOpenings,
+      );
+      const connectorEntrancePreflight = this._validateConnectorEntranceWalkability({
+        floorTiles,
+        rooms,
+        solidZones,
+        // Structural wall runs are checked explicitly below. Pre-assembly
+        // room solids include connector dressing footprints that must not be
+        // mistaken for wall planes between adjacent floor centers.
+        segmentBarrierZones: [],
+        connectionPlans,
+        wallRuns: preflightBoundaryWallRuns,
+        useSegmentBarriers: true,
+      });
+      if (!connectorEntrancePreflight.accepted) {
+        const preflightError = new Error(
+          `Dungeon augmentation failed connector entrance preflight: ${connectorEntrancePreflight.errors.join(' | ')}`,
+        );
+        preflightError.code = 'DUNGEON_AUGMENTATION_CONNECTOR_PREFLIGHT_FAILED';
+        preflightError.augmentationDiagnostics = {
+          status: 'unchanged',
+          reason: 'connector-entrance-preflight-failed',
+          errors: connectorEntrancePreflight.errors,
+          connectorEntrances: connectorEntrancePreflight.details,
+        };
+        throw preflightError;
+      }
+    }
+
+    generationCandidateGroup = new THREE.Group();
+    const group = generationCandidateGroup;
     group.name = 'randomizedRuinLayout';
-    const materials = this._createMaterials();
+    materials = this._createMaterials();
+    if (dungeonAugmentation?.status === 'applied') {
+      const extensionRegion = dungeonAugmentation.host.extensionRegions[0];
+      supplementAssemblyStartedAt = globalThis.performance?.now?.() ?? Date.now();
+      try {
+        dungeonSupplementThemeSession = this._createIndustrialDungeonThemeSession(
+          materials,
+          extensionRegion.themeBinding,
+        );
+        dungeonSupplementFragment = assembleDungeonSupplement({
+          overlayPlan: dungeonAugmentation.result.overlayPlan,
+          themeSessions: new Map([[extensionRegion.id, dungeonSupplementThemeSession]]),
+          themeSession: dungeonSupplementThemeSession,
+          tileSize: this.tileSize,
+          structuralMode: 'facadeOnly',
+          rootName: 'DungeonSupplementRuntimeFacade',
+        });
+      } catch (error) {
+        dungeonSupplementThemeSession?.resources?.disposeOwned?.();
+        dungeonSupplementThemeSession = null;
+        const assemblyFailure = {
+          code: error?.code ?? 'DUNGEON_SUPPLEMENT_ASSEMBLY_FAILED',
+          message: error?.message ?? String(error),
+        };
+        if (this.committedAugmentationIdentity) {
+          throw new DungeonAugmentationIncompatibleContentError(
+            'The saved dungeon augmentation cannot be assembled by the installed parent theme. Reset or abandon the expedition to continue.',
+            {
+              compatible: false,
+              status: 'incompatible-content',
+              resetOrAbandonRequired: true,
+              errors: [assemblyFailure],
+            },
+          );
+        }
+        supplementAssemblyValidation = {
+          accepted: false,
+          errors: [assemblyFailure],
+          warnings: [],
+          details: { requested: true, reason: 'theme-assembly-failed' },
+        };
+      }
+    }
 
     for (const tile of floorTiles) {
       if (tile.surface === 'industrialRamp') {
@@ -1806,6 +2445,9 @@ export class DungeonGenerator {
       visualOwner.userData.cameraOcclusionOwner = true;
       visualOwner.userData.roomId = tile.roomId ?? null;
       visualOwner.userData.connectorId = tile.connectorId ?? null;
+      if (tile.augmentationOwnerId) {
+        visualOwner.userData.augmentationOwnerId = tile.augmentationOwnerId;
+      }
       const mesh = this._createFloorTileMesh(tile, materials);
       mesh.name = `dungeonTile_${tile.type}_level${tile.level ?? 0}`;
       mesh.userData.cameraOcclusionSurface = true;
@@ -1822,6 +2464,7 @@ export class DungeonGenerator {
         rampDirectionZ: tile.rampDirectionZ,
         connectionId: tile.connectionId,
         connectorId: tile.connectorId,
+        ...(tile.augmentationOwnerId ? { augmentationOwnerId: tile.augmentationOwnerId } : {}),
         connectorZone: tile.connectorZone,
         platformGroupId: tile.platformGroupId,
         supportStyle: tile.supportStyle,
@@ -1844,7 +2487,7 @@ export class DungeonGenerator {
     this._addSolidTraversalVolumes(group, floorTiles, rooms, materials);
     const connectorFixtures = this._addConnectorTraversalPrefabs(
       group,
-      connectionPlans,
+      legacyConnectionPlans,
       materials,
       solidZones,
     );
@@ -1861,30 +2504,99 @@ export class DungeonGenerator {
       group,
       rooms,
       floorTiles,
-      connectionPlans,
+      tileConnectionPlans,
       materials,
       solidZones,
     );
     this._addCeilings(group, tiles, materials, openAirTileKeys, rooms);
-    const aerialBoundaryZones = this._addWalls(group, tiles, materials, openAirTileKeys, rooms);
+    const augmentationApplied = dungeonAugmentation?.status === 'applied';
+    // The sidecar owns these apertures. Keeping the legacy shell call exactly
+    // unchanged while augmentation is off preserves Industrial V1 output/RNG.
+    const connectorWallOpenings = augmentationApplied
+      ? this._createConnectorWallOpeningMap(connectionPlans)
+      : new Map();
+    const aerialBoundaryZones = this._addWalls(
+      group,
+      tiles,
+      materials,
+      openAirTileKeys,
+      rooms,
+      connectorWallOpenings,
+    );
+    const boundaryWallRuns = this._collectBoundaryWallRuns(
+      tiles,
+      openAirTileKeys,
+      rooms,
+      connectorWallOpenings,
+    );
     this._addInvisibleOpenAirBounds(group, tiles, materials, openAirTileKeys);
     const doors = this._addDoors(
       group,
       rooms,
       materials,
       tiles,
-      connectionPlans,
+      legacyConnectionPlans,
       solidZones,
       aerialBoundaryZones,
+      {
+        preserveAdjacentConnectorEntrances: augmentationApplied,
+        connectorWallOpenings,
+      },
     );
-    const criticalDoorValidation = this._validateCriticalDoorChokepoints({
+    let validationSolidZones = this._createDungeonAugmentationValidationSolidZones(
+      solidZones,
+      dungeonSupplementFragment,
+      augmentationApplied,
+    );
+    const validationSegmentBarrierZones = augmentationApplied
+      ? [
+          ...aerialBoundaryZones,
+          ...(dungeonSupplementFragment?.solidZones ?? []),
+        ]
+      : null;
+    let criticalDoorValidation = this._validateCriticalDoorChokepoints({
       floorTiles,
       rooms,
-      solidZones,
+      solidZones: validationSolidZones,
       doors,
+      // Preserve the exact legacy validation path when augmentation is off.
+      // Supplemental padding can route through threshold wings between tile
+      // centers, so its effective graph also needs segment-vs-wall collision.
+      useSegmentBarriers: augmentationApplied,
     });
-    const verticalPortals = this._addVerticalConnectionPortals(group, connectionPlans, materials);
+    let connectorEntranceValidation = augmentationApplied
+      ? this._validateConnectorEntranceWalkability({
+          floorTiles,
+          rooms,
+          solidZones: validationSolidZones,
+          segmentBarrierZones: validationSegmentBarrierZones,
+          // Padded-edge physical records are graph-only for shell assembly,
+          // but their internal room thresholds are still real player entrances
+          // and must pass the same aperture/reachability proof as stamped galleries.
+          connectionPlans,
+          wallRuns: boundaryWallRuns,
+          useSegmentBarriers: true,
+        })
+      : {
+          accepted: true,
+          errors: [],
+          warnings: [],
+          details: {
+            checkedSocketCount: 0,
+            acceptedSocketCount: 0,
+            reachableNodeCount: 0,
+            checks: [],
+            skipped: true,
+            reason: 'augmentation-disabled',
+          },
+        };
+    const verticalPortals = this._addVerticalConnectionPortals(
+      group,
+      legacyConnectionPlans,
+      materials,
+    );
     const landmarks = this._addRoomLandmarks(group, rooms, materials, tiles, floorTiles, solidZones);
+    generationCandidateNpcAnimators = landmarks.npcAnimators ?? [];
     landmarks.platforms.push(...this._createGeneratedPlatformSurfaces(floorTiles));
     landmarks.platforms.push(...connectorFixtures.platforms);
     const specialEnvironmentRoom = rooms.find((room) => room.specialEnvironmentId === 'verticalTransitReliquary');
@@ -1895,15 +2607,53 @@ export class DungeonGenerator {
         seed: `${this.bossProfileId}:${this.difficulty}:${specialEnvironmentRoom.x}:${specialEnvironmentRoom.z}`,
       })
       : null;
+    generationCandidateSpecialEnvironment = specialEnvironment;
     if (specialEnvironment) {
       specialEnvironment.attachToDungeon({ group, platforms: landmarks.platforms, solidZones });
     }
-    const encounters = this._createEncounterDefinitions(rooms, floorTiles, solidZones);
+    validationSolidZones = this._createDungeonAugmentationValidationSolidZones(
+      solidZones,
+      dungeonSupplementFragment,
+      augmentationApplied,
+    );
+    if (augmentationApplied) {
+      // Theme products and authored landmarks may contribute collision after
+      // the renderer-free preflight. Re-run both barrier-aware proofs against
+      // the exact final collision candidate before accepting the overlay.
+      criticalDoorValidation = this._validateCriticalDoorChokepoints({
+        floorTiles,
+        rooms,
+        solidZones: validationSolidZones,
+        doors,
+        useSegmentBarriers: true,
+      });
+      connectorEntranceValidation = this._validateConnectorEntranceWalkability({
+        floorTiles,
+        rooms,
+        solidZones: validationSolidZones,
+        segmentBarrierZones: validationSegmentBarrierZones,
+        connectionPlans,
+        wallRuns: boundaryWallRuns,
+        useSegmentBarriers: true,
+      });
+    }
+    const encounters = this._createEncounterDefinitions(
+      rooms,
+      floorTiles,
+      validationSolidZones,
+    );
+    if (dungeonAugmentation?.status === 'applied') {
+      encounters.push(...this._createDungeonSupplementEncounterDefinitions(
+        rooms.filter((room) => room.isDungeonSupplement),
+        floorTiles,
+        validationSolidZones,
+      ));
+    }
     const trapVisualsByRoom = new Map(landmarks.trapVisuals.map((entry) => [entry.roomId, entry.object]));
 
     const enemySpawnPoints = rooms
       .filter((room) => !['hub', 'camp', 'entrance', 'bonus'].includes(room.type))
-      .flatMap((room) => this._roomSpawnPoints(room, floorTiles, solidZones));
+      .flatMap((room) => this._roomSpawnPoints(room, floorTiles, validationSolidZones));
     const hubRoom = rooms.find((room) => room.id === 'hubTown') ?? rooms[0];
     const campRoom = rooms.find((room) => room.id === 'expeditionCamp') ?? hubRoom;
     const entranceRoom = rooms.find((room) => room.id === 'entrance') ?? campRoom;
@@ -1914,21 +2664,98 @@ export class DungeonGenerator {
       landmarks,
       chests: landmarks.chests,
       encounters,
-      connectionPlans,
+      connectionPlans: legacyConnectionPlans,
     });
+    if (dungeonAugmentation?.status === 'applied') {
+      const supplementalRoomConnections = connectionPlans
+        .filter((plan) => plan.isDungeonSupplement)
+        .map((plan) => ({
+          id: plan.id,
+          connectorId: plan.id,
+          logicalConnectionId: plan.logicalConnectionId,
+          fromRoomId: plan.fromRoomId,
+          toRoomId: plan.toRoomId,
+          doorId: plan.doorId ?? null,
+          routeClassification: plan.routeClassification ?? 'optional_branch',
+          requiredForProgression: Boolean(plan.requiredForProgression),
+          gateId: plan.logicalGateId ?? null,
+          operationId: plan.augmentationOperationId ?? null,
+          isDungeonSupplement: true,
+          routes: [{
+            id: plan.id,
+            connectorType: plan.connectorType,
+            level: plan.level,
+            elevation: plan.elevation,
+            sourceElevation: plan.sourceElevation ?? plan.fromSocket?.elevation ?? plan.elevation,
+            destinationElevation: plan.destinationElevation ?? plan.toSocket?.elevation ?? plan.elevation,
+            elevationDelta: plan.elevationDelta ?? 0,
+            direction: plan.direction ?? 'level',
+            connectorVariantId: plan.connectorVariantId ?? null,
+            purpose: plan.purpose,
+            routeClassification: plan.routeClassification ?? 'optional_branch',
+            requiredForProgression: Boolean(plan.requiredForProgression),
+            explorationBeats: (plan.explorationBeats ?? []).map((beat) => ({ ...beat })),
+            fromSocket: { ...plan.fromSocket },
+            toSocket: { ...plan.toSocket },
+            isDungeonSupplement: true,
+          }],
+        }));
+      const paddedLogicalConnectionIds = new Set(
+        legacyConnectionPlans
+          .filter((plan) => plan.isPaddedByDungeonSupplement)
+          .map((plan) => String(plan.logicalConnectionId ?? plan.id)),
+      );
+      progression.supplementalRoomConnections = supplementalRoomConnections;
+      // DungeonController uses roomConnections for reachability and discovery.
+      // Replace padded logical edges only after the authored validator has
+      // accepted the unchanged parent graph. The immutable base snapshot still
+      // retains those records for diagnostics and fallback.
+      progression.roomConnections = [
+        ...progression.roomConnections.filter((connection) => (
+          !paddedLogicalConnectionIds.has(String(connection.id))
+        )),
+        ...supplementalRoomConnections,
+      ];
+      const effectiveAdjacency = new Map();
+      const connectRooms = (fromRoomId, toRoomId) => {
+        if (!fromRoomId || !toRoomId) return;
+        if (!effectiveAdjacency.has(fromRoomId)) effectiveAdjacency.set(fromRoomId, new Set());
+        effectiveAdjacency.get(fromRoomId).add(toRoomId);
+      };
+      for (const connection of progression.roomConnections) {
+        connectRooms(connection.fromRoomId, connection.toRoomId);
+        connectRooms(connection.toRoomId, connection.fromRoomId);
+      }
+      progression.minimap = {
+        ...progression.minimap,
+        rooms: (progression.minimap?.rooms ?? []).map((room) => ({
+          ...room,
+          connectedRoomIds: [...(effectiveAdjacency.get(room.roomId) ?? [])],
+        })),
+        hallways: (progression.minimap?.hallways ?? []).filter((hallway) => (
+          !paddedLogicalConnectionIds.has(String(hallway.hallwayId ?? hallway.id))
+        )),
+      };
+    }
     const platformabilityValidation = this._validatePlatformability({
       floorTiles,
       rooms,
-      solidZones,
-      connectionPlans,
+      solidZones: validationSolidZones,
+      segmentBarrierZones: validationSegmentBarrierZones,
+      connectionPlans: tileConnectionPlans,
       doors,
       landmarks,
       encounters,
+      useSegmentBarriers: augmentationApplied,
     });
     progression.validation = {
       ...progression.validation,
       platformability: platformabilityValidation.details,
       physicalProgression: criticalDoorValidation.details,
+      ...(dungeonAugmentation ? {
+        connectorEntrances: connectorEntranceValidation.details,
+        supplementAssembly: supplementAssemblyValidation.details,
+      } : {}),
       connectorAssembly: connectorAssemblyValidation.details,
       connectorPlanning: connectorPlanning.diagnostics,
       connectorAssignmentSearch: connectorAssignmentSearchDiagnostics,
@@ -1946,6 +2773,8 @@ export class DungeonGenerator {
         && connectorVariantValidation.ok
         && connectorTrackTrapPlanning.diagnostics.accepted
         && connectorAssemblyValidation.accepted
+        && connectorEntranceValidation.accepted
+        && supplementAssemblyValidation.accepted
         && criticalDoorValidation.accepted
         && platformabilityValidation.accepted
       ),
@@ -1960,6 +2789,8 @@ export class DungeonGenerator {
         ...connectorVariantValidation.errors,
         ...connectorTrackTrapPlanning.diagnostics.errors,
         ...connectorAssemblyValidation.errors,
+        ...connectorEntranceValidation.errors,
+        ...supplementAssemblyValidation.errors,
         ...criticalDoorValidation.errors,
         ...platformabilityValidation.errors,
       ],
@@ -1969,10 +2800,113 @@ export class DungeonGenerator {
         ...coolantWalkabilityValidation.warnings,
         ...conveyorPuzzleValidation.warnings,
         ...connectorAssemblyValidation.warnings,
+        ...connectorEntranceValidation.warnings,
+        ...supplementAssemblyValidation.warnings,
         ...criticalDoorValidation.warnings,
         ...platformabilityValidation.warnings,
       ],
     };
+    let dungeonSupplementRoot = null;
+    let augmentationAssemblyMetrics = null;
+    if (dungeonAugmentation?.status === 'applied' && dungeonSupplementFragment) {
+      // Industrial's host-stamped rooms already own their encounter and chest
+      // runtime records. Keep the generic assembler's normalized graph,
+      // minimap, lights, resources, and future audio records without creating
+      // duplicate interactables.
+      dungeonSupplementFragment.encounters = [];
+      dungeonSupplementFragment.enemySpawnPoints = [];
+      dungeonSupplementFragment.chests = [];
+      dungeonSupplementRoot = this._createDungeonSupplementRoot(group, {
+        roomIds: dungeonAugmentation.materialized.supplementalRoomIds,
+        connectorIds: dungeonAugmentation.materialized.supplementalConnectionIds,
+      });
+      const runtimeFacadeRoot = dungeonSupplementFragment.root;
+      const disposeRuntimeFacade = dungeonSupplementFragment.dispose;
+      const runtimeFacadeObjects = new Set();
+      runtimeFacadeRoot?.traverse?.((object) => runtimeFacadeObjects.add(object));
+      dungeonSupplementRoot.add(runtimeFacadeRoot);
+      dungeonSupplementFragment.runtimeFacadeRoot = runtimeFacadeRoot;
+      dungeonSupplementFragment.root = dungeonSupplementRoot;
+      dungeonSupplementFragment.group = dungeonSupplementRoot;
+      dungeonSupplementFragment.supplementRoot = dungeonSupplementRoot;
+      let supplementDisposed = false;
+      dungeonSupplementFragment.dispose = () => {
+        if (supplementDisposed) return;
+        supplementDisposed = true;
+        const supplementObjects = new Set();
+        dungeonSupplementRoot.traverse((object) => supplementObjects.add(object));
+        const externallyReferencedGeometries = new Set();
+        group.traverse((object) => {
+          if (!supplementObjects.has(object) && object.geometry) {
+            externallyReferencedGeometries.add(object.geometry);
+          }
+        });
+        disposeRuntimeFacade?.();
+        const disposedGeometries = new Set();
+        dungeonSupplementRoot.traverse((object) => {
+          if (
+            object.geometry
+            && !runtimeFacadeObjects.has(object)
+            && !externallyReferencedGeometries.has(object.geometry)
+            && !disposedGeometries.has(object.geometry)
+          ) {
+            object.geometry.dispose?.();
+            disposedGeometries.add(object.geometry);
+          }
+        });
+        dungeonSupplementRoot.removeFromParent();
+      };
+      const materialReferences = new Set();
+      const geometryReferences = new Set();
+      let objectCount = 0;
+      let meshCount = 0;
+      let lightCount = 0;
+      let triangleCount = 0;
+      dungeonSupplementRoot.traverse((object) => {
+        objectCount += 1;
+        if (object.isLight) lightCount += 1;
+        if (!object.isMesh) return;
+        meshCount += 1;
+        if (object.geometry) {
+          geometryReferences.add(object.geometry);
+          triangleCount += Math.floor(
+            (object.geometry.index?.count ?? object.geometry.attributes?.position?.count ?? 0) / 3,
+          ) * Math.max(1, Number(object.count ?? 1));
+        }
+        for (const material of (Array.isArray(object.material)
+          ? object.material
+          : [object.material])) {
+          if (material) materialReferences.add(material);
+        }
+      });
+      const supplementalRoomIds = new Set(
+        dungeonAugmentation.materialized.supplementalRoomIds,
+      );
+      augmentationAssemblyMetrics = {
+        planningTimeMs: dungeonAugmentation.diagnostics.planningTimeMs ?? null,
+        assemblyTimeMs: Math.max(
+          0,
+          (globalThis.performance?.now?.() ?? Date.now())
+            - (supplementAssemblyStartedAt ?? (globalThis.performance?.now?.() ?? Date.now())),
+        ),
+        operationCount: dungeonAugmentation.result.overlayPlan.operations?.length ?? 0,
+        roomCount: supplementalRoomIds.size,
+        physicalConnectionCount:
+          dungeonAugmentation.materialized.supplementalConnectionIds.length,
+        tileCount: floorTiles.filter((tile) => (
+          supplementalRoomIds.has(tile.roomId)
+          || String(tile.augmentationOwnerId ?? '').startsWith('supplement:')
+        )).length,
+        objectCount,
+        meshCount,
+        lightCount,
+        drawCallUpperBound: meshCount,
+        triangleCount,
+        geometryReferenceCount: geometryReferences.size,
+        materialReferenceCount: materialReferences.size,
+        localLightRecordCount: dungeonSupplementFragment.localLights?.length ?? 0,
+      };
+    }
     const renderCullGroups = this._createStaticRenderCullGroups(group, [
       doors,
       verticalPortals,
@@ -1990,12 +2924,12 @@ export class DungeonGenerator {
       connectorTrackTrapInfrastructure,
     ]);
 
-    return {
+    const baseFacade = {
       group,
       rooms,
       tiles,
       floorTiles,
-      verticalConnectors: this._createVerticalConnectors(rooms, connectionPlans),
+      verticalConnectors: this._createVerticalConnectors(rooms, legacyConnectionPlans),
       connectionPlans,
       connectorPlanningDiagnostics: connectorPlanning.diagnostics,
       connectorAssignmentSearchDiagnostics,
@@ -2061,7 +2995,70 @@ export class DungeonGenerator {
       renderCullGroups,
       specialEnvironment,
       specialEnvironmentId: specialEnvironment?.id ?? null,
+      ...(this.basePlanHash || dungeonAugmentation ? {
+        basePlanHash: dungeonAugmentation?.baseDraft?.basePlanHash ?? this.basePlanHash,
+        augmentationPlanHash: dungeonAugmentation?.result?.overlayPlan?.augmentationPlanHash ?? null,
+        effectivePlanHash: dungeonAugmentation?.result?.overlayPlan?.effectivePlanHash
+          ?? dungeonAugmentation?.baseDraft?.basePlanHash
+          ?? this.basePlanHash,
+      } : {}),
+      ...(dungeonAugmentation ? {
+        augmentationStatus: dungeonAugmentation.status,
+        augmentationDiagnostics: dungeonAugmentation.diagnostics,
+      } : {}),
+      ...(dungeonAugmentation?.status === 'applied' && dungeonSupplementFragment ? {
+        extensionHost: dungeonAugmentation.host,
+        augmentationOverlayPlan: dungeonAugmentation.result.overlayPlan,
+        augmentationIdentity: dungeonAugmentation.identity,
+        dungeonSupplementRoot,
+        augmentationMetrics: augmentationAssemblyMetrics,
+        disposableResources: [dungeonSupplementFragment],
+      } : {}),
     };
+    if (!dungeonSupplementFragment) return baseFacade;
+    const effectiveFacade = mergeDungeonFacade(baseFacade, dungeonSupplementFragment, {
+      conflictPolicy: 'base',
+      attachRoot: false,
+    });
+    effectiveFacade.supplementRoot = dungeonSupplementRoot;
+    effectiveFacade.dungeonSupplementRoot = dungeonSupplementRoot;
+    effectiveFacade.augmentationIdentity = dungeonAugmentation.identity;
+    effectiveFacade.augmentationOverlayPlan = dungeonAugmentation.result.overlayPlan;
+    effectiveFacade.augmentationDiagnostics = dungeonAugmentation.diagnostics;
+    effectiveFacade.augmentationMetrics = augmentationAssemblyMetrics;
+    effectiveFacade.extensionHost = dungeonAugmentation.host;
+    effectiveFacade.disposableResources = [dungeonSupplementFragment];
+    return effectiveFacade;
+    } catch (error) {
+      let cleanupError = null;
+      const fragmentOwnsThemeProducts = Boolean(dungeonSupplementFragment);
+      try {
+        this._disposeGeneratedDungeonCandidate({
+          group: generationCandidateGroup,
+          materials,
+          npcAnimators: generationCandidateNpcAnimators,
+          specialEnvironment: generationCandidateSpecialEnvironment,
+          disposableResources: dungeonSupplementFragment ? [dungeonSupplementFragment] : [],
+        });
+      } catch (candidateCleanupError) {
+        cleanupError = candidateCleanupError;
+      }
+      // A completed fragment ledger disposes every session-managed factory
+      // product and removes it from the session ledger. Running the session's
+      // broad fallback afterward would traverse those products a second time.
+      // The session fallback is reserved for throws before a fragment exists.
+      if (!fragmentOwnsThemeProducts) {
+        try {
+          dungeonSupplementThemeSession?.resources?.disposeOwned?.();
+        } catch (sessionCleanupError) {
+          cleanupError ??= sessionCleanupError;
+        }
+      }
+      if (cleanupError && error && typeof error === 'object') {
+        error.generationCandidateCleanupError = cleanupError;
+      }
+      throw error;
+    }
   }
 
   _createStaticRenderCullGroups(root, criticalSources = []) {
@@ -2268,6 +3265,227 @@ export class DungeonGenerator {
       maxBucketSpan,
       maxBucketDrawObjects,
     }));
+  }
+
+  _createDungeonSupplementRoot(group, {
+    roomIds = [],
+    connectorIds = [],
+  } = {}) {
+    const supplementalRoomIds = new Set(roomIds);
+    const supplementalConnectorIds = new Set(connectorIds);
+    const root = new THREE.Group();
+    root.name = 'DungeonSupplementRoot';
+    root.userData.dungeonSupplementRoot = true;
+    root.userData.supplementalRoomIds = [...supplementalRoomIds];
+    root.userData.supplementalConnectorIds = [...supplementalConnectorIds];
+
+    const isSupplementOwner = (value) => value != null && (
+      supplementalRoomIds.has(value)
+      || supplementalConnectorIds.has(value)
+      || String(value).startsWith('supplement:')
+    );
+    const belongsOnlyToSupplement = (object) => {
+      const primaryOwnerId = object.userData?.augmentationOwnerId
+        ?? object.userData?.roomId
+        ?? object.userData?.connectorId
+        ?? null;
+      if (primaryOwnerId != null) return isSupplementOwner(primaryOwnerId);
+      const owners = [];
+      object.traverse((descendant) => {
+        const roomId = descendant.userData?.roomId;
+        const connectorId = descendant.userData?.connectorId;
+        const augmentationOwnerId = descendant.userData?.augmentationOwnerId;
+        if (augmentationOwnerId) {
+          owners.push(isSupplementOwner(augmentationOwnerId));
+        } else if (roomId) {
+          owners.push(isSupplementOwner(roomId));
+        } else if (connectorId) {
+          owners.push(isSupplementOwner(connectorId));
+        }
+        for (const wallOwnerId of descendant.userData?.wallOwnerIds ?? []) {
+          owners.push(isSupplementOwner(wallOwnerId));
+        }
+      });
+      return owners.length > 0 && owners.every(Boolean);
+    };
+
+    const supplementChildren = [...group.children].filter((child) => (
+      child !== root && belongsOnlyToSupplement(child)
+    ));
+    for (const child of supplementChildren) root.add(child);
+    group.add(root);
+    return root;
+  }
+
+  _createDungeonSupplementEncounterDefinitions(rooms, floorTiles, solidZones) {
+    return rooms.map((room, index) => {
+      const position = new THREE.Vector3(
+        room.x * this.tileSize,
+        Number(room.baseElevation ?? 0),
+        room.z * this.tileSize,
+      );
+      const roster = index % 2 === 0
+        ? ['basic', 'fast']
+        : ['ranged', 'basic'];
+      if (this.difficulty >= 3) roster.push('horokko');
+      return {
+        id: `${room.id}:encounter`,
+        roomId: room.id,
+        label: 'Supplemental Exploration Defense',
+        roster,
+        zone: {
+          id: `${room.id}:encounter-zone`,
+          roomId: room.id,
+          position,
+          halfWidth: Math.max(this.tileSize, (Math.floor(room.width / 2) - 0.25) * this.tileSize),
+          halfDepth: Math.max(this.tileSize, (Math.floor(room.depth / 2) - 0.25) * this.tileSize),
+          active: true,
+        },
+        triggerZone: null,
+        spawnPoints: this._roomSpawnPoints(room, floorTiles, solidZones),
+        spawned: false,
+        cleared: false,
+        enemyIds: [],
+        isDungeonSupplement: true,
+        operationId: room.augmentationOperationId,
+      };
+    });
+  }
+
+  _createIndustrialDungeonThemeSession(materials, themeBinding) {
+    const assetFactory = (role, specification = {}, context = {}) => {
+      const root = new THREE.Group();
+      root.name = `industrialSupplementAsset_${role}`;
+      root.userData.dungeonSupplementAssetRole = role;
+      root.userData.themeBinding = themeBinding;
+      root.userData.parentAssetCatalogId = `industrial-v1:${role}`;
+      const position = specification.position ?? specification.center;
+      if (position?.isVector3) root.position.copy(position);
+      else if (position) root.position.set(
+        Number(position.x ?? 0),
+        Number(position.y ?? 0),
+        Number(position.z ?? 0),
+      );
+      const facing = specification.facing;
+      if (facing && (Number(facing.x) || Number(facing.z))) {
+        root.rotation.y = Math.atan2(Number(facing.x ?? 0), Number(facing.z ?? 0));
+      }
+
+      const borrow = (material, label) => {
+        context.resources?.borrow?.(material, { label });
+        return material;
+      };
+      const addBox = (name, size, material, localPosition = [0, 0, 0]) => {
+        borrow(material, `industrial:${role}:${name}:parent-material`);
+        const geometry = this._createTiledBoxGeometry(...size);
+        context.resources?.own?.(geometry, { label: `industrial:${role}:${name}:geometry` });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.name = name;
+        mesh.position.set(...localPosition);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        root.add(mesh);
+        return mesh;
+      };
+      const addIndustrialFrame = ({ warning = false, transition = false } = {}) => {
+        const width = Math.max(2.8, Number(specification.width ?? 4.2));
+        const height = Math.max(2.8, Number(specification.height ?? 3.6));
+        const columnMaterial = materials.supportMetal;
+        const beamMaterial = warning ? materials.hazardStripe : materials.wallTrim;
+        addBox('industrialFrameLeftColumn', [0.28, height, 0.32], columnMaterial, [-width * 0.5, height * 0.5, 0]);
+        addBox('industrialFrameRightColumn', [0.28, height, 0.32], columnMaterial, [width * 0.5, height * 0.5, 0]);
+        addBox(
+          transition ? 'industrialTransitionHeader' : 'industrialFrameHeader',
+          [width + 0.56, 0.34, 0.38],
+          beamMaterial,
+          [0, height - 0.17, 0],
+        );
+      };
+
+      switch (role) {
+        case 'support':
+          addBox('industrialIBeamWeb', [0.22, 3.2, 0.28], materials.supportMetal, [0, 1.6, 0]);
+          addBox('industrialIBeamTopFlange', [0.62, 0.16, 0.5], materials.factoryRail, [0, 3.12, 0]);
+          addBox('industrialIBeamBaseFlange', [0.62, 0.16, 0.5], materials.factoryRail, [0, 0.08, 0]);
+          break;
+        case 'arch':
+          addIndustrialFrame();
+          break;
+        case 'frame':
+          addIndustrialFrame({ warning: true });
+          break;
+        case 'transitionFrame':
+          addIndustrialFrame({ warning: true, transition: true });
+          break;
+        case 'cap': {
+          const width = Math.max(2.8, Number(specification.width ?? 2.8));
+          const height = Math.max(2.8, Number(specification.height ?? 3.2));
+          addBox('industrialSocketCapPanel', [width, height, 0.2], materials.wall, [0, height * 0.5, 0]);
+          addBox('industrialSocketCapWarningBar', [width * 0.72, 0.18, 0.24], materials.hazardStripe, [0, 1.05, -0.03]);
+          addBox('industrialSocketCapHeader', [width, 0.22, 0.28], materials.wallTrim, [0, height - 0.12, 0]);
+          break;
+        }
+        case 'control':
+          addBox('industrialControlPedestal', [0.78, 0.72, 0.48], materials.terminal, [0, 0.36, 0]);
+          addBox('industrialControlScreen', [0.62, 0.08, 0.3], materials.glowBlue, [0, 0.78, -0.18]);
+          break;
+        case 'prop':
+          addBox('industrialCargoBody', [0.9, 0.72, 0.9], materials.wallTrim, [0, 0.36, 0]);
+          addBox('industrialCargoStripe', [0.94, 0.09, 0.2], materials.hazardStripe, [0, 0.56, -0.46]);
+          break;
+        case 'decal':
+        case 'hazard':
+          addBox('industrialWarningSurface', [1.4, 0.035, 0.34], materials.hazardStripe, [0, 0.02, 0]);
+          break;
+        case 'lightFixture':
+          addBox('industrialLightHousing', [0.72, 0.18, 0.48], materials.supportMetal, [0, 0, 0]);
+          addBox('industrialLightLens', [0.54, 0.06, 0.34], materials.glowBlue, [0, -0.1, 0]);
+          break;
+        default:
+          throw new Error(`Industrial V1 has no registered supplement asset role ${role}.`);
+      }
+
+      if (role === 'lightFixture') {
+        const light = new THREE.PointLight(0x6bdcff, 1.25, 10, 2);
+        light.name = 'industrialSupplementLocalLight';
+        light.position.y = -0.2;
+        root.add(light);
+      }
+      return root;
+    };
+    const metadataFactory = (kind) => (contract = {}) => {
+      const root = new THREE.Group();
+      root.name = `industrialSupplement${kind}`;
+      root.userData.dungeonSupplementPresentation = kind;
+      root.userData.contract = contract;
+      root.userData.themeBinding = themeBinding;
+      return root;
+    };
+    return createIndustrialThemeAdapter({
+      themeBinding,
+      materials,
+      assetFactory,
+      assetRoles: [
+        'support', 'arch', 'frame', 'prop', 'decal', 'control',
+        'lightFixture', 'hazard', 'cap', 'transitionFrame',
+      ],
+      connectorSkinFactory: (_family, contract) => metadataFactory('ConnectorSkin')(contract),
+      connectorFamilies: [
+        'serviceGallery', 'slope', 'ladder', 'lift', 'trackTrap', 'transitionBay',
+      ],
+      transitionFactory: (_type, contract) => metadataFactory('TransitionFrame')(contract),
+      transitionTypes: ['levelTransitionBay'],
+      environment: {
+        localLightingProfileId: themeBinding.localLightingProfileId,
+        soundscapeProfileId: themeBinding.soundscapeProfileId,
+        createLocalLights: (specification) => assetFactory('lightFixture', specification),
+        createAudioEmitters: (specification) => ({
+          ...specification,
+          themeBinding,
+          parentOwnedDescriptor: true,
+        }),
+      },
+    });
   }
 
   _assignRoomArchetypes(rooms) {
@@ -3051,8 +4269,25 @@ export class DungeonGenerator {
 
   _stampConnectionPlans(tiles, connectionPlans = []) {
     for (const plan of connectionPlans.filter((candidate) => candidate.level === 0)) {
+      const usesSignedSurfaces = (
+        Math.abs(Number(plan.elevationDelta ?? 0)) > 0.001
+        || Math.abs(Number(plan.sourceElevation ?? plan.elevation ?? 0)) > 0.001
+        || Math.abs(Number(plan.destinationElevation ?? plan.elevation ?? 0)) > 0.001
+      );
+      // Signed traversal assembly owns these floors. Stamping a temporary Y=0
+      // tile first can overwrite an authored route in the same X/Z column
+      // even when the two connectors are safely separated vertically.
+      const isSupplemental = Boolean(
+        plan.isDungeonSupplement || plan.isPaddedByDungeonSupplement,
+      );
+      if (usesSignedSurfaces && isSupplemental) {
+        continue;
+      }
       for (const point of plan.fullPath ?? []) {
-        setTile(tiles, point.x, point.z, 'hallway');
+        setTile(tiles, point.x, point.z, 'hallway', isSupplemental ? {
+          connectorId: plan.id,
+          augmentationOwnerId: plan.augmentationOperationId ?? plan.id,
+        } : {});
       }
     }
   }
@@ -3118,21 +4353,32 @@ export class DungeonGenerator {
       return floor;
     };
 
+    const isSupplementalPlan = (plan) => Boolean(
+      plan.isDungeonSupplement || plan.isPaddedByDungeonSupplement,
+    );
     const elevationPlans = connectionPlans.filter((plan) => (
-      plan.level === 0 && Math.abs(Number(plan.elevationDelta ?? 0)) > 0.001
+      plan.level === 0
+      && (
+        Math.abs(Number(plan.elevationDelta ?? 0)) > 0.001
+        || (isSupplementalPlan(plan) && (
+          Math.abs(Number(plan.sourceElevation ?? plan.elevation ?? 0)) > 0.001
+          || Math.abs(Number(plan.destinationElevation ?? plan.elevation ?? 0)) > 0.001
+        ))
+      )
     ));
-    const removedBaseFloors = new Set();
     for (const plan of elevationPlans) {
+      const isSupplemental = isSupplementalPlan(plan);
       const ownedColumns = new Set([
         ...(plan.bridgePath ?? []).map(pointKey),
         ...(plan.galleryFootprintTiles ?? []).map(pointKey),
       ]);
       floorTiles = floorTiles.filter((floor) => {
         if (floor?.roomId || !ownedColumns.has(tileKey(floor.x, floor.z))) return true;
-        if (floor === tiles.get(tileKey(floor.x, floor.z))
+        if (!isSupplemental && (
+          floor === tiles.get(tileKey(floor.x, floor.z))
           || floor.connectorId === plan.id
-          || floor.connectionId === plan.id) {
-          removedBaseFloors.add(floor);
+          || floor.connectionId === plan.id
+        )) {
           return false;
         }
         return true;
@@ -3140,6 +4386,7 @@ export class DungeonGenerator {
       for (const columnKey of ownedColumns) {
         const base = tiles.get(columnKey);
         if (!base || base.roomId) continue;
+        if (isSupplemental) continue;
         base.type = 'connectorEnvelope';
         base.surface = 'connectorStructuralEnvelope';
         base.connectorId = plan.id;
@@ -3156,8 +4403,27 @@ export class DungeonGenerator {
         connectionId: plan.id,
         noEnemySpawn: true,
       });
-      envelope.connectorId = plan.id;
-      envelope.connectionId = plan.id;
+      if (!isSupplementalPlan(plan)) {
+        // Preserve Industrial V1's exact last-authored-plan ownership when the
+        // sidecar is absent. Multi-owner envelopes exist only to prevent a
+        // supplemental elevated route from stealing an authored column.
+        envelope.connectorId = plan.id;
+        envelope.connectionId = plan.id;
+      } else {
+        const ownsColumn = !existing
+          || existing.connectorId === plan.id
+          || existing.connectionId === plan.id
+          || existing.structuralEnvelopeOnly;
+        if (ownsColumn) {
+          envelope.connectorId = plan.id;
+          envelope.connectionId = plan.id;
+        } else {
+          envelope.connectorEnvelopeOwnerIds = [...new Set([
+            ...(envelope.connectorEnvelopeOwnerIds ?? []),
+            plan.id,
+          ])];
+        }
+      }
       envelope.connectorMinY = Math.min(
         Number(envelope.connectorMinY ?? floorY),
         Number(floorY),
@@ -5351,6 +6617,25 @@ export class DungeonGenerator {
   _addConnectorExplorationSpaces(tiles, rooms, connectionPlans = []) {
     const isInsideAnyRoom = (point) => rooms.some((room) => this._isTileInsideRoom(point, room));
     const roomById = new Map(rooms.map((room) => [room.id, room]));
+    const requiresSignedSurfaces = (plan) => (
+      Math.abs(Number(plan.elevationDelta ?? 0)) > 0.001
+      || Math.abs(Number(plan.sourceElevation ?? plan.elevation ?? 0)) > 0.001
+      || Math.abs(Number(plan.destinationElevation ?? plan.elevation ?? 0)) > 0.001
+    );
+    const usesVirtualSignedFootprint = (plan) => (
+      requiresSignedSurfaces(plan)
+      && (plan.isDungeonSupplement || plan.isPaddedByDungeonSupplement)
+    );
+    const createVirtualFootprintTile = (x, z, plan, zone) => ({
+      x,
+      z,
+      type: 'hallway',
+      surface: 'connectorGalleryFloor',
+      connectorId: plan.id,
+      connectorZone: zone,
+      noEnemySpawn: true,
+      virtualSignedConnectorFootprint: true,
+    });
     const centerlineOwners = new Map();
     for (const plan of connectionPlans.filter((candidate) => candidate.level === 0)) {
       for (const point of plan.bridgePath ?? []) {
@@ -5371,6 +6656,9 @@ export class DungeonGenerator {
       const point = { x, z };
       if (isInsideAnyRoom(point)) {
         return null;
+      }
+      if (usesVirtualSignedFootprint(plan)) {
+        return createVirtualFootprintTile(x, z, plan, zone);
       }
       const owners = centerlineOwners.get(tileKey(x, z));
       const existing = tiles.get(tileKey(x, z));
@@ -5411,10 +6699,29 @@ export class DungeonGenerator {
       if (path.length < 2) {
         continue;
       }
-      const galleryCenters = new Set([
-        Math.max(2, Math.floor(path.length * 0.28)),
-        Math.min(path.length - 3, Math.floor(path.length * 0.72)),
-      ]);
+      const exteriorIndexes = path
+        .map((point, index) => ({ point, index }))
+        .filter(({ point }) => !isInsideAnyRoom(point))
+        .map(({ index }) => index);
+      const galleryCenterTargets = [
+        Math.floor((path.length - 1) * 0.28),
+        Math.ceil((path.length - 1) * 0.72),
+      ];
+      const usesSupplementExteriorCenters = Boolean(
+        plan.isDungeonSupplement || plan.isPaddedByDungeonSupplement
+      );
+      const galleryCenters = usesSupplementExteriorCenters
+        ? new Set(galleryCenterTargets
+            .map((target) => exteriorIndexes.reduce((closest, index) => (
+              closest == null || Math.abs(index - target) < Math.abs(closest - target)
+                ? index
+                : closest
+            ), null))
+            .filter(Number.isFinite))
+        : new Set([
+            Math.max(2, Math.floor(path.length * 0.28)),
+            Math.min(path.length - 3, Math.floor(path.length * 0.72)),
+          ]);
       const specialRun = plan.connectorVariant?.traversalKind !== 'walk'
         ? plan.connectorVariant?.pathContract?.selectedStraightRun
         : null;
@@ -5445,7 +6752,6 @@ export class DungeonGenerator {
       plan.connectorRunLaneOffsets = [...specialRunLaneOffsets];
       const footprintByKey = new Map();
       const crossSections = [];
-      const exteriorIndexes = [];
 
       const recordFootprintTile = (tile, index, role) => {
         if (!tile) return;
@@ -5462,7 +6768,6 @@ export class DungeonGenerator {
       for (let index = 0; index < path.length; index += 1) {
         const point = path[index];
         if (isInsideAnyRoom(point)) continue;
-        exteriorIndexes.push(index);
         const directions = getCardinalDirections(path, index);
         if (!directions.length) continue;
         const insideSpecialTransfer = specialRun
@@ -5472,7 +6777,16 @@ export class DungeonGenerator {
           ? CONNECTOR_GALLERY_ALCOVE_SIDE_TILES
           : CONNECTOR_GALLERY_SIDE_TILES;
 
-        const centerTile = tiles.get(tileKey(point.x, point.z));
+        const centerTile = usesVirtualSignedFootprint(plan)
+          ? createVirtualFootprintTile(
+              point.x,
+              point.z,
+              plan,
+              insideSpecialTransfer
+                ? `${plan.connectorVariant.traversalKind}_gallery`
+                : 'main_gallery',
+            )
+          : tiles.get(tileKey(point.x, point.z));
         if (centerTile) {
           centerTile.connectorId = plan.id;
           centerTile.connectorZone = insideSpecialTransfer
@@ -6429,7 +7743,7 @@ export class DungeonGenerator {
     const shrineRoom = roomById.get('shrineRoom');
     const trapRoom = roomById.get('trapRoom');
 
-    for (const room of rooms) {
+    for (const room of rooms.filter((candidate) => !candidate.isDungeonSupplement)) {
       this._markRoomCatwalks(tiles, room);
     }
 
@@ -8184,7 +9498,10 @@ export class DungeonGenerator {
       coolant: 'valve_control_and_keycard_cache',
       bonus: 'rare_salvage_cache',
     };
-    for (const room of rooms.filter((candidate) => !RUIN_OPEN_AIR_ROOM_TYPES.has(candidate.type))) {
+    for (const room of rooms.filter((candidate) => (
+      !candidate.isDungeonSupplement
+      && !RUIN_OPEN_AIR_ROOM_TYPES.has(candidate.type)
+    ))) {
       if (getAllFloorTiles().some((tile) => tile.roomId === room.id && tile.isPlatformingSurface)) {
         continue;
       }
@@ -8554,7 +9871,9 @@ export class DungeonGenerator {
     return null;
   }
 
-  _createReachableFloorTileKeySet(startTile, floorTiles = []) {
+  _createReachableFloorTileKeySet(startTile, floorTiles = [], {
+    canTraverseEdge = null,
+  } = {}) {
     if (!startTile) {
       return new Set();
     }
@@ -8580,7 +9899,12 @@ export class DungeonGenerator {
           if (reachable.has(candidateKey)) {
             continue;
           }
-          if (!this._getTraversalActionBetweenFloorTiles(current, candidate)) {
+          const traversalAction = this._getTraversalActionBetweenFloorTiles(
+            current,
+            candidate,
+          );
+          if (!traversalAction
+            || (canTraverseEdge && !canTraverseEdge(current, candidate, traversalAction))) {
             continue;
           }
 
@@ -8596,6 +9920,9 @@ export class DungeonGenerator {
         }
         const candidateKey = this._getFloorTileGraphKey(candidate);
         if (reachable.has(candidateKey)) {
+          continue;
+        }
+        if (canTraverseEdge && !canTraverseEdge(current, candidate, link.action ?? 'link')) {
           continue;
         }
         reachable.add(candidateKey);
@@ -9067,11 +10394,114 @@ export class DungeonGenerator {
       && position.y <= baseY + height;
   }
 
+  _doesFloorTraversalSegmentIntersectZone(fromTile, toTile, zone, padding = 0) {
+    if (!fromTile || !toTile || !zone?.position) return false;
+    const from = this._floorTileToWorld(fromTile);
+    const to = this._floorTileToWorld(toTile);
+    const toLocal = (point) => {
+      const dx = point.x - Number(zone.position.x ?? 0);
+      const dz = point.z - Number(zone.position.z ?? 0);
+      const rotationY = Number(zone.rotationY ?? 0);
+      if (Math.abs(rotationY) <= 0.0001) return { x: dx, y: point.y, z: dz };
+      const cos = Math.cos(rotationY);
+      const sin = Math.sin(rotationY);
+      return {
+        x: dx * cos + dz * sin,
+        y: point.y,
+        z: -dx * sin + dz * cos,
+      };
+    };
+    const halfWidth = Number(zone.halfWidth ?? 0) + Math.max(0, padding);
+    const halfDepth = Number(zone.halfDepth ?? 0) + Math.max(0, padding);
+    const intersectsSegment = (worldStart, worldEnd) => {
+      const start = toLocal(worldStart);
+      const end = toLocal(worldEnd);
+      const slabs = [
+        { start: start.x, end: end.x, minimum: -halfWidth, maximum: halfWidth },
+        { start: start.z, end: end.z, minimum: -halfDepth, maximum: halfDepth },
+      ];
+      if (Number.isFinite(zone.verticalHalfHeight)) {
+        const zoneCenterY = Number(zone.position.y ?? 0);
+        const verticalHalfHeight = Number(zone.verticalHalfHeight);
+        slabs.push({
+          start: Number(start.y ?? 0),
+          end: Number(end.y ?? 0),
+          // Floor elevations represent the player's feet. A solid intersects
+          // the standing envelope when its top is above the feet and its base
+          // is below the head. The small margin permits exact floor/fascia and
+          // ceiling contacts without treating them as walls.
+          minimum: zoneCenterY
+            - verticalHalfHeight
+            - PLAYER_TRAVERSAL_ENVELOPE.headClearance
+            + CONNECTOR_APERTURE_VERTICAL_MARGIN,
+          maximum: zoneCenterY
+            + verticalHalfHeight
+            - CONNECTOR_APERTURE_VERTICAL_MARGIN,
+        });
+      }
+      let minimumT = 0;
+      let maximumT = 1;
+      for (const slab of slabs) {
+        const origin = slab.start;
+        const delta = slab.end - origin;
+        if (Math.abs(delta) <= 1e-8) {
+          if (origin < slab.minimum || origin > slab.maximum) return false;
+          continue;
+        }
+        const firstT = (slab.minimum - origin) / delta;
+        const secondT = (slab.maximum - origin) / delta;
+        const entryT = Math.min(firstT, secondT);
+        const exitT = Math.max(firstT, secondT);
+        minimumT = Math.max(minimumT, entryT);
+        maximumT = Math.min(maximumT, exitT);
+        if (minimumT > maximumT) return false;
+      }
+      return maximumT >= 0 && minimumT <= 1;
+    };
+
+    const tileDeltaX = Math.sign(Number(toTile.x) - Number(fromTile.x));
+    const tileDeltaZ = Math.sign(Number(toTile.z) - Number(fromTile.z));
+    const adjacent = Math.abs(Number(toTile.x) - Number(fromTile.x))
+      + Math.abs(Number(toTile.z) - Number(fromTile.z)) === 1;
+    if (adjacent && (fromTile.surface === 'industrialRamp' || toTile.surface === 'industrialRamp')) {
+      // Ramp tile elevations are measured at tile centers. Test the two halves
+      // against their authored shared-edge elevation so a fascia beneath a
+      // descending ramp cannot masquerade as a full-height blocking wall.
+      const seam = new THREE.Vector3(
+        (from.x + to.x) * 0.5,
+        (
+          Number(this._getFloorTileConnectionElevation(fromTile, tileDeltaX, tileDeltaZ))
+          + Number(this._getFloorTileConnectionElevation(toTile, -tileDeltaX, -tileDeltaZ))
+        ) * 0.5,
+        (from.z + to.z) * 0.5,
+      );
+      const zoneTopY = Number(zone.position.y ?? 0)
+        + Number(zone.verticalHalfHeight ?? 0);
+      const zoneHeight = Number(zone.verticalHalfHeight ?? 0) * 2;
+      if (
+        zone.obstacleKind === 'boundaryWall'
+        && Number.isFinite(zone.verticalHalfHeight)
+        && (
+          zoneTopY <= seam.y + CONNECTOR_APERTURE_VERTICAL_MARGIN
+          || zoneHeight <= (
+            PLAYER_TRAVERSAL_ENVELOPE.maximumRampRisePerTile
+            + CONNECTOR_APERTURE_VERTICAL_MARGIN
+          )
+        )
+      ) {
+        return false;
+      }
+      return intersectsSegment(from, seam) || intersectsSegment(seam, to);
+    }
+    return intersectsSegment(from, to);
+  }
+
   _validateCriticalDoorChokepoints({
     floorTiles = [],
     rooms = [],
     solidZones = [],
     doors = [],
+    useSegmentBarriers = false,
   } = {}) {
     const errors = [];
     const checks = [];
@@ -9084,8 +10514,11 @@ export class DungeonGenerator {
       if (!door.thresholdAnchored) {
         errors.push(`${door.id} is not anchored to its destination-room threshold.`);
       }
-      if ((door.thresholdWallZones?.length ?? 0) !== 2) {
-        errors.push(`${door.id} does not have two continuous threshold wall wings.`);
+      const thresholdSides = new Set(
+        (door.thresholdWallZones ?? []).map((zone) => zone.thresholdSide),
+      );
+      if (!thresholdSides.has('left') || !thresholdSides.has('right')) {
+        errors.push(`${door.id} does not retain threshold wall coverage on both sides.`);
       }
       const traversableTiles = floorTiles.filter((tile) => (
         !this._isFloorTileBlockedBySolidZone(tile, solidZones)
@@ -9093,7 +10526,45 @@ export class DungeonGenerator {
         && !this._isFloorTileBlockedByDoor(tile, door)
       ));
       const startTile = this._findRoomWalkabilityStartTile(startRoom, traversableTiles);
-      const reachable = this._createReachableFloorTileKeySet(startTile, traversableTiles);
+      const doorBarrierZones = useSegmentBarriers
+        ? [
+            ...(door.thresholdWallZones ?? []),
+            {
+              position: door.graphBlockingPosition ?? door.position,
+              halfWidth: door.collisionHalfWidth
+                ?? (door.alongX ? 0.16 : this.tileSize * 0.48),
+              halfDepth: door.collisionHalfDepth
+                ?? (door.alongX ? this.tileSize * 0.48 : 0.16),
+              verticalHalfHeight: (door.collisionHeight ?? RUIN_DOOR_HEIGHT) * 0.5,
+              baseY: door.baseY ?? door.position.y ?? 0,
+            },
+          ].map((zone) => (
+            Object.hasOwn(zone, 'baseY')
+              ? {
+                  ...zone,
+                  position: new THREE.Vector3(
+                    Number(zone.position.x ?? 0),
+                    Number(zone.baseY) + Number(zone.verticalHalfHeight ?? 0),
+                    Number(zone.position.z ?? 0),
+                  ),
+                }
+              : zone
+          ))
+        : [];
+      const reachable = this._createReachableFloorTileKeySet(
+        startTile,
+        traversableTiles,
+        useSegmentBarriers ? {
+          canTraverseEdge: (fromTile, toTile) => !doorBarrierZones.some((zone) => (
+            this._doesFloorTraversalSegmentIntersectZone(
+              fromTile,
+              toTile,
+              zone,
+              PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+            )
+          )),
+        } : {},
+      );
       const fromRoom = roomById.get(door.fromRoomId);
       const toRoom = roomById.get(door.toRoomId);
       const fromTile = this._findRoomWalkabilityStartTile(fromRoom, traversableTiles);
@@ -9751,14 +11222,28 @@ export class DungeonGenerator {
     return surfaces;
   }
 
+  _createDungeonAugmentationValidationSolidZones(
+    baseSolidZones = [],
+    dungeonSupplementFragment = null,
+    augmentationApplied = false,
+  ) {
+    if (!augmentationApplied || !dungeonSupplementFragment) return baseSolidZones;
+    return [
+      ...baseSolidZones,
+      ...(dungeonSupplementFragment.solidZones ?? []),
+    ];
+  }
+
   _validatePlatformability({
     floorTiles = [],
     rooms = [],
     solidZones = [],
+    segmentBarrierZones = null,
     connectionPlans = [],
     doors = [],
     landmarks = {},
     encounters = [],
+    useSegmentBarriers = false,
   } = {}) {
     const errors = [];
     const rampScaffoldHeadroomConflicts = this._findRampScaffoldHeadroomConflicts(floorTiles);
@@ -9783,6 +11268,20 @@ export class DungeonGenerator {
     const startTile = this._findRoomWalkabilityStartTile(startRoom, navigableTiles);
     const reachable = new Set();
     const queue = [];
+    const traversalSegmentBarrierZones = useSegmentBarriers
+      ? (segmentBarrierZones ?? solidZones).filter((zone) => zone?.position)
+      : [];
+    const canTraverseEdge = (fromTile, toTile, traversalAction = null) => (
+      ['ladder', 'automatic_lift'].includes(traversalAction)
+      || !traversalSegmentBarrierZones.some((zone) => (
+        this._doesFloorTraversalSegmentIntersectZone(
+          fromTile,
+          toTile,
+          zone,
+          PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+        )
+      ))
+    );
 
     if (!startTile) {
       errors.push('Platformability solver has no valid dungeon start tile.');
@@ -9800,7 +11299,7 @@ export class DungeonGenerator {
             continue;
           }
           const action = this._getTraversalActionBetweenFloorTiles(current, candidate);
-          if (!action) {
+          if (!action || !canTraverseEdge(current, candidate, action)) {
             continue;
           }
           const actions = incomingActions.get(candidateKey) ?? new Set();
@@ -9815,7 +11314,7 @@ export class DungeonGenerator {
       for (const link of current.traversalLinks ?? []) {
         const candidateKey = link.toFloorKey;
         const candidate = navigableByKey.get(candidateKey);
-        if (!candidate) {
+        if (!candidate || !canTraverseEdge(current, candidate, link.action ?? 'link')) {
           continue;
         }
         const actions = incomingActions.get(candidateKey) ?? new Set();
@@ -9852,6 +11351,7 @@ export class DungeonGenerator {
         (columns.get(tileKey(tile.x + dx, tile.z + dz)) ?? []).some((candidate) => (
           reachable.has(this._getFloorTileGraphKey(candidate))
           && Math.abs((candidate.elevation ?? 0) - (point.y ?? 0)) <= PLAYER_TRAVERSAL_ENVELOPE.maximumNormalJumpRise
+          && canTraverseEdge(candidate, tile)
         ))
       ));
       if (!directlyReachable && !hasReachableApproach) {
@@ -9880,19 +11380,22 @@ export class DungeonGenerator {
       if (!reachableRoomTiles.length) {
         errors.push(`${room.id} has no platformably reachable floor.`);
       }
-      if (reachableElevations.size < 2 || !elevatedTiles.length) {
-        errors.push(`${room.id} does not provide a reachable vertical traversal tier.`);
-      }
-      if (!platformTiles.length) {
-        errors.push(`${room.id} has no purposeful platforming node.`);
-      }
-      if (disconnectedTraversalTiles.length) {
-        errors.push(
-          `${room.id} has ${disconnectedTraversalTiles.length} disconnected elevated traversal tile(s), including ${this._getFloorTileGraphKey(disconnectedTraversalTiles[0])}.`,
-        );
+      const requiresIndustrialPlatforming = !room.isDungeonSupplement;
+      if (requiresIndustrialPlatforming) {
+        if (reachableElevations.size < 2 || !elevatedTiles.length) {
+          errors.push(`${room.id} does not provide a reachable vertical traversal tier.`);
+        }
+        if (!platformTiles.length) {
+          errors.push(`${room.id} has no purposeful platforming node.`);
+        }
+        if (disconnectedTraversalTiles.length) {
+          errors.push(
+            `${room.id} has ${disconnectedTraversalTiles.length} disconnected elevated traversal tile(s), including ${this._getFloorTileGraphKey(disconnectedTraversalTiles[0])}.`,
+          );
+        }
       }
       let hasRequiredPlatformAction = false;
-      for (const platform of platformTiles) {
+      for (const platform of requiresIndustrialPlatforming ? platformTiles : []) {
         const actions = incomingActions.get(platform.floorKey) ?? new Set();
         if (!reachable.has(platform.floorKey)) {
           errors.push(`${room.id} platform ${platform.floorKey} is unreachable.`);
@@ -9903,7 +11406,7 @@ export class DungeonGenerator {
           errors.push(`${room.id} platform ${platform.floorKey} has no gameplay or story purpose.`);
         }
       }
-      if (platformTiles.length && !hasRequiredPlatformAction) {
+      if (requiresIndustrialPlatforming && platformTiles.length && !hasRequiredPlatformAction) {
         errors.push(`${room.id} platform segment does not require a real jump or ledge action.`);
       }
       if (room.type === 'keycard') {
@@ -9964,7 +11467,11 @@ export class DungeonGenerator {
           Math.abs(candidate.x - room.x) + Math.abs(candidate.z - room.z)
         )))
       )) ?? lowerTiles[0] ?? null;
-      const egressReachable = this._createReachableFloorTileKeySet(lowerStart, navigableTiles);
+      const egressReachable = this._createReachableFloorTileKeySet(
+        lowerStart,
+        navigableTiles,
+        useSegmentBarriers ? { canTraverseEdge } : {},
+      );
       const entryDropExists = hasAction(entryLipTiles, entryTiles, 'drop');
       const returnClimbExists = hasAction(lowerTiles, shelfTiles, 'ledge_climb');
       const exitJumpExists = hasAction(shelfTiles, exitTiles, 'jump');
@@ -10016,6 +11523,7 @@ export class DungeonGenerator {
               reverseReachable.has(candidateKey)
               || !navigableByKey.has(candidateKey)
               || !this._getTraversalActionBetweenFloorTiles(candidate, current)
+              || !canTraverseEdge(candidate, current)
             ) {
               continue;
             }
@@ -10093,7 +11601,11 @@ export class DungeonGenerator {
           ? navigableTiles.filter((tile) => this._isTileInsideRoom(tile, ownerRoom))
           : [];
         const localStart = this._findRoomWalkabilityStartTile(ownerRoom, localTiles);
-        const locallyReachable = this._createReachableFloorTileKeySet(localStart, localTiles);
+        const locallyReachable = this._createReachableFloorTileKeySet(
+          localStart,
+          localTiles,
+          useSegmentBarriers ? { canTraverseEdge } : {},
+        );
         // Parallel V1 upper-catwalk links are retained byte-for-byte as room
         // architecture and stay level. Some of those legacy catwalks are
         // reached through authored platform jumps that the tile-neighbor
@@ -10115,21 +11627,40 @@ export class DungeonGenerator {
       if (plan.requiredForProgression || plan.level > 0) {
         const traversalFloorKeys = plan.traversalFloorKeys?.length
           ? plan.traversalFloorKeys
-          : plan.bridgePath.map((point) => floorTileKey(point.x, point.z, plan.level));
-        for (const key of traversalFloorKeys) {
-          if (!reachable.has(key)) {
-            const connectorTile = floorTiles.find((tile) => this._getFloorTileGraphKey(tile) === key);
-            errors.push(
-              `${plan.id} ${plan.requiredForProgression ? 'required ' : ''}connector tile ${key} `
-              + `is disconnected under the base traversal envelope (variant=${plan.connectorVariantId ?? 'standard'}, `
-              + `surface=${connectorTile?.surface ?? 'missing'}, zone=${connectorTile?.connectorZone ?? 'missing'}).`,
-            );
-            break;
-          }
+          : (plan.bridgePath ?? []).flatMap((point) => (
+              columns.get(tileKey(point.x, point.z)) ?? []
+            )).map((tile) => this._getFloorTileGraphKey(tile));
+        const connectorFloorKeys = new Set([
+          ...traversalFloorKeys,
+          plan.fromSocket?.floorKey,
+          plan.toSocket?.floorKey,
+        ].filter(Boolean));
+        const connectorFloors = [...connectorFloorKeys]
+          .map((key) => navigableByKey.get(key))
+          .filter(Boolean);
+        const connectorStart = navigableByKey.get(plan.fromSocket?.floorKey);
+        const connectorReachable = this._createReachableFloorTileKeySet(
+          connectorStart,
+          connectorFloors,
+          useSegmentBarriers ? { canTraverseEdge } : {},
+        );
+        if (!connectorReachable.has(plan.toSocket?.floorKey)) {
+          errors.push(
+            `${plan.id} ${plan.requiredForProgression ? 'required ' : ''}connector has no traversable spine between its sockets under the base movement envelope (variant=${plan.connectorVariantId ?? 'standard'}).`,
+          );
         }
       }
       const authoredExteriorSectionCount = plan.galleryCrossSections?.length ?? 0;
-      const requiredExplorationBeatCount = Math.min(2, authoredExteriorSectionCount);
+      // Supplemental routes inherit their dressing from the parent theme
+      // session. Require one visible inherited beat while retaining V1's
+      // denser two-beat service-gallery rule for wholly authored connectors.
+      const inheritsSupplementPresentation = Boolean(
+        plan.isDungeonSupplement || plan.isPaddedByDungeonSupplement
+      );
+      const requiredExplorationBeatCount = Math.min(
+        inheritsSupplementPresentation ? 1 : 2,
+        authoredExteriorSectionCount,
+      );
       if (
         plan.level === 0
         && requiredExplorationBeatCount > 0
@@ -10184,6 +11715,7 @@ export class DungeonGenerator {
           count + (room.rampClearanceConvertedToSolidTileCount ?? 0)
         ), 0),
         movementEnvelope: PLAYER_TRAVERSAL_ENVELOPE,
+        segmentBarriersValidated: useSegmentBarriers,
       },
     };
   }
@@ -13412,6 +14944,10 @@ export class DungeonGenerator {
       ALIEN_SERVER_ROOM_MODEL,
       (gltf) => {
         const model = gltf.scene;
+        if (this._isDisposedGenerationCandidateObject(roomGroup)) {
+          this._disposeDetachedObjectResources(model);
+          return;
+        }
         model.name = 'alienServerRoomImportedGLB';
         model.userData.roomId = room.id;
         this._stripImportedRoomShell(model);
@@ -13467,6 +15003,10 @@ export class DungeonGenerator {
       MACHINE_FACTORY_ROOM_MODEL,
       (gltf) => {
         const model = gltf.scene;
+        if (this._isDisposedGenerationCandidateObject(roomGroup)) {
+          this._disposeDetachedObjectResources(model);
+          return;
+        }
         model.name = 'machineFactoryRoomImportedGLB';
         model.userData.roomId = room.id;
         this._stripImportedRoomShell(model);
@@ -13522,6 +15062,10 @@ export class DungeonGenerator {
       COOLANT_RELAY_ROOM_MODEL,
       (gltf) => {
         const model = gltf.scene;
+        if (this._isDisposedGenerationCandidateObject(roomGroup)) {
+          this._disposeDetachedObjectResources(model);
+          return;
+        }
         model.name = 'coolantRelayRoomImportedGLB';
         model.userData.roomId = room.id;
         this._stripImportedRoomShell(model);
@@ -13758,14 +15302,288 @@ export class DungeonGenerator {
       ceiling.userData.floorElevation = floorElevation;
       ceiling.userData.roomId = room?.id ?? null;
       ceiling.userData.connectorId = tile.connectorId ?? null;
+      if (tile.augmentationOwnerId) {
+        ceiling.userData.augmentationOwnerId = tile.augmentationOwnerId;
+      }
       ceiling.castShadow = true;
       ceiling.receiveShadow = true;
       group.add(ceiling);
     }
   }
 
-  _addWalls(group, tiles, materials, openAirTileKeys = new Set(), rooms = []) {
-    const runs = this._collectBoundaryWallRuns(tiles, openAirTileKeys, rooms);
+  _validateConnectorEntranceWalkability({
+    floorTiles = [],
+    rooms = [],
+    solidZones = [],
+    segmentBarrierZones = null,
+    connectionPlans = [],
+    wallRuns = [],
+    useSegmentBarriers = false,
+  } = {}) {
+    const errors = [];
+    const checks = [];
+    const blockingPlatformTops = this._createBlockingPlatformColumnMap(floorTiles);
+    const navigableTiles = floorTiles.filter((tile) => (
+      !this._isFloorTileBlockedBySolidZone(tile, solidZones)
+      && !this._isFloorTileBlockedByGeneratedPlatform(tile, blockingPlatformTops)
+    ));
+    const columns = this._createFloorTileLookup(navigableTiles);
+    const startRoom = rooms.find((room) => room.id === 'hubTown') ?? rooms[0];
+    const startTile = this._findRoomWalkabilityStartTile(startRoom, navigableTiles);
+    const traversalSegmentBarrierZones = useSegmentBarriers
+      ? (segmentBarrierZones ?? solidZones).filter((zone) => zone?.position)
+      : [];
+    const canTraverseConnectorEdge = (fromTile, toTile, traversalAction = null) => (
+      ['ladder', 'automatic_lift'].includes(traversalAction)
+      || !traversalSegmentBarrierZones.some((zone) => (
+        this._doesFloorTraversalSegmentIntersectZone(
+          fromTile,
+          toTile,
+          zone,
+          PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+        )
+      ))
+    );
+    const reachable = this._createReachableFloorTileKeySet(
+      startTile,
+      navigableTiles,
+      { canTraverseEdge: canTraverseConnectorEdge },
+    );
+    const findFloor = (x, z, elevation) => (columns.get(tileKey(x, z)) ?? [])
+      .sort((first, second) => (
+        Math.abs(Number(first.elevation ?? 0) - elevation)
+        - Math.abs(Number(second.elevation ?? 0) - elevation)
+      ))
+      .find((tile) => Math.abs(Number(tile.elevation ?? 0) - elevation) <= 0.56)
+      ?? null;
+    const resolveFacing = (plan, socket, role) => {
+      let x = Math.sign(Number(socket?.facingX ?? 0));
+      let z = Math.sign(Number(socket?.facingZ ?? 0));
+      if (Math.abs(x) + Math.abs(z) === 1) return { x, z };
+      const path = plan.bridgePath ?? plan.fullPath ?? [];
+      const index = path.findIndex((point) => point.x === socket?.x && point.z === socket?.z);
+      const outside = role === 'from'
+        ? path[Math.min(path.length - 1, Math.max(0, index) + 1)]
+        : path[Math.max(0, (index < 0 ? path.length - 1 : index) - 1)];
+      x = Math.sign(Number(outside?.x) - Number(socket?.x));
+      z = Math.sign(Number(outside?.z) - Number(socket?.z));
+      return Math.abs(x) + Math.abs(z) === 1 ? { x, z } : null;
+    };
+    const wallBlocks = (socket, facing, elevation, clearanceHeight) => {
+      const horizontal = facing.z !== 0;
+      const line = horizontal
+        ? Number(socket.z) + facing.z * 0.5
+        : Number(socket.x) + facing.x * 0.5;
+      const minimumY = elevation;
+      const maximumY = elevation + clearanceHeight;
+      return wallRuns.find((run) => {
+        if (run.horizontal !== horizontal || Math.abs(run.line - line) > 0.001) return false;
+        if (run.wallTopY <= minimumY + 0.001 || run.wallBottomY >= maximumY - 0.001) return false;
+        for (const lane of this._getConnectorEntranceLanes(socket, facing)) {
+          const axis = horizontal ? lane.x : lane.z;
+          if (run.start <= axis && run.end >= axis) return true;
+        }
+        return false;
+      }) ?? null;
+    };
+
+    const seenSocketIds = new Set();
+    for (const plan of connectionPlans) {
+      for (const [role, socket] of [['from', plan.fromSocket], ['to', plan.toSocket]]) {
+        if (!socket || seenSocketIds.has(socket.id)) continue;
+        seenSocketIds.add(socket.id);
+        const facing = resolveFacing(plan, socket, role);
+        const elevation = Number(socket.elevation ?? plan.elevation ?? 0);
+        const clearanceHeight = Math.max(
+          PLAYER_TRAVERSAL_ENVELOPE.headClearance,
+          Number(socket.clearanceHeight ?? 0),
+        );
+        if (!facing) {
+          errors.push(`${socket.id} has no cardinal connector entrance facing.`);
+          checks.push({ socketId: socket.id, connectionId: plan.id, accepted: false });
+          continue;
+        }
+        const socketFloor = findFloor(Number(socket.x), Number(socket.z), elevation);
+        const outsideFloor = findFloor(
+          Number(socket.x) + facing.x,
+          Number(socket.z) + facing.z,
+          elevation,
+        );
+        const socketReachable = Boolean(
+          socketFloor && reachable.has(this._getFloorTileGraphKey(socketFloor)),
+        );
+        const outsideReachable = Boolean(
+          outsideFloor && reachable.has(this._getFloorTileGraphKey(outsideFloor)),
+        );
+        const traversableOutward = Boolean(
+          socketFloor
+          && outsideFloor
+          && this._getTraversalActionBetweenFloorTiles(socketFloor, outsideFloor)
+          && canTraverseConnectorEdge(socketFloor, outsideFloor),
+        );
+        const traversableReturn = Boolean(
+          socketFloor
+          && outsideFloor
+          && this._getTraversalActionBetweenFloorTiles(outsideFloor, socketFloor)
+          && canTraverseConnectorEdge(outsideFloor, socketFloor),
+        );
+        const blockingWall = wallBlocks(socket, facing, elevation, clearanceHeight);
+        if (!socketFloor) errors.push(`${socket.id} has no walkable floor at its room threshold.`);
+        if (!outsideFloor) errors.push(`${socket.id} has no walkable connector approach outside its room.`);
+        if (socketFloor && !socketReachable) errors.push(`${socket.id} room threshold is unreachable from the dungeon start.`);
+        if (outsideFloor && !outsideReachable) errors.push(`${socket.id} connector approach is unreachable from the dungeon start.`);
+        if (socketFloor && outsideFloor && (!traversableOutward || !traversableReturn)) {
+          errors.push(`${socket.id} cannot be traversed in both directions across its entrance.`);
+        }
+        if (blockingWall) {
+          errors.push(`${socket.id} is blocked by boundary wall ${blockingWall.facadeId}.`);
+        }
+        checks.push({
+          socketId: socket.id,
+          connectionId: plan.id,
+          roomId: socket.roomId ?? null,
+          elevation,
+          facing,
+          socketFloorKey: socketFloor ? this._getFloorTileGraphKey(socketFloor) : null,
+          outsideFloorKey: outsideFloor ? this._getFloorTileGraphKey(outsideFloor) : null,
+          socketReachable,
+          outsideReachable,
+          traversableOutward,
+          traversableReturn,
+          blockingWallFacadeId: blockingWall?.facadeId ?? null,
+          accepted: Boolean(
+            socketFloor
+            && outsideFloor
+            && socketReachable
+            && outsideReachable
+            && traversableOutward
+            && traversableReturn
+            && !blockingWall
+          ),
+        });
+      }
+    }
+
+    return {
+      accepted: errors.length === 0,
+      errors,
+      warnings: errors.length ? [] : [
+        `Validated ${checks.length} connector entrances against floors, reachability, and boundary walls.`,
+      ],
+      details: {
+        checkedSocketCount: checks.length,
+        acceptedSocketCount: checks.filter((check) => check.accepted).length,
+        reachableNodeCount: reachable.size,
+        checks,
+      },
+    };
+  }
+
+  _getConnectorEntranceLanes(socket = {}, facing = {}) {
+    const laneCount = Math.max(
+      CONNECTOR_GALLERY_MIN_WIDTH_TILES,
+      Math.round(Number(socket.landingWidth ?? 0) / this.tileSize) || 1,
+    );
+    let lateralX = -Math.sign(Number(facing.z ?? 0));
+    let lateralZ = Math.sign(Number(facing.x ?? 0));
+    // Give even lane counts one deterministic world-space bias. Canonicalizing
+    // the lateral vector keeps opposite-facing sockets on the same lane set.
+    if (lateralX < 0 || (lateralX === 0 && lateralZ < 0)) {
+      lateralX *= -1;
+      lateralZ *= -1;
+    }
+    const firstOffset = -Math.floor(laneCount / 2);
+    return Array.from({ length: laneCount }, (_, index) => {
+      const offset = firstOffset + index;
+      return {
+        x: Number(socket.x) + lateralX * offset,
+        z: Number(socket.z) + lateralZ * offset,
+        offset,
+      };
+    });
+  }
+
+  _createConnectorWallOpeningMap(connectionPlans = []) {
+    const openings = new Map();
+    const addOpening = (key, opening) => {
+      const entries = openings.get(key) ?? [];
+      entries.push(opening);
+      openings.set(key, entries);
+    };
+    const resolveFacing = (plan, socket, role) => {
+      let facingX = Math.sign(Number(socket?.facingX ?? 0));
+      let facingZ = Math.sign(Number(socket?.facingZ ?? 0));
+      if (Math.abs(facingX) + Math.abs(facingZ) === 1) return { x: facingX, z: facingZ };
+      const path = plan.bridgePath ?? plan.fullPath ?? [];
+      const socketIndex = path.findIndex((point) => (
+        point.x === socket?.x && point.z === socket?.z
+      ));
+      const outside = role === 'from'
+        ? path[Math.min(path.length - 1, Math.max(0, socketIndex) + 1)]
+        : path[Math.max(0, (socketIndex < 0 ? path.length - 1 : socketIndex) - 1)];
+      facingX = Math.sign(Number(outside?.x) - Number(socket?.x));
+      facingZ = Math.sign(Number(outside?.z) - Number(socket?.z));
+      return Math.abs(facingX) + Math.abs(facingZ) === 1
+        ? { x: facingX, z: facingZ }
+        : null;
+    };
+
+    for (const plan of connectionPlans) {
+      for (const [role, socket] of [['from', plan.fromSocket], ['to', plan.toSocket]]) {
+        if (!socket || !Number.isFinite(Number(socket.x)) || !Number.isFinite(Number(socket.z))) {
+          continue;
+        }
+        const facing = resolveFacing(plan, socket, role);
+        if (!facing) continue;
+        const horizontal = facing.z !== 0;
+        const line = horizontal
+          ? Number(socket.z) + facing.z * 0.5
+          : Number(socket.x) + facing.x * 0.5;
+        const floorY = Number(socket.elevation ?? plan.elevation ?? 0);
+        // Wall subtraction must include the same vertical movement envelope
+        // used by connector traversal. Otherwise a retained sill ending
+        // exactly at an elevated socket's floor can still collide with a
+        // grounded step across the mouth.
+        const bottomY = floorY
+          - PLAYER_TRAVERSAL_ENVELOPE.groundedStepDownHeight
+          - CONNECTOR_APERTURE_VERTICAL_MARGIN;
+        const topY = floorY + Math.max(
+          PLAYER_TRAVERSAL_ENVELOPE.headClearance,
+          Number(socket.clearanceHeight ?? 0),
+        ) + CONNECTOR_APERTURE_VERTICAL_MARGIN;
+        for (const lane of this._getConnectorEntranceLanes(socket, facing)) {
+          const axis = horizontal ? lane.x : lane.z;
+          const key = `${horizontal ? 'h' : 'v'}:${line.toFixed(3)}:${axis}`;
+          addOpening(key, {
+            connectionId: plan.id,
+            logicalConnectionId: plan.logicalConnectionId ?? plan.id,
+            socketId: socket.id,
+            horizontal,
+            line,
+            axis,
+            bottomY,
+            topY,
+          });
+        }
+      }
+    }
+    return openings;
+  }
+
+  _addWalls(
+    group,
+    tiles,
+    materials,
+    openAirTileKeys = new Set(),
+    rooms = [],
+    connectorWallOpenings = new Map(),
+  ) {
+    const runs = this._collectBoundaryWallRuns(
+      tiles,
+      openAirTileKeys,
+      rooms,
+      connectorWallOpenings,
+    );
 
     for (const run of runs) {
       this._addBoundaryWallRun(group, run, materials);
@@ -13795,7 +15613,12 @@ export class DungeonGenerator {
     });
   }
 
-  _collectBoundaryWallRuns(tiles, openAirTileKeys, rooms = []) {
+  _collectBoundaryWallRuns(
+    tiles,
+    openAirTileKeys,
+    rooms = [],
+    connectorWallOpenings = new Map(),
+  ) {
     const buckets = new Map();
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const getVerticalEnvelope = (tile) => {
@@ -13826,7 +15649,11 @@ export class DungeonGenerator {
         const horizontal = dz !== 0;
         const line = horizontal ? tile.z + dz * 0.5 : tile.x + dx * 0.5;
         const axis = horizontal ? tile.x : tile.z;
-        const ownerId = tile.roomId ?? tile.connectorId ?? tile.type ?? 'spatial';
+        const ownerId = tile.roomId
+          ?? tile.augmentationOwnerId
+          ?? tile.connectorId
+          ?? tile.type
+          ?? 'spatial';
         const { wallBottomY, wallTopY } = getVerticalEnvelope(tile);
         const neighborKey = tileKey(tile.x + dx, tile.z + dz);
         const neighbor = openAirTileKeys.has(neighborKey) ? null : tiles.get(neighborKey);
@@ -13854,7 +15681,26 @@ export class DungeonGenerator {
           }
         }
 
-        for (const [exposedBottomY, exposedTopY] of exposedIntervals) {
+        const edgeKey = `${horizontal ? 'h' : 'v'}:${line.toFixed(3)}:${axis}`;
+        let carvedIntervals = exposedIntervals;
+        for (const opening of connectorWallOpenings.get?.(edgeKey) ?? []) {
+          carvedIntervals = carvedIntervals.flatMap(([intervalBottomY, intervalTopY]) => {
+            if (opening.topY <= intervalBottomY + 0.001
+              || opening.bottomY >= intervalTopY - 0.001) {
+              return [[intervalBottomY, intervalTopY]];
+            }
+            const remaining = [];
+            if (opening.bottomY > intervalBottomY + 0.001) {
+              remaining.push([intervalBottomY, Math.min(opening.bottomY, intervalTopY)]);
+            }
+            if (opening.topY < intervalTopY - 0.001) {
+              remaining.push([Math.max(opening.topY, intervalBottomY), intervalTopY]);
+            }
+            return remaining;
+          });
+        }
+
+        for (const [exposedBottomY, exposedTopY] of carvedIntervals) {
           if (exposedTopY - exposedBottomY <= 0.001) continue;
           // Ownership changes do not create a physical corner. Build each
           // exposed facade interval from the continuous silhouette, then
@@ -14093,7 +15939,12 @@ export class DungeonGenerator {
           Math.min(run.end, Math.round(worldAlong / this.tileSize)),
         );
         const ownerId = run.ownerByAxis?.[ownerAxis] ?? run.ownerId ?? 'spatial';
-        const material = this._pickWallMacroTileMaterial(materials, tileName);
+        const material = this._pickWallMacroTileMaterial(
+          materials,
+          tileName,
+          ownerId,
+          `${run.facadeId}:${normalX}:${normalZ}:${row}:${column}`,
+        );
         const macroBatchKey = [
           chunkX,
           chunkZ,
@@ -14243,11 +16094,15 @@ export class DungeonGenerator {
     }
   }
 
-  _pickWallMacroTileMaterial(materials, tileName) {
+  _pickWallMacroTileMaterial(materials, tileName, ownerId = null, sampleKey = '') {
     const tiles = materials.wallMacroTiles;
 
-    if (tileName === 'mm' && tiles?.mmAlt && this.random() < 0.72) {
-      return tiles.mmAlt;
+    if (tileName === 'mm' && tiles?.mmAlt) {
+      const supplementalOwner = String(ownerId ?? '').startsWith('supplement:');
+      const useAlternate = supplementalOwner
+        ? (stableRenderHash(`${ownerId}:${sampleKey}:mm-alt`) % 1000) < 720
+        : this.random() < 0.72;
+      if (useAlternate) return tiles.mmAlt;
     }
 
     return tiles?.[tileName] ?? tiles?.mm ?? materials.wall;
@@ -14823,6 +16678,10 @@ export class DungeonGenerator {
     materials,
     solidZones = [],
     aerialBoundaryZones = [],
+    preserveAdjacentConnectorEntrances = false,
+    connectorWallOpenings = new Map(),
+    doorConnectionPlanId = null,
+    doorLogicalConnectionId = null,
   }) {
     if (!descriptor?.to || !placement?.point) {
       return null;
@@ -14832,14 +16691,16 @@ export class DungeonGenerator {
     const alongX = placement.alongX;
     const halfW = Math.floor(room.width / 2);
     const halfD = Math.floor(room.depth / 2);
-    const transverseMin = alongX
+    const roomTransverseMin = alongX
       ? (room.z - halfD - 0.5) * this.tileSize
       : (room.x - halfW - 0.5) * this.tileSize;
-    const transverseMax = alongX
+    const roomTransverseMax = alongX
       ? (room.z + halfD + 0.5) * this.tileSize
       : (room.x + halfW + 0.5) * this.tileSize;
     const transverseCenter = alongX ? position.z : position.x;
     const portalSpan = this.tileSize * CONNECTOR_GALLERY_PORTAL_WIDTH_TILES;
+    const transverseMin = roomTransverseMin;
+    const transverseMax = roomTransverseMax;
     const openingMin = Math.max(transverseMin, transverseCenter - portalSpan * 0.5);
     const openingMax = Math.min(transverseMax, transverseCenter + portalSpan * 0.5);
     // The normal dungeon shell already occupies the exact exterior boundary.
@@ -14857,22 +16718,134 @@ export class DungeonGenerator {
     seal.userData.doorId = descriptor.id;
     seal.userData.doorThresholdSeal = true;
     const wallZones = [];
-    const segmentDefinitions = [
-      { side: 'left', min: transverseMin, max: openingMin },
-      { side: 'right', min: openingMax, max: transverseMax },
-    ];
+    const wallBottomY = position.y;
+    const wallTopY = position.y + RUIN_WALL_HEIGHT;
+    const reservedOpenings = [{
+      id: `${descriptor.id}:door-opening`,
+      min: openingMin,
+      max: openingMax,
+      bottomY: wallBottomY,
+      topY: wallTopY,
+    }];
+    if (preserveAdjacentConnectorEntrances) {
+      const sealLine = (alongX ? position.x : position.z) / this.tileSize;
+      const expectsHorizontalWall = !alongX;
+      const seenApertures = new Set();
+      for (const entries of connectorWallOpenings.values()) {
+        for (const opening of entries) {
+          if (
+            opening.connectionId === doorConnectionPlanId
+            || (
+              doorLogicalConnectionId
+              && opening.logicalConnectionId === doorLogicalConnectionId
+            )
+            || opening.horizontal !== expectsHorizontalWall
+            || Math.abs(Number(opening.line) - sealLine) > 0.001
+          ) {
+            continue;
+          }
+          const bottomY = Math.max(wallBottomY, Number(opening.bottomY));
+          const topY = Math.min(wallTopY, Number(opening.topY));
+          if (topY - bottomY <= 0.05) continue;
+          const min = Math.max(
+            transverseMin,
+            (Number(opening.axis) - 0.5) * this.tileSize
+              - PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+          );
+          const max = Math.min(
+            transverseMax,
+            (Number(opening.axis) + 0.5) * this.tileSize
+              + PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+          );
+          if (max - min <= 0.05) continue;
+          const apertureKey = [opening.socketId, min, max, bottomY, topY].join(':');
+          if (seenApertures.has(apertureKey)) continue;
+          seenApertures.add(apertureKey);
+          reservedOpenings.push({
+            id: `${opening.connectionId}:${opening.socketId}:${opening.axis}`,
+            min,
+            max,
+            bottomY,
+            topY,
+          });
+        }
+      }
+    }
+    const subtractOpening = (rectangle, opening) => {
+      const intersectionMin = Math.max(rectangle.min, opening.min);
+      const intersectionMax = Math.min(rectangle.max, opening.max);
+      const intersectionBottomY = Math.max(rectangle.bottomY, opening.bottomY);
+      const intersectionTopY = Math.min(rectangle.topY, opening.topY);
+      if (
+        intersectionMax - intersectionMin <= 0.05
+        || intersectionTopY - intersectionBottomY <= 0.05
+      ) {
+        return [rectangle];
+      }
+      const pieces = [];
+      if (intersectionMin - rectangle.min > 0.05) {
+        pieces.push({
+          ...rectangle,
+          max: intersectionMin,
+        });
+      }
+      if (rectangle.max - intersectionMax > 0.05) {
+        pieces.push({
+          ...rectangle,
+          min: intersectionMax,
+        });
+      }
+      if (intersectionBottomY - rectangle.bottomY > 0.05) {
+        pieces.push({
+          ...rectangle,
+          min: intersectionMin,
+          max: intersectionMax,
+          topY: intersectionBottomY,
+        });
+      }
+      if (rectangle.topY - intersectionTopY > 0.05) {
+        pieces.push({
+          ...rectangle,
+          min: intersectionMin,
+          max: intersectionMax,
+          bottomY: intersectionTopY,
+        });
+      }
+      return pieces;
+    };
+    let segmentDefinitions = [{
+      min: transverseMin,
+      max: transverseMax,
+      bottomY: wallBottomY,
+      topY: wallTopY,
+    }];
+    for (const opening of reservedOpenings) {
+      segmentDefinitions = segmentDefinitions.flatMap((rectangle) => (
+        subtractOpening(rectangle, opening)
+      ));
+    }
+    segmentDefinitions.sort((left, right) => (
+      left.min - right.min
+      || left.bottomY - right.bottomY
+      || left.max - right.max
+    ));
+    const sideCounts = { left: 0, right: 0 };
 
     for (const segment of segmentDefinitions) {
       const span = segment.max - segment.min;
-      if (span <= 0.05) {
+      const height = segment.topY - segment.bottomY;
+      if (span <= 0.05 || height <= 0.05) {
         continue;
       }
 
       const segmentCenter = (segment.min + segment.max) * 0.5;
+      const side = segmentCenter < transverseCenter ? 'left' : 'right';
+      sideCounts[side] += 1;
+      const sideSuffix = sideCounts[side] === 1 ? side : `${side}_${sideCounts[side]}`;
       const width = alongX ? RUIN_WALL_THICKNESS : span;
       const depth = alongX ? span : RUIN_WALL_THICKNESS;
       const wall = new THREE.Mesh(
-        this._createTiledBoxGeometry(width, RUIN_WALL_HEIGHT, depth),
+        this._createTiledBoxGeometry(width, height, depth),
         [
           materials.wallMacroTiles.mm,
           materials.wallMacroTiles.mm,
@@ -14882,17 +16855,17 @@ export class DungeonGenerator {
           materials.wallMacroTiles.mm,
         ],
       );
-      wall.name = `doorThresholdWallWing_${segment.side}`;
+      wall.name = `doorThresholdWallWing_${sideSuffix}`;
       wall.position.set(
         alongX ? sealPlaneX : segmentCenter,
-        position.y + RUIN_WALL_HEIGHT * 0.5,
+        segment.bottomY + height * 0.5,
         alongX ? segmentCenter : sealPlaneZ,
       );
       wall.castShadow = true;
       wall.receiveShadow = true;
       wall.userData.doorId = descriptor.id;
       wall.userData.roomId = room.id;
-      wall.userData.thresholdSide = segment.side;
+      wall.userData.thresholdSide = side;
       // Threshold wings visually replace the boundary shell around a doorway,
       // so they must participate in the same camera-to-player occlusion test.
       // Own each wing independently: hiding one obstructing side must not make
@@ -14902,7 +16875,7 @@ export class DungeonGenerator {
       seal.add(wall);
 
       const zone = {
-        id: `${descriptor.id}_thresholdWall_${segment.side}`,
+        id: `${descriptor.id}_thresholdWall_${sideSuffix}`,
         roomId: room.id,
         doorId: descriptor.id,
         label: 'Door threshold wall wing',
@@ -14910,10 +16883,10 @@ export class DungeonGenerator {
         position: wall.position.clone(),
         halfWidth: width * 0.5,
         halfDepth: depth * 0.5,
-        verticalHalfHeight: RUIN_WALL_HEIGHT * 0.5,
+        verticalHalfHeight: height * 0.5,
         allowFlyOver: false,
         blocksPowerKnockback: true,
-        thresholdSide: segment.side,
+        thresholdSide: side,
       };
       solidZones.push(zone);
       aerialBoundaryZones.push(zone);
@@ -14928,6 +16901,7 @@ export class DungeonGenerator {
       portalSpan,
       transverseMin,
       transverseMax,
+      reservedConnectorApertureCount: reservedOpenings.length - 1,
       wallZones,
     };
   }
@@ -14940,6 +16914,10 @@ export class DungeonGenerator {
     connectionPlans = [],
     solidZones = [],
     aerialBoundaryZones = [],
+    {
+      preserveAdjacentConnectorEntrances = false,
+      connectorWallOpenings = new Map(),
+    } = {},
   ) {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const descriptors = [
@@ -14985,6 +16963,11 @@ export class DungeonGenerator {
         materials,
         solidZones,
         aerialBoundaryZones,
+        preserveAdjacentConnectorEntrances,
+        connectorWallOpenings,
+        doorConnectionPlanId: connectionPlan?.id ?? null,
+        doorLogicalConnectionId:
+          connectionPlan?.logicalConnectionId ?? connectionPlan?.id ?? null,
       });
       const door = new THREE.Group();
       door.name = descriptor.id;
@@ -15138,6 +17121,8 @@ export class DungeonGenerator {
         thresholdSeal: thresholdSeal?.object ?? null,
         thresholdWallZones: thresholdSeal?.wallZones ?? [],
         thresholdPortalSpan: thresholdSeal?.portalSpan ?? null,
+        thresholdReservedConnectorApertureCount:
+          thresholdSeal?.reservedConnectorApertureCount ?? 0,
         exitElevation: connectionPlan?.fromSocket.elevation ?? baseY,
         entranceElevation: connectionPlan?.toSocket.elevation ?? baseY,
         fromPortal: connectionPlan ? { ...connectionPlan.fromSocket } : null,
@@ -16772,7 +18757,7 @@ export class DungeonGenerator {
       const halfRoomDepth = Math.max(1, Math.floor(room.depth / 2));
       // Do not use the outer two-tile corner wedges. The previous farthest-
       // first ordering made these exact corners the default encounter layout.
-      const candidates = reachableCandidates.filter((tile) => {
+      const candidates = room.isDungeonSupplement ? reachableCandidates : reachableCandidates.filter((tile) => {
         const xEdgeInset = halfRoomWidth - Math.abs(tile.x - room.x);
         const zEdgeInset = halfRoomDepth - Math.abs(tile.z - room.z);
         return !(xEdgeInset <= 1 && zEdgeInset <= 1);

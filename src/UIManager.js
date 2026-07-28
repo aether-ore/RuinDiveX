@@ -468,6 +468,12 @@ export class UIManager {
     this.interruptedExpeditionDescription = document.getElementById('interrupted-expedition-description');
     this.interruptedExpeditionStatus = document.getElementById('interrupted-expedition-status');
     this.interruptedExpeditionError = document.getElementById('interrupted-expedition-error');
+    this.interruptedExpeditionContentResetButton = this.interruptedExpeditionModal?.querySelector(
+      '[data-action="reset-interrupted-expedition-content"]',
+    ) ?? null;
+    this.interruptedExpeditionResumeButton = this.interruptedExpeditionModal?.querySelector(
+      '[data-action="resume-interrupted-expedition"]',
+    ) ?? null;
     this.busterLabView = document.getElementById('buster-lab-view');
     this.busterLabWarning = document.getElementById('buster-lab-warning');
     this.busterLabPersistence = document.getElementById('buster-lab-persistence');
@@ -582,6 +588,7 @@ export class UIManager {
     this.interruptedExpeditionLoading = false;
     this.interruptedExpeditionLoadingMessage = '';
     this.interruptedExpeditionErrorMessage = '';
+    this.interruptedExpeditionContentResetAvailable = false;
     this.interruptedExpeditionId = null;
     this.interruptedExpeditionBossProfileId = null;
     this.interruptedExpeditionStatusValue = null;
@@ -1005,10 +1012,12 @@ export class UIManager {
     bossProfileId = '',
     expeditionStatus = 'active',
     expeditionLabel = 'Boss Hunt',
+    resetOrAbandonRequired = false,
   } = {}) {
     this.interruptedExpeditionLoading = false;
     this.interruptedExpeditionLoadingMessage = '';
     this.interruptedExpeditionErrorMessage = '';
+    this.interruptedExpeditionContentResetAvailable = Boolean(resetOrAbandonRequired);
     this.interruptedExpeditionId = String(expeditionId ?? '') || null;
     this.interruptedExpeditionBossProfileId = String(bossProfileId ?? '') || null;
     this.interruptedExpeditionStatusValue = expeditionStatus === 'victory' ? 'victory' : 'active';
@@ -1037,7 +1046,9 @@ export class UIManager {
     this.renderInterruptedExpeditionPrompt();
     this._focusWorldModal(
       this.interruptedExpeditionModal,
-      '[data-action="resume-interrupted-expedition"]',
+      this.interruptedExpeditionContentResetAvailable
+        ? '[data-action="reset-interrupted-expedition-content"]'
+        : '[data-action="resume-interrupted-expedition"]',
     );
     return {
       ok: true,
@@ -1058,6 +1069,7 @@ export class UIManager {
     this.interruptedExpeditionLoading = false;
     this.interruptedExpeditionLoadingMessage = '';
     this.interruptedExpeditionErrorMessage = '';
+    this.interruptedExpeditionContentResetAvailable = false;
     this.interruptedExpeditionId = null;
     this.interruptedExpeditionBossProfileId = null;
     this.interruptedExpeditionStatusValue = null;
@@ -1075,7 +1087,9 @@ export class UIManager {
     if (this.interruptedExpeditionStatus) {
       this.interruptedExpeditionStatus.textContent = this.interruptedExpeditionLoading
         ? this.interruptedExpeditionLoadingMessage || 'Resolving the interrupted expedition...'
-        : 'Re-enter from the beginning, or abandon this Boss Hunt and return to camp.';
+        : this.interruptedExpeditionContentResetAvailable
+          ? 'Saved generated rooms are incompatible. Reset to current content, or abandon this Boss Hunt.'
+          : 'Re-enter from the beginning, or abandon this Boss Hunt and return to camp.';
     }
     if (this.interruptedExpeditionError) {
       this.interruptedExpeditionError.hidden = !this.interruptedExpeditionErrorMessage;
@@ -1083,6 +1097,12 @@ export class UIManager {
     }
     for (const button of this.interruptedExpeditionModal.querySelectorAll('button')) {
       button.disabled = this.interruptedExpeditionLoading;
+    }
+    if (this.interruptedExpeditionContentResetButton) {
+      this.interruptedExpeditionContentResetButton.hidden = !this.interruptedExpeditionContentResetAvailable;
+    }
+    if (this.interruptedExpeditionResumeButton) {
+      this.interruptedExpeditionResumeButton.hidden = this.interruptedExpeditionContentResetAvailable;
     }
   }
 
@@ -1283,14 +1303,47 @@ export class UIManager {
     try {
       const result = await this.game.resumeInterruptedExpedition();
       if (!this._worldActionSucceeded(result)) {
+        if (result?.resetOrAbandonRequired) {
+          this.interruptedExpeditionContentResetAvailable = true;
+        }
         this.setInterruptedExpeditionError(this._worldActionFailureMessage(
           result,
           'The interrupted expedition could not be rebuilt.',
+        ));
+        if (result?.resetOrAbandonRequired) {
+          this._focusWorldModal(
+            this.interruptedExpeditionModal,
+            '[data-action="reset-interrupted-expedition-content"]',
+          );
+        }
+        return;
+      }
+      this.closeInterruptedExpeditionPrompt({ restoreFocus: false });
+    } catch (error) {
+      this.setInterruptedExpeditionError(error);
+    }
+  }
+
+  async _resetInterruptedExpeditionContent() {
+    if (this.interruptedExpeditionLoading) return;
+    if (typeof this.game.resetInterruptedExpeditionToCurrentContent !== 'function') {
+      this.setInterruptedExpeditionError('Expedition content reset is unavailable.');
+      return;
+    }
+    this.setInterruptedExpeditionLoading(true, 'Resetting the dungeon to currently installed content...');
+    try {
+      const result = await this.game.resetInterruptedExpeditionToCurrentContent();
+      if (!this._worldActionSucceeded(result)) {
+        this.interruptedExpeditionContentResetAvailable = true;
+        this.setInterruptedExpeditionError(this._worldActionFailureMessage(
+          result,
+          'The interrupted expedition could not be reset to current content.',
         ));
         return;
       }
       this.closeInterruptedExpeditionPrompt({ restoreFocus: false });
     } catch (error) {
+      this.interruptedExpeditionContentResetAvailable = true;
       this.setInterruptedExpeditionError(error);
     }
   }
@@ -3761,6 +3814,8 @@ export class UIManager {
       const action = button.dataset.action;
       if (action === 'resume-interrupted-expedition') {
         this._resumeInterruptedExpedition();
+      } else if (action === 'reset-interrupted-expedition-content') {
+        this._resetInterruptedExpeditionContent();
       } else if (action === 'abandon-interrupted-expedition') {
         this._abandonInterruptedExpedition();
       }

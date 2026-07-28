@@ -34,6 +34,12 @@ import {
   MemoryLockManager,
   createBusterLabEnvelope,
 } from '../src/buster/BusterLabPersistence.js';
+import {
+  createDungeonAugmentationSaveIdentity,
+} from '../src/dungeon-augmentation/identity.js';
+import {
+  computeEffectiveDungeonPlanHash,
+} from '../src/dungeon-augmentation/validation.js';
 
 class MemoryStorage {
   constructor() {
@@ -657,6 +663,55 @@ test('Boss Hunt locks persist an exact dungeon layout seed and reject non-identi
   assert.equal(retiredFamilyCompatibility.expedition.dungeonFamilyId, 'industrial-v1');
 });
 
+test('Boss Hunt locks and restarts preserve the canonical augmentation identity', async () => {
+  const storage = new MemoryStorage();
+  const saveContextId = 'boss-hunt-augmentation-identity';
+  const lab = await BusterLabStorage.open({
+    storage,
+    lockManager: new MemoryLockManager(),
+    saveContextId,
+  });
+  const basePlanHash = 'base-plan:persistence-test';
+  const augmentationPlanHash = 'augmentation-plan:persistence-test';
+  const dungeonAugmentation = createDungeonAugmentationSaveIdentity({
+    profileId: 'industrial-supplement-preview-v1',
+    seed: 'augmentation-seed:persistence-test',
+    basePlanHash,
+    augmentationPlanHash,
+    effectivePlanHash: computeEffectiveDungeonPlanHash(basePlanHash, augmentationPlanHash),
+    themeRevisions: [{
+      parentRegionId: 'industrial:main',
+      themeId: 'industrial-v1',
+      revision: '1',
+      contentHash: 'industrial-content:test',
+    }],
+    progressionStateIds: ['reward:supplement:1'],
+  });
+  const expedition = {
+    ...createBossExpeditionSpec({
+      id: 'augmentation-identity-expedition',
+      seed: 8181,
+      depth: 3,
+      bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    }),
+    dungeonLayoutSeed: 'layout:augmentation-identity',
+    dungeonAugmentation,
+  };
+
+  const locked = await lab.lockBossHuntForExpedition(expedition);
+  assert.equal(locked.ok, true);
+  assert.deepEqual(locked.expedition.dungeonAugmentation, dungeonAugmentation);
+  assert.deepEqual(lab.getActiveBossExpedition().dungeonAugmentation, dungeonAugmentation);
+
+  const restarted = await lab.restartActiveBossExpedition(expedition);
+  assert.equal(restarted.ok, true);
+  assert.deepEqual(restarted.expedition.dungeonAugmentation, dungeonAugmentation);
+
+  const reloaded = new BusterLabStorage({ storage, saveContextId }).load()
+    .bossHunts.recordedExpeditions[expedition.id];
+  assert.deepEqual(reloaded.dungeonAugmentation, dungeonAugmentation);
+});
+
 test('legacy active Boss Hunts deterministically migrate and persist a restart layout seed', () => {
   const storage = new MemoryStorage();
   const saveContextId = 'legacy-active-layout-migration';
@@ -693,6 +748,10 @@ test('legacy active Boss Hunts deterministically migrate and persist a restart l
     loaded.bossHunts.recordedExpeditions[expeditionId].dungeonFamilyFallback?.reason,
     'retired-dungeon-family',
   );
+  assert.equal(
+    loaded.bossHunts.recordedExpeditions[expeditionId].dungeonAugmentation,
+    null,
+  );
   const persisted = JSON.parse(storage.getItem(lab.storageKeys.main));
   assert.equal(
     persisted.state.bossHunts.recordedExpeditions[expeditionId].dungeonLayoutSeed,
@@ -707,6 +766,171 @@ test('legacy active Boss Hunts deterministically migrate and persist a restart l
     reloaded.bossHunts.recordedExpeditions[expeditionId].dungeonFamilyFallback?.requestedDungeonFamilyId,
     'magma-refinery-v1',
   );
+});
+
+test('malformed committed dungeon augmentation stays incompatible until reset or abandon', async () => {
+  const storage = new MemoryStorage();
+  const saveContextId = 'invalid-committed-dungeon-augmentation';
+  const lab = new BusterLabStorage({ storage, saveContextId });
+  const state = createDefaultBusterLabState();
+  const expeditionId = 'invalid-augmentation-expedition';
+  state.bossHunts.activeExpeditionId = expeditionId;
+  state.bossHunts.recordedExpeditions[expeditionId] = {
+    schemaVersion: 2,
+    expeditionId,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    seed: 919,
+    dungeonLayoutSeed: 'layout:invalid-augmentation',
+    dungeonAugmentation: {
+      schema: 'ruindivex-dungeon-augmentation-save-identity/v1',
+      profileId: 'industrial-supplement-preview-v1',
+      // Deliberately missing the committed hashes and theme revisions.
+    },
+    depth: 2,
+    status: 'active',
+    startedAt: new Date(0).toISOString(),
+    completedAt: null,
+    reward: null,
+  };
+  storage.setItem(lab.storageKeys.main, JSON.stringify(createBusterLabEnvelope({
+    saveContextId,
+    state,
+    revision: 1,
+  })));
+
+  const loaded = lab.load();
+  const committed = loaded.bossHunts.recordedExpeditions[expeditionId];
+  assert.notEqual(committed.dungeonAugmentation, null);
+  assert.equal(committed.dungeonAugmentation.status, 'incompatible-content');
+  assert.equal(committed.dungeonAugmentation.resetOrAbandonRequired, true);
+  assert.equal(
+    committed.dungeonAugmentation.reason,
+    'saved-augmentation-identity-invalid',
+  );
+
+  const restart = await lab.restartActiveBossExpedition({
+    expeditionId,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    dungeonLayoutSeed: committed.dungeonLayoutSeed,
+  });
+  assert.equal(restart.ok, false);
+  assert.equal(restart.reason, 'incompatible-dungeon-augmentation');
+  assert.equal(restart.status, 'incompatible-content');
+  assert.equal(restart.resetOrAbandonRequired, true);
+  assert.equal(lab.getActiveBossExpedition().dungeonAugmentation.resetOrAbandonRequired, true);
+
+  const reloaded = new BusterLabStorage({ storage, saveContextId }).load()
+    .bossHunts.recordedExpeditions[expeditionId];
+  assert.equal(reloaded.dungeonAugmentation.status, 'incompatible-content');
+  assert.equal(reloaded.dungeonAugmentation.resetOrAbandonRequired, true);
+
+  const reset = await lab.resetActiveBossExpeditionDungeonContent({
+    expeditionId,
+    bossProfileId: committed.bossProfileId,
+    seed: committed.seed,
+    depth: committed.depth,
+    dungeonLayoutSeed: committed.dungeonLayoutSeed,
+    dungeonFamilyId: committed.dungeonFamilyId,
+    expectedDungeonAugmentation: committed.dungeonAugmentation,
+    // This explicit user-selected reset targets the currently installed base
+    // content. Null is intentional here, not save sanitization fallback.
+    dungeonAugmentation: null,
+  });
+  assert.equal(reset.ok, true);
+  assert.equal(reset.contentReset, true);
+  assert.equal(reset.expedition.expeditionId, expeditionId);
+  assert.equal(reset.expedition.status, 'active');
+  assert.equal(reset.expedition.dungeonAugmentation, null);
+  assert.equal(reset.expedition.restartCount, 1);
+  assert.equal(lab.getActiveBossExpedition().dungeonAugmentation, null);
+  assert.equal(
+    new BusterLabStorage({ storage, saveContextId }).load()
+      .bossHunts.recordedExpeditions[expeditionId].dungeonAugmentation,
+    null,
+  );
+});
+
+test('dungeon-content reset requires exact prior identity and a canonical replacement', async () => {
+  const lab = await BusterLabStorage.open({
+    storage: new MemoryStorage(),
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'dungeon-content-reset-identity-guard',
+  });
+  const basePlanHash = 'base-plan:content-reset';
+  const augmentationPlanHash = 'augmentation-plan:content-reset';
+  const dungeonAugmentation = createDungeonAugmentationSaveIdentity({
+    profileId: 'industrial-supplement-preview-v1',
+    seed: 'augmentation-seed:content-reset',
+    basePlanHash,
+    augmentationPlanHash,
+    effectivePlanHash: computeEffectiveDungeonPlanHash(basePlanHash, augmentationPlanHash),
+    themeRevisions: [],
+    progressionStateIds: [],
+  });
+  const expedition = {
+    ...createBossExpeditionSpec({
+      id: 'dungeon-content-reset-identity-guard-expedition',
+      seed: 921,
+      depth: 2,
+      bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    }),
+    dungeonLayoutSeed: 'layout:dungeon-content-reset-identity-guard',
+    dungeonAugmentation,
+  };
+  assert.equal((await lab.lockBossHuntForExpedition(expedition)).ok, true);
+
+  const mismatch = await lab.resetActiveBossExpeditionDungeonContent({
+    expeditionId: expedition.id,
+    bossProfileId: expedition.bossProfileId,
+    seed: expedition.seed,
+    depth: expedition.depth,
+    dungeonLayoutSeed: expedition.dungeonLayoutSeed,
+    dungeonFamilyId: 'industrial-v1',
+    expectedDungeonAugmentation: null,
+    dungeonAugmentation: null,
+  });
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.reason, 'expedition-spec-mismatch');
+  assert.deepEqual(lab.getActiveBossExpedition().dungeonAugmentation, dungeonAugmentation);
+
+  const invalidReplacement = await lab.resetActiveBossExpeditionDungeonContent({
+    expeditionId: expedition.id,
+    bossProfileId: expedition.bossProfileId,
+    seed: expedition.seed,
+    depth: expedition.depth,
+    dungeonLayoutSeed: expedition.dungeonLayoutSeed,
+    dungeonFamilyId: 'industrial-v1',
+    expectedDungeonAugmentation: dungeonAugmentation,
+    dungeonAugmentation: { schema: dungeonAugmentation.schema },
+  });
+  assert.equal(invalidReplacement.ok, false);
+  assert.equal(invalidReplacement.reason, 'invalid-dungeon-augmentation');
+  assert.deepEqual(lab.getActiveBossExpedition().dungeonAugmentation, dungeonAugmentation);
+});
+
+test('new expedition locks reject every present malformed augmentation identity', async () => {
+  const lab = await BusterLabStorage.open({
+    storage: new MemoryStorage(),
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'invalid-new-dungeon-augmentation',
+  });
+  const baseSpec = createBossExpeditionSpec({
+    id: 'invalid-new-augmentation-expedition',
+    seed: 920,
+    depth: 2,
+    bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+  });
+  for (const dungeonAugmentation of ['', false, {}, {
+    schema: 'ruindivex-dungeon-augmentation-save-identity/v1',
+  }]) {
+    const result = await lab.lockBossHuntForExpedition({
+      ...baseSpec,
+      dungeonAugmentation,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid-dungeon-augmentation');
+  }
+  assert.equal(lab.getActiveBossExpedition(), null);
 });
 
 test('restarting an active Boss Hunt atomically resets progress and preserves its exact identity', async () => {

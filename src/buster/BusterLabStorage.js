@@ -1,6 +1,9 @@
 import { RollSalvageStorage } from '../RollSalvageStorage.js';
 import { resolveDungeonFamilyId } from '../DungeonFamilies.js';
 import {
+  sanitizeDungeonAugmentationSaveIdentity,
+} from '../dungeon-augmentation/identity.js';
+import {
   BOSS_EXPEDITION_SCHEMA_VERSION,
   DEFAULT_BOSS_PROFILE_ID,
   getReaverbotBossProfile,
@@ -757,6 +760,38 @@ function sanitizeDungeonFamilyFallback(value, rawFamilyId) {
   return resolveDungeonFamilyId(value.requestedDungeonFamilyId).fallback;
 }
 
+const INVALID_DUNGEON_AUGMENTATION_IDENTITY = Object.freeze({
+  schema: 'ruindivex-dungeon-augmentation-save-invalid/v1',
+  status: 'incompatible-content',
+  resetOrAbandonRequired: true,
+  reason: 'saved-augmentation-identity-invalid',
+});
+
+function sanitizeRecordedDungeonAugmentation(raw) {
+  if (!Object.prototype.hasOwnProperty.call(raw, 'dungeonAugmentation')
+    || raw.dungeonAugmentation == null) {
+    return null;
+  }
+  return sanitizeDungeonAugmentationSaveIdentity(raw.dungeonAugmentation)
+    ?? INVALID_DUNGEON_AUGMENTATION_IDENTITY;
+}
+
+function getDungeonAugmentationIdentityState(value) {
+  if (value == null) return { kind: 'none', identity: null };
+  const identity = sanitizeDungeonAugmentationSaveIdentity(value);
+  return identity
+    ? { kind: 'valid', identity }
+    : { kind: 'invalid', identity: null };
+}
+
+function sameDungeonAugmentationIdentity(first, second) {
+  const left = getDungeonAugmentationIdentityState(first);
+  const right = getDungeonAugmentationIdentityState(second);
+  if (left.kind !== right.kind) return false;
+  if (left.kind !== 'valid') return true;
+  return JSON.stringify(left.identity) === JSON.stringify(right.identity);
+}
+
 function hasExplicitUnknownBossRewardMaterial(raw) {
   const reward = raw?.reward;
   if (!reward || typeof reward !== 'object'
@@ -850,6 +885,10 @@ function sanitizeRecordedBossExpedition(raw, fallbackExpeditionId = '') {
       raw.dungeonFamilyFallback,
       raw.dungeonFamilyId,
     ),
+    // Legacy rows naturally remain unaugmented. A present but malformed modern
+    // identity is retained as an explicit incompatibility marker so recovery
+    // can require reset/abandon instead of silently deleting generated rooms.
+    dungeonAugmentation: sanitizeRecordedDungeonAugmentation(raw),
     depth: Math.max(1, nonNegativeInteger(raw.depth, 1)),
     status,
     startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : null,
@@ -2616,11 +2655,31 @@ export class BusterLabStorage {
     );
     const requestedDungeonFamily = resolveDungeonFamilyId(expeditionSpec.dungeonFamilyId);
     const requestedDungeonFamilyId = requestedDungeonFamily.dungeonFamilyId;
+    const hasRequestedDungeonAugmentation = Object.prototype.hasOwnProperty.call(
+      expeditionSpec,
+      'dungeonAugmentation',
+    ) && expeditionSpec.dungeonAugmentation != null;
+    const requestedDungeonAugmentation = sanitizeDungeonAugmentationSaveIdentity(
+      expeditionSpec.dungeonAugmentation,
+    );
+    if (hasRequestedDungeonAugmentation && !requestedDungeonAugmentation) {
+      return { ok: false, reason: 'invalid-dungeon-augmentation', state: this.state };
+    }
     if (!getReaverbotBossProfile(requestedProfileId)) {
       return { ok: false, reason: 'unknown-boss-profile', state: this.state };
     }
     const existing = currentHunts.recordedExpeditions[expeditionId];
     if (existing) {
+      if (getDungeonAugmentationIdentityState(existing.dungeonAugmentation).kind === 'invalid') {
+        return {
+          ok: false,
+          reason: 'incompatible-dungeon-augmentation',
+          status: 'incompatible-content',
+          resetOrAbandonRequired: true,
+          expedition: cloneJson(existing),
+          state: this.state,
+        };
+      }
       if (existing.bossProfileId !== requestedProfileId) {
         return { ok: false, reason: 'expedition-profile-mismatch', expedition: cloneJson(existing), state: this.state };
       }
@@ -2634,7 +2693,11 @@ export class BusterLabStorage {
       if (existing.depth !== requestedDepth
         || existing.seed !== requestedSeed
         || existing.dungeonLayoutSeed !== requestedLayoutSeed
-        || existing.dungeonFamilyId !== requestedDungeonFamilyId) {
+        || existing.dungeonFamilyId !== requestedDungeonFamilyId
+        || !sameDungeonAugmentationIdentity(
+          existing.dungeonAugmentation,
+          requestedDungeonAugmentation,
+        )) {
         return { ok: false, reason: 'expedition-spec-mismatch', expedition: cloneJson(existing), state: this.state };
       }
       return { ok: true, unchanged: true, expedition: cloneJson(existing), state: this.state };
@@ -2664,6 +2727,11 @@ export class BusterLabStorage {
       const hunts = state.bossHunts;
       const concurrentExisting = hunts.recordedExpeditions[expeditionId];
       if (concurrentExisting) {
+        if (getDungeonAugmentationIdentityState(
+          concurrentExisting.dungeonAugmentation,
+        ).kind === 'invalid') {
+          throw new BusterLabOperationError('incompatible-dungeon-augmentation');
+        }
         if (concurrentExisting.bossProfileId !== requestedProfileId) {
           throw new BusterLabOperationError('expedition-profile-mismatch');
         }
@@ -2677,7 +2745,11 @@ export class BusterLabStorage {
         if (concurrentExisting.depth !== concurrentDepth
           || concurrentExisting.seed !== concurrentSeed
           || concurrentExisting.dungeonLayoutSeed !== requestedLayoutSeed
-          || concurrentExisting.dungeonFamilyId !== requestedDungeonFamilyId) {
+          || concurrentExisting.dungeonFamilyId !== requestedDungeonFamilyId
+          || !sameDungeonAugmentationIdentity(
+            concurrentExisting.dungeonAugmentation,
+            requestedDungeonAugmentation,
+          )) {
           throw new BusterLabOperationError('expedition-spec-mismatch');
         }
         return { expedition: cloneJson(concurrentExisting), unchanged: true };
@@ -2697,6 +2769,7 @@ export class BusterLabStorage {
         dungeonLayoutSeed: requestedLayoutSeed,
         dungeonFamilyId: requestedDungeonFamilyId,
         dungeonFamilyFallback: requestedDungeonFamily.fallback,
+        dungeonAugmentation: requestedDungeonAugmentation,
         depth: Math.max(1, nonNegativeInteger(expeditionSpec.depth, 1)),
         status: 'active',
         startedAt: new Date().toISOString(),
@@ -2741,6 +2814,19 @@ export class BusterLabStorage {
         state: this.state,
       };
     }
+    const currentExpedition = currentHunts.recordedExpeditions[expeditionId];
+    if (getDungeonAugmentationIdentityState(
+      currentExpedition?.dungeonAugmentation,
+    ).kind === 'invalid') {
+      return {
+        ok: false,
+        reason: 'incompatible-dungeon-augmentation',
+        status: 'incompatible-content',
+        resetOrAbandonRequired: true,
+        expedition: cloneJson(currentExpedition),
+        state: this.state,
+      };
+    }
 
     const hasExpectation = (field) => Object.prototype.hasOwnProperty.call(expeditionSpec, field);
     const transaction = await this.transact({
@@ -2755,6 +2841,9 @@ export class BusterLabStorage {
       const expedition = hunts.recordedExpeditions[expeditionId];
       if (!expedition || !['active', 'victory'].includes(expedition.status)) {
         throw new BusterLabOperationError('expedition-closed');
+      }
+      if (getDungeonAugmentationIdentityState(expedition.dungeonAugmentation).kind === 'invalid') {
+        throw new BusterLabOperationError('incompatible-dungeon-augmentation');
       }
       if (hasExpectation('bossProfileId')
         && expeditionSpec.bossProfileId !== expedition.bossProfileId) {
@@ -2774,10 +2863,20 @@ export class BusterLabStorage {
       const expectedDungeonFamilyId = hasExpectation('dungeonFamilyId')
         ? sanitizeDungeonFamilyId(expeditionSpec.dungeonFamilyId)
         : expedition.dungeonFamilyId;
+      const expectedDungeonAugmentation = hasExpectation('dungeonAugmentation')
+        ? sanitizeDungeonAugmentationSaveIdentity(expeditionSpec.dungeonAugmentation)
+        : expedition.dungeonAugmentation;
       if (expectedSeed !== expedition.seed
         || expectedDepth !== expedition.depth
         || expectedLayoutSeed !== expedition.dungeonLayoutSeed
-        || expectedDungeonFamilyId !== expedition.dungeonFamilyId) {
+        || expectedDungeonFamilyId !== expedition.dungeonFamilyId
+        || (hasExpectation('dungeonAugmentation')
+          && expeditionSpec.dungeonAugmentation != null
+          && !expectedDungeonAugmentation)
+        || !sameDungeonAugmentationIdentity(
+          expectedDungeonAugmentation,
+          expedition.dungeonAugmentation,
+        )) {
         throw new BusterLabOperationError('expedition-spec-mismatch');
       }
 
@@ -2803,6 +2902,116 @@ export class BusterLabStorage {
 
   restartActiveBossExpeditionAsync(expeditionSpec = {}, concurrency = {}) {
     return this.restartActiveBossExpedition(expeditionSpec, concurrency);
+  }
+
+  async resetActiveBossExpeditionDungeonContent(expeditionSpec = {}, concurrency = {}) {
+    const expeditionId = typeof expeditionSpec.id === 'string' && expeditionSpec.id
+      ? expeditionSpec.id
+      : typeof expeditionSpec.expeditionId === 'string' && expeditionSpec.expeditionId
+        ? expeditionSpec.expeditionId
+        : '';
+    if (!expeditionId) {
+      return { ok: false, reason: 'invalid-expedition-id', state: this._ensureLoaded() };
+    }
+    const hasExpectedIdentity = Object.prototype.hasOwnProperty.call(
+      expeditionSpec,
+      'expectedDungeonAugmentation',
+    );
+    const hasReplacementIdentity = Object.prototype.hasOwnProperty.call(
+      expeditionSpec,
+      'dungeonAugmentation',
+    );
+    if (!hasExpectedIdentity || !hasReplacementIdentity) {
+      return {
+        ok: false,
+        reason: 'dungeon-augmentation-reset-identity-required',
+        state: this._ensureLoaded(),
+      };
+    }
+    const replacementDungeonAugmentation = sanitizeDungeonAugmentationSaveIdentity(
+      expeditionSpec.dungeonAugmentation,
+    );
+    if (expeditionSpec.dungeonAugmentation != null && !replacementDungeonAugmentation) {
+      return { ok: false, reason: 'invalid-dungeon-augmentation', state: this._ensureLoaded() };
+    }
+
+    const currentHunts = this._ensureLoaded().bossHunts;
+    if (currentHunts.activeExpeditionId !== expeditionId) {
+      return {
+        ok: false,
+        reason: 'active-expedition-mismatch',
+        activeExpeditionId: currentHunts.activeExpeditionId,
+        state: this.state,
+      };
+    }
+
+    const expectedProfileId = expeditionSpec.bossProfileId;
+    const expectedSeed = typeof expeditionSpec.seed === 'string'
+      || Number.isFinite(Number(expeditionSpec.seed))
+      ? expeditionSpec.seed
+      : null;
+    const expectedDepth = Math.max(1, nonNegativeInteger(expeditionSpec.depth, 1));
+    const expectedLayoutSeed = sanitizeDungeonLayoutSeed(
+      expeditionSpec.dungeonLayoutSeed,
+      expeditionId,
+    );
+    const expectedDungeonFamilyId = sanitizeDungeonFamilyId(expeditionSpec.dungeonFamilyId);
+    const transaction = await this.transact({
+      operation: 'reset-active-boss-expedition-dungeon-content',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const hunts = state.bossHunts;
+      if (hunts.activeExpeditionId !== expeditionId) {
+        throw new BusterLabOperationError('active-expedition-mismatch');
+      }
+      const expedition = hunts.recordedExpeditions[expeditionId];
+      if (!expedition || !['active', 'victory'].includes(expedition.status)) {
+        throw new BusterLabOperationError('expedition-closed');
+      }
+      if (expedition.bossProfileId !== expectedProfileId) {
+        throw new BusterLabOperationError('expedition-profile-mismatch');
+      }
+      if (expedition.seed !== expectedSeed
+        || expedition.depth !== expectedDepth
+        || expedition.dungeonLayoutSeed !== expectedLayoutSeed
+        || expedition.dungeonFamilyId !== expectedDungeonFamilyId
+        || !sameDungeonAugmentationIdentity(
+          expedition.dungeonAugmentation,
+          expeditionSpec.expectedDungeonAugmentation,
+        )) {
+        throw new BusterLabOperationError('expedition-spec-mismatch');
+      }
+
+      const previousDungeonAugmentation = cloneJson(expedition.dungeonAugmentation);
+      expedition.dungeonAugmentation = replacementDungeonAugmentation;
+      // Resetting current content intentionally discards dungeon-local state
+      // only for an active attempt. A secured victory and its recovery remain
+      // immutable, matching ordinary interrupted-expedition restart behavior.
+      if (expedition.status === 'active') {
+        expedition.encounterProgress = expedition.bossProfileId === ASCENSION_ENGINE_PROFILE_ID
+          ? createAscensionEngineEncounterProgress(0)
+          : null;
+        expedition.encounterProgressQuarantined = false;
+        expedition.completedAt = null;
+        expedition.victoryIndex = null;
+        expedition.signaturePartOverloaded = false;
+        expedition.reward = null;
+      }
+      expedition.restartCount = nonNegativeInteger(expedition.restartCount) + 1;
+      expedition.restartedAt = new Date().toISOString();
+      return {
+        expedition: cloneJson(expedition),
+        previousDungeonAugmentation,
+        dungeonAugmentation: cloneJson(replacementDungeonAugmentation),
+        contentReset: true,
+      };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  resetActiveBossExpeditionDungeonContentAsync(expeditionSpec = {}, concurrency = {}) {
+    return this.resetActiveBossExpeditionDungeonContent(expeditionSpec, concurrency);
   }
 
   async recordBossCheckpoint({
@@ -3061,6 +3270,9 @@ export class BusterLabStorage {
           seed: prior?.seed ?? null,
           dungeonLayoutSeed: prior?.dungeonLayoutSeed
             ?? createMigratedDungeonLayoutSeed(expeditionId),
+          dungeonFamilyId: prior?.dungeonFamilyId ?? sanitizeDungeonFamilyId(null),
+          dungeonFamilyFallback: prior?.dungeonFamilyFallback ?? null,
+          dungeonAugmentation: prior?.dungeonAugmentation ?? null,
           depth: prior?.depth ?? 1,
           status: 'victory',
           startedAt: prior?.startedAt ?? null,
@@ -3199,6 +3411,9 @@ export class BusterLabStorage {
         seed: prior?.seed ?? null,
         dungeonLayoutSeed: prior?.dungeonLayoutSeed
           ?? createMigratedDungeonLayoutSeed(expeditionId),
+        dungeonFamilyId: prior?.dungeonFamilyId ?? sanitizeDungeonFamilyId(null),
+        dungeonFamilyFallback: prior?.dungeonFamilyFallback ?? null,
+        dungeonAugmentation: prior?.dungeonAugmentation ?? null,
         depth: prior?.depth ?? 1,
         status: 'victory',
         startedAt: prior?.startedAt ?? null,

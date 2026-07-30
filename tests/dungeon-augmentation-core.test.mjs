@@ -3,6 +3,10 @@ import test from 'node:test';
 import { DungeonGenerator } from '../src/DungeonGenerator.js';
 import {
   DUNGEON_AUGMENTATION_OVERLAY_SCHEMA,
+  DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
+  DUNGEON_EXTENSION_HOST_V2_SCHEMA,
+  DUNGEON_PROGRESSION_SNAPSHOT_V2_SCHEMA,
+  DUNGEON_ROUTE_NETWORK_GRANT_V2_SCHEMA,
   DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA,
   DUNGEON_AUGMENTATION_PROFILES,
   GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
@@ -15,10 +19,12 @@ import {
   createDungeonAugmentationSaveIdentity,
   createIndustrialAugmentationHost,
   createIndustrialBaseDraft,
+  dungeonVolumesOverlap,
   hashCanonicalValue,
   materializeIndustrialOverlay,
   sanitizeDungeonAugmentationSaveIdentity,
   validateCommittedDungeonAugmentationIdentity,
+  validateDungeonExtensionHost,
   validateDungeonAugmentationPlan,
 } from '../src/dungeon-augmentation/index.js';
 
@@ -45,9 +51,12 @@ const DESTINATION_THEME = Object.freeze({
 });
 
 const COMPLETE_CAPABILITIES = Object.freeze({
-  materials: ['primary-floor', 'corridor-floor', 'wall', 'ceiling', 'support', 'cap'],
-  assets: ['light-fixture', 'transition-frame'],
-  connectors: ['service-gallery', 'transition-bay'],
+  materials: [
+    'primary-floor', 'corridor-floor', 'wall', 'ceiling', 'support', 'cap',
+    'catwalk', 'rail', 'ramp', 'warning',
+  ],
+  assets: ['frame', 'hazard', 'light-fixture', 'transition-frame'],
+  connectors: ['service-gallery', 'slope', 'ladder', 'lift', 'transition-bay'],
   transitions: ['level-transition-bay'],
 });
 
@@ -92,7 +101,7 @@ function makeFixture({
       facing: { x: 0, y: 0, z: -1 },
       widthMeters: 8.4,
       heightMeters: 5.6,
-      availableDepthMeters: 80,
+      availableDepthMeters: 160,
       connectorFamilies: ['service-gallery'],
     }],
     spliceEdges: [{
@@ -287,6 +296,87 @@ test(`${VERIFICATION_SEED_COUNT} Industrial generator hooks leave the legacy RNG
   }
 });
 
+test('missing parent theme capabilities and bindings stop realization after one attempt', () => {
+  for (const failureCode of [
+    'MISSING_THEME_CAPABILITY',
+    'MISSING_PARENT_THEME_SESSION',
+    'INVALID_THEME_MATERIAL',
+    'THEME_ASSET_CREATION_FAILED',
+    'THEME_CONNECTOR_CREATION_FAILED',
+    'invalid-theme-binding',
+  ]) {
+    let realizationCalls = 0;
+    const generator = new DungeonGenerator({
+      random: () => 0.5,
+      basePlanHash: `base:non-retryable-theme:${failureCode}`,
+      augmentationSeed: `augmentation:non-retryable-theme:${failureCode}`,
+      augmentationProfileId: 'industrial-supplement-preview-v4',
+    });
+    generator._generateAcceptedIndustrialDungeon = () => ({
+      dungeon: {
+        basePlanHash: generator.basePlanHash,
+        generationAttempts: 1,
+        progression: { validation: { accepted: true, errors: [] } },
+      },
+      randomTape: [],
+    });
+    generator._generateOnce = () => {
+      realizationCalls += 1;
+      const error = new Error(`Missing deterministic theme content: ${failureCode}`);
+      error.code = failureCode;
+      throw error;
+    };
+
+    const dungeon = generator._generateIndustrialDungeonWithAugmentationReplay();
+    assert.equal(realizationCalls, 1, failureCode);
+    assert.equal(dungeon.augmentationStatus, 'unchanged');
+    assert.equal(
+      dungeon.augmentationDiagnostics.reason,
+      'theme-capability-or-binding-unavailable',
+    );
+    assert.equal(dungeon.augmentationDiagnostics.nonRetryable, true);
+    assert.equal(dungeon.augmentationReplayDiagnostics.realizationAttempts, 1);
+    assert.equal(
+      dungeon.augmentationDiagnostics.rejectedOverlay.attempts[0].failureCode,
+      failureCode,
+    );
+    assert.equal(
+      dungeon.augmentationDiagnostics.rejectedOverlay.attempts[0].failureCategory,
+      'theme-capability-or-binding',
+    );
+  }
+
+  let geometryRealizationCalls = 0;
+  const retryableGenerator = new DungeonGenerator({
+    random: () => 0.5,
+    basePlanHash: 'base:retryable-geometry-failure',
+    augmentationSeed: 'augmentation:retryable-geometry-failure',
+    augmentationProfileId: 'industrial-supplement-preview-v4',
+  });
+  retryableGenerator._generateAcceptedIndustrialDungeon = () => ({
+    dungeon: {
+      basePlanHash: retryableGenerator.basePlanHash,
+      generationAttempts: 1,
+      progression: { validation: { accepted: true, errors: [] } },
+    },
+    randomTape: [],
+  });
+  retryableGenerator._generateOnce = () => {
+    geometryRealizationCalls += 1;
+    const error = new Error('Seed-dependent supplemental geometry collision.');
+    error.code = 'INVALID_SUPPLEMENT_STRUCTURE_RAMP';
+    throw error;
+  };
+  const retryableFallback = retryableGenerator
+    ._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(geometryRealizationCalls, 8);
+  assert.equal(retryableFallback.augmentationDiagnostics.nonRetryable, false);
+  assert.equal(
+    retryableFallback.augmentationDiagnostics.reason,
+    'physical-validation-fallback',
+  );
+});
+
 test(`${VERIFICATION_SEED_COUNT} augmentation seeds are deterministic, immutable, namespaced, and within profile budgets`, () => {
   const planHashes = new Set();
   const structuralSignatures = new Set();
@@ -301,7 +391,11 @@ test(`${VERIFICATION_SEED_COUNT} augmentation seeds are deterministic, immutable
     };
     const first = augmentDungeonDraft(options);
     const second = augmentDungeonDraft(options);
-    assert.equal(first.status, 'applied', JSON.stringify(first.diagnostics.errors));
+    assert.equal(first.status, 'applied', JSON.stringify({
+      index,
+      layoutSeed: options.layoutSeed,
+      errors: first.diagnostics.errors,
+    }));
     assert.deepEqual(first.overlayPlan, second.overlayPlan);
     assert.equal(first.overlayPlan.schema, DUNGEON_AUGMENTATION_OVERLAY_SCHEMA);
     assert.equal(first.overlayPlan.augmentationPlanHash, computeDungeonAugmentationPlanHash(first.overlayPlan));
@@ -370,6 +464,250 @@ test(`${VERIFICATION_SEED_COUNT} preview-v2 seeds guarantee a perceptible two-ro
   assert.ok(planHashes.size >= 80, `expected v2 seed diversity, received ${planHashes.size} hashes`);
 });
 
+test(`${VERIFICATION_SEED_COUNT} preview-v3 seeds build a multi-door hallway cluster with varied vertical traversal`, () => {
+  const profileId = 'industrial-supplement-preview-v3';
+  const observedVerticalFamilies = new Set();
+  const observedVerticalDirections = new Set();
+  const planHashes = new Set();
+  for (let index = 0; index < VERIFICATION_SEED_COUNT; index += 1) {
+    const fixture = makeFixture({ profileId });
+    const options = {
+      ...fixture,
+      profileId,
+      layoutSeed: `augmentation-v3:${index}`,
+      difficulty: 2,
+    };
+    const result = augmentDungeonDraft(options);
+    const repeated = augmentDungeonDraft(options);
+    assert.equal(result.status, 'applied', JSON.stringify(result.diagnostics.errors));
+    assert.deepEqual(result.overlayPlan, repeated.overlayPlan);
+    assert.equal(result.overlayPlan.nodes.length, 5);
+    const branch = result.overlayPlan.operations.find(({ type }) => type === 'optionalBranch');
+    const padding = result.overlayPlan.operations.find(({ type }) => type === 'edgePadding');
+    assert.ok(branch);
+    assert.ok(padding);
+    assert.equal(branch.topology, 'hallway-cluster-v1');
+    assert.equal(branch.nodeIds.length, 4);
+    assert.equal(branch.segmentIds.length, 4);
+    assert.equal(padding.nodeIds.length, 1);
+    assert.deepEqual(branch.featureSummary, {
+      sideRoomCount: 2,
+      elevationTransferCount: 1,
+      encounterCount: 1,
+      rewardCount: 1,
+      trapCount: 1,
+      platformRoomCount: 2,
+      doorwayCount: 4,
+      hallwaySpineCount: 1,
+    });
+
+    const nodeById = new Map(result.overlayPlan.nodes.map((node) => [node.id, node]));
+    const hallway = nodeById.get(branch.hallwayNodeId);
+    const terminal = nodeById.get(branch.terminalNodeId);
+    assert.ok(hallway);
+    assert.ok(terminal);
+    assert.deepEqual(
+      { x: hallway.size.x, z: hallway.size.z },
+      { x: 14, z: 36.4 },
+    );
+    assert.equal(branch.corridorOriented, true);
+    assert.equal(branch.hallwayLengthMeters, 36.4);
+    assert.equal(branch.hallwayDoorwayCount, 4);
+    assert.equal(branch.sideRoomDoorwayCount, 2);
+    assert.deepEqual(branch.hallwayDoorwaySocketIds, hallway.hallwayDoorwaySocketIds);
+    assert.deepEqual(branch.sideRoomDoorwaySocketIds, hallway.sideRoomDoorwaySocketIds);
+    assert.equal(hallway.layoutRole, 'corridor-hallway-spine');
+    assert.equal(hallway.corridorOriented, true);
+    const hallwaySocketByLocalId = new Map(
+      hallway.sockets.map((candidate) => [candidate.localSocketId, candidate]),
+    );
+    const hallwayForward = hallway.placement.facing;
+    const longitudinalOffset = (candidate) => (
+      (candidate.position.x - hallway.placement.center.x) * hallwayForward.x
+        + (candidate.position.z - hallway.placement.center.z) * hallwayForward.z
+    );
+    assert.ok(Math.abs(longitudinalOffset(hallwaySocketByLocalId.get('left')) + 8.4) < 1e-9);
+    assert.ok(Math.abs(longitudinalOffset(hallwaySocketByLocalId.get('right')) - 8.4) < 1e-9);
+    assert.deepEqual(
+      branch.sideRoomNodeIds.map((id) => ({ x: nodeById.get(id).size.x, z: nodeById.get(id).size.z })),
+      [{ x: 19.6, z: 19.6 }, { x: 19.6, z: 19.6 }],
+    );
+    assert.deepEqual(
+      { x: terminal.size.x, z: terminal.size.z },
+      { x: 25.2, z: 25.2 },
+    );
+    assert.equal(hallway.sockets.every(({ state }) => state === 'connected'), true);
+    for (const sideRoomId of branch.sideRoomNodeIds) {
+      const states = Object.fromEntries(nodeById.get(sideRoomId).sockets
+        .map(({ localSocketId, state }) => [localSocketId, state]));
+      assert.deepEqual(states, { entry: 'connected', exit: 'capped' });
+    }
+    assert.deepEqual(
+      Object.fromEntries(terminal.sockets.map(({ localSocketId, state }) => [localSocketId, state])),
+      { entry: 'connected', exit: 'capped' },
+    );
+    assert.equal(
+      nodeById.get(branch.sideRoomNodeIds[0]).anchors.some(({ kind }) => kind === 'encounter'),
+      true,
+    );
+    assert.equal(
+      nodeById.get(branch.sideRoomNodeIds[1]).anchors.some(({ kind }) => kind === 'reward'),
+      true,
+    );
+    assert.equal(terminal.anchors.some(({ kind }) => kind === 'trap'), true);
+    assert.ok(terminal.structure.platforms.length > 0);
+    assert.ok(terminal.structure.ramps.length > 0);
+    assert.equal(
+      hallway.anchors.filter(({ assetRole }) => assetRole === 'frame').length,
+      4,
+    );
+
+    const verticalSegment = result.overlayPlan.segments.find(({ id }) => (
+      id === branch.verticalConnectorSegmentId
+    ));
+    assert.ok(verticalSegment);
+    assert.ok(['slope', 'ladder', 'lift'].includes(verticalSegment.connectorFamily));
+    assert.equal(verticalSegment.connectorFamily, branch.verticalConnectorFamily);
+    assert.equal(verticalSegment.verticalTransfer, true);
+    assert.equal(Math.abs(verticalSegment.elevationDelta), 14);
+    assert.equal(
+      verticalSegment.destinationElevation - verticalSegment.sourceElevation,
+      verticalSegment.elevationDelta,
+    );
+    assert.ok(verticalSegment.path[1].z !== verticalSegment.path[0].z
+      || verticalSegment.path[1].x !== verticalSegment.path[0].x);
+    const verticalConnectorLength = Math.hypot(
+      verticalSegment.path[1].x - verticalSegment.path[0].x,
+      verticalSegment.path[1].z - verticalSegment.path[0].z,
+    );
+    assert.ok(
+      verticalConnectorLength >= (verticalSegment.connectorFamily === 'slope' ? 50.4 : 44.8),
+    );
+    observedVerticalFamilies.add(verticalSegment.connectorFamily);
+    observedVerticalDirections.add(verticalSegment.direction);
+    assert.equal(
+      result.overlayPlan.nodes.find(({ id }) => id === padding.nodeIds[0]).grammarId,
+      'supplement-padding-through-chamber-v1',
+      `seed ${index} must use the dedicated padding grammar`,
+    );
+    assertRendererFree(result.overlayPlan);
+    assertDeepFrozen(result.overlayPlan);
+    planHashes.add(result.overlayPlan.augmentationPlanHash);
+  }
+  assert.deepEqual([...observedVerticalFamilies].sort(), ['ladder', 'lift', 'slope']);
+  assert.deepEqual([...observedVerticalDirections].sort(), ['ascending', 'descending']);
+  assert.ok(planHashes.size >= 80, `expected v3 seed diversity, received ${planHashes.size} hashes`);
+});
+
+test(`${VERIFICATION_SEED_COUNT} preview-v3 seeds keep a corridor hallway when edge padding has no safe insertion`, () => {
+  const profileId = 'industrial-supplement-preview-v3';
+  const hashes = new Set();
+  for (let index = 0; index < VERIFICATION_SEED_COUNT; index += 1) {
+    const fixture = makeFixture({ profileId });
+    fixture.baseDraft.protectedVolumes.push({
+      id: 'fixture-splice-corridor-reserved',
+      center: { x: 0, y: 2.8, z: 0 },
+      size: { x: 140, y: 5.6, z: 30 },
+      purpose: 'force-v3-padding-fallback',
+    });
+    const options = {
+      ...fixture,
+      profileId,
+      layoutSeed: `augmentation-v3-padding-fallback:${index}`,
+      difficulty: 2,
+    };
+    const result = augmentDungeonDraft(options);
+    const repeated = augmentDungeonDraft(options);
+    assert.equal(result.status, 'applied', JSON.stringify(result.diagnostics.errors));
+    assert.deepEqual(result.overlayPlan, repeated.overlayPlan);
+    assert.deepEqual(result.overlayPlan.operations.map(({ type }) => type), ['optionalBranch']);
+    assert.equal(result.overlayPlan.nodes.length, 4);
+    assert.equal(result.overlayPlan.segments.length, 4);
+    assert.equal(result.diagnostics.decisions.some(({ context }) => (
+      context?.optionalEdgePaddingOmitted === true
+    )), true);
+    const branch = result.overlayPlan.operations[0];
+    const hallway = result.overlayPlan.nodes.find(({ id }) => id === branch.hallwayNodeId);
+    assert.equal(branch.corridorOriented, true);
+    assert.equal(branch.hallwayLengthMeters, 36.4);
+    assert.equal(branch.hallwayDoorwayCount, 4);
+    assert.equal(branch.sideRoomDoorwayCount, 2);
+    assert.equal(hallway.size.z > hallway.size.x * 2, true);
+    assert.equal(hallway.sockets.every(({ state }) => state === 'connected'), true);
+    assert.deepEqual(
+      branch.sideRoomNodeIds.map((nodeId) => (
+        result.overlayPlan.nodes.find(({ id }) => id === nodeId).contentRole
+      )),
+      ['encounter', 'reward'],
+    );
+    hashes.add(result.overlayPlan.augmentationPlanHash);
+  }
+  assert.ok(hashes.size >= 80, `expected fallback seed diversity, received ${hashes.size} hashes`);
+});
+
+test('edge-padding connector paths follow an L-shaped parent splice instead of cutting a chord', () => {
+  const profileId = 'industrial-supplement-preview-v3';
+  const fixture = makeFixture({ profileId });
+  const splice = fixture.extensionRegions[0].spliceEdges[0];
+  splice.path = [
+    { x: -60, y: 0, z: 0 },
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 60 },
+    { x: 60, y: 0, z: 60 },
+  ];
+  splice.availableLengthMeters = 180;
+  splice.to.position = { x: 60, y: 0, z: 60 };
+  const result = augmentDungeonDraft({
+    ...fixture,
+    profileId,
+    layoutSeed: 'l-shaped-padding-splice-regression',
+    difficulty: 2,
+  });
+
+  assert.equal(result.status, 'applied', JSON.stringify(result.diagnostics.errors));
+  const padding = result.overlayPlan.operations.find(({ type }) => type === 'edgePadding');
+  assert.ok(padding, 'the L-shaped fixture should retain its preferred padding room');
+  const paddingSegments = result.overlayPlan.segments.filter(({ operationId }) => (
+    operationId === padding.id
+  ));
+  assert.equal(paddingSegments.length, 2);
+  assert.equal(paddingSegments.some(({ path }) => path.length > 2), true);
+  const pointIsOnSplice = ({ x, z }) => (
+    (Math.abs(z) <= 1e-6 && x >= -60 && x <= 0)
+      || (Math.abs(x) <= 1e-6 && z >= 0 && z <= 60)
+      || (Math.abs(z - 60) <= 1e-6 && x >= 0 && x <= 60)
+  );
+  assert.equal(
+    paddingSegments.every(({ path }) => path.every(pointIsOnSplice)),
+    true,
+  );
+  assert.equal(
+    paddingSegments.some(({ path }) => path.some(({ x, z }) => x === 0 && z === 0)),
+    true,
+  );
+});
+
+test('the Industrial adapter forwards authoritative base volumes into route planning', () => {
+  const baseVolume = {
+    id: 'industrial-wrapper-authoritative-volume',
+    ownerId: 'industrial-wrapper-room',
+    center: { x: 14, y: 2.8, z: -14 },
+    size: { x: 8.4, y: 5.6, z: 8.4 },
+  };
+  const baseDraft = {
+    basePlanHash: 'industrial-wrapper-authoritative-base',
+    occupiedVolumes: [baseVolume],
+    rooms: [],
+    connectionPlans: [],
+  };
+  const host = createIndustrialAugmentationHost({ baseDraft });
+
+  assert.deepEqual(
+    host.extensionRegions[0].routeNetworkPlacementProtectedVolumes,
+    [{ ...baseVolume, purpose: 'base-draft-protected' }],
+  );
+});
+
 test('the pure planner accepts the Industrial adapter world-meter snapshot without replacing its base graph', () => {
   const rooms = [
     { id: 'enemyNest', type: 'combat', x: -30, z: 0, width: 7, depth: 7, baseElevation: 0 },
@@ -380,6 +718,7 @@ test('the pure planner accepts the Industrial adapter world-meter snapshot witho
     logicalConnectionId: 'enemyNest_keycardRoom',
     fromRoomId: 'enemyNest',
     toRoomId: 'keycardRoom',
+    doorId: 'enemyNestGate',
     level: 0,
     elevation: 0,
     fullPath: Array.from({ length: 53 }, (_, index) => ({ x: index - 26, z: 0 })),
@@ -401,6 +740,9 @@ test('the pure planner accepts the Industrial adapter world-meter snapshot witho
   assert.equal(canonicalStringify(baseDraft), before);
   assert.deepEqual(result.effectiveDraft.connectionPlans, baseDraft.connectionPlans);
   assert.equal(result.overlayPlan.operations.some(({ type }) => type === 'edgePadding'), true);
+  const paddedOperation = result.overlayPlan.operations.find(({ type }) => type === 'edgePadding');
+  assert.equal(paddedOperation.originalLogicalEdge.gateId, 'enemyNestGate');
+  assert.equal(paddedOperation.originalLogicalEdge.gatePlacementSide, 'source');
   const materialized = materializeIndustrialOverlay({
     rooms,
     connectionPlans,
@@ -410,7 +752,565 @@ test('the pure planner accepts the Industrial adapter world-meter snapshot witho
   });
   assert.equal(materialized.diagnostics.accepted, true, JSON.stringify(materialized.diagnostics.errors));
   assert.equal(materialized.rooms.length, rooms.length + result.overlayPlan.nodes.length);
+  const physicalGateHost = materialized.connectionPlans.find((plan) => (
+    plan.isPaddedByDungeonSupplement && plan.hostsLogicalGate
+  ));
+  assert.ok(physicalGateHost);
+  assert.equal(physicalGateHost.fromRoomId, 'enemyNest');
+  assert.equal(physicalGateHost.gatePlacementSide, 'source');
   assert.deepEqual(connectionPlans[0].fullPath, Array.from({ length: 53 }, (_, index) => ({ x: index - 26, z: 0 })));
+});
+
+test('the Industrial host advertises only boundary-socket-to-boundary-socket padding length', () => {
+  const rooms = [
+    { id: 'entrance', type: 'entrance', x: 0, z: 0, width: 5, depth: 5, baseElevation: 0 },
+    { id: 'enemyNest', type: 'combat', x: 0, z: 8, width: 5, depth: 5, baseElevation: 0 },
+  ];
+  const connectionPlans = [{
+    id: 'entrance_enemyNest_ground',
+    logicalConnectionId: 'entrance_enemyNest',
+    fromRoomId: 'entrance',
+    toRoomId: 'enemyNest',
+    level: 0,
+    elevation: 0,
+    fullPath: Array.from({ length: 9 }, (_, z) => ({ x: 0, z })),
+    fromSocket: {
+      id: 'entrance:south',
+      roomId: 'entrance',
+      x: 0,
+      z: 2,
+      elevation: 0,
+      facingX: 0,
+      facingZ: 1,
+    },
+    toSocket: {
+      id: 'enemyNest:north',
+      roomId: 'enemyNest',
+      x: 0,
+      z: 6,
+      elevation: 0,
+      facingX: 0,
+      facingZ: -1,
+    },
+  }];
+  const baseDraft = createIndustrialBaseDraft({ rooms, connectionPlans, tileSize: 2.8 });
+  const host = createIndustrialAugmentationHost({
+    baseDraft,
+    rooms,
+    connectionPlans,
+    tileSize: 2.8,
+  });
+  const splice = host.extensionRegions[0].spliceEdges[0];
+
+  assert.ok(splice);
+  assert.equal(splice.pathContract, 'boundary-socket-to-boundary-socket');
+  assert.deepEqual(splice.fullPath, Array.from({ length: 5 }, (_, index) => ({
+    x: 0,
+    z: index + 2,
+  })));
+  assert.deepEqual(splice.path[0], { x: 0, y: 0, z: 5.6 });
+  assert.equal(splice.path.at(-1).x, 0);
+  assert.equal(splice.path.at(-1).y, 0);
+  assert.ok(Math.abs(splice.path.at(-1).z - 16.8) <= 1e-9);
+  assert.ok(Math.abs(splice.availableLengthMeters - 11.2) <= 1e-9);
+  assert.equal(splice.availableLengthMeters, splice.measuredPathLengthMeters);
+});
+
+test('the Industrial V2 host grants the exact unused keycard walls and tile-aligned long-route stations', () => {
+  const tileSize = 2.8;
+  const rooms = [
+    { id: 'enemyNest', x: -30, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'keycardRoom', x: 0, z: 0, width: 23, depth: 21, baseElevation: 0 },
+    { id: 'trapRoom', x: 0, z: 50, width: 7, depth: 7, baseElevation: 0 },
+  ];
+  const connectionPlans = [
+    {
+      id: 'enemyNest_keycardRoom_ground',
+      logicalConnectionId: 'enemyNest_keycardRoom',
+      fromRoomId: 'enemyNest',
+      toRoomId: 'keycardRoom',
+      doorId: 'enemyNestGate',
+      level: 0,
+      elevation: 0,
+      fullPath: Array.from({ length: 17 }, (_, index) => ({ x: index - 27, z: 0 })),
+      fromSocket: { id: 'enemy:east', roomId: 'enemyNest', x: -27, z: 0, elevation: 0, facingX: 1, facingZ: 0 },
+      toSocket: { id: 'keycard:west', roomId: 'keycardRoom', x: -11, z: 0, elevation: 0, facingX: -1, facingZ: 0 },
+    },
+    {
+      id: 'keycardRoom_trapRoom_ground',
+      logicalConnectionId: 'keycardRoom_trapRoom',
+      fromRoomId: 'keycardRoom',
+      toRoomId: 'trapRoom',
+      doorId: 'Door_Alpha',
+      level: 0,
+      elevation: 0,
+      fullPath: Array.from({ length: 38 }, (_, index) => ({ x: 0, z: index + 10 })),
+      fromSocket: { id: 'keycard:south', roomId: 'keycardRoom', x: 0, z: 10, elevation: 0, facingX: 0, facingZ: 1 },
+      toSocket: { id: 'trap:north', roomId: 'trapRoom', x: 0, z: 47, elevation: 0, facingX: 0, facingZ: -1 },
+    },
+  ];
+  const baseDraft = createIndustrialBaseDraft({ rooms, connectionPlans, tileSize });
+  const host = createIndustrialAugmentationHost({ baseDraft, rooms, connectionPlans, tileSize });
+  const validation = validateDungeonExtensionHost(host);
+  const region = host.extensionRegions[0];
+  const pyramid = region.routeNetworkGrants.find(({ kind }) => (
+    kind === 'landmark-perimeter-loop'
+  ));
+  const coverage = region.routeNetworkGrants.filter(({ kind }) => (
+    kind === 'objective-route-coverage'
+  ));
+
+  assert.equal(validation.accepted, true, validation.errors.join(', '));
+  assert.equal(host.schema, DUNGEON_EXTENSION_HOST_V2_SCHEMA);
+  assert.equal(region.progressionSnapshot.schema, DUNGEON_PROGRESSION_SNAPSHOT_V2_SCHEMA);
+  assert.ok(pyramid);
+  assert.equal(pyramid.schema, DUNGEON_ROUTE_NETWORK_GRANT_V2_SCHEMA);
+  assert.deepEqual(pyramid.occupiedCriticalWallSides, ['south', 'west']);
+  assert.deepEqual(pyramid.openedWallSides, ['east', 'north']);
+  assert.deepEqual(
+    pyramid.endpointSockets.map(({ wallSide }) => wallSide).sort(),
+    ['east', 'north'],
+  );
+  assert.equal(pyramid.endpointSockets.every(({ roomId, widthMeters }) => (
+    roomId === 'keycardRoom' && Math.abs(widthMeters - 8.4) <= 1e-9
+  )), true);
+  assert.equal(coverage.length, 2);
+  assert.equal(coverage.every(({ coverage: contract }) => (
+    contract.coverageComplete
+      && Math.max(...contract.featurelessSpansMeters) <= 33.6 + 1e-6
+      && contract.stationDistancesMeters.every((distance) => (
+        Math.abs(distance / tileSize - Math.round(distance / tileSize)) <= 1e-9
+      ))
+  )), true);
+  assert.equal(coverage.every((grant) => (
+    grant.minimumModules === 3
+      && grant.maximumModules === 6
+      && !('minimumTrueRoomCount' in grant)
+      && grant.planningReservationRectangles.every((rectangle) => {
+        const spans = [
+          rectangle.maxX - rectangle.minX,
+          rectangle.maxZ - rectangle.minZ,
+        ].sort((first, second) => first - second);
+        return Math.abs(spans[0] - tileSize) <= 1e-6
+          && Math.abs(spans[1] - tileSize * 3) <= 1e-6;
+      })
+      && grant.endpointSockets.every(({ endpointModuleOverlapRequired }) => (
+        endpointModuleOverlapRequired === true
+      ))
+      && grant.socketModuleOverlapGrants.length === grant.endpointSockets.length
+  )), true);
+  const alphaCoverage = coverage.find(({ coverage: contract }) => (
+    contract.logicalEdgeId === 'keycardRoom_trapRoom'
+  ));
+  assert.deepEqual(alphaCoverage.requiredCredentialIds, ['Keycard_Alpha']);
+  assert.equal(alphaCoverage.sourceGate.gatePlacementSide, 'source');
+  assert.equal(alphaCoverage.endpointSockets.every(({ roomId }) => roomId === 'trapRoom'), true);
+});
+
+test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active pyramid route network`, () => {
+  const tileSize = 2.8;
+  const accessDomainId = 'fixture-region:band-0';
+  const endpointSockets = [
+    {
+      id: 'fixture:keycard:north',
+      nodeId: 'keycardRoom',
+      roomId: 'keycardRoom',
+      position: { x: 0, y: 0, z: -30 },
+      facing: { x: 0, y: 0, z: -1 },
+      wallSide: 'north',
+    },
+    {
+      id: 'fixture:keycard:east',
+      nodeId: 'keycardRoom',
+      roomId: 'keycardRoom',
+      position: { x: 32, y: 0, z: 0 },
+      facing: { x: 1, y: 0, z: 0 },
+      wallSide: 'east',
+    },
+  ].map((socket) => ({
+    ...socket,
+    widthMeters: 8.4,
+    heightMeters: 3.6,
+    landingWidthTiles: 3,
+    clearanceHeightMeters: 3.6,
+    connectorFamilies: ['service-gallery'],
+    progressionBandId: 0,
+    accessDomainId,
+  }));
+  const grant = {
+    schema: DUNGEON_ROUTE_NETWORK_GRANT_V2_SCHEMA,
+    id: 'fixture:keycard-pyramid-loop-grant',
+    required: true,
+    kind: 'landmark-perimeter-loop',
+    landmarkRoomId: 'keycardRoom',
+    endpointSockets,
+    occupiedCriticalWallSides: ['south', 'west'],
+    openedWallSides: ['north', 'east'],
+    progressionBandId: 0,
+    accessDomainId,
+    dominanceRegionId: 'fixture:post-encounter:pre-alpha',
+    crossedBoundaryIds: [],
+    requiredCredentialIds: [],
+    sourceGate: null,
+    protectedVolumes: [{
+      id: 'fixture:keycard-pyramid-protected',
+      center: { x: 0, y: 4, z: 0 },
+      size: { x: 20, y: 8, z: 20 },
+    }],
+    socketLandingOverlapGrants: endpointSockets.map((socket) => {
+      const horizontal = Math.abs(socket.facing.x) > 0;
+      return {
+        id: `${socket.id}:landing-overlap`,
+        socketId: socket.id,
+        center: { ...socket.position, y: 1.8 },
+        size: { x: horizontal ? 5.6 : 8.4, y: 3.6, z: horizontal ? 8.4 : 5.6 },
+        maximumBoundaryDepthTiles: 1,
+      };
+    }),
+    mustPreserveBeatIds: ['enemyNestGate', 'keycardGuard', 'Keycard_Alpha', 'Door_Alpha'],
+    minimumModules: 3,
+    maximumModules: 5,
+    requiredCycleRankDelta: 1,
+  };
+  const extensionRegion = {
+    id: 'fixture-region',
+    themeBinding: SOURCE_THEME,
+    attachmentSockets: [],
+    spliceEdges: [],
+    allowedProfileIds: ['industrial-supplement-preview-v4'],
+    delegatedProgressionBeats: [],
+    routeNetworkGrants: [grant],
+    progressionSnapshot: {
+      schema: DUNGEON_PROGRESSION_SNAPSHOT_V2_SCHEMA,
+      startRoomId: 'keycardRoom',
+      rooms: [{ id: 'keycardRoom', progressionBandId: 0, accessDomainId }],
+      connections: [],
+      bands: [{ progressionBandId: 0, accessDomainId, roomIds: ['keycardRoom'] }],
+      keycards: [],
+      doors: [],
+      objectiveRouteIds: [],
+      protectedBeatIds: ['enemyNestGate', 'keycardGuard', 'Keycard_Alpha', 'Door_Alpha'],
+    },
+    themeCapabilities: COMPLETE_CAPABILITIES,
+  };
+  const baseDraft = {
+    basePlanHash: 'fixture-v4-base-plan',
+    rooms: [],
+    occupiedVolumes: [],
+    protectedVolumes: [],
+    connectionPlans: [],
+  };
+  const topologyKinds = new Set();
+  const junctionKinds = new Set();
+  const elevationModes = new Set();
+  const v4Profile = DUNGEON_AUGMENTATION_PROFILES['industrial-supplement-preview-v4'];
+  const metersFromTiles = (tiles) => Number((tiles * tileSize).toFixed(6));
+  const expectedJunctionFootprints = new Map([
+    ['through-t', [metersFromTiles(5), metersFromTiles(7)]],
+    ['crossroads', [metersFromTiles(7), metersFromTiles(7)]],
+    ['staggered-cross', [metersFromTiles(5), metersFromTiles(13)]],
+    ['stacked-interchange', [metersFromTiles(9), metersFromTiles(13)]],
+    ['over-under-crossover', [metersFromTiles(7), metersFromTiles(7)]],
+  ]);
+  const v4Grammars = v4Profile.grammarPool.map(({ id }) => (
+    GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS[id]
+  ));
+  const connectorGrammars = v4Grammars.filter((grammar) => (
+    grammar?.selectionConstraints?.routeNetworkModuleKind === 'connector-module'
+  ));
+  const contentGrammars = v4Grammars.filter((grammar) => (
+    grammar?.selectionConstraints?.routeNetworkModuleKind !== 'connector-module'
+  ));
+  assert.equal(v4Profile.revision, 5);
+  assert.equal(v4Grammars.length, 21);
+  assert.equal(v4Grammars.every((grammar) => Boolean(grammar?.blueprintId)), true);
+  assert.equal(connectorGrammars.length, 5);
+  assert.equal(contentGrammars.length, 16);
+  assert.equal(contentGrammars.every((grammar) => (
+    grammar?.selectionConstraints?.connectorOwned !== true
+  )), true);
+  for (const grammar of connectorGrammars) {
+    const kind = grammar.selectionConstraints.routeNetworkJunctionKind;
+    const expected = [...expectedJunctionFootprints.get(kind)]
+      .sort((left, right) => left - right);
+    const actual = [Number(grammar.size.width), Number(grammar.size.depth)]
+      .sort((left, right) => left - right);
+    assert.deepEqual(actual, expected, kind);
+    assert.equal(grammar.selectionConstraints.connectorOwned, true);
+    assert.equal(grammar.selectionConstraints.substantiveRoom, false);
+    assert.equal(
+      grammar.selectionConstraints.supportsJunctionPromotion,
+      kind !== 'over-under-crossover',
+    );
+  }
+  for (let index = 0; index < VERIFICATION_SEED_COUNT; index += 1) {
+    const options = {
+      baseDraft,
+      extensionRegions: [extensionRegion],
+      profileId: 'industrial-supplement-preview-v4',
+      layoutSeed: `pure-v4:${index}`,
+    };
+    const first = augmentDungeonDraft(options);
+    const repeated = augmentDungeonDraft(options);
+    assert.equal(first.status, 'applied', JSON.stringify(first.diagnostics.errors));
+    assert.deepEqual(first.overlayPlan, repeated.overlayPlan);
+    assert.equal(first.overlayPlan.schema, DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA);
+    assert.equal(first.overlayPlan.operations.length, 1);
+    const operation = first.overlayPlan.operations[0];
+    const roomNodes = first.overlayPlan.nodes.filter(({ kind }) => (
+      kind === 'supplementRoom'
+    ));
+    const connectorModuleNodes = first.overlayPlan.nodes.filter(({ kind }) => (
+      kind === 'supplementConnectorModule'
+    ));
+    const connectorJunctionNodes = first.overlayPlan.nodes.filter(({ kind }) => (
+      kind === 'supplementConnectorJunction'
+    ));
+    assert.ok(roomNodes.length >= 2);
+    assert.ok(connectorJunctionNodes.length >= 1);
+    assert.equal(first.overlayPlan.nodes.every(({ kind }) => (
+      kind === 'supplementRoom'
+        || kind === 'supplementConnectorModule'
+        || kind === 'supplementConnectorJunction'
+    )), true);
+    for (const node of connectorJunctionNodes) {
+      const expected = [...expectedJunctionFootprints.get(node.junction.junctionKind)]
+        .sort((left, right) => left - right);
+      const spans = [Number(node.size?.x ?? 0), Number(node.size?.z ?? 0)]
+        .sort((left, right) => left - right);
+      assert.deepEqual(spans, expected);
+      assert.ok(Number(node.graphDegree ?? 0) >= 3);
+      assert.equal(node.junction.countsAsMeaningfulStation, true);
+    }
+    assert.equal(connectorModuleNodes.every((node) => (
+      Number(node.graphDegree ?? 0) < 3
+        && node.junction?.countsAsMeaningfulStation !== true
+    )), true);
+    assert.equal(first.overlayPlan.nodes.every((node) => (
+      Number(node.graphDegree ?? 0) >= 1
+        && node.sockets.some(({ segmentId }) => Boolean(segmentId))
+    )), true);
+    assert.deepEqual(
+      [...(operation.connectorModuleNodeIds ?? [])].sort(),
+      connectorModuleNodes.map(({ id }) => id).sort(),
+    );
+    assert.deepEqual(
+      [...(operation.connectorJunctionNodeIds ?? [])].sort(),
+      connectorJunctionNodes.map(({ id }) => id).sort(),
+    );
+    assert.equal(operation.type, 'routeNetwork');
+    assert.equal(operation.routeNetworkKind, 'landmark-perimeter-loop');
+    assert.deepEqual([...operation.endpointSocketIds].sort(), endpointSockets.map(({ id }) => id).sort());
+    assert.equal(operation.cycleRankDelta, 1);
+    assert.ok(operation.moduleCount >= 3 && operation.moduleCount <= 5);
+    assert.equal(operation.substantiveModuleCount, operation.moduleCount);
+    assert.equal(
+      operation.moduleCount,
+      roomNodes.length + connectorJunctionNodes.length,
+    );
+    assert.equal(operation.physicalNodeCount, first.overlayPlan.nodes.length);
+    assert.equal(operation.connectorModuleCount, connectorModuleNodes.length);
+    assert.equal(operation.featurelessSpans.every(({ distanceMeters }) => distanceMeters <= 33.6 + 1e-6), true);
+    const physicalNodeIds = new Set(first.overlayPlan.nodes.map(({ id }) => id));
+    const adjacency = new Map([...physicalNodeIds].map((id) => [id, new Set()]));
+    const parentAnchoredNodeIds = new Set();
+    for (const segment of first.overlayPlan.segments) {
+      assert.ok(Array.isArray(segment.path) && segment.path.length >= 2);
+      for (const landing of segment.landingVolumes ?? []) {
+        assert.deepEqual(
+          [Number(landing.size.x), Number(landing.size.z)]
+            .sort((left, right) => left - right),
+          [5.6, 8.4],
+          'V4 route-network landings use the bounded three-by-two-tile doorway footprint',
+        );
+      }
+      const supplementalEndpointIds = [segment.from, segment.to]
+        .map(({ nodeId }) => String(nodeId ?? ''))
+        .filter((nodeId) => physicalNodeIds.has(nodeId));
+      if (supplementalEndpointIds.length === 2) {
+        adjacency.get(supplementalEndpointIds[0]).add(supplementalEndpointIds[1]);
+        adjacency.get(supplementalEndpointIds[1]).add(supplementalEndpointIds[0]);
+      } else if (supplementalEndpointIds.length === 1
+        && [segment.from, segment.to].some(({ kind }) => kind === 'parentSocket')) {
+        parentAnchoredNodeIds.add(supplementalEndpointIds[0]);
+      }
+    }
+    assert.equal(parentAnchoredNodeIds.size, 2);
+    const physicallyReachableNodeIds = new Set(parentAnchoredNodeIds);
+    const pendingReachability = [...parentAnchoredNodeIds];
+    while (pendingReachability.length > 0) {
+      const nodeId = pendingReachability.pop();
+      for (const adjacentNodeId of adjacency.get(nodeId) ?? []) {
+        if (physicallyReachableNodeIds.has(adjacentNodeId)) continue;
+        physicallyReachableNodeIds.add(adjacentNodeId);
+        pendingReachability.push(adjacentNodeId);
+      }
+    }
+    assert.deepEqual(
+      [...physicallyReachableNodeIds].sort(),
+      [...physicalNodeIds].sort(),
+      'every physical route module must connect to an exact parent aperture',
+    );
+    topologyKinds.add(operation.topologyTemplateId);
+    operation.junctionKinds.forEach((kind) => junctionKinds.add(kind));
+    operation.elevationModes.forEach((mode) => elevationModes.add(mode));
+  }
+  assert.deepEqual([...topologyKinds].sort(), [
+    'fork-merge-h-loop',
+    'multi-door-room-chain',
+    'over-under-loop',
+    'parallel-gallery-loop',
+    'split-level-ring',
+    'stacked-interchange',
+  ]);
+  assert.ok(junctionKinds.size >= 3);
+  assert.deepEqual(
+    [...elevationModes].sort(),
+    ['split-level-platform'],
+    'the keycard-pyramid loop remains in band 0 and uses only its internal split level',
+  );
+});
+
+test('the Industrial host excludes special-surface conveyor routes from generic edge padding', () => {
+  const rooms = [
+    { id: 'enemyNest', x: -30, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'keycardRoom', x: 30, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'trapRoom', x: -30, z: 30, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'conveyorRoom', x: 30, z: 30, width: 7, depth: 7, baseElevation: 0 },
+  ];
+  const connection = ({ id, logicalConnectionId, fromRoomId, toRoomId, z }) => ({
+    id,
+    logicalConnectionId,
+    fromRoomId,
+    toRoomId,
+    level: 0,
+    elevation: 0,
+    fullPath: Array.from({ length: 55 }, (_, index) => ({ x: index - 27, z })),
+    fromSocket: { id: `${id}:from`, roomId: fromRoomId, x: -27, z, elevation: 0, facingX: 1, facingZ: 0 },
+    toSocket: { id: `${id}:to`, roomId: toRoomId, x: 27, z, elevation: 0, facingX: -1, facingZ: 0 },
+  });
+  const connectionPlans = [
+    connection({
+      id: 'enemyNest_keycardRoom_ground',
+      logicalConnectionId: 'enemyNest_keycardRoom',
+      fromRoomId: 'enemyNest',
+      toRoomId: 'keycardRoom',
+      z: 0,
+    }),
+    connection({
+      id: 'trapRoom_conveyorRoom_ground',
+      logicalConnectionId: 'trapRoom_conveyorRoom',
+      fromRoomId: 'trapRoom',
+      toRoomId: 'conveyorRoom',
+      z: 30,
+    }),
+  ];
+  const baseDraft = createIndustrialBaseDraft({ rooms, connectionPlans, tileSize: 2.8 });
+  const host = createIndustrialAugmentationHost({ baseDraft, rooms, connectionPlans, tileSize: 2.8 });
+
+  assert.deepEqual(
+    host.extensionRegions[0].spliceEdges.map(({ logicalEdgeId }) => logicalEdgeId),
+    ['enemyNest_keycardRoom'],
+  );
+});
+
+test('the Industrial host protects every authored gallery footprint cell', () => {
+  const rooms = [
+    { id: 'enemyNest', x: -10, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'keycardRoom', x: 10, z: 0, width: 7, depth: 7, baseElevation: 0 },
+  ];
+  const connectionPlans = [{
+    id: 'enemyNest_keycardRoom_ground',
+    logicalConnectionId: 'enemyNest_keycardRoom',
+    fromRoomId: 'enemyNest',
+    toRoomId: 'keycardRoom',
+    level: 0,
+    elevation: 0,
+    fullPath: [{ x: -7, z: 0 }, { x: 7, z: 0 }],
+    fromSocket: { id: 'gallery:from', roomId: 'enemyNest', x: -7, z: 0, elevation: 0, facingX: 1, facingZ: 0 },
+    toSocket: { id: 'gallery:to', roomId: 'keycardRoom', x: 7, z: 0, elevation: 0, facingX: -1, facingZ: 0 },
+    galleryFootprintTiles: [
+      { x: 0, z: -2, elevation: 0 },
+      { x: 0, z: -1, elevation: 0 },
+      { x: 0, z: 0, elevation: 0 },
+      { x: 0, z: 1, elevation: 0 },
+      { x: 0, z: 2, elevation: 0 },
+      { x: 0, z: 2, elevation: 0 },
+    ],
+  }];
+  const baseDraft = createIndustrialBaseDraft({ rooms, connectionPlans, tileSize: 2.8 });
+  const host = createIndustrialAugmentationHost({ baseDraft, rooms, connectionPlans, tileSize: 2.8 });
+  const galleryVolumes = host.extensionRegions[0].protectedVolumes.filter(({ purpose }) => (
+    purpose === 'industrial-authored-gallery-footprint-column'
+  ));
+
+  assert.equal(galleryVolumes.length, 5);
+  assert.deepEqual(galleryVolumes.map(({ center }) => center.z).sort((a, b) => a - b), [
+    -5.6, -2.8, 0, 2.8, 5.6,
+  ]);
+  assert.equal(galleryVolumes.every((volume) => (
+    volume.ownerId === 'enemyNest_keycardRoom'
+      && volume.physicalConnectionId === 'enemyNest_keycardRoom_ground'
+      && volume.size.x === 2.8
+      && volume.size.z === 2.8
+      && volume.size.y === 2048
+  )), true);
+});
+
+test('the Industrial host and base draft preserve exact family-reserved connector heights', () => {
+  const rooms = [
+    { id: 'enemyNest', x: -10, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'keycardRoom', x: 10, z: 0, width: 7, depth: 7, baseElevation: 0 },
+  ];
+  const connectionPlans = [{
+    id: 'enemyNest_keycardRoom_ground',
+    logicalConnectionId: 'enemyNest_keycardRoom',
+    fromRoomId: 'enemyNest',
+    toRoomId: 'keycardRoom',
+    level: 0,
+    elevation: 14,
+    fullPath: [{ x: -7, z: 0 }, { x: 7, z: 0 }],
+    fromSocket: { id: 'gallery:from', roomId: 'enemyNest', x: -7, z: 0, elevation: 14, facingX: 1, facingZ: 0 },
+    toSocket: { id: 'gallery:to', roomId: 'keycardRoom', x: 7, z: 0, elevation: 14, facingX: -1, facingZ: 0 },
+    familyReservedFootprintColumns: [
+      { x: 0, z: 0, minY: 13.4, maxY: 17.6, purposes: ['gallery-envelope'] },
+      { x: 0, z: 0, minY: 27.4, maxY: 31.6, purposes: ['gallery-envelope'] },
+      { x: 1, z: 0, minY: 13.4, maxY: 17.6, purposes: ['gallery-envelope'] },
+    ],
+  }];
+  const baseDraft = createIndustrialBaseDraft({ rooms, connectionPlans, tileSize: 2.8 });
+  const host = createIndustrialAugmentationHost({ baseDraft, rooms, connectionPlans, tileSize: 2.8 });
+  const hostColumns = host.extensionRegions[0].protectedVolumes.filter(({ purpose }) => (
+    purpose === 'industrial-authored-gallery-footprint-column'
+  ));
+  const baseColumns = baseDraft.protectedVolumes.filter(({ purpose }) => (
+    purpose === 'industrial-single-owner-xz-connector-column'
+  ));
+
+  assert.equal(hostColumns.length, 3);
+  assert.equal(baseColumns.length, 3);
+  for (const columns of [hostColumns, baseColumns]) {
+    const originIntervals = columns
+      .filter(({ center }) => center.x === 0 && center.z === 0)
+      .sort((first, second) => first.center.y - second.center.y);
+    assert.equal(originIntervals.length, 2);
+    assert.deepEqual(
+      originIntervals.map(({ center }) => Number(center.y.toFixed(6))),
+      [15.5, 29.5],
+    );
+    assert.deepEqual(
+      originIntervals.map(({ size }) => Number(size.y.toFixed(6))),
+      [4.2, 4.2],
+    );
+    assert.equal(dungeonVolumesOverlap(originIntervals[0], {
+      center: { x: 0, y: 15.5, z: 0 },
+      size: { x: 2, y: 2, z: 2 },
+    }), true);
+    assert.equal(dungeonVolumesOverlap(originIntervals[0], {
+      center: { x: 0, y: 23, z: 0 },
+      size: { x: 2, y: 2, z: 2 },
+    }), false);
+  }
 });
 
 test('the Industrial adapter rejects supplemental rooms stacked over authored connector columns', () => {

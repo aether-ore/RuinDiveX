@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import {
+  isDungeonGraphOnlyConnection,
+  isDungeonRuntimeRoom,
+} from '../DungeonProgression.js';
+import {
   DUNGEON_SUPPLEMENT_FRAGMENT_SCHEMA,
   DungeonSupplementAssemblyError,
 } from './DungeonSupplementAssembler.js';
@@ -8,6 +12,7 @@ export const DUNGEON_EFFECTIVE_FACADE_SCHEMA = 'ruindivex-dungeon-effective-faca
 
 const MERGED_ARRAY_FIELDS = Object.freeze([
   'rooms',
+  'connectorJunctionProxies',
   'floorTiles',
   'verticalConnectors',
   'connectionPlans',
@@ -68,6 +73,116 @@ function floorIdentity(tile) {
   return `${tile?.x},${tile?.z}@${finite(tile?.elevation ?? tile?.baseElevation).toFixed(3)}`;
 }
 
+function floorOwnerIds(tile = {}) {
+  return [...new Set([
+    tile.roomId,
+    tile.connectorJunctionProxyId,
+    tile.connectorJunctionOwnerId,
+    tile.connectorId,
+    tile.connectionId,
+    ...(tile.mergedFloorOwnerIds ?? []),
+    ...(tile.sharedThresholdOwnerIds ?? []),
+  ].filter(Boolean).map(String))].sort();
+}
+
+function floorSourceCount(tile = {}) {
+  return Math.max(1, Number(tile.mergedFloorSourceCount ?? 1));
+}
+
+function floorUnownedSourceCount(tile = {}) {
+  if (Number.isFinite(Number(tile.mergedUnownedFloorSourceCount))) {
+    return Math.max(0, Number(tile.mergedUnownedFloorSourceCount));
+  }
+  return floorOwnerIds(tile).length === 0 ? 1 : 0;
+}
+
+function mergeFloorProvenance(baseFloor, supplementFloor, identity, diagnostics, field) {
+  const baseOwnerIds = floorOwnerIds(baseFloor);
+  const supplementOwnerIds = floorOwnerIds(supplementFloor);
+  const mergedOwnerIds = [...new Set([...baseOwnerIds, ...supplementOwnerIds])].sort();
+  const sharedThresholdOwnerIds = new Set([
+    ...(baseFloor.sharedThresholdOwnerIds ?? []),
+    ...(baseFloor.sharedFloorOwnerIds ?? []),
+    ...(supplementFloor.sharedThresholdOwnerIds ?? []),
+    ...(supplementFloor.sharedFloorOwnerIds ?? []),
+  ].filter(Boolean).map(String));
+  const sameOwners = baseOwnerIds.length > 0
+    && supplementOwnerIds.length > 0
+    && baseOwnerIds.every((ownerId) => supplementOwnerIds.includes(ownerId))
+    && supplementOwnerIds.every((ownerId) => baseOwnerIds.includes(ownerId));
+  const explicitlySharedThreshold = sharedThresholdOwnerIds.size > 0
+    && mergedOwnerIds.every((ownerId) => sharedThresholdOwnerIds.has(ownerId));
+  const mergedUnownedSourceCount = floorUnownedSourceCount(baseFloor)
+    + floorUnownedSourceCount(supplementFloor);
+  diagnostics.conflicts.push({
+    field,
+    identity,
+    source: 'supplement',
+    baseOwnerIds,
+    supplementOwnerIds,
+    explicitlySharedThreshold,
+  });
+  if (
+    mergedUnownedSourceCount > 0
+    || (!sameOwners && !explicitlySharedThreshold)
+  ) {
+    throw new DungeonSupplementAssemblyError(
+      `Dungeon facade overlay conflicts with floor provenance at ${identity}.`,
+      {
+        code: 'DUNGEON_FACADE_FLOOR_OWNERSHIP_CONFLICT',
+        diagnostics: [{
+          field,
+          floorIdentity: identity,
+          baseOwnerIds,
+          supplementOwnerIds,
+          sharedThresholdOwnerIds: [...sharedThresholdOwnerIds].sort(),
+          mergedUnownedSourceCount,
+        }],
+      },
+    );
+  }
+  return {
+    ...baseFloor,
+    mergedFloorOwnerIds: mergedOwnerIds,
+    mergedFloorSourceCount: floorSourceCount(baseFloor) + floorSourceCount(supplementFloor),
+    mergedUnownedFloorSourceCount: 0,
+    ...(sharedThresholdOwnerIds.size > 0 ? {
+      sharedThresholdOwnerIds: [...sharedThresholdOwnerIds].sort(),
+      sharedThresholdContractIds: [...new Set([
+        ...(baseFloor.sharedThresholdContractIds ?? []),
+        ...(supplementFloor.sharedThresholdContractIds ?? []),
+      ].filter(Boolean).map(String))].sort(),
+    } : {}),
+  };
+}
+
+function mergeFloorRecords(baseRecords, supplementRecords, diagnostics) {
+  const merged = [];
+  const indexByIdentity = new Map();
+  for (const record of asArray(baseRecords)) {
+    const identity = floorIdentity(record);
+    indexByIdentity.set(identity, merged.length);
+    merged.push(record);
+  }
+  for (const record of asArray(supplementRecords)) {
+    const identity = floorIdentity(record);
+    if (!indexByIdentity.has(identity)) {
+      indexByIdentity.set(identity, merged.length);
+      merged.push(record);
+      continue;
+    }
+    const index = indexByIdentity.get(identity);
+    merged[index] = mergeFloorProvenance(
+      merged[index],
+      record,
+      identity,
+      diagnostics,
+      'floorTiles',
+    );
+  }
+  return merged;
+}
+
 function mergeRecords(baseRecords, supplementRecords, {
   conflictPolicy = 'supplement',
   identity = recordId,
@@ -117,6 +232,18 @@ function mergeTiles(baseTiles, supplementTiles, conflictPolicy, diagnostics) {
   const merged = new Map(normalizeTiles(baseTiles));
   for (const [key, tile] of normalizeTiles(supplementTiles)) {
     if (merged.has(key)) {
+      const existing = merged.get(key);
+      const sameElevation = Math.abs(
+        finite(existing?.elevation ?? existing?.baseElevation)
+          - finite(tile?.elevation ?? tile?.baseElevation),
+      ) <= 0.0001;
+      if (sameElevation) {
+        merged.set(
+          key,
+          mergeFloorProvenance(existing, tile, floorIdentity(tile), diagnostics, 'tiles'),
+        );
+        continue;
+      }
       diagnostics.conflicts.push({ field: 'tiles', identity: key, source: 'supplement' });
       if (conflictPolicy === 'error') {
         throw new DungeonSupplementAssemblyError(
@@ -274,8 +401,8 @@ function mergeMinimap(baseMinimap, supplementMinimap, options, diagnostics) {
   const base = baseMinimap ?? {};
   const supplement = supplementMinimap ?? {};
   let rooms = mergeRecords(
-    asArray(base.rooms).map(normalizeMinimapRoom),
-    asArray(supplement.rooms).map(normalizeMinimapRoom),
+    asArray(base.rooms).filter(isDungeonRuntimeRoom).map(normalizeMinimapRoom),
+    asArray(supplement.rooms).filter(isDungeonRuntimeRoom).map(normalizeMinimapRoom),
     {
       ...options,
       diagnostics,
@@ -283,8 +410,12 @@ function mergeMinimap(baseMinimap, supplementMinimap, options, diagnostics) {
       identity: minimapRoomIdentity,
     },
   );
-  const baseHallways = asArray(base.hallways ?? base.connections).map(normalizeMinimapHallway);
-  const supplementHallways = asArray(supplement.hallways ?? supplement.connections).map(normalizeMinimapHallway);
+  const baseHallways = asArray(base.hallways ?? base.connections)
+    .filter((hallway) => !isDungeonGraphOnlyConnection(hallway))
+    .map(normalizeMinimapHallway);
+  const supplementHallways = asArray(supplement.hallways ?? supplement.connections)
+    .filter((hallway) => !isDungeonGraphOnlyConnection(hallway))
+    .map(normalizeMinimapHallway);
   const hallways = mergeRecords(baseHallways, supplementHallways, {
     ...options,
     diagnostics,
@@ -292,8 +423,12 @@ function mergeMinimap(baseMinimap, supplementMinimap, options, diagnostics) {
     identity: minimapHallwayIdentity,
   });
   const connections = mergeRecords(
-    asArray(base.connections ?? baseHallways).map(normalizeMinimapHallway),
-    asArray(supplement.connections ?? supplementHallways).map(normalizeMinimapHallway),
+    asArray(base.connections ?? baseHallways)
+      .filter((connection) => !isDungeonGraphOnlyConnection(connection))
+      .map(normalizeMinimapHallway),
+    asArray(supplement.connections ?? supplementHallways)
+      .filter((connection) => !isDungeonGraphOnlyConnection(connection))
+      .map(normalizeMinimapHallway),
     {
       ...options,
       diagnostics,
@@ -333,29 +468,37 @@ function mergeMinimap(baseMinimap, supplementMinimap, options, diagnostics) {
 }
 
 function mergeProgression(baseProgression, patch, options, diagnostics) {
-  if (!patch) return baseProgression;
-  if (!baseProgression) return { ...patch };
-  const merged = { ...baseProgression, ...patch };
+  if (!baseProgression && !patch) return null;
+  const base = baseProgression ?? {};
+  const supplement = patch ?? {};
+  const merged = { ...base, ...supplement };
   for (const field of ['rooms', 'roomConnections', 'doors', 'keycards', 'objectives', 'beats']) {
-    if (baseProgression[field] || patch[field]) {
-      merged[field] = mergeRecords(baseProgression[field], patch[field], {
-        ...options,
-        diagnostics,
-        field: `progression.${field}`,
-      });
+    if (base[field] || supplement[field]) {
+      const filter = field === 'roomConnections'
+        ? (record) => !isDungeonGraphOnlyConnection(record)
+        : field === 'rooms' ? isDungeonRuntimeRoom : () => true;
+      merged[field] = mergeRecords(
+        asArray(base[field]).filter(filter),
+        asArray(supplement[field]).filter(filter),
+        {
+          ...options,
+          diagnostics,
+          field: `progression.${field}`,
+        },
+      );
     }
   }
-  if (baseProgression.validation || patch.validation) {
+  if (base.validation || supplement.validation) {
     merged.validation = {
-      ...(baseProgression.validation ?? {}),
-      ...(patch.validation ?? {}),
+      ...(base.validation ?? {}),
+      ...(supplement.validation ?? {}),
       errors: [
-        ...asArray(baseProgression.validation?.errors),
-        ...asArray(patch.validation?.errors),
+        ...asArray(base.validation?.errors),
+        ...asArray(supplement.validation?.errors),
       ],
       warnings: [
-        ...asArray(baseProgression.validation?.warnings),
-        ...asArray(patch.validation?.warnings),
+        ...asArray(base.validation?.warnings),
+        ...asArray(supplement.validation?.warnings),
       ],
     };
   }
@@ -434,17 +577,24 @@ export function mergeDungeonFacade(baseFacade, supplementFragment, {
 
   for (const field of MERGED_ARRAY_FIELDS) {
     let baseRecords = asArray(baseFacade[field]);
+    let supplementRecords = asArray(supplementFragment[field]);
+    if (field === 'rooms') {
+      baseRecords = baseRecords.filter(isDungeonRuntimeRoom);
+      supplementRecords = supplementRecords.filter(isDungeonRuntimeRoom);
+    }
     if (replaceSet.size > 0 && ['connectionPlans', 'verticalConnectors'].includes(field)) {
       baseRecords = baseRecords.filter((record) => !replaceSet.has(
         record?.id ?? record?.connectorId ?? record?.connectionId,
       ));
     }
-    effective[field] = mergeRecords(baseRecords, supplementFragment[field], {
-      conflictPolicy,
-      diagnostics,
-      field,
-      identity: field === 'floorTiles' ? floorIdentity : recordId,
-    });
+    effective[field] = field === 'floorTiles'
+      ? mergeFloorRecords(baseRecords, supplementRecords, diagnostics)
+      : mergeRecords(baseRecords, supplementRecords, {
+          conflictPolicy,
+          diagnostics,
+          field,
+          identity: recordId,
+        });
   }
 
   effective.tiles = mergeTiles(

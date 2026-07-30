@@ -1,5 +1,26 @@
 export const SHRINE_KEY_ID = 'Shrine_Key';
 
+export function isDungeonGraphOnlyConnection(connection = null) {
+  if (!connection) return false;
+  const recordIsGraphOnly = (record) => Boolean(
+    record?.isSupplementGraphConnection === true
+    || record?.graphOnly === true
+    || record?.connectorVariantConstraints?.graphOnly === true
+  );
+  if (recordIsGraphOnly(connection)) return true;
+  const routes = Array.isArray(connection.routes) ? connection.routes : [];
+  return routes.length > 0 && routes.every(recordIsGraphOnly);
+}
+
+export function isDungeonRuntimeRoom(room = null) {
+  return Boolean(
+    room
+    && room.suppressRoomGeometry !== true
+    && room.isRouteStationProxy !== true
+    && room.isConnectorJunctionProxy !== true
+  );
+}
+
 export const PROGRESSION_ROOM_BANDS = {
   hubTown: 0,
   expeditionCamp: 0,
@@ -171,6 +192,163 @@ function roomCenter2D(room) {
   };
 }
 
+function resolveRoomProgressionBand(room = {}) {
+  if (!room.isDungeonSupplement) {
+    return PROGRESSION_ROOM_BANDS[room.id] ?? 0;
+  }
+
+  const supplementBand = Number(
+    room.augmentationProgressionBandId
+      ?? room.augmentationProgressionBand
+      ?? room.augmentationAccessBand
+      ?? room.progressionBand
+      ?? 0,
+  );
+  return Number.isFinite(supplementBand) ? supplementBand : 0;
+}
+
+function normalizeRequirementId(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readRequirementIds(source, pluralKey, singularKey = null) {
+  if (!source || typeof source !== 'object') {
+    return { ids: [], malformed: false };
+  }
+
+  const ids = [];
+  let malformed = false;
+  if (Object.hasOwn(source, pluralKey)) {
+    if (!Array.isArray(source[pluralKey])) {
+      malformed = true;
+    } else {
+      for (const raw of source[pluralKey]) {
+        const id = normalizeRequirementId(raw);
+        if (!id) malformed = true;
+        else ids.push(id);
+      }
+    }
+  }
+  if (singularKey && Object.hasOwn(source, singularKey)) {
+    const id = normalizeRequirementId(source[singularKey]);
+    if (!id) malformed = true;
+    else ids.push(id);
+  }
+  return { ids, malformed };
+}
+
+function normalizeActiveStateIds(value) {
+  if (value instanceof Set) return value;
+  if (Array.isArray(value)) {
+    return new Set(value.map(normalizeRequirementId).filter(Boolean));
+  }
+  if (value && typeof value === 'object') {
+    return new Set(Object.entries(value)
+      .filter(([, active]) => active === true)
+      .map(([id]) => normalizeRequirementId(id))
+      .filter(Boolean));
+  }
+  return new Set();
+}
+
+function createActiveProgressionState(rawState = {}) {
+  const source = rawState && typeof rawState === 'object' ? rawState : {};
+  const generic = normalizeActiveStateIds(
+    source.activeStateIds
+      ?? source.progressionStateIds
+      ?? source.satisfiedStateIds,
+  );
+  const merge = (...values) => new Set(values.flatMap((value) => (
+    [...normalizeActiveStateIds(value)]
+  )));
+  return {
+    generic,
+    encounter: merge(
+      source.completedEncounterIds,
+      source.clearedEncounterIds,
+      source.encounterStateIds,
+    ),
+    mechanism: merge(
+      source.activatedMechanismIds,
+      source.mechanismStateIds,
+    ),
+    shortcut: merge(
+      source.unlockedShortcutIds,
+      source.enabledShortcutIds,
+      source.shortcutStateIds,
+    ),
+    pressurePlate: merge(
+      source.activatedPressurePlateIds,
+      source.poweredPressurePlateIds,
+      source.pressurePlateStateIds,
+    ),
+  };
+}
+
+function collectSupplementalConnectionRequirements(connection = {}, door = null) {
+  const sources = [connection, connection.gateRequirement, door, door?.gateRequirement]
+    .filter(Boolean);
+  const requirements = {
+    credentials: new Set(),
+    encounter: new Set(),
+    mechanism: new Set(),
+    shortcut: new Set(),
+    generic: new Set(),
+    pressurePlate: new Set(),
+    malformed: false,
+  };
+  let requiresEncounterState = false;
+  let requiresMechanismState = false;
+  let requiresShortcutState = false;
+  let requiresState = false;
+  let requiresPressurePlate = false;
+  const fields = [
+    ['credentials', 'requiredCredentialIds', 'requiredCredentialId'],
+    ['encounter', 'requiredEncounterStateIds', 'requiredEncounterStateId'],
+    ['mechanism', 'requiredMechanismStateIds', 'requiredMechanismStateId'],
+    ['shortcut', 'requiredShortcutStateIds', 'requiredShortcutStateId'],
+    ['generic', 'requiredStateIds', 'requiredStateId'],
+    ['pressurePlate', 'requiredPressurePlateIds', 'requiredPressurePlateId'],
+  ];
+  for (const source of sources) {
+    requirements.malformed ||= source.requirementsMalformed === true;
+    for (const [kind, pluralKey, singularKey] of fields) {
+      const result = readRequirementIds(source, pluralKey, singularKey);
+      result.ids.forEach((id) => requirements[kind].add(id));
+      requirements.malformed ||= result.malformed;
+    }
+    const requiredKeycardId = normalizeRequirementId(source.requiredKeycardId);
+    if (requiredKeycardId) requirements.credentials.add(requiredKeycardId);
+    if (Object.hasOwn(source, 'pressurePlateId')) {
+      const pressurePlateId = normalizeRequirementId(source.pressurePlateId);
+      if (pressurePlateId) requirements.pressurePlate.add(pressurePlateId);
+      else if (source.pressurePlateId != null && source.pressurePlateId !== '') {
+        requirements.malformed = true;
+      }
+    }
+    requiresEncounterState ||= source.requiresEncounterState === true;
+    requiresMechanismState ||= source.requiresMechanismState === true;
+    requiresShortcutState ||= source.requiresShortcutState === true;
+    requiresState ||= source.requiresState === true;
+    requiresPressurePlate ||= source.requiresPressurePlate === true;
+  }
+  requirements.malformed ||= requiresEncounterState && requirements.encounter.size === 0;
+  requirements.malformed ||= requiresMechanismState && requirements.mechanism.size === 0;
+  requirements.malformed ||= requiresShortcutState && requirements.shortcut.size === 0;
+  requirements.malformed ||= requiresState && requirements.generic.size === 0;
+  requirements.malformed ||= requiresPressurePlate && requirements.pressurePlate.size === 0;
+  requirements.malformed ||= Boolean(connection.doorId)
+    && [
+      requirements.credentials,
+      requirements.encounter,
+      requirements.mechanism,
+      requirements.shortcut,
+      requirements.generic,
+      requirements.pressurePlate,
+    ].every((ids) => ids.size === 0);
+  return requirements;
+}
+
 function findSourcePosition({ keycardId, spawnMode, landmarks, chests, encounters }) {
   if (spawnMode === 'Pedestal') {
     return clonePosition(landmarks.keycards.find((keycard) => keycard.keycardId === keycardId)?.position);
@@ -193,7 +371,10 @@ function createRoomConnections(roomById, connectionPlans = []) {
     .map(([fromRoomId, toRoomId, doorId]) => {
       const id = `${fromRoomId}_${toRoomId}`;
       const routes = connectionPlans
-        .filter((plan) => plan.logicalConnectionId === id)
+        .filter((plan) => (
+          plan.logicalConnectionId === id
+          && !isDungeonGraphOnlyConnection(plan)
+        ))
         .map((plan) => ({
           id: plan.id,
           connectorType: plan.connectorType,
@@ -261,8 +442,8 @@ function createMinimapData({ rooms, roomConnections, doors, keycards, chests, ke
       connectedRoomIds: roomConnections
         .filter((connection) => connection.fromRoomId === room.id || connection.toRoomId === room.id)
         .map((connection) => connection.fromRoomId === room.id ? connection.toRoomId : connection.fromRoomId),
-      progressionBand: PROGRESSION_ROOM_BANDS[room.id] ?? 0,
-      isInitialUnlockedArea: (PROGRESSION_ROOM_BANDS[room.id] ?? 0) === 0,
+      progressionBand: resolveRoomProgressionBand(room),
+      isInitialUnlockedArea: resolveRoomProgressionBand(room) === 0,
       containsKeycard: keycards.some((keycard) => keycard.spawnRoomId === room.id),
       containsChest: chests.some((chest) => chest.roomId === room.id),
       containsBoss: bossEncounter?.roomId === room.id,
@@ -333,7 +514,8 @@ export function createDungeonProgressionData({
   encounters = [],
   connectionPlans = [],
 } = {}) {
-  const roomById = new Map(rooms.map((room) => [room.id, room]));
+  const runtimeRooms = rooms.filter(isDungeonRuntimeRoom);
+  const roomById = new Map(runtimeRooms.map((room) => [room.id, room]));
   const doorById = new Map(doors.map((door) => [door.id, door]));
   const roomConnections = createRoomConnections(roomById, connectionPlans);
   const keycards = PROGRESSION_KEYCARDS.map((keycard) => ({
@@ -378,8 +560,8 @@ export function createDungeonProgressionData({
     }
     : null;
 
-  for (const room of rooms) {
-    room.progressionBand = PROGRESSION_ROOM_BANDS[room.id] ?? 0;
+  for (const room of runtimeRooms) {
+    room.progressionBand = resolveRoomProgressionBand(room);
   }
 
   const progression = {
@@ -412,7 +594,7 @@ export function createDungeonProgressionData({
   };
 
   progression.minimap = createMinimapData({
-    rooms,
+    rooms: runtimeRooms,
     roomConnections,
     doors: progressionDoors,
     keycards,
@@ -529,7 +711,8 @@ export class DungeonValidator {
     this.roomsById = new Map();
     this.doorsById = new Map((progression.doors ?? []).map((door) => [door.doorId, door]));
     this.keycardsById = new Map((progression.keycards ?? []).map((keycard) => [keycard.keycardId, keycard]));
-    this.connections = progression.roomConnections ?? [];
+    this.connections = (progression.roomConnections ?? [])
+      .filter((connection) => !isDungeonGraphOnlyConnection(connection));
 
     for (const band of progression.bands ?? []) {
       for (const roomId of band.roomIds ?? []) {
@@ -552,7 +735,18 @@ export class DungeonValidator {
 
     for (const connection of this.connections) {
       const routes = connection.routes ?? [];
-      if (!routes.some((route) => route.requiredForProgression)) {
+      if (connection.isDungeonSupplement) {
+        const door = connection.doorId ? this.doorsById.get(connection.doorId) : null;
+        const requirements = collectSupplementalConnectionRequirements(connection, door);
+        if (connection.doorId && !door) {
+          errors.push(`${connection.id} references unknown supplemental gate ${connection.doorId}.`);
+        }
+        if (requirements.malformed) {
+          errors.push(`${connection.id} has an incomplete supplemental gate requirement.`);
+        }
+      }
+      if (!connection.isDungeonSupplement
+        && !routes.some((route) => route.requiredForProgression)) {
         errors.push(`${connection.id} has no required physical traversal route.`);
       }
       for (const route of routes) {
@@ -705,7 +899,7 @@ export class DungeonValidator {
     };
   }
 
-  getReachableRooms(inventory = new Set(), forceClosedDoorIds = new Set()) {
+  getReachableRooms(inventory = new Set(), forceClosedDoorIds = new Set(), activeState = {}) {
     const startRoomId = this.progression.entranceRoomId ?? 'hubTown';
     const reachable = new Set([startRoomId]);
     const queue = [startRoomId];
@@ -724,7 +918,7 @@ export class DungeonValidator {
           continue;
         }
 
-        if (!this.canPassConnection(connection, inventory, forceClosedDoorIds)) {
+        if (!this.canPassConnection(connection, inventory, forceClosedDoorIds, activeState)) {
           continue;
         }
 
@@ -736,24 +930,49 @@ export class DungeonValidator {
     return reachable;
   }
 
-  canPassConnection(connection, inventory, forceClosedDoorIds) {
+  canPassConnection(connection, inventory, forceClosedDoorIds, activeState = {}) {
+    const supplemental = connection.isDungeonSupplement === true;
+    const door = connection.doorId ? this.doorsById.get(connection.doorId) : null;
+    const requirements = supplemental
+      ? collectSupplementalConnectionRequirements(connection, door)
+      : null;
+
+    if (supplemental && requirements.malformed) return false;
+
     if (!connection.doorId || connection.doorId === 'entranceDoor') {
-      return true;
+      if (!supplemental) return true;
+    } else {
+      if (forceClosedDoorIds.has(connection.doorId)) {
+        return false;
+      }
+
+      if (!door) {
+        // Preserve legacy encounter/pressure gates while ensuring a malformed
+        // supplemental cross-band edge cannot silently fail open.
+        return !supplemental;
+      }
     }
 
-    if (forceClosedDoorIds.has(connection.doorId)) {
-      return false;
+    if (!supplemental) {
+      if (!door.requiredKeycardId) return true;
+      return inventory.has(door.requiredKeycardId);
     }
 
-    const door = this.doorsById.get(connection.doorId);
-    if (!door) {
-      return true;
+    for (const credentialId of requirements.credentials) {
+      if (!inventory.has(credentialId)) return false;
     }
-
-    if (!door.requiredKeycardId) {
-      return true;
+    const state = createActiveProgressionState(activeState);
+    for (const [kind, ids] of [
+      ['encounter', requirements.encounter],
+      ['mechanism', requirements.mechanism],
+      ['shortcut', requirements.shortcut],
+      ['generic', requirements.generic],
+      ['pressurePlate', requirements.pressurePlate],
+    ]) {
+      for (const stateId of ids) {
+        if (!state.generic.has(stateId) && !state[kind].has(stateId)) return false;
+      }
     }
-
-    return inventory.has(door.requiredKeycardId);
+    return true;
   }
 }

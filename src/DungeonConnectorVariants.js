@@ -84,6 +84,50 @@ const FAMILY_RESERVATION_HALF_WIDTH_TILES = Object.freeze({
   unvaried: 2,
 });
 
+/**
+ * Returns the authored walkable approach elevation for one connector path
+ * index. A null result is the transfer aperture/flight itself and must not be
+ * treated as an ordinary corridor station.
+ */
+export function resolveDungeonConnectorApproachElevationAt(plan, index) {
+  const contract = plan?.connectorVariant ?? null;
+  const traversalKind = contract?.traversalKind ?? 'walk';
+  const sourceElevation = Number(
+    plan?.sourceElevation
+      ?? plan?.fromSocket?.elevation
+      ?? plan?.elevation
+      ?? 0,
+  );
+  const destinationElevation = Number(
+    plan?.destinationElevation
+      ?? plan?.toSocket?.elevation
+      ?? sourceElevation,
+  );
+  const pathIndex = Number(index);
+  if (!Number.isFinite(pathIndex)) return null;
+  if (traversalKind === 'walk') return sourceElevation;
+  if (traversalKind === 'slope') {
+    const run = contract?.pathContract?.selectedStraightRun ?? null;
+    if (pathIndex < Number(run?.startIndex)) return sourceElevation;
+    if (pathIndex >= Number(run?.endIndex)) return destinationElevation;
+    return null;
+  }
+  if (traversalKind === 'ladder') {
+    const mechanism = contract?.mechanisms?.find(({ type }) => type === 'ladder');
+    const apertureIndex = Number(mechanism?.pathIndex);
+    if (pathIndex < apertureIndex) return sourceElevation;
+    if (pathIndex > apertureIndex) return destinationElevation;
+    return null;
+  }
+  if (traversalKind === 'automatic_lift') {
+    const shaft = contract?.liftShaft ?? null;
+    if (pathIndex < Number(shaft?.startPathIndex)) return sourceElevation;
+    if (pathIndex > Number(shaft?.endPathIndex)) return destinationElevation;
+    return null;
+  }
+  return sourceElevation;
+}
+
 const VARIANT_DESCRIPTORS = {
   [DUNGEON_CONNECTOR_VARIANT_IDS.SERVICE_GALLERY]: {
     traversalKind: 'walk',
@@ -1532,32 +1576,12 @@ function makeConnectorFamilyReservation(plan) {
   const transferRun = contract?.pathContract?.selectedStraightRun ?? null;
   const ladderMechanism = contract?.mechanisms?.find((mechanism) => mechanism.type === 'ladder');
   const liftShaft = contract?.liftShaft ?? null;
-  const approachElevationAt = (index) => {
-    if (traversalKind === 'walk') return sourceElevation;
-    if (traversalKind === 'slope') {
-      if (index < Number(transferRun?.startIndex)) return sourceElevation;
-      if (index >= Number(transferRun?.endIndex)) return destinationElevation;
-      return null;
-    }
-    if (traversalKind === 'ladder') {
-      const apertureIndex = Number(ladderMechanism?.pathIndex);
-      if (index < apertureIndex) return sourceElevation;
-      if (index > apertureIndex) return destinationElevation;
-      return null;
-    }
-    if (traversalKind === 'automatic_lift') {
-      if (index < Number(liftShaft?.startPathIndex)) return sourceElevation;
-      if (index > Number(liftShaft?.endPathIndex)) return destinationElevation;
-      return null;
-    }
-    return sourceElevation;
-  };
 
   // Reserve each common gallery column at its realized floor layer. A single
   // min-to-max range falsely treats the empty air beside a ladder or lift as
   // structure and rejects legal stacked V1 catwalks.
   for (let index = 0; index < path.length; index += 1) {
-    const floorElevation = approachElevationAt(index);
+    const floorElevation = resolveDungeonConnectorApproachElevationAt(plan, index);
     if (!Number.isFinite(floorElevation)) continue;
     const center = path[index];
     const facing = connectorReservationDirectionAt(path, index);

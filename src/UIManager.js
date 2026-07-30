@@ -622,9 +622,17 @@ export class UIManager {
     this.healthDamagePulseTimer = Math.max(0, this.healthDamagePulseTimer - dt);
 
     this.healthFill.style.height = `${healthPercent * 100}%`;
-    this.healthText.textContent = `${Math.ceil(player.health)} / ${Math.ceil(player.stats.maxHealth)}`;
+    this.healthText.textContent = `${Math.ceil(player.health)} / ${Math.ceil(player.stats.maxHealth)}`
+      + (player.invulnerabilityEnabled ? ' · INVULN' : '');
     this.healthGauge?.classList.toggle('is-warning', healthPercent <= 0.25);
     this.healthGauge?.classList.toggle('is-damaged', this.healthDamagePulseTimer > 0);
+    this.healthGauge?.classList.toggle('is-invulnerable', player.invulnerabilityEnabled);
+    this.healthGauge?.setAttribute(
+      'aria-label',
+      player.invulnerabilityEnabled
+        ? 'Player health gauge; invulnerability test mode enabled'
+        : 'Player health gauge',
+    );
     this.healthGauge?.classList.toggle(
       'is-power-knockback',
       player.isPowerKnockbackActive?.() === true,

@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import {
   DungeonProgressionManager,
   SHRINE_KEY_ID,
+  isDungeonGraphOnlyConnection,
+  isDungeonRuntimeRoom,
 } from './DungeonProgression.js';
 import { PLAYER_TRAVERSAL_ENVELOPE } from './TraversalCapabilities.js';
 
@@ -2742,7 +2744,7 @@ export class DungeonController {
         if (!door?.closed) {
           continue;
         }
-        this._openDoor(
+        this._openDoorIfRequirementsSatisfied(
           door,
           `${door.label ?? 'Bulkhead'} opened by ${definition?.displayName ?? keycard.displayName ?? 'credential'}.`,
         );
@@ -2776,7 +2778,8 @@ export class DungeonController {
   }
 
   _getReachableRoomIds(inventory = new Set(), forceClosedDoorIds = new Set()) {
-    const connections = this.progression?.roomConnections ?? [];
+    const connections = (this.progression?.roomConnections ?? [])
+      .filter((connection) => !isDungeonGraphOnlyConnection(connection));
     const startRoomId = this.progression?.entranceRoomId ?? 'hubTown';
     const reachable = new Set([startRoomId]);
     const queue = [startRoomId];
@@ -2808,39 +2811,30 @@ export class DungeonController {
   }
 
   _canTraverseProgressionConnection(connection, inventory, forceClosedDoorIds = new Set()) {
-    if (!connection.doorId || connection.doorId === 'entranceDoor') {
-      return true;
+    const supplemental = connection.isDungeonSupplement === true;
+    const doorId = connection.doorId ?? null;
+    if (doorId && forceClosedDoorIds.has(doorId)) return false;
+    const door = doorId
+      ? this.doors.find((candidate) => candidate.id === doorId)
+      : null;
+
+    if (supplemental) {
+      if (doorId && doorId !== 'entranceDoor' && !door) return false;
+      const requirements = this._getDoorRequirementStatus(door, {
+        inventory,
+        additionalSources: [connection, connection.gateRequirement].filter(Boolean),
+      });
+      if (!requirements.satisfied) return false;
+      if (!door || doorId === 'entranceDoor' || !door.closed) return true;
+      return requirements.hasRequirements || !door.locked;
     }
 
-    if (forceClosedDoorIds.has(connection.doorId)) {
-      return false;
-    }
-
-    const door = this.doors.find((candidate) => candidate.id === connection.doorId);
-    if (!door || !door.closed) {
-      return true;
-    }
-
-    if (door.encounterId) {
-      const encounter = this.encounters.find((candidate) => candidate.id === door.encounterId);
-      if (encounter && !encounter.cleared) {
-        return false;
-      }
-    }
-
-    if (door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId)) {
-      return true;
-    }
-
-    if (door.mechanismId && !this._isMechanismActivated(door.mechanismId)) {
-      return false;
-    }
-
-    if (door.requiresKeycard) {
-      return inventory.has(door.requiredKeycardId);
-    }
-
-    return !door.locked;
+    if (!doorId || doorId === 'entranceDoor') return true;
+    if (!door) return true;
+    if (!door.closed) return true;
+    const requirements = this._getDoorRequirementStatus(door, { inventory });
+    if (!requirements.satisfied) return false;
+    return requirements.hasRequirements || !door.locked;
   }
 
   _getRoomAtPosition(position) {
@@ -2850,7 +2844,7 @@ export class DungeonController {
 
     const tile = this.worldToTile(position);
 
-    for (const room of this.dungeon?.rooms ?? []) {
+    for (const room of (this.dungeon?.rooms ?? []).filter(isDungeonRuntimeRoom)) {
       if (Number.isFinite(room.minY) && position.y < room.minY) {
         continue;
       }
@@ -2889,7 +2883,8 @@ export class DungeonController {
       this.environmentalStoryToastTimer = 2.25;
     }
 
-    for (const connection of this.progression?.roomConnections ?? []) {
+    for (const connection of (this.progression?.roomConnections ?? [])
+      .filter((candidate) => !isDungeonGraphOnlyConnection(candidate))) {
       if (connection.fromRoomId === room.id) {
         this.discoveredRoomIds.add(connection.toRoomId);
       } else if (connection.toRoomId === room.id) {
@@ -4136,7 +4131,10 @@ export class DungeonController {
 
     const targetDoor = this.doors.find((door) => door.id === puzzle.targetDoorId);
     if (targetDoor?.closed) {
-      this._openDoor(targetDoor, 'Cargo receiver powered: bonus vault unlocked');
+      this._openDoorIfRequirementsSatisfied(
+        targetDoor,
+        'Cargo receiver powered: bonus vault unlocked',
+      );
     } else {
       this.game.ui?.showToast?.('Cargo receiver powered.', '#6bdcff');
     }
@@ -4154,7 +4152,10 @@ export class DungeonController {
 
         const targetDoor = this.doors.find((door) => door.id === plate.targetDoorId);
         if (targetDoor?.closed) {
-          this._openDoor(targetDoor, `${plate.label} powered: ${targetDoor.label} opened`);
+          this._openDoorIfRequirementsSatisfied(
+            targetDoor,
+            `${plate.label} powered: ${targetDoor.label} opened`,
+          );
         } else {
           this.game.ui?.showToast?.(`${plate.label} powered`, '#6bdcff');
         }
@@ -4389,29 +4390,33 @@ export class DungeonController {
 
       const distanceSq = playerPosition.distanceToSquared(door.position);
       if (distanceSq <= 2.45 * 2.45 && distanceSq < nearestDistanceSq) {
-        const encounter = door.encounterId
-          ? this.encounters.find((candidate) => candidate.id === door.encounterId)
-          : null;
-        const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
-        const needsKeycard = door.requiresKeycard && !pressureReady;
-        const needsPressurePlate = door.pressurePlateId && !pressureReady && !door.requiresKeycard;
-        const hasRequiredKeycard = needsKeycard && this.progressionManager.hasKeycard(door.requiredKeycardId);
-        const requiredName = this.progressionManager.getKeycardDisplayName(door.requiredKeycardId);
+        const requirements = this._getDoorRequirementStatus(door);
+        const missingCredentialNames = requirements.unmetCredentialIds.map((id) => (
+          this.progressionManager.getKeycardDisplayName(id)
+        ));
+        const requirementsSatisfied = requirements.satisfied;
         nearest = {
           kind: 'door',
           target: door,
-          label: encounter && !encounter.cleared
+          label: requirements.malformed
+            ? `${door.label}: Requirements unavailable`
+            : requirements.unmetEncounterIds.length > 0
             ? `${door.label}: Clear Reaverbots`
-            : needsPressurePlate
+            : requirements.unmetCredentialIds.length > 0
+              ? `${door.label}: Requires ${missingCredentialNames.join(' + ')}`
+            : requirements.unmetPressurePlateIds.length > 0
               ? `${door.label}: Receiver Plate`
-            : needsKeycard
-              ? hasRequiredKeycard
-                ? `${door.label}: ${requiredName}`
-                : `${door.label}: Requires ${requiredName}`
+            : requirements.unmetMechanismIds.length > 0
+              || requirements.unmetShortcutStateIds.length > 0
+              || requirements.unmetStateIds.length > 0
+              ? `${door.label}: Override Console`
+            : requirements.requiredCredentialIds.length > 0
+              ? `${door.label}: ${requirements.requiredCredentialIds
+                .map((id) => this.progressionManager.getKeycardDisplayName(id)).join(' + ')}`
               : door.label,
-          color: (needsKeycard && !hasRequiredKeycard) || needsPressurePlate || (encounter && !encounter.cleared)
+          color: !requirementsSatisfied
             ? LOCKED_COLOR
-            : needsKeycard
+            : requirements.requiredCredentialIds.length > 0
               ? TRACKING_COLOR
               : MECHANISM_COLOR,
         };
@@ -4530,15 +4535,21 @@ export class DungeonController {
 
       const distanceSq = playerPosition.distanceToSquared(chest.position);
       if (distanceSq <= 2.05 * 2.05 && distanceSq < nearestDistanceSq) {
+        const blockedRequirement = this._getChestBlockingRequirement(chest);
+        const baseLabel = chest.guaranteedKeycardId
+          ? 'Open Keycard Chest'
+          : chest.rewardLabel
+            ? `Open ${chest.rewardLabel} Cache`
+            : 'Open Ruin Chest';
         nearest = {
           kind: 'chest',
           target: chest,
-          label: chest.guaranteedKeycardId
-            ? 'Open Keycard Chest'
-            : chest.rewardLabel
-              ? `Open ${chest.rewardLabel} Cache`
-              : 'Open Ruin Chest',
-          color: chest.guaranteedKeycardId ? KEY_SEEKER_COLOR : KEYCARD_COLOR,
+          label: blockedRequirement
+            ? `${baseLabel}: ${blockedRequirement.prompt}`
+            : baseLabel,
+          color: blockedRequirement
+            ? LOCKED_COLOR
+            : chest.guaranteedKeycardId ? KEY_SEEKER_COLOR : KEYCARD_COLOR,
         };
         nearestDistanceSq = distanceSq;
       }
@@ -4672,52 +4683,251 @@ export class DungeonController {
     return interactable.label;
   }
 
-  _activateDoor(door) {
-    if (door.encounterId) {
-      const encounter = this.encounters.find((candidate) => candidate.id === door.encounterId);
-      if (encounter && !encounter.cleared) {
-        this.game.ui?.showToast?.('Defeat the Reaverbots to unlock this gate', '#ffb347');
-        this._pulseDoor(door, LOCKED_COLOR);
-        return;
+  _readDoorRequirementIds(door, pluralKeys = [], singularKeys = []) {
+    const ids = new Set();
+    let malformed = false;
+    for (const key of pluralKeys) {
+      if (!Object.hasOwn(door ?? {}, key)) continue;
+      const values = door[key];
+      if (!Array.isArray(values)) {
+        malformed = true;
+        continue;
+      }
+      for (const raw of values) {
+        const id = typeof raw === 'string' ? raw.trim() : '';
+        if (!id) malformed = true;
+        else ids.add(id);
       }
     }
+    for (const key of singularKeys) {
+      if (!Object.hasOwn(door ?? {}, key)) continue;
+      const raw = door[key];
+      if (raw == null || raw === '') continue;
+      const id = typeof raw === 'string' ? raw.trim() : '';
+      if (!id) malformed = true;
+      else ids.add(id);
+    }
+    return { ids: [...ids], malformed };
+  }
 
-    const pressureReady = door.pressurePlateId && this._isPressurePlateActivated(door.pressurePlateId);
+  _isEncounterRequirementSatisfied(id) {
+    return this.encounters.some((encounter) => (
+      encounter.id === id
+        || encounter.stateId === id
+        || encounter.encounterStateId === id
+        || (encounter.runtimeStateIds ?? []).includes(id)
+    ) && encounter.cleared === true);
+  }
 
-    if (door.pressurePlateId && !pressureReady && !door.requiresKeycard) {
-      this.game.ui?.showToast?.('Route the cargo object to the receiver plate.', '#ffb347');
+  _isShortcutStateActivated(id) {
+    if (this.mechanisms.some((mechanism) => (
+      mechanism.id === id
+        || mechanism.stateId === id
+        || mechanism.shortcutStateId === id
+        || (mechanism.runtimeStateIds ?? []).includes(id)
+    ) && mechanism.activated === true)) return true;
+    if (this.ladders.some((ladder) => (
+      ladder.id === id
+        || ladder.stateId === id
+        || ladder.shortcutStateId === id
+        || (ladder.runtimeStateIds ?? []).includes(id)
+    ) && ladder.deployed === true && ladder.disabled !== true)) return true;
+    if (this.connectorLifts.some((lift) => (
+      lift.id === id
+        || lift.stateId === id
+        || lift.shortcutStateId === id
+        || (lift.runtimeStateIds ?? []).includes(id)
+    ) && lift.shortcutUnlocked === true)) return true;
+    return (this.game?.connectorLiftRuntime?.getDiagnostics?.().lifts ?? []).some((lift) => (
+      (
+        lift.id === id
+        || lift.stateId === id
+        || lift.shortcutStateId === id
+        || (lift.runtimeStateIds ?? []).includes(id)
+      ) && lift.shortcutUnlocked === true
+    ));
+  }
+
+  _isGenericProgressionStateActivated(id) {
+    if (this._isEncounterRequirementSatisfied(id)
+      || this._isMechanismActivated(id)
+      || this._isShortcutStateActivated(id)
+      || this._isPressurePlateActivated(id)) return true;
+    return (this.chests ?? []).some((chest) => (
+      chest.id === id
+        || chest.stateId === id
+        || chest.rewardStateId === id
+        || (chest.runtimeStateIds ?? []).includes(id)
+    ) && (chest.opened === true || chest.rewardClaimed === true));
+  }
+
+  _getDoorRequirementStatus(door, {
+    inventory = null,
+    additionalSources = [],
+  } = {}) {
+    const sources = [
+      ...(Array.isArray(additionalSources) ? additionalSources : []),
+      door?.gateRequirement,
+      door,
+    ].filter((source) => source && typeof source === 'object');
+    const readRequirements = (pluralKeys, singularKeys) => {
+      const ids = new Set();
+      let malformed = false;
+      for (const source of sources) {
+        const result = this._readDoorRequirementIds(source, pluralKeys, singularKeys);
+        result.ids.forEach((id) => ids.add(id));
+        malformed ||= result.malformed;
+      }
+      return { ids: [...ids], malformed };
+    };
+    const credentials = readRequirements(
+      ['requiredCredentialIds'],
+      ['requiredCredentialId', 'requiredKeycardId'],
+    );
+    const encounters = readRequirements(
+      ['requiredEncounterIds', 'requiredEncounterStateIds'],
+      ['requiredEncounterId', 'requiredEncounterStateId', 'requiresEncounterId', 'encounterId'],
+    );
+    const mechanisms = readRequirements(
+      ['requiredMechanismIds', 'requiredMechanismStateIds'],
+      ['requiredMechanismId', 'requiredMechanismStateId', 'requiresMechanismId', 'mechanismId'],
+    );
+    const shortcuts = readRequirements(
+      ['requiredShortcutStateIds'],
+      ['requiredShortcutStateId'],
+    );
+    const genericStates = readRequirements(
+      ['requiredStateIds'],
+      ['requiredStateId'],
+    );
+    const pressurePlates = readRequirements(
+      ['requiredPressurePlateIds'],
+      ['requiredPressurePlateId', 'pressurePlateId'],
+    );
+    const hasCredential = (id) => inventory instanceof Set
+      ? inventory.has(id)
+      : this.progressionManager.hasKeycard(id);
+    const unmetCredentialIds = credentials.ids.filter((id) => !hasCredential(id));
+    const unmetEncounterIds = encounters.ids.filter((id) => (
+      !this._isEncounterRequirementSatisfied(id)
+    ));
+    const unmetMechanismIds = mechanisms.ids.filter((id) => !this._isMechanismActivated(id));
+    const unmetShortcutStateIds = shortcuts.ids.filter((id) => (
+      !this._isShortcutStateActivated(id)
+    ));
+    const unmetStateIds = genericStates.ids.filter((id) => (
+      !this._isGenericProgressionStateActivated(id)
+    ));
+    const unmetPressurePlateIds = pressurePlates.ids.filter((id) => (
+      !this._isPressurePlateActivated(id)
+    ));
+    const hasRequirements = credentials.ids.length > 0
+      || encounters.ids.length > 0
+      || mechanisms.ids.length > 0
+      || shortcuts.ids.length > 0
+      || genericStates.ids.length > 0
+      || pressurePlates.ids.length > 0;
+    const explicitlyRequires = (key) => sources.some((source) => source[key] === true);
+    const malformed = credentials.malformed
+      || encounters.malformed
+      || mechanisms.malformed
+      || shortcuts.malformed
+      || genericStates.malformed
+      || pressurePlates.malformed
+      || sources.some((source) => source.requirementsMalformed === true)
+      || (explicitlyRequires('requiresKeycard') && credentials.ids.length === 0)
+      || (explicitlyRequires('requiresEncounterState') && encounters.ids.length === 0)
+      || (explicitlyRequires('requiresMechanismState') && mechanisms.ids.length === 0)
+      || (explicitlyRequires('requiresShortcutState') && shortcuts.ids.length === 0)
+      || (explicitlyRequires('requiresState') && genericStates.ids.length === 0)
+      || (explicitlyRequires('requiresPressurePlate') && pressurePlates.ids.length === 0)
+      || (sources.some((source) => (
+        source.isDungeonSupplement === true && source.locked === true
+      )) && !hasRequirements);
+    return {
+      malformed,
+      hasRequirements,
+      requiredCredentialIds: credentials.ids,
+      requiredEncounterIds: encounters.ids,
+      requiredMechanismIds: mechanisms.ids,
+      requiredShortcutStateIds: shortcuts.ids,
+      requiredStateIds: genericStates.ids,
+      requiredPressurePlateIds: pressurePlates.ids,
+      unmetCredentialIds,
+      unmetEncounterIds,
+      unmetMechanismIds,
+      unmetShortcutStateIds,
+      unmetStateIds,
+      unmetPressurePlateIds,
+      satisfied: !malformed
+        && unmetCredentialIds.length === 0
+        && unmetEncounterIds.length === 0
+        && unmetMechanismIds.length === 0
+        && unmetShortcutStateIds.length === 0
+        && unmetStateIds.length === 0
+        && unmetPressurePlateIds.length === 0,
+    };
+  }
+
+  _openDoorIfRequirementsSatisfied(door, message) {
+    if (!door?.closed || !this._getDoorRequirementStatus(door).satisfied) return false;
+    this._openDoor(door, message);
+    return true;
+  }
+
+  _activateDoor(door) {
+    const requirements = this._getDoorRequirementStatus(door);
+    if (requirements.malformed) {
+      this.game.ui?.showToast?.('Gate requirements unavailable', '#ffb347');
       this._pulseDoor(door, LOCKED_COLOR);
       return;
     }
-
-    if (door.requiresKeycard && !this.progressionManager.hasKeycard(door.requiredKeycardId) && !pressureReady) {
-      const requiredName = this.progressionManager.getKeycardDisplayName(door.requiredKeycardId);
+    if (requirements.unmetEncounterIds.length > 0) {
+      this.game.ui?.showToast?.('Defeat the Reaverbots to unlock this gate', '#ffb347');
+      this._pulseDoor(door, LOCKED_COLOR);
+      return;
+    }
+    if (requirements.unmetCredentialIds.length > 0) {
+      const requiredNames = requirements.unmetCredentialIds.map((id) => (
+        this.progressionManager.getKeycardDisplayName(id)
+      ));
       const keySeekerHint = this.keySeeker?.activated && !door.isShrineDoor
         ? ' Search for keycard signals on your minimap.'
         : '';
       this.game.ui?.showToast?.(
         door.isShrineDoor
           ? 'Shrine sealed. Requires Shrine Key.'
-          : `Locked. Requires ${requiredName}.${keySeekerHint}`,
+          : `Locked. Requires ${requiredNames.join(' + ')}.${keySeekerHint}`,
         '#ffb347',
       );
       this._pulseDoor(door, LOCKED_COLOR);
       return;
     }
-
-    if (door.mechanismId && !this._isMechanismActivated(door.mechanismId)) {
+    if (requirements.unmetPressurePlateIds.length > 0) {
+      this.game.ui?.showToast?.('Route the cargo object to the receiver plate.', '#ffb347');
+      this._pulseDoor(door, LOCKED_COLOR);
+      return;
+    }
+    if (requirements.unmetMechanismIds.length > 0
+      || requirements.unmetShortcutStateIds.length > 0
+      || requirements.unmetStateIds.length > 0) {
       this.game.ui?.showToast?.('Find the override console', '#6bdcff');
       this._pulseDoor(door, MECHANISM_COLOR);
       return;
     }
-
-    if (door.requiresKeycard && !pressureReady) {
-      const requiredName = this.progressionManager.getKeycardDisplayName(door.requiredKeycardId);
-      this._openDoor(door, door.isShrineDoor ? 'Shrine access granted.' : `${door.label} unlocked with ${requiredName}.`);
-      return;
-    }
-
-    this._openDoor(door, pressureReady ? 'Pressure plate route unlocked' : 'Door opened');
+    const credentialNames = requirements.requiredCredentialIds.map((id) => (
+      this.progressionManager.getKeycardDisplayName(id)
+    ));
+    this._openDoor(
+      door,
+      door.isShrineDoor
+        ? 'Shrine access granted.'
+        : credentialNames.length > 0
+          ? `${door.label} unlocked with ${credentialNames.join(' + ')}.`
+          : requirements.requiredPressurePlateIds.length > 0
+            ? 'Pressure plate route unlocked'
+            : 'Door opened',
+    );
   }
 
   _activateMechanism(mechanism) {
@@ -4733,6 +4943,120 @@ export class DungeonController {
       return;
     }
 
+    const isScopedShortcut = Boolean(
+      mechanism.shortcutAction
+      || mechanism.shortcutMode
+      || mechanism.scopedAction === 'unlockShortcut'
+      || mechanism.type === 'dungeonSupplementShortcut'
+      || mechanism.action?.type === 'activateDungeonSupplementShortcut'
+    );
+    if (isScopedShortcut) {
+      mechanism.activated = true;
+      const topologyRevisionBefore = Number(this.navigationTopologyRevision ?? 0);
+      let traversalTopologyChanged = false;
+      const targetLadderIds = new Set(
+        (mechanism.targetLadderIds ?? mechanism.controlledLadderIds ?? []).map(String),
+      );
+      const targetConnectionIds = new Set([
+        mechanism.connectionId,
+        mechanism.targetConnectionId,
+        mechanism.action?.connectionId,
+        ...(mechanism.targetConnectionIds ?? []),
+      ].filter(Boolean).map(String));
+      for (const ladder of this.ladders) {
+        const ladderConnectionId = ladder?.connectionId ?? ladder?.descriptor?.connectionId;
+        if (!targetLadderIds.has(String(ladder?.id))
+          && !targetConnectionIds.has(String(ladderConnectionId))) continue;
+        traversalTopologyChanged ||= ladder.disabled === true || ladder.deployed !== true;
+        ladder.disabled = false;
+        ladder.deployed = true;
+        if (ladder.object) ladder.object.visible = true;
+      }
+      const targetLiftIds = new Set((
+        mechanism.targetLiftIds ?? mechanism.controlledLiftIds ?? []
+      ).map(String));
+      for (const lift of this.connectorLifts) {
+        const liftConnectionId = lift?.connectionId ?? lift?.descriptor?.connectionId;
+        if (!targetLiftIds.has(String(lift?.id))
+          && !targetConnectionIds.has(String(liftConnectionId))) continue;
+        traversalTopologyChanged ||= lift.shortcutUnlocked !== true;
+        lift.shortcutUnlocked = true;
+        if (lift?.descriptor) lift.descriptor.shortcutUnlocked = true;
+        targetLiftIds.add(String(lift.id));
+      }
+      for (const liftId of targetLiftIds) {
+        this.game?.connectorLiftRuntime?.unlockLift?.(liftId);
+      }
+      const targetDoorIds = new Set(
+        (mechanism.targetDoorIds ?? mechanism.controlledDoorIds ?? []).map(String),
+      );
+      for (const door of this.doors) {
+        const doorConnectionId = door?.connectionId ?? door?.connectionPlanId;
+        if (targetDoorIds.has(String(door?.id))
+          || targetConnectionIds.has(String(doorConnectionId))
+          || door.mechanismId === mechanism.id) {
+          this._openDoorIfRequirementsSatisfied(door, 'Shortcut route unlocked');
+        }
+      }
+      if (traversalTopologyChanged
+        && Number(this.navigationTopologyRevision ?? 0) === topologyRevisionBefore) {
+        this.invalidateNavigationTopology?.();
+      }
+      this.game.addParticleBurst(mechanism.position, MECHANISM_COLOR, 24, 0.18);
+      this.game.ui?.showToast?.(
+        mechanism.shortcutAction === 'deploy-ladder'
+          ? 'Shortcut ladder deployed'
+          : 'Shortcut route online',
+        '#6bdcff',
+      );
+      return;
+    }
+
+    if (mechanism.scopedAction === 'controlLocalHazards'
+      || mechanism.type === 'dungeonSupplementLocalControl'
+      || mechanism.action?.type === 'controlDungeonSupplementLocalHazards') {
+      mechanism.activated = true;
+      const targetRoomId = String(mechanism.targetRoomId ?? mechanism.roomId ?? '');
+      const targetOperationId = String(mechanism.targetOperationId ?? mechanism.operationId ?? '');
+      const controlledProfiles = new Set(
+        (mechanism.controlledHazardProfileIds ?? []).map(String),
+      );
+      let disabledHazardCount = 0;
+      for (const trap of this.traps) {
+        const sameRoom = targetRoomId && String(trap.roomId ?? '') === targetRoomId;
+        const sameOperation = targetOperationId
+          && String(trap.operationId ?? '') === targetOperationId;
+        // Curated V4 controls declare an owning-module scope. An operation can
+        // contain several rooms, so broadening a room-bound control to every
+        // hazard in that operation would silently disable sibling challenges.
+        // Operation scope remains a fail-closed compatibility fallback only
+        // for older supplemental controls that do not identify a room.
+        const matchesDeclaredScope = targetRoomId ? sameRoom : sameOperation;
+        const allowedProfile = controlledProfiles.size === 0
+          || controlledProfiles.has(String(trap.hazardProfileId ?? ''));
+        if (!matchesDeclaredScope || !allowedProfile) continue;
+        trap.active = false;
+        disabledHazardCount += 1;
+      }
+      this.game.addParticleBurst(mechanism.position, MECHANISM_COLOR, 24, 0.18);
+      this.game.ui?.showToast?.(
+        disabledHazardCount > 0
+          ? 'Local hazard grid isolated'
+          : 'Local control already safe',
+        '#6bdcff',
+      );
+      return;
+    }
+
+    // Supplemental controls are never allowed to inherit the authored-room
+    // global override below. Unknown or incomplete supplemental actions fail
+    // closed so a bad runtime record cannot disable unrelated dungeon systems.
+    if (mechanism.isDungeonSupplement === true || mechanism.dungeonSupplement === true) {
+      this.game.ui?.showToast?.('Supplement control unavailable', '#ffb347');
+      this.game.addParticleBurst?.(mechanism.position, LOCKED_COLOR, 12, 0.12);
+      return;
+    }
+
     mechanism.activated = true;
 
     for (const trap of this.traps) {
@@ -4745,7 +5069,7 @@ export class DungeonController {
 
     for (const door of this.doors) {
       if (door.mechanismId === mechanism.id) {
-        this._openDoor(door, 'Shrine seal released');
+        this._openDoorIfRequirementsSatisfied(door, 'Shrine seal released');
       }
     }
 
@@ -4754,12 +5078,129 @@ export class DungeonController {
   }
 
   _getMechanismBlockingEncounter(mechanism) {
-    if (!mechanism?.requiresEncounterId) {
-      return null;
+    if (!mechanism) return null;
+    const requirements = this._readDoorRequirementIds(
+      mechanism,
+      ['requiresEncounterIds', 'requiredEncounterIds'],
+      ['requiresEncounterId', 'requiredEncounterId'],
+    );
+    for (const id of requirements.ids) {
+      const encounter = this.encounters.find((candidate) => (
+        candidate.id === id
+          || candidate.stateId === id
+          || candidate.encounterStateId === id
+          || (candidate.runtimeStateIds ?? []).includes(id)
+      ));
+      if (encounter && !encounter.cleared) return encounter;
     }
 
-    const encounter = this.encounters.find((candidate) => candidate.id === mechanism.requiresEncounterId);
-    return encounter && !encounter.cleared ? encounter : null;
+    // V4 route-network controls inherit the operation's authored challenge
+    // when no narrower prerequisite was serialized. This keeps the dependency
+    // local to one generated network and leaves every legacy/global mechanism
+    // unchanged.
+    if (requirements.ids.length > 0
+      || (mechanism.isDungeonSupplement !== true
+        && mechanism.dungeonSupplement !== true)) return null;
+    const operationId = this._getDungeonSupplementOperationId(mechanism);
+    if (!operationId) return null;
+    return this.encounters.find((encounter) => (
+      encounter.isDungeonSupplement === true
+        && this._getDungeonSupplementOperationId(encounter) === operationId
+        && encounter.cleared !== true
+    )) ?? null;
+  }
+
+  _getDungeonSupplementOperationId(record) {
+    const explicit = record?.operationId ?? record?.augmentationOperationId;
+    if (explicit != null && String(explicit)) return String(explicit);
+    const roomId = record?.roomId ?? record?.targetRoomId;
+    if (roomId == null) return null;
+    const room = (this.dungeon?.rooms ?? []).find((candidate) => (
+      String(candidate?.id ?? '') === String(roomId)
+    ));
+    const operationId = room?.augmentationOperationId ?? room?.operationId;
+    return operationId == null || !String(operationId) ? null : String(operationId);
+  }
+
+  _getChestBlockingRequirement(chest) {
+    if (!chest) return null;
+    const encounterRequirements = this._readDoorRequirementIds(
+      chest,
+      ['requiresEncounterIds', 'requiredEncounterIds'],
+      ['requiresEncounterId', 'requiredEncounterId'],
+    );
+    const explicitEncounter = encounterRequirements.ids
+      .map((id) => this.encounters.find((candidate) => (
+        candidate.id === id
+          || candidate.stateId === id
+          || candidate.encounterStateId === id
+          || (candidate.runtimeStateIds ?? []).includes(id)
+      )))
+      .find((encounter) => encounter && encounter.cleared !== true);
+    if (explicitEncounter) {
+      return {
+        kind: 'encounter',
+        target: explicitEncounter,
+        prompt: `Clear ${explicitEncounter.label ?? 'Reaverbots'}`,
+      };
+    }
+
+    const operationId = this._getDungeonSupplementOperationId(chest);
+    if (encounterRequirements.ids.length === 0
+      && (chest.isDungeonSupplement === true || chest.dungeonSupplement === true)
+      && operationId) {
+      const operationEncounter = this.encounters.find((encounter) => (
+        encounter.isDungeonSupplement === true
+          && this._getDungeonSupplementOperationId(encounter) === operationId
+          && encounter.cleared !== true
+      ));
+      if (operationEncounter) {
+        return {
+          kind: 'encounter',
+          target: operationEncounter,
+          prompt: `Clear ${operationEncounter.label ?? 'Reaverbots'}`,
+        };
+      }
+    }
+
+    const mechanismRequirements = this._readDoorRequirementIds(
+      chest,
+      ['requiresMechanismIds', 'requiredMechanismIds'],
+      ['requiresMechanismId', 'requiredMechanismId'],
+    );
+    const explicitMechanism = mechanismRequirements.ids
+      .map((id) => this.mechanisms.find((candidate) => (
+        candidate.id === id
+          || candidate.stateId === id
+          || candidate.mechanismStateId === id
+          || (candidate.runtimeStateIds ?? []).includes(id)
+      )))
+      .find((mechanism) => mechanism && mechanism.activated !== true);
+    if (explicitMechanism) {
+      return {
+        kind: 'mechanism',
+        target: explicitMechanism,
+        prompt: `Use ${explicitMechanism.label ?? 'local control'}`,
+      };
+    }
+
+    if (mechanismRequirements.ids.length === 0
+      && (chest.isDungeonSupplement === true || chest.dungeonSupplement === true)
+      && operationId) {
+      const operationControl = this.mechanisms.find((mechanism) => (
+        mechanism.type === 'dungeonSupplementLocalControl'
+          && this._getDungeonSupplementOperationId(mechanism) === operationId
+          && mechanism.activated !== true
+      ));
+      if (operationControl) {
+        return {
+          kind: 'mechanism',
+          target: operationControl,
+          prompt: `Use ${operationControl.label ?? 'local control'}`,
+        };
+      }
+    }
+    return null;
   }
 
   _activateTrap(trap) {
@@ -4783,12 +5224,25 @@ export class DungeonController {
       return;
     }
 
+    const blockedRequirement = this._getChestBlockingRequirement(chest);
+    if (blockedRequirement) {
+      this.game.ui?.showToast?.(
+        blockedRequirement.kind === 'encounter'
+          ? `Clear ${blockedRequirement.target.label ?? 'the Reaverbots'} before opening this cache`
+          : `Use ${blockedRequirement.target.label ?? 'the local control'} before opening this cache`,
+        '#ffb347',
+      );
+      this.game.addParticleBurst?.(chest.position, LOCKED_COLOR, 12, 0.12);
+      return;
+    }
+
     if (chest.rewardPartId) {
       this._activatePartRewardChest(chest);
       return;
     }
 
     chest.opened = true;
+    chest.rewardClaimed = true;
     chest.object.userData.opened = true;
 
     this.game.refractors?.rollChestDrop?.(chest.position, {
@@ -4889,8 +5343,14 @@ export class DungeonController {
       }
 
       for (const door of this.doors) {
-        if (door.encounterId === encounter.id) {
-          this._openDoor(door, `${door.label} unlocked`);
+        const encounterRequirementIds = this._readDoorRequirementIds(
+          door,
+          ['requiredEncounterIds', 'requiredEncounterStateIds'],
+          ['requiredEncounterId', 'requiredEncounterStateId', 'requiresEncounterId', 'encounterId'],
+        ).ids;
+        if (encounterRequirementIds.includes(encounter.id)
+          || encounterRequirementIds.includes(encounter.encounterStateId)) {
+          this._openDoorIfRequirementsSatisfied(door, `${door.label} unlocked`);
         }
       }
     }
@@ -5145,11 +5605,22 @@ export class DungeonController {
   }
 
   _isMechanismActivated(id) {
-    return this.mechanisms.some((mechanism) => mechanism.id === id && mechanism.activated);
+    return this.mechanisms.some((mechanism) => (
+      mechanism.id === id
+        || mechanism.stateId === id
+        || mechanism.mechanismStateId === id
+        || (mechanism.runtimeStateIds ?? []).includes(id)
+    ) && mechanism.activated);
   }
 
   _isPressurePlateActivated(id) {
-    return this.pressurePlates.some((plate) => plate.id === id && plate.activated);
+    return this.pressurePlates.some((plate) => (
+      plate.id === id
+        || plate.stateId === id
+        || plate.pressureStateId === id
+        || plate.pressurePlateStateId === id
+        || (plate.runtimeStateIds ?? []).includes(id)
+    ) && plate.activated);
   }
 
   _findNearestWalkablePosition(position) {

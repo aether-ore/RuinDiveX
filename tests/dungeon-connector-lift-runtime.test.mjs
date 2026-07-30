@@ -140,3 +140,27 @@ test('unmount preserves state for rollback while dispose unregisters permanently
   assert.equal(fixture.registered.length, 0);
   assert.equal(runtime.mount(), false);
 });
+
+test('shortcut lifts remain parked until their far-side mechanism is activated', () => {
+  const fixture = createFixture({ playerOnLift: false });
+  fixture.descriptor.shortcutMechanismId = 'supplement:shortcut:control';
+  fixture.descriptor.shortcutUnlocked = false;
+  let activated = false;
+  fixture.game.dungeonController._isMechanismActivated = (id) => (
+    id === 'supplement:shortcut:control' && activated
+  );
+  const runtime = new DungeonConnectorLiftRuntime(fixture.game, [fixture.descriptor]);
+  runtime.mount();
+
+  runtime.prePlayerUpdate(4);
+  assert.equal(fixture.surface.topY, 0);
+  assert.equal(runtime.requestLift('freight-lift', 'top').reason, 'shortcut-locked');
+  assert.equal(runtime.getDiagnostics().lifts[0].shortcutUnlocked, false);
+
+  activated = true;
+  runtime.prePlayerUpdate(0);
+  assert.equal(runtime.getDiagnostics().lifts[0].shortcutUnlocked, true);
+  assert.equal(runtime.requestLift('freight-lift', 'top').ok, true);
+  runtime.prePlayerUpdate(0.5);
+  assert.equal(fixture.surface.topY, 1);
+});

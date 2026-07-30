@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test';
+import {
+  createDungeonAugmentationCompleteLayoutSignature,
+} from '../src/dungeon-augmentation/varietySignature.js';
 
-const INDUSTRIAL_PROFILE_ID = 'industrial-supplement-preview-v2';
+const INDUSTRIAL_PROFILE_ID = 'industrial-supplement-preview-v4';
 const INDUSTRIAL_THEME_ID = 'industrial-v1';
 const INDUSTRIAL_THEME_REVISION = 'industrial-v1-presentation-r1';
 const SAVE_IDENTITY_SCHEMA = 'ruindivex-dungeon-augmentation-save-identity/v1';
@@ -172,30 +175,68 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
     const supplementRooms = dungeon.rooms
       .filter((room) => room.isDungeonSupplement)
       .sort((left, right) => left.id.localeCompare(right.id));
+    const routeStationProxies = [...(dungeon.connectorJunctionProxies ?? [])]
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const leakedRouteStationProxies = dungeon.rooms.filter((room) => (
+      room.isRouteStationProxy === true || room.isConnectorJunctionProxy === true
+    ));
+    const authoredRooms = dungeon.rooms.filter((room) => !room.isDungeonSupplement);
     const supplementRoomIds = supplementRooms.map((room) => room.id);
     const supplementRoomIdSet = new Set(supplementRoomIds);
+    const routeStationProxyIdSet = new Set(routeStationProxies.map((room) => room.id));
     const supplementConnections = dungeon.connectionPlans.filter((connection) => (
       connection.isDungeonSupplement
     ));
-    const minimapRoomIds = (dungeon.minimap?.rooms ?? [])
+    const minimapRooms = dungeon.minimap?.rooms ?? [];
+    const minimapRoomIds = minimapRooms
       .map((room) => room.roomId ?? room.id)
       .filter((roomId) => supplementRoomIdSet.has(roomId))
       .sort();
-    const minimapHallways = (dungeon.minimap?.hallways ?? dungeon.minimap?.connections ?? [])
+    const minimapProxyRoomIds = minimapRooms
+      .map((room) => room.roomId ?? room.id)
+      .filter((roomId) => routeStationProxyIdSet.has(roomId))
+      .sort();
+    const allMinimapHallways = dungeon.minimap?.hallways ?? dungeon.minimap?.connections ?? [];
+    const minimapHallways = allMinimapHallways
       .filter((hallway) => {
         const from = hallway.fromRoomId ?? hallway.fromNodeId ?? hallway.from;
         const to = hallway.toRoomId ?? hallway.toNodeId ?? hallway.to;
         return supplementRoomIdSet.has(from) || supplementRoomIdSet.has(to);
       });
+    const minimapHallwayProxyRoomIds = allMinimapHallways
+      .flatMap((hallway) => [
+        hallway.fromRoomId ?? hallway.fromNodeId ?? hallway.from,
+        hallway.toRoomId ?? hallway.toNodeId ?? hallway.to,
+      ])
+      .filter((roomId) => routeStationProxyIdSet.has(roomId))
+      .sort();
     const supplementEncounters = (dungeon.encounters ?? []).filter((encounter) => (
       encounter.isDungeonSupplement
       || supplementRoomIdSet.has(encounter.roomId)
     ));
+    const supplementChests = (dungeon.chests ?? []).filter((chest) => (
+      supplementRoomIdSet.has(chest.roomId)
+    ));
+    const supplementTraps = (dungeon.traps ?? []).filter((trap) => (
+      trap.isDungeonSupplement
+      || supplementRoomIdSet.has(trap.roomId)
+    ));
+    const encounterProxyRoomIds = (dungeon.encounters ?? [])
+      .map((record) => record.roomId ?? record.nodeId ?? record.ownerRoomId)
+      .filter((roomId) => routeStationProxyIdSet.has(roomId))
+      .sort();
+    const rewardProxyRoomIds = [
+      ...(dungeon.rewards ?? []),
+      ...(dungeon.chests ?? []),
+    ].map((record) => record.roomId ?? record.nodeId ?? record.ownerRoomId)
+      .filter((roomId) => routeStationProxyIdSet.has(roomId))
+      .sort();
 
     const supplementObjects = new Set();
     supplementRoot?.traverse((object) => supplementObjects.add(object));
     const outsideSupplementOwners = [];
     const supplementMaterials = new Map();
+    const supplementMaterialOwners = new Map();
     const parentMaterials = new Set();
     const assetCatalogIds = [];
     const boundThemeIds = [];
@@ -209,7 +250,15 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
     };
     supplementRoot?.traverse((object) => {
       if (object.isLight) supplementLightCount += 1;
-      if (object.isMesh) addMaterials(supplementMaterials, object.material);
+      if (object.isMesh) {
+        addMaterials(supplementMaterials, object.material);
+        for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
+          if (!material) continue;
+          const owners = supplementMaterialOwners.get(material.uuid) ?? [];
+          owners.push(object.name || object.type || object.uuid);
+          supplementMaterialOwners.set(material.uuid, owners);
+        }
+      }
       if (object.userData?.parentAssetCatalogId) {
         assetCatalogIds.push(object.userData.parentAssetCatalogId);
       }
@@ -232,48 +281,565 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
     });
     const foreignSupplementMaterials = [...supplementMaterials]
       .filter(([uuid]) => !parentMaterials.has(uuid))
-      .map(([, name]) => name)
-      .sort();
+      .map(([uuid, name]) => ({
+        name,
+        owners: [...new Set(supplementMaterialOwners.get(uuid) ?? [])].sort(),
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
     const resourceCounts = dungeon.dungeonSupplement
       ?.diagnostics?.assembled?.resourceCounts ?? null;
     const identity = dungeon.augmentationIdentity ?? null;
     const overlay = dungeon.augmentationOverlayPlan ?? null;
     const diagnostics = game.getWorldTransitionDiagnostics().dungeonAugmentation;
-    const operationTypeById = new Map((overlay?.operations ?? []).map((operation) => [
-      operation.id,
-      operation.type ?? operation.operationType ?? operation.kind,
-    ]));
-    const branchRoomCount = supplementRooms.filter((room) => (
-      operationTypeById.get(room.augmentationOperationId) === 'optionalBranch'
-    )).length;
-    const paddingRoomCount = supplementRooms.filter((room) => (
-      operationTypeById.get(room.augmentationOperationId) === 'edgePadding'
-    )).length;
-    const physicalSupplementConnections = dungeon.connectionPlans.filter((plan) => (
-      plan.isDungeonSupplement && !plan.isSupplementGraphConnection
+    const routeNetworks = (overlay?.operations ?? []).filter(({ type }) => (
+      type === 'routeNetwork'
     ));
-    const longestExteriorCorridorRunTiles = Math.max(0, ...physicalSupplementConnections
-      .map((plan) => {
-        let longest = 0;
-        let current = 0;
-        for (const point of plan.bridgePath ?? plan.fullPath ?? []) {
-          const hasExteriorFloor = dungeon.floorTiles.some((tile) => (
-            tile.x === point.x
-            && tile.z === point.z
-            && !tile.roomId
-            && (tile.connectionId === plan.id || tile.connectorId === plan.id)
-          ));
-          current = hasExteriorFloor ? current + 1 : 0;
-          longest = Math.max(longest, current);
+    const routeNetworkGrantIds = routeNetworks.map(({ grantId }) => String(grantId ?? ''));
+    const routeNetworkGrantManifestAccepted = routeNetworkGrantIds.every(Boolean)
+      && new Set(routeNetworkGrantIds).size === routeNetworks.length
+      && JSON.stringify(overlay?.routeNetworkGrantIds ?? [])
+        === JSON.stringify(routeNetworks.map(({ grantId }) => grantId));
+    const coverageNetworks = routeNetworks.filter(({ routeNetworkKind }) => (
+      routeNetworkKind === 'objective-route-coverage'
+    ));
+    const coverageWitnessesAccepted = coverageNetworks.length > 0
+      && coverageNetworks.every(({ coverage }) => (
+        coverage?.coverageComplete === true
+          && String(coverage.logicalEdgeId ?? '').length > 0
+          && Array.isArray(coverage.ordinaryTraversalSpans)
+          && coverage.ordinaryTraversalSpans.length > 0
+          && Array.isArray(coverage.stationDistancesMeters)
+          && coverage.stationDistancesMeters.length >= 2
+          && Array.isArray(coverage.featurelessSpansMeters)
+          && coverage.featurelessSpansMeters.length > 0
+          && coverage.featurelessSpansMeters.every((distanceMeters) => (
+            Number.isFinite(Number(distanceMeters))
+              && Number(distanceMeters) >= 0
+              && Number(distanceMeters) <= 33.6 + 1e-6
+          ))
+      ))
+      && JSON.stringify((overlay?.featurelessCoverage ?? [])
+        .map(({ operationId }) => operationId).sort())
+        === JSON.stringify(coverageNetworks.map(({ id }) => id).sort());
+    const featurelessWitnessesAccepted = routeNetworks.every((operation) => (
+      Array.isArray(operation.featurelessSpans)
+        && operation.featurelessSpans.length > 0
+        && operation.featurelessSpans.every(({ distanceMeters }) => (
+          Number.isFinite(Number(distanceMeters))
+            && Number(distanceMeters) >= 0
+            && Number(distanceMeters) <= 33.6 + 1e-6
+        ))
+    ));
+    const featurelessSpans = routeNetworks.flatMap((operation) => (
+      operation.featurelessSpans ?? []
+    )).map(({ distanceMeters }) => Number(distanceMeters));
+    const pyramidLoop = routeNetworks.find(({ routeNetworkKind }) => (
+      routeNetworkKind === 'landmark-perimeter-loop'
+    ));
+    const topologyTemplateIds = [...new Set(routeNetworks
+      .map(({ topologyTemplateId }) => topologyTemplateId)
+      .filter(Boolean))].sort();
+    const topologyTemplateSequence = routeNetworks
+      .map(({ topologyTemplateId }) => topologyTemplateId ?? null);
+    const junctionKinds = [...new Set(routeNetworks
+      .flatMap((operation) => operation.junctionKinds ?? []))].sort();
+    const elevationModes = [...new Set(routeNetworks
+      .flatMap((operation) => operation.elevationModes ?? []))].sort();
+    const elevationModeSequence = routeNetworks
+      .map((operation) => operation.elevationModes?.[0] ?? null);
+    const isGraphOnlyConnection = (plan) => Boolean(
+      plan.isSupplementGraphConnection
+      || plan.graphOnly === true
+      || plan.connectorVariantConstraints?.graphOnly === true
+    );
+    const graphOnlyConnections = dungeon.connectionPlans.filter(isGraphOnlyConnection);
+    const graphOnlyConnectionIds = new Set(graphOnlyConnections.map(({ id }) => id));
+    const minimapGraphOnlyConnectionIds = allMinimapHallways
+      .map((hallway) => (
+        hallway.hallwayId ?? hallway.connectionId ?? hallway.connectorId ?? hallway.id
+      ))
+      .filter((connectionId) => graphOnlyConnectionIds.has(connectionId))
+      .sort();
+    const physicalSupplementConnections = dungeon.connectionPlans.filter((plan) => (
+      plan.isDungeonSupplement && !isGraphOnlyConnection(plan)
+    ));
+    const physicalSupplementConnectionIds = new Set(
+      physicalSupplementConnections.map(({ id }) => id),
+    );
+    const shortcutConnectionIds = physicalSupplementConnections
+      .filter((plan) => plan.oneSideActivatedShortcut || plan.shortcutMode)
+      .map(({ id }) => id)
+      .sort();
+    const supplementRoomById = new Map(supplementRooms.map((room) => [room.id, room]));
+    const connectorProxyById = new Map(routeStationProxies.map((room) => [room.id, room]));
+    const junctionMetadataRoomById = new Map([
+      ...supplementRooms,
+      ...routeStationProxies,
+    ].map((room) => [room.id, room]));
+    const overlayNodes = overlay?.nodes ?? [];
+    const overlayRoomNodes = overlayNodes.filter(({ kind }) => kind === 'supplementRoom');
+    const overlayConnectorModuleNodes = overlayNodes.filter(({ kind }) => (
+      kind === 'supplementConnectorModule'
+    ));
+    const overlayConnectorJunctionNodes = overlayNodes.filter(({ kind }) => (
+      kind === 'supplementConnectorJunction'
+    ));
+    const overlayConnectorNodes = [
+      ...overlayConnectorModuleNodes,
+      ...overlayConnectorJunctionNodes,
+    ];
+    const overlayRoomNodeIdSet = new Set(overlayRoomNodes.map(({ id }) => id));
+    const overlayNodeById = new Map(overlayNodes.map((node) => [node.id, node]));
+    const overlayOperationById = new Map(routeNetworks.map((operation) => [operation.id, operation]));
+    const overlaySubstantiveModuleCount = routeNetworks.reduce((count, operation) => (
+      count + Number(operation.substantiveModuleCount ?? operation.moduleCount ?? 0)
+    ), 0);
+    const overlayPhysicalArmIdsByNodeId = new Map(overlayConnectorNodes.map(({ id }) => (
+      [id, new Set()]
+    )));
+    for (const segment of overlay?.segments ?? []) {
+      for (const endpoint of [segment.from, segment.to]) {
+        if (overlayPhysicalArmIdsByNodeId.has(endpoint?.nodeId)) {
+          overlayPhysicalArmIdsByNodeId.get(endpoint.nodeId).add(String(segment.id));
         }
-        return longest;
-      }));
-    const paddedLogicalIds = new Set((overlay?.operations ?? [])
-      .filter((operation) => operation.type === 'edgePadding')
-      .map((operation) => operation.originalLogicalEdge?.id)
-      .filter(Boolean));
-    const progressionSupplementConnections = (dungeon.progression?.roomConnections ?? [])
+      }
+    }
+    // An exact objective-corridor station is one composite T: two explicit
+    // supplemental approaches plus the parent corridor's authored through
+    // route. Keep that contribution visible in the semantic arm set, but do
+    // not invent a third supplemental connection or local floor approach.
+    for (const node of overlayConnectorJunctionNodes) {
+      if (node.exactParentEndpoint !== true
+        || node.parentEndpointSocketKind !== 'authored-corridor-station') continue;
+      const contribution = Math.min(
+        1,
+        Math.max(0, Number(node.parentThroughRouteDegreeContribution ?? 0)),
+      );
+      for (let index = 0; index < contribution; index += 1) {
+        overlayPhysicalArmIdsByNodeId.get(node.id)
+          ?.add(String(
+            node.parentThroughPhysicalArmId ?? `${node.id}:authored-through:${index}`,
+          ));
+      }
+    }
+    const floorExistsAt = (point, elevation) => dungeon.floorTiles.some((tile) => (
+      tile.x === point?.x
+      && tile.z === point?.z
+      && Math.abs(Number(tile.elevation ?? 0) - Number(elevation ?? 0)) <= 0.56
+    ));
+    const realizedJunctionCandidateIds = [...new Set([
+      ...overlayConnectorNodes.map(({ id }) => id),
+      ...overlayRoomNodes
+        .filter((node) => (
+          Number(node.graphDegree ?? node.junction?.graphDegree ?? 0) >= 3
+            && node.junction?.countsAsMeaningfulStation === true
+        ))
+        .map(({ id }) => id),
+      ...routeStationProxies.map(({ id }) => id),
+    ])];
+    const inspectParentRouteArms = (room) => {
+      if (room?.isRouteStationProxy !== true) {
+        return { accepted: false, parentPlan: null };
+      }
+      const parentPlan = dungeon.connectionPlans.find((plan) => (
+        plan.id === room.parentRouteId && !isGraphOnlyConnection(plan)
+      ));
+      const parentPath = parentPlan?.bridgePath ?? parentPlan?.fullPath ?? [];
+      const stationPathIndex = parentPath.findIndex((point) => (
+        point.x === room.x && point.z === room.z
+      ));
+      const previous = parentPath[stationPathIndex - 1];
+      const station = parentPath[stationPathIndex];
+      const next = parentPath[stationPathIndex + 1];
+      return {
+        parentPlan,
+        accepted: Boolean(
+          parentPlan
+          && stationPathIndex > 0
+          && stationPathIndex < parentPath.length - 1
+          && (previous.x !== station.x || previous.z !== station.z)
+          && (next.x !== station.x || next.z !== station.z)
+          && (previous.x !== next.x || previous.z !== next.z)
+          && floorExistsAt(previous, room.baseElevation)
+          && floorExistsAt(station, room.baseElevation)
+          && floorExistsAt(next, room.baseElevation)
+        ),
+      };
+    };
+    const realizedNetworkJunctionChecks = realizedJunctionCandidateIds.map((nodeId) => {
+      const node = overlayNodeById.get(nodeId) ?? null;
+      const room = junctionMetadataRoomById.get(nodeId);
+      const operationId = node?.operationId ?? room?.augmentationOperationId ?? null;
+      const operation = overlayOperationById.get(operationId);
+      const approachIds = new Set();
+      for (const plan of physicalSupplementConnections.filter((candidate) => (
+        candidate.augmentationOperationId === operationId
+      ))) {
+        if (plan.fromRoomId === nodeId && plan.fromSocket?.roomId === nodeId) {
+          approachIds.add([
+            'physical',
+            Number(plan.fromSocket.x),
+            Number(plan.fromSocket.z),
+            Number(plan.fromSocket.elevation ?? plan.sourceElevation ?? 0).toFixed(3),
+          ].join(':'));
+        }
+        if (plan.toRoomId === nodeId && plan.toSocket?.roomId === nodeId) {
+          approachIds.add([
+            'physical',
+            Number(plan.toSocket.x),
+            Number(plan.toSocket.z),
+            Number(plan.toSocket.elevation ?? plan.destinationElevation ?? 0).toFixed(3),
+          ].join(':'));
+        }
+      }
+      let parentRouteArmsRealized = false;
+      if (room?.isRouteStationProxy) {
+        const parentRoute = inspectParentRouteArms(room);
+        const parentPlan = parentRoute.parentPlan;
+        parentRouteArmsRealized = parentRoute.accepted;
+        if (parentRouteArmsRealized) {
+          approachIds.add(`parent-route:${parentPlan.id}:source-arm`);
+          approachIds.add(`parent-route:${parentPlan.id}:destination-arm`);
+        }
+      }
+      const exactParentStationComposite = room?.isExactParentStationComposite === true;
+      let exactParentStationCompositeBound = !exactParentStationComposite;
+      let parentStationProxyId = null;
+      if (exactParentStationComposite) {
+        const attachment = physicalSupplementConnections.find((plan) => (
+          plan.networkRole === 'parent-station-attachment'
+          && (plan.fromRoomId === nodeId || plan.toRoomId === nodeId)
+        ));
+        parentStationProxyId = attachment
+          ? (attachment.fromRoomId === nodeId ? attachment.toRoomId : attachment.fromRoomId)
+          : null;
+        const parentStationProxy = junctionMetadataRoomById.get(parentStationProxyId);
+        const parentRoute = inspectParentRouteArms(parentStationProxy);
+        exactParentStationCompositeBound = Boolean(
+          attachment
+          && parentStationProxy
+          && parentRoute.accepted
+          && String(parentStationProxy.routeNetworkSocketId ?? '')
+            === String(room.parentEndpointSocketId ?? ''),
+        );
+        if (exactParentStationCompositeBound) {
+          approachIds.add(`parent-route:${parentRoute.parentPlan.id}:authored-through`);
+        }
+      }
+      const actualDegree = approachIds.size;
+      const overlayJunction = node?.junction ?? null;
+      const runtimeJunction = room?.augmentationJunction ?? room?.junction ?? null;
+      return {
+        nodeId,
+        nodeKind: node?.kind ?? null,
+        operationId,
+        operationContainsNode: Boolean(
+          operation?.nodeIds?.includes(nodeId)
+          || (room?.isRouteStationProxy && operationId === operation?.id)
+        ),
+        actualDegree,
+        approachIds: [...approachIds].sort(),
+        routeStationProxy: room?.isRouteStationProxy === true,
+        parentRouteArmsRealized,
+        exactParentStationComposite,
+        exactParentStationCompositeBound,
+        parentStationProxyId,
+        overlayMeaningful: room?.isRouteStationProxy === true && !node
+          ? true
+          : Number(node?.graphDegree ?? node?.junction?.graphDegree ?? 0) >= 3
+            && node?.countsAsMeaningfulStation === true
+            && overlayJunction?.countsAsMeaningfulStation === true,
+        runtimeMeaningful: room?.countsAsMeaningfulStation === true
+          && runtimeJunction?.countsAsMeaningfulStation === true,
+        runtimeJunctionKind: runtimeJunction?.junctionKind ?? null,
+      };
+    });
+    const actualNetworkNodeDegrees = Object.fromEntries(realizedNetworkJunctionChecks
+      .map(({ nodeId, actualDegree }) => [nodeId, actualDegree]));
+    const overlayConnectorProxyChecks = overlayConnectorNodes.map((node) => {
+      const proxy = connectorProxyById.get(node.id) ?? null;
+      const expectedArmIds = [...(
+        overlayPhysicalArmIdsByNodeId.get(node.id) ?? []
+      )].sort();
+      const realizedArmIds = [...(proxy?.physicalArmIds ?? [])].sort();
+      const coreFloors = dungeon.floorTiles.filter((tile) => (
+        tile.connectorJunctionOwnerId === node.id
+      ));
+      const coreWidth = Math.max(3, Math.round(Number(proxy?.width ?? 0)));
+      const coreDepth = Math.max(3, Math.round(Number(proxy?.depth ?? 0)));
+      const expectedCoreFloorCount = proxy
+        ? (Math.floor(coreWidth / 2) * 2 + 1)
+          * (Math.floor(coreDepth / 2) * 2 + 1)
+        : 0;
+      const exactParentStationComposite = proxy?.isExactParentStationComposite === true;
+      const requiredApproachCount = node.kind === 'supplementConnectorModule'
+        || exactParentStationComposite
+        ? 2
+        : 3;
+      return {
+        nodeId: node.id,
+        kind: node.kind,
+        materializedOnlyAsProxy: Boolean(
+          proxy
+            && !supplementRoomById.has(node.id)
+            && proxy.isConnectorJunctionProxy === true
+            && proxy.suppressRoomGeometry === true
+        ),
+        expectedArmIds,
+        realizedArmIds,
+        physicalArmCount: Number(proxy?.physicalArmCount ?? 0),
+        actualApproachCount: Number(actualNetworkNodeDegrees[node.id] ?? 0),
+        requiredApproachCount,
+        exactParentStationComposite,
+        parentThroughPhysicalArmId: node.parentThroughPhysicalArmId ?? null,
+        meaningful: proxy?.countsAsMeaningfulStation === true,
+        coreFloorCount: coreFloors.length,
+        expectedCoreFloorCount,
+      };
+    });
+    const realizedMeaningfulJunctions = realizedNetworkJunctionChecks.filter((check) => (
+      check.operationContainsNode
+      && check.nodeKind === 'supplementConnectorJunction'
+      && check.actualDegree >= 3
+      && check.overlayMeaningful
+      && check.runtimeMeaningful
+      && Boolean(check.runtimeJunctionKind)
+      && (!check.exactParentStationComposite || check.exactParentStationCompositeBound)
+      && (!check.routeStationProxy || check.parentRouteArmsRealized)
+    ));
+    const actualJunctionKinds = [...new Set(realizedMeaningfulJunctions
+      .map(({ runtimeJunctionKind }) => runtimeJunctionKind))].sort();
+    const supplementRoomOwnedFloorCounts = Object.fromEntries(supplementRooms.map((room) => [
+      room.id,
+      dungeon.floorTiles.filter((tile) => tile.roomId === room.id).length,
+    ]));
+    const supplementRoomFootprintChecks = overlayRoomNodes.map((node) => {
+      const room = supplementRoomById.get(node.id) ?? null;
+      const floorMask = Array.isArray(room?.augmentationFloorMask)
+        ? room.augmentationFloorMask.map((row) => String(row ?? ''))
+        : [];
+      const maskWidth = floorMask.length > 0
+        ? Math.max(...floorMask.map((row) => row.length))
+        : 0;
+      const maskDepth = floorMask.length;
+      const floorMaskCellCount = floorMask.reduce((count, row) => (
+        count + [...row].filter((cell) => cell === '#').length
+      ), 0);
+      const turns = ((Math.trunc(Number(room?.augmentationRotationQuarterTurns ?? 0)) % 4) + 4) % 4;
+      const expectedWidth = turns % 2 === 1 ? maskDepth : maskWidth;
+      const expectedDepth = turns % 2 === 1 ? maskWidth : maskDepth;
+      const spans = [Number(room?.width ?? 0), Number(room?.depth ?? 0)]
+        .sort((left, right) => left - right);
+      return {
+        nodeId: node.id,
+        materializedAsRoom: Boolean(room),
+        leakedAsProxy: connectorProxyById.has(node.id),
+        shortSpanTiles: spans[0],
+        longSpanTiles: spans[1],
+        floorMaskCellCount,
+        moduleTemplateId: room?.augmentationModuleTemplateId ?? null,
+        moduleKind: room?.augmentationModuleKind ?? null,
+        accepted: Boolean(room)
+          && floorMaskCellCount > 0
+          && Number(room.width) === expectedWidth
+          && Number(room.depth) === expectedDepth
+          && room.augmentationModuleKind !== 'connector',
+      };
+    });
+    const physicalSupplementFloorOwnership = physicalSupplementConnections.map((plan) => {
+      const path = plan.bridgePath ?? plan.fullPath ?? [];
+      const ownedFloorCount = dungeon.floorTiles.filter((tile) => (
+        tile.signedConnectorFloorOwnerId === plan.id
+        || tile.connectorId === plan.id
+        || tile.connectionId === plan.id
+      )).length;
+      const sharedThresholdRoomFloorCount = plan.isSharedThresholdConnection
+        ? dungeon.floorTiles.filter((tile) => (
+          path.some((point) => point.x === tile.x && point.z === tile.z)
+          && [plan.fromRoomId, plan.toRoomId].includes(tile.roomId)
+        )).length
+        : 0;
+      return {
+        connectionId: plan.id,
+        ownedFloorCount,
+        sharedThresholdRoomFloorCount,
+        hasRealizedOwner: ownedFloorCount > 0 || sharedThresholdRoomFloorCount > 0,
+      };
+    });
+    const realizedPhysicalSpanMeters = physicalSupplementConnections.map((plan) => ({
+      connectionId: plan.id,
+      distanceMeters: (plan.bridgePath ?? plan.fullPath ?? []).slice(1)
+        .reduce((distance, point, index) => {
+          const previous = (plan.bridgePath ?? plan.fullPath)[index];
+          return distance + Math.hypot(
+            Number(point.x) - Number(previous.x),
+            Number(point.z) - Number(previous.z),
+          ) * dungeon.tileSize;
+        }, 0),
+    }));
+    const realizedTopologyChecks = routeNetworks.map((operation) => {
+      const plans = physicalSupplementConnections.filter((plan) => (
+        plan.augmentationOperationId === operation.id
+      ));
+      const rooms = operation.nodeIds
+        .filter((nodeId) => overlayRoomNodeIdSet.has(nodeId))
+        .map((nodeId) => supplementRoomById.get(nodeId));
+      return {
+        operationId: operation.id,
+        topologyTemplateId: operation.topologyTemplateId,
+        accepted: plans.length > 0
+          && rooms.length + operation.nodeIds.filter((nodeId) => (
+            overlayNodeById.get(nodeId)?.kind === 'supplementConnectorJunction'
+          )).length === Number(operation.substantiveModuleCount)
+          && Number(operation.substantiveModuleCount) >= 3
+          && Number(operation.substantiveModuleCount) <= 6
+          && plans.every((plan) => plan.topologyTemplateId === operation.topologyTemplateId)
+          && rooms.every((room) => (
+            room?.augmentationTopologyTemplateId === operation.topologyTemplateId
+          )),
+      };
+    });
+    const realizedElevationChecks = routeNetworks.map((operation) => {
+      const mode = operation.elevationModes?.[0] ?? null;
+      const plans = physicalSupplementConnections.filter((plan) => (
+        plan.augmentationOperationId === operation.id
+      ));
+      const nodeIds = new Set(operation.nodeIds.filter((nodeId) => (
+        overlayRoomNodeIdSet.has(nodeId)
+      )));
+      const hasElevatedPlatform = dungeon.floorTiles.some((tile) => {
+        if (!nodeIds.has(tile.roomId) || !tile.isPlatformingSurface) return false;
+        const room = supplementRoomById.get(tile.roomId);
+        return Number(tile.elevation ?? 0) > Number(room?.baseElevation ?? 0) + 0.001;
+      });
+      const hasConnector = (variantId, shortcutMode = null) => plans.some((plan) => (
+        plan.connectorVariantId === variantId
+        && Math.abs(Number(plan.elevationDelta ?? 0)) > 0.001
+        && (shortcutMode === null || plan.shortcutMode === shortcutMode)
+      ));
+      const accepted = mode === 'slope'
+        ? hasConnector('crested_slope_v1')
+        : mode === 'ladder'
+          ? hasConnector('ladder_gallery_v1')
+          : mode === 'lift'
+            ? hasConnector('automatic_lift_gallery_v1')
+            : mode === 'shortcut-lift'
+              ? hasConnector('automatic_lift_gallery_v1', 'shortcut-lift')
+              : mode === 'drop-ladder'
+                ? hasConnector('ladder_gallery_v1', 'drop-ladder')
+                : mode === 'split-level-platform'
+                  ? hasElevatedPlatform
+                  : false;
+      return { operationId: operation.id, mode, accepted };
+    });
+    const actualElevationModes = [...new Set(realizedElevationChecks
+      .filter(({ accepted }) => accepted)
+      .map(({ mode }) => mode))].sort();
+    const completeLayoutSignatureInputs = routeNetworks.map((operation) => {
+      const degreeSequence = operation.nodeIds
+        .map((nodeId) => Number(actualNetworkNodeDegrees[nodeId] ?? 0))
+        .sort((left, right) => left - right);
+      const contentSequence = operation.nodeIds.map((nodeId) => (
+        overlayNodeById.get(nodeId)?.contentRole ?? null
+      ));
+      return {
+        legacyFields: {
+          topologyTemplateId: operation.topologyTemplateId,
+          degreeSequence,
+          elevationMode: operation.elevationModes?.[0] ?? null,
+          contentSequence,
+        },
+        rooms: operation.nodeIds.flatMap((nodeId, ordinal) => {
+          const room = supplementRoomById.get(nodeId);
+          if (!room) return [];
+          const node = overlayNodeById.get(nodeId);
+          const manifest = room.augmentationModuleManifest ?? {};
+          const anchors = room.augmentationAnchors ?? [];
+          const roomChests = (dungeon.chests ?? []).filter((chest) => (
+            chest.roomId === room.id
+          ));
+          const rewardSources = roomChests.length > 0
+            ? roomChests
+            : anchors.filter(({ kind }) => kind === 'reward');
+          return [{
+            ordinal,
+            contentRole: node?.contentRole ?? room.augmentationContentRole ?? null,
+            moduleManifestId: manifest.id ?? null,
+            moduleTemplateId: room.augmentationModuleTemplateId ?? null,
+            moduleKind: room.augmentationModuleKind ?? null,
+            physicalModuleKind: room.augmentationPhysicalModuleKind ?? null,
+            geometry: {
+              dimensionsTiles: {
+                width: Number(room.width),
+                depth: Number(room.depth),
+              },
+              rotationQuarterTurns: room.augmentationRotationQuarterTurns ?? 0,
+              layout: manifest.layout ?? null,
+              floorCellMeters: manifest.floorCellMeters ?? null,
+              floorMask: room.augmentationFloorMask ?? [],
+              floorTiers: room.augmentationFloorTiers ?? [],
+              clearRoutes: room.augmentationClearRoutes ?? [],
+              zones: room.augmentationZones ?? [],
+            },
+            furnishing: anchors,
+            cover: room.augmentationCover ?? [],
+            landmarks: room.augmentationLandmarks ?? [],
+            lighting: room.augmentationLighting ?? [],
+            hazardRecipes: anchors
+              .filter(({ kind }) => (
+                ['trap', 'hazard', 'environmentalHazard'].includes(kind)
+              ))
+              .map((anchor) => anchor.hazardRecipe ?? (
+                anchor.hazardProfileId ? { hazardProfileId: anchor.hazardProfileId } : null
+              ))
+              .filter(Boolean),
+            encounterChoices: (dungeon.encounters ?? [])
+              .filter((encounter) => encounter.roomId === room.id)
+              .map((encounter) => ({
+                encounterProfileId: encounter.encounterProfileId ?? null,
+                encounterRecipe: encounter.encounterRecipe ?? null,
+                roster: encounter.roster ?? [],
+                spatialRoles: encounter.spatialRoles ?? [],
+              })),
+            rewardRecipes: rewardSources
+              .map((reward) => reward.rewardRecipe ?? (
+                reward.rewardProfileId ? { rewardProfileId: reward.rewardProfileId } : null
+              ))
+              .filter(Boolean),
+          }];
+        }),
+      };
+    });
+    const verticalConnectorPlans = physicalSupplementConnections.filter((plan) => (
+      Math.abs(Number(plan.elevationDelta ?? 0)) > 0.001
+        || ['crested_slope_v1', 'ladder_gallery_v1', 'automatic_lift_gallery_v1']
+          .includes(plan.connectorVariantId)
+    ));
+    const progressionRoomConnections = dungeon.progression?.roomConnections ?? [];
+    const declaredSupplementalProgressionConnections = (
+      dungeon.progression?.supplementalRoomConnections ?? []
+    );
+    const progressionSupplementConnections = progressionRoomConnections
       .filter((connection) => connection.isDungeonSupplement);
+    const progressionGraphOnlyConnectionIds = [...new Set([
+      ...progressionRoomConnections,
+      ...declaredSupplementalProgressionConnections,
+    ].map((connection) => connection.id ?? connection.connectorId)
+      .filter((connectionId) => graphOnlyConnectionIds.has(connectionId)))].sort();
+    const progressionRoomIds = new Set([
+      ...(dungeon.progression?.rooms ?? []).map((room) => room.roomId ?? room.id),
+      ...(dungeon.progression?.bands ?? []).flatMap((band) => band.roomIds ?? []),
+    ]);
+    const progressionProxyRoomIds = [...routeStationProxyIdSet]
+      .filter((roomId) => progressionRoomIds.has(roomId))
+      .sort();
+    const progressionConnectionProxyRoomIds = [
+      ...progressionRoomConnections,
+      ...declaredSupplementalProgressionConnections,
+    ].flatMap((connection) => [
+      connection.fromRoomId ?? connection.fromNodeId ?? connection.from,
+      connection.toRoomId ?? connection.toNodeId ?? connection.to,
+    ]).filter((roomId) => routeStationProxyIdSet.has(roomId)).sort();
     const connectorEntrances = dungeon.progression?.validation?.connectorEntrances ?? null;
     const augmentationMetrics = dungeon.augmentationMetrics ?? null;
 
@@ -288,25 +854,140 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
       operationTypes: (overlay?.operations ?? [])
         .map((operation) => operation.type ?? operation.operationType ?? operation.kind)
         .sort(),
-      totalRoomCount: dungeon.rooms.length,
-      authoredRoomCount: dungeon.rooms.filter((room) => !room.isDungeonSupplement).length,
-      supplementRoomIds,
-      branchRoomCount,
-      paddingRoomCount,
-      longestExteriorCorridorRunTiles,
-      supplementConnectionCount: supplementConnections.length,
-      paddedLogicalConnectionCount: dungeon.connectionPlans.filter((connection) => (
-        connection.isPaddedByDungeonSupplement && !connection.isDungeonSupplement
+      overlaySchema: overlay?.schema ?? null,
+      routeNetworkCount: routeNetworks.length,
+      coverageNetworkCount: routeNetworks.filter(({ routeNetworkKind }) => (
+        routeNetworkKind === 'objective-route-coverage'
       )).length,
+      coverageEndpointSocketCounts: coverageNetworks
+        .map((operation) => operation.endpointSocketIds?.length ?? 0)
+        .sort((left, right) => left - right),
+      routeNetworkGrantManifestAccepted,
+      coverageWitnessesAccepted,
+      featurelessWitnessesAccepted,
+      pyramidLoopCount: routeNetworks.filter(({ routeNetworkKind }) => (
+        routeNetworkKind === 'landmark-perimeter-loop'
+      )).length,
+      overlayModuleCount: overlaySubstantiveModuleCount,
+      overlayPhysicalNodeCount: overlayNodes.length,
+      overlayRoomNodeCount: overlayRoomNodes.length,
+      overlayRoomNodeIds: overlayRoomNodes.map(({ id }) => id).sort(),
+      overlayConnectorModuleCount: overlayConnectorModuleNodes.length,
+      overlayConnectorJunctionCount: overlayConnectorJunctionNodes.length,
+      overlayConnectorNodeIds: overlayConnectorNodes.map(({ id }) => id).sort(),
+      overlayNodePartitionAccepted: overlayNodes.every(({ kind }) => [
+        'supplementRoom',
+        'supplementConnectorModule',
+        'supplementConnectorJunction',
+      ].includes(kind)),
+      maximumFeaturelessSpanMeters: Math.max(0, ...featurelessSpans),
+      topologyTemplateIds,
+      topologyTemplateSequence,
+      junctionKinds,
+      elevationModes,
+      elevationModeSequence,
+      networkContractsAccepted: routeNetworks.every((operation) => (
+        operation.substantiveModuleCount >= 3
+          && operation.substantiveModuleCount <= 6
+          && operation.moduleCount === operation.substantiveModuleCount
+          && operation.physicalNodeCount === operation.nodeIds.length
+          && operation.substantiveModuleCount === operation.nodeIds.filter((nodeId) => (
+            overlayRoomNodeIdSet.has(nodeId)
+              || overlayNodeById.get(nodeId)?.kind === 'supplementConnectorJunction'
+          )).length
+          && operation.connectorModuleCount === operation.nodeIds.filter((nodeId) => (
+            overlayNodeById.get(nodeId)?.kind === 'supplementConnectorModule'
+          )).length
+          && operation.endpointSocketIds.length >= 2
+          && operation.returnRouteGuaranteed === true
+          && operation.bidirectional === true
+          && operation.localProgressionArc.join(':') === 'enter:challenge:mechanism:payoff:reconnect'
+          && operation.contentRoles.includes('challenge')
+          && operation.contentRoles.includes('reward')
+          && operation.contentRoles.includes('elevation')
+          && realizedMeaningfulJunctions.some((check) => (
+            check.operationId === operation.id
+          ))
+      )),
+      actualNetworkNodeDegrees,
+      realizedNetworkJunctionChecks,
+      overlayConnectorProxyChecks,
+      actualJunctionCount: realizedMeaningfulJunctions.length,
+      actualJunctionKinds,
+      realizedTopologyChecks,
+      realizedElevationChecks,
+      actualElevationModes,
+      completeLayoutSignatureInputs,
+      pyramidLoop: pyramidLoop ? {
+        cycleRankDelta: pyramidLoop.cycleRankDelta,
+        landmarkRoomId: pyramidLoop.landmarkRoomId,
+        occupiedCriticalWallSides: pyramidLoop.occupiedCriticalWallSides,
+        openedWallSides: pyramidLoop.openedWallSides,
+        progressionBandId: pyramidLoop.progressionBandId,
+      } : null,
+      totalRoomCount: dungeon.rooms.length,
+      authoredRoomCount: authoredRooms.length,
+      supplementRoomIds,
+      supplementRoomFootprintChecks,
+      roomProxyLeakIds: leakedRouteStationProxies.map(({ id }) => id).sort(),
+      routeStationProxyCount: routeStationProxies.length,
+      authoredRouteStationProxyCount: routeStationProxies.filter((room) => (
+        room.isRouteStationProxy === true
+      )).length,
+      routeStationProxyIds: routeStationProxies.map(({ id }) => id),
+      routeStationProxyContractsAccepted: routeStationProxies.every((room) => (
+        room.isDungeonSupplement === false
+          && room.suppressRoomGeometry === true
+          && room.isConnectorJunctionProxy === true
+          && (
+            room.isRouteStationProxy === true
+            || room.isSupplementConnectorModule === true
+            || room.isSupplementConnectorJunction === true
+          )
+      )),
+      supplementConnectionCount: supplementConnections.length,
+      physicalSupplementConnectionCount: physicalSupplementConnections.length,
+      graphSupplementConnectionCount: supplementConnections.filter((connection) => (
+        isGraphOnlyConnection(connection)
+      )).length,
+      parentRouteStationLinkCount: supplementConnections.filter((connection) => (
+        isGraphOnlyConnection(connection) && connection.parentRouteStationLink === true
+      )).length,
+      graphOnlyConnectionIds: [...graphOnlyConnectionIds].sort(),
+      supplementRoomOwnedFloorCounts,
+      physicalSupplementFloorOwnership,
+      realizedPhysicalSpanMeters,
+      maximumRealizedPhysicalSpanMeters: Math.max(
+        0,
+        ...realizedPhysicalSpanMeters.map(({ distanceMeters }) => distanceMeters),
+      ),
+      verticalConnectorCount: verticalConnectorPlans.length,
+      verticalConnectorVariantIds: [...new Set(verticalConnectorPlans
+        .map(({ connectorVariantId }) => connectorVariantId)
+        .filter(Boolean))].sort(),
       rootName: supplementRoot?.name ?? null,
       rootParentIsDungeon: supplementRoot?.parent === dungeon.group,
       rootRoomIds: [...(supplementRoot?.userData?.supplementalRoomIds ?? [])].sort(),
       minimapRoomIds,
+      minimapProxyRoomIds,
+      minimapHallwayProxyRoomIds,
       minimapHallwayCount: minimapHallways.length,
+      minimapGraphOnlyConnectionIds,
       supplementEncounterCount: supplementEncounters.length,
       supplementEncounterRoomIds: [...new Set(
         supplementEncounters.map((encounter) => encounter.roomId).filter(Boolean),
       )].sort(),
+      supplementChestCount: supplementChests.length,
+      supplementTrapCount: supplementTraps.length,
+      encounterProxyRoomIds,
+      rewardProxyRoomIds,
+      elevatedPlatformTileCount: dungeon.floorTiles.filter((tile) => (
+        supplementRoomIdSet.has(tile.roomId)
+        && tile.isPlatformingSurface
+        && Number(tile.elevation ?? 0) > Number(
+          supplementRooms.find((room) => room.id === tile.roomId)?.baseElevation ?? 0,
+        )
+      )).length,
       supplementLightCount,
       localLightRecordCount: (dungeon.localLights ?? []).length,
       identity,
@@ -318,44 +999,217 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
       outsideSupplementOwners,
       resourceCounts,
       progressionSupplementConnectionCount: progressionSupplementConnections.length,
+      declaredSupplementalProgressionConnectionCount:
+        declaredSupplementalProgressionConnections.length,
+      progressionGraphOnlyConnectionIds,
+      progressionProxyRoomIds,
+      progressionConnectionProxyRoomIds,
       progressionSupplementEndpointsResolve: progressionSupplementConnections.every((connection) => (
         dungeon.rooms.some((room) => room.id === connection.fromRoomId)
           && dungeon.rooms.some((room) => room.id === connection.toRoomId)
       )),
       connectorEntrances,
+      platformability: dungeon.progression?.validation?.platformability ?? null,
       segmentBarriersValidated:
         dungeon.progression?.validation?.platformability?.segmentBarriersValidated ?? false,
+      effectiveGraphAccepted:
+        dungeon.progression?.validation?.effectiveGraph?.accepted ?? false,
+      lockedGatePlacements: (dungeon.doors ?? [])
+        .filter(({ locked }) => locked)
+        .map(({
+          id,
+          gatePlacementSide,
+          fromRoomId,
+          toRoomId,
+          connectionPlanId,
+          graphBlockingPosition,
+          thresholdAnchored,
+          thresholdOwnerRoomId,
+          fromPortal,
+        }) => {
+          const plan = dungeon.connectionPlans.find((candidate) => candidate.id === connectionPlanId);
+          const source = plan?.fromSocket;
+          return {
+            id,
+            gatePlacementSide,
+            fromRoomId,
+            toRoomId,
+            connectionPlanId: connectionPlanId ?? null,
+            thresholdAnchored: thresholdAnchored === true,
+            thresholdOwnerRoomId: thresholdOwnerRoomId ?? null,
+            planFromRoomId: plan?.fromRoomId ?? null,
+            planDoorId: plan?.doorId ?? plan?.logicalGateId ?? null,
+            sourcePortalMatchesPlan: Boolean(
+              fromPortal
+              && source
+              && fromPortal.roomId === source.roomId
+              && fromPortal.x === source.x
+              && fromPortal.z === source.z
+            ),
+            sourceEntranceDistanceMeters: source && graphBlockingPosition
+              ? Math.hypot(
+                graphBlockingPosition.x - source.x * dungeon.tileSize,
+                graphBlockingPosition.z - source.z * dungeon.tileSize,
+              )
+              : null,
+            sourceEntranceElevationDistanceMeters: source && graphBlockingPosition
+              ? Math.abs(
+                Number(graphBlockingPosition.y) - Number(source.elevation ?? 0),
+              )
+              : null,
+          };
+        }),
+      physicalSupplementConnectionIds: [...physicalSupplementConnectionIds].sort(),
+      shortcutConnectionIds,
       augmentationMetrics,
-      retainsPaddedLogicalProgressionEdge: (dungeon.progression?.roomConnections ?? [])
-        .some((connection) => paddedLogicalIds.has(connection.id)),
-      retainsPaddedLogicalMinimapEdge: (dungeon.minimap?.hallways ?? [])
-        .some((hallway) => paddedLogicalIds.has(hallway.hallwayId ?? hallway.id)),
     };
   });
+
+  snapshot.completeLayoutSignatures = snapshot.completeLayoutSignatureInputs.map((input) => (
+    createDungeonAugmentationCompleteLayoutSignature(input)
+  ));
+  delete snapshot.completeLayoutSignatureInputs;
 
   expect(snapshot.generationAccepted).toBe(true);
   expect(snapshot.status, JSON.stringify(snapshot.diagnostics, null, 2)).toBe('applied');
   expect(snapshot.profileId).toBe(INDUSTRIAL_PROFILE_ID);
-  expect(snapshot.operationTypes).toEqual(['edgePadding', 'optionalBranch']);
-  expect(snapshot.supplementRoomIds.length).toBeGreaterThanOrEqual(3);
-  expect(snapshot.supplementRoomIds.length).toBeLessThanOrEqual(4);
-  expect(snapshot.branchRoomCount).toBe(2);
-  expect(snapshot.paddingRoomCount).toBeGreaterThanOrEqual(1);
-  expect(snapshot.paddingRoomCount).toBeLessThanOrEqual(2);
-  expect(snapshot.branchRoomCount + snapshot.paddingRoomCount).toBe(
-    snapshot.supplementRoomIds.length,
+  expect(snapshot.overlaySchema).toBe('ruindivex-dungeon-augmentation-overlay/v2');
+  expect(snapshot.operationTypes.every((type) => type === 'routeNetwork')).toBe(true);
+  expect(snapshot.routeNetworkCount).toBeGreaterThanOrEqual(3);
+  expect(snapshot.routeNetworkCount).toBeLessThanOrEqual(8);
+  expect(snapshot.coverageNetworkCount).toBeGreaterThanOrEqual(1);
+  expect(snapshot.coverageEndpointSocketCounts).toEqual(
+    expect.arrayContaining([2, 3, 4]),
   );
-  expect(snapshot.longestExteriorCorridorRunTiles).toBeGreaterThanOrEqual(2);
+  expect(snapshot.routeNetworkGrantManifestAccepted).toBe(true);
+  expect(snapshot.coverageWitnessesAccepted).toBe(true);
+  expect(snapshot.featurelessWitnessesAccepted).toBe(true);
+  expect(snapshot.pyramidLoopCount).toBe(1);
+  expect(snapshot.overlayModuleCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount * 3);
+  expect(snapshot.overlayModuleCount).toBeLessThanOrEqual(30);
+  expect(snapshot.overlayNodePartitionAccepted).toBe(true);
+  expect(snapshot.overlayModuleCount).toBe(
+    snapshot.overlayRoomNodeCount + snapshot.overlayConnectorJunctionCount,
+  );
+  expect(snapshot.overlayPhysicalNodeCount).toBe(
+    snapshot.overlayRoomNodeCount
+      + snapshot.overlayConnectorModuleCount
+      + snapshot.overlayConnectorJunctionCount,
+  );
+  expect(snapshot.overlayPhysicalNodeCount).toBe(
+    snapshot.overlayModuleCount + snapshot.overlayConnectorModuleCount,
+  );
+  expect(snapshot.supplementRoomIds).toEqual(snapshot.overlayRoomNodeIds);
+  expect(snapshot.supplementRoomIds.length).toBe(snapshot.overlayRoomNodeCount);
+  expect(snapshot.supplementRoomIds.length).toBeGreaterThanOrEqual(
+    snapshot.routeNetworkCount * 2,
+  );
+  expect(snapshot.supplementRoomIds.length).toBeLessThanOrEqual(30);
+  expect(snapshot.maximumFeaturelessSpanMeters).toBeLessThanOrEqual(33.6);
+  expect(snapshot.maximumRealizedPhysicalSpanMeters).toBeLessThanOrEqual(33.6 + 1e-6);
+  expect(snapshot.topologyTemplateIds.length).toBeGreaterThanOrEqual(3);
+  expect(snapshot.junctionKinds.length).toBeGreaterThanOrEqual(2);
+  expect(snapshot.elevationModes.length).toBeGreaterThanOrEqual(3);
+  expect(snapshot.realizedTopologyChecks.every(({ accepted }) => accepted)).toBe(true);
+  expect(snapshot.actualJunctionKinds.length).toBeGreaterThanOrEqual(2);
+  expect(snapshot.realizedElevationChecks.every(({ accepted }) => accepted)).toBe(true);
+  expect(snapshot.actualElevationModes).toEqual(snapshot.elevationModes);
+  const selectionBagPrefixLength = Math.min(snapshot.routeNetworkCount, 6);
+  expect(new Set(
+    snapshot.topologyTemplateSequence.slice(0, selectionBagPrefixLength),
+  ).size).toBe(selectionBagPrefixLength);
+  expect(new Set(
+    snapshot.elevationModeSequence.slice(0, selectionBagPrefixLength),
+  ).size).toBe(selectionBagPrefixLength);
+  expect(new Set(
+    snapshot.completeLayoutSignatures.slice(0, selectionBagPrefixLength),
+  ).size).toBe(selectionBagPrefixLength);
+  expect(snapshot.networkContractsAccepted).toBe(true);
+  expect(snapshot.actualJunctionCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount);
+  expect(snapshot.realizedNetworkJunctionChecks.filter((check) => (
+    check.actualDegree >= 3
+    && (!check.exactParentStationComposite || check.exactParentStationCompositeBound)
+    && (!check.routeStationProxy || check.parentRouteArmsRealized)
+  )).every((check) => (
+    check.overlayMeaningful && check.runtimeMeaningful && check.runtimeJunctionKind
+  ))).toBe(true);
+  expect(snapshot.pyramidLoop).toMatchObject({
+    cycleRankDelta: 1,
+    landmarkRoomId: 'keycardRoom',
+    progressionBandId: 0,
+  });
+  expect(snapshot.pyramidLoop.occupiedCriticalWallSides).toHaveLength(2);
+  expect(snapshot.pyramidLoop.openedWallSides).toHaveLength(2);
+  expect(new Set([
+    ...snapshot.pyramidLoop.occupiedCriticalWallSides,
+    ...snapshot.pyramidLoop.openedWallSides,
+  ]).size).toBe(4);
   expect(snapshot.authoredRoomCount).toBe(13);
+  expect(snapshot.supplementRoomFootprintChecks).toHaveLength(snapshot.overlayRoomNodeCount);
+  expect(snapshot.supplementRoomFootprintChecks.every((check) => (
+    check.materializedAsRoom
+      && !check.leakedAsProxy
+      && check.accepted
+      && check.floorMaskCellCount > 0
+      && Boolean(check.moduleTemplateId)
+      && check.moduleKind !== 'connector'
+  ))).toBe(true);
+  expect(snapshot.roomProxyLeakIds).toEqual([]);
+  expect(snapshot.routeStationProxyContractsAccepted).toBe(true);
+  expect(new Set(snapshot.routeStationProxyIds).size).toBe(snapshot.routeStationProxyCount);
   expect(snapshot.totalRoomCount).toBe(
-    snapshot.authoredRoomCount + snapshot.supplementRoomIds.length,
+    snapshot.authoredRoomCount
+      + snapshot.supplementRoomIds.length,
   );
-  expect(snapshot.supplementConnectionCount).toBeGreaterThanOrEqual(2);
-  expect(snapshot.paddedLogicalConnectionCount).toBe(1);
+  expect(snapshot.supplementConnectionCount).toBeGreaterThanOrEqual(
+    snapshot.routeNetworkCount * 2,
+  );
+  expect(snapshot.physicalSupplementConnectionCount).toBeGreaterThanOrEqual(
+    snapshot.routeNetworkCount * 2,
+  );
+  expect(snapshot.routeStationProxyCount).toBeGreaterThanOrEqual(
+    snapshot.overlayConnectorNodeIds.length,
+  );
+  expect(snapshot.overlayConnectorProxyChecks).toHaveLength(
+    snapshot.overlayConnectorNodeIds.length,
+  );
+  expect(snapshot.overlayConnectorProxyChecks.every((check) => (
+    check.materializedOnlyAsProxy
+      && check.expectedArmIds.length === check.realizedArmIds.length
+      && check.expectedArmIds.every((armId, index) => armId === check.realizedArmIds[index])
+      && check.physicalArmCount === check.expectedArmIds.length
+      && check.actualApproachCount === check.expectedArmIds.length
+      && check.coreFloorCount === check.expectedCoreFloorCount
+      && check.coreFloorCount > 0
+      && check.requiredApproachCount === (
+        check.kind === 'supplementConnectorModule' || check.exactParentStationComposite
+          ? 2
+          : 3
+      )
+      && (
+        check.kind === 'supplementConnectorJunction'
+          ? check.actualApproachCount >= 3 && check.meaningful
+          : check.actualApproachCount === 2 && !check.meaningful
+      )
+  ))).toBe(true);
+  expect(snapshot.graphSupplementConnectionCount).toBeGreaterThanOrEqual(
+    snapshot.authoredRouteStationProxyCount,
+  );
+  expect(snapshot.parentRouteStationLinkCount).toBe(snapshot.authoredRouteStationProxyCount);
+  expect(snapshot.graphOnlyConnectionIds.length).toBeGreaterThan(0);
+  expect(snapshot.physicalSupplementConnectionIds.some((connectionId) => (
+    snapshot.graphOnlyConnectionIds.includes(connectionId)
+  ))).toBe(false);
+  expect(Object.values(snapshot.supplementRoomOwnedFloorCounts).every((count) => (
+    count > 0
+  ))).toBe(true);
+  expect(snapshot.physicalSupplementFloorOwnership.every(({ hasRealizedOwner }) => (
+    hasRealizedOwner
+  ))).toBe(true);
   expect(snapshot.augmentationMetrics).toMatchObject({
-    operationCount: 2,
+    operationCount: snapshot.routeNetworkCount,
     roomCount: snapshot.supplementRoomIds.length,
-    physicalConnectionCount: snapshot.supplementConnectionCount,
+    physicalConnectionCount: snapshot.physicalSupplementConnectionCount,
   });
   expect(snapshot.augmentationMetrics.tileCount).toBeGreaterThan(0);
   expect(snapshot.augmentationMetrics.meshCount).toBeGreaterThan(0);
@@ -364,14 +1218,194 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
   expect(snapshot.connectorEntrances.acceptedSocketCount).toBe(
     snapshot.connectorEntrances.checkedSocketCount,
   );
+  expect(snapshot.connectorEntrances.checks.filter((check) => (
+    check.strictApproachContract
+  )).length).toBeGreaterThanOrEqual(snapshot.routeNetworkCount * 2);
   expect(snapshot.connectorEntrances.checks.every((check) => (
     check.socketReachable
       && check.outsideReachable
       && check.traversableOutward
       && check.traversableReturn
       && check.blockingWallFacadeId === null
+      && (
+        !check.strictApproachContract
+        || (
+          check.requiredLaneCount >= 3
+          && check.acceptedLaneCount === check.requiredLaneCount
+          && check.requiredApproachDepthTiles === 2
+          && check.laneChecks.every((lane) => lane.accepted)
+        )
+      )
   ))).toBe(true);
+  expect(snapshot.connectorEntrances.skippedGraphConnectionIds.sort()).toEqual(
+    snapshot.graphOnlyConnectionIds,
+  );
+  expect(snapshot.connectorEntrances.checks.some(({ connectionId }) => (
+    snapshot.graphOnlyConnectionIds.includes(connectionId)
+  ))).toBe(false);
   expect(snapshot.segmentBarriersValidated).toBe(true);
+  expect(snapshot.platformability.orphanSupplementFloorCount).toBe(0);
+  expect(snapshot.platformability.blockedSupplementFloorCount).toBe(0);
+  expect(snapshot.platformability.nonReturnableSupplementFloorCount).toBe(0);
+  expect(snapshot.platformability.supplementConnectivityChecks.length).toBe(
+    snapshot.physicalSupplementConnectionCount,
+  );
+  expect(snapshot.platformability.supplementConnectivityChecks
+    .map(({ connectionId }) => connectionId)
+    .sort()).toEqual(snapshot.physicalSupplementConnectionIds);
+  expect(snapshot.platformability.supplementConnectivityChecks.every((check) => (
+    check.accepted
+      && check.centerlinePointCount > 0
+      && check.centerlineChecks.every((point) => (
+        (point.floorKey || point.contractTraversal)
+        && point.reachable
+        && (
+          point.contractTraversal
+          || (point.elevationMatchesExpected && point.expectedElevations.length > 0)
+        )
+      ))
+      && check.verticalContractChecks.every((contract) => contract.accepted)
+      && check.missingOwnedCenterlinePointCount === 0
+      && check.unreachableCenterlinePointCount === 0
+      && check.strictLocalComponentAccepted
+      && check.locallyUnreachableTraversalFloorKeys.length === 0
+      && check.locallyNonReturnableTraversalFloorKeys.length === 0
+  ))).toBe(true);
+  expect(snapshot.platformability.supplementRoomConnectivityChecks).toHaveLength(
+    snapshot.supplementRoomIds.length,
+  );
+  expect(snapshot.platformability.supplementRoomConnectivityChecks.every((check) => (
+    check.accepted
+      && check.attachedPhysicalConnectionIds.length > 0
+      && snapshot.supplementRoomOwnedFloorCounts[check.roomId] > 0
+      && check.totalNavigableFloorCount > 0
+      && check.realizedRoomOwnedFloorCount
+        === check.totalNavigableFloorCount + check.authoredBlockingRoomFloorCount
+      && check.reachableFloorCount === check.totalNavigableFloorCount
+      && check.meetsSubstantiveRoomFootprint
+      && check.usesAuthoredFloorMask
+      && check.expectedBaseFootprintFloorCount > 0
+      && Boolean(check.authoredModuleTemplateId)
+      && check.authoredModuleKind !== 'connector'
+      && check.realizedBaseFootprintFloorCount === check.expectedBaseFootprintFloorCount
+      && check.baseFootprintCoverageAccepted
+      && check.missingBaseFootprintColumnKeys.length === 0
+      && check.nonNavigableBaseFootprintFloorKeys.length === 0
+      && check.globallyUnreachableBaseFootprintFloorKeys.length === 0
+      && check.locallyUnreachableBaseFootprintFloorKeys.length === 0
+      && check.locallyNonReturnableBaseFootprintFloorKeys.length === 0
+      && check.unexpectedNonNavigableRoomFloorKeys.length === 0
+      && check.outsideDeclaredRoomFloorKeys.length === 0
+      && check.foreignRoomFloorOwnership.length === 0
+      && check.globallyNonReturnableRoomFloorKeys.length === 0
+      && check.orphanFloorKeys.length === 0
+      && check.localRoomConnectivityAccepted
+      && check.locallyUnreachableRoomFloorKeys.length === 0
+      && check.locallyNonReturnableRoomFloorKeys.length === 0
+      && check.localApproachChecks.every((approach) => (
+        approach.floorKey
+        && approach.reachableFromFirstApproach
+        && approach.returnReachable
+      ))
+  ))).toBe(true);
+  expect(snapshot.platformability.supplementJunctionConnectivityChecks).toHaveLength(
+    snapshot.realizedNetworkJunctionChecks.length,
+  );
+  const connectorProxyCheckById = new Map(snapshot.overlayConnectorProxyChecks.map((check) => (
+    [check.nodeId, check]
+  )));
+  expect(snapshot.platformability.supplementJunctionConnectivityChecks.every((check) => {
+    const connector = connectorProxyCheckById.get(check.roomId);
+    const expectedApproachCount = connector?.exactParentStationComposite
+      ? 2
+      : connector?.kind === 'supplementConnectorModule'
+        ? 2
+        : connector?.expectedArmIds.length ?? check.approachCount;
+    const minimumApproachCount = connector?.requiredApproachCount ?? 3;
+    const realizedLocalArmIds = connector?.realizedArmIds.filter((armId) => (
+      String(armId) !== String(connector?.parentThroughPhysicalArmId ?? '')
+      && !String(armId).includes(':authored-through:')
+    ));
+    const exactAttachedArmIds = !connector || JSON.stringify(
+      [...(check.attachedPhysicalConnectionIds ?? [])].sort(),
+    ) === JSON.stringify(realizedLocalArmIds);
+    const exactCompositeBound = !connector?.exactParentStationComposite || (
+      check.exactParentStationComposite === true
+      && check.exactParentStationCompositeBound === true
+      && Boolean(check.parentStationAttachmentId)
+      && snapshot.platformability.supplementJunctionConnectivityChecks.some((candidate) => (
+        candidate.roomId === check.parentStationProxyId
+          && candidate.routeStationProxy === true
+          && candidate.accepted
+          && candidate.approachCount >= 3
+      ))
+    );
+    return check.accepted
+      && check.approachCount === expectedApproachCount
+      && exactAttachedArmIds
+      && exactCompositeBound
+      && check.requiredApproachCount === minimumApproachCount
+      && check.coreFloorCoverageAccepted
+      && check.foreignCoreFloorOwnerIds.length === 0
+      && check.unownedMergedCoreFloorSourceCount === 0
+      && check.coreFloorCount === check.expectedCoreFloorCount
+      && check.navigableCoreFloorCount === check.expectedCoreFloorCount
+      && check.approachChecks.length === expectedApproachCount
+      && check.approachChecks.every((approach) => (
+        approach.floorKey
+          && approach.globallyReachable
+          && approach.locallyReachable
+          && approach.returnReachable
+      ));
+  })).toBe(true);
+  expect(snapshot.routeNetworkCount).toBeLessThanOrEqual(
+    new Set(snapshot.platformability.supplementJunctionConnectivityChecks
+      .filter((check) => (
+        check.accepted
+          && (
+            check.approachCount >= 3
+            || (
+              check.exactParentStationComposite === true
+              && check.exactParentStationCompositeBound === true
+            )
+          )
+      ))
+      .map(({ operationId }) => operationId)).size,
+  );
+  expect(snapshot.platformability.supplementVerticalConnectivityChecks.every((check) => (
+    check.accepted && check.allOperationRoomsConnected
+  ))).toBe(true);
+  expect(snapshot.platformability.supplementShortcutConnectivityChecks
+    .map(({ connectionId }) => connectionId)
+    .sort()).toEqual(snapshot.shortcutConnectionIds);
+  expect(snapshot.platformability.supplementShortcutConnectivityChecks.every((check) => (
+    check.accepted
+      && check.mechanismRecordAccepted
+      && check.initiallyUnavailable
+      && check.sourceReachableBeforeActivation
+      && check.farSideReachableBeforeActivation
+      && check.matchingTraversalLinkIds.length >= 2
+      && check.postActivationBidirectional
+  ))).toBe(true);
+  expect(snapshot.effectiveGraphAccepted).toBe(true);
+  expect(snapshot.lockedGatePlacements.length).toBeGreaterThan(0);
+  expect(snapshot.lockedGatePlacements.every(({ gatePlacementSide }) => (
+    gatePlacementSide === 'source'
+  ))).toBe(true);
+  expect(snapshot.lockedGatePlacements.every(({ sourceEntranceDistanceMeters }) => (
+    sourceEntranceDistanceMeters !== null && sourceEntranceDistanceMeters <= 0.01
+  ))).toBe(true);
+  expect(snapshot.lockedGatePlacements.every(({ sourceEntranceElevationDistanceMeters }) => (
+    sourceEntranceElevationDistanceMeters !== null
+      && sourceEntranceElevationDistanceMeters <= 0.01
+  ))).toBe(true);
+  expect(snapshot.lockedGatePlacements.every((gate) => (
+    gate.thresholdAnchored
+      && gate.thresholdOwnerRoomId === gate.fromRoomId
+      && gate.planFromRoomId === gate.fromRoomId
+      && gate.planDoorId === gate.id
+      && gate.sourcePortalMatchesPlan
+  ))).toBe(true);
 
   expect(snapshot.basePlanHash).toBeTruthy();
   expect(snapshot.augmentationPlanHash).toBeTruthy();
@@ -384,11 +1418,25 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
   expect(snapshot.rootParentIsDungeon).toBe(true);
   expect(snapshot.rootRoomIds).toEqual(snapshot.supplementRoomIds);
   expect(snapshot.minimapRoomIds).toEqual(snapshot.supplementRoomIds);
-  expect(snapshot.minimapHallwayCount).toBeGreaterThanOrEqual(2);
-  expect(snapshot.supplementEncounterCount).toBeGreaterThanOrEqual(
-    snapshot.supplementRoomIds.length,
+  expect(snapshot.minimapProxyRoomIds).toEqual([]);
+  expect(snapshot.minimapHallwayProxyRoomIds).toEqual([]);
+  expect(snapshot.minimapGraphOnlyConnectionIds).toEqual([]);
+  expect(snapshot.minimapHallwayCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount * 2);
+  expect(snapshot.supplementEncounterCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount);
+  expect(snapshot.supplementEncounterRoomIds.length).toBeGreaterThanOrEqual(
+    snapshot.routeNetworkCount,
   );
-  expect(snapshot.supplementEncounterRoomIds).toEqual(snapshot.supplementRoomIds);
+  expect(snapshot.supplementChestCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount);
+  expect(snapshot.supplementTrapCount).toBeGreaterThanOrEqual(1);
+  expect(snapshot.encounterProxyRoomIds).toEqual([]);
+  expect(snapshot.rewardProxyRoomIds).toEqual([]);
+  expect(snapshot.elevatedPlatformTileCount).toBeGreaterThan(0);
+  expect(snapshot.verticalConnectorCount).toBeGreaterThanOrEqual(1);
+  expect(snapshot.verticalConnectorVariantIds.every((variantId) => [
+    'crested_slope_v1',
+    'ladder_gallery_v1',
+    'automatic_lift_gallery_v1',
+  ].includes(variantId))).toBe(true);
   expect(snapshot.supplementLightCount).toBeGreaterThan(0);
   expect(snapshot.localLightRecordCount).toBeGreaterThan(0);
 
@@ -426,10 +1474,16 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
       || name.startsWith('connectorIndustrialArch_')
       || name.startsWith('classicV1CorridorFurnishing_')
   ))).toBe(true);
-  expect(snapshot.progressionSupplementConnectionCount).toBe(snapshot.supplementConnectionCount);
+  expect(snapshot.progressionSupplementConnectionCount).toBe(
+    snapshot.physicalSupplementConnectionCount,
+  );
+  expect(snapshot.declaredSupplementalProgressionConnectionCount).toBe(
+    snapshot.physicalSupplementConnectionCount,
+  );
+  expect(snapshot.progressionGraphOnlyConnectionIds).toEqual([]);
+  expect(snapshot.progressionProxyRoomIds).toEqual([]);
+  expect(snapshot.progressionConnectionProxyRoomIds).toEqual([]);
   expect(snapshot.progressionSupplementEndpointsResolve).toBe(true);
-  expect(snapshot.retainsPaddedLogicalProgressionEdge).toBe(false);
-  expect(snapshot.retainsPaddedLogicalMinimapEdge).toBe(false);
   expect(snapshot.resourceCounts).toMatchObject({
     borrowedCount: expect.any(Number),
     ownedCount: expect.any(Number),
@@ -512,6 +1566,9 @@ test('five opt-in reset cycles plateau supplement ownership and live resource co
     await waitForDungeonPresentationAssets(page);
     const sample = await page.evaluate((resetResult) => {
       const { game } = window;
+      const overlayNodes = game.dungeon.augmentationOverlayPlan?.nodes ?? [];
+      const routeNetworks = (game.dungeon.augmentationOverlayPlan?.operations ?? [])
+        .filter(({ type }) => type === 'routeNetwork');
       const geometries = new Set();
       const materials = new Set();
       game.dungeon.group.traverse((object) => {
@@ -525,6 +1582,21 @@ test('five opt-in reset cycles plateau supplement ownership and live resource co
         status: game.dungeon.augmentationStatus,
         roomCount: game.dungeon.rooms.length,
         supplementRoomCount: game.dungeon.rooms.filter((room) => room.isDungeonSupplement).length,
+        overlayModuleCount: routeNetworks.reduce((count, operation) => (
+          count + Number(operation.substantiveModuleCount ?? operation.moduleCount ?? 0)
+        ), 0),
+        overlayPhysicalNodeCount: overlayNodes.length,
+        overlayRoomNodeCount: overlayNodes.filter(({ kind }) => kind === 'supplementRoom').length,
+        overlayConnectorModuleCount: overlayNodes.filter(({ kind }) => (
+          kind === 'supplementConnectorModule'
+        )).length,
+        overlayConnectorJunctionCount: overlayNodes.filter(({ kind }) => (
+          kind === 'supplementConnectorJunction'
+        )).length,
+        overlayConnectorNodeCount: overlayNodes.filter(({ kind }) => (
+          kind === 'supplementConnectorModule' || kind === 'supplementConnectorJunction'
+        )).length,
+        routeNetworkCount: routeNetworks.length,
         supplementRootCount: game.dungeon.group.children.filter((child) => (
           child.userData?.dungeonSupplementRoot === true
         )).length,
@@ -550,12 +1622,31 @@ test('five opt-in reset cycles plateau supplement ownership and live resource co
       disposableResourceCount: 1,
       controllerBoundToCurrentDungeon: true,
     });
-    expect(sample.supplementRoomCount).toBeGreaterThanOrEqual(3);
-    expect(sample.supplementRoomCount).toBeLessThanOrEqual(4);
+    expect(sample.supplementRoomCount).toBe(sample.overlayRoomNodeCount);
+    expect(sample.supplementRoomCount).toBeGreaterThanOrEqual(sample.routeNetworkCount * 2);
+    expect(sample.supplementRoomCount).toBeLessThanOrEqual(30);
+    expect(sample.overlayModuleCount).toBe(
+      sample.overlayRoomNodeCount + sample.overlayConnectorJunctionCount,
+    );
+    expect(sample.overlayPhysicalNodeCount).toBe(
+      sample.overlayRoomNodeCount
+        + sample.overlayConnectorModuleCount
+        + sample.overlayConnectorJunctionCount,
+    );
+    expect(sample.overlayPhysicalNodeCount).toBe(
+      sample.overlayModuleCount + sample.overlayConnectorModuleCount,
+    );
   }
   const stableKeys = [
     'roomCount',
     'supplementRoomCount',
+      'overlayModuleCount',
+      'overlayPhysicalNodeCount',
+      'overlayRoomNodeCount',
+      'overlayConnectorModuleCount',
+      'overlayConnectorJunctionCount',
+      'overlayConnectorNodeCount',
+    'routeNetworkCount',
     'geometryCount',
     'materialCount',
     'encounterCount',

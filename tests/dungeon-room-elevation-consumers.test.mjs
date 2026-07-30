@@ -209,6 +209,54 @@ test('translated V1 structural supports stop at the owning room floor', () => {
   material.dispose();
 });
 
+test('module-local platform tier names cannot merge collision or render masses across rooms', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const platformTile = (roomId, x, z) => ({
+    roomId,
+    x,
+    z,
+    elevation: 16.8,
+    roomBaseElevation: 14,
+    level: 1,
+    surface: 'supplementAuthoredFloor',
+    type: 'floor',
+    isPlatformingSurface: true,
+    platformGroupId: 'upper',
+  });
+  const tiles = [
+    platformTile('supplementRoomA', 0, 0),
+    platformTile('supplementRoomA', 1, 0),
+    platformTile('supplementRoomA', 0, 1),
+    platformTile('supplementRoomB', 20, 20),
+    platformTile('supplementRoomB', 21, 20),
+  ];
+
+  const assemblies = generator._createPurposePlatformAssemblies(tiles);
+  assert.equal(assemblies.length, 2);
+  assert.deepEqual(
+    assemblies.map(({ roomId }) => roomId).sort(),
+    ['supplementRoomA', 'supplementRoomB'],
+  );
+  for (const assembly of assemblies) {
+    const representedTileCount = assembly.rectangles.reduce((total, rectangle) => (
+      total
+      + (rectangle.maxX - rectangle.minX + 1)
+        * (rectangle.maxZ - rectangle.minZ + 1)
+    ), 0);
+    assert.equal(representedTileCount, assembly.tiles.length);
+    assert.equal(assembly.localGroupId, 'upper');
+  }
+
+  const surfaces = generator._createGeneratedPlatformSurfaces(tiles);
+  assert.equal(surfaces.length, 3, 'the L mask remains two exact rectangles plus room B');
+  assert.ok(surfaces.every(({ id }) => id !== 'generatedSolidPlatform_upper'));
+  assert.ok(surfaces.every(({ halfWidth, halfDepth }) => halfWidth < 6 && halfDepth < 6));
+  assert.deepEqual(
+    [...new Set(surfaces.map(({ roomId }) => roomId))].sort(),
+    ['supplementRoomA', 'supplementRoomB'],
+  );
+});
+
 test('translated conveyor puzzle keys retain their authored absolute floor layer', () => {
   const observedHints = [];
   const controller = {

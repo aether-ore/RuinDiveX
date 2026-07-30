@@ -1290,6 +1290,17 @@ button:focus-visible {
     0 0 0 1px rgba(18, 4, 7, 0.96);
 }
 
+.legends-health-gauge.is-invulnerable .gauge-track {
+  box-shadow:
+    inset 0 0 0 2px rgba(125, 248, 255, 0.78),
+    0 0 14px rgba(125, 248, 255, 0.54);
+}
+
+.legends-health-gauge.is-invulnerable .gauge-readout {
+  border-color: rgba(125, 248, 255, 0.72);
+  color: #7df8ff;
+}
+
 .weapon-green-fill {
   background: linear-gradient(180deg, #4eff7f, #16d85e 60%, #0b8f45);
   box-shadow: 0 0 10px rgba(46, 255, 116, 0.5);

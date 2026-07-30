@@ -6,7 +6,7 @@ This subsystem belongs only to the Three.js project. It is an optional planning 
 
 Industrial V1 remains the authoritative owner of its base rooms, connections, gates, progression, and presentation. Augmentation is off by default. When the sidecar is disabled, not supported by a host, or rejected during planning or validation, the generator keeps the original parent draft. The disabled path enters before sidecar random-number generation, and the pure planning API returns the exact input draft reference for an unchanged result.
 
-The compatibility profile `industrial-supplement-preview-v1` remains available for committed expeditions and produces two to four supplemental rooms. New preview runs use `industrial-supplement-preview-v2`, which guarantees a two-room out-and-back exploration branch and pads one explicitly eligible authored edge with one or two rooms, producing three to four supplemental rooms in total. V2 also keeps 8.4 metres (three Industrial grid cells) between supplemental footprints so the generated corridors read as an obvious addition instead of adjacent rooms blending into the authored factory. Neither profile relocates keys, objectives, gates, or the boss arena. Generic delegated-progression support exists in the core, but a parent must grant individual beat IDs explicitly; the Industrial previews grant none.
+The immutable `industrial-supplement-preview-v1`, `-v2`, and `-v3` profiles remain available for committed-expedition reconstruction. New preview runs use `industrial-supplement-preview-v4` profile revision 5. V4 adds a required external loop through the two keycard-pyramid walls unused by the critical path and coverage networks along every overlong objective connector. It caps uninterrupted featureless traversal at 33.6 metres and selects from 21 authored physical blueprints: six corridor/cycle forms, five substantive baseline rooms, and ten modules whose entry and reconnect sockets differ by 2.8 or 5.6 metres. The exact connector set includes the 5x7 Through T, 7x7 Crossroads, 5x13 Staggered Cross, paired-T H loop, stacked interchange, and grade-separated over-under crossover. No Industrial preview relocates keys, objectives, authored gates, or the boss arena. Generic delegated-progression support exists in the core, but a parent must grant individual beat IDs explicitly; the Industrial previews grant none.
 
 No neutral presentation and no Industrial presentation are fallback choices. Supplemental content must resolve every required material, asset, connector skin, transition frame, and local environment recipe through the theme session belonging to the parent region where it attaches. Missing capabilities reject the whole augmentation and leave a new run unaugmented.
 
@@ -20,11 +20,13 @@ Normal launches remain unaugmented. The Industrial preview can be enabled for a 
 ?dungeonAugmentation=true
 ?dungeonAugmentation=on
 ?dungeonAugmentation=2
+?dungeonAugmentation=3
+?dungeonAugmentation=4
 ?dungeonAugmentation=expanded
-?dungeonAugmentation=industrial-supplement-preview-v2
+?dungeonAugmentation=industrial-supplement-preview-v4
 ```
 
-Only the explicit `industrial-supplement-preview-v1` ID selects the original profile for compatibility testing. A committed v1 expedition remains v1 regardless of the current URL alias because its exact profile ID is saved with the expedition.
+The explicit V1, V2, and V3 IDs select those historical profiles for compatibility testing. A committed expedition remains on its saved profile regardless of the current URL alias.
 
 For reproducible development runs, combine the flag with an authored layout seed:
 
@@ -54,19 +56,32 @@ augmentDungeonDraft({
 
 It returns `status: 'applied'` with a frozen overlay and a copied effective draft, or `status: 'unchanged'` with diagnostics and the original parent draft. Plans contain serializable data only; never Three.js objects or functions. The augmentation seed is derived independently from the layout seed, canonical base-draft fingerprint, parent-region identity, and profile. It does not consume the legacy generator's random stream.
 
-The planner supports three graph operations:
+The planner supports four graph operations:
 
 - `optionalBranch` attaches a bounded tree or loop to a registered socket and must preserve a return route.
 - `edgePadding` replaces the physical realization of an eligible edge with namespaced supplemental segments while preserving the original logical edge ID, gate, credential, tier, and dominance boundary.
+- `routeNetwork` binds two or more exact parent-granted sockets into a same-domain loop, multi-door coverage network, landmark perimeter route, or explicitly gated cross-band shortcut.
 - `delegatedProgression` may place only progression beat IDs explicitly delegated by the parent host. This operation is disabled in the Industrial preview.
 
-Delegated progression is solved against the effective graph, not assigned by room index. The parent-supplied prerequisite graph is topologically ordered, candidate anchors are checked against actual reachability, and a delegated gate may be placed only on a segment whose dominance preserves the required key-before-gate route. Cycles, undelegated beats, reused gates, bypasses, or a graph with no solvable assignment reject the complete overlay. This generic path is exercised by fixtures but remains disabled in both Industrial preview profiles.
+V4 measures accumulated centerline distance through ordinary turns and degree-two corridor chains. Cosmetic props, gates, empty bays, and capped sockets do not reset the 33.6-metre limit. A qualifying station must expose a real route choice, substantive content, or an elevation transition. Every coverage network reconnects through at least two active apertures, supplies three to six meaningful modules, and contains a challenge, distinct payoff, vertical traversal, and meaningful junction.
+
+V4 distinguishes curated gameplay rooms from compact connector junctions and does not generate endpoint vestibule rooms. Every blueprint owns its exact non-rectangular base mask, optional upper mask, three-tile sockets, route polylines, zones, features, voids, and physical transfer records; footprints range from narrow service rises to the 15x11 paired-T cycle rather than reusing one rectangular shell. Networks are budgeted by meaningful modules rather than a fixed room count. Exact parent apertures connect through physical three-tile corridors to the network. Adjacent exact station junctions may instead use a short positive corridor whose two-tile approaches are proven inside their owning cores. Only exactly coincident, oppositely facing station apertures may use a typed `shared-junction-threshold`: it owns one exact 8.4-by-2.8-metre aperture footprint, two bound 5.6-metre node-local approach witnesses, and no corridor, clearance, or landing volume. A compact form is promoted to a meaningful `supplementConnectorJunction` only when at least three physically assembled, bidirectionally traversable approaches survive validation. Degree-two forms remain connector infrastructure and cannot masquerade as rooms, encounters, rewards, or qualifying junctions. The over-under blueprint retains two port-level connectivity groups and is never promoted as an at-grade junction; the stacked interchange joins its groups only through its declared lift.
+
+Required networks are solved as one deterministic reservation problem in this order: pyramid loop, mandatory coverage networks, optional same-band loops, then explicitly granted cross-band shortcuts. Candidate topology, junction, elevation, encounter, and room-layout families use independent exhaustion bags. The solver places a complete topology graph against the shared 2.8-metre planning grid with bounded backtracking; accepting one network reserves its exact geometry for every later branch, while failure of a later required grant backtracks earlier choices instead of silently overcommitting space.
+
+Industrial V4 physical geometry resolves through `IndustrialSupplementBlueprintCatalog`; the planner canonicalizes each blueprint's entry orientation while preserving its authored mask and socket elevations, and the materializer projects those same records into floors, walls, collisions, navigation, anchors, and diagnostics. `IndustrialSupplementContent` remains the semantic recipe layer for challenge, hazard/control, vertical-maintenance, reward-vault, and calm/discovery behavior. Encounter recipes reuse the existing Reaverbot roster with topology-aware threat budgets and frontline/flank/perch placement. Rewards are explicitly non-progression-critical, and controls are namespaced to their room or route-network operation; they never invoke the legacy global hazard override.
+
+Delegated progression is solved against the effective graph, not assigned by room index. The parent-supplied prerequisite graph is topologically ordered, candidate anchors are checked against actual reachability, and a delegated gate may be placed only on a segment whose dominance preserves the required key-before-gate route. Cycles, undelegated beats, reused gates, bypasses, or a graph with no solvable assignment reject the complete overlay. This generic path is exercised by fixtures but remains disabled in every Industrial preview profile.
 
 Planning and validation finish before `DungeonSupplementAssembler` creates Three.js objects. Collision validation uses one combined effective-layout set containing authored occupied/clearance volumes and every selected supplemental room, segment, landing, and transition volume, regardless of which theme owns the presentation. Cross-theme content therefore cannot pass by validating each theme in isolation.
 
 Industrial additionally materializes the overlay into renderer-free tile/connector records and preflights the whole realized seed before creating a mesh or material. Every supplemental connector mouth must have threshold and exterior support, fit the complete player collision/head/step envelope, and be reachable bidirectionally from the dungeon start. Traversal edges are swept against the realized solid barriers, including thin wall strips and door wings; connected floor-cell centers alone are not considered proof of walkability. Wall generation reserves each connector's exact declared lane count, subtracts those horizontal and vertical apertures from boundary runs and nearby authored door-threshold wings, and preserves the padded edge's own logical gate rather than carving a bypass through it. A failure anywhere rejects the entire overlay and returns the unchanged accepted parent.
 
-Accepted content is assembled under a separate `DungeonSupplementRoot`; its normalized rooms, connections, collisions, boundaries, platforms, encounters, rewards, minimap entries, local lights, culling records, and owned resources are merged into copies of the parent facade before `DungeonController` is constructed. Live topology growth is intentionally out of scope.
+V4's physical acceptance gate does not treat logical or graph-only records as geometry. Every ordinary route-network centerline cell must resolve to a floor owned by that exact physical connector at the centerline's contracted elevation, every navigable supplemental floor must belong to the start-reachable collision component, and every supplemental room must expose at least one exact physical socket. A typed shared threshold is the sole zero-corridor exception: realization maps its coincident world aperture to the two adjacent boundary cells owned by its junction cores, reserves both wall openings, and emits no ordinary gallery footprint or presentation. All three aperture lanes require two flat, hazard-free approach tiles on both sides with full headroom. Every supplemental room—not only degree-three junctions—is checked as one strongly connected local component across its own floors and exact connector thresholds: every floor and junction arm must be reachable from an entrance and able to return to it, so globally reachable floors from two unrelated routes cannot hide an internal wall, one-way pit, or disconnected platform. Connector-module floors are stamped only after their exact physical arms exist; degree-two modules require two accepted approaches, meaningful junctions require at least three, and every owned core tile must be clear, start-reachable, and returnable at its declared elevation. Stacked or over-under paths count only when both realized levels survive assembly and an explicit ramp, ladder, or lift joins them. A floorless ladder aperture or lift shaft is valid only when its exact upper/lower landings, barrier-clear shaft-mouth approaches, and named forward and reverse traversal links joining opposite landings exist. One-side shortcuts are tested both before and after activation, require a reachable far-side control, and cannot be credited as the route used to reach that control. An orphaned lower hallway, wrong-elevation underpass, overwritten X/Z route, decorative connector, broad shared-node overlap, wall opening from a graph-only record, or graph-only station link rejects the overlay instead of contributing to coverage or metrics.
+
+Every locked logical gate is placed at the source-side entrance of its corridor, so the player learns that its encounter, credential, shrine, pressure-plate, or mechanism objective is incomplete before committing to a long connector. If a gated edge is padded, the source-most physical segment hosts the same parent-owned logical gate; its ID, objective authority, dominance boundary, and unlock behavior are unchanged.
+
+Accepted content is assembled under a separate `DungeonSupplementRoot`; its curated rooms, compact connector-junction metadata, connections, collisions, boundaries, platforms, encounters, rewards, minimap entries, local lights, culling records, and owned resources are merged into copies of the parent facade before `DungeonController` is constructed. Physical connector IDs and direct room endpoints remain exact for assembly, walkability, discovery, and persistence. Parent-corridor station records are geometry-suppressed metadata over already-authored gallery floors, never generated rooms or vestibules. Live topology growth is intentionally out of scope.
 
 ## Parent extension host contract
 
@@ -74,20 +89,105 @@ A dungeon generator opts in by supplying a renderer-free host record:
 
 ```js
 {
-  schema: 'ruindivex-dungeon-extension-host/v1',
+  schema: 'ruindivex-dungeon-extension-host/v2',
   basePlanHash,
   extensionRegions: [{
     id,
     themeBinding,
     attachmentSockets,
     spliceEdges,
+    progressionSnapshot,
+    routeNetworkGrants,
     allowedProfileIds,
     delegatedProgressionBeats,
   }],
 }
 ```
 
-`attachmentSockets` grant possible side-branch locations. `spliceEdges` grant only the authored connections that may be physically padded. `allowedProfileIds` is an explicit opt-in list. `delegatedProgressionBeats` is the complete authority boundary for required content; an empty list delegates nothing.
+`attachmentSockets` grant possible side-branch locations. `spliceEdges` grant only the authored connections that may be physically padded. `progressionSnapshot` identifies access bands, gates, credentials, dominance boundaries, and measured objective routes. `routeNetworkGrants` name exact endpoints, bounded landing overlap, protected volumes, and any crossed credentials. `allowedProfileIds` is an explicit opt-in list. `delegatedProgressionBeats` is the complete authority boundary for required authored content; an empty list delegates nothing. V1 hosts remain readable by V1-V3 profiles.
+
+An authored-corridor station that must merge directly into a compact endpoint module declares the following additional V2 contract:
+
+```js
+{
+  endpointSockets: [{
+    id: socketId,
+    routeNetworkSocketKind: 'authored-corridor-station',
+    endpointModuleOverlapRequired: true,
+    position,
+    facing, // one cardinal direction
+    parentRouteId,
+    logicalEdgeId,
+    planningModuleCenter,
+    planningContinuationCenter,
+    planningContinuationRoute,
+  }],
+  socketModuleOverlapGrants: [{
+    id,
+    socketId,
+    center,
+    size,
+    purpose: 'route-network-endpoint-module-parent-merge',
+    moduleKind: 'connector-module',
+    moduleTemplateId: 'supplement-route-connector-through-t-v1',
+    footprintTiles: { width: 5, depth: 7 },
+    leadTiles: 1,
+    parentOwnerId, // exact logicalEdgeId or parentRouteId
+  }],
+}
+```
+
+There must be exactly one `socketModuleOverlapGrants` entry for every endpoint marked `endpointModuleOverlapRequired`, and no non-empty module-overlap list when no endpoint requests one. The grant is the exact oriented 5x7 Through-T volume: its transverse span is five 2.8-metre cells, its longitudinal span is seven, its height is three, and its center begins after one clear lead tile in the socket's cardinal facing direction. It is separate from `socketLandingOverlapGrants`, which remains the smaller three-lane doorway/landing allowance.
+
+The three `planning*` fields are one optional placement-witness bundle; a producer either omits all of them or supplies all of them. `planningModuleCenter` is the horizontal center of the exact 5x7 overlap volume. `planningContinuationCenter` is the horizontal center reserved for the adjacent 7x7 content room. `planningContinuationRoute` is the complete finite X/Z polyline from the module's outward aperture to that room's inward aperture. Every leg is non-zero and axis-aligned, its first and last legs follow the endpoint's cardinal facing, its endpoints match those two apertures exactly, and its measured length cannot exceed either the grant's declared coverage maximum or 33.6 metres. These are planning witnesses, not collision waivers; validation also requires `planningModuleCenter` to match the corresponding `socketModuleOverlapGrants.center` horizontally.
+
+This record is not a general collision waiver. It can authorize only the matching exact-parent endpoint module and its attachment segment, only inside the declared volume, and only against a base occupied volume whose owner matches `parentOwnerId`. It cannot excuse another room, a later network, an arbitrary segment, a wider footprint, or overlap with a different authored owner. The planner copies the grant unchanged into the route-network operation so validation and identity hashing retain the same authority boundary.
+
+### Route-network overlay operation
+
+A V4 route-network operation exposes its complete renderer-free identity through existing canonical fields:
+
+```js
+{
+  schema: 'ruindivex-dungeon-augmentation-operation/v1',
+  id,
+  type: 'routeNetwork',
+  parentRegionId,
+  grantId,
+  routeNetworkKind,
+  endpointSocketIds,
+  nodeIds,
+  roomNodeIds,
+  connectorModuleNodeIds,
+  connectorJunctionNodeIds,
+  connectorInfrastructureNodeIds,
+  contentRoles,
+  segmentIds,
+  moduleCount,
+  substantiveModuleCount,
+  physicalNodeCount,
+  roomCount,
+  connectorModuleCount,
+  connectorJunctionCount,
+  connectorInfrastructureCount,
+  featurelessSpans,
+  maximumFeaturelessSpanMeters,
+  coverage,
+  localProgressionArc,
+  stableRuntimeStateIds,
+  runtimeStateIds,
+  protectedVolumes,
+  socketLandingOverlapGrants,
+  socketModuleOverlapGrants,
+  mustPreserveBeatIds,
+}
+```
+
+`endpointSocketIds` is the exact grant socket sequence ordered by authored route distance and then socket ID. `nodeIds` is exactly the operation-owned subsequence of `overlay.nodes`; the four specialized node-ID arrays are stable filters of that same sequence, and `contentRoles` is index-aligned with it. Counts are recomputed from those node records. `segmentIds` is exactly the operation-owned subsequence of `overlay.segments`; those referenced records are the physical-segment contract, so no parallel physical-segment alias is required.
+
+`coverage`, bounded overlap grants, protected volumes, and `mustPreserveBeatIds` are exact copies of parent authority. `featurelessSpans` is recomputed rather than trusted: authored-route coverage spans come first, followed by one ordered physical witness for every `segmentIds` entry, with the segment path and maximum continuous level distance retained. `localProgressionArc` exactly matches the selected profile. Encounter, mechanism, reward, and shortcut dependencies use the stable IDs `${operationId}:state:encounter`, `${operationId}:state:mechanism`, `${operationId}:state:reward`, and `${operationId}:state:shortcut`; `runtimeStateIds` repeats those values in that order, and shortcut segments may reference only the operation-local shortcut ID.
+
+An ordinary segment may include `localApproachWitnesses` only for exact non-entry sockets on connector-owned authored-corridor stations. Each witness names its owning node, exact socket, local socket ID, and the straight 5.6-metre path from the clear junction core to the aperture. It supplements a short positive corridor's endpoint approach; it does not replace that corridor's normal volumes or collision checks. A zero-distance segment additionally requires `sharedEndpointFootprint.kind === 'shared-junction-threshold'`, exact ordered node/socket identities, coincident path endpoints, opposite cardinal facings, the oriented 8.4-by-2.8-by-5.6-metre footprint, two valid local witnesses, two coincident landing records, and empty occupied, clearance, and landing-volume arrays. Unknown footprint kinds and untyped zero-length paths remain invalid.
 
 Industrial's host is built after its authored room and connection planning and before geometry assembly. It exposes a deliberately narrow set of branch rooms and flat service-gallery edges. The immutable Industrial base draft remains available for diagnostics and fallback even when an overlay is accepted. Because Industrial V1 currently has a single structural owner per X/Z tile column, its adapter also publishes renderer-specific projected connector exclusion volumes: supplemental rooms cannot be stacked above or below an authored connector, while an explicitly padded edge retains its normal replacement exemption. Themes with multilayer renderers keep the generic core's normal 3D-volume behavior.
 
@@ -147,7 +247,7 @@ The parent-owned `basePlanHash` is never rewritten.
 - `effectivePlanHash` is canonically derived from `basePlanHash` plus `augmentationPlanHash`.
 - With augmentation disabled, `augmentationPlanHash` is `null` and the effective hash remains the legacy base hash.
 
-Accepted expeditions persist `ruindivex-dungeon-augmentation-save-identity/v1`, including profile, seed, all three hashes, theme revisions/content hashes, and stable generated progression-state IDs. Legacy saves naturally carry no augmentation identity.
+Accepted expeditions persist `ruindivex-dungeon-augmentation-save-identity/v1`, including profile, seed, all three hashes, theme revisions/content hashes, and stable generated progression-state IDs. V4 also persists an allow-listed mutable-state snapshot for its encounters, mechanisms, rewards, deployed ladders, unlocked lifts, and shortcuts. Mutable values are restored only after the exact deterministic content identity has rebuilt successfully; they never participate in or weaken content compatibility. Unknown state IDs fail closed, and legacy saves naturally carry no augmentation identity or supplemental state.
 
 The expedition's base identity is also family-namespaced. Industrial V1 retains its exact historical base-hash format for save compatibility; other dungeon families append their canonical family namespace so identical boss/layout/depth inputs cannot collide across parent generators. The persisted `dungeonFamilyId` owns both normal resume and direct dungeon startup. It remains identity metadata only and never selects a theme session or presentation asset.
 
@@ -171,6 +271,8 @@ The recovery UI exposes an explicit **Reset to Current Content** action only for
 | `src/dungeon-augmentation/IndustrialDraftAdapter.js` | Converts the authored Industrial plan into an immutable renderer-free base snapshot, including Industrial's projected connector-column exclusions. |
 | `src/dungeon-augmentation/IndustrialExtensionHost.js` | Industrial's explicit branch sockets, splice-edge permissions, theme binding, and zero delegated beats. |
 | `src/dungeon-augmentation/IndustrialOverlayMaterializer.js` | Converts an accepted generic overlay into Industrial-compatible physical room and connection plan records. |
+| `src/dungeon-augmentation/IndustrialSupplementContent.js` | Curated V4 module manifests and topology-aware encounter, reward, mechanism, and hazard recipes. |
+| `src/dungeon-augmentation/IndustrialSupplementBlueprintCatalog.js` | Exact renderer-free plans for all 21 V4 rooms, junctions, cycles, masks, sockets, tiers, and internal transfers. |
 | `src/dungeon-augmentation/DungeonSupplementAssembler.js` | Creates parent-themed Three.js supplement geometry, transition seams, normalized facade fragments, and metrics. |
 | `src/dungeon-augmentation/DungeonFacadeOverlay.js` | Merges supplement fragments into copied facade arrays and attaches/detaches `DungeonSupplementRoot`. |
 | `src/dungeon-augmentation/identity.js` | Canonical save identity, sanitation, and committed-content compatibility checks. |
@@ -194,7 +296,7 @@ For only the renderer-free and assembly checks, run:
 npm run test:dungeon-augmentation:unit
 ```
 
-Run the normal realized gate across 100 complete deterministic Industrial v2 generations, accepting only a fully reachable overlay or the unchanged accepted parent:
+Run the normal realized gate across 100 complete deterministic Industrial V4 generations, requiring every accepted parent to receive a fully reachable overlay:
 
 ```powershell
 npm run test:dungeon-augmentation:realized
@@ -227,6 +329,6 @@ Before release, run the extended gate: 1,000 pure-planner augmentation seeds,
 npm run verify:dungeon-augmentation:release
 ```
 
-The focused suite covers immutable fallback, separate RNG behavior, deterministic explicit-seed replay, deterministic plans and hashes, 100 normal full-realization generations, 100 Industrial hook/RNG checks, branch return routes, padded-edge gate identity, exact-lane connector apertures, thin-solid movement-segment blocking, whole-seed barrier-aware bidirectional reachability, both authored door orientations, elevated connector sill/headroom clearance, same-logical-gate protection, projected-column rejection, nonzero-elevation connectors, accepted-parent fallback after a forced-invalid overlay, combined authored/supplemental and cross-theme collision validation, graph-solved delegated progression, missing-capability and exact-binding rejection, split theme ownership, parent resource ownership, family-namespaced persistence compatibility, facade normalization, Industrial/Magma cooperative transition seams, and explicit incompatible-content reset. Runtime verification additionally checks the separate supplement root, the v2 minimum three-room measurable delta, physical effective graph, merged minimap/encounter/light records, exact parent material use, unchanged hashes when the feature is off, direct committed-family startup, recovery transaction behavior, and supplement-only teardown without disposing shared parent materials or geometry.
+The focused suite covers immutable fallback, separate RNG behavior, deterministic explicit-seed replay, deterministic plans and hashes, 100 normal full-realization generations, 100 Industrial hook/RNG checks, branch return routes, padded-edge gate identity, exact-lane connector apertures, two-tile flat approaches, thin-solid movement-segment blocking, connector-owned and exact-elevation centerlines, graph-only exclusion, orphan-floor and wrong-level-underpass rejection, bidirectional room-floor and junction-arm traversal, barrier-clear ladder/lift shaft mouths, explicit vertical-transfer links, whole-seed barrier-aware bidirectional reachability, source-threshold gate coordinates, both authored door orientations, elevated connector sill/headroom clearance, same-logical-gate protection, projected-column rejection, nonzero-elevation connectors, accepted-parent fallback after a forced-invalid overlay, combined authored/supplemental and cross-theme collision validation, graph-solved delegated progression, missing-capability and exact-binding rejection, split theme ownership, parent resource ownership, family-namespaced persistence compatibility, mutable supplemental-state persistence, facade normalization, Industrial/Magma cooperative transition seams, and explicit incompatible-content reset. Runtime verification additionally checks the separate supplement root, the V4 coverage and pyramid-loop contracts, physical effective graph, merged minimap/encounter/light records, exact parent material use, unchanged hashes when the feature is off, direct committed-family startup, recovery transaction behavior, and supplement-only teardown without disposing shared parent materials or geometry.
 
-The realized-seed audit runs complete Industrial planning, tile realization, combined collision checks, whole-seed connector-mouth reachability, progression validation, assembly, and fallback. At least 95% of each deterministic sample must apply; any rejected realization must return the unchanged accepted parent. A raw seed that exhausts Industrial V1's own authored-layout attempts is not misreported as an augmentation rejection: the verifier reruns it with augmentation disabled and may skip it only when the parent error and legacy RNG consumption match exactly, then continues until the requested number of accepted parent layouts has been audited. The ten-seed smoke alias is useful for rapid diagnostics but is not release evidence. The normal gate requires 100 full realized generations, and the release gate requires 1,000. The browser runtime suite performs five same-seed reset cycles and requires rooms, supplement roots, live geometry/material sets, encounters, hazards, disposable resources, controller ownership, and renderer texture/geometry memory to plateau. Planning/assembly time, rejection causes, graph shape, exact theme bindings, tiles, draw calls, triangles, local lights, and renderer memory are exposed through the dungeon augmentation diagnostics for investigation.
+The realized-seed audit runs complete Industrial planning, tile realization, combined collision checks, whole-seed connector-mouth reachability, effective progression validation, assembly, and fallback. Every accepted parent seed in the normal and release corpora must apply V4, contain exactly one pyramid loop, cover every required span, and keep every reported featureless interval at or below 33.6 metres. A raw seed that exhausts Industrial V1's own authored-layout attempts is not misreported as an augmentation rejection: the verifier reruns it with augmentation disabled and may skip it only when the parent error and legacy RNG consumption match exactly, then continues until the requested number of accepted parent layouts has been audited. The ten-seed smoke alias is useful for rapid diagnostics but is not release evidence. The normal gate requires 100 full realized generations, and the release gate requires 1,000. The browser runtime suite performs five same-seed reset cycles and requires rooms, supplement roots, live geometry/material sets, encounters, hazards, disposable resources, controller ownership, and renderer texture/geometry memory to plateau. Planning/assembly time, rejection causes, graph shape, exact theme bindings, tiles, draw calls, triangles, local lights, and renderer memory are exposed through the dungeon augmentation diagnostics for investigation.

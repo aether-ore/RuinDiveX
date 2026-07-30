@@ -1,4 +1,8 @@
 import * as THREE from 'three';
+import {
+  createDungeonJunctionGeometryRecord,
+  createDungeonSocketLandingOverlapVolume,
+} from './geometry.js';
 
 export const DUNGEON_SUPPLEMENT_ROOT_NAME = 'DungeonSupplementRoot';
 export const DUNGEON_SUPPLEMENT_FRAGMENT_SCHEMA = 'ruindivex-dungeon-supplement-fragment/v1';
@@ -23,10 +27,15 @@ const CONNECTOR_FAMILY_ALIASES = Object.freeze({
   'transition-bay': 'transitionBay',
   transition_bay: 'transitionBay',
   transitionBay: 'transitionBay',
+  'shortcut-lift': 'lift',
+  shortcutLift: 'lift',
+  'drop-ladder': 'ladder',
+  dropLadder: 'ladder',
 });
 
 const FRAGMENT_ARRAY_FIELDS = Object.freeze([
   'rooms',
+  'connectorJunctionProxies',
   'floorTiles',
   'solidZones',
   'aerialBoundaryZones',
@@ -52,6 +61,14 @@ const FRAGMENT_ARRAY_FIELDS = Object.freeze([
   'progressionAssignments',
   'progressionAnchors',
   'socketCaps',
+  'junctions',
+  'landingClearances',
+]);
+
+const PRESENTATION_FACTORY_ARRAY_FIELDS = new Set([
+  'localLights',
+  'audioEmitters',
+  'renderCullGroups',
 ]);
 
 export class DungeonSupplementAssemblyError extends Error {
@@ -573,6 +590,11 @@ function assertThemeSession(session, context) {
   return session;
 }
 
+function requiresAuthoritativeThemePreflight(overlayPlan) {
+  return overlayPlan?.authoritativeManifestRealization === true
+    || overlayPlan?.profileId === 'industrial-supplement-preview-v4';
+}
+
 function requireCapabilities(session, required = {}, context = 'supplement element') {
   const missing = [];
   const materialRoles = required.materialRoles ?? required.materials ?? [];
@@ -722,11 +744,45 @@ function invokeTransition(session, type, contract, ledger, context) {
   }
 }
 
-function addFactoryProductToGroup(product, parent, fragment) {
+function addFactoryProductToGroup(
+  product,
+  parent,
+  fragment,
+  { facadeOnly = false, context = 'theme factory product' } = {},
+) {
   if (!product) return;
   if (Array.isArray(product)) {
-    product.forEach((entry) => addFactoryProductToGroup(entry, parent, fragment));
+    product.forEach((entry) => addFactoryProductToGroup(
+      entry,
+      parent,
+      fragment,
+      { facadeOnly, context },
+    ));
     return;
+  }
+  const facade = product.fragment ?? product.facade ?? product;
+  const topologySources = [...new Set([
+    product,
+    product.fragment,
+    product.facade,
+  ].filter((source) => source && typeof source === 'object'))];
+  const forbiddenFields = [...new Set(topologySources.flatMap((source) => (
+    FRAGMENT_ARRAY_FIELDS.filter((field) => (
+      !PRESENTATION_FACTORY_ARRAY_FIELDS.has(field)
+        && Array.isArray(source[field])
+        && source[field].length > 0
+    ))
+  )))];
+  if (forbiddenFields.length > 0) {
+    throw new DungeonSupplementAssemblyError(
+      `${context} attempted to inject unvalidated topology: ${forbiddenFields.join(', ')}.`,
+      {
+        code: facadeOnly
+          ? 'FACADE_ONLY_FACTORY_TOPOLOGY_FORBIDDEN'
+          : 'THEME_FACTORY_TOPOLOGY_FORBIDDEN',
+        diagnostics: [{ forbiddenFields, structuralMode: facadeOnly ? 'facadeOnly' : 'complete' }],
+      },
+    );
   }
   if (product.isObject3D) {
     parent.add(product);
@@ -734,8 +790,8 @@ function addFactoryProductToGroup(product, parent, fragment) {
   }
   const object = product.object ?? product.root ?? product.group;
   if (object?.isObject3D) parent.add(object);
-  const facade = product.fragment ?? product.facade ?? product;
   for (const field of FRAGMENT_ARRAY_FIELDS) {
+    if (!PRESENTATION_FACTORY_ARRAY_FIELDS.has(field)) continue;
     if (Array.isArray(facade[field])) fragment[field].push(...facade[field]);
   }
 }
@@ -860,6 +916,122 @@ function collectPlanElements(overlayPlan) {
   return { operations, nodes, segments, transitionBays, caps };
 }
 
+function operationType(operation) {
+  return operation?.type ?? operation?.operationType ?? operation?.kind ?? null;
+}
+
+function isSupplementConnectorProxyNode(node = {}) {
+  return ['supplementConnectorJunction', 'supplementConnectorModule'].includes(node.kind)
+    || ['supplementConnectorJunction', 'supplementConnectorModule'].includes(node.nodeKind)
+    || node.isSupplementConnectorJunction === true
+    || node.isSupplementConnectorModule === true;
+}
+
+function segmentOperationId(segment) {
+  return segment?.operationId ?? segment?.parentOperationId ?? segment?.operation?.id ?? null;
+}
+
+function endpointSocketId(endpoint) {
+  return endpoint?.socketId ?? endpoint?.id ?? endpoint?.sourceSocketId ?? null;
+}
+
+function validateRouteNetworkSocketBindings(elements) {
+  const nodeById = new Map(elements.nodes.map((node) => [String(node.id), node]));
+  for (const operation of elements.operations.filter((entry) => operationType(entry) === 'routeNetwork')) {
+    const selectedSocketIds = new Set(asArray(operation.endpointSocketIds).map(String));
+    if (selectedSocketIds.size < 2) {
+      throw new DungeonSupplementAssemblyError(
+        `Route network ${operation.id ?? '(unnamed)'} must declare at least two exact endpoint socket IDs.`,
+        { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+      );
+    }
+    const declaredSegmentIds = new Set(asArray(operation.segmentIds).map(String));
+    const operationSegments = elements.segments.filter((segment) => (
+      String(segmentOperationId(segment)) === String(operation.id)
+      || declaredSegmentIds.has(String(segment.id))
+    ));
+    if (operationSegments.length === 0) {
+      throw new DungeonSupplementAssemblyError(
+        `Route network ${operation.id ?? '(unnamed)'} has no physical segments.`,
+        { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+      );
+    }
+    const parentUseCounts = new Map();
+    for (const segment of operationSegments) {
+      for (const [role, endpoint] of [['from', segment.from], ['to', segment.to]]) {
+        const nodeId = endpoint?.nodeId ?? endpoint?.roomId;
+        const socketId = endpointSocketId(endpoint);
+        if (!nodeId || !socketId) {
+          throw new DungeonSupplementAssemblyError(
+            `Route network segment ${segment.id ?? '(unnamed)'} ${role} endpoint lacks an exact nodeId/socketId binding.`,
+            { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+          );
+        }
+        const supplementNode = nodeById.get(String(nodeId));
+        if (supplementNode) {
+          const socket = asArray(supplementNode.sockets).find((candidate) => (
+            String(candidate.id) === String(socketId)
+          ));
+          if (!socket) {
+            throw new DungeonSupplementAssemblyError(
+              `Route network segment ${segment.id ?? '(unnamed)'} ${role} endpoint references missing supplement socket ${socketId}.`,
+              { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+            );
+          }
+          const endpointPosition = vectorFrom(endpoint.position ?? endpoint.worldPosition);
+          const socketPosition = vectorFrom(socket.position ?? socket.worldPosition);
+          if (endpointPosition && socketPosition
+            && endpointPosition.distanceToSquared(socketPosition) > EPSILON ** 2) {
+            throw new DungeonSupplementAssemblyError(
+              `Route network segment ${segment.id ?? '(unnamed)'} ${role} endpoint position does not match supplement socket ${socketId}.`,
+              { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+            );
+          }
+          const endpointFacing = directionFrom(endpoint.facing ?? endpoint.worldFacing);
+          const socketFacing = directionFrom(socket.facing ?? socket.worldFacing);
+          if (endpointFacing && socketFacing && endpointFacing.dot(socketFacing) < 1 - EPSILON) {
+            throw new DungeonSupplementAssemblyError(
+              `Route network segment ${segment.id ?? '(unnamed)'} ${role} endpoint facing does not match supplement socket ${socketId}.`,
+              { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+            );
+          }
+          continue;
+        }
+        if (!selectedSocketIds.has(String(socketId))) {
+          throw new DungeonSupplementAssemblyError(
+            `Route network segment ${segment.id ?? '(unnamed)'} uses ungranted parent socket ${socketId}.`,
+            { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+          );
+        }
+        if (!endpoint.position && !endpoint.worldPosition
+          && !Number.isFinite(Number(endpoint.x))) {
+          throw new DungeonSupplementAssemblyError(
+            `Route network parent socket ${socketId} has no exact position.`,
+            { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+          );
+        }
+        parentUseCounts.set(String(socketId), (parentUseCounts.get(String(socketId)) ?? 0) + 1);
+      }
+    }
+    const invalidUsage = [...selectedSocketIds].filter((socketId) => (
+      parentUseCounts.get(socketId) !== 1
+    ));
+    if (invalidUsage.length > 0) {
+      throw new DungeonSupplementAssemblyError(
+        `Route network ${operation.id ?? '(unnamed)'} must use each granted endpoint once: ${invalidUsage.join(', ')}.`,
+        { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
+      );
+    }
+    const missingNodes = asArray(operation.nodeIds).map(String).filter((nodeId) => !nodeById.has(nodeId));
+    if (missingNodes.length > 0) {
+      throw new DungeonSupplementAssemblyError(
+        `Route network ${operation.id ?? '(unnamed)'} references missing nodes: ${missingNodes.join(', ')}.`,
+        { code: 'INVALID_ROUTE_NETWORK_NODE_BINDING' },
+      );
+    }
+  }
+}
+
 function createFragment(overlayPlan, root, tileSize, ledger) {
   const fragment = {
     schema: DUNGEON_SUPPLEMENT_FRAGMENT_SCHEMA,
@@ -980,6 +1152,145 @@ function getConnectedSocketIds(segments) {
     }
   }
   return connected;
+}
+
+function createConnectorProxyProgressionCandidates(elements) {
+  const connectorIds = new Set(elements.nodes
+    .filter(isSupplementConnectorProxyNode)
+    .map(({ id }) => String(id)));
+  const roomIds = new Set(elements.nodes
+    .filter((node) => !isSupplementConnectorProxyNode(node))
+    .map(({ id }) => String(id)));
+  const adjacency = new Map();
+  const armIdsByProxyId = new Map([...connectorIds].map((id) => [id, new Set()]));
+  const connect = (fromId, toId) => {
+    if (!fromId || !toId) return;
+    const from = String(fromId);
+    const to = String(toId);
+    if (!adjacency.has(from)) adjacency.set(from, new Set());
+    adjacency.get(from).add(to);
+  };
+  for (const [segmentOrdinal, segment] of elements.segments.entries()) {
+    const fromId = segment.from?.nodeId ?? segment.fromNodeId ?? null;
+    const toId = segment.to?.nodeId ?? segment.toNodeId ?? null;
+    connect(fromId, toId);
+    connect(toId, fromId);
+    const segmentId = String(segment.id ?? `segment:${segmentOrdinal}`);
+    if (connectorIds.has(String(fromId))) armIdsByProxyId.get(String(fromId)).add(segmentId);
+    if (connectorIds.has(String(toId))) armIdsByProxyId.get(String(toId)).add(segmentId);
+  }
+  for (const node of elements.nodes) {
+    const nodeId = String(node?.id ?? '');
+    if (!connectorIds.has(nodeId)
+      || node?.exactParentEndpoint !== true
+      || node?.parentEndpointSocketKind !== 'authored-corridor-station'
+      || Number(node?.parentThroughRouteDegreeContribution ?? 0) !== 1) {
+      continue;
+    }
+    armIdsByProxyId.get(nodeId).add(String(
+      node.parentThroughPhysicalArmId ?? `${nodeId}:authored-parent-through-arm`,
+    ));
+  }
+
+  const candidatesByProxyId = new Map();
+  for (const proxyId of [...connectorIds].sort()) {
+    const queue = [{ id: proxyId, distance: 0 }];
+    const visited = new Set([proxyId]);
+    const candidates = [];
+    for (let index = 0; index < queue.length; index += 1) {
+      const current = queue[index];
+      for (const neighborId of [...(adjacency.get(current.id) ?? [])].sort()) {
+        if (visited.has(neighborId)) continue;
+        visited.add(neighborId);
+        const distance = current.distance + 1;
+        if (roomIds.has(neighborId)) {
+          candidates.push({ roomId: neighborId, distance });
+        } else if (connectorIds.has(neighborId)) {
+          queue.push({ id: neighborId, distance });
+        }
+      }
+    }
+    candidates.sort((left, right) => (
+      left.distance - right.distance || left.roomId.localeCompare(right.roomId)
+    ));
+    const node = elements.nodes.find(({ id }) => String(id) === proxyId);
+    const minimumArmCount = node?.kind === 'supplementConnectorJunction' ? 3 : 2;
+    const armCount = armIdsByProxyId.get(proxyId)?.size ?? 0;
+    if (armCount < minimumArmCount) {
+      throw new DungeonSupplementAssemblyError(
+        `Connector proxy ${proxyId} has ${armCount} physical arms; ${minimumArmCount} are required.`,
+        { code: 'INVALID_SUPPLEMENT_CONNECTOR_JUNCTION_ARMS' },
+      );
+    }
+    if (candidates.length === 0) {
+      throw new DungeonSupplementAssemblyError(
+        `Connector proxy ${proxyId} cannot reach a substantive supplemental room.`,
+        { code: 'INVALID_SUPPLEMENT_CONNECTOR_JUNCTION_PROGRESSION' },
+      );
+    }
+    candidatesByProxyId.set(proxyId, candidates);
+  }
+  return { candidatesByProxyId, armIdsByProxyId };
+}
+
+function selectConnectorProxyProgressionCandidate(candidates = [], excludedRoomId = null) {
+  return candidates.find(({ roomId }) => roomId !== excludedRoomId)
+    ?? candidates[0]
+    ?? null;
+}
+
+function selectConnectorProxyProgressionPair(fromCandidates = [], toCandidates = []) {
+  const pairs = [];
+  for (const from of fromCandidates) {
+    for (const to of toCandidates) {
+      pairs.push({ from, to, selfEdge: from.roomId === to.roomId });
+    }
+  }
+  pairs.sort((left, right) => (
+    Number(left.selfEdge) - Number(right.selfEdge)
+      || left.from.distance + left.to.distance - right.from.distance - right.to.distance
+      || left.from.distance - right.from.distance
+      || left.to.distance - right.to.distance
+      || left.from.roomId.localeCompare(right.from.roomId)
+      || left.to.roomId.localeCompare(right.to.roomId)
+  ));
+  return pairs[0] ?? null;
+}
+
+function resolveConnectorProxyProgressionEndpoints(
+  fromNodeId,
+  toNodeId,
+  candidatesByProxyId,
+) {
+  const fromProxyId = candidatesByProxyId.has(String(fromNodeId)) ? String(fromNodeId) : null;
+  const toProxyId = candidatesByProxyId.has(String(toNodeId)) ? String(toNodeId) : null;
+  let fromProgressionRoomId = fromNodeId;
+  let toProgressionRoomId = toNodeId;
+  if (fromProxyId && toProxyId) {
+    const pair = selectConnectorProxyProgressionPair(
+      candidatesByProxyId.get(fromProxyId),
+      candidatesByProxyId.get(toProxyId),
+    );
+    fromProgressionRoomId = pair?.from.roomId ?? fromProgressionRoomId;
+    toProgressionRoomId = pair?.to.roomId ?? toProgressionRoomId;
+  } else if (fromProxyId) {
+    fromProgressionRoomId = selectConnectorProxyProgressionCandidate(
+      candidatesByProxyId.get(fromProxyId),
+      toProgressionRoomId,
+    )?.roomId ?? fromProgressionRoomId;
+  } else if (toProxyId) {
+    toProgressionRoomId = selectConnectorProxyProgressionCandidate(
+      candidatesByProxyId.get(toProxyId),
+      fromProgressionRoomId,
+    )?.roomId ?? toProgressionRoomId;
+  }
+  return {
+    fromProgressionRoomId,
+    toProgressionRoomId,
+    fromProxyId,
+    toProxyId,
+    selfEdge: fromProgressionRoomId === toProgressionRoomId,
+  };
 }
 
 function normalizeRoomSocket(node, socket, room, tileSize, connectedSocketIds) {
@@ -1284,15 +1595,99 @@ function tileRange(center, size, tileSize) {
   return [minimum, maximum];
 }
 
+function floorOwnerIds(tile = {}) {
+  return [...new Set([
+    tile.roomId,
+    tile.connectorJunctionProxyId,
+    tile.connectorJunctionOwnerId,
+    tile.connectorId,
+    tile.connectionId,
+    ...(tile.mergedFloorOwnerIds ?? []),
+    ...(tile.sharedThresholdOwnerIds ?? []),
+  ].filter(Boolean).map(String))].sort();
+}
+
+function floorSourceCount(tile = {}) {
+  return Math.max(1, Number(tile.mergedFloorSourceCount ?? 1));
+}
+
+function unownedFloorSourceCount(tile = {}) {
+  if (Number.isFinite(Number(tile.mergedUnownedFloorSourceCount))) {
+    return Math.max(0, Number(tile.mergedUnownedFloorSourceCount));
+  }
+  return floorOwnerIds(tile).length === 0 ? 1 : 0;
+}
+
+function explicitSharedThresholdOwnerIds(...tiles) {
+  return new Set(tiles.flatMap((tile) => [
+    ...(tile?.sharedThresholdOwnerIds ?? []),
+    ...(tile?.sharedFloorOwnerIds ?? []),
+  ]).filter(Boolean).map(String));
+}
+
+function mergeCompatibleFloorProvenance(existing, incoming, key) {
+  const existingOwners = floorOwnerIds(existing);
+  const incomingOwners = floorOwnerIds(incoming);
+  const combinedOwners = [...new Set([...existingOwners, ...incomingOwners])].sort();
+  const sharedOwners = explicitSharedThresholdOwnerIds(existing, incoming);
+  const sameOwnedSurface = existingOwners.length > 0
+    && incomingOwners.length > 0
+    && existingOwners.every((ownerId) => incomingOwners.includes(ownerId))
+    && incomingOwners.every((ownerId) => existingOwners.includes(ownerId));
+  const explicitThresholdSharing = sharedOwners.size > 0
+    && combinedOwners.every((ownerId) => sharedOwners.has(ownerId));
+  const unownedSourceCount = unownedFloorSourceCount(existing)
+    + unownedFloorSourceCount(incoming);
+  if (
+    unownedSourceCount > 0
+    || (!sameOwnedSurface && !explicitThresholdSharing)
+  ) {
+    throw new DungeonSupplementAssemblyError(
+      `Dungeon supplement floor ${key} has incompatible or unowned overlapping sources.`,
+      {
+        code: 'DUNGEON_SUPPLEMENT_FLOOR_OWNERSHIP_CONFLICT',
+        diagnostics: [{
+          floorKey: key,
+          existingOwnerIds: existingOwners,
+          incomingOwnerIds: incomingOwners,
+          sharedThresholdOwnerIds: [...sharedOwners].sort(),
+          unownedSourceCount,
+        }],
+      },
+    );
+  }
+  existing.mergedFloorOwnerIds = combinedOwners;
+  existing.mergedFloorSourceCount = floorSourceCount(existing) + floorSourceCount(incoming);
+  existing.mergedUnownedFloorSourceCount = 0;
+  if (sharedOwners.size > 0) {
+    existing.sharedThresholdOwnerIds = [...sharedOwners].sort();
+    existing.sharedThresholdContractIds = [...new Set([
+      ...(existing.sharedThresholdContractIds ?? []),
+      ...(incoming.sharedThresholdContractIds ?? []),
+    ].filter(Boolean).map(String))].sort();
+  }
+  return existing;
+}
+
 function addFloorTile(fragment, tile) {
   const elevation = finite(tile.elevation);
   const key = `${tile.x},${tile.z}@${elevation.toFixed(3)}`;
-  if (fragment._floorTileKeys.has(key)) return;
+  const existing = fragment._floorTileByKey.get(key);
+  if (existing) {
+    mergeCompatibleFloorProvenance(existing, tile, key);
+    return existing;
+  }
+  tile.mergedFloorOwnerIds = floorOwnerIds(tile);
+  tile.mergedFloorSourceCount = floorSourceCount(tile);
+  tile.mergedUnownedFloorSourceCount = unownedFloorSourceCount(tile);
   fragment._floorTileKeys.add(key);
+  fragment._floorTileByKey.set(key, tile);
   fragment.floorTiles.push(tile);
   const planarKey = `${tile.x},${tile.z}`;
-  const existing = fragment.tiles.get(planarKey);
-  if (!existing || finite(existing.elevation) > elevation) fragment.tiles.set(planarKey, tile);
+  const planarExisting = fragment.tiles.get(planarKey);
+  if (!planarExisting || finite(planarExisting.elevation) > elevation) {
+    fragment.tiles.set(planarKey, tile);
+  }
 }
 
 function rasterizeRectangle(fragment, {
@@ -1305,6 +1700,7 @@ function rasterizeRectangle(fragment, {
   connectorId = null,
   surfaceRole,
   operationId = null,
+  sharedThresholdContracts = [],
 }) {
   const radius = Math.hypot(size.x, size.z) * 0.5;
   const [minX, maxX] = tileRange(center.x, radius * 2, tileSize);
@@ -1315,6 +1711,14 @@ function rasterizeRectangle(fragment, {
       const local = worldToLocal(world, center, yaw);
       if (Math.abs(local.x) > size.x * 0.5 + tileSize * 0.45
         || Math.abs(local.z) > size.z * 0.5 + tileSize * 0.45) continue;
+      const sharedThresholdContractsAtTile = sharedThresholdContracts.filter((contract) => {
+        const delta = world.clone().sub(contract.center);
+        const direction = contract.direction;
+        const longitudinal = delta.x * direction.x + delta.z * direction.z;
+        const lateral = -delta.x * direction.z + delta.z * direction.x;
+        return Math.abs(longitudinal) <= tileSize * 1.05
+          && Math.abs(lateral) <= contract.width * 0.5 + tileSize * 0.05;
+      });
       addFloorTile(fragment, {
         id: stableId('supplementFloorTile', id, x, z, center.y.toFixed(3)),
         x,
@@ -1328,6 +1732,16 @@ function rasterizeRectangle(fragment, {
         connectorId,
         connectionId: connectorId,
         operationId,
+        ...(sharedThresholdContractsAtTile.length > 0 ? {
+          sharedThresholdOwnerIds: [...new Set(sharedThresholdContractsAtTile.flatMap((contract) => (
+            [contract.roomId, contract.connectorId]
+          )).filter(Boolean).map(String))].sort(),
+          sharedThresholdContractIds: sharedThresholdContractsAtTile
+            .map((contract) => contract.id)
+            .filter(Boolean)
+            .map(String)
+            .sort(),
+        } : {}),
         dungeonSupplement: true,
       });
     }
@@ -1346,6 +1760,12 @@ function createMinimapRoom(room) {
     discovered: false,
     operationId: room.operationId,
     parentRegionId: room.parentRegionId,
+    contentRole: room.source?.contentRole ?? room.source?.networkRole ?? null,
+    junctionKind: room.source?.junction?.junctionKind
+      ?? room.source?.junctionKind
+      ?? null,
+    accessDomainId: room.source?.accessDomainId ?? null,
+    progressionBandId: room.source?.progressionBandId ?? null,
     dungeonSupplement: true,
   };
 }
@@ -1367,6 +1787,470 @@ function resolveAnchorWorld(node, anchor, tileSize) {
     return localToWorld(localVector, center, yaw);
   }
   return resolveRecordPosition(anchor, tileSize, { fallback: center, inheritedGrid: usesParentGrid(node) });
+}
+
+function nodeStructureRecords(node, key) {
+  return asArray(node?.structure?.[key]);
+}
+
+function supplementalNodeOwnerReferences(room) {
+  return room?.isConnectorJunctionProxy
+    ? { connectorJunctionProxyId: room.id }
+    : { roomId: room.id };
+}
+
+function nodeStructuralDescriptors(node) {
+  return {
+    platforms: stableUnique([
+      ...nodeStructureRecords(node, 'platforms'),
+      ...nodeStructureRecords(node, 'catwalks'),
+    ], (record) => record.id),
+    ramps: stableUnique(nodeStructureRecords(node, 'ramps'), (record) => record.id),
+    rails: stableUnique(nodeStructureRecords(node, 'rails'), (record) => record.id),
+  };
+}
+
+function structureMaterialRole(descriptor, fallback) {
+  return descriptor?.materialRole
+    ?? descriptor?.surfaceRole
+    ?? descriptor?.role
+    ?? fallback;
+}
+
+function requiredNodeStructureMaterialRoles(descriptors) {
+  return [...new Set([
+    ...descriptors.platforms.map((descriptor) => structureMaterialRole(descriptor, 'catwalk')),
+    ...descriptors.ramps.map((descriptor) => structureMaterialRole(descriptor, 'ramp')),
+    ...descriptors.rails.map((descriptor) => structureMaterialRole(descriptor, 'rail')),
+  ].filter(Boolean))];
+}
+
+function structureLocalPoint(descriptor, {
+  gridKeys = [],
+  meterKeys = [],
+  tileSize,
+  fallback = new THREE.Vector3(),
+} = {}) {
+  for (const key of gridKeys) {
+    const point = vectorFrom(descriptor?.[key]);
+    if (point) return new THREE.Vector3(point.x * tileSize, point.y, point.z * tileSize);
+  }
+  for (const key of meterKeys) {
+    const point = vectorFrom(descriptor?.[key]);
+    if (point) return point;
+  }
+  return fallback.clone();
+}
+
+function platformAnchorForStructure(node, room, descriptor, localTop, tileSize) {
+  const explicitAnchorId = descriptor.anchorId ?? descriptor.platformAnchorId;
+  if (explicitAnchorId) {
+    return asArray(node?.anchors).find((anchor) => (
+      anchor.id === explicitAnchorId || anchor.localAnchorId === explicitAnchorId
+    )) ?? null;
+  }
+  const worldTop = localToWorld(localTop, room.center, room.yaw);
+  return asArray(node?.anchors).find((anchor) => {
+    const kind = anchor.kind ?? anchor.type ?? anchor.anchorKind;
+    if (kind !== 'platform') return false;
+    const world = resolveAnchorWorld(node, anchor, tileSize);
+    return world.distanceToSquared(worldTop) <= 0.05 * 0.05;
+  }) ?? null;
+}
+
+function resolveStructurePlatform(node, room, descriptor, tileSize) {
+  const localTop = structureLocalPoint(descriptor, {
+    gridKeys: ['localCenterGrid'],
+    meterKeys: ['localCenter', 'localPosition', 'center'],
+    tileSize,
+  });
+  localTop.y = finite(
+    descriptor.elevation ?? descriptor.localElevation,
+    localTop.y,
+  );
+  const width = positive(
+    descriptor.widthMeters ?? descriptor.width,
+    positive(descriptor.widthTiles, 3) * tileSize,
+  );
+  const depth = positive(
+    descriptor.depthMeters ?? descriptor.depth,
+    positive(descriptor.depthTiles, 3) * tileSize,
+  );
+  const thickness = positive(
+    descriptor.thicknessMeters ?? descriptor.thickness,
+    DEFAULT_FLOOR_THICKNESS,
+  );
+  const worldTop = localToWorld(localTop, room.center, room.yaw);
+  const anchor = platformAnchorForStructure(node, room, descriptor, localTop, tileSize);
+  const id = anchor?.id ?? stableId('supplementPlatform', room.id, descriptor.id);
+  const surfaceRole = structureMaterialRole(descriptor, 'catwalk');
+  return {
+    descriptor,
+    anchor,
+    id,
+    surfaceRole,
+    localTop,
+    worldTop,
+    width,
+    depth,
+    thickness,
+    record: {
+      ...cloneSerializableRecord(descriptor),
+      id,
+      sourceStructureId: descriptor.id ?? null,
+      ...supplementalNodeOwnerReferences(room),
+      operationId: room.operationId,
+      parentRegionId: room.parentRegionId,
+      center: worldTop.clone(),
+      position: worldTop.clone(),
+      halfWidth: width * 0.5,
+      halfDepth: depth * 0.5,
+      elevation: worldTop.y,
+      topY: worldTop.y,
+      baseY: worldTop.y - thickness,
+      thickness,
+      surfaceRole,
+      platformPurpose: descriptor.platformPurpose ?? descriptor.purpose ?? null,
+      requiredTraversalAction: descriptor.requiredTraversalAction ?? null,
+      blocksBelow: descriptor.blocksBelow === true,
+      dynamic: false,
+      themeBinding: cloneBinding(room.themeBinding),
+      dungeonSupplement: true,
+    },
+  };
+}
+
+function resolveStructureRamp(room, descriptor, tileSize) {
+  const localStart = structureLocalPoint(descriptor, {
+    gridKeys: ['localStartGrid'],
+    meterKeys: ['localStart', 'start'],
+    tileSize,
+  });
+  const localEnd = structureLocalPoint(descriptor, {
+    gridKeys: ['localEndGrid'],
+    meterKeys: ['localEnd', 'end'],
+    tileSize,
+  });
+  localStart.y = finite(descriptor.fromElevation, localStart.y);
+  localEnd.y = finite(descriptor.toElevation, localEnd.y);
+  const horizontalLength = Math.hypot(
+    localEnd.x - localStart.x,
+    localEnd.z - localStart.z,
+  );
+  if (horizontalLength <= EPSILON) {
+    throw new DungeonSupplementAssemblyError(
+      `Supplement ramp ${descriptor.id ?? '(unnamed)'} has no horizontal run.`,
+      { code: 'INVALID_SUPPLEMENT_STRUCTURE_RAMP' },
+    );
+  }
+  const width = positive(
+    descriptor.widthMeters ?? descriptor.width,
+    positive(descriptor.widthTiles, 3) * tileSize,
+  );
+  const thickness = positive(
+    descriptor.thicknessMeters ?? descriptor.thickness,
+    DEFAULT_FLOOR_THICKNESS,
+  );
+  const worldStart = localToWorld(localStart, room.center, room.yaw);
+  const worldEnd = localToWorld(localEnd, room.center, room.yaw);
+  return {
+    descriptor,
+    id: stableId('supplementRamp', room.id, descriptor.id),
+    surfaceRole: structureMaterialRole(descriptor, 'ramp'),
+    localStart,
+    localEnd,
+    worldStart,
+    worldEnd,
+    horizontalLength,
+    width,
+    thickness,
+  };
+}
+
+function upsertPlatform(fragment, record) {
+  const existingIndex = fragment.platforms.findIndex((entry) => entry.id === record.id);
+  if (existingIndex >= 0) {
+    fragment.platforms[existingIndex] = { ...fragment.platforms[existingIndex], ...record };
+  } else {
+    fragment.platforms.push(record);
+  }
+}
+
+function rasterizeStructureRamp(fragment, ramp, room, tileSize) {
+  const delta = ramp.localEnd.clone().sub(ramp.localStart);
+  const horizontalDirection = new THREE.Vector3(delta.x, 0, delta.z).normalize();
+  const lateral = new THREE.Vector3(-horizontalDirection.z, 0, horizontalDirection.x);
+  const longitudinalSteps = Math.max(1, Math.round(ramp.horizontalLength / tileSize));
+  const laneCount = Math.max(1, Math.round(ramp.width / tileSize));
+  const firstLaneOffset = -(laneCount - 1) * 0.5;
+  const worldDirection = rotateDirection(horizontalDirection, room.yaw);
+  for (let longitudinal = 0; longitudinal <= longitudinalSteps; longitudinal += 1) {
+    const t = longitudinal / longitudinalSteps;
+    const center = ramp.localStart.clone().lerp(ramp.localEnd, t);
+    for (let lane = 0; lane < laneCount; lane += 1) {
+      const local = center.clone().addScaledVector(
+        lateral,
+        (firstLaneOffset + lane) * tileSize,
+      );
+      const world = localToWorld(local, room.center, room.yaw);
+      addFloorTile(fragment, {
+        id: stableId('supplementRampTile', ramp.id, longitudinal, lane),
+        x: Math.round(world.x / tileSize),
+        z: Math.round(world.z / tileSize),
+        elevation: world.y,
+        baseElevation: world.y,
+        type: 'floor',
+        surface: 'dungeonSupplementRamp',
+        surfaceRole: ramp.surfaceRole,
+        ...supplementalNodeOwnerReferences(room),
+        operationId: room.operationId,
+        rampId: ramp.id,
+        rampStartElevation: ramp.worldStart.y,
+        rampEndElevation: ramp.worldEnd.y,
+        rampDirectionX: worldDirection.x,
+        rampDirectionZ: worldDirection.z,
+        isRampSurface: true,
+        dungeonSupplement: true,
+      });
+    }
+  }
+}
+
+function rampOpeningSides(platform, ramps, tileSize) {
+  const result = new Set();
+  const minimumX = platform.localTop.x - platform.width * 0.5;
+  const maximumX = platform.localTop.x + platform.width * 0.5;
+  const minimumZ = platform.localTop.z - platform.depth * 0.5;
+  const maximumZ = platform.localTop.z + platform.depth * 0.5;
+  const margin = tileSize * 0.76;
+  for (const ramp of ramps) {
+    for (const endpoint of [ramp.localStart, ramp.localEnd]) {
+      if (Math.abs(endpoint.y - platform.localTop.y) > 0.1) continue;
+      if (endpoint.z >= minimumZ - margin && endpoint.z <= maximumZ + margin) {
+        if (Math.abs(endpoint.x - minimumX) <= margin) result.add('west');
+        if (Math.abs(endpoint.x - maximumX) <= margin) result.add('east');
+      }
+      if (endpoint.x >= minimumX - margin && endpoint.x <= maximumX + margin) {
+        if (Math.abs(endpoint.z - minimumZ) <= margin) result.add('north');
+        if (Math.abs(endpoint.z - maximumZ) <= margin) result.add('south');
+      }
+    }
+  }
+  return result;
+}
+
+function assembleNodeStructures({
+  node,
+  room,
+  nodeGroup,
+  session,
+  variant,
+  tileSize,
+  ledger,
+  fragment,
+  structuralMode,
+  descriptors,
+}) {
+  // Facade-only assembly never owns physical traversal surfaces. Publishing a
+  // platform or vertical-connector descriptor here without its floor/mesh
+  // would let downstream navigation count geometry that does not exist. The
+  // parent still receives the node's immutable structure contract and may
+  // publish realized records only after its own floor/connector validation.
+  // Complete assembly remains the single mode in which this function emits
+  // both the physical structure and its matching facade records.
+  if (structuralMode === 'facadeOnly') return;
+  const platforms = descriptors.platforms.map((descriptor) => (
+    resolveStructurePlatform(node, room, descriptor, tileSize)
+  ));
+  const ramps = descriptors.ramps.map((descriptor) => (
+    resolveStructureRamp(room, descriptor, tileSize)
+  ));
+  const platformById = new Map();
+  for (const platform of platforms) {
+    platformById.set(String(platform.descriptor.id ?? platform.id), platform);
+    upsertPlatform(fragment, platform.record);
+  }
+
+  if (structuralMode !== 'facadeOnly') {
+    for (const platform of platforms) {
+      const material = resolveMaterial(
+        session,
+        platform.surfaceRole,
+        variant,
+        ledger,
+        `structure platform ${platform.descriptor.id ?? platform.id} in ${room.id}`,
+      );
+      makeMesh({
+        parent: nodeGroup,
+        geometry: makeGeometry(
+          ledger,
+          platform.width,
+          platform.thickness,
+          platform.depth,
+        ),
+        material,
+        name: stableId('supplementStructurePlatform', room.id, platform.descriptor.id),
+        position: new THREE.Vector3(
+          platform.localTop.x,
+          platform.localTop.y - platform.thickness * 0.5,
+          platform.localTop.z,
+        ),
+        userData: {
+          dungeonSupplement: true,
+          supplementNodeId: room.id,
+          supplementPlatformId: platform.id,
+          surfaceRole: platform.surfaceRole,
+          cameraOcclusionSurface: true,
+        },
+      });
+      rasterizeRectangle(fragment, {
+        id: platform.id,
+        center: platform.worldTop,
+        size: new THREE.Vector3(platform.width, platform.thickness, platform.depth),
+        yaw: room.yaw,
+        tileSize,
+        ...(room.isConnectorJunctionProxy
+          ? { connectorId: room.id }
+          : { roomId: room.id }),
+        surfaceRole: platform.surfaceRole,
+        operationId: room.operationId,
+      });
+    }
+
+    for (const ramp of ramps) {
+      const material = resolveMaterial(
+        session,
+        ramp.surfaceRole,
+        variant,
+        ledger,
+        `structure ramp ${ramp.descriptor.id ?? ramp.id} in ${room.id}`,
+      );
+      const delta = ramp.localEnd.clone().sub(ramp.localStart);
+      const length = delta.length();
+      const xAxis = delta.clone().normalize();
+      const zAxis = new THREE.Vector3(-delta.z, 0, delta.x).normalize();
+      const yAxis = new THREE.Vector3().crossVectors(zAxis, xAxis).normalize();
+      const orientation = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+      const position = ramp.localStart.clone().add(ramp.localEnd).multiplyScalar(0.5)
+        .addScaledVector(yAxis, -ramp.thickness * 0.5);
+      const mesh = makeMesh({
+        parent: nodeGroup,
+        geometry: makeGeometry(ledger, length, ramp.thickness, ramp.width),
+        material,
+        name: stableId('supplementStructureRamp', room.id, ramp.descriptor.id),
+        position,
+        userData: {
+          dungeonSupplement: true,
+          supplementNodeId: room.id,
+          supplementRampId: ramp.id,
+          surfaceRole: ramp.surfaceRole,
+          cameraOcclusionSurface: true,
+        },
+      });
+      mesh.quaternion.setFromRotationMatrix(orientation);
+      rasterizeStructureRamp(fragment, ramp, room, tileSize);
+    }
+  }
+
+  for (const ramp of ramps) {
+    fragment.verticalConnectors.push({
+      ...cloneSerializableRecord(ramp.descriptor),
+      id: ramp.id,
+      type: 'slope',
+      kind: 'structuralRamp',
+      connectorFamily: 'slope',
+      ...supplementalNodeOwnerReferences(room),
+      operationId: room.operationId,
+      parentRegionId: room.parentRegionId,
+      start: ramp.worldStart.clone(),
+      end: ramp.worldEnd.clone(),
+      fromElevation: ramp.worldStart.y,
+      toElevation: ramp.worldEnd.y,
+      elevationDelta: ramp.worldEnd.y - ramp.worldStart.y,
+      width: ramp.width,
+      widthMeters: ramp.width,
+      themeBinding: cloneBinding(room.themeBinding),
+      dungeonSupplement: true,
+    });
+  }
+
+  for (const railDescriptor of descriptors.rails) {
+    const platform = platformById.get(String(railDescriptor.platformId ?? ''));
+    if (!platform) {
+      throw new DungeonSupplementAssemblyError(
+        `Supplement rail ${railDescriptor.id ?? '(unnamed)'} references missing platform ${railDescriptor.platformId ?? '(none)'}.`,
+        { code: 'INVALID_SUPPLEMENT_STRUCTURE_RAIL' },
+      );
+    }
+    const requestedSides = asArray(railDescriptor.sides).length > 0
+      ? asArray(railDescriptor.sides)
+      : ['north', 'south', 'east', 'west'];
+    const openSides = new Set([
+      ...asArray(railDescriptor.openSides),
+      ...rampOpeningSides(platform, ramps, tileSize),
+    ]);
+    const sides = requestedSides.filter((side) => !openSides.has(side));
+    platform.record.railSides = [...sides];
+    upsertPlatform(fragment, platform.record);
+    if (structuralMode === 'facadeOnly') continue;
+    const role = structureMaterialRole(railDescriptor, 'rail');
+    const material = resolveMaterial(
+      session,
+      role,
+      variant,
+      ledger,
+      `structure rail ${railDescriptor.id ?? '(unnamed)'} in ${room.id}`,
+    );
+    const height = positive(railDescriptor.heightMeters ?? railDescriptor.height, 1.1);
+    const thickness = positive(railDescriptor.thicknessMeters ?? railDescriptor.thickness, 0.12);
+    for (const side of sides) {
+      const northOrSouth = side === 'north' || side === 'south';
+      const localPosition = new THREE.Vector3(
+        northOrSouth
+          ? platform.localTop.x
+          : platform.localTop.x + (side === 'east' ? 1 : -1) * platform.width * 0.5,
+        platform.localTop.y + height * 0.5,
+        northOrSouth
+          ? platform.localTop.z + (side === 'south' ? 1 : -1) * platform.depth * 0.5
+          : platform.localTop.z,
+      );
+      const width = northOrSouth ? platform.width : thickness;
+      const depth = northOrSouth ? thickness : platform.depth;
+      makeMesh({
+        parent: nodeGroup,
+        geometry: makeGeometry(ledger, width, height, depth),
+        material,
+        name: stableId('supplementStructureRail', room.id, railDescriptor.id, side),
+        position: localPosition,
+        userData: {
+          dungeonSupplement: true,
+          supplementNodeId: room.id,
+          supplementPlatformId: platform.id,
+          supplementRailId: railDescriptor.id,
+          railSide: side,
+          surfaceRole: role,
+          cameraOcclusionSurface: true,
+        },
+      });
+      const worldPosition = localToWorld(localPosition, room.center, room.yaw);
+      addCollisionZone(fragment, makeZone({
+        id: stableId('supplementRailZone', room.id, railDescriptor.id, side),
+        label: 'Dungeon supplement safety rail',
+        obstacleKind: 'safetyRail',
+        position: worldPosition,
+        halfWidth: width * 0.5,
+        halfDepth: depth * 0.5,
+        verticalHalfHeight: height * 0.5,
+        rotationY: room.yaw,
+        metadata: {
+          ...supplementalNodeOwnerReferences(room),
+          platformId: platform.id,
+          railId: railDescriptor.id,
+          railSide: side,
+        },
+      }));
+    }
+  }
 }
 
 function cloneVectorRecords(records) {
@@ -1403,13 +2287,35 @@ function appendAnchorFacade(fragment, node, anchor, position) {
   } else if (kind === 'progression' || kind === 'objective') {
     fragment.progressionAnchors.push(common);
   } else if (kind === 'platform') {
-    fragment.platforms.push({
+    const absoluteElevation = finite(position.y);
+    const existingIndex = fragment.platforms.findIndex((entry) => entry.id === id);
+    const existing = existingIndex >= 0 ? fragment.platforms[existingIndex] : null;
+    const localTopY = finite(anchor.elevation ?? anchor.localPosition?.y);
+    const declaredLocalBaseY = Number(anchor.baseY);
+    const absoluteBaseY = Number.isFinite(existing?.baseY)
+      ? existing.baseY
+      : Number.isFinite(declaredLocalBaseY)
+        ? absoluteElevation + declaredLocalBaseY - localTopY
+        : absoluteElevation;
+    const platform = {
       ...common,
       center: position.clone(),
       halfWidth: positive(anchor.halfWidth, 1),
       halfDepth: positive(anchor.halfDepth, 1),
-      elevation: finite(anchor.elevation, position.y),
-    });
+      // Anchor elevation is grammar-local. Runtime platform metadata is
+      // always world-space, matching center.y and the floor facade.
+      elevation: absoluteElevation,
+      topY: absoluteElevation,
+      baseY: absoluteBaseY,
+    };
+    if (existingIndex >= 0) {
+      fragment.platforms[existingIndex] = {
+        ...fragment.platforms[existingIndex],
+        ...platform,
+      };
+    } else {
+      fragment.platforms.push(platform);
+    }
   } else if (kind === 'trap' || kind === 'hazard') {
     fragment.traps.push(common);
   } else if (kind === 'environmentalHazard') {
@@ -1426,9 +2332,20 @@ function appendAnchorFacade(fragment, node, anchor, position) {
   }
 }
 
+function connectorProxyAnchorIsPresentationOnly(anchor = {}) {
+  const kind = String(anchor.kind ?? anchor.type ?? anchor.anchorKind ?? '');
+  return ![
+    'encounter', 'enemyEncounter', 'enemySpawn', 'spawn',
+    'reward', 'chest', 'mechanism', 'control', 'terminal',
+    'door', 'gate', 'keycard', 'progressionKey', 'progression', 'objective',
+    'platform', 'trap', 'hazard', 'environmentalHazard', 'safeInteractable',
+  ].includes(kind);
+}
+
 function assembleDelegatedProgression(fragment, overlayPlan, nodeById, segmentById, tileSize) {
   for (const assignment of asArray(overlayPlan.progressionAssignments)) {
     const node = nodeById.get(assignment.nodeId);
+    if (isSupplementConnectorProxyNode(node)) continue;
     const anchor = asArray(node?.anchors).find((candidate) => candidate.id === assignment.anchorId);
     const gateBeat = /gate|door/i.test(String(assignment.beatKind ?? ''));
     const gatedSegment = gateBeat ? segmentById.get(assignment.gatedSegmentId) : null;
@@ -1477,6 +2394,46 @@ function assembleDelegatedProgression(fragment, overlayPlan, nodeById, segmentBy
   }
 }
 
+function createAssembledJunctionContract(node, room, normalizedSockets, tileSize) {
+  const source = node.junction ?? node.junctionContract;
+  const junctionKind = source?.junctionKind ?? node.junctionKind;
+  if (!junctionKind) return null;
+  const connectedSocketIds = normalizedSockets
+    .filter((socket) => !socket.capped)
+    .map((socket) => String(socket.id));
+  const activeSocketIds = Array.isArray(source?.activeSocketIds)
+    ? [...new Set(source.activeSocketIds.map(String))]
+    : connectedSocketIds;
+  const generated = createDungeonJunctionGeometryRecord({
+    id: source?.id ?? stableId('supplementJunction', room.id),
+    nodeId: room.id,
+    junctionKind,
+    center: room.center,
+    elevation: room.center.y,
+    heightMeters: source?.clearanceHeightMeters ?? 3.6,
+    tileSize,
+    throughSocketPairs: source?.throughSocketPairs,
+    decisionSocketIds: source?.decisionSocketIds,
+    activeSocketIds,
+    operationId: room.operationId,
+    accessDomainId: node.accessDomainId,
+    progressionBandId: node.progressionBandId,
+  });
+  if (!generated) return null;
+  return {
+    ...cloneSerializableRecord(source ?? {}),
+    ...generated,
+    clearCoreVolume: cloneSerializableRecord(source?.clearCoreVolume ?? generated.clearCoreVolume),
+    activeSocketIds,
+    countsAsMeaningfulStation: source?.countsAsMeaningfulStation
+      ?? node.countsAsMeaningfulStation
+      ?? generated.countsAsMeaningfulStation,
+    parentRegionId: room.parentRegionId,
+    themeBinding: cloneBinding(room.themeBinding),
+    dungeonSupplement: true,
+  };
+}
+
 function assembleNode({
   node,
   operationById,
@@ -1488,8 +2445,18 @@ function assembleNode({
   ledger,
   fragment,
   structuralMode,
+  connectorProxyProgression,
+  authoritativeThemePreflight = false,
 }) {
-  const id = node.id ?? stableId('supplementNode', node.operationId, node.ordinal ?? fragment.rooms.length);
+  const connectorProxy = isSupplementConnectorProxyNode(node);
+  const connectorKind = node.kind === 'supplementConnectorModule'
+    ? 'supplementConnectorModule'
+    : 'supplementConnectorJunction';
+  const id = node.id ?? stableId(
+    'supplementNode',
+    node.operationId,
+    node.ordinal ?? fragment.rooms.length + fragment.connectorJunctionProxies.length,
+  );
   const themeBinding = recordThemeBinding(node, operationById, bindingByRegion);
   const parentRegionId = node.parentRegionId ?? themeBinding?.parentRegionId
     ?? operationById.get(node.operationId)?.parentRegionId;
@@ -1507,7 +2474,9 @@ function assembleNode({
     yaw,
     tileSize,
     wallThickness: positive(node.wallThicknessMeters, DEFAULT_WALL_THICKNESS),
+    isConnectorJunctionProxy: connectorProxy,
   };
+  const structuralDescriptors = nodeStructuralDescriptors(node);
   const facadeRoom = {
     ...cloneSerializableRecord(node),
     id,
@@ -1527,12 +2496,47 @@ function assembleNode({
     parentRegionId: room.parentRegionId,
     themeBinding: cloneBinding(themeBinding),
     dungeonSupplement: true,
+    ...(connectorProxy ? {
+      kind: connectorKind,
+      isDungeonSupplement: false,
+      isSupplementConnectorJunction: connectorKind === 'supplementConnectorJunction',
+      isSupplementConnectorModule: connectorKind === 'supplementConnectorModule',
+      isConnectorJunctionProxy: true,
+      suppressRoomGeometry: true,
+      stampConnectorJunctionFloor: true,
+      countsAsMeaningfulStation: connectorKind === 'supplementConnectorJunction',
+      connectorJunctionSockets: asArray(node.sockets).map(cloneSerializableRecord),
+      minimumPhysicalArmCount: connectorKind === 'supplementConnectorJunction' ? 3 : 2,
+      minimumPhysicalConnectorArms: connectorKind === 'supplementConnectorJunction' ? 3 : 2,
+      physicalArmIds: [...(
+        connectorProxyProgression?.armIdsByProxyId?.get(String(id)) ?? []
+      )].sort(),
+    } : {
+      isDungeonSupplement: true,
+    }),
   };
-  fragment.rooms.push(facadeRoom);
-  fragment.minimap.rooms.push(createMinimapRoom(room));
+  if (connectorProxy) {
+    facadeRoom.anchors = asArray(node.anchors)
+      .filter(connectorProxyAnchorIsPresentationOnly)
+      .map(cloneSerializableRecord);
+    for (const field of [
+      'encounters', 'rewards', 'chests', 'mechanisms', 'doors', 'keycards',
+      'progressionAssignments', 'progressionAnchors', 'objectives', 'traps',
+    ]) {
+      delete facadeRoom[field];
+    }
+    facadeRoom.physicalArmCount = facadeRoom.physicalArmIds.length;
+    fragment.connectorJunctionProxies.push(facadeRoom);
+  } else {
+    fragment.rooms.push(facadeRoom);
+    fragment.minimap.rooms.push(createMinimapRoom(room));
+  }
 
   const nodeGroup = new THREE.Group();
-  nodeGroup.name = stableId('DungeonSupplementRoom', id);
+  nodeGroup.name = stableId(
+    connectorProxy ? 'DungeonSupplementConnectorJunction' : 'DungeonSupplementRoom',
+    id,
+  );
   nodeGroup.position.copy(center);
   nodeGroup.rotation.y = yaw;
   nodeGroup.userData.dungeonSupplement = true;
@@ -1540,23 +2544,64 @@ function assembleNode({
   nodeGroup.userData.operationId = room.operationId;
   nodeGroup.userData.parentRegionId = room.parentRegionId;
   nodeGroup.userData.themeBinding = cloneBinding(themeBinding);
+  nodeGroup.userData.isConnectorJunctionProxy = connectorProxy;
+  nodeGroup.userData.suppressRoomGeometry = connectorProxy;
   fragment.root.add(nodeGroup);
 
-  const session = structuralMode === 'facadeOnly'
-    ? resolveThemeSession(themeSources, themeBinding, parentRegionId, fallbackSession)
-    : assertThemeSession(
-      resolveThemeSession(themeSources, themeBinding, parentRegionId, fallbackSession),
-      `supplement node ${id}`,
-    );
-  if (session) requireCapabilities(session, node.requiredThemeCapabilities, `supplement node ${id}`);
+  const resolvedSession = resolveThemeSession(
+    themeSources,
+    themeBinding,
+    parentRegionId,
+    fallbackSession,
+  );
+  const session = structuralMode === 'facadeOnly' && !authoritativeThemePreflight
+    ? resolvedSession
+    : assertThemeSession(resolvedSession, `supplement node ${id}`);
+  if (session) {
+    const authoritativeMaterialRoles = authoritativeThemePreflight
+      ? [
+          ...(connectorProxy ? ['corridorFloor'] : ['primaryFloor', 'wall', 'ceiling']),
+          ...requiredNodeStructureMaterialRoles(structuralDescriptors),
+        ]
+      : structuralMode !== 'facadeOnly'
+        ? requiredNodeStructureMaterialRoles(structuralDescriptors)
+        : [];
+    const authoritativeAssetRoles = authoritativeThemePreflight
+      ? asArray(node.anchors).map((anchor) => (
+          anchor.assetRole ?? anchor.presentationAssetRole ?? null
+        )).filter(Boolean)
+      : [];
+    requireCapabilities(session, {
+      ...(node.requiredThemeCapabilities ?? {}),
+      materialRoles: [
+        ...asArray(node.requiredThemeCapabilities?.materialRoles),
+        ...asArray(node.requiredThemeCapabilities?.materials),
+        ...authoritativeMaterialRoles,
+      ],
+      assetRoles: [
+        ...asArray(node.requiredThemeCapabilities?.assetRoles),
+        ...asArray(node.requiredThemeCapabilities?.assets),
+        ...authoritativeAssetRoles,
+      ],
+    }, `supplement node ${id}`);
+  }
   const variant = node.presentationVariantId
     ?? themeBinding?.presentationVariantId
     ?? session?.themeBinding?.presentationVariantId;
   const sockets = asArray(node.sockets).map((socket) => (
     normalizeRoomSocket(node, socket, room, tileSize, connectedSocketIds)
   ));
+  const junction = createAssembledJunctionContract(node, room, sockets, tileSize);
+  if (junction) {
+    facadeRoom.junction = junction;
+    facadeRoom.junctionKind = junction.junctionKind;
+    facadeRoom.countsAsMeaningfulStation = junction.countsAsMeaningfulStation;
+    nodeGroup.userData.junctionKind = junction.junctionKind;
+    nodeGroup.userData.countsAsMeaningfulStation = junction.countsAsMeaningfulStation;
+    fragment.junctions.push(junction);
+  }
 
-  if (structuralMode !== 'facadeOnly') {
+  if (!connectorProxy && structuralMode !== 'facadeOnly') {
     const supportDescriptors = asArray(node.structure?.supports);
     const hasCappedSockets = sockets.some((socket) => socket.capped);
     const materials = {
@@ -1615,7 +2660,7 @@ function assembleNode({
       fragment.socketCaps.push({
         id: stableId('supplementCap', id, socket.id),
         nodeId: id,
-        roomId: id,
+        ...(connectorProxy ? { connectorJunctionProxyId: id } : { roomId: id }),
         socketId: socket.id,
         position: socket.world.clone(),
         width: socket.width,
@@ -1636,30 +2681,86 @@ function assembleNode({
           themeBinding: cloneBinding(themeBinding),
         }, ledger, `socket ${socket.id}`, { optional: true })
         : null;
-      addFactoryProductToGroup(asset, fragment.root, fragment);
+      addFactoryProductToGroup(asset, fragment.root, fragment, {
+        facadeOnly: structuralMode === 'facadeOnly',
+        context: `socket cap factory for ${socket.id}`,
+      });
     }
   }
 
-  for (const anchor of asArray(node.anchors)) {
-    const anchorPosition = resolveAnchorWorld(node, anchor, tileSize);
-    appendAnchorFacade(fragment, facadeRoom, anchor, anchorPosition);
+  assembleNodeStructures({
+    node,
+    room,
+    nodeGroup,
+    session,
+    variant,
+    tileSize,
+    ledger,
+    fragment,
+    structuralMode,
+    descriptors: structuralDescriptors,
+  });
+
+  for (const anchor of asArray(node.anchors).filter((entry) => (
+    !connectorProxy || connectorProxyAnchorIsPresentationOnly(entry)
+  ))) {
     const anchorKind = anchor.kind ?? anchor.type ?? anchor.anchorKind;
-    const assetRole = anchor.assetRole
+    // A platform anchor is a request for physical traversal geometry, not an
+    // independently valid facade witness. In facade-only mode the parent must
+    // realize and validate that surface before publishing a platform record.
+    if (structuralMode === 'facadeOnly' && anchorKind === 'platform') continue;
+    const doorwaySocketLocalId = anchorKind === 'doorway-frame'
+      ? String(
+        anchor.socketId
+          ?? anchor.localSocketId
+          ?? anchor.doorwaySocketId
+          ?? anchor.localAnchorId
+          ?? '',
+      ).replace(/-frame$/, '')
+      : null;
+    const doorwaySocket = doorwaySocketLocalId
+      ? sockets.find((socket) => (
+        String(socket.id) === doorwaySocketLocalId
+          || String(socket.source?.localSocketId ?? '') === doorwaySocketLocalId
+      )) ?? null
+      : null;
+    // Doorway frames are connector dressing. A capped or unbound arm gets the
+    // parent-themed cap only; emitting its free-standing pillars produced the
+    // disconnected columns seen in augmented layouts.
+    if (anchorKind === 'doorway-frame' && (!doorwaySocket || doorwaySocket.capped)) continue;
+    const effectiveAnchor = doorwaySocket
+      ? {
+        ...anchor,
+        socketId: doorwaySocket.id,
+        width: doorwaySocket.width,
+        widthMeters: doorwaySocket.width,
+        height: doorwaySocket.height,
+        heightMeters: doorwaySocket.height,
+        facing: resolveSocketFacing(node, doorwaySocket.source),
+      }
+      : anchor;
+    const anchorPosition = doorwaySocket?.world?.clone?.()
+      ?? resolveAnchorWorld(node, effectiveAnchor, tileSize);
+    appendAnchorFacade(fragment, facadeRoom, effectiveAnchor, anchorPosition);
+    const assetRole = effectiveAnchor.assetRole
       ?? anchor.presentationAssetRole
       ?? (session?.assets?.has?.(anchorKind) ? anchorKind : null);
     if (assetRole && session) {
       const product = invokeAsset(session, assetRole, {
-        ...cloneSerializableRecord(anchor),
-        id: anchor.id ?? stableId(id, assetRole),
+        ...cloneSerializableRecord(effectiveAnchor),
+        id: effectiveAnchor.id ?? stableId(id, assetRole),
         nodeId: id,
         position: anchorPosition.clone(),
         themeBinding: cloneBinding(themeBinding),
         variant,
-      }, ledger, `anchor ${anchor.id ?? assetRole} in ${id}`);
-      addFactoryProductToGroup(product, fragment.root, fragment);
+      }, ledger, `anchor ${effectiveAnchor.id ?? assetRole} in ${id}`);
+      addFactoryProductToGroup(product, fragment.root, fragment, {
+        facadeOnly: structuralMode === 'facadeOnly',
+        context: `anchor factory for ${effectiveAnchor.id ?? assetRole}`,
+      });
     }
   }
-  for (const encounter of asArray(node.encounters)) {
+  for (const encounter of connectorProxy ? [] : asArray(node.encounters)) {
     appendAnchorFacade(
       fragment,
       facadeRoom,
@@ -1695,7 +2796,10 @@ function assembleNode({
         `supplement node ${id}`,
       );
       appendEnvironmentProduct(fragment, capability, product);
-      addFactoryProductToGroup(product, fragment.root, fragment);
+      addFactoryProductToGroup(product, fragment.root, fragment, {
+        facadeOnly: structuralMode === 'facadeOnly',
+        context: `environment factory ${capability} for ${id}`,
+      });
     }
   }
   return { room, facadeRoom, nodeGroup, session };
@@ -1717,6 +2821,9 @@ function addTunnelSegment({
   parent,
   tileSize,
   materialRoles = null,
+  openStart = false,
+  openEnd = false,
+  sharedThresholdContracts = [],
 }) {
   const delta = pointB.clone().sub(pointA);
   const horizontalLength = Math.hypot(delta.x, delta.z);
@@ -1763,11 +2870,16 @@ function addTunnelSegment({
     position: new THREE.Vector3(0, height + DEFAULT_CEILING_THICKNESS * 0.5, 0),
     userData: { dungeonSupplement: true, supplementSegmentId: segment.id, surfaceRole: roles.ceiling },
   });
+  const startTrim = openStart ? Math.min(width * 0.5, horizontalLength * 0.5) : 0;
+  const endTrim = openEnd ? Math.min(width * 0.5, horizontalLength * 0.5) : 0;
+  const wallLength = Math.max(0, horizontalLength - startTrim - endTrim);
+  const wallCenterX = (startTrim - endTrim) * 0.5;
   for (const [side, z] of [['left', -width * 0.5], ['right', width * 0.5]]) {
-    const wallPosition = new THREE.Vector3(0, height * 0.5, z);
+    if (wallLength <= EPSILON) continue;
+    const wallPosition = new THREE.Vector3(wallCenterX, height * 0.5, z);
     makeMesh({
       parent: group,
-      geometry: makeGeometry(ledger, horizontalLength, height, DEFAULT_WALL_THICKNESS),
+      geometry: makeGeometry(ledger, wallLength, height, DEFAULT_WALL_THICKNESS),
       material: materials.wall,
       name: stableId('supplementCorridorWall', id, side),
       position: wallPosition,
@@ -1785,7 +2897,7 @@ function addTunnelSegment({
       label: 'Dungeon supplement corridor wall',
       obstacleKind: 'boundaryWall',
       position: zonePosition,
-      halfWidth: horizontalLength * 0.5,
+      halfWidth: wallLength * 0.5,
       halfDepth: DEFAULT_WALL_THICKNESS * 0.5,
       verticalHalfHeight: height * 0.5,
       rotationY: yaw,
@@ -1802,8 +2914,136 @@ function addTunnelSegment({
     connectorId: segment.id,
     surfaceRole: roles.floor,
     operationId,
+    sharedThresholdContracts,
   });
   return { group, center, yaw, horizontalLength };
+}
+
+function appendRouteNetworkRuntimeRecords({
+  fragment,
+  segment,
+  operation,
+  connection,
+  path,
+  tileSize,
+  themeBinding,
+}) {
+  if (operationType(operation) !== 'routeNetwork') return;
+  const selectedSocketIds = new Set(asArray(operation.endpointSocketIds).map(String));
+  for (const [role, endpoint] of [['from', segment.from], ['to', segment.to]]) {
+    const socketId = endpointSocketId(endpoint);
+    if (!socketId || !selectedSocketIds.has(String(socketId))) continue;
+    fragment.landingClearances.push({
+      ...createDungeonSocketLandingOverlapVolume(endpoint, {
+        id: stableId('supplementLandingClearance', operation.id, socketId),
+        tileSize,
+        operationId: operation.id,
+        grantId: operation.grantId,
+      }),
+      endpointRole: role,
+      connectionId: connection.id,
+      parentRegionId: operation.parentRegionId ?? null,
+      themeBinding: cloneBinding(themeBinding),
+      dungeonSupplement: true,
+    });
+  }
+
+  const doorId = segment.doorId
+    ?? segment.gateId
+    ?? segment.localGate?.doorId
+    ?? segment.localGate?.gateId
+    ?? segment.localGate?.id
+    ?? null;
+  const requiresEncounterId = segment.requiresEncounterId
+    ?? segment.localGate?.requiresEncounterId
+    ?? segment.localGate?.encounterId
+    ?? null;
+  const requiredKeycardId = segment.requiredKeycardId
+    ?? segment.localGate?.requiredKeycardId
+    ?? segment.localGate?.credentialId
+    ?? null;
+  if (doorId || requiresEncounterId || requiredKeycardId) {
+    if (segment.gatePlacementSide && segment.gatePlacementSide !== 'source') {
+      throw new DungeonSupplementAssemblyError(
+        `Route network segment ${connection.id} places its lock away from the source entrance.`,
+        { code: 'INVALID_ROUTE_NETWORK_GATE_PLACEMENT' },
+      );
+    }
+    fragment.doors.push({
+      id: String(doorId ?? stableId('supplementEncounterGate', connection.id)),
+      doorId: doorId == null ? null : String(doorId),
+      gateId: doorId == null ? null : String(doorId),
+      roomId: connection.fromNodeId,
+      sourceRoomId: connection.fromNodeId,
+      connectionId: connection.id,
+      position: path[0].clone(),
+      gatePlacementSide: 'source',
+      requiresEncounterId: requiresEncounterId == null ? null : String(requiresEncounterId),
+      requiredKeycardId: requiredKeycardId == null ? null : String(requiredKeycardId),
+      credentialRequirement: requiredKeycardId == null ? null : String(requiredKeycardId),
+      operationId: operation.id,
+      accessDomainId: operation.accessDomainId ?? null,
+      progressionBandId: operation.progressionBandId ?? null,
+      themeBinding: cloneBinding(themeBinding),
+      dungeonSupplement: true,
+    });
+  }
+
+  const shortcutMode = segment.shortcutMode
+    ?? segment.shortcut?.kind
+    ?? segment.traversal?.shortcutMode
+    ?? (['shortcut-lift', 'drop-ladder'].includes(String(segment.connectorFamily))
+      ? String(segment.connectorFamily)
+      : null);
+  if (!shortcutMode) return;
+  const stateId = segment.shortcutStateId
+    ?? segment.shortcut?.stateId
+    ?? segment.stableRuntimeStateId
+    ?? segment.traversal?.stateId
+    ?? stableId('supplementShortcutState', operation.id, connection.id);
+  const mechanismId = segment.shortcutMechanismId
+    ?? stableId('supplementShortcutMechanism', operation.id, connection.id);
+  const shortcutAction = shortcutMode === 'drop-ladder'
+    ? 'deploy-ladder'
+    : shortcutMode === 'shortcut-lift'
+      ? 'unlock-lift'
+      : 'unlock-route';
+  connection.shortcutMechanismId = mechanismId;
+  connection.shortcutStateId = String(stateId);
+  connection.runtimeStateIds = [String(stateId)];
+  fragment.mechanisms.push({
+    id: mechanismId,
+    mechanismId,
+    stateId,
+    shortcutStateId: String(stateId),
+    runtimeStateIds: [String(stateId)],
+    type: 'dungeonSupplementShortcut',
+    label: shortcutMode === 'drop-ladder' ? 'Deploy shortcut ladder' : 'Enable shortcut route',
+    shortcutMode,
+    shortcutAction,
+    scopedAction: 'unlockShortcut',
+    connectionId: connection.id,
+    targetConnectionId: connection.id,
+    roomId: connection.toNodeId,
+    position: path.at(-1).clone(),
+    initialState: segment.shortcut?.initialState
+      ?? (shortcutMode === 'shortcut-lift' ? 'unavailable' : 'retracted'),
+    activatedState: segment.shortcut?.activatedState
+      ?? (shortcutMode === 'shortcut-lift' ? 'available' : 'deployed'),
+    activationSide: segment.shortcut?.activationSide ?? 'far-side',
+    oneSideActivated: true,
+    permanentOnActivation: segment.shortcut?.persistent !== false,
+    action: {
+      type: 'activateDungeonSupplementShortcut',
+      scope: 'connection',
+      connectionId: connection.id,
+      stateId,
+    },
+    operationId: operation.id,
+    parentRegionId: operation.parentRegionId ?? null,
+    themeBinding: cloneBinding(themeBinding),
+    dungeonSupplement: true,
+  });
 }
 
 function assembleSegment({
@@ -1817,8 +3057,11 @@ function assembleSegment({
   ledger,
   fragment,
   structuralMode,
+  connectorProxyProgression,
+  authoritativeThemePreflight = false,
 }) {
   const id = segment.id ?? stableId('supplementSegment', segment.operationId, fragment.connectionPlans.length);
+  const operation = operationById.get(segment.operationId) ?? null;
   const themeBinding = recordThemeBinding(segment, operationById, bindingByRegion);
   const parentRegionId = segment.parentRegionId ?? themeBinding?.parentRegionId
     ?? operationById.get(segment.operationId)?.parentRegionId;
@@ -1844,18 +3087,29 @@ function assembleSegment({
   const family = CONNECTOR_FAMILY_ALIASES[
     segment.connectorFamily ?? segment.family ?? segment.connectorVariantId ?? 'serviceGallery'
   ] ?? segment.connectorFamily ?? segment.family ?? 'serviceGallery';
-  const session = structuralMode === 'facadeOnly'
-    ? resolveThemeSession(themeSources, themeBinding, parentRegionId, fallbackSession)
-    : assertThemeSession(
-      resolveThemeSession(themeSources, themeBinding, parentRegionId, fallbackSession),
-      `supplement segment ${id}`,
-    );
+  const resolvedSession = resolveThemeSession(
+    themeSources,
+    themeBinding,
+    parentRegionId,
+    fallbackSession,
+  );
+  const session = structuralMode === 'facadeOnly' && !authoritativeThemePreflight
+    ? resolvedSession
+    : assertThemeSession(resolvedSession, `supplement segment ${id}`);
   if (session) {
     requireCapabilities(session, {
       ...(segment.requiredThemeCapabilities ?? {}),
+      materialRoles: [
+        ...asArray(segment.requiredThemeCapabilities?.materialRoles),
+        ...asArray(segment.requiredThemeCapabilities?.materials),
+        ...(authoritativeThemePreflight
+          ? [family === 'slope' ? 'ramp' : 'corridorFloor', 'wall', 'ceiling']
+          : []),
+      ],
       connectorFamilies: [
         ...asArray(segment.requiredThemeCapabilities?.connectorFamilies),
-        ...(structuralMode === 'facadeOnly' ? [] : [family]),
+        ...asArray(segment.requiredThemeCapabilities?.connectors),
+        ...(structuralMode === 'facadeOnly' && !authoritativeThemePreflight ? [] : [family]),
       ],
     }, `supplement segment ${id}`);
   }
@@ -1869,6 +3123,38 @@ function assembleSegment({
   segmentGroup.userData.operationId = segment.operationId ?? null;
   segmentGroup.userData.themeBinding = cloneBinding(themeBinding);
   fragment.root.add(segmentGroup);
+
+  const fromNodeId = segment.from?.nodeId ?? segment.fromNodeId ?? null;
+  const toNodeId = segment.to?.nodeId ?? segment.toNodeId ?? null;
+  const thresholdContract = (role, roomId, center, adjacent, endpoint) => {
+    if (!roomId || !center || !adjacent) return null;
+    const direction = adjacent.clone().sub(center);
+    direction.y = 0;
+    if (direction.lengthSq() <= EPSILON) return null;
+    direction.normalize();
+    return {
+      id: stableId('supplementSharedThreshold', id, role, endpointSocketId(endpoint) ?? roomId),
+      roomId,
+      connectorId: id,
+      center,
+      direction,
+      width: positive(endpoint?.widthMeters ?? endpoint?.landingWidth, width),
+    };
+  };
+  const fromThreshold = thresholdContract(
+    'from',
+    fromNodeId,
+    path[0],
+    path[1],
+    segment.from,
+  );
+  const toThreshold = thresholdContract(
+    'to',
+    toNodeId,
+    path.at(-1),
+    path.at(-2),
+    segment.to,
+  );
 
   if (structuralMode !== 'facadeOnly') {
     for (let index = 1; index < path.length; index += 1) {
@@ -1887,12 +3173,18 @@ function assembleSegment({
         fragment,
         parent: segmentGroup,
         tileSize,
-        materialRoles: {
-          floor: family === 'slope' ? 'ramp' : 'corridorFloor',
-          wall: 'wall',
-          ceiling: 'ceiling',
-        },
-      });
+         materialRoles: {
+           floor: family === 'slope' ? 'ramp' : 'corridorFloor',
+           wall: 'wall',
+           ceiling: 'ceiling',
+         },
+          openStart: index > 1,
+          openEnd: index < path.length - 1,
+          sharedThresholdContracts: [
+            ...(index === 1 && fromThreshold ? [fromThreshold] : []),
+            ...(index === path.length - 1 && toThreshold ? [toThreshold] : []),
+          ],
+       });
     }
     const skin = invokeConnectorSkin(session, family, {
       ...cloneSerializableRecord(segment),
@@ -1908,8 +3200,11 @@ function assembleSegment({
     addFactoryProductToGroup(skin, segmentGroup, fragment);
   }
 
-  const fromNodeId = segment.from?.nodeId ?? segment.fromNodeId ?? null;
-  const toNodeId = segment.to?.nodeId ?? segment.toNodeId ?? null;
+  const progressionEndpoints = resolveConnectorProxyProgressionEndpoints(
+    fromNodeId,
+    toNodeId,
+    connectorProxyProgression?.candidatesByProxyId ?? new Map(),
+  );
   const connection = {
     ...cloneSerializableRecord(segment),
     id,
@@ -1919,25 +3214,81 @@ function assembleSegment({
     to: toNodeId ?? segment.to,
     fromNodeId,
     toNodeId,
+    progressionFromRoomId: progressionEndpoints.fromProgressionRoomId,
+    progressionToRoomId: progressionEndpoints.toProgressionRoomId,
+    progressionCollapsedSelfEdge: progressionEndpoints.selfEdge,
+    connectorJunctionProxyIds: [
+      progressionEndpoints.fromProxyId,
+      progressionEndpoints.toProxyId,
+    ].filter(Boolean),
+    fromSocket: {
+      ...cloneSerializableRecord(segment.from ?? {}),
+      roomId: fromNodeId,
+      progressionRoomId: progressionEndpoints.fromProgressionRoomId,
+      ...(progressionEndpoints.fromProxyId ? {
+        connectorJunctionProxyId: progressionEndpoints.fromProxyId,
+      } : {}),
+    },
+    toSocket: {
+      ...cloneSerializableRecord(segment.to ?? {}),
+      roomId: toNodeId,
+      progressionRoomId: progressionEndpoints.toProgressionRoomId,
+      ...(progressionEndpoints.toProxyId ? {
+        connectorJunctionProxyId: progressionEndpoints.toProxyId,
+      } : {}),
+    },
+    fromSocketId: endpointSocketId(segment.from),
+    toSocketId: endpointSocketId(segment.to),
+    exactEndpointSocketIds: operationType(operation) === 'routeNetwork'
+      ? [endpointSocketId(segment.from), endpointSocketId(segment.to)].filter(Boolean)
+      : [],
     logicalEdgeId: segment.logicalEdgeId ?? segment.originalEdgeId ?? null,
     physicalOrdinal: segment.physicalOrdinal ?? 0,
     path: path.map((point) => point.clone()),
     themeBinding: cloneBinding(themeBinding),
+    routeNetworkGrantId: operation?.grantId ?? null,
+    routeNetworkKind: operation?.routeNetworkKind ?? null,
+    topologyTemplateId: operation?.topologyTemplateId ?? null,
+    elevationModes: asArray(operation?.elevationModes).map(String),
+    accessDomainId: operation?.accessDomainId ?? null,
+    progressionBandId: operation?.progressionBandId ?? null,
+    stableRuntimeStateIds: asArray(operation?.stableRuntimeStateIds).map((entry) => (
+      typeof entry === 'object' ? cloneSerializableRecord(entry) : entry
+    )),
     dungeonSupplement: true,
   };
   fragment.connectionPlans.push(connection);
+  appendRouteNetworkRuntimeRecords({
+    fragment,
+    segment,
+    operation,
+    connection,
+    path,
+    tileSize,
+    themeBinding,
+  });
   const minimapConnection = {
     id,
-    from: fromNodeId,
-    to: toNodeId,
-    fromRoomId: fromNodeId,
-    toRoomId: toNodeId,
+    from: progressionEndpoints.fromProgressionRoomId,
+    to: progressionEndpoints.toProgressionRoomId,
+    fromRoomId: progressionEndpoints.fromProgressionRoomId,
+    toRoomId: progressionEndpoints.toProgressionRoomId,
     path: path.map((point) => ({ x: point.x / tileSize, z: point.z / tileSize, elevation: point.y })),
     logicalEdgeId: connection.logicalEdgeId,
+    routeNetworkGrantId: operation?.grantId ?? null,
+    routeNetworkKind: operation?.routeNetworkKind ?? null,
+    topologyTemplateId: operation?.topologyTemplateId ?? null,
+    accessDomainId: operation?.accessDomainId ?? null,
+    progressionBandId: operation?.progressionBandId ?? null,
     dungeonSupplement: true,
   };
-  fragment.minimap.hallways.push(minimapConnection);
-  fragment.minimap.connections.push({ ...minimapConnection, path: minimapConnection.path.map((point) => ({ ...point })) });
+  if (!progressionEndpoints.selfEdge) {
+    fragment.minimap.hallways.push(minimapConnection);
+    fragment.minimap.connections.push({
+      ...minimapConnection,
+      path: minimapConnection.path.map((point) => ({ ...point })),
+    });
+  }
 }
 
 function validateTransitionBay(transition) {
@@ -1965,6 +3316,7 @@ function assembleTransitionBay({
   ledger,
   fragment,
   structuralMode,
+  authoritativeThemePreflight = false,
 }) {
   validateTransitionBay(transition);
   const id = transition.id ?? stableId('supplementTransition', transition.operationId, fragment.connectionPlans.length);
@@ -1976,19 +3328,25 @@ function assembleTransitionBay({
     transition.destinationThemeBinding
     ?? bindingByRegion.get(transition.destinationParentRegionId),
   );
-  const sourceSession = structuralMode === 'facadeOnly'
-    ? resolveThemeSession(themeSources, sourceBinding, sourceBinding?.parentRegionId, fallbackSession)
-    : assertThemeSession(
-      resolveThemeSession(themeSources, sourceBinding, sourceBinding?.parentRegionId, fallbackSession),
-      `source side of transition bay ${id}`,
-    );
-  const destinationSession = structuralMode === 'facadeOnly'
-    ? resolveThemeSession(themeSources, destinationBinding, destinationBinding?.parentRegionId, fallbackSession)
-    : assertThemeSession(
-      resolveThemeSession(themeSources, destinationBinding, destinationBinding?.parentRegionId, fallbackSession),
-      `destination side of transition bay ${id}`,
-    );
-  const transitionRequirements = structuralMode === 'facadeOnly'
+  const resolvedSourceSession = resolveThemeSession(
+    themeSources,
+    sourceBinding,
+    sourceBinding?.parentRegionId,
+    fallbackSession,
+  );
+  const resolvedDestinationSession = resolveThemeSession(
+    themeSources,
+    destinationBinding,
+    destinationBinding?.parentRegionId,
+    fallbackSession,
+  );
+  const sourceSession = structuralMode === 'facadeOnly' && !authoritativeThemePreflight
+    ? resolvedSourceSession
+    : assertThemeSession(resolvedSourceSession, `source side of transition bay ${id}`);
+  const destinationSession = structuralMode === 'facadeOnly' && !authoritativeThemePreflight
+    ? resolvedDestinationSession
+    : assertThemeSession(resolvedDestinationSession, `destination side of transition bay ${id}`);
+  const transitionRequirements = structuralMode === 'facadeOnly' && !authoritativeThemePreflight
     ? {
       materialRoles: [],
       assetRoles: ['transitionFrame'],
@@ -2124,16 +3482,19 @@ function assembleTransitionBay({
         invokeAsset(session, 'transitionFrame', contract, ledger, `${side} facade frame of transition bay ${id}`),
         group,
         fragment,
+        { facadeOnly: true, context: `${side} facade transition frame for ${id}` },
       );
       addFactoryProductToGroup(
         invokeConnectorSkin(session, 'transitionBay', contract, ledger, `${side} facade skin of transition bay ${id}`),
         group,
         fragment,
+        { facadeOnly: true, context: `${side} facade transition skin for ${id}` },
       );
       addFactoryProductToGroup(
         invokeTransition(session, 'levelTransitionBay', contract, ledger, `${side} facade transition provider of ${id}`),
         group,
         fragment,
+        { facadeOnly: true, context: `${side} facade transition provider for ${id}` },
       );
     }
   }
@@ -2225,6 +3586,7 @@ function computeMinimapBounds(fragment) {
 
 function finalizeFragment(fragment, elementCounts, sessions) {
   delete fragment._floorTileKeys;
+  delete fragment._floorTileByKey;
   delete fragment._anchorSequence;
   fragment.floorTiles.sort((left, right) => (
     finite(left.elevation) - finite(right.elevation)
@@ -2236,14 +3598,21 @@ function finalizeFragment(fragment, elementCounts, sessions) {
   fragment.minimap.hallways.sort((left, right) => String(left.id).localeCompare(String(right.id)));
   fragment.minimap.connections.sort((left, right) => String(left.id).localeCompare(String(right.id)));
   fragment.minimap.bounds = computeMinimapBounds(fragment);
+  fragment.root.userData.supplementalRoomIds = fragment.rooms.map(({ id }) => id).sort();
+  fragment.root.userData.connectorJunctionProxyIds = fragment.connectorJunctionProxies
+    .map(({ id }) => id)
+    .sort();
   fragment.root.updateMatrixWorld(true);
   fragment.diagnostics.assembled = {
     ...elementCounts,
     roomCount: fragment.rooms.length,
+    connectorJunctionProxyCount: fragment.connectorJunctionProxies.length,
     floorTileCount: fragment.floorTiles.length,
     solidZoneCount: fragment.solidZones.length,
     aerialBoundaryZoneCount: fragment.aerialBoundaryZones.length,
     encounterCount: fragment.encounters.length,
+    junctionCount: fragment.junctions.length,
+    landingClearanceCount: fragment.landingClearances.length,
     resourceCounts: fragment.resources.snapshot(sessions),
   };
   return fragment;
@@ -2286,6 +3655,7 @@ export function assembleDungeonSupplement({
   const ledger = createResourceLedger();
   const fragment = createFragment(overlayPlan, root, resolvedTileSize, ledger);
   fragment._floorTileKeys = new Set();
+  fragment._floorTileByKey = new Map();
   fragment._anchorSequence = 0;
   fragment.structuralMode = structuralMode;
 
@@ -2313,8 +3683,12 @@ export function assembleDungeonSupplement({
   const segmentById = new Map(elements.segments.map((segment) => [segment.id, segment]));
   const connectedSocketIds = getConnectedSocketIds(elements.segments);
   const resolvedSessions = new Set();
+  let connectorProxyProgression = null;
+  const authoritativeThemePreflight = requiresAuthoritativeThemePreflight(overlayPlan);
 
   try {
+    validateRouteNetworkSocketBindings(elements);
+    connectorProxyProgression = createConnectorProxyProgressionCandidates(elements);
     for (const node of elements.nodes) {
       const assembled = assembleNode({
         node,
@@ -2327,6 +3701,8 @@ export function assembleDungeonSupplement({
         ledger,
         fragment,
         structuralMode,
+        connectorProxyProgression,
+        authoritativeThemePreflight,
       });
       if (assembled.session) resolvedSessions.add(assembled.session);
     }
@@ -2349,6 +3725,8 @@ export function assembleDungeonSupplement({
         ledger,
         fragment,
         structuralMode,
+        connectorProxyProgression,
+        authoritativeThemePreflight,
       });
     }
     for (const transition of elements.transitionBays) {
@@ -2362,6 +3740,7 @@ export function assembleDungeonSupplement({
         ledger,
         fragment,
         structuralMode,
+        authoritativeThemePreflight,
       });
     }
   } catch (error) {

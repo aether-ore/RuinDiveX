@@ -207,6 +207,14 @@ export class EnemySpawner {
       enemy = new ReaverbotEnemy(genome, level, { eliteAffix: affix });
     }
 
+    const damageMultiplier = Number(options.damageMultiplier ?? 1);
+    if (Number.isFinite(damageMultiplier)
+      && damageMultiplier > 0
+      && Number.isFinite(Number(enemy?.stats?.damage))) {
+      enemy.stats.damage *= damageMultiplier;
+      enemy.encounterDamageMultiplier = damageMultiplier;
+    }
+
     enemy.root.position.copy(position
       ?? randomDungeonSpawnPoint(this.game, this.game.player.root.position, 9, () => rng.next())
       ?? randomPointAround(this.game.player.root.position, 13, 19, () => rng.next()));
@@ -257,6 +265,7 @@ export class EnemySpawner {
         favoredTags: encounter.enemyTags,
         suppressedTags: encounter.enemySuppressedTags,
         healthMultiplier: encounter.enemyHealthMultiplier ?? 1,
+        damageMultiplier: encounter.enemyDamageMultiplier ?? 1,
         excludedArchetypes: tractorControllerCount > 0 ? ['tractorController'] : [],
         isBoss: Boolean(encounter.isBoss && i === 0),
         keycardCarrier,

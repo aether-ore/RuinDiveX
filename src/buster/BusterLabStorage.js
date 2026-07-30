@@ -2,6 +2,7 @@ import { RollSalvageStorage } from '../RollSalvageStorage.js';
 import { resolveDungeonFamilyId } from '../DungeonFamilies.js';
 import {
   sanitizeDungeonAugmentationSaveIdentity,
+  validateCommittedDungeonAugmentationIdentity,
 } from '../dungeon-augmentation/identity.js';
 import {
   BOSS_EXPEDITION_SCHEMA_VERSION,
@@ -789,7 +790,25 @@ function sameDungeonAugmentationIdentity(first, second) {
   const right = getDungeonAugmentationIdentityState(second);
   if (left.kind !== right.kind) return false;
   if (left.kind !== 'valid') return true;
-  return JSON.stringify(left.identity) === JSON.stringify(right.identity);
+  return validateCommittedDungeonAugmentationIdentity(
+    left.identity,
+    right.identity,
+  ).compatible;
+}
+
+// Reset is a destructive compare-and-swap operation. Unlike ordinary runtime
+// state updates, it must compare the complete canonical identity, including
+// every allow-listed mutable state value, so a stale reset cannot erase newer
+// dungeon progress committed by another writer.
+function sameExactDungeonAugmentationIdentity(first, second) {
+  const left = getDungeonAugmentationIdentityState(first);
+  const right = getDungeonAugmentationIdentityState(second);
+  if (left.kind !== right.kind) return false;
+  if (left.kind === 'valid') {
+    return JSON.stringify(left.identity) === JSON.stringify(right.identity);
+  }
+  if (left.kind === 'none') return true;
+  return JSON.stringify(first) === JSON.stringify(second);
 }
 
 function hasExplicitUnknownBossRewardMaterial(raw) {
@@ -2904,6 +2923,101 @@ export class BusterLabStorage {
     return this.restartActiveBossExpedition(expeditionSpec, concurrency);
   }
 
+  /**
+   * Commits dungeon-local augmentation values inside the active expedition
+   * record. The stable content identity must remain byte-for-byte compatible;
+   * only the allow-listed mutableState values may change.
+   */
+  async recordActiveBossExpeditionDungeonAugmentationState({
+    expeditionId,
+    dungeonAugmentation,
+  } = {}, concurrency = {}) {
+    if (typeof expeditionId !== 'string' || !expeditionId) {
+      return { ok: false, reason: 'invalid-expedition-id', state: this._ensureLoaded() };
+    }
+    const requestedIdentity = sanitizeDungeonAugmentationSaveIdentity(dungeonAugmentation);
+    if (!requestedIdentity) {
+      return { ok: false, reason: 'invalid-dungeon-augmentation', state: this._ensureLoaded() };
+    }
+    const currentHunts = this._ensureLoaded().bossHunts;
+    if (currentHunts.activeExpeditionId !== expeditionId) {
+      return {
+        ok: false,
+        reason: 'active-expedition-mismatch',
+        activeExpeditionId: currentHunts.activeExpeditionId,
+        state: this.state,
+      };
+    }
+    const existing = currentHunts.recordedExpeditions[expeditionId];
+    if (!existing || existing.status !== 'active') {
+      return { ok: false, reason: 'expedition-closed', state: this.state };
+    }
+    if (getDungeonAugmentationIdentityState(existing.dungeonAugmentation).kind === 'invalid') {
+      return {
+        ok: false,
+        reason: 'incompatible-dungeon-augmentation',
+        status: 'incompatible-content',
+        resetOrAbandonRequired: true,
+        expedition: cloneJson(existing),
+        state: this.state,
+      };
+    }
+    if (!sameDungeonAugmentationIdentity(existing.dungeonAugmentation, requestedIdentity)) {
+      return { ok: false, reason: 'expedition-spec-mismatch', state: this.state };
+    }
+    if (JSON.stringify(existing.dungeonAugmentation) === JSON.stringify(requestedIdentity)) {
+      return {
+        ok: true,
+        unchanged: true,
+        idempotent: true,
+        dungeonAugmentation: cloneJson(requestedIdentity),
+        expedition: cloneJson(existing),
+        state: this.state,
+      };
+    }
+    if (this.readOnly) return { ok: false, reason: 'read-only', state: this.state };
+
+    const transaction = await this.transact({
+      operation: 'record-dungeon-augmentation-state',
+      expectedRevision: concurrency.expectedRevision ?? this.revision,
+      expectedWriteId: concurrency.expectedWriteId ?? this.writeId,
+    }, (state) => {
+      const hunts = state.bossHunts;
+      if (hunts.activeExpeditionId !== expeditionId) {
+        throw new BusterLabOperationError('active-expedition-mismatch');
+      }
+      const expedition = hunts.recordedExpeditions[expeditionId];
+      if (!expedition || expedition.status !== 'active') {
+        throw new BusterLabOperationError('expedition-closed');
+      }
+      if (getDungeonAugmentationIdentityState(expedition.dungeonAugmentation).kind === 'invalid') {
+        throw new BusterLabOperationError('incompatible-dungeon-augmentation');
+      }
+      if (!sameDungeonAugmentationIdentity(expedition.dungeonAugmentation, requestedIdentity)) {
+        throw new BusterLabOperationError('expedition-spec-mismatch');
+      }
+      if (JSON.stringify(expedition.dungeonAugmentation) === JSON.stringify(requestedIdentity)) {
+        return {
+          unchanged: true,
+          idempotent: true,
+          dungeonAugmentation: cloneJson(requestedIdentity),
+          expedition: cloneJson(expedition),
+        };
+      }
+      expedition.dungeonAugmentation = requestedIdentity;
+      expedition.dungeonAugmentationStateUpdatedAt = new Date().toISOString();
+      return {
+        dungeonAugmentation: cloneJson(requestedIdentity),
+        expedition: cloneJson(expedition),
+      };
+    });
+    return transaction.ok ? { ...transaction, ...transaction.result } : transaction;
+  }
+
+  recordActiveBossExpeditionDungeonAugmentationStateAsync(update = {}, concurrency = {}) {
+    return this.recordActiveBossExpeditionDungeonAugmentationState(update, concurrency);
+  }
+
   async resetActiveBossExpeditionDungeonContent(expeditionSpec = {}, concurrency = {}) {
     const expeditionId = typeof expeditionSpec.id === 'string' && expeditionSpec.id
       ? expeditionSpec.id
@@ -2976,7 +3090,7 @@ export class BusterLabStorage {
         || expedition.depth !== expectedDepth
         || expedition.dungeonLayoutSeed !== expectedLayoutSeed
         || expedition.dungeonFamilyId !== expectedDungeonFamilyId
-        || !sameDungeonAugmentationIdentity(
+        || !sameExactDungeonAugmentationIdentity(
           expedition.dungeonAugmentation,
           expeditionSpec.expectedDungeonAugmentation,
         )) {

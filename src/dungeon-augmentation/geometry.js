@@ -2,6 +2,82 @@ import { cloneDungeonAugmentationValue } from './canonical.js';
 
 const EPSILON = 1e-6;
 
+export const DUNGEON_SUPPLEMENT_JUNCTION_GEOMETRY = Object.freeze({
+  'through-t': Object.freeze({
+    widthTiles: 5,
+    depthTiles: 7,
+    clearCoreWidthTiles: 3,
+    clearCoreDepthTiles: 3,
+    minimumActiveSocketCount: 3,
+    graphAdjacency: 'at-grade-junction',
+  }),
+  crossroads: Object.freeze({
+    widthTiles: 7,
+    depthTiles: 7,
+    clearCoreWidthTiles: 3,
+    clearCoreDepthTiles: 3,
+    minimumActiveSocketCount: 4,
+    graphAdjacency: 'at-grade-junction',
+  }),
+  'staggered-cross': Object.freeze({
+    widthTiles: 5,
+    depthTiles: 13,
+    clearCoreWidthTiles: 3,
+    clearCoreDepthTiles: 9,
+    minimumActiveSocketCount: 4,
+    lateralSeparationTiles: 6,
+    graphAdjacency: 'at-grade-junction',
+  }),
+  'fork-merge': Object.freeze({
+    widthTiles: 5,
+    depthTiles: 7,
+    clearCoreWidthTiles: 3,
+    clearCoreDepthTiles: 3,
+    minimumActiveSocketCount: 3,
+    graphAdjacency: 'paired-at-grade-junction',
+  }),
+  'stacked-interchange': Object.freeze({
+    widthTiles: 9,
+    depthTiles: 13,
+    clearCoreWidthTiles: 3,
+    clearCoreDepthTiles: 3,
+    minimumActiveSocketCount: 3,
+    transferHeightMeters: 5.6,
+    graphAdjacency: 'explicit-vertical-transfer',
+  }),
+  'over-under': Object.freeze({
+    widthTiles: 7,
+    depthTiles: 7,
+    clearCoreWidthTiles: 3,
+    clearCoreDepthTiles: 3,
+    minimumActiveSocketCount: 4,
+    graphAdjacency: 'separate-elevations',
+  }),
+});
+
+const DUNGEON_SUPPLEMENT_JUNCTION_ALIASES = Object.freeze({
+  t: 'through-t',
+  tee: 'through-t',
+  throughT: 'through-t',
+  'through-t': 'through-t',
+  cross: 'crossroads',
+  crossroads: 'crossroads',
+  'cross-junction': 'crossroads',
+  staggeredCross: 'staggered-cross',
+  'staggered-cross': 'staggered-cross',
+  forkMerge: 'fork-merge',
+  'fork-merge': 'fork-merge',
+  stackedInterchange: 'stacked-interchange',
+  'stacked-interchange': 'stacked-interchange',
+  overUnder: 'over-under',
+  'over-under': 'over-under',
+  'over-under-crossover': 'over-under',
+});
+
+export function normalizeDungeonJunctionKind(value) {
+  return DUNGEON_SUPPLEMENT_JUNCTION_ALIASES[String(value ?? '')] ?? null;
+}
+
 export function toDungeonPoint(value = {}, fallbackY = 0) {
   const source = value?.position ?? value?.center ?? value ?? {};
   return {
@@ -62,10 +138,17 @@ export function transformDungeonLocalFacing(localFacing, placement) {
 export function transformDungeonVolume(volume, placement, idPrefix = '') {
   const turns = ((Math.round(placement?.rotationQuarterTurns ?? 0) % 4) + 4) % 4;
   const sourceSize = volume?.size ?? {};
+  // Grammar records intentionally use author-facing width/height/depth names,
+  // while planned overlay volumes use renderer-neutral x/y/z axes. Accept
+  // both spellings here so an authored room body cannot silently collapse to
+  // a zero-sized volume before overlap validation.
+  const sourceX = sourceSize.x ?? sourceSize.width ?? 0;
+  const sourceY = sourceSize.y ?? sourceSize.height ?? 0;
+  const sourceZ = sourceSize.z ?? sourceSize.depth ?? 0;
   const size = {
-    x: Number(turns % 2 === 0 ? sourceSize.x ?? 0 : sourceSize.z ?? 0),
-    y: Number(sourceSize.y ?? 0),
-    z: Number(turns % 2 === 0 ? sourceSize.z ?? 0 : sourceSize.x ?? 0),
+    x: Number(turns % 2 === 0 ? sourceX : sourceZ),
+    y: Number(sourceY),
+    z: Number(turns % 2 === 0 ? sourceZ : sourceX),
   };
   return {
     ...cloneDungeonAugmentationValue(volume),
@@ -108,6 +191,232 @@ export function normalizeDungeonVolume(volume, fallbackId = 'volume') {
     purpose: String(volume.purpose ?? 'base-draft-protected'),
   };
   return Object.values(normalized.size).every(Number.isFinite) ? normalized : null;
+}
+
+/**
+ * Produces the renderer-neutral contract shared by planning, validation, and
+ * assembly for V4 decision nodes. The record describes a clear walkable core;
+ * it intentionally does not select materials or create Three.js objects.
+ */
+export function createDungeonJunctionGeometryRecord({
+  id,
+  nodeId = null,
+  junctionKind,
+  center = null,
+  elevation = null,
+  heightMeters = 3.6,
+  tileSize = 2.8,
+  throughSocketPairs = [],
+  decisionSocketIds = [],
+  activeSocketIds = [],
+  operationId = null,
+  accessDomainId = null,
+  progressionBandId = null,
+} = {}) {
+  const normalizedKind = normalizeDungeonJunctionKind(junctionKind);
+  if (!normalizedKind) return null;
+  const specification = DUNGEON_SUPPLEMENT_JUNCTION_GEOMETRY[normalizedKind];
+  const resolvedCenter = toDungeonPoint(center ?? {}, Number(elevation ?? 0));
+  const resolvedHeight = Math.max(0, Number(heightMeters) || 3.6);
+  const resolvedTileSize = Math.max(EPSILON, Number(tileSize) || 2.8);
+  const normalizedPairs = (Array.isArray(throughSocketPairs) ? throughSocketPairs : [])
+    .map((pair) => (Array.isArray(pair) ? pair.map(String) : []))
+    .filter((pair) => pair.length === 2);
+  const normalizedDecisionIds = [...new Set(
+    (Array.isArray(decisionSocketIds) ? decisionSocketIds : []).map(String),
+  )];
+  const normalizedActiveIds = [...new Set(
+    (Array.isArray(activeSocketIds) ? activeSocketIds : []).map(String),
+  )];
+  return {
+    schema: 'ruindivex-dungeon-supplement-junction/v1',
+    id: String(id ?? `${nodeId ?? 'junction'}:${normalizedKind}`),
+    nodeId: nodeId == null ? null : String(nodeId),
+    operationId: operationId == null ? null : String(operationId),
+    junctionKind: normalizedKind,
+    widthTiles: specification.widthTiles,
+    depthTiles: specification.depthTiles,
+    minimumActiveSocketCount: specification.minimumActiveSocketCount,
+    lateralSeparationTiles: specification.lateralSeparationTiles ?? null,
+    transferHeightMeters: specification.transferHeightMeters ?? null,
+    graphAdjacency: specification.graphAdjacency,
+    throughSocketPairs: normalizedPairs,
+    decisionSocketIds: normalizedDecisionIds,
+    activeSocketIds: normalizedActiveIds,
+    countsAsMeaningfulStation:
+      normalizedActiveIds.length >= specification.minimumActiveSocketCount,
+    clearCoreVolume: {
+      id: String(`${id ?? nodeId ?? 'junction'}:clear-core`),
+      ownerId: nodeId == null ? null : String(nodeId),
+      center: {
+        x: resolvedCenter.x,
+        y: resolvedCenter.y + resolvedHeight * 0.5,
+        z: resolvedCenter.z,
+      },
+      size: {
+        x: specification.clearCoreWidthTiles * resolvedTileSize,
+        y: resolvedHeight,
+        z: specification.clearCoreDepthTiles * resolvedTileSize,
+      },
+      purpose: 'junction-walkable-clear-core',
+    },
+    accessDomainId: accessDomainId == null ? null : String(accessDomainId),
+    progressionBandId: progressionBandId == null ? null : Number(progressionBandId),
+  };
+}
+
+/**
+ * The only parent-room overlap a route network may claim at an attachment is
+ * a three-tile doorway landing spanning one tile inward and one tile outward.
+ */
+export function createDungeonSocketLandingOverlapVolume(socket = {}, {
+  id = null,
+  tileSize = 2.8,
+  widthTiles = 3,
+  inwardTiles = 1,
+  outwardTiles = 1,
+  clearanceHeightMeters = 3.6,
+  operationId = null,
+  grantId = null,
+} = {}) {
+  const resolvedTileSize = Math.max(EPSILON, Number(tileSize) || 2.8);
+  const position = toDungeonPoint(socket.position ?? socket, socket.elevation ?? 0);
+  const facing = toDungeonFacing(socket.facing ?? socket);
+  const facingX = Math.abs(facing.x) >= Math.abs(facing.z) ? Math.sign(facing.x) : 0;
+  const facingZ = facingX === 0 ? Math.sign(facing.z) || 1 : 0;
+  const inward = Math.max(0, Number(inwardTiles) || 0) * resolvedTileSize;
+  const outward = Math.max(0, Number(outwardTiles) || 0) * resolvedTileSize;
+  const depth = inward + outward;
+  const centerOffset = (outward - inward) * 0.5;
+  const width = Math.max(1, Number(widthTiles) || 3) * resolvedTileSize;
+  const height = Math.max(EPSILON, Number(clearanceHeightMeters) || 3.6);
+  const socketId = String(socket.id ?? socket.socketId ?? 'socket');
+  return {
+    id: String(id ?? `${socketId}:landing-overlap`),
+    ownerId: socket.nodeId ?? socket.roomId ?? null,
+    socketId,
+    operationId: operationId == null ? null : String(operationId),
+    grantId: grantId == null ? null : String(grantId),
+    center: {
+      x: position.x + facingX * centerOffset,
+      y: position.y + height * 0.5,
+      z: position.z + facingZ * centerOffset,
+    },
+    size: {
+      x: facingX ? depth : width,
+      y: height,
+      z: facingZ ? depth : width,
+    },
+    facing: { x: facingX, y: 0, z: facingZ },
+    widthTiles: Math.max(1, Number(widthTiles) || 3),
+    inwardTiles: Math.max(0, Number(inwardTiles) || 0),
+    outwardTiles: Math.max(0, Number(outwardTiles) || 0),
+    bounded: true,
+    purpose: 'socket-landing-overlap-grant',
+  };
+}
+
+export function dungeonVolumeOverlapWithinGrant(first, second, grant, tolerance = 1e-4) {
+  const normalizedFirst = normalizeDungeonVolume(first, 'first');
+  const normalizedSecond = normalizeDungeonVolume(second, 'second');
+  const normalizedGrant = normalizeDungeonVolume(grant, 'grant');
+  if (!normalizedFirst || !normalizedSecond || !normalizedGrant) return false;
+  if (!dungeonVolumesOverlap(normalizedFirst, normalizedSecond, tolerance)) return false;
+  return ['x', 'y', 'z'].every((axis) => {
+    const overlapMinimum = Math.max(
+      normalizedFirst.center[axis] - normalizedFirst.size[axis] * 0.5,
+      normalizedSecond.center[axis] - normalizedSecond.size[axis] * 0.5,
+    );
+    const overlapMaximum = Math.min(
+      normalizedFirst.center[axis] + normalizedFirst.size[axis] * 0.5,
+      normalizedSecond.center[axis] + normalizedSecond.size[axis] * 0.5,
+    );
+    const grantMinimum = normalizedGrant.center[axis] - normalizedGrant.size[axis] * 0.5;
+    const grantMaximum = normalizedGrant.center[axis] + normalizedGrant.size[axis] * 0.5;
+    return overlapMinimum >= grantMinimum - tolerance
+      && overlapMaximum <= grantMaximum + tolerance;
+  });
+}
+
+/**
+ * Returns true when the exact overlap between two volumes is covered by the
+ * union of several bounded grants. Route-network corridor stations use an
+ * adjacent doorway-landing grant and endpoint-module grant; a widened camera
+ * clearance can legitimately straddle their shared plane without fitting
+ * wholly inside either box by itself.
+ */
+export function dungeonVolumeOverlapWithinGrants(
+  first,
+  second,
+  grants = [],
+  tolerance = 1e-4,
+) {
+  const normalizedFirst = normalizeDungeonVolume(first, 'first');
+  const normalizedSecond = normalizeDungeonVolume(second, 'second');
+  if (!normalizedFirst || !normalizedSecond
+    || !dungeonVolumesOverlap(normalizedFirst, normalizedSecond, tolerance)) return false;
+  const normalizedGrants = (Array.isArray(grants) ? grants : [])
+    .map((grant, index) => normalizeDungeonVolume(grant, `grant:${index}`))
+    .filter(Boolean);
+  if (normalizedGrants.length === 0) return false;
+  if (normalizedGrants.some((grant) => (
+    dungeonVolumeOverlapWithinGrant(
+      normalizedFirst,
+      normalizedSecond,
+      grant,
+      tolerance,
+    )
+  ))) return true;
+
+  const intersectionBounds = Object.fromEntries(['x', 'y', 'z'].map((axis) => [
+    axis,
+    {
+      minimum: Math.max(
+        normalizedFirst.center[axis] - normalizedFirst.size[axis] * 0.5,
+        normalizedSecond.center[axis] - normalizedSecond.size[axis] * 0.5,
+      ),
+      maximum: Math.min(
+        normalizedFirst.center[axis] + normalizedFirst.size[axis] * 0.5,
+        normalizedSecond.center[axis] + normalizedSecond.size[axis] * 0.5,
+      ),
+    },
+  ]));
+  const cutsByAxis = Object.fromEntries(['x', 'y', 'z'].map((axis) => {
+    const { minimum, maximum } = intersectionBounds[axis];
+    const cuts = new Set([minimum, maximum]);
+    for (const grant of normalizedGrants) {
+      const grantMinimum = grant.center[axis] - grant.size[axis] * 0.5;
+      const grantMaximum = grant.center[axis] + grant.size[axis] * 0.5;
+      if (grantMinimum > minimum + tolerance && grantMinimum < maximum - tolerance) {
+        cuts.add(grantMinimum);
+      }
+      if (grantMaximum > minimum + tolerance && grantMaximum < maximum - tolerance) {
+        cuts.add(grantMaximum);
+      }
+    }
+    return [axis, [...cuts].sort((left, right) => left - right)];
+  }));
+  const intervals = (axis) => cutsByAxis[axis].slice(1).map((maximum, index) => ({
+    minimum: cutsByAxis[axis][index],
+    maximum,
+  })).filter(({ minimum, maximum }) => maximum - minimum > tolerance);
+  for (const x of intervals('x')) {
+    for (const y of intervals('y')) {
+      for (const z of intervals('z')) {
+        const cell = { x, y, z };
+        const covered = normalizedGrants.some((grant) => (
+          ['x', 'y', 'z'].every((axis) => {
+            const grantMinimum = grant.center[axis] - grant.size[axis] * 0.5;
+            const grantMaximum = grant.center[axis] + grant.size[axis] * 0.5;
+            return cell[axis].minimum >= grantMinimum - tolerance
+              && cell[axis].maximum <= grantMaximum + tolerance;
+          })
+        ));
+        if (!covered) return false;
+      }
+    }
+  }
+  return true;
 }
 
 function collectVolumeArray(target, values, prefix) {

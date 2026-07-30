@@ -420,6 +420,7 @@ export class Player {
     };
     this.lastDamageResult = null;
     this.noClipEnabled = false;
+    this.invulnerabilityEnabled = false;
 
     this.baseStats = { ...PLAYER_BASE_STATS };
     this.stats = { ...PLAYER_BASE_STATS };
@@ -2281,6 +2282,17 @@ export class Player {
       this.modelRoot.position.y = 0;
     }
     return this.noClipEnabled;
+  }
+
+  setInvulnerabilityEnabled(enabled) {
+    this.invulnerabilityEnabled = Boolean(enabled);
+    if (this.invulnerabilityEnabled) {
+      // Testing invulnerability is deliberately independent from no-clip: the
+      // player still collides with and traverses the geometry under test.
+      this.burnTimer = 0;
+      this.burnDamagePerSecond = 0;
+    }
+    return this.invulnerabilityEnabled;
   }
 
   updateNoClip(dt, input, movementOptions = {}) {
@@ -4360,6 +4372,7 @@ export class Player {
       guarded: false,
       parried: false,
       immune: false,
+      invulnerable: false,
       resisted: false,
       barrierDamage: 0,
       healthDamage: 0,
@@ -4381,6 +4394,14 @@ export class Player {
     result.contacted = true;
     if (this.isDodgeRollInvulnerable()) {
       result.dodged = true;
+      this.lastDamageResult = result;
+      return result;
+    }
+
+    if (this.invulnerabilityEnabled) {
+      // Count the attack as a resolved physical contact so enemies, traps, and
+      // projectiles still exercise their ordinary cooldown/retreat behavior.
+      result.invulnerable = true;
       this.lastDamageResult = result;
       return result;
     }
@@ -4521,7 +4542,7 @@ export class Player {
   }
 
   applyBurn(duration = 1.8, damagePerSecond = 2) {
-    if (this.dead) return false;
+    if (this.dead || this.invulnerabilityEnabled) return false;
     this.burnTimer = Math.max(this.burnTimer, Math.max(0, Number(duration) || 0));
     this.burnDamagePerSecond = Math.max(
       this.burnDamagePerSecond,

@@ -9,7 +9,13 @@ import { DungeonGenerator } from './DungeonGenerator.js';
 import {
   INDUSTRIAL_SUPPLEMENT_PREVIEW_PROFILE_ID,
   INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID,
+  INDUSTRIAL_SUPPLEMENT_PREVIEW_V3_PROFILE_ID,
+  INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
 } from './dungeon-augmentation/IndustrialExtensionHost.js';
+import {
+  sanitizeDungeonAugmentationSaveIdentity,
+  withDungeonAugmentationMutableState,
+} from './dungeon-augmentation/identity.js';
 import {
   INDUSTRIAL_DUNGEON_FAMILY_ID,
   resolveDungeonFamilyId,
@@ -574,21 +580,29 @@ export function resolveDungeonAugmentationProfileId(requested) {
     ? requested.trim().toLowerCase()
     : '';
   if (!normalized || ['0', 'off', 'disabled', 'none'].includes(normalized)) return null;
-  // Keep only the explicit immutable v1 profile ID on the compatibility
-  // profile. Boolean-style opt-ins select the current, visibly expanded
-  // preview; committed v1 expeditions reconstruct from their saved profile ID.
+  // Explicit immutable profile IDs remain replayable. Boolean-style opt-ins
+  // select the current preview; committed expeditions always reconstruct from
+  // the exact profile ID stored in their augmentation identity.
   if (normalized === INDUSTRIAL_SUPPLEMENT_PREVIEW_PROFILE_ID) {
     return INDUSTRIAL_SUPPLEMENT_PREVIEW_PROFILE_ID;
+  }
+  if (normalized === INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID) {
+    return INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID;
+  }
+  if (normalized === INDUSTRIAL_SUPPLEMENT_PREVIEW_V3_PROFILE_ID) {
+    return INDUSTRIAL_SUPPLEMENT_PREVIEW_V3_PROFILE_ID;
   }
   if ([
     '1',
     'true',
     'on',
     '2',
+    '3',
+    '4',
     'preview',
     'expanded',
-    INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID,
-  ].includes(normalized)) return INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID;
+    INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+  ].includes(normalized)) return INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID;
   return null;
 }
 
@@ -601,6 +615,26 @@ function readDungeonAugmentationProfileId() {
     // The sidecar is optional. Non-browser hosts remain on the legacy path.
   }
   return null;
+}
+
+function readDungeonAugmentationPlayableAlphaMode() {
+  try {
+    const params = new URLSearchParams(globalThis.location?.search ?? '');
+    return params.get('dungeonAugmentationAlpha') === '1'
+      && resolveDungeonAugmentationProfileId(params.get('dungeonAugmentation'))
+        === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID;
+  } catch {
+    return false;
+  }
+}
+
+function readPlayerInvulnerabilityMode() {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? '')
+      .get('playerInvulnerable') === '1';
+  } catch {
+    return false;
+  }
 }
 
 export function createLegacyDungeonBasePlanHash({
@@ -662,6 +696,384 @@ export function resolveCommittedDungeonGenerationSpec(
     // Explicit null is important: a committed legacy run must remain
     // augmentation-off even when the current URL opts new runs into a profile.
     dungeonAugmentation: committedExpedition.dungeonAugmentation ?? null,
+  });
+}
+
+function appendDungeonAugmentationStateId(target, value) {
+  if (typeof value === 'string') {
+    const stateId = value.trim();
+    if (stateId) target.add(stateId);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) appendDungeonAugmentationStateId(target, entry);
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const entry of Object.values(value)) appendDungeonAugmentationStateId(target, entry);
+}
+
+function createDungeonAugmentationRuntimeStateContext(dungeon, identity) {
+  const overlayPlan = dungeon?.augmentationOverlayPlan ?? dungeon?.overlayPlan ?? null;
+  const operations = [
+    ...(Array.isArray(overlayPlan?.operations) ? overlayPlan.operations : []),
+  ];
+  const nestedSegments = operations.flatMap((operation) => [
+    ...(Array.isArray(operation?.segments) ? operation.segments : []),
+    ...(Array.isArray(operation?.connections) ? operation.connections : []),
+  ]);
+  const segments = [
+    ...(Array.isArray(overlayPlan?.segments) ? overlayPlan.segments : []),
+    ...(Array.isArray(overlayPlan?.connections) ? overlayPlan.connections : []),
+    ...nestedSegments,
+    ...(Array.isArray(dungeon?.connectionPlans) ? dungeon.connectionPlans : []),
+  ];
+  return {
+    allowedStateIds: new Set(identity?.progressionStateIds ?? []),
+    operationById: new Map(operations
+      .filter((operation) => operation?.id != null)
+      .map((operation) => [String(operation.id), operation])),
+    segmentById: new Map(segments.flatMap((segment) => [
+      segment?.id,
+      segment?.connectorId,
+      segment?.connectionId,
+    ].filter((id) => id != null).map((id) => [String(id), segment]))),
+  };
+}
+
+function dungeonAugmentationStateIdsForRecord(record, role, context, {
+  includeGenericStateId = true,
+} = {}) {
+  if (!record || typeof record !== 'object') return [];
+  const candidates = new Set();
+  const add = (value) => appendDungeonAugmentationStateId(candidates, value);
+  const addRole = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    add(value[role]);
+    add(value[`${role}StateId`]);
+  };
+  add(record[`${role}StateId`]);
+  addRole(record.stableRuntimeStateIds);
+  if (includeGenericStateId) add(record.stateId);
+  if (role === 'shortcut') {
+    add(record.shortcutStateId);
+    add(record.shortcut?.stateId);
+    add(record.traversal?.stateId);
+  } else if (role === 'pressurePlate') {
+    add(record.pressureStateId);
+    add(record.pressurePlateStateId);
+  }
+  // Stateful supplemental anchors use their stable anchor ID directly.
+  add(record.id);
+
+  const connectionId = record.connectionId ?? record.connectorId
+    ?? record.descriptor?.connectionId ?? null;
+  const segment = connectionId == null
+    ? null
+    : context.segmentById.get(String(connectionId));
+  if (segment) {
+    addRole(segment.stableRuntimeStateIds);
+    if (role === 'shortcut') {
+      add(segment.shortcutStateId);
+      add(segment.shortcut?.stateId);
+      add(segment.traversal?.stateId);
+      add(segment.stableRuntimeStateId);
+    }
+  }
+  const operationId = record.operationId
+    ?? record.augmentationOperationId
+    ?? segment?.operationId
+    ?? segment?.augmentationOperationId
+    ?? null;
+  const operation = operationId == null
+    ? null
+    : context.operationById.get(String(operationId));
+  addRole(operation?.stableRuntimeStateIds);
+  return [...candidates]
+    .filter((stateId) => context.allowedStateIds.has(stateId))
+    .sort();
+}
+
+const DUNGEON_AUGMENTATION_ACTIVE_STATE_VALUES = new Set([
+  true,
+  'activated',
+  'available',
+  'claimed',
+  'cleared',
+  'deployed',
+  'enabled',
+  'opened',
+  'unlocked',
+]);
+
+function isDungeonAugmentationStateActive(value) {
+  return DUNGEON_AUGMENTATION_ACTIVE_STATE_VALUES.has(value);
+}
+
+function writeDungeonAugmentationStateValue(state, stateId, value) {
+  const current = state[stateId];
+  if (isDungeonAugmentationStateActive(current)
+    && !isDungeonAugmentationStateActive(value)) return;
+  state[stateId] = value;
+}
+
+function isDungeonSupplementShortcutMechanism(mechanism) {
+  return Boolean(
+    mechanism?.shortcutAction
+    || mechanism?.shortcutMode
+    || mechanism?.scopedAction === 'unlockShortcut'
+    || mechanism?.type === 'dungeonSupplementShortcut'
+    || mechanism?.action?.type === 'activateDungeonSupplementShortcut'
+  );
+}
+
+function isDungeonSupplementLocalControlMechanism(mechanism) {
+  return Boolean(
+    mechanism?.scopedAction === 'controlLocalHazards'
+    || mechanism?.type === 'dungeonSupplementLocalControl'
+    || mechanism?.action?.type === 'controlDungeonSupplementLocalHazards'
+  );
+}
+
+function dungeonSupplementTransferStateRecords(record, stateKind, context) {
+  const byRuntimeStateId = new Map();
+  for (const source of [record, record?.descriptor]) {
+    for (const stateRecord of Array.isArray(source?.stateRecords)
+      ? source.stateRecords
+      : []) {
+      const runtimeStateId = typeof stateRecord?.runtimeStateId === 'string'
+        ? stateRecord.runtimeStateId.trim()
+        : '';
+      if (!runtimeStateId
+        || stateRecord.stateKind !== stateKind
+        || !context.allowedStateIds.has(runtimeStateId)) continue;
+      byRuntimeStateId.set(runtimeStateId, stateRecord);
+    }
+  }
+  return [...byRuntimeStateId.values()].sort((left, right) => (
+    String(left.runtimeStateId).localeCompare(String(right.runtimeStateId))
+  ));
+}
+
+/** Captures allow-listed augmentation state without serializing Three.js/runtime objects. */
+export function captureDungeonAugmentationMutableState({
+  dungeon,
+  controller,
+  connectorLiftRuntime,
+  identity = dungeon?.augmentationIdentity,
+} = {}) {
+  const canonicalIdentity = sanitizeDungeonAugmentationSaveIdentity(identity);
+  if (!canonicalIdentity) return Object.freeze({});
+  const context = createDungeonAugmentationRuntimeStateContext(dungeon, canonicalIdentity);
+  const state = { ...(canonicalIdentity.mutableState ?? {}) };
+  const writeRecords = (records, role, valueFor, options) => {
+    for (const record of Array.isArray(records) ? records : []) {
+      const value = valueFor(record);
+      for (const stateId of dungeonAugmentationStateIdsForRecord(
+        record,
+        role,
+        context,
+        options,
+      )) {
+        writeDungeonAugmentationStateValue(state, stateId, value);
+      }
+    }
+  };
+
+  writeRecords(controller?.encounters, 'encounter', (encounter) => Boolean(encounter.cleared));
+  writeRecords(
+    controller?.mechanisms?.filter((mechanism) => (
+      !isDungeonSupplementShortcutMechanism(mechanism)
+    )),
+    'mechanism',
+    (mechanism) => Boolean(mechanism.activated),
+    { includeGenericStateId: false },
+  );
+  writeRecords(controller?.mechanisms?.filter(isDungeonSupplementShortcutMechanism), 'shortcut',
+    (mechanism) => mechanism.activated
+      ? mechanism.activatedState ?? 'available'
+      : mechanism.initialState ?? 'unavailable');
+  writeRecords(controller?.chests, 'reward', (chest) => Boolean(
+    chest.opened || chest.rewardClaimed,
+  ));
+  writeRecords(controller?.pressurePlates, 'pressurePlate', (plate) => Boolean(
+    plate.activated,
+  ));
+  writeRecords(controller?.ladders, 'shortcut', (ladder) => (
+    ladder.deployed && ladder.disabled !== true ? 'deployed' : 'retracted'
+  ));
+
+  const runtimeLifts = Array.isArray(connectorLiftRuntime?.lifts)
+    ? connectorLiftRuntime.lifts
+    : [];
+  for (const lift of runtimeLifts) {
+    for (const stateRecord of dungeonSupplementTransferStateRecords(
+      lift,
+      'lift-state',
+      context,
+    )) {
+      const localStateId = String(stateRecord.localStateId ?? '').toLowerCase();
+      const value = localStateId.includes('position')
+        ? Number(lift.currentElevation)
+        : lift.shortcutUnlocked ? 'enabled' : 'disabled';
+      if (!Number.isFinite(value) && typeof value !== 'string') continue;
+      writeDungeonAugmentationStateValue(
+        state,
+        stateRecord.runtimeStateId,
+        value,
+      );
+    }
+  }
+  for (const ladder of controller?.ladders ?? []) {
+    for (const stateRecord of dungeonSupplementTransferStateRecords(
+      ladder,
+      'ladder-state',
+      context,
+    )) {
+      writeDungeonAugmentationStateValue(
+        state,
+        stateRecord.runtimeStateId,
+        ladder.deployed && ladder.disabled !== true ? 'deployed' : 'retracted',
+      );
+    }
+  }
+  writeRecords(runtimeLifts, 'shortcut', (lift) => (
+    lift.shortcutUnlocked ? 'available' : 'unavailable'
+  ));
+  if (runtimeLifts.length === 0) {
+    writeRecords(controller?.connectorLifts, 'shortcut', (lift) => (
+      lift.shortcutUnlocked ? 'available' : 'unavailable'
+    ));
+  }
+
+  return Object.freeze(Object.fromEntries(
+    Object.entries(state)
+      .filter(([stateId]) => context.allowedStateIds.has(stateId))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  ));
+}
+
+/** Restores committed augmentation state after deterministic assembly and runtime creation. */
+export function restoreDungeonAugmentationMutableState({
+  dungeon,
+  controller,
+  connectorLiftRuntime,
+  identity = dungeon?.augmentationIdentity,
+} = {}) {
+  const canonicalIdentity = sanitizeDungeonAugmentationSaveIdentity(identity);
+  const mutableState = canonicalIdentity?.mutableState ?? null;
+  if (!canonicalIdentity || !mutableState) {
+    return Object.freeze({ applied: false, restoredStateCount: 0 });
+  }
+  const context = createDungeonAugmentationRuntimeStateContext(dungeon, canonicalIdentity);
+  let restoredStateCount = 0;
+  const recordIsActive = (record, role, options) => (
+    dungeonAugmentationStateIdsForRecord(record, role, context, options)
+      .some((stateId) => isDungeonAugmentationStateActive(mutableState[stateId]))
+  );
+
+  for (const encounter of controller?.encounters ?? []) {
+    if (!recordIsActive(encounter, 'encounter')) continue;
+    encounter.cleared = true;
+    encounter.spawned = true;
+    encounter.enemyIds = [];
+    restoredStateCount += 1;
+  }
+  // Restore passive prerequisite state before replaying any shortcut control.
+  // The shortcut activation below must see the same complete requirement set
+  // that was present when the route originally opened.
+  for (const chest of controller?.chests ?? []) {
+    if (!recordIsActive(chest, 'reward')) continue;
+    chest.opened = true;
+    chest.rewardClaimed = true;
+    chest.rewardPending = false;
+    if (chest.object?.userData) chest.object.userData.opened = true;
+    restoredStateCount += 1;
+  }
+  for (const plate of controller?.pressurePlates ?? []) {
+    if (!recordIsActive(plate, 'pressurePlate')) continue;
+    plate.active = true;
+    plate.activated = true;
+    restoredStateCount += 1;
+  }
+  for (const lift of connectorLiftRuntime?.lifts ?? []) {
+    const stateRecords = dungeonSupplementTransferStateRecords(
+      lift,
+      'lift-state',
+      context,
+    );
+    const positionRecord = stateRecords.find(({ localStateId }) => (
+      String(localStateId ?? '').toLowerCase().includes('position')
+    ));
+    const enabledRecords = stateRecords.filter(({ localStateId }) => (
+      !String(localStateId ?? '').toLowerCase().includes('position')
+    ));
+    const savedElevation = positionRecord
+      ? mutableState[positionRecord.runtimeStateId]
+      : undefined;
+    const hasSavedElevation = Number.isFinite(savedElevation);
+    const hasSavedEnabledState = enabledRecords.some(({ runtimeStateId }) => (
+      Object.hasOwn(mutableState, runtimeStateId)
+    ));
+    const shortcutUnlocked = enabledRecords.some(({ runtimeStateId }) => (
+      isDungeonAugmentationStateActive(mutableState[runtimeStateId])
+    ));
+    if (!hasSavedElevation && !hasSavedEnabledState) continue;
+    const result = connectorLiftRuntime?.restoreLiftState?.(lift.id, {
+      ...(hasSavedElevation ? { currentElevation: savedElevation } : {}),
+      ...(hasSavedEnabledState ? { shortcutUnlocked } : {}),
+    });
+    if (result?.ok) {
+      restoredStateCount += Number(hasSavedElevation)
+        + Number(hasSavedEnabledState);
+    }
+  }
+  for (const ladder of controller?.ladders ?? []) {
+    const stateRecord = dungeonSupplementTransferStateRecords(
+      ladder,
+      'ladder-state',
+      context,
+    ).find(({ runtimeStateId }) => Object.hasOwn(mutableState, runtimeStateId));
+    if (!stateRecord) continue;
+    const deployed = isDungeonAugmentationStateActive(
+      mutableState[stateRecord.runtimeStateId],
+    );
+    ladder.deployed = deployed;
+    ladder.disabled = !deployed;
+    if (ladder.object) ladder.object.visible = deployed;
+    restoredStateCount += 1;
+  }
+  const mechanismsInRestoreOrder = [...(controller?.mechanisms ?? [])]
+    .sort((left, right) => (
+      Number(isDungeonSupplementShortcutMechanism(left))
+      - Number(isDungeonSupplementShortcutMechanism(right))
+    ));
+  for (const mechanism of mechanismsInRestoreOrder) {
+    const shortcutMechanism = isDungeonSupplementShortcutMechanism(mechanism);
+    const mechanismActive = !shortcutMechanism && recordIsActive(mechanism, 'mechanism', {
+      includeGenericStateId: false,
+    });
+    const shortcutActive = shortcutMechanism
+      && recordIsActive(mechanism, 'shortcut');
+    if (!mechanismActive && !shortcutActive) continue;
+    if (shortcutActive
+      || (mechanismActive && isDungeonSupplementLocalControlMechanism(mechanism))) {
+      // Replay the exact runtime activation transaction. This keeps every
+      // conjunctive gate and scoped local-hazard effect fail-closed. It also
+      // lets _openDoor perform normal topology invalidation instead of
+      // mutating a persisted door directly.
+      if (typeof controller?._activateMechanism !== 'function') continue;
+      controller._activateMechanism(mechanism);
+      if (mechanism.activated !== true) continue;
+    } else {
+      mechanism.activated = true;
+    }
+    if (mechanism.object?.userData) mechanism.object.userData.activated = true;
+    restoredStateCount += 1;
+  }
+  return Object.freeze({
+    applied: restoredStateCount > 0,
+    restoredStateCount,
   });
 }
 
@@ -1009,6 +1421,7 @@ export class Game {
     this.busterLabSandboxEnabled = this.busterLabEnabled && isBusterLabSandboxEnabled();
     this.busterLabDebugEnabled = this.busterLabEnabled && isBusterLabDebugPresetEnabled();
     this.bossDebugEnabled = isBossDebugEnabled();
+    this.playerInvulnerabilityEnabled = readPlayerInvulnerabilityMode();
     this.busterLabStorage = busterLabStorage;
     this.busterLabState = null;
     this.busterLabLoadWarning = null;
@@ -1072,10 +1485,14 @@ export class Game {
     this.dungeonLayoutGeneration = 0;
     this.dungeonLayoutSeed = readDungeonLayoutSeed();
     this.dungeonAugmentationProfileId = readDungeonAugmentationProfileId();
-    this.selectedBossProfileId = normalizeBossProfileId(
-      this.busterLabStorage?.state?.bossHunts?.selectedBossProfileId
-        ?? DEFAULT_BOSS_PROFILE_ID,
-    );
+    this.dungeonAugmentationPlayableAlphaMode =
+      readDungeonAugmentationPlayableAlphaMode();
+    this.selectedBossProfileId = this.dungeonAugmentationPlayableAlphaMode
+      ? DEFAULT_BOSS_PROFILE_ID
+      : normalizeBossProfileId(
+        this.busterLabStorage?.state?.bossHunts?.selectedBossProfileId
+          ?? DEFAULT_BOSS_PROFILE_ID,
+      );
     this.activeBossExpeditionSpec = null;
     this.activeReaverbotBoss = null;
     this.bossStageRuntime = null;
@@ -1225,6 +1642,7 @@ export class Game {
     this.scene.add(this.poseDebugHandleGroup, this.debugSpawnedPlatformGroup);
 
     this.player = new Player();
+    this.player.setInvulnerabilityEnabled(this.playerInvulnerabilityEnabled);
     this.scene.add(this.player.root);
     if (this.dungeon?.playerStart) {
       this.player.root.position.copy(this.dungeon.playerStart);
@@ -1288,6 +1706,7 @@ export class Game {
     if (this.activeWorldBundle) this.activeWorldBundle.controller = this.dungeonController;
     this._activateConnectorLiftRuntimeForBundle(this.activeWorldBundle);
     this._activateConnectorTrackTrapRuntimeForBundle(this.activeWorldBundle);
+    this._restoreDungeonAugmentationStateForBundle(this.activeWorldBundle);
     this.bossStageRuntime?.mount?.(this);
     this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
       this.dungeonController.resolvePowerKnockbackTravel(fromPosition, position)
@@ -1727,6 +2146,7 @@ export class Game {
     dataset.debugJumpHeight = formatBrowserDiagnosticNumber(platformDebug?.jumpHeight);
     dataset.debugSpawnedPlatformCount = String(this.debugSpawnedPlatforms?.length ?? 0);
     dataset.debugNoClipEnabled = this.debugNoClipEnabled ? 'true' : 'false';
+    dataset.playerInvulnerable = this.playerInvulnerabilityEnabled ? 'true' : 'false';
     dataset.debugNoClipRestoreSource = this.debugNoClipLastRestoreSource ?? 'none';
     dataset.connectorTrackTrapMounted = this.connectorTrackTrapRuntime?.mounted ? 'true' : 'false';
     dataset.connectorTrackTrapCount = String(this.connectorTrackTrapRuntime?.traps?.length ?? 0);
@@ -2357,10 +2777,97 @@ export class Game {
 
   activateNearestInteractable() {
     if (this.dungeonController?.activateNearest?.()) {
+      this._persistCurrentDungeonAugmentationState({ force: true });
       return true;
     }
 
     return this.mapEvents?.activateNearest?.() ?? false;
+  }
+
+  _restoreDungeonAugmentationStateForBundle(bundle = this.activeWorldBundle) {
+    if (bundle?.worldKind !== 'dungeon') {
+      return Object.freeze({ applied: false, restoredStateCount: 0 });
+    }
+    const result = restoreDungeonAugmentationMutableState({
+      dungeon: bundle.facade,
+      controller: bundle.controller,
+      connectorLiftRuntime: bundle.connectorLiftRuntime ?? this.connectorLiftRuntime,
+      identity: bundle.facade?.augmentationIdentity,
+    });
+    this._lastDungeonAugmentationMutableStateFingerprint = JSON.stringify(
+      bundle.facade?.augmentationIdentity?.mutableState ?? {},
+    );
+    return result;
+  }
+
+  _captureCurrentDungeonAugmentationIdentity() {
+    if (this.worldKind !== 'dungeon' || !this.dungeon?.augmentationIdentity) return null;
+    const mutableState = captureDungeonAugmentationMutableState({
+      dungeon: this.dungeon,
+      controller: this.dungeonController,
+      connectorLiftRuntime: this.connectorLiftRuntime,
+      identity: this.dungeon.augmentationIdentity,
+    });
+    return withDungeonAugmentationMutableState(
+      this.dungeon.augmentationIdentity,
+      mutableState,
+      { merge: false },
+    );
+  }
+
+  _persistCurrentDungeonAugmentationState({ force = false } = {}) {
+    const storageMethod = this.busterLabStorage
+      ?.recordActiveBossExpeditionDungeonAugmentationState;
+    const expeditionId = this.activeBossExpeditionSpec?.id;
+    if (!storageMethod || !expeditionId || this.worldKind !== 'dungeon') {
+      return Promise.resolve({ ok: true, unchanged: true, reason: 'augmentation-state-not-active' });
+    }
+    const now = Number(this.elapsedTime ?? 0);
+    if (!force && now < Number(this._nextDungeonAugmentationStateCaptureAt ?? 0)) {
+      return Promise.resolve({ ok: true, unchanged: true, reason: 'augmentation-state-cadence' });
+    }
+    this._nextDungeonAugmentationStateCaptureAt = now + 0.5;
+    const identity = this._captureCurrentDungeonAugmentationIdentity();
+    if (!identity) {
+      return Promise.resolve({ ok: true, unchanged: true, reason: 'no-augmentation-identity' });
+    }
+    const fingerprint = JSON.stringify(identity.mutableState ?? {});
+    if (fingerprint === this._lastDungeonAugmentationMutableStateFingerprint) {
+      return Promise.resolve({ ok: true, unchanged: true, reason: 'augmentation-state-unchanged' });
+    }
+    this._lastDungeonAugmentationMutableStateFingerprint = fingerprint;
+    this.dungeon.augmentationIdentity = identity;
+    if (this.activeWorldBundle?.worldKind === 'dungeon') {
+      this.activeWorldBundle.facade.augmentationIdentity = identity;
+    }
+    if (this.activeBossExpeditionSpec?.id === expeditionId) {
+      this.activeBossExpeditionSpec = Object.freeze({
+        ...this.activeBossExpeditionSpec,
+        dungeonAugmentation: identity,
+      });
+    }
+    return this._queueBusterStorageOperation(() => storageMethod.call(
+      this.busterLabStorage,
+      { expeditionId, dungeonAugmentation: identity },
+    )).then((result) => {
+      if (!result?.ok) {
+        this._lastDungeonAugmentationMutableStateFingerprint = null;
+        return result;
+      }
+      const committedIdentity = sanitizeDungeonAugmentationSaveIdentity(
+        result.dungeonAugmentation ?? result.expedition?.dungeonAugmentation,
+      );
+      if (committedIdentity) {
+        this.dungeon.augmentationIdentity = committedIdentity;
+        if (this.activeWorldBundle?.worldKind === 'dungeon') {
+          this.activeWorldBundle.facade.augmentationIdentity = committedIdentity;
+        }
+      }
+      return result;
+    }).catch((error) => {
+      this._lastDungeonAugmentationMutableStateFingerprint = null;
+      return { ok: false, reason: 'augmentation-state-save-failed', error };
+    });
   }
 
   getRuinResetCost() {
@@ -2993,6 +3500,7 @@ export class Game {
     );
     this._activateConnectorLiftRuntimeForBundle(bundle);
     this._activateConnectorTrackTrapRuntimeForBundle(bundle);
+    this._restoreDungeonAugmentationStateForBundle(bundle);
     return controller;
   }
 
@@ -7337,6 +7845,7 @@ export class Game {
     player.recalculateStats();
     player.health = player.stats.maxHealth;
     player.dead = false;
+    player.setInvulnerabilityEnabled(this.playerInvulnerabilityEnabled);
     player.lastMoveDirection.copy(sourcePlayer?.lastMoveDirection ?? new THREE.Vector3(0, 0, 1));
     return player;
   }
@@ -9274,6 +9783,7 @@ export class Game {
           this.dungeonController?.update?.(gameplayDt);
         } else {
           this.dungeonController?.update?.(gameplayDt);
+          this._persistCurrentDungeonAugmentationState();
           this.mapEvents?.update?.(gameplayDt);
           this.spawner?.update?.(gameplayDt);
           this._updateEnemies(gameplayDt);
@@ -9556,6 +10066,13 @@ export class Game {
     dungeon.layoutSeed = layoutSeed;
     dungeon.basePlanHash ??= basePlanHash;
     dungeon.effectivePlanHash ??= basePlanHash;
+    const committedIdentity = sanitizeDungeonAugmentationSaveIdentity(dungeonAugmentation);
+    if (dungeon.augmentationIdentity && committedIdentity?.mutableState) {
+      dungeon.augmentationIdentity = withDungeonAugmentationMutableState(
+        dungeon.augmentationIdentity,
+        committedIdentity.mutableState,
+      ) ?? dungeon.augmentationIdentity;
+    }
 
     // The historical underlay was a world-sized opaque plane just below Y=0.
     // It cuts through signed subterranean rooms and makes a downward ladder,
@@ -9633,7 +10150,12 @@ export class Game {
 
   _buildWorld() {
     const useOverworld = this.usesStreamedWorldLifecycle && !this._creatingBusterSandbox;
-    const committedExpedition = this.busterLabStorage?.getActiveBossExpedition?.() ?? null;
+    // The explicit V4 alpha URL is a disposable preview surface. It must not
+    // be replaced by a saved dedicated boss expedition, and it must not clear
+    // or rewrite that save merely to show the generated supplement.
+    const committedExpedition = this.dungeonAugmentationPlayableAlphaMode
+      ? null
+      : this.busterLabStorage?.getActiveBossExpedition?.() ?? null;
     const dungeonGenerationSpec = resolveCommittedDungeonGenerationSpec(
       this._creatingBusterSandbox ? null : committedExpedition,
       {
@@ -12570,6 +13092,10 @@ export class Game {
     if (!expeditionId || !this.busterLabStorage?.recordBossCheckpoint) {
       return { ok: false, reason: 'storage-unavailable' };
     }
+    const augmentationStateResult = await this._persistCurrentDungeonAugmentationState({
+      force: true,
+    });
+    if (!augmentationStateResult?.ok) return augmentationStateResult;
     const result = await this._queueBusterStorageOperation(() => (
       this.busterLabStorage.recordBossCheckpoint({
         expeditionId,

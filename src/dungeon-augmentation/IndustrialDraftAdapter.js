@@ -7,11 +7,11 @@ import { createIndustrialExtensionHost } from './IndustrialExtensionHost.js';
 
 const BASE_DRAFT_SCHEMA = 'ruindivex-industrial-v1-extension-draft/v1';
 const DEFAULT_ROOM_HEIGHT_METERS = 5.6;
-// Industrial V1 stores one structural owner per X/Z tile column. Until that
-// renderer supports stacked room columns, an authored connector's footprint
-// must remain unavailable to supplemental rooms at every elevation. Keeping
-// this constraint in the Industrial adapter lets the generic planner remain
-// fully 3D for themes which do support stacked geometry.
+// Older connector plans do not describe their vertical reservation, so their
+// footprints remain unavailable at every elevation. Connector-family plans
+// carry exact renderer-authored vertical intervals and can safely coexist with
+// genuinely separated stacked geometry. This stays an adapter constraint so
+// the generic planner does not need Industrial-specific fallback behavior.
 const INDUSTRIAL_PROJECTED_COLUMN_HEIGHT_METERS = 2048;
 
 function finiteNumber(value, fallback = 0) {
@@ -175,6 +175,80 @@ function createConnectionVolumeRecords(plan, tileSize) {
   return { occupiedVolumes, clearanceVolumes, landingVolumes };
 }
 
+function createProjectedConnectionVolumes(plan, volumeRecord, tileSize) {
+  const logicalConnectionId = String(
+    plan.logicalConnectionId ?? `${plan.fromRoomId}_${plan.toRoomId}`,
+  );
+  const physicalConnectionId = String(plan.id ?? logicalConnectionId);
+  const familyColumns = Array.isArray(plan.familyReservedFootprintColumns)
+    ? plan.familyReservedFootprintColumns
+    : [];
+  const hasCompleteFamilyCoordinates = familyColumns.length > 0
+    && familyColumns.every((point) => (
+      Number.isFinite(Number(point?.x)) && Number.isFinite(Number(point?.z))
+    ));
+
+  if (hasCompleteFamilyCoordinates) {
+    const uniqueColumns = [...new Map(familyColumns.map((point) => {
+      const x = Number(point.x);
+      const z = Number(point.z);
+      const minY = Number(point?.minY);
+      const maxY = Number(point?.maxY);
+      const hasExactVerticalExtent = Number.isFinite(minY)
+        && Number.isFinite(maxY)
+        && maxY > minY;
+      const verticalExtent = hasExactVerticalExtent ? { minY, maxY } : null;
+      const key = verticalExtent
+        ? `${x},${z}@${minY}:${maxY}`
+        : `${x},${z}@fail-closed`;
+      return [key, { x, z, verticalExtent }];
+    })).values()];
+
+    return uniqueColumns.map(({ x, z, verticalExtent }, index) => ({
+      id: `base:connection:${plan.id}:family-reserved:${index}:industrial-projected-column`,
+      ownerId: logicalConnectionId,
+      physicalConnectionId,
+      logicalConnectionId,
+      center: {
+        x: x * tileSize,
+        y: verticalExtent
+          ? (verticalExtent.minY + verticalExtent.maxY) * 0.5
+          : 0,
+        z: z * tileSize,
+      },
+      size: {
+        x: tileSize * 1.18,
+        y: verticalExtent
+          ? verticalExtent.maxY - verticalExtent.minY
+          : INDUSTRIAL_PROJECTED_COLUMN_HEIGHT_METERS,
+        z: tileSize * 1.18,
+      },
+      purpose: 'industrial-single-owner-xz-connector-column',
+      protectedReason: verticalExtent
+        ? 'industrial-renderer-connector-reserved-vertical-interval'
+        : 'industrial-renderer-connector-missing-vertical-extents',
+    }));
+  }
+
+  // Missing or unusable family metadata preserves the legacy fail-closed
+  // centerline projection. This also handles malformed family coordinates,
+  // rather than silently dropping protection for the authored connector.
+  return volumeRecord.clearanceVolumes.map((volume) => ({
+    ...cloneDungeonAugmentationValue(volume),
+    id: `${volume.id}:industrial-projected-column`,
+    center: {
+      ...cloneDungeonAugmentationValue(volume.center),
+      y: 0,
+    },
+    size: {
+      ...cloneDungeonAugmentationValue(volume.size),
+      y: INDUSTRIAL_PROJECTED_COLUMN_HEIGHT_METERS,
+    },
+    purpose: 'industrial-single-owner-xz-connector-column',
+    protectedReason: 'industrial-renderer-does-not-support-stacked-room-columns',
+  }));
+}
+
 /**
  * Captures only renderer-free Industrial planning data. This snapshot is never
  * handed back to the legacy generator for mutation; the overlay is applied to
@@ -209,22 +283,9 @@ export function createIndustrialBaseDraft({
       id: `base:protected:${room.id}`,
       protectedReason: 'boss-arena-ineligible',
     }));
-  const projectedConnectionVolumes = connectionVolumeRecords
-    .flatMap((record) => record.clearanceVolumes)
-    .map((volume) => ({
-      ...cloneDungeonAugmentationValue(volume),
-      id: `${volume.id}:industrial-projected-column`,
-      center: {
-        ...cloneDungeonAugmentationValue(volume.center),
-        y: 0,
-      },
-      size: {
-        ...cloneDungeonAugmentationValue(volume.size),
-        y: INDUSTRIAL_PROJECTED_COLUMN_HEIGHT_METERS,
-      },
-      purpose: 'industrial-single-owner-xz-connector-column',
-      protectedReason: 'industrial-renderer-does-not-support-stacked-room-columns',
-    }));
+  const projectedConnectionVolumes = connectionPlans.flatMap((plan, index) => (
+    createProjectedConnectionVolumes(plan, connectionVolumeRecords[index], tileSize)
+  ));
   return deepFreezeDungeonAugmentationValue({
     schema: BASE_DRAFT_SCHEMA,
     basePlanHash: resolvedBasePlanHash,
@@ -252,6 +313,7 @@ export function createIndustrialAugmentationHost({
 } = {}) {
   return createIndustrialExtensionHost({
     basePlanHash: baseDraft?.basePlanHash,
+    baseDraft,
     rooms,
     connectionPlans,
     tileSize,

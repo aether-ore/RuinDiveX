@@ -36,6 +36,7 @@ import {
 } from '../src/buster/BusterLabPersistence.js';
 import {
   createDungeonAugmentationSaveIdentity,
+  withDungeonAugmentationMutableState,
 } from '../src/dungeon-augmentation/identity.js';
 import {
   computeEffectiveDungeonPlanHash,
@@ -710,6 +711,154 @@ test('Boss Hunt locks and restarts preserve the canonical augmentation identity'
   const reloaded = new BusterLabStorage({ storage, saveContextId }).load()
     .bossHunts.recordedExpeditions[expedition.id];
   assert.deepEqual(reloaded.dungeonAugmentation, dungeonAugmentation);
+});
+
+test('active Boss Hunt persists augmentation mutable state without changing content identity', async () => {
+  const storage = new MemoryStorage();
+  const saveContextId = 'boss-hunt-augmentation-runtime-state';
+  const lab = await BusterLabStorage.open({
+    storage,
+    lockManager: new MemoryLockManager(),
+    saveContextId,
+  });
+  const basePlanHash = 'base-plan:runtime-state';
+  const augmentationPlanHash = 'augmentation-plan:runtime-state';
+  const dungeonAugmentation = createDungeonAugmentationSaveIdentity({
+    profileId: 'industrial-supplement-preview-v4',
+    seed: 'augmentation-seed:runtime-state',
+    basePlanHash,
+    augmentationPlanHash,
+    effectivePlanHash: computeEffectiveDungeonPlanHash(basePlanHash, augmentationPlanHash),
+    themeRevisions: [],
+    progressionStateIds: ['network:encounter', 'network:shortcut'],
+  });
+  const expedition = {
+    ...createBossExpeditionSpec({
+      id: 'augmentation-runtime-state-expedition',
+      seed: 8282,
+      depth: 3,
+      bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    }),
+    dungeonLayoutSeed: 'layout:augmentation-runtime-state',
+    dungeonAugmentation,
+  };
+  assert.equal((await lab.lockBossHuntForExpedition(expedition)).ok, true);
+
+  const updatedIdentity = withDungeonAugmentationMutableState(dungeonAugmentation, {
+    'network:encounter': true,
+    'network:shortcut': 'available',
+    'foreign:state': true,
+  });
+  const recorded = await lab.recordActiveBossExpeditionDungeonAugmentationState({
+    expeditionId: expedition.id,
+    dungeonAugmentation: updatedIdentity,
+  });
+  assert.equal(recorded.ok, true);
+  assert.deepEqual(recorded.dungeonAugmentation.mutableState, {
+    'network:encounter': true,
+    'network:shortcut': 'available',
+  });
+
+  // A rebuild may present the same immutable content identity without the
+  // mutable values; restart compatibility must not mistake that for new content.
+  const restarted = await lab.restartActiveBossExpedition({
+    ...expedition,
+    dungeonAugmentation,
+  });
+  assert.equal(restarted.ok, true);
+  assert.deepEqual(restarted.expedition.dungeonAugmentation.mutableState, {
+    'network:encounter': true,
+    'network:shortcut': 'available',
+  });
+
+  const reloaded = new BusterLabStorage({ storage, saveContextId }).load()
+    .bossHunts.recordedExpeditions[expedition.id];
+  assert.deepEqual(reloaded.dungeonAugmentation.mutableState, {
+    'network:encounter': true,
+    'network:shortcut': 'available',
+  });
+
+  const mismatched = createDungeonAugmentationSaveIdentity({
+    ...dungeonAugmentation,
+    augmentationPlanHash: 'augmentation-plan:different-content',
+    effectivePlanHash: computeEffectiveDungeonPlanHash(
+      basePlanHash,
+      'augmentation-plan:different-content',
+    ),
+  });
+  const rejected = await lab.recordActiveBossExpeditionDungeonAugmentationState({
+    expeditionId: expedition.id,
+    dungeonAugmentation: mismatched,
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, 'expedition-spec-mismatch');
+});
+
+test('dungeon-content reset compare-and-swap rejects stale mutable augmentation state', async () => {
+  const lab = await BusterLabStorage.open({
+    storage: new MemoryStorage(),
+    lockManager: new MemoryLockManager(),
+    saveContextId: 'dungeon-content-reset-mutable-state-cas',
+  });
+  const basePlanHash = 'base-plan:reset-mutable-state-cas';
+  const augmentationPlanHash = 'augmentation-plan:reset-mutable-state-cas';
+  const initialIdentity = createDungeonAugmentationSaveIdentity({
+    profileId: 'industrial-supplement-preview-v4',
+    seed: 'augmentation-seed:reset-mutable-state-cas',
+    basePlanHash,
+    augmentationPlanHash,
+    effectivePlanHash: computeEffectiveDungeonPlanHash(basePlanHash, augmentationPlanHash),
+    themeRevisions: [],
+    progressionStateIds: ['network:shortcut'],
+  });
+  const expedition = {
+    ...createBossExpeditionSpec({
+      id: 'dungeon-content-reset-mutable-state-cas-expedition',
+      seed: 8383,
+      depth: 3,
+      bossProfileId: DEFAULT_BOSS_PROFILE_ID,
+    }),
+    dungeonLayoutSeed: 'layout:dungeon-content-reset-mutable-state-cas',
+    dungeonAugmentation: initialIdentity,
+  };
+  assert.equal((await lab.lockBossHuntForExpedition(expedition)).ok, true);
+
+  const currentIdentity = withDungeonAugmentationMutableState(initialIdentity, {
+    'network:shortcut': true,
+  });
+  assert.equal((await lab.recordActiveBossExpeditionDungeonAugmentationState({
+    expeditionId: expedition.id,
+    dungeonAugmentation: currentIdentity,
+  })).ok, true);
+
+  const resetSpec = {
+    expeditionId: expedition.id,
+    bossProfileId: expedition.bossProfileId,
+    seed: expedition.seed,
+    depth: expedition.depth,
+    dungeonLayoutSeed: expedition.dungeonLayoutSeed,
+    dungeonFamilyId: 'industrial-v1',
+    dungeonAugmentation: null,
+  };
+  const staleReset = await lab.resetActiveBossExpeditionDungeonContent({
+    ...resetSpec,
+    expectedDungeonAugmentation: initialIdentity,
+  });
+  assert.equal(staleReset.ok, false);
+  assert.equal(staleReset.reason, 'expedition-spec-mismatch');
+  assert.deepEqual(
+    lab.getActiveBossExpedition().dungeonAugmentation,
+    currentIdentity,
+  );
+
+  const currentReset = await lab.resetActiveBossExpeditionDungeonContent({
+    ...resetSpec,
+    expectedDungeonAugmentation: currentIdentity,
+  });
+  assert.equal(currentReset.ok, true);
+  assert.equal(currentReset.contentReset, true);
+  assert.deepEqual(currentReset.previousDungeonAugmentation, currentIdentity);
+  assert.equal(currentReset.dungeonAugmentation, null);
 });
 
 test('legacy active Boss Hunts deterministically migrate and persist a restart layout seed', () => {

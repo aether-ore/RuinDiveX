@@ -28,7 +28,7 @@ test('incompatible committed augmentation can be explicitly reset to current con
   ));
   expect(committed.dungeonAugmentation).toMatchObject({
     schema: SAVE_IDENTITY_SCHEMA,
-    profileId: 'industrial-supplement-preview-v2',
+    profileId: 'industrial-supplement-preview-v4',
   });
 
   const corrupted = await page.evaluate(async () => {
@@ -91,7 +91,7 @@ test('incompatible committed augmentation can be explicitly reset to current con
   expect(reset.active.dungeonAugmentation).toEqual(reset.facadeIdentity);
   expect(reset.active.dungeonAugmentation).toMatchObject({
     schema: SAVE_IDENTITY_SCHEMA,
-    profileId: 'industrial-supplement-preview-v2',
+    profileId: 'industrial-supplement-preview-v4',
   });
   expect(reset.diagnostics.worldKind).toBe('dungeon');
   expect(runtimeErrors).toEqual([]);

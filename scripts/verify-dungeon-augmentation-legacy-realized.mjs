@@ -18,11 +18,25 @@ const seedCount = Number.isFinite(requestedCount) && requestedCount > 0 ? reques
 const startIndex = Number.isFinite(requestedStart) && requestedStart >= 0 ? requestedStart : 0;
 
 const LEGACY_BASELINE_HASH_NAMESPACE =
+  'ruindivex-industrial-v1-source-gate-realized-baseline/v3';
+const PRE_SOURCE_GATE_HEAD_HASH_NAMESPACE =
   'ruindivex-industrial-v1-pre-sidecar-realized-baseline/v1';
-// Generated from git HEAD's pre-sidecar DungeonGenerator via
-// `--verify-head-baselines`. These include the realized tile maps, every floor
-// tile, and stable door-threshold geometry in addition to the logical plan.
+// Regenerated after the explicit source-gate migration. These include the
+// realized tile maps, every floor tile, and stable door-threshold geometry in
+// addition to the logical plan. Rejected augmentation must still reproduce the
+// same accepted authored result exactly.
 const LEGACY_BASELINE_FINGERPRINTS = Object.freeze({
+  'layout:augmentation-legacy-realized-000':
+    'sha256-ed15a3097c23e4ccc4ba14e110830c035b4d0d116cf84c233cd39904c71ab89f',
+  'layout:augmentation-legacy-realized-023':
+    'sha256-fc432270a88ba472e2dc5d45293cdefb23648aa7a19e133d5795154cee14eb07',
+});
+
+// `--verify-head-baselines` also proves the saved pre-migration fingerprints
+// still describe git HEAD. Current output is intentionally not equal to these:
+// every locked gate and its full-height clearance lane moved from the far end
+// of its corridor to the source entrance.
+const PRE_SOURCE_GATE_HEAD_FINGERPRINTS = Object.freeze({
   'layout:augmentation-legacy-realized-000':
     'sha256-6e8e1d72df7db45e21616fd246c388dea6f1a28019e60deffedaca9315f677b9',
   'layout:augmentation-legacy-realized-023':
@@ -150,6 +164,36 @@ function createLegacySnapshot(dungeon, expectedBasePlanHash) {
   });
 }
 
+function createStableSourceGateBaselineSnapshot(snapshot) {
+  const stable = rendererFreeCopy(snapshot);
+  const platformability = stable?.progression?.validation?.platformability;
+  if (!platformability) return stable;
+
+  // These records describe the sidecar's increasingly strict proof process,
+  // not Industrial V1's authored layout. Keep the legacy baseline pinned to
+  // realized rooms, connectors, tiles, floors, doors, and the pre-existing
+  // traversal result while allowing diagnostic schema to evolve independently.
+  for (const key of [
+    'connectorSpineChecks',
+    'supplementConnectivityChecks',
+    'supplementRoomConnectivityChecks',
+    'supplementJunctionConnectivityChecks',
+    'supplementVerticalConnectivityChecks',
+    'supplementShortcutConnectivityChecks',
+    'supplementalOwnedFloorCount',
+    'orphanSupplementFloorCount',
+    'orphanSupplementFloorKeys',
+    'bidirectionallyTraversableConnectorCount',
+  ]) {
+    delete platformability[key];
+  }
+  for (const check of platformability.localSocketChecks ?? []) {
+    delete check.exactOwner;
+    delete check.exactElevation;
+  }
+  return stable;
+}
+
 function fingerprintCanonicalValue(value, namespace = LEGACY_BASELINE_HASH_NAMESPACE) {
   return `sha256-${createHash('sha256')
     .update(`${namespace}\u0000${canonicalStringify(value)}`)
@@ -157,7 +201,7 @@ function fingerprintCanonicalValue(value, namespace = LEGACY_BASELINE_HASH_NAMES
 }
 
 function fingerprintLegacySnapshot(snapshot) {
-  return fingerprintCanonicalValue(snapshot);
+  return fingerprintCanonicalValue(createStableSourceGateBaselineSnapshot(snapshot));
 }
 
 function collectLegacyDifferencePaths(actual, expected, path = '$', results = [], limit = 32) {
@@ -322,24 +366,23 @@ async function auditHardCodedBaselines() {
         assert.equal(
           disabledFingerprint,
           expectedFingerprint,
-          `Disabled sidecar drifted from the pre-sidecar HEAD baseline for ${seed}.`,
+          `Disabled sidecar drifted from the source-gate regeneration baseline for ${seed}.`,
         );
       }
 
       let headFingerprint = null;
       if (headGenerator) {
         head = generate(seed, basePlanHash, null, headGenerator);
-        headFingerprint = fingerprintLegacySnapshot(head.snapshot);
-        assertLegacySnapshotsEqual(
-          disabled.snapshot,
+        headFingerprint = fingerprintCanonicalValue(
           head.snapshot,
-          `Current disabled generation differs from git HEAD for ${seed}.`,
+          PRE_SOURCE_GATE_HEAD_HASH_NAMESPACE,
         );
-        if (expectedFingerprint) {
+        const expectedHeadFingerprint = PRE_SOURCE_GATE_HEAD_FINGERPRINTS[seed];
+        if (expectedHeadFingerprint) {
           assert.equal(
             headFingerprint,
-            expectedFingerprint,
-            `Hard-coded fingerprint no longer matches git HEAD for ${seed}.`,
+            expectedHeadFingerprint,
+            `Saved pre-source-gate fingerprint no longer matches git HEAD for ${seed}.`,
           );
         }
       }

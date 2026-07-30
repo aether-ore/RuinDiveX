@@ -28,6 +28,13 @@ const MATERIAL_ROLES = [
   'cap',
 ];
 
+const STRUCTURAL_MATERIAL_ROLES = [
+  ...MATERIAL_ROLES,
+  'catwalk',
+  'ramp',
+  'rail',
+];
+
 function binding(regionId, themeId = 'test-theme') {
   return createDungeonRegionThemeBinding({
     parentMapId: 'test-map',
@@ -149,6 +156,94 @@ function basicOverlay(themeBinding) {
   };
 }
 
+function structuralOverlay(themeBinding, { baseElevation = 10 } = {}) {
+  const nodeId = 'region-a__optionalBranch__structural-node__0';
+  const operationId = 'region-a__optionalBranch__structural-operation__0';
+  return {
+    schema: 'ruindivex-dungeon-augmentation-overlay/v1',
+    revision: 1,
+    profileId: 'test-structural-profile',
+    basePlanHash: 'base-hash',
+    augmentationPlanHash: 'structural-augmentation-hash',
+    effectivePlanHash: 'structural-effective-hash',
+    augmentationSeed: 'structural-test-seed',
+    themeBindings: [themeBinding],
+    operations: [{
+      id: operationId,
+      type: 'optionalBranch',
+      parentRegionId: 'region-a',
+      themeBinding,
+      nodeIds: [nodeId],
+      segmentIds: [],
+    }],
+    nodes: [{
+      id: nodeId,
+      operationId,
+      parentRegionId: 'region-a',
+      kind: 'supplementRoom',
+      grammarId: 'test-structural-room',
+      themeBinding,
+      placement: {
+        center: { x: 28, y: baseElevation, z: 0 },
+        rotationQuarterTurns: 0,
+        coordinateSpace: 'parent-plan',
+      },
+      size: {
+        x: 19.6,
+        y: 8.4,
+        z: 19.6,
+        widthMeters: 19.6,
+        heightMeters: 8.4,
+        depthMeters: 19.6,
+      },
+      structure: {
+        supports: [],
+        platforms: [{
+          id: 'overlook',
+          role: 'catwalk',
+          localCenterGrid: { x: 0, z: 1 },
+          widthTiles: 3,
+          depthTiles: 3,
+          elevation: 2.8,
+          platformPurpose: 'test-overlook',
+        }],
+        ramps: [{
+          id: 'overlook-ramp',
+          role: 'ramp',
+          localStartGrid: { x: -2, z: -2 },
+          localEndGrid: { x: -2, z: 1 },
+          fromElevation: 0,
+          toElevation: 2.8,
+          widthTiles: 1,
+        }],
+        rails: [{
+          id: 'overlook-rails',
+          role: 'rail',
+          platformId: 'overlook',
+        }],
+      },
+      sockets: [],
+      anchors: [{
+        id: 'overlook-anchor',
+        kind: 'platform',
+        position: { x: 28, y: baseElevation + 2.8, z: 2.8 },
+        localPosition: { x: 0, y: 0, z: 2.8 },
+        elevation: 2.8,
+        halfWidth: 4.2,
+        halfDepth: 4.2,
+        platformPurpose: 'test-overlook',
+      }],
+      requiredThemeCapabilities: {
+        materials: ['primary-floor', 'wall', 'ceiling'],
+        assets: [],
+        connectors: [],
+      },
+    }],
+    segments: [],
+    transitionBays: [],
+  };
+}
+
 test('assembles deterministic enclosed facade output from parent theme resources', () => {
   const regionBinding = binding('region-a');
   const { session, material, resources } = themeSession(regionBinding, 'a');
@@ -171,6 +266,17 @@ test('assembles deterministic enclosed facade output from parent theme resources
   assert.equal(fragment.localLights.length, 1);
   assert.equal(fragment.connectionPlans.length, 1);
   assert.equal(fragment.minimap.rooms[0].id, fragment.rooms[0].id);
+  const sharedThresholdFloor = fragment.floorTiles.find((floor) => (
+    floor.x === 10 && floor.z === -2 && Math.abs(floor.elevation - 1.5) < 0.001
+  ));
+  assert.ok(sharedThresholdFloor, 'the exact room/corridor threshold must be rasterized');
+  assert.deepEqual(sharedThresholdFloor.mergedFloorOwnerIds, [
+    'region-a__optionalBranch__node__0',
+    'region-a__optionalBranch__segment__0',
+  ]);
+  assert.ok(sharedThresholdFloor.mergedFloorSourceCount >= 2);
+  assert.equal(sharedThresholdFloor.mergedUnownedFloorSourceCount, 0);
+  assert.equal(sharedThresholdFloor.sharedThresholdContractIds.length, 1);
   assert.ok(resources.isBorrowed(material));
   const meshMaterials = [];
   fragment.root.traverse((object) => {
@@ -192,6 +298,414 @@ test('assembles deterministic enclosed facade output from parent theme resources
   fragment.dispose();
   assert.equal(parentMaterialDisposeCount, 0, 'borrowed parent material remains parent-owned');
   second.dispose();
+});
+
+test('assembles compact connector junctions as themed non-room proxy metadata', () => {
+  const regionBinding = binding('region-a');
+  const { session, material } = themeSession(regionBinding, 'compact');
+  const operationId = 'region-a__routeNetwork__compact-operation';
+  const proxyId = `${operationId}__connector-junction`;
+  const roomSpecifications = [
+    { id: `${operationId}__room-a`, center: { x: -28, y: 0, z: 0 } },
+    { id: `${operationId}__room-b`, center: { x: 28, y: 0, z: 0 } },
+    { id: `${operationId}__room-c`, center: { x: 0, y: 0, z: 28 } },
+  ];
+  const armSpecifications = [
+    { id: 'west', position: { x: -5.6, y: 0, z: 0 }, facing: { x: -1, y: 0, z: 0 } },
+    { id: 'east', position: { x: 5.6, y: 0, z: 0 }, facing: { x: 1, y: 0, z: 0 } },
+    { id: 'south', position: { x: 0, y: 0, z: 5.6 }, facing: { x: 0, y: 0, z: 1 } },
+  ];
+  const segments = roomSpecifications.map((room, index) => ({
+    id: `${operationId}__segment-${index}`,
+    operationId,
+    parentRegionId: 'region-a',
+    themeBinding: regionBinding,
+    connectorFamily: 'service-gallery',
+    from: {
+      nodeId: room.id,
+      socketId: `${room.id}:exit`,
+      position: room.center,
+    },
+    to: {
+      nodeId: proxyId,
+      socketId: `${proxyId}:${armSpecifications[index].id}`,
+      position: armSpecifications[index].position,
+      facing: armSpecifications[index].facing,
+    },
+    path: [room.center, armSpecifications[index].position],
+  }));
+  const roomNodes = roomSpecifications.map((room, index) => ({
+    id: room.id,
+    operationId,
+    parentRegionId: 'region-a',
+    kind: 'supplementRoom',
+    grammarId: 'test-substantive-room',
+    themeBinding: regionBinding,
+    placement: { center: room.center, coordinateSpace: 'parent-plan' },
+    size: { x: 11.2, y: 5.6, z: 11.2 },
+    structure: {},
+    sockets: [{
+      id: `${room.id}:exit`,
+      nodeId: room.id,
+      position: room.center,
+      state: 'connected',
+      segmentId: segments[index].id,
+    }],
+    anchors: [],
+    environment: false,
+  }));
+  const connectorNode = {
+    id: proxyId,
+    operationId,
+    parentRegionId: 'region-a',
+    kind: 'supplementConnectorJunction',
+    grammarId: 'test-compact-crossroads',
+    themeBinding: regionBinding,
+    placement: { center: { x: 0, y: 0, z: 0 }, coordinateSpace: 'parent-plan' },
+    size: { x: 11.2, y: 5.6, z: 11.2 },
+    structure: {},
+    sockets: [
+      ...armSpecifications.map((arm, index) => ({
+        id: `${proxyId}:${arm.id}`,
+        nodeId: proxyId,
+        position: arm.position,
+        facing: arm.facing,
+        state: 'connected',
+        segmentId: segments[index].id,
+      })),
+      {
+        id: `${proxyId}:north-unused`,
+        nodeId: proxyId,
+        position: { x: 0, y: 0, z: -5.6 },
+        facing: { x: 0, y: 0, z: -1 },
+        state: 'capped',
+      },
+    ],
+    anchors: [
+      { id: `${proxyId}:encounter`, kind: 'encounter', position: { x: 0, y: 0, z: 0 } },
+      { id: `${proxyId}:reward`, kind: 'reward', position: { x: 0, y: 0, z: 0 } },
+      { id: `${proxyId}:progression`, kind: 'progression', position: { x: 0, y: 0, z: 0 } },
+      {
+        id: `${proxyId}:light`,
+        kind: 'light-fixture',
+        assetRole: 'light-fixture',
+        position: { x: 0, y: 4.8, z: 0 },
+      },
+    ],
+    encounters: [{ id: `${proxyId}:declared-encounter` }],
+    junction: {
+      id: `${proxyId}:junction`,
+      junctionKind: 'crossroads',
+      activeSocketIds: armSpecifications.map(({ id }) => `${proxyId}:${id}`),
+      countsAsMeaningfulStation: true,
+    },
+    countsAsMeaningfulStation: true,
+    requiredThemeCapabilities: { materials: [], assets: ['light-fixture'], connectors: [] },
+    environment: false,
+  };
+  const fragment = assembleDungeonSupplement({
+    overlayPlan: {
+      schema: 'ruindivex-dungeon-augmentation-overlay/v2',
+      profileId: 'compact-proxy-test',
+      themeBindings: [regionBinding],
+      operations: [{
+        id: operationId,
+        type: 'optionalBranch',
+        parentRegionId: 'region-a',
+        themeBinding: regionBinding,
+        nodeIds: [...roomNodes.map(({ id }) => id), proxyId],
+        segmentIds: segments.map(({ id }) => id),
+      }],
+      nodes: [...roomNodes, connectorNode],
+      segments,
+      progressionAssignments: [{
+        id: `${proxyId}:delegated-beat`,
+        nodeId: proxyId,
+        anchorId: `${proxyId}:progression`,
+        beatId: 'must-not-appear',
+        beatKind: 'objective',
+      }],
+    },
+    themeSessions: new Map([['region-a', session]]),
+    structuralMode: 'facadeOnly',
+  });
+
+  assert.deepEqual(fragment.rooms.map(({ id }) => id).sort(), roomNodes.map(({ id }) => id).sort());
+  assert.equal(fragment.minimap.rooms.some(({ roomId }) => roomId === proxyId), false);
+  assert.equal(fragment.connectorJunctionProxies.length, 1);
+  const proxy = fragment.connectorJunctionProxies[0];
+  assert.equal(proxy.id, proxyId);
+  assert.equal(proxy.kind, 'supplementConnectorJunction');
+  assert.equal(proxy.isDungeonSupplement, false);
+  assert.equal(proxy.isConnectorJunctionProxy, true);
+  assert.equal(proxy.suppressRoomGeometry, true);
+  assert.equal(proxy.stampConnectorJunctionFloor, true);
+  assert.equal(proxy.countsAsMeaningfulStation, true);
+  assert.equal(proxy.minimumPhysicalArmCount, 3);
+  assert.equal(proxy.physicalArmCount, 3);
+  assert.equal(proxy.connectorJunctionSockets.length, 4);
+  assert.deepEqual(proxy.anchors.map(({ kind }) => kind), ['light-fixture']);
+  assert.equal(Object.hasOwn(proxy, 'encounters'), false);
+  assert.equal(fragment.junctions.length, 1);
+  assert.equal(fragment.socketCaps.length, 1);
+  assert.equal(fragment.socketCaps[0].connectorJunctionProxyId, proxyId);
+  assert.equal(Object.hasOwn(fragment.socketCaps[0], 'roomId'), false);
+  assert.equal(fragment.encounters.length, 0);
+  assert.equal(fragment.chests.length, 0);
+  assert.equal(fragment.progressionAssignments.length, 0);
+  assert.equal(fragment.progressionPatch, undefined);
+  assert.equal(fragment.localLights.length, 1);
+  assert.ok(fragment.root.getObjectByName('compact-cap'));
+  assert.ok(fragment.root.getObjectByName('compact-light'));
+  assert.ok(fragment.root.getObjectByName(`DungeonSupplementConnectorJunction__${proxyId}`));
+  assert.deepEqual(fragment.root.userData.supplementalRoomIds, roomNodes.map(({ id }) => id).sort());
+  assert.deepEqual(fragment.root.userData.connectorJunctionProxyIds, [proxyId]);
+  assert.equal(fragment.connectionPlans.length, 3);
+  assert.equal(fragment.connectionPlans.every((connection) => (
+    connection.toNodeId === proxyId
+      && connection.progressionFromRoomId !== proxyId
+      && connection.progressionToRoomId !== proxyId
+      && connection.progressionCollapsedSelfEdge === false
+      && connection.toSocket.connectorJunctionProxyId === proxyId
+  )), true);
+  assert.equal(fragment.minimap.hallways.length, 3);
+  assert.equal(fragment.minimap.hallways.every((hallway) => (
+    hallway.fromRoomId !== proxyId && hallway.toRoomId !== proxyId
+  )), true);
+
+  fragment.dispose();
+  material.dispose();
+});
+
+test('facade-only doorway frames require an active socket and inherit its exact aperture', () => {
+  const regionBinding = binding('region-a');
+  const overlayPlan = basicOverlay(regionBinding);
+  const node = overlayPlan.nodes[0];
+  node.anchors.push({
+    id: 'node-a-entry-frame',
+    localAnchorId: 'entry-frame',
+    kind: 'doorway-frame',
+    assetRole: 'frame',
+    position: { ...node.sockets[0].position },
+  }, {
+    id: 'node-a-unused-frame',
+    localAnchorId: 'unused-frame',
+    kind: 'doorway-frame',
+    assetRole: 'frame',
+    position: { ...node.sockets[1].position },
+  });
+  node.sockets[0].localSocketId = 'entry';
+  node.sockets[1].localSocketId = 'unused';
+  node.requiredThemeCapabilities.assets.push('frame');
+
+  const material = new THREE.MeshStandardMaterial({ name: 'frame-parent-material' });
+  const resources = createDungeonThemeResourceLedger();
+  const frameSpecifications = [];
+  const makeAsset = (name) => {
+    const group = new THREE.Group();
+    group.name = name;
+    return group;
+  };
+  const session = createDungeonThemeSession({
+    id: 'frame-theme-session',
+    themeBinding: regionBinding,
+    resources,
+    materialProviders: Object.fromEntries(MATERIAL_ROLES.map((role) => [role, material])),
+    assetProviders: {
+      cap: () => makeAsset('capped-socket'),
+      lightFixture: () => makeAsset('room-light'),
+      frame: (specification) => {
+        frameSpecifications.push(specification);
+        return makeAsset('active-doorway-frame');
+      },
+    },
+    connectorSkinProviders: {
+      serviceGallery: () => makeAsset('service-gallery'),
+    },
+  });
+  const fragment = assembleDungeonSupplement({
+    overlayPlan,
+    themeSessions: new Map([['region-a', session]]),
+    structuralMode: 'facadeOnly',
+  });
+
+  assert.equal(frameSpecifications.length, 1);
+  assert.equal(frameSpecifications[0].socketId, 'node-a-entry');
+  assert.equal(frameSpecifications[0].widthMeters, 8.4);
+  assert.equal(frameSpecifications[0].heightMeters, 4.2);
+  assert.equal(fragment.socketCaps.length, 1);
+  const names = [];
+  fragment.root.traverse((object) => names.push(object.name));
+  assert.ok(names.includes('active-doorway-frame'));
+  assert.ok(names.includes('capped-socket'));
+
+  const unsafeSession = createDungeonThemeSession({
+    id: 'unsafe-frame-theme-session',
+    themeBinding: regionBinding,
+    resources: createDungeonThemeResourceLedger(),
+    materialProviders: Object.fromEntries(MATERIAL_ROLES.map((role) => [role, material])),
+    assetProviders: {
+      cap: () => makeAsset('unsafe-cap'),
+      lightFixture: () => makeAsset('unsafe-light'),
+      frame: () => ({
+        object: makeAsset('unsafe-frame'),
+        floorTiles: [{ x: 999, z: 999, elevation: 0 }],
+        platforms: [{ id: 'orphan-factory-platform' }],
+      }),
+    },
+    connectorSkinProviders: {
+      serviceGallery: () => makeAsset('unsafe-service-gallery'),
+    },
+  });
+  assert.throws(() => assembleDungeonSupplement({
+    overlayPlan,
+    themeSessions: new Map([['region-a', unsafeSession]]),
+    structuralMode: 'facadeOnly',
+  }), (error) => error?.code === 'FACADE_ONLY_FACTORY_TOPOLOGY_FORBIDDEN');
+  assert.throws(() => assembleDungeonSupplement({
+    overlayPlan,
+    themeSessions: new Map([['region-a', unsafeSession]]),
+    structuralMode: 'complete',
+  }), (error) => error?.code === 'THEME_FACTORY_TOPOLOGY_FORBIDDEN');
+
+  fragment.dispose();
+  material.dispose();
+});
+
+test('complete assembly rejects unrelated same-elevation floor ownership collisions', () => {
+  const regionBinding = binding('region-a');
+  const overlayPlan = basicOverlay(regionBinding);
+  const firstNode = overlayPlan.nodes[0];
+  const secondNode = structuredClone(firstNode);
+  secondNode.id = 'region-a__optionalBranch__unrelated-overlap';
+  secondNode.grammarId = 'unrelated-overlap-room';
+  secondNode.sockets = [];
+  secondNode.anchors = [];
+  overlayPlan.nodes.push(secondNode);
+  overlayPlan.operations[0].nodeIds.push(secondNode.id);
+  const { session, material } = themeSession(regionBinding, 'overlap');
+
+  assert.throws(() => assembleDungeonSupplement({
+    overlayPlan,
+    themeSessions: new Map([['region-a', session]]),
+    structuralMode: 'complete',
+  }), (error) => (
+    error?.code === 'DUNGEON_SUPPLEMENT_FLOOR_OWNERSHIP_CONFLICT'
+    && error.diagnostics[0].existingOwnerIds.includes(firstNode.id)
+    && error.diagnostics[0].incomingOwnerIds.includes(secondNode.id)
+  ));
+
+  material.dispose();
+});
+
+test('realizes declared platforms, ramps, and rails with absolute facade elevations', () => {
+  const regionBinding = binding('region-a');
+  const material = new THREE.MeshStandardMaterial({ name: 'structural-parent-material' });
+  const resources = createDungeonThemeResourceLedger();
+  const session = createDungeonThemeSession({
+    id: 'structural-theme-session',
+    themeBinding: regionBinding,
+    resources,
+    materialProviders: Object.fromEntries(
+      STRUCTURAL_MATERIAL_ROLES.map((role) => [role, material]),
+    ),
+  });
+  const fragment = assembleDungeonSupplement({
+    overlayPlan: structuralOverlay(regionBinding),
+    themeSessions: new Map([['region-a', session]]),
+  });
+
+  assert.equal(fragment.platforms.length, 1, 'structure and matching anchor must upsert one platform');
+  const [platform] = fragment.platforms;
+  assert.equal(platform.id, 'overlook-anchor');
+  assert.equal(platform.center.y, 12.8);
+  assert.equal(platform.position.y, 12.8);
+  assert.equal(platform.elevation, 12.8);
+  assert.equal(platform.topY, 12.8);
+  assert.ok(Math.abs(platform.baseY - 12.62) < 1e-9);
+  assert.deepEqual(platform.railSides, ['north', 'south', 'east']);
+
+  const platformMesh = [];
+  const rampMeshes = [];
+  const railMeshes = [];
+  fragment.root.traverse((object) => {
+    if (object.userData?.supplementPlatformId && !object.userData?.supplementRailId) {
+      platformMesh.push(object);
+    }
+    if (object.userData?.supplementRampId) rampMeshes.push(object);
+    if (object.userData?.supplementRailId) railMeshes.push(object);
+  });
+  assert.equal(platformMesh.length, 1);
+  assert.equal(rampMeshes.length, 1);
+  assert.equal(railMeshes.length, 3, 'the ramp-facing west edge remains open');
+  assert.ok([...platformMesh, ...rampMeshes, ...railMeshes].every((mesh) => (
+    mesh.material === material
+  )));
+
+  const platformFloors = fragment.floorTiles.filter(({ surfaceRole }) => surfaceRole === 'catwalk');
+  const rampFloors = fragment.floorTiles.filter(({ surfaceRole }) => surfaceRole === 'ramp');
+  assert.ok(platformFloors.length >= 9);
+  assert.equal(new Set(platformFloors.map(({ elevation }) => elevation)).size, 1);
+  assert.equal(platformFloors[0].elevation, 12.8);
+  assert.ok(rampFloors.length >= 2);
+  const rampElevations = rampFloors.map(({ elevation }) => elevation);
+  assert.ok(Math.min(...rampElevations) >= 10);
+  assert.ok(Math.max(...rampElevations) <= 12.8);
+  assert.ok(rampElevations.some((elevation) => elevation > 10 && elevation < 12.8));
+
+  assert.equal(fragment.verticalConnectors.length, 1);
+  assert.equal(fragment.verticalConnectors[0].connectorFamily, 'slope');
+  assert.equal(fragment.verticalConnectors[0].fromElevation, 10);
+  assert.equal(fragment.verticalConnectors[0].toElevation, 12.8);
+  assert.ok(Math.abs(fragment.verticalConnectors[0].elevationDelta - 2.8) < 1e-9);
+  assert.equal(
+    fragment.solidZones.filter(({ obstacleKind }) => obstacleKind === 'safetyRail').length,
+    3,
+  );
+  assert.ok(resources.isBorrowed(material));
+
+  const facadeOnly = assembleDungeonSupplement({
+    overlayPlan: structuralOverlay(regionBinding),
+    themeSessions: new Map([['region-a', session]]),
+    structuralMode: 'facadeOnly',
+  });
+  assert.equal(facadeOnly.platforms.length, 0);
+  assert.equal(facadeOnly.verticalConnectors.length, 0);
+  assert.equal(facadeOnly.floorTiles.length, 0);
+
+  facadeOnly.dispose();
+  fragment.dispose();
+  material.dispose();
+});
+
+test('preflights declared structure roles before resolving any theme material', () => {
+  const regionBinding = binding('region-a');
+  const material = new THREE.MeshStandardMaterial({ name: 'incomplete-structure-material' });
+  let resolverCalls = 0;
+  const materialProviders = Object.fromEntries(
+    STRUCTURAL_MATERIAL_ROLES
+      .filter((role) => role !== 'rail')
+      .map((role) => [role, () => {
+        resolverCalls += 1;
+        return material;
+      }]),
+  );
+  const session = createDungeonThemeSession({
+    id: 'incomplete-structural-theme-session',
+    themeBinding: regionBinding,
+    materialProviders,
+  });
+
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan: structuralOverlay(regionBinding),
+      themeSessions: new Map([['region-a', session]]),
+    }),
+    (error) => error.code === 'MISSING_THEME_CAPABILITY'
+      && error.diagnostics.some(({ capability }) => capability === 'material:rail'),
+  );
+  assert.equal(resolverCalls, 0);
+  material.dispose();
 });
 
 test('fragment disposal delegates owned theme products to their custom disposers once', () => {
@@ -322,6 +836,68 @@ test('merges facade arrays and maps without mutating the parent facade', () => {
   assert.equal(fragment.root.parent, base.group);
   effective.detachDungeonSupplement();
   assert.equal(fragment.root.parent, null);
+});
+
+test('facade floor overlays preserve explicit shared-threshold provenance and reject unrelated owners', () => {
+  const baseFloor = {
+    id: 'authored-floor',
+    x: 4,
+    z: 2,
+    elevation: 0,
+    roomId: 'authored-room',
+  };
+  const base = {
+    group: new THREE.Group(),
+    floorTiles: [baseFloor],
+    tiles: new Map([['4,2', baseFloor]]),
+  };
+  const fragment = (floor) => ({
+    schema: 'ruindivex-dungeon-supplement-fragment/v1',
+    root: new THREE.Group(),
+    floorTiles: [floor],
+    tiles: new Map([['4,2', floor]]),
+  });
+  const unrelatedFloor = {
+    id: 'unrelated-supplement-floor',
+    x: 4,
+    z: 2,
+    elevation: 0,
+    roomId: 'unrelated-supplement-room',
+  };
+  assert.throws(
+    () => mergeDungeonFacade(base, fragment(unrelatedFloor)),
+    (error) => error?.code === 'DUNGEON_FACADE_FLOOR_OWNERSHIP_CONFLICT',
+  );
+  assert.equal(base.floorTiles[0], baseFloor);
+  assert.equal(baseFloor.mergedFloorOwnerIds, undefined);
+
+  const sharedFloor = {
+    id: 'shared-supplement-threshold',
+    x: 4,
+    z: 2,
+    elevation: 0,
+    connectorId: 'supplement-connector',
+    connectionId: 'supplement-connector',
+    sharedThresholdOwnerIds: ['authored-room', 'supplement-connector'],
+    sharedThresholdContractIds: ['supplement-threshold-contract'],
+  };
+  const effective = mergeDungeonFacade(base, fragment(sharedFloor));
+  assert.equal(effective.floorTiles.length, 1);
+  assert.deepEqual(effective.floorTiles[0].mergedFloorOwnerIds, [
+    'authored-room',
+    'supplement-connector',
+  ]);
+  assert.equal(effective.floorTiles[0].mergedFloorSourceCount, 2);
+  assert.equal(effective.floorTiles[0].mergedUnownedFloorSourceCount, 0);
+  assert.deepEqual(
+    effective.floorTiles[0].sharedThresholdContractIds,
+    ['supplement-threshold-contract'],
+  );
+  assert.deepEqual(effective.tiles.get('4,2').mergedFloorOwnerIds, [
+    'authored-room',
+    'supplement-connector',
+  ]);
+  assert.equal(baseFloor.mergedFloorOwnerIds, undefined, 'base provenance remains immutable');
 });
 
 test('builds a split transition bay cooperatively from both parent themes', () => {
@@ -560,4 +1136,265 @@ test('assembles an Industrial-to-Magma seam through the concrete parent adapters
   for (const material of [...Object.values(industrialMaterials), ...Object.values(magmaMaterials)]) {
     material.dispose();
   }
+});
+
+function routeNetworkOverlay(themeBinding, { corruptSocket = false } = {}) {
+  const operationId = 'region-a__routeNetwork__operation__0';
+  const junctionId = 'region-a__routeNetwork__junction__0';
+  const rewardId = 'region-a__routeNetwork__reward__0';
+  const parentWestId = 'parent-west-unused';
+  const parentEastId = 'parent-east-unused';
+  const westId = `${junctionId}:west`;
+  const eastId = `${junctionId}:east`;
+  const southId = `${junctionId}:south`;
+  const rewardNorthId = `${rewardId}:north`;
+  const socket = (id, nodeId, position, facing, state = 'connected') => ({
+    id,
+    nodeId,
+    position,
+    facing,
+    widthMeters: 8.4,
+    heightMeters: 3.6,
+    state,
+  });
+  const nodes = [{
+    id: junctionId,
+    operationId,
+    parentRegionId: 'region-a',
+    grammarId: 'supplement-through-t-v1',
+    themeBinding,
+    placement: { center: { x: 0, y: 0, z: -28 }, rotationQuarterTurns: 0 },
+    size: { x: 14, y: 8.4, z: 19.6 },
+    sockets: [
+      socket(westId, junctionId, { x: -7, y: 0, z: -28 }, { x: -1, y: 0, z: 0 }),
+      socket(eastId, junctionId, { x: 7, y: 0, z: -28 }, { x: 1, y: 0, z: 0 }),
+      socket(southId, junctionId, { x: 0, y: 0, z: -18.2 }, { x: 0, y: 0, z: 1 }),
+    ],
+    junction: {
+      junctionKind: 'through-t',
+      throughSocketPairs: [[westId, eastId]],
+      decisionSocketIds: [southId],
+      countsAsMeaningfulStation: true,
+    },
+    contentRole: 'challenge-junction',
+    anchors: [{ id: 'junction-encounter', kind: 'encounter', position: { x: 0, y: 0, z: -28 } }],
+    requiredThemeCapabilities: {
+      materials: ['primary-floor', 'wall', 'ceiling'],
+      connectors: ['service-gallery'],
+    },
+  }, {
+    id: rewardId,
+    operationId,
+    parentRegionId: 'region-a',
+    grammarId: 'supplement-reward-v1',
+    themeBinding,
+    placement: { center: { x: 0, y: 0, z: 0 }, rotationQuarterTurns: 0 },
+    size: { x: 11.2, y: 8.4, z: 11.2 },
+    sockets: [socket(rewardNorthId, rewardId, { x: 0, y: 0, z: -5.6 }, { x: 0, y: 0, z: -1 })],
+    contentRole: 'treasure',
+    anchors: [{ id: 'reward-cache', kind: 'reward', position: { x: 0, y: 0, z: 0 } }],
+    requiredThemeCapabilities: {
+      materials: ['primary-floor', 'wall', 'ceiling'],
+      connectors: ['service-gallery'],
+    },
+  }];
+  const parentWest = {
+    id: parentWestId,
+    nodeId: 'keycardRoom',
+    socketId: corruptSocket ? 'ungranted-parent-socket' : parentWestId,
+    position: { x: -28, y: 0, z: -28 },
+    facing: { x: 1, y: 0, z: 0 },
+  };
+  const parentEast = {
+    id: parentEastId,
+    nodeId: 'keycardRoom',
+    socketId: parentEastId,
+    position: { x: 28, y: 0, z: -28 },
+    facing: { x: -1, y: 0, z: 0 },
+  };
+  const segments = [{
+    id: `${operationId}:segment:west`,
+    operationId,
+    parentRegionId: 'region-a',
+    connectorFamily: 'service-gallery',
+    themeBinding,
+    from: parentWest,
+    to: { nodeId: junctionId, socketId: westId, position: { x: -7, y: 0, z: -28 } },
+    path: [parentWest.position, { x: -7, y: 0, z: -28 }],
+  }, {
+    id: `${operationId}:segment:east`,
+    operationId,
+    parentRegionId: 'region-a',
+    connectorFamily: 'service-gallery',
+    themeBinding,
+    from: { nodeId: junctionId, socketId: eastId, position: { x: 7, y: 0, z: -28 } },
+    to: parentEast,
+    path: [{ x: 7, y: 0, z: -28 }, parentEast.position],
+  }, {
+    id: `${operationId}:segment:reward`,
+    operationId,
+    parentRegionId: 'region-a',
+    connectorFamily: 'service-gallery',
+    themeBinding,
+    from: { nodeId: junctionId, socketId: southId, position: { x: 0, y: 0, z: -18.2 } },
+    to: { nodeId: rewardId, socketId: rewardNorthId, position: { x: 0, y: 0, z: -5.6 } },
+    path: [{ x: 0, y: 0, z: -18.2 }, { x: 0, y: 0, z: -5.6 }],
+    doorId: 'SupplementEncounterGate_0',
+    requiresEncounterId: 'junction-encounter',
+    gatePlacementSide: 'source',
+    shortcut: {
+      kind: 'drop-ladder',
+      stateId: 'route-network-shortcut-state-0',
+      initialState: 'retracted',
+      activatedState: 'deployed',
+      activationSide: 'far',
+      persistent: true,
+    },
+  }];
+  return {
+    schema: 'ruindivex-dungeon-augmentation-overlay/v2',
+    revision: 2,
+    profileId: 'industrial-supplement-preview-v4',
+    themeBindings: [themeBinding],
+    operations: [{
+      id: operationId,
+      type: 'routeNetwork',
+      parentRegionId: 'region-a',
+      themeBinding,
+      grantId: 'pyramid-loop-grant',
+      routeNetworkKind: 'landmark-perimeter-loop',
+      endpointSocketIds: [parentWestId, parentEastId],
+      nodeIds: nodes.map(({ id }) => id),
+      segmentIds: segments.map(({ id }) => id),
+      topologyTemplateId: 'fork-merge-h-loop',
+      elevationModes: ['drop-ladder'],
+      progressionBandId: 0,
+      accessDomainId: 'industrial:band-0',
+      stableRuntimeStateIds: ['route-network-shortcut-state-0'],
+    }],
+    nodes,
+    segments,
+  };
+}
+
+test('assembles V4 route junction, exact landings, source gate, and scoped shortcut records', () => {
+  const regionBinding = binding('region-a');
+  const { session, material } = themeSession(regionBinding, 'route-network');
+  const overlayPlan = routeNetworkOverlay(regionBinding);
+  const fragment = assembleDungeonSupplement({
+    overlayPlan,
+    themeSession: session,
+    structuralMode: 'complete',
+  });
+
+  assert.equal(fragment.junctions.length, 1);
+  assert.equal(fragment.junctions[0].junctionKind, 'through-t');
+  assert.equal(fragment.junctions[0].countsAsMeaningfulStation, true);
+  assert.deepEqual(fragment.junctions[0].decisionSocketIds, [
+    'region-a__routeNetwork__junction__0:south',
+  ]);
+  assert.equal(fragment.landingClearances.length, 2);
+  assert.deepEqual(fragment.landingClearances.map(({ socketId }) => socketId).sort(), [
+    'parent-east-unused',
+    'parent-west-unused',
+  ]);
+  const gate = fragment.doors.find(({ id }) => id === 'SupplementEncounterGate_0');
+  assert.ok(gate);
+  assert.equal(gate.gatePlacementSide, 'source');
+  assert.equal(gate.sourceRoomId, 'region-a__routeNetwork__junction__0');
+  assert.equal(gate.requiresEncounterId, 'junction-encounter');
+  const shortcut = fragment.mechanisms.find(({ type }) => type === 'dungeonSupplementShortcut');
+  assert.ok(shortcut);
+  assert.equal(shortcut.stateId, 'route-network-shortcut-state-0');
+  assert.equal(shortcut.shortcutStateId, 'route-network-shortcut-state-0');
+  assert.deepEqual(shortcut.runtimeStateIds, ['route-network-shortcut-state-0']);
+  assert.equal(shortcut.scopedAction, 'unlockShortcut');
+  assert.equal(shortcut.shortcutAction, 'deploy-ladder');
+  assert.equal(
+    shortcut.targetConnectionId,
+    'region-a__routeNetwork__operation__0:segment:reward',
+  );
+  assert.equal(shortcut.initialState, 'retracted');
+  assert.equal(shortcut.activationSide, 'far');
+  assert.deepEqual(shortcut.action, {
+    type: 'activateDungeonSupplementShortcut',
+    scope: 'connection',
+    connectionId: 'region-a__routeNetwork__operation__0:segment:reward',
+    stateId: 'route-network-shortcut-state-0',
+  });
+  const shortcutConnection = fragment.connectionPlans.find(
+    ({ id }) => id === 'region-a__routeNetwork__operation__0:segment:reward',
+  );
+  assert.equal(shortcutConnection.shortcutMechanismId, shortcut.id);
+  assert.equal(shortcutConnection.shortcutStateId, shortcut.shortcutStateId);
+  assert.deepEqual(shortcutConnection.runtimeStateIds, shortcut.runtimeStateIds);
+  assert.deepEqual(shortcutConnection.elevationModes, ['drop-ladder']);
+  assert.equal(fragment.diagnostics.assembled.junctionCount, 1);
+  assert.equal(fragment.diagnostics.assembled.landingClearanceCount, 2);
+  fragment.dispose();
+  material.dispose();
+});
+
+test('authoritative V4 facade-only assembly fails closed on exact theme sessions and connector skins', () => {
+  const regionBinding = binding('region-a');
+  const overlayPlan = {
+    ...routeNetworkOverlay(regionBinding),
+    authoritativeManifestRealization: true,
+  };
+
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan,
+      structuralMode: 'facadeOnly',
+    }),
+    (error) => error?.code === 'MISSING_PARENT_THEME_SESSION',
+  );
+
+  const material = new THREE.MeshStandardMaterial({ name: 'strict-facade-material' });
+  const incompleteSession = createDungeonThemeSession({
+    id: 'strict-facade-incomplete-session',
+    themeBinding: regionBinding,
+    resources: createDungeonThemeResourceLedger(),
+    materialProviders: Object.fromEntries(MATERIAL_ROLES.map((role) => [role, material])),
+    assetProviders: {
+      cap: () => new THREE.Group(),
+      lightFixture: () => new THREE.Group(),
+    },
+    connectorSkinProviders: {},
+  });
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan,
+      structuralMode: 'facadeOnly',
+      themeSession: incompleteSession,
+    }),
+    (error) => error?.code === 'MISSING_THEME_CAPABILITY'
+      && /connector:serviceGallery/.test(error.message),
+  );
+
+  const mismatched = themeSession(binding('region-a', 'wrong-theme'), 'wrong-theme');
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan,
+      structuralMode: 'facadeOnly',
+      themeSession: mismatched.session,
+    }),
+    (error) => error?.code === 'MISSING_PARENT_THEME_SESSION',
+  );
+  mismatched.material.dispose();
+  material.dispose();
+});
+
+test('route-network assembly rejects ungranted parent sockets before creating resources', () => {
+  const regionBinding = binding('region-a');
+  const { session, material } = themeSession(regionBinding, 'route-network-invalid');
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan: routeNetworkOverlay(regionBinding, { corruptSocket: true }),
+      themeSession: session,
+    }),
+    (error) => error.code === 'INVALID_ROUTE_NETWORK_SOCKET_BINDING'
+      && /ungranted parent socket/i.test(error.message),
+  );
+  material.dispose();
 });

@@ -105,6 +105,12 @@ export class DungeonConnectorLiftRuntime {
       ? platformObject.position.y - finiteOr(surface.topY, currentElevation)
       : 0;
     const controls = Array.isArray(descriptor.controls) ? descriptor.controls : [];
+    const shortcutMechanismId = descriptor.shortcutMechanismId
+      ?? descriptor.lockedUntilMechanismId
+      ?? null;
+    const shortcutUnlocked = !shortcutMechanismId
+      || descriptor.shortcutUnlocked === true
+      || descriptor.activated === true;
 
     return {
       id,
@@ -113,6 +119,8 @@ export class DungeonConnectorLiftRuntime {
       platformObject,
       objectTopYOffset,
       controls,
+      shortcutMechanismId,
+      shortcutUnlocked,
       bottomElevation,
       topElevation,
       speedMetersPerSecond: Math.max(
@@ -255,6 +263,19 @@ export class DungeonConnectorLiftRuntime {
   }
 
   _updateLift(lift, dt) {
+    if (!lift.shortcutUnlocked && lift.shortcutMechanismId) {
+      const activated = this.game?.dungeonController?._isMechanismActivated?.(
+        lift.shortcutMechanismId,
+      );
+      if (activated) this._unlockLift(lift);
+    }
+    if (!lift.shortcutUnlocked) {
+      lift.requestedEndpoint = null;
+      lift.phase = 'dwelling';
+      lift.dwellRemaining = lift.dwellSeconds;
+      this._syncDescriptor(lift);
+      return;
+    }
     let remaining = Math.max(0, finiteOr(dt, 0));
     let steps = 0;
     while (remaining > ENDPOINT_EPSILON && steps < MAX_UPDATE_STEPS) {
@@ -326,6 +347,14 @@ export class DungeonConnectorLiftRuntime {
       this.invalidRequestCount += 1;
       return { ok: false, reason: 'unknown-lift', liftId };
     }
+    if (!lift.shortcutUnlocked) {
+      return {
+        ok: false,
+        reason: 'shortcut-locked',
+        liftId,
+        mechanismId: lift.shortcutMechanismId,
+      };
+    }
     if (!resolvedEndpoint) {
       this.invalidRequestCount += 1;
       return { ok: false, reason: 'invalid-endpoint', liftId };
@@ -343,6 +372,64 @@ export class DungeonConnectorLiftRuntime {
     if (lift.phase === 'moving') this._beginTravel(lift, resolvedEndpoint);
     this._syncDescriptor(lift);
     return { ok: true, liftId, endpoint: resolvedEndpoint, alreadyPresent: false };
+  }
+
+  _unlockLift(lift) {
+    if (!lift || lift.shortcutUnlocked) return false;
+    lift.shortcutUnlocked = true;
+    setDescriptorField(lift.descriptor, 'shortcutUnlocked', true);
+    lift.dwellRemaining = Math.max(lift.dwellRemaining, lift.dwellSeconds);
+    this._syncDescriptor(lift);
+    return true;
+  }
+
+  unlockLift(id) {
+    const lift = this.liftById.get(String(id ?? ''));
+    if (!lift) return { ok: false, reason: 'unknown-lift', liftId: String(id ?? '') };
+    const changed = this._unlockLift(lift);
+    return { ok: true, liftId: lift.id, changed };
+  }
+
+  restoreLiftState(id, {
+    currentElevation,
+    shortcutUnlocked,
+  } = {}) {
+    const lift = this.liftById.get(String(id ?? ''));
+    if (!lift) return { ok: false, reason: 'unknown-lift', liftId: String(id ?? '') };
+    let changed = false;
+    if (Number.isFinite(currentElevation)) {
+      this._applyElevation(lift, currentElevation, { carryRider: false });
+      const atBottom = Math.abs(
+        lift.currentElevation - lift.bottomElevation,
+      ) <= ENDPOINT_EPSILON;
+      const atTop = Math.abs(
+        lift.currentElevation - lift.topElevation,
+      ) <= ENDPOINT_EPSILON;
+      lift.currentEndpoint = atBottom ? 'bottom' : atTop ? 'top' : null;
+      if (lift.currentEndpoint) {
+        lift.targetEndpoint = lift.currentEndpoint;
+        lift.phase = 'dwelling';
+        lift.dwellRemaining = lift.dwellSeconds;
+      } else {
+        lift.phase = 'moving';
+        lift.dwellRemaining = 0;
+      }
+      changed = true;
+    }
+    if (typeof shortcutUnlocked === 'boolean'
+      && lift.shortcutUnlocked !== shortcutUnlocked) {
+      lift.shortcutUnlocked = shortcutUnlocked;
+      setDescriptorField(lift.descriptor, 'shortcutUnlocked', shortcutUnlocked);
+      changed = true;
+    }
+    this._syncDescriptor(lift);
+    return {
+      ok: true,
+      liftId: lift.id,
+      changed,
+      currentElevation: lift.currentElevation,
+      shortcutUnlocked: lift.shortcutUnlocked,
+    };
   }
 
   getDiagnostics() {
@@ -370,6 +457,8 @@ export class DungeonConnectorLiftRuntime {
         travelDistanceMeters: lift.travelDistanceMeters,
         lastRiderCarried: lift.lastRiderCarried,
         controlIds: Object.freeze(lift.controls.map((control) => control?.id).filter(Boolean)),
+        shortcutMechanismId: lift.shortcutMechanismId,
+        shortcutUnlocked: lift.shortcutUnlocked,
       }))),
     });
   }

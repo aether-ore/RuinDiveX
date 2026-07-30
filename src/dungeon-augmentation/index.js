@@ -13,6 +13,7 @@ export * from './DungeonSupplementAssembler.js';
 export * from './IndustrialDraftAdapter.js';
 export * from './IndustrialExtensionHost.js';
 export * from './IndustrialOverlayMaterializer.js';
+export * from './IndustrialSupplementBlueprintCatalog.js';
+export * from './IndustrialSupplementContent.js';
 export * from './ThemeAdapters.js';
 export * from './ThemeSession.js';
-

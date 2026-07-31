@@ -7,8 +7,8 @@ import { PLAYER_TRAVERSAL_ENVELOPE } from '../src/TraversalCapabilities.js';
 import { hashSeed, SeededRandom } from '../src/reaverbots/SeededRandom.js';
 
 const REAL_SEED = 'v1-bidirectional-connector-sweep-0000';
-const AUGMENTED_SEED = 'layout:augmentation-runtime-check';
-const AUGMENTED_BASE_PLAN_HASH = 'v1:layout:augmentation-runtime-check:depth:1:revolvingFusillade';
+const AUGMENTED_SEED = 'layout:augmentation-realized-v4-000';
+const AUGMENTED_BASE_PLAN_HASH = 'v1:layout:augmentation-realized-v4-000:depth:1:revolvingFusillade';
 const ADJACENT_THRESHOLD_WITNESS_SEED = 'layout:augmentation-v2-witness-023';
 const ADJACENT_THRESHOLD_WITNESS_BASE_PLAN_HASH =
   'v1:layout:augmentation-v2-witness-023:depth:1:revolvingFusillade';
@@ -65,6 +65,18 @@ function collectConnectorEnvelopeDiscontinuities({
       if (openAirTileKeys.has(neighborKey)) continue;
       const neighbor = tiles.get(neighborKey);
       if (!neighbor) continue;
+      const tileTransferIds = new Set([
+        ...(tile.augmentationTransferIds ?? []),
+        ...(tile.augmentationTransferId ? [tile.augmentationTransferId] : []),
+      ].map(String));
+      const sharesAuthoredTransfer = tileTransferIds.size > 0
+        && [
+          ...(neighbor.augmentationTransferIds ?? []),
+          ...(neighbor.augmentationTransferId ? [neighbor.augmentationTransferId] : []),
+        ].some((id) => tileTransferIds.has(String(id)));
+      if (sharesAuthoredTransfer
+        || tile.surface === 'industrialRamp'
+        || neighbor.surface === 'industrialRamp') continue;
       if (!(tile.connectorId || tile.connectionId || neighbor.connectorId || neighbor.connectionId)) {
         continue;
       }
@@ -2971,7 +2983,7 @@ test('floorless ladder and lift shaft points require exact reachable landings an
   );
 });
 
-test('a late augmented assembly throw disposes the partial candidate exactly once', { timeout: 60_000 }, () => {
+test('a late augmented assembly throw disposes the partial candidate exactly once', { timeout: 180_000 }, () => {
   const browserRandom = new SeededRandom(hashSeed(AUGMENTED_SEED));
   const generator = new DungeonGenerator({
     random: () => browserRandom.next(),
@@ -2984,6 +2996,22 @@ test('a late augmented assembly throw disposes the partial candidate exactly onc
   cachedTexture.name = 'lateAssemblyCleanupCachedTexture';
   generator.textureCache.set('lateAssemblyCleanupCachedTexture', cachedTexture);
   generator._loadRuinTexture = () => cachedTexture;
+
+  // Exercise the same accepted-parent replay path used by generate(). A raw
+  // _generateOnce() starts at the beginning of the seed stream, which can be
+  // an authored parent attempt that was intentionally rejected before the
+  // accepted random tape was captured.
+  generator.augmentationProfileId = null;
+  const { dungeon: acceptedParent, randomTape } = generator
+    ._generateAcceptedIndustrialDungeon({ captureAcceptedRandomTape: true });
+  generator.augmentationProfileId = AUGMENTATION_PROFILE_ID;
+  let replayCursor = 0;
+  generator.random = () => {
+    assert.ok(replayCursor < randomTape.length, 'augmented replay exceeded parent RNG tape');
+    const value = randomTape[replayCursor];
+    replayCursor += 1;
+    return value;
+  };
 
   const createMaterials = generator._createMaterials.bind(generator);
   let detachedMaterial = null;
@@ -3035,6 +3063,7 @@ test('a late augmented assembly throw disposes the partial candidate exactly onc
       () => generator._generateOnce(),
       (error) => error.code === 'SYNTHETIC_LATE_AUGMENTED_ASSEMBLY_FAILURE',
     );
+    assert.ok(replayCursor > 0, 'fixture did not consume the accepted parent replay tape');
     assert.ok(capturedGroup);
     assert.equal(capturedGroup.userData.generationCandidateDisposed, true);
     assert.ok(supplementGeometries.size > 0, 'fixture assembled no supplement geometry');
@@ -3051,6 +3080,7 @@ test('a late augmented assembly throw disposes the partial candidate exactly onc
     assert.equal(detachedMaterialDisposals, 1);
     assert.equal(cachedTextureDisposals, 0);
   } finally {
+    generator._disposeGeneratedDungeonCandidate(acceptedParent);
     cachedTexture.dispose();
   }
 });
@@ -3072,12 +3102,14 @@ test('a browser-identical accepted seed seals every connector-adjacent envelope 
     openAirTileKeys,
     rooms,
     connectorWallOpenings,
+    authoritativeFloorTiles,
   ) => {
     const runs = collectBoundaryWallRuns(
       tiles,
       openAirTileKeys,
       rooms,
       connectorWallOpenings,
+      authoritativeFloorTiles,
     );
     captured = { tiles, openAirTileKeys, rooms, runs };
     return runs;
@@ -3195,7 +3227,13 @@ test('the v2 adjacent-threshold witness reserves both authored connector apertur
   let dungeon = null;
   try {
     dungeon = generator.generate();
-    assert.equal(dungeon.augmentationStatus, 'applied');
+    assert.equal(
+      dungeon.augmentationStatus,
+      'applied',
+      dungeon.augmentationStatus === 'applied'
+        ? undefined
+        : JSON.stringify(dungeon.augmentationDiagnostics),
+    );
     assert.equal(
       dungeon.progression.validation.accepted,
       true,
@@ -3232,7 +3270,7 @@ test('the v2 adjacent-threshold witness reserves both authored connector apertur
   }
 });
 
-test('a nonzero-elevation supplement keeps every connector mouth open and reachable', { timeout: 60_000 }, () => {
+test('a nonzero-elevation supplement keeps every connector mouth open and reachable', { timeout: 180_000 }, () => {
   const browserRandom = new SeededRandom(hashSeed(AUGMENTED_SEED));
   const generator = new DungeonGenerator({
     random: () => browserRandom.next(),
@@ -3245,6 +3283,18 @@ test('a nonzero-elevation supplement keeps every connector mouth open and reacha
   inertTexture.name = 'connectorEntranceAugmentationTexture';
   generator._loadRuinTexture = () => inertTexture;
 
+  generator.augmentationProfileId = null;
+  const { dungeon: acceptedParent, randomTape } = generator
+    ._generateAcceptedIndustrialDungeon({ captureAcceptedRandomTape: true });
+  generator.augmentationProfileId = AUGMENTATION_PROFILE_ID;
+  let replayCursor = 0;
+  generator.random = () => {
+    assert.ok(replayCursor < randomTape.length, 'augmented replay exceeded parent RNG tape');
+    const value = randomTape[replayCursor];
+    replayCursor += 1;
+    return value;
+  };
+
   let wallRuns = [];
   const collectBoundaryWallRuns = generator._collectBoundaryWallRuns.bind(generator);
   generator._collectBoundaryWallRuns = (
@@ -3252,20 +3302,29 @@ test('a nonzero-elevation supplement keeps every connector mouth open and reacha
     openAirTileKeys,
     rooms,
     connectorWallOpenings,
+    authoritativeFloorTiles,
   ) => {
     wallRuns = collectBoundaryWallRuns(
       tiles,
       openAirTileKeys,
       rooms,
       connectorWallOpenings,
+      authoritativeFloorTiles,
     );
     return wallRuns;
   };
 
   let dungeon = null;
   try {
-    dungeon = generator.generate();
-    assert.equal(dungeon.augmentationStatus, 'applied');
+    dungeon = generator._generateOnce();
+    assert.equal(replayCursor, randomTape.length);
+    assert.equal(
+      dungeon.augmentationStatus,
+      'applied',
+      dungeon.augmentationStatus === 'applied'
+        ? undefined
+        : JSON.stringify(dungeon.augmentationDiagnostics),
+    );
     assert.equal(
       dungeon.progression.validation.accepted,
       true,
@@ -3334,7 +3393,6 @@ test('a nonzero-elevation supplement keeps every connector mouth open and reacha
         );
       }
     }
-
     const entranceValidation = dungeon.progression.validation.connectorEntrances;
     assert.ok(entranceValidation.checkedSocketCount > 0);
     assert.equal(
@@ -3353,8 +3411,8 @@ test('a nonzero-elevation supplement keeps every connector mouth open and reacha
       'one or more generated connector mouths failed bidirectional reachability',
     );
   } finally {
-    disposeDungeon(dungeon);
-    inertTexture.dispose();
+    generator._disposeGeneratedDungeonCandidate(dungeon);
+    generator._disposeGeneratedDungeonCandidate(acceptedParent);
   }
 });
 

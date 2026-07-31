@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
 import { DungeonController } from '../src/DungeonController.js';
-import { DungeonGenerator } from '../src/DungeonGenerator.js';
+import {
+  DungeonGenerator,
+  resolveDungeonSupplementLadderFace,
+} from '../src/DungeonGenerator.js';
 import { createDungeonProgressionData } from '../src/DungeonProgression.js';
 import { Player } from '../src/Player.js';
 
@@ -22,6 +25,69 @@ const makeRoom = (overrides = {}) => ({
   exitSockets: [],
   mechanicalPyramidCenter: { x: 4, z: 7, elevation: 4 },
   ...overrides,
+});
+
+test('supplement ladder mounts on the lower approach face instead of inside the upper wall', () => {
+  const owner = { id: 'supplement-ladder-room' };
+  const floor = (x, z, elevation) => ({
+    roomId: owner.id,
+    x,
+    z,
+    elevation,
+  });
+  const lowerApproach = floor(33, 38, 28);
+  const face = resolveDungeonSupplementLadderFace({
+    owner,
+    centerGrid: { x: 34, z: 38 },
+    bottomElevation: 28,
+    topElevation: 30.8,
+    floorTiles: [
+      lowerApproach,
+      floor(34, 38, 28),
+      floor(34, 38, 30.8),
+      floor(35, 38, 30.8),
+      floor(34, 37, 28),
+      floor(34, 37, 30.8),
+      floor(34, 39, 28),
+      floor(34, 39, 30.8),
+    ],
+  });
+
+  assert.deepEqual(face.normal, { x: -1, z: 0 });
+  assert.equal(face.bottomApproachFloor, lowerApproach);
+  assert.equal(face.planeOffsetTiles, 0.5);
+  assert.equal(face.source, 'floor-tier-transition');
+});
+
+test('legacy conveyor decoration cannot rewrite authoritative supplement floor elevations', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const authoritative = {
+    type: 'floor',
+    surface: 'industrialSupplementTier',
+    x: 0,
+    z: 0,
+    elevation: 0,
+    roomId: 'supplement-room',
+    augmentationBlueprintId: 'ind-room-ladder-defense-rise-01',
+    augmentationFloorTierRuntimeId: 'supplement-room:floor-tier:base',
+    augmentationFloorCellId: 'supplement-room:floor-tier:base:cell:0:0',
+  };
+  const ordinary = { type: 'floor', x: 1, z: 0, elevation: 0 };
+  const tiles = new Map([
+    ['0,0', authoritative],
+    ['1,0', ordinary],
+  ]);
+
+  generator._markConveyorBridge(
+    tiles,
+    { id: 'from' },
+    { id: 'to' },
+    { path: [{ x: 0, z: 0 }, { x: 1, z: 0 }] },
+  );
+
+  assert.equal(authoritative.elevation, 0);
+  assert.equal(authoritative.surface, 'industrialSupplementTier');
+  assert.equal(ordinary.surface, 'conveyorBridge');
 });
 
 test('player weapon origins retain their local height at signed room elevations', () => {
@@ -255,6 +321,110 @@ test('module-local platform tier names cannot merge collision or render masses a
     [...new Set(surfaces.map(({ roomId }) => roomId))].sort(),
     ['supplementRoomA', 'supplementRoomB'],
   );
+});
+
+test('orphan connector envelopes cannot emit shell geometry without nearby footing', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const floorTiles = [
+    { x: 0, z: 0, elevation: 0, roomId: 'authoredRoom' },
+    { x: 1, z: 0, elevation: 0, connectionId: 'routeA' },
+  ];
+  const nearEnvelope = {
+    x: 2,
+    z: 1,
+    structuralEnvelopeOnly: true,
+    surface: 'connectorStructuralEnvelope',
+    connectionId: 'routeA',
+  };
+  const orphanEnvelope = {
+    x: 6,
+    z: 5,
+    structuralEnvelopeOnly: true,
+    surface: 'connectorStructuralEnvelope',
+    connectionId: 'routeA',
+  };
+  const authoredStructure = { x: 8, z: 8, roomId: 'authoredRoom', type: 'floor' };
+  const tiles = new Map([
+    ['2,1', nearEnvelope],
+    ['6,5', orphanEnvelope],
+    ['8,8', authoredStructure],
+  ]);
+
+  const diagnostics = generator._pruneOrphanStructuralEnvelopeCells(tiles, floorTiles);
+
+  assert.equal(diagnostics.removedCellCount, 1);
+  assert.deepEqual(diagnostics.removedCells, [{
+    x: 6,
+    z: 5,
+    connectionId: 'routeA',
+    roomId: null,
+  }]);
+  assert.equal(tiles.get('2,1'), nearEnvelope, 'one-cell shell padding remains valid');
+  assert.equal(tiles.has('6,5'), false, 'unowned shell island is removed authoritatively');
+  assert.equal(tiles.get('8,8'), authoredStructure, 'authored geometry is never pruned');
+});
+
+test('authoritative V4 realization removes detached connector gallery duplicates only', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const entrance = { id: 'entrance', x: 0, z: 0, isDungeonSupplement: false };
+  const entranceFloor = { x: 0, z: 0, elevation: 0, roomId: 'entrance', surface: 'floor' };
+  const connectedGallery = {
+    x: 1,
+    z: 0,
+    elevation: 0,
+    connectionId: 'connectedRoute',
+    surface: 'connectorGalleryFloor',
+  };
+  const orphanGalleryA = {
+    x: 10,
+    z: 10,
+    elevation: 0,
+    connectionId: 'phantomUpperRoute',
+    surface: 'connectorGalleryFloor',
+  };
+  const orphanGalleryB = { ...orphanGalleryA, x: 11 };
+  const authoredRoomFloor = {
+    x: 20,
+    z: 20,
+    elevation: 0,
+    roomId: 'authoredDestination',
+    surface: 'floor',
+  };
+  const disconnectedPlatform = {
+    x: 30,
+    z: 30,
+    elevation: 4,
+    roomId: 'authoredDestination',
+    surface: 'jumpPlatform',
+    isPlatformingSurface: true,
+  };
+  const floorTiles = [
+    entranceFloor,
+    connectedGallery,
+    orphanGalleryA,
+    orphanGalleryB,
+    authoredRoomFloor,
+    disconnectedPlatform,
+  ];
+  const tiles = new Map(floorTiles.map((floor) => [`${floor.x},${floor.z}`, floor]));
+
+  const result = generator._pruneDisconnectedConnectorGalleryFloors(
+    tiles,
+    floorTiles,
+    [entrance, { id: 'authoredDestination', x: 20, z: 20 }],
+  );
+
+  assert.equal(result.diagnostics.removedFloorTileCount, 2);
+  assert.deepEqual(result.diagnostics.removedFloorTilesByConnectionId, {
+    phantomUpperRoute: 2,
+  });
+  assert.ok(result.floorTiles.includes(connectedGallery));
+  assert.ok(result.floorTiles.includes(authoredRoomFloor));
+  assert.ok(result.floorTiles.includes(disconnectedPlatform));
+  assert.ok(!result.floorTiles.includes(orphanGalleryA));
+  assert.ok(!result.floorTiles.includes(orphanGalleryB));
+  assert.equal(tiles.has('10,10'), false);
+  assert.equal(tiles.has('11,10'), false);
 });
 
 test('translated conveyor puzzle keys retain their authored absolute floor layer', () => {

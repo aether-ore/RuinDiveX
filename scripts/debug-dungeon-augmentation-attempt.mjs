@@ -53,6 +53,149 @@ function countBy(values, keyFor) {
   }, new Map())].sort(([left], [right]) => left.localeCompare(right)));
 }
 
+function createGeometryIntegritySummary(generator, dungeon) {
+  const floorTiles = dungeon?.floorTiles ?? [];
+  const structuralTiles = [...(dungeon?.tiles?.values?.() ?? [])];
+  const rooms = dungeon?.rooms ?? [];
+  const roomById = new Map(rooms.map((room) => [String(room.id), room]));
+  const supplementalRoomIds = new Set(rooms
+    .filter(({ isDungeonSupplement }) => isDungeonSupplement === true)
+    .map(({ id }) => String(id)));
+  const authoredFloorTiles = floorTiles.filter((floor) => (
+    floor.roomId && !supplementalRoomIds.has(String(floor.roomId))
+  ));
+  const authoredStart = authoredFloorTiles[0] ?? null;
+  const reachableFloorKeys = authoredStart
+    ? generator._createReachableFloorTileKeySet(authoredStart, floorTiles)
+    : new Set();
+  const unreachableSupplementFloors = floorTiles.filter((floor) => (
+    supplementalRoomIds.has(String(floor.roomId ?? ''))
+      && !reachableFloorKeys.has(generator._getFloorTileGraphKey(floor))
+  ));
+  const unreachableNonSupplementFloors = floorTiles.filter((floor) => (
+    !supplementalRoomIds.has(String(floor.roomId ?? ''))
+      && !reachableFloorKeys.has(generator._getFloorTileGraphKey(floor))
+  ));
+  const authoredColumns = new Map();
+  for (const floor of authoredFloorTiles) {
+    const key = `${floor.x},${floor.z}`;
+    const values = authoredColumns.get(key) ?? [];
+    values.push(floor);
+    authoredColumns.set(key, values);
+  }
+  const authoredVolumeIntrusions = floorTiles.filter((floor) => {
+    if (!supplementalRoomIds.has(String(floor.roomId ?? ''))) return false;
+    return (authoredColumns.get(`${floor.x},${floor.z}`) ?? []).some((authoredFloor) => {
+      const authoredRoom = roomById.get(String(authoredFloor.roomId));
+      const authoredY = Number(authoredFloor.elevation ?? 0);
+      const ceilingY = Number(
+        authoredRoom?.ceilingY
+          ?? authoredRoom?.ceilingHeight
+          ?? (authoredY + 8.4),
+      );
+      const supplementalY = Number(floor.elevation ?? 0);
+      return supplementalY > authoredY + 0.05 && supplementalY < ceilingY - 0.05;
+    });
+  });
+  const mixedAuthoredSupplementFloors = floorTiles.filter((floor) => {
+    const ownerIds = floor.mergedFloorOwnerIds ?? [];
+    return ownerIds.some((ownerId) => supplementalRoomIds.has(String(ownerId)))
+      && ownerIds.some((ownerId) => (
+        roomById.has(String(ownerId))
+          && !supplementalRoomIds.has(String(ownerId))
+      ));
+  });
+  const unownedFloorTiles = floorTiles.filter((floor) => (
+    !floor.roomId
+      && !floor.connectionId
+      && !floor.connectorId
+      && !floor.connectorJunctionOwnerId
+      && !floor.augmentationOwnerId
+  ));
+  const floorColumns = new Set(floorTiles.map(({ x, z }) => `${x},${z}`));
+  const structuralEnvelopeCells = structuralTiles.filter((tile) => (
+    tile?.structuralEnvelopeOnly === true
+      || tile?.surface === 'connectorStructuralEnvelope'
+      || tile?.type === 'connectorEnvelope'
+  ));
+  const orphanStructuralEnvelopeCells = structuralEnvelopeCells.filter((tile) => {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        if (floorColumns.has(`${tile.x + dx},${tile.z + dz}`)) return false;
+      }
+    }
+    return true;
+  });
+  const boundaryWallRuns = dungeon?.augmentationPhysicalShell?.boundaryWallRuns ?? [];
+  const unownedBoundaryWallRuns = boundaryWallRuns.filter((run) => (
+    !Array.isArray(run.ownerIds) || run.ownerIds.length === 0
+  ));
+  const unreachableByRoom = countBy(
+    unreachableSupplementFloors,
+    ({ roomId }) => roomId,
+  );
+  return {
+    accepted: unreachableSupplementFloors.length === 0
+      && unreachableNonSupplementFloors.length === 0
+      && authoredVolumeIntrusions.length === 0
+      && mixedAuthoredSupplementFloors.length === 0
+      && unownedFloorTiles.length === 0
+      && orphanStructuralEnvelopeCells.length === 0
+      && unownedBoundaryWallRuns.length === 0,
+    authoredStartFloorKey: authoredStart
+      ? generator._getFloorTileGraphKey(authoredStart)
+      : null,
+    totalFloorTileCount: floorTiles.length,
+    reachableFloorTileCount: reachableFloorKeys.size,
+    unreachableSupplementFloorCount: unreachableSupplementFloors.length,
+    unreachableSupplementRoomCount: Object.keys(unreachableByRoom).length,
+    unreachableSupplementFloorsByRoom: unreachableByRoom,
+    unreachableNonSupplementFloorCount: unreachableNonSupplementFloors.length,
+    unreachableNonSupplementFloorsByRoom: countBy(
+      unreachableNonSupplementFloors,
+      ({ roomId, connectionId, connectorId }) => (
+        roomId ?? connectionId ?? connectorId ?? 'unowned'
+      ),
+    ),
+    unreachableNonSupplementFloorsBySurface: countBy(
+      unreachableNonSupplementFloors,
+      ({ surface, type }) => surface ?? type ?? 'unknown',
+    ),
+    unreachableNonSupplementFloorSamples: unreachableNonSupplementFloors
+      .slice(0, 50)
+      .map((floor) => ({
+        floorKey: generator._getFloorTileGraphKey(floor),
+        roomId: floor.roomId ?? null,
+        connectionId: floor.connectionId ?? floor.connectorId ?? null,
+        surface: floor.surface ?? floor.type ?? null,
+        isPlatformingSurface: Boolean(floor.isPlatformingSurface),
+        requiredTraversalAction: floor.requiredTraversalAction ?? null,
+      })),
+    authoredVolumeIntrusionCount: authoredVolumeIntrusions.length,
+    authoredVolumeIntrusionSamples: authoredVolumeIntrusions.slice(0, 30).map((floor) => ({
+      floorKey: generator._getFloorTileGraphKey(floor),
+      roomId: floor.roomId ?? null,
+      surface: floor.surface ?? floor.type ?? null,
+    })),
+    mixedAuthoredSupplementFloorCount: mixedAuthoredSupplementFloors.length,
+    unownedFloorTileCount: unownedFloorTiles.length,
+    unownedFloorSamples: unownedFloorTiles.slice(0, 30).map((floor) => ({
+      floorKey: generator._getFloorTileGraphKey(floor),
+      surface: floor.surface ?? floor.type ?? null,
+    })),
+    structuralEnvelopeCellCount: structuralEnvelopeCells.length,
+    orphanStructuralEnvelopeCellCount: orphanStructuralEnvelopeCells.length,
+    orphanStructuralEnvelopeSamples: orphanStructuralEnvelopeCells.slice(0, 30).map((tile) => ({
+      x: tile.x,
+      z: tile.z,
+      connectionId: tile.connectionId ?? tile.connectorId ?? null,
+      roomId: tile.roomId ?? null,
+    })),
+    boundaryWallRunCount: boundaryWallRuns.length,
+    unownedBoundaryWallRunCount: unownedBoundaryWallRuns.length,
+  };
+}
+
 // Facade-level alpha probe only: these checks prove that accepted generated
 // geometry reached the records consumed by gameplay. The exhaustive geometry,
 // reachability, variety, and corpus gates remain in the dedicated verifiers.
@@ -336,7 +479,8 @@ if (process.argv.includes('--candidate-summary')) {
   };
 }
 
-const seed = 'layout:augmentation-realized-v4-000';
+const seed = process.argv.find((argument) => argument.startsWith('--seed='))
+  ?.slice('--seed='.length) ?? 'layout:augmentation-realized-v4-000';
 const seeded = new SeededRandom(hashSeed(seed));
 const generator = new DungeonGenerator({
   random: () => seeded.next(),
@@ -344,14 +488,97 @@ const generator = new DungeonGenerator({
   augmentationProfileId: 'industrial-supplement-preview-v4',
   augmentationSeed: seed,
   basePlanHash: `v1:${seed}:depth:1:revolvingFusillade`,
+  allowInvalidAugmentationPreview: process.argv.includes('--playable-alpha'),
 });
 const texture = new THREE.Texture();
 generator.textureCache.set('debug-augmentation-attempt', texture);
 generator._loadRuinTexture = () => texture;
+let capturedPreSurfacePlans = [];
+let capturedBoundaryWallRuns = [];
+if (process.argv.includes('--wall-run-count')) {
+  const collectBoundaryWallRuns = generator._collectBoundaryWallRuns.bind(generator);
+  generator._collectBoundaryWallRuns = (...args) => {
+    capturedBoundaryWallRuns = collectBoundaryWallRuns(...args);
+    return capturedBoundaryWallRuns;
+  };
+}
+if (process.argv.includes('--failed-physical')) {
+  const applyConnectorTraversalSurfaces =
+    generator._applyConnectorTraversalSurfaces.bind(generator);
+  generator._applyConnectorTraversalSurfaces = (tiles, connectionPlans, floorTiles) => {
+    capturedPreSurfacePlans = connectionPlans;
+    return applyConnectorTraversalSurfaces(tiles, connectionPlans, floorTiles);
+  };
+}
 
-if (process.argv.includes('--playable-alpha')) {
+if (process.argv.includes('--playable-alpha') || process.argv.includes('--generate')) {
   const dungeon = generator.generate();
+  if (process.argv.includes('--failed-physical')) {
+    console.log(JSON.stringify({
+      status: dungeon.augmentationStatus,
+      rejectedErrors: dungeon.augmentationDiagnostics?.rejectedOverlay?.errors ?? [],
+      plans: capturedPreSurfacePlans.filter(({ id }) => String(id).includes(
+        ':routenetwork:1:segment:5:',
+      )).map(({ id, fromRoomId, toRoomId, sourceElevation, destinationElevation,
+        fromSocket, toSocket, fullPath, augmentationAuthoritativePath }) => ({
+        id, fromRoomId, toRoomId, sourceElevation, destinationElevation,
+        fromSocket, toSocket, fullPath, augmentationAuthoritativePath,
+      })),
+      keycardRoom: (dungeon.rooms ?? []).find(({ id }) => id === 'keycardRoom') ?? null,
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
+  if (process.argv.includes('--release-errors-only')) {
+    const requestedFloor = process.argv.find((argument) => argument.startsWith('--floor='))
+      ?.slice('--floor='.length)
+      ?.split(',')
+      ?.map(Number) ?? null;
+    const requestedConnection = process.argv.find((argument) => argument.startsWith('--connection='))
+      ?.slice('--connection='.length) ?? null;
+    console.log(JSON.stringify({
+      seed,
+      status: dungeon.augmentationStatus,
+      acceptedAsPlayableAlpha: dungeon.augmentationPlayableAlpha?.accepted === true,
+      releaseValidationAccepted: dungeon.progression?.validation?.accepted === true,
+      replay: dungeon.augmentationReplayDiagnostics ?? null,
+      errorCount: dungeon.progression?.validation?.errors?.length ?? 0,
+      errors: dungeon.progression?.validation?.errors ?? [],
+      floorTileCount: dungeon.floorTiles?.length ?? 0,
+      physicalSupplementPlanCount: (dungeon.connectionPlans ?? []).filter((plan) => (
+        plan.isDungeonSupplement && !plan.isSupplementGraphConnection
+      )).length,
+      boundaryWallRunCount: capturedBoundaryWallRuns.length,
+      ...(requestedFloor?.length === 2 && requestedFloor.every(Number.isFinite) ? {
+        requestedFloors: (dungeon.floorTiles ?? []).filter(({ x, z }) => (
+          Number(x) === requestedFloor[0] && Number(z) === requestedFloor[1]
+        )),
+      } : {}),
+      ...(requestedConnection ? {
+        requestedOverlaySegments: (dungeon.augmentationOverlayPlan?.segments ?? [])
+          .filter(({ id }) => String(id).includes(requestedConnection)),
+        requestedConnections: (dungeon.connectionPlans ?? []).filter(({ id }) => (
+          String(id).includes(requestedConnection)
+        )).map(({ id, fromRoomId, toRoomId, fromSocket, toSocket, fullPath, bridgePath,
+          authoritativeSocketSeams }) => ({
+          id,
+          fromRoomId,
+          toRoomId,
+          fromSocket,
+          toSocket,
+          fullPath,
+          bridgePath,
+          authoritativeSocketSeams,
+        })),
+      } : {}),
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
   const smoke = createPlayableAlphaSmokeSummary(dungeon);
+  const geometryIntegrity = createGeometryIntegritySummary(generator, dungeon);
   const upperPlatforms = (dungeon.platforms ?? []).filter(({ platformGroupId }) => (
     platformGroupId === 'upper'
   ));
@@ -379,6 +606,57 @@ if (process.argv.includes('--playable-alpha')) {
       ), 0),
       upperPlatformOwnerCount: new Set(upperPlatforms.map(({ roomId }) => roomId)).size,
     },
+    affectedTransferPlacements: {
+      treatmentControlRamp: (dungeon.floorTiles ?? [])
+        .filter(({ augmentationTransferId }) => String(augmentationTransferId ?? '').includes('tc-ramp'))
+        .sort((left, right) => (
+          Number(left.elevation ?? 0) - Number(right.elevation ?? 0)
+        ))
+        .map((floor) => ({
+          x: floor.x,
+          z: floor.z,
+          elevation: floor.elevation,
+          rampStartElevation: floor.rampStartElevation,
+          rampEndElevation: floor.rampEndElevation,
+          rampDirectionX: floor.rampDirectionX,
+          rampDirectionZ: floor.rampDirectionZ,
+        })),
+      supplementalLadders: (dungeon.ladders ?? [])
+        .filter(({ augmentationTransfer }) => augmentationTransfer === true)
+        .map((ladder) => {
+          const owner = [...(dungeon.rooms ?? []), ...(dungeon.connectorJunctionProxies ?? [])]
+            .find(({ id }) => String(id) === String(ladder.connectionId));
+          const wallPoint = ladder.wallFaceGridPoint ?? ladder.apertureGridPoint;
+          return {
+            id: ladder.id,
+            owner: owner ? {
+              id: owner.id,
+              blueprintId: owner.augmentationBlueprintId,
+              baseElevation: owner.baseElevation,
+              transfer: (owner.augmentationTransfers ?? []).find(({ id }) => id === ladder.id),
+            } : null,
+            planeCenter: ladder.planeCenter,
+            planeNormal: ladder.planeNormal,
+            bottomY: ladder.bottomY,
+            topY: ladder.topY,
+            bottomExit: ladder.bottomExit,
+            topExit: ladder.topExit,
+            wallFaceGridPoint: wallPoint,
+            bottomApproachFloorKey: ladder.bottomApproachFloorKey,
+            placementSource: ladder.placementSource,
+            nearbyOwnedFloors: (dungeon.floorTiles ?? [])
+              .filter(({ roomId, x, z }) => (
+                String(roomId ?? '') === String(owner?.id ?? '')
+                  && Math.abs(Number(x) - Number(wallPoint?.x)) <= 1
+                  && Math.abs(Number(z) - Number(wallPoint?.z)) <= 1
+              ))
+              .map(({ x, z, elevation, floorKey, augmentationFloorCellId, surface }) => ({
+                x, z, elevation, floorKey, augmentationFloorCellId, surface,
+              })),
+          };
+        }),
+    },
+    geometryIntegrity,
   }, null, 2));
   generator._disposeGeneratedDungeonCandidate(dungeon);
   texture.dispose();
@@ -435,9 +713,13 @@ if (process.argv.includes('--grants-only')) {
 }
 if (process.argv.includes('--host-only')) console.log(JSON.stringify({
   rooms: base.dungeon.rooms
-    .filter(({ id }) => [witnessGrant?.mustPreserveBeatIds ?? []].flat().includes(id))
-    .map(({ id, x, z, width, depth, baseElevation }) => ({
-      id, x, z, width, depth, baseElevation,
+    .filter(({ id }) => (
+      process.argv.includes('--all-rooms')
+        || [witnessGrant?.mustPreserveBeatIds ?? []].flat().includes(id)
+        || id === 'keycardRoom'
+    ))
+    .map(({ id, x, z, width, depth, baseElevation, minY, maxY, ceilingHeight }) => ({
+      id, x, z, width, depth, baseElevation, minY, maxY, ceilingHeight,
     })),
   connection: base.dungeon.connectionPlans
     .filter(({ logicalConnectionId }) => logicalConnectionId === requestedGrant)
@@ -452,6 +734,11 @@ if (process.argv.includes('--host-only')) console.log(JSON.stringify({
   stationDiagnostics: witnessGrant?.planningStationSideDiagnostics,
   grantProtectedVolumes: host.extensionRegions[0].routeNetworkPlacementProtectedVolumes
     .filter(({ ownerId }) => String(ownerId) === requestedGrant),
+  baseRoomPlanningVolumes: host.extensionRegions[0].routeNetworkPlacementProtectedVolumes
+    .filter(({ id }) => String(id).includes('room'))
+    .map(({ id, ownerId, center, size, purpose }) => ({
+      id, ownerId, center, size, purpose,
+    })),
 }, null, 2));
 if (process.argv.includes('--host-only')) {
   generator._disposeGeneratedDungeonCandidate(base.dungeon);
@@ -467,6 +754,12 @@ if (process.argv.includes('--plan-only')) {
     rooms: base.dungeon.rooms,
     connectionPlans: base.dungeon.connectionPlans,
   });
+  if (process.argv.includes('--diagnostics-only')) {
+    console.log(JSON.stringify(planned?.diagnostics ?? null, null, 2));
+    generator._disposeGeneratedDungeonCandidate(base.dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
   if (process.argv.includes('--failure-summary')) {
     const error = planned?.diagnostics?.errors?.[0] ?? null;
     const context = error?.context ?? {};
@@ -507,6 +800,33 @@ if (process.argv.includes('--plan-only')) {
     process.exit(0);
   }
   const overlayPlan = planned?.result?.overlayPlan ?? null;
+  if (process.argv.includes('--transfer-summary')) {
+    console.log(JSON.stringify({
+      status: planned?.status ?? null,
+      rooms: (planned?.materialized?.rooms ?? [])
+        .filter(({ augmentationTransfers }) => (augmentationTransfers?.length ?? 0) > 0)
+        .map((room) => ({
+          id: room.id,
+          x: room.x,
+          z: room.z,
+          blueprintId: room.augmentationBlueprintId,
+          rotationQuarterTurns: room.augmentationRotationQuarterTurns,
+          transfers: room.augmentationTransfers.map((transfer) => ({
+            id: transfer.id,
+            form: transfer.form,
+            localElevationRange: transfer.localElevationRange,
+            worldElevationRange: transfer.worldElevationRange,
+            worldEndpoints: transfer.worldEndpoints,
+            localTraversalAxis: transfer.localTraversalAxis,
+            localTraversalReversed: transfer.localTraversalReversed,
+            localTraversalOrientationSource: transfer.localTraversalOrientationSource,
+          })),
+        })),
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(base.dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
   if (process.argv.includes('--physical-summary')) {
     const requestedSegment = process.argv.find((argument) => argument.startsWith('--segment='))
       ?.slice('--segment='.length) ?? null;
@@ -670,9 +990,283 @@ if (process.argv.includes('--plan-only')) {
 try {
   const dungeon = generator._generateOnce();
   const rawDiagnostics = dungeon.augmentationDiagnostics ?? null;
+  const floorByGraphKey = new Map((dungeon.floorTiles ?? []).map((floor) => [
+    generator._getFloorTileGraphKey(floor),
+    floor,
+  ]));
   const playableAlphaSmoke = createPlayableAlphaSmokeSummary(dungeon);
+  const rejectedEntranceChecks = (dungeon.progression?.validation?.connectorEntrances?.checks ?? [])
+    .filter(({ accepted }) => accepted !== true);
+  const missingApproachCoordinates = [...new Map(rejectedEntranceChecks.flatMap((check) => (
+    (check.laneChecks ?? []).flatMap((lane) => lane.points
+      .filter(({ floorKey }) => !floorKey)
+      .map((point) => [`${point.x},${point.z}`, { x: point.x, z: point.z }]))
+  ))).values()];
+  const blockingPlatformTops = generator._createBlockingPlatformColumnMap(dungeon.floorTiles ?? []);
+  const blockedApproachDiagnostics = missingApproachCoordinates.slice(0, 80).map(({ x, z }) => {
+    const floors = (dungeon.floorTiles ?? []).filter((floor) => floor.x === x && floor.z === z);
+    return {
+      x,
+      z,
+      blockingPlatformTop: blockingPlatformTops.get(`${x},${z}`) ?? null,
+      floors: floors.map((floor) => ({
+        floorKey: generator._getFloorTileGraphKey(floor),
+        roomId: floor.roomId ?? null,
+        connectorId: floor.signedConnectorFloorOwnerId
+          ?? floor.connectionId
+          ?? floor.connectorId
+          ?? null,
+        sharedConnectorFloorOwnerIds: floor.sharedConnectorFloorOwnerIds ?? [],
+        surface: floor.surface ?? null,
+        walkabilityIntent: floor.walkabilityIntent ?? null,
+        steepRamp: floor.steepRamp === true,
+        blockingZoneIds: (dungeon.solidZones ?? [])
+          .filter((zone) => generator._isPositionInsideZone(
+            generator._floorTileToWorld(floor),
+            zone,
+          ))
+          .map(({ id }) => id),
+      })),
+    };
+  });
+  const supplementalRoomById = new Map((dungeon.rooms ?? [])
+    .filter(({ isDungeonSupplement }) => isDungeonSupplement === true)
+    .map((room) => [String(room.id), room]));
+  const unexpectedBlockedRoomFloorDiagnostics = (dungeon.floorTiles ?? [])
+    .filter((floor) => supplementalRoomById.has(String(floor.roomId ?? '')))
+    .map((floor) => {
+      const room = supplementalRoomById.get(String(floor.roomId));
+      const position = generator._floorTileToWorld(floor);
+      const blockingZones = (dungeon.solidZones ?? []).filter((zone) => (
+        generator._isPositionInsideZone(position, zone)
+      ));
+      const authoredZoneIds = new Set(generator
+        ._createDungeonSupplementManifestSolidZones([room])
+        .map(({ id }) => String(id)));
+      return {
+        floorKey: generator._getFloorTileGraphKey(floor),
+        roomId: floor.roomId,
+        surface: floor.surface ?? null,
+        transferId: floor.augmentationTransferId ?? null,
+        walkabilityIntent: floor.walkabilityIntent ?? null,
+        blockingPlatformTop: blockingPlatformTops.get(`${floor.x},${floor.z}`) ?? null,
+        blockingZones: blockingZones.map((zone) => ({
+          id: zone.id,
+          roomId: zone.roomId ?? null,
+          obstacleKind: zone.obstacleKind ?? null,
+          declaredByFloorOwner: authoredZoneIds.has(String(zone.id)),
+        })),
+      };
+    })
+    .filter(({ blockingZones, blockingPlatformTop, floorKey, walkabilityIntent }) => {
+      if (walkabilityIntent === 'support-only') return false;
+      const floorElevation = Number(floorKey.match(/@y(-?[0-9.]+)/)?.[1] ?? 0);
+      return blockingZones.some(({ declaredByFloorOwner }) => !declaredByFloorOwner)
+        || (Number.isFinite(blockingPlatformTop)
+          && blockingPlatformTop > floorElevation + 0.05);
+    })
+    .slice(0, 180);
+  if (process.argv.includes('--errors-only')) {
+    const summarizeConnectorEntrance = (check) => ({
+      connectionId: check.connectionId ?? null,
+      accepted: check.accepted === true,
+      source: check.sourceRoomId ?? check.fromRoomId ?? null,
+      target: check.targetRoomId ?? check.toRoomId ?? null,
+      missingApproachFloorKeys: check.missingApproachFloorKeys ?? [],
+      blockedApproachFloorKeys: check.blockedApproachFloorKeys ?? [],
+      unreachableApproachFloorKeys: check.unreachableApproachFloorKeys ?? [],
+      nonReturnableApproachFloorKeys: check.nonReturnableApproachFloorKeys ?? [],
+      errors: check.errors ?? [],
+    });
+    const summarizeConnectivity = (check) => ({
+      id: check.connectionId ?? check.roomId ?? check.junctionId
+        ?? check.operationId ?? check.id ?? null,
+      accepted: check.accepted === true,
+      routeStationProxy: check.routeStationProxy ?? null,
+      connectorModuleProxy: check.connectorModuleProxy ?? null,
+      attachedPhysicalConnectionIds: check.attachedPhysicalConnectionIds ?? [],
+      requiredPhysicalArmCount: check.requiredPhysicalArmCount ?? null,
+      requiredApproachCount: check.requiredApproachCount ?? null,
+      attachedConnectorsTraversable: check.attachedConnectorsTraversable ?? null,
+      approachCount: check.approachCount ?? null,
+      approachChecks: check.approachChecks ?? [],
+      coreFloorCount: check.coreFloorCount ?? null,
+      navigableCoreFloorCount: check.navigableCoreFloorCount ?? null,
+      expectedCoreFloorCount: check.expectedCoreFloorCount ?? null,
+      coreFloorCoverageAccepted: check.coreFloorCoverageAccepted ?? null,
+      foreignCoreFloorOwnerIds: check.foreignCoreFloorOwnerIds ?? [],
+      unownedMergedCoreFloorSourceCount: check.unownedMergedCoreFloorSourceCount ?? null,
+      locallyReachableFloorCount: check.locallyReachableFloorCount ?? null,
+      locallyReturnableFloorCount: check.locallyReturnableFloorCount ?? null,
+      missingFloorKeys: check.missingCenterlineFloorKeys ?? check.missingFloorKeys ?? [],
+      unreachableFloorKeys: check.unreachableCenterlineFloorKeys
+        ?? check.locallyUnreachableRoomFloorKeys ?? check.unreachableFloorKeys ?? [],
+      nonReturnableFloorKeys: check.nonReturnableCenterlineFloorKeys
+        ?? check.locallyNonReturnableRoomFloorKeys ?? check.nonReturnableFloorKeys ?? [],
+      missingApproachFloorKeys: check.missingApproachFloorKeys ?? [],
+      blockedApproachFloorKeys: check.blockedApproachFloorKeys ?? [],
+      errors: check.errors ?? [],
+    });
+    console.log(JSON.stringify({
+      status: dungeon.augmentationStatus,
+      accepted: dungeon.progression?.validation?.accepted ?? null,
+      errorCount: dungeon.progression?.validation?.errors?.length ?? 0,
+      errors: dungeon.progression?.validation?.errors ?? [],
+      rejectedConnectorEntrances: (dungeon.progression?.validation?.connectorEntrances
+        ?.checks ?? []).filter(({ accepted }) => accepted !== true).map(summarizeConnectorEntrance),
+      rejectedConnectorSpines: (dungeon.progression?.validation?.platformability
+        ?.supplementConnectivityChecks ?? []).filter(({ accepted }) => accepted !== true)
+        .map(summarizeConnectivity),
+      rejectedLocalSockets: (dungeon.progression?.validation?.platformability
+        ?.localSocketChecks ?? []).filter(({ accessibleFromOwnerRoom }) => (
+        accessibleFromOwnerRoom !== true
+      )).map((check) => ({
+        ...check,
+        socket: (dungeon.connectionPlans ?? []).flatMap((plan) => [
+          { planId: plan.id, socket: plan.fromSocket },
+          { planId: plan.id, socket: plan.toSocket },
+        ]).find(({ socket }) => socket?.id === check.socketId) ?? null,
+        floor: floorByGraphKey.get((dungeon.connectionPlans ?? []).flatMap((plan) => [
+          plan.fromSocket,
+          plan.toSocket,
+        ]).find((socket) => socket?.id === check.socketId)?.floorKey) ?? null,
+      })),
+      rejectedJunctions: (dungeon.progression?.validation?.platformability
+        ?.supplementJunctionConnectivityChecks ?? []).filter(({ accepted }) => accepted !== true)
+        .map(summarizeConnectivity),
+      rejectedOperations: (dungeon.progression?.validation?.platformability
+        ?.supplementOperationConnectivityChecks ?? []).filter(({ accepted }) => accepted !== true)
+        .map(summarizeConnectivity),
+      blockedSupplementFloors: (dungeon.progression?.validation?.platformability
+        ?.blockedSupplementFloorKeys ?? []).map((floorKey) => {
+        const floor = floorByGraphKey.get(floorKey) ?? null;
+        const position = floor ? generator._floorTileToWorld(floor) : null;
+        return {
+          floorKey,
+          floor,
+          blockingPlatformTop: floor
+            ? blockingPlatformTops.get(`${floor.x},${floor.z}`) ?? null
+            : null,
+          blockingZones: position ? (dungeon.solidZones ?? [])
+            .filter((zone) => generator._isPositionInsideZone(position, zone))
+            .map(({ id, roomId, obstacleKind }) => ({ id, roomId, obstacleKind })) : [],
+        };
+      }),
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(dungeon, base.dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
+  if (process.argv.includes('--failed-rooms-only')) {
+    const diagnosticBarrierZones = [
+      ...(dungeon.solidZones ?? []),
+      ...(dungeon.aerialBoundaryZones ?? []),
+    ].filter((zone, index, zones) => (
+      zone?.position && zones.findIndex((candidate) => candidate?.id === zone?.id) === index
+    ));
+    const failedRooms = (dungeon.progression?.validation?.platformability
+      ?.supplementRoomConnectivityChecks ?? [])
+      .filter(({ accepted }) => accepted !== true)
+      .map((check) => {
+        const room = supplementalRoomById.get(String(check.roomId)) ?? null;
+        const unreachableKeys = new Set(check.locallyUnreachableRoomFloorKeys ?? []);
+        const nonReturnableKeys = new Set(check.locallyNonReturnableRoomFloorKeys ?? []);
+        const frontierEdges = [...unreachableKeys].flatMap((floorKey) => {
+          const floor = floorByGraphKey.get(floorKey);
+          if (!floor) return [];
+          return (dungeon.floorTiles ?? [])
+            .filter((candidate) => candidate.roomId === floor.roomId)
+            .filter((candidate) => (
+              Math.abs(candidate.x - floor.x) + Math.abs(candidate.z - floor.z) === 1
+            ))
+            .filter((candidate) => !unreachableKeys.has(generator._getFloorTileGraphKey(candidate)))
+            .map((candidate) => ({
+              from: generator._getFloorTileGraphKey(candidate),
+              to: floorKey,
+              action: generator._getTraversalActionBetweenFloorTiles(candidate, floor),
+              blockers: diagnosticBarrierZones
+                .filter((zone) => generator._doesFloorTraversalSegmentIntersectZone(
+                  candidate,
+                  floor,
+                  zone,
+                  0.42,
+                ))
+                .map(({ id }) => String(id).split(':blueprint-feature:').at(-1)),
+            }));
+        }).slice(0, 12);
+        const returnFrontierEdges = [...nonReturnableKeys].flatMap((floorKey) => {
+          const floor = floorByGraphKey.get(floorKey);
+          if (!floor) return [];
+          return (dungeon.floorTiles ?? [])
+            .filter((candidate) => candidate.roomId === floor.roomId)
+            .filter((candidate) => (
+              Math.abs(candidate.x - floor.x) + Math.abs(candidate.z - floor.z) === 1
+            ))
+            .filter((candidate) => !nonReturnableKeys.has(generator._getFloorTileGraphKey(candidate)))
+            .map((candidate) => ({
+              from: floorKey,
+              to: generator._getFloorTileGraphKey(candidate),
+              action: generator._getTraversalActionBetweenFloorTiles(floor, candidate),
+              blockers: diagnosticBarrierZones
+                .filter((zone) => generator._doesFloorTraversalSegmentIntersectZone(
+                  floor,
+                  candidate,
+                  zone,
+                  0.42,
+                ))
+                .map(({ id }) => String(id).split(':blueprint-feature:').at(-1)),
+            }));
+        }).slice(0, 12);
+        return {
+          roomId: check.roomId,
+          blueprintId: room?.augmentationBlueprintId ?? null,
+          center: room ? { x: room.x, z: room.z, y: room.baseElevation ?? 0 } : null,
+          rotationQuarterTurns: room?.augmentationRotationQuarterTurns ?? null,
+          transfers: (room?.augmentationTransfers ?? []).map((transfer) => ({
+            id: transfer.localTransferId ?? transfer.id,
+            form: transfer.form ?? transfer.traversalKind ?? transfer.kind,
+            endpoints: Object.fromEntries(Object.entries(transfer.worldEndpoints ?? {}).map(([
+              key,
+              endpoint,
+            ]) => [key, {
+              floorCellId: endpoint.floorCellId,
+              transferCellId: endpoint.transferCellId,
+              grid: endpoint.grid,
+              elevation: endpoint.elevation,
+            }])),
+            cells: (transfer.worldCells ?? []).map((cell) => ({
+              grid: cell.grid,
+              elevation: cell.elevation,
+              id: cell.id,
+            })),
+          })),
+          connectedApproaches: (check.localApproachChecks ?? []).map((approach) => ({
+            floorKey: approach.floorKey,
+            reachable: approach.reachableFromFirstApproach,
+            returnable: approach.returnReachable,
+          })),
+          unreachableCount: check.locallyUnreachableRoomFloorKeys?.length ?? 0,
+          unreachableSamples: (check.locallyUnreachableRoomFloorKeys ?? []).slice(0, 8),
+          nonReturnableCount: check.locallyNonReturnableRoomFloorKeys?.length ?? 0,
+          nonReturnableSamples: (check.locallyNonReturnableRoomFloorKeys ?? []).slice(0, 8),
+          orphanCount: check.orphanFloorKeys?.length ?? 0,
+          frontierEdges,
+          returnFrontierEdges,
+        };
+      });
+    console.log(JSON.stringify({
+      status: dungeon.augmentationStatus,
+      errorCount: dungeon.progression?.validation?.errors?.length ?? 0,
+      failedRooms,
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(dungeon, base.dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
   console.log(JSON.stringify({
     status: dungeon.augmentationStatus,
+    blockedApproachDiagnostics,
+    unexpectedBlockedRoomFloorDiagnostics,
     playableAlphaSmoke: {
       ready: playableAlphaSmoke.ready,
       failedAssertions: playableAlphaSmoke.failedAssertions,
@@ -685,7 +1279,84 @@ try {
     progressionValidation: dungeon.progression?.validation ? {
       accepted: dungeon.progression.validation.accepted,
       errorCount: dungeon.progression.validation.errors?.length ?? 0,
-      errors: dungeon.progression.validation.errors?.slice(0, 220) ?? [],
+      errorKinds: countBy(dungeon.progression.validation.errors ?? [], (error) => {
+        if (error.includes('decorative V1 arches')) return 'v1-arches';
+        if (error.includes('theme-bound V4 structural frames')) return 'v4-frames';
+        if (error.includes('clear two-tile bidirectional approach')) return 'socket-approach';
+        if (error.includes('realized traversal floor')) return 'connector-floor';
+        if (error.includes('orphaned realized centerline')) return 'connector-orphan';
+        if (error.includes('declared base-floor footprint')) return 'room-footprint';
+        if (error.includes('orphaned walkable floor')) return 'room-orphan';
+        if (error.includes('locally clear, bidirectional component')) return 'room-local';
+        if (error.includes('connector module is not one exact-elevation')) return 'junction-local';
+        if (error.includes('Supplement assembly contains')) return 'assembly-aggregate';
+        if (error.includes('realized operation graph')) return 'operation-graph';
+        if (error.includes('encounter spawn')) return 'encounter-spawn';
+        if (error.includes('cannot be reached locally')) return 'socket-local';
+        return 'other';
+      }),
+      errors: dungeon.progression.validation.errors?.slice(0, 90) ?? [],
+      failedRoomChecks: (dungeon.progression.validation.platformability
+        ?.supplementRoomConnectivityChecks ?? [])
+        .filter(({ accepted }) => accepted !== true)
+        .map((check) => {
+          const room = supplementalRoomById.get(String(check.roomId)) ?? null;
+          const unreachableKeys = new Set(check.locallyUnreachableRoomFloorKeys ?? []);
+          const frontierEdges = [...unreachableKeys]
+            .flatMap((floorKey) => {
+              const floor = floorByGraphKey.get(floorKey);
+              if (!floor) return [];
+              return (dungeon.floorTiles ?? [])
+                .filter((candidate) => candidate.roomId === floor.roomId)
+                .filter((candidate) => (
+                  Math.abs(candidate.x - floor.x) + Math.abs(candidate.z - floor.z) === 1
+                ))
+                .filter((candidate) => !unreachableKeys.has(generator._getFloorTileGraphKey(candidate)))
+                .map((candidate) => ({
+                  fromFloorKey: generator._getFloorTileGraphKey(candidate),
+                  toFloorKey: floorKey,
+                  action: generator._getTraversalActionBetweenFloorTiles(candidate, floor),
+                  blockingZoneIds: (dungeon.solidZones ?? [])
+                    .filter((zone) => zone?.position)
+                    .filter((zone) => generator._doesFloorTraversalSegmentIntersectZone(
+                      candidate,
+                      floor,
+                      zone,
+                      0.42,
+                    ))
+                    .map(({ id }) => id),
+                }));
+            })
+            .slice(0, 16);
+          return {
+          roomId: check.roomId,
+          blueprintId: room?.augmentationBlueprintId ?? null,
+          center: room ? { x: room.x, z: room.z, y: room.baseElevation ?? 0 } : null,
+          rotationQuarterTurns: room?.augmentationRotationQuarterTurns ?? null,
+          transferForms: (room?.augmentationTransfers ?? []).map((transfer) => ({
+            id: transfer.localTransferId ?? transfer.id,
+            form: transfer.form ?? transfer.kind ?? transfer.traversalKind,
+            worldElevationRange: transfer.worldElevationRange,
+            endpointFloorKeys: Object.values(transfer.worldEndpoints ?? {}).map((endpoint) => (
+              endpoint?.grid
+                ? `${endpoint.grid.x},${endpoint.grid.z}@y${Number(endpoint.elevation).toFixed(3)}`
+                : null
+            )).filter(Boolean),
+          })),
+          connectedSocketIds: check.connectedSocketIds,
+          localApproachChecks: (check.localApproachChecks ?? []).map((approach) => ({
+            socketId: approach.socketId,
+            floorKey: approach.floorKey,
+            reachableFromFirstApproach: approach.reachableFromFirstApproach,
+            returnReachable: approach.returnReachable,
+          })),
+          authoredBlockingRoomFloorCount: check.authoredBlockingRoomFloorCount,
+          locallyUnreachableRoomFloorKeys: (check.locallyUnreachableRoomFloorKeys ?? []).slice(0, 12),
+          locallyNonReturnableRoomFloorKeys: (check.locallyNonReturnableRoomFloorKeys ?? []).slice(0, 12),
+          orphanFloorKeys: (check.orphanFloorKeys ?? []).slice(0, 12),
+          frontierEdges: frontierEdges.slice(0, 8),
+        };
+        }),
       effectiveGraphAccepted: dungeon.progression.validation.effectiveGraph?.accepted ?? null,
       rejectedConnectorEntrances: (
         dungeon.progression.validation.connectorEntrances?.checks ?? []

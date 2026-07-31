@@ -2050,8 +2050,7 @@ export function resolveRouteNetworkGrammarAssignments({
     topologyTemplateId,
   );
   if (!topologyKitGrammar
-    || routeNetworkKind === 'landmark-perimeter-loop'
-    || routeNetworkKind === 'objective-route-coverage') {
+    || routeNetworkKind === 'landmark-perimeter-loop') {
     if (routeNetworkKind === 'objective-route-coverage') {
       balanceObjectiveRouteGrammarAssignments({
         profile,
@@ -6195,7 +6194,7 @@ function planRouteNetwork({
       ))
     );
     const indexedStaticNodeCollisionScore = (node, overlapGrants = []) => (
-      [...(node.occupiedVolumes ?? []), ...(node.clearanceVolumes ?? [])]
+      [...(node?.occupiedVolumes ?? []), ...(node?.clearanceVolumes ?? [])]
         .reduce((score, nodeVolume) => (
           score + [...nearbyStaticAvoidanceVolumes(nodeVolume)].reduce((count, obstacle) => (
             count + (planningVolumesOverlap(nodeVolume, obstacle)

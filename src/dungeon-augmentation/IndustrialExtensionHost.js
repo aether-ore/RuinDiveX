@@ -241,12 +241,15 @@ function createSocketLandingOverlapGrant(socket, tileSize, suffix = '') {
       z: Number(socket.position?.z ?? socket.z * tileSize ?? 0),
     },
     size: {
-      x: horizontal ? tileSize * 2 : tileSize * 3,
+      x: horizontal ? tileSize * 5 : tileSize * 3,
       y: 3.6,
-      z: horizontal ? tileSize * 3 : tileSize * 2,
+      z: horizontal ? tileSize * 3 : tileSize * 5,
     },
     purpose: 'route-network-doorway-landing-overlap',
-    maximumBoundaryDepthTiles: 1,
+    widthTiles: 3,
+    insideDepthTiles: 2,
+    outsideDepthTiles: 2,
+    maximumBoundaryDepthTiles: 2,
     parentOwnerId: String(socket.logicalEdgeId ?? socket.parentRouteId ?? ''),
   };
 }

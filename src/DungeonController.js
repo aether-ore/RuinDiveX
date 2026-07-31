@@ -5079,11 +5079,20 @@ export class DungeonController {
 
   _getMechanismBlockingEncounter(mechanism) {
     if (!mechanism) return null;
-    const requirements = this._readDoorRequirementIds(
-      mechanism,
-      ['requiresEncounterIds', 'requiredEncounterIds'],
-      ['requiresEncounterId', 'requiredEncounterId'],
-    );
+    const requirements = typeof this._readDoorRequirementIds === 'function'
+      ? this._readDoorRequirementIds(
+          mechanism,
+          ['requiresEncounterIds', 'requiredEncounterIds'],
+          ['requiresEncounterId', 'requiredEncounterId'],
+        )
+      : {
+          ids: [...new Set([
+            ...(mechanism.requiresEncounterIds ?? []),
+            ...(mechanism.requiredEncounterIds ?? []),
+            mechanism.requiresEncounterId,
+            mechanism.requiredEncounterId,
+          ].filter(Boolean).map(String))],
+        };
     for (const id of requirements.ids) {
       const encounter = this.encounters.find((candidate) => (
         candidate.id === id

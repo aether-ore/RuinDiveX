@@ -2113,6 +2113,66 @@ function nearestBlueprintTierCell(tier, localPoint) {
   ))[0] ?? null;
 }
 
+function blueprintTierDistanceSquared(floorTiers, localPoint, elevation) {
+  const tier = (floorTiers ?? []).find(({ localElevation }) => (
+    approximatelyEqualNumber(localElevation, elevation)
+  ));
+  if (!tier?.worldCells?.length) return Number.POSITIVE_INFINITY;
+  return tier.worldCells.reduce((minimum, cell) => Math.min(
+    minimum,
+    (number(cell.localTile?.x) - number(localPoint?.x)) ** 2
+      + (number(cell.localTile?.z) - number(localPoint?.z)) ** 2,
+  ), Number.POSITIVE_INFINITY);
+}
+
+export function orientBlueprintTransferChoice({
+  choice,
+  previousPoint,
+  floorTiers,
+  fromElevation,
+  toElevation,
+}) {
+  const distanceFromPrevious = (point) => (
+    (point.x - number(previousPoint?.x, point.x)) ** 2
+      + (point.z - number(previousPoint?.z, point.z)) ** 2
+  );
+  const firstDistance = distanceFromPrevious(choice.first);
+  const secondDistance = distanceFromPrevious(choice.second);
+  const forwardTierDistance = blueprintTierDistanceSquared(
+    floorTiers,
+    choice.first,
+    fromElevation,
+  ) + blueprintTierDistanceSquared(
+    floorTiers,
+    choice.second,
+    toElevation,
+  );
+  const reverseTierDistance = blueprintTierDistanceSquared(
+    floorTiers,
+    choice.second,
+    fromElevation,
+  ) + blueprintTierDistanceSquared(
+    floorTiers,
+    choice.first,
+    toElevation,
+  );
+  const hasTierPreference = Number.isFinite(forwardTierDistance)
+    && Number.isFinite(reverseTierDistance)
+    && Math.abs(forwardTierDistance - reverseTierDistance) > 0.000001;
+  const reversed = hasTierPreference
+    ? reverseTierDistance < forwardTierDistance
+    : secondDistance < firstDistance;
+  return {
+    ...choice,
+    from: reversed ? choice.second : choice.first,
+    to: reversed ? choice.first : choice.second,
+    distance: Math.min(firstDistance, secondDistance),
+    tierDistance: Math.min(forwardTierDistance, reverseTierDistance),
+    reversed,
+    orientationSource: hasTierPreference ? 'floor-tier-alignment' : 'entry-proximity',
+  };
+}
+
 function realizeBlueprintClearRoutes({
   node,
   operation,
@@ -2513,23 +2573,23 @@ function realizeBlueprintTransfers({
         span: depthTiles,
       }] : []),
     ];
-    const distanceFromPrevious = (point) => (
-      (point.x - number(previousTransferLocalPoint?.x, centerX)) ** 2
-        + (point.z - number(previousTransferLocalPoint?.z, centerZ)) ** 2
-    );
-    const orientedChoices = axisChoices.map((choice) => {
-      const firstDistance = distanceFromPrevious(choice.first);
-      const secondDistance = distanceFromPrevious(choice.second);
-      return {
-        ...choice,
-        from: firstDistance <= secondDistance ? choice.first : choice.second,
-        to: firstDistance <= secondDistance ? choice.second : choice.first,
-        distance: Math.min(firstDistance, secondDistance),
-        reversed: secondDistance < firstDistance,
-      };
-    }).sort((left, right) => (
-      left.distance - right.distance
+    const fromElevation = number(sectionRoute[0]?.elevation);
+    const toElevation = number(sectionRoute.at(-1)?.elevation);
+    const explicitlyAuthoredAxis = ['x', 'z'].includes(String(transfer.axis))
+      ? String(transfer.axis)
+      : null;
+    const orientedChoices = axisChoices.map((choice) => orientBlueprintTransferChoice({
+      choice,
+      previousPoint: previousTransferLocalPoint ?? { x: centerX, z: centerZ },
+      floorTiers,
+      fromElevation,
+      toElevation,
+    })).sort((left, right) => (
+      Number(Boolean(explicitlyAuthoredAxis && right.axis === explicitlyAuthoredAxis))
+        - Number(Boolean(explicitlyAuthoredAxis && left.axis === explicitlyAuthoredAxis))
         || right.span - left.span
+        || left.tierDistance - right.tierDistance
+        || left.distance - right.distance
         || left.axis.localeCompare(right.axis)
     ));
     const orientation = orientedChoices[0] ?? {
@@ -2537,6 +2597,7 @@ function realizeBlueprintTransfers({
       from: { x: centerX, z: centerZ },
       to: { x: centerX, z: centerZ },
       reversed: false,
+      orientationSource: 'vertical-device',
     };
     const variesAlongX = orientation.axis === 'x';
     const runtimeId = `${node.id}:blueprint-transfer:${stableIdPart(transfer.id)}`;
@@ -2585,8 +2646,6 @@ function realizeBlueprintTransfers({
         });
       }
     }
-    const fromElevation = number(sectionRoute[0]?.elevation);
-    const toElevation = number(sectionRoute.at(-1)?.elevation);
     const fromLocalTile = {
       x: orientation.from.x,
       z: orientation.from.z,
@@ -2652,6 +2711,7 @@ function realizeBlueprintTransfers({
       },
       localTraversalAxis: orientation.axis,
       localTraversalReversed: orientation.reversed,
+      localTraversalOrientationSource: orientation.orientationSource,
       worldCells,
       worldEndpoints,
       sectionRoute: sectionRoute.map(({ progress, elevation }) => ({

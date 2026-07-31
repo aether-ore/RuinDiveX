@@ -1883,7 +1883,10 @@ function validateLandingOverlapGrants(grant, errors) {
     }
     seen.add(socketId);
     if (!finitePoint(overlap?.center) || !positiveSize(overlap?.size)
-      || Number(overlap?.maximumBoundaryDepthTiles) !== 1) {
+      || Number(overlap?.maximumBoundaryDepthTiles) !== 2
+      || Number(overlap?.widthTiles ?? 0) !== 3
+      || Number(overlap?.insideDepthTiles ?? 0) !== 2
+      || Number(overlap?.outsideDepthTiles ?? 0) !== 2) {
       errors.push(diagnostic(
         'route-network-landing-overlap-invalid',
         `Grant ${grant.id} has an invalid bounded landing overlap.`,
@@ -1895,7 +1898,7 @@ function validateLandingOverlapGrants(grant, errors) {
     const width = Number(overlap.size[horizontal ? 'z' : 'x']);
     const boundaryDepth = Number(overlap.size[horizontal ? 'x' : 'z']);
     if (width > Number(socket?.widthMeters ?? 8.4) + 1e-4
-      || boundaryDepth > 5.6 + 1e-4
+      || boundaryDepth > 14 + 1e-4
       || Number(overlap.size.y) > Number(socket?.heightMeters ?? 3.6) + 1e-4
       || dungeonPointDistance(overlap.center, {
         ...socket.position,
@@ -4260,7 +4263,8 @@ export function validateDungeonAugmentationPlan(plan, {
       || !segment.landings.every((landing) => finitePoint(landing?.position))) {
       errors.push(diagnostic('segment-landings-invalid', `Segment ${segment?.id} lacks endpoint landing records.`, { segmentId: segment?.id }));
     }
-    if (!sharedJunctionThreshold && (!Array.isArray(segment?.landingVolumes)
+    if (isV4AugmentationPlan(plan, profile)
+      && !sharedJunctionThreshold && (!Array.isArray(segment?.landingVolumes)
       || segment.landingVolumes.length !== 2
       || !segment.landingVolumes.every((volume) => finitePoint(volume?.center) && positiveSize(volume?.size)))) {
       errors.push(diagnostic('segment-landing-volumes-invalid', `Segment ${segment?.id} lacks valid endpoint landing volumes.`, { segmentId: segment?.id }));

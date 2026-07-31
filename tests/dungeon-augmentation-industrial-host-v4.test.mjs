@@ -254,12 +254,25 @@ test('Industrial V4 host budgets direct-aperture pyramid and coverage routes by 
     assert.equal(grant.endpointSockets.every(({ endpointModuleOverlapRequired }) => (
       endpointModuleOverlapRequired === true
     )), true);
-    assert.equal(grant.socketModuleOverlapGrants.length, grant.endpointSockets.length);
-    const overlapBySocketId = new Map(grant.socketModuleOverlapGrants.map((overlap) => (
-      [overlap.socketId, overlap]
-    )));
+    assert.equal(grant.socketModuleOverlapGrants.length, grant.endpointSockets.length * 2);
     for (const socket of grant.endpointSockets) {
-      const overlap = overlapBySocketId.get(socket.id);
+      const socketOverlaps = grant.socketModuleOverlapGrants.filter((overlap) => (
+        overlap.socketId === socket.id
+      ));
+      assert.deepEqual(
+        socketOverlaps.map(({ moduleTemplateId, footprintTiles }) => ({
+          moduleTemplateId,
+          footprintTiles,
+        })),
+        [{
+          moduleTemplateId: 'supplement-route-connector-through-t-v1',
+          footprintTiles: { width: 5, depth: 7 },
+        }, {
+          moduleTemplateId: 'supplement-route-connector-through-t-branch-entry-v1',
+          footprintTiles: { width: 7, depth: 5 },
+        }],
+      );
+      const overlap = socketOverlaps[0];
       const horizontal = Math.abs(Number(socket.facing.x)) > 0;
       assert.deepEqual({
         ...overlap,

@@ -10,8 +10,49 @@ import {
   INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS,
   INDUSTRIAL_SUPPLEMENT_BLUEPRINTS,
 } from '../src/dungeon-augmentation/IndustrialSupplementBlueprintCatalog.js';
+import { orientBlueprintTransferChoice } from '../src/dungeon-augmentation/IndustrialOverlayMaterializer.js';
 
 const V4_PROFILE_ID = 'industrial-supplement-preview-v4';
+
+function realizedTierCells(blueprint) {
+  return blueprint.floorTiers.map((tier) => ({
+    localElevation: tier.elevation,
+    worldCells: tier.floorMask.flatMap((row, rowIndex) => [...row].flatMap((symbol, columnIndex) => (
+      symbol === '#'
+        ? [{
+            id: `${tier.id}:${columnIndex}:${rowIndex}`,
+            localTile: {
+              x: tier.maskOriginTile.x + columnIndex,
+              z: tier.maskOriginTile.z + rowIndex,
+            },
+          }]
+        : []
+    ))),
+  }));
+}
+
+test('treatment-control ramp rises toward its authored upper ledge', () => {
+  const blueprint = INDUSTRIAL_SUPPLEMENT_BLUEPRINTS['ind-room-treatment-control-01'];
+  const transfer = blueprint.physicalTransfers.find(({ id }) => id === 'tc-ramp');
+  const halfDepth = (transfer.depthTiles - 1) * 0.5;
+  const orientation = orientBlueprintTransferChoice({
+    choice: {
+      axis: 'z',
+      first: { x: transfer.footprintTiles.x, z: transfer.footprintTiles.z - halfDepth },
+      second: { x: transfer.footprintTiles.x, z: transfer.footprintTiles.z + halfDepth },
+      span: transfer.depthTiles,
+    },
+    previousPoint: { x: 0, z: 5 },
+    floorTiers: realizedTierCells(blueprint),
+    fromElevation: 0,
+    toElevation: 2.8,
+  });
+
+  assert.equal(orientation.orientationSource, 'floor-tier-alignment');
+  assert.equal(orientation.reversed, false);
+  assert.deepEqual(orientation.from, { x: 4, z: -3 });
+  assert.deepEqual(orientation.to, { x: 4, z: 3 });
+});
 
 const LEGACY_GRAMMAR_POOLS = Object.freeze({
   'industrial-supplement-preview-v1': Object.freeze([
@@ -46,6 +87,7 @@ const CONNECTOR_BLUEPRINT_IDS = Object.freeze([
   'ind-junction-staggered-cross-01',
   'ind-interchange-stacked-01',
   'ind-crossover-over-under-01',
+  'ind-junction-through-t-branch-entry-01',
 ]);
 
 function blueprintGrammar(blueprintId) {
@@ -90,12 +132,15 @@ function rotateQuarterTurns(point, quarterTurns) {
   return { ...point };
 }
 
-test('the V4 grammar pool contains exactly all 21 authored blueprints', () => {
+test('the V4 grammar pool contains exactly every authored blueprint', () => {
   const profile = DUNGEON_AUGMENTATION_PROFILES[V4_PROFILE_ID];
   assert.equal(profile.revision, 5);
   assert.deepEqual(profile.grammarPool, INDUSTRIAL_SUPPLEMENT_BLUEPRINT_GRAMMAR_POOL);
-  assert.equal(profile.grammarPool.length, 21);
-  assert.equal(new Set(profile.grammarPool.map(({ id }) => id)).size, 21);
+  assert.equal(profile.grammarPool.length, INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS.length);
+  assert.equal(
+    new Set(profile.grammarPool.map(({ id }) => id)).size,
+    INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS.length,
+  );
 
   const pooledGrammars = profile.grammarPool.map(({ id }) => (
     GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS[id]
@@ -205,7 +250,10 @@ test('only compact junction infrastructure is connector-owned', () => {
     }
   }
   assert.deepEqual(connectorIds.sort(), [...CONNECTOR_BLUEPRINT_IDS].sort());
-  assert.equal(substantiveIds.length, 16);
+  assert.equal(
+    substantiveIds.length,
+    INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS.length - CONNECTOR_BLUEPRINT_IDS.length,
+  );
   assert.ok(substantiveIds.includes('ind-loop-paired-t-h-01'));
   assert.ok(substantiveIds.includes('ind-rise-long-freight-ramp-01'));
 });

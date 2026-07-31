@@ -225,12 +225,15 @@ function makeV4ValidationFixture() {
         y: socket.position.y + 1.8,
       },
       size: {
-        x: horizontal ? 5.6 : 8.4,
+        x: horizontal ? 14 : 8.4,
         y: 3.6,
-        z: horizontal ? 8.4 : 5.6,
+        z: horizontal ? 8.4 : 14,
       },
       purpose: 'route-network-doorway-landing-overlap',
-      maximumBoundaryDepthTiles: 1,
+      widthTiles: 3,
+      insideDepthTiles: 2,
+      outsideDepthTiles: 2,
+      maximumBoundaryDepthTiles: 2,
     };
   });
   const grant = {
@@ -685,12 +688,15 @@ function appendV4CrossBandShortcutFixture(fixture, plan, {
       socketId: socket.id,
       center: { ...socket.position, y: Number(socket.position.y) + 1.8 },
       size: {
-        x: horizontal ? 5.6 : 8.4,
+        x: horizontal ? 14 : 8.4,
         y: 3.6,
-        z: horizontal ? 8.4 : 5.6,
+        z: horizontal ? 8.4 : 14,
       },
       purpose: 'route-network-doorway-landing-overlap',
-      maximumBoundaryDepthTiles: 1,
+      widthTiles: 3,
+      insideDepthTiles: 2,
+      outsideDepthTiles: 2,
+      maximumBoundaryDepthTiles: 2,
     };
   };
   const grant = {
@@ -891,9 +897,12 @@ function appendSharedJunctionThresholdCoverageFixture(fixture, plan) {
     id: `${socket.id}:landing-overlap`,
     socketId: socket.id,
     center: { ...socket.position, y: 1.8 },
-    size: { x: 8.4, y: 3.6, z: 5.6 },
+    size: { x: 8.4, y: 3.6, z: 14 },
     purpose: 'route-network-doorway-landing-overlap',
-    maximumBoundaryDepthTiles: 1,
+    widthTiles: 3,
+    insideDepthTiles: 2,
+    outsideDepthTiles: 2,
+    maximumBoundaryDepthTiles: 2,
   }));
   const coverage = {
     logicalEdgeId: coveredConnection.logicalEdgeId,
@@ -2496,12 +2505,12 @@ test('V4 fails closed for late gates, unknown credentials, and keycard-band bypa
   assert.ok(codes.includes('progression-boundary-credential-missing'));
 });
 
-test('V4 rejects landing overlaps that extend beyond one doorway boundary tile', () => {
+test('V4 rejects landing overlaps that extend beyond two clear approach tiles per side', () => {
   const { fixture, plan } = makeV4ValidationFixture();
   const overlap = fixture.extensionRegions[0]
     .routeNetworkGrants[0]
     .socketLandingOverlapGrants[0];
-  overlap.size.z = 11.2;
+  overlap.size.z = 16.8;
 
   const validation = validateV4(plan, fixture);
   assert.equal(validation.accepted, false);
@@ -2524,8 +2533,8 @@ test('V4 base-volume overlap is allowed only inside the segment endpoint exact l
   const bounded = validateV4(plan, fixture);
   assert.equal(bounded.accepted, true, JSON.stringify(bounded.errors));
 
-  endpointLanding.center.z = 4.2;
-  fixture.baseDraft.occupiedVolumes[0].center.z = 4.2;
+  endpointLanding.center.z = 8.4;
+  fixture.baseDraft.occupiedVolumes[0].center.z = 8.4;
   rehash(plan);
   const escaped = validateV4(plan, fixture);
   assert.equal(escaped.accepted, false);

@@ -854,8 +854,8 @@ test('V4 pyramid route networks bind both unused wall sockets exactly and preser
   const entry = result.connectionPlans.find(({ id }) => id.endsWith('segment:entry'));
   assert.deepEqual(entry.fullPath.slice(0, 3), [
     { x: 3, z: 0 },
-    { x: 4, z: 0 },
-    { x: 5, z: 0 },
+    { x: 3, z: -1 },
+    { x: 3, z: -2 },
   ]);
   assert.equal(entry.fromSocket.id, 'industrial-v1:keycardRoom:east-unused');
   assert.deepEqual(entry.landingOverlapGrants[0].size, { x: 5.6, y: 3.6, z: 8.399999999999999 });
@@ -1427,7 +1427,7 @@ function sharedJunctionThresholdFixture() {
   };
 }
 
-test('shared junction thresholds materialize only the two adjacent junction-core boundary cells', () => {
+test('shared junction thresholds materialize one shared authoritative seam centerline', () => {
   const fixture = sharedJunctionThresholdFixture();
   const result = materializeIndustrialOverlay({
     rooms: fixture.rooms,
@@ -1451,13 +1451,13 @@ test('shared junction thresholds materialize only the two adjacent junction-core
       path[1].z - path[0].z,
     ) === 5.6
   )));
-  assert.deepEqual(plan.fullPath, [{ x: 0, z: 0 }, { x: 1, z: 0 }]);
+  assert.deepEqual(plan.fullPath, [{ x: 0, z: 0 }]);
   assert.deepEqual(plan.bridgePath, plan.fullPath);
   assert.deepEqual(plan.fromSocket.grantedWorldPosition, { x: 0, y: 0, z: 0 });
   assert.deepEqual(plan.toSocket.grantedWorldPosition, { x: 0, y: 0, z: 0 });
   assert.deepEqual(
     [plan.fromSocket.x, plan.fromSocket.z, plan.toSocket.x, plan.toSocket.z],
-    [0, 0, 1, 0],
+    [0, 0, 0, 0],
   );
   assert.equal(plan.connectorVariantId, null);
   assert.equal(plan.connectorVariant, null);

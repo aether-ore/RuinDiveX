@@ -391,7 +391,10 @@ const BLUEPRINT_DEFINITIONS = [
       { id: 'rf-press-column-e', type: 'machine', x: 2, z: 0, w: 1, d: 1, label: 'P', solid: true },
       { id: 'rf-crates-w', type: 'cover', x: -3, z: 2, w: 1, d: 2, label: '½', solid: true },
       { id: 'rf-crates-e', type: 'cover', x: 3, z: 2, w: 1, d: 2, label: '½', solid: true },
-      { id: 'rf-ramp', type: 'transfer', x: 4, z: 1, w: 1, d: 3, label: '↗' },
+      // A 2.8 m tier change needs at least six movement intervals under the
+      // shared 0.55 m-per-tile envelope. Seven authored cells provide both
+      // endpoint samples and keep the physical slope deterministic.
+      { id: 'rf-ramp', type: 'transfer', x: 4, z: 1, w: 1, d: 7, label: '↗' },
       { id: 'rf-frontline', type: 'spawn', x: 0, z: -3, w: 1, d: 1, label: 'F' },
       { id: 'rf-flank-w', type: 'spawn', x: -4, z: 1, w: 1, d: 1, label: 'L' },
       // This cell is also part of the ramp/upper-perch projection. Pin the
@@ -400,7 +403,7 @@ const BLUEPRINT_DEFINITIONS = [
       { id: 'rf-flank-e', type: 'spawn', x: 4, z: 1, w: 1, d: 1, label: 'L', tier: 'base' },
       { id: 'rf-perch', type: 'spawn', x: 3, z: -2, w: 1, d: 1, label: 'P', tier: 'upper' },
     ],
-    traversal: 'A 3-tile through lane and two 2-tile flank lanes connect S entry to N reconnect. The east ramp reaches the +2.80 m perch without blocking return travel.',
+    traversal: 'A 3-tile through lane and two 2-tile flank lanes connect S entry to N reconnect. The seven-cell east ramp reaches the +2.80 m perch within the shared movement envelope without blocking return travel.',
     gameplay: 'Recipe supplement-route-network-defense: basic frontline, fast flank pair, ranged perch; high difficulty may replace the perch unit with Horokko. Only this network exit clears.',
     state: 'rf-encounter-cleared; no global hazard action.',
   },
@@ -429,10 +432,10 @@ const BLUEPRINT_DEFINITIONS = [
       { id: 'tc-emitter', type: 'machine', x: 0, z: 0, w: 1, d: 1, label: 'E', solid: true },
       { id: 'tc-bulkhead', type: 'cover', x: -3, z: 1, w: 1, d: 2, label: 'F', solid: true },
       { id: 'tc-valve-bank', type: 'cover', x: 3, z: -2, w: 1, d: 2, label: '½', solid: true },
-      { id: 'tc-ramp', type: 'transfer', x: 4, z: 0, w: 1, d: 3, label: '↗' },
+      { id: 'tc-ramp', type: 'transfer', x: 4, z: 0, w: 1, d: 7, label: '↗' },
       { id: 'tc-control', type: 'control', x: 3, z: 3, w: 1, d: 1, label: 'C', tier: 'upper' },
     ],
-    traversal: 'S safe approach splits into two 2-tile bypasses around the 3×3 armed field; both reconnect at N. The east ramp reaches the +2.80 m control deck.',
+    traversal: 'S safe approach splits into two 2-tile bypasses around the 3×3 armed field; both reconnect at N. The seven-cell east ramp reaches the +2.80 m control deck within the shared movement envelope.',
     gameplay: 'The console changes only tc-treatment-field from armed to isolated, adding a 3-tile center crossing. Enemy anchors are restricted to safe floor and the deck.',
     state: 'tc-mechanism-activated; tc-hazard-disabled; tc-encounter-cleared.',
   },
@@ -441,7 +444,7 @@ const BLUEPRINT_DEFINITIONS = [
     name: 'Ladder relay defense',
     family: 'Elevation room / ladder challenge',
     purpose: 'A compact defense floor feeds a permanently deployed ladder and an upper relay bridge exactly one 2.8 m tier above the entry.',
-    mask: ['.........', '.........', '.........', '.........', '.........', '....#####', '#########', '#########', '#########', '.#######.', '...###...'],
+    mask: ['.........', '.........', '.........', '.........', '.........', '....#####', '..#######', '..#######', '.########', '.#######.', '...###...'],
     upper: ['...###...', '.#######.', '#########', '#########', '#########', '....#####', '.........', '.........', '.........', '.........', '.........'],
     upperY: 2.8,
     sockets: [
@@ -979,7 +982,7 @@ const BLUEPRINT_DEFINITIONS = [
     name: 'Switchgear cache descent',
     family: 'Compact elevation room / reward stair',
     purpose: 'A compact upper inspection landing descends exactly one 2.8 m tier past failed switchgear to a safely offset maintenance cache and a base-level reconnect.',
-    mask: ['.......', '.......', '.......', '.......', '#######', '#######', '#######'],
+    mask: ['.......', '.......', '.......', '.......', '#######', '#######', '.######'],
     upper: ['..###..', '#######', '#######', '.......', '.......', '.......', '.......'],
     upperY: 2.8,
     sockets: [
@@ -1026,7 +1029,7 @@ const BLUEPRINT_DEFINITIONS = [
     name: 'Survey relay cache',
     family: 'Compact room / calm reward discovery',
     purpose: 'A chamfered survey relay offers a quiet inspection beat, a protected three-tile through lane, and an optional cache beside the decommissioned plotting equipment.',
-    mask: ['..###..', '.#####.', '#######', '#######', '#######', '.#####.', '..###..'],
+    mask: ['..###..', '.#####.', '#######', '#######', '.######', '.#####.', '..###..'],
     upper: [], upperY: null,
     sockets: [
       { id: 'src-n', side: 'N', center: 0, width: 3, y: 0, role: 'entry' },

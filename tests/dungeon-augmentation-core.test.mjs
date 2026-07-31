@@ -377,6 +377,69 @@ test('missing parent theme capabilities and bindings stop realization after one 
   );
 });
 
+test('invalid augmentation preview acceptance requires both explicit opt-in and the V4 profile', () => {
+  const runInvalidReplay = ({
+    profileId = 'industrial-supplement-preview-v4',
+    allowInvalidAugmentationPreview = false,
+  } = {}) => {
+    let realizationCalls = 0;
+    const generator = new DungeonGenerator({
+      random: () => 0.5,
+      basePlanHash: `base:explicit-alpha-gate:${profileId}`,
+      augmentationSeed: `augmentation:explicit-alpha-gate:${profileId}`,
+      augmentationProfileId: profileId,
+      allowInvalidAugmentationPreview,
+    });
+    generator._generateAcceptedIndustrialDungeon = () => ({
+      dungeon: {
+        basePlanHash: generator.basePlanHash,
+        generationAttempts: 1,
+        progression: { validation: { accepted: true, errors: [] } },
+      },
+      randomTape: [],
+    });
+    generator._generateOnce = () => {
+      realizationCalls += 1;
+      return {
+        augmentationStatus: 'applied',
+        augmentationDiagnostics: { errors: [] },
+        progression: {
+          validation: {
+            accepted: false,
+            errors: ['Synthetic collision-derived release failure.'],
+          },
+        },
+      };
+    };
+    generator._finalizeAcceptedIndustrialDungeon = (dungeon) => dungeon;
+    generator._disposeGeneratedDungeonCandidate = () => {};
+    return {
+      dungeon: generator._generateIndustrialDungeonWithAugmentationReplay(),
+      realizationCalls,
+    };
+  };
+
+  const ordinaryV4 = runInvalidReplay();
+  assert.equal(ordinaryV4.realizationCalls, 8);
+  assert.equal(ordinaryV4.dungeon.augmentationStatus, 'unchanged');
+  assert.equal(ordinaryV4.dungeon.augmentationReplayDiagnostics.fallbackToAcceptedBase, true);
+
+  const explicitV4Alpha = runInvalidReplay({ allowInvalidAugmentationPreview: true });
+  assert.equal(explicitV4Alpha.realizationCalls, 1);
+  assert.equal(explicitV4Alpha.dungeon.augmentationStatus, 'applied');
+  assert.equal(explicitV4Alpha.dungeon.augmentationPlayableAlpha.accepted, true);
+  assert.equal(explicitV4Alpha.dungeon.augmentationReplayDiagnostics.acceptedAsPlayableAlpha, true);
+  assert.equal(explicitV4Alpha.dungeon.augmentationReplayDiagnostics.releaseValidationAccepted, false);
+
+  const legacyProfile = runInvalidReplay({
+    profileId: 'industrial-supplement-preview-v3',
+    allowInvalidAugmentationPreview: true,
+  });
+  assert.equal(legacyProfile.realizationCalls, 8);
+  assert.equal(legacyProfile.dungeon.augmentationStatus, 'unchanged');
+  assert.equal(legacyProfile.dungeon.augmentationPlayableAlpha, undefined);
+});
+
 test(`${VERIFICATION_SEED_COUNT} augmentation seeds are deterministic, immutable, namespaced, and within profile budgets`, () => {
   const planHashes = new Set();
   const structuralSignatures = new Set();
@@ -897,7 +960,7 @@ test('the Industrial V2 host grants the exact unused keycard walls and tile-alig
       && grant.endpointSockets.every(({ endpointModuleOverlapRequired }) => (
         endpointModuleOverlapRequired === true
       ))
-      && grant.socketModuleOverlapGrants.length === grant.endpointSockets.length
+      && grant.socketModuleOverlapGrants.length === grant.endpointSockets.length * 2
   )), true);
   const alphaCoverage = coverage.find(({ coverage: contract }) => (
     contract.logicalEdgeId === 'keycardRoom_trapRoom'
@@ -963,8 +1026,11 @@ test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active p
         id: `${socket.id}:landing-overlap`,
         socketId: socket.id,
         center: { ...socket.position, y: 1.8 },
-        size: { x: horizontal ? 5.6 : 8.4, y: 3.6, z: horizontal ? 8.4 : 5.6 },
-        maximumBoundaryDepthTiles: 1,
+        size: { x: horizontal ? 14 : 8.4, y: 3.6, z: horizontal ? 8.4 : 14 },
+        widthTiles: 3,
+        insideDepthTiles: 2,
+        outsideDepthTiles: 2,
+        maximumBoundaryDepthTiles: 2,
       };
     }),
     mustPreserveBeatIds: ['enemyNestGate', 'keycardGuard', 'Keycard_Alpha', 'Door_Alpha'],
@@ -1004,6 +1070,13 @@ test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active p
   const junctionKinds = new Set();
   const elevationModes = new Set();
   const v4Profile = DUNGEON_AUGMENTATION_PROFILES['industrial-supplement-preview-v4'];
+  const singleNetworkProfile = {
+    ...v4Profile,
+    requiredVariety: {
+      ...v4Profile.requiredVariety,
+      elevationModeCount: 1,
+    },
+  };
   const metersFromTiles = (tiles) => Number((tiles * tileSize).toFixed(6));
   const expectedJunctionFootprints = new Map([
     ['through-t', [metersFromTiles(5), metersFromTiles(7)]],
@@ -1022,10 +1095,10 @@ test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active p
     grammar?.selectionConstraints?.routeNetworkModuleKind !== 'connector-module'
   ));
   assert.equal(v4Profile.revision, 5);
-  assert.equal(v4Grammars.length, 21);
+  assert.equal(v4Grammars.length, v4Profile.grammarPool.length);
   assert.equal(v4Grammars.every((grammar) => Boolean(grammar?.blueprintId)), true);
-  assert.equal(connectorGrammars.length, 5);
-  assert.equal(contentGrammars.length, 16);
+  assert.equal(connectorGrammars.length, 6);
+  assert.equal(contentGrammars.length, v4Grammars.length - connectorGrammars.length);
   assert.equal(contentGrammars.every((grammar) => (
     grammar?.selectionConstraints?.connectorOwned !== true
   )), true);
@@ -1047,7 +1120,8 @@ test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active p
     const options = {
       baseDraft,
       extensionRegions: [extensionRegion],
-      profileId: 'industrial-supplement-preview-v4',
+      profileId: singleNetworkProfile.id,
+      profiles: { [singleNetworkProfile.id]: singleNetworkProfile },
       layoutSeed: `pure-v4:${index}`,
     };
     const first = augmentDungeonDraft(options);

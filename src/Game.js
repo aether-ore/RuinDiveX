@@ -882,9 +882,7 @@ export function captureDungeonAugmentationMutableState({
 
   writeRecords(controller?.encounters, 'encounter', (encounter) => Boolean(encounter.cleared));
   writeRecords(
-    controller?.mechanisms?.filter((mechanism) => (
-      !isDungeonSupplementShortcutMechanism(mechanism)
-    )),
+    controller?.mechanisms,
     'mechanism',
     (mechanism) => Boolean(mechanism.activated),
     { includeGenericStateId: false },
@@ -5711,6 +5709,7 @@ export class Game {
       random: createDungeonRandom(this.dungeonLayoutSeed),
       bossProfileId: this.getSelectedBossProfileId(),
       augmentationProfileId: this.dungeonAugmentationProfileId,
+      allowInvalidAugmentationPreview: this.dungeonAugmentationPlayableAlphaMode,
       augmentationSeed: this.dungeonLayoutSeed,
       basePlanHash,
     }).generate();
@@ -10062,6 +10061,11 @@ export class Game {
       augmentationSeed: layoutSeed,
       basePlanHash,
       committedAugmentationIdentity: augmentationRequest.committedAugmentationIdentity,
+      allowInvalidAugmentationPreview: Boolean(
+        this.dungeonAugmentationPlayableAlphaMode
+          && augmentationRequest.augmentationProfileId
+            === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+      ),
     }).generate();
     dungeon.layoutSeed = layoutSeed;
     dungeon.basePlanHash ??= basePlanHash;

@@ -337,6 +337,11 @@ const CONNECTOR_APERTURE_VERTICAL_MARGIN = 0.08;
 const DUNGEON_AUGMENTATION_MAX_REALIZATION_ATTEMPTS = 8;
 const INDUSTRIAL_SUPPLEMENT_PLAYABLE_ALPHA_PROFILE_ID =
   'industrial-supplement-preview-v4';
+const isV4SupplementalRoutePlan = (plan) => Boolean(
+  plan?.isDungeonSupplement === true
+    && plan?.augmentationOperationType === 'routeNetwork'
+    && plan?.routeNetworkGrantId,
+);
 const NON_RETRYABLE_DUNGEON_THEME_ASSEMBLY_CODES = new Set([
   'MISSING_PARENT_THEME_SESSION',
   'INVALID_PARENT_THEME_SESSION',
@@ -1732,6 +1737,61 @@ function dungeonSupplementBlueprintTransferCells(owner, transfer) {
   return cells;
 }
 
+export function resolveDungeonSupplementLadderFace({
+  owner,
+  centerGrid,
+  bottomElevation,
+  topElevation,
+  floorTiles = [],
+}) {
+  const matchesOwner = (floor) => Boolean(
+    String(floor?.roomId ?? '') === String(owner?.id ?? '')
+      || String(floor?.connectorJunctionOwnerId ?? '') === String(owner?.id ?? '')
+      || (
+        !floor?.roomId
+        && String(floor?.augmentationOwnerId ?? '') === String(
+          owner?.augmentationOperationId ?? owner?.id ?? '',
+        )
+      )
+  );
+  const ownedFloors = floorTiles.filter(matchesOwner);
+  const floorAt = (x, z, elevation) => ownedFloors.find((floor) => (
+    Number(floor.x) === Number(x)
+      && Number(floor.z) === Number(z)
+      && Math.abs(Number(floor.elevation ?? 0) - Number(elevation)) <= 0.05
+  )) ?? null;
+  const centerX = Math.round(Number(centerGrid?.x));
+  const centerZ = Math.round(Number(centerGrid?.z));
+  const candidates = DIRECTIONS.map(([x, z], ordinal) => {
+    const bottomApproachFloor = floorAt(centerX + x, centerZ + z, bottomElevation);
+    const topSameSideFloor = floorAt(centerX + x, centerZ + z, topElevation);
+    const bottomOppositeFloor = floorAt(centerX - x, centerZ - z, bottomElevation);
+    const topContinuationFloor = floorAt(centerX - x, centerZ - z, topElevation);
+    return {
+      normal: { x, z },
+      ordinal,
+      bottomApproachFloor,
+      topContinuationFloor,
+      score: (bottomApproachFloor ? 8 : 0)
+        + (topContinuationFloor ? 4 : 0)
+        - (topSameSideFloor ? 3 : 0)
+        - (bottomOppositeFloor ? 1 : 0),
+    };
+  }).filter(({ bottomApproachFloor }) => Boolean(bottomApproachFloor));
+  const selected = candidates.sort((left, right) => (
+    right.score - left.score || left.ordinal - right.ordinal
+  ))[0] ?? null;
+  if (!selected) return null;
+  return {
+    normal: selected.normal,
+    bottomApproachFloor: selected.bottomApproachFloor,
+    topContinuationFloor: selected.topContinuationFloor,
+    planeOffsetTiles: 0.5,
+    score: selected.score,
+    source: 'floor-tier-transition',
+  };
+}
+
 function stampDungeonSupplementBlueprintTransfers(
   tiles,
   physicalOwners = [],
@@ -2059,9 +2119,19 @@ function stampDungeonSupplementBlueprintTransfers(
       const topFloor = bottomFloor === fromFloor ? toFloor : fromFloor;
       const bottomElevation = Number(bottomFloor.elevation ?? 0);
       const topElevation = Number(topFloor.elevation ?? 0);
+      const ladderFace = form === 'ladder'
+        ? resolveDungeonSupplementLadderFace({
+            owner,
+            centerGrid,
+            bottomElevation,
+            topElevation,
+            floorTiles,
+          })
+        : null;
+      const bottomMountFloor = ladderFace?.bottomApproachFloor ?? bottomFloor;
       const bottomLandingTiles = serializeLandingTiles(
         owner,
-        bottomFloor,
+        bottomMountFloor,
         Math.max(3, widthTiles),
         Math.max(3, depthTiles),
       );
@@ -2073,17 +2143,22 @@ function stampDungeonSupplementBlueprintTransfers(
       );
 
       if (form === 'ladder') {
-        addTransferLinks(fromFloor, toFloor, 'ladder', transfer);
-        const planeNormal = facing.clone();
+        addTransferLinks(bottomMountFloor, topFloor, 'ladder', transfer);
+        const planeNormal = ladderFace
+          ? new THREE.Vector3(ladderFace.normal.x, 0, ladderFace.normal.z)
+          : facing.clone();
         const planeCenter = new THREE.Vector3(
           centerGrid.x * tileSize,
           0,
           centerGrid.z * tileSize,
+        ).addScaledVector(
+          planeNormal,
+          ladderFace ? tileSize * ladderFace.planeOffsetTiles : 0,
         );
         const bottomExit = new THREE.Vector3(
-          bottomFloor.x * tileSize,
+          bottomMountFloor.x * tileSize,
           bottomElevation,
-          bottomFloor.z * tileSize,
+          bottomMountFloor.z * tileSize,
         );
         const topExit = new THREE.Vector3(
           topFloor.x * tileSize,
@@ -2111,6 +2186,13 @@ function stampDungeonSupplementBlueprintTransfers(
           width: Math.min(1.7, Math.max(0.9, widthTiles * tileSize - 0.5)),
           caged: true,
           apertureGridPoint: { x: Math.round(centerGrid.x), z: Math.round(centerGrid.z) },
+          wallFaceGridPoint: { x: Math.round(centerGrid.x), z: Math.round(centerGrid.z) },
+          placementSource: ladderFace?.source ?? 'endpoint-delta-fallback',
+          bottomApproachFloorKey: absoluteFloorTileKey(
+            bottomMountFloor.x,
+            bottomMountFloor.z,
+            bottomElevation,
+          ),
           landingWidthTiles: Math.max(3, widthTiles),
           landingDepthTiles: Math.max(3, depthTiles),
           landingWidthMeters: Math.max(3, widthTiles) * tileSize,
@@ -2195,6 +2277,7 @@ export class DungeonGenerator {
     augmentationSeed = null,
     basePlanHash = null,
     committedAugmentationIdentity = null,
+    allowInvalidAugmentationPreview = false,
   } = {}) {
     this.tileSize = tileSize;
     this.random = random;
@@ -2212,6 +2295,7 @@ export class DungeonGenerator {
       && typeof committedAugmentationIdentity === 'object'
       ? committedAugmentationIdentity
       : null;
+    this.allowInvalidAugmentationPreview = allowInvalidAugmentationPreview === true;
     this.dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID;
     this.textureLoader = new THREE.TextureLoader();
     this.fbxLoader = new FBXLoader();
@@ -2655,23 +2739,28 @@ export class DungeonGenerator {
       const expectedEarlyAugmentationRejection = new Set([
         'DUNGEON_AUGMENTATION_PLANNING_UNCHANGED',
         'DUNGEON_AUGMENTATION_CONNECTOR_PREFLIGHT_FAILED',
+        // Physical ownership is finalized while the supplement is stamped,
+        // before the replay reaches the rest of the authored RNG tape. It is
+        // a deterministic, seed-dependent overlay rejection just like route
+        // preflight, so the outer V4 realization bag must be allowed to try
+        // its next seed without treating the shorter replay as parent drift.
+        'DUNGEON_AUGMENTATION_FOREIGN_FLOOR_OWNERSHIP',
       ]).has(replayFailure?.code);
       const releaseValidationAccepted = Boolean(
         augmentedDungeon?.progression?.validation?.accepted,
       );
-      const playableAlphaRequested = (
-        requestedProfileId === INDUSTRIAL_SUPPLEMENT_PLAYABLE_ALPHA_PROFILE_ID
+      const playableAlphaRequested = Boolean(
+        this.allowInvalidAugmentationPreview
+          && requestedProfileId === INDUSTRIAL_SUPPLEMENT_PLAYABLE_ALPHA_PROFILE_ID,
       );
       const augmentationPhysicallyRealized = Boolean(
         !replayFailure
         && replayConsumedExactly
         && augmentedDungeon?.augmentationStatus === 'applied'
       );
-      // V4 is still an explicit, disabled-by-default preview. Retain a fully
-      // materialized first realization for hands-on alpha playtests even while
-      // its stricter release validators continue reporting failures. Earlier
-      // immutable profiles and the default non-augmentation path retain their
-      // exact acceptance/fallback behavior.
+      // Invalid geometry may be retained only for an explicit V4 alpha URL.
+      // Ordinary V4 requests remain release-authoritative and atomically fall
+      // back to the unchanged parent dungeon on any validation failure.
       const augmentationAccepted = Boolean(
         augmentationPhysicallyRealized
         && (releaseValidationAccepted || playableAlphaRequested)
@@ -3741,7 +3830,7 @@ export class DungeonGenerator {
     let elevatedConnectorJunctionCoreFloors = [];
     let supplementalRewardTiles = [];
     let supplementalTrapTiles = [];
-    if (dungeonAugmentation?.status === 'applied') {
+    if (usesAuthoritativeV4Geometry && dungeonAugmentation?.status === 'applied') {
       supplementalRewardTiles = createIndustrialSupplementRewardTiles(
         rooms.filter((room) => room.isDungeonSupplement),
         this.tileSize,
@@ -3859,6 +3948,19 @@ export class DungeonGenerator {
       solidZones,
     });
     floorTiles = this._applyConnectorTraversalSurfaces(tiles, tileConnectionPlans, floorTiles);
+    const authoritativeSupplementSocketSeams = usesAuthoritativeV4Geometry
+      ? this._realizeAuthoritativeSupplementSocketSeams(
+          tiles,
+          floorTiles,
+          tileConnectionPlans,
+        )
+      : { floorTiles, records: [], physicalPlanCount: 0, seamCount: 0, cellWitnessCount: 0 };
+    floorTiles = authoritativeSupplementSocketSeams.floorTiles;
+    let connectorPresentationSeamReservation = {
+      adjustedBeatCount: 0,
+      removedBeatCount: 0,
+      reservedCellCount: 0,
+    };
     // Structural connector envelopes reserve wall/ceiling columns only. They
     // are never player footing and must not leak into rendering, navigation,
     // room coverage, or connector-width validation as disconnected floor
@@ -3877,9 +3979,40 @@ export class DungeonGenerator {
       trackOwnerProvenance: dungeonAugmentation?.status === 'applied',
     });
     floorTiles = floorIdentityNormalization.floorTiles;
+    const disconnectedConnectorGalleryPruning = usesAuthoritativeV4Geometry
+      ? this._pruneDisconnectedConnectorGalleryFloors(tiles, floorTiles, rooms)
+      : {
+          floorTiles,
+          diagnostics: {
+            schema: 'ruindivex-disconnected-connector-gallery-pruning/v1',
+            skipped: true,
+            reason: 'authoritative-v4-geometry-disabled',
+            removedFloorTileCount: 0,
+            removedFloorTilesByConnectionId: {},
+          },
+        };
+    floorTiles = disconnectedConnectorGalleryPruning.floorTiles;
+    const supplementWalkabilityIntent = usesAuthoritativeV4Geometry
+      ? this._annotateDungeonSupplementWalkabilityIntent(floorTiles, rooms)
+      : { requiredClearFloorCount: 0, supportOnlyFloorCount: 0 };
+    if (usesAuthoritativeV4Geometry) {
+      // Presentation is fitted only after floor identity normalization and
+      // walkability intent are final. This prevents a pre-merge proxy floor
+      // from hiding a real ramp/deck collision during frame reservation.
+      connectorPresentationSeamReservation =
+        this._reserveConnectorPresentationOutsideAuthoritativeSeams(
+          tileConnectionPlans,
+          authoritativeSupplementSocketSeams.records,
+          floorTiles,
+        );
+    }
+    const structuralEnvelopePruning = this._pruneOrphanStructuralEnvelopeCells(
+      tiles,
+      floorTiles,
+    );
     if (dungeonAugmentation?.status === 'applied') {
       const resolveAuthoredAnchorFloor = (record, kind) => {
-        const candidates = floorTiles.filter((floor) => (
+        const exactCandidates = floorTiles.filter((floor) => (
           String(floor.roomId ?? '') === String(record.roomId)
             && floor.x === record.x
             && floor.z === record.z
@@ -3887,7 +4020,47 @@ export class DungeonGenerator {
           Math.abs(Number(left.elevation ?? 0) - Number(record.elevation ?? 0))
             - Math.abs(Number(right.elevation ?? 0) - Number(record.elevation ?? 0))
         ));
-        const floor = candidates[0] ?? null;
+        let floor = exactCandidates[0] ?? null;
+        if (usesAuthoritativeV4Geometry && (!floor || Math.abs(
+          Number(floor.elevation ?? 0) - Number(record.elevation ?? 0)
+        ) > 0.1 || floor.walkabilityIntent === 'support-only'
+          || this._isFloorTileBlockedBySolidZone(floor, solidZones))) {
+          floor = floorTiles.filter((candidate) => (
+            String(candidate.roomId ?? '') === String(record.roomId)
+              && Math.abs(
+                Number(candidate.elevation ?? 0) - Number(record.elevation ?? 0)
+              ) <= 0.1
+              && candidate.walkabilityIntent !== 'support-only'
+              && !this._isFloorTileBlockedBySolidZone(candidate, solidZones)
+              && !['trap', 'chest', 'void'].includes(String(candidate.type ?? 'floor'))
+              && !candidate.dungeonSupplementRewardId
+              && !candidate.dungeonSupplementTrapId
+          )).sort((left, right) => (
+            Math.hypot(left.x - record.x, left.z - record.z)
+              - Math.hypot(right.x - record.x, right.z - record.z)
+              || left.x - right.x
+              || left.z - right.z
+          ))[0] ?? null;
+          if (floor) {
+            record.x = floor.x;
+            record.z = floor.z;
+            record.elevation = Number(floor.elevation ?? record.elevation ?? 0);
+            const room = rooms.find(({ id }) => String(id) === String(record.roomId));
+            const anchor = (room?.augmentationAnchors ?? []).find(({ id }) => (
+              String(id) === String(record.id)
+            ));
+            if (anchor) {
+              anchor.position = {
+                x: floor.x * this.tileSize,
+                y: record.elevation,
+                z: floor.z * this.tileSize,
+              };
+              anchor.worldPosition = { ...anchor.position };
+              anchor.grid = { x: floor.x, z: floor.z };
+              anchor.postCollisionReselected = true;
+            }
+          }
+        }
         if (!floor || Math.abs(
           Number(floor.elevation ?? 0) - Number(record.elevation ?? 0)
         ) > 0.1) {
@@ -4872,8 +5045,23 @@ export class DungeonGenerator {
         ? {
             ...floorIdentityNormalization.diagnostics,
             structuralEnvelopeFloorRecordCount,
+            authoritativeSupplementSocketSeams: {
+              physicalPlanCount: authoritativeSupplementSocketSeams.physicalPlanCount,
+              seamCount: authoritativeSupplementSocketSeams.seamCount,
+              cellWitnessCount: authoritativeSupplementSocketSeams.cellWitnessCount,
+            },
+            connectorPresentationSeamReservation,
+            supplementWalkabilityIntent,
+            disconnectedConnectorGalleryPruning:
+              disconnectedConnectorGalleryPruning.diagnostics,
+            structuralEnvelopePruning,
           }
-        : floorIdentityNormalization.diagnostics,
+        : {
+            ...floorIdentityNormalization.diagnostics,
+            disconnectedConnectorGalleryPruning:
+              disconnectedConnectorGalleryPruning.diagnostics,
+            structuralEnvelopePruning,
+          },
       verticalPortals,
       roomArchetypes: rooms.map((room) => ({
         id: room.id,
@@ -5331,6 +5519,9 @@ export class DungeonGenerator {
   }
 
   _createDungeonSupplementEncounterDefinitions(rooms, floorTiles, solidZones) {
+    floorTiles = Array.isArray(floorTiles) ? floorTiles : [];
+    solidZones = Array.isArray(solidZones) ? solidZones : [];
+    const blockingPlatformTops = this._createBlockingPlatformColumnMap(floorTiles);
     return rooms.flatMap((room, roomIndex) => {
       const encounterAnchors = (room.augmentationAnchors ?? [])
         .filter((anchor) => ['encounter', 'enemyEncounter'].includes(anchor.kind));
@@ -5372,21 +5563,54 @@ export class DungeonGenerator {
       const spatialAnchorById = new Map((room.augmentationAnchors ?? [])
         .filter(({ kind }) => kind === 'spatial-role')
         .map((spatialAnchor) => [String(spatialAnchor.localAnchorId ?? spatialAnchor.id), spatialAnchor]));
+      const reservedSpawnFloorKeys = new Set();
+      const roomSpawnFloors = floorTiles.filter((floor) => (
+        String(floor.roomId ?? '') === String(room.id)
+          && floor.walkabilityIntent !== 'support-only'
+          && floor.noEnemySpawn !== true
+          && !this._isFloorTileBlockedBySolidZone(floor, solidZones)
+          && !this._isFloorTileBlockedByGeneratedPlatform(floor, blockingPlatformTops)
+      ));
       const spawnSpatialRoles = (encounterRecipe?.spatialRoles ?? []).map((role, roleIndex) => {
         const spatialAnchor = (role.anchorIds ?? [])
           .map((anchorId) => spatialAnchorById.get(String(anchorId)))
           .find(Boolean);
-        const spawnPosition = spatialAnchor?.position
+        const authoredPosition = spatialAnchor?.position
           ? new THREE.Vector3(
-            Number(spatialAnchor.position.x),
-            Number(spatialAnchor.position.y ?? room.baseElevation ?? 0),
-            Number(spatialAnchor.position.z),
-          )
+              Number(spatialAnchor.position.x),
+              Number(spatialAnchor.position.y ?? room.baseElevation ?? 0),
+              Number(spatialAnchor.position.z),
+            )
           : fallbackSpawnPoints[roleIndex % Math.max(1, fallbackSpawnPoints.length)]?.clone?.()
             ?? fallbackSpawnPoints[roleIndex % Math.max(1, fallbackSpawnPoints.length)];
+        const targetPosition = authoredPosition ?? new THREE.Vector3(
+          Number(room.x ?? 0) * this.tileSize,
+          Number(room.baseElevation ?? 0),
+          Number(room.z ?? 0) * this.tileSize,
+        );
+        const declaredElevation = Number(targetPosition.y);
+        const selectedFloor = roomSpawnFloors
+          .filter((floor) => Math.abs(Number(floor.elevation ?? 0) - declaredElevation) <= 0.05)
+          .filter((floor) => !reservedSpawnFloorKeys.has(this._getFloorTileGraphKey(floor)))
+          .sort((left, right) => {
+            const leftPosition = this._floorTileToWorld(left);
+            const rightPosition = this._floorTileToWorld(right);
+            return leftPosition.distanceToSquared(targetPosition)
+              - rightPosition.distanceToSquared(targetPosition)
+              || left.z - right.z
+              || left.x - right.x;
+          })[0] ?? null;
+        if (selectedFloor) reservedSpawnFloorKeys.add(this._getFloorTileGraphKey(selectedFloor));
+        const spawnPosition = selectedFloor
+          ? this._floorTileToWorld(selectedFloor)
+          : targetPosition;
         return {
           ...role,
           spawnPosition,
+          spawnFloorKey: selectedFloor ? this._getFloorTileGraphKey(selectedFloor) : null,
+          spawnPlacementSource: selectedFloor
+            ? (spatialAnchor ? 'post-collision-authored-nearest' : 'post-collision-fallback')
+            : 'unresolved',
         };
       });
       const recipeSpawnPoints = spawnSpatialRoles
@@ -6646,6 +6870,7 @@ export class DungeonGenerator {
         }
         if (
           isSupplemental
+          && matching.signedConnectorFloorOwnerId !== plan.id
           && (
             (matching.roomId && !relatedEndpointRoom && !relatedPaddedOperationRoom)
             || (foreignOwnerIds.length > 0 && !exactThreshold)
@@ -6671,6 +6896,18 @@ export class DungeonGenerator {
           });
         }
         const existingOwnerId = matching.signedConnectorFloorOwnerId;
+        if (isSupplemental
+          && existingOwnerId === plan.id
+          && matching.roomId
+          && !relatedEndpointRoom
+          && !relatedPaddedOperationRoom) {
+          // The 2D tile map can lend a room-labelled construction cell to a
+          // vertically separated supplement before signed floors are split
+          // into distinct Y records. Once this plan owns the exact signed
+          // floor, remove that stale planar label; it is not shared authored
+          // room ownership at this elevation.
+          matching.roomId = null;
+        }
         if (existingOwnerId && existingOwnerId !== plan.id) {
           if (isSupplemental && exactThreshold) {
             matching.sharedConnectorFloorOwnerIds = [...new Set([
@@ -6733,8 +6970,12 @@ export class DungeonGenerator {
         ensureEnvelope(point, plan, elevation, options.connectorCeilingY ?? elevation + 8.4);
         return registerSignedFloor(plan, matching);
       }
+      const columnElevation = Number(column?.elevation ?? 0);
+      const columnOccupiesRequestedFloor = Number.isFinite(columnElevation)
+        && Math.abs(columnElevation - Number(elevation)) <= 0.05;
       if (
         column?.roomId
+        && columnOccupiesRequestedFloor
         && column.roomId !== plan.fromRoomId
         && column.roomId !== plan.toRoomId
       ) {
@@ -6758,6 +6999,7 @@ export class DungeonGenerator {
 
       const canReuseColumn = column
         && !floorTiles.includes(column)
+        && !column.roomId
         && !column.signedConnectorFloorOwnerId;
       const floor = canReuseColumn
         ? column
@@ -7621,7 +7863,10 @@ export class DungeonGenerator {
           for (const offset of [-1, 0, 1]) v4TurnBufferIndexes.add(pathIndex + offset);
         }
       }
-      const archEligibleCenters = allGalleryCenters.filter((section) => (
+      const completeFrameEligibleCenters = allGalleryCenters.filter((section) => (
+        !/(?:control|shaft|aperture)/i.test(section.connectorZone ?? '')
+      ));
+      const archEligibleCenters = completeFrameEligibleCenters.filter((section) => (
         !/(?:control|shaft|aperture)/i.test(section.connectorZone ?? '')
         && (
           !usesV4RouteNetworkArchClearance
@@ -7673,6 +7918,61 @@ export class DungeonGenerator {
           ceilingY: Number(section.ceilingY ?? section.elevation + 8.4),
         }, section.elevation);
       });
+      if (isV4SupplementalRoutePlan(plan)) {
+        const structuralFrameCandidates = completeFrameEligibleCenters.filter((_, index) => (
+          index === 0
+            || index === completeFrameEligibleCenters.length - 1
+            || index % CONNECTOR_DECORATIVE_ARCH_INTERVAL_TILES === 0
+        ));
+        plan.structuralFrameBeats = structuralFrameCandidates.map((section, index) => {
+          const widthMeters = this.tileSize * this._connectorDecorativeArchWidthTiles(plan);
+          return finalizeConnectorDecorativeArchBeat({
+            id: `${plan.id}:structural-frame:${index}`,
+            pathIndex: section.pathIndex ?? index * CONNECTOR_DECORATIVE_ARCH_INTERVAL_TILES,
+            gridPoint: { ...section.center },
+            direction: { ...section.direction },
+            widthMeters,
+            internalClearWidthMeters:
+              widthMeters - CONNECTOR_DECORATIVE_ARCH_COLUMN_HALF_SIZE * 2,
+            laneCenterOffsetMeters: this.tileSize,
+            visualFamily: 'v4_industrial_load_bearing_frame',
+            ceilingY: Number(section.ceilingY ?? section.elevation + 8.4),
+          }, section.elevation);
+        });
+        // V4 uses rectilinear, theme-bound load-bearing frames. Keeping this
+        // list empty prevents the legacy cylinder-arch motif from being
+        // rendered merely because the route shares the Industrial parent.
+        plan.decorativeArchBeats = [];
+      } else if (plan.isPaddedByDungeonSupplement || plan.hasDungeonSupplementRouteStation) {
+        const requiredArchCount = Math.max(
+          1,
+          Math.ceil(completeFrameEligibleCenters.length
+            / CONNECTOR_DECORATIVE_ARCH_INTERVAL_TILES),
+        );
+        const occupied = new Set(plan.decorativeArchBeats.map((beat) => (
+          `${beat.gridPoint.x},${beat.gridPoint.z},${Number(beat.floorElevation).toFixed(3)}`
+        )));
+        for (const section of completeFrameEligibleCenters) {
+          if (plan.decorativeArchBeats.length >= requiredArchCount) break;
+          const key = `${section.center.x},${section.center.z},${Number(section.elevation).toFixed(3)}`;
+          if (occupied.has(key)) continue;
+          const widthMeters = this.tileSize * this._connectorDecorativeArchWidthTiles(plan);
+          plan.decorativeArchBeats.push(finalizeConnectorDecorativeArchBeat({
+            id: `${plan.id}:decorative-arch:${plan.decorativeArchBeats.length}`,
+            pathIndex: section.pathIndex ?? plan.decorativeArchBeats.length * 3,
+            gridPoint: { ...section.center },
+            direction: { ...section.direction },
+            widthMeters,
+            internalClearWidthMeters:
+              widthMeters - CONNECTOR_DECORATIVE_ARCH_COLUMN_HALF_SIZE * 2,
+            laneCenterOffsetMeters: this.tileSize,
+            visualFamily: 'v1_industrial_cylinder_arch',
+            ceilingY: Number(section.ceilingY ?? section.elevation + 8.4),
+          }, section.elevation));
+          occupied.add(key);
+        }
+        plan.decorativeArchBeats.sort((left, right) => left.pathIndex - right.pathIndex);
+      }
     }
 
     return floorTiles;
@@ -8487,7 +8787,10 @@ export class DungeonGenerator {
           && toRoom
           && !RUIN_OPEN_AIR_ROOM_TYPES.has(fromRoom.type)
           && !RUIN_OPEN_AIR_ROOM_TYPES.has(toRoom.type);
-        const decorativeArchBeats = [...(plan.decorativeArchBeats ?? [])]
+        const usesV4StructuralFrames = isV4SupplementalRoutePlan(plan);
+        const decorativeArchBeats = [...(usesV4StructuralFrames
+          ? plan.structuralFrameBeats ?? []
+          : plan.decorativeArchBeats ?? [])]
           .sort((left, right) => left.pathIndex - right.pathIndex);
         const archEligibleSections = measurableGallerySections.filter((section) => (
           !/(?:control|shaft|aperture)/i.test(section.connectorZone ?? '')
@@ -8496,7 +8799,9 @@ export class DungeonGenerator {
           ? Math.max(1, Math.ceil(archEligibleSections.length / 3))
           : 0;
         if (decorativeArchBeats.length < requiredArchCount) {
-          errors.push(`${plan.id} does not provide decorative V1 arches across its complete gallery.`);
+          errors.push(usesV4StructuralFrames
+            ? `${plan.id} does not provide theme-bound V4 structural frames across its complete gallery.`
+            : `${plan.id} does not provide decorative V1 arches across its complete gallery.`);
         }
         for (let index = 0; index < decorativeArchBeats.length; index += 1) {
           const beat = decorativeArchBeats[index];
@@ -8821,11 +9126,16 @@ export class DungeonGenerator {
         && !RUIN_OPEN_AIR_ROOM_TYPES.has(fromRoom.type)
         && !RUIN_OPEN_AIR_ROOM_TYPES.has(toRoom.type);
       if (!requiresArches) return 0;
-      const beats = [...(plan.decorativeArchBeats ?? [])]
+      const usesV4StructuralFrames = isV4SupplementalRoutePlan(plan);
+      const beats = [...(usesV4StructuralFrames
+        ? plan.structuralFrameBeats ?? []
+        : plan.decorativeArchBeats ?? [])]
         .sort((a, b) => a.pathIndex - b.pathIndex);
       const requiredArchCount = Math.min(2, plan.galleryCrossSections?.length ?? 0);
       if (beats.length < requiredArchCount) {
-        errors.push(`${plan.id} does not provide decorative V1 arches across its complete gallery.`);
+        errors.push(usesV4StructuralFrames
+          ? `${plan.id} does not provide theme-bound V4 structural frames across its complete gallery.`
+          : `${plan.id} does not provide decorative V1 arches across its complete gallery.`);
       }
       const maximumSpacing = plan.connectorVariant?.decoration?.archSpacingTiles
         ?? CONNECTOR_DECORATIVE_ARCH_INTERVAL_TILES;
@@ -8833,7 +9143,9 @@ export class DungeonGenerator {
         const beat = beats[index];
         const previous = beats[index - 1];
         if (previous && beat.pathIndex - previous.pathIndex > maximumSpacing) {
-          errors.push(`${plan.id} leaves more than ${maximumSpacing} tiles between decorative arches.`);
+          errors.push(usesV4StructuralFrames
+            ? `${plan.id} leaves more than ${maximumSpacing} tiles between V4 structural frames.`
+            : `${plan.id} leaves more than ${maximumSpacing} tiles between decorative arches.`);
         }
         const minimumClearWidth = this._connectorMinimumClearWidthMeters();
         if (beat.internalClearWidthMeters + 1e-6 < minimumClearWidth) {
@@ -12377,6 +12689,515 @@ export class DungeonGenerator {
     return lookup;
   }
 
+  _pruneDisconnectedConnectorGalleryFloors(tiles = new Map(), floorTiles = [], rooms = []) {
+    const entranceRoom = rooms.find(({ id }) => id === 'entrance')
+      ?? rooms.find(({ id }) => id === 'expeditionCamp')
+      ?? rooms.find(({ isDungeonSupplement }) => isDungeonSupplement !== true)
+      ?? null;
+    const entranceFloor = entranceRoom
+      ? floorTiles
+        .filter(({ roomId }) => String(roomId ?? '') === String(entranceRoom.id))
+        .sort((left, right) => (
+          Math.abs(left.x - entranceRoom.x) + Math.abs(left.z - entranceRoom.z)
+            - Math.abs(right.x - entranceRoom.x) - Math.abs(right.z - entranceRoom.z)
+        ))[0] ?? null
+      : null;
+    if (!entranceFloor) {
+      return {
+        floorTiles,
+        diagnostics: {
+          schema: 'ruindivex-disconnected-connector-gallery-pruning/v1',
+          skipped: true,
+          reason: 'missing-authored-entrance-floor',
+          removedFloorTileCount: 0,
+          removedFloorTilesByConnectionId: {},
+        },
+      };
+    }
+
+    const reachableFloorKeys = this._createReachableFloorTileKeySet(
+      entranceFloor,
+      floorTiles,
+    );
+    const removedFloors = floorTiles.filter((floor) => (
+      !floor.roomId
+        && Boolean(floor.connectionId ?? floor.connectorId)
+        && floor.surface === 'connectorGalleryFloor'
+        && !reachableFloorKeys.has(this._getFloorTileGraphKey(floor))
+    ));
+    const removedFloorSet = new Set(removedFloors);
+    const removedFloorTilesByConnectionId = {};
+    for (const floor of removedFloors) {
+      const connectionId = String(floor.connectionId ?? floor.connectorId);
+      removedFloorTilesByConnectionId[connectionId] =
+        (removedFloorTilesByConnectionId[connectionId] ?? 0) + 1;
+      const key = tileKey(floor.x, floor.z);
+      const structuralTile = tiles.get(key);
+      const structuralConnectionId = String(
+        structuralTile?.connectionId ?? structuralTile?.connectorId ?? '',
+      );
+      if (
+        structuralTile
+        && !structuralTile.roomId
+        && structuralConnectionId === connectionId
+        && (
+          structuralTile === floor
+          || structuralTile.surface === 'connectorGalleryFloor'
+        )
+      ) {
+        tiles.delete(key);
+      }
+    }
+
+    return {
+      floorTiles: floorTiles.filter((floor) => !removedFloorSet.has(floor)),
+      diagnostics: {
+        schema: 'ruindivex-disconnected-connector-gallery-pruning/v1',
+        skipped: false,
+        entranceRoomId: entranceRoom.id,
+        entranceFloorKey: this._getFloorTileGraphKey(entranceFloor),
+        removedFloorTileCount: removedFloors.length,
+        removedFloorTilesByConnectionId,
+      },
+    };
+  }
+
+  _realizeAuthoritativeSupplementSocketSeams(
+    tiles = new Map(),
+    floorTiles = [],
+    connectionPlans = [],
+  ) {
+    const physicalPlans = connectionPlans.filter((plan) => (
+      isV4SupplementalRoutePlan(plan)
+        && plan.isSupplementGraphConnection !== true
+        && plan.connectorVariantConstraints?.graphOnly !== true
+    ));
+    const floorAt = (x, z, elevation) => floorTiles.find((floor) => (
+      Number(floor.x) === Number(x)
+        && Number(floor.z) === Number(z)
+        && Math.abs(Number(floor.elevation ?? 0) - Number(elevation)) <= 0.05
+    )) ?? null;
+    const resolveFacing = (plan, socket, role) => {
+      const declared = {
+        x: Math.sign(Number(socket?.facingX ?? 0)),
+        z: Math.sign(Number(socket?.facingZ ?? 0)),
+      };
+      if (Math.abs(declared.x) + Math.abs(declared.z) === 1) return declared;
+      const path = plan.bridgePath ?? plan.fullPath ?? [];
+      const index = path.findIndex((point) => (
+        point.x === socket?.x && point.z === socket?.z
+      ));
+      const outside = role === 'from'
+        ? path[Math.min(path.length - 1, Math.max(0, index) + 1)]
+        : path[Math.max(0, (index < 0 ? path.length - 1 : index) - 1)];
+      const inferred = {
+        x: Math.sign(Number(outside?.x) - Number(socket?.x)),
+        z: Math.sign(Number(outside?.z) - Number(socket?.z)),
+      };
+      return Math.abs(inferred.x) + Math.abs(inferred.z) === 1 ? inferred : null;
+    };
+    const seamRecords = [];
+    for (const plan of physicalPlans) {
+      plan.authoritativeSocketSeams = [];
+      for (const [role, socket] of [['from', plan.fromSocket], ['to', plan.toSocket]]) {
+        if (!socket) continue;
+        const facing = resolveFacing(plan, socket, role);
+        if (!facing) continue;
+        const elevation = Number(socket.elevation ?? plan.elevation ?? 0);
+        const seamId = `${plan.id}:socket-seam:${role}`;
+        const cells = [];
+        for (const lane of this._getConnectorEntranceLanes(socket, facing)) {
+          for (const signedDepth of [-2, -1, 0, 1, 2]) {
+            const x = lane.x + facing.x * signedDepth;
+            const z = lane.z + facing.z * signedDepth;
+            let floor = floorAt(x, z, elevation);
+            if (!floor) {
+              floor = createFloorTile(x, z, {
+                type: 'hallway',
+                elevation,
+                level: Number((elevation / 14).toFixed(3)),
+                surface: 'connectorGalleryFloor',
+                connectorZone: 'authoritative_socket_seam',
+                supportStyle: 'connector_girder_posts',
+                supportBaseElevation: elevation,
+                noEnemySpawn: true,
+              });
+              floorTiles.push(floor);
+            }
+            if (!floor.signedConnectorFloorOwnerId) {
+              floor.signedConnectorFloorOwnerId = plan.id;
+            } else if (String(floor.signedConnectorFloorOwnerId) !== String(plan.id)) {
+              floor.sharedConnectorFloorOwnerIds = [...new Set([
+                ...(floor.sharedConnectorFloorOwnerIds ?? []),
+                plan.id,
+              ])];
+            }
+            floor.authoritativeSocketSeamIds = [...new Set([
+              ...(floor.authoritativeSocketSeamIds ?? []),
+              seamId,
+            ])];
+            floor.authoritativeSocketSeamOwnerIds = [...new Set([
+              ...(floor.authoritativeSocketSeamOwnerIds ?? []),
+              plan.id,
+            ])];
+            floor.isDungeonSupplementConnectorFloor = true;
+            floor.walkabilityIntent = 'required-clear';
+            floor.floorKey = absoluteFloorTileKey(x, z, elevation);
+            if (signedDepth === 0 && lane.offset === 0) socket.floorKey = floor.floorKey;
+            cells.push({
+              x,
+              z,
+              elevation,
+              floorKey: floor.floorKey,
+              laneOffset: lane.offset,
+              signedDepth,
+              side: signedDepth < 0 ? 'inside' : signedDepth > 0 ? 'outside' : 'threshold',
+            });
+          }
+        }
+        const record = {
+          id: seamId,
+          connectionId: plan.id,
+          socketId: socket.id,
+          roomId: socket.roomId ?? null,
+          role,
+          facing,
+          widthTiles: 3,
+          insideDepthTiles: 2,
+          outsideDepthTiles: 2,
+          elevation,
+          cells,
+          authoritative: true,
+          preRender: true,
+        };
+        plan.authoritativeSocketSeams.push(record);
+        seamRecords.push(record);
+      }
+    }
+    return {
+      floorTiles,
+      records: seamRecords,
+      physicalPlanCount: physicalPlans.length,
+      seamCount: seamRecords.length,
+      cellWitnessCount: seamRecords.reduce((sum, record) => sum + record.cells.length, 0),
+    };
+  }
+
+  _annotateDungeonSupplementWalkabilityIntent(floorTiles = [], rooms = []) {
+    const supplementalRoomIds = new Set(rooms
+      .filter(({ isDungeonSupplement }) => isDungeonSupplement === true)
+      .map(({ id }) => String(id)));
+    const floorsByOwnedColumn = new Map();
+    for (const floor of floorTiles) {
+      const roomId = String(floor.roomId ?? '');
+      if (!supplementalRoomIds.has(roomId)) continue;
+      const key = `${roomId}:${floor.x},${floor.z}`;
+      const column = floorsByOwnedColumn.get(key) ?? [];
+      column.push(floor);
+      floorsByOwnedColumn.set(key, column);
+    }
+    let requiredClearFloorCount = 0;
+    let supportOnlyFloorCount = 0;
+    for (const column of floorsByOwnedColumn.values()) {
+      column.sort((left, right) => (
+        Number(left.elevation ?? 0) - Number(right.elevation ?? 0)
+      ));
+      for (const [index, floor] of column.entries()) {
+        const elevation = Number(floor.elevation ?? 0);
+        const coveringFloor = column.slice(index + 1).find((candidate) => {
+          const rise = Number(candidate.elevation ?? 0) - elevation;
+          if (
+            floor.surface === 'industrialRamp'
+            && Number.isFinite(Number(floor.rampEndElevation))
+            && Number(candidate.elevation ?? 0) <= Math.max(
+              Number(floor.rampStartElevation ?? floor.rampEndElevation),
+              Number(floor.rampEndElevation),
+            ) + 0.06
+          ) {
+            // A ramp's last interval legitimately overlaps its destination
+            // landing column. It remains the traversable transfer surface;
+            // the landing is not an overhead support deck.
+            return false;
+          }
+          return rise > 0.05
+            && rise + 1e-6 < PLAYER_TRAVERSAL_ENVELOPE.headClearance
+            && Boolean(
+              candidate.isPlatformingSurface
+                || candidate.augmentationFloorTierId
+                || candidate.augmentationTransferId
+                || (candidate.augmentationTransferIds?.length ?? 0) > 0
+            );
+        });
+        if (coveringFloor) {
+          floor.walkabilityIntent = 'support-only';
+          floor.coveredByAuthoritativeFloorKey = this._getFloorTileGraphKey(coveringFloor);
+          supportOnlyFloorCount += 1;
+        } else {
+          floor.walkabilityIntent ??= 'required-clear';
+          requiredClearFloorCount += 1;
+        }
+      }
+    }
+    return { requiredClearFloorCount, supportOnlyFloorCount };
+  }
+
+  _reserveConnectorPresentationOutsideAuthoritativeSeams(
+    connectionPlans = [],
+    authoritativeSeams = [],
+    floorTiles = [],
+  ) {
+    const v4PhysicalPlanIds = new Set(connectionPlans
+      .filter((plan) => isV4SupplementalRoutePlan(plan))
+      .map((plan) => String(plan.id)));
+    const floorBelongsToV4Route = (floor) => [
+      floor?.signedConnectorFloorOwnerId,
+      floor?.connectorId,
+      floor?.connectionId,
+      ...(floor?.sharedConnectorFloorOwnerIds ?? []),
+    ].filter(Boolean).some((ownerId) => v4PhysicalPlanIds.has(String(ownerId)));
+    const v4RouteCells = floorTiles
+      .filter(floorBelongsToV4Route)
+      .map((floor) => ({
+        x: floor.x,
+        z: floor.z,
+        elevation: Number(floor.elevation ?? 0),
+      }));
+    const reservedCells = [
+      ...authoritativeSeams.flatMap((seam) => seam.cells ?? []),
+      ...floorTiles
+        // Frames are connector presentation, never room furniture. Reserve
+        // every room-owned floor layer so their columns cannot clip either
+        // authored V1 rooms or a supplemental ramp/deck after rotation.
+        .filter((floor) => floor.roomId || floorBelongsToV4Route(floor))
+        .map((floor) => ({
+          x: floor.x,
+          z: floor.z,
+          elevation: Number(floor.elevation ?? 0),
+        })),
+    ];
+    if (reservedCells.length === 0) {
+      return { adjustedBeatCount: 0, removedBeatCount: 0, reservedCellCount: 0 };
+    }
+    const columnClearance = CONNECTOR_DECORATIVE_ARCH_COLUMN_HALF_SIZE
+      + PLAYER_TRAVERSAL_ENVELOPE.collisionRadius
+      + this.tileSize * 0.5;
+    const conflictsWithReservedApproach = (beat) => {
+      if (!beat?.gridPoint || !Number.isFinite(beat.widthMeters)) return true;
+      const direction = beat.direction ?? { x: 0, z: 1 };
+      const worldX = beat.gridPoint.x * this.tileSize;
+      const worldZ = beat.gridPoint.z * this.tileSize;
+      const halfWidth = beat.widthMeters * 0.5;
+      const columns = direction.x !== 0
+        ? [
+            { x: worldX, z: worldZ - halfWidth },
+            { x: worldX, z: worldZ + halfWidth },
+          ]
+        : [
+            { x: worldX - halfWidth, z: worldZ },
+            { x: worldX + halfWidth, z: worldZ },
+          ];
+      const frameBottom = Number(beat.floorElevation ?? 0);
+      const frameTop = Number(
+        beat.ceilingY
+          ?? (frameBottom + (
+            Number.isFinite(Number(beat.archHeightMeters))
+              ? Number(beat.archHeightMeters)
+              : 6.2
+          )),
+      );
+      return reservedCells.some((cell) => (
+        Number(cell.elevation ?? 0) >= frameBottom - PLAYER_TRAVERSAL_ENVELOPE.collisionRadius
+          && Number(cell.elevation ?? 0) <= frameTop + PLAYER_TRAVERSAL_ENVELOPE.headClearance
+          && columns.some((column) => (
+            Math.abs(column.x - cell.x * this.tileSize) <= columnClearance
+              && Math.abs(column.z - cell.z * this.tileSize) <= columnClearance
+          ))
+      ));
+    };
+    let adjustedBeatCount = 0;
+    let removedBeatCount = 0;
+    for (const plan of connectionPlans) {
+      const property = isV4SupplementalRoutePlan(plan)
+        ? 'structuralFrameBeats'
+        : plan.isPaddedByDungeonSupplement || plan.hasDungeonSupplementRouteStation
+          ? 'decorativeArchBeats'
+          : null;
+      if (!property || !Array.isArray(plan[property]) || plan[property].length === 0) continue;
+      if (property === 'structuralFrameBeats') {
+        // V4 frames are suspended from the authoritative boundary shell and
+        // deliberately have no floor columns. They therefore neither occupy
+        // socket approach cells nor need relocation away from room floors.
+        // Keeping the complete deterministic cadence here is what lets frame
+        // validation cover every eligible gallery interval.
+        for (const beat of plan[property]) beat.collisionFreeOverheadFrame = true;
+        continue;
+      }
+      const candidates = (plan.galleryCrossSections ?? [])
+        .flatMap((crossSection) => crossSection.sections ?? [])
+        .filter((section, index, array) => (
+          !/(?:control|shaft|aperture)/i.test(section.connectorZone ?? '')
+            && index === array.findIndex((candidate) => (
+              candidate.center.x === section.center.x
+                && candidate.center.z === section.center.z
+                && Math.abs(Number(candidate.elevation ?? 0) - Number(section.elevation ?? 0)) <= 0.05
+            ))
+        ))
+        .sort((left, right) => (
+          Number(left.pathIndex ?? 0) - Number(right.pathIndex ?? 0)
+            || Number(left.elevation ?? 0) - Number(right.elevation ?? 0)
+            || left.center.z - right.center.z
+            || left.center.x - right.center.x
+        ));
+      const used = new Set();
+      const nextBeats = [];
+      for (const beat of [...plan[property]].sort((left, right) => left.pathIndex - right.pathIndex)) {
+        if (!conflictsWithReservedApproach(beat)) {
+          used.add(`${beat.gridPoint.x},${beat.gridPoint.z},${Number(beat.floorElevation).toFixed(3)}`);
+          nextBeats.push(beat);
+          continue;
+        }
+        let replacement = candidates
+          .map((section) => {
+            const candidateBeat = finalizeConnectorDecorativeArchBeat({
+              ...beat,
+              gridPoint: { ...section.center },
+              direction: { ...section.direction },
+              pathIndex: Number(section.pathIndex ?? beat.pathIndex),
+              ceilingY: Number(section.ceilingY ?? section.elevation + 8.4),
+            }, Number(section.elevation ?? beat.floorElevation ?? 0));
+            const key = `${candidateBeat.gridPoint.x},${candidateBeat.gridPoint.z},${Number(candidateBeat.floorElevation).toFixed(3)}`;
+            return {
+              beat: candidateBeat,
+              key,
+              distance: Math.abs(Number(candidateBeat.pathIndex) - Number(beat.pathIndex)),
+            };
+          })
+          .filter((candidate) => (
+            !used.has(candidate.key)
+              && !conflictsWithReservedApproach(candidate.beat)
+          ))
+          .sort((left, right) => (
+            left.distance - right.distance
+              || left.beat.pathIndex - right.beat.pathIndex
+              || left.beat.gridPoint.z - right.beat.gridPoint.z
+              || left.beat.gridPoint.x - right.beat.gridPoint.x
+          ))[0];
+        if (!replacement && property === 'structuralFrameBeats') {
+          replacement = candidates
+            .flatMap((section) => Array.from({ length: 12 }, (_, index) => index + 5)
+              .map((widthTiles) => {
+              const widthMeters = widthTiles * this.tileSize;
+              const candidateBeat = finalizeConnectorDecorativeArchBeat({
+                ...beat,
+                gridPoint: { ...section.center },
+                direction: { ...section.direction },
+                pathIndex: Number(section.pathIndex ?? beat.pathIndex),
+                widthMeters,
+                internalClearWidthMeters:
+                  widthMeters - CONNECTOR_DECORATIVE_ARCH_COLUMN_HALF_SIZE * 2,
+                ceilingY: Number(section.ceilingY ?? section.elevation + 8.4),
+              }, Number(section.elevation ?? beat.floorElevation ?? 0));
+              const key = `${candidateBeat.gridPoint.x},${candidateBeat.gridPoint.z},${Number(candidateBeat.floorElevation).toFixed(3)}`;
+              return {
+                beat: candidateBeat,
+                key,
+                distance: Math.abs(Number(candidateBeat.pathIndex) - Number(beat.pathIndex)),
+                widthTiles,
+              };
+              }))
+            .filter((candidate) => (
+              !used.has(candidate.key)
+                && !conflictsWithReservedApproach(candidate.beat)
+            ))
+            .sort((left, right) => (
+              left.distance - right.distance
+                || left.widthTiles - right.widthTiles
+                || left.beat.pathIndex - right.beat.pathIndex
+                || left.beat.gridPoint.z - right.beat.gridPoint.z
+                || left.beat.gridPoint.x - right.beat.gridPoint.x
+            ))[0];
+        }
+        if (!replacement) {
+          removedBeatCount += 1;
+          continue;
+        }
+        used.add(replacement.key);
+        nextBeats.push(replacement.beat);
+        adjustedBeatCount += 1;
+      }
+      plan[property] = nextBeats.sort((left, right) => left.pathIndex - right.pathIndex);
+
+      // The optional V1 service vignette was authored before the overlay and
+      // may land beside a newly reserved supplemental spine. Preserve the V1
+      // arch cadence, but omit a service/fence/girder vignette whenever any of
+      // its solid presentation footprints would occupy a V4 route cell.
+      if (Array.isArray(plan.classicV1ServiceBeats)) {
+        plan.classicV1ServiceBeats = plan.classicV1ServiceBeats.filter((serviceBeat) => {
+          const presentationPoints = [
+            serviceBeat.servicePoint,
+            serviceBeat.fencePoint,
+            serviceBeat.girderPoint,
+          ].filter(Boolean);
+          return !v4RouteCells.some((cell) => presentationPoints.some((point) => (
+            Math.abs(Number(point.x) - Number(cell.x)) <= 1.5
+              && Math.abs(Number(point.z) - Number(cell.z)) <= 1.5
+          )));
+        });
+      }
+    }
+    return {
+      adjustedBeatCount,
+      removedBeatCount,
+      reservedCellCount: reservedCells.length,
+    };
+  }
+
+  _pruneOrphanStructuralEnvelopeCells(tiles = new Map(), floorTiles = [], {
+    maximumFloorDistanceTiles = 1,
+  } = {}) {
+    const floorColumns = new Set(floorTiles.map(({ x, z }) => tileKey(x, z)));
+    const isStructuralEnvelopeCell = (tile) => Boolean(
+      tile?.structuralEnvelopeOnly === true
+        || tile?.surface === 'connectorStructuralEnvelope'
+        || tile?.type === 'connectorEnvelope'
+    );
+    const hasNearbyFloor = (tile) => {
+      for (let dx = -maximumFloorDistanceTiles;
+        dx <= maximumFloorDistanceTiles;
+        dx += 1) {
+        for (let dz = -maximumFloorDistanceTiles;
+          dz <= maximumFloorDistanceTiles;
+          dz += 1) {
+          if (floorColumns.has(tileKey(tile.x + dx, tile.z + dz))) return true;
+        }
+      }
+      return false;
+    };
+    const removedCells = [];
+    for (const [key, tile] of tiles) {
+      if (!isStructuralEnvelopeCell(tile) || hasNearbyFloor(tile)) continue;
+      // Envelope-only records may extend one cell beyond a real gallery so
+      // wall and ceiling faces can enclose it. Anything farther away has no
+      // traversable owner and otherwise renders as an isolated shell fragment.
+      // Remove it from the same structural map consumed by wall, ceiling,
+      // collision, and diagnostics rather than hiding a later Three.js mesh.
+      if (tiles.get(key) !== tile) continue;
+      tiles.delete(key);
+      removedCells.push({
+        x: tile.x,
+        z: tile.z,
+        connectionId: tile.connectionId ?? tile.connectorId ?? null,
+        roomId: tile.roomId ?? null,
+      });
+    }
+    return {
+      schema: 'ruindivex-structural-envelope-pruning/v1',
+      maximumFloorDistanceTiles,
+      removedCellCount: removedCells.length,
+      removedCells,
+    };
+  }
+
   _isTileInsideRoom(tile, room) {
     if (!tile || !room) {
       return false;
@@ -13082,12 +13903,17 @@ export class DungeonGenerator {
       localZ = rotatedZ;
     }
 
-    if (Math.abs(localX) > zone.halfWidth || Math.abs(localZ) > zone.halfDepth) {
+    const containmentEpsilon = 1e-4;
+    if (
+      Math.abs(localX) > zone.halfWidth + containmentEpsilon
+      || Math.abs(localZ) > zone.halfDepth + containmentEpsilon
+    ) {
       return false;
     }
 
     if (!ignoreVertical && Number.isFinite(zone.verticalHalfHeight)) {
-      return Math.abs((position.y ?? 0) - (zone.position.y ?? 0)) <= zone.verticalHalfHeight;
+      return Math.abs((position.y ?? 0) - (zone.position.y ?? 0))
+        <= zone.verticalHalfHeight + containmentEpsilon;
     }
 
     return true;
@@ -13129,6 +13955,19 @@ export class DungeonGenerator {
     }
     const elevation = tile.elevation ?? 0;
     const verticalGap = topY - elevation;
+    if (
+      tile.surface === 'industrialRamp'
+      && Number.isFinite(Number(tile.rampEndElevation))
+      && topY <= Math.max(
+        Number(tile.rampStartElevation ?? tile.rampEndElevation),
+        Number(tile.rampEndElevation),
+      ) + 0.06
+    ) {
+      // The final interval of an authored ramp/stair intentionally occupies
+      // the same X/Z column as its destination landing. The destination deck
+      // is the endpoint support, not a low ceiling above an unrelated floor.
+      return false;
+    }
     return verticalGap > 0.06
       && verticalGap < PLAYER_TRAVERSAL_ENVELOPE.headClearance + 0.12;
   }
@@ -14575,11 +15414,18 @@ export class DungeonGenerator {
         const ownerRoom = roomById.get(socket.roomId);
         const localTiles = ownerRoom
           ? navigableTiles.filter((tile) => (
-              this._isTileInsideRoom(tile, ownerRoom)
-              && (!isStrictSupplementConnector || (
-                tile.roomId === ownerRoom.id
-                || floorOwnedByConnection(tile, plan.id)
-              ))
+              (
+                this._isTileInsideRoom(tile, ownerRoom)
+                && (!isStrictSupplementConnector || (
+                  tile.roomId === ownerRoom.id
+                  || floorOwnedByConnection(tile, plan.id)
+                ))
+              )
+              || (
+                isStrictSupplementConnector
+                && this._getFloorTileGraphKey(tile) === socket.floorKey
+                && floorOwnedByConnection(tile, plan.id)
+              )
             ))
           : [];
         const localStart = this._findRoomWalkabilityStartTile(ownerRoom, localTiles);
@@ -15049,6 +15895,7 @@ export class DungeonGenerator {
       navigableTiles,
       useSegmentBarriers ? { canTraverseEdge } : {},
     );
+    const authoredBlockingSupplementFloorKeySet = new Set();
 
     for (const room of rooms.filter((candidate) => (
       candidate.isDungeonSupplement
@@ -15070,6 +15917,7 @@ export class DungeonGenerator {
         this._createDungeonSupplementManifestSolidZones([room]);
       const authoredBlockingRoomFloorKeys = allRoomOwnedFloors
         .filter((floor) => {
+          if (floor.walkabilityIntent === 'support-only') return true;
           const floorPosition = this._floorTileToWorld(floor);
           return authoredBlockingSolidZones.some((zone) => (
             this._isPositionInsideZone(floorPosition, zone)
@@ -15077,9 +15925,19 @@ export class DungeonGenerator {
         })
         .map((floor) => this._getFloorTileGraphKey(floor));
       const authoredBlockingRoomFloorKeySet = new Set(authoredBlockingRoomFloorKeys);
-      const localFloors = allRoomOwnedFloors.filter((tile) => (
-        navigableByKey.has(this._getFloorTileGraphKey(tile))
-      ));
+      for (const floorKey of authoredBlockingRoomFloorKeys) {
+        authoredBlockingSupplementFloorKeySet.add(floorKey);
+      }
+      // The authored traversal contract is the realized tier/transfer surface
+      // minus support-only cells and the exact footprints occupied by solid
+      // authored features. Those cells still exist physically beneath props
+      // and upper decks, but they are not walkable intent and must not be
+      // misreported as orphan traversal islands.
+      const localFloors = allRoomOwnedFloors.filter((tile) => {
+        const floorKey = this._getFloorTileGraphKey(tile);
+        return navigableByKey.has(floorKey)
+          && !authoredBlockingRoomFloorKeySet.has(floorKey);
+      });
       const isTrueSupplementRoom = room.isConnectorJunctionProxy !== true
         && room.isRouteStationProxy !== true
         && room.suppressRoomGeometry !== true;
@@ -15277,6 +16135,10 @@ export class DungeonGenerator {
           || [...attachedPhysicalPlanIds].some((planId) => (
             floorOwnedByConnection(tile, planId)
           ))
+        )
+        && !(
+          tile.roomId === room.id
+            && authoredBlockingRoomFloorKeySet.has(this._getFloorTileGraphKey(tile))
         )
       ));
       const firstApproachFloor = uniqueSocketApproaches.find(({ floor }) => floor)?.floor ?? null;
@@ -15612,13 +16474,11 @@ export class DungeonGenerator {
           ['parent-route-after', parentPath[stationIndex + 1]],
         ]) {
           if (!point) continue;
-          const expectedElevation = Number(
-            point.elevation
-              ?? parentPlan.sourceElevation
-              ?? parentPlan.elevation
-              ?? junction.baseElevation
-              ?? 0,
-          );
+          // A route-station proxy is an exact physical composite cut into the
+          // parent connector. Its two parent approaches share the station's
+          // authoritative elevation; the original parent source elevation is
+          // not valid after the station has split an ascending connector.
+          const expectedElevation = Number(junction.baseElevation ?? 0);
           const floor = (columns.get(tileKey(point.x, point.z)) ?? [])
             .filter((candidate) => navigableByKey.has(this._getFloorTileGraphKey(candidate)))
             .filter((candidate) => floorMatchesElevation(candidate, expectedElevation))
@@ -15707,13 +16567,32 @@ export class DungeonGenerator {
         };
       });
       const coreFloorKeys = allCoreFloors.map((floor) => this._getFloorTileGraphKey(floor));
+      const authoritativeCoreFloorKeys = new Set((junction.augmentationFloorTiers ?? [])
+        .filter((tier) => tier?.authoritative === true && Array.isArray(tier.worldCells))
+        .flatMap((tier) => tier.worldCells.map((cell) => this._getFloorTileGraphKey({
+          x: Number(cell?.grid?.x),
+          z: Number(cell?.grid?.z),
+          elevation: Number(
+            cell?.elevation
+              ?? cell?.worldElevation
+              ?? tier?.worldElevation
+              ?? junction.baseElevation
+              ?? 0,
+          ),
+        }))));
       const expectedCoreFloorCount = junction.stampConnectorJunctionFloor === true
-        ? (Math.floor(Number(junction.width ?? 0) / 2) * 2 + 1)
-          * (Math.floor(Number(junction.depth ?? 0) / 2) * 2 + 1)
+        ? (authoritativeCoreFloorKeys.size || (
+          (Math.floor(Number(junction.width ?? 0) / 2) * 2 + 1)
+            * (Math.floor(Number(junction.depth ?? 0) / 2) * 2 + 1)
+        ))
         : 0;
       const coreFloorCoverageAccepted = junction.stampConnectorJunctionFloor !== true
         || (
           allCoreFloors.length === expectedCoreFloorCount
+          && (
+            authoritativeCoreFloorKeys.size === 0
+            || coreFloorKeys.every((floorKey) => authoritativeCoreFloorKeys.has(floorKey))
+          )
           && navigableCoreFloors.length === allCoreFloors.length
           && foreignCoreFloorOwnerIds.length === 0
           && unownedMergedCoreFloorSourceCount === 0
@@ -15823,16 +16702,20 @@ export class DungeonGenerator {
       ))
       || floor.isDungeonSupplementConnectorFloor === true
     ));
-    const blockedSupplementFloorKeys = supplementalOwnedFloors
+    const supplementalWalkableIntentFloors = supplementalOwnedFloors.filter((floor) => (
+      floor.walkabilityIntent !== 'support-only'
+        && !authoredBlockingSupplementFloorKeySet.has(this._getFloorTileGraphKey(floor))
+    ));
+    const blockedSupplementFloorKeys = supplementalWalkableIntentFloors
       .filter((floor) => !navigableByKey.has(this._getFloorTileGraphKey(floor)))
       .map((floor) => this._getFloorTileGraphKey(floor));
-    const orphanSupplementFloorKeys = supplementalOwnedFloors
+    const orphanSupplementFloorKeys = supplementalWalkableIntentFloors
       .filter((floor) => (
         navigableByKey.has(this._getFloorTileGraphKey(floor))
         && !reachable.has(this._getFloorTileGraphKey(floor))
       ))
       .map((floor) => this._getFloorTileGraphKey(floor));
-    const nonReturnableSupplementFloorKeys = supplementalOwnedFloors
+    const nonReturnableSupplementFloorKeys = supplementalWalkableIntentFloors
       .filter((floor) => (
         navigableByKey.has(this._getFloorTileGraphKey(floor))
         && !globallyReturnableToStart.has(this._getFloorTileGraphKey(floor))
@@ -16280,7 +17163,11 @@ export class DungeonGenerator {
       const current = path[i];
       const tile = tiles.get(tileKey(current.x, current.z));
 
-      if (!tile || CONVEYOR_BRIDGE_RESERVED_TYPES.has(tile.type)) {
+      if (!tile
+        || CONVEYOR_BRIDGE_RESERVED_TYPES.has(tile.type)
+        || tile.augmentationFloorCellId
+        || tile.augmentationFloorTierRuntimeId
+        || tile.augmentationBlueprintId) {
         continue;
       }
 
@@ -18809,10 +19696,12 @@ export class DungeonGenerator {
       parent.add(beam);
       return beam;
     };
-    const createGirderFrame = (width = 7, height = 5.4) => {
+    const createGirderFrame = (width = 7, height = 5.4, includeFloorColumns = true) => {
       const prefab = new THREE.Group();
-      addIBeam(prefab, 'girderFrameLeftColumn', height, materials.supportMetal, -width * 0.5, height * 0.5, 0, true);
-      addIBeam(prefab, 'girderFrameRightColumn', height, materials.supportMetal, width * 0.5, height * 0.5, 0, true);
+      const columnHeight = includeFloorColumns ? height : 0.9;
+      const columnCenterY = includeFloorColumns ? height * 0.5 : height - columnHeight * 0.5;
+      addIBeam(prefab, 'girderFrameLeftColumn', columnHeight, materials.supportMetal, -width * 0.5, columnCenterY, 0, true);
+      addIBeam(prefab, 'girderFrameRightColumn', columnHeight, materials.supportMetal, width * 0.5, columnCenterY, 0, true);
       addIBeam(prefab, 'girderFrameHeader', width, materials.supportMetal, 0, height, 0, false);
       for (const sign of [-1, 1]) {
         const brace = addBox(prefab, 'girderFrameDiagonalBrace', width * 0.56, 0.12, 0.16, materials.hazardStripe, 0, height * 0.6, sign * 0.18);
@@ -18998,8 +19887,66 @@ export class DungeonGenerator {
       );
     };
 
+    for (const room of rooms.filter(({ isDungeonSupplement }) => isDungeonSupplement)) {
+      for (const [recordIndex, record] of (room.augmentationCollisionRecords ?? []).entries()) {
+        if (
+          record?.blocking !== true
+          || !['cover', 'landmark'].includes(String(record.sourceKind ?? ''))
+          || !record.center
+          || !Number.isFinite(Number(record.size?.x))
+          || !Number.isFinite(Number(record.size?.y))
+          || !Number.isFinite(Number(record.size?.z))
+        ) continue;
+        const width = Number(record.size.x);
+        const height = Number(record.size.y);
+        const depth = Number(record.size.z);
+        const prefab = new THREE.Group();
+        prefab.userData.dungeonSupplementBlueprintFeature = true;
+        prefab.userData.augmentationCollisionRecordId = String(record.id);
+        prefab.userData.augmentationBlueprintId = room.augmentationBlueprintId ?? null;
+        const material = record.sourceKind === 'cover'
+          ? materials.factoryRail
+          : materials.machineryDark ?? materials.factoryRail;
+        addBox(
+          prefab,
+          'authoritativeBlueprintFeatureBody',
+          width,
+          height,
+          depth,
+          material,
+          0,
+          height * 0.5,
+          0,
+        );
+        const capHeight = Math.min(0.12, height * 0.08);
+        addBox(
+          prefab,
+          'authoritativeBlueprintFeatureCap',
+          width * 0.92,
+          capHeight,
+          depth * 0.92,
+          record.sourceKind === 'cover' ? materials.floorTrim : materials.glowBlue,
+          0,
+          height + capHeight * 0.5,
+          0,
+        );
+        const object = place(
+          prefab,
+          `dungeonSupplementBlueprintFeature_${room.id}_${recordIndex}`,
+          Number(record.center.x),
+          Number(record.center.z),
+          Number(record.rotationY ?? 0),
+          Number(record.center.y ?? room.baseElevation ?? 0),
+        );
+        object.userData.roomId = room.id;
+        object.userData.operationId = room.augmentationOperationId ?? null;
+      }
+    }
+
     for (const room of rooms.filter((candidate) => (
-      !candidate.specialEnvironmentId && !RUIN_OPEN_AIR_ROOM_TYPES.has(candidate.type)
+      !candidate.isDungeonSupplement
+        && !candidate.specialEnvironmentId
+        && !RUIN_OPEN_AIR_ROOM_TYPES.has(candidate.type)
     ))) {
       activeRoomBaseElevation = Number(room.baseElevation ?? 0);
       const centerX = room.x * this.tileSize;
@@ -19253,6 +20200,80 @@ export class DungeonGenerator {
               ]
             : [];
       plan.explorationBeats = [...traversalBeats];
+
+      for (const [beatIndex, beat] of (plan.structuralFrameBeats ?? []).entries()) {
+        const point = beat.gridPoint;
+        const direction = beat.direction ?? { x: 0, z: 1 };
+        const rotationY = direction.x !== 0 ? Math.PI / 2 : 0;
+        const worldX = point.x * this.tileSize;
+        const worldZ = point.z * this.tileSize;
+        const floorElevation = beat.floorElevation ?? 0;
+        const frameHeight = beat.archHeightMeters
+          ?? Math.min(6.2, Math.max(4.2, (beat.clearHeightMeters ?? 8.4) - 0.25));
+        const columnClearance = CONNECTOR_DECORATIVE_ARCH_COLUMN_HALF_SIZE
+          + PLAYER_TRAVERSAL_ENVELOPE.collisionRadius
+          + this.tileSize * 0.5;
+        const frameWidthIsClear = (widthMeters) => {
+          const halfWidth = widthMeters * 0.5;
+          const columnCenters = direction.x !== 0
+            ? [
+                { x: worldX, z: worldZ - halfWidth },
+                { x: worldX, z: worldZ + halfWidth },
+              ]
+            : [
+                { x: worldX - halfWidth, z: worldZ },
+                { x: worldX + halfWidth, z: worldZ },
+              ];
+          return !(floorTiles ?? []).some((floor) => (
+            Number(floor.elevation ?? 0)
+                >= Number(floorElevation) - PLAYER_TRAVERSAL_ENVELOPE.collisionRadius
+              && Number(floor.elevation ?? 0)
+                <= Number(floorElevation) + frameHeight
+                  + PLAYER_TRAVERSAL_ENVELOPE.headClearance
+              && columnCenters.some((column) => (
+                Math.abs(column.x - Number(floor.x) * this.tileSize) <= columnClearance
+                  && Math.abs(column.z - Number(floor.z) * this.tileSize) <= columnClearance
+              ))
+          ));
+        };
+        const minimumWidthTiles = Math.max(5, Math.ceil(Number(beat.widthMeters) / this.tileSize));
+        const safeWidthTiles = Array.from({ length: 20 }, (_, index) => (
+          minimumWidthTiles + index
+        )).find((widthTiles) => frameWidthIsClear(widthTiles * this.tileSize));
+        if (!safeWidthTiles) {
+          // An enclosed connector can legitimately have no safe column bay.
+          // Omitting that decorative frame is preferable to committing a
+          // collision that severs the authoritative traversal graph.
+          continue;
+        }
+        beat.widthMeters = safeWidthTiles * this.tileSize;
+        beat.internalClearWidthMeters = beat.widthMeters
+          - CONNECTOR_DECORATIVE_ARCH_COLUMN_HALF_SIZE * 2;
+        const name = `connectorIndustrialStructuralFrame_${plan.id}_${beatIndex}`;
+        const frame = place(
+          // V4 connector frames are suspended from the authoritative shell.
+          // Their header and high wall brackets provide the structural rhythm
+          // without placing freestanding columns in a room/ramp seam.
+          createGirderFrame(beat.widthMeters, frameHeight, false),
+          name,
+          worldX,
+          worldZ,
+          rotationY,
+          floorElevation,
+        );
+        frame.userData.connectorStructuralFrame = true;
+        frame.userData.connectorId = plan.id;
+        frame.userData.pathIndex = beat.pathIndex;
+        frame.userData.internalClearWidthMeters = beat.internalClearWidthMeters;
+        beat.collisionFreeOverheadFrame = true;
+        plan.explorationBeats.push({
+          type: 'v4_load_bearing_structural_frame',
+          connectorId: plan.id,
+          x: point.x,
+          z: point.z,
+          elevation: floorElevation,
+        });
+      }
 
       for (const [beatIndex, beat] of (plan.decorativeArchBeats ?? []).entries()) {
         const point = beat.gridPoint;
@@ -20365,9 +21386,15 @@ export class DungeonGenerator {
         wallTopY: Math.max(wallBottomY + PLAYER_TRAVERSAL_ENVELOPE.headClearance, wallTopY),
       };
     };
-    const shellTiles = [...(authoritativeFloorLayers ?? tiles.values())];
+    const allShellTiles = [...(authoritativeFloorLayers ?? tiles.values())];
+    // Support-only floors still describe occupied volume beneath decks and
+    // ramps, so they participate when subtracting neighboring silhouettes.
+    // They do not emit their own walls or they would slice through the
+    // playable transfer surface above them.
+    const shellTiles = allShellTiles
+      .filter((tile) => tile?.walkabilityIntent !== 'support-only');
     const shellTilesByColumn = new Map();
-    for (const tile of shellTiles) {
+    for (const tile of allShellTiles) {
       const key = tileKey(tile.x, tile.z);
       const column = shellTilesByColumn.get(key) ?? [];
       column.push(tile);
@@ -20383,6 +21410,14 @@ export class DungeonGenerator {
         firstIds.has(id)
       ));
     };
+    const isAuthoredTransferFloor = (floor) => Boolean(
+      floor?.surface === 'industrialRamp'
+        || floor?.augmentationTransferId
+        || (floor?.augmentationTransferIds?.length ?? 0) > 0
+        || (floor?.traversalLinks ?? []).some((link) => (
+          link?.augmentationTransferId || link?.transferId
+        ))
+    );
     const subtractInterval = (intervals, subtractBottom, subtractTop) => intervals.flatMap(([
       intervalBottom,
       intervalTop,
@@ -20423,9 +21458,19 @@ export class DungeonGenerator {
         // An authored transfer owns the vertical connection across this edge;
         // emitting a retaining wall between its consecutive cells would turn
         // the exact ramp/stair witness into a collision barrier.
-        const connectedByAuthoredTransfer = neighbors.some((neighbor) => (
-          floorsShareAuthoredTransfer(tile, neighbor)
-        ));
+        const connectedByAuthoredTransfer = neighbors.some((neighbor) => {
+          if (floorsShareAuthoredTransfer(tile, neighbor)) return true;
+          // The wall shell must agree with the same bidirectional movement
+          // graph used for release acceptance. If both directions can cross
+          // an adjacent pair, the shared edge is an interior seam—not a
+          // retaining facade—even when one side is a ramp endpoint whose
+          // transfer id was merged into a tier floor.
+          return Boolean(
+            (isAuthoredTransferFloor(tile) || isAuthoredTransferFloor(neighbor))
+              && this._getTraversalActionBetweenFloorTiles(tile, neighbor)
+              && this._getTraversalActionBetweenFloorTiles(neighbor, tile)
+          );
+        });
         let exposedIntervals = connectedByAuthoredTransfer
           ? []
           : [[wallBottomY, wallTopY]];
@@ -22071,7 +23116,7 @@ export class DungeonGenerator {
       return tile ? this._floorTileToWorld(tile) : this._tileToWorld(room.x, room.z, tiles);
     };
 
-    for (const room of rooms) {
+    for (const room of rooms.filter(({ isDungeonSupplement }) => !isDungeonSupplement)) {
       const position = this._tileToWorld(room.x, room.z, tiles);
 
       if (room.type === 'hub') {

@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  Game,
   captureDungeonAugmentationMutableState,
   createLegacyDungeonBasePlanHash,
+  isDungeonAugmentationPlayableAlphaRequest,
   restoreDungeonAugmentationMutableState,
   resolveCommittedDungeonGenerationSpec,
   resolveDungeonAugmentationGenerationRequest,
@@ -27,6 +29,78 @@ import {
   INDUSTRIAL_SUPPLEMENT_PREVIEW_V3_PROFILE_ID,
   INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
 } from '../src/dungeon-augmentation/IndustrialExtensionHost.js';
+
+test('invalid V4 alpha acceptance requires the exact profile id, never an alias', () => {
+  const exact = `?dungeonAugmentation=${INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID}`
+    + '&dungeonAugmentationAlpha=1';
+  assert.equal(isDungeonAugmentationPlayableAlphaRequest(exact), true);
+  for (const alias of ['1', '4', 'preview', 'expanded']) {
+    assert.equal(
+      isDungeonAugmentationPlayableAlphaRequest(
+        `?dungeonAugmentation=${alias}&dungeonAugmentationAlpha=1`,
+      ),
+      false,
+      alias,
+    );
+  }
+  assert.equal(
+    isDungeonAugmentationPlayableAlphaRequest(
+      `?dungeonAugmentation=${INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID}`,
+    ),
+    false,
+  );
+});
+
+test('disposable alpha mode cannot adopt or persist a boss expedition', async () => {
+  let storageReads = 0;
+  let storageWrites = 0;
+  const alpha = {
+    dungeonAugmentationPlayableAlphaMode: true,
+    activeBossExpeditionSpec: Object.freeze({ id: 'must-be-discarded' }),
+    worldKind: 'dungeon',
+    busterLabStorage: {
+      getActiveBossExpedition() {
+        storageReads += 1;
+        return { expeditionId: 'committed-expedition' };
+      },
+      recordActiveBossExpeditionDungeonAugmentationState() {
+        storageWrites += 1;
+        return { ok: true };
+      },
+      recordBossCheckpoint() {
+        storageWrites += 1;
+        return { ok: true };
+      },
+      recordBossVictory() {
+        storageWrites += 1;
+        return { ok: true };
+      },
+    },
+    getSelectedBossProfileId: () => 'revolvingFusillade',
+  };
+  const encounter = { id: 'alpha-boss', isBoss: true };
+  const configured = Game.prototype._configureBossHuntEncounter.call(alpha, {
+    encounters: [encounter],
+  });
+  assert.equal(configured, encounter);
+  assert.equal(alpha.activeBossExpeditionSpec, null);
+  assert.equal(encounter.expeditionSpec, null);
+  assert.equal(storageReads, 0);
+
+  assert.deepEqual(
+    await Game.prototype._persistCurrentDungeonAugmentationState.call(alpha, { force: true }),
+    { ok: true, unchanged: true, reason: 'augmentation-alpha-disposable' },
+  );
+  assert.deepEqual(
+    await Game.prototype.commitAscensionCheckpoint.call(alpha, {}, {}),
+    { ok: true, unchanged: true, reason: 'augmentation-alpha-disposable' },
+  );
+  assert.deepEqual(
+    await Game.prototype._recordBossVictory.call(alpha, {}),
+    { ok: true, unchanged: true, reason: 'augmentation-alpha-disposable' },
+  );
+  assert.equal(storageWrites, 0);
+});
 
 test('base-plan identity preserves Industrial V1 while namespacing future parent families', () => {
   const input = {
@@ -213,6 +287,7 @@ test('V4 save identity collects stable state IDs from operations, nodes, segment
     }],
     segments: [{ shortcutStateId: 'state:segment-shortcut' }],
     connections: [{ traversal: { stateId: 'state:connection-shortcut' } }],
+    stateBindings: [{ runtimeStateId: 'state:physical-binding' }],
   });
 
   assert.deepEqual(identity.progressionStateIds, [
@@ -221,6 +296,7 @@ test('V4 save identity collects stable state IDs from operations, nodes, segment
     'state:mechanism',
     'state:nested-shortcut',
     'state:node-reward',
+    'state:physical-binding',
     'state:reward',
     'state:segment-shortcut',
   ]);
@@ -762,4 +838,143 @@ test('persisted V4 local controls replay only their namespaced hazard scope', ()
   assert.equal(siblingNetworkTrap.active, true);
   assert.equal(unrelatedTrap.active, true);
   assert.equal(restoredController.conveyors[0].active, true);
+});
+
+test('V4 semantic bindings persist anchor state and lift/ladder state independently', () => {
+  const stateIds = {
+    encounter: 'anchor:encounter:state:encounter-cleared',
+    mechanism: 'anchor:mechanism:state:mechanism-activated',
+    reward: 'anchor:reward:state:reward-claimed',
+    liftEnabled: 'transfer:lift:state:lift-enabled',
+    liftPosition: 'transfer:lift:state:lift-position',
+    ladderDeployed: 'transfer:ladder:state:ladder-deployed',
+  };
+  const baseIdentity = createDungeonAugmentationSaveIdentity({
+    profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+    seed: 'layout:semantic-runtime-state',
+    basePlanHash: 'base:semantic-runtime-state',
+    augmentationPlanHash: 'augmentation:semantic-runtime-state',
+    effectivePlanHash: computeEffectiveDungeonPlanHash(
+      'base:semantic-runtime-state',
+      'augmentation:semantic-runtime-state',
+    ),
+    themeRevisions: [],
+    progressionStateIds: Object.values(stateIds),
+  });
+  const stateRecord = (runtimeStateId, stateKind) => ({
+    runtimeStateId,
+    localStateId: stateKind,
+    stateKind,
+    semanticStateKind: stateKind,
+  });
+  const liftStateRecords = [
+    stateRecord(stateIds.liftEnabled, 'lift-enabled'),
+    stateRecord(stateIds.liftPosition, 'lift-position'),
+  ];
+  const ladderStateRecords = [
+    stateRecord(stateIds.ladderDeployed, 'ladder-deployed'),
+  ];
+  const sourceDungeon = {
+    augmentationIdentity: baseIdentity,
+    augmentationOverlayPlan: { operations: [], segments: [] },
+  };
+  const sourceController = {
+    encounters: [{ stateId: stateIds.encounter, cleared: true }],
+    mechanisms: [{
+      stateId: stateIds.mechanism,
+      mechanismStateId: stateIds.mechanism,
+      activated: true,
+    }],
+    chests: [{ stateId: stateIds.reward, opened: true }],
+    pressurePlates: [],
+    ladders: [{
+      id: 'transfer:ladder',
+      stateRecords: ladderStateRecords,
+      deployed: true,
+      disabled: false,
+    }],
+    connectorLifts: [],
+  };
+  const sourceLiftRuntime = {
+    lifts: [{
+      id: 'transfer:lift',
+      stateRecords: liftStateRecords,
+      currentElevation: 4.2,
+      shortcutUnlocked: true,
+    }],
+  };
+  const captured = captureDungeonAugmentationMutableState({
+    dungeon: sourceDungeon,
+    controller: sourceController,
+    connectorLiftRuntime: sourceLiftRuntime,
+  });
+  assert.deepEqual(captured, {
+    [stateIds.encounter]: true,
+    [stateIds.ladderDeployed]: 'deployed',
+    [stateIds.liftEnabled]: 'enabled',
+    [stateIds.liftPosition]: 4.2,
+    [stateIds.mechanism]: true,
+    [stateIds.reward]: true,
+  });
+
+  const restoredIdentity = withDungeonAugmentationMutableState(baseIdentity, captured);
+  const restoredLift = {
+    id: 'transfer:lift',
+    descriptor: { stateRecords: liftStateRecords },
+    currentElevation: 0,
+    shortcutUnlocked: false,
+  };
+  const restoredController = {
+    encounters: [{ stateId: stateIds.encounter, cleared: false, enemyIds: ['enemy'] }],
+    mechanisms: [{
+      stateId: stateIds.mechanism,
+      mechanismStateId: stateIds.mechanism,
+      activated: false,
+      object: { userData: {} },
+    }],
+    chests: [{
+      stateId: stateIds.reward,
+      opened: false,
+      rewardClaimed: false,
+      object: { userData: {} },
+    }],
+    pressurePlates: [],
+    ladders: [{
+      id: 'transfer:ladder',
+      descriptor: { stateRecords: ladderStateRecords },
+      deployed: false,
+      disabled: true,
+      object: { visible: false },
+    }],
+    connectorLifts: [restoredLift],
+  };
+  const restoredLiftStates = [];
+  const restoredLiftRuntime = {
+    lifts: [restoredLift],
+    restoreLiftState(id, state) {
+      assert.equal(id, 'transfer:lift');
+      restoredLiftStates.push({ ...state });
+      restoredLift.currentElevation = state.currentElevation;
+      restoredLift.shortcutUnlocked = state.shortcutUnlocked;
+      return { ok: true };
+    },
+  };
+  const restored = restoreDungeonAugmentationMutableState({
+    dungeon: {
+      augmentationIdentity: restoredIdentity,
+      augmentationOverlayPlan: { operations: [], segments: [] },
+    },
+    controller: restoredController,
+    connectorLiftRuntime: restoredLiftRuntime,
+  });
+  assert.equal(restored.applied, true);
+  assert.equal(restoredController.encounters[0].cleared, true);
+  assert.equal(restoredController.mechanisms[0].activated, true);
+  assert.equal(restoredController.chests[0].rewardClaimed, true);
+  assert.equal(restoredController.ladders[0].deployed, true);
+  assert.equal(restoredController.ladders[0].disabled, false);
+  assert.deepEqual(restoredLiftStates, [{
+    currentElevation: 4.2,
+    shortcutUnlocked: true,
+  }]);
 });

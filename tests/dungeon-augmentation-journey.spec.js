@@ -22,7 +22,8 @@ const COMBAT_SEED = 'overworld-v1-public-extraction-easy-110';
 const STARTUP_URL = [
   `/?dungeonSeed=${JOURNEY_SEED}`,
   `reaverbotSeed=${COMBAT_SEED}`,
-  'dungeonAugmentation=preview',
+  `dungeonAugmentation=${PROFILE_ID}`,
+  'playerInvulnerable=1',
 ].join('&');
 
 test.use({ viewport: { width: 640, height: 360 } });

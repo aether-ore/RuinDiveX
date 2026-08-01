@@ -11,8 +11,9 @@ import {
   resolveIndustrialSupplementBlueprint,
 } from '../src/dungeon-augmentation/IndustrialSupplementBlueprintCatalog.js';
 
-const BASELINE_BLUEPRINT_IDS = [
+const EXPECTED_BLUEPRINT_IDS = [
   'ind-junction-through-t-01',
+  'ind-junction-through-t-branch-entry-01',
   'ind-junction-crossroads-01',
   'ind-junction-staggered-cross-01',
   'ind-loop-paired-t-h-01',
@@ -20,12 +21,12 @@ const BASELINE_BLUEPRINT_IDS = [
   'ind-crossover-over-under-01',
   'ind-room-reaverbot-foundry-01',
   'ind-room-treatment-control-01',
+  'ind-room-ladder-defense-rise-01',
+  'ind-room-lift-defense-rise-01',
+  'ind-room-compact-ramp-defense-rise-01',
   'ind-room-maintenance-rise-01',
   'ind-room-dispatch-vault-01',
   'ind-room-observation-break-01',
-];
-
-const EXIT_ELEVATION_BLUEPRINT_IDS = [
   'ind-rise-switchback-ramp-01',
   'ind-rise-stair-cascade-01',
   'ind-rise-freight-lift-dogleg-01',
@@ -34,12 +35,39 @@ const EXIT_ELEVATION_BLUEPRINT_IDS = [
   'ind-room-floodgate-descent-01',
   'ind-room-crane-gantry-lift-01',
   'ind-room-pressure-lock-reward-rise-01',
+  'ind-room-pressure-lock-reward-descent-01',
+  'ind-room-switchgear-cache-descent-01',
+  'ind-room-survey-relay-cache-01',
+  'ind-rise-long-freight-ramp-01',
+  'ind-room-inclined-sorter-01',
+];
+
+const EXIT_ELEVATION_BLUEPRINT_IDS = [
+  'ind-room-ladder-defense-rise-01',
+  'ind-room-lift-defense-rise-01',
+  'ind-room-compact-ramp-defense-rise-01',
+  'ind-room-maintenance-rise-01',
+  'ind-rise-switchback-ramp-01',
+  'ind-rise-stair-cascade-01',
+  'ind-rise-freight-lift-dogleg-01',
+  'ind-rise-ladder-bridge-01',
+  'ind-room-turbine-helix-01',
+  'ind-room-floodgate-descent-01',
+  'ind-room-crane-gantry-lift-01',
+  'ind-room-pressure-lock-reward-rise-01',
+  'ind-room-pressure-lock-reward-descent-01',
+  'ind-room-switchgear-cache-descent-01',
   'ind-rise-long-freight-ramp-01',
   'ind-room-inclined-sorter-01',
 ];
 
 const EXPECTED_LAYOUTS = {
   'ind-junction-through-t-01': {
+    width: 5,
+    depth: 7,
+    maskSha256: 'ce64ad73d1df8acb65947158eaab6c2203582e33699bbb9ad51f4b47fed94abe',
+  },
+  'ind-junction-through-t-branch-entry-01': {
     width: 5,
     depth: 7,
     maskSha256: 'ce64ad73d1df8acb65947158eaab6c2203582e33699bbb9ad51f4b47fed94abe',
@@ -78,6 +106,21 @@ const EXPECTED_LAYOUTS = {
     width: 11,
     depth: 11,
     maskSha256: 'f61cd76f742611a30dfebd326d8a8f5e18d9bb9f9c12534ebfb4ebcc032596fd',
+  },
+  'ind-room-ladder-defense-rise-01': {
+    width: 9,
+    depth: 11,
+    maskSha256: '8765e01234537557fe38bb1a5b3627f4a98eea994ee2e9418ecb9e120870abd9',
+  },
+  'ind-room-lift-defense-rise-01': {
+    width: 9,
+    depth: 11,
+    maskSha256: 'e1eb711f2538dc5482a1538db5dc92f5ca539084eb944e7ccf54bb7966ca036c',
+  },
+  'ind-room-compact-ramp-defense-rise-01': {
+    width: 7,
+    depth: 11,
+    maskSha256: 'b00e29aa560485242a8b82aef82706883aafcbf4ea2edf92d59d65e27d8e82e5',
   },
   'ind-room-maintenance-rise-01': {
     width: 9,
@@ -134,6 +177,21 @@ const EXPECTED_LAYOUTS = {
     depth: 11,
     maskSha256: 'd6753093d9b15ef1803c5e4d2fe9411ad7d8b06f3f144c206829eda88f96267d',
   },
+  'ind-room-pressure-lock-reward-descent-01': {
+    width: 9,
+    depth: 11,
+    maskSha256: 'f282d61d2d70e50f42b22e008bf7ea17f91dc6ed9cafcec7d5287261acb78393',
+  },
+  'ind-room-switchgear-cache-descent-01': {
+    width: 7,
+    depth: 7,
+    maskSha256: '1578ac640a1504e18acc405cd20a60c3941e53d75e6744d9549489efa6eec388',
+  },
+  'ind-room-survey-relay-cache-01': {
+    width: 7,
+    depth: 7,
+    maskSha256: '144e870d9df857bbc8dd97f8f5cb67a3e00c6465b1c6ae11f462e5352a29edc5',
+  },
   'ind-rise-long-freight-ramp-01': {
     width: 7,
     depth: 15,
@@ -147,6 +205,26 @@ const EXPECTED_LAYOUTS = {
 };
 
 const EXPECTED_EXIT_ELEVATIONS = {
+  'ind-room-ladder-defense-rise-01': {
+    entry: 0,
+    reconnect: 2.8,
+    transferForms: ['ladder'],
+  },
+  'ind-room-lift-defense-rise-01': {
+    entry: 0,
+    reconnect: 2.8,
+    transferForms: ['lift'],
+  },
+  'ind-room-compact-ramp-defense-rise-01': {
+    entry: 0,
+    reconnect: 2.8,
+    transferForms: ['ramp'],
+  },
+  'ind-room-maintenance-rise-01': {
+    entry: 0,
+    reconnect: 2.8,
+    transferForms: ['ramp', 'lift'],
+  },
   'ind-rise-switchback-ramp-01': {
     entry: 0,
     reconnect: 2.8,
@@ -185,6 +263,16 @@ const EXPECTED_EXIT_ELEVATIONS = {
   'ind-room-pressure-lock-reward-rise-01': {
     entry: 0,
     reconnect: 2.8,
+    transferForms: ['stairs'],
+  },
+  'ind-room-pressure-lock-reward-descent-01': {
+    entry: 2.8,
+    reconnect: 0,
+    transferForms: ['stairs'],
+  },
+  'ind-room-switchgear-cache-descent-01': {
+    entry: 2.8,
+    reconnect: 0,
     transferForms: ['stairs'],
   },
   'ind-rise-long-freight-ramp-01': {
@@ -278,6 +366,34 @@ function transferFormOf(transfer) {
   return transfer.form ?? transfer.traversal ?? transfer.transferKind;
 }
 
+function localCellInTransferFootprint(transfer, localTile) {
+  const footprint = transfer.footprintTiles ?? transfer;
+  const width = Number(transfer.widthTiles ?? footprint.width ?? transfer.w ?? 1);
+  const depth = Number(transfer.depthTiles ?? footprint.depth ?? transfer.d ?? 1);
+  const minimumX = Number(footprint.x ?? transfer.x) - (width - 1) * 0.5;
+  const minimumZ = Number(footprint.z ?? transfer.z) - (depth - 1) * 0.5;
+  const xOrdinal = Number(localTile?.x) - minimumX;
+  const zOrdinal = Number(localTile?.z) - minimumZ;
+  return Number.isInteger(xOrdinal)
+    && xOrdinal >= 0
+    && xOrdinal < width
+    && Number.isInteger(zOrdinal)
+    && zOrdinal >= 0
+    && zOrdinal < depth;
+}
+
+function exactBlueprintTierCell(blueprint, floorTierId, localTile) {
+  const tier = (blueprint.floorTiers ?? []).find(({ id }) => id === floorTierId);
+  if (!tier) return null;
+  const column = Number(localTile?.x) - Number(tier.maskOriginTile?.x);
+  const row = Number(localTile?.z) - Number(tier.maskOriginTile?.z);
+  return Number.isInteger(column)
+    && Number.isInteger(row)
+    && tier.floorMask?.[row]?.[column] === '#'
+    ? tier
+    : null;
+}
+
 function routeTierOf(route) {
   return route.tier ?? route.floorTierId;
 }
@@ -340,30 +456,22 @@ function assertSocketApertureIsFloor(blueprint, socket) {
   }
 }
 
-test('Industrial supplement blueprint catalog exposes the exact 11 baseline and 10 elevation templates', () => {
+test('Industrial supplement blueprint catalog exposes the exact 28 authored templates', () => {
   assert.equal(
     INDUSTRIAL_SUPPLEMENT_BLUEPRINT_SCHEMA,
     'ruindivex-industrial-supplement-blueprint/v1',
   );
   assert.deepEqual(
     INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS,
-    [...BASELINE_BLUEPRINT_IDS, ...EXIT_ELEVATION_BLUEPRINT_IDS],
+    EXPECTED_BLUEPRINT_IDS,
   );
-  assert.equal(INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS.length, 21);
-  assert.deepEqual(
-    INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS.slice(0, 11),
-    BASELINE_BLUEPRINT_IDS,
-  );
-  assert.deepEqual(
-    INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS.slice(11),
-    EXIT_ELEVATION_BLUEPRINT_IDS,
-  );
+  assert.equal(INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS.length, 28);
   assert.deepEqual(
     Object.keys(INDUSTRIAL_SUPPLEMENT_BLUEPRINTS),
     INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS,
   );
 
-  assert.equal(INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST.length, 21);
+  assert.equal(INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST.length, 28);
   assert.deepEqual(
     INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST.map(({ id }) => id),
     INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS,
@@ -392,7 +500,7 @@ test('Industrial supplement blueprint catalog exposes the exact 11 baseline and 
   }
 });
 
-test('all 21 authored blueprints retain their exact plan footprints and floor masks', () => {
+test('all 28 authored blueprints retain their exact plan footprints and floor masks', () => {
   assert.deepEqual(
     Object.keys(EXPECTED_LAYOUTS),
     INDUSTRIAL_SUPPLEMENT_BLUEPRINT_IDS,
@@ -507,7 +615,7 @@ test('every socket is an exact three-tile aperture backed by walkable floor on i
   }
 });
 
-test('all 10 exit-elevation blueprints physically connect both authored tiers', () => {
+test('all 16 executable exit-elevation blueprints physically connect both authored tiers', () => {
   const acceptedTransferForms = new Set(['ramp', 'stairs', 'lift', 'ladder']);
 
   for (const blueprintId of EXIT_ELEVATION_BLUEPRINT_IDS) {
@@ -588,6 +696,86 @@ test('all 10 exit-elevation blueprints physically connect both authored tiers', 
     assert.ok(routeTiers.has('base'), `${blueprintId} has a base-tier route`);
     assert.ok(routeTiers.has('upper'), `${blueprintId} has an upper-tier route`);
   }
+});
+
+test('every authored physical transfer endpoint names exact local transfer and support cells', () => {
+  let transferCount = 0;
+  let endpointCount = 0;
+  let floorSupportCount = 0;
+  let transferSupportCount = 0;
+
+  for (const blueprint of INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST) {
+    const transferById = new Map(physicalTransfersOf(blueprint).map((transfer) => (
+      [transfer.id, transfer]
+    )));
+    transferCount += transferById.size;
+    for (const transfer of transferById.values()) {
+      for (const role of ['from', 'to']) {
+        endpointCount += 1;
+        const endpoint = transfer.endpoints?.[role];
+        assert.ok(endpoint, `${blueprint.id}/${transfer.id}/${role} endpoint`);
+        assert.ok(
+          Number.isFinite(endpoint.localElevation),
+          `${blueprint.id}/${transfer.id}/${role} local elevation`,
+        );
+        assert.ok(
+          localCellInTransferFootprint(transfer, endpoint.localTransferCell),
+          `${blueprint.id}/${transfer.id}/${role} exact owning transfer cell`,
+        );
+
+        const support = endpoint.localSupportRef;
+        assert.ok(support?.localTile, `${blueprint.id}/${transfer.id}/${role} support ref`);
+        if (support.kind === 'floor-cell') {
+          floorSupportCount += 1;
+          const tier = exactBlueprintTierCell(
+            blueprint,
+            support.floorTierId,
+            support.localTile,
+          );
+          assert.ok(tier, `${blueprint.id}/${transfer.id}/${role} exact floor support`);
+          assert.equal(
+            tier.elevation,
+            endpoint.localElevation,
+            `${blueprint.id}/${transfer.id}/${role} support tier elevation`,
+          );
+        } else {
+          assert.equal(
+            support.kind,
+            'transfer-cell',
+            `${blueprint.id}/${transfer.id}/${role} support kind`,
+          );
+          transferSupportCount += 1;
+          const supportingTransfer = transferById.get(support.transferId);
+          assert.ok(
+            supportingTransfer && supportingTransfer !== transfer,
+            `${blueprint.id}/${transfer.id}/${role} supporting transfer`,
+          );
+          assert.ok(
+            localCellInTransferFootprint(supportingTransfer, support.localTile),
+            `${blueprint.id}/${transfer.id}/${role} exact neighboring transfer cell`,
+          );
+        }
+      }
+    }
+  }
+
+  assert.equal(transferCount, 27);
+  assert.equal(endpointCount, 54);
+  assert.equal(floorSupportCount, 42);
+  assert.equal(transferSupportCount, 12);
+});
+
+test('maintenance rise provides at least six playable ramp intervals for its 2.8 metre rise', () => {
+  const blueprint = resolveIndustrialSupplementBlueprint('ind-room-maintenance-rise-01');
+  const ramp = physicalTransfersOf(blueprint).find((transfer) => (
+    transfer.id === 'mr-switchback-ramp'
+  ));
+  assert.ok(ramp);
+  assert.equal(transferFormOf(ramp), 'ramp');
+  const intervalCount = Math.max(ramp.widthTiles, ramp.depthTiles) - 1;
+  const rise = ramp.elevationRangeMeters.max - ramp.elevationRangeMeters.min;
+  assert.ok(intervalCount >= Math.ceil(rise / 0.55));
+  assert.ok(rise / intervalCount <= 0.55);
 });
 
 test('blueprint catalog, list, and resolver expose deeply immutable independent values', () => {

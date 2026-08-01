@@ -617,12 +617,22 @@ function readDungeonAugmentationProfileId() {
   return null;
 }
 
+export function isDungeonAugmentationPlayableAlphaRequest(search = '') {
+  const params = new URLSearchParams(String(search ?? ''));
+  return params.get('dungeonAugmentationAlpha') === '1'
+    // Invalid-preview acceptance is intentionally narrower than ordinary
+    // profile selection. Aliases such as `1`, `preview`, and `expanded`
+    // may opt into release-authoritative V4, but they cannot silently unlock
+    // the disposable invalid-geometry surface.
+    && params.get('dungeonAugmentation')
+      === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID;
+}
+
 function readDungeonAugmentationPlayableAlphaMode() {
   try {
-    const params = new URLSearchParams(globalThis.location?.search ?? '');
-    return params.get('dungeonAugmentationAlpha') === '1'
-      && resolveDungeonAugmentationProfileId(params.get('dungeonAugmentation'))
-        === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID;
+    return isDungeonAugmentationPlayableAlphaRequest(
+      globalThis.location?.search ?? '',
+    );
   } catch {
     return false;
   }
@@ -835,7 +845,10 @@ function isDungeonSupplementLocalControlMechanism(mechanism) {
   );
 }
 
-function dungeonSupplementTransferStateRecords(record, stateKind, context) {
+function dungeonSupplementTransferStateRecords(record, stateKinds, context) {
+  const acceptedStateKinds = new Set(
+    (Array.isArray(stateKinds) ? stateKinds : [stateKinds]).map(String),
+  );
   const byRuntimeStateId = new Map();
   for (const source of [record, record?.descriptor]) {
     for (const stateRecord of Array.isArray(source?.stateRecords)
@@ -844,8 +857,11 @@ function dungeonSupplementTransferStateRecords(record, stateKind, context) {
       const runtimeStateId = typeof stateRecord?.runtimeStateId === 'string'
         ? stateRecord.runtimeStateId.trim()
         : '';
+      const semanticStateKind = String(
+        stateRecord?.semanticStateKind ?? stateRecord?.stateKind ?? '',
+      );
       if (!runtimeStateId
-        || stateRecord.stateKind !== stateKind
+        || !acceptedStateKinds.has(semanticStateKind)
         || !context.allowedStateIds.has(runtimeStateId)) continue;
       byRuntimeStateId.set(runtimeStateId, stateRecord);
     }
@@ -907,11 +923,14 @@ export function captureDungeonAugmentationMutableState({
   for (const lift of runtimeLifts) {
     for (const stateRecord of dungeonSupplementTransferStateRecords(
       lift,
-      'lift-state',
+      ['lift-enabled', 'lift-position', 'lift-state'],
       context,
     )) {
+      const semanticStateKind = String(
+        stateRecord.semanticStateKind ?? stateRecord.stateKind ?? '',
+      );
       const localStateId = String(stateRecord.localStateId ?? '').toLowerCase();
-      const value = localStateId.includes('position')
+      const value = semanticStateKind === 'lift-position' || localStateId.includes('position')
         ? Number(lift.currentElevation)
         : lift.shortcutUnlocked ? 'enabled' : 'disabled';
       if (!Number.isFinite(value) && typeof value !== 'string') continue;
@@ -925,7 +944,7 @@ export function captureDungeonAugmentationMutableState({
   for (const ladder of controller?.ladders ?? []) {
     for (const stateRecord of dungeonSupplementTransferStateRecords(
       ladder,
-      'ladder-state',
+      ['ladder-deployed', 'ladder-state'],
       context,
     )) {
       writeDungeonAugmentationStateValue(
@@ -997,14 +1016,15 @@ export function restoreDungeonAugmentationMutableState({
   for (const lift of connectorLiftRuntime?.lifts ?? []) {
     const stateRecords = dungeonSupplementTransferStateRecords(
       lift,
-      'lift-state',
+      ['lift-enabled', 'lift-position', 'lift-state'],
       context,
     );
-    const positionRecord = stateRecords.find(({ localStateId }) => (
-      String(localStateId ?? '').toLowerCase().includes('position')
+    const positionRecord = stateRecords.find((stateRecord) => (
+      String(stateRecord.semanticStateKind ?? stateRecord.stateKind ?? '') === 'lift-position'
+        || String(stateRecord.localStateId ?? '').toLowerCase().includes('position')
     ));
-    const enabledRecords = stateRecords.filter(({ localStateId }) => (
-      !String(localStateId ?? '').toLowerCase().includes('position')
+    const enabledRecords = stateRecords.filter((stateRecord) => (
+      stateRecord !== positionRecord
     ));
     const savedElevation = positionRecord
       ? mutableState[positionRecord.runtimeStateId]
@@ -1029,7 +1049,7 @@ export function restoreDungeonAugmentationMutableState({
   for (const ladder of controller?.ladders ?? []) {
     const stateRecord = dungeonSupplementTransferStateRecords(
       ladder,
-      'ladder-state',
+      ['ladder-deployed', 'ladder-state'],
       context,
     ).find(({ runtimeStateId }) => Object.hasOwn(mutableState, runtimeStateId));
     if (!stateRecord) continue;
@@ -2814,6 +2834,13 @@ export class Game {
   }
 
   _persistCurrentDungeonAugmentationState({ force = false } = {}) {
+    if (this.dungeonAugmentationPlayableAlphaMode) {
+      return Promise.resolve({
+        ok: true,
+        unchanged: true,
+        reason: 'augmentation-alpha-disposable',
+      });
+    }
     const storageMethod = this.busterLabStorage
       ?.recordActiveBossExpeditionDungeonAugmentationState;
     const expeditionId = this.activeBossExpeditionSpec?.id;
@@ -2892,6 +2919,16 @@ export class Game {
     if (!encounter) return null;
     const profileId = this.getSelectedBossProfileId();
     const profile = getReaverbotBossProfile(profileId);
+    if (this.dungeonAugmentationPlayableAlphaMode) {
+      // Alpha is a disposable geometry/gameplay surface. It may configure a
+      // live boss for playtesting, but it must never adopt or mint a durable
+      // expedition identity that a later checkpoint/victory path could write.
+      this.activeBossExpeditionSpec = null;
+      encounter.bossProfileId = profileId;
+      encounter.expeditionSpec = null;
+      encounter.label = profile?.title ?? 'Ruin Core Boss';
+      return encounter;
+    }
     const persistedExpedition = this.busterLabStorage?.getActiveBossExpedition?.();
     if (!ignorePersistedActive
       && isInterruptedExpeditionRecord(persistedExpedition)
@@ -13092,6 +13129,9 @@ export class Game {
 
   async commitAscensionCheckpoint(enemy, checkpoint) {
     if (enemy?.debugBoss) return { ok: true, debug: true, encounterProgress: checkpoint };
+    if (this.dungeonAugmentationPlayableAlphaMode) {
+      return { ok: true, unchanged: true, reason: 'augmentation-alpha-disposable' };
+    }
     const expeditionId = enemy?.expeditionSpec?.id ?? this.activeBossExpeditionSpec?.id;
     if (!expeditionId || !this.busterLabStorage?.recordBossCheckpoint) {
       return { ok: false, reason: 'storage-unavailable' };
@@ -13152,6 +13192,9 @@ export class Game {
     ascensionAtomic = false,
     originBundle = this.activeWorldBundle,
   } = {}) {
+    if (this.dungeonAugmentationPlayableAlphaMode) {
+      return { ok: true, unchanged: true, reason: 'augmentation-alpha-disposable' };
+    }
     const expeditionId = enemy.expeditionSpec?.id
       ?? this.activeBossExpeditionSpec?.id
       ?? `boss:${enemy.id}`;

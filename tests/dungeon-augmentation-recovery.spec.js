@@ -165,3 +165,74 @@ test('direct dungeon startup rebuilds the complete persisted expedition spec', a
   expect(reopenedErrors).toEqual([]);
   await reopened.evaluate(() => window.game?.stop?.());
 });
+
+test('explicit V4 alpha startup is disposable and cannot rewrite a committed expedition', async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(240_000);
+  const setupErrors = attachRuntimeErrorCapture(page);
+  await page.goto('/?dungeonSeed=alpha-disposable-setup');
+  await waitForWorld(page, 'overworld');
+  const committed = await page.evaluate(async () => {
+    const lab = window.game.busterLabStorage;
+    const result = await lab.lockBossHuntForExpedition({
+      id: 'alpha-disposable-committed-expedition',
+      bossProfileId: 'revolvingFusillade',
+      seed: 'boss:alpha-disposable-committed',
+      depth: 3,
+      dungeonLayoutSeed: 'layout:alpha-disposable-committed',
+      dungeonFamilyId: 'industrial-v1',
+      dungeonAugmentation: null,
+    });
+    if (!result.ok) throw new Error(`Could not establish committed expedition: ${result.reason}`);
+    return structuredClone(lab.getActiveBossExpedition());
+  });
+
+  await page.close();
+  const alpha = await context.newPage();
+  const alphaErrors = attachRuntimeErrorCapture(alpha);
+  await alpha.goto([
+    '/?startupWorld=dungeon',
+    'dungeonFamily=industrial-v1',
+    'dungeonSeed=augmentation-realized-v4-000',
+    'reaverbotSeed=augmentation-realized-v4-000',
+    'dungeonAugmentation=industrial-supplement-preview-v4',
+    'dungeonAugmentationAlpha=1',
+    'playerInvulnerable=1',
+  ].join('&'));
+  await waitForWorld(alpha, 'dungeon', { timeout: 180_000 });
+
+  const result = await alpha.evaluate(async () => {
+    const { game } = window;
+    const before = structuredClone(game.busterLabStorage.getActiveBossExpedition());
+    const persistence = await game._persistCurrentDungeonAugmentationState({ force: true });
+    const after = structuredClone(game.busterLabStorage.getActiveBossExpedition());
+    return structuredClone({
+      alphaMode: game.dungeonAugmentationPlayableAlphaMode,
+      activeBossExpeditionSpec: game.activeBossExpeditionSpec,
+      playerInvulnerable: game.player?.testInvulnerable === true
+        || game.player?.invulnerable === true,
+      augmentationStatus: game.dungeon?.augmentationStatus ?? null,
+      persistence,
+      before,
+      after,
+    });
+  });
+
+  expect(result).toMatchObject({
+    alphaMode: true,
+    activeBossExpeditionSpec: null,
+    playerInvulnerable: true,
+    persistence: {
+      ok: true,
+      unchanged: true,
+      reason: 'augmentation-alpha-disposable',
+    },
+  });
+  expect(result.before).toEqual(committed);
+  expect(result.after).toEqual(committed);
+  expect(setupErrors).toEqual([]);
+  expect(alphaErrors).toEqual([]);
+  await alpha.evaluate(() => window.game?.stop?.());
+});

@@ -11,6 +11,9 @@ import {
 import {
   INDUSTRIAL_THEME_MATERIAL_ROLE_MAP,
 } from '../src/dungeon-augmentation/ThemeAdapters.js';
+import {
+  createIndustrialSupplementRewardTiles,
+} from '../src/dungeon-augmentation/IndustrialOverlayMaterializer.js';
 
 const TILE_SIZE = 2.8;
 
@@ -136,6 +139,312 @@ test('recipe-less legacy supplement encounters retain legacy roster adjustment',
   assert.deepEqual(hard.roster, ['basic', 'fast', 'ranged', 'horokko']);
   assert.equal(easy.enemyHealthMultiplier, 1);
   assert.equal(easy.enemyDamageMultiplier, 1);
+});
+
+test('V4 encounters reject missing accepted role placements instead of using legacy room spawns', () => {
+  const recipe = resolveIndustrialSupplementEncounterRecipe(
+    'supplement-route-network-defense',
+    {
+      grammarId: 'supplement-hall-cluster-encounter-v1',
+      moduleKind: 'room',
+      contentRole: 'challenge',
+      topology: 'parallel-gallery-loop',
+      difficulty: 2,
+    },
+  );
+  const room = {
+    ...authoredEncounterRoom(recipe),
+    isDungeonSupplement: true,
+    augmentationAnchorPlacements: [],
+  };
+  const generator = new DungeonGenerator({
+    difficulty: 2,
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+  });
+  const floors = [{
+    x: 0,
+    z: 0,
+    elevation: 0,
+    roomId: room.id,
+    augmentationFloorCellId: `${room.id}:floor:tempting-fallback`,
+    walkabilityIntent: 'required-clear',
+  }];
+
+  assert.throws(
+    () => generator._createDungeonSupplementEncounterDefinitions([room], floors, []),
+    (error) => error?.compatibility?.code
+      === 'DUNGEON_AUGMENTATION_ENCOUNTER_PLACEMENT_MISSING',
+  );
+});
+
+test('V4 encounters consume only their accepted unique support-floor identities', () => {
+  const recipe = resolveIndustrialSupplementEncounterRecipe(
+    'supplement-route-network-defense',
+    {
+      grammarId: 'supplement-hall-cluster-encounter-v1',
+      moduleKind: 'room',
+      contentRole: 'challenge',
+      topology: 'parallel-gallery-loop',
+      difficulty: 2,
+    },
+  );
+  const room = authoredEncounterRoom(recipe);
+  const spatialAnchors = room.augmentationAnchors.filter(({ kind }) => kind === 'spatial-role');
+  const floors = spatialAnchors.map((anchor, index) => {
+    const supportFloorCellId = `${room.id}:floor:spawn:${index}`;
+    anchor.authoritativePlacement = {
+      id: `${anchor.id}:placement`,
+      supportFloorCellId,
+    };
+    return {
+      x: index * 2,
+      z: 0,
+      elevation: 0,
+      roomId: room.id,
+      augmentationFloorCellId: supportFloorCellId,
+      walkabilityIntent: 'required-clear',
+    };
+  });
+  room.isDungeonSupplement = true;
+  room.augmentationAnchorPlacements = spatialAnchors.map((anchor) => ({
+    ...anchor.authoritativePlacement,
+    anchorId: anchor.id,
+  }));
+  const generator = new DungeonGenerator({
+    difficulty: 2,
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+  });
+  generator._roomSpawnPoints = () => {
+    throw new Error('legacy room spawn fallback must not run for V4');
+  };
+  const encounterAnchor = room.augmentationAnchors.find(({ kind }) => kind === 'encounter');
+  encounterAnchor.runtimeConsumerDescriptor = {
+    id: `${room.id}:encounter`,
+    kind: 'encounter-cleared-runtime',
+    runtimeStateIds: [encounterAnchor.runtimeStateId],
+  };
+  encounterAnchor.liveStateConsumers = [{
+    id: 'live-encounter-consumer',
+    runtimeStateId: encounterAnchor.runtimeStateId,
+  }];
+
+  const [encounter] = generator._createDungeonSupplementEncounterDefinitions(
+    [room],
+    floors,
+    [],
+  );
+  assert.equal(encounter.spawnPoints.length, recipe.roster.length);
+  assert.equal(new Set(encounter.spatialRoles.map(({ supportFloorCellId }) => (
+    supportFloorCellId
+  ))).size, recipe.roster.length);
+  assert.equal(encounter.spatialRoles.every(({ spawnPlacementSource }) => (
+    spawnPlacementSource === 'accepted-authoritative-anchor-placement'
+  )), true);
+  assert.equal(encounter.runtimeConsumerDescriptor.id, `${room.id}:encounter`);
+  assert.deepEqual(encounter.liveStateConsumers.map(({ id }) => id), [
+    'live-encounter-consumer',
+  ]);
+});
+
+test('discovery rewards become concrete collectible records with accepted live state', () => {
+  const [reward] = createIndustrialSupplementRewardTiles([{
+    id: 'discovery-room',
+    x: 0,
+    z: 0,
+    baseElevation: 0,
+    augmentationAnchors: [{
+      id: 'discovery-room:shift-log',
+      kind: 'discovery',
+      position: { x: 2.8, y: 0, z: -2.8 },
+      runtimeStateId: 'discovery-room:shift-log:state:reward-claimed',
+      discoveryRecipe: { id: 'industrial-shift-route-log' },
+      stateRecords: [{ id: 'discovery-state-record' }],
+      runtimeConsumerDescriptor: {
+        id: 'discovery-room:shift-log',
+        kind: 'reward-claimed-runtime',
+      },
+      liveStateConsumers: [{ id: 'discovery-live-consumer' }],
+    }],
+  }], TILE_SIZE);
+
+  assert.equal(reward.kind, 'discovery');
+  assert.equal(reward.id, 'discovery-room:shift-log');
+  assert.equal(reward.rewardRecipe.id, 'industrial-shift-route-log');
+  assert.deepEqual(reward.stateRecords.map(({ id }) => id), ['discovery-state-record']);
+  assert.equal(reward.runtimeConsumerDescriptor.id, 'discovery-room:shift-log');
+  assert.deepEqual(reward.liveStateConsumers.map(({ id }) => id), [
+    'discovery-live-consumer',
+  ]);
+});
+
+test('final collision parity rejects a late relocation of an accepted V4 anchor', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  const roomId = 'final-collision-room';
+  const floors = ['a', 'b'].map((suffix, index) => ({
+    x: index,
+    z: 0,
+    elevation: 0,
+    roomId,
+    augmentationFloorCellId: `${roomId}:floor:${suffix}`,
+    augmentationFloorTierId: 'base',
+    augmentationFloorTierRuntimeId: `${roomId}:tier:base`,
+    walkabilityIntent: 'required-clear',
+  }));
+  const request = {
+    id: `${roomId}:reward:placement-request`,
+    requestId: `${roomId}:reward:placement-request`,
+    anchorId: `${roomId}:reward`,
+    ownerKind: 'supplemental-anchor',
+    ownerId: `${roomId}:reward`,
+    roomId,
+    placementKind: 'reward',
+    requestedPosition: { x: 0, y: 0, z: 0 },
+    exactSupportCellId: `${roomId}:floor:a`,
+    allowedSupportCellIds: [`${roomId}:floor:a`, `${roomId}:floor:b`],
+    allowedZoneIds: [],
+    requiredTierId: 'base',
+    requiredTierRuntimeId: `${roomId}:tier:base`,
+    requiredElevation: 0,
+    elevationToleranceMeters: 0.08,
+    forbiddenFootprints: [],
+    reservationRadiusMeters: 0,
+    reselectWithinDeclaredZoneAndTier: true,
+  };
+  const contract = {
+    active: true,
+    accepted: true,
+    requests: [request],
+    placements: [{
+      id: `${request.id}:placement`,
+      requestId: request.id,
+      anchorId: request.anchorId,
+      supportFloorCellId: `${roomId}:floor:a`,
+    }],
+  };
+  const rooms = [{ id: roomId, isDungeonSupplement: true, augmentationZones: [] }];
+
+  const unchanged = generator
+    ._validateDungeonSupplementAnchorPlacementsAgainstFinalCollision({
+      contract,
+      floorTiles: floors,
+      solidZones: [],
+      rooms,
+    });
+  assert.equal(unchanged.accepted, true);
+
+  const relocated = generator
+    ._validateDungeonSupplementAnchorPlacementsAgainstFinalCollision({
+      contract,
+      floorTiles: floors,
+      solidZones: [{
+        id: 'late-solid',
+        position: new THREE.Vector3(0, 0, 0),
+        halfWidth: 0.6,
+        halfDepth: 0.6,
+        verticalHalfHeight: 1,
+        blocking: true,
+      }],
+      rooms,
+    });
+  assert.equal(relocated.accepted, false);
+  assert.equal(relocated.errors.some(({ code }) => (
+    code === 'v4-anchor-placement-final-collision-parity-mismatch'
+  )), true);
+});
+
+test('runtime factories must carry every accepted live owner and consumer exactly once', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  const owner = {
+    schema: 'ruindivex-industrial-supplement-live-state-participant/v1',
+    id: 'live-owner-record',
+    runtimeStateId: 'live-runtime-state',
+    stateKind: 'reward-claimed',
+    participantRole: 'owner',
+    participantKind: 'supplemental-anchor',
+    participantId: 'reward-anchor',
+    authoritative: true,
+    rendererFree: true,
+  };
+  const consumer = {
+    schema: 'ruindivex-industrial-supplement-live-state-participant/v1',
+    id: 'live-consumer-record',
+    runtimeStateId: 'live-runtime-state',
+    stateKind: 'reward-claimed',
+    participantRole: 'consumer',
+    participantKind: 'reward-claimed-runtime',
+    participantId: 'reward-anchor',
+    authoritative: true,
+    rendererFree: true,
+  };
+  const contract = {
+    active: true,
+    liveOwners: [owner],
+    liveConsumers: [consumer],
+  };
+  const common = {
+    contract,
+    rooms: [{
+      augmentationAnchors: [{ liveStateOwners: [{ ...owner }] }],
+    }],
+    connectionPlans: [{ liveStateConsumers: [{ ...consumer }] }],
+  };
+
+  const accepted = generator._validateDungeonSupplementRuntimeFactoryStateBindings(common);
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.ownerCount, 1);
+  assert.equal(accepted.consumerCount, 1);
+
+  const duplicated = generator._validateDungeonSupplementRuntimeFactoryStateBindings({
+    ...common,
+    encounters: [{ liveStateConsumers: [{ ...consumer }] }],
+  });
+  assert.equal(duplicated.accepted, false);
+  assert.equal(duplicated.errors.some(({ participantRole, actualCount }) => (
+    participantRole === 'consumer' && actualCount === 2
+  )), true);
+
+  const missing = generator._validateDungeonSupplementRuntimeFactoryStateBindings({
+    ...common,
+    connectionPlans: [],
+  });
+  assert.equal(missing.accepted, false);
+  assert.equal(missing.errors.some(({ participantRole, actualCount }) => (
+    participantRole === 'consumer' && actualCount === 0
+  )), true);
+
+  const identityDrift = structuredClone(common);
+  identityDrift.connectionPlans[0].liveStateConsumers[0].runtimeStateId = 'wrong-state';
+  assert.equal(generator._validateDungeonSupplementRuntimeFactoryStateBindings(
+    identityDrift,
+  ).accepted, false);
+});
+
+test('blueprint transfer fixtures reject missing accepted live state before rendering', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  assert.throws(
+    () => generator._addConnectorTraversalPrefabs(
+      new THREE.Group(),
+      [{
+        id: 'blueprint-transfer-wrapper',
+        isDungeonSupplementBlueprintTransferFixture: true,
+        ladderContracts: [{
+          id: 'blueprint-ladder',
+          connectionId: 'blueprint-room',
+          authoritativeV4StateContract: true,
+          stateBindings: [],
+          stateRecords: [],
+          liveStateConsumers: [],
+        }],
+        liftContracts: [],
+      }],
+      {},
+      [],
+    ),
+    (error) => error?.compatibility?.code
+      === 'DUNGEON_AUGMENTATION_TRANSFER_LIVE_STATE_CONTRACT_MISSING',
+  );
 });
 
 test('authored encounter damage scaling reaches every spawned Reaverbot slot', () => {

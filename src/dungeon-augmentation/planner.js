@@ -22,6 +22,7 @@ import {
 import {
   addDungeonPoints,
   createDungeonPolyline,
+  createDungeonRouteEndpointSeam,
   dungeonPointDistance,
   dungeonVolumeOverlapWithinGrants,
   measureDungeonPolyline,
@@ -36,12 +37,18 @@ import {
 } from './geometry.js';
 import { createDungeonSupplementId } from './ids.js';
 import {
+  DUNGEON_ROUTE_ENDPOINT_SEAM_GRID_LATTICE_DIAGNOSTIC,
+  inspectDungeonRouteEndpointSeamGridLattice,
+} from './endpointSeamLattice.js';
+import {
   DungeonAugmentationRandom,
   deriveDungeonAugmentationSeed,
 } from './rng.js';
+import { createDungeonSelectionBagWitness } from './selectionBagWitness.js';
 import {
   computeDungeonAugmentationPlanHash,
   computeEffectiveDungeonPlanHash,
+  evaluateDungeonRouteNetworkFeaturelessGraph,
   validateDungeonAugmentationPlan,
 } from './validation.js';
 
@@ -51,6 +58,141 @@ function issue(code, message, context = {}) {
 
 function clampInteger(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, Math.floor(Number(value) || 0)));
+}
+
+function stableUniqueSelectionIds(ids = []) {
+  return [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))]
+    .sort((first, second) => first.localeCompare(second));
+}
+
+function uniqueSelectionIdsInOrder(ids = []) {
+  return [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+}
+
+export function dungeonSelectionBagDomainKey(legalIds = []) {
+  return canonicalStringify(stableUniqueSelectionIds(legalIds));
+}
+
+function selectionBagDomainState(bag, domainKey, legalIds = []) {
+  const legalSet = new Set(stableUniqueSelectionIds(legalIds));
+  const filteredState = (state, cycle = 0) => ({
+    cycle: Math.max(0, Math.trunc(Number(state?.cycle ?? cycle))),
+    consumedIds: uniqueSelectionIdsInOrder(state?.consumedIds)
+      .filter((id) => legalSet.has(id)),
+  });
+  const domains = bag?.domains && typeof bag.domains === 'object'
+    ? bag.domains
+    : null;
+  const domain = domains?.[domainKey];
+  if (domain) return filteredState(domain);
+  const seedState = {
+    cycle: !domains || Object.keys(domains).length === 0 ? bag?.cycle : 0,
+    consumedIds: bag?.globalConsumedIds ?? bag?.consumedIds,
+  };
+  // A newly encountered compatibility domain inherits only the selections
+  // that overlap its legal set. This preserves global no-repeat ordering
+  // across changing grant constraints while preventing one role's refill
+  // from clearing another overlapping role's state.
+  return filteredState(seedState);
+}
+
+function cloneSelectionBagDomains(domains) {
+  return Object.fromEntries(Object.entries(
+    domains && typeof domains === 'object' ? domains : {},
+  ).sort(([first], [second]) => first.localeCompare(second)).map(([key, state]) => [
+    key,
+    {
+      cycle: Math.max(0, Math.trunc(Number(state?.cycle ?? 0))),
+      consumedIds: uniqueSelectionIdsInOrder(state?.consumedIds),
+    },
+  ]));
+}
+
+function cloneDungeonSelectionBag(bag) {
+  return {
+    order: uniqueSelectionIdsInOrder(bag?.order),
+    cycle: Math.max(0, Math.trunc(Number(bag?.cycle ?? 0))),
+    consumedIds: uniqueSelectionIdsInOrder(bag?.consumedIds),
+    ...(Array.isArray(bag?.globalConsumedIds)
+      ? { globalConsumedIds: uniqueSelectionIdsInOrder(bag.globalConsumedIds) }
+      : {}),
+    ...(bag?.domains && typeof bag.domains === 'object'
+      ? { domains: cloneSelectionBagDomains(bag.domains) }
+      : {}),
+  };
+}
+
+/**
+ * Creates one immutable exhaustion bag. Callers must provide an isolated RNG
+ * fork for the family; the returned state is renderer-free and serializable.
+ */
+export function createDungeonSelectionBag(random, ids = []) {
+  const legalIds = stableUniqueSelectionIds(ids);
+  return {
+    order: random?.shuffle ? random.shuffle(legalIds) : legalIds,
+    cycle: 0,
+    consumedIds: [],
+  };
+}
+
+/**
+ * Enumerates tentative immutable selections. A cycle refills only after every
+ * member that is legal for the current decision has already been consumed.
+ * Merely enumerating a failed branch never mutates the parent bag.
+ */
+export function dungeonSelectionBagCandidates(bag, legalIds = []) {
+  const order = uniqueSelectionIdsInOrder(bag?.order ?? []);
+  const canonicalLegalIds = stableUniqueSelectionIds(legalIds);
+  const legal = new Set(canonicalLegalIds);
+  const orderedLegal = order.filter((id) => legal.has(id));
+  if (orderedLegal.length === 0) return [];
+  const domainKey = dungeonSelectionBagDomainKey(canonicalLegalIds);
+  const beforeDomain = selectionBagDomainState(bag, domainKey, canonicalLegalIds);
+  const consumed = new Set(beforeDomain.consumedIds);
+  let available = orderedLegal.filter((id) => !consumed.has(id));
+  const refilled = available.length === 0;
+  const baseDomainState = {
+    cycle: beforeDomain.cycle + (refilled ? 1 : 0),
+    consumedIds: refilled ? [] : orderedLegal.filter((id) => consumed.has(id)),
+  };
+  let globalConsumedIds = uniqueSelectionIdsInOrder(
+    bag?.globalConsumedIds ?? bag?.consumedIds,
+  ).filter((id) => order.includes(id));
+  if (globalConsumedIds.length >= order.length) globalConsumedIds = [];
+  if (refilled) available = orderedLegal;
+  return available.map((id) => ({
+    id,
+    domainKey,
+    beforeDomainState: {
+      cycle: beforeDomain.cycle,
+      consumedIds: [...beforeDomain.consumedIds],
+    },
+    beforeGlobalConsumedIds: [...globalConsumedIds],
+    refilled,
+    state: {
+      order: [...order],
+      cycle: baseDomainState.cycle,
+      consumedIds: [...baseDomainState.consumedIds, id],
+      globalConsumedIds: uniqueSelectionIdsInOrder([...globalConsumedIds, id]),
+      domains: {
+        ...cloneSelectionBagDomains(bag?.domains),
+        [domainKey]: {
+          cycle: baseDomainState.cycle,
+          consumedIds: [...baseDomainState.consumedIds, id],
+        },
+      },
+    },
+  }));
+}
+
+function consumeDungeonSelectionBagIds(bag, selectedIds = [], legalIds = bag?.order ?? []) {
+  let next = cloneDungeonSelectionBag(bag);
+  for (const id of uniqueSelectionIdsInOrder(selectedIds)) {
+    const candidate = dungeonSelectionBagCandidates(next, legalIds)
+      .find((entry) => entry.id === String(id));
+    if (candidate) next = candidate.state;
+  }
+  return next;
 }
 
 function normalizeRange(range, fallback = [1, 1]) {
@@ -157,7 +299,7 @@ function normalizeSpliceEdge(edge, region) {
   };
 }
 
-function normalizeRouteNetworkGrant(grant, region) {
+export function normalizeRouteNetworkGrant(grant, region) {
   return {
     source: grant,
     id: String(grant?.id ?? ''),
@@ -250,6 +392,7 @@ function createNode({
   facing,
   coordinateSpace,
   progressionOrder,
+  planningOnly = false,
 }) {
   const placement = {
     center: toDungeonPoint(center),
@@ -269,7 +412,7 @@ function createNode({
     });
     socketIdByLocalId.set(socket.id, socketId);
     return {
-      ...cloneDungeonAugmentationValue(socket),
+      ...(planningOnly ? socket : cloneDungeonAugmentationValue(socket)),
       id: socketId,
       localSocketId: socket.id,
       nodeId: id,
@@ -280,7 +423,13 @@ function createNode({
       segmentId: null,
     };
   });
-  const anchors = grammar.anchors.map((anchor, anchorOrdinal) => {
+  // Placement search can construct thousands of candidates before retaining
+  // a domain of at most 64. Anchors and their runtime payload never
+  // participate in collision, socket routing, or mask checks, so defer them
+  // until the accepted candidate is hydrated below. This keeps the planning
+  // record physical and deterministic without deep-cloning discarded
+  // gameplay content.
+  const anchors = planningOnly ? [] : grammar.anchors.map((anchor, anchorOrdinal) => {
     const localFacing = anchor.localFacing ?? null;
     return {
       ...cloneDungeonAugmentationValue(anchor),
@@ -310,17 +459,18 @@ function createNode({
     grammarId: grammar.id,
     grammarRevision: grammar.revision,
     blueprintId: grammar.blueprintId ?? null,
-    blueprintPersistentStateIds: cloneDungeonAugmentationValue(
-      grammar.blueprintPersistentStateIds ?? [],
-    ),
-    runtimeStateIds: blueprintRuntimeStateIds(
-      id,
-      grammar.blueprintPersistentStateIds,
-    ),
+    blueprintPersistentStateIds: planningOnly
+      ? (grammar.blueprintPersistentStateIds ?? [])
+      : cloneDungeonAugmentationValue(grammar.blueprintPersistentStateIds ?? []),
+    runtimeStateIds: planningOnly
+      ? []
+      : blueprintRuntimeStateIds(id, grammar.blueprintPersistentStateIds),
     blueprintCanonicalRotationQuarterTurns:
       grammar.blueprintCanonicalRotationQuarterTurns ?? 0,
     topology: grammar.topology,
-    themeBinding: cloneDungeonAugmentationValue(themeBinding),
+    themeBinding: planningOnly
+      ? themeBinding
+      : cloneDungeonAugmentationValue(themeBinding),
     placement,
     size: {
       x: Number(grammar.size.width),
@@ -330,20 +480,31 @@ function createNode({
       heightMeters: Number(grammar.size.height),
       depthMeters: Number(grammar.size.depth),
     },
-    structure: cloneDungeonAugmentationValue(grammar.structure),
-    socketConnectivityGroups: cloneDungeonAugmentationValue(
-      grammar.socketConnectivityGroups ?? [],
-    ),
-    selectionConstraints: cloneDungeonAugmentationValue(
-      grammar.selectionConstraints ?? {},
-    ),
+    // Route semantics can replace the top-level platform/ramp/rail arrays, so
+    // every planning candidate still receives its own structure shell. The
+    // immutable authored children are safe to share until final hydration.
+    structure: planningOnly
+      ? { ...(grammar.structure ?? {}) }
+      : cloneDungeonAugmentationValue(grammar.structure),
+    socketConnectivityGroups: planningOnly
+      ? (grammar.socketConnectivityGroups ?? [])
+      : cloneDungeonAugmentationValue(grammar.socketConnectivityGroups ?? []),
+    selectionConstraints: planningOnly
+      ? (grammar.selectionConstraints ?? {})
+      : cloneDungeonAugmentationValue(grammar.selectionConstraints ?? {}),
     sockets,
     anchors,
     occupiedVolumes: grammar.occupiedVolumes.map((volume) => transformDungeonVolume(volume, placement, `${id}:`)),
     clearanceVolumes: grammar.clearanceVolumes.map((volume) => transformDungeonVolume(volume, placement, `${id}:`)),
-    requiredThemeCapabilities: cloneDungeonAugmentationValue(grammar.requiredThemeCapabilities),
+    requiredThemeCapabilities: planningOnly
+      ? {
+        ...(grammar.requiredThemeCapabilities ?? {}),
+        materials: [...(grammar.requiredThemeCapabilities?.materials ?? [])],
+      }
+      : cloneDungeonAugmentationValue(grammar.requiredThemeCapabilities),
     progressionOrder,
     socketIdByLocalId,
+    ...(planningOnly ? { planningOnly: true } : {}),
   };
 }
 
@@ -1723,9 +1884,10 @@ function routeNetworkContentGrammarForRole(
       : !wantsElevation && levelCandidates.length > 0
         ? levelCandidates
         : authoredCandidates;
-    const index = ((Math.trunc(Number(selectionOrdinal)) % choices.length) + choices.length)
-      % choices.length;
-    return choices[index];
+    // V4 applies the global room-layout bag after semantic/elevation
+    // balancing. Keep this resolver as a stable constraint seed; it must not
+    // independently consume or pseudo-randomly index a family.
+    return choices[0];
   }
   const hallwayRole = ['reward', 'treasure', 'calm', 'discovery'].includes(requestedRole)
     ? 'reward'
@@ -1736,6 +1898,207 @@ function routeNetworkContentGrammarForRole(
     .filter((candidate) => candidate?.selectionConstraints?.hallwayClusterRole === hallwayRole)
     .sort((first, second) => String(first.id).localeCompare(String(second.id)));
   return candidates[0] ?? null;
+}
+
+const ROUTE_NETWORK_ENCOUNTER_PROFILE_IDS = Object.freeze([
+  'supplement-route-network-defense',
+  'supplement-lateral-defense',
+]);
+
+function routeNetworkRoomLayoutCandidates({
+  profile,
+  grammars,
+  contentRole,
+  currentGrammar,
+  topologyKit = false,
+}) {
+  if (!currentGrammar) return [];
+  if (topologyKit) return [currentGrammar];
+  const currentDelta = Number(
+    currentGrammar.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
+  );
+  const currentTransferKinds = new Set(
+    currentGrammar.selectionConstraints?.authoredTransferKinds ?? [],
+  );
+  return profile.grammarPool
+    .map(({ id }) => grammars[id])
+    .filter((candidate) => {
+      if (!candidate
+        || String(candidate.selectionConstraints?.routeNetworkModuleKind ?? 'room') !== 'room'
+        || candidate.selectionConstraints?.routeNetworkJunctionKind != null
+        || !candidate.selectionConstraints?.routeNetworkContentRoles?.includes(contentRole)) {
+        return false;
+      }
+      const candidateDelta = Number(
+        candidate.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
+      );
+      if (Math.abs(candidateDelta - currentDelta) > 0.000001) return false;
+      if (Math.abs(currentDelta) <= 0.000001 || currentTransferKinds.size === 0) return true;
+      return (candidate.selectionConstraints?.authoredTransferKinds ?? [])
+        .some((kind) => currentTransferKinds.has(kind));
+    })
+    .sort((first, second) => String(first.id).localeCompare(String(second.id)));
+}
+
+function selectRouteNetworkRoomLayouts({
+  profile,
+  grammars,
+  selectedGrammars,
+  contentRoles,
+  moduleKinds,
+  topologyKitModuleIndex,
+  roomLayoutBag,
+  legalGrammarIdsByIndex = new Map(),
+  selectionAlternativeOrdinal = 0,
+}) {
+  let nextBag = cloneDungeonSelectionBag(roomLayoutBag);
+  const selections = [];
+  const witnesses = [];
+  const resolvedGrammars = [...selectedGrammars];
+  for (let index = 0; index < resolvedGrammars.length; index += 1) {
+    if (moduleKinds[index] !== 'room') continue;
+    const compatibleGrammars = routeNetworkRoomLayoutCandidates({
+      profile,
+      grammars,
+      contentRole: contentRoles[index],
+      currentGrammar: resolvedGrammars[index],
+      topologyKit: index === topologyKitModuleIndex,
+    });
+    const constrainedGrammarIds = legalGrammarIdsByIndex.get(index);
+    const constrainedGrammarIdSet = constrainedGrammarIds
+      ? new Set(constrainedGrammarIds.map(String))
+      : null;
+    const legalGrammars = constrainedGrammarIdSet
+      ? [...constrainedGrammarIdSet]
+        .map((id) => grammars[id])
+        .filter(Boolean)
+      : compatibleGrammars;
+    const legalIds = legalGrammars.map(({ id }) => id);
+    const beforeBag = nextBag;
+    const candidates = dungeonSelectionBagCandidates(nextBag, legalIds);
+    const selected = candidates[Math.min(
+      Math.max(0, Math.trunc(Number(selectionAlternativeOrdinal) || 0)),
+      Math.max(0, candidates.length - 1),
+    )];
+    if (!selected) continue;
+    const grammar = grammars[selected.id];
+    if (!grammar) continue;
+    resolvedGrammars[index] = grammar;
+    nextBag = selected.state;
+    witnesses.push(createDungeonSelectionBagWitness({
+      family: 'roomLayout',
+      bag: beforeBag,
+      legalIds,
+      selection: selected,
+    }));
+    selections.push({
+      nodeOrdinal: index,
+      grammarId: grammar.id,
+      contentRole: String(contentRoles[index] ?? ''),
+      cycle: selected.state.cycle,
+      refilled: selected.refilled,
+      topologyKit: index === topologyKitModuleIndex,
+    });
+  }
+  return {
+    selectedGrammars: resolvedGrammars,
+    bag: nextBag,
+    selections,
+    witnesses,
+  };
+}
+
+function recordAcceptedRouteNetworkRoomLayouts({
+  profile,
+  grammars,
+  selectedGrammars,
+  contentRoles,
+  moduleKinds,
+  topologyKitModuleIndex,
+  roomLayoutBag,
+  legalGrammarIdsByIndex = new Map(),
+}) {
+  let nextBag = cloneDungeonSelectionBag(roomLayoutBag);
+  const selections = [];
+  const witnesses = [];
+  for (let index = 0; index < selectedGrammars.length; index += 1) {
+    if (moduleKinds[index] !== 'room') continue;
+    const grammar = selectedGrammars[index];
+    const compatibleIds = routeNetworkRoomLayoutCandidates({
+      profile,
+      grammars,
+      contentRole: contentRoles[index],
+      currentGrammar: grammar,
+      topologyKit: index === topologyKitModuleIndex,
+    }).map(({ id }) => id);
+    const constrainedGrammarIds = legalGrammarIdsByIndex.get(index);
+    const constrainedGrammarIdSet = constrainedGrammarIds
+      ? new Set(constrainedGrammarIds.map(String))
+      : null;
+    const legalCompatibleIds = constrainedGrammarIdSet
+      ? [...constrainedGrammarIdSet].filter((id) => Boolean(grammars[id]))
+      : compatibleIds;
+    const beforeBag = nextBag;
+    let legalIds = legalCompatibleIds;
+    let selected = dungeonSelectionBagCandidates(nextBag, legalIds)
+      .find(({ id }) => id === String(grammar?.id ?? ''));
+    if (!selected) {
+      // A topology/elevation balance can make one exact authored grammar the
+      // only physically legal choice after the provisional bag decision. Its
+      // singleton compatibility domain records that forced decision without
+      // changing the already accepted geometry or consuming a failed branch.
+      legalIds = [String(grammar?.id ?? '')].filter(Boolean);
+      [selected] = dungeonSelectionBagCandidates(nextBag, legalIds);
+    }
+    if (!selected) continue;
+    nextBag = selected.state;
+    witnesses.push(createDungeonSelectionBagWitness({
+      family: 'roomLayout',
+      bag: beforeBag,
+      legalIds,
+      selection: selected,
+    }));
+    selections.push({
+      nodeOrdinal: index,
+      grammarId: String(grammar.id),
+      contentRole: String(contentRoles[index] ?? ''),
+      cycle: selected.state.cycle,
+      refilled: selected.refilled,
+      topologyKit: index === topologyKitModuleIndex,
+    });
+  }
+  return { bag: nextBag, selections, witnesses };
+}
+
+function selectRouteNetworkEncounters(nodes, encounterBag) {
+  let nextBag = cloneDungeonSelectionBag(encounterBag);
+  const selections = [];
+  const witnesses = [];
+  for (const node of nodes) {
+    const encounterAnchors = (node.anchors ?? []).filter(({ kind }) => kind === 'encounter');
+    if (encounterAnchors.length === 0) continue;
+    const beforeBag = nextBag;
+    const selected = dungeonSelectionBagCandidates(
+      nextBag,
+      ROUTE_NETWORK_ENCOUNTER_PROFILE_IDS,
+    )[0];
+    if (!selected) continue;
+    nextBag = selected.state;
+    witnesses.push(createDungeonSelectionBagWitness({
+      family: 'encounter',
+      bag: beforeBag,
+      legalIds: ROUTE_NETWORK_ENCOUNTER_PROFILE_IDS,
+      selection: selected,
+    }));
+    for (const anchor of encounterAnchors) anchor.encounterProfileId = selected.id;
+    selections.push({
+      nodeOrdinal: Number(node.ordinal),
+      encounterProfileId: selected.id,
+      cycle: selected.state.cycle,
+      refilled: selected.refilled,
+    });
+  }
+  return { bag: nextBag, selections, witnesses };
 }
 
 function routeNetworkTopologyKitGrammarForTemplate(
@@ -1795,9 +2158,7 @@ function balanceObjectiveRouteGrammarAssignments({
         })
         .sort((first, second) => String(first.id).localeCompare(String(second.id)));
       if (candidates.length === 0) continue;
-      const selectionIndex = ((operationOrdinal + searchVariant + index) % candidates.length
-        + candidates.length) % candidates.length;
-      selectedGrammars[index] = candidates[selectionIndex];
+      selectedGrammars[index] = candidates[0];
       break;
     }
   }
@@ -1828,9 +2189,7 @@ function balanceObjectiveRouteGrammarAssignments({
       ))
       .sort((first, second) => String(first.id).localeCompare(String(second.id)));
     if (candidates.length === 0) continue;
-    const selectionIndex = ((operationOrdinal + searchVariant + index) % candidates.length
-      + candidates.length) % candidates.length;
-    selectedGrammars[index] = candidates[selectionIndex];
+    selectedGrammars[index] = candidates[0];
     if (Math.abs(currentDelta()) <= 0.000001) break;
   }
 }
@@ -1843,7 +2202,7 @@ function balanceObjectiveRouteGrammarAssignments({
  * a complete authored rise-and-return pair and every other interval stays
  * level.
  */
-function balanceObjectiveRouteGrammarIntervals({
+export function balanceObjectiveRouteGrammarIntervals({
   profile,
   grammars,
   selectedGrammars,
@@ -1855,6 +2214,8 @@ function balanceObjectiveRouteGrammarIntervals({
   searchVariant = 0,
   elevationMode = 'level',
   preferCompactRise = false,
+  excludedNodeIndices = [],
+  legalGrammarIdsByIndex = new Map(),
 }) {
   const epsilon = 0.000001;
   const grammarDelta = (candidate) => Number(
@@ -1876,7 +2237,13 @@ function balanceObjectiveRouteGrammarIntervals({
     .sort((first, second) => String(first.id).localeCompare(String(second.id)));
   const candidatesFor = (index, targetDelta, { matchTransfer = false } = {}) => {
     const requestedRole = String(contentRoles[index] ?? 'discovery');
+    const constrainedGrammarIds = legalGrammarIdsByIndex.get(index);
+    const constrainedGrammarIdSet = constrainedGrammarIds
+      ? new Set(constrainedGrammarIds.map(String))
+      : null;
     return candidatePool.filter((candidate) => {
+      if (constrainedGrammarIdSet
+        && !constrainedGrammarIdSet.has(String(candidate.id))) return false;
       if (!candidate.selectionConstraints?.routeNetworkContentRoles?.includes(requestedRole)) {
         return false;
       }
@@ -1895,12 +2262,20 @@ function balanceObjectiveRouteGrammarIntervals({
         : 0
     ) || String(first.id).localeCompare(String(second.id)));
   };
-  const roomIndices = moduleKinds
+  const excludedNodeIndexSet = new Set(excludedNodeIndices.map(Number));
+  const allRoomIndices = moduleKinds
     .map((moduleKind, index) => ({ moduleKind, index }))
     .filter(({ moduleKind, index }) => (
       moduleKind === 'room' && index !== topologyKitModuleIndex
     ))
     .map(({ index }) => index);
+  // A content room moved onto a topology branch is not part of the mandatory
+  // endpoint-to-endpoint elevation arc. A self-contained transfer on that
+  // branch can satisfy the network's vertical-traversal contract, but it
+  // cannot provide a nonzero rise or descent across an authored station.
+  const roomIndices = allRoomIndices.filter((index) => (
+    !excludedNodeIndexSet.has(index)
+  ));
   const orderedEndpointIndices = [...new Set(endpointNodeIndices)]
     .filter((index) => Number.isInteger(index))
     .sort((first, second) => first - second);
@@ -1916,6 +2291,44 @@ function balanceObjectiveRouteGrammarIntervals({
       )),
     }),
   );
+  const selfContainedBranchTransferPlan = allRoomIndices
+    .filter((index) => (
+      excludedNodeIndexSet.has(index) && contentRoles[index] === 'challenge'
+    ))
+    .map((index) => ({
+      index,
+      candidates: candidatesFor(index, 0, { matchTransfer: true }),
+    }))
+    .find(({ candidates }) => candidates.length > 0);
+  if (selfContainedBranchTransferPlan) {
+    const selfContainedBranchTransferIndex = selfContainedBranchTransferPlan.index;
+    selectedGrammars[selfContainedBranchTransferIndex] =
+      selfContainedBranchTransferPlan.candidates[0];
+    for (const index of roomIndices) {
+      const levelCandidates = candidatesFor(index, 0);
+      if (levelCandidates.length === 0) {
+        return {
+          balanced: false,
+          reason: 'branch-transfer-level-replacement-unavailable',
+          branchTransferIndex: selfContainedBranchTransferIndex,
+          nodeIndex: index,
+        };
+      }
+      selectedGrammars[index] = levelCandidates[0];
+    }
+    const intervalDeltas = intervals.map(({ first, second, roomIndices: indices }) => ({
+      first,
+      second,
+      delta: indices.reduce((sum, index) => (
+        sum + grammarDelta(selectedGrammars[index])
+      ), 0),
+    }));
+    return {
+      balanced: intervalDeltas.every(({ delta }) => Math.abs(delta) <= epsilon),
+      intervalDeltas,
+      branchTransferIndex: selfContainedBranchTransferIndex,
+    };
+  }
   const pairPlans = [];
   for (const interval of intervals) {
     for (const riseIndex of interval.roomIndices) {
@@ -1927,7 +2340,7 @@ function balanceObjectiveRouteGrammarIntervals({
         if (descentCandidates.length === 0) continue;
         const levelReplacements = new Map();
         let feasible = true;
-        for (const index of roomIndices) {
+        for (const index of allRoomIndices) {
           if (index === riseIndex || index === descentIndex) continue;
           if (Math.abs(grammarDelta(selectedGrammars[index])) <= epsilon
             && !preferCompactCoverage) continue;
@@ -1936,11 +2349,7 @@ function balanceObjectiveRouteGrammarIntervals({
             feasible = false;
             break;
           }
-          const selectionIndex = preferCompactCoverage
-            ? 0
-            : ((operationOrdinal + searchVariant + index)
-              % levelCandidates.length + levelCandidates.length) % levelCandidates.length;
-          levelReplacements.set(index, levelCandidates[selectionIndex]);
+          levelReplacements.set(index, levelCandidates[0]);
         }
         if (!feasible) continue;
         pairPlans.push({
@@ -1964,6 +2373,48 @@ function balanceObjectiveRouteGrammarIntervals({
       || first.descentIndex - second.descentIndex
   ));
   if (pairPlans.length === 0) {
+    const selfContainedPlans = intervals.flatMap((interval) => (
+      interval.roomIndices.flatMap((index) => {
+        const transferCandidates = candidatesFor(index, 0, { matchTransfer: true });
+        if (transferCandidates.length === 0) return [];
+        const levelReplacements = new Map();
+        for (const otherIndex of allRoomIndices) {
+          if (otherIndex === index) continue;
+          const levelCandidates = candidatesFor(otherIndex, 0);
+          if (levelCandidates.length === 0) return [];
+          levelReplacements.set(otherIndex, levelCandidates[0]);
+        }
+        return [{
+          intervalOrdinal: interval.ordinal,
+          index,
+          transferCandidates,
+          levelReplacements,
+        }];
+      })
+    )).sort((first, second) => (
+      Number(contentRoles[first.index] !== 'challenge')
+        - Number(contentRoles[second.index] !== 'challenge')
+        || Number(contentRoles[first.index] !== 'mechanism')
+          - Number(contentRoles[second.index] !== 'mechanism')
+        || first.intervalOrdinal - second.intervalOrdinal
+        || first.index - second.index
+    ));
+    if (selfContainedPlans.length > 0) {
+      const plan = selfContainedPlans[0];
+      for (const [index, grammar] of plan.levelReplacements) {
+        selectedGrammars[index] = grammar;
+      }
+      selectedGrammars[plan.index] = plan.transferCandidates[0];
+      return {
+        balanced: true,
+        intervalDeltas: intervals.map(({ first, second }) => ({
+          first,
+          second,
+          delta: 0,
+        })),
+        selfContainedTransferIndex: plan.index,
+      };
+    }
     return {
       balanced: false,
       reason: 'authored-rise-return-pair-unavailable',
@@ -1972,6 +2423,7 @@ function balanceObjectiveRouteGrammarIntervals({
         second,
         roomIndices: indices,
       })),
+      excludedNodeIndices: [...excludedNodeIndexSet].sort((first, second) => first - second),
     };
   }
   // Pair ordering encodes the semantic preference. Variety is sampled within
@@ -1981,21 +2433,12 @@ function balanceObjectiveRouteGrammarIntervals({
   for (const [index, grammar] of plan.levelReplacements) {
     selectedGrammars[index] = grammar;
   }
-  const riseSelectionIndex = orderedEndpointIndices.length >= 3 && preferCompactRise
-    ? 0
-    : ((operationOrdinal + searchVariant + plan.riseIndex)
-      % plan.riseCandidates.length + plan.riseCandidates.length) % plan.riseCandidates.length;
   // Three- and four-station coverage grants have only one 14 m station bay
   // between some exact sockets. Prefer the smallest legal authored rise and
   // return in those dense networks; two-station routes retain the normal
   // deterministic exhaustion order for visual variety.
-  const descentSelectionIndex = orderedEndpointIndices.length >= 3
-    ? 0
-    : ((operationOrdinal + searchVariant + plan.descentIndex)
-      % plan.descentCandidates.length + plan.descentCandidates.length)
-      % plan.descentCandidates.length;
-  selectedGrammars[plan.riseIndex] = plan.riseCandidates[riseSelectionIndex];
-  selectedGrammars[plan.descentIndex] = plan.descentCandidates[descentSelectionIndex];
+  selectedGrammars[plan.riseIndex] = plan.riseCandidates[0];
+  selectedGrammars[plan.descentIndex] = plan.descentCandidates[0];
 
   const intervalDeltas = intervals.map(({ first, second }) => ({
     first,
@@ -2031,6 +2474,7 @@ export function resolveRouteNetworkGrammarAssignments({
   contentRoles = [],
   moduleKinds = [],
   junctionModuleIndex = 0,
+  topologySupportConnectorIndex = null,
   operationOrdinal = 0,
   searchVariant = 0,
   elevationMode = 'level',
@@ -2118,6 +2562,27 @@ export function resolveRouteNetworkGrammarAssignments({
       elevationMode,
     });
   }
+  // Balancing is allowed to diversify ordinary connector grammars, but the
+  // stacked-interchange support is structural topology, not a free selection
+  // slot. Apply it after balancing so refinement cannot turn the support into
+  // a second stacked kit and invalidate the authored compound.
+  if (Number.isSafeInteger(Number(topologySupportConnectorIndex))) {
+    const supportIndex = Number(topologySupportConnectorIndex);
+    const throughTGrammar = routeNetworkGrammarForKind(
+      profile,
+      grammars,
+      'through-t',
+      'connector-module',
+    );
+    if (supportIndex >= 0
+      && supportIndex < selectedGrammars.length
+      && supportIndex !== topologyKitModuleIndex
+      && moduleKinds[supportIndex] === 'connector-module'
+      && throughTGrammar) {
+      selectedGrammars[supportIndex] = throughTGrammar;
+      resolvedJunctionKinds[supportIndex] = 'through-t';
+    }
+  }
   return {
     selectedGrammars,
     junctionKinds: resolvedJunctionKinds,
@@ -2125,6 +2590,298 @@ export function resolveRouteNetworkGrammarAssignments({
     topologyKitModuleIndex,
     topologyKitDeferred: topologyKitModuleIndex == null,
   };
+}
+
+/**
+ * Reserve the free-standing connector needed by the stacked-interchange kit.
+ *
+ * The terminal interchange owns two upper-route sockets. Those sockets cannot
+ * legally return to one ordinary two-socket room: their minimum exterior U is
+ * already longer than the V4 featureless-distance limit. Preserve the first
+ * and last non-endpoint modules as challenge/payoff rooms and reserve the
+ * middle non-endpoint module as an authored Through-T support instead.
+ *
+ * This helper is deliberately renderer- and geometry-free so the allocation
+ * is stable across provisional and refined coverage placement passes.
+ */
+export function resolveStackedInterchangeSupportAllocation({
+  routeNetworkKind = null,
+  topologyTemplateId = null,
+  physicalModuleCount = 0,
+  endpointNodeIndices = [],
+} = {}) {
+  const count = Math.max(0, Math.trunc(Number(physicalModuleCount) || 0));
+  const endpointIndexSet = new Set((endpointNodeIndices ?? [])
+    .map((index) => Math.trunc(Number(index)))
+    .filter((index) => Number.isSafeInteger(index) && index >= 0 && index < count));
+  const ordinaryNodeIndices = Array.from({ length: count }, (_, index) => index)
+    .filter((index) => !endpointIndexSet.has(index));
+  const supportCandidates = routeNetworkKind === 'objective-route-coverage'
+    && topologyTemplateId === 'stacked-interchange'
+    ? ordinaryNodeIndices.slice(1, -1)
+    : [];
+  const supportConnectorIndex = supportCandidates[
+    Math.floor(supportCandidates.length * 0.5)
+  ] ?? null;
+  const connectorNodeIndices = [...endpointIndexSet];
+  if (supportConnectorIndex != null) connectorNodeIndices.push(supportConnectorIndex);
+  connectorNodeIndices.sort((first, second) => first - second);
+  return {
+    supportConnectorIndex,
+    supportMinimumGraphDegree: supportConnectorIndex == null ? null : 3,
+    connectorNodeIndices,
+    roomNodeIndices: ordinaryNodeIndices.filter((index) => index !== supportConnectorIndex),
+  };
+}
+
+export function routeNetworkTopologyIsLegalForGrant(topologyTemplateId, grant = {}) {
+  if (String(topologyTemplateId) === 'stacked-interchange') {
+    return Number(grant.endpointSockets?.length ?? 0) === 2;
+  }
+  return true;
+}
+
+/**
+ * Reject catalog/topology compositions that cannot allocate their authored
+ * infrastructure before running geometry. The stacked interchange consumes a
+ * terminal kit plus one ordinary Through-T support, while still preserving
+ * two curated content rooms. With two exact parent stations that requires at
+ * least five physical modules; a four-module candidate can only fail later
+ * while trying to invent the missing return leg.
+ */
+export function routeNetworkTopologySupportsModuleCount(
+  topologyTemplateId,
+  grant = {},
+  moduleCount = 0,
+) {
+  if (!routeNetworkTopologyIsLegalForGrant(topologyTemplateId, grant)) return false;
+  if (String(topologyTemplateId) !== 'stacked-interchange'
+    || String(grant.kind ?? '') !== 'objective-route-coverage') return true;
+  const endpointCount = Number(grant.endpointSockets?.length ?? 0);
+  return Number(moduleCount) - endpointCount >= 3;
+}
+
+/**
+ * Expands a two-endpoint coverage composition with the reserved Through-T as
+ * a physical companion to the terminal stacked-interchange kit. The two
+ * ordinary rooms remain on the externally composed route; the support is
+ * inserted immediately before the kit in graph order and starts exactly two
+ * 5.6 m seam leads from one upper socket.
+ */
+export function composeStackedInterchangeSupportCompound({
+  placement,
+  selectedGrammars = [],
+  physicalModuleCount = 0,
+  endpointNodeIndices = [],
+  topologyKitModuleIndex = null,
+  supportConnectorIndex = null,
+  endpoints = [],
+  diagnostics = null,
+} = {}) {
+  const reject = (reason, details = {}) => {
+    if (diagnostics && typeof diagnostics === 'object') {
+      Object.assign(diagnostics, { accepted: false, reason, ...details });
+    }
+    return null;
+  };
+  const count = Math.max(0, Math.trunc(Number(physicalModuleCount) || 0));
+  const endpointIndices = [...new Set((endpointNodeIndices ?? []).map(Number))]
+    .filter((index) => Number.isSafeInteger(index) && index >= 0 && index < count)
+    .sort((first, second) => first - second);
+  const supportIndex = Number(supportConnectorIndex);
+  const kitIndex = Number(topologyKitModuleIndex);
+  if (!placement
+    || endpointIndices.length !== 2
+    || !Number.isSafeInteger(supportIndex)
+    || !Number.isSafeInteger(kitIndex)
+    || supportIndex < 0
+    || supportIndex >= count
+    || kitIndex < 0
+    || kitIndex >= count
+    || !endpointIndices.includes(kitIndex)) return reject('invalid-compound-contract', {
+      physicalModuleCount: count,
+      endpointNodeIndices: endpointIndices,
+      topologyKitModuleIndex: topologyKitModuleIndex ?? null,
+      supportConnectorIndex: supportConnectorIndex ?? null,
+    });
+  const physicalOrderWithoutSupport = Array.from({ length: count }, (_, index) => index)
+    .filter((index) => index !== supportIndex);
+  const placementCenterCount = placement.centers?.length ?? 0;
+  const supportAlreadyPresent = placementCenterCount === count
+    && placement.endpointNodeIndices?.length === 2
+    && endpointIndices.every((index, ordinal) => (
+      Number(placement.endpointNodeIndices[ordinal]) === index
+    ));
+  const supportOmitted = placementCenterCount === physicalOrderWithoutSupport.length
+    && placement.endpointNodeIndices?.length === 2
+    && Number(placement.endpointNodeIndices[0]) === 0
+    && Number(placement.endpointNodeIndices[1]) === physicalOrderWithoutSupport.length - 1;
+  if (!supportAlreadyPresent && !supportOmitted) {
+    return reject('unsupported-placement-shape', {
+      placementCenterCount,
+      placementEndpointNodeIndices: cloneDungeonAugmentationValue(
+        placement.endpointNodeIndices ?? [],
+      ),
+      expectedPhysicalModuleCount: count,
+      expectedWithoutSupportCount: physicalOrderWithoutSupport.length,
+    });
+  }
+  const oldPhysicalOrder = supportAlreadyPresent
+    ? Array.from({ length: count }, (_, index) => index)
+    : physicalOrderWithoutSupport;
+  const oldIndexByPhysicalIndex = new Map(oldPhysicalOrder.map((index, ordinal) => (
+    [index, ordinal]
+  )));
+  const remapIndex = (oldIndex) => oldPhysicalOrder[Number(oldIndex)];
+  const expandArray = (values = [], fallback = null) => Array.from(
+    { length: count },
+    (_, index) => index === supportIndex
+      ? cloneDungeonAugmentationValue(fallback)
+      : cloneDungeonAugmentationValue(values[oldIndexByPhysicalIndex.get(index)] ?? fallback),
+  );
+  const centers = expandArray(placement.centers, null);
+  const nodeFacings = expandArray(placement.nodeFacings, null);
+  const placementOutwardFacings = expandArray(placement.placementOutwardFacings, null);
+  const anchorEndpointOrdinals = expandArray(placement.anchorEndpointOrdinals, null);
+  const kitCenter = centers[kitIndex];
+  const kitEndpointOrdinal = endpointIndices.indexOf(kitIndex);
+  const kitFacing = toDungeonCardinalFacing(
+    nodeFacings[kitIndex] ?? endpoints[kitEndpointOrdinal]?.facing,
+  );
+  const kitGrammar = selectedGrammars[kitIndex];
+  const supportGrammar = selectedGrammars[supportIndex];
+  const topologySocketIds = new Set(
+    kitGrammar?.selectionConstraints?.routeNetworkTopologySocketIds ?? ['left', 'right'],
+  );
+  const kitPlacement = {
+    center: kitCenter,
+    rotationQuarterTurns: rotationQuarterTurnsForFacing(kitFacing),
+  };
+  const otherEndpointCenter = centers[endpointIndices.find((index) => index !== kitIndex)];
+  const kitSocketCandidates = (kitGrammar?.sockets ?? [])
+    .filter(({ id }) => topologySocketIds.has(id))
+    .map((socket) => ({
+      socket,
+      position: transformDungeonLocalPoint(socket.localPosition, kitPlacement),
+      facing: transformDungeonLocalFacing(socket.localFacing, kitPlacement),
+    }))
+    .sort((first, second) => (
+      dungeonPointDistance(second.position, otherEndpointCenter)
+        - dungeonPointDistance(first.position, otherEndpointCenter)
+        || String(first.socket.id).localeCompare(String(second.socket.id))
+    ));
+  const supportBranchSocket = supportGrammar?.sockets?.find(({ id }) => id === 'right')
+    ?? supportGrammar?.sockets?.find(({ id }) => !['entry', 'exit'].includes(id));
+  const kitSocket = kitSocketCandidates[0] ?? null;
+  if (!kitCenter || !kitSocket || !supportBranchSocket) {
+    return reject('compound-socket-unavailable', {
+      kitCenter: cloneDungeonAugmentationValue(kitCenter),
+      topologySocketCount: kitSocketCandidates.length,
+      supportSocketIds: (supportGrammar?.sockets ?? []).map(({ id }) => id),
+    });
+  }
+  const desiredSupportSocketFacing = scaleDungeonPoint(kitSocket.facing, -1);
+  const supportFacing = [
+    { x: 1, y: 0, z: 0 },
+    { x: 0, y: 0, z: 1 },
+    { x: -1, y: 0, z: 0 },
+    { x: 0, y: 0, z: -1 },
+  ].find((candidateFacing) => {
+    const transformedFacing = transformDungeonLocalFacing(
+      supportBranchSocket.localFacing,
+      { rotationQuarterTurns: rotationQuarterTurnsForFacing(candidateFacing) },
+    );
+    return dungeonPointDistance(transformedFacing, desiredSupportSocketFacing) <= 1e-6;
+  }) ?? null;
+  if (!supportFacing) return reject('support-orientation-unavailable', {
+    kitLocalSocketId: kitSocket.socket.id,
+    kitSocketFacing: cloneDungeonAugmentationValue(kitSocket.facing),
+    supportLocalSocketId: supportBranchSocket.id,
+  });
+  const supportRotationQuarterTurns = rotationQuarterTurnsForFacing(supportFacing);
+  const desiredSupportSocketPosition = addDungeonPoints(
+    kitSocket.position,
+    scaleDungeonPoint(kitSocket.facing, ROUTE_NETWORK_SOCKET_APPROACH_METERS * 2),
+  );
+  const rotatedSupportSocketPosition = transformDungeonLocalPoint(
+    supportBranchSocket.localPosition,
+    {
+      center: { x: 0, y: 0, z: 0 },
+      rotationQuarterTurns: supportRotationQuarterTurns,
+    },
+  );
+  const supportCenter = {
+    x: Number(desiredSupportSocketPosition.x) - Number(rotatedSupportSocketPosition.x),
+    y: Number(desiredSupportSocketPosition.y) - Number(rotatedSupportSocketPosition.y),
+    z: Number(desiredSupportSocketPosition.z) - Number(rotatedSupportSocketPosition.z),
+  };
+  centers[supportIndex] = supportCenter;
+  nodeFacings[supportIndex] = supportFacing;
+  placementOutwardFacings[supportIndex] = cloneDungeonAugmentationValue(kitSocket.facing);
+  anchorEndpointOrdinals[supportIndex] = null;
+
+  const graphOrder = physicalOrderWithoutSupport.filter((index) => index !== kitIndex);
+  graphOrder.push(supportIndex, kitIndex);
+  const endpointIndexSet = new Set(endpointIndices);
+  const requiredSocketBindings = graphOrder.slice(1).map((toIndex, ordinal) => {
+    const fromIndex = graphOrder[ordinal];
+    if (fromIndex === supportIndex && toIndex === kitIndex) {
+      return {
+        fromIndex,
+        toIndex,
+        fromLocalSocketId: supportBranchSocket.id,
+        toLocalSocketId: kitSocket.socket.id,
+      };
+    }
+    return {
+      fromIndex,
+      toIndex,
+      fromLocalSocketId: endpointIndexSet.has(fromIndex) ? null : 'exit',
+      toLocalSocketId: endpointIndexSet.has(toIndex) ? null : 'entry',
+    };
+  });
+  const requiredPairKeys = new Set(requiredSocketBindings.map(({ fromIndex, toIndex }) => (
+    fromIndex < toIndex ? `${fromIndex}:${toIndex}` : `${toIndex}:${fromIndex}`
+  )));
+  const externalSpinePaths = (placement.externalSpinePaths ?? []).flatMap((record) => {
+    const fromIndex = remapIndex(record.fromIndex);
+    const toIndex = remapIndex(record.toIndex);
+    const pairKey = fromIndex < toIndex
+      ? `${fromIndex}:${toIndex}`
+      : `${toIndex}:${fromIndex}`;
+    if (!requiredPairKeys.has(pairKey)) return [];
+    return [{ ...cloneDungeonAugmentationValue(record), fromIndex, toIndex }];
+  });
+  const result = {
+    ...cloneDungeonAugmentationValue(placement),
+    centers,
+    endpointNodeIndices: endpointIndices,
+    anchorEndpointOrdinals,
+    nodeFacings,
+    placementOutwardFacings,
+    requiredSocketBindings,
+    externalSpinePaths,
+    stackedInterchangeCompound: {
+      kitNodeIndex: kitIndex,
+      supportNodeIndex: supportIndex,
+      kitLocalSocketId: kitSocket.socket.id,
+      supportLocalSocketId: supportBranchSocket.id,
+      seamLeadMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+      routePath: [
+        cloneDungeonAugmentationValue(kitSocket.position),
+        cloneDungeonAugmentationValue(desiredSupportSocketPosition),
+      ],
+    },
+  };
+  if (diagnostics && typeof diagnostics === 'object') {
+    Object.assign(diagnostics, {
+      accepted: true,
+      inputShape: supportAlreadyPresent ? 'support-present' : 'support-omitted',
+      supportCenter: cloneDungeonAugmentationValue(supportCenter),
+      graphOrder: [...graphOrder],
+    });
+  }
+  return result;
 }
 
 function samplePolylineByFraction(points, fraction) {
@@ -2320,6 +3077,7 @@ function objectiveCoverageRoomPlacementsOnPath(
   {
     roomEntryElevationMeters = [],
     roomExitElevationMeters = [],
+    roomEntryLocalPositions = [],
     scorePlacement = () => 0,
   } = {},
 ) {
@@ -2346,16 +3104,21 @@ function objectiveCoverageRoomPlacementsOnPath(
         + Number(roomExitElevationMeters[previousPlacement.roomOrdinal] ?? 0)
         - entryElevationMeters
       : Number(entryPoint.y) - entryElevationMeters;
+    const entryLocalPosition = roomEntryLocalPositions[roomOrdinal] ?? null;
+    const rotatedEntryOffset = entryLocalPosition
+      ? transformDungeonLocalPoint(entryLocalPosition, {
+        center: { x: 0, y: 0, z: 0 },
+        rotationQuarterTurns: rotationQuarterTurnsForFacing(run.facing),
+      })
+      : scaleDungeonPoint(run.facing, -depthMeters * 0.5);
     return {
       roomOrdinal,
       entryDistanceMeters,
       exitDistanceMeters: entryDistanceMeters + depthMeters,
       center: {
-        ...addDungeonPoints(
-          entryPoint,
-          scaleDungeonPoint(run.facing, depthMeters * 0.5),
-        ),
+        x: Number(entryPoint.x) - Number(rotatedEntryOffset.x),
         y: baseElevationMeters,
+        z: Number(entryPoint.z) - Number(rotatedEntryOffset.z),
       },
       facing: cloneDungeonAugmentationValue(run.facing),
     };
@@ -2377,16 +3140,26 @@ function objectiveCoverageRoomPlacementsOnPath(
         pathLengthMeters - depthMeters - minimumApproachMeters,
       );
       if (minimumEntryDistanceMeters > maximumEntryDistanceMeters + 1e-6) return [];
-      const entryDistanceMeters = Math.max(
+      const entryValues = [
         minimumEntryDistanceMeters,
-        Math.min(maximumEntryDistanceMeters, idealEntryDistanceMeters),
-      );
-      return [{
-        placements: [placementForEntry(roomOrdinal, entryDistanceMeters, run)],
-        targetDeviationMeters: Math.abs(
-          entryDistanceMeters - idealEntryDistanceMeters,
+        maximumEntryDistanceMeters,
+        Math.max(
+          minimumEntryDistanceMeters,
+          Math.min(maximumEntryDistanceMeters, idealEntryDistanceMeters),
         ),
-      }];
+      ];
+      for (let value = minimumEntryDistanceMeters;
+        value <= maximumEntryDistanceMeters + 1e-6;
+        value += 2.8) {
+        entryValues.push(Math.min(value, maximumEntryDistanceMeters));
+      }
+      return [...new Set(entryValues.map((value) => Number(value.toFixed(6))))]
+        .map((entryDistanceMeters) => ({
+          placements: [placementForEntry(roomOrdinal, entryDistanceMeters, run)],
+          targetDeviationMeters: Math.abs(
+            entryDistanceMeters - idealEntryDistanceMeters,
+          ),
+        }));
     }).map((candidate) => ({
       ...candidate,
       collisionScore: scorePlacement(candidate.placements[0]),
@@ -2395,7 +3168,7 @@ function objectiveCoverageRoomPlacementsOnPath(
         || first.targetDeviationMeters - second.targetDeviationMeters
         || first.placements[0].entryDistanceMeters
           - second.placements[0].entryDistanceMeters
-    )).map(({ placements }) => placements);
+    )).slice(0, 64).map(({ placements }) => placements);
   }
   if (roomOrdinals.length === 2) {
     const [firstRoomOrdinal, secondRoomOrdinal] = roomOrdinals;
@@ -2588,19 +3361,38 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
   contentRoomDepthMeters = [19.6, 19.6],
   contentRoomEntryElevationMeters = [],
   contentRoomExitElevationMeters = [],
+  contentRoomEntryLocalPositions = [],
   contentRoomSizes = [],
   contentRoomPlanningVolumes = [],
   minimumApproachMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
-  minimumRoomApproachMeters = 2.8,
+  minimumRoomApproachMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
   maximumFeaturelessSpanMeters = ROUTE_NETWORK_MAXIMUM_FEATURELESS_SPAN_METERS,
   searchVariant = 0,
   planningAvoidanceVolumes = [],
   planningOverlapGrants = [],
   diagnostics = null,
 } = {}) {
+  const planningNowMilliseconds = () => (
+    globalThis.performance?.now?.() ?? Date.now()
+  );
+  const planningStartedAt = planningNowMilliseconds();
+  const planningPhaseTimings = {
+    candidateGenerationMs: 0,
+    staticCollisionScoringMs: 0,
+    staticCollisionScoringCalls: 0,
+    pairCompatibilityMs: 0,
+    pairCompatibilityEvaluations: 0,
+    recursiveCompositionMs: 0,
+    totalMs: 0,
+  };
   const setDiagnostics = (stage, details = {}) => {
     if (diagnostics && typeof diagnostics === 'object') {
-      Object.assign(diagnostics, { stage, ...details });
+      planningPhaseTimings.totalMs = planningNowMilliseconds() - planningStartedAt;
+      Object.assign(diagnostics, {
+        stage,
+        ...details,
+        planningPhaseTimings: cloneDungeonAugmentationValue(planningPhaseTimings),
+      });
     }
   };
   if (outerPoints.length < 2 || contentRoomDepthMeters.length < 2) {
@@ -2638,9 +3430,10 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
   ));
   const stationPlanningVolumesByOrdinal = outerPoints.map((center, stationOrdinal) => {
     const grammar = stationGrammars[stationOrdinal];
-    const volumeTemplates = (grammar?.occupiedVolumes ?? []).length > 0
-      ? grammar.occupiedVolumes
-      : grammar?.clearanceVolumes ?? [];
+    const volumeTemplates = [
+      ...(grammar?.occupiedVolumes ?? []),
+      ...(grammar?.clearanceVolumes ?? []),
+    ];
     if (volumeTemplates.length > 0) {
       const stationPlacement = {
         center: toDungeonPoint(center),
@@ -2727,11 +3520,15 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       if (roomPlacementStaticCollisionScoreCache.has(key)) {
         return roomPlacementStaticCollisionScoreCache.get(key);
       }
+      const scoringStartedAt = planningNowMilliseconds();
       const score = planningVolumesForRoomPlacement(placement).reduce((total, volume) => (
         total + [...nearbyPlanningAvoidanceVolumes(volume)].reduce((count, obstacle) => (
           count + (planningVolumesOverlap(volume, obstacle) ? 1 : 0)
         ), 0)
       ), 0);
+      planningPhaseTimings.staticCollisionScoringMs +=
+        planningNowMilliseconds() - scoringStartedAt;
+      planningPhaseTimings.staticCollisionScoringCalls += 1;
       roomPlacementStaticCollisionScoreCache.set(key, score);
       return score;
     })()
@@ -2740,13 +3537,32 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     path,
     heightMeters = 5.6,
     overlapGrants = [],
-  ) => routePathPlanningVolumes(path, heightMeters).reduce((score, volume) => (
-    score + [...nearbyPlanningAvoidanceVolumes(volume)].reduce((count, obstacle) => (
-      count + (planningVolumesOverlap(volume, obstacle)
-        && !planningOverlapIsGranted(volume, obstacle, overlapGrants) ? 1 : 0)
-    ), 0)
-  ), 0);
+  ) => {
+    const scoringStartedAt = planningNowMilliseconds();
+    const score = routePathPlanningVolumes(path, heightMeters).reduce((total, volume) => (
+      total + [...nearbyPlanningAvoidanceVolumes(volume)].reduce((count, obstacle) => (
+        count + (planningVolumesOverlap(volume, obstacle)
+          && !planningOverlapIsGranted(volume, obstacle, overlapGrants) ? 1 : 0)
+      ), 0)
+    ), 0);
+    planningPhaseTimings.staticCollisionScoringMs +=
+      planningNowMilliseconds() - scoringStartedAt;
+    planningPhaseTimings.staticCollisionScoringCalls += 1;
+    return score;
+  };
+  const planningCollisionIdsForVolumes = (
+    volumes,
+    overlapGrants = [],
+  ) => [...new Set(volumes.flatMap((volume) => (
+    [...nearbyPlanningAvoidanceVolumes(volume)]
+      .filter((obstacle) => (
+        planningVolumesOverlap(volume, obstacle)
+          && !planningOverlapIsGranted(volume, obstacle, overlapGrants)
+      ))
+      .map((obstacle) => String(obstacle.id ?? obstacle.ownerId ?? 'unknown'))
+  )))].sort();
   const roomPlacementStationCollisionScore = (placements) => {
+    const compatibilityStartedAt = planningNowMilliseconds();
     const roomVolumeGroups = placements.map(planningVolumesForRoomPlacement);
     const stationScore = roomVolumeGroups.reduce((score, roomVolumes) => (
       score + stationPlanningVolumesByOrdinal.reduce((stationTotal, stationVolumes) => (
@@ -2766,7 +3582,11 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         ), 0)
       ), 0)
     ), 0);
-    return stationScore + roomScore;
+    const score = stationScore + roomScore;
+    planningPhaseTimings.pairCompatibilityMs +=
+      planningNowMilliseconds() - compatibilityStartedAt;
+    planningPhaseTimings.pairCompatibilityEvaluations += 1;
+    return score;
   };
   const roomPlacementsClearExactStations = (placements) => (
     roomPlacementStationCollisionScore(placements) === 0
@@ -2788,6 +3608,32 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       roomsByGap[gapOrdinal].push(roomOrdinal);
     }
   }
+  const maximumRoomHalfExtentMeters = Math.max(
+    4.2,
+    ...contentRoomSizes.flatMap((size = {}) => [
+      Number(size.width ?? 0) * 0.5,
+      Number(size.depth ?? 0) * 0.5,
+    ]),
+  );
+  const obstacleBoundsByOwner = new Map();
+  for (const volume of planningAvoidanceVolumes) {
+    if (!volume?.center || !volume?.size) continue;
+    const ownerId = String(volume.ownerId ?? volume.id ?? 'unknown');
+    const halfX = Number(volume.size.x ?? 0) * 0.5;
+    const halfZ = Number(volume.size.z ?? 0) * 0.5;
+    const bounds = obstacleBoundsByOwner.get(ownerId) ?? {
+      minX: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      minZ: Number.POSITIVE_INFINITY,
+      maxZ: Number.NEGATIVE_INFINITY,
+    };
+    bounds.minX = Math.min(bounds.minX, Number(volume.center.x) - halfX);
+    bounds.maxX = Math.max(bounds.maxX, Number(volume.center.x) + halfX);
+    bounds.minZ = Math.min(bounds.minZ, Number(volume.center.z) - halfZ);
+    bounds.maxZ = Math.max(bounds.maxZ, Number(volume.center.z) + halfZ);
+    obstacleBoundsByOwner.set(ownerId, bounds);
+  }
+  const obstacleOwnerBounds = [...obstacleBoundsByOwner.values()];
   const routePathCandidates = (fromSocket, toSocket) => {
     const results = [];
     const seen = new Set();
@@ -2817,7 +3663,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         cloneDungeonAugmentationValue(fromSocket.position),
       ], -1);
     }
-    const detourOffsetsMeters = Array.from(
+    const baseDetourOffsetsMeters = Array.from(
       // A 31 m authored room needs its own straight run plus a two-tile
       // approach at both sockets.  The former 33.6 m detour ceiling could not
       // contain that perfectly legal footprint, so the exact-path solver
@@ -2832,7 +3678,35 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         preferXFirst,
         sourceApproachMeters: [minimumApproachMeters],
         destinationApproachMeters: [minimumApproachMeters],
-        detourOffsetsMeters,
+        detourOffsetsMeters: (() => {
+          const fromLead = routeSocketLead(fromSocket, minimumApproachMeters);
+          const toLead = routeSocketLead(toSocket, minimumApproachMeters);
+          const minimumLeadX = Math.min(Number(fromLead.x), Number(toLead.x));
+          const maximumLeadX = Math.max(Number(fromLead.x), Number(toLead.x));
+          const minimumLeadZ = Math.min(Number(fromLead.z), Number(toLead.z));
+          const maximumLeadZ = Math.max(Number(fromLead.z), Number(toLead.z));
+          const clearanceMeters = maximumRoomHalfExtentMeters + 2.8;
+          const maximumDetourMeters = maximumFeaturelessSpanMeters
+            * (contentRoomDepthMeters.length + 1);
+          const quantizedOutwardOffset = (distance) => (
+            Math.ceil(Math.max(0, Number(distance)) / 2.8 - 1e-9) * 2.8
+          );
+          const boundaryOffsets = obstacleOwnerBounds.flatMap((bounds) => [
+            minimumLeadX - (Number(bounds.minX) - clearanceMeters),
+            Number(bounds.maxX) + clearanceMeters - maximumLeadX,
+            minimumLeadZ - (Number(bounds.minZ) - clearanceMeters),
+            Number(bounds.maxZ) + clearanceMeters - maximumLeadZ,
+          ]).map(quantizedOutwardOffset);
+          return [...new Set([
+            ...baseDetourOffsetsMeters,
+            ...boundaryOffsets,
+          ].filter((offset) => (
+            offset >= 2.8 - 1e-6
+              && offset <= maximumDetourMeters + 1e-6
+          )).map((offset) => Number(offset.toFixed(6))))].sort((first, second) => (
+            first - second
+          ));
+        })(),
         minimumApproachMeters,
       })) register(path, routePreferenceOrdinal);
     }
@@ -2842,6 +3716,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         || first.signature.localeCompare(second.signature)
     ));
   };
+  const candidateGenerationStartedAt = planningNowMilliseconds();
   const gapOptions = roomsByGap.map((roomOrdinals, gapOrdinal) => {
     const maximumRouteLengthMeters = roomOrdinals.reduce((total, roomOrdinal) => (
       total + Number(contentRoomDepthMeters[roomOrdinal] ?? 0)
@@ -2859,6 +3734,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
             {
               roomEntryElevationMeters: contentRoomEntryElevationMeters,
               roomExitElevationMeters: contentRoomExitElevationMeters,
+              roomEntryLocalPositions: contentRoomEntryLocalPositions,
               scorePlacement: roomPlacementStaticCollisionScore,
             },
           );
@@ -2900,6 +3776,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
             // authored rooms.  Scoring only host volumes allowed exactly that
             // invalid shape, which the global physical solver rejected much
             // later as a collision with node 0.
+            const stationCollisionScoringStartedAt = planningNowMilliseconds();
             const connectorStationCollisionScore = connectorPaths.reduce(
               (score, connectorPath, connectorOrdinal) => {
                 if (measureDungeonPolyline(connectorPath) <= 1e-6) return score;
@@ -2923,6 +3800,9 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
               },
               0,
             );
+            planningPhaseTimings.staticCollisionScoringMs +=
+              planningNowMilliseconds() - stationCollisionScoringStartedAt;
+            planningPhaseTimings.staticCollisionScoringCalls += connectorPaths.length;
             const roomStaticCollisionScore = roomPlacements.reduce((score, placement) => (
               score + roomPlacementStaticCollisionScore(placement)
             ), 0);
@@ -2930,7 +3810,9 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
               gapOrdinal,
               fromLocalSocketId: fromSocket.localSocketId,
               toLocalSocketId: toSocket.localSocketId,
+              routeSignature: route.signature,
               roomPlacements,
+              connectorPaths,
               routePath: route.path,
               routeLengthMeters: route.lengthMeters,
               stationCollisionScore: connectorStationCollisionScore,
@@ -2956,22 +3838,51 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         || first.toLocalSocketId.localeCompare(second.toLocalSocketId)
         || first.signature.localeCompare(second.signature)
     ));
-    // Keep deterministic socket-pair diversity while bounding the Cartesian
-    // combination used by repeated global candidate attempts.
-    const pairCounts = new Map();
-    return options.filter((option) => {
+    // Keep the same eight-candidate bound per socket pair, but spend it on
+    // distinct physical routes before retaining alternate placements along a
+    // single shortest route.  The latter all bunch rooms beside the shared
+    // station and can hide a collision-free outward detour beyond the beam.
+    const optionsByPair = new Map();
+    for (const option of options) {
       const pairKey = `${option.fromLocalSocketId}:${option.toLocalSocketId}`;
-      const count = pairCounts.get(pairKey) ?? 0;
-      pairCounts.set(pairKey, count + 1);
-      return count < 8;
-    });
+      const pairOptions = optionsByPair.get(pairKey) ?? [];
+      pairOptions.push(option);
+      optionsByPair.set(pairKey, pairOptions);
+    }
+    return [...optionsByPair.values()].flatMap((pairOptions) => {
+      const selected = [];
+      const selectedOptions = new Set();
+      const seenRouteSignatures = new Set();
+      for (const option of pairOptions) {
+        if (selected.length >= 4) break;
+        if (seenRouteSignatures.has(option.routeSignature)) continue;
+        seenRouteSignatures.add(option.routeSignature);
+        selected.push(option);
+        selectedOptions.add(option);
+      }
+      for (const option of pairOptions) {
+        if (selected.length >= 8) break;
+        if (selectedOptions.has(option)) continue;
+        selected.push(option);
+      }
+      return selected;
+    }).sort((first, second) => (
+      first.staticCollisionScore - second.staticCollisionScore
+        || first.routeLengthMeters - second.routeLengthMeters
+        || first.fromLocalSocketId.localeCompare(second.fromLocalSocketId)
+        || first.toLocalSocketId.localeCompare(second.toLocalSocketId)
+        || first.signature.localeCompare(second.signature)
+    ));
   });
+  planningPhaseTimings.candidateGenerationMs +=
+    planningNowMilliseconds() - candidateGenerationStartedAt;
   if (gapOptions.some((options) => options.length === 0)) {
     setDiagnostics('gap-options-empty', {
       gapOptionCounts: gapOptions.map((options) => options.length),
     });
     return null;
   }
+  const recursiveCompositionStartedAt = planningNowMilliseconds();
   let states = [{
     options: [],
     usedSockets: new Set(),
@@ -3010,12 +3921,16 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         || first.signature.localeCompare(second.signature)
     )).slice(0, 256);
     if (states.length === 0) {
+      planningPhaseTimings.recursiveCompositionMs +=
+        planningNowMilliseconds() - recursiveCompositionStartedAt;
       setDiagnostics('combined-state-empty', {
         gapOptionCounts: gapOptions.map((candidates) => candidates.length),
       });
       return null;
     }
   }
+  planningPhaseTimings.recursiveCompositionMs +=
+    planningNowMilliseconds() - recursiveCompositionStartedAt;
   const normalizedSearchVariant = Math.abs(
     Math.trunc(Number(searchVariant) || 0),
   );
@@ -3030,10 +3945,84 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
   // modules to the bounded global placement solver below; it can rotate and
   // spread them beyond the precomposed station-to-station polyline.
   if (bestStaticCollisionScore > 0) {
+    const bestState = states[0];
+    const zeroStaticAdjacentPairDiagnostics = gapOptions.length >= 2
+      ? gapOptions[0].flatMap((firstOption) => gapOptions[1].flatMap((secondOption) => {
+        if (firstOption.staticCollisionScore !== 0
+          || secondOption.staticCollisionScore !== 0
+          || firstOption.toLocalSocketId === secondOption.fromLocalSocketId) return [];
+        const combinedPlacements = [
+          ...firstOption.roomPlacements,
+          ...secondOption.roomPlacements,
+        ];
+        return [{
+          firstSocketPair: `${firstOption.fromLocalSocketId}:${firstOption.toLocalSocketId}`,
+          secondSocketPair: `${secondOption.fromLocalSocketId}:${secondOption.toLocalSocketId}`,
+          combinedRoomStationCollisionScore:
+            roomPlacementStationCollisionScore(combinedPlacements),
+          firstRoomCenters: firstOption.roomPlacements.map(({ center }) => (
+            cloneDungeonAugmentationValue(center)
+          )),
+          secondRoomCenters: secondOption.roomPlacements.map(({ center }) => (
+            cloneDungeonAugmentationValue(center)
+          )),
+        }];
+      })).sort((first, second) => (
+        first.combinedRoomStationCollisionScore
+          - second.combinedRoomStationCollisionScore
+      )).slice(0, 8)
+      : [];
+    const connectorCollisionIds = planningCollisionIdsForVolumes(
+      bestState.options.flatMap(({ connectorPaths = [] }) => (
+        connectorPaths.flatMap((path) => routePathPlanningVolumes(path, 5.6))
+      )),
+      planningOverlapGrants,
+    );
+    const roomCollisionIds = planningCollisionIdsForVolumes(
+      bestState.options.flatMap(({ roomPlacements }) => (
+        roomPlacements.flatMap(planningVolumesForRoomPlacement)
+      )),
+    );
     setDiagnostics('best-state-collides', {
       bestStaticCollisionScore,
       stateCount: states.length,
       gapOptionCounts: gapOptions.map((candidates) => candidates.length),
+      connectorCollisionIds: connectorCollisionIds.slice(0, 24),
+      roomCollisionIds: roomCollisionIds.slice(0, 24),
+      zeroStaticAdjacentPairDiagnostics,
+      gapBestSocketPairs: gapOptions.map((options, gapOrdinal) => (
+        [...new Map(options.map((option) => [
+          `${option.fromLocalSocketId}:${option.toLocalSocketId}`,
+          option,
+        ])).values()].map((option) => ({
+          gapOrdinal,
+          fromLocalSocketId: option.fromLocalSocketId,
+          toLocalSocketId: option.toLocalSocketId,
+          routeLengthMeters: option.routeLengthMeters,
+          staticCollisionScore: option.staticCollisionScore,
+          routePath: cloneDungeonAugmentationValue(option.routePath),
+          roomPlacements: option.roomPlacements.map(({ roomOrdinal, center, facing }) => ({
+            roomOrdinal,
+            center: cloneDungeonAugmentationValue(center),
+            facing: cloneDungeonAugmentationValue(facing),
+          })),
+        }))
+      )),
+      bestStateSocketPairs: bestState.options.map((option) => ({
+        gapOrdinal: option.gapOrdinal,
+        fromLocalSocketId: option.fromLocalSocketId,
+        toLocalSocketId: option.toLocalSocketId,
+        routeLengthMeters: option.routeLengthMeters,
+        staticCollisionScore: option.staticCollisionScore,
+        routePath: cloneDungeonAugmentationValue(option.routePath),
+        roomPlacements: option.roomPlacements.map((placement) => ({
+          roomOrdinal: placement.roomOrdinal,
+          center: cloneDungeonAugmentationValue(placement.center),
+          facing: cloneDungeonAugmentationValue(placement.facing),
+          entryDistanceMeters: placement.entryDistanceMeters,
+          exitDistanceMeters: placement.exitDistanceMeters,
+        })),
+      })),
     });
     return null;
   }
@@ -3093,6 +4082,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     );
   }
   const requiredSocketBindings = [];
+  const externalSpinePaths = [];
   for (const option of selectedState.options) {
     const fromStationNodeIndex = stationNodeIndexByOrdinal.get(option.gapOrdinal);
     const toStationNodeIndex = stationNodeIndexByOrdinal.get(option.gapOrdinal + 1);
@@ -3100,33 +4090,65 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       roomNodeIndexByOrdinal.get(roomOrdinal)
     ));
     if (roomNodeIndices.length === 0) {
-      requiredSocketBindings.push({
+      const binding = {
         fromIndex: fromStationNodeIndex,
         toIndex: toStationNodeIndex,
         fromLocalSocketId: option.fromLocalSocketId,
         toLocalSocketId: option.toLocalSocketId,
+      };
+      requiredSocketBindings.push(binding);
+      externalSpinePaths.push({
+        ...binding,
+        path: cloneDungeonAugmentationValue(option.routePath),
       });
       continue;
     }
-    requiredSocketBindings.push({
+    const firstBinding = {
       fromIndex: fromStationNodeIndex,
       toIndex: roomNodeIndices[0],
       fromLocalSocketId: option.fromLocalSocketId,
       toLocalSocketId: 'entry',
+    };
+    requiredSocketBindings.push(firstBinding);
+    externalSpinePaths.push({
+      ...firstBinding,
+      path: sliceDungeonPolylineByDistance(
+        option.routePath,
+        0,
+        option.roomPlacements[0].entryDistanceMeters,
+      ),
     });
     for (let roomIndex = 1; roomIndex < roomNodeIndices.length; roomIndex += 1) {
-      requiredSocketBindings.push({
+      const binding = {
         fromIndex: roomNodeIndices[roomIndex - 1],
         toIndex: roomNodeIndices[roomIndex],
         fromLocalSocketId: 'exit',
         toLocalSocketId: 'entry',
+      };
+      requiredSocketBindings.push(binding);
+      externalSpinePaths.push({
+        ...binding,
+        path: sliceDungeonPolylineByDistance(
+          option.routePath,
+          option.roomPlacements[roomIndex - 1].exitDistanceMeters,
+          option.roomPlacements[roomIndex].entryDistanceMeters,
+        ),
       });
     }
-    requiredSocketBindings.push({
+    const finalBinding = {
       fromIndex: roomNodeIndices.at(-1),
       toIndex: toStationNodeIndex,
       fromLocalSocketId: 'exit',
       toLocalSocketId: option.toLocalSocketId,
+    };
+    requiredSocketBindings.push(finalBinding);
+    externalSpinePaths.push({
+      ...finalBinding,
+      path: sliceDungeonPolylineByDistance(
+        option.routePath,
+        option.roomPlacements.at(-1).exitDistanceMeters,
+        option.routeLengthMeters,
+      ),
     });
   }
   setDiagnostics('composed', {
@@ -3146,6 +4168,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     externalRoutePaths: selectedState.options.map(({ routePath }) => (
       cloneDungeonAugmentationValue(routePath)
     )),
+    externalSpinePaths: cloneDungeonAugmentationValue(externalSpinePaths),
   };
 }
 
@@ -3642,15 +4665,224 @@ function orthogonalRouteSegmentPath(from, to, preferXFirst) {
 const ROUTE_NETWORK_SOCKET_APPROACH_METERS = 5.6;
 const ROUTE_NETWORK_CORRIDOR_WIDTH_METERS = 8.4;
 const ROUTE_NETWORK_MAXIMUM_FEATURELESS_SPAN_METERS = 33.6;
+
+export function ordinaryRouteNetworkSocketGapMeters(
+  connectorGapMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+  socketApproachMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+) {
+  // Each ordinary endpoint owns two exterior approach cells. Unlike the typed
+  // coincident junction threshold, two unrelated seams may not overlap, so the
+  // centerline between socket thresholds must contain both complete leads.
+  return Math.max(
+    Number(connectorGapMeters),
+    Number(socketApproachMeters) * 2,
+  );
+}
+
+export function orderCoverageRoomIndicesForArc(
+  roomNodeIndices = [],
+  endpointNodeIndices = [],
+) {
+  const rooms = [...roomNodeIndices].sort((first, second) => first - second);
+  const endpoints = [...new Set(endpointNodeIndices)]
+    .sort((first, second) => first - second);
+  if (rooms.length < 2 || endpoints.length < 3) return rooms;
+  const intervals = Array.from(
+    { length: endpoints.length - 1 },
+    (_, ordinal) => ({
+      ordinal,
+      rooms: rooms.filter((index) => (
+        index > endpoints[ordinal] && index < endpoints[ordinal + 1]
+      )),
+    }),
+  );
+  const roomiestInterval = [...intervals].sort((first, second) => (
+    second.rooms.length - first.rooms.length
+      || first.ordinal - second.ordinal
+  ))[0];
+  if (!roomiestInterval || roomiestInterval.rooms.length === 0) return rooms;
+  // Allocate the ordered challenge -> elevation pair to the roomiest
+  // interval. The compact payoff can then occupy a constrained one-room bay.
+  // Physical indices within the selected interval stay ascending because the
+  // authored rise/return balancer binds riseIndex < descentIndex.
+  const roomiestSet = new Set(roomiestInterval.rooms);
+  return [
+    ...roomiestInterval.rooms,
+    ...rooms.filter((index) => !roomiestSet.has(index)),
+  ];
+}
+
+export function interleavedCartesianIndexPairs(firstCount, secondCount) {
+  const firstLength = Math.max(0, Math.trunc(Number(firstCount) || 0));
+  const secondLength = Math.max(0, Math.trunc(Number(secondCount) || 0));
+  if (firstLength === 0 || secondLength === 0) return [];
+  const pairs = [];
+  const seen = new Set();
+  const add = (firstIndex, secondIndex) => {
+    const key = `${firstIndex}:${secondIndex}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    pairs.push({ firstIndex, secondIndex });
+  };
+  // Exercise both independent family orders before the bounded solver can
+  // spend its window on near-identical neighbors from one axis.
+  for (let ordinal = 0; ordinal < Math.max(firstLength, secondLength); ordinal += 1) {
+    add(ordinal % firstLength, ordinal % secondLength);
+  }
+  for (let diagonal = 0;
+    diagonal < firstLength + secondLength - 1;
+    diagonal += 1) {
+    for (let firstIndex = 0; firstIndex < firstLength; firstIndex += 1) {
+      const secondIndex = diagonal - firstIndex;
+      if (secondIndex < 0 || secondIndex >= secondLength) continue;
+      add(firstIndex, secondIndex);
+    }
+  }
+  return pairs;
+}
+
+export function coverageTraversalBranchBindings({
+  nodeCount = 0,
+  endpointNodeIndices = [],
+  traversalConnectorIndices = [],
+  keepPayoffOnMainChain = false,
+  preferredBranchRoomIndex = null,
+  requirePreferredBranchRoom = false,
+  branchRouteRole = 'route-network-payoff-branch',
+} = {}) {
+  const endpointSet = new Set(endpointNodeIndices);
+  const traversalIndex = [...traversalConnectorIndices]
+    .sort((first, second) => first - second)[0];
+  if (!Number.isInteger(traversalIndex)) return null;
+  const eligibleBranchRoomIndices = Array.from(
+    { length: Math.max(0, Number(nodeCount)) },
+    (_, index) => index,
+  ).filter((index) => (
+    !endpointSet.has(index)
+      && index !== traversalIndex
+      && index > traversalIndex
+  ));
+  const requestedBranchRoomIndex = preferredBranchRoomIndex == null
+    ? null
+    : Number(preferredBranchRoomIndex);
+  if (requirePreferredBranchRoom
+    && !eligibleBranchRoomIndices.includes(requestedBranchRoomIndex)) return null;
+  const branchRoomIndex = keepPayoffOnMainChain
+    ? null
+    : eligibleBranchRoomIndices.includes(requestedBranchRoomIndex)
+      ? requestedBranchRoomIndex
+      : eligibleBranchRoomIndices.at(-1);
+  if (!keepPayoffOnMainChain && !Number.isInteger(branchRoomIndex)) return null;
+  const mainIndices = Array.from(
+    { length: Math.max(0, Number(nodeCount)) },
+    (_, index) => index,
+  ).filter((index) => index !== branchRoomIndex);
+  const mainBindings = mainIndices.slice(0, -1).map((fromIndex, ordinal) => {
+    const toIndex = mainIndices[ordinal + 1];
+    return {
+      fromIndex,
+      toIndex,
+      fromLocalSocketId: endpointSet.has(fromIndex) ? null : 'exit',
+      toLocalSocketId: endpointSet.has(toIndex) ? null : 'entry',
+    };
+  });
+  return {
+    traversalIndex,
+    branchRoomIndex,
+    bindings: [
+      ...mainBindings,
+      ...(!keepPayoffOnMainChain ? [{
+        fromIndex: traversalIndex,
+        toIndex: branchRoomIndex,
+        fromLocalSocketId: 'right',
+        toLocalSocketId: 'entry',
+        routeRole: branchRouteRole,
+      }] : []),
+    ],
+  };
+}
+
+export function coveragePayoffGrammarIdsForStationBay({
+  grammarPool = [],
+  grammars = {},
+  stationSeparationMeters = Number.POSITIVE_INFINITY,
+  connectorEndpointGapMeters = ordinaryRouteNetworkSocketGapMeters(),
+} = {}) {
+  const maximumTraversalMeters = Number(stationSeparationMeters)
+    - Number(connectorEndpointGapMeters);
+  const entryExitTraversalMeters = (grammar) => {
+    const entry = grammar.sockets?.find(({ id }) => id === 'entry');
+    const exit = grammar.sockets?.find(({ id }) => id === 'exit');
+    if (!entry?.localPosition || !exit?.localPosition) {
+      return Number(grammar.size?.depth ?? Number.POSITIVE_INFINITY);
+    }
+    return Math.abs(
+      Number(exit.localPosition.x) - Number(entry.localPosition.x),
+    ) + Math.abs(
+      Number(exit.localPosition.z) - Number(entry.localPosition.z),
+    );
+  };
+  return grammarPool
+    .map(({ id }) => grammars[id])
+    .filter((grammar) => (
+      grammar
+        && String(grammar.selectionConstraints?.routeNetworkModuleKind ?? '') === 'room'
+        && grammar.selectionConstraints?.routeNetworkContentRoles?.includes('reward')
+        && Math.abs(Number(
+          grammar.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
+        )) <= 1e-6
+        && entryExitTraversalMeters(grammar) <= maximumTraversalMeters + 1e-6
+    ))
+    .map(({ id }) => String(id));
+}
+
+export function selectCoverageTraversalConnectorIndices({
+  nodeCount = 0,
+  endpointNodeIndices = [],
+  minimumRoomCount = 2,
+} = {}) {
+  const normalizedNodeCount = Math.max(0, Math.trunc(Number(nodeCount) || 0));
+  const endpointIndices = [...new Set(endpointNodeIndices.map(Number))]
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < normalizedNodeCount)
+    .sort((first, second) => first - second);
+  const nonEndpointCount = normalizedNodeCount - endpointIndices.length;
+  if (endpointIndices.length < 3
+    || nonEndpointCount <= Math.max(0, Math.trunc(Number(minimumRoomCount) || 0))) return [];
+  const constrainedBay = endpointIndices
+    .slice(0, -1)
+    .map((fromIndex, ordinal) => ({
+      fromIndex,
+      toIndex: endpointIndices[ordinal + 1],
+    }))
+    .find(({ fromIndex, toIndex }) => toIndex - fromIndex === 2);
+  return constrainedBay ? [constrainedBay.fromIndex + 1] : [];
+}
+
+export function minimumVerticalRouteFeaturelessSpanMeters(deltaX, deltaZ) {
+  // One real elevation transition resets featureless travel once. Even with an
+  // ideally placed transfer, at least half of the complete planar Manhattan
+  // route remains on one side of that reset. Returning min(dx,dz)—or zero for
+  // a straight run—admits physically impossible 80m+ slopes into exact search.
+  return (Math.abs(Number(deltaX)) + Math.abs(Number(deltaZ))) * 0.5;
+}
 const ROUTE_NETWORK_VERTICAL_MINIMUM_RUN_METERS = Object.freeze({
-  slope: 36.4,
-  ladder: 19.6,
-  lift: 28,
+  // These are raw straight-run distances. The connector renderer reserves
+  // two flat clearance cells at both ends before selecting its safe span,
+  // leaving exactly 13/7/10 usable cells for slope/ladder/lift respectively.
+  slope: 44.8,
+  ladder: 28,
+  lift: 36.4,
 });
 
 function appendDistinctRoutePoint(points, point) {
   const candidate = toDungeonPoint(point);
-  if (points.length > 0 && dungeonPointDistance(points.at(-1), candidate) <= 1e-6) return;
+  if (points.length > 0) {
+    const last = points.at(-1);
+    const deltaX = Number(last.x) - Number(candidate.x);
+    const deltaY = Number(last.y) - Number(candidate.y);
+    const deltaZ = Number(last.z) - Number(candidate.z);
+    if (deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ <= 1e-12) return;
+  }
   if (points.length >= 2) {
     const previous = points.at(-2);
     const current = points.at(-1);
@@ -3664,16 +4896,18 @@ function appendDistinctRoutePoint(points, point) {
       y: Number(candidate.y) - Number(current.y),
       z: Number(candidate.z) - Number(current.z),
     };
-    const occupiedIncomingAxes = ['x', 'y', 'z'].filter((axis) => (
-      Math.abs(incoming[axis]) > 1e-6
-    ));
-    const occupiedOutgoingAxes = ['x', 'y', 'z'].filter((axis) => (
-      Math.abs(outgoing[axis]) > 1e-6
-    ));
-    if (occupiedIncomingAxes.length === 1
-      && occupiedOutgoingAxes.length === 1
-      && occupiedIncomingAxes[0] === occupiedOutgoingAxes[0]
-      && incoming[occupiedIncomingAxes[0]] * outgoing[occupiedOutgoingAxes[0]] > 0) {
+    const singleOccupiedAxis = (delta) => {
+      const x = Math.abs(delta.x) > 1e-6;
+      const y = Math.abs(delta.y) > 1e-6;
+      const z = Math.abs(delta.z) > 1e-6;
+      if (Number(x) + Number(y) + Number(z) !== 1) return null;
+      return x ? 'x' : y ? 'y' : 'z';
+    };
+    const incomingAxis = singleOccupiedAxis(incoming);
+    const outgoingAxis = singleOccupiedAxis(outgoing);
+    if (incomingAxis
+      && incomingAxis === outgoingAxis
+      && incoming[incomingAxis] * outgoing[outgoingAxis] > 0) {
       // Socket-lead construction can introduce a waypoint in the middle of a
       // straight run. Preserve the route geometry canonically as one leg so
       // the non-adjacent-volume self-overlap check does not mistake a valid L
@@ -3785,6 +5019,756 @@ function routePathBacktracksOrSelfOverlaps(path = []) {
     }
   }
   return false;
+}
+
+// Planning must use the same station-reset rule as finalized physical
+// validation. A connector blueprint is not a reset by name alone; it becomes
+// one only when its committed topology is guaranteed to expose three arms.
+export function routeNetworkNodeResetsFeaturelessDistance(node) {
+  return !node?.connectorOwned
+    || Number(node.plannedMinimumGraphDegree ?? 0) >= 3;
+}
+
+export function closestPlacementCandidatesPerFacing(validCandidates = [], target = {}) {
+  const candidatesByFacing = new Map();
+  for (const candidate of validCandidates) {
+    const key = `${Number(candidate.facing?.x ?? 0).toFixed(0)}:${Number(
+      candidate.facing?.z ?? 0,
+    ).toFixed(0)}`;
+    const existing = candidatesByFacing.get(key);
+    const distance = Math.hypot(
+      Number(candidate.center?.x) - Number(target.x),
+      Number(candidate.center?.z) - Number(target.z),
+    );
+    const existingDistance = existing ? Math.hypot(
+      Number(existing.center?.x) - Number(target.x),
+      Number(existing.center?.z) - Number(target.z),
+    ) : Number.POSITIVE_INFINITY;
+    if (!existing
+      || distance < existingDistance - 1e-6
+      || (Math.abs(distance - existingDistance) <= 1e-6
+        && Number(candidate.displacement ?? 0) < Number(existing.displacement ?? 0))) {
+      candidatesByFacing.set(key, candidate);
+    }
+  }
+  return [...candidatesByFacing.entries()]
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([, candidate]) => candidate);
+}
+
+export function closestPlacementCandidate(validCandidates = [], target = {}) {
+  let closest = null;
+  let closestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of validCandidates) {
+    const distance = Math.hypot(
+      Number(candidate.center?.x) - Number(target.x),
+      Number(candidate.center?.z) - Number(target.z),
+    );
+    const displacement = Number(candidate.displacement ?? 0);
+    const closestDisplacement = Number(closest?.displacement ?? 0);
+    if (!closest
+      || distance < closestDistance - 1e-12
+      || (Math.abs(distance - closestDistance) <= 1e-12
+        && displacement < closestDisplacement)) {
+      closest = candidate;
+      closestDistance = distance;
+    }
+  }
+  return closest;
+}
+
+export function mergeReservedPlacementCandidates(
+  currentCandidates = [],
+  reservedCandidates = [],
+  limit = currentCandidates.length,
+) {
+  const boundedLimit = Math.max(0, Math.trunc(Number(limit) || 0));
+  const merged = [];
+  const seen = new Set();
+  for (const candidate of [...reservedCandidates, ...currentCandidates]) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    merged.push(candidate);
+    if (merged.length >= boundedLimit) break;
+  }
+  return merged;
+}
+
+export function shouldAttemptCorrelatedPlacementRepair({
+  orderedEdges = [],
+  failedFirstIndex = null,
+  failedSecondIndex = null,
+  alreadyAttempted = false,
+} = {}) {
+  if (alreadyAttempted
+    || failedFirstIndex == null
+    || failedSecondIndex == null
+    || !Number.isSafeInteger(Number(failedFirstIndex))
+    || !Number.isSafeInteger(Number(failedSecondIndex))) return false;
+  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex }) => ({
+    fromIndex: Number(fromIndex),
+    toIndex: Number(toIndex),
+  }));
+  const participatingNodeIndices = new Set(normalizedEdges.flatMap(({ fromIndex, toIndex }) => [
+    fromIndex,
+    toIndex,
+  ]));
+  // A tree can exhaust on a non-edge pair when a locally valid branch room
+  // consumes another endpoint's reserved parent approach. That is still a
+  // correlated placement failure and must be repaired from the complete
+  // candidate pools, not reported as if the branch had no legal geometry.
+  return normalizedEdges.length > 0
+    && participatingNodeIndices.has(Number(failedFirstIndex))
+    && participatingNodeIndices.has(Number(failedSecondIndex));
+}
+
+export function orientOrderedCandidateChainAtFailure(
+  orderedEdges = [],
+  failedFirstIndex = null,
+  failedSecondIndex = null,
+) {
+  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex }) => ({
+    fromIndex: Number(fromIndex),
+    toIndex: Number(toIndex),
+  }));
+  const failedEdgeOrdinal = normalizedEdges.findIndex(({ fromIndex, toIndex }) => (
+    (fromIndex === Number(failedFirstIndex) && toIndex === Number(failedSecondIndex))
+      || (fromIndex === Number(failedSecondIndex) && toIndex === Number(failedFirstIndex))
+  ));
+  if (failedEdgeOrdinal < 0 || failedEdgeOrdinal < normalizedEdges.length * 0.5) {
+    return normalizedEdges;
+  }
+  return normalizedEdges.reverse().map(({ fromIndex, toIndex }) => ({
+    fromIndex: toIndex,
+    toIndex: fromIndex,
+  }));
+}
+
+export function orientOrderedCandidateTreeAtFailure(
+  orderedEdges = [],
+  failedFirstIndex = null,
+  failedSecondIndex = null,
+) {
+  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex }) => ({
+    fromIndex: Number(fromIndex),
+    toIndex: Number(toIndex),
+  }));
+  if (normalizedEdges.length === 0) return [];
+  const adjacency = new Map();
+  const append = (fromIndex, toIndex, edgeOrdinal) => {
+    const records = adjacency.get(fromIndex) ?? [];
+    records.push({ toIndex, edgeOrdinal });
+    adjacency.set(fromIndex, records);
+  };
+  normalizedEdges.forEach(({ fromIndex, toIndex }, edgeOrdinal) => {
+    append(fromIndex, toIndex, edgeOrdinal);
+    append(toIndex, fromIndex, edgeOrdinal);
+  });
+  const requestedRoot = Number(failedSecondIndex);
+  const rootIndex = adjacency.has(requestedRoot)
+    ? requestedRoot
+    : normalizedEdges[0].fromIndex;
+  const result = [];
+  const visited = new Set([rootIndex]);
+  const visit = (fromIndex) => {
+    const neighbors = [...(adjacency.get(fromIndex) ?? [])]
+      .sort((first, second) => first.edgeOrdinal - second.edgeOrdinal
+        || first.toIndex - second.toIndex);
+    for (const { toIndex } of neighbors) {
+      if (visited.has(toIndex)) continue;
+      visited.add(toIndex);
+      result.push({ fromIndex, toIndex });
+      visit(toIndex);
+    }
+  };
+  visit(rootIndex);
+  return result.length === normalizedEdges.length ? result : normalizedEdges;
+}
+
+export function reserveOrderedCandidateTree({
+  candidateGroups = [],
+  orderedEdges = [],
+  pairIsCompatible,
+  pairCompatibilityIsKnown = () => false,
+  pairClearsAssignedCandidates = () => true,
+  pairPassesCheapBounds = () => true,
+  prefixIsCompatible = () => true,
+  prefilterEdgeCandidates = (candidates) => candidates,
+  candidateKey = (candidate) => candidate,
+  maxPairEvaluations = 256,
+  maxCheapPairEvaluations = 32768,
+  candidateWindowSize = 128,
+  maximumLayerCandidates = 96,
+} = {}) {
+  const exactEvaluationLimit = Math.max(0, Math.trunc(Number(maxPairEvaluations) || 0));
+  const cheapEvaluationLimit = Math.max(
+    0,
+    Math.trunc(Number(maxCheapPairEvaluations) || 0),
+  );
+  const boundedCandidateWindowSize = Math.max(
+    1,
+    Math.trunc(Number(candidateWindowSize) || 0),
+  );
+  const boundedMaximumLayerCandidates = Math.max(
+    1,
+    Math.trunc(Number(maximumLayerCandidates) || 0),
+  );
+  const groupByIndex = new Map(candidateGroups.map((group) => [Number(group.index), group]));
+  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex }) => ({
+    fromIndex: Number(fromIndex),
+    toIndex: Number(toIndex),
+  }));
+  const rootIndex = normalizedEdges[0]?.fromIndex;
+  const introduced = new Set(Number.isSafeInteger(rootIndex) ? [rootIndex] : []);
+  const isOrderedTree = normalizedEdges.length > 0
+    && normalizedEdges.every(({ fromIndex, toIndex }) => {
+      if (!introduced.has(fromIndex) || introduced.has(toIndex)
+        || !groupByIndex.has(fromIndex) || !groupByIndex.has(toIndex)) return false;
+      introduced.add(toIndex);
+      return true;
+    })
+    && introduced.size === normalizedEdges.length + 1
+    && typeof pairIsCompatible === 'function';
+  if (!isOrderedTree) {
+    return {
+      status: 'unsupported-tree',
+      pairEvaluations: 0,
+      exactPairEvaluations: 0,
+      cheapPairEvaluations: 0,
+      cheapPairCount: 0,
+      prunedCandidateCount: 0,
+      reservedByIndex: new Map(),
+    };
+  }
+  const completePoolByIndex = new Map(candidateGroups.map((group) => {
+    const seen = new Set();
+    const candidates = [];
+    for (const candidate of [...(group.candidates ?? []), ...(group.candidatePool ?? [])]) {
+      if (!candidate) continue;
+      const key = candidateKey(candidate, Number(group.index));
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(candidate);
+    }
+    return [Number(group.index), candidates];
+  }));
+  const rootCandidates = completePoolByIndex.get(rootIndex) ?? [];
+  let prefixes = rootCandidates
+    .slice(0, boundedMaximumLayerCandidates)
+    .map((candidate) => new Map([[rootIndex, candidate]]));
+  let cheapPairEvaluations = 0;
+  let cheapPairCount = 0;
+  let cheapBudgetExhausted = false;
+  for (let edgeOrdinal = 0; edgeOrdinal < normalizedEdges.length; edgeOrdinal += 1) {
+    const { fromIndex, toIndex } = normalizedEdges[edgeOrdinal];
+    const nextPrefixes = [];
+    const supportQuota = Math.max(
+      1,
+      Math.ceil(boundedCandidateWindowSize / Math.max(1, prefixes.length)),
+    );
+    for (const prefix of prefixes) {
+      const fromCandidate = prefix.get(fromIndex);
+      if (!fromCandidate) continue;
+      const candidates = prefilterEdgeCandidates(
+        completePoolByIndex.get(toIndex) ?? [],
+        fromCandidate,
+        fromIndex,
+        toIndex,
+        edgeOrdinal,
+      ) ?? [];
+      let retainedForPrefix = 0;
+      for (const toCandidate of candidates) {
+        let cheapClear = true;
+        for (const [assignedIndex, assignedCandidate] of prefix) {
+          if (cheapPairEvaluations >= cheapEvaluationLimit) {
+            cheapBudgetExhausted = true;
+            cheapClear = false;
+            break;
+          }
+          cheapPairEvaluations += 1;
+          if (!pairPassesCheapBounds(
+            assignedCandidate,
+            assignedIndex,
+            toCandidate,
+            toIndex,
+          )) {
+            cheapClear = false;
+            break;
+          }
+        }
+        if (cheapBudgetExhausted) break;
+        if (!cheapClear || !pairClearsAssignedCandidates(
+          fromCandidate,
+          fromIndex,
+          toCandidate,
+          toIndex,
+          prefix,
+        )) continue;
+        const extended = new Map(prefix);
+        extended.set(toIndex, toCandidate);
+        if (!prefixIsCompatible(extended)) continue;
+        nextPrefixes.push(extended);
+        cheapPairCount += 1;
+        retainedForPrefix += 1;
+        if (retainedForPrefix >= supportQuota
+          || nextPrefixes.length >= boundedCandidateWindowSize) break;
+      }
+      if (cheapBudgetExhausted || nextPrefixes.length >= boundedCandidateWindowSize) break;
+    }
+    prefixes = nextPrefixes.slice(0, boundedMaximumLayerCandidates);
+    if (cheapBudgetExhausted || prefixes.length === 0) break;
+  }
+  const orderedNodeIndices = [rootIndex, ...normalizedEdges.map(({ toIndex }) => toIndex)];
+  const prunedCandidateCount = orderedNodeIndices.reduce((count, index) => (
+    count + Math.max(
+      0,
+      Number(completePoolByIndex.get(index)?.length ?? 0)
+        - Number(new Set(prefixes.map((prefix) => prefix.get(index)).filter(Boolean)).size),
+    )
+  ), 0);
+  if (cheapBudgetExhausted || prefixes.length === 0) {
+    return {
+      status: cheapBudgetExhausted ? 'cheap-budget-exhausted' : 'not-found',
+      pairEvaluations: 0,
+      exactPairEvaluations: 0,
+      cheapPairEvaluations,
+      cheapPairCount,
+      prunedCandidateCount,
+      reservedByIndex: new Map(),
+    };
+  }
+  let exactPairEvaluations = 0;
+  let exactBudgetExhausted = false;
+  for (const prefix of prefixes) {
+    let exactClear = true;
+    for (const { fromIndex, toIndex } of normalizedEdges) {
+      const fromCandidate = prefix.get(fromIndex);
+      const toCandidate = prefix.get(toIndex);
+      if (!pairCompatibilityIsKnown(
+        fromCandidate,
+        fromIndex,
+        toCandidate,
+        toIndex,
+      )) {
+        if (exactPairEvaluations >= exactEvaluationLimit) {
+          exactBudgetExhausted = true;
+          exactClear = false;
+          break;
+        }
+        exactPairEvaluations += 1;
+      }
+      if (!pairIsCompatible(fromCandidate, fromIndex, toCandidate, toIndex)) {
+        exactClear = false;
+        break;
+      }
+    }
+    if (exactClear) {
+      return {
+        status: 'reserved',
+        pairEvaluations: exactPairEvaluations,
+        exactPairEvaluations,
+        cheapPairEvaluations,
+        cheapPairCount,
+        prunedCandidateCount,
+        reservedByIndex: new Map(prefix),
+      };
+    }
+    if (exactBudgetExhausted) break;
+  }
+  return {
+    status: exactBudgetExhausted ? 'exact-budget-exhausted' : 'not-found',
+    pairEvaluations: exactPairEvaluations,
+    exactPairEvaluations,
+    cheapPairEvaluations,
+    cheapPairCount,
+    prunedCandidateCount,
+    reservedByIndex: new Map(),
+  };
+}
+
+export function reserveOrderedCandidateChain({
+  candidateGroups = [],
+  orderedEdges = [],
+  pairIsCompatible,
+  pairCompatibilityIsKnown = () => false,
+  pairClearsAssignedCandidates = () => true,
+  pairPassesCheapBounds = () => true,
+  prefixIsCompatible = () => true,
+  prefilterEdgeCandidates = (candidates) => candidates,
+  compareEdgeCandidates = () => 0,
+  candidateKey = (candidate) => candidate,
+  maxPairEvaluations = 256,
+  maxCheapPairEvaluations = 32768,
+  candidateWindowSize = 128,
+  maximumLayerCandidates = 96,
+} = {}) {
+  const exactEvaluationLimit = Math.max(
+    0,
+    Math.trunc(Number(maxPairEvaluations) || 0),
+  );
+  const cheapEvaluationLimit = Math.max(
+    0,
+    Math.trunc(Number(maxCheapPairEvaluations) || 0),
+  );
+  const boundedCandidateWindowSize = Math.max(
+    1,
+    Math.trunc(Number(candidateWindowSize) || 0),
+  );
+  const boundedMaximumLayerCandidates = Math.max(
+    1,
+    Math.trunc(Number(maximumLayerCandidates) || 0),
+  );
+  const groupByIndex = new Map(candidateGroups.map((group) => [
+    Number(group.index),
+    group,
+  ]));
+  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex }) => ({
+    fromIndex: Number(fromIndex),
+    toIndex: Number(toIndex),
+  }));
+  const chainNodeIndices = normalizedEdges.length > 0
+    ? [
+      normalizedEdges[0].fromIndex,
+      ...normalizedEdges.map(({ toIndex }) => toIndex),
+    ]
+    : [];
+  const isSimpleDirectedChain = normalizedEdges.length > 0
+    && normalizedEdges.every((edge, edgeOrdinal) => (
+      edgeOrdinal === 0
+        || edge.fromIndex === normalizedEdges[edgeOrdinal - 1].toIndex
+    ))
+    && new Set(chainNodeIndices).size === chainNodeIndices.length
+    && chainNodeIndices.every((index) => groupByIndex.has(index));
+  if (!isSimpleDirectedChain || typeof pairIsCompatible !== 'function') {
+    return {
+      status: 'unsupported-chain',
+      pairEvaluations: 0,
+      exactPairEvaluations: 0,
+      cheapPairEvaluations: 0,
+      cheapPairCount: 0,
+      prunedCandidateCount: 0,
+      reservedByIndex: new Map(),
+    };
+  }
+
+  const completePoolByIndex = new Map(candidateGroups.map((group) => {
+    const seen = new Set();
+    const candidates = [];
+    for (const candidate of [
+      ...(group.candidates ?? []),
+      ...(group.candidatePool ?? []),
+    ]) {
+      if (!candidate) continue;
+      const key = candidateKey(candidate, Number(group.index));
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(candidate);
+    }
+    return [Number(group.index), candidates];
+  }));
+  const firstGroup = groupByIndex.get(chainNodeIndices[0]);
+  const firstCandidates = firstGroup.candidates ?? [];
+  const completePoolOrdinalByIndex = new Map([...completePoolByIndex].map(([
+    index,
+    candidates,
+  ]) => [index, new Map(candidates.map((candidate, ordinal) => [candidate, ordinal]))]));
+  const edgeCandidateGraph = [];
+  let reachableCandidates = [...firstCandidates];
+  let reachablePrefixesByCandidate = new Map(firstCandidates.map((candidate) => [
+    candidate,
+    [new Map([[chainNodeIndices[0], candidate]])],
+  ]));
+  let cheapPairEvaluations = 0;
+  let cheapPairCount = 0;
+  let cheapBudgetExhausted = false;
+
+  for (let edgeOrdinal = 0; edgeOrdinal < normalizedEdges.length; edgeOrdinal += 1) {
+    const { fromIndex, toIndex } = normalizedEdges[edgeOrdinal];
+    const toGroup = groupByIndex.get(toIndex);
+    const boundedCandidates = new Set(toGroup.candidates ?? []);
+    const completeToPool = completePoolByIndex.get(toIndex) ?? [];
+    const supportsByFromCandidate = new Map();
+    const supportCountByToCandidate = new Map();
+    const prefixesByToCandidate = new Map();
+    let retainedLayerSupportCount = 0;
+    for (let fromOrdinal = 0; fromOrdinal < reachableCandidates.length; fromOrdinal += 1) {
+      const fromCandidate = reachableCandidates[fromOrdinal];
+      const remainingFromCount = reachableCandidates.length - fromOrdinal;
+      const remainingLayerSupportSlots = Math.max(
+        0,
+        boundedCandidateWindowSize - retainedLayerSupportCount,
+      );
+      const supportQuota = Math.max(
+        1,
+        Math.ceil(remainingLayerSupportSlots / remainingFromCount),
+      );
+      const supports = [];
+      // Filter before ranking. Sorting the complete 2,500-candidate pool for
+      // every predecessor was both unbounded by the cheap-evaluation budget
+      // and could discard the only seam-valid continuation outside the first
+      // distance-ranked window. The pool is already deterministic with the
+      // bounded domain first, so scan it once, retain only legal supports, and
+      // rank that much smaller set afterwards.
+      const prefilteredToPool = prefilterEdgeCandidates(
+        completeToPool,
+        fromCandidate,
+        fromIndex,
+        toIndex,
+        edgeOrdinal,
+      ) ?? [];
+      // The complete pool already carries the bounded domain first. A caller
+      // may return a stricter deterministic order (for example, cached exact
+      // witnesses before unknown pairs), which must remain authoritative here
+      // or the only correlated continuation can be hidden behind the quota.
+      const scanOrder = [...prefilteredToPool];
+      for (const toCandidate of scanOrder) {
+        if (cheapPairEvaluations >= cheapEvaluationLimit) {
+          cheapBudgetExhausted = true;
+          break;
+        }
+        cheapPairEvaluations += 1;
+        if (!pairPassesCheapBounds(
+          fromCandidate,
+          fromIndex,
+          toCandidate,
+          toIndex,
+        )) continue;
+        const extendingPrefixes = [];
+        for (const prefix of reachablePrefixesByCandidate.get(fromCandidate) ?? []) {
+          let prefixCompatible = true;
+          for (const [assignedIndex, assignedCandidate] of prefix) {
+            if (assignedIndex === fromIndex) continue;
+            if (cheapPairEvaluations >= cheapEvaluationLimit) {
+              cheapBudgetExhausted = true;
+              prefixCompatible = false;
+              break;
+            }
+            cheapPairEvaluations += 1;
+            if (!pairPassesCheapBounds(
+              assignedCandidate,
+              assignedIndex,
+              toCandidate,
+              toIndex,
+            )) {
+              prefixCompatible = false;
+              break;
+            }
+          }
+          if (cheapBudgetExhausted) break;
+          if (!prefixCompatible || !pairClearsAssignedCandidates(
+            fromCandidate,
+            fromIndex,
+            toCandidate,
+            toIndex,
+            prefix,
+          )) continue;
+          const extendedPrefix = new Map(prefix);
+          extendedPrefix.set(toIndex, toCandidate);
+          if (!prefixIsCompatible(extendedPrefix)) continue;
+          extendingPrefixes.push(extendedPrefix);
+          // Two deterministic prefixes preserve an alternate predecessor
+          // without turning the 32-node beam back into a Cartesian search.
+          if (extendingPrefixes.length >= 2) break;
+        }
+        if (cheapBudgetExhausted) break;
+        if (extendingPrefixes.length === 0) continue;
+        cheapPairCount += 1;
+        supports.push(toCandidate);
+        const knownPrefixes = prefixesByToCandidate.get(toCandidate) ?? [];
+        prefixesByToCandidate.set(
+          toCandidate,
+          [...knownPrefixes, ...extendingPrefixes].slice(0, 2),
+        );
+        supportCountByToCandidate.set(
+          toCandidate,
+          Number(supportCountByToCandidate.get(toCandidate) ?? 0) + 1,
+        );
+        if (supports.length >= supportQuota) break;
+      }
+      supports.sort((first, second) => (
+        Number(compareEdgeCandidates(
+          first,
+          second,
+          fromCandidate,
+          fromIndex,
+          toIndex,
+          edgeOrdinal,
+        ) ?? 0)
+          || (completePoolOrdinalByIndex.get(toIndex)?.get(first) ?? 0)
+            - (completePoolOrdinalByIndex.get(toIndex)?.get(second) ?? 0)
+      ));
+      supportsByFromCandidate.set(
+        fromCandidate,
+        supports.slice(0, supportQuota),
+      );
+      retainedLayerSupportCount += Math.min(supports.length, supportQuota);
+      if (cheapBudgetExhausted) break;
+    }
+    if (cheapBudgetExhausted) break;
+    const reachableToCandidates = [...supportCountByToCandidate]
+      .sort(([first, firstSupportCount], [second, secondSupportCount]) => (
+        Number(!boundedCandidates.has(first)) - Number(!boundedCandidates.has(second))
+          || secondSupportCount - firstSupportCount
+          || (completePoolOrdinalByIndex.get(toIndex)?.get(first) ?? 0)
+            - (completePoolOrdinalByIndex.get(toIndex)?.get(second) ?? 0)
+      ))
+      .slice(0, boundedMaximumLayerCandidates)
+      .map(([candidate]) => candidate);
+    const reachableToCandidateSet = new Set(reachableToCandidates);
+    for (const [fromCandidate, supports] of supportsByFromCandidate) {
+      supportsByFromCandidate.set(
+        fromCandidate,
+        supports.filter((candidate) => reachableToCandidateSet.has(candidate)),
+      );
+    }
+    edgeCandidateGraph.push({
+      fromIndex,
+      toIndex,
+      supportsByFromCandidate,
+    });
+    reachableCandidates = reachableToCandidates;
+    reachablePrefixesByCandidate = new Map(reachableToCandidates.map((candidate) => [
+      candidate,
+      prefixesByToCandidate.get(candidate) ?? [],
+    ]));
+    if (reachableCandidates.length === 0) break;
+  }
+
+  if (cheapBudgetExhausted || edgeCandidateGraph.length !== normalizedEdges.length
+    || reachableCandidates.length === 0) {
+    return {
+      status: cheapBudgetExhausted ? 'cheap-budget-exhausted' : 'not-found',
+      pairEvaluations: 0,
+      exactPairEvaluations: 0,
+      cheapPairEvaluations,
+      cheapPairCount,
+      prunedCandidateCount: 0,
+      reservedByIndex: new Map(),
+    };
+  }
+
+  const viableCandidatesByIndex = new Map([[
+    chainNodeIndices.at(-1),
+    new Set(reachableCandidates),
+  ]]);
+  for (let edgeOrdinal = edgeCandidateGraph.length - 1; edgeOrdinal >= 0; edgeOrdinal -= 1) {
+    const { fromIndex, toIndex, supportsByFromCandidate } = edgeCandidateGraph[edgeOrdinal];
+    const viableToCandidates = viableCandidatesByIndex.get(toIndex) ?? new Set();
+    const viableFromCandidates = new Set();
+    for (const [fromCandidate, supports] of supportsByFromCandidate) {
+      const viableSupports = supports.filter((candidate) => viableToCandidates.has(candidate));
+      supportsByFromCandidate.set(fromCandidate, viableSupports);
+      if (viableSupports.length > 0) viableFromCandidates.add(fromCandidate);
+    }
+    viableCandidatesByIndex.set(fromIndex, viableFromCandidates);
+  }
+  const prunedCandidateCount = chainNodeIndices.reduce((count, index) => (
+    count + Math.max(
+      0,
+      Number(completePoolByIndex.get(index)?.length ?? 0)
+        - Number(viableCandidatesByIndex.get(index)?.size ?? 0),
+    )
+  ), 0);
+  if ((viableCandidatesByIndex.get(chainNodeIndices[0])?.size ?? 0) === 0) {
+    return {
+      status: 'not-found',
+      pairEvaluations: 0,
+      exactPairEvaluations: 0,
+      cheapPairEvaluations,
+      cheapPairCount,
+      prunedCandidateCount,
+      reservedByIndex: new Map(),
+    };
+  }
+
+  const selectedByIndex = new Map();
+  let exactPairEvaluations = 0;
+  let exactBudgetExhausted = false;
+
+  const visitEdge = (edgeOrdinal) => {
+    if (edgeOrdinal >= normalizedEdges.length) return true;
+    const { fromIndex, toIndex } = normalizedEdges[edgeOrdinal];
+    const fromCandidate = selectedByIndex.get(fromIndex);
+    if (!fromCandidate) return false;
+    const graphEdge = edgeCandidateGraph[edgeOrdinal];
+    const viableToCandidates = viableCandidatesByIndex.get(toIndex) ?? new Set();
+    const candidates = (graphEdge.supportsByFromCandidate.get(fromCandidate) ?? [])
+      .filter((candidate) => viableToCandidates.has(candidate));
+    const nonEdgeAssignedEntries = [...selectedByIndex.entries()]
+      .filter(([index]) => index !== fromIndex);
+    for (const candidate of candidates) {
+      if (!nonEdgeAssignedEntries.every(([assignedIndex, assignedCandidate]) => (
+        pairPassesCheapBounds(
+          assignedCandidate,
+          assignedIndex,
+          candidate,
+          toIndex,
+        )
+      ))) continue;
+      if (!pairClearsAssignedCandidates(
+        fromCandidate,
+        fromIndex,
+        candidate,
+        toIndex,
+        selectedByIndex,
+      )) continue;
+      const compatibilityIsKnown = pairCompatibilityIsKnown(
+        fromCandidate,
+        fromIndex,
+        candidate,
+        toIndex,
+      );
+      if (!compatibilityIsKnown) {
+        if (exactPairEvaluations >= exactEvaluationLimit) {
+          exactBudgetExhausted = true;
+          return false;
+        }
+        exactPairEvaluations += 1;
+      }
+      if (!pairIsCompatible(
+        fromCandidate,
+        fromIndex,
+        candidate,
+        toIndex,
+      )) continue;
+      selectedByIndex.set(toIndex, candidate);
+      if (!prefixIsCompatible(selectedByIndex)) {
+        selectedByIndex.delete(toIndex);
+        continue;
+      }
+      if (visitEdge(edgeOrdinal + 1)) return true;
+      selectedByIndex.delete(toIndex);
+      if (exactBudgetExhausted) return false;
+    }
+    return false;
+  };
+
+  for (const candidate of firstCandidates) {
+    if (!viableCandidatesByIndex.get(chainNodeIndices[0])?.has(candidate)) continue;
+    selectedByIndex.set(chainNodeIndices[0], candidate);
+    if (visitEdge(0)) {
+      return {
+        status: 'reserved',
+        pairEvaluations: exactPairEvaluations,
+        exactPairEvaluations,
+        cheapPairEvaluations,
+        cheapPairCount,
+        prunedCandidateCount,
+        reservedByIndex: new Map(selectedByIndex),
+      };
+    }
+    selectedByIndex.clear();
+    if (exactBudgetExhausted) break;
+  }
+  return {
+    status: exactBudgetExhausted ? 'exact-budget-exhausted' : 'not-found',
+    pairEvaluations: exactPairEvaluations,
+    exactPairEvaluations,
+    cheapPairEvaluations,
+    cheapPairCount,
+    prunedCandidateCount,
+    reservedByIndex: new Map(),
+  };
 }
 
 function routePathsWithVerticalTransfer(path, destinationElevation, connectorFamily) {
@@ -3910,6 +5894,21 @@ function facingAwareSocketRouteCandidates(from, to, {
       y: start.y,
     })));
     if (planarPath.length < 2) return;
+    // A level connector has no meaningful station between its endpoint
+    // modules, so a planar run longer than the featureless contract can never
+    // become legal. A vertical connector has exactly one real transition and
+    // can reset the counter once; more than twice the limit is likewise
+    // impossible regardless of which legal transfer tile is selected. Prune
+    // those shapes before expanding transfer placements and self-overlap
+    // witnesses—the same-facing U family otherwise manufactures hundreds of
+    // provably unusable candidates for every socket pair.
+    const planarLengthMeters = measureDungeonPolyline(planarPath);
+    const changesElevation = Math.abs(Number(end.y) - Number(start.y)) > 1e-6;
+    if ((!changesElevation
+        && planarLengthMeters > ROUTE_NETWORK_MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6)
+      || (changesElevation
+        && planarLengthMeters
+          > ROUTE_NETWORK_MAXIMUM_FEATURELESS_SPAN_METERS * 2 + 1e-6)) return;
     const firstDelta = {
       x: planarPath[1].x - planarPath[0].x,
       z: planarPath[1].z - planarPath[0].z,
@@ -4094,10 +6093,18 @@ function parentAttachmentRouteSegmentPath(
 
 function planningVolumesOverlap(first, second) {
   if (!first?.center || !first?.size || !second?.center || !second?.size) return false;
-  return ['x', 'y', 'z'].every((axis) => (
-    Math.abs(Number(first.center[axis]) - Number(second.center[axis]))
-      < (Number(first.size[axis]) + Number(second.size[axis])) * 0.5 - 1e-6
-  ));
+  // This predicate sits on the innermost placement/route loops. Avoiding an
+  // axis array, callback, and temporary closure matters here: a dense V4
+  // coverage solve evaluates the same primitive millions of times before its
+  // higher-level pair caches can answer. Keep the exact strict-overlap
+  // semantics (including the 1e-6 separating tolerance) while short-circuiting
+  // the most selective planning axes first.
+  if (Math.abs(Number(first.center.x) - Number(second.center.x))
+    >= (Number(first.size.x) + Number(second.size.x)) * 0.5 - 1e-6) return false;
+  if (Math.abs(Number(first.center.z) - Number(second.center.z))
+    >= (Number(first.size.z) + Number(second.size.z)) * 0.5 - 1e-6) return false;
+  return Math.abs(Number(first.center.y) - Number(second.center.y))
+    < (Number(first.size.y) + Number(second.size.y)) * 0.5 - 1e-6;
 }
 
 function planningVolumeOwnedBy(volume, ownerId) {
@@ -4159,15 +6166,27 @@ function createPlanningVolumeSpatialLookup(volumes, cellMeters = 8.4) {
   };
 }
 
-function planningOverlapIsGranted(first, second, overlapGrants = []) {
+export function routeNetworkPlanningOverlapIsGranted(first, second, overlapGrants = []) {
+  if (overlapGrants.length === 0) return false;
   const applicableGrants = overlapGrants.filter((grant) => (
     !grant?.parentOwnerId || [first, second].some((volume) => (
       [volume?.ownerId, volume?.logicalConnectionId, volume?.physicalConnectionId]
         .some((ownerId) => String(ownerId ?? '') === String(grant.parentOwnerId))
+        || String(volume?.id ?? '') === String(grant.parentOwnerId)
+        || String(volume?.id ?? '').startsWith(`${String(grant.parentOwnerId)}:`)
+        // Base-draft normalization intentionally strips auxiliary provenance
+        // fields, but the immutable projected-column ID still carries the
+        // exact physical connection owner. Recognize only that exact prefix;
+        // the overlap must still fit wholly inside the endpoint seam below.
+        || String(volume?.id ?? '').startsWith(
+          `base:connection:${String(grant.parentOwnerId)}:`,
+        )
     ))
   ));
   return dungeonVolumeOverlapWithinGrants(first, second, applicableGrants);
 }
+
+const planningOverlapIsGranted = routeNetworkPlanningOverlapIsGranted;
 
 function isGrantedParentGalleryThresholdVolume(volume, landingOverlapGrant) {
   if (!landingOverlapGrant || !planningVolumesOverlap(volume, landingOverlapGrant)) return false;
@@ -4202,11 +6221,13 @@ function isGrantedParentGalleryThresholdVolume(volume, landingOverlapGrant) {
 
 function nodePlanningCollisionScore(node, avoidanceVolumes) {
   const volumes = [...(node.occupiedVolumes ?? []), ...(node.clearanceVolumes ?? [])];
-  return volumes.reduce((score, volume) => (
-    score + avoidanceVolumes.reduce((count, obstacle) => (
-      count + (planningVolumesOverlap(volume, obstacle) ? 1 : 0)
-    ), 0)
-  ), 0);
+  let score = 0;
+  for (const volume of volumes) {
+    for (const obstacle of avoidanceVolumes) {
+      if (planningVolumesOverlap(volume, obstacle)) score += 1;
+    }
+  }
+  return score;
 }
 
 function nodePlanningCollisionIds(node, avoidanceVolumes) {
@@ -4247,18 +6268,76 @@ function routePathPlanningVolumes(path, heightMeters = 5.6) {
   }).filter(Boolean);
 }
 
+function routeEndpointPlanningLandingVolume(endpoint, point, landingDepthMeters = 5.6) {
+  const widthMeters = ROUTE_NETWORK_CORRIDOR_WIDTH_METERS;
+  const facing = toDungeonFacing(endpoint?.facing);
+  const horizontal = Math.abs(facing.x) > Math.abs(facing.z);
+  return {
+    center: {
+      x: Number(point.x),
+      y: Number(point.y) + 1.4,
+      z: Number(point.z),
+    },
+    size: {
+      x: horizontal ? Number(landingDepthMeters) : widthMeters,
+      y: 2.8,
+      z: horizontal ? widthMeters : Number(landingDepthMeters),
+    },
+    purpose: 'supplement-connector-landing-clearance',
+  };
+}
+
+/**
+ * Mirrors the complete V4 volume set emitted by createSegment. Candidate
+ * selection must reserve the two endpoint landings as well as the path body;
+ * otherwise a route can pass the early solve and fail only after serialization.
+ */
+function routeSegmentPlanningCollisionVolumes(
+  path,
+  from,
+  to,
+  heightMeters = 5.6,
+  landingDepthMeters = 5.6,
+) {
+  if (!Array.isArray(path) || path.length < 2) return [];
+  return [
+    ...routePathPlanningVolumes(path, heightMeters),
+    routeEndpointPlanningLandingVolume(from, path[0], landingDepthMeters),
+    routeEndpointPlanningLandingVolume(to, path.at(-1), landingDepthMeters),
+  ];
+}
+
 function pathPlanningCollisionScore(
   path,
   avoidanceVolumes,
   heightMeters = 5.6,
   overlapGrants = [],
 ) {
-  return routePathPlanningVolumes(path, heightMeters).reduce((score, volume) => (
-    score + avoidanceVolumes.reduce((count, obstacle) => (
-      count + (planningVolumesOverlap(volume, obstacle)
-        && !planningOverlapIsGranted(volume, obstacle, overlapGrants) ? 1 : 0)
-    ), 0)
-  ), 0);
+  return planningRouteVolumesCollisionScore(
+    routePathPlanningVolumes(path, heightMeters),
+    avoidanceVolumes,
+    overlapGrants,
+  );
+}
+
+function planningRouteVolumesCollisionScore(
+  pathVolumes,
+  avoidanceVolumes,
+  overlapGrants = [],
+) {
+  let score = 0;
+  const hasOverlapGrants = overlapGrants.length > 0;
+  for (const volume of pathVolumes) {
+    for (const obstacle of avoidanceVolumes) {
+      if (!planningVolumesOverlap(volume, obstacle)) continue;
+      if (!hasOverlapGrants || !planningOverlapIsGranted(
+        volume,
+        obstacle,
+        overlapGrants,
+      )) score += 1;
+    }
+  }
+  return score;
 }
 
 function pathPlanningCollisionIds(
@@ -4274,6 +6353,210 @@ function pathPlanningCollisionIds(
         && !planningOverlapIsGranted(volume, obstacle, overlapGrants)
     ))
   )).map((obstacle) => String(obstacle.id ?? obstacle.ownerId ?? 'unknown')))];
+}
+
+function planningVolumeIntersection(first, second) {
+  if (!first?.center || !first?.size || !second?.center || !second?.size) return null;
+  const minimum = {};
+  const maximum = {};
+  for (const axis of ['x', 'y', 'z']) {
+    minimum[axis] = Math.max(
+      Number(first.center[axis]) - Number(first.size[axis]) * 0.5,
+      Number(second.center[axis]) - Number(second.size[axis]) * 0.5,
+    );
+    maximum[axis] = Math.min(
+      Number(first.center[axis]) + Number(first.size[axis]) * 0.5,
+      Number(second.center[axis]) + Number(second.size[axis]) * 0.5,
+    );
+    if (maximum[axis] <= minimum[axis] + 1e-6) return null;
+  }
+  return {
+    center: Object.fromEntries(['x', 'y', 'z'].map((axis) => (
+      [axis, (minimum[axis] + maximum[axis]) * 0.5]
+    ))),
+    size: Object.fromEntries(['x', 'y', 'z'].map((axis) => (
+      [axis, maximum[axis] - minimum[axis]]
+    ))),
+    purpose: 'route-network-shared-endpoint-seam-intersection',
+  };
+}
+
+function routePathExteriorSocketApproachDiagnostic(
+  path,
+  socket,
+  reverse = false,
+  endpointSeam = null,
+) {
+  if (!Array.isArray(path) || path.length < 2 || !socket?.position || !socket?.facing) {
+    return {
+      accepted: false,
+      code: 'route-network-seam-exterior-lead-mismatch',
+      reason: 'missing-path-or-socket-transform',
+    };
+  }
+  const facing = toDungeonCardinalFacing(socket.facing);
+  const ordered = reverse ? [...path].reverse() : path;
+  if (dungeonPointDistance(ordered[0], socket.position) > 1e-4) {
+    return {
+      accepted: false,
+      code: 'route-network-seam-exterior-lead-mismatch',
+      reason: 'path-does-not-start-at-socket',
+      expectedStart: cloneDungeonAugmentationValue(socket.position),
+      actualStart: cloneDungeonAugmentationValue(ordered[0]),
+    };
+  }
+  const expectedOutsideCells = (endpointSeam?.orderedCells ?? [])
+    .filter(({ lane, signedDepthTiles }) => (
+      Number(lane) === 0 && [1, 2].includes(Number(signedDepthTiles))
+    ))
+    .sort((first, second) => Number(first.signedDepthTiles) - Number(second.signedDepthTiles));
+  if (endpointSeam) {
+    const latticeInspection = inspectDungeonRouteEndpointSeamGridLattice(endpointSeam);
+    if (!latticeInspection.accepted) {
+      return {
+        accepted: false,
+        code: DUNGEON_ROUTE_ENDPOINT_SEAM_GRID_LATTICE_DIAGNOSTIC,
+        ...latticeInspection,
+      };
+    }
+  }
+  if (endpointSeam && expectedOutsideCells.length !== 2) {
+    return {
+      accepted: false,
+      code: 'route-network-seam-exterior-lead-mismatch',
+      reason: 'seam-missing-two-center-lane-exterior-cells',
+      seamId: endpointSeam.id ?? null,
+      exteriorCellCount: expectedOutsideCells.length,
+    };
+  }
+  let distanceMeters = 0;
+  for (let index = 1; index < ordered.length; index += 1) {
+    const start = ordered[index - 1];
+    const end = ordered[index];
+    const deltaX = Number(end.x) - Number(start.x);
+    const deltaY = Number(end.y) - Number(start.y);
+    const deltaZ = Number(end.z) - Number(start.z);
+    const horizontalLength = Math.hypot(deltaX, deltaZ);
+    if (Math.abs(deltaY) > 1e-6 || horizontalLength <= 1e-6) {
+      return {
+        accepted: false,
+        code: 'route-network-seam-exterior-lead-mismatch',
+        reason: 'non-flat-or-degenerate-exterior-lead',
+        seamId: endpointSeam?.id ?? null,
+      };
+    }
+    const projection = deltaX * facing.x + deltaZ * facing.z;
+    const lateral = Math.abs(deltaX * facing.z - deltaZ * facing.x);
+    if (projection <= 1e-6 || lateral > 1e-6 * Math.max(1, horizontalLength)) {
+      return {
+        accepted: false,
+        code: 'route-network-seam-exterior-lead-mismatch',
+        reason: projection <= 1e-6 ? 'lead-reverses-into-endpoint' : 'lead-turns-before-two-cells',
+        seamId: endpointSeam?.id ?? null,
+      };
+    }
+    distanceMeters += horizontalLength;
+    if (distanceMeters >= ROUTE_NETWORK_SOCKET_APPROACH_METERS - 1e-6) {
+      const expectedPositions = expectedOutsideCells.map(({ position }) => position);
+      const exactCellIdentity = expectedPositions.every((position, cellIndex) => {
+        const expectedDistance = (cellIndex + 1) * Number(endpointSeam?.tileSize ?? 2.8);
+        return Math.abs(Number(position.x) - (
+          Number(socket.position.x) + facing.x * expectedDistance
+        )) <= 1e-4 && Math.abs(Number(position.z) - (
+          Number(socket.position.z) + facing.z * expectedDistance
+        )) <= 1e-4 && Math.abs(Number(position.y) - Number(socket.position.y)) <= 1e-4;
+      });
+      if (endpointSeam && !exactCellIdentity) {
+        return {
+          accepted: false,
+          code: 'route-network-seam-exterior-lead-mismatch',
+          reason: 'seam-exterior-cell-transform-mismatch',
+          seamId: endpointSeam.id ?? null,
+        };
+      }
+      return {
+        accepted: true,
+        code: null,
+        seamId: endpointSeam?.id ?? null,
+        exteriorCellIds: expectedOutsideCells.map(({ id }) => id),
+        distanceMeters,
+      };
+    }
+  }
+  return {
+    accepted: false,
+    code: 'route-network-seam-exterior-lead-mismatch',
+    reason: 'lead-shorter-than-two-cells',
+    seamId: endpointSeam?.id ?? null,
+    distanceMeters,
+  };
+}
+
+function routePathWithAuthoritativeSeamEndpoints(path, endpointSeams = []) {
+  if (!Array.isArray(path) || path.length < 2 || endpointSeams.length !== 2) return path;
+  const thresholdCenter = (seam) => (seam?.orderedCells ?? []).find(({ lane, signedDepthTiles }) => (
+    Number(lane) === 0 && Number(signedDepthTiles) === 0
+  ))?.position ?? null;
+  const result = path.map((point) => cloneDungeonAugmentationValue(point));
+  const replacements = [
+    { pathIndex: 0, seam: endpointSeams[0] },
+    { pathIndex: result.length - 1, seam: endpointSeams[1] },
+  ];
+  for (const { pathIndex, seam } of replacements) {
+    const threshold = thresholdCenter(seam);
+    if (!threshold || dungeonPointDistance(result[pathIndex], threshold) > 1e-4) continue;
+    // Half-grid authored coordinates (for example 43.39999999999999) must not
+    // choose a different cell from the stabilized 15-cell seam record. The
+    // accepted path therefore serializes the seam threshold identity itself.
+    result[pathIndex] = cloneDungeonAugmentationValue(threshold);
+  }
+  return result;
+}
+
+function routePathHasExteriorSocketApproach(
+  path,
+  socket,
+  reverse = false,
+  endpointSeam = null,
+) {
+  return routePathExteriorSocketApproachDiagnostic(
+    path,
+    socket,
+    reverse,
+    endpointSeam,
+  ).accepted;
+}
+
+function routePlanningVolumesRespectEndpointNodeMask(pathVolumes, node, seamOrSeams) {
+  if (!node) return true;
+  // `occupiedVolumes` are the row-merged projection of the blueprint's exact
+  // authored floor masks. Clearance volumes are placement envelopes, not
+  // physical room ownership; treating them as floor made every legal exterior
+  // lead overlap its endpoint outside the 3x5 seam.
+  const endpointVolumes = node.occupiedVolumes ?? [];
+  const seams = (Array.isArray(seamOrSeams) ? seamOrSeams : [seamOrSeams])
+    .filter(Boolean);
+  const overlapEnvelopes = seams.map(({ overlapEnvelope }) => {
+    const { parentOwnerId: omittedParentOwnerId, ...nodeLocalEnvelope } = overlapEnvelope;
+    // This predicate already has the exact endpoint node in hand. It can use
+    // the geometric seam directly while the serialized envelope retains its
+    // authored-parent owner for segment/base validation parity.
+    return nodeLocalEnvelope;
+  });
+  return pathVolumes.every((pathVolume) => (
+    endpointVolumes.every((nodeVolume) => (
+      !planningVolumesOverlap(pathVolume, nodeVolume)
+        || planningOverlapIsGranted(pathVolume, nodeVolume, overlapEnvelopes)
+    ))
+  ));
+}
+
+function routePathRespectsEndpointNodeMask(path, node, seam) {
+  return routePlanningVolumesRespectEndpointNodeMask(
+    routePathPlanningVolumes(path),
+    node,
+    seam,
+  );
 }
 
 function collisionAvoidingOrthogonalPath(from, to, avoidanceVolumes, preferXFirst) {
@@ -4360,6 +6643,7 @@ function collisionAvoidingParentAttachmentPath(
   connectorFamily = 'service-gallery',
   minimumApproachMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
   returnCandidate = false,
+  reserveLandingVolumes = false,
 ) {
   const volumeEnvelope = (volumes) => {
     if (volumes.length === 0) return null;
@@ -4398,18 +6682,24 @@ function collisionAvoidingParentAttachmentPath(
     minimumApproachMeters,
   }).map((path, ordinal) => {
     const pathVolumes = routePathPlanningVolumes(path, 3.6);
+    const collisionVolumes = reserveLandingVolumes
+      ? routeSegmentPlanningCollisionVolumes(path, from, to, 3.6, 5.6)
+      : pathVolumes;
     return {
       ordinal,
       path,
       pathVolumes,
-      envelope: volumeEnvelope(pathVolumes),
+      collisionVolumes,
+      envelope: volumeEnvelope(collisionVolumes),
       lengthMeters: measureDungeonPolyline(path),
     };
   }).sort((first, second) => (
     first.lengthMeters - second.lengthMeters
       || first.ordinal - second.ordinal
   ));
-  const candidateEnvelope = volumeEnvelope(candidates.flatMap(({ pathVolumes }) => pathVolumes));
+  const candidateEnvelope = volumeEnvelope(candidates.flatMap(({ collisionVolumes }) => (
+    collisionVolumes
+  )));
   const relevantAvoidanceVolumes = candidateEnvelope
     ? avoidanceVolumes.filter((obstacle) => planningVolumesOverlap(candidateEnvelope, obstacle))
     : [];
@@ -4422,7 +6712,7 @@ function collisionAvoidingParentAttachmentPath(
       : [];
     let collisionScore = 0;
     scoreCandidate:
-    for (const volume of candidate.pathVolumes) {
+    for (const volume of candidate.collisionVolumes) {
       for (const obstacle of candidateAvoidanceVolumes) {
         if (planningVolumesOverlap(volume, obstacle)
           && !planningOverlapIsGranted(volume, obstacle, overlapGrants)) {
@@ -4498,7 +6788,7 @@ function decorateRouteNetworkSegment(segment, {
   }
 }
 
-function planRouteNetwork({
+export function planRouteNetwork({
   region,
   grant,
   operationOrdinal,
@@ -4506,6 +6796,12 @@ function planRouteNetwork({
   topologyTemplateId,
   junctionBag,
   elevationMode,
+  selectionBags = null,
+  topologySelection = null,
+  topologyLegalIds = null,
+  junctionSelection = null,
+  elevationSelection = null,
+  elevationLegalIds = null,
   random,
   profile,
   grammars,
@@ -4535,6 +6831,27 @@ function planRouteNetwork({
     Number(first.distanceMeters ?? 0) - Number(second.distanceMeters ?? 0)
       || first.id.localeCompare(second.id)
   ));
+  // Exact occupied/landing volume emission remains specific to authored
+  // objective coverage. Endpoint seam identity is a separate V4 route
+  // contract and applies to every ordinary route-network segment, including
+  // the pyramid loop.
+  const enforceExactEmittedCoverageVolumes = grant.kind === 'objective-route-coverage';
+  const requireAuthoritativeEndpointSeams = profile?.id === 'industrial-supplement-preview-v4'
+    && Number(profile?.revision ?? 0) >= 5;
+  const endpointSeamSharedOwnerId = (socket, node = null) => {
+    const directSocketId = String(socket?.id ?? socket?.socketId ?? '');
+    const parentSocketId = node?.exactParentEndpoint
+      ? String(node.parentEndpointSocketId ?? '')
+      : '';
+    const overlap = (grant.socketLandingOverlapGrants ?? []).find(({ socketId }) => (
+      String(socketId ?? '') === directSocketId
+        || (parentSocketId && String(socketId ?? '') === parentSocketId)
+    ));
+    // `parentOwnerId` names only an authored host owner. Supplemental-node
+    // ownership is represented by the separate node-bound copy of the seam
+    // envelope, never by overloading this field with the node ID.
+    return overlap?.parentOwnerId ?? null;
+  };
   // Every non-landmark parent socket terminates at compact connector-owned
   // infrastructure. Only one of those stations is promoted into the required
   // physical junction; the remaining endpoint vestibules stay outside the
@@ -4554,11 +6871,61 @@ function planRouteNetwork({
   let endpointNodeIndexSet = grant.kind === 'landmark-perimeter-loop'
     ? new Set([0, mainNodeCount - 1])
     : new Set([0]);
+  let coverageTraversalConnectorIndices = new Set();
+  const refreshCoverageTraversalConnectorIndices = () => {
+    coverageTraversalConnectorIndices = new Set();
+    if (grant.kind !== 'objective-route-coverage' || endpointNodeIndexSet.size < 3) return;
+    // A one-slot bay between exact corridor stations cannot hold a curated
+    // room plus both authoritative seams. Realize that slot as a compact
+    // three-arm station and move one curated content room onto its branch.
+    // Preserve at least two full rooms for the challenge/elevation and reward
+    // contracts.
+    coverageTraversalConnectorIndices = new Set(selectCoverageTraversalConnectorIndices({
+      nodeCount: physicalModuleCount,
+      endpointNodeIndices: [...endpointNodeIndexSet],
+      minimumRoomCount: 2,
+    }));
+  };
+  refreshCoverageTraversalConnectorIndices();
   let junctionModuleIndex = 0;
+  let topologySupportConnectorIndex = null;
+  const refreshTopologySupportConnectorIndex = () => {
+    topologySupportConnectorIndex = resolveStackedInterchangeSupportAllocation({
+      routeNetworkKind: grant.kind,
+      topologyTemplateId,
+      physicalModuleCount,
+      endpointNodeIndices: [...endpointNodeIndexSet],
+    }).supportConnectorIndex;
+  };
+  refreshTopologySupportConnectorIndex();
   const selectCoverageJunctionModuleIndex = (placement) => {
     const endpointNodeIndices = [...(placement?.endpointNodeIndices ?? [])]
       .sort((first, second) => first - second);
     if (endpointNodeIndices.length === 0) return 0;
+    const topologyKitGrammar = routeNetworkTopologyKitGrammarForTemplate(
+      profile,
+      grammars,
+      topologyTemplateId,
+    );
+    if (String(
+      topologyKitGrammar?.selectionConstraints?.routeNetworkModuleKind ?? '',
+    ) === 'connector-module') {
+      const terminalEndpointIndices = endpointNodeIndices.filter((index) => (
+        index === 0 || index === Number(placement?.centers?.length ?? mainNodeCount) - 1
+      ));
+      if (terminalEndpointIndices.length > 0) {
+        // Reserve a stable terminal contract before any geometry-dependent
+        // interval ranking. A promotable kit is itself the junction; a
+        // non-promotable crossover occupies the last terminal and leaves the
+        // first terminal's Through-T as the qualifying junction. Without this
+        // rule the two refinement passes could swap junction and kit forever.
+        const supportsJunctionPromotion =
+          topologyKitGrammar.selectionConstraints?.supportsJunctionPromotion !== false;
+        return supportsJunctionPromotion
+          ? terminalEndpointIndices.at(-1)
+          : terminalEndpointIndices[0];
+      }
+    }
     // A station inside the chain already owns two supplemental spine arms;
     // together with its parent attachment it is the natural single junction.
     // With only terminal stations, promote the one beside the longer interval
@@ -4599,10 +6966,17 @@ function planRouteNetwork({
     const roomNodeIndices = Array.from(
       { length: physicalModuleCount },
       (_, index) => index,
-    ).filter((index) => !endpointNodeIndexSet.has(index));
-    const roomRoleByIndex = new Map(roomNodeIndices.map((index, roomOrdinal) => {
+    ).filter((index) => (
+      !endpointNodeIndexSet.has(index)
+        && !coverageTraversalConnectorIndices.has(index)
+        && index !== topologySupportConnectorIndex
+    ));
+    const semanticRoomNodeIndices = grant.kind === 'objective-route-coverage'
+      ? orderCoverageRoomIndicesForArc(roomNodeIndices, [...endpointNodeIndexSet])
+      : roomNodeIndices;
+    const roomRoleByIndex = new Map(semanticRoomNodeIndices.map((index, roomOrdinal) => {
       if (roomOrdinal === 0) return [index, 'challenge'];
-      if (roomOrdinal === roomNodeIndices.length - 1) return [index, 'reward'];
+      if (roomOrdinal === semanticRoomNodeIndices.length - 1) return [index, 'reward'];
       // The first intermediate room owns the required authored vertical
       // traversal. Elevation blueprints can also carry a local mechanism, while
       // a generic control room cannot substitute for a physical tier change.
@@ -4612,6 +6986,8 @@ function planRouteNetwork({
       if (endpointNodeIndexSet.has(index)) {
         return index === junctionModuleIndex ? 'junction' : 'connector';
       }
+      if (coverageTraversalConnectorIndices.has(index)) return 'connector';
+      if (index === topologySupportConnectorIndex) return 'junction';
       return roomRoleByIndex.get(index) ?? 'discovery';
     });
   };
@@ -4624,8 +7000,15 @@ function planRouteNetwork({
     grant.kind === 'landmark-perimeter-loop'
       ? index === junctionModuleIndex
       : endpointNodeIndexSet.has(index)
+        || coverageTraversalConnectorIndices.has(index)
+        || index === topologySupportConnectorIndex
   ) ? 'connector-module' : 'room';
-  const candidateJunctionBag = junctionBag.filter((kind) => {
+  const junctionSelectionBag = selectionBags?.junction ?? {
+    order: [...junctionBag],
+    cycle: 0,
+    consumedIds: [],
+  };
+  const candidateJunctionBag = junctionSelectionBag.order.filter((kind) => {
     const candidate = routeNetworkGrammarForKind(
       profile,
       grammars,
@@ -4641,12 +7024,49 @@ function planRouteNetwork({
       context: { grantId: grant.id },
     };
   }
-  const baseJunctionKinds = Array.from({ length: physicalModuleCount }, (_, index) => (
-    candidateJunctionBag[(operationOrdinal + index) % candidateJunctionBag.length]
-  ));
+  let provisionalJunctionBag = junctionSelectionBag;
+  const baseJunctionKinds = Array.from({ length: physicalModuleCount }, (_, index) => {
+    if (moduleKindForIndex(index) !== 'connector-module') return candidateJunctionBag[0];
+    const candidates = dungeonSelectionBagCandidates(
+      provisionalJunctionBag,
+      candidateJunctionBag,
+    );
+    const selected = candidates.find(({ id }) => id === junctionSelection?.id)
+      ?? candidates[0];
+    if (!selected) return candidateJunctionBag[0];
+    provisionalJunctionBag = selected.state;
+    return selected.id;
+  });
   let junctionKinds = [...baseJunctionKinds];
   let topologyKitModuleIndex = null;
+  const roomLayoutLegalIdsByIndex = new Map();
+  let roomLayoutSelectionResult = {
+    bag: selectionBags?.roomLayout ?? { order: [], cycle: 0, consumedIds: [] },
+    selections: [],
+    witnesses: [],
+  };
+  const selectCurrentRoomLayouts = (candidateGrammars) => {
+    roomLayoutSelectionResult = selectRouteNetworkRoomLayouts({
+      profile,
+      grammars,
+      selectedGrammars: candidateGrammars,
+      contentRoles: plannedContentRoles,
+      moduleKinds: Array.from(
+        { length: physicalModuleCount },
+        (_, index) => moduleKindForIndex(index),
+      ),
+      topologyKitModuleIndex,
+      roomLayoutBag: selectionBags?.roomLayout,
+      legalGrammarIdsByIndex: roomLayoutLegalIdsByIndex,
+      selectionAlternativeOrdinal: searchVariant,
+    });
+    return roomLayoutSelectionResult.selectedGrammars;
+  };
   const assignRouteNetworkGrammars = (candidateJunctionKinds) => {
+    const moduleKinds = Array.from(
+      { length: physicalModuleCount },
+      (_, index) => moduleKindForIndex(index),
+    );
     const assignment = resolveRouteNetworkGrammarAssignments({
       profile,
       grammars,
@@ -4654,11 +7074,9 @@ function planRouteNetwork({
       topologyTemplateId,
       junctionKinds: candidateJunctionKinds,
       contentRoles: plannedContentRoles,
-      moduleKinds: Array.from(
-        { length: physicalModuleCount },
-        (_, index) => moduleKindForIndex(index),
-      ),
+      moduleKinds,
       junctionModuleIndex,
+      topologySupportConnectorIndex,
       operationOrdinal,
       searchVariant,
       elevationMode,
@@ -4666,24 +7084,92 @@ function planRouteNetwork({
     junctionKinds = assignment.junctionKinds;
     topologyKitModuleIndex = assignment.topologyKitModuleIndex;
     if (grant.kind === 'objective-route-coverage') {
+      const endpointThroughT = grammars['supplement-route-connector-through-t-v1'];
       const branchEntryThroughT = grammars[
         'supplement-route-connector-through-t-branch-entry-v1'
       ];
-      if (branchEntryThroughT) {
+      if (endpointThroughT) {
+        const topologyKitGrammar = assignment.topologyKitGrammar;
+        const topologyKitModuleKind = String(
+          topologyKitGrammar?.selectionConstraints?.routeNetworkModuleKind ?? '',
+        );
+        // A connector topology kit cannot occupy an interior exact station:
+        // that station already needs three at-grade arms (parent plus both
+        // spine directions). A terminal exact station needs only parent + one
+        // spine arm, leaving the kit's authored topology sockets available for
+        // its return leg. Relocate the kit deterministically instead of
+        // overwriting it with a Through-T and later attempting an impossible
+        // chord between ordinary two-socket rooms.
+        const topologyKitSupportsJunctionPromotion =
+          topologyKitGrammar?.selectionConstraints?.supportsJunctionPromotion !== false;
+        const terminalEndpointIndices = [...endpointNodeIndexSet]
+          .filter((index) => index === 0 || index === physicalModuleCount - 1)
+          .sort((first, second) => first - second);
+        const legalTopologyKitTerminalIndices = terminalEndpointIndices.filter((index) => (
+          topologyKitSupportsJunctionPromotion || index !== junctionModuleIndex
+        ));
+        let preservedTopologyKitIndex = assignment.topologyKitModuleIndex;
+        if (topologyKitGrammar && topologyKitModuleKind === 'connector-module') {
+          preservedTopologyKitIndex = topologyKitSupportsJunctionPromotion
+            ? legalTopologyKitTerminalIndices.at(-1) ?? null
+            : legalTopologyKitTerminalIndices.at(-1) ?? null;
+          if (preservedTopologyKitIndex != null) {
+            assignment.selectedGrammars[preservedTopologyKitIndex] = topologyKitGrammar;
+            assignment.junctionKinds[preservedTopologyKitIndex] = String(
+              topologyKitGrammar.selectionConstraints?.routeNetworkJunctionKind
+                ?? assignment.junctionKinds[preservedTopologyKitIndex]
+                ?? '',
+            );
+            assignment.topologyKitModuleIndex = preservedTopologyKitIndex;
+            assignment.topologyKitDeferred = false;
+            topologyKitModuleIndex = preservedTopologyKitIndex;
+          }
+        }
         for (const endpointNodeIndex of endpointNodeIndexSet) {
+          if (endpointNodeIndex === preservedTopologyKitIndex) continue;
           // An interior exact station has a parent attachment plus two ordered
           // supplemental neighbors. Use the authored branch-entry T so those
           // neighbor arms remain a collinear through pair. Terminal stations
           // retain the parent-through T and its outward decision arm.
-          if (endpointNodeIndex <= 0
-            || endpointNodeIndex >= physicalModuleCount - 1
-            || endpointNodeIndex === assignment.topologyKitModuleIndex) continue;
-          assignment.selectedGrammars[endpointNodeIndex] = branchEntryThroughT;
+          const interiorEndpoint = endpointNodeIndex > 0
+            && endpointNodeIndex < physicalModuleCount - 1;
+          const leadsIntoTraversalBranch = coverageTraversalConnectorIndices.has(
+            endpointNodeIndex + 1,
+          );
+          assignment.selectedGrammars[endpointNodeIndex] = interiorEndpoint
+            || leadsIntoTraversalBranch
+            ? branchEntryThroughT ?? endpointThroughT
+            : endpointThroughT;
           assignment.junctionKinds[endpointNodeIndex] = 'through-t';
+        }
+        for (const traversalConnectorIndex of coverageTraversalConnectorIndices) {
+          if (traversalConnectorIndex === preservedTopologyKitIndex) continue;
+          // A constrained one-slot bay becomes the branch point for its
+          // curated challenge room. The branch-entry kit supplies the two ordered spine
+          // arms plus the authored right arm; all three must be realized by
+          // exact socket bindings before this station may reset featureless
+          // distance. The ordinary Through-T has a 16.8 m collinear core; at
+          // perpendicular exact stations that leaves no legal exterior lead
+          // inside the 33.6 m featureless cap.
+          assignment.selectedGrammars[traversalConnectorIndex] =
+            branchEntryThroughT ?? endpointThroughT;
+          assignment.junctionKinds[traversalConnectorIndex] = 'through-t';
+        }
+        if (endpointNodeIndexSet.has(assignment.topologyKitModuleIndex)) {
+          const selectedTopologyKit = assignment.selectedGrammars[
+            assignment.topologyKitModuleIndex
+          ];
+          if (String(
+            selectedTopologyKit?.selectionConstraints?.routeNetworkTopologyTemplateId ?? '',
+          ) !== String(topologyTemplateId)) {
+            assignment.topologyKitModuleIndex = null;
+            assignment.topologyKitDeferred = Boolean(assignment.topologyKitGrammar);
+            topologyKitModuleIndex = null;
+          }
         }
       }
     }
-    return assignment.selectedGrammars;
+    return selectCurrentRoomLayouts(assignment.selectedGrammars);
   };
   let selectedGrammars = assignRouteNetworkGrammars(junctionKinds);
   let balancedCoverageLayoutSignature = null;
@@ -4694,8 +7180,21 @@ function planRouteNetwork({
       context: { grantId: grant.id, junctionKinds },
     };
   }
-  const balanceCoverageElevationIntervals = () => (
-    balanceObjectiveRouteGrammarIntervals({
+  const balanceCoverageElevationIntervals = () => {
+    const challengeBranchRoomIndex = plannedContentRoles.findIndex((contentRole, index) => (
+      contentRole === 'challenge'
+        && !endpointNodeIndexSet.has(index)
+        && !coverageTraversalConnectorIndices.has(index)
+    ));
+    const branchLayout = coverageTraversalBranchBindings({
+      nodeCount: physicalModuleCount,
+      endpointNodeIndices: [...endpointNodeIndexSet],
+      traversalConnectorIndices: [...coverageTraversalConnectorIndices],
+      preferredBranchRoomIndex: challengeBranchRoomIndex,
+      requirePreferredBranchRoom: true,
+      branchRouteRole: 'route-network-challenge-branch',
+    });
+    return balanceObjectiveRouteGrammarIntervals({
       profile,
       grammars,
       selectedGrammars,
@@ -4717,11 +7216,14 @@ function planRouteNetwork({
         const facing = toDungeonCardinalFacing(endpoint.facing);
         return `${facing.x}:${facing.z}`;
       })).size > 1,
-    })
-  );
+      excludedNodeIndices: Number.isInteger(branchLayout?.branchRoomIndex)
+        ? [branchLayout.branchRoomIndex]
+        : [],
+      legalGrammarIdsByIndex: roomLayoutLegalIdsByIndex,
+    });
+  };
   const connectorGapMeters = Number(profile.connectorGapMeters ?? 5.6);
-  const connectorEndpointGapMeters = Math.max(
-    ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+  const connectorEndpointGapMeters = ordinaryRouteNetworkSocketGapMeters(
     connectorGapMeters,
   );
   const grammarEntryExitTraversalMeters = (grammar) => {
@@ -4739,6 +7241,83 @@ function planRouteNetwork({
   let placementPath = null;
   let coveragePlacement = null;
   const objectiveExternalDiagnostics = {};
+  const refreshCoveragePayoffLayoutConstraint = () => {
+    roomLayoutLegalIdsByIndex.clear();
+    if (grant.kind !== 'objective-route-coverage'
+      || coverageTraversalConnectorIndices.size === 0) return null;
+    const challengeBranchRoomIndex = plannedContentRoles.findIndex((contentRole, index) => (
+      contentRole === 'challenge'
+        && !endpointNodeIndexSet.has(index)
+        && !coverageTraversalConnectorIndices.has(index)
+    ));
+    const mainPayoffRoomIndex = plannedContentRoles.findIndex((contentRole, index) => (
+      contentRole === 'reward'
+        && index !== challengeBranchRoomIndex
+        && !endpointNodeIndexSet.has(index)
+        && !coverageTraversalConnectorIndices.has(index)
+    ));
+    const orderedEndpointIndices = [...endpointNodeIndexSet]
+      .sort((first, second) => first - second);
+    const adjacentEndpointPair = orderedEndpointIndices
+      .slice(0, -1)
+      .map((firstIndex, ordinal) => ({
+        firstIndex,
+        secondIndex: orderedEndpointIndices[ordinal + 1],
+      }))
+      .find(({ firstIndex, secondIndex }) => (
+        mainPayoffRoomIndex > firstIndex && mainPayoffRoomIndex < secondIndex
+      ));
+    const firstStationCenter = coveragePlacement?.centers?.[
+      adjacentEndpointPair?.firstIndex
+    ];
+    const secondStationCenter = coveragePlacement?.centers?.[
+      adjacentEndpointPair?.secondIndex
+    ];
+    if (challengeBranchRoomIndex < 0
+      || mainPayoffRoomIndex < 0
+      || !firstStationCenter
+      || !secondStationCenter) {
+      return {
+        error: 'route-network-coverage-payoff-layout-unavailable',
+        context: {
+          grantId: grant.id,
+          challengeBranchRoomIndex,
+          mainPayoffRoomIndex,
+          endpointNodeIndices: orderedEndpointIndices,
+        },
+      };
+    }
+    const stationSeparationMeters = Math.abs(
+      Number(secondStationCenter.x) - Number(firstStationCenter.x),
+    ) + Math.abs(
+      Number(secondStationCenter.z) - Number(firstStationCenter.z),
+    );
+    // Once the challenge leaves the serial spine, the payoff is the sole
+    // curated room between the final pair of authored stations. Its exact
+    // socket-to-socket traverse plus both exterior seam leads must fit that
+    // station interval. Shell half-cells are not traversal and must not be
+    // counted a second time; exact routing below remains authoritative for
+    // footprint clearance and both approach directions.
+    const legalPayoffGrammarIds = coveragePayoffGrammarIdsForStationBay({
+      grammarPool: profile.grammarPool,
+      grammars,
+      stationSeparationMeters,
+      connectorEndpointGapMeters,
+    });
+    if (legalPayoffGrammarIds.length === 0) {
+      return {
+        error: 'route-network-coverage-payoff-layout-unavailable',
+        context: {
+          grantId: grant.id,
+          mainPayoffRoomIndex,
+          stationSeparationMeters,
+          connectorEndpointGapMeters,
+        },
+      };
+    }
+    roomLayoutLegalIdsByIndex.set(mainPayoffRoomIndex, legalPayoffGrammarIds);
+    return null;
+  };
   if (grant.kind !== 'landmark-perimeter-loop') {
     const maximumHalfDepth = Math.max(...selectedGrammars.map(({ size }) => (
       Number(size.depth) * 0.5
@@ -4771,14 +7350,17 @@ function planRouteNetwork({
         ),
         searchVariant,
         planningAvoidanceVolumes,
-        planningOverlapGrants: [
-          ...(grant.socketLandingOverlapGrants ?? []),
-          ...(grant.socketModuleOverlapGrants ?? []),
-        ],
+        // External connector spines may share only the authored socket
+        // threshold. `socketModuleOverlapGrants` belong exclusively to the
+        // supplemental node-versus-parent placement check; admitting them
+        // here lets a route tunnel through the authored parent footprint.
+        planningOverlapGrants: grant.socketLandingOverlapGrants ?? [],
         diagnostics: objectiveExternalDiagnostics,
       },
     );
     endpointNodeIndexSet = new Set(coveragePlacement.endpointNodeIndices);
+    refreshCoverageTraversalConnectorIndices();
+    refreshTopologySupportConnectorIndex();
     junctionModuleIndex = selectCoverageJunctionModuleIndex(coveragePlacement);
     plannedContentRoles = buildPlannedContentRoles();
     // Authored corridor stations are physical T intersections. Give every
@@ -4818,12 +7400,41 @@ function planRouteNetwork({
     // authored gallery. Endpoint stations all use the same Through-T grammar,
     // so one deterministic rebuild also keeps multi-endpoint index allocation
     // stable after semantics are refreshed below.
+    const exactCoverageStationCenter = (endpoint, grammar) => {
+      const facing = toDungeonCardinalFacing(endpoint.facing);
+      const entrySocket = grammar?.sockets?.find(({ id }) => id === 'entry');
+      if (!entrySocket?.localPosition) {
+        return routeNetworkOuterPoint(
+          endpoint,
+          Number(grammar?.size?.depth ?? 0) * 0.5 + 2.8,
+        );
+      }
+      const rotatedEntry = transformDungeonLocalPoint(
+        entrySocket.localPosition,
+        {
+          center: { x: 0, y: 0, z: 0 },
+          rotationQuarterTurns: rotationQuarterTurnsForFacing(facing),
+        },
+      );
+      const desiredEntry = addDungeonPoints(
+        endpoint.position,
+        scaleDungeonPoint(facing, Math.max(
+          ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+          Number(endpoint.widthMeters ?? 8.4) * 0.5,
+        )),
+      );
+      return {
+        x: Number(desiredEntry.x) - Number(rotatedEntry.x),
+        y: Number(desiredEntry.y) - Number(rotatedEntry.y),
+        z: Number(desiredEntry.z) - Number(rotatedEntry.z),
+      };
+    };
+    for (let coverageRefinementPass = 0;
+      coverageRefinementPass < 3;
+      coverageRefinementPass += 1) {
     placementPath = endpoints.map((endpoint, endpointOrdinal) => {
       const nodeIndex = coveragePlacement.endpointNodeIndices[endpointOrdinal];
-      return routeNetworkOuterPoint(
-        endpoint,
-        Number(selectedGrammars[nodeIndex].size.depth) * 0.5 + 2.8,
-      );
+      return exactCoverageStationCenter(endpoint, selectedGrammars[nodeIndex]);
     });
     const minimumCoverageInteriorSpacingMeters = Math.max(
       connectorEndpointGapMeters,
@@ -4839,6 +7450,9 @@ function planRouteNetwork({
         Number(size.depth) * 0.5 + connectorEndpointGapMeters
       )),
     );
+    const serialCoverageRoomEntries = selectedGrammars
+      .map((grammar, index) => ({ grammar, index }))
+      .filter(({ index }) => moduleKindForIndex(index) === 'room');
     coveragePlacement = expandCoveragePlacement(
       placementPath,
       mainNodeCount,
@@ -4858,26 +7472,26 @@ function planRouteNetwork({
             coveragePlacement.endpointNodeIndices[endpointOrdinal]
           ]
         )),
-        contentRoomDepthMeters: selectedGrammars
-          .filter((_, index) => !endpointNodeIndexSet.has(index))
-          .map((grammar) => grammarEntryExitTraversalMeters(grammar)),
-        contentRoomEntryElevationMeters: selectedGrammars
-          .filter((_, index) => !endpointNodeIndexSet.has(index))
-          .map((grammar) => Number(grammar.sockets.find(({ id }) => id === 'entry')
+        contentRoomDepthMeters: serialCoverageRoomEntries
+          .map(({ grammar }) => grammarEntryExitTraversalMeters(grammar)),
+        contentRoomEntryElevationMeters: serialCoverageRoomEntries
+          .map(({ grammar }) => Number(grammar.sockets.find(({ id }) => id === 'entry')
             ?.localPosition?.y ?? 0)),
-        contentRoomExitElevationMeters: selectedGrammars
-          .filter((_, index) => !endpointNodeIndexSet.has(index))
-          .map((grammar) => Number(grammar.sockets.find(({ id }) => id === 'exit')
+        contentRoomExitElevationMeters: serialCoverageRoomEntries
+          .map(({ grammar }) => Number(grammar.sockets.find(({ id }) => id === 'exit')
             ?.localPosition?.y ?? 0)),
-        contentRoomSizes: selectedGrammars
-          .filter((_, index) => !endpointNodeIndexSet.has(index))
-          .map(({ size }) => cloneDungeonAugmentationValue(size)),
-        contentRoomPlanningVolumes: selectedGrammars
-          .filter((_, index) => !endpointNodeIndexSet.has(index))
-          .map((grammar) => cloneDungeonAugmentationValue(
-            (grammar.occupiedVolumes ?? []).length > 0
-              ? grammar.occupiedVolumes
-              : grammar.clearanceVolumes ?? [],
+        contentRoomEntryLocalPositions: serialCoverageRoomEntries
+          .map(({ grammar }) => cloneDungeonAugmentationValue(
+            grammar.sockets.find(({ id }) => id === 'entry')?.localPosition ?? null,
+          )),
+        contentRoomSizes: serialCoverageRoomEntries
+          .map(({ grammar }) => cloneDungeonAugmentationValue(grammar.size)),
+        contentRoomPlanningVolumes: serialCoverageRoomEntries
+          .map(({ grammar }) => cloneDungeonAugmentationValue(
+            [
+              ...(grammar.occupiedVolumes ?? []),
+              ...(grammar.clearanceVolumes ?? []),
+            ],
           )),
         minimumApproachMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
         maximumFeaturelessSpanMeters: Number(
@@ -4885,16 +7499,59 @@ function planRouteNetwork({
         ),
         searchVariant,
         planningAvoidanceVolumes,
-        planningOverlapGrants: [
-          ...(grant.socketLandingOverlapGrants ?? []),
-          ...(grant.socketModuleOverlapGrants ?? []),
-        ],
+        planningOverlapGrants: grant.socketLandingOverlapGrants ?? [],
         diagnostics: objectiveExternalDiagnostics,
       },
     );
+    if (topologySupportConnectorIndex != null) {
+      const compoundDiagnostics = {};
+      const compoundPlacement = composeStackedInterchangeSupportCompound({
+        placement: coveragePlacement,
+        selectedGrammars,
+        physicalModuleCount,
+        endpointNodeIndices: [...endpointNodeIndexSet],
+        topologyKitModuleIndex,
+        supportConnectorIndex: topologySupportConnectorIndex,
+        endpoints,
+        diagnostics: compoundDiagnostics,
+      });
+      if (!compoundPlacement) {
+        return {
+          error: 'route-network-stacked-interchange-compound-unavailable',
+          context: {
+            grantId: grant.id,
+            topologyTemplateId,
+            topologyKitModuleIndex,
+            topologySupportConnectorIndex,
+            endpointNodeIndices: [...endpointNodeIndexSet],
+            planningPhaseTimings: cloneDungeonAugmentationValue(
+              objectiveExternalDiagnostics.planningPhaseTimings ?? null,
+            ),
+            objectiveExternalDiagnostics: cloneDungeonAugmentationValue(
+              objectiveExternalDiagnostics,
+            ),
+            compoundDiagnostics,
+            coveragePlacementShape: {
+              centerCount: coveragePlacement?.centers?.length ?? 0,
+              endpointNodeIndices: cloneDungeonAugmentationValue(
+                coveragePlacement?.endpointNodeIndices ?? [],
+              ),
+              requiredSocketBindingCount:
+                coveragePlacement?.requiredSocketBindings?.length ?? 0,
+              externalSpinePathCount: coveragePlacement?.externalSpinePaths?.length ?? 0,
+            },
+          },
+        };
+      }
+      coveragePlacement = compoundPlacement;
+    }
     endpointNodeIndexSet = new Set(coveragePlacement.endpointNodeIndices);
+    refreshCoverageTraversalConnectorIndices();
+    refreshTopologySupportConnectorIndex();
     junctionModuleIndex = selectCoverageJunctionModuleIndex(coveragePlacement);
     plannedContentRoles = buildPlannedContentRoles();
+    const coveragePayoffLayoutError = refreshCoveragePayoffLayoutConstraint();
+    if (coveragePayoffLayoutError) return coveragePayoffLayoutError;
     const refinedCoverageJunctionKinds = baseJunctionKinds.map((junctionKind, index) => (
       endpointNodeIndexSet.has(index) ? 'through-t' : junctionKind
     ));
@@ -4905,6 +7562,28 @@ function planRouteNetwork({
         context: { grantId: grant.id, junctionKinds },
       };
     }
+    const unresolvedConstrainedLayout = [...roomLayoutLegalIdsByIndex]
+      .find(([index, legalIds]) => !legalIds.includes(String(
+        selectedGrammars[index]?.id ?? '',
+      )));
+    if (unresolvedConstrainedLayout) {
+      const [nodeIndex, legalGrammarIds] = unresolvedConstrainedLayout;
+      return {
+        error: 'route-network-coverage-payoff-layout-unavailable',
+        context: {
+          grantId: grant.id,
+          nodeIndex,
+          legalGrammarIds,
+          selectedGrammarId: selectedGrammars[nodeIndex]?.id ?? null,
+        },
+      };
+    }
+    // Only objective-route coverage has a grammar/layout dependency that
+    // needs fixed-point refinement. Other supplemental networks already have
+    // their final placement after this rebuild; repeating the pass three
+    // times wastes work and can leave centers derived from the preceding
+    // grammar assignment.
+    if (grant.kind !== 'objective-route-coverage') break;
     if (grant.kind === 'objective-route-coverage') {
       const intervalBalance = balanceCoverageElevationIntervals();
       if (!intervalBalance.balanced) {
@@ -4918,6 +7597,10 @@ function planRouteNetwork({
         grammarIds: selectedGrammars.map(({ id }) => id),
       });
       if (refinedLayoutSignature !== balancedCoverageLayoutSignature) {
+        if (coverageRefinementPass < 2) {
+          balancedCoverageLayoutSignature = refinedLayoutSignature;
+          continue;
+        }
         return {
           error: 'route-network-coverage-refinement-changed-layout',
           context: {
@@ -4947,7 +7630,10 @@ function planRouteNetwork({
             rotationQuarterTurns: rotationQuarterTurnsForFacing(facing),
           },
         );
-        const thresholdLeadMeters = Number(endpoint.widthMeters ?? 8.4) * 0.5;
+        const thresholdLeadMeters = Math.max(
+          ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+          Number(endpoint.widthMeters ?? 8.4) * 0.5,
+        );
         const desiredEntry = addDungeonPoints(
           endpoint.position,
           scaleDungeonPoint(facing, thresholdLeadMeters),
@@ -4959,6 +7645,8 @@ function planRouteNetwork({
         };
       }
       hasBalancedAuthoredCoverageElevation = true;
+      break;
+    }
     }
   } else {
     const maximumHalfDepth = Math.max(...selectedGrammars.map(({ size }) => (
@@ -4970,12 +7658,144 @@ function planRouteNetwork({
       random.fork('perimeter-side').chance(0.5) ? 1 : -1,
     );
   }
+  if (grant.kind === 'objective-route-coverage'
+    && coverageTraversalConnectorIndices.size > 0) {
+    const challengeBranchRoomIndex = plannedContentRoles.findIndex((contentRole, index) => (
+      contentRole === 'challenge'
+        && !endpointNodeIndexSet.has(index)
+        && !coverageTraversalConnectorIndices.has(index)
+    ));
+    const branchLayout = coverageTraversalBranchBindings({
+      nodeCount: physicalModuleCount,
+      endpointNodeIndices: [...endpointNodeIndexSet],
+      traversalConnectorIndices: [...coverageTraversalConnectorIndices],
+      preferredBranchRoomIndex: challengeBranchRoomIndex,
+      requirePreferredBranchRoom: true,
+      branchRouteRole: 'route-network-challenge-branch',
+    });
+    if (!branchLayout) {
+      return {
+        error: 'route-network-coverage-traversal-branch-unavailable',
+        context: {
+          grantId: grant.id,
+          endpointNodeIndices: [...endpointNodeIndexSet],
+          traversalConnectorIndices: [...coverageTraversalConnectorIndices],
+        },
+      };
+    }
+    coveragePlacement.requiredSocketBindings = branchLayout.bindings;
+    if (Number.isInteger(branchLayout.branchRoomIndex)) {
+      // The branch room was initially composed on the serial station-to-
+      // station route. Seed it from the constrained station's authored right
+      // socket instead. The global solver may still
+      // translate and rotate both modules, but starting from their exact
+      // socket relationship keeps the legal branch pair inside its bounded
+      // candidate window instead of spending that window around the stale
+      // main-chain position.
+      const traversalCenter = coveragePlacement.centers?.[
+        branchLayout.traversalIndex
+      ];
+      const branchCenter = coveragePlacement.centers?.[
+        branchLayout.branchRoomIndex
+      ];
+      const traversalGrammar = selectedGrammars[branchLayout.traversalIndex];
+      const branchGrammar = selectedGrammars[branchLayout.branchRoomIndex];
+      const traversalRightSocket = traversalGrammar?.sockets?.find(({ id }) => (
+        id === 'right'
+      ));
+      const branchEntrySocket = branchGrammar?.sockets?.find(({ id }) => (
+        id === 'entry'
+      ));
+      const incomingBinding = branchLayout.bindings.find(({ toIndex, fromIndex }) => (
+        toIndex === branchLayout.traversalIndex
+          && fromIndex !== branchLayout.branchRoomIndex
+      ));
+      const incomingCenter = coveragePlacement.centers?.[incomingBinding?.fromIndex];
+      const traversalFacing = coveragePlacement.nodeFacings?.[
+        branchLayout.traversalIndex
+      ] ?? (incomingCenter && traversalCenter
+        ? toDungeonCardinalFacing({
+          x: Number(traversalCenter.x) - Number(incomingCenter.x),
+          z: Number(traversalCenter.z) - Number(incomingCenter.z),
+        })
+        : null);
+      if (traversalCenter
+        && branchCenter
+        && traversalFacing
+        && traversalRightSocket?.localPosition
+        && traversalRightSocket?.localFacing
+        && branchEntrySocket?.localPosition) {
+        const traversalPlacement = {
+          center: traversalCenter,
+          rotationQuarterTurns: rotationQuarterTurnsForFacing(traversalFacing),
+        };
+        const branchFacing = toDungeonCardinalFacing(transformDungeonLocalFacing(
+          traversalRightSocket.localFacing,
+          traversalPlacement,
+        ));
+        const traversalRightPosition = transformDungeonLocalPoint(
+          traversalRightSocket.localPosition,
+          traversalPlacement,
+        );
+        const rotatedBranchEntry = transformDungeonLocalPoint(
+          branchEntrySocket.localPosition,
+          {
+            center: { x: 0, y: 0, z: 0 },
+            rotationQuarterTurns: rotationQuarterTurnsForFacing(branchFacing),
+          },
+        );
+        const desiredBranchEntry = addDungeonPoints(
+          traversalRightPosition,
+          scaleDungeonPoint(branchFacing, connectorEndpointGapMeters),
+        );
+        coveragePlacement.centers[branchLayout.branchRoomIndex] = {
+          x: Number(desiredBranchEntry.x) - Number(rotatedBranchEntry.x),
+          y: Number(desiredBranchEntry.y) - Number(rotatedBranchEntry.y),
+          z: Number(desiredBranchEntry.z) - Number(rotatedBranchEntry.z),
+        };
+        coveragePlacement.nodeFacings ??= Array.from(
+          { length: physicalModuleCount },
+          () => null,
+        );
+        coveragePlacement.nodeFacings[branchLayout.branchRoomIndex] = branchFacing;
+        coveragePlacement.placementOutwardFacings ??= Array.from(
+          { length: physicalModuleCount },
+          () => null,
+        );
+        coveragePlacement.placementOutwardFacings[
+          branchLayout.branchRoomIndex
+        ] = branchFacing;
+        coveragePlacement.anchorEndpointOrdinals ??= Array.from(
+          { length: physicalModuleCount },
+          () => null,
+        );
+        coveragePlacement.anchorEndpointOrdinals[branchLayout.branchRoomIndex] = null;
+      }
+      coveragePlacement.coverageTraversalBranch = {
+        traversalNodeIndex: branchLayout.traversalIndex,
+        branchRoomIndex: branchLayout.branchRoomIndex,
+      };
+      delete coveragePlacement.coverageTraversalGallery;
+    } else {
+      delete coveragePlacement.coverageTraversalBranch;
+      coveragePlacement.coverageTraversalGallery = {
+        traversalNodeIndex: branchLayout.traversalIndex,
+      };
+    }
+  }
   if (grant.kind === 'objective-route-coverage') {
     const authoredExitDeltas = selectedGrammars.map((grammar) => Number(
       grammar?.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
     ));
+    const hasAuthoredElevationModule = selectedGrammars.some((grammar) => (
+      (grammar?.selectionConstraints?.authoredTransferKinds ?? []).length > 0
+    ));
     const authoredExitDelta = authoredExitDeltas.reduce((sum, delta) => sum + delta, 0);
-    if (!authoredExitDeltas.some((delta) => Math.abs(delta) > 0.000001)) {
+    // A self-contained elevation room can rise and return between level exits.
+    // Its net authored exit delta is zero by design; the physical transfer
+    // records, not a nonzero handoff to the next module, prove that the
+    // required elevation traversal exists.
+    if (!hasAuthoredElevationModule) {
       return {
         error: 'route-network-authored-elevation-module-missing',
         context: { grantId: grant.id, elevationMode },
@@ -5020,6 +7840,19 @@ function planRouteNetwork({
       };
     }
   }
+  roomLayoutSelectionResult = recordAcceptedRouteNetworkRoomLayouts({
+    profile,
+    grammars,
+    selectedGrammars,
+    contentRoles: plannedContentRoles,
+    moduleKinds: Array.from(
+      { length: physicalModuleCount },
+      (_, index) => moduleKindForIndex(index),
+    ),
+    topologyKitModuleIndex,
+    roomLayoutBag: selectionBags?.roomLayout,
+    legalGrammarIdsByIndex: roomLayoutLegalIdsByIndex,
+  });
   if (!placementPath || placementPath.length < 2) {
     return { error: 'route-network-placement-path-unavailable', context: { grantId: grant.id } };
   }
@@ -5060,7 +7893,7 @@ function planRouteNetwork({
   // remain pinned later and therefore receive a real descent/ascent witness
   // when the chain must return to the authored host elevation.
   for (let index = 1; index < Math.min(mainNodeCount, centers.length); index += 1) {
-    if (endpointNodeIndexSet.has(index)) continue;
+    if (endpointNodeIndexSet.has(index) || index === topologySupportConnectorIndex) continue;
     const previousExitElevation = Number(
       selectedGrammars[index - 1]?.sockets?.find(({ id }) => id === 'exit')
         ?.localPosition?.y ?? 0,
@@ -5076,18 +7909,35 @@ function planRouteNetwork({
   const verticalFamily = connectorFamilyForElevationMode(elevationMode);
   const coverageModuleRouteOptions = grant.kind === 'objective-route-coverage'
     ? {
-      sourceApproachMeters: [ROUTE_NETWORK_SOCKET_APPROACH_METERS, 2.8],
-      destinationApproachMeters: [ROUTE_NETWORK_SOCKET_APPROACH_METERS, 2.8],
-      minimumApproachMeters: 2.8,
+      sourceApproachMeters: [ROUTE_NETWORK_SOCKET_APPROACH_METERS],
+      destinationApproachMeters: [ROUTE_NETWORK_SOCKET_APPROACH_METERS],
+      minimumApproachMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
     }
     : {};
   const socketRouteCandidateCache = new Map();
+  const socketRouteMinimumLevelSpanCache = new Map();
+  const socketRouteTransformKey = (socket) => [
+    Number(socket?.position?.x),
+    Number(socket?.position?.y),
+    Number(socket?.position?.z),
+    Number(socket?.facing?.x),
+    Number(socket?.facing?.z),
+  ].join(',');
+  const socketRouteOptionsKey = (options = {}) => [
+    String(options.connectorFamily ?? 'service-gallery'),
+    String(options.preferXFirst ?? true),
+    (options.sourceApproachMeters ?? []).map(Number).join(','),
+    (options.destinationApproachMeters ?? []).map(Number).join(','),
+    (options.detourOffsetsMeters ?? []).map(Number).join(','),
+    Number(options.minimumApproachMeters ?? ROUTE_NETWORK_SOCKET_APPROACH_METERS),
+  ].join(';');
+  const socketRouteCacheKey = (from, to, options = {}) => [
+    socketRouteTransformKey(from),
+    socketRouteTransformKey(to),
+    socketRouteOptionsKey(options),
+  ].join('>');
   const cachedSocketRouteCandidates = (from, to, options = {}) => {
-    const cacheKey = canonicalStringify({
-      from: { position: from?.position, facing: from?.facing },
-      to: { position: to?.position, facing: to?.facing },
-      options,
-    });
+    const cacheKey = socketRouteCacheKey(from, to, options);
     if (!socketRouteCandidateCache.has(cacheKey)) {
       socketRouteCandidateCache.set(
         cacheKey,
@@ -5095,6 +7945,19 @@ function planRouteNetwork({
       );
     }
     return socketRouteCandidateCache.get(cacheKey);
+  };
+  const cachedMinimumSocketRouteLevelSpan = (from, to, options = {}) => {
+    const cacheKey = socketRouteCacheKey(from, to, options);
+    if (!socketRouteMinimumLevelSpanCache.has(cacheKey)) {
+      const paths = cachedSocketRouteCandidates(from, to, options);
+      socketRouteMinimumLevelSpanCache.set(
+        cacheKey,
+        paths.length > 0
+          ? Math.min(...paths.map(maximumContinuousLevelRouteSpan))
+          : Number.POSITIVE_INFINITY,
+      );
+    }
+    return socketRouteMinimumLevelSpanCache.get(cacheKey);
   };
   const roomNodeIndices = Array.from({ length: physicalModuleCount }, (_, index) => index)
     .filter((index) => moduleKindForIndex(index) === 'room');
@@ -5122,9 +7985,9 @@ function planRouteNetwork({
     .at(-1) ?? -1;
   const hasAuthoredNetworkElevationTransfer = selectedGrammars
     .slice(0, mainNodeCount)
-    .some((grammar) => Math.abs(Number(
-      grammar?.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
-    )) > 0.000001);
+    .some((grammar) => (
+      (grammar?.selectionConstraints?.authoredTransferKinds ?? []).length > 0
+    ));
   const requiresExternalVerticalTransfer = !hasAuthoredNetworkElevationTransfer && [
     'slope', 'ladder', 'lift', 'shortcut-lift', 'drop-ladder',
   ].includes(elevationMode);
@@ -5208,7 +8071,7 @@ function planRouteNetwork({
     index,
     throughLocalSocketId = null,
   ) => {
-    if (!node?.connectorOwned || Number(node.plannedMinimumGraphDegree ?? 0) >= 3) return 0;
+    if (routeNetworkNodeResetsFeaturelessDistance(node)) return 0;
     const endpointOrdinal = endpointOrdinalForNodeIndex(index);
     if (endpointOrdinal < 0) return 0;
     const parentSocket = endpoints[endpointOrdinal];
@@ -5227,9 +8090,7 @@ function planRouteNetwork({
         nodeSocket,
         preferXFirst,
         connectorFamily,
-        grant.kind === 'landmark-perimeter-loop'
-          ? ROUTE_NETWORK_SOCKET_APPROACH_METERS
-          : 2.8,
+        ROUTE_NETWORK_SOCKET_APPROACH_METERS,
       );
       return path.length >= 2
         ? maximumContinuousLevelRouteSpan(path)
@@ -5244,7 +8105,7 @@ function planRouteNetwork({
       : 0;
     return attachmentDistance + coreTraversalDistance;
   };
-  const createRouteNetworkNode = (index, center, facing) => {
+  const createRouteNetworkNode = (index, center, facing, planningOnly = false) => {
     const grammar = selectedGrammars[index];
     const nodeId = createDungeonSupplementId({
       parentRegionId: region.id,
@@ -5265,6 +8126,7 @@ function planRouteNetwork({
       facing,
       coordinateSpace: grant.endpointSockets[0].coordinateSpace,
       progressionOrder: progressionOrderStart + index,
+      planningOnly,
     });
     applyRouteNetworkNodeSemantics(node, {
       contentRole: contentRoles[index],
@@ -5297,6 +8159,16 @@ function planRouteNetwork({
       if (index === junctionModuleIndex) {
         node.plannedMinimumGraphDegree = Math.max(3, node.plannedMinimumGraphDegree);
       }
+    } else if (coverageTraversalConnectorIndices.has(index)) {
+      node.connectorOwnershipId = node.id;
+      // A constrained one-slot bay owns its curated-content branch as well as
+      // its two ordered spine arms. Planning must therefore realize all three exact
+      // bindings; validation still derives the effective degree from the
+      // committed physical graph and will reject a capped or missing arm.
+      node.plannedMinimumGraphDegree = 3;
+    } else if (index === topologySupportConnectorIndex) {
+      node.connectorOwnershipId = node.id;
+      node.plannedMinimumGraphDegree = 3;
     }
     return node;
   };
@@ -5304,6 +8176,15 @@ function planRouteNetwork({
     if (grant.kind !== 'landmark-perimeter-loop') {
       const endpointOrdinal = coveragePlacement.endpointNodeIndices.indexOf(index);
       if (endpointOrdinal >= 0) return endpoints[endpointOrdinal].facing;
+      if (index === topologySupportConnectorIndex
+        && coveragePlacement.nodeFacings?.[index]) {
+        // The stacked-interchange composer solves the Through-T branch socket
+        // orientation exactly against the selected terminal kit socket. The
+        // generic chain tangent below describes traversal order, not that
+        // branch identity, and rotating to it destroys every legal compound
+        // pair before placement begins.
+        return coveragePlacement.nodeFacings[index];
+      }
       if (grant.kind === 'objective-route-coverage'
         && !Array.isArray(coveragePlacement.externalRoutePaths)) {
         // The external coverage solver positions rooms on a valid station-to-
@@ -5326,13 +8207,24 @@ function planRouteNetwork({
             && binding.toLocalSocketId === 'entry'
             && centers[binding.fromIndex]
         ));
-        const adjacentCenter = outgoingBinding
-          ? centers[outgoingBinding.toIndex]
-          : incomingBinding
-            ? centers[incomingBinding.fromIndex]
-            : null;
+        // An exact authored-corridor station cannot rotate its supplemental
+        // arm to follow the later chain tangent. When this room immediately
+        // follows such a station, align the room's entry to that immutable
+        // incoming seam and let the gallery after the room own any bend toward
+        // the next module. Preferring the outgoing binding here used to point
+        // both endpoint normals away from one another, leaving no legal
+        // <=33.6 m facing-aware route even though the room centers were close.
+        const incomingSourceIsExactEndpoint = incomingBinding
+          && endpointNodeIndexSet.has(Number(incomingBinding.fromIndex));
+        const preferredBinding = incomingSourceIsExactEndpoint
+          ? incomingBinding
+          : outgoingBinding ?? incomingBinding;
+        const preferredBindingIsOutgoing = preferredBinding === outgoingBinding;
+        const adjacentCenter = preferredBindingIsOutgoing
+          ? centers[preferredBinding?.toIndex]
+          : centers[preferredBinding?.fromIndex];
         if (adjacentCenter) {
-          const delta = outgoingBinding
+          const delta = preferredBindingIsOutgoing
             ? {
               x: Number(adjacentCenter.x) - Number(centers[index].x),
               z: Number(adjacentCenter.z) - Number(centers[index].z),
@@ -5441,19 +8333,27 @@ function planRouteNetwork({
       && grant.kind === 'landmark-perimeter-loop';
     const exactCoverageEndpointStation = Boolean(parentSocket)
       && grant.kind !== 'landmark-perimeter-loop';
-    // A coverage station is the authored merge body for one exact host
-    // socket. The host's module-overlap grant describes that one body, not a
-    // corridor along which the station may slide. Global expansion belongs to
-    // the substantive rooms and their recomputed spine paths; moving the
-    // station itself creates a long parent attachment that can cut across the
-    // same network at another tier.
-    const movableDenseCoverageEndpointStation = false;
+    // The host socket remains exact, but the connector-owned station may sit
+    // farther out on that socket's own ray. The original width/2 seed is only
+    // 4.2 m from an 8.4 m aperture and cannot satisfy the strict 5.6 m exterior
+    // approach. Enumerate tile-aligned outward translations only: no tangent
+    // drift, reverse placement, or host-side movement is legal here.
+    const movableDenseCoverageEndpointStation = exactCoverageEndpointStation
+      && grant.kind === 'objective-route-coverage';
     const precomposedObjectiveExternalRoom = parentSocket == null
       && grant.kind === 'objective-route-coverage'
       && Array.isArray(coveragePlacement?.externalRoutePaths);
     const planarCandidates = exactCoverageEndpointStation
       ? movableDenseCoverageEndpointStation
-        ? placementCandidatesForNode(baseCenter, outward, false)
+        ? Array.from({ length: 11 }, (_, offsetTiles) => (
+          addDungeonPoints(
+            baseCenter,
+            scaleDungeonPoint(
+              toDungeonCardinalFacing(outward),
+              offsetTiles * 2.8,
+            ),
+          )
+        ))
         : [cloneDungeonAugmentationValue(baseCenter)]
       : precomposedObjectiveExternalRoom
         // The external composer supplies a strong deterministic seed, not an
@@ -5543,7 +8443,10 @@ function planRouteNetwork({
     const solveInteriorOrientation = candidatesOnly
       && grant.kind === 'objective-route-coverage'
       && !exactCoverageEndpointStation;
-    const orientationCandidates = solveInteriorOrientation
+    const solveEndpointOrientation = candidatesOnly
+      && grant.kind === 'objective-route-coverage'
+      && exactCoverageEndpointStation;
+    const orientationCandidates = solveInteriorOrientation || solveEndpointOrientation
       ? [
         toDungeonCardinalFacing(facing),
         { x: 1, y: 0, z: 0 },
@@ -5564,49 +8467,66 @@ function planRouteNetwork({
         orientationOrdinal,
       }))
     ));
+    const stableCandidateNodeId = createDungeonSupplementId({
+      parentRegionId: region.id,
+      operationType: 'routeNetwork',
+      operationOrdinal,
+      kind: 'node',
+      ordinal: index,
+      sourceId,
+    });
+    const parentLocalSocketId = grant.kind === 'landmark-perimeter-loop'
+      && index === mainCenters.length - 1
+      ? 'exit'
+      : 'entry';
+    const parentOverlapGrants = parentSocket
+      ? (grant.socketLandingOverlapGrants ?? []).filter(({ socketId }) => (
+        String(socketId) === String(parentSocket.id)
+      ))
+      : [];
+    // The candidate node ID, avoidance set, and exact parent seam do not
+    // change while its center/orientation candidates are evaluated. Hoisting
+    // this filter avoids rescanning every authored and globally reserved
+    // volume for every candidate in the hottest placement loop.
+    const parentRouteAvoidanceVolumes = parentSocket
+      ? avoidanceVolumes.filter((volume) => (
+        !planningVolumeOwnedBy(volume, stableCandidateNodeId)
+          && !isGrantedParentGalleryThresholdVolume(volume, parentOverlapGrants[0])
+      ))
+      : [];
+    const parentRouteEndpoint = parentSocket ? {
+      position: parentSocket.position,
+      facing: parentSocket.facing,
+    } : null;
     const candidates = random.fork(`node-placement:${index}`).shuffle(
       orientedPlacementCandidates,
     ).map(({ center, candidateFacing, orientationOrdinal }) => {
-      const node = createRouteNetworkNode(index, center, candidateFacing);
-      const parentLocalSocketId = grant.kind === 'landmark-perimeter-loop'
-        && index === mainCenters.length - 1
-        ? 'exit'
-        : 'entry';
+      const node = createRouteNetworkNode(
+        index,
+        center,
+        candidateFacing,
+        true,
+      );
       const parentNodeSocket = getNodeSocket(node, parentLocalSocketId);
       const parentConnectorFamily = parentSocket && Math.abs(
         Number(parentNodeSocket.position.y) - Number(parentSocket.position.y),
       ) > 1e-6 ? verticalFamily : 'service-gallery';
       const parentDistanceMeters = parentSocket
-        ? Math.min(...[true, false].map((preferXFirst) => {
-          const path = parentAttachmentRouteSegmentPath(
-            { position: parentSocket.position, facing: parentSocket.facing },
-            parentNodeSocket,
-            preferXFirst,
-            parentConnectorFamily,
-            grant.kind === 'landmark-perimeter-loop'
-              ? ROUTE_NETWORK_SOCKET_APPROACH_METERS
-              : 2.8,
-          );
-          return path.length >= 2
-            ? maximumContinuousLevelRouteSpan(path)
-            : Number.POSITIVE_INFINITY;
-        }))
+        ? cachedMinimumSocketRouteLevelSpan(
+          parentRouteEndpoint,
+          parentNodeSocket,
+          {
+            connectorFamily: parentConnectorFamily,
+            sourceApproachMeters: [ROUTE_NETWORK_SOCKET_APPROACH_METERS],
+            destinationApproachMeters: [ROUTE_NETWORK_SOCKET_APPROACH_METERS],
+            minimumApproachMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+          },
+        )
         : 0;
-      const parentOverlapGrants = parentSocket
-        ? (grant.socketLandingOverlapGrants ?? []).filter(({ socketId }) => (
-          String(socketId) === String(parentSocket.id)
-        ))
-        : [];
-      const parentRouteAvoidanceVolumes = parentSocket
-        ? avoidanceVolumes.filter((volume) => (
-          !planningVolumeOwnedBy(volume, node.id)
-            && !isGrantedParentGalleryThresholdVolume(volume, parentOverlapGrants[0])
-        ))
-        : [];
       const parentRouteCandidates = parentSocket
         && grant.kind === 'landmark-perimeter-loop'
         ? cachedSocketRouteCandidates(
-          { position: parentSocket.position, facing: parentSocket.facing },
+          parentRouteEndpoint,
           parentNodeSocket,
           {
             connectorFamily: parentConnectorFamily,
@@ -5762,16 +8682,22 @@ function planRouteNetwork({
       };
       return null;
     }
+    const committedNode = createRouteNetworkNode(
+      index,
+      selected.center,
+      selected.facing,
+    );
     centers[index] = selected.center;
     localPlacementAvoidanceVolumes.push(
-      ...selected.node.occupiedVolumes,
-      ...selected.node.clearanceVolumes,
+      ...committedNode.occupiedVolumes,
+      ...committedNode.clearanceVolumes,
     );
-    return selected.node;
+    return committedNode;
   };
   const mainNodes = Array.from({ length: mainCenters.length }, () => null);
   let preselectedCoverageSpinePairs = null;
   let preselectedCoverageParentAttachmentPaths = null;
+  let physicalPlanningPhaseTimings = null;
   const placementInputsForIndex = (index) => {
     const endpointOrdinal = grant.kind === 'landmark-perimeter-loop'
       ? index === 0 ? 0 : index === mainCenters.length - 1 ? 1 : -1
@@ -6112,11 +9038,16 @@ function planRouteNetwork({
         [firstIndex, selectedPair.firstCandidate],
         [secondIndex, selectedPair.secondCandidate],
       ]) {
+        const committedNode = createRouteNetworkNode(
+          index,
+          candidate.center,
+          candidate.facing,
+        );
         centers[index] = candidate.center;
-        mainNodes[index] = candidate.node;
+        mainNodes[index] = committedNode;
         localPlacementAvoidanceVolumes.push(
-          ...(candidate.node.occupiedVolumes ?? []),
-          ...(candidate.node.clearanceVolumes ?? []),
+          ...(committedNode.occupiedVolumes ?? []),
+          ...(committedNode.clearanceVolumes ?? []),
         );
       }
     } else {
@@ -6134,6 +9065,24 @@ function planRouteNetwork({
     // them on a winding authored route. Joint search keeps the immutable base
     // proxy, parent threshold reach, pairwise room clearance, and adjacent
     // connector bounds in the same decision.
+    const planningNowMilliseconds = () => (
+      globalThis.performance?.now?.() ?? Date.now()
+    );
+    const physicalPlanningStartedAt = planningNowMilliseconds();
+    physicalPlanningPhaseTimings = {
+      candidateGenerationMs: 0,
+      staticCollisionScoringMs: 0,
+      staticCollisionScoringCalls: 0,
+      pairCompatibilityMs: 0,
+      pairCompatibilityEvaluations: 0,
+      recursiveCompositionMs: 0,
+      totalMs: 0,
+    };
+    const physicalPlanningTimingSnapshot = () => {
+      physicalPlanningPhaseTimings.totalMs = planningNowMilliseconds()
+        - physicalPlanningStartedAt;
+      return cloneDungeonAugmentationValue(physicalPlanningPhaseTimings);
+    };
     const staticAvoidanceVolumes = [...localPlacementAvoidanceVolumes];
     const planningIndexCellMeters = 8.4;
     const staticAvoidanceVolumeBuckets = new Map();
@@ -6186,15 +9135,21 @@ function planRouteNetwork({
       }
       return volumes;
     };
-    const indexedStaticPathVolumesHaveCollision = (pathVolumes) => (
-      pathVolumes.some((pathVolume) => (
+    const indexedStaticPathVolumesHaveCollision = (pathVolumes) => {
+      const startedAt = planningNowMilliseconds();
+      const result = pathVolumes.some((pathVolume) => (
         [...nearbyStaticAvoidanceVolumes(pathVolume)].some((obstacle) => (
           planningVolumesOverlap(pathVolume, obstacle)
         ))
-      ))
-    );
-    const indexedStaticNodeCollisionScore = (node, overlapGrants = []) => (
-      [...(node?.occupiedVolumes ?? []), ...(node?.clearanceVolumes ?? [])]
+      ));
+      physicalPlanningPhaseTimings.staticCollisionScoringMs +=
+        planningNowMilliseconds() - startedAt;
+      physicalPlanningPhaseTimings.staticCollisionScoringCalls += 1;
+      return result;
+    };
+    const indexedStaticNodeCollisionScore = (node, overlapGrants = []) => {
+      const startedAt = planningNowMilliseconds();
+      const result = [...(node?.occupiedVolumes ?? []), ...(node?.clearanceVolumes ?? [])]
         .reduce((score, nodeVolume) => (
           score + [...nearbyStaticAvoidanceVolumes(nodeVolume)].reduce((count, obstacle) => (
             count + (planningVolumesOverlap(nodeVolume, obstacle)
@@ -6206,8 +9161,12 @@ function planRouteNetwork({
                 )),
               ) ? 1 : 0)
           ), 0)
-        ), 0)
-    );
+        ), 0);
+      physicalPlanningPhaseTimings.staticCollisionScoringMs +=
+        planningNowMilliseconds() - startedAt;
+      physicalPlanningPhaseTimings.staticCollisionScoringCalls += 1;
+      return result;
+    };
     const maximumSpan = Number(profile.routeNetworkPlanning.maximumFeaturelessSpanMeters);
     const featurelessPathDistance = maximumContinuousLevelRouteSpan;
     const endpointOrdinalForNodeIndex = (index) => (
@@ -6219,11 +9178,26 @@ function planRouteNetwork({
         const landingOverlapGrant = (grant.socketLandingOverlapGrants ?? []).find(({ socketId }) => (
           String(socketId) === String(parentSocket.id)
         )) ?? null;
+        const parentEndpointSeam = createDungeonRouteEndpointSeam(parentSocket, {
+          id: `${operationId}:planning-parent-endpoint-seam:${nodeIndex}`,
+          operationId,
+          networkId: operationId,
+          nodeId: parentSocket.nodeId ?? parentSocket.roomId ?? null,
+          socketId: parentSocket.id,
+          localSocketId: parentSocket.localSocketId ?? null,
+          role: 'from',
+          elevationBand: grant.progressionBandId ?? null,
+          parentOwnerId: landingOverlapGrant?.parentOwnerId ?? null,
+        });
         return [nodeIndex, {
           endpointOrdinal,
           parentSocket,
+          parentEndpointSeam,
           routeAvoidanceVolumes: staticAvoidanceVolumes.filter((volume) => (
-            !isGrantedParentGalleryThresholdVolume(volume, landingOverlapGrant)
+            !isGrantedParentGalleryThresholdVolume(
+              volume,
+              parentEndpointSeam.overlapEnvelope,
+            )
           )),
         }];
       }),
@@ -6242,28 +9216,22 @@ function planRouteNetwork({
       const endpointOrdinal = endpointOrdinalForNodeIndex(index);
       if (endpointOrdinal < 0) return { compatible: true, path: null };
       const attachmentContext = parentAttachmentContextByNodeIndex.get(index);
-      const { parentSocket, routeAvoidanceVolumes } = attachmentContext;
+      const { parentSocket, parentEndpointSeam, routeAvoidanceVolumes } = attachmentContext;
       const nodeSocket = getNodeSocket(candidate.node, 'entry');
-      // The host grants two adjacent pieces of the exact corridor station:
-      // the centered doorway landing and the authored Through-T merge body.
-      // Canonical Industrial clearance columns are deliberately wider than a
-      // floor tile, so the short parent attachment can intersect both grants
-      // even though its physical centerline never leaves the approved socket.
-      // Final validation already evaluates this same union; use it during
-      // placement as well so the global solver cannot reject its only exact
-      // production station for an overlap that realization later permits.
+      const nodeSeam = createDungeonRouteEndpointSeam(nodeSocket, {
+        id: `${operationId}:planning-parent-attachment:${candidate.node.id}:endpoint-seam`,
+        operationId,
+        networkId: operationId,
+        nodeId: candidate.node.id,
+        socketId: nodeSocket.id,
+        localSocketId: nodeSocket.localSocketId,
+        role: 'to',
+        elevationBand: candidate.node.progressionBandId ?? grant.progressionBandId ?? null,
+        parentOwnerId: endpointSeamSharedOwnerId(nodeSocket, candidate.node),
+      });
       const parentAttachmentOverlapGrants = [
-        ...(grant.socketLandingOverlapGrants ?? []).filter(({ socketId }) => (
-          String(socketId) === String(parentSocket.id)
-        )),
-        ...(grant.socketModuleOverlapGrants ?? []).filter(({
-          socketId,
-          moduleTemplateId,
-        }) => (
-          String(socketId) === String(parentSocket.id)
-            && (!moduleTemplateId
-              || String(moduleTemplateId) === String(candidate.node.grammarId))
-        )),
+        parentEndpointSeam.overlapEnvelope,
+        nodeSeam.overlapEnvelope,
       ];
       const parentConnectorFamily = Math.abs(
         Number(nodeSocket.position.y) - Number(parentSocket.position.y),
@@ -6275,7 +9243,8 @@ function planRouteNetwork({
         true,
         parentAttachmentOverlapGrants,
         parentConnectorFamily,
-        2.8,
+        ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+        true,
         true,
       );
       const path = selectedParentAttachment?.path ?? null;
@@ -6290,12 +9259,50 @@ function planRouteNetwork({
           overlapGrants: parentAttachmentOverlapGrants,
         };
       }
+      const parentApproachDiagnostic = routePathExteriorSocketApproachDiagnostic(
+        path,
+        parentSocket,
+        false,
+        parentEndpointSeam,
+      );
+      const nodeApproachDiagnostic = routePathExteriorSocketApproachDiagnostic(
+        path,
+        nodeSocket,
+        true,
+        nodeSeam,
+      );
+      const nodeMaskCompatible = routePathRespectsEndpointNodeMask(
+        path,
+        candidate.node,
+        nodeSeam,
+      );
+      if (!parentApproachDiagnostic.accepted
+        || !nodeApproachDiagnostic.accepted
+        || !nodeMaskCompatible) {
+        return {
+          compatible: false,
+          path: null,
+          pathVolumes: [],
+          collisionScore: Number.POSITIVE_INFINITY,
+          distanceMeters: Number.POSITIVE_INFINITY,
+          routeAvoidanceVolumes,
+          overlapGrants: parentAttachmentOverlapGrants,
+          rejectionCode: !parentApproachDiagnostic.accepted
+            || !nodeApproachDiagnostic.accepted
+            ? 'route-network-seam-exterior-lead-mismatch'
+            : 'route-network-endpoint-overlap-outside-seam',
+          parentApproachDiagnostic,
+          nodeApproachDiagnostic,
+          nodeMaskCompatible,
+        };
+      }
       const collisionScore = selectedParentAttachment.collisionScore;
       const distanceMeters = featurelessPathDistance(path);
       return {
         compatible: collisionScore === 0 && distanceMeters <= maximumSpan + 1e-6,
         path,
         pathVolumes: selectedParentAttachment.pathVolumes,
+        collisionVolumes: selectedParentAttachment.collisionVolumes,
         collisionScore,
         distanceMeters,
         routeAvoidanceVolumes,
@@ -6348,34 +9355,33 @@ function planRouteNetwork({
       firstIndex,
       secondNode,
       secondIndex,
-    ) => (
-      Math.min(...availableSpineSockets(firstNode, firstIndex, secondIndex)
-        .flatMap((firstSocket) => (
-        availableSpineSockets(secondNode, secondIndex, firstIndex).map((secondSocket) => (
-          (() => {
-            const deltaX = Math.abs(
-              Number(secondSocket.position.x) - Number(firstSocket.position.x),
-            );
-            const deltaY = Math.abs(
-              Number(secondSocket.position.y) - Number(firstSocket.position.y),
-            );
-            const deltaZ = Math.abs(
-              Number(secondSocket.position.z) - Number(firstSocket.position.z),
-            );
-            // Match featurelessPathDistance exactly. A real elevation-changing
-            // connector is itself a meaningful reset: the segment containing
-            // the vertical transfer contributes no featureless distance. For
-            // an L path only its first, level leg contributes, so choose the
-            // shorter ordering. The exact physical witness remains mandatory.
-            if (deltaY > 1e-6) {
-              if (deltaX <= 1e-6 || deltaZ <= 1e-6) return 0;
-              return Math.min(deltaX, deltaZ);
-            }
-            return deltaX + deltaZ;
-          })()
-        ))
-      )))
-    );
+    ) => {
+      let minimum = Number.POSITIVE_INFINITY;
+      const firstSockets = availableSpineSockets(firstNode, firstIndex, secondIndex);
+      const secondSockets = availableSpineSockets(secondNode, secondIndex, firstIndex);
+      for (const firstSocket of firstSockets) {
+        for (const secondSocket of secondSockets) {
+          const deltaX = Math.abs(
+            Number(secondSocket.position.x) - Number(firstSocket.position.x),
+          );
+          const deltaY = Math.abs(
+            Number(secondSocket.position.y) - Number(firstSocket.position.y),
+          );
+          const deltaZ = Math.abs(
+            Number(secondSocket.position.z) - Number(firstSocket.position.z),
+          );
+          // A real elevation-changing connector is a meaningful reset. Its
+          // best possible placement splits total planar travel evenly; exact
+          // routing still enforces approach, transfer-run, and collision
+          // constraints after this admissible lower bound.
+          const distance = deltaY > 1e-6
+            ? minimumVerticalRouteFeaturelessSpanMeters(deltaX, deltaZ)
+            : deltaX + deltaZ;
+          if (distance < minimum) minimum = distance;
+        }
+      }
+      return minimum;
+    };
     const selectBoundedPlacementCandidates = (
       validCandidates,
       endpoint,
@@ -6390,14 +9396,7 @@ function planRouteNetwork({
       // search and weakens the exact endpoint contract. Interior modules keep
       // a bounded local/tangent spread for genuine backtracking.
       const movableDenseCoverageEndpoint = endpoint
-        && grant.kind === 'objective-route-coverage'
-        && endpoints.length >= 3
-        // objectiveCoverageExternalPlacement has already solved these station
-        // centers together with its exact socket/path witnesses. Moving one of
-        // those stations here invalidates that global solution and makes the
-        // physical pass route a different network. Only the legacy/fallback
-        // coverage expansion may spread dense endpoint stations locally.
-        && !Array.isArray(coveragePlacement?.externalRoutePaths);
+        && grant.kind === 'objective-route-coverage';
       const globallyPlacedObjectiveCoverage = grant.kind === 'objective-route-coverage';
       // Dense authored connectors frequently leave several disjoint legal
       // pockets around their reserved gallery. Twelve samples are enough for
@@ -6469,16 +9468,16 @@ function planRouteNetwork({
       // displacements, or the local eight can omit the first non-overlapping
       // placement and make an otherwise bounded featureless run look too long.
       for (const preferredAdjacentEndpointTarget of preferredAdjacentEndpointTargets) {
-        const closest = [...validCandidates].sort((first, second) => (
-          Math.hypot(
-            first.center.x - preferredAdjacentEndpointTarget.x,
-            first.center.z - preferredAdjacentEndpointTarget.z,
-          ) - Math.hypot(
-            second.center.x - preferredAdjacentEndpointTarget.x,
-            second.center.z - preferredAdjacentEndpointTarget.z,
-          ) || first.displacement - second.displacement
-        ))[0];
-        if (closest) selected.add(closest);
+        // Socket orientation is part of the physical candidate. Retaining only
+        // one distance-tied rotation can keep a route witness whose room mask
+        // overlaps the endpoint while discarding the equally positioned
+        // outward-facing module that clears it. Preserve one candidate per
+        // facing at this uniquely important target; the overall domain remains
+        // capped below.
+        for (const closest of closestPlacementCandidatesPerFacing(
+          validCandidates,
+          preferredAdjacentEndpointTarget,
+        )) selected.add(closest);
       }
       // Reserve outward continuation choices before generic envelope/cardinal
       // sampling. The old code overfilled `selected` from the first future
@@ -6490,11 +9489,10 @@ function planRouteNetwork({
         for (const distance of [grammarClearanceRadius, grammarClearanceRadius * 2]) {
           const targetX = Number(baseCenter.x) + outward.x * distance;
           const targetZ = Number(baseCenter.z) + outward.z * distance;
-          const closest = [...validCandidates].sort((first, second) => (
-            Math.hypot(first.center.x - targetX, first.center.z - targetZ)
-              - Math.hypot(second.center.x - targetX, second.center.z - targetZ)
-              || first.displacement - second.displacement
-          ))[0];
+          const closest = closestPlacementCandidate(
+            validCandidates,
+            { x: targetX, z: targetZ },
+          );
           if (closest) selected.add(closest);
         }
       }
@@ -6519,11 +9517,10 @@ function planRouteNetwork({
           [Number(volume.center.x), Number(volume.center.z) - offsetZ],
           [Number(volume.center.x), Number(volume.center.z) + offsetZ],
         ]) {
-          const closest = [...validCandidates].sort((first, second) => (
-            Math.hypot(first.center.x - targetX, first.center.z - targetZ)
-              - Math.hypot(second.center.x - targetX, second.center.z - targetZ)
-              || first.displacement - second.displacement
-          ))[0];
+          const closest = closestPlacementCandidate(
+            validCandidates,
+            { x: targetX, z: targetZ },
+          );
           if (closest) selected.add(closest);
         }
       }
@@ -6535,11 +9532,10 @@ function planRouteNetwork({
         for (const [directionX, directionZ] of directions) {
           const targetX = baseCenter.x + directionX * radius;
           const targetZ = baseCenter.z + directionZ * radius;
-          const closest = [...validCandidates].sort((first, second) => (
-            Math.hypot(first.center.x - targetX, first.center.z - targetZ)
-              - Math.hypot(second.center.x - targetX, second.center.z - targetZ)
-              || first.displacement - second.displacement
-          ))[0];
+          const closest = closestPlacementCandidate(
+            validCandidates,
+            { x: targetX, z: targetZ },
+          );
           if (closest) selected.add(closest);
         }
       }
@@ -6561,6 +9557,7 @@ function planRouteNetwork({
       }
       return [...selected].slice(0, limit);
     };
+    const candidateGenerationStartedAt = planningNowMilliseconds();
     const placementCandidateGroups = mainCenters.map((_, index) => {
       const inputs = placementInputsForIndex(index);
       const endpointOrdinal = endpointOrdinalForNodeIndex(index);
@@ -6643,6 +9640,7 @@ function planRouteNetwork({
         })
         : [];
       let candidates;
+      let candidatePool;
       if (endpointNodeIndexSet.has(index)) {
         // Validate the complete collision-free, in-range endpoint domain, then
         // keep a bounded deterministic spread. This preserves global solver
@@ -6665,6 +9663,15 @@ function planRouteNetwork({
                 path: cloneDungeonAugmentationValue(attachment.path),
                 collisionScore: attachment.collisionScore,
                 distanceMeters: attachment.distanceMeters,
+                overlapGrants: cloneDungeonAugmentationValue(attachment.overlapGrants ?? []),
+                rejectionCode: attachment.rejectionCode ?? null,
+                parentApproachDiagnostic: cloneDungeonAugmentationValue(
+                  attachment.parentApproachDiagnostic ?? null,
+                ),
+                nodeApproachDiagnostic: cloneDungeonAugmentationValue(
+                  attachment.nodeApproachDiagnostic ?? null,
+                ),
+                nodeMaskCompatible: attachment.nodeMaskCompatible ?? null,
                 blockingVolumeIds: attachment.path
                   ? pathPlanningCollisionIds(
                     attachment.path,
@@ -6685,6 +9692,7 @@ function planRouteNetwork({
           inputs.outward,
           null,
         );
+        candidatePool = compatibleCandidates;
       } else {
         candidates = selectBoundedPlacementCandidates(
           nodeValidCandidates,
@@ -6694,6 +9702,7 @@ function planRouteNetwork({
           inputs.outward,
           preferredAdjacentEndpointTargets,
         );
+        candidatePool = nodeValidCandidates;
       }
       const withinParentDistance = rawCandidates.filter(({ parentDistanceExceeded }) => (
         !parentDistanceExceeded
@@ -6712,8 +9721,11 @@ function planRouteNetwork({
       return {
         index,
         candidates,
+        candidatePool,
         endpoint: endpointNodeIndexSet.has(index),
         diagnostics: {
+          facing: cloneDungeonAugmentationValue(inputs.facing),
+          outward: cloneDungeonAugmentationValue(inputs.outward),
           baseCenterCandidate: (() => {
             const candidate = [...rawCandidates].sort((first, second) => (
               first.displacement - second.displacement
@@ -6781,6 +9793,8 @@ function planRouteNetwork({
         },
       };
     }).sort((first, second) => first.index - second.index);
+    physicalPlanningPhaseTimings.candidateGenerationMs +=
+      planningNowMilliseconds() - candidateGenerationStartedAt;
     if (placementCandidateGroups.some(({ candidates }) => candidates.length === 0)) {
       const failedGroup = placementCandidateGroups.find(({ candidates }) => candidates.length === 0);
       return {
@@ -6795,26 +9809,33 @@ function planRouteNetwork({
             nodeIndex: index,
             count: candidates.length,
           })),
+          planningPhaseTimings: physicalPlanningTimingSnapshot(),
         },
       };
     }
-    // Objective coverage contributes one bidirectional external gameplay path.
-    // Its authored corridor is already the parallel return leg, so duplicating
-    // every station-to-station parent edge and then adding an overlay closure
-    // invents an infeasible second loop. The structural placement order makes
-    // the required overlay path consecutive for every endpoint cardinality.
-    const coverageRequiredEdges = Array.from(
-      { length: Math.max(0, mainCenters.length - 1) },
-      (_, edgeOrdinal) => ({
-        edgeOrdinal,
-        fromIndex: edgeOrdinal,
-        toIndex: edgeOrdinal + 1,
-        routeRole: 'route-network-spine',
-        requiredSocketBinding: requiredCoverageSocketBindingByKey.get(
-          coverageSocketBindingKey(edgeOrdinal, edgeOrdinal + 1),
-        ) ?? null,
-      }),
-    );
+    // Objective coverage contributes one bidirectional external gameplay
+    // path. Most layouts use numeric adjacency; authored compounds may supply
+    // a different ordered chain (for example reward -> support -> terminal
+    // stacked kit). Consume that binding order directly rather than silently
+    // reconnecting the old serial indices and stranding the reserved module.
+    const declaredCoverageBindings = coveragePlacement?.requiredSocketBindings ?? [];
+    const coverageRequiredEdges = (
+      declaredCoverageBindings.length === Math.max(0, mainCenters.length - 1)
+        ? declaredCoverageBindings
+        : Array.from(
+          { length: Math.max(0, mainCenters.length - 1) },
+          (_, edgeOrdinal) => ({
+            fromIndex: edgeOrdinal,
+            toIndex: edgeOrdinal + 1,
+          }),
+        )
+    ).map((binding, edgeOrdinal) => ({
+      edgeOrdinal,
+      fromIndex: Number(binding.fromIndex),
+      toIndex: Number(binding.toIndex),
+      routeRole: binding.routeRole ?? 'route-network-spine',
+      requiredSocketBinding: binding,
+    }));
     const coverageEdgeKey = (firstIndex, secondIndex) => (
       firstIndex < secondIndex
         ? `${firstIndex}:${secondIndex}`
@@ -6850,6 +9871,7 @@ function planRouteNetwork({
         minimumDistanceMeters: null,
         bestBlockedPath: null,
         bestBlockedCollisionIds: [],
+        lastSocketPairDiagnostics: [],
       }));
     const parentAttachmentFailureDiagnostics = endpoints.map((_, endpointOrdinal) => ({
       endpointOrdinal,
@@ -6863,6 +9885,7 @@ function planRouteNetwork({
       bestBlockingVolumes: [],
     }));
     const physicalPairCompatibilityCache = new Map();
+    const physicalPairRouteShapeCache = new Map();
     const physicalPairEdgeDiagnostics = coverageRequiredEdges.map((edge) => ({
         edgeIndex: edge.edgeOrdinal,
         fromNodeIndex: edge.fromIndex,
@@ -6874,15 +9897,101 @@ function planRouteNetwork({
         bestBlockedPath: null,
         bestBlockedCollisionIds: [],
         socketPairCandidateCounts: [],
+        eligibleSocketPairCandidateCounts: [],
+        routeStageTotals: {
+          socketPairCount: 0,
+          rawRouteCandidateCount: 0,
+          exteriorApproachEligibleCount: 0,
+          fromNodeMaskEligibleCount: 0,
+          toNodeMaskEligibleCount: 0,
+          positiveLengthCount: 0,
+          withinFeaturelessSpanCount: 0,
+          routeOptionCount: 0,
+          staticCollisionFreeCount: 0,
+          exactRouteOptionStaticCollisionFreeCount: 0,
+          indexedStaticCollisionCount: 0,
+          pinnedAttachmentCollisionCount: 0,
+        },
       }));
-    const candidatePhysicalKey = (candidate, index) => [
-      index,
-      Number(candidate.center.x).toFixed(3),
-      Number(candidate.center.y).toFixed(3),
-      Number(candidate.center.z).toFixed(3),
-      Number(candidate.facing?.x ?? 0).toFixed(3),
-      Number(candidate.facing?.z ?? 0).toFixed(3),
-    ].join(':');
+    const candidatePhysicalKeyCache = new WeakMap();
+    const candidatePhysicalKey = (candidate, index) => {
+      if (!candidatePhysicalKeyCache.has(candidate)) {
+        candidatePhysicalKeyCache.set(candidate, [
+          index,
+          Number(candidate.center.x).toFixed(3),
+          Number(candidate.center.y).toFixed(3),
+          Number(candidate.center.z).toFixed(3),
+          Number(candidate.facing?.x ?? 0).toFixed(3),
+          Number(candidate.facing?.z ?? 0).toFixed(3),
+        ].join(':'));
+      }
+      return candidatePhysicalKeyCache.get(candidate);
+    };
+    const physicalPairCacheKey = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => {
+      const ordered = firstIndex <= secondIndex
+        ? [firstCandidate, firstIndex, secondCandidate, secondIndex]
+        : [secondCandidate, secondIndex, firstCandidate, firstIndex];
+      const [fromCandidate, fromIndex, toCandidate, toIndex] = ordered;
+      return `${candidatePhysicalKey(fromCandidate, fromIndex)}>${candidatePhysicalKey(
+        toCandidate,
+        toIndex,
+      )}`;
+    };
+    const candidatePairNodeCollisionCache = new Map();
+    const candidatePairNodeCollisionScore = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => {
+      const cacheKey = physicalPairCacheKey(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      );
+      if (!candidatePairNodeCollisionCache.has(cacheKey)) {
+        candidatePairNodeCollisionCache.set(
+          cacheKey,
+          nodePlanningCollisionScore(
+            firstCandidate.node,
+            candidateNodeVolumes(secondCandidate),
+          ),
+        );
+      }
+      return candidatePairNodeCollisionCache.get(cacheKey);
+    };
+    const candidatePairMinimumSpineDistanceCache = new Map();
+    const candidatePairMinimumSpineDistance = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => {
+      const cacheKey = physicalPairCacheKey(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      );
+      if (!candidatePairMinimumSpineDistanceCache.has(cacheKey)) {
+        candidatePairMinimumSpineDistanceCache.set(
+          cacheKey,
+          minimumSpineDistance(
+            firstCandidate.node,
+            firstIndex,
+            secondCandidate.node,
+            secondIndex,
+          ),
+        );
+      }
+      return candidatePairMinimumSpineDistanceCache.get(cacheKey);
+    };
     const parentAttachmentPairCompatibilityCache = new Map();
     const candidatePairRespectsParentAttachments = (
       firstCandidate,
@@ -6945,7 +10054,12 @@ function planRouteNetwork({
     const pinnedParentAttachmentPathVolumes = placementCandidateGroups
       .filter(({ endpoint, candidates }) => endpoint && candidates.length === 1)
       .flatMap(({ index, candidates }) => (
-        staticParentAttachmentForCandidate(candidates[0], index).pathVolumes ?? []
+        (staticParentAttachmentForCandidate(candidates[0], index).pathVolumes ?? [])
+          .map((volume) => ({
+            ...volume,
+            pinnedEndpointNodeIndex: index,
+            pinnedEndpointNodeId: candidates[0]?.node?.id ?? null,
+          }))
       ));
     const socketPositionKey = (socket) => [
       Number(socket.position.x).toFixed(3),
@@ -6954,6 +10068,120 @@ function planRouteNetwork({
       Number(socket.facing?.x ?? 0).toFixed(3),
       Number(socket.facing?.z ?? 0).toFixed(3),
     ].join(':');
+    const externalSpinePathKey = (
+      fromIndex,
+      fromLocalSocketId,
+      toIndex,
+      toLocalSocketId,
+    ) => `${fromIndex}:${String(fromLocalSocketId ?? '')}>${toIndex}:${String(
+      toLocalSocketId ?? '',
+    )}`;
+    const externalSpinePathBySocketPair = new Map();
+    for (const record of coveragePlacement?.externalSpinePaths ?? []) {
+      const path = cloneDungeonAugmentationValue(record.path ?? []);
+      externalSpinePathBySocketPair.set(externalSpinePathKey(
+        record.fromIndex,
+        record.fromLocalSocketId,
+        record.toIndex,
+        record.toLocalSocketId,
+      ), path);
+      externalSpinePathBySocketPair.set(externalSpinePathKey(
+        record.toIndex,
+        record.toLocalSocketId,
+        record.fromIndex,
+        record.fromLocalSocketId,
+      ), [...path].reverse());
+    }
+    const matchingExternalSpinePath = (
+      fromSocket,
+      toSocket,
+      fromNode,
+      toNode,
+    ) => {
+      const path = externalSpinePathBySocketPair.get(externalSpinePathKey(
+        fromNode?.ordinal,
+        fromSocket?.localSocketId,
+        toNode?.ordinal,
+        toSocket?.localSocketId,
+      ));
+      if (!Array.isArray(path) || path.length < 2
+        || dungeonPointDistance(path[0], fromSocket?.position) > 1e-4
+        || dungeonPointDistance(path.at(-1), toSocket?.position) > 1e-4) return null;
+      return path;
+    };
+    const planningEndpointSeamCache = new Map();
+    const planningEndpointSeam = (socket, node, role) => {
+      // Placement candidates intentionally reuse the logical node/socket IDs
+      // so the accepted plan remains stable. Their transforms are different,
+      // however, and a seam is a physical record. Caching by identity alone
+      // reused the first candidate's 15 cells and overlap envelope for every
+      // translated/rotated candidate, falsely reporting endpoint-floor
+      // overlap outside the seam. Include the exact candidate transform in
+      // the cache key; the selected endpoint still derives one authoritative
+      // record from its final socket.
+      const key = `${String(node?.id ?? socket?.nodeId ?? '')}:${String(
+        socket?.id ?? socket?.socketId ?? '',
+      )}:${socketPositionKey(socket)}:${role}`;
+      if (!planningEndpointSeamCache.has(key)) {
+        const parentOverlap = (grant.socketLandingOverlapGrants ?? []).find((overlap) => (
+          String(overlap.socketId ?? '') === String(socket?.id ?? socket?.socketId ?? '')
+        ));
+        planningEndpointSeamCache.set(key, createDungeonRouteEndpointSeam(socket, {
+          id: `${operationId}:planning-endpoint-seam:${key}`,
+          operationId,
+          networkId: operationId,
+          nodeId: node?.id ?? socket?.nodeId ?? socket?.roomId ?? null,
+          socketId: socket?.id ?? socket?.socketId ?? null,
+          localSocketId: socket?.localSocketId ?? null,
+          role,
+          elevationBand: node?.progressionBandId ?? grant.progressionBandId ?? null,
+          parentOwnerId: enforceExactEmittedCoverageVolumes
+            ? endpointSeamSharedOwnerId(socket, node)
+            : parentOverlap?.parentOwnerId ?? null,
+        }));
+      }
+      return planningEndpointSeamCache.get(key);
+    };
+    const routeOptionRespectsEndpointSeams = (
+      routeOption,
+      fromSocket,
+      toSocket,
+      fromNode,
+      toNode,
+    ) => {
+      if (routeOption?.sharedEndpointFootprint?.kind === 'shared-junction-threshold') {
+        return true;
+      }
+      if (!routePathHasExteriorSocketApproach(routeOption?.path, fromSocket, false)
+        || !routePathHasExteriorSocketApproach(routeOption?.path, toSocket, true)) {
+        return false;
+      }
+      const endpointRecords = [
+        { node: fromNode, seam: planningEndpointSeam(fromSocket, fromNode, 'from') },
+        { node: toNode, seam: planningEndpointSeam(toSocket, toNode, 'to') },
+      ];
+      if (!routePathHasExteriorSocketApproach(
+        routeOption?.path,
+        fromSocket,
+        false,
+        endpointRecords[0].seam,
+      ) || !routePathHasExteriorSocketApproach(
+        routeOption?.path,
+        toSocket,
+        true,
+        endpointRecords[1].seam,
+      )) return false;
+      const collisionVolumes = routeSegmentPlanningCollisionVolumes(
+        routeOption.path,
+        fromSocket,
+        toSocket,
+        5.6,
+        5.6,
+      );
+      return endpointRecords.every(({ node, seam }) => (
+        routePlanningVolumesRespectEndpointNodeMask(collisionVolumes, node, seam)
+      ));
+    };
     const nodeLocalApproachWitness = (node, socket) => ({
       nodeId: node.id,
       socketId: socket.id,
@@ -7068,7 +10296,7 @@ function planRouteNetwork({
       );
       const cacheKey = `${socketPositionKey(fromSocket)}>${socketPositionKey(
         toSocket,
-      )}:${preferXFirst ? 'x' : 'z'}:${sharedThreshold
+      )}:${String(fromNode?.id ?? '')}>${String(toNode?.id ?? '')}:${preferXFirst ? 'x' : 'z'}:${sharedThreshold
         ? 'shared'
         : shortJunctionLink ? 'short-local' : 'corridor'}`;
       if (socketRouteOptionsCache.has(cacheKey)) {
@@ -7082,47 +10310,119 @@ function planRouteNetwork({
         connectorFamily,
         ...coverageModuleRouteOptions,
       });
-      const orderedPaths = [
+      const preselectedExternalPath = matchingExternalSpinePath(
+        fromSocket,
+        toSocket,
+        fromNode,
+        toNode,
+      );
+      const candidateOptions = [
         ...(sharedThreshold ? [sharedThreshold] : []),
-        ...(shortJunctionLink ? [shortJunctionLink] : []),
+        ...(preselectedExternalPath ? [{
+          path: preselectedExternalPath,
+          ordinal: -3,
+          distanceMeters: featurelessPathDistance(preselectedExternalPath),
+          pathVolumes: routePathPlanningVolumes(preselectedExternalPath),
+          preselectedExternalPath: true,
+        }] : []),
         ...paths.map((path, ordinal) => ({
         path,
         ordinal,
         distanceMeters: featurelessPathDistance(path),
         pathVolumes: routePathPlanningVolumes(path),
         })),
-      ].filter(({ path, distanceMeters, sharedEndpointFootprint }) => (
-        (sharedEndpointFootprint || measureDungeonPolyline(path) > 1e-6)
-          && distanceMeters <= maximumSpan + 1e-6
-      )).sort((first, second) => (
+      ].map((routeOption) => {
+        if (routeOption.sharedEndpointFootprint) return routeOption;
+        const endpointSeams = [
+          planningEndpointSeam(fromSocket, fromNode, 'from'),
+          planningEndpointSeam(toSocket, toNode, 'to'),
+        ];
+        return {
+          ...routeOption,
+          endpointSeams,
+          endpointSeamEnvelopes: endpointSeams.map(({ overlapEnvelope }) => (
+            overlapEnvelope
+          )),
+          collisionVolumes: routeSegmentPlanningCollisionVolumes(
+            routeOption.path,
+            fromSocket,
+            toSocket,
+            5.6,
+            5.6,
+          ),
+        };
+      });
+      const exteriorApproachEligible = candidateOptions.filter((routeOption) => (
+        routeOption?.sharedEndpointFootprint?.kind === 'shared-junction-threshold'
+          || (routePathHasExteriorSocketApproach(
+            routeOption?.path,
+            fromSocket,
+            false,
+            routeOption.endpointSeams?.[0],
+          ) && routePathHasExteriorSocketApproach(
+            routeOption?.path,
+            toSocket,
+            true,
+            routeOption.endpointSeams?.[1],
+          ))
+      ));
+      const fromNodeMaskEligible = exteriorApproachEligible.filter((routeOption) => (
+        routeOption?.sharedEndpointFootprint?.kind === 'shared-junction-threshold'
+          || routePlanningVolumesRespectEndpointNodeMask(
+            routeOption.collisionVolumes ?? routeOption.pathVolumes,
+            fromNode,
+            routeOption.endpointSeams?.[0],
+          )
+      ));
+      const toNodeMaskEligible = fromNodeMaskEligible.filter((routeOption) => (
+        routeOption?.sharedEndpointFootprint?.kind === 'shared-junction-threshold'
+          || routePlanningVolumesRespectEndpointNodeMask(
+            routeOption.collisionVolumes ?? routeOption.pathVolumes,
+            toNode,
+            routeOption.endpointSeams?.[1],
+          )
+      ));
+      const positiveLengthOptions = toNodeMaskEligible.filter(({
+        path,
+        sharedEndpointFootprint,
+      }) => (
+        sharedEndpointFootprint || measureDungeonPolyline(path) > 1e-6
+      ));
+      const withinFeaturelessSpanOptions = positiveLengthOptions.filter(({
+        distanceMeters,
+      }) => distanceMeters <= maximumSpan + 1e-6);
+      // These staged predicates are the authoritative seam checks, retained
+      // separately so a rejected solve identifies the exact stage without
+      // evaluating every floor-mask overlap twice.
+      const orderedPaths = withinFeaturelessSpanOptions.sort((first, second) => (
         first.distanceMeters - second.distanceMeters
           || first.ordinal - second.ordinal
       ));
+      orderedPaths.routeSelectionDiagnostics = {
+        rawRouteCandidateCount: paths.length,
+        candidateOptionCount: candidateOptions.length,
+        exteriorApproachEligibleCount: exteriorApproachEligible.length,
+        fromNodeMaskEligibleCount: fromNodeMaskEligible.length,
+        toNodeMaskEligibleCount: toNodeMaskEligible.length,
+        positiveLengthCount: positiveLengthOptions.length,
+        withinFeaturelessSpanCount: withinFeaturelessSpanOptions.length,
+        routeOptionCount: orderedPaths.length,
+      };
       socketRouteOptionsCache.set(cacheKey, orderedPaths);
       return orderedPaths;
     };
-    const spineLandingOverlapGrants = (firstNodeIndex, secondNodeIndex) => [
-      firstNodeIndex,
-      secondNodeIndex,
-    ]
-      .filter((nodeIndex) => endpointNodeIndexSet.has(nodeIndex))
-      .flatMap((nodeIndex) => {
-        const endpointOrdinal = endpointOrdinalForNodeIndex(nodeIndex);
-        const socketId = endpoints[endpointOrdinal]?.id;
-        return [
-          ...(grant.socketLandingOverlapGrants ?? []),
-          ...(grant.socketModuleOverlapGrants ?? []),
-        ].filter((overlap) => (
-          String(overlap.socketId) === String(socketId)
-        ));
-      });
     const routeOptionHasStaticCollision = (routeOption, overlapGrants = []) => {
-      if (overlapGrants.length === 0) {
+      const routeVolumes = routeOption.collisionVolumes ?? routeOption.pathVolumes ?? [];
+      const authoritativeOverlapGrants = [
+        ...(routeOption.endpointSeamEnvelopes ?? []),
+        ...overlapGrants,
+      ];
+      if (authoritativeOverlapGrants.length === 0) {
         if (!staticRouteOptionCollisionCache.has(routeOption)) {
           staticRouteOptionCollisionCache.set(
             routeOption,
-            indexedStaticPathVolumesHaveCollision(routeOption.pathVolumes)
-              || routeOption.pathVolumes.some((pathVolume) => (
+            indexedStaticPathVolumesHaveCollision(routeVolumes)
+              || routeVolumes.some((pathVolume) => (
                 pinnedParentAttachmentPathVolumes.some((attachmentVolume) => (
                   planningVolumesOverlap(pathVolume, attachmentVolume)
                 ))
@@ -7131,13 +10431,54 @@ function planRouteNetwork({
         }
         return staticRouteOptionCollisionCache.get(routeOption);
       }
-      return routeOption.pathVolumes.some((pathVolume) => (
+      return routeVolumes.some((pathVolume) => (
         [...nearbyStaticAvoidanceVolumes(pathVolume), ...pinnedParentAttachmentPathVolumes]
           .some((obstacle) => (
           planningVolumesOverlap(pathVolume, obstacle)
-            && !planningOverlapIsGranted(pathVolume, obstacle, overlapGrants)
+            && !planningOverlapIsGranted(
+              pathVolume,
+              obstacle,
+              authoritativeOverlapGrants,
+            )
           ))
       ));
+    };
+    const routeOptionStaticCollisionDiagnostics = (routeOption, overlapGrants = []) => {
+      const routeVolumes = routeOption.collisionVolumes ?? routeOption.pathVolumes ?? [];
+      const authoritativeOverlapGrants = [
+        ...(routeOption.endpointSeamEnvelopes ?? []),
+        ...overlapGrants,
+      ];
+      const indexedStaticCollisions = routeVolumes.flatMap((pathVolume) => (
+        [...nearbyStaticAvoidanceVolumes(pathVolume)].filter((obstacle) => (
+          planningVolumesOverlap(pathVolume, obstacle)
+            && !planningOverlapIsGranted(
+              pathVolume,
+              obstacle,
+              authoritativeOverlapGrants,
+            )
+        ))
+      ));
+      const pinnedAttachmentCollisions = routeVolumes.flatMap((pathVolume) => (
+        pinnedParentAttachmentPathVolumes.filter((obstacle) => (
+          planningVolumesOverlap(pathVolume, obstacle)
+            && !planningOverlapIsGranted(
+              pathVolume,
+              obstacle,
+              authoritativeOverlapGrants,
+            )
+        ))
+      ));
+      return {
+        indexedStaticCollisionCount: indexedStaticCollisions.length,
+        indexedStaticCollisionIds: [...new Set(indexedStaticCollisions.map((obstacle) => (
+          String(obstacle.id ?? obstacle.ownerId ?? 'unknown')
+        )))].slice(0, 12),
+        pinnedAttachmentCollisionCount: pinnedAttachmentCollisions.length,
+        pinnedEndpointNodeIndices: [...new Set(pinnedAttachmentCollisions.map((obstacle) => (
+          Number(obstacle.pinnedEndpointNodeIndex)
+        )))].filter(Number.isFinite).sort((first, second) => first - second),
+      };
     };
     const staticSocketRouteWitness = (
       fromSocket,
@@ -7160,14 +10501,17 @@ function planRouteNetwork({
         preferXFirst,
         fromNode,
         toNode,
-      ).find((routeOption) => !routeOptionHasStaticCollision(
-        routeOption,
-        firstNodeIndex == null || secondNodeIndex == null
-          ? []
-          : spineLandingOverlapGrants(firstNodeIndex, secondNodeIndex),
-      )) ?? null;
+      ).find((routeOption) => !routeOptionHasStaticCollision(routeOption)) ?? null;
       staticSocketRouteWitnessCache.set(cacheKey, witness);
       return witness;
+    };
+    const endpointFeaturelessPrefixMeters = (candidate, index, throughLocalSocketId) => {
+      const node = candidate?.node;
+      if (routeNetworkNodeResetsFeaturelessDistance(node)) return 0;
+      const parentAttachment = staticParentAttachmentForCandidate(candidate, index);
+      if (!parentAttachment?.compatible) return Number.POSITIVE_INFINITY;
+      return Number(parentAttachment.distanceMeters ?? 0)
+        + connectorModuleCoreTraversalDistance(node, 'entry', throughLocalSocketId);
     };
     const adjacentPairHasPhysicalRoute = (
       firstCandidate,
@@ -7181,13 +10525,16 @@ function planRouteNetwork({
       const [fromCandidate, fromIndex, toCandidate, toIndex] = ordered;
       const requiredEdge = coverageRequiredEdgeForPair(fromIndex, toIndex);
       if (!requiredEdge) return false;
-      const cacheKey = `${candidatePhysicalKey(fromCandidate, fromIndex)}>${candidatePhysicalKey(
+      const cacheKey = physicalPairCacheKey(
+        fromCandidate,
+        fromIndex,
         toCandidate,
         toIndex,
-      )}`;
+      );
       if (physicalPairCompatibilityCache.has(cacheKey)) {
         return physicalPairCompatibilityCache.get(cacheKey);
       }
+      const pairCompatibilityStartedAt = planningNowMilliseconds();
       const edgeDiagnostics = physicalPairEdgeDiagnostics[requiredEdge.edgeOrdinal];
       let compatible = false;
       let bestRoute = null;
@@ -7210,20 +10557,69 @@ function planRouteNetwork({
             { preferXFirst: true, connectorFamily, ...coverageModuleRouteOptions },
           );
           const rawRouteCandidateCount = rawRouteCandidates.length;
-          const routeOptionCount = orderedSocketRouteOptions(
+          const declaredExternalSpinePath = externalSpinePathBySocketPair.get(
+            externalSpinePathKey(
+              fromCandidate.node?.ordinal,
+              fromSocket.localSocketId,
+              toCandidate.node?.ordinal,
+              toSocket.localSocketId,
+            ),
+          ) ?? null;
+          const routeOptions = orderedSocketRouteOptions(
             fromSocket,
             toSocket,
             true,
             fromCandidate.node,
             toCandidate.node,
-          ).length;
-          if (edgeDiagnostics.socketPairCandidateCounts.length < 16) {
-            edgeDiagnostics.socketPairCandidateCounts.push({
+          );
+          const routeSelectionDiagnostics = routeOptions.routeSelectionDiagnostics ?? {
+            rawRouteCandidateCount,
+            candidateOptionCount: rawRouteCandidateCount,
+            exteriorApproachEligibleCount: null,
+            fromNodeMaskEligibleCount: null,
+            toNodeMaskEligibleCount: null,
+            positiveLengthCount: null,
+            withinFeaturelessSpanCount: null,
+            routeOptionCount: routeOptions.length,
+          };
+          const routeOptionCount = routeOptions.length;
+          const optionCollisionDiagnostics = routeOptions.map((routeOption) => ({
+            distanceMeters: routeOption.distanceMeters,
+            ...routeOptionStaticCollisionDiagnostics(routeOption),
+          }));
+          const exactRouteOptionStaticCollisionFreeCount = optionCollisionDiagnostics
+            .filter((diagnostics) => (
+              diagnostics.indexedStaticCollisionCount === 0
+                && diagnostics.pinnedAttachmentCollisionCount === 0
+            )).length;
+          const endpointPrefixMeters = endpointFeaturelessPrefixMeters(
+            fromCandidate,
+            fromIndex,
+            fromSocket.localSocketId,
+          ) + endpointFeaturelessPrefixMeters(
+            toCandidate,
+            toIndex,
+            toSocket.localSocketId,
+          );
+          const socketPairDiagnostics = {
               fromLocalSocketId: fromSocket.localSocketId,
               toLocalSocketId: toSocket.localSocketId,
               connectorFamily,
               rawRouteCandidateCount,
               routeOptionCount,
+              routeSelectionDiagnostics,
+              endpointPrefixMeters,
+              accumulatedFeaturelessDistancesMeters: routeOptions.slice(0, 8)
+                .map(({ distanceMeters }) => distanceMeters + endpointPrefixMeters),
+              exactRouteOptionStaticCollisionFreeCount,
+              optionCollisionDiagnostics: optionCollisionDiagnostics.slice(0, 8),
+              declaredExternalSpinePath: Boolean(declaredExternalSpinePath),
+              externalSpineStartDeltaMeters: declaredExternalSpinePath
+                ? dungeonPointDistance(declaredExternalSpinePath[0], fromSocket.position)
+                : null,
+              externalSpineEndDeltaMeters: declaredExternalSpinePath
+                ? dungeonPointDistance(declaredExternalSpinePath.at(-1), toSocket.position)
+                : null,
               fromPosition: cloneDungeonAugmentationValue(fromSocket.position),
               toPosition: cloneDungeonAugmentationValue(toSocket.position),
               fromFacing: cloneDungeonAugmentationValue(fromSocket.facing),
@@ -7231,8 +10627,37 @@ function planRouteNetwork({
               minimumRawFeaturelessDistanceMeters: rawRouteCandidates.length > 0
                 ? Math.min(...rawRouteCandidates.map(featurelessPathDistance))
                 : null,
-            });
+            };
+          if (edgeDiagnostics.socketPairCandidateCounts.length < 16) {
+            edgeDiagnostics.socketPairCandidateCounts.push(socketPairDiagnostics);
           }
+          if (routeOptionCount > 0
+            && edgeDiagnostics.eligibleSocketPairCandidateCounts.length < 16) {
+            edgeDiagnostics.eligibleSocketPairCandidateCounts.push(socketPairDiagnostics);
+          }
+          edgeDiagnostics.routeStageTotals.socketPairCount += 1;
+          for (const key of [
+            'rawRouteCandidateCount',
+            'exteriorApproachEligibleCount',
+            'fromNodeMaskEligibleCount',
+            'toNodeMaskEligibleCount',
+            'positiveLengthCount',
+            'withinFeaturelessSpanCount',
+            'routeOptionCount',
+          ]) {
+            const count = Number(routeSelectionDiagnostics[key]);
+            if (Number.isFinite(count)) edgeDiagnostics.routeStageTotals[key] += count;
+          }
+          edgeDiagnostics.routeStageTotals.exactRouteOptionStaticCollisionFreeCount +=
+            exactRouteOptionStaticCollisionFreeCount;
+          edgeDiagnostics.routeStageTotals.indexedStaticCollisionCount +=
+            optionCollisionDiagnostics.reduce((sum, diagnostics) => (
+              sum + diagnostics.indexedStaticCollisionCount
+            ), 0);
+          edgeDiagnostics.routeStageTotals.pinnedAttachmentCollisionCount +=
+            optionCollisionDiagnostics.reduce((sum, diagnostics) => (
+              sum + diagnostics.pinnedAttachmentCollisionCount
+            ), 0);
           const witness = staticSocketRouteWitness(
             fromSocket,
             toSocket,
@@ -7242,31 +10667,29 @@ function planRouteNetwork({
             fromCandidate.node,
             toCandidate.node,
           );
-          if (witness) {
+          const accumulatedFeaturelessDistanceMeters = witness
+            ? Number(witness.distanceMeters) + endpointPrefixMeters
+            : Number.POSITIVE_INFINITY;
+          if (witness
+            && accumulatedFeaturelessDistanceMeters <= maximumSpan + 1e-6) {
+            edgeDiagnostics.routeStageTotals.staticCollisionFreeCount += 1;
             bestRoute = {
               path: witness.path,
               collisionScore: 0,
               distanceMeters: witness.distanceMeters,
+              accumulatedFeaturelessDistanceMeters,
             };
             compatible = true;
             break;
           }
-          const overlapGrants = spineLandingOverlapGrants(fromIndex, toIndex);
-          const blockedRoute = orderedSocketRouteOptions(
-            fromSocket,
-            toSocket,
-            true,
-            fromCandidate.node,
-            toCandidate.node,
-          )
+          const blockedRoute = routeOptions
             .map((routeOption) => ({
               path: routeOption.path,
               distanceMeters: routeOption.distanceMeters,
-              collisionScore: pathPlanningCollisionScore(
-                routeOption.path,
+              collisionScore: planningRouteVolumesCollisionScore(
+                routeOption.collisionVolumes ?? routeOption.pathVolumes ?? [],
                 staticAvoidanceVolumes,
-                5.6,
-                overlapGrants,
+                routeOption.endpointSeamEnvelopes ?? [],
               ),
             }))
             .sort((first, second) => (
@@ -7299,7 +10722,52 @@ function planRouteNetwork({
         ).slice(0, 12);
       }
       physicalPairCompatibilityCache.set(cacheKey, compatible);
+      physicalPlanningPhaseTimings.pairCompatibilityMs +=
+        planningNowMilliseconds() - pairCompatibilityStartedAt;
+      physicalPlanningPhaseTimings.pairCompatibilityEvaluations += 1;
       return compatible;
+    };
+    const adjacentPairHasRouteShape = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => {
+      const ordered = firstIndex <= secondIndex
+        ? [firstCandidate, firstIndex, secondCandidate, secondIndex]
+        : [secondCandidate, secondIndex, firstCandidate, firstIndex];
+      const [fromCandidate, fromIndex, toCandidate, toIndex] = ordered;
+      if (!coverageRequiredEdgeForPair(fromIndex, toIndex)) return false;
+      const cacheKey = physicalPairCacheKey(
+        fromCandidate,
+        fromIndex,
+        toCandidate,
+        toIndex,
+      );
+      if (physicalPairRouteShapeCache.has(cacheKey)) {
+        return physicalPairRouteShapeCache.get(cacheKey);
+      }
+      // This cache is deliberately geometry-only. Static obstacle collision
+      // belongs to the bounded exact stage; evaluating it while scanning the
+      // complete candidate pool bypasses the solver's cheap/exact budgets and
+      // made a single repair perform tens of thousands of full route tests.
+      const hasRouteShape = availableSpineSockets(
+        fromCandidate.node,
+        fromIndex,
+        toIndex,
+      ).some((fromSocket) => availableSpineSockets(
+        toCandidate.node,
+        toIndex,
+        fromIndex,
+      ).some((toSocket) => orderedSocketRouteOptions(
+        fromSocket,
+        toSocket,
+        true,
+        fromCandidate.node,
+        toCandidate.node,
+      ).length > 0));
+      physicalPairRouteShapeCache.set(cacheKey, hasRouteShape);
+      return hasRouteShape;
     };
     const adjacentCandidatesCompatible = (
       firstCandidate,
@@ -7307,15 +10775,16 @@ function planRouteNetwork({
       secondCandidate,
       secondIndex,
     ) => {
-      const secondVolumes = [
-        ...(secondCandidate.node.occupiedVolumes ?? []),
-        ...(secondCandidate.node.clearanceVolumes ?? []),
-      ];
-      return nodePlanningCollisionScore(firstCandidate.node, secondVolumes) === 0
-        && minimumSpineDistance(
-          firstCandidate.node,
+      return candidatePairNodeCollisionScore(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      ) === 0
+        && candidatePairMinimumSpineDistance(
+          firstCandidate,
           firstIndex,
-          secondCandidate.node,
+          secondCandidate,
           secondIndex,
         ) <= maximumSpan + 1e-6
         && adjacentPairHasPhysicalRoute(
@@ -7325,20 +10794,143 @@ function planRouteNetwork({
           secondIndex,
         );
     };
+    const stackedCompoundPairIndices = coveragePlacement?.stackedInterchangeCompound
+      ? new Set([
+        Number(coveragePlacement.stackedInterchangeCompound.kitNodeIndex),
+        Number(coveragePlacement.stackedInterchangeCompound.supportNodeIndex),
+      ])
+      : null;
+    const isStackedCompoundPair = (firstIndex, secondIndex) => (
+      stackedCompoundPairIndices?.size === 2
+        && stackedCompoundPairIndices.has(Number(firstIndex))
+        && stackedCompoundPairIndices.has(Number(secondIndex))
+    );
+    const routeHorizontalBendCount = (path = []) => {
+      const directions = [];
+      for (let index = 1; index < path.length; index += 1) {
+        const deltaX = Number(path[index].x) - Number(path[index - 1].x);
+        const deltaZ = Number(path[index].z) - Number(path[index - 1].z);
+        if (Math.hypot(deltaX, deltaZ) <= 1e-6) continue;
+        const direction = toDungeonCardinalFacing({ x: deltaX, z: deltaZ });
+        const previous = directions.at(-1);
+        if (!previous
+          || Math.abs(previous.x - direction.x) > 1e-6
+          || Math.abs(previous.z - direction.z) > 1e-6) directions.push(direction);
+      }
+      return Math.max(0, directions.length - 1);
+    };
+    const stackedCompoundCompatibilityCache = new Map();
+    const stackedCompoundCandidatesCompatible = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => {
+      if (!isStackedCompoundPair(firstIndex, secondIndex)) return true;
+      const compound = coveragePlacement.stackedInterchangeCompound;
+      const kitIsFirst = Number(firstIndex) === Number(compound.kitNodeIndex);
+      const kitCandidate = kitIsFirst ? firstCandidate : secondCandidate;
+      const supportCandidate = kitIsFirst ? secondCandidate : firstCandidate;
+      const cacheKey = `${candidatePhysicalKey(
+        kitCandidate,
+        compound.kitNodeIndex,
+      )}>${candidatePhysicalKey(supportCandidate, compound.supportNodeIndex)}`;
+      if (stackedCompoundCompatibilityCache.has(cacheKey)) {
+        return stackedCompoundCompatibilityCache.get(cacheKey);
+      }
+      const pairCompatibilityStartedAt = planningNowMilliseconds();
+      const kitSocket = getNodeSocket(kitCandidate.node, compound.kitLocalSocketId);
+      const supportSocket = getNodeSocket(
+        supportCandidate.node,
+        compound.supportLocalSocketId,
+      );
+      const compatible = Boolean(kitSocket && supportSocket) && orderedSocketRouteOptions(
+        kitSocket,
+        supportSocket,
+        true,
+        kitCandidate.node,
+        supportCandidate.node,
+      ).some((routeOption) => (
+        routeHorizontalBendCount(routeOption.path) <= 1
+          && !routeOptionHasStaticCollision(routeOption)
+      ));
+      stackedCompoundCompatibilityCache.set(cacheKey, compatible);
+      physicalPlanningPhaseTimings.pairCompatibilityMs +=
+        planningNowMilliseconds() - pairCompatibilityStartedAt;
+      physicalPlanningPhaseTimings.pairCompatibilityEvaluations += 1;
+      return compatible;
+    };
+    const stackedCompoundCandidatesMeetCheapBounds = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => {
+      if (!isStackedCompoundPair(firstIndex, secondIndex)) return true;
+      const compound = coveragePlacement.stackedInterchangeCompound;
+      const kitCandidate = Number(firstIndex) === Number(compound.kitNodeIndex)
+        ? firstCandidate
+        : secondCandidate;
+      const supportCandidate = Number(firstIndex) === Number(compound.supportNodeIndex)
+        ? firstCandidate
+        : secondCandidate;
+      const kitSocket = getNodeSocket(kitCandidate.node, compound.kitLocalSocketId);
+      const supportSocket = getNodeSocket(
+        supportCandidate.node,
+        compound.supportLocalSocketId,
+      );
+      if (!kitSocket || !supportSocket) return false;
+      if (dungeonPointDistance(kitSocket.position, supportSocket.position)
+        > ROUTE_NETWORK_SOCKET_APPROACH_METERS * 4 + 1e-6) return false;
+      // Preserve the cheap/exact split while applying the complete authored
+      // compound route shape here. Static collision remains an exact check,
+      // but pairs which cannot align the named sockets with at most one bend
+      // must never consume the 32-check collision budget.
+      return orderedSocketRouteOptions(
+        kitSocket,
+        supportSocket,
+        true,
+        kitCandidate.node,
+        supportCandidate.node,
+      ).some((routeOption) => routeHorizontalBendCount(routeOption.path) <= 1);
+    };
     const adjacentCandidatesMeetCheapBounds = (
       firstCandidate,
       firstIndex,
       secondCandidate,
       secondIndex,
     ) => {
-      const secondVolumes = candidateNodeVolumes(secondCandidate);
-      return nodePlanningCollisionScore(firstCandidate.node, secondVolumes) === 0
-        && minimumSpineDistance(
-          firstCandidate.node,
+      const cachedCompatibility = physicalPairCompatibilityCache.get(
+        physicalPairCacheKey(
+          firstCandidate,
           firstIndex,
-          secondCandidate.node,
+          secondCandidate,
           secondIndex,
-        ) <= maximumSpan + 1e-6;
+        ),
+      );
+      return candidatePairNodeCollisionScore(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      ) === 0
+        && cachedCompatibility !== false
+        && candidatePairMinimumSpineDistance(
+          firstCandidate,
+          firstIndex,
+          secondCandidate,
+          secondIndex,
+        ) <= maximumSpan + 1e-6
+        // The correlated reservoir is deliberately allowed only 32 exact
+        // collision checks. Apply the same authoritative seam/mask route-shape
+        // predicate here (without static collision) so that budget is never
+        // spent on pairs which cannot produce a physical path at all.
+        && adjacentPairHasRouteShape(
+          firstCandidate,
+          firstIndex,
+          secondCandidate,
+          secondIndex,
+        );
     };
     const candidatePairSatisfiesPlacementConstraints = (
       firstCandidate,
@@ -7346,9 +10938,19 @@ function planRouteNetwork({
       secondCandidate,
       secondIndex,
     ) => {
-      const secondVolumes = candidateNodeVolumes(secondCandidate);
-      if (nodePlanningCollisionScore(firstCandidate.node, secondVolumes) > 0) return false;
+      if (candidatePairNodeCollisionScore(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      ) > 0) return false;
       if (!candidatePairRespectsParentAttachments(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      )) return false;
+      if (!stackedCompoundCandidatesCompatible(
         firstCandidate,
         firstIndex,
         secondCandidate,
@@ -7362,6 +10964,364 @@ function planRouteNetwork({
           secondIndex,
         );
     };
+    // Every coverage chain needs the same global candidate correlation. A
+    // numeric 0 -> 1 -> 2 -> 3 -> 4 chain can lose its only valid continuation
+    // to the 64-candidate per-node sweep just as a rewired compound can.
+    const requiresCorrelatedPlacementReservation = coverageRequiredEdges.length > 0;
+    const boundedPlacementCandidatesByIndex = new Map(
+      placementCandidateGroups.map(({ index, candidates }) => [index, [...candidates]]),
+    );
+    let correlatedPlacementReservation = {
+      status: requiresCorrelatedPlacementReservation ? 'not-invoked' : 'not-required',
+      pairEvaluations: 0,
+      exactPairEvaluations: 0,
+      cheapPairEvaluations: 0,
+      cheapPairCount: 0,
+      prunedCandidateCount: 0,
+      reservedByIndex: new Map(),
+    };
+    const correlatedCheapStageDiagnostics = new Map();
+    const correlatedPairPassesCheapBounds = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => {
+      const edgeKey = `${firstIndex}>${secondIndex}`;
+      const diagnostics = correlatedCheapStageDiagnostics.get(edgeKey) ?? {
+        edgeKey,
+        evaluatedCount: 0,
+        nodeCollisionPassCount: 0,
+        parentAttachmentPassCount: 0,
+        compoundShapePassCount: 0,
+        adjacentShapePassCount: 0,
+      };
+      diagnostics.evaluatedCount += 1;
+      correlatedCheapStageDiagnostics.set(edgeKey, diagnostics);
+      if (candidatePairNodeCollisionScore(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      ) > 0) return false;
+      diagnostics.nodeCollisionPassCount += 1;
+      if (!candidatePairRespectsParentAttachments(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      )) return false;
+      diagnostics.parentAttachmentPassCount += 1;
+      if (!stackedCompoundCandidatesMeetCheapBounds(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      )) return false;
+      diagnostics.compoundShapePassCount += 1;
+      if (coverageRequiredEdgeForPair(firstIndex, secondIndex)
+        && !adjacentCandidatesMeetCheapBounds(
+          firstCandidate,
+          firstIndex,
+          secondCandidate,
+          secondIndex,
+        )) return false;
+      diagnostics.adjacentShapePassCount += 1;
+      return true;
+    };
+    const correlatedPairClearsAssignedCandidates = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+      assignedCandidates,
+    ) => {
+      const otherCandidateVolumes = [...assignedCandidates.entries()]
+        .filter(([index]) => index !== firstIndex && index !== secondIndex)
+        .flatMap(([, candidate]) => candidateNodeVolumes(candidate));
+       return availableSpineSockets(
+        firstCandidate.node,
+        firstIndex,
+        secondIndex,
+      ).some((fromSocket) => availableSpineSockets(
+        secondCandidate.node,
+        secondIndex,
+        firstIndex,
+      ).some((toSocket) => orderedSocketRouteOptions(
+        fromSocket,
+        toSocket,
+        true,
+        firstCandidate.node,
+        secondCandidate.node,
+       ).some((routeOption) => (
+         !routeOptionHasStaticCollision(routeOption)
+          && (routeOption.collisionVolumes ?? routeOption.pathVolumes ?? [])
+            .every((pathVolume) => (
+            otherCandidateVolumes.every((obstacle) => (
+              !planningVolumesOverlap(pathVolume, obstacle)
+            ))
+            ))
+      ))));
+    };
+    const correlatedPrefixSocketAssignmentCache = new Map();
+    const correlatedPrefixHasInjectiveSocketAssignment = (assignedCandidates) => {
+      const assignedEdges = coverageRequiredEdges.filter(({ fromIndex, toIndex }) => (
+        assignedCandidates.has(fromIndex) && assignedCandidates.has(toIndex)
+      ));
+      if (assignedEdges.length <= 1) return true;
+      const cacheKey = [...assignedCandidates.entries()]
+        .sort((first, second) => first[0] - second[0])
+        .map(([index, candidate]) => candidatePhysicalKey(candidate, index))
+        .join('|socket-prefix|');
+      if (correlatedPrefixSocketAssignmentCache.has(cacheKey)) {
+        return correlatedPrefixSocketAssignmentCache.get(cacheKey);
+      }
+      const socketClaimsByConstraint = assignedEdges.map(({ fromIndex, toIndex }) => {
+        const fromCandidate = assignedCandidates.get(fromIndex);
+        const toCandidate = assignedCandidates.get(toIndex);
+        const pairKeys = new Set();
+        const pairs = [];
+        for (const fromSocket of availableSpineSockets(
+          fromCandidate.node,
+          fromIndex,
+          toIndex,
+        )) {
+          for (const toSocket of availableSpineSockets(
+            toCandidate.node,
+            toIndex,
+            fromIndex,
+          )) {
+            const hasStaticClearRoute = orderedSocketRouteOptions(
+              fromSocket,
+              toSocket,
+              true,
+              fromCandidate.node,
+              toCandidate.node,
+            ).some((routeOption) => (
+              !routeOptionHasStaticCollision(routeOption)
+            ));
+            if (!hasStaticClearRoute) continue;
+            const pairKey = `${String(fromSocket.localSocketId)}>${String(
+              toSocket.localSocketId,
+            )}`;
+            if (pairKeys.has(pairKey)) continue;
+            pairKeys.add(pairKey);
+            pairs.push({ claims: [
+              { nodeIndex: fromIndex, localSocketId: String(fromSocket.localSocketId) },
+              { nodeIndex: toIndex, localSocketId: String(toSocket.localSocketId) },
+            ] });
+          }
+        }
+        return pairs;
+      });
+      if (socketClaimsByConstraint.some((pairs) => pairs.length === 0)) {
+        correlatedPrefixSocketAssignmentCache.set(cacheKey, false);
+        return false;
+      }
+      const edgeOrdinals = socketClaimsByConstraint
+        .map((pairs, edgeOrdinal) => ({ edgeOrdinal, pairCount: pairs.length }))
+        .sort((first, second) => first.pairCount - second.pairCount
+          || first.edgeOrdinal - second.edgeOrdinal)
+        .map(({ edgeOrdinal }) => edgeOrdinal);
+      const usedSocketIdsByNodeIndex = new Map(
+        [...assignedCandidates.keys()].map((nodeIndex) => [
+          nodeIndex,
+          new Set(endpointNodeIndexSet.has(nodeIndex) ? ['entry'] : []),
+        ]),
+      );
+      const visitEdge = (ordinal) => {
+        if (ordinal >= edgeOrdinals.length) return true;
+        for (const { claims } of socketClaimsByConstraint[edgeOrdinals[ordinal]]) {
+          if (claims.some(({ nodeIndex, localSocketId }) => (
+            usedSocketIdsByNodeIndex.get(nodeIndex).has(localSocketId)
+          ))) continue;
+          for (const { nodeIndex, localSocketId } of claims) {
+            usedSocketIdsByNodeIndex.get(nodeIndex).add(localSocketId);
+          }
+          if (visitEdge(ordinal + 1)) return true;
+          for (const { nodeIndex, localSocketId } of claims) {
+            usedSocketIdsByNodeIndex.get(nodeIndex).delete(localSocketId);
+          }
+        }
+        return false;
+      };
+      const compatible = visitEdge(0);
+      correlatedPrefixSocketAssignmentCache.set(cacheKey, compatible);
+      return compatible;
+    };
+    const correlatedCandidateGroupByIndex = new Map(
+      placementCandidateGroups.map((group) => [Number(group.index), group]),
+    );
+    const correlatedFutureSupportCache = new Map();
+    const candidateHasBoundedFutureSupport = (
+      candidate,
+      candidateIndex,
+      futureIndex,
+    ) => {
+      const cacheKey = `${candidatePhysicalKey(candidate, candidateIndex)}>${futureIndex}`;
+      if (correlatedFutureSupportCache.has(cacheKey)) {
+        return correlatedFutureSupportCache.get(cacheKey);
+      }
+      const futureGroup = correlatedCandidateGroupByIndex.get(Number(futureIndex));
+      const supported = (futureGroup?.candidates ?? []).some((futureCandidate) => (
+        candidatePairNodeCollisionScore(
+          candidate,
+          candidateIndex,
+          futureCandidate,
+          futureIndex,
+        ) === 0
+          && candidatePairMinimumSpineDistance(
+            candidate,
+            candidateIndex,
+            futureCandidate,
+            futureIndex,
+          ) <= maximumSpan + 1e-6
+          && (!futureGroup?.endpoint || adjacentPairHasRouteShape(
+            candidate,
+            candidateIndex,
+            futureCandidate,
+            futureIndex,
+          ))
+      ));
+      correlatedFutureSupportCache.set(cacheKey, supported);
+      return supported;
+    };
+    const attemptCorrelatedPlacementReservation = (
+      failedFirstIndex,
+      failedSecondIndex,
+    ) => {
+      const orientedEdges = orientOrderedCandidateChainAtFailure(
+        coverageRequiredEdges,
+        failedFirstIndex,
+        failedSecondIndex,
+      );
+      const prefilterEdgeCandidatesForOrder = (edgeOrder) => (
+        candidates,
+        fromCandidate,
+        fromIndex,
+        toIndex,
+        edgeOrdinal,
+      ) => {
+        const nextEdge = edgeOrder[edgeOrdinal + 1] ?? null;
+        const ranked = Array.from({ length: 6 }, () => []);
+        for (const toCandidate of candidates) {
+          if (candidatePairMinimumSpineDistance(
+            fromCandidate,
+            fromIndex,
+            toCandidate,
+            toIndex,
+          ) > maximumSpan + 1e-6) continue;
+          const compatibility = physicalPairCompatibilityCache.get(
+            physicalPairCacheKey(
+              fromCandidate,
+              fromIndex,
+              toCandidate,
+              toIndex,
+            ),
+          );
+          const futureSupported = !nextEdge || nextEdge.fromIndex !== toIndex
+            || candidateHasBoundedFutureSupport(
+              toCandidate,
+              toIndex,
+              nextEdge.toIndex,
+            );
+          const compatibilityRank = compatibility === true
+            ? 0
+            : compatibility === false ? 2 : 1;
+          ranked[compatibilityRank * 2 + Number(!futureSupported)].push(toCandidate);
+        }
+        return ranked.flat();
+      };
+      const reservationOptions = {
+      candidateGroups: placementCandidateGroups,
+      candidateKey: candidatePhysicalKey,
+      maxPairEvaluations: 32,
+      maxCheapPairEvaluations: 16384,
+      // Retain at most two continuations for each 32-node layer. A single
+      // continuation could be static-clear yet cross the already paired
+      // compound kit; 96 per predecessor overfilled the fixed cheap budget.
+      candidateWindowSize: 64,
+      maximumLayerCandidates: 32,
+      pairPassesCheapBounds: correlatedPairPassesCheapBounds,
+      pairClearsAssignedCandidates: correlatedPairClearsAssignedCandidates,
+      prefixIsCompatible: correlatedPrefixHasInjectiveSocketAssignment,
+      prefilterEdgeCandidates: prefilterEdgeCandidatesForOrder(orientedEdges),
+      pairIsCompatible: candidatePairSatisfiesPlacementConstraints,
+      pairCompatibilityIsKnown: (
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      ) => physicalPairCompatibilityCache.has(physicalPairCacheKey(
+        firstCandidate,
+        firstIndex,
+        secondCandidate,
+        secondIndex,
+      )),
+      compareEdgeCandidates: (
+        firstCandidate,
+        secondCandidate,
+        fromCandidate,
+        fromIndex,
+        toIndex,
+      ) => {
+        const firstCachedCompatibility = physicalPairCompatibilityCache.get(
+          physicalPairCacheKey(
+            fromCandidate,
+            fromIndex,
+            firstCandidate,
+            toIndex,
+          ),
+        );
+        const secondCachedCompatibility = physicalPairCompatibilityCache.get(
+          physicalPairCacheKey(
+            fromCandidate,
+            fromIndex,
+            secondCandidate,
+            toIndex,
+          ),
+        );
+        const compatibilityRank = (compatibility) => (
+          compatibility === true ? 0 : compatibility === false ? 2 : 1
+        );
+        return compatibilityRank(firstCachedCompatibility)
+          - compatibilityRank(secondCachedCompatibility)
+          || candidatePairMinimumSpineDistance(
+          fromCandidate,
+          fromIndex,
+          firstCandidate,
+          toIndex,
+        ) - candidatePairMinimumSpineDistance(
+          fromCandidate,
+          fromIndex,
+          secondCandidate,
+          toIndex,
+        )
+          || Number(firstCandidate.displacement ?? 0)
+            - Number(secondCandidate.displacement ?? 0)
+          || Number(firstCandidate.center.x) - Number(secondCandidate.center.x)
+          || Number(firstCandidate.center.y) - Number(secondCandidate.center.y)
+          || Number(firstCandidate.center.z) - Number(secondCandidate.center.z)
+          || Number(firstCandidate.facing?.x ?? 0) - Number(secondCandidate.facing?.x ?? 0)
+          || Number(firstCandidate.facing?.z ?? 0) - Number(secondCandidate.facing?.z ?? 0);
+      },
+    };
+      const chainReservation = reserveOrderedCandidateChain({
+        ...reservationOptions,
+        orderedEdges: orientedEdges,
+      });
+      if (chainReservation.status !== 'unsupported-chain') return chainReservation;
+      const orientedTreeEdges = orientOrderedCandidateTreeAtFailure(
+        coverageRequiredEdges,
+        failedFirstIndex,
+        failedSecondIndex,
+      );
+      return reserveOrderedCandidateTree({
+        ...reservationOptions,
+        orderedEdges: orientedTreeEdges,
+        prefilterEdgeCandidates: prefilterEdgeCandidatesForOrder(orientedTreeEdges),
+      });
+    };
     const placementConstraintPairs = placementCandidateGroups.flatMap((firstGroup, firstOrdinal) => (
       placementCandidateGroups.slice(firstOrdinal + 1).map((secondGroup) => {
         const adjacent = Boolean(coverageRequiredEdgeForPair(
@@ -7372,19 +11332,112 @@ function planRouteNetwork({
         return { firstGroup, secondGroup, adjacent, parentAttachment };
       })
     ));
+    const summarizePlacementPairRejections = (
+      firstGroup,
+      secondGroup,
+      firstCandidates,
+      secondCandidates,
+    ) => {
+      const summary = {
+        candidatePairCount: firstCandidates.length * secondCandidates.length,
+        compatibleCount: 0,
+        nodeCollisionRejectedCount: 0,
+        parentAttachmentRejectedCount: 0,
+        stackedCompoundRejectedCount: 0,
+        minimumSpineDistanceRejectedCount: 0,
+        exactPhysicalRouteRejectedCount: 0,
+        exactPhysicalRouteNotEvaluatedCount: 0,
+      };
+      const requiredEdge = coverageRequiredEdgeForPair(firstGroup.index, secondGroup.index);
+      for (const firstCandidate of firstCandidates) {
+        for (const secondCandidate of secondCandidates) {
+          if (candidatePairNodeCollisionScore(
+            firstCandidate,
+            firstGroup.index,
+            secondCandidate,
+            secondGroup.index,
+          ) > 0) {
+            summary.nodeCollisionRejectedCount += 1;
+            continue;
+          }
+          if (!candidatePairRespectsParentAttachments(
+            firstCandidate,
+            firstGroup.index,
+            secondCandidate,
+            secondGroup.index,
+          )) {
+            summary.parentAttachmentRejectedCount += 1;
+            continue;
+          }
+          if (!stackedCompoundCandidatesCompatible(
+            firstCandidate,
+            firstGroup.index,
+            secondCandidate,
+            secondGroup.index,
+          )) {
+            summary.stackedCompoundRejectedCount += 1;
+            continue;
+          }
+          if (!requiredEdge) {
+            summary.compatibleCount += 1;
+            continue;
+          }
+          if (candidatePairMinimumSpineDistance(
+            firstCandidate,
+            firstGroup.index,
+            secondCandidate,
+            secondGroup.index,
+          ) > maximumSpan + 1e-6) {
+            summary.minimumSpineDistanceRejectedCount += 1;
+            continue;
+          }
+          const routeState = physicalPairCompatibilityCache.get(physicalPairCacheKey(
+            firstCandidate,
+            firstGroup.index,
+            secondCandidate,
+            secondGroup.index,
+          ));
+          if (routeState === true) summary.compatibleCount += 1;
+          else if (routeState === false) summary.exactPhysicalRouteRejectedCount += 1;
+          else summary.exactPhysicalRouteNotEvaluatedCount += 1;
+        }
+      }
+      return summary;
+    };
     // Arc-consistency covers both neighboring spine modules and every binary
     // endpoint-to-module pair. The latter is essential: a non-adjacent room
     // can otherwise consume an endpoint's only clear two-tile parent approach,
     // leaving the expensive full-layout solver to discover the conflict late.
-    let arcChanged = true;
-    while (arcChanged) {
-      arcChanged = false;
-      for (const {
-        firstGroup,
-        secondGroup,
-        adjacent,
-        parentAttachment,
-      } of placementConstraintPairs) {
+    const initialPlacementCandidateCounts = placementCandidateGroups.map(({ index, candidates }) => ({
+      nodeIndex: index,
+      count: candidates.length,
+    }));
+    const arcConsistencyHistory = [];
+    let arcIteration = 0;
+    let correlatedRepairAttempted = false;
+    const finalizeCorrelatedCandidateDiagnostics = () => {
+      for (const group of placementCandidateGroups) {
+        group.diagnostics.correlatedCandidatePoolCount = group.candidatePool?.length ?? 0;
+        group.diagnostics.correlatedCandidateReserved =
+          correlatedPlacementReservation.reservedByIndex.has(group.index);
+        group.diagnostics.correlatedCandidateReservationStatus =
+          correlatedPlacementReservation.status;
+        delete group.candidatePool;
+      }
+    };
+    arcConsistencyPass:
+    while (true) {
+      let arcChanged = true;
+      while (arcChanged) {
+        arcChanged = false;
+        const currentArcIteration = arcIteration;
+        arcIteration += 1;
+        for (const {
+          firstGroup,
+          secondGroup,
+          adjacent,
+          parentAttachment,
+        } of placementConstraintPairs) {
         const originalFirstCandidates = firstGroup.candidates;
         const originalSecondCandidates = secondGroup.candidates;
         const firstCandidates = firstGroup.candidates.filter((firstCandidate) => (
@@ -7410,14 +11463,87 @@ function planRouteNetwork({
           arcChanged = true;
           firstGroup.candidates = firstCandidates;
           secondGroup.candidates = secondCandidates;
+          arcConsistencyHistory.push({
+            iteration: currentArcIteration,
+            firstNodeIndex: firstGroup.index,
+            secondNodeIndex: secondGroup.index,
+            adjacent,
+            parentAttachment,
+            beforeFirstCount: originalFirstCandidates.length,
+            afterFirstCount: firstCandidates.length,
+            beforeSecondCount: originalSecondCandidates.length,
+            afterSecondCount: secondCandidates.length,
+          });
         }
         if (firstCandidates.length === 0 || secondCandidates.length === 0) {
+          if (requiresCorrelatedPlacementReservation
+            && shouldAttemptCorrelatedPlacementRepair({
+              orderedEdges: coverageRequiredEdges,
+              failedFirstIndex: firstGroup.index,
+              failedSecondIndex: secondGroup.index,
+              alreadyAttempted: correlatedRepairAttempted,
+            })) {
+            correlatedRepairAttempted = true;
+            const failedPlacementCandidatesByIndex = new Map(
+              placementCandidateGroups.map(({ index, candidates }) => [index, candidates]),
+            );
+            for (const group of placementCandidateGroups) {
+              group.candidates = [
+                ...(boundedPlacementCandidatesByIndex.get(group.index) ?? []),
+              ];
+            }
+            correlatedPlacementReservation = attemptCorrelatedPlacementReservation(
+              firstGroup.index,
+              secondGroup.index,
+            );
+            correlatedPlacementReservation.cheapStageDiagnostics = [
+              ...correlatedCheapStageDiagnostics.values(),
+            ];
+            if (correlatedPlacementReservation.status === 'reserved') {
+              for (const group of placementCandidateGroups) {
+                const reservedCandidate =
+                  correlatedPlacementReservation.reservedByIndex.get(group.index);
+                if (!reservedCandidate) continue;
+                group.candidates = mergeReservedPlacementCandidates(
+                  group.candidates,
+                  [reservedCandidate],
+                  group.candidates.length,
+                );
+              }
+              arcConsistencyHistory.push({
+                iteration: currentArcIteration,
+                kind: 'correlated-chain-domain-restart',
+                exactPairEvaluations:
+                  correlatedPlacementReservation.exactPairEvaluations,
+                cheapPairEvaluations:
+                  correlatedPlacementReservation.cheapPairEvaluations,
+                reservedNodeIndices: [
+                  ...correlatedPlacementReservation.reservedByIndex.keys(),
+                ].sort((first, second) => first - second),
+              });
+              continue arcConsistencyPass;
+            }
+            for (const group of placementCandidateGroups) {
+              group.candidates = failedPlacementCandidatesByIndex.get(group.index) ?? [];
+            }
+            arcConsistencyHistory.push({
+              iteration: currentArcIteration,
+              kind: 'correlated-chain-domain-repair-failed',
+              status: correlatedPlacementReservation.status,
+              exactPairEvaluations:
+                correlatedPlacementReservation.exactPairEvaluations,
+              cheapPairEvaluations:
+                correlatedPlacementReservation.cheapPairEvaluations,
+              cheapPairCount: correlatedPlacementReservation.cheapPairCount,
+              prunedCandidateCount:
+                correlatedPlacementReservation.prunedCandidateCount,
+              cheapStageDiagnostics:
+                correlatedPlacementReservation.cheapStageDiagnostics,
+            });
+          }
+          finalizeCorrelatedCandidateDiagnostics();
           const closestRejectedPairs = originalFirstCandidates.flatMap((firstCandidate) => (
             originalSecondCandidates.map((secondCandidate) => {
-              const secondVolumes = [
-                ...(secondCandidate.node.occupiedVolumes ?? []),
-                ...(secondCandidate.node.clearanceVolumes ?? []),
-              ];
               return {
                 firstCenter: firstCandidate.center,
                 secondCenter: secondCandidate.center,
@@ -7439,14 +11565,16 @@ function planRouteNetwork({
                   position,
                   facing,
                 })),
-                nodeCollisionScore: nodePlanningCollisionScore(
-                  firstCandidate.node,
-                  secondVolumes,
-                ),
-                minimumSpineDistanceMeters: minimumSpineDistance(
-                  firstCandidate.node,
+                nodeCollisionScore: candidatePairNodeCollisionScore(
+                  firstCandidate,
                   firstGroup.index,
-                  secondCandidate.node,
+                  secondCandidate,
+                  secondGroup.index,
+                ),
+                minimumSpineDistanceMeters: candidatePairMinimumSpineDistance(
+                  firstCandidate,
+                  firstGroup.index,
+                  secondCandidate,
                   secondGroup.index,
                 ),
                 parentAttachmentClear: candidatePairRespectsParentAttachments(
@@ -7497,13 +11625,89 @@ function planRouteNetwork({
                 centers: group.diagnostics?.selectedCandidateCenters ?? [],
                 baseCenterCandidate: group.diagnostics?.baseCenterCandidate ?? null,
               })),
+              objectiveExternalDiagnostics: cloneDungeonAugmentationValue(
+                objectiveExternalDiagnostics,
+              ),
+              externalSpinePathCount: coveragePlacement?.externalSpinePaths?.length ?? 0,
+              externalSpinePathBindings: (coveragePlacement?.externalSpinePaths ?? [])
+                .map((record) => ({
+                  fromIndex: record.fromIndex,
+                  fromLocalSocketId: record.fromLocalSocketId,
+                  toIndex: record.toIndex,
+                  toLocalSocketId: record.toLocalSocketId,
+                })),
+              requiredSocketBindings: cloneDungeonAugmentationValue(
+                coveragePlacement?.requiredSocketBindings ?? [],
+              ),
+              planningPhaseTimings: physicalPlanningTimingSnapshot(),
+              initialPlacementCandidateCounts,
+              arcConsistencyHistory,
+              failedPairRejectionSummary: summarizePlacementPairRejections(
+                firstGroup,
+                secondGroup,
+                originalFirstCandidates,
+                originalSecondCandidates,
+              ),
               closestRejectedPairs,
               physicalPairEdgeDiagnostics,
+              correlatedPlacementReservationDiagnostics: {
+                status: correlatedPlacementReservation.status,
+                exactPairEvaluations:
+                  correlatedPlacementReservation.exactPairEvaluations,
+                cheapPairEvaluations:
+                  correlatedPlacementReservation.cheapPairEvaluations,
+                cheapPairCount: correlatedPlacementReservation.cheapPairCount,
+                prunedCandidateCount:
+                  correlatedPlacementReservation.prunedCandidateCount,
+                reservedNodeIndices: [
+                  ...correlatedPlacementReservation.reservedByIndex.keys(),
+                ].sort((first, second) => first - second),
+              },
             },
           };
         }
       }
+      }
+      break;
     }
+    if (requiresCorrelatedPlacementReservation
+      && !correlatedRepairAttempted
+      && coverageRequiredEdges.length > 0) {
+      correlatedRepairAttempted = true;
+      const firstEdge = coverageRequiredEdges[0];
+      correlatedPlacementReservation = attemptCorrelatedPlacementReservation(
+        firstEdge.fromIndex,
+        firstEdge.toIndex,
+      );
+      correlatedPlacementReservation.cheapStageDiagnostics = [
+        ...correlatedCheapStageDiagnostics.values(),
+      ];
+      if (correlatedPlacementReservation.status === 'reserved') {
+        for (const group of placementCandidateGroups) {
+          const reservedCandidate = correlatedPlacementReservation.reservedByIndex.get(
+            group.index,
+          );
+          if (!reservedCandidate) continue;
+          group.candidates = mergeReservedPlacementCandidates(
+            group.candidates,
+            [reservedCandidate],
+            group.candidates.length,
+          );
+        }
+      }
+      arcConsistencyHistory.push({
+        iteration: arcIteration,
+        kind: 'correlated-global-domain-reservation',
+        status: correlatedPlacementReservation.status,
+        exactPairEvaluations: correlatedPlacementReservation.exactPairEvaluations,
+        cheapPairEvaluations: correlatedPlacementReservation.cheapPairEvaluations,
+        cheapPairCount: correlatedPlacementReservation.cheapPairCount,
+        reservedNodeIndices: [
+          ...correlatedPlacementReservation.reservedByIndex.keys(),
+        ].sort((first, second) => first - second),
+      });
+    }
+    finalizeCorrelatedCandidateDiagnostics();
     const candidateCompatibleWithSelection = (candidate, index) => {
       const selectedEntries = [...selectedPlacementCandidates.entries()];
       const selectedVolumes = selectedEntries.flatMap(([, selected]) => [
@@ -7511,8 +11715,16 @@ function planRouteNetwork({
         ...(selected.node.clearanceVolumes ?? []),
       ]);
       if (nodePlanningCollisionScore(candidate.node, selectedVolumes) > 0) return false;
+      const candidatePrefix = new Map(selectedPlacementCandidates);
+      candidatePrefix.set(index, candidate);
+      if (!correlatedPrefixHasInjectiveSocketAssignment(candidatePrefix)) return false;
       return selectedEntries.every(([selectedIndex, selected]) => (
         candidatePairRespectsParentAttachments(
+          candidate,
+          index,
+          selected,
+          selectedIndex,
+        ) && stackedCompoundCandidatesCompatible(
           candidate,
           index,
           selected,
@@ -7528,9 +11740,23 @@ function planRouteNetwork({
     };
     const candidateCheaplyCompatibleWithSelection = (candidate, index) => {
       const selectedEntries = [...selectedPlacementCandidates.entries()];
+      const candidatePrefix = new Map(selectedPlacementCandidates);
+      candidatePrefix.set(index, candidate);
+      if (!correlatedPrefixHasInjectiveSocketAssignment(candidatePrefix)) return false;
       return selectedEntries.every(([selectedIndex, selected]) => (
-        nodePlanningCollisionScore(candidate.node, candidateNodeVolumes(selected)) === 0
+        candidatePairNodeCollisionScore(
+          candidate,
+          index,
+          selected,
+          selectedIndex,
+        ) === 0
           && candidatePairRespectsParentAttachments(
+            candidate,
+            index,
+            selected,
+            selectedIndex,
+          )
+          && stackedCompoundCandidatesMeetCheapBounds(
             candidate,
             index,
             selected,
@@ -7561,6 +11787,7 @@ function planRouteNetwork({
       const parentAttachmentPaths = [];
       const parentAttachmentPathVolumes = [];
       const parentAttachmentDistanceByNodeIndex = new Map();
+      const parentAttachmentEndpointSeamByNodeIndex = new Map();
       for (let endpointOrdinal = 0; endpointOrdinal < endpoints.length; endpointOrdinal += 1) {
         const parentSocket = endpoints[endpointOrdinal];
         const nodeIndex = coveragePlacement.endpointNodeIndices[endpointOrdinal];
@@ -7583,7 +11810,9 @@ function planRouteNetwork({
           nodeIndex,
         );
         const path = attachment.path;
-        const collisionScore = attachment.pathVolumes.reduce((score, pathVolume) => (
+        const attachmentCollisionVolumes = attachment.collisionVolumes
+          ?? attachment.pathVolumes;
+        const collisionScore = attachmentCollisionVolumes.reduce((score, pathVolume) => (
           score + selectedOtherNodeVolumes.reduce((count, obstacle) => (
             count + (planningVolumesOverlap(pathVolume, obstacle) ? 1 : 0)
           ), 0)
@@ -7626,8 +11855,12 @@ function planRouteNetwork({
           return null;
         }
         parentAttachmentPaths.push(path);
-        parentAttachmentPathVolumes.push(...attachment.pathVolumes);
+        parentAttachmentPathVolumes.push(...attachmentCollisionVolumes);
         parentAttachmentDistanceByNodeIndex.set(nodeIndex, distanceMeters);
+        parentAttachmentEndpointSeamByNodeIndex.set(
+          nodeIndex,
+          planningEndpointSeam(nodeSocket, node, 'to'),
+        );
       }
       const pairs = [];
       const selectedOtherNodeVolumesByEdge = coverageRequiredEdges.map(({
@@ -7641,11 +11874,25 @@ function planRouteNetwork({
             ...(selectedNode.clearanceVolumes ?? []),
           ]
       )));
-      const routeOptionIntersectsVolumes = (routeOption, obstacleVolumes) => (
-        routeOption.pathVolumes.some((pathVolume) => obstacleVolumes.some((obstacle) => (
+      const routeOptionIntersectsVolumes = (
+        routeOption,
+        obstacleVolumes,
+        overlapGrants = [],
+      ) => {
+        const routeVolumes = routeOption.collisionVolumes ?? routeOption.pathVolumes ?? [];
+        const authoritativeOverlapGrants = [
+          ...(routeOption.endpointSeamEnvelopes ?? []),
+          ...overlapGrants,
+        ];
+        return routeVolumes.some((pathVolume) => obstacleVolumes.some((obstacle) => (
           planningVolumesOverlap(pathVolume, obstacle)
-        )))
-      );
+            && !planningOverlapIsGranted(
+              pathVolume,
+              obstacle,
+              authoritativeOverlapGrants,
+            )
+        )));
+      };
       // Node placements and parent attachments are immutable for this spine
       // attempt. Filter those fixed obstacles once per socket pair; recursive
       // states then test only the small incremental set of already committed
@@ -7658,7 +11905,6 @@ function planRouteNetwork({
             ...selectedOtherNodeVolumesByEdge[edgeOrdinal],
             ...parentAttachmentPathVolumes,
           ];
-          const overlapGrants = spineLandingOverlapGrants(fromIndex, toIndex);
           return availableSpineSockets(fromNode, fromIndex, toIndex)
             .flatMap((fromSocket) => (
             availableSpineSockets(toNode, toIndex, fromIndex).map((toSocket) => ({
@@ -7672,16 +11918,43 @@ function planRouteNetwork({
                 toNode,
               )
                 .filter((routeOption) => (
-                  !routeOptionHasStaticCollision(routeOption, overlapGrants)
-                    && !routeOptionIntersectsVolumes(routeOption, fixedObstacles)
+                  !routeOptionHasStaticCollision(routeOption)
+                    && (() => {
+                      const sharedParentSeams = [fromIndex, toIndex].map((nodeIndex) => {
+                        const parentSeam = parentAttachmentEndpointSeamByNodeIndex.get(nodeIndex);
+                        const routeSeam = nodeIndex === fromIndex
+                          ? routeOption.endpointSeams?.[0]
+                          : routeOption.endpointSeams?.[1];
+                        return planningVolumeIntersection(
+                          parentSeam?.overlapEnvelope,
+                          routeSeam?.overlapEnvelope,
+                        );
+                      }).filter(Boolean);
+                      return !routeOptionIntersectsVolumes(
+                        routeOption,
+                        fixedObstacles,
+                        sharedParentSeams,
+                      );
+                    })()
                 )),
             }))
           ));
         });
       const committedSpineRouteVolumes = [];
-      const routeOptionClearsCommittedSpine = (routeOption) => (
-        !routeOptionIntersectsVolumes(routeOption, committedSpineRouteVolumes)
-      );
+      const routeOptionClearsCommittedSpine = (routeOption) => {
+        const previousPair = pairs.at(-1);
+        const sharedEndpointSeam = previousPair
+          ? planningVolumeIntersection(
+            previousPair.endpointSeams?.[1]?.overlapEnvelope,
+            routeOption.endpointSeams?.[0]?.overlapEnvelope,
+          )
+          : null;
+        return !routeOptionIntersectsVolumes(
+          routeOption,
+          committedSpineRouteVolumes,
+          sharedEndpointSeam ? [sharedEndpointSeam] : [],
+        );
+      };
       const futureEdgeHasRouteOption = (edgeOrdinal) => {
         const { fromIndex, toIndex } = coverageRequiredEdges[edgeOrdinal];
         const fromUsed = usedSocketIdsByNodeIndex.get(fromIndex);
@@ -7725,13 +11998,15 @@ function planRouteNetwork({
               [toIndex, toLocalSocketId],
             ].reduce((sum, [nodeIndex, throughLocalSocketId]) => {
               const node = selectedNodes[nodeIndex];
-              if (!node?.connectorOwned
-                || Number(node.plannedMinimumGraphDegree ?? 0) >= 3) return sum;
-              return sum
-                + Number(
+              if (routeNetworkNodeResetsFeaturelessDistance(node)) return sum;
+              const parentAttachmentDistance = node.exactParentEndpoint
+                ? Number(
                   parentAttachmentDistanceByNodeIndex.get(nodeIndex)
                     ?? Number.POSITIVE_INFINITY,
                 )
+                : 0;
+              return sum
+                + parentAttachmentDistance
                 + connectorModuleCoreTraversalDistance(
                   node,
                   'entry',
@@ -7743,6 +12018,9 @@ function planRouteNetwork({
               toLocalSocketId,
               path: witness.path,
               pathVolumes: witness.pathVolumes,
+              collisionVolumes: witness.collisionVolumes,
+              endpointSeams: witness.endpointSeams,
+              endpointSeamEnvelopes: witness.endpointSeamEnvelopes,
               collisionScore: 0,
               distanceMeters: witness.distanceMeters,
               endpointPrefixMeters: endpointPrefix,
@@ -7774,6 +12052,27 @@ function planRouteNetwork({
               || first.toLocalSocketId.localeCompare(second.toLocalSocketId)
           ));
         const edgeDiagnostics = physicalSpineEdgeDiagnostics[edgeOrdinal];
+        edgeDiagnostics.lastSocketPairDiagnostics = socketPairs.map(({
+          fromSocket,
+          toSocket,
+          routeOptions,
+        }) => ({
+          fromLocalSocketId: fromSocket.localSocketId,
+          toLocalSocketId: toSocket.localSocketId,
+          fromPosition: cloneDungeonAugmentationValue(fromSocket.position),
+          toPosition: cloneDungeonAugmentationValue(toSocket.position),
+          fromFacing: cloneDungeonAugmentationValue(fromSocket.facing),
+          toFacing: cloneDungeonAugmentationValue(toSocket.facing),
+          routeSelectionDiagnostics: cloneDungeonAugmentationValue(
+            orderedSocketRouteOptions(
+              fromSocket,
+              toSocket,
+              true,
+              fromNode,
+              toNode,
+            ).routeSelectionDiagnostics ?? null,
+          ),
+        }));
         edgeDiagnostics.visits += 1;
         edgeDiagnostics.maximumRawCandidateCount = Math.max(
           edgeDiagnostics.maximumRawCandidateCount,
@@ -7872,7 +12171,9 @@ function planRouteNetwork({
           toUsed.add(candidate.toLocalSocketId);
           pairs.push(candidate);
           const committedVolumeCount = committedSpineRouteVolumes.length;
-          committedSpineRouteVolumes.push(...candidate.pathVolumes);
+          committedSpineRouteVolumes.push(...(
+            candidate.collisionVolumes ?? candidate.pathVolumes ?? []
+          ));
           const futureEdgeIndices = Array.from(
             { length: coverageRequiredEdges.length - edgeOrdinal - 1 },
             (_, offset) => edgeOrdinal + offset + 1,
@@ -7946,7 +12247,12 @@ function planRouteNetwork({
         if (placementSolution) break;
       }
     };
+    const recursiveCompositionStartedAt = planningNowMilliseconds();
     visitPlacementCandidates();
+    physicalPlanningPhaseTimings.recursiveCompositionMs +=
+      planningNowMilliseconds() - recursiveCompositionStartedAt;
+    physicalPlanningPhaseTimings.totalMs = planningNowMilliseconds()
+      - physicalPlanningStartedAt;
     if (!placementSolution) {
       return {
         error: 'route-network-placement-backtrack-exhausted',
@@ -7957,7 +12263,15 @@ function planRouteNetwork({
           endpointNodeIndices: [...endpointNodeIndexSet].sort((first, second) => first - second),
           placementSearchVisits,
           physicalSpineAttempts,
+          planningPhaseTimings: cloneDungeonAugmentationValue(
+            physicalPlanningPhaseTimings,
+          ),
           objectiveExternalDiagnostics,
+          requiredSocketBindings: cloneDungeonAugmentationValue(
+            coveragePlacement?.requiredSocketBindings ?? [],
+          ),
+          endpointNodeIndices: [...endpointNodeIndexSet]
+            .sort((first, second) => first - second),
           lastPhysicalPlacementCenters,
           remainingPlacementCandidateCenters: placementCandidateGroups.map((group) => ({
             nodeIndex: group.index,
@@ -7980,11 +12294,16 @@ function planRouteNetwork({
     preselectedCoverageSpinePairs = placementSpineSolution;
     for (let index = 0; index < mainCenters.length; index += 1) {
       const selected = placementSolution.get(index);
+      const committedNode = createRouteNetworkNode(
+        index,
+        selected.center,
+        selected.facing,
+      );
       centers[index] = selected.center;
-      mainNodes[index] = selected.node;
+      mainNodes[index] = committedNode;
       localPlacementAvoidanceVolumes.push(
-        ...selected.node.occupiedVolumes,
-        ...selected.node.clearanceVolumes,
+        ...committedNode.occupiedVolumes,
+        ...committedNode.clearanceVolumes,
       );
     }
   }
@@ -8026,48 +12345,80 @@ function planRouteNetwork({
     const connectorFamily = Math.abs(elevationDelta) > 1e-6
       ? verticalFamily
       : 'service-gallery';
-    const endpointOwnerIds = new Set(nodeSockets
-      .map(([node]) => node?.id)
-      .filter(Boolean)
-      .map(String));
-    const sharedEndpointOverlapGrants = nodeSockets.flatMap(([node]) => [
-      node?.junction?.clearCoreVolume,
-      // Two connector segments that terminate at different sockets of the
-      // same authored module may meet inside that module's exact floor mask.
-      // The centerline solver excludes endpoint-owned geometry, but final
-      // landing squares also need the same bounded ownership grant. Without
-      // it, an exit landing can falsely collide with the preceding entrance
-      // span even though their intersection is wholly inside the shared room.
-      ...(node?.occupiedVolumes ?? []),
-    ]).filter((volume) => volume?.center && volume?.size);
     const parentLandingOverlapGrant = routeRole === 'parent-station-attachment'
       ? (grant.socketLandingOverlapGrants ?? []).find(({ socketId }) => (
         String(socketId) === String(from.socketId ?? from.id)
       )) ?? null
       : null;
-    const parentModuleNode = routeRole === 'parent-station-attachment'
-      ? nodeSockets[0]?.[0] ?? null
-      : null;
-    const parentModuleOverlapGrant = parentModuleNode
-      ? (grant.socketModuleOverlapGrants ?? []).find(({
-        socketId,
-        moduleTemplateId,
-      }) => (
-        String(socketId) === String(from.socketId ?? from.id)
-          && (!moduleTemplateId
-            || String(moduleTemplateId) === String(parentModuleNode.grammarId))
-      )) ?? null
-      : null;
     const parentAttachmentOverlapGrants = [
       parentLandingOverlapGrant,
-      parentModuleOverlapGrant,
     ].filter(Boolean);
+    const endpointNodeAndSocket = (endpoint) => {
+      for (const [node, localSocketId] of nodeSockets) {
+        const socket = getNodeSocket(node, localSocketId);
+        if (String(socket?.id ?? '') === String(endpoint?.socketId ?? endpoint?.id ?? '')) {
+          return { node, socket };
+        }
+      }
+      return { node: null, socket: endpoint };
+    };
+    const endpointSeams = [from, to].map((endpoint, endpointIndex) => {
+      const { node, socket } = endpointNodeAndSocket(endpoint);
+      const matchingParentOverlap = (grant.socketLandingOverlapGrants ?? []).find((overlap) => (
+        String(overlap.socketId ?? '') === String(endpoint?.socketId ?? endpoint?.id ?? '')
+      ));
+      return createDungeonRouteEndpointSeam(socket ?? endpoint, {
+        id: `${segmentId}:${endpointIndex === 0 ? 'from' : 'to'}-endpoint-seam`,
+        segmentId,
+        operationId,
+        networkId: operationId,
+        nodeId: node?.id ?? endpoint?.nodeId ?? null,
+        socketId: endpoint?.socketId ?? endpoint?.id ?? socket?.id ?? null,
+        localSocketId: socket?.localSocketId ?? endpoint?.localSocketId ?? null,
+        role: endpointIndex === 0 ? 'from' : 'to',
+        elevationBand: node?.progressionBandId ?? grant.progressionBandId ?? null,
+        // A connector-owned station at an exact host endpoint inherits that
+        // endpoint's authored physical owner. It may overlap that owner only
+        // inside this seam; ownership of the supplemental node itself remains
+        // represented by the node-bound envelope below.
+        parentOwnerId: enforceExactEmittedCoverageVolumes
+          ? endpointSeamSharedOwnerId(socket ?? endpoint, node)
+          : matchingParentOverlap?.parentOwnerId ?? null,
+      });
+    });
+    if (requireAuthoritativeEndpointSeams) {
+      const malformedSeamIndex = endpointSeams.findIndex((seam) => (
+        !inspectDungeonRouteEndpointSeamGridLattice(seam).accepted
+      ));
+      if (malformedSeamIndex >= 0) {
+        lastSegmentFailureDiagnostics = {
+          code: DUNGEON_ROUTE_ENDPOINT_SEAM_GRID_LATTICE_DIAGNOSTIC,
+          segmentId,
+          routeRole,
+          endpointRole: malformedSeamIndex === 0 ? 'from' : 'to',
+          ...inspectDungeonRouteEndpointSeamGridLattice(
+            endpointSeams[malformedSeamIndex],
+          ),
+        };
+        return null;
+      }
+    }
+    const endpointSeamOverlapGrants = endpointSeams.map(({ overlapEnvelope }) => (
+      overlapEnvelope
+    ));
+    const endpointNodeOverlapGrants = endpointSeams.flatMap((seam, endpointIndex) => {
+      const { node } = endpointNodeAndSocket([from, to][endpointIndex]);
+      return node ? [{
+        ...seam.overlapEnvelope,
+        id: `${seam.overlapEnvelope.id}:node-owner`,
+        parentOwnerId: node.id,
+      }] : [];
+    });
     const routeAvoidanceVolumes = localPlacementAvoidanceVolumes.filter((volume) => (
-      !planningVolumeOwnedByAny(volume, endpointOwnerIds)
-        // The host explicitly grants this exact three-tile threshold footprint
-        // to the attachment. Ignore only obstacles intersecting that bounded
-        // landing; every gallery/room column beyond it remains authoritative.
-        && !isGrantedParentGalleryThresholdVolume(volume, parentLandingOverlapGrant)
+      // The host explicitly grants this exact three-tile threshold footprint
+      // to the attachment. Ignore only obstacles wholly inside that bounded
+      // landing; every endpoint module remains present for seam-only pruning.
+      !isGrantedParentGalleryThresholdVolume(volume, parentLandingOverlapGrant)
     ));
     const preferXFirst = segments.length % 2 === 0;
     let segmentPath = preselectedPath;
@@ -8078,30 +12429,46 @@ function planRouteNetwork({
           to,
           routeAvoidanceVolumes,
           preferXFirst,
-          parentAttachmentOverlapGrants,
+          [...parentAttachmentOverlapGrants, ...endpointSeamOverlapGrants],
           connectorFamily,
-          grant.kind === 'landmark-perimeter-loop'
-            ? ROUTE_NETWORK_SOCKET_APPROACH_METERS
-            : 2.8,
+          ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+          false,
+          enforceExactEmittedCoverageVolumes,
         );
       } else {
         segmentPath = cachedSocketRouteCandidates(from, to, {
           preferXFirst,
           connectorFamily,
           ...coverageModuleRouteOptions,
-        }).map((path, ordinal) => ({
-          path,
-          ordinal,
-          collisionScore: pathPlanningCollisionScore(
+        }).map((path, ordinal) => {
+          const collisionVolumes = enforceExactEmittedCoverageVolumes
+            ? routeSegmentPlanningCollisionVolumes(path, from, to, 5.6, 5.6)
+            : routePathPlanningVolumes(path, 5.6);
+          return {
             path,
-            routeAvoidanceVolumes,
-            5.6,
-            sharedEndpointOverlapGrants,
-          ),
-          lengthMeters: measureDungeonPolyline(path),
-          maximumLevelSpanMeters: maximumContinuousLevelRouteSpan(path),
-        })).filter(({ collisionScore, maximumLevelSpanMeters }) => (
+            ordinal,
+            collisionScore: planningRouteVolumesCollisionScore(
+              collisionVolumes,
+              routeAvoidanceVolumes,
+              [...endpointSeamOverlapGrants, ...endpointNodeOverlapGrants],
+            ),
+            lengthMeters: measureDungeonPolyline(path),
+            maximumLevelSpanMeters: maximumContinuousLevelRouteSpan(path),
+          };
+        }).filter(({ path, collisionScore, maximumLevelSpanMeters }) => (
           collisionScore === 0
+            && routePathHasExteriorSocketApproach(
+              path,
+              from,
+              false,
+              requireAuthoritativeEndpointSeams ? endpointSeams[0] : null,
+            )
+            && routePathHasExteriorSocketApproach(
+              path,
+              to,
+              true,
+              requireAuthoritativeEndpointSeams ? endpointSeams[1] : null,
+            )
             && maximumLevelSpanMeters <= Number(
               profile.routeNetworkPlanning.maximumFeaturelessSpanMeters,
             ) + 1e-6
@@ -8112,6 +12479,9 @@ function planRouteNetwork({
           ))[0]?.path ?? null;
       }
     }
+    if (requireAuthoritativeEndpointSeams && Array.isArray(segmentPath)) {
+      segmentPath = routePathWithAuthoritativeSeamEndpoints(segmentPath, endpointSeams);
+    }
     const segmentFeaturelessDistance = Array.isArray(segmentPath)
       ? maximumContinuousLevelRouteSpan(segmentPath)
       : Number.POSITIVE_INFINITY;
@@ -8119,7 +12489,7 @@ function planRouteNetwork({
       ? 0
       : nodeSockets.reduce((sum, [node, throughLocalSocketId]) => {
         if (!node?.connectorOwned || !node?.exactParentEndpoint) return sum;
-        if (Number(node.plannedMinimumGraphDegree ?? 0) >= 3) return sum;
+        if (routeNetworkNodeResetsFeaturelessDistance(node)) return sum;
         const committedDegree = node.sockets.filter((socket) => (
           socket.state === 'connected' && socket.segmentId
         )).length;
@@ -8147,20 +12517,114 @@ function planRouteNetwork({
       }, 0);
     if (!Array.isArray(segmentPath)
       || segmentPath.length < 2
-      || measureDungeonPolyline(segmentPath) <= 1e-6
-      || segmentFeaturelessDistance > Number(
+      || measureDungeonPolyline(segmentPath) <= 1e-6) {
+      lastSegmentFailureDiagnostics = {
+        code: 'route-network-segment-path-missing',
+        segmentId,
+        routeRole,
+      };
+      return null;
+    }
+    const endpointApproachDiagnostics = [
+      routePathExteriorSocketApproachDiagnostic(
+        segmentPath,
+        from,
+        false,
+        requireAuthoritativeEndpointSeams ? endpointSeams[0] : null,
+      ),
+      routePathExteriorSocketApproachDiagnostic(
+        segmentPath,
+        to,
+        true,
+        requireAuthoritativeEndpointSeams ? endpointSeams[1] : null,
+      ),
+    ];
+    const rejectedEndpointApproachIndex = endpointApproachDiagnostics.findIndex((diagnostic) => (
+      diagnostic.accepted !== true
+    ));
+    if (rejectedEndpointApproachIndex >= 0) {
+      lastSegmentFailureDiagnostics = {
+        ...cloneDungeonAugmentationValue(
+          endpointApproachDiagnostics[rejectedEndpointApproachIndex],
+        ),
+        segmentId,
+        routeRole,
+        endpointRole: rejectedEndpointApproachIndex === 0 ? 'from' : 'to',
+      };
+      return null;
+    }
+    const plannedCollisionVolumes = enforceExactEmittedCoverageVolumes
+      ? routeSegmentPlanningCollisionVolumes(
+        segmentPath,
+        from,
+        to,
+        routeRole === 'parent-station-attachment' ? 3.6 : 5.6,
+        5.6,
+      )
+      : routePathPlanningVolumes(
+        segmentPath,
+        routeRole === 'parent-station-attachment' ? 3.6 : 5.6,
+      );
+    const rejectedEndpointMaskIndex = [from, to].findIndex((endpoint, endpointIndex) => {
+      const { node } = endpointNodeAndSocket(endpoint);
+      return !routePlanningVolumesRespectEndpointNodeMask(
+        plannedCollisionVolumes,
+        node,
+        endpointSeams[endpointIndex],
+      );
+    });
+    if (rejectedEndpointMaskIndex >= 0) {
+      const rejectedEndpoint = [from, to][rejectedEndpointMaskIndex];
+      const { node } = endpointNodeAndSocket(rejectedEndpoint);
+      lastSegmentFailureDiagnostics = {
+        code: 'route-network-endpoint-overlap-outside-seam',
+        segmentId,
+        routeRole,
+        endpointRole: rejectedEndpointMaskIndex === 0 ? 'from' : 'to',
+        nodeId: node?.id ?? rejectedEndpoint?.nodeId ?? null,
+        seamId: endpointSeams[rejectedEndpointMaskIndex]?.id ?? null,
+      };
+      return null;
+    }
+    if (segmentFeaturelessDistance > Number(
         profile.routeNetworkPlanning.maximumFeaturelessSpanMeters,
       ) + 1e-6
       || segmentFeaturelessDistance + endpointModulePrefixMeters > Number(
         profile.routeNetworkPlanning.maximumFeaturelessSpanMeters,
-      ) + 1e-6) return null;
-    if (routeRole === 'parent-station-attachment'
-      && pathPlanningCollisionScore(
-        segmentPath,
-        routeAvoidanceVolumes,
-        3.6,
-        parentAttachmentOverlapGrants,
-      ) > 0) return null;
+      ) + 1e-6) {
+      lastSegmentFailureDiagnostics = {
+        code: 'route-network-segment-featureless-span-exceeded',
+        segmentId,
+        routeRole,
+        segmentFeaturelessDistance,
+        endpointModulePrefixMeters,
+      };
+      return null;
+    }
+    const plannedOverlapGrants = [
+      ...parentAttachmentOverlapGrants,
+      ...endpointSeamOverlapGrants,
+      ...endpointNodeOverlapGrants,
+    ];
+    const rejectedPlannedOverlap = routeRole === 'parent-station-attachment'
+      ? plannedCollisionVolumes.flatMap((volume) => (
+        routeAvoidanceVolumes.map((obstacle) => ({ volume, obstacle }))
+      )).find(({ volume, obstacle }) => (
+        planningVolumesOverlap(volume, obstacle)
+          && !planningOverlapIsGranted(volume, obstacle, plannedOverlapGrants)
+      ))
+      : null;
+    if (rejectedPlannedOverlap) {
+      lastSegmentFailureDiagnostics = {
+        code: 'route-network-parent-attachment-overlap-outside-seam',
+        segmentId,
+        routeRole,
+        volume: cloneDungeonAugmentationValue(rejectedPlannedOverlap.volume),
+        obstacle: cloneDungeonAugmentationValue(rejectedPlannedOverlap.obstacle),
+        overlapGrants: cloneDungeonAugmentationValue(plannedOverlapGrants),
+      };
+      return null;
+    }
     const segment = createSegment({
       id: segmentId,
       operationId,
@@ -8176,6 +12640,7 @@ function planRouteNetwork({
       landingDepthMeters: 5.6,
       path: segmentPath,
     });
+    segment.endpointSeams = cloneDungeonAugmentationValue(endpointSeams);
     const authoredLocalApproachWitness = (endpoint) => {
       const endpointSocketId = String(endpoint?.socketId ?? endpoint?.id ?? '');
       const ownedNodeSocket = nodeSockets.flatMap(([node]) => (
@@ -8214,7 +12679,8 @@ function planRouteNetwork({
     ];
     const finalOverlapGrants = [
       ...parentAttachmentOverlapGrants,
-      ...sharedEndpointOverlapGrants,
+      ...endpointSeamOverlapGrants,
+      ...endpointNodeOverlapGrants,
     ];
     const rejectedFinalOverlap = finalSegmentVolumes.flatMap((volume) => (
       routeAvoidanceVolumes.map((obstacle) => ({ volume, obstacle }))
@@ -8360,7 +12826,14 @@ function planRouteNetwork({
     if (!attachmentSegment) {
       return {
         error: 'route-network-parent-attachment-unrealizable',
-        context: { grantId: grant.id, socketId: socket.id, endpointOrdinal: index },
+        context: {
+          grantId: grant.id,
+          socketId: socket.id,
+          endpointOrdinal: index,
+          segmentFailureDiagnostics: cloneDungeonAugmentationValue(
+            lastSegmentFailureDiagnostics,
+          ),
+        },
       };
     }
   }
@@ -8399,7 +12872,7 @@ function planRouteNetwork({
         ROUTE_NETWORK_SOCKET_APPROACH_METERS,
         Number(profile.connectorGapMeters ?? ROUTE_NETWORK_SOCKET_APPROACH_METERS),
       ) * 2,
-      wingNodeIndex === elevationNodeIndex
+      requiresExternalVerticalTransfer && wingNodeIndex === elevationNodeIndex
         ? Number(ROUTE_NETWORK_VERTICAL_MINIMUM_RUN_METERS[verticalFamily] ?? 0)
         : 0,
     );
@@ -8413,7 +12886,7 @@ function planRouteNetwork({
           wingDepth * 0.5 + minimumWingConnectorRun,
         ),
       );
-      if (wingNodeIndex === elevationNodeIndex) {
+      if (requiresExternalVerticalTransfer && wingNodeIndex === elevationNodeIndex) {
         wingCenter.y = Number(wingParent.placement.center.y) + 14;
       }
       const rawCandidates = placeCollisionSafeNode(
@@ -8438,9 +12911,14 @@ function planRouteNetwork({
         ...rawCandidates.slice(0, candidateOffset),
       ].slice(0, 24);
       for (const candidate of candidates) {
+        const committedWingNode = createRouteNetworkNode(
+          wingNodeIndex,
+          candidate.center,
+          candidate.facing,
+        );
         const candidateVolumes = [
-          ...(candidate.node.occupiedVolumes ?? []),
-          ...(candidate.node.clearanceVolumes ?? []),
+          ...(committedWingNode.occupiedVolumes ?? []),
+          ...(committedWingNode.clearanceVolumes ?? []),
         ];
         localPlacementAvoidanceVolumes.push(...candidateVolumes);
         // This compact parent is committed to the two perimeter approaches and
@@ -8453,11 +12931,11 @@ function planRouteNetwork({
         );
         const wingSegment = addSegment({
           from: nodeEndpoint(wingParent, decisionSocket.localSocketId),
-          to: nodeEndpoint(candidate.node, 'entry'),
+          to: nodeEndpoint(committedWingNode, 'entry'),
           routeRole: 'pyramid-loop-content-wing',
           nodeSockets: [
             [wingParent, decisionSocket.localSocketId],
-            [candidate.node, 'entry'],
+            [committedWingNode, 'entry'],
           ],
         });
         attemptedWingCandidates.push({
@@ -8473,11 +12951,11 @@ function planRouteNetwork({
           continue;
         }
         centers.push(candidate.center);
-        nodes.push(candidate.node);
+        nodes.push(committedWingNode);
         pyramidWingConnection = {
           parentNode: wingParent,
           parentLocalSocketId: decisionSocket.localSocketId,
-          wingNode: candidate.node,
+          wingNode: committedWingNode,
           segment: wingSegment,
         };
         break;
@@ -8498,31 +12976,111 @@ function planRouteNetwork({
   const availableSocketPairs = (fromNode, toNode, diagnostics = null) => {
     const fromSockets = fromNode.sockets.filter(({ state }) => state === 'capped');
     const toSockets = toNode.sockets.filter(({ state }) => state === 'capped');
-    const routeAvoidanceVolumes = localPlacementAvoidanceVolumes.filter((volume) => (
-      !planningVolumeOwnedByAny(volume, [fromNode.id, toNode.id])
-    ));
+    const routeAvoidanceVolumes = localPlacementAvoidanceVolumes;
+    const seamForAvailableSocket = (socket, node, role) => (
+      createDungeonRouteEndpointSeam(socket, {
+        id: `${operationId}:available-socket:${node.id}:${socket.id}:${role}:endpoint-seam`,
+        operationId,
+        networkId: operationId,
+        nodeId: node.id,
+        socketId: socket.id,
+        localSocketId: socket.localSocketId ?? null,
+        role,
+        elevationBand: node.progressionBandId ?? grant.progressionBandId ?? null,
+        parentOwnerId: enforceExactEmittedCoverageVolumes
+          ? endpointSeamSharedOwnerId(socket, node)
+          : null,
+      })
+    );
     const rawCandidates = fromSockets.flatMap((fromSocket) => toSockets.flatMap((toSocket) => {
       const connectorFamily = Math.abs(
         Number(toSocket.position.y) - Number(fromSocket.position.y),
       ) > 1e-6 ? verticalFamily : 'service-gallery';
+      // The exact seams are properties of this socket pair, not of each route
+      // candidate. Some elevation families enumerate hundreds of transfer
+      // positions for one pair; rebuilding both 15-cell records per path was
+      // pure work and obscured stage-specific rejection diagnostics.
+      const endpointSeams = [
+        seamForAvailableSocket(fromSocket, fromNode, 'from'),
+        seamForAvailableSocket(toSocket, toNode, 'to'),
+      ];
+      const endpointSeamEnvelopes = endpointSeams.map(({ overlapEnvelope }) => (
+        overlapEnvelope
+      ));
+      const endpointPlanningOverlapGrants = endpointSeams.flatMap((seam, endpointIndex) => ([
+        seam.overlapEnvelope,
+        {
+          ...seam.overlapEnvelope,
+          id: `${seam.overlapEnvelope.id}:node-owner`,
+          parentOwnerId: [fromNode, toNode][endpointIndex].id,
+        },
+      ]));
       return cachedSocketRouteCandidates(fromSocket, toSocket, {
         preferXFirst: segments.length % 2 === 0,
         connectorFamily,
         ...coverageModuleRouteOptions,
-      }).map((path) => ({
-        fromLocalSocketId: fromSocket.localSocketId,
-        toLocalSocketId: toSocket.localSocketId,
-        path,
-        collisionScore: pathPlanningCollisionScore(path, routeAvoidanceVolumes),
-        distanceMeters: maximumContinuousLevelRouteSpan(path),
-        physicalLengthMeters: measureDungeonPolyline(path),
-        endpointPrefixMeters: [
+      }).map((path) => {
+        const pathVolumes = routePathPlanningVolumes(path);
+        const collisionVolumes = enforceExactEmittedCoverageVolumes
+          ? routeSegmentPlanningCollisionVolumes(path, fromSocket, toSocket, 5.6, 5.6)
+          : pathVolumes;
+        const fromApproachCompatible = routePathHasExteriorSocketApproach(
+          path,
+          fromSocket,
+          false,
+          endpointSeams[0],
+        );
+        const toApproachCompatible = routePathHasExteriorSocketApproach(
+          path,
+          toSocket,
+          true,
+          endpointSeams[1],
+        );
+        const approachCompatible = fromApproachCompatible && toApproachCompatible;
+        const sharedEndpointNode = String(fromNode.id) === String(toNode.id);
+        const fromEndpointMaskCompatible = approachCompatible
+          && routePlanningVolumesRespectEndpointNodeMask(
+            collisionVolumes,
+            fromNode,
+            sharedEndpointNode ? endpointSeams : endpointSeams[0],
+          );
+        const toEndpointMaskCompatible = approachCompatible
+          && routePlanningVolumesRespectEndpointNodeMask(
+            collisionVolumes,
+            toNode,
+            sharedEndpointNode ? endpointSeams : endpointSeams[1],
+          );
+        const endpointSeamCompatible = fromEndpointMaskCompatible
+          && toEndpointMaskCompatible;
+        return {
+          fromLocalSocketId: fromSocket.localSocketId,
+          toLocalSocketId: toSocket.localSocketId,
+          path,
+          pathVolumes,
+          collisionVolumes,
+          endpointSeams,
+          endpointSeamEnvelopes,
+          fromApproachCompatible,
+          toApproachCompatible,
+          approachCompatible,
+          fromEndpointMaskCompatible,
+          toEndpointMaskCompatible,
+          endpointSeamCompatible,
+          collisionScore: endpointSeamCompatible
+            ? planningRouteVolumesCollisionScore(
+              collisionVolumes,
+              routeAvoidanceVolumes,
+              endpointPlanningOverlapGrants,
+            )
+            : Number.POSITIVE_INFINITY,
+          distanceMeters: maximumContinuousLevelRouteSpan(path),
+          physicalLengthMeters: measureDungeonPolyline(path),
+          endpointPrefixMeters: [
           [fromNode, fromSocket],
           [toNode, toSocket],
         ].reduce((sum, [candidateNode, throughSocket]) => {
-          if (!candidateNode?.connectorOwned
-            || !candidateNode?.exactParentEndpoint
-            || Number(candidateNode.plannedMinimumGraphDegree ?? 0) >= 3) return sum;
+          if (!candidateNode?.exactParentEndpoint
+            || routeNetworkNodeResetsFeaturelessDistance(candidateNode)) return sum;
           const parentSegment = segments.find((candidate) => (
             candidate.routeRole === 'parent-station-attachment'
               && [candidate.from, candidate.to].some((endpoint) => (
@@ -8542,13 +13100,15 @@ function planRouteNetwork({
                 throughSocket.localSocketId,
               )
             : Number.POSITIVE_INFINITY);
-        }, 0),
-      }));
+          }, 0),
+        };
+      });
     }));
     const physicallyEligibleCandidates = rawCandidates.filter(({
       collisionScore,
       physicalLengthMeters,
-    }) => collisionScore === 0 && physicalLengthMeters > 1e-6);
+      endpointSeamCompatible,
+    }) => endpointSeamCompatible && collisionScore === 0 && physicalLengthMeters > 1e-6);
     const measuredCandidates = physicallyEligibleCandidates.map((candidate) => ({
         ...candidate,
         accumulatedFeaturelessDistanceMeters: candidate.distanceMeters
@@ -8561,6 +13121,44 @@ function planRouteNetwork({
       accumulatedFeaturelessDistanceMeters,
     }) => accumulatedFeaturelessDistanceMeters <= maximumFeaturelessSpanMeters + 1e-6);
     if (diagnostics && typeof diagnostics === 'object') {
+      const finiteCollisionScores = rawCandidates
+        .map(({ collisionScore }) => collisionScore)
+        .filter(Number.isFinite);
+      const socketPairStageCounts = [...new Set(rawCandidates.map((candidate) => (
+        `${candidate.fromLocalSocketId}>${candidate.toLocalSocketId}`
+      )))].slice(0, 12).map((pairKey) => {
+        const candidates = rawCandidates.filter((candidate) => (
+          `${candidate.fromLocalSocketId}>${candidate.toLocalSocketId}` === pairKey
+        ));
+        return {
+          fromLocalSocketId: candidates[0]?.fromLocalSocketId ?? null,
+          toLocalSocketId: candidates[0]?.toLocalSocketId ?? null,
+          rawCandidateCount: candidates.length,
+          approachCandidateCount: candidates.filter(({ approachCompatible }) => (
+            approachCompatible
+          )).length,
+          fromEndpointMaskCandidateCount: candidates.filter(({
+            fromEndpointMaskCompatible,
+          }) => fromEndpointMaskCompatible).length,
+          toEndpointMaskCandidateCount: candidates.filter(({
+            toEndpointMaskCompatible,
+          }) => toEndpointMaskCompatible).length,
+          exactSeamCandidateCount: candidates.filter(({ endpointSeamCompatible }) => (
+            endpointSeamCompatible
+          )).length,
+          collisionFreeCandidateCount: candidates.filter(({
+            endpointSeamCompatible,
+            collisionScore,
+          }) => endpointSeamCompatible && collisionScore === 0).length,
+          featurelessCandidateCount: candidates.filter((candidate) => (
+            candidate.endpointSeamCompatible
+              && candidate.collisionScore === 0
+              && candidate.physicalLengthMeters > 1e-6
+              && candidate.distanceMeters + candidate.endpointPrefixMeters
+                <= maximumFeaturelessSpanMeters + 1e-6
+          )).length,
+        };
+      });
       Object.assign(diagnostics, {
         fromNodeId: fromNode.id,
         toNodeId: toNode.id,
@@ -8569,15 +13167,22 @@ function planRouteNetwork({
         fromSocketCount: fromSockets.length,
         toSocketCount: toSockets.length,
         routeCandidateCount: rawCandidates.length,
+        approachEligibleCandidateCount: rawCandidates.filter(({
+          approachCompatible,
+        }) => approachCompatible).length,
+        endpointMaskEligibleCandidateCount: rawCandidates.filter(({
+          endpointSeamCompatible,
+        }) => endpointSeamCompatible).length,
         physicallyEligibleCandidateCount: physicallyEligibleCandidates.length,
         featurelessEligibleCandidateCount: eligibleCandidates.length,
+        socketPairStageCounts,
         featurelessEligibleSocketPairs: eligibleCandidates.slice(0, 8).map((candidate) => ({
           fromLocalSocketId: candidate.fromLocalSocketId,
           toLocalSocketId: candidate.toLocalSocketId,
           distanceMeters: candidate.accumulatedFeaturelessDistanceMeters,
         })),
-        minimumCollisionScore: rawCandidates.length > 0
-          ? Math.min(...rawCandidates.map(({ collisionScore }) => collisionScore))
+        minimumCollisionScore: finiteCollisionScores.length > 0
+          ? Math.min(...finiteCollisionScores)
           : null,
         minimumPhysicalLengthMeters: physicallyEligibleCandidates.length > 0
           ? Math.min(...physicallyEligibleCandidates.map(({ physicalLengthMeters }) => (
@@ -8678,8 +13283,6 @@ function planRouteNetwork({
         const previouslySelectedRouteVolumes = selectedPairs.flatMap(({ path }) => (
           routePathPlanningVolumes(path)
         ));
-        const sharedMidpointOverlapGrants = [fromNode?.junction?.clearCoreVolume]
-          .filter((volume) => volume?.center && volume?.size);
         const candidates = availableSocketPairs(
           fromNode,
           toNode,
@@ -8687,12 +13290,21 @@ function planRouteNetwork({
         ).filter((candidate) => (
           !fromUsed.has(candidate.fromLocalSocketId)
             && !toUsed.has(candidate.toLocalSocketId)
-            && pathPlanningCollisionScore(
-              candidate.path,
-              previouslySelectedRouteVolumes,
-              5.6,
-              sharedMidpointOverlapGrants,
-            ) === 0
+            && (() => {
+              const previousPair = selectedPairs.at(-1);
+              const sharedEndpointSeam = previousPair
+                ? planningVolumeIntersection(
+                  previousPair.endpointSeamEnvelopes?.[1],
+                  candidate.endpointSeamEnvelopes?.[0],
+                )
+                : null;
+              return pathPlanningCollisionScore(
+                candidate.path,
+                previouslySelectedRouteVolumes,
+                5.6,
+                sharedEndpointSeam ? [sharedEndpointSeam] : [],
+              ) === 0;
+            })()
         ));
         edgeDiagnostics.unusedEligibleCandidateCount = candidates.length;
         if (diagnostics.length < 32) diagnostics.push(edgeDiagnostics);
@@ -8786,6 +13398,7 @@ function planRouteNetwork({
       context: {
         grantId: grant.id,
         routeNetworkKind: grant.kind,
+        selectedGrammarIds: selectedGrammars.map(({ id }) => id),
         pyramidSpineFailureDiagnostics,
       },
     };
@@ -8888,18 +13501,38 @@ function planRouteNetwork({
     }
   }
   if (grant.kind !== 'landmark-perimeter-loop') {
+    let lastTopologyReturnDiagnostics = null;
     const connectTopologyChord = (
       fromIndex,
       toIndex,
       routeRole,
-      { fromLocalSocketId = null, toLocalSocketId = null } = {},
+      {
+        fromLocalSocketId = null,
+        toLocalSocketId = null,
+        diagnostics = null,
+      } = {},
     ) => {
-      if (fromIndex === toIndex) return false;
-      const socketPairs = availableSocketPairs(nodes[fromIndex], nodes[toIndex])
+      if (fromIndex === toIndex && (
+        !fromLocalSocketId
+          || !toLocalSocketId
+          || String(fromLocalSocketId) === String(toLocalSocketId)
+      )) {
+        if (diagnostics) Object.assign(diagnostics, {
+          rejected: 'same-node-without-distinct-explicit-sockets',
+        });
+        return false;
+      }
+      const availablePairDiagnostics = {};
+      const socketPairs = availableSocketPairs(
+        nodes[fromIndex],
+        nodes[toIndex],
+        availablePairDiagnostics,
+      )
         .filter((pair) => (
           (!fromLocalSocketId || pair.fromLocalSocketId === fromLocalSocketId)
             && (!toLocalSocketId || pair.toLocalSocketId === toLocalSocketId)
         ));
+      const attemptedPairs = [];
       for (const pair of socketPairs) {
         if (pair.distanceMeters > Number(
           profile.routeNetworkPlanning.maximumFeaturelessSpanMeters,
@@ -8914,8 +13547,43 @@ function planRouteNetwork({
           ],
           preselectedPath: pair.path,
         });
-        if (chordSegment) return true;
+        attemptedPairs.push({
+          fromLocalSocketId: pair.fromLocalSocketId,
+          toLocalSocketId: pair.toLocalSocketId,
+          physicalLengthMeters: pair.physicalLengthMeters,
+          accumulatedFeaturelessDistanceMeters:
+            pair.accumulatedFeaturelessDistanceMeters,
+          accepted: Boolean(chordSegment),
+          ...(chordSegment || !lastSegmentFailureDiagnostics ? {} : {
+            segmentFailure: cloneDungeonAugmentationValue(
+              lastSegmentFailureDiagnostics,
+            ),
+          }),
+        });
+        if (chordSegment) {
+          if (diagnostics) Object.assign(diagnostics, {
+            fromIndex,
+            toIndex,
+            routeRole,
+            requestedFromLocalSocketId: fromLocalSocketId,
+            requestedToLocalSocketId: toLocalSocketId,
+            availablePairDiagnostics,
+            attemptedPairs: attemptedPairs.slice(0, 8),
+            accepted: true,
+          });
+          return true;
+        }
       }
+      if (diagnostics) Object.assign(diagnostics, {
+        fromIndex,
+        toIndex,
+        routeRole,
+        requestedFromLocalSocketId: fromLocalSocketId,
+        requestedToLocalSocketId: toLocalSocketId,
+        availablePairDiagnostics,
+        attemptedPairs: attemptedPairs.slice(0, 8),
+        accepted: false,
+      });
       return false;
     };
     const connectAuthoredTopologySockets = (kitNodeIndex, routeRole) => {
@@ -8923,11 +13591,78 @@ function planRouteNetwork({
       const topologySocketIds = (
         kitNode?.selectionConstraints?.routeNetworkTopologySocketIds ?? []
       ).map(String);
-      if (!kitNode || topologySocketIds.length === 0) return false;
+      const topologyDiagnostics = {
+        kitNodeIndex,
+        routeRole,
+        kitNodeId: kitNode?.id ?? null,
+        kitGrammarId: kitNode?.grammarId ?? null,
+        topologySocketIds,
+        kitSockets: (kitNode?.sockets ?? []).map((socket) => ({
+          localSocketId: socket.localSocketId,
+          state: socket.state,
+          position: cloneDungeonAugmentationValue(socket.position),
+          facing: cloneDungeonAugmentationValue(socket.facing),
+        })),
+        targetAttempts: [],
+      };
+      lastTopologyReturnDiagnostics = topologyDiagnostics;
+      if (!kitNode || topologySocketIds.length === 0) {
+        topologyDiagnostics.rejected = !kitNode
+          ? 'missing-kit-node'
+          : 'missing-topology-socket-ids';
+        return false;
+      }
       const pendingSocketIds = topologySocketIds.filter((localSocketId) => (
         getNodeSocket(kitNode, localSocketId)?.state === 'capped'
       ));
-      if (pendingSocketIds.length === 0) return true;
+      topologyDiagnostics.pendingSocketIds = [...pendingSocketIds];
+      if (pendingSocketIds.length === 0) {
+        topologyDiagnostics.accepted = true;
+        return true;
+      }
+      if (pendingSocketIds.length === 2) {
+        const localReturnDiagnostics = {};
+        const firstPendingSocket = getNodeSocket(kitNode, pendingSocketIds[0]);
+        const secondPendingSocket = getNodeSocket(kitNode, pendingSocketIds[1]);
+        // Opposite outward sockets on the same module need two exterior leads
+        // plus the expanded crossbar outside both leads. For the 22.4 m
+        // stacked kit this is 44.8 m before any obstacle detour, so generating
+        // U candidates can never satisfy the 33.6 m featureless gate.
+        const minimumLocalReturnMeters = firstPendingSocket && secondPendingSocket
+          ? dungeonPointDistance(
+            firstPendingSocket.position,
+            secondPendingSocket.position,
+          ) + ROUTE_NETWORK_SOCKET_APPROACH_METERS * 4
+          : Number.POSITIVE_INFINITY;
+        const localReturnConnected = minimumLocalReturnMeters
+          <= Number(profile.routeNetworkPlanning.maximumFeaturelessSpanMeters) + 1e-6
+          && connectTopologyChord(
+            kitNodeIndex,
+            kitNodeIndex,
+            `${routeRole}:local-return`,
+            {
+              fromLocalSocketId: pendingSocketIds[0],
+              toLocalSocketId: pendingSocketIds[1],
+              diagnostics: localReturnDiagnostics,
+            },
+          );
+        if (minimumLocalReturnMeters
+          > Number(profile.routeNetworkPlanning.maximumFeaturelessSpanMeters) + 1e-6) {
+          Object.assign(localReturnDiagnostics, {
+            accepted: false,
+            rejected: 'geometric-featureless-lower-bound',
+            minimumLocalReturnMeters,
+            maximumFeaturelessSpanMeters: Number(
+              profile.routeNetworkPlanning.maximumFeaturelessSpanMeters,
+            ),
+          });
+        }
+        topologyDiagnostics.localReturnAttempt = localReturnDiagnostics;
+        if (localReturnConnected) {
+          topologyDiagnostics.accepted = true;
+          return true;
+        }
+      }
       const targetNodeIndices = nodes
         .map((node, index) => ({
           index,
@@ -8957,15 +13692,30 @@ function planRouteNetwork({
             capRole: socket.capRole,
           }))),
         };
-        const connected = pendingSocketIds.every((localSocketId, ordinal) => (
-          connectTopologyChord(
+        const targetAttempt = { targetIndices: [...targetIndices], chords: [] };
+        let connected = true;
+        for (const [ordinal, localSocketId] of pendingSocketIds.entries()) {
+          const chordDiagnostics = {};
+          const chordConnected = connectTopologyChord(
             kitNodeIndex,
             targetIndices[ordinal],
             `${routeRole}:${localSocketId}`,
-            { fromLocalSocketId: localSocketId },
-          )
-        ));
-        if (connected) return true;
+            { fromLocalSocketId: localSocketId, diagnostics: chordDiagnostics },
+          );
+          targetAttempt.chords.push(chordDiagnostics);
+          if (!chordConnected) {
+            connected = false;
+            break;
+          }
+        }
+        targetAttempt.accepted = connected;
+        if (topologyDiagnostics.targetAttempts.length < 12) {
+          topologyDiagnostics.targetAttempts.push(targetAttempt);
+        }
+        if (connected) {
+          topologyDiagnostics.accepted = true;
+          return true;
+        }
         segments.length = transaction.segmentCount;
         localPlacementAvoidanceVolumes.length = transaction.avoidanceVolumeCount;
         nextSegmentOrdinal = transaction.nextSegmentOrdinal;
@@ -8975,6 +13725,7 @@ function planRouteNetwork({
           socketState.socket.capRole = socketState.capRole;
         }
       }
+      topologyDiagnostics.accepted = false;
       return false;
     };
     if (topologyTemplateId === 'parallel-gallery-loop') {
@@ -8983,12 +13734,18 @@ function planRouteNetwork({
       const middle = Math.max(0, Math.floor(nodes.length * 0.5) - 1);
       connectTopologyChord(middle, Math.min(nodes.length - 1, middle + 1), 'split-level-ring:return-leg');
     } else if (topologyTemplateId === 'over-under-loop') {
+      const directReturnDiagnostics = {};
       const upperRouteConnected = topologyKitModuleIndex == null
-        ? connectTopologyChord(0, 1, 'over-under-loop:upper-return-leg')
+        ? connectTopologyChord(0, 1, 'over-under-loop:upper-return-leg', {
+          diagnostics: directReturnDiagnostics,
+        })
         : connectAuthoredTopologySockets(
           topologyKitModuleIndex,
           'over-under-loop:upper-return-leg',
         );
+      if (topologyKitModuleIndex == null) {
+        lastTopologyReturnDiagnostics = directReturnDiagnostics;
+      }
       if (!upperRouteConnected) {
         return {
           error: 'route-network-topology-kit-return-leg-unrealizable',
@@ -8996,6 +13753,12 @@ function planRouteNetwork({
             grantId: grant.id,
             topologyTemplateId,
             topologyKitModuleIndex,
+            planningPhaseTimings: cloneDungeonAugmentationValue(
+              physicalPlanningPhaseTimings,
+            ),
+            topologyReturnDiagnostics: cloneDungeonAugmentationValue(
+              lastTopologyReturnDiagnostics,
+            ),
           },
         };
       }
@@ -9012,16 +13775,21 @@ function planRouteNetwork({
       }
     } else if (topologyTemplateId === 'stacked-interchange') {
       const middle = Math.max(0, Math.floor(nodes.length * 0.5) - 1);
+      const directReturnDiagnostics = {};
       const upperRouteConnected = topologyKitModuleIndex == null
         ? connectTopologyChord(
           middle,
           Math.min(nodes.length - 1, middle + 1),
           'stacked-interchange:upper-arm',
+          { diagnostics: directReturnDiagnostics },
         )
         : connectAuthoredTopologySockets(
           topologyKitModuleIndex,
           'stacked-interchange:upper-arm',
         );
+      if (topologyKitModuleIndex == null) {
+        lastTopologyReturnDiagnostics = directReturnDiagnostics;
+      }
       if (!upperRouteConnected) {
         return {
           error: 'route-network-topology-kit-return-leg-unrealizable',
@@ -9029,6 +13797,12 @@ function planRouteNetwork({
             grantId: grant.id,
             topologyTemplateId,
             topologyKitModuleIndex,
+            planningPhaseTimings: cloneDungeonAugmentationValue(
+              physicalPlanningPhaseTimings,
+            ),
+            topologyReturnDiagnostics: cloneDungeonAugmentationValue(
+              lastTopologyReturnDiagnostics,
+            ),
           },
         };
       }
@@ -9334,7 +14108,210 @@ function planRouteNetwork({
       },
     };
   }
+  // Edge-local checks cannot prove the V4 station-to-station contract: two
+  // individually legal galleries can still exceed the limit when joined by
+  // a degree-two connector core. Rebuild the finalized physical graph after
+  // socket commitment and semantic promotion, then run the exact evaluator
+  // used by release validation before this operation can leave planning.
+  const finalizedNodeById = new Map(nodes.map((node) => [String(node.id), node]));
+  const finalizedOperationNodeIds = new Set(finalizedNodeById.keys());
+  const finalizedGraphAdjacency = new Map(
+    [...finalizedOperationNodeIds].map((nodeId) => [nodeId, []]),
+  );
+  const finalizedExternalKeys = new Set();
+  const externalKeyForEndpoint = (endpoint, segmentId, role) => (
+    `external:${String(
+      endpoint?.socketId ?? endpoint?.id ?? endpoint?.nodeId ?? `${segmentId}:${role}`,
+    )}`
+  );
+  for (const segment of segments) {
+    const fromNodeId = String(segment?.from?.nodeId ?? '');
+    const toNodeId = String(segment?.to?.nodeId ?? '');
+    const fromInternal = finalizedOperationNodeIds.has(fromNodeId);
+    const toInternal = finalizedOperationNodeIds.has(toNodeId);
+    if (!fromInternal && !toInternal) continue;
+    const graphFrom = fromInternal
+      ? fromNodeId
+      : externalKeyForEndpoint(segment.from, segment.id, 'from');
+    const graphTo = toInternal
+      ? toNodeId
+      : externalKeyForEndpoint(segment.to, segment.id, 'to');
+    if (!fromInternal) finalizedExternalKeys.add(graphFrom);
+    if (!toInternal) finalizedExternalKeys.add(graphTo);
+    if (!finalizedGraphAdjacency.has(graphFrom)) finalizedGraphAdjacency.set(graphFrom, []);
+    if (!finalizedGraphAdjacency.has(graphTo)) finalizedGraphAdjacency.set(graphTo, []);
+    const lengthMeters = Array.isArray(segment.path) && segment.path.length >= 2
+      ? maximumContinuousLevelRouteSpan(segment.path)
+      : dungeonPointDistance(segment.from?.position, segment.to?.position);
+    finalizedGraphAdjacency.get(graphFrom).push({
+      id: String(segment.id),
+      to: graphTo,
+      lengthMeters,
+      fromPosition: segment.from?.position ?? null,
+      toPosition: segment.to?.position ?? null,
+    });
+    finalizedGraphAdjacency.get(graphTo).push({
+      id: String(segment.id),
+      to: graphFrom,
+      lengthMeters,
+      fromPosition: segment.to?.position ?? null,
+      toPosition: segment.from?.position ?? null,
+    });
+  }
+  const finalizedRealJunctionNodeIds = new Set(nodes
+    .filter((node) => (
+      node.connectorOwned === true
+        && node.countsAsMeaningfulStation === true
+        && Number(node.graphDegree ?? 0) >= 3
+    ))
+    .map(({ id }) => String(id)));
+  const finalizedFeaturelessGraph = evaluateDungeonRouteNetworkFeaturelessGraph({
+    operation: { id: operationId, topologyTemplateId },
+    operationNodeIds: finalizedOperationNodeIds,
+    graphAdjacency: finalizedGraphAdjacency,
+    nodeById: finalizedNodeById,
+    externalKeys: finalizedExternalKeys,
+    realJunctionNodeIds: finalizedRealJunctionNodeIds,
+    maximum: maximumFeaturelessSpanMeters,
+  });
+  const accumulatedFeaturelessViolation = finalizedFeaturelessGraph.overlongSpans[0];
+  if (accumulatedFeaturelessViolation) {
+    return {
+      error: 'route-network-accumulated-featureless-span-exceeded',
+      context: {
+        grantId: grant.id,
+        ...accumulatedFeaturelessViolation,
+      },
+    };
+  }
+  const featurelessCycle = finalizedFeaturelessGraph.featurelessCycles[0];
+  if (featurelessCycle) {
+    return {
+      error: 'route-network-featureless-cycle-without-station',
+      context: { grantId: grant.id, ...featurelessCycle },
+    };
+  }
   const featurelessSpans = [...authoredFeaturelessSpans, ...physicalFeaturelessSpans];
+  let finalJunctionSelectionBag = junctionSelectionBag;
+  const junctionSelections = [];
+  const junctionBagWitnesses = [];
+  for (const node of nodes) {
+    const nodeOrdinal = Number(node.ordinal);
+    if (moduleKindForIndex(nodeOrdinal) !== 'connector-module') continue;
+    const junctionKind = String(
+      junctionKinds[nodeOrdinal]
+        ?? node.selectionConstraints?.routeNetworkJunctionKind
+        ?? '',
+    );
+    if (!junctionKind) continue;
+    const legalJunctionKinds = candidateJunctionBag.includes(junctionKind)
+      ? candidateJunctionBag
+      : [junctionKind];
+    const beforeJunctionBag = finalJunctionSelectionBag;
+    let selectedLegalJunctionKinds = legalJunctionKinds;
+    let selected = dungeonSelectionBagCandidates(
+      finalJunctionSelectionBag,
+      legalJunctionKinds,
+    ).find(({ id }) => id === junctionKind);
+    // Exact endpoint topology can force Through-T even while another general
+    // junction family remains in the bag. At that node the forced kit is the
+    // complete legal set, so consume it through a role-scoped decision.
+    if (!selected) {
+      selectedLegalJunctionKinds = [junctionKind];
+      [selected] = dungeonSelectionBagCandidates(
+        finalJunctionSelectionBag,
+        [junctionKind],
+      );
+    }
+    if (!selected) continue;
+    finalJunctionSelectionBag = selected.state;
+    junctionBagWitnesses.push(createDungeonSelectionBagWitness({
+      family: 'junction',
+      bag: beforeJunctionBag,
+      legalIds: selectedLegalJunctionKinds,
+      selection: selected,
+    }));
+    junctionSelections.push({
+      nodeOrdinal,
+      junctionKind,
+      cycle: selected.state.cycle,
+      refilled: selected.refilled,
+      realized: Number(node.graphDegree) >= 3,
+    });
+  }
+  const encounterSelectionResult = selectRouteNetworkEncounters(
+    nodes,
+    selectionBags?.encounter,
+  );
+  const roomLayoutSelections = nodes
+    .filter(({ kind }) => kind === 'supplementRoom')
+    .map((node) => {
+      const selected = roomLayoutSelectionResult.selections.find(({ nodeOrdinal }) => (
+        nodeOrdinal === Number(node.ordinal)
+      ));
+      return selected ?? {
+        nodeOrdinal: Number(node.ordinal),
+        grammarId: String(node.grammarId),
+        contentRole: String(node.contentRole ?? ''),
+        cycle: Number(roomLayoutSelectionResult.bag?.cycle ?? 0),
+        refilled: false,
+        topologyKit: Number(node.ordinal) === topologyKitModuleIndex,
+      };
+    });
+  const normalizedSemanticSignature = canonicalStringify({
+    topologyTemplateId,
+    elevationMode,
+    junctions: junctionSelections.map(({ nodeOrdinal, junctionKind }) => ({
+      nodeOrdinal,
+      junctionKind,
+    })),
+    roomLayouts: roomLayoutSelections.map(({
+      nodeOrdinal,
+      grammarId,
+      contentRole,
+      topologyKit,
+    }) => ({ nodeOrdinal, grammarId, contentRole, topologyKit })),
+    encounters: encounterSelectionResult.selections.map(({
+      nodeOrdinal,
+      encounterProfileId,
+    }) => ({ nodeOrdinal, encounterProfileId })),
+  });
+  const topologyBagWitness = createDungeonSelectionBagWitness({
+    family: 'topology',
+    bag: selectionBags?.topology,
+    legalIds: topologyLegalIds ?? selectionBags?.topology?.order ?? [topologyTemplateId],
+    selection: topologySelection,
+  });
+  const elevationBagWitness = createDungeonSelectionBagWitness({
+    family: 'elevation',
+    bag: selectionBags?.elevation,
+    legalIds: elevationLegalIds ?? selectionBags?.elevation?.order ?? [elevationMode],
+    selection: elevationSelection,
+  });
+  const selectionManifest = {
+    schema: 'ruindivex-dungeon-route-network-selection-manifest/v1',
+    topology: {
+      id: topologyTemplateId,
+      cycle: Number(topologySelection?.state?.cycle ?? selectionBags?.topology?.cycle ?? 0),
+      refilled: Boolean(topologySelection?.refilled),
+    },
+    elevation: {
+      id: elevationMode,
+      cycle: Number(elevationSelection?.state?.cycle ?? selectionBags?.elevation?.cycle ?? 0),
+      refilled: Boolean(elevationSelection?.refilled),
+    },
+    junctions: junctionSelections,
+    roomLayouts: roomLayoutSelections,
+    encounters: encounterSelectionResult.selections,
+    bagWitnesses: {
+      topology: [topologyBagWitness],
+      junction: junctionBagWitnesses,
+      elevation: [elevationBagWitness],
+      encounter: encounterSelectionResult.witnesses,
+      roomLayout: roomLayoutSelectionResult.witnesses,
+    },
+    normalizedSemanticSignature,
+  };
   const activeJunctionKinds = [...new Set(nodes
     .filter(({ graphDegree, junction }) => (
       Number(graphDegree) >= 3 && junction?.countsAsMeaningfulStation === true
@@ -9370,6 +14347,8 @@ function planRouteNetwork({
     topologyTemplateId,
     junctionKinds: activeJunctionKinds,
     elevationModes: [elevationMode],
+    selectionManifest,
+    normalizedSemanticSignature,
     contentRoles: nodes.map(({ contentRole }) => String(contentRole ?? '')),
     localProgressionArc: cloneDungeonAugmentationValue(
       profile.routeNetworkPlanning.localProgressionArc,
@@ -9421,7 +14400,32 @@ function planRouteNetwork({
     } : {}),
     ...(grant.coverage ? { coverage: cloneDungeonAugmentationValue(grant.coverage) } : {}),
   };
-  return { operation, nodes, segments };
+  return {
+    operation,
+    nodes,
+    segments,
+    // Planner-only evidence for profiling and debug tooling. The attempt
+    // assembler intentionally consumes only the deterministic operation,
+    // nodes, segments, signatures, and bag state below, so elapsed timing can
+    // never enter a plan hash or alter replay output.
+    planningPhaseTimings: physicalPlanningPhaseTimings
+      ? cloneDungeonAugmentationValue(physicalPlanningPhaseTimings)
+      : null,
+    normalizedSemanticSignature,
+    selectionBags: {
+      ...selectionBags,
+      junction: finalJunctionSelectionBag,
+      roomLayout: roomLayoutSelectionResult.bag,
+      encounter: encounterSelectionResult.bag,
+    },
+    signatureAlternativesExhausted: [
+      Boolean(topologySelection?.refilled),
+      Boolean(elevationSelection?.refilled),
+      ...junctionSelections.map(({ refilled }) => refilled),
+      ...roomLayoutSelections.map(({ refilled }) => refilled),
+      ...encounterSelectionResult.selections.map(({ refilled }) => refilled),
+    ].every(Boolean),
+  };
 }
 
 function planRouteNetworkAttempt({
@@ -9613,9 +14617,38 @@ function planRouteNetworkAttempt({
   // Starting every network at its complete semantic minimum leaves the
   // bounded solver free to add a module only when a topology candidate truly
   // needs one, rather than packing six large rooms around two nearby stations.
-  const topologyBag = random.fork('topology-bag').shuffle(settings.topologyTemplates);
-  const junctionBag = random.fork('junction-bag').shuffle(settings.junctionKinds);
-  const elevationBag = random.fork('elevation-bag').shuffle(settings.elevationModes);
+  const roomLayoutFamilyIds = profile.grammarPool
+    .map(({ id }) => grammars[id])
+    .filter((grammar) => (
+      grammar
+        && String(grammar.selectionConstraints?.routeNetworkModuleKind ?? 'room') === 'room'
+    ))
+    .map(({ id }) => id);
+  const initialSelectionBags = {
+    topology: createDungeonSelectionBag(
+      random.fork('topology-bag'),
+      settings.topologyTemplates,
+    ),
+    junction: createDungeonSelectionBag(
+      random.fork('junction-bag'),
+      settings.junctionKinds,
+    ),
+    elevation: createDungeonSelectionBag(
+      random.fork('elevation-bag'),
+      settings.elevationModes,
+    ),
+    encounter: createDungeonSelectionBag(
+      random.fork('selection-bag:encounter'),
+      ROUTE_NETWORK_ENCOUNTER_PROFILE_IDS,
+    ),
+    roomLayout: createDungeonSelectionBag(
+      random.fork('selection-bag:room-layout'),
+      roomLayoutFamilyIds,
+    ),
+  };
+  const topologyBag = initialSelectionBags.topology.order;
+  const junctionBag = initialSelectionBags.junction.order;
+  const elevationBag = initialSelectionBags.elevation.order;
   if (topologyBag.length < 3 || junctionBag.length < 2 || elevationBag.length < 3) {
     return { error: 'route-network-variety-catalog-incomplete' };
   }
@@ -9638,7 +14671,7 @@ function planRouteNetworkAttempt({
     !['shortcut-lift', 'drop-ladder'].includes(mode)
   ));
   const requiredElevationModeCount = Number(
-    profile?.requiredVariety?.elevationModeCount ?? 3,
+    profile?.requiredVariety?.elevationModeCount ?? 1,
   );
   const rotateBag = (bag, offset) => {
     if (bag.length === 0) return [];
@@ -9659,6 +14692,13 @@ function planRouteNetworkAttempt({
       const physicalMinimumModules = Math.max(
         minimumModules,
         Number(grants[operationOrdinal].grant.endpointSockets?.length ?? 0) + 2,
+        // Three or four exact stations split the supplemental arc into at
+        // least two independently balanced intervals. Five modules can leave
+        // one interval with no substantive room capable of owning its
+        // transfer, so it is semantically impossible before placement begins.
+        Number(grants[operationOrdinal].grant.endpointSockets?.length ?? 0) >= 3
+          ? 6
+          : 0,
       );
       return Array.from(
         { length: Math.max(0, maximumModules - physicalMinimumModules + 1) },
@@ -9692,6 +14732,7 @@ function planRouteNetworkAttempt({
   let candidateEvaluations = 0;
   let searchBudgetExhausted = false;
   let deepestRequiredFailure = null;
+  const candidateAttemptTrace = [];
   const recordRequiredFailure = (failure, operationOrdinal, candidateOrdinal = null) => {
     if (!failure?.error) return;
     if (deepestRequiredFailure && deepestRequiredFailure.operationOrdinal > operationOrdinal) return;
@@ -9818,10 +14859,15 @@ function planRouteNetworkAttempt({
     // reach the quota, its candidate bag contains only still-unused legal
     // families. This preserves deterministic exhaustion while avoiding a
     // full-layout backtrack merely to replace the final repeated mode.
-    const elevationModes = mustConsumeUnusedElevationMode
+    const requestedElevationModes = mustConsumeUnusedElevationMode
       ? legalElevationModes.filter((mode) => !previouslyUsedElevationModes.has(mode))
       : legalElevationModes;
-    if (elevationModes.length === 0) {
+    const elevationSelections = dungeonSelectionBagCandidates(
+      state.selectionBags.elevation,
+      requestedElevationModes,
+    );
+    const elevationModes = elevationSelections.map(({ id }) => id);
+    if (elevationSelections.length === 0) {
       if (!grant.required) return solveRouteNetworks(operationOrdinal + 1, state);
       recordRequiredFailure({
         error: 'route-network-elevation-variety-unavailable',
@@ -9875,12 +14921,9 @@ function planRouteNetworkAttempt({
       // The former count/mode zip repeated after one diagonal and could never
       // try a viable mode at another legal module count.
       const primaryModuleCounts = moduleCounts.slice(0, 2);
-      for (let offset = 0; offset < elevationModes.length; offset += 1) {
-        for (let countIndex = 0; countIndex < primaryModuleCounts.length; countIndex += 1) {
-          addCandidateSignature(
-            primaryModuleCounts[countIndex],
-            elevationModes[(countIndex + offset) % elevationModes.length],
-          );
+      for (const elevationMode of elevationModes) {
+        for (const moduleCount of primaryModuleCounts) {
+          addCandidateSignature(moduleCount, elevationMode);
         }
       }
       for (const moduleCount of moduleCounts.slice(primaryModuleCounts.length)) {
@@ -9889,11 +14932,65 @@ function planRouteNetworkAttempt({
         }
       }
     }
+    const legalTopologyIds = topologyBag.filter((topologyTemplateId) => (
+      routeNetworkTopologyIsLegalForGrant(topologyTemplateId, grant)
+    ));
+    const topologySelections = dungeonSelectionBagCandidates(
+      state.selectionBags.topology,
+      legalTopologyIds,
+    );
+    const junctionSelections = dungeonSelectionBagCandidates(
+      state.selectionBags.junction,
+      junctionBag,
+    );
+    const familyChoices = [];
+    for (let diagonal = 0;
+      diagonal < topologySelections.length + junctionSelections.length - 1;
+      diagonal += 1) {
+      // Iterate junction first so the topology index advances immediately:
+      // (T0,J0), (T1,J0), (T0,J1), ... . The former topology-major flatten
+      // could spend an entire required-network candidate budget retrying one
+      // physically impossible topology with different junction labels.
+      for (let junctionIndex = 0;
+        junctionIndex < junctionSelections.length;
+        junctionIndex += 1) {
+        const topologyIndex = diagonal - junctionIndex;
+        if (topologyIndex < 0 || topologyIndex >= topologySelections.length) continue;
+        familyChoices.push({
+          topologySelection: topologySelections[topologyIndex],
+          junctionSelection: junctionSelections[junctionIndex],
+        });
+      }
+    }
+    const familyCandidateSignatures = [];
+    for (const {
+      firstIndex: signatureIndex,
+      secondIndex: familyChoiceIndex,
+    } of interleavedCartesianIndexPairs(
+      candidateSignatures.length,
+      familyChoices.length,
+    )) {
+      const physicalSignature = candidateSignatures[signatureIndex];
+      const { topologySelection, junctionSelection } = familyChoices[familyChoiceIndex];
+      if (!routeNetworkTopologySupportsModuleCount(
+        topologySelection.id,
+        grant,
+        physicalSignature.moduleCount,
+      )) continue;
+      familyCandidateSignatures.push({
+        ...physicalSignature,
+        topologySelection,
+        junctionSelection,
+        elevationSelection: elevationSelections.find(({ id }) => (
+          id === physicalSignature.elevationMode
+        )),
+      });
+    }
     const candidateLimit = grant.required
       ? grant.kind === 'landmark-perimeter-loop'
-        ? 8
-        : Math.min(denseMultiStationCoverage ? 8 : 12, candidateSignatures.length)
-      : Math.min(1, candidateSignatures.length);
+        ? Math.min(24, familyCandidateSignatures.length)
+        : Math.min(denseMultiStationCoverage ? 8 : 12, familyCandidateSignatures.length)
+      : Math.min(1, familyCandidateSignatures.length);
     let attemptedCandidate = false;
     for (let candidateOrdinal = 0; candidateOrdinal < candidateLimit; candidateOrdinal += 1) {
       const futureCandidateEvaluationReserve = futureRequiredNetworkCount
@@ -9905,27 +15002,34 @@ function planRouteNetworkAttempt({
       }
       attemptedCandidate = true;
       candidateEvaluations += 1;
-      const candidateSignature = grant.kind === 'landmark-perimeter-loop'
-        ? {
-          moduleCount: moduleCounts[candidateOrdinal % moduleCounts.length],
-          elevationMode: elevationModes[candidateOrdinal % elevationModes.length],
-        }
-        : candidateSignatures[candidateOrdinal];
-      const { moduleCount, elevationMode } = candidateSignature;
-      const candidateJunctionBag = rotateBag(junctionBag, candidateOrdinal);
+      const candidateSignature = familyCandidateSignatures[candidateOrdinal];
+      if (!candidateSignature?.topologySelection
+        || !candidateSignature?.elevationSelection) continue;
+      const {
+        moduleCount,
+        elevationMode,
+        topologySelection,
+        junctionSelection,
+        elevationSelection,
+      } = candidateSignature;
       const candidateRandom = candidateOrdinal === 0
         ? random.fork(`network:${grant.id}`)
         : random.fork(`network:${grant.id}:global-solver:${candidateOrdinal}`);
+      const candidatePlanningStartedAt = globalThis.performance?.now?.() ?? Date.now();
       const planned = planRouteNetwork({
         region,
         grant,
         operationOrdinal,
         moduleCount,
-        topologyTemplateId: topologyBag[
-          (operationOrdinal + candidateOrdinal) % topologyBag.length
-        ],
-        junctionBag: candidateJunctionBag,
+        topologyTemplateId: topologySelection.id,
+        junctionBag,
         elevationMode,
+        selectionBags: state.selectionBags,
+        topologySelection,
+        topologyLegalIds: legalTopologyIds,
+        junctionSelection,
+        elevationSelection,
+        elevationLegalIds: requestedElevationModes,
         random: candidateRandom,
         profile,
         grammars,
@@ -9934,6 +15038,34 @@ function planRouteNetworkAttempt({
         moduleCapacity: maximumModules,
         searchVariant: candidateSignature.placementVariant ?? candidateOrdinal,
       });
+      const candidateAttemptRecord = {
+        operationOrdinal,
+        candidateOrdinal,
+        grantId: grant.id,
+        moduleCount,
+        elevationMode,
+        topologyTemplateId: topologySelection.id,
+        junctionKind: junctionSelection.id,
+        status: planned.error ? 'failed' : 'planned',
+        error: planned.error ?? null,
+        reason: planned.context?.reason ?? null,
+      };
+      candidateAttemptTrace.push(candidateAttemptRecord);
+      if (globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ === true) {
+        const candidatePlanningElapsedMs = (globalThis.performance?.now?.() ?? Date.now())
+          - candidatePlanningStartedAt;
+        console.error(JSON.stringify({
+          ...candidateAttemptRecord,
+          searchVariant: candidateSignature.placementVariant ?? candidateOrdinal,
+          planningElapsedMs: Number(candidatePlanningElapsedMs.toFixed(3)),
+          planningPhaseTimings: planned.context?.planningPhaseTimings
+            ?? planned.planningPhaseTimings
+            ?? null,
+          plannedNodeCount: planned.nodes?.length ?? 0,
+          substantiveModuleCount: planned.operation?.substantiveModuleCount ?? null,
+          context: planned.context ?? null,
+        }));
+      }
       if (planned.error) {
         if (grant.required) {
           recordRequiredFailure({
@@ -9941,6 +15073,20 @@ function planRouteNetworkAttempt({
             context: {
               ...(planned.context ?? {}),
               requestedSubstantiveModuleCount: moduleCount,
+            },
+          }, operationOrdinal, candidateOrdinal);
+        }
+        continue;
+      }
+      if ((state.usedCompleteSignatures ?? []).includes(
+        planned.normalizedSemanticSignature,
+      ) && planned.signatureAlternativesExhausted !== true) {
+        if (grant.required) {
+          recordRequiredFailure({
+            error: 'route-network-complete-signature-repeated-before-exhaustion',
+            context: {
+              grantId: grant.id,
+              normalizedSemanticSignature: planned.normalizedSemanticSignature,
             },
           }, operationOrdinal, candidateOrdinal);
         }
@@ -9980,6 +15126,15 @@ function planRouteNetworkAttempt({
           ...(state.elevationModes ?? []),
           ...(planned.operation?.elevationModes ?? [elevationMode]),
         ])],
+        selectionBags: {
+          ...planned.selectionBags,
+          topology: topologySelection.state,
+          elevation: elevationSelection.state,
+        },
+        usedCompleteSignatures: [
+          ...(state.usedCompleteSignatures ?? []),
+          planned.normalizedSemanticSignature,
+        ],
       });
       if (solved) return solved;
     }
@@ -10000,6 +15155,8 @@ function planRouteNetworkAttempt({
     remainingModules: settings.maximumTotalModules,
     acceptedNetworkCount: 0,
     elevationModes: [],
+    selectionBags: initialSelectionBags,
+    usedCompleteSignatures: [],
   });
   if (!solvedRouteNetworks) {
     const failure = deepestRequiredFailure ?? {
@@ -10017,6 +15174,7 @@ function planRouteNetworkAttempt({
           deepestOperationOrdinal: failure.operationOrdinal ?? null,
           deepestGrantId: failure.grantId ?? null,
           candidateOrdinal: failure.candidateOrdinal ?? null,
+          candidateAttemptTrace: candidateAttemptTrace.slice(-32),
         },
       },
     };

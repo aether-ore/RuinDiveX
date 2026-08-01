@@ -6,6 +6,15 @@ import {
   createIndustrialAugmentationHost,
   createIndustrialBaseDraft,
 } from '../src/dungeon-augmentation/IndustrialDraftAdapter.js';
+import {
+  createDungeonSelectionBag,
+  dungeonSelectionBagCandidates,
+  DUNGEON_AUGMENTATION_PROFILES,
+  DungeonAugmentationRandom,
+  GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
+  normalizeRouteNetworkGrant,
+  planRouteNetwork,
+} from '../src/dungeon-augmentation/index.js';
 
 function isGraphOnlySupplementConnection(plan) {
   return Boolean(
@@ -423,7 +432,7 @@ function createPlayableAlphaSmokeSummary(dungeon) {
 }
 
 if (process.argv.includes('--candidate-summary')) {
-  process.env.ROUTE_CANDIDATE_DEBUG = '1';
+  globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ = true;
   const candidateFilter = process.argv.find((argument) => argument.startsWith('--filter='))
     ?.slice('--filter='.length) ?? 'conveyorRoom_bossRoom';
   const includeStageDiagnostics = process.argv.includes('--stages');
@@ -446,6 +455,8 @@ if (process.argv.includes('--candidate-summary')) {
         minimumModules: record.minimumModules,
         maximumModules: record.maximumModules,
         error: record.error,
+        planningElapsedMs: record.planningElapsedMs ?? null,
+        planningPhaseTimings: record.planningPhaseTimings ?? null,
         plannedNodeCount: record.plannedNodeCount,
         substantiveModuleCount: record.substantiveModuleCount,
         constraintKind: record.constraintKind ?? record.context?.constraintKind ?? null,
@@ -482,6 +493,8 @@ if (process.argv.includes('--candidate-summary')) {
 const seed = process.argv.find((argument) => argument.startsWith('--seed='))
   ?.slice('--seed='.length) ?? 'layout:augmentation-realized-v4-000';
 const seeded = new SeededRandom(hashSeed(seed));
+const attemptLimitArgument = process.argv.find((argument) => argument.startsWith('--attempt-limit='));
+const requestedAttemptLimit = Number.parseInt(attemptLimitArgument?.slice('--attempt-limit='.length) ?? '', 10);
 const generator = new DungeonGenerator({
   random: () => seeded.next(),
   difficulty: 1,
@@ -489,6 +502,9 @@ const generator = new DungeonGenerator({
   augmentationSeed: seed,
   basePlanHash: `v1:${seed}:depth:1:revolvingFusillade`,
   allowInvalidAugmentationPreview: process.argv.includes('--playable-alpha'),
+  augmentationRealizationAttemptLimit: Number.isFinite(requestedAttemptLimit)
+    ? requestedAttemptLimit
+    : undefined,
 });
 const texture = new THREE.Texture();
 generator.textureCache.set('debug-augmentation-attempt', texture);
@@ -681,6 +697,192 @@ const host = createIndustrialAugmentationHost({
   connectionPlans: base.dungeon.connectionPlans,
   tileSize: generator.tileSize,
 });
+const singleGrantPlanArgument = process.argv.find((argument) => (
+  argument.startsWith('--single-grant-plan=')
+));
+if (singleGrantPlanArgument) {
+  const suffix = singleGrantPlanArgument.slice('--single-grant-plan='.length);
+  const region = host.extensionRegions[0];
+  const grant = normalizeRouteNetworkGrant(
+    region.routeNetworkGrants.find(({ id }) => id.endsWith(`coverage:${suffix}`)),
+    region,
+  );
+  const profile = DUNGEON_AUGMENTATION_PROFILES['industrial-supplement-preview-v4'];
+  const grammars = GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS;
+  const plannerRandom = new DungeonAugmentationRandom(seed).fork('single-grant-debug');
+  const roomLayoutIds = profile.grammarPool
+    .map(({ id }) => grammars[id])
+    .filter((grammar) => (
+      grammar
+        && String(grammar.selectionConstraints?.routeNetworkModuleKind ?? 'room') === 'room'
+    ))
+    .map(({ id }) => id);
+  const selectionBags = {
+    topology: createDungeonSelectionBag(plannerRandom.fork('topology-bag'),
+      profile.routeNetworkPlanning.topologyTemplates),
+    junction: createDungeonSelectionBag(plannerRandom.fork('junction-bag'),
+      profile.routeNetworkPlanning.junctionKinds),
+    elevation: createDungeonSelectionBag(plannerRandom.fork('elevation-bag'),
+      profile.routeNetworkPlanning.elevationModes),
+    encounter: createDungeonSelectionBag(plannerRandom.fork('encounter-bag'), [
+      'supplement-route-network-defense',
+      'supplement-lateral-defense',
+    ]),
+    roomLayout: createDungeonSelectionBag(plannerRandom.fork('room-layout-bag'),
+      roomLayoutIds),
+  };
+  const argumentValue = (name, fallback) => process.argv
+    .find((argument) => argument.startsWith(`--${name}=`))
+    ?.slice(name.length + 3) ?? fallback;
+  const topologyTemplateId = argumentValue(
+    'topology',
+    selectionBags.topology.order[0],
+  );
+  const junctionKind = argumentValue('junction', selectionBags.junction.order[0]);
+  const elevationMode = argumentValue('elevation', 'split-level-platform');
+  const moduleCount = Number(argumentValue('modules', '6'));
+  const searchVariant = Number(argumentValue('variant', '0'));
+  const topologySelection = dungeonSelectionBagCandidates(
+    selectionBags.topology,
+    [topologyTemplateId],
+  )[0];
+  const junctionSelection = dungeonSelectionBagCandidates(
+    selectionBags.junction,
+    [junctionKind],
+  )[0];
+  const elevationSelection = dungeonSelectionBagCandidates(
+    selectionBags.elevation,
+    [elevationMode],
+  )[0];
+  const singleGrantPlanningStartedAt = performance.now();
+  const result = planRouteNetwork({
+    region,
+    grant,
+    operationOrdinal: 5,
+    moduleCount,
+    topologyTemplateId,
+    junctionBag: profile.routeNetworkPlanning.junctionKinds,
+    elevationMode,
+    selectionBags,
+    topologySelection,
+    topologyLegalIds: profile.routeNetworkPlanning.topologyTemplates,
+    junctionSelection,
+    elevationSelection,
+    elevationLegalIds: profile.routeNetworkPlanning.elevationModes,
+    random: plannerRandom.fork('candidate'),
+    profile,
+    grammars,
+    progressionOrderStart: 0,
+    planningAvoidanceVolumes: [
+      ...(region.routeNetworkPlacementProtectedVolumes ?? region.protectedVolumes ?? []),
+      ...(grant.protectedVolumes ?? []),
+    ],
+    moduleCapacity: 6,
+    searchVariant,
+  });
+  const singleGrantPlanningElapsedMs = performance.now() - singleGrantPlanningStartedAt;
+  const singleContext = process.argv.includes('--compact-failure-summary')
+    ? {
+      grantId: result.context?.grantId ?? null,
+      selectedGrammarIds: result.context?.selectedGrammarIds ?? null,
+      contentRoles: result.context?.contentRoles ?? null,
+      endpointNodeIndices: result.context?.endpointNodeIndices ?? null,
+      constraintKind: result.context?.constraintKind ?? null,
+      firstNodeIndex: result.context?.firstNodeIndex ?? null,
+      secondNodeIndex: result.context?.secondNodeIndex ?? null,
+      placementSearchVisits: result.context?.placementSearchVisits ?? null,
+      physicalSpineAttempts: result.context?.physicalSpineAttempts ?? null,
+      planningPhaseTimings: result.context?.planningPhaseTimings
+        ?? result.planningPhaseTimings
+        ?? null,
+      placementCandidateCounts: result.context?.placementCandidateCounts ?? null,
+      initialPlacementCandidateCenters: (result.context?.initialPlacementCandidateCenters ?? [])
+        .map((group) => ({
+          nodeIndex: group.nodeIndex,
+          baseCenterCandidate: group.baseCenterCandidate,
+          candidateCount: group.centers?.length ?? 0,
+          firstCenters: (group.centers ?? []).slice(0, 8),
+        })),
+      objectiveExternalDiagnostics: result.context?.objectiveExternalDiagnostics ?? null,
+      externalSpinePathBindings: result.context?.externalSpinePathBindings ?? null,
+      requiredSocketBindings: result.context?.requiredSocketBindings ?? null,
+      placementCandidateCounts: result.context?.placementCandidateCounts ?? null,
+      initialPlacementCandidateCounts: result.context?.initialPlacementCandidateCounts ?? null,
+      closestRejectedPairs: (result.context?.closestRejectedPairs ?? []).slice(0, 3),
+      arcConsistencyHistory: (result.context?.arcConsistencyHistory ?? []).map((entry) => ({
+        iteration: entry.iteration,
+        kind: entry.kind,
+        status: entry.status,
+        firstNodeIndex: entry.firstNodeIndex,
+        secondNodeIndex: entry.secondNodeIndex,
+        adjacent: entry.adjacent,
+        parentAttachment: entry.parentAttachment,
+        beforeFirstCount: entry.beforeFirstCount,
+        afterFirstCount: entry.afterFirstCount,
+        beforeSecondCount: entry.beforeSecondCount,
+        afterSecondCount: entry.afterSecondCount,
+        exactPairEvaluations: entry.exactPairEvaluations,
+        cheapPairEvaluations: entry.cheapPairEvaluations,
+        cheapPairCount: entry.cheapPairCount,
+      })),
+      failedPairRejectionSummary: result.context?.failedPairRejectionSummary ?? null,
+      closestRejectedPairs: (result.context?.closestRejectedPairs ?? []).slice(0, 2),
+      physicalPairEdges: (result.context?.physicalPairEdgeDiagnostics ?? []).map((edge) => ({
+        edgeIndex: edge.edgeIndex,
+        fromNodeIndex: edge.fromNodeIndex,
+        toNodeIndex: edge.toNodeIndex,
+        evaluatedPairCount: edge.evaluatedPairCount,
+        compatiblePairCount: edge.compatiblePairCount,
+        minimumCollisionScore: edge.minimumCollisionScore,
+        minimumDistanceMeters: edge.minimumDistanceMeters,
+        bestBlockedPath: edge.bestBlockedPath,
+        bestBlockedCollisionIds: edge.bestBlockedCollisionIds,
+        routeStageTotals: edge.routeStageTotals,
+        socketPairCandidateCounts: edge.socketPairCandidateCounts,
+        eligibleSocketPairCandidateCounts: edge.eligibleSocketPairCandidateCounts,
+      })),
+      physicalSpineEdges: (result.context?.physicalSpineEdgeDiagnostics ?? []).map((edge) => ({
+        edgeIndex: edge.edgeIndex,
+        fromNodeIndex: edge.fromNodeIndex,
+        toNodeIndex: edge.toNodeIndex,
+        visits: edge.visits,
+        deadEnds: edge.deadEnds,
+        maximumRawCandidateCount: edge.maximumRawCandidateCount,
+        maximumCollisionFreeCandidateCount: edge.maximumCollisionFreeCandidateCount,
+        maximumWithinSpanCandidateCount: edge.maximumWithinSpanCandidateCount,
+        maximumFeasibleCandidateCount: edge.maximumFeasibleCandidateCount,
+        minimumAccumulatedFeaturelessDistanceMeters:
+          edge.minimumAccumulatedFeaturelessDistanceMeters,
+        minimumCollisionScore: edge.minimumCollisionScore,
+        minimumDistanceMeters: edge.minimumDistanceMeters,
+        bestBlockedPath: edge.bestBlockedPath,
+        bestBlockedCollisionIds: edge.bestBlockedCollisionIds,
+        lastSocketPairDiagnostics: edge.lastSocketPairDiagnostics,
+      })),
+    }
+    : result.context ?? null;
+  console.log(JSON.stringify({
+    suffix,
+    topologyTemplateId,
+    junctionKind,
+    elevationMode,
+    moduleCount,
+    searchVariant,
+    planningElapsedMs: Number(singleGrantPlanningElapsedMs.toFixed(3)),
+    error: result.error ?? null,
+    context: singleContext,
+    operation: result.operation ? {
+      nodeIds: result.operation.nodeIds,
+      contentRoles: result.operation.contentRoles,
+      moduleCount: result.operation.moduleCount,
+      physicalNodeCount: result.operation.physicalNodeCount,
+    } : null,
+    selectedGrammarIds: result.nodes?.map(({ grammarId }) => grammarId) ?? null,
+  }, null, 2));
+  generator._disposeGeneratedDungeonCandidate(base.dungeon);
+  texture.dispose();
+  process.exit(0);
+}
 const requestedGrant = process.argv.find((argument) => argument.startsWith('--grant='))
   ?.slice('--grant='.length) ?? 'enemyNest_keycardRoom';
 const witnessGrant = host.extensionRegions[0].routeNetworkGrants.find(({ id }) => (
@@ -760,6 +962,79 @@ if (process.argv.includes('--plan-only')) {
     texture.dispose();
     process.exit(0);
   }
+  if (process.argv.includes('--compact-failure-summary')) {
+    const error = planned?.diagnostics?.errors?.[0] ?? null;
+    const context = error?.context ?? {};
+    console.log(JSON.stringify({
+      status: planned?.status ?? null,
+      error: error ? {
+        code: error.code,
+        grantId: context.grantId,
+        constraintKind: context.constraintKind,
+        firstNodeIndex: context.firstNodeIndex,
+        secondNodeIndex: context.secondNodeIndex,
+        nodeIndex: context.nodeIndex,
+        topologyTemplateId: context.topologyTemplateId,
+        elevationMode: context.elevationMode,
+        reason: context.reason,
+        intervals: context.intervals,
+        intervalDeltas: context.intervalDeltas,
+        balancedCoverageLayoutSignature: context.balancedCoverageLayoutSignature,
+        refinedLayoutSignature: context.refinedLayoutSignature,
+        riseIndex: context.riseIndex,
+        descentIndex: context.descentIndex,
+        selectedGrammarIds: context.selectedGrammarIds,
+        contentRoles: context.contentRoles,
+        endpointNodeIndices: context.endpointNodeIndices,
+        requestedSubstantiveModuleCount: context.requestedSubstantiveModuleCount,
+        routeNetworkSolver: context.routeNetworkSolver,
+        placementSearchVisits: context.placementSearchVisits,
+        physicalSpineAttempts: context.physicalSpineAttempts,
+        planningPhaseTimings: context.planningPhaseTimings,
+        initialPlacementCandidateCounts: context.initialPlacementCandidateCounts,
+        arcConsistencyHistory: context.arcConsistencyHistory,
+        failedPairRejectionSummary: context.failedPairRejectionSummary,
+        placementCandidateCounts: (context.placementCandidateCounts ?? []).map((record) => ({
+          nodeIndex: record.nodeIndex,
+          count: record.count,
+        })),
+        physicalPairEdges: (context.physicalPairEdgeDiagnostics ?? []).map((edge) => ({
+          edgeOrdinal: edge.edgeOrdinal,
+          fromNodeIndex: edge.fromNodeIndex,
+          toNodeIndex: edge.toNodeIndex,
+          evaluatedPairCount: edge.evaluatedPairCount,
+          compatiblePairCount: edge.compatiblePairCount,
+          minimumCollisionScore: edge.minimumCollisionScore,
+          minimumDistanceMeters: edge.minimumDistanceMeters,
+          bestBlockedCollisionIds: edge.bestBlockedCollisionIds,
+          routeStageTotals: edge.routeStageTotals,
+        })),
+        physicalSpineEdges: (context.physicalSpineEdgeDiagnostics ?? []).map((edge) => ({
+          edgeIndex: edge.edgeIndex,
+          fromNodeIndex: edge.fromNodeIndex,
+          toNodeIndex: edge.toNodeIndex,
+          visits: edge.visits,
+          deadEnds: edge.deadEnds,
+          maximumRawCandidateCount: edge.maximumRawCandidateCount,
+          maximumCollisionFreeCandidateCount: edge.maximumCollisionFreeCandidateCount,
+          maximumWithinSpanCandidateCount: edge.maximumWithinSpanCandidateCount,
+          maximumFeasibleCandidateCount: edge.maximumFeasibleCandidateCount,
+          forwardCheckFailures: edge.forwardCheckFailures,
+          minimumEndpointPrefixMeters: edge.minimumEndpointPrefixMeters,
+          minimumAccumulatedFeaturelessDistanceMeters:
+            edge.minimumAccumulatedFeaturelessDistanceMeters,
+          minimumCollisionScore: edge.minimumCollisionScore,
+          minimumDistanceMeters: edge.minimumDistanceMeters,
+          bestBlockedCollisionIds: edge.bestBlockedCollisionIds,
+        })),
+        parentAttachmentFailures: context.parentAttachmentFailureDiagnostics,
+        lastPhysicalPlacementCenters: context.lastPhysicalPlacementCenters,
+      } : null,
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(base.dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
   if (process.argv.includes('--failure-summary')) {
     const error = planned?.diagnostics?.errors?.[0] ?? null;
     const context = error?.context ?? {};
@@ -779,7 +1054,15 @@ if (process.argv.includes('--plan-only')) {
         closestRejectedPairs: context.closestRejectedPairs,
         placementSearchVisits: context.placementSearchVisits,
         physicalSpineAttempts: context.physicalSpineAttempts,
+        planningPhaseTimings: context.planningPhaseTimings,
         objectiveExternalDiagnostics: context.objectiveExternalDiagnostics,
+        compoundDiagnostics: context.compoundDiagnostics,
+        coveragePlacementShape: context.coveragePlacementShape,
+        externalSpinePathCount: context.externalSpinePathCount,
+        externalSpinePathBindings: context.externalSpinePathBindings,
+        initialPlacementCandidateCounts: context.initialPlacementCandidateCounts,
+        arcConsistencyHistory: context.arcConsistencyHistory,
+        failedPairRejectionSummary: context.failedPairRejectionSummary,
         lastPhysicalPlacementCenters: context.lastPhysicalPlacementCenters,
         parentAttachmentFailures: context.parentAttachmentFailureDiagnostics,
         placementCandidates: (context.placementCandidateCounts ?? []).map((record) => ({
@@ -791,8 +1074,67 @@ if (process.argv.includes('--plan-only')) {
           parentAttachmentCompatibleCount:
             record.diagnostics?.parentAttachmentCompatibleCount,
         })),
-        physicalPairEdges: context.physicalPairEdgeDiagnostics,
+        physicalPairEdges: (context.physicalPairEdgeDiagnostics ?? []).map((edge) => ({
+          edgeOrdinal: edge.edgeOrdinal,
+          fromNodeIndex: edge.fromNodeIndex,
+          toNodeIndex: edge.toNodeIndex,
+          evaluatedPairCount: edge.evaluatedPairCount,
+          compatiblePairCount: edge.compatiblePairCount,
+          minimumCollisionScore: edge.minimumCollisionScore,
+          minimumDistanceMeters: edge.minimumDistanceMeters,
+          bestBlockedCollisionIds: edge.bestBlockedCollisionIds,
+          routeStageTotals: edge.routeStageTotals,
+          socketPairCandidateCounts: (edge.socketPairCandidateCounts ?? [])
+            .slice(0, 16)
+            .map((pair) => ({
+              fromLocalSocketId: pair.fromLocalSocketId,
+              toLocalSocketId: pair.toLocalSocketId,
+              connectorFamily: pair.connectorFamily,
+              rawRouteCandidateCount: pair.rawRouteCandidateCount,
+              routeOptionCount: pair.routeOptionCount,
+              declaredExternalSpinePath: pair.declaredExternalSpinePath,
+              externalSpineStartDeltaMeters: pair.externalSpineStartDeltaMeters,
+              externalSpineEndDeltaMeters: pair.externalSpineEndDeltaMeters,
+              fromPosition: pair.fromPosition,
+              toPosition: pair.toPosition,
+              minimumRawFeaturelessDistanceMeters:
+                pair.minimumRawFeaturelessDistanceMeters,
+              routeSelectionDiagnostics: pair.routeSelectionDiagnostics,
+              endpointPrefixMeters: pair.endpointPrefixMeters,
+              accumulatedFeaturelessDistancesMeters:
+                pair.accumulatedFeaturelessDistancesMeters,
+              exactRouteOptionStaticCollisionFreeCount:
+                pair.exactRouteOptionStaticCollisionFreeCount,
+              optionCollisionDiagnostics: pair.optionCollisionDiagnostics,
+            })),
+          eligibleSocketPairCandidateCounts: (edge.eligibleSocketPairCandidateCounts ?? [])
+            .slice(0, 16)
+            .map((pair) => ({
+              fromLocalSocketId: pair.fromLocalSocketId,
+              toLocalSocketId: pair.toLocalSocketId,
+              connectorFamily: pair.connectorFamily,
+              rawRouteCandidateCount: pair.rawRouteCandidateCount,
+              routeOptionCount: pair.routeOptionCount,
+              declaredExternalSpinePath: pair.declaredExternalSpinePath,
+              fromPosition: pair.fromPosition,
+              toPosition: pair.toPosition,
+              minimumRawFeaturelessDistanceMeters:
+                pair.minimumRawFeaturelessDistanceMeters,
+              routeSelectionDiagnostics: pair.routeSelectionDiagnostics,
+              endpointPrefixMeters: pair.endpointPrefixMeters,
+              accumulatedFeaturelessDistancesMeters:
+                pair.accumulatedFeaturelessDistancesMeters,
+              exactRouteOptionStaticCollisionFreeCount:
+                pair.exactRouteOptionStaticCollisionFreeCount,
+              optionCollisionDiagnostics: pair.optionCollisionDiagnostics,
+            })),
+        })),
         spineEdges: context.physicalSpineEdgeDiagnostics,
+        topologyTemplateId: context.topologyTemplateId,
+        topologyKitModuleIndex: context.topologyKitModuleIndex,
+        topologyReturnDiagnostics: context.topologyReturnDiagnostics,
+        balancedCoverageLayoutSignature: context.balancedCoverageLayoutSignature,
+        refinedLayoutSignature: context.refinedLayoutSignature,
       } : null,
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);

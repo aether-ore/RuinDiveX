@@ -556,6 +556,85 @@ test('all elevation families expose mirrored ascending and descending endpoint c
   }
 });
 
+test('strict V4 connector contracts honor exact 2.8m-quantized elevation deltas', () => {
+  for (const variantId of [
+    DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT,
+  ]) {
+    for (const [direction, sourceElevation, destinationElevation] of [
+      ['ascending', 0, 2.8],
+      ['descending', 5.6, 2.8],
+    ]) {
+      const contract = createDungeonConnectorVariantContract(
+        makePlan(`strict-v4-${variantId}-${direction}`, 0),
+        variantId,
+        {
+          sourceElevation,
+          destinationElevation,
+          direction,
+          allowExactQuantizedElevationDelta: true,
+        },
+      );
+      assert.equal(contract.sourceElevation, sourceElevation);
+      assert.equal(contract.destinationElevation, destinationElevation);
+      assert.ok(Math.abs(
+        contract.elevationDelta - (destinationElevation - sourceElevation),
+      ) < 1e-9);
+      assert.equal(contract.direction, direction);
+      if (contract.traversalKind === 'slope') {
+        assert.ok(contract.construction.flights.every((flight) => (
+          Math.abs(Math.abs(flight.riseMeters) - 1.4) < 1e-9
+            && Math.abs(Math.abs(flight.risePerSegmentMeters)
+              - (1.4 / DUNGEON_CONNECTOR_CLEARANCE.slopeSegmentsPerFlight)) < 1e-6
+        )));
+      } else {
+        assert.ok(Math.abs(
+          contract.sweptVolumes[0].size.y
+            - (2.8 + DUNGEON_CONNECTOR_CLEARANCE.minimumHeadroomMeters),
+        ) < 1e-9);
+      }
+    }
+  }
+
+  const plan = makePlan('strict-v4-invalid-delta', 0);
+  assert.throws(() => createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    { sourceElevation: 0, destinationElevation: 2.8, direction: 'ascending' },
+  ), /exactly 14 metres/);
+  assert.throws(() => createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    {
+      sourceElevation: 0,
+      destinationElevation: 1.4,
+      direction: 'ascending',
+      allowExactQuantizedElevationDelta: true,
+    },
+  ), /2.8 metre-quantized/);
+  assert.throws(() => createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    {
+      sourceElevation: 0,
+      destinationElevation: 16.8,
+      direction: 'ascending',
+      allowExactQuantizedElevationDelta: true,
+    },
+  ), /no greater than 14 metres/);
+  assert.throws(() => createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.LADDER_GALLERY,
+    {
+      sourceElevation: 0,
+      destinationElevation: 2.8,
+      direction: 'descending',
+      allowExactQuantizedElevationDelta: true,
+    },
+  ), /disagrees with its exact elevation delta/);
+});
+
 test('service galleries are explicitly level and reject a nonzero destination delta', () => {
   const plan = makePlan('level-service', 0);
   const contract = createDungeonConnectorVariantContract(

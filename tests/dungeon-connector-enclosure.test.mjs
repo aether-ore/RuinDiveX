@@ -3,6 +3,7 @@ import test from 'node:test';
 import * as THREE from 'three';
 
 import { DungeonGenerator } from '../src/DungeonGenerator.js';
+import { createDungeonRouteEndpointSeam } from '../src/dungeon-augmentation/geometry.js';
 import { PLAYER_TRAVERSAL_ENVELOPE } from '../src/TraversalCapabilities.js';
 import { hashSeed, SeededRandom } from '../src/reaverbots/SeededRandom.js';
 
@@ -24,6 +25,57 @@ const DIRECTIONS = [
   [0, 1],
   [0, -1],
 ];
+
+function createExactEndpointSeam(planId, operationId, socket, role) {
+  return createDungeonRouteEndpointSeam({
+    ...socket,
+    nodeId: socket.roomId,
+    position: {
+      x: Number(socket.x) * 2.8,
+      y: Number(socket.elevation ?? 0),
+      z: Number(socket.z) * 2.8,
+    },
+    facing: {
+      x: Number(socket.facingX ?? 0),
+      y: 0,
+      z: Number(socket.facingZ ?? 0),
+    },
+  }, {
+    id: `${planId}:${role}-endpoint-seam`,
+    segmentId: planId,
+    operationId,
+    networkId: operationId,
+    nodeId: socket.roomId,
+    socketId: socket.id,
+    role,
+    tileSize: 2.8,
+  });
+}
+
+function stampTestSeamOwnership(floorTiles, seams, connectionId) {
+  for (const seam of seams) {
+    for (const cell of seam.orderedCells) {
+      const floor = floorTiles.find((candidate) => (
+        candidate.x === cell.gridX
+          && candidate.z === cell.gridZ
+          && Math.abs(Number(candidate.elevation ?? 0) - Number(cell.position.y)) <= 0.05
+      ));
+      if (!floor) continue;
+      floor.authoritativeSocketSeamIds = [...new Set([
+        ...(floor.authoritativeSocketSeamIds ?? []),
+        seam.id,
+      ])];
+      floor.authoritativeSocketSeamCellIds = [...new Set([
+        ...(floor.authoritativeSocketSeamCellIds ?? []),
+        cell.id,
+      ])];
+      floor.authoritativeSocketSeamOwnerIds = [...new Set([
+        ...(floor.authoritativeSocketSeamOwnerIds ?? []),
+        connectionId,
+      ])];
+    }
+  }
+}
 
 function tileKey(x, z) {
   return `${x},${z}`;
@@ -637,6 +689,7 @@ test('even-width connector apertures reserve exactly their declared lane count',
 test('a V4 connector entrance rejects a wall in any lane of either two-tile approach', () => {
   const generator = new DungeonGenerator({ random: () => 0.5 });
   const connectionId = 'supplement:test:strict-entrance';
+  const operationId = 'supplement:test:strict-entrance:operation';
   const floorTiles = [];
   for (let x = -1; x <= 5; x += 1) {
     for (let z = -1; z <= 1; z += 1) {
@@ -681,6 +734,26 @@ test('a V4 connector entrance rejects a wall in any lane of either two-tile appr
   };
   fromSocket.matchingSocketId = toSocket.id;
   toSocket.matchingSocketId = fromSocket.id;
+  const endpointSeams = [
+    createExactEndpointSeam(connectionId, operationId, fromSocket, 'from'),
+    createExactEndpointSeam(connectionId, operationId, toSocket, 'to'),
+  ];
+  stampTestSeamOwnership(floorTiles, endpointSeams, connectionId);
+  const plan = {
+    id: connectionId,
+    fromRoomId: 'hubTown',
+    toRoomId: 'supplement-room',
+    fromSocket,
+    toSocket,
+    elevation: 0,
+    bridgePath: [{ x: 1, z: 0 }, { x: 2, z: 0 }, { x: 3, z: 0 }],
+    isDungeonSupplement: true,
+    isRouteNetworkConnection: true,
+    augmentationOperationType: 'routeNetwork',
+    augmentationOperationId: operationId,
+    routeNetworkGrantId: operationId,
+    endpointSeams,
+  };
   const validation = generator._validateConnectorEntranceWalkability({
     floorTiles,
     rooms: [
@@ -696,18 +769,7 @@ test('a V4 connector entrance rejects a wall in any lane of either two-tile appr
         isDungeonSupplement: true,
       },
     ],
-    connectionPlans: [{
-      id: connectionId,
-      fromRoomId: 'hubTown',
-      toRoomId: 'supplement-room',
-      fromSocket,
-      toSocket,
-      elevation: 0,
-      bridgePath: [{ x: 1, z: 0 }, { x: 2, z: 0 }, { x: 3, z: 0 }],
-      isDungeonSupplement: true,
-      isRouteNetworkConnection: true,
-      augmentationOperationType: 'routeNetwork',
-    }],
+    connectionPlans: [plan],
     wallRuns: [{
       facadeId: 'retained-center-lane-wall',
       horizontal: false,
@@ -727,16 +789,24 @@ test('a V4 connector entrance rejects a wall in any lane of either two-tile appr
   assert.equal(sourceCheck.strictApproachContract, true);
   assert.equal(sourceCheck.requiredLaneCount, 3);
   assert.equal(sourceCheck.requiredApproachDepthTiles, 2);
+  assert.equal(sourceCheck.authoritativeSeamCellCount, 15);
+  assert.ok(sourceCheck.laneChecks.every((lane) => lane.points.length === 5));
+  assert.ok(sourceCheck.laneChecks.every((lane) => (
+    JSON.stringify(lane.points.map(({ signedDepthTiles }) => signedDepthTiles))
+      === JSON.stringify([-2, -1, 0, 1, 2])
+  )));
   assert.equal(sourceCheck.blockingWallFacadeId, 'retained-center-lane-wall');
   assert.match(validation.errors.join('\n'), /blocked by boundary wall/);
 });
 
 test('graph-only route records cannot carve physical wall openings', () => {
   const generator = new DungeonGenerator({ random: () => 0.5 });
+  const operationId = 'supplement:test:graph-only-wall-opening:operation';
   const plan = {
     id: 'supplement:test:graph-only-wall-opening',
     fromSocket: {
       id: 'supplement:test:graph-only-wall-opening:from',
+      roomId: 'graph-from-room',
       x: 0,
       z: 0,
       elevation: 0,
@@ -747,6 +817,7 @@ test('graph-only route records cannot carve physical wall openings', () => {
     },
     toSocket: {
       id: 'supplement:test:graph-only-wall-opening:to',
+      roomId: 'graph-to-room',
       x: 0,
       z: 2,
       elevation: 0,
@@ -761,14 +832,33 @@ test('graph-only route records cannot carve physical wall openings', () => {
     isSupplementGraphConnection: true,
     connectorVariantConstraints: { graphOnly: true },
   };
+  const endpointSeams = [
+    createExactEndpointSeam(plan.id, operationId, plan.fromSocket, 'from'),
+    createExactEndpointSeam(plan.id, operationId, plan.toSocket, 'to'),
+  ];
 
   assert.equal(generator._createConnectorWallOpeningMap([plan]).size, 0);
   const physicalOpenings = generator._createConnectorWallOpeningMap([{
     ...plan,
     isSupplementGraphConnection: false,
     connectorVariantConstraints: {},
+    augmentationOperationType: 'routeNetwork',
+    augmentationOperationId: operationId,
+    routeNetworkGrantId: operationId,
+    endpointSeams,
   }]);
-  assert.ok(physicalOpenings.size > 0);
+  const openingRecords = [...physicalOpenings.values()].flat();
+  assert.equal(openingRecords.length, 6);
+  assert.deepEqual(
+    openingRecords.map(({ authoritativeSeamId }) => authoritativeSeamId).sort(),
+    endpointSeams.flatMap((seam) => Array(3).fill(seam.id)).sort(),
+  );
+  assert.deepEqual(
+    openingRecords.map(({ authoritativeSeamCellId }) => authoritativeSeamCellId).sort(),
+    endpointSeams.flatMap((seam) => seam.orderedCells
+      .filter(({ signedDepthTiles }) => signedDepthTiles === 0)
+      .map(({ id }) => id)).sort(),
+  );
 });
 
 test('augmented door threshold wings carve a close adjacent connector aperture', () => {

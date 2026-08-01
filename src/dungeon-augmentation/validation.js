@@ -16,12 +16,21 @@ import {
 } from './canonical.js';
 import {
   collectBaseDraftVolumes,
+  createDungeonRouteEndpointSeam,
   dungeonPointDistance,
   dungeonVolumeOverlapWithinGrants,
   dungeonVolumesOverlap,
   measureDungeonPolyline,
 } from './geometry.js';
 import { isDungeonSupplementIdForRegion } from './ids.js';
+import {
+  DUNGEON_ROUTE_ENDPOINT_SEAM_GRID_LATTICE_DIAGNOSTIC,
+  inspectDungeonRouteEndpointSeamGridLattice,
+} from './endpointSeamLattice.js';
+import {
+  DUNGEON_SELECTION_BAG_FAMILIES,
+  validateDungeonSelectionBagWitnessSequence,
+} from './selectionBagWitness.js';
 
 function diagnostic(code, message, context = {}) {
   return { code, message, context };
@@ -825,12 +834,14 @@ const SUPPLEMENT_ROOM_NODE_KIND = 'supplementRoom';
 const SUPPLEMENT_CONNECTOR_MODULE_NODE_KIND = 'supplementConnectorModule';
 const SUPPLEMENT_CONNECTOR_JUNCTION_NODE_KIND = 'supplementConnectorJunction';
 const V4_VERTICAL_CONNECTOR_MINIMUM_RUN_METERS = Object.freeze({
-  slope: 36.4,
-  ladder: 19.6,
-  lift: 28,
+  slope: 44.8,
+  ladder: 28,
+  lift: 36.4,
 });
 const ROUTE_WITNESS_TOLERANCE = 1e-4;
 const CARDINAL_WALL_SIDES = Object.freeze(['north', 'east', 'south', 'west']);
+const ROUTE_NETWORK_SELECTION_MANIFEST_SCHEMA =
+  'ruindivex-dungeon-route-network-selection-manifest/v1';
 
 function stringArray(value) {
   if (value == null) return [];
@@ -885,6 +896,237 @@ function sameStringSequence(first, second) {
   if (!Array.isArray(first) || !Array.isArray(second)) return false;
   return first.length === second.length
     && first.every((value, index) => String(value) === String(second[index]));
+}
+
+function routeNetworkSelectionManifestDeclarations(manifest) {
+  const junctions = (Array.isArray(manifest?.junctions) ? manifest.junctions : []).map(({
+    nodeOrdinal,
+    junctionKind,
+  } = {}) => ({
+    nodeOrdinal: Number.isFinite(Number(nodeOrdinal)) ? Number(nodeOrdinal) : null,
+    junctionKind: String(junctionKind ?? ''),
+  }));
+  const roomLayouts = (
+    Array.isArray(manifest?.roomLayouts) ? manifest.roomLayouts : []
+  ).map(({
+    nodeOrdinal,
+    grammarId,
+    contentRole,
+    topologyKit,
+  } = {}) => ({
+    nodeOrdinal: Number.isFinite(Number(nodeOrdinal)) ? Number(nodeOrdinal) : null,
+    grammarId: String(grammarId ?? ''),
+    contentRole: String(contentRole ?? ''),
+    topologyKit: topologyKit === true,
+  }));
+  const encounters = (
+    Array.isArray(manifest?.encounters) ? manifest.encounters : []
+  ).map(({
+    nodeOrdinal,
+    encounterProfileId,
+  } = {}) => ({
+    nodeOrdinal: Number.isFinite(Number(nodeOrdinal)) ? Number(nodeOrdinal) : null,
+    encounterProfileId: String(encounterProfileId ?? ''),
+  }));
+  const topologyTemplateId = String(manifest?.topology?.id ?? '');
+  const elevationMode = String(manifest?.elevation?.id ?? '');
+  return {
+    topologyTemplateId,
+    elevationMode,
+    junctions,
+    roomLayouts,
+    encounters,
+    selectedIdsByFamily: {
+      topology: topologyTemplateId ? [topologyTemplateId] : [],
+      elevation: elevationMode ? [elevationMode] : [],
+      junction: junctions.map(({ junctionKind }) => junctionKind).filter(Boolean),
+      roomLayout: roomLayouts.map(({ grammarId }) => grammarId).filter(Boolean),
+      encounter: encounters
+        .map(({ encounterProfileId }) => encounterProfileId)
+        .filter(Boolean),
+    },
+  };
+}
+
+function validateV4RouteNetworkSelectionManifest(operation, nodeById, errors) {
+  if (!Object.hasOwn(operation ?? {}, 'selectionManifest')) return;
+  const operationId = operation?.id ?? null;
+  const manifest = operation?.selectionManifest;
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    errors.push(diagnostic(
+      'route-network-selection-manifest-schema-invalid',
+      `Route network ${operationId} has a malformed selection manifest.`,
+      { operationId, actualSchema: manifest?.schema ?? null },
+    ));
+    return;
+  }
+  if (manifest.schema !== ROUTE_NETWORK_SELECTION_MANIFEST_SCHEMA) {
+    errors.push(diagnostic(
+      'route-network-selection-manifest-schema-invalid',
+      `Route network ${operationId} uses an unsupported selection-manifest schema.`,
+      {
+        operationId,
+        expectedSchema: ROUTE_NETWORK_SELECTION_MANIFEST_SCHEMA,
+        actualSchema: manifest.schema ?? null,
+      },
+    ));
+  }
+
+  const declarations = routeNetworkSelectionManifestDeclarations(manifest);
+  if (declarations.topologyTemplateId !== String(operation?.topologyTemplateId ?? '')) {
+    errors.push(diagnostic(
+      'route-network-selection-manifest-topology-identity-mismatch',
+      `Route network ${operationId} changes its selected topology identity.`,
+      {
+        operationId,
+        manifestTopologyTemplateId: declarations.topologyTemplateId || null,
+        operationTopologyTemplateId: operation?.topologyTemplateId ?? null,
+      },
+    ));
+  }
+  const operationElevationModes = stringArray(operation?.elevationModes);
+  if (operationElevationModes.length !== 1
+    || declarations.elevationMode !== operationElevationModes[0]) {
+    errors.push(diagnostic(
+      'route-network-selection-manifest-elevation-identity-mismatch',
+      `Route network ${operationId} changes its selected elevation identity.`,
+      {
+        operationId,
+        manifestElevationMode: declarations.elevationMode || null,
+        operationElevationModes,
+      },
+    ));
+  }
+
+  const operationNodes = [...new Set([
+    ...stringArray(operation?.nodeIds),
+    ...[...nodeById.values()]
+      .filter((node) => String(node?.operationId ?? '') === String(operationId ?? ''))
+      .map(({ id }) => String(id)),
+  ])].map((nodeId) => nodeById.get(nodeId)).filter(Boolean)
+    .sort((first, second) => Number(first.ordinal) - Number(second.ordinal));
+  const declaredNodeOrdinalById = new Map(stringArray(operation?.nodeIds).map(
+    (nodeId, ordinal) => [nodeId, ordinal],
+  ));
+  const manifestNodeOrdinal = (node) => (
+    Number.isFinite(Number(node?.ordinal))
+      ? Number(node.ordinal)
+      : Number(declaredNodeOrdinalById.get(String(node?.id ?? '')) ?? -1)
+  );
+  const actualRoomLayouts = operationNodes
+    .filter((node) => String(node?.kind ?? '') === 'supplementRoom')
+    .map((node) => ({
+      nodeOrdinal: manifestNodeOrdinal(node),
+      grammarId: String(node.grammarId ?? ''),
+      contentRole: String(node.contentRole ?? ''),
+      topologyKit: String(
+        node.selectionConstraints?.routeNetworkTopologyTemplateId ?? '',
+      ) === declarations.topologyTemplateId,
+    }));
+  if (canonicalStringify(actualRoomLayouts) !== canonicalStringify(declarations.roomLayouts)) {
+    errors.push(diagnostic(
+      'route-network-selection-manifest-room-layout-mismatch',
+      `Route network ${operationId} has room-layout declarations that differ from its accepted nodes.`,
+      { operationId, expected: actualRoomLayouts, actual: declarations.roomLayouts },
+    ));
+  }
+  const actualEncounters = operationNodes.flatMap((node) => {
+    const profiles = [...new Set((node.anchors ?? [])
+      .filter(({ kind }) => kind === 'encounter')
+      .map(({ encounterProfileId }) => String(
+        encounterProfileId ?? 'supplement-route-network-defense',
+      ))
+      .filter(Boolean))];
+    return profiles.map((encounterProfileId) => ({
+      nodeOrdinal: manifestNodeOrdinal(node),
+      encounterProfileId,
+    }));
+  });
+  if (canonicalStringify(actualEncounters) !== canonicalStringify(declarations.encounters)) {
+    errors.push(diagnostic(
+      'route-network-selection-manifest-encounter-mismatch',
+      `Route network ${operationId} has encounter declarations that differ from its accepted nodes.`,
+      { operationId, expected: actualEncounters, actual: declarations.encounters },
+    ));
+  }
+
+  const normalizedSemanticSignature = canonicalStringify({
+    topologyTemplateId: declarations.topologyTemplateId,
+    elevationMode: declarations.elevationMode,
+    junctions: declarations.junctions,
+    roomLayouts: declarations.roomLayouts,
+    encounters: declarations.encounters,
+  });
+  if (String(manifest.normalizedSemanticSignature ?? '') !== normalizedSemanticSignature
+    || String(operation?.normalizedSemanticSignature ?? '') !== normalizedSemanticSignature) {
+    errors.push(diagnostic(
+      'route-network-selection-manifest-normalized-signature-mismatch',
+      `Route network ${operationId} does not preserve its normalized semantic signature.`,
+      {
+        operationId,
+        expectedNormalizedSemanticSignature: normalizedSemanticSignature,
+        manifestNormalizedSemanticSignature: manifest.normalizedSemanticSignature ?? null,
+        operationNormalizedSemanticSignature: operation?.normalizedSemanticSignature ?? null,
+      },
+    ));
+  }
+
+  const bagWitnesses = manifest.bagWitnesses;
+  const witnessFamilies = bagWitnesses
+    && typeof bagWitnesses === 'object'
+    && !Array.isArray(bagWitnesses)
+    ? Object.keys(bagWitnesses)
+    : [];
+  const unknownFamilies = witnessFamilies.filter((family) => (
+    !DUNGEON_SELECTION_BAG_FAMILIES.includes(family)
+  ));
+  if (unknownFamilies.length > 0) {
+    errors.push(diagnostic(
+      'route-network-selection-manifest-bag-witness-family-invalid',
+      `Route network ${operationId} declares unknown selection-bag witness families.`,
+      { operationId, unknownFamilies: unknownFamilies.sort() },
+    ));
+  }
+  for (const family of DUNGEON_SELECTION_BAG_FAMILIES) {
+    const witnesses = bagWitnesses?.[family];
+    const expectedSelectedIds = declarations.selectedIdsByFamily[family];
+    const validation = validateDungeonSelectionBagWitnessSequence(witnesses, {
+      family,
+      // A family is explicit in every manifest, but some networks have no
+      // compatible decision for it (for example, a mechanism-only challenge
+      // has no encounter node).  Requiring a fabricated selection would
+      // consume the global bag without an owning runtime record.  Non-empty
+      // witnesses remain mandatory whenever the manifest actually declares
+      // one or more selections.
+      requireNonEmpty: expectedSelectedIds.length > 0,
+    });
+    if (!validation.accepted) {
+      errors.push(diagnostic(
+        'route-network-selection-manifest-bag-witness-invalid',
+        `Route network ${operationId} has an invalid ${family} selection-bag witness sequence.`,
+        {
+          operationId,
+          family,
+          witnessErrorCodes: validation.errors.map(({ code }) => code),
+          witnessErrors: validation.errors,
+        },
+      ));
+    }
+    const actualSelectedIds = (Array.isArray(witnesses) ? witnesses : [])
+      .map(({ selectedId } = {}) => String(selectedId ?? ''));
+    if (!sameStringSequence(actualSelectedIds, expectedSelectedIds)) {
+      errors.push(diagnostic(
+        'route-network-selection-manifest-witness-selection-mismatch',
+        `Route network ${operationId} has ${family} witness selections that differ from its manifest.`,
+        {
+          operationId,
+          family,
+          expectedSelectedIds,
+          actualSelectedIds,
+        },
+      ));
+    }
+  }
 }
 
 function isV4AugmentationPlan(plan, profile) {
@@ -1355,6 +1597,138 @@ function longestHorizontalRouteRun(path) {
   };
 }
 
+function validateV4RouteEndpointSeams({
+  segment,
+  operation,
+  nodeById,
+  extensionRegions,
+  errors,
+}) {
+  if (!Array.isArray(segment?.endpointSeams) || segment.endpointSeams.length !== 2) {
+    errors.push(diagnostic(
+      'route-network-endpoint-seam-record-invalid',
+      `Route-network segment ${segment?.id} does not own exactly two endpoint seams.`,
+      {
+        operationId: operation?.id ?? null,
+        segmentId: segment?.id ?? null,
+        endpointSeamCount: Array.isArray(segment?.endpointSeams)
+          ? segment.endpointSeams.length
+          : null,
+      },
+    ));
+    return;
+  }
+  const grant = routeNetworkGrantForOperation(operation, extensionRegions);
+  const landingOverlapBySocketId = new Map(
+    (grant?.socketLandingOverlapGrants ?? []).map((overlap) => (
+      [String(overlap.socketId ?? ''), overlap]
+    )),
+  );
+  for (const [endpointIndex, endpoint] of [segment.from, segment.to].entries()) {
+    const role = endpointIndex === 0 ? 'from' : 'to';
+    const exactSocket = exactRouteNetworkEndpointSocket(
+      operation,
+      endpoint,
+      nodeById,
+      extensionRegions,
+    );
+    if (!exactSocket) continue;
+    const node = nodeById.get(String(endpoint?.nodeId ?? ''));
+    // Exact connector stations inherit the host socket's physical owner even
+    // though the segment terminates at a supplemental socket. Reconstruct the
+    // same inherited owner used by planning; otherwise strict validation
+    // mistakes the destination seam for a malformed record and then rejects
+    // every legitimate base-floor intersection inside it.
+    const inheritedStationOverlap = node?.exactParentEndpoint === true
+      && node?.parentEndpointSocketKind === 'authored-corridor-station'
+      ? landingOverlapBySocketId.get(String(node.parentEndpointSocketId ?? ''))
+      : null;
+    const parentOverlap = landingOverlapBySocketId.get(socketIdOf(endpoint))
+      ?? inheritedStationOverlap;
+    const expected = createDungeonRouteEndpointSeam(exactSocket, {
+      id: `${segment.id}:${role}-endpoint-seam`,
+      segmentId: segment.id,
+      operationId: operation.id,
+      networkId: operation.id,
+      nodeId: endpoint?.nodeId ?? node?.id ?? null,
+      socketId: socketIdOf(endpoint),
+      localSocketId: exactSocket.localSocketId ?? endpoint?.localSocketId ?? null,
+      role,
+      elevationBand: node?.progressionBandId ?? operation?.progressionBandId ?? null,
+      parentOwnerId: parentOverlap?.parentOwnerId ?? null,
+    });
+    const actual = segment.endpointSeams[endpointIndex];
+    const identityMatches = actual?.schema === expected.schema
+      && String(actual?.id ?? '') === expected.id
+      && String(actual?.segmentId ?? '') === String(segment.id)
+      && String(actual?.operationId ?? '') === String(operation.id)
+      && String(actual?.networkId ?? '') === String(operation.id)
+      && String(actual?.nodeId ?? '') === String(endpoint?.nodeId ?? '')
+      && String(actual?.socketId ?? '') === socketIdOf(endpoint)
+      && String(actual?.localSocketId ?? '') === String(
+        exactSocket.localSocketId ?? endpoint?.localSocketId ?? '',
+      )
+      && actual?.role === role;
+    if (!identityMatches) {
+      errors.push(diagnostic(
+        'route-network-endpoint-seam-identity-mismatch',
+        `Route-network segment ${segment.id} changes its ${role} endpoint seam identity.`,
+        {
+          operationId: operation.id,
+          segmentId: segment.id,
+          role,
+          expectedSeamId: expected.id,
+          actualSeamId: actual?.id ?? null,
+          expectedNodeId: expected.nodeId,
+          actualNodeId: actual?.nodeId ?? null,
+          expectedSocketId: expected.socketId,
+          actualSocketId: actual?.socketId ?? null,
+        },
+      ));
+      continue;
+    }
+    const latticeInspection = inspectDungeonRouteEndpointSeamGridLattice(actual);
+    if (!latticeInspection.accepted) {
+      errors.push(diagnostic(
+        DUNGEON_ROUTE_ENDPOINT_SEAM_GRID_LATTICE_DIAGNOSTIC,
+        `Route-network segment ${segment.id} has a non-cardinal ${role} endpoint seam grid lattice.`,
+        {
+          operationId: operation.id,
+          segmentId: segment.id,
+          role,
+          seamId: actual.id,
+          ...latticeInspection,
+        },
+      ));
+    }
+    if (canonicalStringify(actual) !== canonicalStringify(expected)) {
+      const mismatchedFields = [...new Set([
+        ...Object.keys(expected),
+        ...Object.keys(actual ?? {}),
+      ])].filter((field) => (
+        canonicalStringify(actual?.[field]) !== canonicalStringify(expected[field])
+      ));
+      errors.push(diagnostic(
+        'route-network-endpoint-seam-record-invalid',
+        `Route-network segment ${segment.id} has a malformed ${role} 3x5 endpoint seam.`,
+        {
+          operationId: operation.id,
+          segmentId: segment.id,
+          role,
+          seamId: actual.id,
+          expectedCellCount: 15,
+          actualCellCount: Array.isArray(actual.orderedCells)
+            ? actual.orderedCells.length
+            : null,
+          mismatchedFields,
+          expectedParentOwnerId: expected.overlapEnvelope?.parentOwnerId ?? null,
+          actualParentOwnerId: actual?.overlapEnvelope?.parentOwnerId ?? null,
+        },
+      ));
+    }
+  }
+}
+
 function validateV4RouteSegmentPhysicalWitness({
   segment,
   operation,
@@ -1363,6 +1737,13 @@ function validateV4RouteSegmentPhysicalWitness({
   errors,
 }) {
   const path = segment.path;
+  validateV4RouteEndpointSeams({
+    segment,
+    operation,
+    nodeById,
+    extensionRegions,
+    errors,
+  });
   if (segment?.localApproachWitnesses != null
     && (!Array.isArray(segment.localApproachWitnesses)
       || segment.localApproachWitnesses.length !== 2)) {
@@ -1410,10 +1791,10 @@ function validateV4RouteSegmentPhysicalWitness({
       socket: exactSocket,
       nodeById,
     });
-    if (localApproach.present && !localApproach.accepted) {
+    if (!localApproach.accepted) {
       errors.push(diagnostic(
         'route-network-local-approach-witness-invalid',
-        `Route-network segment ${segment.id} has an invalid node-local ${side} approach witness.`,
+        `Route-network segment ${segment.id} lacks a valid two-tile node-local ${side} approach.`,
         {
           operationId: operation.id,
           segmentId: segment.id,
@@ -1423,10 +1804,10 @@ function validateV4RouteSegmentPhysicalWitness({
         },
       ));
     }
-    if (!approach.accepted && !localApproach.accepted) {
+    if (!approach.accepted) {
       errors.push(diagnostic(
         'route-network-socket-approach-invalid',
-        `Route-network segment ${segment.id} lacks a clear two-tile ${side} approach.`,
+        `Route-network segment ${segment.id} lacks a clear two-tile exterior ${side} approach.`,
         {
           operationId: operation.id,
           segmentId: segment.id,
@@ -2063,6 +2444,18 @@ function segmentEndpointLandingRecords(segment) {
   ));
 }
 
+function segmentEndpointSeamRecords(segment) {
+  return (segment?.endpointSeams ?? []).map((seam, endpointIndex) => ({
+    nodeId: seam?.nodeId == null ? null : String(seam.nodeId),
+    socketId: seam?.socketId == null ? null : String(seam.socketId),
+    role: endpointIndex === 0 ? 'from' : 'to',
+    seam,
+    volume: seam?.overlapEnvelope ?? null,
+  })).filter(({ nodeId, volume }) => (
+    nodeId !== null && finitePoint(volume?.center) && positiveSize(volume?.size)
+  ));
+}
+
 function transitionBayEndpointFootprint(transition) {
   if (!finitePoint(transition?.placement?.center) || !positiveSize(transition?.size)) return null;
   const quarterTurns = ((Math.round(transition.placement.rotationQuarterTurns ?? 0) % 4) + 4) % 4;
@@ -2087,9 +2480,28 @@ function sharedSegmentEndpointOverlapFootprints(
   secondSegment,
   nodeById,
   transitionById,
+  strictEndpointSeams = false,
 ) {
   const footprints = [];
   const seen = new Set();
+  if (strictEndpointSeams) {
+    for (const firstEndpoint of segmentEndpointSeamRecords(firstSegment)) {
+      for (const secondEndpoint of segmentEndpointSeamRecords(secondSegment)) {
+        if (firstEndpoint.nodeId !== secondEndpoint.nodeId) continue;
+        const sharedSeam = volumeIntersection(firstEndpoint.volume, secondEndpoint.volume);
+        if (!sharedSeam) continue;
+        const id = `${firstEndpoint.seam.id}:${secondEndpoint.seam.id}:intersection`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        footprints.push({
+          id,
+          nodeId: firstEndpoint.nodeId,
+          volume: sharedSeam,
+        });
+      }
+    }
+    return footprints;
+  }
   for (const firstEndpoint of segmentEndpointLandingRecords(firstSegment)) {
     for (const secondEndpoint of segmentEndpointLandingRecords(secondSegment)) {
       if (firstEndpoint.nodeId !== secondEndpoint.nodeId) continue;
@@ -2167,15 +2579,11 @@ function validateRouteNetworkProtectedVolumes(
       }
     }
   }
-  const overlapBySocketId = new Map((grant.socketLandingOverlapGrants ?? []).map((overlap) => (
-    [String(overlap.socketId), overlap]
-  )));
   for (const segmentId of operationOwnedSegments(operation, segmentById)) {
     const segment = segmentById.get(segmentId);
     if (!segment) continue;
-    const allowedOverlaps = [segment.from, segment.to]
-      .map((endpoint) => overlapBySocketId.get(socketIdOf(endpoint)))
-      .filter(Boolean);
+    const allowedOverlaps = segmentEndpointSeamRecords(segment)
+      .map(({ volume }) => volume);
     const volumes = [
       ...(segment.occupiedVolumes ?? []),
       ...(segment.clearanceVolumes ?? []),
@@ -2215,24 +2623,30 @@ function exactRouteNetworkLandingOverlapsForSegment(
   const socketById = new Map((grant.endpointSockets ?? []).map((socket) => (
     [String(socket.id), socket]
   )));
-  const overlapBySocketId = new Map((grant.socketLandingOverlapGrants ?? []).map((overlap) => (
-    [String(overlap.socketId), overlap]
-  )));
   const matches = [];
-  for (const endpoint of [segment.from, segment.to]) {
+  for (const [endpointIndex, endpoint] of [segment.from, segment.to].entries()) {
     const socket = socketById.get(socketIdOf(endpoint));
-    const overlap = overlapBySocketId.get(String(socket?.id ?? ''));
-    if (!socket || !overlap || !endpointMatchesGrantedSocket(endpoint, socket)) continue;
-    matches.push(overlap);
-  }
-  for (const endpoint of [segment.from, segment.to]) {
-    const node = nodeById.get(String(endpoint?.nodeId ?? ''));
-    if (!node?.exactParentEndpoint) continue;
-    matches.push(...(grant.socketModuleOverlapGrants ?? []).filter((overlap) => (
-      String(overlap.socketId ?? '') === String(node.parentEndpointSocketId ?? '')
-        && (!overlap.moduleTemplateId
-          || String(overlap.moduleTemplateId) === String(node.grammarId))
-    )));
+    const seam = segment.endpointSeams?.[endpointIndex];
+    if (!seam?.overlapEnvelope) continue;
+    if (socket && endpointMatchesGrantedSocket(endpoint, socket)) {
+      matches.push(seam.overlapEnvelope);
+      continue;
+    }
+    // A supplemental socket on an exact authored-corridor station may share
+    // only the same physical parent owner already granted to that station.
+    // This is still the endpoint seam—not socketModuleOverlapGrants—and keeps
+    // plan-time collision pruning identical to final acceptance.
+    const endpointNode = nodeById.get(String(endpoint?.nodeId ?? ''));
+    if (endpointNode?.exactParentEndpoint !== true) continue;
+    const parentSocketId = String(endpointNode.parentEndpointSocketId ?? '');
+    const parentSocket = socketById.get(parentSocketId);
+    const parentOverlap = (grant.socketLandingOverlapGrants ?? []).find(({ socketId }) => (
+      String(socketId ?? '') === parentSocketId
+    ));
+    if (!parentSocket || !parentOverlap?.parentOwnerId) continue;
+    if (String(seam.overlapEnvelope.parentOwnerId ?? '')
+      !== String(parentOverlap.parentOwnerId)) continue;
+    matches.push(seam.overlapEnvelope);
   }
   return matches;
 }
@@ -2257,14 +2671,25 @@ function exactRouteNetworkModuleOverlapsForNode(
 
 function overlapGrantMatchesBaseVolume(overlap, baseVolume) {
   if (!overlap?.parentOwnerId) return true;
-  return [
+  const parentOwnerId = String(overlap.parentOwnerId);
+  if ([
     baseVolume?.ownerId,
     baseVolume?.logicalConnectionId,
     baseVolume?.physicalConnectionId,
-  ].some((ownerId) => String(ownerId ?? '') === String(overlap.parentOwnerId));
+  ].some((ownerId) => String(ownerId ?? '') === parentOwnerId)) return true;
+  // Base-draft normalization may preserve the exact physical connection only
+  // in the immutable volume ID while retaining its logical edge as ownerId.
+  // Match the same bounded physical-owner namespaces used by planning; the
+  // subsequent overlap-within-seams predicate still rejects every square
+  // millimetre outside the authoritative 3x5 endpoint envelope.
+  const baseVolumeId = String(baseVolume?.id ?? '');
+  return baseVolumeId === parentOwnerId
+    || baseVolumeId.startsWith(`${parentOwnerId}:`)
+    || baseVolumeId.startsWith(`base:connection:${parentOwnerId}:`)
+    || baseVolumeId.startsWith(`industrial:gallery-footprint:${parentOwnerId}:`);
 }
 
-function validateFeaturelessGraphSpans({
+export function evaluateDungeonRouteNetworkFeaturelessGraph({
   operation,
   operationNodeIds,
   graphAdjacency,
@@ -2272,9 +2697,10 @@ function validateFeaturelessGraphSpans({
   externalKeys,
   realJunctionNodeIds,
   maximum,
-  errors,
 }) {
   const meaningful = new Set(externalKeys);
+  const overlongSpans = [];
+  const featurelessCycles = [];
   for (const nodeId of operationNodeIds) {
     const node = nodeById.get(nodeId);
     if (nodeIsSupplementConnectorModule(node)) continue;
@@ -2293,6 +2719,7 @@ function validateFeaturelessGraphSpans({
       accumulated,
       visitedEdges,
       arrivalPosition = null,
+      trace = [],
     ) => {
       for (const edge of graphAdjacency.get(current) ?? []) {
         // Reversing the edge just used is backtracking, not a new route span.
@@ -2313,27 +2740,82 @@ function validateFeaturelessGraphSpans({
         const nextDistance = accumulated
           + connectorModuleTraversalMeters
           + edge.lengthMeters;
+        const nextNode = nodeById.get(edge.to);
+        const nextTrace = [...trace, {
+          segmentId: edge.id,
+          fromNodeId: current,
+          toNodeId: edge.to,
+          fromNodeKind: currentNode?.kind ?? null,
+          toNodeKind: nextNode?.kind ?? null,
+          fromNodeGrammarId: currentNode?.grammarId ?? null,
+          toNodeGrammarId: nextNode?.grammarId ?? null,
+          fromNodeContentRole: currentNode?.contentRole ?? null,
+          toNodeContentRole: nextNode?.contentRole ?? null,
+          fromNodePosition: currentNode?.placement?.center ?? null,
+          toNodePosition: nextNode?.placement?.center ?? null,
+          fromNodeActiveSocketIds: (currentNode?.sockets ?? [])
+            .filter(({ state }) => state === 'connected')
+            .map(({ id }) => String(id)),
+          toNodeActiveSocketIds: (nextNode?.sockets ?? [])
+            .filter(({ state }) => state === 'connected')
+            .map(({ id }) => String(id)),
+          fromNodeGraphDegree: routeNetworkPhysicalGraphDegree(
+            currentNode,
+            graphAdjacency,
+            current,
+          ),
+          toNodeGraphDegree: routeNetworkPhysicalGraphDegree(
+            nextNode,
+            graphAdjacency,
+            edge.to,
+          ),
+          segmentLengthMeters: edge.lengthMeters,
+          connectorModuleTraversalMeters,
+          accumulatedDistanceMeters: nextDistance,
+        }];
         if (nextDistance > maximum + 1e-4) {
-          errors.push(diagnostic(
-            'route-network-accumulated-featureless-span-exceeded',
-            `Route network ${operation.id} exceeds ${maximum}m between meaningful stations.`,
-            {
+          overlongSpans.push({
               operationId: operation.id,
+              topologyTemplateId: operation.topologyTemplateId ?? null,
               fromStationId: start,
               lengthMeters: nextDistance,
               connectorModuleTraversalMeters,
               maximumFeaturelessSpanMeters: maximum,
-            },
-          ));
+              toNodeId: edge.to,
+              segmentId: edge.id,
+              traversedNodeIds: [start, ...nextTrace.map(({ toNodeId }) => toNodeId)],
+              traversedSegmentIds: nextTrace.map(({ segmentId }) => segmentId),
+              traversalTrace: nextTrace,
+              networkNodeSummaries: [...operationNodeIds].map((nodeId) => {
+                const node = nodeById.get(nodeId);
+                return {
+                  nodeId,
+                  ordinal: node?.ordinal ?? null,
+                  kind: node?.kind ?? null,
+                  grammarId: node?.grammarId ?? null,
+                  contentRole: node?.contentRole ?? null,
+                  position: node?.placement?.center ?? null,
+                  graphDegree: routeNetworkPhysicalGraphDegree(
+                    node,
+                    graphAdjacency,
+                    nodeId,
+                  ),
+                  countsAsMeaningfulStation: meaningful.has(nodeId),
+                  activeSockets: (node?.sockets ?? [])
+                    .filter(({ state }) => state === 'connected')
+                    .map(({ id, localSocketId, segmentId }) => ({
+                      id: String(id),
+                      localSocketId: localSocketId ?? null,
+                      segmentId: segmentId ?? null,
+                  })),
+                };
+              }),
+            });
           continue;
         }
         if (meaningful.has(edge.to)) continue;
         if (visitedEdges.has(edge.id)) {
-          errors.push(diagnostic(
-            'route-network-featureless-cycle-without-station',
-            `Route network ${operation.id} has a cycle with no meaningful station.`,
-            { operationId: operation.id, nodeId: edge.to },
-          ));
+          featurelessCycles.push({ operationId: operation.id, nodeId: edge.to });
           continue;
         }
         walk(
@@ -2342,10 +2824,34 @@ function validateFeaturelessGraphSpans({
           nextDistance,
           new Set([...visitedEdges, edge.id]),
           edge.toPosition,
+          nextTrace,
         );
       }
     };
     walk(start, null, 0, new Set());
+  }
+  return {
+    meaningfulNodeIds: [...meaningful],
+    overlongSpans,
+    featurelessCycles,
+  };
+}
+
+function validateFeaturelessGraphSpans(options) {
+  const evaluation = evaluateDungeonRouteNetworkFeaturelessGraph(options);
+  for (const context of evaluation.overlongSpans) {
+    options.errors.push(diagnostic(
+      'route-network-accumulated-featureless-span-exceeded',
+      `Route network ${options.operation.id} exceeds ${options.maximum}m between meaningful stations.`,
+      context,
+    ));
+  }
+  for (const context of evaluation.featurelessCycles) {
+    options.errors.push(diagnostic(
+      'route-network-featureless-cycle-without-station',
+      `Route network ${options.operation.id} has a cycle with no meaningful station.`,
+      context,
+    ));
   }
 }
 
@@ -3127,7 +3633,15 @@ function validateCrossBandShortcutPhysicalGates({
   }
 }
 
-function validatePyramidLoop({ operation, grant, graph, snapshotRecord, errors }) {
+function validatePyramidLoop({
+  operation,
+  grant,
+  graph,
+  snapshotRecord,
+  nodeById,
+  segmentById,
+  errors,
+}) {
   const occupied = sortedUniqueStrings(grant?.occupiedCriticalWallSides);
   const opened = sortedUniqueStrings(grant?.openedWallSides);
   const allSides = sortedUniqueStrings([...occupied, ...opened]);
@@ -3169,6 +3683,40 @@ function validatePyramidLoop({ operation, grant, graph, snapshotRecord, errors }
       'pyramid-loop-progression-domain-invalid',
       `Pyramid loop ${operation.id} must remain wholly inside keycard band 0.`,
       { operationId: operation.id, grantId: grant.id },
+    ));
+  }
+  const parentElevation = Number(grant?.endpointSockets?.[0]?.position?.y ?? 0);
+  const pyramidNodes = stringArray(operation?.nodeIds)
+    .map((nodeId) => nodeById.get(nodeId))
+    .filter(Boolean);
+  const pyramidSegments = stringArray(operation?.segmentIds)
+    .map((segmentId) => segmentById.get(segmentId))
+    .filter(Boolean);
+  const hasExternalElevation = pyramidNodes.some((node) => (
+    Math.abs(Number(node?.placement?.center?.y ?? parentElevation) - parentElevation)
+      > ROUTE_WITNESS_TOLERANCE
+      || (node?.sockets ?? []).some((socket) => (
+        Math.abs(Number(socket?.position?.y ?? parentElevation) - parentElevation)
+          > ROUTE_WITNESS_TOLERANCE
+      ))
+  )) || pyramidSegments.some((segment) => (
+    canonicalConnectorFamily(segment?.connectorFamily) !== 'service-gallery'
+      || [segment?.from?.position, segment?.to?.position, ...(segment?.path ?? [])]
+        .filter(Boolean)
+        .some((point) => (
+          Math.abs(Number(point?.y ?? parentElevation) - parentElevation)
+            > ROUTE_WITNESS_TOLERANCE
+        ))
+  ));
+  if (hasExternalElevation) {
+    errors.push(diagnostic(
+      'pyramid-loop-external-elevation-invalid',
+      `Pyramid loop ${operation.id} must keep every external node, socket, and segment in parent band 0.`,
+      {
+        operationId: operation.id,
+        grantId: grant.id,
+        parentElevation,
+      },
     ));
   }
   const protectedBeatIds = new Set(snapshotRecord?.snapshot?.protectedBeatIds ?? []);
@@ -3412,6 +3960,7 @@ function validateV4RouteNetworks({
   const elevationModes = new Set();
 
   for (const operation of routeOperations) {
+    if (v4) validateV4RouteNetworkSelectionManifest(operation, nodeById, errors);
     const record = grantsById.get(String(operation?.grantId ?? ''));
     const grant = record?.grant;
     if (!grant || grant.schema !== ROUTE_NETWORK_GRANT_SCHEMA_V2
@@ -3902,6 +4451,8 @@ function validateV4RouteNetworks({
         grant,
         graph,
         snapshotRecord: snapshotsByRegionId.get(String(operation.parentRegionId)),
+        nodeById,
+        segmentById,
         errors,
       });
     }
@@ -4429,8 +4980,31 @@ export function validateDungeonAugmentationPlan(plan, {
       }));
     }
     for (const nodeVolume of nodeVolumes) {
-      if (endpointNodeIds.has(nodeVolume.nodeId)) continue;
-      if (dungeonVolumesOverlap(volume, nodeVolume)) {
+      if (!dungeonVolumesOverlap(volume, nodeVolume)) continue;
+      if (endpointNodeIds.has(nodeVolume.nodeId)) {
+        if (operation?.type !== 'routeNetwork' || !isV4AugmentationPlan(plan, profile)) {
+          continue;
+        }
+        const overlap = volumeIntersection(volume, nodeVolume);
+        const endpointSeams = segmentEndpointSeamRecords(segment).filter(({ nodeId }) => (
+          nodeId === String(nodeVolume.nodeId)
+        ));
+        if (overlap && endpointSeams.some(({ volume: seamVolume }) => (
+          volumeContainsVolume(seamVolume, overlap)
+        ))) continue;
+        errors.push(diagnostic(
+          'route-network-segment-endpoint-overlap-outside-seam',
+          `Route-network segment ${volume.segmentId} overlaps endpoint node ${nodeVolume.nodeId} outside its exact 3x5 seam.`,
+          {
+            segmentId: volume.segmentId,
+            nodeId: nodeVolume.nodeId,
+            volumePurpose: volume.purpose,
+            endpointSeamIds: endpointSeams.map(({ seam }) => seam.id),
+          },
+        ));
+        continue;
+      }
+      {
         errors.push(diagnostic('supplement-segment-overlaps-node', `Supplement segment ${volume.segmentId} overlaps node ${nodeVolume.nodeId}.`, {
           segmentId: volume.segmentId,
           nodeId: nodeVolume.nodeId,
@@ -4445,24 +5019,33 @@ export function validateDungeonAugmentationPlan(plan, {
       if (!dungeonVolumesOverlap(segmentVolumes[first], segmentVolumes[second])) continue;
       const firstSegment = segmentById.get(segmentVolumes[first].segmentId);
       const secondSegment = segmentById.get(segmentVolumes[second].segmentId);
+      const strictEndpointSeams = isV4AugmentationPlan(plan, profile)
+        && operationById.get(firstSegment?.operationId)?.type === 'routeNetwork'
+        && operationById.get(secondSegment?.operationId)?.type === 'routeNetwork';
       const overlap = volumeIntersection(segmentVolumes[first], segmentVolumes[second]);
       const allowedFootprints = sharedSegmentEndpointOverlapFootprints(
         firstSegment,
         secondSegment,
         nodeById,
         transitionById,
+        strictEndpointSeams,
       );
       if (overlap && allowedFootprints.some(({ volume }) => (
         volumeContainsVolume(volume, overlap)
       ))) continue;
-      errors.push(diagnostic('supplement-segments-overlap', `Supplement segments ${segmentVolumes[first].segmentId} and ${segmentVolumes[second].segmentId} overlap outside an exact shared endpoint footprint.`, {
+      errors.push(diagnostic(
+        strictEndpointSeams
+          ? 'route-network-segment-shared-overlap-outside-seams'
+          : 'supplement-segments-overlap',
+        `Supplement segments ${segmentVolumes[first].segmentId} and ${segmentVolumes[second].segmentId} overlap outside an exact shared endpoint footprint.`, {
         firstSegmentId: segmentVolumes[first].segmentId,
         secondSegmentId: segmentVolumes[second].segmentId,
         firstVolumeClass: segmentVolumes[first].volumeClass,
         secondVolumeClass: segmentVolumes[second].volumeClass,
         sharedEndpointNodeIds: [...new Set(allowedFootprints.map(({ nodeId }) => nodeId))],
         allowedEndpointFootprintIds: allowedFootprints.map(({ id }) => id),
-      }));
+      },
+      ));
     }
   }
 

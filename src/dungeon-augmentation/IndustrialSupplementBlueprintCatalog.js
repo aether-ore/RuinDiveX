@@ -92,6 +92,173 @@ function inferTransferForm(feature) {
   return 'ramp';
 }
 
+function floorCellSupport(floorTierId, x, z) {
+  return { kind: 'floor-cell', floorTierId, localTile: { x, z } };
+}
+
+function transferCellSupport(transferId, x, z) {
+  return { kind: 'transfer-cell', transferId, localTile: { x, z } };
+}
+
+function transferEndpoint(localElevation, x, z, localSupportRef) {
+  return {
+    localElevation,
+    localTransferCell: { x, z },
+    localSupportRef,
+  };
+}
+
+/*
+ * V4 transfer endpoints are authored identities, not proximity hints. Each
+ * endpoint names one cell in its own transfer footprint and the exact floor
+ * or neighboring transfer cell that supports traversal beyond that endpoint.
+ * Half-grid devices deliberately name a concrete footprint cell even when
+ * their visual/device center lies between floor cells.
+ */
+const TRANSFER_ENDPOINT_LOCAL_REFS = {
+  'si-lift-01': {
+    from: transferEndpoint(0, 2, 0, floorCellSupport('base', 2, 0)),
+    to: transferEndpoint(5.6, 2, 0, floorCellSupport('upper', 2, 0)),
+  },
+  'rf-ramp': {
+    from: transferEndpoint(0, 4, 4, floorCellSupport('base', 4, 2)),
+    to: transferEndpoint(2.8, 4, -2, floorCellSupport('upper', 4, -2)),
+  },
+  'tc-ramp': {
+    from: transferEndpoint(0, 4, -3, floorCellSupport('base', 4, -2)),
+    to: transferEndpoint(2.8, 4, 3, floorCellSupport('upper', 4, 3)),
+  },
+  'ldr-ladder': {
+    from: transferEndpoint(0, 2, 0, floorCellSupport('base', 2, 0)),
+    to: transferEndpoint(2.8, 2, 0, floorCellSupport('upper', 2, 0)),
+  },
+  'lft-cargo-lift': {
+    from: transferEndpoint(0, -2.5, -0.5, floorCellSupport('base', -2, 0)),
+    to: transferEndpoint(2.8, -2.5, -0.5, floorCellSupport('upper', -2, 0)),
+  },
+  'crd-service-ramp': {
+    from: transferEndpoint(0, 0, 3, floorCellSupport('base', 0, 3)),
+    to: transferEndpoint(2.8, 0, -3, floorCellSupport('upper', 0, -3)),
+  },
+  'mr-switchback-ramp': {
+    from: transferEndpoint(0, -2, -2, floorCellSupport('base', -2, -2)),
+    to: transferEndpoint(2.8, -2, 4, floorCellSupport('upper', -2, 4)),
+  },
+  'mr-lift-platform': {
+    from: transferEndpoint(0, 0, 0, floorCellSupport('base', -2, 0)),
+    to: transferEndpoint(2.8, 0, 0, floorCellSupport('upper', 0, 2)),
+  },
+  'ob-step': {
+    from: transferEndpoint(0, 2, 0, floorCellSupport('base', 2, 0)),
+    to: transferEndpoint(0.7, 2, 0, floorCellSupport('upper', 2, 1)),
+  },
+  'sr-flight-lower': {
+    from: transferEndpoint(0, -2.5, 4, floorCellSupport('base', -2, 4)),
+    to: transferEndpoint(1.4, -2.5, 0, transferCellSupport('sr-mid-landing', -2, -0.5)),
+  },
+  'sr-mid-landing': {
+    from: transferEndpoint(1.4, -2, -0.5, transferCellSupport('sr-flight-lower', -2.5, 0)),
+    to: transferEndpoint(1.4, 2, -0.5, transferCellSupport('sr-flight-upper', 1.5, 0)),
+  },
+  'sr-flight-upper': {
+    from: transferEndpoint(1.4, 1.5, 0, transferCellSupport('sr-mid-landing', 2, -0.5)),
+    to: transferEndpoint(2.8, 1.5, -4, floorCellSupport('upper', 2, -4)),
+  },
+  'scd-flight-01': {
+    from: transferEndpoint(0, -6, 0, floorCellSupport('base', -6, 0)),
+    to: transferEndpoint(2.8, 0, 0, transferCellSupport('scd-rest', 0, 0)),
+  },
+  'scd-rest': {
+    from: transferEndpoint(2.8, -1, 0, transferCellSupport('scd-flight-01', 0, 0)),
+    to: transferEndpoint(2.8, 1, 0, transferCellSupport('scd-flight-02', 0, 0)),
+  },
+  'scd-flight-02': {
+    from: transferEndpoint(2.8, 0, 0, transferCellSupport('scd-rest', 0, 0)),
+    to: transferEndpoint(5.6, 6, 0, floorCellSupport('upper', 6, 0)),
+  },
+  'fl-cab': {
+    from: transferEndpoint(0, 1.5, -0.5, floorCellSupport('base', 2, 0)),
+    to: transferEndpoint(5.6, 1.5, -0.5, floorCellSupport('upper', 2, 0)),
+  },
+  'lb-ladder': {
+    from: transferEndpoint(0, 0, 2, floorCellSupport('base', 0, 2)),
+    to: transferEndpoint(2.8, 0, 2, floorCellSupport('upper', 0, 2)),
+  },
+  'ta-ramp-west': {
+    from: transferEndpoint(0, -4, 3, floorCellSupport('base', -4, 3)),
+    to: transferEndpoint(1.4, -4, -3, transferCellSupport('ta-turn-landing', -4, -3)),
+  },
+  'ta-turn-landing': {
+    from: transferEndpoint(1.4, -4, -3, transferCellSupport('ta-ramp-west', -4, -3)),
+    to: transferEndpoint(1.4, -4, -5, transferCellSupport('ta-ramp-north', -4, -4)),
+  },
+  'ta-ramp-north': {
+    from: transferEndpoint(1.4, -4, -4, transferCellSupport('ta-turn-landing', -4, -4)),
+    to: transferEndpoint(2.8, 4, -4, floorCellSupport('upper', 4, -4)),
+  },
+  'fd-stair': {
+    from: transferEndpoint(2.8, -3, -2, floorCellSupport('upper', -3, -2)),
+    to: transferEndpoint(0, 3, -2, floorCellSupport('base', 3, -2)),
+  },
+  'cg-lift': {
+    from: transferEndpoint(0, 3.5, -0.5, floorCellSupport('base', 4, 0)),
+    to: transferEndpoint(5.6, 3.5, -0.5, floorCellSupport('upper', 4, 0)),
+  },
+  'pr-stair': {
+    from: transferEndpoint(0, 2.5, -3, floorCellSupport('base', 2, -3)),
+    to: transferEndpoint(2.8, 2.5, 3, floorCellSupport('upper', 3, 3)),
+  },
+  'pd-stair': {
+    from: transferEndpoint(2.8, -2.5, -3, floorCellSupport('upper', -2, -3)),
+    to: transferEndpoint(0, -3.5, 3, floorCellSupport('base', -3, 3)),
+  },
+  'sgd-stair': {
+    from: transferEndpoint(2.8, 0, -3, floorCellSupport('upper', 0, -3)),
+    to: transferEndpoint(0, 0, 3, floorCellSupport('base', 0, 3)),
+  },
+  'lfr-slope': {
+    from: transferEndpoint(0, 0, 4, floorCellSupport('base', 0, 4)),
+    to: transferEndpoint(2.8, 0, -4, floorCellSupport('upper', 0, -4)),
+  },
+  'isg-incline': {
+    from: transferEndpoint(0, 0, 4, floorCellSupport('base', 0, 4)),
+    to: transferEndpoint(2.8, 0, -4, floorCellSupport('upper', 0, -4)),
+  },
+};
+
+function exactLocalTile(point) {
+  return point
+    && Number.isFinite(Number(point.x))
+    && Number.isFinite(Number(point.z));
+}
+
+function footprintContainsExactCell(feature, localTile) {
+  const width = Number(feature.w ?? 1);
+  const depth = Number(feature.d ?? 1);
+  const minimumX = Number(feature.x) - (width - 1) * 0.5;
+  const minimumZ = Number(feature.z) - (depth - 1) * 0.5;
+  const xOrdinal = Number(localTile.x) - minimumX;
+  const zOrdinal = Number(localTile.z) - minimumZ;
+  return Number.isInteger(width)
+    && width > 0
+    && Number.isInteger(depth)
+    && depth > 0
+    && Number.isInteger(xOrdinal)
+    && xOrdinal >= 0
+    && xOrdinal < width
+    && Number.isInteger(zOrdinal)
+    && zOrdinal >= 0
+    && zOrdinal < depth;
+}
+
+function tierContainsExactFloorCell(tier, localTile) {
+  const column = Number(localTile.x) - Number(tier.maskOriginTile?.x);
+  const row = Number(localTile.z) - Number(tier.maskOriginTile?.z);
+  return Number.isInteger(column)
+    && Number.isInteger(row)
+    && tier.floorMask?.[row]?.[column] === '#';
+}
+
 function createBlueprint(definition) {
   const value = cloneDungeonAugmentationValue(definition);
   const baseDimensions = validateMask(value.id, 'mask', value.mask);
@@ -136,6 +303,48 @@ function createBlueprint(definition) {
     });
   }
 
+  const transferFeatures = value.features.filter(feature => feature.type === 'transfer');
+  const transferFeatureById = new Map(transferFeatures.map(feature => [feature.id, feature]));
+  if (transferFeatureById.size !== transferFeatures.length) {
+    fail(value.id, 'transfer feature ids must be unique');
+  }
+  for (const feature of transferFeatures) {
+    const endpointRefs = TRANSFER_ENDPOINT_LOCAL_REFS[feature.id];
+    if (!endpointRefs) {
+      fail(value.id, `transfer ${feature.id} has no authored endpoint cell identities`);
+    }
+    for (const role of ['from', 'to']) {
+      const endpoint = endpointRefs[role];
+      if (!endpoint
+        || !Number.isFinite(Number(endpoint.localElevation))
+        || !exactLocalTile(endpoint.localTransferCell)
+        || !footprintContainsExactCell(feature, endpoint.localTransferCell)) {
+        fail(value.id, `transfer ${feature.id} ${role} endpoint is not an exact local transfer cell`);
+      }
+      const support = endpoint.localSupportRef;
+      if (!support || !exactLocalTile(support.localTile)) {
+        fail(value.id, `transfer ${feature.id} ${role} endpoint has no exact local support cell`);
+      }
+      if (support.kind === 'floor-cell') {
+        const tier = floorTiers.find(candidate => candidate.id === support.floorTierId);
+        if (!tier
+          || Math.abs(Number(tier.elevation) - Number(endpoint.localElevation)) > 0.000001
+          || !tierContainsExactFloorCell(tier, support.localTile)) {
+          fail(value.id, `transfer ${feature.id} ${role} floor support is not an exact tier cell`);
+        }
+      } else if (support.kind === 'transfer-cell') {
+        const supportingTransfer = transferFeatureById.get(support.transferId);
+        if (!supportingTransfer
+          || supportingTransfer === feature
+          || !footprintContainsExactCell(supportingTransfer, support.localTile)) {
+          fail(value.id, `transfer ${feature.id} ${role} transfer support is not an exact neighbor cell`);
+        }
+      } else {
+        fail(value.id, `transfer ${feature.id} ${role} uses an unknown support kind`);
+      }
+    }
+  }
+
   const sectionElevations = value.sectionRoute?.map(point => point[1]) ?? [];
   const socketElevations = value.sockets.map(socket => socket.y);
   const elevations = sectionElevations.length > 0 ? [...sectionElevations] : [...socketElevations];
@@ -145,9 +354,9 @@ function createBlueprint(definition) {
   const entrySocket = value.sockets.find(socket => socket.role.includes('entry')) ?? value.sockets[0];
   const exitSocket = value.sockets.find(socket => socket.role.includes('reconnect'))
     ?? value.sockets[value.sockets.length - 1];
-  const physicalTransfers = value.features
-    .filter(feature => feature.type === 'transfer')
-    .map(feature => ({
+  const physicalTransfers = transferFeatures.map(feature => {
+    const endpointRefs = TRANSFER_ENDPOINT_LOCAL_REFS[feature.id];
+    return {
       id: feature.id,
       form: inferTransferForm(feature),
       tier: feature.tier ?? 'base',
@@ -162,10 +371,19 @@ function createBlueprint(definition) {
       solid: feature.solid === true,
       elevationRangeMeters: { min: minElevation, max: maxElevation },
       endpoints: {
-        from: { socketId: entrySocket?.id ?? null, elevation: entrySocket?.y ?? minElevation },
-        to: { socketId: exitSocket?.id ?? null, elevation: exitSocket?.y ?? maxElevation },
+        from: {
+          socketId: entrySocket?.id ?? null,
+          elevation: endpointRefs.from.localElevation,
+          ...cloneDungeonAugmentationValue(endpointRefs.from),
+        },
+        to: {
+          socketId: exitSocket?.id ?? null,
+          elevation: endpointRefs.to.localElevation,
+          ...cloneDungeonAugmentationValue(endpointRefs.to),
+        },
       },
-    }));
+    };
+  });
 
   return deepFreezeDungeonAugmentationValue({
     schema: INDUSTRIAL_SUPPLEMENT_BLUEPRINT_SCHEMA,
@@ -619,13 +837,23 @@ const BLUEPRINT_DEFINITIONS = [
     zones: [{ type: 'clear', id: 'mr-shaft-keepout', x: 0, z: 0, w: 3, d: 3, label: 'SHAFT VOID' }],
     voids: [{ id: 'mr-open-shaft', x: 0, z: 0, w: 3, d: 3, label: 'OPEN SHAFT' }],
     features: [
-      { id: 'mr-switchback-ramp', type: 'transfer', x: -2.5, z: 1, w: 2, d: 5, label: '↗' },
+      {
+        id: 'mr-switchback-ramp',
+        type: 'transfer',
+        x: -2.5,
+        z: 1,
+        w: 2,
+        d: 7,
+        label: '16.7%',
+        form: 'ramp',
+      },
       { id: 'mr-counterweight', type: 'machine', x: 0, z: 0, w: 1, d: 3, label: 'W', solid: true },
       { id: 'mr-lift-platform', type: 'transfer', x: 0, z: 0, w: 3, d: 3, label: 'L', solid: true },
       { id: 'mr-regulator', type: 'control', x: 3, z: 2, w: 1, d: 1, label: 'C', tier: 'upper' },
       { id: 'mr-lockers', type: 'cover', x: 2, z: 3, w: 1, d: 2, label: '½', solid: true, tier: 'upper' },
     ],
-    traversal: 'N entry reaches the lower deck; the west switchback rises to y +2.80 m and the upper route reaches S. A complete bidirectional return exists before lift activation.',
+    sectionRoute: [[0, 0], [0.18, 0], [0.82, 2.8], [1, 2.8]],
+    traversal: 'N entry reaches the lower deck; the seven-cell west switchback provides six playable rise intervals to y +2.80 m and the upper route reaches S. A complete bidirectional return exists before lift activation.',
     gameplay: 'The 3×3 shaft is true base-tier void. The optional freight lift becomes available only from the upper regulator and never replaces the required ramp.',
     state: 'mr-lift-enabled; mr-lift-position; mr-mechanism-activated.',
   },

@@ -1,39 +1,44 @@
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 
 import { DungeonGenerator } from '../src/DungeonGenerator.js';
+import { DUNGEON_AUGMENTATION_PROFILES } from '../src/dungeon-augmentation/catalog.js';
 import {
   createDungeonAugmentationCompleteLayoutSignature,
 } from '../src/dungeon-augmentation/varietySignature.js';
 import {
+  DUNGEON_SELECTION_BAG_FAMILIES,
+} from '../src/dungeon-augmentation/selectionBagWitness.js';
+import {
   inspectIndustrialSupplementRealizedStructuralQuality,
 } from '../src/dungeon-augmentation/IndustrialSupplementStructuralQuality.js';
 import { hashSeed, SeededRandom } from '../src/reaverbots/SeededRandom.js';
+import {
+  EXPECTED_ELEVATION_MODES,
+  EXPECTED_ENCOUNTER_PROFILE_IDS,
+  EXPECTED_JUNCTION_KINDS,
+  EXPECTED_ROOM_LAYOUT_IDS,
+  EXPECTED_TOPOLOGY_TEMPLATE_IDS,
+  RELEASE_PERFORMANCE_BUDGET_MS,
+  RELEASE_WARM_PROCESS_EVIDENCE_SCHEMA,
+  RELEASE_WARM_PROCESS_MODE,
+  assertMatchingReleaseProvenance,
+  createAcceptedParentWitness,
+  createReleaseProvenance,
+  createSeedWorkerEvidence,
+  readJson,
+  selectCorpusEntries,
+  validateReleaseSelectionBagWitnesses,
+  validateCorpusManifest,
+  writeImmutableJson,
+  writeImmutableJsonSync,
+} from './dungeon-augmentation-release-evidence.mjs';
 
 const PROFILE_ID = 'industrial-supplement-preview-v4';
+const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const MAXIMUM_FEATURELESS_SPAN_METERS = 33.6;
-const EXPECTED_TOPOLOGY_TEMPLATE_IDS = Object.freeze([
-  'fork-merge-h-loop',
-  'multi-door-room-chain',
-  'over-under-loop',
-  'parallel-gallery-loop',
-  'split-level-ring',
-  'stacked-interchange',
-]);
-const EXPECTED_JUNCTION_KINDS = Object.freeze([
-  'crossroads',
-  'stacked-interchange',
-  'staggered-cross',
-  'through-t',
-]);
-const EXPECTED_ELEVATION_MODES = Object.freeze([
-  'drop-ladder',
-  'ladder',
-  'lift',
-  'shortcut-lift',
-  'slope',
-  'split-level-platform',
-]);
 const JUNCTION_FOOTPRINT_TILES = Object.freeze({
   'through-t': Object.freeze([5, 7]),
   crossroads: Object.freeze([7, 7]),
@@ -222,26 +227,190 @@ const realizedVarietyRoom = ({
       .filter(Boolean),
   };
 };
-const countArgument = process.argv.find((argument) => argument.startsWith('--count='));
-const startArgument = process.argv.find((argument) => argument.startsWith('--start='));
-const requestedCount = Number.parseInt(countArgument?.slice('--count='.length) ?? '10', 10);
-const requestedStart = Number.parseInt(startArgument?.slice('--start='.length) ?? '0', 10);
+const argumentValue = (name) => process.argv
+  .find((argument) => argument.startsWith(`--${name}=`))
+  ?.slice(name.length + 3);
+const requestedCount = Number.parseInt(argumentValue('count') ?? '10', 10);
+const requestedStart = Number.parseInt(argumentValue('start') ?? '0', 10);
+const manifestArgument = argumentValue('manifest');
+const corpusTierArgument = argumentValue('tier') ?? 'release';
+const outputArgument = argumentValue('output');
+const seedWorkerOutputArgument = argumentValue('seed-worker-output');
+const ordinalStartArgument = argumentValue('ordinal-start');
+const ordinalCountArgument = argumentValue('ordinal-count');
+const shardIndexArgument = argumentValue('shard-index');
+const shardCountArgument = argumentValue('shard-count');
 const progressEnabled = process.argv.includes('--progress');
 const summaryOnly = process.argv.includes('--summary');
-const seedCount = Number.isFinite(requestedCount) && requestedCount > 0
-  ? requestedCount
-  : 10;
-const startIndex = Number.isFinite(requestedStart) && requestedStart >= 0
-  ? requestedStart
-  : 0;
+if (outputArgument) {
+  throw new Error(
+    'Direct release-shard output is disabled; use run-dungeon-augmentation-release-shard.mjs so every ordinal receives its own watchdog.',
+  );
+}
+if (seedWorkerOutputArgument && !manifestArgument) {
+  throw new Error('Evidence output requires --manifest so it has an immutable seed boundary.');
+}
+if (manifestArgument && !seedWorkerOutputArgument) {
+  throw new Error('--manifest evidence runs require the internal --seed-worker-output=<path> mode.');
+}
+
+let releaseManifest = null;
+let releaseSelection = null;
+let releaseProvenance = null;
+if (manifestArgument) {
+  releaseManifest = validateCorpusManifest(await readJson(path.resolve(projectRoot, manifestArgument)));
+  releaseProvenance = await createReleaseProvenance({
+    projectRoot,
+    profile: DUNGEON_AUGMENTATION_PROFILES[PROFILE_ID],
+  });
+  assertMatchingReleaseProvenance(
+    releaseProvenance,
+    releaseManifest.provenance,
+    'realized verifier',
+  );
+  releaseSelection = selectCorpusEntries(releaseManifest, {
+    tier: corpusTierArgument,
+    ordinalStart: ordinalStartArgument == null ? null : Number.parseInt(ordinalStartArgument, 10),
+    ordinalCount: ordinalCountArgument == null ? null : Number.parseInt(ordinalCountArgument, 10),
+    shardIndex: shardIndexArgument == null ? null : Number.parseInt(shardIndexArgument, 10),
+    shardCount: shardCountArgument == null ? null : Number.parseInt(shardCountArgument, 10),
+  });
+  if (releaseSelection.entries.length !== 1) {
+    throw new Error('--seed-worker-output requires exactly one manifest ordinal.');
+  }
+}
+
+const seedCount = releaseSelection?.entries.length ?? (
+  Number.isFinite(requestedCount) && requestedCount > 0 ? requestedCount : 10
+);
+const startIndex = releaseSelection?.entries[0]?.rawIndex ?? (
+  Number.isFinite(requestedStart) && requestedStart >= 0 ? requestedStart : 0
+);
+if (!releaseManifest && seedCount >= 100) {
+  console.error(
+    'NOTICE: raw --start/--count realized sweeps are ad hoc regressions, not release evidence. Use the manifest-based release shard runner.',
+  );
+}
+
+function runReleaseWorkerWarmup(manifest, targetEntry) {
+  const warmupOrdinal = (targetEntry.ordinal + 1) % manifest.entries.length;
+  const warmupEntry = manifest.entries[warmupOrdinal];
+  const seededRandom = new SeededRandom(hashSeed(warmupEntry.seed));
+  let sourceRandomCalls = 0;
+  const generator = new DungeonGenerator({
+    random: () => {
+      sourceRandomCalls += 1;
+      return seededRandom.next();
+    },
+    difficulty: 1,
+    augmentationProfileId: PROFILE_ID,
+    augmentationSeed: warmupEntry.seed,
+    basePlanHash: warmupEntry.basePlanHash,
+  });
+  const inertTexture = new THREE.Texture();
+  inertTexture.name = `releaseWorkerWarmup_${String(warmupOrdinal).padStart(4, '0')}`;
+  generator.textureCache.set(inertTexture.name, inertTexture);
+  generator._loadRuinTexture = () => inertTexture;
+  const startedAt = performance.now();
+  let dungeon = null;
+  try {
+    dungeon = generator.generate();
+    const parentWitness = createAcceptedParentWitness(dungeon, sourceRandomCalls);
+    assert.equal(parentWitness.hash, warmupEntry.parentWitness.hash);
+    assert.equal(dungeon.basePlanHash, warmupEntry.basePlanHash);
+    assert.equal(dungeon.augmentationStatus, 'applied');
+    assert.equal(dungeon.augmentationReplayDiagnostics?.realizationAttempts, 1);
+    // Release workers intentionally retain one timed target per process so a
+    // wedged target remains killable by the 180-second watchdog. This real V4
+    // preroll warms imports, JIT paths, catalog lookups, and generator caches
+    // in that same process, but its diagnostic duration is excluded from the
+    // target performance sample. The process watchdog conservatively covers
+    // both warm-up and target rather than allowing an unbounded preroll.
+    return {
+      schema: RELEASE_WARM_PROCESS_EVIDENCE_SCHEMA,
+      mode: RELEASE_WARM_PROCESS_MODE,
+      completed: true,
+      includedInTargetTiming: false,
+      targetTimingStartedAfterWarmup: true,
+      workerIsolation: 'one-timed-target-per-process',
+      watchdogScope: 'warmup-and-target-process',
+      watchdogTimeoutMs: RELEASE_PERFORMANCE_BUDGET_MS.ciTimeoutPerSeed,
+      targetOrdinal: targetEntry.ordinal,
+      warmupOrdinal,
+      warmupRawIndex: warmupEntry.rawIndex,
+      warmupSeed: warmupEntry.seed,
+      warmupBasePlanHash: warmupEntry.basePlanHash,
+      warmupParentWitnessHash: parentWitness.hash,
+      warmupSourceRandomCalls: sourceRandomCalls,
+      warmupAugmentationStatus: dungeon.augmentationStatus,
+      warmupRealizationAttempts:
+        dungeon.augmentationReplayDiagnostics?.realizationAttempts ?? 0,
+      diagnosticElapsedMs: performance.now() - startedAt,
+    };
+  } finally {
+    generator._disposeGeneratedDungeonCandidate(dungeon);
+    inertTexture.dispose();
+  }
+}
 
 const records = [];
 const skippedParentSeeds = [];
 let index = startIndex;
+let currentManifestEntry = null;
+let evidenceWritten = false;
+const evidenceOutputArgument = seedWorkerOutputArgument;
+const resolvedOutputPath = evidenceOutputArgument
+  ? path.resolve(projectRoot, evidenceOutputArgument)
+  : null;
+
+const writeFailureEvidence = (error) => {
+  if (!releaseManifest || !releaseSelection || !resolvedOutputPath || evidenceWritten) return;
+  const artifact = createSeedWorkerEvidence({
+    manifest: releaseManifest,
+    selection: releaseSelection,
+    provenance: releaseProvenance,
+    records,
+    result: 'failed',
+    failure: {
+      errorName: error?.name ?? 'Error',
+      message: error?.message ?? String(error),
+      stack: error?.stack ?? null,
+      currentOrdinal: currentManifestEntry?.ordinal ?? null,
+      currentSeed: currentManifestEntry?.seed ?? null,
+    },
+  });
+  writeImmutableJsonSync(resolvedOutputPath, artifact);
+  evidenceWritten = true;
+};
+
+if (releaseManifest) {
+  process.once('uncaughtException', (error) => {
+    try {
+      writeFailureEvidence(error);
+    } catch (evidenceError) {
+      console.error(`Could not write failed release evidence: ${evidenceError.stack ?? evidenceError}`);
+    }
+    console.error(error?.stack ?? error);
+    process.exit(1);
+  });
+}
+
+let releaseWarmProcessEvidence = null;
+if (releaseManifest) {
+  currentManifestEntry = releaseSelection.entries[0];
+  releaseWarmProcessEvidence = runReleaseWorkerWarmup(
+    releaseManifest,
+    currentManifestEntry,
+  );
+}
+
 while (records.length < seedCount) {
-  const suffix = String(index).padStart(3, '0');
-  const seed = `layout:augmentation-realized-v4-${suffix}`;
-  const basePlanHash = `v1:${seed}:depth:1:revolvingFusillade`;
+  currentManifestEntry = releaseSelection?.entries[records.length] ?? null;
+  const rawIndex = currentManifestEntry?.rawIndex ?? index;
+  const suffix = String(rawIndex).padStart(3, '0');
+  const seed = currentManifestEntry?.seed ?? `layout:augmentation-realized-v4-${suffix}`;
+  const basePlanHash = currentManifestEntry?.basePlanHash
+    ?? `v1:${seed}:depth:1:revolvingFusillade`;
   const seededRandom = new SeededRandom(hashSeed(seed));
   let sourceRandomCalls = 0;
   const generator = new DungeonGenerator({
@@ -259,11 +428,21 @@ while (records.length < seedCount) {
   generator.textureCache.set(inertTexture.name, inertTexture);
   generator._loadRuinTexture = () => inertTexture;
   const startedAt = performance.now();
+  let generationCompletedAt = null;
   let dungeon = null;
+  let acceptedParentWitness = null;
+  let acceptedParentParity = currentManifestEntry == null;
   try {
     try {
       dungeon = generator.generate();
+      generationCompletedAt = performance.now();
     } catch (candidateParentError) {
+      if (currentManifestEntry) {
+        throw new Error(
+          `Accepted-parent manifest seed ${seed} failed during augmented realization: ${candidateParentError.message}`,
+          { cause: candidateParentError },
+        );
+      }
       // The sidecar cannot repair or redefine a parent layout that Industrial
       // V1 itself cannot accept. Prove the exact augmentation-disabled run
       // fails with the same error and RNG consumption before classifying the
@@ -311,6 +490,16 @@ while (records.length < seedCount) {
       }
       index += 1;
       continue;
+    }
+    acceptedParentWitness = createAcceptedParentWitness(dungeon, sourceRandomCalls);
+    if (currentManifestEntry) {
+      assert.equal(
+        acceptedParentWitness.hash,
+        currentManifestEntry.parentWitness.hash,
+        `Augmentation changed the accepted parent witness for corpus ordinal ${currentManifestEntry.ordinal}.`,
+      );
+      assert.equal(dungeon.basePlanHash, currentManifestEntry.basePlanHash);
+      acceptedParentParity = true;
     }
     assert.equal(
       dungeon.progression?.validation?.accepted,
@@ -362,7 +551,12 @@ while (records.length < seedCount) {
     let topologyTemplateSelections = [];
     let junctionKindSelections = [];
     let elevationModeSelections = [];
+    let encounterProfileSelections = [];
+    let roomLayoutSelections = [];
     let completeLayoutSignatures = [];
+    let selectionBagWitnesses = Object.fromEntries(
+      DUNGEON_SELECTION_BAG_FAMILIES.map((family) => [family, []]),
+    );
     if (dungeon.augmentationStatus === 'applied') {
       assert.equal(
         dungeon.augmentationReplayDiagnostics?.realizationAttempts,
@@ -417,6 +611,28 @@ while (records.length < seedCount) {
       elevationModeSelections = routeNetworks
         .flatMap((operation) => operation.elevationModes ?? [])
         .filter(Boolean);
+      encounterProfileSelections = routeNetworks
+        .flatMap((operation) => operation.selectionManifest?.encounters ?? [])
+        .map(({ encounterProfileId }) => encounterProfileId)
+        .filter(Boolean);
+      roomLayoutSelections = routeNetworks
+        .flatMap((operation) => operation.selectionManifest?.roomLayouts ?? [])
+        .map(({ grammarId }) => grammarId)
+        .filter(Boolean);
+      selectionBagWitnesses = Object.fromEntries(
+        DUNGEON_SELECTION_BAG_FAMILIES.map((family) => [
+          family,
+          routeNetworks.flatMap((operation) => {
+            const operationWitnesses = operation.selectionManifest?.bagWitnesses;
+            if (Array.isArray(operationWitnesses)) {
+              return operationWitnesses.filter((witness) => witness?.family === family);
+            }
+            const familyWitnesses = operationWitnesses?.[family];
+            return Array.isArray(familyWitnesses) ? familyWitnesses : [];
+          }),
+        ]),
+      );
+      validateReleaseSelectionBagWitnesses(selectionBagWitnesses);
       topologyTemplateIds = [...new Set(topologyTemplateSelections)];
       junctionKinds = [...new Set(junctionKindSelections)];
       elevationModes = [...new Set(elevationModeSelections)];
@@ -843,50 +1059,12 @@ while (records.length < seedCount) {
             Math.abs(Number(floor.elevation ?? 0) - Number(elevation)) <= 0.05
           ));
           if (!hasExactExpectedElevation) return false;
-          if (planOwnsFloor(plan, floor)) return true;
-          const belongsToExactAuthoritativeSeam = (plan.authoritativeSocketSeams ?? [])
-            .some((seam) => (seam.cells ?? []).some((cell) => (
-              Number(cell.x) === Number(point.x)
-                && Number(cell.z) === Number(point.z)
-                && Math.abs(Number(cell.elevation ?? 0) - Number(floor.elevation ?? 0)) <= 0.05
-            )));
-          if (belongsToExactAuthoritativeSeam) return true;
-          const belongsToEndpointApproachRoom = [
-            [plan.fromSocket, plan.fromRoomId],
-            [plan.toSocket, plan.toRoomId],
-          ].some(([socket, roomId]) => {
-            if (!socket || String(floor.roomId ?? '') !== String(roomId ?? socket.roomId ?? '')) {
-              return false;
-            }
-            const facingX = Math.sign(Number(socket.facingX ?? 0));
-            const facingZ = Math.sign(Number(socket.facingZ ?? 0));
-            const lateralX = -facingZ;
-            const lateralZ = facingX;
-            return [-1, 0, 1].some((lane) => [-2, -1, 0].some((depth) => (
-              Number(point.x) === Number(socket.x) + lateralX * lane + facingX * depth
-                && Number(point.z) === Number(socket.z) + lateralZ * lane + facingZ * depth
-            )));
-          });
-          if (belongsToEndpointApproachRoom) return true;
-          const endpoint = index === 0
-            ? plan.fromSocket
-            : index === path.length - 1
-              ? plan.toSocket
-              : null;
-          const endpointRoomId = index === 0
-            ? plan.fromRoomId
-            : index === path.length - 1
-              ? plan.toRoomId
-              : null;
-          return Boolean(
-            endpoint
-            && endpoint.x === point.x
-            && endpoint.z === point.z
-            && Math.abs(Number(floor.elevation ?? 0) - Number(endpoint.elevation ?? 0)) <= 0.05
-            && String(floor.roomId ?? '') === String(
-              endpoint.roomId ?? endpointRoomId ?? '',
-            )
-          );
+          // V4 has no coordinate- or endpoint-room ownership fallback. A
+          // centerline floor is legal only when the finalized physical record
+          // names this connector directly, including exact seam ownership
+          // stamped from the supplied 15-cell record. Vertical transfers are
+          // handled independently by the explicit traversal contract below.
+          return planOwnsFloor(plan, floor);
         })
       );
       const connectivityCheckByConnectionId = new Map(
@@ -1142,7 +1320,15 @@ while (records.length < seedCount) {
               check.requiredLaneCount >= 3
               && check.acceptedLaneCount === check.requiredLaneCount
               && check.requiredApproachDepthTiles === 2
-              && check.laneChecks.every((lane) => lane.accepted)
+              && check.authoritativeSeamCellCount === 15
+              && check.laneChecks.every((lane) => (
+                lane.accepted
+                  && lane.points.length === 5
+                  && lane.points.every((point) => point.exactSeamOwnership)
+                  && JSON.stringify(
+                    lane.points.map(({ signedDepthTiles }) => signedDepthTiles),
+                  ) === JSON.stringify([-2, -1, 0, 1, 2])
+              ))
             )
           )
       )));
@@ -1423,8 +1609,32 @@ while (records.length < seedCount) {
       assert.equal(dungeon.effectivePlanHash, dungeon.basePlanHash);
       assert.equal(dungeon.augmentationReplayDiagnostics?.fallbackToAcceptedBase, true);
     }
+    const verificationCompletedAt = performance.now();
+    const generationMs = Math.max(
+      0,
+      (generationCompletedAt ?? verificationCompletedAt) - startedAt,
+    );
+    const strictValidationMs = Math.max(
+      0,
+      verificationCompletedAt - (generationCompletedAt ?? verificationCompletedAt),
+    );
+    const elapsedPhases = {
+      generationMs,
+      strictValidationMs,
+      totalMs: generationMs + strictValidationMs,
+    };
     records.push({
+      ordinal: currentManifestEntry?.ordinal ?? null,
+      rawIndex,
       seed,
+      basePlanHash,
+      parentWitnessHash: acceptedParentWitness?.hash ?? null,
+      acceptedParentParity,
+      releaseValidationAccepted: dungeon.progression?.validation?.accepted === true,
+      releaseValidationErrorCount: dungeon.progression?.validation?.errors?.length ?? 0,
+      acceptedAsPlayableAlpha:
+        dungeon.augmentationReplayDiagnostics?.acceptedAsPlayableAlpha === true,
+      strictRealizedAccepted: true,
       status: dungeon.augmentationStatus,
       totalRoomRecords: dungeon.rooms.length,
       authoredRooms: authoredRooms.length,
@@ -1442,11 +1652,16 @@ while (records.length < seedCount) {
       topologyTemplateSelections,
       junctionKindSelections,
       elevationModeSelections,
+      encounterProfileSelections,
+      roomLayoutSelections,
       completeLayoutSignatures,
+      selectionBagWitnesses,
       generationAttempts: dungeon.generationAttempts,
       realizationAttempts: dungeon.augmentationReplayDiagnostics?.realizationAttempts ?? 0,
       sourceRandomCalls,
-      elapsedMs: Math.round(performance.now() - startedAt),
+      warmProcessEvidence: releaseWarmProcessEvidence,
+      elapsedPhases,
+      elapsedMs: elapsedPhases.totalMs,
       ...(dungeon.augmentationStatus === 'unchanged' ? {
         rejectionAttempts: (
           dungeon.augmentationDiagnostics?.rejectedOverlay?.attempts ?? []
@@ -1506,7 +1721,7 @@ while (records.length < seedCount) {
     generator._disposeGeneratedDungeonCandidate(dungeon);
     inertTexture.dispose();
   }
-  index += 1;
+  index = currentManifestEntry ? rawIndex + 1 : index + 1;
 }
 
 const appliedCount = records.filter(({ status }) => status === 'applied').length;
@@ -1528,9 +1743,18 @@ const countSelections = (key) => {
 const topologyTemplateFrequency = countSelections('topologyTemplateSelections');
 const junctionKindFrequency = countSelections('junctionKindSelections');
 const elevationModeFrequency = countSelections('elevationModeSelections');
+const encounterProfileFrequency = countSelections('encounterProfileSelections');
+const roomLayoutFrequency = countSelections('roomLayoutSelections');
 const completeLayoutSignatureFrequency = countSelections('completeLayoutSignatures');
-console.log(JSON.stringify({
+const verifierSummary = {
   profileId: PROFILE_ID,
+  evidenceMode: releaseManifest
+    ? 'immutable-manifest-seed-worker'
+    : 'ad-hoc-non-authoritative',
+  manifestHash: releaseManifest?.evidenceHash ?? null,
+  corpusTier: releaseSelection?.tier ?? null,
+  ordinalStart: releaseSelection?.ordinalStart ?? null,
+  ordinalEndExclusive: releaseSelection?.ordinalEndExclusive ?? null,
   startIndex,
   endIndexExclusive: index,
   seedCount,
@@ -1542,14 +1766,17 @@ console.log(JSON.stringify({
   topologyTemplateFrequency,
   junctionKindFrequency,
   elevationModeFrequency,
+  encounterProfileFrequency,
+  roomLayoutFrequency,
   completeLayoutSignatureFrequency,
   ...(summaryOnly ? {} : { records }),
-}, null, 2));
+};
+console.log(JSON.stringify(verifierSummary, null, 2));
 assert.ok(
   appliedCount >= minimumAppliedCount,
   `Only ${appliedCount}/${seedCount} realized v4 seeds applied; expected ${minimumAppliedCount}.`,
 );
-if (startIndex === 0 && seedCount >= 100) {
+if (!releaseManifest && startIndex === 0 && seedCount >= 100) {
   assert.deepEqual(
     Object.keys(topologyTemplateFrequency.counts),
     EXPECTED_TOPOLOGY_TEMPLATE_IDS,
@@ -1565,9 +1792,21 @@ if (startIndex === 0 && seedCount >= 100) {
     EXPECTED_ELEVATION_MODES,
     'The realized sweep did not exercise exactly the registered elevation families.',
   );
+  assert.deepEqual(
+    Object.keys(encounterProfileFrequency.counts),
+    EXPECTED_ENCOUNTER_PROFILE_IDS,
+    'The realized sweep did not exercise exactly the registered encounter families.',
+  );
+  assert.deepEqual(
+    Object.keys(roomLayoutFrequency.counts),
+    EXPECTED_ROOM_LAYOUT_IDS,
+    'The realized sweep did not exercise exactly the registered room-layout families.',
+  );
   assert.ok(topologyTemplateFrequency.total > 0);
   assert.ok(junctionKindFrequency.total > 0);
   assert.ok(elevationModeFrequency.total > 0);
+  assert.ok(encounterProfileFrequency.total > 0);
+  assert.ok(roomLayoutFrequency.total > 0);
   assert.ok(completeLayoutSignatureFrequency.total > 0);
   for (const [topologyTemplateId, count] of Object.entries(
     topologyTemplateFrequency.counts,
@@ -1591,4 +1830,17 @@ if (startIndex === 0 && seedCount >= 100) {
       `Complete layout signature ${signature} occupies more than 10% of realized selections.`,
     );
   }
+}
+
+if (releaseManifest) {
+  const artifact = createSeedWorkerEvidence({
+    manifest: releaseManifest,
+    selection: releaseSelection,
+    provenance: releaseProvenance,
+    records,
+    result: 'passed',
+  });
+  await writeImmutableJson(resolvedOutputPath, artifact);
+  evidenceWritten = true;
+  console.error(`Wrote immutable seed-worker evidence to ${resolvedOutputPath}.`);
 }

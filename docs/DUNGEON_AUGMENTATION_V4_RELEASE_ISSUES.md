@@ -1,36 +1,123 @@
 # Dungeon Augmentation V4 Release-Issue Register
 
-<!-- V4_RELEASE_CLOSURE_START -->
-## Release recovery closure
+<!-- V4_RELEASE_EVIDENCE_START -->
+## Release evidence status — blocked
 
-Verified 2026-07-30 against profile `industrial-supplement-preview-v4` revision 5 and deterministic seed `layout:augmentation-realized-v4-000`.
+No sealed aggregate-and-receipts attestation has been supplied for this working tree.
 
-- Augmentation status: **applied**.
-- First-realization acceptance: **passed**.
-- Release validation: **passed**.
+- Authoritative profile: `industrial-supplement-preview-v4` revision 5.
+- Immutable accepted-parent corpus: **not supplied**.
+- Ordinal shard coverage: **not established**.
+- First-realization, strict-validation, diversity, and performance gates: **not established**.
+- Overall V4 release readiness: **blocked**.
+
+This block is intentionally conservative. A canonical validator witness, a playable-alpha run, or a corpus aggregate without all same-source receipts cannot establish release. Supply `--evidence=<release-attestation.json>` only after the manifest shards and every required suite receipt have been sealed.
+<!-- V4_RELEASE_EVIDENCE_END -->
+
+## Canonical validator witness — release blocked
+
+Verified 2026-07-31 against profile `industrial-supplement-preview-v4` revision 5 and deterministic seed `layout:augmentation-realized-v4-000`.
+
+- Augmentation status: **unchanged** (atomic authored-parent fallback).
+- First-realization acceptance: **failed during materialization after successful planning**.
+- Planner final-graph validation: **passed**.
 - Invalid-alpha bypass used: **no**.
-- Current release-validator issue records: **0**.
-- Ordered current error-array SHA-256: `4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`.
+- Materialization diagnostics: **4 `DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE` errors**.
+- Final collision-derived release validator: **not reached**.
+- Strict one-seed realized verifier: **not reached**.
+- Overall V4 release readiness: **blocked**.
 
-All historical `ISSUE-001` through `ISSUE-175` records below are closed for the canonical release witness because their underlying physical conditions are absent. The original register is retained unchanged as historical evidence; it is not the current validator output.
+The previous zero-error canonical witness is stale and must not be treated as release evidence. Exact seam ownership, materializer ownership, and strict validation have since changed. The current first-derived seed no longer reports ISSUE-066, the five pyramid endpoint-seam mismatches, or the boss-to-shrine featureless-span defect, but it still does not produce an overlay, so the 175-entry historical register as a whole cannot be declared closed. The original register remains unchanged as historical evidence, and the completion rule at the end of this document still applies.
+
+### Current actionable canonical failure
+
+The first-attempt plan now succeeds with 6 operations, 30 supplemental rooms, 37 segments, and zero accumulated featureless-span records. Materialization then rejects four independent paths with `DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE`: pyramid network 0 segment 1, `enemyNest_keycardRoom` network 1 segment 1, `trapRoom_conveyorRoom` network 3 segment 0, and `conveyorRoom_bossRoom` network 4 segment 0. Atomic fallback therefore remains correct. This is not an accepted or realized release witness, and the Chromium GPU/SharedImage diagnostics remain a separate capture-stability concern.
+
+### Boss-to-shrine featureless-span closure evidence
+
+Verified 2026-07-31 without weakening the 33.6 m limit:
+
+- The two former diagnostics were forward and reverse views of one 60.4955435713 m physical span: 30.8 m of segment, 10.0955435713 m through a capped degree-two connector shell, and 19.6 m of segment.
+- The constrained bay now realizes its authored third arm as an exact challenge-room branch. The compact reward room remains on the reconnect spine, preserving `enter -> challenge -> payoff -> reconnect` instead of exposing the payoff before the challenge.
+- The branch room is seeded from the Through-T's exact `right` socket, while the final station interval uses the 19.6 m survey-relay-cache footprint. Exact socket routing remains responsible for both complete exterior approaches.
+- Planning and release validation now call the same accumulated physical-graph evaluator. A capped connector cannot reset distance merely by declaring a planned degree of three, and an overlong final graph rejects before the operation is committed.
+- The focused topology/validation suites pass 93/93, the canonical unit manifest passes 320/320, and immutable V1-V3 replay passes 1/1 with its stored hashes unchanged. Canonical attempt-one planning reports zero featureless-span records; overall release remains blocked by the four independent materialization failures above and the unreached realized/browser/corpus gates.
+
+### ISSUE-066 targeted closure evidence
+
+Verified 2026-07-31 without removing the historical register entry:
+
+- The canonical segment leaves its source threshold through both authoritative exterior seam cells and preserves the ordered centerline floor `-16,15@y14.000`.
+- Final collision validation consumes the authoritative floor keys and independently proves source-to-destination and destination-to-source traversal.
+- Wrong-side leads and one-tile doglegs reject before materialization; missing floors and both traversal directions have stable diagnostics.
+- The issue-specific regression suite passes 6/6, the canonical unit manifest passes 320/320, and the immutable V1-V3 replay test retains its stored hashes.
+- Canonical plan validation reports zero records for ISSUE-066's segment. The other 174 historical records are not declared closed by this targeted result; full V4 release remains blocked by the current independent failures and the unreached corpus/browser gates.
+
+### Pyramid endpoint-seam ownership closure evidence
+
+Verified 2026-07-31 without broadening any seam grant:
+
+- Landmark-wall endpoint rooms retain ownerless room-side seams; only the exact parent-wall seam carries the authored physical owner.
+- Inherited parent ownership remains mandatory for co-located `authored-corridor-station` endpoints used by coverage networks.
+- Strict seam diagnostics now report the exact mismatched top-level fields and expected/actual parent-owner identities.
+- The focused regression accepts the correct landmark-wall contract, rejects a remote owner added to a room seam, and rejects an authored corridor station that omits its inherited owner.
+- Canonical plan validation reports zero `route-network-endpoint-seam-record-invalid` records. Pyramid segment 1 now reaches a separate materializer-side wrong-seam-side rejection; that path defect remains open and does not reopen the corrected endpoint-seam-record contract.
 
 ### Inconsistencies and decisions requiring confirmation
 
 | Contract tension | Current implementation/interpretation | Decision required |
 | --- | --- | --- |
-| Variety is stated as a 100-seed threshold, while the smoke verifier also required at least three topology and elevation families inside every single dungeon. | Per-dungeon verification requires at least one real topology, junction, and elevation family; exact family coverage and frequency limits remain enforced by the 100-seed corpus gate. | Confirm that diversity is a corpus property, or specify explicit per-dungeon minimums and the module budget they may consume. |
-| The outer eight-seed realization retry must remain as defensive fallback, while release-corpus layouts are required to apply on their first derived seed. | The retry remains in runtime code, but the realized release verifier rejects any corpus result whose `realizationAttempts` is not 1. | Confirm whether first-realization acceptance applies to all 10/100/1,000 release seeds or only the named canonical witness. |
-| The 175-record register can be zero for the canonical witness before the required 10/100/1,000 sweeps and browser journeys all pass. | This document calls the historical records closed only for the canonical witness; release authorization remains a separate, stricter milestone. | Confirm whether “close all 175” means canonical root-cause closure or full release authorization. |
+| Variety is a 100-seed corpus threshold, while the planner previously hard-required three elevation modes in every dungeon. | The per-seed minimum is one; the evidence aggregate requires exact topology, junction, elevation, encounter, and room-layout family coverage plus topology ≤35%, junction ≤50%, and complete-layout signature ≤10% across the first 100 accepted parents. | **Adopted:** diversity is a corpus property. A dungeon still must satisfy its physical semantic contracts, but it has no hidden three-family quota. |
+| The specification requires independent topology, junction, elevation, encounter, and room-layout exhaustion bags. | All five immutable, RNG-isolated bags now serialize accepted manifests; failed branches do not consume choices, and focused rollback/refill/replay tests pass. | **Resolved in implementation; release evidence remains outstanding.** |
+| V4 structural frames require entrance, bend, junction, and interval coverage. | Required multi-role records now bind exact floors, wall runs, clearance, theme, and renderer IDs; missing, duplicated, renamed, or unsafe realizations reject before rendering. | **Resolved in implementation; realized/browser evidence remains outstanding.** |
+| Transfer endpoints must bind to exact authoritative floor-cell identities. | Every V4 transfer now resolves authored floor-cell or transfer-cell endpoint identities, including even-footprint lift boarding cells; nearest/grid fallback remains legacy-only. | **Resolved in implementation; realized traversal evidence remains outstanding.** |
+| Encounters, rewards, and mechanisms are required to resolve after finalized collision. | One renderer-free resolver now confines all gameplay anchors to declared cells/zones/tiers after solid and walkability inputs, including far-side shortcut controls; failure rejects the overlay before scene factories. | **Resolved in implementation; live journey evidence remains outstanding.** |
+| The outer eight-seed realization retry must remain as defensive fallback, while release-corpus layouts are required to apply on their first derived seed. | Runtime retains its defensive retry, while every accepted-parent manifest entry records and validates its first derived realization. | **Adopted:** the canonical witness and every entry in the 10/100/1,000 release corpora must apply on attempt 1. The requirement does not claim every theoretical seed worldwide. |
+| The 175-record current-validator count can be zero before the strict 10/100/1,000 sweeps and browser journeys pass. | This register remains open and release is blocked until all completion gates pass. | Recommended interpretation: “close all 175” means root-cause closure proven by the full strict gates, not a zero from one weaker validator witness. |
 | The public ID contains `preview-v4`, but ordinary requests are now release-authoritative and alpha bypass requires a second explicit flag. | The ID and revision remain unchanged for save/hash compatibility; authority is determined by validation, not the word “preview.” | Confirm whether a future non-preview alias should be introduced after the release gates pass. |
 | V1 authored connectors retain arches, while supplemental V4 routes use structural frames. Older validation treated the V1 arch cadence as universal. | Presentation validation is versioned: V1 arches remain immutable; V4 requires theme-bound entrance, bend, junction, and interval frame coverage. | No code decision is currently blocked; retain this row as the resolved presentation-policy record. |
-| Alpha may expose invalid geometry, but alpha diagnostics must use the same collision-derived graph as release validation. | Alpha changes acceptance only; it does not substitute a weaker graph or rewrite validation results. Invulnerability is separately controlled. | No code decision is currently blocked; confirm this remains the intended debugging policy. |
+| Alpha may expose invalid geometry, but alpha diagnostics must use the same collision-derived graph as release validation. | Alpha changes acceptance only; it does not substitute a weaker graph or rewrite validation results. Invulnerability is separately controlled. | **Adopted:** alpha is explicit, disposable, non-authoritative, and cannot create, update, or clear committed expedition evidence. |
 | The release plan requires a three-lane threshold plus two clear approach tiles on both sides, while the pre-recovery host and validator encoded only one tile per side. | V4 host grants and validation now use an exact 3 x 5 tile envelope: two inside cells, the threshold cell, and two outside cells. | Resolved in favor of the written release plan; confirm that no legacy one-tile V4 development grant must remain accepted. |
-| An exact base floor mask can be read as every room-owned floor at the base elevation, but authored ramp and transfer cells can begin at that same elevation. | Base-mask checks compare authoritative base-tier cell identities; transfer cells are validated separately through their transfer IDs and endpoint identities. | Confirm that “base mask” means the named base tier, not every physical cell whose numeric elevation equals the base tier. |
-| Junction kits have named footprint dimensions such as 7 x 7 Crossroads, but their substantive floor masks are non-rectangular. | Width/depth describe the planning and clearance envelope; physical floor coverage is the exact authored tier-cell mask. | Confirm that footprint dimensions are bounding envelopes and must not require rectangle-stamped floors. |
-| Exact seam ownership forbids cross-owner overlap outside the socket seam, but the current bounded solver grants an endpoint module core to its incident segment and can select a one-tile dogleg that re-enters that core. | The canonical dungeon remains playable and release-valid, but the realized sweep detects at least one connector-spine ownership witness outside the 3 x 5 seam. Enforcing exact ownership in candidate selection exhausts the current 121-candidate search budget and can exceed three minutes for one seed. | Decision required: enlarge/redesign the solver search and accept a much higher generation cost, constrain/re-author endpoint module sockets, or explicitly permit an incident connector to traverse its endpoint module floor without taking ownership. |
-| The acceptance plan requires 10/100/1,000 realized sweeps, while one canonical fully realized seed currently takes roughly 90-105 seconds even before strict seam backtracking. | At current throughput, serial 100- and 1,000-seed runs are multi-hour release jobs, not practical interactive checks; strict seam search is slower still. | Decide whether release sweeps run as parallel/offline CI jobs, or establish a performance budget and require planner/materializer optimization before those gates are actionable. |
+| An exact base floor mask can be read as every room-owned floor at the base elevation, but authored ramp and transfer cells can begin at that same elevation. | Base-mask checks compare authoritative base-tier cell identities; transfer cells are validated separately through their transfer IDs and endpoint identities. | **Adopted:** the base mask is the single named `base` tier at local elevation 0, not every physical cell with the same numeric elevation. Transfer presentation may replace a base cell only while retaining its original cell identity link. |
+| Junction kits have named footprint dimensions such as 7 x 7 Crossroads, but their substantive floor masks are non-rectangular. | Width/depth describe the planning and clearance envelope; physical floor coverage is the exact authored tier-cell mask. | **Adopted:** dimensions are rotated bounding placement/clearance envelopes, including `.` cells; floors are exact authored `#` cells minus declared voids and blockers. |
+| Exact seam ownership forbids cross-owner overlap outside the socket seam. | Planning, materialization, collision, navigation, and validation consume exact 15-cell endpoint seams; arbitrary endpoint-floor reuse and segment use of node-only overlap grants are rejected. ISSUE-066's canonical segment and the pyramid's plan-level endpoint-seam ownership records are clean; pyramid segment 1 still has a distinct wrong-side path failure. | **Resolved as a contract decision; full realized proof remains outstanding. Do not broaden ownership to solve the remaining failures.** |
+| The acceptance plan requires 10/100/1,000 realized sweeps, while the canonical attempt is not yet accepted. | All tiers are ordinal views of one immutable 1,000-parent manifest; shard records include generation/strict-validation phase timings. A single plan-only timing is not release-performance evidence. | **Adopted:** on the named reference environment, median ≤10 s, p95 ≤20 s, maximum ≤30 s; 180 s/seed is only a CI hang timeout. The performance gate remains unproven. |
 
-<!-- V4_RELEASE_CLOSURE_END -->
+### Resolved audit drift
+
+- The catalog and its exact-layout tests now formalize all 28 exported blueprints; the focused blueprint suite passes 8/8.
+- The maintenance-rise ramp now spans seven cells/six intervals for a 2.8 m rise and has an executable section route.
+- The preflight threshold predicate now matches the authoritative 3×5 seam instead of a stale 3×3 interpretation.
+- ISSUE-066's exact enemy-nest-to-keycard segment now has authoritative seam exits, complete centerline floor intent, and finalized bidirectional collision proof; its historical entry remains below for traceability.
+- Pyramid landmark-wall rooms no longer inherit the remote authored-wall owner on their room-side seams; true authored corridor stations retain exact inherited ownership.
+- The boss-to-shrine constrained bay now has a physically active challenge branch, a compact payoff on the reconnect spine, and one shared accumulated-distance check in planning and validation; the former symmetric 60.4955435713 m records are absent.
+- Alpha acceptance remains explicit to exact V4 plus `dungeonAugmentationAlpha=1`; invulnerability remains independently controlled by `playerInvulnerable=1`.
+- V1 authored arches and V4 supplemental structural frames remain separate presentation contracts.
+
+### Release evidence workflow
+
+1. Build one immutable accepted-parent manifest containing exactly 1,000 entries. Each entry contains its ordinal, raw seed index, exact seed and base-plan hash, and a hash of the disabled authored-parent layout plus source RNG consumption. Smoke is the first 10 ordinals, normal is the first 100, and release is all 1,000; they never use separate parent manifests.
+2. Run realized verification by manifest ordinal and explicit view. Required partitions are 1×10 for `smoke`, 10×10 for `normal`, and 20×50 for `release`. Raw `--start` ranges are not release evidence because skipped parent seeds make those ranges overlap or leave gaps.
+3. Each manifest ordinal runs in its own verifier worker with a hard 180-second watchdog. The orchestrator combines successful one-seed records into the canonical sealed, atomic shard JSON containing provenance, expected ordinals, every strict result, first-attempt status, validation state, signatures, and elapsed time. A timed-out or failed worker produces a failed canonical shard without allowing later seeds to hide the failure.
+4. Aggregate shards against the same manifest and exact tier topology. Every JSON supplied directly or discovered in a shard directory must be a valid shard for that manifest and source hash; unrelated, stale, or mixed-manifest files are rejected rather than filtered out. The aggregator also rejects duplicate or missing ordinals, fallback, retries, validator or strict-verifier failures, accepted-parent drift, diversity violations, and performance-budget violations.
+5. Run the five immutable suite contracts and seal one receipt for each: canonical unit/blueprints, enclosure, legacy replay, persistence/lifecycle, and ordinary-movement/disposable-alpha Playwright journeys. Every receipt must retain the aggregate's exact git commit, source hash, runtime platform, profile hash, and machine provenance before and after its commands.
+6. Finalize the release aggregate and all five receipts into one sealed attestation. Missing, duplicated, substituted, failed, source-drifted, or mixed-SHA receipts reject finalization. Regenerate only the narrow evidence block at the top of this document from that attestation; a corpus aggregate by itself is deliberately not accepted.
+
+Example normal-view commands (run shard indexes 0 through 9, normally on parallel CI workers):
+
+```text
+npm run build:dungeon-augmentation:corpus
+npm run run:dungeon-augmentation:release-shard -- --manifest=artifacts/dungeon-augmentation-v4-release/accepted-parent-manifest-1000.json --tier=normal --shard-index=0 --shard-count=10 --output=artifacts/dungeon-augmentation-v4-release/normal-shards/shard-000-of-010.json
+npm run aggregate:dungeon-augmentation:release-evidence -- --manifest=artifacts/dungeon-augmentation-v4-release/accepted-parent-manifest-1000.json --tier=normal --shard-dir=artifacts/dungeon-augmentation-v4-release/normal-shards --output=artifacts/dungeon-augmentation-v4-release/normal-aggregate.json
+```
+
+Normal and smoke aggregates are regression evidence only. The full release orchestrator runs the 20Ã—50 release view, seals the five same-source receipts, and finalizes `release-attestation.json`. Only that release attestation may be passed to the documentation command:
+
+```text
+npm run verify:dungeon-augmentation:release
+npm run document:dungeon-augmentation:release-evidence -- --evidence=<same-source-artifact-root>/release-attestation.json
+```
+
 ## Historical pre-recovery register
 
 Generated 2026-07-30 from profile `industrial-supplement-preview-v4` and deterministic seed `layout:augmentation-realized-v4-000`.
@@ -333,4 +420,4 @@ Recommended closure: Select spawns only from the post-collision reachable owned-
 
 ## Completion rule
 
-This register is closed only when the same profile and seed produce zero release-validation errors, the 10/100/1,000-seed release sweeps satisfy their gates, and no issue is removed merely by suppressing or weakening a validator without a versioned contract decision.
+This register is closed only when the canonical seed applies on attempt 1 with zero current-validator and strict-realized errors; sealed 10/100/1,000 accepted-parent evidence with one git/source/profile provenance proves zero fallback, exact ordinal coverage, first-attempt application, diversity, and the performance budget; the canonical unit, blueprint, enclosure, legacy replay, persistence/lifecycle, and ordinary-movement Playwright journeys pass; and no issue is removed merely by suppressing or weakening a validator without a versioned contract decision.

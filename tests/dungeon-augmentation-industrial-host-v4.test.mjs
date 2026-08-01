@@ -75,6 +75,15 @@ test('Industrial V4 publishes one deterministic same-band micro progression thro
   assert.equal(grant.endpointSockets.length, 2);
   assert.equal(new Set(grant.endpointSockets.map(({ roomId }) => roomId)).size, 2);
   assert.equal(grant.endpointSockets.every(({ widthMeters }) => widthMeters === 8.4), true);
+  assert.equal(grant.socketLandingOverlapGrants.length, 2);
+  assert.equal(grant.socketLandingOverlapGrants.every((overlap) => (
+    overlap.widthTiles === 3
+      && overlap.insideDepthTiles === 2
+      && overlap.outsideDepthTiles === 2
+      && overlap.maximumBoundaryDepthTiles === 2
+      && [overlap.size.x, overlap.size.z].sort((first, second) => first - second)
+        .every((size, index) => Math.abs(size - [8.4, 14][index]) <= 1e-9)
+  )), true);
   assert.equal(grant.endpointSockets.every(({ routeNetworkSocketKind }) => (
     routeNetworkSocketKind === 'parent-room-wall'
   )), true);
@@ -288,7 +297,7 @@ test('Industrial V4 host budgets direct-aperture pyramid and coverage routes by 
         moduleTemplateId: 'supplement-route-connector-through-t-v1',
         footprintTiles: { width: 5, depth: 7 },
         leadTiles: 1,
-        parentOwnerId: socket.logicalEdgeId,
+        parentOwnerId: socket.parentRouteId,
       });
       const expectedCenter = {
         x: socket.position.x + socket.facing.x * TILE_SIZE * 4.5,

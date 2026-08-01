@@ -5,10 +5,17 @@ import {
   DUNGEON_AUGMENTATION_PROFILES,
   GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
   augmentDungeonDraft,
+  canonicalStringify,
   computeDungeonAugmentationPlanHash,
   computeEffectiveDungeonPlanHash,
+  createDungeonRouteEndpointSeam,
+  evaluateDungeonRouteNetworkFeaturelessGraph,
   validateDungeonAugmentationPlan,
 } from '../src/dungeon-augmentation/index.js';
+import {
+  DUNGEON_SELECTION_BAG_FAMILIES,
+  createDungeonSelectionBagWitness,
+} from '../src/dungeon-augmentation/selectionBagWitness.js';
 
 const PROFILE_ID = 'industrial-supplement-preview-v2';
 const THEME_BINDING = Object.freeze({
@@ -186,6 +193,96 @@ function maximumContinuousLevelPathDistance(path = []) {
   return Math.max(maximum, current);
 }
 
+function applyV4EndpointContracts({
+  segments,
+  nodes,
+  operationId,
+  progressionBandId,
+  grant,
+}) {
+  const nodeById = new Map(nodes.map((node) => [String(node.id), node]));
+  const parentSocketById = new Map((grant.endpointSockets ?? []).map((socket) => (
+    [String(socket.id), socket]
+  )));
+  const parentOverlapBySocketId = new Map(
+    (grant.socketLandingOverlapGrants ?? []).map((overlap) => (
+      [String(overlap.socketId), overlap]
+    )),
+  );
+  for (const segment of segments) {
+    if (segment.sharedEndpointFootprint?.kind === 'shared-junction-threshold') continue;
+    const endpointRecords = [segment.from, segment.to].map((endpoint, endpointIndex) => {
+      const node = nodeById.get(String(endpoint.nodeId));
+      if (node && !node.blueprintId && node.connectorOwned !== true) {
+        node.blueprintId = `${node.id}:fixture-blueprint`;
+      }
+      if (!node && parentSocketById.has(String(endpoint.socketId ?? endpoint.id))) {
+        endpoint.kind = 'parentSocket';
+      }
+      const exactSocket = node?.sockets?.find(({ id }) => (
+        String(id) === String(endpoint.socketId ?? endpoint.id)
+      )) ?? parentSocketById.get(String(endpoint.socketId ?? endpoint.id)) ?? endpoint;
+      const role = endpointIndex === 0 ? 'from' : 'to';
+      const parentOverlap = parentOverlapBySocketId.get(String(
+        endpoint.socketId ?? endpoint.id,
+      ));
+      return {
+        endpoint,
+        node,
+        exactSocket,
+        seam: createDungeonRouteEndpointSeam(exactSocket, {
+          id: `${segment.id}:${role}-endpoint-seam`,
+          segmentId: segment.id,
+          operationId,
+          networkId: operationId,
+          nodeId: endpoint.nodeId,
+          socketId: endpoint.socketId ?? endpoint.id,
+          localSocketId: exactSocket.localSocketId ?? endpoint.localSocketId ?? null,
+          role,
+          elevationBand: node?.progressionBandId ?? progressionBandId,
+          parentOwnerId: parentOverlap?.parentOwnerId ?? null,
+        }),
+      };
+    });
+    segment.endpointSeams = endpointRecords.map(({ seam }) => seam);
+    segment.localApproachWitnesses = endpointRecords.map(({
+      endpoint,
+      node,
+      exactSocket,
+    }, endpointIndex) => {
+      const start = {
+        x: Number(exactSocket.position.x) - Number(exactSocket.facing.x) * 5.6,
+        y: Number(exactSocket.position.y),
+        z: Number(exactSocket.position.z) - Number(exactSocket.facing.z) * 5.6,
+      };
+      if (node) {
+        const alongX = Math.abs(Number(exactSocket.facing.x)) > 0.5;
+        node.occupiedVolumes.push({
+          id: `${segment.id}:endpoint-${endpointIndex}:walkable-intent`,
+          ownerId: node.id,
+          center: {
+            x: (start.x + Number(exactSocket.position.x)) * 0.5,
+            y: Number(exactSocket.position.y) + 0.1,
+            z: (start.z + Number(exactSocket.position.z)) * 0.5,
+          },
+          size: {
+            x: alongX ? 5.6 : 0.2,
+            y: 0.2,
+            z: alongX ? 0.2 : 5.6,
+          },
+          purpose: 'fixture-socket-walkable-intent',
+        });
+      }
+      return {
+        nodeId: endpoint.nodeId,
+        socketId: endpoint.socketId ?? endpoint.id,
+        localSocketId: exactSocket.localSocketId ?? endpoint.localSocketId ?? null,
+        path: [start, { ...exactSocket.position }],
+      };
+    });
+  }
+}
+
 function makeV4ValidationFixture() {
   const domain = 'validation-fixture-region:access-domain:band-0';
   const sockets = [{
@@ -206,7 +303,7 @@ function makeV4ValidationFixture() {
     nodeId: 'keycardRoom',
     roomId: 'keycardRoom',
     wallSide: 'west',
-    position: { x: 36, y: 14, z: 0 },
+    position: { x: 36, y: 0, z: 0 },
     facing: { x: -1, y: 0, z: 0 },
     widthMeters: 8.4,
     heightMeters: 3.6,
@@ -358,7 +455,9 @@ function makeV4ValidationFixture() {
   const centers = {
     [v4Id('node', 0)]: { x: 0, y: 0, z: 0 },
     [v4Id('node', 1)]: { x: 12, y: 0, z: 0 },
-    [v4Id('node', 2)]: { x: 24, y: 14, z: 0 },
+    // The pyramid loop stays externally in band 0. This module's ramp is an
+    // authored room-local transfer and does not lift either route socket.
+    [v4Id('node', 2)]: { x: 24, y: 0, z: 0 },
     [v4Id('node', 3)]: { x: 0, y: 0, z: 12 },
   };
   const roles = ['junction', 'challenge', 'elevation', 'reward'];
@@ -385,7 +484,7 @@ function makeV4ValidationFixture() {
     path: (from, to) => [
       { ...from.position },
       { x: from.position.x + 5.6, y: from.position.y, z: from.position.z },
-      { x: from.position.x + 5.6, y: to.position.y, z: to.position.z },
+      { x: to.position.x - 5.6, y: to.position.y, z: to.position.z },
       { ...to.position },
     ],
   }, {
@@ -457,7 +556,6 @@ function makeV4ValidationFixture() {
       clearanceVolumes: [{
         id: `${id}:clearance`, center, size: { x: 0.4, y: 0.4, z: 0.4 }, endpointParentNodeIds,
       }],
-      ...(index === 2 ? { elevationDelta: 4, traversal: { elevationChange: true } } : {}),
     };
   });
   const nodes = Object.entries(centers).map(([id, center], index) => {
@@ -508,6 +606,13 @@ function makeV4ValidationFixture() {
         },
       } : {}),
     };
+  });
+  applyV4EndpointContracts({
+    segments,
+    nodes,
+    operationId,
+    progressionBandId: 0,
+    grant,
   });
   const operation = {
     schema: 'ruindivex-dungeon-augmentation-operation/v1',
@@ -634,8 +739,8 @@ function appendV4CrossBandShortcutFixture(fixture, plan, {
       ...(segment.clearanceVolumes ?? []),
     ]) shiftPoint(record.center);
   }
-  // Give the one-way lift family its required straight 28m machinery run
-  // while keeping both endpoint vestibules aligned with their exact sockets.
+  // Give the one-way transfer family enough straight machinery run while
+  // keeping both endpoint vestibules aligned with their exact sockets.
   const elevationNode = nodes[2];
   const shiftElevationNodePoint = (point) => {
     if (point && Number.isFinite(Number(point.x))) point.x = Number(point.x) + 32;
@@ -651,6 +756,24 @@ function appendV4CrossBandShortcutFixture(fixture, plan, {
   shiftElevationNodePoint(segments[2].to?.position);
   shiftElevationNodePoint(segments[3].from?.position);
   shiftElevationNodePoint(segments[3].path?.[0]);
+  shiftElevationNodePoint(segments[2].landingVolumes?.[1]?.center);
+  shiftElevationNodePoint(segments[3].landingVolumes?.[0]?.center);
+  const raiseElevationNodePoint = (point) => {
+    if (point && Number.isFinite(Number(point.y))) point.y = Number(point.y) + 14;
+  };
+  raiseElevationNodePoint(elevationNode.placement?.center);
+  for (const record of [
+    ...(elevationNode.sockets ?? []),
+    ...(elevationNode.anchors ?? []),
+    ...(elevationNode.occupiedVolumes ?? []),
+    ...(elevationNode.clearanceVolumes ?? []),
+  ]) raiseElevationNodePoint(record.position ?? record.center);
+  raiseElevationNodePoint(elevationNode.junction?.clearCoreVolume?.center);
+  raiseElevationNodePoint(segments[2].to?.position);
+  raiseElevationNodePoint(segments[3].from?.position);
+  raiseElevationNodePoint(segments[3].path?.[0]);
+  raiseElevationNodePoint(segments[2].landingVolumes?.[1]?.center);
+  raiseElevationNodePoint(segments[3].landingVolumes?.[0]?.center);
   const domain0 = 'validation-fixture-region:access-domain:band-0';
   const domain1 = 'validation-fixture-region:access-domain:band-1';
   const shallowSocket = {
@@ -817,6 +940,14 @@ function appendV4CrossBandShortcutFixture(fixture, plan, {
     boundedByMeaningfulStations: true,
   }));
 
+  applyV4EndpointContracts({
+    segments,
+    nodes,
+    operationId: operation.id,
+    progressionBandId: 1,
+    grant,
+  });
+
   fixture.extensionRegions[0].routeNetworkGrants.push(grant);
   plan.operations.push(operation);
   plan.nodes.push(...nodes);
@@ -831,6 +962,97 @@ function validateV4(plan, fixture) {
     profiles: { [V4_PROFILE_ID]: V4_PROFILE },
     grammars: GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
   });
+}
+
+function createSelectionWitnessSequence(family, selectedIds) {
+  const order = [...new Set(selectedIds.map(String))];
+  let state = { cycle: 0, consumedIds: [] };
+  return selectedIds.map((selectedValue) => {
+    const selectedId = String(selectedValue);
+    const consumed = new Set(state.consumedIds);
+    const refilled = order.every((id) => consumed.has(id));
+    const after = {
+      cycle: state.cycle + (refilled ? 1 : 0),
+      consumedIds: [
+        ...(refilled ? [] : order.filter((id) => consumed.has(id))),
+        selectedId,
+      ],
+    };
+    const witness = createDungeonSelectionBagWitness({
+      family,
+      bag: { order, ...state },
+      legalIds: order,
+      selection: { id: selectedId, refilled, state: after },
+    });
+    state = after;
+    return witness;
+  });
+}
+
+function applyValidV4SelectionManifest(plan, operation = plan.operations[0]) {
+  const nodeById = new Map(plan.nodes.map((node) => [String(node.id), node]));
+  const nodeOrdinal = (nodeId) => operation.nodeIds.findIndex((id) => (
+    String(id) === String(nodeId)
+  ));
+  const junctions = (operation.junctionKinds ?? []).map((junctionKind, index) => ({
+    nodeOrdinal: nodeOrdinal(operation.connectorJunctionNodeIds?.[index]) >= 0
+      ? nodeOrdinal(operation.connectorJunctionNodeIds[index])
+      : index,
+    junctionKind: String(junctionKind),
+  }));
+  const roomLayouts = (operation.roomNodeIds ?? []).map((nodeId) => {
+    const node = nodeById.get(String(nodeId));
+    return {
+      nodeOrdinal: nodeOrdinal(nodeId),
+      grammarId: String(node?.grammarId ?? ''),
+      contentRole: String(node?.contentRole ?? ''),
+      topologyKit: false,
+    };
+  });
+  const encounters = (operation.nodeIds ?? []).flatMap((nodeId) => {
+    const node = nodeById.get(String(nodeId));
+    return (node?.anchors ?? []).some(({ kind }) => kind === 'encounter')
+      ? [{
+        nodeOrdinal: nodeOrdinal(nodeId),
+        encounterProfileId: 'supplement-route-network-defense',
+      }]
+      : [];
+  });
+  const topologyTemplateId = String(operation.topologyTemplateId);
+  const elevationMode = String(operation.elevationModes[0]);
+  const normalizedSemanticSignature = canonicalStringify({
+    topologyTemplateId,
+    elevationMode,
+    junctions,
+    roomLayouts,
+    encounters,
+  });
+  const selectedIdsByFamily = {
+    topology: [topologyTemplateId],
+    elevation: [elevationMode],
+    junction: junctions.map(({ junctionKind }) => junctionKind),
+    roomLayout: roomLayouts.map(({ grammarId }) => grammarId),
+    encounter: encounters.map(({ encounterProfileId }) => encounterProfileId),
+  };
+  assert.ok(DUNGEON_SELECTION_BAG_FAMILIES.every((family) => (
+    selectedIdsByFamily[family].length > 0
+  )));
+  operation.selectionManifest = {
+    schema: 'ruindivex-dungeon-route-network-selection-manifest/v1',
+    topology: { id: topologyTemplateId, cycle: 0, refilled: false },
+    elevation: { id: elevationMode, cycle: 0, refilled: false },
+    junctions,
+    roomLayouts,
+    encounters,
+    normalizedSemanticSignature,
+    bagWitnesses: Object.fromEntries(DUNGEON_SELECTION_BAG_FAMILIES.map((family) => [
+      family,
+      createSelectionWitnessSequence(family, selectedIdsByFamily[family]),
+    ])),
+  };
+  operation.normalizedSemanticSignature = normalizedSemanticSignature;
+  rehash(plan);
+  return operation.selectionManifest;
 }
 
 function appendSharedJunctionThresholdCoverageFixture(fixture, plan) {
@@ -1173,6 +1395,14 @@ function appendSharedJunctionThresholdCoverageFixture(fixture, plan) {
     },
   });
 
+  applyV4EndpointContracts({
+    segments,
+    nodes,
+    operationId,
+    progressionBandId: 0,
+    grant,
+  });
+
   const stableRuntimeStateIds = Object.fromEntries([
     'encounter', 'mechanism', 'reward', 'shortcut',
   ].map((role) => [role, `${operationId}:state:${role}`]));
@@ -1471,6 +1701,141 @@ test('V4 accepts an exact same-band pyramid loop with a real junction and final 
     0,
   );
   assert.ok(validation.diagnostics.routeNetworkValidation.progression[0].reachableNodeCount >= 6);
+});
+
+test('V4 accepts an absent selection manifest and validates a complete manifest when present', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  assert.equal(Object.hasOwn(plan.operations[0], 'selectionManifest'), false);
+  const absent = validateV4(plan, fixture);
+  assert.equal(absent.accepted, true, JSON.stringify(absent.errors));
+
+  applyValidV4SelectionManifest(plan);
+  const present = validateV4(plan, fixture);
+  assert.equal(present.accepted, true, JSON.stringify(present.errors));
+});
+
+test('V4 selection manifests preserve schema, topology, elevation, and normalized signature identity', () => {
+  const mutations = [{
+    label: 'schema',
+    expectedCode: 'route-network-selection-manifest-schema-invalid',
+    mutate: (operation) => { operation.selectionManifest.schema = 'invented-selection-schema'; },
+  }, {
+    label: 'topology identity',
+    expectedCode: 'route-network-selection-manifest-topology-identity-mismatch',
+    mutate: (operation) => { operation.selectionManifest.topology.id = 'other-topology'; },
+  }, {
+    label: 'elevation identity',
+    expectedCode: 'route-network-selection-manifest-elevation-identity-mismatch',
+    mutate: (operation) => { operation.selectionManifest.elevation.id = 'other-elevation'; },
+  }, {
+    label: 'manifest normalized signature',
+    expectedCode: 'route-network-selection-manifest-normalized-signature-mismatch',
+    mutate: (operation) => {
+      operation.selectionManifest.normalizedSemanticSignature = 'stale-manifest-signature';
+    },
+  }, {
+    label: 'operation normalized signature',
+    expectedCode: 'route-network-selection-manifest-normalized-signature-mismatch',
+    mutate: (operation) => { operation.normalizedSemanticSignature = 'stale-operation-signature'; },
+  }];
+
+  for (const { label, expectedCode, mutate } of mutations) {
+    const { fixture, plan } = makeV4ValidationFixture();
+    const operation = plan.operations[0];
+    applyValidV4SelectionManifest(plan, operation);
+    mutate(operation);
+    rehash(plan);
+    const validation = validateV4(plan, fixture);
+    assert.equal(validation.accepted, false, label);
+    assert.ok(validation.errors.some(({ code, context }) => (
+      code === expectedCode && context.operationId === operation.id
+    )), `${label}: ${JSON.stringify(validation.errors)}`);
+  }
+});
+
+test('V4 selection manifests serialize the accepted room layouts and encounter profiles', () => {
+  for (const { label, expectedCode, mutate } of [{
+    label: 'accepted room grammar',
+    expectedCode: 'route-network-selection-manifest-room-layout-mismatch',
+    mutate: (plan, operation) => {
+      const room = plan.nodes.find(({ id }) => operation.roomNodeIds.includes(id));
+      room.grammarId = 'different-accepted-room-layout';
+    },
+  }, {
+    label: 'accepted encounter profile',
+    expectedCode: 'route-network-selection-manifest-encounter-mismatch',
+    mutate: (plan, operation) => {
+      const node = plan.nodes.find(({ id, anchors }) => (
+        operation.nodeIds.includes(id)
+          && anchors?.some(({ kind }) => kind === 'encounter')
+      ));
+      const anchor = node.anchors.find(({ kind }) => kind === 'encounter');
+      anchor.encounterProfileId = 'supplement-lateral-defense';
+    },
+  }]) {
+    const { fixture, plan } = makeV4ValidationFixture();
+    const operation = plan.operations[0];
+    applyValidV4SelectionManifest(plan, operation);
+    mutate(plan, operation);
+    rehash(plan);
+    const validation = validateV4(plan, fixture);
+    assert.equal(validation.accepted, false, label);
+    assert.ok(validation.errors.some(({ code }) => code === expectedCode), (
+      `${label}: ${JSON.stringify(validation.errors)}`
+    ));
+  }
+});
+
+test('V4 selection manifests require valid nonempty witnesses for exactly five families', () => {
+  const mutations = [{
+    label: 'missing family',
+    expectedCode: 'route-network-selection-manifest-bag-witness-invalid',
+    expectedFamily: 'roomLayout',
+    mutate: (manifest) => { manifest.bagWitnesses.roomLayout = []; },
+  }, {
+    label: 'state drift',
+    expectedCode: 'route-network-selection-manifest-bag-witness-invalid',
+    expectedFamily: 'encounter',
+    mutate: (manifest) => { manifest.bagWitnesses.encounter[0].after.consumedIds = []; },
+  }, {
+    label: 'unknown family',
+    expectedCode: 'route-network-selection-manifest-bag-witness-family-invalid',
+    mutate: (manifest) => { manifest.bagWitnesses.inventedFamily = []; },
+  }];
+
+  for (const { label, expectedCode, expectedFamily, mutate } of mutations) {
+    const { fixture, plan } = makeV4ValidationFixture();
+    const manifest = applyValidV4SelectionManifest(plan);
+    mutate(manifest);
+    rehash(plan);
+    const validation = validateV4(plan, fixture);
+    assert.equal(validation.accepted, false, label);
+    assert.ok(validation.errors.some(({ code, context }) => (
+      code === expectedCode
+        && (expectedFamily === undefined || context.family === expectedFamily)
+    )), `${label}: ${JSON.stringify(validation.errors)}`);
+  }
+});
+
+test('V4 selection witnesses must exactly match every ordered manifest declaration', () => {
+  for (const family of DUNGEON_SELECTION_BAG_FAMILIES) {
+    const { fixture, plan } = makeV4ValidationFixture();
+    const operation = plan.operations[0];
+    const manifest = applyValidV4SelectionManifest(plan, operation);
+    manifest.bagWitnesses[family] = createSelectionWitnessSequence(
+      family,
+      [`${family}-alternate-selection`],
+    );
+    rehash(plan);
+
+    const validation = validateV4(plan, fixture);
+    assert.equal(validation.accepted, false, family);
+    assert.ok(validation.errors.some(({ code, context }) => (
+      code === 'route-network-selection-manifest-witness-selection-mismatch'
+        && context.operationId === operation.id
+        && context.family === family
+    )), `${family}: ${JSON.stringify(validation.errors)}`);
+  }
 });
 
 test('V4 route-network operations expose exact ordered module, segment, coverage, and local dependency records', () => {
@@ -1983,6 +2348,181 @@ test('an absent or unknown shared-threshold kind cannot bypass ordinary degenera
   }
 });
 
+test('V4 validates the exact identities and all 15 ordered cells of both endpoint seams', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  for (const segment of plan.segments) {
+    assert.equal(segment.endpointSeams.length, 2);
+    assert.deepEqual(segment.endpointSeams.map(({ role }) => role), ['from', 'to']);
+    assert.equal(segment.endpointSeams.every(({ orderedCells }) => (
+      orderedCells.length === 15
+    )), true);
+  }
+  const accepted = validateV4(plan, fixture);
+  assert.equal(accepted.accepted, true, JSON.stringify(accepted.errors));
+
+  const malformed = plan.segments[1].endpointSeams[0];
+  malformed.orderedCells[0].position.x += 2.8;
+  rehash(plan);
+  const rejected = validateV4(plan, fixture);
+  assert.equal(rejected.accepted, false);
+  assert.ok(rejected.errors.some(({ code, context }) => (
+    code === 'route-network-endpoint-seam-record-invalid'
+      && context.segmentId === plan.segments[1].id
+      && context.role === 'from'
+  )), JSON.stringify(rejected.errors));
+});
+
+test('V4 rejects duplicate, skipped, and reordered endpoint-seam lattice cells explicitly', () => {
+  const mutations = [{
+    label: 'duplicate',
+    mutate(seam) {
+      const threshold = seam.orderedCells.find(({ signedDepthTiles, lane }) => (
+        signedDepthTiles === 0 && lane === 0
+      ));
+      const outside = seam.orderedCells.find(({ signedDepthTiles, lane }) => (
+        signedDepthTiles === 1 && lane === 0
+      ));
+      outside.gridX = threshold.gridX;
+      outside.gridZ = threshold.gridZ;
+    },
+  }, {
+    label: 'skip',
+    mutate(seam) {
+      const outside = seam.orderedCells.find(({ signedDepthTiles, lane }) => (
+        signedDepthTiles === 1 && lane === 0
+      ));
+      outside.gridX += seam.facing.x * 3;
+      outside.gridZ += seam.facing.z * 3;
+    },
+  }, {
+    label: 'reorder',
+    mutate(seam) {
+      [seam.orderedCells[0], seam.orderedCells[1]] = [
+        seam.orderedCells[1],
+        seam.orderedCells[0],
+      ];
+    },
+  }];
+
+  for (const { label, mutate } of mutations) {
+    const { fixture, plan } = makeV4ValidationFixture();
+    const segment = plan.segments[1];
+    const seam = segment.endpointSeams[0];
+    mutate(seam);
+    rehash(plan);
+
+    const rejected = validateV4(plan, fixture);
+    assert.equal(rejected.accepted, false, label);
+    assert.ok(rejected.errors.some(({ code, context }) => (
+      code === 'route-network-endpoint-seam-grid-lattice-invalid'
+        && context.segmentId === segment.id
+        && context.role === 'from'
+    )), `${label}: ${JSON.stringify(rejected.errors)}`);
+  }
+});
+
+test('V4 pyramid room seams do not inherit remote landmark-wall ownership', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const grant = fixture.extensionRegions[0].routeNetworkGrants[0];
+  const remoteParentSocket = grant.endpointSockets[1];
+  const physicalParentOwnerId = 'keycardRoom_ground';
+  const pyramidRoom = plan.nodes[2];
+  pyramidRoom.exactParentEndpoint = true;
+  pyramidRoom.parentEndpointSocketId = remoteParentSocket.id;
+  pyramidRoom.parentEndpointSocketKind = 'landmark-wall-aperture';
+  grant.socketLandingOverlapGrants[1].parentOwnerId = physicalParentOwnerId;
+  plan.operations[0].socketLandingOverlapGrants[1].parentOwnerId = physicalParentOwnerId;
+  for (const segment of plan.segments) {
+    for (const [endpointIndex, endpoint] of [segment.from, segment.to].entries()) {
+      if ((endpoint.socketId ?? endpoint.id) !== remoteParentSocket.id) continue;
+      segment.endpointSeams[endpointIndex].overlapEnvelope.parentOwnerId =
+        physicalParentOwnerId;
+    }
+  }
+
+  const roomEndpointSeams = plan.segments.flatMap((segment) => (
+    [segment.from, segment.to].flatMap((endpoint, endpointIndex) => (
+      endpoint.nodeId === pyramidRoom.id ? [segment.endpointSeams[endpointIndex]] : []
+    ))
+  ));
+  assert.ok(roomEndpointSeams.length >= 2);
+  assert.equal(roomEndpointSeams.every(({ overlapEnvelope }) => (
+    overlapEnvelope.parentOwnerId == null
+  )), true);
+  rehash(plan);
+
+  const accepted = validateV4(plan, fixture);
+  assert.equal(accepted.accepted, true, JSON.stringify(accepted.errors));
+
+  roomEndpointSeams[0].overlapEnvelope.parentOwnerId = physicalParentOwnerId;
+  rehash(plan);
+  const broadened = validateV4(plan, fixture);
+  assert.equal(broadened.accepted, false);
+  assert.ok(broadened.errors.some(({ code, context }) => (
+    code === 'route-network-endpoint-seam-record-invalid'
+      && context.segmentId === roomEndpointSeams[0].segmentId
+      && context.expectedParentOwnerId === null
+      && context.actualParentOwnerId === physicalParentOwnerId
+      && context.mismatchedFields.includes('overlapEnvelope')
+  )), JSON.stringify(broadened.errors));
+
+  delete roomEndpointSeams[0].overlapEnvelope.parentOwnerId;
+  pyramidRoom.parentEndpointSocketKind = 'authored-corridor-station';
+  rehash(plan);
+  const stationWithoutInheritedOwner = validateV4(plan, fixture);
+  assert.equal(stationWithoutInheritedOwner.accepted, false);
+  assert.ok(stationWithoutInheritedOwner.errors.some(({ code, context }) => (
+    code === 'route-network-endpoint-seam-record-invalid'
+      && context.expectedParentOwnerId === physicalParentOwnerId
+      && context.actualParentOwnerId === null
+      && context.mismatchedFields.includes('overlapEnvelope')
+  )), JSON.stringify(stationWithoutInheritedOwner.errors));
+});
+
+test('V4 rejects endpoint-node solid overlap outside the segment exact seam', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const segment = plan.segments[1];
+  const endpointNode = plan.nodes.find(({ id }) => id === segment.from.nodeId);
+  endpointNode.occupiedVolumes.push({
+    id: `${endpointNode.id}:outside-seam-solid`,
+    ownerId: endpointNode.id,
+    center: { x: segment.from.position.x, y: 0.25, z: 6 },
+    size: { x: 0.5, y: 0.5, z: 0.5 },
+  });
+  segment.occupiedVolumes[0].center = {
+    x: segment.from.position.x,
+    y: 0.25,
+    z: 6,
+  };
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.equal(validation.accepted, false);
+  assert.ok(validation.errors.some(({ code, context }) => (
+    code === 'route-network-segment-endpoint-overlap-outside-seam'
+      && context.segmentId === segment.id
+      && context.nodeId === endpointNode.id
+  )), JSON.stringify(validation.errors));
+});
+
+test('V4 allows shared segment geometry only inside the intersection of both endpoint seams', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const first = plan.segments[0];
+  const second = plan.segments[1];
+  const sharedPoint = { x: 7, y: 0.25, z: 7 };
+  first.occupiedVolumes[0].center = { ...sharedPoint };
+  second.occupiedVolumes[0].center = { ...sharedPoint };
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.equal(validation.accepted, false);
+  assert.ok(validation.errors.some(({ code, context }) => (
+    code === 'route-network-segment-shared-overlap-outside-seams'
+      && [context.firstSegmentId, context.secondSegmentId].includes(first.id)
+      && [context.firstSegmentId, context.secondSegmentId].includes(second.id)
+  )), JSON.stringify(validation.errors));
+});
+
 test('V4 requires both exact socket approaches to remain flat and facing-aligned for 5.6m', () => {
   const { fixture, plan } = makeV4ValidationFixture();
   const segment = plan.segments[0];
@@ -2059,9 +2599,9 @@ test('V4 rejects an adjacent route reversal even when both endpoint approaches a
 
 test('V4 enforces each vertical connector family minimum horizontal run', () => {
   const minimumByFamily = new Map([
-    ['slope', 36.4],
-    ['ladder', 19.6],
-    ['lift', 28],
+    ['slope', 44.8],
+    ['ladder', 28],
+    ['lift', 36.4],
   ]);
   for (const [connectorFamily, minimumHorizontalRunMeters] of minimumByFamily) {
     const { fixture, plan } = makeV4ValidationFixture();
@@ -2084,7 +2624,11 @@ test('V4 enforces each vertical connector family minimum horizontal run', () => 
 test('V4 rejects a purely vertical connector footprint without treating elevation as zero length', () => {
   const { fixture, plan } = makeV4ValidationFixture();
   const segment = plan.segments[2];
-  const destination = { ...segment.to.position, x: segment.from.position.x };
+  const destination = {
+    ...segment.to.position,
+    x: segment.from.position.x,
+    y: segment.from.position.y + 14,
+  };
   segment.connectorFamily = 'ladder';
   segment.to.position = destination;
   segment.path = [{ ...segment.from.position }, destination];
@@ -2107,9 +2651,9 @@ test('V4 physical witnesses allow a real vertical transfer point on a sufficient
     { x: 12, y: 0, z: 0 },
     { x: 17.6, y: 0, z: 0 },
     { x: 17.6, y: 0, z: -11.2 },
-    { x: 56, y: 0, z: -11.2 },
-    { x: 56, y: 14, z: -11.2 },
-    { x: 56, y: 14, z: 22.4 },
+    { x: 62.4, y: 0, z: -11.2 },
+    { x: 62.4, y: 14, z: -11.2 },
+    { x: 62.4, y: 14, z: 22.4 },
     { x: 18.4, y: 14, z: 22.4 },
     { x: 18.4, y: 14, z: 0 },
     { x: 24, y: 14, z: 0 },
@@ -2259,7 +2803,7 @@ test('shared-node segment overlap is rejected when it continues past the endpoin
 
   const validation = validateV4(plan, fixture);
   const overlapError = validation.errors.find(({ code, context }) => (
-    code === 'supplement-segments-overlap'
+    code === 'route-network-segment-shared-overlap-outside-seams'
       && context.firstSegmentId === segments[0].id
       && context.secondSegmentId === segments[1].id
       && context.firstVolumeClass === 'occupied'
@@ -2268,9 +2812,8 @@ test('shared-node segment overlap is rejected when it continues past the endpoin
   assert.equal(validation.accepted, false);
   assert.ok(overlapError, JSON.stringify(validation.errors));
   assert.deepEqual(overlapError.context.sharedEndpointNodeIds, [junctionNode.id]);
-  assert.ok(overlapError.context.allowedEndpointFootprintIds.includes(
-    junctionNode.junction.clearCoreVolume.id,
-  ));
+  assert.equal(overlapError.context.allowedEndpointFootprintIds.length, 1);
+  assert.match(overlapError.context.allowedEndpointFootprintIds[0], /endpoint-seam:.*intersection$/);
 });
 
 test('V4 rejects altered endpoint grants and same-band nodes that escape their access domain', () => {
@@ -2302,6 +2845,23 @@ test('V4 rejects pyramid wall, cycle, aperture, and protected-volume mutations',
   assert.ok(codes.includes('pyramid-loop-aperture-contract-invalid'));
   assert.ok(codes.includes('pyramid-loop-cycle-rank-invalid'));
   assert.ok(codes.includes('route-network-node-overlaps-protected-volume'));
+});
+
+test('V4 pyramid loops keep external geometry in parent band 0', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const operation = plan.operations[0];
+  const segment = plan.segments.find(({ id }) => operation.segmentIds.includes(id));
+  segment.connectorFamily = 'slope';
+  segment.path[1].y = 14;
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.equal(validation.accepted, false);
+  assert.ok(validation.errors.some(({ code, context }) => (
+    code === 'pyramid-loop-external-elevation-invalid'
+      && context.operationId === operation.id
+      && context.parentElevation === 0
+  )), JSON.stringify(validation.errors));
 });
 
 test('V4 rejects fake junctions and substantive-module budget violations', () => {
@@ -2381,6 +2941,128 @@ test('V4 accumulates featureless length through bends and rejects spans over 33.
   assert.equal(validation.accepted, false);
   assert.ok(codes.includes('route-network-featureless-span-exceeded'));
   assert.ok(codes.includes('route-network-accumulated-featureless-span-exceeded'));
+});
+
+test('V4 carries featureless distance across the canonical boss-shrine degree-two shell', () => {
+  const firstJunction = {
+    id: 'boss-shrine:node:0',
+    kind: 'supplementConnectorJunction',
+    connectorOwned: true,
+    placement: { center: { x: 0, y: 0, z: 0 } },
+    sockets: [],
+  };
+  const connectorShell = {
+    id: 'boss-shrine:node:1',
+    kind: 'supplementConnectorModule',
+    connectorOwned: true,
+    // Optimistic planner metadata must not turn a capped third arm into a
+    // final-graph reset.
+    plannedMinimumGraphDegree: 3,
+    placement: { center: { x: 30.8, y: 0, z: 0 } },
+    sockets: [],
+  };
+  const secondJunction = {
+    id: 'boss-shrine:node:2',
+    kind: 'supplementConnectorJunction',
+    connectorOwned: true,
+    placement: { center: { x: 60.4, y: 0, z: 0 } },
+    sockets: [],
+  };
+  const nodeById = new Map([
+    [firstJunction.id, firstJunction],
+    [connectorShell.id, connectorShell],
+    [secondJunction.id, secondJunction],
+  ]);
+  const graphAdjacency = new Map([...nodeById.keys()].map((nodeId) => [nodeId, []]));
+  const addEdge = (id, from, to, lengthMeters, fromPosition, toPosition) => {
+    graphAdjacency.get(from).push({
+      id, to, lengthMeters, fromPosition, toPosition,
+    });
+    graphAdjacency.get(to).push({
+      id,
+      to: from,
+      lengthMeters,
+      fromPosition: toPosition,
+      toPosition: fromPosition,
+    });
+  };
+  const firstShellSocket = { x: 0, y: 0, z: 0 };
+  const secondShellSocket = { x: 8.4, y: 0, z: 5.6 };
+  addEdge(
+    'boss-shrine:segment:3',
+    firstJunction.id,
+    connectorShell.id,
+    30.8,
+    { x: -30.8, y: 0, z: 0 },
+    firstShellSocket,
+  );
+  addEdge(
+    'boss-shrine:segment:4',
+    connectorShell.id,
+    secondJunction.id,
+    19.6,
+    secondShellSocket,
+    { x: 28, y: 0, z: 5.6 },
+  );
+  const operationNodeIds = new Set(nodeById.keys());
+  const operation = {
+    id: 'boss-shrine:operation',
+    topologyTemplateId: 'multi-door-room-chain',
+  };
+  const realJunctionNodeIds = new Set([firstJunction.id, secondJunction.id]);
+  const evaluation = evaluateDungeonRouteNetworkFeaturelessGraph({
+    operation,
+    operationNodeIds,
+    graphAdjacency,
+    nodeById,
+    externalKeys: new Set(),
+    realJunctionNodeIds,
+    maximum: 33.6,
+  });
+
+  assert.equal(evaluation.overlongSpans.length, 2, 'both traversal directions reject');
+  const expected = 30.8 + Math.hypot(8.4, 5.6) + 19.6;
+  assert.ok(evaluation.overlongSpans.every(({ lengthMeters }) => (
+    Math.abs(lengthMeters - expected) <= 1e-9
+  )));
+  assert.ok(evaluation.overlongSpans.every(({ traversalTrace }) => (
+    traversalTrace.some(({ connectorModuleTraversalMeters }) => (
+      Math.abs(connectorModuleTraversalMeters - Math.hypot(8.4, 5.6)) <= 1e-9
+    ))
+  )));
+
+  const challengeBranch = {
+    id: 'boss-shrine:node:challenge',
+    kind: 'supplementRoom',
+    contentRole: 'challenge',
+    placement: { center: { x: 30.8, y: 0, z: 11.2 } },
+    sockets: [],
+  };
+  nodeById.set(challengeBranch.id, challengeBranch);
+  graphAdjacency.set(challengeBranch.id, []);
+  operationNodeIds.add(challengeBranch.id);
+  addEdge(
+    'boss-shrine:segment:challenge-branch',
+    connectorShell.id,
+    challengeBranch.id,
+    5.6,
+    { x: 30.8, y: 0, z: 5.6 },
+    { x: 30.8, y: 0, z: 11.2 },
+  );
+  connectorShell.kind = 'supplementConnectorJunction';
+  connectorShell.junction = { countsAsMeaningfulStation: true };
+  realJunctionNodeIds.add(connectorShell.id);
+  assert.equal(graphAdjacency.get(connectorShell.id).length, 3);
+  const withPhysicalThirdArm = evaluateDungeonRouteNetworkFeaturelessGraph({
+    operation,
+    operationNodeIds,
+    graphAdjacency,
+    nodeById,
+    externalKeys: new Set(),
+    realJunctionNodeIds,
+    maximum: 33.6,
+  });
+  assert.equal(withPhysicalThirdArm.overlongSpans.length, 0);
 });
 
 test('V4 accepts both far-side shortcut families with an exact physical shallow gate', () => {
@@ -2533,6 +3215,30 @@ test('V4 base-volume overlap is allowed only inside the segment endpoint exact l
   const bounded = validateV4(plan, fixture);
   assert.equal(bounded.accepted, true, JSON.stringify(bounded.errors));
 
+  const physicalParentOwnerId = 'keycardRoom_ground';
+  fixture.extensionRegions[0].routeNetworkGrants[0]
+    .socketLandingOverlapGrants[0].parentOwnerId = physicalParentOwnerId;
+  plan.operations[0]
+    .socketLandingOverlapGrants[0].parentOwnerId = physicalParentOwnerId;
+  plan.segments[0].endpointSeams[0]
+    .overlapEnvelope.parentOwnerId = physicalParentOwnerId;
+  fixture.baseDraft.occupiedVolumes[0] = {
+    ...fixture.baseDraft.occupiedVolumes[0],
+    id: `base:connection:${physicalParentOwnerId}:family-reserved:0:industrial-projected-column`,
+    // Base-draft normalization may retain the logical edge as ownerId while
+    // preserving the exact physical connector only in this stable ID.
+    ownerId: 'logical-parent-without-ground-suffix',
+  };
+  rehash(plan);
+  const normalizedPhysicalOwner = validateV4(plan, fixture);
+  assert.equal(
+    normalizedPhysicalOwner.accepted,
+    true,
+    JSON.stringify(normalizedPhysicalOwner.errors),
+  );
+
+  fixture.baseDraft.occupiedVolumes[0].id = 'keycardRoom:doorway-threshold';
+  fixture.baseDraft.occupiedVolumes[0].ownerId = 'keycardRoom';
   endpointLanding.center.z = 8.4;
   fixture.baseDraft.occupiedVolumes[0].center.z = 8.4;
   rehash(plan);

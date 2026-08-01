@@ -7,6 +7,7 @@ import {
   DUNGEON_EXTENSION_HOST_V2_SCHEMA,
   DUNGEON_PROGRESSION_SNAPSHOT_V2_SCHEMA,
   DUNGEON_ROUTE_NETWORK_GRANT_V2_SCHEMA,
+  DUNGEON_SELECTION_BAG_FAMILIES,
   DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA,
   DUNGEON_AUGMENTATION_PROFILES,
   GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
@@ -16,16 +17,20 @@ import {
   computeDungeonAugmentationPlanHash,
   computeEffectiveDungeonPlanHash,
   createDungeonAugmentationProfile,
+  createDungeonSelectionBag,
   createDungeonAugmentationSaveIdentity,
+  createDungeonRouteEndpointSeam,
   createIndustrialAugmentationHost,
   createIndustrialBaseDraft,
   dungeonVolumesOverlap,
+  dungeonSelectionBagCandidates,
   hashCanonicalValue,
   materializeIndustrialOverlay,
   sanitizeDungeonAugmentationSaveIdentity,
   validateCommittedDungeonAugmentationIdentity,
   validateDungeonExtensionHost,
   validateDungeonAugmentationPlan,
+  validateDungeonSelectionBagWitnessSequence,
 } from '../src/dungeon-augmentation/index.js';
 
 const SOURCE_THEME = Object.freeze({
@@ -68,6 +73,195 @@ const VERIFICATION_SEED_COUNT = Number.isFinite(requestedVerificationSeedCount)
   && requestedVerificationSeedCount >= 100
   ? requestedVerificationSeedCount
   : 100;
+
+test('V4 endpoint seams quantize half-grid thresholds once for every cardinal facing', () => {
+  const tileSize = 2.8;
+  const facings = [
+    { x: 1, y: 0, z: 0 },
+    { x: -1, y: 0, z: 0 },
+    { x: 0, y: 0, z: 1 },
+    { x: 0, y: 0, z: -1 },
+  ];
+  const cases = facings.flatMap((facing, facingIndex) => (
+    [-1, 1].map((thresholdSign) => {
+      const normalAlongX = Math.abs(facing.x) > 0.5;
+      return {
+        facing,
+        facingIndex,
+        thresholdSign,
+        position: normalAlongX
+          ? { x: thresholdSign * 29.4, y: 14, z: thresholdSign * -18.2 }
+          : { x: thresholdSign * -18.2, y: 14, z: thresholdSign * 29.4 },
+      };
+    })
+  ));
+  for (const [index, {
+    facing,
+    facingIndex,
+    thresholdSign,
+    position,
+  }] of cases.entries()) {
+    const seam = createDungeonRouteEndpointSeam({
+      id: `socket-${index}`,
+      nodeId: `node-${index}`,
+      position,
+      facing,
+    }, {
+      id: `segment-${index}:from-endpoint-seam`,
+      segmentId: `segment-${index}`,
+      operationId: 'operation-0',
+      networkId: 'operation-0',
+      role: 'from',
+      elevationBand: 2,
+    });
+    assert.equal(seam.schema, 'ruindivex-dungeon-route-endpoint-seam/v1');
+    assert.equal(seam.widthTiles, 3);
+    assert.equal(seam.depthTiles, 5);
+    assert.equal(seam.orderedCells.length, 15);
+    assert.deepEqual(
+      [...new Set(seam.orderedCells.map(({ lane }) => lane))],
+      [-1, 0, 1],
+    );
+    assert.deepEqual(
+      [...new Set(seam.orderedCells.map(({ signedDepthTiles }) => signedDepthTiles))],
+      [-2, -1, 0, 1, 2],
+    );
+    assert.equal(seam.orderedCells[0].signedDepthTiles, -2);
+    assert.equal(seam.orderedCells[0].lane, -1);
+    assert.equal(seam.orderedCells.at(-1).signedDepthTiles, 2);
+    assert.equal(seam.orderedCells.at(-1).lane, 1);
+    const cellKeys = seam.orderedCells.map(({ gridX, gridZ }) => `${gridX},${gridZ}`);
+    assert.equal(
+      new Set(cellKeys).size,
+      15,
+      `facing ${facingIndex}, threshold sign ${thresholdSign}: ${cellKeys.join(' ')}`,
+    );
+    const thresholdGridX = Math.round(position.x / tileSize);
+    const thresholdGridZ = Math.round(position.z / tileSize);
+    const lateral = { x: -facing.z, z: facing.x };
+    const cellsByLocalIdentity = new Map(seam.orderedCells.map((cell) => (
+      [`${cell.signedDepthTiles}:${cell.lane}`, cell]
+    )));
+    for (let signedDepthTiles = -2; signedDepthTiles <= 2; signedDepthTiles += 1) {
+      for (let lane = -1; lane <= 1; lane += 1) {
+        const cell = cellsByLocalIdentity.get(`${signedDepthTiles}:${lane}`);
+        assert.ok(cell);
+        assert.deepEqual(
+          { gridX: cell.gridX, gridZ: cell.gridZ },
+          {
+            gridX: thresholdGridX + facing.x * signedDepthTiles + lateral.x * lane,
+            gridZ: thresholdGridZ + facing.z * signedDepthTiles + lateral.z * lane,
+          },
+          `facing ${facingIndex}, threshold sign ${thresholdSign}, cell ${signedDepthTiles}:${lane}`,
+        );
+        assert.deepEqual(cell.position, {
+          x: Number((position.x
+            + facing.x * signedDepthTiles * tileSize
+            + lateral.x * lane * tileSize).toFixed(6)),
+          y: position.y,
+          z: Number((position.z
+            + facing.z * signedDepthTiles * tileSize
+            + lateral.z * lane * tileSize).toFixed(6)),
+        });
+        if (lane < 1) {
+          const nextLane = cellsByLocalIdentity.get(`${signedDepthTiles}:${lane + 1}`);
+          assert.equal(
+            Math.abs(cell.gridX - nextLane.gridX) + Math.abs(cell.gridZ - nextLane.gridZ),
+            1,
+          );
+        }
+        if (signedDepthTiles < 2) {
+          const nextDepth = cellsByLocalIdentity.get(`${signedDepthTiles + 1}:${lane}`);
+          assert.equal(
+            Math.abs(cell.gridX - nextDepth.gridX) + Math.abs(cell.gridZ - nextDepth.gridZ),
+            1,
+          );
+        }
+      }
+    }
+    const normalAlongX = Math.abs(facing.x) > 0.5;
+    assert.deepEqual(seam.overlapEnvelope.size, {
+      x: normalAlongX ? 14 : 8.4,
+      y: 5.6,
+      z: normalAlongX ? 8.4 : 14,
+    });
+    assert.deepEqual(seam.ownerIds, {
+      seamId: seam.id,
+      segmentId: `segment-${index}`,
+      nodeId: `node-${index}`,
+      socketId: `socket-${index}`,
+    });
+  }
+});
+
+test('V4 immutable selection bags preserve shuffle order and failed branches', () => {
+  const bag = createDungeonSelectionBag({
+    shuffle: (ids) => [...ids].reverse(),
+  }, ['beta', 'alpha', 'gamma', 'beta']);
+  assert.deepEqual(bag, {
+    order: ['gamma', 'beta', 'alpha'],
+    cycle: 0,
+    consumedIds: [],
+  });
+  const parentSnapshot = structuredClone(bag);
+  const candidates = dungeonSelectionBagCandidates(bag, ['alpha', 'gamma']);
+  assert.deepEqual(candidates.map(({ id }) => id), ['gamma', 'alpha']);
+  assert.deepEqual(bag, parentSnapshot);
+  assert.deepEqual(
+    dungeonSelectionBagCandidates(bag, ['alpha', 'gamma']).map(({ id }) => id),
+    ['gamma', 'alpha'],
+  );
+
+  const afterGamma = candidates[0].state;
+  const afterAlpha = dungeonSelectionBagCandidates(afterGamma, ['alpha', 'gamma'])
+    .find(({ id }) => id === 'alpha').state;
+  const refilled = dungeonSelectionBagCandidates(afterAlpha, ['alpha', 'gamma']);
+  assert.equal(refilled.every(({ refilled: didRefill }) => didRefill), true);
+  assert.equal(refilled[0].state.cycle, 1);
+});
+
+test('V4 selection bags isolate overlapping legal compatibility domains', () => {
+  const bag = createDungeonSelectionBag({ shuffle: (ids) => ids }, ['a', 'b', 'c']);
+  const parentSnapshot = structuredClone(bag);
+  const challengeA = dungeonSelectionBagCandidates(bag, ['a', 'b'])[0];
+  assert.equal(challengeA.id, 'a');
+  // Enumerating and discarding a branch cannot consume its choice.
+  assert.deepEqual(bag, parentSnapshot);
+  assert.equal(dungeonSelectionBagCandidates(bag, ['a', 'b'])[0].id, 'a');
+
+  const rewardB = dungeonSelectionBagCandidates(challengeA.state, ['b', 'c'])[0];
+  assert.equal(rewardB.id, 'b');
+  const challengeB = dungeonSelectionBagCandidates(rewardB.state, ['a', 'b'])[0];
+  assert.equal(challengeB.id, 'b');
+  const rewardC = dungeonSelectionBagCandidates(challengeB.state, ['b', 'c'])[0];
+  assert.equal(rewardC.id, 'c');
+
+  const refilledChallenge = dungeonSelectionBagCandidates(
+    rewardC.state,
+    ['b', 'a'],
+  );
+  assert.equal(refilledChallenge.every(({ refilled }) => refilled), true);
+  assert.deepEqual(refilledChallenge.map(({ id }) => id), ['a', 'b']);
+  assert.equal(refilledChallenge[0].state.cycle, 1);
+  // Refilling A/B never releases B early in the overlapping B/C domain.
+  assert.equal(
+    dungeonSelectionBagCandidates(refilledChallenge[0].state, ['b', 'c'])[0].id,
+    'b',
+  );
+});
+
+test('V4 selection bag RNG families are isolated and replayable', () => {
+  const root = new DungeonAugmentationRandom('selection-bag-replay');
+  const first = createDungeonSelectionBag(root.fork('topology'), ['a', 'b', 'c']);
+  root.fork('encounter').next();
+  root.fork('encounter').next();
+  const replayed = createDungeonSelectionBag(root.fork('topology'), ['a', 'b', 'c']);
+  assert.deepEqual(first, replayed);
+  assert.notDeepEqual(
+    first.order,
+    createDungeonSelectionBag(root.fork('room-layout'), ['a', 'b', 'c']).order,
+  );
+});
 
 function makeFixture({
   profileId = 'industrial-supplement-preview-v1',
@@ -383,6 +577,18 @@ test('invalid augmentation preview acceptance requires both explicit opt-in and 
     allowInvalidAugmentationPreview = false,
   } = {}) => {
     let realizationCalls = 0;
+    const collisionDerivedDiagnostics = {
+      schema: 'ruindivex-dungeon-augmentation-diagnostics/v1',
+      accepted: false,
+      errors: [{
+        code: 'supplemental-floor-non-returnable',
+        message: 'Synthetic collision-derived release failure.',
+      }],
+      traversal: {
+        graphKind: 'collision-derived',
+        blockedFloorIds: ['supplement:test:floor:blocked'],
+      },
+    };
     const generator = new DungeonGenerator({
       random: () => 0.5,
       basePlanHash: `base:explicit-alpha-gate:${profileId}`,
@@ -402,7 +608,7 @@ test('invalid augmentation preview acceptance requires both explicit opt-in and 
       realizationCalls += 1;
       return {
         augmentationStatus: 'applied',
-        augmentationDiagnostics: { errors: [] },
+        augmentationDiagnostics: structuredClone(collisionDerivedDiagnostics),
         progression: {
           validation: {
             accepted: false,
@@ -416,6 +622,7 @@ test('invalid augmentation preview acceptance requires both explicit opt-in and 
     return {
       dungeon: generator._generateIndustrialDungeonWithAugmentationReplay(),
       realizationCalls,
+      collisionDerivedDiagnostics,
     };
   };
 
@@ -430,6 +637,19 @@ test('invalid augmentation preview acceptance requires both explicit opt-in and 
   assert.equal(explicitV4Alpha.dungeon.augmentationPlayableAlpha.accepted, true);
   assert.equal(explicitV4Alpha.dungeon.augmentationReplayDiagnostics.acceptedAsPlayableAlpha, true);
   assert.equal(explicitV4Alpha.dungeon.augmentationReplayDiagnostics.releaseValidationAccepted, false);
+  const { warnings: _alphaWarnings, ...alphaValidationDiagnostics } =
+    explicitV4Alpha.dungeon.augmentationDiagnostics;
+  const ordinaryValidationDiagnostics = ordinaryV4.dungeon
+    .augmentationDiagnostics.rejectedOverlay.attempts[0].diagnostics;
+  assert.equal(
+    JSON.stringify(alphaValidationDiagnostics),
+    JSON.stringify(ordinaryValidationDiagnostics),
+    'Alpha acceptance may append a warning but must not rewrite release diagnostics.',
+  );
+  assert.deepEqual(
+    alphaValidationDiagnostics,
+    explicitV4Alpha.collisionDerivedDiagnostics,
+  );
 
   const legacyProfile = runInvalidReplay({
     profileId: 'industrial-supplement-preview-v3',
@@ -1072,10 +1292,9 @@ test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active p
   const v4Profile = DUNGEON_AUGMENTATION_PROFILES['industrial-supplement-preview-v4'];
   const singleNetworkProfile = {
     ...v4Profile,
-    requiredVariety: {
-      ...v4Profile.requiredVariety,
-      elevationModeCount: 1,
-    },
+    // A single-network fixture exercises the planner's per-dungeon default.
+    // Corpus-wide family diversity is enforced by the 100-seed verifier.
+    requiredVariety: undefined,
   };
   const metersFromTiles = (tiles) => Number((tiles * tileSize).toFixed(6));
   const expectedJunctionFootprints = new Map([
@@ -1174,6 +1393,31 @@ test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active p
     );
     assert.equal(operation.type, 'routeNetwork');
     assert.equal(operation.routeNetworkKind, 'landmark-perimeter-loop');
+    assert.equal(
+      operation.selectionManifest.schema,
+      'ruindivex-dungeon-route-network-selection-manifest/v1',
+    );
+    assert.equal(operation.selectionManifest.topology.id, operation.topologyTemplateId);
+    assert.equal(operation.selectionManifest.elevation.id, operation.elevationModes[0]);
+    assert.equal(
+      operation.selectionManifest.normalizedSemanticSignature,
+      operation.normalizedSemanticSignature,
+    );
+    for (const family of DUNGEON_SELECTION_BAG_FAMILIES) {
+      const witnessValidation = validateDungeonSelectionBagWitnessSequence(
+        operation.selectionManifest.bagWitnesses?.[family],
+        { family, requireNonEmpty: true },
+      );
+      assert.equal(
+        witnessValidation.accepted,
+        true,
+        `${family}: ${JSON.stringify(witnessValidation.errors)}`,
+      );
+    }
+    assert.deepEqual(
+      operation.selectionManifest.roomLayouts.map(({ grammarId }) => grammarId).sort(),
+      roomNodes.map(({ grammarId }) => grammarId).sort(),
+    );
     assert.deepEqual([...operation.endpointSocketIds].sort(), endpointSockets.map(({ id }) => id).sort());
     assert.equal(operation.cycleRankDelta, 1);
     assert.ok(operation.moduleCount >= 3 && operation.moduleCount <= 5);
@@ -1190,6 +1434,12 @@ test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active p
     const parentAnchoredNodeIds = new Set();
     for (const segment of first.overlayPlan.segments) {
       assert.ok(Array.isArray(segment.path) && segment.path.length >= 2);
+      if (segment.sharedEndpointFootprint?.kind !== 'shared-junction-threshold') {
+        assert.deepEqual(segment.endpointSeams.map(({ role }) => role), ['from', 'to']);
+        assert.equal(segment.endpointSeams.every(({ orderedCells }) => (
+          orderedCells.length === 15
+        )), true);
+      }
       for (const landing of segment.landingVolumes ?? []) {
         assert.deepEqual(
           [Number(landing.size.x), Number(landing.size.z)]

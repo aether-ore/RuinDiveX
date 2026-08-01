@@ -316,6 +316,163 @@ export function createDungeonSocketLandingOverlapVolume(socket = {}, {
   };
 }
 
+/**
+ * Builds the V4 physical ownership record for one route-network endpoint.
+ *
+ * A seam is deliberately larger than the legacy landing overlap: three lanes
+ * span the doorway and five depth cells reserve two complete approach tiles on
+ * either side of the exact socket threshold. `signedDepthTiles` is negative
+ * inside the endpoint node and positive along the socket's outward facing.
+ * The stable depth-major cell order is part of the serialized V4 contract.
+ */
+export function createDungeonRouteEndpointSeam(socket = {}, {
+  id = null,
+  segmentId = null,
+  operationId = null,
+  networkId = operationId,
+  nodeId = socket.nodeId ?? socket.roomId ?? null,
+  socketId = socket.id ?? socket.socketId ?? null,
+  localSocketId = socket.localSocketId ?? null,
+  role = 'from',
+  tileSize = 2.8,
+  widthTiles = 3,
+  insideDepthTiles = 2,
+  thresholdDepthTiles = 1,
+  outsideDepthTiles = 2,
+  clearanceHeightMeters = 5.6,
+  elevationBand = socket.progressionBandId ?? socket.elevationBand ?? null,
+  parentOwnerId = null,
+} = {}) {
+  const resolvedTileSize = Math.max(EPSILON, Number(tileSize) || 2.8);
+  const stableMetric = (value) => Number(Number(value).toFixed(6));
+  const resolvedWidthTiles = Math.max(1, Math.floor(Number(widthTiles) || 3));
+  const resolvedInsideDepthTiles = Math.max(
+    0,
+    Math.floor(Number(insideDepthTiles) || 0),
+  );
+  // V4 owns one threshold row between its two inside and two outside rows.
+  // Retain the option for call-shape compatibility, but never advertise a
+  // larger depth than the factory actually serializes.
+  const resolvedThresholdDepthTiles = 1;
+  const resolvedOutsideDepthTiles = Math.max(
+    0,
+    Math.floor(Number(outsideDepthTiles) || 0),
+  );
+  const position = toDungeonPoint(socket.position ?? socket, socket.elevation ?? 0);
+  const facing = toDungeonFacing(socket.facing ?? socket);
+  const facingX = Math.abs(facing.x) >= Math.abs(facing.z) ? Math.sign(facing.x) || 1 : 0;
+  const facingZ = facingX === 0 ? Math.sign(facing.z) || 1 : 0;
+  const lateral = { x: -facingZ, y: 0, z: facingX };
+  const resolvedSocketId = String(socketId ?? 'socket');
+  const resolvedSegmentId = segmentId == null ? null : String(segmentId);
+  const resolvedNodeId = nodeId == null ? null : String(nodeId);
+  const resolvedOperationId = operationId == null ? null : String(operationId);
+  const resolvedNetworkId = networkId == null ? resolvedOperationId : String(networkId);
+  const resolvedRole = role === 'to' ? 'to' : 'from';
+  const resolvedId = String(
+    id ?? `${resolvedSegmentId ?? resolvedNetworkId ?? 'route-network'}:${resolvedRole}-endpoint-seam`,
+  );
+  const minimumLane = -Math.floor(resolvedWidthTiles / 2);
+  const maximumLane = minimumLane + resolvedWidthTiles - 1;
+  const minimumDepth = -resolvedInsideDepthTiles;
+  const maximumDepth = resolvedOutsideDepthTiles;
+  // The socket threshold can intentionally lie on a half-grid wall plane.
+  // Quantizing every metric cell independently makes negative half-grid ties
+  // round inconsistently as floating-point tails accumulate, which can skip or
+  // duplicate grid identities inside an otherwise cardinal 3x5 seam. Resolve
+  // the threshold identity once, then derive the complete lattice through
+  // integer cardinal offsets. Metric positions remain the presentation and
+  // overlap authority; these grid identities are the traversal authority.
+  const thresholdGridX = Math.round(stableMetric(position.x) / resolvedTileSize);
+  const thresholdGridZ = Math.round(stableMetric(position.z) / resolvedTileSize);
+  const orderedCells = [];
+  for (let signedDepthTiles = minimumDepth;
+    signedDepthTiles <= maximumDepth;
+    signedDepthTiles += 1) {
+    for (let lane = minimumLane; lane <= maximumLane; lane += 1) {
+      const x = stableMetric(position.x
+        + facingX * signedDepthTiles * resolvedTileSize
+        + lateral.x * lane * resolvedTileSize);
+      const z = stableMetric(position.z
+        + facingZ * signedDepthTiles * resolvedTileSize
+        + lateral.z * lane * resolvedTileSize);
+      orderedCells.push({
+        id: `${resolvedId}:cell:${signedDepthTiles}:${lane}`,
+        lane,
+        signedDepthTiles,
+        side: signedDepthTiles < 0
+          ? 'inside'
+          : signedDepthTiles > 0 ? 'outside' : 'threshold',
+        position: { x, y: position.y, z },
+        gridX: thresholdGridX
+          + facingX * signedDepthTiles
+          + lateral.x * lane,
+        gridZ: thresholdGridZ
+          + facingZ * signedDepthTiles
+          + lateral.z * lane,
+      });
+    }
+  }
+  const depthTiles = resolvedInsideDepthTiles
+    + resolvedThresholdDepthTiles
+    + resolvedOutsideDepthTiles;
+  const depthCenterOffsetTiles = (
+    resolvedOutsideDepthTiles - resolvedInsideDepthTiles
+  ) * 0.5;
+  const clearanceHeight = Math.max(
+    EPSILON,
+    Number(clearanceHeightMeters) || 5.6,
+  );
+  const overlapEnvelope = {
+    id: `${resolvedId}:overlap-envelope`,
+    ownerId: resolvedId,
+    center: {
+      x: stableMetric(position.x + facingX * depthCenterOffsetTiles * resolvedTileSize),
+      y: stableMetric(position.y + clearanceHeight * 0.5),
+      z: stableMetric(position.z + facingZ * depthCenterOffsetTiles * resolvedTileSize),
+    },
+    size: {
+      x: stableMetric(
+        facingX ? depthTiles * resolvedTileSize : resolvedWidthTiles * resolvedTileSize,
+      ),
+      y: stableMetric(clearanceHeight),
+      z: stableMetric(
+        facingZ ? depthTiles * resolvedTileSize : resolvedWidthTiles * resolvedTileSize,
+      ),
+    },
+    purpose: 'route-network-endpoint-seam-overlap-envelope',
+    ...(parentOwnerId == null ? {} : { parentOwnerId: String(parentOwnerId) }),
+  };
+  return {
+    schema: 'ruindivex-dungeon-route-endpoint-seam/v1',
+    id: resolvedId,
+    segmentId: resolvedSegmentId,
+    operationId: resolvedOperationId,
+    networkId: resolvedNetworkId,
+    nodeId: resolvedNodeId,
+    socketId: resolvedSocketId,
+    localSocketId: localSocketId == null ? null : String(localSocketId),
+    role: resolvedRole,
+    position,
+    facing: { x: facingX, y: 0, z: facingZ },
+    elevationBand: elevationBand == null ? null : Number(elevationBand),
+    tileSize: resolvedTileSize,
+    widthTiles: resolvedWidthTiles,
+    insideDepthTiles: resolvedInsideDepthTiles,
+    thresholdDepthTiles: resolvedThresholdDepthTiles,
+    outsideDepthTiles: resolvedOutsideDepthTiles,
+    depthTiles,
+    orderedCells,
+    overlapEnvelope,
+    ownerIds: {
+      seamId: resolvedId,
+      segmentId: resolvedSegmentId,
+      nodeId: resolvedNodeId,
+      socketId: resolvedSocketId,
+    },
+  };
+}
+
 export function dungeonVolumeOverlapWithinGrant(first, second, grant, tolerance = 1e-4) {
   const normalizedFirst = normalizeDungeonVolume(first, 'first');
   const normalizedSecond = normalizeDungeonVolume(second, 'second');

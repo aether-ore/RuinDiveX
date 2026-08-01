@@ -84,6 +84,36 @@ test('room lookup cannot select a suppressed connector-junction proxy', () => {
   assert.equal(room, realRoom);
 });
 
+test('calm-room discovery logs are collectible terminals, not generic treasure drops', () => {
+  const toasts = [];
+  let chestRollCount = 0;
+  const chest = {
+    id: 'supplement:discovery-log',
+    isDungeonSupplementDiscovery: true,
+    discoveryLabel: 'Shift Route Log',
+    position: new THREE.Vector3(),
+    object: new THREE.Group(),
+    opened: false,
+    rewardClaimed: false,
+  };
+  const context = {
+    _getChestBlockingRequirement: () => null,
+    game: {
+      addParticleBurst() {},
+      ui: { showToast: (message) => toasts.push(message) },
+      refractors: { rollChestDrop: () => { chestRollCount += 1; } },
+    },
+  };
+
+  DungeonController.prototype._activateChest.call(context, chest);
+
+  assert.equal(chest.opened, true);
+  assert.equal(chest.rewardClaimed, true);
+  assert.equal(chest.object.userData.opened, true);
+  assert.equal(chestRollCount, 0);
+  assert.deepEqual(toasts, ['Recovered log: Shift Route Log']);
+});
+
 test('shortcut activation is scoped and does not disable unrelated dungeon hazards', () => {
   const unlocks = [];
   const openedDoors = [];

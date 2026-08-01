@@ -250,7 +250,10 @@ function createSocketLandingOverlapGrant(socket, tileSize, suffix = '') {
     insideDepthTiles: 2,
     outsideDepthTiles: 2,
     maximumBoundaryDepthTiles: 2,
-    parentOwnerId: String(socket.logicalEdgeId ?? socket.parentRouteId ?? ''),
+    // Seam sharing is a physical ownership contract. Prefer the concrete
+    // authored connector plan ID stamped onto its realized floors; the logical
+    // edge remains a compatibility fallback for hosts that do not expose one.
+    parentOwnerId: String(socket.parentRouteId ?? socket.logicalEdgeId ?? ''),
   };
 }
 
@@ -287,7 +290,7 @@ function createSocketModuleOverlapGrant(socket, tileSize, {
     moduleTemplateId,
     footprintTiles: { width: widthTiles, depth: depthTiles },
     leadTiles: 1,
-    parentOwnerId: String(socket.logicalEdgeId ?? socket.parentRouteId ?? ''),
+    parentOwnerId: String(socket.parentRouteId ?? socket.logicalEdgeId ?? ''),
   };
 }
 

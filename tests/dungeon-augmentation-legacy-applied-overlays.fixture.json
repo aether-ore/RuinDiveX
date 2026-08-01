@@ -1,0 +1,35 @@
+{
+  "schema": "ruindivex-dungeon-augmentation-legacy-applied-overlay-fixtures/v1",
+  "basePlanHash": "fixture-base-plan-v1",
+  "difficulty": 2,
+  "canonicalHashNamespace": "ruindivex-dungeon-augmentation-legacy-overlay-golden/v1",
+  "fixtures": [
+    {
+      "profileId": "industrial-supplement-preview-v1",
+      "profileRevision": 1,
+      "layoutSeed": "legacy-applied-overlay-golden-v1",
+      "augmentationSeed": "legacy-applied-overlay-golden-v1:augmentation",
+      "augmentationPlanHash": "v1-9421a37a34f65530a81f079d29a135af",
+      "effectivePlanHash": "v1-cfa61a4ecee777b539a9e3e3a50f1790",
+      "canonicalOverlayHash": "v1-04bbc3960ec5053bc895c2a17a00f3f1"
+    },
+    {
+      "profileId": "industrial-supplement-preview-v2",
+      "profileRevision": 2,
+      "layoutSeed": "legacy-applied-overlay-golden-v2",
+      "augmentationSeed": "legacy-applied-overlay-golden-v2:augmentation",
+      "augmentationPlanHash": "v1-8ef11c11032536fdb470d15de3750a18",
+      "effectivePlanHash": "v1-149a83a9c68bf6c35fb3e689639c870e",
+      "canonicalOverlayHash": "v1-df17f5d2092ca2b1cb3486f529e91971"
+    },
+    {
+      "profileId": "industrial-supplement-preview-v3",
+      "profileRevision": 3,
+      "layoutSeed": "legacy-applied-overlay-golden-v3",
+      "augmentationSeed": "legacy-applied-overlay-golden-v3:augmentation",
+      "augmentationPlanHash": "v1-6096f277a9c1462498aee8b4d22db0f7",
+      "effectivePlanHash": "v1-23dcc0690c4bd8cd394e55d8e156388d",
+      "canonicalOverlayHash": "v1-b03f943150c2d7ad1b1619aad6ce49d6"
+    }
+  ]
+}

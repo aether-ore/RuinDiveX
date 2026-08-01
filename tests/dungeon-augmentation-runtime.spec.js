@@ -2,6 +2,13 @@ import { expect, test } from '@playwright/test';
 import {
   createDungeonAugmentationCompleteLayoutSignature,
 } from '../src/dungeon-augmentation/varietySignature.js';
+import {
+  abandonExpeditionThroughEntrance,
+  beginBossExpedition,
+  readWorldDiagnostics,
+  waitForOverworldAssetsSettled,
+  waitForWorld,
+} from './helpers/overworld-runtime.js';
 
 const INDUSTRIAL_PROFILE_ID = 'industrial-supplement-preview-v4';
 const INDUSTRIAL_THEME_ID = 'industrial-v1';
@@ -1541,34 +1548,35 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
   expect(teardown.sharedGeometryDisposeEvents).toBe(0);
 });
 
-test('five opt-in reset cycles plateau supplement ownership and live resource counts', async ({ page }) => {
-  test.setTimeout(360_000);
+test('five opt-in enter/fresh-reset/exit cycles plateau supplement ownership and resources', async ({ page }) => {
+  test.setTimeout(900_000);
   const runtimeErrors = captureRuntimeErrors(page);
   await page.goto([
-    '/?startupWorld=dungeon',
-    'busterLab=sandbox',
+    '/?busterLab=sandbox',
     'dungeonSeed=augmentation-runtime-check',
-    'dungeonAugmentation=preview',
+    `dungeonAugmentation=${INDUSTRIAL_PROFILE_ID}`,
+    'playerInvulnerable=1',
   ].join('&'));
-  await waitForDungeon(page, runtimeErrors, 180_000);
+  await waitForWorld(page, 'overworld');
+  await waitForOverworldAssetsSettled(page);
 
-  const samples = [];
-  for (let cycle = 0; cycle < 5; cycle += 1) {
-    const reset = await page.evaluate(() => (
-      window.game.resetDungeonLayout({
-        free: true,
-        advanceFloor: false,
-        regenerateSeed: false,
-        abandonExpedition: false,
-        message: 'Dungeon augmentation lifecycle verification',
-      })
-    ));
+  const initialWorld = await readWorldDiagnostics(page);
+  const dungeonSamples = [];
+  const overworldSamples = [];
+  const dungeonRootIds = new Set();
+  let entryStateSignature = null;
+
+  for (let cycle = 1; cycle <= 5; cycle += 1) {
+    await beginBossExpedition(page, 'revolvingFusillade');
+    await waitForDungeon(page, runtimeErrors, 180_000);
     await waitForDungeonPresentationAssets(page);
-    const sample = await page.evaluate((resetResult) => {
+
+    const sample = await page.evaluate(() => {
       const { game } = window;
       const overlayNodes = game.dungeon.augmentationOverlayPlan?.nodes ?? [];
       const routeNetworks = (game.dungeon.augmentationOverlayPlan?.operations ?? [])
         .filter(({ type }) => type === 'routeNetwork');
+      const publicState = game.getPublicDungeonJourneyDiagnostics?.({ includeGeometry: false });
       const geometries = new Set();
       const materials = new Set();
       game.dungeon.group.traverse((object) => {
@@ -1578,7 +1586,7 @@ test('five opt-in reset cycles plateau supplement ownership and live resource co
         }
       });
       return {
-        reset: resetResult,
+        rootId: game.activeWorldBundle?.root?.uuid ?? null,
         status: game.dungeon.augmentationStatus,
         roomCount: game.dungeon.rooms.length,
         supplementRoomCount: game.dungeon.rooms.filter((room) => room.isDungeonSupplement).length,
@@ -1609,14 +1617,55 @@ test('five opt-in reset cycles plateau supplement ownership and live resource co
         rendererGeometries: game.renderer.info.memory.geometries,
         rendererTextures: game.renderer.info.memory.textures,
         controllerBoundToCurrentDungeon: game.dungeonController?.dungeon === game.dungeon,
+        entryState: {
+          ownedKeys: publicState?.ownedKeys ?? [],
+          keycards: (publicState?.keycards ?? []).map(({ id, collected }) => ({ id, collected })),
+          encounters: (publicState?.encounters ?? []).map(({ id, spawned, cleared }) => ({
+            id, spawned, cleared,
+          })),
+          mechanisms: (publicState?.mechanisms ?? []).map(({ id, activated }) => ({
+            id, activated,
+          })),
+          chests: (publicState?.chests ?? []).map(({ id, opened }) => ({ id, opened })),
+          mutableState: structuredClone(game.dungeon.augmentationIdentity?.mutableState ?? {}),
+        },
       };
-    }, reset);
-    samples.push(sample);
+    });
+    dungeonSamples.push(sample);
+    dungeonRootIds.add(sample.rootId);
+    if (entryStateSignature === null) entryStateSignature = sample.entryState;
+    else expect(sample.entryState, `cycle ${cycle} did not receive fresh dungeon-local state`)
+      .toEqual(entryStateSignature);
+
+    const dungeonReferences = await page.evaluateHandle(() => ({
+      bundle: window.game.activeWorldBundle,
+      root: window.game.activeWorldBundle.root,
+      controller: window.game.dungeonController,
+    }));
+    await abandonExpeditionThroughEntrance(page);
+    await waitForOverworldAssetsSettled(page);
+
+    const released = await page.evaluate((previous) => ({
+      disposed: previous.bundle.disposed === true,
+      detached: previous.root.parent === null,
+      controllerReplaced: window.game.dungeonController !== previous.controller,
+    }), dungeonReferences);
+    expect(released, `cycle ${cycle} retained dungeon-owned runtime objects`).toEqual({
+      disposed: true,
+      detached: true,
+      controllerReplaced: true,
+    });
+    await dungeonReferences.dispose();
+
+    const world = await readWorldDiagnostics(page);
+    overworldSamples.push(world);
+    expect(world.worldKind).toBe('overworld');
+    expect(world.planHash).toBe(initialWorld.planHash);
   }
 
-  for (const sample of samples) {
+  expect(dungeonRootIds.size).toBe(5);
+  for (const sample of dungeonSamples) {
     expect(sample).toMatchObject({
-      reset: true,
       status: 'applied',
       supplementRootCount: 1,
       disposableResourceCount: 1,
@@ -1637,33 +1686,49 @@ test('five opt-in reset cycles plateau supplement ownership and live resource co
       sample.overlayModuleCount + sample.overlayConnectorModuleCount,
     );
   }
-  const stableKeys = [
+  for (const key of [
     'roomCount',
     'supplementRoomCount',
-      'overlayModuleCount',
-      'overlayPhysicalNodeCount',
-      'overlayRoomNodeCount',
-      'overlayConnectorModuleCount',
-      'overlayConnectorJunctionCount',
-      'overlayConnectorNodeCount',
+    'overlayModuleCount',
+    'overlayPhysicalNodeCount',
+    'overlayRoomNodeCount',
+    'overlayConnectorModuleCount',
+    'overlayConnectorJunctionCount',
+    'overlayConnectorNodeCount',
     'routeNetworkCount',
     'geometryCount',
     'materialCount',
     'encounterCount',
     'hazardCount',
     'disposableResourceCount',
-  ];
-  for (const key of stableKeys) {
+  ]) {
     expect(
-      new Set(samples.slice(2).map((sample) => sample[key])).size,
-      `${key} did not plateau: ${JSON.stringify(samples.map((sample) => sample[key]))}`,
+      new Set(dungeonSamples.slice(2).map((sample) => sample[key])).size,
+      `${key} did not plateau: ${JSON.stringify(dungeonSamples.map((sample) => sample[key]))}`,
     ).toBe(1);
   }
-  for (const key of ['rendererGeometries', 'rendererTextures']) {
-    const tail = samples.slice(2).map((sample) => sample[key]);
+  for (const key of ['geometries', 'textures']) {
+    const values = overworldSamples.slice(1).map(({ renderer }) => renderer[key]);
     expect(
-      Math.max(...tail) - Math.min(...tail),
-      `${key} kept growing: ${JSON.stringify(samples.map((sample) => sample[key]))}`,
+      Math.max(...values) - Math.min(...values),
+      `overworld renderer ${key} kept growing: ${JSON.stringify(values)}`,
     ).toBeLessThanOrEqual(1);
   }
+  for (const key of [
+    'activeRootObjectCount',
+    'activeRootMeshCount',
+    'activeRootLightCount',
+    'sceneObjectCount',
+    'scenePlayerRootCount',
+    'sceneActiveWorldRootCount',
+    'controllerRuntimeRootCount',
+    'disposableResourceCount',
+    'activeControllerCount',
+  ]) {
+    const values = overworldSamples.slice(1).map(({ ownership }) => ownership[key]);
+    expect(new Set(values).size, `overworld ${key} did not plateau: ${JSON.stringify(values)}`)
+      .toBe(1);
+  }
+  expect(runtimeErrors.pageErrors).toEqual([]);
+  expect(runtimeErrors.consoleErrors).toEqual([]);
 });

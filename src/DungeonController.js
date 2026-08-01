@@ -4536,11 +4536,13 @@ export class DungeonController {
       const distanceSq = playerPosition.distanceToSquared(chest.position);
       if (distanceSq <= 2.05 * 2.05 && distanceSq < nearestDistanceSq) {
         const blockedRequirement = this._getChestBlockingRequirement(chest);
-        const baseLabel = chest.guaranteedKeycardId
-          ? 'Open Keycard Chest'
-          : chest.rewardLabel
-            ? `Open ${chest.rewardLabel} Cache`
-            : 'Open Ruin Chest';
+        const baseLabel = chest.isDungeonSupplementDiscovery === true
+          ? `Read ${chest.discoveryLabel ?? 'Maintenance Log'}`
+          : chest.guaranteedKeycardId
+            ? 'Open Keycard Chest'
+            : chest.rewardLabel
+              ? `Open ${chest.rewardLabel} Cache`
+              : 'Open Ruin Chest';
         nearest = {
           kind: 'chest',
           target: chest,
@@ -5247,6 +5249,18 @@ export class DungeonController {
 
     if (chest.rewardPartId) {
       this._activatePartRewardChest(chest);
+      return;
+    }
+
+    if (chest.isDungeonSupplementDiscovery === true) {
+      chest.opened = true;
+      chest.rewardClaimed = true;
+      if (chest.object?.userData) chest.object.userData.opened = true;
+      this.game.addParticleBurst?.(chest.position, MECHANISM_COLOR, 16, 0.12);
+      this.game.ui?.showToast?.(
+        `Recovered log: ${chest.discoveryLabel ?? 'maintenance route notes'}`,
+        '#6bdcff',
+      );
       return;
     }
 

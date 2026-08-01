@@ -811,7 +811,7 @@ function createSlopeContract(plan, context) {
       flights,
       flightCount: flights.length,
       segmentsPerFlight: segmentCount,
-      risePerFlightMeters: DUNGEON_CONNECTOR_CLEARANCE.slopeRisePerFlightMeters,
+      risePerFlightMeters: Math.abs(signedFlightRise),
       signedRisePerFlightMeters: signedFlightRise,
       switchbackSideSign,
       sourceFlightDirection: { ...facing },
@@ -846,6 +846,7 @@ function createLadderContract(plan, context) {
   } = context;
   const bottomElevation = Math.min(sourceElevation, destinationElevation);
   const topElevation = Math.max(sourceElevation, destinationElevation);
+  const transferHeight = topElevation - bottomElevation;
   const ladderIndex = Math.floor((run.startIndex + run.endIndex) * 0.5);
   const ladderPoint = pointAt(path, ladderIndex);
   const endpointLandings = makeEndpointLandings(
@@ -873,14 +874,14 @@ function createLadderContract(plan, context) {
     id: `${plan.id}:swept:ladder`,
     center: worldPoint(
       ladderPoint,
-      bottomElevation + (DUNGEON_CONNECTOR_CLEARANCE.transferElevationMeters
+      bottomElevation + (transferHeight
         + DUNGEON_CONNECTOR_CLEARANCE.minimumHeadroomMeters) * 0.5,
       tileSize,
     ),
     axis: run.axis,
     length: DUNGEON_CONNECTOR_CLEARANCE.minimumApertureDepthMeters,
     width: DUNGEON_CONNECTOR_CLEARANCE.minimumApertureWidthMeters,
-    height: DUNGEON_CONNECTOR_CLEARANCE.transferElevationMeters + DUNGEON_CONNECTOR_CLEARANCE.minimumHeadroomMeters,
+    height: transferHeight + DUNGEON_CONNECTOR_CLEARANCE.minimumHeadroomMeters,
     purpose: 'ladder_player_sweep',
   });
   return {
@@ -934,6 +935,7 @@ function createLiftContract(plan, context) {
   } = context;
   const bottomElevation = Math.min(sourceElevation, destinationElevation);
   const topElevation = Math.max(sourceElevation, destinationElevation);
+  const transferHeight = topElevation - bottomElevation;
   const liftIndex = Math.floor((run.startIndex + run.endIndex) * 0.5);
   const shaftStartPathIndex = Math.max(
     run.startIndex + 3,
@@ -1003,14 +1005,14 @@ function createLiftContract(plan, context) {
     id: `${plan.id}:swept:lift`,
     center: {
       x: shaftCenter.x,
-      y: bottomElevation + (DUNGEON_CONNECTOR_CLEARANCE.transferElevationMeters
+      y: bottomElevation + (transferHeight
         + DUNGEON_CONNECTOR_CLEARANCE.liftPlayerClearanceMeters) * 0.5,
       z: shaftCenter.z,
     },
     axis: run.axis,
     length: DUNGEON_CONNECTOR_CLEARANCE.liftShaftDepthMeters,
     width: DUNGEON_CONNECTOR_CLEARANCE.liftShaftWidthMeters,
-    height: DUNGEON_CONNECTOR_CLEARANCE.transferElevationMeters
+    height: transferHeight
       + DUNGEON_CONNECTOR_CLEARANCE.liftPlayerClearanceMeters,
     purpose: 'lift_platform_and_rider_sweep',
   });
@@ -1239,6 +1241,7 @@ function resolveConnectorElevations(plan, variantId, {
   sourceElevation: sourceElevationOption,
   destinationElevation: destinationElevationOption,
   direction: directionOption,
+  allowExactQuantizedElevationDelta = false,
 } = {}) {
   const descriptor = DUNGEON_CONNECTOR_VARIANTS[variantId];
   const sourceElevation = Number(
@@ -1269,6 +1272,33 @@ function resolveConnectorElevations(plan, variantId, {
 
   let direction = directionOption ?? plan.direction ?? plan.elevationDirection ?? null;
   const explicitDestination = destinationElevationOption ?? plan.destinationElevation;
+  if (allowExactQuantizedElevationDelta) {
+    const destinationElevation = Number(explicitDestination);
+    if (!Number.isFinite(destinationElevation)) {
+      throw new TypeError(
+        `Connection ${plan.id} requires an explicit finite destination elevation.`,
+      );
+    }
+    const elevationDelta = destinationElevation - sourceElevation;
+    const magnitude = Math.abs(elevationDelta);
+    const quantum = DUNGEON_CONNECTOR_CLEARANCE.tileSizeMeters;
+    const quantizedSteps = Math.round(magnitude / quantum);
+    if (magnitude <= EPSILON
+      || magnitude > DUNGEON_CONNECTOR_CLEARANCE.transferElevationMeters + EPSILON
+      || Math.abs(magnitude - quantizedSteps * quantum) > EPSILON) {
+      throw new RangeError(
+        `Connection ${plan.id} must use a nonzero ${quantum} metre-quantized elevation delta no greater than ${DUNGEON_CONNECTOR_CLEARANCE.transferElevationMeters} metres.`,
+      );
+    }
+    const exactDirection = elevationDelta > 0 ? 'ascending' : 'descending';
+    direction ??= exactDirection;
+    if (!descriptor.allowedDirections.includes(direction) || direction !== exactDirection) {
+      throw new RangeError(
+        `Connector ${plan.id} direction ${direction} disagrees with its exact elevation delta.`,
+      );
+    }
+    return { sourceElevation, destinationElevation, elevationDelta, direction };
+  }
   if (!direction && Number.isFinite(explicitDestination)) {
     direction = Number(explicitDestination) >= sourceElevation ? 'ascending' : 'descending';
   }
@@ -1308,6 +1338,7 @@ export function createDungeonConnectorVariantContract(plan, variantId, {
   sourceElevation: sourceElevationOption,
   destinationElevation: destinationElevationOption,
   direction: directionOption,
+  allowExactQuantizedElevationDelta = false,
 } = {}) {
   if (!plan?.id) throw new TypeError('A stable connection plan id is required.');
   if (!DUNGEON_CONNECTOR_VARIANT_ORDER.includes(variantId)) {
@@ -1346,6 +1377,7 @@ export function createDungeonConnectorVariantContract(plan, variantId, {
     sourceElevation: sourceElevationOption,
     destinationElevation: destinationElevationOption,
     direction: directionOption,
+    allowExactQuantizedElevationDelta,
   });
   const sourceEndpoint = {
     ...(cloneSocket(plan.fromSocket) ?? {}),

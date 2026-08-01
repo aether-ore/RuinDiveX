@@ -104,6 +104,7 @@ export function collectDungeonAugmentationStableStateIds(source = {}) {
     source.connections,
     source.connectionPlans,
     source.progressionAssignments,
+    source.stateBindings,
   ]) {
     for (const record of Array.isArray(collection) ? collection : []) {
       appendRecordStateIds(stateIds, record);

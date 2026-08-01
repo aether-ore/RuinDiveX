@@ -7,10 +7,15 @@ import {
   INDUSTRIAL_SUPPLEMENT_MODULE_MANIFESTS,
 } from '../src/dungeon-augmentation/IndustrialSupplementContent.js';
 import {
+  INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST,
+  resolveIndustrialSupplementBlueprint,
+} from '../src/dungeon-augmentation/IndustrialSupplementBlueprintCatalog.js';
+import {
   inspectIndustrialSupplementRealizedStructuralQuality,
 } from '../src/dungeon-augmentation/IndustrialSupplementStructuralQuality.js';
 import {
   createDungeonJunctionGeometryRecord,
+  createDungeonRouteEndpointSeam,
   createDungeonSocketLandingOverlapVolume,
   dungeonVolumeOverlapWithinGrant,
   transformDungeonLocalPoint,
@@ -36,6 +41,335 @@ function supplementNode({
     anchors: [],
   };
 }
+
+function physicalBlueprintSocket(blueprint, socket, {
+  center = { x: 0, y: 0, z: 0 },
+  rotationQuarterTurns = 0,
+} = {}) {
+  const halfWidth = (blueprint.dimensionsTiles.width - 1) * TILE_SIZE * 0.5;
+  const halfDepth = (blueprint.dimensionsTiles.depth - 1) * TILE_SIZE * 0.5;
+  const apertureCenter = socket.center * TILE_SIZE;
+  const localPosition = socket.side === 'N'
+    ? { x: apertureCenter, y: socket.y, z: -halfDepth }
+    : socket.side === 'S'
+      ? { x: apertureCenter, y: socket.y, z: halfDepth }
+      : socket.side === 'W'
+        ? { x: -halfWidth, y: socket.y, z: apertureCenter }
+        : { x: halfWidth, y: socket.y, z: apertureCenter };
+  const localFacing = socket.side === 'N'
+    ? { x: 0, y: 0, z: -1 }
+    : socket.side === 'S'
+      ? { x: 0, y: 0, z: 1 }
+      : socket.side === 'W'
+        ? { x: -1, y: 0, z: 0 }
+        : { x: 1, y: 0, z: 0 };
+  const position = transformDungeonLocalPoint(localPosition, {
+    center,
+    rotationQuarterTurns,
+  });
+  const facing = transformDungeonLocalPoint(localFacing, {
+    center: { x: 0, y: 0, z: 0 },
+    rotationQuarterTurns,
+  });
+  return {
+    id: `test-socket:${socket.id}`,
+    localSocketId: socket.id,
+    blueprintSocketId: socket.id,
+    localPosition,
+    localFacing,
+    position,
+    facing,
+    state: 'capped',
+  };
+}
+
+function materializePhysicalBlueprintRoom(blueprintId, {
+  center = { x: 0, y: 0, z: 0 },
+  rotationQuarterTurns = 0,
+} = {}) {
+  const blueprint = resolveIndustrialSupplementBlueprint(blueprintId);
+  assert.ok(blueprint, `${blueprintId} resolves`);
+  const operationId = `test-operation:${blueprintId}`;
+  const nodeId = `test-node:${blueprintId}`;
+  const themeBinding = { themeId: 'industrial-v1', themeSessionId: 'transfer-test' };
+  const operation = {
+    id: operationId,
+    type: 'routeNetwork',
+    themeBinding,
+  };
+  const node = {
+    id: nodeId,
+    operationId,
+    kind: 'supplementPhysicalTest',
+    grammarId: `test-grammar:${blueprintId}`,
+    blueprintId,
+    themeBinding,
+    placement: {
+      center,
+      rotationQuarterTurns,
+    },
+    size: {
+      x: blueprint.widthMeters,
+      y: Math.max(8.4, Number(blueprint.upperY ?? 0) + 3.6),
+      z: blueprint.depthMeters,
+    },
+    sockets: blueprint.sockets.map((socket) => physicalBlueprintSocket(blueprint, socket, {
+      center,
+      rotationQuarterTurns,
+    })),
+    anchors: [],
+  };
+  const result = materializeIndustrialOverlay({
+    overlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [],
+    },
+    tileSize: TILE_SIZE,
+  });
+  const room = result.rooms.find(({ id }) => id === nodeId);
+  assert.ok(room, `${blueprintId} materializes: ${JSON.stringify(result.diagnostics.errors)}`);
+  return { blueprint, room };
+}
+
+function exactLocalCell(cells, localTile, localElevation = null) {
+  return (cells ?? []).filter((cell) => (
+    Math.abs(Number(cell.localTile?.x) - Number(localTile?.x)) <= 0.000001
+      && Math.abs(Number(cell.localTile?.z) - Number(localTile?.z)) <= 0.000001
+      && (localElevation == null
+        || Math.abs(Number(cell.localTile?.elevation) - Number(localElevation)) <= 0.000001)
+  ));
+}
+
+test('V4 physical transfer endpoints resolve only their exact authored support identities', () => {
+  let endpointCount = 0;
+  let floorSupportCount = 0;
+  let transferSupportCount = 0;
+
+  for (const sourceBlueprint of INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST.filter((blueprint) => (
+    blueprint.physicalTransfers.length > 0
+  ))) {
+    const { blueprint, room } = materializePhysicalBlueprintRoom(sourceBlueprint.id);
+    const realizedTransferById = new Map(room.augmentationTransfers.map((transfer) => (
+      [transfer.localTransferId, transfer]
+    )));
+    assert.equal(realizedTransferById.size, blueprint.physicalTransfers.length);
+
+    for (const sourceTransfer of blueprint.physicalTransfers) {
+      const realizedTransfer = realizedTransferById.get(sourceTransfer.id);
+      assert.ok(realizedTransfer, `${blueprint.id}/${sourceTransfer.id} realizes`);
+      for (const role of ['from', 'to']) {
+        endpointCount += 1;
+        const sourceEndpoint = sourceTransfer.endpoints[role];
+        const endpoint = realizedTransfer.worldEndpoints[role];
+        const ownCells = exactLocalCell(
+          realizedTransfer.worldCells,
+          sourceEndpoint.localTransferCell,
+        );
+        assert.equal(
+          ownCells.length,
+          1,
+          `${blueprint.id}/${sourceTransfer.id}/${role} exact own transfer cell`,
+        );
+        assert.equal(endpoint.transferCellId, ownCells[0].id);
+        assert.deepEqual(endpoint.authoredLocalTransferCell, sourceEndpoint.localTransferCell);
+        assert.deepEqual(endpoint.localSupportRef, sourceEndpoint.localSupportRef);
+
+        const support = sourceEndpoint.localSupportRef;
+        if (support.kind === 'floor-cell') {
+          floorSupportCount += 1;
+          const tier = room.augmentationFloorTiers.find(({ id }) => (
+            id === support.floorTierId
+          ));
+          const floorCells = exactLocalCell(tier?.worldCells, support.localTile);
+          assert.equal(
+            floorCells.length,
+            1,
+            `${blueprint.id}/${sourceTransfer.id}/${role} exact floor support`,
+          );
+          assert.equal(endpoint.floorCellId, floorCells[0].id);
+          assert.equal(endpoint.floorTierRuntimeId, tier.runtimeId);
+          assert.equal(endpoint.adjacentTransferCellId, null);
+          assert.equal(endpoint.supportCellId, floorCells[0].id);
+        } else {
+          transferSupportCount += 1;
+          const supportingTransfer = realizedTransferById.get(support.transferId);
+          const transferCells = exactLocalCell(
+            supportingTransfer?.worldCells,
+            support.localTile,
+            endpoint.localElevation,
+          );
+          assert.equal(
+            transferCells.length,
+            1,
+            `${blueprint.id}/${sourceTransfer.id}/${role} exact transfer support`,
+          );
+          assert.equal(endpoint.floorCellId, null);
+          assert.equal(endpoint.adjacentTransferCellId, transferCells[0].id);
+          assert.equal(endpoint.supportCellId, transferCells[0].id);
+          assert.equal(endpoint.adjacentTransferRuntimeId, supportingTransfer.id);
+        }
+        assert.deepEqual(endpoint.supportRef, {
+          kind: support.kind,
+          id: endpoint.supportCellId,
+        });
+        assert.deepEqual(endpoint.supportCellIds, [endpoint.supportCellId]);
+        assert.equal(endpoint.supportReachable, true);
+      }
+    }
+  }
+
+  assert.equal(endpointCount, 54);
+  assert.equal(floorSupportCount, 42);
+  assert.equal(transferSupportCount, 12);
+});
+
+test('all 16 elevation blueprints retain exact endpoints through rotations and mirrored traversal', () => {
+  const elevationBlueprintIds = new Set([
+    'ind-room-ladder-defense-rise-01',
+    'ind-room-lift-defense-rise-01',
+    'ind-room-compact-ramp-defense-rise-01',
+    'ind-room-maintenance-rise-01',
+    'ind-rise-switchback-ramp-01',
+    'ind-rise-stair-cascade-01',
+    'ind-rise-freight-lift-dogleg-01',
+    'ind-rise-ladder-bridge-01',
+    'ind-room-turbine-helix-01',
+    'ind-room-floodgate-descent-01',
+    'ind-room-crane-gantry-lift-01',
+    'ind-room-pressure-lock-reward-rise-01',
+    'ind-room-pressure-lock-reward-descent-01',
+    'ind-room-switchgear-cache-descent-01',
+    'ind-rise-long-freight-ramp-01',
+    'ind-room-inclined-sorter-01',
+  ]);
+  const elevationBlueprints = INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST.filter(({ id }) => (
+    elevationBlueprintIds.has(id)
+  ));
+  assert.equal(elevationBlueprints.length, 16);
+
+  const center = { x: 137.2, y: -8.4, z: -53.2 };
+  let realizedVariantCount = 0;
+  let checkedEndpointCount = 0;
+
+  for (const sourceBlueprint of elevationBlueprints) {
+    for (let rotationQuarterTurns = 0; rotationQuarterTurns < 4; rotationQuarterTurns += 1) {
+      const { blueprint, room } = materializePhysicalBlueprintRoom(sourceBlueprint.id, {
+        center,
+        rotationQuarterTurns,
+      });
+      const realizedTransferById = new Map(room.augmentationTransfers.map((transfer) => (
+        [transfer.localTransferId, transfer]
+      )));
+
+      for (const sourceTransfer of blueprint.physicalTransfers) {
+        const realizedTransfer = realizedTransferById.get(sourceTransfer.id);
+        assert.ok(realizedTransfer, `${blueprint.id}/${sourceTransfer.id} realizes`);
+
+        // The physical contract is bidirectional. Reversing traversal swaps
+        // the exposed endpoint order; it must not rebuild, round, or otherwise
+        // mutate either accepted endpoint identity.
+        for (const mirroredTraversal of [false, true]) {
+          realizedVariantCount += 1;
+          const orderedRoles = mirroredTraversal ? ['to', 'from'] : ['from', 'to'];
+          const orderedEndpoints = orderedRoles.map((role) => {
+            checkedEndpointCount += 1;
+            const sourceEndpoint = sourceTransfer.endpoints[role];
+            const endpoint = realizedTransfer.worldEndpoints[role];
+            const transferCell = realizedTransfer.worldCells.find(({ id }) => (
+              id === endpoint.transferCellId
+            ));
+            assert.ok(
+              transferCell,
+              `${blueprint.id}/${sourceTransfer.id}/${role}/r${rotationQuarterTurns} transfer cell`,
+            );
+            assert.deepEqual(
+              endpoint.authoredLocalTransferCell,
+              sourceEndpoint.localTransferCell,
+              `${blueprint.id}/${sourceTransfer.id}/${role}/r${rotationQuarterTurns} local identity`,
+            );
+            assert.deepEqual(
+              endpoint.position,
+              transformDungeonLocalPoint({
+                x: Number(sourceEndpoint.localTransferCell.x) * TILE_SIZE,
+                y: Number(sourceEndpoint.localElevation),
+                z: Number(sourceEndpoint.localTransferCell.z) * TILE_SIZE,
+              }, {
+                center,
+                rotationQuarterTurns,
+              }),
+              `${blueprint.id}/${sourceTransfer.id}/${role}/r${rotationQuarterTurns} world identity`,
+            );
+            assert.deepEqual(
+              endpoint.supportPosition,
+              sourceEndpoint.localSupportRef.kind === 'floor-cell'
+                ? room.augmentationFloorTiers
+                  .find(({ id }) => id === sourceEndpoint.localSupportRef.floorTierId)
+                  ?.worldCells.find(({ id }) => id === endpoint.supportCellId)?.position
+                : realizedTransferById
+                  .get(sourceEndpoint.localSupportRef.transferId)
+                  ?.worldCells.find(({ id }) => id === endpoint.supportCellId)?.position,
+              `${blueprint.id}/${sourceTransfer.id}/${role}/r${rotationQuarterTurns} support identity`,
+            );
+            assert.deepEqual(endpoint.supportRef, {
+              kind: sourceEndpoint.localSupportRef.kind,
+              id: endpoint.supportCellId,
+            });
+            assert.deepEqual(endpoint.supportCellIds, [endpoint.supportCellId]);
+            assert.equal(endpoint.supportReachable, true);
+            return endpoint;
+          });
+          assert.deepEqual(
+            orderedEndpoints.map(({ role }) => role),
+            orderedRoles,
+            `${blueprint.id}/${sourceTransfer.id}/r${rotationQuarterTurns} mirrored endpoint order`,
+          );
+          assert.ok(
+            Math.abs(
+              (orderedEndpoints[1].elevation - orderedEndpoints[0].elevation)
+                + (mirroredTraversal ? 1 : -1)
+                  * (realizedTransfer.toElevation - realizedTransfer.fromElevation),
+            ) <= 0.000001,
+            `${blueprint.id}/${sourceTransfer.id}/r${rotationQuarterTurns} mirrored elevation delta`,
+          );
+        }
+      }
+    }
+  }
+
+  assert.equal(realizedVariantCount, 184);
+  assert.equal(checkedEndpointCount, 368);
+});
+
+test('exact transfer refs cover offset ramps, half-grid lifts, and intermediate landings', () => {
+  const foundry = materializePhysicalBlueprintRoom('ind-room-reaverbot-foundry-01').room;
+  const foundryEndpoint = foundry.augmentationTransfers[0].worldEndpoints.from;
+  assert.deepEqual(foundryEndpoint.localTile, { x: 4, z: 4, elevation: 0 });
+  assert.deepEqual(foundryEndpoint.supportLocalTile, { x: 4, z: 2, elevation: 0 });
+
+  const lift = materializePhysicalBlueprintRoom('ind-room-lift-defense-rise-01').room;
+  const liftEndpoint = lift.augmentationTransfers[0].worldEndpoints.from;
+  assert.deepEqual(liftEndpoint.authoredLocalTransferCell, { x: -2.5, z: -0.5 });
+  assert.deepEqual(liftEndpoint.supportLocalTile, { x: -2, z: 0, elevation: 0 });
+
+  const switchback = materializePhysicalBlueprintRoom('ind-rise-switchback-ramp-01').room;
+  const lowerFlight = switchback.augmentationTransfers.find(({ localTransferId }) => (
+    localTransferId === 'sr-flight-lower'
+  ));
+  const landing = switchback.augmentationTransfers.find(({ localTransferId }) => (
+    localTransferId === 'sr-mid-landing'
+  ));
+  const intermediateEndpoint = lowerFlight.worldEndpoints.to;
+  const exactLandingCell = exactLocalCell(
+    landing.worldCells,
+    { x: -2, z: -0.5 },
+    1.4,
+  )[0];
+  assert.ok(exactLandingCell);
+  assert.equal(intermediateEndpoint.floorCellId, null);
+  assert.equal(intermediateEndpoint.adjacentTransferCellId, exactLandingCell.id);
+  assert.equal(intermediateEndpoint.supportCellId, exactLandingCell.id);
+});
 
 function materializeVerticalBranch({
   connectorFamily,
@@ -696,6 +1030,241 @@ function routeSocket(id, nodeId, position, facing) {
   };
 }
 
+function v4LevelSpineFixture({ reversed = false, worldZ = 0 } = {}) {
+  const operationId = 'supplement:test:issue-066:operation';
+  const grantId = 'industrial:test:issue-066:grant';
+  const segmentId = `${operationId}:segment:0`;
+  const leftSocket = routeSocket(
+    'industrial:test:issue-066:left',
+    'authored-left',
+    { x: 0, y: 14, z: worldZ },
+    { x: 1, y: 0, z: 0 },
+  );
+  const rightSocket = routeSocket(
+    'industrial:test:issue-066:right',
+    'authored-right',
+    { x: 22.4, y: 14, z: worldZ },
+    { x: -1, y: 0, z: 0 },
+  );
+  const orderedSockets = reversed
+    ? [rightSocket, leftSocket]
+    : [leftSocket, rightSocket];
+  const orderedGridX = reversed
+    ? Array.from({ length: 9 }, (_, index) => 8 - index)
+    : Array.from({ length: 9 }, (_, index) => index);
+  const segment = {
+    id: segmentId,
+    operationId,
+    connectorFamily: 'service-gallery',
+    from: { ...orderedSockets[0], kind: 'parentSocket' },
+    to: { ...orderedSockets[1], kind: 'parentSocket' },
+    path: orderedGridX.map((x) => ({ x: x * TILE_SIZE, y: 14, z: worldZ })),
+  };
+  segment.endpointSeams = [
+    createDungeonRouteEndpointSeam(segment.from, {
+      segmentId,
+      operationId,
+      nodeId: segment.from.nodeId,
+      socketId: segment.from.socketId,
+      role: 'from',
+      tileSize: TILE_SIZE,
+    }),
+    createDungeonRouteEndpointSeam(segment.to, {
+      segmentId,
+      operationId,
+      nodeId: segment.to.nodeId,
+      socketId: segment.to.socketId,
+      role: 'to',
+      tileSize: TILE_SIZE,
+    }),
+  ];
+  const themeBinding = { themeId: 'industrial-v1', themeSessionId: 'issue-066-test' };
+  const operation = {
+    id: operationId,
+    type: 'routeNetwork',
+    grantId,
+    routeNetworkKind: 'objective-route-coverage',
+    endpointSocketIds: [leftSocket.id, rightSocket.id],
+    nodeIds: [],
+    segmentIds: [segmentId],
+    accessDomainId: 'industrial:test:band-1',
+    progressionBandId: 1,
+    themeBinding,
+  };
+  return {
+    segment,
+    rooms: [
+      {
+        id: 'authored-left',
+        x: -2,
+        z: Math.round(Number(worldZ.toFixed(6)) / TILE_SIZE),
+        width: 5,
+        depth: 5,
+        baseElevation: 14,
+        plannedBaseElevation: 14,
+        exitSockets: [],
+      },
+      {
+        id: 'authored-right',
+        x: 10,
+        z: Math.round(Number(worldZ.toFixed(6)) / TILE_SIZE),
+        width: 5,
+        depth: 5,
+        baseElevation: 14,
+        plannedBaseElevation: 14,
+        exitSockets: [],
+      },
+    ],
+    overlayPlan: {
+      profileId: 'industrial-supplement-preview-v4',
+      profileRevision: 5,
+      operations: [operation],
+      nodes: [],
+      segments: [segment],
+    },
+    extensionRegions: [{
+      id: 'industrial:test:region',
+      themeBinding,
+      routeNetworkGrants: [{
+        id: grantId,
+        routeNetworkKind: operation.routeNetworkKind,
+        endpointSockets: [leftSocket, rightSocket],
+        accessDomainId: operation.accessDomainId,
+        progressionBandId: operation.progressionBandId,
+        themeBinding,
+      }],
+    }],
+  };
+}
+
+function materializeV4LevelSpineFixture(fixture) {
+  return materializeIndustrialOverlay({
+    rooms: fixture.rooms,
+    overlayPlan: fixture.overlayPlan,
+    extensionRegions: fixture.extensionRegions,
+    tileSize: TILE_SIZE,
+  });
+}
+
+test('V4 materialization preserves the ordered centerline as authoritative floor intent', () => {
+  const fixture = v4LevelSpineFixture();
+  const result = materializeV4LevelSpineFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
+  const plan = result.connectionPlans.find(({ id }) => id === fixture.segment.id);
+  assert.ok(plan);
+  const spine = plan.authoritativeTraversalSpine;
+  assert.equal(spine.schema, 'ruindivex-dungeon-authoritative-traversal-spine/v1');
+  assert.deepEqual(spine.endpointSeamIds, fixture.segment.endpointSeams.map(({ id }) => id));
+  assert.deepEqual(
+    spine.floorStampOrder.map(({ kind }) => kind),
+    ['endpoint-seam', 'endpoint-seam', 'ordered-centerline'],
+  );
+  assert.deepEqual(
+    spine.orderedCells.map(({ grid }) => grid),
+    Array.from({ length: 9 }, (_, x) => ({ x, z: 0 })),
+  );
+  assert.deepEqual(
+    spine.requiredFloorKeys,
+    Array.from({ length: 9 }, (_, x) => `${x},0@y14.000`),
+  );
+  assert.deepEqual(
+    spine.orderedCells.slice(0, 3).map(({ seamCellIds }) => seamCellIds.length),
+    [1, 1, 1],
+  );
+  assert.deepEqual(
+    spine.orderedCells.slice(-3).map(({ seamCellIds }) => seamCellIds.length),
+    [1, 1, 1],
+  );
+  assert.equal(spine.precommitTraversal.forwardAccepted, true);
+  assert.equal(spine.precommitTraversal.reverseAccepted, true);
+  assert.equal(spine.precommitTraversal.forwardReachableCellCount, 9);
+  assert.equal(spine.precommitTraversal.reverseReachableCellCount, 9);
+  assert.equal(spine.finalCollisionVerificationRequired, true);
+  assert.equal(plan.connectorVariantConstraints.finalCollisionSpineVerificationRequired, true);
+});
+
+test('V4 authoritative level spines remain exact when source and destination are reversed', () => {
+  const fixture = v4LevelSpineFixture({ reversed: true });
+  const result = materializeV4LevelSpineFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
+  const spine = result.connectionPlans.find(({ id }) => id === fixture.segment.id)
+    ?.authoritativeTraversalSpine;
+  assert.ok(spine);
+  assert.deepEqual(
+    spine.orderedCells.map(({ grid }) => grid),
+    Array.from({ length: 9 }, (_, index) => ({ x: 8 - index, z: 0 })),
+  );
+  assert.equal(spine.precommitTraversal.forwardAccepted, true);
+  assert.equal(spine.precommitTraversal.reverseAccepted, true);
+});
+
+test('V4 centerlines consume the seam grid identity at half-tile float boundaries', () => {
+  const fixture = v4LevelSpineFixture({ worldZ: 43.39999999999999 });
+  const result = materializeV4LevelSpineFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
+  const plan = result.connectionPlans.find(({ id }) => id === fixture.segment.id);
+  assert.ok(plan);
+  const seamThresholdGridZ = fixture.segment.endpointSeams[0].orderedCells.find((cell) => (
+    cell.lane === 0 && cell.signedDepthTiles === 0
+  )).gridZ;
+  assert.equal(seamThresholdGridZ, 16);
+  assert.equal(plan.fromSocket.z, seamThresholdGridZ);
+  assert.equal(plan.toSocket.z, seamThresholdGridZ);
+  assert.ok(plan.fullPath.every(({ z }) => z === seamThresholdGridZ));
+  assert.ok(plan.authoritativeTraversalSpine.requiredFloorKeys.every((floorKey) => (
+    floorKey.includes(',16@y14.000')
+  )));
+});
+
+test('V4 level spines reject a wrong-side lead before committing a connection', () => {
+  const fixture = v4LevelSpineFixture();
+  fixture.segment.path[1] = { x: -TILE_SIZE, y: 14, z: 0 };
+  const result = materializeV4LevelSpineFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, false);
+  assert.equal(result.diagnostics.routeNetworkConnectionCount, 0);
+  assert.match(
+    result.diagnostics.errors.join(' | '),
+    /DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE/,
+  );
+});
+
+test('V4 level spines reject one-tile seam doglegs before committing a connection', () => {
+  const fixture = v4LevelSpineFixture();
+  fixture.segment.path[2] = { x: TILE_SIZE, y: 14, z: TILE_SIZE };
+  const result = materializeV4LevelSpineFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, false);
+  assert.equal(result.diagnostics.routeNetworkConnectionCount, 0);
+  assert.match(
+    result.diagnostics.errors.join(' | '),
+    /DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE/,
+  );
+});
+
+test('V4 level spines expand accepted waypoints into complete authoritative floor intent', () => {
+  const fixture = v4LevelSpineFixture();
+  fixture.segment.path = [fixture.segment.path[0], fixture.segment.path.at(-1)];
+  fixture.overlayPlan.segments = [fixture.segment];
+  const result = materializeV4LevelSpineFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
+  const spine = result.connectionPlans.find(({ id }) => id === fixture.segment.id)
+    ?.authoritativeTraversalSpine;
+  assert.ok(spine);
+  assert.deepEqual(
+    spine.requiredFloorKeys,
+    Array.from({ length: 9 }, (_, x) => `${x},0@y14.000`),
+  );
+  assert.equal(
+    spine.precommitTraversal.missingFloorDiagnosticCode,
+    'DUNGEON_AUGMENTATION_ROUTE_CENTERLINE_FLOOR_MISSING',
+  );
+});
+
 function pyramidRouteNetworkFixture({
   corruptFirstEndpoint = false,
   shortcut = null,
@@ -1009,10 +1578,35 @@ test('corridor-station grants become exact T-junction proxies with one deeper-si
           kind: 'supplementSocket',
         },
         to: { ...destinationSocket, kind: 'parentSocket' },
-        path: [{ x: 9.8, y: 0, z: -40.6 }, destinationSocket.position],
+        path: [
+          { x: 9.8, y: 0, z: -40.6 },
+          { x: 14, y: 0, z: -40.6 },
+          { x: 14, y: 0, z: 0 },
+          destinationSocket.position,
+        ],
       },
     ],
   };
+  for (const segment of overlayPlan.segments) {
+    segment.endpointSeams = [
+      createDungeonRouteEndpointSeam(segment.from, {
+        segmentId: segment.id,
+        operationId,
+        nodeId: segment.from.nodeId,
+        socketId: segment.from.socketId,
+        role: 'from',
+        tileSize: TILE_SIZE,
+      }),
+      createDungeonRouteEndpointSeam(segment.to, {
+        segmentId: segment.id,
+        operationId,
+        nodeId: segment.to.nodeId,
+        socketId: segment.to.socketId,
+        role: 'to',
+        tileSize: TILE_SIZE,
+      }),
+    ];
+  }
   const result = materializeIndustrialOverlay({
     rooms,
     connectionPlans,
@@ -1045,6 +1639,11 @@ test('corridor-station grants become exact T-junction proxies with one deeper-si
   assert.deepEqual(branch.fullPath[0], { x: 0, z: -2 });
   assert.equal(branch.fromSocket.id, stationSocketId);
   assert.equal(branch.fromSocket.routeNetworkSocketKind, 'authored-corridor-station');
+  assert.equal(branch.fromSocket.connectorJunctionProxyId, station.id);
+  assert.equal(branch.fromSocket.progressionRoomId, 'authored-b');
+  assert.equal(branch.endpointSeams[0].nodeId, 'authored-b');
+  assert.equal(branch.endpointSeams[0].socketId, stationSocketId);
+  assert.notEqual(branch.endpointSeams[0].nodeId, station.id);
   const graphLink = result.connectionPlans.find((plan) => plan.parentRouteStationLink);
   assert.equal(graphLink.fromRoomId, station.id);
   assert.equal(graphLink.toRoomId, 'authored-b');
@@ -1057,6 +1656,24 @@ test('corridor-station grants become exact T-junction proxies with one deeper-si
   assert.deepEqual(result.supplementalGraphOnlyConnectionIds, [graphLink.id]);
   assert.equal(result.diagnostics.connectionCount, 2);
   assert.equal(result.diagnostics.graphOnlyConnectionCount, 1);
+
+  const foreignOwnerOverlay = structuredClone(overlayPlan);
+  foreignOwnerOverlay.segments[0].endpointSeams[0].nodeId = 'foreign-parent';
+  const foreignOwnerResult = materializeIndustrialOverlay({
+    rooms,
+    connectionPlans,
+    overlayPlan: foreignOwnerOverlay,
+    extensionRegions: [{
+      id: 'industrial-v1:main-region',
+      routeNetworkGrants: [{ id: grantId, endpointSockets: [stationSocket, destinationSocket] }],
+    }],
+    tileSize: TILE_SIZE,
+  });
+  assert.equal(foreignOwnerResult.diagnostics.accepted, false);
+  assert.match(
+    foreignOwnerResult.diagnostics.errors.join(' | '),
+    /from endpoint seam identity changed during materialization/i,
+  );
 });
 
 function sharedJunctionThresholdFixture() {

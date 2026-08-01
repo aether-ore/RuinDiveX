@@ -331,7 +331,7 @@ function validateRouteNetworkEndpointModuleOverlapGrants(grant, grantPrefix, err
         + facingZ * tileSize * (leadTiles + depthTiles * 0.5),
     };
     const expectedParentOwnerId = String(
-      socket?.logicalEdgeId ?? socket?.parentRouteId ?? '',
+      socket?.parentRouteId ?? socket?.logicalEdgeId ?? '',
     );
     const exactContract = nonEmptyString(overlap?.id)
       && socket?.routeNetworkSocketKind === 'authored-corridor-station'

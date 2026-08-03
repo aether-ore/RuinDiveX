@@ -317,6 +317,33 @@ export function createDungeonSocketLandingOverlapVolume(socket = {}, {
 }
 
 /**
+ * Resolves the physical host-side threshold used by a landmark perimeter
+ * attachment. The authored room socket remains the grant identity, while the
+ * actual segment endpoint is aligned one complete approach span behind the
+ * supplemental node socket. Keeping this transform in geometry lets planning
+ * and strict validation reconstruct the same threshold without trusting a
+ * serialized endpoint position.
+ */
+export function dungeonLandmarkSharedThresholdParentPosition(
+  endpoint = {},
+  nodeSocket = {},
+  attachmentGapMeters = 5.6,
+) {
+  const facing = toDungeonFacing(endpoint?.facing ?? endpoint);
+  const facingX = Math.abs(facing.x) >= Math.abs(facing.z)
+    ? Math.sign(facing.x) || 1
+    : 0;
+  const facingZ = facingX === 0 ? Math.sign(facing.z) || 1 : 0;
+  return {
+    x: Number(nodeSocket?.position?.x ?? endpoint?.position?.x ?? 0)
+      - facingX * Number(attachmentGapMeters),
+    y: Number(endpoint?.position?.y ?? nodeSocket?.position?.y ?? 0),
+    z: Number(nodeSocket?.position?.z ?? endpoint?.position?.z ?? 0)
+      - facingZ * Number(attachmentGapMeters),
+  };
+}
+
+/**
  * Builds the V4 physical ownership record for one route-network endpoint.
  *
  * A seam is deliberately larger than the legacy landing overlap: three lanes
@@ -345,6 +372,9 @@ export function createDungeonRouteEndpointSeam(socket = {}, {
 } = {}) {
   const resolvedTileSize = Math.max(EPSILON, Number(tileSize) || 2.8);
   const stableMetric = (value) => Number(Number(value).toFixed(6));
+  const stableGridCoordinate = (value) => Math.round(Number((
+    stableMetric(value) / resolvedTileSize
+  ).toFixed(6)));
   const resolvedWidthTiles = Math.max(1, Math.floor(Number(widthTiles) || 3));
   const resolvedInsideDepthTiles = Math.max(
     0,
@@ -383,8 +413,8 @@ export function createDungeonRouteEndpointSeam(socket = {}, {
   // the threshold identity once, then derive the complete lattice through
   // integer cardinal offsets. Metric positions remain the presentation and
   // overlap authority; these grid identities are the traversal authority.
-  const thresholdGridX = Math.round(stableMetric(position.x) / resolvedTileSize);
-  const thresholdGridZ = Math.round(stableMetric(position.z) / resolvedTileSize);
+  const thresholdGridX = stableGridCoordinate(position.x);
+  const thresholdGridZ = stableGridCoordinate(position.z);
   const orderedCells = [];
   for (let signedDepthTiles = minimumDepth;
     signedDepthTiles <= maximumDepth;

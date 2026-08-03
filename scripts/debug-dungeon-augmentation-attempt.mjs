@@ -12,6 +12,7 @@ import {
   DUNGEON_AUGMENTATION_PROFILES,
   DungeonAugmentationRandom,
   GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
+  hashCanonicalValue,
   normalizeRouteNetworkGrant,
   planRouteNetwork,
 } from '../src/dungeon-augmentation/index.js';
@@ -431,18 +432,127 @@ function createPlayableAlphaSmokeSummary(dungeon) {
   };
 }
 
-if (process.argv.includes('--candidate-summary')) {
+const candidateSummaryRequested = process.argv.includes('--candidate-summary');
+const candidateHistogramRequested = process.argv.includes('--candidate-histogram');
+const candidateHistogramRecords = [];
+
+function summarizeCandidateHistogram(records) {
+  const byGrantId = new Map();
+  for (const record of records) {
+    const grantId = String(record.grantId ?? 'unknown');
+    const summary = byGrantId.get(grantId) ?? {
+      grantId,
+      evaluations: 0,
+      plannedCount: 0,
+      failedCount: 0,
+      errors: new Map(),
+      planningTimesMs: [],
+    };
+    summary.evaluations += 1;
+    if (record.error == null) {
+      summary.plannedCount += 1;
+    } else {
+      summary.failedCount += 1;
+      const error = String(record.error);
+      summary.errors.set(error, (summary.errors.get(error) ?? 0) + 1);
+    }
+    const planningElapsedMs = Number(record.planningElapsedMs);
+    if (Number.isFinite(planningElapsedMs)) {
+      summary.planningTimesMs.push(planningElapsedMs);
+    }
+    byGrantId.set(grantId, summary);
+  }
+  return [...byGrantId.values()].map((summary) => {
+    const sortedTimes = [...summary.planningTimesMs].sort((first, second) => first - second);
+    const midpoint = Math.floor(sortedTimes.length * 0.5);
+    const medianPlanningMs = sortedTimes.length === 0
+      ? null
+      : sortedTimes.length % 2 === 0
+        ? (sortedTimes[midpoint - 1] + sortedTimes[midpoint]) * 0.5
+        : sortedTimes[midpoint];
+    return {
+      grantId: summary.grantId,
+      evaluations: summary.evaluations,
+      plannedCount: summary.plannedCount,
+      failedCount: summary.failedCount,
+      errors: Object.fromEntries([...summary.errors].sort(([first], [second]) => (
+        first.localeCompare(second)
+      ))),
+      totalPlanningMs: Number(
+        sortedTimes.reduce((sum, value) => sum + value, 0).toFixed(3),
+      ),
+      medianPlanningMs: medianPlanningMs == null
+        ? null
+        : Number(medianPlanningMs.toFixed(3)),
+      maxPlanningMs: sortedTimes.length === 0
+        ? null
+        : Number(sortedTimes.at(-1).toFixed(3)),
+    };
+  });
+}
+
+if (candidateSummaryRequested) {
   globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ = true;
   const candidateFilter = process.argv.find((argument) => argument.startsWith('--filter='))
     ?.slice('--filter='.length) ?? 'conveyorRoom_bossRoom';
+  globalThis.__DUNGEON_AUGMENTATION_ROUTE_PLANNING_DEBUG_FILTER__ = candidateFilter;
+  globalThis.__DUNGEON_AUGMENTATION_ROUTE_PLANNING_STAGE_FILTER__ = process.argv
+    .find((argument) => argument.startsWith('--stage-filter='))
+    ?.slice('--stage-filter='.length) ?? '';
+  globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG_SKIPS__ = process.argv
+    .find((argument) => argument.startsWith('--debug-skip-candidates='))
+    ?.slice('--debug-skip-candidates='.length)
+    .split(',')
+    .map((token) => {
+      const match = token.match(/^(.*)@(\d+)(?:-(\d+))?$/);
+      if (!match) return null;
+      const firstOrdinal = Number.parseInt(match[2], 10);
+      const lastOrdinal = Number.parseInt(match[3] ?? match[2], 10);
+      return {
+        grantSuffix: match[1],
+        firstOrdinal: Math.min(firstOrdinal, lastOrdinal),
+        lastOrdinal: Math.max(firstOrdinal, lastOrdinal),
+      };
+    })
+    .filter(Boolean) ?? [];
+  globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG_PREFERRED_GRANT__ = process.argv
+    .find((argument) => argument.startsWith('--debug-prefer-grant='))
+    ?.slice('--debug-prefer-grant='.length) ?? '';
+  const stopAfterCandidateArgument = process.argv.find((argument) => (
+    argument.startsWith('--stop-after-candidate=')
+  ));
+  const stopAfterCandidateOrdinal = Number.parseInt(
+    stopAfterCandidateArgument?.slice('--stop-after-candidate='.length) ?? '',
+    10,
+  );
   const includeStageDiagnostics = process.argv.includes('--stages');
+  const stagesOnly = process.argv.includes('--stages-only');
+  const briefCandidateSummary = process.argv.includes('--brief-candidate-summary');
+  const stopAfterStage = process.argv.find((argument) => (
+    argument.startsWith('--stop-after-stage=')
+  ))?.slice('--stop-after-stage='.length) ?? null;
+  const stopAfterStageCount = Math.max(1, Number.parseInt(
+    process.argv.find((argument) => argument.startsWith('--stop-after-stage-count='))
+      ?.slice('--stop-after-stage-count='.length) ?? '1',
+    10,
+  ) || 1);
+  let matchingStageCount = 0;
   console.error = (value) => {
     try {
       const record = JSON.parse(String(value));
       if (record.stage) {
-        if (includeStageDiagnostics) console.log(JSON.stringify(record));
+        if (includeStageDiagnostics
+          && String(record.grantId ?? '').includes(candidateFilter)) {
+          console.log(JSON.stringify(record));
+        }
+        if (stopAfterStage === String(record.stage)
+          && String(record.grantId ?? '').includes(candidateFilter)) {
+          matchingStageCount += 1;
+          if (matchingStageCount >= stopAfterStageCount) process.exit(0);
+        }
         return;
       }
+      if (stagesOnly) return;
       if (!String(record.grantId ?? '').includes(candidateFilter)) return;
       console.log(JSON.stringify({
         grantId: record.grantId,
@@ -450,6 +560,8 @@ if (process.argv.includes('--candidate-summary')) {
         searchVariant: record.searchVariant,
         moduleCount: record.moduleCount,
         elevationMode: record.elevationMode,
+        topologyTemplateId: record.topologyTemplateId,
+        junctionKind: record.junctionKind,
         remainingModulesBefore: record.remainingModulesBefore,
         futureRequiredMinimum: record.futureRequiredMinimum,
         minimumModules: record.minimumModules,
@@ -459,58 +571,444 @@ if (process.argv.includes('--candidate-summary')) {
         planningPhaseTimings: record.planningPhaseTimings ?? null,
         plannedNodeCount: record.plannedNodeCount,
         substantiveModuleCount: record.substantiveModuleCount,
+        placementSearchVisits: record.placementSearchVisits
+          ?? record.context?.placementSearchVisits
+          ?? null,
+        physicalSpineAttempts: record.physicalSpineAttempts
+          ?? record.context?.physicalSpineAttempts
+          ?? null,
         constraintKind: record.constraintKind ?? record.context?.constraintKind ?? null,
         failedEdge: record.failedEdge ?? null,
-        selectedGrammarIds: record.selectedGrammarIds ?? null,
-        initialCenters: record.initialCenters ?? null,
+        selectedGrammarIds: record.selectedGrammarIds
+          ?? record.context?.selectedGrammarIds
+          ?? null,
+        initialCenters: briefCandidateSummary ? undefined : record.initialCenters
+          ?? record.context?.initialPlacementCandidateCenters
+          ?? null,
         spineEdges: record.spineEdges ?? null,
         pairEdges: record.pairEdges ?? null,
-        closestRejectedPairs: record.closestRejectedPairs ?? null,
-        lastPhysicalPlacementCenters: record.lastPhysicalPlacementCenters ?? null,
-        remainingPlacementCandidateCenters: record.remainingPlacementCandidateCenters ?? null,
+        closestRejectedPairs: briefCandidateSummary
+          ? undefined
+          : record.closestRejectedPairs ?? null,
+        lastPhysicalPlacementCenters: record.lastPhysicalPlacementCenters
+          ?? record.context?.lastPhysicalPlacementCenters
+          ?? null,
+        remainingPlacementCandidateCenters: briefCandidateSummary
+          ? undefined
+          : record.remainingPlacementCandidateCenters
+          ?? record.context?.remainingPlacementCandidateCenters
+          ?? null,
         contextKeys: Object.keys(record.context ?? {}),
         endpointOrdinal: record.context?.endpointOrdinal ?? null,
         nodeIndex: record.context?.nodeIndex ?? null,
+        nodePlacementFailure: record.error === 'route-network-node-placement-collision'
+          ? record.context
+          : null,
+        challengeBranchRoomIndex: record.context?.challengeBranchRoomIndex ?? null,
+        mainPayoffRoomIndex: record.context?.mainPayoffRoomIndex ?? null,
+        endpointNodeIndices: record.context?.endpointNodeIndices ?? null,
+        stationSeparationMeters: record.context?.stationSeparationMeters ?? null,
+        stationRouteLengthMeters: record.context?.stationRouteLengthMeters ?? null,
+        connectorEndpointGapMeters: record.context?.connectorEndpointGapMeters ?? null,
+        legalGrammarIds: record.context?.legalGrammarIds ?? null,
+        selectedGrammarId: record.context?.selectedGrammarId ?? null,
         firstNodeIndex: record.context?.firstNodeIndex ?? null,
         secondNodeIndex: record.context?.secondNodeIndex ?? null,
+        landmarkEndpointPlacements:
+          record.context?.landmarkEndpointPlacements ?? null,
+        firstCandidateCount: record.context?.firstCandidateCount ?? null,
+        firstCandidateCenters: briefCandidateSummary
+          ? undefined
+          : record.context?.firstCandidateCenters ?? null,
+        nearestRawFirstCandidates: briefCandidateSummary
+          ? undefined
+          : record.context?.nearestRawFirstCandidates ?? null,
+        pairPlacementDiagnostics: briefCandidateSummary
+          ? undefined
+          : record.context?.pairPlacementDiagnostics ?? null,
+        entryEligiblePairPlacementDiagnostics: briefCandidateSummary
+          ? undefined
+          : record.context?.entryEligiblePairPlacementDiagnostics ?? null,
+        attemptedWingCandidates: briefCandidateSummary
+          ? undefined
+          : record.context?.attemptedWingCandidates ?? null,
+        attemptedWingCandidateSummary:
+          record.context?.attemptedWingCandidateSummary ?? null,
         placementCandidateCounts: (record.context?.placementCandidateCounts ?? [])
           .map(({ nodeIndex, count }) => ({ nodeIndex, count })),
+        initialPlacementCandidateCounts:
+          record.context?.initialPlacementCandidateCounts ?? null,
+        arcConsistencyHistory: record.context?.arcConsistencyHistory ?? null,
+        failedPairRejectionSummary:
+          record.context?.failedPairRejectionSummary ?? null,
+        physicalPairEdgeDiagnostics:
+          record.context?.physicalPairEdgeDiagnostics ?? null,
+        closestRejectedPairs: (record.context?.closestRejectedPairs ?? []).map((pair) => ({
+          firstCenter: pair.firstCenter,
+          secondCenter: pair.secondCenter,
+          firstAvailableSockets: pair.firstAvailableSockets,
+          secondAvailableSockets: pair.secondAvailableSockets,
+          nodeCollisionScore: pair.nodeCollisionScore,
+          minimumSpineDistanceMeters: pair.minimumSpineDistanceMeters,
+          parentAttachmentClear: pair.parentAttachmentClear,
+          physicalRouteClear: pair.physicalRouteClear,
+        })),
+        requiredSocketBindings: record.context?.requiredSocketBindings ?? null,
+        objectiveExternalDiagnostics:
+          record.context?.objectiveExternalDiagnostics ?? null,
+        externalSpinePathCount:
+          record.context?.externalSpinePathCount ?? null,
+        externalSpinePathBindings:
+          record.context?.externalSpinePathBindings ?? null,
+        correlatedPlacementReservationDiagnostics:
+          record.context?.correlatedPlacementReservationDiagnostics ?? null,
         placementCandidateDiagnostics: record.placementCandidateDiagnostics ?? null,
         placementFailureDiagnostics: record.placementFailureDiagnostics ?? null,
-        parentAttachmentFailureDiagnostics:
+        parentAttachmentFailureDiagnostics: briefCandidateSummary ? undefined
+          :
           record.context?.parentAttachmentFailureDiagnostics ?? null,
+        inactiveSocketCapFailureDiagnostics: briefCandidateSummary ? undefined
+          : record.context?.inactiveSocketCapFailureDiagnostics ?? null,
+        segmentFailureDiagnostics: briefCandidateSummary ? undefined
+          : record.context?.segmentFailureDiagnostics ?? null,
         lastPhysicalEdge: record.context?.physicalSpineEdgeDiagnostics?.at(-1) ?? null,
+        physicalSpineEdges: briefCandidateSummary
+          ? undefined
+          : record.context?.physicalSpineEdgeDiagnostics ?? null,
       }));
       if (process.argv.includes('--stop-on-success') && record.error == null) {
+        process.exit(0);
+      }
+      if (Number.isSafeInteger(stopAfterCandidateOrdinal)
+        && Number(record.candidateOrdinal) === stopAfterCandidateOrdinal) {
         process.exit(0);
       }
     } catch {
       // Ignore unrelated diagnostic output in this temporary repro helper.
     }
   };
+} else if (candidateHistogramRequested) {
+  globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ = true;
+  const originalConsoleError = console.error.bind(console);
+  console.error = (value, ...remainingValues) => {
+    try {
+      const record = JSON.parse(String(value));
+      if (!record.stage && record.grantId && Number.isSafeInteger(record.candidateOrdinal)) {
+        candidateHistogramRecords.push(record);
+      }
+    } catch {
+      originalConsoleError(value, ...remainingValues);
+    }
+  };
 }
 
 const seed = process.argv.find((argument) => argument.startsWith('--seed='))
   ?.slice('--seed='.length) ?? 'layout:augmentation-realized-v4-000';
+const requestedConnectionFilter = process.argv
+  .find((argument) => argument.startsWith('--connection='))
+  ?.slice('--connection='.length) ?? null;
+const requestedConnectionFilters = requestedConnectionFilter
+  ? requestedConnectionFilter.split(',').map((value) => value.trim()).filter(Boolean)
+  : [];
 const seeded = new SeededRandom(hashSeed(seed));
 const attemptLimitArgument = process.argv.find((argument) => argument.startsWith('--attempt-limit='));
 const requestedAttemptLimit = Number.parseInt(attemptLimitArgument?.slice('--attempt-limit='.length) ?? '', 10);
+const routeConflictExclusionsBase64Argument = process.argv.find((argument) => (
+  argument.startsWith('--route-conflict-exclusions-base64=')
+));
+const injectedRouteNetworkConflictExclusions = routeConflictExclusionsBase64Argument
+  ? JSON.parse(Buffer.from(
+      routeConflictExclusionsBase64Argument.slice(
+        '--route-conflict-exclusions-base64='.length,
+      ),
+      'base64',
+    ).toString('utf8'))
+  : null;
 const generator = new DungeonGenerator({
   random: () => seeded.next(),
   difficulty: 1,
   augmentationProfileId: 'industrial-supplement-preview-v4',
   augmentationSeed: seed,
   basePlanHash: `v1:${seed}:depth:1:revolvingFusillade`,
-  allowInvalidAugmentationPreview: process.argv.includes('--playable-alpha'),
+  allowInvalidAugmentationPreview: process.argv.includes('--playable-alpha')
+    || process.argv.includes('--failed-rooms-only'),
   augmentationRealizationAttemptLimit: Number.isFinite(requestedAttemptLimit)
     ? requestedAttemptLimit
     : undefined,
 });
+if (Array.isArray(injectedRouteNetworkConflictExclusions)) {
+  generator.augmentationRouteNetworkConflictExclusions =
+    injectedRouteNetworkConflictExclusions;
+}
+if (process.argv.includes('--stop-on-first-rejected-room-connectivity')) {
+  const validatePlatformability = generator._validatePlatformability.bind(generator);
+  generator._validatePlatformability = (input = {}) => {
+    const validation = validatePlatformability(input);
+    const failedRoomChecks = (
+      validation?.details?.supplementRoomConnectivityChecks ?? []
+    ).filter(({ accepted }) => accepted !== true);
+    if (failedRoomChecks.length > 0) {
+      const roomById = new Map((input.rooms ?? []).map((room) => [String(room.id), room]));
+      const floorByKey = new Map((input.floorTiles ?? []).map((floor) => [
+        generator._getFloorTileGraphKey(floor),
+        floor,
+      ]));
+      const diagnosticBarrierZones = [
+        ...(input.segmentBarrierZones ?? input.solidZones ?? []),
+      ].filter((zone, index, zones) => (
+        zone?.position
+          && zones.findIndex((candidate) => candidate?.id === zone?.id) === index
+      ));
+      console.log(JSON.stringify({
+        accepted: validation.accepted === true,
+        errors: validation.errors ?? [],
+        failedRoomChecks: failedRoomChecks.map((check) => {
+          const room = roomById.get(String(check.roomId)) ?? null;
+          const disconnectedFloorKeys = new Set([
+            ...(check.locallyUnreachableRoomFloorKeys ?? []),
+            ...(check.locallyNonReturnableRoomFloorKeys ?? []),
+          ].map(String));
+          const disconnectedFloors = [...disconnectedFloorKeys]
+            .map((floorKey) => floorByKey.get(floorKey) ?? null)
+            .filter(Boolean);
+          const frontierEdges = disconnectedFloors.flatMap((floor) => (
+            (input.floorTiles ?? [])
+              .filter((candidate) => (
+                String(candidate.roomId ?? '') === String(floor.roomId ?? '')
+                  && Math.abs(Number(candidate.x) - Number(floor.x))
+                    + Math.abs(Number(candidate.z) - Number(floor.z)) === 1
+                  && !disconnectedFloorKeys.has(generator._getFloorTileGraphKey(candidate))
+              ))
+              .map((candidate) => ({
+                fromFloorKey: generator._getFloorTileGraphKey(floor),
+                toFloorKey: generator._getFloorTileGraphKey(candidate),
+                forwardAction: generator._getTraversalActionBetweenFloorTiles(
+                  floor,
+                  candidate,
+                ),
+                reverseAction: generator._getTraversalActionBetweenFloorTiles(
+                  candidate,
+                  floor,
+                ),
+                forwardBlockingZoneIds: diagnosticBarrierZones
+                  .filter((zone) => generator._doesFloorTraversalSegmentIntersectZone(
+                    floor,
+                    candidate,
+                    zone,
+                    0.42,
+                  ))
+                  .map(({ id }) => id),
+                reverseBlockingZoneIds: diagnosticBarrierZones
+                  .filter((zone) => generator._doesFloorTraversalSegmentIntersectZone(
+                    candidate,
+                    floor,
+                    zone,
+                    0.42,
+                  ))
+                  .map(({ id }) => id),
+              }))
+          ));
+          return {
+            ...check,
+            outsideDeclaredRoomFloors: (check.outsideDeclaredRoomFloorKeys ?? [])
+              .map((floorKey) => floorByKey.get(String(floorKey)) ?? null)
+              .filter(Boolean),
+            disconnectedFloors,
+            frontierEdges,
+            augmentationTransfers: room?.augmentationTransfers ?? [],
+            blueprintId: room?.augmentationBlueprintId ?? null,
+            moduleTemplateId: room?.augmentationModuleTemplateId ?? null,
+            placement: room ? {
+              x: room.x,
+              y: room.baseElevation ?? 0,
+              z: room.z,
+              rotationQuarterTurns: room.augmentationRotationQuarterTurns ?? 0,
+            } : null,
+          };
+        }),
+      }, null, 2));
+      process.exit(0);
+    }
+    return validation;
+  };
+}
+if (process.argv.includes('--stop-on-first-rejected-drop-space')
+  || process.argv.includes('--stop-on-first-drop-space-check')) {
+  const validatePlatformability = generator._validatePlatformability.bind(generator);
+  generator._validatePlatformability = (input = {}) => {
+    const validation = validatePlatformability(input);
+    const dropSpaceChecks = validation?.details?.dropSpaceChecks ?? [];
+    const failedDropSpaceChecks = dropSpaceChecks.filter(({
+      lowerReachable,
+      canExit,
+      everyLowerTileCanExit,
+    }) => (
+      lowerReachable !== true
+        || canExit !== true
+        || everyLowerTileCanExit !== true
+    ));
+    const barrierAwareDropSpaceChecks = dropSpaceChecks.filter((check) => (
+      Object.hasOwn(check, 'egressBlockingEdges')
+        || Object.hasOwn(check, 'egressBlockingZones')
+        || Object.hasOwn(check, 'egressBlockingZoneIds')
+    ));
+    const reportedDropSpaceChecks = failedDropSpaceChecks.length > 0
+      ? failedDropSpaceChecks
+      : process.argv.includes('--stop-on-first-drop-space-check')
+        ? barrierAwareDropSpaceChecks
+        : [];
+    if (reportedDropSpaceChecks.length > 0) {
+      const barrierZoneById = new Map((input.segmentBarrierZones ?? []).map((zone) => [
+        String(zone?.id ?? zone?.manifestCollisionRecordId ?? ''),
+        zone,
+      ]));
+      console.log(JSON.stringify({
+        accepted: validation.accepted === true,
+        errors: validation.errors ?? [],
+        failedDropSpaceChecks,
+        reportedDropSpaceChecks,
+        blockingBarrierZones: [...new Set(reportedDropSpaceChecks.flatMap((check) => (
+          check.egressBlockingZoneIds ?? []
+        )).map(String))].map((id) => {
+          const zone = barrierZoneById.get(id) ?? null;
+          return zone ? {
+            id,
+            position: zone.position ?? null,
+            halfWidth: zone.halfWidth ?? null,
+            halfDepth: zone.halfDepth ?? null,
+            verticalHalfHeight: zone.verticalHalfHeight ?? null,
+            wallHorizontal: zone.wallHorizontal ?? null,
+            wallStart: zone.wallStart ?? null,
+            wallEnd: zone.wallEnd ?? null,
+            wallOwnerIds: zone.wallOwnerIds ?? null,
+            wallOwnerIdsByAxis: zone.wallOwnerIdsByAxis ?? null,
+          } : { id, missing: true };
+        }),
+      }, null, 2));
+      process.exit(0);
+    }
+    return validation;
+  };
+}
+const planningInputSummaryRequested = process.argv.includes('--planning-input-summary');
+if (planningInputSummaryRequested) {
+  const originalPlanIndustrialDungeonAugmentation =
+    generator._planIndustrialDungeonAugmentation.bind(generator);
+  let planningInvocation = 0;
+  generator._planIndustrialDungeonAugmentation = (planningInput) => {
+    const activeProfileId = generator.committedAugmentationIdentity?.profileId
+      ?? generator.augmentationProfileId;
+    if (!activeProfileId && !generator.committedAugmentationIdentity) {
+      return originalPlanIndustrialDungeonAugmentation(planningInput);
+    }
+    planningInvocation += 1;
+    const planningSnapshot = planningInput.planningSnapshotOverride
+      ?? generator._createIndustrialDungeonAugmentationPlanningSnapshot(planningInput);
+    const planningBaseDraft = createIndustrialBaseDraft({
+      rooms: planningSnapshot.rooms,
+      connectionPlans: planningSnapshot.connectionPlans,
+      basePlanHash: generator.basePlanHash,
+      tileSize: generator.tileSize,
+      difficulty: generator.difficulty,
+    });
+    const planningHost = createIndustrialAugmentationHost({
+      basePlanHash: planningBaseDraft.basePlanHash,
+      baseDraft: planningBaseDraft,
+      rooms: planningSnapshot.rooms,
+      connectionPlans: planningSnapshot.connectionPlans,
+      tileSize: generator.tileSize,
+    });
+    const regions = planningHost.extensionRegions ?? [];
+    const grants = regions.flatMap((region) => region.routeNetworkGrants ?? []);
+    const serializablePlanningSnapshot = JSON.parse(JSON.stringify(planningSnapshot));
+    console.log(JSON.stringify({
+      kind: 'planning-input-summary',
+      invocation: planningInvocation,
+      profileId: activeProfileId,
+      augmentationSeed: generator.augmentationSeed ?? null,
+      augmentationPlanSeedOverride: generator.committedAugmentationIdentity?.seed
+        ?? generator.augmentationPlanSeedOverride
+        ?? null,
+      basePlanHash: planningBaseDraft.basePlanHash,
+      planningSnapshotHash: hashCanonicalValue(serializablePlanningSnapshot, {
+        namespace: 'debug-industrial-planning-snapshot/v1',
+      }),
+      baseDraftHash: hashCanonicalValue(planningBaseDraft, {
+        namespace: 'debug-industrial-base-draft/v1',
+      }),
+      hostRegionHash: hashCanonicalValue(regions, {
+        namespace: 'debug-industrial-host-regions/v1',
+      }),
+      grantHash: hashCanonicalValue(grants, {
+        namespace: 'debug-industrial-route-grants/v1',
+      }),
+      reservationHash: hashCanonicalValue(regions.map((region) => ({
+        id: region.id,
+        protectedVolumes: region.routeNetworkPlacementProtectedVolumes
+          ?? region.protectedVolumes
+          ?? [],
+      })), {
+        namespace: 'debug-industrial-route-reservations/v1',
+      }),
+      roomCount: planningSnapshot.rooms.length,
+      connectionPlanCount: planningSnapshot.connectionPlans.length,
+      roomHashes: Object.fromEntries(serializablePlanningSnapshot.rooms.map((room) => [
+        room.id,
+        hashCanonicalValue(room, { namespace: 'debug-industrial-planning-room/v1' }),
+      ])),
+      connectionPlanHashes: Object.fromEntries(
+        serializablePlanningSnapshot.connectionPlans.map((plan) => [
+          plan.id,
+          hashCanonicalValue(plan, {
+            namespace: 'debug-industrial-planning-connection/v1',
+          }),
+        ]),
+      ),
+      ...(process.argv.includes('--planning-input-details') ? {
+        rooms: planningSnapshot.rooms.map((room) => ({
+          id: room.id,
+          x: room.x,
+          z: room.z,
+          width: room.width,
+          depth: room.depth,
+          baseElevation: room.baseElevation,
+          plannedBaseElevation: room.plannedBaseElevation,
+          exitSockets: room.exitSockets,
+        })),
+        connectionPlans: planningSnapshot.connectionPlans.map((plan) => ({
+          id: plan.id,
+          logicalConnectionId: plan.logicalConnectionId,
+          fromRoomId: plan.fromRoomId,
+          toRoomId: plan.toRoomId,
+          sourceElevation: plan.sourceElevation,
+          destinationElevation: plan.destinationElevation,
+          fromSocket: plan.fromSocket,
+          toSocket: plan.toSocket,
+          fullPath: plan.fullPath,
+          bridgePath: plan.bridgePath,
+          connectorFootprintTiles: plan.connectorFootprintTiles,
+        })),
+      } : {}),
+      grants: grants.map((grant) => ({
+        id: grant.id,
+        required: grant.required,
+        endpointIds: (grant.endpointSockets ?? []).map(({ id }) => id),
+        endpointDistancesMeters: (grant.endpointSockets ?? [])
+          .map(({ distanceMeters }) => Number(distanceMeters)),
+      })),
+    }));
+    if (process.argv.includes('--stop-before-planning')) process.exit(0);
+    return originalPlanIndustrialDungeonAugmentation(planningInput);
+  };
+}
 const texture = new THREE.Texture();
 generator.textureCache.set('debug-augmentation-attempt', texture);
 generator._loadRuinTexture = () => texture;
 let capturedPreSurfacePlans = [];
+let capturedPostSurfaceFloorTiles = [];
 let capturedBoundaryWallRuns = [];
+let capturedWallRunBindingSummary = [];
+let capturedEncounterPlacementSummary = [];
 if (process.argv.includes('--wall-run-count')) {
   const collectBoundaryWallRuns = generator._collectBoundaryWallRuns.bind(generator);
   generator._collectBoundaryWallRuns = (...args) => {
@@ -518,17 +1016,497 @@ if (process.argv.includes('--wall-run-count')) {
     return capturedBoundaryWallRuns;
   };
 }
+if (process.argv.includes('--stop-on-drop-space-wall-runs')) {
+  let capturedDropSpaceWallPlanningResult = null;
+  const planIndustrialDungeonAugmentation =
+    generator._planIndustrialDungeonAugmentation.bind(generator);
+  generator._planIndustrialDungeonAugmentation = (...args) => {
+    const result = planIndustrialDungeonAugmentation(...args);
+    if (result?.result?.overlayPlan) capturedDropSpaceWallPlanningResult = result;
+    return result;
+  };
+  const collectBoundaryWallRuns = generator._collectBoundaryWallRuns.bind(generator);
+  const minimumConflictCount = Number.parseInt(
+    process.argv.find((argument) => (
+      argument.startsWith('--drop-space-wall-runs-min-conflicts=')
+    ))?.slice('--drop-space-wall-runs-min-conflicts='.length) ?? '0',
+    10,
+  ) || 0;
+  generator._collectBoundaryWallRuns = (...args) => {
+    const runs = collectBoundaryWallRuns(...args);
+    const rooms = args[2] ?? [];
+    const authoritativeFloors = args[4];
+    const dropSpace = rooms.find(({ dropSpace }) => dropSpace)?.dropSpace ?? null;
+    if (dropSpace
+      && Array.isArray(authoritativeFloors)
+      && (generator.augmentationRouteNetworkConflictExclusions?.length ?? 0)
+        >= minimumConflictCount) {
+      const floorByKey = new Map(authoritativeFloors.map((floor) => [
+        generator._getFloorTileGraphKey(floor),
+        floor,
+      ]));
+      const floorsByKey = new Map();
+      for (const floor of authoritativeFloors) {
+        const floorKey = generator._getFloorTileGraphKey(floor);
+        const matchingFloors = floorsByKey.get(floorKey) ?? [];
+        matchingFloors.push(floor);
+        floorsByKey.set(floorKey, matchingFloors);
+      }
+      const shelves = (dropSpace.returnShelfFloorKeys ?? [])
+        .map((floorKey) => floorByKey.get(String(floorKey)))
+        .filter(Boolean);
+      const exits = (dropSpace.exitFloorKeys ?? [])
+        .map((floorKey) => floorByKey.get(String(floorKey)))
+        .filter(Boolean);
+      const edges = shelves.flatMap((shelf) => exits.flatMap((exit) => {
+        const dx = Number(exit.x) - Number(shelf.x);
+        const dz = Number(exit.z) - Number(shelf.z);
+        if (Math.abs(dx) + Math.abs(dz) !== 1) return [];
+        const horizontal = dz !== 0;
+        const line = horizontal
+          ? Number(shelf.z) + Math.sign(dz) * 0.5
+          : Number(shelf.x) + Math.sign(dx) * 0.5;
+        const axis = horizontal ? Number(shelf.x) : Number(shelf.z);
+        const outwardAction = generator._getTraversalActionBetweenFloorTiles(shelf, exit);
+        const returnAction = generator._getTraversalActionBetweenFloorTiles(exit, shelf);
+        const edgeKey = `${horizontal ? 'h' : 'v'}:${line.toFixed(3)}:${axis}`;
+        return [{
+          edgeKey,
+          shelf,
+          exit,
+          outwardAction,
+          returnAction,
+          authoredTraversalWallOpeningAccepted:
+            outwardAction === 'jump' && returnAction === 'drop',
+          wallRuns: runs.filter((run) => (
+            run.horizontal === horizontal
+              && Math.abs(Number(run.line) - line) <= 0.001
+              && Number(run.start) <= axis
+              && Number(run.end) >= axis
+          )),
+        }];
+      }));
+      const summarizeFloor = (floor) => floor ? {
+        floorKey: generator._getFloorTileGraphKey(floor),
+        x: floor.x,
+        z: floor.z,
+        elevation: floor.elevation,
+        roomId: floor.roomId ?? null,
+        surface: floor.surface ?? null,
+        ledgeEdges: floor.ledgeEdges ?? [],
+        traversalLinks: floor.traversalLinks ?? [],
+        augmentationOwnerId: floor.augmentationOwnerId ?? null,
+        physicalFloorOwnerIds: floor.physicalFloorOwnerIds ?? [],
+      } : null;
+      const summarizeDeclaredFloorKeys = (floorKeys) => (floorKeys ?? []).map((floorKey) => {
+        const matchingFloors = floorsByKey.get(String(floorKey)) ?? [];
+        return {
+          floorKey: String(floorKey),
+          resolved: matchingFloors.length > 0,
+          duplicateCount: matchingFloors.length,
+          selectedByCollectorLastWrite: summarizeFloor(floorByKey.get(String(floorKey))),
+          matchingFloors: matchingFloors.map(summarizeFloor),
+        };
+      });
+      const overlayPlan = capturedDropSpaceWallPlanningResult?.result?.overlayPlan ?? null;
+      const targetSegment = (overlayPlan?.segments ?? []).find(({ id }) => (
+        String(id).includes('coverage-traproom_conveyorroom')
+          && String(id).includes(':segment:4:')
+      )) ?? null;
+      const ownerIdsForFloor = (floor) => [...new Set([
+        ...(floor?.physicalFloorOwnerIds ?? []),
+        floor?.augmentationOwnerId,
+        floor?.augmentationSegmentId,
+        floor?.signedConnectorFloorOwnerId,
+        floor?.connectionId,
+        floor?.connectorId,
+        floor?.roomId,
+      ].filter(Boolean).map(String))];
+      const targetSegmentId = String(targetSegment?.id ?? '');
+      const targetSegmentShellFloors = targetSegmentId
+        ? authoritativeFloors.filter((floor) => (
+            Math.abs(Number(floor.elevation ?? 0) - 14) <= 0.001
+              && ownerIdsForFloor(floor).includes(targetSegmentId)
+          )).map((floor) => ({
+            ...summarizeFloor(floor),
+            ownerIds: ownerIdsForFloor(floor),
+            walkabilityIntent: floor.walkabilityIntent ?? null,
+            v4SupplementalOpenRetainingWallEdges:
+              floor.v4SupplementalOpenRetainingWallEdges ?? [],
+            openRetainingWallEdges: floor.openRetainingWallEdges ?? [],
+          }))
+        : [];
+      const exactFacadeId = 'aerialBoundary_h:0:1:63.5:14:16:14.00:28.00';
+      console.log(JSON.stringify({
+        augmentationPlanHash: overlayPlan?.augmentationPlanHash ?? null,
+        acceptedParentPlanningSnapshotOverride:
+          generator._augmentationReplayPlanningSnapshotOverride != null,
+        targetSegment: targetSegment ? {
+          id: targetSegment.id,
+          path: targetSegment.path,
+          occupiedVolumes: targetSegment.occupiedVolumes,
+        } : null,
+        dropSpaceId: dropSpace.id,
+        dropSpace,
+        routeNetworkConflictExclusions:
+          generator.augmentationRouteNetworkConflictExclusions ?? [],
+        returnShelfFloorKeys: dropSpace.returnShelfFloorKeys,
+        exitFloorKeys: dropSpace.exitFloorKeys,
+        resolvedReturnShelfFloors:
+          summarizeDeclaredFloorKeys(dropSpace.returnShelfFloorKeys),
+        resolvedExitFloors: summarizeDeclaredFloorKeys(dropSpace.exitFloorKeys),
+        authoritativeFloorCount: authoritativeFloors.length,
+        authoredTraversalWallOpeningKeys: [...new Set(edges
+          .filter(({ authoredTraversalWallOpeningAccepted }) => (
+            authoredTraversalWallOpeningAccepted
+          ))
+          .map(({ edgeKey }) => edgeKey))].sort(),
+        exactFacadeId,
+        exactFacade: runs.find(({ facadeId }) => facadeId === exactFacadeId) ?? null,
+        exactFacadeLineRuns: runs.filter((run) => (
+          run.horizontal === true
+            && Math.abs(Number(run.line) - 63.5) <= 0.001
+            && Number(run.start) <= 16
+            && Number(run.end) >= 15
+        )),
+        targetSegmentShellFloors,
+        targetSegmentWallRuns: targetSegmentId
+          ? runs.filter((run) => (run.ownerIds ?? []).map(String).includes(targetSegmentId))
+          : [],
+        edges,
+      }, null, 2));
+      process.exit(0);
+    }
+    return runs;
+  };
+}
+if (process.argv.includes('--wall-run-binding-summary')) {
+  const bindStructuralFrameRealizations =
+    generator._bindDungeonSupplementStructuralFrameRealizations.bind(generator);
+  generator._bindDungeonSupplementStructuralFrameRealizations = (
+    connectionPlans,
+    wallRuns,
+    ...remainingArguments
+  ) => {
+    capturedWallRunBindingSummary = connectionPlans
+      .filter((plan) => requestedConnectionFilters.length === 0
+        || requestedConnectionFilters.some((filter) => String(plan.id).includes(filter)))
+      .flatMap((plan) => (plan.structuralFrameRealizations ?? []).map((realization) => {
+        const point = realization.boundarySocketGridPoint
+          ?? realization.gridPoint
+          ?? { x: 0, z: 0 };
+        const direction = realization.direction ?? { x: 0, z: 1 };
+        const pathRunsHorizontally = Math.abs(Number(direction.x ?? 0)) === 1;
+        const axis = pathRunsHorizontally ? Number(point.x) : Number(point.z);
+        const lateral = pathRunsHorizontally ? Number(point.z) : Number(point.x);
+        const nearbyRuns = wallRuns
+          .filter((run) => {
+            const thresholdCandidate = Boolean(run.horizontal) === !pathRunsHorizontally
+              && Math.abs(Number(run.line) - axis) <= 2.01
+              && Number(run.end) >= lateral - 2.01
+              && Number(run.start) <= lateral + 2.01;
+            const galleryCandidate = Boolean(run.horizontal) === pathRunsHorizontally
+              && Math.abs(Number(run.line) - lateral) <= 2.01
+              && axis >= Number(run.start) - 0.51
+              && axis <= Number(run.end) + 0.51;
+            return thresholdCandidate || galleryCandidate;
+          })
+          .map((run) => ({
+            facadeId: run.facadeId,
+            ownerId: run.ownerId ?? null,
+            ownerIds: run.ownerIds ?? [],
+            ownerAtAxis: run.ownerByAxis?.[Math.round(
+              Boolean(run.horizontal) === pathRunsHorizontally ? axis : lateral,
+            )] ?? null,
+            ownerByAxis: run.ownerByAxis ?? null,
+            ownerIdsByAxis: run.ownerIdsByAxis ?? null,
+            horizontal: run.horizontal,
+            line: run.line,
+            dx: run.dx,
+            dz: run.dz,
+            thresholdSignedDelta: Number(run.line) - axis,
+            galleryLateralDelta: Number(run.line) - lateral,
+            start: run.start,
+            end: run.end,
+            wallBottomY: run.wallBottomY,
+            wallTopY: run.wallTopY,
+          }));
+        const frontierEdges = frontierEdgesFor(check.locallyUnreachableRoomFloorKeys);
+        const returnFrontierEdges = frontierEdgesFor(
+          check.locallyNonReturnableRoomFloorKeys,
+          { reverse: true },
+        );
+        return {
+          planId: plan.id,
+          augmentationOperationId: plan.augmentationOperationId ?? null,
+          routeNetworkGrantId: plan.routeNetworkGrantId ?? null,
+          fromRoomId: plan.fromRoomId ?? null,
+          toRoomId: plan.toRoomId ?? null,
+          fromAttachmentSocketId: plan.fromSocket?.attachmentSocketId ?? null,
+          toAttachmentSocketId: plan.toSocket?.attachmentSocketId ?? null,
+          boundarySocket: Object.fromEntries(Object.entries(
+            realization.boundaryEndpoint === 'to' ? plan.toSocket : plan.fromSocket,
+          ).filter(([key]) => [
+            'id',
+            'x',
+            'z',
+            'elevation',
+            'facingX',
+            'facingZ',
+            'roomId',
+            'parentRouteId',
+            'authoritativeSeamParentOwnerId',
+            'authoritativeSeamNodeId',
+            'progressionRoomId',
+            'connectorJunctionProxyId',
+          ].includes(key))),
+          realizationId: realization.id,
+          attachmentSocketId: realization.attachmentSocketId,
+          boundaryEndpoint: realization.boundaryEndpoint,
+          gridPoint: point,
+          direction,
+          floorElevation: realization.floorElevation,
+          clearHeightMeters: realization.clearHeightMeters,
+          frameHeightMeters: realization.frameHeightMeters,
+          finalWidthMeters: realization.finalWidthMeters,
+          nearbyRuns,
+        };
+      }));
+    return bindStructuralFrameRealizations(
+      connectionPlans,
+      wallRuns,
+      ...remainingArguments,
+    );
+  };
+}
+if (process.argv.includes('--encounter-placement-summary')) {
+  const createEncounterDefinitions =
+    generator._createDungeonSupplementEncounterDefinitions.bind(generator);
+  generator._createDungeonSupplementEncounterDefinitions = (
+    rooms,
+    floorTiles,
+    solidZones,
+  ) => {
+    const blockingPlatformTops = generator._createBlockingPlatformColumnMap(floorTiles);
+    capturedEncounterPlacementSummary = rooms
+      .filter((room) => (room.augmentationAnchors ?? []).some(({ kind }) => (
+        kind === 'spatial-role'
+      )))
+      .map((room) => ({
+        roomId: room.id,
+        blueprintId: room.augmentationBlueprintId ?? null,
+        grammarId: room.augmentationGrammarId ?? room.archetypeId ?? null,
+        anchors: (room.augmentationAnchors ?? [])
+          .filter(({ kind }) => kind === 'spatial-role')
+          .map((anchor) => {
+            const supportFloorCellId = anchor.authoritativePlacement?.supportFloorCellId ?? null;
+            const floor = floorTiles.find((candidate) => (
+              String(candidate.augmentationFloorCellId
+                ?? candidate.augmentationTransferCellId
+                ?? '') === String(supportFloorCellId ?? '')
+            )) ?? null;
+            return {
+              id: anchor.id,
+              localAnchorId: anchor.localAnchorId ?? null,
+              sourceFeatureId: anchor.sourceFeatureId ?? null,
+              supportFloorCellId,
+              localTile: anchor.localTile ?? null,
+              position: anchor.position ?? null,
+              floor: floor ? {
+                x: floor.x,
+                z: floor.z,
+                elevation: floor.elevation,
+                roomId: floor.roomId ?? null,
+                walkabilityIntent: floor.walkabilityIntent ?? null,
+                noEnemySpawn: floor.noEnemySpawn === true,
+                blockedBySolid: generator._isFloorTileBlockedBySolidZone(floor, solidZones),
+                blockedByGeneratedPlatform:
+                  generator._isFloorTileBlockedByGeneratedPlatform(
+                    floor,
+                    blockingPlatformTops,
+                  ),
+              } : null,
+            };
+          }),
+      }))
+      .filter((room) => room.anchors.some(({ floor }) => (
+        !floor
+          || floor.walkabilityIntent === 'support-only'
+          || floor.noEnemySpawn
+          || floor.blockedBySolid
+          || floor.blockedByGeneratedPlatform
+      )));
+    return createEncounterDefinitions(rooms, floorTiles, solidZones);
+  };
+}
 if (process.argv.includes('--failed-physical')) {
   const applyConnectorTraversalSurfaces =
     generator._applyConnectorTraversalSurfaces.bind(generator);
   generator._applyConnectorTraversalSurfaces = (tiles, connectionPlans, floorTiles) => {
     capturedPreSurfacePlans = connectionPlans;
-    return applyConnectorTraversalSurfaces(tiles, connectionPlans, floorTiles);
+    const result = applyConnectorTraversalSurfaces(tiles, connectionPlans, floorTiles);
+    capturedPostSurfaceFloorTiles = result;
+    return result;
   };
 }
 
-if (process.argv.includes('--playable-alpha') || process.argv.includes('--generate')) {
+if (process.argv.includes('--playable-alpha')
+  || process.argv.includes('--generate')
+  || process.argv.includes('--failed-rooms-only')
+  // This flag describes the concise output of the complete replay-aware
+  // generator. Historically it was silently ignored unless callers also
+  // supplied --generate, which made an apparent attempt-one probe fall
+  // through to the direct _generateOnce() diagnostic below.
+  || process.argv.includes('--release-errors-only')) {
   const dungeon = generator.generate();
+  if (process.argv.includes('--failed-rooms-only')) {
+    const floorByGraphKey = new Map((dungeon.floorTiles ?? []).map((floor) => [
+      generator._getFloorTileGraphKey(floor),
+      floor,
+    ]));
+    const supplementalRoomById = new Map((dungeon.rooms ?? [])
+      .filter(({ isDungeonSupplement }) => isDungeonSupplement)
+      .map((room) => [String(room.id), room]));
+    const diagnosticBarrierZones = [
+      ...(dungeon.solidZones ?? []),
+      ...(dungeon.aerialBoundaryZones ?? []),
+    ].filter((zone, index, zones) => (
+      zone?.position && zones.findIndex((candidate) => candidate?.id === zone?.id) === index
+    ));
+    const frontierEdgesFor = (floorKeys, { reverse = false } = {}) => {
+      const failedKeySet = new Set(floorKeys ?? []);
+      return [...failedKeySet].flatMap((floorKey) => {
+        const floor = floorByGraphKey.get(floorKey);
+        if (!floor) return [];
+        return (dungeon.floorTiles ?? [])
+          .filter((candidate) => candidate.roomId === floor.roomId)
+          .filter((candidate) => (
+            Math.abs(candidate.x - floor.x) + Math.abs(candidate.z - floor.z) === 1
+          ))
+          .filter((candidate) => !failedKeySet.has(generator._getFloorTileGraphKey(candidate)))
+          .map((candidate) => {
+            const from = reverse ? floor : candidate;
+            const to = reverse ? candidate : floor;
+            return {
+              from: generator._getFloorTileGraphKey(from),
+              to: generator._getFloorTileGraphKey(to),
+              action: generator._getTraversalActionBetweenFloorTiles(from, to),
+              blockers: diagnosticBarrierZones
+                .filter((zone) => generator._doesFloorTraversalSegmentIntersectZone(
+                  from,
+                  to,
+                  zone,
+                  0.42,
+                ))
+                .map(({ id, roomId, obstacleKind }) => ({ id, roomId, obstacleKind })),
+            };
+          });
+      }).slice(0, 16);
+    };
+    const failedRooms = (dungeon.progression?.validation?.platformability
+      ?.supplementRoomConnectivityChecks
+      ?? dungeon.augmentationDiagnostics?.rejectedOverlay?.validation
+      ?.platformability?.supplementRoomConnectivityChecks
+      ?? dungeon.augmentationDiagnostics?.rejectedOverlay?.platformability
+        ?.supplementRoomConnectivityChecks
+      ?? []).filter(({ accepted }) => accepted !== true).map((check) => {
+        const room = supplementalRoomById.get(String(check.roomId)) ?? null;
+        const frontierEdges = frontierEdgesFor(
+          check.locallyUnreachableRoomFloorKeys ?? [],
+        );
+        const returnFrontierEdges = frontierEdgesFor(
+          check.locallyNonReturnableRoomFloorKeys ?? [],
+          { reverse: true },
+        );
+        return {
+          roomId: check.roomId,
+          blueprintId: room?.augmentationBlueprintId ?? null,
+          moduleTemplateId: room?.augmentationModuleTemplateId ?? null,
+          center: room ? { x: room.x, z: room.z, y: room.baseElevation ?? 0 } : null,
+          width: room?.width ?? null,
+          depth: room?.depth ?? null,
+          rotationQuarterTurns: room?.augmentationRotationQuarterTurns ?? null,
+          localApproachChecks: check.localApproachChecks ?? [],
+          locallyUnreachableRoomFloorKeys: check.locallyUnreachableRoomFloorKeys ?? [],
+          locallyNonReturnableRoomFloorKeys: check.locallyNonReturnableRoomFloorKeys ?? [],
+          orphanFloorKeys: check.orphanFloorKeys ?? [],
+          blockingZoneIds: [...new Set([
+            ...frontierEdges,
+            ...returnFrontierEdges,
+          ].flatMap(({ blockers }) => blockers.map(({ id }) => id)))].sort(),
+          frontierEdges: frontierEdges.slice(0, 4),
+          returnFrontierEdges: returnFrontierEdges.slice(0, 4),
+        };
+      });
+    const platformability = dungeon.progression?.validation?.platformability ?? {};
+    const failedConnectors = (platformability.supplementConnectivityChecks ?? [])
+      .filter(({ accepted }) => accepted !== true)
+      .map((check) => ({
+        connectionId: check.connectionId,
+        locallyUnreachableTraversalFloorKeys: check.locallyUnreachableTraversalFloorKeys ?? [],
+        locallyNonReturnableTraversalFloorKeys:
+          check.locallyNonReturnableTraversalFloorKeys ?? [],
+        finalCollisionSpineCheck: check.finalCollisionSpineCheck ?? null,
+        centerlineChecks: check.centerlineChecks ?? [],
+        verticalContractChecks: check.verticalContractChecks ?? [],
+      }));
+    const encounterOverlaps = (dungeon.encounters ?? []).flatMap((encounter) => (
+      (encounter.spawnPoints ?? []).flatMap((point, spawnIndex) => {
+        const blockingZones = diagnosticBarrierZones.filter((zone) => (
+          generator._isPositionInsideZone(point, zone)
+        ));
+        return blockingZones.length > 0 ? [{
+          encounterId: encounter.id,
+          roomId: encounter.roomId,
+          spawnIndex,
+          point: { x: point.x, y: point.y, z: point.z },
+          localAnchorId: point.localAnchorId ?? point.anchorId ?? null,
+          supportFloorCellId: point.supportFloorCellId ?? point.floorCellId ?? null,
+          blockingZones: blockingZones.map((zone) => ({
+            id: zone.id,
+            roomId: zone.roomId,
+            center: {
+              x: zone.position.x,
+              y: zone.position.y,
+              z: zone.position.z,
+            },
+            size: {
+              x: Number(zone.halfWidth ?? 0) * 2,
+              y: Number(zone.verticalHalfHeight ?? 0) * 2,
+              z: Number(zone.halfDepth ?? 0) * 2,
+            },
+          })),
+        }] : [];
+      })
+    ));
+    console.log(JSON.stringify({
+      seed,
+      status: dungeon.augmentationStatus,
+      replayErrors: dungeon.augmentationReplayDiagnostics?.errors ?? [],
+      validationErrors: dungeon.progression?.validation?.errors ?? [],
+      failedRooms,
+      failedConnectors,
+      dropSpaceChecks: platformability.dropSpaceChecks ?? [],
+      physicalProgression: dungeon.progression?.validation?.physicalProgression ?? null,
+      encounterOverlaps,
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
+  if (process.argv.includes('--connector-entrance-failures')) {
+    const attempts = dungeon.augmentationDiagnostics?.rejectedOverlay?.attempts ?? [];
+    console.log(JSON.stringify({
+      seed,
+      status: dungeon.augmentationStatus,
+      failures: attempts.flatMap((attempt) => (
+        attempt.diagnostics?.connectorEntrances?.checks ?? []
+      )).filter(({ accepted }) => accepted !== true),
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
   if (process.argv.includes('--failed-physical')) {
     console.log(JSON.stringify({
       status: dungeon.augmentationStatus,
@@ -547,18 +1525,184 @@ if (process.argv.includes('--playable-alpha') || process.argv.includes('--genera
     process.exit(0);
   }
   if (process.argv.includes('--release-errors-only')) {
+    const overlayPlan = dungeon.augmentationOverlayPlan ?? null;
+    const overlayNodes = Array.isArray(overlayPlan?.nodes) ? overlayPlan.nodes : [];
+    const overlaySegments = Array.isArray(overlayPlan?.segments) ? overlayPlan.segments : [];
+    const routeNetworkOperations = (overlayPlan?.operations ?? [])
+      .filter(({ type }) => type === 'routeNetwork');
+    const routeNetworkOperationSummaries = routeNetworkOperations.map((operation) => {
+      const operationId = String(operation.id ?? '');
+      const operationNodes = overlayNodes.filter((node) => String(
+        node.operationId ?? node.augmentationOperationId ?? '',
+      ) === operationId);
+      const operationSegments = overlaySegments.filter((segment) => String(
+        segment.operationId ?? segment.augmentationOperationId ?? '',
+      ) === operationId);
+      const derivedModuleCount = operationNodes.filter(({ kind }) => (
+        kind === 'supplementRoom' || kind === 'supplementConnectorJunction'
+      )).length;
+      const declaredModuleCount = Number(
+        operation.substantiveModuleCount ?? operation.moduleCount ?? derivedModuleCount,
+      );
+      return {
+        id: operation.id,
+        grantId: operation.grantId ?? operation.routeNetworkGrantId ?? null,
+        routeNetworkKind: operation.routeNetworkKind ?? null,
+        topologyTemplateId: operation.topologyTemplateId ?? null,
+        candidateOrdinal: operation.candidateOrdinal ?? null,
+        searchVariant: operation.searchVariant ?? null,
+        segmentIds: operationSegments.map(({ id }) => id).sort(),
+        counts: {
+          operations: 1,
+          nodes: operationNodes.length,
+          segments: operationSegments.length,
+          modules: Number.isFinite(declaredModuleCount)
+            ? declaredModuleCount
+            : derivedModuleCount,
+          derivedModules: derivedModuleCount,
+        },
+      };
+    });
+    const routeNetworkCounts = routeNetworkOperationSummaries.reduce((counts, operation) => ({
+      operations: counts.operations + operation.counts.operations,
+      nodes: counts.nodes + operation.counts.nodes,
+      segments: counts.segments + operation.counts.segments,
+      modules: counts.modules + operation.counts.modules,
+      derivedModules: counts.derivedModules + operation.counts.derivedModules,
+    }), {
+      operations: 0,
+      nodes: 0,
+      segments: 0,
+      modules: 0,
+      derivedModules: 0,
+    });
+    const routeNetworkConflictExclusions = [
+      ...(overlayPlan?.routeNetworkConflictExclusions ?? []),
+    ].map((entry) => ({
+      grantId: entry.grantId,
+      entityKind: entry.entityKind,
+      entityId: entry.entityId,
+      signature: entry.signature,
+      reason: entry.reason,
+    })).sort((first, second) => (
+      String(first.grantId ?? '').localeCompare(String(second.grantId ?? ''))
+        || String(first.entityKind ?? '').localeCompare(String(second.entityKind ?? ''))
+        || String(first.entityId ?? '').localeCompare(String(second.entityId ?? ''))
+        || String(first.signature ?? '').localeCompare(String(second.signature ?? ''))
+        || String(first.reason ?? '').localeCompare(String(second.reason ?? ''))
+    ));
     const requestedFloor = process.argv.find((argument) => argument.startsWith('--floor='))
       ?.slice('--floor='.length)
       ?.split(',')
       ?.map(Number) ?? null;
-    const requestedConnection = process.argv.find((argument) => argument.startsWith('--connection='))
-      ?.slice('--connection='.length) ?? null;
+    const requestedConnection = requestedConnectionFilter;
+    const requestedEdge = process.argv.find((argument) => (
+      argument.startsWith('--edge-blockers=')
+    ))?.slice('--edge-blockers='.length).split(',').map(Number) ?? null;
+    const requestedEdgeDiagnostics = requestedEdge?.length === 5
+      && requestedEdge.every(Number.isFinite)
+      ? (() => {
+          const [fromX, fromZ, toX, toZ, elevation] = requestedEdge;
+          const floors = dungeon.floorTiles ?? [];
+          const floorAt = (x, z) => floors.find((floor) => (
+            Number(floor.x) === x
+              && Number(floor.z) === z
+              && Math.abs(Number(floor.elevation ?? 0) - elevation) <= 0.05
+          )) ?? null;
+          const fromFloor = floorAt(fromX, fromZ);
+          const toFloor = floorAt(toX, toZ);
+          const zones = [
+            ...(dungeon.solidZones ?? []),
+            ...(dungeon.aerialBoundaryZones ?? []),
+          ].filter((zone, index, allZones) => (
+            zone?.position && allZones.findIndex((candidate) => candidate?.id === zone?.id) === index
+          ));
+          const blockers = (first, second) => !first || !second ? [] : zones
+            .filter((zone) => generator._doesFloorTraversalSegmentIntersectZone(
+              first,
+              second,
+              zone,
+              0.42,
+            ))
+            .map((zone) => ({
+              id: zone.id,
+              roomId: zone.roomId ?? null,
+              operationId: zone.operationId ?? null,
+              obstacleKind: zone.obstacleKind ?? null,
+              wallFacadeId: zone.wallFacadeId ?? null,
+              position: zone.position,
+              halfWidth: zone.halfWidth,
+              halfDepth: zone.halfDepth,
+              verticalHalfHeight: zone.verticalHalfHeight,
+              rotationY: zone.rotationY ?? 0,
+            }));
+          const forwardBlockers = blockers(fromFloor, toFloor);
+          const reverseBlockers = blockers(toFloor, fromFloor);
+          const facadeIds = new Set([
+            ...forwardBlockers,
+            ...reverseBlockers,
+          ].map(({ wallFacadeId }) => wallFacadeId).filter(Boolean));
+          return {
+            fromFloor,
+            toFloor,
+            forwardAction: fromFloor && toFloor
+              ? generator._getTraversalActionBetweenFloorTiles(fromFloor, toFloor)
+              : null,
+            reverseAction: fromFloor && toFloor
+              ? generator._getTraversalActionBetweenFloorTiles(toFloor, fromFloor)
+              : null,
+            forwardBlockers,
+            reverseBlockers,
+            boundaryWallRuns: (dungeon.augmentationPhysicalShell?.boundaryWallRuns ?? [])
+              .filter(({ facadeId }) => facadeIds.has(facadeId)),
+          };
+        })()
+      : null;
     console.log(JSON.stringify({
       seed,
       status: dungeon.augmentationStatus,
+      augmentationPlanHash: dungeon.augmentationPlanHash ?? null,
+      effectivePlanHash: dungeon.effectivePlanHash ?? null,
+      completionMode: dungeon.augmentationOverlayPlan?.completionMode ?? 'complete',
+      prunedRouteNetworkGrants:
+        dungeon.augmentationOverlayPlan?.prunedRouteNetworkGrants ?? [],
+      routeNetworkConflictExclusions,
+      routeNetworkCounts,
+      routeNetworkOperations: routeNetworkOperationSummaries,
+      planningTimeMs: dungeon.augmentationDiagnostics?.planningTimeMs ?? null,
+      generatorPhaseTimings:
+        dungeon.augmentationDiagnostics?.generatorPhaseTimings ?? null,
       acceptedAsPlayableAlpha: dungeon.augmentationPlayableAlpha?.accepted === true,
       releaseValidationAccepted: dungeon.progression?.validation?.accepted === true,
+      dropSpaceChecks: (
+        dungeon.progression?.validation?.platformability?.dropSpaceChecks ?? []
+      ).map((check) => ({
+        id: check.id,
+        lowerTileCount: check.lowerTileCount,
+        lowerReachable: check.lowerReachable,
+        canExit: check.canExit,
+        everyLowerTileCanExit: check.everyLowerTileCanExit,
+        nonExitLowerFloorKeys: check.nonExitLowerFloorKeys ?? [],
+        egressBlockingEdgeCount: check.egressBlockingEdges?.length ?? 0,
+        egressBlockingZoneIds: check.egressBlockingZoneIds ?? [],
+      })),
       replay: dungeon.augmentationReplayDiagnostics ?? null,
+      rejectedAttempts: (
+        dungeon.augmentationDiagnostics?.rejectedOverlay?.attempts ?? []
+      ).map((attempt) => ({
+        realizationAttempt: attempt.realizationAttempt,
+        augmentationPlanHash: attempt.augmentationPlanHash,
+        status: attempt.status,
+        reason: attempt.reason,
+        failureCategory: attempt.failureCategory,
+        failureCodes: attempt.failureCodes,
+        failureCode: attempt.failureCode,
+        consumedRandomCallCount: attempt.consumedRandomCallCount,
+        expectedEarlyAugmentationRejection: attempt.expectedEarlyAugmentationRejection,
+        diagnosticReason: attempt.diagnostics?.reason,
+        diagnosticErrors: attempt.diagnostics?.errors,
+        diagnostics: attempt.diagnostics,
+      })),
       errorCount: dungeon.progression?.validation?.errors?.length ?? 0,
       errors: dungeon.progression?.validation?.errors ?? [],
       floorTileCount: dungeon.floorTiles?.length ?? 0,
@@ -566,6 +1710,13 @@ if (process.argv.includes('--playable-alpha') || process.argv.includes('--genera
         plan.isDungeonSupplement && !plan.isSupplementGraphConnection
       )).length,
       boundaryWallRunCount: capturedBoundaryWallRuns.length,
+      ...(requestedEdgeDiagnostics ? { requestedEdgeDiagnostics } : {}),
+      ...(process.argv.includes('--wall-run-binding-summary') ? {
+        wallRunBindingSummary: capturedWallRunBindingSummary,
+      } : {}),
+      ...(process.argv.includes('--encounter-placement-summary') ? {
+        encounterPlacementSummary: capturedEncounterPlacementSummary,
+      } : {}),
       ...(requestedFloor?.length === 2 && requestedFloor.every(Number.isFinite) ? {
         requestedFloors: (dungeon.floorTiles ?? []).filter(({ x, z }) => (
           Number(x) === requestedFloor[0] && Number(z) === requestedFloor[1]
@@ -573,9 +1724,11 @@ if (process.argv.includes('--playable-alpha') || process.argv.includes('--genera
       } : {}),
       ...(requestedConnection ? {
         requestedOverlaySegments: (dungeon.augmentationOverlayPlan?.segments ?? [])
-          .filter(({ id }) => String(id).includes(requestedConnection)),
+          .filter(({ id }) => requestedConnectionFilters.some((filter) => (
+            String(id).includes(filter)
+          ))),
         requestedConnections: (dungeon.connectionPlans ?? []).filter(({ id }) => (
-          String(id).includes(requestedConnection)
+          requestedConnectionFilters.some((filter) => String(id).includes(filter))
         )).map(({ id, fromRoomId, toRoomId, fromSocket, toSocket, fullPath, bridgePath,
           authoritativeSocketSeams }) => ({
           id,
@@ -896,6 +2049,49 @@ if (process.argv.includes('--grants-only')) console.log(JSON.stringify(
     minimumModules: grant.minimumModules,
     maximumModules: grant.maximumModules,
     endpointCount: grant.endpointSockets?.length ?? 0,
+    planningStationSideDomainCounts: (grant.planningStationSideDiagnostics ?? [])
+      .map((station) => ({
+        candidateCount: station?.candidates?.length ?? 0,
+        viableCount: (station?.candidates ?? []).filter((candidate) => (
+          candidate?.stationEligible !== false
+            && candidate?.stationBodyBlocked !== true
+            && candidate?.fullRoomBodyBlocked !== true
+            && candidate?.approachIntersectsOwnCenterline !== true
+            && Number(candidate?.hardRouteOverlapArea ?? 0) <= 1e-6
+            && Number(candidate?.roomOverlapArea ?? 0) <= 1e-6
+            && Number(candidate?.ownRouteOverlapArea ?? 0) <= 1e-6
+        )).length,
+      })),
+    planningReservationRectangles: (grant.planningReservationRectangles ?? [])
+      .map(({ id, purpose, center, minX, maxX, minZ, maxZ }) => ({
+        id,
+        purpose,
+        center,
+        minX,
+        maxX,
+        minZ,
+        maxZ,
+      })),
+    planningRoomReservationRectangles: (grant.planningRoomReservationRectangles ?? [])
+      .map(({ id, purpose, center, minX, maxX, minZ, maxZ }) => ({
+        id,
+        purpose,
+        center,
+        minX,
+        maxX,
+        minZ,
+        maxZ,
+      })),
+    planningRouteReservationRectangles: (grant.planningRouteReservationRectangles ?? [])
+      .map(({ id, purpose, center, minX, maxX, minZ, maxZ }) => ({
+        id,
+        purpose,
+        center,
+        minX,
+        maxX,
+        minZ,
+        maxZ,
+      })),
     endpoints: (grant.endpointSockets ?? []).map((socket) => ({
       id: socket.id,
       position: socket.position,
@@ -936,6 +2132,14 @@ if (process.argv.includes('--host-only')) console.log(JSON.stringify({
   stationDiagnostics: witnessGrant?.planningStationSideDiagnostics,
   grantProtectedVolumes: host.extensionRegions[0].routeNetworkPlacementProtectedVolumes
     .filter(({ ownerId }) => String(ownerId) === requestedGrant),
+  matchingPlanningVolumes: host.extensionRegions[0].routeNetworkPlacementProtectedVolumes
+    .filter(({ id, ownerId }) => (
+      String(id ?? '').includes(requestedGrant)
+        || String(ownerId ?? '').includes(requestedGrant)
+    ))
+    .map(({ id, ownerId, center, size, purpose }) => ({
+      id, ownerId, center, size, purpose,
+    })),
   baseRoomPlanningVolumes: host.extensionRegions[0].routeNetworkPlacementProtectedVolumes
     .filter(({ id }) => String(id).includes('room'))
     .map(({ id, ownerId, center, size, purpose }) => ({
@@ -951,11 +2155,180 @@ generator.augmentationProfileId = profileId;
 let cursor = 0;
 generator.random = () => base.randomTape[cursor++];
 
+// Focused parity probe for the outer replay wrapper: ordinary direct
+// `_generateOnce()` diagnostics plan and materialize against their fresh live
+// connection kit, while the wrapper plans against the already accepted
+// parent's finalized connector snapshot. Opt in explicitly so normal debug
+// output remains unchanged.
+if (process.argv.includes('--accepted-parent-planning-snapshot-override')) {
+  generator._augmentationReplayPlanningSnapshotOverride =
+    generator._createIndustrialDungeonAugmentationPlanningSnapshot({
+      rooms: base.dungeon.rooms,
+      connectionPlans: base.dungeon.connectionPlans,
+    });
+}
+
 if (process.argv.includes('--plan-only')) {
   const planned = generator._planIndustrialDungeonAugmentation({
     rooms: base.dungeon.rooms,
     connectionPlans: base.dungeon.connectionPlans,
   });
+  if (process.argv.includes('--route-network-overlay-json')) {
+    const requestedGrantSuffix = process.argv
+      .find((argument) => argument.startsWith('--grant='))
+      ?.slice('--grant='.length) ?? '';
+    const overlayPlan = planned?.result?.overlayPlan ?? null;
+    const operations = (overlayPlan?.operations ?? []).filter((operation) => (
+      operation?.type === 'routeNetwork'
+        && (!requestedGrantSuffix
+          || String(operation.grantId ?? '').endsWith(requestedGrantSuffix))
+    ));
+    const operationIds = new Set(operations.map(({ id }) => String(id)));
+    const compactRouteNetworkOverlay = process.argv.includes(
+      '--compact-route-network-overlay',
+    );
+    const matchingNodes = (overlayPlan?.nodes ?? []).filter(({ operationId }) => (
+      operationIds.has(String(operationId))
+    ));
+    const matchingSegments = (overlayPlan?.segments ?? []).filter(({ operationId }) => (
+      operationIds.has(String(operationId))
+    ));
+    console.log(JSON.stringify({
+      status: planned?.status ?? null,
+      augmentationPlanHash: overlayPlan?.augmentationPlanHash ?? null,
+      operations: compactRouteNetworkOverlay
+        ? operations.map((operation) => ({
+          id: operation.id,
+          grantId: operation.grantId,
+          topologyTemplateId: operation.topologyTemplateId,
+          elevationModes: operation.elevationModes,
+          nodeIds: operation.nodeIds,
+          segmentIds: operation.segmentIds,
+          featurelessSpans: operation.featurelessSpans,
+          cycleRankDelta: operation.cycleRankDelta,
+        }))
+        : operations,
+      nodes: compactRouteNetworkOverlay
+        ? matchingNodes.map((node) => ({
+          id: node.id,
+          ordinal: node.ordinal,
+          kind: node.kind,
+          grammarId: node.grammarId,
+          blueprintId: node.blueprintId,
+          moduleTemplateId: node.moduleTemplateId,
+          contentRole: node.contentRole,
+          placement: node.placement,
+          graphDegree: node.graphDegree,
+          junction: node.junction,
+          sockets: (node.sockets ?? []).map((socket) => ({
+            id: socket.id,
+            localSocketId: socket.localSocketId,
+            state: socket.state,
+            segmentId: socket.segmentId,
+            position: socket.position,
+            facing: socket.facing,
+          })),
+        }))
+        : matchingNodes,
+      segments: compactRouteNetworkOverlay
+        ? matchingSegments.map((segment) => ({
+          id: segment.id,
+          physicalOrdinal: segment.physicalOrdinal,
+          routeRole: segment.routeRole,
+          connectorFamily: segment.connectorFamily,
+          connectorVariantId: segment.connectorVariantId,
+          from: segment.from,
+          to: segment.to,
+          path: segment.path,
+          occupiedVolumes: segment.occupiedVolumes,
+          clearanceVolumes: segment.clearanceVolumes,
+          landingVolumes: segment.landingVolumes,
+          verticalTransfer: segment.verticalTransfer,
+          traversal: segment.traversal,
+        }))
+        : matchingSegments,
+      ...(compactRouteNetworkOverlay ? {} : {
+        diagnostics: planned?.diagnostics ?? null,
+      }),
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(base.dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
+  const edgeBlockerArgument = process.argv.find((argument) => (
+    argument.startsWith('--edge-blockers=')
+  ));
+  if (edgeBlockerArgument) {
+    const [fromX, fromZ, toX, toZ, elevation] = edgeBlockerArgument
+      .slice('--edge-blockers='.length)
+      .split(',')
+      .map(Number);
+    const fromFloor = { x: fromX, z: fromZ, elevation };
+    const toFloor = { x: toX, z: toZ, elevation };
+    const supplementalRooms = [
+      ...(planned?.materialized?.rooms ?? []),
+      ...(planned?.materialized?.connectorJunctionProxies ?? []),
+    ];
+    const zones = [
+      ...generator._createSolidCollisionZones([
+        ...base.dungeon.rooms,
+        ...supplementalRooms,
+      ]),
+      ...generator._createDungeonSupplementManifestSolidZones(supplementalRooms),
+    ];
+    const connectionPlans = planned?.materialized?.connectionPlans ?? [];
+    const nearbyPlans = connectionPlans.filter((plan) => (
+      (plan.fullPath ?? plan.bridgePath ?? []).some((point) => (
+        Math.abs(Number(point.x) - fromX) <= 3
+          && Math.abs(Number(point.z) - fromZ) <= 3
+      ))
+    ));
+    console.log(JSON.stringify({
+      status: planned?.status ?? null,
+      edge: { fromFloor, toFloor },
+      nearbyPlans: nearbyPlans.map((plan) => ({
+        id: plan.id,
+        sourceElevation: plan.sourceElevation,
+        destinationElevation: plan.destinationElevation,
+        path: plan.fullPath ?? plan.bridgePath ?? [],
+        authoritativeTraversalFloorKeys:
+          plan.authoritativeTraversalSpine?.requiredFloorKeys ?? [],
+        seamMatches: (plan.endpointSeams ?? []).flatMap((seam) => (seam?.orderedCells ?? [])
+          .filter((cell) => [fromX, toX].includes(Number(cell.grid?.x))
+            && [fromZ, toZ].includes(Number(cell.grid?.z)))
+          .map((cell) => ({ role: seam.role, seamId: seam.id, cell }))),
+      })),
+      nearbyRoomFloors: supplementalRooms.flatMap((room) => (
+        (room.augmentationFloorTiers ?? []).flatMap((tier) => (
+          (tier.worldCells ?? [])
+            .filter((cell) => [fromX, toX].includes(Number(cell.grid?.x))
+              && [fromZ, toZ].includes(Number(cell.grid?.z)))
+            .map((cell) => ({ roomId: room.id, tierId: tier.id, cell }))
+        ))
+      )),
+      blockers: zones.filter((zone) => (
+        generator._doesFloorTraversalSegmentIntersectZone(
+          fromFloor,
+          toFloor,
+          zone,
+          0.42,
+        )
+      )).map((zone) => ({
+        id: zone.id,
+        roomId: zone.roomId ?? null,
+        operationId: zone.operationId ?? null,
+        obstacleKind: zone.obstacleKind ?? null,
+        position: zone.position,
+        halfWidth: zone.halfWidth,
+        halfDepth: zone.halfDepth,
+        verticalHalfHeight: zone.verticalHalfHeight,
+        rotationY: zone.rotationY ?? 0,
+      })),
+    }, null, 2));
+    generator._disposeGeneratedDungeonCandidate(base.dungeon);
+    texture.dispose();
+    process.exit(0);
+  }
   if (process.argv.includes('--diagnostics-only')) {
     console.log(JSON.stringify(planned?.diagnostics ?? null, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);
@@ -967,8 +2340,26 @@ if (process.argv.includes('--plan-only')) {
     const context = error?.context ?? {};
     console.log(JSON.stringify({
       status: planned?.status ?? null,
+      augmentationPlanHash: planned?.result?.overlayPlan?.augmentationPlanHash ?? null,
+      effectivePlanHash: planned?.result?.overlayPlan?.effectivePlanHash ?? null,
+      ...(candidateHistogramRequested ? {
+        candidateHistogram: summarizeCandidateHistogram(candidateHistogramRecords),
+      } : {}),
       error: error ? {
         code: error.code,
+        operationId: context.operationId,
+        segmentId: context.segmentId,
+        role: context.role,
+        seamId: context.seamId,
+        endpointSeamCount: context.endpointSeamCount,
+        mismatchedFields: context.mismatchedFields,
+        expectedCellCount: context.expectedCellCount,
+        actualCellCount: context.actualCellCount,
+        expectedParentOwnerId: context.expectedParentOwnerId,
+        actualParentOwnerId: context.actualParentOwnerId,
+        family: context.family,
+        witnessErrorCodes: context.witnessErrorCodes,
+        witnessErrors: context.witnessErrors,
         grantId: context.grantId,
         constraintKind: context.constraintKind,
         firstNodeIndex: context.firstNodeIndex,
@@ -986,8 +2377,17 @@ if (process.argv.includes('--plan-only')) {
         selectedGrammarIds: context.selectedGrammarIds,
         contentRoles: context.contentRoles,
         endpointNodeIndices: context.endpointNodeIndices,
+        challengeBranchRoomIndex: context.challengeBranchRoomIndex,
+        mainPayoffRoomIndex: context.mainPayoffRoomIndex,
+        stationSeparationMeters: context.stationSeparationMeters,
+        stationRouteLengthMeters: context.stationRouteLengthMeters,
+        connectorEndpointGapMeters: context.connectorEndpointGapMeters,
+        legalGrammarIds: context.legalGrammarIds,
+        selectedGrammarId: context.selectedGrammarId,
         requestedSubstantiveModuleCount: context.requestedSubstantiveModuleCount,
         routeNetworkSolver: context.routeNetworkSolver,
+        blockingDiagnostics: context.blockingDiagnostics,
+        reservedByNetworkDiagnostics: context.reservedByNetworkDiagnostics,
         placementSearchVisits: context.placementSearchVisits,
         physicalSpineAttempts: context.physicalSpineAttempts,
         planningPhaseTimings: context.planningPhaseTimings,
@@ -1196,7 +2596,10 @@ if (process.argv.includes('--plan-only')) {
         toSocket: plan.toSocket,
         fullPath: plan.fullPath,
       })),
-      rooms: (planned?.materialized?.rooms ?? [])
+      rooms: [
+        ...(planned?.materialized?.rooms ?? []),
+        ...(planned?.materialized?.connectorJunctionProxies ?? []),
+      ]
         .filter(({ id }) => roomIds.has(String(id)))
         .map((room) => ({
           id: room.id,
@@ -1206,6 +2609,8 @@ if (process.argv.includes('--plan-only')) {
           depth: room.depth,
           blueprintId: room.augmentationBlueprintId,
           moduleTemplateId: room.augmentationModuleTemplateId,
+          placementRotationQuarterTurns: room.augmentationPlacementRotationQuarterTurns,
+          physicalRotationQuarterTurns: room.augmentationPhysicalRotationQuarterTurns,
           transfers: (room.augmentationTransfers ?? []).map((transfer) => ({
             id: transfer.id,
             form: transfer.form,
@@ -1218,6 +2623,9 @@ if (process.argv.includes('--plan-only')) {
           })),
           floorCells: (room.augmentationFloorTiers ?? []).flatMap((tier) => (
             (tier.worldCells ?? []).map((cell) => ({
+              id: cell.id,
+              localTile: cell.localTile,
+              position: cell.position,
               x: cell.grid?.x,
               z: cell.grid?.z,
               y: cell.elevation,
@@ -1773,11 +3181,57 @@ try {
       } : null;
   const blockedVolumeIds = new Set((context.physicalPairEdgeDiagnostics ?? [])
     .flatMap(({ bestBlockedCollisionIds = [] }) => bestBlockedCollisionIds));
+  const failedPhysicalSegmentArgument = process.argv.find((argument) => (
+    argument.startsWith('--segment=')
+  ));
+  const failedPhysicalSegment = failedPhysicalSegmentArgument
+    ?.slice('--segment='.length) ?? null;
+  const failedPhysicalGrant = process.argv.find((argument) => (
+    argument.startsWith('--grant=')
+  ))?.slice('--grant='.length) ?? null;
+  const failedPhysicalPlans = process.argv.includes('--failed-physical')
+    ? capturedPreSurfacePlans.filter((plan) => (
+      (failedPhysicalGrant == null || String(plan.id).toLowerCase().includes(
+        failedPhysicalGrant.toLowerCase(),
+      ))
+      && (failedPhysicalSegment == null || String(plan.id).includes(
+        `:segment:${failedPhysicalSegment}:`,
+      ))
+    )).map((plan) => ({
+      id: plan.id,
+      fromRoomId: plan.fromRoomId,
+      toRoomId: plan.toRoomId,
+      sourceElevation: plan.sourceElevation,
+      destinationElevation: plan.destinationElevation,
+      fromSocket: plan.fromSocket,
+      toSocket: plan.toSocket,
+      bridgePath: plan.bridgePath,
+      traversalFloorKeys: plan.traversalFloorKeys,
+      centerlineFloors: (plan.bridgePath ?? []).map((point, pathIndex) => ({
+        pathIndex,
+        point,
+        candidates: capturedPostSurfaceFloorTiles.filter((floor) => (
+          Number(floor.x) === Number(point.x) && Number(floor.z) === Number(point.z)
+        )).map((floor) => ({
+          floorKey: generator._getFloorTileGraphKey(floor),
+          elevation: floor.elevation,
+          roomId: floor.roomId ?? null,
+          signedConnectorFloorOwnerId: floor.signedConnectorFloorOwnerId ?? null,
+          connectorId: floor.connectorId ?? null,
+          connectionId: floor.connectionId ?? null,
+          sharedConnectorFloorOwnerIds: floor.sharedConnectorFloorOwnerIds ?? [],
+          authoritativeSocketSeamOwnerIds: floor.authoritativeSocketSeamOwnerIds ?? [],
+          surface: floor.surface ?? null,
+        })),
+      })),
+    }))
+    : null;
   console.log(JSON.stringify({
     code: error.code,
     message: error.message,
     stack: error.stack?.split('\n').slice(0, 12) ?? null,
     diagnostics,
+    ...(failedPhysicalPlans ? { failedPhysicalPlans } : {}),
     playableAlphaSmoke: {
       ready: false,
       failedAssertions: ['generationCompleted'],

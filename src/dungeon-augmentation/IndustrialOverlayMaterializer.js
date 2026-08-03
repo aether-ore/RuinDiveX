@@ -27,11 +27,18 @@ import {
   inspectIndustrialSupplementManifestStructuralQuality,
   inspectIndustrialSupplementRealizedStructuralQuality,
 } from './IndustrialSupplementStructuralQuality.js';
+import { canonicalStringify, stableHashText } from './canonical.js';
 
 const CONNECTOR_ELEVATION_EPSILON = 0.000001;
 const INDUSTRIAL_SUPPLEMENT_V4_PROFILE_ID = 'industrial-supplement-preview-v4';
 const INDUSTRIAL_SUPPLEMENT_CONTENT_CONTRACT_ERROR =
   'DUNGEON_SUPPLEMENT_CONTENT_CONTRACT_REJECTED';
+const INDUSTRIAL_SUPPLEMENT_PRESENTATION_RECORD_SCHEMA =
+  'ruindivex-industrial-supplement-presentation-record/v1';
+const INDUSTRIAL_SUPPLEMENT_PROTECTED_SIGHTLINE_SCHEMA =
+  'ruindivex-industrial-supplement-protected-sightline/v1';
+const INDUSTRIAL_SUPPLEMENT_STORY_SELECTION_NAMESPACE =
+  'ruindivex-industrial-supplement-story-marking-selection/v1';
 const V4_CONNECTOR_SPINE_DIAGNOSTICS = Object.freeze({
   SEAM_GRID_LATTICE_INVALID: DUNGEON_ROUTE_ENDPOINT_SEAM_GRID_LATTICE_DIAGNOSTIC,
   WRONG_SEAM_SIDE: 'DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE',
@@ -102,6 +109,33 @@ function connectorMaterializationError(segment, message, cause = null) {
   return error;
 }
 
+function routeNetworkMaterializationFailure(error, {
+  operationId = null,
+  grantId = null,
+  segmentId = null,
+  connectorFamily = null,
+} = {}) {
+  const resolvedSegmentId = error?.segmentId ?? segmentId;
+  const resolvedGrantId = grantId == null ? null : String(grantId);
+  if (
+    error?.code !== 'DUNGEON_SUPPLEMENT_CONNECTOR_CONTRACT_REJECTED'
+    || resolvedSegmentId == null
+    || resolvedGrantId == null
+  ) return null;
+  return {
+    code: error.code,
+    diagnosticCode: error?.diagnosticCode ?? null,
+    message: error?.message ?? String(error),
+    operationId: operationId == null ? null : String(operationId),
+    grantId: resolvedGrantId,
+    entityKind: 'segment',
+    segmentId: String(resolvedSegmentId),
+    connectorFamily: String(
+      error?.connectorFamily ?? connectorFamily ?? 'service-gallery',
+    ),
+  };
+}
+
 function connectorSpineMaterializationError(segment, diagnosticCode, message, details = null) {
   const error = connectorMaterializationError(
     segment,
@@ -131,9 +165,12 @@ function gridPoint(value, tileSize) {
 
 function stableV4GridPoint(value, tileSize) {
   const point = pointOf(value);
+  const coordinate = (metric) => Math.round(Number((
+    Number(metric.toFixed(6)) / tileSize
+  ).toFixed(6)));
   return {
-    x: Math.round(Number(point.x.toFixed(6)) / tileSize),
-    z: Math.round(Number(point.z.toFixed(6)) / tileSize),
+    x: coordinate(point.x),
+    z: coordinate(point.z),
   };
 }
 
@@ -416,6 +453,8 @@ function exactRouteNetworkEndpoint({
   grant,
   overlayNodeById,
   corridorStationBySocketId,
+  oppositeEndpoint = null,
+  segment = null,
 }) {
   const nodeId = endpointNodeId(endpoint);
   const socketId = endpointSocketId(endpoint);
@@ -478,7 +517,8 @@ function exactRouteNetworkEndpoint({
     );
   }
   const corridorStation = corridorStationBySocketId?.get(String(socketId)) ?? null;
-  if (endpoint.position && !pointsApproximatelyEqual(endpoint.position, socket.position)) {
+  const physicalSocketPosition = socket.position;
+  if (endpoint.position && !pointsApproximatelyEqual(endpoint.position, physicalSocketPosition)) {
     throw new Error(
       `Route network ${operation.id} ${role} endpoint position does not match granted socket ${socketId}.`,
     );
@@ -501,6 +541,8 @@ function exactRouteNetworkEndpoint({
     routeNetworkSocketKind: corridorStation
       ? 'authored-corridor-station'
       : socket.routeNetworkSocketKind ?? socket.socketKind ?? 'parent-room-wall',
+    position: clonePlainValue(physicalSocketPosition),
+    authoredSocketPosition: clonePlainValue(socket.position),
     exactSocketBinding: true,
     routeNetworkGrantId: operation.grantId,
   };
@@ -513,24 +555,30 @@ function normalizeRouteNetworkSegment(
   overlayNodeById,
   corridorStationBySocketId,
 ) {
+  const fromEndpoint = endpointOf(segment, 'from');
+  const toEndpoint = endpointOf(segment, 'to');
   return {
     ...clonePlainValue(segment),
     operationId: operation.id,
     from: exactRouteNetworkEndpoint({
-      endpoint: endpointOf(segment, 'from'),
+      endpoint: fromEndpoint,
       role: 'from',
       operation,
       grant,
       overlayNodeById,
       corridorStationBySocketId,
+      oppositeEndpoint: toEndpoint,
+      segment,
     }),
     to: exactRouteNetworkEndpoint({
-      endpoint: endpointOf(segment, 'to'),
+      endpoint: toEndpoint,
       role: 'to',
       operation,
       grant,
       overlayNodeById,
       corridorStationBySocketId,
+      oppositeEndpoint: fromEndpoint,
+      segment,
     }),
   };
 }
@@ -1440,6 +1488,166 @@ function manifestWorldPoint(localTile, {
   });
 }
 
+function rasterizedManifestSightlineCells(from, to) {
+  let x = Math.round(number(from?.x));
+  let z = Math.round(number(from?.z));
+  const targetX = Math.round(number(to?.x));
+  const targetZ = Math.round(number(to?.z));
+  const deltaX = Math.abs(targetX - x);
+  const deltaZ = Math.abs(targetZ - z);
+  const stepX = x < targetX ? 1 : -1;
+  const stepZ = z < targetZ ? 1 : -1;
+  let error = deltaX - deltaZ;
+  const cells = [];
+  while (true) {
+    cells.push({ x, z });
+    if (x === targetX && z === targetZ) break;
+    const doubled = error * 2;
+    if (doubled > -deltaZ) {
+      error -= deltaZ;
+      x += stepX;
+    }
+    if (doubled < deltaX) {
+      error += deltaX;
+      z += stepZ;
+    }
+  }
+  return cells;
+}
+
+function manifestSightlineBoundaryOrigins(baseCells, boundary) {
+  if (baseCells.length === 0) return [];
+  const coordinate = boundary === 'south'
+    ? Math.min(...baseCells.map(({ z }) => z))
+    : boundary === 'north'
+      ? Math.max(...baseCells.map(({ z }) => z))
+      : boundary === 'west'
+        ? Math.min(...baseCells.map(({ x }) => x))
+        : Math.max(...baseCells.map(({ x }) => x));
+  return baseCells.filter((cell) => (
+    ['south', 'north'].includes(boundary)
+      ? cell.z === coordinate
+      : cell.x === coordinate
+  )).sort((left, right) => left.x - right.x || left.z - right.z);
+}
+
+function realizeManifestProtectedSightlines({
+  node,
+  operation,
+  manifest,
+  center,
+  rotationQuarterTurns,
+  tileSize,
+  themeBinding,
+}) {
+  const quality = manifest?.structuralQuality;
+  if (!quality?.requiredSightlines?.length) return [];
+  const baseCells = manifestMaskCells(manifest.floorMask ?? []);
+  const targetById = new Map([
+    ...(manifest.landmarks ?? []),
+    ...(manifest.anchors ?? []),
+  ].map((record) => [String(record.id), record]));
+  const routeById = new Map((manifest.clearRoutes ?? []).map((route) => (
+    [String(route.id), route]
+  )));
+  const blockingCover = (manifest.cover ?? []).filter(({ blocksLineOfSight }) => (
+    blocksLineOfSight === true
+  ));
+  return quality.requiredSightlines.flatMap((sightline) => {
+    const sightlineId = String(sightline.id ?? 'required-sightline');
+    const targetId = String(
+      sightline.targetLandmarkId ?? sightline.targetAnchorId ?? '',
+    );
+    const targetRecord = targetById.get(targetId);
+    const target = targetRecord?.localTile ?? targetRecord?.localPosition ?? null;
+    const requiredClearRouteIds = [...new Set(
+      (sightline.requiredClearRouteIds ?? []).map(String),
+    )].sort();
+    const routeReferencesAccepted = requiredClearRouteIds.length > 0
+      && requiredClearRouteIds.every((routeId) => routeById.get(routeId)?.required === true);
+    const sourceRouteAccepted = requiredClearRouteIds.some((routeId) => (
+      (routeById.get(routeId)?.fromSocketIds ?? []).map(String)
+        .includes(String(sightline.fromSocketId ?? ''))
+    ));
+    if (!target || !routeReferencesAccepted || !sourceRouteAccepted) return [];
+    const visibleRays = manifestSightlineBoundaryOrigins(
+      baseCells,
+      sightline.fromBoundary,
+    ).map((origin) => ({
+      origin,
+      cells: rasterizedManifestSightlineCells(origin, target),
+    })).filter(({ origin, cells }) => !blockingCover.some((cover) => {
+      const point = cover.localTile ?? cover.localPosition ?? null;
+      return point
+        && !(number(point.x) === number(target.x) && number(point.z) === number(target.z))
+        && !(number(point.x) === number(origin.x) && number(point.z) === number(origin.z))
+        && cells.some((cell) => (
+          cell.x === Math.round(number(point.x))
+            && cell.z === Math.round(number(point.z))
+        ));
+    }));
+    const minimumVisibleOrigins = Math.max(
+      1,
+      Math.trunc(number(sightline.minimumVisibleOrigins, 1)),
+    );
+    const protectedRays = visibleRays.slice(0, minimumVisibleOrigins);
+    if (protectedRays.length < minimumVisibleOrigins) return [];
+    const localRayCells = [...new Map(protectedRays.flatMap(({ cells }) => cells)
+      .map((cell) => [`${cell.x},${cell.z}`, cell])).values()]
+      .sort((left, right) => left.x - right.x || left.z - right.z);
+    const runtimeId = `${node.id}:protected-sightline:${stableIdPart(sightlineId)}`;
+    return [{
+      id: runtimeId,
+      runtimeId,
+      schema: INDUSTRIAL_SUPPLEMENT_PROTECTED_SIGHTLINE_SCHEMA,
+      sightlineId,
+      roomId: node.id,
+      nodeId: node.id,
+      operationId: operation?.id ?? nodeOperationId(node),
+      moduleManifestId: manifest.id,
+      fromSocketId: String(sightline.fromSocketId ?? ''),
+      fromBoundary: sightline.fromBoundary ?? null,
+      targetId,
+      requiredClearRouteIds,
+      minimumVisibleOrigins,
+      protectedOriginCount: protectedRays.length,
+      localOrigins: protectedRays.map(({ origin }) => ({
+        x: number(origin.x),
+        z: number(origin.z),
+      })),
+      localTarget: {
+        x: number(target.x),
+        z: number(target.z),
+        elevation: number(target.elevation ?? target.y),
+      },
+      localRayCells,
+      worldCells: localRayCells.map((cell) => {
+        const position = manifestWorldPoint({
+          ...cell,
+          elevation: 0,
+        }, {
+          center,
+          rotationQuarterTurns,
+          tileSize,
+        });
+        return {
+          id: `${runtimeId}:cell:${stableIdPart(cell.x)}:${stableIdPart(cell.z)}`,
+          localTile: { ...cell, elevation: 0 },
+          grid: stableV4GridPoint(position, tileSize),
+          position,
+          worldPosition: clonePlainValue(position),
+          widthMeters: tileSize,
+          depthMeters: tileSize,
+        };
+      }),
+      protectionKind: 'required-sightline',
+      authoritative: true,
+      preRender: true,
+      themeBinding: clonePlainValue(themeBinding),
+    }];
+  }).sort((left, right) => left.id.localeCompare(right.id));
+}
+
 function realizeManifestFloorTiers({
   node,
   operation,
@@ -1471,10 +1679,11 @@ function realizeManifestFloorTiers({
         tileSize,
       });
       const id = `${runtimeId}:cell:${stableIdPart(cell.x)}:${stableIdPart(cell.z)}`;
-      const grid = {
-        x: Math.round(position.x / tileSize),
-        z: Math.round(position.z / tileSize),
-      };
+      // Blueprint centers and rotated cells can land on exact half-grid
+      // metrics represented with a small negative floating tail (for example
+      // 74.19999999999999 m). Quantize the metric first so adjacent authored
+      // cells cannot collapse onto one grid identity and leave a false hole.
+      const grid = stableV4GridPoint(position, tileSize);
       return {
         id,
         roomId: node.id,
@@ -1821,6 +2030,34 @@ function blueprintFeatureCollisionSegments(feature, footprint, supportCells) {
     });
 }
 
+function blueprintSolidPositionOnCommittedFloorGrid(
+  projectedPosition,
+  supportCells,
+  tileSize,
+) {
+  const occupiedGridCells = (supportCells ?? []).filter((cell) => (
+    Number.isFinite(Number(cell?.grid?.x))
+      && Number.isFinite(Number(cell?.grid?.z))
+  ));
+  if (occupiedGridCells.length === 0) return projectedPosition;
+
+  const gridXs = occupiedGridCells.map((cell) => Number(cell.grid.x));
+  const gridZs = occupiedGridCells.map((cell) => Number(cell.grid.z));
+  return {
+    ...projectedPosition,
+    // Runtime floor stamping consumes the authoritative integer support grid,
+    // not the pre-quantization metric projection. Blueprint feature centers
+    // can intentionally use the opposite half-grid parity from their room
+    // center (for example, an even-depth cover in an odd-width room), so one
+    // module-wide snap cannot align every physical solid. Center each direct
+    // floor-supported solid on the bounds of the exact cells it occupies.
+    // Transfer-supported solids stay in authored metric space so dividers on
+    // continuous ramps are not pulled onto one of the traversable lanes.
+    x: (Math.min(...gridXs) + Math.max(...gridXs)) * 0.5 * tileSize,
+    z: (Math.min(...gridZs) + Math.max(...gridZs)) * 0.5 * tileSize,
+  };
+}
+
 function realizeBlueprintFeatureRecords({
   node,
   operation,
@@ -1895,6 +2132,26 @@ function realizeBlueprintFeatureRecords({
       }];
     const sourceRuntimeId = `${node.id}:blueprint-feature:${stableIdPart(feature.id)}`;
     const stateRecord = blueprintStateForFeature(feature, stateRecords);
+    const authoredLocalElevation = number(
+      nearestSupport?.localElevation
+        ?? nearestSupport?.localTile?.elevation
+        ?? fallbackTier?.localElevation,
+    );
+    const authoredLocalTile = {
+      x: number(localFootprint.center.x),
+      z: number(localFootprint.center.z),
+      elevation: authoredLocalElevation,
+    };
+    const authoredWorldPosition = manifestWorldPoint(authoredLocalTile, {
+      center,
+      rotationQuarterTurns,
+      tileSize,
+    });
+    const authoredHeightMeters = featureType === 'cover'
+      ? 1.2
+      : featureType === 'story'
+        ? 0.035
+        : 3.6;
     return recordDefinitions.map((definition, segmentOrdinal) => {
       const segmentSupportCells = definition.supportCells ?? [];
       const segmentSupport = nearestBlueprintFeatureSupport(
@@ -1914,11 +2171,34 @@ function realizeBlueprintFeatureRecords({
         z: number(definition.localFootprint.center.z),
         elevation: number(definition.localElevation),
       };
-      const position = manifestWorldPoint(localTile, {
+      const projectedPosition = manifestWorldPoint(localTile, {
         center,
         rotationQuarterTurns,
         tileSize,
       });
+      const hasAuthoredSolidFloorOccupancy = feature.solid === true
+        && ['cover', 'machine'].includes(featureType);
+      const occupiedSupportCellIds = hasAuthoredSolidFloorOccupancy
+        && supportAttachment === 'direct'
+        ? [...new Set(segmentSupportCells
+            .map(({ supportCellId }) => supportCellId)
+            .filter(Boolean)
+            .map(String))].sort((left, right) => left.localeCompare(right))
+        : [];
+      const usesCommittedFloorGridPosition = hasAuthoredSolidFloorOccupancy
+        && supportAttachment === 'direct'
+        && occupiedSupportCellIds.length > 0
+        && segmentSupportCells.every((cell) => (
+          cell.supportKind === 'floor-tier-cell'
+            && cell.floorCellId != null
+        ));
+      const position = usesCommittedFloorGridPosition
+        ? blueprintSolidPositionOnCommittedFloorGrid(
+            projectedPosition,
+            segmentSupportCells,
+            tileSize,
+          )
+        : projectedPosition;
       return {
         ...clonePlainValue(feature),
         id: runtimeId,
@@ -1937,6 +2217,28 @@ function realizeBlueprintFeatureRecords({
         localTile,
         localFootprint: clonePlainValue(definition.localFootprint),
         authoredLocalFootprint: clonePlainValue(localFootprint),
+        authoredLocalTile: clonePlainValue(authoredLocalTile),
+        authoredWorldPosition: clonePlainValue(authoredWorldPosition),
+        authoredRotationQuarterTurns: normalizedRotationQuarterTurns,
+        authoredRotationY: -normalizedRotationQuarterTurns * Math.PI * 0.5,
+        authoredFootprintMeters: {
+          width: localFootprint.widthTiles * tileSize,
+          height: authoredHeightMeters,
+          depth: localFootprint.depthTiles * tileSize,
+        },
+        authoredWorldFootprintMeters: {
+          width: (
+            collisionSwapsHorizontalAxes
+              ? localFootprint.depthTiles
+              : localFootprint.widthTiles
+          ) * tileSize,
+          height: authoredHeightMeters,
+          depth: (
+            collisionSwapsHorizontalAxes
+              ? localFootprint.widthTiles
+              : localFootprint.depthTiles
+          ) * tileSize,
+        },
         position,
         worldPosition: clonePlainValue(position),
         grid: {
@@ -1969,6 +2271,12 @@ function realizeBlueprintFeatureRecords({
         supportKind: segmentSupport?.supportKind ?? null,
         supportCellId: segmentSupport?.supportCellId ?? null,
         supportCellIds: segmentSupportCells.map(({ supportCellId }) => supportCellId),
+        // `supportCellIds` describes what physically supports a feature and
+        // can therefore name adjacent-edge cells. This separate inventory is
+        // the authoritative set of floor/transfer cells the solid actually
+        // occupies; an explicit empty array means the feature occupies no
+        // authored walkable cell centers.
+        ...(hasAuthoredSolidFloorOccupancy ? { occupiedSupportCellIds } : {}),
         supportFloorCellId: segmentSupport?.floorCellId ?? null,
         sourceTransferId: segmentSupport?.sourceTransferId ?? null,
         sourceTransferRuntimeId: segmentSupport?.sourceTransferRuntimeId ?? null,
@@ -1986,7 +2294,7 @@ function realizeBlueprintFeatureRecords({
       ['machine'].includes(blueprintFeatureType)
     )),
     anchorPositions: records.filter(({ blueprintFeatureType }) => (
-      ['control', 'reward', 'spawn', 'hazard'].includes(blueprintFeatureType)
+      ['control', 'reward', 'spawn', 'hazard', 'story'].includes(blueprintFeatureType)
     )).map((record) => ({
       ...record,
       id: `${record.runtimeId}:anchor`,
@@ -3043,6 +3351,9 @@ function relocateManifestAnchorsToBlueprint({
   const rewardTargets = blueprintAnchorPositions.filter(({ blueprintFeatureType }) => (
     blueprintFeatureType === 'reward'
   ));
+  const discoveryTargets = blueprintAnchorPositions.filter(({ blueprintFeatureType }) => (
+    blueprintFeatureType === 'story'
+  ));
   const encounterZones = blueprintZones.filter(({ zoneKind }) => zoneKind === 'encounter');
   const hazardZones = blueprintZones.filter(({ zoneKind }) => zoneKind === 'hazard');
   const requiredSpatialAnchorIds = new Set(manifestAnchors.flatMap((anchor) => (
@@ -3145,7 +3456,12 @@ function relocateManifestAnchorsToBlueprint({
       return controlTargets[0] ?? null;
     }
     if (kind === 'reward') return rewardTargets[0] ?? null;
-    if (kind === 'discovery') return controlTargets[0] ?? rewardTargets[0] ?? null;
+    // A physical blueprint can author a dedicated story position alongside a
+    // reward. Keep those semantic anchors on their corresponding authored
+    // supports before falling back to older control/reward-only blueprints.
+    if (kind === 'discovery') {
+      return discoveryTargets[0] ?? controlTargets[0] ?? rewardTargets[0] ?? null;
+    }
     if (kind === 'platform') {
       const transfer = blueprintTransfers[
         Math.min(platformOrdinal, Math.max(blueprintTransfers.length - 1, 0))
@@ -3495,6 +3811,9 @@ function createManifestCollisionRecords({
       z: number(record.collisionFootprint?.depthMeters, tileSize * 0.42),
     },
     blocksLineOfSight: Boolean(record.blocksLineOfSight),
+    ...(Array.isArray(record.occupiedSupportCellIds) ? {
+      occupiedSupportCellIds: [...record.occupiedSupportCellIds],
+    } : {}),
     // Cover is physical even when the player can see over it. Treating
     // waist-high props as a non-blocking reservation made authored flank
     // lanes and encounter choreography visually present but collisionless.
@@ -3517,6 +3836,9 @@ function createManifestCollisionRecords({
       y: number(record.collisionFootprint.heightMeters, 3.6),
       z: number(record.collisionFootprint.depthMeters, tileSize),
     } : undefined,
+    ...(Array.isArray(record.occupiedSupportCellIds) ? {
+      occupiedSupportCellIds: [...record.occupiedSupportCellIds],
+    } : {}),
     blocking: blueprint ? record.blocking === true : false,
   }));
   const transferRecords = transfers.map((transfer) => ({
@@ -3571,6 +3893,305 @@ function createManifestCollisionRecords({
     ...voidRecords,
     ...socketRecordsForCollision,
   ];
+}
+
+function blueprintFeaturePresentationContract(featureType) {
+  switch (String(featureType ?? 'feature')) {
+    case 'cover':
+      return {
+        semanticRole: 'gameplay-cover',
+        themeRole: 'gameplayCover',
+        presentationOwner: 'supplement-assembler',
+        realizationKind: 'theme-object-root',
+      };
+    case 'machine':
+      return {
+        semanticRole: 'machinery-landmark',
+        themeRole: 'machineryLandmark',
+        presentationOwner: 'supplement-assembler',
+        realizationKind: 'theme-object-root',
+      };
+    case 'story':
+      return {
+        semanticRole: 'story-marking',
+        themeRole: 'storyMarking',
+        presentationOwner: 'supplement-assembler',
+        realizationKind: 'theme-object-root',
+      };
+    case 'control':
+      return {
+        semanticRole: 'gameplay-control',
+        themeRole: null,
+        presentationOwner: 'gameplay-runtime',
+        realizationKind: 'gameplay-anchor',
+      };
+    case 'hazard':
+      return {
+        semanticRole: 'gameplay-hazard',
+        themeRole: null,
+        presentationOwner: 'gameplay-runtime',
+        realizationKind: 'gameplay-anchor',
+      };
+    case 'reward':
+      return {
+        semanticRole: 'gameplay-reward',
+        themeRole: null,
+        presentationOwner: 'gameplay-runtime',
+        realizationKind: 'gameplay-anchor',
+      };
+    case 'spawn':
+      return {
+        semanticRole: 'encounter-spawn',
+        themeRole: null,
+        presentationOwner: 'gameplay-runtime',
+        realizationKind: 'gameplay-anchor',
+      };
+    case 'transfer':
+      return {
+        semanticRole: 'traversal-transfer',
+        themeRole: null,
+        presentationOwner: 'supplement-connector-assembler',
+        realizationKind: 'physical-transfer',
+      };
+    default:
+      return {
+        semanticRole: `authored-${stableIdPart(featureType ?? 'feature')}`,
+        themeRole: null,
+        presentationOwner: 'gameplay-runtime',
+        realizationKind: 'gameplay-anchor',
+      };
+  }
+}
+
+function createBlueprintPresentationRecords({
+  node,
+  operation,
+  blueprint,
+  blueprintFeatures,
+  anchors = [],
+  transfers = [],
+  collisionRecords = [],
+  tileSize,
+  themeBinding,
+}) {
+  if (!blueprint) return [];
+  const collisionRecordIds = new Set(collisionRecords.map(({ id }) => String(id)));
+  const featureRecordsBySourceId = new Map();
+  for (const record of blueprintFeatures?.all ?? []) {
+    const sourceId = String(record.sourceFeatureRuntimeId ?? record.runtimeId ?? record.id);
+    const records = featureRecordsBySourceId.get(sourceId) ?? [];
+    records.push(record);
+    featureRecordsBySourceId.set(sourceId, records);
+  }
+  const activeSpatialAnchorIds = new Set(anchors.flatMap((anchor) => (
+    anchor.encounterRecipe?.spatialRoles ?? []
+  )).flatMap(({ anchorIds = [] }) => anchorIds.map(String)));
+  const anchorIsActiveRuntimeConsumer = (anchor) => Boolean(
+    anchor.encounterRecipe
+      || anchor.rewardRecipe
+      || anchor.mechanismRecipe
+      || anchor.hazardRecipe
+      || anchor.discoveryRecipe
+      || (
+        String(anchor.kind ?? '') === 'spatial-role'
+          && activeSpatialAnchorIds.has(String(anchor.localAnchorId ?? anchor.id ?? ''))
+      )
+  );
+
+  const records = (blueprint.features ?? []).map((sourceFeature) => {
+    const localFeatureId = String(sourceFeature.id);
+    const sourceFeatureRuntimeId = `${node.id}:blueprint-feature:${stableIdPart(localFeatureId)}`;
+    const realizedFeatures = featureRecordsBySourceId.get(sourceFeatureRuntimeId) ?? [];
+    assertSupplementContentContract(
+      realizedFeatures.length > 0,
+      node,
+      `blueprint feature ${localFeatureId} has no source presentation identity`,
+    );
+    const representative = realizedFeatures[0];
+    const featureType = String(sourceFeature.type ?? representative.blueprintFeatureType ?? 'feature');
+    const contract = blueprintFeaturePresentationContract(featureType);
+    const relatedAnchors = anchors.filter((anchor) => (
+      String(anchor.sourceFeatureId ?? '') === localFeatureId
+        || String(anchor.blueprintFeatureId ?? '') === localFeatureId
+        || String(anchor.sourceFeatureRuntimeId ?? '') === sourceFeatureRuntimeId
+    ));
+    const relatedAnchorIds = new Set(relatedAnchors.map(({ id }) => String(id)));
+    const canonicalAnchorIds = [...new Set((blueprintFeatures?.anchorPositions ?? [])
+      .filter((anchor) => (
+        String(anchor.sourceFeatureId ?? anchor.localFeatureId ?? '') === localFeatureId
+          && String(anchor.sourceFeatureRuntimeId ?? '') === sourceFeatureRuntimeId
+      ))
+      .map(({ id }) => String(id)))]
+      .sort();
+    const runtimeConsumerBindingIds = [...new Set(relatedAnchors
+      .filter((anchor) => !canonicalAnchorIds.includes(String(anchor.id)))
+      .filter(anchorIsActiveRuntimeConsumer)
+      .map(({ id }) => String(id)))]
+      .sort();
+    const relatedTransfers = transfers.filter((transfer) => (
+      String(transfer.localTransferId ?? '') === localFeatureId
+        || String(transfer.sourceFeatureId ?? '') === localFeatureId
+    ));
+    const relatedTransferIds = new Set(relatedTransfers.flatMap((transfer) => [
+      String(transfer.id),
+      String(transfer.localTransferId ?? ''),
+    ]).filter(Boolean));
+    const physicalTransferBindingIds = [...new Set(relatedTransfers
+      .filter((transfer) => String(transfer.localTransferId ?? '') === localFeatureId)
+      .map(({ id }) => String(id)))]
+      .sort();
+    const relatedSourceIds = new Set([
+      localFeatureId,
+      sourceFeatureRuntimeId,
+      ...realizedFeatures.flatMap((record) => [
+        String(record.id),
+        String(record.runtimeId ?? ''),
+        String(record.collisionId ?? ''),
+      ]),
+      ...relatedAnchorIds,
+      ...relatedTransferIds,
+    ].filter(Boolean));
+    const associatedCollisionRecordIds = new Set(realizedFeatures
+      .map(({ collisionId }) => String(collisionId ?? ''))
+      .filter((id) => id && collisionRecordIds.has(id)));
+    for (const record of collisionRecords) {
+      const recordId = String(record.id ?? '');
+      const sourceId = String(record.sourceId ?? '');
+      if (
+        relatedSourceIds.has(sourceId)
+        || relatedSourceIds.has(recordId)
+        || (record.sourceKind === 'physical-transfer'
+          && String(record.localTransferId ?? record.sourceId ?? '') === localFeatureId)
+      ) {
+        associatedCollisionRecordIds.add(recordId);
+      }
+    }
+
+    const authoredFootprint = representative.authoredLocalFootprint
+      ?? blueprintRecordFootprint(sourceFeature);
+    const authoredMeters = representative.authoredFootprintMeters ?? {
+      width: number(authoredFootprint.widthTiles, 1) * tileSize,
+      height: featureType === 'cover' ? 1.2 : featureType === 'story' ? 0.035 : 3.6,
+      depth: number(authoredFootprint.depthTiles, 1) * tileSize,
+    };
+    const worldMeters = representative.authoredWorldFootprintMeters ?? authoredMeters;
+    const usesCommittedSolidPosition = ['cover', 'machine'].includes(featureType)
+      && representative.blocking === true
+      && Array.isArray(representative.occupiedSupportCellIds)
+      && representative.occupiedSupportCellIds.length > 0
+      && representative.supportKind === 'floor-tier-cell'
+      && representative.supportFloorCellId != null;
+    const position = clonePlainValue(
+      usesCommittedSolidPosition
+        ? representative.worldPosition ?? representative.position
+        : representative.authoredWorldPosition
+          ?? representative.worldPosition
+          ?? representative.position,
+    );
+    const optional = featureType === 'story';
+    const selectedForRendering = Boolean(contract.themeRole) && !optional;
+    const ownerBindingIds = contract.presentationOwner === 'gameplay-runtime'
+      ? canonicalAnchorIds
+      : contract.presentationOwner === 'supplement-connector-assembler'
+        ? physicalTransferBindingIds
+        : [];
+    if (contract.presentationOwner !== 'supplement-assembler') {
+      assertSupplementContentContract(
+        ownerBindingIds.length === 1,
+        node,
+        `blueprint feature ${localFeatureId} has ${ownerBindingIds.length} canonical ${contract.presentationOwner} owner bindings`,
+      );
+    }
+    const runtimeActivation = contract.presentationOwner === 'gameplay-runtime'
+      ? runtimeConsumerBindingIds.length > 0 ? 'active' : 'dormant'
+      : optional
+        ? 'optional-not-selected'
+        : 'not-applicable';
+    return {
+      id: `${sourceFeatureRuntimeId}:presentation`,
+      schema: INDUSTRIAL_SUPPLEMENT_PRESENTATION_RECORD_SCHEMA,
+      roomId: node.id,
+      nodeId: node.id,
+      operationId: operation?.id ?? nodeOperationId(node),
+      blueprintId: blueprint.id,
+      sourceFeatureId: localFeatureId,
+      sourceFeatureRuntimeId,
+      sourceFeatureType: featureType,
+      sourceFeature: clonePlainValue(sourceFeature),
+      sourceRealizationIds: realizedFeatures.map(({ id }) => String(id)).sort(),
+      collisionRecordIds: [...associatedCollisionRecordIds].sort(),
+      transform: {
+        position: clonePlainValue(position),
+        rotationQuarterTurns: number(representative.authoredRotationQuarterTurns),
+        rotationY: number(representative.authoredRotationY),
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      position: clonePlainValue(position),
+      rotationY: number(representative.authoredRotationY),
+      authoredFootprint: {
+        coordinateSpace: 'blueprint-local-tiles',
+        localTile: clonePlainValue(representative.authoredLocalTile),
+        center: clonePlainValue(authoredFootprint.center),
+        widthTiles: number(authoredFootprint.widthTiles, 1),
+        depthTiles: number(authoredFootprint.depthTiles, 1),
+        widthMeters: number(authoredMeters.width),
+        heightMeters: number(authoredMeters.height),
+        depthMeters: number(authoredMeters.depth),
+      },
+      worldFootprint: {
+        coordinateSpace: 'world-meters-axis-aligned',
+        widthMeters: number(worldMeters.width),
+        heightMeters: number(worldMeters.height),
+        depthMeters: number(worldMeters.depth),
+      },
+      widthMeters: number(authoredMeters.width),
+      heightMeters: number(authoredMeters.height),
+      depthMeters: number(authoredMeters.depth),
+      semanticRole: contract.semanticRole,
+      themeRole: contract.themeRole,
+      presentationAssetRole: contract.themeRole,
+      presentationOwner: contract.presentationOwner,
+      realizationOwner: contract.presentationOwner,
+      realizationKind: contract.realizationKind,
+      ownerBindingIds,
+      runtimeConsumerBindingIds,
+      runtimeActivation,
+      required: !optional,
+      optional,
+      nonblocking: optional,
+      selectedForRendering,
+      renderingRequired: selectedForRendering,
+      // Every source presentation receives exactly one realization ledger
+      // disposition. Optionality controls rendering, not audit coverage.
+      realizationRequired: true,
+      renderedBySupplementAssembler: selectedForRendering,
+      presentationSurface: optional ? 'floor-flush-decal' : 'authored-volume',
+      selectionStatus: optional ? 'pending-network-selection' : 'required',
+      preservesAuthoritativeCollision: true,
+      themeBinding: clonePlainValue(themeBinding),
+      authoritative: true,
+      preRender: true,
+    };
+  });
+  assertSupplementContentContract(
+    records.length === (blueprint.features ?? []).length
+      && new Set(records.map(({ sourceFeatureId }) => sourceFeatureId)).size === records.length,
+    node,
+    'blueprint presentation records do not map source features one-to-one',
+  );
+  const delegatedOwnerBindings = records.flatMap((record) => (
+    record.realizationOwner === 'supplement-assembler'
+      ? []
+      : record.ownerBindingIds.map((ownerBindingId) => (
+        `${record.realizationOwner}:${ownerBindingId}`
+      ))
+  ));
+  assertSupplementContentContract(
+    delegatedOwnerBindings.length === new Set(delegatedOwnerBindings).size,
+    node,
+    'blueprint presentation records share delegated owner bindings',
+  );
+  return records;
 }
 
 function manifestRecipeRecords(anchors = []) {
@@ -3829,6 +4450,15 @@ function createSupplementRoom(node, tileSize, operation = null, {
       themeBinding,
     },
   ) : [];
+  const protectedSightlines = moduleManifest ? realizeManifestProtectedSightlines({
+    node,
+    operation,
+    manifest: moduleManifest,
+    center,
+    rotationQuarterTurns,
+    tileSize,
+    themeBinding,
+  }) : [];
   const authoredClearRoutes = physicalBlueprint ? realizeBlueprintClearRoutes({
     node,
     operation,
@@ -3890,6 +4520,17 @@ function createSupplementRoom(node, tileSize, operation = null, {
     transfers: blueprintTransfers,
     voids: blueprintVoids,
     socketRecords: blueprintSocketRecords,
+    tileSize,
+    themeBinding,
+  }) : [];
+  const presentationRecords = physicalBlueprint ? createBlueprintPresentationRecords({
+    node,
+    operation,
+    blueprint: physicalBlueprint,
+    blueprintFeatures,
+    anchors,
+    transfers: blueprintTransfers,
+    collisionRecords,
     tileSize,
     themeBinding,
   }) : [];
@@ -4000,12 +4641,14 @@ function createSupplementRoom(node, tileSize, operation = null, {
     cover: clonePlainValue(cover),
     landmarks: clonePlainValue(landmarks),
     lighting: clonePlainValue(lighting),
+    protectedSightlines: clonePlainValue(protectedSightlines),
     sockets: clonePlainValue(blueprintSocketRecords),
     transfers: clonePlainValue(blueprintTransfers),
     features: clonePlainValue(blueprintFeatures.all),
     voids: clonePlainValue(blueprintVoids),
     stateRecords: clonePlainValue(blueprintStateRecords),
     collisionRecords: clonePlainValue(collisionRecords),
+    presentationRecords: clonePlainValue(presentationRecords),
     anchorRecords: clonePlainValue(anchors),
     recipeRecords: clonePlainValue(recipeRecords),
   } : node.structure ?? null;
@@ -4033,6 +4676,7 @@ function createSupplementRoom(node, tileSize, operation = null, {
     cover: clonePlainValue(cover),
     landmarks: clonePlainValue(landmarks),
     lighting: clonePlainValue(lighting),
+    protectedSightlines: clonePlainValue(protectedSightlines),
     anchors: clonePlainValue(anchors),
     socketRecords: clonePlainValue(blueprintSocketRecords),
     sockets: clonePlainValue(blueprintSocketRecords),
@@ -4043,6 +4687,7 @@ function createSupplementRoom(node, tileSize, operation = null, {
     localStateIds: blueprintStateRecords.map(({ localStateId }) => localStateId),
     stateIds: blueprintStateRecords.map(({ runtimeStateId }) => runtimeStateId),
     collisionRecords: clonePlainValue(collisionRecords),
+    presentationRecords: clonePlainValue(presentationRecords),
     recipeRecords: clonePlainValue(recipeRecords),
     structureMetadata: clonePlainValue(structureMetadata),
     structuralQualityReport: clonePlainValue(structuralQualityReport),
@@ -4140,6 +4785,7 @@ function createSupplementRoom(node, tileSize, operation = null, {
     augmentationStructuralQualityReport: clonePlainValue(structuralQualityReport),
     augmentationPhysicalRealization: physicalRealization,
     augmentationCollisionRecords: collisionRecords,
+    augmentationPresentationRecords: presentationRecords,
     augmentationRecipeRecords: recipeRecords,
     augmentationModuleTemplateId: node.moduleTemplateId
       ?? physicalBlueprint?.id
@@ -4166,6 +4812,7 @@ function createSupplementRoom(node, tileSize, operation = null, {
     augmentationCover: cover,
     augmentationLandmarks: landmarks,
     augmentationLighting: lighting,
+    augmentationProtectedSightlines: protectedSightlines,
     augmentationRotationQuarterTurns: physicalRotationQuarterTurns,
     augmentationPlacementRotationQuarterTurns: rotationQuarterTurns,
     augmentationBlueprintCanonicalRotationQuarterTurns:
@@ -4554,6 +5201,11 @@ function createSocket({
       routeNetworkSocketKind: sourceEndpoint?.routeNetworkSocketKind ?? null,
       parentRouteId: sourceEndpoint?.parentRouteId ?? null,
       progressionRoomId: sourceEndpoint?.sourceParentNodeId ?? roomId,
+      // Progression collapsing may later retarget progressionRoomId from a
+      // connector proxy to a substantive room. Preserve the exact physical
+      // owner used by the accepted endpoint seam independently of that graph
+      // facade so runtime seam validation cannot drift after materialization.
+      authoritativeSeamNodeId: sourceEndpoint?.sourceParentNodeId ?? roomId,
       connectorJunctionProxyId: sourceEndpoint?.routeNetworkSocketKind
         === 'authored-corridor-station'
         ? roomId
@@ -5170,7 +5822,9 @@ function createSupplementConnectionPlan(
     // seam. Ordinary parent-room and supplemental sockets have the same
     // progression and physical owner, so this remains an exact identity check
     // for every other endpoint kind.
-    const authoritativeNodeId = socket.progressionRoomId ?? socket.roomId;
+    const authoritativeNodeId = socket.authoritativeSeamNodeId
+      ?? socket.progressionRoomId
+      ?? socket.roomId;
     if (
       seam.schema !== 'ruindivex-dungeon-route-endpoint-seam/v1'
       || String(seam.segmentId ?? '') !== String(segment.id)
@@ -5184,6 +5838,13 @@ function createSupplementConnectionPlan(
         `${sourceRole} endpoint seam identity changed during materialization`,
       );
     }
+    // A supplemental socket on an exact parent station can inherit the
+    // authored corridor owner through its node even though the serialized
+    // endpoint itself has no parentRouteId. Carry the accepted seam owner as
+    // a stable physical identity; progression/socket rewrites must not infer
+    // or erase it later.
+    socket.authoritativeSeamParentOwnerId =
+      seam.overlapEnvelope?.parentOwnerId ?? null;
     const facing = {
       x: Math.sign(number(seam.facing?.x)),
       z: Math.sign(number(seam.facing?.z)),
@@ -5385,6 +6046,9 @@ function createSupplementConnectionPlan(
         destinationElevation,
         direction: plan.direction,
         allowExactQuantizedElevationDelta,
+        switchbackSideSign: segment.slopeSwitchbackSideSign == null
+          ? null
+          : Number(segment.slopeSwitchbackSideSign) * (reverseForSourceGate ? -1 : 1),
       },
     );
   } catch (error) {
@@ -5537,6 +6201,221 @@ function addRoomSocket(roomById, roomId, socket, connectionId, purpose) {
   room.exitSockets.push({ ...socket, connectionId, purpose });
 }
 
+function horizontalPresentationBounds(position, width, depth, dilation = 0) {
+  const halfWidth = Math.max(0, number(width)) * 0.5 + Math.max(0, number(dilation));
+  const halfDepth = Math.max(0, number(depth)) * 0.5 + Math.max(0, number(dilation));
+  return {
+    minX: number(position?.x) - halfWidth,
+    maxX: number(position?.x) + halfWidth,
+    minZ: number(position?.z) - halfDepth,
+    maxZ: number(position?.z) + halfDepth,
+  };
+}
+
+function horizontalPresentationBoundsOverlap(first, second) {
+  return first.minX < second.maxX - CONNECTOR_ELEVATION_EPSILON
+    && first.maxX > second.minX + CONNECTOR_ELEVATION_EPSILON
+    && first.minZ < second.maxZ - CONNECTOR_ELEVATION_EPSILON
+    && first.maxZ > second.minZ + CONNECTOR_ELEVATION_EPSILON;
+}
+
+export function inspectIndustrialSupplementStoryPresentationLegality({
+  room,
+  record,
+  effectiveConnections = [],
+  tileSize,
+}) {
+  const candidate = horizontalPresentationBounds(
+    record.transform?.position ?? record.position,
+    record.worldFootprint?.widthMeters ?? record.widthMeters,
+    record.worldFootprint?.depthMeters ?? record.depthMeters,
+  );
+  const reasons = new Set();
+  const associatedCollisionIds = new Set((record.collisionRecordIds ?? []).map(String));
+  const intersects = (bounds, reason) => {
+    if (horizontalPresentationBoundsOverlap(candidate, bounds)) reasons.add(reason);
+  };
+
+  for (const collision of room.augmentationCollisionRecords ?? []) {
+    if (associatedCollisionIds.has(String(collision.id))) continue;
+    const protectedCollision = collision.blocking === true
+      || collision.mustRemainClear === true
+      || collision.excludesFloor === true
+      || collision.reservedOpening === true
+      || ['anchor', 'physical-transfer', 'blueprint-socket'].includes(collision.sourceKind);
+    if (!protectedCollision || !collision.center || !collision.size) continue;
+    intersects(horizontalPresentationBounds(
+      collision.center,
+      collision.size.x,
+      collision.size.z,
+    ), `collision:${collision.id}`);
+  }
+
+  for (const sightline of room.augmentationProtectedSightlines ?? []) {
+    if (sightline.authoritative === false
+      || sightline.protectionKind !== 'required-sightline') continue;
+    for (const cell of sightline.worldCells ?? []) {
+      intersects(horizontalPresentationBounds(
+        cell.position ?? cell.worldPosition,
+        number(cell.widthMeters, tileSize),
+        number(cell.depthMeters, tileSize),
+      ), `protected-sightline:${sightline.sightlineId ?? sightline.id}`);
+    }
+  }
+
+  // Route/landing/encounter zones are already projected onto exact authored
+  // cells. A one-tile dilation reserves the readable travel and sightline
+  // envelope without consuming planner RNG or inventing new collision.
+  for (const zone of room.augmentationZones ?? []) {
+    if (!['clear', 'encounter', 'hazard'].includes(String(zone.zoneKind ?? ''))) continue;
+    for (const cell of zone.worldCells ?? []) {
+      intersects(horizontalPresentationBounds(
+        cell.position,
+        tileSize,
+        tileSize,
+        tileSize,
+      ), `dilated-zone:${zone.runtimeId ?? zone.id}`);
+    }
+  }
+  for (const transfer of room.augmentationTransfers ?? []) {
+    for (const cell of transfer.worldCells ?? []) {
+      intersects(horizontalPresentationBounds(
+        cell.position,
+        tileSize,
+        tileSize,
+        tileSize,
+      ), `dilated-transfer:${transfer.id}`);
+    }
+  }
+  for (const anchor of room.augmentationAnchors ?? []) {
+    const kind = String(anchor.kind ?? anchor.type ?? '');
+    const ownsStoryPresentationIdentity = Boolean(
+      String(record.sourceFeatureRuntimeId ?? '')
+        && String(anchor.sourceFeatureRuntimeId ?? '')
+          === String(record.sourceFeatureRuntimeId)
+        && /story/i.test(kind),
+    );
+    // A story feature's canonical blueprint anchor is its source identity, not
+    // a separate gameplay reservation. Its associated collision is already
+    // excluded above; excluding the matching nonblocking story anchor keeps
+    // that same source record from vetoing its own decal. Controls, rewards,
+    // spawns, mechanisms, hazards, and every foreign anchor remain protected.
+    if (ownsStoryPresentationIdentity) continue;
+    if (!(
+      anchor.sourceFeatureId
+      || anchor.blueprintFeatureId
+      || /spawn|encounter|control|mechanism|reward|hazard|trap/i.test(kind)
+    )) continue;
+    intersects(horizontalPresentationBounds(
+      anchor.position ?? anchor.worldPosition,
+      tileSize,
+      tileSize,
+      tileSize * 0.5,
+    ), `anchor:${anchor.id}`);
+  }
+  for (const socket of room.augmentationSocketRecords ?? []) {
+    intersects(horizontalPresentationBounds(
+      socket.position ?? socket.worldPosition,
+      number(socket.widthMeters, tileSize),
+      tileSize,
+      tileSize,
+    ), `socket-landing:${socket.runtimeId ?? socket.id}`);
+  }
+  for (const plan of effectiveConnections) {
+    if (String(plan.augmentationOperationId ?? plan.operationId ?? '')
+      !== String(record.operationId ?? '')) continue;
+    for (const seam of plan.endpointSeams ?? []) {
+      for (const cell of seam.orderedCells ?? []) {
+        intersects(horizontalPresentationBounds(
+          { x: number(cell.gridX) * tileSize, z: number(cell.gridZ) * tileSize },
+          tileSize,
+          tileSize,
+          tileSize,
+        ), `endpoint-seam:${seam.id}`);
+      }
+    }
+  }
+  return {
+    legal: reasons.size === 0,
+    reasons: [...reasons].sort(),
+  };
+}
+
+function synchronizeRoomPresentationRecords(room) {
+  const records = room.augmentationPresentationRecords ?? [];
+  if (room.augmentationStructure) {
+    room.augmentationStructure = {
+      ...room.augmentationStructure,
+      presentationRecords: clonePlainValue(records),
+    };
+  }
+  if (room.augmentationPhysicalRealization) {
+    room.augmentationPhysicalRealization = {
+      ...room.augmentationPhysicalRealization,
+      presentationRecords: clonePlainValue(records),
+    };
+  }
+}
+
+function selectOptionalV4StoryPresentation({
+  supplementRooms,
+  effectiveConnections,
+  tileSize,
+  enabled = true,
+}) {
+  const recordsByOperationId = new Map();
+  for (const room of supplementRooms) {
+    for (const record of room.augmentationPresentationRecords ?? []) {
+      if (record.semanticRole !== 'story-marking') continue;
+      const operationId = String(record.operationId ?? room.augmentationOperationId ?? '');
+      const candidates = recordsByOperationId.get(operationId) ?? [];
+      candidates.push({ room, record });
+      recordsByOperationId.set(operationId, candidates);
+    }
+  }
+  for (const [operationId, candidates] of recordsByOperationId) {
+    const inspected = candidates.map((candidate) => ({
+      ...candidate,
+      inspection: inspectIndustrialSupplementStoryPresentationLegality({
+        room: candidate.room,
+        record: candidate.record,
+        effectiveConnections,
+        tileSize,
+      }),
+    }));
+    const legal = inspected.filter(({ inspection }) => inspection.legal)
+      .sort((left, right) => String(left.record.id).localeCompare(String(right.record.id)));
+    const selectionHash = stableHashText(canonicalStringify({
+      operationId,
+      candidateIds: legal.map(({ record }) => record.id),
+    }), INDUSTRIAL_SUPPLEMENT_STORY_SELECTION_NAMESPACE);
+    const hashLane = Number.parseInt(selectionHash.slice(3, 11), 16) >>> 0;
+    const selected = enabled && legal.length > 0 ? legal[hashLane % legal.length] : null;
+    for (const candidate of inspected) {
+      const isSelected = candidate === selected;
+      candidate.record.selectedForRendering = isSelected;
+      candidate.record.renderingRequired = isSelected;
+      candidate.record.realizationRequired = true;
+      candidate.record.renderedBySupplementAssembler = isSelected;
+      candidate.record.runtimeActivation = isSelected
+        ? 'not-applicable'
+        : 'optional-not-selected';
+      candidate.record.storySelectionHash = selectionHash;
+      candidate.record.storySelectionCandidateCount = legal.length;
+      candidate.record.storyPlacementLegal = candidate.inspection.legal;
+      candidate.record.storyPlacementRejectionReasons = candidate.inspection.reasons;
+      candidate.record.selectionStatus = !enabled
+        ? 'optional-decoration-disabled'
+        : isSelected
+          ? 'selected-by-isolated-stable-hash'
+          : candidate.inspection.legal
+            ? 'not-selected'
+            : 'illegal-placement';
+    }
+  }
+  for (const room of supplementRooms) synchronizeRoomPresentationRecords(room);
+}
+
 function createIndustrialAssemblyOverlayPlan(overlayPlan, supplementRooms) {
   const roomByNodeId = new Map(supplementRooms.map((room) => (
     [String(room.augmentationNodeId ?? room.id), room]
@@ -5552,8 +6431,25 @@ function createIndustrialAssemblyOverlayPlan(overlayPlan, supplementRooms) {
       if (/control|terminal/i.test(kind)) return 'control';
       return 'prop';
     };
+    const hasAuthoredBlueprintPresentation = Boolean(room.augmentationBlueprintId);
+    const authoritativeV4BlueprintPresentation = Boolean(
+      hasAuthoredBlueprintPresentation
+        && (
+          overlayPlan?.profileId === INDUSTRIAL_SUPPLEMENT_V4_PROFILE_ID
+            || room.augmentationPhysicalRealization?.profileId
+              === INDUSTRIAL_SUPPLEMENT_V4_PROFILE_ID
+            || room.augmentationStructureMetadata?.profileId
+              === INDUSTRIAL_SUPPLEMENT_V4_PROFILE_ID
+        )
+    );
+    const assemblyAnchors = (room.augmentationAnchors ?? []).filter((anchor) => (
+      !(
+        authoritativeV4BlueprintPresentation
+          && String(anchor?.kind ?? anchor?.type ?? '') === 'doorway-frame'
+      )
+    ));
     const manifestPresentationAnchors = [
-      ...(room.augmentationCover ?? []).map((cover) => ({
+      ...(hasAuthoredBlueprintPresentation ? [] : (room.augmentationCover ?? [])).map((cover) => ({
         ...clonePlainValue(cover),
         id: `${cover.id}:presentation`,
         sourceRecordId: cover.id,
@@ -5561,7 +6457,7 @@ function createIndustrialAssemblyOverlayPlan(overlayPlan, supplementRooms) {
         assetRole: 'prop',
         isManifestCover: true,
       })),
-      ...(room.augmentationLandmarks ?? []).map((landmark) => ({
+      ...(hasAuthoredBlueprintPresentation ? [] : (room.augmentationLandmarks ?? [])).map((landmark) => ({
         ...clonePlainValue(landmark),
         id: `${landmark.id}:presentation`,
         sourceRecordId: landmark.id,
@@ -5582,7 +6478,12 @@ function createIndustrialAssemblyOverlayPlan(overlayPlan, supplementRooms) {
       ...node,
       themeBinding: clonePlainValue(room.augmentationThemeBinding),
       anchors: clonePlainValue([
-        ...(room.augmentationAnchors ?? []),
+        // V4 parent-socket boundary indicators are the only threshold
+        // markers. Keep doorway-frame records in the authoritative
+        // materialization ledger, but do not send their old per-module render
+        // path to the assembler. V1-V3 and non-blueprint assembly are
+        // deliberately outside this filter.
+        ...assemblyAnchors,
         ...manifestPresentationAnchors,
       ]),
       structure: clonePlainValue(room.augmentationStructure),
@@ -5597,6 +6498,7 @@ function createIndustrialAssemblyOverlayPlan(overlayPlan, supplementRooms) {
       socketRecords: clonePlainValue(room.augmentationSocketRecords),
       transfers: clonePlainValue(room.augmentationTransfers),
       features: clonePlainValue(room.augmentationBlueprintFeatures),
+      presentationRecords: clonePlainValue(room.augmentationPresentationRecords),
       voids: clonePlainValue(room.augmentationVoids),
       blueprintStateRecords: clonePlainValue(room.augmentationBlueprintStateRecords),
       blueprintStateIds: clonePlainValue(room.augmentationBlueprintStateIds),
@@ -5605,6 +6507,7 @@ function createIndustrialAssemblyOverlayPlan(overlayPlan, supplementRooms) {
       cover: clonePlainValue(room.augmentationCover),
       landmarks: clonePlainValue(room.augmentationLandmarks),
       lighting: clonePlainValue(room.augmentationLighting),
+      protectedSightlines: clonePlainValue(room.augmentationProtectedSightlines),
       collisionRecords: clonePlainValue(room.augmentationCollisionRecords),
       recipeRecords: clonePlainValue(room.augmentationRecipeRecords),
       physicalRealization: clonePlainValue(room.augmentationPhysicalRealization),
@@ -5630,6 +6533,7 @@ function atomicIndustrialMaterializationRejection({
   connectionPlans,
   overlayPlan,
   errors,
+  materializationFailures = [],
   reason = 'materialization-failed',
 }) {
   const normalizedErrors = errors.map((error) => error?.message ?? String(error));
@@ -5656,6 +6560,7 @@ function atomicIndustrialMaterializationRejection({
       accepted: false,
       reason,
       errors: normalizedErrors,
+      materializationFailures: clonePlainValue(materializationFailures),
       contentContractErrors,
       atomicRejected: true,
       profileId: overlayPlan?.profileId ?? null,
@@ -5835,11 +6740,12 @@ export function materializeIndustrialOverlay({
     [plan.id, immutableConnectionPlanSnapshot(plan)]
   )));
   const effectiveConnections = connectionPlans.map(cloneConnectionPlan);
-  for (const plan of effectiveConnections) {
-    if (plan.connectorVariantConstraints) {
-      plan.connectorVariantConstraints.roomFootprints = footprints.map((entry) => ({ ...entry }));
-    }
-  }
+  // Authored connector variants were selected and accepted against the base
+  // room footprints before augmentation. Preserve that immutable construction
+  // domain: adding supplemental rooms here can retroactively invalidate a V1
+  // slope/lift side even though the planner kept those rooms clear of the
+  // connector's exact protected volumes. Newly materialized supplemental plans
+  // receive the complete effective footprint set in their own factories below.
   const routeStationGraphPlans = corridorStations.stations.map((station) => (
     createCorridorStationGraphPlan(station, tileSize, footprints)
   ));
@@ -5849,6 +6755,12 @@ export function materializeIndustrialOverlay({
     .filter((operation) => operationType(operation) === 'edgePadding')
     .map((operation) => operation.id));
   const errors = [];
+  const materializationFailures = [];
+  const recordMaterializationError = (error, context = {}) => {
+    errors.push(error?.message ?? String(error));
+    const failure = routeNetworkMaterializationFailure(error, context);
+    if (failure) materializationFailures.push(failure);
+  };
   errors.push(...corridorStations.errors);
   errors.push(...connectorJunctionProgression.errors);
   const materializedPaddingConnectionIds = [];
@@ -5929,7 +6841,7 @@ export function materializeIndustrialOverlay({
           originalEdgeSnapshot: clonePlainValue(operation.originalEdgeSnapshot ?? null),
         });
       } catch (error) {
-        errors.push(error?.message ?? String(error));
+        recordMaterializationError(error);
         contractRejected = true;
         break;
       }
@@ -6059,7 +6971,12 @@ export function materializeIndustrialOverlay({
         }
         normalizedSegments.push(normalized);
       } catch (error) {
-        errors.push(error?.message ?? String(error));
+        recordMaterializationError(error, {
+          operationId: operation.id,
+          grantId: operation.grantId,
+          segmentId: segment.id,
+          connectorFamily: supplementConnectorFamily(segment),
+        });
         rejected = true;
         break;
       }
@@ -6112,7 +7029,12 @@ export function materializeIndustrialOverlay({
           requiredForProgression: false,
         });
       } catch (error) {
-        errors.push(error?.message ?? String(error));
+        recordMaterializationError(error, {
+          operationId: operation.id,
+          grantId: operation.grantId,
+          segmentId: segment.id,
+          connectorFamily: supplementConnectorFamily(segment),
+        });
         rejected = true;
         break;
       }
@@ -6152,7 +7074,7 @@ export function materializeIndustrialOverlay({
         connectorJunctionProgression.candidatesByProxyId,
       );
     } catch (error) {
-      errors.push(error?.message ?? String(error));
+      recordMaterializationError(error);
       continue;
     }
     if (!plan.fromRoomId || !plan.toRoomId || plan.fullPath.length < 1) {
@@ -6190,8 +7112,16 @@ export function materializeIndustrialOverlay({
       connectionPlans,
       overlayPlan,
       errors,
+      materializationFailures,
     });
   }
+  selectOptionalV4StoryPresentation({
+    supplementRooms,
+    effectiveConnections,
+    tileSize,
+    enabled: overlayPlan.optionalPresentationEnabled !== false
+      && overlayPlan.presentation?.optionalDecorationsEnabled !== false,
+  });
   const assemblyOverlayPlan = createIndustrialAssemblyOverlayPlan(
     overlayPlan,
     [...supplementRooms, ...supplementConnectorJunctionProxies],
@@ -6211,6 +7141,7 @@ export function materializeIndustrialOverlay({
       accepted: errors.length === 0,
       reason: errors.length === 0 ? 'materialized' : 'materialization-failed',
       errors,
+      materializationFailures,
       roomCount: supplementRooms.length,
       connectorJunctionProxyCount: connectorJunctionProxies.length,
       supplementConnectorJunctionProxyCount: supplementConnectorJunctionProxies.filter(

@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { DungeonGenerator } from '../src/DungeonGenerator.js';
 import { DUNGEON_CONNECTOR_VARIANT_IDS } from '../src/DungeonConnectorVariants.js';
 import { GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS } from '../src/dungeon-augmentation/catalog.js';
-import { materializeIndustrialOverlay } from '../src/dungeon-augmentation/IndustrialOverlayMaterializer.js';
+import {
+  inspectIndustrialSupplementStoryPresentationLegality,
+  materializeIndustrialOverlay,
+} from '../src/dungeon-augmentation/IndustrialOverlayMaterializer.js';
+import { hashCanonicalValue } from '../src/dungeon-augmentation/canonical.js';
 import {
   INDUSTRIAL_SUPPLEMENT_MODULE_MANIFESTS,
 } from '../src/dungeon-augmentation/IndustrialSupplementContent.js';
@@ -14,9 +19,15 @@ import {
   inspectIndustrialSupplementRealizedStructuralQuality,
 } from '../src/dungeon-augmentation/IndustrialSupplementStructuralQuality.js';
 import {
+  INDUSTRIAL_SUPPLEMENT_V4_RUNTIME_CONTRACT_MODE,
+  buildIndustrialSupplementAnchorPlacementRequests,
+  resolveIndustrialSupplementAnchorPlacementRequests,
+} from '../src/dungeon-augmentation/IndustrialSupplementRuntimeContracts.js';
+import {
   createDungeonJunctionGeometryRecord,
   createDungeonRouteEndpointSeam,
   createDungeonSocketLandingOverlapVolume,
+  dungeonLandmarkSharedThresholdParentPosition,
   dungeonVolumeOverlapWithinGrant,
   transformDungeonLocalPoint,
 } from '../src/dungeon-augmentation/geometry.js';
@@ -86,22 +97,39 @@ function physicalBlueprintSocket(blueprint, socket, {
 function materializePhysicalBlueprintRoom(blueprintId, {
   center = { x: 0, y: 0, z: 0 },
   rotationQuarterTurns = 0,
+  optionalPresentationEnabled = true,
+  contentRole = null,
+  includeLegacyDoorwayFrameAnchors = false,
 } = {}) {
   const blueprint = resolveIndustrialSupplementBlueprint(blueprintId);
   assert.ok(blueprint, `${blueprintId} resolves`);
   const operationId = `test-operation:${blueprintId}`;
   const nodeId = `test-node:${blueprintId}`;
   const themeBinding = { themeId: 'industrial-v1', themeSessionId: 'transfer-test' };
+  const stableRuntimeStateIds = Object.fromEntries([
+    'encounter',
+    'mechanism',
+    'reward',
+    'shortcut',
+  ].map((kind) => [kind, `${operationId}:state:${kind}`]));
   const operation = {
     id: operationId,
     type: 'routeNetwork',
     themeBinding,
+    stableRuntimeStateIds,
   };
+  const sockets = blueprint.sockets.map((socket) => physicalBlueprintSocket(
+    blueprint,
+    socket,
+    { center, rotationQuarterTurns },
+  ));
   const node = {
     id: nodeId,
     operationId,
-    kind: 'supplementPhysicalTest',
+    kind: contentRole ? 'supplementRoom' : 'supplementPhysicalTest',
     grammarId: `test-grammar:${blueprintId}`,
+    moduleKind: contentRole ? 'room' : null,
+    contentRole,
     blueprintId,
     themeBinding,
     placement: {
@@ -113,14 +141,21 @@ function materializePhysicalBlueprintRoom(blueprintId, {
       y: Math.max(8.4, Number(blueprint.upperY ?? 0) + 3.6),
       z: blueprint.depthMeters,
     },
-    sockets: blueprint.sockets.map((socket) => physicalBlueprintSocket(blueprint, socket, {
-      center,
-      rotationQuarterTurns,
-    })),
-    anchors: [],
+    sockets,
+    anchors: includeLegacyDoorwayFrameAnchors ? sockets.map((socket, index) => ({
+      id: `${nodeId}:legacy-doorway-frame:${index}`,
+      localAnchorId: `${socket.localSocketId}-frame`,
+      kind: 'doorway-frame',
+      assetRole: 'frame',
+      position: { ...socket.position },
+      facing: { ...socket.facing },
+    })) : [],
+    stableRuntimeStateIds,
   };
   const result = materializeIndustrialOverlay({
     overlayPlan: {
+      difficulty: 2,
+      optionalPresentationEnabled,
       operations: [operation],
       nodes: [node],
       segments: [],
@@ -129,7 +164,68 @@ function materializePhysicalBlueprintRoom(blueprintId, {
   });
   const room = result.rooms.find(({ id }) => id === nodeId);
   assert.ok(room, `${blueprintId} materializes: ${JSON.stringify(result.diagnostics.errors)}`);
-  return { blueprint, room };
+  return { blueprint, room, result };
+}
+
+function materializePhysicalBlueprintNetwork(blueprintIds, {
+  optionalPresentationEnabled = true,
+} = {}) {
+  const operationId = 'test-operation:multi-blueprint-story-network';
+  const themeBinding = { themeId: 'industrial-v1', themeSessionId: 'story-network-test' };
+  const stableRuntimeStateIds = Object.fromEntries([
+    'encounter',
+    'mechanism',
+    'reward',
+    'shortcut',
+  ].map((kind) => [kind, `${operationId}:state:${kind}`]));
+  const nodes = blueprintIds.map((blueprintId, index) => {
+    const blueprint = resolveIndustrialSupplementBlueprint(blueprintId);
+    assert.ok(blueprint, `${blueprintId} resolves`);
+    const center = { x: index * TILE_SIZE * 40, y: 0, z: 0 };
+    const nodeId = `test-node:story-network:${index}:${blueprintId}`;
+    return {
+      id: nodeId,
+      operationId,
+      kind: 'supplementPhysicalTest',
+      grammarId: `test-grammar:${blueprintId}`,
+      blueprintId,
+      themeBinding,
+      placement: { center, rotationQuarterTurns: 0 },
+      size: {
+        x: blueprint.widthMeters,
+        y: Math.max(8.4, Number(blueprint.upperY ?? 0) + 3.6),
+        z: blueprint.depthMeters,
+      },
+      sockets: blueprint.sockets.map((socket) => physicalBlueprintSocket(
+        blueprint,
+        socket,
+        { center, rotationQuarterTurns: 0 },
+      )),
+      anchors: [],
+      stableRuntimeStateIds,
+    };
+  });
+  const result = materializeIndustrialOverlay({
+    overlayPlan: {
+      difficulty: 2,
+      optionalPresentationEnabled,
+      operations: [{
+        id: operationId,
+        type: 'routeNetwork',
+        themeBinding,
+        stableRuntimeStateIds,
+      }],
+      nodes,
+      segments: [],
+    },
+    tileSize: TILE_SIZE,
+  });
+  const rooms = nodes.map(({ id }) => {
+    const room = result.rooms.find((candidate) => candidate.id === id);
+    assert.ok(room, `${id} materializes: ${JSON.stringify(result.diagnostics.errors)}`);
+    return room;
+  });
+  return { result, rooms };
 }
 
 function exactLocalCell(cells, localTile, localElevation = null) {
@@ -140,6 +236,669 @@ function exactLocalCell(cells, localTile, localElevation = null) {
         || Math.abs(Number(cell.localTile?.elevation) - Number(localElevation)) <= 0.000001)
   ));
 }
+
+function assertPointApproximatelyEqual(actual, expected, message) {
+  for (const axis of ['x', 'y', 'z']) {
+    assert.ok(
+      Math.abs(Number(actual?.[axis]) - Number(expected?.[axis])) <= 0.000001,
+      `${message} ${axis}: expected ${expected?.[axis]}, received ${actual?.[axis]}`,
+    );
+  }
+}
+
+test('rotated half-grid blueprint cells retain distinct stable grid identities', () => {
+  const { room: positiveRoom } = materializePhysicalBlueprintRoom('ind-junction-through-t-01', {
+    // This exact V4 placement previously produced 71.39999999999999 and
+    // 74.19999999999999 meter cells. Raw division collapsed both onto x=26.
+    center: { x: 68.6, y: 28, z: 100.8 },
+    rotationQuarterTurns: 1,
+  });
+  const { room: negativeRoom } = materializePhysicalBlueprintRoom('ind-junction-through-t-01', {
+    center: { x: -68.6, y: 14, z: 44.8 },
+    rotationQuarterTurns: 2,
+  });
+  const baseCells = positiveRoom.augmentationFloorTiers
+    .find(({ id }) => id === 'base')
+    ?.worldCells ?? [];
+  const cellAt = (localX, localZ) => baseCells.find((cell) => (
+    Number(cell.localTile?.x) === localX
+      && Number(cell.localTile?.z) === localZ
+  ));
+
+  assert.deepEqual(
+    [1, 2, 3].map((localZ) => cellAt(0, localZ)?.grid.x),
+    [26, 27, 28],
+  );
+  assert.equal(
+    new Set(baseCells.map(({ grid }) => `${grid.x},${grid.z}`)).size,
+    baseCells.length,
+  );
+  const negativeBaseCells = negativeRoom.augmentationFloorTiers
+    .find(({ id }) => id === 'base')
+    ?.worldCells ?? [];
+  const negativeCellAt = (localX, localZ) => negativeBaseCells.find((cell) => (
+    Number(cell.localTile?.x) === localX
+      && Number(cell.localTile?.z) === localZ
+  ));
+  assert.deepEqual(
+    [-1, 0, 1].map((localX) => negativeCellAt(localX, -3)?.grid.x),
+    [-23, -24, -25],
+  );
+  assert.equal(
+    new Set(negativeBaseCells.map(({ grid }) => `${grid.x},${grid.z}`)).size,
+    negativeBaseCells.length,
+  );
+});
+
+test('calm discovery keeps log and cache on distinct rotated survey supports', () => {
+  const semanticAnchors = new Map(
+    INDUSTRIAL_SUPPLEMENT_MODULE_MANIFESTS['calm-discovery'].anchors
+      .map((anchor) => [anchor.id, anchor]),
+  );
+  assert.equal(semanticAnchors.get('discovery-log')?.kind, 'discovery');
+  assert.equal(semanticAnchors.get('discovery-cache')?.kind, 'reward');
+
+  const center = { x: 56, y: 14, z: -33.6 };
+  let stableSupportIds = null;
+  for (let rotationQuarterTurns = 0; rotationQuarterTurns < 4; rotationQuarterTurns += 1) {
+    const { room } = materializePhysicalBlueprintRoom(
+      'ind-room-survey-relay-cache-01',
+      { center, rotationQuarterTurns, contentRole: 'discovery' },
+    );
+    const anchors = new Map(room.augmentationAnchors.map((anchor) => [
+      anchor.localAnchorId,
+      anchor,
+    ]));
+    const discoveryLog = anchors.get('discovery-log');
+    const discoveryCache = anchors.get('discovery-cache');
+    assert.ok(discoveryLog);
+    assert.ok(discoveryCache);
+    assert.equal(discoveryLog.blueprintFeatureId, 'src-survey-notes');
+    assert.equal(discoveryCache.blueprintFeatureId, 'src-reward');
+    assert.equal(discoveryLog.authoritativeBlueprintPlacement, true);
+    assert.equal(discoveryCache.authoritativeBlueprintPlacement, true);
+    assert.notEqual(discoveryLog.supportCellId, discoveryCache.supportCellId);
+    assert.deepEqual(discoveryLog.localTile, { x: -2, z: -2, elevation: 0 });
+    assert.deepEqual(discoveryCache.localTile, { x: 2, z: 0, elevation: 0 });
+
+    const supportIds = [discoveryLog.supportCellId, discoveryCache.supportCellId];
+    if (stableSupportIds == null) stableSupportIds = supportIds;
+    else assert.deepEqual(supportIds, stableSupportIds);
+    const expectedLogPosition = transformDungeonLocalPoint({
+      x: -2 * TILE_SIZE,
+      y: 0,
+      z: -2 * TILE_SIZE,
+    }, { center, rotationQuarterTurns });
+    const expectedCachePosition = transformDungeonLocalPoint({
+      x: 2 * TILE_SIZE,
+      y: 0,
+      z: 0,
+    }, { center, rotationQuarterTurns });
+    assert.deepEqual(discoveryLog.position, expectedLogPosition);
+    assert.deepEqual(discoveryCache.position, expectedCachePosition);
+
+    const built = buildIndustrialSupplementAnchorPlacementRequests({
+      mode: INDUSTRIAL_SUPPLEMENT_V4_RUNTIME_CONTRACT_MODE,
+      rooms: [room],
+    });
+    assert.equal(built.accepted, true, JSON.stringify(built.errors));
+    const semanticRequests = built.requests.filter(({ localAnchorId }) => (
+      ['discovery-log', 'discovery-cache'].includes(localAnchorId)
+    ));
+    assert.equal(semanticRequests.length, 2);
+    const semanticRequestIds = new Set(semanticRequests.map(({ id }) => id));
+    const resolved = resolveIndustrialSupplementAnchorPlacementRequests({
+      mode: INDUSTRIAL_SUPPLEMENT_V4_RUNTIME_CONTRACT_MODE,
+      requests: built.requests,
+      floors: room.augmentationFloorTiers,
+      zones: room.augmentationZones,
+    });
+    assert.equal(resolved.accepted, true, JSON.stringify(resolved.errors));
+    assert.deepEqual(
+      resolved.placements
+        .filter(({ requestId }) => semanticRequestIds.has(requestId))
+        .map(({ supportFloorCellId }) => supportFloorCellId)
+        .sort(),
+      [...supportIds].sort(),
+    );
+  }
+});
+
+test('switchgear reward binds its authored base cell outside the blueprint stair transfer', () => {
+  const { room } = materializePhysicalBlueprintRoom(
+    'ind-room-switchgear-cache-descent-01',
+    { center: { x: 0, y: 14, z: 0 }, contentRole: 'treasure' },
+  );
+  const anchor = room.augmentationAnchors.find(({ localAnchorId }) => (
+    localAnchorId === 'vault-reward'
+  ));
+  const floors = room.augmentationFloorTiers.flatMap((tier) => tier.worldCells ?? []);
+  const support = floors.find(({ id }) => id === anchor?.supportCellId);
+  const transfers = room.augmentationTransfers.flatMap((transfer) => (
+    (transfer.worldCells ?? []).map((cell) => ({ transfer, cell }))
+  ));
+  const covering = transfers.filter(({ cell }) => (
+    Number(cell.grid?.x) === Number(support?.grid?.x)
+      && Number(cell.grid?.z) === Number(support?.grid?.z)
+  ));
+  assert.ok(anchor);
+  assert.deepEqual(anchor.localTile, { x: 2, z: 2, elevation: 0 });
+  assert.match(anchor.supportCellId, /:floor-tier:base:cell:2:2$/);
+  assert.equal(support?.walkable, true);
+  assert.deepEqual(covering, []);
+});
+
+test('V4 physical blueprints emit one source-bound presentation record without generic prop promotion', () => {
+  let sourceFeatureCount = 0;
+  let dormantGameplayReservationCount = 0;
+  let delegatedTransferReservationCount = 0;
+  for (const sourceBlueprint of INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST) {
+    const { blueprint, room, result } = materializePhysicalBlueprintRoom(sourceBlueprint.id);
+    const records = room.augmentationPresentationRecords;
+    const sourceFeatureIds = blueprint.features.map(({ id }) => String(id)).sort();
+    sourceFeatureCount += sourceFeatureIds.length;
+    assert.equal(records.length, sourceFeatureIds.length, `${blueprint.id} one record per source`);
+    assert.deepEqual(
+      records.map(({ sourceFeatureId }) => sourceFeatureId).sort(),
+      sourceFeatureIds,
+      `${blueprint.id} exact source feature set`,
+    );
+    assert.equal(new Set(records.map(({ id }) => id)).size, records.length);
+    assert.equal(new Set(records.map(({ sourceFeatureRuntimeId }) => (
+      sourceFeatureRuntimeId
+    ))).size, records.length);
+    const collisionIds = new Set(room.augmentationCollisionRecords.map(({ id }) => String(id)));
+    const anchorIds = new Set(room.augmentationAnchors.map(({ id }) => String(id)));
+    const transferIds = new Set(room.augmentationTransfers.map(({ id }) => String(id)));
+    for (const record of records) {
+      assert.equal(
+        record.schema,
+        'ruindivex-industrial-supplement-presentation-record/v1',
+      );
+      assert.ok(record.collisionRecordIds.every((id) => collisionIds.has(String(id))));
+      assert.ok(Number(record.authoredFootprint.widthMeters) > 0);
+      assert.ok(Number(record.authoredFootprint.heightMeters) > 0);
+      assert.ok(Number(record.authoredFootprint.depthMeters) > 0);
+      assert.ok(Number.isFinite(Number(record.transform.rotationY)));
+      const source = blueprint.features.find(({ id }) => String(id) === record.sourceFeatureId);
+      assert.equal(record.authoredFootprint.widthMeters, Number(source.w ?? 1) * TILE_SIZE);
+      assert.equal(record.authoredFootprint.depthMeters, Number(source.d ?? 1) * TILE_SIZE);
+      assert.equal(record.realizationOwner, record.presentationOwner);
+      assert.equal(record.realizationRequired, true);
+      assert.equal(
+        record.renderedBySupplementAssembler,
+        record.presentationOwner === 'supplement-assembler'
+          && record.selectedForRendering === true,
+      );
+      if (record.sourceFeatureType !== 'story') {
+        assert.equal(record.required, true);
+        assert.equal(record.optional, false);
+        assert.equal(record.realizationRequired, true);
+      }
+      if (['cover', 'machine'].includes(record.sourceFeatureType)) {
+        assert.equal(record.presentationOwner, 'supplement-assembler');
+        assert.equal(record.required, true);
+        assert.equal(record.selectedForRendering, true);
+        assert.ok(record.collisionRecordIds.length > 0);
+        assert.equal(
+          record.presentationAssetRole,
+          record.sourceFeatureType === 'cover' ? 'gameplayCover' : 'machineryLandmark',
+        );
+        assert.equal(record.realizationKind, 'theme-object-root');
+        assert.deepEqual(record.ownerBindingIds, []);
+        assert.equal(record.runtimeActivation, 'not-applicable');
+      } else if (['control', 'hazard', 'reward', 'spawn'].includes(
+        record.sourceFeatureType,
+      )) {
+        dormantGameplayReservationCount += 1;
+        assert.equal(record.presentationOwner, 'gameplay-runtime');
+        assert.equal(record.realizationKind, 'gameplay-anchor');
+        assert.equal(record.ownerBindingIds.length, 1);
+        assert.ok(anchorIds.has(record.ownerBindingIds[0]));
+        assert.equal(record.runtimeActivation, 'dormant');
+        assert.deepEqual(record.runtimeConsumerBindingIds, []);
+        assert.equal(record.selectedForRendering, false);
+      } else if (record.sourceFeatureType === 'transfer') {
+        delegatedTransferReservationCount += 1;
+        assert.equal(record.presentationOwner, 'supplement-connector-assembler');
+        assert.equal(record.realizationKind, 'physical-transfer');
+        assert.equal(record.ownerBindingIds.length, 1);
+        assert.ok(transferIds.has(record.ownerBindingIds[0]));
+        assert.equal(record.runtimeActivation, 'not-applicable');
+        assert.deepEqual(record.runtimeConsumerBindingIds, []);
+        assert.equal(record.selectedForRendering, false);
+      }
+    }
+    const assemblyNode = result.assemblyOverlayPlan.nodes.find(({ id }) => id === room.id);
+    assert.deepEqual(assemblyNode.presentationRecords, records);
+    assert.equal(assemblyNode.anchors.some((anchor) => (
+      anchor.isManifestCover === true
+        || anchor.isManifestLandmark === true
+        || (anchor.assetRole === 'prop' && anchor.sourceRecordId)
+    )), false, `${blueprint.id} has no generic authored-solid prop path`);
+  }
+  assert.ok(sourceFeatureCount > 100);
+  assert.ok(dormantGameplayReservationCount > 0);
+  assert.ok(delegatedTransferReservationCount > 0);
+});
+
+test('V4 assembly strips legacy per-socket doorway frames while retaining source metadata', () => {
+  const { room, result } = materializePhysicalBlueprintRoom(
+    'ind-junction-through-t-01',
+    { includeLegacyDoorwayFrameAnchors: true },
+  );
+  const sourceDoorwayFrames = room.augmentationAnchors.filter((anchor) => (
+    String(anchor.kind ?? anchor.type ?? '') === 'doorway-frame'
+  ));
+  assert.equal(sourceDoorwayFrames.length, room.augmentationSocketRecords.length);
+
+  const assemblyNode = result.assemblyOverlayPlan.nodes.find(({ id }) => id === room.id);
+  assert.ok(assemblyNode);
+  assert.equal(assemblyNode.authoritativeBlueprintRealization, true);
+  assert.deepEqual(
+    assemblyNode.anchors.filter((anchor) => (
+      String(anchor.kind ?? anchor.type ?? '') === 'doorway-frame'
+    )),
+    [],
+  );
+  assert.equal(
+    assemblyNode.anchors.some(({ assetRole }) => assetRole === 'frame'),
+    false,
+  );
+});
+
+test('optional story decoration uses isolated deterministic selection without gameplay drift', () => {
+  const blueprintId = 'ind-room-switchgear-cache-descent-01';
+  const enabled = materializePhysicalBlueprintRoom(blueprintId, {
+    optionalPresentationEnabled: true,
+  });
+  const replay = materializePhysicalBlueprintRoom(blueprintId, {
+    optionalPresentationEnabled: true,
+  });
+  const disabled = materializePhysicalBlueprintRoom(blueprintId, {
+    optionalPresentationEnabled: false,
+  });
+  const storyRecords = (entry) => entry.room.augmentationPresentationRecords.filter((record) => (
+    record.semanticRole === 'story-marking'
+  ));
+  assert.equal(storyRecords(enabled).length, 1);
+  assert.equal(storyRecords(enabled).filter(({ selectedForRendering }) => selectedForRendering).length, 1);
+  assert.deepEqual(storyRecords(replay), storyRecords(enabled));
+  assert.equal(storyRecords(disabled).filter(({ selectedForRendering }) => selectedForRendering).length, 0);
+  assert.equal(storyRecords(enabled)[0].optional, true);
+  assert.equal(storyRecords(enabled)[0].nonblocking, true);
+  assert.equal(storyRecords(enabled)[0].presentationSurface, 'floor-flush-decal');
+  assert.equal(storyRecords(enabled)[0].storyPlacementLegal, true);
+  assert.equal(storyRecords(disabled)[0].selectionStatus, 'optional-decoration-disabled');
+  assert.equal(
+    storyRecords(disabled)[0].storySelectionHash,
+    storyRecords(enabled)[0].storySelectionHash,
+  );
+
+  for (const field of [
+    'augmentationCollisionRecords',
+    'augmentationFloorTiers',
+    'augmentationClearRoutes',
+    'augmentationZones',
+    'augmentationAnchors',
+    'augmentationTransfers',
+    'augmentationBlueprintFeatures',
+    'augmentationBlueprintStateRecords',
+  ]) {
+    assert.deepEqual(disabled.room[field], enabled.room[field], `${field} remains invariant`);
+  }
+});
+
+test('story selection stably chooses exactly one of two legal candidates in one route network', () => {
+  const blueprintIds = [
+    'ind-room-switchgear-cache-descent-01',
+    'ind-room-switchgear-cache-descent-01',
+  ];
+  const enabled = materializePhysicalBlueprintNetwork(blueprintIds, {
+    optionalPresentationEnabled: true,
+  });
+  const replay = materializePhysicalBlueprintNetwork(blueprintIds, {
+    optionalPresentationEnabled: true,
+  });
+  const disabled = materializePhysicalBlueprintNetwork(blueprintIds, {
+    optionalPresentationEnabled: false,
+  });
+  const storyRecords = (entry) => entry.rooms.flatMap((room) => (
+    room.augmentationPresentationRecords.filter(({ semanticRole }) => (
+      semanticRole === 'story-marking'
+    ))
+  )).sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  const enabledStories = storyRecords(enabled);
+  const replayStories = storyRecords(replay);
+  const disabledStories = storyRecords(disabled);
+
+  assert.equal(enabledStories.length, 2);
+  assert.equal(enabledStories.every(({ storyPlacementLegal }) => storyPlacementLegal === true), true);
+  assert.equal(enabledStories.every(({ storySelectionCandidateCount }) => (
+    storySelectionCandidateCount === 2
+  )), true);
+  assert.equal(enabledStories.filter(({ selectedForRendering }) => selectedForRendering).length, 1);
+  assert.deepEqual(replayStories, enabledStories);
+  assert.equal(disabledStories.filter(({ selectedForRendering }) => selectedForRendering).length, 0);
+  assert.deepEqual(
+    disabledStories.map(({ storySelectionHash }) => storySelectionHash),
+    enabledStories.map(({ storySelectionHash }) => storySelectionHash),
+  );
+  assert.equal(new Set(enabledStories.map(({ storySelectionHash }) => storySelectionHash)).size, 1);
+});
+
+test('story placement rejects every protected gameplay class including authoritative sightlines', () => {
+  const record = {
+    id: 'story-candidate',
+    operationId: 'story-operation',
+    collisionRecordIds: [],
+    transform: { position: { x: 0, y: 0, z: 0 } },
+    worldFootprint: { widthMeters: 0.5, depthMeters: 0.5 },
+  };
+  const emptyRoom = () => ({
+    augmentationCollisionRecords: [],
+    augmentationProtectedSightlines: [],
+    augmentationZones: [],
+    augmentationTransfers: [],
+    augmentationAnchors: [],
+    augmentationSocketRecords: [],
+  });
+  const atCandidate = { x: 0, y: 0, z: 0 };
+  const cases = [
+    {
+      name: 'blocking solid',
+      room: {
+        augmentationCollisionRecords: [{
+          id: 'solid', blocking: true, center: atCandidate, size: { x: 1, z: 1 },
+        }],
+      },
+      reason: 'collision:solid',
+    },
+    {
+      name: 'authored void',
+      room: {
+        augmentationCollisionRecords: [{
+          id: 'void', excludesFloor: true, center: atCandidate, size: { x: 1, z: 1 },
+        }],
+      },
+      reason: 'collision:void',
+    },
+    {
+      name: 'clear route',
+      room: {
+        augmentationZones: [{
+          id: 'clear-route', zoneKind: 'clear', worldCells: [{ position: atCandidate }],
+        }],
+      },
+      reason: 'dilated-zone:clear-route',
+    },
+    {
+      name: 'hazard envelope',
+      room: {
+        augmentationZones: [{
+          id: 'hazard', zoneKind: 'hazard', worldCells: [{ position: atCandidate }],
+        }],
+      },
+      reason: 'dilated-zone:hazard',
+    },
+    {
+      name: 'physical traversal',
+      room: {
+        augmentationTransfers: [{ id: 'transfer', worldCells: [{ position: atCandidate }] }],
+      },
+      reason: 'dilated-transfer:transfer',
+    },
+    ...['spawn', 'control', 'reward'].map((kind) => ({
+      name: `${kind} anchor`,
+      room: {
+        augmentationAnchors: [{ id: `${kind}-anchor`, kind, position: atCandidate }],
+      },
+      reason: `anchor:${kind}-anchor`,
+    })),
+    {
+      name: 'socket landing',
+      room: {
+        augmentationSocketRecords: [{
+          id: 'socket', runtimeId: 'socket', position: atCandidate, widthMeters: TILE_SIZE,
+        }],
+      },
+      reason: 'socket-landing:socket',
+    },
+    {
+      name: 'endpoint seam',
+      connectionPlans: [{
+        id: 'connection',
+        operationId: 'story-operation',
+        endpointSeams: [{
+          id: 'seam',
+          orderedCells: [{ gridX: 0, gridZ: 0 }],
+        }],
+      }],
+      reason: 'endpoint-seam:seam',
+    },
+    {
+      name: 'authoritative protected sightline',
+      room: {
+        augmentationProtectedSightlines: [{
+          id: 'sightline',
+          sightlineId: 'entry-to-focal-landmark',
+          protectionKind: 'required-sightline',
+          authoritative: true,
+          worldCells: [{
+            position: atCandidate,
+            widthMeters: TILE_SIZE,
+            depthMeters: TILE_SIZE,
+          }],
+        }],
+      },
+      reason: 'protected-sightline:entry-to-focal-landmark',
+    },
+  ];
+
+  assert.deepEqual(inspectIndustrialSupplementStoryPresentationLegality({
+    room: emptyRoom(),
+    record,
+    tileSize: TILE_SIZE,
+  }), { legal: true, reasons: [] });
+  for (const fixture of cases) {
+    const inspection = inspectIndustrialSupplementStoryPresentationLegality({
+      room: { ...emptyRoom(), ...(fixture.room ?? {}) },
+      record,
+      effectiveConnections: fixture.connectionPlans ?? [],
+      tileSize: TILE_SIZE,
+    });
+    assert.equal(inspection.legal, false, fixture.name);
+    assert.ok(inspection.reasons.includes(fixture.reason), fixture.name);
+  }
+
+  const advisorySightline = emptyRoom();
+  advisorySightline.augmentationProtectedSightlines = [{
+    id: 'advisory-sightline',
+    sightlineId: 'advisory',
+    protectionKind: 'required-sightline',
+    authoritative: false,
+    worldCells: [{ position: atCandidate }],
+  }];
+  assert.equal(inspectIndustrialSupplementStoryPresentationLegality({
+    room: advisorySightline,
+    record,
+    tileSize: TILE_SIZE,
+  }).legal, true);
+});
+
+test('optional decoration leaves representative final gameplay contract hashes unchanged', () => {
+  const representativeBlueprintIds = [
+    'ind-room-switchgear-cache-descent-01',
+    'ind-room-reaverbot-foundry-01',
+    'ind-rise-long-freight-ramp-01',
+  ];
+  const materializeSet = (optionalPresentationEnabled) => representativeBlueprintIds.map(
+    (blueprintId, index) => materializePhysicalBlueprintRoom(blueprintId, {
+      center: { x: index * TILE_SIZE * 20, y: 0, z: 0 },
+      optionalPresentationEnabled,
+    }).room,
+  );
+  const finalGameplayContract = (rooms) => {
+    const generator = new DungeonGenerator({
+      random: () => {
+        throw new Error('representative gameplay contract must not consume RNG');
+      },
+    });
+    const floorTiles = rooms.flatMap((room) => [
+      ...room.augmentationFloorTiers.flatMap((tier) => tier.worldCells.map((cell) => ({
+        id: cell.id,
+        x: cell.grid.x,
+        z: cell.grid.z,
+        elevation: cell.elevation,
+        roomId: room.id,
+        surface: 'industrialSupplementTier',
+        augmentationFloorCellId: cell.id,
+        augmentationFloorTierId: tier.id,
+        augmentationFloorTierRuntimeId: tier.runtimeId,
+      }))),
+      ...room.augmentationTransfers.flatMap((transfer) => transfer.worldCells.map((cell) => ({
+        id: cell.id,
+        x: cell.grid.x,
+        z: cell.grid.z,
+        elevation: cell.elevation,
+        roomId: room.id,
+        surface: transfer.form === 'ramp' ? 'industrialRamp' : 'industrialTransfer',
+        isPlatformingSurface: true,
+        augmentationTransferCellId: cell.id,
+        augmentationTransferId: transfer.id,
+        rampStartElevation: transfer.worldElevationRange?.from,
+        rampEndElevation: transfer.worldElevationRange?.to,
+      }))),
+    ]);
+    generator._annotateDungeonSupplementWalkabilityIntent(floorTiles, rooms);
+    const solids = generator._createDungeonSupplementManifestSolidZones(rooms);
+    const navigation = rooms.flatMap((room) => {
+      const roomFloors = floorTiles.filter((floor) => floor.roomId === room.id);
+      const walkableFloors = roomFloors.filter((floor) => (
+        floor.walkabilityIntent !== 'support-only'
+          && !generator._isFloorTileBlockedBySolidZone(floor, solids)
+      ));
+      const start = [...walkableFloors].sort((left, right) => (
+        String(left.id).localeCompare(String(right.id))
+      ))[0];
+      const reachable = start
+        ? generator._createReachableFloorTileKeySet(start, walkableFloors)
+        : new Set();
+      const returnable = start
+        ? generator._createFloorTileKeySetThatCanReach(start, walkableFloors)
+        : new Set();
+      return roomFloors.map((floor) => {
+        const floorKey = generator._getFloorTileGraphKey(floor);
+        return {
+          id: floor.id,
+          roomId: floor.roomId,
+          grid: { x: floor.x, z: floor.z },
+          elevation: floor.elevation,
+          surface: floor.surface,
+          walkabilityIntent: floor.walkabilityIntent ?? null,
+          blocked: generator._isFloorTileBlockedBySolidZone(floor, solids),
+          reachable: reachable.has(floorKey),
+          returnable: returnable.has(floorKey),
+        };
+      });
+    }).sort((left, right) => left.id.localeCompare(right.id));
+    const navigationById = new Map(navigation.map((floor) => [String(floor.id), floor]));
+    const anchorRoles = rooms.flatMap((room) => room.augmentationAnchors.map((anchor) => ({
+      id: anchor.id,
+      roomId: room.id,
+      sourceFeatureId: anchor.sourceFeatureId ?? null,
+      blueprintFeatureType: anchor.blueprintFeatureType ?? null,
+      kind: anchor.kind ?? null,
+      spatialRole: anchor.spatialRole ?? null,
+      supportCellId: anchor.supportCellId ?? null,
+      runtimeStateId: anchor.runtimeStateId ?? null,
+      encounterRecipeId: anchor.encounterRecipe?.id ?? null,
+      mechanismRecipeId: anchor.mechanismRecipe?.id ?? null,
+      rewardRecipeId: anchor.rewardRecipe?.id ?? null,
+      position: anchor.position ?? anchor.worldPosition ?? null,
+    }))).sort((left, right) => left.id.localeCompare(right.id));
+    const runtimeRoleBindings = rooms.flatMap((room) => (
+      room.augmentationPresentationRecords
+        .filter(({ presentationOwner }) => presentationOwner === 'gameplay-runtime')
+        .map((record) => ({
+          id: record.id,
+          semanticRole: record.semanticRole,
+          ownerBindingIds: record.ownerBindingIds,
+          runtimeConsumerBindingIds: record.runtimeConsumerBindingIds,
+          runtimeActivation: record.runtimeActivation,
+        }))
+    )).sort((left, right) => left.id.localeCompare(right.id));
+    const spawns = anchorRoles.filter(({ blueprintFeatureType }) => (
+      blueprintFeatureType === 'spawn'
+    )).map((anchor) => ({
+      ...anchor,
+      supportWalkability: navigationById.get(String(anchor.supportCellId)) ?? null,
+    }));
+    const collision = solids.map((solid) => ({
+      id: solid.id,
+      roomId: solid.roomId ?? null,
+      sourceKind: solid.sourceKind ?? null,
+      sourceId: solid.sourceId ?? null,
+      center: solid.center,
+      size: solid.size,
+      blocking: solid.blocking !== false,
+      excludesFloor: solid.excludesFloor === true,
+      occupiedSupportCellIds: solid.occupiedSupportCellIds ?? [],
+    })).sort((left, right) => left.id.localeCompare(right.id));
+    const traversal = rooms.flatMap((room) => [
+      ...room.augmentationTransfers.map((transfer) => ({
+        kind: 'transfer',
+        id: transfer.id,
+        form: transfer.form,
+        endpointSupportCellIds: transfer.endpointSupportCellIds,
+        worldConnectivityEdges: transfer.worldConnectivityEdges,
+        worldElevationRange: transfer.worldElevationRange,
+      })),
+      ...room.augmentationClearRoutes.map((route) => ({
+        kind: 'clear-route',
+        id: route.runtimeId ?? route.id,
+        traversal: route.traversal,
+        worldCellIds: route.worldCellIds,
+        worldConnectivityEdgeIds: route.worldConnectivityEdgeIds,
+      })),
+      ...room.augmentationFloorTiers.map((tier) => ({
+        kind: 'floor-connectivity',
+        id: tier.runtimeId ?? tier.id,
+        worldConnectivityEdges: tier.worldConnectivityEdges,
+      })),
+    ]).sort((left, right) => left.id.localeCompare(right.id));
+    assert.ok(collision.length > 0, 'collision projection is representative');
+    assert.ok(navigation.length > 0 && navigation.some(({ reachable }) => reachable));
+    assert.ok(anchorRoles.length > 0 && runtimeRoleBindings.length > 0);
+    assert.ok(spawns.length > 0 && spawns.every(({ supportWalkability }) => supportWalkability));
+    assert.ok(traversal.length > 0);
+    const projections = {
+      collision,
+      navigation,
+      anchors: { anchorRoles, runtimeRoleBindings },
+      spawn: spawns,
+      traversal,
+    };
+    const hashes = Object.fromEntries(Object.entries(projections).map(([name, value]) => [
+      name,
+      hashCanonicalValue(value, {
+        namespace: `ruindivex-industrial-optional-decoration-${name}/v1`,
+      }),
+    ]));
+    return {
+      hashes,
+      combinedHash: hashCanonicalValue(hashes, {
+        namespace: 'ruindivex-industrial-optional-decoration-gameplay-contract/v1',
+      }),
+    };
+  };
+
+  const enabled = finalGameplayContract(materializeSet(true));
+  const disabled = finalGameplayContract(materializeSet(false));
+  assert.deepEqual(enabled.hashes, disabled.hashes);
+  assert.equal(enabled.combinedHash, disabled.combinedHash);
+  assert.ok(Object.values(enabled.hashes).every((hash) => /^v1-[0-9a-f]{32}$/.test(hash)));
+});
 
 test('V4 physical transfer endpoints resolve only their exact authored support identities', () => {
   let endpointCount = 0;
@@ -369,6 +1128,604 @@ test('exact transfer refs cover offset ramps, half-grid lifts, and intermediate 
   assert.equal(intermediateEndpoint.floorCellId, null);
   assert.equal(intermediateEndpoint.adjacentTransferCellId, exactLandingCell.id);
   assert.equal(intermediateEndpoint.supportCellId, exactLandingCell.id);
+});
+
+test('lift-defense solids preserve every unoccupied floor and the reopened east route', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+
+  for (let rotationQuarterTurns = 0; rotationQuarterTurns < 4; rotationQuarterTurns += 1) {
+    const { blueprint, room } = materializePhysicalBlueprintRoom(
+      'ind-room-lift-defense-rise-01',
+      { rotationQuarterTurns },
+    );
+    const featureById = new Map(blueprint.features.map((feature) => [feature.id, feature]));
+    assert.deepEqual(
+      ['lft-hoist-motor', 'lft-cover-east'].map((id) => {
+        const feature = featureById.get(id);
+        return [feature.x, feature.z];
+      }),
+      [[4, 2], [4, 3]],
+    );
+
+    const floorTiles = room.augmentationFloorTiers.flatMap((tier) => (
+      tier.worldCells.map((cell) => ({
+        x: cell.grid.x,
+        z: cell.grid.z,
+        elevation: cell.elevation,
+        roomId: room.id,
+        surface: 'industrialSupplementTier',
+        augmentationFloorCellId: cell.id,
+        augmentationFloorTierId: tier.id,
+        augmentationFloorTierRuntimeId: tier.runtimeId,
+        localTile: cell.localTile,
+      }))
+    ));
+    const floorBySupportId = new Map(floorTiles.map((floor) => (
+      [String(floor.augmentationFloorCellId), floor]
+    )));
+    const lift = room.augmentationTransfers.find(({ localTransferId }) => (
+      localTransferId === 'lft-cargo-lift'
+    ));
+    const fromFloor = floorBySupportId.get(String(lift.worldEndpoints.from.supportCellId));
+    const toFloor = floorBySupportId.get(String(lift.worldEndpoints.to.supportCellId));
+    assert.ok(fromFloor && toFloor, 'the lift keeps exact floor-backed endpoints');
+    const lowerApproach = floorTiles.find(({ localTile }) => (
+      localTile.x === -2 && localTile.z === 1 && localTile.elevation === 0
+    ));
+    const upperApproach = floorTiles.find(({ localTile }) => (
+      localTile.x === -2 && localTile.z === -1 && localTile.elevation === 2.8
+    ));
+    assert.ok(lowerApproach && upperApproach, 'the lift retains both clear approach floors');
+    lowerApproach.traversalLinks = [{
+      id: `${lift.id}:forward`,
+      action: 'automatic_lift',
+      toFloorKey: generator._getFloorTileGraphKey(upperApproach),
+    }];
+    upperApproach.traversalLinks = [{
+      id: `${lift.id}:reverse`,
+      action: 'automatic_lift',
+      toFloorKey: generator._getFloorTileGraphKey(lowerApproach),
+    }];
+
+    generator._annotateDungeonSupplementWalkabilityIntent(
+      floorTiles,
+      [{ id: room.id, isDungeonSupplement: true }],
+    );
+    const solidZones = generator._createDungeonSupplementManifestSolidZones([room]);
+    const navigableFloors = floorTiles.filter((floor) => (
+      floor.walkabilityIntent !== 'support-only'
+        && !generator._isFloorTileBlockedBySolidZone(floor, solidZones)
+    ));
+    assert.ok(navigableFloors.includes(lowerApproach));
+    assert.ok(navigableFloors.includes(upperApproach));
+    const canTraverseEdge = (first, second, action) => (
+      action === 'automatic_lift'
+        || !solidZones.some((zone) => generator._doesFloorTraversalSegmentIntersectZone(
+          first,
+          second,
+          zone,
+          0.42,
+        ))
+    );
+    const start = floorTiles.find(({ localTile }) => (
+      localTile.x === 0 && localTile.z === 5 && localTile.elevation === 0
+    ));
+    const reachable = generator._createReachableFloorTileKeySet(start, navigableFloors, {
+      canTraverseEdge,
+    });
+    const returnable = generator._createFloorTileKeySetThatCanReach(start, navigableFloors, {
+      canTraverseEdge,
+    });
+    assert.equal(reachable.size, navigableFloors.length, `rotation ${rotationQuarterTurns}`);
+    assert.equal(returnable.size, navigableFloors.length, `rotation ${rotationQuarterTurns}`);
+
+    const reopenedEastRoute = floorTiles.find(({ localTile }) => (
+      localTile.x === 3 && localTile.z === 3 && localTile.elevation === 0
+    ));
+    assert.ok(reopenedEastRoute);
+    assert.equal(
+      generator._isFloorTileBlockedBySolidZone(reopenedEastRoute, solidZones),
+      false,
+    );
+    const reopenedKey = generator._getFloorTileGraphKey(reopenedEastRoute);
+    assert.equal(reachable.has(reopenedKey), true);
+    assert.equal(returnable.has(reopenedKey), true);
+  }
+});
+
+test('solid blueprint collisions expose exact occupied floor and transfer identities', () => {
+  const supportIndex = (room) => new Map([
+    ...room.augmentationFloorTiers.flatMap(({ worldCells }) => worldCells),
+    ...room.augmentationTransfers.flatMap(({ worldCells }) => worldCells),
+  ].map((cell) => [String(cell.id), cell]));
+  const collisionFor = (room, localFeatureId) => room.augmentationCollisionRecords.find(
+    (record) => record.blocking === true
+      && room.augmentationBlueprintFeatures.some((feature) => (
+        feature.localFeatureId === localFeatureId
+          && feature.collisionId === record.id
+      )),
+  );
+
+  const ladder = materializePhysicalBlueprintRoom('ind-room-ladder-defense-rise-01').room;
+  const ladderCells = supportIndex(ladder);
+  const westCover = ladder.augmentationCover.find(({ localFeatureId }) => (
+    localFeatureId === 'ldr-cover-west'
+  ));
+  const westCollision = collisionFor(ladder, 'ldr-cover-west');
+  assert.ok(westCover);
+  assert.ok(westCollision);
+  assert.deepEqual(westCollision.occupiedSupportCellIds, westCover.occupiedSupportCellIds);
+  assert.deepEqual(
+    westCollision.occupiedSupportCellIds.map((id) => {
+      const cell = ladderCells.get(String(id));
+      return [cell.localTile.x, cell.localTile.z];
+    }).sort(),
+    [[-2, 1]],
+  );
+  const ladderFlankAnchor = ladder.augmentationAnchors.find(({ sourceFeatureId }) => (
+    sourceFeatureId === 'ldr-flank'
+  ));
+  assert.deepEqual(ladderFlankAnchor?.localTile, { x: -1, z: 3, elevation: 0 });
+  const ladderFlank = exactLocalCell(
+    ladder.augmentationFloorTiers.find(({ id }) => id === 'base').worldCells,
+    ladderFlankAnchor.localTile,
+    0,
+  )[0];
+  assert.ok(ladderFlank);
+  assert.equal(westCollision.occupiedSupportCellIds.includes(ladderFlank.id), false);
+  const eastCollision = collisionFor(ladder, 'ldr-cover-east');
+  const formerBlockedApproachCell = exactLocalCell(
+    ladder.augmentationFloorTiers.find(({ id }) => id === 'base').worldCells,
+    { x: 1, z: 3 },
+    0,
+  )[0];
+  assert.ok(eastCollision);
+  assert.ok(formerBlockedApproachCell);
+  assert.deepEqual(
+    eastCollision.occupiedSupportCellIds.map((id) => {
+      const cell = ladderCells.get(String(id));
+      return [cell.localTile.x, cell.localTile.z];
+    }),
+    [[2, 3]],
+  );
+  assert.equal(
+    eastCollision.occupiedSupportCellIds.includes(formerBlockedApproachCell.id),
+    false,
+  );
+
+  const sorter = materializePhysicalBlueprintRoom('ind-room-inclined-sorter-01').room;
+  const eastDivider = collisionFor(sorter, 'isg-divider-east');
+  const eastFlank = sorter.augmentationAnchors.find(({ sourceFeatureId }) => (
+    sourceFeatureId === 'isg-flank-east'
+  ));
+  const beltStop = sorter.augmentationAnchors.find(({ sourceFeatureId }) => (
+    sourceFeatureId === 'isg-belt-stop'
+  ));
+  assert.ok(eastDivider);
+  assert.ok(eastFlank?.supportCellId);
+  assert.deepEqual(
+    { x: eastFlank.localTile.x, z: eastFlank.localTile.z },
+    { x: 3, z: -1 },
+  );
+  assert.ok(Math.abs(eastFlank.localTile.elevation - 1.75) <= 0.000001);
+  assert.match(eastFlank.supportCellId, /:blueprint-transfer:isg-incline:cell:6:3$/);
+  assert.deepEqual(
+    { x: beltStop?.localTile.x, z: beltStop?.localTile.z },
+    { x: 3, z: 0 },
+  );
+  assert.ok(Math.abs(beltStop.localTile.elevation - 1.4) <= 0.000001);
+  assert.match(beltStop?.supportCellId, /:blueprint-transfer:isg-incline:cell:6:4$/);
+  assert.equal(eastDivider.occupiedSupportCellIds.includes(eastFlank.supportCellId), false);
+  assert.equal(eastDivider.occupiedSupportCellIds.includes(beltStop.supportCellId), false);
+
+  for (const room of [ladder, sorter]) {
+    const cells = supportIndex(room);
+    for (const collision of room.augmentationCollisionRecords.filter((record) => (
+      record.blocking === true
+        && ['cover', 'landmark'].includes(record.sourceKind)
+    ))) {
+      assert.ok(Array.isArray(collision.occupiedSupportCellIds));
+      assert.ok(collision.occupiedSupportCellIds.every((id) => cells.has(String(id))));
+    }
+  }
+
+  const rotated = materializePhysicalBlueprintRoom('ind-room-ladder-defense-rise-01', {
+    rotationQuarterTurns: 1,
+  }).room;
+  const rotatedCover = collisionFor(rotated, 'ldr-cover-west');
+  const rotatedCells = supportIndex(rotated);
+  assert.deepEqual(rotatedCover.occupiedSupportCellIds, westCollision.occupiedSupportCellIds);
+  const stableOccupiedId = westCollision.occupiedSupportCellIds[0];
+  assert.notDeepEqual(
+    rotatedCells.get(stableOccupiedId).grid,
+    ladderCells.get(stableOccupiedId).grid,
+  );
+});
+
+test('mixed-lattice solids align to committed support grids without moving exact sockets', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  const cases = [
+    {
+      blueprintId: 'ind-room-dispatch-vault-01',
+      featureId: 'dv-partition-e',
+      center: { x: 119, y: -14, z: 68.6 },
+      rotationQuarterTurns: 0,
+      expectedAuthoredPosition: { x: 124.6, y: -14, z: 72.8 },
+      expectedRealizedPosition: { x: 126, y: -14, z: 72.8 },
+      seamFloor: { x: 44, z: 27, elevation: -14 },
+      seamEdge: [
+        { x: 44, z: 27, elevation: -14 },
+        { x: 44, z: 28, elevation: -14 },
+      ],
+    },
+    {
+      blueprintId: 'ind-room-switchgear-cache-descent-01',
+      featureId: 'sgd-cable-spool-cover',
+      center: { x: -36.4, y: 0, z: 373.8 },
+      rotationQuarterTurns: 1,
+      expectedAuthoredPosition: { x: -30.8, y: 0, z: 379.4 },
+      expectedRealizedPosition: { x: -32.2, y: 0, z: 380.8 },
+      seamFloor: { x: -10, z: 135, elevation: 0 },
+      seamEdge: [
+        { x: -11, z: 135, elevation: 0 },
+        { x: -10, z: 135, elevation: 0 },
+      ],
+    },
+  ];
+
+  for (const specification of cases) {
+    const { blueprint, room } = materializePhysicalBlueprintRoom(
+      specification.blueprintId,
+      specification,
+    );
+    const feature = room.augmentationBlueprintFeatures.find(({ localFeatureId }) => (
+      localFeatureId === specification.featureId
+    ));
+    const collision = room.augmentationCollisionRecords.find(({ id }) => (
+      id === feature?.collisionId
+    ));
+    const presentation = room.augmentationPresentationRecords.find(({ sourceFeatureId }) => (
+      sourceFeatureId === specification.featureId
+    ));
+    assert.ok(feature);
+    assert.ok(collision);
+    assert.ok(presentation);
+    assertPointApproximatelyEqual(
+      feature.authoredWorldPosition,
+      specification.expectedAuthoredPosition,
+      `${specification.featureId} preserves its authored position`,
+    );
+    assertPointApproximatelyEqual(
+      feature.position,
+      specification.expectedRealizedPosition,
+      `${specification.featureId} uses its committed support-grid center`,
+    );
+    assertPointApproximatelyEqual(
+      collision.center,
+      specification.expectedRealizedPosition,
+      `${specification.featureId} collision follows the realized position`,
+    );
+    assertPointApproximatelyEqual(
+      presentation.transform.position,
+      specification.expectedRealizedPosition,
+      `${specification.featureId} presentation follows the realized position`,
+    );
+
+    const expectedSocketById = new Map(blueprint.sockets.map((socket) => [
+      String(socket.id),
+      physicalBlueprintSocket(blueprint, socket, specification),
+    ]));
+    for (const socket of room.augmentationSocketRecords) {
+      const expected = expectedSocketById.get(String(socket.localSocketId));
+      assert.ok(expected);
+      assert.deepEqual(socket.position, expected.position);
+      assert.deepEqual(socket.facing, expected.facing);
+    }
+
+    const supportById = new Map([
+      ...room.augmentationFloorTiers.flatMap(({ worldCells }) => worldCells),
+      ...room.augmentationTransfers.flatMap(({ worldCells }) => worldCells),
+    ].map((cell) => [String(cell.id), cell]));
+    const occupiedSupports = feature.occupiedSupportCellIds.map((id) => supportById.get(String(id)));
+    assert.ok(occupiedSupports.length > 0 && occupiedSupports.every(Boolean));
+    const solidZone = generator._createDungeonSupplementManifestSolidZones([room])
+      .find(({ id }) => id === collision.id);
+    assert.ok(solidZone);
+    assert.equal(
+      generator._isFloorTileBlockedBySolidZone(specification.seamFloor, [solidZone]),
+      false,
+      `${specification.featureId} does not consume the quantized seam lane`,
+    );
+    assert.equal(
+      generator._doesFloorTraversalSegmentIntersectZone(
+        specification.seamEdge[0],
+        specification.seamEdge[1],
+        solidZone,
+        0.42,
+      ),
+      false,
+      `${specification.featureId} does not consume the seam edge envelope`,
+    );
+    for (const support of occupiedSupports) {
+      assert.equal(generator._isFloorTileBlockedBySolidZone({
+        x: support.grid.x,
+        z: support.grid.z,
+        elevation: support.elevation,
+        roomId: room.id,
+        augmentationFloorCellId: support.id,
+      }, [solidZone]), true, `${specification.featureId} retains occupied support collision`);
+    }
+  }
+});
+
+test('direct floor solids stay centered on occupied support-grid bounds across rotations and parity origins', () => {
+  const centers = [
+    { x: 0, y: 0, z: 0 },
+    { x: TILE_SIZE * 0.5, y: 0, z: 0 },
+    { x: 0, y: 0, z: TILE_SIZE * 0.5 },
+    { x: TILE_SIZE * 0.5, y: 0, z: TILE_SIZE * 0.5 },
+  ];
+  let alignedSolidRecordCount = 0;
+
+  for (const sourceBlueprint of INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST) {
+    for (const center of centers) {
+      for (let rotationQuarterTurns = 0; rotationQuarterTurns < 4; rotationQuarterTurns += 1) {
+        const { room } = materializePhysicalBlueprintRoom(sourceBlueprint.id, {
+          center,
+          rotationQuarterTurns,
+        });
+        const supportById = new Map([
+          ...room.augmentationFloorTiers.flatMap(({ worldCells }) => worldCells),
+          ...room.augmentationTransfers.flatMap(({ worldCells }) => worldCells),
+        ].map((cell) => [String(cell.id), cell]));
+        const floorSupportIds = new Set(room.augmentationFloorTiers.flatMap(({ worldCells }) => (
+          worldCells.map(({ id }) => String(id))
+        )));
+        const directSolids = room.augmentationBlueprintFeatures.filter((feature) => (
+          feature.blocking === true
+            && ['cover', 'machine'].includes(feature.blueprintFeatureType)
+            && feature.supportAttachment === 'direct'
+            && (feature.occupiedSupportCellIds?.length ?? 0) > 0
+            && feature.occupiedSupportCellIds.every((id) => floorSupportIds.has(String(id)))
+        ));
+
+        for (const feature of directSolids) {
+          alignedSolidRecordCount += 1;
+          const supports = feature.occupiedSupportCellIds.map((id) => supportById.get(String(id)));
+          assert.ok(supports.every(Boolean));
+          const gridXs = supports.map(({ grid }) => Number(grid.x));
+          const gridZs = supports.map(({ grid }) => Number(grid.z));
+          const expectedPosition = {
+            x: (Math.min(...gridXs) + Math.max(...gridXs)) * 0.5 * TILE_SIZE,
+            y: feature.position.y,
+            z: (Math.min(...gridZs) + Math.max(...gridZs)) * 0.5 * TILE_SIZE,
+          };
+          assertPointApproximatelyEqual(
+            feature.position,
+            expectedPosition,
+            `${sourceBlueprint.id}/${feature.localFeatureId}/r${rotationQuarterTurns}`,
+          );
+          const collision = room.augmentationCollisionRecords.find(({ id }) => (
+            id === feature.collisionId
+          ));
+          assert.ok(collision);
+          assertPointApproximatelyEqual(
+            collision.center,
+            expectedPosition,
+            `${sourceBlueprint.id}/${feature.localFeatureId} collision`,
+          );
+        }
+
+        for (const sourceFeatureId of new Set(directSolids.map(({ localFeatureId }) => (
+          localFeatureId
+        )))) {
+          const representative = directSolids.find(({ localFeatureId }) => (
+            localFeatureId === sourceFeatureId
+          ));
+          const presentation = room.augmentationPresentationRecords.find((record) => (
+            record.sourceFeatureId === sourceFeatureId
+          ));
+          assert.ok(presentation);
+          assertPointApproximatelyEqual(
+            presentation.transform.position,
+            representative.position,
+            `${sourceBlueprint.id}/${sourceFeatureId} presentation`,
+          );
+        }
+      }
+    }
+  }
+
+  assert.ok(alignedSolidRecordCount > 400);
+});
+
+test('all authored encounter, control, and reward supports keep standing-envelope clearance', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const centers = [
+    { x: 0, y: 0, z: 0 },
+    { x: TILE_SIZE * 0.5, y: 0, z: 0 },
+    { x: 0, y: 0, z: TILE_SIZE * 0.5 },
+    { x: TILE_SIZE * 0.5, y: 0, z: TILE_SIZE * 0.5 },
+  ];
+
+  for (const sourceBlueprint of INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST) {
+    for (const center of centers) {
+      for (let rotationQuarterTurns = 0; rotationQuarterTurns < 4; rotationQuarterTurns += 1) {
+        const { room } = materializePhysicalBlueprintRoom(sourceBlueprint.id, {
+          center,
+          rotationQuarterTurns,
+        });
+        const blockingZones = generator._createDungeonSupplementManifestSolidZones([room]);
+        const floorSupportById = new Map(room.augmentationFloorTiers.flatMap((tier) => (
+          tier.worldCells.map((cell) => [String(cell.id), {
+            cell,
+            floorTierId: tier.id,
+          }])
+        )));
+        const transferSupportById = new Map(room.augmentationTransfers.flatMap((transfer) => (
+          transfer.worldCells.map((cell) => [String(cell.id), {
+            cell,
+            transfer,
+          }])
+        )));
+        const gameplayAnchors = room.augmentationAnchors.filter(({ blueprintFeatureType }) => (
+          ['spawn', 'control', 'reward'].includes(blueprintFeatureType)
+        ));
+        for (const anchor of gameplayAnchors) {
+          const support = floorSupportById.get(String(anchor.supportCellId))
+            ?? transferSupportById.get(String(anchor.supportCellId));
+          assert.ok(
+            support,
+            `${sourceBlueprint.id}/${anchor.sourceFeatureId} exact support`,
+          );
+          // Final generation commits authoritative supports to integer floor
+          // coordinates. Exercise that standing capsule, not merely the
+          // pre-stamp authored point, including half-grid room centers.
+          const floor = {
+            x: support.cell.grid.x,
+            z: support.cell.grid.z,
+            elevation: support.cell.elevation,
+            roomId: room.id,
+            ...(support.transfer ? {
+              surface: support.transfer.form === 'ramp'
+                ? 'industrialRamp'
+                : 'industrialTransfer',
+              isPlatformingSurface: true,
+              augmentationTransferCellId: support.cell.id,
+              augmentationTransferId: support.transfer.id,
+              rampStartElevation: support.transfer.worldElevationRange?.from,
+              rampEndElevation: support.transfer.worldElevationRange?.to,
+            } : {
+              surface: 'industrialSupplementTier',
+              augmentationFloorCellId: support.cell.id,
+              augmentationFloorTierId: support.floorTierId,
+            }),
+          };
+          const overlaps = blockingZones.filter((zone) => (
+            generator._isFloorTileBlockedBySolidZone(floor, [zone])
+          ));
+          assert.deepEqual(
+            overlaps.map(({ id }) => id),
+            [],
+            `${sourceBlueprint.id}/${anchor.sourceFeatureId} rotation ${rotationQuarterTurns} center ${center.x},${center.z}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test('required foundry flank and observation log targets remain finally walkable', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const inspectTarget = (blueprintId, featureId) => {
+    const { room } = materializePhysicalBlueprintRoom(blueprintId);
+    const floorTiles = [
+      ...room.augmentationFloorTiers.flatMap((tier) => tier.worldCells.map((cell) => ({
+        x: cell.grid.x,
+        z: cell.grid.z,
+        elevation: cell.elevation,
+        roomId: room.id,
+        surface: 'industrialSupplementTier',
+        augmentationFloorCellId: cell.id,
+        augmentationFloorTierId: tier.id,
+        augmentationFloorTierRuntimeId: tier.runtimeId,
+        localTile: cell.localTile,
+      }))),
+      ...room.augmentationTransfers.flatMap((transfer) => transfer.worldCells.map((cell) => ({
+        x: cell.grid.x,
+        z: cell.grid.z,
+        elevation: cell.elevation,
+        roomId: room.id,
+        surface: transfer.form === 'ramp' ? 'industrialRamp' : 'industrialTransfer',
+        isPlatformingSurface: true,
+        augmentationTransferCellId: cell.id,
+        augmentationTransferId: transfer.id,
+        localTile: cell.localTile,
+        rampStartElevation: transfer.worldElevationRange?.from,
+        rampEndElevation: transfer.worldElevationRange?.to,
+      }))),
+    ];
+    generator._annotateDungeonSupplementWalkabilityIntent(
+      floorTiles,
+      [{ id: room.id, isDungeonSupplement: true }],
+    );
+    const solidZones = generator._createDungeonSupplementManifestSolidZones([room]);
+    const navigableFloors = floorTiles.filter((floor) => (
+      floor.walkabilityIntent !== 'support-only'
+        && !generator._isFloorTileBlockedBySolidZone(floor, solidZones)
+    ));
+    const baseFloors = floorTiles.filter(({ augmentationFloorTierId }) => (
+      augmentationFloorTierId === 'base'
+    ));
+    const maximumLocalZ = Math.max(...baseFloors.map(({ localTile }) => localTile.z));
+    const startFloor = baseFloors.find(({ localTile }) => (
+      localTile.x === 0 && localTile.z === maximumLocalZ
+    ));
+    const anchor = room.augmentationAnchors.find(({ sourceFeatureId }) => (
+      sourceFeatureId === featureId
+    ));
+    const targetFloor = floorTiles.find(({ augmentationFloorCellId }) => (
+      augmentationFloorCellId === anchor?.supportCellId
+    ));
+    const reachableKeys = generator._createReachableFloorTileKeySet(
+      startFloor,
+      navigableFloors,
+    );
+    const returnableKeys = generator._createFloorTileKeySetThatCanReach(
+      startFloor,
+      navigableFloors,
+    );
+    const floorKey = generator._getFloorTileGraphKey(targetFloor);
+    return {
+      room,
+      floorTiles,
+      anchor,
+      targetFloor,
+      blocked: generator._isFloorTileBlockedBySolidZone(targetFloor, solidZones),
+      reachable: reachableKeys.has(floorKey),
+      returnable: returnableKeys.has(floorKey),
+    };
+  };
+
+  const foundry = inspectTarget('ind-room-reaverbot-foundry-01', 'rf-flank-e');
+  assert.deepEqual(foundry.anchor.localTile, { x: 1, z: -2, elevation: 0 });
+  assert.equal(foundry.targetFloor.walkabilityIntent, 'required-clear');
+  assert.equal(foundry.blocked, false);
+  assert.equal(foundry.reachable, true);
+  assert.equal(foundry.returnable, true);
+  assert.equal(foundry.room.augmentationTransfers.some((transfer) => (
+    transfer.worldCells.some(({ localTile }) => (
+      localTile.x === 1 && localTile.z === -2
+    ))
+  )), false, 'foundry flank has no ramp overhead in its authored column');
+  assert.ok(foundry.room.augmentationZones.find(({ id }) => id === 'rf-encounter-zone')
+    .worldCells.some(({ floorCellId }) => floorCellId === foundry.anchor.supportCellId));
+  const otherFoundryAnchors = foundry.room.augmentationAnchors.filter((anchor) => (
+    anchor.sourceFeatureId?.startsWith('rf-')
+      && anchor.sourceFeatureId !== 'rf-flank-e'
+      && anchor.blueprintFeatureType === 'spawn'
+  ));
+  assert.ok(otherFoundryAnchors.every((anchor) => (
+    Math.hypot(
+      anchor.position.x - foundry.anchor.position.x,
+      anchor.position.y - foundry.anchor.position.y,
+      anchor.position.z - foundry.anchor.position.z,
+    ) >= 2.8
+  )));
+
+  const observation = inspectTarget('ind-room-observation-break-01', 'ob-lore');
+  assert.deepEqual(observation.anchor.localTile, { x: -3, z: 0, elevation: 0 });
+  assert.equal(observation.targetFloor.walkabilityIntent, 'required-clear');
+  assert.equal(observation.blocked, false);
+  assert.equal(observation.reachable, true);
+  assert.equal(observation.returnable, true);
+  const observationCache = observation.room.augmentationAnchors.find(({ sourceFeatureId }) => (
+    sourceFeatureId === 'ob-cache'
+  ));
+  assert.ok(Math.hypot(
+    observationCache.position.x - observation.anchor.position.x,
+    observationCache.position.z - observation.anchor.position.z,
+  ) > 1.6, 'log and cache remain outside their combined reward reservation radii');
 });
 
 function materializeVerticalBranch({
@@ -1030,35 +2387,48 @@ function routeSocket(id, nodeId, position, facing) {
   };
 }
 
-function v4LevelSpineFixture({ reversed = false, worldZ = 0 } = {}) {
+function v4LevelSpineFixture({
+  reversed = false,
+  worldZ = 0,
+  connectorFamily = 'service-gallery',
+  leftElevation = 14,
+  rightElevation = 14,
+  spanCells = 8,
+} = {}) {
   const operationId = 'supplement:test:issue-066:operation';
   const grantId = 'industrial:test:issue-066:grant';
   const segmentId = `${operationId}:segment:0`;
   const leftSocket = routeSocket(
     'industrial:test:issue-066:left',
     'authored-left',
-    { x: 0, y: 14, z: worldZ },
+    { x: 0, y: leftElevation, z: worldZ },
     { x: 1, y: 0, z: 0 },
   );
   const rightSocket = routeSocket(
     'industrial:test:issue-066:right',
     'authored-right',
-    { x: 22.4, y: 14, z: worldZ },
+    { x: spanCells * TILE_SIZE, y: rightElevation, z: worldZ },
     { x: -1, y: 0, z: 0 },
   );
   const orderedSockets = reversed
     ? [rightSocket, leftSocket]
     : [leftSocket, rightSocket];
   const orderedGridX = reversed
-    ? Array.from({ length: 9 }, (_, index) => 8 - index)
-    : Array.from({ length: 9 }, (_, index) => index);
+    ? Array.from({ length: spanCells + 1 }, (_, index) => spanCells - index)
+    : Array.from({ length: spanCells + 1 }, (_, index) => index);
   const segment = {
     id: segmentId,
     operationId,
-    connectorFamily: 'service-gallery',
+    connectorFamily,
     from: { ...orderedSockets[0], kind: 'parentSocket' },
     to: { ...orderedSockets[1], kind: 'parentSocket' },
-    path: orderedGridX.map((x) => ({ x: x * TILE_SIZE, y: 14, z: worldZ })),
+    path: orderedGridX.map((x, index) => ({
+      x: x * TILE_SIZE,
+      y: index === orderedGridX.length - 1
+        ? orderedSockets[1].position.y
+        : orderedSockets[0].position.y,
+      z: worldZ,
+    })),
   };
   segment.endpointSeams = [
     createDungeonRouteEndpointSeam(segment.from, {
@@ -1100,18 +2470,18 @@ function v4LevelSpineFixture({ reversed = false, worldZ = 0 } = {}) {
         z: Math.round(Number(worldZ.toFixed(6)) / TILE_SIZE),
         width: 5,
         depth: 5,
-        baseElevation: 14,
-        plannedBaseElevation: 14,
+        baseElevation: leftElevation,
+        plannedBaseElevation: leftElevation,
         exitSockets: [],
       },
       {
         id: 'authored-right',
-        x: 10,
+        x: spanCells + 2,
         z: Math.round(Number(worldZ.toFixed(6)) / TILE_SIZE),
         width: 5,
         depth: 5,
-        baseElevation: 14,
-        plannedBaseElevation: 14,
+        baseElevation: rightElevation,
+        plannedBaseElevation: rightElevation,
         exitSockets: [],
       },
     ],
@@ -1182,6 +2552,33 @@ test('V4 materialization preserves the ordered centerline as authoritative floor
   assert.equal(spine.precommitTraversal.reverseReachableCellCount, 9);
   assert.equal(spine.finalCollisionVerificationRequired, true);
   assert.equal(plan.connectorVariantConstraints.finalCollisionSpineVerificationRequired, true);
+});
+
+test('V4 route connector rejection preserves exact segment and grant diagnostics', () => {
+  const fixture = v4LevelSpineFixture({
+    connectorFamily: 'lift',
+    leftElevation: 0,
+    rightElevation: 14,
+    spanCells: 4,
+  });
+  const result = materializeV4LevelSpineFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, false);
+  assert.equal(result.diagnostics.atomicRejected, true);
+  assert.match(
+    result.diagnostics.errors.join(' | '),
+    /cannot realize lift contract: .*no exterior straight run/i,
+  );
+  assert.deepEqual(result.diagnostics.materializationFailures, [{
+    code: 'DUNGEON_SUPPLEMENT_CONNECTOR_CONTRACT_REJECTED',
+    diagnosticCode: null,
+    message: result.diagnostics.errors[0],
+    operationId: fixture.overlayPlan.operations[0].id,
+    grantId: fixture.overlayPlan.operations[0].grantId,
+    entityKind: 'segment',
+    segmentId: fixture.segment.id,
+    connectorFamily: 'lift',
+  }]);
 });
 
 test('V4 authoritative level spines remain exact when source and destination are reversed', () => {
@@ -1382,6 +2779,7 @@ function pyramidRouteNetworkFixture({
       id: 'industrial-v1:main-region',
       routeNetworkGrants: [{
         id: grantId,
+        kind: 'landmark-perimeter-loop',
         routeNetworkKind: 'landmark-perimeter-loop',
         endpointSockets: [east, west],
         progressionBandId: 0,
@@ -1437,6 +2835,50 @@ test('V4 pyramid route networks bind both unused wall sockets exactly and preser
   assert.equal(junction.junctionKind, 'through-t');
   assert.equal(junction.countsAsMeaningfulStation, true);
   assert.ok(Math.abs(junction.augmentationJunction.clearCoreVolume.size.x - 8.4) < 1e-9);
+});
+
+test('V4 pyramid materialization rejects displaced parent thresholds even with authored socket metadata', () => {
+  const fixture = pyramidRouteNetworkFixture();
+  const [entry, , reconnect] = fixture.overlayPlan.segments;
+  const grant = fixture.extensionRegions[0].routeNetworkGrants[0];
+  const nodeById = new Map(fixture.overlayPlan.nodes.map((node) => [node.id, node]));
+  const bindSharedThreshold = (segment, endpointRole, oppositeRole, grantedSocket) => {
+    const endpoint = segment[endpointRole];
+    const opposite = segment[oppositeRole];
+    const oppositeNode = nodeById.get(opposite.nodeId);
+    const oppositeSocket = oppositeNode.sockets.find((socket) => socket.id === opposite.socketId);
+    const threshold = dungeonLandmarkSharedThresholdParentPosition(
+      grantedSocket,
+      oppositeSocket,
+    );
+    segment.routeRole = 'parent-station-attachment';
+    endpoint.position = threshold;
+    endpoint.authoredSocketPosition = { ...grantedSocket.position };
+    if (endpointRole === 'from') segment.path[0] = { ...threshold };
+    else segment.path[segment.path.length - 1] = { ...threshold };
+  };
+  bindSharedThreshold(entry, 'from', 'to', grant.endpointSockets[0]);
+  bindSharedThreshold(reconnect, 'to', 'from', grant.endpointSockets[1]);
+
+  const result = materializeIndustrialOverlay({
+    rooms: [{
+      id: 'keycardRoom',
+      x: 0,
+      z: 0,
+      width: 7,
+      depth: 7,
+      baseElevation: 0,
+      plannedBaseElevation: 0,
+      exitSockets: [],
+    }],
+    overlayPlan: fixture.overlayPlan,
+    extensionRegions: fixture.extensionRegions,
+    tileSize: TILE_SIZE,
+  });
+
+  assert.equal(result.diagnostics.accepted, false);
+  assert.equal(result.diagnostics.routeNetworkConnectionCount, 0);
+  assert.match(result.diagnostics.errors.join(' | '), /does not match granted socket/i);
 });
 
 test('V4 materialized shortcut plans share deterministic mechanism identity and elevation modes', () => {
@@ -1538,6 +2980,16 @@ test('corridor-station grants become exact T-junction proxies with one deeper-si
     bridgePath: Array.from({ length: 19 }, (_, index) => ({ x: index - 9, z: 0 })),
     fromSocket: { id: 'a:exit', roomId: 'authored-a', x: -9, z: 0, elevation: 0 },
     toSocket: { id: 'b:entry', roomId: 'authored-b', x: 9, z: 0, elevation: 0 },
+    connectorVariantConstraints: {
+      roomFootprints: [{
+        roomId: 'authored-base-only',
+        minX: -12,
+        maxX: 12,
+        minZ: -2,
+        maxZ: 2,
+      }],
+      blockedLanePoints: [],
+    },
   }];
   const segmentId = `${operationId}:segment:0`;
   const overlayPlan = {
@@ -1620,6 +3072,18 @@ test('corridor-station grants become exact T-junction proxies with one deeper-si
 
   assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
   assert.equal(result.diagnostics.routeStationGraphConnectionCount, 1);
+  const authoredPlan = result.connectionPlans.find(({ id }) => (
+    id === 'authored-a_authored-b_ground'
+  ));
+  assert.deepEqual(authoredPlan.connectorVariantConstraints.roomFootprints, [
+    {
+      roomId: 'authored-base-only',
+      minX: -12,
+      maxX: 12,
+      minZ: -2,
+      maxZ: 2,
+    },
+  ]);
   const station = result.connectorJunctionProxies.find((room) => room.isRouteStationProxy);
   assert.ok(station);
   assert.equal(result.rooms.some((room) => room.isRouteStationProxy), false);
@@ -2482,6 +3946,33 @@ test('rotated curated rooms retain accepted structural-quality records', () => {
       report.metrics.requiredExitSocketIds,
     );
     assert.ok(report.metrics.sightlines.every(({ accepted }) => accepted));
+    assert.equal(
+      room.augmentationProtectedSightlines.length,
+      room.augmentationModuleManifest.structuralQuality.requiredSightlines.length,
+    );
+    assert.ok(room.augmentationProtectedSightlines.every((sightline) => (
+      sightline.authoritative === true
+        && sightline.protectionKind === 'required-sightline'
+        && sightline.protectedOriginCount >= sightline.minimumVisibleOrigins
+        && sightline.worldCells.length > 0
+    )));
+    const protectedSightline = room.augmentationProtectedSightlines[0];
+    const protectedCell = protectedSightline.worldCells[0];
+    const inspection = inspectIndustrialSupplementStoryPresentationLegality({
+      room,
+      record: {
+        id: 'structural-quality-story-probe',
+        operationId: room.augmentationOperationId,
+        collisionRecordIds: [],
+        transform: { position: protectedCell.position },
+        worldFootprint: { widthMeters: 0.25, depthMeters: 0.25 },
+      },
+      tileSize: TILE_SIZE,
+    });
+    assert.equal(inspection.legal, false);
+    assert.ok(inspection.reasons.includes(
+      `protected-sightline:${protectedSightline.sightlineId}`,
+    ));
     const tierCells = new Set(room.augmentationFloorTiers.flatMap((tier) => (
       tier.worldCells.map((cell) => (
         `${cell.localTile.x},${cell.localTile.z}@${cell.localTile.elevation}`

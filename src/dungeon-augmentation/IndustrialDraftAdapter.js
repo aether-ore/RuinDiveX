@@ -62,6 +62,45 @@ function createRoomRecord(room, tileSize) {
       z: depthTiles * tileSize,
     },
   };
+  const dropBounds = room?.dropSpace?.lowerBounds;
+  const dropMinimumX = Number(dropBounds?.minX);
+  const dropMaximumX = Number(dropBounds?.maxX);
+  const dropMinimumZ = Number(dropBounds?.minZ);
+  const dropMaximumZ = Number(dropBounds?.maxZ);
+  const hasDropBounds = [
+    dropMinimumX,
+    dropMaximumX,
+    dropMinimumZ,
+    dropMaximumZ,
+  ].every(Number.isFinite)
+    && dropMaximumX >= dropMinimumX
+    && dropMaximumZ >= dropMinimumZ;
+  const declaredLowerY = floorY + finiteNumber(room?.dropSpace?.lowerElevation);
+  const resolvedLowerY = room.minY != null && Number.isFinite(Number(room.minY))
+    ? Math.min(declaredLowerY, Number(room.minY))
+    : declaredLowerY;
+  const resolvedUpperY = room.maxY != null && Number.isFinite(Number(room.maxY))
+    ? Number(room.maxY)
+    : room.ceilingY != null && Number.isFinite(Number(room.ceilingY))
+      ? Number(room.ceilingY)
+      : floorY + height;
+  const dropSpaceOccupiedVolume = hasDropBounds && resolvedUpperY > resolvedLowerY
+    ? {
+        id: `base:room:${room.id}:drop-space-occupied`,
+        ownerId: room.id,
+        center: {
+          x: (dropMinimumX + dropMaximumX) * tileSize * 0.5,
+          y: (resolvedLowerY + resolvedUpperY) * 0.5,
+          z: (dropMinimumZ + dropMaximumZ) * tileSize * 0.5,
+        },
+        size: {
+          x: (dropMaximumX - dropMinimumX + 1) * tileSize,
+          y: resolvedUpperY - resolvedLowerY,
+          z: (dropMaximumZ - dropMinimumZ + 1) * tileSize,
+        },
+        purpose: 'industrial-authored-drop-space-occupied',
+      }
+    : null;
   return {
     id: String(room.id ?? ''),
     type: String(room.type ?? 'room'),
@@ -81,7 +120,7 @@ function createRoomRecord(room, tileSize) {
     widthMeters: widthTiles * tileSize,
     depthMeters: depthTiles * tileSize,
     occupiedVolume,
-    occupiedVolumes: [occupiedVolume],
+    occupiedVolumes: [occupiedVolume, dropSpaceOccupiedVolume].filter(Boolean),
     sockets: (room.exitSockets ?? []).map((socket) => cloneSocket(socket, tileSize)),
   };
 }
@@ -294,7 +333,11 @@ export function createIndustrialBaseDraft({
     difficulty: Math.max(1, Math.trunc(finiteNumber(difficulty, 1))),
     rooms: roomRecords,
     connectionPlans: connectionRecords,
-    occupiedVolumes: roomRecords.map((room) => room.occupiedVolume),
+    // Multi-tier authored rooms can contribute narrower occupied sub-volumes
+    // in addition to their ordinary baseElevation..ceiling body. Keep every
+    // deterministic record in the canonical collision input rather than
+    // silently projecting only the singular legacy room volume.
+    occupiedVolumes: roomRecords.flatMap((room) => room.occupiedVolumes),
     connectionOccupiedVolumes: connectionVolumeRecords
       .flatMap((record) => record.occupiedVolumes),
     connectionClearanceVolumes: connectionVolumeRecords
@@ -310,6 +353,7 @@ export function createIndustrialAugmentationHost({
   rooms = [],
   connectionPlans = [],
   tileSize = 2.8,
+  profileId = null,
 } = {}) {
   return createIndustrialExtensionHost({
     basePlanHash: baseDraft?.basePlanHash,
@@ -317,5 +361,6 @@ export function createIndustrialAugmentationHost({
     rooms,
     connectionPlans,
     tileSize,
+    profileId,
   });
 }

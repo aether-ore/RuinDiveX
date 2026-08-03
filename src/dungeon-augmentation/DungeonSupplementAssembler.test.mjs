@@ -1398,3 +1398,363 @@ test('route-network assembly rejects ungranted parent sockets before creating re
   );
   material.dispose();
 });
+
+test('owner-aware presentation records realize once without delegated gameplay or transfer rendering', () => {
+  const regionBinding = binding('region-a');
+  const material = new THREE.MeshStandardMaterial({ name: 'presentation-test-material' });
+  const calls = [];
+  let propCalls = 0;
+  let frameCalls = 0;
+  const makeProvider = (role) => (specification) => {
+    calls.push({ role, specification });
+    const group = new THREE.Group();
+    group.name = `presentation-${role}-${specification.sourceFeatureId}`;
+    group.position.copy(specification.position);
+    group.rotation.y = specification.rotationY;
+    group.add(new THREE.Mesh(
+      new THREE.BoxGeometry(
+        specification.width,
+        specification.height,
+        specification.depth,
+      ),
+      material,
+    ));
+    return group;
+  };
+  const session = createDungeonThemeSession({
+    id: 'presentation-session',
+    themeBinding: regionBinding,
+    resources: createDungeonThemeResourceLedger(),
+    materialProviders: Object.fromEntries(MATERIAL_ROLES.map((role) => [role, material])),
+    assetProviders: {
+      gameplayCover: makeProvider('gameplayCover'),
+      machineryLandmark: makeProvider('machineryLandmark'),
+      storyMarking: makeProvider('storyMarking'),
+      prop: () => {
+        propCalls += 1;
+        return new THREE.Group();
+      },
+      frame: () => {
+        frameCalls += 1;
+        return new THREE.Group();
+      },
+    },
+  });
+  const nodeId = 'presentation-node';
+  const operationId = 'presentation-operation';
+  const record = ({
+    featureId,
+    featureType,
+    semanticRole,
+    assetRole,
+    position,
+    width,
+    height,
+    depth,
+    collisionRecordIds = [],
+    optional = false,
+    selected = !optional,
+    realizationOwner = 'supplement-assembler',
+    realizationKind = 'theme-object-root',
+    ownerBindingId = null,
+    runtimeActivation = realizationOwner === 'gameplay-runtime'
+      ? 'dormant'
+      : optional && !selected
+        ? 'optional-not-selected'
+        : 'not-applicable',
+  }) => ({
+    id: `${nodeId}:blueprint-feature:${featureId}:presentation`,
+    schema: 'ruindivex-industrial-supplement-presentation-record/v1',
+    nodeId,
+    roomId: nodeId,
+    operationId,
+    blueprintId: 'presentation-test-blueprint',
+    sourceFeatureId: featureId,
+    sourceFeatureRuntimeId: `${nodeId}:blueprint-feature:${featureId}`,
+    sourceFeatureType: featureType,
+    semanticRole,
+    themeRole: assetRole,
+    presentationAssetRole: assetRole,
+    presentationOwner: realizationOwner,
+    realizationOwner,
+    realizationKind,
+    ownerBindingIds: ownerBindingId == null ? [] : [ownerBindingId],
+    runtimeConsumerBindingIds: [],
+    runtimeActivation,
+    collisionRecordIds,
+    presentationSurface: semanticRole === 'story-marking'
+      ? 'floor-flush-decal'
+      : 'authored-volume',
+    transform: { position, rotationY: Math.PI * 0.5, scale: { x: 1, y: 1, z: 1 } },
+    authoredFootprint: {
+      widthMeters: width,
+      heightMeters: height,
+      depthMeters: depth,
+    },
+    required: !optional,
+    optional,
+    nonblocking: optional,
+    selectedForRendering: selected,
+    renderingRequired: selected,
+    realizationRequired: true,
+    renderedBySupplementAssembler:
+      realizationOwner === 'supplement-assembler' && selected,
+    storyPlacementLegal: optional ? true : undefined,
+  });
+  const presentationRecords = [
+    record({
+      featureId: 'cover',
+      featureType: 'cover',
+      semanticRole: 'gameplay-cover',
+      assetRole: 'gameplayCover',
+      position: { x: 30.8, y: 1.5, z: -2.8 },
+      width: 2.8,
+      height: 1.2,
+      depth: 5.6,
+      collisionRecordIds: ['cover-collision'],
+    }),
+    record({
+      featureId: 'machine',
+      featureType: 'machine',
+      semanticRole: 'machinery-landmark',
+      assetRole: 'machineryLandmark',
+      position: { x: 25.2, y: 1.5, z: 2.8 },
+      width: 5.6,
+      height: 3.6,
+      depth: 2.8,
+      collisionRecordIds: ['machine-collision'],
+    }),
+    record({
+      featureId: 'story',
+      featureType: 'story',
+      semanticRole: 'story-marking',
+      assetRole: 'storyMarking',
+      position: { x: 33.6, y: 1.5, z: 2.8 },
+      width: 2.8,
+      height: 0.035,
+      depth: 2.8,
+      optional: true,
+      selected: true,
+    }),
+    record({
+      featureId: 'control',
+      featureType: 'control',
+      semanticRole: 'gameplay-control',
+      assetRole: null,
+      position: { x: 28, y: 1.5, z: 0 },
+      width: 2.8,
+      height: 3.6,
+      depth: 2.8,
+      selected: false,
+      realizationOwner: 'gameplay-runtime',
+      realizationKind: 'gameplay-anchor',
+      ownerBindingId: 'control-anchor',
+    }),
+    record({
+      featureId: 'transfer',
+      featureType: 'transfer',
+      semanticRole: 'traversal-transfer',
+      assetRole: null,
+      position: { x: 28, y: 1.5, z: -5.6 },
+      width: 2.8,
+      height: 3.6,
+      depth: 2.8,
+      selected: false,
+      realizationOwner: 'supplement-connector-assembler',
+      realizationKind: 'physical-transfer',
+      ownerBindingId: 'transfer-runtime',
+    }),
+    record({
+      featureId: 'story-unselected',
+      featureType: 'story',
+      semanticRole: 'story-marking',
+      assetRole: 'storyMarking',
+      position: { x: 22.4, y: 1.5, z: 2.8 },
+      width: 2.8,
+      height: 0.035,
+      depth: 2.8,
+      optional: true,
+      selected: false,
+    }),
+  ];
+  const overlayPlan = {
+    schema: 'ruindivex-dungeon-augmentation-overlay/v2',
+    revision: 2,
+    profileId: 'industrial-supplement-preview-v4',
+    authoritativeManifestRealization: true,
+    operations: [{
+      id: operationId,
+      type: 'optionalBranch',
+      parentRegionId: 'region-a',
+      themeBinding: regionBinding,
+      nodeIds: [nodeId],
+      segmentIds: [],
+    }],
+    nodes: [{
+      id: nodeId,
+      operationId,
+      parentRegionId: 'region-a',
+      kind: 'supplementRoom',
+      grammarId: 'presentation-test-room',
+      blueprintId: 'presentation-test-blueprint',
+      authoritativeBlueprintRealization: true,
+      themeBinding: regionBinding,
+      placement: { center: { x: 28, y: 1.5, z: 0 }, rotationQuarterTurns: 0 },
+      size: { x: 11.2, y: 5.6, z: 11.2 },
+      sockets: [],
+      anchors: [{ id: 'control-anchor', runtimeId: 'control-anchor' }],
+      transfers: [{ id: 'transfer-runtime', runtimeId: 'transfer-runtime' }],
+      features: presentationRecords.map((entry) => ({
+        id: entry.sourceFeatureRuntimeId,
+        runtimeId: entry.sourceFeatureRuntimeId,
+        sourceFeatureRuntimeId: entry.sourceFeatureRuntimeId,
+      })),
+      collisionRecords: [
+        { id: 'cover-collision' },
+        { id: 'machine-collision' },
+      ],
+      presentationRecords,
+    }],
+    segments: [],
+  };
+
+  const fragment = assembleDungeonSupplement({
+    overlayPlan,
+    themeSession: session,
+    structuralMode: 'facadeOnly',
+  });
+  const assemblerRecords = presentationRecords.filter(({ renderedBySupplementAssembler }) => (
+    renderedBySupplementAssembler
+  ));
+  const requiredRecords = presentationRecords;
+  assert.equal(calls.length, assemblerRecords.length);
+  assert.equal(propCalls, 0, 'authored solids never use the generic cargo prop factory');
+  assert.equal(fragment.presentationRealizations.length, requiredRecords.length);
+  assert.equal(new Set(fragment.presentationRealizations.map(({ presentationRecordId }) => (
+    presentationRecordId
+  ))).size, requiredRecords.length);
+  for (const { role, specification } of calls) {
+    const source = presentationRecords.find(({ id }) => id === specification.id);
+    assert.ok(source);
+    assert.equal(role, source.presentationAssetRole);
+    assert.equal(specification.presentationRecord.id, source.id);
+    assert.equal(specification.width, source.authoredFootprint.widthMeters);
+    assert.equal(specification.height, source.authoredFootprint.heightMeters);
+    assert.equal(specification.depth, source.authoredFootprint.depthMeters);
+    assert.equal(specification.rotationY, source.transform.rotationY);
+    assert.ok(specification.position.isVector3);
+    assert.ok(specification.facing.isVector3);
+    const object = fragment.root.getObjectByName(
+      `presentation-${role}-${source.sourceFeatureId}`,
+    );
+    assert.ok(object);
+    assert.equal(object.parent, fragment.root, 'presentation root attaches once at world scope');
+    const worldPosition = object.getWorldPosition(new THREE.Vector3());
+    assert.deepEqual(worldPosition.toArray(), [
+      source.transform.position.x,
+      source.transform.position.y,
+      source.transform.position.z,
+    ]);
+  }
+  const delegated = fragment.presentationRealizations.filter(({ realizationOwner }) => (
+    realizationOwner !== 'supplement-assembler'
+  ));
+  assert.deepEqual(delegated.map(({ realizationKind }) => realizationKind).sort(), [
+    'gameplay-anchor',
+    'physical-transfer',
+  ]);
+  assert.ok(delegated.every((entry) => (
+    entry.rootObjectCount === 0
+      && entry.rendererObjectId == null
+      && entry.meshCount === 0
+      && entry.drawCallCount === 0
+  )));
+  const unselectedStory = fragment.presentationRealizations.find(({ sourceFeatureId }) => (
+    sourceFeatureId === 'story-unselected'
+  ));
+  assert.ok(unselectedStory);
+  assert.equal(unselectedStory.realizationDisposition, 'optional-not-selected');
+  assert.equal(unselectedStory.renderedBySupplementAssembler, false);
+  assert.equal(unselectedStory.rootObjectCount, 0);
+  assert.equal(unselectedStory.rendererObjectId, null);
+  assert.equal(fragment.diagnostics.assembled.presentationRealizationCount, 6);
+  fragment.dispose();
+
+  const invalidStorySurface = structuredClone(overlayPlan);
+  invalidStorySurface.nodes[0].presentationRecords.find(({ sourceFeatureId }) => (
+    sourceFeatureId === 'story'
+  )).presentationSurface = 'authored-volume';
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan: invalidStorySurface,
+      themeSession: session,
+      structuralMode: 'facadeOnly',
+    }),
+    (error) => error.code === 'INVALID_STORY_PRESENTATION_SURFACE',
+  );
+
+  const thickFlushStory = structuredClone(overlayPlan);
+  thickFlushStory.nodes[0].presentationRecords.find(({ sourceFeatureId }) => (
+    sourceFeatureId === 'story'
+  )).authoredFootprint.heightMeters = 0.5;
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan: thickFlushStory,
+      themeSession: session,
+      structuralMode: 'facadeOnly',
+    }),
+    (error) => error.code === 'INVALID_STORY_PRESENTATION_SURFACE',
+  );
+
+  const wallMountedStory = structuredClone(overlayPlan);
+  const wallMountedRecord = wallMountedStory.nodes[0].presentationRecords.find(({
+    sourceFeatureId,
+  }) => sourceFeatureId === 'story');
+  wallMountedRecord.presentationSurface = 'wall-mounted-decal';
+  wallMountedRecord.authoredFootprint.heightMeters = 1.2;
+  wallMountedRecord.authoredFootprint.depthMeters = 0.035;
+  const wallMountedFragment = assembleDungeonSupplement({
+    overlayPlan: wallMountedStory,
+    themeSession: session,
+    structuralMode: 'facadeOnly',
+  });
+  assert.equal(
+    wallMountedFragment.presentationRealizations.find(({ sourceFeatureId }) => (
+      sourceFeatureId === 'story'
+    ))?.renderedBySupplementAssembler,
+    true,
+  );
+  wallMountedFragment.dispose();
+
+  const internalFrameDrift = structuredClone(overlayPlan);
+  internalFrameDrift.nodes[0].anchors.push({
+    id: 'legacy-internal-doorway-frame',
+    localAnchorId: 'legacy-internal-doorway-frame',
+    kind: 'doorway-frame',
+    assetRole: 'frame',
+    position: { x: 28, y: 1.5, z: 5.6 },
+  });
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan: internalFrameDrift,
+      themeSession: session,
+      structuralMode: 'facadeOnly',
+    }),
+    (error) => error.code === 'V4_INTERNAL_DOORWAY_FRAME_PRESENTATION_FORBIDDEN',
+  );
+  assert.equal(frameCalls, 0, 'V4 internal sockets never invoke the legacy frame asset path');
+
+  const missingOwnerBinding = structuredClone(overlayPlan);
+  missingOwnerBinding.nodes[0].presentationRecords.find(({ sourceFeatureId }) => (
+    sourceFeatureId === 'control'
+  )).ownerBindingIds = ['missing-control-anchor'];
+  assert.throws(
+    () => assembleDungeonSupplement({
+      overlayPlan: missingOwnerBinding,
+      themeSession: session,
+      structuralMode: 'facadeOnly',
+    }),
+    (error) => error.code === 'INVALID_PRESENTATION_OWNER_BINDING',
+  );
+  material.dispose();
+});

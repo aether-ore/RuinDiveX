@@ -1,4 +1,7 @@
 import { expect, test } from '@playwright/test';
+import { hashCanonicalValue } from '../src/dungeon-augmentation/canonical.js';
+
+const EXPECTED_V1_CONNECTOR_PRESENTATION_HASH = 'v1-a360ed711be3206aaa46c902adfd01d3';
 
 const EXPECTED_V1_ROOM_IDS = [
   'alienServerRoom',
@@ -85,6 +88,15 @@ test('real V1 seed assembles signed vertical galleries, classic corridors, ladde
     const decorativeArchVisualCounts = new Map();
     const decorativeArchVisualProfiles = new Map();
     const classicFurnishingVisuals = new Map();
+    const decorativeArchVisualIdentity = [];
+    const classicFurnishingVisualIdentity = [];
+    const roundedNumber = (value) => Number(Number(value ?? 0).toFixed(6));
+    const pointIdentity = (point) => ({
+      x: roundedNumber(point?.x),
+      y: roundedNumber(point?.y),
+      z: roundedNumber(point?.z),
+    });
+    dungeon.group.updateMatrixWorld(true);
     dungeon.group.traverse((object) => {
       if (object.name?.startsWith('dungeonConnectorLadder_')) ladderVisualCount += 1;
       if (object.userData?.connectorDecorativeArch) {
@@ -103,6 +115,13 @@ test('real V1 seed assembles signed vertical galleries, classic corridors, ladde
             ?.torusVerticalScale ?? null,
         });
         decorativeArchVisualProfiles.set(connectorId, profiles);
+        decorativeArchVisualIdentity.push({
+          connectorId: String(connectorId),
+          name: String(object.name),
+          pathIndex: Number(object.userData.pathIndex),
+          position: pointIdentity(object.getWorldPosition(object.position.clone())),
+          direction: pointIdentity(object.getWorldDirection(object.position.clone())),
+        });
       }
       if (object.userData?.classicV1CorridorFurnishing) {
         const connectorId = object.userData.connectorId;
@@ -112,6 +131,13 @@ test('real V1 seed assembles signed vertical galleries, classic corridors, ladde
           keepsTravelEnvelopeClear: object.userData.keepsTravelEnvelopeClear,
         });
         classicFurnishingVisuals.set(connectorId, visuals);
+        classicFurnishingVisualIdentity.push({
+          connectorId: String(connectorId),
+          name: String(object.name),
+          serviceBeatId: String(object.userData.serviceBeatId),
+          keepsTravelEnvelopeClear:
+            object.userData.keepsTravelEnvelopeClear === true,
+        });
       }
     });
     const galleries = dungeon.connectionPlans
@@ -196,6 +222,75 @@ test('real V1 seed assembles signed vertical galleries, classic corridors, ladde
         )),
       };
     });
+    const optionalNumber = (value) => (
+      Number.isFinite(Number(value)) ? roundedNumber(value) : null
+    );
+    const gridPointIdentity = (point) => ({
+      x: optionalNumber(point?.x),
+      z: optionalNumber(point?.z),
+    });
+    const v1ConnectorPresentationIdentity = {
+      plans: dungeon.connectionPlans
+        .filter(isInteriorPlan)
+        .filter((plan) => (
+          (plan.decorativeArchBeats?.length ?? 0) > 0
+            || (plan.classicV1ServiceBeats?.length ?? 0) > 0
+        ))
+        .map((plan) => ({
+          id: String(plan.id),
+          connectorVariantId: String(plan.connectorVariantId ?? ''),
+          fromRoomId: String(plan.fromRoomId ?? ''),
+          toRoomId: String(plan.toRoomId ?? ''),
+          decorativeArchBeats: [...(plan.decorativeArchBeats ?? [])]
+            .sort((left, right) => (
+              Number(left.pathIndex) - Number(right.pathIndex)
+                || String(left.id).localeCompare(String(right.id))
+            ))
+            .map((beat) => ({
+              id: String(beat.id),
+              pathIndex: Number(beat.pathIndex),
+              gridPoint: gridPointIdentity(beat.gridPoint),
+              direction: gridPointIdentity(beat.direction),
+              floorElevation: optionalNumber(beat.floorElevation),
+              widthMeters: optionalNumber(beat.widthMeters),
+              archHeightMeters: optionalNumber(beat.archHeightMeters),
+              clearHeightMeters: optionalNumber(beat.clearHeightMeters),
+              internalClearWidthMeters: optionalNumber(beat.internalClearWidthMeters),
+              laneCenterOffsetMeters: optionalNumber(beat.laneCenterOffsetMeters),
+            })),
+          classicV1ServiceBeats: [...(plan.classicV1ServiceBeats ?? [])]
+            .sort((left, right) => String(left.id).localeCompare(String(right.id)))
+            .map((beat) => ({
+              id: String(beat.id),
+              pathIndex: Number(beat.pathIndex),
+              serviceKind: String(beat.serviceKind),
+              direction: gridPointIdentity(beat.direction),
+              galleryCenter: gridPointIdentity(beat.galleryCenter),
+              servicePoint: gridPointIdentity(beat.servicePoint),
+              fencePoint: gridPointIdentity(beat.fencePoint),
+              girderPoint: gridPointIdentity(beat.girderPoint),
+              serviceHalfExtentMeters: optionalNumber(beat.serviceHalfExtentMeters),
+              travelEnvelopeHalfWidthMeters: optionalNumber(
+                beat.travelEnvelopeHalfWidthMeters,
+              ),
+              minimumTravelClearanceMeters: optionalNumber(
+                beat.minimumTravelClearanceMeters,
+              ),
+              girderWidthMeters: optionalNumber(beat.girderWidthMeters),
+              keepsTravelEnvelopeClear: beat.keepsTravelEnvelopeClear === true,
+            })),
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      decorativeArchVisuals: decorativeArchVisualIdentity.sort((left, right) => (
+        left.connectorId.localeCompare(right.connectorId)
+          || left.pathIndex - right.pathIndex
+          || left.name.localeCompare(right.name)
+      )),
+      classicFurnishingVisuals: classicFurnishingVisualIdentity.sort((left, right) => (
+        left.connectorId.localeCompare(right.connectorId)
+          || left.serviceBeatId.localeCompare(right.serviceBeatId)
+      )),
+    };
     const wideDoors = dungeon.doors
       .filter((door) => door.connectionPlanId)
       .map((door) => ({
@@ -261,6 +356,7 @@ test('real V1 seed assembles signed vertical galleries, classic corridors, ladde
         && plan.connectorPresentation?.preservesV1Corridor === true
       )),
       classicCorridors,
+      v1ConnectorPresentationIdentity,
       ladderCount: dungeon.ladders.length,
       ladderVisualCount,
       ladderContracts: dungeon.ladders.map((ladder) => ({
@@ -369,6 +465,14 @@ test('real V1 seed assembles signed vertical galleries, classic corridors, ladde
     };
   });
 
+  const v1ConnectorPresentationHash = hashCanonicalValue(
+    initial.v1ConnectorPresentationIdentity,
+    { namespace: 'ruindivex-industrial-v1-connector-presentation/v1' },
+  );
+  expect(
+    v1ConnectorPresentationHash,
+    JSON.stringify(initial.v1ConnectorPresentationIdentity, null, 2),
+  ).toBe(EXPECTED_V1_CONNECTOR_PRESENTATION_HASH);
   expect(initial.accepted, initial.validationErrors.join('\n')).toBe(true);
   expect(initial.standardDungeonVoidUnderlayCount).toBe(0);
   expect(initial.roomIds).toEqual(EXPECTED_V1_ROOM_IDS);

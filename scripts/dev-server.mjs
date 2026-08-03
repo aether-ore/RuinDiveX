@@ -1,9 +1,14 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { createLevelForgeControlHandler } from '../src/level-editor/control/index.js';
 
 const root = path.resolve(process.cwd());
 const port = Number(process.argv[2] ?? 5174);
+const levelForgeControl = createLevelForgeControlHandler({
+  projectRoot: root,
+  origin: `http://127.0.0.1:${port}`,
+});
 
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -15,12 +20,18 @@ const contentTypes = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
   '.svg': 'image/svg+xml',
   '.wasm': 'application/wasm',
   '.fbx': 'application/octet-stream',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json; charset=utf-8',
+  '.bin': 'application/octet-stream',
+  '.zip': 'application/zip',
 };
 
 const server = createServer(async (request, response) => {
+  if (await levelForgeControl(request, response)) return;
   const requestUrl = new URL(request.url, `http://${request.headers.host}`);
   let filePath = path.resolve(root, `.${decodeURIComponent(requestUrl.pathname)}`);
 

@@ -8,8 +8,12 @@ import {
   RELEASE_PROFILE_ID,
   RELEASE_REQUIRED_SUITE_IDS,
   RELEASE_SHARD_TOPOLOGY,
+  assertCleanReleaseProvenance,
+  createReleaseArtifactIdentity,
   createReleaseProvenance,
-  hashCanonicalValue,
+  readJson,
+  validateCorpusManifest,
+  validateReleasePredecessorEvidenceCollection,
 } from './dungeon-augmentation-release-evidence.mjs';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -28,15 +32,8 @@ const provenance = await createReleaseProvenance({
   projectRoot,
   profile: DUNGEON_AUGMENTATION_PROFILES[RELEASE_PROFILE_ID],
 });
-const sourceEvidenceId = hashCanonicalValue({
-  gitCommit: provenance.gitCommit,
-  sourceHash: provenance.sourceHash,
-  profileHash: provenance.profile.hash,
-  nodeVersion: provenance.nodeVersion,
-  platform: provenance.platform,
-  machine: provenance.machine,
-}, 'dungeon-augmentation-v4-release-artifact-root-v1')
-  .replace(/[^a-z0-9-]/giu, '-');
+assertCleanReleaseProvenance(provenance, 'release evidence runner source');
+const sourceEvidenceId = createReleaseArtifactIdentity(provenance);
 const artifactRoot = requestedArtifactRoot
   ? path.resolve(projectRoot, requestedArtifactRoot)
   : path.join(
@@ -48,6 +45,9 @@ const artifactRoot = requestedArtifactRoot
 const manifestPath = path.join(artifactRoot, 'accepted-parent-manifest-1000.json');
 const shardDirectory = path.join(artifactRoot, 'shards', tier);
 const aggregatePath = path.join(artifactRoot, `aggregate-${tier}.json`);
+const canonicalPredecessorPath = path.join(artifactRoot, 'canonical-seed-0-1.json');
+const smokePredecessorPath = path.join(artifactRoot, 'aggregate-smoke.json');
+const normalPredecessorPath = path.join(artifactRoot, 'aggregate-normal.json');
 const receiptDirectory = path.join(artifactRoot, 'receipts');
 const attestationPath = path.join(artifactRoot, 'release-attestation.json');
 const topology = RELEASE_SHARD_TOPOLOGY[tier];
@@ -103,6 +103,9 @@ if (tier === 'release') {
     script: 'scripts/finalize-dungeon-augmentation-release-evidence.mjs',
     args: [
       `--aggregate=${aggregatePath}`,
+      `--canonical=${canonicalPredecessorPath}`,
+      `--smoke-aggregate=${smokePredecessorPath}`,
+      `--normal-aggregate=${normalPredecessorPath}`,
       `--receipt-dir=${receiptDirectory}`,
       `--output=${attestationPath}`,
     ],
@@ -118,6 +121,11 @@ if (printPlan) {
     manifestPath,
     shardDirectory,
     aggregatePath,
+    predecessorPaths: tier === 'release' ? {
+      canonical: canonicalPredecessorPath,
+      smoke: smokePredecessorPath,
+      normal: normalPredecessorPath,
+    } : null,
     receiptDirectory: tier === 'release' ? receiptDirectory : null,
     attestationPath: tier === 'release' ? attestationPath : null,
     shardCount: topology.shardCount,
@@ -125,6 +133,27 @@ if (printPlan) {
     steps,
   }, null, 2));
   process.exit(0);
+}
+
+let releasePredecessorEvidence = null;
+if (tier === 'release') {
+  try {
+    const [canonical, smoke, normal] = await Promise.all([
+      readJson(canonicalPredecessorPath),
+      readJson(smokePredecessorPath),
+      readJson(normalPredecessorPath),
+    ]);
+    releasePredecessorEvidence = { canonical, smoke, normal };
+    validateReleasePredecessorEvidenceCollection(releasePredecessorEvidence, {
+      provenance,
+      profile: provenance.profile,
+    });
+  } catch (error) {
+    throw new Error(
+      `Release tier requires passing same-source canonical, smoke, and normal predecessor evidence: ${error.message}`,
+      { cause: error },
+    );
+  }
 }
 
 await mkdir(shardDirectory, { recursive: true });
@@ -151,6 +180,14 @@ for (const step of steps) {
       `No release claim was emitted because ${step.label} failed with status ${result.status}.`,
     );
   }
+  if (tier === 'release' && step.script === 'scripts/build-dungeon-augmentation-release-corpus.mjs') {
+    const manifest = validateCorpusManifest(await readJson(manifestPath));
+    validateReleasePredecessorEvidenceCollection(releasePredecessorEvidence, {
+      manifestHash: manifest.evidenceHash,
+      provenance: manifest.provenance,
+      profile: manifest.profile,
+    });
+  }
 }
 
 console.log(JSON.stringify({
@@ -161,6 +198,11 @@ console.log(JSON.stringify({
   manifestPath,
   shardDirectory,
   aggregatePath,
+  predecessorPaths: tier === 'release' ? {
+    canonical: canonicalPredecessorPath,
+    smoke: smokePredecessorPath,
+    normal: normalPredecessorPath,
+  } : null,
   receiptDirectory: tier === 'release' ? receiptDirectory : null,
   attestationPath: tier === 'release' ? attestationPath : null,
   shardCount: topology.shardCount,

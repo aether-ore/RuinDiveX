@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { DungeonGenerator } from '../src/DungeonGenerator.js';
+import {
+  addAuthoredRoomFloor,
+  DungeonGenerator,
+  stampDungeonSupplementConnectorJunctionCores,
+} from '../src/DungeonGenerator.js';
 import { createDungeonRouteEndpointSeam } from '../src/dungeon-augmentation/geometry.js';
+import { createRouteNetworkConflictEntitySignature } from '../src/dungeon-augmentation/index.js';
 
 const TILE_SIZE = 2.8;
 
@@ -141,6 +146,48 @@ function corridorStationFixture() {
   return { plan, floorTiles, fromSeam, toSeam, parentRouteId, unrelatedParentFloor };
 }
 
+function exactSegmentOverlayFixture(plan) {
+  const operation = {
+    id: plan.augmentationOperationId,
+    type: 'routeNetwork',
+    grantId: plan.routeNetworkGrantId,
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const segment = {
+    id: plan.id,
+    operationId: operation.id,
+    kind: 'route-network-segment',
+    routeRole: 'objective-route-coverage:spine',
+    connectorFamily: 'service-gallery',
+    from: {
+      nodeId: plan.fromRoomId,
+      socketId: plan.fromSocket.id,
+      position: { ...plan.fromSocket.position },
+    },
+    to: {
+      nodeId: plan.toRoomId,
+      socketId: plan.toSocket.id,
+      position: { ...plan.toSocket.position },
+    },
+    path: plan.bridgePath.map(({ x, z }) => ({
+      x: x * TILE_SIZE,
+      y: 0,
+      z: z * TILE_SIZE,
+    })),
+  };
+  return {
+    operation,
+    segment,
+    overlayPlan: {
+      augmentationPlanHash: 'augmentation:exact-endpoint-failure',
+      effectivePlanHash: 'effective:exact-endpoint-failure',
+      operations: [operation],
+      nodes: [],
+      segments: [segment],
+    },
+  };
+}
+
 test('generator realizes a corridor-station seam against its authored parent owner', () => {
   const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
   const fixture = corridorStationFixture();
@@ -170,6 +217,54 @@ test('generator realizes a corridor-station seam against its authored parent own
   assert.equal(fixture.unrelatedParentFloor.sharedConnectorFloorOwnerIds, undefined);
 });
 
+test('missing endpoint-seam interior support attributes only the exact route segment', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  const fixture = corridorStationFixture();
+  const missingCell = fixture.fromSeam.orderedCells.find(({ signedDepthTiles }) => (
+    signedDepthTiles < 0
+  ));
+  fixture.floorTiles = fixture.floorTiles.filter((floor) => !(
+    floor.x === missingCell.gridX
+      && floor.z === missingCell.gridZ
+      && Math.abs(Number(floor.elevation ?? 0) - Number(missingCell.position.y ?? 0)) <= 0.05
+  ));
+  const { operation, segment, overlayPlan } = exactSegmentOverlayFixture(fixture.plan);
+
+  let caught = null;
+  try {
+    generator._realizeAuthoritativeSupplementSocketSeams(
+      new Map(),
+      fixture.floorTiles,
+      [fixture.plan],
+      overlayPlan,
+    );
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught?.code, 'DUNGEON_AUGMENTATION_SOCKET_SEAM_INTERIOR_SUPPORT_MISSING');
+  assert.deepEqual(caught.augmentationDiagnostics?.failedRouteNetworkGrants, [{
+    grantId: operation.grantId,
+    augmentationOperationId: operation.id,
+    routeNetworkKind: operation.routeNetworkKind,
+    connectionIds: [segment.id],
+    roomIds: [],
+    socketIds: [],
+    failureKinds: ['DUNGEON_AUGMENTATION_SOCKET_SEAM_INTERIOR_SUPPORT_MISSING'],
+  }]);
+  assert.deepEqual(caught.augmentationDiagnostics?.routeNetworkConflictExclusions, [{
+    grantId: operation.grantId,
+    entityKind: 'segment',
+    entityId: segment.id,
+    signature: createRouteNetworkConflictEntitySignature(segment, 'segment'),
+    reason: 'route-network-socket-seam-interior-support-missing',
+  }]);
+  assert.equal(
+    Object.hasOwn(caught.augmentationDiagnostics, 'routeNetworkPruningOverrides'),
+    false,
+  );
+});
+
 test('generator rejects a foreign physical owner even inside an exact corridor-station seam', () => {
   const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
   const fixture = corridorStationFixture();
@@ -182,6 +277,82 @@ test('generator rejects a foreign physical owner even inside an exact corridor-s
       [fixture.plan],
     ),
     (error) => error?.code === 'DUNGEON_AUGMENTATION_ENDPOINT_OVERLAP_OUTSIDE_SEAM',
+  );
+});
+
+test('foreign endpoint-seam ownership attributes only the exact route segment for replay exclusion', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  const fixture = corridorStationFixture();
+  fixture.floorTiles[0].signedConnectorFloorOwnerId = 'foreign-authored-route';
+  const operation = {
+    id: fixture.plan.augmentationOperationId,
+    type: 'routeNetwork',
+    grantId: fixture.plan.routeNetworkGrantId,
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const segment = {
+    id: fixture.plan.id,
+    operationId: operation.id,
+    kind: 'route-network-segment',
+    routeRole: 'objective-route-coverage:spine',
+    connectorFamily: 'service-gallery',
+    from: {
+      nodeId: fixture.plan.fromRoomId,
+      socketId: fixture.plan.fromSocket.id,
+      position: { ...fixture.plan.fromSocket.position },
+    },
+    to: {
+      nodeId: fixture.plan.toRoomId,
+      socketId: fixture.plan.toSocket.id,
+      position: { ...fixture.plan.toSocket.position },
+    },
+    path: fixture.plan.bridgePath.map(({ x, z }) => ({
+      x: x * TILE_SIZE,
+      y: 0,
+      z: z * TILE_SIZE,
+    })),
+  };
+  const overlayPlan = {
+    augmentationPlanHash: 'augmentation:exact-endpoint-overlap',
+    effectivePlanHash: 'effective:exact-endpoint-overlap',
+    operations: [operation],
+    nodes: [],
+    segments: [segment],
+  };
+
+  let caught = null;
+  try {
+    generator._realizeAuthoritativeSupplementSocketSeams(
+      new Map(),
+      fixture.floorTiles,
+      [fixture.plan],
+      overlayPlan,
+    );
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.ok(caught);
+  assert.equal(caught.code, 'DUNGEON_AUGMENTATION_ENDPOINT_OVERLAP_OUTSIDE_SEAM');
+  assert.deepEqual(caught.augmentationDiagnostics?.failedRouteNetworkGrants, [{
+    grantId: operation.grantId,
+    augmentationOperationId: operation.id,
+    routeNetworkKind: operation.routeNetworkKind,
+    connectionIds: [segment.id],
+    roomIds: [],
+    socketIds: [],
+    failureKinds: ['DUNGEON_AUGMENTATION_ENDPOINT_OVERLAP_OUTSIDE_SEAM'],
+  }]);
+  assert.deepEqual(caught.augmentationDiagnostics?.routeNetworkConflictExclusions, [{
+    grantId: operation.grantId,
+    entityKind: 'segment',
+    entityId: segment.id,
+    signature: createRouteNetworkConflictEntitySignature(segment, 'segment'),
+    reason: 'route-network-endpoint-overlap-outside-seam',
+  }]);
+  assert.equal(
+    Object.hasOwn(caught.augmentationDiagnostics, 'routeNetworkPruningOverrides'),
+    false,
   );
 });
 
@@ -284,6 +455,112 @@ test('legacy supplement records remain outside V4 seam realization', () => {
   assert.equal(result.seamCount, 0);
   assert.deepEqual(result.floorTiles, [legacyFloor]);
   assert.equal(legacyPlan.authoritativeSocketSeams, undefined);
+});
+
+test('elevated connector-junction base tiers stay outside the single-layer structural map', () => {
+  const junctionId = 'supplement:test:elevated-junction';
+  const tiles = new Map();
+  const elevatedFloors = stampDungeonSupplementConnectorJunctionCores(
+    tiles,
+    [{
+      id: junctionId,
+      stampConnectorJunctionFloor: true,
+      baseElevation: -14,
+      plannedBaseElevation: -14,
+      augmentationFloorTiers: [{
+        id: 'base',
+        localTierId: 'base',
+        authoritative: true,
+        localElevation: 0,
+        worldElevation: -14,
+        worldCells: [{
+          id: `${junctionId}:floor-tier:base:cell:0:0`,
+          grid: { x: 0, z: 118 },
+          elevation: -14,
+        }],
+      }],
+    }],
+    [
+      { id: 'supplement:test:arm:a', isDungeonSupplement: true, fromRoomId: junctionId },
+      { id: 'supplement:test:arm:b', isDungeonSupplement: true, toRoomId: junctionId },
+    ],
+  );
+
+  assert.equal(tiles.has('0,118'), false);
+  assert.equal(elevatedFloors.length, 1);
+  assert.equal(elevatedFloors[0].elevation, -14);
+  assert.equal(elevatedFloors[0].connectorJunctionOwnerId, junctionId);
+  assert.equal(
+    elevatedFloors[0].augmentationFloorCellId,
+    `${junctionId}:floor-tier:base:cell:0:0`,
+  );
+
+  const authoredProgressionTile = {
+    x: 0,
+    z: 118,
+    type: 'hallway',
+    surface: 'industrialRamp',
+    elevation: 2.8,
+    level: 1,
+    connectionId: 'authored-route',
+  };
+  tiles.set('0,118', authoredProgressionTile);
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  generator._clearProgressionAccessObstructions(tiles, [], new Set(['0,118']));
+
+  assert.equal(authoredProgressionTile.elevation, 0);
+  assert.equal(elevatedFloors[0].elevation, -14);
+  assert.notEqual(elevatedFloors[0], tiles.get('0,118'));
+});
+
+test('elevated supplement-room base tiers stay outside the empty structural-map layer', () => {
+  const roomId = 'supplement:test:elevated-room';
+  const tiles = new Map();
+  const elevatedFloors = [];
+
+  addAuthoredRoomFloor(tiles, {
+    id: roomId,
+    isDungeonSupplement: true,
+    baseElevation: -14,
+    plannedBaseElevation: -14,
+    tileType: 'floor',
+    augmentationOperationId: 'supplement:test:operation',
+    augmentationBlueprintId: 'ind-room-dispatch-vault-01',
+    augmentationFloorTiers: [{
+      id: `${roomId}:floor-tier:base`,
+      localTierId: 'base',
+      authoritative: true,
+      localElevation: 0,
+      worldElevation: -14,
+      worldCells: [{
+        id: `${roomId}:floor-tier:base:cell:1:2`,
+        grid: { x: 44, z: 27 },
+        elevation: -14,
+      }],
+    }],
+  }, elevatedFloors);
+
+  assert.equal(tiles.has('44,27'), false);
+  assert.equal(elevatedFloors.length, 1);
+  assert.equal(elevatedFloors[0].roomId, roomId);
+  assert.equal(elevatedFloors[0].elevation, -14);
+
+  const authoredProgressionTile = {
+    x: 44,
+    z: 27,
+    type: 'hallway',
+    surface: 'industrialRamp',
+    elevation: 2.8,
+    level: 1,
+    connectionId: 'authored-route',
+  };
+  tiles.set('44,27', authoredProgressionTile);
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  generator._clearProgressionAccessObstructions(tiles, [], new Set(['44,27']));
+
+  assert.equal(authoredProgressionTile.elevation, 0);
+  assert.equal(elevatedFloors[0].elevation, -14);
+  assert.notEqual(elevatedFloors[0], tiles.get('44,27'));
 });
 
 test('floor canonicalization preserves every intersecting seam and shared owner identity', () => {

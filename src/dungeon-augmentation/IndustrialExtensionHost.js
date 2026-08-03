@@ -21,6 +21,10 @@ const PROGRESSION_SNAPSHOT_SCHEMA = 'ruindivex-dungeon-progression-snapshot/v2';
 const ROUTE_NETWORK_GRANT_SCHEMA = 'ruindivex-dungeon-route-network-grant/v2';
 const MAXIMUM_FEATURELESS_SPAN_METERS = 33.6;
 const MAXIMUM_COVERAGE_STATIONS = 4;
+// There are currently only five objective routes, so this comfortably covers
+// every deterministic allocation-order permutation (and its partial states)
+// without turning host construction into an unbounded geometry search.
+const MAXIMUM_COVERAGE_GRANT_ALLOCATION_VISITS = 512;
 const V4_MINIMUM_SUBSTANTIVE_MODULES_PER_NETWORK = 3;
 const V4_MAXIMUM_SUBSTANTIVE_MODULES_PER_NETWORK = 6;
 // Exact authored-corridor sockets host the compact 5x7 Through-T station, not
@@ -661,110 +665,114 @@ function findCoverageFullRoomWitnesses({
   const approachLength = tileSize;
   const roomHalfDepth = ROUTE_NETWORK_ENDPOINT_MODULE_DEPTH_METERS * 0.5;
   const roomHalfWidth = ROUTE_NETWORK_ENDPOINT_MODULE_WIDTH_METERS * 0.5;
-  // The public endpoint-overlap grant is an exact one-tile lead into a 5x7
-  // Through-T. Do not advertise shifted witnesses which that grant cannot
-  // legally realize; station displacement already searches the parent route.
-  const outwardOffsets = [0];
-  const tangentOffsets = [0];
   const candidates = [];
+  const entry = {
+    x: socket.x + facing.x * approachLength,
+    z: socket.z + facing.z * approachLength,
+  };
+  const center = {
+    x: entry.x + facing.x * roomHalfDepth,
+    z: entry.z + facing.z * roomHalfDepth,
+  };
+  const normalRunsAlongX = Math.abs(facing.x) > Math.abs(facing.z);
+  const roomRectangle = {
+    id: 'coverage-full-room-witness',
+    center,
+    minX: center.x - (normalRunsAlongX ? roomHalfDepth : roomHalfWidth),
+    maxX: center.x + (normalRunsAlongX ? roomHalfDepth : roomHalfWidth),
+    minZ: center.z - (normalRunsAlongX ? roomHalfWidth : roomHalfDepth),
+    maxZ: center.z + (normalRunsAlongX ? roomHalfWidth : roomHalfDepth),
+  };
+  if (obstacles.some((obstacle) => (
+    rectangleIntersectionArea(roomRectangle, obstacle) > 1e-6
+  ))) return [];
+  const route = [socket, entry];
+  const pathLengthMeters = coverageRouteLengthMeters(route);
+  if (pathLengthMeters > MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6
+    || !coverageRouteIsClear(route, obstacles)) return [];
 
-  for (const outwardOffset of outwardOffsets) {
-    for (const tangentOffset of tangentOffsets) {
-      const entry = {
-        x: socket.x
-          + facing.x * (approachLength + outwardOffset)
-          + tangent.x * tangentOffset,
-        z: socket.z
-          + facing.z * (approachLength + outwardOffset)
-          + tangent.z * tangentOffset,
-      };
-      const center = {
-        x: entry.x + facing.x * roomHalfDepth,
-        z: entry.z + facing.z * roomHalfDepth,
-      };
-      const normalRunsAlongX = Math.abs(facing.x) > Math.abs(facing.z);
-      const roomRectangle = {
-        id: 'coverage-full-room-witness',
-        center,
-        minX: center.x - (normalRunsAlongX ? roomHalfDepth : roomHalfWidth),
-        maxX: center.x + (normalRunsAlongX ? roomHalfDepth : roomHalfWidth),
-        minZ: center.z - (normalRunsAlongX ? roomHalfWidth : roomHalfDepth),
-        maxZ: center.z + (normalRunsAlongX ? roomHalfWidth : roomHalfDepth),
-      };
-      const roomBlocked = obstacles.some((obstacle) => (
-        rectangleIntersectionArea(roomRectangle, obstacle) > 1e-6
-      ));
-      if (roomBlocked) continue;
-
-      // A Through-T which fits but terminates against an authored room is not
-      // a usable network endpoint. Reserve a real adjacent 7x7 content room
-      // and its connector. Nearby stations may stagger that continuation on
-      // the 2.8 m planning grid; the endpoint module itself stays pinned to its
-      // exact one-tile parent lead.
-      const continuationWitnesses = findCoverageContentContinuationWitnesses({
-        moduleCenter: center,
-        facing,
-        tileSize,
-        obstacles,
-      });
-      if (continuationWitnesses.length === 0) continue;
-
-      const fromLead = {
-        x: socket.x + facing.x * approachLength,
-        z: socket.z + facing.z * approachLength,
-      };
-      const toLead = {
-        x: entry.x - facing.x * approachLength,
-        z: entry.z - facing.z * approachLength,
-      };
-      const collinear = Math.abs(socket.x - entry.x) <= 1e-6
-        || Math.abs(socket.z - entry.z) <= 1e-6;
-      const routeOptions = collinear
-        ? [[socket, entry]]
-        : [
-          [
-            socket,
-            fromLead,
-            { x: toLead.x, z: fromLead.z },
-            toLead,
-            entry,
-          ],
-          [
-            socket,
-            fromLead,
-            { x: fromLead.x, z: toLead.z },
-            toLead,
-            entry,
-          ],
-        ].map(normalizedCoverageRoute);
-      const route = routeOptions.find((path) => {
-        const pathLengthMeters = coverageRouteLengthMeters(path);
-        if (pathLengthMeters > MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6
-          || !coverageRouteIsClear(path, obstacles)) return false;
-        return true;
-      });
-      if (!route) continue;
-      const pathLengthMeters = coverageRouteLengthMeters(route);
-      for (const continuationWitness of continuationWitnesses) {
-        candidates.push({
-          center,
-          roomRectangle,
-          ...continuationWitness,
-          route,
-          pathLengthMeters,
-          outwardOffset,
-          tangentOffset,
-        });
-      }
-    }
+  // Prefer the historical dedicated-room witness when it exists. A coverage
+  // network owns shared substantive roles rather than one private 7x7 room per
+  // authored station, so the recovery alternatives reserve the exact 5x7
+  // Through-T plus a two-tile, three-wide lane from one of its legal exits.
+  const continuationWitnesses = findCoverageContentContinuationWitnesses({
+    moduleCenter: center,
+    facing,
+    tileSize,
+    obstacles,
+  });
+  for (const continuationWitness of continuationWitnesses) {
+    candidates.push({
+      witnessKind: 'dedicated-content-room',
+      center,
+      roomRectangle,
+      ...continuationWitness,
+      route,
+      pathLengthMeters,
+      outwardOffset: 0,
+      tangentOffset: 0,
+    });
+  }
+  const exitDirections = [facing, tangent, { x: -tangent.x, z: -tangent.z }];
+  for (const [exitOrdinal, exitDirection] of exitDirections.entries()) {
+    const exitsAlongModuleDepth = Math.abs(
+      exitDirection.x * facing.x + exitDirection.z * facing.z,
+    ) > 0.5;
+    const moduleExit = {
+      x: center.x + exitDirection.x * (
+        exitsAlongModuleDepth ? roomHalfDepth : roomHalfWidth
+      ),
+      z: center.z + exitDirection.z * (
+        exitsAlongModuleDepth ? roomHalfDepth : roomHalfWidth
+      ),
+    };
+    const egressEnd = {
+      x: moduleExit.x + exitDirection.x * tileSize * 2,
+      z: moduleExit.z + exitDirection.z * tileSize * 2,
+    };
+    const continuationRectangle = corridorSegmentPlanningRectangle(
+      moduleExit,
+      egressEnd,
+      tileSize * 1.5,
+    );
+    if (!continuationRectangle || obstacles.some((obstacle) => (
+      rectangleIntersectionArea(continuationRectangle, obstacle) > 1e-6
+    ))) continue;
+    candidates.push({
+      witnessKind: 'module-egress',
+      center,
+      roomRectangle,
+      continuationCenter: egressEnd,
+      continuationRectangle: {
+        ...continuationRectangle,
+        id: 'coverage-module-egress-witness',
+        center: {
+          x: (continuationRectangle.minX + continuationRectangle.maxX) * 0.5,
+          z: (continuationRectangle.minZ + continuationRectangle.maxZ) * 0.5,
+        },
+        purpose: 'industrial-supplement-coverage-module-egress-reservation',
+      },
+      continuationRoute: [moduleExit, egressEnd],
+      continuationPathLengthMeters: tileSize * 2,
+      continuationOutwardOffset: 0,
+      continuationTangentOffset: 0,
+      exitOrdinal,
+      route,
+      pathLengthMeters,
+      outwardOffset: 0,
+      tangentOffset: 0,
+    });
   }
 
   return candidates.sort((first, second) => (
-    first.pathLengthMeters - second.pathLengthMeters
+    Number(first.witnessKind !== 'dedicated-content-room')
+      - Number(second.witnessKind !== 'dedicated-content-room')
+      || first.pathLengthMeters - second.pathLengthMeters
       || first.continuationPathLengthMeters - second.continuationPathLengthMeters
       || Math.abs(first.tangentOffset) - Math.abs(second.tangentOffset)
       || first.outwardOffset - second.outwardOffset
       || first.tangentOffset - second.tangentOffset
+      || Number(first.exitOrdinal ?? 0) - Number(second.exitOrdinal ?? 0)
   )).slice(0, 16);
 }
 
@@ -870,7 +878,12 @@ function chooseCoverageSideSign({
   tileSize,
   reservedRectangles,
   fullRoomWitnessCache = null,
+  fallbackWitnessesAllowed = false,
 }) {
+  const softReservationPurposes = new Set([
+    'industrial-supplement-coverage-decision-egress-reservation',
+    'industrial-supplement-coverage-route-reservation',
+  ]);
   const authoredRoomObstacles = rooms.map((room) => roomPlanningRectangle(room, tileSize));
   const authoredRoomBodyObstacles = rooms.map((room) => roomBodyPlanningRectangle(room, tileSize));
   const authoredForeignGalleryObstacles = connectionPlans
@@ -880,6 +893,9 @@ function chooseCoverageSideSign({
     ...authoredForeignGalleryObstacles,
     ...reservedRectangles,
   ];
+  const hardReservedRectangles = reservedRectangles.filter(({ purpose }) => (
+    !softReservationPurposes.has(purpose)
+  ));
   const ownRouteObstacles = galleryPlanningRectangles(plan, tileSize);
   const ownRouteCenterline = worldPathFromPlan(plan, tileSize);
   const preferredSign = deterministicSideSign(edgeId);
@@ -944,16 +960,18 @@ function chooseCoverageSideSign({
             ...authoredRoomBodyObstacles,
             ...authoredForeignGalleryObstacles,
             ...remoteOwnRouteObstacles,
+            ...hardReservedRectangles,
           ],
         });
         fullRoomWitnessCache?.set(witnessKey, fullRoomWitnesses);
       }
-      const fullRoomWitness = fullRoomWitnesses[0] ?? null;
+      const eligibleFullRoomWitnesses = fallbackWitnessesAllowed
+        ? fullRoomWitnesses
+        : fullRoomWitnesses.filter((witness) => (
+          witness.witnessKind === 'dedicated-content-room'
+        ));
+      const fullRoomWitness = eligibleFullRoomWitnesses[0] ?? null;
       const roomOverlapArea = roomOverlaps.reduce((sum, { area }) => sum + area, 0);
-      const softReservationPurposes = new Set([
-        'industrial-supplement-coverage-decision-egress-reservation',
-        'industrial-supplement-coverage-route-reservation',
-      ]);
       const hardRouteOverlapArea = routeOverlaps
         .filter(({ purpose }) => !softReservationPurposes.has(purpose))
         .reduce((sum, { area }) => sum + area, 0);
@@ -976,7 +994,7 @@ function chooseCoverageSideSign({
         sideSign,
         rectangle,
         approachRectangle,
-        fullRoomWitnesses,
+        fullRoomWitnesses: eligibleFullRoomWitnesses,
         fullRoomWitness,
         apertureBlocked: sample.stationEligible === false
           || approachIntersectsOwnCenterline,
@@ -1143,6 +1161,7 @@ function chooseCoverageStationLayout({
   reservedRectangles,
   ordinaryTraversalSpans,
   nominalStationSpans,
+  searchEvidence = null,
 }) {
   const fullRoomWitnessCache = new Map();
   const candidateOffsetsTiles = [
@@ -1187,61 +1206,152 @@ function chooseCoverageStationLayout({
           || first.distances.join(',').localeCompare(second.distances.join(','))
       ))
       .slice(0, maximumLayoutCandidates);
-    if (layoutStates.length === 0) return null;
-  }
-  let bestLayout = null;
-  for (const { distances, displacement } of layoutStates) {
-    const featurelessSpans = featurelessSpansWithinOrdinaryTraversal(
-      ordinaryTraversalSpans,
-      distances,
-    );
-    if (featurelessSpans.some((distance) => (
-      distance > MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6
-    ))) continue;
-    const samples = distances.map((distanceMeters) => ({
-      distanceMeters,
-      ...sampleWorldPathAtDistance(centerline, distanceMeters),
-    }));
-    const sideChoice = chooseCoverageSideSign({
-      edgeId,
-      samples,
-      rooms,
-      connectionPlans,
-      plan,
-      tileSize,
-      reservedRectangles,
-      fullRoomWitnessCache,
-    });
-    if (!sideChoice.feasible) continue;
-    const score = sideChoice.score + displacement * 0.001;
-    const candidateLayout = { score, distances, samples, sideChoice };
-    if (!bestLayout
-      || sideChoice.sideReversalCount < bestLayout.sideChoice.sideReversalCount
-      || (sideChoice.sideReversalCount === bestLayout.sideChoice.sideReversalCount
-        && score < bestLayout.score - 1e-6)) {
-      bestLayout = candidateLayout;
+    if (layoutStates.length === 0) {
+      if (searchEvidence) {
+        Object.assign(searchEvidence, {
+          reason: 'coverage-station-distance-domain-empty',
+          failedStationIndex: stationIndex,
+          layoutStateCount: 0,
+        });
+      }
+      return null;
     }
-    // Layout states are displacement ordered. Once every station uses one
-    // side, later layouts cannot improve the primary facing-reversal cost and
-    // only add displacement.
-    if (sideChoice.sideReversalCount === 0) return candidateLayout;
   }
-  return bestLayout;
+  const evaluateLayoutDomain = (fallbackWitnessesAllowed) => {
+    let bestLayout = null;
+    let featurelessCompatibleLayoutCount = 0;
+    let sideFeasibleLayoutCount = 0;
+    let bestInfeasibleSideLayout = null;
+    for (const { distances, displacement } of layoutStates) {
+      const featurelessSpans = featurelessSpansWithinOrdinaryTraversal(
+        ordinaryTraversalSpans,
+        distances,
+      );
+      if (featurelessSpans.some((distance) => (
+        distance > MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6
+      ))) continue;
+      featurelessCompatibleLayoutCount += 1;
+      const samples = distances.map((distanceMeters) => ({
+        distanceMeters,
+        ...sampleWorldPathAtDistance(centerline, distanceMeters),
+      }));
+      const sideChoice = chooseCoverageSideSign({
+        edgeId,
+        samples,
+        rooms,
+        connectionPlans,
+        plan,
+        tileSize,
+        reservedRectangles,
+        fullRoomWitnessCache,
+        fallbackWitnessesAllowed,
+      });
+      if (!sideChoice.feasible) {
+        const viableStationCount = sideChoice.diagnostics.filter(({ candidates }) => (
+          candidates.some((candidate) => (
+            candidate?.stationEligible !== false
+              && candidate?.stationBodyBlocked !== true
+              && candidate?.fullRoomBodyBlocked !== true
+              && candidate?.approachIntersectsOwnCenterline !== true
+              && Number(candidate?.hardRouteOverlapArea ?? 0) <= 1e-6
+              && Number(candidate?.roomOverlapArea ?? 0) <= 1e-6
+              && Number(candidate?.ownRouteOverlapArea ?? 0) <= 1e-6
+          ))
+        )).length;
+        if (!bestInfeasibleSideLayout
+          || viableStationCount > bestInfeasibleSideLayout.viableStationCount) {
+          bestInfeasibleSideLayout = {
+            distances,
+            viableStationCount,
+            stationCount: sideChoice.diagnostics.length,
+            diagnostics: sideChoice.diagnostics,
+          };
+        }
+        continue;
+      }
+      sideFeasibleLayoutCount += 1;
+      const score = sideChoice.score + displacement * 0.001;
+      const candidateLayout = { score, distances, samples, sideChoice };
+      if (!bestLayout
+        || sideChoice.sideReversalCount < bestLayout.sideChoice.sideReversalCount
+        || (sideChoice.sideReversalCount === bestLayout.sideChoice.sideReversalCount
+          && score < bestLayout.score - 1e-6)) {
+        bestLayout = candidateLayout;
+      }
+      // Layout states are displacement ordered. Once every station uses one
+      // side, later layouts cannot improve the primary facing-reversal cost and
+      // only add displacement.
+      if (sideChoice.sideReversalCount === 0) {
+        return {
+          layout: candidateLayout,
+          evidence: {
+            reason: null,
+            layoutStateCount: layoutStates.length,
+            featurelessCompatibleLayoutCount,
+            sideFeasibleLayoutCount,
+          },
+        };
+      }
+    }
+    return {
+      layout: bestLayout,
+      evidence: {
+        reason: bestLayout ? null : 'coverage-station-side-domain-empty',
+        layoutStateCount: layoutStates.length,
+        featurelessCompatibleLayoutCount,
+        sideFeasibleLayoutCount,
+        bestInfeasibleSideLayout,
+      },
+    };
+  };
+  // Preserve the exact historical host layout whenever its terminal-module +
+  // dedicated-room witness domain is non-empty. The lighter shared-network
+  // egress witness is a recovery domain, never a competing preference.
+  const dedicatedDomain = evaluateLayoutDomain(false);
+  const selectedDomain = dedicatedDomain.layout
+    ? dedicatedDomain
+    : evaluateLayoutDomain(true);
+  if (searchEvidence) {
+    Object.assign(searchEvidence, {
+      ...selectedDomain.evidence,
+      witnessDomain: dedicatedDomain.layout ? 'dedicated-content-room' : 'module-egress-fallback',
+      dedicatedDomainEvidence: dedicatedDomain.layout ? null : dedicatedDomain.evidence,
+    });
+  }
+  return selectedDomain.layout;
 }
 
 function createCoverageRouteGrant(
   plan,
   tileSize,
   themeBinding,
-  { rooms = [], connectionPlans = [], reservedRectangles = [] } = {},
+  {
+    rooms = [],
+    connectionPlans = [],
+    reservedRectangles = [],
+    failureEvidence = null,
+  } = {},
 ) {
+  const fail = (reason, context = {}) => {
+    if (failureEvidence) Object.assign(failureEvidence, { reason, ...context });
+    return null;
+  };
   const edgeId = logicalConnectionId(plan);
-  if (!OBJECTIVE_ROUTE_EDGE_IDS.has(edgeId) || Number(plan.level ?? 0) !== 0) return null;
+  if (!OBJECTIVE_ROUTE_EDGE_IDS.has(edgeId) || Number(plan.level ?? 0) !== 0) {
+    return fail('coverage-route-not-eligible', { edgeId });
+  }
   const centerline = worldPathFromPlan(plan, tileSize);
-  const pathLengthMeters = measureGridPathMeters(createUsableSpliceGridPath(plan), tileSize);
-  if (centerline.length < 2 || pathLengthMeters <= MAXIMUM_FEATURELESS_SPAN_METERS) return null;
+  // Match the immutable progression snapshot and authoritative validation:
+  // transfer rise contributes to an objective route's total traversal length,
+  // while ordinary featureless station spans remain planar within each level.
+  const pathLengthMeters = measureWorldPathMeters(centerline);
+  if (centerline.length < 2 || pathLengthMeters <= MAXIMUM_FEATURELESS_SPAN_METERS) {
+    return fail('coverage-route-not-overlong', { edgeId, pathLengthMeters });
+  }
   const ordinaryTraversalSpans = createOrdinaryTraversalSpans(centerline);
-  if (ordinaryTraversalSpans.length === 0) return null;
+  if (ordinaryTraversalSpans.length === 0) {
+    return fail('coverage-route-has-no-ordinary-traversal-span', { edgeId, pathLengthMeters });
+  }
   const stationAllocations = ordinaryTraversalSpans.map((span) => {
     const lengthTiles = Math.max(1, Math.round(span.lengthMeters / tileSize));
     const stationCapacity = Math.max(0, lengthTiles - 1);
@@ -1274,7 +1384,13 @@ function createCoverageRouteGrant(
           - first.span.lengthMeters / (first.count + 1)
           || first.span.startDistanceMeters - second.span.startDistanceMeters
       ))[0];
-    if (!allocation) return null;
+    if (!allocation) {
+      return fail('coverage-route-has-insufficient-station-capacity', {
+        edgeId,
+        pathLengthMeters,
+        ordinaryTraversalSpans,
+      });
+    }
     allocation.count += 1;
   }
   const stationCount = stationAllocations.reduce(
@@ -1284,7 +1400,14 @@ function createCoverageRouteGrant(
   // Each exact authored aperture needs one connector module and every network
   // needs at least two true large rooms. The V4 six-module ceiling therefore
   // permits no more than four coverage apertures in one network.
-  if (stationCount > MAXIMUM_COVERAGE_STATIONS) return null;
+  if (stationCount > MAXIMUM_COVERAGE_STATIONS) {
+    return fail('coverage-route-exceeds-station-limit', {
+      edgeId,
+      pathLengthMeters,
+      stationCount,
+      maximumCoverageStations: MAXIMUM_COVERAGE_STATIONS,
+    });
+  }
   const nominalStations = stationAllocations.flatMap(({ span, count }) => {
     const lengthTiles = Math.round(span.lengthMeters / tileSize);
     return Array.from({ length: count }, (_, index) => ({
@@ -1299,6 +1422,7 @@ function createCoverageRouteGrant(
     distanceMeters
   ));
   const nominalStationSpans = nominalStations.map(({ span }) => span);
+  const layoutSearchEvidence = {};
   const stationLayout = chooseCoverageStationLayout({
     edgeId,
     nominalDistancesMeters: nominalStationDistancesMeters,
@@ -1311,8 +1435,19 @@ function createCoverageRouteGrant(
     reservedRectangles,
     ordinaryTraversalSpans,
     nominalStationSpans,
+    searchEvidence: layoutSearchEvidence,
   });
-  if (!stationLayout) return null;
+  if (!stationLayout) {
+    return fail('coverage-route-station-layout-domain-empty', {
+      edgeId,
+      pathLengthMeters,
+      stationCount,
+      ordinaryTraversalSpans,
+      nominalStationDistancesMeters,
+      reservedRectangleCount: reservedRectangles.length,
+      layoutSearchEvidence,
+    });
+  }
   const stationDistancesMeters = stationLayout.distances;
   const samples = stationLayout.samples;
   const sideChoice = stationLayout.sideChoice;
@@ -1347,6 +1482,8 @@ function createCoverageRouteGrant(
       y: sample.position.y,
       z: sample.position.z + facing.z * tileSize * 1.5,
     };
+    const planningWitness = sideChoice.selectedWitnesses[index];
+    const terminalPlanningWitness = planningWitness?.witnessKind === 'dedicated-content-room';
     return {
       id: `${INDUSTRIAL_EXTENSION_REGION_ID}:route-socket:${edgeId}:${index}`,
       // The parent source threshold owns every gate on this route, so all
@@ -1373,11 +1510,15 @@ function createCoverageRouteGrant(
       progressionBandId,
       accessDomainId: accessDomainId(progressionBandId),
       themeBinding,
-      planningModuleCenter: sideChoice.selectedWitnesses[index]?.center,
-      planningContinuationCenter:
-        sideChoice.selectedWitnesses[index]?.continuationCenter,
-      planningContinuationRoute:
-        sideChoice.selectedWitnesses[index]?.continuationRoute,
+      // The public planning-witness contract is currently the terminal 5x7
+      // geometry. The exact 7x5 branch-entry alternative remains fully pinned
+      // by its module overlap grant, but intentionally omits that optional
+      // terminal-only witness bundle.
+      ...(terminalPlanningWitness ? {
+        planningModuleCenter: planningWitness.center,
+        planningContinuationCenter: planningWitness.continuationCenter,
+        planningContinuationRoute: planningWitness.continuationRoute,
+      } : {}),
     };
   });
   const stationDirectionChangeCount = samples.slice(1).filter((sample, index) => {
@@ -1464,6 +1605,211 @@ function createCoverageRouteGrant(
     planningDecisionEgressReservationRectangles,
     planningRouteReservationRectangles,
     planningStationSideDiagnostics: sideChoice.diagnostics,
+  };
+}
+
+function coverageGrantPlanningReservationRectangles(grant) {
+  return [
+    ...(grant?.planningReservationRectangles ?? []),
+    ...(grant?.planningRoomReservationRectangles ?? []),
+    ...(grant?.planningDecisionEgressReservationRectangles ?? []),
+    ...(grant?.planningRouteReservationRectangles ?? []),
+  ];
+}
+
+function coverageGrantConstraintDomainSize(grant) {
+  // The exact station layout has already been selected, but its diagnostics
+  // still expose how many locally viable side witnesses remained at each
+  // station. Their product is a stable constrainedness proxy for MRV ordering:
+  // routes with only one usable side per station are committed first.
+  return (grant?.planningStationSideDiagnostics ?? []).reduce(
+    (domainSize, station) => {
+      const viableSideCount = (station?.candidates ?? []).filter((candidate) => (
+        candidate?.stationEligible !== false
+          && candidate?.stationBodyBlocked !== true
+          && candidate?.fullRoomBodyBlocked !== true
+          && candidate?.approachIntersectsOwnCenterline !== true
+          && Number(candidate?.hardRouteOverlapArea ?? 0) <= 1e-6
+          && Number(candidate?.roomOverlapArea ?? 0) <= 1e-6
+          && Number(candidate?.ownRouteOverlapArea ?? 0) <= 1e-6
+      )).length;
+      return domainSize * Math.max(1, viableSideCount);
+    },
+    1,
+  );
+}
+
+function objectiveCoveragePlanRecords(coveragePlanByLogicalEdgeId, tileSize) {
+  return [...coveragePlanByLogicalEdgeId.entries()].map(([edgeId, plan], canonicalOrdinal) => ({
+    edgeId,
+    plan,
+    canonicalOrdinal,
+    pathLengthMeters: measureWorldPathMeters(worldPathFromPlan(plan, tileSize)),
+  })).filter(({ pathLengthMeters }) => (
+    pathLengthMeters > MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6
+  ));
+}
+
+function createCoverageGrantAllocationError({
+  requiredPlanRecords,
+  independentGrantByEdgeId,
+  independentFailureEvidenceByEdgeId,
+  greedyGrantByEdgeId,
+  searchVisits,
+  deadEnds,
+}) {
+  const missingRouteIds = requiredPlanRecords
+    .filter(({ edgeId }) => !greedyGrantByEdgeId.has(edgeId))
+    .map(({ edgeId }) => edgeId);
+  const error = new Error(
+    `Industrial objective-route coverage allocation failed for ${missingRouteIds.join(', ') || 'an overlong route'}.`,
+  );
+  error.name = 'IndustrialCoverageGrantAllocationError';
+  error.code = 'industrial-objective-route-coverage-allocation-failed';
+  error.coverageGrantAllocationEvidence = {
+    maximumFeaturelessSpanMeters: MAXIMUM_FEATURELESS_SPAN_METERS,
+    requiredRoutes: requiredPlanRecords.map(({ edgeId, pathLengthMeters }) => ({
+      edgeId,
+      pathLengthMeters,
+      independentGrantDomainSize: independentGrantByEdgeId.has(edgeId) ? 1 : 0,
+      independentFailureEvidence: independentFailureEvidenceByEdgeId.get(edgeId) ?? null,
+    })),
+    missingRouteIds,
+    searchVisits,
+    maximumSearchVisits: MAXIMUM_COVERAGE_GRANT_ALLOCATION_VISITS,
+    deadEnds: deadEnds.slice(0, 32),
+  };
+  return error;
+}
+
+function allocateCoverageRouteGrants({
+  coveragePlanByLogicalEdgeId,
+  rooms,
+  connectionPlans,
+  tileSize,
+  themeBinding,
+  requireCompleteAllocation = true,
+}) {
+  const requiredPlanRecords = objectiveCoveragePlanRecords(
+    coveragePlanByLogicalEdgeId,
+    tileSize,
+  );
+  const greedyGrantByEdgeId = new Map();
+  const greedyReservedRectangles = [];
+  for (const record of requiredPlanRecords) {
+    const grant = createCoverageRouteGrant(record.plan, tileSize, themeBinding, {
+      rooms,
+      connectionPlans,
+      reservedRectangles: greedyReservedRectangles,
+    });
+    if (!grant) continue;
+    greedyGrantByEdgeId.set(record.edgeId, grant);
+    greedyReservedRectangles.push(...coverageGrantPlanningReservationRectangles(grant));
+  }
+  if (greedyGrantByEdgeId.size === requiredPlanRecords.length) {
+    return {
+      grants: requiredPlanRecords.map(({ edgeId }) => greedyGrantByEdgeId.get(edgeId)),
+      reservedRectangles: greedyReservedRectangles,
+    };
+  }
+  // V1-V3 save identities predate the complete objective-coverage allocation
+  // contract. Their immutable host behavior was the deterministic greedy pass:
+  // retain every locally valid coverage grant and skip only an unavailable
+  // route. Keep that replay path exact while V4 continues to require all
+  // objective routes and receives the bounded global allocation below.
+  if (!requireCompleteAllocation) {
+    return {
+      grants: requiredPlanRecords
+        .map(({ edgeId }) => greedyGrantByEdgeId.get(edgeId))
+        .filter(Boolean),
+      reservedRectangles: greedyReservedRectangles,
+    };
+  }
+
+  // Preflight each route in isolation. A zero-sized independent domain cannot
+  // be repaired by adding reservations, so reject immediately with explicit
+  // evidence instead of returning a host that will fail much later.
+  const independentGrantByEdgeId = new Map();
+  const independentFailureEvidenceByEdgeId = new Map();
+  for (const record of requiredPlanRecords) {
+    const failureEvidence = {};
+    const grant = createCoverageRouteGrant(record.plan, tileSize, themeBinding, {
+      rooms,
+      connectionPlans,
+      reservedRectangles: [],
+      failureEvidence,
+    });
+    if (grant) independentGrantByEdgeId.set(record.edgeId, grant);
+    else independentFailureEvidenceByEdgeId.set(record.edgeId, failureEvidence);
+  }
+  const deadEnds = [];
+  let searchVisits = 0;
+  let allocationByEdgeId = null;
+  const visit = (remainingRecords, selectedByEdgeId, reservedRectangles) => {
+    if (allocationByEdgeId || searchVisits >= MAXIMUM_COVERAGE_GRANT_ALLOCATION_VISITS) return;
+    searchVisits += 1;
+    if (remainingRecords.length === 0) {
+      allocationByEdgeId = new Map(selectedByEdgeId);
+      return;
+    }
+    const currentDomains = remainingRecords.map((record) => {
+      const grant = createCoverageRouteGrant(record.plan, tileSize, themeBinding, {
+        rooms,
+        connectionPlans,
+        reservedRectangles,
+      });
+      return {
+        ...record,
+        grant,
+        domainSize: grant ? coverageGrantConstraintDomainSize(grant) : 0,
+      };
+    }).sort((first, second) => (
+      first.domainSize - second.domainSize
+        || first.edgeId.localeCompare(second.edgeId)
+        || first.canonicalOrdinal - second.canonicalOrdinal
+    ));
+    const unavailableRouteIds = currentDomains
+      .filter(({ grant }) => !grant)
+      .map(({ edgeId }) => edgeId);
+    if (unavailableRouteIds.length > 0) {
+      deadEnds.push({
+        selectedRouteIds: [...selectedByEdgeId.keys()],
+        unavailableRouteIds,
+        reservationRectangleCount: reservedRectangles.length,
+      });
+      return;
+    }
+    for (const domain of currentDomains) {
+      const nextSelectedByEdgeId = new Map(selectedByEdgeId);
+      nextSelectedByEdgeId.set(domain.edgeId, domain.grant);
+      visit(
+        remainingRecords.filter(({ edgeId }) => edgeId !== domain.edgeId),
+        nextSelectedByEdgeId,
+        [
+          ...reservedRectangles,
+          ...coverageGrantPlanningReservationRectangles(domain.grant),
+        ],
+      );
+      if (allocationByEdgeId) return;
+    }
+  };
+  if (independentGrantByEdgeId.size === requiredPlanRecords.length) {
+    visit(requiredPlanRecords, new Map(), []);
+  }
+  if (!allocationByEdgeId) {
+    throw createCoverageGrantAllocationError({
+      requiredPlanRecords,
+      independentGrantByEdgeId,
+      independentFailureEvidenceByEdgeId,
+      greedyGrantByEdgeId,
+      searchVisits,
+      deadEnds,
+    });
+  }
+  const grants = requiredPlanRecords.map(({ edgeId }) => allocationByEdgeId.get(edgeId));
+  return {
+    grants,
+    reservedRectangles: grants.flatMap(coverageGrantPlanningReservationRectangles),
   };
 }
 
@@ -2352,6 +2698,7 @@ export function createIndustrialExtensionHost({
   rooms = [],
   connectionPlans = [],
   tileSize = 2.8,
+  profileId = null,
 } = {}) {
   const roomById = new Map(rooms.map((room) => [room.id, room]));
   const themeBinding = createThemeBinding();
@@ -2407,23 +2754,22 @@ export function createIndustrialExtensionHost({
       coveragePlanByLogicalEdgeId.set(edgeId, plan);
     }
   }
-  const coverageRouteGrants = [];
-  const reservedCoverageRectangles = [];
-  for (const plan of coveragePlanByLogicalEdgeId.values()) {
-    const grant = createCoverageRouteGrant(plan, tileSize, themeBinding, {
-      rooms,
-      connectionPlans,
-      reservedRectangles: reservedCoverageRectangles,
-    });
-    if (!grant) continue;
-    coverageRouteGrants.push(grant);
-    reservedCoverageRectangles.push(
-      ...grant.planningReservationRectangles,
-      ...(grant.planningRoomReservationRectangles ?? []),
-      ...grant.planningDecisionEgressReservationRectangles,
-      ...grant.planningRouteReservationRectangles,
-    );
-  }
+  const {
+    grants: coverageRouteGrants,
+    reservedRectangles: reservedCoverageRectangles,
+  } = allocateCoverageRouteGrants({
+    coveragePlanByLogicalEdgeId,
+    rooms,
+    connectionPlans,
+    tileSize,
+    themeBinding,
+    // Direct host consumers historically omit a profile and exercise the
+    // current strict contract. Runtime planning supplies the selected profile,
+    // allowing only committed legacy revisions to retain their old best-effort
+    // coverage semantics.
+    requireCompleteAllocation: profileId == null
+      || profileId === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+  });
   const reservedRouteNetworkSocketIds = new Set([
     ...(pyramidLoopGrant?.endpointSockets ?? []),
     ...coverageRouteGrants.flatMap(({ endpointSockets = [] }) => endpointSockets),

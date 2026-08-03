@@ -7,6 +7,7 @@ export * from './ids.js';
 export * from './planner.js';
 export * from './rng.js';
 export * from './selectionBagWitness.js';
+export * from './routeNetworkModulePruning.js';
 export * from './validation.js';
 
 export * from './DungeonFacadeOverlay.js';

@@ -2,11 +2,26 @@ import Game from './Game.js';
 import { getReaverbotCatalogSummary } from './reaverbots/ReaverbotGenerator.js';
 import { getReaverbotSalvageCatalogSummary } from './reaverbots/ReaverbotSalvageCatalog.js';
 
+const launchParams = new URLSearchParams(window.location.search);
+const editorPlaytestHost = launchParams.get('editorPlaytestHost') === '1';
 const game = await Game.create({
   container: document.getElementById('game-container'),
+  ...(editorPlaytestHost ? {
+    busterLabStorageOptions: {
+      storage: null,
+      storageEventTarget: null,
+      saveContextId: 'level-editor-playtest',
+    },
+  } : {}),
 });
 
-game.start();
+if (editorPlaytestHost) {
+  document.documentElement.dataset.editorPlaytestHost = 'ready';
+  const { installLevelEditorPlaytestHost } = await import('./level-editor/playtestHost.js');
+  installLevelEditorPlaytestHost(game);
+} else {
+  game.start();
+}
 
 // Small development hooks for trying systems from the browser console.
 window.game = game;

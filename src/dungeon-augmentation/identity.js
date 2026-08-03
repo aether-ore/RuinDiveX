@@ -8,6 +8,7 @@ import {
   deepFreezeDungeonAugmentationValue,
 } from './canonical.js';
 import { computeEffectiveDungeonPlanHash } from './validation.js';
+import { normalizeRouteNetworkConflictExclusions } from './routeNetworkModulePruning.js';
 
 function stringValue(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -40,6 +41,24 @@ function normalizeProgressionStateIds(values = []) {
     .map(stringValue)
     .filter(Boolean))]
     .sort();
+}
+
+function normalizeRouteNetworkPruningOverrides(values = []) {
+  const byGrantId = new Map();
+  for (const raw of Array.isArray(values) ? values : []) {
+    const grantId = stringValue(raw?.grantId);
+    const reason = stringValue(raw?.reason).slice(0, 128);
+    if (!grantId || !reason) continue;
+    const candidate = { grantId, reason };
+    const current = byGrantId.get(grantId);
+    if (!current || reason.localeCompare(current.reason) < 0) {
+      byGrantId.set(grantId, candidate);
+    }
+  }
+  return [...byGrantId.values()].sort((left, right) => (
+    left.grantId.localeCompare(right.grantId)
+      || left.reason.localeCompare(right.reason)
+  ));
 }
 
 function appendStateIdValues(target, value) {
@@ -164,6 +183,10 @@ function identityInputFromOverlay(plan, options = {}) {
     })) ?? [],
     progressionStateIds: options.progressionStateIds
       ?? collectDungeonAugmentationStableStateIds(plan),
+    routeNetworkPruningOverrides: options.routeNetworkPruningOverrides
+      ?? plan.routeNetworkPruningOverrides,
+    routeNetworkConflictExclusions: options.routeNetworkConflictExclusions
+      ?? plan.routeNetworkConflictExclusions,
     mutableState: options.mutableState ?? plan.mutableState,
   };
 }
@@ -176,6 +199,12 @@ export function createDungeonAugmentationSaveIdentity(input = {}) {
     ? identityInputFromOverlay(input)
     : input;
   const progressionStateIds = normalizeProgressionStateIds(source.progressionStateIds);
+  const routeNetworkPruningOverrides = normalizeRouteNetworkPruningOverrides(
+    source.routeNetworkPruningOverrides,
+  );
+  const routeNetworkConflictExclusions = normalizeRouteNetworkConflictExclusions(
+    source.routeNetworkConflictExclusions,
+  );
   const mutableState = normalizeMutableState(source.mutableState, progressionStateIds);
   const identity = {
     schema: DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA,
@@ -187,6 +216,12 @@ export function createDungeonAugmentationSaveIdentity(input = {}) {
     themeRevisions: normalizeThemeRevisions(source.themeRevisions),
     progressionStateIds,
   };
+  if (routeNetworkPruningOverrides.length > 0) {
+    identity.routeNetworkPruningOverrides = routeNetworkPruningOverrides;
+  }
+  if (routeNetworkConflictExclusions.length > 0) {
+    identity.routeNetworkConflictExclusions = routeNetworkConflictExclusions;
+  }
   if (Object.keys(mutableState).length > 0) identity.mutableState = mutableState;
   const missing = ['profileId', 'seed', 'basePlanHash', 'augmentationPlanHash', 'effectivePlanHash']
     .filter((key) => !identity[key]);
@@ -290,6 +325,20 @@ export function validateCommittedDungeonAugmentationIdentity(savedValue, current
     if (canonicalStringify(savedIdentity.progressionStateIds)
       !== canonicalStringify(currentIdentity.progressionStateIds)) {
       errors.push({ code: 'augmentation-progression-state-ids-mismatch', message: 'Generated progression identities changed.' });
+    }
+    if (canonicalStringify(savedIdentity.routeNetworkPruningOverrides ?? [])
+      !== canonicalStringify(currentIdentity.routeNetworkPruningOverrides ?? [])) {
+      errors.push({
+        code: 'augmentation-route-network-pruning-overrides-mismatch',
+        message: 'Committed route-network pruning overrides do not match available content.',
+      });
+    }
+    if (canonicalStringify(savedIdentity.routeNetworkConflictExclusions ?? [])
+      !== canonicalStringify(currentIdentity.routeNetworkConflictExclusions ?? [])) {
+      errors.push({
+        code: 'augmentation-route-network-conflict-exclusions-mismatch',
+        message: 'Committed route-network conflict exclusions do not match available content.',
+      });
     }
   }
   return deepFreezeDungeonAugmentationValue({

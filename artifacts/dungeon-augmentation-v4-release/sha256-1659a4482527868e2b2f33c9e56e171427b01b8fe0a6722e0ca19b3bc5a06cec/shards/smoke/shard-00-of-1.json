@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "kind": "dungeon-augmentation-release-shard",
+  "generatedAt": "2026-08-01T08:19:14.101Z",
+  "result": "failed",
+  "profile": {
+    "id": "industrial-supplement-preview-v4",
+    "revision": 5,
+    "hash": "sha256-ddd298625970857199d065fedf2bea91dd49c36b19539b03f9e85ac49ca63177"
+  },
+  "provenance": {
+    "gitCommit": "5d1510eeef410197d62105123e1fc1350ce93446",
+    "gitBranch": "codex/dungeon-generation-pivot-20260721",
+    "sourceDirty": false,
+    "sourceHash": "sha256-8f2fee17625c9b1ee7e06bd895910dab8a07f701f516557b55f6361aef0b43c9",
+    "sourceFileCount": 167,
+    "nodeVersion": "v24.17.0",
+    "platform": "win32-x64",
+    "machine": {
+      "cpuModel": "AMD Ryzen 7 9800X3D 8-Core Processor",
+      "logicalCpuCount": 16,
+      "totalMemoryBytes": 33453711360
+    },
+    "profile": {
+      "id": "industrial-supplement-preview-v4",
+      "revision": 5,
+      "hash": "sha256-ddd298625970857199d065fedf2bea91dd49c36b19539b03f9e85ac49ca63177"
+    }
+  },
+  "manifestHash": "sha256-2ff80971c5c356757f364bdbfd8feba465ac6ac08ecf5756593ba90725484f0c",
+  "corpusTier": "smoke",
+  "corpusViewCount": 10,
+  "shardIndex": 0,
+  "shardCount": 1,
+  "shardSize": 10,
+  "ordinalStart": 0,
+  "ordinalEndExclusive": 10,
+  "expectedEntries": [
+    {
+      "ordinal": 0,
+      "rawIndex": 0,
+      "seed": "layout:augmentation-realized-v4-000",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-000:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-0fd48541e2fb706fc0230b17f9de759c5e6d0cc1939ad30407a753f1ba8ef67f"
+    },
+    {
+      "ordinal": 1,
+      "rawIndex": 1,
+      "seed": "layout:augmentation-realized-v4-001",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-001:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-486af306bb8195821887b21e8c9248f4ffaf03fd03e1b73565cd4f28a7320d30"
+    },
+    {
+      "ordinal": 2,
+      "rawIndex": 2,
+      "seed": "layout:augmentation-realized-v4-002",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-002:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-f322cf432f27b827521be869f100324310aedcaac23bffaeb83c0fd24739ccc2"
+    },
+    {
+      "ordinal": 3,
+      "rawIndex": 3,
+      "seed": "layout:augmentation-realized-v4-003",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-003:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-c57330b9b4dc43fd36cb6c975359dc5e8b14e4e15e0d93da3049c75d06b24b8d"
+    },
+    {
+      "ordinal": 4,
+      "rawIndex": 4,
+      "seed": "layout:augmentation-realized-v4-004",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-004:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-e2e52484d6ff6db03eec4ed6183e467a5504b9ae865a6bc466f45584125f5feb"
+    },
+    {
+      "ordinal": 5,
+      "rawIndex": 5,
+      "seed": "layout:augmentation-realized-v4-005",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-005:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-f1e5a10018d0b56ab9f43bb911601ac223ee08cbc2d6adfca5e75cce1f65993c"
+    },
+    {
+      "ordinal": 6,
+      "rawIndex": 6,
+      "seed": "layout:augmentation-realized-v4-006",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-006:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-4d43613c77513b50cd742927a4c645b7f96f7b3ff8cc25dcbaf4828e5605d795"
+    },
+    {
+      "ordinal": 7,
+      "rawIndex": 7,
+      "seed": "layout:augmentation-realized-v4-007",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-007:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-d02ee7de594b3f273fbf83f683f78f7a094be96dd05a47027393f21a4aabab4a"
+    },
+    {
+      "ordinal": 8,
+      "rawIndex": 8,
+      "seed": "layout:augmentation-realized-v4-008",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-008:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-c663154312066047db0eec37f0bcd3df851830675c5f4487662083d19d8fddf4"
+    },
+    {
+      "ordinal": 9,
+      "rawIndex": 9,
+      "seed": "layout:augmentation-realized-v4-009",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-009:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-b930f17e81ddf56e213765df48e4a638fcce1aefcda2c3f7b09bd49038d158a5"
+    }
+  ],
+  "records": [],
+  "skippedParentSeeds": [],
+  "failure": {
+    "errorName": "Error",
+    "message": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "currentOrdinal": 0,
+    "currentSeed": "layout:augmentation-realized-v4-000",
+    "timedOut": true,
+    "timeoutMs": 180000,
+    "workerEvidenceHash": null
+  },
+  "evidenceHash": "sha256-2b9fa42cac6516945dfd248b8196f554aab609d89af81847930c41481d483fc8"
+}

@@ -14,7 +14,556 @@ No sealed aggregate-and-receipts attestation has been supplied for this working 
 This block is intentionally conservative. A canonical validator witness, a playable-alpha run, or a corpus aggregate without all same-source receipts cannot establish release. Supply `--evidence=<release-attestation.json>` only after the manifest shards and every required suite receipt have been sealed.
 <!-- V4_RELEASE_EVIDENCE_END -->
 
-## Canonical validator witness — release blocked
+## 2026-08-02 Current module-level recovery checkpoint
+
+This is the current working-tree checkpoint. Seed000 now completes the exact one-attempt canonical command in 166.4 seconds with status `applied`, accepted strict release validation, zero errors, and accepted hashes `v1-f5178024e92254900ddaee251b78e15d` / `v1-76d7dfc517c1470584839152fcb8d227`. Seed001 remains strictly accepted with unchanged hashes, although its latest 55.3-second wall time still fails the 30-second whole-seed gate. The previously posted Seed001 URL resumed an existing committed expedition because saved dungeon identity correctly overrides ordinary URL seed/profile parameters; the exact `dungeonAugmentationFresh=1` path ignores but does not mutate that save and remains strict rather than alpha. Focused browser observations are not the pending formal two-seed visual receipt. The 2026-08-01 and older sections below are preserved only as superseded investigation chronology.
+
+[Open the current strict Seed001 augmentation test](http://127.0.0.1:5174/?startupWorld=dungeon&dungeonFamily=industrial-v1&busterLab=sandbox&playerInvulnerable=1&dungeonSeed=augmentation-realized-v4-001&reaverbotSeed=augmentation-realized-v4-001&dungeonAugmentation=industrial-supplement-preview-v4&dungeonAugmentationFresh=1)
+
+The required generation order is additive and module-level:
+
+1. Generate and accept the base floor plan, authored rooms, and authored connectors.
+2. Discover the areas that need supplemental augmentation.
+3. Plan and materialize eligible augmented areas against the complete authored collision set.
+4. Remove or replace only the exact conflicting supplemental room or connection segment.
+5. Replay the same seed and retain every unrelated valid augmentation module.
+
+An exact candidate signature, not a whole augmented area, is the normal recovery unit. For a room it includes the grant, entity kind, grammar/template, placement, and rotation; for a connection segment it includes the grant, entity kind, endpoints, and path geometry. The bounded planner must construct a complete replacement graph and pass the unchanged strict validators. Stable ordinal IDs are evidence fields, not sufficient exclusion identities.
+
+### Individually isolated defects
+
+| Defect | Current status | Exact cause | Repair unit |
+| --- | --- | --- | --- |
+| Partial scheduler and useful floor | **Seed001 strict end-to-end replay evidenced** | The preferred three-network partial path was effectively all-or-nothing, and a partial-first checkpoint could accept landmark + conveyor after only coverage candidates 0–1 even though candidate 3 was a valid modular replacement for `enemyNest_keycardRoom`. | Deterministic checkpoints and a deferred, fair coverage-suffix queue prioritize accepted required-count/class coverage. Current strict replay retains three operations, 10 supplemental rooms, 14 nodes, and 17 segments. Candidate, visit, module, network, and watchdog limits remain unchanged. |
+| Exact-node conflict attribution | **Seed000 canonical exact-repair evidenced** | Late failures were attributed to aggregate/global conditions or only to an ordinal `entityId`, so recovery could delete an entire grant instead of the one conflicting placement or path. | Seed000 now applies after four exact node-repair passes across five physical exclusion signatures, retains four operations and every unrelated valid module, and records zero whole-grant runtime pruning. `entityId` remains evidence only; the physical signature is the exclusion identity. Current Seed001 requires no runtime repair. |
+| `crested_slope_v1` footprint parity | **Locally repaired; canonical proof pending** | Planning reserved a narrow centerline, but materialization emitted a two-flight switchback with a 7 m lateral offset and could silently try a colliding fallback side. | Project the materializer's complete two-flight reservation for both sides during planning, select a legal side there, carry it into materialization, and reject instead of choosing an unplanned fallback side. |
+| Vertical-underpass false missing floor | **Seed001 integration evidenced** | Coverage segment 4 had a real ownerless connector floor at `-28,122@y-14`, but wide-floor bookkeeping suppressed its section solely because the same X/Z column lay inside `bossRoom`. The validator then lacked the section's expected elevation and reported a false missing/orphaned floor, cascading into a node failure. | Seed001 now retains this coverage network with strict physical/progression validation. Cross-sections are recorded outside room footprints or when the realized center floor exists at that elevation without a room owner; genuine same-elevation authored-room interiors remain suppressed. |
+| Ownerless endpoint seam/base-overlap mismatch | **Locally repaired; canonical proof pending** | An internal endpoint seam without `parentOwnerId` could waive overlap with immutable base connection occupied, camera, or landing volumes merely because it was inside an endpoint seam envelope. | Permit overlap only at the exact parent-boundary seam whose `parentOwnerId` matches that base connection. An ownerless internal seam never receives the waiver. |
+| Lift exterior straight-run parity | **Seed001 integration evidenced** | The planner could accept a lift segment/path without the exterior straight run required by the connector contract, leaving materialization to reject it. | Planning now applies the same lift contract against base and previously selected room footprints before committing the segment. Seed001 strictly retains `conveyorRoom_bossRoom`; alternate legal routes remain available and no higher limit or materializer fallback was added. |
+| Legacy progression-footing false positives | **Seed001 integration evidenced** | Progression columns correctly came from legacy/authored routes, but final validation was passed only legacy connection plans. It therefore failed to recognize a physically registered V4 connector gallery at another elevation and incorrectly demanded Y=0 footing beneath the midpoint. | Seed001 now passes with zero progression errors. Only registered, non-graph-only realized physical connector plan IDs count as connector footing; unregistered and graph-only floors still fail. |
+| Foreign supplemental floors contaminating `bossRoom.platformNodes` | **Seed001 integration evidenced** | Room-floor collection used `roomId === room.id || X/Z containment`, so a supplemental floor owned by another V4 node but lying under the boss footprint was absorbed into the boss platform list and tested against authored solids as if it belonged to the boss. | Seed001 now excludes explicitly foreign-owned supplemental floors from the authored boss platform list while retaining unowned legacy geometry and room-owned floors. |
+| Authored scaffold ownership in overlapping X/Z layers | **Seed001 strict integration evidenced** | Two scaffold-repair loops selected local floors by X/Z containment, then stamped a new ramp with the outer supplemental room even when the selected chain tile carried the authored boss-room `roomId`. The underpass could therefore capture overpass floors and create false footprint/connectivity failures. | Owned tiles now require exact normalized `roomId` equality, spatial containment is retained only for genuinely unowned legacy floors, mismatched candidates are rejected, and the selected exact owner is carried into ramp creation. Focused ownership regressions pass and strict Seed001 reaches exact modular recovery without foreign-floor contamination. |
+| Lift shaft swept-interval bounds | **Focused lift geometry repaired; Seed001 strict integration evidenced** | The shaft predicate first treated floors above the lift as crossing the aperture, then an open-interval correction also excluded a blocking cap exactly at `topElevation`. | Shaft occupancy now uses the intended lower-exclusive, upper-inclusive interval: the bottom landing is not a blocker, an exact top-elevation cap is rejected, and a separate floor above the top landing is ignored. Full lift geometry passes 4/4, including ascending and descending cap fixtures. |
+| Ramp/scaffold exact failure bridge | **Exact attribution contracts evidenced; current canonical seeds accepted** | A final ramp/scaffold conflict was emitted only as a global string/count, so the replay loop had no exact entity to replace and could return the unchanged authored base. | Platformability now emits concise ramp/scaffold ownership records, and connector-assembly plan errors carry exact supplemental segment IDs for the same recovery path. Current Seed001 passes without runtime exclusions; Seed000's bounded exact repairs retain every unrelated network and never prune a whole grant. |
+| Exact replacements before terminal grant omission | **Seed000 canonical exact-repair evidenced** | `continueWithoutRequiredGrant` and post-validation omission could discard a grant immediately after an exact conflict identified a replaceable module. Conversely, an unconditional prohibition on ever omitting that grant could collapse the entire overlay to the authored base after every bounded replacement was genuinely exhausted. | A conflict-protected grant is forbidden from every early, capacity, future-grant, and post-validation omission path. Seed000 now proves four bounded exact node-repair passes across five signatures before an applied result, with every unrelated valid network retained and zero whole-grant runtime pruning. Only genuinely exhausted atomic grants may enter the terminal best-effort ledger. |
+| Structured planning/materialization exact-segment backstop | **Locally repaired; canonical proof pending** | Connector-contract failures were unstructured strings, so same-seed recovery could not identify the failing segment and fell back to coarse pruning. | Materialization records code, operation ID, grant ID, entity kind, segment ID, and connector family. The generator verifies those IDs against the overlay, emits the exact signature with `route-network-materialization-contract-rejected`, and replays the same seed without pruning the grant. This is a safety net, not a substitute for planner/materializer parity. |
+| Final planner-validation exact-conflict bridge | **Locally repaired; canonical proof pending** | Final validation could identify a precise base-overlapping node or segment, but post-validation recovery still converted its grant into a whole-grant omission because no exclusion had been synthesized yet. | Only the unambiguous immutable-base diagnostics `supplement-overlaps-base-draft` and `route-network-segment-base-overlap-outside-landing-grant` now map to exact physical signatures. The same attempt replans before omission; exhaustion returns structured exclusion/failed-grant evidence for the generator fixed point. Ambiguous pairwise conflicts remain fail-closed. |
+| Structural-frame failure attribution | **Seed000 canonical applied** | Missing structural-frame wall runs were reported only as strings inside a generic incompatible-content exception, so no segment signature reached same-seed recovery. | Structural-frame validation now emits verified segment/operation/grant evidence. Seed000's bounded exact recovery retains zero whole-grant pruning and reaches the accepted `v1-f5178024e92254900ddaee251b78e15d` overlay. |
+| Corridor-station boundary-indicator support | **Locally repaired; Seed000 delta evidenced** | An authored corridor station is a T-junction: the through corridor occupies both neighbors at the exact socket cell and its 5.6 m aperture consumes the threshold transom. Binding only at the socket axis therefore reported missing side walls that downstream segment replanning could never create. | Search only threshold/+1/+2 outside depths of the same authoritative 3×5 seam, select the nearest complete connector-owned side-wall pair, and move only the nonblocking presentation point. Four-facing structural tests pass; the original conveyor segment-0 structural failure disappears from Seed000. |
+| Endpoint-seam ownership failure attribution | **Seed000 exact replay evidenced** | After the structural-frame repair, Seed000 exposed an endpoint overlap at `-38,104@y0` with foreign owner `conveyorRoom_machineFactoryRoom_upper`; this late physical error also lacked an exact recovery bridge. | The generator now attributes the exact segment endpoint and replays its physical signature. Seed000's second repair pass excludes only that segment candidate and records no whole-grant pruning. |
+| Finite parent-attachment path continuation | **Locally repaired; both canonical seeds functionally accepted** | Coverage placement cached only the single shortest static-clear parent path and the correlated prefix treated that choice as immutable. Alternate finite doglegs were generated but discarded, so one conflicting shortest path could eliminate a legal room assignment and surface as protected replacement exhaustion. | Reserve a parent-attachment collision body during the correlated prefix only when its domain is a singleton. Multi-path domains remain unresolved until the exact spine solve enumerates their compatible finite product. Tuple-independent spine behavior is compiled once; equivalent failures are memoized by exact option-mask and attachment distances while every logical tuple still consumes the unchanged 20,000-visit budget. Performance evidence remains open. |
+| Parent-attachment seam ownership | **Focused route/topology contracts evidenced; canonical proof pending** | The compiled and reference spine solvers granted both endpoint seam intersections to every attachment, so attachment A could borrow attachment B's waiver on a foreign edge. | Bind each parent seam grant to its own attachment endpoint and node index in compiled masks, reference checks, exact route solving, and topology solving. A self-edge retains both endpoint grants; selected foreign nodes receive none. |
+| Observation-break false full-tier verticality | **Seed001 strict integration evidenced** | Observation-break metadata advertises `step`, but its geometry is only an optional 0-to-0.7-metre lore spur. The any-transfer predicate incorrectly treated that spur as the required 2.8-metre slope tier and suppressed synthesis of the real operation transfer. | A mode-aware purposeful-authored-elevation predicate now requires a floor-supported transfer component in the requested family spanning at least 2.8 metres. Candidate 3 replaces only the conflicting rise room with `compact-ramp-defense-rise`, retains `switchgear-cache-descent` and the rest of the network, and passes with the unchanged candidate limit. |
+| Horizontal-bend planner/runtime footprint parity | **Seed001 strict integration evidenced** | Runtime widens every level cardinal bend to a 3×3 landing, while planning reserved only the two orthogonal corridor legs. A sibling segment could occupy the unreserved outer quadrant and then fail strict floor ownership during realization. | `routePathFinalOccupiedSpans` now emits the exact bend landing used by runtime; candidate planning and serialized final volumes share it. Self-overlap checks compare route legs, and strict unrelated-floor ownership remains unchanged. The two original enclosure failures and 57/57 route-candidate checks pass. |
+| Legacy switchback assignment retry | **V1 integration evidenced** | `crested_slope_v1` threw when its first coarse side check found no side, aborting before the existing 48-assignment legacy retry loop. It also counted its own endpoint-room handoff as a blocker although complete reservation permits it. | Unrequested V1 contracts retain the unresolved side sentinel so complete reservation rejects only that assignment and the bounded outer loop retries. Endpoint rooms are excluded consistently. Explicit V4 planned sides remain immutable and fail fast. Connector variants pass 26/26 and the forced-invalid V1 fallback still uses eight gameplay attempts. |
+| V1–V3 objective-allocation isolation | **Immutable replay evidenced** | V4's all-overlong-objective-routes allocation rule leaked into committed legacy profiles and aborted host construction before their historical overlays could run. | Runtime threads the exact profile ID into the host. V1–V3 retain their historical deterministic greedy partial grants; V4 and direct/default host consumers retain strict bounded complete allocation. The V2 adjacent-threshold witness, pre-pruned contracts, and committed V1–V3 hashes pass. |
+| Sparse presentation and public interfaces | **151/151 focused contracts passing; current Seed001 browser observation; formal visual receipt pending** | Boundary indicators, source-bound cover/machinery records, optional story markings, immutable V1 presentation, and the public V4 schema/profile shape needed one combined current-tree audit; isolated registration assertions could otherwise be mistaken for a realized presentation result. | Current local audit passes structural 35/35, assembler plus materializer 59/59, legacy plus blueprint 19/19, runtime content plus connector variants 37/37, and the pure V4 schema/profile 100-seed fixture 1/1. The current browser observation visibly rendered a supplemental foundry area with the accepted hashes and zero console errors; it does not replace the pending two-seed visual receipt. |
+| Release-worker phase/timing integrity | **52/52 focused release evidence and gate checks passing; sealed receipt pending** | Failed evidence could omit planner/assembly metrics or drift from its captured heartbeat, a nominally successful worker could accept a stale pre-disposal heartbeat, and aggregate validation trusted its sealed overall verdict after checking only performance. In addition, an unchanged authored-base fallback has no top-level `augmentationMetrics`, so the verifier discarded the final rejected attempt's valid timings before publishing its zero-record failure. Those gaps could obscure the watchdog phase or allow a re-sealed zero-record aggregate to claim release. | Warm-up and target generators remain pinned to one attempt. Successful evidence must end on completed target disposal with exact six-phase and generator-timing parity; failed seed workers publish zero records, while a failed shard retains only earlier independently validated records and binds its failure to the captured heartbeat. Fallback extraction uses the final rejected attempt's planning metric and only that attempt's completed assembly event; missing/non-finite metrics fail closed and are never synthesized as zero. Aggregate validation now recomputes authoritative tier/shard/record counts, coverage, diversity, performance, every acceptance gate, and the final verdict. Runtime generation remains at eight attempts. |
+| Direct release-stage predecessor binding | **Locally repaired; sealed ordered evidence pending** | The lower-level release entry point previously built the 1,000-seed aggregate and final attestation without consuming the canonical, 10-seed, or 100-seed results, so direct invocation bypassed the package runner's procedural ordering. | Direct release now preflights sealed passing canonical, smoke, and normal artifacts before corpus work, rechecks exact manifest identity after manifest creation, and passes all three required artifacts to the finalizer. The final attestation embeds their evidence and hashes and revalidates exact same-source/profile/manifest identity; missing, mixed-source, failed-but-resealed, or removed predecessors fail closed. |
+| Strict fresh testing URL | **Browser evidenced** | Ordinary URL parameters correctly lose to an existing committed expedition, which made the original test link appear unaugmented. | Exact `startupWorld=dungeon` + exact V4 profile + `dungeonAugmentationFresh=1` constructs a strict disposable run, ignores without mutating the save, and suppresses durable writes. It does not enable alpha acceptance. |
+| V4 authoritative ladder boarding walls | **Seed001 browser and focused contract evidenced; formal journey pending** | The V4 authoritative shell rebuilt base `ladder_gallery_v1` connectors from floor layers but honored only the newer V4-owned opening field. Both exact legacy ladder boarding hints were therefore ignored and a wall run was emitted across each upper and lower ladder face. Ladder traversal bypasses ordinary barrier checks, so platformability did not expose the visual/physical obstruction. | Supplemental blueprint ladders now stamp only their exact owner-bound floor-to-aperture edges. During authoritative V4 shell reconstruction, a legacy ladder edge is carved only when that exact edge is declared, its target floor exists at a different elevation in the same direction, and the target has the reciprocal ladder link. Non-augmented V1 remains unchanged, unrelated legacy hints remain walled, and lifts retain their separate multi-lane contract. Both Seed001 ladders now report zero blocking wall IDs at all four boarding endpoints; the focused screenshot/receipt is under `artifacts/dungeon-augmentation-v4-release/visual/`. |
+| V4 authoritative automatic-lift boarding walls | **Seed001 live 6/6 edges and 68/68 focused connector contracts evidenced; formal journey pending** | Automatic-lift landing floors carried generic retaining-wall hints, but the authoritative V4 shell had no lift-specific proof that the complete paired aperture existed. Treating one hint as sufficient would over-open unrelated walls; ignoring it rebuilt blocking facades across the lift landings. | Each connection now declares a dedicated exact three-lane source and three-lane destination contract. The shell opens the six edges only when both owner-bound groups are contiguous and same-elevation, their cardinal directions oppose, their centers and 14 m separation match, reciprocal `automatic_lift` center links exist, and the shaft columns are clear. Live Seed001 reports zero blockers on all six edges. Focused artifacts are `artifacts/dungeon-augmentation-v4-release/visual/seed001-lift-aperture-after.png` and `.json`; they are not the formal receipt. |
+| Exact authored drop-space traversal walls | **Seed000 canonical 79/79 egress and 47/47 enclosure contracts evidenced** | Authoritative V4 shell reconstruction could emit supplemental wall runs through the authored lower-floor walk, return-shelf climb, and exit jump even though those floor pairs were real drop-space traversal edges. Broadly opening the room boundary would weaken unrelated authored walls. | V4 now resolves every declared drop-space key to exactly one non-support floor, considers only unique cardinal pairs with a real `walk`, `ledge_climb`, or `jump` action, and removes only that action's exact player-height interval. Missing/malformed arrays, unresolved or duplicate keys, non-cardinal pairs, and actionless pairs fail closed; unrelated and non-authoritative V1 walls remain. Seed000 now reports all 79 lower tiles reachable and escapable with zero egress-blocking edges. |
+| Planner and final-validation performance | **Active release blocker; both canonical seeds functionally accepted** | The latest one-attempt strict Seed001 probe completes in 55.3 seconds with 28.7146 seconds of total planning, 28.2992 seconds of generator planning, and 202.055 ms of overlay materialization. Seed000 completes in 166.4 seconds. Both exceed the unchanged 30-second whole-seed maximum despite strict functional acceptance. | Preserve exact modular replacement and unchanged limits while reusing only sound candidate-independent work. Do not advance 10/100/1,000 until the complete run meets the performance gate. |
+
+### Current verification evidence
+
+- Seed001 strict generation is **functionally passing** on outer realization attempt 1 with 3 operations, 14 nodes, 17 segments, accepted progression/release validation, RNG 80/80, and zero errors. Runtime pruning passes and records, conflict exclusions, and rejected realization attempts are empty. Its two bounded planner best-effort omissions are `keycardRoom_trapRoom` and `conveyorRoom_bossRoom`; every retained network remains augmented.
+- Seed001 accepted hashes remain augmentation `v1-302ed26c9f2bc8dfdf8f598c28ac53c9` and effective `v1-4a48156df773fb747768ce9e95cb6f8a`. The latest exact one-attempt probe takes 55.3 seconds wall, 28.7146 seconds total planning, 28.2992 seconds generator planning, and 202.055 ms materialization. Strict validation accepts, but the unchanged 30-second whole-seed gate fails.
+- Seed000 is now **functionally passing**. `node scripts/debug-dungeon-augmentation-attempt.mjs --seed=layout:augmentation-realized-v4-000 --generate --attempt-limit=1 --release-errors-only` exits 0 after 166.4 seconds with status `applied`, accepted strict release validation, zero errors, 4 operations, 22 nodes, and 27 segments. Accepted hashes are augmentation `v1-f5178024e92254900ddaee251b78e15d` and effective `v1-76d7dfc517c1470584839152fcb8d227`.
+- Seed000 completes four exact node-repair passes across five exclusion signatures, with every recovery outcome `exact-entity-replacement-realized` and zero whole-grant runtime pruning. Its two planner best-effort omissions are `keycardRoom_trapRoom` and `conveyorRoom_bossRoom`. All 79/79 `trapRoom_hazardDropSpace` lower tiles are reachable and escapable; no non-exit key, egress-blocking edge, or blocking zone remains. Planning is 38.0677 seconds, generator planning 37.7603 seconds, and materialization 272.672 ms, so the whole-seed gate still fails.
+- The current Seed000 evidence artifact is `artifacts/dungeon-augmentation-diagnostics/seed000-current-canonical-accepted-2026-08-02.json`. The prior failed `artifacts/dungeon-augmentation-diagnostics/seed000-current-canonical-2026-08-02.json` remains preserved only as before-fix chronology and must not be cited as current status.
+- Current local Seed001 browser observations reproduce the accepted hashes and verify both `ladder_gallery_v1` fixtures plus the automatic lift. The four ladder endpoints and all six lift boarding edges have empty blocking-wall ID lists. Lift evidence is `artifacts/dungeon-augmentation-v4-release/visual/seed001-lift-aperture-after.png` plus `seed001-lift-aperture-after.json`; these focused developer-camera artifacts are not the formal two-seed ordinary-movement receipt.
+- Focused contracts currently pass automatic-lift connector suites 68/68, enclosure 47/47, and route-candidate 57/57. The former pure-V4 seed-33 failure is repaired and the pure-V4 100-seed core run passes. Existing focused ladder, materializer, runtime, seam, topology, and blueprint contracts also remain passing.
+- Current presentation/interface audit remains **151/151 passing**. This is local contract evidence only; no formal two-seed visual receipt is claimed.
+- Current release-worker hardening requires one-attempt phase/timing parity, atomic failed publication, authoritative aggregate recomputation, and exact sealed canonical/smoke/normal predecessor binding before release work and final attestation. The focused release-evidence and gate assertions pass **52/52**, but no clean-source same-source suite receipt or sealed ordered attestation exists.
+- The formal two-seed visual gate, canonical -> 10 -> 100 -> 1,000 ordered evidence, clean-source receipts, release provenance, and sealed attestation remain pending. Both canonical seeds are functionally accepted, but both exceed the unchanged 30-second whole-seed gate.
+
+### `V4-RCV-017` - repaired unchanged-worker metric extraction
+
+The realized verifier originally read planner and assembly metrics only from `dungeon.augmentationMetrics`. That object belongs to an applied augmentation facade; when strict realization rejects the supplement, the returned accepted authored base is correctly `unchanged` and has no top-level augmentation metrics. The final rejected attempt still retains its finite `diagnostics.planningTimeMs`, and the release observer has the generator's exact completed `three-js-assembly` duration, but the worker discarded both and reached its release finite-metric assertion with null values. The resulting zero-record failure therefore could lose the timings needed to diagnose performance and watchdog behavior.
+
+Fallback extraction now selects only `rejectedOverlay.attempts.at(-1)`, takes its existing planning duration, and pairs it with the completed assembly event observed after that same attempt's `planning started` event. Starting another attempt resets the observed assembly value, so an earlier repair pass cannot leak into the terminal diagnostic; an unmatched completion event is also ignored. Missing, negative, or non-finite values remain null and fail closed; the worker does not synthesize zero and does not relax the finite-metric requirement. Once a failed worker or shard has reached strict validation or disposal, its validator requires both finite generator metrics; an earlier planning/assembly watchdog failure may still report its honestly incomplete phase without invented completion data. The regression drives an actual `DungeonGenerator` through a rejected applied facade into its unchanged authored-base fallback, proves final-attempt selection, rejects an orphan assembly completion, converts `unchanged` to an atomic failed publication with `records: []`, and validates the sealed worker with the exact retained `222 ms` planning and `7.25 ms` assembly fixture values. This is harness-integrity evidence, not a canonical performance result or release receipt.
+
+### `V4-RCV-018` - repaired direct release-stage predecessor binding
+
+The ordered gate runner already stopped after the first failed canonical, smoke, or normal stage, but the lower-level `verify-dungeon-augmentation-release.mjs --tier=release` entry point previously created release artifacts without consuming those predecessors. The package aliases were ordered procedurally while direct invocation could skip the sequence; the final attestation had no predecessor evidence or hashes to revalidate.
+
+The direct release stage now reads and validates sealed passing canonical, smoke, and normal artifacts before creating the release shard directory, then revalidates them against the exact generated manifest before any 1,000-seed shard runs. The finalizer requires all three predecessor paths, and the final attestation embeds their evidence plus exact hashes and revalidates source provenance, profile, manifest, tier/count, seals, and passing results. Focused regressions reject every missing stage, mixed-source or mixed-manifest evidence, a failed canonical artifact re-sealed with passing fields, and a passing attestation re-sealed after an embedded predecessor is removed. The attestation schema identifier remains stable, but predecessor-less historical attestations fail the strengthened validator. No current release artifact is accepted here: the working tree is dirty, no current canonical/10/100/1,000 evidence sequence exists, and no same-source suite receipt or final attestation exists.
+
+## 2026-08-01 12-hour checkpoint — superseded historical handoff
+
+This section is retained only as historical investigation chronology and is superseded by the 2026-08-02 checkpoint above. Its former "current" labels, active blockers, counts, and receipts describe an earlier working tree and must not be used as present-state evidence. The ordered 10/100/1,000 tiers and sealed release attestation remain blocked.
+
+The two deliberately unaccepted planner experiments documented as `V4-RCV-011` and `V4-RCV-012` are no longer present. The hard host-witness expansion was removed, and the topology selector now uses one complete bag-independent viable domain. Those repairs expose a narrower current seed-1 failure in the exact future endpoint domain; they do not retroactively validate the historical seed-0 result or establish canonical success. This checkpoint therefore labels each item **repaired**, **current**, or **historical**. A locally passing assertion proves only the contract named by that assertion; it is not canonical or release evidence.
+
+### Current status at a glance
+
+| ID | Status | Independently reproducible symptom | Established cause or boundary | Resolution unit |
+| --- | --- | --- | --- | --- |
+| `V4-RCV-011` | **Locally repaired; canonical proof pending** | The simultaneous 2,048 m host-witness obstacles are gone. Seed 1 reaches the real exact future-domain recovery path instead of being rejected by host-only rectangles. | Host feasibility rectangles are no longer treated as exact topology geometry. The separate fail-closed rule still prevents an endpoint seam from waiving a valid `future-route-network-*` reservation. | Preserve this boundary and its focused regressions while resolving the current exact-domain exhaustion under `V4-RCV-008`. |
+| `V4-RCV-012` | **Locally repaired; canonical proof pending** | Consumed topology IDs are no longer reintroduced with fabricated singleton `legalIds`; retained candidates keep their original ordinal and RNG/search-variant identity. | One immutable-order, grant-legal, pre-cap-signature-supported viable domain is computed independently of bag consumption and passed once to the bag selector. | Preserve the complete-domain implementation, existing `1/8/12/24` limits, and focused topology/selection tests; re-establish both canonical results without relying on the discarded fallback. |
+| `V4-RCV-013` | **Locally repaired; canonical visual proof pending** | Active internal V4 blueprint sockets still invoked the legacy three-mesh `doorway-frame` asset even though structural-frame and V4 arch checks reported boundary-only presentation. | Route-network nodes retained doorway-frame anchors and the materializer forwarded them through a separate assembler path that the sparse-frame assertions did not inspect. | Preserve the V4-authoritative-blueprint assembly filter, fail-closed assembler rejection, and zero-frame visual assertion; execute the canonical browser gate after planning is repaired. |
+| `V4-RCV-014` | **Locally repaired; release attestation pending** | The public aggregate helper accepted a caller-provided performance budget, and aggregate validation later recomputed only performance while trusting sealed counts, non-performance gates, `corpusAccepted`, and `result`. | A direct caller could either raise the 10/20/30-second thresholds or re-seal a zero-record failed aggregate as `passed`; the latter could produce an accepted final attestation despite `gates.performance === false`. | The aggregate input no longer accepts a budget. Validation now pins tier/shard topology, requires complete shard summaries for any pass, recomputes record and ordinal coverage, diversity, timing statistics, every gate, and the verdict. Preserve the raised-budget and zero-record/full-gate reseal regressions; focused release evidence and gate suites pass 52/52, but no release attestation exists. |
+| `V4-RCV-008` | **Current seed-1 blocker; seed-0 proof incomplete** | The complete ordinary landmark pass evaluates all 24 identities; candidates 1, 9, and 23 produce complete pyramids and are queued because each consumes a mandatory future endpoint domain. Exact recovery is fair and finite, yet Seed 1 still exceeds the unchanged 30-second ceiling without an accepted leaf. | For candidates 1 and 9, the best pairwise-compatible future witness conflicts with exactly one realized internal spine segment and with no pyramid node, inactive cap, or parent attachment. The remaining failure is local spine rerouting/search completeness or ordering, not global-budget exhaustion. | Repair the one-edge recovery/search defect under `V4-RCV-016`, preserve the exact masks and limits, then prove Seed 1 attempt one and Seed 0 parity below budget. |
+| `V4-RCV-015` | **Locally repaired; canonical proof pending** | Landmark prospective route checks previously used corridor bodies without the two landing volumes that final `createSegment()` emits. A leaf could pass pairwise/cap/future checks and fail only during commit. | `enforceExactEmittedCoverageVolumes` applied only to objective coverage, leaving landmark spine, wing, and parent candidates with an incomplete collision set. | Preserve stable prospective segment IDs and body-plus-both-landings through pairwise DFS, cap validation, forward checking, and commit. The route-candidate suite passes 28/28 and the cap-planning suite passes 8/8 locally; canonical proof is pending. |
+| `V4-RCV-016` | **Active completeness/performance blocker** | FIFO frames now rotate candidates 1, 9, and 23 with `candidateEvaluations` fixed at 24. The ordinary warm start is promoted and endpoint tuples are interleaved by exact reconnect center without loss, but no accepted leaf is reached below 30 seconds. Forced candidate-9 tuples 0 and 20 both retain room pairs and then lose exact internal-spine support. | Fair scheduling and reconnect-center diversity are repaired. Guided recovery carries one selected future-witness reservation while a separately identified unguided branch retains the complete original input. The remaining gaps are local: ordinary failures cannot enter the pair/wing odometer, parent-attachment paths have no continuation axis, and the selected internal-spine conflict is not rerouted within budget. | Retain FIFO/caches, reconnect-center interleaving, distinct guided/unguided inputs, and exact final checking. Add the missing finite axes or a sound one-edge reroute; do not add a local cap or raise any existing limit. |
+| `V4-RCV-009A` | **Active performance blocker** | Equivalent AC/exact-support work is repeated across pair scans, while complete collision diagnostics are built for options that are later discarded or rescanned. | Boolean feasibility and detailed failure evidence have different lifetimes, but the hot path still couples them in uncached contexts. | Memoize exact boolean support by complete deterministic context and defer full diagnostics to the selected failure; preserve result, ordering, and hashes. |
+| `V4-RCV-009B` | **Active performance/evidence blocker** | The historical 32-40 second, roughly 135-visit candidate is no longer reproducible after the hot-path changes. The current bounded surrogate takes 3.57-5.58 seconds and ends after 71 placement-backtrack visits with zero spine placements. | Candidate isolation is bag-state-sensitive: the debug skip flag bypasses the skipped candidates' bag draws, so jumping directly to the surrogate is not a faithful replay of the full prefix. | Seal a fixture containing the complete accepted prefix, bag states, 484-volume reservation set, and candidate signature before adding an early predicate or suffix memo. Preserve all existing limits. |
+| `V4-RCV-010` | **Locally repaired; integration unproved** | A later terminal diagnostic could retain state-selection and path fields from an earlier successful refinement pass. | `objectiveExternalDiagnostics` was reused across passes and `setDiagnostics()` merged with `Object.assign()` without clearing obsolete keys. The working-tree repair now replaces the snapshot. | Preserve the clear-before-assign repair and focused regression; close only after the wider planner/debug suites pass. |
+| `V4-RCV-001` | **Locally repaired; integration unproved** | Exact coverage routing previously offered only a 5.6 m endpoint lead, causing a legal 8.4 m-wide turn to clip an authored wall panel. | Route-enumeration asymmetry: the external composer offered 5.6 and 8.4 m, while the exact coverage solver offered only 5.6 m. The authored socket, shell, seam, and mask are correct. | Preserve the new symmetric `[5.6, 8.4]` exact approach set and its focused regression; close only after the full canonical attempt passes. |
+| `V4-RCV-007` | **Confirmed dead candidate placement** | `conveyorRoom_bossRoom` candidate 11 still has no legal Through-T-to-inclined-sorter `0 -> 1` pair. | Its only source-clear witness is a same-facing U that penetrates the sorter body and two shell walls. An 8.4 m lead does not make that placement legal. | Deterministically prune/re-place this orientation, or add a genuinely different legal witness. Do not weaken exact masks. |
+| `V4-RCV-002` | **Confirmed dead candidate family** | `trapRoom_conveyorRoom` candidate 1 ends with zero support at switchgear-to-lift-defense `2 -> 1`. | Genuine grammar/socket/shape incompatibility; the bounded chain still has budget and does not reach exact evaluation for the impossible pair. | Pre-prune the family or repair its authored physical contract; do not raise the cheap or exact caps. |
+| `V4-RCV-003` | **Locally repaired; canonical proof pending** | Finalized inactive room-socket caps now participate in exact socket-assignment backtracking, final candidate validation, and planner-only later-network reservations. | The former collision-lifecycle omission is wired without serializing caps into overlay schema V2 or plan hashes; all eight focused cap tests pass. | Preserve alternate-socket recovery, landmark conflict, cross-network reservation, and final cap/solid disjointness while running wider planner and canonical gates. |
+| `V4-RCV-004` | **Acceptance proof blocked** | Seed-0 direct/full parity and seed-1 attempt-one application are not established on the current tree. | Repairs 011/012/003 remove three unsound boundaries, but seed 1 now fails the exact future-domain check under 008 and seed 0 has no post-repair canonical receipt. | Repair 008, bring both canonical planners below budget, then run the two focused integration proofs on the current tree. |
+| `V4-RCV-005` | **Visual gate registered but unexecuted** | The two-seed V4 Playwright specification is part of the runtime and release receipt contracts, and its quiet-corridor point must be at least 5.6 m from every boundary. No browser journey or screenshot has completed. | Neither canonical V4 realization is currently available for review. | Run and review both canonical browser journeys after planning/realization passes; registration and stronger assertions are not execution evidence. |
+| `V4-RCV-006` | **Release/provenance gate blocked** | No current canonical, 10-, 100-, or 1,000-seed same-source receipt exists. Failed seed workers now publish zero records atomically, and the legacy receipt now requires the real V1 scene Playwright regression, but neither change is a release receipt. | The ordered gate is correctly fail-closed, and a dirty working tree cannot produce official clean-source evidence. | After upstream 008/009/004/005, verify from one clean source identity in canonical -> 10 -> 100 -> 1,000 order and seal every required receipt. |
+
+### `V4-RCV-014` - repaired aggregate budget and verdict bypasses
+
+The release aggregate constructor previously exposed `performanceBudgetMs`, while aggregate validation accepted the sealed budget, summary statistics, and performance gate without recomputing them. A later partial repair recomputed performance but still trusted record/shard counts, coverage, diversity, the other gates, `corpusAccepted`, and `result`. A re-sealed historical release aggregate with zero records and `gates.performance === false` could therefore be relabeled `passed`; with otherwise valid same-source suite receipts, the final attestation also reported `releaseAccepted: true`.
+
+The constructor now always uses the authoritative `10,000/20,000/30,000/180,000 ms` identity and records sealed per-shard result/range summaries. Validation independently recomputes the authoritative tier count and shard topology, shard-hash/range/result coverage, record coverage diagnostics, sample count, median, nearest-rank p95, maximum, diversity frequencies and thresholds, every acceptance gate, and the final verdict. Passing evidence must contain complete shard summaries; historical summary-free evidence remains readable only as failed diagnostics. The focused regressions prove that a supplied budget override is ignored, a re-sealed raised budget is rejected, every mutated gate is rejected, and zero records cannot be promoted to an accepted aggregate or attestation. Release evidence and gate suites pass 52/52; this local repair is not a canonical run, suite receipt, or sealed release attestation.
+
+### V4-RCV-008 — current exact future-endpoint-domain blocker
+
+Current reproduction commands:
+
+```powershell
+node scripts/debug-dungeon-augmentation-attempt.mjs --plan-only --compact-failure-summary --candidate-histogram --attempt-limit=1
+node scripts/debug-dungeon-augmentation-attempt.mjs --seed=layout:augmentation-realized-v4-001 --plan-only --compact-failure-summary --candidate-histogram --attempt-limit=1
+```
+
+#### Seed 0 — historical diagnostic pass, not current proof
+
+- At the historical pre-repair tree, attempt one found all six required networks and passed strict plan validation in about 48.6 seconds.
+- `augmentationPlanHash`: `v1-601392a701ebaebd0cbd8df071385a4d`.
+- `effectivePlanHash`: `v1-a2121b767e4fa19dcaea474a29f22926`.
+- That result used the now-discarded singleton topology fallback documented in `V4-RCV-012` and predates the current exact-domain and cap lifecycle. Its hashes are retained only for chronology.
+- The current tree has not re-established seed-0 attempt-one application, direct/full parity, or a sub-30-second result. Do not reuse the historical hashes as current expected values.
+
+#### Seed 1 — current attempt-one blocker
+
+- Seed: `layout:augmentation-realized-v4-001`.
+- The complete ordinary landmark pass evaluates all 24 candidate identities. Candidates 1, 9, and 23 produce complete local pyramids, but accepting any of them empties the mandatory future domain at operation ordinal 3. `candidateEvaluations` remains exactly 24; no global-budget exhaustion occurs.
+- Historical diagnostic only: the first repaired-tree candidate-9 witness reported that the future `trapRoom_conveyorRoom` endpoint-0 domain lost 190/190 exact candidates while endpoint 1 retained 190/190. That observation exposed the real finite-domain boundary after `V4-RCV-011`/`012`, but it is no longer the current root-cause attribution.
+- Exact prospective landmark segments now include both endpoint landing volumes. With that corrected collision set, deterministic FIFO recovery rotates all queued candidate identities instead of draining one candidate until the watchdog. The focused sequence is candidate/tuple `1:0, 9:0, 23:0, 1:1`, with global evaluations unchanged.
+- Recovery caches the 24,768-56,160 exact endpoint tuples per candidate. Candidate 1's already successful ordinary endpoint geometry is found at source tuple 8 and promoted to recovery tuple 0 without dropping any tuple. The remaining tuples are then interleaved round-robin by exact reconnect center, retaining every tuple and its original order within each center bucket instead of consuming thousands of same-center orientation variants first.
+- Conflict-directed witness evidence is narrower than the historical 190/190 aggregate. For candidates 1 and 9, a pairwise-compatible future trap witness overlaps zero pyramid node volumes, zero inactive-cap volumes, zero parent attachments, and exactly one internal `route-network-spine` segment (segment 5). Guided recovery includes that selected witness as a local-only planning input; the separately identified unguided fallback omits it and preserves the complete original search input. Final cap-inclusive exact forward checking remains authoritative for both branches.
+- Forced candidate-9 recovery tuple 0 retains 43 room pairs and tuple 20 retains 47 room pairs, but neither tuple finds exact support for the complete internal spine. This isolates the observed failure downstream of room-pair selection; it does not prove every endpoint tuple or legal pyramid placement impossible.
+- The route-candidate suite passes 28/28 and inactive-socket-cap planning passes 8/8 locally. Hard Seed-1 attempt-one probes still exceed 30 seconds without an accepted full leaf, so these focused results are not canonical success evidence.
+
+The smallest remaining Seed-1 repair is a local reroute of the single blocking internal spine edge for candidates 1 or 9, or enumeration/proof of the missing local continuation axes. Preserve the exact guided branch, its distinct unguided fallback, and the repaired reconnect-center interleave so the finite domain remains complete and materially diverse. Do not weaken masks, seams, collision authority, inactive caps, candidate limits, the global bound, or the watchdog.
+
+One validation-stage mismatch encountered immediately before this blocker is locally repaired. A typed zero-distance segment shared by two adjacent authored-station junctions was being treated as an ordinary degenerate route. The validator now accepts only the exact `shared-junction-threshold` contract and still rejects mutated fields, absent kinds, and unknown kinds. The focused acceptance regression passes:
+
+```powershell
+node --test --test-name-pattern="V4 accepts only the typed zero-distance threshold shared by adjacent station junctions" tests/dungeon-augmentation-validation.test.mjs
+```
+
+Done means seed 0 and seed 1 both pass attempt-one strict plan validation below 30 seconds on the post-011/012/003 tree. Both must preserve canonical progression serialization, solve-order witness integrity, the existing 8/12 candidate limits, cheap/exact caps, global evaluation bound, and watchdog.
+
+### V4-RCV-015 — repaired landmark prospective-volume mismatch
+
+Landmark route selection previously set `enforceExactEmittedCoverageVolumes` to false. Its pair preselector, full spine DFS, inactive-cap check, and future-domain check therefore saw only the corridor body returned by `routePathPlanningVolumes()`. Final `createSegment()` emits that body plus a landing volume at each endpoint. A landing-only collision could pass the bounded search and fail after the solver had already discarded the alternate local witness.
+
+The working-tree repair gives every prospective landmark edge a stable segment identity and uses the exact body-plus-both-landings volume set through pairwise route collision, cap validation, future checking, and commit. An unexpected commit failure in recovery advances the local wing/pair continuation instead of terminating the candidate. The focused landing-only regression is included in the route-candidate suite, which passes 28/28; the cap-planning suite passes 8/8. This closes the isolated mismatch, not either canonical seed.
+
+### V4-RCV-016 — finite landmark-recovery ordering and missing axes
+
+Five independent recovery boundaries are separated here so they can be resolved without changing any global limit:
+
+1. **Repaired fairness:** one recovery entry formerly drained its complete local continuation loop synchronously. Candidate 1 could therefore starve candidates 9 and 23 until the watchdog. Recovery now executes one `planRouteNetwork()` frame, appends its continuation to the FIFO tail, and preserves per-candidate tuple caches, future-domain caches, cycle state, and timing. Continuation frames do not increment the 24 global evaluations or create fake terminal attempt records.
+2. **Repaired tuple-order diversity:** each candidate has tens of thousands of complete endpoint tuples, and the original order grouped many same-center grammar/socket variants consecutively. Recovery now promotes the ordinary warm start and then interleaves exact reconnect-center buckets round-robin. Every tuple is retained exactly once, and original order remains stable within each bucket.
+3. **Preserved guided/unguided completeness:** the conflict-directed branch carries the selected future-witness reservation as a local-only obstacle and requeues continuations with that same witness. One separately identified unguided fallback per witness signature omits the obstacle, and branch identity participates in cycle detection. The witness never becomes a committed or serialized volume, and final exact forward checking remains authoritative.
+4. **Current ordinary/recovery gap:** an ordinary landmark failure cannot use the pair/wing odometer because local continuation is enabled only when a future checker exists. Only an ordinary plan that completes and then empties a future domain is queued. A candidate whose first ordinary pair, wing, or spine fails can still hide a legal later local choice.
+5. **Current parent-path gap:** continuation state contains endpoint tuple, room-pair, and wing-choice axes, but no parent-attachment path axis. A later failure can reject a complete room pair without trying another legal parent attachment path.
+
+The ordinary endpoint warm start, reconnect-center interleave, and exact future-witness branch are search-order accelerators only. They remain sound because the distinct complete unguided branch and final cap-inclusive exact forward check are retained. Forced candidate-9 tuples 0 and 20 both reach surviving room pairs but fail to realize an exact complete spine, confirming that the observed blocker is downstream of pair availability. The focused route-candidate suite passes 28/28 and cap planning passes 8/8, but Seed 1 still exceeds 30 seconds. Done means the missing finite axes are either enumerated or proven irrelevant by necessary-condition tests, the blocking spine is rerouted within the existing bounds, and Seed 1 applies on attempt one below 30 seconds without a new cap.
+
+### V4-RCV-011 — repaired host-witness/exact-domain boundary
+
+Historical defect: `stagingReservationsByGrantId` promoted every host `planningRoomReservationRectangle` and `planningRouteReservationRectangle` to simultaneous 2,048 m-tall exact-planner obstacles. Those rectangles jointly witness that the host can allocate staging space, but they do not prescribe the exact topology's final room bodies, shared rooms, or route paths. Seed 1 therefore rejected all 24 pyramid candidates against host-only `room-envelope:*` volumes before the real downstream constraint could be observed.
+
+Current working-tree repair:
+
+- The all-witness `authoredReservationVolumes` expansion is removed. The planner retains only the narrow endpoint envelope and flat-approach staging contract.
+- A future volume whose purpose begins `future-route-network-` remains fail-closed: an endpoint seam cannot waive its overlap. The focused regression `endpoint seams never waive a future required-network staging reservation` passes.
+- Tentative acceptance now forward-checks the future grant's exact endpoint domain. Exact objective endpoints use the real station center, the 12 outward 2.8 m steps, every real orientation on that ray, full occupied/clearance masks, and only grammars selectable by the real solver; the landmark tangent/fallback branch remains separate.
+- The first repaired-tree witness reached pyramid candidate 9 and exposed a historical 190/190 endpoint-0 exhaustion rather than a host-feasibility rejection. The current complete ordinary pass evaluates all 24 identities and queues candidates 1, 9, and 23 for exact recovery; use `V4-RCV-008`/`016` for the current diagnosis.
+
+This item is locally repaired, not canonically closed. Preserve the host/exact boundary and the fail-closed seam rule while repairing `V4-RCV-008`. Do not reintroduce hard host witnesses, shrink their former height, ignore future owners, weaken collision masks, or grant future reservations an endpoint-seam waiver.
+
+### V4-RCV-012 — repaired complete topology-selection domain
+
+Historical defect: `routeNetworkTopologySelectionCandidates()` supplemented a depleted primary result by appending consumed topology IDs under post-hoc singleton `legalIds` and `compatibilityFallback: true`. The resulting refill could validate itself even though the purported legal domain was derived from bag consumption rather than independent physical feasibility. Filtering could also compact retained candidate ordinals and change RNG/search-variant identity. The historical 48.6-second seed-0 result used this discarded behavior and remains non-evidence.
+
+Current working-tree repair:
+
+1. `routeNetworkViableTopologyIds` starts in immutable topology-bag order and retains only IDs accepted by grant legality for which at least one complete **pre-cap** physical signature supports the module count.
+2. `dungeonSelectionBagCandidates()` is called once with that complete, bag-independent domain. Every emitted witness uses the same independently computed `legalIds`/`domainKey`; no consumed singleton supplementation exists.
+3. Candidate ordinals and default search variants are assigned before later filtering. A retained candidate keeps its original ordinal, RNG fork, and identity instead of being renumbered by compaction.
+4. The optional/dense/ordinary/landmark candidate limits (`1/8/12/24`), global evaluation bound, future reserve, cheap/exact caps, immutable parent-bag commit behavior, and serialized hash contracts are unchanged.
+
+Focused topology reachability, route-candidate, and selection-witness suites pass on this implementation, including consumed-domain exhaustion, stacked-interchange feasibility, immutable order/input checks, stored-ordinal identity, and exact serialized `legalIds`. `minimumPrimaryDomainSize`, `compatibilityFallback`, and the fabricated singleton test are gone.
+
+This item is locally repaired, not canonically closed. The current seed-1 failure occurs after the complete-domain selection boundary, and seed 0 still needs a fresh post-repair attempt-one/parity result. Do not use topology-independent endpoint caches or chosen-route results to shrink the viable domain; any additional pruning must be a proved necessary predicate over the complete finite manifest.
+
+### V4-RCV-013 — repaired internal doorway-frame presentation leak
+
+The boundary-indicator contract missed a second V4 frame path: route-network grammar nodes retained `doorway-frame` anchors, the materializer copied them into the assembly overlay, and every active internal module socket could render the legacy three-mesh frame asset. The materializer now retains those anchors only in authoritative source/materialization metadata and strips them from V4 authoritative-blueprint assembly input. The assembler independently rejects any V4 authoritative blueprint that reintroduces one before the frame factory can run, and visual acceptance now requires zero supplemental `frame` asset roots.
+
+The expanded focused presentation set passes 96/96. V1-V3 committed replay hashes still pass, and the real V1 Three.js connector scene passes with arch plan/render parity and service cadence intact. This is local repair evidence only: canonical V4 planning still prevents the two browser journeys and screenshots from proving the zero-frame result in realized layouts.
+
+### V4-RCV-009A — repeated exact-support work and eager diagnostics
+
+One duplicated cost is already repaired: the first `expandCoveragePlacement` pass establishes only endpoint/module indices, but previously ran the full external composer with generic 19.6 m depths and then discarded the result. It now uses the cheap provisional skeleton; grammar-aware refinement still runs the authoritative composer, masks, seams, obstacles, and unchanged windows. The focused objective-coverage tests remain 6/6. The representative six-module keycard candidate 10 fell from roughly 9.8-11.9 seconds to 3.3-4.6 seconds with the same result and search behavior. The historical singleton-topology fallback test described in `V4-RCV-012` has been removed and was never performance or release evidence.
+
+The remaining measured hot path is pairwise arc consistency: it scans Cartesian node-placement pairs and repeatedly invokes exact physical-route support. Equivalent uncached contexts eagerly build obstacle diagnostics against hundreds of prior volumes and later rescan or sort the same blocked options.
+
+Use `node scripts/debug-dungeon-augmentation-attempt.mjs --plan-only --candidate-summary --filter= --brief-candidate-summary --attempt-limit=1` and retain each record's `planningPhaseTimings`. The isolated repair is to cache boolean support separately from detailed failure evidence, construct full diagnostics only for the selected best failure, and ensure every key includes the complete geometry, socket, reservation, seam, and mask context. No timing, cache key, or hit count may enter a serialized plan or replay hash.
+
+Done means the focused fixture returns the identical candidate result, deterministic order, failure identity, and replay hash while equivalent exact pairs are evaluated once per complete context. The end-to-end performance gate remains part of `V4-RCV-009B`/`V4-RCV-006`.
+
+### V4-RCV-009B — bounded placement-backtrack surrogate and missing faithful fixture
+
+The former full trace contained a 32-40 second placement-backtrack failure at about 135 recursive visits. That witness is historical: after the current hot-path changes it is no longer reproducible, so it must not be used as the present optimization target or timing baseline.
+
+The current bounded surrogate is precisely identified as follows:
+
+- Accepted prefix: pyramid candidate 15 -> conveyor candidate 4 -> trap candidate 3 -> enemy candidate 3.
+- Target: `keycardRoom_trapRoom` candidate 8, six modules, `slope`, `over-under-loop`, and `stacked-interchange`.
+- Prior reservation state: 484 volumes, signature `v1-99753f6ac16752a585508c5f7ff1ca63`.
+- Current result: 71 placement-backtrack visits, zero spine placements, and about 3.57-5.58 seconds.
+
+This surrogate is bounded and useful, but it is not yet a faithful standalone reproduction. The debug skip flag bypasses skipped candidates before their selection-bag draws, so using it to jump to candidate 8 changes the bag state and can change the candidate manifest. A release-quality fixture must replay the accepted prefix and every prior draw, or directly restore the exact bag states and 484-volume reservation snapshot. Once sealed, add only a proved necessary-condition rejection or context-complete suffix memo. Done means that fixture preserves its stable result and evidence, seed 0 falls below the 30-second maximum, and the canonical median/p95/max gates pass. Proved dead-family pruning remains independently owned by `V4-RCV-002` and `V4-RCV-007`.
+
+### V4-RCV-010 — stale external-composer diagnostics
+
+`objectiveCoverageExternalPlacement()` writes to a caller-owned diagnostics object. The same `objectiveExternalDiagnostics` object is reused across refinement passes. Previously, `setDiagnostics(stage, details)` performed only `Object.assign`, so a later `gap-options-empty` result could retain keys such as `stateCount`, `selectedStateIndex`, `bestStateSocketPairs`, or composed-path data from an earlier `composed` pass.
+
+This does not change planner geometry, but it can send an engineer to the wrong phase and invalidate watchdog/failure evidence. The working-tree repair deletes every prior own key before assigning the new snapshot. The focused regression `objective external terminal diagnostics replace stale refinement fields` passes and proves that an `insufficient-input` terminal record cannot retain composed-state fields. Wider planner/debug integration is still required before closing the item.
+
+```powershell
+node --test --test-name-pattern="objective external terminal diagnostics replace stale refinement fields" tests/dungeon-augmentation-route-candidate-performance.test.mjs
+```
+
+### V4-RCV-001 — turn-safe exact endpoint approaches
+
+Focused cause:
+
+- Authored blueprint sockets are centered in their boundary floor cells, 1.4 m inside the physical wall plane.
+- A full 8.4 m corridor turning after only the minimum 5.6 m lead reaches 4.2 m back from its centerline to the wall plane. Against the 0.22 m panel, the exact collision is a real 0.11 m overlap.
+- The exact objective-coverage solver previously enumerated only `[5.6]`; the external composer already enumerated `[5.6, 8.4]`.
+- Moving the socket, broadening the seam, excluding the panel, or weakening the destination mask would hide real assembled geometry and is not an acceptable repair.
+
+Working-tree repair and evidence:
+
+- `objectiveCoverageRouteApproachMeters()` now returns the shortest legal lead first and one tile-aligned extension: `[5.6, 8.4]`.
+- Both exact source and destination coverage routes use that helper.
+- The real Through-T/inclined-sorter regression proves the 5.6 m turn hits `blueprint-structural-shell-north-panel-0-clearance`, while an 8.4 m candidate clears both endpoint masks and ends with the required 8.4 m lead.
+- The focused `objective exact routing retains a turn-safe approach beside an authored shell` regression passes.
+- With only this planner change, the canonical `conveyorRoom_bossRoom` search now finds candidate 4: four modules, `lift`, `parallel-gallery-loop`, `over-under-crossover`, error `null`.
+
+This closes the pair-level defect but not the canonical release gate; `V4-RCV-008` is the current end-to-end blocker.
+
+### V4-RCV-007 — candidate 11 is a different, legitimately impossible U-placement
+
+The earlier handoff incorrectly treated candidate 11 as proof that only a longer endpoint lead was required. Current exact tracing separates the two defects:
+
+- Layout: Through-T -> inclined sorter -> switchgear-cache -> Through-T.
+- Edge `0 -> 1`: 33 exterior paths, one source-mask-clear path, zero destination-mask-clear paths.
+- The only source-clear pair runs from `{5.6, 0, 340.2}` facing `+X` to `{11.2, 0, 348.6}` also facing `+X`, producing a same-facing U.
+- Both `[5.6]` and `[5.6, 8.4]` collide with the same sorter-owned geometry: `blueprint-mask-body-4`, `blueprint-structural-shell-north-panel-0-clearance`, `blueprint-structural-shell-west-panel-0-clearance`, and `blueprint-mask-body-3`.
+
+The 8.4 m regression in `V4-RCV-001` is therefore valid without making candidate 11 legal. Candidate 11 should either receive a different orientation/placement domain witness or be rejected earlier by a deterministic feasibility rule. Add a negative regression naming all four exact conflicts before changing this family.
+
+### V4-RCV-002 — dead `trapRoom_conveyorRoom` candidate family
+
+Reproduction:
+
+```powershell
+node scripts/debug-dungeon-augmentation-attempt.mjs --plan-only --single-grant-plan=trapRoom_conveyorRoom --modules=5 --topology=parallel-gallery-loop --junction=fork-merge --elevation=lift --variant=1 --compact-failure-summary
+```
+
+Evidence:
+
+- Error: `route-network-adjacent-domain-exhausted`.
+- Suffix repair reaches `4 -> 3` (`24 -> 47` prefixes), `3 -> 2` (`47 -> 54`), and `2 -> 1` (`54 -> 0`).
+- The impossible final pair scans 563 bounded candidates and produces no legal extension.
+- Total cheap evaluations are 6,481, below the unchanged 16,384 cap; no exact evaluation is reached for the zero-support pair.
+
+The former fairness bug is already repaired: every predecessor samples the existing deterministic 64-item head/middle/tail window before expensive predicates. What remains is a real switchgear-to-lift-defense physical incompatibility. Pre-prune it, or repair the authored socket/shape contract with a pair-level regression.
+
+### V4-RCV-003 — repaired inactive-socket cap lifecycle
+
+Historical defect: assembler-equivalent cap AABBs could be derived for inactive physical room sockets, but the planner did not consume them. A plan could therefore choose a route, landmark solid, or later network through geometry that the assembler would close with a solid cap.
+
+Current working-tree repair:
+
+1. Exact socket-assignment leaves derive caps only for finalized physical `supplementRoom` nodes; connector-owned proxies do not emit room caps, and exact claimed/topology-return sockets remain active.
+2. Each assignment validates caps against static avoidance, every selected node mask, parent attachment paths, and committed spine route volumes. `route-network-inactive-socket-cap-overlap` rejects that assignment with deterministic conflicts so another socket assignment can be tried.
+3. Final candidates recompute and validate the room caps against planning avoidance plus finalized node, segment, and landing volumes.
+4. Accepted caps are projected into planner-only cross-network reservations for later networks. They remain absent from overlay schema V2, presentation records, and plan hashes.
+
+`tests/dungeon-augmentation-inactive-socket-cap-planning.test.mjs` now passes 8/8. The suite covers cardinal assembler dimensions, active/claimed exclusion, deterministic obstacle and cap-pair conflicts, alternate-socket recovery, landmark-loop conflict, later-network reservation, and deterministic final disjointness from every non-owning solid. The file is registered in the canonical unit manifest.
+
+This closes the isolated lifecycle defect but not the release gate. Preserve these eight contracts during seed-1 geometry repair and prove them again in the wider planner, determinism, canonical, and realized suites.
+
+### V4-RCV-004 — canonical parity and seed-1 attempt-one proof
+
+The intended focused tests are:
+
+```powershell
+node --test --test-name-pattern="canonical seed0 direct and full replay" tests/dungeon-augmentation-industrial-host-coverage-allocation.test.mjs
+node --test --test-name-pattern="canonical seed1 keeps a useful landmark\+objective coverage partial" tests/dungeon-augmentation-industrial-host-coverage-allocation.test.mjs
+```
+
+They are not current evidence. The 48.6-second seed-0 result is historical, over budget, and used the removed `V4-RCV-012` fallback. On the current tree, Seed 1 evaluates all 24 ordinary landmark identities, queues candidates 1, 9, and 23 for exact recovery, and still exceeds 30 seconds without an accepted leaf. The best current candidate-1/9 future witness conflicts with one internal spine segment and with no node, inactive cap, or parent attachment; the earlier candidate-9 190/190 report is historical diagnostic context, not the present root-cause claim. Repairs `V4-RCV-011`, `V4-RCV-012`, `V4-RCV-015`, and `V4-RCV-003` must remain in place. When unblocked, parity must compare the same accepted-parent snapshot, seed, grants, selection manifest, solve-decision witness order, reservation state, candidate order, hashes, and trace. Release still requires attempt-one application even if a matching stable rejection is useful diagnostic parity.
+
+### V4-RCV-005 — visual acceptance is release-gated but unexecuted
+
+`tests/dungeon-augmentation-visual-acceptance.spec.js` passes syntax checking and Playwright discovery for seeds 000 and 001. It is now included in `test:dungeon-augmentation:runtime` and in the required Playwright release-receipt contract. The quiet-corridor sample must be at least two tiles (5.6 m) from every boundary, and the test fails explicitly when no such sample exists.
+
+No V4 browser run or screenshot artifact exists because neither canonical realization is currently available. After planning succeeds, verify camera staging, cover and machinery presentation records, zero duplicate presentation paths, zero V4 arches, one boundary indicator per distinct granted parent socket, and the <=2 draw-call boundary budget in both canonical journeys. Registration and stronger assertions are not execution evidence.
+
+### V4-RCV-006 — release tiers and provenance remain blocked
+
+Older aggregates and the historical issue list below are not evidence for the current tree. After the current defects are closed:
+
+1. Run focused/unit suites, immutable V1-V3 replay, and the release-gated real V1 connector/decorative-arch scene regression.
+2. Verify from one clean copy or intentional commit without altering unrelated dirty work.
+3. Run canonical probes, then 10, 100, and 1,000 seeds strictly in order.
+4. Seal browser/lifecycle receipts from the same git/source/profile identity.
+
+### Locally implemented release-worker and legacy-receipt reliability — not planner closure
+
+The current source pins both warm-up and target generation to one realization attempt, persists phase heartbeats through watchdog termination, and retains captured planning/assembly metrics when post-generation validation fails. It also repairs an atomic-publication defect: a generated `unchanged` result was previously assembled and pushed as a record before the applied-count assertion failed, so a failed worker could contain one record even though failed workers are required to contain zero.
+
+`inspectReleaseSeedWorkerRecordPublication()` now publishes exactly one record only for `applied`. An `unchanged` result becomes a diagnostic failure with its rejection codes, messages, attempts, elapsed phases, and generator timings preserved but `record: null`; the verifier's failed-artifact path always emits `records: []`, including failures raised after local record assembly. A passing worker must also end on a persisted target-disposal heartbeat whose six-phase totals and planning/assembly metrics exactly match its record. Failed worker and shard validators bind their timeout phase and generator timings to the captured heartbeat, so deleting or rewriting those fields cannot produce valid resealed evidence. Focused release-evidence tests cover applied publication, unchanged rejection with diagnostics, terminal-heartbeat parity, and sealed zero-record failed-worker validation.
+
+For an unchanged authored-base fallback, those generator timings are now resolved without relying on the absent top-level `augmentationMetrics`: planning comes from the final rejected attempt, and assembly comes from the completed generator event observed for that same attempt. The observer resets on every new planning start, and any incomplete/non-finite metric remains a failure rather than being rewritten to zero. The focused regression carries these exact values through the unchanged publication decision into a valid sealed zero-record failed worker.
+
+The immutable legacy receipt is also stronger: its contract now includes `tests/dungeon-connector-runtime.spec.js --workers=1`, a real V1 Three.js scene regression for signed vertical galleries, classic corridors, ladders, lifts, track traps, and decorative arches. A focused release-evidence test rejects a legacy receipt that omits this command. The Playwright scene has not been executed as a current same-source receipt.
+
+These behaviors prevent the release harness from hiding repeated runtime attempts, publishing a contradictory failed record, losing the phase that consumed the watchdog, or treating renderer-free V1 fixtures as complete scene proof. They do not repair `V4-RCV-008` or constitute a release receipt.
+
+```powershell
+node --test --test-name-pattern="manifest seed-worker publication|actual unchanged generator fallback|unchanged manifest results|release warm-up and target generators|synthetic watchdog timeouts|post-generation strict-validation failures|successful workers require terminal|failed workers require zero records|failed shards bind timeout|release receipts require" tests/dungeon-augmentation-release-evidence.test.mjs
+```
+
+The focused worker-publication, watchdog/metrics, release-gate, and legacy-receipt assertions pass on the current tree. End-to-end shard, aggregate, browser, and same-source receipt evidence remains blocked by `V4-RCV-004` through `V4-RCV-006`.
+
+### Recommended independent work order
+
+1. Preserve the completed `V4-RCV-011` host/exact-boundary repair, its fail-closed seam rule, and the completed `V4-RCV-012` bag-independent topology domain.
+2. Preserve `V4-RCV-015` exact prospective-volume parity and `V4-RCV-003` inactive-cap lifecycle; keep the passing route-candidate 28/28 and cap-planning 8/8 contracts intact.
+3. Repair `V4-RCV-008`/`016`: reroute the one internal spine segment that conflicts with the best candidate-1/9 future witness, or enumerate/prove irrelevant the missing ordinary-local and parent-path continuation axes. Forced candidate-9 tuples 0 and 20 retain room pairs but fail exact spine realization, so pair absence is not the current cause. Preserve FIFO fairness, warm-start promotion, reconnect-center interleaving, distinct guided/unguided inputs, exact final checking, and every existing limit and mask.
+4. Preserve the locally verified diagnostic-integrity repair (`V4-RCV-010`) and fix the remaining hot paths (`V4-RCV-009A` and `V4-RCV-009B`) so failures and successes are both trustworthy and bounded. Prune the proved dead families in `V4-RCV-002` and `V4-RCV-007` only through necessary-condition checks.
+5. Re-establish both canonical results and `V4-RCV-004`, then run focused canonical, V1-V3 replay, real V1 scene, determinism, release-worker, and performance suites.
+6. Execute the V4 browser journeys under `V4-RCV-005`.
+7. Produce clean-source `V4-RCV-006` evidence in canonical -> 10 -> 100 -> 1,000 order.
+
+Do not classify the following as current root causes: accepted-parent loading, Three.js rendering, sparse presentation density, an incorrectly authored inclined-sorter socket, an incorrectly derived shell panel, absent room pairs, or an exhausted cheap-search/global cap. The current exact checker shows that the best candidate-1/9 future witness conflicts with exactly one internal spine segment and with no node, inactive cap, or parent attachment. It does not prove that every legal pyramid placement, route, or correctly modeled future-domain witness is physically impossible; the candidate-9 190/190 report is historical context only. Historical validator `ISSUE-001` through `ISSUE-175` below describe an older realized witness and must be re-run before any one of them is treated as current.
+
+## Superseded 2026-08-01 engineering handoff (before the turn-safe repair)
+
+This section is retained for chronology only. Its statement that all 12 `conveyorRoom_bossRoom` candidates fail is no longer current; use the 12-hour checkpoint above. Any remaining present-tense wording in this section describes that superseded checkpoint, not the current tree.
+
+### Historical status at that checkpoint
+
+| ID | Kind | Symptom at that checkpoint | Established cause or boundary | Independent next action |
+| --- | --- | --- | --- | --- |
+| `V4-RCV-001` | Confirmed planner blocker | Canonical seed 0 returns `unchanged` after one attempt; planning alone reports about 56.96 seconds. | The mandatory `conveyorRoom_bossRoom` grant loses both endpoint domains on its constrained `0 -> 1` edge. Exact destination shell-mask clearance, not seed loading, materialization, rendering, or a search-budget limit, is the current boundary. | Audit the Through-T to inclined-sorter destination entry mask and approach geometry as a self-contained planner task. |
+| `V4-RCV-002` | Confirmed dead candidate family | `trapRoom_conveyorRoom` candidate 1 rejects with `route-network-adjacent-domain-exhausted`. | The bounded solver reaches the final suffix with budget remaining, but the switchgear-to-lift-defense `2 -> 1` pair has zero legal support. | Either prune this family before exact search or correct its authored socket/shape compatibility; do not raise caps. |
+| `V4-RCV-003` | Incomplete collision lifecycle | Exact inactive-socket cap volumes exist and pass isolated tests, but the planner does not consume them. | The derivation/validator module is not wired into candidate acceptance or cross-network reservations. | Integrate caps after sockets are finalized, reject cap conflicts, and reserve accepted caps for later networks without serializing them. |
+| `V4-RCV-004` | Blocked acceptance proof | Seed-0 direct/full parity and seed-1 attempt-one application are not established on the current tree. | The canonical planner blocker occurs before either acceptance claim can be sealed. | Re-run the two focused integration tests only after `V4-RCV-001`; record equal acceptance or equal stable rejection for seed 0. |
+| `V4-RCV-005` | Unexecuted visual gate | The two-seed visual specification parses and is discoverable, but no browser journey or screenshot evidence has completed. | Canonical augmentation is not applied. The quiet-corridor screenshot assertion is also too weak to prove a genuinely internal view. | Run after canonical planning/realization passes; strengthen the boundary-distance assertion before accepting the quiet-corridor capture. |
+| `V4-RCV-006` | Release/provenance gate | No current canonical, 10-, 100-, or 1,000-seed evidence exists. | The ordered gate is correctly fail-closed at canonical planning, and the current dirty source cannot produce an official clean-source attestation. | Verify from a clean copy/commit after issues 001-005, then run canonical -> 10 -> 100 -> 1,000 in order. |
+
+### V4-RCV-001 - canonical seed 0 fails at `conveyorRoom_bossRoom`
+
+Reproduction:
+
+```powershell
+node scripts/debug-dungeon-augmentation-attempt.mjs --plan-only --compact-failure-summary --candidate-histogram
+```
+
+Result at that checkpoint:
+
+- Seed: `layout:augmentation-realized-v4-000`.
+- Status: `unchanged`; augmentation produces no committed operations, rooms, or segments.
+- Search-budget status: not exhausted.
+- Measured planning time in the latest unrestricted run: `56,960.4952 ms`, already above the 30-second release maximum even though the plan rejects.
+- Pyramid candidate 15 plans successfully. Planning then reaches the mandatory `conveyorRoom_bossRoom` coverage grant.
+- All 12 bounded candidates for that grant fail: five with an adjacent-domain rejection and seven with a parent-attachment-domain rejection.
+- The final constrained `0 -> 1` edge reports node-domain counts `[0, 0, 64, 24]` for the selected four-node layout.
+- The representative failing layout selects Through-T, inclined sorter, switchgear-cache descent, and Through-T grammars. Its Through-T-to-inclined-sorter edge produces 33 raw/exterior route paths; one clears the source shell mask and none clears the destination shell mask.
+
+Cause boundary:
+
+- This is an exact destination entry shell-mask/approach incompatibility in the planner's candidate geometry.
+- It is not the historical accepted-parent loading problem, not Three.js assembly, not presentation density, and not the correlated cheap-search cap.
+- The exact mask and final validator must remain authoritative. Broadening overlap grants or weakening the destination mask would hide the defect rather than repair it.
+
+Smallest repair unit:
+
+1. Isolate the `0 -> 1` Through-T-to-inclined-sorter pair and report which destination shell panels reject the 33 path candidates.
+2. Determine whether the authored inclined-sorter entry socket, its shell-panel derivation, or the approach offset is inconsistent.
+3. Correct that one contract while preserving exact socket identity, tier, seam, and final route-volume validation.
+4. Add a focused pair-level regression before re-running the unrestricted canonical seed.
+
+Done means seed 0 either applies on attempt one or returns the same stable rejection through both direct and replay paths, within the performance budget and without a cap increase.
+
+### V4-RCV-002 - dead `trapRoom_conveyorRoom` candidate family
+
+Reproduction:
+
+```powershell
+node scripts/debug-dungeon-augmentation-attempt.mjs --plan-only --single-grant-plan=trapRoom_conveyorRoom --modules=5 --topology=parallel-gallery-loop --junction=fork-merge --elevation=lift --variant=1 --compact-failure-summary
+```
+
+Result at that checkpoint:
+
+- Error: `route-network-adjacent-domain-exhausted`.
+- The suffix-oriented repair order reaches `4 -> 3`, `3 -> 2`, and then `2 -> 1`.
+- `4 -> 3`: prefixes `24 -> 47`, 1,420 scanned candidates, 121 legal extensions.
+- `3 -> 2`: prefixes `47 -> 54`, 1,920 scanned candidates, 128 legal extensions.
+- `2 -> 1`: prefixes `54 -> 0`, 563 scanned candidates, zero legal extensions.
+- The chain uses 6,481 cheap evaluations, below the unchanged 16,384 cap. No exact evaluation is reached for the impossible final pair.
+
+Cause boundary:
+
+The remaining failure is genuine switchgear-to-lift-defense geometry/socket-shape incompatibility. Earlier runs incorrectly presented it as cheap-budget exhaustion because each predecessor scanned an effectively unbounded post-prefilter pool. That fairness defect is fixed: each predecessor now samples the existing deterministic 64-candidate head/middle/tail window before expensive predicates. Collision, injectivity, socket, route-clearance, and exact predicates were not weakened, and no search limit was increased.
+
+Smallest repair unit:
+
+- Preferred: add deterministic feasibility pruning so this known zero-support grammar/topology/elevation combination is never offered as a viable global candidate.
+- Alternative: if the family is intended to be legal, repair its authored socket or shell shape and prove the pair with a focused exact-mask test.
+- Do not force candidate 1 to succeed merely because it is ordinal 1; the global solver may choose a later legal candidate.
+
+### V4-RCV-003 - inactive socket caps are derived but not reserved
+
+Implemented but not integrated:
+
+- `src/dungeon-augmentation/routeNetworkCapPlanning.js` derives the assembler-equivalent cap AABB for each inactive physical room socket and validates cap-to-obstacle and cap-to-cap overlap deterministically.
+- `tests/dungeon-augmentation-inactive-socket-cap-planning.test.mjs` passes 4/4 for all cardinal walls, active/claimed socket exclusion, owner-volume exclusion, deterministic conflict evidence, and cap-pair rejection.
+- The derivation mirrors the assembler's `width`, `height`, wall-plane center, and `wallThickness * 1.18` dimensions.
+
+Missing lifecycle wiring:
+
+1. After `planRouteNetwork` finalizes socket states and node kinds, derive caps only for physical `supplementRoom` nodes. Connector proxy nodes do not emit solid room-cap collision in complete assembly and must not receive these reservations.
+2. Validate caps against immutable/protected volumes, prior accepted-network reservations, every other node, parent attachments, committed route spans, landings, and topology-return spans. Ignore only the cap's owning room volume.
+3. Reject/backtrack the current candidate with `route-network-inactive-socket-cap-overlap` and deterministic conflict evidence when any cap conflicts.
+4. Append accepted cap volumes to planner-only `acceptedPlanningVolumes` so later route networks cannot cross them.
+5. Keep the cap volumes out of overlay schema V2 serialization and plan hashes.
+
+Missing integration regressions: alternate-socket recovery, landmark-loop cap collision, later-network reservation, and final cap/solid disjointness.
+
+### V4-RCV-004 - canonical parity and seed-1 attempt-one proof are blocked
+
+The intended focused tests exist in `tests/dungeon-augmentation-industrial-host-coverage-allocation.test.mjs`:
+
+```powershell
+node --test --test-name-pattern="canonical seed0 direct and full replay" tests/dungeon-augmentation-industrial-host-coverage-allocation.test.mjs
+node --test --test-name-pattern="canonical seed1 keeps a useful landmark\+objective coverage partial" tests/dungeon-augmentation-industrial-host-coverage-allocation.test.mjs
+```
+
+They are not current passing evidence. Seed 0 cannot provide accepted-plan parity while `V4-RCV-001` rejects its direct plan. Seed 1 has not been re-established after the endpoint-mask and bounded-chain changes. The older 377-second seed-1 `trapRoom_conveyorRoom` diagnosis below remains historical until the current focused test is rerun.
+
+When unblocked, parity evidence must compare the same accepted-parent snapshot, plan seed, grants, selection manifest, reservation state, candidate ordering, plan hash, and candidate trace. A matching stable rejection is acceptable diagnostic parity, but release still requires attempt-one application.
+
+### V4-RCV-005 - visual acceptance is statically valid but unexecuted
+
+`tests/dungeon-augmentation-visual-acceptance.spec.js` currently passes syntax checking and Playwright test discovery for seeds 000 and 001. Static audit found its URL seed convention, runtime field paths, V4 plan filtering, boundary/presentation user-data names, mesh names, draw-call accounting, profile revision, and realization-ledger lookups consistent with current production code.
+
+Outstanding risks:
+
+- No browser run or screenshot artifact exists because neither canonical seed is known to apply.
+- Camera staging may be affected by wall occlusion/culling once real geometry exists.
+- The suite assumes both seeds contain at least one cover and one machinery presentation record.
+- The global `industrialCargo*` absence assertion may need to distinguish an actual duplicate rendering path from any independently legitimate authored cargo.
+- The quiet-corridor capture chooses the best internal point but asserts only `nearestBoundaryMeters > 0`. A point immediately beside a boundary can pass, so the screenshot does not prove a visually quiet internal corridor. Require a meaningful minimum distance based on the corridor/indicator footprint before accepting that artifact.
+
+The global zero-V4-arch assertions still provide a useful structural check; they do not replace the missing rendered screenshot review.
+
+### V4-RCV-006 - release tiers and clean-source evidence remain blocked
+
+Do not interpret any older aggregate, zero-record fallback boolean, or historical canonical witness below as current evidence. The source has changed substantially and is dirty. After the independent defects above are closed:
+
+1. Verify the current focused/unit suites and immutable V1 replay.
+2. Create a clean verification copy or intentional commit without altering the user's dirty worktree.
+3. Run the canonical seed probes.
+4. Run the 10-seed tier only if canonical passes.
+5. Run the 100-seed tier only if 10 passes.
+6. Run the 1,000-seed tier only if 100 passes.
+7. Run and seal browser/lifecycle receipts from the same source identity.
+
+The current measured seed-0 rejecting plan is slower than the 30-second maximum, so correctness alone is not enough; timing must be remeasured after the planner defect is repaired.
+
+### Work completed during this investigation
+
+The following changes are present in the working tree and should be preserved while the issues above are separated:
+
+- Exact endpoint shell-mask and route-volume parity between composer preselection and exact planning.
+- Tier-aligned composer connector paths and exact stored connector slices.
+- RN3 false-ceiling correction, trap lower-floor escapability, bonus-vault bypass repair, and collision-hint preservation without replaying a colliding path.
+- Suffix-oriented correlated-chain repair and the deterministic bounded predecessor scan described in `V4-RCV-002`.
+- Existing focused regressions for endpoint composition, suffix reversal, and late-witness retention.
+- Sparse boundary-indicator and presentation-record implementation; its focused presentation suite previously passed 80/80, but browser acceptance remains outstanding.
+
+Latest focused checks after the bounded-scan change:
+
+- `node --check src/dungeon-augmentation/planner.js`: pass.
+- Route-candidate performance suite: 14/14 pass.
+- Topology/blueprint reachability focused suite: 49/49 pass.
+- Inactive-socket cap derivation suite: 4/4 pass.
+- Visual acceptance spec syntax and Playwright discovery: pass; browser execution not run.
+
+These checks prove only their named units. They do not override the canonical planner rejection.
+
+## 2026-08-01 10/100/1,000 corpus execution - blocked in ordinal 1 warm-up planning
+
+Historical evidence for the source identity recorded below; the current dirty-working-tree diagnosis is the engineering handoff above. The three canonical corpus views were attempted against one completed, immutable 1,000-parent manifest. This was diagnostic evidence, not a release attestation; the generated evidence block above remains conservative until a full release aggregate and all five same-source suite receipts can be sealed.
+
+### Shared evidence identity
+
+- Profile: `industrial-supplement-preview-v4` revision 5, profile hash `sha256-ddd298625970857199d065fedf2bea91dd49c36b19539b03f9e85ac49ca63177`.
+- Git commit: `5d1510eeef410197d62105123e1fc1350ce93446` on `codex/dungeon-generation-pivot-20260721`.
+- Release source hash: `sha256-8f2fee17625c9b1ee7e06bd895910dab8a07f701f516557b55f6361aef0b43c9`; `sourceDirty: false`.
+- Manifest: `accepted-parent-manifest-1000.json`, exactly 1,000 accepted parents, evidence hash `sha256-2ff80971c5c356757f364bdbfd8feba465ac6ac08ecf5756593ba90725484f0c`.
+- Machine: Windows x64, Node `v24.17.0`, AMD Ryzen 7 9800X3D, 16 logical CPUs, 33,453,711,360 bytes of memory. This matches the named release reference machine.
+- Artifact root: `artifacts/dungeon-augmentation-v4-release/sha256-1659a4482527868e2b2f33c9e56e171427b01b8fe0a6722e0ca19b3bc5a06cec`.
+
+### Stage results
+
+| Tier | Canonical topology | Executed evidence | First failure | Aggregate result | Evidence hashes |
+| --- | --- | --- | --- | --- | --- |
+| Smoke | 1 shard x 10 ordinals | Shard 0 attempted; 0/10 records completed | Target ordinal 0 worker exceeded the fixed 180,000 ms watchdog while prerolling warm-up ordinal 1, `layout:augmentation-realized-v4-001` | Failed: `shardResultsPassed`, `exactRecordCoverage`, and `performance`; shard topology and ordinal range were otherwise exact | Shard `sha256-2b9fa42cac6516945dfd248b8196f554aab609d89af81847930c41481d483fc8`; aggregate `sha256-838d68b4123a7e863f88419dc50905e54d56665b62aed3514d4f649ba045c2a8` |
+| Normal | 10 shards x 10 ordinals | Shard 0 attempted; 0/100 records completed; shards 1-9 were stage-gated | Same target-0 worker timeout during ordinal 1 warm-up planning | Failed: `shardResultsPassed`, `exactShardTopology`, `exactOrdinalCoverage`, `exactRecordCoverage`, and `performance` | Shard `sha256-b3ea11f4d79653fe087d64b9c0e0cccffb08885ea6ceaced77ba721801c87685`; partial aggregate `sha256-326f44830588fc6cba826ba80f54959e187ce31cf202529275e87453ff13b49a` |
+| Release | 20 shards x 50 ordinals | Shard 0 attempted; 0/1,000 records completed; shards 1-19 were stage-gated | Same target-0 worker timeout during ordinal 1 warm-up planning | Failed: `shardResultsPassed`, `exactShardTopology`, `exactOrdinalCoverage`, `exactRecordCoverage`, and `performance` | Shard `sha256-153e39e94a49eb294619a7a96639f2d380bde3382b2d95aa277b1993058d3f64`; partial aggregate `sha256-a57d77ef8fba556d0fad9c7c837e583df21d8d91a1a0f69850cb06e0b5527148` |
+
+All three historical aggregates passed clean-source provenance and reference-machine checks. Their zero-record fallback, first-realization, release-validation, strict-realized-validation, parent-parity, and diversity booleans are vacuous and must not be interpreted as seed-level passes. The release aggregator now requires exact, nonempty record coverage before any seed-level gate can pass. No geometry, traversal, coverage, variety, or fallback claim can be made for the uncompleted records.
+
+### Execution and workflow diagnosis
+
+- The accepted parent manifest is not the blocker: both canonical parents load consistently with their stored parent witnesses. A target-ordinal-0 worker always runs ordinal 1 as its same-process warm-up before target timing begins.
+- Ordinal 1 fails in route-network planning before supplemental materialization or Three.js assembly. Its first planning attempt takes roughly 44-58 seconds; because the historical release worker inherited the gameplay default of eight realization attempts, it repeated that failure until the 180-second watchdog killed the process. The target ordinal 0 generation never began.
+- A standalone seed-1 run took roughly 377 seconds and returned the authored parent unchanged. Its stable root rejection was `route-network-node-placement-collision` in the mandatory `trapRoom_conveyorRoom` coverage grant after the global solver exhausted its search. This is not a seed-loading failure and no supplemental frames or authored arches were rendered on the failing path.
+- Seed 0's direct planner accepts a plan, while the full replay path reports `planning-failed`. Direct and replay planning must consume the same committed host snapshot, plan seed, grants, selection manifest, reservation state, and candidate ordering before this can be accepted as deterministic parity.
+- Release warm-up and target generators are now explicitly capped at one realization attempt. Durable phase heartbeats and failed-shard timeout-phase fields preserve the last active phase even when the watchdog kills the child; successful records retain generator, strict-validation, disposal, and existing planning/assembly timings.
+- Smoke leaves ordinals 0-9 unverified. Normal leaves ordinals 0-99 unverified after its first shard fails. Release leaves ordinals 0-999 unverified after its first shard fails. These are explicitly unexecuted/stage-gated ranges, not passing coverage.
+- Building the immutable parent manifest itself completed successfully, but required about 81 minutes on the reference machine. An earlier 30-minute command-harness attempt stopped without publishing a partial artifact.
+- The top-level tier wrapper then attempted to rebuild the already valid manifest instead of reusing it and hit a separate one-hour command-harness limit at parent 718. That interruption occurred before smoke seed execution and did not alter the sealed manifest. Direct canonical shard commands were used afterward to obtain the three immutable timeout failures above.
+- Running later shards concurrently cannot close this gate and would contaminate performance measurements with machine contention. Canonical seed-0 parity and seed-1 attempt-one application must pass first, followed in order by the 10-, 100-, and 1,000-seed corpus views. The complete tiers must be regenerated from a new same-source evidence root after release-source changes.
+
+### Release consequence
+
+The V4 release remains blocked. No release receipts or final attestation were generated, and the historical 175-record register remains open. This corpus attempt establishes a reproducible performance/execution blocker; it does not establish closure or recurrence of any individual historical geometry record.
+
+The dated canonical witness below predates the subsequent shared seam-lattice correction and is retained as historical diagnostic context. Its four wrong-seam-side records must not be read as the current corpus failure; the current corpus worker times out before it can publish a replacement strict realized record.
+
+## Historical canonical validator witness — release blocked
 
 Verified 2026-07-31 against profile `industrial-supplement-preview-v4` revision 5 and deterministic seed `layout:augmentation-realized-v4-000`.
 
@@ -27,11 +576,11 @@ Verified 2026-07-31 against profile `industrial-supplement-preview-v4` revision 
 - Strict one-seed realized verifier: **not reached**.
 - Overall V4 release readiness: **blocked**.
 
-The previous zero-error canonical witness is stale and must not be treated as release evidence. Exact seam ownership, materializer ownership, and strict validation have since changed. The current first-derived seed no longer reports ISSUE-066, the five pyramid endpoint-seam mismatches, or the boss-to-shrine featureless-span defect, but it still does not produce an overlay, so the 175-entry historical register as a whole cannot be declared closed. The original register remains unchanged as historical evidence, and the completion rule at the end of this document still applies.
+The previous zero-error canonical witness is stale and must not be treated as release evidence. Exact seam ownership, materializer ownership, and strict validation later changed. At this historical source identity, the first-derived seed no longer reported ISSUE-066, the five pyramid endpoint-seam mismatches, or the boss-to-shrine featureless-span defect, but it still did not produce an overlay, so the 175-entry historical register as a whole could not be declared closed. The original register remains unchanged as historical evidence, and the completion rule at the end of this document still applies.
 
-### Current actionable canonical failure
+### Historical actionable canonical failure at that source identity
 
-The first-attempt plan now succeeds with 6 operations, 30 supplemental rooms, 37 segments, and zero accumulated featureless-span records. Materialization then rejects four independent paths with `DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE`: pyramid network 0 segment 1, `enemyNest_keycardRoom` network 1 segment 1, `trapRoom_conveyorRoom` network 3 segment 0, and `conveyorRoom_bossRoom` network 4 segment 0. Atomic fallback therefore remains correct. This is not an accepted or realized release witness, and the Chromium GPU/SharedImage diagnostics remain a separate capture-stability concern.
+At that source identity, the first-attempt plan succeeded with 6 operations, 30 supplemental rooms, 37 segments, and zero accumulated featureless-span records. Materialization then rejected four independent paths with `DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE`: pyramid network 0 segment 1, `enemyNest_keycardRoom` network 1 segment 1, `trapRoom_conveyorRoom` network 3 segment 0, and `conveyorRoom_bossRoom` network 4 segment 0. Atomic fallback therefore remained correct. This was not an accepted or realized release witness, and the Chromium GPU/SharedImage diagnostics were a separate capture-stability concern.
 
 ### Boss-to-shrine featureless-span closure evidence
 
@@ -69,13 +618,13 @@ Verified 2026-07-31 without broadening any seam grant:
 | --- | --- | --- |
 | Variety is a 100-seed corpus threshold, while the planner previously hard-required three elevation modes in every dungeon. | The per-seed minimum is one; the evidence aggregate requires exact topology, junction, elevation, encounter, and room-layout family coverage plus topology ≤35%, junction ≤50%, and complete-layout signature ≤10% across the first 100 accepted parents. | **Adopted:** diversity is a corpus property. A dungeon still must satisfy its physical semantic contracts, but it has no hidden three-family quota. |
 | The specification requires independent topology, junction, elevation, encounter, and room-layout exhaustion bags. | All five immutable, RNG-isolated bags now serialize accepted manifests; failed branches do not consume choices, and focused rollback/refill/replay tests pass. | **Resolved in implementation; release evidence remains outstanding.** |
-| V4 structural frames require entrance, bend, junction, and interval coverage. | Required multi-role records now bind exact floors, wall runs, clearance, theme, and renderer IDs; missing, duplicated, renamed, or unsafe realizations reject before rendering. | **Resolved in implementation; realized/browser evidence remains outstanding.** |
+| V4 presentation previously required entrance, bend, junction, and interval frames throughout a route. | V4 now emits exactly one nonblocking, two-draw-call boundary indicator for each distinct granted parent `attachmentSocketId`. Internal segments, cadence intervals, bends, and junctions do not create standalone frames; coincident bend/junction meaning is metadata on the boundary record. Floor identity, wall support, clearance, theme binding, and renderer identity remain strict. | **Resolved in implementation; realized/browser evidence remains outstanding.** |
 | Transfer endpoints must bind to exact authoritative floor-cell identities. | Every V4 transfer now resolves authored floor-cell or transfer-cell endpoint identities, including even-footprint lift boarding cells; nearest/grid fallback remains legacy-only. | **Resolved in implementation; realized traversal evidence remains outstanding.** |
 | Encounters, rewards, and mechanisms are required to resolve after finalized collision. | One renderer-free resolver now confines all gameplay anchors to declared cells/zones/tiers after solid and walkability inputs, including far-side shortcut controls; failure rejects the overlay before scene factories. | **Resolved in implementation; live journey evidence remains outstanding.** |
 | The outer eight-seed realization retry must remain as defensive fallback, while release-corpus layouts are required to apply on their first derived seed. | Runtime retains its defensive retry, while every accepted-parent manifest entry records and validates its first derived realization. | **Adopted:** the canonical witness and every entry in the 10/100/1,000 release corpora must apply on attempt 1. The requirement does not claim every theoretical seed worldwide. |
 | The 175-record current-validator count can be zero before the strict 10/100/1,000 sweeps and browser journeys pass. | This register remains open and release is blocked until all completion gates pass. | Recommended interpretation: “close all 175” means root-cause closure proven by the full strict gates, not a zero from one weaker validator witness. |
 | The public ID contains `preview-v4`, but ordinary requests are now release-authoritative and alpha bypass requires a second explicit flag. | The ID and revision remain unchanged for save/hash compatibility; authority is determined by validation, not the word “preview.” | Confirm whether a future non-preview alias should be introduced after the release gates pass. |
-| V1 authored connectors retain arches, while supplemental V4 routes use structural frames. Older validation treated the V1 arch cadence as universal. | Presentation validation is versioned: V1 arches remain immutable; V4 requires theme-bound entrance, bend, junction, and interval frame coverage. | No code decision is currently blocked; retain this row as the resolved presentation-policy record. |
+| V1 authored connectors retain their arches and hashes; older validation treated that cadence as universal. | Presentation validation is versioned: V1 arch behavior remains immutable, while V4 uses only parent-socket boundary indicators and never inherits interval/bend/junction frame cadence. | No code decision is currently blocked; retain this row as the resolved presentation-policy record. |
 | Alpha may expose invalid geometry, but alpha diagnostics must use the same collision-derived graph as release validation. | Alpha changes acceptance only; it does not substitute a weaker graph or rewrite validation results. Invulnerability is separately controlled. | **Adopted:** alpha is explicit, disposable, non-authoritative, and cannot create, update, or clear committed expedition evidence. |
 | The release plan requires a three-lane threshold plus two clear approach tiles on both sides, while the pre-recovery host and validator encoded only one tile per side. | V4 host grants and validation now use an exact 3 x 5 tile envelope: two inside cells, the threshold cell, and two outside cells. | Resolved in favor of the written release plan; confirm that no legacy one-tile V4 development grant must remain accepted. |
 | An exact base floor mask can be read as every room-owned floor at the base elevation, but authored ramp and transfer cells can begin at that same elevation. | Base-mask checks compare authoritative base-tier cell identities; transfer cells are validated separately through their transfer IDs and endpoint identities. | **Adopted:** the base mask is the single named `base` tier at local elevation 0, not every physical cell with the same numeric elevation. Transfer presentation may replace a base cell only while retaining its original cell identity link. |
@@ -92,9 +641,20 @@ Verified 2026-07-31 without broadening any seam grant:
 - Pyramid landmark-wall rooms no longer inherit the remote authored-wall owner on their room-side seams; true authored corridor stations retain exact inherited ownership.
 - The boss-to-shrine constrained bay now has a physically active challenge branch, a compact payoff on the reconnect spine, and one shared accumulated-distance check in planning and validation; the former symmetric 60.4955435713 m records are absent.
 - Alpha acceptance remains explicit to exact V4 plus `dungeonAugmentationAlpha=1`; invulnerability remains independently controlled by `playerInvulnerable=1`.
-- V1 authored arches and V4 supplemental structural frames remain separate presentation contracts.
+- V1 authored arches and V4 parent-socket boundary indicators remain separate presentation contracts.
 
 ### Release evidence workflow
+
+The mandatory public progression is exact canonical seed 0, exact canonical seed 1, the 10-seed smoke view, the 100-seed normal view, and finally the 1,000-seed release view. Every stage is manifest-bound and fail-closed: a failure blocks all later stages. The two canonical records must apply on realization attempt one, preserve accepted-parent parity, pass release and strict-realized validation, retain parent-generation/planning/materialization/Three.js-assembly/strict-validation/disposal timings, and satisfy the 10/20/30-second performance budget. Warm-up and target generation both use the release-only attempt cap of one; ordinary runtime generation retains its default cap of eight.
+
+Use the ordered public gates. They reuse one provenance-keyed artifact root and cannot bypass prerequisites:
+
+```text
+npm run verify:dungeon-augmentation:canonical
+npm run verify:dungeon-augmentation:corpus:smoke
+npm run verify:dungeon-augmentation:corpus:normal
+npm run verify:dungeon-augmentation:corpus:release
+```
 
 1. Build one immutable accepted-parent manifest containing exactly 1,000 entries. Each entry contains its ordinal, raw seed index, exact seed and base-plan hash, and a hash of the disabled authored-parent layout plus source RNG consumption. Smoke is the first 10 ordinals, normal is the first 100, and release is all 1,000; they never use separate parent manifests.
 2. Run realized verification by manifest ordinal and explicit view. Required partitions are 1×10 for `smoke`, 10×10 for `normal`, and 20×50 for `release`. Raw `--start` ranges are not release evidence because skipped parent seeds make those ranges overlap or leave gaps.
@@ -103,7 +663,9 @@ Verified 2026-07-31 without broadening any seam grant:
 5. Run the five immutable suite contracts and seal one receipt for each: canonical unit/blueprints, enclosure, legacy replay, persistence/lifecycle, and ordinary-movement/disposable-alpha Playwright journeys. Every receipt must retain the aggregate's exact git commit, source hash, runtime platform, profile hash, and machine provenance before and after its commands.
 6. Finalize the release aggregate and all five receipts into one sealed attestation. Missing, duplicated, substituted, failed, source-drifted, or mixed-SHA receipts reject finalization. Regenerate only the narrow evidence block at the top of this document from that attestation; a corpus aggregate by itself is deliberately not accepted.
 
-Example normal-view commands (run shard indexes 0 through 9, normally on parallel CI workers):
+Low-level normal-view diagnostic commands (run shard indexes 0 through 9, normally on parallel CI workers):
+
+The manifest builder, shard runner, and aggregator below are diagnostic/CI primitives. Invoking them directly does not satisfy the ordered canonical-to-release gate, and their explicit artifact path is not the provenance-keyed path chosen by the public gate runner.
 
 ```text
 npm run build:dungeon-augmentation:corpus
@@ -153,9 +715,9 @@ The playable-alpha gate is intentionally narrower than release validation. It co
 
 ### ARCH — Legacy V1 decorative-arch coverage (19)
 
-The release validator still requires complete-gallery V1 arch decoration on authored and supplemental routes. This is presentation coverage, not a playable-alpha connectivity failure.
+The historical release validator required complete-gallery V1 arch decoration on both authored and supplemental routes. That mixed-version rule was presentation coverage, not a playable-alpha connectivity failure, and is no longer the V4 contract.
 
-Recommended closure: Decide whether V4 inherits the V1 arch contract. If it does, emit arch coverage from the authoritative wall-run records; otherwise version-gate this validator rule.
+Closure decision: V4 does not inherit the V1 arch contract. The validator is version-gated so V1 arches and hashes remain unchanged, while V4 validates only the exact granted-parent boundary-indicator socket set.
 
 ### APPROACH — Socket threshold and two-tile approach contracts (34)
 

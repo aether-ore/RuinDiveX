@@ -1,0 +1,18 @@
+{
+  "name": "ruindiver-level-forge",
+  "version": "0.1.0",
+  "description": "Deterministically generate, inspect, validate, and edit playable RuinDiver dungeons through Level Forge.",
+  "author": {
+    "name": "RuinDiver"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "RuinDiver Level Forge",
+    "shortDescription": "Generate and edit valid RuinDiver dungeons",
+    "longDescription": "Controls the local RuinDiver Level Forge through its revision-safe JSON-RPC API, validates generated dungeons, and leaves the result open and fully editable.",
+    "developerName": "RuinDiver",
+    "category": "Developer Tools",
+    "capabilities": ["local-level-authoring", "deterministic-generation", "visual-validation"],
+    "defaultPrompt": "Use $ruindiver-level-forge to build a fully playable dungeon from my prompt."
+  }
+}

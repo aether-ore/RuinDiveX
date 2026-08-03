@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
+import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { DungeonGenerator } from '../src/DungeonGenerator.js';
 import {
   DUNGEON_SELECTION_BAG_FAMILIES,
   createDungeonSelectionBagWitness,
@@ -15,9 +17,14 @@ import {
   EXPECTED_JUNCTION_KINDS,
   EXPECTED_ROOM_LAYOUT_IDS,
   EXPECTED_TOPOLOGY_TEMPLATE_IDS,
+  RELEASE_AUGMENTATION_REALIZATION_ATTEMPT_LIMIT,
+  RELEASE_CANONICAL_PROBES,
+  RELEASE_GENERATOR_PHASE_TIMING_SCHEMA,
   RELEASE_PERFORMANCE_BUDGET_MS,
+  RELEASE_PHASE_HEARTBEAT_SCHEMA,
   RELEASE_PROFILE_ID,
   RELEASE_PROFILE_REVISION,
+  RELEASE_PREDECESSOR_STAGE_IDS,
   RELEASE_REQUIRED_SUITE_IDS,
   RELEASE_REFERENCE_MACHINE,
   RELEASE_SHARD_TOPOLOGY,
@@ -25,20 +32,32 @@ import {
   RELEASE_WARM_PROCESS_EVIDENCE_SCHEMA,
   RELEASE_WARM_PROCESS_MODE,
   aggregateShardEvidence,
+  assertCleanReleaseProvenance,
+  assertMatchingReleaseProvenance,
   assertSealedEvidence,
   createAcceptedParentWitness,
+  captureReleaseDungeonGeneratorMetrics,
+  createCanonicalProbeEvidence,
   createCorpusManifest,
   createReleaseAttestation,
+  createReleaseArtifactIdentity,
+  createReleasePhaseHeartbeatReporter,
   createReleaseSuiteReceipt,
+  createReleaseWorkerFailureDiagnostics,
   createSeedWorkerEvidence,
   createShardEvidence,
   hashCanonicalValue,
+  inspectReleaseSeedWorkerRecordPublication,
+  readReleasePhaseHeartbeat,
+  releaseSourceDirtyFromGitStatusResult,
   runReleaseSeedWorkerProcess,
   sealEvidence,
   selectCorpusEntries,
   validateAggregateEvidenceForCurrentProvenance,
   validateAcceptedParentWitness,
   validateCorpusManifest,
+  validateCompletedReleaseWorkerPhaseEvidence,
+  validateReleasePredecessorEvidenceCollection,
   validateReleaseAttestation,
   validateReleaseSuiteReceipt,
   validateSeedWorkerEvidence,
@@ -46,6 +65,13 @@ import {
   validateShardEvidence,
   writeImmutableJson,
 } from '../scripts/dungeon-augmentation-release-evidence.mjs';
+import {
+  RELEASE_PARENT_SNAPSHOT_MAX_CONCURRENCY,
+  RELEASE_PARENT_SNAPSHOT_WORKER_KIND,
+  collectOrderedAcceptedParentSnapshots,
+  createReleaseParentSnapshotWorkerPool,
+  resolveReleaseParentSnapshotConcurrency,
+} from '../scripts/dungeon-augmentation-parent-snapshot-pool.mjs';
 
 const provenance = Object.freeze({
   gitCommit: '0123456789abcdef',
@@ -137,6 +163,64 @@ function createSelectionBagWitnesses() {
   }));
 }
 
+function createGeneratorPhaseTimings({
+  parentGenerationMs = 100,
+  planningMs = 50,
+  materializationMs = 25,
+  threeJsAssemblyMs = 25,
+  strictValidationMs = 25,
+  disposalMs = 25,
+  planningTimeMs = 75,
+  assemblyTimeMs = 30,
+} = {}) {
+  return {
+    schema: RELEASE_GENERATOR_PHASE_TIMING_SCHEMA,
+    parentGenerationMs,
+    planningMs,
+    materializationMs,
+    threeJsAssemblyMs,
+    strictValidationMs,
+    disposalMs,
+    totalMs: parentGenerationMs
+      + planningMs
+      + materializationMs
+      + threeJsAssemblyMs
+      + strictValidationMs
+      + disposalMs,
+    planningTimeMs,
+    assemblyTimeMs,
+  };
+}
+
+function createPhaseSnapshot(entry, {
+  targetStarted = false,
+  phase = 'planning',
+  status = 'started',
+  phaseElapsedMs = 5_000,
+} = {}) {
+  const warmupOrdinal = (entry.ordinal + 1) % 1000;
+  const phaseStartedEpochMs = 1_000;
+  return {
+    schema: RELEASE_PHASE_HEARTBEAT_SCHEMA,
+    sequence: 0,
+    phase,
+    status,
+    phaseStartedEpochMs,
+    emittedAtEpochMs: phaseStartedEpochMs,
+    phaseElapsedMs,
+    targetStarted,
+    targetOrdinal: entry.ordinal,
+    targetSeed: entry.seed,
+    warmupOrdinal,
+    warmupSeed: `layout:augmentation-realized-v4-${String(warmupOrdinal).padStart(3, '0')}`,
+    phaseTimings: createGeneratorPhaseTimings({
+      planningTimeMs: null,
+      assemblyTimeMs: null,
+    }),
+    observedAtEpochMs: phaseStartedEpochMs + phaseElapsedMs,
+  };
+}
+
 function createWarmProcessEvidence(entry) {
   const warmupOrdinal = (entry.ordinal + 1) % 1000;
   const warmupWitness = createParentWitness(warmupOrdinal);
@@ -160,6 +244,7 @@ function createWarmProcessEvidence(entry) {
     warmupAugmentationStatus: 'applied',
     warmupRealizationAttempts: 1,
     diagnosticElapsedMs: 250,
+    generatorPhaseTimings: createGeneratorPhaseTimings(),
   };
 }
 
@@ -182,8 +267,10 @@ function createRecord(entry, ordinal = entry.ordinal) {
     elapsedPhases: {
       generationMs: 7_500,
       strictValidationMs: 500,
+      disposalMs: 0,
       totalMs: 8_000,
     },
+    generatorPhaseTimings: createGeneratorPhaseTimings(),
     topologyTemplateSelections: [
       EXPECTED_TOPOLOGY_TEMPLATE_IDS[ordinal % EXPECTED_TOPOLOGY_TEMPLATE_IDS.length],
     ],
@@ -208,15 +295,78 @@ function createRecord(entry, ordinal = entry.ordinal) {
 function createShard(manifest, selection, records = null, {
   result = 'passed',
   shardProvenance = manifest.provenance,
+  failure = null,
 } = {}) {
+  const failedEntry = selection.entries[0];
+  const resolvedFailure = result === 'failed'
+    ? failure ?? createReleaseWorkerFailureDiagnostics({
+        errorName: 'SyntheticWorkerFailure',
+        message: 'Synthetic release worker failed.',
+        entry: failedEntry,
+        timedOut: true,
+        lastPhaseEvidence: createPhaseSnapshot(failedEntry),
+      })
+    : null;
   return createShardEvidence({
     manifest,
     selection,
     provenance: shardProvenance,
     records: records ?? selection.entries.map((entry) => createRecord(entry)),
     result,
+    failure: resolvedFailure,
     generatedAt: '2026-07-31T00:01:00.000Z',
   });
+}
+
+function createPassingAggregate(manifest, tier) {
+  const topology = RELEASE_SHARD_TOPOLOGY[tier];
+  const shards = Array.from({ length: topology.shardCount }, (_, shardIndex) => {
+    const selection = selectCorpusEntries(manifest, {
+      tier,
+      shardIndex,
+      shardCount: topology.shardCount,
+    });
+    return createShard(manifest, selection);
+  });
+  return aggregateShardEvidence({
+    manifest,
+    shards,
+    generatedAt: `2026-07-31T00:0${tier === 'smoke' ? 2 : tier === 'normal' ? 3 : 4}:00.000Z`,
+  });
+}
+
+function createPassingCanonicalPredecessor(manifest) {
+  const records = RELEASE_CANONICAL_PROBES.map((probe) => {
+    const source = createRecord(manifest.entries[probe.ordinal]);
+    return {
+      ordinal: probe.ordinal,
+      seed: probe.seed,
+      status: source.status,
+      realizationAttempts: source.realizationAttempts,
+      releaseValidationAccepted: source.releaseValidationAccepted,
+      releaseValidationErrorCount: source.releaseValidationErrorCount,
+      acceptedAsPlayableAlpha: source.acceptedAsPlayableAlpha,
+      strictRealizedAccepted: source.strictRealizedAccepted,
+      acceptedParentParity: source.acceptedParentParity,
+      elapsedMs: source.elapsedMs,
+      generatorPhaseTimings: source.generatorPhaseTimings,
+      workerEvidenceHash: `sha256-canonical-worker-${probe.ordinal}`,
+    };
+  });
+  return createCanonicalProbeEvidence({
+    manifest,
+    provenance: manifest.provenance,
+    records,
+    generatedAt: '2026-07-31T00:01:30.000Z',
+  });
+}
+
+function createPassingPredecessorEvidence(manifest) {
+  return {
+    canonical: createPassingCanonicalPredecessor(manifest),
+    smoke: createPassingAggregate(manifest, 'smoke'),
+    normal: createPassingAggregate(manifest, 'normal'),
+  };
 }
 
 function createSuiteReceipt(suiteId, {
@@ -224,6 +374,7 @@ function createSuiteReceipt(suiteId, {
   failedCommandIndex = -1,
   sourceStable = true,
   postRunSourceHash = receiptProvenance.sourceHash,
+  postRunSourceDirty = receiptProvenance.sourceDirty,
 } = {}) {
   const contract = RELEASE_SUITE_CONTRACTS[suiteId];
   return createReleaseSuiteReceipt({
@@ -231,6 +382,7 @@ function createSuiteReceipt(suiteId, {
     provenance: receiptProvenance,
     sourceStable,
     postRunSourceHash,
+    postRunSourceDirty,
     generatedAt: '2026-07-31T00:08:00.000Z',
     commandResults: contract.commands.map((command, index) => ({
       id: command.id,
@@ -244,6 +396,186 @@ function createSuiteReceipt(suiteId, {
     })),
   });
 }
+
+test('git source status and clean provenance are fail-closed before release work', () => {
+  assert.equal(releaseSourceDirtyFromGitStatusResult({ status: 0, stdout: '' }), false);
+  assert.equal(
+    releaseSourceDirtyFromGitStatusResult({ status: 0, stdout: ' M src/file.js\n' }),
+    true,
+  );
+  assert.throws(
+    () => releaseSourceDirtyFromGitStatusResult({
+      status: 128,
+      stdout: '',
+      stderr: 'fatal: status unavailable',
+    }),
+    /could not determine git source cleanliness/u,
+  );
+  assert.equal(assertCleanReleaseProvenance(provenance), provenance);
+  assert.throws(
+    () => assertCleanReleaseProvenance({ ...provenance, sourceDirty: true }),
+    /source is dirty/u,
+  );
+  assert.throws(
+    () => assertCleanReleaseProvenance({ ...provenance, sourceDirty: null }),
+    /source is indeterminate/u,
+  );
+});
+
+test('cleanliness participates in artifact identity and every provenance boundary', () => {
+  const dirty = { ...provenance, sourceDirty: true };
+  assert.notEqual(
+    createReleaseArtifactIdentity(provenance),
+    createReleaseArtifactIdentity(dirty),
+  );
+  assert.throws(
+    () => assertMatchingReleaseProvenance(dirty, provenance, 'synthetic boundary'),
+    /sourceDirty does not match/u,
+  );
+});
+
+function syntheticParentSnapshot(rawIndex, status = 'accepted') {
+  const seed = `layout:augmentation-realized-v4-${String(rawIndex).padStart(3, '0')}`;
+  if (status === 'skipped') {
+    return {
+      status,
+      rawIndex,
+      seed,
+      sourceRandomCalls: 0,
+      errorName: 'SyntheticParentRejected',
+      reason: 'synthetic rejected parent',
+    };
+  }
+  return {
+    status,
+    rawIndex,
+    seed,
+    basePlanHash: `v1:${seed}:depth:1:revolvingFusillade`,
+    sourceRandomCalls: rawIndex + 1,
+    parentWitness: { hash: `sha256-parent-${rawIndex}` },
+  };
+}
+
+test('bounded parent snapshot scans commit raw-order output and stop at the exact accepted endpoint', async () => {
+  const completionOrder = [];
+  const batches = [];
+  const scan = await collectOrderedAcceptedParentSnapshots({
+    rawStartIndex: 0,
+    maximumRawAttempts: 10,
+    requestedAcceptedParentCount: 3,
+    concurrency: 3,
+    async buildBatch(rawIndices) {
+      batches.push([...rawIndices]);
+      return Promise.all(rawIndices.map(async (rawIndex, offset) => {
+        await new Promise((resolve) => setTimeout(resolve, (rawIndices.length - offset) * 2));
+        completionOrder.push(rawIndex);
+        return syntheticParentSnapshot(rawIndex, rawIndex === 0 ? 'skipped' : 'accepted');
+      }));
+    },
+  });
+  assert.deepEqual(batches, [[0, 1, 2], [3, 4, 5]]);
+  assert.notDeepEqual(completionOrder, [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(scan.entries.map(({ ordinal, rawIndex }) => ({ ordinal, rawIndex })), [{
+    ordinal: 0, rawIndex: 1,
+  }, {
+    ordinal: 1, rawIndex: 2,
+  }, {
+    ordinal: 2, rawIndex: 3,
+  }]);
+  assert.deepEqual(scan.skippedParentSeeds.map(({ rawIndex }) => rawIndex), [0]);
+  assert.equal(scan.rawEndIndexExclusive, 4);
+});
+
+test('parent snapshot scans fail fast and preserve the sequential exhaustion boundary', async () => {
+  let batchCalls = 0;
+  await assert.rejects(
+    collectOrderedAcceptedParentSnapshots({
+      rawStartIndex: 10,
+      maximumRawAttempts: 6,
+      requestedAcceptedParentCount: 2,
+      concurrency: 3,
+      async buildBatch() {
+        batchCalls += 1;
+        throw new Error('synthetic worker failure');
+      },
+    }),
+    /synthetic worker failure/u,
+  );
+  assert.equal(batchCalls, 1);
+
+  await assert.rejects(
+    collectOrderedAcceptedParentSnapshots({
+      rawStartIndex: 0,
+      maximumRawAttempts: 2,
+      requestedAcceptedParentCount: 2,
+      concurrency: 2,
+      buildBatch: async (rawIndices) => rawIndices.map((rawIndex) => (
+        syntheticParentSnapshot(rawIndex, 'skipped')
+      )),
+    }),
+    /exhausted 2 raw seeds after finding 0\/2/u,
+  );
+});
+
+test('parent snapshot concurrency is hardware-bounded and worker lanes stay isolated', async () => {
+  assert.equal(RELEASE_PARENT_SNAPSHOT_MAX_CONCURRENCY, 8);
+  assert.equal(resolveReleaseParentSnapshotConcurrency(null, 16), 8);
+  assert.equal(resolveReleaseParentSnapshotConcurrency(null, 1), 1);
+  assert.equal(resolveReleaseParentSnapshotConcurrency(6, 4), 3);
+  assert.throws(() => resolveReleaseParentSnapshotConcurrency(9, 16), /1 through 8/u);
+
+  const workerContracts = [];
+  class SyntheticWorker extends EventEmitter {
+    constructor(_workerUrl, options) {
+      super();
+      this.options = options;
+      workerContracts.push(options.workerData);
+    }
+
+    postMessage({ requestId, rawIndex }) {
+      queueMicrotask(() => this.emit('message', {
+        requestId,
+        ok: true,
+        snapshot: syntheticParentSnapshot(rawIndex),
+      }));
+    }
+
+    terminate() {
+      return Promise.resolve(0);
+    }
+  }
+  const pool = createReleaseParentSnapshotWorkerPool({
+    concurrency: 2,
+    WorkerImplementation: SyntheticWorker,
+  });
+  try {
+    const snapshots = await pool.runBatch([7, 8]);
+    assert.deepEqual(snapshots.map(({ rawIndex }) => rawIndex), [7, 8]);
+    assert.deepEqual(workerContracts, [{
+      kind: RELEASE_PARENT_SNAPSHOT_WORKER_KIND,
+      laneIndex: 0,
+    }, {
+      kind: RELEASE_PARENT_SNAPSHOT_WORKER_KIND,
+      laneIndex: 1,
+    }]);
+    await assert.rejects(pool.runBatch([1, 2, 3]), /exceeds its bounded lanes/u);
+  } finally {
+    await pool.close();
+  }
+});
+
+test('parallel manifest construction is restricted to augmentation-disabled parent snapshots', async () => {
+  const [builderSource, workerSource] = await Promise.all([
+    readFile(new URL('../scripts/build-dungeon-augmentation-release-corpus.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../scripts/dungeon-augmentation-parent-snapshot-worker.mjs', import.meta.url), 'utf8'),
+  ]);
+  assert.match(builderSource, /collectOrderedAcceptedParentSnapshots/u);
+  assert.match(builderSource, /createReleaseParentSnapshotWorkerPool/u);
+  assert.match(builderSource, /createCorpusManifest\(\{[\s\S]*?provenance,/u);
+  assert.doesNotMatch(builderSource, /new DungeonGenerator/u);
+  assert.match(workerSource, /augmentationProfileId:\s*null/u);
+  assert.doesNotMatch(workerSource, /industrial-supplement-preview-v4/u);
+});
 
 test('release corpus manifests are sealed and reject payload mutation', () => {
   const manifest = createManifest();
@@ -369,6 +701,7 @@ test('aggregate evidence enforces exact coverage, first realization, and perform
   failedRecords[1].elapsedPhases = {
     generationMs: 39_000,
     strictValidationMs: 1_000,
+    disposalMs: 0,
     totalMs: 40_000,
   };
   const rejected = aggregateShardEvidence({
@@ -379,6 +712,108 @@ test('aggregate evidence enforces exact coverage, first realization, and perform
   assert.equal(rejected.corpusAccepted, false);
   assert.equal(rejected.gates.firstRealization, false);
   assert.equal(rejected.gates.performance, false);
+
+  const overrideAttempt = aggregateShardEvidence({
+    manifest,
+    shards: [createShard(manifest, selection, failedRecords)],
+    performanceBudgetMs: {
+      median: 100_000,
+      p95: 100_000,
+      maximum: 100_000,
+      ciTimeoutPerSeed: 999_000,
+    },
+  });
+  assert.deepEqual(overrideAttempt.performance.budgetMs, RELEASE_PERFORMANCE_BUDGET_MS);
+  assert.equal(overrideAttempt.gates.performance, false);
+
+  const resealedRaisedBudget = structuredClone(rejected);
+  resealedRaisedBudget.performance.budgetMs = {
+    median: 100_000,
+    p95: 100_000,
+    maximum: 100_000,
+    ciTimeoutPerSeed: 999_000,
+  };
+  assert.throws(
+    () => validateAggregateEvidenceForCurrentProvenance(
+      sealEvidence(resealedRaisedBudget),
+      provenance,
+    ),
+    /authoritative performance budget/u,
+  );
+});
+
+test('re-sealed zero-record and gate-mutated aggregates cannot forge release acceptance', () => {
+  const manifest = createManifest();
+  const zeroRecordAggregate = aggregateShardEvidence({
+    manifest,
+    shards: [],
+    generatedAt: '2026-07-31T00:02:30.000Z',
+  });
+  assert.equal(zeroRecordAggregate.recordCount, 0);
+  assert.equal(zeroRecordAggregate.corpusAccepted, false);
+
+  const verdictOnlyForgery = structuredClone(zeroRecordAggregate);
+  verdictOnlyForgery.corpusAccepted = true;
+  verdictOnlyForgery.result = 'passed';
+  assert.throws(
+    () => validateAggregateEvidenceForCurrentProvenance(
+      sealEvidence(verdictOnlyForgery),
+      provenance,
+    ),
+    /complete shard-result summaries|verdict does not match/u,
+  );
+
+  const fullGateForgery = structuredClone(zeroRecordAggregate);
+  fullGateForgery.corpusAccepted = true;
+  fullGateForgery.result = 'passed';
+  fullGateForgery.gates = Object.fromEntries(
+    Object.keys(fullGateForgery.gates).map((gate) => [gate, true]),
+  );
+  assert.throws(
+    () => validateAggregateEvidenceForCurrentProvenance(
+      sealEvidence(fullGateForgery),
+      provenance,
+    ),
+    /complete shard-result summaries|acceptance gates/u,
+  );
+  const receipts = RELEASE_REQUIRED_SUITE_IDS.map((suiteId) => createSuiteReceipt(suiteId));
+  assert.throws(
+    () => createReleaseAttestation({
+      aggregate: sealEvidence(fullGateForgery),
+      suiteReceipts: receipts,
+    }),
+    /complete shard-result summaries|acceptance gates/u,
+  );
+
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'smoke', shardIndex: 0, shardCount: 1,
+  });
+  const accepted = aggregateShardEvidence({
+    manifest,
+    shards: [createShard(manifest, selection)],
+  });
+  for (const gate of Object.keys(accepted.gates)) {
+    const gateForgery = structuredClone(accepted);
+    gateForgery.gates[gate] = false;
+    assert.throws(
+      () => validateAggregateEvidenceForCurrentProvenance(
+        sealEvidence(gateForgery),
+        provenance,
+      ),
+      /acceptance gates/u,
+      gate,
+    );
+  }
+
+  const recordForgery = structuredClone(accepted);
+  recordForgery.records[0].status = 'unchanged';
+  assert.throws(
+    () => validateAggregateEvidenceForCurrentProvenance(
+      sealEvidence(recordForgery),
+      provenance,
+    ),
+    /acceptance gates/u,
+  );
 });
 
 test('re-sealed record mutations independently fail every per-record acceptance gate', () => {
@@ -413,6 +848,7 @@ test('re-sealed record mutations independently fail every per-record acceptance 
       record.elapsedPhases = {
         generationMs: 39_000,
         strictValidationMs: 1_000,
+        disposalMs: 0,
         totalMs: 40_000,
       };
       record.elapsedMs = 40_000;
@@ -608,6 +1044,681 @@ test('one-seed worker evidence is isolated and uses the exact per-seed timeout',
   assert.equal(captured.options.timeout, 180_000);
 });
 
+test('release warm-up and target generators are both pinned to one realization attempt', async () => {
+  assert.equal(RELEASE_AUGMENTATION_REALIZATION_ATTEMPT_LIMIT, 1);
+  const [workerSource, generatorSource] = await Promise.all([
+    readFile(
+      new URL('../scripts/verify-dungeon-augmentation-realized.mjs', import.meta.url),
+      'utf8',
+    ),
+    readFile(new URL('../src/DungeonGenerator.js', import.meta.url), 'utf8'),
+  ]);
+  assert.equal(
+    workerSource.match(
+      /augmentationRealizationAttemptLimit:\s*RELEASE_AUGMENTATION_REALIZATION_ATTEMPT_LIMIT/gu,
+    )?.length,
+    2,
+  );
+  assert.equal(
+    workerSource.match(/captureDungeonGeneratorMetrics\(dungeon\)/gu)?.length,
+    2,
+    'Warm-up and target verifier paths must both use fallback-aware metric capture.',
+  );
+  assert.doesNotMatch(
+    workerSource,
+    /(?:planningTimeMs|assemblyTimeMs):\s*Number\.isFinite\([^)]*\)\s*\?[^:]*:\s*0/gu,
+    'Verifier diagnostics must not synthesize missing generator metrics as zero.',
+  );
+  assert.match(
+    generatorSource,
+    /const DUNGEON_AUGMENTATION_MAX_REALIZATION_ATTEMPTS = 8;/u,
+  );
+  assert.match(
+    generatorSource,
+    /augmentationRealizationAttemptLimit = DUNGEON_AUGMENTATION_MAX_REALIZATION_ATTEMPTS/u,
+  );
+});
+
+test('synthetic watchdog timeouts retain the last complete warm-up planning heartbeat', async () => {
+  const manifest = createManifest();
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'release', ordinalStart: 57, ordinalCount: 1,
+  });
+  const targetEntry = selection.entries[0];
+  const warmupEntry = manifest.entries[targetEntry.ordinal + 1];
+  const temporaryDirectory = await mkdtemp(path.join(
+    os.tmpdir(),
+    'dungeon-augmentation-phase-heartbeat-',
+  ));
+  const heartbeatPath = path.join(temporaryDirectory, 'worker.phase.jsonl');
+  let epochMilliseconds = 10_000;
+  let monotonicMilliseconds = 0;
+  const advance = (milliseconds) => {
+    epochMilliseconds += milliseconds;
+    monotonicMilliseconds += milliseconds;
+  };
+  try {
+    const reporter = createReleasePhaseHeartbeatReporter({
+      targetPath: heartbeatPath,
+      targetEntry,
+      warmupEntry,
+      epochNow: () => epochMilliseconds,
+      monotonicNow: () => monotonicMilliseconds,
+    });
+    reporter.startPhase('parent-generation');
+    advance(20);
+    reporter.observeGeneratorPhase({ phase: 'planning', status: 'started' });
+    advance(45_000);
+    await appendFile(heartbeatPath, '{"interrupted":', 'utf8');
+
+    const snapshot = await readReleasePhaseHeartbeat(heartbeatPath, {
+      manifest,
+      selection,
+      observedAtEpochMs: epochMilliseconds,
+    });
+    assert.equal(snapshot.phase, 'planning');
+    assert.equal(snapshot.status, 'started');
+    assert.equal(snapshot.targetStarted, false);
+    assert.equal(snapshot.phaseElapsedMs, 45_000);
+    assert.equal(snapshot.phaseTimings.parentGenerationMs, 20);
+    assert.equal(snapshot.phaseTimings.planningMs, 45_000);
+
+    const failure = createReleaseWorkerFailureDiagnostics({
+      errorName: 'Error',
+      message: 'spawnSync node ETIMEDOUT',
+      entry: targetEntry,
+      timedOut: true,
+      lastPhaseEvidence: snapshot,
+    });
+    assert.equal(failure.timeoutPhase, 'warmup:planning');
+    assert.equal(failure.timeoutPhaseElapsedMs, 45_000);
+    assert.equal(failure.generatorPhaseTimings.planningMs, 45_000);
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('post-generation strict-validation failures retain captured planner and assembly metrics', async () => {
+  const manifest = createManifest();
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'release', ordinalStart: 57, ordinalCount: 1,
+  });
+  const targetEntry = selection.entries[0];
+  const warmupEntry = manifest.entries[targetEntry.ordinal + 1];
+  const temporaryDirectory = await mkdtemp(path.join(
+    os.tmpdir(),
+    'dungeon-augmentation-post-generation-metrics-',
+  ));
+  const heartbeatPath = path.join(temporaryDirectory, 'worker.phase.jsonl');
+  let epochMilliseconds = 20_000;
+  let monotonicMilliseconds = 0;
+  const advance = (milliseconds) => {
+    epochMilliseconds += milliseconds;
+    monotonicMilliseconds += milliseconds;
+  };
+  try {
+    const reporter = createReleasePhaseHeartbeatReporter({
+      targetPath: heartbeatPath,
+      targetEntry,
+      warmupEntry,
+      epochNow: () => epochMilliseconds,
+      monotonicNow: () => monotonicMilliseconds,
+    });
+    reporter.beginTarget();
+    reporter.startPhase('parent-generation');
+    advance(10);
+    reporter.observeGeneratorPhase({ phase: 'planning', status: 'started' });
+    advance(20);
+    reporter.observeGeneratorPhase({ phase: 'planning', status: 'completed' });
+    reporter.captureGeneratorMetrics({ planningTimeMs: 19.5, assemblyTimeMs: 7.25 });
+    reporter.startPhase('strict-validation');
+    advance(3);
+    const failurePhaseEvidence = reporter.captureFailure();
+    assert.equal(failurePhaseEvidence.phase, 'strict-validation');
+    assert.equal(failurePhaseEvidence.phaseTimings.planningTimeMs, 19.5);
+    assert.equal(failurePhaseEvidence.phaseTimings.assemblyTimeMs, 7.25);
+
+    const failure = createReleaseWorkerFailureDiagnostics({
+      errorName: 'AssertionError',
+      message: 'synthetic post-generation validation failure',
+      entry: targetEntry,
+      workerFailure: {
+        failurePhaseEvidence,
+        generatorPhaseTimings: failurePhaseEvidence.phaseTimings,
+      },
+      lastPhaseEvidence: failurePhaseEvidence,
+    });
+    assert.equal(failure.generatorPhaseTimings.planningTimeMs, 19.5);
+    assert.equal(failure.generatorPhaseTimings.assemblyTimeMs, 7.25);
+
+    const persisted = await readReleasePhaseHeartbeat(heartbeatPath, {
+      manifest,
+      selection,
+      observedAtEpochMs: epochMilliseconds,
+    });
+    assert.equal(persisted.phaseTimings.planningTimeMs, 19.5);
+    assert.equal(persisted.phaseTimings.assemblyTimeMs, 7.25);
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('successful workers require terminal target-disposal evidence matching published timings', () => {
+  const manifest = createManifest();
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'release', ordinalStart: 57, ordinalCount: 1,
+  });
+  const entry = selection.entries[0];
+  const snapshot = createPhaseSnapshot(entry, {
+    targetStarted: true,
+    phase: 'disposal',
+    status: 'completed',
+    phaseElapsedMs: 2,
+  });
+  snapshot.phaseTimings = createGeneratorPhaseTimings();
+  assert.equal(
+    validateCompletedReleaseWorkerPhaseEvidence(
+      snapshot,
+      snapshot.phaseTimings,
+      { manifest, selection },
+    ),
+    snapshot,
+  );
+
+  for (const { label, mutate } of [{
+    label: 'warmup terminal',
+    mutate: (candidate) => { candidate.targetStarted = false; },
+  }, {
+    label: 'stale planning heartbeat',
+    mutate: (candidate) => {
+      candidate.phase = 'planning';
+      candidate.status = 'started';
+    },
+  }, {
+    label: 'timing drift',
+    mutate: (_candidate, timings) => { timings.planningTimeMs += 1; },
+  }]) {
+    const candidate = structuredClone(snapshot);
+    const timings = structuredClone(snapshot.phaseTimings);
+    mutate(candidate, timings);
+    assert.throws(
+      () => validateCompletedReleaseWorkerPhaseEvidence(
+        candidate,
+        timings,
+        { manifest, selection },
+      ),
+      /completed target disposal|published generator phase timings/u,
+      label,
+    );
+  }
+});
+
+test('failed zero-record workers cannot create vacuous seed-level aggregate passes', () => {
+  const manifest = createManifest();
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'smoke', shardIndex: 0, shardCount: 1,
+  });
+  const aggregate = aggregateShardEvidence({
+    manifest,
+    shards: [createShard(manifest, selection, [], { result: 'failed' })],
+  });
+  assert.equal(aggregate.recordCount, 0);
+  assert.equal(aggregate.corpusAccepted, false);
+  for (const gate of [
+    'exactRecordCoverage',
+    'zeroFallback',
+    'firstRealization',
+    'releaseValidation',
+    'strictRealizedValidation',
+    'acceptedParentParity',
+    'diversity',
+    'performance',
+  ]) {
+    assert.equal(aggregate.gates[gate], false, gate);
+  }
+  assert.equal(aggregate.diversity.accepted, false);
+});
+
+test('manifest seed-worker publication accepts one applied record unchanged', () => {
+  const manifest = createManifest();
+  const entry = manifest.entries[57];
+  const record = createRecord(entry);
+  const before = structuredClone(record);
+
+  const publication = inspectReleaseSeedWorkerRecordPublication(record);
+
+  assert.equal(publication.accepted, true);
+  assert.equal(publication.record, record);
+  assert.equal(publication.failure, null);
+  assert.deepEqual(record, before);
+});
+
+test('actual unchanged generator fallback retains final metrics in a zero-record worker', async () => {
+  const manifest = createManifest();
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'release', ordinalStart: 57, ordinalCount: 1,
+  });
+  const entry = selection.entries[0];
+  const warmupEntry = manifest.entries[entry.ordinal + 1];
+  const temporaryDirectory = await mkdtemp(path.join(
+    os.tmpdir(),
+    'dungeon-augmentation-unchanged-worker-metrics-',
+  ));
+  const heartbeatPath = path.join(temporaryDirectory, 'worker.phase.jsonl');
+  let epochMilliseconds = 30_000;
+  let monotonicMilliseconds = 0;
+  const advance = (milliseconds) => {
+    epochMilliseconds += milliseconds;
+    monotonicMilliseconds += milliseconds;
+  };
+  try {
+    const reporter = createReleasePhaseHeartbeatReporter({
+      targetPath: heartbeatPath,
+      targetEntry: entry,
+      warmupEntry,
+      epochNow: () => epochMilliseconds,
+      monotonicNow: () => monotonicMilliseconds,
+    });
+    reporter.beginTarget();
+    reporter.startPhase('parent-generation');
+    advance(10);
+
+    const generator = new DungeonGenerator({
+      random: () => 0.5,
+      difficulty: 1,
+      augmentationProfileId: RELEASE_PROFILE_ID,
+      augmentationSeed: entry.seed,
+      basePlanHash: entry.basePlanHash,
+      augmentationRealizationAttemptLimit: 1,
+    });
+    generator.augmentationPhaseObserver = (event) => reporter.observeGeneratorPhase(event);
+    generator._generateAcceptedIndustrialDungeon = () => ({
+      dungeon: {
+        basePlanHash: entry.basePlanHash,
+        generationAttempts: 1,
+        rooms: [],
+        connectionPlans: [],
+        progression: { validation: { accepted: true, errors: [] } },
+      },
+      randomTape: [],
+    });
+    generator._createIndustrialDungeonAugmentationPlanningSnapshot = () => ({
+      rooms: [],
+      connectionPlans: [],
+    });
+    generator._generateOnce = function generateRejectedAugmentationCandidate() {
+      this._reportDungeonAugmentationPhase('planning', 'started');
+      advance(4);
+      this._reportDungeonAugmentationPhase('planning', 'completed', { elapsedMs: 22 });
+      this._reportDungeonAugmentationPhase('three-js-assembly', 'started');
+      advance(9);
+      this._reportDungeonAugmentationPhase('three-js-assembly', 'completed', {
+        elapsedMs: 7.25,
+      });
+      return {
+        augmentationStatus: 'applied',
+        augmentationPlanHash: 'v1-synthetic-rejected-plan',
+        augmentationMetrics: { planningTimeMs: 222, assemblyTimeMs: 7.25 },
+        augmentationDiagnostics: {
+          schema: 'ruindivex-dungeon-augmentation-diagnostics/v1',
+          accepted: false,
+          reason: 'synthetic-drop-space-egress-failure',
+          planningTimeMs: 222,
+          errors: ['The final augmentation candidate failed drop-space egress.'],
+        },
+        progression: {
+          validation: {
+            accepted: false,
+            errors: ['The final augmentation candidate failed drop-space egress.'],
+          },
+        },
+      };
+    };
+    generator._disposeGeneratedDungeonCandidate = () => {};
+
+    const dungeon = generator.generate();
+    assert.equal(dungeon.augmentationStatus, 'unchanged');
+    assert.equal(dungeon.augmentationMetrics, undefined);
+    assert.equal(dungeon.augmentationDiagnostics.rejectedOverlay.attempts.length, 1);
+    assert.equal(
+      dungeon.augmentationDiagnostics.rejectedOverlay.attempts[0].diagnostics.planningTimeMs,
+      222,
+    );
+    assert.deepEqual(captureReleaseDungeonGeneratorMetrics(dungeon), {
+      planningTimeMs: 222,
+      assemblyTimeMs: null,
+    });
+    const withEarlierRejectedAttempt = structuredClone(dungeon);
+    withEarlierRejectedAttempt.augmentationDiagnostics.rejectedOverlay.attempts.unshift({
+      realizationAttempt: 0,
+      diagnostics: { planningTimeMs: 111 },
+    });
+    assert.equal(
+      captureReleaseDungeonGeneratorMetrics(withEarlierRejectedAttempt).planningTimeMs,
+      222,
+    );
+    const capturedMetrics = reporter.captureDungeonGeneratorMetrics(dungeon);
+    assert.deepEqual(capturedMetrics, {
+      planningTimeMs: 222,
+      assemblyTimeMs: 7.25,
+    });
+    reporter.observeGeneratorPhase({
+      phase: 'three-js-assembly', status: 'completed', elapsedMs: 999,
+    });
+    assert.equal(
+      reporter.captureDungeonGeneratorMetrics(dungeon).assemblyTimeMs,
+      7.25,
+      'An unmatched completion event cannot replace the final attempt assembly metric.',
+    );
+
+    reporter.startPhase('strict-validation');
+    advance(2);
+    reporter.completePhase('strict-validation');
+    reporter.startPhase('disposal');
+    advance(1);
+    reporter.completePhase('disposal');
+    const generatorPhaseTimings = reporter.timings({ scope: 'target' });
+    assert.equal(generatorPhaseTimings.planningTimeMs, 222);
+    assert.equal(generatorPhaseTimings.assemblyTimeMs, 7.25);
+
+    const record = {
+      ...createRecord(entry),
+      status: 'unchanged',
+      completeLayoutSignatures: [],
+      generatorPhaseTimings,
+      rejectionAttempts: [{
+        realizationAttempt: 1,
+        reason: 'physical-validation-fallback',
+        failureCodes: ['DUNGEON_AUGMENTATION_DROP_SPACE_EGRESS_FAILED'],
+        errorMessages: ['The final augmentation candidate failed drop-space egress.'],
+        errorCount: 1,
+        lastPlanningDecision: null,
+      }],
+    };
+    const publication = inspectReleaseSeedWorkerRecordPublication(record);
+    assert.equal(publication.accepted, false);
+    assert.equal(publication.record, null);
+    assert.equal(publication.failure.generatorPhaseTimings.planningTimeMs, 222);
+    assert.equal(publication.failure.generatorPhaseTimings.assemblyTimeMs, 7.25);
+
+    const phaseEvidence = reporter.snapshot();
+    assert.equal(phaseEvidence.phase, 'disposal');
+    assert.equal(phaseEvidence.status, 'completed');
+    assert.deepEqual(phaseEvidence.phaseTimings, generatorPhaseTimings);
+    const failedWorker = createSeedWorkerEvidence({
+      manifest,
+      selection,
+      provenance,
+      records: [],
+      result: 'failed',
+      failure: {
+        ...publication.failure,
+        currentOrdinal: entry.ordinal,
+        currentSeed: entry.seed,
+        failurePhaseEvidence: phaseEvidence,
+        lastPhaseEvidence: phaseEvidence,
+      },
+    });
+    assert.equal(failedWorker.records.length, 0);
+    assert.equal(validateSeedWorkerEvidence(failedWorker, manifest), failedWorker);
+
+    const missingPostGenerationMetrics = structuredClone(failedWorker);
+    for (const timings of [
+      missingPostGenerationMetrics.failure.generatorPhaseTimings,
+      missingPostGenerationMetrics.failure.failurePhaseEvidence.phaseTimings,
+      missingPostGenerationMetrics.failure.lastPhaseEvidence.phaseTimings,
+    ]) {
+      timings.planningTimeMs = null;
+      timings.assemblyTimeMs = null;
+    }
+    assert.throws(
+      () => validateSeedWorkerEvidence(
+        sealEvidence(missingPostGenerationMetrics),
+        manifest,
+      ),
+      /generator phase timings/u,
+    );
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('unchanged manifest results retain diagnostics but publish a valid zero-record failure', () => {
+  const manifest = createManifest();
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'release', ordinalStart: 57, ordinalCount: 1,
+  });
+  const entry = selection.entries[0];
+  const record = {
+    ...createRecord(entry),
+    status: 'unchanged',
+    completeLayoutSignatures: [],
+    rejectionAttempts: [{
+      realizationAttempt: 1,
+      reason: 'physical-validation-fallback',
+      failureCodes: [
+        'DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE',
+        'DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE',
+      ],
+      errorMessages: ['Pyramid segment 1 exits on the wrong seam side.'],
+      errorCount: 1,
+      lastPlanningDecision: {
+        attempt: 0,
+        rejection: 'route-network-planning-failed',
+      },
+    }],
+  };
+  const before = structuredClone(record);
+
+  const publication = inspectReleaseSeedWorkerRecordPublication(record);
+
+  assert.equal(publication.accepted, false);
+  assert.equal(publication.record, null);
+  assert.equal(
+    publication.failure.errorCode,
+    'RELEASE_SEED_WORKER_AUGMENTATION_NOT_APPLIED',
+  );
+  assert.equal(publication.failure.augmentationStatus, 'unchanged');
+  assert.deepEqual(publication.failure.failureCodes, [
+    'DUNGEON_AUGMENTATION_ROUTE_WRONG_SEAM_SIDE',
+  ]);
+  assert.equal(
+    publication.failure.rejectionMessage,
+    'Pyramid segment 1 exits on the wrong seam side.',
+  );
+  assert.match(
+    publication.failure.message,
+    /requires augmentationStatus "applied".*Pyramid segment 1 exits on the wrong seam side\./u,
+  );
+  assert.deepEqual(publication.failure.elapsedPhases, record.elapsedPhases);
+  assert.deepEqual(
+    publication.failure.generatorPhaseTimings,
+    record.generatorPhaseTimings,
+  );
+  assert.deepEqual(record, before);
+
+  const phaseEvidence = createPhaseSnapshot(entry, {
+    targetStarted: true,
+    phase: 'disposal',
+    status: 'completed',
+  });
+  phaseEvidence.phaseTimings = structuredClone(
+    publication.failure.generatorPhaseTimings,
+  );
+  const failed = createSeedWorkerEvidence({
+    manifest,
+    selection,
+    provenance,
+    records: [],
+    result: 'failed',
+    failure: {
+      ...publication.failure,
+      currentOrdinal: entry.ordinal,
+      currentSeed: entry.seed,
+      failurePhaseEvidence: phaseEvidence,
+      lastPhaseEvidence: phaseEvidence,
+    },
+  });
+  assert.equal(failed.records.length, 0);
+  assert.equal(validateSeedWorkerEvidence(failed, manifest), failed);
+});
+
+test('failed workers require zero records and phase-bearing failure diagnostics', () => {
+  const manifest = createManifest();
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'release', ordinalStart: 57, ordinalCount: 1,
+  });
+  const entry = selection.entries[0];
+  const phaseEvidence = createPhaseSnapshot(entry);
+  const failure = {
+    errorName: 'SyntheticWorkerFailure',
+    message: 'Synthetic release worker failed.',
+    currentOrdinal: entry.ordinal,
+    currentSeed: entry.seed,
+    failurePhaseEvidence: phaseEvidence,
+    lastPhaseEvidence: phaseEvidence,
+    generatorPhaseTimings: phaseEvidence.phaseTimings,
+  };
+  const failed = createSeedWorkerEvidence({
+    manifest,
+    selection,
+    provenance,
+    records: [],
+    result: 'failed',
+    failure,
+  });
+  assert.equal(validateSeedWorkerEvidence(failed, manifest), failed);
+
+  const driftedFailureTimings = structuredClone(failed);
+  driftedFailureTimings.failure.generatorPhaseTimings = {
+    ...driftedFailureTimings.failure.generatorPhaseTimings,
+    planningTimeMs: 1,
+  };
+  assert.throws(
+    () => validateSeedWorkerEvidence(sealEvidence(driftedFailureTimings), manifest),
+    /generator timings do not match/u,
+  );
+
+  const missingFailureMetric = structuredClone(failed);
+  missingFailureMetric.failure.generatorPhaseTimings = {
+    ...missingFailureMetric.failure.generatorPhaseTimings,
+  };
+  delete missingFailureMetric.failure.generatorPhaseTimings.assemblyTimeMs;
+  assert.throws(
+    () => validateSeedWorkerEvidence(sealEvidence(missingFailureMetric), manifest),
+    /generator phase timings/u,
+  );
+
+  const wrongFailureIdentity = structuredClone(failed);
+  wrongFailureIdentity.failure.currentSeed = 'layout:not-the-manifest-seed';
+  assert.throws(
+    () => validateSeedWorkerEvidence(sealEvidence(wrongFailureIdentity), manifest),
+    /lacks phase evidence/u,
+  );
+
+  const failedWithRecord = createSeedWorkerEvidence({
+    manifest,
+    selection,
+    provenance,
+    records: [createRecord(entry)],
+    result: 'failed',
+    failure,
+  });
+  assert.throws(
+    () => validateSeedWorkerEvidence(failedWithRecord, manifest),
+    /zero failed records/u,
+  );
+
+  const failedWithoutPhase = createSeedWorkerEvidence({
+    manifest,
+    selection,
+    provenance,
+    records: [],
+    result: 'failed',
+    failure: { errorName: 'SyntheticWorkerFailure', message: 'missing phase' },
+  });
+  assert.throws(
+    () => validateSeedWorkerEvidence(failedWithoutPhase, manifest),
+    /lacks phase evidence/u,
+  );
+});
+
+test('failed shards bind timeout and generator timings to their last phase evidence', () => {
+  const manifest = createManifest();
+  const selection = selectCorpusEntries(manifest, {
+    tier: 'smoke', shardIndex: 0, shardCount: 1,
+  });
+  const failed = createShard(manifest, selection, [], { result: 'failed' });
+  assert.equal(validateShardEvidence(failed, manifest), failed);
+
+  const failedEntry = selection.entries[0];
+  const postGenerationPhase = createPhaseSnapshot(failedEntry, {
+    targetStarted: true,
+    phase: 'disposal',
+    status: 'completed',
+  });
+  postGenerationPhase.phaseTimings = createGeneratorPhaseTimings();
+  const postGenerationFailure = createReleaseWorkerFailureDiagnostics({
+    errorName: 'ReleaseSeedWorkerAugmentationRejected',
+    message: 'Synthetic unchanged publication failure.',
+    entry: failedEntry,
+    lastPhaseEvidence: postGenerationPhase,
+  });
+  const postGenerationShard = createShard(manifest, selection, [], {
+    result: 'failed',
+    failure: postGenerationFailure,
+  });
+  assert.equal(validateShardEvidence(postGenerationShard, manifest), postGenerationShard);
+  const missingPostGenerationMetrics = structuredClone(postGenerationShard);
+  for (const timings of [
+    missingPostGenerationMetrics.failure.generatorPhaseTimings,
+    missingPostGenerationMetrics.failure.lastPhaseEvidence.phaseTimings,
+  ]) {
+    timings.planningTimeMs = null;
+    timings.assemblyTimeMs = null;
+  }
+  assert.throws(
+    () => validateShardEvidence(sealEvidence(missingPostGenerationMetrics), manifest),
+    /generator phase timings/u,
+  );
+
+  for (const { label, mutate, expected } of [{
+    label: 'timeout phase drift',
+    mutate: (candidate) => { candidate.failure.timeoutPhase = 'target:planning'; },
+    expected: /authoritative worker phase diagnostics/u,
+  }, {
+    label: 'timeout elapsed drift',
+    mutate: (candidate) => { candidate.failure.timeoutPhaseElapsedMs += 1; },
+    expected: /authoritative worker phase diagnostics/u,
+  }, {
+    label: 'planner metric omitted',
+    mutate: (candidate) => {
+      candidate.failure.generatorPhaseTimings = {
+        ...candidate.failure.generatorPhaseTimings,
+      };
+      delete candidate.failure.generatorPhaseTimings.planningTimeMs;
+    },
+    expected: /phase timings/u,
+  }, {
+    label: 'assembly metric drift',
+    mutate: (candidate) => {
+      candidate.failure.generatorPhaseTimings = {
+        ...candidate.failure.generatorPhaseTimings,
+        assemblyTimeMs: 1,
+      };
+    },
+    expected: /generator timings do not match/u,
+  }]) {
+    const candidate = structuredClone(failed);
+    mutate(candidate);
+    assert.throws(
+      () => validateShardEvidence(sealEvidence(candidate), manifest),
+      expected,
+      label,
+    );
+  }
+});
+
 test('re-sealed seed records must exactly match manifest and parent RNG identity', () => {
   const manifest = createManifest();
   const selection = selectCorpusEntries(manifest, {
@@ -664,9 +1775,23 @@ test('re-sealed seed records reject nonnumeric, negative, and inconsistent timin
   }, {
     label: 'negative phase', mutate: (record) => { record.elapsedPhases.generationMs = -1; },
   }, {
+    label: 'missing disposal phase', mutate: (record) => { delete record.elapsedPhases.disposalMs; },
+  }, {
     label: 'phase sum drift', mutate: (record) => { record.elapsedPhases.totalMs += 1; },
   }, {
     label: 'elapsed total drift', mutate: (record) => { record.elapsedMs += 1; },
+  }, {
+    label: 'missing planner timing', mutate: (record) => {
+      record.generatorPhaseTimings.planningTimeMs = null;
+    },
+  }, {
+    label: 'negative assembly timing', mutate: (record) => {
+      record.generatorPhaseTimings.assemblyTimeMs = -1;
+    },
+  }, {
+    label: 'generator phase sum drift', mutate: (record) => {
+      record.generatorPhaseTimings.totalMs += 1;
+    },
   }];
   for (const { label, mutate } of mutations) {
     const record = createRecord(entry);
@@ -680,7 +1805,7 @@ test('re-sealed seed records reject nonnumeric, negative, and inconsistent timin
     });
     assert.throws(
       () => validateSeedWorkerEvidence(worker, manifest),
-      /finite nonnegative and internally consistent phase timing/u,
+      /phase timing/u,
       label,
     );
   }
@@ -730,6 +1855,14 @@ test('re-sealed warm-process evidence proves untimed same-process preroll before
     label: 'warmup RNG drift', mutate: (evidence) => { evidence.warmupSourceRandomCalls += 1; },
   }, {
     label: 'null warmup duration', mutate: (evidence) => { evidence.diagnosticElapsedMs = null; },
+  }, {
+    label: 'missing warmup phase timing', mutate: (evidence) => {
+      delete evidence.generatorPhaseTimings;
+    },
+  }, {
+    label: 'missing warmup assembly timing', mutate: (evidence) => {
+      evidence.generatorPhaseTimings.assemblyTimeMs = null;
+    },
   }, {
     label: 'wrong watchdog', mutate: (evidence) => { evidence.watchdogTimeoutMs = 30_000; },
   }];
@@ -897,42 +2030,107 @@ test('release suite receipts are sealed against command substitution and source 
   });
   assert.equal(drifted.result, 'failed');
   assert.equal(validateReleaseSuiteReceipt(drifted), drifted);
+
+  const dirtyAfterRun = createSuiteReceipt('canonical-unit', {
+    sourceStable: true,
+    postRunSourceDirty: true,
+  });
+  assert.equal(dirtyAfterRun.sourceStable, false);
+  assert.equal(dirtyAfterRun.result, 'failed');
+  assert.equal(validateReleaseSuiteReceipt(dirtyAfterRun), dirtyAfterRun);
+  const contradictoryDirtyAfterRun = structuredClone(dirtyAfterRun);
+  contradictoryDirtyAfterRun.sourceStable = true;
+  assert.throws(
+    () => validateReleaseSuiteReceipt(sealEvidence(contradictoryDirtyAfterRun)),
+    /sourceStable conflicts/u,
+  );
+
+  const dirtyBeforeRunProvenance = { ...provenance, sourceDirty: true };
+  const dirtyBeforeRun = createSuiteReceipt('canonical-unit', {
+    receiptProvenance: dirtyBeforeRunProvenance,
+    sourceStable: true,
+    postRunSourceDirty: false,
+  });
+  assert.equal(dirtyBeforeRun.sourceStable, false);
+  assert.equal(dirtyBeforeRun.result, 'failed');
 });
 
-test('release attestation rejects missing, duplicate, and mixed-source receipts', () => {
+test('release receipts require the real V1 scene regression and V4 visual acceptance', () => {
+  const command = RELEASE_SUITE_CONTRACTS['legacy-replay'].commands.find(({ id }) => (
+    id === 'legacy-v1-connector-scene'
+  ));
+  assert.deepEqual(command, {
+    id: 'legacy-v1-connector-scene',
+    runner: 'node',
+    args: [
+      'node_modules/@playwright/test/cli.js',
+      'test',
+      'tests/dungeon-connector-runtime.spec.js',
+      '--workers=1',
+    ],
+  });
+  const playwrightCommand = RELEASE_SUITE_CONTRACTS.playwright.commands.find(({ id }) => (
+    id === 'augmentation-runtime-journeys'
+  ));
+  assert.ok(
+    playwrightCommand.args.includes('tests/dungeon-augmentation-visual-acceptance.spec.js'),
+  );
+});
+
+test('release attestation seals passing predecessors and rejects coverage or identity bypasses', () => {
   const manifest = createManifest();
-  const selection = selectCorpusEntries(manifest, {
-    tier: 'smoke', shardIndex: 0, shardCount: 1,
-  });
-  const aggregate = aggregateShardEvidence({
-    manifest,
-    shards: [createShard(manifest, selection)],
-    generatedAt: '2026-07-31T00:09:00.000Z',
-  });
+  const aggregate = createPassingAggregate(manifest, 'release');
+  const predecessorEvidence = createPassingPredecessorEvidence(manifest);
   const receipts = RELEASE_REQUIRED_SUITE_IDS.map((suiteId) => createSuiteReceipt(suiteId));
   const attestation = createReleaseAttestation({
     aggregate,
+    predecessorEvidence,
     suiteReceipts: receipts,
     generatedAt: '2026-07-31T00:10:00.000Z',
   });
   assert.equal(validateReleaseAttestation(attestation), attestation);
+  assert.deepEqual(Object.keys(attestation.predecessorEvidence), [
+    ...RELEASE_PREDECESSOR_STAGE_IDS,
+  ]);
+  assert.equal(attestation.gates.exactPredecessorCoverage, true);
+  assert.equal(attestation.gates.predecessorStagesPassed, true);
+  assert.equal(attestation.gates.predecessorManifestIdentity, true);
   assert.equal(attestation.gates.exactReceiptCoverage, true);
   assert.equal(attestation.gates.sameSourceProvenance, true);
   assert.equal(attestation.gates.receiptsPassed, true);
-  assert.equal(attestation.gates.releaseCorpusTier, false);
-  assert.equal(attestation.releaseAccepted, false);
+  assert.equal(attestation.gates.releaseCorpusTier, true);
+  assert.equal(attestation.releaseAccepted, true);
 
   assert.throws(
-    () => createReleaseAttestation({ aggregate, suiteReceipts: receipts.slice(1) }),
+    () => createReleaseAttestation({
+      aggregate,
+      predecessorEvidence,
+      suiteReceipts: receipts.slice(1),
+    }),
     /missing receipts: canonical-unit/u,
   );
   assert.throws(
     () => createReleaseAttestation({
       aggregate,
+      predecessorEvidence,
       suiteReceipts: [...receipts, receipts[0]],
     }),
     /duplicate canonical-unit receipts/u,
   );
+
+  for (const stage of RELEASE_PREDECESSOR_STAGE_IDS) {
+    const missing = { ...predecessorEvidence };
+    delete missing[stage];
+    assert.throws(
+      () => createReleaseAttestation({
+        aggregate,
+        predecessorEvidence: missing,
+        suiteReceipts: receipts,
+      }),
+      new RegExp(`missing predecessor stages: ${stage}`, 'u'),
+      stage,
+    );
+  }
 
   const mixedProvenance = structuredClone(provenance);
   mixedProvenance.sourceHash = 'sha256-other-receipt-source';
@@ -940,8 +2138,74 @@ test('release attestation rejects missing, duplicate, and mixed-source receipts'
     ? createSuiteReceipt('playwright', { receiptProvenance: mixedProvenance })
     : receipt);
   assert.throws(
-    () => createReleaseAttestation({ aggregate, suiteReceipts: mixedReceipts }),
+    () => createReleaseAttestation({
+      aggregate,
+      predecessorEvidence,
+      suiteReceipts: mixedReceipts,
+    }),
     /sourceHash does not match/u,
+  );
+
+  const mixedSourcePredecessors = {
+    ...predecessorEvidence,
+    smoke: structuredClone(predecessorEvidence.smoke),
+  };
+  mixedSourcePredecessors.smoke.provenance.sourceHash = 'sha256-other-predecessor-source';
+  mixedSourcePredecessors.smoke = sealEvidence(mixedSourcePredecessors.smoke);
+  assert.throws(
+    () => createReleaseAttestation({
+      aggregate,
+      predecessorEvidence: mixedSourcePredecessors,
+      suiteReceipts: receipts,
+    }),
+    /sourceHash does not match/u,
+  );
+
+  const mixedManifestPredecessors = structuredClone(predecessorEvidence);
+  mixedManifestPredecessors.normal.manifestHash = 'sha256-other-manifest';
+  mixedManifestPredecessors.normal = sealEvidence(mixedManifestPredecessors.normal);
+  assert.throws(
+    () => createReleaseAttestation({
+      aggregate,
+      predecessorEvidence: mixedManifestPredecessors,
+      suiteReceipts: receipts,
+    }),
+    /wrong tier, manifest, or profile identity/u,
+  );
+
+  const failedCanonical = createCanonicalProbeEvidence({
+    manifest,
+    provenance,
+    records: [],
+    generatedAt: '2026-07-31T00:09:30.000Z',
+  });
+  const forgedCanonical = structuredClone(failedCanonical);
+  forgedCanonical.gates = Object.fromEntries(
+    Object.keys(forgedCanonical.gates).map((gate) => [gate, true]),
+  );
+  forgedCanonical.accepted = true;
+  forgedCanonical.result = 'passed';
+  forgedCanonical.failure = null;
+  const forgedPredecessors = {
+    ...predecessorEvidence,
+    canonical: sealEvidence(forgedCanonical),
+  };
+  assert.throws(
+    () => createReleaseAttestation({
+      aggregate,
+      predecessorEvidence: forgedPredecessors,
+      suiteReceipts: receipts,
+    }),
+    /result, gates, or failure diagnostics are inconsistent/u,
+  );
+
+  const missingEmbeddedPredecessor = structuredClone(attestation);
+  delete missingEmbeddedPredecessor.predecessorEvidence.normal;
+  missingEmbeddedPredecessor.releaseAccepted = true;
+  missingEmbeddedPredecessor.result = 'passed';
+  assert.throws(
+    () => validateReleaseAttestation(sealEvidence(missingEmbeddedPredecessor)),
+    /missing predecessor stages: normal/u,
   );
   assert.throws(
     () => validateReleaseAttestation(aggregate),
@@ -963,23 +2227,63 @@ test('failed suite receipts remain sealed evidence but cannot pass the final att
       ? createSuiteReceipt(suiteId, { failedCommandIndex: 0 })
       : createSuiteReceipt(suiteId)
   ));
-  const attestation = createReleaseAttestation({ aggregate, suiteReceipts: receipts });
+  const predecessorEvidence = createPassingPredecessorEvidence(manifest);
+  const attestation = createReleaseAttestation({
+    aggregate,
+    predecessorEvidence,
+    suiteReceipts: receipts,
+  });
   assert.equal(attestation.gates.receiptsPassed, false);
   assert.equal(attestation.releaseAccepted, false);
 });
 
-test('package smoke and normal aliases use only the immutable ordinal evidence workflow', async () => {
+test('direct release verifier and finalizer require predecessor artifacts', async () => {
+  const [verifierSource, finalizerSource] = await Promise.all([
+    readFile(
+      new URL('../scripts/verify-dungeon-augmentation-release.mjs', import.meta.url),
+      'utf8',
+    ),
+    readFile(
+      new URL('../scripts/finalize-dungeon-augmentation-release-evidence.mjs', import.meta.url),
+      'utf8',
+    ),
+  ]);
+  for (const requiredArgument of [
+    '--canonical=',
+    '--smoke-aggregate=',
+    '--normal-aggregate=',
+  ]) {
+    assert.ok(verifierSource.includes(requiredArgument), requiredArgument);
+  }
+  const preflightStart = verifierSource.indexOf("if (tier === 'release') {");
+  const releaseWorkStart = verifierSource.indexOf('await mkdir(shardDirectory');
+  assert.ok(preflightStart >= 0 && preflightStart < releaseWorkStart);
+  assert.match(
+    verifierSource.slice(preflightStart, releaseWorkStart),
+    /validateReleasePredecessorEvidenceCollection/u,
+  );
+  assert.match(
+    finalizerSource,
+    /!canonicalArgument\s*\|\|\s*!smokeAggregateArgument\s*\|\|\s*!normalAggregateArgument/u,
+  );
+  assert.match(
+    finalizerSource,
+    /createReleaseAttestation\(\{[\s\S]*predecessorEvidence,[\s\S]*suiteReceipts/u,
+  );
+});
+
+test('package smoke and normal aliases use the ordered immutable release gates', async () => {
   const packageJson = JSON.parse(await readFile(
     new URL('../package.json', import.meta.url),
     'utf8',
   ));
   assert.equal(
     packageJson.scripts['test:dungeon-augmentation:realized:smoke'],
-    'node scripts/verify-dungeon-augmentation-release.mjs --tier=smoke',
+    'node scripts/run-dungeon-augmentation-release-gates.mjs --through=smoke',
   );
   assert.equal(
     packageJson.scripts['test:dungeon-augmentation:realized'],
-    'node scripts/verify-dungeon-augmentation-release.mjs --tier=normal',
+    'node scripts/run-dungeon-augmentation-release-gates.mjs --through=normal',
   );
   for (const alias of [
     packageJson.scripts['test:dungeon-augmentation:realized:smoke'],

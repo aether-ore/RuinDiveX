@@ -11,6 +11,8 @@ import {
   INDUSTRIAL_SUPPLEMENT_BLUEPRINTS,
 } from '../src/dungeon-augmentation/IndustrialSupplementBlueprintCatalog.js';
 import { orientBlueprintTransferChoice } from '../src/dungeon-augmentation/IndustrialOverlayMaterializer.js';
+import { transformDungeonVolume } from '../src/dungeon-augmentation/geometry.js';
+import { nodePlanningCollisionScore } from '../src/dungeon-augmentation/planner.js';
 
 const V4_PROFILE_ID = 'industrial-supplement-preview-v4';
 
@@ -206,6 +208,86 @@ test('blueprint grammars preserve exact masks, tiers, sockets, routes, and trans
       [...new Set(blueprint.physicalTransfers.map(({ form }) => String(form)))],
     );
   }
+});
+
+test('blueprint planning mirrors assembler perimeter walls around an indented floor mask', () => {
+  const grammar = blueprintGrammar('ind-room-switchgear-cache-descent-01');
+  const placement = {
+    center: { x: 0, y: 14, z: 218.4 },
+    rotationQuarterTurns: 3,
+  };
+  const transform = (volume) => transformDungeonVolume(volume, placement);
+  const bonusVaultBody = {
+    id: 'bonus-vault-body',
+    center: { x: 25.2, y: 20.4, z: 240.8 },
+    size: { x: 36.4, y: 12.8, z: 36.4 },
+  };
+  const exactMaskNode = {
+    grammarId: grammar.id,
+    occupiedVolumes: grammar.occupiedVolumes.map(transform),
+    clearanceVolumes: grammar.clearanceVolumes
+      .filter(({ purpose }) => !String(purpose).includes('structural-shell-wall-clearance'))
+      .map(transform),
+  };
+  const shellAwareNode = {
+    ...exactMaskNode,
+    clearanceVolumes: grammar.clearanceVolumes.map(transform),
+  };
+
+  assert.equal(nodePlanningCollisionScore(exactMaskNode, [bonusVaultBody]), 0);
+  assert.ok(nodePlanningCollisionScore(shellAwareNode, [bonusVaultBody]) > 0);
+  assert.deepEqual(grammar.clearanceVolumes.filter(({ purpose }) => (
+    String(purpose).includes('structural-shell-wall-clearance')
+  )), [
+    {
+      id: 'blueprint-structural-shell-north-panel-0-clearance',
+      center: { x: -7, y: grammar.size.height * 0.5, z: -grammar.size.depth * 0.5 },
+      size: { x: 5.6000000000000005, y: grammar.size.height, z: 0.22 },
+      purpose: 'supplement-room-structural-shell-wall-clearance',
+    },
+    {
+      id: 'blueprint-structural-shell-north-header-1-clearance',
+      center: { x: 0, y: 7, z: -grammar.size.depth * 0.5 },
+      size: { x: 8.4, y: 2.8000000000000007, z: 0.22 },
+      purpose: 'supplement-room-structural-shell-wall-clearance',
+    },
+    {
+      id: 'blueprint-structural-shell-north-panel-2-clearance',
+      center: { x: 7, y: grammar.size.height * 0.5, z: -grammar.size.depth * 0.5 },
+      size: { x: 5.6000000000000005, y: grammar.size.height, z: 0.22 },
+      purpose: 'supplement-room-structural-shell-wall-clearance',
+    },
+    {
+      id: 'blueprint-structural-shell-south-panel-0-clearance',
+      center: { x: -7, y: grammar.size.height * 0.5, z: grammar.size.depth * 0.5 },
+      size: { x: 5.6000000000000005, y: grammar.size.height, z: 0.22 },
+      purpose: 'supplement-room-structural-shell-wall-clearance',
+    },
+    {
+      id: 'blueprint-structural-shell-south-header-1-clearance',
+      center: { x: 0, y: 7, z: grammar.size.depth * 0.5 },
+      size: { x: 8.4, y: 2.8000000000000007, z: 0.22 },
+      purpose: 'supplement-room-structural-shell-wall-clearance',
+    },
+    {
+      id: 'blueprint-structural-shell-south-panel-2-clearance',
+      center: { x: 7, y: grammar.size.height * 0.5, z: grammar.size.depth * 0.5 },
+      size: { x: 5.6000000000000005, y: grammar.size.height, z: 0.22 },
+      purpose: 'supplement-room-structural-shell-wall-clearance',
+    },
+    {
+      id: 'blueprint-structural-shell-west-panel-0-clearance',
+      center: { x: -grammar.size.width * 0.5, y: grammar.size.height * 0.5, z: 0 },
+      size: { x: 0.22, y: grammar.size.height, z: grammar.size.depth },
+      purpose: 'supplement-room-structural-shell-wall-clearance',
+    },
+    {
+      id: 'blueprint-structural-shell-east-panel-0-clearance',
+      center: { x: grammar.size.width * 0.5, y: grammar.size.height * 0.5, z: 0 },
+      size: { x: 0.22, y: grammar.size.height, z: grammar.size.depth },
+      purpose: 'supplement-room-structural-shell-wall-clearance',
+    },
+  ]);
 });
 
 test('V1 through V3 retain their legacy non-blueprint grammar pools', () => {

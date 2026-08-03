@@ -192,6 +192,72 @@ function roomFloorCells(room) {
   return [...floorCells, ...transferCells];
 }
 
+function boundedBlueprintAnchorFallbackSupportCellIds(room, anchor, declaredZoneIds = []) {
+  if (
+    anchor?.authoritativeBlueprintPlacement !== true
+    || declaredZoneIds.length > 0
+    || anchor?.reselectWithinDeclaredZoneAndTier === false
+  ) {
+    return [];
+  }
+  const exactId = supportCellId(anchor);
+  if (!exactId) return [];
+  const cells = roomFloorCells(room);
+  const exact = cells.find((cell) => supportCellId(cell) === exactId);
+  if (!exact?.localTile) return [];
+  const exactElevation = finiteNumber(
+    exact.localTile.elevation ?? exact.localElevation ?? exact.elevation ?? exact.position?.y,
+  );
+  const exactX = finiteNumber(exact.localTile.x);
+  const exactZ = finiteNumber(exact.localTile.z);
+  if (exactElevation == null || exactX == null || exactZ == null) return [];
+  const floorTierRuntimeId = stringOrNull(
+    anchor.floorTierRuntimeId ?? exact.floorTierRuntimeId,
+  );
+  const transferRuntimeId = stringOrNull(
+    anchor.blueprintTransferRuntimeId ?? anchor.sourceTransferRuntimeId ?? exact.transferId,
+  );
+  if (!floorTierRuntimeId && !transferRuntimeId) return [];
+  return cells
+    .filter((candidate) => {
+      const candidateId = supportCellId(candidate);
+      const candidateX = finiteNumber(candidate.localTile?.x);
+      const candidateZ = finiteNumber(candidate.localTile?.z);
+      const candidateElevation = finiteNumber(
+        candidate.localTile?.elevation
+          ?? candidate.localElevation
+          ?? candidate.elevation
+          ?? candidate.position?.y,
+      );
+      if (
+        !candidateId
+        || candidateX == null
+        || candidateZ == null
+        || candidateElevation == null
+        || String(candidate.roomId ?? room.id) !== String(room.id)
+        || candidate.authoritative === false
+        || Math.abs(candidateElevation - exactElevation) > EPSILON
+        || Math.abs(candidateX - exactX) + Math.abs(candidateZ - exactZ) > 1 + EPSILON
+      ) {
+        return false;
+      }
+      if (floorTierRuntimeId) {
+        return String(candidate.floorTierRuntimeId ?? '') === floorTierRuntimeId;
+      }
+      return String(candidate.transferId ?? '') === transferRuntimeId;
+    })
+    .sort((left, right) => {
+      const leftDistance = Math.abs(finiteNumber(left.localTile?.x, 0) - exactX)
+        + Math.abs(finiteNumber(left.localTile?.z, 0) - exactZ);
+      const rightDistance = Math.abs(finiteNumber(right.localTile?.x, 0) - exactX)
+        + Math.abs(finiteNumber(right.localTile?.z, 0) - exactZ);
+      return Number(supportCellId(right) === exactId) - Number(supportCellId(left) === exactId)
+        || leftDistance - rightDistance
+        || String(supportCellId(left)).localeCompare(String(supportCellId(right)));
+    })
+    .map(supportCellId);
+}
+
 function zoneSupportCellIds(zone) {
   return sortedUniqueStrings(asArray(zone?.worldCells).map(supportCellId).filter(Boolean));
 }
@@ -268,6 +334,12 @@ function normalizeForbiddenFootprint(record, fallbackKind = 'forbidden-footprint
     ...asArray(record.worldCellIds),
     ...asArray(record.apertureFloorCellIds),
   ]);
+  const hasAuthoritativeOccupiedSupportCellIds = Array.isArray(
+    record.occupiedSupportCellIds,
+  );
+  const occupiedSupportCellIds = hasAuthoritativeOccupiedSupportCellIds
+    ? sortedUniqueStrings(record.occupiedSupportCellIds)
+    : null;
   return {
     id: String(record.id ?? record.runtimeId ?? `${fallbackKind}:anonymous`),
     kind: String(record.kind ?? record.collisionKind ?? fallbackKind),
@@ -277,6 +349,7 @@ function normalizeForbiddenFootprint(record, fallbackKind = 'forbidden-footprint
     bounds: clonePlainValue(record.bounds ?? null),
     grid: clonePlainValue(record.grid ?? null),
     supportCellIds,
+    ...(hasAuthoritativeOccupiedSupportCellIds ? { occupiedSupportCellIds } : {}),
     allowOwningAnchor: record.allowOwningAnchor === true,
     allowedPlacementKinds: sortedUniqueStrings(record.allowedPlacementKinds),
   };
@@ -286,19 +359,29 @@ function forbiddenFootprintsForRoom(room, anchor = null) {
   const records = [
     ...asArray(anchor?.forbiddenFootprints),
     ...asArray(room?.augmentationCollisionRecords).filter((record) => (
-      record?.blocking === true || record?.excludesFloor === true || record?.mustRemainClear === true
+      (
+        record?.blocking === true
+          || record?.excludesFloor === true
+          || record?.mustRemainClear === true
+      )
+        && String(record?.sourceKind ?? '') !== 'clear-route'
+        && String(record?.collisionKind ?? '') !== 'clear-route-reservation'
     )),
     ...asArray(room?.augmentationCover).filter((record) => record?.blocksMovement !== false),
     ...asArray(room?.augmentationBlueprintFeatures).filter((record) => (
       ['cover', 'machine'].includes(String(record?.blueprintFeatureType ?? record?.type ?? ''))
-        && record?.blocksMovement !== false
+        && (
+          record?.blocking === true
+            || record?.solid === true
+            || record?.blocksMovement === true
+        )
     )),
     ...asArray(room?.augmentationVoids),
-    ...asArray(room?.augmentationClearRoutes).map((record) => ({
-      ...record,
-      kind: 'clear-route-reservation',
-      supportCellIds: record.worldCellIds,
-    })),
+    // Authored room anchors may deliberately occupy a route endpoint (for
+    // example a control console at the end of its access path or an encounter
+    // role on a traversable perch). Clear routes constrain geometry and the
+    // separately-built shortcut-control request below; they are not blanket
+    // blockers for the room's own authored anchor requests.
   ];
   return stableRecords(records.map((record) => normalizeForbiddenFootprint(record)).filter(Boolean))
     .filter((record, index, all) => index === all.findIndex(({ id }) => id === record.id));
@@ -312,10 +395,16 @@ function requestForAnchor(room, anchor, options) {
   const zones = declaredZoneIds.map((id) => byId.get(id)).filter(Boolean);
   const allowedZoneIds = sortedUniqueStrings(zones.map((zone) => zone.runtimeId ?? zone.id));
   const exactSupportCellId = stringOrNull(anchor.supportCellId);
+  const localFallbackSupportCellIds = boundedBlueprintAnchorFallbackSupportCellIds(
+    room,
+    anchor,
+    declaredZoneIds,
+  );
   const allowedSupportCellIds = sortedUniqueStrings([
     exactSupportCellId,
     ...asArray(anchor.supportCellIds),
     ...zones.flatMap(zoneSupportCellIds),
+    ...localFallbackSupportCellIds,
   ]);
   const id = `${anchor.id}:placement-request`;
   const requiredElevation = finiteNumber(
@@ -331,10 +420,17 @@ function requestForAnchor(room, anchor, options) {
     ownerId: String(anchor.id),
     operationId: stringOrNull(anchor.operationId ?? room.augmentationOperationId),
     roomId: String(room.id),
+    blueprintId: stringOrNull(room.augmentationBlueprintId),
+    grammarId: stringOrNull(
+      room.augmentationModuleTemplateId
+        ?? room.augmentationPhysicalModuleKind
+        ?? room.archetypeId,
+    ),
     placementKind,
     requestedPosition: clonePlainValue(pointOf(anchor)),
     exactSupportCellId,
     allowedSupportCellIds,
+    localFallbackSupportCellIds,
     declaredZoneIds,
     allowedZoneIds,
     requiredTierId: stringOrNull(anchor.floorTierId ?? anchor.requiredTierId),
@@ -681,6 +777,9 @@ function candidateBlockedByFootprint(candidate, footprint, request) {
   if (footprint.ownerId && String(footprint.ownerId) === String(request.ownerId)
     && footprint.allowOwningAnchor === true) return false;
   if (asArray(footprint.allowedPlacementKinds).includes(request.placementKind)) return false;
+  if (Array.isArray(footprint.occupiedSupportCellIds) && candidate.supportCellId) {
+    return footprint.occupiedSupportCellIds.map(String).includes(String(candidate.supportCellId));
+  }
   if (asArray(footprint.supportCellIds).map(String).includes(candidate.supportCellId)) return true;
   return pointInsideFootprint(candidate, footprint);
 }
@@ -791,6 +890,9 @@ export function resolveIndustrialSupplementAnchorPlacementRequests({
       forbidden: 0,
       reservation: 0,
     };
+    const blockingFootprintIds = new Set();
+    const blockingReservationsById = new Map();
+    const unwalkableSupportDetails = [];
     const candidates = [];
     for (const candidate of pool) {
       if (request.requiresFarSide === true
@@ -831,21 +933,55 @@ export function resolveIndustrialSupplementAnchorPlacementRequests({
       const allowlistedWalkable = walkability.allowedSet == null
         || walkability.allowedSet.has(candidate.supportCellId);
       if (!baseWalkable || !recordedWalkable || !allowlistedWalkable) {
+        unwalkableSupportDetails.push({
+          supportCellId: candidate.supportCellId,
+          baseWalkable,
+          recordedWalkable,
+          allowlistedWalkable,
+          walkable: candidate.walkable,
+          blocked: candidate.blocked,
+          reachable: candidate.reachable,
+          returnable: candidate.returnable,
+          walkabilityIntent: candidate.walkabilityIntent ?? null,
+          floorKey: candidate.floorKey ?? null,
+          reachableFloorKeyMember: candidate.reachableFloorKeyMember ?? null,
+          coveredByAuthoritativeFloorKey: candidate.coveredByAuthoritativeFloorKey ?? null,
+          blockingSolidZoneIds: sortedUniqueStrings(candidate.blockingSolidZoneIds),
+        });
         rejectionCounts.walkability += 1;
         continue;
       }
-      const forbidden = [
+      const blockingFootprint = [
         ...asArray(request.forbiddenFootprints),
         ...globalForbidden,
-      ].some((footprint) => candidateBlockedByFootprint(candidate, footprint, request));
-      if (forbidden) {
+      ].find((footprint) => candidateBlockedByFootprint(candidate, footprint, request));
+      if (blockingFootprint) {
+        blockingFootprintIds.add(String(blockingFootprint.id ?? '(unnamed-footprint)'));
         rejectionCounts.forbidden += 1;
         continue;
       }
       const radius = Math.max(0, finiteNumber(request.reservationRadiusMeters, 0));
-      if (committedReservations.some((reservation) => (
+      const blockingReservation = committedReservations.find((reservation) => (
         reservationConflict(candidate, radius, reservation)
-      ))) {
+      ));
+      if (blockingReservation) {
+        const reservationId = String(
+          blockingReservation.id
+            ?? blockingReservation.requestId
+            ?? blockingReservation.ownerId
+            ?? '(unnamed-reservation)',
+        );
+        blockingReservationsById.set(reservationId, {
+          id: blockingReservation.id ?? null,
+          requestId: blockingReservation.requestId ?? null,
+          ownerId: blockingReservation.ownerId ?? null,
+          supportCellId: blockingReservation.supportCellId ?? null,
+          position: clonePlainValue(blockingReservation.position ?? null),
+          reservationRadiusMeters: finiteNumber(
+            blockingReservation.reservationRadiusMeters,
+            0,
+          ),
+        });
         rejectionCounts.reservation += 1;
         continue;
       }
@@ -880,7 +1016,19 @@ export function resolveIndustrialSupplementAnchorPlacementRequests({
       errors.push(makeError(code, {
         recordId: request.id,
         ownerId: request.ownerId,
-        details: { candidateCount: total, rejectionCounts },
+        details: {
+          candidateCount: total,
+          rejectionCounts,
+          placementKind: request.placementKind,
+          roomId: request.roomId,
+          blueprintId: request.blueprintId ?? null,
+          grammarId: request.grammarId ?? null,
+          exactSupportCellId: exactId,
+          candidateSupportCellIds: pool.map(({ supportCellId }) => supportCellId).sort(),
+          unwalkableSupportDetails,
+          blockingFootprintIds: [...blockingFootprintIds].sort(),
+          blockingReservations: [...blockingReservationsById.values()],
+        },
       }));
       continue;
     }

@@ -10,6 +10,7 @@ import {
 } from '../src/dungeon-augmentation/varietySignature.js';
 import {
   DUNGEON_SELECTION_BAG_FAMILIES,
+  inspectDungeonRouteNetworkSelectionSequence,
 } from '../src/dungeon-augmentation/selectionBagWitness.js';
 import {
   inspectIndustrialSupplementRealizedStructuralQuality,
@@ -21,13 +22,18 @@ import {
   EXPECTED_JUNCTION_KINDS,
   EXPECTED_ROOM_LAYOUT_IDS,
   EXPECTED_TOPOLOGY_TEMPLATE_IDS,
+  RELEASE_AUGMENTATION_REALIZATION_ATTEMPT_LIMIT,
   RELEASE_PERFORMANCE_BUDGET_MS,
   RELEASE_WARM_PROCESS_EVIDENCE_SCHEMA,
   RELEASE_WARM_PROCESS_MODE,
+  assertCleanReleaseProvenance,
   assertMatchingReleaseProvenance,
+  captureReleaseGeneratorMetrics,
   createAcceptedParentWitness,
+  createReleasePhaseHeartbeatReporter,
   createReleaseProvenance,
   createSeedWorkerEvidence,
+  inspectReleaseSeedWorkerRecordPublication,
   readJson,
   selectCorpusEntries,
   validateReleaseSelectionBagWitnesses,
@@ -236,6 +242,7 @@ const manifestArgument = argumentValue('manifest');
 const corpusTierArgument = argumentValue('tier') ?? 'release';
 const outputArgument = argumentValue('output');
 const seedWorkerOutputArgument = argumentValue('seed-worker-output');
+const phaseHeartbeatArgument = argumentValue('phase-heartbeat');
 const ordinalStartArgument = argumentValue('ordinal-start');
 const ordinalCountArgument = argumentValue('ordinal-count');
 const shardIndexArgument = argumentValue('shard-index');
@@ -250,6 +257,9 @@ if (outputArgument) {
 if (seedWorkerOutputArgument && !manifestArgument) {
   throw new Error('Evidence output requires --manifest so it has an immutable seed boundary.');
 }
+if (seedWorkerOutputArgument && !phaseHeartbeatArgument) {
+  throw new Error('Release seed workers require --phase-heartbeat=<path>.');
+}
 if (manifestArgument && !seedWorkerOutputArgument) {
   throw new Error('--manifest evidence runs require the internal --seed-worker-output=<path> mode.');
 }
@@ -258,11 +268,12 @@ let releaseManifest = null;
 let releaseSelection = null;
 let releaseProvenance = null;
 if (manifestArgument) {
-  releaseManifest = validateCorpusManifest(await readJson(path.resolve(projectRoot, manifestArgument)));
   releaseProvenance = await createReleaseProvenance({
     projectRoot,
     profile: DUNGEON_AUGMENTATION_PROFILES[PROFILE_ID],
   });
+  assertCleanReleaseProvenance(releaseProvenance, 'realized verifier source');
+  releaseManifest = validateCorpusManifest(await readJson(path.resolve(projectRoot, manifestArgument)));
   assertMatchingReleaseProvenance(
     releaseProvenance,
     releaseManifest.provenance,
@@ -292,7 +303,7 @@ if (!releaseManifest && seedCount >= 100) {
   );
 }
 
-function runReleaseWorkerWarmup(manifest, targetEntry) {
+function runReleaseWorkerWarmup(manifest, targetEntry, phaseReporter) {
   const warmupOrdinal = (targetEntry.ordinal + 1) % manifest.entries.length;
   const warmupEntry = manifest.entries[warmupOrdinal];
   const seededRandom = new SeededRandom(hashSeed(warmupEntry.seed));
@@ -306,27 +317,43 @@ function runReleaseWorkerWarmup(manifest, targetEntry) {
     augmentationProfileId: PROFILE_ID,
     augmentationSeed: warmupEntry.seed,
     basePlanHash: warmupEntry.basePlanHash,
+    augmentationRealizationAttemptLimit: RELEASE_AUGMENTATION_REALIZATION_ATTEMPT_LIMIT,
   });
+  generator.augmentationPhaseObserver = (event) => {
+    phaseReporter.observeGeneratorPhase(event);
+  };
   const inertTexture = new THREE.Texture();
   inertTexture.name = `releaseWorkerWarmup_${String(warmupOrdinal).padStart(4, '0')}`;
   generator.textureCache.set(inertTexture.name, inertTexture);
   generator._loadRuinTexture = () => inertTexture;
   const startedAt = performance.now();
   let dungeon = null;
+  let evidence = null;
+  let planningTimeMs = null;
+  let assemblyTimeMs = null;
+  phaseReporter.startPhase('parent-generation');
   try {
     dungeon = generator.generate();
+    const capturedMetrics = phaseReporter.captureDungeonGeneratorMetrics(dungeon);
+    planningTimeMs = capturedMetrics.planningTimeMs;
+    assemblyTimeMs = capturedMetrics.assemblyTimeMs;
+    phaseReporter.completePhase();
+    phaseReporter.startPhase('strict-validation');
     const parentWitness = createAcceptedParentWitness(dungeon, sourceRandomCalls);
     assert.equal(parentWitness.hash, warmupEntry.parentWitness.hash);
     assert.equal(dungeon.basePlanHash, warmupEntry.basePlanHash);
     assert.equal(dungeon.augmentationStatus, 'applied');
     assert.equal(dungeon.augmentationReplayDiagnostics?.realizationAttempts, 1);
+    assert.ok(Number.isFinite(planningTimeMs) && planningTimeMs >= 0);
+    assert.ok(Number.isFinite(assemblyTimeMs) && assemblyTimeMs >= 0);
+    phaseReporter.completePhase('strict-validation');
     // Release workers intentionally retain one timed target per process so a
     // wedged target remains killable by the 180-second watchdog. This real V4
     // preroll warms imports, JIT paths, catalog lookups, and generator caches
     // in that same process, but its diagnostic duration is excluded from the
     // target performance sample. The process watchdog conservatively covers
     // both warm-up and target rather than allowing an unbounded preroll.
-    return {
+    evidence = {
       schema: RELEASE_WARM_PROCESS_EVIDENCE_SCHEMA,
       mode: RELEASE_WARM_PROCESS_MODE,
       completed: true,
@@ -345,12 +372,29 @@ function runReleaseWorkerWarmup(manifest, targetEntry) {
       warmupAugmentationStatus: dungeon.augmentationStatus,
       warmupRealizationAttempts:
         dungeon.augmentationReplayDiagnostics?.realizationAttempts ?? 0,
-      diagnosticElapsedMs: performance.now() - startedAt,
     };
+  } catch (error) {
+    phaseReporter.captureFailure();
+    throw error;
   } finally {
-    generator._disposeGeneratedDungeonCandidate(dungeon);
-    inertTexture.dispose();
+    phaseReporter.startPhase('disposal');
+    try {
+      generator._disposeGeneratedDungeonCandidate(dungeon);
+      inertTexture.dispose();
+    } catch (error) {
+      phaseReporter.captureFailure();
+      throw error;
+    } finally {
+      phaseReporter.completePhase('disposal');
+    }
   }
+  evidence.diagnosticElapsedMs = performance.now() - startedAt;
+  evidence.generatorPhaseTimings = phaseReporter.timings({
+    scope: 'warmup',
+    planningTimeMs,
+    assemblyTimeMs,
+  });
+  return evidence;
 }
 
 const records = [];
@@ -362,21 +406,53 @@ const evidenceOutputArgument = seedWorkerOutputArgument;
 const resolvedOutputPath = evidenceOutputArgument
   ? path.resolve(projectRoot, evidenceOutputArgument)
   : null;
+const resolvedPhaseHeartbeatPath = phaseHeartbeatArgument
+  ? path.resolve(projectRoot, phaseHeartbeatArgument)
+  : null;
+const releasePhaseReporter = releaseManifest
+  ? createReleasePhaseHeartbeatReporter({
+      targetPath: resolvedPhaseHeartbeatPath,
+      targetEntry: releaseSelection.entries[0],
+      warmupEntry: releaseManifest.entries[
+        (releaseSelection.entries[0].ordinal + 1) % releaseManifest.entries.length
+      ],
+    })
+  : null;
 
 const writeFailureEvidence = (error) => {
   if (!releaseManifest || !releaseSelection || !resolvedOutputPath || evidenceWritten) return;
+  const failurePhaseEvidence = releasePhaseReporter?.snapshot({ preferFailure: true }) ?? null;
+  const lastPhaseEvidence = releasePhaseReporter?.snapshot() ?? null;
+  const publicationFailure = error?.releaseSeedWorkerFailure ?? null;
   const artifact = createSeedWorkerEvidence({
     manifest: releaseManifest,
     selection: releaseSelection,
     provenance: releaseProvenance,
-    records,
+    // A failed worker is one atomic non-publication even if an exception is
+    // raised after a local candidate record has been assembled.
+    records: [],
     result: 'failed',
     failure: {
-      errorName: error?.name ?? 'Error',
-      message: error?.message ?? String(error),
+      errorName: publicationFailure?.errorName ?? error?.name ?? 'Error',
+      message: publicationFailure?.message ?? error?.message ?? String(error),
       stack: error?.stack ?? null,
       currentOrdinal: currentManifestEntry?.ordinal ?? null,
       currentSeed: currentManifestEntry?.seed ?? null,
+      failurePhaseEvidence,
+      lastPhaseEvidence,
+      ...(publicationFailure ? {
+        errorCode: publicationFailure.errorCode,
+        augmentationStatus: publicationFailure.augmentationStatus,
+        failureCodes: publicationFailure.failureCodes,
+        rejectionMessage: publicationFailure.rejectionMessage,
+        rejectionMessages: publicationFailure.rejectionMessages,
+        rejectionAttempts: publicationFailure.rejectionAttempts,
+        elapsedPhases: publicationFailure.elapsedPhases,
+      } : {}),
+      generatorPhaseTimings: publicationFailure?.generatorPhaseTimings
+        ?? failurePhaseEvidence?.phaseTimings
+        ?? lastPhaseEvidence?.phaseTimings
+        ?? null,
     },
   });
   writeImmutableJsonSync(resolvedOutputPath, artifact);
@@ -401,7 +477,9 @@ if (releaseManifest) {
   releaseWarmProcessEvidence = runReleaseWorkerWarmup(
     releaseManifest,
     currentManifestEntry,
+    releasePhaseReporter,
   );
+  releasePhaseReporter.beginTarget();
 }
 
 while (records.length < seedCount) {
@@ -422,7 +500,15 @@ while (records.length < seedCount) {
     augmentationProfileId: PROFILE_ID,
     augmentationSeed: seed,
     basePlanHash,
+    ...(releaseManifest ? {
+      augmentationRealizationAttemptLimit: RELEASE_AUGMENTATION_REALIZATION_ATTEMPT_LIMIT,
+    } : {}),
   });
+  if (releasePhaseReporter) {
+    generator.augmentationPhaseObserver = (event) => {
+      releasePhaseReporter.observeGeneratorPhase(event);
+    };
+  }
   const inertTexture = new THREE.Texture();
   inertTexture.name = `realizedAugmentationAudit_${suffix}`;
   generator.textureCache.set(inertTexture.name, inertTexture);
@@ -432,10 +518,21 @@ while (records.length < seedCount) {
   let dungeon = null;
   let acceptedParentWitness = null;
   let acceptedParentParity = currentManifestEntry == null;
+  let recordCandidate = null;
+  let planningTimeMs = null;
+  let assemblyTimeMs = null;
+  let disposalMs = 0;
+  releasePhaseReporter?.startPhase('parent-generation');
   try {
     try {
       dungeon = generator.generate();
+      const capturedMetrics = releasePhaseReporter?.captureDungeonGeneratorMetrics(dungeon)
+        ?? captureReleaseGeneratorMetrics(dungeon?.augmentationMetrics);
+      planningTimeMs = capturedMetrics.planningTimeMs;
+      assemblyTimeMs = capturedMetrics.assemblyTimeMs;
       generationCompletedAt = performance.now();
+      releasePhaseReporter?.completePhase();
+      releasePhaseReporter?.startPhase('strict-validation');
     } catch (candidateParentError) {
       if (currentManifestEntry) {
         throw new Error(
@@ -619,19 +716,18 @@ while (records.length < seedCount) {
         .flatMap((operation) => operation.selectionManifest?.roomLayouts ?? [])
         .map(({ grammarId }) => grammarId)
         .filter(Boolean);
-      selectionBagWitnesses = Object.fromEntries(
-        DUNGEON_SELECTION_BAG_FAMILIES.map((family) => [
-          family,
-          routeNetworks.flatMap((operation) => {
-            const operationWitnesses = operation.selectionManifest?.bagWitnesses;
-            if (Array.isArray(operationWitnesses)) {
-              return operationWitnesses.filter((witness) => witness?.family === family);
-            }
-            const familyWitnesses = operationWitnesses?.[family];
-            return Array.isArray(familyWitnesses) ? familyWitnesses : [];
-          }),
-        ]),
+      const selectionSequence = inspectDungeonRouteNetworkSelectionSequence(routeNetworks, {
+        allowAllManifestsAbsent: false,
+        requireNonEmptyFamilies: true,
+      });
+      assert.equal(
+        selectionSequence.accepted,
+        true,
+        `Route-network solve-order selection sequence is invalid: ${JSON.stringify(
+          selectionSequence.errors,
+        )}`,
       );
+      selectionBagWitnesses = selectionSequence.witnessesByFamily;
       validateReleaseSelectionBagWitnesses(selectionBagWitnesses);
       topologyTemplateIds = [...new Set(topologyTemplateSelections)];
       junctionKinds = [...new Set(junctionKindSelections)];
@@ -732,7 +828,10 @@ while (records.length < seedCount) {
         routeNetworks.map(({ grantId }) => grantId),
         'The overlay grant manifest must name every and only realized route network.',
       );
-      assert.ok(networkCount >= 3 && networkCount <= 8);
+      assert.ok(
+        networkCount >= 2 && networkCount <= 8,
+        'A realized V4 partial must retain 2-8 networks; the minimum is one landmark plus one objective-coverage supplement.',
+      );
       assert.equal(pyramidLoopCount, 1);
       assert.ok(coverageNetworkCount >= 1);
       assert.ok(moduleCount >= networkCount * 3 && moduleCount <= 30);
@@ -1621,9 +1720,15 @@ while (records.length < seedCount) {
     const elapsedPhases = {
       generationMs,
       strictValidationMs,
+      disposalMs: 0,
       totalMs: generationMs + strictValidationMs,
     };
-    records.push({
+    if (releaseManifest) {
+      assert.ok(Number.isFinite(planningTimeMs) && planningTimeMs >= 0);
+      assert.ok(Number.isFinite(assemblyTimeMs) && assemblyTimeMs >= 0);
+    }
+    releasePhaseReporter?.completePhase('strict-validation');
+    recordCandidate = {
       ordinal: currentManifestEntry?.ordinal ?? null,
       rawIndex,
       seed,
@@ -1672,8 +1777,14 @@ while (records.length < seedCount) {
             reason: attempt.reason ?? null,
             failureCodes: [...new Set([
               ...(Array.isArray(attempt.failureCodes) ? attempt.failureCodes : []),
+              ...(attempt.failureCode ? [attempt.failureCode] : []),
               ...errors.map((error) => error?.code).filter(Boolean),
-            ])].slice(0, 12),
+            ])],
+            errorMessages: [...new Set(errors.map((error) => (
+              typeof error === 'string'
+                ? error
+                : error?.message ?? JSON.stringify(error)
+            )).filter(Boolean))],
             errorCount: errors.length,
             lastPlanningDecision: (() => {
               const decision = attempt.diagnostics?.decisions?.at(-1);
@@ -1711,15 +1822,67 @@ while (records.length < seedCount) {
           };
         }),
       } : {}),
-    });
+    };
     if (progressEnabled) {
       console.error(
-        `[${records.length}/${seedCount}] ${seed}: ${dungeon.augmentationStatus}`,
+        `[${records.length + 1}/${seedCount}] ${seed}: ${dungeon.augmentationStatus}`,
       );
     }
+  } catch (error) {
+    releasePhaseReporter?.captureFailure();
+    throw error;
   } finally {
-    generator._disposeGeneratedDungeonCandidate(dungeon);
-    inertTexture.dispose();
+    const disposalStartedAt = performance.now();
+    releasePhaseReporter?.startPhase('disposal');
+    try {
+      generator._disposeGeneratedDungeonCandidate(dungeon);
+      inertTexture.dispose();
+    } catch (error) {
+      releasePhaseReporter?.captureFailure();
+      throw error;
+    } finally {
+      disposalMs = Math.max(0, performance.now() - disposalStartedAt);
+      releasePhaseReporter?.completePhase('disposal');
+    }
+  }
+  if (recordCandidate) {
+    recordCandidate.elapsedPhases.disposalMs = disposalMs;
+    recordCandidate.elapsedPhases.totalMs = recordCandidate.elapsedPhases.generationMs
+      + recordCandidate.elapsedPhases.strictValidationMs
+      + recordCandidate.elapsedPhases.disposalMs;
+    recordCandidate.elapsedMs = recordCandidate.elapsedPhases.totalMs;
+    recordCandidate.generatorPhaseTimings = releasePhaseReporter
+      ? releasePhaseReporter.timings({
+          scope: 'target',
+          planningTimeMs,
+          assemblyTimeMs,
+        })
+      : {
+          schema: 'ruindivex-dungeon-augmentation-generator-phase-timings/v1',
+          parentGenerationMs: recordCandidate.elapsedPhases.generationMs,
+          planningMs: 0,
+          materializationMs: 0,
+          threeJsAssemblyMs: 0,
+          strictValidationMs: recordCandidate.elapsedPhases.strictValidationMs,
+          disposalMs,
+          totalMs: recordCandidate.elapsedPhases.totalMs,
+          planningTimeMs: Number.isFinite(planningTimeMs) ? planningTimeMs : null,
+          assemblyTimeMs: Number.isFinite(assemblyTimeMs) ? assemblyTimeMs : null,
+        };
+    if (releaseManifest) {
+      const publication = inspectReleaseSeedWorkerRecordPublication(recordCandidate);
+      if (!publication.accepted) {
+        const publicationError = new Error(publication.failure.message);
+        publicationError.name = publication.failure.errorName;
+        publicationError.code = publication.failure.errorCode;
+        publicationError.releaseSeedWorkerFailure = publication.failure;
+        releasePhaseReporter?.captureFailure();
+        throw publicationError;
+      }
+      records.push(publication.record);
+    } else {
+      records.push(recordCandidate);
+    }
   }
   index = currentManifestEntry ? rawIndex + 1 : index + 1;
 }

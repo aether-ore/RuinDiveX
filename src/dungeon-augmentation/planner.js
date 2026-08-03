@@ -23,6 +23,7 @@ import {
   addDungeonPoints,
   createDungeonPolyline,
   createDungeonRouteEndpointSeam,
+  dungeonLandmarkSharedThresholdParentPosition,
   dungeonPointDistance,
   dungeonVolumeOverlapWithinGrants,
   measureDungeonPolyline,
@@ -46,11 +47,25 @@ import {
 } from './rng.js';
 import { createDungeonSelectionBagWitness } from './selectionBagWitness.js';
 import {
+  routeNetworkInactiveSocketCapPlanningVolumes,
+  validateRouteNetworkInactiveSocketCapPlanningVolumes,
+} from './routeNetworkCapPlanning.js';
+import {
+  createRouteNetworkConflictEntitySignature,
+  normalizeRouteNetworkConflictExclusions,
+  rejectRouteNetworkCandidateForConflictExclusions,
+} from './routeNetworkModulePruning.js';
+import {
   computeDungeonAugmentationPlanHash,
   computeEffectiveDungeonPlanHash,
   evaluateDungeonRouteNetworkFeaturelessGraph,
   validateDungeonAugmentationPlan,
 } from './validation.js';
+import {
+  DUNGEON_CONNECTOR_VARIANT_IDS,
+  createDungeonConnectorVariantContract,
+  reserveDungeonConnectorFamilyFootprints,
+} from '../DungeonConnectorVariants.js';
 
 function issue(code, message, context = {}) {
   return { code, message, context };
@@ -58,6 +73,29 @@ function issue(code, message, context = {}) {
 
 function clampInteger(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, Math.floor(Number(value) || 0)));
+}
+
+const ORIGINAL_LANDMARK_CANDIDATE_LIMIT = 24;
+const LANDMARK_LOCAL_RECOVERY_ERRORS = new Set([
+  'pyramid-loop-room-pair-placement-unavailable',
+  'route-network-node-placement-collision',
+  'route-network-parent-attachment-unrealizable',
+  'route-network-spine-segment-unrealizable',
+  'route-network-spine-sockets-unavailable',
+]);
+
+export function shouldQueueFinalLandmarkLocalRecovery({
+  recoveryReplay = false,
+  routeNetworkKind = null,
+  futureRequiredNetworkCount = 0,
+  error = null,
+  alreadyQueued = false,
+} = {}) {
+  return recoveryReplay !== true
+    && routeNetworkKind === 'landmark-perimeter-loop'
+    && Number(futureRequiredNetworkCount) === 0
+    && LANDMARK_LOCAL_RECOVERY_ERRORS.has(String(error ?? ''))
+    && alreadyQueued !== true;
 }
 
 function stableUniqueSelectionIds(ids = []) {
@@ -73,7 +111,12 @@ export function dungeonSelectionBagDomainKey(legalIds = []) {
   return canonicalStringify(stableUniqueSelectionIds(legalIds));
 }
 
-function selectionBagDomainState(bag, domainKey, legalIds = []) {
+function selectionBagDomainState(
+  bag,
+  domainKey,
+  legalIds = [],
+  globalConsumedIds = bag?.globalConsumedIds ?? bag?.consumedIds,
+) {
   const legalSet = new Set(stableUniqueSelectionIds(legalIds));
   const filteredState = (state, cycle = 0) => ({
     cycle: Math.max(0, Math.trunc(Number(state?.cycle ?? cycle))),
@@ -85,9 +128,15 @@ function selectionBagDomainState(bag, domainKey, legalIds = []) {
     : null;
   const domain = domains?.[domainKey];
   if (domain) return filteredState(domain);
+  const globalConsumedSet = new Set(uniqueSelectionIdsInOrder(globalConsumedIds));
   const seedState = {
     cycle: !domains || Object.keys(domains).length === 0 ? bag?.cycle : 0,
-    consumedIds: bag?.globalConsumedIds ?? bag?.consumedIds,
+    // A new compatibility domain is seeded in immutable bag order. Global
+    // consumption records preserve decision order, which may differ after MRV
+    // solving; serializing that order as a domain state would make an otherwise
+    // valid witness fail deterministic reconstruction.
+    consumedIds: uniqueSelectionIdsInOrder(bag?.order)
+      .filter((id) => legalSet.has(id) && globalConsumedSet.has(id)),
   };
   // A newly encountered compatibility domain inherits only the selections
   // that overlap its legal set. This preserves global no-repeat ordering
@@ -146,8 +195,18 @@ export function dungeonSelectionBagCandidates(bag, legalIds = []) {
   const legal = new Set(canonicalLegalIds);
   const orderedLegal = order.filter((id) => legal.has(id));
   if (orderedLegal.length === 0) return [];
+  let globalConsumedIds = uniqueSelectionIdsInOrder(
+    bag?.globalConsumedIds ?? bag?.consumedIds,
+  ).filter((id) => order.includes(id));
+  const globalRefilled = globalConsumedIds.length >= order.length;
+  if (globalRefilled) globalConsumedIds = [];
   const domainKey = dungeonSelectionBagDomainKey(canonicalLegalIds);
-  const beforeDomain = selectionBagDomainState(bag, domainKey, canonicalLegalIds);
+  const beforeDomain = selectionBagDomainState(
+    bag,
+    domainKey,
+    canonicalLegalIds,
+    globalConsumedIds,
+  );
   const consumed = new Set(beforeDomain.consumedIds);
   let available = orderedLegal.filter((id) => !consumed.has(id));
   const refilled = available.length === 0;
@@ -155,10 +214,6 @@ export function dungeonSelectionBagCandidates(bag, legalIds = []) {
     cycle: beforeDomain.cycle + (refilled ? 1 : 0),
     consumedIds: refilled ? [] : orderedLegal.filter((id) => consumed.has(id)),
   };
-  let globalConsumedIds = uniqueSelectionIdsInOrder(
-    bag?.globalConsumedIds ?? bag?.consumedIds,
-  ).filter((id) => order.includes(id));
-  if (globalConsumedIds.length >= order.length) globalConsumedIds = [];
   if (refilled) available = orderedLegal;
   return available.map((id) => ({
     id,
@@ -168,6 +223,7 @@ export function dungeonSelectionBagCandidates(bag, legalIds = []) {
       consumedIds: [...beforeDomain.consumedIds],
     },
     beforeGlobalConsumedIds: [...globalConsumedIds],
+    globalRefilled,
     refilled,
     state: {
       order: [...order],
@@ -183,6 +239,55 @@ export function dungeonSelectionBagCandidates(bag, legalIds = []) {
       },
     },
   }));
+}
+
+/**
+ * Compute the complete topology domain before consulting exhaustion state.
+ * Feasibility is deliberately limited to pure authored constraints that are
+ * quantified over the complete pre-cap physical-signature manifest. Concrete
+ * route geometry remains the responsibility of the bounded planner.
+ */
+export function routeNetworkViableTopologyIds({
+  topologyIds = [],
+  grant = {},
+  physicalSignatures = [],
+} = {}) {
+  const signatures = Array.isArray(physicalSignatures) ? physicalSignatures : [];
+  return uniqueSelectionIdsInOrder(topologyIds).filter((topologyTemplateId) => (
+    routeNetworkTopologyIsLegalForGrant(topologyTemplateId, grant)
+      && signatures.some(({ moduleCount }) => (
+        routeNetworkTopologySupportsModuleCount(
+          topologyTemplateId,
+          grant,
+          moduleCount,
+        )
+      ))
+  ));
+}
+
+/**
+ * Enumerate topology selections exactly once against a complete, bag-independent
+ * viable domain. In particular, consumed IDs are never reintroduced through a
+ * post-hoc singleton domain; only ordinary complete-domain exhaustion can refill.
+ */
+export function routeNetworkTopologySelectionCandidates(
+  bag,
+  topologyIds = [],
+  { grant = {}, physicalSignatures = [] } = {},
+) {
+  const requestedIds = new Set(uniqueSelectionIdsInOrder(topologyIds));
+  const immutableTopologyOrder = uniqueSelectionIdsInOrder(bag?.order)
+    .filter((id) => requestedIds.has(id));
+  const viableTopologyIds = routeNetworkViableTopologyIds({
+    topologyIds: immutableTopologyOrder,
+    grant,
+    physicalSignatures,
+  });
+  return dungeonSelectionBagCandidates(bag, viableTopologyIds)
+    .map((selection) => ({
+      ...selection,
+      legalIds: [...viableTopologyIds],
+    }));
 }
 
 function consumeDungeonSelectionBagIds(bag, selectedIds = [], legalIds = bag?.order ?? []) {
@@ -539,7 +644,100 @@ function nodeEndpoint(node, localSocketId) {
   } : null;
 }
 
-function createSegment({
+export function routePathFinalOccupiedSpans(
+  path,
+  { widthMeters = 8.4, heightMeters = 5.6 } = {},
+) {
+  const points = (path ?? []).map(toDungeonPoint);
+  const spans = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    const deltaX = end.x - start.x;
+    const deltaY = end.y - start.y;
+    const deltaZ = end.z - start.z;
+    const horizontalLength = Math.hypot(deltaX, deltaZ);
+    if (horizontalLength <= 1e-6 && Math.abs(deltaY) <= 1e-6) continue;
+    const directionX = horizontalLength > 1e-6 ? deltaX / horizontalLength : 0;
+    const directionZ = horizontalLength > 1e-6 ? deltaZ / horizontalLength : 0;
+    const size = {
+      x: horizontalLength > 1e-6
+        ? Math.abs(deltaX) + Number(widthMeters) * Math.abs(directionZ)
+        : Number(widthMeters),
+      y: Number(heightMeters) + Math.abs(deltaY),
+      z: horizontalLength > 1e-6
+        ? Math.abs(deltaZ) + Number(widthMeters) * Math.abs(directionX)
+        : Number(widthMeters),
+    };
+    spans.push({
+      center: {
+        x: (start.x + end.x) * 0.5,
+        y: Math.min(start.y, end.y) + size.y * 0.5,
+        z: (start.z + end.z) * 0.5,
+      },
+      size,
+    });
+  }
+  // Industrial traversal realization widens every horizontal bend to one
+  // complete three-by-three floor landing. The two orthogonal corridor spans
+  // cover only three quadrants of that square; without this explicit turn
+  // volume, another route can place a centerline in the unreserved outer
+  // quadrant and fail later when both routes claim the same realized floor.
+  // Reserve the exact landing here so candidate replacement happens in the
+  // planner and runtime ownership remains strict outside shared endpoint seams.
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const previous = points[index - 1];
+    const point = points[index];
+    const next = points[index + 1];
+    const incoming = {
+      x: Math.sign(Number(point.x) - Number(previous.x)),
+      z: Math.sign(Number(point.z) - Number(previous.z)),
+    };
+    const outgoing = {
+      x: Math.sign(Number(next.x) - Number(point.x)),
+      z: Math.sign(Number(next.z) - Number(point.z)),
+    };
+    const levelHorizontalBend = Math.abs(Number(previous.y) - Number(point.y)) <= 1e-6
+      && Math.abs(Number(next.y) - Number(point.y)) <= 1e-6
+      && Math.abs(incoming.x) + Math.abs(incoming.z) === 1
+      && Math.abs(outgoing.x) + Math.abs(outgoing.z) === 1
+      && incoming.x * outgoing.x + incoming.z * outgoing.z === 0;
+    if (!levelHorizontalBend) continue;
+    spans.push({
+      center: {
+        x: Number(point.x),
+        y: Number(point.y) + Number(heightMeters) * 0.5,
+        z: Number(point.z),
+      },
+      size: {
+        x: Number(widthMeters),
+        y: Number(heightMeters),
+        z: Number(widthMeters),
+      },
+      purpose: 'supplement-connector-turn-landing',
+    });
+  }
+  // Contract validation rejects an empty volume array. Preserve a concrete
+  // landing-sized body for a degenerate same-position connector so malformed
+  // host data cannot evade collision checks via a zero-length span.
+  if (spans.length === 0 && points[0]) {
+    spans.push({
+      center: {
+        x: points[0].x,
+        y: points[0].y + Number(heightMeters) * 0.5,
+        z: points[0].z,
+      },
+      size: {
+        x: Number(widthMeters),
+        y: Number(heightMeters),
+        z: Number(widthMeters),
+      },
+    });
+  }
+  return spans;
+}
+
+export function createSegment({
   id,
   operationId,
   parentRegionId,
@@ -560,44 +758,7 @@ function createSegment({
   const widthMeters = 8.4;
   const heightMeters = Number(requestedHeightMeters);
   const segmentPath = createDungeonPolyline(path ?? [], fromPoint, toPoint);
-  const spans = [];
-  for (let index = 1; index < segmentPath.length; index += 1) {
-    const start = segmentPath[index - 1];
-    const end = segmentPath[index];
-    const deltaX = end.x - start.x;
-    const deltaY = end.y - start.y;
-    const deltaZ = end.z - start.z;
-    const horizontalLength = Math.hypot(deltaX, deltaZ);
-    if (horizontalLength <= 1e-6 && Math.abs(deltaY) <= 1e-6) continue;
-    const directionX = horizontalLength > 1e-6 ? deltaX / horizontalLength : 0;
-    const directionZ = horizontalLength > 1e-6 ? deltaZ / horizontalLength : 0;
-    const size = {
-      x: horizontalLength > 1e-6
-        ? Math.abs(deltaX) + widthMeters * Math.abs(directionZ)
-        : widthMeters,
-      y: heightMeters + Math.abs(deltaY),
-      z: horizontalLength > 1e-6
-        ? Math.abs(deltaZ) + widthMeters * Math.abs(directionX)
-        : widthMeters,
-    };
-    spans.push({
-      center: {
-        x: (start.x + end.x) * 0.5,
-        y: Math.min(start.y, end.y) + size.y * 0.5,
-        z: (start.z + end.z) * 0.5,
-      },
-      size,
-    });
-  }
-  // Contract validation rejects an empty volume array. Preserve a concrete
-  // landing-sized body for a degenerate same-position connector so malformed
-  // host data cannot evade collision checks via a zero-length span.
-  if (spans.length === 0) {
-    spans.push({
-      center: { x: fromPoint.x, y: fromPoint.y + heightMeters * 0.5, z: fromPoint.z },
-      size: { x: widthMeters, y: heightMeters, z: widthMeters },
-    });
-  }
+  const spans = routePathFinalOccupiedSpans(segmentPath, { widthMeters, heightMeters });
   const createLandingVolume = (endpoint, point, suffix) => {
     const isParentThreshold = endpoint?.kind === 'parentSocket';
     const facing = toDungeonFacing(endpoint?.facing);
@@ -1760,6 +1921,441 @@ function omitOptionalEdgePadding(plan, profile) {
   return fallbackPlan;
 }
 
+export function routeNetworkConflictExclusionPruneRefusal(
+  grantId,
+  conflictExclusions = [],
+) {
+  const normalizedGrantId = String(grantId ?? '').trim();
+  if (!normalizedGrantId) return null;
+  const matchingExclusions = normalizeRouteNetworkConflictExclusions(
+    conflictExclusions,
+  ).filter((exclusion) => exclusion.grantId === normalizedGrantId);
+  if (matchingExclusions.length === 0) return null;
+  return {
+    error: 'route-network-conflict-exclusion-replacements-exhausted',
+    grantId: normalizedGrantId,
+    conflictExclusionCount: matchingExclusions.length,
+    entityKinds: [...new Set(matchingExclusions.map(({ entityKind }) => entityKind))]
+      .sort(),
+  };
+}
+
+const ROUTE_NETWORK_FINAL_VALIDATION_EXACT_BASE_CONFLICTS = Object.freeze({
+  'supplement-overlaps-base-draft': {
+    entityKind: 'node',
+    contextIdKey: 'nodeId',
+  },
+  'route-network-segment-base-overlap-outside-landing-grant': {
+    entityKind: 'segment',
+    contextIdKey: 'segmentId',
+  },
+});
+
+function routeNetworkConflictIdentityKey({ grantId, entityKind, signature }) {
+  return [grantId, entityKind, signature].map(String).join('\u0000');
+}
+
+function mergeRouteNetworkFinalValidationFailedGrants(entries = []) {
+  const byGrantId = new Map();
+  for (const raw of entries) {
+    const grantId = String(raw?.grantId ?? '').trim();
+    if (!grantId) continue;
+    const current = byGrantId.get(grantId) ?? {
+      grantId,
+      augmentationOperationId: String(raw?.augmentationOperationId ?? '').trim() || null,
+      routeNetworkKind: String(raw?.routeNetworkKind ?? '').trim() || null,
+      connectionIds: new Set(),
+      roomIds: new Set(),
+      socketIds: new Set(),
+      failureKinds: new Set(),
+    };
+    if (!current.augmentationOperationId && raw?.augmentationOperationId) {
+      current.augmentationOperationId = String(raw.augmentationOperationId);
+    }
+    if (!current.routeNetworkKind && raw?.routeNetworkKind) {
+      current.routeNetworkKind = String(raw.routeNetworkKind);
+    }
+    for (const id of raw?.connectionIds ?? []) current.connectionIds.add(String(id));
+    for (const id of raw?.roomIds ?? []) current.roomIds.add(String(id));
+    for (const id of raw?.socketIds ?? []) current.socketIds.add(String(id));
+    for (const code of raw?.failureKinds ?? []) current.failureKinds.add(String(code));
+    byGrantId.set(grantId, current);
+  }
+  return [...byGrantId.values()]
+    .sort((first, second) => first.grantId.localeCompare(second.grantId))
+    .map((entry) => ({
+      grantId: entry.grantId,
+      augmentationOperationId: entry.augmentationOperationId,
+      routeNetworkKind: entry.routeNetworkKind,
+      connectionIds: [...entry.connectionIds].sort(),
+      roomIds: [...entry.roomIds].sort(),
+      socketIds: [...entry.socketIds].sort(),
+      failureKinds: [...entry.failureKinds].sort(),
+    }));
+}
+
+/**
+ * Translate only validator diagnostics that identify one exact route-network
+ * entity colliding with immutable base geometry. Pairwise supplement conflicts
+ * are intentionally excluded because they do not identify an unambiguous
+ * replacement victim.
+ */
+export function collectRouteNetworkFinalValidationExactConflictAttribution(
+  plan,
+  validation,
+) {
+  const operations = plan?.operations ?? [];
+  const routeOperations = operations.filter(({ type }) => type === 'routeNetwork');
+  const rawExclusions = [];
+  const rawFailedGrants = [];
+  for (const error of validation?.errors ?? []) {
+    const code = String(error?.code ?? '');
+    const contract = ROUTE_NETWORK_FINAL_VALIDATION_EXACT_BASE_CONFLICTS[code];
+    if (!contract) continue;
+    const entityId = String(error?.context?.[contract.contextIdKey] ?? '').trim();
+    if (!entityId) continue;
+    const entities = contract.entityKind === 'segment'
+      ? plan?.segments ?? []
+      : plan?.nodes ?? [];
+    const matchingEntities = entities.filter(({ id }) => String(id) === entityId);
+    if (matchingEntities.length !== 1) continue;
+    const entity = matchingEntities[0];
+    const matchingOperations = routeOperations.filter(({ id }) => (
+      String(id) === String(entity?.operationId ?? '')
+    ));
+    if (matchingOperations.length !== 1) continue;
+    const operation = matchingOperations[0];
+    const grantId = String(operation?.grantId ?? '').trim();
+    if (!grantId) continue;
+    rawExclusions.push({
+      grantId,
+      entityKind: contract.entityKind,
+      entityId,
+      signature: createRouteNetworkConflictEntitySignature(
+        entity,
+        contract.entityKind,
+      ),
+      reason: `route-network-final-validation-${code}`,
+    });
+    rawFailedGrants.push({
+      grantId,
+      augmentationOperationId: String(operation.id),
+      routeNetworkKind: String(operation.routeNetworkKind ?? ''),
+      connectionIds: contract.entityKind === 'segment' ? [entityId] : [],
+      roomIds: contract.entityKind === 'node' ? [entityId] : [],
+      socketIds: [],
+      failureKinds: [code],
+    });
+  }
+  const routeOperationIds = new Set(routeOperations.map(({ id }) => String(id)));
+  return {
+    routeNetworkConflictExclusions: normalizeRouteNetworkConflictExclusions(
+      rawExclusions,
+    ),
+    failedRouteNetworkGrants: mergeRouteNetworkFinalValidationFailedGrants(
+      rawFailedGrants,
+    ),
+    routeNetworkGrantIds: [...new Set(routeOperations
+      .map(({ grantId }) => String(grantId ?? '').trim())
+      .filter(Boolean))].sort(),
+    routeNetworkEntityCount:
+      (plan?.nodes ?? []).filter(({ operationId }) => (
+        routeOperationIds.has(String(operationId))
+      )).length
+      + (plan?.segments ?? []).filter(({ operationId }) => (
+        routeOperationIds.has(String(operationId))
+      )).length,
+    augmentationPlanHash: String(plan?.augmentationPlanHash ?? '').trim() || null,
+  };
+}
+
+/**
+ * Re-run the same deterministic planning attempt with an accumulated set of
+ * exact immutable-base conflict signatures. A protected grant is never
+ * converted into a whole-grant omission; exhaustion remains structured so the
+ * generator's same-seed fixed point can retain the evidence.
+ */
+export function recoverRouteNetworkFinalValidationExactConflicts({
+  candidatePlan,
+  validation,
+  conflictExclusions = [],
+  replan,
+  validate,
+  maximumPasses = null,
+} = {}) {
+  let currentPlan = candidatePlan;
+  let currentValidation = validation;
+  let normalizedExclusions = normalizeRouteNetworkConflictExclusions(
+    conflictExclusions,
+  );
+  let failedRouteNetworkGrants = [];
+  const routeNetworkGrantIds = new Set();
+  let routeNetworkEntityCount = 0;
+  let rejectedAugmentationPlanHash = null;
+  let recoveryPasses = 0;
+  let planningFailure = null;
+  let exhaustionReason = null;
+  let exactConflictDetected = false;
+  const initialAttribution =
+    collectRouteNetworkFinalValidationExactConflictAttribution(
+      currentPlan,
+      currentValidation,
+    );
+  const passLimit = maximumPasses != null && Number.isFinite(Number(maximumPasses))
+    ? Math.max(0, Math.trunc(Number(maximumPasses)))
+    : Math.max(1, initialAttribution.routeNetworkEntityCount);
+
+  while (currentValidation?.accepted === false) {
+    const attribution = collectRouteNetworkFinalValidationExactConflictAttribution(
+      currentPlan,
+      currentValidation,
+    );
+    if (attribution.routeNetworkConflictExclusions.length === 0) break;
+    exactConflictDetected = true;
+    failedRouteNetworkGrants = mergeRouteNetworkFinalValidationFailedGrants([
+      ...failedRouteNetworkGrants,
+      ...attribution.failedRouteNetworkGrants,
+    ]);
+    for (const grantId of attribution.routeNetworkGrantIds) {
+      routeNetworkGrantIds.add(grantId);
+    }
+    routeNetworkEntityCount = Math.max(
+      routeNetworkEntityCount,
+      Number(attribution.routeNetworkEntityCount ?? 0),
+    );
+    rejectedAugmentationPlanHash = attribution.augmentationPlanHash
+      ?? rejectedAugmentationPlanHash;
+    const existingKeys = new Set(normalizedExclusions.map(
+      routeNetworkConflictIdentityKey,
+    ));
+    const additions = attribution.routeNetworkConflictExclusions.filter((entry) => (
+      !existingKeys.has(routeNetworkConflictIdentityKey(entry))
+    ));
+    normalizedExclusions = normalizeRouteNetworkConflictExclusions([
+      ...normalizedExclusions,
+      ...additions,
+    ]);
+    if (additions.length === 0) {
+      exhaustionReason = 'route-network-final-validation-exact-conflict-no-progress';
+      break;
+    }
+    if (recoveryPasses >= passLimit) {
+      exhaustionReason = 'route-network-final-validation-exact-conflict-pass-limit';
+      break;
+    }
+    recoveryPasses += 1;
+    const replanned = typeof replan === 'function'
+      ? replan(normalizedExclusions, {
+        recoveryPass: recoveryPasses,
+        additions,
+        rejectedPlan: currentPlan,
+        rejectedValidation: currentValidation,
+      })
+      : null;
+    if (!replanned?.plan) {
+      planningFailure = replanned ?? {
+        error: 'route-network-final-validation-exact-conflict-replan-unavailable',
+      };
+      exhaustionReason = String(
+        planningFailure.error
+          ?? 'route-network-final-validation-exact-conflict-replan-failed',
+      );
+      break;
+    }
+    currentPlan = replanned.plan;
+    currentValidation = typeof validate === 'function'
+      ? validate(currentPlan)
+      : currentValidation;
+  }
+
+  return {
+    plan: currentPlan,
+    validation: currentValidation,
+    conflictExclusions: normalizedExclusions,
+    exactConflictDetected,
+    recovered: exactConflictDetected && !exhaustionReason,
+    exhausted: Boolean(exhaustionReason),
+    exhaustionReason,
+    recoveryPasses,
+    planningFailure,
+    failedRouteNetworkGrants,
+    routeNetworkGrantIds: [...routeNetworkGrantIds].sort(),
+    routeNetworkEntityCount,
+    rejectedAugmentationPlanHash,
+  };
+}
+
+export function omitConflictingRouteNetworkOperation(
+  plan,
+  validation,
+  profile,
+  extensionRegions,
+) {
+  if (profile?.routeNetworkPlanning?.allowPartialRouteNetworkRealization !== true) {
+    return null;
+  }
+  const operations = plan?.operations ?? [];
+  const routeOperations = operations.filter(({ type }) => type === 'routeNetwork');
+  if (routeOperations.length === 0 || validation?.accepted !== false) return null;
+
+  const operationById = new Map(operations.map((operation) => [
+    String(operation.id),
+    operation,
+  ]));
+  const nodeById = new Map((plan.nodes ?? []).map((node) => [String(node.id), node]));
+  const segmentById = new Map((plan.segments ?? []).map((segment) => [
+    String(segment.id),
+    segment,
+  ]));
+  const routeOperationByGrantId = new Map(routeOperations.map((operation) => [
+    String(operation.grantId ?? ''),
+    operation,
+  ]));
+  const routeOperationIds = new Set(routeOperations.map(({ id }) => String(id)));
+  const collectReferencedRouteOperationIds = (value, result = new Set()) => {
+    if (typeof value === 'string') {
+      const directOperation = operationById.get(value);
+      const nodeOperation = operationById.get(String(nodeById.get(value)?.operationId ?? ''));
+      const segmentOperation = operationById.get(
+        String(segmentById.get(value)?.operationId ?? ''),
+      );
+      const grantOperation = routeOperationByGrantId.get(value);
+      for (const operation of [
+        directOperation,
+        nodeOperation,
+        segmentOperation,
+        grantOperation,
+      ]) {
+        if (operation && routeOperationIds.has(String(operation.id))) {
+          result.add(String(operation.id));
+        }
+      }
+      return result;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) collectReferencedRouteOperationIds(entry, result);
+      return result;
+    }
+    if (value && typeof value === 'object') {
+      for (const entry of Object.values(value)) {
+        collectReferencedRouteOperationIds(entry, result);
+      }
+    }
+    return result;
+  };
+  const implicatedByError = (validation.errors ?? []).map((error) => ({
+    error,
+    operationIds: collectReferencedRouteOperationIds(error?.context ?? {}),
+  }));
+  // Recovery only removes augmentation that a validator identified directly.
+  // An unattributed/global error is never converted into a warning.
+  if (implicatedByError.length === 0
+    || implicatedByError.some(({ operationIds }) => operationIds.size === 0)) {
+    return null;
+  }
+  const occurrenceCountByOperationId = new Map();
+  for (const { operationIds } of implicatedByError) {
+    for (const operationId of operationIds) {
+      occurrenceCountByOperationId.set(
+        operationId,
+        (occurrenceCountByOperationId.get(operationId) ?? 0) + 1,
+      );
+    }
+  }
+  const operationIndexById = new Map(operations.map(({ id }, index) => [String(id), index]));
+  const selectedOperationId = [...occurrenceCountByOperationId.keys()].sort(
+    (first, second) => (
+      occurrenceCountByOperationId.get(second) - occurrenceCountByOperationId.get(first)
+        || operationIndexById.get(second) - operationIndexById.get(first)
+        || second.localeCompare(first)
+    ),
+  ).find((operationId) => {
+    const operation = operationById.get(operationId);
+    return !routeNetworkConflictExclusionPruneRefusal(
+      operation?.grantId,
+      plan?.routeNetworkConflictExclusions,
+    );
+  });
+  const selectedOperation = operationById.get(selectedOperationId);
+  if (!selectedOperation || selectedOperation.type !== 'routeNetwork') return null;
+
+  const canonicalGrantEntries = (extensionRegions ?? []).flatMap((region) => (
+    (region.routeNetworkGrants ?? []).map((grant, grantOrdinal) => ({
+      region,
+      grant,
+      grantOrdinal,
+    }))
+  )).sort((first, second) => {
+    const planningPhase = ({ grant }) => {
+      const kind = String(grant?.kind ?? grant?.routeNetworkKind ?? '');
+      if (kind === 'landmark-perimeter-loop') return 0;
+      if (grant?.required === true && kind === 'objective-route-coverage') return 1;
+      if (kind !== 'cross-band-shortcut') return 2;
+      return 3;
+    };
+    return planningPhase(first) - planningPhase(second)
+      || String(first.region?.id ?? '').localeCompare(String(second.region?.id ?? ''))
+      || first.grantOrdinal - second.grantOrdinal;
+  });
+  const canonicalOperationOrdinal = canonicalGrantEntries.findIndex(({ grant }) => (
+    String(grant?.id ?? '') === String(selectedOperation.grantId ?? '')
+  ));
+  const selectedGrantEntry = canonicalGrantEntries[canonicalOperationOrdinal] ?? null;
+  if (selectedGrantEntry?.grant?.required !== true || canonicalOperationOrdinal < 0) {
+    return null;
+  }
+  // Recovery never mutates a previously hashed plan. It selects one directly
+  // implicated grant, then reruns the deterministic planner with that grant
+  // pre-pruned so bag witnesses, manifests, summaries, dependencies, and both
+  // hashes are rebuilt from one coherent solve. Keep at least one augmentation
+  // network; a global/final-network failure remains fail-closed.
+  if (routeOperations.length <= 1) return null;
+  const implicatedErrorCodes = implicatedByError
+    .filter(({ operationIds }) => operationIds.has(selectedOperationId))
+    .map(({ error }) => String(error.code ?? 'validation-failed'))
+    .sort();
+  const reason = `route-network-validation-${
+    implicatedErrorCodes[0] ?? 'failed'
+  }`;
+  return {
+    omission: {
+      operationId: selectedOperationId,
+      grantId: String(selectedOperation.grantId),
+      reason,
+      validationErrorCodes: implicatedErrorCodes,
+    },
+  };
+}
+
+function normalizePrePrunedRouteNetworkGrants(entries = []) {
+  const normalized = (Array.isArray(entries) ? entries : [])
+    .flatMap((entry) => {
+      const source = typeof entry === 'string' ? { grantId: entry } : entry;
+      const grantId = String(source?.grantId ?? '').trim();
+      if (!grantId) return [];
+      const rawReason = String(source?.reason ?? '').trim();
+      const rawRecoveryPass = Number(source?.recoveryPass);
+      return [{
+        grantId,
+        reason: rawReason || 'route-network-validation-failed',
+        recoveryPass: Number.isFinite(rawRecoveryPass)
+          ? Math.max(0, Math.trunc(rawRecoveryPass))
+          : 0,
+      }];
+    })
+    .sort((first, second) => (
+      first.grantId.localeCompare(second.grantId)
+        || first.reason.localeCompare(second.reason)
+        || first.recoveryPass - second.recoveryPass
+    ));
+  const seenGrantIds = new Set();
+  return normalized.filter(({ grantId }) => {
+    if (seenGrantIds.has(grantId)) return false;
+    seenGrantIds.add(grantId);
+    return true;
+  });
+}
+
 function freezeResult(result) {
   if (result.overlayPlan) deepFreezeDungeonAugmentationValue(result.overlayPlan);
   deepFreezeDungeonAugmentationValue(result.diagnostics);
@@ -1777,7 +2373,21 @@ function unchangedResult({
   errors = [],
   warnings = [],
   decisions = [],
+  augmentationPlanHash = null,
+  routeNetworkConflictExclusions = [],
+  failedRouteNetworkGrants = [],
+  routeNetworkGrantIds = [],
+  routeNetworkEntityCount = 0,
+  routeNetworkConflictRecovery = null,
 }) {
+  const normalizedConflictExclusions = normalizeRouteNetworkConflictExclusions(
+    routeNetworkConflictExclusions,
+  );
+  const normalizedFailedRouteNetworkGrants =
+    mergeRouteNetworkFinalValidationFailedGrants(failedRouteNetworkGrants);
+  const normalizedRouteNetworkGrantIds = [...new Set(
+    (routeNetworkGrantIds ?? []).map(String).filter(Boolean),
+  )].sort();
   return freezeResult({
     schema: DUNGEON_AUGMENTATION_RESULT_SCHEMA,
     status: 'unchanged',
@@ -1791,8 +2401,28 @@ function unchangedResult({
       profileId,
       basePlanHash,
       baseDraftFingerprint,
-      augmentationPlanHash: null,
+      augmentationPlanHash,
       effectivePlanHash: basePlanHash,
+      ...(normalizedConflictExclusions.length > 0 ? {
+        routeNetworkConflictExclusions: normalizedConflictExclusions,
+      } : {}),
+      ...(normalizedFailedRouteNetworkGrants.length > 0 ? {
+        failedRouteNetworkGrants: normalizedFailedRouteNetworkGrants,
+      } : {}),
+      ...(normalizedRouteNetworkGrantIds.length > 0 ? {
+        routeNetworkGrantIds: normalizedRouteNetworkGrantIds,
+      } : {}),
+      ...(Number(routeNetworkEntityCount) > 0 ? {
+        routeNetworkEntityCount: Math.max(
+          0,
+          Math.trunc(Number(routeNetworkEntityCount)),
+        ),
+      } : {}),
+      ...(routeNetworkConflictRecovery ? {
+        routeNetworkConflictRecovery: cloneDungeonAugmentationValue(
+          routeNetworkConflictRecovery,
+        ),
+      } : {}),
       errors,
       warnings,
       decisions,
@@ -1822,6 +2452,106 @@ function routeNetworkGrammarForKind(
   return candidates.find((candidate) => (
     String(candidate?.selectionConstraints?.routeNetworkModuleKind ?? 'room') === moduleKind
   )) ?? null;
+}
+
+const ROUTE_NETWORK_AUTHORED_TIER_HEIGHT_METERS = 2.8;
+
+function routeNetworkRequestedTransferKinds(elevationMode) {
+  if (['lift', 'shortcut-lift'].includes(String(elevationMode))) {
+    return new Set(['lift']);
+  }
+  if (['ladder', 'drop-ladder'].includes(String(elevationMode))) {
+    return new Set(['ladder']);
+  }
+  return new Set(['ramp', 'stairs', 'step']);
+}
+
+/**
+ * Prove that an authored room owns a complete, floor-supported vertical tier.
+ *
+ * `authoredTransferKinds` is selection metadata, not proof of the traversal
+ * contract. In particular, the observation-break room advertises `step` for
+ * an optional 0.70 m lore spur. That spur must not satisfy a route network's
+ * 2.80 m separated-level requirement or suppress synthesis of the real
+ * operation transfer.
+ *
+ * Multi-flight transfers remain legal: explicit transfer-cell support links
+ * join their component, and the component's two floor-supported endpoints
+ * must span at least one complete dungeon tier in the requested family.
+ */
+export function routeNetworkGrammarHasPurposefulAuthoredVerticalTraversal(
+  grammar,
+  elevationMode,
+  { minimumTierSpanMeters = ROUTE_NETWORK_AUTHORED_TIER_HEIGHT_METERS } = {},
+) {
+  const requestedTransferKinds = routeNetworkRequestedTransferKinds(elevationMode);
+  const endpointElevationDelta = (transfer) => {
+    const fromElevation = Number(
+      transfer?.endpoints?.from?.elevation
+        ?? transfer?.endpoints?.from?.localElevation,
+    );
+    const toElevation = Number(
+      transfer?.endpoints?.to?.elevation
+        ?? transfer?.endpoints?.to?.localElevation,
+    );
+    return Number.isFinite(fromElevation) && Number.isFinite(toElevation)
+      ? Math.abs(toElevation - fromElevation)
+      : Number.POSITIVE_INFINITY;
+  };
+  const isRequestedLeg = (transfer) => requestedTransferKinds.has(String(
+    transfer?.form ?? '',
+  ));
+  // A level landing may bridge two requested legs, regardless of family. It
+  // is neutral support rather than proof by itself. Rising landings and
+  // wrong-family vertical legs remain excluded so they cannot smuggle a tier
+  // change into a lift- or ladder-selected operation.
+  const isNeutralLanding = (transfer) => String(transfer?.form ?? '') === 'landing'
+    && endpointElevationDelta(transfer) <= 0.000001;
+  const transfers = (grammar?.structure?.physicalTransfers ?? [])
+    .filter((transfer) => isRequestedLeg(transfer) || isNeutralLanding(transfer));
+  if (transfers.length === 0) return false;
+
+  const transferById = new Map(transfers.map((transfer) => [String(transfer.id), transfer]));
+  const neighborsById = new Map(transfers.map((transfer) => [String(transfer.id), new Set()]));
+  for (const transfer of transfers) {
+    const transferId = String(transfer.id);
+    for (const endpoint of Object.values(transfer.endpoints ?? {})) {
+      const support = endpoint?.localSupportRef;
+      if (support?.kind !== 'transfer-cell') continue;
+      const supportId = String(support.transferId ?? '');
+      if (!transferById.has(supportId)) continue;
+      neighborsById.get(transferId).add(supportId);
+      neighborsById.get(supportId).add(transferId);
+    }
+  }
+
+  const visited = new Set();
+  for (const transfer of transfers) {
+    const startId = String(transfer.id);
+    if (visited.has(startId)) continue;
+    const pending = [startId];
+    const floorElevations = [];
+    let requestedLegCount = 0;
+    while (pending.length > 0) {
+      const transferId = pending.pop();
+      if (visited.has(transferId)) continue;
+      visited.add(transferId);
+      const current = transferById.get(transferId);
+      if (isRequestedLeg(current)) requestedLegCount += 1;
+      for (const endpoint of Object.values(current?.endpoints ?? {})) {
+        if (endpoint?.localSupportRef?.kind !== 'floor-cell') continue;
+        const elevation = Number(endpoint.elevation ?? endpoint.localElevation);
+        if (Number.isFinite(elevation)) floorElevations.push(elevation);
+      }
+      for (const neighborId of neighborsById.get(transferId) ?? []) {
+        if (!visited.has(neighborId)) pending.push(neighborId);
+      }
+    }
+    if (requestedLegCount === 0 || floorElevations.length < 2) continue;
+    const spanMeters = Math.max(...floorElevations) - Math.min(...floorElevations);
+    if (spanMeters + 0.000001 >= Number(minimumTierSpanMeters)) return true;
+  }
+  return false;
 }
 
 function routeNetworkContentGrammarForRole(
@@ -1860,11 +2590,6 @@ function routeNetworkContentGrammarForRole(
         candidate.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
       )) <= 0.000001
     ));
-    const requestedTransferKinds = elevationMode === 'lift'
-      ? new Set(['lift'])
-      : elevationMode === 'ladder'
-        ? new Set(['ladder'])
-        : new Set(['ramp', 'stairs', 'step', 'landing']);
     // Same-band V4 networks realize their elevation change inside authored
     // modules. Prefer one 2.8 m rise in the requested family so a later
     // authored descent can return to the exact parent tier without synthesizing
@@ -1873,9 +2598,11 @@ function routeNetworkContentGrammarForRole(
       const delta = Number(
         candidate.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
       );
-      const transferKinds = candidate.selectionConstraints?.authoredTransferKinds ?? [];
       return Math.abs(delta - 2.8) <= 0.000001
-        && transferKinds.some((kind) => requestedTransferKinds.has(String(kind)));
+        && routeNetworkGrammarHasPurposefulAuthoredVerticalTraversal(
+          candidate,
+          elevationMode,
+        );
     });
     const choices = wantsElevation && balancedRiseCandidates.length > 0
       ? balancedRiseCandidates
@@ -2132,11 +2859,6 @@ function balanceObjectiveRouteGrammarAssignments({
     sum + grammarDelta(candidate)
   ), 0);
   if (!selectedGrammars.some((candidate) => Math.abs(grammarDelta(candidate)) > 0.000001)) {
-    const requestedTransferKinds = elevationMode === 'lift'
-      ? new Set(['lift'])
-      : elevationMode === 'ladder'
-        ? new Set(['ladder'])
-        : new Set(['ramp', 'stairs', 'step', 'landing']);
     const challengeIndices = moduleKinds
       .map((moduleKind, index) => ({ moduleKind, index }))
       .filter(({ moduleKind, index }) => (
@@ -2148,13 +2870,15 @@ function balanceObjectiveRouteGrammarAssignments({
       const candidates = profile.grammarPool
         .map(({ id }) => grammars[id])
         .filter((candidate) => {
-          const transferKinds = candidate?.selectionConstraints?.authoredTransferKinds ?? [];
           return candidate
             && String(candidate.selectionConstraints?.routeNetworkModuleKind ?? 'room') === 'room'
             && candidate.selectionConstraints?.routeNetworkJunctionKind == null
             && candidate.selectionConstraints?.routeNetworkContentRoles?.includes('challenge')
             && Math.abs(grammarDelta(candidate) - 2.8) <= 0.000001
-            && transferKinds.some((kind) => requestedTransferKinds.has(String(kind)));
+            && routeNetworkGrammarHasPurposefulAuthoredVerticalTraversal(
+              candidate,
+              elevationMode,
+            );
         })
         .sort((first, second) => String(first.id).localeCompare(String(second.id)));
       if (candidates.length === 0) continue;
@@ -2195,6 +2919,34 @@ function balanceObjectiveRouteGrammarAssignments({
 }
 
 /**
+ * Enumerate one finite authored rise/descent replacement product. The
+ * canonical pair remains first; subsequent ordinals replace one room before
+ * replacing both, so a local physical conflict does not immediately discard
+ * the containing route network.
+ */
+export function routeNetworkGrammarPairAlternativeOrdinals(
+  riseCandidateCount,
+  descentCandidateCount,
+) {
+  const riseCount = Math.max(0, Math.trunc(Number(riseCandidateCount) || 0));
+  const descentCount = Math.max(0, Math.trunc(Number(descentCandidateCount) || 0));
+  if (riseCount === 0 || descentCount === 0) return [];
+  const alternatives = [];
+  const maximumDiagonal = riseCount + descentCount - 2;
+  for (let diagonal = 0; diagonal <= maximumDiagonal; diagonal += 1) {
+    for (let riseCandidateOrdinal = Math.min(
+      diagonal,
+      riseCount - 1,
+    ); riseCandidateOrdinal >= 0; riseCandidateOrdinal -= 1) {
+      const descentCandidateOrdinal = diagonal - riseCandidateOrdinal;
+      if (descentCandidateOrdinal < 0 || descentCandidateOrdinal >= descentCount) continue;
+      alternatives.push({ riseCandidateOrdinal, descentCandidateOrdinal });
+    }
+  }
+  return alternatives;
+}
+
+/**
  * Exact coverage stations are fixed to the authored connector tier. A rise in
  * one station interval therefore cannot be balanced by a descent in a later
  * interval: the intervening exact station would otherwise need an ungranted
@@ -2216,16 +2968,12 @@ export function balanceObjectiveRouteGrammarIntervals({
   preferCompactRise = false,
   excludedNodeIndices = [],
   legalGrammarIdsByIndex = new Map(),
+  selectionAlternativeOrdinal = 0,
 }) {
   const epsilon = 0.000001;
   const grammarDelta = (candidate) => Number(
     candidate?.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
   );
-  const requestedTransferKinds = ['lift', 'shortcut-lift'].includes(elevationMode)
-    ? new Set(['lift'])
-    : ['ladder', 'drop-ladder'].includes(elevationMode)
-      ? new Set(['ladder'])
-      : new Set(['ramp', 'stairs', 'step', 'landing']);
   const preferCompactCoverage = new Set(endpointNodeIndices).size >= 3;
   const candidatePool = profile.grammarPool
     .map(({ id }) => grammars[id])
@@ -2249,8 +2997,10 @@ export function balanceObjectiveRouteGrammarIntervals({
       }
       if (Math.abs(grammarDelta(candidate) - targetDelta) > epsilon) return false;
       if (!matchTransfer) return true;
-      return (candidate.selectionConstraints?.authoredTransferKinds ?? [])
-        .some((kind) => requestedTransferKinds.has(String(kind)));
+      return routeNetworkGrammarHasPurposefulAuthoredVerticalTraversal(
+        candidate,
+        elevationMode,
+      );
     }).sort((first, second) => (
       targetDelta < -epsilon
         || (preferCompactCoverage && (
@@ -2426,10 +3176,28 @@ export function balanceObjectiveRouteGrammarIntervals({
       excludedNodeIndices: [...excludedNodeIndexSet].sort((first, second) => first - second),
     };
   }
-  // Pair ordering encodes the semantic preference. Variety is sampled within
-  // the compatible rise/descent grammar families, never by choosing a weaker
-  // pair that strands a required elevation-role room.
-  const plan = pairPlans[0];
+  // Pair ordering encodes the semantic preference. The candidate's existing
+  // search variant is also the finite authored-room replacement axis: the
+  // interval balancer used to overwrite the provisional room-layout choice
+  // with riseCandidates[0]/descentCandidates[0] on every variant. A compact
+  // but physically incompatible pair could therefore make the partial-first
+  // checkpoint omit the whole coverage grant even though another authored
+  // room pair was already in the legal domain. Enumerate one-module changes
+  // before changing both modules, preserving the canonical pair at ordinal 0.
+  const grammarPairAlternatives = pairPlans.flatMap((candidatePlan) => {
+    return routeNetworkGrammarPairAlternativeOrdinals(
+      candidatePlan.riseCandidates.length,
+      candidatePlan.descentCandidates.length,
+    ).map((alternative) => ({ plan: candidatePlan, ...alternative }));
+  });
+  const normalizedAlternativeOrdinal = Math.max(
+    0,
+    Math.trunc(Number(selectionAlternativeOrdinal) || 0),
+  );
+  const selectedAlternative = grammarPairAlternatives[
+    normalizedAlternativeOrdinal % grammarPairAlternatives.length
+  ];
+  const plan = selectedAlternative.plan;
   for (const [index, grammar] of plan.levelReplacements) {
     selectedGrammars[index] = grammar;
   }
@@ -2437,8 +3205,12 @@ export function balanceObjectiveRouteGrammarIntervals({
   // between some exact sockets. Prefer the smallest legal authored rise and
   // return in those dense networks; two-station routes retain the normal
   // deterministic exhaustion order for visual variety.
-  selectedGrammars[plan.riseIndex] = plan.riseCandidates[0];
-  selectedGrammars[plan.descentIndex] = plan.descentCandidates[0];
+  selectedGrammars[plan.riseIndex] = plan.riseCandidates[
+    selectedAlternative.riseCandidateOrdinal
+  ];
+  selectedGrammars[plan.descentIndex] = plan.descentCandidates[
+    selectedAlternative.descentCandidateOrdinal
+  ];
 
   const intervalDeltas = intervals.map(({ first, second }) => ({
     first,
@@ -2452,6 +3224,10 @@ export function balanceObjectiveRouteGrammarIntervals({
     intervalDeltas,
     riseIndex: plan.riseIndex,
     descentIndex: plan.descentIndex,
+    selectionAlternativeOrdinal: normalizedAlternativeOrdinal,
+    selectedGrammarAlternativeOrdinal:
+      normalizedAlternativeOrdinal % grammarPairAlternatives.length,
+    grammarAlternativeCount: grammarPairAlternatives.length,
   };
 }
 
@@ -2639,6 +3415,17 @@ export function routeNetworkTopologyIsLegalForGrant(topologyTemplateId, grant = 
     return Number(grant.endpointSockets?.length ?? 0) === 2;
   }
   return true;
+}
+
+export function routeNetworkSpineSocketIds(grammarOrNode = {}) {
+  const declaredSocketIds = new Set(
+    grammarOrNode.selectionConstraints?.routeNetworkSpineSocketIds?.map(String) ?? [],
+  );
+  return (grammarOrNode.sockets ?? [])
+    .map(({ localSocketId, id }) => String(localSocketId ?? id ?? ''))
+    .filter((socketId) => (
+      socketId && (declaredSocketIds.size === 0 || declaredSocketIds.has(socketId))
+    ));
 }
 
 /**
@@ -2898,6 +3685,38 @@ function routeNetworkOuterPoint(socket, offsetMeters) {
   );
 }
 
+export function exactLandmarkEndpointNodeCenter({
+  endpoint,
+  grammar,
+  localSocketId,
+  nodeFacing,
+  connectorGapMeters = 2.8,
+}) {
+  const localSocket = grammar?.sockets?.find(({ id }) => id === localSocketId);
+  if (!localSocket?.localPosition) {
+    return routeNetworkOuterPoint(
+      endpoint,
+      Number(grammar?.size?.depth ?? 0) * 0.5 + Number(connectorGapMeters),
+    );
+  }
+  const rotatedLocalSocket = transformDungeonLocalPoint(
+    localSocket.localPosition,
+    {
+      center: { x: 0, y: 0, z: 0 },
+      rotationQuarterTurns: rotationQuarterTurnsForFacing(nodeFacing),
+    },
+  );
+  const desiredSocketPosition = routeNetworkOuterPoint(
+    endpoint,
+    Number(connectorGapMeters),
+  );
+  return {
+    x: Number(desiredSocketPosition.x) - Number(rotatedLocalSocket.x),
+    y: Number(desiredSocketPosition.y) - Number(rotatedLocalSocket.y),
+    z: Number(desiredSocketPosition.z) - Number(rotatedLocalSocket.z),
+  };
+}
+
 function toDungeonCardinalFacing(value) {
   const facing = toDungeonFacing(value);
   if (Math.abs(facing.x) >= Math.abs(facing.z)) {
@@ -2990,11 +3809,86 @@ function pyramidPerimeterPolyline(grant, endpoints, offsetMeters, sideSign = 1) 
   ];
 }
 
-function routeNetworkPlacementPolyline(grant, offsetMeters, sideSign) {
-  const endpoints = [...grant.endpointSockets].sort((first, second) => (
-    Number(first.distanceMeters ?? 0) - Number(second.distanceMeters ?? 0)
-      || first.id.localeCompare(second.id)
+function compareRouteNetworkEndpoints(first, second) {
+  return Number(first?.distanceMeters ?? 0) - Number(second?.distanceMeters ?? 0)
+    || String(first?.id ?? '').localeCompare(String(second?.id ?? ''));
+}
+
+export function objectiveCoverageEndpointOrderAlternatives(endpointSockets = []) {
+  const canonicalEndpoints = [...endpointSockets].sort(compareRouteNetworkEndpoints);
+  if (canonicalEndpoints.length < 2) return [canonicalEndpoints];
+  const canonicalOrdinals = canonicalEndpoints.map((_, ordinal) => ordinal);
+  const ordinalOrders = [];
+  const signatures = new Set();
+  const addRotations = (ordinals) => {
+    for (let shift = 0; shift < ordinals.length; shift += 1) {
+      const order = [
+        ...ordinals.slice(shift),
+        ...ordinals.slice(0, shift),
+      ];
+      const signature = order.join(':');
+      if (signatures.has(signature)) continue;
+      signatures.add(signature);
+      ordinalOrders.push(order);
+    }
+  };
+  // For the authored objective domain (at most three endpoints), rotations
+  // followed by reverse rotations enumerate every permutation. Unlike a
+  // factorial generator, this remains a small deterministic retry family if
+  // a future grant admits more stations.
+  addRotations(canonicalOrdinals);
+  addRotations([...canonicalOrdinals].reverse());
+  return ordinalOrders.map((order) => (
+    order.map((ordinal) => canonicalEndpoints[ordinal])
   ));
+}
+
+// Four dense-coverage retries remain within the existing candidate budget.
+// Keep canonical first, then try the reverse-order/third-socket composition
+// which has a complete cold-cache boss witness before exhausting the two
+// weaker socket alternatives of the same reverse endpoint order.
+export const DENSE_OBJECTIVE_COVERAGE_SEARCH_VARIANTS = Object.freeze([
+  0, 15, 3, 9,
+]);
+
+/**
+ * Dense three-station coverage moves its challenge room onto the traversal
+ * branch, outside the mandatory station-to-station elevation arc. That branch
+ * must therefore own a complete transfer with level entry and exit. Reject
+ * elevation families with no authored room satisfying that contract before
+ * the bounded physical candidate window is spent on impossible signatures.
+ *
+ * This is deliberately V4-only. Earlier profile revisions and ordinary
+ * two-station networks retain their exact elevation-bag domain and hashes.
+ */
+export function filterDenseObjectiveCoverageElevationModes({
+  profile,
+  grammars,
+  grant,
+  elevationModes = [],
+} = {}) {
+  if (Number(profile?.revision ?? 0) < 5
+    || grant?.kind !== 'objective-route-coverage'
+    || Number(grant?.endpointSockets?.length ?? 0) < 3) {
+    return [...elevationModes];
+  }
+  const candidatePool = (profile.grammarPool ?? [])
+    .map(({ id }) => grammars?.[id])
+    .filter((grammar) => (
+      grammar
+        && String(grammar.selectionConstraints?.routeNetworkModuleKind ?? 'room') === 'room'
+        && grammar.selectionConstraints?.routeNetworkJunctionKind == null
+        && grammar.selectionConstraints?.routeNetworkContentRoles?.includes('challenge')
+        && Math.abs(Number(
+          grammar.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
+        )) <= 0.000001
+  ));
+  return elevationModes.filter((mode) => candidatePool.some((grammar) => (
+    routeNetworkGrammarHasPurposefulAuthoredVerticalTraversal(grammar, mode)
+  )));
+}
+
+function routeNetworkPlacementPolyline(grant, endpoints, offsetMeters, sideSign) {
   if (grant.kind === 'landmark-perimeter-loop') {
     return pyramidPerimeterPolyline(grant, endpoints, offsetMeters, sideSign);
   }
@@ -3355,9 +4249,10 @@ function objectiveCoverageRoomPlacementsOnPath(
   return [];
 }
 
-function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
+export function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
   stationSizes = [],
   stationGrammars = [],
+  contentRoomGrammars = [],
   contentRoomDepthMeters = [19.6, 19.6],
   contentRoomEntryElevationMeters = [],
   contentRoomExitElevationMeters = [],
@@ -3388,11 +4283,49 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
   const setDiagnostics = (stage, details = {}) => {
     if (diagnostics && typeof diagnostics === 'object') {
       planningPhaseTimings.totalMs = planningNowMilliseconds() - planningStartedAt;
+      // Callers reuse one diagnostics object across grammar-aware refinement
+      // passes. A terminal failure must replace the previous pass snapshot;
+      // merging left stale `stateCount`, selected-state, and path fields next
+      // to a later `gap-options-empty` stage and misidentified the hot phase.
+      for (const key of Object.keys(diagnostics)) delete diagnostics[key];
       Object.assign(diagnostics, {
         stage,
         ...details,
         planningPhaseTimings: cloneDungeonAugmentationValue(planningPhaseTimings),
       });
+    }
+  };
+  const defineLazyDiagnosticProperty = (target, key, evaluate) => {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        const value = evaluate();
+        Object.defineProperty(target, key, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value,
+        });
+        return value;
+      },
+    });
+  };
+  const setLazyDiagnostics = (stage, keys, createDetails) => {
+    if (!diagnostics || typeof diagnostics !== 'object') return;
+    planningPhaseTimings.totalMs = planningNowMilliseconds() - planningStartedAt;
+    for (const key of Object.keys(diagnostics)) delete diagnostics[key];
+    diagnostics.stage = stage;
+    diagnostics.planningPhaseTimings = cloneDungeonAugmentationValue(
+      planningPhaseTimings,
+    );
+    let details = null;
+    const hydrate = () => {
+      details ??= createDetails();
+      return details;
+    };
+    for (const key of keys) {
+      defineLazyDiagnosticProperty(diagnostics, key, () => hydrate()[key]);
     }
   };
   if (outerPoints.length < 2 || contentRoomDepthMeters.length < 2) {
@@ -3428,42 +4361,65 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       stationSizes[stationOrdinal] ?? { width: 14, depth: 19.6 },
     )
   ));
-  const stationPlanningVolumesByOrdinal = outerPoints.map((center, stationOrdinal) => {
-    const grammar = stationGrammars[stationOrdinal];
-    const volumeTemplates = [
-      ...(grammar?.occupiedVolumes ?? []),
-      ...(grammar?.clearanceVolumes ?? []),
-    ];
-    if (volumeTemplates.length > 0) {
-      const stationPlacement = {
-        center: toDungeonPoint(center),
-        facing: toDungeonFacing(endpoints[stationOrdinal].facing),
-        rotationQuarterTurns: rotationQuarterTurnsForFacing(
-          endpoints[stationOrdinal].facing,
-        ),
-        coordinateSpace: endpoints[stationOrdinal]?.coordinateSpace,
-      };
-      return volumeTemplates.map((volume, volumeOrdinal) => transformDungeonVolume(
+  const transformedPlanningNode = (grammar, placement, idPrefix) => ({
+    id: idPrefix,
+    occupiedVolumes: (grammar?.occupiedVolumes ?? []).map((volume, volumeOrdinal) => (
+      transformDungeonVolume(
         volume,
-        stationPlacement,
-        `objective-external-station:${stationOrdinal}:${volumeOrdinal}:`,
-      ));
+        placement,
+        `${idPrefix}:occupied:${volumeOrdinal}:`,
+      )
+    )),
+    clearanceVolumes: (grammar?.clearanceVolumes ?? []).map((volume, volumeOrdinal) => (
+      transformDungeonVolume(
+        volume,
+        placement,
+        `${idPrefix}:clearance:${volumeOrdinal}:`,
+      )
+    )),
+  });
+  const stationPlanningNodesByOrdinal = outerPoints.map((center, stationOrdinal) => {
+    const grammar = stationGrammars[stationOrdinal];
+    if ((grammar?.occupiedVolumes?.length ?? 0) > 0
+      || (grammar?.clearanceVolumes?.length ?? 0) > 0) {
+      return transformedPlanningNode(
+        grammar,
+        {
+          center: toDungeonPoint(center),
+          facing: toDungeonFacing(endpoints[stationOrdinal].facing),
+          rotationQuarterTurns: rotationQuarterTurnsForFacing(
+            endpoints[stationOrdinal].facing,
+          ),
+          coordinateSpace: endpoints[stationOrdinal]?.coordinateSpace,
+        },
+        `objective-external-station:${stationOrdinal}`,
+      );
     }
     const footprint = stationFootprints[stationOrdinal];
-    return [{
+    return {
       id: `objective-external-station:${stationOrdinal}`,
-      center: {
-        x: Number(footprint.center.x),
-        y: Number(footprint.center.y) + 4.2,
-        z: Number(footprint.center.z),
-      },
-      size: {
-        x: Number(footprint.size.x),
-        y: 8.4,
-        z: Number(footprint.size.z),
-      },
-    }];
+      occupiedVolumes: [{
+        id: `objective-external-station:${stationOrdinal}:fallback-volume`,
+        center: {
+          x: Number(footprint.center.x),
+          y: Number(footprint.center.y) + 4.2,
+          z: Number(footprint.center.z),
+        },
+        size: {
+          x: Number(footprint.size.x),
+          y: 8.4,
+          z: Number(footprint.size.z),
+        },
+      }],
+      clearanceVolumes: [],
+    };
   });
+  const planningNodeVolumes = (node) => [
+    ...(node?.occupiedVolumes ?? []),
+    ...(node?.clearanceVolumes ?? []),
+  ];
+  const stationPlanningVolumesByOrdinal = stationPlanningNodesByOrdinal
+    .map(planningNodeVolumes);
   const roomFootprint = (placement) => footprintForPlacement(
     placement.center,
     placement.facing,
@@ -3472,7 +4428,22 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       depth: contentRoomDepthMeters[placement.roomOrdinal],
     },
   );
-  const planningVolumesForRoomPlacement = (placement) => {
+  const createPlanningNodeForRoomPlacement = (placement) => {
+    const grammar = contentRoomGrammars[placement.roomOrdinal] ?? null;
+    if (grammar && ((grammar.occupiedVolumes?.length ?? 0) > 0
+      || (grammar.clearanceVolumes?.length ?? 0) > 0)) {
+      const roomPlacement = {
+        center: toDungeonPoint(placement.center),
+        facing: toDungeonFacing(placement.facing),
+        rotationQuarterTurns: rotationQuarterTurnsForFacing(placement.facing),
+        coordinateSpace: endpoints[0]?.coordinateSpace,
+      };
+      return transformedPlanningNode(
+        grammar,
+        roomPlacement,
+        `objective-external-room:${placement.roomOrdinal}`,
+      );
+    }
     const volumeTemplates = contentRoomPlanningVolumes[placement.roomOrdinal] ?? [];
     if (volumeTemplates.length > 0) {
       const roomPlacement = {
@@ -3481,42 +4452,124 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         rotationQuarterTurns: rotationQuarterTurnsForFacing(placement.facing),
         coordinateSpace: endpoints[0]?.coordinateSpace,
       };
-      return volumeTemplates.map((volume, volumeOrdinal) => transformDungeonVolume(
-        volume,
-        roomPlacement,
-        `objective-external-room:${placement.roomOrdinal}:${volumeOrdinal}:`,
-      ));
+      return {
+        id: `objective-external-room:${placement.roomOrdinal}`,
+        occupiedVolumes: volumeTemplates.map((volume, volumeOrdinal) => (
+          transformDungeonVolume(
+            volume,
+            roomPlacement,
+            `objective-external-room:${placement.roomOrdinal}:${volumeOrdinal}:`,
+          )
+        )),
+        clearanceVolumes: [],
+      };
     }
     const footprint = roomFootprint(placement);
     const size = contentRoomSizes[placement.roomOrdinal] ?? {};
     const heightMeters = Number(size.height ?? 8.4);
-    return [{
-      center: {
-        x: Number(footprint.center.x),
-        y: Number(footprint.center.y) + heightMeters * 0.5,
-        z: Number(footprint.center.z),
-      },
-      size: {
-        x: Number(footprint.size.x),
-        y: heightMeters,
-        z: Number(footprint.size.z),
-      },
-    }];
+    return {
+      id: `objective-external-room:${placement.roomOrdinal}`,
+      occupiedVolumes: [{
+        id: `objective-external-room:${placement.roomOrdinal}:fallback-volume`,
+        center: {
+          x: Number(footprint.center.x),
+          y: Number(footprint.center.y) + heightMeters * 0.5,
+          z: Number(footprint.center.z),
+        },
+        size: {
+          x: Number(footprint.size.x),
+          y: heightMeters,
+          z: Number(footprint.size.z),
+        },
+      }],
+      clearanceVolumes: [],
+    };
   };
+  const roomPlacementCacheKey = (placement) => [
+      placement.roomOrdinal,
+      Number(placement.center.x).toFixed(4),
+      Number(placement.center.y).toFixed(4),
+      Number(placement.center.z).toFixed(4),
+      Number(placement.facing.x).toFixed(1),
+      Number(placement.facing.z).toFixed(1),
+    ].join(':');
+  const roomPlanningNodeCache = new Map();
+  const planningNodeForRoomPlacement = (placement) => {
+    const key = roomPlacementCacheKey(placement);
+    if (!roomPlanningNodeCache.has(key)) {
+      roomPlanningNodeCache.set(key, createPlanningNodeForRoomPlacement(placement));
+    }
+    return roomPlanningNodeCache.get(key);
+  };
+  const planningVolumesForRoomPlacement = (placement) => (
+    planningNodeVolumes(planningNodeForRoomPlacement(placement))
+  );
+  const stationConnectorEndpoint = (stationOrdinal, socket) => ({
+    node: stationPlanningNodesByOrdinal[stationOrdinal] ?? null,
+    socket: {
+      ...cloneDungeonAugmentationValue(socket),
+      id: `objective-external-station:${stationOrdinal}:socket:${socket.localSocketId}`,
+      nodeId: `objective-external-station:${stationOrdinal}`,
+      coordinateSpace: endpoints[stationOrdinal]?.coordinateSpace,
+    },
+    stationOrdinal,
+    roomOrdinal: null,
+  });
+  const roomConnectorEndpoint = (
+    placement,
+    localSocketId,
+    fallbackPosition,
+  ) => {
+    const grammar = contentRoomGrammars[placement.roomOrdinal] ?? null;
+    const grammarSocket = grammar?.sockets?.find(({ id }) => (
+      String(id) === String(localSocketId)
+    ));
+    const roomTransform = {
+      center: toDungeonPoint(placement.center),
+      facing: toDungeonFacing(placement.facing),
+      rotationQuarterTurns: rotationQuarterTurnsForFacing(placement.facing),
+      coordinateSpace: endpoints[0]?.coordinateSpace,
+    };
+    const fallbackFacing = localSocketId === 'entry'
+      ? scaleDungeonPoint(toDungeonCardinalFacing(placement.facing), -1)
+      : toDungeonCardinalFacing(placement.facing);
+    const nodeId = `objective-external-room:${placement.roomOrdinal}`;
+    return {
+      node: planningNodeForRoomPlacement(placement),
+      socket: {
+        id: `${nodeId}:socket:${localSocketId}`,
+        nodeId,
+        localSocketId,
+        position: grammarSocket?.localPosition
+          ? transformDungeonLocalPoint(grammarSocket.localPosition, roomTransform)
+          : cloneDungeonAugmentationValue(fallbackPosition),
+        facing: grammarSocket?.localFacing
+          ? transformDungeonLocalFacing(grammarSocket.localFacing, roomTransform)
+          : fallbackFacing,
+        coordinateSpace: endpoints[0]?.coordinateSpace,
+      },
+      stationOrdinal: null,
+      roomOrdinal: placement.roomOrdinal,
+    };
+  };
+  const objectiveConnectorEndpointSeam = (endpoint, role) => (
+    createDungeonRouteEndpointSeam(endpoint.socket, {
+      id: `${endpoint.socket.id}:${role}:planning-seam`,
+      operationId: 'objective-external-composer',
+      networkId: 'objective-external-composer',
+      nodeId: endpoint.node?.id ?? endpoint.socket.nodeId,
+      socketId: endpoint.socket.id,
+      localSocketId: endpoint.socket.localSocketId,
+      role,
+    })
+  );
   const nearbyPlanningAvoidanceVolumes = createPlanningVolumeSpatialLookup(
     planningAvoidanceVolumes,
   );
   const roomPlacementStaticCollisionScoreCache = new Map();
   const roomPlacementStaticCollisionScore = (placement) => (
     (() => {
-      const key = [
-        placement.roomOrdinal,
-        Number(placement.center.x).toFixed(4),
-        Number(placement.center.y).toFixed(4),
-        Number(placement.center.z).toFixed(4),
-        Number(placement.facing.x).toFixed(1),
-        Number(placement.facing.z).toFixed(1),
-      ].join(':');
+      const key = roomPlacementCacheKey(placement);
       if (roomPlacementStaticCollisionScoreCache.has(key)) {
         return roomPlacementStaticCollisionScoreCache.get(key);
       }
@@ -3533,13 +4586,12 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       return score;
     })()
   );
-  const indexedPathPlanningCollisionScore = (
-    path,
-    heightMeters = 5.6,
+  const indexedPlanningVolumeCollisionScore = (
+    volumes,
     overlapGrants = [],
   ) => {
     const scoringStartedAt = planningNowMilliseconds();
-    const score = routePathPlanningVolumes(path, heightMeters).reduce((total, volume) => (
+    const score = volumes.reduce((total, volume) => (
       total + [...nearbyPlanningAvoidanceVolumes(volume)].reduce((count, obstacle) => (
         count + (planningVolumesOverlap(volume, obstacle)
           && !planningOverlapIsGranted(volume, obstacle, overlapGrants) ? 1 : 0)
@@ -3561,25 +4613,53 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       ))
       .map((obstacle) => String(obstacle.id ?? obstacle.ownerId ?? 'unknown'))
   )))].sort();
-  const roomPlacementStationCollisionScore = (placements) => {
-    const compatibilityStartedAt = planningNowMilliseconds();
-    const roomVolumeGroups = placements.map(planningVolumesForRoomPlacement);
-    const stationScore = roomVolumeGroups.reduce((score, roomVolumes) => (
-      score + stationPlanningVolumesByOrdinal.reduce((stationTotal, stationVolumes) => (
+  const roomPlacementStationCollisionScoreByNode = new WeakMap();
+  const roomPlacementPairCollisionScoreByNode = new WeakMap();
+  const cachedRoomPlacementStationCollisionScore = (placement) => {
+    const node = planningNodeForRoomPlacement(placement);
+    if (!roomPlacementStationCollisionScoreByNode.has(node)) {
+      const roomVolumes = planningNodeVolumes(node);
+      const score = stationPlanningVolumesByOrdinal.reduce((stationTotal, stationVolumes) => (
         stationTotal + roomVolumes.reduce((roomTotal, roomVolume) => (
           roomTotal + stationVolumes.reduce((volumeTotal, stationVolume) => (
             volumeTotal + (planningVolumesOverlap(roomVolume, stationVolume) ? 1 : 0)
           ), 0)
         ), 0)
-      ), 0)
-    ), 0);
-    const roomScore = roomVolumeGroups.reduce((score, roomVolumes, index) => (
-      score + roomVolumeGroups.slice(index + 1).reduce((otherTotal, otherRoomVolumes) => (
-        otherTotal + roomVolumes.reduce((roomTotal, roomVolume) => (
-          roomTotal + otherRoomVolumes.reduce((volumeTotal, otherRoomVolume) => (
-            volumeTotal + (planningVolumesOverlap(roomVolume, otherRoomVolume) ? 1 : 0)
-          ), 0)
+      ), 0);
+      roomPlacementStationCollisionScoreByNode.set(node, score);
+    }
+    return roomPlacementStationCollisionScoreByNode.get(node);
+  };
+  const cachedRoomPlacementPairCollisionScore = (firstPlacement, secondPlacement) => {
+    const firstNode = planningNodeForRoomPlacement(firstPlacement);
+    const secondNode = planningNodeForRoomPlacement(secondPlacement);
+    const firstScores = roomPlacementPairCollisionScoreByNode.get(firstNode)
+      ?? new WeakMap();
+    roomPlacementPairCollisionScoreByNode.set(firstNode, firstScores);
+    if (!firstScores.has(secondNode)) {
+      const firstVolumes = planningNodeVolumes(firstNode);
+      const secondVolumes = planningNodeVolumes(secondNode);
+      const score = firstVolumes.reduce((firstTotal, firstVolume) => (
+        firstTotal + secondVolumes.reduce((secondTotal, secondVolume) => (
+          secondTotal + (planningVolumesOverlap(firstVolume, secondVolume) ? 1 : 0)
         ), 0)
+      ), 0);
+      firstScores.set(secondNode, score);
+      const secondScores = roomPlacementPairCollisionScoreByNode.get(secondNode)
+        ?? new WeakMap();
+      roomPlacementPairCollisionScoreByNode.set(secondNode, secondScores);
+      secondScores.set(firstNode, score);
+    }
+    return firstScores.get(secondNode);
+  };
+  const roomPlacementStationCollisionScore = (placements) => {
+    const compatibilityStartedAt = planningNowMilliseconds();
+    const stationScore = placements.reduce((score, placement) => (
+      score + cachedRoomPlacementStationCollisionScore(placement)
+    ), 0);
+    const roomScore = placements.reduce((score, placement, index) => (
+      score + placements.slice(index + 1).reduce((otherTotal, otherPlacement) => (
+        otherTotal + cachedRoomPlacementPairCollisionScore(placement, otherPlacement)
       ), 0)
     ), 0);
     const score = stationScore + roomScore;
@@ -3634,7 +4714,11 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     obstacleBoundsByOwner.set(ownerId, bounds);
   }
   const obstacleOwnerBounds = [...obstacleBoundsByOwner.values()];
-  const routePathCandidates = (fromSocket, toSocket) => {
+  const routePathCandidates = (
+    fromSocket,
+    toSocket,
+    maximumAggregatePlanarLengthMeters,
+  ) => {
     const results = [];
     const seen = new Set();
     const register = (path, routePreferenceOrdinal) => {
@@ -3676,8 +4760,18 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     for (const [routePreferenceOrdinal, preferXFirst] of [true, false].entries()) {
       for (const path of facingAwareSocketRouteCandidates(fromSocket, toSocket, {
         preferXFirst,
-        sourceApproachMeters: [minimumApproachMeters],
-        destinationApproachMeters: [minimumApproachMeters],
+        sourceApproachMeters: objectiveCoverageRouteApproachMeters(
+          minimumApproachMeters,
+        ),
+        destinationApproachMeters: objectiveCoverageRouteApproachMeters(
+          minimumApproachMeters,
+        ),
+        // This path is an aggregate composition surface: authored rooms are
+        // inserted below and reset the featureless-distance counter before
+        // the path is serialized into individual connector slices. Ordinary
+        // socket-to-socket callers retain the helper's strict single-interval
+        // default.
+        maximumPlanarLengthMeters: maximumAggregatePlanarLengthMeters,
         detourOffsetsMeters: (() => {
           const fromLead = routeSocketLead(fromSocket, minimumApproachMeters);
           const toLead = routeSocketLead(toSocket, minimumApproachMeters);
@@ -3717,13 +4811,21 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     ));
   };
   const candidateGenerationStartedAt = planningNowMilliseconds();
+  const gapOptionGenerationDiagnostics = [];
   const gapOptions = roomsByGap.map((roomOrdinals, gapOrdinal) => {
+    let placementSetCount = 0;
+    let endpointAlignmentRejectedCount = 0;
+    let endpointMaskRejectedCount = 0;
     const maximumRouteLengthMeters = roomOrdinals.reduce((total, roomOrdinal) => (
       total + Number(contentRoomDepthMeters[roomOrdinal] ?? 0)
     ), 0) + maximumFeaturelessSpanMeters * (roomOrdinals.length + 1);
     const options = stationSockets[gapOrdinal].flatMap((fromSocket) => (
       stationSockets[gapOrdinal + 1].flatMap((toSocket) => (
-        routePathCandidates(fromSocket, toSocket).flatMap((route) => {
+        routePathCandidates(
+          fromSocket,
+          toSocket,
+          maximumRouteLengthMeters,
+        ).flatMap((route) => {
           if (route.lengthMeters > maximumRouteLengthMeters + 1e-6) return [];
           const rawPlacementSets = objectiveCoverageRoomPlacementsOnPath(
             route.path,
@@ -3745,79 +4847,206 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
           const placementSets = scoredPlacementSets
             .filter(({ stationCollisionScore }) => stationCollisionScore === 0)
             .map(({ placements }) => placements);
-          return placementSets.map((roomPlacements) => {
+          placementSetCount += placementSets.length;
+          return placementSets.flatMap((roomPlacements) => {
             let connectorStartDistanceMeters = 0;
-            const connectorPaths = [];
+            const rawConnectorPaths = [];
             for (const placement of roomPlacements) {
-              connectorPaths.push(sliceDungeonPolylineByDistance(
+              rawConnectorPaths.push(sliceDungeonPolylineByDistance(
                 route.path,
                 connectorStartDistanceMeters,
                 placement.entryDistanceMeters,
               ));
               connectorStartDistanceMeters = placement.exitDistanceMeters;
             }
-            connectorPaths.push(sliceDungeonPolylineByDistance(
+            rawConnectorPaths.push(sliceDungeonPolylineByDistance(
               route.path,
               connectorStartDistanceMeters,
               route.lengthMeters,
             ));
-            const connectorStaticCollisionScore = connectorPaths.reduce((score, connectorPath) => (
-              score + (measureDungeonPolyline(connectorPath) > 1e-6
-                ? indexedPathPlanningCollisionScore(
-                  connectorPath,
-                  5.6,
-                  planningOverlapGrants,
+            const sourceStationEndpoint = stationConnectorEndpoint(
+              gapOrdinal,
+              fromSocket,
+            );
+            const destinationStationEndpoint = stationConnectorEndpoint(
+              gapOrdinal + 1,
+              toSocket,
+            );
+            const roomEntryEndpoints = roomPlacements.map((placement, roomIndex) => (
+              roomConnectorEndpoint(
+                placement,
+                'entry',
+                rawConnectorPaths[roomIndex]?.at(-1),
+              )
+            ));
+            const roomExitEndpoints = roomPlacements.map((placement, roomIndex) => (
+              roomConnectorEndpoint(
+                placement,
+                'exit',
+                rawConnectorPaths[roomIndex + 1]?.[0],
+              )
+            ));
+            const connectorEndpointPairs = rawConnectorPaths.map((_, connectorOrdinal) => ({
+              from: connectorOrdinal === 0
+                ? sourceStationEndpoint
+                : roomExitEndpoints[connectorOrdinal - 1],
+              to: connectorOrdinal === rawConnectorPaths.length - 1
+                ? destinationStationEndpoint
+                : roomEntryEndpoints[connectorOrdinal],
+            }));
+            const connectorPaths = rawConnectorPaths.map((rawPath, connectorOrdinal) => {
+              const { from, to } = connectorEndpointPairs[connectorOrdinal];
+              const normalized = normalizedRoutePath(rawPath);
+              const planarPoint = (point) => ({ ...point, y: 0 });
+              if (normalized.length < 2
+                || dungeonPointDistance(
+                  planarPoint(normalized[0]),
+                  planarPoint(from.socket.position),
+                ) > 1e-4
+                || dungeonPointDistance(
+                  planarPoint(normalized.at(-1)),
+                  planarPoint(to.socket.position),
+                ) > 1e-4
+                || Math.abs(
+                  Number(from.socket.position.y) - Number(to.socket.position.y)
+                ) > 1e-6) return null;
+              const connectorElevation = Number(from.socket.position.y);
+              const aligned = normalized.map((point) => ({
+                ...cloneDungeonAugmentationValue(point),
+                y: connectorElevation,
+              }));
+              aligned[0] = cloneDungeonAugmentationValue(from.socket.position);
+              aligned[aligned.length - 1] = cloneDungeonAugmentationValue(
+                to.socket.position,
+              );
+              return normalizedRoutePath(aligned);
+            });
+            if (connectorPaths.some((path) => !Array.isArray(path) || path.length < 2)) {
+              endpointAlignmentRejectedCount += 1;
+              return [];
+            }
+            const connectorRouteRecords = connectorPaths.map((path, connectorOrdinal) => {
+              const { from, to } = connectorEndpointPairs[connectorOrdinal];
+              const endpointSeams = [
+                objectiveConnectorEndpointSeam(from, 'from'),
+                objectiveConnectorEndpointSeam(to, 'to'),
+              ];
+              const collisionVolumes = routeSegmentPlanningCollisionVolumes(
+                path,
+                from.socket,
+                to.socket,
+                5.6,
+                5.6,
+              );
+              const exteriorApproachCompatible = routePathHasExteriorSocketApproach(
+                path,
+                from.socket,
+                false,
+                endpointSeams[0],
+              ) && routePathHasExteriorSocketApproach(
+                path,
+                to.socket,
+                true,
+                endpointSeams[1],
+              );
+              const endpointNodeMasksCompatible = exteriorApproachCompatible
+                && routePlanningVolumesRespectEndpointNodeMask(
+                  collisionVolumes,
+                  from.node,
+                  endpointSeams[0],
                 )
-                : 0)
-            ), 0);
-            // A gap path may overlap its source station on the first leg and
-            // its destination station on the final leg.  It may never loop
-            // back through either station (or cross a third station) between
-            // authored rooms.  Scoring only host volumes allowed exactly that
-            // invalid shape, which the global physical solver rejected much
-            // later as a collision with node 0.
-            const stationCollisionScoringStartedAt = planningNowMilliseconds();
-            const connectorStationCollisionScore = connectorPaths.reduce(
-              (score, connectorPath, connectorOrdinal) => {
-                if (measureDungeonPolyline(connectorPath) <= 1e-6) return score;
-                const permittedStationOrdinals = new Set([
-                  ...(connectorOrdinal === 0 ? [gapOrdinal] : []),
-                  ...(connectorOrdinal === connectorPaths.length - 1
-                    ? [gapOrdinal + 1]
-                    : []),
-                ]);
-                const forbiddenStationVolumes = stationPlanningVolumesByOrdinal.flatMap(
-                  (stationVolumes, stationOrdinal) => (
-                    permittedStationOrdinals.has(stationOrdinal) ? [] : stationVolumes
-                  ),
+                && routePlanningVolumesRespectEndpointNodeMask(
+                  collisionVolumes,
+                  to.node,
+                  endpointSeams[1],
                 );
-                return score + pathPlanningCollisionScore(
-                  connectorPath,
-                  forbiddenStationVolumes,
-                  5.6,
-                  [],
-                );
-              },
+              return {
+                path,
+                from,
+                to,
+                collisionVolumes,
+                endpointNodeMasksCompatible,
+              };
+            });
+            // A composed path is replayed verbatim by the exact solver. Apply
+            // its final-width endpoint masks here, before the per-pair option
+            // window, so a short shell-cutting turn cannot hide a legal
+            // tile-aligned route later in the deterministic order.
+            if (connectorRouteRecords.some(({ endpointNodeMasksCompatible }) => (
+              !endpointNodeMasksCompatible
+            ))) {
+              endpointMaskRejectedCount += 1;
+              return [];
+            }
+            const connectorStaticCollisionScore = connectorRouteRecords.reduce(
+              (score, { collisionVolumes }) => score + indexedPlanningVolumeCollisionScore(
+                collisionVolumes,
+                planningOverlapGrants,
+              ),
+              0,
+            );
+            // Adjacent bodies are governed only by the exact seam masks above.
+            // Every other room and station remains a hard physical obstacle.
+            const allPlacementNodes = [
+              ...stationPlanningNodesByOrdinal.map((node, stationOrdinal) => ({
+                node,
+                stationOrdinal,
+                roomOrdinal: null,
+              })),
+              ...roomPlacements.map((placement) => ({
+                node: planningNodeForRoomPlacement(placement),
+                stationOrdinal: null,
+                roomOrdinal: placement.roomOrdinal,
+              })),
+            ];
+            const nodeCollisionScoringStartedAt = planningNowMilliseconds();
+            const connectorNodeCollisionScore = connectorRouteRecords.reduce(
+              (score, { from, to, collisionVolumes }) => score
+                + allPlacementNodes.reduce((nodeTotal, record) => {
+                  const adjacent = (
+                    record.stationOrdinal != null
+                      && (record.stationOrdinal === from.stationOrdinal
+                        || record.stationOrdinal === to.stationOrdinal)
+                  ) || (
+                    record.roomOrdinal != null
+                      && (record.roomOrdinal === from.roomOrdinal
+                        || record.roomOrdinal === to.roomOrdinal)
+                  );
+                  if (adjacent) return nodeTotal;
+                  return nodeTotal + collisionVolumes.reduce((volumeTotal, pathVolume) => (
+                    volumeTotal + planningNodeVolumes(record.node).reduce(
+                      (overlapTotal, nodeVolume) => overlapTotal
+                        + Number(planningVolumesOverlap(pathVolume, nodeVolume)),
+                      0,
+                    )
+                  ), 0);
+                }, 0),
               0,
             );
             planningPhaseTimings.staticCollisionScoringMs +=
-              planningNowMilliseconds() - stationCollisionScoringStartedAt;
+              planningNowMilliseconds() - nodeCollisionScoringStartedAt;
             planningPhaseTimings.staticCollisionScoringCalls += connectorPaths.length;
             const roomStaticCollisionScore = roomPlacements.reduce((score, placement) => (
               score + roomPlacementStaticCollisionScore(placement)
             ), 0);
-            return {
+            return [{
               gapOrdinal,
               fromLocalSocketId: fromSocket.localSocketId,
               toLocalSocketId: toSocket.localSocketId,
               routeSignature: route.signature,
               roomPlacements,
               connectorPaths,
+              connectorCollisionVolumes: connectorRouteRecords.map(({ collisionVolumes }) => (
+                collisionVolumes
+              )),
               routePath: route.path,
               routeLengthMeters: route.lengthMeters,
-              stationCollisionScore: connectorStationCollisionScore,
+              stationCollisionScore: connectorNodeCollisionScore,
+              connectorStaticCollisionScore,
+              connectorNodeCollisionScore,
+              roomStaticCollisionScore,
               staticCollisionScore: connectorStaticCollisionScore
-                + connectorStationCollisionScore
+                + connectorNodeCollisionScore
                 + roomStaticCollisionScore,
               signature: [
                 fromSocket.localSocketId,
@@ -3827,8 +5056,8 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
                   `${roomOrdinal}@${entryDistanceMeters.toFixed(4)}`
                 )),
               ].join(':'),
-            };
-          }).filter(({ stationCollisionScore }) => stationCollisionScore === 0);
+            }];
+          });
         })
       ))
     )).sort((first, second) => (
@@ -3849,7 +5078,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       pairOptions.push(option);
       optionsByPair.set(pairKey, pairOptions);
     }
-    return [...optionsByPair.values()].flatMap((pairOptions) => {
+    const retainedOptions = [...optionsByPair.values()].flatMap((pairOptions) => {
       const selected = [];
       const selectedOptions = new Set();
       const seenRouteSignatures = new Set();
@@ -3873,12 +5102,56 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         || first.toLocalSocketId.localeCompare(second.toLocalSocketId)
         || first.signature.localeCompare(second.signature)
     ));
+    const gapGenerationDiagnostic = {
+      gapOrdinal,
+      placementSetCount,
+      endpointAlignmentRejectedCount,
+      endpointMaskRejectedCount,
+      maskCompatibleOptionCount: options.length,
+      zeroStaticOptionCount: options.filter(({ staticCollisionScore }) => (
+        staticCollisionScore === 0
+      )).length,
+      retainedOptionCount: retainedOptions.length,
+      retainedZeroStaticOptionCount: retainedOptions.filter(({ staticCollisionScore }) => (
+        staticCollisionScore === 0
+      )).length,
+    };
+    defineLazyDiagnosticProperty(gapGenerationDiagnostic, 'perSocketPair', () => (
+      [...optionsByPair].map(([socketPair, pairOptions]) => ({
+        socketPair,
+        optionCount: pairOptions.length,
+        zeroStaticOptionCount: pairOptions.filter(({ staticCollisionScore }) => (
+          staticCollisionScore === 0
+        )).length,
+        minimumStaticCollisionScore: pairOptions[0]?.staticCollisionScore ?? null,
+      }))
+    ));
+    defineLazyDiagnosticProperty(gapGenerationDiagnostic, 'bestOptions', () => (
+      options.slice(0, 8).map((option) => ({
+        fromLocalSocketId: option.fromLocalSocketId,
+        toLocalSocketId: option.toLocalSocketId,
+        routeLengthMeters: option.routeLengthMeters,
+        staticCollisionScore: option.staticCollisionScore,
+        connectorStaticCollisionScore: option.connectorStaticCollisionScore,
+        connectorNodeCollisionScore: option.connectorNodeCollisionScore,
+        roomStaticCollisionScore: option.roomStaticCollisionScore,
+        connectorPaths: cloneDungeonAugmentationValue(option.connectorPaths),
+        roomPlacements: option.roomPlacements.map((placement) => ({
+          roomOrdinal: placement.roomOrdinal,
+          center: cloneDungeonAugmentationValue(placement.center),
+          facing: cloneDungeonAugmentationValue(placement.facing),
+        })),
+      }))
+    ));
+    gapOptionGenerationDiagnostics.push(gapGenerationDiagnostic);
+    return retainedOptions;
   });
   planningPhaseTimings.candidateGenerationMs +=
     planningNowMilliseconds() - candidateGenerationStartedAt;
   if (gapOptions.some((options) => options.length === 0)) {
     setDiagnostics('gap-options-empty', {
       gapOptionCounts: gapOptions.map((options) => options.length),
+      gapOptionGenerationDiagnostics,
     });
     return null;
   }
@@ -3925,6 +5198,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
         planningNowMilliseconds() - recursiveCompositionStartedAt;
       setDiagnostics('combined-state-empty', {
         gapOptionCounts: gapOptions.map((candidates) => candidates.length),
+        gapOptionGenerationDiagnostics,
       });
       return null;
     }
@@ -3944,93 +5218,120 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
   // When no collision-free composed state exists, hand the same authored
   // modules to the bounded global placement solver below; it can rotate and
   // spread them beyond the precomposed station-to-station polyline.
+  let collisionHint = false;
+  let selectedState = null;
   if (bestStaticCollisionScore > 0) {
     const bestState = states[0];
-    const zeroStaticAdjacentPairDiagnostics = gapOptions.length >= 2
-      ? gapOptions[0].flatMap((firstOption) => gapOptions[1].flatMap((secondOption) => {
-        if (firstOption.staticCollisionScore !== 0
-          || secondOption.staticCollisionScore !== 0
-          || firstOption.toLocalSocketId === secondOption.fromLocalSocketId) return [];
-        const combinedPlacements = [
-          ...firstOption.roomPlacements,
-          ...secondOption.roomPlacements,
-        ];
-        return [{
-          firstSocketPair: `${firstOption.fromLocalSocketId}:${firstOption.toLocalSocketId}`,
-          secondSocketPair: `${secondOption.fromLocalSocketId}:${secondOption.toLocalSocketId}`,
-          combinedRoomStationCollisionScore:
-            roomPlacementStationCollisionScore(combinedPlacements),
-          firstRoomCenters: firstOption.roomPlacements.map(({ center }) => (
-            cloneDungeonAugmentationValue(center)
-          )),
-          secondRoomCenters: secondOption.roomPlacements.map(({ center }) => (
-            cloneDungeonAugmentationValue(center)
-          )),
-        }];
-      })).sort((first, second) => (
-        first.combinedRoomStationCollisionScore
-          - second.combinedRoomStationCollisionScore
-      )).slice(0, 8)
-      : [];
-    const connectorCollisionIds = planningCollisionIdsForVolumes(
-      bestState.options.flatMap(({ connectorPaths = [] }) => (
-        connectorPaths.flatMap((path) => routePathPlanningVolumes(path, 5.6))
-      )),
-      planningOverlapGrants,
-    );
-    const roomCollisionIds = planningCollisionIdsForVolumes(
-      bestState.options.flatMap(({ roomPlacements }) => (
-        roomPlacements.flatMap(planningVolumesForRoomPlacement)
-      )),
-    );
-    setDiagnostics('best-state-collides', {
-      bestStaticCollisionScore,
-      stateCount: states.length,
-      gapOptionCounts: gapOptions.map((candidates) => candidates.length),
-      connectorCollisionIds: connectorCollisionIds.slice(0, 24),
-      roomCollisionIds: roomCollisionIds.slice(0, 24),
-      zeroStaticAdjacentPairDiagnostics,
-      gapBestSocketPairs: gapOptions.map((options, gapOrdinal) => (
-        [...new Map(options.map((option) => [
-          `${option.fromLocalSocketId}:${option.toLocalSocketId}`,
-          option,
-        ])).values()].map((option) => ({
-          gapOrdinal,
+    setLazyDiagnostics('best-state-collides', [
+      'bestStaticCollisionScore',
+      'stateCount',
+      'gapOptionCounts',
+      'gapOptionGenerationDiagnostics',
+      'connectorCollisionIds',
+      'roomCollisionIds',
+      'zeroStaticAdjacentPairDiagnostics',
+      'gapBestSocketPairs',
+      'bestStateSocketPairs',
+    ], () => {
+      const zeroStaticAdjacentPairDiagnostics = gapOptions.length >= 2
+        ? gapOptions[0].flatMap((firstOption) => gapOptions[1].flatMap((secondOption) => {
+          if (firstOption.staticCollisionScore !== 0
+            || secondOption.staticCollisionScore !== 0
+            || firstOption.toLocalSocketId === secondOption.fromLocalSocketId) return [];
+          const combinedPlacements = [
+            ...firstOption.roomPlacements,
+            ...secondOption.roomPlacements,
+          ];
+          return [{
+            firstSocketPair: `${firstOption.fromLocalSocketId}:${firstOption.toLocalSocketId}`,
+            secondSocketPair: `${secondOption.fromLocalSocketId}:${secondOption.toLocalSocketId}`,
+            combinedRoomStationCollisionScore:
+              roomPlacementStationCollisionScore(combinedPlacements),
+            firstRoomCenters: firstOption.roomPlacements.map(({ center }) => (
+              cloneDungeonAugmentationValue(center)
+            )),
+            secondRoomCenters: secondOption.roomPlacements.map(({ center }) => (
+              cloneDungeonAugmentationValue(center)
+            )),
+          }];
+        })).sort((first, second) => (
+          first.combinedRoomStationCollisionScore
+            - second.combinedRoomStationCollisionScore
+        )).slice(0, 8)
+        : [];
+      const connectorCollisionIds = planningCollisionIdsForVolumes(
+        bestState.options.flatMap(({ connectorCollisionVolumes = [] }) => (
+          connectorCollisionVolumes.flat()
+        )),
+        planningOverlapGrants,
+      );
+      const roomCollisionIds = planningCollisionIdsForVolumes(
+        bestState.options.flatMap(({ roomPlacements }) => (
+          roomPlacements.flatMap(planningVolumesForRoomPlacement)
+        )),
+      );
+      return {
+        bestStaticCollisionScore,
+        stateCount: states.length,
+        gapOptionCounts: gapOptions.map((candidates) => candidates.length),
+        gapOptionGenerationDiagnostics,
+        connectorCollisionIds: connectorCollisionIds.slice(0, 24),
+        roomCollisionIds: roomCollisionIds.slice(0, 24),
+        zeroStaticAdjacentPairDiagnostics,
+        gapBestSocketPairs: gapOptions.map((options, gapOrdinal) => (
+          [...new Map(options.map((option) => [
+            `${option.fromLocalSocketId}:${option.toLocalSocketId}`,
+            option,
+          ])).values()].map((option) => ({
+            gapOrdinal,
+            fromLocalSocketId: option.fromLocalSocketId,
+            toLocalSocketId: option.toLocalSocketId,
+            routeLengthMeters: option.routeLengthMeters,
+            staticCollisionScore: option.staticCollisionScore,
+            routePath: cloneDungeonAugmentationValue(option.routePath),
+            roomPlacements: option.roomPlacements.map(({ roomOrdinal, center, facing }) => ({
+              roomOrdinal,
+              center: cloneDungeonAugmentationValue(center),
+              facing: cloneDungeonAugmentationValue(facing),
+            })),
+          }))
+        )),
+        bestStateSocketPairs: bestState.options.map((option) => ({
+          gapOrdinal: option.gapOrdinal,
           fromLocalSocketId: option.fromLocalSocketId,
           toLocalSocketId: option.toLocalSocketId,
           routeLengthMeters: option.routeLengthMeters,
           staticCollisionScore: option.staticCollisionScore,
           routePath: cloneDungeonAugmentationValue(option.routePath),
-          roomPlacements: option.roomPlacements.map(({ roomOrdinal, center, facing }) => ({
-            roomOrdinal,
-            center: cloneDungeonAugmentationValue(center),
-            facing: cloneDungeonAugmentationValue(facing),
+          roomPlacements: option.roomPlacements.map((placement) => ({
+            roomOrdinal: placement.roomOrdinal,
+            center: cloneDungeonAugmentationValue(placement.center),
+            facing: cloneDungeonAugmentationValue(placement.facing),
+            entryDistanceMeters: placement.entryDistanceMeters,
+            exitDistanceMeters: placement.exitDistanceMeters,
           })),
-        }))
-      )),
-      bestStateSocketPairs: bestState.options.map((option) => ({
-        gapOrdinal: option.gapOrdinal,
-        fromLocalSocketId: option.fromLocalSocketId,
-        toLocalSocketId: option.toLocalSocketId,
-        routeLengthMeters: option.routeLengthMeters,
-        staticCollisionScore: option.staticCollisionScore,
-        routePath: cloneDungeonAugmentationValue(option.routePath),
-        roomPlacements: option.roomPlacements.map((placement) => ({
-          roomOrdinal: placement.roomOrdinal,
-          center: cloneDungeonAugmentationValue(placement.center),
-          facing: cloneDungeonAugmentationValue(placement.facing),
-          entryDistanceMeters: placement.entryDistanceMeters,
-          exitDistanceMeters: placement.exitDistanceMeters,
         })),
-      })),
+      };
     });
-    return null;
+    // Preserve the strongest deterministic centers, facings, and semantic
+    // socket chain as the global solver's displacement seed. The colliding
+    // connector paths are deliberately withheld, so exact placement must
+    // rotate/translate the rooms and solve every physical edge afresh.
+    collisionHint = true;
+    selectedState = bestState;
+  } else {
+    const bestCollisionTier = states.filter(({ totalStaticCollisionScore }) => (
+      totalStaticCollisionScore === bestStaticCollisionScore
+    ));
+    const selectedStateIndex = (normalizedSearchVariant * 67) % bestCollisionTier.length;
+    selectedState = bestCollisionTier[selectedStateIndex];
+    setDiagnostics('composed', {
+      stateCount: states.length,
+      gapOptionCounts: gapOptions.map((candidates) => candidates.length),
+      gapOptionGenerationDiagnostics,
+      selectedStateIndex,
+    });
   }
-  const bestCollisionTier = states.filter(({ totalStaticCollisionScore }) => (
-    totalStaticCollisionScore === bestStaticCollisionScore
-  ));
-  const selectedStateIndex = (normalizedSearchVariant * 67) % bestCollisionTier.length;
-  const selectedState = bestCollisionTier[selectedStateIndex];
   const sequence = [];
   for (let gapOrdinal = 0; gapOrdinal < selectedState.options.length; gapOrdinal += 1) {
     if (gapOrdinal === 0) sequence.push({ kind: 'station', stationOrdinal: 0 });
@@ -4099,7 +5400,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       requiredSocketBindings.push(binding);
       externalSpinePaths.push({
         ...binding,
-        path: cloneDungeonAugmentationValue(option.routePath),
+        path: cloneDungeonAugmentationValue(option.connectorPaths[0]),
       });
       continue;
     }
@@ -4112,11 +5413,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     requiredSocketBindings.push(firstBinding);
     externalSpinePaths.push({
       ...firstBinding,
-      path: sliceDungeonPolylineByDistance(
-        option.routePath,
-        0,
-        option.roomPlacements[0].entryDistanceMeters,
-      ),
+      path: cloneDungeonAugmentationValue(option.connectorPaths[0]),
     });
     for (let roomIndex = 1; roomIndex < roomNodeIndices.length; roomIndex += 1) {
       const binding = {
@@ -4128,11 +5425,7 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
       requiredSocketBindings.push(binding);
       externalSpinePaths.push({
         ...binding,
-        path: sliceDungeonPolylineByDistance(
-          option.routePath,
-          option.roomPlacements[roomIndex - 1].exitDistanceMeters,
-          option.roomPlacements[roomIndex].entryDistanceMeters,
-        ),
+        path: cloneDungeonAugmentationValue(option.connectorPaths[roomIndex]),
       });
     }
     const finalBinding = {
@@ -4144,18 +5437,9 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     requiredSocketBindings.push(finalBinding);
     externalSpinePaths.push({
       ...finalBinding,
-      path: sliceDungeonPolylineByDistance(
-        option.routePath,
-        option.roomPlacements.at(-1).exitDistanceMeters,
-        option.routeLengthMeters,
-      ),
+      path: cloneDungeonAugmentationValue(option.connectorPaths.at(-1)),
     });
   }
-  setDiagnostics('composed', {
-    stateCount: states.length,
-    gapOptionCounts: gapOptions.map((candidates) => candidates.length),
-    selectedStateIndex,
-  });
   return {
     centers,
     endpointNodeIndices: outerPoints.map((_, stationOrdinal) => (
@@ -4168,7 +5452,10 @@ function objectiveCoverageExternalPlacement(outerPoints, endpoints, {
     externalRoutePaths: selectedState.options.map(({ routePath }) => (
       cloneDungeonAugmentationValue(routePath)
     )),
-    externalSpinePaths: cloneDungeonAugmentationValue(externalSpinePaths),
+    externalSpinePaths: collisionHint
+      ? []
+      : cloneDungeonAugmentationValue(externalSpinePaths),
+    ...(collisionHint ? { collisionHint: true } : {}),
   };
 }
 
@@ -4338,7 +5625,14 @@ function expandCoveragePlacement(
   for (let extra = seededGapCount; extra < interiorModuleCount; extra += 1) {
     let selectedGap = 0;
     let selectedSpan = -Infinity;
-    const hasParallelSeededGap = seededGapCount > 0 && insertionCounts.some((_, gap) => {
+    // The canonical retry preserves the authored parallel rise/return bias.
+    // Endpoint-order retries are the spatial alternative: allocate their
+    // remaining room by divided span so the short, viable station pair can
+    // remain a one-slot bay while the longer cross-gallery interval owns the
+    // complete challenge/elevation run.
+    const preferParallelSeededGap = Number(options.endpointOrderVariant ?? 0) === 0;
+    const hasParallelSeededGap = preferParallelSeededGap
+      && seededGapCount > 0 && insertionCounts.some((_, gap) => {
       const facingDot = Number(endpoints[gap]?.facing?.x ?? 0)
           * Number(endpoints[gap + 1]?.facing?.x ?? 0)
         + Number(endpoints[gap]?.facing?.z ?? 0)
@@ -4511,8 +5805,20 @@ function expandCoveragePlacement(
         ));
         anchorEndpointOrdinals.push(null);
       }
-      centers.push(cloneDungeonAugmentationValue(toLead));
-      anchorEndpointOrdinals.push(gap + 1);
+      // In a reordered three-station retry the first room in the roomy gap is
+      // subsequently moved onto the constrained T's branch. Seed the sole
+      // surviving spine reset from the gap's east-side continuation as well;
+      // anchoring it at the far endpoint hides every raised midpoint witness
+      // behind the bounded displacement domain. The branch seed is replaced
+      // from its exact branch socket before physical placement, so this
+      // temporary duplicate does not stamp overlapping modules.
+      const reorderedCoverageSpineReset = Number(options.endpointOrderVariant ?? 0) > 0
+        && outerPoints.length >= 3
+        && insertionCount === 2;
+      centers.push(cloneDungeonAugmentationValue(
+        reorderedCoverageSpineReset ? fromLead : toLead,
+      ));
+      anchorEndpointOrdinals.push(reorderedCoverageSpineReset ? gap : gap + 1);
     }
     centers.push(cloneDungeonAugmentationValue(outerPoints[gap + 1]));
     anchorEndpointOrdinals.push(gap + 1);
@@ -4665,6 +5971,97 @@ function orthogonalRouteSegmentPath(from, to, preferXFirst) {
 const ROUTE_NETWORK_SOCKET_APPROACH_METERS = 5.6;
 const ROUTE_NETWORK_CORRIDOR_WIDTH_METERS = 8.4;
 const ROUTE_NETWORK_MAXIMUM_FEATURELESS_SPAN_METERS = 33.6;
+// Must remain identical to the grounded player's horizontal collision radius
+// used by DungeonGenerator's strict connector-entrance preflight. Candidate
+// planning owns the same three-lane seam contract and must reject a room prop
+// before materialization if that capsule cannot occupy any seam cell.
+const ROUTE_NETWORK_PLAYER_COLLISION_RADIUS_METERS = 0.42;
+export const LANDMARK_SHARED_THRESHOLD_ATTACHMENT_GAP_METERS =
+  ROUTE_NETWORK_SOCKET_APPROACH_METERS;
+
+export function objectiveCoverageRouteApproachMeters(
+  minimumApproachMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+) {
+  const minimum = Math.max(
+    ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+    Number(minimumApproachMeters) || ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+  );
+  // Blueprint sockets sit at the center of their boundary floor cell, while
+  // the physical shell is half a tile farther out. A full 8.4 m corridor that
+  // turns after only the required two-cell lead reaches back to that wall
+  // plane and clips the aperture-side panel. Retain the shortest lead first,
+  // then offer the one-tile extension already used by the external composer;
+  // exact masks decide which witness is legal without changing any search cap.
+  return [minimum, Number((minimum + 2.8).toFixed(6))];
+}
+
+export function exactObjectiveCoverageStationCenter(endpoint, grammar) {
+  const facing = toDungeonCardinalFacing(endpoint?.facing);
+  const entrySocket = grammar?.sockets?.find(({ id }) => id === 'entry');
+  if (!entrySocket?.localPosition) {
+    return routeNetworkOuterPoint(
+      endpoint,
+      Number(grammar?.size?.depth ?? 0) * 0.5 + 2.8,
+    );
+  }
+  const rotatedEntry = transformDungeonLocalPoint(
+    entrySocket.localPosition,
+    {
+      center: { x: 0, y: 0, z: 0 },
+      rotationQuarterTurns: rotationQuarterTurnsForFacing(facing),
+    },
+  );
+  const desiredEntry = addDungeonPoints(
+    endpoint.position,
+    scaleDungeonPoint(facing, Math.max(
+      ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+      Number(endpoint.widthMeters ?? 8.4) * 0.5,
+    )),
+  );
+  return {
+    x: Number(desiredEntry.x) - Number(rotatedEntry.x),
+    y: Number(desiredEntry.y) - Number(rotatedEntry.y),
+    z: Number(desiredEntry.z) - Number(rotatedEntry.z),
+  };
+}
+
+export function objectiveCoverageEndpointGrammarIsSelectable(grammar, grant = {}) {
+  const constraints = grammar?.selectionConstraints ?? {};
+  if (String(constraints.routeNetworkModuleKind ?? '') !== 'connector-module') return false;
+  if (String(constraints.routeNetworkJunctionKind ?? '') === 'through-t') return true;
+  const topologyTemplateId = String(constraints.routeNetworkTopologyTemplateId ?? '');
+  return Boolean(topologyTemplateId)
+    && routeNetworkTopologyIsLegalForGrant(topologyTemplateId, grant);
+}
+
+export function landmarkSharedThresholdParentPosition(
+  endpoint,
+  nodeSocket,
+  attachmentGapMeters = LANDMARK_SHARED_THRESHOLD_ATTACHMENT_GAP_METERS,
+) {
+  return dungeonLandmarkSharedThresholdParentPosition(
+    endpoint,
+    nodeSocket,
+    attachmentGapMeters,
+  );
+}
+
+export function landmarkEndpointPlacementVariantIndex(
+  searchVariant,
+  endpointOrdinal,
+  candidateCount,
+) {
+  const count = Math.max(0, Math.trunc(Number(candidateCount) || 0));
+  if (count === 0) return -1;
+  const variant = Math.max(0, Math.trunc(Number(searchVariant) || 0));
+  const endpoint = Math.max(0, Math.trunc(Number(endpointOrdinal) || 0));
+  // Triangular progression avoids repeating a transform merely because two
+  // global candidates are separated by a multiple of this small endpoint
+  // domain. The endpoint term advances the reconnect independently, while
+  // variant zero remains the canonical first witness for seed stability.
+  const interleavedOrdinal = variant * (variant + 1) * 0.5 + endpoint * variant;
+  return interleavedOrdinal % count;
+}
 
 export function ordinaryRouteNetworkSocketGapMeters(
   connectorGapMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
@@ -4741,10 +6138,111 @@ export function interleavedCartesianIndexPairs(firstCount, secondCount) {
   return pairs;
 }
 
+export function interleavedRouteNetworkCandidateSignatures({
+  physicalSignatures = [],
+  familyChoices = [],
+  supportsModuleCount = () => true,
+} = {}) {
+  return interleavedCartesianIndexPairs(
+    physicalSignatures.length,
+    familyChoices.length,
+  ).map(({
+    firstIndex: signatureIndex,
+    secondIndex: familyChoiceIndex,
+  }, candidateOrdinal) => {
+    const physicalSignature = physicalSignatures[signatureIndex];
+    const familyChoice = familyChoices[familyChoiceIndex];
+    if (!physicalSignature || !familyChoice) return null;
+    return {
+      ...physicalSignature,
+      ...familyChoice,
+      // Identity belongs to the complete deterministic product, not its
+      // filtered projection. Later feasibility filtering may leave gaps but
+      // must never compact RNG forks or default search variants.
+      candidateOrdinal,
+      searchVariant: physicalSignature.placementVariant ?? candidateOrdinal,
+    };
+  }).filter((candidate) => (
+    candidate && supportsModuleCount(
+      candidate,
+      candidate.moduleCount,
+    )
+  ));
+}
+
+export function orderDenseObjectiveCoverageFamilyChoices(familyChoices = []) {
+  const preferredOrdinals = [0, 3, 1, 2];
+  return [
+    ...preferredOrdinals
+      .map((ordinal) => familyChoices[ordinal])
+      .filter(Boolean),
+    ...familyChoices.slice(4),
+  ];
+}
+
+export function coverageTraversalSocketContractForGrammar(
+  grammar,
+  { alternativeOrdinal = 0 } = {},
+) {
+  const sockets = (grammar?.sockets ?? []).filter(({ id, localFacing }) => (
+    id && localFacing
+  ));
+  const opposedPairs = sockets.flatMap((firstSocket, firstOrdinal) => (
+    sockets.slice(firstOrdinal + 1).flatMap((secondSocket) => {
+      const facingDot = Number(firstSocket.localFacing.x ?? 0)
+        * Number(secondSocket.localFacing.x ?? 0)
+        + Number(firstSocket.localFacing.z ?? 0)
+        * Number(secondSocket.localFacing.z ?? 0);
+      return facingDot < -0.999 ? [[firstSocket, secondSocket]] : [];
+    })
+  ));
+  const canonicalThroughPair = opposedPairs.find((pair) => (
+    pair.some(({ id }) => id === 'entry')
+      && pair.some(({ id }) => id === 'exit')
+  )) ?? opposedPairs.find((pair) => pair.some(({ id }) => id === 'exit'))
+    ?? opposedPairs[0]
+    ?? null;
+  if (!canonicalThroughPair || sockets.length !== 3) return null;
+  const pairKey = (pair) => pair.map(({ id }) => String(id)).sort().join(':');
+  const canonicalPairKey = pairKey(canonicalThroughPair);
+  const unorderedPairs = sockets.flatMap((firstSocket, firstOrdinal) => (
+    sockets.slice(firstOrdinal + 1).map((secondSocket) => [firstSocket, secondSocket])
+  ));
+  const orderedPairs = [
+    canonicalThroughPair,
+    ...unorderedPairs
+      .filter((pair) => pairKey(pair) !== canonicalPairKey)
+      .sort((first, second) => pairKey(first).localeCompare(pairKey(second))),
+  ];
+  const normalizedAlternativeOrdinal = Math.max(
+    0,
+    Math.trunc(Number(alternativeOrdinal) || 0),
+  );
+  const reverseDirection = normalizedAlternativeOrdinal >= orderedPairs.length;
+  const throughPair = orderedPairs[
+    normalizedAlternativeOrdinal % orderedPairs.length
+  ];
+  const throughIds = new Set(throughPair.map(({ id }) => String(id)));
+  const branchSocket = sockets.find(({ id }) => !throughIds.has(String(id))) ?? null;
+  if (!branchSocket) return null;
+  let incomingSocket = throughPair.find(({ id }) => id === 'entry')
+    ?? throughPair.find(({ id }) => id === 'exit')
+    ?? throughPair[0];
+  let outgoingSocket = throughPair.find(({ id }) => id !== incomingSocket.id) ?? null;
+  if (!outgoingSocket) return null;
+  if (reverseDirection) [incomingSocket, outgoingSocket] = [outgoingSocket, incomingSocket];
+  return {
+    incomingMainLocalSocketId: String(incomingSocket.id),
+    outgoingMainLocalSocketId: String(outgoingSocket.id),
+    branchLocalSocketId: String(branchSocket.id),
+  };
+}
+
 export function coverageTraversalBranchBindings({
   nodeCount = 0,
   endpointNodeIndices = [],
   traversalConnectorIndices = [],
+  traversalSocketContract = null,
   keepPayoffOnMainChain = false,
   preferredBranchRoomIndex = null,
   requirePreferredBranchRoom = false,
@@ -4760,7 +6258,6 @@ export function coverageTraversalBranchBindings({
   ).filter((index) => (
     !endpointSet.has(index)
       && index !== traversalIndex
-      && index > traversalIndex
   ));
   const requestedBranchRoomIndex = preferredBranchRoomIndex == null
     ? null
@@ -4777,13 +6274,35 @@ export function coverageTraversalBranchBindings({
     { length: Math.max(0, Number(nodeCount)) },
     (_, index) => index,
   ).filter((index) => index !== branchRoomIndex);
+  const incomingMainLocalSocketId = String(
+    traversalSocketContract?.incomingMainLocalSocketId ?? 'entry',
+  );
+  const outgoingMainLocalSocketId = String(
+    traversalSocketContract?.outgoingMainLocalSocketId ?? 'exit',
+  );
+  const branchLocalSocketId = String(
+    traversalSocketContract?.branchLocalSocketId ?? 'right',
+  );
+  if (new Set([
+    incomingMainLocalSocketId,
+    outgoingMainLocalSocketId,
+    branchLocalSocketId,
+  ]).size !== 3) return null;
   const mainBindings = mainIndices.slice(0, -1).map((fromIndex, ordinal) => {
     const toIndex = mainIndices[ordinal + 1];
     return {
       fromIndex,
       toIndex,
-      fromLocalSocketId: endpointSet.has(fromIndex) ? null : 'exit',
-      toLocalSocketId: endpointSet.has(toIndex) ? null : 'entry',
+      fromLocalSocketId: endpointSet.has(fromIndex)
+        ? null
+        : fromIndex === traversalIndex
+          ? outgoingMainLocalSocketId
+          : 'exit',
+      toLocalSocketId: endpointSet.has(toIndex)
+        ? null
+        : toIndex === traversalIndex
+          ? incomingMainLocalSocketId
+          : 'entry',
     };
   });
   return {
@@ -4794,7 +6313,7 @@ export function coverageTraversalBranchBindings({
       ...(!keepPayoffOnMainChain ? [{
         fromIndex: traversalIndex,
         toIndex: branchRoomIndex,
-        fromLocalSocketId: 'right',
+        fromLocalSocketId: branchLocalSocketId,
         toLocalSocketId: 'entry',
         routeRole: branchRouteRole,
       }] : []),
@@ -4806,9 +6325,10 @@ export function coveragePayoffGrammarIdsForStationBay({
   grammarPool = [],
   grammars = {},
   stationSeparationMeters = Number.POSITIVE_INFINITY,
+  stationRouteLengthMeters = stationSeparationMeters,
   connectorEndpointGapMeters = ordinaryRouteNetworkSocketGapMeters(),
 } = {}) {
-  const maximumTraversalMeters = Number(stationSeparationMeters)
+  const maximumTraversalMeters = Number(stationRouteLengthMeters)
     - Number(connectorEndpointGapMeters);
   const entryExitTraversalMeters = (grammar) => {
     const entry = grammar.sockets?.find(({ id }) => id === 'entry');
@@ -4919,10 +6439,264 @@ function appendDistinctRoutePoint(points, point) {
   points.push(candidate);
 }
 
-function normalizedRoutePath(points = []) {
+export function normalizedRoutePath(points = []) {
   const normalized = [];
   for (const point of points) appendDistinctRoutePoint(normalized, point);
   return normalized;
+}
+
+export function measureRawPlanarRouteLengthMeters(points = []) {
+  let lengthMeters = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    const segmentLengthMeters = Math.hypot(
+      Number(end?.x) - Number(start?.x),
+      Number(end?.z) - Number(start?.z),
+    );
+    if (!Number.isFinite(segmentLengthMeters)) return Number.NaN;
+    lengthMeters += segmentLengthMeters;
+  }
+  return lengthMeters;
+}
+
+export function rawPlanarRouteExceedsLengthLimit(
+  points,
+  maximumLengthMeters,
+  toleranceMeters = 1e-4,
+) {
+  const measuredLengthMeters = measureRawPlanarRouteLengthMeters(points);
+  const normalizedMaximumLengthMeters = Number(maximumLengthMeters);
+  const normalizedToleranceMeters = Math.max(0, Number(toleranceMeters) || 0);
+  return Number.isFinite(measuredLengthMeters)
+    && Number.isFinite(normalizedMaximumLengthMeters)
+    && measuredLengthMeters
+      > normalizedMaximumLengthMeters + normalizedToleranceMeters;
+}
+
+const ROUTE_SHAPE_CACHE_METRIC_PRECISION = 12;
+
+function routeShapeCacheMetric(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric)
+    ? numeric.toFixed(ROUTE_SHAPE_CACHE_METRIC_PRECISION)
+    : String(numeric);
+}
+
+function routeShapeCacheRelativePoint(point = {}, origin = {}) {
+  return [
+    routeShapeCacheMetric(Number(point.x) - Number(origin.x)),
+    routeShapeCacheMetric(Number(point.y) - Number(origin.y)),
+    routeShapeCacheMetric(Number(point.z) - Number(origin.z)),
+  ].join(',');
+}
+
+/**
+ * Returns the translation-independent physical signature used by the cheap
+ * adjacent-pair route-shape cache. Callers pass the already-filtered socket
+ * domain so authored spine/socket bindings are part of the identity rather
+ * than being inferred a second time here.
+ */
+export function routeShapeNodeGeometrySignature({
+  candidate = {},
+  nodeIndex = null,
+  adjacentNodeIndex = null,
+  availableSockets = [],
+} = {}) {
+  const node = candidate.node ?? {};
+  const center = candidate.center ?? node.placement?.center ?? { x: 0, y: 0, z: 0 };
+  const facing = candidate.facing ?? node.placement?.facing ?? {};
+  const socketSignature = [...availableSockets].map((socket) => [
+    String(socket.localSocketId ?? socket.id ?? ''),
+    String(socket.state ?? ''),
+    routeShapeCacheRelativePoint(socket.position, center),
+    routeShapeCacheMetric(socket.facing?.x),
+    routeShapeCacheMetric(socket.facing?.y),
+    routeShapeCacheMetric(socket.facing?.z),
+  ].join(':')).sort().join('|');
+  const occupiedVolumeSignature = [...(node.occupiedVolumes ?? [])].map((volume) => [
+    routeShapeCacheRelativePoint(volume.center, center),
+    routeShapeCacheMetric(volume.size?.x),
+    routeShapeCacheMetric(volume.size?.y),
+    routeShapeCacheMetric(volume.size?.z),
+  ].join(':')).sort().join('|');
+  return [
+    Number(nodeIndex),
+    Number(adjacentNodeIndex),
+    String(node.grammarId ?? ''),
+    String(node.grammarRevision ?? ''),
+    String(node.blueprintId ?? ''),
+    Number(node.placement?.rotationQuarterTurns ?? 0),
+    routeShapeCacheMetric(facing.x),
+    routeShapeCacheMetric(facing.y),
+    routeShapeCacheMetric(facing.z),
+    String(candidate.parentLocalSocketId
+      ?? node.planningParentLocalSocketId
+      ?? node.parentAttachmentLocalSocketId
+      ?? ''),
+    Number(node.connectorOwned === true),
+    Number(node.exactParentEndpoint === true),
+    socketSignature,
+    occupiedVolumeSignature,
+  ].join(';');
+}
+
+/**
+ * Combines two node-local signatures with only their relative displacement.
+ * A common world translation therefore produces the same key, while grammar,
+ * socket-domain, rotation, facing, mask geometry, and preselected-path shape
+ * changes remain distinct.
+ */
+export function translationInvariantRouteShapeCacheKey({
+  contextSignature = '',
+  firstNodeSignature = '',
+  secondNodeSignature = '',
+  firstCenter = {},
+  secondCenter = {},
+  matchingExternalPaths = [],
+} = {}) {
+  const externalPathSignature = [...matchingExternalPaths].map((record) => [
+    String(record.fromLocalSocketId ?? ''),
+    String(record.toLocalSocketId ?? ''),
+    (record.path ?? []).map((point) => (
+      routeShapeCacheRelativePoint(point, firstCenter)
+    )).join('>'),
+  ].join(':')).sort().join('|');
+  return [
+    String(contextSignature),
+    String(firstNodeSignature),
+    String(secondNodeSignature),
+    routeShapeCacheRelativePoint(secondCenter, firstCenter),
+    externalPathSignature,
+  ].join('||');
+}
+
+/**
+ * Memoizes only the predicate's boolean result. No path/candidate object can
+ * escape this cache or alter deterministic candidate enumeration.
+ */
+export function cachedTranslationInvariantRouteShapeBoolean(
+  cache,
+  cacheKey,
+  evaluate,
+) {
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+  const value = Boolean(evaluate());
+  cache.set(cacheKey, value);
+  return value;
+}
+
+/**
+ * Memoizes the scalar stages of the correlated-placement cheap predicate.
+ * Reservation visits and their advertised budgets remain owned by the
+ * caller; this cache only prevents a repeated physical pair from rebuilding
+ * the same collision, attachment, compound, and route-shape verdicts.
+ */
+export function cachedCorrelatedCheapPairStageOutcome(
+  cache,
+  cacheKey,
+  evaluate,
+) {
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+  const source = evaluate?.() ?? {};
+  const nodeCollisionPass = source.nodeCollisionPass === true;
+  const parentAttachmentPass = nodeCollisionPass
+    && source.parentAttachmentPass === true;
+  const compoundShapePass = parentAttachmentPass
+    && source.compoundShapePass === true;
+  const adjacentShapePass = compoundShapePass
+    && source.adjacentShapePass === true;
+  const outcome = Object.freeze({
+    nodeCollisionPass,
+    parentAttachmentPass,
+    compoundShapePass,
+    adjacentShapePass,
+    accepted: adjacentShapePass,
+  });
+  cache.set(cacheKey, outcome);
+  return outcome;
+}
+
+/**
+ * Memoizes one deterministic correlated-edge prefilter ordering. The copied
+ * frozen array prevents the reservation sweep from mutating a cached order;
+ * candidate objects themselves remain owned by the caller and are never
+ * cloned or replaced.
+ */
+export function cachedCorrelatedEdgeCandidateOrder(
+  cache,
+  cacheKey,
+  evaluate,
+) {
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
+  const orderedCandidates = Object.freeze([...(evaluate?.() ?? [])]);
+  cache.set(cacheKey, orderedCandidates);
+  return orderedCandidates;
+}
+
+/**
+ * Caches one scalar for an ordered pair of exact candidate identities. The
+ * cache itself is scoped by the caller to a planning attempt; context and
+ * node indices prevent a candidate reused in another logical role from
+ * inheriting the wrong value. Candidate/path objects are rejected as values.
+ */
+export function cachedOrderedCandidatePairScalar(
+  cache,
+  contextIdentity,
+  firstCandidate,
+  firstIndex,
+  secondCandidate,
+  secondIndex,
+  evaluate,
+) {
+  const firstComesFirst = Number(firstIndex) <= Number(secondIndex);
+  const orderedFirstCandidate = firstComesFirst ? firstCandidate : secondCandidate;
+  const orderedSecondCandidate = firstComesFirst ? secondCandidate : firstCandidate;
+  const orderedFirstIndex = Number(firstComesFirst ? firstIndex : secondIndex);
+  const orderedSecondIndex = Number(firstComesFirst ? secondIndex : firstIndex);
+  let bySecondCandidate = cache.get(orderedFirstCandidate);
+  if (!bySecondCandidate) {
+    bySecondCandidate = new WeakMap();
+    cache.set(orderedFirstCandidate, bySecondCandidate);
+  }
+  const cachedRecords = bySecondCandidate.get(orderedSecondCandidate);
+  if (cachedRecords) {
+    if (Array.isArray(cachedRecords)) {
+      for (const record of cachedRecords) {
+        if (record.contextIdentity === contextIdentity
+          && record.firstIndex === orderedFirstIndex
+          && record.secondIndex === orderedSecondIndex) return record.value;
+      }
+    } else if (cachedRecords.contextIdentity === contextIdentity
+      && cachedRecords.firstIndex === orderedFirstIndex
+      && cachedRecords.secondIndex === orderedSecondIndex) {
+      return cachedRecords.value;
+    }
+  }
+  const value = evaluate(
+    firstCandidate,
+    firstIndex,
+    secondCandidate,
+    secondIndex,
+  );
+  if (value !== null && !['boolean', 'number', 'string'].includes(typeof value)) {
+    throw new TypeError('Ordered candidate-pair caches accept scalar values only.');
+  }
+  const record = Object.freeze({
+    contextIdentity,
+    firstIndex: orderedFirstIndex,
+    secondIndex: orderedSecondIndex,
+    value,
+  });
+  bySecondCandidate.set(
+    orderedSecondCandidate,
+    cachedRecords
+      ? Array.isArray(cachedRecords)
+        ? [...cachedRecords, record]
+        : [cachedRecords, record]
+      : record,
+  );
+  return value;
 }
 
 function routeSocketLead(socket, distanceMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS) {
@@ -5012,7 +6786,9 @@ function routePathBacktracksOrSelfOverlaps(path = []) {
       return true;
     }
   }
-  const volumes = routePathPlanningVolumes(path);
+  // Turn-landing reservations intentionally overlap their two adjacent legs;
+  // self-overlap detection is concerned only with non-adjacent route legs.
+  const volumes = routePathPlanningVolumes(path).slice(0, legs.length);
   for (let first = 0; first < volumes.length; first += 1) {
     for (let second = first + 2; second < volumes.length; second += 1) {
       if (planningVolumesOverlap(volumes[first], volumes[second])) return true;
@@ -5105,9 +6881,10 @@ export function shouldAttemptCorrelatedPlacementRepair({
     || failedSecondIndex == null
     || !Number.isSafeInteger(Number(failedFirstIndex))
     || !Number.isSafeInteger(Number(failedSecondIndex))) return false;
-  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex }) => ({
+  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex, routeRole }) => ({
     fromIndex: Number(fromIndex),
     toIndex: Number(toIndex),
+    routeRole: routeRole ?? 'route-network-spine',
   }));
   const participatingNodeIndices = new Set(normalizedEdges.flatMap(({ fromIndex, toIndex }) => [
     fromIndex,
@@ -5135,7 +6912,12 @@ export function orientOrderedCandidateChainAtFailure(
     (fromIndex === Number(failedFirstIndex) && toIndex === Number(failedSecondIndex))
       || (fromIndex === Number(failedSecondIndex) && toIndex === Number(failedFirstIndex))
   ));
-  if (failedEdgeOrdinal < 0 || failedEdgeOrdinal < normalizedEdges.length * 0.5) {
+  // On an exact midpoint failure, start from the suffix endpoint as well. The
+  // later endpoint then exists before the middle edge is admitted, allowing
+  // full-prefix route checks to reject a corridor that crosses that endpoint
+  // without spending the fixed beam on indistinguishable near-side prefixes.
+  if (failedEdgeOrdinal < 0
+    || failedEdgeOrdinal < (normalizedEdges.length - 1) * 0.5) {
     return normalizedEdges;
   }
   return normalizedEdges.reverse().map(({ fromIndex, toIndex }) => ({
@@ -5148,10 +6930,16 @@ export function orientOrderedCandidateTreeAtFailure(
   orderedEdges = [],
   failedFirstIndex = null,
   failedSecondIndex = null,
+  {
+    edgeSupportCounts = [],
+    prioritizeFailedEdge = false,
+    prioritizeRootSiblingAfterFailedEdge = false,
+  } = {},
 ) {
-  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex }) => ({
+  const normalizedEdges = orderedEdges.map(({ fromIndex, toIndex, routeRole }) => ({
     fromIndex: Number(fromIndex),
     toIndex: Number(toIndex),
+    routeRole: routeRole ?? 'route-network-spine',
   }));
   if (normalizedEdges.length === 0) return [];
   const adjacency = new Map();
@@ -5170,19 +6958,129 @@ export function orientOrderedCandidateTreeAtFailure(
     : normalizedEdges[0].fromIndex;
   const result = [];
   const visited = new Set([rootIndex]);
-  const visit = (fromIndex) => {
-    const neighbors = [...(adjacency.get(fromIndex) ?? [])]
-      .sort((first, second) => first.edgeOrdinal - second.edgeOrdinal
-        || first.toIndex - second.toIndex);
-    for (const { toIndex } of neighbors) {
-      if (visited.has(toIndex)) continue;
-      visited.add(toIndex);
-      result.push({ fromIndex, toIndex });
-      visit(toIndex);
-    }
+  const isFailedEdge = (edgeOrdinal) => {
+    const { fromIndex, toIndex } = normalizedEdges[edgeOrdinal];
+    return (fromIndex === Number(failedFirstIndex)
+      && toIndex === Number(failedSecondIndex))
+      || (fromIndex === Number(failedSecondIndex)
+        && toIndex === Number(failedFirstIndex));
   };
-  visit(rootIndex);
+  const remainingEdgeOrdinals = new Set(normalizedEdges.map((_, ordinal) => ordinal));
+  const subtreeMinimumSupportCount = (frontierEdgeOrdinal) => {
+    if (edgeSupportCounts.length === 0) return Number.POSITIVE_INFINITY;
+    const frontierEdge = normalizedEdges[frontierEdgeOrdinal];
+    const subtreeRoot = visited.has(frontierEdge.fromIndex)
+      ? frontierEdge.toIndex
+      : frontierEdge.fromIndex;
+    const subtreeVisited = new Set(visited);
+    const frontier = [subtreeRoot];
+    let minimumSupportCount = Number.POSITIVE_INFINITY;
+    while (frontier.length > 0) {
+      const nodeIndex = frontier.pop();
+      if (subtreeVisited.has(nodeIndex)) continue;
+      subtreeVisited.add(nodeIndex);
+      for (const { toIndex, edgeOrdinal } of adjacency.get(nodeIndex) ?? []) {
+        if (!remainingEdgeOrdinals.has(edgeOrdinal)) continue;
+        const supportCount = Number(edgeSupportCounts[edgeOrdinal]);
+        if (Number.isFinite(supportCount)) {
+          minimumSupportCount = Math.min(minimumSupportCount, supportCount);
+        }
+        if (!subtreeVisited.has(toIndex)) frontier.push(toIndex);
+      }
+    }
+    return minimumSupportCount;
+  };
+  while (remainingEdgeOrdinals.size > 0) {
+    const nextEdgeOrdinal = [...remainingEdgeOrdinals]
+      .filter((edgeOrdinal) => {
+        const edge = normalizedEdges[edgeOrdinal];
+        return visited.has(edge.fromIndex) !== visited.has(edge.toIndex);
+      })
+      .sort((first, second) => (
+        Number(prioritizeFailedEdge && result.length === 0 && !isFailedEdge(first))
+          - Number(prioritizeFailedEdge && result.length === 0 && !isFailedEdge(second))
+          || Number(
+            prioritizeRootSiblingAfterFailedEdge
+              && result.length === 1
+              && normalizedEdges[first].fromIndex !== rootIndex
+              && normalizedEdges[first].toIndex !== rootIndex,
+          ) - Number(
+            prioritizeRootSiblingAfterFailedEdge
+              && result.length === 1
+              && normalizedEdges[second].fromIndex !== rootIndex
+              && normalizedEdges[second].toIndex !== rootIndex,
+          )
+          || Number(normalizedEdges[first].routeRole === 'route-network-spine')
+          - Number(normalizedEdges[second].routeRole === 'route-network-spine')
+          || subtreeMinimumSupportCount(first) - subtreeMinimumSupportCount(second)
+          || first - second
+      ))[0];
+    if (nextEdgeOrdinal == null) break;
+    remainingEdgeOrdinals.delete(nextEdgeOrdinal);
+    const edge = normalizedEdges[nextEdgeOrdinal];
+    const fromIndex = visited.has(edge.fromIndex) ? edge.fromIndex : edge.toIndex;
+    const toIndex = fromIndex === edge.fromIndex ? edge.toIndex : edge.fromIndex;
+    visited.add(toIndex);
+    result.push({ fromIndex, toIndex });
+  }
   return result.length === normalizedEdges.length ? result : normalizedEdges;
+}
+
+function selectStratifiedBoundedSupports(candidates, limit, prefixOrdinal) {
+  const boundedLimit = Math.max(1, Math.trunc(Number(limit) || 0));
+  if (candidates.length <= boundedLimit) return [...candidates];
+  const selected = [];
+  for (let stratum = 0; stratum < boundedLimit; stratum += 1) {
+    const start = Math.floor(stratum * candidates.length / boundedLimit);
+    const end = Math.floor((stratum + 1) * candidates.length / boundedLimit);
+    const width = Math.max(1, end - start);
+    // Advance by the caller's actual sweep/state ordinal. Multiplying that
+    // ordinal by the requested limit aliases whenever a stratum width divides
+    // the limit (notably the 64 -> 32 tree layer), repeatedly selecting the
+    // same half of every stratum.
+    const phase = Math.max(0, Math.trunc(Number(prefixOrdinal) || 0)) % width;
+    selected.push(candidates[start + phase]);
+  }
+  return selected;
+}
+
+export function sampleBoundedCorrelatedSuffixCandidates(
+  candidates,
+  {
+    prefilterCandidates = (values) => values,
+    limit = 64,
+    headCount = 4,
+    tailCount = 24,
+    phase = 0,
+  } = {},
+) {
+  const orderedCandidates = prefilterCandidates(candidates) ?? [];
+  const boundedLimit = Math.max(1, Math.trunc(Number(limit) || 0));
+  if (orderedCandidates.length <= boundedLimit) return [...orderedCandidates];
+  const boundedHeadCount = Math.min(
+    boundedLimit,
+    Math.max(0, Math.trunc(Number(headCount) || 0)),
+  );
+  const boundedTailCount = Math.min(
+    boundedLimit - boundedHeadCount,
+    Math.max(0, Math.trunc(Number(tailCount) || 0)),
+  );
+  const middleStart = boundedHeadCount;
+  const middleEnd = orderedCandidates.length - boundedTailCount;
+  const middleLimit = boundedLimit - boundedHeadCount - boundedTailCount;
+  return [
+    ...orderedCandidates.slice(0, boundedHeadCount),
+    ...(middleLimit > 0
+      ? selectStratifiedBoundedSupports(
+        orderedCandidates.slice(middleStart, middleEnd),
+        middleLimit,
+        phase,
+      )
+      : []),
+    ...(boundedTailCount > 0
+      ? orderedCandidates.slice(-boundedTailCount)
+      : []),
+  ];
 }
 
 export function reserveOrderedCandidateTree({
@@ -5193,6 +7091,7 @@ export function reserveOrderedCandidateTree({
   pairClearsAssignedCandidates = () => true,
   pairPassesCheapBounds = () => true,
   prefixIsCompatible = () => true,
+  prefixHasNextEdgeSupport = null,
   prefilterEdgeCandidates = (candidates) => candidates,
   candidateKey = (candidate) => candidate,
   maxPairEvaluations = 256,
@@ -5253,39 +7152,145 @@ export function reserveOrderedCandidateTree({
     return [Number(group.index), candidates];
   }));
   const rootCandidates = completePoolByIndex.get(rootIndex) ?? [];
-  let prefixes = rootCandidates
-    .slice(0, boundedMaximumLayerCandidates)
+  const boundedRootCandidates = groupByIndex.get(rootIndex)?.candidates ?? [];
+  const boundedRootCandidateSet = new Set(boundedRootCandidates);
+  const retainedBoundedRootCandidates = boundedRootCandidates.slice(
+    0,
+    boundedMaximumLayerCandidates,
+  );
+  const remainingRootSlots = Math.max(
+    0,
+    boundedMaximumLayerCandidates - retainedBoundedRootCandidates.length,
+  );
+  const retainedRootCandidates = [
+    ...retainedBoundedRootCandidates,
+    ...(remainingRootSlots > 0
+      ? selectStratifiedBoundedSupports(
+        rootCandidates.filter((candidate) => !boundedRootCandidateSet.has(candidate)),
+        remainingRootSlots,
+        0,
+      )
+      : []),
+  ];
+  let prefixes = retainedRootCandidates
     .map((candidate) => new Map([[rootIndex, candidate]]));
   let cheapPairEvaluations = 0;
   let cheapPairCount = 0;
   let cheapBudgetExhausted = false;
+  // This budget covers every potentially route-enumerating forward predicate,
+  // not only the scalar pair bounds. Otherwise pairClearsAssignedCandidates
+  // and prefixIsCompatible can perform uncounted path searches while the
+  // advertised fixed budget remains unchanged.
+  const consumeCheapPredicateEvaluation = () => {
+    if (cheapPairEvaluations >= cheapEvaluationLimit) {
+      cheapBudgetExhausted = true;
+      return false;
+    }
+    cheapPairEvaluations += 1;
+    return true;
+  };
+  const layerDiagnostics = [];
+  const reservedNextCandidateByPrefix = new WeakMap();
   for (let edgeOrdinal = 0; edgeOrdinal < normalizedEdges.length; edgeOrdinal += 1) {
     const { fromIndex, toIndex } = normalizedEdges[edgeOrdinal];
+    const prefixCountBefore = prefixes.length;
+    let scannedCandidateCount = 0;
+    let cheapClearCandidateCount = 0;
+    let assignedRouteClearCandidateCount = 0;
+    let injectivePrefixCandidateCount = 0;
+    let legalExtensionCount = 0;
+    let nextFrontierSupportCheckCount = 0;
+    let nextFrontierSupportPassCount = 0;
+    const nextFrontierSupportedPrefixes = new Set();
     const nextPrefixes = [];
     const supportQuota = Math.max(
       1,
       Math.ceil(boundedCandidateWindowSize / Math.max(1, prefixes.length)),
     );
-    for (const prefix of prefixes) {
+    for (let prefixOrdinal = 0; prefixOrdinal < prefixes.length; prefixOrdinal += 1) {
+      const prefix = prefixes[prefixOrdinal];
       const fromCandidate = prefix.get(fromIndex);
       if (!fromCandidate) continue;
-      const candidates = prefilterEdgeCandidates(
+      let prefilteredCandidates = prefilterEdgeCandidates(
         completePoolByIndex.get(toIndex) ?? [],
         fromCandidate,
         fromIndex,
         toIndex,
         edgeOrdinal,
       ) ?? [];
-      let retainedForPrefix = 0;
+      const reservedNextCandidate = reservedNextCandidateByPrefix.get(prefix);
+      const reservedCandidateMatchesEdge = reservedNextCandidate?.fromIndex === fromIndex
+        && reservedNextCandidate?.toIndex === toIndex;
+      if (reservedCandidateMatchesEdge) {
+        prefilteredCandidates = [
+          reservedNextCandidate.candidate,
+          ...prefilteredCandidates.filter((candidate) => (
+            candidate !== reservedNextCandidate.candidate
+          )),
+        ];
+      }
+      // A tree layer can have thousands of deterministic sweep candidates.
+      // Letting its first predecessor consume the complete cheap budget means
+      // a valid prefix found on that layer is discarded before any branch is
+      // visited. Reserve an equal bounded share for every remaining prefix
+      // slot and tree layer. Keep the prefilter's highest-ranked head, then
+      // sample the remainder by strata so a far-side witness is not hidden
+      // behind interchangeable near placements.
+      const remainingLayerCount = normalizedEdges.length - edgeOrdinal;
+      const remainingPrefixSlots = prefixes.length - prefixOrdinal
+        + boundedMaximumLayerCandidates * Math.max(0, remainingLayerCount - 1);
+      const maximumChecksPerCandidate = Math.max(1, prefix.size);
+      const remainingCheapEvaluations = Math.max(
+        0,
+        cheapEvaluationLimit - cheapPairEvaluations,
+      );
+      const fairCandidateScanLimit = Math.max(
+        0,
+        Math.floor(
+          remainingCheapEvaluations
+            / Math.max(1, remainingPrefixSlots * maximumChecksPerCandidate),
+        ),
+      );
+      // A suffix plan returned by prefixHasNextEdgeSupport is a bounded joint
+      // witness. Always replay its next candidate before scanning unrelated
+      // candidates; the support search below leaves enough budget to validate
+      // every planned edge through the ordinary predicates.
+      const candidateScanLimit = Math.max(
+        Number(reservedCandidateMatchesEdge),
+        fairCandidateScanLimit,
+      );
+      if (candidateScanLimit === 0 && prefilteredCandidates.length > 0) {
+        cheapBudgetExhausted = true;
+        break;
+      }
+      const prioritizedHeadCount = Math.min(
+        supportQuota,
+        candidateScanLimit,
+        prefilteredCandidates.length,
+      );
+      const stratifiedCandidateCount = Math.max(
+        0,
+        candidateScanLimit - prioritizedHeadCount,
+      );
+      const candidates = [
+        ...prefilteredCandidates.slice(0, prioritizedHeadCount),
+        ...(stratifiedCandidateCount > 0
+          ? selectStratifiedBoundedSupports(
+            prefilteredCandidates.slice(prioritizedHeadCount),
+            stratifiedCandidateCount,
+            prefixOrdinal,
+          )
+          : []),
+      ];
+      const legalExtensions = [];
       for (const toCandidate of candidates) {
+        scannedCandidateCount += 1;
         let cheapClear = true;
         for (const [assignedIndex, assignedCandidate] of prefix) {
-          if (cheapPairEvaluations >= cheapEvaluationLimit) {
-            cheapBudgetExhausted = true;
+          if (!consumeCheapPredicateEvaluation()) {
             cheapClear = false;
             break;
           }
-          cheapPairEvaluations += 1;
           if (!pairPassesCheapBounds(
             assignedCandidate,
             assignedIndex,
@@ -5297,25 +7302,195 @@ export function reserveOrderedCandidateTree({
           }
         }
         if (cheapBudgetExhausted) break;
-        if (!cheapClear || !pairClearsAssignedCandidates(
+        if (!cheapClear) continue;
+        cheapClearCandidateCount += 1;
+        if (!consumeCheapPredicateEvaluation()) break;
+        if (!pairClearsAssignedCandidates(
           fromCandidate,
           fromIndex,
           toCandidate,
           toIndex,
           prefix,
         )) continue;
+        assignedRouteClearCandidateCount += 1;
         const extended = new Map(prefix);
         extended.set(toIndex, toCandidate);
+        if (!consumeCheapPredicateEvaluation()) break;
         if (!prefixIsCompatible(extended)) continue;
+        injectivePrefixCandidateCount += 1;
+        legalExtensions.push(extended);
+        legalExtensionCount += 1;
+        if (reservedNextCandidate?.candidate === toCandidate) {
+          nextFrontierSupportedPrefixes.add(extended);
+          const [followingReservation, ...remainingReservations] =
+            reservedNextCandidate.remainingPlan ?? [];
+          if (followingReservation) {
+            reservedNextCandidateByPrefix.set(extended, {
+              ...followingReservation,
+              remainingPlan: remainingReservations,
+            });
+          }
+        }
+        if (legalExtensions.length >= boundedCandidateWindowSize) break;
+      }
+      if (cheapBudgetExhausted) break;
+      let rankedLegalExtensions = legalExtensions;
+      const nextEdge = normalizedEdges[edgeOrdinal + 1] ?? null;
+      if (typeof prefixHasNextEdgeSupport === 'function'
+        && nextEdge) {
+        const supportedExtensions = [];
+        const uncheckedOrUnsupportedExtensions = [];
+        for (const extended of legalExtensions) {
+          const remainingEdges = normalizedEdges.slice(edgeOrdinal + 1);
+          const replayReservation = reservedNextCandidateByPrefix.get(extended);
+          const replayPlan = replayReservation?.fromIndex === nextEdge.fromIndex
+            && replayReservation?.toIndex === nextEdge.toIndex
+            ? [{
+              fromIndex: replayReservation.fromIndex,
+              toIndex: replayReservation.toIndex,
+              candidate: replayReservation.candidate,
+            }, ...(replayReservation.remainingPlan ?? [])]
+            : null;
+          // Reserve the exact number of cheap/prefix predicate calls needed
+          // to replay one complete returned suffix through the normal tree
+          // layers. A forward proof may use the rest of the global budget,
+          // but it cannot consume the witness it just found.
+          const replayEvaluationReserve = remainingEdges.reduce(
+            (sum, _edge, suffixOrdinal) => (
+              sum + extended.size + suffixOrdinal + 2
+            ),
+            0,
+          );
+          const support = replayPlan
+            ? { plan: replayPlan }
+            : prefixHasNextEdgeSupport(extended, nextEdge, {
+              consumeCheapPairEvaluation: () => {
+                if (cheapPairEvaluations
+                  >= cheapEvaluationLimit - replayEvaluationReserve) return false;
+                cheapPairEvaluations += 1;
+                return true;
+              },
+              remainingEdges,
+            });
+          const supportPlan = support && typeof support === 'object'
+            ? support.plan ?? (support.candidate ? [{
+              fromIndex: nextEdge.fromIndex,
+              toIndex: nextEdge.toIndex,
+              candidate: support.candidate,
+            }] : [])
+            : [];
+          const [firstSupportReservation, ...remainingSupportReservations] = supportPlan;
+          const supportCandidate = firstSupportReservation?.candidate ?? null;
+          const supported = support === true || Boolean(supportCandidate);
+          if (support != null) nextFrontierSupportCheckCount += 1;
+          if (supported) {
+            nextFrontierSupportPassCount += 1;
+            supportedExtensions.push(extended);
+            nextFrontierSupportedPrefixes.add(extended);
+            if (supportCandidate) {
+              reservedNextCandidateByPrefix.set(extended, {
+                fromIndex: firstSupportReservation.fromIndex,
+                toIndex: firstSupportReservation.toIndex,
+                candidate: supportCandidate,
+                remainingPlan: remainingSupportReservations,
+              });
+            }
+          } else {
+            uncheckedOrUnsupportedExtensions.push(extended);
+          }
+        }
+        rankedLegalExtensions = [
+          ...supportedExtensions,
+          ...uncheckedOrUnsupportedExtensions,
+        ];
+      }
+      // The caller ranks cached exact supports before unknown candidates.
+      // Preserve that first legal support, then use the remaining quota for a
+      // deterministic cross-pool sample. Pure stratification could otherwise
+      // discard every already-proved junction continuation at layer one.
+      const provedNextFrontierExtensions = rankedLegalExtensions.filter((extended) => (
+        nextFrontierSupportedPrefixes.has(extended)
+      ));
+      const unprovedNextFrontierExtensions = rankedLegalExtensions.filter((extended) => (
+        !nextFrontierSupportedPrefixes.has(extended)
+      ));
+      const retainedExtensions = provedNextFrontierExtensions.length > 0
+        ? [
+          ...provedNextFrontierExtensions,
+          ...(supportQuota > provedNextFrontierExtensions.length
+            ? selectStratifiedBoundedSupports(
+              unprovedNextFrontierExtensions,
+              supportQuota - provedNextFrontierExtensions.length,
+              prefixOrdinal,
+            )
+            : []),
+        ]
+        : rankedLegalExtensions.length <= supportQuota
+          ? [...rankedLegalExtensions]
+          : (() => {
+          const stratified = selectStratifiedBoundedSupports(
+            rankedLegalExtensions,
+            supportQuota,
+            prefixOrdinal,
+          );
+          return stratified.includes(rankedLegalExtensions[0])
+            ? stratified
+            : [rankedLegalExtensions[0], ...stratified].slice(0, supportQuota);
+          })();
+      for (const extended of retainedExtensions) {
         nextPrefixes.push(extended);
         cheapPairCount += 1;
-        retainedForPrefix += 1;
-        if (retainedForPrefix >= supportQuota
-          || nextPrefixes.length >= boundedCandidateWindowSize) break;
+        if (nextPrefixes.length >= boundedCandidateWindowSize) break;
       }
       if (cheapBudgetExhausted || nextPrefixes.length >= boundedCandidateWindowSize) break;
     }
-    prefixes = nextPrefixes.slice(0, boundedMaximumLayerCandidates);
+    // The layer is emitted in predecessor-major order. Taking its first 32
+    // entries keeps only the first half of a two-support-per-prefix beam and
+    // can deterministically erase the one raised/crossing continuation owned
+    // by a later predecessor. Downsample across the complete bounded layer so
+    // every predecessor stratum remains represented without changing either
+    // the 64-support window or 32-prefix cap.
+    const supportedNextPrefixes = nextPrefixes.filter((prefix) => (
+      nextFrontierSupportedPrefixes.has(prefix)
+    ));
+    const otherNextPrefixes = nextPrefixes.filter((prefix) => (
+      !nextFrontierSupportedPrefixes.has(prefix)
+    ));
+    const retainedSupportedNextPrefixes = supportedNextPrefixes.slice(
+      0,
+      boundedMaximumLayerCandidates,
+    );
+    const remainingLayerSlots = Math.max(
+      0,
+      boundedMaximumLayerCandidates - retainedSupportedNextPrefixes.length,
+    );
+    prefixes = [
+      ...retainedSupportedNextPrefixes,
+      ...(remainingLayerSlots > 0
+        ? selectStratifiedBoundedSupports(
+          otherNextPrefixes,
+          remainingLayerSlots,
+          edgeOrdinal + 1,
+        )
+        : []),
+    ];
+    layerDiagnostics.push({
+      edgeOrdinal,
+      fromIndex,
+      toIndex,
+      prefixCountBefore,
+      scannedCandidateCount,
+      cheapClearCandidateCount,
+      assignedRouteClearCandidateCount,
+      injectivePrefixCandidateCount,
+      legalExtensionCount,
+      prefixCountAfter: prefixes.length,
+      nextFrontierSupportCheckCount,
+      nextFrontierSupportPassCount,
+      retainedNextFrontierSupportCount: prefixes.filter((prefix) => (
+        nextFrontierSupportedPrefixes.has(prefix)
+      )).length,
+    });
     if (cheapBudgetExhausted || prefixes.length === 0) break;
   }
   const orderedNodeIndices = [rootIndex, ...normalizedEdges.map(({ toIndex }) => toIndex)];
@@ -5326,7 +7501,12 @@ export function reserveOrderedCandidateTree({
         - Number(new Set(prefixes.map((prefix) => prefix.get(index)).filter(Boolean)).size),
     )
   ), 0);
-  if (cheapBudgetExhausted || prefixes.length === 0) {
+  const completedEveryTreeLayer = layerDiagnostics.length === normalizedEdges.length;
+  // Reaching the cheap cap while filling optional siblings on the final layer
+  // must not discard a complete prefix already proved within the cap. Let the
+  // separately bounded exact stage accept that prefix; if it rejects every
+  // retained completion, the final status still reports cheap exhaustion.
+  if ((cheapBudgetExhausted && !completedEveryTreeLayer) || prefixes.length === 0) {
     return {
       status: cheapBudgetExhausted ? 'cheap-budget-exhausted' : 'not-found',
       pairEvaluations: 0,
@@ -5334,6 +7514,7 @@ export function reserveOrderedCandidateTree({
       cheapPairEvaluations,
       cheapPairCount,
       prunedCandidateCount,
+      layerDiagnostics,
       reservedByIndex: new Map(),
     };
   }
@@ -5370,18 +7551,22 @@ export function reserveOrderedCandidateTree({
         cheapPairEvaluations,
         cheapPairCount,
         prunedCandidateCount,
+        layerDiagnostics,
         reservedByIndex: new Map(prefix),
       };
     }
     if (exactBudgetExhausted) break;
   }
   return {
-    status: exactBudgetExhausted ? 'exact-budget-exhausted' : 'not-found',
+    status: cheapBudgetExhausted
+      ? 'cheap-budget-exhausted'
+      : exactBudgetExhausted ? 'exact-budget-exhausted' : 'not-found',
     pairEvaluations: exactPairEvaluations,
     exactPairEvaluations,
     cheapPairEvaluations,
     cheapPairCount,
     prunedCandidateCount,
+    layerDiagnostics,
     reservedByIndex: new Map(),
   };
 }
@@ -5481,9 +7666,28 @@ export function reserveOrderedCandidateChain({
   let cheapPairEvaluations = 0;
   let cheapPairCount = 0;
   let cheapBudgetExhausted = false;
+  const layerDiagnostics = [];
+  // Count every bounded forward predicate which may enumerate physical
+  // routes. The public counter is therefore an actual work cap rather than a
+  // count of only the inexpensive scalar prechecks.
+  const consumeCheapPredicateEvaluation = () => {
+    if (cheapPairEvaluations >= cheapEvaluationLimit) {
+      cheapBudgetExhausted = true;
+      return false;
+    }
+    cheapPairEvaluations += 1;
+    return true;
+  };
 
   for (let edgeOrdinal = 0; edgeOrdinal < normalizedEdges.length; edgeOrdinal += 1) {
     const { fromIndex, toIndex } = normalizedEdges[edgeOrdinal];
+    const prefixCountBefore = [...reachablePrefixesByCandidate.values()]
+      .reduce((count, candidates) => count + candidates.length, 0);
+    let scannedCandidateCount = 0;
+    let cheapClearCandidateCount = 0;
+    let assignedRouteClearCandidateCount = 0;
+    let injectivePrefixCandidateCount = 0;
+    let legalExtensionCount = 0;
     const toGroup = groupByIndex.get(toIndex);
     const boundedCandidates = new Set(toGroup.candidates ?? []);
     const completeToPool = completePoolByIndex.get(toIndex) ?? [];
@@ -5491,18 +7695,14 @@ export function reserveOrderedCandidateChain({
     const supportCountByToCandidate = new Map();
     const prefixesByToCandidate = new Map();
     let retainedLayerSupportCount = 0;
+    const supportQuota = Math.max(
+      1,
+      Math.ceil(boundedCandidateWindowSize / Math.max(1, reachableCandidates.length)),
+    );
     for (let fromOrdinal = 0; fromOrdinal < reachableCandidates.length; fromOrdinal += 1) {
       const fromCandidate = reachableCandidates[fromOrdinal];
-      const remainingFromCount = reachableCandidates.length - fromOrdinal;
-      const remainingLayerSupportSlots = Math.max(
-        0,
-        boundedCandidateWindowSize - retainedLayerSupportCount,
-      );
-      const supportQuota = Math.max(
-        1,
-        Math.ceil(remainingLayerSupportSlots / remainingFromCount),
-      );
-      const supports = [];
+      const legalSupports = [];
+      const extendingPrefixesByCandidate = new Map();
       // Filter before ranking. Sorting the complete 2,500-candidate pool for
       // every predecessor was both unbounded by the cheap-evaluation budget
       // and could discard the only seam-valid continuation outside the first
@@ -5516,17 +7716,23 @@ export function reserveOrderedCandidateChain({
         toIndex,
         edgeOrdinal,
       ) ?? [];
-      // The complete pool already carries the bounded domain first. A caller
-      // may return a stricter deterministic order (for example, cached exact
-      // witnesses before unknown pairs), which must remain authoritative here
-      // or the only correlated continuation can be hidden behind the quota.
-      const scanOrder = [...prefilteredToPool];
-      for (const toCandidate of scanOrder) {
-        if (cheapPairEvaluations >= cheapEvaluationLimit) {
-          cheapBudgetExhausted = true;
-          break;
-        }
-        cheapPairEvaluations += 1;
+      // The advertised candidate window also bounds expensive predicates per
+      // predecessor. Preserve the prefilter's strongest head and far tail,
+      // then stratify the middle so a late or interior witness remains visible
+      // without letting one intermediate layer consume the complete global
+      // cheap budget before the chain's constrained suffix is visited.
+      const sampledToPool = sampleBoundedCorrelatedSuffixCandidates(
+        prefilteredToPool,
+        {
+          limit: boundedCandidateWindowSize,
+          headCount: 4,
+          tailCount: 24,
+          phase: fromOrdinal,
+        },
+      );
+      for (const toCandidate of sampledToPool) {
+        scannedCandidateCount += 1;
+        if (!consumeCheapPredicateEvaluation()) break;
         if (!pairPassesCheapBounds(
           fromCandidate,
           fromIndex,
@@ -5534,16 +7740,16 @@ export function reserveOrderedCandidateChain({
           toIndex,
         )) continue;
         const extendingPrefixes = [];
+        let candidateCheapClear = false;
+        let candidateRouteClear = false;
         for (const prefix of reachablePrefixesByCandidate.get(fromCandidate) ?? []) {
           let prefixCompatible = true;
           for (const [assignedIndex, assignedCandidate] of prefix) {
             if (assignedIndex === fromIndex) continue;
-            if (cheapPairEvaluations >= cheapEvaluationLimit) {
-              cheapBudgetExhausted = true;
+            if (!consumeCheapPredicateEvaluation()) {
               prefixCompatible = false;
               break;
             }
-            cheapPairEvaluations += 1;
             if (!pairPassesCheapBounds(
               assignedCandidate,
               assignedIndex,
@@ -5555,25 +7761,45 @@ export function reserveOrderedCandidateChain({
             }
           }
           if (cheapBudgetExhausted) break;
-          if (!prefixCompatible || !pairClearsAssignedCandidates(
+          if (!prefixCompatible) continue;
+          candidateCheapClear = true;
+          if (!consumeCheapPredicateEvaluation()) break;
+          if (!pairClearsAssignedCandidates(
             fromCandidate,
             fromIndex,
             toCandidate,
             toIndex,
             prefix,
           )) continue;
+          candidateRouteClear = true;
           const extendedPrefix = new Map(prefix);
           extendedPrefix.set(toIndex, toCandidate);
+          if (!consumeCheapPredicateEvaluation()) break;
           if (!prefixIsCompatible(extendedPrefix)) continue;
           extendingPrefixes.push(extendedPrefix);
           // Two deterministic prefixes preserve an alternate predecessor
           // without turning the 32-node beam back into a Cartesian search.
           if (extendingPrefixes.length >= 2) break;
         }
+        if (candidateCheapClear) cheapClearCandidateCount += 1;
+        if (candidateRouteClear) assignedRouteClearCandidateCount += 1;
         if (cheapBudgetExhausted) break;
         if (extendingPrefixes.length === 0) continue;
+        injectivePrefixCandidateCount += 1;
+        legalExtensionCount += extendingPrefixes.length;
+        legalSupports.push(toCandidate);
+        extendingPrefixesByCandidate.set(toCandidate, extendingPrefixes);
+        if (legalSupports.length >= boundedCandidateWindowSize) break;
+      }
+      if (cheapBudgetExhausted) break;
+      const supports = selectStratifiedBoundedSupports(
+        legalSupports,
+        supportQuota,
+        fromOrdinal,
+      );
+      for (const toCandidate of supports) {
         cheapPairCount += 1;
-        supports.push(toCandidate);
+        const extendingPrefixes = extendingPrefixesByCandidate.get(toCandidate) ?? [];
         const knownPrefixes = prefixesByToCandidate.get(toCandidate) ?? [];
         prefixesByToCandidate.set(
           toCandidate,
@@ -5583,7 +7809,6 @@ export function reserveOrderedCandidateChain({
           toCandidate,
           Number(supportCountByToCandidate.get(toCandidate) ?? 0) + 1,
         );
-        if (supports.length >= supportQuota) break;
       }
       supports.sort((first, second) => (
         Number(compareEdgeCandidates(
@@ -5602,9 +7827,27 @@ export function reserveOrderedCandidateChain({
         supports.slice(0, supportQuota),
       );
       retainedLayerSupportCount += Math.min(supports.length, supportQuota);
-      if (cheapBudgetExhausted) break;
+      if (retainedLayerSupportCount >= boundedCandidateWindowSize) break;
     }
-    if (cheapBudgetExhausted) break;
+    if (cheapBudgetExhausted) {
+      layerDiagnostics.push({
+        edgeOrdinal,
+        fromIndex,
+        toIndex,
+        prefixCountBefore,
+        scannedCandidateCount,
+        cheapClearCandidateCount,
+        assignedRouteClearCandidateCount,
+        injectivePrefixCandidateCount,
+        legalExtensionCount,
+        prefixCountAfter: [...prefixesByToCandidate.values()]
+          .reduce((count, candidates) => count + candidates.length, 0),
+        nextFrontierSupportCheckCount: 0,
+        nextFrontierSupportPassCount: 0,
+        retainedNextFrontierSupportCount: 0,
+      });
+      break;
+    }
     const reachableToCandidates = [...supportCountByToCandidate]
       .sort(([first, firstSupportCount], [second, secondSupportCount]) => (
         Number(!boundedCandidates.has(first)) - Number(!boundedCandidates.has(second))
@@ -5631,6 +7874,22 @@ export function reserveOrderedCandidateChain({
       candidate,
       prefixesByToCandidate.get(candidate) ?? [],
     ]));
+    layerDiagnostics.push({
+      edgeOrdinal,
+      fromIndex,
+      toIndex,
+      prefixCountBefore,
+      scannedCandidateCount,
+      cheapClearCandidateCount,
+      assignedRouteClearCandidateCount,
+      injectivePrefixCandidateCount,
+      legalExtensionCount,
+      prefixCountAfter: [...reachablePrefixesByCandidate.values()]
+        .reduce((count, candidates) => count + candidates.length, 0),
+      nextFrontierSupportCheckCount: 0,
+      nextFrontierSupportPassCount: 0,
+      retainedNextFrontierSupportCount: 0,
+    });
     if (reachableCandidates.length === 0) break;
   }
 
@@ -5643,6 +7902,7 @@ export function reserveOrderedCandidateChain({
       cheapPairEvaluations,
       cheapPairCount,
       prunedCandidateCount: 0,
+      layerDiagnostics,
       reservedByIndex: new Map(),
     };
   }
@@ -5677,6 +7937,7 @@ export function reserveOrderedCandidateChain({
       cheapPairEvaluations,
       cheapPairCount,
       prunedCandidateCount,
+      layerDiagnostics,
       reservedByIndex: new Map(),
     };
   }
@@ -5697,14 +7958,25 @@ export function reserveOrderedCandidateChain({
     const nonEdgeAssignedEntries = [...selectedByIndex.entries()]
       .filter(([index]) => index !== fromIndex);
     for (const candidate of candidates) {
-      if (!nonEdgeAssignedEntries.every(([assignedIndex, assignedCandidate]) => (
-        pairPassesCheapBounds(
+      let nonEdgeCheapClear = true;
+      for (const [assignedIndex, assignedCandidate] of nonEdgeAssignedEntries) {
+        if (!consumeCheapPredicateEvaluation()) {
+          nonEdgeCheapClear = false;
+          break;
+        }
+        if (!pairPassesCheapBounds(
           assignedCandidate,
           assignedIndex,
           candidate,
           toIndex,
-        )
-      ))) continue;
+        )) {
+          nonEdgeCheapClear = false;
+          break;
+        }
+      }
+      if (cheapBudgetExhausted) return false;
+      if (!nonEdgeCheapClear) continue;
+      if (!consumeCheapPredicateEvaluation()) return false;
       if (!pairClearsAssignedCandidates(
         fromCandidate,
         fromIndex,
@@ -5732,6 +8004,10 @@ export function reserveOrderedCandidateChain({
         toIndex,
       )) continue;
       selectedByIndex.set(toIndex, candidate);
+      if (!consumeCheapPredicateEvaluation()) {
+        selectedByIndex.delete(toIndex);
+        return false;
+      }
       if (!prefixIsCompatible(selectedByIndex)) {
         selectedByIndex.delete(toIndex);
         continue;
@@ -5754,19 +8030,23 @@ export function reserveOrderedCandidateChain({
         cheapPairEvaluations,
         cheapPairCount,
         prunedCandidateCount,
+        layerDiagnostics,
         reservedByIndex: new Map(selectedByIndex),
       };
     }
     selectedByIndex.clear();
-    if (exactBudgetExhausted) break;
+    if (exactBudgetExhausted || cheapBudgetExhausted) break;
   }
   return {
-    status: exactBudgetExhausted ? 'exact-budget-exhausted' : 'not-found',
+    status: cheapBudgetExhausted
+      ? 'cheap-budget-exhausted'
+      : exactBudgetExhausted ? 'exact-budget-exhausted' : 'not-found',
     pairEvaluations: exactPairEvaluations,
     exactPairEvaluations,
     cheapPairEvaluations,
     cheapPairCount,
     prunedCandidateCount,
+    layerDiagnostics,
     reservedByIndex: new Map(),
   };
 }
@@ -5871,7 +8151,7 @@ function routePathsWithVerticalTransfer(path, destinationElevation, connectorFam
   return candidates.map((candidate) => candidate.path);
 }
 
-function facingAwareSocketRouteCandidates(from, to, {
+export function facingAwareSocketRouteCandidates(from, to, {
   preferXFirst = true,
   connectorFamily = 'service-gallery',
   sourceApproachMeters = [ROUTE_NETWORK_SOCKET_APPROACH_METERS],
@@ -5881,6 +8161,7 @@ function facingAwareSocketRouteCandidates(from, to, {
   // junction sockets without folding the two 8.4 m-wide legs together.
   detourOffsetsMeters = [8.4, 14, 16.8, 25.2, 33.6],
   minimumApproachMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+  maximumPlanarLengthMeters = null,
 } = {}) {
   const start = toDungeonPoint(from?.position);
   const end = toDungeonPoint(to?.position);
@@ -5889,6 +8170,23 @@ function facingAwareSocketRouteCandidates(from, to, {
   const results = [];
   const seen = new Set();
   const registerPlanarPath = (rawPath) => {
+    const changesElevation = Math.abs(Number(end.y) - Number(start.y)) > 1e-6;
+    const defaultMaximumPlanarLengthMeters = ROUTE_NETWORK_MAXIMUM_FEATURELESS_SPAN_METERS
+      * (changesElevation ? 2 : 1);
+    const planarLengthLimitMeters = maximumPlanarLengthMeters != null
+      && Number.isFinite(Number(maximumPlanarLengthMeters))
+      ? Math.max(0, Number(maximumPlanarLengthMeters))
+      : defaultMaximumPlanarLengthMeters;
+    // Raw socket paths contain only duplicates and same-direction collinear
+    // waypoints that normalization can remove without changing planar length.
+    // Reject clearly overlong families before allocating normalized points,
+    // transfer variants, overlap witnesses, or canonical signatures. The
+    // wider precheck tolerance leaves the exact normalized gate below as the
+    // sole authority for candidates on the featureless boundary.
+    if (rawPlanarRouteExceedsLengthLimit(
+      rawPath,
+      planarLengthLimitMeters,
+    )) return;
     const planarPath = normalizedRoutePath(rawPath.map((point) => ({
       ...point,
       y: start.y,
@@ -5903,12 +8201,7 @@ function facingAwareSocketRouteCandidates(from, to, {
     // witnesses—the same-facing U family otherwise manufactures hundreds of
     // provably unusable candidates for every socket pair.
     const planarLengthMeters = measureDungeonPolyline(planarPath);
-    const changesElevation = Math.abs(Number(end.y) - Number(start.y)) > 1e-6;
-    if ((!changesElevation
-        && planarLengthMeters > ROUTE_NETWORK_MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6)
-      || (changesElevation
-        && planarLengthMeters
-          > ROUTE_NETWORK_MAXIMUM_FEATURELESS_SPAN_METERS * 2 + 1e-6)) return;
+    if (planarLengthMeters > planarLengthLimitMeters + 1e-6) return;
     const firstDelta = {
       x: planarPath[1].x - planarPath[0].x,
       z: planarPath[1].z - planarPath[0].z,
@@ -6123,7 +8416,7 @@ function planningVolumeOwnedByAny(volume, ownerIds) {
   return [...ownerIds].some((ownerId) => planningVolumeOwnedBy(volume, ownerId));
 }
 
-function createPlanningVolumeSpatialLookup(volumes, cellMeters = 8.4) {
+export function createPlanningVolumeSpatialLookup(volumes, cellMeters = 8.4) {
   const buckets = new Map();
   const unindexed = [];
   const boundsFor = (volume) => {
@@ -6166,10 +8459,598 @@ function createPlanningVolumeSpatialLookup(volumes, cellMeters = 8.4) {
   };
 }
 
+export function createDirectFutureEndpointBitsetEvaluator(candidateDomains = []) {
+  const normalizedDomains = candidateDomains.map((domain) => ({
+    primaryCandidates: [...(domain?.primaryCandidates ?? [])],
+    fallbackCandidates: [...(domain?.fallbackCandidates ?? [])],
+  }));
+  const allCandidateMasks = normalizedDomains.map((domain) => ({
+    primary: domain.primaryCandidates.length > 0
+      ? (1n << BigInt(domain.primaryCandidates.length)) - 1n
+      : 0n,
+    fallback: domain.fallbackCandidates.length > 0
+      ? (1n << BigInt(domain.fallbackCandidates.length)) - 1n
+      : 0n,
+  }));
+  const indexedCandidateReservationVolumes = normalizedDomains.flatMap(
+    (domain, domainIndex) => ([
+      ['primary', domain.primaryCandidates],
+      ['fallback', domain.fallbackCandidates],
+    ]).flatMap(([phase, candidates]) => candidates.flatMap((candidate, candidateOrdinal) => (
+      candidate.reservationVolumes
+        ?? [candidate.reservationVolume].filter(Boolean)
+    ).map((reservationVolume) => Object.freeze({
+      ...reservationVolume,
+      directFutureDomainIndex: domainIndex,
+      directFutureCandidatePhase: phase,
+      directFutureCandidateOrdinal: candidateOrdinal,
+    })))),
+  );
+  const nearbyCandidateReservationVolumes = createPlanningVolumeSpatialLookup(
+    indexedCandidateReservationVolumes,
+  );
+  return (avoidanceVolumes = [], initialSurvivorBitsets = allCandidateMasks) => {
+    // Callers that repeatedly add transient obstacles to one fixed baseline
+    // can supply the baseline masks here. The masks are cloned before any
+    // clearing, so the compiled evaluator and the caller's baseline remain
+    // immutable across candidate checks.
+    const survivorBitsets = allCandidateMasks.map(
+      ({ primary, fallback }, domainIndex) => ({
+        primary: initialSurvivorBitsets?.[domainIndex]?.primary ?? primary,
+        fallback: initialSurvivorBitsets?.[domainIndex]?.fallback ?? fallback,
+      }),
+    );
+    for (const obstacle of avoidanceVolumes) {
+      for (const reservationVolume of nearbyCandidateReservationVolumes(obstacle)) {
+        if (!planningVolumesOverlap(reservationVolume, obstacle)) continue;
+        const domainBitsets = survivorBitsets[
+          reservationVolume.directFutureDomainIndex
+        ];
+        const phase = reservationVolume.directFutureCandidatePhase;
+        domainBitsets[phase] &= ~(
+          1n << BigInt(reservationVolume.directFutureCandidateOrdinal)
+        );
+      }
+    }
+    return survivorBitsets;
+  };
+}
+
+export function appendRouteNetworkRecoveryScheduleEntry(
+  scheduledCandidateAttempts,
+  {
+    candidateIndex,
+    candidateOrdinal = null,
+    recoveryTargetOrdinal = null,
+    landmarkBacktracking = null,
+    futureEndpointReservationWitness = null,
+  },
+) {
+  const scheduledAttempt = {
+    candidateIndex: Number(candidateIndex),
+    candidateOrdinal: candidateOrdinal == null ? null : Number(candidateOrdinal),
+    recoveryReplay: true,
+    recoveryTargetOrdinal: recoveryTargetOrdinal == null
+      ? null
+      : Number(recoveryTargetOrdinal),
+    landmarkBacktracking,
+    futureEndpointReservationWitness,
+  };
+  scheduledCandidateAttempts.push(scheduledAttempt);
+  return scheduledAttempt;
+}
+
+/**
+ * Charge one route-network planner invocation against the existing finite
+ * global budget. This is intentionally phase-agnostic: ordinary candidates
+ * and every landmark recovery replay consume the same budget while preserving
+ * the established reserve for later required networks.
+ */
+export function consumeRouteNetworkCandidateEvaluationBudget({
+  candidateEvaluations = 0,
+  maximumCandidateEvaluations = 0,
+  futureRequiredNetworkCount = 0,
+  reservedCandidateEvaluationsPerFutureRequiredNetwork = 0,
+} = {}) {
+  const consumed = Math.max(0, Math.trunc(Number(candidateEvaluations) || 0));
+  const maximum = Math.max(0, Math.trunc(Number(maximumCandidateEvaluations) || 0));
+  const reserved = Math.max(0, Math.trunc(Number(futureRequiredNetworkCount) || 0))
+    * Math.max(
+      0,
+      Math.trunc(Number(reservedCandidateEvaluationsPerFutureRequiredNetwork) || 0),
+    );
+  const currentNetworkCandidateEvaluationLimit = Math.max(0, maximum - reserved);
+  const accepted = consumed < currentNetworkCandidateEvaluationLimit;
+  return {
+    accepted,
+    candidateEvaluations: consumed + (accepted ? 1 : 0),
+    maximumCandidateEvaluations: maximum,
+    reservedCandidateEvaluations: reserved,
+    currentNetworkCandidateEvaluationLimit,
+  };
+}
+
+function landmarkEndpointPlacementIdentity(placement) {
+  return canonicalStringify({
+    center: placement?.center ?? placement?.selectedCenter ?? null,
+    facing: placement?.facing ?? placement?.selectedFacing ?? null,
+    parentLocalSocketId: placement?.parentLocalSocketId
+      ?? placement?.selectedParentLocalSocketId
+      ?? null,
+  });
+}
+
+export function createLandmarkEndpointRecoveryWarmStart(
+  endpointSelectionDiagnostics = [],
+) {
+  const orderedEndpointSelections = endpointSelectionDiagnostics
+    .filter(({ endpointOrdinal }) => Number.isInteger(endpointOrdinal))
+    .sort((first, second) => Number(first.endpointOrdinal) - Number(second.endpointOrdinal));
+  if (orderedEndpointSelections.length !== 2
+    || orderedEndpointSelections.some(({ endpointOrdinal }, ordinal) => (
+      endpointOrdinal !== ordinal
+    ))) return null;
+  const endpointPlacements = orderedEndpointSelections.map((selection) => ({
+    center: cloneDungeonAugmentationValue(selection.selectedCenter ?? null),
+    facing: cloneDungeonAugmentationValue(selection.selectedFacing ?? null),
+    parentLocalSocketId: selection.selectedParentLocalSocketId == null
+      ? null
+      : String(selection.selectedParentLocalSocketId),
+  }));
+  if (endpointPlacements.some(({ center, facing }) => !center || !facing)) return null;
+  return { endpointPlacements };
+}
+
+export function promoteLandmarkEndpointTupleWarmStart(
+  endpointTuples = [],
+  warmStart = null,
+) {
+  const matchingTupleOrdinal = landmarkEndpointTupleWarmStartMatchOrdinal(
+    endpointTuples,
+    warmStart,
+  );
+  if (matchingTupleOrdinal <= 0) return endpointTuples;
+  return [
+    endpointTuples[matchingTupleOrdinal],
+    ...endpointTuples.slice(0, matchingTupleOrdinal),
+    ...endpointTuples.slice(matchingTupleOrdinal + 1),
+  ];
+}
+
+export function createLandmarkEndpointTupleDirectionalGuidance(
+  planned,
+  futureEndpointReservationWitness,
+  warmStart,
+) {
+  const endpointPlacements = warmStart?.endpointPlacements ?? [];
+  const nodes = planned?.nodes ?? [];
+  const segments = planned?.segments ?? [];
+  const candidateSummaries = futureEndpointReservationWitness?.candidateSummaries ?? [];
+  if (endpointPlacements.length !== 2 || nodes.length === 0 || segments.length === 0) {
+    return null;
+  }
+  const conflictingSegmentOwners = candidateSummaries.flatMap((summary) => (
+    summary?.rankingMetrics?.conflictingSegmentOwners ?? []
+  ));
+  const conflictingSegmentIds = [...new Set(conflictingSegmentOwners.map(({ segmentId }) => (
+    String(segmentId ?? '')
+  )).filter(Boolean))];
+  if (conflictingSegmentIds.length !== 1) return null;
+  const conflictSegmentId = conflictingSegmentIds[0];
+  const conflictSegment = segments.find(({ id }) => String(id) === conflictSegmentId);
+  if (!conflictSegment || conflictSegment.routeRole !== 'route-network-spine') return null;
+  const samePoint = (first, second) => first && second
+    && ['x', 'y', 'z'].every((axis) => (
+      Math.abs(Number(first[axis]) - Number(second[axis])) <= 1e-6
+    ));
+  const endpointNodes = endpointPlacements.map((placement) => nodes.find((node) => (
+    samePoint(node?.placement?.center, placement.center)
+  )) ?? null);
+  const fromNodeId = String(
+    conflictSegment.fromNodeId ?? conflictSegment.from?.nodeId ?? '',
+  );
+  const toNodeId = String(
+    conflictSegment.toNodeId ?? conflictSegment.to?.nodeId ?? '',
+  );
+  const endpointOrdinal = endpointNodes.findIndex((node) => node && (
+    String(node.id) === fromNodeId || String(node.id) === toNodeId
+  ));
+  if (endpointOrdinal < 0) return null;
+  const endpointNodeId = String(endpointNodes[endpointOrdinal].id);
+  const interiorNodeId = endpointNodeId === fromNodeId ? toNodeId : fromNodeId;
+  const interiorNode = nodes.find(({ id }) => String(id) === interiorNodeId);
+  const witnessSummary = candidateSummaries.find((summary) => (
+    (summary?.rankingMetrics?.conflictingSegmentOwners ?? []).some(({ segmentId }) => (
+      String(segmentId ?? '') === conflictSegmentId
+    ))
+  ));
+  if (!interiorNode?.placement?.center || !witnessSummary?.center) return null;
+  const origin = toDungeonPoint(witnessSummary.center);
+  const toward = toDungeonPoint(interiorNode.placement.center);
+  if (dungeonPointDistance(origin, toward) <= 1e-6) return null;
+  return {
+    endpointOrdinal,
+    origin: cloneDungeonAugmentationValue(origin),
+    toward: cloneDungeonAugmentationValue(toward),
+    conflictSegmentId,
+  };
+}
+
+export function prioritizeLandmarkEndpointTuplesByDirectionalGuidance(
+  endpointTuples = [],
+  guidance = null,
+) {
+  if (endpointTuples.length <= 1 || !guidance) return endpointTuples;
+  const endpointOrdinal = Number(guidance.endpointOrdinal);
+  const origin = guidance.origin;
+  const toward = guidance.toward;
+  if (!Number.isInteger(endpointOrdinal) || endpointOrdinal < 0
+    || endpointOrdinal > 1 || !origin || !toward) return endpointTuples;
+  const axis = {
+    x: Number(toward.x) - Number(origin.x),
+    y: Number(toward.y) - Number(origin.y),
+    z: Number(toward.z) - Number(origin.z),
+  };
+  if (Math.hypot(axis.x, axis.y, axis.z) <= 1e-6) return endpointTuples;
+  const firstTuple = endpointTuples[0];
+  const ranked = endpointTuples.slice(1).map((tuple, stableOrdinal) => {
+    const center = tuple?.candidates?.[endpointOrdinal]?.center ?? origin;
+    return {
+      tuple,
+      stableOrdinal,
+      projection: ['x', 'y', 'z'].reduce((sum, coordinate) => (
+        sum + (Number(center[coordinate]) - Number(origin[coordinate])) * axis[coordinate]
+      ), 0),
+    };
+  }).sort((first, second) => (
+    second.projection - first.projection
+      || first.stableOrdinal - second.stableOrdinal
+  ));
+  return [firstTuple, ...ranked.map(({ tuple }) => tuple)];
+}
+
+function interleaveLandmarkEndpointTuplesByKey(
+  endpointTuples,
+  tupleKey,
+) {
+  if (endpointTuples.length <= 1) return endpointTuples;
+  const firstTuple = endpointTuples[0];
+  const firstKey = tupleKey(firstTuple);
+  const buckets = new Map([[firstKey, []]]);
+  const keyOrder = [firstKey];
+  for (const tuple of endpointTuples.slice(1)) {
+    const key = tupleKey(tuple);
+    if (!buckets.has(key)) {
+      buckets.set(key, []);
+      keyOrder.push(key);
+    }
+    buckets.get(key).push(tuple);
+  }
+  const interleaved = [firstTuple];
+  const bucketCursors = new Map(keyOrder.map((key) => [key, 0]));
+  const takeNextTuple = (key) => {
+    const bucket = buckets.get(key) ?? [];
+    const cursor = bucketCursors.get(key) ?? 0;
+    if (cursor >= bucket.length) return null;
+    bucketCursors.set(key, cursor + 1);
+    return bucket[cursor];
+  };
+  // The first tuple already consumed round zero for its bucket.
+  for (const key of keyOrder) {
+    if (key === firstKey) continue;
+    const tuple = takeNextTuple(key);
+    if (tuple) interleaved.push(tuple);
+  }
+  let remaining = true;
+  while (remaining) {
+    remaining = false;
+    for (const key of keyOrder) {
+      const tuple = takeNextTuple(key);
+      if (!tuple) continue;
+      interleaved.push(tuple);
+      remaining = true;
+    }
+  }
+  return interleaved;
+}
+
+function landmarkEndpointTupleCenterKey(tuple, endpointOrdinal) {
+  const center = tuple?.candidates?.[endpointOrdinal]?.center ?? null;
+  return canonicalStringify(center == null ? null : {
+      x: Number(center.x),
+      y: Number(center.y),
+      z: Number(center.z),
+  });
+}
+
+function landmarkEndpointTupleAttachmentKey(tuple, endpointOrdinal) {
+  const candidate = tuple?.candidates?.[endpointOrdinal] ?? null;
+  const facing = candidate?.facing ?? null;
+  return canonicalStringify({
+    parentLocalSocketId: candidate?.parentLocalSocketId ?? null,
+    facing: facing == null ? null : {
+      x: Number(facing.x),
+      y: Number(facing.y),
+      z: Number(facing.z),
+    },
+  });
+}
+
+/**
+ * Interleave the complete endpoint-tuple domain by exact centers and legal
+ * socket/facing identities on both endpoints, then by PP/PF/FP/FF domain
+ * phase. The promoted ordinary tuple remains first while early recovery changes
+ * translation, orientation, and primary/fallback composition. No pass removes
+ * a tuple, and ranked order remains stable inside every bucket.
+ */
+export function interleaveLandmarkEndpointTuplesByExactEndpointAxes(
+  endpointTuples = [],
+) {
+  const endpointAxisInterleaved = [
+    [1, landmarkEndpointTupleCenterKey],
+    [0, landmarkEndpointTupleCenterKey],
+    [1, landmarkEndpointTupleAttachmentKey],
+    [0, landmarkEndpointTupleAttachmentKey],
+  ].reduce((interleaved, [endpointOrdinal, keyFactory]) => (
+    interleaveLandmarkEndpointTuplesByKey(interleaved, (tuple) => (
+      keyFactory(tuple, endpointOrdinal)
+    ))
+  ), endpointTuples);
+  return interleaveLandmarkEndpointTuplesByKey(
+    endpointAxisInterleaved,
+    (tuple) => String(tuple?.phase ?? ''),
+  );
+}
+
+export function nextLandmarkParentAttachmentPathOrdinals(
+  currentOrdinals = [0, 0],
+  candidateCounts = [0, 0],
+) {
+  const nextOrdinals = [0, 1].map((endpointOrdinal) => Math.max(
+    0,
+    Math.floor(Number(currentOrdinals?.[endpointOrdinal]) || 0),
+  ));
+  for (let endpointOrdinal = nextOrdinals.length - 1;
+    endpointOrdinal >= 0; endpointOrdinal -= 1) {
+    const candidateCount = Math.max(
+      0,
+      Math.floor(Number(candidateCounts?.[endpointOrdinal]) || 0),
+    );
+    if (nextOrdinals[endpointOrdinal] + 1 >= candidateCount) continue;
+    nextOrdinals[endpointOrdinal] += 1;
+    for (let resetOrdinal = endpointOrdinal + 1;
+      resetOrdinal < nextOrdinals.length; resetOrdinal += 1) {
+      nextOrdinals[resetOrdinal] = 0;
+    }
+    return nextOrdinals;
+  }
+  return null;
+}
+
+/**
+ * Enumerates the complete finite parent-attachment path product while pruning
+ * only exact physical path intersections. Coverage placement is a separate
+ * axis from attachment routing: collapsing each endpoint to its shortest path
+ * can reject a legal room assignment when a longer dogleg clears the other
+ * endpoint. The caller remains responsible for static/node clearance and may
+ * stop at the first combination whose complete spine is realizable.
+ */
+export function* routeNetworkParentAttachmentPathCombinations(
+  candidateDomains = [],
+) {
+  if (!Array.isArray(candidateDomains)
+    || candidateDomains.some((domain) => !Array.isArray(domain) || domain.length === 0)) {
+    return;
+  }
+  const selected = [];
+  const collisionVolumesFor = (candidate) => (
+    candidate?.collisionVolumes ?? candidate?.pathVolumes ?? []
+  );
+  function* visitDomain(domainOrdinal) {
+    if (domainOrdinal >= candidateDomains.length) {
+      yield [...selected];
+      return;
+    }
+    for (const candidate of candidateDomains[domainOrdinal]) {
+      const candidateVolumes = collisionVolumesFor(candidate);
+      const intersectsSelection = selected.some((selectedCandidate) => (
+        candidateVolumes.some((candidateVolume) => (
+          collisionVolumesFor(selectedCandidate).some((selectedVolume) => (
+            planningVolumesOverlap(candidateVolume, selectedVolume)
+          ))
+        ))
+      ));
+      if (intersectsSelection) continue;
+      selected.push(candidate);
+      yield* visitDomain(domainOrdinal + 1);
+      selected.pop();
+    }
+  }
+  yield* visitDomain(0);
+}
+
+/**
+ * A parent-attachment overlap grant belongs only to the endpoint node that
+ * owns that attachment. In particular, a path from endpoint A must not borrow
+ * the handoff seam at endpoint B merely because both endpoints terminate the
+ * same supplemental edge. Self-edges retain both endpoint seam ordinals.
+ */
+export function routeNetworkParentAttachmentSharedSeamGrants(
+  edge,
+  routeOption,
+  attachmentNodeIndex,
+  parentAttachmentEndpointSeamByNodeIndex,
+) {
+  if (attachmentNodeIndex == null) return [];
+  const normalizedAttachmentNodeIndex = Number(attachmentNodeIndex);
+  if (!Number.isFinite(normalizedAttachmentNodeIndex)) return [];
+  return [
+    { nodeIndex: Number(edge?.fromIndex), routeEndpointOrdinal: 0 },
+    { nodeIndex: Number(edge?.toIndex), routeEndpointOrdinal: 1 },
+  ].filter(({ nodeIndex }) => (
+    Number.isFinite(nodeIndex) && nodeIndex === normalizedAttachmentNodeIndex
+  )).map(({ nodeIndex, routeEndpointOrdinal }) => {
+    const parentSeam = parentAttachmentEndpointSeamByNodeIndex?.get?.(nodeIndex);
+    return planningVolumeIntersection(
+      parentSeam?.overlapEnvelope,
+      routeOption?.endpointSeams?.[routeEndpointOrdinal]?.overlapEnvelope,
+    );
+  }).filter(Boolean);
+}
+
+export function routeNetworkParentAttachmentSpineBehaviorSignature(
+  blockedOptionMask = [],
+  attachmentDistances = [],
+  {
+    blockedTopologyOptionMask = [],
+    conflictingInactiveCapMask = [],
+  } = {},
+) {
+  const wordsFor = (mask) => Array.from(mask, (word) => (
+    (Number(word) >>> 0).toString(16).padStart(8, '0')
+  ));
+  const maskWords = wordsFor(blockedOptionMask);
+  const topologyMaskWords = wordsFor(blockedTopologyOptionMask);
+  const inactiveCapMaskWords = wordsFor(conflictingInactiveCapMask);
+  const distances = Array.from(attachmentDistances, (distance) => {
+    const numericDistance = Number(distance);
+    if (Number.isNaN(numericDistance)) return 'nan';
+    if (numericDistance === Number.POSITIVE_INFINITY) return 'inf';
+    if (numericDistance === Number.NEGATIVE_INFINITY) return '-inf';
+    return Object.is(numericDistance, -0) ? '-0' : String(numericDistance);
+  });
+  return [
+    `${maskWords.join('.')}:${distances.join(',')}`,
+    topologyMaskWords.join('.'),
+    inactiveCapMaskWords.join('.'),
+  ].join('|');
+}
+
+/**
+ * Before a complete coverage leaf, failed searches reuse the required-route
+ * mask and parent-prefix distance signature. Once a leaf reaches topology or
+ * inactive-cap validation, reuse additionally requires exact topology-route
+ * and cap-conflict masks. Logical tuple accounting remains separate from the
+ * number of exact DFS executions.
+ */
+export function createRouteNetworkParentAttachmentSpineAttemptMemo() {
+  const failedBeforeCompleteCoverageLeaf = new Set();
+  const failedAtCompleteCoverageLeaf = new Set();
+  const completeLeafCoverageSignatures = new Set();
+  let logicalAttempts = 0;
+  let exactDfsExecutions = 0;
+  let cacheHits = 0;
+  return {
+    begin(signature, { completeBehaviorSignature = null } = {}) {
+      logicalAttempts += 1;
+      const coverageSignature = String(signature);
+      if (failedBeforeCompleteCoverageLeaf.has(coverageSignature)
+        || (completeBehaviorSignature != null
+          && failedAtCompleteCoverageLeaf.has(String(completeBehaviorSignature)))) {
+        cacheHits += 1;
+        return false;
+      }
+      exactDfsExecutions += 1;
+      return true;
+    },
+    recordFailure(signature, {
+      reachedCompleteCoverageLeaf = false,
+      completeBehaviorSignature = null,
+    } = {}) {
+      if (!reachedCompleteCoverageLeaf) {
+        failedBeforeCompleteCoverageLeaf.add(String(signature));
+      } else if (completeBehaviorSignature != null) {
+        completeLeafCoverageSignatures.add(String(signature));
+        failedAtCompleteCoverageLeaf.add(String(completeBehaviorSignature));
+      }
+    },
+    requiresCompleteBehaviorSignature(signature) {
+      return completeLeafCoverageSignatures.has(String(signature));
+    },
+    snapshot() {
+      return {
+        logicalAttempts,
+        exactDfsExecutions,
+        cacheHits,
+        cachedFailureCount:
+          failedBeforeCompleteCoverageLeaf.size + failedAtCompleteCoverageLeaf.size,
+        cachedCoverageFailureCount: failedBeforeCompleteCoverageLeaf.size,
+        cachedCompleteFailureCount: failedAtCompleteCoverageLeaf.size,
+      };
+    },
+  };
+}
+
+/**
+ * Collision bodies are a sound prefix reservation only when the endpoint's
+ * attachment path domain is already a singleton. Multi-path domains retain
+ * their seam identity here and defer the coupled path choice to the exact
+ * attachment-product/spine solve.
+ */
+export function routeNetworkParentAttachmentPrefixReservation(
+  attachmentDomain = {},
+) {
+  const candidates = Array.isArray(attachmentDomain?.candidates)
+    ? attachmentDomain.candidates
+    : [];
+  const pinnedAttachment = candidates.length === 1 ? candidates[0] : null;
+  return {
+    compatible: candidates.length > 0,
+    candidateCount: candidates.length,
+    collisionVolumes: pinnedAttachment?.collisionVolumes
+      ?? pinnedAttachment?.pathVolumes
+      ?? [],
+  };
+}
+
+export function landmarkEndpointTupleWarmStartMatchOrdinal(
+  endpointTuples = [],
+  warmStart = null,
+) {
+  const endpointPlacements = warmStart?.endpointPlacements;
+  if (!Array.isArray(endpointPlacements) || endpointPlacements.length !== 2) {
+    return -1;
+  }
+  const warmStartIdentity = canonicalStringify(
+    endpointPlacements.map(landmarkEndpointPlacementIdentity),
+  );
+  return endpointTuples.findIndex((tuple) => (
+    Array.isArray(tuple?.candidates)
+      && canonicalStringify(
+        tuple.candidates.map(landmarkEndpointPlacementIdentity),
+      ) === warmStartIdentity
+  ));
+}
+
 export function routeNetworkPlanningOverlapIsGranted(first, second, overlapGrants = []) {
   if (overlapGrants.length === 0) return false;
+  // Future-network staging volumes are solver reservations, not authored
+  // physical owners. Accepted inactive-socket caps are real supplemental
+  // solids projected into the same cross-network reservation plane. An
+  // unrelated endpoint seam with no parentOwnerId must not turn either into a
+  // generic overlap allowance; doing so lets a network cross reserved space
+  // and postpones the contradiction until deep backtracking or assembly.
+  if ([first, second].some((volume) => (
+    String(volume?.purpose ?? '').startsWith('future-route-network-')
+      || String(volume?.purpose ?? '').startsWith(
+        'route-network-inactive-socket-cap-planning-reservation',
+      )
+  ))) return false;
+  const touchesImmutableBaseVolume = [first, second].some((volume) => {
+    const id = String(volume?.id ?? '');
+    const purpose = String(volume?.purpose ?? '');
+    return id.startsWith('base:')
+      || purpose.startsWith('base-')
+      || purpose.startsWith('industrial-authored-')
+      || purpose === 'industrial-single-owner-xz-connector-column';
+  });
   const applicableGrants = overlapGrants.filter((grant) => (
-    !grant?.parentOwnerId || [first, second].some((volume) => (
+    // An ownerless endpoint seam describes only the local handoff between a
+    // supplemental segment and its endpoint module. It is not permission to
+    // consume authored/base geometry that happens to cross the same envelope.
+    // Base overlaps require an explicit parentOwnerId, matching the exact
+    // landing-grant rule used by final plan validation.
+    (!grant?.parentOwnerId && !touchesImmutableBaseVolume) || [first, second].some((volume) => (
       [volume?.ownerId, volume?.logicalConnectionId, volume?.physicalConnectionId]
         .some((ownerId) => String(ownerId ?? '') === String(grant.parentOwnerId))
         || String(volume?.id ?? '') === String(grant.parentOwnerId)
@@ -6219,15 +9100,51 @@ function isGrantedParentGalleryThresholdVolume(volume, landingOverlapGrant) {
   });
 }
 
-function nodePlanningCollisionScore(node, avoidanceVolumes) {
+function applicableNodePlanningOverlapGrants(node, overlapGrants) {
+  return overlapGrants.filter(({ moduleTemplateId }) => (
+    !moduleTemplateId || String(moduleTemplateId) === String(node?.grammarId)
+  ));
+}
+
+function nodePlanningCollisionScoreFromLookup(
+  node,
+  nearbyAvoidanceVolumes,
+  overlapGrants = [],
+) {
   const volumes = [...(node.occupiedVolumes ?? []), ...(node.clearanceVolumes ?? [])];
+  const applicableOverlapGrants = overlapGrants.length > 0
+    ? applicableNodePlanningOverlapGrants(node, overlapGrants)
+    : overlapGrants;
+  const hasApplicableOverlapGrants = applicableOverlapGrants.length > 0;
   let score = 0;
   for (const volume of volumes) {
-    for (const obstacle of avoidanceVolumes) {
-      if (planningVolumesOverlap(volume, obstacle)) score += 1;
+    for (const obstacle of nearbyAvoidanceVolumes(volume)) {
+      if (planningVolumesOverlap(volume, obstacle)
+        && (!hasApplicableOverlapGrants
+          || !planningOverlapIsGranted(volume, obstacle, applicableOverlapGrants))) score += 1;
     }
   }
   return score;
+}
+
+export function nodePlanningCollisionScore(node, avoidanceVolumes, overlapGrants = []) {
+  return nodePlanningCollisionScoreFromLookup(
+    node,
+    () => avoidanceVolumes,
+    overlapGrants,
+  );
+}
+
+export function indexedNodePlanningCollisionScore(
+  node,
+  nearbyAvoidanceVolumes,
+  overlapGrants = [],
+) {
+  return nodePlanningCollisionScoreFromLookup(
+    node,
+    nearbyAvoidanceVolumes,
+    overlapGrants,
+  );
 }
 
 function nodePlanningCollisionIds(node, avoidanceVolumes) {
@@ -6238,34 +9155,10 @@ function nodePlanningCollisionIds(node, avoidanceVolumes) {
 }
 
 function routePathPlanningVolumes(path, heightMeters = 5.6) {
-  const widthMeters = ROUTE_NETWORK_CORRIDOR_WIDTH_METERS;
-  return path.slice(1).map((end, index) => {
-    const start = path[index];
-    const deltaX = Number(end.x) - Number(start.x);
-    const deltaY = Number(end.y) - Number(start.y);
-    const deltaZ = Number(end.z) - Number(start.z);
-    const horizontalLength = Math.hypot(deltaX, deltaZ);
-    if (horizontalLength <= 1e-6 && Math.abs(deltaY) <= 1e-6) return null;
-    const directionX = horizontalLength > 1e-6 ? deltaX / horizontalLength : 0;
-    const directionZ = horizontalLength > 1e-6 ? deltaZ / horizontalLength : 0;
-    return {
-      center: {
-        x: (Number(start.x) + Number(end.x)) * 0.5,
-        y: Math.min(Number(start.y), Number(end.y))
-          + (heightMeters + Math.abs(deltaY)) * 0.5,
-        z: (Number(start.z) + Number(end.z)) * 0.5,
-      },
-      size: {
-        x: horizontalLength > 1e-6
-          ? Math.abs(deltaX) + widthMeters * Math.abs(directionZ)
-          : widthMeters,
-        y: heightMeters + Math.abs(deltaY),
-        z: horizontalLength > 1e-6
-          ? Math.abs(deltaZ) + widthMeters * Math.abs(directionX)
-          : widthMeters,
-      },
-    };
-  }).filter(Boolean);
+  return routePathFinalOccupiedSpans(path, {
+    widthMeters: ROUTE_NETWORK_CORRIDOR_WIDTH_METERS,
+    heightMeters,
+  });
 }
 
 function routeEndpointPlanningLandingVolume(endpoint, point, landingDepthMeters = 5.6) {
@@ -6292,19 +9185,371 @@ function routeEndpointPlanningLandingVolume(endpoint, point, landingDepthMeters 
  * selection must reserve the two endpoint landings as well as the path body;
  * otherwise a route can pass the early solve and fail only after serialization.
  */
-function routeSegmentPlanningCollisionVolumes(
+export function routeSegmentPlanningCollisionVolumes(
   path,
   from,
   to,
   heightMeters = 5.6,
   landingDepthMeters = 5.6,
+  stableOwnerId = null,
 ) {
   if (!Array.isArray(path) || path.length < 2) return [];
-  return [
-    ...routePathPlanningVolumes(path, heightMeters),
-    routeEndpointPlanningLandingVolume(from, path[0], landingDepthMeters),
-    routeEndpointPlanningLandingVolume(to, path.at(-1), landingDepthMeters),
+  const fromPoint = toDungeonPoint(from?.position);
+  const toPoint = toDungeonPoint(to?.position);
+  const segmentPath = createDungeonPolyline(path, fromPoint, toPoint);
+  const occupiedVolumes = routePathFinalOccupiedSpans(segmentPath, {
+    widthMeters: ROUTE_NETWORK_CORRIDOR_WIDTH_METERS,
+    heightMeters,
+  });
+  const landingVolumes = [
+    routeEndpointPlanningLandingVolume(from, fromPoint, landingDepthMeters),
+    routeEndpointPlanningLandingVolume(to, toPoint, landingDepthMeters),
   ];
+  if (stableOwnerId == null || String(stableOwnerId).length === 0) {
+    return [...occupiedVolumes, ...landingVolumes];
+  }
+  const ownerId = String(stableOwnerId);
+  const endpointParentNodeIds = [from?.nodeId, to?.nodeId].filter(Boolean);
+  return [
+    ...occupiedVolumes.map((volume, volumeOrdinal) => ({
+      ...volume,
+      id: `${ownerId}:occupied:${volumeOrdinal}`,
+      ownerId,
+      purpose: 'supplement-connector-occupied',
+      endpointParentNodeIds,
+    })),
+    ...landingVolumes.map((volume, endpointOrdinal) => ({
+      ...volume,
+      id: `${ownerId}:${endpointOrdinal === 0 ? 'from' : 'to'}-landing-volume`,
+      ownerId,
+      endpointParentNodeIds,
+    })),
+  ];
+}
+
+const ROUTE_NETWORK_CONNECTOR_TILE_METERS = 2.8;
+
+function routeNetworkStableGridCoordinate(value) {
+  return Math.round(Number((
+    Number(Number(value).toFixed(6)) / ROUTE_NETWORK_CONNECTOR_TILE_METERS
+  ).toFixed(6)));
+}
+
+function routeNetworkConnectorGridPath(path = []) {
+  const waypoints = path.map((point) => ({
+    x: routeNetworkStableGridCoordinate(point?.x),
+    z: routeNetworkStableGridCoordinate(point?.z),
+  }));
+  const gridPath = [];
+  const append = (point) => {
+    if (gridPath.at(-1)?.x !== point.x || gridPath.at(-1)?.z !== point.z) {
+      gridPath.push(point);
+    }
+  };
+  for (const waypoint of waypoints) {
+    const source = gridPath.at(-1);
+    if (!source) {
+      append(waypoint);
+      continue;
+    }
+    const stepX = Math.sign(waypoint.x - source.x);
+    for (let x = source.x + stepX; stepX && x !== waypoint.x + stepX; x += stepX) {
+      append({ x, z: source.z });
+    }
+    const stepZ = Math.sign(waypoint.z - gridPath.at(-1).z);
+    for (let z = gridPath.at(-1).z + stepZ;
+      stepZ && z !== waypoint.z + stepZ;
+      z += stepZ) {
+      append({ x: waypoint.x, z });
+    }
+  }
+  return gridPath;
+}
+
+/**
+ * Mirrors the rectangular room footprint that Industrial materialization adds
+ * to every connector variant. Base-draft room records already carry tile
+ * dimensions; supplemental nodes carry canonicalized metric dimensions, so
+ * only their placement rotation still needs to be applied here. Connector-owned
+ * modules are materialized as junction proxies and deliberately contribute no
+ * room footprint.
+ */
+export function routeNetworkConnectorRoomFootprint(
+  roomOrNode,
+  tileSize = ROUTE_NETWORK_CONNECTOR_TILE_METERS,
+) {
+  if (!roomOrNode || roomOrNode.suppressRoomGeometry === true
+    || roomOrNode.connectorOwned === true
+    || roomOrNode.isSupplementConnectorModule === true
+    || ['supplementConnectorJunction', 'supplementConnectorModule'].includes(
+      String(roomOrNode.kind ?? roomOrNode.nodeKind ?? ''),
+    )) return null;
+  const roomId = String(roomOrNode.id ?? roomOrNode.roomId ?? '');
+  if (!roomId) return null;
+  const baseGridPosition = roomOrNode.gridPosition;
+  let centerX;
+  let centerZ;
+  let widthTiles;
+  let depthTiles;
+  if (baseGridPosition
+    && Number.isFinite(Number(roomOrNode.widthTiles))
+    && Number.isFinite(Number(roomOrNode.depthTiles))) {
+    centerX = Number(baseGridPosition.x);
+    centerZ = Number(baseGridPosition.z);
+    widthTiles = Number(roomOrNode.widthTiles);
+    depthTiles = Number(roomOrNode.depthTiles);
+  } else {
+    const center = roomOrNode.placement?.center
+      ?? roomOrNode.center
+      ?? roomOrNode.position;
+    const size = roomOrNode.size ?? roomOrNode.placement?.size ?? {};
+    if (!center
+      || !Number.isFinite(Number(center.x))
+      || !Number.isFinite(Number(center.z))) return null;
+    const unrotatedWidthMeters = Number(
+      size.x ?? size.width ?? size.widthMeters,
+    );
+    const unrotatedDepthMeters = Number(
+      size.z ?? size.depth ?? size.depthMeters,
+    );
+    if (!Number.isFinite(unrotatedWidthMeters)
+      || !Number.isFinite(unrotatedDepthMeters)) return null;
+    const placementTurns = ((Math.trunc(Number(
+      roomOrNode.placement?.rotationQuarterTurns ?? 0,
+    )) % 4) + 4) % 4;
+    const swapsHorizontalAxes = placementTurns % 2 === 1;
+    centerX = Math.round(Number(center.x) / Number(tileSize));
+    centerZ = Math.round(Number(center.z) / Number(tileSize));
+    widthTiles = Math.max(1, Math.round((
+      swapsHorizontalAxes ? unrotatedDepthMeters : unrotatedWidthMeters
+    ) / Number(tileSize)));
+    depthTiles = Math.max(1, Math.round((
+      swapsHorizontalAxes ? unrotatedWidthMeters : unrotatedDepthMeters
+    ) / Number(tileSize)));
+  }
+  return {
+    roomId,
+    minX: centerX - Math.floor(widthTiles / 2),
+    maxX: centerX + Math.floor(widthTiles / 2),
+    minZ: centerZ - Math.floor(depthTiles / 2),
+    maxZ: centerZ + Math.floor(depthTiles / 2),
+  };
+}
+
+/**
+ * Preflights the exact automatic-lift family/path contract used by Industrial
+ * materialization. A null result rejects this path only; callers remain free to
+ * choose another socket, route, placement, or bounded network candidate.
+ */
+export function routeNetworkLiftPlanningContract(
+  path,
+  from,
+  to,
+  roomFootprints = [],
+  stableConnectionId = 'route-network-lift-candidate',
+) {
+  if (!Array.isArray(path) || path.length < 2) return null;
+  const gridPath = routeNetworkConnectorGridPath(path);
+  if (gridPath.length < 2) return null;
+  const sourceElevation = Number(from?.position?.y ?? 0);
+  const destinationElevation = Number(to?.position?.y ?? sourceElevation);
+  const ownerId = String(stableConnectionId);
+  const endpointRoomId = (endpoint, role) => String(
+    endpoint?.nodeId ?? endpoint?.roomId ?? endpoint?.id ?? `${ownerId}:${role}`,
+  );
+  const plan = {
+    id: ownerId,
+    logicalConnectionId: ownerId,
+    fromRoomId: endpointRoomId(from, 'from'),
+    toRoomId: endpointRoomId(to, 'to'),
+    connectorType: 'ground_corridor',
+    level: 0,
+    elevation: sourceElevation,
+    sourceElevation,
+    destinationElevation,
+    elevationDelta: destinationElevation - sourceElevation,
+    direction: destinationElevation >= sourceElevation ? 'ascending' : 'descending',
+    fullPath: gridPath,
+    bridgePath: gridPath,
+    fromSocket: {
+      id: String(from?.socketId ?? from?.id ?? `${ownerId}:from`),
+      roomId: endpointRoomId(from, 'from'),
+      x: gridPath[0].x,
+      z: gridPath[0].z,
+      elevation: sourceElevation,
+    },
+    toSocket: {
+      id: String(to?.socketId ?? to?.id ?? `${ownerId}:to`),
+      roomId: endpointRoomId(to, 'to'),
+      x: gridPath.at(-1).x,
+      z: gridPath.at(-1).z,
+      elevation: destinationElevation,
+    },
+    connectorVariantId: DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT,
+    connectorVariantConstraints: {
+      endpointFlatBufferTiles: 2,
+      roomFootprints: roomFootprints.map((footprint) => ({ ...footprint })),
+      blockedLanePoints: [],
+    },
+  };
+  try {
+    return createDungeonConnectorVariantContract(
+      plan,
+      DUNGEON_CONNECTOR_VARIANT_IDS.AUTOMATIC_LIFT,
+      {
+        tileSize: ROUTE_NETWORK_CONNECTOR_TILE_METERS,
+        sourceElevation,
+        destinationElevation,
+        direction: plan.direction,
+        allowExactQuantizedElevationDelta: true,
+      },
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Projects the exact crested-slope family reservation used by materialization
+ * into planner volumes. Both switchback sides are tried in stable +1/-1 order;
+ * a candidate is accepted only when every flight, landing, destination lane,
+ * and crossover column is collision-free (or covered by an endpoint grant).
+ */
+export function routeNetworkSlopeSwitchbackPlanningReservation(
+  path,
+  from,
+  to,
+  avoidanceVolumes = [],
+  overlapGrants = [],
+  stableOwnerId = 'route-network-slope-candidate',
+) {
+  if (!Array.isArray(path) || path.length < 2) return null;
+  const gridPath = routeNetworkConnectorGridPath(path);
+  if (gridPath.length < 2) return null;
+  const sourceElevation = Number(from?.position?.y ?? 0);
+  const destinationElevation = Number(to?.position?.y ?? sourceElevation);
+  const ownerId = String(stableOwnerId);
+  const endpointRoomId = (endpoint, role) => String(
+    endpoint?.nodeId ?? endpoint?.roomId ?? endpoint?.id ?? `${ownerId}:${role}`,
+  );
+  const basePlan = {
+    id: ownerId,
+    logicalConnectionId: ownerId,
+    fromRoomId: endpointRoomId(from, 'from'),
+    toRoomId: endpointRoomId(to, 'to'),
+    connectorType: 'ground_corridor',
+    level: 0,
+    elevation: sourceElevation,
+    sourceElevation,
+    destinationElevation,
+    elevationDelta: destinationElevation - sourceElevation,
+    fullPath: gridPath,
+    bridgePath: gridPath,
+    fromSocket: {
+      id: String(from?.socketId ?? from?.id ?? `${ownerId}:from`),
+      x: gridPath[0].x,
+      z: gridPath[0].z,
+      elevation: sourceElevation,
+    },
+    toSocket: {
+      id: String(to?.socketId ?? to?.id ?? `${ownerId}:to`),
+      x: gridPath.at(-1).x,
+      z: gridPath.at(-1).z,
+      elevation: destinationElevation,
+    },
+    connectorVariantId: DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    connectorVariantConstraints: {
+      endpointFlatBufferTiles: 2,
+      roomFootprints: [],
+      blockedLanePoints: [],
+    },
+  };
+  for (const switchbackSideSign of [1, -1]) {
+    let connectorVariant;
+    try {
+      connectorVariant = createDungeonConnectorVariantContract(
+        basePlan,
+        DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+        {
+          tileSize: ROUTE_NETWORK_CONNECTOR_TILE_METERS,
+          sourceElevation,
+          destinationElevation,
+          direction: destinationElevation >= sourceElevation ? 'ascending' : 'descending',
+          allowExactQuantizedElevationDelta: true,
+          switchbackSideSign,
+        },
+      );
+    } catch {
+      continue;
+    }
+    const reservedPlan = reserveDungeonConnectorFamilyFootprints([{
+      ...basePlan,
+      connectorVariant,
+    }]).connectionPlans[0];
+    const collisionVolumes = (reservedPlan?.familyReservedFootprintColumns ?? []).map(
+      (column, ordinal) => ({
+        id: `${ownerId}:slope-family:${switchbackSideSign}:${ordinal}`,
+        ownerId,
+        center: {
+          x: Number(column.x) * ROUTE_NETWORK_CONNECTOR_TILE_METERS,
+          y: (Number(column.minY) + Number(column.maxY)) * 0.5,
+          z: Number(column.z) * ROUTE_NETWORK_CONNECTOR_TILE_METERS,
+        },
+        size: {
+          x: ROUTE_NETWORK_CONNECTOR_TILE_METERS,
+          y: Math.max(0.001, Number(column.maxY) - Number(column.minY)),
+          z: ROUTE_NETWORK_CONNECTOR_TILE_METERS,
+        },
+        purpose: (column.purposes ?? []).join('|') || 'switchback-slope-family-reservation',
+      }),
+    );
+    if (planningRouteVolumesCollisionScore(
+      collisionVolumes,
+      avoidanceVolumes,
+      overlapGrants,
+    ) === 0) {
+      return {
+        switchbackSideSign,
+        collisionVolumes,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Exact prospective volumes used by the landmark room-pair preselector.
+ * The stable identity mirrors the later segment reservation while keeping the
+ * preselector renderer-free and deterministic.
+ */
+export function landmarkPairPreselectorRouteCollisionVolumes(
+  path,
+  fromSocket,
+  toSocket,
+  {
+    operationId = 'landmark-pair-preselector',
+    fromIndex = 0,
+    toIndex = 1,
+    pathOrdinal = 0,
+  } = {},
+) {
+  const prospectiveSegmentId = [
+    operationId,
+    'landmark-pair-preselector',
+    fromIndex,
+    fromSocket?.localSocketId ?? fromSocket?.id ?? 'from',
+    toIndex,
+    toSocket?.localSocketId ?? toSocket?.id ?? 'to',
+    pathOrdinal,
+  ].map(String).join(':');
+  return routeSegmentPlanningCollisionVolumes(
+    path,
+    fromSocket,
+    toSocket,
+    5.6,
+    5.6,
+    prospectiveSegmentId,
+  );
 }
 
 function pathPlanningCollisionScore(
@@ -6320,7 +9565,7 @@ function pathPlanningCollisionScore(
   );
 }
 
-function planningRouteVolumesCollisionScore(
+export function planningRouteVolumesCollisionScore(
   pathVolumes,
   avoidanceVolumes,
   overlapGrants = [],
@@ -6527,15 +9772,345 @@ function routePathHasExteriorSocketApproach(
   ).accepted;
 }
 
-function routePlanningVolumesRespectEndpointNodeMask(pathVolumes, node, seamOrSeams) {
+/**
+ * Mirrors strict runtime floor, hazard, and void checks for the exact V4
+ * endpoint lattice. Blueprint floor cells are committed to stable integer
+ * grid centers, while an authored module placement may sit on a half-grid
+ * center; evaluating the serialized seam grid here therefore matches the
+ * physical floor that the generator will stamp instead of the unsnapped
+ * planning metric.
+ */
+export function routeEndpointSeamSolidFeatureConflicts(
+  node,
+  seamOrSeams,
+  {
+    playerCollisionRadiusMeters = ROUTE_NETWORK_PLAYER_COLLISION_RADIUS_METERS,
+  } = {},
+) {
+  if (!node?.placement?.center) return [];
+  const features = (node.structure?.features ?? []).filter((feature) => (
+    feature?.solid === true
+      && ['cover', 'machine'].includes(String(feature.type ?? ''))
+  ));
+  const hazardZones = (node.structure?.zones ?? []).filter(({ type }) => (
+    String(type ?? '').toLowerCase() === 'hazard'
+  ));
+  const voids = node.structure?.voids ?? [];
+  if (features.length === 0 && hazardZones.length === 0 && voids.length === 0) {
+    return [];
+  }
+  const seams = (Array.isArray(seamOrSeams) ? seamOrSeams : [seamOrSeams])
+    .filter(Boolean);
+  if (seams.length === 0) return [];
+
+  const placementTurns = Math.trunc(Number(node.placement.rotationQuarterTurns ?? 0));
+  const canonicalTurns = Math.trunc(Number(
+    node.blueprintCanonicalRotationQuarterTurns
+      ?? node.selectionConstraints?.blueprintCanonicalRotationQuarterTurns
+      ?? 0,
+  ));
+  const physicalTurns = ((placementTurns + canonicalTurns) % 4 + 4) % 4;
+  const swapsHorizontalAxes = physicalTurns % 2 === 1;
+  const floorTiers = node.structure?.floors ?? [];
+  const tileSize = Number(seams[0]?.tileSize ?? 2.8);
+  const stableGridCoordinate = (metric) => Math.round(Number((
+    Number(Number(metric).toFixed(6)) / tileSize
+  ).toFixed(6)));
+  const floorCells = (tier) => {
+    const rows = (tier?.floorMask ?? []).map((row) => String(row ?? ''));
+    if (rows.length === 0) return [];
+    const width = Math.max(0, ...rows.map((row) => row.length));
+    const origin = tier.maskOriginTile ?? {
+      x: -Math.floor(width / 2),
+      z: -Math.floor(rows.length / 2),
+    };
+    return rows.flatMap((row, rowIndex) => [...row].flatMap((symbol, columnIndex) => (
+      symbol === '#'
+        ? [{
+            x: Number(origin.x) + columnIndex,
+            z: Number(origin.z) + rowIndex,
+          }]
+        : []
+    )));
+  };
+  const physicalTransfers = node.structure?.physicalTransfers
+    ?? node.structure?.elevationTransfers
+    ?? [];
+  const transferOverlapsFeatureTier = (feature, tier) => {
+    const featureWidth = Math.max(1, Number(feature.w ?? feature.width ?? 1));
+    const featureDepth = Math.max(1, Number(feature.d ?? feature.depth ?? 1));
+    const featureMinX = Number(feature.x ?? 0) - featureWidth * 0.5;
+    const featureMaxX = Number(feature.x ?? 0) + featureWidth * 0.5;
+    const featureMinZ = Number(feature.z ?? 0) - featureDepth * 0.5;
+    const featureMaxZ = Number(feature.z ?? 0) + featureDepth * 0.5;
+    const elevation = Number(tier?.elevation ?? 0);
+    return physicalTransfers.some((transfer) => {
+      const footprint = transfer.footprintTiles ?? transfer;
+      const width = Math.max(1, Number(footprint.width ?? transfer.widthTiles ?? 1));
+      const depth = Math.max(1, Number(footprint.depth ?? transfer.depthTiles ?? 1));
+      const minX = Number(footprint.x ?? 0) - width * 0.5;
+      const maxX = Number(footprint.x ?? 0) + width * 0.5;
+      const minZ = Number(footprint.z ?? 0) - depth * 0.5;
+      const maxZ = Number(footprint.z ?? 0) + depth * 0.5;
+      const range = transfer.elevationRangeMeters ?? {};
+      return featureMinX < maxX - 1e-6
+        && featureMaxX > minX + 1e-6
+        && featureMinZ < maxZ - 1e-6
+        && featureMaxZ > minZ + 1e-6
+        && elevation >= Number(range.min ?? elevation) - 1e-6
+        && elevation <= Number(range.max ?? elevation) + 1e-6;
+    });
+  };
+  const radius = Math.max(0, Number(playerCollisionRadiusMeters) || 0);
+  const featureVolumes = features.flatMap((feature) => {
+    const height = feature.type === 'cover' ? 1.2 : 3.6;
+    const widthTiles = Math.max(1, Number(feature.w ?? 1));
+    const depthTiles = Math.max(1, Number(feature.d ?? 1));
+    const declaredTier = feature.tier == null
+      ? null
+      : floorTiers.find(({ id }) => String(id) === String(feature.tier));
+    const defaultMachineTier = feature.type === 'machine' && feature.tier == null
+      ? floorTiers.find(({ id }) => String(id) === 'base') ?? floorTiers[0]
+      : null;
+    const candidateTiers = declaredTier
+      ? [declaredTier]
+      : defaultMachineTier
+        ? [defaultMachineTier]
+        : floorTiers;
+    const footprintMinX = Number(feature.x ?? 0) - widthTiles * 0.5;
+    const footprintMaxX = Number(feature.x ?? 0) + widthTiles * 0.5;
+    const footprintMinZ = Number(feature.z ?? 0) - depthTiles * 0.5;
+    const footprintMaxZ = Number(feature.z ?? 0) + depthTiles * 0.5;
+    const supportGroups = candidateTiers.map((tier) => ({
+      tier,
+      cells: floorCells(tier).filter((cell) => (
+        cell.x >= footprintMinX - 1e-6
+          && cell.x < footprintMaxX - 1e-6
+          && cell.z >= footprintMinZ - 1e-6
+          && cell.z < footprintMaxZ - 1e-6
+      )),
+    })).filter(({ cells }) => cells.length > 0);
+    const realizedGroups = supportGroups.length > 0
+      ? supportGroups
+      : [{ tier: candidateTiers[0] ?? { elevation: 0 }, cells: [] }];
+    return realizedGroups.map(({ tier, cells }) => {
+      const localElevation = Number(tier?.elevation ?? 0);
+      const projectedCenter = transformDungeonLocalPoint({
+        x: Number(feature.x ?? 0) * tileSize,
+        y: localElevation,
+        z: Number(feature.z ?? 0) * tileSize,
+      }, {
+        center: node.placement.center,
+        rotationQuarterTurns: physicalTurns,
+      });
+      const usesCommittedFloorGridPosition = cells.length > 0
+        && !transferOverlapsFeatureTier(feature, tier);
+      const gridCells = usesCommittedFloorGridPosition ? cells.map((cell) => {
+        const position = transformDungeonLocalPoint({
+          x: cell.x * tileSize,
+          y: localElevation,
+          z: cell.z * tileSize,
+        }, {
+          center: node.placement.center,
+          rotationQuarterTurns: physicalTurns,
+        });
+        return {
+          x: stableGridCoordinate(position.x),
+          z: stableGridCoordinate(position.z),
+        };
+      }) : [];
+      const center = gridCells.length > 0 ? {
+        ...projectedCenter,
+        x: (Math.min(...gridCells.map(({ x }) => x))
+          + Math.max(...gridCells.map(({ x }) => x))) * 0.5 * tileSize,
+        z: (Math.min(...gridCells.map(({ z }) => z))
+          + Math.max(...gridCells.map(({ z }) => z))) * 0.5 * tileSize,
+      } : projectedCenter;
+      const segmented = supportGroups.length > 1;
+      const localXs = cells.map(({ x }) => x);
+      const localZs = cells.map(({ z }) => z);
+      const segmentWidthTiles = segmented && cells.length > 0
+        ? Math.min(widthTiles, Math.max(1, Math.round(
+            Math.max(...localXs) - Math.min(...localXs) + 1,
+          )))
+        : widthTiles;
+      const segmentDepthTiles = segmented && cells.length > 0
+        ? Math.min(depthTiles, Math.max(1, Math.round(
+            Math.max(...localZs) - Math.min(...localZs) + 1,
+          )))
+        : depthTiles;
+      return {
+        featureId: String(feature.id ?? '(unnamed-solid-feature)'),
+        center,
+        minimumY: Number(center.y),
+        maximumY: Number(center.y) + height,
+        halfWidth: tileSize
+          * (swapsHorizontalAxes ? segmentDepthTiles : segmentWidthTiles) * 0.5,
+        halfDepth: tileSize
+          * (swapsHorizontalAxes ? segmentWidthTiles : segmentDepthTiles) * 0.5,
+      };
+    });
+  });
+  const recordFootprint = (record) => ({
+    center: {
+      x: Number(record?.x ?? record?.center?.x ?? 0),
+      z: Number(record?.z ?? record?.center?.z ?? 0),
+    },
+    widthTiles: Math.max(1, Number(record?.w ?? record?.width ?? 1)),
+    depthTiles: Math.max(1, Number(record?.d ?? record?.depth ?? 1)),
+  });
+  const footprintContainsCell = (footprint, cell) => (
+    Number(cell.x) >= footprint.center.x - footprint.widthTiles * 0.5 - 1e-6
+      && Number(cell.x) < footprint.center.x + footprint.widthTiles * 0.5 - 1e-6
+      && Number(cell.z) >= footprint.center.z - footprint.depthTiles * 0.5 - 1e-6
+      && Number(cell.z) < footprint.center.z + footprint.depthTiles * 0.5 - 1e-6
+  );
+  const authoredFootprintVolumes = (records, blockerKind, {
+    defaultElevation = 0,
+    useIntersectingFloorTiers = false,
+  } = {}) => records.flatMap((record) => {
+    const footprint = recordFootprint(record);
+    const declaredTier = record?.tier == null
+      ? null
+      : floorTiers.find(({ id }) => String(id) === String(record.tier));
+    const intersectingTiers = useIntersectingFloorTiers
+      ? (declaredTier ? [declaredTier] : floorTiers).filter((tier) => (
+        floorCells(tier).some((cell) => footprintContainsCell(footprint, cell))
+      ))
+      : [];
+    const elevations = intersectingTiers.length > 0
+      ? intersectingTiers.map(({ elevation }) => Number(elevation ?? 0))
+      : [Number(record?.elevation ?? declaredTier?.elevation ?? defaultElevation)];
+    return [...new Set(elevations.map((elevation) => elevation.toFixed(6)))]
+      .map(Number)
+      .map((localElevation) => ({
+        featureId: String(record?.id ?? `(unnamed-${blockerKind})`),
+        blockerKind,
+        center: transformDungeonLocalPoint({
+          x: footprint.center.x * tileSize,
+          y: localElevation,
+          z: footprint.center.z * tileSize,
+        }, {
+          center: node.placement.center,
+          rotationQuarterTurns: physicalTurns,
+        }),
+        minimumY: Number(node.placement.center.y) + localElevation - 1e-4,
+        maximumY: Number(node.placement.center.y) + localElevation + 1e-4,
+        halfWidth: tileSize
+          * (swapsHorizontalAxes ? footprint.depthTiles : footprint.widthTiles) * 0.5,
+        halfDepth: tileSize
+          * (swapsHorizontalAxes ? footprint.widthTiles : footprint.depthTiles) * 0.5,
+        collisionPadding: 0,
+      }));
+  });
+  const declaredTraversalBlockerVolumes = [
+    ...featureVolumes.map((volume) => ({
+      ...volume,
+      blockerKind: 'solid-feature',
+      collisionPadding: radius,
+    })),
+    ...authoredFootprintVolumes(
+      hazardZones,
+      'hazard',
+      { useIntersectingFloorTiers: true },
+    ),
+    ...authoredFootprintVolumes(
+      voids,
+      'void',
+      { defaultElevation: 0 },
+    ),
+  ];
+
+  return seams.flatMap((seam) => {
+    const tileSize = Number(seam?.tileSize ?? 2.8);
+    return (seam?.orderedCells ?? []).flatMap((cell) => {
+      // The node owns its two interior rows and threshold. Its prop collision
+      // cannot invalidate any of those nine required approach cells. Exterior
+      // rows belong to the connector and are checked by route/base collisions.
+      if (![-2, -1, 0].includes(Number(cell.signedDepthTiles))) return [];
+      const point = {
+        x: Number(cell.gridX ?? cell.grid?.x) * tileSize,
+        y: Number(cell.position?.y ?? seam.position?.y ?? 0),
+        z: Number(cell.gridZ ?? cell.grid?.z) * tileSize,
+      };
+      return declaredTraversalBlockerVolumes.flatMap((volume) => (
+        point.y >= volume.minimumY - 1e-4
+          && point.y <= volume.maximumY + 1e-4
+          && Math.abs(point.x - Number(volume.center.x))
+            <= volume.halfWidth + volume.collisionPadding + 1e-4
+          && Math.abs(point.z - Number(volume.center.z))
+            <= volume.halfDepth + volume.collisionPadding + 1e-4
+          ? [{
+              nodeId: String(node.id ?? ''),
+              seamId: String(seam.id ?? ''),
+              cellId: String(cell.id ?? ''),
+              lane: Number(cell.lane),
+              signedDepthTiles: Number(cell.signedDepthTiles),
+              featureId: volume.featureId,
+              blockerKind: volume.blockerKind,
+              point,
+            }]
+          : []
+      ));
+    });
+  });
+}
+
+export function routeNetworkNodeSocketApproachConflicts(
+  node,
+  localSocketIds = null,
+) {
+  if (!node?.id || !Array.isArray(node?.sockets)) return [];
+  const requiredLocalSocketIds = localSocketIds == null
+    ? null
+    : new Set((Array.isArray(localSocketIds) ? localSocketIds : [localSocketIds])
+      .filter(Boolean)
+      .map(String));
+  return node.sockets
+    .filter((socket) => (
+      !requiredLocalSocketIds
+        || requiredLocalSocketIds.has(String(socket.localSocketId ?? socket.id ?? ''))
+    ))
+    .flatMap((socket) => {
+      const seam = createDungeonRouteEndpointSeam(socket, {
+        id: `${node.id}:unary-socket-approach:${String(
+          socket.localSocketId ?? socket.id ?? 'socket',
+        )}:endpoint-seam`,
+        operationId: node.operationId ?? null,
+        networkId: node.operationId ?? null,
+        nodeId: node.id,
+        socketId: socket.id ?? null,
+        localSocketId: socket.localSocketId ?? null,
+        role: 'unary-candidate-preflight',
+        elevationBand: node.progressionBandId ?? null,
+      });
+      return routeEndpointSeamSolidFeatureConflicts(node, seam).map((conflict) => ({
+        ...conflict,
+        socketId: String(socket.id ?? ''),
+        localSocketId: String(socket.localSocketId ?? socket.id ?? ''),
+      }));
+    });
+}
+
+export function routePlanningVolumesRespectEndpointNodeMask(pathVolumes, node, seamOrSeams) {
   if (!node) return true;
   // `occupiedVolumes` are the row-merged projection of the blueprint's exact
   // authored floor masks. Clearance volumes are placement envelopes, not
   // physical room ownership; treating them as floor made every legal exterior
   // lead overlap its endpoint outside the 3x5 seam.
-  const endpointVolumes = node.occupiedVolumes ?? [];
+  const endpointVolumes = [
+    ...(node.occupiedVolumes ?? []),
+    // Generic clearance boxes are placement envelopes, but blueprint shell
+    // panels/headers are exact physical walls mirrored from materialization.
+    // They must participate in socket-route masks or the placement solver can
+    // accept a turn through a panel that final segment volumes later reject.
+    ...(node.clearanceVolumes ?? []).filter(({ purpose }) => (
+      String(purpose ?? '').includes('structural-shell-wall-clearance')
+    )),
+  ];
   const seams = (Array.isArray(seamOrSeams) ? seamOrSeams : [seamOrSeams])
     .filter(Boolean);
+  if (routeEndpointSeamSolidFeatureConflicts(node, seams).length > 0) return false;
   const overlapEnvelopes = seams.map(({ overlapEnvelope }) => {
     const { parentOwnerId: omittedParentOwnerId, ...nodeLocalEnvelope } = overlapEnvelope;
     // This predicate already has the exact endpoint node in hand. It can use
@@ -6551,7 +10126,45 @@ function routePlanningVolumesRespectEndpointNodeMask(pathVolumes, node, seamOrSe
   ));
 }
 
-function routePathRespectsEndpointNodeMask(path, node, seam) {
+export function routePlanningEndpointNodeMaskConflicts(
+  pathVolumes,
+  node,
+  seamOrSeams,
+) {
+  if (!node) return [];
+  const endpointVolumes = [
+    ...(node.occupiedVolumes ?? []),
+    ...(node.clearanceVolumes ?? []).filter(({ purpose }) => (
+      String(purpose ?? '').includes('structural-shell-wall-clearance')
+    )),
+  ];
+  const overlapEnvelopes = (
+    Array.isArray(seamOrSeams) ? seamOrSeams : [seamOrSeams]
+  ).filter(Boolean).map(({ overlapEnvelope }) => {
+    const { parentOwnerId: omittedParentOwnerId, ...nodeLocalEnvelope } = overlapEnvelope;
+    return nodeLocalEnvelope;
+  });
+  return pathVolumes.flatMap((pathVolume, pathVolumeOrdinal) => (
+    endpointVolumes.flatMap((nodeVolume, nodeVolumeOrdinal) => (
+      planningVolumesOverlap(pathVolume, nodeVolume)
+        && !planningOverlapIsGranted(pathVolume, nodeVolume, overlapEnvelopes)
+        ? [{
+          pathVolumeOrdinal,
+          pathVolumeId: pathVolume.id ?? null,
+          pathVolumeCenter: cloneDungeonAugmentationValue(pathVolume.center),
+          pathVolumeSize: cloneDungeonAugmentationValue(pathVolume.size),
+          nodeVolumeOrdinal,
+          nodeVolumeId: nodeVolume.id ?? null,
+          nodeVolumePurpose: nodeVolume.purpose ?? null,
+          nodeVolumeCenter: cloneDungeonAugmentationValue(nodeVolume.center),
+          nodeVolumeSize: cloneDungeonAugmentationValue(nodeVolume.size),
+        }]
+        : []
+    ))
+  ));
+}
+
+export function routePathRespectsEndpointNodeMask(path, node, seam) {
   return routePlanningVolumesRespectEndpointNodeMask(
     routePathPlanningVolumes(path),
     node,
@@ -6644,6 +10257,8 @@ function collisionAvoidingParentAttachmentPath(
   minimumApproachMeters = ROUTE_NETWORK_SOCKET_APPROACH_METERS,
   returnCandidate = false,
   reserveLandingVolumes = false,
+  requestedCandidateOrdinal = null,
+  returnCandidateDomain = false,
 ) {
   const volumeEnvelope = (volumes) => {
     if (volumes.length === 0) return null;
@@ -6704,6 +10319,7 @@ function collisionAvoidingParentAttachmentPath(
     ? avoidanceVolumes.filter((obstacle) => planningVolumesOverlap(candidateEnvelope, obstacle))
     : [];
   let bestCandidate = null;
+  const scoredCandidates = [];
   for (const candidate of candidates) {
     const candidateAvoidanceVolumes = candidate.envelope
       ? relevantAvoidanceVolumes.filter((obstacle) => (
@@ -6724,6 +10340,7 @@ function collisionAvoidingParentAttachmentPath(
       }
     }
     const scoredCandidate = { ...candidate, collisionScore };
+    scoredCandidates.push(scoredCandidate);
     if (!bestCandidate
       || scoredCandidate.collisionScore < bestCandidate.collisionScore
       || (scoredCandidate.collisionScore === bestCandidate.collisionScore
@@ -6735,7 +10352,40 @@ function collisionAvoidingParentAttachmentPath(
     }
     // Candidates are length-ordered. The first collision-free path is exactly
     // the former score/length/ordinal sort winner.
-    if (collisionScore === 0) break;
+    if (collisionScore === 0
+      && !Number.isInteger(requestedCandidateOrdinal)
+      && !returnCandidateDomain) break;
+  }
+  if (Number.isInteger(requestedCandidateOrdinal)) {
+    const eligibleCandidates = scoredCandidates.filter(({ collisionScore }) => (
+      collisionScore === 0
+    ));
+    const selectedCandidate = eligibleCandidates[requestedCandidateOrdinal] ?? null;
+    if (returnCandidate) {
+      return {
+        ...(selectedCandidate ?? {
+          path: null,
+          pathVolumes: [],
+          collisionVolumes: [],
+          collisionScore: Number.POSITIVE_INFINITY,
+          lengthMeters: Number.POSITIVE_INFINITY,
+        }),
+        requestedCandidateOrdinal,
+        eligibleCandidateCount: eligibleCandidates.length,
+      };
+    }
+    return selectedCandidate?.path ?? null;
+  }
+  if (returnCandidateDomain) {
+    const eligibleCandidates = scoredCandidates.filter(({ collisionScore }) => (
+      collisionScore === 0
+    ));
+    return {
+      candidates: eligibleCandidates,
+      eligibleCandidateCount: eligibleCandidates.length,
+      scoredCandidates,
+      bestCandidate,
+    };
   }
   // The caller still performs the exact proxy check before committing. Never
   // fall back to an inward dogleg through the parent room merely because it
@@ -6788,6 +10438,112 @@ function decorateRouteNetworkSegment(segment, {
   }
 }
 
+function routeNetworkPlanningDebugMatchesGrant(grantId) {
+  if (globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ !== true) return;
+  const debugFilter = String(
+    globalThis.__DUNGEON_AUGMENTATION_ROUTE_PLANNING_DEBUG_FILTER__ ?? '',
+  );
+  return !debugFilter || String(grantId ?? '').includes(debugFilter);
+}
+
+export function routeNetworkEndpointDomainForParentSocket(
+  endpointDomains,
+  parentSocket,
+  endpointOrdinal,
+) {
+  if (!Array.isArray(endpointDomains)) return null;
+  const parentSocketId = parentSocket?.id;
+  if (parentSocketId != null) {
+    return endpointDomains.find((domain) => (
+      domain?.endpointId != null
+        && String(domain.endpointId) === String(parentSocketId)
+    )) ?? null;
+  }
+  return endpointDomains.find((domain) => (
+    Number(domain?.endpointOrdinal) === Number(endpointOrdinal)
+  )) ?? null;
+}
+
+export function orderLandmarkEndpointsByPreflightDomain(
+  endpoints,
+  endpointDomains,
+  grammars,
+) {
+  const canonicalEndpoints = Array.isArray(endpoints) ? [...endpoints] : [];
+  if (canonicalEndpoints.length !== 2 || !Array.isArray(endpointDomains)) {
+    return canonicalEndpoints;
+  }
+  const moduleCandidateCount = (endpoint, endpointOrdinal, moduleKind) => {
+    const domain = routeNetworkEndpointDomainForParentSocket(
+      endpointDomains,
+      endpoint,
+      endpointOrdinal,
+    );
+    return (domain?.candidates ?? []).filter((candidate) => {
+      const grammar = grammars?.[candidate?.grammarId];
+      if (String(
+        grammar?.selectionConstraints?.routeNetworkModuleKind ?? 'room',
+      ) !== moduleKind) return false;
+      return moduleKind !== 'connector-module'
+        || grammar?.selectionConstraints?.supportsJunctionPromotion !== false;
+    }).length;
+  };
+  const orientations = [
+    { endpoints: canonicalEndpoints, stableOrdinal: 0 },
+    { endpoints: [...canonicalEndpoints].reverse(), stableOrdinal: 1 },
+  ].map((orientation) => {
+    const connectorCandidateCount = moduleCandidateCount(
+      orientation.endpoints[0],
+      0,
+      'connector-module',
+    );
+    const roomCandidateCount = moduleCandidateCount(
+      orientation.endpoints[1],
+      1,
+      'room',
+    );
+    return {
+      ...orientation,
+      connectorCandidateCount,
+      roomCandidateCount,
+      missingRequiredModuleDomains:
+        Number(connectorCandidateCount <= 0) + Number(roomCandidateCount <= 0),
+    };
+  }).sort((first, second) => (
+    first.missingRequiredModuleDomains - second.missingRequiredModuleDomains
+      || Math.min(second.connectorCandidateCount, second.roomCandidateCount)
+        - Math.min(first.connectorCandidateCount, first.roomCandidateCount)
+      || first.stableOrdinal - second.stableOrdinal
+  ));
+  return orientations[0].endpoints;
+}
+
+export function orderedLandmarkDecisionSockets(node, outwardReference) {
+  const outward = toDungeonCardinalFacing(outwardReference ?? { x: 0, z: 1 });
+  return (node?.sockets ?? [])
+    .filter((socket) => socket?.state === 'capped')
+    .map((socket) => ({
+      localSocketId: socket.localSocketId,
+      socket,
+    }))
+    .sort((first, second) => (
+      second.socket.facing.x * outward.x
+        + second.socket.facing.z * outward.z
+        - first.socket.facing.x * outward.x
+        - first.socket.facing.z * outward.z
+        || String(first.localSocketId).localeCompare(String(second.localSocketId))
+    ));
+}
+
+function emitRouteNetworkPlanningDebugStage(stage, details = {}) {
+  if (!routeNetworkPlanningDebugMatchesGrant(details.grantId)) return;
+  const stageFilter = String(
+    globalThis.__DUNGEON_AUGMENTATION_ROUTE_PLANNING_STAGE_FILTER__ ?? '',
+  );
+  if (stageFilter && String(stage) !== stageFilter) return;
+  console.error(JSON.stringify({ stage, ...details }));
+}
+
 export function planRouteNetwork({
   region,
   grant,
@@ -6807,9 +10563,56 @@ export function planRouteNetwork({
   grammars,
   progressionOrderStart,
   planningAvoidanceVolumes = [],
+  connectorVariantRoomFootprints = [],
+  planningCaches = null,
+  preflightEndpointDomains = null,
+  futureEndpointDomainForwardCheck = null,
+  landmarkBacktracking = null,
+  landmarkRecoveryWarmStart = null,
   moduleCapacity = moduleCount,
   searchVariant = 0,
+  solveDecisionOrdinal = 0,
+  routeNetworkConflictExclusions = [],
 }) {
+  const landmarkUseFallbackEndpointCandidates = Boolean(
+    landmarkBacktracking?.useFallbackEndpointCandidates,
+  );
+  const landmarkRejectedPlacementPairSignatures = new Set(
+    landmarkBacktracking?.rejectedPlacementPairSignatures ?? [],
+  );
+  const landmarkActivePlacementPairSignature =
+    landmarkBacktracking?.activePlacementPairSignature == null
+      ? null
+      : String(landmarkBacktracking.activePlacementPairSignature);
+  const landmarkRequestedWingChoiceOrdinal = Math.max(
+    0,
+    Math.floor(Number(landmarkBacktracking?.wingChoiceOrdinal) || 0),
+  );
+  const landmarkExpectedWingChoiceSignature =
+    landmarkBacktracking?.activeWingChoiceSignature == null
+      ? null
+      : String(landmarkBacktracking.activeWingChoiceSignature);
+  const landmarkRequestedParentAttachmentPathOrdinals = [0, 1].map(
+    (endpointOrdinal) => Math.max(0, Math.floor(Number(
+      landmarkBacktracking?.parentAttachmentPathOrdinals?.[endpointOrdinal],
+    ) || 0)),
+  );
+  const planningDebugStartedAt = globalThis.performance?.now?.() ?? Date.now();
+  const emitPlanningDebugStage = (stage, details = {}) => (
+    emitRouteNetworkPlanningDebugStage(stage, {
+      grantId: grant?.id ?? null,
+      operationOrdinal,
+      moduleCount,
+      topologyTemplateId,
+      junctionKind: junctionSelection?.id ?? null,
+      elevationMode,
+      searchVariant,
+      elapsedMs: Number(((globalThis.performance?.now?.() ?? Date.now())
+        - planningDebugStartedAt).toFixed(3)),
+      ...details,
+    })
+  );
+  emitPlanningDebugStage('route-network-plan-start');
   if (!grant.id || grant.endpointSockets.length < 2) {
     return { error: 'route-network-grant-endpoints-missing', context: { grantId: grant.id } };
   }
@@ -6827,15 +10630,48 @@ export function planRouteNetwork({
     kind: 'operation',
     sourceId,
   });
-  const endpoints = [...grant.endpointSockets].sort((first, second) => (
-    Number(first.distanceMeters ?? 0) - Number(second.distanceMeters ?? 0)
-      || first.id.localeCompare(second.id)
-  ));
+  const excludedSegmentConflictSignatures = new Set(
+    normalizeRouteNetworkConflictExclusions(routeNetworkConflictExclusions)
+      .filter((exclusion) => (
+        exclusion.entityKind === 'segment'
+          && String(exclusion.grantId) === String(grant.id)
+      ))
+      .map(({ signature }) => String(signature)),
+  );
+  const canonicalEndpoints = [...grant.endpointSockets].sort(compareRouteNetworkEndpoints);
+  const endpointOrderAlternatives = grant.kind === 'objective-route-coverage'
+    ? objectiveCoverageEndpointOrderAlternatives(canonicalEndpoints)
+    : [canonicalEndpoints];
+  const normalizedSearchVariant = Math.max(
+    0,
+    Math.trunc(Number(searchVariant) || 0),
+  );
+  const endpointOrderingCount = Math.max(1, endpointOrderAlternatives.length);
+  const endpointOrderVariant = normalizedSearchVariant % endpointOrderingCount;
+  const coverageTraversalSocketAlternative = Math.floor(
+    normalizedSearchVariant / endpointOrderingCount,
+  );
+  // Planning order is an internal spatial search axis. Public operation
+  // serialization below remains in the canonical grant distance/id order.
+  const selectedEndpointOrder = endpointOrderAlternatives[endpointOrderVariant];
+  const endpoints = grant.kind === 'landmark-perimeter-loop'
+    ? orderLandmarkEndpointsByPreflightDomain(
+      selectedEndpointOrder,
+      preflightEndpointDomains,
+      grammars,
+    )
+    : selectedEndpointOrder;
   // Exact occupied/landing volume emission remains specific to authored
   // objective coverage. Endpoint seam identity is a separate V4 route
   // contract and applies to every ordinary route-network segment, including
   // the pyramid loop.
   const enforceExactEmittedCoverageVolumes = grant.kind === 'objective-route-coverage';
+  // Landmark route selection must reserve the same corridor body and endpoint
+  // landings that createSegment emits. A body-only proxy can accept a path
+  // whose landing collides, then fail after the bounded DFS has discarded its
+  // alternate witnesses.
+  const reserveCompleteSegmentCollisionVolumes = enforceExactEmittedCoverageVolumes
+    || grant.kind === 'landmark-perimeter-loop';
   const requireAuthoritativeEndpointSeams = profile?.id === 'industrial-supplement-preview-v4'
     && Number(profile?.revision ?? 0) >= 5;
   const endpointSeamSharedOwnerId = (socket, node = null) => {
@@ -7172,6 +11008,15 @@ export function planRouteNetwork({
     return selectCurrentRoomLayouts(assignment.selectedGrammars);
   };
   let selectedGrammars = assignRouteNetworkGrammars(junctionKinds);
+  const currentCoverageTraversalSocketContract = () => {
+    const traversalIndex = [...coverageTraversalConnectorIndices]
+      .sort((first, second) => first - second)[0];
+    return Number.isInteger(traversalIndex)
+      ? coverageTraversalSocketContractForGrammar(selectedGrammars[traversalIndex], {
+        alternativeOrdinal: coverageTraversalSocketAlternative,
+      })
+      : null;
+  };
   let balancedCoverageLayoutSignature = null;
   let hasBalancedAuthoredCoverageElevation = false;
   if (selectedGrammars.some((grammar) => !grammar)) {
@@ -7190,6 +11035,7 @@ export function planRouteNetwork({
       nodeCount: physicalModuleCount,
       endpointNodeIndices: [...endpointNodeIndexSet],
       traversalConnectorIndices: [...coverageTraversalConnectorIndices],
+      traversalSocketContract: currentCoverageTraversalSocketContract(),
       preferredBranchRoomIndex: challengeBranchRoomIndex,
       requirePreferredBranchRoom: true,
       branchRouteRole: 'route-network-challenge-branch',
@@ -7220,6 +11066,7 @@ export function planRouteNetwork({
         ? [branchLayout.branchRoomIndex]
         : [],
       legalGrammarIdsByIndex: roomLayoutLegalIdsByIndex,
+      selectionAlternativeOrdinal: searchVariant,
     });
   };
   const connectorGapMeters = Number(profile.connectorGapMeters ?? 5.6);
@@ -7263,6 +11110,7 @@ export function planRouteNetwork({
       .map((firstIndex, ordinal) => ({
         firstIndex,
         secondIndex: orderedEndpointIndices[ordinal + 1],
+        gapOrdinal: ordinal,
       }))
       .find(({ firstIndex, secondIndex }) => (
         mainPayoffRoomIndex > firstIndex && mainPayoffRoomIndex < secondIndex
@@ -7292,6 +11140,17 @@ export function planRouteNetwork({
     ) + Math.abs(
       Number(secondStationCenter.z) - Number(firstStationCenter.z),
     );
+    const stationRoutePath = coveragePlacement?.externalRoutePaths?.[
+      adjacentEndpointPair.gapOrdinal
+    ];
+    // Exact-station galleries may deliberately dogleg outside a dense parent
+    // bay. Capacity belongs to a composed socket-to-socket route, not the
+    // straight Manhattan chord between station centers. If composition fell
+    // back, the bounded global physical solver below is responsible for
+    // rotating and spreading these rooms; a chord-derived grammar filter
+    // would reject that documented fallback before it gets a chance to run.
+    if (!Array.isArray(stationRoutePath) || stationRoutePath.length < 2) return null;
+    const stationRouteLengthMeters = measureDungeonPolyline(stationRoutePath);
     // Once the challenge leaves the serial spine, the payoff is the sole
     // curated room between the final pair of authored stations. Its exact
     // socket-to-socket traverse plus both exterior seam leads must fit that
@@ -7302,6 +11161,7 @@ export function planRouteNetwork({
       grammarPool: profile.grammarPool,
       grammars,
       stationSeparationMeters,
+      stationRouteLengthMeters,
       connectorEndpointGapMeters,
     });
     if (legalPayoffGrammarIds.length === 0) {
@@ -7311,6 +11171,7 @@ export function planRouteNetwork({
           grantId: grant.id,
           mainPayoffRoomIndex,
           stationSeparationMeters,
+          stationRouteLengthMeters,
           connectorEndpointGapMeters,
         },
       };
@@ -7328,6 +11189,7 @@ export function planRouteNetwork({
     // of leaving coveragePlacement null for the generic grants.
     placementPath = routeNetworkPlacementPolyline(
       grant,
+      endpoints,
       maximumHalfDepth + connectorEndpointGapMeters,
       random.fork('perimeter-side').chance(0.5) ? 1 : -1,
     );
@@ -7339,12 +11201,22 @@ export function planRouteNetwork({
       0,
       0,
       {
-        objectiveExternalPath: grant.kind === 'objective-route-coverage',
+        // This first placement establishes only deterministic endpoint/module
+        // indices so grammar roles can be assigned. Running the full external
+        // composer here uses generic 19.6 m room depths and is discarded by
+        // the grammar-aware refinement below; on a six-module coverage grant
+        // it repeated thousands of exact endpoint-mask checks before every
+        // bounded candidate. Use the existing cheap fallback skeleton for
+        // this provisional pass. The refinement loop still runs the complete
+        // external composer with authored grammars, masks, seams, obstacles,
+        // and the unchanged candidate windows before any plan can succeed.
+        objectiveExternalPath: false,
         contentRoomDepthMeters: Array.from(
           { length: Math.max(2, mainNodeCount - endpoints.length) },
           () => 19.6,
         ),
         minimumApproachMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+        minimumRoomApproachMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
         maximumFeaturelessSpanMeters: Number(
           profile.routeNetworkPlanning.maximumFeaturelessSpanMeters,
         ),
@@ -7355,6 +11227,7 @@ export function planRouteNetwork({
         // supplemental node-versus-parent placement check; admitting them
         // here lets a route tunnel through the authored parent footprint.
         planningOverlapGrants: grant.socketLandingOverlapGrants ?? [],
+        endpointOrderVariant,
         diagnostics: objectiveExternalDiagnostics,
       },
     );
@@ -7400,41 +11273,17 @@ export function planRouteNetwork({
     // authored gallery. Endpoint stations all use the same Through-T grammar,
     // so one deterministic rebuild also keeps multi-endpoint index allocation
     // stable after semantics are refreshed below.
-    const exactCoverageStationCenter = (endpoint, grammar) => {
-      const facing = toDungeonCardinalFacing(endpoint.facing);
-      const entrySocket = grammar?.sockets?.find(({ id }) => id === 'entry');
-      if (!entrySocket?.localPosition) {
-        return routeNetworkOuterPoint(
-          endpoint,
-          Number(grammar?.size?.depth ?? 0) * 0.5 + 2.8,
-        );
-      }
-      const rotatedEntry = transformDungeonLocalPoint(
-        entrySocket.localPosition,
-        {
-          center: { x: 0, y: 0, z: 0 },
-          rotationQuarterTurns: rotationQuarterTurnsForFacing(facing),
-        },
-      );
-      const desiredEntry = addDungeonPoints(
-        endpoint.position,
-        scaleDungeonPoint(facing, Math.max(
-          ROUTE_NETWORK_SOCKET_APPROACH_METERS,
-          Number(endpoint.widthMeters ?? 8.4) * 0.5,
-        )),
-      );
-      return {
-        x: Number(desiredEntry.x) - Number(rotatedEntry.x),
-        y: Number(desiredEntry.y) - Number(rotatedEntry.y),
-        z: Number(desiredEntry.z) - Number(rotatedEntry.z),
-      };
-    };
     for (let coverageRefinementPass = 0;
       coverageRefinementPass < 3;
       coverageRefinementPass += 1) {
+    emitPlanningDebugStage('route-network-coverage-refinement-start', {
+      coverageRefinementPass,
+      endpointNodeIndices: [...endpointNodeIndexSet].sort((first, second) => first - second),
+      selectedGrammarIds: selectedGrammars.map(({ id }) => id),
+    });
     placementPath = endpoints.map((endpoint, endpointOrdinal) => {
       const nodeIndex = coveragePlacement.endpointNodeIndices[endpointOrdinal];
-      return exactCoverageStationCenter(endpoint, selectedGrammars[nodeIndex]);
+      return exactObjectiveCoverageStationCenter(endpoint, selectedGrammars[nodeIndex]);
     });
     const minimumCoverageInteriorSpacingMeters = Math.max(
       connectorEndpointGapMeters,
@@ -7474,6 +11323,8 @@ export function planRouteNetwork({
         )),
         contentRoomDepthMeters: serialCoverageRoomEntries
           .map(({ grammar }) => grammarEntryExitTraversalMeters(grammar)),
+        contentRoomGrammars: serialCoverageRoomEntries
+          .map(({ grammar }) => grammar),
         contentRoomEntryElevationMeters: serialCoverageRoomEntries
           .map(({ grammar }) => Number(grammar.sockets.find(({ id }) => id === 'entry')
             ?.localPosition?.y ?? 0)),
@@ -7494,15 +11345,23 @@ export function planRouteNetwork({
             ],
           )),
         minimumApproachMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+        minimumRoomApproachMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
         maximumFeaturelessSpanMeters: Number(
           profile.routeNetworkPlanning.maximumFeaturelessSpanMeters,
         ),
         searchVariant,
         planningAvoidanceVolumes,
         planningOverlapGrants: grant.socketLandingOverlapGrants ?? [],
+        endpointOrderVariant,
         diagnostics: objectiveExternalDiagnostics,
       },
     );
+    emitPlanningDebugStage('route-network-coverage-refinement-complete', {
+      coverageRefinementPass,
+      placementStage: objectiveExternalDiagnostics.stage ?? null,
+      placementPlanningPhaseTimings:
+        cloneDungeonAugmentationValue(objectiveExternalDiagnostics.planningPhaseTimings ?? null),
+    });
     if (topologySupportConnectorIndex != null) {
       const compoundDiagnostics = {};
       const compoundPlacement = composeStackedInterchangeSupportCompound({
@@ -7654,6 +11513,7 @@ export function planRouteNetwork({
     )));
     placementPath = routeNetworkPlacementPolyline(
       grant,
+      endpoints,
       maximumHalfDepth + connectorEndpointGapMeters,
       random.fork('perimeter-side').chance(0.5) ? 1 : -1,
     );
@@ -7665,10 +11525,12 @@ export function planRouteNetwork({
         && !endpointNodeIndexSet.has(index)
         && !coverageTraversalConnectorIndices.has(index)
     ));
+    const traversalSocketContract = currentCoverageTraversalSocketContract();
     const branchLayout = coverageTraversalBranchBindings({
       nodeCount: physicalModuleCount,
       endpointNodeIndices: [...endpointNodeIndexSet],
       traversalConnectorIndices: [...coverageTraversalConnectorIndices],
+      traversalSocketContract,
       preferredBranchRoomIndex: challengeBranchRoomIndex,
       requirePreferredBranchRoom: true,
       branchRouteRole: 'route-network-challenge-branch',
@@ -7686,8 +11548,8 @@ export function planRouteNetwork({
     coveragePlacement.requiredSocketBindings = branchLayout.bindings;
     if (Number.isInteger(branchLayout.branchRoomIndex)) {
       // The branch room was initially composed on the serial station-to-
-      // station route. Seed it from the constrained station's authored right
-      // socket instead. The global solver may still
+      // station route. Seed it from the socket that the selected traversal
+      // grammar assigns to the branch. The global solver may still
       // translate and rotate both modules, but starting from their exact
       // socket relationship keeps the legal branch pair inside its bounded
       // candidate window instead of spending that window around the stale
@@ -7700,8 +11562,13 @@ export function planRouteNetwork({
       ];
       const traversalGrammar = selectedGrammars[branchLayout.traversalIndex];
       const branchGrammar = selectedGrammars[branchLayout.branchRoomIndex];
-      const traversalRightSocket = traversalGrammar?.sockets?.find(({ id }) => (
-        id === 'right'
+      const branchBinding = branchLayout.bindings.find(({ fromIndex, toIndex }) => (
+        fromIndex === branchLayout.traversalIndex
+          && toIndex === branchLayout.branchRoomIndex
+      ));
+      const traversalBranchSocket = traversalGrammar?.sockets?.find(({ id }) => (
+        id === (branchBinding?.fromLocalSocketId
+          ?? traversalSocketContract?.branchLocalSocketId)
       ));
       const branchEntrySocket = branchGrammar?.sockets?.find(({ id }) => (
         id === 'entry'
@@ -7711,30 +11578,48 @@ export function planRouteNetwork({
           && fromIndex !== branchLayout.branchRoomIndex
       ));
       const incomingCenter = coveragePlacement.centers?.[incomingBinding?.fromIndex];
-      const traversalFacing = coveragePlacement.nodeFacings?.[
-        branchLayout.traversalIndex
-      ] ?? (incomingCenter && traversalCenter
+      const traversalApproachFacing = incomingCenter && traversalCenter
         ? toDungeonCardinalFacing({
           x: Number(traversalCenter.x) - Number(incomingCenter.x),
           z: Number(traversalCenter.z) - Number(incomingCenter.z),
         })
-        : null);
+        : coveragePlacement.nodeFacings?.[branchLayout.traversalIndex] ?? null;
+      const incomingTraversalSocket = traversalGrammar?.sockets?.find(({ id }) => (
+        id === (incomingBinding?.toLocalSocketId
+          ?? traversalSocketContract?.incomingMainLocalSocketId)
+      ));
+      const desiredIncomingSocketFacing = traversalApproachFacing
+        ? scaleDungeonPoint(traversalApproachFacing, -1)
+        : null;
+      const traversalRotationQuarterTurns = incomingTraversalSocket?.localFacing
+        && desiredIncomingSocketFacing
+        ? [0, 1, 2, 3].find((rotationQuarterTurns) => (
+          dungeonPointDistance(
+            transformDungeonLocalFacing(
+              incomingTraversalSocket.localFacing,
+              { rotationQuarterTurns },
+            ),
+            desiredIncomingSocketFacing,
+          ) <= 1e-6
+        ))
+        : null;
       if (traversalCenter
         && branchCenter
-        && traversalFacing
-        && traversalRightSocket?.localPosition
-        && traversalRightSocket?.localFacing
+        && traversalApproachFacing
+        && Number.isInteger(traversalRotationQuarterTurns)
+        && traversalBranchSocket?.localPosition
+        && traversalBranchSocket?.localFacing
         && branchEntrySocket?.localPosition) {
         const traversalPlacement = {
           center: traversalCenter,
-          rotationQuarterTurns: rotationQuarterTurnsForFacing(traversalFacing),
+          rotationQuarterTurns: traversalRotationQuarterTurns,
         };
         const branchFacing = toDungeonCardinalFacing(transformDungeonLocalFacing(
-          traversalRightSocket.localFacing,
+          traversalBranchSocket.localFacing,
           traversalPlacement,
         ));
-        const traversalRightPosition = transformDungeonLocalPoint(
-          traversalRightSocket.localPosition,
+        const traversalBranchPosition = transformDungeonLocalPoint(
+          traversalBranchSocket.localPosition,
           traversalPlacement,
         );
         const rotatedBranchEntry = transformDungeonLocalPoint(
@@ -7745,7 +11630,7 @@ export function planRouteNetwork({
           },
         );
         const desiredBranchEntry = addDungeonPoints(
-          traversalRightPosition,
+          traversalBranchPosition,
           scaleDungeonPoint(branchFacing, connectorEndpointGapMeters),
         );
         coveragePlacement.centers[branchLayout.branchRoomIndex] = {
@@ -7788,7 +11673,7 @@ export function planRouteNetwork({
       grammar?.selectionConstraints?.authoredExitElevationDeltaMeters ?? 0,
     ));
     const hasAuthoredElevationModule = selectedGrammars.some((grammar) => (
-      (grammar?.selectionConstraints?.authoredTransferKinds ?? []).length > 0
+      routeNetworkGrammarHasPurposefulAuthoredVerticalTraversal(grammar, elevationMode)
     ));
     const authoredExitDelta = authoredExitDeltas.reduce((sum, delta) => sum + delta, 0);
     // A self-contained elevation room can rise and return between level exits.
@@ -7872,15 +11757,20 @@ export function planRouteNetwork({
     // straight two-tile approach, never a dogleg inside the protected room
     // envelope. Deriving the center from the selected grammar also avoids the
     // max-grammar-depth tangent error that previously shifted the doorway.
-    mainCenters[0] = routeNetworkOuterPoint(
-      endpoints[0],
-      Number(selectedGrammars[0].size.depth) * 0.5 + connectorEndpointGapMeters,
-    );
-    mainCenters[mainCenters.length - 1] = routeNetworkOuterPoint(
-      endpoints[1],
-      Number(selectedGrammars[mainCenters.length - 1].size.depth) * 0.5
-        + connectorEndpointGapMeters,
-    );
+    mainCenters[0] = exactLandmarkEndpointNodeCenter({
+      endpoint: endpoints[0],
+      grammar: selectedGrammars[0],
+      localSocketId: 'entry',
+      nodeFacing: endpoints[0].facing,
+      connectorGapMeters: LANDMARK_SHARED_THRESHOLD_ATTACHMENT_GAP_METERS,
+    });
+    mainCenters[mainCenters.length - 1] = exactLandmarkEndpointNodeCenter({
+      endpoint: endpoints[1],
+      grammar: selectedGrammars[mainCenters.length - 1],
+      localSocketId: 'exit',
+      nodeFacing: scaleDungeonPoint(endpoints[1].facing, -1),
+      connectorGapMeters: LANDMARK_SHARED_THRESHOLD_ATTACHMENT_GAP_METERS,
+    });
   }
   // The perimeter path already includes the largest selected half-depth plus
   // the exact socket lead. The former giant-room planner pushed interior
@@ -7907,15 +11797,58 @@ export function planRouteNetwork({
       - currentEntryElevation;
   }
   const verticalFamily = connectorFamilyForElevationMode(elevationMode);
+  const connectorRoomFootprintsForNodes = (candidateNodes = []) => ([
+    ...connectorVariantRoomFootprints,
+    ...candidateNodes.map((node) => routeNetworkConnectorRoomFootprint(node))
+      .filter(Boolean),
+  ]);
+  const liftRoutePathIsMaterializable = (
+    path,
+    fromSocket,
+    toSocket,
+    roomFootprints,
+    stableConnectionId,
+    endpointSeams = [],
+  ) => {
+    if (verticalFamily !== 'lift'
+      || Math.abs(
+        Number(toSocket?.position?.y) - Number(fromSocket?.position?.y),
+      ) <= 1e-6) return true;
+    const exactPath = Array.isArray(path)
+      && requireAuthoritativeEndpointSeams
+      && endpointSeams.length === 2
+      ? routePathWithAuthoritativeSeamEndpoints(path, endpointSeams)
+      : path;
+    return Boolean(routeNetworkLiftPlanningContract(
+      exactPath,
+      fromSocket,
+      toSocket,
+      roomFootprints,
+      stableConnectionId,
+    ));
+  };
   const coverageModuleRouteOptions = grant.kind === 'objective-route-coverage'
     ? {
-      sourceApproachMeters: [ROUTE_NETWORK_SOCKET_APPROACH_METERS],
-      destinationApproachMeters: [ROUTE_NETWORK_SOCKET_APPROACH_METERS],
+      sourceApproachMeters: objectiveCoverageRouteApproachMeters(),
+      destinationApproachMeters: objectiveCoverageRouteApproachMeters(),
       minimumApproachMeters: ROUTE_NETWORK_SOCKET_APPROACH_METERS,
     }
     : {};
-  const socketRouteCandidateCache = new Map();
-  const socketRouteMinimumLevelSpanCache = new Map();
+  const networkModuleRouteOptions = grant.kind === 'landmark-perimeter-loop'
+    ? {
+      // A 5.6 m lead clears the socket aperture, but a full-width 8.4 m
+      // gallery that turns immediately can still brush the adjacent authored
+      // shell panel by half its thickness. Keep the compact lead as a
+      // fallback while enumerating the first tile-aligned shell-clear turn.
+      sourceApproachMeters: [8.4, ROUTE_NETWORK_SOCKET_APPROACH_METERS],
+      destinationApproachMeters: [8.4, ROUTE_NETWORK_SOCKET_APPROACH_METERS],
+    }
+    : coverageModuleRouteOptions;
+  const socketRouteCandidateCache = planningCaches?.socketRouteCandidateCache ?? new Map();
+  const socketRouteMinimumLevelSpanCache =
+    planningCaches?.socketRouteMinimumLevelSpanCache ?? new Map();
+  const landmarkEndpointTupleDomainCache =
+    planningCaches?.landmarkEndpointTupleDomainCache ?? new Map();
   const socketRouteTransformKey = (socket) => [
     Number(socket?.position?.x),
     Number(socket?.position?.y),
@@ -7986,7 +11919,7 @@ export function planRouteNetwork({
   const hasAuthoredNetworkElevationTransfer = selectedGrammars
     .slice(0, mainNodeCount)
     .some((grammar) => (
-      (grammar?.selectionConstraints?.authoredTransferKinds ?? []).length > 0
+      routeNetworkGrammarHasPurposefulAuthoredVerticalTraversal(grammar, elevationMode)
     ));
   const requiresExternalVerticalTransfer = !hasAuthoredNetworkElevationTransfer && [
     'slope', 'ladder', 'lift', 'shortcut-lift', 'drop-ladder',
@@ -8075,10 +12008,12 @@ export function planRouteNetwork({
     const endpointOrdinal = endpointOrdinalForNodeIndex(index);
     if (endpointOrdinal < 0) return 0;
     const parentSocket = endpoints[endpointOrdinal];
-    const parentLocalSocketId = grant.kind === 'landmark-perimeter-loop'
-      && index === mainNodeCount - 1
-      ? 'exit'
-      : 'entry';
+    const parentLocalSocketId = node?.parentAttachmentLocalSocketId
+      ?? node?.planningParentLocalSocketId
+      ?? (grant.kind === 'landmark-perimeter-loop'
+        && index === mainNodeCount - 1
+        ? 'exit'
+        : 'entry');
     const nodeSocket = getNodeSocket(node, parentLocalSocketId);
     if (!parentSocket?.position || !nodeSocket?.position) return Number.POSITIVE_INFINITY;
     const connectorFamily = Math.abs(
@@ -8199,12 +12134,11 @@ export function planRouteNetwork({
         // chain represented by requiredSocketBindings.
         const outgoingBinding = coveragePlacement.requiredSocketBindings?.find((binding) => (
           binding.fromIndex === index
-            && binding.fromLocalSocketId === 'exit'
+            && binding.routeRole == null
             && centers[binding.toIndex]
         ));
         const incomingBinding = coveragePlacement.requiredSocketBindings?.find((binding) => (
           binding.toIndex === index
-            && binding.toLocalSocketId === 'entry'
             && centers[binding.fromIndex]
         ));
         // An exact authored-corridor station cannot rotate its supplemental
@@ -8224,17 +12158,37 @@ export function planRouteNetwork({
           ? centers[preferredBinding?.toIndex]
           : centers[preferredBinding?.fromIndex];
         if (adjacentCenter) {
-          const delta = preferredBindingIsOutgoing
-            ? {
-              x: Number(adjacentCenter.x) - Number(centers[index].x),
-              z: Number(adjacentCenter.z) - Number(centers[index].z),
-            }
-            : {
-              x: Number(centers[index].x) - Number(adjacentCenter.x),
-              z: Number(centers[index].z) - Number(adjacentCenter.z),
-            };
-          if (Math.hypot(delta.x, delta.z) > 1e-6) {
-            return toDungeonCardinalFacing(delta);
+          const adjacentDelta = {
+            x: Number(adjacentCenter.x) - Number(centers[index].x),
+            z: Number(adjacentCenter.z) - Number(centers[index].z),
+          };
+          const desiredSocketFacing = Math.hypot(
+            adjacentDelta.x,
+            adjacentDelta.z,
+          ) > 1e-6 ? toDungeonCardinalFacing(adjacentDelta) : null;
+          const preferredLocalSocketId = preferredBindingIsOutgoing
+            ? preferredBinding?.fromLocalSocketId
+            : preferredBinding?.toLocalSocketId;
+          const preferredGrammarSocket = selectedGrammars[index]?.sockets?.find(({ id }) => (
+            id === preferredLocalSocketId
+          ));
+          const grammarAwareRotationQuarterTurns = preferredGrammarSocket?.localFacing
+            && desiredSocketFacing
+            ? [0, 1, 2, 3].find((rotationQuarterTurns) => (
+              dungeonPointDistance(
+                transformDungeonLocalFacing(
+                  preferredGrammarSocket.localFacing,
+                  { rotationQuarterTurns },
+                ),
+                desiredSocketFacing,
+              ) <= 1e-6
+            ))
+            : null;
+          if (Number.isInteger(grammarAwareRotationQuarterTurns)) {
+            return toDungeonCardinalFacing(transformDungeonLocalFacing(
+              { x: 0, y: 0, z: 1 },
+              { rotationQuarterTurns: grammarAwareRotationQuarterTurns },
+            ));
           }
         }
       }
@@ -8282,12 +12236,13 @@ export function planRouteNetwork({
   };
   const localPlacementAvoidanceVolumes = [...planningAvoidanceVolumes];
   let nodePlacementFailureDetails = null;
+  const landmarkEndpointSelectionDiagnostics = [];
   const placementCandidatesForNode = (baseCenter, outward, allowReverse = false) => {
     const tangent = { x: -outward.z, y: 0, z: outward.x };
     const candidates = [];
     const isPyramidLoop = grant.kind === 'landmark-perimeter-loop';
     const outwardOffsets = isPyramidLoop
-      ? [0, 8.4, 16.8, 25.2, 33.6, 42, 50.4, 58.8]
+      ? [0, 2.8, 5.6, 8.4, 16.8, 25.2, 33.6, 42, 50.4, 58.8]
       : [0, 2.8, 5.6, 8.4, 16.8, 25.2, 33.6, 42, 50.4, 58.8, 67.2, 75.6, 84];
     if (allowReverse) {
       outwardOffsets.push(
@@ -8297,7 +12252,7 @@ export function planRouteNetwork({
     for (const outwardOffset of outwardOffsets) {
       const tangentOffsets = isPyramidLoop
         ? [
-          0, -8.4, 8.4, -16.8, 16.8,
+          0, -2.8, 2.8, -5.6, 5.6, -8.4, 8.4, -16.8, 16.8,
           -19.6, 19.6, -22.4, 22.4,
           -25.2, 25.2, -33.6, 33.6, -42, 42, -50.4, 50.4,
         ]
@@ -8327,10 +12282,40 @@ export function planRouteNetwork({
       candidatesOnly = false,
       avoidanceVolumes = localPlacementAvoidanceVolumes,
       collisionScoreForNode = nodePlanningCollisionScore,
+      landmarkEndpointCandidatePhase = null,
     } = {},
   ) => {
     const landmarkEndpointRoom = Boolean(parentSocket)
       && grant.kind === 'landmark-perimeter-loop';
+    const endpointOrdinal = landmarkEndpointRoom
+      ? endpointOrdinalForNodeIndex(index)
+      : -1;
+    const preflightLandmarkDomain = landmarkEndpointRoom
+      ? routeNetworkEndpointDomainForParentSocket(
+        preflightEndpointDomains,
+        parentSocket,
+        endpointOrdinal,
+      )
+      : null;
+    const useFallbackLandmarkEndpointCandidates = landmarkEndpointCandidatePhase
+      ? landmarkEndpointCandidatePhase === 'fallback'
+      : landmarkUseFallbackEndpointCandidates;
+    const preflightLandmarkCandidates = useFallbackLandmarkEndpointCandidates
+      && typeof preflightLandmarkDomain?.fallbackCandidateFactory === 'function'
+      ? preflightLandmarkDomain.fallbackCandidateFactory().filter((candidate) => (
+        String(candidate.grammarId) === String(selectedGrammars[index].id)
+      ))
+      : routeNetworkEndpointDomainCandidatesForGrammar(
+        preflightLandmarkDomain,
+        selectedGrammars[index].id,
+      );
+    const preflightLandmarkPlacements = preflightLandmarkCandidates
+      .map((candidate, orientationOrdinal) => ({
+        center: cloneDungeonAugmentationValue(candidate.center),
+        candidateFacing: toDungeonCardinalFacing(candidate.facing),
+        orientationOrdinal,
+        parentLocalSocketId: String(candidate.parentLocalSocketId),
+      }));
     const exactCoverageEndpointStation = Boolean(parentSocket)
       && grant.kind !== 'landmark-perimeter-loop';
     // The host socket remains exact, but the connector-owned station may sit
@@ -8343,9 +12328,31 @@ export function planRouteNetwork({
     const precomposedObjectiveExternalRoom = parentSocket == null
       && grant.kind === 'objective-route-coverage'
       && Array.isArray(coveragePlacement?.externalRoutePaths);
+    const requiredEndpointNeighborCount = parentSocket == null
+      ? new Set((coveragePlacement?.requiredSocketBindings ?? []).flatMap((binding) => {
+        if (Number(binding.fromIndex) === index
+          && endpointNodeIndexSet.has(Number(binding.toIndex))) {
+          return [Number(binding.toIndex)];
+        }
+        if (Number(binding.toIndex) === index
+          && endpointNodeIndexSet.has(Number(binding.fromIndex))) {
+          return [Number(binding.fromIndex)];
+        }
+        return [];
+      })).size
+      : 0;
+    const reorderedCoverageCrossingReset = grant.kind === 'objective-route-coverage'
+      && endpointOrderVariant > 0
+      && requiredEndpointNeighborCount >= 2;
     const planarCandidates = exactCoverageEndpointStation
       ? movableDenseCoverageEndpointStation
-        ? Array.from({ length: 11 }, (_, offsetTiles) => (
+        // Include the final 30.8 m station translation. With the connector
+        // module's entry socket inset from its center, this is the last
+        // tile-aligned fallback whose physical parent attachment can still
+        // remain inside the 33.6 m featureless-span contract. The previous
+        // ten-step domain stopped one tile early and could report node 0 as
+        // empty even though this final outward placement was legal.
+        ? Array.from({ length: 12 }, (_, offsetTiles) => (
           addDungeonPoints(
             baseCenter,
             scaleDungeonPoint(
@@ -8430,8 +12437,8 @@ export function planRouteNetwork({
       : candidatesOnly
         && grant.kind === 'objective-route-coverage'
         && endpoints.length >= 3
-        && !hasBalancedAuthoredCoverageElevation
         && !Array.isArray(coveragePlacement?.externalRoutePaths)
+        && (!hasBalancedAuthoredCoverageElevation || reorderedCoverageCrossingReset)
         ? planarCandidates.flatMap((center) => [
           Number(center.y),
           Number(center.y) + 14,
@@ -8460,13 +12467,16 @@ export function planRouteNetwork({
         )) === orientationOrdinal
       ))
       : [toDungeonCardinalFacing(facing)];
-    const orientedPlacementCandidates = placementCandidates.flatMap((center) => (
-      orientationCandidates.map((candidateFacing, orientationOrdinal) => ({
-        center,
-        candidateFacing,
-        orientationOrdinal,
-      }))
-    ));
+    const orientedPlacementCandidates = preflightLandmarkDomain
+      ? preflightLandmarkPlacements
+      : placementCandidates.flatMap((center) => (
+        orientationCandidates.map((candidateFacing, orientationOrdinal) => ({
+          center,
+          candidateFacing,
+          orientationOrdinal,
+          parentLocalSocketId: null,
+        }))
+      ));
     const stableCandidateNodeId = createDungeonSupplementId({
       parentRegionId: region.id,
       operationType: 'routeNetwork',
@@ -8475,7 +12485,7 @@ export function planRouteNetwork({
       ordinal: index,
       sourceId,
     });
-    const parentLocalSocketId = grant.kind === 'landmark-perimeter-loop'
+    const defaultParentLocalSocketId = grant.kind === 'landmark-perimeter-loop'
       && index === mainCenters.length - 1
       ? 'exit'
       : 'entry';
@@ -8498,22 +12508,39 @@ export function planRouteNetwork({
       position: parentSocket.position,
       facing: parentSocket.facing,
     } : null;
-    const candidates = random.fork(`node-placement:${index}`).shuffle(
-      orientedPlacementCandidates,
-    ).map(({ center, candidateFacing, orientationOrdinal }) => {
+    // The avoidance array is stable for the complete candidate map below.
+    // Build one exact XZ lookup for that snapshot instead of rescanning every
+    // globally reserved volume for every occupied/clearance box. A committed
+    // node mutates localPlacementAvoidanceVolumes only after this map has
+    // finished, so the next placement call receives and indexes a new
+    // snapshot. Custom scorers retain their existing inputs and semantics.
+    const defaultCollisionSpatialLookup = collisionScoreForNode === nodePlanningCollisionScore
+      ? createPlanningVolumeSpatialLookup(avoidanceVolumes)
+      : null;
+    const placementCandidateOrder = preflightLandmarkDomain
+      ? orientedPlacementCandidates
+      : random.fork(`node-placement:${index}`).shuffle(orientedPlacementCandidates);
+    const candidates = placementCandidateOrder
+      .map(({ center, candidateFacing, orientationOrdinal, parentLocalSocketId }) => {
+      const candidateParentLocalSocketId = parentLocalSocketId
+        ?? defaultParentLocalSocketId;
       const node = createRouteNetworkNode(
         index,
         center,
         candidateFacing,
         true,
       );
-      const parentNodeSocket = getNodeSocket(node, parentLocalSocketId);
+      if (parentSocket) {
+        node.planningParentLocalSocketId = candidateParentLocalSocketId;
+      }
+      const parentNodeSocket = getNodeSocket(node, candidateParentLocalSocketId);
+      const candidateParentRouteEndpoint = parentRouteEndpoint;
       const parentConnectorFamily = parentSocket && Math.abs(
         Number(parentNodeSocket.position.y) - Number(parentSocket.position.y),
       ) > 1e-6 ? verticalFamily : 'service-gallery';
       const parentDistanceMeters = parentSocket
         ? cachedMinimumSocketRouteLevelSpan(
-          parentRouteEndpoint,
+          candidateParentRouteEndpoint,
           parentNodeSocket,
           {
             connectorFamily: parentConnectorFamily,
@@ -8526,7 +12553,7 @@ export function planRouteNetwork({
       const parentRouteCandidates = parentSocket
         && grant.kind === 'landmark-perimeter-loop'
         ? cachedSocketRouteCandidates(
-          parentRouteEndpoint,
+          candidateParentRouteEndpoint,
           parentNodeSocket,
           {
             connectorFamily: parentConnectorFamily,
@@ -8552,17 +12579,21 @@ export function planRouteNetwork({
       const currentEntryReserved = Boolean(parentSocket);
       const currentSockets = node.sockets.filter((socket) => (
         socket.state === 'capped'
-          && !(currentEntryReserved && socket.localSocketId === parentLocalSocketId)
+          && !(currentEntryReserved
+            && socket.localSocketId === candidateParentLocalSocketId)
       ));
       const adjacentDistancesMeters = adjacentPlacedNodes.map(({ node: adjacentNode, index: adjacentIndex }) => {
         if (grant.kind === 'landmark-perimeter-loop') {
-          const parentReservedLocalSocketId = (nodeIndex) => {
+          const parentReservedLocalSocketId = (candidateNode, nodeIndex) => {
+            if (candidateNode?.planningParentLocalSocketId) {
+              return candidateNode.planningParentLocalSocketId;
+            }
             if (nodeIndex === 0) return 'entry';
             if (nodeIndex === mainNodeCount - 1) return 'exit';
             return null;
           };
           const usableSockets = (candidateNode, nodeIndex) => {
-            const reserved = parentReservedLocalSocketId(nodeIndex);
+            const reserved = parentReservedLocalSocketId(candidateNode, nodeIndex);
             return candidateNode.sockets.filter(({ localSocketId }) => localSocketId !== reserved);
           };
           const distances = usableSockets(adjacentNode, adjacentIndex).flatMap((fromSocket) => (
@@ -8614,7 +12645,7 @@ export function planRouteNetwork({
           ) > 1e-6 ? verticalFamily : 'service-gallery';
           const paths = cachedSocketRouteCandidates(fromSocket, toSocket, {
             connectorFamily,
-            ...coverageModuleRouteOptions,
+            ...networkModuleRouteOptions,
           });
           return paths.length > 0
             ? Math.min(...paths.map(maximumContinuousLevelRouteSpan))
@@ -8628,8 +12659,11 @@ export function planRouteNetwork({
         center,
         facing: candidateFacing,
         orientationOrdinal,
+        parentLocalSocketId: candidateParentLocalSocketId,
         node,
-        collisionScore: collisionScoreForNode(node, avoidanceVolumes),
+        collisionScore: defaultCollisionSpatialLookup
+          ? indexedNodePlanningCollisionScore(node, defaultCollisionSpatialLookup)
+          : collisionScoreForNode(node, avoidanceVolumes),
         parentAttachmentCollisionScore,
         parentAttachmentBlocked: parentAttachmentCollisionScore > 0,
         parentDistanceMeters,
@@ -8653,13 +12687,151 @@ export function planRouteNetwork({
         || first.orientationOrdinal - second.orientationOrdinal
     ));
     if (candidatesOnly) return candidates;
-    const selected = candidates[0];
+    const eligibleCandidates = candidates.filter((candidate) => (
+      !candidate.parentDistanceExceeded
+        && !candidate.spineDistanceExceeded
+        && !candidate.parentAttachmentBlocked
+        && candidate.collisionScore === 0
+    ));
+    const rankedEligibleCandidates = landmarkEndpointRoom
+      && landmarkUseFallbackEndpointCandidates
+      && typeof futureEndpointDomainForwardCheck === 'function'
+      ? eligibleCandidates.map((candidate, stableOrdinal) => {
+        const otherEndpointNodeVolumes = [0, mainCenters.length - 1]
+          .filter((nodeIndex) => nodeIndex !== index && mainNodes[nodeIndex])
+          .flatMap((nodeIndex) => [
+            ...(mainNodes[nodeIndex].occupiedVolumes ?? []),
+            ...(mainNodes[nodeIndex].clearanceVolumes ?? []),
+          ]);
+        return {
+          candidate,
+          stableOrdinal,
+          futureEndpointDomainSupport: Number(
+            futureEndpointDomainForwardCheck.directMinimumCandidateCount?.([
+              ...otherEndpointNodeVolumes,
+              ...(candidate.node.occupiedVolumes ?? []),
+              ...(candidate.node.clearanceVolumes ?? []),
+            ]) ?? futureEndpointDomainForwardCheck([
+              ...otherEndpointNodeVolumes,
+              ...(candidate.node.occupiedVolumes ?? []),
+              ...(candidate.node.clearanceVolumes ?? []),
+            ]),
+          ) || 0,
+        };
+      }).sort((first, second) => (
+        second.futureEndpointDomainSupport - first.futureEndpointDomainSupport
+          || first.stableOrdinal - second.stableOrdinal
+      ))
+      : eligibleCandidates.map((candidate, stableOrdinal) => ({
+        candidate,
+        stableOrdinal,
+        futureEndpointDomainSupport: null,
+      }));
+    const selectedRankedCandidate = landmarkEndpointRoom
+      && rankedEligibleCandidates.length > 0
+      ? rankedEligibleCandidates[landmarkEndpointPlacementVariantIndex(
+        searchVariant,
+        endpointOrdinal,
+        rankedEligibleCandidates.length,
+      )]
+      : null;
+    const selected = selectedRankedCandidate?.candidate ?? candidates[0];
+    if (landmarkEndpointRoom) {
+      landmarkEndpointSelectionDiagnostics.push({
+        endpointOrdinal,
+        endpointPhase: landmarkUseFallbackEndpointCandidates ? 'fallback' : 'primary',
+        eligibleCandidateCount: eligibleCandidates.length,
+        selectedStableOrdinal: selectedRankedCandidate?.stableOrdinal ?? null,
+        selectedFutureEndpointDomainSupport:
+          selectedRankedCandidate?.futureEndpointDomainSupport ?? null,
+        selectedCenter: cloneDungeonAugmentationValue(selected?.center ?? null),
+        selectedFacing: cloneDungeonAugmentationValue(selected?.facing ?? null),
+        selectedParentLocalSocketId: selected?.parentLocalSocketId ?? null,
+      });
+    }
     if (!selected
       || selected.parentDistanceExceeded
       || selected.spineDistanceExceeded
       || selected.parentAttachmentBlocked
       || selected.collisionScore > 0) {
+      const landmarkDistanceDiagnostics = landmarkEndpointRoom || (
+        grant.kind === 'landmark-perimeter-loop' && adjacentPlacedNodes.length > 0
+      ) ? candidates.slice(0, 8).map((candidate) => ({
+        center: candidate.center,
+        facing: candidate.facing,
+        grammarId: candidate.node?.grammarId ?? null,
+        parentLocalSocketId: candidate.parentLocalSocketId ?? null,
+        resetsFeaturelessDistance: routeNetworkNodeResetsFeaturelessDistance(candidate.node),
+        edges: adjacentPlacedNodes.map(({ node: adjacentNode, index: adjacentIndex }) => {
+          const reservedSocketId = (candidateNode, nodeIndex) => (
+            candidateNode?.planningParentLocalSocketId
+              ?? (nodeIndex === 0
+                ? 'entry'
+                : nodeIndex === mainNodeCount - 1 ? 'exit' : null)
+          );
+          const adjacentReservedSocketId = reservedSocketId(adjacentNode, adjacentIndex);
+          const currentReservedSocketId = reservedSocketId(candidate.node, index);
+          const socketPairs = adjacentNode.sockets
+            .filter(({ localSocketId }) => localSocketId !== adjacentReservedSocketId)
+            .flatMap((fromSocket) => candidate.node.sockets
+              .filter(({ localSocketId }) => localSocketId !== currentReservedSocketId)
+              .map((toSocket) => {
+                const planarDistance = Math.abs(
+                  Number(toSocket.position.x) - Number(fromSocket.position.x),
+                ) + Math.abs(
+                  Number(toSocket.position.z) - Number(fromSocket.position.z),
+                );
+                const spineDistance = Math.abs(
+                  Number(toSocket.position.y) - Number(fromSocket.position.y),
+                ) > 1e-6 ? planarDistance * 0.5 : planarDistance;
+                const adjacentPrefix = parentAttachmentFeaturelessDistanceForNode(
+                  adjacentNode,
+                  adjacentIndex,
+                  fromSocket.localSocketId,
+                );
+                const currentPrefix = parentAttachmentFeaturelessDistanceForNode(
+                  candidate.node,
+                  index,
+                  toSocket.localSocketId,
+                );
+                return {
+                  fromLocalSocketId: fromSocket.localSocketId,
+                  fromPosition: fromSocket.position,
+                  toLocalSocketId: toSocket.localSocketId,
+                  toPosition: toSocket.position,
+                  planarDistance,
+                  spineDistance,
+                  adjacentPrefix,
+                  currentPrefix,
+                  totalDistance: spineDistance + adjacentPrefix + currentPrefix,
+                };
+              }))
+            .sort((first, second) => first.totalDistance - second.totalDistance)
+            .slice(0, 4);
+          return {
+            adjacentIndex,
+            adjacentCenter: adjacentNode.center,
+            adjacentFacing: adjacentNode.facing,
+            adjacentGrammarId: adjacentNode.grammarId,
+            adjacentParentLocalSocketId:
+              adjacentNode.planningParentLocalSocketId ?? null,
+            adjacentResetsFeaturelessDistance:
+              routeNetworkNodeResetsFeaturelessDistance(adjacentNode),
+            socketPairs,
+          };
+        }),
+      })) : [];
       nodePlacementFailureDetails = {
+        ...(preflightLandmarkDomain ? {
+          preflightEndpointId: preflightLandmarkDomain.endpointId ?? null,
+          preflightEndpointCandidateCount:
+            preflightLandmarkDomain.candidates?.length ?? 0,
+          preflightSelectedGrammarId: selectedGrammars[index]?.id ?? null,
+          preflightCandidateGrammarIds: [...new Set(
+            (preflightLandmarkDomain.candidates ?? [])
+              .map(({ grammarId }) => String(grammarId)),
+          )].sort(),
+        } : {}),
         minimumCollisionScore: selected?.collisionScore ?? null,
         parentDistanceMeters: selected?.parentDistanceMeters ?? null,
         parentDistanceExceeded: selected?.parentDistanceExceeded ?? null,
@@ -8668,6 +12840,10 @@ export function planRouteNetwork({
         parentAttachmentCollisionScore: selected?.parentAttachmentCollisionScore ?? null,
         parentAttachmentBlocked: selected?.parentAttachmentBlocked ?? null,
         candidateCenter: selected?.center ?? null,
+        requestedBaseCenter: baseCenter,
+        requestedFacing: facing,
+        requestedOutward: outward,
+        landmarkDistanceDiagnostics,
         collidingVolumeIds: selected
           ? nodePlanningCollisionIds(selected.node, avoidanceVolumes).slice(0, 8)
           : [],
@@ -8687,6 +12863,10 @@ export function planRouteNetwork({
       selected.center,
       selected.facing,
     );
+    if (parentSocket) {
+      committedNode.planningParentLocalSocketId = selected.parentLocalSocketId;
+      committedNode.parentAttachmentLocalSocketId = selected.parentLocalSocketId;
+    }
     centers[index] = selected.center;
     localPlacementAvoidanceVolumes.push(
       ...committedNode.occupiedVolumes,
@@ -8695,8 +12875,88 @@ export function planRouteNetwork({
     return committedNode;
   };
   const mainNodes = Array.from({ length: mainCenters.length }, () => null);
+  let selectedLandmarkPlacementPairSignature = null;
+  let landmarkParentAttachmentCandidateCounts = [0, 0];
+  let preselectedLandmarkSpinePairs = null;
+  let preselectedLandmarkWingParentLocalSocketId = null;
+  let selectedLandmarkEndpointTuplePhase = landmarkUseFallbackEndpointCandidates
+    ? 'fallback/fallback'
+    : 'primary/primary';
+  let selectedLandmarkEndpointTupleOrdinal = Number(
+    landmarkBacktracking?.endpointTupleOrdinal ?? 0,
+  );
+  const landmarkLocalBacktrackResult = (
+    reason,
+    {
+      endpointTupleOrdinal = selectedLandmarkEndpointTupleOrdinal,
+      activePlacementPairSignature = null,
+      parentAttachmentPathOrdinals = landmarkRequestedParentAttachmentPathOrdinals,
+      wingChoiceOrdinal = 0,
+      activeWingChoiceSignature = null,
+      rejectedPlacementPairSignatures = landmarkRejectedPlacementPairSignatures,
+    } = {},
+    context = {},
+  ) => {
+    const continuation = {
+      endpointTupleOrdinal: Math.max(0, Math.floor(Number(endpointTupleOrdinal) || 0)),
+      activePlacementPairSignature: activePlacementPairSignature == null
+        ? null
+        : String(activePlacementPairSignature),
+      parentAttachmentPathOrdinals: [0, 1].map((endpointOrdinal) => Math.max(
+        0,
+        Math.floor(Number(parentAttachmentPathOrdinals?.[endpointOrdinal]) || 0),
+      )),
+      wingChoiceOrdinal: Math.max(0, Math.floor(Number(wingChoiceOrdinal) || 0)),
+      activeWingChoiceSignature: activeWingChoiceSignature == null
+        ? null
+        : String(activeWingChoiceSignature),
+      rejectedPlacementPairSignatures: [...new Set(
+        rejectedPlacementPairSignatures ?? [],
+      )].map(String).sort((first, second) => first.localeCompare(second)),
+    };
+    emitPlanningDebugStage('route-network-landmark-local-continuation', {
+      reason,
+      continuation,
+      ...context,
+    });
+    return {
+      error: 'route-network-landmark-local-backtrack',
+      context: {
+        grantId: grant.id,
+        reason,
+        ...context,
+      },
+      landmarkBacktrackingContinuation: continuation,
+    };
+  };
+  const rejectSelectedLandmarkPlacementPair = (reason, context = {}) => {
+    if (typeof futureEndpointDomainForwardCheck !== 'function'
+      || !selectedLandmarkPlacementPairSignature) return null;
+    const rejectedPlacementPairSignatures = new Set(
+      landmarkRejectedPlacementPairSignatures,
+    );
+    rejectedPlacementPairSignatures.add(selectedLandmarkPlacementPairSignature);
+    return landmarkLocalBacktrackResult(
+      reason,
+      {
+        activePlacementPairSignature: null,
+        parentAttachmentPathOrdinals: [0, 0],
+        wingChoiceOrdinal: 0,
+        activeWingChoiceSignature: null,
+        rejectedPlacementPairSignatures,
+      },
+      {
+        selectedPlacementPairSignature: selectedLandmarkPlacementPairSignature,
+        ...context,
+      },
+    );
+  };
+  let landmarkEndpointTupleCount = 1;
+  let selectedLandmarkEndpointSurvivorBitsets = null;
   let preselectedCoverageSpinePairs = null;
+  let preselectedCoverageTopologyReturnPairs = null;
   let preselectedCoverageParentAttachmentPaths = null;
+  let preselectedCoverageParentLocalSocketIds = null;
   let physicalPlanningPhaseTimings = null;
   const placementInputsForIndex = (index) => {
     const endpointOrdinal = grant.kind === 'landmark-perimeter-loop'
@@ -8759,7 +13019,12 @@ export function planRouteNetwork({
     if (!node) {
       return {
         error: 'route-network-node-placement-collision',
-        context: { grantId: grant.id, nodeIndex: index, ...nodePlacementFailureDetails },
+        context: {
+          grantId: grant.id,
+          nodeIndex: index,
+          selectedGrammarIds: selectedGrammars.map(({ id }) => id),
+          ...nodePlacementFailureDetails,
+        },
       };
     }
     mainNodes[index] = node;
@@ -8767,9 +13032,365 @@ export function planRouteNetwork({
   };
   if (grant.kind === 'landmark-perimeter-loop') {
     // Reserve both exact parent attachments before filling the perimeter.
-    for (const index of [0, mainCenters.length - 1]) {
-      const failure = placeNodeAtIndex(index);
-      if (failure) return failure;
+    const endpointNodeIndices = [0, mainCenters.length - 1];
+    if (typeof futureEndpointDomainForwardCheck === 'function') {
+      const endpointFixedAvoidanceVolumes = [...localPlacementAvoidanceVolumes];
+      const endpointCandidateIdentity = (candidate) => canonicalStringify({
+        center: candidate.center,
+        facing: candidate.facing,
+        parentLocalSocketId: candidate.parentLocalSocketId,
+      });
+      const stableDedupeEndpointCandidates = (candidates) => {
+        const seen = new Set();
+        return candidates.filter((candidate) => {
+          const identity = endpointCandidateIdentity(candidate);
+          if (seen.has(identity)) return false;
+          seen.add(identity);
+          return true;
+        });
+      };
+      const rotateEndpointCandidates = (candidates, endpointOrdinal) => {
+        if (candidates.length === 0) return [];
+        const offset = landmarkEndpointPlacementVariantIndex(
+          searchVariant,
+          endpointOrdinal,
+          candidates.length,
+        );
+        return [
+          ...candidates.slice(offset),
+          ...candidates.slice(0, offset),
+        ];
+      };
+      const validEndpointCandidate = (candidate) => (
+        candidate
+          && candidate.collisionScore === 0
+          && !candidate.parentDistanceExceeded
+          && !candidate.parentAttachmentBlocked
+      );
+      const endpointTupleDomainCacheKey = canonicalStringify({
+        grantId: grant.id,
+        operationOrdinal,
+        moduleCount,
+        topologyTemplateId,
+        elevationMode,
+        searchVariant,
+        selectedGrammarIds: selectedGrammars.map(({ id }) => id),
+        planningAvoidanceSignature: canonicalStringify(
+          endpointFixedAvoidanceVolumes.map((volume) => ({
+            id: volume.id ?? null,
+            ownerId: volume.ownerId ?? null,
+            purpose: volume.purpose ?? null,
+            center: volume.center ?? null,
+            size: volume.size ?? null,
+          })),
+        ),
+      });
+      let cachedEndpointTupleDomain = landmarkEndpointTupleDomainCache.get(
+        endpointTupleDomainCacheKey,
+      );
+      let endpointDomains = cachedEndpointTupleDomain?.endpointDomains ?? null;
+      let endpointTuples = cachedEndpointTupleDomain?.endpointTuples ?? null;
+      let endpointTupleCounts = cachedEndpointTupleDomain?.endpointTupleCounts ?? null;
+      if (!endpointDomains || !endpointTuples) {
+      endpointDomains = endpointNodeIndices.map((nodeIndex, endpointOrdinal) => {
+        const inputs = placementInputsForIndex(nodeIndex);
+        const candidatesForPhase = (phase) => placeCollisionSafeNode(
+          nodeIndex,
+          centers[nodeIndex],
+          inputs.facing,
+          inputs.outward,
+          inputs.parentSocket,
+          [],
+          {
+            candidatesOnly: true,
+            avoidanceVolumes: endpointFixedAvoidanceVolumes,
+            landmarkEndpointCandidatePhase: phase,
+          },
+        ).filter(validEndpointCandidate);
+        const primary = rotateEndpointCandidates(
+          stableDedupeEndpointCandidates(candidatesForPhase('primary')),
+          endpointOrdinal,
+        );
+        const primaryIdentities = new Set(primary.map(endpointCandidateIdentity));
+        const fallback = rotateEndpointCandidates(
+          stableDedupeEndpointCandidates(candidatesForPhase('fallback'))
+            .filter((candidate) => (
+              !primaryIdentities.has(endpointCandidateIdentity(candidate))
+            )),
+          endpointOrdinal,
+        );
+        return { nodeIndex, endpointOrdinal, primary, fallback };
+      });
+      const endpointNodeVolumes = (candidate) => [
+        ...(candidate.node.occupiedVolumes ?? []),
+        ...(candidate.node.clearanceVolumes ?? []),
+      ];
+      emitPlanningDebugStage('route-network-landmark-endpoint-candidates-built', {
+        endpointCandidateCounts: endpointDomains.map((domain) => ({
+          endpointOrdinal: domain.endpointOrdinal,
+          primary: domain.primary.length,
+          fallback: domain.fallback.length,
+        })),
+      });
+      const endpointCandidateSurvivorBitsets = new Map(
+        endpointDomains.flatMap((domain) => [
+          ...domain.primary,
+          ...domain.fallback,
+        ]).map((candidate) => [
+          candidate,
+          futureEndpointDomainForwardCheck.directSurvivorBitsets(
+            endpointNodeVolumes(candidate),
+          ),
+        ]),
+      );
+      const tupleDomain = (firstCandidates, secondCandidates, phase) => (
+        firstCandidates.flatMap((firstCandidate, firstOrdinal) => (
+          secondCandidates.flatMap((secondCandidate, secondOrdinal) => {
+            const firstVolumes = endpointNodeVolumes(firstCandidate);
+            if (nodePlanningCollisionScore(secondCandidate.node, firstVolumes) > 0) return [];
+            const survivorBitsets = futureEndpointDomainForwardCheck
+              .intersectDirectSurvivorBitsets(
+                endpointCandidateSurvivorBitsets.get(firstCandidate),
+                endpointCandidateSurvivorBitsets.get(secondCandidate),
+              );
+            const survivorVector = futureEndpointDomainForwardCheck
+              .directSurvivorVectorForBitsets(survivorBitsets);
+            if (survivorVector.length > 0 && Math.min(...survivorVector) <= 0) return [];
+            const candidateDisplacements = [firstCandidate, secondCandidate]
+              .map((candidate, endpointOrdinal) => Number(
+                candidate.displacement
+                  ?? dungeonPointDistance(
+                    candidate.center,
+                    centers[endpointNodeIndices[endpointOrdinal]],
+                  ),
+              ));
+            return [{
+              phase,
+              candidates: [firstCandidate, secondCandidate],
+              stableOrdinals: [firstOrdinal, secondOrdinal],
+              survivorBitsets,
+              survivorVector,
+              minimumSurvivorCount: survivorVector.length > 0
+                ? Math.min(...survivorVector)
+                : 1,
+              totalCandidateDisplacement: candidateDisplacements
+                .reduce((sum, displacement) => sum + displacement, 0),
+              maximumCandidateDisplacement: Math.max(...candidateDisplacements),
+              rankedSurvivorVector: [...survivorVector].sort((first, second) => (
+                first - second
+              )),
+            }];
+          })
+        ))
+      );
+      const compareEndpointTuples = (first, second) => {
+        const vectorLength = Math.max(
+          first.rankedSurvivorVector.length,
+          second.rankedSurvivorVector.length,
+        );
+        for (let index = 0; index < vectorLength; index += 1) {
+          const delta = Number(second.rankedSurvivorVector[index] ?? 0)
+            - Number(first.rankedSurvivorVector[index] ?? 0);
+          if (delta !== 0) return delta;
+        }
+        return 0;
+      };
+      const primaryPrimaryTuples = tupleDomain(
+        endpointDomains[0].primary,
+        endpointDomains[1].primary,
+        'primary/primary',
+      );
+      const primaryFallbackTuples = tupleDomain(
+        endpointDomains[0].primary,
+        endpointDomains[1].fallback,
+        'primary/fallback',
+      );
+      const fallbackPrimaryTuples = tupleDomain(
+        endpointDomains[0].fallback,
+        endpointDomains[1].primary,
+        'fallback/primary',
+      );
+      const mixedTuples = Array.from({
+        length: Math.max(primaryFallbackTuples.length, fallbackPrimaryTuples.length),
+      }, (_, tupleIndex) => ([
+        primaryFallbackTuples[tupleIndex],
+        fallbackPrimaryTuples[tupleIndex],
+      ].filter(Boolean))).flat();
+      const fallbackFallbackTuples = tupleDomain(
+        endpointDomains[0].fallback,
+        endpointDomains[1].fallback,
+        'fallback/fallback',
+      );
+      const endpointPhaseRank = {
+        'primary/primary': 0,
+        'primary/fallback': 1,
+        'fallback/primary': 1,
+        'fallback/fallback': 2,
+      };
+      const rawEndpointTuples = [
+        ...primaryPrimaryTuples,
+        ...mixedTuples,
+        ...fallbackFallbackTuples,
+      ].map((tuple, domainStableOrdinal) => ({
+        ...tuple,
+        domainStableOrdinal,
+      }));
+      const endpointTupleGeometrySignatures = new Set();
+      let duplicateEndpointTupleGeometryCount = 0;
+      endpointTuples = rawEndpointTuples.filter((tuple) => {
+        const geometrySignature = canonicalStringify(tuple.candidates.map((candidate) => ({
+          center: candidate.center,
+          facing: candidate.facing,
+          parentLocalSocketId: candidate.parentLocalSocketId ?? null,
+        })));
+        if (endpointTupleGeometrySignatures.has(geometrySignature)) {
+          duplicateEndpointTupleGeometryCount += 1;
+          return false;
+        }
+        endpointTupleGeometrySignatures.add(geometrySignature);
+        return true;
+      }).sort((first, second) => (
+        second.minimumSurvivorCount - first.minimumSurvivorCount
+          || endpointPhaseRank[first.phase] - endpointPhaseRank[second.phase]
+          || first.totalCandidateDisplacement - second.totalCandidateDisplacement
+          || first.maximumCandidateDisplacement - second.maximumCandidateDisplacement
+          || compareEndpointTuples(first, second)
+          || first.domainStableOrdinal - second.domainStableOrdinal
+      ));
+      endpointTupleCounts = {
+        primaryPrimary: primaryPrimaryTuples.length,
+        primaryFallback: primaryFallbackTuples.length,
+        fallbackPrimary: fallbackPrimaryTuples.length,
+        fallbackFallback: fallbackFallbackTuples.length,
+        rawTotal: rawEndpointTuples.length,
+        duplicateGeometry: duplicateEndpointTupleGeometryCount,
+        total: endpointTuples.length,
+      };
+      cachedEndpointTupleDomain = {
+        endpointDomains,
+        endpointTuples,
+        endpointTupleCounts,
+        orderedEndpointTuplesByRecoveryKey: new Map(),
+      };
+      landmarkEndpointTupleDomainCache.set(
+        endpointTupleDomainCacheKey,
+        cachedEndpointTupleDomain,
+      );
+      }
+      // Recovery begins with the exact endpoint geometry that already produced
+      // a complete ordinary landmark. Then interleave reconnect centers so a
+      // second orientation at one unchanged center cannot hide every distinct
+      // geometric repair. Both transforms retain every finite-domain tuple.
+      const ordinaryWarmStartSourceTupleOrdinal =
+        landmarkEndpointTupleWarmStartMatchOrdinal(
+          endpointTuples,
+          landmarkRecoveryWarmStart,
+        );
+      const endpointTupleOrderingCacheKey = canonicalStringify({
+        endpointPlacements: (landmarkRecoveryWarmStart?.endpointPlacements ?? [])
+          .map((placement) => ({
+            center: placement?.center ?? null,
+            facing: placement?.facing ?? null,
+            parentLocalSocketId: placement?.parentLocalSocketId ?? null,
+          })),
+        directionalGuidance:
+          landmarkRecoveryWarmStart?.directionalGuidance ?? null,
+      });
+      const orderedEndpointTuplesByRecoveryKey =
+        cachedEndpointTupleDomain.orderedEndpointTuplesByRecoveryKey ?? new Map();
+      cachedEndpointTupleDomain.orderedEndpointTuplesByRecoveryKey =
+        orderedEndpointTuplesByRecoveryKey;
+      let orderedEndpointTuples = orderedEndpointTuplesByRecoveryKey.get(
+        endpointTupleOrderingCacheKey,
+      );
+      if (!orderedEndpointTuples) {
+        orderedEndpointTuples = prioritizeLandmarkEndpointTuplesByDirectionalGuidance(
+          interleaveLandmarkEndpointTuplesByExactEndpointAxes(
+            promoteLandmarkEndpointTupleWarmStart(
+              endpointTuples,
+              landmarkRecoveryWarmStart,
+            ),
+          ),
+          landmarkRecoveryWarmStart?.directionalGuidance ?? null,
+        );
+        orderedEndpointTuplesByRecoveryKey.set(
+          endpointTupleOrderingCacheKey,
+          orderedEndpointTuples,
+        );
+      }
+      endpointTuples = orderedEndpointTuples;
+      landmarkEndpointTupleCount = endpointTuples.length;
+      emitPlanningDebugStage('route-network-landmark-endpoint-tuples-ranked', {
+        endpointCandidateCounts: endpointDomains.map((domain) => ({
+          endpointOrdinal: domain.endpointOrdinal,
+          primary: domain.primary.length,
+          fallback: domain.fallback.length,
+        })),
+        endpointTupleCounts,
+        selectedEndpointTupleOrdinal: selectedLandmarkEndpointTupleOrdinal,
+        selectedEndpointTuplePhase:
+          endpointTuples[selectedLandmarkEndpointTupleOrdinal]?.phase ?? null,
+        selectedEndpointTupleSurvivorVector:
+          endpointTuples[selectedLandmarkEndpointTupleOrdinal]?.survivorVector ?? null,
+        ordinaryWarmStartMatched: ordinaryWarmStartSourceTupleOrdinal >= 0,
+        ordinaryWarmStartSourceTupleOrdinal,
+      });
+      const selectedTuple = endpointTuples[selectedLandmarkEndpointTupleOrdinal] ?? null;
+      if (!selectedTuple) {
+        return {
+          error: 'pyramid-loop-endpoint-tuple-domain-exhausted',
+          context: {
+            grantId: grant.id,
+            endpointTupleOrdinal: selectedLandmarkEndpointTupleOrdinal,
+            endpointTupleCount: landmarkEndpointTupleCount,
+            endpointCandidateCounts: endpointDomains.map((domain) => ({
+              endpointOrdinal: domain.endpointOrdinal,
+              primary: domain.primary.length,
+              fallback: domain.fallback.length,
+            })),
+          },
+        };
+      }
+      selectedLandmarkEndpointTuplePhase = selectedTuple.phase;
+      selectedLandmarkEndpointSurvivorBitsets = selectedTuple.survivorBitsets;
+      for (let endpointOrdinal = 0; endpointOrdinal < endpointNodeIndices.length;
+        endpointOrdinal += 1) {
+        const nodeIndex = endpointNodeIndices[endpointOrdinal];
+        const candidate = selectedTuple.candidates[endpointOrdinal];
+        const committedNode = createRouteNetworkNode(
+          nodeIndex,
+          candidate.center,
+          candidate.facing,
+        );
+        committedNode.planningParentLocalSocketId = candidate.parentLocalSocketId;
+        committedNode.parentAttachmentLocalSocketId = candidate.parentLocalSocketId;
+        centers[nodeIndex] = candidate.center;
+        mainNodes[nodeIndex] = committedNode;
+        localPlacementAvoidanceVolumes.push(
+          ...(committedNode.occupiedVolumes ?? []),
+          ...(committedNode.clearanceVolumes ?? []),
+        );
+        landmarkEndpointSelectionDiagnostics.push({
+          endpointOrdinal,
+          endpointTupleOrdinal: selectedLandmarkEndpointTupleOrdinal,
+          endpointTupleCount: landmarkEndpointTupleCount,
+          endpointPhase: selectedTuple.phase.split('/')[endpointOrdinal],
+          eligibleCandidateCount: selectedTuple.phase.split('/')[endpointOrdinal] === 'primary'
+            ? endpointDomains[endpointOrdinal].primary.length
+            : endpointDomains[endpointOrdinal].fallback.length,
+          selectedStableOrdinal: selectedTuple.stableOrdinals[endpointOrdinal],
+          selectedFutureEndpointDomainSupport: selectedTuple.rankedSurvivorVector[0] ?? null,
+          selectedSurvivorVector: selectedTuple.survivorVector,
+          selectedCenter: cloneDungeonAugmentationValue(candidate.center),
+          selectedFacing: cloneDungeonAugmentationValue(candidate.facing),
+          selectedParentLocalSocketId: candidate.parentLocalSocketId ?? null,
+        });
+      }
+    } else {
+      for (const index of endpointNodeIndices) {
+        const failure = placeNodeAtIndex(index);
+        if (failure) return failure;
+      }
     }
     const interiorIndices = Array.from(
       { length: Math.max(0, mainCenters.length - 2) },
@@ -8783,6 +13404,15 @@ export function planRouteNetwork({
       // and exact.
       const [firstIndex, secondIndex] = interiorIndices;
       const fixedAvoidanceVolumes = [...localPlacementAvoidanceVolumes];
+      const landmarkPairForwardDiagnostics = {
+        evaluatedPlacementPairCount: 0,
+        nodeDomainRejectedPairCount: 0,
+        exactSpineRejectedPairCount: 0,
+        partialSpineFutureCheckCount: 0,
+        partialSpineFutureRejectedCount: 0,
+        entryRouteRejectedFirstCandidateCount: 0,
+        firstExactSpineRejection: null,
+      };
       const validPlacementCandidate = (candidate) => (
         candidate
           && candidate.collisionScore === 0
@@ -8790,7 +13420,7 @@ export function planRouteNetwork({
           && !candidate.spineDistanceExceeded
           && !candidate.parentAttachmentBlocked
       );
-      const exactAdjacentRouteWitness = (
+      const exactAdjacentRouteCandidates = (
         fromNode,
         fromIndex,
         toNode,
@@ -8798,44 +13428,137 @@ export function planRouteNetwork({
         avoidanceVolumes,
         diagnostics = null,
       ) => {
+        // This is the bounded pair-composition preselector, not the exact
+        // segment validator. Ignore the two candidate endpoint bodies here so
+        // the cheap witness preserves the placement domain; final seam-aware
+        // routing below retains every wall slab and rejects wrong-face entry.
         const routeAvoidanceVolumes = avoidanceVolumes.filter((volume) => (
           !planningVolumeOwnedByAny(volume, [fromNode.id, toNode.id])
         ));
-        const parentReservedLocalSocketId = (nodeIndex) => {
+        const parentReservedLocalSocketId = (candidateNode, nodeIndex) => {
+          if (candidateNode?.planningParentLocalSocketId) {
+            return candidateNode.planningParentLocalSocketId;
+          }
           if (nodeIndex === 0) return 'entry';
           if (nodeIndex === mainNodeCount - 1) return 'exit';
           return null;
         };
         const usableSockets = (node, nodeIndex) => node.sockets.filter(({ localSocketId }) => (
-          localSocketId !== parentReservedLocalSocketId(nodeIndex)
+          localSocketId !== parentReservedLocalSocketId(node, nodeIndex)
         ));
         const rawCandidates = usableSockets(fromNode, fromIndex).flatMap((fromSocket) => (
           usableSockets(toNode, toIndex).flatMap((toSocket) => {
             const connectorFamily = Math.abs(
               Number(toSocket.position.y) - Number(fromSocket.position.y),
             ) > 1e-6 ? verticalFamily : 'service-gallery';
+            const endpointSeams = [
+              [fromSocket, fromNode, 'from'],
+              [toSocket, toNode, 'to'],
+            ].map(([socket, node, role]) => createDungeonRouteEndpointSeam(socket, {
+              id: `${operationId}:landmark-pair-preselector:${node.id}:${socket.id}:${role}`,
+              operationId,
+              networkId: operationId,
+              nodeId: node.id,
+              socketId: socket.id,
+              localSocketId: socket.localSocketId ?? null,
+              role,
+              elevationBand: node.progressionBandId ?? grant.progressionBandId ?? null,
+            }));
+            const endpointSeamEnvelopes = endpointSeams.map(({ overlapEnvelope }) => (
+              overlapEnvelope
+            ));
+            const endpointPlanningOverlapGrants = endpointSeams.flatMap(
+              (seam, endpointOrdinal) => ([
+                seam.overlapEnvelope,
+                {
+                  ...seam.overlapEnvelope,
+                  id: `${seam.overlapEnvelope.id}:node-owner`,
+                  parentOwnerId: [fromNode, toNode][endpointOrdinal].id,
+                },
+              ]),
+            );
             return cachedSocketRouteCandidates(fromSocket, toSocket, {
               connectorFamily,
-              ...coverageModuleRouteOptions,
-            }).map((path) => ({
-              path,
-              distanceMeters: maximumContinuousLevelRouteSpan(path)
-                + parentAttachmentFeaturelessDistanceForNode(
-                  fromNode,
+              ...networkModuleRouteOptions,
+            }).map((path, pathOrdinal) => {
+              const collisionVolumes = landmarkPairPreselectorRouteCollisionVolumes(
+                path,
+                fromSocket,
+                toSocket,
+                {
+                  operationId,
                   fromIndex,
-                  fromSocket.localSocketId,
-                )
-                + parentAttachmentFeaturelessDistanceForNode(
-                  toNode,
                   toIndex,
-                  toSocket.localSocketId,
-                ),
-              collisionScore: pathPlanningCollisionScore(path, routeAvoidanceVolumes),
-            }));
+                  pathOrdinal,
+                },
+              );
+              const fromApproachCompatible = routePathHasExteriorSocketApproach(
+                path,
+                fromSocket,
+                false,
+                endpointSeams[0],
+              );
+              const toApproachCompatible = routePathHasExteriorSocketApproach(
+                path,
+                toSocket,
+                true,
+                endpointSeams[1],
+              );
+              const fromNodeMaskCompatible = routePlanningVolumesRespectEndpointNodeMask(
+                collisionVolumes,
+                fromNode,
+                endpointSeams[0],
+              );
+              const toNodeMaskCompatible = routePlanningVolumesRespectEndpointNodeMask(
+                collisionVolumes,
+                toNode,
+                endpointSeams[1],
+              );
+              const endpointSeamCompatible = fromApproachCompatible
+                && toApproachCompatible
+                && fromNodeMaskCompatible
+                && toNodeMaskCompatible;
+              const collisionScore = endpointSeamCompatible
+                ? planningRouteVolumesCollisionScore(
+                  collisionVolumes,
+                  routeAvoidanceVolumes,
+                  endpointPlanningOverlapGrants,
+                )
+                : Number.POSITIVE_INFINITY;
+              return {
+                path,
+                collisionVolumes,
+                endpointSeams,
+                endpointSeamEnvelopes,
+                endpointSeamCompatible,
+                fromLocalSocketId: fromSocket.localSocketId,
+                fromSocket: cloneDungeonAugmentationValue(fromSocket),
+                toLocalSocketId: toSocket.localSocketId,
+                toSocket: cloneDungeonAugmentationValue(toSocket),
+                distanceMeters: maximumContinuousLevelRouteSpan(path)
+                  + parentAttachmentFeaturelessDistanceForNode(
+                    fromNode,
+                    fromIndex,
+                    fromSocket.localSocketId,
+                  )
+                  + parentAttachmentFeaturelessDistanceForNode(
+                    toNode,
+                    toIndex,
+                    toSocket.localSocketId,
+                  ),
+                collisionScore,
+                collisionIds: collisionScore > 0
+                  ? pathPlanningCollisionIds(path, routeAvoidanceVolumes).slice(0, 8)
+                  : [],
+              };
+            });
           })
         ));
-        const collisionFreeCandidates = rawCandidates.filter(({ collisionScore }) => (
-          collisionScore === 0
+        const collisionFreeCandidates = rawCandidates.filter(({
+          collisionScore,
+          endpointSeamCompatible,
+        }) => (
+          endpointSeamCompatible && collisionScore === 0
         ));
         const candidates = collisionFreeCandidates.filter(({ distanceMeters }) => (
           distanceMeters <= Number(
@@ -8846,6 +13569,13 @@ export function planRouteNetwork({
             || measureDungeonPolyline(first.path) - measureDungeonPolyline(second.path)
         ));
         if (diagnostics && typeof diagnostics === 'object') {
+          const minimumCollisionCandidate = [...rawCandidates].sort((first, second) => (
+            first.collisionScore - second.collisionScore
+              || first.distanceMeters - second.distanceMeters
+              || measureDungeonPolyline(first.path) - measureDungeonPolyline(second.path)
+              || String(first.fromLocalSocketId).localeCompare(String(second.fromLocalSocketId))
+              || String(first.toLocalSocketId).localeCompare(String(second.toLocalSocketId))
+          ))[0] ?? null;
           Object.assign(diagnostics, {
             fromNodeId: fromNode.id,
             toNodeId: toNode.id,
@@ -8855,9 +13585,230 @@ export function planRouteNetwork({
             minimumFeaturelessDistanceMeters: collisionFreeCandidates.length > 0
               ? Math.min(...collisionFreeCandidates.map(({ distanceMeters }) => distanceMeters))
               : null,
+            minimumCollisionScore: minimumCollisionCandidate?.collisionScore ?? null,
+            minimumCollisionCandidate: minimumCollisionCandidate ? {
+              fromLocalSocketId: minimumCollisionCandidate.fromLocalSocketId,
+              fromSocket: minimumCollisionCandidate.fromSocket,
+              toLocalSocketId: minimumCollisionCandidate.toLocalSocketId,
+              toSocket: minimumCollisionCandidate.toSocket,
+              path: cloneDungeonAugmentationValue(minimumCollisionCandidate.path),
+              distanceMeters: minimumCollisionCandidate.distanceMeters,
+              collisionScore: minimumCollisionCandidate.collisionScore,
+              collisionIds: minimumCollisionCandidate.collisionIds,
+            } : null,
           });
         }
-        return candidates[0] ?? null;
+        return candidates;
+      };
+      const exactAdjacentRouteWitness = (...args) => (
+        exactAdjacentRouteCandidates(...args)[0] ?? null
+      );
+      const exactLandmarkSpineForwardWitness = (
+        candidateNodes,
+        avoidanceVolumes,
+        initialSurvivorBitsets = null,
+        diagnostics = null,
+      ) => {
+        const junctionNode = candidateNodes[junctionModuleIndex];
+        const landmarkCenter = grant.source?.landmarkBounds?.center;
+        const outwardReference = landmarkCenter
+          ? toDungeonCardinalFacing({
+            x: junctionNode.placement.center.x - Number(landmarkCenter.x),
+            z: junctionNode.placement.center.z - Number(landmarkCenter.z),
+          })
+          : endpoints.at(-1).facing;
+        const decisionSockets = orderedLandmarkDecisionSockets(
+          junctionNode,
+          outwardReference,
+        );
+        const decisionOffset = decisionSockets.length > 0
+          ? Math.max(0, Math.floor(Number(searchVariant) || 0)) % decisionSockets.length
+          : 0;
+        const orderedDecisionSockets = [
+          ...decisionSockets.slice(decisionOffset),
+          ...decisionSockets.slice(0, decisionOffset),
+        ];
+        if (diagnostics && typeof diagnostics === 'object') {
+          Object.assign(diagnostics, {
+            decisionSocketCount: orderedDecisionSockets.length,
+            decisionLocalSocketIds: orderedDecisionSockets.map(({ localSocketId }) => (
+              localSocketId
+            )),
+            edgeCandidateDomainSizes: [],
+            rejectionCounts: {
+              noDecisionSocket: 0,
+              emptyEdgeCandidateDomain: 0,
+              socketUniqueness: 0,
+              interSegmentCollision: 0,
+              futureBitsetZero: 0,
+            },
+            rejectionCountsByEdge: Array.from(
+              { length: candidateNodes.length - 1 },
+              () => ({
+                socketUniqueness: 0,
+                interSegmentCollision: 0,
+                futureBitsetZero: 0,
+              }),
+            ),
+          });
+        }
+        if (orderedDecisionSockets.length === 0) {
+          if (diagnostics) diagnostics.rejectionCounts.noDecisionSocket += 1;
+          return null;
+        }
+        const edgeCandidateDiagnostics = Array.from(
+          { length: candidateNodes.length - 1 },
+          () => ({}),
+        );
+        const edgeCandidateDomains = Array.from(
+          { length: candidateNodes.length - 1 },
+          (_, edgeIndex) => exactAdjacentRouteCandidates(
+            candidateNodes[edgeIndex],
+            edgeIndex,
+            candidateNodes[edgeIndex + 1],
+            edgeIndex + 1,
+            avoidanceVolumes,
+            edgeCandidateDiagnostics[edgeIndex],
+          ),
+        );
+        if (diagnostics) {
+          diagnostics.edgeCandidateDomainSizes = edgeCandidateDomains.map((domain) => (
+            domain.length
+          ));
+          diagnostics.edgeCandidateDiagnostics = edgeCandidateDiagnostics.map((edge) => ({
+            routeCandidateCount: edge.routeCandidateCount ?? 0,
+            collisionFreeCandidateCount: edge.collisionFreeCandidateCount ?? 0,
+            featurelessEligibleCandidateCount:
+              edge.featurelessEligibleCandidateCount ?? 0,
+            minimumFeaturelessDistanceMeters:
+              edge.minimumFeaturelessDistanceMeters ?? null,
+            minimumCollisionScore: edge.minimumCollisionScore ?? null,
+            minimumCollisionCandidate: edge.minimumCollisionCandidate ? {
+              fromLocalSocketId: edge.minimumCollisionCandidate.fromLocalSocketId,
+              toLocalSocketId: edge.minimumCollisionCandidate.toLocalSocketId,
+              distanceMeters: edge.minimumCollisionCandidate.distanceMeters,
+              collisionScore: edge.minimumCollisionCandidate.collisionScore,
+              collisionIds: edge.minimumCollisionCandidate.collisionIds,
+            } : null,
+          }));
+        }
+        if (edgeCandidateDomains.some((domain) => domain.length === 0)) {
+          if (diagnostics) {
+            diagnostics.rejectionCounts.emptyEdgeCandidateDomain += 1;
+          }
+          return null;
+        }
+        const nodeVolumes = candidateNodes.flatMap((node) => [
+          ...(node.occupiedVolumes ?? []),
+          ...(node.clearanceVolumes ?? []),
+        ]);
+        const nodeSurvivorBitsets = initialSurvivorBitsets
+          ?? futureEndpointDomainForwardCheck.directSurvivorBitsets(nodeVolumes);
+        const routeSurvivorBitsets = new Map();
+        const nextFutureSurvivorBitsets = (currentBitsets, candidate) => {
+          if (!routeSurvivorBitsets.has(candidate)) {
+            routeSurvivorBitsets.set(
+              candidate,
+              futureEndpointDomainForwardCheck.directSurvivorBitsets(
+                candidate.collisionVolumes ?? routePathPlanningVolumes(candidate.path),
+              ),
+            );
+          }
+          return futureEndpointDomainForwardCheck.intersectDirectSurvivorBitsets(
+            currentBitsets,
+            routeSurvivorBitsets.get(candidate),
+          );
+        };
+        const futureBitsetsRetainEveryEndpoint = (bitsets) => {
+          landmarkPairForwardDiagnostics.partialSpineFutureCheckCount += 1;
+          const retained = futureEndpointDomainForwardCheck
+            .directSurvivorVectorForBitsets(bitsets)
+            .every((count) => count > 0);
+          if (!retained) {
+            landmarkPairForwardDiagnostics.partialSpineFutureRejectedCount += 1;
+          }
+          return retained;
+        };
+        for (const decisionSocket of orderedDecisionSockets) {
+          const usedByNodeId = new Map(candidateNodes.map((node, nodeIndex) => [
+            node.id,
+            new Set([
+              node.planningParentLocalSocketId
+                ?? (nodeIndex === 0
+                  ? 'entry'
+                  : nodeIndex === candidateNodes.length - 1 ? 'exit' : null),
+            ].filter(Boolean)),
+          ]));
+          usedByNodeId.get(junctionNode.id)?.add(decisionSocket.localSocketId);
+          const selectedPairs = [];
+          const visit = (edgeIndex, currentSurvivorBitsets) => {
+            if (edgeIndex >= edgeCandidateDomains.length) return true;
+            const fromNode = candidateNodes[edgeIndex];
+            const toNode = candidateNodes[edgeIndex + 1];
+            const fromUsed = usedByNodeId.get(fromNode.id);
+            const toUsed = usedByNodeId.get(toNode.id);
+            const previouslySelectedRouteVolumes = selectedPairs.flatMap((pair) => (
+              pair.collisionVolumes ?? routePathPlanningVolumes(pair.path)
+            ));
+            for (const candidate of edgeCandidateDomains[edgeIndex]) {
+              if (fromUsed.has(candidate.fromLocalSocketId)
+                || toUsed.has(candidate.toLocalSocketId)) {
+                if (diagnostics) {
+                  diagnostics.rejectionCounts.socketUniqueness += 1;
+                  diagnostics.rejectionCountsByEdge[edgeIndex].socketUniqueness += 1;
+                }
+                continue;
+              }
+              const previousPair = selectedPairs.at(-1);
+              const sharedEndpointSeam = previousPair
+                ? planningVolumeIntersection(
+                  previousPair.endpointSeamEnvelopes?.[1],
+                  candidate.endpointSeamEnvelopes?.[0],
+                )
+                : null;
+              if (pathPlanningCollisionScore(
+                candidate.path,
+                previouslySelectedRouteVolumes,
+                5.6,
+                sharedEndpointSeam ? [sharedEndpointSeam] : [],
+              ) > 0) {
+                if (diagnostics) {
+                  diagnostics.rejectionCounts.interSegmentCollision += 1;
+                  diagnostics.rejectionCountsByEdge[edgeIndex].interSegmentCollision += 1;
+                }
+                continue;
+              }
+              fromUsed.add(candidate.fromLocalSocketId);
+              toUsed.add(candidate.toLocalSocketId);
+              selectedPairs.push(candidate);
+              const nextSurvivorBitsets = nextFutureSurvivorBitsets(
+                currentSurvivorBitsets,
+                candidate,
+              );
+              const retainsFutureEndpoints = futureBitsetsRetainEveryEndpoint(
+                nextSurvivorBitsets,
+              );
+              if (!retainsFutureEndpoints && diagnostics) {
+                diagnostics.rejectionCounts.futureBitsetZero += 1;
+                diagnostics.rejectionCountsByEdge[edgeIndex].futureBitsetZero += 1;
+              }
+              if (retainsFutureEndpoints && visit(edgeIndex + 1, nextSurvivorBitsets)) {
+                return true;
+              }
+              selectedPairs.pop();
+              fromUsed.delete(candidate.fromLocalSocketId);
+              toUsed.delete(candidate.toLocalSocketId);
+            }
+            return false;
+          };
+          if (visit(0, nodeSurvivorBitsets)) {
+            return {
+              pairs: selectedPairs.map((pair) => ({ ...pair })),
+              wingParentLocalSocketId: decisionSocket.localSocketId,
+            };
+          }
+        }
+        return null;
       };
       const firstInputs = placementInputsForIndex(firstIndex);
       const rawFirstCandidates = placeCollisionSafeNode(
@@ -8875,6 +13826,216 @@ export function planRouteNetwork({
       const firstCandidates = rawFirstCandidates.filter(validPlacementCandidate).slice(0, 96);
       let selectedPair = null;
       const pairPlacementDiagnostics = [];
+      if (typeof futureEndpointDomainForwardCheck === 'function') {
+        const endpointNodeVolumes = [mainNodes[0], mainNodes.at(-1)]
+          .flatMap((node) => [
+            ...(node.occupiedVolumes ?? []),
+            ...(node.clearanceVolumes ?? []),
+          ]);
+        const endpointSurvivorBitsets = selectedLandmarkEndpointSurvivorBitsets
+          ?? futureEndpointDomainForwardCheck.directSurvivorBitsets(
+            endpointNodeVolumes,
+          );
+        const firstCandidateSurvivorBitsets = new Map();
+        const secondCandidateSurvivorBitsets = new Map();
+        const rankedPlacementPairs = [];
+        for (let firstOrdinal = 0; firstOrdinal < firstCandidates.length;
+          firstOrdinal += 1) {
+          const firstCandidate = firstCandidates[firstOrdinal];
+          const firstVolumes = [
+            ...(firstCandidate.node.occupiedVolumes ?? []),
+            ...(firstCandidate.node.clearanceVolumes ?? []),
+          ];
+          // Preserve the ordinary landmark solver's mandatory first physical
+          // edge check before expanding the second-room domain. This is only a
+          // necessary prefilter: the exact four-node spine DFS below recomputes
+          // the edge against the selected second room and remains authoritative.
+          const entryRouteDiagnostics = {};
+          const entryRouteWitness = exactAdjacentRouteWitness(
+            mainNodes[0],
+            0,
+            firstCandidate.node,
+            firstIndex,
+            [...fixedAvoidanceVolumes, ...firstVolumes],
+            entryRouteDiagnostics,
+          );
+          if (!entryRouteWitness) {
+            landmarkPairForwardDiagnostics.entryRouteRejectedFirstCandidateCount += 1;
+            pairPlacementDiagnostics.push({
+              firstCenter: cloneDungeonAugmentationValue(firstCandidate.center),
+              secondCandidateCount: 0,
+              entryRouteDiagnostics,
+            });
+            continue;
+          }
+          if (!firstCandidateSurvivorBitsets.has(firstCandidate)) {
+            firstCandidateSurvivorBitsets.set(
+              firstCandidate,
+              futureEndpointDomainForwardCheck.directSurvivorBitsets(firstVolumes),
+            );
+          }
+          const secondInputs = placementInputsForIndex(secondIndex);
+          const rawSecondCandidates = placeCollisionSafeNode(
+            secondIndex,
+            centers[secondIndex],
+            secondInputs.facing,
+            secondInputs.outward,
+            null,
+            [
+              { node: firstCandidate.node, index: firstIndex },
+              { node: mainNodes.at(-1), index: mainCenters.length - 1 },
+            ],
+            {
+              candidatesOnly: true,
+              avoidanceVolumes: [...fixedAvoidanceVolumes, ...firstVolumes],
+            },
+          );
+          const secondCandidates = rawSecondCandidates.filter(validPlacementCandidate);
+          pairPlacementDiagnostics.push({
+            firstCenter: cloneDungeonAugmentationValue(firstCandidate.center),
+            secondCandidateCount: secondCandidates.length,
+            entryRouteDiagnostics,
+            bestSecondCandidates: rawSecondCandidates.slice(0, 4).map((candidate) => ({
+              center: cloneDungeonAugmentationValue(candidate.center),
+              collisionScore: candidate.collisionScore,
+              spineDistanceMeters: candidate.spineDistanceMeters,
+              spineDistanceExceeded: candidate.spineDistanceExceeded,
+            })),
+          });
+          for (let secondOrdinal = 0; secondOrdinal < secondCandidates.length;
+            secondOrdinal += 1) {
+            const secondCandidate = secondCandidates[secondOrdinal];
+            landmarkPairForwardDiagnostics.evaluatedPlacementPairCount += 1;
+            const placementPairSignature = canonicalStringify({
+              endpointPhase: selectedLandmarkEndpointTuplePhase,
+              nodes: [
+                mainNodes[0],
+                firstCandidate.node,
+                secondCandidate.node,
+                mainNodes.at(-1),
+              ].map((node) => ({
+                grammarId: String(node?.grammarId ?? ''),
+                center: node?.placement?.center ?? null,
+                facing: node?.placement?.facing ?? null,
+                parentLocalSocketId: node?.planningParentLocalSocketId ?? null,
+              })),
+            });
+            if (landmarkRejectedPlacementPairSignatures.has(placementPairSignature)) continue;
+            const secondVolumes = [
+              ...(secondCandidate.node.occupiedVolumes ?? []),
+              ...(secondCandidate.node.clearanceVolumes ?? []),
+            ];
+            if (!secondCandidateSurvivorBitsets.has(secondCandidate)) {
+              secondCandidateSurvivorBitsets.set(
+                secondCandidate,
+                futureEndpointDomainForwardCheck.directSurvivorBitsets(secondVolumes),
+              );
+            }
+            const endpointAndFirstBitsets = futureEndpointDomainForwardCheck
+              .intersectDirectSurvivorBitsets(
+                endpointSurvivorBitsets,
+                firstCandidateSurvivorBitsets.get(firstCandidate),
+              );
+            const survivorBitsets = futureEndpointDomainForwardCheck
+              .intersectDirectSurvivorBitsets(
+                endpointAndFirstBitsets,
+                secondCandidateSurvivorBitsets.get(secondCandidate),
+              );
+            const survivorVector = futureEndpointDomainForwardCheck
+              .directSurvivorVectorForBitsets(survivorBitsets);
+            if (survivorVector.some((count) => count <= 0)) {
+              landmarkPairForwardDiagnostics.nodeDomainRejectedPairCount += 1;
+              continue;
+            }
+            rankedPlacementPairs.push({
+              firstCandidate,
+              secondCandidate,
+              firstOrdinal,
+              secondOrdinal,
+              placementPairSignature,
+              survivorVector,
+              survivorBitsets,
+              rankedSurvivorVector: [...survivorVector].sort((first, second) => (
+                first - second
+              )),
+              pairAvoidanceVolumes: [
+                ...fixedAvoidanceVolumes,
+                ...firstVolumes,
+                ...secondVolumes,
+              ],
+            });
+          }
+        }
+        rankedPlacementPairs.sort((first, second) => {
+          const vectorLength = Math.max(
+            first.rankedSurvivorVector.length,
+            second.rankedSurvivorVector.length,
+          );
+          for (let index = 0; index < vectorLength; index += 1) {
+            const delta = Number(second.rankedSurvivorVector[index] ?? 0)
+              - Number(first.rankedSurvivorVector[index] ?? 0);
+            if (delta !== 0) return delta;
+          }
+          return first.firstOrdinal - second.firstOrdinal
+            || first.secondOrdinal - second.secondOrdinal;
+        });
+        landmarkPairForwardDiagnostics.rankedPlacementPairCount =
+          rankedPlacementPairs.length;
+        landmarkPairForwardDiagnostics.bestPlacementPairSurvivorVectors =
+          rankedPlacementPairs.slice(0, 8).map(({ survivorVector }) => survivorVector);
+        emitPlanningDebugStage('route-network-landmark-room-pairs-ranked', {
+          endpointPhase: selectedLandmarkEndpointTuplePhase,
+          landmarkEndpointSelectionDiagnostics,
+          activePlacementPairSignature: landmarkActivePlacementPairSignature,
+          ...landmarkPairForwardDiagnostics,
+        });
+        const rankedPlacementPairsForSelection = landmarkActivePlacementPairSignature
+          ? rankedPlacementPairs.filter(({ placementPairSignature }) => (
+            placementPairSignature === landmarkActivePlacementPairSignature
+          ))
+          : rankedPlacementPairs;
+        for (const rankedPair of rankedPlacementPairsForSelection) {
+          const exactSpineRejectionDiagnostics =
+            landmarkPairForwardDiagnostics.firstExactSpineRejection ? null : {};
+          const spineForwardWitness = exactLandmarkSpineForwardWitness([
+            mainNodes[0],
+            rankedPair.firstCandidate.node,
+            rankedPair.secondCandidate.node,
+            mainNodes.at(-1),
+          ], rankedPair.pairAvoidanceVolumes, rankedPair.survivorBitsets,
+          exactSpineRejectionDiagnostics);
+          if (!spineForwardWitness) {
+            landmarkPairForwardDiagnostics.exactSpineRejectedPairCount += 1;
+            if (exactSpineRejectionDiagnostics) {
+              landmarkPairForwardDiagnostics.firstExactSpineRejection = {
+                firstOrdinal: rankedPair.firstOrdinal,
+                secondOrdinal: rankedPair.secondOrdinal,
+                placementPairSignature: rankedPair.placementPairSignature,
+                ...exactSpineRejectionDiagnostics,
+              };
+            }
+            continue;
+          }
+          selectedPair = {
+            firstCandidate: rankedPair.firstCandidate,
+            secondCandidate: rankedPair.secondCandidate,
+          };
+          selectedLandmarkPlacementPairSignature = rankedPair.placementPairSignature;
+          preselectedLandmarkSpinePairs = spineForwardWitness.pairs;
+          preselectedLandmarkWingParentLocalSocketId =
+            spineForwardWitness.wingParentLocalSocketId;
+          emitPlanningDebugStage('route-network-landmark-pair-forward-selected', {
+            endpointPhase: selectedLandmarkEndpointTuplePhase,
+            landmarkEndpointSelectionDiagnostics,
+            ...landmarkPairForwardDiagnostics,
+            selectedPairSignature: rankedPair.placementPairSignature,
+            selectedPairSurvivorVector: rankedPair.survivorVector,
+            wingParentLocalSocketId: preselectedLandmarkWingParentLocalSocketId,
+          });
+          break;
+        }
+      }
+      if (typeof futureEndpointDomainForwardCheck !== 'function') {
       for (const firstCandidate of firstCandidates) {
         const firstVolumes = [
           ...(firstCandidate.node.occupiedVolumes ?? []),
@@ -8934,32 +14095,94 @@ export function planRouteNetwork({
         // a slightly longer level run than half its Manhattan distance. Pick
         // the first deterministic candidate with a real collision-free route
         // witness inside the 33.6m featureless bound.
-        const secondCandidate = secondCandidates.find((candidate) => (
-          exactAdjacentRouteWitness(
-            firstCandidate.node,
-            firstIndex,
-            candidate.node,
-            secondIndex,
-            [
-              ...fixedAvoidanceVolumes,
+        let secondCandidate = null;
+        let secondCandidateSignature = null;
+        let secondCandidateSpineForwardWitness = null;
+        for (const candidate of secondCandidates) {
+          landmarkPairForwardDiagnostics.evaluatedPlacementPairCount += 1;
+          const placementPairSignature = canonicalStringify({
+            endpointPhase: selectedLandmarkEndpointTuplePhase,
+            nodes: [
+              mainNodes[0],
+              firstCandidate.node,
+              candidate.node,
+              mainNodes.at(-1),
+            ].map((node) => ({
+              grammarId: String(node?.grammarId ?? ''),
+              center: node?.placement?.center ?? null,
+              facing: node?.placement?.facing ?? null,
+              parentLocalSocketId: node?.planningParentLocalSocketId ?? null,
+            })),
+          });
+          if (landmarkRejectedPlacementPairSignatures.has(placementPairSignature)) continue;
+          const secondVolumes = [
+            ...(candidate.node.occupiedVolumes ?? []),
+            ...(candidate.node.clearanceVolumes ?? []),
+          ];
+          const pairAvoidanceVolumes = [
+            ...fixedAvoidanceVolumes,
+            ...firstVolumes,
+            ...secondVolumes,
+          ];
+          if (typeof futureEndpointDomainForwardCheck === 'function') {
+            const endpointNodeVolumes = [mainNodes[0], mainNodes.at(-1)]
+              .flatMap((node) => [
+                ...(node.occupiedVolumes ?? []),
+                ...(node.clearanceVolumes ?? []),
+              ]);
+            // Placement preselection owns node masks only. Its shortest route
+            // witness is deliberately non-authoritative; the exact spine DFS
+            // below enumerates the legal socket/path alternatives and applies
+            // the same future-domain check to the selected segment volumes.
+            const prospectiveNodeVolumes = [
+              ...endpointNodeVolumes,
               ...firstVolumes,
-              ...(candidate.node.occupiedVolumes ?? []),
-              ...(candidate.node.clearanceVolumes ?? []),
-            ],
-          )
-            && exactAdjacentRouteWitness(
+              ...secondVolumes,
+            ];
+            const retainedNodeDomain = futureEndpointDomainForwardCheck
+              .directMinimumCandidateCount?.(prospectiveNodeVolumes)
+              ?? futureEndpointDomainForwardCheck(prospectiveNodeVolumes);
+            if (!retainedNodeDomain) {
+              landmarkPairForwardDiagnostics.nodeDomainRejectedPairCount += 1;
+              continue;
+            }
+          }
+          const spineForwardWitness = typeof futureEndpointDomainForwardCheck === 'function'
+            ? exactLandmarkSpineForwardWitness([
+              mainNodes[0],
+              firstCandidate.node,
+              candidate.node,
+              mainNodes.at(-1),
+            ], pairAvoidanceVolumes)
+            : null;
+          if (typeof futureEndpointDomainForwardCheck === 'function') {
+            if (!spineForwardWitness) {
+              landmarkPairForwardDiagnostics.exactSpineRejectedPairCount += 1;
+              continue;
+            }
+          } else {
+            const middleRouteWitness = exactAdjacentRouteWitness(
+              firstCandidate.node,
+              firstIndex,
+              candidate.node,
+              secondIndex,
+              pairAvoidanceVolumes,
+            );
+            if (!middleRouteWitness) continue;
+            const endpointRouteWitness = exactAdjacentRouteWitness(
               candidate.node,
               secondIndex,
               mainNodes.at(-1),
               mainCenters.length - 1,
-              [
-                ...fixedAvoidanceVolumes,
-                ...firstVolumes,
-                ...(candidate.node.occupiedVolumes ?? []),
-                ...(candidate.node.clearanceVolumes ?? []),
-              ],
-            )
-        )) ?? null;
+              pairAvoidanceVolumes,
+            );
+            if (!endpointRouteWitness) continue;
+          }
+          secondCandidate = candidate;
+          secondCandidateSignature = placementPairSignature;
+          secondCandidateSpineForwardWitness = spineForwardWitness;
+          break;
+        }
         if (!secondCandidate) {
           const currentPairDiagnostics = pairPlacementDiagnostics.at(-1);
           if (currentPairDiagnostics && secondCandidates.length > 0) {
@@ -9000,9 +14223,68 @@ export function planRouteNetwork({
           continue;
         }
         selectedPair = { firstCandidate, secondCandidate };
+        selectedLandmarkPlacementPairSignature = secondCandidateSignature;
+        preselectedLandmarkSpinePairs = secondCandidateSpineForwardWitness?.pairs ?? null;
+        preselectedLandmarkWingParentLocalSocketId =
+          secondCandidateSpineForwardWitness?.wingParentLocalSocketId ?? null;
+        if (secondCandidateSpineForwardWitness) {
+          emitPlanningDebugStage('route-network-landmark-pair-forward-selected', {
+            endpointPhase: selectedLandmarkEndpointTuplePhase,
+            landmarkEndpointSelectionDiagnostics,
+            ...landmarkPairForwardDiagnostics,
+            selectedPairSignature: secondCandidateSignature,
+            wingParentLocalSocketId: preselectedLandmarkWingParentLocalSocketId,
+          });
+        }
         break;
       }
+      }
       if (!selectedPair) {
+        if (typeof futureEndpointDomainForwardCheck === 'function') {
+          emitPlanningDebugStage('route-network-landmark-pair-forward-exhausted', {
+            endpointPhase: selectedLandmarkEndpointTuplePhase,
+            landmarkEndpointSelectionDiagnostics,
+            ...landmarkPairForwardDiagnostics,
+          });
+        }
+        if (typeof futureEndpointDomainForwardCheck === 'function'
+          && landmarkActivePlacementPairSignature) {
+          const rejectedPlacementPairSignatures = new Set(
+            landmarkRejectedPlacementPairSignatures,
+          );
+          rejectedPlacementPairSignatures.add(landmarkActivePlacementPairSignature);
+          return landmarkLocalBacktrackResult(
+            'active-landmark-placement-pair-exhausted',
+            {
+              activePlacementPairSignature: null,
+              parentAttachmentPathOrdinals: [0, 0],
+              wingChoiceOrdinal: 0,
+              activeWingChoiceSignature: null,
+              rejectedPlacementPairSignatures,
+            },
+            {
+              activePlacementPairSignature: landmarkActivePlacementPairSignature,
+            },
+          );
+        }
+        if (typeof futureEndpointDomainForwardCheck === 'function'
+          && selectedLandmarkEndpointTupleOrdinal + 1 < landmarkEndpointTupleCount) {
+          // Recovery enumerates the finite endpoint tuple domain by retained
+          // future support. PP/mixed/FF phase and triangular source order are
+          // deterministic tie-breaks. Advancing this ordinal changes only the
+          // landmark's local endpoint identity; global caps remain unchanged.
+          return landmarkLocalBacktrackResult(
+            'landmark-endpoint-tuple-placement-pairs-exhausted',
+            {
+              endpointTupleOrdinal: selectedLandmarkEndpointTupleOrdinal + 1,
+              activePlacementPairSignature: null,
+              parentAttachmentPathOrdinals: [0, 0],
+              wingChoiceOrdinal: 0,
+              activeWingChoiceSignature: null,
+              rejectedPlacementPairSignatures: [],
+            },
+          );
+        }
         return {
           error: 'pyramid-loop-room-pair-placement-unavailable',
           context: {
@@ -9010,6 +14292,18 @@ export function planRouteNetwork({
             topologyTemplateId,
             elevationMode,
             selectedGrammarIds: selectedGrammars.map(({ id }) => id),
+            landmarkEndpointPlacements: [0, mainCenters.length - 1].map((nodeIndex) => ({
+              nodeIndex,
+              grammarId: mainNodes[nodeIndex]?.grammarId ?? null,
+              center: cloneDungeonAugmentationValue(
+                mainNodes[nodeIndex]?.placement?.center ?? centers[nodeIndex],
+              ),
+              facing: cloneDungeonAugmentationValue(
+                mainNodes[nodeIndex]?.placement?.facing ?? null,
+              ),
+              parentLocalSocketId:
+                mainNodes[nodeIndex]?.planningParentLocalSocketId ?? null,
+            })),
             firstNodeIndex: firstIndex,
             secondNodeIndex: secondIndex,
             firstCandidateCount: firstCandidates.length,
@@ -9031,6 +14325,21 @@ export function planRouteNetwork({
                 spineDistanceExceeded: candidate.spineDistanceExceeded,
               })),
             pairPlacementDiagnostics: pairPlacementDiagnostics.slice(0, 8),
+            landmarkPairForwardDiagnostics,
+            entryEligiblePairPlacementDiagnostics: pairPlacementDiagnostics
+              .filter(({ entryRouteDiagnostics }) => (
+                Number(entryRouteDiagnostics?.featurelessEligibleCandidateCount ?? 0) > 0
+              ))
+              .slice(0, 8),
+            ...(typeof futureEndpointDomainForwardCheck === 'function' ? {
+              futureEndpointDomainBacktracking: {
+                endpointPhase: selectedLandmarkEndpointTuplePhase,
+                endpointTupleOrdinal: selectedLandmarkEndpointTupleOrdinal,
+                endpointTupleCount: landmarkEndpointTupleCount,
+                rejectedPlacementPairCount:
+                  landmarkRejectedPlacementPairSignatures.size,
+              },
+            } : {}),
           },
         };
       }
@@ -9083,6 +14392,11 @@ export function planRouteNetwork({
         - physicalPlanningStartedAt;
       return cloneDungeonAugmentationValue(physicalPlanningPhaseTimings);
     };
+    emitPlanningDebugStage('route-network-physical-planning-start', {
+      physicalNodeCount: mainCenters.length,
+      endpointNodeIndices: [...endpointNodeIndexSet].sort((first, second) => first - second),
+      selectedGrammarIds: selectedGrammars.map(({ id }) => id),
+    });
     const staticAvoidanceVolumes = [...localPlacementAvoidanceVolumes];
     const planningIndexCellMeters = 8.4;
     const staticAvoidanceVolumeBuckets = new Map();
@@ -9203,6 +14517,7 @@ export function planRouteNetwork({
       }),
     );
     const candidateNodeVolumeCache = new WeakMap();
+    const candidateNodeEnvelopeCache = new WeakMap();
     const candidateNodeVolumes = (candidate) => {
       if (!candidateNodeVolumeCache.has(candidate)) {
         candidateNodeVolumeCache.set(candidate, [
@@ -9212,12 +14527,73 @@ export function planRouteNetwork({
       }
       return candidateNodeVolumeCache.get(candidate);
     };
-    const parentAttachmentForCandidate = (candidate, index) => {
+    const candidateNodeEnvelope = (candidate) => {
+      if (!candidateNodeEnvelopeCache.has(candidate)) {
+        const volumes = candidateNodeVolumes(candidate);
+        if (volumes.length === 0) {
+          candidateNodeEnvelopeCache.set(candidate, null);
+        } else {
+          let minimumX = Number.POSITIVE_INFINITY;
+          let maximumX = Number.NEGATIVE_INFINITY;
+          let minimumY = Number.POSITIVE_INFINITY;
+          let maximumY = Number.NEGATIVE_INFINITY;
+          let minimumZ = Number.POSITIVE_INFINITY;
+          let maximumZ = Number.NEGATIVE_INFINITY;
+          for (const volume of volumes) {
+            const halfX = Number(volume.size.x) * 0.5;
+            const halfY = Number(volume.size.y) * 0.5;
+            const halfZ = Number(volume.size.z) * 0.5;
+            minimumX = Math.min(minimumX, Number(volume.center.x) - halfX);
+            maximumX = Math.max(maximumX, Number(volume.center.x) + halfX);
+            minimumY = Math.min(minimumY, Number(volume.center.y) - halfY);
+            maximumY = Math.max(maximumY, Number(volume.center.y) + halfY);
+            minimumZ = Math.min(minimumZ, Number(volume.center.z) - halfZ);
+            maximumZ = Math.max(maximumZ, Number(volume.center.z) + halfZ);
+          }
+          candidateNodeEnvelopeCache.set(candidate, {
+            center: {
+              x: (minimumX + maximumX) * 0.5,
+              y: (minimumY + maximumY) * 0.5,
+              z: (minimumZ + maximumZ) * 0.5,
+            },
+            size: {
+              x: maximumX - minimumX,
+              y: maximumY - minimumY,
+              z: maximumZ - minimumZ,
+            },
+          });
+        }
+      }
+      return candidateNodeEnvelopeCache.get(candidate);
+    };
+    const parentAttachmentDomainForCandidate = (candidate, index) => {
       const endpointOrdinal = endpointOrdinalForNodeIndex(index);
-      if (endpointOrdinal < 0) return { compatible: true, path: null };
+      if (endpointOrdinal < 0) {
+        return {
+          compatible: true,
+          candidates: [{ compatible: true, path: null, pathVolumes: [] }],
+          path: null,
+        };
+      }
       const attachmentContext = parentAttachmentContextByNodeIndex.get(index);
       const { parentSocket, parentEndpointSeam, routeAvoidanceVolumes } = attachmentContext;
-      const nodeSocket = getNodeSocket(candidate.node, 'entry');
+      const parentLocalSocketId = candidate.parentLocalSocketId
+        ?? candidate.node?.planningParentLocalSocketId
+        ?? 'entry';
+      const nodeSocket = getNodeSocket(candidate.node, parentLocalSocketId);
+      if (!nodeSocket) {
+        return {
+          compatible: false,
+          candidates: [],
+          path: null,
+          pathVolumes: [],
+          collisionScore: Number.POSITIVE_INFINITY,
+          distanceMeters: Number.POSITIVE_INFINITY,
+          routeAvoidanceVolumes,
+          overlapGrants: [parentEndpointSeam.overlapEnvelope],
+          rejectionCode: 'route-network-endpoint-local-socket-missing',
+        };
+      }
       const nodeSeam = createDungeonRouteEndpointSeam(nodeSocket, {
         id: `${operationId}:planning-parent-attachment:${candidate.node.id}:endpoint-seam`,
         operationId,
@@ -9236,7 +14612,7 @@ export function planRouteNetwork({
       const parentConnectorFamily = Math.abs(
         Number(nodeSocket.position.y) - Number(parentSocket.position.y),
       ) > 1e-6 ? verticalFamily : 'service-gallery';
-      const selectedParentAttachment = collisionAvoidingParentAttachmentPath(
+      const parentAttachmentDomain = collisionAvoidingParentAttachmentPath(
         { position: parentSocket.position, facing: parentSocket.facing },
         nodeSocket,
         routeAvoidanceVolumes,
@@ -9246,78 +14622,104 @@ export function planRouteNetwork({
         ROUTE_NETWORK_SOCKET_APPROACH_METERS,
         true,
         true,
-      );
-      const path = selectedParentAttachment?.path ?? null;
-      if (!path || path.length < 2) {
-        return {
-          compatible: false,
-          path: null,
-          pathVolumes: [],
-          collisionScore: Number.POSITIVE_INFINITY,
-          distanceMeters: Number.POSITIVE_INFINITY,
-          routeAvoidanceVolumes,
-          overlapGrants: parentAttachmentOverlapGrants,
-        };
-      }
-      const parentApproachDiagnostic = routePathExteriorSocketApproachDiagnostic(
-        path,
-        parentSocket,
-        false,
-        parentEndpointSeam,
-      );
-      const nodeApproachDiagnostic = routePathExteriorSocketApproachDiagnostic(
-        path,
-        nodeSocket,
+        null,
         true,
-        nodeSeam,
       );
-      const nodeMaskCompatible = routePathRespectsEndpointNodeMask(
-        path,
-        candidate.node,
-        nodeSeam,
-      );
-      if (!parentApproachDiagnostic.accepted
-        || !nodeApproachDiagnostic.accepted
-        || !nodeMaskCompatible) {
+      const assessCandidate = (pathCandidate) => {
+        const path = pathCandidate?.path ?? null;
+        if (!path || path.length < 2) return null;
+        const parentApproachDiagnostic = routePathExteriorSocketApproachDiagnostic(
+          path,
+          parentSocket,
+          false,
+          parentEndpointSeam,
+        );
+        const nodeApproachDiagnostic = routePathExteriorSocketApproachDiagnostic(
+          path,
+          nodeSocket,
+          true,
+          nodeSeam,
+        );
+        const nodeMaskCompatible = routePathRespectsEndpointNodeMask(
+          path,
+          candidate.node,
+          nodeSeam,
+        );
+        const collisionScore = Number(pathCandidate.collisionScore);
+        const distanceMeters = featurelessPathDistance(path);
         return {
-          compatible: false,
-          path: null,
-          pathVolumes: [],
-          collisionScore: Number.POSITIVE_INFINITY,
-          distanceMeters: Number.POSITIVE_INFINITY,
+          ...pathCandidate,
+          compatible: collisionScore === 0
+            && distanceMeters <= maximumSpan + 1e-6
+            && parentApproachDiagnostic.accepted === true
+            && nodeApproachDiagnostic.accepted === true
+            && nodeMaskCompatible,
+          path,
+          collisionScore,
+          distanceMeters,
           routeAvoidanceVolumes,
           overlapGrants: parentAttachmentOverlapGrants,
           rejectionCode: !parentApproachDiagnostic.accepted
             || !nodeApproachDiagnostic.accepted
             ? 'route-network-seam-exterior-lead-mismatch'
-            : 'route-network-endpoint-overlap-outside-seam',
+            : !nodeMaskCompatible
+              ? 'route-network-endpoint-overlap-outside-seam'
+              : collisionScore > 0
+                ? 'route-network-parent-attachment-static-collision'
+                : distanceMeters > maximumSpan + 1e-6
+                  ? 'route-network-parent-attachment-featureless-span-exceeded'
+                  : null,
           parentApproachDiagnostic,
           nodeApproachDiagnostic,
           nodeMaskCompatible,
         };
-      }
-      const collisionScore = selectedParentAttachment.collisionScore;
-      const distanceMeters = featurelessPathDistance(path);
+      };
+      const assessedCandidates = (parentAttachmentDomain?.scoredCandidates ?? [])
+        .map(assessCandidate)
+        .filter(Boolean);
+      const compatibleCandidates = assessedCandidates.filter(({ compatible }) => compatible);
+      const representative = compatibleCandidates[0]
+        ?? assessedCandidates.slice().sort((first, second) => (
+          first.collisionScore - second.collisionScore
+            || Number(!first.parentApproachDiagnostic?.accepted)
+              - Number(!second.parentApproachDiagnostic?.accepted)
+            || Number(!first.nodeApproachDiagnostic?.accepted)
+              - Number(!second.nodeApproachDiagnostic?.accepted)
+            || Number(!first.nodeMaskCompatible) - Number(!second.nodeMaskCompatible)
+            || first.distanceMeters - second.distanceMeters
+            || Number(first.ordinal ?? 0) - Number(second.ordinal ?? 0)
+        ))[0]
+        ?? {
+          path: null,
+          pathVolumes: [],
+          collisionVolumes: [],
+          collisionScore: Number.POSITIVE_INFINITY,
+          distanceMeters: Number.POSITIVE_INFINITY,
+          rejectionCode: 'route-network-parent-attachment-path-missing',
+        };
       return {
-        compatible: collisionScore === 0 && distanceMeters <= maximumSpan + 1e-6,
-        path,
-        pathVolumes: selectedParentAttachment.pathVolumes,
-        collisionVolumes: selectedParentAttachment.collisionVolumes,
-        collisionScore,
-        distanceMeters,
+        ...representative,
+        compatible: compatibleCandidates.length > 0,
+        candidates: compatibleCandidates,
+        eligibleCandidateCount: compatibleCandidates.length,
+        rawCandidateCount: assessedCandidates.length,
         routeAvoidanceVolumes,
         overlapGrants: parentAttachmentOverlapGrants,
       };
     };
-    const staticParentAttachmentCache = new WeakMap();
-    const staticParentAttachmentForCandidate = (candidate, index) => {
-      if (!staticParentAttachmentCache.has(candidate)) {
-        staticParentAttachmentCache.set(
+    const staticParentAttachmentDomainCache = new WeakMap();
+    const staticParentAttachmentDomainForCandidate = (candidate, index) => {
+      if (!staticParentAttachmentDomainCache.has(candidate)) {
+        staticParentAttachmentDomainCache.set(
           candidate,
-          parentAttachmentForCandidate(candidate, index),
+          parentAttachmentDomainForCandidate(candidate, index),
         );
       }
-      return staticParentAttachmentCache.get(candidate);
+      return staticParentAttachmentDomainCache.get(candidate);
+    };
+    const staticParentAttachmentForCandidate = (candidate, index) => {
+      const domain = staticParentAttachmentDomainForCandidate(candidate, index);
+      return domain.candidates?.[0] ?? domain;
     };
     const coverageSocketBindingKey = (firstIndex, secondIndex) => (
       firstIndex < secondIndex
@@ -9343,11 +14745,24 @@ export function planRouteNetwork({
       const requiredLocalSocketId = adjacentIndex == null
         ? null
         : requiredLocalSocketIdForPair(index, adjacentIndex);
+      const declaredSpineSocketIds = new Set(routeNetworkSpineSocketIds(node));
       return node.sockets.filter((socket) => (
         socket.state === 'capped'
-          && !(endpointNodeIndexSet.has(index) && socket.localSocketId === 'entry')
+          && !(endpointNodeIndexSet.has(index)
+            && socket.localSocketId === (
+              node.parentAttachmentLocalSocketId
+                ?? node.planningParentLocalSocketId
+                ?? 'entry'
+            ))
           && (!requiredLocalSocketId
             || socket.localSocketId === requiredLocalSocketId)
+          // Authored topology kits distinguish their ordinary spine from
+          // infrastructure-only sockets. Honor that contract throughout the
+          // pair cache, CSP, and exact spine solve. A named structural binding
+          // (the stacked-interchange support compound) is the sole override.
+          && (requiredLocalSocketId
+            || declaredSpineSocketIds.size === 0
+            || declaredSpineSocketIds.has(String(socket.localSocketId)))
       ));
     };
     const minimumSpineDistance = (
@@ -9438,22 +14853,24 @@ export function planRouteNetwork({
       const localCount = 8;
       const selected = new Set();
       if (globallyPlacedObjectiveCoverage) {
-        // At a bend the global solver must decide whether the turn happens
-        // before or after an authored module. Retain the base position and its
-        // one-tile neighborhood for every legal rotation. Keeping only two
-        // shuffled ties can omit the single 2.8 m tangent shift that aligns
-        // opposing authored sockets, leaving only an invalid diagonal elbow.
-        const candidatesByFacing = new Map();
-        for (const candidate of validCandidates) {
-          const key = `${Number(candidate.facing?.x ?? 0).toFixed(0)}:${Number(
-            candidate.facing?.z ?? 0,
-          ).toFixed(0)}`;
-          const group = candidatesByFacing.get(key) ?? [];
-          group.push(candidate);
-          candidatesByFacing.set(key, group);
-        }
-        for (const group of candidatesByFacing.values()) {
-          for (const candidate of group.slice(0, 8)) selected.add(candidate);
+        // Reserve explicit physical witness slots before generic per-facing
+        // fill. Insertion-order truncation previously spent half the domain on
+        // shuffled near ties and could omit the one-tile alignment or the
+        // three-tile lateral clearance needed to keep an earlier corridor out
+        // of a later endpoint mask. Every retained transform remains on the
+        // existing 2.8 m grid and the overall 64-candidate cap is unchanged.
+        for (const [offsetX, offsetZ] of [
+          [0, 0],
+          [-2.8, 0], [2.8, 0], [0, -2.8], [0, 2.8],
+          [-8.4, 0], [8.4, 0], [0, -8.4], [0, 8.4],
+        ]) {
+          for (const closest of closestPlacementCandidatesPerFacing(
+            validCandidates,
+            {
+              x: Number(baseCenter.x) + offsetX,
+              z: Number(baseCenter.z) + offsetZ,
+            },
+          )) selected.add(closest);
         }
       } else {
         for (const candidate of validCandidates.slice(0, localCount)) selected.add(candidate);
@@ -9558,7 +14975,50 @@ export function planRouteNetwork({
       return [...selected].slice(0, limit);
     };
     const candidateGenerationStartedAt = planningNowMilliseconds();
+    emitPlanningDebugStage('route-network-candidate-generation-start', {
+      physicalNodeCount: mainCenters.length,
+      staticAvoidanceVolumeCount: staticAvoidanceVolumes.length,
+    });
+    const unarySocketApproachConflictCache = new Map();
+    const requiredLocalSocketIdsForCandidate = (nodeIndex, candidate) => [...new Set([
+      ...(coveragePlacement?.requiredSocketBindings ?? []).flatMap((binding) => {
+        if (Number(binding.fromIndex) === nodeIndex && binding.fromLocalSocketId) {
+          return [String(binding.fromLocalSocketId)];
+        }
+        if (Number(binding.toIndex) === nodeIndex && binding.toLocalSocketId) {
+          return [String(binding.toLocalSocketId)];
+        }
+        return [];
+      }),
+      ...(candidate?.parentLocalSocketId ? [String(candidate.parentLocalSocketId)] : []),
+    ])].sort();
+    const unarySocketApproachConflictsForCandidate = (nodeIndex, candidate) => {
+      const requiredLocalSocketIds = requiredLocalSocketIdsForCandidate(
+        nodeIndex,
+        candidate,
+      );
+      if (requiredLocalSocketIds.length === 0) return [];
+      const key = [
+        String(candidate.node?.grammarId ?? ''),
+        Number(candidate.node?.placement?.rotationQuarterTurns ?? 0),
+        Number(candidate.node?.placement?.center?.x ?? 0).toFixed(6),
+        Number(candidate.node?.placement?.center?.y ?? 0).toFixed(6),
+        Number(candidate.node?.placement?.center?.z ?? 0).toFixed(6),
+        requiredLocalSocketIds.join(','),
+      ].join(':');
+      if (!unarySocketApproachConflictCache.has(key)) {
+        unarySocketApproachConflictCache.set(
+          key,
+          routeNetworkNodeSocketApproachConflicts(
+            candidate.node,
+            requiredLocalSocketIds,
+          ),
+        );
+      }
+      return unarySocketApproachConflictCache.get(key);
+    };
     const placementCandidateGroups = mainCenters.map((_, index) => {
+      emitPlanningDebugStage('route-network-candidate-group-start', { nodeIndex: index });
       const inputs = placementInputsForIndex(index);
       const endpointOrdinal = endpointOrdinalForNodeIndex(index);
       const endpointOverlapGrants = endpointOrdinal >= 0
@@ -9585,15 +15045,44 @@ export function planRouteNetwork({
           ),
         },
       );
-      const nodeValidCandidates = rawCandidates.filter((candidate) => (
+      const collisionValidCandidates = rawCandidates.filter((candidate) => (
         !candidate.parentDistanceExceeded
           && candidate.collisionScore === 0
+      ));
+      const unarySocketApproachRejectedCandidates = collisionValidCandidates.filter(
+        (candidate) => unarySocketApproachConflictsForCandidate(index, candidate).length > 0,
+      );
+      const nodeValidCandidates = collisionValidCandidates.filter((candidate) => (
+        unarySocketApproachConflictsForCandidate(index, candidate).length === 0
       ));
       let parentAttachmentCandidatesEvaluated = 0;
       let parentAttachmentRejectedCount = 0;
       let bestRejectedParentAttachment = null;
-      const adjacentEndpointNodeIndices = [...endpointNodeIndexSet]
+      let bestRejectedParentAttachmentCollisionSource = null;
+      const ordinalAdjacentEndpointNodeIndices = [...endpointNodeIndexSet]
         .filter((endpointNodeIndex) => Math.abs(endpointNodeIndex - index) === 1);
+      const bindingAdjacentEndpointNodeIndices = endpointOrderVariant > 0
+        ? (coveragePlacement?.requiredSocketBindings ?? []).flatMap((binding) => {
+          if (Number(binding.fromIndex) === index
+            && endpointNodeIndexSet.has(Number(binding.toIndex))) {
+            return [Number(binding.toIndex)];
+          }
+          if (Number(binding.toIndex) === index
+            && endpointNodeIndexSet.has(Number(binding.fromIndex))) {
+            return [Number(binding.fromIndex)];
+          }
+          return [];
+        })
+        : [];
+      // A traversal T can move a numerically intervening room onto its branch.
+      // Candidate targeting must follow the resulting physical bindings: the
+      // surviving main-chain room may then be adjacent to an endpoint two
+      // ordinals away and is the reset that lets the longer interval cross a
+      // protected gallery. Keep variant zero's historical domain unchanged.
+      const adjacentEndpointNodeIndices = [...new Set([
+        ...ordinalAdjacentEndpointNodeIndices,
+        ...bindingAdjacentEndpointNodeIndices,
+      ])].sort((first, second) => first - second);
       const preferredAdjacentEndpointTargets = endpointOrdinal < 0
         ? adjacentEndpointNodeIndices.flatMap((adjacentEndpointNodeIndex) => {
           const endpointGrammar = selectedGrammars[adjacentEndpointNodeIndex];
@@ -9672,15 +15161,174 @@ export function planRouteNetwork({
                   attachment.nodeApproachDiagnostic ?? null,
                 ),
                 nodeMaskCompatible: attachment.nodeMaskCompatible ?? null,
-                blockingVolumeIds: attachment.path
-                  ? pathPlanningCollisionIds(
-                    attachment.path,
-                    attachment.routeAvoidanceVolumes,
-                    3.6,
-                    attachment.overlapGrants ?? [],
-                  ).slice(0, 12)
-                  : [],
+                blockingVolumeIds: [],
               };
+              bestRejectedParentAttachmentCollisionSource = attachment.path
+                ? {
+                    path: attachment.path,
+                    avoidanceVolumes: attachment.routeAvoidanceVolumes,
+                    overlapGrants: attachment.overlapGrants ?? [],
+                  }
+                : null;
+            }
+          }
+        }
+        // Dense-coverage endpoints own exact host handoffs. Individually valid
+        // `entry` placements do not prove that the later spine can use them,
+        // so reserve a bounded share of alternate-socket and one-tile tangent
+        // witnesses at both ends of the route.
+        // The retained endpoint domain remains capped at 24; an empty primary
+        // domain may additionally walk the same 2.8 m grid out to the existing
+        // six-tile bound until that cap is filled.
+        if (grant.kind === 'objective-route-coverage') {
+          const tangent = {
+            x: -Number(toDungeonCardinalFacing(inputs.outward).z),
+            y: 0,
+            z: Number(toDungeonCardinalFacing(inputs.outward).x),
+          };
+          const maximumEndpointCandidateCount = 24;
+          const primaryCompatibleCandidateCount = compatibleCandidates.length;
+          const collisionFreeFallbackCandidates = rawCandidates.filter((candidate) => (
+            candidate.collisionScore === 0
+              && unarySocketApproachConflictsForCandidate(index, candidate).length === 0
+          ));
+          const boundedFallbackSourceCandidates = [...new Set([
+              ...closestPlacementCandidatesPerFacing(
+                collisionFreeFallbackCandidates,
+                centers[index],
+              ),
+              ...collisionFreeFallbackCandidates.slice(0, 8),
+            ])];
+          const tangentSourceCandidates = primaryCompatibleCandidateCount === 0
+            ? rawCandidates
+            : boundedFallbackSourceCandidates;
+          const tangentWitnessKeys = new Set(compatibleCandidates.map((candidate) => [
+            Number(candidate.center.x).toFixed(4),
+            Number(candidate.center.y).toFixed(4),
+            Number(candidate.center.z).toFixed(4),
+            Number(candidate.facing.x).toFixed(4),
+            Number(candidate.facing.z).toFixed(4),
+            candidate.parentLocalSocketId ?? 'entry',
+          ].join(':')));
+          const registerCompatibleFallback = (candidate) => {
+            const witnessKey = [
+              Number(candidate.center.x).toFixed(4),
+              Number(candidate.center.y).toFixed(4),
+              Number(candidate.center.z).toFixed(4),
+              Number(candidate.facing.x).toFixed(4),
+              Number(candidate.facing.z).toFixed(4),
+              candidate.parentLocalSocketId ?? 'entry',
+            ].join(':');
+            if (tangentWitnessKeys.has(witnessKey)) return false;
+            tangentWitnessKeys.add(witnessKey);
+            if (unarySocketApproachConflictsForCandidate(index, candidate).length > 0) {
+              return false;
+            }
+            parentAttachmentCandidatesEvaluated += 1;
+            const attachment = staticParentAttachmentForCandidate(candidate, index);
+            if (!attachment.compatible) {
+              parentAttachmentRejectedCount += 1;
+              return false;
+            }
+            compatibleCandidates.push({
+              ...candidate,
+              parentDistanceMeters: attachment.distanceMeters,
+              parentDistanceExceeded: false,
+            });
+            return true;
+          };
+          const alternateCandidateLimit = primaryCompatibleCandidateCount + 8;
+          for (const candidate of boundedFallbackSourceCandidates) {
+            if (compatibleCandidates.length >= alternateCandidateLimit) break;
+            const legalParentLocalSocketIds = new Set(
+              routeNetworkSpineSocketIds(candidate.node),
+            );
+            const alternateLocalSocketIds = candidate.node.sockets
+              .filter(({ state }) => state === 'capped')
+              .map(({ localSocketId }) => String(localSocketId))
+              .filter((localSocketId) => (
+                localSocketId !== String(candidate.parentLocalSocketId ?? 'entry')
+                  && legalParentLocalSocketIds.has(localSocketId)
+              ))
+              .sort((first, second) => first.localeCompare(second));
+            for (const parentLocalSocketId of alternateLocalSocketIds) {
+              registerCompatibleFallback({
+                ...candidate,
+                parentLocalSocketId,
+                node: {
+                  ...candidate.node,
+                  planningParentLocalSocketId: parentLocalSocketId,
+                },
+              });
+              if (compatibleCandidates.length >= alternateCandidateLimit) break;
+            }
+          }
+          const tangentTileOffsets = Array.from(
+            {
+              length: ROUTE_NETWORK_ENDPOINT_DOMAIN_TANGENT_WITNESS_TILES,
+            },
+            (_, ordinal) => ordinal + 1,
+          ).flatMap((tiles) => [-tiles, tiles]);
+          const tangentCandidateLimit = primaryCompatibleCandidateCount
+            + maximumEndpointCandidateCount;
+          tangentSearch:
+          for (const sourceCandidate of tangentSourceCandidates) {
+            for (const tangentTiles of tangentTileOffsets) {
+              const shiftedCenter = addDungeonPoints(
+                sourceCandidate.center,
+                scaleDungeonPoint(
+                  tangent,
+                  tangentTiles * ROUTE_NETWORK_ENDPOINT_DOMAIN_TILE_METERS,
+                ),
+              );
+              const legalParentLocalSocketIds = new Set(
+                routeNetworkSpineSocketIds(sourceCandidate.node),
+              );
+              const parentLocalSocketIds = sourceCandidate.node.sockets
+                .filter(({ state }) => state === 'capped')
+                .map(({ localSocketId }) => String(localSocketId))
+                .filter((localSocketId) => legalParentLocalSocketIds.has(localSocketId))
+                .sort((first, second) => first.localeCompare(second));
+              for (const parentLocalSocketId of parentLocalSocketIds) {
+                const witnessKey = [
+                  Number(shiftedCenter.x).toFixed(4),
+                  Number(shiftedCenter.y).toFixed(4),
+                  Number(shiftedCenter.z).toFixed(4),
+                  Number(sourceCandidate.facing.x).toFixed(4),
+                  Number(sourceCandidate.facing.z).toFixed(4),
+                  parentLocalSocketId,
+                ].join(':');
+                if (tangentWitnessKeys.has(witnessKey)) continue;
+                const shiftedNode = createRouteNetworkNode(
+                  index,
+                  shiftedCenter,
+                  sourceCandidate.facing,
+                  true,
+                );
+                shiftedNode.planningParentLocalSocketId = parentLocalSocketId;
+                const collisionScore = indexedStaticNodeCollisionScore(
+                  shiftedNode,
+                  endpointOverlapGrants,
+                );
+                if (collisionScore > 0) continue;
+                const shiftedCandidate = {
+                  ...sourceCandidate,
+                  center: shiftedCenter,
+                  node: shiftedNode,
+                  parentLocalSocketId,
+                  collisionScore,
+                  parentAttachmentCollisionScore: 0,
+                  parentAttachmentBlocked: false,
+                  parentDistanceExceeded: false,
+                  spineDistanceMeters: 0,
+                  spineDistanceExceeded: false,
+                  displacement: dungeonPointDistance(shiftedCenter, centers[index]),
+                };
+                registerCompatibleFallback(shiftedCandidate);
+                if (compatibleCandidates.length >= tangentCandidateLimit) {
+                  break tangentSearch;
+                }
+              }
             }
           }
         }
@@ -9718,6 +15366,17 @@ export function planRouteNetwork({
           || first.collisionScore - second.collisionScore
           || first.displacement - second.displacement
       ))[0] ?? rawCandidates[0] ?? null;
+      const needsDetailedPlacementDiagnostics = candidates.length === 0;
+      if (needsDetailedPlacementDiagnostics
+        && bestRejectedParentAttachment
+        && bestRejectedParentAttachmentCollisionSource) {
+        bestRejectedParentAttachment.blockingVolumeIds = pathPlanningCollisionIds(
+          bestRejectedParentAttachmentCollisionSource.path,
+          bestRejectedParentAttachmentCollisionSource.avoidanceVolumes,
+          3.6,
+          bestRejectedParentAttachmentCollisionSource.overlapGrants,
+        ).slice(0, 12);
+      }
       return {
         index,
         candidates,
@@ -9735,13 +15394,24 @@ export function planRouteNetwork({
               collisionScore: candidate.collisionScore,
               parentDistanceMeters: candidate.parentDistanceMeters,
               parentDistanceExceeded: candidate.parentDistanceExceeded,
-              collidingVolumeIds: nodePlanningCollisionIds(
-                candidate.node,
-                staticAvoidanceVolumes,
-              ).slice(0, 12),
+              collidingVolumeIds: needsDetailedPlacementDiagnostics
+                ? nodePlanningCollisionIds(
+                  candidate.node,
+                  staticAvoidanceVolumes,
+                ).slice(0, 12)
+                : [],
             } : null;
           })(),
           rawCandidateCount: rawCandidates.length,
+          unarySocketApproachRejectedCount:
+            unarySocketApproachRejectedCandidates.length,
+          unarySocketApproachFirstConflict:
+            unarySocketApproachRejectedCandidates.length > 0
+              ? cloneDungeonAugmentationValue(unarySocketApproachConflictsForCandidate(
+                index,
+                unarySocketApproachRejectedCandidates[0],
+              )[0] ?? null)
+              : null,
           withinParentDistanceCount: withinParentDistance.length,
           collisionFreeCount: collisionFree.length,
           parentAttachmentCompatibleCount: endpointNodeIndexSet.has(index)
@@ -9761,6 +15431,7 @@ export function planRouteNetwork({
           minimumCollisionParentDistanceMeters:
             minimumCollisionCandidate?.parentDistanceMeters ?? null,
           collidingVolumeIds: minimumCollisionCandidate
+            && needsDetailedPlacementDiagnostics
             ? nodePlanningCollisionIds(
               minimumCollisionCandidate.node,
               staticAvoidanceVolumes,
@@ -9782,10 +15453,12 @@ export function planRouteNetwork({
               center: cloneDungeonAugmentationValue(candidate.center),
               collisionScore: candidate.collisionScore,
               parentDistanceMeters: candidate.parentDistanceMeters,
-              collidingVolumeIds: nodePlanningCollisionIds(
-                candidate.node,
-                staticAvoidanceVolumes,
-              ).slice(0, 8),
+              collidingVolumeIds: needsDetailedPlacementDiagnostics
+                ? nodePlanningCollisionIds(
+                  candidate.node,
+                  staticAvoidanceVolumes,
+                ).slice(0, 8)
+                : [],
             })),
           selectedCandidateCenters: candidates.map(({ center }) => (
             cloneDungeonAugmentationValue(center)
@@ -9795,6 +15468,13 @@ export function planRouteNetwork({
     }).sort((first, second) => first.index - second.index);
     physicalPlanningPhaseTimings.candidateGenerationMs +=
       planningNowMilliseconds() - candidateGenerationStartedAt;
+    emitPlanningDebugStage('route-network-candidate-generation-complete', {
+      placementCandidateCounts: placementCandidateGroups.map(({ index, candidates }) => ({
+        nodeIndex: index,
+        count: candidates.length,
+      })),
+      planningPhaseTimings: physicalPlanningTimingSnapshot(),
+    });
     if (placementCandidateGroups.some(({ candidates }) => candidates.length === 0)) {
       const failedGroup = placementCandidateGroups.find(({ candidates }) => candidates.length === 0);
       return {
@@ -9851,6 +15531,7 @@ export function planRouteNetwork({
     const selectedPlacementCandidates = new Map();
     let placementSolution = null;
     let placementSpineSolution = null;
+    let placementTopologySolution = null;
     let placementSearchVisits = 0;
     let physicalSpineAttempts = 0;
     let lastPhysicalPlacementCenters = null;
@@ -9884,8 +15565,21 @@ export function planRouteNetwork({
       bestBlockedCollisionIds: [],
       bestBlockingVolumes: [],
     }));
+    let inactiveSocketCapFailureDiagnostics = null;
     const physicalPairCompatibilityCache = new Map();
     const physicalPairRouteShapeCache = new Map();
+    const translationInvariantRouteShapeBooleanCache =
+      planningCaches?.translationInvariantRouteShapeBooleanCache ?? new Map();
+    const routeShapeNodeGeometrySignatureCache = new WeakMap();
+    const routeShapeCacheContextSignature = [
+      operationId,
+      String(grant.kind ?? ''),
+      String(topologyTemplateId ?? ''),
+      String(elevationMode ?? ''),
+      String(verticalFamily ?? ''),
+      routeShapeCacheMetric(maximumSpan),
+      canonicalStringify(coverageModuleRouteOptions),
+    ].join(':');
     const physicalPairEdgeDiagnostics = coverageRequiredEdges.map((edge) => ({
         edgeIndex: edge.edgeOrdinal,
         fromNodeIndex: edge.fromIndex,
@@ -9900,6 +15594,7 @@ export function planRouteNetwork({
         eligibleSocketPairCandidateCounts: [],
         routeStageTotals: {
           socketPairCount: 0,
+          detailedSocketPairCount: 0,
           rawRouteCandidateCount: 0,
           exteriorApproachEligibleCount: 0,
           fromNodeMaskEligibleCount: 0,
@@ -9913,6 +15608,54 @@ export function planRouteNetwork({
           pinnedAttachmentCollisionCount: 0,
         },
       }));
+    const hydratePhysicalPairEdgeCollisionDiagnostics = () => {
+      for (const diagnostics of physicalPairEdgeDiagnostics) {
+        diagnostics.bestBlockedCollisionIds = diagnostics.bestBlockedPath
+          ? pathPlanningCollisionIds(
+            diagnostics.bestBlockedPath,
+            staticAvoidanceVolumes,
+          ).slice(0, 12)
+          : [];
+      }
+    };
+    const pairBooleanCandidateIdentity = new WeakMap();
+    let pairBooleanCandidateCount = 0;
+    for (const group of placementCandidateGroups) {
+      for (const candidate of [
+        ...(group.candidatePool ?? []),
+        ...(group.candidates ?? []),
+      ]) {
+        const existing = pairBooleanCandidateIdentity.get(candidate);
+        if (existing && existing.nodeIndex !== group.index) {
+          throw new Error('A physical placement candidate cannot belong to two node indices.');
+        }
+        if (!existing) {
+          pairBooleanCandidateIdentity.set(candidate, {
+            ordinal: pairBooleanCandidateCount,
+            nodeIndex: group.index,
+          });
+          pairBooleanCandidateCount += 1;
+        }
+      }
+    }
+    const pairBooleanCache = new Uint8Array(
+      pairBooleanCandidateCount * pairBooleanCandidateCount,
+    );
+    const pairBooleanOffset = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => {
+      const firstIdentity = pairBooleanCandidateIdentity.get(firstCandidate);
+      const secondIdentity = pairBooleanCandidateIdentity.get(secondCandidate);
+      if (!firstIdentity || !secondIdentity
+        || firstIdentity.nodeIndex !== firstIndex
+        || secondIdentity.nodeIndex !== secondIndex) return -1;
+      const lowOrdinal = Math.min(firstIdentity.ordinal, secondIdentity.ordinal);
+      const highOrdinal = Math.max(firstIdentity.ordinal, secondIdentity.ordinal);
+      return lowOrdinal * pairBooleanCandidateCount + highOrdinal;
+    };
     const candidatePhysicalKeyCache = new WeakMap();
     const candidatePhysicalKey = (candidate, index) => {
       if (!candidatePhysicalKeyCache.has(candidate)) {
@@ -9923,6 +15666,7 @@ export function planRouteNetwork({
           Number(candidate.center.z).toFixed(3),
           Number(candidate.facing?.x ?? 0).toFixed(3),
           Number(candidate.facing?.z ?? 0).toFixed(3),
+          String(candidate.parentLocalSocketId ?? 'entry'),
         ].join(':'));
       }
       return candidatePhysicalKeyCache.get(candidate);
@@ -9942,56 +15686,88 @@ export function planRouteNetwork({
         toIndex,
       )}`;
     };
-    const candidatePairNodeCollisionCache = new Map();
-    const candidatePairNodeCollisionScore = (
+    const computeCandidatePairNodeCollisionScore = (
+      firstCandidate,
+      _firstIndex,
+      secondCandidate,
+    ) => {
+      const firstEnvelope = candidateNodeEnvelope(firstCandidate);
+      const secondEnvelope = candidateNodeEnvelope(secondCandidate);
+      if (!firstEnvelope || !secondEnvelope
+        || !planningVolumesOverlap(firstEnvelope, secondEnvelope)) return 0;
+      let score = 0;
+      const firstVolumes = candidateNodeVolumes(firstCandidate);
+      const secondVolumes = candidateNodeVolumes(secondCandidate);
+      for (const firstVolume of firstVolumes) {
+        for (const secondVolume of secondVolumes) {
+          if (planningVolumesOverlap(firstVolume, secondVolume)) score += 1;
+        }
+      }
+      return score;
+    };
+    const computeCandidatePairNodesOverlap = (
+      firstCandidate,
+      secondCandidate,
+    ) => {
+      const firstEnvelope = candidateNodeEnvelope(firstCandidate);
+      const secondEnvelope = candidateNodeEnvelope(secondCandidate);
+      if (!firstEnvelope || !secondEnvelope
+        || !planningVolumesOverlap(firstEnvelope, secondEnvelope)) return false;
+      const firstVolumes = candidateNodeVolumes(firstCandidate);
+      const secondVolumes = candidateNodeVolumes(secondCandidate);
+      return firstVolumes.some((firstVolume) => (
+        secondVolumes.some((secondVolume) => (
+          planningVolumesOverlap(firstVolume, secondVolume)
+        ))
+      ));
+    };
+    const candidatePairNodesOverlap = (
       firstCandidate,
       firstIndex,
       secondCandidate,
       secondIndex,
     ) => {
-      const cacheKey = physicalPairCacheKey(
+      const offset = pairBooleanOffset(
         firstCandidate,
         firstIndex,
         secondCandidate,
         secondIndex,
       );
-      if (!candidatePairNodeCollisionCache.has(cacheKey)) {
-        candidatePairNodeCollisionCache.set(
-          cacheKey,
-          nodePlanningCollisionScore(
-            firstCandidate.node,
-            candidateNodeVolumes(secondCandidate),
-          ),
-        );
+      if (offset < 0) {
+        return computeCandidatePairNodesOverlap(firstCandidate, secondCandidate);
       }
-      return candidatePairNodeCollisionCache.get(cacheKey);
+      const cached = pairBooleanCache[offset];
+      if (cached > 0) return cached === 2;
+      const overlaps = computeCandidatePairNodesOverlap(firstCandidate, secondCandidate);
+      pairBooleanCache[offset] = overlaps ? 2 : 1;
+      return overlaps;
     };
-    const candidatePairMinimumSpineDistanceCache = new Map();
+    const candidatePairMinimumSpineDistanceCache = new WeakMap();
+    const computeCandidatePairMinimumSpineDistance = (
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+    ) => minimumSpineDistance(
+      firstCandidate.node,
+      firstIndex,
+      secondCandidate.node,
+      secondIndex,
+    );
     const candidatePairMinimumSpineDistance = (
       firstCandidate,
       firstIndex,
       secondCandidate,
       secondIndex,
-    ) => {
-      const cacheKey = physicalPairCacheKey(
-        firstCandidate,
-        firstIndex,
-        secondCandidate,
-        secondIndex,
-      );
-      if (!candidatePairMinimumSpineDistanceCache.has(cacheKey)) {
-        candidatePairMinimumSpineDistanceCache.set(
-          cacheKey,
-          minimumSpineDistance(
-            firstCandidate.node,
-            firstIndex,
-            secondCandidate.node,
-            secondIndex,
-          ),
-        );
-      }
-      return candidatePairMinimumSpineDistanceCache.get(cacheKey);
-    };
+    ) => cachedOrderedCandidatePairScalar(
+      candidatePairMinimumSpineDistanceCache,
+      routeShapeCacheContextSignature,
+      firstCandidate,
+      firstIndex,
+      secondCandidate,
+      secondIndex,
+      computeCandidatePairMinimumSpineDistance,
+    );
     const parentAttachmentPairCompatibilityCache = new Map();
     const candidatePairRespectsParentAttachments = (
       firstCandidate,
@@ -10015,30 +15791,32 @@ export function planRouteNetwork({
       if (parentAttachmentPairCompatibilityCache.has(cacheKey)) {
         return parentAttachmentPairCompatibilityCache.get(cacheKey);
       }
-      const firstAttachment = endpointNodeIndexSet.has(firstIndex)
-        ? staticParentAttachmentForCandidate(firstCandidate, firstIndex)
-        : null;
-      const secondAttachment = endpointNodeIndexSet.has(secondIndex)
-        ? staticParentAttachmentForCandidate(secondCandidate, secondIndex)
-        : null;
-      const compatible = (!firstAttachment
-          || !firstAttachment.pathVolumes.some((pathVolume) => (
-            candidateNodeVolumes(secondCandidate).some((nodeVolume) => (
-              planningVolumesOverlap(pathVolume, nodeVolume)
-            ))
-          )))
-        && (!secondAttachment
-          || !secondAttachment.pathVolumes.some((pathVolume) => (
-            candidateNodeVolumes(firstCandidate).some((nodeVolume) => (
-              planningVolumesOverlap(pathVolume, nodeVolume)
-            ))
-          )))
-        && (!firstAttachment || !secondAttachment
-          || !firstAttachment.pathVolumes.some((firstPathVolume) => (
-            secondAttachment.pathVolumes.some((secondPathVolume) => (
-              planningVolumesOverlap(firstPathVolume, secondPathVolume)
-            ))
-          )));
+      const firstAttachmentCandidates = endpointNodeIndexSet.has(firstIndex)
+        ? staticParentAttachmentDomainForCandidate(firstCandidate, firstIndex).candidates ?? []
+        : [null];
+      const secondAttachmentCandidates = endpointNodeIndexSet.has(secondIndex)
+        ? staticParentAttachmentDomainForCandidate(secondCandidate, secondIndex).candidates ?? []
+        : [null];
+      const attachmentVolumes = (attachment) => (
+        attachment?.collisionVolumes ?? attachment?.pathVolumes ?? []
+      );
+      const attachmentClearsNode = (attachment, candidate) => (
+        !attachment || !attachmentVolumes(attachment).some((pathVolume) => (
+          candidateNodeVolumes(candidate).some((nodeVolume) => (
+            planningVolumesOverlap(pathVolume, nodeVolume)
+          ))
+        ))
+      );
+      const firstSupportedAttachments = firstAttachmentCandidates.filter((attachment) => (
+        attachmentClearsNode(attachment, secondCandidate)
+      ));
+      const secondSupportedAttachments = secondAttachmentCandidates.filter((attachment) => (
+        attachmentClearsNode(attachment, firstCandidate)
+      ));
+      const compatible = routeNetworkParentAttachmentPathCombinations([
+        firstSupportedAttachments,
+        secondSupportedAttachments,
+      ]).next().done === false;
       parentAttachmentPairCompatibilityCache.set(cacheKey, compatible);
       return compatible;
     };
@@ -10053,14 +15831,19 @@ export function planRouteNetwork({
     // the actual selected attachment paths below.
     const pinnedParentAttachmentPathVolumes = placementCandidateGroups
       .filter(({ endpoint, candidates }) => endpoint && candidates.length === 1)
-      .flatMap(({ index, candidates }) => (
-        (staticParentAttachmentForCandidate(candidates[0], index).pathVolumes ?? [])
+      .flatMap(({ index, candidates }) => {
+        const attachmentDomain = staticParentAttachmentDomainForCandidate(
+          candidates[0],
+          index,
+        ).candidates ?? [];
+        if (attachmentDomain.length !== 1) return [];
+        return (attachmentDomain[0].pathVolumes ?? [])
           .map((volume) => ({
             ...volume,
             pinnedEndpointNodeIndex: index,
             pinnedEndpointNodeId: candidates[0]?.node?.id ?? null,
-          }))
-      ));
+          }));
+      });
     const socketPositionKey = (socket) => [
       Number(socket.position.x).toFixed(3),
       Number(socket.position.y).toFixed(3),
@@ -10109,7 +15892,53 @@ export function planRouteNetwork({
         || dungeonPointDistance(path.at(-1), toSocket?.position) > 1e-4) return null;
       return path;
     };
-    const planningEndpointSeamCache = new Map();
+    const routeShapeNodeSignatureForCandidate = (
+      candidate,
+      nodeIndex,
+      adjacentNodeIndex,
+      availableSockets,
+    ) => {
+      const signatureByAdjacentIndex = routeShapeNodeGeometrySignatureCache.get(candidate)
+        ?? new Map();
+      routeShapeNodeGeometrySignatureCache.set(candidate, signatureByAdjacentIndex);
+      const signatureKey = Number(adjacentNodeIndex);
+      if (!signatureByAdjacentIndex.has(signatureKey)) {
+        signatureByAdjacentIndex.set(signatureKey, routeShapeNodeGeometrySignature({
+          candidate,
+          nodeIndex,
+          adjacentNodeIndex,
+          availableSockets,
+        }));
+      }
+      return signatureByAdjacentIndex.get(signatureKey);
+    };
+    const matchingExternalPathsForRouteShape = (
+      fromCandidate,
+      toCandidate,
+      fromSockets,
+      toSockets,
+    ) => {
+      if (externalSpinePathBySocketPair.size === 0) return [];
+      const matches = [];
+      for (const fromSocket of fromSockets) {
+        for (const toSocket of toSockets) {
+          const path = matchingExternalSpinePath(
+            fromSocket,
+            toSocket,
+            fromCandidate.node,
+            toCandidate.node,
+          );
+          if (!path) continue;
+          matches.push({
+            fromLocalSocketId: fromSocket.localSocketId,
+            toLocalSocketId: toSocket.localSocketId,
+            path,
+          });
+        }
+      }
+      return matches;
+    };
+    const planningEndpointSeamCache = planningCaches?.planningEndpointSeamCache ?? new Map();
     const planningEndpointSeam = (socket, node, role) => {
       // Placement candidates intentionally reuse the logical node/socket IDs
       // so the accepted plan remains stable. Their transforms are different,
@@ -10119,7 +15948,7 @@ export function planRouteNetwork({
       // overlap outside the seam. Include the exact candidate transform in
       // the cache key; the selected endpoint still derives one authoritative
       // record from its final socket.
-      const key = `${String(node?.id ?? socket?.nodeId ?? '')}:${String(
+      const key = `${operationId}:${String(node?.id ?? socket?.nodeId ?? '')}:${String(
         socket?.id ?? socket?.socketId ?? '',
       )}:${socketPositionKey(socket)}:${role}`;
       if (!planningEndpointSeamCache.has(key)) {
@@ -10391,6 +16220,9 @@ export function planRouteNetwork({
       const withinFeaturelessSpanOptions = positiveLengthOptions.filter(({
         distanceMeters,
       }) => distanceMeters <= maximumSpan + 1e-6);
+      const debugPreselectedExternalOption = routeNetworkPlanningDebugMatchesGrant(grant.id)
+        ? candidateOptions.find(({ ordinal }) => ordinal === -3) ?? null
+        : null;
       // These staged predicates are the authoritative seam checks, retained
       // separately so a rejected solve identifies the exact stage without
       // evaluating every floor-mask overlap twice.
@@ -10407,6 +16239,22 @@ export function planRouteNetwork({
         positiveLengthCount: positiveLengthOptions.length,
         withinFeaturelessSpanCount: withinFeaturelessSpanOptions.length,
         routeOptionCount: orderedPaths.length,
+        ...(debugPreselectedExternalOption ? {
+          preselectedExternalPathMaskConflicts: {
+            from: routePlanningEndpointNodeMaskConflicts(
+              debugPreselectedExternalOption.collisionVolumes
+                ?? debugPreselectedExternalOption.pathVolumes,
+              fromNode,
+              debugPreselectedExternalOption.endpointSeams?.[0],
+            ).slice(0, 8),
+            to: routePlanningEndpointNodeMaskConflicts(
+              debugPreselectedExternalOption.collisionVolumes
+                ?? debugPreselectedExternalOption.pathVolumes,
+              toNode,
+              debugPreselectedExternalOption.endpointSeams?.[1],
+            ).slice(0, 8),
+          },
+        } : {}),
       };
       socketRouteOptionsCache.set(cacheKey, orderedPaths);
       return orderedPaths;
@@ -10417,31 +16265,39 @@ export function planRouteNetwork({
         ...(routeOption.endpointSeamEnvelopes ?? []),
         ...overlapGrants,
       ];
-      if (authoritativeOverlapGrants.length === 0) {
+      const computeCollision = () => {
+        if (authoritativeOverlapGrants.length === 0) {
+          return indexedStaticPathVolumesHaveCollision(routeVolumes)
+            || routeVolumes.some((pathVolume) => (
+              pinnedParentAttachmentPathVolumes.some((attachmentVolume) => (
+                planningVolumesOverlap(pathVolume, attachmentVolume)
+              ))
+            ));
+        }
+        return routeVolumes.some((pathVolume) => (
+          [...nearbyStaticAvoidanceVolumes(pathVolume), ...pinnedParentAttachmentPathVolumes]
+            .some((obstacle) => (
+            planningVolumesOverlap(pathVolume, obstacle)
+              && !planningOverlapIsGranted(
+                pathVolume,
+                obstacle,
+                authoritativeOverlapGrants,
+              )
+            ))
+        ));
+      };
+      // Endpoint seam envelopes are immutable members of the cached route
+      // option. Only caller-supplied grants make the answer context-sensitive.
+      // Every physical-spine call currently supplies none, so cache the normal
+      // seam-aware result instead of rescanning static obstacles for every
+      // parent-attachment tuple.
+      if (overlapGrants.length === 0) {
         if (!staticRouteOptionCollisionCache.has(routeOption)) {
-          staticRouteOptionCollisionCache.set(
-            routeOption,
-            indexedStaticPathVolumesHaveCollision(routeVolumes)
-              || routeVolumes.some((pathVolume) => (
-                pinnedParentAttachmentPathVolumes.some((attachmentVolume) => (
-                  planningVolumesOverlap(pathVolume, attachmentVolume)
-                ))
-              )),
-          );
+          staticRouteOptionCollisionCache.set(routeOption, computeCollision());
         }
         return staticRouteOptionCollisionCache.get(routeOption);
       }
-      return routeVolumes.some((pathVolume) => (
-        [...nearbyStaticAvoidanceVolumes(pathVolume), ...pinnedParentAttachmentPathVolumes]
-          .some((obstacle) => (
-          planningVolumesOverlap(pathVolume, obstacle)
-            && !planningOverlapIsGranted(
-              pathVolume,
-              obstacle,
-              authoritativeOverlapGrants,
-            )
-          ))
-      ));
+      return computeCollision();
     };
     const routeOptionStaticCollisionDiagnostics = (routeOption, overlapGrants = []) => {
       const routeVolumes = routeOption.collisionVolumes ?? routeOption.pathVolumes ?? [];
@@ -10510,8 +16366,16 @@ export function planRouteNetwork({
       if (routeNetworkNodeResetsFeaturelessDistance(node)) return 0;
       const parentAttachment = staticParentAttachmentForCandidate(candidate, index);
       if (!parentAttachment?.compatible) return Number.POSITIVE_INFINITY;
+      const parentLocalSocketId = candidate?.parentLocalSocketId
+        ?? node?.planningParentLocalSocketId
+        ?? node?.parentAttachmentLocalSocketId
+        ?? 'entry';
       return Number(parentAttachment.distanceMeters ?? 0)
-        + connectorModuleCoreTraversalDistance(node, 'entry', throughLocalSocketId);
+        + connectorModuleCoreTraversalDistance(
+          node,
+          parentLocalSocketId,
+          throughLocalSocketId,
+        );
     };
     const adjacentPairHasPhysicalRoute = (
       firstCandidate,
@@ -10583,15 +16447,6 @@ export function planRouteNetwork({
             routeOptionCount: routeOptions.length,
           };
           const routeOptionCount = routeOptions.length;
-          const optionCollisionDiagnostics = routeOptions.map((routeOption) => ({
-            distanceMeters: routeOption.distanceMeters,
-            ...routeOptionStaticCollisionDiagnostics(routeOption),
-          }));
-          const exactRouteOptionStaticCollisionFreeCount = optionCollisionDiagnostics
-            .filter((diagnostics) => (
-              diagnostics.indexedStaticCollisionCount === 0
-                && diagnostics.pinnedAttachmentCollisionCount === 0
-            )).length;
           const endpointPrefixMeters = endpointFeaturelessPrefixMeters(
             fromCandidate,
             fromIndex,
@@ -10601,7 +16456,48 @@ export function planRouteNetwork({
             toIndex,
             toSocket.localSocketId,
           );
-          const socketPairDiagnostics = {
+          const witness = staticSocketRouteWitness(
+            fromSocket,
+            toSocket,
+            true,
+            fromIndex,
+            toIndex,
+            fromCandidate.node,
+            toCandidate.node,
+          );
+          const accumulatedFeaturelessDistanceMeters = witness
+            ? Number(witness.distanceMeters) + endpointPrefixMeters
+            : Number.POSITIVE_INFINITY;
+          const compatibleWitness = Boolean(
+            witness && accumulatedFeaturelessDistanceMeters <= maximumSpan + 1e-6,
+          );
+          // Arc consistency needs only a boolean witness. Building complete
+          // obstacle-ID diagnostics for every successful pair dominated the
+          // Cartesian scan and the records were discarded on success. Retain
+          // detailed collision evidence only for the bounded diagnostic
+          // sample of failed socket pairs; the boolean collision cache still
+          // evaluates every route option authoritatively.
+          const retainDetailedSocketPair = !compatibleWitness && (
+            edgeDiagnostics.socketPairCandidateCounts.length < 16
+              || (routeOptionCount > 0
+                && edgeDiagnostics.eligibleSocketPairCandidateCounts.length < 16)
+          );
+          const optionCollisionDiagnostics = retainDetailedSocketPair
+            ? routeOptions.map((routeOption) => ({
+              distanceMeters: routeOption.distanceMeters,
+              ...routeOptionStaticCollisionDiagnostics(routeOption),
+            }))
+            : [];
+          const exactRouteOptionStaticCollisionFreeCount = compatibleWitness
+            ? routeOptions.reduce((count, routeOption) => (
+              count + Number(!routeOptionHasStaticCollision(routeOption))
+            ), 0)
+            : witness
+              ? routeOptions.reduce((count, routeOption) => (
+                count + Number(!routeOptionHasStaticCollision(routeOption))
+              ), 0)
+              : 0;
+          const socketPairDiagnostics = retainDetailedSocketPair ? {
               fromLocalSocketId: fromSocket.localSocketId,
               toLocalSocketId: toSocket.localSocketId,
               connectorFamily,
@@ -10627,15 +16523,19 @@ export function planRouteNetwork({
               minimumRawFeaturelessDistanceMeters: rawRouteCandidates.length > 0
                 ? Math.min(...rawRouteCandidates.map(featurelessPathDistance))
                 : null,
-            };
-          if (edgeDiagnostics.socketPairCandidateCounts.length < 16) {
+            } : null;
+          if (socketPairDiagnostics
+            && edgeDiagnostics.socketPairCandidateCounts.length < 16) {
             edgeDiagnostics.socketPairCandidateCounts.push(socketPairDiagnostics);
           }
-          if (routeOptionCount > 0
+          if (socketPairDiagnostics
+            && routeOptionCount > 0
             && edgeDiagnostics.eligibleSocketPairCandidateCounts.length < 16) {
             edgeDiagnostics.eligibleSocketPairCandidateCounts.push(socketPairDiagnostics);
           }
           edgeDiagnostics.routeStageTotals.socketPairCount += 1;
+          edgeDiagnostics.routeStageTotals.detailedSocketPairCount +=
+            Number(retainDetailedSocketPair);
           for (const key of [
             'rawRouteCandidateCount',
             'exteriorApproachEligibleCount',
@@ -10658,20 +16558,7 @@ export function planRouteNetwork({
             optionCollisionDiagnostics.reduce((sum, diagnostics) => (
               sum + diagnostics.pinnedAttachmentCollisionCount
             ), 0);
-          const witness = staticSocketRouteWitness(
-            fromSocket,
-            toSocket,
-            true,
-            fromIndex,
-            toIndex,
-            fromCandidate.node,
-            toCandidate.node,
-          );
-          const accumulatedFeaturelessDistanceMeters = witness
-            ? Number(witness.distanceMeters) + endpointPrefixMeters
-            : Number.POSITIVE_INFINITY;
-          if (witness
-            && accumulatedFeaturelessDistanceMeters <= maximumSpan + 1e-6) {
+          if (compatibleWitness) {
             edgeDiagnostics.routeStageTotals.staticCollisionFreeCount += 1;
             bestRoute = {
               path: witness.path,
@@ -10682,7 +16569,7 @@ export function planRouteNetwork({
             compatible = true;
             break;
           }
-          const blockedRoute = routeOptions
+          const blockedRoute = retainDetailedSocketPair ? routeOptions
             .map((routeOption) => ({
               path: routeOption.path,
               distanceMeters: routeOption.distanceMeters,
@@ -10695,7 +16582,7 @@ export function planRouteNetwork({
             .sort((first, second) => (
               first.collisionScore - second.collisionScore
                 || first.distanceMeters - second.distanceMeters
-            ))[0] ?? null;
+            ))[0] ?? null : null;
           if (blockedRoute && (!bestRoute
             || blockedRoute.collisionScore < bestRoute.collisionScore
             || (blockedRoute.collisionScore === bestRoute.collisionScore
@@ -10716,10 +16603,7 @@ export function planRouteNetwork({
         edgeDiagnostics.minimumCollisionScore = bestRoute.collisionScore;
         edgeDiagnostics.minimumDistanceMeters = bestRoute.distanceMeters;
         edgeDiagnostics.bestBlockedPath = bestRoute.path;
-        edgeDiagnostics.bestBlockedCollisionIds = pathPlanningCollisionIds(
-          bestRoute.path,
-          staticAvoidanceVolumes,
-        ).slice(0, 12);
+        edgeDiagnostics.bestBlockedCollisionIds = [];
       }
       physicalPairCompatibilityCache.set(cacheKey, compatible);
       physicalPlanningPhaseTimings.pairCompatibilityMs +=
@@ -10747,25 +16631,56 @@ export function planRouteNetwork({
       if (physicalPairRouteShapeCache.has(cacheKey)) {
         return physicalPairRouteShapeCache.get(cacheKey);
       }
+      const fromSockets = availableSpineSockets(
+        fromCandidate.node,
+        fromIndex,
+        toIndex,
+      );
+      const toSockets = availableSpineSockets(
+        toCandidate.node,
+        toIndex,
+        fromIndex,
+      );
+      const translationInvariantCacheKey = translationInvariantRouteShapeCacheKey({
+        contextSignature: routeShapeCacheContextSignature,
+        firstNodeSignature: routeShapeNodeSignatureForCandidate(
+          fromCandidate,
+          fromIndex,
+          toIndex,
+          fromSockets,
+        ),
+        secondNodeSignature: routeShapeNodeSignatureForCandidate(
+          toCandidate,
+          toIndex,
+          fromIndex,
+          toSockets,
+        ),
+        firstCenter: fromCandidate.center,
+        secondCenter: toCandidate.center,
+        matchingExternalPaths: matchingExternalPathsForRouteShape(
+          fromCandidate,
+          toCandidate,
+          fromSockets,
+          toSockets,
+        ),
+      });
       // This cache is deliberately geometry-only. Static obstacle collision
       // belongs to the bounded exact stage; evaluating it while scanning the
       // complete candidate pool bypasses the solver's cheap/exact budgets and
       // made a single repair perform tens of thousands of full route tests.
-      const hasRouteShape = availableSpineSockets(
-        fromCandidate.node,
-        fromIndex,
-        toIndex,
-      ).some((fromSocket) => availableSpineSockets(
-        toCandidate.node,
-        toIndex,
-        fromIndex,
-      ).some((toSocket) => orderedSocketRouteOptions(
-        fromSocket,
-        toSocket,
-        true,
-        fromCandidate.node,
-        toCandidate.node,
-      ).length > 0));
+      const hasRouteShape = cachedTranslationInvariantRouteShapeBoolean(
+        translationInvariantRouteShapeBooleanCache,
+        translationInvariantCacheKey,
+        () => fromSockets.some((fromSocket) => toSockets.some((toSocket) => (
+          orderedSocketRouteOptions(
+            fromSocket,
+            toSocket,
+            true,
+            fromCandidate.node,
+            toCandidate.node,
+          ).length > 0
+        ))),
+      );
       physicalPairRouteShapeCache.set(cacheKey, hasRouteShape);
       return hasRouteShape;
     };
@@ -10775,13 +16690,12 @@ export function planRouteNetwork({
       secondCandidate,
       secondIndex,
     ) => {
-      return candidatePairNodeCollisionScore(
+      return !candidatePairNodesOverlap(
         firstCandidate,
         firstIndex,
         secondCandidate,
         secondIndex,
-      ) === 0
-        && candidatePairMinimumSpineDistance(
+      ) && candidatePairMinimumSpineDistance(
           firstCandidate,
           firstIndex,
           secondCandidate,
@@ -10908,13 +16822,12 @@ export function planRouteNetwork({
           secondIndex,
         ),
       );
-      return candidatePairNodeCollisionScore(
+      return !candidatePairNodesOverlap(
         firstCandidate,
         firstIndex,
         secondCandidate,
         secondIndex,
-      ) === 0
-        && cachedCompatibility !== false
+      ) && cachedCompatibility !== false
         && candidatePairMinimumSpineDistance(
           firstCandidate,
           firstIndex,
@@ -10938,12 +16851,12 @@ export function planRouteNetwork({
       secondCandidate,
       secondIndex,
     ) => {
-      if (candidatePairNodeCollisionScore(
+      if (candidatePairNodesOverlap(
         firstCandidate,
         firstIndex,
         secondCandidate,
         secondIndex,
-      ) > 0) return false;
+      )) return false;
       if (!candidatePairRespectsParentAttachments(
         firstCandidate,
         firstIndex,
@@ -10981,6 +16894,7 @@ export function planRouteNetwork({
       reservedByIndex: new Map(),
     };
     const correlatedCheapStageDiagnostics = new Map();
+    const correlatedCheapPairStageOutcomeCache = new Map();
     const correlatedPairPassesCheapBounds = (
       firstCandidate,
       firstIndex,
@@ -10998,36 +16912,191 @@ export function planRouteNetwork({
       };
       diagnostics.evaluatedCount += 1;
       correlatedCheapStageDiagnostics.set(edgeKey, diagnostics);
-      if (candidatePairNodeCollisionScore(
-        firstCandidate,
-        firstIndex,
-        secondCandidate,
-        secondIndex,
-      ) > 0) return false;
-      diagnostics.nodeCollisionPassCount += 1;
-      if (!candidatePairRespectsParentAttachments(
-        firstCandidate,
-        firstIndex,
-        secondCandidate,
-        secondIndex,
-      )) return false;
-      diagnostics.parentAttachmentPassCount += 1;
-      if (!stackedCompoundCandidatesMeetCheapBounds(
-        firstCandidate,
-        firstIndex,
-        secondCandidate,
-        secondIndex,
-      )) return false;
-      diagnostics.compoundShapePassCount += 1;
-      if (coverageRequiredEdgeForPair(firstIndex, secondIndex)
-        && !adjacentCandidatesMeetCheapBounds(
+      const cacheKey = `${routeShapeCacheContextSignature}|correlated-cheap-pair|${
+        physicalPairCacheKey(
           firstCandidate,
           firstIndex,
           secondCandidate,
           secondIndex,
-        )) return false;
-      diagnostics.adjacentShapePassCount += 1;
-      return true;
+        )
+      }`;
+      const outcome = cachedCorrelatedCheapPairStageOutcome(
+        correlatedCheapPairStageOutcomeCache,
+        cacheKey,
+        () => {
+          const nodeCollisionPass = !candidatePairNodesOverlap(
+            firstCandidate,
+            firstIndex,
+            secondCandidate,
+            secondIndex,
+          );
+          if (!nodeCollisionPass) return { nodeCollisionPass };
+          const parentAttachmentPass = candidatePairRespectsParentAttachments(
+            firstCandidate,
+            firstIndex,
+            secondCandidate,
+            secondIndex,
+          );
+          if (!parentAttachmentPass) {
+            return { nodeCollisionPass, parentAttachmentPass };
+          }
+          const compoundShapePass = stackedCompoundCandidatesMeetCheapBounds(
+            firstCandidate,
+            firstIndex,
+            secondCandidate,
+            secondIndex,
+          );
+          if (!compoundShapePass) {
+            return {
+              nodeCollisionPass,
+              parentAttachmentPass,
+              compoundShapePass,
+            };
+          }
+          const adjacentShapePass = !coverageRequiredEdgeForPair(
+            firstIndex,
+            secondIndex,
+          ) || adjacentCandidatesMeetCheapBounds(
+            firstCandidate,
+            firstIndex,
+            secondCandidate,
+            secondIndex,
+          );
+          return {
+            nodeCollisionPass,
+            parentAttachmentPass,
+            compoundShapePass,
+            adjacentShapePass,
+          };
+        },
+      );
+      // Cache hits replay the same logical stage evidence. The generic chain
+      // and tree reservation functions still invoke this callback and consume
+      // one cheap evaluation, so candidate order and all work caps are
+      // unchanged even though the underlying geometry predicates are reused.
+      if (outcome.nodeCollisionPass) diagnostics.nodeCollisionPassCount += 1;
+      if (outcome.parentAttachmentPass) diagnostics.parentAttachmentPassCount += 1;
+      if (outcome.compoundShapePass) diagnostics.compoundShapePassCount += 1;
+      if (outcome.adjacentShapePass) diagnostics.adjacentShapePassCount += 1;
+      if (outcome.nodeCollisionPass
+        && outcome.parentAttachmentPass
+        && outcome.compoundShapePass
+        && outcome.adjacentShapePass === false
+        && coverageRequiredEdgeForPair(firstIndex, secondIndex)) {
+        const minimumDistanceMeters = candidatePairMinimumSpineDistance(
+          firstCandidate,
+          firstIndex,
+          secondCandidate,
+          secondIndex,
+        );
+        if (!Number.isFinite(Number(diagnostics.minimumAdjacentShapeFailureDistanceMeters))
+          || minimumDistanceMeters
+            < Number(diagnostics.minimumAdjacentShapeFailureDistanceMeters) - 1e-6) {
+          const firstSockets = availableSpineSockets(
+            firstCandidate.node,
+            firstIndex,
+            secondIndex,
+          );
+          const secondSockets = availableSpineSockets(
+            secondCandidate.node,
+            secondIndex,
+            firstIndex,
+          );
+          diagnostics.minimumAdjacentShapeFailureDistanceMeters = minimumDistanceMeters;
+          diagnostics.closestAdjacentShapeFailure = {
+            firstIndex,
+            firstCenter: cloneDungeonAugmentationValue(firstCandidate.center),
+            firstFacing: cloneDungeonAugmentationValue(firstCandidate.facing),
+            firstSockets: firstSockets.map(({ localSocketId, position, facing }) => ({
+              localSocketId,
+              position: cloneDungeonAugmentationValue(position),
+              facing: cloneDungeonAugmentationValue(facing),
+            })),
+            secondIndex,
+            secondCenter: cloneDungeonAugmentationValue(secondCandidate.center),
+            secondFacing: cloneDungeonAugmentationValue(secondCandidate.facing),
+            secondSockets: secondSockets.map(({ localSocketId, position, facing }) => ({
+              localSocketId,
+              position: cloneDungeonAugmentationValue(position),
+              facing: cloneDungeonAugmentationValue(facing),
+            })),
+            cachedPhysicalCompatibility: physicalPairCompatibilityCache.get(
+              physicalPairCacheKey(
+                firstCandidate,
+                firstIndex,
+                secondCandidate,
+                secondIndex,
+              ),
+            ) ?? null,
+            socketPairRouteDiagnostics: firstSockets.flatMap((firstSocket) => (
+              secondSockets.map((secondSocket) => {
+                const connectorFamily = Math.abs(
+                  Number(secondSocket.position.y) - Number(firstSocket.position.y),
+                ) > 1e-6 ? verticalFamily : 'service-gallery';
+                const rawPaths = cachedSocketRouteCandidates(
+                  firstSocket,
+                  secondSocket,
+                  {
+                    preferXFirst: true,
+                    connectorFamily,
+                    ...coverageModuleRouteOptions,
+                  },
+                );
+                const routeOptions = orderedSocketRouteOptions(
+                  firstSocket,
+                  secondSocket,
+                  true,
+                  firstCandidate.node,
+                  secondCandidate.node,
+                );
+                const firstRawPath = rawPaths[0] ?? null;
+                const endpointSeams = firstRawPath ? [
+                  planningEndpointSeam(
+                    firstSocket,
+                    firstCandidate.node,
+                    'from',
+                  ),
+                  planningEndpointSeam(
+                    secondSocket,
+                    secondCandidate.node,
+                    'to',
+                  ),
+                ] : [];
+                const collisionVolumes = firstRawPath
+                  ? routeSegmentPlanningCollisionVolumes(
+                    firstRawPath,
+                    firstSocket,
+                    secondSocket,
+                    5.6,
+                    5.6,
+                  )
+                  : [];
+                return {
+                  firstLocalSocketId: firstSocket.localSocketId,
+                  secondLocalSocketId: secondSocket.localSocketId,
+                  rawRouteCandidateCount: rawPaths.length,
+                  firstRawPath: cloneDungeonAugmentationValue(firstRawPath),
+                  routeOptionCount: routeOptions.length,
+                  routeSelectionDiagnostics: cloneDungeonAugmentationValue(
+                    routeOptions.routeSelectionDiagnostics ?? null,
+                  ),
+                  firstNodeMaskConflicts: routePlanningEndpointNodeMaskConflicts(
+                    collisionVolumes,
+                    firstCandidate.node,
+                    endpointSeams[0],
+                  ).slice(0, 8),
+                  secondNodeMaskConflicts: routePlanningEndpointNodeMaskConflicts(
+                    collisionVolumes,
+                    secondCandidate.node,
+                    endpointSeams[1],
+                  ).slice(0, 8),
+                };
+              })
+            )),
+          };
+        }
+      }
+      return outcome.accepted;
     };
     const correlatedPairClearsAssignedCandidates = (
       firstCandidate,
@@ -11063,12 +17132,31 @@ export function planRouteNetwork({
             ))
       ))));
     };
+    const correlatedCandidateGroupByIndex = new Map(
+      placementCandidateGroups.map((group) => [Number(group.index), group]),
+    );
+    const correlatedCompleteCandidatePoolByIndex = new Map(
+      placementCandidateGroups.map((group) => {
+        const index = Number(group.index);
+        const seen = new Set();
+        const candidates = [
+          ...(group.candidates ?? []),
+          ...(group.candidatePool ?? []),
+        ].filter((candidate) => {
+          const key = candidatePhysicalKey(candidate, index);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        return [index, candidates];
+      }),
+    );
     const correlatedPrefixSocketAssignmentCache = new Map();
     const correlatedPrefixHasInjectiveSocketAssignment = (assignedCandidates) => {
       const assignedEdges = coverageRequiredEdges.filter(({ fromIndex, toIndex }) => (
         assignedCandidates.has(fromIndex) && assignedCandidates.has(toIndex)
       ));
-      if (assignedEdges.length <= 1) return true;
+      if (assignedEdges.length === 0) return true;
       const cacheKey = [...assignedCandidates.entries()]
         .sort((first, second) => first[0] - second[0])
         .map(([index, candidate]) => candidatePhysicalKey(candidate, index))
@@ -11076,10 +17164,53 @@ export function planRouteNetwork({
       if (correlatedPrefixSocketAssignmentCache.has(cacheKey)) {
         return correlatedPrefixSocketAssignmentCache.get(cacheKey);
       }
-      const socketClaimsByConstraint = assignedEdges.map(({ fromIndex, toIndex }) => {
+      const assignedParentAttachments = [...assignedCandidates.entries()]
+        .filter(([nodeIndex]) => endpointNodeIndexSet.has(nodeIndex))
+        .map(([nodeIndex, candidate]) => {
+          const parentLocalSocketId = candidate.parentLocalSocketId
+            ?? candidate.node?.planningParentLocalSocketId
+            ?? candidate.node?.parentAttachmentLocalSocketId
+            ?? 'entry';
+          const nodeSocket = getNodeSocket(candidate.node, parentLocalSocketId);
+          const attachmentDomain = staticParentAttachmentDomainForCandidate(
+            candidate,
+            nodeIndex,
+          );
+          const prefixReservation = routeNetworkParentAttachmentPrefixReservation(
+            attachmentDomain,
+          );
+          // This prefix check is only a cheap hard prune. A singleton path is
+          // immutable and may safely reserve its collision body here. A
+          // multi-path endpoint still owns an unresolved, coupled choice;
+          // pinning candidates[0] can reject a spine cleared by a later dogleg.
+          // Pair consistency and solvePhysicalSpine's exact tuple enumeration
+          // remain authoritative for those domains.
+          return {
+            nodeIndex,
+            compatible: Boolean(prefixReservation.compatible && nodeSocket),
+            collisionVolumes: prefixReservation.collisionVolumes,
+            attachmentCandidateCount: prefixReservation.candidateCount,
+            endpointSeam: nodeSocket
+              ? planningEndpointSeam(nodeSocket, candidate.node, 'to')
+              : null,
+          };
+        });
+      if (assignedParentAttachments.some(({ compatible }) => !compatible)) {
+        correlatedPrefixSocketAssignmentCache.set(cacheKey, false);
+        return false;
+      }
+      const assignedParentAttachmentEndpointSeamByNodeIndex = new Map(
+        assignedParentAttachments.flatMap(({ nodeIndex, endpointSeam }) => (
+          endpointSeam ? [[nodeIndex, endpointSeam]] : []
+        )),
+      );
+      const socketClaimsByConstraint = assignedEdges.map((edge) => {
+        const { fromIndex, toIndex } = edge;
         const fromCandidate = assignedCandidates.get(fromIndex);
         const toCandidate = assignedCandidates.get(toIndex);
-        const pairKeys = new Set();
+        const otherCandidateVolumes = [...assignedCandidates.entries()]
+          .filter(([index]) => index !== fromIndex && index !== toIndex)
+          .flatMap(([, candidate]) => candidateNodeVolumes(candidate));
         const pairs = [];
         for (const fromSocket of availableSpineSockets(
           fromCandidate.node,
@@ -11097,19 +17228,42 @@ export function planRouteNetwork({
               true,
               fromCandidate.node,
               toCandidate.node,
-            ).some((routeOption) => (
-              !routeOptionHasStaticCollision(routeOption)
-            ));
-            if (!hasStaticClearRoute) continue;
-            const pairKey = `${String(fromSocket.localSocketId)}>${String(
-              toSocket.localSocketId,
-            )}`;
-            if (pairKeys.has(pairKey)) continue;
-            pairKeys.add(pairKey);
-            pairs.push({ claims: [
-              { nodeIndex: fromIndex, localSocketId: String(fromSocket.localSocketId) },
-              { nodeIndex: toIndex, localSocketId: String(toSocket.localSocketId) },
-            ] });
+            ).filter((routeOption) => {
+              if (routeOptionHasStaticCollision(routeOption)) return false;
+              const routeVolumes = routeOption.collisionVolumes
+                ?? routeOption.pathVolumes
+                ?? [];
+              const clearsOtherNodes = routeVolumes.every((pathVolume) => (
+                otherCandidateVolumes.every((obstacle) => (
+                  !planningVolumesOverlap(pathVolume, obstacle)
+                ))
+              ));
+              if (!clearsOtherNodes) return false;
+              return assignedParentAttachments.every((attachmentRecord) => {
+                const overlapGrants = routeNetworkParentAttachmentSharedSeamGrants(
+                  edge,
+                  routeOption,
+                  attachmentRecord.nodeIndex,
+                  assignedParentAttachmentEndpointSeamByNodeIndex,
+                );
+                return routeVolumes.every((pathVolume) => (
+                  attachmentRecord.collisionVolumes.every((obstacle) => (
+                    !planningVolumesOverlap(pathVolume, obstacle)
+                      || planningOverlapIsGranted(pathVolume, obstacle, overlapGrants)
+                  ))
+                ));
+              });
+            });
+            for (const routeOption of hasStaticClearRoute) {
+              pairs.push({
+                edge,
+                routeOption,
+                claims: [
+                  { nodeIndex: fromIndex, localSocketId: String(fromSocket.localSocketId) },
+                  { nodeIndex: toIndex, localSocketId: String(toSocket.localSocketId) },
+                ],
+              });
+            }
           }
         }
         return pairs;
@@ -11126,32 +17280,243 @@ export function planRouteNetwork({
       const usedSocketIdsByNodeIndex = new Map(
         [...assignedCandidates.keys()].map((nodeIndex) => [
           nodeIndex,
-          new Set(endpointNodeIndexSet.has(nodeIndex) ? ['entry'] : []),
+          new Set(endpointNodeIndexSet.has(nodeIndex)
+            ? [assignedCandidates.get(nodeIndex)?.parentLocalSocketId ?? 'entry']
+          : []),
         ]),
       );
+      const committedRouteSelections = [];
+      const routeSelectionClearsCommittedRoutes = ({ edge, routeOption }) => (
+        committedRouteSelections.every((committed) => {
+          const sharedNodeIndices = [edge.fromIndex, edge.toIndex].filter((nodeIndex) => (
+            nodeIndex === committed.edge.fromIndex || nodeIndex === committed.edge.toIndex
+          ));
+          const sharedEndpointSeams = sharedNodeIndices.map((nodeIndex) => {
+            const routeEndpointOrdinal = edge.fromIndex === nodeIndex ? 0 : 1;
+            const committedEndpointOrdinal = committed.edge.fromIndex === nodeIndex ? 0 : 1;
+            return planningVolumeIntersection(
+              routeOption.endpointSeams?.[routeEndpointOrdinal]?.overlapEnvelope,
+              committed.routeOption.endpointSeams?.[committedEndpointOrdinal]?.overlapEnvelope,
+            );
+          }).filter(Boolean);
+          const routeVolumes = routeOption.collisionVolumes ?? routeOption.pathVolumes ?? [];
+          const committedVolumes = committed.routeOption.collisionVolumes
+            ?? committed.routeOption.pathVolumes
+            ?? [];
+          return routeVolumes.every((pathVolume) => committedVolumes.every((obstacle) => (
+            !planningVolumesOverlap(pathVolume, obstacle)
+              || planningOverlapIsGranted(
+                pathVolume,
+                obstacle,
+                sharedEndpointSeams,
+              )
+          )));
+        })
+      );
+      const completeAssignmentHasTopologyReturn = () => {
+        if (assignedEdges.length !== coverageRequiredEdges.length
+          || topologyKitModuleIndex == null
+          || !['over-under-loop', 'stacked-interchange'].includes(
+            String(topologyTemplateId),
+          )) return true;
+        const kitIndex = Number(topologyKitModuleIndex);
+        const kitCandidate = assignedCandidates.get(kitIndex);
+        const kitNode = kitCandidate?.node;
+        const topologySocketIds = (
+          kitNode?.selectionConstraints?.routeNetworkTopologySocketIds ?? []
+        ).map(String);
+        if (!kitNode || topologySocketIds.length === 0) return false;
+        const topologySocketIdSet = new Set(topologySocketIds);
+        const topologySelections = [];
+        const routeClearsAssignedPlacement = (
+          routeOption,
+          fromIndex,
+          toIndex,
+        ) => {
+          const edge = { fromIndex, toIndex };
+          const fixedNodeVolumes = [...assignedCandidates.entries()]
+            .filter(([nodeIndex]) => (
+              nodeIndex !== fromIndex && nodeIndex !== toIndex
+            ))
+            .flatMap(([, candidate]) => candidateNodeVolumes(candidate));
+          const routeVolumes = routeOption.collisionVolumes
+            ?? routeOption.pathVolumes
+            ?? [];
+          const clearsOtherNodes = routeVolumes.every((pathVolume) => (
+            fixedNodeVolumes.every((obstacle) => (
+              !planningVolumesOverlap(pathVolume, obstacle)
+            ))
+          ));
+          if (!clearsOtherNodes) return false;
+          return assignedParentAttachments.every((attachmentRecord) => {
+            const overlapGrants = routeNetworkParentAttachmentSharedSeamGrants(
+              edge,
+              routeOption,
+              attachmentRecord.nodeIndex,
+              assignedParentAttachmentEndpointSeamByNodeIndex,
+            );
+            return routeVolumes.every((pathVolume) => (
+              attachmentRecord.collisionVolumes.every((obstacle) => (
+                !planningVolumesOverlap(pathVolume, obstacle)
+                  || planningOverlapIsGranted(pathVolume, obstacle, overlapGrants)
+              ))
+            ));
+          });
+        };
+        const visitPendingTopologySocket = () => {
+          const pendingLocalSocketId = topologySocketIds.find((localSocketId) => (
+            !usedSocketIdsByNodeIndex.get(kitIndex)?.has(localSocketId)
+          ));
+          if (!pendingLocalSocketId) return true;
+          const fromSocket = getNodeSocket(kitNode, pendingLocalSocketId);
+          if (!fromSocket) return false;
+          for (const [targetIndex, targetCandidate] of assignedCandidates) {
+            const targetNode = targetCandidate.node;
+            const targetUsedSocketIds = usedSocketIdsByNodeIndex.get(targetIndex);
+            for (const toSocket of targetNode.sockets ?? []) {
+              const toLocalSocketId = String(toSocket.localSocketId);
+              if (targetUsedSocketIds?.has(toLocalSocketId)
+                || (targetIndex === kitIndex
+                  && toLocalSocketId === pendingLocalSocketId)) continue;
+              // When two topology sockets remain, a same-kit authored pair is
+              // a legitimate local return. With one remaining socket, prefer
+              // an ordinary arm or another module rather than joining it to
+              // itself through an already claimed topology port.
+              if (targetIndex === kitIndex
+                && topologySocketIdSet.has(toLocalSocketId)
+                && usedSocketIdsByNodeIndex.get(kitIndex)?.has(toLocalSocketId)) continue;
+              const edge = { fromIndex: kitIndex, toIndex: targetIndex };
+              for (const routeOption of orderedSocketRouteOptions(
+                fromSocket,
+                toSocket,
+                true,
+                kitNode,
+                targetNode,
+              )) {
+                if (routeOptionHasStaticCollision(routeOption)
+                  || !routeClearsAssignedPlacement(routeOption, kitIndex, targetIndex)
+                  || !routeSelectionClearsCommittedRoutes({ edge, routeOption })) continue;
+                usedSocketIdsByNodeIndex.get(kitIndex).add(pendingLocalSocketId);
+                targetUsedSocketIds.add(toLocalSocketId);
+                const routeSelection = {
+                  edge,
+                  routeOption,
+                  claims: [
+                    { nodeIndex: kitIndex, localSocketId: pendingLocalSocketId },
+                    { nodeIndex: targetIndex, localSocketId: toLocalSocketId },
+                  ],
+                };
+                committedRouteSelections.push(routeSelection);
+                topologySelections.push(routeSelection);
+                if (visitPendingTopologySocket()) return true;
+                topologySelections.pop();
+                committedRouteSelections.pop();
+                usedSocketIdsByNodeIndex.get(kitIndex).delete(pendingLocalSocketId);
+                targetUsedSocketIds.delete(toLocalSocketId);
+              }
+            }
+          }
+          return false;
+        };
+        const compatible = visitPendingTopologySocket();
+        while (topologySelections.length > 0) {
+          const selection = topologySelections.pop();
+          committedRouteSelections.pop();
+          for (const { nodeIndex, localSocketId } of selection.claims) {
+            usedSocketIdsByNodeIndex.get(nodeIndex)?.delete(localSocketId);
+          }
+        }
+        return compatible;
+      };
       const visitEdge = (ordinal) => {
-        if (ordinal >= edgeOrdinals.length) return true;
-        for (const { claims } of socketClaimsByConstraint[edgeOrdinals[ordinal]]) {
+        if (ordinal >= edgeOrdinals.length) {
+          return completeAssignmentHasTopologyReturn();
+        }
+        for (const routeSelection of socketClaimsByConstraint[edgeOrdinals[ordinal]]) {
+          const { claims } = routeSelection;
           if (claims.some(({ nodeIndex, localSocketId }) => (
             usedSocketIdsByNodeIndex.get(nodeIndex).has(localSocketId)
           ))) continue;
+          if (!routeSelectionClearsCommittedRoutes(routeSelection)) continue;
           for (const { nodeIndex, localSocketId } of claims) {
             usedSocketIdsByNodeIndex.get(nodeIndex).add(localSocketId);
           }
+          committedRouteSelections.push(routeSelection);
           if (visitEdge(ordinal + 1)) return true;
+          committedRouteSelections.pop();
           for (const { nodeIndex, localSocketId } of claims) {
             usedSocketIdsByNodeIndex.get(nodeIndex).delete(localSocketId);
           }
         }
         return false;
       };
-      const compatible = visitEdge(0);
+      let compatible = visitEdge(0);
+      if (compatible) {
+        // Forward-check an unassigned authored endpoint against the complete
+        // retained prefix, including route-volume and injective-socket
+        // witnesses. Pairwise lookahead alone can keep an interior candidate
+        // that reaches the endpoint only through an earlier module or route;
+        // two such prefixes are enough to fill the fixed beam with inevitable
+        // dead ends. Recursing with one MRV endpoint candidate at a time keeps
+        // the same 24-candidate endpoint and 32-prefix bounds.
+        const endpointFrontiers = coverageRequiredEdges.flatMap((edge) => {
+          const fromAssigned = assignedCandidates.has(edge.fromIndex);
+          const toAssigned = assignedCandidates.has(edge.toIndex);
+          if (fromAssigned === toAssigned) return [];
+          const assignedIndex = fromAssigned ? edge.fromIndex : edge.toIndex;
+          const futureIndex = fromAssigned ? edge.toIndex : edge.fromIndex;
+          const futureGroup = correlatedCandidateGroupByIndex.get(futureIndex);
+          if (!futureGroup?.endpoint) return [];
+          return [{ edge, assignedIndex, futureIndex, futureGroup }];
+        }).sort((first, second) => (
+          Number(first.futureGroup.candidates?.length ?? 0)
+            - Number(second.futureGroup.candidates?.length ?? 0)
+            || first.futureIndex - second.futureIndex
+        ));
+        const frontier = endpointFrontiers[0] ?? null;
+        if (frontier) {
+          const assignedCandidate = assignedCandidates.get(frontier.assignedIndex);
+          compatible = (frontier.futureGroup.candidates ?? []).some((futureCandidate) => {
+            if (candidatePairNodesOverlap(
+              assignedCandidate,
+              frontier.assignedIndex,
+              futureCandidate,
+              frontier.futureIndex,
+            )) return false;
+            if (!candidatePairRespectsParentAttachments(
+              assignedCandidate,
+              frontier.assignedIndex,
+              futureCandidate,
+              frontier.futureIndex,
+            )) return false;
+            if (!stackedCompoundCandidatesMeetCheapBounds(
+              assignedCandidate,
+              frontier.assignedIndex,
+              futureCandidate,
+              frontier.futureIndex,
+            )) return false;
+            if (!adjacentCandidatesMeetCheapBounds(
+              assignedCandidate,
+              frontier.assignedIndex,
+              futureCandidate,
+              frontier.futureIndex,
+            )) return false;
+            if (!correlatedPairClearsAssignedCandidates(
+              assignedCandidate,
+              frontier.assignedIndex,
+              futureCandidate,
+              frontier.futureIndex,
+              assignedCandidates,
+            )) return false;
+            const extended = new Map(assignedCandidates);
+            extended.set(frontier.futureIndex, futureCandidate);
+            return correlatedPrefixHasInjectiveSocketAssignment(extended);
+          });
+        }
+      }
       correlatedPrefixSocketAssignmentCache.set(cacheKey, compatible);
       return compatible;
     };
-    const correlatedCandidateGroupByIndex = new Map(
-      placementCandidateGroups.map((group) => [Number(group.index), group]),
-    );
     const correlatedFutureSupportCache = new Map();
     const candidateHasBoundedFutureSupport = (
       candidate,
@@ -11164,13 +17529,12 @@ export function planRouteNetwork({
       }
       const futureGroup = correlatedCandidateGroupByIndex.get(Number(futureIndex));
       const supported = (futureGroup?.candidates ?? []).some((futureCandidate) => (
-        candidatePairNodeCollisionScore(
+        !candidatePairNodesOverlap(
           candidate,
           candidateIndex,
           futureCandidate,
           futureIndex,
-        ) === 0
-          && candidatePairMinimumSpineDistance(
+        ) && candidatePairMinimumSpineDistance(
             candidate,
             candidateIndex,
             futureCandidate,
@@ -11195,42 +17559,230 @@ export function planRouteNetwork({
         failedFirstIndex,
         failedSecondIndex,
       );
-      const prefilterEdgeCandidatesForOrder = (edgeOrder) => (
-        candidates,
-        fromCandidate,
-        fromIndex,
-        toIndex,
-        edgeOrdinal,
-      ) => {
-        const nextEdge = edgeOrder[edgeOrdinal + 1] ?? null;
-        const ranked = Array.from({ length: 6 }, () => []);
-        for (const toCandidate of candidates) {
-          if (candidatePairMinimumSpineDistance(
-            fromCandidate,
-            fromIndex,
-            toCandidate,
-            toIndex,
-          ) > maximumSpan + 1e-6) continue;
-          const compatibility = physicalPairCompatibilityCache.get(
-            physicalPairCacheKey(
-              fromCandidate,
-              fromIndex,
-              toCandidate,
-              toIndex,
-            ),
-          );
-          const futureSupported = !nextEdge || nextEdge.fromIndex !== toIndex
-            || candidateHasBoundedFutureSupport(
-              toCandidate,
-              toIndex,
-              nextEdge.toIndex,
-            );
-          const compatibilityRank = compatibility === true
-            ? 0
-            : compatibility === false ? 2 : 1;
-          ranked[compatibilityRank * 2 + Number(!futureSupported)].push(toCandidate);
+      const edgeCandidatePrefilterByOrderSignature = new Map();
+      const prefilterEdgeCandidatesForOrder = (edgeOrder) => {
+        // reserveOrderedCandidateTree owns each complete candidate-pool array
+        // for its full sweep. Key first by that exact ordered-array identity,
+        // then by the closed-over edge order and predecessor's complete
+        // physical identity. The physical compatibility cache cannot change
+        // until the later exact stage, so every input to this ranking is
+        // immutable while the cheap reservation is active.
+        const cacheByCompleteCandidatePool = new WeakMap();
+        const edgeOrderSignature = edgeOrder.map(({ fromIndex, toIndex }) => (
+          `${Number(fromIndex)}>${Number(toIndex)}`
+        )).join('|');
+        if (edgeCandidatePrefilterByOrderSignature.has(edgeOrderSignature)) {
+          return edgeCandidatePrefilterByOrderSignature.get(edgeOrderSignature);
         }
-        return ranked.flat();
+        const prefilter = (
+          candidates,
+          fromCandidate,
+          fromIndex,
+          toIndex,
+          edgeOrdinal,
+        ) => {
+          let cache = cacheByCompleteCandidatePool.get(candidates);
+          if (!cache) {
+            cache = new Map();
+            cacheByCompleteCandidatePool.set(candidates, cache);
+          }
+          const cacheKey = `${routeShapeCacheContextSignature}|${edgeOrderSignature}|${
+            edgeOrdinal
+          }:${fromIndex}>${toIndex}|${candidatePhysicalKey(fromCandidate, fromIndex)}`;
+          return cachedCorrelatedEdgeCandidateOrder(cache, cacheKey, () => {
+            const nextEdge = edgeOrder[edgeOrdinal + 1] ?? null;
+            const futureGroup = nextEdge?.fromIndex === toIndex
+              ? correlatedCandidateGroupByIndex.get(Number(nextEdge.toIndex))
+              : null;
+            const ranked = Array.from({ length: 12 }, () => []);
+            for (const toCandidate of candidates) {
+              if (candidatePairMinimumSpineDistance(
+                fromCandidate,
+                fromIndex,
+                toCandidate,
+                toIndex,
+              ) > maximumSpan + 1e-6) continue;
+              const compatibility = physicalPairCompatibilityCache.get(
+                physicalPairCacheKey(
+                  fromCandidate,
+                  fromIndex,
+                  toCandidate,
+                  toIndex,
+                ),
+              );
+              const futureSupported = !nextEdge || nextEdge.fromIndex !== toIndex
+                || candidateHasBoundedFutureSupport(
+                  toCandidate,
+                  toIndex,
+                  nextEdge.toIndex,
+                );
+              const compatibilityRank = compatibility === true
+                ? 0
+                : compatibility === false ? 2 : 1;
+              const elevationRank = endpointOrderVariant > 0
+                ? Number(Math.abs(
+                  Number(toCandidate.center.y) - Number(fromCandidate.center.y),
+                ) <= 1e-6)
+                : 0;
+              ranked[
+                compatibilityRank * 4 + elevationRank * 2 + Number(!futureSupported)
+              ].push(toCandidate);
+            }
+            // A bounded endpoint domain is the authored set the solver will
+            // actually be allowed to select. Treat the one-edge lookahead into
+            // that domain as forward checking, not merely a ranking hint: keeping
+            // an unsupported interior candidate can fill the fixed beam with
+            // prefixes that are guaranteed to strand the final parent handoff.
+            if (futureGroup?.endpoint) {
+              return ranked.filter((_, rank) => rank % 2 === 0).flat();
+            }
+            return ranked.flat();
+          });
+        };
+        edgeCandidatePrefilterByOrderSignature.set(edgeOrderSignature, prefilter);
+        return prefilter;
+      };
+      const prefixHasNextEdgeSupport = (
+        prefix,
+        _nextEdge,
+        { consumeCheapPairEvaluation, remainingEdges = [] },
+      ) => {
+        let localCheapPairEvaluations = 0;
+        let localBudgetExhausted = false;
+        const suffixCandidatePrefilter = prefilterEdgeCandidatesForOrder(remainingEdges);
+        // Divide the remaining global cheap budget across the at-most-64
+        // legal extensions on this layer. The recursive suffix proof can then
+        // correlate sibling arms without allowing the first prefix to turn
+        // the bounded beam into an exhaustive Cartesian search.
+        const localCheapPairEvaluationLimit = 256;
+        const consumeLocalCheapPairEvaluation = () => {
+          if (localCheapPairEvaluations >= localCheapPairEvaluationLimit) {
+            localBudgetExhausted = true;
+            return false;
+          }
+          if (!consumeCheapPairEvaluation()) {
+            localBudgetExhausted = true;
+            return false;
+          }
+          localCheapPairEvaluations += 1;
+          return true;
+        };
+        const sampledCandidatesForEdge = (assignedPrefix, edge, depth) => {
+          const fromCandidate = assignedPrefix.get(edge.fromIndex);
+          if (!fromCandidate) return [];
+          const completeFuturePool = correlatedCompleteCandidatePoolByIndex.get(
+            edge.toIndex,
+          ) ?? [];
+          const edgeOrdinal = remainingEdges.indexOf(edge);
+          const prefixPhase = [...assignedPrefix.entries()].reduce(
+            (phase, [nodeIndex, candidate]) => (
+              phase
+                + (nodeIndex + 1) * 17
+                + Math.round(Number(candidate.center.x) / 2.8) * 3
+                + Math.round(Number(candidate.center.y) / 2.8) * 5
+                + Math.round(Number(candidate.center.z) / 2.8) * 7
+            ),
+            depth * 11,
+          );
+          const supportCandidateLimit = depth === 0 ? 64 : 32;
+          const headCount = depth === 0 ? 4 : 2;
+          const tailCount = depth === 0 ? 24 : 8;
+          return sampleBoundedCorrelatedSuffixCandidates(completeFuturePool, {
+            prefilterCandidates: (candidates) => suffixCandidatePrefilter(
+              candidates,
+              fromCandidate,
+              edge.fromIndex,
+              edge.toIndex,
+              edgeOrdinal,
+            ),
+            limit: supportCandidateLimit,
+            headCount,
+            tailCount,
+            phase: Math.abs(prefixPhase),
+          });
+        };
+        const visitSuffix = (assignedPrefix, suffixEdges, depth = 0) => {
+          if (suffixEdges.length === 0) return [];
+          const edgeOrdinal = suffixEdges
+            .map((edge, ordinal) => ({ edge, ordinal }))
+            .filter(({ edge }) => (
+              assignedPrefix.has(edge.fromIndex) && !assignedPrefix.has(edge.toIndex)
+            ))
+            .sort((first, second) => {
+              const supportCount = ({ edge }) => {
+                const requiredEdge = coverageRequiredEdgeForPair(
+                  edge.fromIndex,
+                  edge.toIndex,
+                );
+                const diagnostics = physicalPairEdgeDiagnostics[
+                  requiredEdge?.edgeOrdinal
+                ];
+                return Number(diagnostics?.evaluatedPairCount ?? 0) > 0
+                  ? Number(diagnostics?.compatiblePairCount ?? 0)
+                  : Number.POSITIVE_INFINITY;
+              };
+              return supportCount(first) - supportCount(second)
+                || first.ordinal - second.ordinal;
+            })[0]?.ordinal ?? -1;
+          if (edgeOrdinal < 0) return null;
+          const edge = suffixEdges[edgeOrdinal];
+          const fromCandidate = assignedPrefix.get(edge.fromIndex);
+          const remainingSuffixEdges = suffixEdges.filter((_, ordinal) => (
+            ordinal !== edgeOrdinal
+          ));
+          for (const futureCandidate of sampledCandidatesForEdge(
+            assignedPrefix,
+            edge,
+            depth,
+          )) {
+            let cheapClear = true;
+            for (const [assignedIndex, assignedCandidate] of assignedPrefix) {
+              if (!consumeLocalCheapPairEvaluation()) return null;
+              if (!correlatedPairPassesCheapBounds(
+                assignedCandidate,
+                assignedIndex,
+                futureCandidate,
+                edge.toIndex,
+              )) {
+                cheapClear = false;
+                break;
+              }
+            }
+            if (!cheapClear) continue;
+            if (!consumeLocalCheapPairEvaluation()) return null;
+            if (!correlatedPairClearsAssignedCandidates(
+              fromCandidate,
+              edge.fromIndex,
+              futureCandidate,
+              edge.toIndex,
+              assignedPrefix,
+            )) continue;
+            const extended = new Map(assignedPrefix);
+            extended.set(edge.toIndex, futureCandidate);
+            if (!consumeLocalCheapPairEvaluation()) return null;
+            if (!correlatedPrefixHasInjectiveSocketAssignment(extended)) continue;
+            const suffix = visitSuffix(extended, remainingSuffixEdges, depth + 1);
+            if (suffix) {
+              return [{
+                fromIndex: edge.fromIndex,
+                toIndex: edge.toIndex,
+                candidate: futureCandidate,
+              }, ...suffix];
+            }
+            if (localBudgetExhausted) return null;
+          }
+          return localBudgetExhausted ? null : false;
+        };
+        const plan = visitSuffix(prefix, remainingEdges);
+        if (!Array.isArray(plan)) return plan;
+        const orderedPlan = [...plan].sort((first, second) => {
+          const edgeOrdinal = (assignment) => remainingEdges.findIndex((edge) => (
+            edge.fromIndex === assignment.fromIndex
+              && edge.toIndex === assignment.toIndex
+          ));
+          return edgeOrdinal(first) - edgeOrdinal(second);
+        });
+        return { plan: orderedPlan };
       };
       const reservationOptions = {
       candidateGroups: placementCandidateGroups,
@@ -11245,6 +17797,7 @@ export function planRouteNetwork({
       pairPassesCheapBounds: correlatedPairPassesCheapBounds,
       pairClearsAssignedCandidates: correlatedPairClearsAssignedCandidates,
       prefixIsCompatible: correlatedPrefixHasInjectiveSocketAssignment,
+      prefixHasNextEdgeSupport,
       prefilterEdgeCandidates: prefilterEdgeCandidatesForOrder(orientedEdges),
       pairIsCompatible: candidatePairSatisfiesPlacementConstraints,
       pairCompatibilityIsKnown: (
@@ -11306,21 +17859,69 @@ export function planRouteNetwork({
           || Number(firstCandidate.facing?.z ?? 0) - Number(secondCandidate.facing?.z ?? 0);
       },
     };
-      const chainReservation = reserveOrderedCandidateChain({
-        ...reservationOptions,
-        orderedEdges: orientedEdges,
-      });
-      if (chainReservation.status !== 'unsupported-chain') return chainReservation;
+      const requiredDegreeByNodeIndex = new Map();
+      for (const { fromIndex, toIndex } of coverageRequiredEdges) {
+        requiredDegreeByNodeIndex.set(
+          fromIndex,
+          Number(requiredDegreeByNodeIndex.get(fromIndex) ?? 0) + 1,
+        );
+        requiredDegreeByNodeIndex.set(
+          toIndex,
+          Number(requiredDegreeByNodeIndex.get(toIndex) ?? 0) + 1,
+        );
+      }
+      const branchedRequiredGraph = [...requiredDegreeByNodeIndex.values()]
+        .some((degree) => degree > 2);
       const orientedTreeEdges = orientOrderedCandidateTreeAtFailure(
         coverageRequiredEdges,
         failedFirstIndex,
         failedSecondIndex,
+        {
+          edgeSupportCounts: coverageRequiredEdges.map(({ edgeOrdinal }) => {
+            const diagnostics = physicalPairEdgeDiagnostics[edgeOrdinal];
+            return Number(diagnostics?.evaluatedPairCount ?? 0) > 0
+              ? Number(diagnostics?.compatiblePairCount ?? 0)
+              : Number.POSITIVE_INFINITY;
+          }),
+          // Start a branched repair at the edge that exhausted AC, then visit
+          // its constrained branch before broad crossing continuations. This
+          // is a deterministic production order, not a diagnostic mode.
+          prioritizeFailedEdge: branchedRequiredGraph,
+          prioritizeRootSiblingAfterFailedEdge: false,
+        },
       );
-      return reserveOrderedCandidateTree({
+      // A branch-entry T is a tree, not an ordered chain. Running the chain
+      // reservation first repeatedly revisits its shared junction as if it
+      // were a new suffix node and can spend the complete cheap budget before
+      // the tree-aware prefix solver gets a turn. Select the matching bounded
+      // algorithm up front; both paths retain the same candidate and budget
+      // caps.
+      if (branchedRequiredGraph) {
+        const treeReservation = reserveOrderedCandidateTree({
+          ...reservationOptions,
+          orderedEdges: orientedTreeEdges,
+          prefilterEdgeCandidates: prefilterEdgeCandidatesForOrder(orientedTreeEdges),
+        });
+        return treeReservation;
+      }
+      const chainReservation = reserveOrderedCandidateChain({
+        ...reservationOptions,
+        orderedEdges: orientedEdges,
+      });
+      if (chainReservation.status === 'reserved'
+        || chainReservation.status === 'cheap-budget-exhausted'
+        || chainReservation.status === 'exact-budget-exhausted') {
+        return chainReservation;
+      }
+      const fallbackTreeReservation = reserveOrderedCandidateTree({
         ...reservationOptions,
         orderedEdges: orientedTreeEdges,
         prefilterEdgeCandidates: prefilterEdgeCandidatesForOrder(orientedTreeEdges),
       });
+      return {
+        ...fallbackTreeReservation,
+        chainLayerDiagnostics: chainReservation.layerDiagnostics,
+      };
     };
     const placementConstraintPairs = placementCandidateGroups.flatMap((firstGroup, firstOrdinal) => (
       placementCandidateGroups.slice(firstOrdinal + 1).map((secondGroup) => {
@@ -11351,12 +17952,12 @@ export function planRouteNetwork({
       const requiredEdge = coverageRequiredEdgeForPair(firstGroup.index, secondGroup.index);
       for (const firstCandidate of firstCandidates) {
         for (const secondCandidate of secondCandidates) {
-          if (candidatePairNodeCollisionScore(
+          if (candidatePairNodesOverlap(
             firstCandidate,
             firstGroup.index,
             secondCandidate,
             secondGroup.index,
-          ) > 0) {
+          )) {
             summary.nodeCollisionRejectedCount += 1;
             continue;
           }
@@ -11432,12 +18033,30 @@ export function planRouteNetwork({
         arcChanged = false;
         const currentArcIteration = arcIteration;
         arcIteration += 1;
+        emitPlanningDebugStage('route-network-arc-iteration-start', {
+          arcIteration: currentArcIteration,
+          placementCandidateCounts: placementCandidateGroups.map(({ index, candidates }) => ({
+            nodeIndex: index,
+            count: candidates.length,
+          })),
+          planningPhaseTimings: physicalPlanningTimingSnapshot(),
+        });
         for (const {
           firstGroup,
           secondGroup,
           adjacent,
           parentAttachment,
         } of placementConstraintPairs) {
+        emitPlanningDebugStage('route-network-arc-pair-start', {
+          arcIteration: currentArcIteration,
+          firstNodeIndex: firstGroup.index,
+          secondNodeIndex: secondGroup.index,
+          firstCandidateCount: firstGroup.candidates.length,
+          secondCandidateCount: secondGroup.candidates.length,
+          adjacent,
+          parentAttachment,
+          planningPhaseTimings: physicalPlanningTimingSnapshot(),
+        });
         const originalFirstCandidates = firstGroup.candidates;
         const originalSecondCandidates = secondGroup.candidates;
         const firstCandidates = firstGroup.candidates.filter((firstCandidate) => (
@@ -11475,6 +18094,14 @@ export function planRouteNetwork({
             afterSecondCount: secondCandidates.length,
           });
         }
+        emitPlanningDebugStage('route-network-arc-pair-complete', {
+          arcIteration: currentArcIteration,
+          firstNodeIndex: firstGroup.index,
+          secondNodeIndex: secondGroup.index,
+          firstCandidateCount: firstCandidates.length,
+          secondCandidateCount: secondCandidates.length,
+          planningPhaseTimings: physicalPlanningTimingSnapshot(),
+        });
         if (firstCandidates.length === 0 || secondCandidates.length === 0) {
           if (requiresCorrelatedPlacementReservation
             && shouldAttemptCorrelatedPlacementRepair({
@@ -11539,6 +18166,10 @@ export function planRouteNetwork({
                 correlatedPlacementReservation.prunedCandidateCount,
               cheapStageDiagnostics:
                 correlatedPlacementReservation.cheapStageDiagnostics,
+              treeLayerDiagnostics:
+                correlatedPlacementReservation.layerDiagnostics,
+              chainLayerDiagnostics:
+                correlatedPlacementReservation.chainLayerDiagnostics,
             });
           }
           finalizeCorrelatedCandidateDiagnostics();
@@ -11565,7 +18196,7 @@ export function planRouteNetwork({
                   position,
                   facing,
                 })),
-                nodeCollisionScore: candidatePairNodeCollisionScore(
+                nodeCollisionScore: computeCandidatePairNodeCollisionScore(
                   firstCandidate,
                   firstGroup.index,
                   secondCandidate,
@@ -11596,6 +18227,7 @@ export function planRouteNetwork({
               || Number(second.parentAttachmentClear) - Number(first.parentAttachmentClear)
               || first.minimumSpineDistanceMeters - second.minimumSpineDistanceMeters
           )).slice(0, 8);
+          hydratePhysicalPairEdgeCollisionDiagnostics();
           return {
             error: parentAttachment
               ? 'route-network-parent-attachment-domain-exhausted'
@@ -11744,13 +18376,12 @@ export function planRouteNetwork({
       candidatePrefix.set(index, candidate);
       if (!correlatedPrefixHasInjectiveSocketAssignment(candidatePrefix)) return false;
       return selectedEntries.every(([selectedIndex, selected]) => (
-        candidatePairNodeCollisionScore(
+        !candidatePairNodesOverlap(
           candidate,
           index,
           selected,
           selectedIndex,
-        ) === 0
-          && candidatePairRespectsParentAttachments(
+        ) && candidatePairRespectsParentAttachments(
             candidate,
             index,
             selected,
@@ -11771,8 +18402,17 @@ export function planRouteNetwork({
             ))
       ));
     };
-    const solvePhysicalSpine = () => {
-      physicalSpineAttempts += 1;
+    const placementSearchVisitLimit = 20000;
+    let parentAttachmentCombinationAttempts = 0;
+    let parentAttachmentCandidateDomainCounts = [];
+    let parentAttachmentCompatibleDomainCounts = [];
+    let physicalSpineDfsExecutions = 0;
+    let physicalSpineBehaviorCacheHits = 0;
+    let lastPhysicalSpineReachedCompleteCoverageLeaf = false;
+    const solvePhysicalSpine = (
+      selectedParentAttachments = null,
+      compiledFixedSocketPairOptionsByEdge = null,
+    ) => {
       lastPhysicalPlacementCenters = [...selectedPlacementCandidates.entries()]
         .sort((first, second) => first[0] - second[0])
         .map(([nodeIndex, candidate]) => ({ nodeIndex, center: candidate.center }));
@@ -11780,12 +18420,569 @@ export function planRouteNetwork({
         selectedPlacementCandidates.get(index)?.node ?? null
       ));
       if (selectedNodes.some((node) => !node)) return null;
+      const excludedCoverageSpineSignaturesObserved = new Set();
+      const coverageSpineRouteOptionRealizesExcludedSegment = (
+        edge,
+        fromSocket,
+        toSocket,
+        routeOption,
+      ) => {
+        if (excludedSegmentConflictSignatures.size === 0
+          || routeOption?.sharedEndpointFootprint) return false;
+        const fromNode = selectedNodes[edge.fromIndex];
+        const toNode = selectedNodes[edge.toIndex];
+        if (!fromNode || !toNode) return false;
+        const from = nodeEndpoint(fromNode, fromSocket.localSocketId);
+        const to = nodeEndpoint(toNode, toSocket.localSocketId);
+        if (!from?.position || !to?.position) return false;
+        const connectorFamily = Math.abs(
+          Number(to.position.y) - Number(from.position.y),
+        ) > 1e-6 ? verticalFamily : 'service-gallery';
+        // Slope segments carry a selected switchback reservation that is not
+        // part of the route option itself. Let the unchanged candidate-level
+        // exact-signature gate handle those rather than approximating their
+        // final physical identity here.
+        if (connectorFamily === 'slope') return false;
+        const physicalOrdinal = endpoints.length + Number(edge.edgeOrdinal);
+        const segmentId = createDungeonSupplementId({
+          parentRegionId: region.id,
+          operationType: 'routeNetwork',
+          operationOrdinal,
+          kind: 'segment',
+          ordinal: physicalOrdinal,
+          sourceId,
+        });
+        const endpointRecords = [
+          { endpoint: from, node: fromNode, socket: fromSocket, role: 'from' },
+          { endpoint: to, node: toNode, socket: toSocket, role: 'to' },
+        ];
+        const endpointSeams = endpointRecords.map(({
+          endpoint,
+          node,
+          socket,
+          role,
+        }) => createDungeonRouteEndpointSeam(socket, {
+          id: `${segmentId}:${role}-endpoint-seam`,
+          segmentId,
+          operationId,
+          networkId: operationId,
+          nodeId: node.id,
+          socketId: endpoint.socketId ?? endpoint.id ?? socket.id,
+          localSocketId: socket.localSocketId,
+          role,
+          elevationBand: node.progressionBandId ?? grant.progressionBandId ?? null,
+          parentOwnerId: enforceExactEmittedCoverageVolumes
+            ? endpointSeamSharedOwnerId(socket, node)
+            : null,
+        }));
+        const segmentPath = requireAuthoritativeEndpointSeams
+          ? routePathWithAuthoritativeSeamEndpoints(routeOption.path, endpointSeams)
+          : routeOption.path;
+        const segment = createSegment({
+          id: segmentId,
+          operationId,
+          parentRegionId: region.id,
+          physicalOrdinal,
+          logicalEdgeId: grant.coverage?.logicalEdgeId ?? null,
+          from,
+          to,
+          connectorFamily,
+          themeBinding: region.themeBinding,
+          coordinateSpace: grant.endpointSockets[0].coordinateSpace,
+          heightMeters: 5.6,
+          landingDepthMeters: 5.6,
+          path: segmentPath,
+        });
+        segment.endpointSeams = cloneDungeonAugmentationValue(endpointSeams);
+        const authoredLocalApproachWitness = ({ endpoint, node, socket }) => ({
+          nodeId: String(endpoint.nodeId ?? node.id ?? ''),
+          socketId: String(endpoint.socketId ?? endpoint.id ?? socket.id ?? ''),
+          localSocketId: socket.localSocketId ?? endpoint.localSocketId ?? null,
+          path: [
+            addDungeonPoints(
+              socket.position,
+              scaleDungeonPoint(socket.facing, -ROUTE_NETWORK_SOCKET_APPROACH_METERS),
+            ),
+            cloneDungeonAugmentationValue(socket.position),
+          ],
+        });
+        segment.localApproachWitnesses = cloneDungeonAugmentationValue(
+          routeOption.localApproachWitnesses
+            ?? endpointRecords.map(authoredLocalApproachWitness),
+        );
+        decorateRouteNetworkSegment(segment, {
+          routeRole: edge.routeRole,
+          elevationMode,
+          stableRuntimeStateIds: {
+            shortcut: `${operationId}:state:shortcut`,
+          },
+        });
+        const signature = createRouteNetworkConflictEntitySignature(
+          segment,
+          'segment',
+        );
+        if (!excludedSegmentConflictSignatures.has(signature)) return false;
+        if (!excludedCoverageSpineSignaturesObserved.has(signature)) {
+          excludedCoverageSpineSignaturesObserved.add(signature);
+          emitPlanningDebugStage('route-network-exact-segment-option-excluded', {
+            segmentId,
+            segmentSignature: signature,
+            edgeOrdinal: edge.edgeOrdinal,
+            fromNodeIndex: edge.fromIndex,
+            toNodeIndex: edge.toIndex,
+            path: cloneDungeonAugmentationValue(segment.path),
+          });
+        }
+        return true;
+      };
+      if (!Array.isArray(selectedParentAttachments)) {
+        const parentAttachmentCandidateDomains = endpoints.map((_, endpointOrdinal) => {
+          const nodeIndex = coveragePlacement.endpointNodeIndices[endpointOrdinal];
+          const selectedCandidate = selectedPlacementCandidates.get(nodeIndex);
+          const selectedOtherNodeVolumes = selectedNodes.flatMap((selectedNode, selectedIndex) => (
+            selectedIndex === nodeIndex
+              ? []
+              : [
+                ...(selectedNode.occupiedVolumes ?? []),
+                ...(selectedNode.clearanceVolumes ?? []),
+              ]
+          ));
+          const attachmentDomain = staticParentAttachmentDomainForCandidate(
+            selectedCandidate,
+            nodeIndex,
+          ).candidates ?? [];
+          const supportedAttachments = attachmentDomain.filter((attachment) => (
+            !(attachment.collisionVolumes ?? attachment.pathVolumes ?? []).some((pathVolume) => (
+              selectedOtherNodeVolumes.some((obstacle) => (
+                planningVolumesOverlap(pathVolume, obstacle)
+              ))
+            ))
+          ));
+          const diagnostics = parentAttachmentFailureDiagnostics[endpointOrdinal];
+          diagnostics.candidateCount = Math.max(
+            Number(diagnostics.candidateCount ?? 0),
+            attachmentDomain.length,
+          );
+          diagnostics.compatibleWithSelectedNodesCount = Math.max(
+            Number(diagnostics.compatibleWithSelectedNodesCount ?? 0),
+            supportedAttachments.length,
+          );
+          if (supportedAttachments.length === 0) diagnostics.failures += 1;
+          return supportedAttachments;
+        });
+        parentAttachmentCandidateDomainCounts = parentAttachmentFailureDiagnostics
+          .map(({ candidateCount }) => Number(candidateCount ?? 0));
+        parentAttachmentCompatibleDomainCounts = parentAttachmentCandidateDomains
+          .map((domain) => domain.length);
+        let compiledSpineDomain = null;
+        const compileSpineDomain = () => {
+          const routeOptionIntersectsVolumes = (
+            routeOption,
+            obstacleVolumes,
+            overlapGrants = [],
+          ) => {
+            const routeVolumes = routeOption.collisionVolumes
+              ?? routeOption.pathVolumes
+              ?? [];
+            const authoritativeOverlapGrants = [
+              ...(routeOption.endpointSeamEnvelopes ?? []),
+              ...overlapGrants,
+            ];
+            return routeVolumes.some((pathVolume) => obstacleVolumes.some((obstacle) => (
+              planningVolumesOverlap(pathVolume, obstacle)
+                && !planningOverlapIsGranted(
+                  pathVolume,
+                  obstacle,
+                  authoritativeOverlapGrants,
+                )
+            )));
+          };
+          const selectedOtherNodeVolumesByEdge = coverageRequiredEdges.map(({
+            fromIndex,
+            toIndex,
+          }) => selectedNodes.flatMap((selectedNode, selectedIndex) => (
+            selectedIndex === fromIndex || selectedIndex === toIndex
+              ? []
+              : [
+                ...(selectedNode.occupiedVolumes ?? []),
+                ...(selectedNode.clearanceVolumes ?? []),
+              ]
+          )));
+          const parentAttachmentEndpointSeamByNodeIndex = new Map(
+            coveragePlacement.endpointNodeIndices.flatMap((nodeIndex) => {
+              const node = selectedNodes[nodeIndex];
+              const selectedCandidate = selectedPlacementCandidates.get(nodeIndex);
+              const parentLocalSocketId = selectedCandidate?.parentLocalSocketId
+                ?? node?.planningParentLocalSocketId
+                ?? node?.parentAttachmentLocalSocketId
+                ?? 'entry';
+              const nodeSocket = getNodeSocket(node, parentLocalSocketId);
+              return nodeSocket
+                ? [[nodeIndex, planningEndpointSeam(nodeSocket, node, 'to')]]
+                : [];
+            }),
+          );
+          const selectedConnectorRoomFootprints = connectorRoomFootprintsForNodes(
+            selectedNodes,
+          );
+          const optionRecords = [];
+          const baseSocketPairOptionsByEdge = coverageRequiredEdges.map((edge) => {
+            const { edgeOrdinal, fromIndex, toIndex } = edge;
+            const fromNode = selectedNodes[fromIndex];
+            const toNode = selectedNodes[toIndex];
+            return availableSpineSockets(fromNode, fromIndex, toIndex)
+              .flatMap((fromSocket) => (
+                availableSpineSockets(toNode, toIndex, fromIndex).map((toSocket) => {
+                  const routeOptionRecords = orderedSocketRouteOptions(
+                    fromSocket,
+                    toSocket,
+                    true,
+                    fromNode,
+                    toNode,
+                  )
+                    .filter((routeOption) => (
+                      liftRoutePathIsMaterializable(
+                        routeOption.path,
+                        fromSocket,
+                        toSocket,
+                        selectedConnectorRoomFootprints,
+                        `${operationId}:placement-spine:${edgeOrdinal}:lift`,
+                        routeOption.endpointSeams,
+                      )
+                        && !routeOptionHasStaticCollision(routeOption)
+                        && !coverageSpineRouteOptionRealizesExcludedSegment(
+                          edge,
+                          fromSocket,
+                          toSocket,
+                          routeOption,
+                        )
+                        && !routeOptionIntersectsVolumes(
+                          routeOption,
+                          selectedOtherNodeVolumesByEdge[edgeOrdinal],
+                        )
+                    ))
+                    .map((routeOption) => {
+                      const record = {
+                        edge,
+                        optionIndex: optionRecords.length,
+                        routeOption,
+                      };
+                      optionRecords.push(record);
+                      return record;
+                    });
+                  return { fromSocket, toSocket, routeOptionRecords };
+                })
+              ));
+          });
+          const maskWordCount = Math.ceil(optionRecords.length / 32);
+          const blockedOptionMaskByAttachmentAndNodeIndex = new WeakMap();
+          const blockedOptionMaskForAttachment = (attachment, attachmentNodeIndex) => {
+            let maskByNodeIndex = blockedOptionMaskByAttachmentAndNodeIndex.get(attachment);
+            if (!maskByNodeIndex) {
+              maskByNodeIndex = new Map();
+              blockedOptionMaskByAttachmentAndNodeIndex.set(attachment, maskByNodeIndex);
+            }
+            const normalizedAttachmentNodeIndex = Number(attachmentNodeIndex);
+            if (maskByNodeIndex.has(normalizedAttachmentNodeIndex)) {
+              return maskByNodeIndex.get(normalizedAttachmentNodeIndex);
+            }
+            const attachmentVolumes = attachment.collisionVolumes
+              ?? attachment.pathVolumes
+              ?? [];
+            const blockedOptionMask = new Uint32Array(maskWordCount);
+            for (const record of optionRecords) {
+              if (!routeOptionIntersectsVolumes(
+                record.routeOption,
+                attachmentVolumes,
+                routeNetworkParentAttachmentSharedSeamGrants(
+                  record.edge,
+                  record.routeOption,
+                  normalizedAttachmentNodeIndex,
+                  parentAttachmentEndpointSeamByNodeIndex,
+                ),
+              )) continue;
+              const wordIndex = record.optionIndex >>> 5;
+              const bitIndex = record.optionIndex & 31;
+              blockedOptionMask[wordIndex] = (
+                blockedOptionMask[wordIndex] | (1 << bitIndex)
+              ) >>> 0;
+            }
+            maskByNodeIndex.set(normalizedAttachmentNodeIndex, blockedOptionMask);
+            return blockedOptionMask;
+          };
+          let topologyOptionRecords = null;
+          let possibleInactiveCapVolumes = null;
+          const completeInfluenceByAttachment = new WeakMap();
+          const ensureCompleteInfluenceCatalogs = () => {
+            if (topologyOptionRecords && possibleInactiveCapVolumes) return;
+            topologyOptionRecords = [];
+            if (topologyKitModuleIndex != null
+              && ['over-under-loop', 'stacked-interchange'].includes(
+                String(topologyTemplateId),
+              )) {
+              const kitIndex = Number(topologyKitModuleIndex);
+              const kitNode = selectedNodes[kitIndex];
+              const topologySocketIds = (
+                kitNode?.selectionConstraints?.routeNetworkTopologySocketIds ?? []
+              ).map(String);
+              for (const pendingLocalSocketId of topologySocketIds) {
+                const fromSocket = getNodeSocket(kitNode, pendingLocalSocketId);
+                if (!fromSocket) continue;
+                for (const [targetIndex, targetNode] of selectedNodes.entries()) {
+                  for (const toSocket of targetNode.sockets ?? []) {
+                    if (targetIndex === kitIndex
+                      && String(toSocket.localSocketId) === pendingLocalSocketId) continue;
+                    const fixedNodeVolumes = selectedNodes.flatMap((node, nodeIndex) => (
+                      nodeIndex === kitIndex || nodeIndex === targetIndex
+                        ? []
+                        : [
+                          ...(node.occupiedVolumes ?? []),
+                          ...(node.clearanceVolumes ?? []),
+                        ]
+                    ));
+                    for (const routeOption of orderedSocketRouteOptions(
+                      fromSocket,
+                      toSocket,
+                      true,
+                      kitNode,
+                      targetNode,
+                    )) {
+                      if (routeOptionHasStaticCollision(routeOption)) continue;
+                      if (routeOptionIntersectsVolumes(
+                        routeOption,
+                        fixedNodeVolumes,
+                      )) continue;
+                      topologyOptionRecords.push({
+                        edge: { fromIndex: kitIndex, toIndex: targetIndex },
+                        optionIndex: topologyOptionRecords.length,
+                        routeOption,
+                      });
+                    }
+                  }
+                }
+              }
+            }
+            const roomNodes = selectedNodes.filter((node) => node?.connectorOwned !== true);
+            possibleInactiveCapVolumes = routeNetworkInactiveSocketCapPlanningVolumes(roomNodes);
+          };
+          const completeInfluenceForAttachment = (attachment, attachmentNodeIndex) => {
+            let influenceByNodeIndex = completeInfluenceByAttachment.get(attachment);
+            if (!influenceByNodeIndex) {
+              influenceByNodeIndex = new Map();
+              completeInfluenceByAttachment.set(attachment, influenceByNodeIndex);
+            }
+            const normalizedAttachmentNodeIndex = Number(attachmentNodeIndex);
+            if (influenceByNodeIndex.has(normalizedAttachmentNodeIndex)) {
+              return influenceByNodeIndex.get(normalizedAttachmentNodeIndex);
+            }
+            ensureCompleteInfluenceCatalogs();
+            const attachmentVolumes = attachment.collisionVolumes
+              ?? attachment.pathVolumes
+              ?? [];
+            const blockedTopologyOptionMask = new Uint32Array(
+              Math.ceil(topologyOptionRecords.length / 32),
+            );
+            for (const record of topologyOptionRecords) {
+              if (!routeOptionIntersectsVolumes(
+                record.routeOption,
+                attachmentVolumes,
+                routeNetworkParentAttachmentSharedSeamGrants(
+                  record.edge,
+                  record.routeOption,
+                  normalizedAttachmentNodeIndex,
+                  parentAttachmentEndpointSeamByNodeIndex,
+                ),
+              )) continue;
+              const wordIndex = record.optionIndex >>> 5;
+              const bitIndex = record.optionIndex & 31;
+              blockedTopologyOptionMask[wordIndex] = (
+                blockedTopologyOptionMask[wordIndex] | (1 << bitIndex)
+              ) >>> 0;
+            }
+            const conflictingInactiveCapMask = new Uint32Array(
+              Math.ceil(possibleInactiveCapVolumes.length / 32),
+            );
+            for (const [capIndex, capVolume] of possibleInactiveCapVolumes.entries()) {
+              const validation = validateRouteNetworkInactiveSocketCapPlanningVolumes(
+                [capVolume],
+                attachmentVolumes,
+              );
+              if (validation.accepted) continue;
+              const wordIndex = capIndex >>> 5;
+              const bitIndex = capIndex & 31;
+              conflictingInactiveCapMask[wordIndex] = (
+                conflictingInactiveCapMask[wordIndex] | (1 << bitIndex)
+              ) >>> 0;
+            }
+            const influence = {
+              blockedTopologyOptionMask,
+              conflictingInactiveCapMask,
+            };
+            influenceByNodeIndex.set(normalizedAttachmentNodeIndex, influence);
+            return influence;
+          };
+          const domainForAttachments = (attachments) => {
+            const combinedBlockedOptionMask = new Uint32Array(maskWordCount);
+            for (const [endpointOrdinal, attachment] of attachments.entries()) {
+              const attachmentNodeIndex =
+                coveragePlacement.endpointNodeIndices[endpointOrdinal];
+              const blockedOptionMask = blockedOptionMaskForAttachment(
+                attachment,
+                attachmentNodeIndex,
+              );
+              for (let wordIndex = 0;
+                wordIndex < combinedBlockedOptionMask.length;
+                wordIndex += 1) {
+                combinedBlockedOptionMask[wordIndex] = (
+                  combinedBlockedOptionMask[wordIndex] | blockedOptionMask[wordIndex]
+                ) >>> 0;
+              }
+            }
+            const behaviorSignature = routeNetworkParentAttachmentSpineBehaviorSignature(
+              combinedBlockedOptionMask,
+              attachments.map(({ distanceMeters }) => distanceMeters),
+            );
+            let completeBehaviorSignature = null;
+            const getCompleteBehaviorSignature = () => {
+              if (completeBehaviorSignature != null) return completeBehaviorSignature;
+              ensureCompleteInfluenceCatalogs();
+              const combinedBlockedTopologyOptionMask = new Uint32Array(
+                Math.ceil(topologyOptionRecords.length / 32),
+              );
+              const combinedConflictingInactiveCapMask = new Uint32Array(
+                Math.ceil(possibleInactiveCapVolumes.length / 32),
+              );
+              for (const [endpointOrdinal, attachment] of attachments.entries()) {
+                const attachmentNodeIndex =
+                  coveragePlacement.endpointNodeIndices[endpointOrdinal];
+                const influence = completeInfluenceForAttachment(
+                  attachment,
+                  attachmentNodeIndex,
+                );
+                for (let wordIndex = 0;
+                  wordIndex < combinedBlockedTopologyOptionMask.length;
+                  wordIndex += 1) {
+                  combinedBlockedTopologyOptionMask[wordIndex] = (
+                    combinedBlockedTopologyOptionMask[wordIndex]
+                      | influence.blockedTopologyOptionMask[wordIndex]
+                  ) >>> 0;
+                }
+                for (let wordIndex = 0;
+                  wordIndex < combinedConflictingInactiveCapMask.length;
+                  wordIndex += 1) {
+                  combinedConflictingInactiveCapMask[wordIndex] = (
+                    combinedConflictingInactiveCapMask[wordIndex]
+                      | influence.conflictingInactiveCapMask[wordIndex]
+                  ) >>> 0;
+                }
+              }
+              completeBehaviorSignature = routeNetworkParentAttachmentSpineBehaviorSignature(
+                combinedBlockedOptionMask,
+                attachments.map(({ distanceMeters }) => distanceMeters),
+                {
+                  blockedTopologyOptionMask: combinedBlockedTopologyOptionMask,
+                  conflictingInactiveCapMask: combinedConflictingInactiveCapMask,
+                },
+              );
+              return completeBehaviorSignature;
+            };
+            let fixedSocketPairOptionsByEdge = null;
+            const materializeFixedSocketPairOptionsByEdge = () => {
+              fixedSocketPairOptionsByEdge ??= baseSocketPairOptionsByEdge.map((socketPairs) => (
+                socketPairs.map(({ fromSocket, toSocket, routeOptionRecords }) => ({
+                  fromSocket,
+                  toSocket,
+                  routeOptions: routeOptionRecords
+                    .filter(({ optionIndex }) => (
+                      (combinedBlockedOptionMask[optionIndex >>> 5]
+                        & (1 << (optionIndex & 31))) === 0
+                    ))
+                    .map(({ routeOption }) => routeOption),
+                }))
+              ));
+              return fixedSocketPairOptionsByEdge;
+            };
+            return {
+              behaviorSignature,
+              getCompleteBehaviorSignature,
+              materializeFixedSocketPairOptionsByEdge,
+            };
+          };
+          return { domainForAttachments };
+        };
+        const spineAttemptMemo = createRouteNetworkParentAttachmentSpineAttemptMemo();
+        const emitPhysicalSpineProgress = () => {
+          if ((physicalSpineAttempts & (physicalSpineAttempts - 1)) !== 0) return;
+          emitPlanningDebugStage('route-network-physical-spine-progress', {
+            physicalSpineAttempts,
+            physicalSpineDfsExecutions,
+            physicalSpineBehaviorCacheHits,
+            parentAttachmentCombinationAttempts,
+            parentAttachmentCandidateDomainCounts,
+            parentAttachmentCompatibleDomainCounts,
+            placementSearchVisits,
+            planningPhaseTimings: physicalPlanningTimingSnapshot(),
+          });
+        };
+        for (const attachmentCombination of routeNetworkParentAttachmentPathCombinations(
+          parentAttachmentCandidateDomains,
+        )) {
+          // Attachment routing is a continuation axis of the same finite
+          // placement search, not a watchdog-bounded search nested outside it.
+          // Charge every exact tuple to the existing immutable 20k visit
+          // budget before invoking the full spine DFS.
+          if (placementSearchVisits >= placementSearchVisitLimit) break;
+          placementSearchVisits += 1;
+          parentAttachmentCombinationAttempts += 1;
+          physicalSpineAttempts += 1;
+          compiledSpineDomain ??= compileSpineDomain();
+          const {
+            behaviorSignature,
+            getCompleteBehaviorSignature,
+            materializeFixedSocketPairOptionsByEdge,
+          } = compiledSpineDomain.domainForAttachments(attachmentCombination);
+          let completeBehaviorSignature = spineAttemptMemo
+            .requiresCompleteBehaviorSignature(behaviorSignature)
+            ? getCompleteBehaviorSignature()
+            : null;
+          if (!spineAttemptMemo.begin(behaviorSignature, {
+            completeBehaviorSignature,
+          })) {
+            physicalSpineBehaviorCacheHits += 1;
+            emitPhysicalSpineProgress();
+            continue;
+          }
+          physicalSpineDfsExecutions += 1;
+          emitPhysicalSpineProgress();
+          lastPhysicalSpineReachedCompleteCoverageLeaf = false;
+          const solution = solvePhysicalSpine(
+            attachmentCombination,
+            materializeFixedSocketPairOptionsByEdge(),
+          );
+          if (solution) return solution;
+          if (lastPhysicalSpineReachedCompleteCoverageLeaf) {
+            completeBehaviorSignature ??= getCompleteBehaviorSignature();
+          }
+          spineAttemptMemo.recordFailure(behaviorSignature, {
+            reachedCompleteCoverageLeaf: lastPhysicalSpineReachedCompleteCoverageLeaf,
+            completeBehaviorSignature,
+          });
+        }
+        return null;
+      }
       const usedSocketIdsByNodeIndex = new Map(selectedNodes.map((node, index) => [
         index,
-        new Set(endpointNodeIndexSet.has(index) ? ['entry'] : []),
+        new Set(endpointNodeIndexSet.has(index)
+          ? [selectedPlacementCandidates.get(index)?.parentLocalSocketId
+            ?? node?.planningParentLocalSocketId
+            ?? node?.parentAttachmentLocalSocketId
+            ?? 'entry']
+          : []),
       ]));
       const parentAttachmentPaths = [];
+      const parentLocalSocketIds = [];
       const parentAttachmentPathVolumes = [];
+      const parentAttachmentCollisionRecords = [];
       const parentAttachmentDistanceByNodeIndex = new Map();
       const parentAttachmentEndpointSeamByNodeIndex = new Map();
       for (let endpointOrdinal = 0; endpointOrdinal < endpoints.length; endpointOrdinal += 1) {
@@ -11793,7 +18990,11 @@ export function planRouteNetwork({
         const nodeIndex = coveragePlacement.endpointNodeIndices[endpointOrdinal];
         const node = selectedNodes[nodeIndex];
         const selectedCandidate = selectedPlacementCandidates.get(nodeIndex);
-        const nodeSocket = getNodeSocket(node, 'entry');
+        const parentLocalSocketId = selectedCandidate?.parentLocalSocketId
+          ?? node?.planningParentLocalSocketId
+          ?? node?.parentAttachmentLocalSocketId
+          ?? 'entry';
+        const nodeSocket = getNodeSocket(node, parentLocalSocketId);
         const selectedOtherNodeVolumes = selectedNodes.flatMap((selectedNode, selectedIndex) => (
           selectedIndex === nodeIndex
             ? []
@@ -11802,13 +19003,10 @@ export function planRouteNetwork({
               ...(selectedNode.clearanceVolumes ?? []),
             ]
         ));
-        // AC reserves one statically validated physical attachment for every
-        // endpoint candidate. Keep that exact path here: a later selected room
-        // must be rejected if it consumes the reservation, never routed around.
-        const attachment = staticParentAttachmentForCandidate(
-          selectedCandidate,
-          nodeIndex,
-        );
+        // Node placement and parent-attachment routing are independent finite
+        // axes. The wrapper above enumerates every statically valid attachment
+        // combination; this exact spine attempt owns one immutable combination.
+        const attachment = selectedParentAttachments[endpointOrdinal];
         const path = attachment.path;
         const attachmentCollisionVolumes = attachment.collisionVolumes
           ?? attachment.pathVolumes;
@@ -11855,7 +19053,12 @@ export function planRouteNetwork({
           return null;
         }
         parentAttachmentPaths.push(path);
+        parentLocalSocketIds.push(parentLocalSocketId);
         parentAttachmentPathVolumes.push(...attachmentCollisionVolumes);
+        parentAttachmentCollisionRecords.push({
+          nodeIndex,
+          collisionVolumes: attachmentCollisionVolumes,
+        });
         parentAttachmentDistanceByNodeIndex.set(nodeIndex, distanceMeters);
         parentAttachmentEndpointSeamByNodeIndex.set(
           nodeIndex,
@@ -11897,14 +19100,15 @@ export function planRouteNetwork({
       // attempt. Filter those fixed obstacles once per socket pair; recursive
       // states then test only the small incremental set of already committed
       // spine corridors.
-      const fixedSocketPairOptionsByEdge = coverageRequiredEdges.map((edge) => {
+      const selectedConnectorRoomFootprints = connectorRoomFootprintsForNodes(
+        selectedNodes,
+      );
+      const fixedSocketPairOptionsByEdge = compiledFixedSocketPairOptionsByEdge
+        ?? coverageRequiredEdges.map((edge) => {
           const { edgeOrdinal, fromIndex, toIndex } = edge;
           const fromNode = selectedNodes[fromIndex];
           const toNode = selectedNodes[toIndex];
-          const fixedObstacles = [
-            ...selectedOtherNodeVolumesByEdge[edgeOrdinal],
-            ...parentAttachmentPathVolumes,
-          ];
+          const fixedNodeObstacles = selectedOtherNodeVolumesByEdge[edgeOrdinal];
           return availableSpineSockets(fromNode, fromIndex, toIndex)
             .flatMap((fromSocket) => (
             availableSpineSockets(toNode, toIndex, fromIndex).map((toSocket) => ({
@@ -11916,44 +19120,211 @@ export function planRouteNetwork({
                 true,
                 fromNode,
                 toNode,
-              )
+                )
                 .filter((routeOption) => (
-                  !routeOptionHasStaticCollision(routeOption)
-                    && (() => {
-                      const sharedParentSeams = [fromIndex, toIndex].map((nodeIndex) => {
-                        const parentSeam = parentAttachmentEndpointSeamByNodeIndex.get(nodeIndex);
-                        const routeSeam = nodeIndex === fromIndex
-                          ? routeOption.endpointSeams?.[0]
-                          : routeOption.endpointSeams?.[1];
-                        return planningVolumeIntersection(
-                          parentSeam?.overlapEnvelope,
-                          routeSeam?.overlapEnvelope,
-                        );
-                      }).filter(Boolean);
-                      return !routeOptionIntersectsVolumes(
+                  liftRoutePathIsMaterializable(
+                    routeOption.path,
+                    fromSocket,
+                    toSocket,
+                    selectedConnectorRoomFootprints,
+                    `${operationId}:placement-spine:${edgeOrdinal}:lift`,
+                    routeOption.endpointSeams,
+                  )
+                    && !routeOptionHasStaticCollision(routeOption)
+                    && !coverageSpineRouteOptionRealizesExcludedSegment(
+                      edge,
+                      fromSocket,
+                      toSocket,
+                      routeOption,
+                    )
+                    && !routeOptionIntersectsVolumes(routeOption, fixedNodeObstacles)
+                    && parentAttachmentCollisionRecords.every((attachmentRecord) => (
+                      !routeOptionIntersectsVolumes(
                         routeOption,
-                        fixedObstacles,
-                        sharedParentSeams,
-                      );
-                    })()
+                        attachmentRecord.collisionVolumes,
+                        routeNetworkParentAttachmentSharedSeamGrants(
+                          edge,
+                          routeOption,
+                          attachmentRecord.nodeIndex,
+                          parentAttachmentEndpointSeamByNodeIndex,
+                        ),
+                      )
+                    ))
                 )),
             }))
           ));
         });
-      const committedSpineRouteVolumes = [];
-      const routeOptionClearsCommittedSpine = (routeOption) => {
-        const previousPair = pairs.at(-1);
-        const sharedEndpointSeam = previousPair
-          ? planningVolumeIntersection(
-            previousPair.endpointSeams?.[1]?.overlapEnvelope,
-            routeOption.endpointSeams?.[0]?.overlapEnvelope,
-          )
-          : null;
-        return !routeOptionIntersectsVolumes(
-          routeOption,
-          committedSpineRouteVolumes,
-          sharedEndpointSeam ? [sharedEndpointSeam] : [],
+      const committedSpineRouteSelections = [];
+      let topologyReturnWitness = [];
+      const routeOptionClearsCommittedSpine = (edge, routeOption) => (
+        committedSpineRouteSelections.every((committed) => {
+          const sharedNodeIndices = [edge.fromIndex, edge.toIndex]
+            .filter((nodeIndex) => (
+              nodeIndex === committed.edge.fromIndex
+                || nodeIndex === committed.edge.toIndex
+            ));
+          const sharedEndpointSeams = sharedNodeIndices.map((nodeIndex) => {
+            const routeEndpointOrdinal = edge.fromIndex === nodeIndex ? 0 : 1;
+            const committedEndpointOrdinal = committed.edge.fromIndex === nodeIndex ? 0 : 1;
+            return planningVolumeIntersection(
+              routeOption.endpointSeams?.[routeEndpointOrdinal]?.overlapEnvelope,
+              committed.routeOption.endpointSeams?.[committedEndpointOrdinal]?.overlapEnvelope,
+            );
+          }).filter(Boolean);
+          return !routeOptionIntersectsVolumes(
+            routeOption,
+            committed.routeOption.collisionVolumes
+              ?? committed.routeOption.pathVolumes
+              ?? [],
+            sharedEndpointSeams,
+          );
+        })
+      );
+      const inactiveSocketCapsClearCurrentSolution = () => {
+        const roomNodes = selectedNodes.filter((node) => node?.connectorOwned !== true);
+        const claimedSocketIdsByNodeId = new Map(roomNodes.map((node) => {
+          const nodeIndex = selectedNodes.indexOf(node);
+          return [
+            String(node.id),
+            new Set(usedSocketIdsByNodeIndex.get(nodeIndex) ?? []),
+          ];
+        }));
+        const capVolumes = routeNetworkInactiveSocketCapPlanningVolumes(roomNodes, {
+          claimedSocketIdsByNodeId,
+        });
+        const validation = validateRouteNetworkInactiveSocketCapPlanningVolumes(
+          capVolumes,
+          [
+            ...staticAvoidanceVolumes,
+            ...selectedNodes.flatMap((node) => [
+              ...(node.occupiedVolumes ?? []),
+              ...(node.clearanceVolumes ?? []),
+            ]),
+            ...parentAttachmentPathVolumes,
+            ...committedSpineRouteSelections.flatMap(({ routeOption }) => (
+              routeOption.collisionVolumes ?? routeOption.pathVolumes ?? []
+            )),
+          ],
         );
+        if (validation.accepted) return true;
+        inactiveSocketCapFailureDiagnostics = {
+          code: validation.code,
+          capVolumeCount: validation.capVolumeCount,
+          obstacleVolumeCount: validation.obstacleVolumeCount,
+          conflictCount: validation.conflictCount,
+          conflicts: cloneDungeonAugmentationValue(validation.conflicts.slice(0, 12)),
+        };
+        return false;
+      };
+      const exactSpineHasTopologyReturn = () => {
+        if (topologyKitModuleIndex == null
+          || !['over-under-loop', 'stacked-interchange'].includes(
+            String(topologyTemplateId),
+          )) return inactiveSocketCapsClearCurrentSolution();
+        const kitIndex = Number(topologyKitModuleIndex);
+        const kitNode = selectedNodes[kitIndex];
+        const topologySocketIds = (
+          kitNode?.selectionConstraints?.routeNetworkTopologySocketIds ?? []
+        ).map(String);
+        if (!kitNode || topologySocketIds.length === 0) return false;
+        const topologySocketIdSet = new Set(topologySocketIds);
+        const topologySelections = [];
+        const routeClearsFixedPlacement = (routeOption, fromIndex, toIndex) => {
+          const edge = { fromIndex, toIndex };
+          const fixedNodeVolumes = selectedNodes.flatMap((node, nodeIndex) => (
+            nodeIndex === fromIndex || nodeIndex === toIndex
+              ? []
+              : [
+                ...(node.occupiedVolumes ?? []),
+                ...(node.clearanceVolumes ?? []),
+              ]
+          ));
+          return !routeOptionIntersectsVolumes(routeOption, fixedNodeVolumes)
+            && parentAttachmentCollisionRecords.every((attachmentRecord) => (
+              !routeOptionIntersectsVolumes(
+                routeOption,
+                attachmentRecord.collisionVolumes,
+                routeNetworkParentAttachmentSharedSeamGrants(
+                  edge,
+                  routeOption,
+                  attachmentRecord.nodeIndex,
+                  parentAttachmentEndpointSeamByNodeIndex,
+                ),
+              )
+            ));
+        };
+        const visitPendingTopologySocket = () => {
+          const pendingLocalSocketId = topologySocketIds.find((localSocketId) => (
+            !usedSocketIdsByNodeIndex.get(kitIndex)?.has(localSocketId)
+          ));
+          if (!pendingLocalSocketId) return true;
+          const fromSocket = getNodeSocket(kitNode, pendingLocalSocketId);
+          if (!fromSocket) return false;
+          for (const [targetIndex, targetNode] of selectedNodes.entries()) {
+            const targetUsedSocketIds = usedSocketIdsByNodeIndex.get(targetIndex);
+            for (const toSocket of targetNode.sockets ?? []) {
+              const toLocalSocketId = String(toSocket.localSocketId);
+              if (targetUsedSocketIds.has(toLocalSocketId)
+                || (targetIndex === kitIndex
+                  && toLocalSocketId === pendingLocalSocketId)) continue;
+              if (targetIndex === kitIndex
+                && topologySocketIdSet.has(toLocalSocketId)
+                && usedSocketIdsByNodeIndex.get(kitIndex).has(toLocalSocketId)) continue;
+              const topologyEdge = { fromIndex: kitIndex, toIndex: targetIndex };
+              for (const routeOption of orderedSocketRouteOptions(
+                fromSocket,
+                toSocket,
+                true,
+                kitNode,
+                targetNode,
+              )) {
+                if (routeOptionHasStaticCollision(routeOption)
+                  || !routeClearsFixedPlacement(routeOption, kitIndex, targetIndex)
+                  || !routeOptionClearsCommittedSpine(topologyEdge, routeOption)) continue;
+                usedSocketIdsByNodeIndex.get(kitIndex).add(pendingLocalSocketId);
+                targetUsedSocketIds.add(toLocalSocketId);
+                const selection = {
+                  edge: topologyEdge,
+                  routeOption,
+                  claims: [
+                    { nodeIndex: kitIndex, localSocketId: pendingLocalSocketId },
+                    { nodeIndex: targetIndex, localSocketId: toLocalSocketId },
+                  ],
+                };
+                committedSpineRouteSelections.push(selection);
+                topologySelections.push(selection);
+                if (visitPendingTopologySocket()) return true;
+                topologySelections.pop();
+                committedSpineRouteSelections.pop();
+                usedSocketIdsByNodeIndex.get(kitIndex).delete(pendingLocalSocketId);
+                targetUsedSocketIds.delete(toLocalSocketId);
+              }
+            }
+          }
+          return false;
+        };
+        let compatible = visitPendingTopologySocket();
+        if (compatible && !inactiveSocketCapsClearCurrentSolution()) compatible = false;
+        if (compatible) {
+          topologyReturnWitness = topologySelections.map((selection, ordinal) => ({
+            fromIndex: Number(selection.edge.fromIndex),
+            toIndex: Number(selection.edge.toIndex),
+            fromLocalSocketId: String(selection.claims[0].localSocketId),
+            toLocalSocketId: String(selection.claims[1].localSocketId),
+            path: cloneDungeonAugmentationValue(selection.routeOption.path),
+            routeRole: `${topologyTemplateId === 'over-under-loop'
+              ? 'over-under-loop:upper-return-leg'
+              : 'stacked-interchange:upper-arm'}:prevalidated:${ordinal}`,
+          }));
+        }
+        while (topologySelections.length > 0) {
+          const selection = topologySelections.pop();
+          committedSpineRouteSelections.pop();
+          for (const { nodeIndex, localSocketId } of selection.claims) {
+            usedSocketIdsByNodeIndex.get(nodeIndex)?.delete(localSocketId);
+          }
+        }
+        return compatible;
       };
       const futureEdgeHasRouteOption = (edgeOrdinal) => {
         const { fromIndex, toIndex } = coverageRequiredEdges[edgeOrdinal];
@@ -11966,11 +19337,17 @@ export function planRouteNetwork({
         }) => (
           !fromUsed.has(fromSocket.localSocketId)
             && !toUsed.has(toSocket.localSocketId)
-            && routeOptions.some(routeOptionClearsCommittedSpine)
+            && routeOptions.some((routeOption) => routeOptionClearsCommittedSpine(
+              coverageRequiredEdges[edgeOrdinal],
+              routeOption,
+            ))
         ));
       };
       const visitSpineEdge = (edgeOrdinal) => {
-        if (edgeOrdinal >= coverageRequiredEdges.length) return true;
+        if (edgeOrdinal >= coverageRequiredEdges.length) {
+          lastPhysicalSpineReachedCompleteCoverageLeaf = true;
+          return exactSpineHasTopologyReturn();
+        }
         const requiredEdge = coverageRequiredEdges[edgeOrdinal];
         const { fromIndex, toIndex } = requiredEdge;
         const fromNode = selectedNodes[fromIndex];
@@ -11987,7 +19364,10 @@ export function planRouteNetwork({
           .map(({ fromSocket, toSocket, routeOptions }) => ({
             fromSocket,
             toSocket,
-            witness: routeOptions.find(routeOptionClearsCommittedSpine) ?? null,
+            witness: routeOptions.find((routeOption) => routeOptionClearsCommittedSpine(
+              requiredEdge,
+              routeOption,
+            )) ?? null,
           }))
           .filter(({ witness }) => witness)
           .map(({ fromSocket, toSocket, witness }) => {
@@ -12009,7 +19389,10 @@ export function planRouteNetwork({
                 + parentAttachmentDistance
                 + connectorModuleCoreTraversalDistance(
                   node,
-                  'entry',
+                  selectedPlacementCandidates.get(nodeIndex)?.parentLocalSocketId
+                    ?? node?.planningParentLocalSocketId
+                    ?? node?.parentAttachmentLocalSocketId
+                    ?? 'entry',
                   throughLocalSocketId,
                 );
             }, 0);
@@ -12123,7 +19506,9 @@ export function planRouteNetwork({
           const selectedPhysicalObstacles = [
             ...selectedOtherNodeVolumes,
             ...parentAttachmentPathVolumes,
-            ...committedSpineRouteVolumes,
+            ...committedSpineRouteSelections.flatMap(({ routeOption }) => (
+              routeOption.collisionVolumes ?? routeOption.pathVolumes ?? []
+            )),
           ];
           const routeAvoidanceVolumes = [
             ...staticAvoidanceVolumes,
@@ -12170,10 +19555,10 @@ export function planRouteNetwork({
           fromUsed.add(candidate.fromLocalSocketId);
           toUsed.add(candidate.toLocalSocketId);
           pairs.push(candidate);
-          const committedVolumeCount = committedSpineRouteVolumes.length;
-          committedSpineRouteVolumes.push(...(
-            candidate.collisionVolumes ?? candidate.pathVolumes ?? []
-          ));
+          committedSpineRouteSelections.push({
+            edge: requiredEdge,
+            routeOption: candidate,
+          });
           const futureEdgeIndices = Array.from(
             { length: coverageRequiredEdges.length - edgeOrdinal - 1 },
             (_, offset) => edgeOrdinal + offset + 1,
@@ -12189,7 +19574,7 @@ export function planRouteNetwork({
           // clear cores can make a coarse future witness look occupied until
           // the preceding route choice is committed.
           if (visitSpineEdge(edgeOrdinal + 1)) return true;
-          committedSpineRouteVolumes.length = committedVolumeCount;
+          committedSpineRouteSelections.pop();
           pairs.pop();
           fromUsed.delete(candidate.fromLocalSocketId);
           toUsed.delete(candidate.toLocalSocketId);
@@ -12198,18 +19583,33 @@ export function planRouteNetwork({
       };
       return visitSpineEdge(0) ? {
         pairs: pairs.map(({ pathVolumes: omitted, ...pair }) => ({ ...pair })),
+        topologyPairs: topologyReturnWitness.map((pair) => ({ ...pair })),
         parentAttachmentPaths,
+        parentLocalSocketIds,
       } : null;
     };
     const visitPlacementCandidates = () => {
-      if (placementSolution || placementSearchVisits >= 20000) return;
+      if (placementSolution || placementSearchVisits >= placementSearchVisitLimit) return;
       placementSearchVisits += 1;
+      if ((placementSearchVisits & (placementSearchVisits - 1)) === 0) {
+        emitPlanningDebugStage('route-network-recursive-composition-progress', {
+          placementSearchVisits,
+          physicalSpineAttempts,
+          physicalSpineDfsExecutions,
+          physicalSpineBehaviorCacheHits,
+          parentAttachmentCombinationAttempts,
+          selectedPlacementCount: selectedPlacementCandidates.size,
+          planningPhaseTimings: physicalPlanningTimingSnapshot(),
+        });
+      }
       if (selectedPlacementCandidates.size >= placementCandidateGroups.length) {
         const spineSolution = solvePhysicalSpine();
         if (spineSolution) {
           placementSolution = new Map(selectedPlacementCandidates);
           placementSpineSolution = spineSolution.pairs;
+          placementTopologySolution = spineSolution.topologyPairs;
           preselectedCoverageParentAttachmentPaths = spineSolution.parentAttachmentPaths;
+          preselectedCoverageParentLocalSocketIds = spineSolution.parentLocalSocketIds;
         }
         return;
       }
@@ -12234,20 +19634,33 @@ export function planRouteNetwork({
         // Cheaply forward-check every unassigned module, not only the next
         // spine index. Exact route witnesses are still required when a module
         // is selected and by solvePhysicalSpine at every complete assignment.
-        const remainingFeasible = placementCandidateGroups
+        const remainingForwardDomains = placementCandidateGroups
           .filter(({ index }) => !selectedPlacementCandidates.has(index))
-          .every((remainingGroup) => remainingGroup.candidates.some((remainingCandidate) => (
-            candidateCheaplyCompatibleWithSelection(
+          .map((remainingGroup) => ({
+            nodeIndex: remainingGroup.index,
+            compatibleCount: remainingGroup.candidates.filter((remainingCandidate) => (
+              candidateCheaplyCompatibleWithSelection(
               remainingCandidate,
               remainingGroup.index,
             )
-          )));
+            )).length,
+          }));
+        const remainingFeasible = remainingForwardDomains.every(({
+          compatibleCount,
+        }) => compatibleCount > 0);
         if (remainingFeasible) visitPlacementCandidates();
         selectedPlacementCandidates.delete(group.index);
         if (placementSolution) break;
       }
     };
     const recursiveCompositionStartedAt = planningNowMilliseconds();
+    emitPlanningDebugStage('route-network-recursive-composition-start', {
+      placementCandidateCounts: placementCandidateGroups.map(({ index, candidates }) => ({
+        nodeIndex: index,
+        count: candidates.length,
+      })),
+      planningPhaseTimings: physicalPlanningTimingSnapshot(),
+    });
     visitPlacementCandidates();
     physicalPlanningPhaseTimings.recursiveCompositionMs +=
       planningNowMilliseconds() - recursiveCompositionStartedAt;
@@ -12262,7 +19675,17 @@ export function planRouteNetwork({
           contentRoles,
           endpointNodeIndices: [...endpointNodeIndexSet].sort((first, second) => first - second),
           placementSearchVisits,
+          placementSearchVisitLimit,
+          placementSearchBudgetExhausted:
+            placementSearchVisits >= placementSearchVisitLimit,
           physicalSpineAttempts,
+          physicalSpineDfsExecutions,
+          physicalSpineBehaviorCacheHits,
+          parentAttachmentCombinationAttempts,
+          parentAttachmentCandidateDomainCounts,
+          parentAttachmentCompatibleDomainCounts,
+          parentAttachmentCombinationAttemptsWithinVisitBudget:
+            parentAttachmentCombinationAttempts <= placementSearchVisits,
           planningPhaseTimings: cloneDungeonAugmentationValue(
             physicalPlanningPhaseTimings,
           ),
@@ -12278,6 +19701,7 @@ export function planRouteNetwork({
             centers: group.candidates.map(({ center }) => center),
           })),
           parentAttachmentFailureDiagnostics,
+          inactiveSocketCapFailureDiagnostics,
           physicalSpineEdgeDiagnostics,
           placementCandidateCounts: placementCandidateGroups.map(({
             index,
@@ -12292,6 +19716,7 @@ export function planRouteNetwork({
       };
     }
     preselectedCoverageSpinePairs = placementSpineSolution;
+    preselectedCoverageTopologyReturnPairs = placementTopologySolution;
     for (let index = 0; index < mainCenters.length; index += 1) {
       const selected = placementSolution.get(index);
       const committedNode = createRouteNetworkNode(
@@ -12299,6 +19724,10 @@ export function planRouteNetwork({
         selected.center,
         selected.facing,
       );
+      if (endpointNodeIndexSet.has(index)) {
+        committedNode.parentAttachmentLocalSocketId =
+          selected.parentLocalSocketId ?? 'entry';
+      }
       centers[index] = selected.center;
       mainNodes[index] = committedNode;
       localPlacementAvoidanceVolumes.push(
@@ -12308,6 +19737,88 @@ export function planRouteNetwork({
     }
   }
   let pyramidWingConnection = null;
+  let landmarkWingChoices = [];
+  let selectedLandmarkWingChoiceOrdinal = null;
+  let selectedLandmarkWingChoiceSignature = null;
+  const advanceSelectedLandmarkParentAttachmentPair = (reason, context = {}) => {
+    if (typeof futureEndpointDomainForwardCheck !== 'function'
+      || !selectedLandmarkPlacementPairSignature) return null;
+    const nextPathOrdinals = nextLandmarkParentAttachmentPathOrdinals(
+      landmarkRequestedParentAttachmentPathOrdinals,
+      landmarkParentAttachmentCandidateCounts,
+    );
+    if (nextPathOrdinals) {
+      return landmarkLocalBacktrackResult(
+        reason,
+        {
+          activePlacementPairSignature: selectedLandmarkPlacementPairSignature,
+          parentAttachmentPathOrdinals: nextPathOrdinals,
+          wingChoiceOrdinal: 0,
+          activeWingChoiceSignature: null,
+          rejectedPlacementPairSignatures: landmarkRejectedPlacementPairSignatures,
+        },
+        {
+          selectedPlacementPairSignature: selectedLandmarkPlacementPairSignature,
+          previousParentAttachmentPathOrdinals:
+            [...landmarkRequestedParentAttachmentPathOrdinals],
+          nextParentAttachmentPathOrdinals: nextPathOrdinals,
+          parentAttachmentCandidateCounts:
+            [...landmarkParentAttachmentCandidateCounts],
+          ...context,
+        },
+      );
+    }
+    return rejectSelectedLandmarkPlacementPair(
+      'landmark-parent-attachment-path-pairs-exhausted',
+      {
+        parentAttachmentPathOrdinals:
+          [...landmarkRequestedParentAttachmentPathOrdinals],
+        parentAttachmentCandidateCounts:
+          [...landmarkParentAttachmentCandidateCounts],
+        originatingReason: reason,
+        ...context,
+      },
+    );
+  };
+  const advanceSelectedLandmarkWingChoice = (reason, context = {}) => {
+    if (typeof futureEndpointDomainForwardCheck !== 'function'
+      || !selectedLandmarkPlacementPairSignature
+      || !Number.isInteger(selectedLandmarkWingChoiceOrdinal)) return null;
+    const nextWingChoiceOrdinal = selectedLandmarkWingChoiceOrdinal + 1;
+    const nextWingChoice = landmarkWingChoices[nextWingChoiceOrdinal] ?? null;
+    if (!nextWingChoice) {
+      return advanceSelectedLandmarkParentAttachmentPair(
+        'landmark-wing-choices-exhausted',
+        {
+          exhaustedWingChoiceCount: landmarkWingChoices.length,
+          lastWingChoiceOrdinal: selectedLandmarkWingChoiceOrdinal,
+          lastWingChoiceSignature: selectedLandmarkWingChoiceSignature,
+          originatingReason: reason,
+          ...context,
+        },
+      );
+    }
+    return landmarkLocalBacktrackResult(
+      reason,
+      {
+        activePlacementPairSignature: selectedLandmarkPlacementPairSignature,
+        parentAttachmentPathOrdinals:
+          [...landmarkRequestedParentAttachmentPathOrdinals],
+        wingChoiceOrdinal: nextWingChoiceOrdinal,
+        activeWingChoiceSignature: nextWingChoice.signature,
+        rejectedPlacementPairSignatures: landmarkRejectedPlacementPairSignatures,
+      },
+      {
+        selectedPlacementPairSignature: selectedLandmarkPlacementPairSignature,
+        previousWingChoiceOrdinal: selectedLandmarkWingChoiceOrdinal,
+        previousWingChoiceSignature: selectedLandmarkWingChoiceSignature,
+        nextWingChoiceOrdinal,
+        nextWingChoiceSignature: nextWingChoice.signature,
+        wingChoiceCount: landmarkWingChoices.length,
+        ...context,
+      },
+    );
+  };
   const nodes = [...mainNodes];
   const stableRuntimeStateIds = {
     encounter: `${operationId}:state:encounter`,
@@ -12318,15 +19829,18 @@ export function planRouteNetwork({
   const segments = [];
   let nextSegmentOrdinal = 0;
   let lastSegmentFailureDiagnostics = null;
+  let lastParentAttachmentCandidateCount = null;
   const addSegment = ({
     from,
     to,
     routeRole,
     nodeSockets = [],
     preselectedPath = null,
+    parentAttachmentPathOrdinal = null,
     localApproachWitnesses = null,
   }) => {
     lastSegmentFailureDiagnostics = null;
+    lastParentAttachmentCandidateCount = null;
     if (nodeSockets.some(([node, localSocketId]) => {
       const socket = getNodeSocket(node, localSocketId);
       return !socket || socket.state !== 'capped' || socket.segmentId != null;
@@ -12422,53 +19936,126 @@ export function planRouteNetwork({
     ));
     const preferXFirst = segments.length % 2 === 0;
     let segmentPath = preselectedPath;
+    let routeCandidateDiagnostics = null;
     if (!segmentPath) {
       if (routeRole === 'parent-station-attachment') {
-        segmentPath = collisionAvoidingParentAttachmentPath(
-          from,
-          to,
-          routeAvoidanceVolumes,
-          preferXFirst,
-          [...parentAttachmentOverlapGrants, ...endpointSeamOverlapGrants],
-          connectorFamily,
-          ROUTE_NETWORK_SOCKET_APPROACH_METERS,
-          false,
-          enforceExactEmittedCoverageVolumes,
-        );
+        if (Number.isInteger(parentAttachmentPathOrdinal)) {
+          const selectedParentAttachment = collisionAvoidingParentAttachmentPath(
+            from,
+            to,
+            routeAvoidanceVolumes,
+            preferXFirst,
+            [...parentAttachmentOverlapGrants, ...endpointSeamOverlapGrants],
+            connectorFamily,
+            ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+            true,
+            reserveCompleteSegmentCollisionVolumes,
+            parentAttachmentPathOrdinal,
+          );
+          lastParentAttachmentCandidateCount = Number(
+            selectedParentAttachment?.eligibleCandidateCount ?? 0,
+          );
+          segmentPath = selectedParentAttachment?.path ?? null;
+          routeCandidateDiagnostics = {
+            requestedParentAttachmentPathOrdinal: parentAttachmentPathOrdinal,
+            eligibleParentAttachmentCandidateCount:
+              lastParentAttachmentCandidateCount,
+          };
+        } else {
+          segmentPath = collisionAvoidingParentAttachmentPath(
+            from,
+            to,
+            routeAvoidanceVolumes,
+            preferXFirst,
+            [...parentAttachmentOverlapGrants, ...endpointSeamOverlapGrants],
+            connectorFamily,
+            ROUTE_NETWORK_SOCKET_APPROACH_METERS,
+            false,
+            reserveCompleteSegmentCollisionVolumes,
+          );
+        }
       } else {
-        segmentPath = cachedSocketRouteCandidates(from, to, {
+        const pathCandidates = cachedSocketRouteCandidates(from, to, {
           preferXFirst,
           connectorFamily,
-          ...coverageModuleRouteOptions,
+          ...networkModuleRouteOptions,
         }).map((path, ordinal) => {
-          const collisionVolumes = enforceExactEmittedCoverageVolumes
-            ? routeSegmentPlanningCollisionVolumes(path, from, to, 5.6, 5.6)
+          const collisionVolumes = reserveCompleteSegmentCollisionVolumes
+            ? routeSegmentPlanningCollisionVolumes(
+              path,
+              from,
+              to,
+              5.6,
+              5.6,
+              `${segmentId}:candidate:${ordinal}`,
+            )
             : routePathPlanningVolumes(path, 5.6);
+          const overlapGrants = [
+            ...endpointSeamOverlapGrants,
+            ...endpointNodeOverlapGrants,
+          ];
+          const slopePlanningReservation = connectorFamily === 'slope'
+            ? routeNetworkSlopeSwitchbackPlanningReservation(
+              path,
+              from,
+              to,
+              routeAvoidanceVolumes,
+              overlapGrants,
+              `${segmentId}:candidate:${ordinal}`,
+            )
+            : null;
+          const fromApproach = routePathExteriorSocketApproachDiagnostic(
+            path,
+            from,
+            false,
+            requireAuthoritativeEndpointSeams ? endpointSeams[0] : null,
+          );
+          const toApproach = routePathExteriorSocketApproachDiagnostic(
+            path,
+            to,
+            true,
+            requireAuthoritativeEndpointSeams ? endpointSeams[1] : null,
+          );
           return {
             path,
             ordinal,
             collisionScore: planningRouteVolumesCollisionScore(
               collisionVolumes,
               routeAvoidanceVolumes,
-              [...endpointSeamOverlapGrants, ...endpointNodeOverlapGrants],
-            ),
+              overlapGrants,
+            ) + (connectorFamily === 'slope' && !slopePlanningReservation ? 1 : 0),
+            slopeSwitchbackSideSign:
+              slopePlanningReservation?.switchbackSideSign ?? null,
+            collisionIds: pathPlanningCollisionIds(
+              path,
+              routeAvoidanceVolumes,
+              5.6,
+              overlapGrants,
+            ).slice(0, 8),
             lengthMeters: measureDungeonPolyline(path),
             maximumLevelSpanMeters: maximumContinuousLevelRouteSpan(path),
+            fromApproach,
+            toApproach,
           };
-        }).filter(({ path, collisionScore, maximumLevelSpanMeters }) => (
+        });
+        routeCandidateDiagnostics = {
+          from: cloneDungeonAugmentationValue(from),
+          to: cloneDungeonAugmentationValue(to),
+          rawCandidateCount: pathCandidates.length,
+          candidates: pathCandidates.slice(0, 8).map((candidate) => ({
+            ...candidate,
+            path: cloneDungeonAugmentationValue(candidate.path),
+          })),
+        };
+        segmentPath = pathCandidates.filter(({
+          collisionScore,
+          maximumLevelSpanMeters,
+          fromApproach,
+          toApproach,
+        }) => (
           collisionScore === 0
-            && routePathHasExteriorSocketApproach(
-              path,
-              from,
-              false,
-              requireAuthoritativeEndpointSeams ? endpointSeams[0] : null,
-            )
-            && routePathHasExteriorSocketApproach(
-              path,
-              to,
-              true,
-              requireAuthoritativeEndpointSeams ? endpointSeams[1] : null,
-            )
+            && fromApproach.accepted === true
+            && toApproach.accepted === true
             && maximumLevelSpanMeters <= Number(
               profile.routeNetworkPlanning.maximumFeaturelessSpanMeters,
             ) + 1e-6
@@ -12481,6 +20068,21 @@ export function planRouteNetwork({
     }
     if (requireAuthoritativeEndpointSeams && Array.isArray(segmentPath)) {
       segmentPath = routePathWithAuthoritativeSeamEndpoints(segmentPath, endpointSeams);
+    }
+    if (!liftRoutePathIsMaterializable(
+      segmentPath,
+      from,
+      to,
+      connectorRoomFootprintsForNodes(nodes),
+      `${segmentId}:lift`,
+      endpointSeams,
+    )) {
+      lastSegmentFailureDiagnostics = {
+        code: 'route-network-lift-contract-unrealizable',
+        segmentId,
+        routeRole,
+      };
+      return null;
     }
     const segmentFeaturelessDistance = Array.isArray(segmentPath)
       ? maximumContinuousLevelRouteSpan(segmentPath)
@@ -12522,6 +20124,7 @@ export function planRouteNetwork({
         code: 'route-network-segment-path-missing',
         segmentId,
         routeRole,
+        routeCandidateDiagnostics,
       };
       return null;
     }
@@ -12553,18 +20156,46 @@ export function planRouteNetwork({
       };
       return null;
     }
-    const plannedCollisionVolumes = enforceExactEmittedCoverageVolumes
+    const plannedOverlapGrants = [
+      ...parentAttachmentOverlapGrants,
+      ...endpointSeamOverlapGrants,
+      ...endpointNodeOverlapGrants,
+    ];
+    const slopePlanningReservation = connectorFamily === 'slope'
+      ? routeNetworkSlopeSwitchbackPlanningReservation(
+        segmentPath,
+        from,
+        to,
+        routeAvoidanceVolumes,
+        plannedOverlapGrants,
+        segmentId,
+      )
+      : null;
+    if (connectorFamily === 'slope' && !slopePlanningReservation) {
+      lastSegmentFailureDiagnostics = {
+        code: 'route-network-slope-switchback-footprint-blocked',
+        segmentId,
+        routeRole,
+      };
+      return null;
+    }
+    const genericPlannedCollisionVolumes = reserveCompleteSegmentCollisionVolumes
       ? routeSegmentPlanningCollisionVolumes(
         segmentPath,
         from,
         to,
         routeRole === 'parent-station-attachment' ? 3.6 : 5.6,
         5.6,
+        segmentId,
       )
       : routePathPlanningVolumes(
         segmentPath,
         routeRole === 'parent-station-attachment' ? 3.6 : 5.6,
       );
+    const plannedCollisionVolumes = [
+      ...genericPlannedCollisionVolumes,
+      ...(slopePlanningReservation?.collisionVolumes ?? []),
+    ];
     const rejectedEndpointMaskIndex = [from, to].findIndex((endpoint, endpointIndex) => {
       const { node } = endpointNodeAndSocket(endpoint);
       return !routePlanningVolumesRespectEndpointNodeMask(
@@ -12601,11 +20232,6 @@ export function planRouteNetwork({
       };
       return null;
     }
-    const plannedOverlapGrants = [
-      ...parentAttachmentOverlapGrants,
-      ...endpointSeamOverlapGrants,
-      ...endpointNodeOverlapGrants,
-    ];
     const rejectedPlannedOverlap = routeRole === 'parent-station-attachment'
       ? plannedCollisionVolumes.flatMap((volume) => (
         routeAvoidanceVolumes.map((obstacle) => ({ volume, obstacle }))
@@ -12640,6 +20266,12 @@ export function planRouteNetwork({
       landingDepthMeters: 5.6,
       path: segmentPath,
     });
+    if (slopePlanningReservation) {
+      segment.slopeSwitchbackSideSign = slopePlanningReservation.switchbackSideSign;
+      segment.clearanceVolumes.push(...cloneDungeonAugmentationValue(
+        slopePlanningReservation.collisionVolumes,
+      ));
+    }
     segment.endpointSeams = cloneDungeonAugmentationValue(endpointSeams);
     const authoredLocalApproachWitness = (endpoint) => {
       const endpointSocketId = String(endpoint?.socketId ?? endpoint?.id ?? '');
@@ -12804,26 +20436,92 @@ export function planRouteNetwork({
       : coveragePlacement.endpointNodeIndices[index];
     const node = nodes[nodeIndex];
     const localSocketId = grant.kind === 'landmark-perimeter-loop'
-      ? index === 0 ? 'entry' : 'exit'
-      : 'entry';
+      ? node.parentAttachmentLocalSocketId
+        ?? node.planningParentLocalSocketId
+        ?? (index === 0 ? 'entry' : 'exit')
+      : node.parentAttachmentLocalSocketId
+        ?? preselectedCoverageParentLocalSocketIds?.[index]
+        ?? 'entry';
+    const localSocket = getNodeSocket(node, localSocketId);
+    if (!localSocket || localSocket.state !== 'capped' || localSocket.segmentId != null) {
+      const localContinuation = grant.kind === 'landmark-perimeter-loop'
+        ? rejectSelectedLandmarkPlacementPair(
+          'landmark-parent-attachment-local-socket-unavailable',
+          {
+            endpointOrdinal: index,
+            socketId: socket.id,
+            nodeId: node.id,
+            parentAttachmentLocalSocketId: localSocketId,
+          },
+        )
+        : null;
+      if (localContinuation) return localContinuation;
+      return {
+        error: 'route-network-parent-attachment-local-socket-unavailable',
+        context: {
+          grantId: grant.id,
+          socketId: socket.id,
+          endpointOrdinal: index,
+          nodeId: node.id,
+          parentAttachmentLocalSocketId: localSocketId,
+          localSocketState: localSocket?.state ?? null,
+          existingSegmentId: localSocket?.segmentId ?? null,
+        },
+      };
+    }
+    // The authored wall socket is the physical start of every parent
+    // attachment. Landmark endpoint modules may move outward in 2.8m steps;
+    // their attachment segment must cover that complete distance instead of
+    // inventing a new threshold one approach span behind the moved module.
+    const physicalParentPosition = socket.position;
     const parentEndpoint = {
       kind: 'parentSocket',
       id: socket.id,
       nodeId: socket.nodeId,
       socketId: socket.id,
-      position: cloneDungeonAugmentationValue(socket.position),
+      position: cloneDungeonAugmentationValue(physicalParentPosition),
       facing: cloneDungeonAugmentationValue(socket.facing),
+      authoredSocketPosition: cloneDungeonAugmentationValue(socket.position),
     };
     const attachmentSegment = addSegment({
       from: parentEndpoint,
       to: nodeEndpoint(node, localSocketId),
       routeRole: 'parent-station-attachment',
       nodeSockets: [[node, localSocketId]],
+      parentAttachmentPathOrdinal:
+        grant.kind === 'landmark-perimeter-loop'
+          && typeof futureEndpointDomainForwardCheck === 'function'
+          ? landmarkRequestedParentAttachmentPathOrdinals[index]
+          : null,
       preselectedPath: grant.kind === 'objective-route-coverage'
         ? preselectedCoverageParentAttachmentPaths?.[index] ?? null
         : null,
     });
+    if (grant.kind === 'landmark-perimeter-loop'
+      && typeof futureEndpointDomainForwardCheck === 'function') {
+      landmarkParentAttachmentCandidateCounts[index] = Math.max(
+        0,
+        Math.floor(Number(lastParentAttachmentCandidateCount) || 0),
+      );
+    }
     if (!attachmentSegment) {
+      const localContinuation = grant.kind === 'landmark-perimeter-loop'
+        ? advanceSelectedLandmarkParentAttachmentPair(
+          'landmark-parent-attachment-unrealizable',
+          {
+            endpointOrdinal: index,
+            socketId: socket.id,
+            requestedParentAttachmentPathOrdinal:
+              landmarkRequestedParentAttachmentPathOrdinals[index],
+            parentAttachmentCandidateCounts:
+              [...landmarkParentAttachmentCandidateCounts],
+            segmentFailureDiagnostics: cloneDungeonAugmentationValue(
+              lastSegmentFailureDiagnostics,
+            ),
+          },
+        )
+        : null;
+      if (localContinuation) return localContinuation;
       return {
         error: 'route-network-parent-attachment-unrealizable',
         context: {
@@ -12847,25 +20545,26 @@ export function planRouteNetwork({
         z: wingParent.placement.center.z - Number(landmarkCenter.z),
       })
       : endpoints.at(-1).facing;
-    const decisionSockets = ['exit', 'left', 'right']
-      .map((localSocketId) => ({
-        localSocketId,
-        socket: getNodeSocket(wingParent, localSocketId),
-      }))
-      .filter(({ socket }) => socket?.state === 'capped')
-      .sort((first, second) => (
-        second.socket.facing.x * outwardReference.x
-          + second.socket.facing.z * outwardReference.z
-          - first.socket.facing.x * outwardReference.x
-          - first.socket.facing.z * outwardReference.z
-          || first.localSocketId.localeCompare(second.localSocketId)
-      ));
+    const decisionSockets = orderedLandmarkDecisionSockets(
+      wingParent,
+      outwardReference,
+    );
     const variant = Math.max(0, Math.floor(Number(searchVariant) || 0));
     const decisionOffset = decisionSockets.length > 0 ? variant % decisionSockets.length : 0;
-    const orderedDecisionSockets = [
+    const variantOrderedDecisionSockets = [
       ...decisionSockets.slice(decisionOffset),
       ...decisionSockets.slice(0, decisionOffset),
     ];
+    const orderedDecisionSockets = preselectedLandmarkWingParentLocalSocketId
+      ? [
+        ...variantOrderedDecisionSockets.filter(({ localSocketId }) => (
+          localSocketId === preselectedLandmarkWingParentLocalSocketId
+        )),
+        ...variantOrderedDecisionSockets.filter(({ localSocketId }) => (
+          localSocketId !== preselectedLandmarkWingParentLocalSocketId
+        )),
+      ]
+      : variantOrderedDecisionSockets;
     const wingDepth = Number(selectedGrammars[wingNodeIndex].size.depth);
     const minimumWingConnectorRun = Math.max(
       Math.max(
@@ -12877,7 +20576,8 @@ export function planRouteNetwork({
         : 0,
     );
     const attemptedWingCandidates = [];
-    for (const decisionSocket of orderedDecisionSockets) {
+    const seenWingChoiceSignatures = new Set();
+    landmarkWingChoices = orderedDecisionSockets.flatMap((decisionSocket) => {
       const wingFacing = decisionSocket.socket.facing;
       const wingCenter = addDungeonPoints(
         decisionSocket.socket.position,
@@ -12910,64 +20610,239 @@ export function planRouteNetwork({
         ...rawCandidates.slice(candidateOffset),
         ...rawCandidates.slice(0, candidateOffset),
       ].slice(0, 24);
-      for (const candidate of candidates) {
+      return candidates.flatMap((candidate, placementOrdinal) => {
         const committedWingNode = createRouteNetworkNode(
           wingNodeIndex,
           candidate.center,
           candidate.facing,
         );
-        const candidateVolumes = [
-          ...(committedWingNode.occupiedVolumes ?? []),
-          ...(committedWingNode.clearanceVolumes ?? []),
-        ];
-        localPlacementAvoidanceVolumes.push(...candidateVolumes);
-        // This compact parent is committed to the two perimeter approaches and
-        // the reward wing. Mark the promised degree before measuring the wing,
-        // so the already-realized parent threshold is not incorrectly carried
-        // through what will be a meaningful three-arm junction.
-        wingParent.plannedMinimumGraphDegree = Math.max(
-          3,
-          Number(wingParent.plannedMinimumGraphDegree ?? 0),
+        const fromEndpoint = nodeEndpoint(wingParent, decisionSocket.localSocketId);
+        const toEndpoint = nodeEndpoint(committedWingNode, 'entry');
+        const connectorFamily = Math.abs(
+          Number(toEndpoint.position.y) - Number(fromEndpoint.position.y),
+        ) > 1e-6 ? verticalFamily : 'service-gallery';
+        return cachedSocketRouteCandidates(fromEndpoint, toEndpoint, {
+          preferXFirst: segments.length % 2 === 0,
+          connectorFamily,
+          ...networkModuleRouteOptions,
+        }).map((path, sourcePathOrdinal) => ({
+          path,
+          sourcePathOrdinal,
+          lengthMeters: measureDungeonPolyline(path),
+        })).sort((first, second) => (
+          first.lengthMeters - second.lengthMeters
+            || first.sourcePathOrdinal - second.sourcePathOrdinal
+        )).flatMap((pathChoice, orderedPathOrdinal) => {
+          const routePathSignature = canonicalStringify(pathChoice.path);
+          const signature = canonicalStringify({
+            parentLocalSocketId: decisionSocket.localSocketId,
+            center: candidate.center,
+            facing: candidate.facing,
+            routePathSignature,
+          });
+          if (seenWingChoiceSignatures.has(signature)) return [];
+          seenWingChoiceSignatures.add(signature);
+          return [{
+            signature,
+            parentLocalSocketId: decisionSocket.localSocketId,
+            center: candidate.center,
+            facing: candidate.facing,
+            placementOrdinal,
+            orderedPathOrdinal,
+            sourcePathOrdinal: pathChoice.sourcePathOrdinal,
+            routePathSignature,
+            path: pathChoice.path,
+            committedWingNode,
+            candidateVolumes: [
+              ...(committedWingNode.occupiedVolumes ?? []),
+              ...(committedWingNode.clearanceVolumes ?? []),
+            ],
+          }];
+        });
+      });
+    });
+    emitPlanningDebugStage('route-network-landmark-wing-choices-built', {
+      selectedPlacementPairSignature: selectedLandmarkPlacementPairSignature,
+      activePlacementPairSignature: landmarkActivePlacementPairSignature,
+      wingChoiceCount: landmarkWingChoices.length,
+      requestedWingChoiceOrdinal: landmarkRequestedWingChoiceOrdinal,
+      firstWingChoices: landmarkWingChoices.slice(0, 8).map((choice, ordinal) => ({
+        ordinal,
+        parentLocalSocketId: choice.parentLocalSocketId,
+        center: cloneDungeonAugmentationValue(choice.center),
+        facing: cloneDungeonAugmentationValue(choice.facing),
+        placementOrdinal: choice.placementOrdinal,
+        orderedPathOrdinal: choice.orderedPathOrdinal,
+        sourcePathOrdinal: choice.sourcePathOrdinal,
+        routePathSignature: choice.routePathSignature,
+      })),
+    });
+    const commitWingChoice = (choice) => {
+      localPlacementAvoidanceVolumes.push(...choice.candidateVolumes);
+      // This compact parent is committed to the two perimeter approaches and
+      // the reward wing. Mark the promised degree before measuring the wing,
+      // so the already-realized parent threshold is not incorrectly carried
+      // through what will be a meaningful three-arm junction.
+      wingParent.plannedMinimumGraphDegree = Math.max(
+        3,
+        Number(wingParent.plannedMinimumGraphDegree ?? 0),
+      );
+      const wingSegment = addSegment({
+        from: nodeEndpoint(wingParent, choice.parentLocalSocketId),
+        to: nodeEndpoint(choice.committedWingNode, 'entry'),
+        routeRole: 'pyramid-loop-content-wing',
+        nodeSockets: [
+          [wingParent, choice.parentLocalSocketId],
+          [choice.committedWingNode, 'entry'],
+        ],
+        preselectedPath: choice.path,
+      });
+      attemptedWingCandidates.push({
+        parentLocalSocketId: choice.parentLocalSocketId,
+        center: cloneDungeonAugmentationValue(choice.center),
+        placementOrdinal: choice.placementOrdinal,
+        orderedPathOrdinal: choice.orderedPathOrdinal,
+        sourcePathOrdinal: choice.sourcePathOrdinal,
+        routePathSignature: choice.routePathSignature,
+        connected: Boolean(wingSegment),
+        ...(wingSegment ? {} : {
+          segmentFailureDiagnostics: cloneDungeonAugmentationValue(
+            lastSegmentFailureDiagnostics,
+          ),
+        }),
+      });
+      if (!wingSegment) {
+        localPlacementAvoidanceVolumes.splice(
+          localPlacementAvoidanceVolumes.length - choice.candidateVolumes.length,
+          choice.candidateVolumes.length,
         );
-        const wingSegment = addSegment({
-          from: nodeEndpoint(wingParent, decisionSocket.localSocketId),
-          to: nodeEndpoint(committedWingNode, 'entry'),
-          routeRole: 'pyramid-loop-content-wing',
-          nodeSockets: [
-            [wingParent, decisionSocket.localSocketId],
-            [committedWingNode, 'entry'],
-          ],
-        });
-        attemptedWingCandidates.push({
-          parentLocalSocketId: decisionSocket.localSocketId,
-          center: cloneDungeonAugmentationValue(candidate.center),
-          connected: Boolean(wingSegment),
-        });
-        if (!wingSegment) {
-          localPlacementAvoidanceVolumes.splice(
-            localPlacementAvoidanceVolumes.length - candidateVolumes.length,
-            candidateVolumes.length,
-          );
-          continue;
-        }
-        centers.push(candidate.center);
-        nodes.push(committedWingNode);
-        pyramidWingConnection = {
-          parentNode: wingParent,
-          parentLocalSocketId: decisionSocket.localSocketId,
-          wingNode: committedWingNode,
-          segment: wingSegment,
-        };
-        break;
+        return false;
       }
-      if (pyramidWingConnection) break;
+      centers.push(choice.center);
+      nodes.push(choice.committedWingNode);
+      pyramidWingConnection = {
+        parentNode: wingParent,
+        parentLocalSocketId: choice.parentLocalSocketId,
+        wingNode: choice.committedWingNode,
+        segment: wingSegment,
+      };
+      return true;
+    };
+    if (typeof futureEndpointDomainForwardCheck === 'function') {
+      selectedLandmarkWingChoiceOrdinal = landmarkActivePlacementPairSignature
+        && landmarkActivePlacementPairSignature === selectedLandmarkPlacementPairSignature
+        ? landmarkRequestedWingChoiceOrdinal
+        : 0;
+      const selectedWingChoice = landmarkWingChoices[selectedLandmarkWingChoiceOrdinal] ?? null;
+      selectedLandmarkWingChoiceSignature = selectedWingChoice?.signature ?? null;
+      if (!selectedWingChoice) {
+        const localContinuation = rejectSelectedLandmarkPlacementPair(
+          'landmark-wing-choices-exhausted',
+          {
+            exhaustedWingChoiceCount: landmarkWingChoices.length,
+            requestedWingChoiceOrdinal: selectedLandmarkWingChoiceOrdinal,
+          },
+        );
+        if (localContinuation) return localContinuation;
+      }
+      if (landmarkExpectedWingChoiceSignature
+        && landmarkActivePlacementPairSignature === selectedLandmarkPlacementPairSignature
+        && selectedWingChoice?.signature !== landmarkExpectedWingChoiceSignature) {
+        const localContinuation = rejectSelectedLandmarkPlacementPair(
+          'landmark-wing-choice-order-mismatch',
+          {
+            requestedWingChoiceOrdinal: selectedLandmarkWingChoiceOrdinal,
+            expectedWingChoiceSignature: landmarkExpectedWingChoiceSignature,
+            actualWingChoiceSignature: selectedWingChoice?.signature ?? null,
+          },
+        );
+        if (localContinuation) return localContinuation;
+      }
+      if (selectedWingChoice && !commitWingChoice(selectedWingChoice)) {
+        const localContinuation = advanceSelectedLandmarkWingChoice(
+          'landmark-wing-choice-unrealizable',
+          {
+            segmentFailureDiagnostics: cloneDungeonAugmentationValue(
+              lastSegmentFailureDiagnostics,
+            ),
+          },
+        );
+        if (localContinuation) return localContinuation;
+      }
+      if (pyramidWingConnection) {
+        emitPlanningDebugStage('route-network-landmark-wing-choice-selected', {
+          selectedPlacementPairSignature: selectedLandmarkPlacementPairSignature,
+          wingChoiceOrdinal: selectedLandmarkWingChoiceOrdinal,
+          wingChoiceCount: landmarkWingChoices.length,
+          wingChoiceSignature: selectedLandmarkWingChoiceSignature,
+          parentLocalSocketId: pyramidWingConnection.parentLocalSocketId,
+          center: cloneDungeonAugmentationValue(selectedWingChoice.center),
+          routePathSignature: selectedWingChoice.routePathSignature,
+        });
+      }
+    } else {
+      for (const choice of landmarkWingChoices) {
+        if (commitWingChoice(choice)) break;
+      }
     }
     if (!pyramidWingConnection) {
+      const attemptedWingCandidateSummary = Object.values(
+        attemptedWingCandidates.reduce((summary, candidate) => {
+          const key = String(candidate.parentLocalSocketId);
+          const record = summary[key] ?? {
+            parentLocalSocketId: key,
+            attemptedCount: 0,
+            failureCodes: {},
+            minimumEndpointManhattanMeters: Number.POSITIVE_INFINITY,
+            nearestEndpointPair: null,
+          };
+          record.attemptedCount += 1;
+          const failureCode = String(
+            candidate.segmentFailureDiagnostics?.code ?? 'unknown',
+          );
+          record.failureCodes[failureCode] = (record.failureCodes[failureCode] ?? 0) + 1;
+          const routeDiagnostics = candidate.segmentFailureDiagnostics
+            ?.routeCandidateDiagnostics;
+          const fromPosition = routeDiagnostics?.from?.position;
+          const toPosition = routeDiagnostics?.to?.position;
+          if (fromPosition && toPosition) {
+            const distance = Math.abs(
+              Number(fromPosition.x) - Number(toPosition.x),
+            ) + Math.abs(
+              Number(fromPosition.z) - Number(toPosition.z),
+            );
+            if (distance < record.minimumEndpointManhattanMeters) {
+              record.minimumEndpointManhattanMeters = distance;
+              record.nearestEndpointPair = {
+                from: cloneDungeonAugmentationValue(routeDiagnostics.from),
+                to: cloneDungeonAugmentationValue(routeDiagnostics.to),
+              };
+            }
+          }
+          summary[key] = record;
+          return summary;
+        }, {}),
+      ).map((record) => ({
+        ...record,
+        minimumEndpointManhattanMeters: Number.isFinite(
+          record.minimumEndpointManhattanMeters,
+        ) ? record.minimumEndpointManhattanMeters : null,
+      }));
+      const localContinuation = rejectSelectedLandmarkPlacementPair(
+        'landmark-content-wing-unrealizable',
+        {
+          searchVariant: variant,
+          attemptedWingCandidateSummary,
+          attemptedWingCandidates: attemptedWingCandidates.slice(0, 12),
+        },
+      );
+      if (localContinuation) return localContinuation;
       return {
         error: 'pyramid-loop-content-wing-unrealizable',
         context: {
           grantId: grant.id,
           searchVariant: variant,
+          attemptedWingCandidateSummary,
           attemptedWingCandidates: attemptedWingCandidates.slice(0, 12),
         },
       };
@@ -12977,6 +20852,7 @@ export function planRouteNetwork({
     const fromSockets = fromNode.sockets.filter(({ state }) => state === 'capped');
     const toSockets = toNode.sockets.filter(({ state }) => state === 'capped');
     const routeAvoidanceVolumes = localPlacementAvoidanceVolumes;
+    const currentConnectorRoomFootprints = connectorRoomFootprintsForNodes(nodes);
     const seamForAvailableSocket = (socket, node, role) => (
       createDungeonRouteEndpointSeam(socket, {
         id: `${operationId}:available-socket:${node.id}:${socket.id}:${role}:endpoint-seam`,
@@ -13018,11 +20894,27 @@ export function planRouteNetwork({
       return cachedSocketRouteCandidates(fromSocket, toSocket, {
         preferXFirst: segments.length % 2 === 0,
         connectorFamily,
-        ...coverageModuleRouteOptions,
-      }).map((path) => {
+        ...networkModuleRouteOptions,
+      }).map((path, pathOrdinal) => {
         const pathVolumes = routePathPlanningVolumes(path);
-        const collisionVolumes = enforceExactEmittedCoverageVolumes
-          ? routeSegmentPlanningCollisionVolumes(path, fromSocket, toSocket, 5.6, 5.6)
+        const prospectiveSegmentId = [
+          operationId,
+          'prospective-segment',
+          fromNode.id,
+          fromSocket.localSocketId,
+          toNode.id,
+          toSocket.localSocketId,
+          pathOrdinal,
+        ].map(String).join(':');
+        const collisionVolumes = reserveCompleteSegmentCollisionVolumes
+          ? routeSegmentPlanningCollisionVolumes(
+            path,
+            fromSocket,
+            toSocket,
+            5.6,
+            5.6,
+            prospectiveSegmentId,
+          )
           : pathVolumes;
         const fromApproachCompatible = routePathHasExteriorSocketApproach(
           path,
@@ -13052,12 +20944,22 @@ export function planRouteNetwork({
           );
         const endpointSeamCompatible = fromEndpointMaskCompatible
           && toEndpointMaskCompatible;
+        const liftContractCompatible = liftRoutePathIsMaterializable(
+          path,
+          fromSocket,
+          toSocket,
+          currentConnectorRoomFootprints,
+          `${prospectiveSegmentId}:lift`,
+          endpointSeams,
+        );
         return {
           fromLocalSocketId: fromSocket.localSocketId,
           toLocalSocketId: toSocket.localSocketId,
           path,
+          pathOrdinal,
           pathVolumes,
           collisionVolumes,
+          prospectiveSegmentId,
           endpointSeams,
           endpointSeamEnvelopes,
           fromApproachCompatible,
@@ -13066,6 +20968,7 @@ export function planRouteNetwork({
           fromEndpointMaskCompatible,
           toEndpointMaskCompatible,
           endpointSeamCompatible,
+          liftContractCompatible,
           collisionScore: endpointSeamCompatible
             ? planningRouteVolumesCollisionScore(
               collisionVolumes,
@@ -13108,7 +21011,11 @@ export function planRouteNetwork({
       collisionScore,
       physicalLengthMeters,
       endpointSeamCompatible,
-    }) => endpointSeamCompatible && collisionScore === 0 && physicalLengthMeters > 1e-6);
+      liftContractCompatible,
+    }) => endpointSeamCompatible
+      && liftContractCompatible
+      && collisionScore === 0
+      && physicalLengthMeters > 1e-6);
     const measuredCandidates = physicallyEligibleCandidates.map((candidate) => ({
         ...candidate,
         accumulatedFeaturelessDistanceMeters: candidate.distanceMeters
@@ -13124,6 +21031,43 @@ export function planRouteNetwork({
       const finiteCollisionScores = rawCandidates
         .map(({ collisionScore }) => collisionScore)
         .filter(Number.isFinite);
+      const minimumCollisionCandidate = rawCandidates
+        .filter(({ collisionScore }) => Number.isFinite(collisionScore))
+        .sort((first, second) => (
+          first.collisionScore - second.collisionScore
+            || first.physicalLengthMeters - second.physicalLengthMeters
+        ))[0] ?? null;
+      const minimumCollisionVolumeIds = minimumCollisionCandidate
+        ? [...new Set(routeAvoidanceVolumes.filter((obstacle) => (
+          minimumCollisionCandidate.collisionVolumes.some((volume) => (
+            planningVolumesOverlap(volume, obstacle)
+              && !planningOverlapIsGranted(
+                volume,
+                obstacle,
+                minimumCollisionCandidate.endpointSeams.flatMap((seam, endpointIndex) => ([
+                  seam.overlapEnvelope,
+                  {
+                    ...seam.overlapEnvelope,
+                    parentOwnerId: [fromNode, toNode][endpointIndex].id,
+                  },
+                ])),
+              )
+          ))
+        )).map((volume) => String(volume.id ?? volume.ownerId ?? 'unknown')))]
+        : [];
+      const minimumCollisionIntersections = minimumCollisionCandidate
+        ? routeAvoidanceVolumes.flatMap((obstacle) => (
+          minimumCollisionCandidate.collisionVolumes.flatMap((volume) => {
+            if (!planningVolumesOverlap(volume, obstacle)) return [];
+            const intersection = planningVolumeIntersection(volume, obstacle);
+            return intersection ? [{
+              obstacleId: String(obstacle.id ?? obstacle.ownerId ?? 'unknown'),
+              pathVolume: cloneDungeonAugmentationValue(volume),
+              intersection,
+            }] : [];
+          })
+        )).filter(({ obstacleId }) => minimumCollisionVolumeIds.includes(obstacleId)).slice(0, 12)
+        : [];
       const socketPairStageCounts = [...new Set(rawCandidates.map((candidate) => (
         `${candidate.fromLocalSocketId}>${candidate.toLocalSocketId}`
       )))].slice(0, 12).map((pairKey) => {
@@ -13184,6 +21128,13 @@ export function planRouteNetwork({
         minimumCollisionScore: finiteCollisionScores.length > 0
           ? Math.min(...finiteCollisionScores)
           : null,
+        minimumCollisionVolumeIds: minimumCollisionVolumeIds.slice(0, 12),
+        minimumCollisionIntersections,
+        minimumCollisionEndpointSeams: minimumCollisionCandidate
+          ? minimumCollisionCandidate.endpointSeams.map(({ overlapEnvelope }) => (
+            cloneDungeonAugmentationValue(overlapEnvelope)
+          ))
+          : [],
         minimumPhysicalLengthMeters: physicallyEligibleCandidates.length > 0
           ? Math.min(...physicallyEligibleCandidates.map(({ physicalLengthMeters }) => (
             physicalLengthMeters
@@ -13204,6 +21155,7 @@ export function planRouteNetwork({
         || first.physicalLengthMeters - second.physicalLengthMeters
         || first.fromLocalSocketId.localeCompare(second.fromLocalSocketId)
         || first.toLocalSocketId.localeCompare(second.toLocalSocketId)
+        || first.pathOrdinal - second.pathOrdinal
     ));
   };
   const closestAvailableSocketPair = (fromNode, toNode) => (
@@ -13269,8 +21221,91 @@ export function planRouteNetwork({
         .get(pyramidWingConnection.parentNode.id)
         ?.add(pyramidWingConnection.parentLocalSocketId);
       const selectedPairs = [];
+      let futureEndpointDomainRejectionCount = 0;
+      const futureEndpointDomainRejectionVectors = [];
+      let inactiveSocketCapRejectionCount = 0;
+      const inactiveSocketCapRejectionDiagnostics = [];
+      let completeLeafCapStatus = null;
       const visit = (edgeIndex) => {
-        if (edgeIndex >= mainSpineNodeCount - 1) return true;
+        if (edgeIndex >= mainSpineNodeCount - 1) {
+          const selectedPairRouteVolumes = selectedPairs.flatMap((pair, edgeIndex) => (
+            pair.collisionVolumes
+              ?? routeSegmentPlanningCollisionVolumes(
+                pair.path,
+                getNodeSocket(nodes[edgeIndex], pair.fromLocalSocketId),
+                getNodeSocket(nodes[edgeIndex + 1], pair.toLocalSocketId),
+                5.6,
+                5.6,
+                pair.prospectiveSegmentId,
+              )
+          ));
+          const roomNodes = nodes.filter(({ kind }) => kind === 'supplementRoom');
+          const claimedSocketIdsByNodeId = new Map(roomNodes.map((node) => ([
+            String(node.id),
+            new Set(usedByNodeId.get(node.id) ?? []),
+          ])));
+          const inactiveSocketCapVolumes = routeNetworkInactiveSocketCapPlanningVolumes(
+            roomNodes,
+            { claimedSocketIdsByNodeId },
+          );
+          const inactiveSocketCapValidation =
+            validateRouteNetworkInactiveSocketCapPlanningVolumes(
+              inactiveSocketCapVolumes,
+              [...localPlacementAvoidanceVolumes, ...selectedPairRouteVolumes],
+            );
+          completeLeafCapStatus = {
+            futureCheckIncludesInactiveCapVolumes: true,
+            prospectiveInactiveSocketCapCount: inactiveSocketCapVolumes.length,
+            prospectiveInactiveSocketCapIds: inactiveSocketCapVolumes
+              .map(({ id }) => String(id))
+              .sort((first, second) => first.localeCompare(second))
+              .slice(0, 24),
+            validationAccepted: inactiveSocketCapValidation.accepted,
+            validationConflictCount: inactiveSocketCapValidation.conflictCount,
+          };
+          if (!inactiveSocketCapValidation.accepted) {
+            inactiveSocketCapRejectionCount += 1;
+            if (inactiveSocketCapRejectionDiagnostics.length < 8) {
+              inactiveSocketCapRejectionDiagnostics.push({
+                capVolumeCount: inactiveSocketCapValidation.capVolumeCount,
+                obstacleVolumeCount: inactiveSocketCapValidation.obstacleVolumeCount,
+                conflictCount: inactiveSocketCapValidation.conflictCount,
+                conflicts: cloneDungeonAugmentationValue(
+                  inactiveSocketCapValidation.conflicts.slice(0, 8),
+                ),
+              });
+            }
+            return false;
+          }
+          if (typeof futureEndpointDomainForwardCheck !== 'function') return true;
+          const prospectivePlanningVolumes = [
+            ...nodes.flatMap((node) => [
+              ...(node.occupiedVolumes ?? []),
+              ...(node.clearanceVolumes ?? []),
+            ]),
+            ...segments.flatMap((segment) => [
+              ...(segment.occupiedVolumes ?? []),
+              ...(segment.clearanceVolumes ?? []),
+              ...(segment.landingVolumes ?? []),
+            ]),
+            ...selectedPairRouteVolumes,
+            ...inactiveSocketCapVolumes,
+          ];
+          const retained = futureEndpointDomainForwardCheck(
+            prospectivePlanningVolumes,
+          );
+          if (!retained) {
+            futureEndpointDomainRejectionCount += 1;
+            if (futureEndpointDomainRejectionVectors.length < 8) {
+              futureEndpointDomainRejectionVectors.push(
+                futureEndpointDomainForwardCheck.survivorVector?.(
+                  prospectivePlanningVolumes,
+                ) ?? [],
+              );
+            }
+          }
+          return retained;
+        }
         const fromNode = nodes[edgeIndex];
         const toNode = nodes[edgeIndex + 1];
         const fromUsed = usedByNodeId.get(fromNode.id);
@@ -13280,9 +21315,27 @@ export function planRouteNetwork({
           fromUsedSocketIds: [...fromUsed].sort(),
           toUsedSocketIds: [...toUsed].sort(),
         };
-        const previouslySelectedRouteVolumes = selectedPairs.flatMap(({ path }) => (
-          routePathPlanningVolumes(path)
+        const previouslySelectedRouteVolumes = selectedPairs.flatMap((pair, selectedEdgeIndex) => (
+          pair.collisionVolumes
+            ?? routeSegmentPlanningCollisionVolumes(
+              pair.path,
+              getNodeSocket(nodes[selectedEdgeIndex], pair.fromLocalSocketId),
+              getNodeSocket(nodes[selectedEdgeIndex + 1], pair.toLocalSocketId),
+              5.6,
+              5.6,
+              pair.prospectiveSegmentId,
+            )
         ));
+        const preferredPair = preselectedLandmarkSpinePairs?.[edgeIndex] ?? null;
+        const preferredPathSignature = preferredPair
+          ? canonicalStringify(preferredPair.path)
+          : null;
+        const matchesPreferredPair = (candidate) => Boolean(
+          preferredPair
+            && candidate.fromLocalSocketId === preferredPair.fromLocalSocketId
+            && candidate.toLocalSocketId === preferredPair.toLocalSocketId
+            && canonicalStringify(candidate.path) === preferredPathSignature
+        );
         const candidates = availableSocketPairs(
           fromNode,
           toNode,
@@ -13298,13 +21351,14 @@ export function planRouteNetwork({
                   candidate.endpointSeamEnvelopes?.[0],
                 )
                 : null;
-              return pathPlanningCollisionScore(
-                candidate.path,
+              return planningRouteVolumesCollisionScore(
+                candidate.collisionVolumes,
                 previouslySelectedRouteVolumes,
-                5.6,
                 sharedEndpointSeam ? [sharedEndpointSeam] : [],
               ) === 0;
             })()
+        )).sort((first, second) => (
+          Number(matchesPreferredPair(second)) - Number(matchesPreferredPair(first))
         ));
         edgeDiagnostics.unusedEligibleCandidateCount = candidates.length;
         if (diagnostics.length < 32) diagnostics.push(edgeDiagnostics);
@@ -13320,7 +21374,19 @@ export function planRouteNetwork({
         return false;
       };
       const solved = visit(0);
-      pyramidSpineFailureDiagnostics = solved ? [] : diagnostics;
+      pyramidSpineFailureDiagnostics = solved ? [] : [
+        ...diagnostics,
+        ...(futureEndpointDomainRejectionCount > 0 ? [{
+          futureEndpointDomainRejectionCount,
+          futureEndpointDomainRejectionVectors,
+          completeLeafCapStatus,
+        }] : []),
+        ...(inactiveSocketCapRejectionCount > 0 ? [{
+          inactiveSocketCapRejectionCount,
+          inactiveSocketCapRejectionDiagnostics,
+          completeLeafCapStatus,
+        }] : []),
+      ];
       return solved ? selectedPairs.map((pair) => ({ ...pair })) : null;
     })()
     : null;
@@ -13393,6 +21459,40 @@ export function planRouteNetwork({
       })) ?? null;
     })();
   if (grant.kind === 'landmark-perimeter-loop' && !pyramidSpinePairs) {
+    if (typeof futureEndpointDomainForwardCheck === 'function'
+      && selectedLandmarkPlacementPairSignature) {
+      emitPlanningDebugStage('route-network-landmark-complete-leaf-rejected', {
+        endpointPhase: selectedLandmarkEndpointTuplePhase,
+        endpointTupleOrdinal: selectedLandmarkEndpointTupleOrdinal,
+        selectedPairSignature: selectedLandmarkPlacementPairSignature,
+        selectedWingChoiceOrdinal: selectedLandmarkWingChoiceOrdinal,
+        selectedWingChoiceSignature: selectedLandmarkWingChoiceSignature,
+        wingChoiceCount: landmarkWingChoices.length,
+        selectedWingParentLocalSocketId:
+          pyramidWingConnection?.parentLocalSocketId
+            ?? preselectedLandmarkWingParentLocalSocketId,
+        fullDfsFailureCategory: pyramidSpineFailureDiagnostics.some((diagnostic) => (
+          Number(diagnostic?.inactiveSocketCapRejectionCount ?? 0) > 0
+        ))
+          ? 'inactive-socket-cap-overlap'
+          : pyramidSpineFailureDiagnostics.some((diagnostic) => (
+            Number(diagnostic?.futureEndpointDomainRejectionCount ?? 0) > 0
+          ))
+            ? 'future-endpoint-domain-zero'
+            : 'socket-or-route-domain-exhausted',
+        pyramidSpineFailureDiagnostics,
+      });
+      const localContinuation = advanceSelectedLandmarkWingChoice(
+        'complete-landmark-spine-leaf-rejected',
+        { pyramidSpineFailureDiagnostics },
+      );
+      if (localContinuation) return localContinuation;
+      const pairContinuation = rejectSelectedLandmarkPlacementPair(
+        'complete-landmark-spine-leaf-rejected',
+        { pyramidSpineFailureDiagnostics },
+      );
+      if (pairContinuation) return pairContinuation;
+    }
     return {
       error: 'route-network-spine-sockets-unavailable',
       context: {
@@ -13471,7 +21571,7 @@ export function planRouteNetwork({
         {
           preferXFirst: segments.length % 2 === 0,
           connectorFamily: failedConnectorFamily,
-          ...coverageModuleRouteOptions,
+          ...networkModuleRouteOptions,
         },
       ).map((path) => ({
         path,
@@ -13484,6 +21584,36 @@ export function planRouteNetwork({
           || first.maximumLevelSpanMeters - second.maximumLevelSpanMeters
           || first.physicalLengthMeters - second.physicalLengthMeters
       )).slice(0, 4);
+      const commitFailureContext = {
+        fromNodeIndex: fromIndex,
+        toNodeIndex: toIndex,
+        fromLocalSocketId: fromSocketId,
+        toLocalSocketId: toSocketId,
+        prospectiveSegmentId: dynamicPair.prospectiveSegmentId ?? null,
+        prospectivePathOrdinal: dynamicPair.pathOrdinal ?? null,
+        segmentFailureDiagnostics: cloneDungeonAugmentationValue(
+          lastSegmentFailureDiagnostics,
+        ),
+      };
+      if (grant.kind === 'landmark-perimeter-loop'
+        && typeof futureEndpointDomainForwardCheck === 'function') {
+        emitPlanningDebugStage('route-network-landmark-spine-commit-rejected', {
+          selectedPairSignature: selectedLandmarkPlacementPairSignature,
+          selectedWingChoiceOrdinal: selectedLandmarkWingChoiceOrdinal,
+          selectedWingChoiceSignature: selectedLandmarkWingChoiceSignature,
+          ...commitFailureContext,
+        });
+        const localContinuation = advanceSelectedLandmarkWingChoice(
+          'landmark-spine-segment-commit-rejected',
+          commitFailureContext,
+        );
+        if (localContinuation) return localContinuation;
+        const pairContinuation = rejectSelectedLandmarkPlacementPair(
+          'landmark-spine-segment-commit-rejected',
+          commitFailureContext,
+        );
+        if (pairContinuation) return pairContinuation;
+      }
       return {
         error: 'route-network-spine-segment-unrealizable',
         context: {
@@ -13509,6 +21639,7 @@ export function planRouteNetwork({
       {
         fromLocalSocketId = null,
         toLocalSocketId = null,
+        preselectedPath = null,
         diagnostics = null,
       } = {},
     ) => {
@@ -13523,15 +21654,24 @@ export function planRouteNetwork({
         return false;
       }
       const availablePairDiagnostics = {};
-      const socketPairs = availableSocketPairs(
-        nodes[fromIndex],
-        nodes[toIndex],
-        availablePairDiagnostics,
-      )
-        .filter((pair) => (
-          (!fromLocalSocketId || pair.fromLocalSocketId === fromLocalSocketId)
-            && (!toLocalSocketId || pair.toLocalSocketId === toLocalSocketId)
-        ));
+      const socketPairs = Array.isArray(preselectedPath) && preselectedPath.length >= 2
+        ? [{
+          fromLocalSocketId,
+          toLocalSocketId,
+          path: cloneDungeonAugmentationValue(preselectedPath),
+          distanceMeters: maximumContinuousLevelRouteSpan(preselectedPath),
+          physicalLengthMeters: measureDungeonPolyline(preselectedPath),
+          prevalidatedTopologyWitness: true,
+        }]
+        : availableSocketPairs(
+          nodes[fromIndex],
+          nodes[toIndex],
+          availablePairDiagnostics,
+        )
+          .filter((pair) => (
+            (!fromLocalSocketId || pair.fromLocalSocketId === fromLocalSocketId)
+              && (!toLocalSocketId || pair.toLocalSocketId === toLocalSocketId)
+          ));
       const attemptedPairs = [];
       for (const pair of socketPairs) {
         if (pair.distanceMeters > Number(
@@ -13612,6 +21752,65 @@ export function planRouteNetwork({
           : 'missing-topology-socket-ids';
         return false;
       }
+      const prevalidatedReturnPairs = (
+        preselectedCoverageTopologyReturnPairs ?? []
+      ).filter((pair) => (
+        Number(pair.fromIndex) === Number(kitNodeIndex)
+          || Number(pair.toIndex) === Number(kitNodeIndex)
+      ));
+      if (prevalidatedReturnPairs.length > 0) {
+        const transaction = {
+          segmentCount: segments.length,
+          avoidanceVolumeCount: localPlacementAvoidanceVolumes.length,
+          nextSegmentOrdinal,
+          sockets: nodes.flatMap((node) => node.sockets.map((socket) => ({
+            socket,
+            state: socket.state,
+            segmentId: socket.segmentId,
+            capRole: socket.capRole,
+          }))),
+        };
+        topologyDiagnostics.prevalidatedReturnAttempts = [];
+        let committed = true;
+        for (const pair of prevalidatedReturnPairs) {
+          const pairDiagnostics = {};
+          const pairConnected = connectTopologyChord(
+            Number(pair.fromIndex),
+            Number(pair.toIndex),
+            pair.routeRole ?? `${routeRole}:prevalidated-return`,
+            {
+              fromLocalSocketId: pair.fromLocalSocketId,
+              toLocalSocketId: pair.toLocalSocketId,
+              preselectedPath: pair.path,
+              diagnostics: pairDiagnostics,
+            },
+          );
+          topologyDiagnostics.prevalidatedReturnAttempts.push(pairDiagnostics);
+          if (!pairConnected) {
+            committed = false;
+            break;
+          }
+        }
+        committed &&= topologySocketIds.every((localSocketId) => (
+          getNodeSocket(kitNode, localSocketId)?.state === 'connected'
+        ));
+        if (committed) {
+          topologyDiagnostics.accepted = true;
+          topologyDiagnostics.prevalidatedWitnessCommitted = true;
+          return true;
+        }
+        segments.length = transaction.segmentCount;
+        localPlacementAvoidanceVolumes.length = transaction.avoidanceVolumeCount;
+        nextSegmentOrdinal = transaction.nextSegmentOrdinal;
+        for (const socketState of transaction.sockets) {
+          socketState.socket.state = socketState.state;
+          socketState.socket.segmentId = socketState.segmentId;
+          socketState.socket.capRole = socketState.capRole;
+        }
+        topologyDiagnostics.accepted = false;
+        topologyDiagnostics.rejected = 'prevalidated-topology-witness-commit-failed';
+        return false;
+      }
       const pendingSocketIds = topologySocketIds.filter((localSocketId) => (
         getNodeSocket(kitNode, localSocketId)?.state === 'capped'
       ));
@@ -13661,6 +21860,43 @@ export function planRouteNetwork({
         if (localReturnConnected) {
           topologyDiagnostics.accepted = true;
           return true;
+        }
+      }
+      if (pendingSocketIds.length === 1) {
+        // One authored topology arm may already be the coverage spine. Close
+        // the kit through a distinct capped ordinary arm before searching
+        // remote modules. This is the intended over-under composition: the
+        // authored upper pair carries one side of the route and a bounded
+        // exterior return joins its remaining upper socket to the kit's
+        // lower exit. The normal route, collision, and featureless-span gates
+        // remain authoritative through connectTopologyChord.
+        const localCompanionSocketIds = kitNode.sockets
+          .filter((socket) => (
+            socket.state === 'capped'
+              && !topologySocketIds.includes(String(socket.localSocketId))
+          ))
+          .map(({ localSocketId }) => String(localSocketId))
+          .sort((first, second) => first.localeCompare(second));
+        topologyDiagnostics.localCompletionAttempts = [];
+        for (const companionLocalSocketId of localCompanionSocketIds) {
+          const localCompletionDiagnostics = {};
+          const localCompletionConnected = connectTopologyChord(
+            kitNodeIndex,
+            kitNodeIndex,
+            `${routeRole}:local-completion`,
+            {
+              fromLocalSocketId: pendingSocketIds[0],
+              toLocalSocketId: companionLocalSocketId,
+              diagnostics: localCompletionDiagnostics,
+            },
+          );
+          topologyDiagnostics.localCompletionAttempts.push(
+            localCompletionDiagnostics,
+          );
+          if (localCompletionConnected) {
+            topologyDiagnostics.accepted = true;
+            return true;
+          }
         }
       }
       const targetNodeIndices = nodes
@@ -14290,6 +22526,14 @@ export function planRouteNetwork({
   });
   const selectionManifest = {
     schema: 'ruindivex-dungeon-route-network-selection-manifest/v1',
+    // MRV determines selection-bag state transitions, while public operations
+    // remain serialized in canonical grant order. Preserve the winning solve
+    // order explicitly so validators can reconstruct the one global bag
+    // sequence without changing IDs, progression order, or operation hashes.
+    solveDecisionOrdinal: Math.max(
+      0,
+      Math.trunc(Number(solveDecisionOrdinal) || 0),
+    ),
     topology: {
       id: topologyTemplateId,
       cycle: Number(topologySelection?.state?.cycle ?? selectionBags?.topology?.cycle ?? 0),
@@ -14338,7 +22582,7 @@ export function planRouteNetwork({
     themeBinding: cloneDungeonAugmentationValue(region.themeBinding),
     grantId: grant.id,
     routeNetworkKind: grant.kind,
-    endpointSocketIds: endpoints.map(({ id }) => id),
+    endpointSocketIds: canonicalEndpoints.map(({ id }) => String(id)),
     progressionBandId: grant.progressionBandId,
     accessDomainId: grant.accessDomainId,
     crossedBoundaryIds: cloneDungeonAugmentationValue(grant.crossedBoundaryIds),
@@ -14400,10 +22644,18 @@ export function planRouteNetwork({
     } : {}),
     ...(grant.coverage ? { coverage: cloneDungeonAugmentationValue(grant.coverage) } : {}),
   };
+  const ordinaryLandmarkRecoveryWarmStart = grant.kind === 'landmark-perimeter-loop'
+    ? createLandmarkEndpointRecoveryWarmStart(landmarkEndpointSelectionDiagnostics)
+    : null;
   return {
     operation,
     nodes,
     segments,
+    // Planner-only handoff for a queued replay. This never enters the
+    // operation, plan, overlay, or replay serialization surface.
+    ...(ordinaryLandmarkRecoveryWarmStart ? {
+      landmarkRecoveryWarmStart: ordinaryLandmarkRecoveryWarmStart,
+    } : {}),
     // Planner-only evidence for profiling and debug tooling. The attempt
     // assembler intentionally consumes only the deterministic operation,
     // nodes, segments, signatures, and bag state below, so elapsed timing can
@@ -14428,6 +22680,995 @@ export function planRouteNetwork({
   };
 }
 
+const ROUTE_NETWORK_ENDPOINT_DOMAIN_TILE_METERS = 2.8;
+const ROUTE_NETWORK_ENDPOINT_DOMAIN_OUTWARD_STEPS = 11;
+const ROUTE_NETWORK_ENDPOINT_DOMAIN_TANGENT_WITNESS_TILES = 6;
+
+function routeNetworkEndpointDomainFacings(socket) {
+  return [
+    toDungeonCardinalFacing(socket?.facing),
+    { x: 1, y: 0, z: 0 },
+    { x: 0, y: 0, z: 1 },
+    { x: -1, y: 0, z: 0 },
+    { x: 0, y: 0, z: -1 },
+  ].filter((candidateFacing, candidateOrdinal, candidates) => (
+    candidates.findIndex((otherFacing) => (
+      Math.abs(Number(otherFacing.x) - Number(candidateFacing.x)) <= 1e-6
+        && Math.abs(Number(otherFacing.z) - Number(candidateFacing.z)) <= 1e-6
+    )) === candidateOrdinal
+  ));
+}
+
+export function createRouteNetworkEndpointDomain(
+  grant,
+  endpoint,
+  endpointOrdinal,
+  additionalBaseCenters = [],
+  endpointGrammars = [],
+) {
+  if (grant.kind === 'objective-route-coverage' && endpointGrammars.length > 0) {
+    const outward = toDungeonCardinalFacing(endpoint?.facing);
+    const candidates = [];
+    for (const grammar of endpointGrammars.filter((candidate) => (
+      objectiveCoverageEndpointGrammarIsSelectable(candidate, grant)
+    ))) {
+      const baseCenter = exactObjectiveCoverageStationCenter(endpoint, grammar);
+      for (let outwardStep = 0;
+        outwardStep <= ROUTE_NETWORK_ENDPOINT_DOMAIN_OUTWARD_STEPS;
+        outwardStep += 1) {
+        const center = {
+          ...addDungeonPoints(
+            baseCenter,
+            scaleDungeonPoint(
+              outward,
+              outwardStep * ROUTE_NETWORK_ENDPOINT_DOMAIN_TILE_METERS,
+            ),
+          ),
+          // Exact authored coverage stations remain on their parent tier.
+          // This mirrors `placeCollisionSafeNode`, which discards any local
+          // entry-socket elevation while enumerating its fixed endpoint ray.
+          y: Number(endpoint?.position?.y ?? baseCenter.y ?? 0),
+        };
+        for (const [orientationOrdinal, facing] of (
+          routeNetworkEndpointDomainFacings(endpoint).entries()
+        )) {
+          const placement = {
+            center,
+            facing,
+            rotationQuarterTurns: rotationQuarterTurnsForFacing(facing),
+            coordinateSpace: endpoint?.coordinateSpace,
+          };
+          const reservationVolumes = [
+            ...(grammar.occupiedVolumes ?? []),
+            ...(grammar.clearanceVolumes ?? []),
+          ].map((volume, volumeOrdinal) => ({
+            ...transformDungeonVolume(
+              volume,
+              placement,
+              `${grant.id}:endpoint-domain:${endpointOrdinal}:${grammar.id}:`,
+            ),
+            ownerId: grant.id,
+            moduleTemplateId: grammar.id,
+            endpointOrdinal,
+            volumeOrdinal,
+          }));
+          candidates.push({
+            endpointOrdinal,
+            grammarId: grammar.id,
+            parentLocalSocketId: 'entry',
+            outwardStep,
+            tangentOffsetTiles: 0,
+            orientationOrdinal,
+            facing,
+            center,
+            reservationVolumes,
+            reservationVolume: reservationVolumes[0],
+          });
+        }
+      }
+    }
+    return {
+      endpointOrdinal,
+      endpointId: String(endpoint?.id ?? endpointOrdinal),
+      candidates,
+      // Coverage stations have one exact parent socket and a complete
+      // twelve-step outward ray. Tangent widening belongs only to the landmark
+      // placement solver; exposing it here makes a consumed coverage station
+      // look viable even though the real planner can never use that witness.
+      exactGrammarMasks: true,
+    };
+  }
+  if (endpointGrammars.length > 0) {
+    const outward = toDungeonCardinalFacing(endpoint?.facing);
+    const tangent = { x: -Number(outward.z), y: 0, z: Number(outward.x) };
+    const desiredParentSocketPosition = addDungeonPoints(
+      endpoint?.position ?? { x: 0, y: 0, z: 0 },
+      scaleDungeonPoint(outward, LANDMARK_SHARED_THRESHOLD_ATTACHMENT_GAP_METERS),
+    );
+    const collectCandidates = (tangentTileOffsets) => {
+      const candidates = [];
+      const physicalVolumeKeys = new Set();
+      for (const grammar of endpointGrammars) {
+        const legalParentSocketIds = new Set(routeNetworkSpineSocketIds(grammar));
+        for (const [orientationOrdinal, facing] of (
+          routeNetworkEndpointDomainFacings(endpoint).entries()
+        )) {
+          const rotationQuarterTurns = rotationQuarterTurnsForFacing(facing);
+          const zeroPlacement = {
+            center: { x: 0, y: 0, z: 0 },
+            facing,
+            rotationQuarterTurns,
+            coordinateSpace: endpoint?.coordinateSpace,
+          };
+          for (const parentSocket of grammar.sockets ?? []) {
+            if (!legalParentSocketIds.has(String(parentSocket.id))) continue;
+            const parentSocketFacing = transformDungeonLocalFacing(
+              parentSocket.localFacing,
+              zeroPlacement,
+            );
+            if (parentSocketFacing.x * outward.x + parentSocketFacing.z * outward.z
+              > -0.5) continue;
+            const rotatedParentSocket = transformDungeonLocalPoint(
+              parentSocket.localPosition,
+              zeroPlacement,
+            );
+            const alignedCenter = {
+              x: Number(desiredParentSocketPosition.x) - Number(rotatedParentSocket.x),
+              y: Number(desiredParentSocketPosition.y) - Number(rotatedParentSocket.y),
+              z: Number(desiredParentSocketPosition.z) - Number(rotatedParentSocket.z),
+            };
+            for (let outwardStep = 0;
+              outwardStep <= ROUTE_NETWORK_ENDPOINT_DOMAIN_OUTWARD_STEPS;
+              outwardStep += 1) {
+              for (const tangentTiles of tangentTileOffsets) {
+                const center = addDungeonPoints(
+                  addDungeonPoints(
+                    alignedCenter,
+                    scaleDungeonPoint(
+                      outward,
+                      outwardStep * ROUTE_NETWORK_ENDPOINT_DOMAIN_TILE_METERS,
+                    ),
+                  ),
+                  scaleDungeonPoint(
+                    tangent,
+                    tangentTiles * ROUTE_NETWORK_ENDPOINT_DOMAIN_TILE_METERS,
+                  ),
+                );
+                const placement = {
+                  center,
+                  facing,
+                  rotationQuarterTurns,
+                  coordinateSpace: endpoint?.coordinateSpace,
+                };
+                const reservationVolumes = [
+                  ...(grammar.occupiedVolumes ?? []),
+                  ...(grammar.clearanceVolumes ?? []),
+                ].map((volume, volumeOrdinal) => ({
+                  ...transformDungeonVolume(
+                    volume,
+                    placement,
+                    `${grant.id}:endpoint-domain:${endpointOrdinal}:${grammar.id}:`,
+                  ),
+                  ownerId: grant.id,
+                  moduleTemplateId: grammar.id,
+                  endpointOrdinal,
+                  volumeOrdinal,
+                }));
+                const canonicalReservationVolumes = reservationVolumes
+                  .map(({ center: volumeCenter, size }) => {
+                    const physicalVolume = {
+                      center: volumeCenter,
+                      size,
+                    };
+                    return {
+                      physicalVolume,
+                      sortKey: canonicalStringify(physicalVolume),
+                    };
+                  })
+                  .sort((first, second) => first.sortKey.localeCompare(second.sortKey))
+                  .map(({ physicalVolume }) => physicalVolume);
+                const physicalVolumeKey = `${String(parentSocket.id)}:${canonicalStringify(
+                  canonicalReservationVolumes,
+                )}`;
+                if (physicalVolumeKeys.has(physicalVolumeKey)) continue;
+                physicalVolumeKeys.add(physicalVolumeKey);
+                candidates.push({
+                  endpointOrdinal,
+                  grammarId: grammar.id,
+                  parentLocalSocketId: parentSocket.id,
+                  outwardStep,
+                  tangentOffsetTiles: tangentTiles,
+                  orientationOrdinal,
+                  facing,
+                  center,
+                  reservationVolumes,
+                  reservationVolume: reservationVolumes[0],
+                });
+              }
+            }
+          }
+        }
+      }
+      return candidates;
+    };
+    const candidates = collectCandidates([0, -1, 1]);
+    let fallbackCandidates = null;
+    const fallbackCandidateFactory = () => {
+      if (!fallbackCandidates) {
+        fallbackCandidates = collectCandidates(Array.from(
+          {
+            length: Math.max(
+              0,
+              ROUTE_NETWORK_ENDPOINT_DOMAIN_TANGENT_WITNESS_TILES - 1,
+            ),
+          },
+          (_, ordinal) => ordinal + 2,
+        ).flatMap((tiles) => [-tiles, tiles]));
+      }
+      return fallbackCandidates;
+    };
+    return {
+      endpointOrdinal,
+      endpointId: String(endpoint?.id ?? endpointOrdinal),
+      candidates,
+      // The local endpoint solver widens its tangent search only after every
+      // near attachment is consumed. Keep the same farther 2.8 m witnesses
+      // lazy so ordinary states retain the small exact domain, while a prior
+      // network cannot create a false zero merely by occupying the near ray.
+      fallbackCandidateFactory,
+      exactGrammarMasks: true,
+    };
+  }
+  const sourceRectangle = grant.source?.planningReservationRectangles?.[endpointOrdinal] ?? null;
+  const outward = toDungeonCardinalFacing(endpoint?.facing);
+  const fallbackBaseCenter = endpoint?.planningModuleCenter
+    ?? (sourceRectangle?.center
+      ? toDungeonPoint({
+        ...sourceRectangle.center,
+        y: endpoint?.position?.y ?? 0,
+      })
+      : addDungeonPoints(
+        endpoint?.position ?? { x: 0, y: 0, z: 0 },
+        scaleDungeonPoint(outward, 12.6),
+      ));
+  const baseCenters = [
+    fallbackBaseCenter,
+    ...additionalBaseCenters,
+  ].filter(Boolean).filter((center, centerOrdinal, centers) => (
+    centers.findIndex((otherCenter) => (
+      dungeonPointDistance(center, otherCenter) <= 1e-6
+    )) === centerOrdinal
+  ));
+  const rectangleWidth = Number(sourceRectangle?.maxX) - Number(sourceRectangle?.minX);
+  const rectangleDepth = Number(sourceRectangle?.maxZ) - Number(sourceRectangle?.minZ);
+  // Forward checking deliberately uses the smallest legal connector landing
+  // core instead of any selected room blueprint. It is a conservative
+  // necessary condition: if no such core survives, the exact local placement
+  // solver cannot attach a module there either.
+  const reservationWidth = Math.min(
+    8.4,
+    Number.isFinite(rectangleWidth) && rectangleWidth > 0
+      ? rectangleWidth
+      : 8.4,
+  );
+  const reservationDepth = Math.min(
+    8.4,
+    Number.isFinite(rectangleDepth) && rectangleDepth > 0
+      ? rectangleDepth
+      : 8.4,
+  );
+  const candidates = [];
+  const candidateKeys = new Set();
+  for (const [baseCenterOrdinal, baseCenter] of baseCenters.entries()) {
+    for (let outwardStep = 0;
+      outwardStep <= ROUTE_NETWORK_ENDPOINT_DOMAIN_OUTWARD_STEPS;
+      outwardStep += 1) {
+      const outwardCenter = addDungeonPoints(
+        baseCenter,
+        scaleDungeonPoint(
+          outward,
+          outwardStep * ROUTE_NETWORK_ENDPOINT_DOMAIN_TILE_METERS,
+        ),
+      );
+      const tangent = { x: -Number(outward.z), y: 0, z: Number(outward.x) };
+      const tangentOffsetTiles = endpointOrdinal === 0
+        ? [
+          0,
+          -ROUTE_NETWORK_ENDPOINT_DOMAIN_TANGENT_WITNESS_TILES,
+          ROUTE_NETWORK_ENDPOINT_DOMAIN_TANGENT_WITNESS_TILES,
+        ]
+        : [0];
+      for (const tangentTiles of tangentOffsetTiles) {
+        const center = addDungeonPoints(
+          outwardCenter,
+          scaleDungeonPoint(
+            tangent,
+            tangentTiles * ROUTE_NETWORK_ENDPOINT_DOMAIN_TILE_METERS,
+          ),
+        );
+        for (const [orientationOrdinal, facing] of (
+          routeNetworkEndpointDomainFacings(endpoint).entries()
+        )) {
+          const candidateKey = [
+            Number(center.x).toFixed(4),
+            Number(center.y).toFixed(4),
+            Number(center.z).toFixed(4),
+            Number(facing.x).toFixed(4),
+            Number(facing.z).toFixed(4),
+          ].join(':');
+          if (candidateKeys.has(candidateKey)) continue;
+          candidateKeys.add(candidateKey);
+          candidates.push({
+            endpointOrdinal,
+            baseCenterOrdinal,
+            outwardStep,
+            tangentOffsetTiles: tangentTiles,
+            orientationOrdinal,
+            facing,
+            center,
+            reservationVolume: {
+              id: `${grant.id}:endpoint-domain:${endpointOrdinal}:${baseCenterOrdinal}:${outwardStep}:${tangentTiles}:${orientationOrdinal}`,
+              ownerId: grant.id,
+              center: {
+                x: Number(center.x),
+                y: Number(endpoint?.position?.y ?? center.y ?? 0) + 4.2,
+                z: Number(center.z),
+              },
+              size: { x: reservationWidth, y: 8.4, z: reservationDepth },
+              purpose: 'route-network-endpoint-domain-probe',
+            },
+          });
+        }
+      }
+    }
+  }
+  return {
+    endpointOrdinal,
+    endpointId: String(endpoint?.id ?? endpointOrdinal),
+    candidates,
+  };
+}
+
+function summarizeRouteNetworkEndpointDomains(endpointDomains) {
+  const candidateCounts = endpointDomains.map(({ candidates }) => candidates.length);
+  const minimumEndpointCandidateCount = candidateCounts.length > 0
+    ? Math.min(...candidateCounts)
+    : 0;
+  const viableCombinationCount = candidateCounts.reduce((product, count) => (
+    Math.min(Number.MAX_SAFE_INTEGER, product * count)
+  ), 1);
+  return {
+    endpointDomains,
+    endpointCandidateCounts: candidateCounts,
+    minimumEndpointCandidateCount,
+    viableCombinationCount,
+  };
+}
+
+export function filterRouteNetworkEndpointDomains(
+  endpointDomains,
+  avoidanceVolumes,
+  overlapGrants = [],
+) {
+  if (!Array.isArray(avoidanceVolumes) || avoidanceVolumes.length === 0) {
+    return summarizeRouteNetworkEndpointDomains(endpointDomains);
+  }
+  const nearbyVolumes = createPlanningVolumeSpatialLookup(avoidanceVolumes);
+  const candidateReservationVolumes = (candidate) => (
+    candidate.reservationVolumes ?? [candidate.reservationVolume].filter(Boolean)
+  );
+  const candidateClearsAvoidance = (candidate) => (
+      candidateReservationVolumes(candidate).every((reservationVolume) => (
+        ![...nearbyVolumes(reservationVolume)].some((obstacle) => (
+          planningVolumesOverlap(reservationVolume, obstacle)
+            && !planningOverlapIsGranted(reservationVolume, obstacle, overlapGrants)
+        ))
+      ))
+  );
+  const filteredDomains = endpointDomains.map((domain) => {
+    const primaryCandidates = domain.candidates.filter(candidateClearsAvoidance);
+    let filteredFallbackCandidates = null;
+    const fallbackCandidateFactory = typeof domain.fallbackCandidateFactory === 'function'
+      ? () => {
+        if (!filteredFallbackCandidates) {
+          filteredFallbackCandidates = domain.fallbackCandidateFactory()
+            .filter(candidateClearsAvoidance);
+        }
+        return filteredFallbackCandidates;
+      }
+      : null;
+    return {
+      ...domain,
+      candidates: primaryCandidates.length > 0 || !fallbackCandidateFactory
+        ? primaryCandidates
+        : fallbackCandidateFactory(),
+      ...(fallbackCandidateFactory ? { fallbackCandidateFactory } : {}),
+    };
+  });
+  // Pairwise arc consistency is cheap at these bounded endpoint domains and
+  // catches the case where every station individually has room but all legal
+  // choices consume the same landing. The exact route solver still owns all
+  // corridor, seam, and room-envelope validation.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let firstIndex = 0; firstIndex < filteredDomains.length; firstIndex += 1) {
+      const firstDomain = filteredDomains[firstIndex];
+      const remaining = firstDomain.candidates.filter((firstCandidate) => (
+        filteredDomains.every((secondDomain, secondIndex) => (
+          secondIndex === firstIndex
+            || secondDomain.candidates.some((secondCandidate) => (
+              candidateReservationVolumes(firstCandidate).every((firstVolume) => (
+                candidateReservationVolumes(secondCandidate).every((secondVolume) => (
+                  !planningVolumesOverlap(firstVolume, secondVolume)
+                ))
+              ))
+            ))
+        ))
+      ));
+      if (remaining.length !== firstDomain.candidates.length) {
+        firstDomain.candidates = remaining;
+        changed = true;
+      }
+    }
+  }
+  return summarizeRouteNetworkEndpointDomains(filteredDomains);
+}
+
+function futureEndpointWitnessCandidateIdentity(candidate = {}) {
+  return canonicalStringify({
+    endpointOrdinal: Number(candidate.endpointOrdinal ?? 0),
+    grammarId: String(candidate.grammarId ?? ''),
+    parentLocalSocketId: String(candidate.parentLocalSocketId ?? ''),
+    outwardStep: Number(candidate.outwardStep ?? 0),
+    tangentOffsetTiles: Number(candidate.tangentOffsetTiles ?? 0),
+    orientationOrdinal: Number(candidate.orientationOrdinal ?? 0),
+    center: candidate.center ?? null,
+    facing: candidate.facing ?? null,
+  });
+}
+
+/**
+ * Select one concrete, pairwise-compatible endpoint candidate for every domain.
+ * This is a sufficient local recovery witness only: callers must retain their
+ * ordinary unguided branch and keep the full endpoint forward check as the
+ * acceptance authority. Farthest outward placements are tried first because
+ * an earlier landmark most often consumes the near ray from the parent route.
+ */
+export function selectRouteNetworkFutureEndpointReservationWitness(
+  endpointDomains,
+  {
+    avoidanceVolumes = [],
+    overlapGrants = [],
+    guidanceNodeVolumes = [],
+    guidanceSegmentVolumes = [],
+    guidanceCapVolumes = [],
+  } = {},
+) {
+  const filtered = filterRouteNetworkEndpointDomains(
+    endpointDomains,
+    avoidanceVolumes,
+    overlapGrants,
+  );
+  if (filtered.minimumEndpointCandidateCount <= 0) return null;
+  const reservationVolumesFor = (candidate) => (
+    candidate.reservationVolumes ?? [candidate.reservationVolume].filter(Boolean)
+  );
+  const footprintScore = (candidate) => reservationVolumesFor(candidate)
+    .reduce((sum, volume) => (
+      sum + Math.max(0, Number(volume?.size?.x ?? 0))
+        * Math.max(0, Number(volume?.size?.z ?? 0))
+    ), 0);
+  const conflictMetricsFor = (candidate) => {
+    const candidateVolumes = reservationVolumesFor(candidate);
+    const conflictsWith = (volumes) => candidateVolumes.flatMap((candidateVolume) => (
+      volumes.filter((volume) => planningVolumesOverlap(candidateVolume, volume))
+    ));
+    const nodeConflicts = conflictsWith(guidanceNodeVolumes);
+    const segmentConflicts = conflictsWith(guidanceSegmentVolumes);
+    const capConflicts = conflictsWith(guidanceCapVolumes);
+    const distinctOwnerCount = (volumes) => new Set(volumes.map((volume) => String(
+      volume.ownerId ?? volume.nodeId ?? volume.segmentId ?? volume.id ?? '',
+    ))).size;
+    const conflictingSegmentOwners = [...new Map(segmentConflicts.map((volume) => {
+      const segmentId = String(volume.guidanceSegmentId ?? volume.ownerId ?? volume.id ?? '');
+      return [segmentId, {
+        segmentId,
+        routeRole: String(volume.guidanceSegmentRouteRole ?? ''),
+        fromKind: String(volume.guidanceSegmentFromKind ?? ''),
+        toKind: String(volume.guidanceSegmentToKind ?? ''),
+      }];
+    })).values()].sort((first, second) => first.segmentId.localeCompare(second.segmentId));
+    const parentAttachmentSegmentOwners = conflictingSegmentOwners.filter(({ routeRole }) => (
+      routeRole === 'parent-station-attachment'
+    ));
+    return {
+      parentAttachmentSegmentOwnerCount: parentAttachmentSegmentOwners.length,
+      parentAttachmentOverlapCount: segmentConflicts.filter((volume) => (
+        String(volume.guidanceSegmentRouteRole ?? '') === 'parent-station-attachment'
+      )).length,
+      distinctNodeOwnerCount: distinctOwnerCount(nodeConflicts),
+      nodeOverlapCount: nodeConflicts.length,
+      capOverlapCount: capConflicts.length,
+      distinctSegmentOwnerCount: distinctOwnerCount(segmentConflicts),
+      segmentOverlapCount: segmentConflicts.length,
+      conflictingSegmentOwners,
+    };
+  };
+  const rankingMetrics = new Map();
+  const metricsFor = (candidate) => {
+    if (!rankingMetrics.has(candidate)) {
+      rankingMetrics.set(candidate, conflictMetricsFor(candidate));
+    }
+    return rankingMetrics.get(candidate);
+  };
+  const orderedDomains = filtered.endpointDomains.map((domain) => ({
+    ...domain,
+    candidates: [...domain.candidates].sort((first, second) => {
+      const firstMetrics = metricsFor(first);
+      const secondMetrics = metricsFor(second);
+      return firstMetrics.parentAttachmentSegmentOwnerCount
+          - secondMetrics.parentAttachmentSegmentOwnerCount
+        || firstMetrics.parentAttachmentOverlapCount
+          - secondMetrics.parentAttachmentOverlapCount
+        || firstMetrics.distinctNodeOwnerCount - secondMetrics.distinctNodeOwnerCount
+        || firstMetrics.nodeOverlapCount - secondMetrics.nodeOverlapCount
+        || firstMetrics.capOverlapCount - secondMetrics.capOverlapCount
+        || firstMetrics.distinctSegmentOwnerCount - secondMetrics.distinctSegmentOwnerCount
+        || firstMetrics.segmentOverlapCount - secondMetrics.segmentOverlapCount
+        || Math.abs(Number(first.tangentOffsetTiles ?? 0))
+          - Math.abs(Number(second.tangentOffsetTiles ?? 0))
+        || footprintScore(first) - footprintScore(second)
+        || Number(second.outwardStep ?? 0) - Number(first.outwardStep ?? 0)
+        || futureEndpointWitnessCandidateIdentity(first)
+          .localeCompare(futureEndpointWitnessCandidateIdentity(second));
+    }),
+  }));
+  const selectedCandidates = [];
+  const selectedReservationVolumes = [];
+  const selectAt = (domainOrdinal) => {
+    if (domainOrdinal >= orderedDomains.length) return true;
+    for (const candidate of orderedDomains[domainOrdinal].candidates) {
+      const candidateVolumes = reservationVolumesFor(candidate);
+      if (candidateVolumes.some((candidateVolume) => (
+        selectedReservationVolumes.some((selectedVolume) => (
+          planningVolumesOverlap(candidateVolume, selectedVolume)
+        ))
+      ))) continue;
+      selectedCandidates.push(candidate);
+      selectedReservationVolumes.push(...candidateVolumes);
+      if (selectAt(domainOrdinal + 1)) return true;
+      selectedReservationVolumes.splice(
+        selectedReservationVolumes.length - candidateVolumes.length,
+        candidateVolumes.length,
+      );
+      selectedCandidates.pop();
+    }
+    return false;
+  };
+  if (!selectAt(0)) return null;
+  const candidateIdentities = selectedCandidates.map(
+    futureEndpointWitnessCandidateIdentity,
+  );
+  const candidateSummary = (candidate) => ({
+    endpointOrdinal: Number(candidate.endpointOrdinal ?? 0),
+    grammarId: String(candidate.grammarId ?? ''),
+    parentLocalSocketId: String(candidate.parentLocalSocketId ?? ''),
+    outwardStep: Number(candidate.outwardStep ?? 0),
+    tangentOffsetTiles: Number(candidate.tangentOffsetTiles ?? 0),
+    orientationOrdinal: Number(candidate.orientationOrdinal ?? 0),
+    center: cloneDungeonAugmentationValue(candidate.center ?? null),
+    footprintScore: footprintScore(candidate),
+    rankingMetrics: { ...metricsFor(candidate) },
+  });
+  return {
+    signature: hashCanonicalValue(candidateIdentities, {
+      namespace: 'ruindivex-route-network-future-endpoint-reservation-witness/v1',
+    }),
+    candidateIdentities,
+    candidateSummaries: selectedCandidates.map(candidateSummary),
+    rankedCandidateSamplesByEndpoint: orderedDomains.map((domain) => ({
+      endpointOrdinal: Number(domain.endpointOrdinal ?? 0),
+      candidates: domain.candidates.slice(0, 12).map(candidateSummary),
+    })),
+    candidates: selectedCandidates,
+    reservationVolumes: selectedCandidates.flatMap((candidate) => (
+      reservationVolumesFor(candidate)
+    )),
+  };
+}
+
+function routeNetworkEndpointDomainBlockingDiagnostics(
+  endpointDomains,
+  avoidanceVolumes,
+  overlapGrants = [],
+) {
+  const obstacles = [...(avoidanceVolumes ?? [])];
+  if (obstacles.length === 0) return [];
+  const nearbyVolumes = createPlanningVolumeSpatialLookup(obstacles);
+  const reservationVolumesFor = (candidate) => (
+    candidate.reservationVolumes ?? [candidate.reservationVolume].filter(Boolean)
+  );
+  return endpointDomains.map((domain) => {
+    const domainCandidates = domain.candidates.length > 0
+      || typeof domain.fallbackCandidateFactory !== 'function'
+      ? domain.candidates
+      : domain.fallbackCandidateFactory();
+    const blockerCounts = new Map();
+    const blockedCandidateSamples = [];
+    let directSurvivorCount = 0;
+    for (const candidate of domainCandidates) {
+      const blockersById = new Map();
+      for (const reservationVolume of reservationVolumesFor(candidate)) {
+        for (const obstacle of nearbyVolumes(reservationVolume)) {
+          if (!planningVolumesOverlap(reservationVolume, obstacle)
+            || planningOverlapIsGranted(reservationVolume, obstacle, overlapGrants)) continue;
+          const obstacleId = String(obstacle.id ?? 'anonymous-obstacle');
+          blockersById.set(obstacleId, obstacle);
+        }
+      }
+      if (blockersById.size === 0) {
+        directSurvivorCount += 1;
+        continue;
+      }
+      for (const [obstacleId, obstacle] of blockersById) {
+        const blocker = blockerCounts.get(obstacleId) ?? {
+          obstacleId,
+          ownerId: String(obstacle.ownerId ?? ''),
+          purpose: String(obstacle.purpose ?? ''),
+          center: cloneDungeonAugmentationValue(obstacle.center),
+          size: cloneDungeonAugmentationValue(obstacle.size),
+          blockedCandidateCount: 0,
+        };
+        blocker.blockedCandidateCount += 1;
+        blockerCounts.set(obstacleId, blocker);
+      }
+      if (blockedCandidateSamples.length < 12) {
+        blockedCandidateSamples.push({
+          grammarId: String(candidate.grammarId ?? ''),
+          parentLocalSocketId: String(candidate.parentLocalSocketId ?? ''),
+          outwardStep: Number(candidate.outwardStep ?? 0),
+          orientationOrdinal: Number(candidate.orientationOrdinal ?? 0),
+          center: cloneDungeonAugmentationValue(candidate.center),
+          blockerIds: [...blockersById.keys()].sort(),
+        });
+      }
+    }
+    return {
+      endpointOrdinal: Number(domain.endpointOrdinal),
+      endpointId: String(domain.endpointId ?? domain.endpointOrdinal),
+      candidateCountBeforeDynamicAvoidance: domainCandidates.length,
+      directSurvivorCount,
+      blockers: [...blockerCounts.values()].sort((first, second) => (
+        second.blockedCandidateCount - first.blockedCandidateCount
+          || first.obstacleId.localeCompare(second.obstacleId)
+      )).slice(0, 24),
+      blockedCandidateSamples,
+    };
+  });
+}
+
+/**
+ * Resolve the immutable-host endpoint witnesses for one selected grammar.
+ * Endpoint domains widen lazily as a whole, so a near witness for grammar A
+ * must not hide the farther, still-legal witnesses for grammar B.
+ */
+export function routeNetworkEndpointDomainCandidatesForGrammar(domain, grammarId) {
+  if (!domain) return [];
+  const selectedGrammarId = String(grammarId ?? '');
+  const primaryCandidates = (domain.candidates ?? []).filter((candidate) => (
+    String(candidate.grammarId) === selectedGrammarId
+  ));
+  if (primaryCandidates.length > 0
+    || typeof domain.fallbackCandidateFactory !== 'function') {
+    return primaryCandidates;
+  }
+  return domain.fallbackCandidateFactory().filter((candidate) => (
+    String(candidate.grammarId) === selectedGrammarId
+  ));
+}
+
+/**
+ * Deterministically order remaining route-network grant ordinals. The
+ * landmark loop is pinned first; mandatory grants then use minimum remaining
+ * endpoint-domain size (MRV), with canonical progression ordinal as the final
+ * tie-break. Optional work is always last.
+ */
+export function orderRouteNetworkGrantOrdinalsByEndpointDomain(
+  grants,
+  remainingOrdinals,
+  endpointDomainSummaryByGrantId = new Map(),
+) {
+  const summaryFor = (grantId) => (
+    endpointDomainSummaryByGrantId instanceof Map
+      ? endpointDomainSummaryByGrantId.get(grantId)
+      : endpointDomainSummaryByGrantId?.[grantId]
+  ) ?? {};
+  const phase = ({ grant }) => {
+    if (grant?.kind === 'landmark-perimeter-loop') return 0;
+    if (grant?.required) return 1;
+    return 2;
+  };
+  return [...remainingOrdinals].sort((firstOrdinal, secondOrdinal) => {
+    const firstRecord = grants[firstOrdinal];
+    const secondRecord = grants[secondOrdinal];
+    const phaseDifference = phase(firstRecord) - phase(secondRecord);
+    if (phaseDifference !== 0) return phaseDifference;
+    if (phase(firstRecord) === 1) {
+      const firstSummary = summaryFor(firstRecord.grant.id);
+      const secondSummary = summaryFor(secondRecord.grant.id);
+      const minimumDifference = Number(
+        firstSummary.mrvMinimumEndpointCandidateCount
+          ?? firstSummary.minimumEndpointCandidateCount
+          ?? Number.MAX_SAFE_INTEGER,
+      ) - Number(
+        secondSummary.mrvMinimumEndpointCandidateCount
+          ?? secondSummary.minimumEndpointCandidateCount
+          ?? Number.MAX_SAFE_INTEGER,
+      );
+      if (minimumDifference !== 0) return minimumDifference;
+      const combinationDifference = Number(
+        firstSummary.mrvViableCombinationCount
+          ?? firstSummary.viableCombinationCount
+          ?? Number.MAX_SAFE_INTEGER,
+      ) - Number(
+        secondSummary.mrvViableCombinationCount
+          ?? secondSummary.viableCombinationCount
+          ?? Number.MAX_SAFE_INTEGER,
+      );
+      if (combinationDifference !== 0) return combinationDifference;
+    }
+    return firstOrdinal - secondOrdinal;
+  });
+}
+
+export function selectPreferredRouteNetworkPartialSolution(
+  current,
+  candidate,
+  requiredOperationOrdinals = [],
+) {
+  const eligible = (solution) => {
+    if (!solution) return false;
+    // Planner states always expose operations. Keep the fallback compatible
+    // with compact unit witnesses, but never allow an explicitly empty
+    // partial state to masquerade as a realized supplement.
+    if (Array.isArray(solution.operations)) return solution.operations.length > 0;
+    return Number(solution.acceptedNetworkCount ?? 0) > 0
+      || (solution.acceptedGrantOrdinals ?? []).length > 0;
+  };
+  const currentEligible = eligible(current);
+  const candidateEligible = eligible(candidate);
+  if (!candidateEligible) return currentEligible ? current : null;
+  if (!currentEligible) return candidate;
+  const requiredOrdinalSet = requiredOperationOrdinals instanceof Set
+    ? requiredOperationOrdinals
+    : new Set(requiredOperationOrdinals);
+  const quality = (solution) => {
+    const acceptedOrdinals = new Set(solution?.acceptedGrantOrdinals ?? []);
+    return {
+      requiredNetworkCount: [...acceptedOrdinals].filter((ordinal) => (
+        requiredOrdinalSet.has(Number(ordinal))
+      )).length,
+      totalNetworkCount: Number(
+        solution?.acceptedNetworkCount
+          ?? acceptedOrdinals.size
+          ?? solution?.operations?.length
+          ?? 0,
+      ),
+    };
+  };
+  const currentQuality = quality(current);
+  const candidateQuality = quality(candidate);
+  if (candidateQuality.requiredNetworkCount !== currentQuality.requiredNetworkCount) {
+    return candidateQuality.requiredNetworkCount > currentQuality.requiredNetworkCount
+      ? candidate
+      : current;
+  }
+  if (candidateQuality.totalNetworkCount !== currentQuality.totalNetworkCount) {
+    return candidateQuality.totalNetworkCount > currentQuality.totalNetworkCount
+      ? candidate
+      : current;
+  }
+  // Candidate iteration and grant ordering are deterministic. Keep the first
+  // equal-quality solution so partial recovery cannot perturb replay hashes.
+  return current;
+}
+
+function routeNetworkOperationOrdinalSet(entries = []) {
+  const source = entries instanceof Set
+    ? [...entries]
+    : Array.isArray(entries)
+      ? entries
+      : [];
+  return new Set(source
+    .map((entry) => Number(entry))
+    .filter((entry) => Number.isSafeInteger(entry) && entry >= 0));
+}
+
+/**
+ * Return the optimistic retained-required frontier for one partial subtree.
+ * Explicitly pruned grants never contribute to the frontier, even if a stale
+ * continuation list still carries their ordinals.
+ */
+export function routeNetworkPartialBranchRetentionUpperBound({
+  acceptedGrantOrdinals = [],
+  remainingOperationOrdinals = [],
+  explicitlyPrunedOperationOrdinals = [],
+  requiredOperationOrdinals = [],
+  requiredCoverageOperationOrdinals = [],
+} = {}) {
+  const retainableOrdinals = routeNetworkOperationOrdinalSet([
+    ...acceptedGrantOrdinals,
+    ...remainingOperationOrdinals,
+  ]);
+  for (const ordinal of routeNetworkOperationOrdinalSet(
+    explicitlyPrunedOperationOrdinals,
+  )) {
+    retainableOrdinals.delete(ordinal);
+  }
+  const requiredOrdinals = routeNetworkOperationOrdinalSet(requiredOperationOrdinals);
+  const coverageOrdinals = routeNetworkOperationOrdinalSet(
+    requiredCoverageOperationOrdinals,
+  );
+  const retainableRequiredOperationOrdinals = [...retainableOrdinals]
+    .filter((ordinal) => requiredOrdinals.has(ordinal))
+    .sort((first, second) => first - second);
+  const retainableCoverageOperationOrdinals = retainableRequiredOperationOrdinals
+    .filter((ordinal) => coverageOrdinals.has(ordinal));
+  return {
+    maximumRequiredNetworkCount: retainableRequiredOperationOrdinals.length,
+    maximumCoverageNetworkCount: retainableCoverageOperationOrdinals.length,
+    retainableRequiredOperationOrdinals,
+    retainableCoverageOperationOrdinals,
+  };
+}
+
+/**
+ * Inspect a completed partial solution against the solver attempt's useful
+ * floor. The floor is normally two required supplements plus one required
+ * coverage network. It may shrink only when the current subtree genuinely
+ * cannot retain two required grants before proposing another prune.
+ */
+export function evaluateRouteNetworkPartialPreRecoveryAcceptance(
+  solution,
+  {
+    requiredOperationOrdinals = [],
+    requiredCoverageOperationOrdinals = [],
+    requiredLandmarkOperationOrdinals = [],
+    preferredRequiredNetworkCount = 2,
+    requireCoverage = true,
+    requireLandmark = false,
+    retentionUpperBound = null,
+  } = {},
+) {
+  const requiredOrdinals = routeNetworkOperationOrdinalSet(requiredOperationOrdinals);
+  const coverageOrdinals = routeNetworkOperationOrdinalSet(
+    requiredCoverageOperationOrdinals,
+  );
+  const landmarkOrdinals = routeNetworkOperationOrdinalSet(
+    requiredLandmarkOperationOrdinals,
+  );
+  const acceptedOrdinals = routeNetworkOperationOrdinalSet(
+    solution?.acceptedGrantOrdinals ?? [],
+  );
+  const retainedRequiredOperationOrdinals = [...acceptedOrdinals]
+    .filter((ordinal) => requiredOrdinals.has(ordinal))
+    .sort((first, second) => first - second);
+  const retainedCoverageOperationOrdinals = retainedRequiredOperationOrdinals
+    .filter((ordinal) => coverageOrdinals.has(ordinal));
+  const retainedLandmarkOperationOrdinals = retainedRequiredOperationOrdinals
+    .filter((ordinal) => landmarkOrdinals.has(ordinal));
+  const optimisticRequiredCount = Math.max(
+    0,
+    Number(retentionUpperBound?.maximumRequiredNetworkCount
+      ?? requiredOrdinals.size),
+  );
+  const requiredNetworkTarget = Math.min(
+    Math.max(0, Math.trunc(Number(preferredRequiredNetworkCount) || 0)),
+    optimisticRequiredCount,
+  );
+  const coverageNetworkTarget = requireCoverage && coverageOrdinals.size > 0 ? 1 : 0;
+  const landmarkNetworkTarget = requireLandmark && landmarkOrdinals.size > 0 ? 1 : 0;
+  const nonempty = Boolean(
+    solution
+      && (
+        (Array.isArray(solution.operations) && solution.operations.length > 0)
+        || Number(solution.acceptedNetworkCount ?? 0) > 0
+        || acceptedOrdinals.size > 0
+      ),
+  );
+  return {
+    accepted: nonempty
+      && retainedRequiredOperationOrdinals.length >= requiredNetworkTarget
+      && retainedCoverageOperationOrdinals.length >= coverageNetworkTarget
+      && retainedLandmarkOperationOrdinals.length >= landmarkNetworkTarget,
+    nonempty,
+    retainedRequiredNetworkCount: retainedRequiredOperationOrdinals.length,
+    retainedCoverageNetworkCount: retainedCoverageOperationOrdinals.length,
+    retainedLandmarkNetworkCount: retainedLandmarkOperationOrdinals.length,
+    retainedRequiredOperationOrdinals,
+    retainedCoverageOperationOrdinals,
+    retainedLandmarkOperationOrdinals,
+    requiredNetworkTarget,
+    coverageNetworkTarget,
+    landmarkNetworkTarget,
+    maximumRequiredNetworkCount: optimisticRequiredCount,
+  };
+}
+
+/**
+ * Insert deterministic, zero-evaluation partial checkpoints without removing
+ * any ordinary or recovery identity. Landmark fallback runs after its complete
+ * ordinary window. Initial required coverage tries its first four interleaved
+ * identities before pruning itself. That finite prefix includes the compact
+ * authored rise replacement at search variant three; stopping after two can
+ * omit the whole grant before the already-authorized modular substitute is
+ * reached. Runtime conflict exclusions still keep every authorized replacement
+ * candidate ahead of omission.
+ */
+export function createRouteNetworkPartialFirstCandidateSchedule(
+  ordinaryCandidateAttempts = [],
+  {
+    allowPartialRouteNetworkRealization = false,
+    routeNetworkKind = null,
+    required = false,
+    hasConflictExclusions = false,
+  } = {},
+) {
+  const schedule = [...ordinaryCandidateAttempts];
+  if (!allowPartialRouteNetworkRealization || required !== true) return schedule;
+  if (routeNetworkKind === 'landmark-perimeter-loop') {
+    schedule.push({ partialFirstCheckpoint: 'deferred-blocked-future' });
+    return schedule;
+  }
+  if (routeNetworkKind === 'objective-route-coverage'
+    && hasConflictExclusions !== true
+    && schedule.length > 1) {
+    schedule.splice(
+      Math.min(4, schedule.length),
+      0,
+      { partialFirstCheckpoint: 'prune-current-required-coverage' },
+    );
+  }
+  return schedule;
+}
+
+/**
+ * Prefer the most complete retained anchor, then the least-served suffix
+ * class, preserving FIFO ties. Candidate identities remain in the queue.
+ */
+export function selectDeferredRouteNetworkCoverageSuffixIndex(
+  deferredSuffixes = [],
+  dequeueCountByClass = new Map(),
+) {
+  if (!Array.isArray(deferredSuffixes) || deferredSuffixes.length === 0) return -1;
+  const countFor = (classKey) => Number(
+    dequeueCountByClass instanceof Map
+      ? dequeueCountByClass.get(classKey) ?? 0
+      : dequeueCountByClass?.[classKey] ?? 0,
+  );
+  let selectedIndex = 0;
+  let selectedAcceptedRequiredCount = Number.NEGATIVE_INFINITY;
+  let selectedCount = Number.POSITIVE_INFINITY;
+  for (let suffixIndex = 0; suffixIndex < deferredSuffixes.length; suffixIndex += 1) {
+    const acceptedRequiredCount = Math.max(
+      0,
+      Math.trunc(Number(
+        deferredSuffixes[suffixIndex]?.acceptedRequiredNetworkCount,
+      ) || 0),
+    );
+    const dequeueCount = countFor(deferredSuffixes[suffixIndex]?.suffixClassKey);
+    if (acceptedRequiredCount > selectedAcceptedRequiredCount
+      || (acceptedRequiredCount === selectedAcceptedRequiredCount
+        && dequeueCount < selectedCount)) {
+      selectedIndex = suffixIndex;
+      selectedAcceptedRequiredCount = acceptedRequiredCount;
+      selectedCount = dequeueCount;
+    }
+  }
+  return selectedIndex;
+}
+
 function planRouteNetworkAttempt({
   basePlanHash,
   baseDraftFingerprint,
@@ -14438,7 +23679,25 @@ function planRouteNetworkAttempt({
   eligibleRegions,
   grammars,
   attempt,
+  connectorVariantRoomFootprints = [],
+  prePrunedRouteNetworkGrants = [],
+  routeNetworkConflictExclusions = [],
+  routeNetworkPlanResultCache = null,
 }) {
+  const normalizedPrePrunedRouteNetworkGrants =
+    normalizePrePrunedRouteNetworkGrants(prePrunedRouteNetworkGrants);
+  const normalizedRouteNetworkConflictExclusions =
+    normalizeRouteNetworkConflictExclusions(routeNetworkConflictExclusions);
+  const conflictExclusionPruneRefusalByGrantId = new Map(
+    [...new Set(normalizedRouteNetworkConflictExclusions.map(({ grantId }) => grantId))]
+      .map((grantId) => [
+        grantId,
+        routeNetworkConflictExclusionPruneRefusal(
+          grantId,
+          normalizedRouteNetworkConflictExclusions,
+        ),
+      ]),
+  );
   const random = new DungeonAugmentationRandom(augmentationSeed).fork(`attempt:${attempt}:v4`);
   const grants = eligibleRegions.flatMap((region) => (
     (region.routeNetworkGrants ?? []).map((rawGrant, grantOrdinal) => ({
@@ -14457,6 +23716,26 @@ function planRouteNetworkAttempt({
       || first.region.id.localeCompare(second.region.id)
       || first.grantOrdinal - second.grantOrdinal;
   });
+  const prePrunedRouteNetworkGrantById = new Map(
+    normalizedPrePrunedRouteNetworkGrants.map((entry) => [entry.grantId, entry]),
+  );
+  const canonicalPrePrunedRouteNetworkGrants = grants.flatMap(({
+    region,
+    grant,
+  }, operationOrdinal) => {
+    const entry = prePrunedRouteNetworkGrantById.get(String(grant.id));
+    if (!entry || grant.required !== true) return [];
+    return [{
+      grantId: String(grant.id),
+      parentRegionId: String(region.id),
+      routeNetworkKind: String(grant.kind ?? ''),
+      operationOrdinal,
+      reason: entry.reason,
+    }];
+  });
+  const prePrunedRouteNetworkGrantIds = new Set(
+    canonicalPrePrunedRouteNetworkGrants.map(({ grantId }) => grantId),
+  );
   const stagingReservationsByGrantId = new Map(grants.map(({ grant }) => {
     // The landmark loop is always planned first. Later operations avoid its
     // exact accepted geometry, so synthetic future envelopes around the
@@ -14520,6 +23799,8 @@ function planRouteNetworkAttempt({
     return [grant.id, reservations];
   }));
   const settings = profile.routeNetworkPlanning;
+  const allowPartialRouteNetworkRealization =
+    settings.allowPartialRouteNetworkRealization === true;
   const requiredPyramidCount = grants.filter(({ grant }) => (
     grant.required && grant.kind === 'landmark-perimeter-loop'
   )).length;
@@ -14533,6 +23814,43 @@ function planRouteNetworkAttempt({
     return { error: 'v4-route-network-grants-incomplete' };
   }
   const requiredNetworkCount = grants.filter(({ grant }) => grant.required).length;
+  const requiredOperationOrdinalSet = new Set(
+    grants.flatMap(({ grant }, operationOrdinal) => (
+      grant.required ? [operationOrdinal] : []
+    )),
+  );
+  const requiredCoverageOperationOrdinalSet = new Set(
+    grants.flatMap(({ grant }, operationOrdinal) => (
+      grant.required && grant.kind === 'objective-route-coverage'
+        ? [operationOrdinal]
+        : []
+    )),
+  );
+  const requiredLandmarkOperationOrdinalSet = new Set(
+    grants.flatMap(({ grant }, operationOrdinal) => (
+      grant.required && grant.kind === 'landmark-perimeter-loop'
+        ? [operationOrdinal]
+        : []
+    )),
+  );
+  const activeRequiredOperationOrdinals = [...requiredOperationOrdinalSet]
+    .filter((operationOrdinal) => !prePrunedRouteNetworkGrantIds.has(
+      String(grants[operationOrdinal]?.grant?.id ?? ''),
+    ));
+  const preferredPartialRequiredNetworkCount = Math.min(
+    clampInteger(
+      settings.partialUsefulRequiredNetworkCount ?? 2,
+      1,
+      Number(settings.maximumNetworkCount),
+    ),
+    activeRequiredOperationOrdinals.length,
+  );
+  const partialRequiresCoverage = activeRequiredOperationOrdinals.some(
+    (operationOrdinal) => requiredCoverageOperationOrdinalSet.has(operationOrdinal),
+  );
+  const partialRequiresLandmark = activeRequiredOperationOrdinals.some(
+    (operationOrdinal) => requiredLandmarkOperationOrdinalSet.has(operationOrdinal),
+  );
   if (requiredNetworkCount > settings.maximumNetworkCount) {
     return {
       error: 'route-network-count-budget-exceeded',
@@ -14576,6 +23894,7 @@ function planRouteNetworkAttempt({
   });
   const endpointModuleBudgetViolationIndex = grants.findIndex(({ grant }, index) => {
     if (!grant.required) return false;
+    if (prePrunedRouteNetworkGrantIds.has(String(grant.id))) return false;
     const maximumModules = Math.min(
       Number(grant.maximumModules),
       Number(settings.maximumModulesPerNetwork),
@@ -14600,7 +23919,12 @@ function planRouteNetworkAttempt({
     };
   }
   const minimumRequiredTotalModules = minimumModuleCounts.reduce((sum, count, index) => (
-    sum + (grants[index].grant.required ? count : 0)
+    sum + (
+      grants[index].grant.required
+        && !prePrunedRouteNetworkGrantIds.has(String(grants[index].grant.id))
+        ? count
+        : 0
+    )
   ), 0);
   if (minimumRequiredTotalModules > settings.maximumTotalModules) {
     return {
@@ -14646,6 +23970,13 @@ function planRouteNetworkAttempt({
       roomLayoutFamilyIds,
     ),
   };
+  const sharedRoutePlanningCaches = {
+    socketRouteCandidateCache: new Map(),
+    socketRouteMinimumLevelSpanCache: new Map(),
+    planningEndpointSeamCache: new Map(),
+    translationInvariantRouteShapeBooleanCache: new Map(),
+    landmarkEndpointTupleDomainCache: new Map(),
+  };
   const topologyBag = initialSelectionBags.topology.order;
   const junctionBag = initialSelectionBags.junction.order;
   const elevationBag = initialSelectionBags.elevation.order;
@@ -14658,15 +23989,139 @@ function planRouteNetworkAttempt({
     size: { ...volume.size, y: 2048 },
     purpose: `${volume.purpose ?? 'supplement'}:cross-network-xz-reservation`,
   });
-  const requiredMinimumModulesFrom = Array(grants.length + 1).fill(0);
-  const requiredNetworkCountFrom = Array(grants.length + 1).fill(0);
-  for (let index = grants.length - 1; index >= 0; index -= 1) {
-    const required = grants[index].grant.required;
-    requiredMinimumModulesFrom[index] = requiredMinimumModulesFrom[index + 1]
-      + (required ? minimumModuleCounts[index] : 0);
-    requiredNetworkCountFrom[index] = requiredNetworkCountFrom[index + 1]
-      + (required ? 1 : 0);
+  // Endpoint domains and their immutable-host collision results are shared by
+  // every global candidate for this attempt. Previously each candidate did
+  // all of this work only after selecting a grammar/topology, which both hid
+  // constrained mandatory grants until late in the search and rebuilt the
+  // same static collision facts on every backtrack.
+  const mandatoryEndpointDomainCache = new Map();
+  const routeNetworkGrammarPool = profile.grammarPool
+    .map(({ id }) => grammars[id])
+    .filter(Boolean);
+  const endpointConnectorGrammars = routeNetworkGrammarPool
+    .filter((grammar) => (
+      grammar
+        && String(grammar.selectionConstraints?.routeNetworkModuleKind ?? '')
+          === 'connector-module'
+        // `routeNetworkEndpointModule` describes the retired standalone
+        // vestibule role. V4's exact parent stations deliberately set it to
+        // false even though their authored connector sockets and physical
+        // masks are the modules the local solver binds to parent endpoints.
+        // Derive capability from those physical contracts instead, so the
+        // global domain uses the same real connector shapes as placement.
+        && (grammar.sockets ?? []).some((socket) => (
+          socket?.localPosition && socket?.localFacing
+        ))
+        && (grammar.occupiedVolumes?.length ?? 0) > 0
+        && (grammar.clearanceVolumes?.length ?? 0) > 0
+    ));
+  const landmarkTrailingEndpointRoles = new Set(['mechanism', 'discovery']);
+  const landmarkTrailingEndpointRoomGrammars = routeNetworkGrammarPool.filter((grammar) => (
+    String(grammar.selectionConstraints?.routeNetworkModuleKind ?? '') === 'room'
+      && (grammar.selectionConstraints?.routeNetworkContentRoles ?? [])
+        .some((role) => landmarkTrailingEndpointRoles.has(String(role)))
+      && (grammar.sockets ?? []).some((socket) => (
+        socket?.localPosition && socket?.localFacing
+      ))
+      && (grammar.occupiedVolumes?.length ?? 0) > 0
+      && (grammar.clearanceVolumes?.length ?? 0) > 0
+  ));
+  for (const { region, grant } of grants) {
+    if (!grant.required) continue;
+    if (prePrunedRouteNetworkGrantIds.has(String(grant.id))) continue;
+    const rawEndpointDomains = grant.endpointSockets.map((endpoint, endpointOrdinal) => (
+      createRouteNetworkEndpointDomain(
+        grant,
+        endpoint,
+        endpointOrdinal,
+        [],
+        grant.kind === 'landmark-perimeter-loop' && endpointOrdinal > 0
+          // The pyramid's reconnect station is a substantive room. With its
+          // legal four- or five-module assignments, that station can carry the
+          // mechanism or discovery role; connector-only preflight domains made
+          // every selected room grammar disappear at local placement time.
+          ? landmarkTrailingEndpointRoomGrammars
+          : endpointConnectorGrammars,
+      )
+    ));
+    const staticAvoidanceVolumes = [
+      ...(region.routeNetworkPlacementProtectedVolumes
+        ?? region.protectedVolumes
+        ?? []),
+      ...(grant.protectedVolumes ?? []),
+    ];
+    const overlapGrants = [
+      ...(grant.socketLandingOverlapGrants ?? []),
+      ...(grant.socketModuleOverlapGrants ?? []),
+    ];
+    const staticSummary = filterRouteNetworkEndpointDomains(
+      rawEndpointDomains,
+      staticAvoidanceVolumes,
+      overlapGrants,
+    );
+    mandatoryEndpointDomainCache.set(grant.id, {
+      // Retain the raw domain for diagnostics, but forward checking must start
+      // from the exact grammar masks that survive immutable-host collision.
+      // Feeding the unfiltered domain into later-state checks treated stations
+      // buried in authored rooms as viable and let an earlier network consume
+      // every real handoff before the mandatory grant was planned.
+      rawEndpointDomains,
+      endpointDomains: staticSummary.endpointDomains,
+      staticEndpointDomains: staticSummary.endpointDomains,
+      staticMinimumEndpointCandidateCount:
+        staticSummary.minimumEndpointCandidateCount,
+      staticViableCombinationCount: staticSummary.viableCombinationCount,
+    });
   }
+  const endpointDomainStateCache = new Map();
+  const endpointReservationStateSignature = (volumes) => hashCanonicalValue(
+    [...(volumes ?? [])].map((volume) => ({
+      id: String(volume.id ?? ''),
+      ownerId: String(volume.ownerId ?? ''),
+      center: volume.center,
+      size: volume.size,
+    })).sort((first, second) => (
+      first.id.localeCompare(second.id)
+        || canonicalStringify(first.center).localeCompare(canonicalStringify(second.center))
+        || canonicalStringify(first.size).localeCompare(canonicalStringify(second.size))
+    )),
+    { namespace: 'ruindivex-route-network-endpoint-domain-state/v1' },
+  );
+  const endpointDomainSummaryForState = (grant, state) => {
+    const cachedDomain = mandatoryEndpointDomainCache.get(grant.id);
+    if (!cachedDomain) return null;
+    const reservationStateSignature = state.acceptedPlanningVolumeSignature
+      ?? endpointReservationStateSignature(state.acceptedPlanningVolumes ?? []);
+    const cacheKey = `${grant.id}|${reservationStateSignature}`;
+    if (!endpointDomainStateCache.has(cacheKey)) {
+      const dynamicSummary = filterRouteNetworkEndpointDomains(
+        cachedDomain.endpointDomains,
+        state.acceptedPlanningVolumes ?? [],
+      );
+      endpointDomainStateCache.set(
+        cacheKey,
+        {
+          ...dynamicSummary,
+          ...(dynamicSummary.minimumEndpointCandidateCount <= 0
+            ? {
+              blockingDiagnostics: routeNetworkEndpointDomainBlockingDiagnostics(
+                cachedDomain.endpointDomains,
+                state.acceptedPlanningVolumes ?? [],
+              ),
+            }
+            : {}),
+          // MRV is intentionally state-sensitive: accepted network geometry
+          // can consume most of a later grant's once-roomy endpoint domain.
+          // Canonical grant ordinal remains the deterministic final tie-break
+          // in `orderRouteNetworkGrantOrdinalsByEndpointDomain`.
+          mrvMinimumEndpointCandidateCount:
+            dynamicSummary.minimumEndpointCandidateCount,
+          mrvViableCombinationCount: dynamicSummary.viableCombinationCount,
+        },
+      );
+    }
+    return endpointDomainStateCache.get(cacheKey);
+  };
   const sameBandElevationBag = elevationBag.filter((mode) => (
     !['shortcut-lift', 'drop-ladder'].includes(mode)
   ));
@@ -14719,6 +24174,10 @@ function planRouteNetworkAttempt({
     }
     return counts;
   };
+  const activeRequiredNetworkCount = grants.filter(({ grant }) => (
+    grant.required
+      && !prePrunedRouteNetworkGrantIds.has(String(grant.id))
+  )).length;
   const maximumCandidateEvaluations = Math.max(
     96,
     // A candidate that succeeds physically still has to reserve geometry for
@@ -14726,31 +24185,64 @@ function planRouteNetworkAttempt({
     // room to backtrack an earlier dense connector after discovering a late
     // boss-side conflict. Preserve a finite global bound, but budget three
     // additional deterministic alternatives per required network.
-    Math.min(128, requiredNetworkCount * 20 + (grants.length - requiredNetworkCount)),
+    Math.min(
+      128,
+      activeRequiredNetworkCount * 20 + (grants.length - requiredNetworkCount),
+    ),
   );
   const reservedCandidateEvaluationsPerFutureRequiredNetwork = 8;
   let candidateEvaluations = 0;
   let searchBudgetExhausted = false;
   let deepestRequiredFailure = null;
+  const requiredFailureByGrantId = new Map();
   const candidateAttemptTrace = [];
-  const recordRequiredFailure = (failure, operationOrdinal, candidateOrdinal = null) => {
+  const deferredPartialCoverageSuffixes = [];
+  const deferredPartialCoverageSuffixSignatures = new Set();
+  const deferredPartialCoverageSuffixDequeueCountByClass = new Map();
+  const recordRequiredFailure = (
+    failure,
+    operationOrdinal,
+    candidateOrdinal = null,
+    solverDepth = operationOrdinal,
+  ) => {
     if (!failure?.error) return;
-    if (deepestRequiredFailure && deepestRequiredFailure.operationOrdinal > operationOrdinal) return;
+    const failedGrantId = grants[operationOrdinal]?.grant?.id ?? null;
+    if (failedGrantId) {
+      requiredFailureByGrantId.set(String(failedGrantId), {
+        error: String(failure.error),
+      });
+    }
+    if (deepestRequiredFailure && deepestRequiredFailure.solverDepth > solverDepth) return;
     if (deepestRequiredFailure
-      && deepestRequiredFailure.operationOrdinal === operationOrdinal
+      && deepestRequiredFailure.solverDepth === solverDepth
       && Number(deepestRequiredFailure.candidateOrdinal ?? -1)
         > Number(candidateOrdinal ?? -1)) return;
     deepestRequiredFailure = {
       ...failure,
       operationOrdinal,
+      solverDepth,
       candidateOrdinal,
       grantId: grants[operationOrdinal]?.grant?.id ?? null,
     };
   };
-  const solveRouteNetworks = (operationOrdinal, state) => {
-    if (operationOrdinal >= grants.length) {
+  const solveRouteNetworks = (
+    remainingOperationOrdinals,
+    state,
+    solverDepth = 0,
+    resumeCoverageSuffix = null,
+  ) => {
+    if (remainingOperationOrdinals.length === 0) {
+      if ((state.operations ?? []).length === 0) {
+        recordRequiredFailure({
+          error: 'route-network-no-valid-supplements',
+          context: {},
+        }, grants.length, null, solverDepth);
+        return null;
+      }
       const realizedElevationModes = new Set(state.elevationModes ?? []);
-      if (realizedElevationModes.size < requiredElevationModeCount) {
+      const partialRealization = (state.prunedRouteNetworkGrants ?? []).length > 0;
+      if (realizedElevationModes.size < requiredElevationModeCount
+        && !(allowPartialRouteNetworkRealization && partialRealization)) {
         recordRequiredFailure({
           error: 'route-network-elevation-variety-unavailable',
           context: {
@@ -14758,14 +24250,252 @@ function planRouteNetworkAttempt({
             required: requiredElevationModeCount,
             elevationModes: [...realizedElevationModes].sort(),
           },
-        }, grants.length);
+        }, grants.length, null, solverDepth);
         return null;
       }
       return state;
     }
+    const endpointDomainSummaryByGrantId = new Map(
+      remainingOperationOrdinals.map((ordinal) => {
+        const { grant: remainingGrant } = grants[ordinal];
+        return [
+          remainingGrant.id,
+          endpointDomainSummaryForState(remainingGrant, state),
+        ];
+      }),
+    );
+    const orderedOperationOrdinals = orderRouteNetworkGrantOrdinalsByEndpointDomain(
+      grants,
+      remainingOperationOrdinals,
+      endpointDomainSummaryByGrantId,
+    );
+    emitRouteNetworkPlanningDebugStage('route-network-grant-order', {
+      solverDepth,
+      orderedGrants: orderedOperationOrdinals.map((ordinal) => {
+        const orderedGrant = grants[ordinal]?.grant;
+        const summary = endpointDomainSummaryByGrantId.get(orderedGrant?.id) ?? {};
+        return {
+          ordinal,
+          grantId: orderedGrant?.id ?? null,
+          kind: orderedGrant?.kind ?? null,
+          required: orderedGrant?.required === true,
+          endpointCount: orderedGrant?.endpointSockets?.length ?? 0,
+          minimumEndpointCandidateCount:
+            summary.mrvMinimumEndpointCandidateCount
+              ?? summary.minimumEndpointCandidateCount
+              ?? null,
+          viableCombinationCount:
+            summary.mrvViableCombinationCount
+              ?? summary.viableCombinationCount
+              ?? null,
+        };
+      }),
+    });
+    const debugPreferredGrantOrder = globalThis
+      .__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ === true
+      ? String(
+        globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG_PREFERRED_GRANT__ ?? '',
+      ).split(',').map((value) => value.trim()).filter(Boolean)
+      : [];
+    const landmarkPinned = grants[orderedOperationOrdinals[0]]?.grant?.kind
+      === 'landmark-perimeter-loop';
+    const orderedRequiredOrdinals = orderedOperationOrdinals.filter((ordinal) => (
+      grants[ordinal]?.grant?.required === true
+    ));
+    const debugPreferredOrdinals = landmarkPinned
+      ? []
+      : debugPreferredGrantOrder.flatMap((grantFilter) => {
+        const ordinal = orderedRequiredOrdinals.find((candidateOrdinal) => (
+          String(grants[candidateOrdinal]?.grant?.id ?? '').includes(grantFilter)
+        ));
+        return Number.isSafeInteger(ordinal) ? [ordinal] : [];
+      }).filter((ordinal, index, ordinals) => ordinals.indexOf(ordinal) === index);
+    const resumedOperationOrdinal = Number(resumeCoverageSuffix?.operationOrdinal);
+    const operationOrdinal = Number.isSafeInteger(resumedOperationOrdinal)
+      && remainingOperationOrdinals.includes(resumedOperationOrdinal)
+      ? resumedOperationOrdinal
+      : landmarkPinned
+        ? orderedOperationOrdinals[0]
+        : debugPreferredOrdinals[0]
+          ?? orderedRequiredOrdinals[0]
+          ?? orderedOperationOrdinals[0];
+    const remainingAfterCurrent = remainingOperationOrdinals.filter((ordinal) => (
+      ordinal !== operationOrdinal
+    ));
     const { region, grant } = grants[operationOrdinal];
-    const futureRequiredMinimum = requiredMinimumModulesFrom[operationOrdinal + 1];
-    const futureRequiredNetworkCount = requiredNetworkCountFrom[operationOrdinal + 1];
+    const continueWithoutRequiredGrant = ({
+      prunedOperationOrdinal,
+      continuationState,
+      continuationOrdinals,
+      nextSolverDepth,
+      reason = null,
+    }) => {
+      const prunedEntry = grants[prunedOperationOrdinal];
+      const prunedGrant = prunedEntry?.grant;
+      const prunedRegion = prunedEntry?.region;
+      if (!allowPartialRouteNetworkRealization || prunedGrant?.required !== true) {
+        return null;
+      }
+      const pruneRefusal = conflictExclusionPruneRefusalByGrantId.get(
+        String(prunedGrant.id),
+      );
+      if (pruneRefusal) {
+        const { error, ...context } = pruneRefusal;
+        recordRequiredFailure({ error, context }, prunedOperationOrdinal, null, nextSolverDepth);
+        emitRouteNetworkPlanningDebugStage('route-network-required-grant-prune-refused', {
+          solverDepth: nextSolverDepth,
+          ...pruneRefusal,
+        });
+        return null;
+      }
+      const recordedFailure = requiredFailureByGrantId.get(String(prunedGrant.id));
+      const prunedRouteNetworkGrant = {
+        grantId: String(prunedGrant.id),
+        parentRegionId: String(prunedRegion.id),
+        routeNetworkKind: String(prunedGrant.kind ?? ''),
+        operationOrdinal: Number(prunedOperationOrdinal),
+        reason: String(
+          reason
+            ?? recordedFailure?.error
+            ?? 'route-network-planning-failed',
+        ),
+      };
+      emitRouteNetworkPlanningDebugStage('route-network-required-grant-pruned', {
+        solverDepth: nextSolverDepth,
+        ...prunedRouteNetworkGrant,
+      });
+      return solveRouteNetworks(
+        continuationOrdinals.filter((ordinal) => ordinal !== prunedOperationOrdinal),
+        {
+          ...continuationState,
+          prunedRouteNetworkGrants: [
+            ...(continuationState.prunedRouteNetworkGrants ?? []),
+            prunedRouteNetworkGrant,
+          ],
+        },
+        nextSolverDepth,
+      );
+    };
+    const continueWithoutCurrentRequiredGrant = (reason = null) => continueWithoutRequiredGrant({
+      prunedOperationOrdinal: operationOrdinal,
+      continuationState: state,
+      continuationOrdinals: remainingAfterCurrent,
+      nextSolverDepth: solverDepth + 1,
+      reason,
+    });
+    const remainingRequiredOperationOrdinals = remainingOperationOrdinals.filter((ordinal) => (
+      requiredOperationOrdinalSet.has(ordinal)
+    ));
+    const maximumAcceptedNetworkCountForSubtree = Math.min(
+      Number(settings.maximumNetworkCount),
+      Number(state.acceptedNetworkCount ?? 0) + remainingOperationOrdinals.length,
+    );
+    let bestScoredSolution = null;
+    const solutionIsProvablyOptimalForSubtree = (solution) => {
+      if (!solution || (solution.operations ?? []).length === 0) return false;
+      const acceptedOrdinals = new Set(solution.acceptedGrantOrdinals ?? []);
+      return remainingRequiredOperationOrdinals.every((ordinal) => (
+        acceptedOrdinals.has(ordinal)
+      )) && Number(solution.acceptedNetworkCount ?? 0)
+        >= maximumAcceptedNetworkCountForSubtree;
+    };
+    const considerScoredSolution = (solution) => {
+      bestScoredSolution = selectPreferredRouteNetworkPartialSolution(
+        bestScoredSolution,
+        solution,
+        requiredOperationOrdinalSet,
+      );
+      return solutionIsProvablyOptimalForSubtree(bestScoredSolution);
+    };
+    const currentSubtreeRetentionUpperBound =
+      routeNetworkPartialBranchRetentionUpperBound({
+        acceptedGrantOrdinals: state.acceptedGrantOrdinals ?? [],
+        remainingOperationOrdinals,
+        explicitlyPrunedOperationOrdinals: (state.prunedRouteNetworkGrants ?? [])
+          .map(({ operationOrdinal: prunedOperationOrdinal }) => prunedOperationOrdinal),
+        requiredOperationOrdinals: requiredOperationOrdinalSet,
+        requiredCoverageOperationOrdinals: requiredCoverageOperationOrdinalSet,
+      });
+    const partialFirstAcceptanceForBestSolution = (
+      checkpoint,
+      evidence = {},
+      preferredRequiredNetworkCount = preferredPartialRequiredNetworkCount,
+    ) => {
+      const acceptance = evaluateRouteNetworkPartialPreRecoveryAcceptance(
+        bestScoredSolution,
+        {
+          requiredOperationOrdinals: requiredOperationOrdinalSet,
+          requiredCoverageOperationOrdinals: requiredCoverageOperationOrdinalSet,
+          requiredLandmarkOperationOrdinals: requiredLandmarkOperationOrdinalSet,
+          preferredRequiredNetworkCount,
+          requireCoverage: partialRequiresCoverage,
+          requireLandmark: partialRequiresLandmark,
+          // This is the frontier before the checkpoint proposes another
+          // prune. An intentionally narrow post-prune branch may not lower a
+          // reachable landmark-plus-coverage target to landmark-only acceptance.
+          retentionUpperBound: currentSubtreeRetentionUpperBound,
+        },
+      );
+      const completedPartial = Boolean(
+        bestScoredSolution
+          && (bestScoredSolution.prunedRouteNetworkGrants ?? []).length > 0,
+      );
+      const accepted = completedPartial && acceptance.accepted;
+      emitRouteNetworkPlanningDebugStage('route-network-partial-first-evaluated', {
+        solverDepth,
+        grantId: grant.id,
+        operationOrdinal,
+        checkpoint,
+        ...acceptance,
+        accepted,
+        completedPartial,
+        candidateEvaluations,
+        prunedOperationOrdinals: (bestScoredSolution?.prunedRouteNetworkGrants ?? [])
+          .map(({ operationOrdinal: prunedOperationOrdinal }) => prunedOperationOrdinal),
+        deferredCoverageSuffixCount: deferredPartialCoverageSuffixes.length,
+        ...evidence,
+      });
+      return accepted;
+    };
+    const evaluateRequiredPruneFallbacks = ({
+      alternativePrunedOperationOrdinals = [],
+      reason = null,
+    } = {}) => {
+      // A capacity conflict is a conflict among the remaining required
+      // grants, not proof that the MRV-selected current grant is the one to
+      // discard. Try each deterministic future-prune continuation first,
+      // score the retained result, and prune current only after those branches.
+      for (const prunedOperationOrdinal of alternativePrunedOperationOrdinals) {
+        const solution = continueWithoutRequiredGrant({
+          prunedOperationOrdinal,
+          continuationState: state,
+          continuationOrdinals: remainingOperationOrdinals,
+          nextSolverDepth: solverDepth + 1,
+          reason,
+        });
+        if (considerScoredSolution(solution)) return bestScoredSolution;
+      }
+      considerScoredSolution(continueWithoutCurrentRequiredGrant(reason));
+      return bestScoredSolution;
+    };
+    const prePrunedGrant = prePrunedRouteNetworkGrantById.get(String(grant.id));
+    if (prePrunedGrant) {
+      recordRequiredFailure({
+        error: String(prePrunedGrant.reason ?? 'route-network-validation-failed'),
+        context: {
+          grantId: grant.id,
+          recoveryPass: Number(prePrunedGrant.recoveryPass ?? 0),
+        },
+      }, operationOrdinal, null, solverDepth);
+      return continueWithoutCurrentRequiredGrant(prePrunedGrant.reason);
+    }
+    const futureRequiredOperationOrdinals = remainingAfterCurrent.filter((ordinal) => (
+      grants[ordinal].grant.required
+    ));
+    const futureRequiredMinimum = futureRequiredOperationOrdinals.reduce((sum, ordinal) => (
+      sum + minimumModuleCounts[ordinal]
+    ), 0);
+    const futureRequiredNetworkCount = futureRequiredOperationOrdinals.length;
     const minimumModules = minimumModuleCounts[operationOrdinal];
     const hasNetworkCapacity = state.acceptedNetworkCount
       + 1
@@ -14776,11 +24506,14 @@ function planRouteNetworkAttempt({
       state.remainingModules - futureRequiredMinimum,
     );
     if (!hasNetworkCapacity || maximumModules < minimumModules) {
-      if (!grant.required) return solveRouteNetworks(operationOrdinal + 1, state);
+      if (!grant.required) {
+        return solveRouteNetworks(remainingAfterCurrent, state, solverDepth + 1);
+      }
+      const capacityFailureReason = !hasNetworkCapacity
+        ? 'route-network-count-budget-exceeded'
+        : 'route-network-module-allocation-failed';
       recordRequiredFailure({
-        error: !hasNetworkCapacity
-          ? 'route-network-count-budget-exceeded'
-          : 'route-network-module-allocation-failed',
+        error: capacityFailureReason,
         context: {
           grantId: grant.id,
           remainingModules: state.remainingModules,
@@ -14788,14 +24521,17 @@ function planRouteNetworkAttempt({
           minimumModules,
           maximumModules,
         },
-      }, operationOrdinal);
-      return null;
+      }, operationOrdinal, null, solverDepth);
+      return evaluateRequiredPruneFallbacks({
+        alternativePrunedOperationOrdinals: orderedRequiredOrdinals.filter((ordinal) => (
+          ordinal !== operationOrdinal
+        )),
+        reason: capacityFailureReason,
+      });
     }
-    const futureRequiredStagingReservations = grants
-      .slice(operationOrdinal + 1)
-      .filter(({ grant: futureGrant }) => futureGrant.required)
-      .flatMap(({ grant: futureGrant }) => (
-        stagingReservationsByGrantId.get(futureGrant.id) ?? []
+    const futureRequiredStagingReservations = futureRequiredOperationOrdinals
+      .flatMap((ordinal) => (
+        stagingReservationsByGrantId.get(grants[ordinal].grant.id) ?? []
       ));
     const planningAvoidanceVolumes = [
       ...(region.routeNetworkPlacementProtectedVolumes
@@ -14803,16 +24539,39 @@ function planRouteNetworkAttempt({
         ?? []),
       ...(grant.protectedVolumes ?? []),
       ...futureRequiredStagingReservations,
-      ...state.nodes.flatMap((node) => [
-        ...(node.occupiedVolumes ?? []).map(projectPriorSupplementVolume),
-        ...(node.clearanceVolumes ?? []).map(projectPriorSupplementVolume),
-      ]),
-      ...state.segments.flatMap((segment) => [
-        ...(segment.occupiedVolumes ?? []).map(projectPriorSupplementVolume),
-        ...(segment.clearanceVolumes ?? []).map(projectPriorSupplementVolume),
-        ...(segment.landingVolumes ?? []).map(projectPriorSupplementVolume),
-      ]),
+      ...(state.acceptedPlanningVolumes ?? []),
     ];
+    const completedPlanMemoEnabled = routeNetworkPlanResultCache instanceof Map
+      && globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ !== true;
+    const completedPlanMemoContextSignature = completedPlanMemoEnabled
+      ? hashCanonicalValue({
+          version: 1,
+          operationOrdinal,
+          remainingAfterCurrent,
+          futureRequiredOperationOrdinals,
+          solverDepth,
+          state: {
+            progressionOrder: state.progressionOrder,
+            remainingModules: state.remainingModules,
+            acceptedNetworkCount: state.acceptedNetworkCount,
+            elevationModes: state.elevationModes ?? [],
+            selectionBags: state.selectionBags,
+            usedCompleteSignatures: state.usedCompleteSignatures ?? [],
+            acceptedGrantOrdinals: state.acceptedGrantOrdinals ?? [],
+            acceptedPlanningVolumeSignature:
+              state.acceptedPlanningVolumeSignature ?? null,
+            prunedRouteNetworkGrants: state.prunedRouteNetworkGrants ?? [],
+          },
+          planningAvoidanceVolumes,
+          connectorVariantRoomFootprints: [
+            ...connectorVariantRoomFootprints,
+            ...state.nodes.map((node) => routeNetworkConnectorRoomFootprint(node))
+              .filter(Boolean),
+          ],
+        }, {
+          namespace: 'ruindivex-dungeon-route-network-completed-plan-context/v1',
+        })
+      : null;
     const moduleCounts = orderedModuleCounts(operationOrdinal, maximumModules);
     const rotatedSameBandElevationModes = rotateBag(
       sameBandElevationBag,
@@ -14862,13 +24621,21 @@ function planRouteNetworkAttempt({
     const requestedElevationModes = mustConsumeUnusedElevationMode
       ? legalElevationModes.filter((mode) => !previouslyUsedElevationModes.has(mode))
       : legalElevationModes;
+    const candidateElevationModes = filterDenseObjectiveCoverageElevationModes({
+      profile,
+      grammars,
+      grant,
+      elevationModes: requestedElevationModes,
+    });
     const elevationSelections = dungeonSelectionBagCandidates(
       state.selectionBags.elevation,
-      requestedElevationModes,
+      candidateElevationModes,
     );
     const elevationModes = elevationSelections.map(({ id }) => id);
     if (elevationSelections.length === 0) {
-      if (!grant.required) return solveRouteNetworks(operationOrdinal + 1, state);
+      if (!grant.required) {
+        return solveRouteNetworks(remainingAfterCurrent, state, solverDepth + 1);
+      }
       recordRequiredFailure({
         error: 'route-network-elevation-variety-unavailable',
         context: {
@@ -14877,9 +24644,10 @@ function planRouteNetworkAttempt({
           required: requiredElevationModeCount,
           futureRequiredNetworkCount,
           legalElevationModes,
+          candidateElevationModes,
         },
-      }, operationOrdinal);
-      return null;
+      }, operationOrdinal, null, solverDepth);
+      return continueWithoutCurrentRequiredGrant();
     }
     const denseMultiStationCoverage = grant.kind === 'objective-route-coverage'
       && Number(grant.endpointSockets?.length ?? 0) >= 3;
@@ -14904,7 +24672,7 @@ function planRouteNetworkAttempt({
       const internalMode = elevationModes.includes('split-level-platform')
         ? 'split-level-platform'
         : elevationModes[0];
-      for (let placementVariant = 0; placementVariant < 4; placementVariant += 1) {
+      for (const placementVariant of DENSE_OBJECTIVE_COVERAGE_SEARCH_VARIANTS) {
         for (const moduleCount of moduleCounts) {
           addCandidateSignature(moduleCount, internalMode, placementVariant);
         }
@@ -14932,12 +24700,10 @@ function planRouteNetworkAttempt({
         }
       }
     }
-    const legalTopologyIds = topologyBag.filter((topologyTemplateId) => (
-      routeNetworkTopologyIsLegalForGrant(topologyTemplateId, grant)
-    ));
-    const topologySelections = dungeonSelectionBagCandidates(
+    const topologySelections = routeNetworkTopologySelectionCandidates(
       state.selectionBags.topology,
-      legalTopologyIds,
+      topologyBag,
+      { grant, physicalSignatures: candidateSignatures },
     );
     const junctionSelections = dungeonSelectionBagCandidates(
       state.selectionBags.junction,
@@ -14962,49 +24728,531 @@ function planRouteNetworkAttempt({
         });
       }
     }
-    const familyCandidateSignatures = [];
-    for (const {
-      firstIndex: signatureIndex,
-      secondIndex: familyChoiceIndex,
-    } of interleavedCartesianIndexPairs(
-      candidateSignatures.length,
-      familyChoices.length,
-    )) {
-      const physicalSignature = candidateSignatures[signatureIndex];
-      const { topologySelection, junctionSelection } = familyChoices[familyChoiceIndex];
-      if (!routeNetworkTopologySupportsModuleCount(
-        topologySelection.id,
-        grant,
-        physicalSignature.moduleCount,
-      )) continue;
-      familyCandidateSignatures.push({
-        ...physicalSignature,
-        topologySelection,
-        junctionSelection,
-        elevationSelection: elevationSelections.find(({ id }) => (
-          id === physicalSignature.elevationMode
-        )),
-      });
-    }
+    const orderedFamilyChoices = denseMultiStationCoverage
+      // The candidate product advances both axes together. Pair the strongest
+      // reverse/socket witness with the fork-merge family at ordinal three,
+      // while retaining canonical family zero first and exhausting all four
+      // leading families in the same four bounded slots.
+      ? orderDenseObjectiveCoverageFamilyChoices(familyChoices)
+      : familyChoices;
+    const rawFamilyCandidateSignatures = interleavedRouteNetworkCandidateSignatures({
+      physicalSignatures: candidateSignatures,
+      familyChoices: orderedFamilyChoices,
+      supportsModuleCount: ({ topologySelection }, moduleCount) => (
+        routeNetworkTopologySupportsModuleCount(
+          topologySelection.id,
+          grant,
+          moduleCount,
+        )
+      ),
+    }).map((signature) => ({
+      ...signature,
+      elevationSelection: elevationSelections.find(({ id }) => (
+        id === signature.elevationMode
+      )),
+    }));
+    // `interleavedRouteNetworkCandidateSignatures` already advances physical,
+    // topology, and junction axes together. Preserve that order for landmarks
+    // so their finite candidate window cannot be monopolized by one topology
+    // family before another legal family receives a single attempt.
+    const familyCandidateSignatures = rawFamilyCandidateSignatures;
     const candidateLimit = grant.required
       ? grant.kind === 'landmark-perimeter-loop'
-        ? Math.min(24, familyCandidateSignatures.length)
-        : Math.min(denseMultiStationCoverage ? 8 : 12, familyCandidateSignatures.length)
+        ? Math.min(
+          allowPartialRouteNetworkRealization
+            ? clampInteger(
+              settings.partialLandmarkCandidateLimit ?? ORIGINAL_LANDMARK_CANDIDATE_LIMIT,
+              1,
+              ORIGINAL_LANDMARK_CANDIDATE_LIMIT,
+            )
+            : ORIGINAL_LANDMARK_CANDIDATE_LIMIT,
+          familyCandidateSignatures.length,
+        )
+        : Math.min(
+          allowPartialRouteNetworkRealization
+            ? Math.min(
+              Number(settings.partialRequiredCandidateLimit ?? 12),
+              denseMultiStationCoverage ? 8 : 12,
+            )
+            : denseMultiStationCoverage ? 8 : 12,
+          familyCandidateSignatures.length,
+        )
       : Math.min(1, familyCandidateSignatures.length);
+    emitRouteNetworkPlanningDebugStage('route-network-candidate-signatures', {
+      grantId: grant.id,
+      operationOrdinal,
+      solverDepth,
+      candidateSignatures: familyCandidateSignatures.slice(0, candidateLimit)
+        .map((signature) => ({
+          candidateOrdinal: signature.candidateOrdinal,
+          searchVariant: signature.searchVariant,
+          moduleCount: signature.moduleCount,
+          elevationMode: signature.elevationMode,
+          topologyTemplateId: signature.topologySelection?.id ?? null,
+          junctionKind: signature.junctionSelection?.id ?? null,
+        })),
+    });
     let attemptedCandidate = false;
-    for (let candidateOrdinal = 0; candidateOrdinal < candidateLimit; candidateOrdinal += 1) {
-      const futureCandidateEvaluationReserve = futureRequiredNetworkCount
-        * reservedCandidateEvaluationsPerFutureRequiredNetwork;
-      if (candidateEvaluations
-        >= maximumCandidateEvaluations - futureCandidateEvaluationReserve) {
+    const deferredBlockedFutureFallbacks = [];
+    const queuedLandmarkRecoveryCandidateOrdinals = new Set();
+    const landmarkRecoveryContextsByCandidateOrdinal = new Map();
+    let ordinaryCandidateAttemptCount = 0;
+    let ordinaryCandidatePlannedCount = 0;
+    let reachedLandmarkRecoveryCount = 0;
+    const createFutureEndpointDomainForwardCheck = ({ allowEmpty = false } = {}) => {
+      if (futureRequiredOperationOrdinals.length === 0) {
+        if (!allowEmpty) return null;
+        // The landmark's hierarchical recovery search also owns exact local
+        // endpoint, room-pair, attachment, wing, and spine alternatives. A
+        // final required landmark has no future domain to protect, but it
+        // still needs that same finite local search after its ordinary
+        // placement fails. Model the absent suffix as an always-viable empty
+        // domain so recovery can reuse the existing deterministic machinery.
+        const emptyForwardCheck = () => 1;
+        emptyForwardCheck.survivorVector = () => [];
+        emptyForwardCheck.directMinimumCandidateCount = () => 1;
+        emptyForwardCheck.directSurvivorVector = () => [];
+        emptyForwardCheck.directSurvivorBitsets = () => [];
+        emptyForwardCheck.intersectDirectSurvivorBitsets = () => [];
+        emptyForwardCheck.directSurvivorVectorForBitsets = () => [];
+        return emptyForwardCheck;
+      }
+      const viabilityCache = new Map();
+      const directViabilityCache = new Map();
+      const directBitsetCache = new Map();
+      const futureEndpointCandidateDomains = futureRequiredOperationOrdinals.flatMap(
+        (futureOrdinal) => {
+          const cachedFutureDomain = mandatoryEndpointDomainCache.get(
+            grants[futureOrdinal].grant.id,
+          );
+          return (cachedFutureDomain?.endpointDomains ?? []).map((endpointDomain) => ({
+            primaryCandidates: endpointDomain.candidates,
+            fallbackCandidates:
+              typeof endpointDomain.fallbackCandidateFactory === 'function'
+                ? endpointDomain.fallbackCandidateFactory()
+                : [],
+          }));
+        },
+      );
+      const evaluateDirectFutureEndpointBitsetsForAvoidance =
+        createDirectFutureEndpointBitsetEvaluator(futureEndpointCandidateDomains);
+      const acceptedAvoidanceVolumes = state.acceptedPlanningVolumes ?? [];
+      const acceptedDirectFutureEndpointBitsets =
+        evaluateDirectFutureEndpointBitsetsForAvoidance(acceptedAvoidanceVolumes);
+      const bitPopulationCount = (value) => {
+        let remaining = value;
+        let count = 0;
+        while (remaining > 0n) {
+          remaining &= remaining - 1n;
+          count += 1;
+        }
+        return count;
+      };
+      const avoidanceStateForProspectiveVolumes = (prospectivePlanningVolumes) => {
+        const projectedProspectiveVolumes = prospectivePlanningVolumes
+          .filter(Boolean)
+          .map(projectPriorSupplementVolume);
+        return {
+          projectedProspectiveVolumes,
+          // The accepted baseline is fixed for the lifetime of this forward
+          // check. Keying only the prospective suffix preserves the prior
+          // cache partition while avoiding a full accepted-volume clone and
+          // canonical hash for every landmark/node/route candidate.
+          signature: endpointReservationStateSignature(projectedProspectiveVolumes),
+        };
+      };
+      const evaluateFutureEndpointDomains = (prospectivePlanningVolumes) => {
+        const {
+          projectedProspectiveVolumes,
+          signature,
+        } = avoidanceStateForProspectiveVolumes(prospectivePlanningVolumes);
+        if (!viabilityCache.has(signature)) {
+          const avoidance = [
+            ...acceptedAvoidanceVolumes,
+            ...projectedProspectiveVolumes,
+          ];
+          let minimumFutureEndpointCandidateCount = Number.POSITIVE_INFINITY;
+          const survivorVector = [];
+          for (const futureOrdinal of futureRequiredOperationOrdinals) {
+            const cachedFutureDomain = mandatoryEndpointDomainCache.get(
+              grants[futureOrdinal].grant.id,
+            );
+            if (!cachedFutureDomain) continue;
+            const filtered = filterRouteNetworkEndpointDomains(
+              cachedFutureDomain.endpointDomains,
+              avoidance,
+            );
+            survivorVector.push(...filtered.endpointCandidateCounts);
+            minimumFutureEndpointCandidateCount = Math.min(
+              minimumFutureEndpointCandidateCount,
+              filtered.minimumEndpointCandidateCount,
+            );
+            if (minimumFutureEndpointCandidateCount <= 0) break;
+          }
+          viabilityCache.set(
+            signature,
+            {
+              minimumFutureEndpointCandidateCount:
+                Number.isFinite(minimumFutureEndpointCandidateCount)
+                  ? minimumFutureEndpointCandidateCount
+                  : 1,
+              survivorVector,
+            },
+          );
+        }
+        return viabilityCache.get(signature);
+      };
+      const evaluateDirectFutureEndpointBitsetsForState = ({
+        projectedProspectiveVolumes,
+        signature,
+      }) => {
+        if (!directBitsetCache.has(signature)) {
+          directBitsetCache.set(
+            signature,
+            evaluateDirectFutureEndpointBitsetsForAvoidance(
+              projectedProspectiveVolumes,
+              acceptedDirectFutureEndpointBitsets,
+            ),
+          );
+        }
+        return directBitsetCache.get(signature);
+      };
+      const evaluateDirectFutureEndpointBitsets = (prospectivePlanningVolumes) => (
+        evaluateDirectFutureEndpointBitsetsForState(
+          avoidanceStateForProspectiveVolumes(prospectivePlanningVolumes),
+        )
+      );
+      const directSurvivorVectorForBitsets = (bitsets) => bitsets.map((bitset) => {
+        const primaryCount = bitPopulationCount(bitset.primary);
+        return primaryCount > 0 ? primaryCount : bitPopulationCount(bitset.fallback);
+      });
+      const evaluateDirectFutureEndpointDomains = (prospectivePlanningVolumes) => {
+        const prospectiveAvoidanceState = avoidanceStateForProspectiveVolumes(
+          prospectivePlanningVolumes,
+        );
+        const { signature } = prospectiveAvoidanceState;
+        if (!directViabilityCache.has(signature)) {
+          const survivorVector = directSurvivorVectorForBitsets(
+            evaluateDirectFutureEndpointBitsetsForState(prospectiveAvoidanceState),
+          );
+          directViabilityCache.set(signature, {
+            survivorVector,
+            minimumFutureEndpointCandidateCount: survivorVector.length > 0
+              ? Math.min(...survivorVector)
+              : 1,
+          });
+        }
+        return directViabilityCache.get(signature);
+      };
+      const forwardCheck = (prospectivePlanningVolumes) => (
+        evaluateFutureEndpointDomains(prospectivePlanningVolumes)
+          .minimumFutureEndpointCandidateCount
+      );
+      forwardCheck.survivorVector = (prospectivePlanningVolumes) => ([
+        ...evaluateFutureEndpointDomains(prospectivePlanningVolumes).survivorVector,
+      ]);
+      forwardCheck.directMinimumCandidateCount = (prospectivePlanningVolumes) => (
+        evaluateDirectFutureEndpointDomains(prospectivePlanningVolumes)
+          .minimumFutureEndpointCandidateCount
+      );
+      forwardCheck.directSurvivorVector = (prospectivePlanningVolumes) => ([
+        ...evaluateDirectFutureEndpointDomains(prospectivePlanningVolumes).survivorVector,
+      ]);
+      forwardCheck.directSurvivorBitsets = (prospectivePlanningVolumes) => (
+        evaluateDirectFutureEndpointBitsets(prospectivePlanningVolumes)
+      );
+      forwardCheck.intersectDirectSurvivorBitsets = (first, second) => first.map(
+        (bitset, index) => ({
+          primary: bitset.primary & second[index].primary,
+          fallback: bitset.fallback & second[index].fallback,
+        }),
+      );
+      forwardCheck.directSurvivorVectorForBitsets = (bitsets) => (
+        directSurvivorVectorForBitsets(bitsets)
+      );
+      return forwardCheck;
+    };
+    // Populate every ordinary identity up front, then insert zero-budget
+    // partial checkpoints. Landmark recovery entries remain dynamically
+    // appended after the landmark checkpoint; no candidate is removed.
+    const resumedCandidateIndex = Number(resumeCoverageSuffix?.candidateIndex);
+    const firstOrdinaryCandidateIndex = Number.isSafeInteger(resumedCandidateIndex)
+      && Number(resumeCoverageSuffix?.operationOrdinal) === operationOrdinal
+      ? clampInteger(resumedCandidateIndex, 0, candidateLimit)
+      : 0;
+    const ordinaryCandidateAttempts = Array.from(
+      { length: Math.max(0, candidateLimit - firstOrdinaryCandidateIndex) },
+      (_, candidateOffset) => ({
+        candidateIndex: firstOrdinaryCandidateIndex + candidateOffset,
+        candidateOrdinal: null,
+        recoveryReplay: false,
+        recoveryTargetOrdinal: null,
+        landmarkBacktracking: null,
+        futureEndpointReservationWitness: null,
+      }),
+    );
+    const grantHasConflictExclusions = normalizedRouteNetworkConflictExclusions.some(
+      ({ grantId: excludedGrantId }) => String(excludedGrantId) === String(grant.id),
+    );
+    const scheduledCandidateAttempts = createRouteNetworkPartialFirstCandidateSchedule(
+      ordinaryCandidateAttempts,
+      {
+        allowPartialRouteNetworkRealization,
+        routeNetworkKind: grant.kind,
+        required: grant.required,
+        hasConflictExclusions: grantHasConflictExclusions,
+      },
+    );
+    let deferredBlockedFutureFallbackEvaluationCount = 0;
+    let currentRequiredPruneCheckpointEvaluated = false;
+    const emitPartialFirstSelection = (checkpoint, evidence = {}) => {
+      emitRouteNetworkPlanningDebugStage('route-network-partial-first-selected', {
+        solverDepth,
+        grantId: grant.id,
+        operationOrdinal,
+        checkpoint,
+        candidateEvaluations,
+        retainedGrantOrdinals: [
+          ...(bestScoredSolution?.acceptedGrantOrdinals ?? []),
+        ],
+        prunedGrantOrdinals: (bestScoredSolution?.prunedRouteNetworkGrants ?? [])
+          .map(({ operationOrdinal: prunedOperationOrdinal }) => prunedOperationOrdinal),
+        ...evidence,
+      });
+    };
+    const enqueueDeferredCoverageSuffix = (candidateIndex) => {
+      if (!Number.isSafeInteger(candidateIndex) || candidateIndex >= candidateLimit) {
+        return false;
+      }
+      const signature = canonicalStringify({
+        operationOrdinal,
+        candidateIndex,
+        remainingOperationOrdinals,
+        acceptedGrantOrdinals: state.acceptedGrantOrdinals ?? [],
+        acceptedPlanningVolumeSignature: state.acceptedPlanningVolumeSignature ?? null,
+        prunedOperationOrdinals: (state.prunedRouteNetworkGrants ?? [])
+          .map(({ operationOrdinal: prunedOperationOrdinal }) => prunedOperationOrdinal),
+      });
+      if (deferredPartialCoverageSuffixSignatures.has(signature)) return false;
+      deferredPartialCoverageSuffixSignatures.add(signature);
+      const suffixClassKey = `${operationOrdinal}:${candidateIndex}`;
+      const acceptedRequiredNetworkCount = (state.acceptedGrantOrdinals ?? [])
+        .filter((acceptedOrdinal) => requiredOperationOrdinalSet.has(
+          Number(acceptedOrdinal),
+        )).length;
+      deferredPartialCoverageSuffixes.push({
+        signature,
+        suffixClassKey,
+        acceptedRequiredNetworkCount,
+        operationOrdinal,
+        candidateIndex,
+        remainingOperationOrdinals: [...remainingOperationOrdinals],
+        state,
+        solverDepth,
+      });
+      emitRouteNetworkPlanningDebugStage('route-network-partial-coverage-suffix-deferred', {
+        solverDepth,
+        grantId: grant.id,
+        operationOrdinal,
+        candidateIndex,
+        acceptedRequiredNetworkCount,
+        deferredSuffixCount: deferredPartialCoverageSuffixes.length,
+      });
+      return true;
+    };
+    const drainDeferredCoverageSuffixes = (
+      checkpoint,
+      maximumSuffixCount = Number.POSITIVE_INFINITY,
+    ) => {
+      let drainedSuffixCount = 0;
+      while (deferredPartialCoverageSuffixes.length > 0
+        && drainedSuffixCount < maximumSuffixCount) {
+        const selectedSuffixIndex = selectDeferredRouteNetworkCoverageSuffixIndex(
+          deferredPartialCoverageSuffixes,
+          deferredPartialCoverageSuffixDequeueCountByClass,
+        );
+        const [deferredSuffix] = deferredPartialCoverageSuffixes.splice(
+          selectedSuffixIndex,
+          1,
+        );
+        const selectedSuffixDequeueCount = Number(
+          deferredPartialCoverageSuffixDequeueCountByClass.get(
+            deferredSuffix.suffixClassKey,
+          ) ?? 0,
+        );
+        deferredPartialCoverageSuffixDequeueCountByClass.set(
+          deferredSuffix.suffixClassKey,
+          selectedSuffixDequeueCount + 1,
+        );
+        drainedSuffixCount += 1;
+        emitRouteNetworkPlanningDebugStage('route-network-partial-coverage-suffix-reached', {
+          solverDepth,
+          grantId: grants[deferredSuffix.operationOrdinal]?.grant?.id ?? null,
+          operationOrdinal: deferredSuffix.operationOrdinal,
+          candidateIndex: deferredSuffix.candidateIndex,
+          suffixClassKey: deferredSuffix.suffixClassKey,
+          suffixClassDequeueCount: selectedSuffixDequeueCount + 1,
+          acceptedRequiredNetworkCount:
+            deferredSuffix.acceptedRequiredNetworkCount,
+          checkpoint,
+          deferredSuffixCount: deferredPartialCoverageSuffixes.length,
+        });
+        const solution = solveRouteNetworks(
+          deferredSuffix.remainingOperationOrdinals,
+          deferredSuffix.state,
+          deferredSuffix.solverDepth,
+          deferredSuffix,
+        );
+        if (considerScoredSolution(solution)) {
+          emitPartialFirstSelection(checkpoint, { provablyOptimal: true });
+          return true;
+        }
+        if (partialFirstAcceptanceForBestSolution(checkpoint, {
+          resumedOperationOrdinal: deferredSuffix.operationOrdinal,
+          resumedCandidateIndex: deferredSuffix.candidateIndex,
+        })) {
+          emitPartialFirstSelection(checkpoint, { provablyOptimal: false });
+          return true;
+        }
+      }
+      return false;
+    };
+    const evaluateDeferredBlockedFutureFallbacks = (
+      checkpoint,
+      maximumFallbackCount = Number.POSITIVE_INFINITY,
+    ) => {
+      const firstEvaluationCount = deferredBlockedFutureFallbackEvaluationCount;
+      while (deferredBlockedFutureFallbackEvaluationCount
+        < deferredBlockedFutureFallbacks.length
+        && deferredBlockedFutureFallbackEvaluationCount - firstEvaluationCount
+          < maximumFallbackCount) {
+        const deferredFallback = deferredBlockedFutureFallbacks[
+          deferredBlockedFutureFallbackEvaluationCount
+        ];
+        deferredBlockedFutureFallbackEvaluationCount += 1;
+        const solution = continueWithoutRequiredGrant(deferredFallback);
+        if (considerScoredSolution(solution)) {
+          emitPartialFirstSelection(checkpoint, {
+            candidateOrdinal: deferredFallback.candidateOrdinal ?? null,
+            provablyOptimal: true,
+          });
+          return true;
+        }
+        if (partialFirstAcceptanceForBestSolution(checkpoint, {
+          candidateOrdinal: deferredFallback.candidateOrdinal ?? null,
+          deferredFallbackEvaluationCount:
+            deferredBlockedFutureFallbackEvaluationCount,
+          deferredFallbackCount: deferredBlockedFutureFallbacks.length,
+        })) {
+          emitPartialFirstSelection(checkpoint, {
+            candidateOrdinal: deferredFallback.candidateOrdinal ?? null,
+            provablyOptimal: false,
+          });
+          return true;
+        }
+      }
+      return false;
+    };
+    for (let scheduleIndex = 0; scheduleIndex < scheduledCandidateAttempts.length;
+      scheduleIndex += 1) {
+      const scheduledAttempt = scheduledCandidateAttempts[scheduleIndex];
+      if (scheduledAttempt.partialFirstCheckpoint === 'deferred-blocked-future') {
+        // Round-robin quick landmark siblings and one deferred coverage
+        // identity at a time. This keeps a single dense suffix from hiding a
+        // viable sibling, without exhausting every landmark branch before
+        // the first coverage alternative receives a turn.
+        while (deferredBlockedFutureFallbackEvaluationCount
+          < deferredBlockedFutureFallbacks.length
+          || deferredPartialCoverageSuffixes.length > 0) {
+          if (evaluateDeferredBlockedFutureFallbacks(
+            'before-landmark-recovery',
+            1,
+          )) return bestScoredSolution;
+          if (drainDeferredCoverageSuffixes(
+            'before-landmark-recovery',
+            1,
+          )) return bestScoredSolution;
+        }
+        continue;
+      }
+      if (scheduledAttempt.partialFirstCheckpoint
+        === 'prune-current-required-coverage') {
+        currentRequiredPruneCheckpointEvaluated = true;
+        const checkpointSolution = continueWithoutCurrentRequiredGrant(
+          'route-network-partial-first-required-coverage-pruned',
+        );
+        if (considerScoredSolution(checkpointSolution)) {
+          emitPartialFirstSelection('after-first-coverage-candidate', {
+            provablyOptimal: true,
+          });
+          return bestScoredSolution;
+        }
+        if (partialFirstAcceptanceForBestSolution(
+          'after-first-coverage-candidate',
+          { provablyOptimal: false },
+        )) {
+          emitPartialFirstSelection('after-first-coverage-candidate', {
+            provablyOptimal: false,
+          });
+          return bestScoredSolution;
+        }
+        const nextOrdinaryCandidate = scheduledCandidateAttempts
+          .slice(scheduleIndex + 1)
+          .find((entry) => Number.isSafeInteger(entry.candidateIndex)
+            && entry.recoveryReplay !== true);
+        if (enqueueDeferredCoverageSuffix(nextOrdinaryCandidate?.candidateIndex)) {
+          emitRouteNetworkPlanningDebugStage('route-network-partial-coverage-subtree-yielded', {
+            solverDepth,
+            grantId: grant.id,
+            operationOrdinal,
+            resumedCandidateIndex: nextOrdinaryCandidate.candidateIndex,
+            retainedRequiredNetworkCount:
+              bestScoredSolution?.acceptedGrantOrdinals?.length ?? 0,
+          });
+          return bestScoredSolution;
+        }
+        continue;
+      }
+      const {
+        candidateIndex,
+        recoveryReplay,
+        recoveryTargetOrdinal,
+        landmarkBacktracking: scheduledLandmarkBacktracking,
+        futureEndpointReservationWitness,
+      } = scheduledAttempt;
+      const candidateEvaluationBudget = consumeRouteNetworkCandidateEvaluationBudget({
+        candidateEvaluations,
+        maximumCandidateEvaluations,
+        futureRequiredNetworkCount,
+        reservedCandidateEvaluationsPerFutureRequiredNetwork,
+      });
+      if (!candidateEvaluationBudget.accepted) {
         searchBudgetExhausted = true;
+        emitRouteNetworkPlanningDebugStage('route-network-candidate-budget-exhausted', {
+          grantId: grant.id,
+          operationOrdinal,
+          solverDepth,
+          candidatePhase: recoveryReplay ? 'forward-recovery' : 'ordinary',
+          recoveryTargetOrdinal,
+          candidateEvaluations,
+          maximumCandidateEvaluations,
+          reservedCandidateEvaluations:
+            candidateEvaluationBudget.reservedCandidateEvaluations,
+          currentNetworkCandidateEvaluationLimit:
+            candidateEvaluationBudget.currentNetworkCandidateEvaluationLimit,
+        });
         break;
       }
+      candidateEvaluations = candidateEvaluationBudget.candidateEvaluations;
       attemptedCandidate = true;
-      candidateEvaluations += 1;
-      const candidateSignature = familyCandidateSignatures[candidateOrdinal];
+      if (!recoveryReplay) {
+        ordinaryCandidateAttemptCount += 1;
+      }
+      const candidateSignature = familyCandidateSignatures[candidateIndex];
       if (!candidateSignature?.topologySelection
         || !candidateSignature?.elevationSelection) continue;
+      const candidateOrdinal = candidateSignature.candidateOrdinal;
+      const candidateSearchVariant = candidateSignature.searchVariant;
       const {
         moduleCount,
         elevationMode,
@@ -15016,7 +25264,100 @@ function planRouteNetworkAttempt({
         ? random.fork(`network:${grant.id}`)
         : random.fork(`network:${grant.id}:global-solver:${candidateOrdinal}`);
       const candidatePlanningStartedAt = globalThis.performance?.now?.() ?? Date.now();
-      const planned = planRouteNetwork({
+      if (recoveryReplay) {
+        const existingRecoveryContext =
+          landmarkRecoveryContextsByCandidateOrdinal.get(candidateOrdinal) ?? {};
+        if (!existingRecoveryContext.futureEndpointDomainForwardCheck) {
+          Object.assign(existingRecoveryContext, {
+            futureEndpointDomainForwardCheck: createFutureEndpointDomainForwardCheck({
+              allowEmpty: true,
+            }),
+            planningCaches: {
+              ...sharedRoutePlanningCaches,
+              landmarkEndpointTupleDomainCache: new Map(),
+            },
+            visitedLandmarkBacktrackingStates: new Set(),
+            unguidedFallbackWitnessSignatures: new Set(),
+            recoveryFrameCount: 0,
+            planningElapsedMs: 0,
+          });
+          landmarkRecoveryContextsByCandidateOrdinal.set(
+            candidateOrdinal,
+            existingRecoveryContext,
+          );
+        }
+      }
+      const landmarkRecoveryContext = recoveryReplay
+        ? landmarkRecoveryContextsByCandidateOrdinal.get(candidateOrdinal)
+        : null;
+      const recoveryFrameOrdinal = landmarkRecoveryContext?.recoveryFrameCount ?? null;
+      if (recoveryReplay) {
+        if (recoveryFrameOrdinal === 0) reachedLandmarkRecoveryCount += 1;
+        landmarkRecoveryContext.recoveryFrameCount += 1;
+        emitRouteNetworkPlanningDebugStage('route-network-landmark-recovery-reached', {
+          grantId: grant.id,
+          operationOrdinal,
+          solverDepth,
+          candidateOrdinal,
+          recoveryTargetOrdinal,
+          futureEndpointReservationWitnessSignature:
+            futureEndpointReservationWitness?.signature ?? null,
+          endpointTupleOrdinal: Number(
+            scheduledLandmarkBacktracking?.endpointTupleOrdinal ?? 0,
+          ),
+          recoveryFrameOrdinal,
+          firstReached: recoveryFrameOrdinal === 0,
+          reachedRecoveryCount: reachedLandmarkRecoveryCount,
+          queuedRecoveryCount: queuedLandmarkRecoveryCandidateOrdinals.size,
+          ordinaryCandidateAttemptCount,
+          ordinaryCandidatePlannedCount,
+          candidateEvaluations,
+        });
+      }
+      emitRouteNetworkPlanningDebugStage('route-network-candidate-start', {
+        grantId: grant.id,
+        operationOrdinal,
+        candidateOrdinal,
+        candidatePhase: recoveryReplay ? 'forward-recovery' : 'ordinary',
+        candidateEvaluations,
+        maximumCandidateEvaluations,
+        recoveryTargetOrdinal,
+        searchVariant: candidateSearchVariant,
+        moduleCount,
+        elevationMode,
+        topologyTemplateId: topologySelection.id,
+        junctionKind: junctionSelection.id,
+        acceptedNetworkCount: state.acceptedNetworkCount,
+        acceptedPlanningVolumeCount: state.acceptedPlanningVolumes?.length ?? 0,
+        acceptedPlanningVolumeSignature: state.acceptedPlanningVolumeSignature ?? null,
+      });
+      const debugSkipCandidate = globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ === true
+        && (globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG_SKIPS__ ?? [])
+          .some(({ grantSuffix, firstOrdinal, lastOrdinal }) => (
+            String(grant.id).includes(String(grantSuffix))
+              && candidateOrdinal >= Number(firstOrdinal)
+              && candidateOrdinal <= Number(lastOrdinal)
+          ));
+      if (debugSkipCandidate) {
+        emitRouteNetworkPlanningDebugStage('route-network-candidate-debug-skipped', {
+          grantId: grant.id,
+          operationOrdinal,
+          candidateOrdinal,
+          searchVariant: candidateSearchVariant,
+          moduleCount,
+          elevationMode,
+          topologyTemplateId: topologySelection.id,
+          junctionKind: junctionSelection.id,
+        });
+        continue;
+      }
+      const futureEndpointDomainForwardCheck =
+        landmarkRecoveryContext?.futureEndpointDomainForwardCheck ?? null;
+      const candidatePlanningCaches = landmarkRecoveryContext?.planningCaches ?? {
+        ...sharedRoutePlanningCaches,
+        landmarkEndpointTupleDomainCache: new Map(),
+      };
+      const planRouteNetworkInput = {
         region,
         grant,
         operationOrdinal,
@@ -15026,37 +25367,243 @@ function planRouteNetworkAttempt({
         elevationMode,
         selectionBags: state.selectionBags,
         topologySelection,
-        topologyLegalIds: legalTopologyIds,
+        topologyLegalIds: topologySelection.legalIds,
         junctionSelection,
         elevationSelection,
-        elevationLegalIds: requestedElevationModes,
+        elevationLegalIds: candidateElevationModes,
         random: candidateRandom,
         profile,
         grammars,
         progressionOrderStart: state.progressionOrder,
-        planningAvoidanceVolumes,
+        planningAvoidanceVolumes: [
+          ...planningAvoidanceVolumes,
+          ...(futureEndpointReservationWitness?.planningVolumes ?? []),
+        ],
+        connectorVariantRoomFootprints: [
+          ...connectorVariantRoomFootprints,
+          ...state.nodes.map((node) => routeNetworkConnectorRoomFootprint(node))
+            .filter(Boolean),
+        ],
+        planningCaches: candidatePlanningCaches,
+        preflightEndpointDomains: mandatoryEndpointDomainCache.get(grant.id)
+          ?.staticEndpointDomains ?? null,
+        futureEndpointDomainForwardCheck,
+        landmarkRecoveryWarmStart:
+          landmarkRecoveryContext?.ordinaryLandmarkWarmStart ?? null,
         moduleCapacity: maximumModules,
-        searchVariant: candidateSignature.placementVariant ?? candidateOrdinal,
-      });
+        searchVariant: candidateSearchVariant,
+        solveDecisionOrdinal: state.acceptedNetworkCount,
+        routeNetworkConflictExclusions:
+          normalizedRouteNetworkConflictExclusions,
+      };
+      const completedPlanMemoKey = completedPlanMemoContextSignature
+        && !recoveryReplay
+        && !futureEndpointDomainForwardCheck
+        && !futureEndpointReservationWitness
+        && !scheduledLandmarkBacktracking
+        ? hashCanonicalValue({
+            contextSignature: completedPlanMemoContextSignature,
+            candidateIndex,
+            candidateOrdinal,
+            candidateSearchVariant,
+            moduleCount,
+            elevationMode,
+            topologySelection,
+            junctionSelection,
+            elevationSelection,
+            candidateElevationModes,
+            moduleCapacity: maximumModules,
+            solveDecisionOrdinal: state.acceptedNetworkCount,
+            routeNetworkConflictExclusions:
+              normalizedRouteNetworkConflictExclusions.filter(({ grantId }) => (
+                String(grantId) === String(grant.id)
+              )),
+          }, {
+            namespace: 'ruindivex-dungeon-route-network-completed-plan/v1',
+          })
+        : null;
+      let planned;
+      if (completedPlanMemoKey
+        && routeNetworkPlanResultCache.has(completedPlanMemoKey)) {
+        planned = routeNetworkPlanResultCache.get(completedPlanMemoKey);
+      } else {
+        planned = planRouteNetwork({
+          ...planRouteNetworkInput,
+          landmarkBacktracking: recoveryReplay ? scheduledLandmarkBacktracking : null,
+        });
+        if (completedPlanMemoKey) {
+          routeNetworkPlanResultCache.set(
+            completedPlanMemoKey,
+            planned,
+          );
+        }
+      }
+      planned = rejectRouteNetworkCandidateForConflictExclusions(
+        planned,
+        normalizedRouteNetworkConflictExclusions,
+      );
+      const candidatePlanningFrameElapsedMs =
+        (globalThis.performance?.now?.() ?? Date.now()) - candidatePlanningStartedAt;
+      if (landmarkRecoveryContext) {
+        landmarkRecoveryContext.planningElapsedMs += candidatePlanningFrameElapsedMs;
+      }
+      let continuationQueued = false;
+      const continuation = planned.landmarkBacktrackingContinuation ?? null;
+      if (recoveryReplay && continuation) {
+        const recoveryBranchSignature = futureEndpointReservationWitness
+          ? `witness:${futureEndpointReservationWitness.signature}`
+          : 'unguided';
+        const continuationSignature = `${recoveryBranchSignature}|${
+          canonicalStringify(continuation)
+        }`;
+        if (landmarkRecoveryContext.visitedLandmarkBacktrackingStates.has(
+          continuationSignature,
+        )) {
+          planned = {
+            error: 'route-network-landmark-local-backtracking-cycle',
+            context: {
+              grantId: grant.id,
+              endpointPhase: continuation.useFallbackEndpointCandidates
+                ? 'fallback'
+                : 'primary',
+              rejectedPlacementPairCount:
+                continuation.rejectedPlacementPairSignatures?.length ?? 0,
+            },
+          };
+        } else {
+          landmarkRecoveryContext.visitedLandmarkBacktrackingStates.add(
+            continuationSignature,
+          );
+          appendRouteNetworkRecoveryScheduleEntry(scheduledCandidateAttempts, {
+            candidateIndex,
+            candidateOrdinal,
+            recoveryTargetOrdinal,
+            landmarkBacktracking: continuation,
+            futureEndpointReservationWitness,
+          });
+          continuationQueued = true;
+          emitRouteNetworkPlanningDebugStage(
+            'route-network-landmark-recovery-continuation-queued',
+            {
+              grantId: grant.id,
+              operationOrdinal,
+              solverDepth,
+              candidateOrdinal,
+              recoveryTargetOrdinal,
+              futureEndpointReservationWitnessSignature:
+                futureEndpointReservationWitness?.signature ?? null,
+              endpointTupleOrdinal: Number(
+                scheduledLandmarkBacktracking?.endpointTupleOrdinal ?? 0,
+              ),
+              nextEndpointTupleOrdinal: Number(
+                continuation.endpointTupleOrdinal ?? 0,
+              ),
+              recoveryFrameOrdinal,
+              recoveryFramePlanningElapsedMs: Number(
+                candidatePlanningFrameElapsedMs.toFixed(3),
+              ),
+              recoveryPlanningElapsedMs: Number(
+                landmarkRecoveryContext.planningElapsedMs.toFixed(3),
+              ),
+              scheduledAttemptCount: scheduledCandidateAttempts.length,
+              candidateEvaluations,
+            },
+          );
+        }
+      }
+      if (recoveryReplay && futureEndpointReservationWitness
+        && !landmarkRecoveryContext.unguidedFallbackWitnessSignatures.has(
+          futureEndpointReservationWitness.signature,
+        )) {
+        // The guided branch is only a search ordering hint. Queue one exact
+        // unguided replay before accepting or advancing it, so no witness can
+        // remove a legal landmark solution from the finite recovery domain.
+        landmarkRecoveryContext.unguidedFallbackWitnessSignatures.add(
+          futureEndpointReservationWitness.signature,
+        );
+        appendRouteNetworkRecoveryScheduleEntry(scheduledCandidateAttempts, {
+          candidateIndex,
+          candidateOrdinal,
+          recoveryTargetOrdinal,
+          landmarkBacktracking: null,
+          futureEndpointReservationWitness: null,
+        });
+        emitRouteNetworkPlanningDebugStage(
+          'route-network-landmark-witness-guided-fallback-queued',
+          {
+            grantId: grant.id,
+            operationOrdinal,
+            solverDepth,
+            candidateOrdinal,
+            recoveryTargetOrdinal,
+            futureEndpointReservationWitnessSignature:
+              futureEndpointReservationWitness.signature,
+            futureEndpointReservationWitnessCandidates:
+              futureEndpointReservationWitness.candidateSummaries ?? [],
+            guidedFrameReturnedContinuation: Boolean(continuation),
+            candidateEvaluations,
+          },
+        );
+      }
+      if (continuationQueued) continue;
+      if (futureEndpointReservationWitness && planned.error) continue;
       const candidateAttemptRecord = {
         operationOrdinal,
         candidateOrdinal,
+        candidatePhase: recoveryReplay ? 'forward-recovery' : 'ordinary',
+        candidateEvaluations,
+        maximumCandidateEvaluations,
+        recoveryTargetOrdinal,
         grantId: grant.id,
         moduleCount,
         elevationMode,
         topologyTemplateId: topologySelection.id,
         junctionKind: junctionSelection.id,
+        recoveryFrameCount: landmarkRecoveryContext?.recoveryFrameCount ?? null,
         status: planned.error ? 'failed' : 'planned',
         error: planned.error ?? null,
         reason: planned.context?.reason ?? null,
       };
+      if (shouldQueueFinalLandmarkLocalRecovery({
+        recoveryReplay,
+        routeNetworkKind: grant.kind,
+        futureRequiredNetworkCount: futureRequiredOperationOrdinals.length,
+        error: planned.error,
+        alreadyQueued: queuedLandmarkRecoveryCandidateOrdinals.has(candidateOrdinal),
+      })) {
+        // Ordinary planning deliberately keeps the established fast path and
+        // hashes. If that exact identity fails only on local landmark
+        // geometry, replay it through the already-bounded hierarchical search
+        // after all ordinary identities. The replay consumes the unchanged
+        // global evaluation budget; it adds no candidate identity or limit.
+        queuedLandmarkRecoveryCandidateOrdinals.add(candidateOrdinal);
+        appendRouteNetworkRecoveryScheduleEntry(scheduledCandidateAttempts, {
+          candidateIndex,
+          candidateOrdinal,
+          recoveryTargetOrdinal: null,
+          landmarkBacktracking: null,
+          futureEndpointReservationWitness: null,
+        });
+        candidateAttemptRecord.reason = 'queued-final-landmark-local-recovery';
+        emitRouteNetworkPlanningDebugStage('route-network-landmark-local-recovery-queued', {
+          grantId: grant.id,
+          operationOrdinal,
+          solverDepth,
+          candidateOrdinal,
+          ordinaryFailure: planned.error,
+          queuedRecoveryCount: queuedLandmarkRecoveryCandidateOrdinals.size,
+          ordinaryCandidateAttemptCount,
+          candidateEvaluations,
+        });
+      }
+      if (!recoveryReplay && !planned.error) ordinaryCandidatePlannedCount += 1;
       candidateAttemptTrace.push(candidateAttemptRecord);
-      if (globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ === true) {
-        const candidatePlanningElapsedMs = (globalThis.performance?.now?.() ?? Date.now())
-          - candidatePlanningStartedAt;
+      if (routeNetworkPlanningDebugMatchesGrant(grant.id)) {
+        const candidatePlanningElapsedMs = landmarkRecoveryContext?.planningElapsedMs
+          ?? candidatePlanningFrameElapsedMs;
         console.error(JSON.stringify({
           ...candidateAttemptRecord,
-          searchVariant: candidateSignature.placementVariant ?? candidateOrdinal,
+          searchVariant: candidateSearchVariant,
           planningElapsedMs: Number(candidatePlanningElapsedMs.toFixed(3)),
           planningPhaseTimings: planned.context?.planningPhaseTimings
             ?? planned.planningPhaseTimings
@@ -15074,9 +25621,41 @@ function planRouteNetworkAttempt({
               ...(planned.context ?? {}),
               requestedSubstantiveModuleCount: moduleCount,
             },
-          }, operationOrdinal, candidateOrdinal);
+          }, operationOrdinal, candidateOrdinal, solverDepth);
         }
         continue;
+      }
+      if (grant.kind === 'landmark-perimeter-loop') {
+        const parentElevation = Number(grant.endpointSockets?.[0]?.position?.y ?? 0);
+        const elevationTolerance = 1e-4;
+        const hasExternalElevation = planned.nodes.some((node) => (
+          Math.abs(Number(node.placement?.center?.y ?? parentElevation) - parentElevation)
+            > elevationTolerance
+            || (node.sockets ?? []).some((socket) => (
+              Math.abs(Number(socket.position?.y ?? parentElevation) - parentElevation)
+                > elevationTolerance
+            ))
+        )) || planned.segments.some((segment) => (
+          String(segment.connectorFamily ?? '') !== 'service-gallery'
+            || [segment.from?.position, segment.to?.position, ...(segment.path ?? [])]
+              .filter(Boolean)
+              .some((point) => (
+                Math.abs(Number(point.y ?? parentElevation) - parentElevation)
+                  > elevationTolerance
+              ))
+        ));
+        if (hasExternalElevation) {
+          candidateAttemptRecord.status = 'failed';
+          candidateAttemptRecord.error = 'route-network-landmark-external-elevation';
+          recordRequiredFailure({
+            error: candidateAttemptRecord.error,
+            context: {
+              grantId: grant.id,
+              parentElevation,
+            },
+          }, operationOrdinal, candidateOrdinal, solverDepth);
+          continue;
+        }
       }
       if ((state.usedCompleteSignatures ?? []).includes(
         planned.normalizedSemanticSignature,
@@ -15088,7 +25667,7 @@ function planRouteNetworkAttempt({
               grantId: grant.id,
               normalizedSemanticSignature: planned.normalizedSemanticSignature,
             },
-          }, operationOrdinal, candidateOrdinal);
+          }, operationOrdinal, candidateOrdinal, solverDepth);
         }
         continue;
       }
@@ -15111,12 +25690,83 @@ function planRouteNetworkAttempt({
               remainingModules: state.remainingModules,
               futureRequiredMinimum,
             },
-          }, operationOrdinal, candidateOrdinal);
+          }, operationOrdinal, candidateOrdinal, solverDepth);
         }
         continue;
       }
-      const solved = solveRouteNetworks(operationOrdinal + 1, {
+      const candidateNodePlanningVolumes = planned.nodes.flatMap((node) => [
+        ...(node.occupiedVolumes ?? []),
+        ...(node.clearanceVolumes ?? []),
+      ]);
+      const candidateSegmentPlanningVolumes = planned.segments.flatMap((segment) => [
+        ...(segment.occupiedVolumes ?? []),
+        ...(segment.clearanceVolumes ?? []),
+        ...(segment.landingVolumes ?? []),
+      ]);
+      const candidateNodeGuidanceVolumes = planned.nodes.flatMap((node) => [
+        ...(node.occupiedVolumes ?? []),
+        ...(node.clearanceVolumes ?? []),
+      ].map((volume) => ({
+        ...volume,
+        guidanceNodeId: String(node.id ?? volume.ownerId ?? ''),
+        guidanceNodeKind: String(node.kind ?? ''),
+      })));
+      const candidateSegmentGuidanceVolumes = planned.segments.flatMap((segment) => [
+        ...(segment.occupiedVolumes ?? []),
+        ...(segment.clearanceVolumes ?? []),
+        ...(segment.landingVolumes ?? []),
+      ].map((volume) => ({
+        ...volume,
+        guidanceSegmentId: String(segment.id ?? volume.ownerId ?? ''),
+        guidanceSegmentRouteRole: String(segment.routeRole ?? ''),
+        guidanceSegmentFromKind: String(segment.from?.kind ?? ''),
+        guidanceSegmentToKind: String(segment.to?.kind ?? ''),
+      })));
+      const inactiveSocketCapPlanningVolumes =
+        routeNetworkInactiveSocketCapPlanningVolumes(
+          planned.nodes.filter(({ kind }) => kind === 'supplementRoom'),
+        );
+      const inactiveSocketCapValidation =
+        validateRouteNetworkInactiveSocketCapPlanningVolumes(
+          inactiveSocketCapPlanningVolumes,
+          [
+            ...planningAvoidanceVolumes,
+            ...candidateNodePlanningVolumes,
+            ...candidateSegmentPlanningVolumes,
+          ],
+        );
+      if (!inactiveSocketCapValidation.accepted) {
+        candidateAttemptRecord.status = 'failed';
+        candidateAttemptRecord.error = inactiveSocketCapValidation.code;
+        if (grant.required) {
+          recordRequiredFailure({
+            error: inactiveSocketCapValidation.code,
+            context: {
+              grantId: grant.id,
+              requestedSubstantiveModuleCount: moduleCount,
+              capVolumeCount: inactiveSocketCapValidation.capVolumeCount,
+              obstacleVolumeCount: inactiveSocketCapValidation.obstacleVolumeCount,
+              conflictCount: inactiveSocketCapValidation.conflictCount,
+              conflicts: cloneDungeonAugmentationValue(
+                inactiveSocketCapValidation.conflicts.slice(0, 12),
+              ),
+            },
+          }, operationOrdinal, candidateOrdinal, solverDepth);
+        }
+        continue;
+      }
+      const acceptedPlanningVolumes = [
+        ...(state.acceptedPlanningVolumes ?? []),
+        ...candidateNodePlanningVolumes.map(projectPriorSupplementVolume),
+        ...candidateSegmentPlanningVolumes.map(projectPriorSupplementVolume),
+        ...inactiveSocketCapPlanningVolumes.map(projectPriorSupplementVolume),
+      ];
+      const nextState = {
         operations: [...state.operations, planned.operation],
+        operationProgressionOrdinals: [
+          ...(state.operationProgressionOrdinals ?? []),
+          operationOrdinal,
+        ],
         nodes: [...state.nodes, ...planned.nodes],
         segments: [...state.segments, ...planned.segments],
         progressionOrder: state.progressionOrder + planned.nodes.length,
@@ -15135,29 +25785,274 @@ function planRouteNetworkAttempt({
           ...(state.usedCompleteSignatures ?? []),
           planned.normalizedSemanticSignature,
         ],
-      });
-      if (solved) return solved;
+        acceptedGrantOrdinals: [
+          ...(state.acceptedGrantOrdinals ?? []),
+          operationOrdinal,
+        ],
+        acceptedPlanningVolumes,
+        acceptedPlanningVolumeSignature:
+          endpointReservationStateSignature(acceptedPlanningVolumes),
+        prunedRouteNetworkGrants: [
+          ...(state.prunedRouteNetworkGrants ?? []),
+        ],
+      };
+      const exhaustedFutureDomain = futureRequiredOperationOrdinals
+        .map((ordinal) => ({
+          ordinal,
+          summary: endpointDomainSummaryForState(grants[ordinal].grant, nextState),
+        }))
+        .find(({ summary }) => (
+          summary && summary.minimumEndpointCandidateCount <= 0
+        ));
+      if (exhaustedFutureDomain) {
+        if (allowPartialRouteNetworkRealization && grant.required) {
+          const blockedGrant = grants[exhaustedFutureDomain.ordinal].grant;
+          recordRequiredFailure({
+            error: 'route-network-forward-check-endpoint-domain-exhausted',
+            context: {
+              grantId: blockedGrant.id,
+              reservedByGrantId: grant.id,
+              endpointCandidateCounts:
+                exhaustedFutureDomain.summary.endpointCandidateCounts,
+            },
+          }, exhaustedFutureDomain.ordinal, candidateOrdinal, solverDepth + 1);
+          // Queue the complete keep-current/prune-blocked continuation in
+          // candidate order. Partial landmark planning evaluates these after
+          // every ordinary identity but before expensive recovery replays.
+          deferredBlockedFutureFallbacks.push({
+            candidateOrdinal,
+            prunedOperationOrdinal: exhaustedFutureDomain.ordinal,
+            continuationState: nextState,
+            continuationOrdinals: remainingAfterCurrent,
+            nextSolverDepth: solverDepth + 1,
+            reason: 'route-network-forward-check-endpoint-domain-exhausted',
+          });
+        }
+        if (grant.kind === 'landmark-perimeter-loop'
+          && !recoveryReplay
+          && !queuedLandmarkRecoveryCandidateOrdinals.has(candidateOrdinal)) {
+          // Keep ordinary candidate planning cheap. Only a locally complete
+          // landmark whose accepted geometry consumes a mandatory future
+          // domain is queued for the hierarchical pair -> exact-spine -> far-
+          // endpoint fallback search. The schedule was preloaded with every
+          // ordinary identity, so queued work begins only after that pass. The
+          // replay remains the same global candidate/evaluation.
+          queuedLandmarkRecoveryCandidateOrdinals.add(candidateOrdinal);
+          const ordinaryRecoveryContext =
+            landmarkRecoveryContextsByCandidateOrdinal.get(candidateOrdinal) ?? {};
+          ordinaryRecoveryContext.ordinaryLandmarkWarmStart =
+            cloneDungeonAugmentationValue(planned.landmarkRecoveryWarmStart ?? null);
+          landmarkRecoveryContextsByCandidateOrdinal.set(
+            candidateOrdinal,
+            ordinaryRecoveryContext,
+          );
+          const targetEndpointDomain = mandatoryEndpointDomainCache.get(
+            grants[exhaustedFutureDomain.ordinal].grant.id,
+          );
+          const rawFutureEndpointReservationWitness = targetEndpointDomain
+            ? selectRouteNetworkFutureEndpointReservationWitness(
+              targetEndpointDomain.endpointDomains,
+              {
+                avoidanceVolumes: state.acceptedPlanningVolumes ?? [],
+                guidanceNodeVolumes:
+                  candidateNodeGuidanceVolumes.map(projectPriorSupplementVolume),
+                guidanceSegmentVolumes:
+                  candidateSegmentGuidanceVolumes.map(projectPriorSupplementVolume),
+                guidanceCapVolumes:
+                  inactiveSocketCapPlanningVolumes.map(projectPriorSupplementVolume),
+              },
+            )
+            : null;
+          const futureEndpointReservationWitness = rawFutureEndpointReservationWitness
+            ? {
+              signature: rawFutureEndpointReservationWitness.signature,
+              targetGrantId: grants[exhaustedFutureDomain.ordinal].grant.id,
+              candidateIdentities:
+                rawFutureEndpointReservationWitness.candidateIdentities,
+              candidateSummaries:
+                rawFutureEndpointReservationWitness.candidateSummaries,
+              rankedCandidateSamplesByEndpoint:
+                rawFutureEndpointReservationWitness.rankedCandidateSamplesByEndpoint,
+              planningVolumes: rawFutureEndpointReservationWitness.reservationVolumes
+                .map((volume, volumeOrdinal) => ({
+                  ...projectPriorSupplementVolume(volume),
+                  id: [
+                    grants[exhaustedFutureDomain.ordinal].grant.id,
+                    'future-endpoint-witness',
+                    rawFutureEndpointReservationWitness.signature,
+                    volumeOrdinal,
+                  ].join(':'),
+                  ownerId: grants[exhaustedFutureDomain.ordinal].grant.id,
+                  purpose: 'future-route-network-endpoint-witness-reservation',
+                  futureEndpointWitnessSourceVolumeId: String(volume.id ?? ''),
+                })),
+            }
+            : null;
+          const directionalGuidance = createLandmarkEndpointTupleDirectionalGuidance(
+            planned,
+            futureEndpointReservationWitness,
+            ordinaryRecoveryContext.ordinaryLandmarkWarmStart,
+          );
+          if (directionalGuidance
+            && ordinaryRecoveryContext.ordinaryLandmarkWarmStart) {
+            ordinaryRecoveryContext.ordinaryLandmarkWarmStart.directionalGuidance =
+              directionalGuidance;
+          }
+          appendRouteNetworkRecoveryScheduleEntry(scheduledCandidateAttempts, {
+            candidateIndex,
+            candidateOrdinal,
+            recoveryTargetOrdinal: exhaustedFutureDomain.ordinal,
+            landmarkBacktracking: null,
+            futureEndpointReservationWitness,
+          });
+          candidateAttemptRecord.status = 'forward-recovery';
+          candidateAttemptRecord.error =
+            'route-network-forward-check-endpoint-domain-exhausted';
+          candidateAttemptRecord.reason = 'queued-after-ordinary-candidate-pass';
+          emitRouteNetworkPlanningDebugStage('route-network-landmark-recovery-queued', {
+            grantId: grant.id,
+            operationOrdinal,
+            solverDepth,
+            candidateOrdinal,
+            recoveryTargetOrdinal: exhaustedFutureDomain.ordinal,
+            futureEndpointReservationWitnessSignature:
+              futureEndpointReservationWitness?.signature ?? null,
+            futureEndpointReservationWitnessCandidates:
+              futureEndpointReservationWitness?.candidateSummaries ?? [],
+            futureEndpointReservationWitnessRankedCandidateSamples:
+              futureEndpointReservationWitness?.rankedCandidateSamplesByEndpoint ?? [],
+            landmarkEndpointTupleDirectionalGuidance: directionalGuidance,
+            queuedRecoveryCount: queuedLandmarkRecoveryCandidateOrdinals.size,
+            ordinaryCandidateAttemptCount,
+            ordinaryCandidatePlannedCount,
+            candidateEvaluations,
+          });
+          continue;
+        }
+        recordRequiredFailure({
+          error: 'route-network-forward-check-endpoint-domain-exhausted',
+          context: {
+            grantId: grants[exhaustedFutureDomain.ordinal].grant.id,
+            reservedByGrantId: grant.id,
+            endpointCandidateCounts:
+              exhaustedFutureDomain.summary.endpointCandidateCounts,
+            blockingDiagnostics:
+              exhaustedFutureDomain.summary.blockingDiagnostics ?? [],
+            reservedByNetworkDiagnostics: {
+              nodes: planned.nodes.map((node) => ({
+                id: String(node.id),
+                ordinal: Number(node.ordinal),
+                grammarId: String(node.grammarId ?? ''),
+                center: cloneDungeonAugmentationValue(node.placement?.center),
+                facing: cloneDungeonAugmentationValue(node.placement?.facing),
+              })),
+              segments: planned.segments.map((segment) => ({
+                id: String(segment.id),
+                physicalOrdinal: Number(segment.physicalOrdinal),
+                fromNodeId: String(segment.fromNodeId ?? ''),
+                toNodeId: String(segment.toNodeId ?? ''),
+                connectorFamily: String(segment.connectorFamily ?? ''),
+                path: cloneDungeonAugmentationValue(segment.path),
+              })),
+            },
+          },
+        }, exhaustedFutureDomain.ordinal, candidateOrdinal, solverDepth + 1);
+        continue;
+      }
+      const solved = solveRouteNetworks(
+        remainingAfterCurrent,
+        nextState,
+        solverDepth + 1,
+      );
+      if (considerScoredSolution(solved)) return bestScoredSolution;
+      if (allowPartialRouteNetworkRealization
+        && partialFirstAcceptanceForBestSolution('candidate-continuation', {
+          candidateOrdinal,
+        })) {
+        emitPartialFirstSelection('candidate-continuation', {
+          candidateOrdinal,
+          provablyOptimal: false,
+        });
+        return bestScoredSolution;
+      }
     }
-    if (!grant.required) return solveRouteNetworks(operationOrdinal + 1, state);
+    if (grant.kind === 'landmark-perimeter-loop') {
+      emitRouteNetworkPlanningDebugStage('route-network-landmark-recovery-schedule-complete', {
+        grantId: grant.id,
+        operationOrdinal,
+        solverDepth,
+        ordinaryCandidateAttemptCount,
+        ordinaryCandidatePlannedCount,
+        queuedRecoveryCount: queuedLandmarkRecoveryCandidateOrdinals.size,
+        reachedRecoveryCount: reachedLandmarkRecoveryCount,
+        candidateEvaluations,
+        searchBudgetExhausted,
+      });
+    }
+    // Recovery may discover additional keep-current/prune-future branches.
+    // Score only those not already evaluated at the pre-recovery checkpoint.
+    if (evaluateDeferredBlockedFutureFallbacks('after-candidate-recovery')) {
+      return bestScoredSolution;
+    }
+    if (grant.kind === 'landmark-perimeter-loop'
+      && drainDeferredCoverageSuffixes('after-candidate-recovery')) {
+      return bestScoredSolution;
+    }
+    if (!grant.required) {
+      considerScoredSolution(
+        solveRouteNetworks(remainingAfterCurrent, state, solverDepth + 1),
+      );
+      return bestScoredSolution;
+    }
     if (!attemptedCandidate) {
       recordRequiredFailure({
         error: 'route-network-global-search-budget-exhausted',
         context: { grantId: grant.id },
-      }, operationOrdinal);
+      }, operationOrdinal, null, solverDepth);
     }
-    return null;
+    if (!currentRequiredPruneCheckpointEvaluated) {
+      // An exact physical exclusion names one failed module or route, not an
+      // authorization to erase its entire required network. The bounded local
+      // route/node domains above own replacement. If they truly exhaust, fail
+      // closed with the exact evidence instead of cascading a whole-grant and
+      // dependent-grant omission.
+      const exactConflictPruneRefusal = conflictExclusionPruneRefusalByGrantId.get(
+        String(grant.id),
+      );
+      if (exactConflictPruneRefusal) {
+        const { error, ...context } = exactConflictPruneRefusal;
+        recordRequiredFailure({ error, context }, operationOrdinal, null, solverDepth);
+        emitRouteNetworkPlanningDebugStage('route-network-required-grant-prune-refused', {
+          solverDepth,
+          terminal: true,
+          ...exactConflictPruneRefusal,
+        });
+      } else {
+        considerScoredSolution(continueWithoutCurrentRequiredGrant());
+      }
+    }
+    return bestScoredSolution;
   };
-  const solvedRouteNetworks = solveRouteNetworks(0, {
-    operations: [],
-    nodes: [],
-    segments: [],
-    progressionOrder: 0,
-    remainingModules: settings.maximumTotalModules,
-    acceptedNetworkCount: 0,
-    elevationModes: [],
-    selectionBags: initialSelectionBags,
-    usedCompleteSignatures: [],
-  });
+  const solvedRouteNetworks = solveRouteNetworks(
+    grants.map((_, index) => index).filter((operationOrdinal) => (
+      !prePrunedRouteNetworkGrantIds.has(String(grants[operationOrdinal].grant.id))
+    )), {
+      operations: [],
+      operationProgressionOrdinals: [],
+      nodes: [],
+      segments: [],
+      progressionOrder: 0,
+      remainingModules: settings.maximumTotalModules,
+      acceptedNetworkCount: 0,
+      elevationModes: [],
+      selectionBags: initialSelectionBags,
+      usedCompleteSignatures: [],
+      acceptedGrantOrdinals: [],
+      acceptedPlanningVolumes: [],
+      acceptedPlanningVolumeSignature: endpointReservationStateSignature([]),
+      prunedRouteNetworkGrants: canonicalPrePrunedRouteNetworkGrants,
+    },
+  );
   if (!solvedRouteNetworks) {
     const failure = deepestRequiredFailure ?? {
       error: 'route-network-global-search-exhausted',
@@ -15179,12 +26074,50 @@ function planRouteNetworkAttempt({
       },
     };
   }
-  const {
-    operations,
-    nodes,
-    segments,
-  } = solvedRouteNetworks;
+  const operationOrdinalById = new Map(
+    solvedRouteNetworks.operations.map((operation, solveOrdinal) => [
+      operation.id,
+      solvedRouteNetworks.operationProgressionOrdinals[solveOrdinal],
+    ]),
+  );
+  // MRV is a search order only. Public overlay serialization, progression
+  // order, stable IDs, and release hashes remain in the canonical
+  // pyramid/coverage/optional order established before solving.
+  const operations = [...solvedRouteNetworks.operations].sort((first, second) => (
+    Number(operationOrdinalById.get(first.id)) - Number(operationOrdinalById.get(second.id))
+      || String(first.id).localeCompare(String(second.id))
+  ));
+  const nodes = [...solvedRouteNetworks.nodes]
+    .sort((first, second) => (
+      Number(operationOrdinalById.get(first.operationId))
+        - Number(operationOrdinalById.get(second.operationId))
+        || Number(first.ordinal) - Number(second.ordinal)
+        || String(first.id).localeCompare(String(second.id))
+    ))
+    .map((node, progressionOrder) => ({ ...node, progressionOrder }));
+  const segments = [...solvedRouteNetworks.segments].sort((first, second) => (
+    Number(operationOrdinalById.get(first.operationId))
+      - Number(operationOrdinalById.get(second.operationId))
+      || Number(first.physicalOrdinal) - Number(second.physicalOrdinal)
+      || String(first.id).localeCompare(String(second.id))
+  ));
   const serializableNodes = nodes.map(finalizeNode);
+  const prunedRouteNetworkGrants = [...(
+    solvedRouteNetworks.prunedRouteNetworkGrants ?? []
+  )].sort((first, second) => (
+    Number(first.operationOrdinal) - Number(second.operationOrdinal)
+      || String(first.grantId).localeCompare(String(second.grantId))
+  ));
+  const routeNetworkPruningOverrides = canonicalPrePrunedRouteNetworkGrants
+    .map(({ grantId, reason }) => ({ grantId, reason }))
+    .sort((first, second) => (
+      first.grantId.localeCompare(second.grantId)
+        || first.reason.localeCompare(second.reason)
+    ));
+  const canonicalRouteNetworkConflictExclusions =
+    normalizedRouteNetworkConflictExclusions.filter(({ grantId }) => (
+      grants.some(({ grant }) => String(grant.id) === String(grantId))
+    ));
   const plan = {
     schema: DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
     revision: DUNGEON_AUGMENTATION_V2_SCHEMA_REVISION,
@@ -15195,6 +26128,16 @@ function planRouteNetworkAttempt({
     augmentationSeed,
     layoutSeed: String(layoutSeed ?? ''),
     difficulty: Number(difficulty ?? 1),
+    ...(prunedRouteNetworkGrants.length > 0 ? {
+      completionMode: 'best-effort-partial',
+      prunedRouteNetworkGrants,
+    } : {}),
+    ...(routeNetworkPruningOverrides.length > 0 ? {
+      routeNetworkPruningOverrides,
+    } : {}),
+    ...(canonicalRouteNetworkConflictExclusions.length > 0 ? {
+      routeNetworkConflictExclusions: canonicalRouteNetworkConflictExclusions,
+    } : {}),
     operations,
     nodes: serializableNodes,
     segments,
@@ -15238,6 +26181,10 @@ function planAttempt({
   eligibleRegions,
   grammars,
   attempt,
+  connectorVariantRoomFootprints = [],
+  prePrunedRouteNetworkGrants = [],
+  routeNetworkConflictExclusions = [],
+  routeNetworkPlanResultCache = null,
 }) {
   if (profile.routeNetworkPlanning?.enabled === true) {
     return planRouteNetworkAttempt({
@@ -15250,6 +26197,10 @@ function planAttempt({
       eligibleRegions,
       grammars,
       attempt,
+      connectorVariantRoomFootprints,
+      prePrunedRouteNetworkGrants,
+      routeNetworkConflictExclusions,
+      routeNetworkPlanResultCache,
     });
   }
   const attemptRandom = new DungeonAugmentationRandom(augmentationSeed).fork(`attempt:${attempt}`);
@@ -15383,6 +26334,9 @@ export function augmentDungeonDraft({
   profiles = DUNGEON_AUGMENTATION_PROFILES,
   grammars = GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
   themeCapabilitiesByRegionId = {},
+  prePrunedRouteNetworkGrants: suppliedPrePrunedRouteNetworkGrants = [],
+  routeNetworkConflictExclusions: suppliedRouteNetworkConflictExclusions = [],
+  routeNetworkPlanResultCache = null,
 } = {}) {
   const safeBaseDraft = baseDraft ?? null;
   const immediateBasePlanHash = String(
@@ -15465,8 +26419,115 @@ export function augmentDungeonDraft({
         { namespace: 'ruindivex-dungeon-augmentation-seed-set/v1' },
       )
     : String(suppliedAugmentationSeed);
+  const prePrunedRouteNetworkGrants = normalizePrePrunedRouteNetworkGrants(
+    suppliedPrePrunedRouteNetworkGrants,
+  );
+  let routeNetworkConflictExclusions = normalizeRouteNetworkConflictExclusions(
+    suppliedRouteNetworkConflictExclusions,
+  );
+  const connectorVariantRoomFootprints = (Array.isArray(safeBaseDraft.rooms)
+    ? safeBaseDraft.rooms
+    : [])
+    .map((room) => routeNetworkConnectorRoomFootprint(
+      room,
+      Number(safeBaseDraft.tileSize ?? ROUTE_NETWORK_CONNECTOR_TILE_METERS),
+    ))
+    .filter(Boolean);
   const decisions = [];
   let lastFailure = null;
+  let exactConflictRecoveryDiagnostics = null;
+  const validateCandidatePlan = (candidatePlan) => validateDungeonAugmentationPlan(
+    candidatePlan,
+    {
+      baseDraft: safeBaseDraft,
+      extensionRegions: eligibleRegions,
+      profiles,
+      grammars,
+      themeCapabilitiesByRegionId,
+    },
+  );
+  const runExactConflictRecovery = ({
+    candidatePlan,
+    validation,
+    attempt,
+    recoveryPrePrunedRouteNetworkGrants = prePrunedRouteNetworkGrants,
+  }) => recoverRouteNetworkFinalValidationExactConflicts({
+    candidatePlan,
+    validation,
+    conflictExclusions: routeNetworkConflictExclusions,
+    // One same-attempt replacement is sufficient to keep whole-grant omission
+    // behind the exact bridge. If that replacement exposes another exact base
+    // conflict, return both signatures to the generator's bounded same-seed
+    // fixed point instead of nesting another full planner search here.
+    maximumPasses: 1,
+    replan: (nextConflictExclusions) => planAttempt({
+      basePlanHash,
+      baseDraftFingerprint,
+      augmentationSeed,
+      layoutSeed,
+      difficulty,
+      profile,
+      eligibleRegions,
+      grammars,
+      attempt,
+      connectorVariantRoomFootprints,
+      prePrunedRouteNetworkGrants: recoveryPrePrunedRouteNetworkGrants,
+      routeNetworkConflictExclusions: nextConflictExclusions,
+      routeNetworkPlanResultCache,
+    }),
+    validate: validateCandidatePlan,
+  });
+  const recordExactConflictRecovery = (recovery) => {
+    routeNetworkConflictExclusions = recovery.conflictExclusions;
+    exactConflictRecoveryDiagnostics = {
+      augmentationPlanHash:
+        recovery.rejectedAugmentationPlanHash
+          ?? exactConflictRecoveryDiagnostics?.augmentationPlanHash
+          ?? null,
+      routeNetworkConflictExclusions,
+      failedRouteNetworkGrants:
+        mergeRouteNetworkFinalValidationFailedGrants([
+          ...(exactConflictRecoveryDiagnostics?.failedRouteNetworkGrants ?? []),
+          ...recovery.failedRouteNetworkGrants,
+        ]),
+      routeNetworkGrantIds: [...new Set([
+        ...(exactConflictRecoveryDiagnostics?.routeNetworkGrantIds ?? []),
+        ...recovery.routeNetworkGrantIds,
+      ])].sort(),
+      routeNetworkEntityCount: Math.max(
+        Number(exactConflictRecoveryDiagnostics?.routeNetworkEntityCount ?? 0),
+        Number(recovery.routeNetworkEntityCount ?? 0),
+      ),
+      recovery: {
+        recoveryKind: 'final-validation-exact-conflict-entity-exclusion',
+        recoveryPasses: recovery.recoveryPasses,
+        exhausted: recovery.exhausted,
+        exhaustionReason: recovery.exhaustionReason,
+        planningFailure: recovery.planningFailure
+          ? {
+            error: recovery.planningFailure.error ?? null,
+            context: recovery.planningFailure.context ?? {},
+          }
+          : null,
+      },
+    };
+    const currentDecisionContext = decisions.at(-1)?.context ?? {};
+    const priorRecoveries = currentDecisionContext.exactRouteNetworkConflictRecoveries
+      ?? [];
+    decisions.at(-1).context = {
+      ...currentDecisionContext,
+      exactRouteNetworkConflictRecoveries: [
+        ...priorRecoveries,
+        {
+          recoveryPasses: recovery.recoveryPasses,
+          exhausted: recovery.exhausted,
+          exhaustionReason: recovery.exhaustionReason,
+          failedRouteNetworkGrants: recovery.failedRouteNetworkGrants,
+          routeNetworkConflictExclusions: recovery.conflictExclusions,
+        },
+      ],
+    };
+  };
   for (let attempt = 0; attempt < profile.maximumPlanningAttempts; attempt += 1) {
     const planned = planAttempt({
       basePlanHash,
@@ -15478,6 +26539,10 @@ export function augmentDungeonDraft({
       eligibleRegions,
       grammars,
       attempt,
+      connectorVariantRoomFootprints,
+      prePrunedRouteNetworkGrants,
+      routeNetworkConflictExclusions,
+      routeNetworkPlanResultCache,
     });
     decisions.push({
       code: 'planning-attempt',
@@ -15491,24 +26556,12 @@ export function augmentDungeonDraft({
       continue;
     }
     let candidatePlan = planned.plan;
-    let validation = validateDungeonAugmentationPlan(candidatePlan, {
-      baseDraft: safeBaseDraft,
-      extensionRegions: eligibleRegions,
-      profiles,
-      grammars,
-      themeCapabilitiesByRegionId,
-    });
+    let validation = validateCandidatePlan(candidatePlan);
     if (!validation.accepted) {
       const originalErrorCodes = validation.errors.map(({ code }) => code);
       const fallbackPlan = omitOptionalEdgePadding(candidatePlan, profile);
       if (fallbackPlan) {
-        const fallbackValidation = validateDungeonAugmentationPlan(fallbackPlan, {
-          baseDraft: safeBaseDraft,
-          extensionRegions: eligibleRegions,
-          profiles,
-          grammars,
-          themeCapabilitiesByRegionId,
-        });
+        const fallbackValidation = validateCandidatePlan(fallbackPlan);
         if (fallbackValidation.accepted) {
           candidatePlan = fallbackPlan;
           validation = fallbackValidation;
@@ -15519,11 +26572,100 @@ export function augmentDungeonDraft({
         }
       }
     }
+    let exactConflictRecovery = null;
+    if (!validation.accepted && profile.routeNetworkPlanning?.enabled === true) {
+      exactConflictRecovery = runExactConflictRecovery({
+        candidatePlan,
+        validation,
+        attempt,
+      });
+      if (exactConflictRecovery.exactConflictDetected) {
+        candidatePlan = exactConflictRecovery.plan;
+        validation = exactConflictRecovery.validation;
+        recordExactConflictRecovery(exactConflictRecovery);
+      }
+    }
+    if (!validation.accepted
+      && exactConflictRecovery?.exhausted !== true
+      && profile.routeNetworkPlanning?.allowPartialRouteNetworkRealization === true) {
+      const prunedRouteNetworkOperations = [];
+      let recoveryPrePrunedRouteNetworkGrants = [
+        ...prePrunedRouteNetworkGrants,
+      ];
+      const maximumPruningPasses = eligibleRegions.reduce((sum, region) => (
+        sum + (region.routeNetworkGrants ?? []).length
+      ), 0);
+      for (let pruningPass = 0;
+        pruningPass < maximumPruningPasses && !validation.accepted;
+        pruningPass += 1) {
+        const recovery = omitConflictingRouteNetworkOperation(
+          candidatePlan,
+          validation,
+          profile,
+          eligibleRegions,
+        );
+        if (!recovery) break;
+        if (recoveryPrePrunedRouteNetworkGrants.some(({ grantId }) => (
+          String(grantId) === String(recovery.omission.grantId)
+        ))) break;
+        recoveryPrePrunedRouteNetworkGrants = normalizePrePrunedRouteNetworkGrants([
+          ...recoveryPrePrunedRouteNetworkGrants,
+          {
+            grantId: recovery.omission.grantId,
+            reason: recovery.omission.reason,
+            recoveryPass: pruningPass,
+          },
+        ]);
+        prunedRouteNetworkOperations.push(recovery.omission);
+        const replanned = planAttempt({
+          basePlanHash,
+          baseDraftFingerprint,
+          augmentationSeed,
+          layoutSeed,
+          difficulty,
+          profile,
+          eligibleRegions,
+          grammars,
+          attempt,
+          connectorVariantRoomFootprints,
+          prePrunedRouteNetworkGrants: recoveryPrePrunedRouteNetworkGrants,
+          routeNetworkConflictExclusions,
+          routeNetworkPlanResultCache,
+        });
+        if (!replanned.plan) break;
+        candidatePlan = replanned.plan;
+        validation = validateCandidatePlan(candidatePlan);
+        if (!validation.accepted && profile.routeNetworkPlanning?.enabled === true) {
+          const postOmissionExactConflictRecovery = runExactConflictRecovery({
+            candidatePlan,
+            validation,
+            attempt,
+            recoveryPrePrunedRouteNetworkGrants,
+          });
+          if (postOmissionExactConflictRecovery.exactConflictDetected) {
+            exactConflictRecovery = postOmissionExactConflictRecovery;
+            candidatePlan = postOmissionExactConflictRecovery.plan;
+            validation = postOmissionExactConflictRecovery.validation;
+            recordExactConflictRecovery(postOmissionExactConflictRecovery);
+            if (postOmissionExactConflictRecovery.exhausted) break;
+          }
+        }
+      }
+      if (validation.accepted && prunedRouteNetworkOperations.length > 0) {
+        decisions.at(-1).context = {
+          ...(decisions.at(-1).context ?? {}),
+          prunedRouteNetworkOperations,
+        };
+      }
+    }
     if (!validation.accepted) {
       lastFailure = { error: 'validation-failed', validation };
       decisions.at(-1).accepted = false;
       decisions.at(-1).rejection = 'validation-failed';
-      decisions.at(-1).context = { errorCodes: validation.errors.map(({ code }) => code) };
+      decisions.at(-1).context = {
+        ...(decisions.at(-1).context ?? {}),
+        errorCodes: validation.errors.map(({ code }) => code),
+      };
       continue;
     }
     if (canonicalStringify(safeBaseDraft) !== baseSnapshot) {
@@ -15557,6 +26699,10 @@ export function augmentDungeonDraft({
         accepted: true,
         requested: true,
         reason: 'applied',
+        partial: overlayPlan.completionMode === 'best-effort-partial',
+        prunedRouteNetworkGrants: cloneDungeonAugmentationValue(
+          overlayPlan.prunedRouteNetworkGrants ?? [],
+        ),
         profileId,
         basePlanHash,
         baseDraftFingerprint,
@@ -15572,6 +26718,8 @@ export function augmentDungeonDraft({
           segments: overlayPlan.segments.length,
           transitionBays: overlayPlan.transitionBays.length,
           progressionAssignments: overlayPlan.progressionAssignments.length,
+          prunedRouteNetworkGrants:
+            overlayPlan.prunedRouteNetworkGrants?.length ?? 0,
         },
       },
     });
@@ -15589,5 +26737,16 @@ export function augmentDungeonDraft({
       ? validationErrors
       : [issue(errorCode, `Dungeon augmentation failed after ${profile.maximumPlanningAttempts} attempts.`, lastFailure?.context ?? {})],
     decisions,
+    augmentationPlanHash: exactConflictRecoveryDiagnostics?.augmentationPlanHash ?? null,
+    routeNetworkConflictExclusions:
+      exactConflictRecoveryDiagnostics?.routeNetworkConflictExclusions ?? [],
+    failedRouteNetworkGrants:
+      exactConflictRecoveryDiagnostics?.failedRouteNetworkGrants ?? [],
+    routeNetworkGrantIds:
+      exactConflictRecoveryDiagnostics?.routeNetworkGrantIds ?? [],
+    routeNetworkEntityCount:
+      exactConflictRecoveryDiagnostics?.routeNetworkEntityCount ?? 0,
+    routeNetworkConflictRecovery:
+      exactConflictRecoveryDiagnostics?.recovery ?? null,
   });
 }

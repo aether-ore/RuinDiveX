@@ -204,6 +204,9 @@ test('V4 encounters consume only their accepted unique support-floor identities'
       roomId: room.id,
       augmentationFloorCellId: supportFloorCellId,
       walkabilityIntent: 'required-clear',
+      // Transfer and elevated authored surfaces carry this blanket legacy
+      // sampler exclusion. Their exact V4 role placement remains authoritative.
+      noEnemySpawn: true,
     };
   });
   room.isDungeonSupplement = true;
@@ -242,6 +245,7 @@ test('V4 encounters consume only their accepted unique support-floor identities'
   assert.equal(encounter.spatialRoles.every(({ spawnPlacementSource }) => (
     spawnPlacementSource === 'accepted-authoritative-anchor-placement'
   )), true);
+  assert.equal(encounter.spatialRoles.every(({ spawnFloorKey }) => Boolean(spawnFloorKey)), true);
   assert.equal(encounter.runtimeConsumerDescriptor.id, `${room.id}:encounter`);
   assert.deepEqual(encounter.liveStateConsumers.map(({ id }) => id), [
     'live-encounter-consumer',
@@ -554,6 +558,59 @@ test('industrial supplement light fixtures honor authored photometric specificat
     assert.equal(defaultLight.distance, 10);
     assert.equal(defaultLight.decay, 2);
     assert.equal(defaultLight.castShadow, false);
+  } finally {
+    session.resources.disposeOwned();
+    for (const material of Object.values(materials)) material.dispose();
+  }
+});
+
+test('industrial presentation assets preserve exact authored transforms and body dimensions', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  const materials = industrialTestMaterials();
+  const session = generator._createIndustrialDungeonThemeSession(
+    materials,
+    industrialThemeBinding(),
+  );
+  const cases = [{
+    role: 'gameplayCover',
+    meshName: 'industrialAuthoredCoverBody',
+    dimensions: [1.37, 0.83, 0.61],
+  }, {
+    role: 'machineryLandmark',
+    meshName: 'industrialAuthoredMachineryBody',
+    dimensions: [2.43, 1.71, 1.19],
+  }, {
+    role: 'storyMarking',
+    meshName: 'industrialOptionalStoryMarking',
+    dimensions: [0.83, 0.037, 0.29],
+  }];
+
+  try {
+    for (const [index, entry] of cases.entries()) {
+      const [width, height, depth] = entry.dimensions;
+      const root = session.assets.create(entry.role, {
+        position: { x: 3 + index, y: 4 + index, z: 5 + index },
+        rotationY: 0.37 + index * 0.1,
+        width,
+        height,
+        depth,
+      });
+      const body = root.getObjectByName(entry.meshName);
+      assert.ok(body?.isMesh, entry.role);
+      body.geometry.computeBoundingBox();
+      const size = body.geometry.boundingBox.getSize(new THREE.Vector3());
+      assert.deepEqual(
+        size.toArray().map((value) => Number(value.toFixed(6))),
+        entry.dimensions.map((value) => Number(value.toFixed(6))),
+        `${entry.role} body footprint`,
+      );
+      assert.deepEqual(root.position.toArray(), [3 + index, 4 + index, 5 + index]);
+      assert.equal(root.rotation.y, 0.37 + index * 0.1);
+    }
+    assert.throws(
+      () => session.assets.create('gameplayCover', { width: 1, height: 0, depth: 1 }),
+      /exact positive authored dimensions/,
+    );
   } finally {
     session.resources.disposeOwned();
     for (const material of Object.values(materials)) material.dispose();

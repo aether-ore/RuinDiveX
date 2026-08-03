@@ -7,12 +7,16 @@ import { DUNGEON_AUGMENTATION_PROFILES } from '../src/dungeon-augmentation/catal
 import {
   RELEASE_PERFORMANCE_BUDGET_MS,
   RELEASE_PROFILE_ID,
+  assertCleanReleaseProvenance,
   assertMatchingReleaseProvenance,
   createReleaseProvenance,
+  createReleaseWorkerFailureDiagnostics,
   createShardEvidence,
   readJson,
+  readReleasePhaseHeartbeat,
   runReleaseSeedWorkerProcess,
   selectCorpusEntries,
+  validateCompletedReleaseWorkerPhaseEvidence,
   validateCorpusManifest,
   validateSeedWorkerEvidence,
   validateShardEvidence,
@@ -38,12 +42,13 @@ if (!Number.isInteger(shardIndex) || !Number.isInteger(shardCount)) {
 
 const manifestPath = path.resolve(projectRoot, manifestArgument);
 const outputPath = path.resolve(projectRoot, outputArgument);
-const manifest = validateCorpusManifest(await readJson(manifestPath));
-const selection = selectCorpusEntries(manifest, { tier, shardIndex, shardCount });
 const provenance = await createReleaseProvenance({
   projectRoot,
   profile: DUNGEON_AUGMENTATION_PROFILES[RELEASE_PROFILE_ID],
 });
+assertCleanReleaseProvenance(provenance, 'release shard runner source');
+const manifest = validateCorpusManifest(await readJson(manifestPath));
+const selection = selectCorpusEntries(manifest, { tier, shardIndex, shardCount });
 assertMatchingReleaseProvenance(provenance, manifest.provenance, 'release shard runner');
 
 try {
@@ -86,6 +91,15 @@ try {
       workerDirectory,
       `ordinal-${String(entry.ordinal).padStart(4, '0')}.json`,
     );
+    const workerHeartbeatPath = path.join(
+      workerDirectory,
+      `ordinal-${String(entry.ordinal).padStart(4, '0')}.phase.jsonl`,
+    );
+    const workerSelection = selectCorpusEntries(manifest, {
+      tier,
+      ordinalStart: entry.ordinal,
+      ordinalCount: 1,
+    });
     const child = runReleaseSeedWorkerProcess({
       executablePath: process.execPath,
       args: [
@@ -95,6 +109,7 @@ try {
         `--ordinal-start=${entry.ordinal}`,
         '--ordinal-count=1',
         `--seed-worker-output=${workerOutputPath}`,
+        `--phase-heartbeat=${workerHeartbeatPath}`,
         '--summary',
       ],
       cwd: projectRoot,
@@ -102,38 +117,65 @@ try {
     });
 
     let worker = null;
+    let workerValidationError = null;
     try {
       worker = validateSeedWorkerEvidence(await readJson(workerOutputPath), manifest, {
         tier,
         ordinal: entry.ordinal,
       });
     } catch (error) {
-      if (!child.error && child.status === 0) {
-        shardFailure = {
-          errorName: error?.name ?? 'SeedWorkerEvidenceError',
-          message: error?.message ?? String(error),
-          currentOrdinal: entry.ordinal,
-          currentSeed: entry.seed,
-          timedOut: false,
-          timeoutMs,
-        };
+      workerValidationError = error;
+    }
+    let lastPhaseEvidence = null;
+    let heartbeatReadError = null;
+    try {
+      lastPhaseEvidence = await readReleasePhaseHeartbeat(workerHeartbeatPath, {
+        manifest,
+        selection: workerSelection,
+      });
+      if (lastPhaseEvidence && worker?.result === 'passed') {
+        validateCompletedReleaseWorkerPhaseEvidence(
+          lastPhaseEvidence,
+          worker.records?.[0]?.generatorPhaseTimings,
+          {
+            manifest,
+            selection: workerSelection,
+            label: `release seed worker ordinal ${entry.ordinal} phase evidence`,
+          },
+        );
       }
+    } catch (error) {
+      heartbeatReadError = error;
     }
 
-    if (child.error || child.status !== 0 || worker?.result !== 'passed') {
-      shardFailure ??= {
-        errorName: child.error?.name
-          ?? worker?.failure?.errorName
+    if (child.error
+      || child.status !== 0
+      || worker?.result !== 'passed'
+      || workerValidationError
+      || heartbeatReadError
+      || !lastPhaseEvidence) {
+      const diagnosticError = child.error
+        ?? heartbeatReadError
+        ?? workerValidationError
+        ?? worker?.failure
+        ?? (!lastPhaseEvidence ? {
+          name: 'SeedWorkerPhaseEvidenceError',
+          message: 'Release seed worker did not retain phase heartbeat evidence.',
+        } : null)
+        ?? null;
+      shardFailure = createReleaseWorkerFailureDiagnostics({
+        errorName: diagnosticError?.name
+          ?? diagnosticError?.errorName
           ?? 'VerifierProcessFailure',
-        message: child.error?.message
-          ?? worker?.failure?.message
+        message: diagnosticError?.message
           ?? `Realized verifier exited with status ${child.status ?? 'unknown'}.`,
-        currentOrdinal: entry.ordinal,
-        currentSeed: entry.seed,
+        entry,
         timedOut: child.error?.code === 'ETIMEDOUT',
         timeoutMs,
         workerEvidenceHash: worker?.evidenceHash ?? null,
-      };
+        workerFailure: worker?.failure ?? null,
+        lastPhaseEvidence,
+      });
       if (child.error) console.error(child.error.stack ?? child.error);
       break;
     }

@@ -5,6 +5,7 @@ import {
   Game,
   captureDungeonAugmentationMutableState,
   createLegacyDungeonBasePlanHash,
+  isDungeonAugmentationFreshRequest,
   isDungeonAugmentationPlayableAlphaRequest,
   restoreDungeonAugmentationMutableState,
   resolveCommittedDungeonGenerationSpec,
@@ -46,6 +47,37 @@ test('invalid V4 alpha acceptance requires the exact profile id, never an alias'
   assert.equal(
     isDungeonAugmentationPlayableAlphaRequest(
       `?dungeonAugmentation=${INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID}`,
+    ),
+    false,
+  );
+});
+
+test('fresh V4 testing requires an explicit strict-profile dungeon request', () => {
+  const exact = '?startupWorld=dungeon'
+    + `&dungeonAugmentation=${INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID}`
+    + '&dungeonAugmentationFresh=1';
+  assert.equal(isDungeonAugmentationFreshRequest(exact), true);
+  for (const alias of ['1', '4', 'preview', 'expanded']) {
+    assert.equal(
+      isDungeonAugmentationFreshRequest(
+        `?startupWorld=dungeon&dungeonAugmentation=${alias}`
+          + '&dungeonAugmentationFresh=1',
+      ),
+      false,
+      alias,
+    );
+  }
+  assert.equal(
+    isDungeonAugmentationFreshRequest(
+      `?dungeonAugmentation=${INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID}`
+        + '&dungeonAugmentationFresh=1',
+    ),
+    false,
+  );
+  assert.equal(
+    isDungeonAugmentationFreshRequest(
+      `?startupWorld=dungeon&dungeonAugmentation=${INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID}`
+        + '&dungeonAugmentationAlpha=1',
     ),
     false,
   );
@@ -98,6 +130,63 @@ test('disposable alpha mode cannot adopt or persist a boss expedition', async ()
   assert.deepEqual(
     await Game.prototype._recordBossVictory.call(alpha, {}),
     { ok: true, unchanged: true, reason: 'augmentation-alpha-disposable' },
+  );
+  assert.equal(storageWrites, 0);
+});
+
+test('fresh strict V4 testing ignores but never mutates a committed expedition', async () => {
+  let storageReads = 0;
+  let storageWrites = 0;
+  const fresh = {
+    dungeonAugmentationPlayableAlphaMode: false,
+    dungeonAugmentationFreshMode: true,
+    activeBossExpeditionSpec: Object.freeze({ id: 'must-be-discarded' }),
+    worldKind: 'dungeon',
+    busterLabStorage: {
+      getActiveBossExpedition() {
+        storageReads += 1;
+        return { expeditionId: 'committed-expedition' };
+      },
+      recordActiveBossExpeditionDungeonAugmentationState() {
+        storageWrites += 1;
+        return { ok: true };
+      },
+      recordBossCheckpoint() {
+        storageWrites += 1;
+        return { ok: true };
+      },
+      recordBossVictory() {
+        storageWrites += 1;
+        return { ok: true };
+      },
+    },
+    getSelectedBossProfileId: () => 'revolvingFusillade',
+  };
+  const encounter = { id: 'fresh-v4-boss', isBoss: true };
+  const configured = Game.prototype._configureBossHuntEncounter.call(fresh, {
+    encounters: [encounter],
+  });
+  assert.equal(configured, encounter);
+  assert.equal(fresh.activeBossExpeditionSpec, null);
+  assert.equal(encounter.expeditionSpec, null);
+  assert.equal(storageReads, 0);
+
+  const expected = {
+    ok: true,
+    unchanged: true,
+    reason: 'augmentation-fresh-run-disposable',
+  };
+  assert.deepEqual(
+    await Game.prototype._persistCurrentDungeonAugmentationState.call(fresh, { force: true }),
+    expected,
+  );
+  assert.deepEqual(
+    await Game.prototype.commitAscensionCheckpoint.call(fresh, {}, {}),
+    expected,
+  );
+  assert.deepEqual(
+    await Game.prototype._recordBossVictory.call(fresh, {}),
+    expected,
   );
   assert.equal(storageWrites, 0);
 });
@@ -300,6 +389,102 @@ test('V4 save identity collects stable state IDs from operations, nodes, segment
     'state:reward',
     'state:segment-shortcut',
   ]);
+});
+
+test('V4 save identity canonically persists route-network recovery overrides', () => {
+  const basePlanHash = 'base:v4-runtime-pruning';
+  const augmentationPlanHash = 'augmentation:v4-runtime-pruning';
+  const overlay = {
+    schema: DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
+    profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+    augmentationSeed: 'layout:v4-runtime-pruning',
+    basePlanHash,
+    augmentationPlanHash,
+    effectivePlanHash: computeEffectiveDungeonPlanHash(basePlanHash, augmentationPlanHash),
+    themeBindings: [],
+    operations: [],
+    routeNetworkPruningOverrides: [
+      { grantId: 'grant:zeta', reason: 'route-network-runtime-connector-preflight-failed' },
+      { grantId: 'grant:alpha', reason: 'route-network-runtime-connector-preflight-failed' },
+      { grantId: 'grant:zeta', reason: 'route-network-runtime-connector-preflight-failed' },
+      { grantId: '', reason: 'ignored' },
+    ],
+    routeNetworkConflictExclusions: [
+      {
+        grantId: 'grant:zeta',
+        entityKind: 'segment',
+        entityId: 'segment:3',
+        signature: 'v1-segment-path-signature',
+        reason: 'route-network-runtime-connector-preflight-failed',
+      },
+      {
+        grantId: 'grant:alpha',
+        entityKind: 'node',
+        entityId: 'node:2',
+        signature: 'v1-node-placement-signature',
+        reason: 'route-network-runtime-physical-validation-failed',
+      },
+      {
+        grantId: 'grant:alpha',
+        entityKind: 'node',
+        entityId: 'node:2',
+        signature: 'v1-node-placement-signature',
+        reason: 'z-duplicate-reason',
+      },
+      { grantId: 'grant:unsafe-id-only', entityKind: 'node', entityId: 'node:4' },
+    ],
+  };
+
+  const identity = createDungeonAugmentationSaveIdentity(overlay);
+  assert.deepEqual(identity.routeNetworkPruningOverrides, [
+    { grantId: 'grant:alpha', reason: 'route-network-runtime-connector-preflight-failed' },
+    { grantId: 'grant:zeta', reason: 'route-network-runtime-connector-preflight-failed' },
+  ]);
+  assert.deepEqual(identity.routeNetworkConflictExclusions, [
+    {
+      grantId: 'grant:alpha',
+      entityKind: 'node',
+      entityId: 'node:2',
+      signature: 'v1-node-placement-signature',
+      reason: 'route-network-runtime-physical-validation-failed',
+    },
+    {
+      grantId: 'grant:zeta',
+      entityKind: 'segment',
+      entityId: 'segment:3',
+      signature: 'v1-segment-path-signature',
+      reason: 'route-network-runtime-connector-preflight-failed',
+    },
+  ]);
+  assert.deepEqual(
+    createDungeonAugmentationSaveIdentity(identity),
+    identity,
+    'sanitizing a committed identity retains the exact pruning override set',
+  );
+
+  const incompatible = validateCommittedDungeonAugmentationIdentity(
+    identity,
+    createDungeonAugmentationSaveIdentity({
+      ...identity,
+      routeNetworkPruningOverrides: [],
+    }),
+  );
+  assert.equal(incompatible.compatible, false);
+  assert.equal(incompatible.errors.some(({ code }) => (
+    code === 'augmentation-route-network-pruning-overrides-mismatch'
+  )), true);
+
+  const conflictIncompatible = validateCommittedDungeonAugmentationIdentity(
+    identity,
+    createDungeonAugmentationSaveIdentity({
+      ...identity,
+      routeNetworkConflictExclusions: [],
+    }),
+  );
+  assert.equal(conflictIncompatible.compatible, false);
+  assert.equal(conflictIncompatible.errors.some(({ code }) => (
+    code === 'augmentation-route-network-conflict-exclusions-mismatch'
+  )), true);
 });
 
 test('augmentation mutable state captures and restores scoped V4 runtime records', () => {

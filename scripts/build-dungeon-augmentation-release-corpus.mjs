@@ -1,21 +1,23 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as THREE from 'three';
 
-import { DungeonGenerator } from '../src/DungeonGenerator.js';
 import { DUNGEON_AUGMENTATION_PROFILES } from '../src/dungeon-augmentation/catalog.js';
-import { hashSeed, SeededRandom } from '../src/reaverbots/SeededRandom.js';
 import {
   RELEASE_CORPUS_COUNTS,
   RELEASE_PROFILE_ID,
+  assertCleanReleaseProvenance,
   assertMatchingReleaseProvenance,
-  createAcceptedParentWitness,
   createCorpusManifest,
   createReleaseProvenance,
   readJson,
   validateCorpusManifest,
   writeImmutableJson,
 } from './dungeon-augmentation-release-evidence.mjs';
+import {
+  collectOrderedAcceptedParentSnapshots,
+  createReleaseParentSnapshotWorkerPool,
+  resolveReleaseParentSnapshotConcurrency,
+} from './dungeon-augmentation-parent-snapshot-pool.mjs';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const argumentValue = (name) => process.argv
@@ -28,6 +30,10 @@ const requestedMaximumRawAttempts = Number.parseInt(
   argumentValue('maximum-raw-attempts') ?? '',
   10,
 );
+const parentWorkersArgument = argumentValue('parent-workers');
+const requestedParentWorkerCount = parentWorkersArgument == null
+  ? null
+  : Number(parentWorkersArgument);
 const progressEnabled = process.argv.includes('--progress');
 
 if (tier !== 'release') {
@@ -42,11 +48,15 @@ if (!Number.isInteger(requestedRawStart) || requestedRawStart < 0) {
 
 const profile = DUNGEON_AUGMENTATION_PROFILES[RELEASE_PROFILE_ID];
 const provenance = await createReleaseProvenance({ projectRoot, profile });
+assertCleanReleaseProvenance(provenance, 'release corpus builder source');
 const acceptedParentCount = RELEASE_CORPUS_COUNTS[tier];
 const maximumRawAttempts = Number.isInteger(requestedMaximumRawAttempts)
   && requestedMaximumRawAttempts >= acceptedParentCount
   ? requestedMaximumRawAttempts
   : acceptedParentCount * 20;
+const parentSnapshotConcurrency = resolveReleaseParentSnapshotConcurrency(
+  requestedParentWorkerCount,
+);
 const resolvedOutputPath = path.resolve(projectRoot, outputPath);
 
 try {
@@ -78,80 +88,39 @@ try {
   }
 }
 
-const entries = [];
-const skippedParentSeeds = [];
-let rawIndex = requestedRawStart;
-while (entries.length < acceptedParentCount) {
-  if (rawIndex - requestedRawStart >= maximumRawAttempts) {
-    throw new Error(
-      `Accepted-parent scan exhausted ${maximumRawAttempts} raw seeds after finding ${entries.length}/${acceptedParentCount}.`,
-    );
-  }
-  const suffix = String(rawIndex).padStart(3, '0');
-  const seed = `layout:augmentation-realized-v4-${suffix}`;
-  const basePlanHash = `v1:${seed}:depth:1:revolvingFusillade`;
-  const seededRandom = new SeededRandom(hashSeed(seed));
-  let sourceRandomCalls = 0;
-  const generator = new DungeonGenerator({
-    random: () => {
-      sourceRandomCalls += 1;
-      return seededRandom.next();
-    },
-    difficulty: 1,
-    augmentationProfileId: null,
-    augmentationSeed: seed,
-    basePlanHash,
-  });
-  const inertTexture = new THREE.Texture();
-  inertTexture.name = `releaseCorpusParent_${suffix}`;
-  generator.textureCache.set(inertTexture.name, inertTexture);
-  generator._loadRuinTexture = () => inertTexture;
-  let dungeon = null;
-  try {
-    let parentGenerationError = null;
-    try {
-      dungeon = generator.generate();
-    } catch (error) {
-      parentGenerationError = error;
-    }
-    if (parentGenerationError) {
-      skippedParentSeeds.push({
-        rawIndex,
-        seed,
-        sourceRandomCalls,
-        errorName: parentGenerationError?.name ?? 'Error',
-        reason: parentGenerationError?.message ?? String(parentGenerationError),
-      });
-      if (progressEnabled) {
-        console.error(`[parent-skip ${skippedParentSeeds.length}] ${seed}`);
+const parentSnapshotPool = createReleaseParentSnapshotWorkerPool({
+  concurrency: parentSnapshotConcurrency,
+});
+let scan;
+try {
+  scan = await collectOrderedAcceptedParentSnapshots({
+    rawStartIndex: requestedRawStart,
+    maximumRawAttempts,
+    requestedAcceptedParentCount: acceptedParentCount,
+    concurrency: parentSnapshotConcurrency,
+    buildBatch: (rawIndices) => parentSnapshotPool.runBatch(rawIndices),
+    onCommittedSnapshot(committed) {
+      if (!progressEnabled) return;
+      if (committed.status === 'accepted') {
+        console.error(
+          `[parent ${committed.acceptedParentCount}/${acceptedParentCount}] ${committed.entry.seed}`,
+        );
+      } else {
+        console.error(
+          `[parent-skip ${committed.skippedParentSeedCount}] ${committed.skippedParentSeed.seed}`,
+        );
       }
-      continue;
-    }
-    if (dungeon.basePlanHash !== basePlanHash || dungeon.effectivePlanHash !== basePlanHash) {
-      throw new Error(`Disabled parent ${seed} did not preserve its exact base plan hash.`);
-    }
-    const parentWitness = createAcceptedParentWitness(dungeon, sourceRandomCalls);
-    entries.push({
-      ordinal: entries.length,
-      rawIndex,
-      seed,
-      basePlanHash,
-      parentWitness,
-    });
-    if (progressEnabled) {
-      console.error(`[parent ${entries.length}/${acceptedParentCount}] ${seed}`);
-    }
-  } finally {
-    generator._disposeGeneratedDungeonCandidate(dungeon);
-    inertTexture.dispose();
-    rawIndex += 1;
-  }
+    },
+  });
+} finally {
+  await parentSnapshotPool.close();
 }
+const { entries, skippedParentSeeds, rawEndIndexExclusive } = scan;
 
 const manifest = createCorpusManifest({
   tier,
   rawStartIndex: requestedRawStart,
-  rawEndIndexExclusive: rawIndex,
+  rawEndIndexExclusive,
   requestedAcceptedParentCount: acceptedParentCount,
   entries,
   skippedParentSeeds,
@@ -164,8 +133,9 @@ console.log(JSON.stringify({
   tier,
   acceptedParentCount,
   rawStartIndex: requestedRawStart,
-  rawEndIndexExclusive: rawIndex,
+  rawEndIndexExclusive,
   skippedParentSeedCount: skippedParentSeeds.length,
+  parentSnapshotConcurrency,
   manifestHash: manifest.evidenceHash,
   provenance,
 }, null, 2));

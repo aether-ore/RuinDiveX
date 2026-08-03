@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DungeonGenerator } from '../src/DungeonGenerator.js';
+import {
+  collectDungeonAugmentationAnchorPlacementFailureAttribution,
+  collectDungeonAugmentationPhysicalFailureAttribution,
+  DungeonGenerator,
+} from '../src/DungeonGenerator.js';
 import {
   DUNGEON_AUGMENTATION_OVERLAY_SCHEMA,
   DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
@@ -17,6 +21,7 @@ import {
   computeDungeonAugmentationPlanHash,
   computeEffectiveDungeonPlanHash,
   createDungeonAugmentationProfile,
+  createRouteNetworkConflictEntitySignature,
   createDungeonSelectionBag,
   createDungeonAugmentationSaveIdentity,
   createDungeonRouteEndpointSeam,
@@ -26,6 +31,7 @@ import {
   dungeonSelectionBagCandidates,
   hashCanonicalValue,
   materializeIndustrialOverlay,
+  normalizeRouteNetworkConflictExclusions,
   sanitizeDungeonAugmentationSaveIdentity,
   validateCommittedDungeonAugmentationIdentity,
   validateDungeonExtensionHost,
@@ -73,6 +79,2344 @@ const VERIFICATION_SEED_COUNT = Number.isFinite(requestedVerificationSeedCount)
   && requestedVerificationSeedCount >= 100
   ? requestedVerificationSeedCount
   : 100;
+
+test('Industrial augmentation planning snapshots commit elevations without mutating the live V1 kit', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const rooms = [{
+    id: 'source-room',
+    plannedBaseElevation: 14,
+    ceilingHeight: 8.4,
+    exitSockets: [{ id: 'source-upper', roomId: 'source-room', elevation: 4.05 }],
+  }, {
+    id: 'destination-room',
+    plannedBaseElevation: -14,
+    ceilingHeight: 8.4,
+    exitSockets: [{ id: 'destination-upper', roomId: 'destination-room', elevation: 4.05 }],
+  }];
+  const connectionPlans = [{
+    id: 'upper-connection',
+    level: 1,
+    localElevation: 4.05,
+    elevation: 4.05,
+    fromRoomId: 'source-room',
+    toRoomId: 'destination-room',
+    fromSocket: { id: 'source-upper', roomId: 'source-room', elevation: 4.05 },
+    toSocket: { id: 'destination-upper', roomId: 'destination-room', elevation: 4.05 },
+  }];
+  const liveSnapshot = structuredClone({ rooms, connectionPlans });
+
+  const first = generator._createIndustrialDungeonAugmentationPlanningSnapshot({
+    rooms,
+    connectionPlans,
+  });
+  const second = generator._createIndustrialDungeonAugmentationPlanningSnapshot({
+    rooms,
+    connectionPlans,
+  });
+
+  assert.deepEqual({ rooms, connectionPlans }, liveSnapshot);
+  assert.deepEqual(first, second);
+  assert.equal(first.rooms[0].baseElevation, 14);
+  assert.equal(first.rooms[1].baseElevation, -14);
+  assert.equal(first.connectionPlans[0].sourceElevation, 18.05);
+  assert.equal(first.connectionPlans[0].destinationElevation, -9.95);
+  assert.equal(first.connectionPlans[0].fromSocket.elevation, 18.05);
+  assert.equal(first.connectionPlans[0].toSocket.elevation, -9.95);
+  assert.equal(first.rooms[0].exitSockets[0].elevation, 18.05);
+  assert.equal(first.rooms[1].exitSockets[0].elevation, -9.95);
+});
+
+test('Industrial replay planning snapshots preserve resolved basement bounds', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const rooms = [{
+    id: 'trapRoom',
+    type: 'trap',
+    x: 18,
+    z: 58,
+    width: 17,
+    depth: 15,
+    plannedBaseElevation: 28,
+    baseElevation: 28,
+    minY: 23.2,
+    maximumWalkableY: 32.05,
+    maxY: 43.2,
+    ceilingHeight: 15.2,
+    dropSpace: {
+      lowerElevation: -4.8,
+      lowerBounds: { minX: 12, maxX: 20, minZ: 55, maxZ: 63 },
+    },
+    ceilingY: 43.2,
+    exitSockets: [],
+  }];
+  const planningSnapshot =
+    generator._createIndustrialDungeonAugmentationPlanningSnapshot({
+      rooms,
+      connectionPlans: [],
+    });
+
+  assert.equal(planningSnapshot.rooms[0].minY, 23.2);
+  assert.equal(planningSnapshot.rooms[0].maximumWalkableY, 32.05);
+  assert.equal(planningSnapshot.rooms[0].maxY, 43.2);
+
+  const baseDraft = createIndustrialBaseDraft({
+    rooms: planningSnapshot.rooms,
+    connectionPlans: [],
+    tileSize: generator.tileSize,
+  });
+  const dropSpaceVolume = baseDraft.occupiedVolumes.find(({ id }) => (
+    id === 'base:room:trapRoom:drop-space-occupied'
+  ));
+  assert.ok(dropSpaceVolume);
+  assert.deepEqual(dropSpaceVolume.center, { x: 44.8, y: 33.2, z: 165.2 });
+  assert.ok(Math.abs(dropSpaceVolume.size.x - 25.2) <= 1e-9);
+  assert.ok(Math.abs(dropSpaceVolume.size.y - 20) <= 1e-9);
+  assert.ok(Math.abs(dropSpaceVolume.size.z - 25.2) <= 1e-9);
+});
+
+test('a supplemental collision severing an authored drop-space egress excludes only its owning node', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const floor = (x, z, elevation, options = {}) => ({
+    type: 'floor',
+    surface: 'floor',
+    roomId: 'trapRoom',
+    x,
+    z,
+    elevation,
+    level: elevation,
+    ...options,
+  });
+  const floorKey = (tile) => generator._getFloorTileGraphKey(tile);
+  const lowerTiles = [];
+  for (let x = 0; x <= 6; x += 1) {
+    for (let z = 0; z <= 5; z += 1) {
+      lowerTiles.push(floor(x, z, -4.8, {
+        surface: 'basementFloor',
+        dropSpaceId: 'trapRoom_hazardDropSpace',
+      }));
+    }
+  }
+  const entryTiles = lowerTiles.filter(({ x, z }) => x === 0 && [2, 3].includes(z));
+  for (const tile of entryTiles) tile.allowsGroundedDropLanding = true;
+  const shelfTiles = [2, 3].map((z) => floor(6, z, -1.5, {
+    surface: 'basementReturnShelf',
+    isLedgeSurface: true,
+    ledgeEdges: ['left'],
+    supportBaseElevation: -4.8,
+    platformPurpose: 'trapRoom_hazardDropSpace_return_climb_shelf',
+    requiredTraversalAction: 'ledge_climb',
+    dropSpaceId: 'trapRoom_hazardDropSpace',
+  }));
+  const exitTiles = [2, 3].map((z) => floor(7, z, 0));
+  const entryLipTiles = [2, 3].map((z) => floor(-1, z, 0));
+  const outsideRoute = [];
+  for (let x = -1; x <= 7; x += 1) outsideRoute.push(floor(x, -1, 0));
+  for (let z = 0; z <= 1; z += 1) {
+    outsideRoute.push(floor(-1, z, 0), floor(7, z, 0));
+  }
+  const floorTiles = [
+    ...lowerTiles,
+    ...shelfTiles,
+    ...exitTiles,
+    ...entryLipTiles,
+    ...outsideRoute,
+  ];
+  const lowerFloorKeys = lowerTiles
+    .filter(({ x, z }) => !(x === 6 && [2, 3].includes(z)))
+    .map(floorKey);
+  const trapRoom = {
+    id: 'trapRoom',
+    type: 'trap',
+    x: 3,
+    z: 2,
+    width: 19,
+    depth: 15,
+    baseElevation: 0,
+    ceilingHeight: 12,
+    dropSpace: {
+      id: 'trapRoom_hazardDropSpace',
+      roomId: 'trapRoom',
+      lowerElevation: -4.8,
+      lowerBounds: { minX: 0, maxX: 6, minZ: 0, maxZ: 5 },
+      lowerFloorKeys,
+      entryFloorKeys: entryTiles.map(floorKey),
+      entryLipFloorKeys: entryLipTiles.map(floorKey),
+      returnShelfFloorKeys: shelfTiles.map(floorKey),
+      exitFloorKeys: exitTiles.map(floorKey),
+      bridgeFloorKeys: [],
+      returnDirectionX: 1,
+      returnDirectionZ: 0,
+    },
+  };
+  const operation = {
+    id: 'operation:drop-egress-blocker',
+    type: 'routeNetwork',
+    grantId: 'grant:drop-egress-blocker',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const node = {
+    id: 'node:drop-egress-blocker',
+    operationId: operation.id,
+    kind: 'supplementRoom',
+    grammarId: 'industrial-switchback-room',
+    placement: { center: { x: 18.2, y: 0, z: 7 }, rotationQuarterTurns: 0 },
+    size: { x: 8.4, y: 5.6, z: 8.4 },
+    sockets: [],
+  };
+  const blockingZone = {
+    id: 'collision:drop-egress-blocker',
+    roomId: node.id,
+    operationId: operation.id,
+    manifestCollisionRecordId: 'collision:drop-egress-blocker',
+    moduleManifestId: 'module:drop-egress-blocker',
+    obstacleKind: 'supplement-authored-cover',
+    position: { x: 6.5 * generator.tileSize, y: -0.75, z: 2.5 * generator.tileSize },
+    halfWidth: 0.08,
+    halfDepth: generator.tileSize,
+    verticalHalfHeight: 1.2,
+    rotationY: 0,
+    dungeonSupplement: true,
+    isDungeonSupplement: true,
+  };
+  const validation = generator._validatePlatformability({
+    floorTiles,
+    rooms: [trapRoom],
+    solidZones: [blockingZone],
+    segmentBarrierZones: [blockingZone],
+    useSegmentBarriers: true,
+  });
+  const dropCheck = validation.details.dropSpaceChecks[0];
+
+  assert.equal(dropCheck.lowerReachable, true);
+  assert.equal(dropCheck.canExit, false);
+  assert.deepEqual(
+    dropCheck.egressBlockingZoneIds,
+    [blockingZone.id],
+    JSON.stringify(dropCheck),
+  );
+  assert.deepEqual(dropCheck.egressBlockingZones, [{
+    id: blockingZone.id,
+    roomId: node.id,
+    connectionId: null,
+    operationId: operation.id,
+    manifestCollisionRecordId: blockingZone.manifestCollisionRecordId,
+    moduleManifestId: blockingZone.moduleManifestId,
+    obstacleKind: blockingZone.obstacleKind,
+    dungeonSupplement: true,
+  }]);
+
+  const attribution = collectDungeonAugmentationPhysicalFailureAttribution({
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [],
+    },
+    rooms: [trapRoom, { id: node.id, isDungeonSupplement: true }],
+    connectionPlans: [],
+    progression: { validation: { platformability: validation.details } },
+  });
+  assert.deepEqual(attribution.failedRouteNetworkGrants, [{
+    grantId: operation.grantId,
+    augmentationOperationId: operation.id,
+    routeNetworkKind: operation.routeNetworkKind,
+    connectionIds: [],
+    roomIds: [node.id],
+    socketIds: [],
+    failureKinds: ['dropSpaceEgressChecks'],
+  }]);
+  assert.deepEqual(attribution.routeNetworkConflictExclusions, [{
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  }]);
+
+  const segment = {
+    id: 'segment:drop-egress-blocker',
+    operationId: operation.id,
+    connectorFamily: 'service-gallery',
+    from: { nodeId: 'parent-room', position: { x: 14, y: 0, z: 7 } },
+    to: { nodeId: node.id, position: { x: 22.4, y: 0, z: 7 } },
+    path: [
+      { x: 14, y: 0, z: 7 },
+      { x: 22.4, y: 0, z: 7 },
+    ],
+  };
+  const segmentBlocker = {
+    ...dropCheck.egressBlockingZones[0],
+    roomId: null,
+    connectionId: segment.id,
+  };
+  const segmentAttribution = collectDungeonAugmentationPhysicalFailureAttribution({
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [segment],
+    },
+    rooms: [trapRoom, { id: node.id, isDungeonSupplement: true }],
+    connectionPlans: [{ id: segment.id }],
+    progression: {
+      validation: {
+        platformability: {
+          dropSpaceChecks: [{
+            ...dropCheck,
+            egressBlockingZones: [segmentBlocker],
+          }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(segmentAttribution.routeNetworkConflictExclusions, [{
+    grantId: operation.grantId,
+    entityKind: 'segment',
+    entityId: segment.id,
+    signature: createRouteNetworkConflictEntitySignature(segment, 'segment'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  }]);
+
+  const ambiguousAttribution = collectDungeonAugmentationPhysicalFailureAttribution({
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [segment],
+    },
+    rooms: [trapRoom, { id: node.id, isDungeonSupplement: true }],
+    connectionPlans: [{ id: segment.id }],
+    progression: {
+      validation: {
+        platformability: {
+          dropSpaceChecks: [{
+            ...dropCheck,
+            egressBlockingZones: [{
+              ...segmentBlocker,
+              roomId: node.id,
+            }],
+          }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(ambiguousAttribution.failedRouteNetworkGrants, []);
+  assert.deepEqual(ambiguousAttribution.routeNetworkConflictExclusions, []);
+});
+
+function createReplayLifecycleFixture({ committed = false } = {}) {
+  const sourceRandom = () => 0.5;
+  const baseDungeon = {
+    id: 'base',
+    generationAttempts: 2,
+    rooms: [],
+    connectionPlans: [],
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const generator = new DungeonGenerator({
+    random: sourceRandom,
+    augmentationProfileId: 'industrial-supplement-preview-v4',
+    augmentationRealizationAttemptLimit: 1,
+    ...(committed ? {
+      committedAugmentationIdentity: {
+        profileId: 'industrial-supplement-preview-v4',
+        seed: 'committed-lifecycle-seed',
+      },
+    } : {}),
+  });
+  generator._generateAcceptedIndustrialDungeon = () => ({
+    dungeon: baseDungeon,
+    randomTape: [],
+  });
+  generator._finalizeAcceptedIndustrialDungeon = (dungeon) => dungeon;
+  return { generator, sourceRandom, baseDungeon };
+}
+
+test('final-facade wall ownership replays one exact connector-proxy node repair', () => {
+  const validator = new DungeonGenerator({ random: () => 0.5 });
+  const floor = (x, z, elevation, options = {}) => ({
+    type: 'floor',
+    surface: 'floor',
+    roomId: 'trapRoom',
+    x,
+    z,
+    elevation,
+    level: elevation,
+    ...options,
+  });
+  const floorKey = (tile) => validator._getFloorTileGraphKey(tile);
+  const lowerTiles = [];
+  for (let x = 0; x <= 6; x += 1) {
+    for (let z = 0; z <= 5; z += 1) {
+      lowerTiles.push(floor(x, z, -4.8, {
+        surface: 'basementFloor',
+        dropSpaceId: 'trapRoom_hazardDropSpace',
+      }));
+    }
+  }
+  const entryTiles = lowerTiles.filter(({ x, z }) => x === 0 && [2, 3].includes(z));
+  for (const tile of entryTiles) tile.allowsGroundedDropLanding = true;
+  const shelfTiles = [2, 3].map((z) => floor(6, z, -1.5, {
+    surface: 'basementReturnShelf',
+    isLedgeSurface: true,
+    ledgeEdges: ['left'],
+    supportBaseElevation: -4.8,
+    platformPurpose: 'trapRoom_hazardDropSpace_return_climb_shelf',
+    requiredTraversalAction: 'ledge_climb',
+    dropSpaceId: 'trapRoom_hazardDropSpace',
+  }));
+  const exitTiles = [2, 3].map((z) => floor(7, z, 0));
+  const entryLipTiles = [2, 3].map((z) => floor(-1, z, 0));
+  const outsideRoute = [];
+  for (let x = -1; x <= 7; x += 1) outsideRoute.push(floor(x, -1, 0));
+  for (let z = 0; z <= 1; z += 1) {
+    outsideRoute.push(floor(-1, z, 0), floor(7, z, 0));
+  }
+  const floorTiles = [
+    ...lowerTiles,
+    ...shelfTiles,
+    ...exitTiles,
+    ...entryLipTiles,
+    ...outsideRoute,
+  ];
+  const trapRoom = {
+    id: 'trapRoom',
+    type: 'trap',
+    x: 3,
+    z: 2,
+    width: 19,
+    depth: 15,
+    baseElevation: 0,
+    ceilingHeight: 12,
+    dropSpace: {
+      id: 'trapRoom_hazardDropSpace',
+      roomId: 'trapRoom',
+      lowerElevation: -4.8,
+      lowerBounds: { minX: 0, maxX: 6, minZ: 0, maxZ: 5 },
+      lowerFloorKeys: lowerTiles
+        .filter(({ x, z }) => !(x === 6 && [2, 3].includes(z)))
+        .map(floorKey),
+      entryFloorKeys: entryTiles.map(floorKey),
+      entryLipFloorKeys: entryLipTiles.map(floorKey),
+      returnShelfFloorKeys: shelfTiles.map(floorKey),
+      exitFloorKeys: exitTiles.map(floorKey),
+      bridgeFloorKeys: [],
+      returnDirectionX: 1,
+      returnDirectionZ: 0,
+    },
+  };
+  const operation = {
+    id: 'operation:final-wall-proxy-owner',
+    type: 'routeNetwork',
+    grantId: 'grant:final-wall-proxy-owner',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const node = {
+    id: 'node:final-wall-proxy-owner',
+    operationId: operation.id,
+    kind: 'supplementConnectorJunction',
+    grammarId: 'industrial-junction',
+    placement: { center: { x: 18.2, y: 0, z: 7 }, rotationQuarterTurns: 0 },
+    size: { x: 8.4, y: 5.6, z: 8.4 },
+    sockets: [],
+  };
+  const authoritativeWallRun = {
+    horizontal: false,
+    dx: 1,
+    dz: 0,
+    line: 6.5,
+    start: 2,
+    end: 3,
+    lengthTiles: 2,
+    ownerId: node.id,
+    ownerIds: [node.id],
+    ownerByAxis: { 2: node.id, 3: node.id },
+    ownerIdsByAxis: { 2: [node.id], 3: [node.id] },
+    facadeId: 'v:1:0:6.5:2:3:-4.80:4.00',
+    wallBottomY: -4.8,
+    wallTopY: 4,
+    wallHeight: 8.8,
+  };
+  validator._addBoundaryWallRun = () => {};
+  const [blockingWall] = validator._addWalls(
+    null,
+    null,
+    null,
+    new Set(),
+    [],
+    new Map(),
+    [authoritativeWallRun],
+  );
+  assert.equal(blockingWall.authoritativeBoundaryWall, true);
+  assert.deepEqual(blockingWall.wallOwnerIdsByAxis, {
+    2: [node.id],
+    3: [node.id],
+  });
+
+  const validation = validator._validatePlatformability({
+    floorTiles,
+    rooms: [trapRoom],
+    solidZones: [blockingWall],
+    segmentBarrierZones: [blockingWall],
+    useSegmentBarriers: true,
+  });
+  const dropCheck = validation.details.dropSpaceChecks[0];
+  assert.equal(dropCheck.canExit, false);
+  assert.deepEqual(dropCheck.egressBlockingZones, [{
+    id: blockingWall.id,
+    roomId: null,
+    connectionId: null,
+    operationId: null,
+    manifestCollisionRecordId: null,
+    moduleManifestId: null,
+    obstacleKind: 'boundaryWall',
+    dungeonSupplement: false,
+    ownerIds: [node.id],
+    authoritativeBoundaryWall: true,
+  }]);
+
+  const { generator } = createReplayLifecycleFixture();
+  const rejectedDungeon = {
+    id: 'final-wall-proxy-rejected',
+    augmentationStatus: 'applied',
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [],
+    },
+    // This is the completed-facade shape: connector identities do not leak
+    // into runtime rooms, but remain available as physical owner proxies.
+    rooms: [trapRoom],
+    connectorJunctionProxies: [{
+      id: node.id,
+      isConnectorJunctionProxy: true,
+      suppressRoomGeometry: true,
+    }],
+    connectionPlans: [],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: ['Synthetic final boundary wall blocks the authored drop-space egress.'],
+        platformability: validation.details,
+      },
+    },
+  };
+  const acceptedDungeon = {
+    id: 'final-wall-proxy-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    generationPass += 1;
+    return generationPass === 1 ? rejectedDungeon : acceptedDungeon;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  const expectedExclusion = {
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  };
+  assert.equal(result, acceptedDungeon);
+  assert.equal(generationPass, 2);
+  assert.deepEqual(observedConflictExclusions, [[], [expectedExclusion]]);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 1);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [expectedExclusion],
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .prunedRouteNetworkGrantIds,
+    [],
+  );
+});
+
+function createExpectedPlanningRejection() {
+  const error = new Error('Synthetic expected planning rejection.');
+  error.code = 'DUNGEON_AUGMENTATION_PLANNING_UNCHANGED';
+  error.augmentationDiagnostics = {
+    status: 'unchanged',
+    reason: 'no-eligible-regions',
+    errors: [],
+  };
+  return error;
+}
+
+test('augmentation replay restores exact own-property state for every temporary override', () => {
+  for (const mode of ['absent', 'own-undefined', 'own-sentinel', 'inherited']) {
+    const { generator, sourceRandom, baseDungeon } = createReplayLifecycleFixture();
+    const planSeedSentinel = { mode, property: 'plan-seed' };
+    const planningSnapshotSentinel = { mode, property: 'planning-snapshot' };
+    const pruningOverrideSentinel = { mode, property: 'route-network-pruning' };
+    const conflictExclusionSentinel = { mode, property: 'route-network-conflict' };
+    if (mode === 'inherited') {
+      const inheritedPrototype = Object.create(Object.getPrototypeOf(generator));
+      Object.defineProperties(inheritedPrototype, {
+        augmentationPlanSeedOverride: {
+          configurable: true,
+          writable: true,
+          value: planSeedSentinel,
+        },
+        _augmentationReplayPlanningSnapshotOverride: {
+          configurable: true,
+          writable: true,
+          value: planningSnapshotSentinel,
+        },
+        augmentationRouteNetworkPruningOverrides: {
+          configurable: true,
+          writable: true,
+          value: pruningOverrideSentinel,
+        },
+        augmentationRouteNetworkConflictExclusions: {
+          configurable: true,
+          writable: true,
+          value: conflictExclusionSentinel,
+        },
+      });
+      Object.setPrototypeOf(generator, inheritedPrototype);
+    } else if (mode !== 'absent') {
+      Object.defineProperties(generator, {
+        augmentationPlanSeedOverride: {
+          configurable: true,
+          enumerable: false,
+          writable: true,
+          value: mode === 'own-undefined' ? undefined : planSeedSentinel,
+        },
+        _augmentationReplayPlanningSnapshotOverride: {
+          configurable: true,
+          enumerable: false,
+          writable: true,
+          value: mode === 'own-undefined' ? undefined : planningSnapshotSentinel,
+        },
+        augmentationRouteNetworkPruningOverrides: {
+          configurable: true,
+          enumerable: false,
+          writable: true,
+          value: mode === 'own-undefined' ? undefined : pruningOverrideSentinel,
+        },
+        augmentationRouteNetworkConflictExclusions: {
+          configurable: true,
+          enumerable: false,
+          writable: true,
+          value: mode === 'own-undefined' ? undefined : conflictExclusionSentinel,
+        },
+      });
+    }
+    const originalPlanSeedDescriptor = Object.getOwnPropertyDescriptor(
+      generator,
+      'augmentationPlanSeedOverride',
+    );
+    const originalPlanningSnapshotDescriptor = Object.getOwnPropertyDescriptor(
+      generator,
+      '_augmentationReplayPlanningSnapshotOverride',
+    );
+    const originalPruningOverrideDescriptor = Object.getOwnPropertyDescriptor(
+      generator,
+      'augmentationRouteNetworkPruningOverrides',
+    );
+    const originalConflictExclusionDescriptor = Object.getOwnPropertyDescriptor(
+      generator,
+      'augmentationRouteNetworkConflictExclusions',
+    );
+    let observedPlanningSnapshot = null;
+    generator._generateOnce = () => {
+      assert.equal(Object.hasOwn(generator, 'augmentationPlanSeedOverride'), true, mode);
+      assert.equal(generator.augmentationPlanSeedOverride, null, mode);
+      assert.deepEqual(generator.augmentationRouteNetworkPruningOverrides, [], mode);
+      assert.deepEqual(generator.augmentationRouteNetworkConflictExclusions, [], mode);
+      assert.equal(
+        Object.hasOwn(generator, '_augmentationReplayPlanningSnapshotOverride'),
+        true,
+        mode,
+      );
+      observedPlanningSnapshot = generator._augmentationReplayPlanningSnapshotOverride;
+      throw createExpectedPlanningRejection();
+    };
+
+    assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), baseDungeon, mode);
+    assert.ok(observedPlanningSnapshot, mode);
+    assert.equal(generator.random, sourceRandom, mode);
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(generator, 'augmentationPlanSeedOverride'),
+      originalPlanSeedDescriptor,
+      mode,
+    );
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(
+        generator,
+        'augmentationRouteNetworkPruningOverrides',
+      ),
+      originalPruningOverrideDescriptor,
+      mode,
+    );
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(
+        generator,
+        'augmentationRouteNetworkConflictExclusions',
+      ),
+      originalConflictExclusionDescriptor,
+      mode,
+    );
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(
+        generator,
+        '_augmentationReplayPlanningSnapshotOverride',
+      ),
+      originalPlanningSnapshotDescriptor,
+      mode,
+    );
+    if (mode === 'inherited') {
+      assert.equal(generator.augmentationPlanSeedOverride, planSeedSentinel);
+      assert.equal(
+        generator._augmentationReplayPlanningSnapshotOverride,
+        planningSnapshotSentinel,
+      );
+      assert.equal(
+        generator.augmentationRouteNetworkPruningOverrides,
+        pruningOverrideSentinel,
+      );
+      assert.equal(
+        generator.augmentationRouteNetworkConflictExclusions,
+        conflictExclusionSentinel,
+      );
+    }
+  }
+});
+
+test('augmentation replay never falls back to pruning an entire failed route-network grant', () => {
+  const { generator, baseDungeon } = createReplayLifecycleFixture();
+  const observedOverrides = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    generationPass += 1;
+    observedOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    const error = new Error('Synthetic aggregate connector preflight conflict.');
+    error.code = 'DUNGEON_AUGMENTATION_CONNECTOR_PREFLIGHT_FAILED';
+    error.augmentationDiagnostics = {
+      status: 'unchanged',
+      reason: 'connector-entrance-preflight-failed',
+      augmentationPlanHash: 'augmentation:rejected-without-an-exact-entity',
+      routeNetworkGrantIds: ['grant:retained', 'grant:conflicting'],
+      failedRouteNetworkGrants: [{
+        grantId: 'grant:conflicting',
+        augmentationOperationId: 'operation:conflicting',
+        routeNetworkKind: 'objective-route-coverage',
+        connectionIds: ['connection:ambiguous-aggregate'],
+        socketIds: ['socket:ambiguous-aggregate'],
+      }],
+      errors: ['synthetic aggregate connector preflight conflict'],
+    };
+    throw error;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, baseDungeon);
+  assert.equal(generationPass, 1);
+  assert.deepEqual(observedOverrides, [[]]);
+  assert.equal(result.augmentationReplayDiagnostics.realizationAttempts, 1);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 0);
+  assert.deepEqual(result.augmentationReplayDiagnostics.runtimePruningRecords, []);
+  assert.equal(
+    Object.hasOwn(generator, 'augmentationRouteNetworkPruningOverrides'),
+    false,
+  );
+});
+
+test('augmentation replay excludes an exact conflicting module signature before pruning its grant', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const conflictingOperation = {
+    id: 'operation:retained',
+    type: 'routeNetwork',
+    grantId: 'grant:retained',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const conflictingSegment = {
+    id: 'segment:conflicting-path',
+    operationId: conflictingOperation.id,
+    kind: 'route-network-segment',
+    routeRole: 'objective-route-coverage:spine',
+    connectorFamily: 'service-gallery',
+    from: { nodeId: 'authored:a', socketId: 'socket:a' },
+    to: { nodeId: 'supplement:1', socketId: 'socket:entry' },
+    path: [{ x: 0, y: 0, z: 0 }, { x: 8.4, y: 0, z: 0 }],
+  };
+  const exclusion = {
+    grantId: 'grant:retained',
+    entityKind: 'segment',
+    entityId: 'segment:conflicting-path',
+    signature: createRouteNetworkConflictEntitySignature(
+      conflictingSegment,
+      'segment',
+    ),
+    reason: 'route-network-runtime-physical-validation-failed',
+  };
+  const rejectedDungeon = {
+    id: 'module-conflict-rejected',
+    augmentationStatus: 'applied',
+    augmentationPlanHash: 'augmentation:module-conflict-rejected',
+    augmentationOverlayPlan: {
+      operations: [conflictingOperation],
+      nodes: [],
+      segments: [conflictingSegment],
+    },
+    connectionPlans: [{
+      id: conflictingSegment.id,
+      augmentationOperationId: conflictingOperation.id,
+      routeNetworkGrantId: conflictingOperation.grantId,
+      isDungeonSupplement: true,
+    }],
+    rooms: [],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: ['synthetic exact segment conflict'],
+        platformability: {
+          supplementConnectivityChecks: [{
+            accepted: false,
+            operationId: conflictingOperation.id,
+            connectionId: conflictingSegment.id,
+            missingOwnedCenterlinePointCount: 1,
+          }],
+        },
+      },
+    },
+  };
+  const acceptedDungeon = {
+    id: 'module-replacement-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  const observedGrantPruningOverrides = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    generationPass += 1;
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    observedGrantPruningOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    return generationPass === 1 ? rejectedDungeon : acceptedDungeon;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, acceptedDungeon);
+  assert.equal(generationPass, 2);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.deepEqual(observedGrantPruningOverrides, [[], []]);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 1);
+  assert.equal(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0].recoveryKind,
+    'exact-conflict-entity-exclusion',
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .prunedRouteNetworkGrantIds,
+    [],
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [exclusion],
+  );
+  assert.equal(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0].recoveryOutcome,
+    'exact-entity-replacement-realized',
+  );
+  assert.equal(
+    Object.hasOwn(generator, 'augmentationRouteNetworkConflictExclusions'),
+    false,
+  );
+});
+
+test('ramp/scaffold validation excludes only the exact supplemental room node', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:layered-ramp-conflict',
+    type: 'routeNetwork',
+    grantId: 'grant:layered-ramp-conflict',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const node = {
+    id: 'node:layered-ramp-conflict',
+    operationId: operation.id,
+    kind: 'room',
+    grammarId: 'supplement-blueprint-ind-room-switchgear-cache-descent-01-v1',
+    position: { x: -67.2, y: -14, z: 350 },
+    rotationQuarterTurns: 3,
+  };
+  const exclusion = {
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  };
+  const rejectedDungeon = {
+    id: 'layered-ramp-conflict-rejected',
+    augmentationStatus: 'applied',
+    augmentationPlanHash: 'augmentation:layered-ramp-conflict-rejected',
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [],
+    },
+    connectionPlans: [],
+    rooms: [{
+      id: node.id,
+      augmentationOperationId: operation.id,
+      isDungeonSupplement: true,
+    }],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: ['synthetic ramp/scaffold conflict'],
+        platformability: {
+          rampScaffoldHeadroomConflicts: [{
+            accepted: false,
+            rampRoomId: node.id,
+            rampFloorKey: '-22,126@y-11.667',
+            scaffoldFloorKey: '-22,126@y1.050',
+            clearance: 12.48,
+          }],
+        },
+      },
+    },
+  };
+  const acceptedDungeon = {
+    id: 'layered-ramp-replacement-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    generationPass += 1;
+    return generationPass === 1 ? rejectedDungeon : acceptedDungeon;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, acceptedDungeon);
+  assert.equal(generationPass, 2);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [exclusion],
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .prunedRouteNetworkGrantIds,
+    [],
+  );
+});
+
+test('bounded exact replacement exhaustion fails closed instead of deleting its grant', () => {
+  const { generator, baseDungeon } = createReplayLifecycleFixture();
+  const retainedOperation = {
+    id: 'operation:retained-landmark',
+    type: 'routeNetwork',
+    grantId: 'grant:retained-landmark',
+    routeNetworkKind: 'landmark-perimeter-loop',
+  };
+  const conflictingOperation = {
+    id: 'operation:exhausted-coverage',
+    type: 'routeNetwork',
+    grantId: 'grant:exhausted-coverage',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const conflictingSegment = {
+    id: 'segment:exhausted-coverage',
+    operationId: conflictingOperation.id,
+    kind: 'route-network-segment',
+    routeRole: 'objective-route-coverage:spine',
+    connectorFamily: 'service-gallery',
+    from: { nodeId: 'authored:a', socketId: 'socket:a' },
+    to: { nodeId: 'supplement:1', socketId: 'socket:entry' },
+    path: [{ x: 0, y: 0, z: 0 }, { x: 8.4, y: 0, z: 0 }],
+  };
+  const exclusion = {
+    grantId: conflictingOperation.grantId,
+    entityKind: 'segment',
+    entityId: conflictingSegment.id,
+    signature: createRouteNetworkConflictEntitySignature(conflictingSegment, 'segment'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  };
+  const rejectedDungeon = {
+    id: 'bounded-replacement-rejected',
+    augmentationStatus: 'applied',
+    augmentationPlanHash: 'augmentation:bounded-replacement-rejected',
+    augmentationOverlayPlan: {
+      operations: [retainedOperation, conflictingOperation],
+      nodes: [],
+      segments: [conflictingSegment],
+    },
+    connectionPlans: [{
+      id: conflictingSegment.id,
+      augmentationOperationId: conflictingOperation.id,
+      routeNetworkGrantId: conflictingOperation.grantId,
+      isDungeonSupplement: true,
+    }],
+    rooms: [],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: ['synthetic bounded replacement exhaustion'],
+        platformability: {
+          supplementConnectivityChecks: [{
+            accepted: false,
+            operationId: conflictingOperation.id,
+            connectionId: conflictingSegment.id,
+            missingOwnedCenterlinePointCount: 1,
+          }],
+        },
+      },
+    },
+  };
+  const acceptedDungeon = {
+    id: 'bounded-replacement-partial-accepted',
+    augmentationStatus: 'applied',
+    augmentationOverlayPlan: {
+      completionMode: 'best-effort-partial',
+      operations: [retainedOperation],
+      nodes: [],
+      segments: [],
+      routeNetworkConflictExclusions: [exclusion],
+      prunedRouteNetworkGrants: [{
+        grantId: conflictingOperation.grantId,
+        recoveryKind: 'exact-conflict-replacements-exhausted',
+        conflictExclusionCount: 1,
+        conflictEntityKinds: ['segment'],
+        replacementExhaustionKind: 'candidate-domain-exhausted',
+        reason: 'route-network-conflict-exclusion-replacements-exhausted',
+      }],
+    },
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    generationPass += 1;
+    return generationPass === 1 ? rejectedDungeon : acceptedDungeon;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, baseDungeon);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.equal(result.augmentationReplayDiagnostics.accepted, false);
+  assert.equal(result.augmentationReplayDiagnostics.fallbackToAcceptedBase, true);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .prunedRouteNetworkGrantIds,
+    [],
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [exclusion],
+  );
+});
+
+test('planning-time exact segment diagnostics replay the same seed without pruning the grant', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:planning-contract-rejection',
+    type: 'routeNetwork',
+    grantId: 'grant:planning-contract-rejection',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const segment = {
+    id: 'segment:planning-contract-rejection',
+    operationId: operation.id,
+    kind: 'route-network-segment',
+    routeRole: 'objective-route-coverage:spine',
+    connectorFamily: 'lift',
+    from: { position: { x: 0, y: 0, z: 0 }, facing: { x: 1, y: 0, z: 0 } },
+    to: { position: { x: 8.4, y: 14, z: 0 }, facing: { x: -1, y: 0, z: 0 } },
+    path: [{ x: 0, y: 0, z: 0 }, { x: 8.4, y: 14, z: 0 }],
+  };
+  const exclusion = {
+    grantId: operation.grantId,
+    entityKind: 'segment',
+    entityId: segment.id,
+    signature: createRouteNetworkConflictEntitySignature(segment, 'segment'),
+    reason: 'route-network-materialization-contract-rejected',
+  };
+  const acceptedDungeon = {
+    id: 'planning-contract-replacement-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  const observedGrantPruningOverrides = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    generationPass += 1;
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    observedGrantPruningOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    if (generationPass > 1) return acceptedDungeon;
+    const error = new Error('Synthetic exact lift contract rejection.');
+    error.code = 'DUNGEON_AUGMENTATION_PLANNING_UNCHANGED';
+    error.augmentationDiagnostics = {
+      status: 'unchanged',
+      reason: 'industrial-materialization-failed',
+      augmentationPlanHash: 'augmentation:planning-contract-rejected',
+      routeNetworkGrantIds: [operation.grantId],
+      routeNetworkEntityCount: 1,
+      failedRouteNetworkGrants: [{
+        grantId: operation.grantId,
+        augmentationOperationId: operation.id,
+        routeNetworkKind: operation.routeNetworkKind,
+        connectionIds: [segment.id],
+        roomIds: [],
+        socketIds: [],
+        failureKinds: ['DUNGEON_SUPPLEMENT_CONNECTOR_CONTRACT_REJECTED'],
+      }],
+      routeNetworkConflictExclusions: [exclusion],
+      errors: ['Synthetic exact lift contract rejection.'],
+    };
+    throw error;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, acceptedDungeon);
+  assert.equal(generationPass, 2);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.deepEqual(observedGrantPruningOverrides, [[], []]);
+  assert.equal(result.augmentationReplayDiagnostics.realizationAttempts, 1);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 1);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [exclusion],
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .prunedRouteNetworkGrantIds,
+    [],
+  );
+});
+
+test('structural-frame wall-run rejection excludes exact segments without pruning their grants', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:structural-frame-conflict',
+    type: 'routeNetwork',
+    grantId: 'grant:structural-frame-conflict',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const segment = {
+    id: 'segment:structural-frame-conflict',
+    operationId: operation.id,
+    kind: 'route-network-segment',
+    routeRole: 'objective-route-coverage:spine',
+    connectorFamily: 'service-gallery',
+    from: { position: { x: 0, y: 0, z: 0 }, facing: { x: 1, y: 0, z: 0 } },
+    to: { position: { x: 8.4, y: 0, z: 0 }, facing: { x: -1, y: 0, z: 0 } },
+    path: [{ x: 0, y: 0, z: 0 }, { x: 8.4, y: 0, z: 0 }],
+  };
+  const exclusion = {
+    grantId: operation.grantId,
+    entityKind: 'segment',
+    entityId: segment.id,
+    signature: createRouteNetworkConflictEntitySignature(segment, 'segment'),
+    reason: 'route-network-structural-frame-wall-run-missing',
+  };
+  const acceptedDungeon = {
+    id: 'structural-frame-replacement-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  const observedGrantPruningOverrides = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    generationPass += 1;
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    observedGrantPruningOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    if (generationPass > 1) return acceptedDungeon;
+    const error = new Error('Synthetic exact structural-frame wall-run rejection.');
+    error.code = 'DUNGEON_AUGMENTATION_INCOMPATIBLE_CONTENT';
+    error.compatibility = {
+      compatible: false,
+      code: 'DUNGEON_AUGMENTATION_STRUCTURAL_FRAME_BINDING_FAILED',
+    };
+    error.augmentationDiagnostics = {
+      status: 'unchanged',
+      reason: 'route-network-structural-frame-binding-failed',
+      augmentationPlanHash: 'augmentation:structural-frame-conflict',
+      routeNetworkGrantIds: [operation.grantId],
+      routeNetworkEntityCount: 1,
+      failedRouteNetworkGrants: [{
+        grantId: operation.grantId,
+        augmentationOperationId: operation.id,
+        routeNetworkKind: operation.routeNetworkKind,
+        connectionIds: [segment.id],
+        roomIds: [],
+        socketIds: ['socket:structural-frame-conflict'],
+        failureKinds: ['DUNGEON_AUGMENTATION_STRUCTURAL_FRAME_WALL_RUN_MISSING'],
+      }],
+      routeNetworkConflictExclusions: [exclusion],
+      errors: ['synthetic exact structural-frame wall-run rejection'],
+    };
+    throw error;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, acceptedDungeon);
+  assert.equal(generationPass, 2);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.deepEqual(observedGrantPruningOverrides, [[], []]);
+  assert.equal(result.augmentationReplayDiagnostics.realizationAttempts, 1);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 1);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [exclusion],
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .prunedRouteNetworkGrantIds,
+    [],
+  );
+});
+
+test('unwalkable anchor support replaces only its exact supplemental room node', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:anchor-support-conflict',
+    type: 'routeNetwork',
+    grantId: 'grant:anchor-support-conflict',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const node = {
+    id: 'node:anchor-support-conflict',
+    operationId: operation.id,
+    kind: 'supplementRoom',
+    grammarId: 'industrial-switchgear-cache-descent',
+    blueprintId: 'ind-room-switchgear-cache-descent-01',
+    contentRole: 'treasure',
+    placement: { center: { x: -26, y: 14, z: 2 }, rotationQuarterTurns: 0 },
+    size: { x: 14, y: 8.4, z: 14 },
+    sockets: [],
+  };
+  const exactSupportCellId = `${node.id}:floor-tier:base:cell:2:2`;
+  const placementFailure = {
+    code: 'v4-anchor-placement-unwalkable-support',
+    recordId: `${node.id}:anchor:vault-reward:placement-request`,
+    ownerId: `${node.id}:anchor:vault-reward`,
+    details: {
+      roomId: node.id,
+      blueprintId: node.blueprintId,
+      grammarId: node.grammarId,
+      exactSupportCellId,
+      candidateCount: 1,
+      unwalkableSupportDetails: [{
+        supportCellId: exactSupportCellId,
+        walkabilityIntent: 'support-only',
+        floorKey: '-26,2@y14.000',
+        coveredByAuthoritativeFloorKey: '-26,2@y14.467',
+      }],
+    },
+  };
+  const overlayPlan = {
+    augmentationPlanHash: 'augmentation:anchor-support-conflict',
+    operations: [operation],
+    nodes: [node],
+    segments: [],
+  };
+  const attribution = collectDungeonAugmentationAnchorPlacementFailureAttribution(
+    overlayPlan,
+    [placementFailure],
+  );
+  const exclusion = {
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'route-network-anchor-placement-unwalkable-support',
+  };
+  assert.deepEqual(attribution.routeNetworkConflictExclusions, [exclusion]);
+  assert.deepEqual(attribution.failedRouteNetworkGrants, [{
+    grantId: operation.grantId,
+    augmentationOperationId: operation.id,
+    routeNetworkKind: operation.routeNetworkKind,
+    connectionIds: [],
+    roomIds: [node.id],
+    socketIds: [],
+    failureKinds: ['v4-anchor-placement-unwalkable-support'],
+  }]);
+
+  const acceptedDungeon = {
+    id: 'anchor-support-replacement-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  const observedGrantPruningOverrides = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    generationPass += 1;
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    observedGrantPruningOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    if (generationPass > 1) return acceptedDungeon;
+    const error = new Error('Synthetic exact anchor support rejection.');
+    error.code = 'DUNGEON_AUGMENTATION_ANCHOR_PLACEMENT_FAILED';
+    error.compatibility = {
+      compatible: false,
+      code: 'DUNGEON_AUGMENTATION_ANCHOR_PLACEMENT_FAILED',
+    };
+    error.augmentationDiagnostics = {
+      status: 'unchanged',
+      reason: 'DUNGEON_AUGMENTATION_ANCHOR_PLACEMENT_FAILED',
+      anchorPlacementFailures: [placementFailure],
+      errors: [placementFailure],
+      ...attribution,
+    };
+    throw error;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, acceptedDungeon);
+  assert.equal(generationPass, 2);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.deepEqual(observedGrantPruningOverrides, [[], []]);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 1);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [exclusion],
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .prunedRouteNetworkGrantIds,
+    [],
+  );
+});
+
+test('realization attempt limit one reaches a fixed point across two exact same-seed repairs', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:bounded-exact-replay',
+    type: 'routeNetwork',
+    grantId: 'grant:bounded-exact-replay',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const makeSegment = (middleZ) => ({
+    id: 'segment:bounded-exact-replay',
+    operationId: operation.id,
+    kind: 'route-network-segment',
+    connectorFamily: 'service-gallery',
+    routeRole: 'objective-route-coverage:spine',
+    from: { position: { x: 0, y: 0, z: 0 }, facing: { x: 1, y: 0, z: 0 } },
+    to: { position: { x: 8.4, y: 0, z: 0 }, facing: { x: -1, y: 0, z: 0 } },
+    path: [
+      { x: 0, y: 0, z: 0 },
+      { x: 2.8, y: 0, z: middleZ },
+      { x: 8.4, y: 0, z: 0 },
+    ],
+  });
+  const segments = [makeSegment(0), makeSegment(2.8)];
+  const repairBoundWitnessNode = {
+    id: 'node:bounded-exact-replay:witness',
+    operationId: operation.id,
+    kind: 'supplementRoom',
+    placement: { center: { x: 14, y: 0, z: 14 }, rotationQuarterTurns: 0 },
+    size: { x: 2.8, y: 2.8, z: 2.8 },
+    sockets: [],
+  };
+  const exclusions = segments.map((segment) => ({
+    grantId: operation.grantId,
+    entityKind: 'segment',
+    entityId: segment.id,
+    signature: createRouteNetworkConflictEntitySignature(segment, 'segment'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  }));
+  const normalizedExclusions = normalizeRouteNetworkConflictExclusions(exclusions);
+  const rejectedDungeon = (segment, ordinal) => ({
+    id: `bounded-exact-rejection:${ordinal}`,
+    augmentationStatus: 'applied',
+    augmentationOverlayPlan: {
+      operations: [operation],
+      // The first rejected overlay has two exact physical entities, providing
+      // a natural cap of two monotonic same-seed repair passes.
+      nodes: [repairBoundWitnessNode],
+      segments: [segment],
+    },
+    rooms: [],
+    connectionPlans: [{
+      id: segment.id,
+      augmentationOperationId: operation.id,
+      routeNetworkGrantId: operation.grantId,
+      isDungeonSupplement: true,
+    }],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: [`synthetic bounded exact conflict ${ordinal}`],
+        platformability: {
+          supplementConnectivityChecks: [{
+            accepted: false,
+            operationId: operation.id,
+            connectionId: segment.id,
+            missingOwnedCenterlinePointCount: 1,
+          }],
+        },
+      },
+    },
+  });
+  const observedConflictExclusions = [];
+  const observedGrantPruningOverrides = [];
+  const acceptedDungeon = {
+    id: 'bounded-exact-repair-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    observedGrantPruningOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    const pass = generationPass;
+    generationPass += 1;
+    return pass < segments.length
+      ? rejectedDungeon(segments[pass], pass)
+      : acceptedDungeon;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, acceptedDungeon);
+  assert.equal(generationPass, 3);
+  assert.deepEqual(observedConflictExclusions, [
+    [],
+    [exclusions[0]],
+    normalizedExclusions,
+  ]);
+  assert.deepEqual(observedGrantPruningOverrides, [[], [], []]);
+  assert.equal(result.augmentationReplayDiagnostics.realizationAttempts, 1);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 2);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords.map((record) => ({
+      sameSeedRepairPass: record.sameSeedRepairPass,
+      sameSeedRepairLimit: record.sameSeedRepairLimit,
+      prunedRouteNetworkGrantIds: record.prunedRouteNetworkGrantIds,
+      excludedRouteNetworkEntities: record.excludedRouteNetworkEntities,
+    })),
+    [{
+      sameSeedRepairPass: 1,
+      sameSeedRepairLimit: 2,
+      prunedRouteNetworkGrantIds: [],
+      excludedRouteNetworkEntities: [exclusions[0]],
+    }, {
+      sameSeedRepairPass: 2,
+      sameSeedRepairLimit: 2,
+      prunedRouteNetworkGrantIds: [],
+      excludedRouteNetworkEntities: [exclusions[1]],
+    }],
+  );
+});
+
+test('same-seed exact repair stops on signature no-progress and restores overrides', () => {
+  const { generator, sourceRandom, baseDungeon } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:no-progress-exact-replay',
+    type: 'routeNetwork',
+    grantId: 'grant:no-progress-exact-replay',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const makeSegment = (id) => ({
+    id,
+    operationId: operation.id,
+    kind: 'route-network-segment',
+    connectorFamily: 'service-gallery',
+    routeRole: 'objective-route-coverage:spine',
+    from: { position: { x: 0, y: 0, z: 0 }, facing: { x: 1, y: 0, z: 0 } },
+    to: { position: { x: 8.4, y: 0, z: 0 }, facing: { x: -1, y: 0, z: 0 } },
+    path: [{ x: 0, y: 0, z: 0 }, { x: 8.4, y: 0, z: 0 }],
+  });
+  const segments = [
+    makeSegment('segment:no-progress:first-ordinal'),
+    makeSegment('segment:no-progress:renumbered-ordinal'),
+  ];
+  assert.equal(
+    createRouteNetworkConflictEntitySignature(segments[0], 'segment'),
+    createRouteNetworkConflictEntitySignature(segments[1], 'segment'),
+    'the repeated conflict must differ only in diagnostic ordinal identity',
+  );
+  const repairBoundWitnessNode = {
+    id: 'node:no-progress:witness',
+    operationId: operation.id,
+    kind: 'supplementRoom',
+    placement: { center: { x: 14, y: 0, z: 14 }, rotationQuarterTurns: 0 },
+    size: { x: 2.8, y: 2.8, z: 2.8 },
+    sockets: [],
+  };
+  const rejectedDungeon = (segment, ordinal) => ({
+    id: `no-progress-exact-rejection:${ordinal}`,
+    augmentationStatus: 'applied',
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [repairBoundWitnessNode],
+      segments: [segment],
+    },
+    rooms: [],
+    connectionPlans: [{
+      id: segment.id,
+      augmentationOperationId: operation.id,
+      routeNetworkGrantId: operation.grantId,
+      isDungeonSupplement: true,
+    }],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: [`synthetic no-progress exact conflict ${ordinal}`],
+        platformability: {
+          supplementConnectivityChecks: [{
+            accepted: false,
+            operationId: operation.id,
+            connectionId: segment.id,
+            missingOwnedCenterlinePointCount: 1,
+          }],
+        },
+      },
+    },
+  });
+  const observedConflictExclusions = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    const pass = generationPass;
+    generationPass += 1;
+    return rejectedDungeon(segments[Math.min(pass, segments.length - 1)], pass);
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, baseDungeon);
+  assert.equal(generationPass, 2, 'the repeated physical signature must not replay again');
+  assert.equal(result.augmentationReplayDiagnostics.realizationAttempts, 1);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 1);
+  assert.deepEqual(observedConflictExclusions, [
+    [],
+    [result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities[0]],
+  ]);
+  assert.equal(generator.random, sourceRandom);
+  assert.equal(
+    Object.hasOwn(generator, 'augmentationRouteNetworkConflictExclusions'),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(generator, 'augmentationRouteNetworkPruningOverrides'),
+    false,
+  );
+});
+
+test('room-side connector preflight replay excludes the exact supplemental node, not its path', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:room-blocker',
+    type: 'routeNetwork',
+    grantId: 'grant:room-blocker',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const node = {
+    id: 'node:room-blocker',
+    operationId: operation.id,
+    kind: 'supplementRoom',
+    grammarId: 'industrial-switchback-room',
+    contentRole: 'challenge',
+    placement: { center: { x: 8.4, y: 0, z: 0 }, rotationQuarterTurns: 0 },
+    size: { x: 14, y: 5.6, z: 14 },
+    structure: {
+      collisionVolumes: [{
+        id: 'node:room-blocker:interior-obstruction',
+        center: { x: 5.6, y: 1.4, z: 0 },
+        size: { x: 2.8, y: 2.8, z: 2.8 },
+      }],
+    },
+    sockets: [{
+      id: 'node:room-blocker:entry',
+      localSocketId: 'entry',
+      position: { x: 1.4, y: 0, z: 0 },
+      facing: { x: -1, y: 0, z: 0 },
+    }],
+  };
+  const exclusion = {
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'route-network-runtime-connector-preflight-failed',
+  };
+  const acceptedDungeon = {
+    id: 'room-blocker-replacement-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  const observedGrantPruningOverrides = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    generationPass += 1;
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    observedGrantPruningOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    if (generationPass > 1) return acceptedDungeon;
+    const error = new Error('Synthetic room-side connector preflight blocker.');
+    error.code = 'DUNGEON_AUGMENTATION_CONNECTOR_PREFLIGHT_FAILED';
+    error.augmentationDiagnostics = {
+      status: 'unchanged',
+      reason: 'connector-entrance-preflight-failed',
+      augmentationPlanHash: 'augmentation:room-blocker-rejected',
+      routeNetworkGrantIds: [operation.grantId],
+      failedRouteNetworkGrants: [{
+        grantId: operation.grantId,
+        augmentationOperationId: operation.id,
+        routeNetworkKind: operation.routeNetworkKind,
+        connectionIds: [],
+        roomIds: [node.id],
+        socketIds: [node.sockets[0].id],
+      }],
+      routeNetworkConflictExclusions: [exclusion],
+      errors: ['synthetic room-side connector blocker'],
+    };
+    throw error;
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, acceptedDungeon);
+  assert.equal(generationPass, 2);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.deepEqual(observedGrantPruningOverrides, [[], []]);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [exclusion],
+  );
+});
+
+test('room-side failure on an authored parent room never excludes a supplemental node', () => {
+  const { generator, baseDungeon } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:authored-parent-attachment',
+    type: 'routeNetwork',
+    grantId: 'grant:authored-parent-attachment',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const supplementalNode = {
+    id: 'node:healthy-supplement',
+    operationId: operation.id,
+    kind: 'supplementRoom',
+    grammarId: 'industrial-switchback-room',
+    placement: { center: { x: 8.4, y: 0, z: 0 }, rotationQuarterTurns: 0 },
+    size: { x: 14, y: 5.6, z: 14 },
+    sockets: [],
+  };
+  const rejectedDungeon = {
+    id: 'authored-parent-room-side-rejection',
+    augmentationStatus: 'applied',
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [supplementalNode],
+      segments: [],
+    },
+    rooms: [{
+      id: 'authored-parent-room',
+      augmentationOperationId: operation.id,
+    }],
+    connectionPlans: [],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: ['synthetic authored parent room-side failure'],
+        connectorEntrances: {
+          failedRouteNetworkGrants: [{
+            grantId: operation.grantId,
+            augmentationOperationId: operation.id,
+            roomIds: ['authored-parent-room'],
+            socketIds: ['authored-parent-room:socket'],
+          }],
+          checks: [{
+            accepted: false,
+            augmentationOperationId: operation.id,
+            roomId: 'authored-parent-room',
+            socketId: 'authored-parent-room:socket',
+            roomSideFailure: true,
+            pathSideFailure: false,
+          }],
+        },
+      },
+    },
+  };
+  const observedConflictExclusions = [];
+  const observedGrantPruningOverrides = [];
+  generator._generateOnce = () => {
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    observedGrantPruningOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    return rejectedDungeon;
+  };
+
+  assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), baseDungeon);
+  assert.deepEqual(observedConflictExclusions, [[]]);
+  assert.deepEqual(observedGrantPruningOverrides, [[]]);
+  assert.equal(baseDungeon.augmentationReplayDiagnostics.runtimePruningPasses, 0);
+});
+
+test('aggregate global room reachability failure does not ban an otherwise healthy module', () => {
+  const { generator, baseDungeon } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:aggregate-room-check',
+    type: 'routeNetwork',
+    grantId: 'grant:aggregate-room-check',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const node = {
+    id: 'node:aggregate-room-check',
+    operationId: operation.id,
+    kind: 'supplementRoom',
+    grammarId: 'industrial-switchback-room',
+    placement: { center: { x: 8.4, y: 0, z: 0 }, rotationQuarterTurns: 0 },
+    size: { x: 14, y: 5.6, z: 14 },
+    sockets: [],
+  };
+  const rejectedDungeon = {
+    id: 'aggregate-room-rejection',
+    augmentationStatus: 'applied',
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [],
+    },
+    rooms: [{ id: node.id, augmentationOperationId: operation.id }],
+    connectionPlans: [],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: ['synthetic global reachability failure'],
+        platformability: {
+          supplementRoomConnectivityChecks: [{
+            accepted: false,
+            operationId: operation.id,
+            roomId: node.id,
+            meetsSubstantiveRoomFootprint: true,
+            // These aggregate values are false in the real validator whenever
+            // only global reachability fails. Attribution must inspect their
+            // local constituents instead of treating either aggregate as a
+            // defect in this room's exact physical signature.
+            baseFootprintCoverageAccepted: false,
+            localRoomConnectivityAccepted: false,
+            missingBaseFootprintColumnKeys: [],
+            nonNavigableBaseFootprintFloorKeys: [],
+            locallyUnreachableBaseFootprintFloorKeys: [],
+            locallyNonReturnableBaseFootprintFloorKeys: [],
+            localApproachChecks: [{
+              floorKey: 'healthy-floor@0.000',
+              reachableFromFirstApproach: true,
+              returnReachable: true,
+            }],
+            locallyUnreachableRoomFloorKeys: [],
+            locallyNonReturnableRoomFloorKeys: [],
+            unexpectedNonNavigableRoomFloorKeys: [],
+            outsideDeclaredRoomFloorKeys: [],
+            foreignRoomFloorOwnership: [],
+            globallyUnreachableBaseFootprintFloorKeys: ['healthy-floor@0.000'],
+            globallyNonReturnableRoomFloorKeys: ['healthy-floor@0.000'],
+          }],
+        },
+      },
+    },
+  };
+  const observedConflictExclusions = [];
+  generator._generateOnce = () => {
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    return rejectedDungeon;
+  };
+
+  assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), baseDungeon);
+  assert.deepEqual(observedConflictExclusions, [[]]);
+  assert.equal(baseDungeon.augmentationReplayDiagnostics.runtimePruningPasses, 0);
+});
+
+test('a local room component failure still excludes that exact supplemental node', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const operation = {
+    id: 'operation:local-room-check',
+    type: 'routeNetwork',
+    grantId: 'grant:local-room-check',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const node = {
+    id: 'node:local-room-check',
+    operationId: operation.id,
+    kind: 'supplementRoom',
+    grammarId: 'industrial-switchback-room',
+    placement: { center: { x: 8.4, y: 0, z: 0 }, rotationQuarterTurns: 0 },
+    size: { x: 14, y: 5.6, z: 14 },
+    sockets: [],
+  };
+  const exclusion = {
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  };
+  const rejectedDungeon = {
+    id: 'local-room-rejection',
+    augmentationStatus: 'applied',
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [],
+    },
+    rooms: [{ id: node.id, augmentationOperationId: operation.id }],
+    connectionPlans: [],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: ['synthetic local room component failure'],
+        platformability: {
+          supplementRoomConnectivityChecks: [{
+            accepted: false,
+            operationId: operation.id,
+            roomId: node.id,
+            meetsSubstantiveRoomFootprint: true,
+            baseFootprintCoverageAccepted: true,
+            localRoomConnectivityAccepted: false,
+            missingBaseFootprintColumnKeys: [],
+            nonNavigableBaseFootprintFloorKeys: [],
+            locallyUnreachableBaseFootprintFloorKeys: [],
+            locallyNonReturnableBaseFootprintFloorKeys: [],
+            localApproachChecks: [{
+              floorKey: 'local-room-entry@0.000',
+              reachableFromFirstApproach: true,
+              returnReachable: true,
+            }],
+            connectedSocketIds: ['local-room:entry'],
+            distinctLocalApproachCount: 1,
+            locallyUnreachableRoomFloorKeys: ['local-room-interior@0.000'],
+            locallyNonReturnableRoomFloorKeys: [],
+            globallyNonReturnableRoomFloorKeys: [],
+            unexpectedNonNavigableRoomFloorKeys: [],
+            outsideDeclaredRoomFloorKeys: [],
+            foreignRoomFloorOwnership: [],
+          }],
+        },
+      },
+    },
+  };
+  const acceptedDungeon = {
+    id: 'local-room-replacement-accepted',
+    augmentationStatus: 'applied',
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedConflictExclusions = [];
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    generationPass += 1;
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    return generationPass === 1 ? rejectedDungeon : acceptedDungeon;
+  };
+
+  assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), acceptedDungeon);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.equal(acceptedDungeon.augmentationReplayDiagnostics.runtimePruningPasses, 1);
+});
+
+test('global connector reachability and shortcut-control failures do not ban a healthy path', () => {
+  for (const failureKind of ['global-centerline', 'shortcut-control']) {
+    const { generator, baseDungeon } = createReplayLifecycleFixture();
+    const operation = {
+      id: `operation:${failureKind}`,
+      type: 'routeNetwork',
+      grantId: `grant:${failureKind}`,
+      routeNetworkKind: failureKind === 'shortcut-control'
+        ? 'cross-band-shortcut'
+        : 'objective-route-coverage',
+    };
+    const segment = {
+      id: `segment:${failureKind}`,
+      operationId: operation.id,
+      kind: 'route-network-segment',
+      connectorFamily: failureKind === 'shortcut-control' ? 'lift' : 'service-gallery',
+      routeRole: `${operation.routeNetworkKind}:spine`,
+      from: {
+        position: { x: 0, y: 0, z: 0 },
+        facing: { x: 1, y: 0, z: 0 },
+      },
+      to: {
+        position: { x: 8.4, y: 0, z: 0 },
+        facing: { x: -1, y: 0, z: 0 },
+      },
+      path: [{ x: 0, y: 0, z: 0 }, { x: 8.4, y: 0, z: 0 }],
+    };
+    const healthyLocalConnectivity = {
+      connectionId: segment.id,
+      operationId: operation.id,
+      accepted: failureKind !== 'global-centerline',
+      centerlineChecks: [{
+        floorKey: 'healthy-segment-floor@0.000',
+        reachable: failureKind !== 'global-centerline',
+      }],
+      missingOwnedCenterlinePointCount: 0,
+      // This is the real aggregate produced when the segment is locally
+      // complete but its whole operation is disconnected upstream.
+      unreachableCenterlinePointCount: failureKind === 'global-centerline' ? 1 : 0,
+      locallyUnreachableTraversalFloorKeys: [],
+      locallyNonReturnableTraversalFloorKeys: [],
+      strictLocalComponentAccepted: true,
+      finalCollisionSpineCheck: {
+        accepted: true,
+        malformed: false,
+        missingFloorKeys: [],
+        foreignOwnerFloorKeys: [],
+        forwardAccepted: true,
+        reverseAccepted: true,
+      },
+      needsVerticalTransfer: false,
+      hasRampTransfer: false,
+      hasRealVerticalTransfer: true,
+      verticalContractChecks: [],
+    };
+    const platformability = {
+      supplementConnectivityChecks: [healthyLocalConnectivity],
+      ...(failureKind === 'shortcut-control' ? {
+        supplementShortcutConnectivityChecks: [{
+          connectionId: segment.id,
+          operationId: operation.id,
+          accepted: false,
+          sourceReachableBeforeActivation: true,
+          farSideReachableBeforeActivation: true,
+          postActivationBidirectional: true,
+          initiallyUnavailable: true,
+          matchingContractChecks: [{ accepted: true }],
+          matchingTraversalLinkIds: ['shortcut:forward', 'shortcut:reverse'],
+          mechanismRecordAccepted: false,
+        }],
+      } : {}),
+    };
+    const rejectedDungeon = {
+      id: `aggregate-${failureKind}-rejection`,
+      augmentationStatus: 'applied',
+      augmentationOverlayPlan: {
+        operations: [operation],
+        nodes: [],
+        segments: [segment],
+      },
+      rooms: [],
+      connectionPlans: [{
+        id: segment.id,
+        augmentationOperationId: operation.id,
+        routeNetworkGrantId: operation.grantId,
+        isDungeonSupplement: true,
+      }],
+      progression: {
+        validation: {
+          accepted: false,
+          errors: [`synthetic ${failureKind} failure`],
+          platformability,
+        },
+      },
+    };
+    const observedConflictExclusions = [];
+    let generationPass = 0;
+    generator._generateOnce = () => {
+      generationPass += 1;
+      observedConflictExclusions.push([
+        ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+      ]);
+      return rejectedDungeon;
+    };
+
+    assert.equal(
+      generator._generateIndustrialDungeonWithAugmentationReplay(),
+      baseDungeon,
+      failureKind,
+    );
+    assert.equal(generationPass, 1, failureKind);
+    assert.deepEqual(observedConflictExclusions, [[]], failureKind);
+    assert.equal(
+      baseDungeon.augmentationReplayDiagnostics.runtimePruningPasses,
+      0,
+      failureKind,
+    );
+  }
+});
+
+test('augmentation replay replaces one exact late-conflicting segment and retains unrelated networks', () => {
+  const { generator } = createReplayLifecycleFixture();
+  const retainedOperation = {
+    id: 'operation:retained',
+    type: 'routeNetwork',
+    grantId: 'grant:retained',
+    routeNetworkKind: 'landmark-perimeter-loop',
+  };
+  const conflictingOperation = {
+    id: 'operation:conflicting',
+    type: 'routeNetwork',
+    grantId: 'grant:conflicting',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const conflictingSegment = {
+    id: 'connection:conflicting',
+    operationId: conflictingOperation.id,
+    kind: 'route-network-segment',
+    connectorFamily: 'service-gallery',
+    routeRole: 'objective-route-coverage:spine',
+    from: {
+      nodeId: 'authored:a',
+      socketId: 'authored:a:exit',
+      position: { x: 0, y: 0, z: 0 },
+      facing: { x: 1, y: 0, z: 0 },
+    },
+    to: {
+      nodeId: 'supplement:conflicting',
+      socketId: 'supplement:conflicting:entry',
+      position: { x: 8.4, y: 0, z: 0 },
+      facing: { x: -1, y: 0, z: 0 },
+    },
+    path: [{ x: 0, y: 0, z: 0 }, { x: 8.4, y: 0, z: 0 }],
+  };
+  const exclusion = {
+    grantId: conflictingOperation.grantId,
+    entityKind: 'segment',
+    entityId: conflictingSegment.id,
+    signature: createRouteNetworkConflictEntitySignature(
+      conflictingSegment,
+      'segment',
+    ),
+    reason: 'route-network-runtime-physical-validation-failed',
+  };
+  const rejectedDungeon = {
+    id: 'late-physical-rejection',
+    augmentationStatus: 'applied',
+    augmentationPlanHash: 'augmentation:late-physical-rejection',
+    augmentationOverlayPlan: {
+      operations: [retainedOperation, conflictingOperation],
+      nodes: [],
+      segments: [conflictingSegment],
+    },
+    connectionPlans: [{
+      id: 'connection:conflicting',
+      isDungeonSupplement: true,
+      augmentationOperationId: conflictingOperation.id,
+      routeNetworkGrantId: conflictingOperation.grantId,
+    }],
+    rooms: [],
+    progression: {
+      validation: {
+        accepted: false,
+        errors: ['Synthetic late physical validation failure.'],
+        platformability: {
+          supplementConnectivityChecks: [{
+            connectionId: 'connection:conflicting',
+            operationId: conflictingOperation.id,
+            accepted: false,
+            missingOwnedCenterlinePointCount: 1,
+          }],
+        },
+      },
+    },
+  };
+  const acceptedDungeon = {
+    id: 'late-physical-repaired',
+    augmentationStatus: 'applied',
+    augmentationOverlayPlan: {
+      operations: [retainedOperation, conflictingOperation],
+      nodes: [],
+      segments: [{
+        ...conflictingSegment,
+        path: [
+          { x: 0, y: 0, z: 0 },
+          { x: 2.8, y: 0, z: 2.8 },
+          { x: 8.4, y: 0, z: 0 },
+        ],
+      }],
+    },
+    progression: { validation: { accepted: true, errors: [] } },
+  };
+  const observedOverrides = [];
+  const observedConflictExclusions = [];
+  const disposalCalls = [];
+  generator._generateOnce = () => {
+    observedOverrides.push([
+      ...(generator.augmentationRouteNetworkPruningOverrides ?? []),
+    ]);
+    observedConflictExclusions.push([
+      ...(generator.augmentationRouteNetworkConflictExclusions ?? []),
+    ]);
+    return observedOverrides.length === 1 ? rejectedDungeon : acceptedDungeon;
+  };
+  generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+    disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+  };
+
+  const result = generator._generateIndustrialDungeonWithAugmentationReplay();
+  assert.equal(result, acceptedDungeon);
+  assert.deepEqual(observedOverrides, [[], []]);
+  assert.deepEqual(observedConflictExclusions, [[], [exclusion]]);
+  assert.equal(result.augmentationReplayDiagnostics.realizationAttempts, 1);
+  assert.equal(result.augmentationReplayDiagnostics.runtimePruningPasses, 1);
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .prunedRouteNetworkGrantIds,
+    [],
+  );
+  assert.deepEqual(
+    result.augmentationReplayDiagnostics.runtimePruningRecords[0]
+      .excludedRouteNetworkEntities,
+    [exclusion],
+  );
+  assert.deepEqual(
+    result.augmentationOverlayPlan.operations.map(({ id }) => id),
+    [retainedOperation.id, conflictingOperation.id],
+    'the unrelated landmark and repaired coverage network must both remain',
+  );
+  assert.deepEqual(disposalCalls, [
+    ['late-physical-rejection', 'base'],
+    ['base', 'late-physical-repaired'],
+  ]);
+});
+
+test('augmentation replay never prunes the final retained route network', () => {
+  const { generator, baseDungeon } = createReplayLifecycleFixture();
+  let generationPass = 0;
+  generator._generateOnce = () => {
+    generationPass += 1;
+    const error = new Error('Synthetic final-network connector conflict.');
+    error.code = 'DUNGEON_AUGMENTATION_CONNECTOR_PREFLIGHT_FAILED';
+    error.augmentationDiagnostics = {
+      status: 'unchanged',
+      reason: 'connector-entrance-preflight-failed',
+      routeNetworkGrantIds: ['grant:final'],
+      failedRouteNetworkGrants: [{ grantId: 'grant:final' }],
+      errors: ['synthetic final-network connector conflict'],
+    };
+    throw error;
+  };
+
+  assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), baseDungeon);
+  assert.equal(generationPass, 1);
+  assert.equal(baseDungeon.augmentationReplayDiagnostics.runtimePruningPasses, 0);
+  assert.equal(baseDungeon.augmentationReplayDiagnostics.realizationAttempts, 1);
+});
+
+test('augmentation replay owns and disposes accepted, rejected, and failed candidates exactly once', () => {
+  {
+    const { generator, baseDungeon } = createReplayLifecycleFixture();
+    const acceptedDungeon = {
+      id: 'accepted',
+      augmentationStatus: 'applied',
+      progression: { validation: { accepted: true, errors: [] } },
+    };
+    const disposalCalls = [];
+    generator._generateOnce = () => acceptedDungeon;
+    generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+      disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+    };
+    assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), acceptedDungeon);
+    assert.deepEqual(disposalCalls, [['base', 'accepted']]);
+  }
+
+  {
+    const { generator, baseDungeon } = createReplayLifecycleFixture();
+    const rejectedDungeon = {
+      id: 'rejected',
+      augmentationStatus: 'applied',
+      augmentationDiagnostics: { errors: [] },
+      progression: { validation: { accepted: false, errors: ['synthetic-invalid'] } },
+    };
+    const disposalCalls = [];
+    generator._generateOnce = () => rejectedDungeon;
+    generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+      disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+    };
+    assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), baseDungeon);
+    assert.deepEqual(disposalCalls, [['rejected', 'base']]);
+  }
+
+  {
+    const { generator, baseDungeon } = createReplayLifecycleFixture();
+    const disposalCalls = [];
+    generator._generateOnce = () => { throw createExpectedPlanningRejection(); };
+    generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+      disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+    };
+    assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), baseDungeon);
+    assert.deepEqual(disposalCalls, [], 'a thrown _generateOnce owns its partial cleanup');
+  }
+
+  {
+    const { generator, baseDungeon } = createReplayLifecycleFixture({ committed: true });
+    const rejectedDungeon = {
+      id: 'committed-rejected',
+      augmentationStatus: 'applied',
+      augmentationDiagnostics: { errors: [] },
+      progression: { validation: { accepted: false, errors: ['committed-invalid'] } },
+    };
+    const disposalCalls = [];
+    const committedCleanupErrors = [
+      new Error('Synthetic committed candidate cleanup failure.'),
+      new Error('Synthetic committed base cleanup failure.'),
+    ];
+    generator._generateOnce = () => rejectedDungeon;
+    generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+      disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+      throw committedCleanupErrors[disposalCalls.length - 1];
+    };
+    assert.throws(
+      () => generator._generateIndustrialDungeonWithAugmentationReplay(),
+      (error) => (
+        error.name === 'DungeonAugmentationIncompatibleContentError'
+          && error.generationCandidateCleanupError === committedCleanupErrors[0]
+          && error.generationCandidateCleanupErrors?.length === 2
+      ),
+    );
+    assert.deepEqual(disposalCalls, [
+      ['committed-rejected', 'base'],
+      ['base', null],
+    ]);
+    assert.equal(Object.hasOwn(generator, 'augmentationPlanSeedOverride'), false);
+    assert.equal(baseDungeon.id, 'base');
+  }
+});
+
+test('augmentation replay propagates programming failures and preserves primary cleanup errors', () => {
+  {
+    const { generator } = createReplayLifecycleFixture();
+    const snapshotError = new TypeError('Synthetic planning snapshot failure.');
+    const disposalCalls = [];
+    generator._createIndustrialDungeonAugmentationPlanningSnapshot = () => {
+      throw snapshotError;
+    };
+    generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+      disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+    };
+    assert.throws(
+      () => generator._generateIndustrialDungeonWithAugmentationReplay(),
+      (error) => error === snapshotError,
+    );
+    assert.deepEqual(disposalCalls, [['base', null]]);
+    assert.equal(Object.hasOwn(generator, 'augmentationPlanSeedOverride'), false);
+  }
+
+  {
+    const { generator } = createReplayLifecycleFixture();
+    const primaryError = new TypeError('Synthetic programming failure.');
+    const cleanupError = new Error('Synthetic base cleanup failure.');
+    const disposalCalls = [];
+    generator._generateOnce = () => { throw primaryError; };
+    generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+      disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+      throw cleanupError;
+    };
+    assert.throws(
+      () => generator._generateIndustrialDungeonWithAugmentationReplay(),
+      (error) => (
+        error === primaryError
+          && error.generationCandidateCleanupError === cleanupError
+      ),
+    );
+    assert.deepEqual(disposalCalls, [['base', null]]);
+    assert.equal(Object.hasOwn(generator, 'augmentationPlanSeedOverride'), false);
+    assert.equal(
+      Object.hasOwn(generator, '_augmentationReplayPlanningSnapshotOverride'),
+      false,
+    );
+  }
+
+  {
+    const { generator } = createReplayLifecycleFixture();
+    const rejectedDungeon = {
+      id: 'dispose-rejected',
+      augmentationStatus: 'applied',
+      augmentationDiagnostics: { errors: [] },
+      progression: { validation: { accepted: false, errors: ['synthetic-invalid'] } },
+    };
+    const disposalError = new Error('Synthetic rejected-candidate disposal failure.');
+    const disposalCalls = [];
+    generator._generateOnce = () => rejectedDungeon;
+    generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+      disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+      if (candidate === rejectedDungeon) throw disposalError;
+    };
+    assert.throws(
+      () => generator._generateIndustrialDungeonWithAugmentationReplay(),
+      (error) => error === disposalError,
+    );
+    assert.deepEqual(disposalCalls, [
+      ['dispose-rejected', 'base'],
+      ['base', null],
+    ]);
+    assert.equal(Object.hasOwn(generator, 'augmentationPlanSeedOverride'), false);
+  }
+
+  {
+    const { generator } = createReplayLifecycleFixture();
+    const acceptedDungeon = {
+      id: 'finalize-rejected',
+      augmentationStatus: 'applied',
+      progression: { validation: { accepted: true, errors: [] } },
+    };
+    const finalizationError = new Error('Synthetic finalization failure.');
+    const disposalCalls = [];
+    generator._generateOnce = () => acceptedDungeon;
+    generator._finalizeAcceptedIndustrialDungeon = () => { throw finalizationError; };
+    generator._disposeGeneratedDungeonCandidate = (candidate, preserved = null) => {
+      disposalCalls.push([candidate?.id, preserved?.id ?? null]);
+    };
+    assert.throws(
+      () => generator._generateIndustrialDungeonWithAugmentationReplay(),
+      (error) => error === finalizationError,
+    );
+    assert.deepEqual(disposalCalls, [
+      ['finalize-rejected', 'base'],
+      ['base', null],
+    ]);
+  }
+});
 
 test('V4 endpoint seams quantize half-grid thresholds once for every cardinal facing', () => {
   const tileSize = 2.8;
@@ -991,6 +3335,59 @@ test('the Industrial adapter forwards authoritative base volumes into route plan
   );
 });
 
+test('the Industrial adapter protects resolved room floors below base elevation', () => {
+  const trapRoom = {
+    id: 'trapRoom',
+    type: 'trap',
+    x: 18,
+    z: 58,
+    width: 17,
+    depth: 15,
+    baseElevation: 28,
+    minY: 23.2,
+    maxY: 43.2,
+    ceilingHeight: 15.2,
+    dropSpace: {
+      lowerElevation: -4.8,
+      lowerBounds: { minX: 12, maxX: 20, minZ: 55, maxZ: 63 },
+    },
+  };
+  const baseDraft = createIndustrialBaseDraft({
+    rooms: [trapRoom],
+    connectionPlans: [],
+    tileSize: 2.8,
+  });
+  const roomVolume = baseDraft.occupiedVolumes[0];
+
+  assert.equal(roomVolume.id, 'base:room:trapRoom:occupied');
+  assert.ok(Math.abs(roomVolume.center.y - 35.6) <= 1e-9);
+  assert.ok(Math.abs(roomVolume.size.y - 15.2) <= 1e-9);
+
+  const dropSpaceVolume = baseDraft.occupiedVolumes.find(({ id }) => (
+    id === 'base:room:trapRoom:drop-space-occupied'
+  ));
+  assert.ok(dropSpaceVolume);
+  assert.equal(dungeonVolumesOverlap(dropSpaceVolume, {
+    center: { x: 12 * 2.8, y: 21, z: 63 * 2.8 },
+    size: { x: 2.8, y: 14, z: 2.8 },
+  }), true, 'a supplemental y14..28 shell must collide with the authored basement volume');
+  assert.equal(dungeonVolumesOverlap(dropSpaceVolume, {
+    center: { x: 12 * 2.8, y: 18.5, z: 63 * 2.8 },
+    size: { x: 2.8, y: 9, z: 2.8 },
+  }), false, 'a supplemental shell ending below y23.2 remains safely stackable');
+
+  const host = createIndustrialAugmentationHost({
+    baseDraft,
+    rooms: [trapRoom],
+    connectionPlans: [],
+    tileSize: 2.8,
+  });
+  const protectedDropSpaceVolume = host.extensionRegions[0]
+    .routeNetworkPlacementProtectedVolumes
+    .find(({ id }) => id === dropSpaceVolume.id);
+  assert.ok(protectedDropSpaceVolume);
+});
+
 test('the pure planner accepts the Industrial adapter world-meter snapshot without replacing its base graph', () => {
   const rooms = [
     { id: 'enemyNest', type: 'combat', x: -30, z: 0, width: 7, depth: 7, baseElevation: 0 },
@@ -1345,7 +3742,11 @@ test(`${VERIFICATION_SEED_COUNT} pure V4 seeds realize a deterministic, active p
     };
     const first = augmentDungeonDraft(options);
     const repeated = augmentDungeonDraft(options);
-    assert.equal(first.status, 'applied', JSON.stringify(first.diagnostics.errors));
+    assert.equal(
+      first.status,
+      'applied',
+      `${options.layoutSeed}: ${JSON.stringify(first.diagnostics.errors)}`,
+    );
     assert.deepEqual(first.overlayPlan, repeated.overlayPlan);
     assert.equal(first.overlayPlan.schema, DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA);
     assert.equal(first.overlayPlan.operations.length, 1);
@@ -1540,8 +3941,8 @@ test('the Industrial host excludes special-surface conveyor routes from generic 
 
 test('the Industrial host protects every authored gallery footprint cell', () => {
   const rooms = [
-    { id: 'enemyNest', x: -10, z: 0, width: 7, depth: 7, baseElevation: 0 },
-    { id: 'keycardRoom', x: 10, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'enemyNest', x: -8, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'keycardRoom', x: 8, z: 0, width: 7, depth: 7, baseElevation: 0 },
   ];
   const connectionPlans = [{
     id: 'enemyNest_keycardRoom_ground',
@@ -1550,9 +3951,11 @@ test('the Industrial host protects every authored gallery footprint cell', () =>
     toRoomId: 'keycardRoom',
     level: 0,
     elevation: 0,
-    fullPath: [{ x: -7, z: 0 }, { x: 7, z: 0 }],
-    fromSocket: { id: 'gallery:from', roomId: 'enemyNest', x: -7, z: 0, elevation: 0, facingX: 1, facingZ: 0 },
-    toSocket: { id: 'gallery:to', roomId: 'keycardRoom', x: 7, z: 0, elevation: 0, facingX: -1, facingZ: 0 },
+    // Keep this footprint-only fixture below the objective-route coverage
+    // threshold; coverage allocation is exercised by dedicated host tests.
+    fullPath: [{ x: -5, z: 0 }, { x: 5, z: 0 }],
+    fromSocket: { id: 'gallery:from', roomId: 'enemyNest', x: -5, z: 0, elevation: 0, facingX: 1, facingZ: 0 },
+    toSocket: { id: 'gallery:to', roomId: 'keycardRoom', x: 5, z: 0, elevation: 0, facingX: -1, facingZ: 0 },
     galleryFootprintTiles: [
       { x: 0, z: -2, elevation: 0 },
       { x: 0, z: -1, elevation: 0 },
@@ -1583,8 +3986,8 @@ test('the Industrial host protects every authored gallery footprint cell', () =>
 
 test('the Industrial host and base draft preserve exact family-reserved connector heights', () => {
   const rooms = [
-    { id: 'enemyNest', x: -10, z: 0, width: 7, depth: 7, baseElevation: 0 },
-    { id: 'keycardRoom', x: 10, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'enemyNest', x: -8, z: 0, width: 7, depth: 7, baseElevation: 0 },
+    { id: 'keycardRoom', x: 8, z: 0, width: 7, depth: 7, baseElevation: 0 },
   ];
   const connectionPlans = [{
     id: 'enemyNest_keycardRoom_ground',
@@ -1593,9 +3996,11 @@ test('the Industrial host and base draft preserve exact family-reserved connecto
     toRoomId: 'keycardRoom',
     level: 0,
     elevation: 14,
-    fullPath: [{ x: -7, z: 0 }, { x: 7, z: 0 }],
-    fromSocket: { id: 'gallery:from', roomId: 'enemyNest', x: -7, z: 0, elevation: 14, facingX: 1, facingZ: 0 },
-    toSocket: { id: 'gallery:to', roomId: 'keycardRoom', x: 7, z: 0, elevation: 14, facingX: -1, facingZ: 0 },
+    // Keep this vertical-interval fixture below the objective-route coverage
+    // threshold; only the exact reserved Y extents are under test here.
+    fullPath: [{ x: -5, z: 0 }, { x: 5, z: 0 }],
+    fromSocket: { id: 'gallery:from', roomId: 'enemyNest', x: -5, z: 0, elevation: 14, facingX: 1, facingZ: 0 },
+    toSocket: { id: 'gallery:to', roomId: 'keycardRoom', x: 5, z: 0, elevation: 14, facingX: -1, facingZ: 0 },
     familyReservedFootprintColumns: [
       { x: 0, z: 0, minY: 13.4, maxY: 17.6, purposes: ['gallery-envelope'] },
       { x: 0, z: 0, minY: 27.4, maxY: 31.6, purposes: ['gallery-envelope'] },

@@ -9,6 +9,7 @@ import {
   RELEASE_PROFILE_ID,
   RELEASE_REQUIRED_SUITE_IDS,
   RELEASE_SUITE_CONTRACTS,
+  assertCleanReleaseProvenance,
   assertMatchingReleaseProvenance,
   createReleaseProvenance,
   createReleaseSuiteReceipt,
@@ -32,6 +33,7 @@ if (!outputArgument) throw new Error('--output=<path> is required for an immutab
 const outputPath = path.resolve(projectRoot, outputArgument);
 const profile = DUNGEON_AUGMENTATION_PROFILES[RELEASE_PROFILE_ID];
 const provenance = await createReleaseProvenance({ projectRoot, profile });
+assertCleanReleaseProvenance(provenance, `release receipt ${suiteId} source before run`);
 
 try {
   await access(outputPath);
@@ -107,13 +109,16 @@ for (const command of contract.commands) {
 const postRunProvenance = await createReleaseProvenance({ projectRoot, profile });
 const sourceStable = provenance.gitCommit === postRunProvenance.gitCommit
   && provenance.sourceHash === postRunProvenance.sourceHash
-  && provenance.profile.hash === postRunProvenance.profile.hash;
+  && provenance.profile.hash === postRunProvenance.profile.hash
+  && provenance.sourceDirty === false
+  && postRunProvenance.sourceDirty === false;
 const receipt = createReleaseSuiteReceipt({
   suiteId,
   provenance,
   commandResults,
   sourceStable,
   postRunSourceHash: postRunProvenance.sourceHash,
+  postRunSourceDirty: postRunProvenance.sourceDirty,
 });
 const action = await writeImmutableJson(outputPath, receipt);
 console.log(JSON.stringify({

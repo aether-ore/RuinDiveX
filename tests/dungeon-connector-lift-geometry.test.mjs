@@ -56,7 +56,8 @@ function createLiftPlan(direction) {
   return plan;
 }
 
-function realizePlan(plan) {
+function realizePlan(plan, { roomOwnedPathIndices = [] } = {}) {
+  const roomOwnedPathIndexSet = new Set(roomOwnedPathIndices);
   const tiles = new Map(plan.bridgePath.map((point) => [
     `${point.x},${point.z}`,
     {
@@ -64,6 +65,7 @@ function realizePlan(plan) {
       type: 'hallway',
       elevation: plan.sourceElevation,
       level: plan.sourceElevation / 14,
+      ...(roomOwnedPathIndexSet.has(point.x) ? { roomId: plan.fromRoomId } : {}),
     },
   ]));
   const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
@@ -75,6 +77,42 @@ function realizePlan(plan) {
   );
   return { generator, tiles, floorTiles };
 }
+
+test('a lift approach under a room footprint keeps its signed cross-section elevation', () => {
+  const underpassPlan = createLiftPlan('ascending');
+  underpassPlan.connectorVariantConstraints.roomFootprints = [{
+    roomId: underpassPlan.fromRoomId,
+    minX: -1,
+    maxX: 1,
+    minZ: -1,
+    maxZ: 1,
+  }];
+  realizePlan(underpassPlan, { roomOwnedPathIndices: [0] });
+
+  const underpassSection = underpassPlan.galleryCrossSections.find(({ pathIndex }) => (
+    pathIndex === 1
+  ));
+  assert.ok(underpassSection, 'the vertically separate approach must retain a physical section');
+  assert.deepEqual(
+    underpassSection.sections.map(({ elevation }) => elevation),
+    [underpassPlan.sourceElevation],
+  );
+
+  const roomInteriorPlan = createLiftPlan('ascending');
+  roomInteriorPlan.connectorVariantConstraints.roomFootprints = [{
+    roomId: roomInteriorPlan.fromRoomId,
+    minX: -1,
+    maxX: 1,
+    minZ: -1,
+    maxZ: 1,
+  }];
+  realizePlan(roomInteriorPlan, { roomOwnedPathIndices: [0, 1] });
+  assert.equal(
+    roomInteriorPlan.galleryCrossSections.some(({ pathIndex }) => pathIndex === 1),
+    false,
+    'a same-elevation authored room floor must still suppress connector shell sections',
+  );
+});
 
 function floorByKey(generator, floorTiles, floorKey) {
   return floorTiles.find((floor) => generator._getFloorTileGraphKey(floor) === floorKey);
@@ -210,6 +248,107 @@ for (const direction of ['ascending', 'descending']) {
         landingFloors.some((floor) => floor.forcedRetainingWallEdges?.length),
         false,
       );
+
+      const boundaryWallRuns = generator._collectBoundaryWallRuns(
+        tiles,
+        new Set(),
+        [],
+        new Map(),
+        floorTiles,
+      );
+      const legacyBoundaryWallRuns = generator._collectBoundaryWallRuns(
+        tiles,
+        new Set(),
+        [],
+        new Map(),
+      );
+      const runCoversEdge = (run, floor, dx, dz) => {
+        const horizontal = dz !== 0;
+        const line = horizontal ? floor.z + dz * 0.5 : floor.x + dx * 0.5;
+        const axis = horizontal ? floor.x : floor.z;
+        return run.horizontal === horizontal
+          && run.dx === dx
+          && run.dz === dz
+          && Math.abs(run.line - line) <= 0.001
+          && run.start <= axis
+          && run.end >= axis
+          && run.wallBottomY <= floor.elevation + 0.001
+          && run.wallTopY >= floor.elevation + 0.001;
+      };
+      for (const floor of landingFloors) {
+        for (const edge of floor.openRetainingWallEdges ?? []) {
+          const [dx, dz] = edge.split(',').map(Number);
+          assert.ok(
+            floor.connectorLiftBoardingOpenRetainingWallEdges?.includes(edge),
+            `${endpoint} boarding lane must carry its exact lift-shell contract`,
+          );
+          assert.equal(
+            boundaryWallRuns.some((run) => runCoversEdge(run, floor, dx, dz)),
+            false,
+            `${endpoint} authoritative lift boarding lane must be wall-free`,
+          );
+          assert.equal(
+            legacyBoundaryWallRuns.some((run) => runCoversEdge(run, floor, dx, dz)),
+            false,
+            `${endpoint} frozen V1 envelope behavior must remain unchanged`,
+          );
+
+          const foreignFloor = {
+            ...floor,
+            roomId: 'foreign-room',
+            augmentationOwnerId: 'foreign-room',
+            openRetainingWallEdges: [edge],
+            v4SupplementalOpenRetainingWallEdges: undefined,
+            connectorLiftBoardingOpenRetainingWallEdges: undefined,
+          };
+          const foreignRuns = generator._collectBoundaryWallRuns(
+            new Map(),
+            new Set(),
+            [],
+            new Map(),
+            [foreignFloor],
+          );
+          assert.equal(
+            foreignRuns.some((run) => runCoversEdge(run, foreignFloor, dx, dz)),
+            true,
+            'an unrelated generic retaining-wall hint must remain walled',
+          );
+        }
+      }
+
+      const incompleteContractFloors = floorTiles.map((floor) => ({
+        ...floor,
+        openRetainingWallEdges: [...(floor.openRetainingWallEdges ?? [])],
+        connectorLiftBoardingOpenRetainingWallEdges: [
+          ...(floor.connectorLiftBoardingOpenRetainingWallEdges ?? []),
+        ],
+        traversalLinks: (floor.traversalLinks ?? []).map((link) => ({ ...link })),
+      }));
+      const firstBoardingFloor = landingFloors.find((floor) => (
+        (floor.connectorLiftBoardingOpenRetainingWallEdges?.length ?? 0) > 0
+      ));
+      const firstBoardingFloorKey = generator._getFloorTileGraphKey(firstBoardingFloor);
+      const incompleteBoardingFloor = incompleteContractFloors.find((floor) => (
+        generator._getFloorTileGraphKey(floor) === firstBoardingFloorKey
+      ));
+      incompleteBoardingFloor.connectorLiftBoardingOpenRetainingWallEdges = [];
+      const incompleteContractRuns = generator._collectBoundaryWallRuns(
+        new Map(),
+        new Set(),
+        [],
+        new Map(),
+        incompleteContractFloors,
+      );
+      for (const floor of landingFloors) {
+        for (const edge of floor.openRetainingWallEdges ?? []) {
+          const [dx, dz] = edge.split(',').map(Number);
+          assert.equal(
+            incompleteContractRuns.some((run) => runCoversEdge(run, floor, dx, dz)),
+            true,
+            'an incomplete three-lane lift contract must fail closed',
+          );
+        }
+      }
     }
 
     const platformX = lift.center.x / TILE_SIZE;
@@ -246,6 +385,24 @@ for (const direction of ['ascending', 'descending']) {
     });
     assert.equal(capValidation.accepted, false);
     assert.ok(capValidation.errors.some((error) => error.includes('swept shaft aperture')));
+    floorTiles.pop();
+
+    const aboveShaftTile = {
+      ...capTile,
+      elevation: lift.topElevation + lift.shaftHeadroomMeters + 0.1,
+    };
+    floorTiles.push(aboveShaftTile);
+    const aboveShaftValidation = generator._validateConnectorTraversalAssembly({
+      floorTiles,
+      tiles,
+      rooms: [],
+      connectionPlans: [plan],
+    });
+    assert.equal(
+      aboveShaftValidation.accepted,
+      true,
+      'a floor genuinely above the declared lift shaft sweep must remain out of scope',
+    );
     floorTiles.pop();
 
     const sharedMaterial = new THREE.MeshBasicMaterial();
@@ -330,3 +487,58 @@ for (const direction of ['ascending', 'descending']) {
     sharedMaterial.dispose();
   });
 }
+
+test('V4 supplemental automatic lift owns and opens only its declared boarding edges', () => {
+  const plan = createLiftPlan('ascending');
+  Object.assign(plan, {
+    isDungeonSupplement: true,
+    isRouteNetworkConnection: true,
+    augmentationOperationType: 'routeNetwork',
+    augmentationOperationId: 'supplement:test:v4-lift:operation',
+    routeNetworkGrantId: 'supplement:test:v4-lift:grant',
+    routeNetworkKind: 'objective-route-coverage',
+  });
+  const { generator, tiles, floorTiles } = realizePlan(plan);
+  const lift = plan.liftContracts[0];
+  const boundaryWallRuns = generator._collectBoundaryWallRuns(
+    tiles,
+    new Set(),
+    [],
+    new Map(),
+    floorTiles,
+  );
+  const runCoversEdge = (run, floor, dx, dz) => {
+    const horizontal = dz !== 0;
+    const line = horizontal ? floor.z + dz * 0.5 : floor.x + dx * 0.5;
+    const axis = horizontal ? floor.x : floor.z;
+    return run.horizontal === horizontal
+      && run.dx === dx
+      && run.dz === dz
+      && Math.abs(run.line - line) <= 0.001
+      && run.start <= axis
+      && run.end >= axis
+      && run.wallBottomY <= floor.elevation + 0.001
+      && run.wallTopY >= floor.elevation + 0.001;
+  };
+
+  for (const landing of [...lift.bottomLandingTiles, ...lift.topLandingTiles]) {
+    const floor = floorByKey(generator, floorTiles, landing.floorKey);
+    for (const edge of floor.openRetainingWallEdges ?? []) {
+      assert.deepEqual(floor.v4SupplementalRouteOwnerIds, [plan.id]);
+      assert.ok(
+        floor.v4SupplementalOpenRetainingWallEdges?.includes(edge),
+        'a V4 boarding opening must retain edge-specific ownership',
+      );
+      assert.ok(
+        floor.connectorLiftBoardingOpenRetainingWallEdges?.includes(edge),
+        'a V4 automatic lift must retain the same exact multi-lane shell contract',
+      );
+      const [dx, dz] = edge.split(',').map(Number);
+      assert.equal(
+        boundaryWallRuns.some((run) => runCoversEdge(run, floor, dx, dz)),
+        false,
+        'a V4 route-owned lift boarding edge must remain open in the boundary shell',
+      );
+    }
+  }
+});

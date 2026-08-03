@@ -619,7 +619,8 @@ export class DungeonController {
       return 'Use extraction pad';
     }
 
-    const shrineDoor = this.doors.find((door) => door.id === 'Door_Shrine');
+    const shrineDoorId = this.shrine?.doorId ?? this.progression?.shrineDoorId ?? 'Door_Shrine';
+    const shrineDoor = this.doors.find((door) => door.id === shrineDoorId);
     if (this.shrine && !this.shrine.collected && !shrineDoor?.closed) {
       return 'Secure Large Refractor';
     }
@@ -4591,7 +4592,8 @@ export class DungeonController {
 
     if (this.shrine && !this.shrine.collected) {
       const distanceSq = playerPosition.distanceToSquared(this.shrine.position);
-      const shrineDoor = this.doors.find((door) => door.id === 'Door_Shrine');
+      const shrineDoorId = this.shrine?.doorId ?? this.progression?.shrineDoorId ?? 'Door_Shrine';
+      const shrineDoor = this.doors.find((door) => door.id === shrineDoorId);
       if (distanceSq <= 2.8 * 2.8 && distanceSq < nearestDistanceSq && !shrineDoor?.closed) {
         nearest = {
           kind: 'shrine',

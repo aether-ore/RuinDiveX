@@ -259,6 +259,46 @@ function tierContainsExactFloorCell(tier, localTile) {
     && tier.floorMask?.[row]?.[column] === '#';
 }
 
+function socketInteriorApproachTiles(socket, dimensions) {
+  const halfWidth = (Number(dimensions.width) - 1) * 0.5;
+  const halfDepth = (Number(dimensions.depth) - 1) * 0.5;
+  return [-1, 0, 1].flatMap((lane) => [0, 1, 2].map((depth) => {
+    if (socket.side === 'N') {
+      return { x: Number(socket.center) + lane, z: -halfDepth + depth };
+    }
+    if (socket.side === 'S') {
+      return { x: Number(socket.center) + lane, z: halfDepth - depth };
+    }
+    if (socket.side === 'W') {
+      return { x: -halfWidth + depth, z: Number(socket.center) + lane };
+    }
+    return { x: halfWidth - depth, z: Number(socket.center) + lane };
+  }));
+}
+
+function validateStaticSolidSocketApproaches(id, sockets, dimensions, features) {
+  const staticSolids = features.filter((feature) => (
+    feature.solid === true && ['cover', 'machine'].includes(String(feature.type))
+  ));
+  for (const socket of sockets) {
+    const socketTierId = Number(socket.y) === 0 ? 'base' : 'upper';
+    const approachTiles = socketInteriorApproachTiles(socket, dimensions);
+    for (const feature of staticSolids) {
+      if (feature.tier != null && String(feature.tier) !== socketTierId) continue;
+      const blockedTile = approachTiles.find((localTile) => (
+        footprintContainsExactCell(feature, localTile)
+      ));
+      if (blockedTile) {
+        fail(
+          id,
+          `static solid ${feature.id} blocks socket ${socket.id} at local tile `
+            + `(${blockedTile.x}, ${blockedTile.z})`,
+        );
+      }
+    }
+  }
+}
+
 function createBlueprint(definition) {
   const value = cloneDungeonAugmentationValue(definition);
   const baseDimensions = validateMask(value.id, 'mask', value.mask);
@@ -302,6 +342,12 @@ function createBlueprint(definition) {
       maskOriginTile,
     });
   }
+  validateStaticSolidSocketApproaches(
+    value.id,
+    value.sockets,
+    baseDimensions,
+    value.features,
+  );
 
   const transferFeatures = value.features.filter(feature => feature.type === 'transfer');
   const transferFeatureById = new Map(transferFeatures.map(feature => [feature.id, feature]));
@@ -614,11 +660,16 @@ const BLUEPRINT_DEFINITIONS = [
       // endpoint samples and keep the physical slope deterministic.
       { id: 'rf-ramp', type: 'transfer', x: 4, z: 1, w: 1, d: 7, label: '↗' },
       { id: 'rf-frontline', type: 'spawn', x: 0, z: -3, w: 1, d: 1, label: 'F' },
-      { id: 'rf-flank-w', type: 'spawn', x: -4, z: 1, w: 1, d: 1, label: 'L' },
-      // This cell is also part of the ramp/upper-perch projection. Pin the
-      // flank spawn to the base arena so physical realization never has to
-      // infer between two valid authored elevations.
-      { id: 'rf-flank-e', type: 'spawn', x: 4, z: 1, w: 1, d: 1, label: 'L', tier: 'base' },
+      // Keep one full quantized-floor cell between the west flank and the
+      // two-cell crate bank. Route-network rooms can be centered on a half
+      // tile; final floor stamping then snaps the spawn toward the authored
+      // collision by half a tile, so the former (-4, 1) diagonal could land
+      // exactly on the inclusive crate boundary.
+      { id: 'rf-flank-w', type: 'spawn', x: -4, z: 0, w: 1, d: 1, label: 'L' },
+      // Keep the east flank beside the authored base bypass. The former
+      // (4, 1) projection sat beneath the ramp, while (3, 0) could quantize
+      // into the east press column's standing envelope on half-grid centers.
+      { id: 'rf-flank-e', type: 'spawn', x: 1, z: -2, w: 1, d: 1, label: 'L', tier: 'base' },
       { id: 'rf-perch', type: 'spawn', x: 3, z: -2, w: 1, d: 1, label: 'P', tier: 'upper' },
     ],
     traversal: 'A 3-tile through lane and two 2-tile flank lanes connect S entry to N reconnect. The seven-cell east ramp reaches the +2.80 m perch within the shared movement envelope without blocking return travel.',
@@ -692,9 +743,14 @@ const BLUEPRINT_DEFINITIONS = [
       },
       { id: 'ldr-relay-stack', type: 'machine', x: -3, z: 3, w: 1, d: 1, label: 'R', solid: true },
       { id: 'ldr-cover-west', type: 'cover', x: -2, z: 1, w: 1, d: 2, label: 'M', solid: true },
-      { id: 'ldr-cover-east', type: 'cover', x: 1, z: 3, w: 1, d: 1, label: '1/2', solid: true },
+      // Keep the cover in the defense zone while leaving the exact three-wide,
+      // two-cell-deep S socket approach unobstructed.
+      { id: 'ldr-cover-east', type: 'cover', x: 2, z: 3, w: 1, d: 1, label: '1/2', solid: true },
       { id: 'ldr-frontline', type: 'spawn', x: 0, z: 3, w: 1, d: 1, label: 'F', tier: 'base' },
-      { id: 'ldr-flank', type: 'spawn', x: -2, z: 2, w: 1, d: 1, label: 'L', tier: 'base' },
+      // Leave quantization-safe clearance from both the west cover and relay
+      // stack. The former (-2, 2) point sat exactly on the inclusive edge of
+      // the two-cell cover collision before final floor-grid snapping.
+      { id: 'ldr-flank', type: 'spawn', x: -1, z: 3, w: 1, d: 1, label: 'L', tier: 'base' },
       { id: 'ldr-perch', type: 'spawn', x: -2, z: -3, w: 1, d: 1, label: 'P', tier: 'upper' },
     ],
     sectionRoute: [[0, 0], [0.48, 0], [0.48, 2.8], [1, 2.8]],
@@ -738,11 +794,13 @@ const BLUEPRINT_DEFINITIONS = [
       },
       { id: 'lft-call-lower', type: 'control', x: -4, z: 2, w: 1, d: 1, label: 'C', tier: 'base', persistentStateId: 'lft-call-lower' },
       { id: 'lft-call-upper', type: 'control', x: -4, z: -2, w: 1, d: 1, label: 'C', tier: 'upper', persistentStateId: 'lft-call-upper' },
-      { id: 'lft-hoist-motor', type: 'machine', x: 4, z: 1, w: 1, d: 1, label: 'H', solid: true },
+      // Keep the narrow east spur as authored machinery support instead of
+      // letting the motor's standing envelope sever the adjacent galleries.
+      { id: 'lft-hoist-motor', type: 'machine', x: 4, z: 2, w: 1, d: 1, label: 'H', solid: true },
       { id: 'lft-cover-center', type: 'cover', x: 1, z: 1, w: 1, d: 2, label: 'M', solid: true },
-      { id: 'lft-cover-east', type: 'cover', x: 3, z: 3, w: 1, d: 1, label: '1/2', solid: true },
+      { id: 'lft-cover-east', type: 'cover', x: 4, z: 3, w: 1, d: 1, label: '1/2', solid: true },
       { id: 'lft-frontline', type: 'spawn', x: 0, z: 3, w: 1, d: 1, label: 'F', tier: 'base' },
-      { id: 'lft-flank', type: 'spawn', x: 3, z: 2, w: 1, d: 1, label: 'L', tier: 'base' },
+      { id: 'lft-flank', type: 'spawn', x: 1, z: 3, w: 1, d: 1, label: 'L', tier: 'base' },
       { id: 'lft-perch', type: 'spawn', x: 2, z: -3, w: 1, d: 1, label: 'P', tier: 'upper' },
     ],
     sectionRoute: [[0, 0], [0.42, 0], [0.42, 2.8], [1, 2.8]],
@@ -849,7 +907,7 @@ const BLUEPRINT_DEFINITIONS = [
       },
       { id: 'mr-counterweight', type: 'machine', x: 0, z: 0, w: 1, d: 3, label: 'W', solid: true },
       { id: 'mr-lift-platform', type: 'transfer', x: 0, z: 0, w: 3, d: 3, label: 'L', solid: true },
-      { id: 'mr-regulator', type: 'control', x: 3, z: 2, w: 1, d: 1, label: 'C', tier: 'upper' },
+      { id: 'mr-regulator', type: 'control', x: 3, z: 1, w: 1, d: 1, label: 'C', tier: 'upper' },
       { id: 'mr-lockers', type: 'cover', x: 2, z: 3, w: 1, d: 2, label: '½', solid: true, tier: 'upper' },
     ],
     sectionRoute: [[0, 0], [0.18, 0], [0.82, 2.8], [1, 2.8]],
@@ -905,11 +963,13 @@ const BLUEPRINT_DEFINITIONS = [
     zones: [{ type: 'clear', id: 'ob-through-route', x: 0, z: 0, w: 3, d: 9, label: 'DIRECT ROUTE' }],
     features: [
       { id: 'ob-lockers', type: 'cover', x: -3, z: 2, w: 1, d: 2, label: 'M', solid: true },
-      { id: 'ob-lore', type: 'control', x: -3, z: 2, w: 1, d: 1, label: 'i' },
+      // The log and cache remain on the archive spur with enough standing
+      // clearance for half-grid room-center quantization around the lockers.
+      { id: 'ob-lore', type: 'control', x: -3, z: 0, w: 1, d: 1, label: 'i' },
       { id: 'ob-table', type: 'cover', x: 2, z: 0, w: 2, d: 1, label: '½', solid: true },
       { id: 'ob-step', type: 'transfer', x: 2, z: 0, w: 1, d: 1, label: '↗' },
-      { id: 'ob-cache', type: 'reward', x: -2, z: 2, w: 1, d: 1, label: 'R' },
-      { id: 'ob-map', type: 'control', x: 2.5, z: 1.5, w: 1, d: 1, label: 'i', tier: 'upper' },
+      { id: 'ob-cache', type: 'reward', x: -1, z: 2, w: 1, d: 1, label: 'R' },
+      { id: 'ob-map', type: 'control', x: 3, z: 2, w: 1, d: 1, label: 'i', tier: 'upper' },
     ],
     traversal: 'A centered 3-tile lane runs S↔N. The west archive and +0.70 m observation tier are optional one-tile spurs and never block reconnection.',
     gameplay: 'No mandatory encounter. Lore and optional cache are separate interactions; this room is pacing content and cannot replace an independent challenge or payoff.',
@@ -1054,7 +1114,7 @@ const BLUEPRINT_DEFINITIONS = [
       { id: 'ta-ramp-west', type: 'transfer', x: -4, z: 0, w: 3, d: 7, label: 'R1', form: 'ramp' },
       { id: 'ta-turn-landing', type: 'transfer', x: -4, z: -4, w: 3, d: 3, label: '+1.4', form: 'landing' },
       { id: 'ta-ramp-north', type: 'transfer', x: 0, z: -4, w: 9, d: 3, label: 'R2', form: 'ramp' },
-      { id: 'ta-frontline', type: 'spawn', x: 0, z: 3, w: 1, d: 1, label: 'F' },
+      { id: 'ta-frontline', type: 'spawn', x: 0, z: 4, w: 1, d: 1, label: 'F' },
       { id: 'ta-flank-west', type: 'spawn', x: -4, z: 0, w: 1, d: 1, label: 'L' },
       { id: 'ta-flank-north', type: 'spawn', x: 0, z: -4, w: 1, d: 1, label: 'L' },
       { id: 'ta-perch', type: 'spawn', x: 4, z: -2, w: 1, d: 1, label: 'P', tier: 'upper' },
@@ -1087,7 +1147,9 @@ const BLUEPRINT_DEFINITIONS = [
     ],
     features: [
       { id: 'fd-stair', type: 'transfer', x: 0, z: -2, w: 7, d: 3, label: 'DOWN', form: 'stairs' },
-      { id: 'fd-gate', type: 'machine', x: 3, z: 0, w: 1, d: 3, label: 'G', solid: true },
+      // The isolation machinery lines the sump instead of occupying the lower
+      // E socket's strict three-wide approach.
+      { id: 'fd-gate', type: 'machine', x: 2, z: 1, w: 1, d: 3, label: 'G', solid: true },
       { id: 'fd-console', type: 'control', x: -3, z: 1, w: 1, d: 1, label: 'C', tier: 'upper' },
     ],
     sectionRoute: [[0, 2.8], [0.28, 2.8], [0.72, 0], [1, 0]],
@@ -1350,10 +1412,10 @@ const BLUEPRINT_DEFINITIONS = [
       { id: 'isg-incline', type: 'transfer', x: 0, z: 0, w: 7, d: 9, label: '12.5%', form: 'ramp' },
       { id: 'isg-divider-west', type: 'cover', x: -1.5, z: 0, w: 1, d: 7, label: 'D', solid: true },
       { id: 'isg-divider-east', type: 'cover', x: 1.5, z: 0, w: 1, d: 7, label: 'D', solid: true },
-      { id: 'isg-belt-stop', type: 'control', x: 2.5, z: 0, w: 1, d: 1, label: 'C' },
+      { id: 'isg-belt-stop', type: 'control', x: 3, z: 0, w: 1, d: 1, label: 'C' },
       { id: 'isg-frontline', type: 'spawn', x: 0, z: 2, w: 1, d: 1, label: 'F' },
       { id: 'isg-flank-west', type: 'spawn', x: -2.5, z: 0, w: 1, d: 1, label: 'L' },
-      { id: 'isg-flank-east', type: 'spawn', x: 2.5, z: -1, w: 1, d: 1, label: 'L' },
+      { id: 'isg-flank-east', type: 'spawn', x: 3, z: -1, w: 1, d: 1, label: 'L' },
       { id: 'isg-reward', type: 'reward', x: -3, z: -5, w: 1, d: 1, label: 'R', tier: 'upper' },
     ],
     sectionRoute: [[0, 0], [0.18, 0], [0.82, 2.8], [1, 2.8]],

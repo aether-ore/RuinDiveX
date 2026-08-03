@@ -267,6 +267,216 @@ test('request builder emits deterministic live-role and reward contracts from au
   assert.equal(role.requiresFarSide, false);
 });
 
+test('unzoned blueprint anchors receive only a cardinal same-tier fallback domain', () => {
+  const baseCells = [
+    floorCell('floor-exact', 0, 0, {
+      localTile: { x: 0, z: 0, elevation: 0 },
+      authoritative: true,
+    }),
+    floorCell('floor-cardinal', 2.8, 0, {
+      localTile: { x: 1, z: 0, elevation: 0 },
+      authoritative: true,
+    }),
+    floorCell('floor-diagonal', 2.8, 2.8, {
+      localTile: { x: 1, z: 1, elevation: 0 },
+      authoritative: true,
+    }),
+    floorCell('floor-distant', 5.6, 0, {
+      localTile: { x: 2, z: 0, elevation: 0 },
+      authoritative: true,
+    }),
+  ];
+  const anchor = {
+    id: 'room:blueprint-reward',
+    localAnchorId: 'blueprint-reward',
+    kind: 'reward',
+    rewardRecipe: { id: 'reward-recipe' },
+    supportCellId: 'floor-exact',
+    supportCellIds: ['floor-exact'],
+    floorTierId: 'base',
+    floorTierRuntimeId: 'supplement-room:tier:base',
+    position: { x: 0, y: 0, z: 0 },
+    authoritativeBlueprintPlacement: true,
+  };
+  const room = authoredRoom({ cells: baseCells, zones: [], anchors: [anchor] });
+  room.augmentationFloorTiers.push({
+    id: 'upper',
+    runtimeId: 'supplement-room:tier:upper',
+    roomId: room.id,
+    worldCells: [floorCell('floor-cross-tier', 2.8, 0, {
+      tierId: 'upper',
+      tierRuntimeId: 'supplement-room:tier:upper',
+      elevation: 0,
+      localTile: { x: 1, z: 0, elevation: 0 },
+      authoritative: true,
+    })],
+  });
+  const built = buildIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    rooms: [room],
+  });
+  assert.equal(built.accepted, true);
+  assert.equal(built.requests.length, 1);
+  assert.deepEqual(
+    built.requests[0].localFallbackSupportCellIds,
+    ['floor-exact', 'floor-cardinal'],
+  );
+  assert.deepEqual(
+    built.requests[0].allowedSupportCellIds,
+    ['floor-cardinal', 'floor-exact'],
+  );
+
+  const resolution = resolveIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    requests: built.requests,
+    floors: baseCells.map((cell) => ({
+      ...cell,
+      supportFloorCellId: cell.id,
+      walkable: cell.id !== 'floor-exact',
+      reachable: cell.id !== 'floor-exact',
+      returnable: cell.id !== 'floor-exact',
+    })),
+  });
+  assert.equal(resolution.accepted, true);
+  assert.equal(resolution.placements[0].supportFloorCellId, 'floor-cardinal');
+  assert.equal(resolution.placements[0].selectionSource, 'declared-zone-tier-reselection');
+
+  const unresolvedDeclaredZoneAnchor = {
+    ...anchor,
+    id: 'room:declared-zone-reward',
+    localAnchorId: 'declared-zone-reward',
+    blueprintZoneId: 'missing-blueprint-zone',
+  };
+  const unresolvedZoneRequest = buildIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    rooms: [authoredRoom({
+      cells: baseCells,
+      zones: [],
+      anchors: [unresolvedDeclaredZoneAnchor],
+    })],
+  });
+  assert.equal(unresolvedZoneRequest.accepted, true);
+  assert.deepEqual(unresolvedZoneRequest.requests[0].declaredZoneIds, [
+    'missing-blueprint-zone',
+  ]);
+  assert.deepEqual(unresolvedZoneRequest.requests[0].allowedZoneIds, []);
+  assert.deepEqual(unresolvedZoneRequest.requests[0].localFallbackSupportCellIds, []);
+  assert.deepEqual(unresolvedZoneRequest.requests[0].allowedSupportCellIds, ['floor-exact']);
+  const exactOnlyResolution = resolveIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    requests: unresolvedZoneRequest.requests,
+    floors: baseCells.map((cell) => ({ ...cell, supportFloorCellId: cell.id })),
+  });
+  assert.equal(exactOnlyResolution.accepted, true);
+  assert.equal(exactOnlyResolution.placements[0].supportFloorCellId, 'floor-exact');
+  assert.equal(exactOnlyResolution.placements[0].selectionSource, 'exact-support-cell');
+});
+
+test('authoritative occupied support identity overrides forbidden AABB containment', () => {
+  const broadSolid = {
+    id: 'solid-cover',
+    center: { x: 1.4, y: 0, z: 0 },
+    size: { x: 5.6, y: 3.6, z: 5.6 },
+    blocking: true,
+    occupiedSupportCellIds: ['floor-a'],
+  };
+  const adjacent = resolveIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    requests: [placementRequest('adjacent', {
+      exact: 'floor-b',
+      allowed: ['floor-b'],
+      position: { x: 2.8, y: 0, z: 0 },
+    })],
+    floors: [floorCell('floor-b', 2.8, 0)],
+    solids: [broadSolid],
+  });
+  assert.equal(adjacent.accepted, true);
+  assert.equal(adjacent.placements[0].supportFloorCellId, 'floor-b');
+
+  const occupied = resolveIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    requests: [placementRequest('occupied', {
+      exact: 'floor-a',
+      allowed: ['floor-a'],
+    })],
+    floors: [floorCell('floor-a', 0, 0)],
+    solids: [broadSolid],
+  });
+  assert.equal(occupied.accepted, false);
+  assert.equal(occupied.errors[0].code, ERROR_CODES.FORBIDDEN_FOOTPRINT);
+
+  const { occupiedSupportCellIds, ...legacySolid } = broadSolid;
+  assert.deepEqual(occupiedSupportCellIds, ['floor-a']);
+  const legacy = resolveIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    requests: [placementRequest('legacy', {
+      exact: 'floor-b',
+      allowed: ['floor-b'],
+      position: { x: 2.8, y: 0, z: 0 },
+    })],
+    floors: [floorCell('floor-b', 2.8, 0)],
+    solids: [legacySolid],
+  });
+  assert.equal(legacy.accepted, false);
+  assert.equal(legacy.errors[0].code, ERROR_CODES.FORBIDDEN_FOOTPRINT);
+});
+
+test('authored room anchors may occupy an authored clear-route endpoint', () => {
+  const anchor = {
+    id: 'room:route-terminal-control',
+    localAnchorId: 'route-terminal-control',
+    kind: 'progression',
+    mechanismRecipe: { id: 'control-recipe' },
+    supportCellId: 'floor-a',
+    supportCellIds: ['floor-a'],
+    floorTierId: 'base',
+    floorTierRuntimeId: 'supplement-room:tier:base',
+    blueprintZoneId: 'combat-floor',
+    position: { x: 0, y: 0, z: 0 },
+  };
+  const room = authoredRoom({
+    anchors: [anchor],
+    clearRoutes: [{ id: 'route-to-control', worldCellIds: ['floor-a'] }],
+  });
+  room.augmentationCollisionRecords = [{
+    id: 'route-to-control:collision',
+    sourceKind: 'clear-route',
+    collisionKind: 'clear-route-reservation',
+    mustRemainClear: true,
+    supportCellIds: ['floor-a'],
+  }];
+  room.augmentationBlueprintFeatures = [{
+    id: 'non-solid-anchor-dais',
+    blueprintFeatureType: 'machine',
+    blocking: false,
+    supportCellIds: ['floor-a'],
+  }];
+  const requests = buildIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    rooms: [room],
+  });
+  assert.equal(requests.accepted, true);
+  assert.equal(requests.requests.length, 1);
+  assert.equal(
+    requests.requests[0].forbiddenFootprints.some(({ id }) => (
+      [
+        'route-to-control',
+        'route-to-control:collision',
+        'non-solid-anchor-dais',
+      ].includes(id)
+    )),
+    false,
+  );
+  const placement = resolveIndustrialSupplementAnchorPlacementRequests({
+    mode: V4_MODE,
+    requests: requests.requests,
+    floors: room.augmentationFloorTiers,
+    zones: room.augmentationZones,
+  });
+  assert.equal(placement.accepted, true);
+  assert.equal(placement.placements[0].supportFloorCellId, 'floor-a');
+});
+
 test('shortcut request is confined to far-side authored floors outside seams and clear routes', () => {
   const room = authoredRoom({
     id: 'far-room',

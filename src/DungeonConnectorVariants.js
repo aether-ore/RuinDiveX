@@ -656,6 +656,7 @@ function createSlopeContract(plan, context) {
     elevationDelta,
     direction,
     facing,
+    requestedSwitchbackSideSign,
   } = context;
   const signedFlightRise = elevationDelta / DUNGEON_CONNECTOR_CLEARANCE.slopeFlightCount;
   const intermediateElevation = sourceElevation + signedFlightRise;
@@ -663,13 +664,19 @@ function createSlopeContract(plan, context) {
   const firstFlightStart = pointAt(path, run.startIndex);
   const firstFlightEnd = offsetGridPoint(firstFlightStart, facing, segmentCount - 1, 0);
   const roomFootprints = plan.connectorVariantConstraints?.roomFootprints ?? [];
-  const pointIntersectsRoom = (point) => roomFootprints.some((footprint) => (
+  // The authored endpoint rooms own the connector handoff. The complete
+  // family reservation deliberately permits those overlaps, so the early
+  // side selector must not reject a side solely for entering either endpoint.
+  const unrelatedRoomFootprints = roomFootprints.filter((footprint) => (
+    footprint.roomId !== plan.fromRoomId && footprint.roomId !== plan.toRoomId
+  ));
+  const pointIntersectsRoom = (point) => unrelatedRoomFootprints.some((footprint) => (
     point.x >= footprint.minX
     && point.x <= footprint.maxX
     && point.z >= footprint.minZ
     && point.z <= footprint.maxZ
   ));
-  const switchbackSideSign = [1, -1].find((sign) => {
+  const availableSwitchbackSideSigns = [1, -1].filter((sign) => {
     for (let longitudinal = -1; longitudinal <= run.endIndex - run.startIndex; longitudinal += 1) {
       for (let lateral = -1; lateral <= 7; lateral += 1) {
         if (pointIntersectsRoom(offsetGridPoint(
@@ -681,7 +688,27 @@ function createSlopeContract(plan, context) {
       }
     }
     return true;
-  }) ?? null;
+  });
+  const requestedSideSign = requestedSwitchbackSideSign == null
+    ? null
+    : Number(requestedSwitchbackSideSign);
+  if (requestedSideSign != null && ![1, -1].includes(requestedSideSign)) {
+    throw new RangeError(
+      `Connection ${plan.id} requested invalid switchback side ${requestedSwitchbackSideSign}.`,
+    );
+  }
+  const switchbackSideSign = requestedSideSign == null
+    ? availableSwitchbackSideSigns[0] ?? null
+    : availableSwitchbackSideSigns.includes(requestedSideSign)
+      ? requestedSideSign
+      : null;
+  if (requestedSideSign != null && switchbackSideSign == null) {
+    throw new RangeError(`Connection ${plan.id} has no collision-free switchback side.`);
+  }
+  // Legacy V1 assignment has a bounded outer search over family assignments.
+  // Preserve an unresolved null side so complete footprint reservation can
+  // reject this candidate and let that search continue. Explicit V4 plans are
+  // immutable and already fail above instead of materializing a fallback side.
   const realizedSideSign = switchbackSideSign ?? 1;
   const lateralFlightSeparationTiles = 3;
   const switchbackLandingOrigin = offsetGridPoint(
@@ -1339,6 +1366,7 @@ export function createDungeonConnectorVariantContract(plan, variantId, {
   destinationElevation: destinationElevationOption,
   direction: directionOption,
   allowExactQuantizedElevationDelta = false,
+  switchbackSideSign: requestedSwitchbackSideSign = null,
 } = {}) {
   if (!plan?.id) throw new TypeError('A stable connection plan id is required.');
   if (!DUNGEON_CONNECTOR_VARIANT_ORDER.includes(variantId)) {
@@ -1404,6 +1432,7 @@ export function createDungeonConnectorVariantContract(plan, variantId, {
     elevationDelta,
     direction,
     facing,
+    requestedSwitchbackSideSign,
   });
   const contract = {
     schema: DUNGEON_CONNECTOR_VARIANT_SCHEMA,

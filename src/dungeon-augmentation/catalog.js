@@ -350,6 +350,114 @@ function blueprintPlanningMaskRectangles(blueprint, canonicalRotationQuarterTurn
   return rectangles;
 }
 
+function blueprintStructuralWallClearanceVolumes({
+  size,
+  sockets,
+  thickness,
+  purpose,
+}) {
+  const epsilon = 1e-6;
+  const sideRecords = [
+    {
+      id: 'north',
+      length: size.width,
+      normal: -size.depth * 0.5,
+      socketMatches: ({ localFacing }) => Number(localFacing?.z) < -0.5,
+      along: ({ localPosition }) => Number(localPosition?.x ?? 0),
+      volume: (along, bottom, width, height) => ({
+        center: { x: along, y: bottom + height * 0.5, z: -size.depth * 0.5 },
+        size: { x: width, y: height, z: thickness },
+      }),
+    },
+    {
+      id: 'south',
+      length: size.width,
+      normal: size.depth * 0.5,
+      socketMatches: ({ localFacing }) => Number(localFacing?.z) > 0.5,
+      along: ({ localPosition }) => Number(localPosition?.x ?? 0),
+      volume: (along, bottom, width, height) => ({
+        center: { x: along, y: bottom + height * 0.5, z: size.depth * 0.5 },
+        size: { x: width, y: height, z: thickness },
+      }),
+    },
+    {
+      id: 'west',
+      length: size.depth,
+      normal: -size.width * 0.5,
+      socketMatches: ({ localFacing }) => Number(localFacing?.x) < -0.5,
+      along: ({ localPosition }) => Number(localPosition?.z ?? 0),
+      volume: (along, bottom, width, height) => ({
+        center: { x: -size.width * 0.5, y: bottom + height * 0.5, z: along },
+        size: { x: thickness, y: height, z: width },
+      }),
+    },
+    {
+      id: 'east',
+      length: size.depth,
+      normal: size.width * 0.5,
+      socketMatches: ({ localFacing }) => Number(localFacing?.x) > 0.5,
+      along: ({ localPosition }) => Number(localPosition?.z ?? 0),
+      volume: (along, bottom, width, height) => ({
+        center: { x: size.width * 0.5, y: bottom + height * 0.5, z: along },
+        size: { x: thickness, y: height, z: width },
+      }),
+    },
+  ];
+  const volumes = [];
+  for (const side of sideRecords) {
+    const half = side.length * 0.5;
+    const intervals = sockets
+      .filter(side.socketMatches)
+      .map((socketRecord) => ({
+        start: Math.max(
+          -half,
+          side.along(socketRecord) - Number(socketRecord.widthMeters ?? 8.4) * 0.5,
+        ),
+        end: Math.min(
+          half,
+          side.along(socketRecord) + Number(socketRecord.widthMeters ?? 8.4) * 0.5,
+        ),
+        height: Number(socketRecord.heightMeters ?? 5.6),
+      }))
+      .filter(({ start, end }) => end - start > epsilon)
+      .sort((first, second) => first.start - second.start || first.end - second.end)
+      .reduce((merged, interval) => {
+        const previous = merged.at(-1);
+        if (previous && interval.start <= previous.end + epsilon) {
+          previous.end = Math.max(previous.end, interval.end);
+          previous.height = Math.max(previous.height, interval.height);
+        } else {
+          merged.push({ ...interval });
+        }
+        return merged;
+      }, []);
+    let cursor = -half;
+    let panelOrdinal = 0;
+    const addPanel = (kind, start, end, bottom, height) => {
+      if (end - start <= epsilon || height <= epsilon) return;
+      volumes.push({
+        id: `blueprint-structural-shell-${side.id}-${kind}-${panelOrdinal}-clearance`,
+        ...side.volume((start + end) * 0.5, bottom, end - start, height),
+        purpose,
+      });
+      panelOrdinal += 1;
+    };
+    for (const interval of intervals) {
+      addPanel('panel', cursor, interval.start, 0, size.height);
+      addPanel(
+        'header',
+        interval.start,
+        interval.end,
+        interval.height,
+        Math.max(0, size.height - interval.height),
+      );
+      cursor = Math.max(cursor, interval.end);
+    }
+    addPanel('panel', cursor, half, 0, size.height);
+  }
+  return volumes;
+}
+
 function blueprintGrammar(blueprint) {
   const junctionKind = BLUEPRINT_JUNCTION_KIND_BY_ID[blueprint.id] ?? null;
   const contentRoles = BLUEPRINT_CONTENT_ROLES_BY_ID[blueprint.id] ?? [];
@@ -463,6 +571,16 @@ function blueprintGrammar(blueprint) {
     blueprint,
     canonicalRotationQuarterTurns,
   );
+  const structuralWallThickness = Number(blueprint.wallThicknessMeters ?? 0.22);
+  const structuralWallPurpose = connectorOwned
+    ? 'supplement-connector-module-structural-shell-wall-clearance'
+    : 'supplement-room-structural-shell-wall-clearance';
+  const structuralWallClearanceVolumes = blueprintStructuralWallClearanceVolumes({
+    size,
+    sockets,
+    thickness: structuralWallThickness,
+    purpose: structuralWallPurpose,
+  });
   const structure = {
     ownership: connectorOwned ? 'connector' : 'room',
     blueprintId: blueprint.id,
@@ -523,14 +641,21 @@ function blueprintGrammar(blueprint) {
         ? 'supplement-connector-module-occupied'
         : 'supplement-room-occupied',
     })),
-    clearanceVolumes: planningMaskRectangles.map((rectangle, ordinal) => ({
-      id: `blueprint-mask-clearance-${ordinal}`,
-      center: { x: rectangle.center.x, y: 1.8, z: rectangle.center.z },
-      size: { ...rectangle.size, y: 3.6 },
-      purpose: connectorOwned
-        ? 'supplement-connector-module-player-clearance'
-        : 'walkable-player-clearance',
-    })),
+    clearanceVolumes: [
+      ...planningMaskRectangles.map((rectangle, ordinal) => ({
+        id: `blueprint-mask-clearance-${ordinal}`,
+        center: { x: rectangle.center.x, y: 1.8, z: rectangle.center.z },
+        size: { ...rectangle.size, y: 3.6 },
+        purpose: connectorOwned
+          ? 'supplement-connector-module-player-clearance'
+          : 'walkable-player-clearance',
+      })),
+      // DungeonSupplementAssembler encloses the authored floor mask with four
+      // thin perimeter panels. Mirror those panels instead of reserving a
+      // filled room box: the interior remains usable, while routes may cross a
+      // panel only through their exact socket seam overlap grant.
+      ...structuralWallClearanceVolumes,
+    ],
     requiredThemeCapabilities: {
       materials: ['primary-floor', 'wall', 'ceiling', 'support', 'cap'],
       assets: ['frame', 'light-fixture'],
@@ -1140,6 +1265,32 @@ export function createDungeonAugmentationProfile(input = {}) {
   if (input.routeNetworkPlanning && typeof input.routeNetworkPlanning === 'object') {
     profile.routeNetworkPlanning = {
       enabled: input.routeNetworkPlanning.enabled !== false,
+      allowPartialRouteNetworkRealization:
+        input.routeNetworkPlanning.allowPartialRouteNetworkRealization === true,
+      partialUsefulRequiredNetworkCount: Math.min(
+        8,
+        Math.max(
+          1,
+          Math.floor(Number(
+            input.routeNetworkPlanning.partialUsefulRequiredNetworkCount ?? 2,
+          ) || 2),
+        ),
+      ),
+      partialRequiredCandidateLimit: Math.max(
+        1,
+        Math.floor(Number(
+          input.routeNetworkPlanning.partialRequiredCandidateLimit ?? 12,
+        ) || 12),
+      ),
+      partialLandmarkCandidateLimit: Math.min(
+        24,
+        Math.max(
+          1,
+          Math.floor(Number(
+            input.routeNetworkPlanning.partialLandmarkCandidateLimit ?? 24,
+          ) || 24),
+        ),
+      ),
       maximumFeaturelessSpanMeters: Number(
         input.routeNetworkPlanning.maximumFeaturelessSpanMeters ?? 33.6,
       ),
@@ -1282,6 +1433,19 @@ export const INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE = createDungeonAugmentatio
   maximumPlanningAttempts: 1,
   routeNetworkPlanning: {
     enabled: true,
+    // V4 is a sidecar supplement to the accepted authored dungeon. A route
+    // network that cannot be realized is omitted with an explicit ledger
+    // entry; independently valid networks remain applied.
+    allowPartialRouteNetworkRealization: true,
+    // Seed001 demonstrates that landmark + objective coverage completes well
+    // inside the release budget, while forcing a third retained network does
+    // not. Both semantic kinds remain mandatory for early partial acceptance.
+    partialUsefulRequiredNetworkCount: 2,
+    // Preserve the original bounded search domain for ordinary required
+    // grants. Dense multi-station coverage remains capped at eight by the
+    // planner; all other required grants may inspect at most twelve.
+    partialRequiredCandidateLimit: 12,
+    partialLandmarkCandidateLimit: 24,
     maximumFeaturelessSpanMeters: 33.6,
     minimumModulesPerNetwork: 3,
     maximumModulesPerNetwork: 6,

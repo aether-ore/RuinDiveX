@@ -7,6 +7,7 @@ import {
   RELEASE_CORPUS_COUNTS,
   RELEASE_PROFILE_ID,
   aggregateShardEvidence,
+  assertCleanReleaseProvenance,
   assertMatchingReleaseProvenance,
   createReleaseProvenance,
   readJson,
@@ -41,11 +42,12 @@ if (!Object.hasOwn(RELEASE_CORPUS_COUNTS, tier)) {
 
 const manifestPath = path.resolve(projectRoot, manifestArgument);
 const outputPath = path.resolve(projectRoot, outputArgument);
-const manifest = validateCorpusManifest(await readJson(manifestPath));
 const currentProvenance = await createReleaseProvenance({
   projectRoot,
   profile: DUNGEON_AUGMENTATION_PROFILES[RELEASE_PROFILE_ID],
 });
+assertCleanReleaseProvenance(currentProvenance, 'release aggregate source');
+const manifest = validateCorpusManifest(await readJson(manifestPath));
 assertMatchingReleaseProvenance(currentProvenance, manifest.provenance, 'release aggregate');
 
 try {

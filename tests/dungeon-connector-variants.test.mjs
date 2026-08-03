@@ -12,6 +12,7 @@ import {
   findLongestConnectorStraightRun,
   isDungeonConnectorVariantEligible,
   planDungeonConnectorVariantAssignments,
+  reserveDungeonConnectorFamilyFootprints,
   validateDungeonConnectorVariantAssignments,
 } from '../src/DungeonConnectorVariants.js';
 
@@ -483,6 +484,69 @@ test('slope and service contracts require V1 structures and safe continuous surf
   assert.equal(service.construction.supportStyle, 'v1_catwalk_posts_and_cross_braces');
   assert.equal(service.construction.railingStyle, 'v1_industrial_railing');
   assert.ok(service.construction.overheadPipeClearanceMeters >= 3.6);
+});
+
+test('legacy slope assignments defer a blocked side choice while explicit V4 sides fail fast', () => {
+  const plan = makePlan('blocked-switchback', 0, {
+    connectorVariantConstraints: {
+      roomFootprints: [
+        { roomId: 'positive-blocker', minX: 10, maxX: 10, minZ: 7, maxZ: 7 },
+        { roomId: 'negative-blocker', minX: 10, maxX: 10, minZ: -7, maxZ: -7 },
+      ],
+    },
+  });
+
+  const legacyContract = createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+  );
+  assert.equal(legacyContract.construction.switchbackSideSign, null);
+  const reservation = reserveDungeonConnectorFamilyFootprints([{
+    ...plan,
+    connectorVariantId: DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    connectorVariant: legacyContract,
+  }]);
+  assert.equal(reservation.diagnostics.accepted, false);
+  assert.ok(reservation.diagnostics.errors.some((error) => (
+    error.includes('no collision-free switchback side reservation')
+  )));
+
+  for (const switchbackSideSign of [1, -1]) {
+    assert.throws(() => createDungeonConnectorVariantContract(
+      plan,
+      DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+      { switchbackSideSign },
+    ), /no collision-free switchback side/);
+  }
+});
+
+test('slope contracts preserve an explicitly selected clear switchback side', () => {
+  const plan = makePlan('selected-switchback', 0, {
+    connectorVariantConstraints: {
+      roomFootprints: [
+        { roomId: 'positive-blocker', minX: 10, maxX: 10, minZ: 7, maxZ: 7 },
+        {
+          roomId: 'selected-switchback_from',
+          minX: 10,
+          maxX: 10,
+          minZ: -7,
+          maxZ: -7,
+        },
+      ],
+    },
+  });
+  const contract = createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    { switchbackSideSign: -1 },
+  );
+
+  assert.equal(contract.construction.switchbackSideSign, -1);
+  assert.throws(() => createDungeonConnectorVariantContract(
+    plan,
+    DUNGEON_CONNECTOR_VARIANT_IDS.CRESTED_SLOPE,
+    { switchbackSideSign: 1 },
+  ), /no collision-free switchback side/);
 });
 
 test('every connector family declares a continuous three-tile gallery and V1 decorative arches', () => {

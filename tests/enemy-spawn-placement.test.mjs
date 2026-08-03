@@ -131,6 +131,130 @@ test('generated room spawn points use a spaced interior ring instead of corner t
   }
 });
 
+test('finalized room spawn context reuses encounter placement with independent vectors', () => {
+  const room = {
+    id: 'enemyNest',
+    type: 'enemy',
+    x: 0,
+    z: 0,
+    width: 9,
+    depth: 9,
+  };
+  const floorTiles = [];
+  for (let x = -4; x <= 4; x += 1) {
+    for (let z = -4; z <= 4; z += 1) {
+      floorTiles.push({
+        x,
+        z,
+        elevation: 0,
+        level: 0,
+        roomId: room.id,
+        type: room.type,
+        surface: 'enemy',
+      });
+    }
+  }
+  const solidZones = [];
+  let cachedRandomCalls = 0;
+  const cachedGenerator = new DungeonGenerator({
+    tileSize: 2,
+    random: () => {
+      cachedRandomCalls += 1;
+      return 0.5;
+    },
+  });
+  const occupiedSupportCellIdSets =
+    cachedGenerator._createSolidZoneOccupiedSupportCellIdSets(solidZones);
+  const spawnContext = cachedGenerator._createFinalizedRoomSpawnContext(
+    floorTiles,
+    solidZones,
+    occupiedSupportCellIdSets,
+  );
+  const createBlockingPlatformColumnMap =
+    cachedGenerator._createBlockingPlatformColumnMap.bind(cachedGenerator);
+  let placementCalculationCount = 0;
+  cachedGenerator._createBlockingPlatformColumnMap = (...args) => {
+    placementCalculationCount += 1;
+    return createBlockingPlatformColumnMap(...args);
+  };
+
+  const [encounter] = cachedGenerator._createEncounterDefinitions(
+    [room],
+    floorTiles,
+    solidZones,
+    occupiedSupportCellIdSets,
+    spawnContext,
+  );
+  const aggregateSpawnPoints = cachedGenerator._roomSpawnPoints(
+    room,
+    floorTiles,
+    solidZones,
+    occupiedSupportCellIdSets,
+    spawnContext,
+  );
+  const cachedRandomCallCount = cachedRandomCalls;
+
+  let uncachedRandomCalls = 0;
+  const uncachedGenerator = new DungeonGenerator({
+    tileSize: 2,
+    random: () => {
+      uncachedRandomCalls += 1;
+      return 0.5;
+    },
+  });
+  const uncachedOccupiedSupportCellIdSets =
+    uncachedGenerator._createSolidZoneOccupiedSupportCellIdSets(solidZones);
+  const [uncachedEncounter] = uncachedGenerator._createEncounterDefinitions(
+    [room],
+    floorTiles,
+    solidZones,
+    uncachedOccupiedSupportCellIdSets,
+  );
+  const uncachedAggregateSpawnPoints = uncachedGenerator._roomSpawnPoints(
+    room,
+    floorTiles,
+    solidZones,
+    uncachedOccupiedSupportCellIdSets,
+  );
+  const positions = (points) => points.map((point) => point.toArray());
+
+  assert.equal(placementCalculationCount, 1);
+  assert.equal(cachedRandomCallCount, uncachedRandomCalls);
+  assert.deepEqual(positions(encounter.spawnPoints), positions(uncachedEncounter.spawnPoints));
+  assert.deepEqual(positions(aggregateSpawnPoints), positions(uncachedAggregateSpawnPoints));
+  assert.ok(encounter.spawnPoints.every((point, index) => (
+    point !== aggregateSpawnPoints[index]
+  )));
+
+  encounter.spawnPoints[0].x += 1000;
+  const repeatedSpawnPoints = cachedGenerator._roomSpawnPoints(
+    room,
+    floorTiles,
+    solidZones,
+    occupiedSupportCellIdSets,
+    spawnContext,
+  );
+  assert.equal(placementCalculationCount, 1);
+  assert.deepEqual(positions(repeatedSpawnPoints), positions(uncachedAggregateSpawnPoints));
+  assert.ok(repeatedSpawnPoints.every((point, index) => (
+    point !== aggregateSpawnPoints[index]
+  )));
+
+  const replacementFloorTiles = floorTiles.map((tile) => ({ ...tile }));
+  cachedGenerator._roomSpawnPoints(
+    room,
+    replacementFloorTiles,
+    solidZones,
+    occupiedSupportCellIdSets,
+    spawnContext,
+  );
+  assert.equal(
+    placementCalculationCount,
+    2,
+    'a finalized context must not cache across a changed floor array',
+  );
+});
+
 test('encounter spawning sanitizes corner-biased points into clear non-corner positions', () => {
   const { controller, game } = createRuntime();
   const encounter = {

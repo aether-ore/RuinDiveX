@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { DungeonController } from '../src/DungeonController.js';
 import {
   DungeonGenerator,
+  markDungeonSupplementLadderBoardingWallOpenings,
   resolveDungeonSupplementLadderFace,
 } from '../src/DungeonGenerator.js';
 import { createDungeonProgressionData } from '../src/DungeonProgression.js';
@@ -57,6 +58,86 @@ test('supplement ladder mounts on the lower approach face instead of inside the 
   assert.equal(face.bottomApproachFloor, lowerApproach);
   assert.equal(face.planeOffsetTiles, 0.5);
   assert.equal(face.source, 'floor-tier-transition');
+});
+
+test('supplement ladder opens only its exact lower and upper boarding edges', () => {
+  const owner = { id: 'supplement-ladder-room' };
+  const floor = (x, z, elevation, roomId = owner.id) => ({
+    roomId,
+    x,
+    z,
+    elevation,
+  });
+  const bottomFloor = floor(33, 38, 28);
+  const topFloor = floor(35, 38, 30.8);
+  const unrelatedFloor = floor(34, 37, 28);
+  const distantFloor = floor(32, 37, 28);
+  const foreignFloor = floor(34, 39, 30.8, 'other-room');
+
+  const openings = markDungeonSupplementLadderBoardingWallOpenings({
+    owner,
+    apertureGridPoint: { x: 34, z: 38 },
+    planeNormal: { x: -1, z: 0 },
+    bottomFloor,
+    topFloor,
+  });
+
+  assert.deepEqual(openings, [{
+    role: 'bottom',
+    floorKey: '33,38@y28.000',
+    edge: '1,0',
+  }, {
+    role: 'top',
+    floorKey: '35,38@y30.800',
+    edge: '-1,0',
+  }]);
+  assert.deepEqual(bottomFloor.v4SupplementalOpenRetainingWallEdges, ['1,0']);
+  assert.deepEqual(topFloor.v4SupplementalOpenRetainingWallEdges, ['-1,0']);
+  assert.equal(unrelatedFloor.v4SupplementalOpenRetainingWallEdges, undefined);
+
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  for (const boardingFloor of [bottomFloor, topFloor]) {
+    boardingFloor.type = 'floor';
+    boardingFloor.surface = 'industrialSupplementTier';
+    boardingFloor.dungeonSupplement = true;
+  }
+  const wallRuns = generator._collectBoundaryWallRuns(
+    new Map(),
+    new Set(),
+    [{
+      ...owner,
+      baseElevation: 28,
+      ceilingY: 34,
+    }],
+    new Map(),
+    [bottomFloor, topFloor],
+  );
+  const includesBoardingWall = (floor, dx, dz) => {
+    const horizontal = dz !== 0;
+    const line = horizontal ? floor.z + dz * 0.5 : floor.x + dx * 0.5;
+    const axis = horizontal ? floor.x : floor.z;
+    return wallRuns.some((run) => (
+      run.horizontal === horizontal
+        && run.dx === dx
+        && run.dz === dz
+        && Math.abs(run.line - line) <= 0.001
+        && axis >= run.start
+        && axis <= run.end
+    ));
+  };
+  assert.equal(includesBoardingWall(bottomFloor, 1, 0), false);
+  assert.equal(includesBoardingWall(topFloor, -1, 0), false);
+  assert.ok(wallRuns.length > 0, 'unrelated room-shell edges remain enclosed');
+
+  assert.deepEqual(markDungeonSupplementLadderBoardingWallOpenings({
+    owner,
+    apertureGridPoint: { x: 34, z: 38 },
+    planeNormal: { x: 0, z: -1 },
+    bottomFloor: distantFloor,
+    topFloor: foreignFloor,
+  }), []);
+  assert.equal(distantFloor.v4SupplementalOpenRetainingWallEdges, undefined);
+  assert.equal(foreignFloor.v4SupplementalOpenRetainingWallEdges, undefined);
 });
 
 test('legacy conveyor decoration cannot rewrite authoritative supplement floor elevations', () => {

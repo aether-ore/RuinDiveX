@@ -829,7 +829,7 @@ export class CombatSystem {
         aimWorld: aimWorld.clone(),
         applyGroundAimMuzzleOffset,
         target: this.getTargetingLockTarget(),
-        noRewards: Boolean(this.game.busterTestRange?.active || this.game.busterSandboxSession?.active),
+        noRewards: Boolean(this.game.isDisposablePlaytestActive?.()),
       };
       if (poseReadyBeforeHold) {
         firingContext = this._createCompiledBusterFiringContext(intent);
@@ -860,7 +860,7 @@ export class CombatSystem {
         aimWorld,
         applyGroundAimMuzzleOffset,
         target: this.getTargetingLockTarget(),
-        noRewards: Boolean(this.game.busterTestRange?.active || this.game.busterSandboxSession?.active),
+        noRewards: Boolean(this.game.isDisposablePlaytestActive?.()),
       });
       player.holdProjectileFiringPose(
         this._getFacingAimWorld(poseContext.aimPoint),

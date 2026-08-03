@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "kind": "dungeon-augmentation-release-aggregate",
+  "generatedAt": "2026-08-01T08:34:13.525Z",
+  "result": "failed",
+  "corpusAccepted": false,
+  "profile": {
+    "id": "industrial-supplement-preview-v4",
+    "revision": 5,
+    "hash": "sha256-ddd298625970857199d065fedf2bea91dd49c36b19539b03f9e85ac49ca63177"
+  },
+  "provenance": {
+    "gitCommit": "5d1510eeef410197d62105123e1fc1350ce93446",
+    "gitBranch": "codex/dungeon-generation-pivot-20260721",
+    "sourceDirty": false,
+    "sourceHash": "sha256-8f2fee17625c9b1ee7e06bd895910dab8a07f701f516557b55f6361aef0b43c9",
+    "sourceFileCount": 167,
+    "nodeVersion": "v24.17.0",
+    "platform": "win32-x64",
+    "machine": {
+      "cpuModel": "AMD Ryzen 7 9800X3D 8-Core Processor",
+      "logicalCpuCount": 16,
+      "totalMemoryBytes": 33453711360
+    },
+    "profile": {
+      "id": "industrial-supplement-preview-v4",
+      "revision": 5,
+      "hash": "sha256-ddd298625970857199d065fedf2bea91dd49c36b19539b03f9e85ac49ca63177"
+    }
+  },
+  "manifestHash": "sha256-2ff80971c5c356757f364bdbfd8feba465ac6ac08ecf5756593ba90725484f0c",
+  "corpusTier": "smoke",
+  "shardTopology": {
+    "shardCount": 1,
+    "shardSize": 10
+  },
+  "expectedSeedCount": 10,
+  "shardCount": 1,
+  "recordCount": 0,
+  "missingOrdinals": [],
+  "missingRecordOrdinals": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "duplicateRecordOrdinals": [],
+  "gates": {
+    "cleanSourceProvenance": true,
+    "referenceMachine": true,
+    "shardResultsPassed": false,
+    "exactShardTopology": true,
+    "exactOrdinalCoverage": true,
+    "exactRecordCoverage": false,
+    "zeroFallback": true,
+    "firstRealization": true,
+    "releaseValidation": true,
+    "strictRealizedValidation": true,
+    "acceptedParentParity": true,
+    "diversity": true,
+    "performance": false
+  },
+  "performance": {
+    "budgetMs": {
+      "median": 10000,
+      "p95": 20000,
+      "maximum": 30000,
+      "ciTimeoutPerSeed": 180000
+    },
+    "sampleCount": 0,
+    "medianMs": null,
+    "p95Ms": null,
+    "maximumMs": null
+  },
+  "diversity": {
+    "required": false,
+    "exactTopologyFamilies": true,
+    "exactJunctionFamilies": true,
+    "exactElevationFamilies": true,
+    "exactEncounterFamilies": true,
+    "exactRoomLayoutFamilies": true,
+    "topologyMaximumRatio": null,
+    "junctionMaximumRatio": null,
+    "elevationMaximumRatio": null,
+    "completeSignatureMaximumRatio": null,
+    "completeSignatureEvidencePresent": false,
+    "accepted": true,
+    "frequencies": {
+      "topologyTemplates": {
+        "total": 0,
+        "counts": {}
+      },
+      "junctionKinds": {
+        "total": 0,
+        "counts": {}
+      },
+      "elevationModes": {
+        "total": 0,
+        "counts": {}
+      },
+      "encounterProfiles": {
+        "total": 0,
+        "counts": {}
+      },
+      "roomLayouts": {
+        "total": 0,
+        "counts": {}
+      },
+      "completeLayoutSignatures": {
+        "total": 0,
+        "counts": {}
+      }
+    }
+  },
+  "shardEvidenceHashes": [
+    "sha256-2b9fa42cac6516945dfd248b8196f554aab609d89af81847930c41481d483fc8"
+  ],
+  "records": [],
+  "evidenceHash": "sha256-838d68b4123a7e863f88419dc50905e54d56665b62aed3514d4f649ba045c2a8"
+}

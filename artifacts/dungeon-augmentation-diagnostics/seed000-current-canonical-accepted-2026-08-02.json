@@ -1,0 +1,73 @@
+{
+  "schema": "ruindivex-dungeon-augmentation-canonical-diagnostic/v1",
+  "capturedAt": "2026-08-02T19:53:05.0470542-04:00",
+  "workingDirectory": "C:\\Users\\K\\Documents\\New Three.js Practice",
+  "command": "node scripts/debug-dungeon-augmentation-attempt.mjs --seed=layout:augmentation-realized-v4-000 --generate --attempt-limit=1 --release-errors-only",
+  "exitCode": 0,
+  "wallTimeSeconds": 166.4,
+  "seed": "layout:augmentation-realized-v4-000",
+  "status": "applied",
+  "acceptedOverlay": true,
+  "completionMode": "best-effort-partial",
+  "augmentationPlanHash": "v1-f5178024e92254900ddaee251b78e15d",
+  "effectivePlanHash": "v1-76d7dfc517c1470584839152fcb8d227",
+  "releaseValidationAccepted": true,
+  "acceptedAsPlayableAlpha": false,
+  "errorCount": 0,
+  "errors": [],
+  "routeNetworkCounts": {
+    "operations": 4,
+    "nodes": 22,
+    "segments": 27,
+    "modules": 22,
+    "derivedModules": 22
+  },
+  "retainedGrantIds": [
+    "industrial-v1:main-region:route-network-grant:keycard-pyramid-loop",
+    "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+    "industrial-v1:main-region:route-network-grant:coverage:trapRoom_conveyorRoom",
+    "industrial-v1:main-region:route-network-grant:coverage:bossRoom_shrineRoom"
+  ],
+  "plannerBestEffortPrunedGrantIds": [
+    "industrial-v1:main-region:route-network-grant:coverage:keycardRoom_trapRoom",
+    "industrial-v1:main-region:route-network-grant:coverage:conveyorRoom_bossRoom"
+  ],
+  "wholeGrantRuntimePruning": [],
+  "routeNetworkConflictExclusionCount": 5,
+  "routeNetworkConflictExclusions": [
+    "v1-0e5ef3b3b788eba031a5b4a127332d7d",
+    "v1-4ec7fa76845f4c291e9b6ea6d65698bc",
+    "v1-5f2218d066a1f4474d3c613b7c77b38f",
+    "v1-6c0ac6a37ee3886dba0e3231d71d349f",
+    "v1-83ea2f715c5f350cc4d4a1dd532bd5b6"
+  ],
+  "replay": {
+    "accepted": true,
+    "realizationAttempts": 1,
+    "runtimePruningPasses": 4,
+    "runtimePruningRecordCount": 4,
+    "allRecoveryOutcomes": "exact-entity-replacement-realized",
+    "parentRandomCallCount": 80,
+    "consumedRandomCallCount": 80,
+    "parentGenerationAttempts": 3,
+    "rejectedAttempts": []
+  },
+  "dropSpaceCheck": {
+    "id": "trapRoom_hazardDropSpace",
+    "lowerTileCount": 79,
+    "lowerReachable": true,
+    "canExit": true,
+    "everyLowerTileCanExit": true,
+    "nonExitLowerFloorKeys": [],
+    "egressBlockingEdgeCount": 0,
+    "egressBlockingZoneIds": []
+  },
+  "timing": {
+    "planningTimeMs": 38067.7239,
+    "generatorPlanningMs": 37760.349,
+    "overlayMaterializationMs": 272.6718
+  },
+  "floorTileCount": 6701,
+  "physicalSupplementPlanCount": 27,
+  "result": "passed"
+}

@@ -1,0 +1,98 @@
+{
+  "schema": "ruindivex-dungeon-augmentation-canonical-diagnostic/v1",
+  "capturedAt": "2026-08-02T19:25:24.9698463-04:00",
+  "workingDirectory": "C:\\Users\\K\\Documents\\New Three.js Practice",
+  "command": "node scripts/debug-dungeon-augmentation-attempt.mjs --seed=layout:augmentation-realized-v4-000 --generate --attempt-limit=1 --release-errors-only",
+  "exitCode": 0,
+  "wallTimeSeconds": 260,
+  "seed": "layout:augmentation-realized-v4-000",
+  "status": "unchanged",
+  "fallbackToAcceptedBase": true,
+  "acceptedOverlay": false,
+  "releaseValidationAcceptedForPublishedFallback": true,
+  "acceptedAsPlayableAlpha": false,
+  "augmentationPlanHash": null,
+  "publishedEffectivePlanHash": "v1:layout:augmentation-realized-v4-000:depth:1:revolvingFusillade",
+  "parentGenerationAttempts": 3,
+  "realizationAttempts": 1,
+  "parentRandomCallCount": 80,
+  "consumedRandomCallCount": 61,
+  "runtimePruningPasses": 5,
+  "wholeGrantRuntimePruning": [],
+  "repairPasses": [
+    {
+      "pass": 1,
+      "rejectedPlanHash": "v1-0a443331e57d7e0c3aa483a8b7f4fef2",
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+      "entityKind": "node",
+      "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:1:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+      "signature": "v1-83ea2f715c5f350cc4d4a1dd532bd5b6",
+      "failureKinds": ["supplementRoomConnectivityChecks"]
+    },
+    {
+      "pass": 2,
+      "rejectedPlanHash": "v1-fad75de87e2940949d0e79d79e9eb439",
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+      "entityKind": "node",
+      "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:1:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+      "signature": "v1-6c0ac6a37ee3886dba0e3231d71d349f",
+      "failureKinds": ["supplementRoomConnectivityChecks"]
+    },
+    {
+      "pass": 3,
+      "rejectedPlanHash": "v1-e373fc32c1fede0553d9976cf620c7ef",
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+      "entityKind": "node",
+      "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:4:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+      "signature": "v1-5f2218d066a1f4474d3c613b7c77b38f",
+      "failureKinds": ["v4-anchor-placement-unwalkable-support"]
+    },
+    {
+      "pass": 4,
+      "rejectedPlanHash": "v1-db88b4da57c8c6cd52792c23d395bce8",
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+      "entityKind": "node",
+      "entities": [
+        {
+          "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:2:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+          "signature": "v1-4ec7fa76845f4c291e9b6ea6d65698bc"
+        },
+        {
+          "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:3:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+          "signature": "v1-0e5ef3b3b788eba031a5b4a127332d7d"
+        }
+      ],
+      "failureKinds": ["supplementRoomConnectivityChecks"]
+    },
+    {
+      "pass": 5,
+      "rejectedPlanHash": "v1-f5178024e92254900ddaee251b78e15d",
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:trapRoom_conveyorRoom",
+      "entityKind": "segment",
+      "entityId": "supplement:industrial-v1-main-region:routenetwork:3:segment:4:industrial-v1-main-region-route-network-grant-coverage-traproom_conveyorroom",
+      "signature": "v1-8bb6bcc9133df3d8517ab0c26c20ec28",
+      "failureKinds": ["dropSpaceEgressChecks"]
+    }
+  ],
+  "terminalPlanningFailure": {
+    "code": "route-network-adjacent-domain-exhausted",
+    "grantId": "industrial-v1:main-region:route-network-grant:coverage:trapRoom_conveyorRoom",
+    "constraintKind": "adjacent-spine",
+    "firstNodeIndex": 1,
+    "secondNodeIndex": 2,
+    "placementCandidateCounts": [17, 0, 0, 63, 17],
+    "planningTimeMs": 106067.5865,
+    "generatorPlanningMs": 106025.5032
+  },
+  "publishedFallbackDropSpaceCheck": {
+    "id": "trapRoom_hazardDropSpace",
+    "lowerTileCount": 79,
+    "lowerReachable": true,
+    "canExit": true,
+    "everyLowerTileCanExit": true,
+    "egressBlockingEdgeCount": 0,
+    "egressBlockingZoneIds": [],
+    "evidenceScope": "published authored fallback only; this does not clear the rejected augmented pass-five plan"
+  },
+  "result": "failed"
+}

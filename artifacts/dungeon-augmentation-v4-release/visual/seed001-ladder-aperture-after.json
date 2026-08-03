@@ -1,0 +1,73 @@
+{
+  "schema": "ruindivex-dungeon-augmentation-focused-visual-check/v1",
+  "capturedAt": "2026-08-02T19:44:14.858Z",
+  "formalVisualReceipt": false,
+  "scope": "focused developer-camera verification of ladder boarding apertures",
+  "seed": "layout:augmentation-realized-v4-001",
+  "url": "http://127.0.0.1:5174/?startupWorld=dungeon&dungeonFamily=industrial-v1&busterLab=sandbox&playerInvulnerable=1&dungeonSeed=augmentation-realized-v4-001&reaverbotSeed=augmentation-realized-v4-001&dungeonAugmentation=industrial-supplement-preview-v4&dungeonAugmentationFresh=1",
+  "augmentationStatus": "applied",
+  "augmentationPlanHash": "v1-302ed26c9f2bc8dfdf8f598c28ac53c9",
+  "effectivePlanHash": "v1-4a48156df773fb747768ce9e95cb6f8a",
+  "boundaryWallRunCount": 751,
+  "viewport": {
+    "width": 1280,
+    "height": 720,
+    "devicePixelRatio": 1
+  },
+  "screenshot": "seed001-ladder-aperture-after.png",
+  "checks": [
+    {
+      "ladderId": "enemyNest_keycardRoom_ground:ladder",
+      "connectorVariantId": "ladder_gallery_v1",
+      "endpoints": [
+        {
+          "role": "bottom",
+          "floorKey": "16,17@y-14.000",
+          "edge": "-1,0",
+          "targetFloorKey": "14,17@y0.000",
+          "targetBearing": "-1,0",
+          "declaredOpen": true,
+          "reciprocalLadderLink": true,
+          "blockingWallIds": []
+        },
+        {
+          "role": "top",
+          "floorKey": "14,17@y0.000",
+          "edge": "1,0",
+          "targetFloorKey": "16,17@y-14.000",
+          "targetBearing": "1,0",
+          "declaredOpen": true,
+          "reciprocalLadderLink": true,
+          "blockingWallIds": []
+        }
+      ]
+    },
+    {
+      "ladderId": "conveyorRoom_bossRoom_ground:ladder",
+      "connectorVariantId": "ladder_gallery_v1",
+      "endpoints": [
+        {
+          "role": "bottom",
+          "floorKey": "-7,103@y-14.000",
+          "edge": "-1,0",
+          "targetFloorKey": "-9,103@y0.000",
+          "targetBearing": "-1,0",
+          "declaredOpen": true,
+          "reciprocalLadderLink": true,
+          "blockingWallIds": []
+        },
+        {
+          "role": "top",
+          "floorKey": "-9,103@y0.000",
+          "edge": "1,0",
+          "targetFloorKey": "-7,103@y-14.000",
+          "targetBearing": "1,0",
+          "declaredOpen": true,
+          "reciprocalLadderLink": true,
+          "blockingWallIds": []
+        }
+      ]
+    }
+  ],
+  "temporaryCameraStateRestored": true
+}

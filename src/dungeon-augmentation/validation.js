@@ -29,8 +29,13 @@ import {
 } from './endpointSeamLattice.js';
 import {
   DUNGEON_SELECTION_BAG_FAMILIES,
+  inspectDungeonRouteNetworkSelectionSequence,
   validateDungeonSelectionBagWitnessSequence,
 } from './selectionBagWitness.js';
+import {
+  createRouteNetworkConflictEntitySignature,
+  normalizeRouteNetworkConflictExclusions,
+} from './routeNetworkModulePruning.js';
 
 function diagnostic(code, message, context = {}) {
   return { code, message, context };
@@ -1099,6 +1104,10 @@ function validateV4RouteNetworkSelectionManifest(operation, nodeById, errors) {
       // witnesses remain mandatory whenever the manifest actually declares
       // one or more selections.
       requireNonEmpty: expectedSelectedIds.length > 0,
+      // A manifest owns only one operation-local chunk. A leading global
+      // refill is proved against the preceding operation by the V4-wide
+      // solve-order inspector below, not by this truncated local sequence.
+      allowLeadingGlobalRefill: true,
     });
     if (!validation.accepted) {
       errors.push(diagnostic(
@@ -1180,6 +1189,8 @@ function exactRouteNetworkEndpointSocket(
   endpoint,
   nodeById,
   extensionRegions,
+  segment = null,
+  endpointIndex = null,
 ) {
   const node = nodeById.get(String(endpoint?.nodeId ?? ''));
   if (node?.operationId === operation?.id) {
@@ -1187,16 +1198,12 @@ function exactRouteNetworkEndpointSocket(
       String(socket?.id ?? '') === socketIdOf(endpoint)
     )) ?? null;
   }
-  const region = extensionRegions.find(({ id }) => (
-    String(id) === String(operation?.parentRegionId ?? '')
-  ));
-  const grant = (region?.routeNetworkGrants ?? []).find(({ id }) => (
-    String(id) === String(operation?.grantId ?? '')
-  ));
-  return (grant?.endpointSockets ?? []).find((socket) => (
+  const grant = routeNetworkGrantForOperation(operation, extensionRegions);
+  const grantedSocket = (grant?.endpointSockets ?? []).find((socket) => (
     String(socket?.id ?? '') === socketIdOf(endpoint)
       && String(socket?.nodeId ?? '') === String(endpoint?.nodeId ?? '')
   )) ?? null;
+  return grantedSocket;
 }
 
 function normalizedHorizontalFacing(facing) {
@@ -1631,6 +1638,8 @@ function validateV4RouteEndpointSeams({
       endpoint,
       nodeById,
       extensionRegions,
+      segment,
+      endpointIndex,
     );
     if (!exactSocket) continue;
     const node = nodeById.get(String(endpoint?.nodeId ?? ''));
@@ -1762,6 +1771,8 @@ function validateV4RouteSegmentPhysicalWitness({
       endpoint,
       nodeById,
       extensionRegions,
+      segment,
+      endpointIndex,
     );
     if (!exactSocket || !finitePoint(exactSocket.position) || !finitePoint(exactSocket.facing)) {
       errors.push(diagnostic(
@@ -2628,7 +2639,17 @@ function exactRouteNetworkLandingOverlapsForSegment(
     const socket = socketById.get(socketIdOf(endpoint));
     const seam = segment.endpointSeams?.[endpointIndex];
     if (!seam?.overlapEnvelope) continue;
-    if (socket && endpointMatchesGrantedSocket(endpoint, socket)) {
+    const exactSocket = socket
+      ? exactRouteNetworkEndpointSocket(
+        operation,
+        endpoint,
+        nodeById,
+        extensionRegions,
+        segment,
+        endpointIndex,
+      )
+      : null;
+    if (exactSocket && endpointMatchesGrantedSocket(endpoint, exactSocket)) {
       matches.push(seam.overlapEnvelope);
       continue;
     }
@@ -3030,9 +3051,24 @@ function routeNetworkGraph(operation, grant, nodeById, segmentById, errors) {
     let graphTo = toId;
     if (fromInternal !== toInternal) {
       const externalEndpoint = fromInternal ? segment.to : segment.from;
+      const externalEndpointIndex = fromInternal ? 1 : 0;
       const socketId = socketIdOf(externalEndpoint);
       const grantedSocket = grantedSockets.get(socketId);
-      if (!grantedSocket || !endpointMatchesGrantedSocket(externalEndpoint, grantedSocket)) {
+      const exactGrantedSocket = grantedSocket
+        ? exactRouteNetworkEndpointSocket(
+          operation,
+          externalEndpoint,
+          nodeById,
+          [{
+            id: operation.parentRegionId,
+            routeNetworkGrants: [grant],
+          }],
+          segment,
+          externalEndpointIndex,
+        )
+        : null;
+      if (!exactGrantedSocket
+        || !endpointMatchesGrantedSocket(externalEndpoint, exactGrantedSocket)) {
         errors.push(diagnostic(
           'route-network-external-endpoint-not-granted',
           `Route network ${operation.id} uses an endpoint that is not its exact host grant.`,
@@ -3716,6 +3752,22 @@ function validatePyramidLoop({
         operationId: operation.id,
         grantId: grant.id,
         parentElevation,
+        nodeElevations: pyramidNodes.map((node) => ({
+          nodeId: node.id,
+          centerY: Number(node?.placement?.center?.y ?? parentElevation),
+          socketYs: [...new Set((node?.sockets ?? []).map((socket) => (
+            Number(socket?.position?.y ?? parentElevation)
+          )))],
+        })),
+        segmentElevations: pyramidSegments.map((segment) => ({
+          segmentId: segment.id,
+          connectorFamily: canonicalConnectorFamily(segment?.connectorFamily),
+          ys: [...new Set([
+            segment?.from?.position?.y,
+            segment?.to?.position?.y,
+            ...(segment?.path ?? []).map((point) => point?.y),
+          ].filter((value) => Number.isFinite(Number(value))).map(Number))],
+        })),
       },
     ));
   }
@@ -3875,6 +3927,7 @@ function validateV4RouteNetworks({
   nodeById,
   segmentById,
   errors,
+  warnings,
 }) {
   const v4 = isV4AugmentationPlan(plan, profile);
   const routeOperations = [...operationById.values()].filter(({ type }) => type === 'routeNetwork');
@@ -3890,6 +3943,166 @@ function validateV4RouteNetworks({
     };
   }
   const grantsById = routeNetworkGrantsById(extensionRegions, errors);
+  const declaredConflictExclusions = plan?.routeNetworkConflictExclusions ?? [];
+  const normalizedConflictExclusions = normalizeRouteNetworkConflictExclusions(
+    declaredConflictExclusions,
+  );
+  if (v4 && canonicalStringify(declaredConflictExclusions)
+    !== canonicalStringify(normalizedConflictExclusions)) {
+    errors.push(diagnostic(
+      'route-network-conflict-exclusions-invalid',
+      'Route-network conflict exclusions must be canonical exact-entity signatures.',
+    ));
+  }
+  if (v4) {
+    for (const exclusion of normalizedConflictExclusions) {
+      if (!grantsById.has(String(exclusion.grantId))) {
+        errors.push(diagnostic(
+          'route-network-conflict-exclusion-grant-unknown',
+          `Route-network conflict exclusion references unknown grant ${exclusion.grantId}.`,
+          {
+            grantId: exclusion.grantId,
+            entityKind: exclusion.entityKind,
+            entityId: exclusion.entityId,
+          },
+        ));
+      }
+      const matchingEntities = [
+        ...(exclusion.entityKind === 'segment'
+          ? segmentById.values()
+          : nodeById.values()),
+      ].filter((entity) => {
+        const operation = operationById.get(String(entity.operationId ?? ''));
+        return String(operation?.grantId ?? '') === String(exclusion.grantId)
+          && createRouteNetworkConflictEntitySignature(entity, exclusion.entityKind)
+            === exclusion.signature;
+      });
+      for (const entity of matchingEntities) {
+        errors.push(diagnostic(
+          'route-network-conflict-exclusion-still-realized',
+          `Route-network ${exclusion.entityKind} ${entity.id} exactly matches a declared physical conflict exclusion.`,
+          {
+            grantId: exclusion.grantId,
+            entityKind: exclusion.entityKind,
+            // The exclusion ID identifies the rejected source candidate only;
+            // matching is intentionally based on physical signature.
+            entityId: exclusion.entityId,
+            matchedEntityId: String(entity.id ?? ''),
+            signature: exclusion.signature,
+          },
+        ));
+      }
+    }
+  }
+  const bestEffortPartial = Boolean(
+    v4
+      && profile?.routeNetworkPlanning?.allowPartialRouteNetworkRealization === true
+      && plan?.completionMode === 'best-effort-partial',
+  );
+  const declaredPrunedGrants = Array.isArray(plan?.prunedRouteNetworkGrants)
+    ? plan.prunedRouteNetworkGrants
+    : [];
+  const canonicalGrantOrdinalById = new Map(
+    extensionRegions.flatMap((region) => (
+      (region?.routeNetworkGrants ?? []).map((grant, grantOrdinal) => ({
+        grant,
+        grantOrdinal,
+        region,
+      }))
+    )).sort((first, second) => {
+      const planningPhase = ({ grant }) => {
+        if (grant?.kind === 'landmark-perimeter-loop') return 0;
+        if (grant?.required === true && grant?.kind === 'objective-route-coverage') return 1;
+        if (grant?.kind !== 'cross-band-shortcut') return 2;
+        return 3;
+      };
+      return planningPhase(first) - planningPhase(second)
+        || String(first.region?.id ?? '').localeCompare(String(second.region?.id ?? ''))
+        || first.grantOrdinal - second.grantOrdinal;
+    }).map(({ grant }, operationOrdinal) => [String(grant?.id ?? ''), operationOrdinal]),
+  );
+  const prunedGrantIds = new Set();
+  if (plan?.completionMode != null && plan.completionMode !== 'best-effort-partial') {
+    errors.push(diagnostic(
+      'route-network-completion-mode-invalid',
+      `Unsupported route-network completion mode ${String(plan.completionMode)}.`,
+      { completionMode: plan.completionMode },
+    ));
+  }
+  if (plan?.completionMode === 'best-effort-partial' && !bestEffortPartial) {
+    errors.push(diagnostic(
+      'route-network-partial-realization-not-allowed',
+      'This profile does not allow best-effort route-network realization.',
+      { profileId: plan?.profileId ?? null },
+    ));
+  }
+  if (bestEffortPartial && declaredPrunedGrants.length === 0) {
+    errors.push(diagnostic(
+      'route-network-pruned-grant-ledger-empty',
+      'A best-effort partial overlay must identify at least one pruned route-network grant.',
+    ));
+  }
+  if (!bestEffortPartial && declaredPrunedGrants.length > 0) {
+    errors.push(diagnostic(
+      'route-network-pruned-grant-ledger-unexpected',
+      'Pruned route-network grants require explicit best-effort partial completion mode.',
+    ));
+  }
+  for (const [prunedOrdinal, pruned] of declaredPrunedGrants.entries()) {
+    const grantId = String(pruned?.grantId ?? '');
+    const grantRecord = grantsById.get(grantId);
+    const declaresExactConflictReplacementExhaustion = pruned?.recoveryKind
+      === 'exact-conflict-replacements-exhausted';
+    const matchingConflictExclusions = normalizedConflictExclusions.filter((exclusion) => (
+      String(exclusion.grantId) === grantId
+    ));
+    if (grantId && (
+      matchingConflictExclusions.length > 0
+        || declaresExactConflictReplacementExhaustion
+    )) {
+      errors.push(diagnostic(
+        'route-network-conflict-exclusion-grant-pruned',
+        `Route-network grant ${grantId} cannot be removed by an exact module or segment exclusion.`,
+        {
+          prunedOrdinal,
+          grantId,
+          conflictExclusionCount: matchingConflictExclusions.length,
+          conflictEntityKinds: [...new Set(
+            matchingConflictExclusions.map(({ entityKind }) => entityKind),
+          )].sort(),
+          recoveryKind: pruned?.recoveryKind ?? null,
+          replacementExhaustionKind: pruned?.replacementExhaustionKind ?? null,
+        },
+      ));
+    }
+    if (!grantId || prunedGrantIds.has(grantId)) {
+      errors.push(diagnostic(
+        'route-network-pruned-grant-ledger-invalid',
+        `Pruned route-network grant entry ${prunedOrdinal} has a missing or duplicate grant id.`,
+        { prunedOrdinal, grantId: grantId || null },
+      ));
+      continue;
+    }
+    prunedGrantIds.add(grantId);
+    if (!grantRecord || grantRecord.grant.required !== true) {
+      errors.push(diagnostic(
+        'route-network-pruned-grant-not-required',
+        `Pruned route-network grant ${grantId} is missing or is not required.`,
+        { prunedOrdinal, grantId },
+      ));
+      continue;
+    }
+    if (String(pruned?.parentRegionId ?? '') !== String(grantRecord.region.id)
+      || String(pruned?.routeNetworkKind ?? '') !== String(grantRecord.grant.kind ?? '')
+      || Number(pruned?.operationOrdinal) !== canonicalGrantOrdinalById.get(grantId)
+      || !String(pruned?.reason ?? '')) {
+      errors.push(diagnostic(
+        'route-network-pruned-grant-ledger-mismatch',
+        `Pruned route-network grant ${grantId} does not match its authoritative host grant.`,
+        { prunedOrdinal, grantId },
+      ));
+    }
+  }
   const snapshotsByRegionId = new Map();
   if (v4) {
     for (const region of extensionRegions) {
@@ -3958,6 +4171,23 @@ function validateV4RouteNetworks({
   const topologyKinds = new Set();
   const junctionKinds = new Set();
   const elevationModes = new Set();
+
+  if (v4) {
+    const selectionSequence = inspectDungeonRouteNetworkSelectionSequence(routeOperations, {
+      // Older V4 fixtures intentionally predate selection manifests. Once one
+      // operation declares the contract, however, every route operation must
+      // participate so the global exhaustion-bag sequence is complete.
+      allowAllManifestsAbsent: true,
+      requireNonEmptyFamilies: false,
+    });
+    for (const selectionError of selectionSequence.errors) {
+      errors.push(diagnostic(
+        selectionError.code,
+        'The route-network selection manifests do not form one authoritative solve-order sequence.',
+        { ...selectionError },
+      ));
+    }
+  }
 
   for (const operation of routeOperations) {
     if (v4) validateV4RouteNetworkSelectionManifest(operation, nodeById, errors);
@@ -4476,18 +4706,44 @@ function validateV4RouteNetworks({
   if (v4) {
     for (const { grant } of grantsById.values()) {
       if (grant.required === true && !consumedGrantIds.has(String(grant.id))) {
+        if (bestEffortPartial && prunedGrantIds.has(String(grant.id))) {
+          warnings.push(diagnostic(
+            'required-route-network-grant-pruned',
+            `Required route-network grant ${grant.id} was pruned after bounded planning found no valid realization.`,
+            { grantId: grant.id, kind: grant.kind },
+          ));
+        } else {
+          errors.push(diagnostic(
+            'required-route-network-grant-unfulfilled',
+            `Required route-network grant ${grant.id} was not realized.`,
+            { grantId: grant.id, kind: grant.kind },
+          ));
+        }
+      }
+    }
+    for (const grantId of prunedGrantIds) {
+      if (consumedGrantIds.has(grantId)) {
         errors.push(diagnostic(
-          'required-route-network-grant-unfulfilled',
-          `Required route-network grant ${grant.id} was not realized.`,
-          { grantId: grant.id, kind: grant.kind },
+          'route-network-pruned-grant-still-realized',
+          `Route-network grant ${grantId} is both pruned and realized.`,
+          { grantId },
         ));
       }
     }
-    if (pyramidLoopCount !== 1) {
+    if (bestEffortPartial && routeOperations.length === 0) {
+      errors.push(diagnostic(
+        'best-effort-route-network-overlay-empty',
+        'A best-effort partial overlay must retain at least one valid route network.',
+      ));
+    }
+    if ((!bestEffortPartial && pyramidLoopCount !== 1)
+      || (bestEffortPartial && pyramidLoopCount > 1)) {
       errors.push(diagnostic(
         'required-pyramid-loop-count-invalid',
-        `V4 requires exactly one keycard-pyramid perimeter loop.`,
-        { pyramidLoopCount },
+        bestEffortPartial
+          ? 'V4 best-effort realization permits at most one keycard-pyramid perimeter loop.'
+          : 'V4 requires exactly one keycard-pyramid perimeter loop.',
+        { pyramidLoopCount, bestEffortPartial },
       ));
     }
     const maximumNetworks = Number(
@@ -4864,6 +5120,7 @@ export function validateDungeonAugmentationPlan(plan, {
     nodeById,
     segmentById,
     errors,
+    warnings,
   });
 
   const baseVolumes = collectBaseDraftVolumes(baseDraft, extensionRegions);

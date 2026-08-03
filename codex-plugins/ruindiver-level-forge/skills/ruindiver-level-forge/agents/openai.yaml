@@ -1,0 +1,4 @@
+interface:
+  display_name: "RuinDiver Level Forge"
+  short_description: "Generate and edit valid RuinDiver dungeons"
+  default_prompt: "Use $ruindiver-level-forge to build a fully playable dungeon from my prompt."

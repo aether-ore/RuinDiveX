@@ -8,8 +8,10 @@ import {
   canonicalStringify,
   computeDungeonAugmentationPlanHash,
   computeEffectiveDungeonPlanHash,
+  createRouteNetworkConflictEntitySignature,
   createDungeonRouteEndpointSeam,
   evaluateDungeonRouteNetworkFeaturelessGraph,
+  landmarkSharedThresholdParentPosition,
   validateDungeonAugmentationPlan,
 } from '../src/dungeon-augmentation/index.js';
 import {
@@ -130,6 +132,7 @@ const V4_PROFILE = Object.freeze({
     maximumTotalRooms: 30,
   },
   routeNetworkPlanning: {
+    allowPartialRouteNetworkRealization: true,
     maximumFeaturelessSpanMeters: 33.6,
     maximumNetworkCount: 8,
     maximumTotalModules: 30,
@@ -964,6 +967,228 @@ function validateV4(plan, fixture) {
   });
 }
 
+test('V4 best-effort overlays retain valid networks with an exact pruned-grant ledger', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const prunedGrant = structuredClone(fixture.extensionRegions[0].routeNetworkGrants[0]);
+  prunedGrant.id = `${prunedGrant.id}:pruned`;
+  fixture.extensionRegions[0].routeNetworkGrants.push(prunedGrant);
+  plan.completionMode = 'best-effort-partial';
+  plan.prunedRouteNetworkGrants = [{
+    grantId: prunedGrant.id,
+    parentRegionId: fixture.extensionRegions[0].id,
+    routeNetworkKind: prunedGrant.kind,
+    operationOrdinal: 1,
+    reason: 'route-network-node-placement-collision',
+  }];
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.equal(validation.accepted, true, JSON.stringify(validation.errors));
+  assert.ok(validation.warnings.some(({ code, context }) => (
+    code === 'required-route-network-grant-pruned'
+      && context?.grantId === prunedGrant.id
+  )));
+});
+
+test('V4 validation never turns an exact entity conflict into whole-grant pruning', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const retainedOperation = plan.operations.find(({ type }) => type === 'routeNetwork');
+  const prunedGrant = structuredClone(fixture.extensionRegions[0].routeNetworkGrants[0]);
+  prunedGrant.id = `${prunedGrant.id}:exact-conflict-pruned`;
+  fixture.extensionRegions[0].routeNetworkGrants.push(prunedGrant);
+  plan.completionMode = 'best-effort-partial';
+  plan.prunedRouteNetworkGrants = [{
+    grantId: prunedGrant.id,
+    parentRegionId: fixture.extensionRegions[0].id,
+    routeNetworkKind: prunedGrant.kind,
+    operationOrdinal: 1,
+    reason: 'route-network-node-placement-collision',
+  }];
+  plan.routeNetworkConflictExclusions = [{
+    grantId: prunedGrant.id,
+    entityKind: 'node',
+    entityId: 'node:rejected-candidate',
+    signature: 'physical-signature:rejected-candidate',
+    reason: 'synthetic-exact-conflict',
+  }];
+  rehash(plan);
+
+  const protectedValidation = validateV4(plan, fixture);
+  assert.ok(protectedValidation.errors.some(({ code, context }) => (
+    code === 'route-network-conflict-exclusion-grant-pruned'
+      && context?.grantId === prunedGrant.id
+      && context?.conflictExclusionCount === 1
+  )));
+
+  plan.prunedRouteNetworkGrants[0] = {
+    ...plan.prunedRouteNetworkGrants[0],
+    reason: 'route-network-conflict-exclusion-replacements-exhausted',
+    recoveryKind: 'exact-conflict-replacements-exhausted',
+    conflictExclusionCount: 1,
+    conflictEntityKinds: ['node'],
+    replacementExhaustionKind: 'candidate-domain-exhausted',
+  };
+  rehash(plan);
+  const exhaustedValidation = validateV4(plan, fixture);
+  assert.ok(exhaustedValidation.errors.some(({ code, context }) => (
+    code === 'route-network-conflict-exclusion-grant-pruned'
+      && context?.grantId === prunedGrant.id
+      && context?.recoveryKind === 'exact-conflict-replacements-exhausted'
+  )), 'candidate-domain exhaustion cannot delete the affected grant');
+
+  plan.prunedRouteNetworkGrants[0].replacementExhaustionKind = 'bounded-search-exhausted';
+  rehash(plan);
+  const mismatchedBoundedValidation = validateV4(plan, fixture);
+  assert.ok(mismatchedBoundedValidation.errors.some(({ code }) => (
+    code === 'route-network-conflict-exclusion-grant-pruned'
+  )), 'bounded exhaustion must carry its exact bounded reason');
+
+  plan.prunedRouteNetworkGrants[0].reason =
+    'route-network-conflict-exclusion-bounded-search-exhausted';
+  rehash(plan);
+  const boundedValidation = validateV4(plan, fixture);
+  assert.ok(boundedValidation.errors.some(({ code }) => (
+    code === 'route-network-conflict-exclusion-grant-pruned'
+  )), 'bounded exhaustion cannot delete the affected grant');
+
+  plan.routeNetworkConflictExclusions[0].grantId = retainedOperation.grantId;
+  rehash(plan);
+  const orphanedMarkerValidation = validateV4(plan, fixture);
+  assert.ok(orphanedMarkerValidation.errors.some(({ code }) => (
+    code === 'route-network-conflict-exclusion-grant-pruned'
+  )), 'the exact exhaustion marker cannot outlive its matching exclusion evidence');
+
+  plan.prunedRouteNetworkGrants[0] = {
+    grantId: prunedGrant.id,
+    parentRegionId: fixture.extensionRegions[0].id,
+    routeNetworkKind: prunedGrant.kind,
+    operationOrdinal: 1,
+    reason: 'route-network-node-placement-collision',
+  };
+  rehash(plan);
+  const unrelatedValidation = validateV4(plan, fixture);
+  assert.equal(
+    unrelatedValidation.errors.some(({ code }) => (
+      code === 'route-network-conflict-exclusion-grant-pruned'
+    )),
+    false,
+  );
+  assert.equal(unrelatedValidation.accepted, true, JSON.stringify(unrelatedValidation.errors));
+});
+
+test('terminal exact-conflict exhaustion cannot accept an empty supplemental overlay', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const grant = fixture.extensionRegions[0].routeNetworkGrants[0];
+  plan.operations = [];
+  plan.nodes = [];
+  plan.segments = [];
+  plan.themeBindings = [];
+  plan.completionMode = 'best-effort-partial';
+  plan.routeNetworkConflictExclusions = [{
+    grantId: grant.id,
+    entityKind: 'segment',
+    entityId: 'segment:rejected-final-network',
+    signature: 'physical-signature:rejected-final-network',
+    reason: 'synthetic-final-network-conflict',
+  }];
+  plan.prunedRouteNetworkGrants = [{
+    grantId: grant.id,
+    parentRegionId: fixture.extensionRegions[0].id,
+    routeNetworkKind: grant.kind,
+    operationOrdinal: 0,
+    reason: 'route-network-conflict-exclusion-replacements-exhausted',
+    recoveryKind: 'exact-conflict-replacements-exhausted',
+    conflictExclusionCount: 1,
+    conflictEntityKinds: ['segment'],
+    replacementExhaustionKind: 'candidate-domain-exhausted',
+  }];
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.ok(validation.errors.some(({ code }) => (
+    code === 'best-effort-route-network-overlay-empty'
+  )));
+  assert.equal(validation.accepted, false);
+});
+
+test('V4 validation rejects an accepted entity that exactly matches its conflict exclusion', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const operation = plan.operations.find(({ type }) => type === 'routeNetwork');
+  const node = plan.nodes.find(({ operationId }) => operationId === operation.id);
+  plan.routeNetworkConflictExclusions = [{
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'synthetic-validation-conflict',
+  }];
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.ok(validation.errors.some(({ code, context }) => (
+    code === 'route-network-conflict-exclusion-still-realized'
+      && context?.entityId === node.id
+  )));
+});
+
+test('V4 validation matches a physical conflict after its ordinal entity ID changes', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const operation = plan.operations.find(({ type }) => type === 'routeNetwork');
+  const node = plan.nodes.find(({ operationId }) => operationId === operation.id);
+  const evidenceEntityId = `${node.id}:previous-candidate-ordinal`;
+  plan.routeNetworkConflictExclusions = [{
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: evidenceEntityId,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'synthetic-renumbered-validation-conflict',
+  }];
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.ok(validation.errors.some(({ code, context }) => (
+    code === 'route-network-conflict-exclusion-still-realized'
+      && context?.entityId === evidenceEntityId
+      && context?.matchedEntityId === node.id
+  )));
+});
+
+test('V4 best-effort overlays reject forged ordinals and realized pruned grants', () => {
+  const wrongOrdinal = makeV4ValidationFixture();
+  const omittedGrant = structuredClone(
+    wrongOrdinal.fixture.extensionRegions[0].routeNetworkGrants[0],
+  );
+  omittedGrant.id = `${omittedGrant.id}:pruned`;
+  wrongOrdinal.fixture.extensionRegions[0].routeNetworkGrants.push(omittedGrant);
+  wrongOrdinal.plan.completionMode = 'best-effort-partial';
+  wrongOrdinal.plan.prunedRouteNetworkGrants = [{
+    grantId: omittedGrant.id,
+    parentRegionId: wrongOrdinal.fixture.extensionRegions[0].id,
+    routeNetworkKind: omittedGrant.kind,
+    operationOrdinal: 99,
+    reason: 'route-network-node-placement-collision',
+  }];
+  rehash(wrongOrdinal.plan);
+  assert.ok(validateV4(wrongOrdinal.plan, wrongOrdinal.fixture).errors.some(({ code }) => (
+    code === 'route-network-pruned-grant-ledger-mismatch'
+  )));
+
+  const stillRealized = makeV4ValidationFixture();
+  const realizedGrant = stillRealized.fixture.extensionRegions[0].routeNetworkGrants[0];
+  stillRealized.plan.completionMode = 'best-effort-partial';
+  stillRealized.plan.prunedRouteNetworkGrants = [{
+    grantId: realizedGrant.id,
+    parentRegionId: stillRealized.fixture.extensionRegions[0].id,
+    routeNetworkKind: realizedGrant.kind,
+    operationOrdinal: 0,
+    reason: 'route-network-node-placement-collision',
+  }];
+  rehash(stillRealized.plan);
+  assert.ok(validateV4(stillRealized.plan, stillRealized.fixture).errors.some(({ code }) => (
+    code === 'route-network-pruned-grant-still-realized'
+  )));
+});
+
 function createSelectionWitnessSequence(family, selectedIds) {
   const order = [...new Set(selectedIds.map(String))];
   let state = { cycle: 0, consumedIds: [] };
@@ -1039,6 +1264,7 @@ function applyValidV4SelectionManifest(plan, operation = plan.operations[0]) {
   )));
   operation.selectionManifest = {
     schema: 'ruindivex-dungeon-route-network-selection-manifest/v1',
+    solveDecisionOrdinal: 0,
     topology: { id: topologyTemplateId, cycle: 0, refilled: false },
     elevation: { id: elevationMode, cycle: 0, refilled: false },
     junctions,
@@ -2370,6 +2596,141 @@ test('V4 validates the exact identities and all 15 ordered cells of both endpoin
       && context.segmentId === plan.segments[1].id
       && context.role === 'from'
   )), JSON.stringify(rejected.errors));
+});
+
+test('V4 rejects landmark parent seams displaced from their authored socket grant', () => {
+  const { fixture, plan } = makeV4ValidationFixture();
+  const operation = plan.operations[0];
+  const grant = fixture.extensionRegions[0].routeNetworkGrants[0];
+  const nodeById = new Map(plan.nodes.map((node) => [String(node.id), node]));
+  const parentSocketById = new Map(grant.endpointSockets.map((socket) => (
+    [String(socket.id), socket]
+  )));
+  const parentOverlapBySocketId = new Map(grant.socketLandingOverlapGrants.map((overlap) => (
+    [String(overlap.socketId), overlap]
+  )));
+  const parentSegments = plan.segments.filter((segment) => (
+    [segment.from, segment.to].filter((endpoint) => nodeById.has(String(endpoint.nodeId))).length
+      === 1
+  ));
+  assert.equal(parentSegments.length, 2);
+
+  for (const segment of parentSegments) {
+    const endpoints = [segment.from, segment.to];
+    const externalIndex = nodeById.has(String(segment.from.nodeId)) ? 1 : 0;
+    const internalIndex = externalIndex === 0 ? 1 : 0;
+    const externalEndpoint = endpoints[externalIndex];
+    const internalEndpoint = endpoints[internalIndex];
+    const parentSocket = parentSocketById.get(String(
+      externalEndpoint.socketId ?? externalEndpoint.id,
+    ));
+    const internalNode = nodeById.get(String(internalEndpoint.nodeId));
+    const internalSocket = internalNode.sockets.find(({ id }) => (
+      String(id) === String(internalEndpoint.socketId ?? internalEndpoint.id)
+    ));
+    assert.ok(parentSocket && internalSocket);
+
+    internalSocket.facing = {
+      x: -Number(parentSocket.facing.x),
+      y: 0,
+      z: -Number(parentSocket.facing.z),
+    };
+    internalEndpoint.facing = { ...internalSocket.facing };
+    const physicalParentPosition = landmarkSharedThresholdParentPosition(
+      parentSocket,
+      internalSocket,
+    );
+    externalEndpoint.position = { ...physicalParentPosition };
+    externalEndpoint.authoredSocketPosition = { ...parentSocket.position };
+    segment.routeRole = 'parent-station-attachment';
+    segment.path = [
+      { ...segment.from.position },
+      { ...segment.to.position },
+    ];
+    segment.landings = endpoints.map(({ position }) => ({ position: { ...position } }));
+    const midpoint = {
+      x: (Number(segment.from.position.x) + Number(segment.to.position.x)) * 0.5,
+      y: 0.25,
+      z: (Number(segment.from.position.z) + Number(segment.to.position.z)) * 0.5,
+    };
+    for (const volume of [
+      ...(segment.occupiedVolumes ?? []),
+      ...(segment.clearanceVolumes ?? []),
+    ]) volume.center = { ...midpoint };
+    for (const [landingIndex, volume] of (segment.landingVolumes ?? []).entries()) {
+      volume.center = { ...endpoints[landingIndex].position, y: 0.25 };
+    }
+
+    const exactSockets = endpoints.map((endpoint, endpointIndex) => {
+      if (endpointIndex === externalIndex) {
+        return { ...parentSocket, position: { ...physicalParentPosition } };
+      }
+      return internalSocket;
+    });
+    segment.endpointSeams = exactSockets.map((socket, endpointIndex) => {
+      const endpoint = endpoints[endpointIndex];
+      const role = endpointIndex === 0 ? 'from' : 'to';
+      const parentOverlap = parentOverlapBySocketId.get(String(
+        endpoint.socketId ?? endpoint.id,
+      ));
+      return createDungeonRouteEndpointSeam(socket, {
+        id: `${segment.id}:${role}-endpoint-seam`,
+        segmentId: segment.id,
+        operationId: operation.id,
+        networkId: operation.id,
+        nodeId: endpoint.nodeId,
+        socketId: endpoint.socketId ?? endpoint.id,
+        localSocketId: socket.localSocketId ?? endpoint.localSocketId ?? null,
+        role,
+        elevationBand: internalNode.progressionBandId,
+        parentOwnerId: parentOverlap?.parentOwnerId ?? null,
+      });
+    });
+    segment.localApproachWitnesses = exactSockets.map((socket, endpointIndex) => {
+      const endpoint = endpoints[endpointIndex];
+      const start = {
+        x: Number(socket.position.x) - Number(socket.facing.x) * 5.6,
+        y: Number(socket.position.y),
+        z: Number(socket.position.z) - Number(socket.facing.z) * 5.6,
+      };
+      if (endpointIndex === internalIndex) {
+        const intent = internalNode.occupiedVolumes.find(({ id }) => (
+          id === `${segment.id}:endpoint-${internalIndex}:walkable-intent`
+        ));
+        assert.ok(intent);
+        const alongX = Math.abs(Number(socket.facing.x)) > 0.5;
+        intent.center = {
+          x: (start.x + Number(socket.position.x)) * 0.5,
+          y: Number(socket.position.y) + 0.1,
+          z: (start.z + Number(socket.position.z)) * 0.5,
+        };
+        intent.size = {
+          x: alongX ? 5.6 : 0.2,
+          y: 0.2,
+          z: alongX ? 0.2 : 5.6,
+        };
+      }
+      return {
+        nodeId: endpoint.nodeId,
+        socketId: endpoint.socketId ?? endpoint.id,
+        localSocketId: socket.localSocketId ?? endpoint.localSocketId ?? null,
+        path: [start, { ...socket.position }],
+      };
+    });
+    const featurelessSpan = operation.featurelessSpans.find(({ segmentId }) => (
+      segmentId === segment.id
+    ));
+    featurelessSpan.path = structuredClone(segment.path);
+    featurelessSpan.distanceMeters = maximumContinuousLevelPathDistance(segment.path);
+  }
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.equal(validation.accepted, false);
+  assert.ok(validation.errors.some(({ code }) => (
+    code === 'route-network-segment-endpoint-socket-mismatch'
+      || code === 'route-network-external-endpoint-not-granted'
+  )), JSON.stringify(validation.errors));
 });
 
 test('V4 rejects duplicate, skipped, and reordered endpoint-seam lattice cells explicitly', () => {

@@ -628,11 +628,29 @@ export function isDungeonAugmentationPlayableAlphaRequest(search = '') {
       === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID;
 }
 
+export function isDungeonAugmentationFreshRequest(search = '') {
+  const params = new URLSearchParams(String(search ?? ''));
+  return params.get('dungeonAugmentationFresh') === '1'
+    && params.get('startupWorld') === 'dungeon'
+    // Keep this test-only persistence bypass as explicit as the alpha gate,
+    // but do not enable alpha's invalid-geometry acceptance.
+    && params.get('dungeonAugmentation')
+      === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID;
+}
+
 function readDungeonAugmentationPlayableAlphaMode() {
   try {
     return isDungeonAugmentationPlayableAlphaRequest(
       globalThis.location?.search ?? '',
     );
+  } catch {
+    return false;
+  }
+}
+
+function readDungeonAugmentationFreshMode() {
+  try {
+    return isDungeonAugmentationFreshRequest(globalThis.location?.search ?? '');
   } catch {
     return false;
   }
@@ -1462,6 +1480,7 @@ export class Game {
     this.busterGameCommandPending = 0;
     this.busterTestRange = null;
     this.busterSandboxSession = null;
+    this.levelEditorPlaytestSession = null;
     this.combatDepthLevel = 1;
     this.animationPreview = this._readAnimationPreviewFromUrl();
     this.roomPreview = this._readRoomPreviewFromUrl();
@@ -1505,7 +1524,11 @@ export class Game {
     this.dungeonAugmentationProfileId = readDungeonAugmentationProfileId();
     this.dungeonAugmentationPlayableAlphaMode =
       readDungeonAugmentationPlayableAlphaMode();
-    this.selectedBossProfileId = this.dungeonAugmentationPlayableAlphaMode
+    this.dungeonAugmentationFreshMode = readDungeonAugmentationFreshMode();
+    this.selectedBossProfileId = (
+      this.dungeonAugmentationPlayableAlphaMode
+        || this.dungeonAugmentationFreshMode
+    )
       ? DEFAULT_BOSS_PROFILE_ID
       : normalizeBossProfileId(
         this.busterLabStorage?.state?.bossHunts?.selectedBossProfileId
@@ -2590,8 +2613,7 @@ export class Game {
       || this.dungeonController?.isPlayerAtRollWorkshop?.(),
     );
     return atAuthorizedWorkshop
-      && !this.busterSandboxSession?.active
-      && !this.busterTestRange?.active
+      && !this.isDisposablePlaytestActive()
       && !this.busterLabStorage?.readOnly;
   }
 
@@ -2834,11 +2856,13 @@ export class Game {
   }
 
   _persistCurrentDungeonAugmentationState({ force = false } = {}) {
-    if (this.dungeonAugmentationPlayableAlphaMode) {
+    if (this.dungeonAugmentationPlayableAlphaMode || this.dungeonAugmentationFreshMode) {
       return Promise.resolve({
         ok: true,
         unchanged: true,
-        reason: 'augmentation-alpha-disposable',
+        reason: this.dungeonAugmentationPlayableAlphaMode
+          ? 'augmentation-alpha-disposable'
+          : 'augmentation-fresh-run-disposable',
       });
     }
     const storageMethod = this.busterLabStorage
@@ -2919,10 +2943,12 @@ export class Game {
     if (!encounter) return null;
     const profileId = this.getSelectedBossProfileId();
     const profile = getReaverbotBossProfile(profileId);
-    if (this.dungeonAugmentationPlayableAlphaMode) {
-      // Alpha is a disposable geometry/gameplay surface. It may configure a
-      // live boss for playtesting, but it must never adopt or mint a durable
-      // expedition identity that a later checkpoint/victory path could write.
+    if (this.dungeonAugmentationPlayableAlphaMode || this.dungeonAugmentationFreshMode) {
+      // Alpha and explicit fresh-seed testing are disposable geometry/gameplay
+      // surfaces. They may configure a live boss for playtesting, but they
+      // must never adopt or mint a durable expedition identity that a later
+      // checkpoint/victory path could write. Fresh mode retains strict V4
+      // validation; only alpha may accept invalid preview geometry.
       this.activeBossExpeditionSpec = null;
       encounter.bossProfileId = profileId;
       encounter.expeditionSpec = null;
@@ -5335,6 +5361,9 @@ export class Game {
   }
 
   getObjectiveText() {
+    if (this.levelEditorPlaytestSession?.active) {
+      return 'Level Playtest — Escape to return to the editor';
+    }
     if (this.busterTestRange?.active) return 'Buster Test Range — Escape to return';
     if (this.busterSandboxSession?.active) return 'Disposable Buster Dungeon — Escape to return to Roll';
     if (this.worldKind === 'overworld') return 'Choose a Boss Hunt at the sealed ruin door';
@@ -5619,6 +5648,9 @@ export class Game {
   }
 
   extractToCamp() {
+    if (this.levelEditorPlaytestSession?.active) {
+      return this.exitLevelEditorPlaytest('authoredExtraction');
+    }
     if (this.usesStreamedWorldLifecycle && this.worldKind === 'dungeon') {
       return this._returnToStreamedOverworld({
         outcome: this.ruinCompleted ? 'extracted' : 'abandoned',
@@ -6100,8 +6132,20 @@ export class Game {
     return this.busterLabState;
   }
 
+  isDisposablePlaytestActive() {
+    return Boolean(
+      this.busterTestRange?.active
+      || this.busterSandboxSession?.active
+      || this.levelEditorPlaytestSession?.active
+    );
+  }
+
+  isProgressionSuppressed() {
+    return this.isDisposablePlaytestActive();
+  }
+
   _queueBusterStorageOperation(operation) {
-    if (this.busterSandboxSession?.active) {
+    if (this.isDisposablePlaytestActive()) {
       return Promise.resolve({
         ok: false,
         reason: 'sandbox-read-only',
@@ -6121,7 +6165,7 @@ export class Game {
   }
 
   _queueBusterGameCommand(operation) {
-    if (this.busterSandboxSession?.active) {
+    if (this.isDisposablePlaytestActive()) {
       return Promise.resolve({
         ok: false,
         reason: 'sandbox-read-only',
@@ -6129,7 +6173,7 @@ export class Game {
       });
     }
     const execute = () => {
-      if (this.busterSandboxSession?.active) {
+      if (this.isDisposablePlaytestActive()) {
         return {
           ok: false,
           reason: 'sandbox-read-only',
@@ -7974,6 +8018,7 @@ export class Game {
     if (!context || context.kind !== 'gameWorldContext') return false;
     const owned = this._collectRenderResources(context.values.scene);
     const preserved = this._collectRenderResources(preserveContext?.values?.scene);
+    const bundle = context.values.activeWorldBundle;
     this.projectiles?.clear?.(reason);
     this.combat?._clearPendingAttacks?.();
     this.combat?._clearMines?.();
@@ -7984,8 +8029,25 @@ export class Game {
     this.enemies.length = 0;
     this.lootSystem?.clear?.();
     this.refractors?.clear?.();
+    context.values.dungeonController?.dispose?.();
     for (const animator of this.dungeon?.npcAnimators ?? []) animator.dispose?.();
     context.values.connectorLiftRuntime?.dispose?.();
+    context.values.connectorTrackTrapRuntime?.dispose?.();
+    bundle?.connectorTrackTrapVisualFactory?.dispose?.();
+    bundle?.facade?.specialEnvironment?.dispose?.();
+    bundle?.facade?.dispose?.();
+    const alreadyDisposed = new Set([
+      context.values.dungeonController,
+      context.values.connectorLiftRuntime,
+      context.values.connectorTrackTrapRuntime,
+      bundle?.connectorTrackTrapVisualFactory,
+      bundle?.facade?.specialEnvironment,
+      bundle?.facade,
+      ...(this.dungeon?.npcAnimators ?? []),
+    ]);
+    for (const resource of bundle?.disposableResources ?? []) {
+      if (!alreadyDisposed.has(resource)) resource?.dispose?.();
+    }
     this.player.dispose?.();
 
     for (const geometry of owned.geometries) {
@@ -7997,9 +8059,181 @@ export class Game {
     for (const texture of owned.textures) {
       if (!preserved.textures.has(texture)) texture.dispose?.();
     }
+    for (const renderTarget of owned.renderTargets) {
+      if (!preserved.renderTargets.has(renderTarget)) renderTarget.dispose?.();
+    }
+    bundle?.root?.removeFromParent?.();
+    if (bundle) bundle.disposed = true;
     context.values.scene.clear();
     context.disposed = true;
     return true;
+  }
+
+  createLevelEditorPlaytestContext({ sourceWorld, facade } = {}) {
+    if (!sourceWorld || !facade?.group) return null;
+    const sourcePlayer = sourceWorld.values.player;
+    const activeBusterPlan = this.getActiveBusterPlan?.() ?? null;
+
+    this._resetWorldContextFieldsForSandbox(sourceWorld);
+    this.scene.name = 'levelEditorPlaytestScene';
+    this.dungeon = facade;
+    this.arenaRadius = Number(facade.boundsRadius) || this.arenaRadius;
+    this.platformingPlatforms = [...(facade.platforms ?? [])];
+    this.dynamicPlatformingPlatforms = [];
+
+    const root = new THREE.Group();
+    root.name = 'levelEditorPlaytestWorldRoot';
+    root.userData.worldKind = 'dungeon';
+    root.userData.worldRootId = root.uuid;
+    const hemisphere = new THREE.HemisphereLight(0xdbe9ff, 0x261d22, 1.35);
+    hemisphere.name = 'levelEditorPlaytestHemisphereLight';
+    const key = new THREE.DirectionalLight(0xffffff, 1.7);
+    key.name = 'levelEditorPlaytestKeyLight';
+    key.position.set(8, 14, 6);
+    key.castShadow = true;
+    root.add(hemisphere, key, facade.group);
+    this.scene.add(root, this.debugSpawnedPlatformGroup);
+
+    const bundle = createLoadedWorldBundle({
+      worldKind: 'dungeon',
+      root,
+      lighting: root,
+      facade,
+      controller: null,
+      npcAnimators: facade.npcAnimators ?? [],
+      collisionData: facade.solidZones ?? [],
+      cullingData: facade.renderCullGroups ?? [],
+      disposableResources: facade.disposableResources ?? [],
+      planHash: facade.planHash ?? null,
+      editorPlaytest: true,
+    });
+    this.activeWorldBundle = bundle;
+
+    this.player = this._copyPlayerForBusterSandbox(sourcePlayer);
+    this.player.root.position.copy(facade.playerStart ?? new THREE.Vector3());
+    const facing = facade.playerStartFacing?.clone?.() ?? new THREE.Vector3(0, 0, 1);
+    if (facing.lengthSq() < 0.0001) facing.set(0, 0, 1);
+    facing.setY(0).normalize();
+    this.player.lastMoveDirection.copy(facing);
+    this.player.faceDirection?.(facing);
+    this.player.switchArmWeapon?.(sourcePlayer?.activeArmIndex ?? 0, true);
+    this.scene.add(this.player.root);
+
+    this.inventory = new Inventory(sourceWorld.values.inventory?.capacity ?? 54);
+    this.inventory.items = [...(sourceWorld.values.inventory?.items ?? [])];
+    this.inventory.gold = sourceWorld.values.inventory?.gold ?? 0;
+    this.inventory.unidentifiedScrap = sourceWorld.values.inventory?.unidentifiedScrap ?? 0;
+    this.inventory.unidentifiedRecoveries = JSON.parse(JSON.stringify(
+      sourceWorld.values.inventory?.unidentifiedRecoveries ?? [],
+    ));
+
+    const getFloorElevation = (position) => this.dungeonController?.getSurfaceElevationAt?.(position);
+    this.lootSystem = new LootSystem(this.scene, { getFloorElevation });
+    this.refractors = new RefractorPickupSystem(this.scene, { getFloorElevation });
+    this.projectiles = new ProjectileSystem(this);
+    this.busterRuntime = null;
+    if (activeBusterPlan?.ok && sourceWorld.values.busterRuntime) {
+      this.busterRuntime = new BusterRuntime({
+        executeShot: (execution) => this._executeCompiledBusterShot(execution),
+        cancelExecution: ({ token, reason }) => {
+          this.projectiles.cancelWhere(
+            (projectile) => projectile.reservationToken === token,
+            reason ?? 'levelEditorPlaytestCancelled',
+          );
+        },
+      });
+      this.busterRuntime.register(activeBusterPlan);
+      this.busterRuntime.equip(activeBusterPlan);
+    }
+    this.combat = new CombatSystem(this);
+    this.player.onDodgeStarted = () => this.combat.cancelForDodge();
+    this.player.onLedgeClingStarted = () => this.combat.cancelForLedgeCling();
+    this.player.onDeathStarted = () => this.combat.cancelForDeath();
+    this.player.onSwordJumpSlashLandingRecoveryStarted = (startProgress) => (
+      this.combat.beginSwordJumpSlashLandingTrail(startProgress)
+    );
+    this.dungeonController = new DungeonController(this, facade);
+    bundle.controller = this.dungeonController;
+    this.player.jumpLedgeClingResolver = (context) => this._tryResolvePlatformLedgeCling(context);
+    this.player.jumpPlatformLandingResolver = (context) => this._tryResolvePlatformLanding(context);
+    this.player.powerKnockbackTravelResolver = ({ fromPosition, position }) => (
+      this.dungeonController.resolvePowerKnockbackTravel(fromPosition, position)
+    );
+    this.player.powerKnockbackLandingResolver = ({ position, direction, originPosition }) => (
+      this.dungeonController.resolvePowerKnockbackLanding(position, direction, originPosition)
+    );
+    this.spawner = new EnemySpawner(this);
+    if (sourceWorld.values.spawner?.runSeed != null) {
+      this.spawner.runSeed = sourceWorld.values.spawner.runSeed;
+    }
+    this.mapEvents = new MapEventSystem(this);
+    this._activateConnectorLiftRuntimeForBundle(bundle);
+    this._activateConnectorTrackTrapRuntimeForBundle(bundle);
+    this._collectCameraOcclusionWalls();
+    this._collectDungeonRenderCullGroups();
+    this._updateDungeonRenderCulling(0, { force: true });
+
+    const context = this.captureWorldContext('levelEditorPlaytest');
+    context.facade = facade;
+    this.activateWorldContext(sourceWorld);
+    return context;
+  }
+
+  enterLevelEditorPlaytest(facade, { onExit = null } = {}) {
+    if (this.levelEditorPlaytestSession?.active) {
+      return { ok: false, reason: 'already-active', message: 'A level playtest is already active.' };
+    }
+    if (this.busterSandboxSession?.active || this.busterTestRange?.active) {
+      return { ok: false, reason: 'other-playtest-active', message: 'Exit the active test session first.' };
+    }
+    if (!facade?.group || !Array.isArray(facade.floorTiles)) {
+      return { ok: false, reason: 'invalid-facade', message: 'The authored level could not be mounted.' };
+    }
+
+    const production = this.captureWorldContext('levelEditorHost');
+    const playtest = this.createLevelEditorPlaytestContext({ sourceWorld: production, facade });
+    if (!playtest) {
+      return { ok: false, reason: 'context-create-failed', message: 'The authored level could not be prepared.' };
+    }
+    this.levelEditorPlaytestSession = {
+      active: true,
+      production,
+      playtest,
+      onExit: typeof onExit === 'function' ? onExit : null,
+    };
+    this.setInventoryOpen(false);
+    this.setPoseDebugOpen(false);
+    this.keys.clear();
+    this.pointer.primary = false;
+    this.pointer.primaryPressed = false;
+    this.activateWorldContext(playtest);
+    this.cameraController.snapTo(this.player);
+    this.ui?.showToast?.('Level playtest active — Escape returns to the editor', '#7df8ff');
+    return { ok: true, facade };
+  }
+
+  exitLevelEditorPlaytest(reason = 'editorReturn') {
+    const session = this.levelEditorPlaytestSession;
+    if (!session?.active) return false;
+    const activePlaytest = this.captureWorldContext('levelEditorPlaytest');
+    this.disposeWorldContext(activePlaytest, reason, { preserveContext: session.production });
+    this.activateWorldContext(session.production);
+    this.levelEditorPlaytestSession = null;
+    this.keys.clear();
+    this.pointer.primary = false;
+    this.pointer.primaryPressed = false;
+    this.cameraController.snapTo(this.player);
+    session.onExit?.({ reason });
+    return true;
+  }
+
+  getLevelEditorPlaytestState() {
+    const session = this.levelEditorPlaytestSession;
+    return Object.freeze({
+      active: Boolean(session?.active),
+      planHash: session?.playtest?.facade?.planHash ?? null,
+      disposed: Boolean(session?.playtest?.disposed),
+    });
   }
 
   enterBusterSandbox(buildId = 'build-a') {
@@ -9839,9 +10073,7 @@ export class Game {
           this._updateDestructibles(gameplayDt);
         }
 
-        const progressionDisabled = Boolean(
-          this.busterTestRange?.active || this.busterSandboxSession?.active,
-        );
+        const progressionDisabled = this.isProgressionSuppressed();
         const collected = progressionDisabled
           ? []
           : this.lootSystem.update(gameplayDt, this.player, this.inventory, {
@@ -9864,7 +10096,9 @@ export class Game {
         }
 
         if (this.player.dead) {
-          if (this.busterSandboxSession?.active) {
+          if (this.levelEditorPlaytestSession?.active) {
+            this.exitLevelEditorPlaytest('playtestDefeat');
+          } else if (this.busterSandboxSession?.active) {
             this.exitBusterSandbox('sandboxDefeat');
           } else {
             this.isGameOver = true;
@@ -10194,7 +10428,10 @@ export class Game {
     // The explicit V4 alpha URL is a disposable preview surface. It must not
     // be replaced by a saved dedicated boss expedition, and it must not clear
     // or rewrite that save merely to show the generated supplement.
-    const committedExpedition = this.dungeonAugmentationPlayableAlphaMode
+    const committedExpedition = (
+      this.dungeonAugmentationPlayableAlphaMode
+        || this.dungeonAugmentationFreshMode
+    )
       ? null
       : this.busterLabStorage?.getActiveBossExpedition?.() ?? null;
     const dungeonGenerationSpec = resolveCommittedDungeonGenerationSpec(
@@ -12103,13 +12340,21 @@ export class Game {
         return;
       }
 
+      if (event.code === 'Escape' && this.levelEditorPlaytestSession?.active) {
+        event.preventDefault();
+        this.exitLevelEditorPlaytest('manualExit');
+        return;
+      }
+
       if (event.code === 'Escape' && this.busterSandboxSession?.active) {
         event.preventDefault();
         this.exitBusterSandbox('manualExit');
         return;
       }
 
-      if (event.code === 'KeyI' && this.busterSandboxSession?.active) {
+      if (event.code === 'KeyI' && (
+        this.busterSandboxSession?.active || this.levelEditorPlaytestSession?.active
+      )) {
         event.preventDefault();
         return;
       }
@@ -13095,7 +13340,7 @@ export class Game {
   _handleEnemyKilled(enemy, meta) {
     enemy.onDeath(this, meta);
     if (enemy.debugBoss) return;
-    if (this.busterSandboxSession?.active) {
+    if (this.isDisposablePlaytestActive()) {
       return;
     }
     if (enemy.isBoss && enemy.bossProfileId) {
@@ -13129,8 +13374,14 @@ export class Game {
 
   async commitAscensionCheckpoint(enemy, checkpoint) {
     if (enemy?.debugBoss) return { ok: true, debug: true, encounterProgress: checkpoint };
-    if (this.dungeonAugmentationPlayableAlphaMode) {
-      return { ok: true, unchanged: true, reason: 'augmentation-alpha-disposable' };
+    if (this.dungeonAugmentationPlayableAlphaMode || this.dungeonAugmentationFreshMode) {
+      return {
+        ok: true,
+        unchanged: true,
+        reason: this.dungeonAugmentationPlayableAlphaMode
+          ? 'augmentation-alpha-disposable'
+          : 'augmentation-fresh-run-disposable',
+      };
     }
     const expeditionId = enemy?.expeditionSpec?.id ?? this.activeBossExpeditionSpec?.id;
     if (!expeditionId || !this.busterLabStorage?.recordBossCheckpoint) {
@@ -13192,8 +13443,14 @@ export class Game {
     ascensionAtomic = false,
     originBundle = this.activeWorldBundle,
   } = {}) {
-    if (this.dungeonAugmentationPlayableAlphaMode) {
-      return { ok: true, unchanged: true, reason: 'augmentation-alpha-disposable' };
+    if (this.dungeonAugmentationPlayableAlphaMode || this.dungeonAugmentationFreshMode) {
+      return {
+        ok: true,
+        unchanged: true,
+        reason: this.dungeonAugmentationPlayableAlphaMode
+          ? 'augmentation-alpha-disposable'
+          : 'augmentation-fresh-run-disposable',
+      };
     }
     const expeditionId = enemy.expeditionSpec?.id
       ?? this.activeBossExpeditionSpec?.id

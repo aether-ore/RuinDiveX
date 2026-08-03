@@ -1,0 +1,196 @@
+{
+  "schema": "ruindivex-dungeon-augmentation-canonical-diagnostic/v1",
+  "releaseEvidence": false,
+  "command": "node scripts\\debug-dungeon-augmentation-attempt.mjs --seed=layout:augmentation-realized-v4-000 --generate --release-errors-only --attempt-limit=1",
+  "wallTimeMs": 147200,
+  "seed": "layout:augmentation-realized-v4-000",
+  "status": "applied",
+  "augmentationPlanHash": "v1-9bca322d1d4421299f5f87e938085d53",
+  "effectivePlanHash": "v1-6170e346c5219b8a8c570b98120f3bfb",
+  "completionMode": "best-effort-partial",
+  "planningTimeMs": 26151.91949999999,
+  "generatorPhaseTimings": {
+    "planningMs": 25927.048200000005,
+    "materializationMs": 194.16269999998622
+  },
+  "releaseValidationAccepted": true,
+  "errorCount": 0,
+  "errors": [],
+  "floorTileCount": 6612,
+  "physicalSupplementPlanCount": 25,
+  "routeNetworkCounts": {
+    "operations": 4,
+    "nodes": 20,
+    "segments": 25,
+    "modules": 20,
+    "derivedModules": 20
+  },
+  "routeNetworkOperations": [
+    {
+      "grantId": "industrial-v1:main-region:route-network-grant:keycard-pyramid-loop",
+      "routeNetworkKind": "landmark-perimeter-loop",
+      "topologyTemplateId": "over-under-loop",
+      "nodes": 5,
+      "segments": 6
+    },
+    {
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+      "routeNetworkKind": "objective-route-coverage",
+      "topologyTemplateId": "parallel-gallery-loop",
+      "nodes": 4,
+      "segments": 5
+    },
+    {
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:keycardRoom_trapRoom",
+      "routeNetworkKind": "objective-route-coverage",
+      "topologyTemplateId": "split-level-ring",
+      "nodes": 5,
+      "segments": 6
+    },
+    {
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:bossRoom_shrineRoom",
+      "routeNetworkKind": "objective-route-coverage",
+      "topologyTemplateId": "split-level-ring",
+      "nodes": 6,
+      "segments": 8
+    }
+  ],
+  "prunedRouteNetworkGrants": [
+    {
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:trapRoom_conveyorRoom",
+      "reason": "route-network-conflict-exclusion-replacements-exhausted",
+      "recoveryKind": "exact-conflict-replacements-exhausted",
+      "conflictExclusionCount": 1,
+      "conflictEntityKinds": [
+        "segment"
+      ],
+      "replacementExhaustionKind": "candidate-domain-exhausted"
+    },
+    {
+      "grantId": "industrial-v1:main-region:route-network-grant:coverage:conveyorRoom_bossRoom",
+      "reason": "route-network-partial-first-required-coverage-pruned"
+    }
+  ],
+  "replay": {
+    "accepted": true,
+    "releaseValidationAccepted": true,
+    "realizationAttempts": 1,
+    "runtimePruningPasses": 5,
+    "randomCallCount": 80,
+    "consumedRandomCallCount": 80,
+    "parentGenerationAttempts": 3,
+    "runtimePruningRecords": [
+      {
+        "sameSeedRepairPass": 1,
+        "sameSeedRepairLimit": 56,
+        "rejectedAugmentationPlanHash": "v1-0a443331e57d7e0c3aa483a8b7f4fef2",
+        "excludedRouteNetworkEntities": [
+          {
+            "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+            "entityKind": "node",
+            "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:1:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+            "signature": "v1-83ea2f715c5f350cc4d4a1dd532bd5b6",
+            "reason": "route-network-runtime-physical-validation-failed"
+          }
+        ],
+        "failureKinds": [
+          "supplementRoomConnectivityChecks"
+        ],
+        "prunedRouteNetworkGrantIds": [],
+        "recoveryOutcome": "exact-entity-replacement-realized"
+      },
+      {
+        "sameSeedRepairPass": 2,
+        "sameSeedRepairLimit": 56,
+        "rejectedAugmentationPlanHash": "v1-fad75de87e2940949d0e79d79e9eb439",
+        "excludedRouteNetworkEntities": [
+          {
+            "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+            "entityKind": "node",
+            "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:1:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+            "signature": "v1-6c0ac6a37ee3886dba0e3231d71d349f",
+            "reason": "route-network-runtime-physical-validation-failed"
+          }
+        ],
+        "failureKinds": [
+          "supplementRoomConnectivityChecks"
+        ],
+        "prunedRouteNetworkGrantIds": [],
+        "recoveryOutcome": "exact-entity-replacement-realized"
+      },
+      {
+        "sameSeedRepairPass": 3,
+        "sameSeedRepairLimit": 56,
+        "rejectedAugmentationPlanHash": "v1-e373fc32c1fede0553d9976cf620c7ef",
+        "excludedRouteNetworkEntities": [
+          {
+            "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+            "entityKind": "node",
+            "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:4:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+            "signature": "v1-5f2218d066a1f4474d3c613b7c77b38f",
+            "reason": "route-network-anchor-placement-unwalkable-support"
+          }
+        ],
+        "failureKinds": [
+          "v4-anchor-placement-unwalkable-support"
+        ],
+        "prunedRouteNetworkGrantIds": [],
+        "recoveryOutcome": "exact-entity-replacement-realized"
+      },
+      {
+        "sameSeedRepairPass": 4,
+        "sameSeedRepairLimit": 56,
+        "rejectedAugmentationPlanHash": "v1-db88b4da57c8c6cd52792c23d395bce8",
+        "excludedRouteNetworkEntities": [
+          {
+            "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+            "entityKind": "node",
+            "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:2:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+            "signature": "v1-4ec7fa76845f4c291e9b6ea6d65698bc",
+            "reason": "route-network-runtime-physical-validation-failed"
+          },
+          {
+            "grantId": "industrial-v1:main-region:route-network-grant:coverage:enemyNest_keycardRoom",
+            "entityKind": "node",
+            "entityId": "supplement:industrial-v1-main-region:routenetwork:1:node:3:industrial-v1-main-region-route-network-grant-coverage-enemynest_keycardroom",
+            "signature": "v1-0e5ef3b3b788eba031a5b4a127332d7d",
+            "reason": "route-network-runtime-physical-validation-failed"
+          }
+        ],
+        "failureKinds": [
+          "supplementRoomConnectivityChecks"
+        ],
+        "prunedRouteNetworkGrantIds": [],
+        "recoveryOutcome": "exact-entity-replacement-realized"
+      },
+      {
+        "sameSeedRepairPass": 5,
+        "sameSeedRepairLimit": 56,
+        "rejectedAugmentationPlanHash": "v1-f5178024e92254900ddaee251b78e15d",
+        "excludedRouteNetworkEntities": [
+          {
+            "grantId": "industrial-v1:main-region:route-network-grant:coverage:trapRoom_conveyorRoom",
+            "entityKind": "segment",
+            "entityId": "supplement:industrial-v1-main-region:routenetwork:3:segment:4:industrial-v1-main-region-route-network-grant-coverage-traproom_conveyorroom",
+            "signature": "v1-8bb6bcc9133df3d8517ab0c26c20ec28",
+            "reason": "route-network-runtime-physical-validation-failed"
+          }
+        ],
+        "failureKinds": [
+          "dropSpaceEgressChecks"
+        ],
+        "prunedRouteNetworkGrantIds": [
+          "industrial-v1:main-region:route-network-grant:coverage:trapRoom_conveyorRoom"
+        ],
+        "recoveryOutcome": "grant-omitted-after-bounded-replacement-exhaustion"
+      }
+    ]
+  },
+  "diagnosticConclusion": {
+    "formerStopAfterPassFourReproduced": false,
+    "passFiveOccurred": true,
+    "exactPassFiveEntityKind": "segment",
+    "exactPassFiveEntityId": "supplement:industrial-v1-main-region:routenetwork:3:segment:4:industrial-v1-main-region-route-network-grant-coverage-traproom_conveyorroom",
+    "nextOutcome": "The existing planner exhausted replacement candidates for that exact segment and omitted its route-network grant; this is a separate planner/fallback issue, not an attribution or repair-limit failure."
+  }
+}

@@ -71,6 +71,12 @@ const PRESENTATION_FACTORY_ARRAY_FIELDS = new Set([
   'renderCullGroups',
 ]);
 
+const V4_STORY_PRESENTATION_SURFACES = new Set([
+  'floor-flush-decal',
+  'wall-mounted-decal',
+]);
+const V4_STORY_PRESENTATION_MAX_THICKNESS_METERS = 0.035 + 1e-6;
+
 export class DungeonSupplementAssemblyError extends Error {
   constructor(message, {
     code = 'DUNGEON_SUPPLEMENT_ASSEMBLY_FAILED',
@@ -796,6 +802,66 @@ function addFactoryProductToGroup(
   }
 }
 
+function presentationFactoryObjectRoots(product, roots = new Set()) {
+  if (!product) return roots;
+  if (Array.isArray(product)) {
+    for (const entry of product) presentationFactoryObjectRoots(entry, roots);
+    return roots;
+  }
+  if (product.isObject3D) {
+    roots.add(product);
+    return roots;
+  }
+  for (const key of ['object', 'root', 'group']) {
+    if (product[key]?.isObject3D) roots.add(product[key]);
+  }
+  return roots;
+}
+
+function createPresentationAssetSpecification({
+  record,
+  nodeId,
+  themeBinding,
+  variant,
+}) {
+  const position = vectorFrom(record.transform?.position ?? record.position);
+  const width = Number(record.authoredFootprint?.widthMeters ?? record.widthMeters);
+  const height = Number(record.authoredFootprint?.heightMeters ?? record.heightMeters);
+  const depth = Number(record.authoredFootprint?.depthMeters ?? record.depthMeters);
+  const rotationY = Number(record.transform?.rotationY ?? record.rotationY ?? 0);
+  if (!position || !Number.isFinite(width) || width <= 0
+    || !Number.isFinite(height) || height <= 0
+    || !Number.isFinite(depth) || depth <= 0
+    || !Number.isFinite(rotationY)) {
+    throw new DungeonSupplementAssemblyError(
+      `Presentation record ${record.id ?? '(unnamed)'} has an invalid authored transform or footprint.`,
+      { code: 'INVALID_PRESENTATION_TRANSFORM' },
+    );
+  }
+  const authoredFacing = directionFrom(record.transform?.facing ?? record.facing);
+  const facing = authoredFacing ?? new THREE.Vector3(
+    Math.sin(rotationY),
+    0,
+    Math.cos(rotationY),
+  );
+  return {
+    ...cloneSerializableRecord(record),
+    id: String(record.id),
+    nodeId,
+    sourceFeatureId: String(record.sourceFeatureId),
+    sourceFeatureRuntimeId: String(record.sourceFeatureRuntimeId),
+    presentationRecord: cloneSerializableRecord(record),
+    position: position.clone(),
+    width,
+    height,
+    depth,
+    rotationY,
+    facing: facing.clone(),
+    themeBinding: cloneBinding(themeBinding),
+    variant,
+  };
+}
+
 function appendEnvironmentProduct(fragment, capability, product) {
   if (!product) return;
   const destination = capability === 'localLights'
@@ -1032,6 +1098,338 @@ function validateRouteNetworkSocketBindings(elements) {
   }
 }
 
+function validatePresentationRecords(elements, overlayPlan = null) {
+  const selectedStoryByOperationId = new Map();
+  const claimedDelegatedOwnerBindings = new Map();
+  const validRealizationOwners = new Set([
+    'supplement-assembler',
+    'gameplay-runtime',
+    'supplement-connector-assembler',
+  ]);
+  for (const node of elements.nodes) {
+    const records = asArray(node.presentationRecords);
+    const authoritativeBlueprint = node.authoritativeBlueprintRealization === true;
+    const authoritativeV4Blueprint = Boolean(
+      authoritativeBlueprint
+        && (
+          overlayPlan?.profileId === 'industrial-supplement-preview-v4'
+            || node.physicalRealization?.profileId === 'industrial-supplement-preview-v4'
+            || node.structureMetadata?.profileId === 'industrial-supplement-preview-v4'
+        )
+    );
+    if (records.length === 0 && !authoritativeBlueprint) continue;
+    const recordIds = new Set();
+    const sourceFeatureRuntimeIds = new Set();
+    const collisionIds = new Set(asArray(node.collisionRecords).map(({ id }) => String(id)));
+    const anchorRecords = asArray(node.anchors);
+    const transferRecords = asArray(node.transfers);
+    const inventoryRecordsForOwner = (owner) => (
+      owner === 'gameplay-runtime'
+        ? anchorRecords
+        : owner === 'supplement-connector-assembler'
+          ? transferRecords
+          : []
+    );
+    const inventoryContainsExactlyOnce = (owner, bindingId) => (
+      inventoryRecordsForOwner(owner).filter((entry) => (
+        String(entry?.id ?? '') === bindingId
+          || String(entry?.runtimeId ?? '') === bindingId
+      )).length === 1
+    );
+    for (const record of records) {
+      const recordId = String(record?.id ?? '');
+      const sourceFeatureRuntimeId = String(record?.sourceFeatureRuntimeId ?? '');
+      if (!recordId || recordIds.has(recordId) || !sourceFeatureRuntimeId
+        || sourceFeatureRuntimeIds.has(sourceFeatureRuntimeId)) {
+        throw new DungeonSupplementAssemblyError(
+          `Supplement node ${node.id ?? '(unnamed)'} has duplicate or incomplete presentation identity.`,
+          { code: 'INVALID_PRESENTATION_RECORD_IDENTITY' },
+        );
+      }
+      recordIds.add(recordId);
+      sourceFeatureRuntimeIds.add(sourceFeatureRuntimeId);
+      const missingCollisionIds = asArray(record.collisionRecordIds).map(String).filter((id) => (
+        !collisionIds.has(id)
+      ));
+      if (missingCollisionIds.length > 0) {
+        throw new DungeonSupplementAssemblyError(
+          `Presentation record ${recordId} references missing collision records: ${missingCollisionIds.join(', ')}.`,
+          { code: 'INVALID_PRESENTATION_COLLISION_BINDING' },
+        );
+      }
+      const realizationOwner = String(record.realizationOwner ?? '');
+      const realizationKind = String(record.realizationKind ?? '');
+      const ownerBindingIds = asArray(record.ownerBindingIds).map(String);
+      const runtimeConsumerBindingIds = asArray(record.runtimeConsumerBindingIds).map(String);
+      const realizationRequired = record.realizationRequired === true;
+      const storyMarking = record.semanticRole === 'story-marking';
+      if (
+        !validRealizationOwners.has(realizationOwner)
+          || realizationOwner !== String(record.presentationOwner ?? '')
+          || !realizationKind
+      ) {
+        throw new DungeonSupplementAssemblyError(
+          `Presentation record ${recordId} has an invalid owner-aware realization contract.`,
+          { code: 'INVALID_PRESENTATION_REALIZATION_CONTRACT' },
+        );
+      }
+      if (storyMarking) {
+        if (
+          record.optional !== true
+            || record.required === true
+            || realizationRequired !== true
+        ) {
+          throw new DungeonSupplementAssemblyError(
+            `Story presentation record ${recordId} has inconsistent optional realization coverage.`,
+            { code: 'INVALID_STORY_PRESENTATION_RECORD' },
+          );
+        }
+        if (authoritativeV4Blueprint) {
+          const presentationSurface = String(record.presentationSurface ?? '');
+          const footprint = record.authoredFootprint ?? record.worldFootprint ?? {};
+          const presentationThickness = presentationSurface === 'floor-flush-decal'
+            ? Number(footprint.heightMeters)
+            : Number(footprint.depthMeters);
+          if (
+            !V4_STORY_PRESENTATION_SURFACES.has(presentationSurface)
+              || !Number.isFinite(presentationThickness)
+              || presentationThickness <= 0
+              || presentationThickness > V4_STORY_PRESENTATION_MAX_THICKNESS_METERS
+          ) {
+            throw new DungeonSupplementAssemblyError(
+              `Story presentation record ${recordId} is not mounted on an approved nonblocking decal surface.`,
+              { code: 'INVALID_STORY_PRESENTATION_SURFACE' },
+            );
+          }
+        }
+      } else if (
+        record.required !== true
+          || record.optional === true
+          || realizationRequired !== true
+      ) {
+        throw new DungeonSupplementAssemblyError(
+          `Authored gameplay presentation record ${recordId} was made optional or dormant at the source-identity layer.`,
+          { code: 'INVALID_REQUIRED_PRESENTATION_RECORD' },
+        );
+      }
+      if (realizationOwner === 'supplement-assembler'
+        && record.required === true
+        && record.selectedForRendering !== true) {
+        throw new DungeonSupplementAssemblyError(
+          `Required presentation record ${recordId} was not selected for assembly.`,
+          { code: 'REQUIRED_PRESENTATION_RECORD_UNSELECTED' },
+        );
+      }
+      if (realizationOwner === 'supplement-assembler') {
+        if (
+          realizationKind !== 'theme-object-root'
+            || ownerBindingIds.length !== 0
+            || record.renderedBySupplementAssembler !== (record.selectedForRendering === true)
+        ) {
+          throw new DungeonSupplementAssemblyError(
+            `Assembler presentation record ${recordId} has invalid theme-root ownership.`,
+            { code: 'INVALID_PRESENTATION_OWNER_BINDING' },
+          );
+        }
+      } else if (realizationRequired) {
+        const expectedKind = realizationOwner === 'gameplay-runtime'
+          ? 'gameplay-anchor'
+          : 'physical-transfer';
+        const [ownerBindingId] = ownerBindingIds;
+        if (
+          realizationKind !== expectedKind
+            || ownerBindingIds.length !== 1
+            || !ownerBindingId
+            || !inventoryContainsExactlyOnce(realizationOwner, ownerBindingId)
+            || record.selectedForRendering === true
+            || record.renderedBySupplementAssembler === true
+        ) {
+          throw new DungeonSupplementAssemblyError(
+            `Delegated presentation record ${recordId} has no exact owner binding.`,
+            { code: 'INVALID_PRESENTATION_OWNER_BINDING' },
+          );
+        }
+        const ownerBindingKey = `${realizationOwner}:${ownerBindingId}`;
+        if (claimedDelegatedOwnerBindings.has(ownerBindingKey)) {
+          throw new DungeonSupplementAssemblyError(
+            `Presentation records ${claimedDelegatedOwnerBindings.get(ownerBindingKey)} and ${recordId} share ${ownerBindingKey}.`,
+            { code: 'DUPLICATE_PRESENTATION_OWNER_BINDING' },
+          );
+        }
+        claimedDelegatedOwnerBindings.set(ownerBindingKey, recordId);
+        if (realizationOwner === 'gameplay-runtime') {
+          const runtimeActivation = String(record.runtimeActivation ?? '');
+          if (!['active', 'dormant'].includes(runtimeActivation)) {
+            throw new DungeonSupplementAssemblyError(
+              `Gameplay presentation record ${recordId} has invalid runtime activation ${runtimeActivation || '(missing)'}.`,
+              { code: 'INVALID_PRESENTATION_REALIZATION_CONTRACT' },
+            );
+          }
+          if (
+            runtimeActivation === 'active'
+              && (
+                runtimeConsumerBindingIds.length === 0
+                  || runtimeConsumerBindingIds.some((bindingId) => (
+                    !inventoryContainsExactlyOnce('gameplay-runtime', bindingId)
+                  ))
+              )
+          ) {
+            throw new DungeonSupplementAssemblyError(
+              `Active gameplay presentation record ${recordId} has no exact runtime consumer.`,
+              { code: 'ACTIVE_PRESENTATION_CONSUMER_MISSING' },
+            );
+          }
+          if (runtimeActivation === 'dormant' && runtimeConsumerBindingIds.length > 0) {
+            throw new DungeonSupplementAssemblyError(
+              `Dormant gameplay presentation record ${recordId} claims active runtime consumers.`,
+              { code: 'INVALID_PRESENTATION_REALIZATION_CONTRACT' },
+            );
+          }
+        } else if (
+          record.runtimeActivation !== 'not-applicable'
+            || runtimeConsumerBindingIds.length > 0
+        ) {
+          throw new DungeonSupplementAssemblyError(
+            `Transfer presentation record ${recordId} has invalid runtime activation metadata.`,
+            { code: 'INVALID_PRESENTATION_REALIZATION_CONTRACT' },
+          );
+        }
+      }
+      if (storyMarking && record.selectedForRendering === true) {
+        if (record.optional !== true || record.nonblocking !== true
+          || record.storyPlacementLegal !== true) {
+          throw new DungeonSupplementAssemblyError(
+            `Story presentation record ${recordId} is not an optional legal nonblocking marking.`,
+            { code: 'INVALID_STORY_PRESENTATION_RECORD' },
+          );
+        }
+        const operationId = String(record.operationId ?? node.operationId ?? '');
+        if (selectedStoryByOperationId.has(operationId)) {
+          throw new DungeonSupplementAssemblyError(
+            `Route network ${operationId} selected more than one story marking.`,
+            { code: 'DUPLICATE_STORY_PRESENTATION_SELECTION' },
+          );
+        }
+        selectedStoryByOperationId.set(operationId, recordId);
+      }
+    }
+    if (authoritativeBlueprint) {
+      const featureSourceIds = new Set(asArray(node.features).map((feature) => String(
+        feature.sourceFeatureRuntimeId ?? feature.runtimeId ?? feature.id ?? '',
+      )).filter(Boolean));
+      const missingPresentationSourceIds = [...featureSourceIds].filter((id) => (
+        !sourceFeatureRuntimeIds.has(id)
+      ));
+      const inventedPresentationSourceIds = [...sourceFeatureRuntimeIds].filter((id) => (
+        !featureSourceIds.has(id)
+      ));
+      if (missingPresentationSourceIds.length > 0 || inventedPresentationSourceIds.length > 0) {
+        throw new DungeonSupplementAssemblyError(
+          `Supplement node ${node.id ?? '(unnamed)'} presentation/source feature sets differ.`,
+          {
+            code: 'INVALID_PRESENTATION_SOURCE_COVERAGE',
+            diagnostics: [{ missingPresentationSourceIds, inventedPresentationSourceIds }],
+          },
+        );
+      }
+      const genericBlueprintDuplicates = asArray(node.anchors).filter((anchor) => (
+        anchor.isManifestCover === true || anchor.isManifestLandmark === true
+      ));
+      if (genericBlueprintDuplicates.length > 0) {
+        throw new DungeonSupplementAssemblyError(
+          `Supplement node ${node.id ?? '(unnamed)'} still promotes authored blueprint solids through generic prop anchors.`,
+          { code: 'DUPLICATE_BLUEPRINT_PRESENTATION_PATH' },
+        );
+      }
+      const internalDoorwayFrames = authoritativeV4Blueprint
+        ? asArray(node.anchors).filter((anchor) => (
+            String(anchor?.kind ?? anchor?.type ?? anchor?.anchorKind ?? '')
+              === 'doorway-frame'
+          ))
+        : [];
+      if (internalDoorwayFrames.length > 0) {
+        throw new DungeonSupplementAssemblyError(
+          `Supplement node ${node.id ?? '(unnamed)'} reintroduced V4 internal doorway frames.`,
+          {
+            code: 'V4_INTERNAL_DOORWAY_FRAME_PRESENTATION_FORBIDDEN',
+            diagnostics: [{
+              anchorIds: internalDoorwayFrames.map(({ id }) => String(id)).sort(),
+            }],
+          },
+        );
+      }
+    }
+  }
+}
+
+function validatePresentationRealizationCoverage(elements, fragment) {
+  const expectedRecords = elements.nodes.flatMap((node) => asArray(node.presentationRecords));
+  const expectedIds = expectedRecords
+    .map(({ id }) => String(id))
+    .sort();
+  const realizedIds = fragment.presentationRealizations
+    .map(({ presentationRecordId }) => String(presentationRecordId))
+    .sort();
+  if (expectedIds.length !== new Set(expectedIds).size
+    || realizedIds.length !== new Set(realizedIds).size
+    || expectedIds.length !== realizedIds.length
+    || expectedIds.some((id, index) => id !== realizedIds[index])) {
+    throw new DungeonSupplementAssemblyError(
+      'Required presentation records and owner-aware realizations differ.',
+      {
+        code: 'PRESENTATION_REALIZATION_COVERAGE_MISMATCH',
+        diagnostics: [{ expectedIds, realizedIds }],
+      },
+    );
+  }
+  const realizationByRecordId = new Map(fragment.presentationRealizations.map((realization) => (
+    [String(realization.presentationRecordId), realization]
+  )));
+  for (const record of expectedRecords) {
+    const recordId = String(record.id);
+    const realization = realizationByRecordId.get(recordId);
+    const realizationOwner = String(record.realizationOwner);
+    const delegated = realizationOwner !== 'supplement-assembler';
+    const rendered = realizationOwner === 'supplement-assembler'
+      && record.selectedForRendering === true;
+    const expectedDisposition = rendered
+      ? 'rendered'
+      : delegated
+        ? 'delegated-to-owner'
+        : 'optional-not-selected';
+    if (
+      !realization
+        || realization.realizationOwner !== realizationOwner
+        || realization.realizationKind !== record.realizationKind
+        || realization.realizationDisposition !== expectedDisposition
+        || realization.renderedBySupplementAssembler !== rendered
+        || (delegated && (
+          realization.rootObjectCount !== 0
+            || realization.rendererObjectId != null
+            || realization.ownerBindingId !== String(record.ownerBindingIds[0])
+        ))
+        || (rendered && (
+          realization.rootObjectCount !== 1
+            || !realization.rendererObjectId
+            || realization.ownerBindingId != null
+        ))
+        || (!delegated && !rendered && (
+          realization.rootObjectCount !== 0
+            || realization.rendererObjectId != null
+            || realization.ownerBindingId != null
+        ))
+    ) {
+      throw new DungeonSupplementAssemblyError(
+        `Presentation record ${recordId} has an invalid ${realizationOwner} realization ledger entry.`,
+        {
+          code: 'PRESENTATION_REALIZATION_COVERAGE_MISMATCH',
+          diagnostics: [{ recordId, realizationOwner, realization }],
+        },
+      );
+    }
+  }
+}
+
 function createFragment(overlayPlan, root, tileSize, ledger) {
   const fragment = {
     schema: DUNGEON_SUPPLEMENT_FRAGMENT_SCHEMA,
@@ -1049,6 +1447,7 @@ function createFragment(overlayPlan, root, tileSize, ledger) {
     tiles: new Map(),
     minimap: { rooms: [], hallways: [], connections: [], bounds: null },
     diagnostics: { accepted: true, errors: [], warnings: [], assembled: {} },
+    presentationRealizations: [],
     resources: ledger,
     dispose: () => ledger.dispose(root),
   };
@@ -2477,6 +2876,20 @@ function assembleNode({
     isConnectorJunctionProxy: connectorProxy,
   };
   const structuralDescriptors = nodeStructuralDescriptors(node);
+  const presentationRecords = asArray(node.presentationRecords);
+  const selectedPresentationRecords = presentationRecords.filter((record) => (
+    record?.presentationOwner === 'supplement-assembler'
+      && record?.selectedForRendering === true
+  ));
+  const delegatedPresentationRecords = presentationRecords.filter((record) => (
+    record?.realizationRequired === true
+      && record?.realizationOwner !== 'supplement-assembler'
+  ));
+  const unselectedOptionalPresentationRecords = presentationRecords.filter((record) => (
+    record?.realizationRequired === true
+      && record?.realizationOwner === 'supplement-assembler'
+      && record?.selectedForRendering !== true
+  ));
   const facadeRoom = {
     ...cloneSerializableRecord(node),
     id,
@@ -2567,9 +2980,14 @@ function assembleNode({
         ? requiredNodeStructureMaterialRoles(structuralDescriptors)
         : [];
     const authoritativeAssetRoles = authoritativeThemePreflight
-      ? asArray(node.anchors).map((anchor) => (
-          anchor.assetRole ?? anchor.presentationAssetRole ?? null
-        )).filter(Boolean)
+      ? [
+          ...asArray(node.anchors).map((anchor) => (
+            anchor.assetRole ?? anchor.presentationAssetRole ?? null
+          )),
+          ...selectedPresentationRecords.map((record) => (
+            record.presentationAssetRole ?? record.themeRole ?? null
+          )),
+        ].filter(Boolean)
       : [];
     requireCapabilities(session, {
       ...(node.requiredThemeCapabilities ?? {}),
@@ -2759,6 +3177,180 @@ function assembleNode({
         context: `anchor factory for ${effectiveAnchor.id ?? assetRole}`,
       });
     }
+  }
+  for (const presentationRecord of delegatedPresentationRecords) {
+    if (fragment.presentationRealizations.some(({ presentationRecordId }) => (
+      String(presentationRecordId) === String(presentationRecord.id)
+    ))) {
+      throw new DungeonSupplementAssemblyError(
+        `Presentation record ${presentationRecord.id} was realized more than once.`,
+        { code: 'DUPLICATE_PRESENTATION_REALIZATION' },
+      );
+    }
+    const [ownerBindingId] = asArray(presentationRecord.ownerBindingIds).map(String);
+    fragment.presentationRealizations.push({
+      id: `${presentationRecord.id}:realization`,
+      presentationRecordId: String(presentationRecord.id),
+      sourceFeatureId: String(presentationRecord.sourceFeatureId),
+      sourceFeatureRuntimeId: String(presentationRecord.sourceFeatureRuntimeId),
+      nodeId: id,
+      operationId: presentationRecord.operationId ?? node.operationId ?? null,
+      semanticRole: presentationRecord.semanticRole,
+      assetRole: null,
+      realizationOwner: presentationRecord.realizationOwner,
+      realizationKind: presentationRecord.realizationKind,
+      realizationDisposition: 'delegated-to-owner',
+      ownerBindingId,
+      ownerBindingIds: [ownerBindingId],
+      runtimeActivation: presentationRecord.runtimeActivation,
+      runtimeConsumerBindingIds: asArray(presentationRecord.runtimeConsumerBindingIds).map(String),
+      renderedBySupplementAssembler: false,
+      rendererObjectId: null,
+      rootObjectCount: 0,
+      meshCount: 0,
+      drawCallCount: 0,
+      collisionRecordIds: [...asArray(presentationRecord.collisionRecordIds)].map(String),
+      required: presentationRecord.required === true,
+      optional: presentationRecord.optional === true,
+      nonblocking: presentationRecord.nonblocking === true,
+      authoritative: true,
+    });
+  }
+  for (const presentationRecord of unselectedOptionalPresentationRecords) {
+    if (fragment.presentationRealizations.some(({ presentationRecordId }) => (
+      String(presentationRecordId) === String(presentationRecord.id)
+    ))) {
+      throw new DungeonSupplementAssemblyError(
+        `Presentation record ${presentationRecord.id} was realized more than once.`,
+        { code: 'DUPLICATE_PRESENTATION_REALIZATION' },
+      );
+    }
+    fragment.presentationRealizations.push({
+      id: `${presentationRecord.id}:realization`,
+      presentationRecordId: String(presentationRecord.id),
+      sourceFeatureId: String(presentationRecord.sourceFeatureId),
+      sourceFeatureRuntimeId: String(presentationRecord.sourceFeatureRuntimeId),
+      nodeId: id,
+      operationId: presentationRecord.operationId ?? node.operationId ?? null,
+      semanticRole: presentationRecord.semanticRole,
+      assetRole: presentationRecord.presentationAssetRole
+        ?? presentationRecord.themeRole
+        ?? null,
+      realizationOwner: presentationRecord.realizationOwner,
+      realizationKind: presentationRecord.realizationKind,
+      realizationDisposition: 'optional-not-selected',
+      ownerBindingId: null,
+      ownerBindingIds: [],
+      runtimeActivation: presentationRecord.runtimeActivation,
+      runtimeConsumerBindingIds: asArray(presentationRecord.runtimeConsumerBindingIds).map(String),
+      renderedBySupplementAssembler: false,
+      rendererObjectId: null,
+      rootObjectCount: 0,
+      meshCount: 0,
+      drawCallCount: 0,
+      collisionRecordIds: [...asArray(presentationRecord.collisionRecordIds)].map(String),
+      required: presentationRecord.required === true,
+      optional: presentationRecord.optional === true,
+      nonblocking: presentationRecord.nonblocking === true,
+      authoritative: true,
+    });
+  }
+  for (const presentationRecord of selectedPresentationRecords) {
+    const assetRole = presentationRecord.presentationAssetRole
+      ?? presentationRecord.themeRole
+      ?? null;
+    if (!assetRole) {
+      throw new DungeonSupplementAssemblyError(
+        `Selected presentation record ${presentationRecord.id ?? '(unnamed)'} has no theme asset role.`,
+        { code: 'MISSING_PRESENTATION_THEME_ROLE' },
+      );
+    }
+    const presentationSession = assertThemeSession(
+      session,
+      `presentation record ${presentationRecord.id ?? '(unnamed)'}`,
+    );
+    const specification = createPresentationAssetSpecification({
+      record: presentationRecord,
+      nodeId: id,
+      themeBinding,
+      variant,
+    });
+    const product = invokeAsset(
+      presentationSession,
+      assetRole,
+      specification,
+      ledger,
+      `presentation record ${presentationRecord.id} in ${id}`,
+    );
+    const objectRoots = [...presentationFactoryObjectRoots(product)];
+    if (objectRoots.length !== 1) {
+      throw new DungeonSupplementAssemblyError(
+        `Presentation record ${presentationRecord.id} must produce exactly one attachable root; received ${objectRoots.length}.`,
+        { code: 'INVALID_PRESENTATION_REALIZATION_ROOT_COUNT' },
+      );
+    }
+    if (fragment.presentationRealizations.some(({ presentationRecordId }) => (
+      String(presentationRecordId) === String(presentationRecord.id)
+    ))) {
+      throw new DungeonSupplementAssemblyError(
+        `Presentation record ${presentationRecord.id} was realized more than once.`,
+        { code: 'DUPLICATE_PRESENTATION_REALIZATION' },
+      );
+    }
+    const [objectRoot] = objectRoots;
+    objectRoot.userData.dungeonSupplementPresentation = true;
+    objectRoot.userData.presentationRecordId = String(presentationRecord.id);
+    objectRoot.userData.sourceFeatureId = String(presentationRecord.sourceFeatureId);
+    objectRoot.userData.sourceFeatureRuntimeId = String(
+      presentationRecord.sourceFeatureRuntimeId,
+    );
+    objectRoot.userData.presentationSemanticRole = presentationRecord.semanticRole;
+    objectRoot.userData.presentationAssetRole = assetRole;
+    let meshCount = 0;
+    let drawCallCount = 0;
+    objectRoot.traverse((object) => {
+      if (!object.isMesh) return;
+      meshCount += 1;
+      drawCallCount += Array.isArray(object.material) ? object.material.length : 1;
+    });
+    // The theme factory receives the one authoritative world transform and
+    // positions its returned root. The assembler only attaches that root once.
+    addFactoryProductToGroup(product, fragment.root, fragment, {
+      facadeOnly: structuralMode === 'facadeOnly',
+      context: `presentation factory for ${presentationRecord.id}`,
+    });
+    fragment.presentationRealizations.push({
+      id: `${presentationRecord.id}:realization`,
+      presentationRecordId: String(presentationRecord.id),
+      sourceFeatureId: String(presentationRecord.sourceFeatureId),
+      sourceFeatureRuntimeId: String(presentationRecord.sourceFeatureRuntimeId),
+      nodeId: id,
+      operationId: presentationRecord.operationId ?? node.operationId ?? null,
+      semanticRole: presentationRecord.semanticRole,
+      assetRole,
+      realizationOwner: presentationRecord.realizationOwner,
+      realizationKind: presentationRecord.realizationKind,
+      realizationDisposition: 'rendered',
+      ownerBindingId: null,
+      ownerBindingIds: [],
+      runtimeActivation: presentationRecord.runtimeActivation,
+      runtimeConsumerBindingIds: asArray(presentationRecord.runtimeConsumerBindingIds).map(String),
+      renderedBySupplementAssembler: true,
+      rendererObjectId: objectRoot.name || null,
+      rootObjectCount: 1,
+      meshCount,
+      drawCallCount,
+      position: specification.position.clone(),
+      width: specification.width,
+      height: specification.height,
+      depth: specification.depth,
+      rotationY: specification.rotationY,
+      collisionRecordIds: [...asArray(presentationRecord.collisionRecordIds)].map(String),
+      required: presentationRecord.required === true,
+      optional: presentationRecord.optional === true,
+      nonblocking: presentationRecord.nonblocking === true,
+      authoritative: true,
+    });
   }
   for (const encounter of connectorProxy ? [] : asArray(node.encounters)) {
     appendAnchorFacade(
@@ -3602,6 +4194,9 @@ function finalizeFragment(fragment, elementCounts, sessions) {
   fragment.root.userData.connectorJunctionProxyIds = fragment.connectorJunctionProxies
     .map(({ id }) => id)
     .sort();
+  fragment.root.userData.presentationRecordIds = fragment.presentationRealizations
+    .map(({ presentationRecordId }) => presentationRecordId)
+    .sort();
   fragment.root.updateMatrixWorld(true);
   fragment.diagnostics.assembled = {
     ...elementCounts,
@@ -3613,6 +4208,7 @@ function finalizeFragment(fragment, elementCounts, sessions) {
     encounterCount: fragment.encounters.length,
     junctionCount: fragment.junctions.length,
     landingClearanceCount: fragment.landingClearances.length,
+    presentationRealizationCount: fragment.presentationRealizations.length,
     resourceCounts: fragment.resources.snapshot(sessions),
   };
   return fragment;
@@ -3688,6 +4284,7 @@ export function assembleDungeonSupplement({
 
   try {
     validateRouteNetworkSocketBindings(elements);
+    validatePresentationRecords(elements, overlayPlan);
     connectorProxyProgression = createConnectorProxyProgressionCandidates(elements);
     for (const node of elements.nodes) {
       const assembled = assembleNode({
@@ -3743,6 +4340,7 @@ export function assembleDungeonSupplement({
         authoritativeThemePreflight,
       });
     }
+    validatePresentationRealizationCoverage(elements, fragment);
   } catch (error) {
     ledger.dispose(root);
     if (error instanceof DungeonSupplementAssemblyError) throw error;

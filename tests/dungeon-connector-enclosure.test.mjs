@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
 
-import { DungeonGenerator } from '../src/DungeonGenerator.js';
+import { DungeonGenerator, addAuthoredRoomFloor } from '../src/DungeonGenerator.js';
 import { createDungeonRouteEndpointSeam } from '../src/dungeon-augmentation/geometry.js';
 import { PLAYER_TRAVERSAL_ENVELOPE } from '../src/TraversalCapabilities.js';
 import { hashSeed, SeededRandom } from '../src/reaverbots/SeededRandom.js';
@@ -25,6 +25,114 @@ const DIRECTIONS = [
   [0, 1],
   [0, -1],
 ];
+
+test('scaffold ownership prefers the stamped room over an overlapping X/Z room', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const overlappingSupplement = {
+    id: 'supplement-underpass',
+    x: 10,
+    z: 10,
+    width: 7,
+    depth: 7,
+    baseElevation: -14,
+  };
+  const authoredOwner = {
+    id: 'authored-overpass',
+    x: 10,
+    z: 10,
+    width: 11,
+    depth: 11,
+    baseElevation: 0,
+  };
+  const floor = { x: 10, z: 10, elevation: 0, roomId: authoredOwner.id };
+  assert.equal(
+    generator._resolveRoomForFloorTile(
+      [overlappingSupplement, authoredOwner],
+      floor,
+    ),
+    authoredOwner,
+  );
+  assert.equal(
+    generator._resolveRoomForFloorTile(
+      [overlappingSupplement, authoredOwner],
+      { ...floor, roomId: null },
+    ),
+    overlappingSupplement,
+  );
+  assert.equal(
+    generator._resolveRoomForFloorTile(
+      [overlappingSupplement, authoredOwner],
+      { ...floor, roomId: 'missing-stamped-owner' },
+    ),
+    null,
+  );
+  assert.equal(generator._isFloorTileOwnedByRoom(floor, overlappingSupplement), false);
+  assert.equal(generator._isFloorTileOwnedByRoom(floor, authoredOwner), true);
+  assert.equal(
+    generator._isFloorTileOwnedByRoom({ ...floor, roomId: null }, overlappingSupplement),
+    true,
+  );
+});
+
+test('lift shaft checks ignore floors outside their swept vertical interval', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const lift = { bottomElevation: -14, topElevation: -11.2 };
+  assert.equal(
+    generator._isFloorTileInsideLiftShaftSweep({ elevation: -12.6 }, lift),
+    true,
+  );
+  assert.equal(
+    generator._isFloorTileInsideLiftShaftSweep({ elevation: lift.topElevation }, lift),
+    true,
+    'the top-elevation aperture boundary remains part of the swept shaft',
+  );
+  assert.equal(
+    generator._isFloorTileInsideLiftShaftSweep({ elevation: lift.topElevation + 0.1 }, lift),
+    false,
+    'a floor genuinely above the declared shaft sweep remains out of scope',
+  );
+  assert.equal(
+    generator._isFloorTileInsideLiftShaftSweep({ elevation: 0 }, lift),
+    false,
+  );
+});
+
+test('high supportless raised decks do not conflict with a lower ramp', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const ramp = {
+    x: -22,
+    z: 126,
+    elevation: -11.667,
+    surface: 'industrialRamp',
+  };
+  const highRaisedDeck = {
+    x: ramp.x,
+    z: ramp.z,
+    elevation: 1.05,
+    surface: 'raisedDeck',
+  };
+  const marginalRaisedDeck = {
+    ...highRaisedDeck,
+    elevation: ramp.elevation + 3.44,
+  };
+  const supportBearingCatwalk = {
+    ...highRaisedDeck,
+    surface: 'catwalk',
+  };
+
+  assert.deepEqual(
+    generator._findRampScaffoldHeadroomConflicts([ramp, highRaisedDeck]),
+    [],
+  );
+  assert.equal(
+    generator._findRampScaffoldHeadroomConflicts([ramp, marginalRaisedDeck]).length,
+    1,
+  );
+  assert.equal(
+    generator._findRampScaffoldHeadroomConflicts([ramp, supportBearingCatwalk]).length,
+    1,
+  );
+});
 
 function createExactEndpointSeam(planId, operationId, socket, role) {
   return createDungeonRouteEndpointSeam({
@@ -300,6 +408,391 @@ test('adjacent vertical envelopes emit fascia above a lower roof and below a rai
   ]);
 });
 
+test('retaining-edge wall suppression requires V4 ownership or an exact vertical transfer', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const createFloor = () => ({
+    x: 0,
+    z: 0,
+    elevation: 0,
+    connectorMinY: 0,
+    connectorCeilingY: 8.4,
+    connectorId: 'fixture-route',
+    connectionId: 'fixture-route',
+    openRetainingWallEdges: ['1,0'],
+  });
+  const runCoversRightEdge = (run) => (
+    run.horizontal === false
+      && run.dx === 1
+      && run.dz === 0
+      && Math.abs(run.line - 0.5) <= EPSILON
+      && run.start <= 0
+      && run.end >= 0
+  );
+  const runCoversNorthEdge = (run) => (
+    run.horizontal === true
+      && run.dx === 0
+      && run.dz === 1
+      && Math.abs(run.line - 0.5) <= EPSILON
+      && run.start <= 0
+      && run.end >= 0
+  );
+
+  const v1Floor = createFloor();
+  const v1Runs = generator._collectBoundaryWallRuns(
+    new Map([['0,0', v1Floor]]),
+    new Set(),
+    [],
+    new Map(),
+    [v1Floor],
+  );
+  assert.equal(
+    v1Runs.some(runCoversRightEdge),
+    true,
+    'the legacy dressing hint must not alter frozen V1 boundary-wall runs',
+  );
+
+  const v4Floor = {
+    ...createFloor(),
+    v4SupplementalRouteOwnerIds: ['fixture-route'],
+    v4SupplementalOpenRetainingWallEdges: ['1,0'],
+  };
+  const v4Runs = generator._collectBoundaryWallRuns(
+    new Map([['0,0', v4Floor]]),
+    new Set(),
+    [],
+    new Map(),
+    [v4Floor],
+  );
+  assert.equal(
+    v4Runs.some(runCoversRightEdge),
+    false,
+    'the owning V4 supplemental route must keep its declared boarding edge open',
+  );
+
+  const authoredLadderFloor = {
+    ...createFloor(),
+    openRetainingWallEdges: ['0,1', '1,0'],
+    traversalLinks: [{
+      id: 'fixture-ladder:forward',
+      action: 'ladder',
+      toFloorKey: '2,0@y8.400',
+    }],
+  };
+  const authoredLadderTarget = {
+    ...createFloor(),
+    x: 2,
+    elevation: 8.4,
+    connectorMinY: 8.4,
+    connectorCeilingY: 16.8,
+    openRetainingWallEdges: ['-1,0'],
+    traversalLinks: [{
+      id: 'fixture-ladder:reverse',
+      action: 'ladder',
+      toFloorKey: '0,0@y0.000',
+    }],
+  };
+  const authoredLadderTiles = new Map([
+    ['0,0', authoredLadderFloor],
+    ['2,0', authoredLadderTarget],
+  ]);
+  const unaugmentedLadderRuns = generator._collectBoundaryWallRuns(
+    authoredLadderTiles,
+    new Set(),
+    [],
+    new Map(),
+  );
+  assert.equal(
+    unaugmentedLadderRuns.some(runCoversRightEdge),
+    true,
+    'the non-augmented V1 wall pass remains unchanged',
+  );
+
+  const authoritativeLadderRuns = generator._collectBoundaryWallRuns(
+    authoredLadderTiles,
+    new Set(),
+    [],
+    new Map(),
+    [authoredLadderFloor, authoredLadderTarget],
+  );
+  assert.equal(
+    authoritativeLadderRuns.some(runCoversRightEdge),
+    false,
+    'the V4 authoritative shell preserves an exact authored ladder boarding edge',
+  );
+  assert.equal(
+    authoritativeLadderRuns.some(runCoversNorthEdge),
+    true,
+    'an unrelated orthogonal legacy opening remains walled',
+  );
+
+  const missingTargetFloor = {
+    ...authoredLadderFloor,
+    traversalLinks: [{
+      id: 'fixture-ladder:missing-target',
+      action: 'ladder',
+      toFloorKey: '9,0@y8.400',
+    }],
+  };
+  const missingTargetRuns = generator._collectBoundaryWallRuns(
+    new Map([['0,0', missingTargetFloor]]),
+    new Set(),
+    [],
+    new Map(),
+    [missingTargetFloor],
+  );
+  assert.equal(
+    missingTargetRuns.some(runCoversRightEdge),
+    true,
+    'an unresolved ladder target cannot carve the authoritative shell',
+  );
+});
+
+test('authoritative shell carves only exact declared drop-space traversal edges', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const segmentId = 'supplement-drop-space-crossing-segment';
+  const createSegmentFloor = (x) => ({
+    x,
+    z: 0,
+    elevation: 14,
+    connectorMinY: 14,
+    connectorCeilingY: 28,
+    signedConnectorFloorOwnerId: segmentId,
+    augmentationOwnerId: segmentId,
+    dungeonSupplement: true,
+    walkabilityIntent: 'required-clear',
+  });
+  const createAuthoredFloor = (x, elevation, overrides = {}) => ({
+    x,
+    z: 0,
+    elevation,
+    roomId: 'trapRoom',
+    dropSpaceId: 'trapRoom_hazardDropSpace',
+    walkabilityIntent: 'required-clear',
+    ...overrides,
+  });
+  const lowerA = createAuthoredFloor(0, 23.2);
+  const lowerB = createAuthoredFloor(1, 23.2);
+  const lowerClimb = createAuthoredFloor(3, 23.2);
+  const climbShelf = createAuthoredFloor(4, 26.5, {
+    surface: 'basementReturnShelf',
+    isLedgeSurface: true,
+  });
+  const jumpShelf = createAuthoredFloor(6, 26.5, {
+    surface: 'basementReturnShelf',
+    isLedgeSurface: true,
+  });
+  const exit = createAuthoredFloor(7, 28);
+  assert.equal(generator._getTraversalActionBetweenFloorTiles(lowerA, lowerB), 'walk');
+  assert.equal(
+    generator._getTraversalActionBetweenFloorTiles(lowerClimb, climbShelf),
+    'ledge_climb',
+  );
+  assert.equal(generator._getTraversalActionBetweenFloorTiles(jumpShelf, exit), 'jump');
+
+  const segmentFloors = [0, 3, 6, 9].map(createSegmentFloor);
+  const authoredFloors = [lowerA, lowerB, lowerClimb, climbShelf, jumpShelf, exit];
+  const floors = [...segmentFloors, ...authoredFloors];
+  const floorKey = (floor) => generator._getFloorTileGraphKey(floor);
+  const trapRoom = {
+    id: 'trapRoom',
+    baseElevation: 28,
+    ceilingY: 43.2,
+    dropSpace: {
+      id: 'trapRoom_hazardDropSpace',
+      entryFloorKeys: [floorKey(lowerA)],
+      entryLipFloorKeys: [floorKey(lowerB)],
+      lowerFloorKeys: [floorKey(lowerA), floorKey(lowerB), floorKey(lowerClimb)],
+      bridgeFloorKeys: [],
+      returnShelfFloorKeys: [floorKey(climbShelf), floorKey(jumpShelf)],
+      exitFloorKeys: [floorKey(exit)],
+    },
+  };
+  const wallRuns = generator._collectBoundaryWallRuns(
+    new Map(),
+    new Set(),
+    [trapRoom],
+    new Map(),
+    floors,
+  );
+  const runsAtRightEdge = (x, runs = wallRuns) => runs.filter((run) => (
+    run.horizontal === false
+      && run.dx === 1
+      && Math.abs(run.line - (x + 0.5)) <= EPSILON
+      && run.start <= 0
+      && run.end >= 0
+      && (run.ownerIds ?? []).includes(segmentId)
+  ));
+  for (const { label, x, first, second } of [
+    { label: 'lower-to-lower walk', x: 0, first: lowerA, second: lowerB },
+    { label: 'lower-to-shelf climb', x: 3, first: lowerClimb, second: climbShelf },
+    { label: 'shelf-to-exit jump', x: 6, first: jumpShelf, second: exit },
+  ]) {
+    const edgeRuns = runsAtRightEdge(x);
+    assert.ok(edgeRuns.length > 0, `${label} keeps wall modules outside the player envelope`);
+    const minimumElevation = Math.min(first.elevation, second.elevation);
+    const maximumHeadY = Math.max(first.elevation, second.elevation)
+      + PLAYER_TRAVERSAL_ENVELOPE.headClearance;
+    assert.equal(
+      edgeRuns.some((run) => (
+        run.wallTopY > minimumElevation + EPSILON
+          && run.wallBottomY < maximumHeadY - EPSILON
+      )),
+      false,
+      `${label} has no wall inside its exact player-height traversal interval`,
+    );
+  }
+
+  const unrelatedWall = runsAtRightEdge(9).find((run) => (
+    Math.abs(run.wallBottomY - 14) <= EPSILON
+      && Math.abs(run.wallTopY - 28) <= EPSILON
+  ));
+  assert.ok(unrelatedWall, 'an adjacent wall outside the declared drop-space graph stays intact');
+
+  const unaugmentedRuns = generator._collectBoundaryWallRuns(
+    new Map(segmentFloors.map((floor) => [`${floor.x},${floor.z}`, floor])),
+    new Set(),
+    [trapRoom],
+    new Map(),
+  );
+  assert.ok(
+    runsAtRightEdge(0, unaugmentedRuns).some((run) => (
+      Math.abs(run.wallBottomY - 14) <= EPSILON
+        && Math.abs(run.wallTopY - 28) <= EPSILON
+    )),
+    'the non-authoritative V1 wall path remains unchanged',
+  );
+});
+
+test('authoritative drop-space traversal openings fail closed on incomplete metadata', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const segmentId = 'supplement-malformed-drop-space-segment';
+  const segmentFloor = {
+    x: 0,
+    z: 0,
+    elevation: 14,
+    connectorMinY: 14,
+    connectorCeilingY: 28,
+    signedConnectorFloorOwnerId: segmentId,
+    augmentationOwnerId: segmentId,
+    dungeonSupplement: true,
+    walkabilityIntent: 'required-clear',
+  };
+  const firstFloor = {
+    x: 0,
+    z: 0,
+    elevation: 23.2,
+    roomId: 'trapRoom',
+    walkabilityIntent: 'required-clear',
+  };
+  const secondFloor = {
+    ...firstFloor,
+    x: 1,
+  };
+  const firstFloorKey = generator._getFloorTileGraphKey(firstFloor);
+  const secondFloorKey = generator._getFloorTileGraphKey(secondFloor);
+  const validDropSpace = {
+    id: 'trapRoom_hazardDropSpace',
+    entryFloorKeys: [],
+    entryLipFloorKeys: [],
+    lowerFloorKeys: [firstFloorKey, secondFloorKey],
+    bridgeFloorKeys: [],
+    returnShelfFloorKeys: [],
+    exitFloorKeys: [],
+  };
+  const hasFullBlockingWall = (dropSpace, authoritativeFloors) => {
+    const runs = generator._collectBoundaryWallRuns(
+      new Map(),
+      new Set(),
+      [{
+        id: 'trapRoom',
+        baseElevation: 28,
+        ceilingY: 43.2,
+        dropSpace,
+      }],
+      new Map(),
+      authoritativeFloors,
+    );
+    return runs.some((run) => (
+      run.horizontal === false
+        && run.dx === 1
+        && Math.abs(run.line - 0.5) <= EPSILON
+        && run.start <= 0
+        && run.end >= 0
+        && Math.abs(run.wallBottomY - 14) <= EPSILON
+        && Math.abs(run.wallTopY - 28) <= EPSILON
+        && (run.ownerIds ?? []).includes(segmentId)
+    ));
+  };
+  const completeFloors = [segmentFloor, firstFloor, secondFloor];
+
+  const missingField = { ...validDropSpace };
+  delete missingField.exitFloorKeys;
+  assert.equal(hasFullBlockingWall(missingField, completeFloors), true);
+  assert.equal(hasFullBlockingWall({
+    ...validDropSpace,
+    lowerFloorKeys: [firstFloorKey, 42, secondFloorKey],
+  }, completeFloors), true);
+  assert.equal(hasFullBlockingWall({
+    ...validDropSpace,
+    lowerFloorKeys: [firstFloorKey, '9,9@y23.200', secondFloorKey],
+  }, completeFloors), true);
+  assert.equal(hasFullBlockingWall(
+    validDropSpace,
+    [segmentFloor, firstFloor, { ...firstFloor }, secondFloor],
+  ), true);
+});
+
+test('merged authored openings cannot borrow V4 ownership from another edge', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const authoredFloor = {
+    x: 0,
+    z: 0,
+    elevation: 0,
+    connectorMinY: 0,
+    connectorCeilingY: 8.4,
+    connectorId: 'authored-route',
+    openRetainingWallEdges: ['1,0'],
+  };
+  const v4Floor = {
+    x: 0,
+    z: 0,
+    elevation: 0,
+    connectorMinY: 0,
+    connectorCeilingY: 8.4,
+    connectorId: 'v4-route',
+    openRetainingWallEdges: ['-1,0'],
+    v4SupplementalRouteOwnerIds: ['v4-route'],
+    v4SupplementalOpenRetainingWallEdges: ['-1,0'],
+  };
+  const [mergedFloor] = generator._canonicalizeAbsoluteFloorTiles([
+    authoredFloor,
+    v4Floor,
+  ]).floorTiles;
+  assert.deepEqual(mergedFloor.v4SupplementalOpenRetainingWallEdges, ['-1,0']);
+  assert.deepEqual(
+    new Set(mergedFloor.openRetainingWallEdges),
+    new Set(['-1,0', '1,0']),
+  );
+
+  const runs = generator._collectBoundaryWallRuns(
+    new Map([['0,0', mergedFloor]]),
+    new Set(),
+    [],
+    new Map(),
+    [mergedFloor],
+  );
+  const coversEdge = (dx) => runs.some((run) => (
+    run.horizontal === false
+      && run.dx === dx
+      && run.dz === 0
+      && Math.abs(run.line - dx * 0.5) <= EPSILON
+      && run.start <= 0
+      && run.end >= 0
+  ));
+  assert.equal(coversEdge(-1), false, 'the exact V4-owned edge remains open');
+  assert.equal(coversEdge(1), true, 'the authored edge keeps its V1 boundary wall');
+});
+
 test('wall rendering and collision consume the same authoritative pre-render runs', () => {
   const generator = new DungeonGenerator({ random: () => 0.5 });
   const run = {
@@ -497,6 +990,86 @@ test('connector validation rejects a thin solid barrier between clear tile cente
   assert.ok(validation.details.checks.every((check) => !(
     check.traversableOutward && check.traversableReturn
   )));
+});
+
+test('authoritative supplemental solid occupancy uses exact floor and transfer identities', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const occupiedFloor = {
+    x: 0,
+    z: 0,
+    elevation: 0,
+    augmentationFloorCellId: 'tier:cell:occupied',
+  };
+  const adjacentBoundaryFloor = {
+    x: 1,
+    z: 0,
+    elevation: 0,
+    augmentationFloorCellId: 'tier:cell:adjacent',
+  };
+  const clearFloor = {
+    x: 2,
+    z: 0,
+    elevation: 0,
+    augmentationFloorCellId: 'tier:cell:clear',
+  };
+  const transferFloor = {
+    x: 1,
+    z: 0,
+    elevation: 0,
+    augmentationTransferCellId: 'transfer:cell:occupied',
+  };
+  const exactOccupancyZone = {
+    id: 'authored-solid',
+    position: new THREE.Vector3(0, 1.8, 0),
+    halfWidth: generator.tileSize,
+    halfDepth: generator.tileSize,
+    verticalHalfHeight: 1.8,
+    isDungeonSupplement: true,
+    occupiedSupportCellIds: ['tier:cell:occupied', 'transfer:cell:occupied'],
+  };
+
+  assert.equal(
+    generator._isFloorTileBlockedBySolidZone(occupiedFloor, [exactOccupancyZone]),
+    true,
+  );
+  assert.equal(
+    generator._isFloorTileBlockedBySolidZone(adjacentBoundaryFloor, [exactOccupancyZone]),
+    true,
+    'a non-occupied support center within standing capsule clearance is not navigable',
+  );
+  assert.equal(
+    generator._isFloorTileBlockedBySolidZone(clearFloor, [exactOccupancyZone]),
+    false,
+    'a non-occupied support center beyond standing capsule clearance remains navigable',
+  );
+  assert.equal(
+    generator._isFloorTileBlockedBySolidZone(transferFloor, [exactOccupancyZone]),
+    true,
+  );
+  assert.equal(
+    generator._isFloorTileBlockedBySolidZone(adjacentBoundaryFloor, [{
+      ...exactOccupancyZone,
+      occupiedSupportCellIds: [],
+    }]),
+    true,
+    'an empty physical-occupancy inventory does not waive standing capsule clearance',
+  );
+  assert.equal(
+    generator._isFloorTileBlockedBySolidZone(adjacentBoundaryFloor, [{
+      ...exactOccupancyZone,
+      isDungeonSupplement: false,
+      occupiedSupportCellIds: [],
+    }]),
+    false,
+    'non-supplement exact occupancy preserves the legacy point-membership behavior',
+  );
+  const { occupiedSupportCellIds: omitted, ...legacyZone } = exactOccupancyZone;
+  assert.equal(omitted.length, 2);
+  assert.equal(
+    generator._isFloorTileBlockedBySolidZone(adjacentBoundaryFloor, [legacyZone]),
+    true,
+    'legacy and non-authoritative zones preserve continuous AABB containment',
+  );
 });
 
 test('locked-gate full-height structural clearance is reserved at source thresholds', () => {
@@ -752,6 +1325,7 @@ test('a V4 connector entrance rejects a wall in any lane of either two-tile appr
     augmentationOperationType: 'routeNetwork',
     augmentationOperationId: operationId,
     routeNetworkGrantId: operationId,
+    routeNetworkKind: 'objective-route-coverage',
     endpointSeams,
   };
   const validation = generator._validateConnectorEntranceWalkability({
@@ -796,7 +1370,64 @@ test('a V4 connector entrance rejects a wall in any lane of either two-tile appr
       === JSON.stringify([-2, -1, 0, 1, 2])
   )));
   assert.equal(sourceCheck.blockingWallFacadeId, 'retained-center-lane-wall');
+  assert.equal(sourceCheck.augmentationOperationId, operationId);
+  assert.equal(sourceCheck.routeNetworkGrantId, operationId);
+  assert.equal(sourceCheck.routeNetworkKind, 'objective-route-coverage');
+  assert.equal(sourceCheck.roomSideFailure, false);
+  assert.equal(sourceCheck.pathSideFailure, true);
+  assert.deepEqual(validation.details.routeNetworkGrantIds, [operationId]);
+  assert.deepEqual(validation.details.failedRouteNetworkGrants, [{
+    grantId: operationId,
+    augmentationOperationId: operationId,
+    routeNetworkKind: 'objective-route-coverage',
+    connectionIds: [connectionId],
+    roomIds: [],
+    socketIds: [fromSocket.id],
+    failedCheckCount: 1,
+  }]);
   assert.match(validation.errors.join('\n'), /blocked by boundary wall/);
+
+  const blockedInteriorCell = endpointSeams[1].orderedCells.find((cell) => (
+    cell.lane === 0 && cell.signedDepthTiles === -1
+  ));
+  const roomBlockedValidation = generator._validateConnectorEntranceWalkability({
+    floorTiles: floorTiles.filter((floor) => (
+      floor.x !== blockedInteriorCell.gridX || floor.z !== blockedInteriorCell.gridZ
+    )),
+    rooms: [
+      { id: 'hubTown', type: 'hub', x: 0, z: 0, width: 5, depth: 3, baseElevation: 0 },
+      {
+        id: 'supplement-room',
+        type: 'supplement',
+        x: 4,
+        z: 0,
+        width: 3,
+        depth: 3,
+        baseElevation: 0,
+        isDungeonSupplement: true,
+      },
+    ],
+    connectionPlans: [plan],
+    wallRuns: [],
+    solidZones: [],
+    segmentBarrierZones: [],
+    useSegmentBarriers: true,
+  });
+  const destinationCheck = roomBlockedValidation.details.checks.find((check) => (
+    check.socketId === toSocket.id
+  ));
+  assert.equal(destinationCheck.accepted, false);
+  assert.equal(destinationCheck.roomSideFailure, true);
+  assert.equal(destinationCheck.pathSideFailure, false);
+  assert.deepEqual(roomBlockedValidation.details.failedRouteNetworkGrants, [{
+    grantId: operationId,
+    augmentationOperationId: operationId,
+    routeNetworkKind: 'objective-route-coverage',
+    connectionIds: [],
+    roomIds: ['supplement-room'],
+    socketIds: [toSocket.id],
+    failedCheckCount: 1,
+  }]);
 });
 
 test('graph-only route records cannot carve physical wall openings', () => {
@@ -1048,13 +1679,23 @@ test('a different physical segment cannot carve through its own logical gate', (
 
 test('a vertically separated supplement preserves an authored floor in the same X/Z column', () => {
   const generator = new DungeonGenerator({ random: () => 0.5 });
+  const stackedRoom = {
+    id: 'stacked-authored-room',
+    x: 0,
+    z: 0,
+    width: 1,
+    depth: 1,
+    baseElevation: 28,
+    ceilingY: 42,
+  };
   const authoredFloor = {
     x: 0,
     z: 0,
     type: 'hallway',
-    surface: 'authoredLowerGallery',
-    elevation: 0,
+    surface: 'authoredUpperGallery',
+    elevation: 28,
     level: 0,
+    roomId: stackedRoom.id,
     connectorId: 'authored-lower-connector',
     connectionId: 'authored-lower-connector',
   };
@@ -1088,16 +1729,106 @@ test('a vertically separated supplement preserves an authored floor in the same 
   );
 
   assert.equal(tiles.get('0,0'), authoredFloor);
-  assert.equal(authoredFloor.elevation, 0);
+  assert.equal(authoredFloor.elevation, 28);
   assert.equal(authoredFloor.connectorId, 'authored-lower-connector');
   assert.ok(floors.includes(authoredFloor));
-  assert.ok(floors.some((floor) => (
+  const signedConnectorFloor = floors.find((floor) => (
     floor !== authoredFloor
     && floor.x === 0
     && floor.z === 0
     && Math.abs(Number(floor.elevation) - 14) <= EPSILON
     && floor.connectorId === plan.id
-  )));
+  ));
+  assert.ok(signedConnectorFloor);
+  assert.equal(
+    signedConnectorFloor.roomId ?? null,
+    null,
+    'a vertically separated structural column must not lend its room identity to the connector',
+  );
+
+  const boundaryRuns = generator._collectBoundaryWallRuns(
+    tiles,
+    new Set(),
+    [stackedRoom],
+    new Map(),
+    floors,
+  );
+  assert.equal(
+    boundaryRuns.some((run) => (
+      run.horizontal
+        && Math.abs(Number(run.line) + 0.5) <= EPSILON
+        && Number(run.start) <= 0
+        && Number(run.end) >= 0
+        && Number(run.wallBottomY) < 28 - EPSILON
+        && Number(run.wallTopY) > 14 + EPSILON
+    )),
+    false,
+    'stacked room metadata must not fabricate a wall between adjacent connector lanes',
+  );
+});
+
+test('an elevated authored supplement room base does not overwrite a lower legacy floor', () => {
+  const lowerFloor = {
+    x: 10,
+    z: 65,
+    type: 'trap',
+    surface: 'industrialRamp',
+    elevation: 1.05,
+    declaredFloorOwnerElevation: 0,
+    roomId: 'trapRoom',
+    rampRouteId: 'trapRoom-ramp',
+  };
+  const tiles = new Map([['10,65', lowerFloor]]);
+  const elevatedFloors = [];
+  const room = {
+    id: 'supplement:fixture:routeNetwork:3:node:1',
+    x: 10,
+    z: 65,
+    width: 7,
+    depth: 7,
+    baseElevation: 14,
+    plannedBaseElevation: 14,
+    tileType: 'floor',
+    isDungeonSupplement: true,
+    augmentationOperationId: 'supplement:fixture:routeNetwork:3',
+    augmentationBlueprintId: 'fixture-elevated-room',
+    augmentationModuleTemplateId: 'fixture-elevated-room',
+    augmentationModuleKind: 'room',
+    augmentationFloorTiers: [{
+      id: 'base',
+      runtimeId: 'fixture-elevated-room:base',
+      localTierId: 'base',
+      localElevation: 0,
+      worldElevation: 14,
+      authoritative: true,
+      worldCells: [{
+        id: 'fixture-elevated-room:base:cell:0',
+        grid: { x: 10, z: 65 },
+        elevation: 14,
+      }],
+    }],
+  };
+
+  addAuthoredRoomFloor(tiles, room, elevatedFloors);
+
+  assert.equal(tiles.get('10,65'), lowerFloor);
+  assert.equal(lowerFloor.roomId, 'trapRoom');
+  assert.equal(lowerFloor.elevation, 1.05);
+  assert.equal(lowerFloor.rampRouteId, 'trapRoom-ramp');
+  assert.equal(elevatedFloors.length, 1);
+  assert.deepEqual({
+    x: elevatedFloors[0].x,
+    z: elevatedFloors[0].z,
+    elevation: elevatedFloors[0].elevation,
+    roomId: elevatedFloors[0].roomId,
+    floorCellId: elevatedFloors[0].augmentationFloorCellId,
+  }, {
+    x: 10,
+    z: 65,
+    elevation: 14,
+    roomId: room.id,
+    floorCellId: 'fixture-elevated-room:base:cell:0',
+  });
 });
 
 test('a same-elevation supplement cannot steal an unrelated authored floor owner', () => {
@@ -2841,6 +3572,215 @@ test('compact supplement connector junctions require three exact-elevation physi
   assert.match(
     parasiticOverpass.errors.join('\n'),
     /exact-elevation, bidirectionally walkable component/,
+  );
+});
+
+test('authoritative half-grid connector cores use exact rotated cells and keep physical approaches explicit', () => {
+  const generator = new DungeonGenerator({ random: () => 0.5 });
+  const operationId = 'supplement:test:half-grid-authoritative-operation';
+  const junctionId = `${operationId}:connector-module`;
+  const mask = ['.###.', '.###.', '.####', '.####', '.####', '.###.', '.###.'];
+  const coreFloors = [];
+  for (let row = 0; row < mask.length; row += 1) {
+    for (let column = 0; column < mask[row].length; column += 1) {
+      if (mask[row][column] !== '#') continue;
+      const localX = column - 2;
+      const localZ = row - 3;
+      // Rotation two plus the materialized half-grid center produces an
+      // authoritative z=-2..4 mask while the rounded proxy at z=0 spans
+      // z=-3..3. The far three-cell row must remain part of the local core.
+      const x = -localX;
+      const z = 1 - localZ;
+      const authoritativeFloorCellId = `${junctionId}:floor-tier:base:cell:${localX}:${localZ}`;
+      coreFloors.push({
+        x,
+        z,
+        elevation: 0,
+        level: 0,
+        type: 'floor',
+        roomId: junctionId,
+        surface: 'supplementConnectorJunctionCore',
+        connectorJunctionOwnerId: junctionId,
+        augmentationFloorCellId: authoritativeFloorCellId,
+        isDungeonSupplementConnectorFloor: true,
+        augmentationOwnerId: operationId,
+        mergedFloorOwnerIds: [junctionId],
+        mergedFloorSourceCount: 1,
+        noEnemySpawn: true,
+        traversalLinks: [],
+      });
+    }
+  }
+  assert.equal(coreFloors.length, 24);
+  const hubFloor = {
+    x: -4,
+    z: 1,
+    elevation: 0,
+    level: 0,
+    type: 'floor',
+    roomId: 'hubTown',
+    surface: 'roomFloor',
+    traversalLinks: [],
+  };
+  const westApproach = {
+    x: -3,
+    z: 1,
+    elevation: 0,
+    level: 0,
+    type: 'hallway',
+    roomId: junctionId,
+    surface: 'connectorGalleryFloor',
+    traversalLinks: [],
+  };
+  const southApproach = {
+    x: 0,
+    z: -3,
+    elevation: 0,
+    level: 0,
+    type: 'hallway',
+    roomId: junctionId,
+    surface: 'connectorGalleryFloor',
+    traversalLinks: [],
+  };
+  const exitFloor = {
+    x: 0,
+    z: -4,
+    elevation: 0,
+    level: 0,
+    type: 'floor',
+    roomId: 'fixtureExit',
+    surface: 'roomFloor',
+    traversalLinks: [],
+  };
+  const makePlan = (id, fromRoomId, fromFloor, toRoomId, toFloor) => {
+    fromFloor.connectorId = id;
+    fromFloor.connectionId = id;
+    fromFloor.signedConnectorFloorOwnerId = id;
+    toFloor.connectorId = id;
+    toFloor.connectionId = id;
+    toFloor.signedConnectorFloorOwnerId = id;
+    const fromSocket = {
+      id: `${id}:from`,
+      roomId: fromRoomId,
+      x: fromFloor.x,
+      z: fromFloor.z,
+      elevation: 0,
+      connectorType: 'ground_corridor',
+      floorKey: generator._getFloorTileGraphKey(fromFloor),
+    };
+    const toSocket = {
+      id: `${id}:to`,
+      roomId: toRoomId,
+      x: toFloor.x,
+      z: toFloor.z,
+      elevation: 0,
+      connectorType: 'ground_corridor',
+      floorKey: generator._getFloorTileGraphKey(toFloor),
+    };
+    fromSocket.matchingSocketId = toSocket.id;
+    toSocket.matchingSocketId = fromSocket.id;
+    return {
+      id,
+      fromRoomId,
+      toRoomId,
+      fromSocket,
+      toSocket,
+      level: 0,
+      elevation: 0,
+      sourceElevation: 0,
+      destinationElevation: 0,
+      elevationDelta: 0,
+      bridgePath: [
+        { x: fromFloor.x, z: fromFloor.z, elevation: 0 },
+        { x: toFloor.x, z: toFloor.z, elevation: 0 },
+      ],
+      traversalFloorKeys: [fromSocket.floorKey, toSocket.floorKey],
+      isDungeonSupplement: true,
+      isRouteNetworkConnection: true,
+      augmentationOperationType: 'routeNetwork',
+      augmentationOperationId: operationId,
+      connectorVariantConstraints: {},
+    };
+  };
+  const plans = [
+    makePlan(`${operationId}:west`, 'hubTown', hubFloor, junctionId, westApproach),
+    makePlan(`${operationId}:south`, junctionId, southApproach, 'fixtureExit', exitFloor),
+  ];
+  const authoritativeWorldCells = coreFloors.map((floor) => ({
+    id: floor.augmentationFloorCellId,
+    grid: { x: floor.x, z: floor.z },
+    elevation: floor.elevation,
+  }));
+  const validation = generator._validatePlatformability({
+    floorTiles: [hubFloor, westApproach, ...coreFloors, southApproach, exitFloor],
+    rooms: [
+      { id: 'hubTown', type: 'hub', x: -4, z: 1, width: 1, depth: 1, baseElevation: 0 },
+      { id: 'fixtureExit', type: 'room', x: 0, z: -4, width: 1, depth: 1, baseElevation: 0 },
+      {
+        id: junctionId,
+        type: 'supplement',
+        x: 0,
+        z: 0,
+        width: 5,
+        depth: 7,
+        baseElevation: 0,
+        isDungeonSupplement: false,
+        isDungeonSupplementConnector: true,
+        isSupplementConnectorModule: true,
+        isConnectorJunctionProxy: true,
+        suppressRoomGeometry: true,
+        stampConnectorJunctionFloor: true,
+        junctionKind: 'through-t',
+        countsAsMeaningfulStation: false,
+        minimumPhysicalConnectorArms: 2,
+        augmentationOperationId: operationId,
+        augmentationRotationQuarterTurns: 2,
+        augmentationFloorTiers: [{
+          id: 'base',
+          runtimeId: `${junctionId}:floor-tier:base`,
+          localTierId: 'base',
+          authoritative: true,
+          localElevation: 0,
+          worldElevation: 0,
+          worldCells: authoritativeWorldCells,
+        }],
+      },
+    ],
+    solidZones: [],
+    connectionPlans: plans,
+    doors: [],
+    landmarks: {},
+    encounters: [],
+    useSegmentBarriers: true,
+  });
+
+  const check = validation.details.supplementJunctionConnectivityChecks.find(({ roomId }) => (
+    roomId === junctionId
+  ));
+  assert.ok(check);
+  assert.equal(check.accepted, true, validation.errors.join('\n'));
+  assert.equal(validation.errors.some((error) => (
+    error.includes(`${junctionId} connector module is not one exact-elevation`)
+  )), false);
+  assert.equal(check.coreFloorCount, 24);
+  assert.equal(check.navigableCoreFloorCount, 24);
+  assert.equal(check.expectedCoreFloorCount, 24);
+  assert.equal(check.coreFloorCoverageAccepted, true);
+  assert.equal(check.approachCount, 2);
+  assert.equal(check.requiredApproachCount, 2);
+  assert.ok(check.approachChecks.every((approach) => (
+    approach.exactElevation
+      && approach.globallyReachable
+      && approach.locallyReachable
+      && approach.returnReachable
+  )));
+  assert.equal(check.locallyReachableFloorCount, 26);
+  assert.equal(check.locallyReturnableFloorCount, 26);
+  assert.deepEqual(
+    coreFloors.filter(({ z }) => z === 4).map((floor) => (
+      generator._getFloorTileGraphKey(floor)
+    )).sort(),
+    ['-1,4@y0.000', '0,4@y0.000', '1,4@y0.000'],
   );
 });
 

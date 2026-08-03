@@ -1,0 +1,402 @@
+{
+  "schemaVersion": 1,
+  "kind": "dungeon-augmentation-release-shard",
+  "generatedAt": "2026-08-01T08:40:53.042Z",
+  "result": "failed",
+  "profile": {
+    "id": "industrial-supplement-preview-v4",
+    "revision": 5,
+    "hash": "sha256-ddd298625970857199d065fedf2bea91dd49c36b19539b03f9e85ac49ca63177"
+  },
+  "provenance": {
+    "gitCommit": "5d1510eeef410197d62105123e1fc1350ce93446",
+    "gitBranch": "codex/dungeon-generation-pivot-20260721",
+    "sourceDirty": false,
+    "sourceHash": "sha256-8f2fee17625c9b1ee7e06bd895910dab8a07f701f516557b55f6361aef0b43c9",
+    "sourceFileCount": 167,
+    "nodeVersion": "v24.17.0",
+    "platform": "win32-x64",
+    "machine": {
+      "cpuModel": "AMD Ryzen 7 9800X3D 8-Core Processor",
+      "logicalCpuCount": 16,
+      "totalMemoryBytes": 33453711360
+    },
+    "profile": {
+      "id": "industrial-supplement-preview-v4",
+      "revision": 5,
+      "hash": "sha256-ddd298625970857199d065fedf2bea91dd49c36b19539b03f9e85ac49ca63177"
+    }
+  },
+  "manifestHash": "sha256-2ff80971c5c356757f364bdbfd8feba465ac6ac08ecf5756593ba90725484f0c",
+  "corpusTier": "release",
+  "corpusViewCount": 1000,
+  "shardIndex": 0,
+  "shardCount": 20,
+  "shardSize": 50,
+  "ordinalStart": 0,
+  "ordinalEndExclusive": 50,
+  "expectedEntries": [
+    {
+      "ordinal": 0,
+      "rawIndex": 0,
+      "seed": "layout:augmentation-realized-v4-000",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-000:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-0fd48541e2fb706fc0230b17f9de759c5e6d0cc1939ad30407a753f1ba8ef67f"
+    },
+    {
+      "ordinal": 1,
+      "rawIndex": 1,
+      "seed": "layout:augmentation-realized-v4-001",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-001:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-486af306bb8195821887b21e8c9248f4ffaf03fd03e1b73565cd4f28a7320d30"
+    },
+    {
+      "ordinal": 2,
+      "rawIndex": 2,
+      "seed": "layout:augmentation-realized-v4-002",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-002:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-f322cf432f27b827521be869f100324310aedcaac23bffaeb83c0fd24739ccc2"
+    },
+    {
+      "ordinal": 3,
+      "rawIndex": 3,
+      "seed": "layout:augmentation-realized-v4-003",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-003:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-c57330b9b4dc43fd36cb6c975359dc5e8b14e4e15e0d93da3049c75d06b24b8d"
+    },
+    {
+      "ordinal": 4,
+      "rawIndex": 4,
+      "seed": "layout:augmentation-realized-v4-004",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-004:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-e2e52484d6ff6db03eec4ed6183e467a5504b9ae865a6bc466f45584125f5feb"
+    },
+    {
+      "ordinal": 5,
+      "rawIndex": 5,
+      "seed": "layout:augmentation-realized-v4-005",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-005:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-f1e5a10018d0b56ab9f43bb911601ac223ee08cbc2d6adfca5e75cce1f65993c"
+    },
+    {
+      "ordinal": 6,
+      "rawIndex": 6,
+      "seed": "layout:augmentation-realized-v4-006",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-006:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-4d43613c77513b50cd742927a4c645b7f96f7b3ff8cc25dcbaf4828e5605d795"
+    },
+    {
+      "ordinal": 7,
+      "rawIndex": 7,
+      "seed": "layout:augmentation-realized-v4-007",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-007:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-d02ee7de594b3f273fbf83f683f78f7a094be96dd05a47027393f21a4aabab4a"
+    },
+    {
+      "ordinal": 8,
+      "rawIndex": 8,
+      "seed": "layout:augmentation-realized-v4-008",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-008:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-c663154312066047db0eec37f0bcd3df851830675c5f4487662083d19d8fddf4"
+    },
+    {
+      "ordinal": 9,
+      "rawIndex": 9,
+      "seed": "layout:augmentation-realized-v4-009",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-009:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-b930f17e81ddf56e213765df48e4a638fcce1aefcda2c3f7b09bd49038d158a5"
+    },
+    {
+      "ordinal": 10,
+      "rawIndex": 10,
+      "seed": "layout:augmentation-realized-v4-010",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-010:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-983ea04cce4c787a8ac064285a9cfabd33326c8c4985b8136b15dd0283c1600d"
+    },
+    {
+      "ordinal": 11,
+      "rawIndex": 11,
+      "seed": "layout:augmentation-realized-v4-011",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-011:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-19d1da54b18074b7b7fe756f296ad0f6d3d3604387c1d08b4e6021a2be0ded5f"
+    },
+    {
+      "ordinal": 12,
+      "rawIndex": 12,
+      "seed": "layout:augmentation-realized-v4-012",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-012:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-d729615c3537454a37a3304f0a1781f9c82c88c47e9ae6a95378156e505d1243"
+    },
+    {
+      "ordinal": 13,
+      "rawIndex": 13,
+      "seed": "layout:augmentation-realized-v4-013",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-013:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-e4bf0390a5529a4202f1f0d5e3783d5cf2af6fe2ed2d293114816c098315ac8d"
+    },
+    {
+      "ordinal": 14,
+      "rawIndex": 14,
+      "seed": "layout:augmentation-realized-v4-014",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-014:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-a293bebc8e6f35c908c4c5953c5e4446782c3cece92de17bec8f5e2709f88858"
+    },
+    {
+      "ordinal": 15,
+      "rawIndex": 15,
+      "seed": "layout:augmentation-realized-v4-015",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-015:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-417d8cb1d68323d4f327e492910d9b178469c37183ab4c59ce6e19bc10bb3824"
+    },
+    {
+      "ordinal": 16,
+      "rawIndex": 16,
+      "seed": "layout:augmentation-realized-v4-016",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-016:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-303f18faedb226ef460a1f7c0de5e39a252777a21d8899c45ba00e895ab3df88"
+    },
+    {
+      "ordinal": 17,
+      "rawIndex": 17,
+      "seed": "layout:augmentation-realized-v4-017",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-017:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-2dfa40641bab37cc4f56c42e95cf6e2a00023d0f5039507236602af585db9dfe"
+    },
+    {
+      "ordinal": 18,
+      "rawIndex": 18,
+      "seed": "layout:augmentation-realized-v4-018",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-018:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-eba548a3fbaed74b76a0bba086956a3f332c1df6e25a074fa781a6b815c45db8"
+    },
+    {
+      "ordinal": 19,
+      "rawIndex": 19,
+      "seed": "layout:augmentation-realized-v4-019",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-019:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-8759c509095b32c931d5c65ddcadc6e9dd231d790d159b3891dcf81a1bfcb517"
+    },
+    {
+      "ordinal": 20,
+      "rawIndex": 20,
+      "seed": "layout:augmentation-realized-v4-020",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-020:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-0b38841625d28b3a4ea8c84c54fe574be5c2e41d3dcca393e7aee4236a07e432"
+    },
+    {
+      "ordinal": 21,
+      "rawIndex": 21,
+      "seed": "layout:augmentation-realized-v4-021",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-021:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-c2f482bcaaf2bf68b39b9f56d687e7401834428c60036873326deefd539f6e75"
+    },
+    {
+      "ordinal": 22,
+      "rawIndex": 22,
+      "seed": "layout:augmentation-realized-v4-022",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-022:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-b5bf7d119a0a39357ac2488f68f0a4fd3a4a0a4e58aa0ed7cc06cf69e159a3c0"
+    },
+    {
+      "ordinal": 23,
+      "rawIndex": 23,
+      "seed": "layout:augmentation-realized-v4-023",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-023:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-add5b593177b92378de7288876bd99ccf9fb251a58fe13d0db1675142036f142"
+    },
+    {
+      "ordinal": 24,
+      "rawIndex": 24,
+      "seed": "layout:augmentation-realized-v4-024",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-024:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-1ca79b69ca304f2b84f91c7875005f56e2d0b82a9d4ca67d29f1ed0c222d1a53"
+    },
+    {
+      "ordinal": 25,
+      "rawIndex": 25,
+      "seed": "layout:augmentation-realized-v4-025",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-025:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-065d29c9eee38a68173eff13f3dc9968b39f86c72eaed9011f6fb091de57961e"
+    },
+    {
+      "ordinal": 26,
+      "rawIndex": 26,
+      "seed": "layout:augmentation-realized-v4-026",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-026:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-91c2828e1e2bbfb92d63c0f1bcbfecc96dd93851849489a4728fc16613d98789"
+    },
+    {
+      "ordinal": 27,
+      "rawIndex": 27,
+      "seed": "layout:augmentation-realized-v4-027",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-027:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-b5f01273735043fc5bb588ccb751fcbf2bc9b3423c380adbddf760af4e72ea84"
+    },
+    {
+      "ordinal": 28,
+      "rawIndex": 28,
+      "seed": "layout:augmentation-realized-v4-028",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-028:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-4f843830f5bcd174790a47517c3527dbc3937df1ae79c75a124edc550ed7ffad"
+    },
+    {
+      "ordinal": 29,
+      "rawIndex": 29,
+      "seed": "layout:augmentation-realized-v4-029",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-029:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-4094d39a07357795b026bc6d031d5a3fd2876fec0f50d475b68017b585ddedd9"
+    },
+    {
+      "ordinal": 30,
+      "rawIndex": 30,
+      "seed": "layout:augmentation-realized-v4-030",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-030:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-23dfd9d70e08533cb73035c9da36dcbcbb94e0b0fe6b5af6920b3bb712d051f6"
+    },
+    {
+      "ordinal": 31,
+      "rawIndex": 31,
+      "seed": "layout:augmentation-realized-v4-031",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-031:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-a659e5cdfdcdb418b934fe7c9b119ce209140cb334173c73a0df971c649aba11"
+    },
+    {
+      "ordinal": 32,
+      "rawIndex": 32,
+      "seed": "layout:augmentation-realized-v4-032",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-032:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-130cc6b49722c530499950987a4b6b2745232a2a661057de90a44dd446023505"
+    },
+    {
+      "ordinal": 33,
+      "rawIndex": 33,
+      "seed": "layout:augmentation-realized-v4-033",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-033:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-583d37dd36f79c9b3c7171a99214d4034eb910ba92003513d8f972fa3d8af414"
+    },
+    {
+      "ordinal": 34,
+      "rawIndex": 34,
+      "seed": "layout:augmentation-realized-v4-034",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-034:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-752789976a70a10e08eb85c37e8d392a803a06a06ca0c9e2d92fe09d0d2617e9"
+    },
+    {
+      "ordinal": 35,
+      "rawIndex": 35,
+      "seed": "layout:augmentation-realized-v4-035",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-035:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-b1f2a728ba5c89de7967a290551b31cc3c6032ba8c6d59bc970d9b4fcc3b1770"
+    },
+    {
+      "ordinal": 36,
+      "rawIndex": 36,
+      "seed": "layout:augmentation-realized-v4-036",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-036:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-c9c730065e6bfe650f18ccc5b91c1922ef67710facdbea9273ff0a3022b2313b"
+    },
+    {
+      "ordinal": 37,
+      "rawIndex": 37,
+      "seed": "layout:augmentation-realized-v4-037",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-037:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-80e837b3351d397dee69a75c933608de608589a37a27e4b570184a4e9049a296"
+    },
+    {
+      "ordinal": 38,
+      "rawIndex": 38,
+      "seed": "layout:augmentation-realized-v4-038",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-038:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-e01864a7cd46dcd0ebb3f7a754529682a670c6cef64636fbd7e92a6c2f9faa9d"
+    },
+    {
+      "ordinal": 39,
+      "rawIndex": 39,
+      "seed": "layout:augmentation-realized-v4-039",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-039:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-70f39d7d4223472b377acfe69719f8cf19bf070255b1e7948ce54eae5061bdf0"
+    },
+    {
+      "ordinal": 40,
+      "rawIndex": 40,
+      "seed": "layout:augmentation-realized-v4-040",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-040:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-00354dedd650605a0eb2b98bc1cc94b98120ec60015128a23180ae35398616f9"
+    },
+    {
+      "ordinal": 41,
+      "rawIndex": 41,
+      "seed": "layout:augmentation-realized-v4-041",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-041:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-c0ac6b82994864fabd024b264dd6bb260ccbbc3fae8dc27f60ff0f9c4ded8666"
+    },
+    {
+      "ordinal": 42,
+      "rawIndex": 42,
+      "seed": "layout:augmentation-realized-v4-042",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-042:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-00437614e3a35623f3e8016e7cadf9b5dd4017252a79708ba55d16dbc0a91b6f"
+    },
+    {
+      "ordinal": 43,
+      "rawIndex": 43,
+      "seed": "layout:augmentation-realized-v4-043",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-043:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-cf18e3a53a36288cf0bcbbb610d66123023c431d3a6c66620de8c9c7fcf4a8c3"
+    },
+    {
+      "ordinal": 44,
+      "rawIndex": 44,
+      "seed": "layout:augmentation-realized-v4-044",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-044:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-03e836c68ffdaeb0d9180ccf6742b7ba9b3daee820a4584e20bbcbea41e9b2f0"
+    },
+    {
+      "ordinal": 45,
+      "rawIndex": 45,
+      "seed": "layout:augmentation-realized-v4-045",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-045:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-44dff8473988012d4782071e837d295df3b32f17551559a02d4144c4274dd663"
+    },
+    {
+      "ordinal": 46,
+      "rawIndex": 46,
+      "seed": "layout:augmentation-realized-v4-046",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-046:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-0c778811a168acaaeb49e972c0b294c809a2e2a11ddf55c1909a271c65c8fcbd"
+    },
+    {
+      "ordinal": 47,
+      "rawIndex": 47,
+      "seed": "layout:augmentation-realized-v4-047",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-047:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-07986009522e8953979737275b6d6308c6617defcf970ceec10808047c9a8907"
+    },
+    {
+      "ordinal": 48,
+      "rawIndex": 48,
+      "seed": "layout:augmentation-realized-v4-048",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-048:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-7aa884d066b8e815a1f53dd1edd1f4a39c7e059b63514fc4e1b46668df0c58fe"
+    },
+    {
+      "ordinal": 49,
+      "rawIndex": 49,
+      "seed": "layout:augmentation-realized-v4-049",
+      "basePlanHash": "v1:layout:augmentation-realized-v4-049:depth:1:revolvingFusillade",
+      "parentWitnessHash": "sha256-49540f0d27a8a4b540beb52f39708bb87cf63031a64123402e6b01ad6a77cdbe"
+    }
+  ],
+  "records": [],
+  "skippedParentSeeds": [],
+  "failure": {
+    "errorName": "Error",
+    "message": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "currentOrdinal": 0,
+    "currentSeed": "layout:augmentation-realized-v4-000",
+    "timedOut": true,
+    "timeoutMs": 180000,
+    "workerEvidenceHash": null
+  },
+  "evidenceHash": "sha256-153e39e94a49eb294619a7a96639f2d380bde3382b2d95aa277b1993058d3f64"
+}

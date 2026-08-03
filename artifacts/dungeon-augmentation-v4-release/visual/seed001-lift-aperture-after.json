@@ -1,0 +1,31 @@
+{
+  "schema": "ruindivex-dungeon-augmentation-focused-visual-check/v1",
+  "capturedAt": "2026-08-02T17:36:47.9722802-04:00",
+  "formalVisualReceipt": false,
+  "scope": "focused developer-camera verification of automatic-lift boarding apertures",
+  "seed": "layout:augmentation-realized-v4-001",
+  "url": "http://127.0.0.1:5174/?startupWorld=dungeon&dungeonFamily=industrial-v1&busterLab=sandbox&playerInvulnerable=1&dungeonSeed=augmentation-realized-v4-001&reaverbotSeed=augmentation-realized-v4-001&dungeonAugmentation=industrial-supplement-preview-v4&dungeonAugmentationFresh=1",
+  "augmentationStatus": "applied",
+  "augmentationPlanHash": "v1-302ed26c9f2bc8dfdf8f598c28ac53c9",
+  "effectivePlanHash": "v1-4a48156df773fb747768ce9e95cb6f8a",
+  "releaseValidationAccepted": true,
+  "releaseValidationErrorCount": 0,
+  "liftId": "trapRoom_conveyorRoom_ground:lift",
+  "screenshot": "seed001-lift-aperture-after.png",
+  "formerBlockingFacadeIds": [
+    "v:-1:0:3.5:60:62:-14.00:4.20",
+    "v:1:0:-0.5:60:62:0.00:8.40"
+  ],
+  "formerBlockingFacadeIdsPresent": [],
+  "allSixBoardingEdgesDeclared": true,
+  "allSixBoardingEdgesClear": true,
+  "boardingEdges": [
+    { "floorKey": "4,60@y-14.000", "edge": "-1,0", "blockingWallIds": [] },
+    { "floorKey": "4,61@y-14.000", "edge": "-1,0", "blockingWallIds": [] },
+    { "floorKey": "4,62@y-14.000", "edge": "-1,0", "blockingWallIds": [] },
+    { "floorKey": "-1,60@y0.000", "edge": "1,0", "blockingWallIds": [] },
+    { "floorKey": "-1,61@y0.000", "edge": "1,0", "blockingWallIds": [] },
+    { "floorKey": "-1,62@y0.000", "edge": "1,0", "blockingWallIds": [] }
+  ],
+  "temporaryCameraStateRestored": true
+}

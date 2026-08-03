@@ -541,6 +541,104 @@ test('all 28 authored blueprints retain their exact plan footprints and floor ma
   }
 });
 
+test('required encounter flanks and observation log targets use legal authored floor cells', () => {
+  const foundry = resolveIndustrialSupplementBlueprint('ind-room-reaverbot-foundry-01');
+  const ladder = resolveIndustrialSupplementBlueprint('ind-room-ladder-defense-rise-01');
+  const observation = resolveIndustrialSupplementBlueprint('ind-room-observation-break-01');
+  const foundryFlank = foundry.features.find(({ id }) => id === 'rf-flank-e');
+  const foundryWestFlank = foundry.features.find(({ id }) => id === 'rf-flank-w');
+  const ladderFlank = ladder.features.find(({ id }) => id === 'ldr-flank');
+  const observationLog = observation.features.find(({ id }) => id === 'ob-lore');
+
+  assert.deepEqual(
+    { x: foundryFlank.x, z: foundryFlank.z, tier: foundryFlank.tier },
+    { x: 1, z: -2, tier: 'base' },
+  );
+  assert.ok(foundry.routes.some((route) => (
+    route.tier === 'base'
+      && route.points.some((point, index) => {
+        const next = route.points[index + 1];
+        return next
+          && point[0] === 3
+          && next[0] === 3
+          && Math.min(point[1], next[1]) <= foundryFlank.z
+          && Math.max(point[1], next[1]) >= foundryFlank.z
+          && Math.abs(point[0] - foundryFlank.x) === 2;
+      })
+  )), 'east flank remains beside the authored base bypass');
+  assert.deepEqual(
+    { x: foundryWestFlank.x, z: foundryWestFlank.z },
+    { x: -4, z: 0 },
+  );
+  assert.deepEqual(
+    { x: ladderFlank.x, z: ladderFlank.z, tier: ladderFlank.tier },
+    { x: -1, z: 3, tier: 'base' },
+  );
+  assert.deepEqual(
+    { x: observationLog.x, z: observationLog.z },
+    { x: -3, z: 0 },
+  );
+});
+
+test('static authored solids stay outside every exact socket threshold and interior approach', () => {
+  const blocked = [];
+  for (const blueprint of INDUSTRIAL_SUPPLEMENT_BLUEPRINT_LIST) {
+    const halfWidth = (blueprint.dimensionsTiles.width - 1) * 0.5;
+    const halfDepth = (blueprint.dimensionsTiles.depth - 1) * 0.5;
+    const staticSolids = blueprint.features.filter((feature) => (
+      feature.solid === true && ['cover', 'machine'].includes(feature.type)
+    ));
+    for (const socket of blueprint.sockets) {
+      for (const lane of [-1, 0, 1]) {
+        for (const depth of [0, 1, 2]) {
+          const localTile = socket.side === 'N'
+            ? { x: socket.center + lane, z: -halfDepth + depth }
+            : socket.side === 'S'
+              ? { x: socket.center + lane, z: halfDepth - depth }
+              : socket.side === 'W'
+                ? { x: -halfWidth + depth, z: socket.center + lane }
+                : { x: halfWidth - depth, z: socket.center + lane };
+          for (const feature of staticSolids) {
+            const minimumX = feature.x - (Number(feature.w ?? 1) - 1) * 0.5;
+            const minimumZ = feature.z - (Number(feature.d ?? 1) - 1) * 0.5;
+            const xOrdinal = localTile.x - minimumX;
+            const zOrdinal = localTile.z - minimumZ;
+            if (Number.isInteger(xOrdinal)
+              && xOrdinal >= 0
+              && xOrdinal < Number(feature.w ?? 1)
+              && Number.isInteger(zOrdinal)
+              && zOrdinal >= 0
+              && zOrdinal < Number(feature.d ?? 1)) {
+              blocked.push({
+                blueprintId: blueprint.id,
+                socketId: socket.id,
+                featureId: feature.id,
+                localTile,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.deepEqual(blocked, []);
+
+  const ladder = resolveIndustrialSupplementBlueprint('ind-room-ladder-defense-rise-01');
+  const floodgate = resolveIndustrialSupplementBlueprint('ind-room-floodgate-descent-01');
+  assert.deepEqual(
+    (({ x, z, w, d }) => ({ x, z, w, d }))(
+      ladder.features.find(({ id }) => id === 'ldr-cover-east'),
+    ),
+    { x: 2, z: 3, w: 1, d: 1 },
+  );
+  assert.deepEqual(
+    (({ x, z, w, d }) => ({ x, z, w, d }))(
+      floodgate.features.find(({ id }) => id === 'fd-gate'),
+    ),
+    { x: 2, z: 1, w: 1, d: 3 },
+  );
+});
+
 test('the three required junction kits retain their specified exact footprints and active arms', () => {
   const throughT = resolveIndustrialSupplementBlueprint('ind-junction-through-t-01');
   assert.deepEqual(footprintOf(throughT), { width: 5, depth: 7 });

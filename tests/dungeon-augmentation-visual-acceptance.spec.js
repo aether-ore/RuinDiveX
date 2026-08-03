@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { PLAYER_TRAVERSAL_ENVELOPE } from '../src/TraversalCapabilities.js';
 
 const PROFILE_ID = 'industrial-supplement-preview-v4';
 const PROFILE_REVISION = 5;
@@ -76,7 +77,7 @@ async function waitForDungeonPresentationAssets(page, timeout = 30_000) {
 }
 
 async function installVisualAcceptanceHarness(page) {
-  await page.evaluate(() => {
+  await page.evaluate((traversalEnvelope) => {
     const game = window.game;
     const dungeon = game?.dungeon;
     if (!game || !dungeon?.group || !game.camera || !game.renderer) {
@@ -350,6 +351,45 @@ async function installVisualAcceptanceHarness(page) {
         worldPosition: plainVector(root.getWorldPosition(new Vector3())),
       }));
       const boundaryWallRuns = dungeon.augmentationPhysicalShell?.boundaryWallRuns ?? [];
+      const boundaryWallMeshes = collect(dungeon.group, (object) => (
+        object.isMesh === true && object.name === 'dungeonBoundaryWall'
+      )).map((mesh) => {
+        mesh.geometry?.computeBoundingBox?.();
+        const bounds = mesh.geometry?.boundingBox?.clone?.();
+        bounds?.applyMatrix4?.(mesh.matrixWorld);
+        return {
+          facadeId: String(mesh.userData?.wallRun?.facadeId ?? mesh.uuid),
+          bounds: bounds ? {
+            minX: Number(bounds.min.x),
+            maxX: Number(bounds.max.x),
+            minY: Number(bounds.min.y),
+            maxY: Number(bounds.max.y),
+            minZ: Number(bounds.min.z),
+            maxZ: Number(bounds.max.z),
+          } : null,
+        };
+      }).filter(({ bounds }) => bounds);
+      const boundaryCollisionZones = (dungeon.aerialBoundaryZones ?? [])
+        .filter(({ obstacleKind }) => obstacleKind === 'boundaryWall')
+        .map((zone) => ({
+          id: String(zone.id ?? zone.wallFacadeId ?? 'unknown'),
+          bounds: {
+            minX: Number(zone.position.x) - Number(zone.halfWidth),
+            maxX: Number(zone.position.x) + Number(zone.halfWidth),
+            minY: Number(zone.position.y) - Number(zone.verticalHalfHeight),
+            maxY: Number(zone.position.y) + Number(zone.verticalHalfHeight),
+            minZ: Number(zone.position.z) - Number(zone.halfDepth),
+            maxZ: Number(zone.position.z) + Number(zone.halfDepth),
+          },
+        }));
+      const boundsOverlap = (first, second) => (
+        first.maxX > second.minX + 0.001
+          && first.minX < second.maxX - 0.001
+          && first.maxY > second.minY + 0.001
+          && first.minY < second.maxY - 0.001
+          && first.maxZ > second.minZ + 0.001
+          && first.minZ < second.maxZ - 0.001
+      );
       const floorKeyFor = (floor) => String(
         floor?.floorKey
           ?? `${floor?.x},${floor?.z}@y${Number(floor?.elevation ?? 0).toFixed(3)}`,
@@ -385,9 +425,23 @@ async function installVisualAcceptanceHarness(page) {
                 edge: null,
                 missingFloor: true,
                 blockingWallIds: [],
+                blockingSceneWallIds: [],
+                blockingCollisionZoneIds: [],
               }];
               return (floor.connectorLiftBoardingOpenRetainingWallEdges ?? []).map((edge) => {
                 const [dx, dz] = String(edge).split(',').map(Number);
+                const centerX = (Number(floor.x) + dx * 0.5) * Number(dungeon.tileSize);
+                const centerZ = (Number(floor.z) + dz * 0.5) * Number(dungeon.tileSize);
+                const laneHalfWidth = Number(traversalEnvelope.collisionRadius);
+                const laneBounds = {
+                  minX: centerX - laneHalfWidth,
+                  maxX: centerX + laneHalfWidth,
+                  minY: Number(floor.elevation ?? 0) + 0.05,
+                  maxY: Number(floor.elevation ?? 0)
+                    + Number(traversalEnvelope.headClearance),
+                  minZ: centerZ - laneHalfWidth,
+                  maxZ: centerZ + laneHalfWidth,
+                };
                 return {
                   floorKey: floorKeyFor(floor),
                   edge: String(edge),
@@ -395,6 +449,14 @@ async function installVisualAcceptanceHarness(page) {
                   blockingWallIds: boundaryWallRuns
                     .filter((run) => runCoversFloorEdge(run, floor, dx, dz))
                     .map(({ facadeId, id }) => String(facadeId ?? id ?? 'unknown'))
+                    .sort((left, right) => left.localeCompare(right)),
+                  blockingSceneWallIds: boundaryWallMeshes
+                    .filter(({ bounds }) => boundsOverlap(bounds, laneBounds))
+                    .map(({ facadeId }) => facadeId)
+                    .sort((left, right) => left.localeCompare(right)),
+                  blockingCollisionZoneIds: boundaryCollisionZones
+                    .filter(({ bounds }) => boundsOverlap(bounds, laneBounds))
+                    .map(({ id }) => id)
                     .sort((left, right) => left.localeCompare(right)),
                 };
               });
@@ -612,6 +674,9 @@ async function installVisualAcceptanceHarness(page) {
       stageQuietCorridor,
       stagePresentation,
     };
+  }, {
+    collisionRadius: PLAYER_TRAVERSAL_ENVELOPE.collisionRadius,
+    headClearance: PLAYER_TRAVERSAL_ENVELOPE.headClearance,
   });
 }
 
@@ -714,6 +779,12 @@ for (const seed of SEEDS) {
       for (const { lanes } of lift.endpoints) {
         expect(lanes.every(({ edge, missingFloor }) => edge && !missingFloor)).toBe(true);
         expect(lanes.every(({ blockingWallIds }) => blockingWallIds.length === 0)).toBe(true);
+        expect(lanes.every(({ blockingSceneWallIds }) => (
+          blockingSceneWallIds.length === 0
+        ))).toBe(true);
+        expect(lanes.every(({ blockingCollisionZoneIds }) => (
+          blockingCollisionZoneIds.length === 0
+        ))).toBe(true);
       }
     }
 

@@ -10,6 +10,57 @@ import { createDungeonRouteEndpointSeam } from '../src/dungeon-augmentation/geom
 import { createRouteNetworkConflictEntitySignature } from '../src/dungeon-augmentation/index.js';
 
 const TILE_SIZE = 2.8;
+const V4_PROFILE_ID = 'industrial-supplement-preview-v4';
+
+function planarConnectorPlan({
+  id,
+  elevation = 0,
+  isDungeonSupplement = false,
+  level = 0,
+  localElevation = null,
+  z = 0,
+}) {
+  const path = Array.from({ length: 5 }, (_, x) => ({ x, z }));
+  return {
+    id,
+    level,
+    ...(Number.isFinite(localElevation) ? { localElevation } : {}),
+    elevation,
+    sourceElevation: elevation,
+    destinationElevation: elevation,
+    elevationDelta: 0,
+    direction: 'level',
+    isDungeonSupplement,
+    ...(isDungeonSupplement ? {
+      augmentationOperationType: 'routeNetwork',
+      augmentationOperationId: `${id}:operation`,
+      routeNetworkGrantId: `${id}:grant`,
+    } : {}),
+    fromRoomId: `${id}:from-room`,
+    toRoomId: `${id}:to-room`,
+    fromSocket: {
+      id: `${id}:from-socket`,
+      roomId: `${id}:from-room`,
+      x: 0,
+      z,
+      elevation,
+      facingX: 1,
+      facingZ: 0,
+    },
+    toSocket: {
+      id: `${id}:to-socket`,
+      roomId: `${id}:to-room`,
+      x: path.length - 1,
+      z,
+      elevation,
+      facingX: -1,
+      facingZ: 0,
+    },
+    bridgePath: path.map((point) => ({ ...point })),
+    fullPath: path.map((point) => ({ ...point })),
+    connectorVariantConstraints: { roomFootprints: [] },
+  };
+}
 
 function exactSocket({
   id,
@@ -188,6 +239,660 @@ function exactSegmentOverlayFixture(plan) {
   };
 }
 
+test('V4 planar service-lane helpers retain exact source-plan provenance without changing V1', () => {
+  const basePlan = planarConnectorPlan({
+    id: 'authored:test:lower-plan',
+    elevation: -14,
+  });
+  const supplementalPlan = planarConnectorPlan({
+    id: 'supplement:test:planar-helper',
+    isDungeonSupplement: true,
+  });
+  const v4Tiles = new Map();
+  const v4Generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+  v4Generator._stampConnectionPlans(v4Tiles, [supplementalPlan]);
+
+  v4Generator._addConnectorExplorationSpaces(
+    v4Tiles,
+    [],
+    [basePlan, supplementalPlan],
+  );
+
+  const helper = v4Tiles.get('2,1');
+  assert.ok(helper);
+  assert.equal(helper.connectorId, supplementalPlan.id);
+  assert.equal(helper.connectorZone, 'service_lane');
+  assert.deepEqual(helper.connectorPlanarHelperProvenance, {
+    schema: 'ruindivex-connector-planar-helper-provenance/v1',
+    kind: 'planar-connector-helper',
+    sourcePlanId: supplementalPlan.id,
+    sourcePlanLevel: 0,
+    gridX: 2,
+    gridZ: 1,
+    helperStampedLocalElevation: 0,
+    intendedSourceWorldElevation: 0,
+    intendedDestinationWorldElevation: 0,
+    connectorZone: 'service_lane',
+  });
+  const centerHelper = v4Tiles.get('2,0');
+  assert.equal(centerHelper.connectorId, supplementalPlan.id);
+  assert.deepEqual(centerHelper.connectorPlanarHelperProvenance, {
+    schema: 'ruindivex-connector-planar-helper-provenance/v1',
+    kind: 'planar-connector-helper',
+    sourcePlanId: supplementalPlan.id,
+    sourcePlanLevel: 0,
+    gridX: 2,
+    gridZ: 0,
+    helperStampedLocalElevation: 0,
+    intendedSourceWorldElevation: 0,
+    intendedDestinationWorldElevation: 0,
+    connectorZone: 'main_gallery',
+  });
+
+  const legacyTiles = new Map();
+  const legacyGenerator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  legacyGenerator._stampConnectionPlans(legacyTiles, [
+    planarConnectorPlan({
+      id: supplementalPlan.id,
+      isDungeonSupplement: true,
+    }),
+  ]);
+  legacyGenerator._addConnectorExplorationSpaces(
+    legacyTiles,
+    [],
+    [
+      planarConnectorPlan({ id: basePlan.id, elevation: -14 }),
+      planarConnectorPlan({
+        id: supplementalPlan.id,
+        isDungeonSupplement: true,
+      }),
+    ],
+  );
+  assert.equal(
+    Object.hasOwn(legacyTiles.get('2,1'), 'connectorPlanarHelperProvenance'),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(legacyTiles.get('2,0'), 'connectorPlanarHelperProvenance'),
+    false,
+  );
+});
+
+test('disjoint signed envelopes preserve a proven V4 helper across stacked floors', () => {
+  const supplementalPlan = planarConnectorPlan({
+    id: 'supplement:test:stacked-planar-helper',
+    isDungeonSupplement: true,
+  });
+  const tiles = new Map();
+  const generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+  generator._stampConnectionPlans(tiles, [supplementalPlan]);
+  generator._addConnectorExplorationSpaces(tiles, [], [supplementalPlan]);
+  const helper = tiles.get('2,0');
+  const lowerFloor = {
+    x: 2,
+    z: 0,
+    elevation: -14,
+    level: -1,
+    type: 'floor',
+    surface: 'floor',
+    roomId: 'authored:test:lower-room',
+  };
+  const upperPlan = planarConnectorPlan({
+    id: 'authored:test:upper-plan',
+    elevation: -9.95,
+    level: 1,
+    localElevation: 4.05,
+  });
+
+  const floorTiles = generator._applyConnectorTraversalSurfaces(
+    tiles,
+    [upperPlan],
+    [...tiles.values(), lowerFloor],
+  );
+  const floorsAtTarget = floorTiles
+    .filter((floor) => floor.x === 2 && floor.z === 0)
+    .sort((left, right) => left.elevation - right.elevation);
+
+  assert.deepEqual(floorsAtTarget.map((floor) => floor.elevation), [-14, -9.95, 0]);
+  assert.equal(tiles.get('2,0'), helper);
+  assert.equal(helper.connectorId, supplementalPlan.id);
+  assert.equal(helper.connectionId, undefined);
+  assert.equal(helper.structuralEnvelopeOnly, false);
+  assert.deepEqual(helper.connectorEnvelopeOwnerIds, [upperPlan.id]);
+  assert.equal(
+    helper.connectorPlanarHelperProvenance.sourcePlanId,
+    supplementalPlan.id,
+  );
+  const upperFloor = floorsAtTarget.find((floor) => floor.elevation === -9.95);
+  assert.equal(upperFloor.signedConnectorFloorOwnerId, upperPlan.id);
+  assert.equal(lowerFloor.roomId, 'authored:test:lower-room');
+});
+
+test('a signed plan consumes and rekeys only its own exact V4 planar helper', () => {
+  const upperPlan = planarConnectorPlan({
+    id: 'authored:test:rekeyed-upper-plan',
+    elevation: -9.95,
+  });
+  const tiles = new Map();
+  const generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+  generator._addConnectorExplorationSpaces(tiles, [], [upperPlan]);
+  const helper = tiles.get('2,1');
+  assert.equal(helper.elevation, 0);
+  assert.equal(helper.connectorPlanarHelperProvenance.sourcePlanId, upperPlan.id);
+
+  const floorTiles = generator._applyConnectorTraversalSurfaces(
+    tiles,
+    [upperPlan],
+    [...tiles.values()],
+  );
+
+  assert.equal(tiles.get('2,1'), helper);
+  assert.equal(helper.elevation, -9.95);
+  assert.equal(helper.signedConnectorFloorOwnerId, upperPlan.id);
+  assert.equal(Object.hasOwn(helper, 'connectorPlanarHelperProvenance'), false);
+  assert.equal(floorTiles.some((floor) => (
+    floor.x === 2 && floor.z === 1 && Math.abs(floor.elevation) <= 0.05
+  )), false);
+});
+
+test('supplemental traversal reuses an already seam-stamped planar helper identity', () => {
+  const plan = planarConnectorPlan({
+    id: 'supplement:test:seam-stamped-planar-helper',
+    isDungeonSupplement: true,
+  });
+  const tiles = new Map();
+  const generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+  generator._stampConnectionPlans(tiles, [plan]);
+  generator._addConnectorExplorationSpaces(tiles, [], [plan]);
+  const helper = tiles.get('2,0');
+  const seamId = `${plan.id}:to-endpoint-seam`;
+  const seamCellId = `${seamId}:cell:1:0`;
+  helper.signedConnectorFloorOwnerId = plan.id;
+  helper.authoritativeSocketSeamIds = [seamId];
+  helper.authoritativeSocketSeamCellIds = [seamCellId];
+  helper.authoritativeSocketSeamOwnerIds = [plan.id];
+
+  const floorTiles = generator._applyConnectorTraversalSurfaces(
+    tiles,
+    [plan],
+    [...tiles.values()],
+  );
+  const realizedAtTarget = floorTiles.filter((floor) => (
+    floor.x === helper.x
+      && floor.z === helper.z
+      && Math.abs(Number(floor.elevation) - Number(helper.elevation)) <= 0.05
+  ));
+
+  assert.deepEqual(realizedAtTarget, [helper]);
+  assert.deepEqual(helper.authoritativeSocketSeamIds, [seamId]);
+  assert.deepEqual(helper.authoritativeSocketSeamCellIds, [seamCellId]);
+  assert.deepEqual(helper.authoritativeSocketSeamOwnerIds, [plan.id]);
+  assert.equal(Object.hasOwn(helper, 'connectorPlanarHelperProvenance'), false);
+});
+
+test('V4 supplemental traversal safely shares a flat authored connector crossing', () => {
+  const authoredPlan = planarConnectorPlan({ id: 'authored:test:crossing-route' });
+  authoredPlan.bridgePath = [];
+  authoredPlan.fullPath = [];
+  const supplementalPlan = planarConnectorPlan({
+    id: 'supplement:test:crossing-route',
+    isDungeonSupplement: true,
+  });
+  const crossingFloor = {
+    x: 2,
+    z: 0,
+    elevation: 0,
+    level: 0,
+    type: 'hallway',
+    surface: 'connectorGalleryFloor',
+    connectorId: authoredPlan.id,
+    connectionId: authoredPlan.id,
+  };
+  const tiles = new Map([['2,0', crossingFloor]]);
+  const generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+
+  const floorTiles = generator._applyConnectorTraversalSurfaces(
+    tiles,
+    // Production V4 realizes accepted authored connectors first, then invokes
+    // this pass with only supplemental plans. The existing floor identity is
+    // therefore the authoritative witness for the authored crossing.
+    [supplementalPlan],
+    [crossingFloor],
+  );
+
+  assert.equal(floorTiles.find((floor) => floor.x === 2 && floor.z === 0), crossingFloor);
+  assert.equal(crossingFloor.connectorId, authoredPlan.id);
+  assert.equal(crossingFloor.connectionId, authoredPlan.id);
+  assert.deepEqual(crossingFloor.sharedConnectorFloorOwnerIds, [supplementalPlan.id]);
+  assert.deepEqual(crossingFloor.v4SupplementalRouteOwnerIds, [supplementalPlan.id]);
+  assert.equal(crossingFloor.walkabilityIntent, 'required-clear');
+  assert.equal(crossingFloor.noEnemySpawn, true);
+  assert.deepEqual(crossingFloor.connectorEnvelopeOwnerIds, [supplementalPlan.id]);
+  assert.equal(supplementalPlan.localConnectorCrossingCutThroughs.length, 1);
+  assert.deepEqual(
+    crossingFloor.localConnectorCrossingCutThroughIds,
+    [supplementalPlan.localConnectorCrossingCutThroughs[0].id],
+  );
+  assert.equal(
+    supplementalPlan.localConnectorCrossingCutThroughs[0].retainedPrimaryOwnerId,
+    authoredPlan.id,
+  );
+});
+
+test('V4 supplemental crossing salvage rejects ramp and transfer surfaces', async (t) => {
+  for (const [name, unsafeFields] of [
+    ['ramp', {
+      surface: 'industrialRamp',
+      rampStartElevation: 0,
+      rampEndElevation: 1,
+    }],
+    ['transfer', {
+      augmentationTransferId: 'supplement:test:transfer',
+    }],
+  ]) {
+    await t.test(name, () => {
+      const authoredPlan = planarConnectorPlan({ id: `authored:test:${name}-route` });
+      authoredPlan.bridgePath = [];
+      authoredPlan.fullPath = [];
+      const supplementalPlan = planarConnectorPlan({
+        id: `supplement:test:${name}-route`,
+        isDungeonSupplement: true,
+      });
+      const crossingFloor = {
+        x: 2,
+        z: 0,
+        elevation: 0,
+        level: 0,
+        type: 'hallway',
+        surface: 'connectorGalleryFloor',
+        connectorId: authoredPlan.id,
+        connectionId: authoredPlan.id,
+        ...unsafeFields,
+      };
+      const generator = new DungeonGenerator({
+        tileSize: TILE_SIZE,
+        random: () => 0.5,
+        augmentationProfileId: V4_PROFILE_ID,
+      });
+
+      assert.throws(
+        () => generator._applyConnectorTraversalSurfaces(
+          new Map([['2,0', crossingFloor]]),
+          [authoredPlan, supplementalPlan],
+          [crossingFloor],
+        ),
+        (error) => error?.code === 'DUNGEON_AUGMENTATION_FOREIGN_FLOOR_OWNERSHIP',
+      );
+      assert.equal(crossingFloor.localConnectorCrossingCutThroughIds, undefined);
+    });
+  }
+});
+
+test('V4 authored traversal clears only a leaked supplemental room label outside declared cells', () => {
+  const generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+  const authoredPlan = planarConnectorPlan({ id: 'authored:test:room-cut-through' });
+  const leakedRoomId = 'supplement:test:room-outside-declared-floor';
+  const crossingFloor = {
+    x: 2,
+    z: 0,
+    elevation: 0,
+    level: 0,
+    type: 'floor',
+    surface: 'floor',
+    roomId: leakedRoomId,
+    augmentationOwnerId: 'supplement:test:operation',
+    augmentationBlueprintId: 'ind-room-test-01',
+    augmentationModuleTemplateId: 'ind-room-test-01',
+    augmentationModuleKind: 'room',
+  };
+
+  const floorTiles = generator._applyConnectorTraversalSurfaces(
+    new Map([['2,0', crossingFloor]]),
+    [authoredPlan],
+    [crossingFloor],
+  );
+
+  assert.equal(floorTiles.includes(crossingFloor), true);
+  assert.equal(crossingFloor.roomId, undefined);
+  assert.equal(crossingFloor.augmentationBlueprintId, undefined);
+  assert.equal(crossingFloor.connectorId, authoredPlan.id);
+  assert.equal(crossingFloor.connectionId, authoredPlan.id);
+  assert.equal(crossingFloor.surface, 'connectorGalleryFloor');
+  assert.equal(crossingFloor.walkabilityIntent, 'required-clear');
+  assert.equal(authoredPlan.localSupplementRoomCutThroughs.length, 1);
+  assert.equal(
+    authoredPlan.localSupplementRoomCutThroughs[0].removedRoomId,
+    leakedRoomId,
+  );
+  assert.deepEqual(
+    crossingFloor.localSupplementRoomCutThroughIds,
+    [authoredPlan.localSupplementRoomCutThroughs[0].id],
+  );
+});
+
+test('V4 authored traversal never cuts an authoritative supplemental room or transfer cell', async (t) => {
+  for (const [name, protectedFields] of [
+    ['floor-cell', {
+      augmentationFloorCellId: 'supplement:test:floor-cell',
+      augmentationFloorTierId: 'base',
+    }],
+    ['transfer-cell', {
+      augmentationTransferId: 'supplement:test:lift',
+      augmentationTransferCellId: 'supplement:test:lift-cell',
+    }],
+  ]) {
+    await t.test(name, () => {
+      const generator = new DungeonGenerator({
+        tileSize: TILE_SIZE,
+        random: () => 0.5,
+        augmentationProfileId: V4_PROFILE_ID,
+      });
+      const authoredPlan = planarConnectorPlan({ id: `authored:test:protected-${name}` });
+      const protectedFloor = {
+        x: 2,
+        z: 0,
+        elevation: 0,
+        level: 0,
+        type: 'floor',
+        surface: 'floor',
+        roomId: `supplement:test:protected-${name}-room`,
+        augmentationBlueprintId: 'ind-room-test-01',
+        ...protectedFields,
+      };
+
+      generator._applyConnectorTraversalSurfaces(
+        new Map([['2,0', protectedFloor]]),
+        [authoredPlan],
+        [protectedFloor],
+      );
+
+      assert.equal(protectedFloor.roomId, `supplement:test:protected-${name}-room`);
+      assert.equal(protectedFloor.localSupplementRoomCutThroughIds, undefined);
+      assert.deepEqual(authoredPlan.localSupplementRoomCutThroughs, []);
+    });
+  }
+});
+
+test('V4 late room cleanup keeps authored connector geometry and clears only stale room ownership', () => {
+  const generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+  const roomId = 'supplement:test:late-room-cut-through';
+  const authoredPlan = planarConnectorPlan({
+    id: 'authored:test:upper-room-cut-through',
+    elevation: 4.05,
+    level: 1,
+  });
+  const room = {
+    id: roomId,
+    isDungeonSupplement: true,
+    augmentationFloorTiers: [{
+      id: 'base',
+      authoritative: true,
+      worldElevation: 0,
+      worldCells: [{
+        id: `${roomId}:floor-tier:base:cell:0:0`,
+        grid: { x: 29, z: 107 },
+        elevation: 0,
+      }],
+    }],
+    augmentationTransfers: [],
+  };
+  const declaredFloor = {
+    x: 29,
+    z: 107,
+    elevation: 0,
+    roomId,
+    augmentationFloorCellId: `${roomId}:floor-tier:base:cell:0:0`,
+  };
+  const leakedUpperFloor = {
+    x: 29,
+    z: 107,
+    elevation: 4.05,
+    level: 1,
+    type: 'floor',
+    surface: 'upperConnectionBridge',
+    roomId,
+    connectionId: authoredPlan.id,
+    augmentationFloorCellId: `${roomId}:stale-cell`,
+    augmentationFloorTierId: 'base',
+    augmentationFloorTierRuntimeId: `${roomId}:floor-tier:base`,
+    mergedFloorOwnerIds: [authoredPlan.id, roomId],
+  };
+
+  const result = generator._clearLeakedSupplementRoomOwnershipFromAuthoredFloors(
+    [declaredFloor, leakedUpperFloor],
+    [room],
+    [authoredPlan],
+  );
+
+  assert.equal(result.diagnostics.clearedFloorCount, 1);
+  assert.equal(declaredFloor.roomId, roomId);
+  assert.equal(declaredFloor.augmentationFloorCellId, `${roomId}:floor-tier:base:cell:0:0`);
+  assert.equal(leakedUpperFloor.roomId, undefined);
+  assert.equal(leakedUpperFloor.augmentationFloorCellId, undefined);
+  assert.equal(leakedUpperFloor.augmentationFloorTierId, undefined);
+  assert.equal(leakedUpperFloor.connectionId, authoredPlan.id);
+  assert.equal(leakedUpperFloor.surface, 'upperConnectionBridge');
+  assert.deepEqual(leakedUpperFloor.mergedFloorOwnerIds, [authoredPlan.id]);
+  assert.equal(leakedUpperFloor.walkabilityIntent, 'required-clear');
+  assert.deepEqual(
+    leakedUpperFloor.localSupplementRoomCutThroughIds,
+    [result.diagnostics.records[0].id],
+  );
+});
+
+test('V4 late room cleanup removes a stale wrong-elevation duplicate only with its signed replacement', () => {
+  const generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+  const roomId = 'supplement:test:stale-upper-duplicate';
+  const authoredPlan = planarConnectorPlan({
+    id: 'authored:test:shifted-upper-route',
+    elevation: -9.95,
+    level: 1,
+    localElevation: 4.05,
+  });
+  const room = {
+    id: roomId,
+    isDungeonSupplement: true,
+    augmentationFloorTiers: [{
+      id: 'base',
+      authoritative: true,
+      worldElevation: 0,
+      worldCells: [{ id: `${roomId}:base`, grid: { x: 29, z: 107 }, elevation: 0 }],
+    }],
+    augmentationTransfers: [],
+  };
+  const staleFloor = {
+    x: 29,
+    z: 107,
+    elevation: 4.05,
+    level: 1,
+    type: 'floor',
+    surface: 'upperConnectionBridge',
+    roomId,
+    connectionId: authoredPlan.id,
+    mergedFloorOwnerIds: [authoredPlan.id, roomId],
+  };
+  const retainedFloor = {
+    x: 29,
+    z: 107,
+    elevation: -9.95,
+    type: 'hallway',
+    surface: 'connectorGalleryFloor',
+    connectorId: authoredPlan.id,
+    connectionId: authoredPlan.id,
+    signedConnectorFloorOwnerId: authoredPlan.id,
+  };
+  const tiles = new Map([['29,107', staleFloor]]);
+
+  const result = generator._clearLeakedSupplementRoomOwnershipFromAuthoredFloors(
+    [staleFloor, retainedFloor],
+    [room],
+    [authoredPlan],
+    tiles,
+  );
+
+  assert.deepEqual(result.floorTiles, [retainedFloor]);
+  assert.equal(result.diagnostics.clearedFloorCount, 1);
+  assert.equal(result.diagnostics.clearedOwnershipFloorCount, 0);
+  assert.equal(result.diagnostics.removedStaleFloorCount, 1);
+  assert.equal(
+    result.diagnostics.records[0].action,
+    'remove-stale-room-owned-connector-floor',
+  );
+  assert.equal(result.diagnostics.records[0].floorKey, '29,107@y4.050');
+  assert.equal(result.diagnostics.records[0].retainedFloorKey, '29,107@y-9.950');
+  assert.deepEqual(
+    retainedFloor.localSupplementRoomCutThroughIds,
+    [result.diagnostics.records[0].id],
+  );
+  assert.equal(tiles.has('29,107'), false);
+});
+
+test('V4 late room cleanup preserves vertical connector and exact seam floors', async (t) => {
+  const roomId = 'supplement:test:late-room-protection';
+  const room = {
+    id: roomId,
+    isDungeonSupplement: true,
+    augmentationFloorTiers: [{
+      id: 'base',
+      authoritative: true,
+      worldElevation: 0,
+      worldCells: [{ id: `${roomId}:base`, grid: { x: 0, z: 0 }, elevation: 0 }],
+    }],
+    augmentationTransfers: [],
+  };
+  await t.test('vertical authored connector', () => {
+    const generator = new DungeonGenerator({
+      tileSize: TILE_SIZE,
+      random: () => 0.5,
+      augmentationProfileId: V4_PROFILE_ID,
+    });
+    const verticalPlan = planarConnectorPlan({
+      id: 'authored:test:vertical-room-protection',
+      elevation: 0,
+    });
+    verticalPlan.destinationElevation = 4.05;
+    verticalPlan.connectorVariant = { traversalKind: 'lift' };
+    const floor = {
+      x: 5,
+      z: 5,
+      elevation: 4.05,
+      roomId,
+      connectionId: verticalPlan.id,
+      surface: 'liftLanding',
+    };
+    const result = generator._clearLeakedSupplementRoomOwnershipFromAuthoredFloors(
+      [floor],
+      [room],
+      [verticalPlan],
+    );
+    assert.equal(result.diagnostics.clearedFloorCount, 0);
+    assert.equal(floor.roomId, roomId);
+  });
+
+  await t.test('exact supplemental seam', () => {
+    const generator = new DungeonGenerator({
+      tileSize: TILE_SIZE,
+      random: () => 0.5,
+      augmentationProfileId: V4_PROFILE_ID,
+    });
+    const authoredPlan = planarConnectorPlan({
+      id: 'authored:test:seam-room-protection',
+      elevation: 4.05,
+    });
+    const supplementalPlan = planarConnectorPlan({
+      id: 'supplement:test:seam-room-protection',
+      elevation: 4.05,
+      isDungeonSupplement: true,
+    });
+    supplementalPlan.fromRoomId = roomId;
+    supplementalPlan.endpointSeams = [{
+      id: `${supplementalPlan.id}:from-endpoint-seam`,
+      nodeId: roomId,
+      orderedCells: [{ gridX: 5, gridZ: 5, elevation: 4.05 }],
+    }];
+    const floor = {
+      x: 5,
+      z: 5,
+      elevation: 4.05,
+      roomId,
+      connectionId: authoredPlan.id,
+      surface: 'upperConnectionBridge',
+    };
+    const result = generator._clearLeakedSupplementRoomOwnershipFromAuthoredFloors(
+      [floor],
+      [room],
+      [authoredPlan, supplementalPlan],
+    );
+    assert.equal(result.diagnostics.clearedFloorCount, 0);
+    assert.equal(floor.roomId, roomId);
+  });
+});
+
+test('malformed V4 planar-helper provenance cannot preserve foreign physical ownership', () => {
+  const supplementalPlan = planarConnectorPlan({
+    id: 'supplement:test:malformed-planar-helper',
+    isDungeonSupplement: true,
+  });
+  const tiles = new Map();
+  const generator = new DungeonGenerator({
+    tileSize: TILE_SIZE,
+    random: () => 0.5,
+    augmentationProfileId: V4_PROFILE_ID,
+  });
+  generator._addConnectorExplorationSpaces(tiles, [], [supplementalPlan]);
+  const helper = tiles.get('2,1');
+  helper.connectorPlanarHelperProvenance.gridX = 99;
+  const upperPlan = planarConnectorPlan({
+    id: 'authored:test:malformed-upper-plan',
+    elevation: -9.95,
+    level: 1,
+    localElevation: 4.05,
+  });
+
+  generator._applyConnectorTraversalSurfaces(
+    tiles,
+    [upperPlan],
+    [...tiles.values()],
+  );
+
+  assert.equal(helper.connectorId, upperPlan.id);
+  assert.equal(helper.connectionId, upperPlan.id);
+  assert.equal(helper.connectorEnvelopeOwnerIds, undefined);
+  assert.equal(Object.hasOwn(helper, 'connectorPlanarHelperProvenance'), false);
+});
+
 test('generator realizes a corridor-station seam against its authored parent owner', () => {
   const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
   const fixture = corridorStationFixture();
@@ -278,6 +983,75 @@ test('generator rejects a foreign physical owner even inside an exact corridor-s
     ),
     (error) => error?.code === 'DUNGEON_AUGMENTATION_ENDPOINT_OVERLAP_OUTSIDE_SEAM',
   );
+});
+
+test('generator locally shares an exact seam floor owned by another V4 supplement module', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  const fixture = corridorStationFixture();
+  const modularOwnerId = 'supplement:test:foreign-modular-route';
+  fixture.floorTiles[0].signedConnectorFloorOwnerId = modularOwnerId;
+
+  const result = generator._realizeAuthoritativeSupplementSocketSeams(
+    new Map(),
+    fixture.floorTiles,
+    [fixture.plan],
+  );
+
+  assert.equal(result.seamCount, 2);
+  assert.equal(result.cutThroughCount, 1);
+  assert.deepEqual(result.cutThroughs, [{
+    schema: 'ruindivex-dungeon-route-endpoint-seam-cut-through/v1',
+    id: `${fixture.fromSeam.id}:cut-through:${fixture.fromSeam.orderedCells[0].id}`,
+    connectionId: fixture.plan.id,
+    operationId: fixture.plan.augmentationOperationId,
+    seamId: fixture.fromSeam.id,
+    cellId: fixture.fromSeam.orderedCells[0].id,
+    floorKey: fixture.floorTiles[0].floorKey,
+    action: 'reuse-shared-supplement-floor',
+    retainedOwnerIds: [modularOwnerId],
+    requiredClear: true,
+  }]);
+  assert.ok(fixture.floorTiles[0].sharedConnectorFloorOwnerIds.includes(modularOwnerId));
+  assert.ok(fixture.floorTiles[0].sharedConnectorFloorOwnerIds.includes(fixture.plan.id));
+  assert.equal(fixture.floorTiles[0].walkabilityIntent, 'required-clear');
+  assert.deepEqual(
+    fixture.plan.authoritativeSocketSeamCutThroughs,
+    result.cutThroughs,
+  );
+});
+
+test('generator fills only a missing supplemental-node seam interior as a local cut-through', () => {
+  const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
+  const fixture = corridorStationFixture();
+  const missingCell = fixture.toSeam.orderedCells.find(({ signedDepthTiles }) => (
+    signedDepthTiles < 0
+  ));
+  fixture.floorTiles = fixture.floorTiles.filter((floor) => !(
+    floor.x === missingCell.gridX
+      && floor.z === missingCell.gridZ
+      && Math.abs(Number(floor.elevation ?? 0) - Number(missingCell.position.y ?? 0)) <= 0.05
+  ));
+
+  const result = generator._realizeAuthoritativeSupplementSocketSeams(
+    new Map(),
+    fixture.floorTiles,
+    [fixture.plan],
+  );
+
+  assert.equal(result.cutThroughCount, 1);
+  assert.equal(result.cutThroughs[0].action, 'create-supplemental-interior-support');
+  assert.equal(result.cutThroughs[0].cellId, missingCell.id);
+  const createdFloor = result.floorTiles.find((floor) => (
+    floor.x === missingCell.gridX
+      && floor.z === missingCell.gridZ
+      && Math.abs(Number(floor.elevation ?? 0) - Number(missingCell.position.y ?? 0)) <= 0.05
+  ));
+  assert.ok(createdFloor);
+  assert.equal(createdFloor.signedConnectorFloorOwnerId, fixture.plan.id);
+  assert.equal(createdFloor.walkabilityIntent, 'required-clear');
+  assert.ok(createdFloor.authoritativeSocketSeamCutThroughIds.includes(
+    result.cutThroughs[0].id,
+  ));
 });
 
 test('foreign endpoint-seam ownership attributes only the exact route segment for replay exclusion', () => {

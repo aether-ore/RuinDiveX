@@ -248,6 +248,11 @@ for (const direction of ['ascending', 'descending']) {
         landingFloors.some((floor) => floor.forcedRetainingWallEdges?.length),
         false,
       );
+      assert.equal(
+        landingFloors.some((floor) => floor.connectorLiftBoardingWallGuardEdges != null),
+        false,
+        'the V4-only defensive guard must not alter frozen V1 lift floor records',
+      );
 
       const boundaryWallRuns = generator._collectBoundaryWallRuns(
         tiles,
@@ -542,6 +547,118 @@ test('V4 supplemental automatic lift owns and opens only its declared boarding e
     6,
     'the V4 lift must satisfy the complete paired shell proof',
   );
+  const mergedCompleteFloors = floorTiles.map((floor) => ({
+    ...floor,
+    openRetainingWallEdges: [...(floor.openRetainingWallEdges ?? [])],
+    v4SupplementalOpenRetainingWallEdges: [
+      ...(floor.v4SupplementalOpenRetainingWallEdges ?? []),
+    ],
+    connectorLiftBoardingOpenRetainingWallEdges: [
+      ...(floor.connectorLiftBoardingOpenRetainingWallEdges ?? []),
+    ],
+    connectorLiftBoardingWallGuardEdges: [
+      ...(floor.connectorLiftBoardingWallGuardEdges ?? []),
+    ],
+    traversalLinks: (floor.traversalLinks ?? []).map((link) => ({ ...link })),
+  }));
+  for (const floor of mergedCompleteFloors) {
+    if ((floor.connectorLiftBoardingOpenRetainingWallEdges?.length ?? 0) > 0) {
+      floor.connectorZone = 'merged-authoritative-floor';
+    }
+  }
+  assert.equal(
+    generator._collectConnectorLiftBoardingWallOpeningKeys(mergedCompleteFloors).size,
+    6,
+    'exact lift-edge geometry must recover both endpoints after scalar zone merging',
+  );
+  const mergedCompleteRuns = generator._collectBoundaryWallRuns(
+    new Map(),
+    new Set(),
+    [],
+    new Map(),
+    mergedCompleteFloors,
+  );
+  for (const floor of mergedCompleteFloors) {
+    for (const edge of floor.connectorLiftBoardingOpenRetainingWallEdges ?? []) {
+      const [dx, dz] = edge.split(',').map(Number);
+      assert.equal(
+        mergedCompleteRuns.some((run) => runCoversEdge(run, floor, dx, dz)),
+        false,
+        'a complete exact lift aperture must remain wall-free after zone merging',
+      );
+    }
+  }
+  const mergedOwnerFloors = mergedCompleteFloors.map((floor) => ({
+    ...floor,
+    sharedConnectorFloorOwnerIds: [...(floor.sharedConnectorFloorOwnerIds ?? [])],
+    traversalLinks: (floor.traversalLinks ?? []).map((link) => ({ ...link })),
+  }));
+  for (const floor of mergedOwnerFloors) {
+    if ((floor.connectorLiftBoardingOpenRetainingWallEdges?.length ?? 0) === 0
+      || Math.abs(floor.elevation - lift.topElevation) > 0.05) continue;
+    floor.connectionId = 'merged-supplement-plan';
+    floor.connectorId = 'merged-supplement-plan';
+    floor.signedConnectorFloorOwnerId = 'merged-supplement-plan';
+    floor.sharedConnectorFloorOwnerIds = [...new Set([
+      ...floor.sharedConnectorFloorOwnerIds,
+      plan.id,
+    ])];
+  }
+  assert.equal(
+    generator._collectConnectorLiftBoardingWallOpeningKeys(mergedOwnerFloors).size,
+    6,
+    'a shared exact physical owner must pair endpoints after scalar owner merging',
+  );
+  const splitMechanismFloors = mergedOwnerFloors.map((floor) => ({
+    ...floor,
+    traversalLinks: (floor.traversalLinks ?? []).map((link) => ({ ...link })),
+  }));
+  const splitMechanismCenters = splitMechanismFloors.filter((floor) => (
+    (floor.traversalLinks ?? []).some(({ action }) => action === 'automatic_lift')
+  ));
+  assert.equal(splitMechanismCenters.length, 2);
+  for (const [index, floor] of splitMechanismCenters.entries()) {
+    floor.traversalLinks = floor.traversalLinks.map((link) => (
+      link.action === 'automatic_lift'
+        ? { ...link, id: `unrelated-lift-${index}:${index === 0 ? 'forward' : 'reverse'}` }
+        : link
+    ));
+  }
+  assert.equal(
+    generator._collectConnectorLiftBoardingWallOpeningKeys(splitMechanismFloors).size,
+    0,
+    'two half-lifts with different mechanism identities cannot share an aperture',
+  );
+  const sameRoleFloors = mergedOwnerFloors.map((floor) => ({
+    ...floor,
+    traversalLinks: (floor.traversalLinks ?? []).map((link) => (
+      link.action === 'automatic_lift'
+        ? { ...link, id: `${lift.id}:forward` }
+        : { ...link }
+    )),
+  }));
+  assert.equal(
+    generator._collectConnectorLiftBoardingWallOpeningKeys(sameRoleFloors).size,
+    0,
+    'same-role half-links cannot masquerade as one reciprocal lift mechanism',
+  );
+  const mergedOwnerRuns = generator._collectBoundaryWallRuns(
+    new Map(),
+    new Set(),
+    [],
+    new Map(),
+    mergedOwnerFloors,
+  );
+  for (const floor of mergedOwnerFloors) {
+    for (const edge of floor.connectorLiftBoardingOpenRetainingWallEdges ?? []) {
+      const [dx, dz] = edge.split(',').map(Number);
+      assert.equal(
+        mergedOwnerRuns.some((run) => runCoversEdge(run, floor, dx, dz)),
+        false,
+        'a complete shared-owner lift aperture must remain wall-free',
+      );
+    }
+  }
   const lowerCenterLane = boardingEdges.find(({ floor }) => (
     (floor.traversalLinks ?? []).some(({ action }) => action === 'automatic_lift')
       && Math.abs(floor.elevation - lift.bottomElevation) <= 0.05
@@ -594,6 +711,9 @@ test('V4 supplemental automatic lift owns and opens only its declared boarding e
     connectorLiftBoardingOpenRetainingWallEdges: [
       ...(floor.connectorLiftBoardingOpenRetainingWallEdges ?? []),
     ],
+    connectorLiftBoardingWallGuardEdges: [
+      ...(floor.connectorLiftBoardingWallGuardEdges ?? []),
+    ],
     traversalLinks: (floor.traversalLinks ?? []).map((link) => ({ ...link })),
   }));
   const removedLane = incompleteFloors.find((floor) => {
@@ -608,7 +728,13 @@ test('V4 supplemental automatic lift owns and opens only its declared boarding e
     ));
   });
   assert.ok(removedLane);
+  const removedLiftEdge = removedLane.connectorLiftBoardingOpenRetainingWallEdges[0];
+  assert.ok(
+    removedLane.connectorLiftBoardingWallGuardEdges?.includes(removedLiftEdge),
+    'each exact lift edge must retain an independent fail-closed guard identity',
+  );
   removedLane.connectorLiftBoardingOpenRetainingWallEdges = [];
+  removedLane.connectorZone = 'merged-authoritative-floor';
   const mergedZoneLane = incompleteFloors.find((floor) => {
     if (floor === removedLane
       || floor.connectorLiftBoardingOpenRetainingWallEdges.length === 0) return false;
@@ -643,7 +769,7 @@ test('V4 supplemental automatic lift owns and opens only its declared boarding e
     0,
     'one missing lane must invalidate the complete paired V4 lift proof',
   );
-  const removedEdge = removedLane.openRetainingWallEdges[0];
+  const removedEdge = removedLiftEdge;
   const incompleteRemovedLane = incompleteByKey.get(
     generator._getFloorTileGraphKey(removedLane),
   );
@@ -656,7 +782,7 @@ test('V4 supplemental automatic lift owns and opens only its declared boarding e
       removedDz,
     )),
     true,
-    'the missing V4 lane must not be reopened by its generic ownership marker',
+    'a lane missing both exact edge and scalar zone metadata must remain closed',
   );
   const mergedZoneEdge = mergedZoneLane.openRetainingWallEdges[0];
   const [mergedDx, mergedDz] = mergedZoneEdge.split(',').map(Number);
@@ -670,4 +796,37 @@ test('V4 supplemental automatic lift owns and opens only its declared boarding e
     true,
     'exact lift metadata must suppress the generic bypass if scalar zone identity was merged',
   );
+  const guardedIncompleteEdges = incompleteFloors.flatMap((floor) => (
+    (floor.connectorLiftBoardingWallGuardEdges ?? []).map((edge) => ({ floor, edge }))
+  ));
+  assert.equal(guardedIncompleteEdges.length, 6);
+  for (const { floor, edge } of guardedIncompleteEdges) {
+    const isolatedGuardedFloor = {
+      ...floor,
+      connectorZone: 'merged-authoritative-floor',
+      openRetainingWallEdges: [edge],
+      v4SupplementalOpenRetainingWallEdges: [edge],
+      connectorLiftBoardingOpenRetainingWallEdges: [],
+      connectorLiftBoardingWallGuardEdges: [edge],
+      traversalLinks: [],
+    };
+    const isolatedRuns = generator._collectBoundaryWallRuns(
+      new Map(),
+      new Set(),
+      [],
+      new Map(),
+      [isolatedGuardedFloor],
+    );
+    const [dx, dz] = edge.split(',').map(Number);
+    assert.equal(
+      isolatedRuns.some((run) => runCoversEdge(
+        run,
+        isolatedGuardedFloor,
+        dx,
+        dz,
+      )),
+      true,
+      'each guarded lane independently suppresses the generic V4 opening bypass',
+    );
+  }
 });

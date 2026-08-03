@@ -322,13 +322,13 @@ function cloneRouteNetworkSalvageValue(value, seen = new Map()) {
   return clone;
 }
 
-function routeNetworkSalvageEntityOrdinal(entity, entityKind, fallbackOrdinal) {
+function routeNetworkSalvageEntityOrdinal(entity, entityKind) {
   const value = entityKind === 'segment'
     ? entity?.physicalOrdinal ?? entity?.ordinal
     : entity?.ordinal;
-  return Number.isSafeInteger(Number(value))
-    ? Number(value)
-    : fallbackOrdinal;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
 }
 
 function compareRouteNetworkSalvageEntities(first, second) {
@@ -361,6 +361,25 @@ function routeNetworkSalvageConnectorMinimumDegree(node) {
     return 2;
   }
   return 1;
+}
+
+function routeNetworkSalvageMinimumIncidentSegmentCount(node) {
+  const minimumDegree = routeNetworkSalvageConnectorMinimumDegree(node);
+  // An authored corridor's continuation is a real arm of an exact through-T
+  // junction, so it can satisfy one of that junction's three approaches. It is
+  // not, however, a second attachment to a supplemental connector module. If
+  // pruning leaves such a module with only its parent-station attachment, the
+  // module is a physical dead end and DungeonGenerator cannot stamp it as a
+  // two-arm connector. Require two retained supplement segments for modules;
+  // only a junction may use the exact parent-through contribution.
+  if (node?.kind === ROUTE_NETWORK_CONNECTOR_MODULE_KIND
+    || node?.isSupplementConnectorModule === true) {
+    return minimumDegree;
+  }
+  return Math.max(
+    1,
+    minimumDegree - routeNetworkSalvageParentThroughContribution(node),
+  );
 }
 
 function maximumContinuousSalvageLevelDistance(path = []) {
@@ -426,10 +445,11 @@ function routeNetworkSalvageFailure(code, {
  * route-network candidate. This helper does not authorize planner acceptance:
  * callers must keep complete bounded replacements ahead of this fallback.
  *
- * Every retained component is a tree with exactly one exact parent socket.
- * Exact physical conflicts seed the removal set; incident edges, unrooted
- * fragments, cycle/multi-root edges, and invalid connector infrastructure are
- * then removed deterministically. Source IDs and ordinals are never rewritten.
+ * Every retained component is connected to one or more exact parent sockets.
+ * Exact physical conflicts seed the removal set; only incident dependencies,
+ * unrooted fragments, and invalid connector infrastructure are then removed.
+ * Safe cycles and safe multi-root connections remain intact. Source IDs and
+ * ordinals are never rewritten.
  */
 export function createParentAnchoredRouteNetworkSalvage(
   planned,
@@ -452,18 +472,45 @@ export function createParentAnchoredRouteNetworkSalvage(
     );
   }
 
-  const nodeRecords = planned.nodes.map((entity, inputOrdinal) => ({
+  const nodeRecords = planned.nodes.map((entity) => ({
     entity,
     id: stringValue(entity?.id),
-    ordinal: routeNetworkSalvageEntityOrdinal(entity, 'node', inputOrdinal),
-    inputOrdinal,
+    ordinal: routeNetworkSalvageEntityOrdinal(entity, 'node'),
   })).filter(({ id }) => Boolean(id)).sort(compareRouteNetworkSalvageEntities);
-  const segmentRecords = planned.segments.map((entity, inputOrdinal) => ({
+  const segmentRecords = planned.segments.map((entity) => ({
     entity,
     id: stringValue(entity?.id),
-    ordinal: routeNetworkSalvageEntityOrdinal(entity, 'segment', inputOrdinal),
-    inputOrdinal,
+    ordinal: routeNetworkSalvageEntityOrdinal(entity, 'segment'),
   })).filter(({ id }) => Boolean(id)).sort(compareRouteNetworkSalvageEntities);
+  const invalidSourceOrdinals = [
+    ...nodeRecords.filter(({ ordinal }) => ordinal == null).map(({ id }) => `node:${id}`),
+    ...segmentRecords.filter(({ ordinal }) => ordinal == null).map(({ id }) => `segment:${id}`),
+  ];
+  const duplicateSourceOrdinals = (records, entityKind) => {
+    const seen = new Set();
+    return records.flatMap(({ id, ordinal }) => {
+      if (!seen.has(ordinal)) {
+        seen.add(ordinal);
+        return [];
+      }
+      return [`${entityKind}:${id}:${ordinal}`];
+    });
+  };
+  const duplicateOrdinalEvidence = [
+    ...duplicateSourceOrdinals(nodeRecords, 'node'),
+    ...duplicateSourceOrdinals(segmentRecords, 'segment'),
+  ];
+  if (invalidSourceOrdinals.length > 0 || duplicateOrdinalEvidence.length > 0) {
+    return routeNetworkSalvageFailure(
+      'route-network-parent-anchored-salvage-source-ordinals-invalid',
+      {
+        operationId,
+        grantId,
+        invalidSourceOrdinals,
+        duplicateSourceOrdinals: duplicateOrdinalEvidence,
+      },
+    );
+  }
   const nodeById = new Map(nodeRecords.map(({ id, entity }) => [id, entity]));
   const nodeRecordById = new Map(nodeRecords.map((record) => [record.id, record]));
   const segmentRecordById = new Map(segmentRecords.map((record) => [record.id, record]));
@@ -475,12 +522,43 @@ export function createParentAnchoredRouteNetworkSalvage(
     id,
     createRouteNetworkConflictEntitySignature(entity, 'segment'),
   ]));
+  const segmentInternalNodeIds = (segment) => [segment?.from, segment?.to]
+    .map(routeNetworkSalvageEndpointNodeId)
+    .filter((nodeId) => nodeById.has(nodeId));
+  const originalAdjacency = new Map(nodeRecords.map(({ id }) => [id, []]));
+  const originalIncidentSegmentIdsByNodeId = new Map(
+    nodeRecords.map(({ id }) => [id, []]),
+  );
+  for (const { id: segmentId, entity } of segmentRecords) {
+    const internalNodeIds = [...new Set(segmentInternalNodeIds(entity))];
+    for (const nodeId of internalNodeIds) {
+      originalIncidentSegmentIdsByNodeId.get(nodeId)?.push(segmentId);
+    }
+    if (internalNodeIds.length !== 2) continue;
+    originalAdjacency.get(internalNodeIds[0])?.push(internalNodeIds[1]);
+    originalAdjacency.get(internalNodeIds[1])?.push(internalNodeIds[0]);
+  }
+  const originalComponentByNodeId = new Map();
+  for (const { id: startNodeId } of nodeRecords) {
+    if (originalComponentByNodeId.has(startNodeId)) continue;
+    const componentId = startNodeId;
+    const queue = [startNodeId];
+    originalComponentByNodeId.set(startNodeId, componentId);
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      for (const nextNodeId of originalAdjacency.get(queue[cursor]) ?? []) {
+        if (originalComponentByNodeId.has(nextNodeId)) continue;
+        originalComponentByNodeId.set(nextNodeId, componentId);
+        queue.push(nextNodeId);
+      }
+    }
+  }
   const normalizedExclusions = normalizeRouteNetworkConflictExclusions(exclusions)
     .filter((entry) => entry.grantId === grantId);
   const removedNodeIds = new Set();
   const removedSegmentIds = new Set();
   const omissionByIdentity = new Map();
   const matchedRootSignatures = new Set();
+  let dependencyRootAssignmentFailed = false;
 
   const addOmission = (
     entityKind,
@@ -498,6 +576,11 @@ export function createParentAnchoredRouteNetworkSalvage(
     const signature = entityKind === 'segment'
       ? segmentSignatures.get(entityId)
       : nodeSignatures.get(entityId);
+    const normalizedRootSignature = stringValue(rootSignature);
+    if (!signature || !normalizedRootSignature) {
+      dependencyRootAssignmentFailed = true;
+      return;
+    }
     omissionByIdentity.set(key, {
       grantId,
       operationId,
@@ -508,7 +591,7 @@ export function createParentAnchoredRouteNetworkSalvage(
       disposition,
       reason: stringValue(reason).slice(0, 128)
         || 'route-network-salvage-dependency',
-      rootSignature,
+      rootSignature: normalizedRootSignature,
     });
   };
 
@@ -537,11 +620,51 @@ export function createParentAnchoredRouteNetworkSalvage(
       { operationId, grantId },
     );
   }
-  const fallbackRootSignature = [...matchedRootSignatures].sort()[0];
-
-  const segmentInternalNodeIds = (segment) => [segment?.from, segment?.to]
-    .map(routeNetworkSalvageEndpointNodeId)
-    .filter((nodeId) => nodeById.has(nodeId));
+  const rootSignaturesByOriginalComponent = new Map();
+  const addRootForOriginalComponent = (componentId, rootSignature) => {
+    if (!componentId || !rootSignature) return;
+    if (!rootSignaturesByOriginalComponent.has(componentId)) {
+      rootSignaturesByOriginalComponent.set(componentId, new Set());
+    }
+    rootSignaturesByOriginalComponent.get(componentId).add(rootSignature);
+  };
+  for (const omission of omissionByIdentity.values()) {
+    if (omission.disposition !== 'conflict-root') continue;
+    const componentIds = omission.entityKind === 'node'
+      ? [originalComponentByNodeId.get(omission.entityId)]
+      : segmentInternalNodeIds(segmentRecordById.get(omission.entityId)?.entity)
+        .map((nodeId) => originalComponentByNodeId.get(nodeId));
+    for (const componentId of new Set(componentIds.filter(Boolean))) {
+      addRootForOriginalComponent(componentId, omission.rootSignature);
+    }
+  }
+  const connectedConflictRootSignature = (entityKind, entityId) => {
+    const componentIds = entityKind === 'node'
+      ? [originalComponentByNodeId.get(entityId)]
+      : segmentInternalNodeIds(segmentRecordById.get(entityId)?.entity)
+        .map((nodeId) => originalComponentByNodeId.get(nodeId));
+    const connected = [...new Set(componentIds.filter(Boolean))].flatMap((componentId) => (
+      [...(rootSignaturesByOriginalComponent.get(componentId) ?? [])]
+    ));
+    return [...new Set(connected)].sort()[0] ?? null;
+  };
+  const directlyIncidentConflictRootSignature = (entityKind, entityId) => {
+    const incidentRootOmissions = entityKind === 'node'
+      ? (originalIncidentSegmentIdsByNodeId.get(entityId) ?? []).map((segmentId) => (
+        omissionByIdentity.get(`segment\u0000${segmentId}`)
+      ))
+      : segmentInternalNodeIds(segmentRecordById.get(entityId)?.entity).map((nodeId) => (
+        omissionByIdentity.get(`node\u0000${nodeId}`)
+      ));
+    const signatures = incidentRootOmissions
+      .filter((omission) => omission?.disposition === 'conflict-root')
+      .map((omission) => omission.rootSignature);
+    return [...new Set(signatures)].sort()[0] ?? null;
+  };
+  const dependencyConflictRootSignature = (entityKind, entityId) => (
+    directlyIncidentConflictRootSignature(entityKind, entityId)
+      ?? connectedConflictRootSignature(entityKind, entityId)
+  );
   for (const { id, entity } of segmentRecords) {
     if (removedSegmentIds.has(id)) continue;
     if (!segmentInternalNodeIds(entity).some((nodeId) => removedNodeIds.has(nodeId))) continue;
@@ -551,7 +674,7 @@ export function createParentAnchoredRouteNetworkSalvage(
       id,
       'dependency',
       'incident-to-omitted-node',
-      fallbackRootSignature,
+      dependencyConflictRootSignature('segment', id),
     );
   }
 
@@ -581,39 +704,6 @@ export function createParentAnchoredRouteNetworkSalvage(
     .map(({ id }) => id)
     .filter((id) => !removedNodeIds.has(id)));
   const retainedSegmentIds = new Set();
-  const unionParent = new Map();
-  const unionRootSocket = new Map();
-  const ensureUnionVertex = (id, rootSocketId = null) => {
-    if (!unionParent.has(id)) unionParent.set(id, id);
-    if (!unionRootSocket.has(id)) unionRootSocket.set(id, rootSocketId);
-  };
-  const findUnionRoot = (id) => {
-    let root = id;
-    while (unionParent.get(root) !== root) root = unionParent.get(root);
-    let cursor = id;
-    while (unionParent.get(cursor) !== cursor) {
-      const next = unionParent.get(cursor);
-      unionParent.set(cursor, root);
-      cursor = next;
-    }
-    return root;
-  };
-  const unionVertices = (firstId, secondId) => {
-    const firstRoot = findUnionRoot(firstId);
-    const secondRoot = findUnionRoot(secondId);
-    if (firstRoot === secondRoot) return 'cycle-edge';
-    const firstSocket = unionRootSocket.get(firstRoot);
-    const secondSocket = unionRootSocket.get(secondRoot);
-    if (firstSocket && secondSocket && firstSocket !== secondSocket) {
-      return 'multi-root-merge-edge';
-    }
-    const retainedRoot = firstRoot.localeCompare(secondRoot) <= 0 ? firstRoot : secondRoot;
-    const mergedRoot = retainedRoot === firstRoot ? secondRoot : firstRoot;
-    unionParent.set(mergedRoot, retainedRoot);
-    unionRootSocket.set(retainedRoot, firstSocket || secondSocket || null);
-    return null;
-  };
-  for (const nodeId of retainedNodeIds) ensureUnionVertex(`node:${nodeId}`);
   const usedParentSocketIds = new Set();
   for (const { id, entity } of segmentRecords) {
     if (removedSegmentIds.has(id)) continue;
@@ -625,7 +715,11 @@ export function createParentAnchoredRouteNetworkSalvage(
       || descriptors.filter(({ kind }) => kind === 'parent').length > 1) {
       removedSegmentIds.add(id);
       addOmission(
-        'segment', id, 'dependency', 'invalid-salvage-endpoint', fallbackRootSignature,
+        'segment',
+        id,
+        'dependency',
+        'invalid-salvage-endpoint',
+        dependencyConflictRootSignature('segment', id),
       );
       continue;
     }
@@ -633,47 +727,16 @@ export function createParentAnchoredRouteNetworkSalvage(
     if (parentDescriptor && usedParentSocketIds.has(parentDescriptor.id)) {
       removedSegmentIds.add(id);
       addOmission(
-        'segment', id, 'dependency', 'duplicate-parent-socket-edge', fallbackRootSignature,
+        'segment',
+        id,
+        'dependency',
+        'duplicate-parent-socket-edge',
+        dependencyConflictRootSignature('segment', id),
       );
-      continue;
-    }
-    const vertices = descriptors.map((descriptor) => {
-      const vertexId = `${descriptor.kind}:${descriptor.id}`;
-      ensureUnionVertex(
-        vertexId,
-        descriptor.kind === 'parent' ? descriptor.id : null,
-      );
-      return vertexId;
-    });
-    const refusal = unionVertices(vertices[0], vertices[1]);
-    if (refusal) {
-      removedSegmentIds.add(id);
-      addOmission('segment', id, 'dependency', refusal, fallbackRootSignature);
       continue;
     }
     if (parentDescriptor) usedParentSocketIds.add(parentDescriptor.id);
     retainedSegmentIds.add(id);
-  }
-
-  for (const nodeId of [...retainedNodeIds]) {
-    const root = findUnionRoot(`node:${nodeId}`);
-    if (unionRootSocket.get(root)) continue;
-    retainedNodeIds.delete(nodeId);
-    removedNodeIds.add(nodeId);
-    addOmission(
-      'node', nodeId, 'dependency', 'unrooted-component', fallbackRootSignature,
-    );
-  }
-  for (const segmentId of [...retainedSegmentIds]) {
-    const segment = segmentRecordById.get(segmentId)?.entity;
-    if (segmentInternalNodeIds(segment).every((nodeId) => retainedNodeIds.has(nodeId))) {
-      continue;
-    }
-    retainedSegmentIds.delete(segmentId);
-    removedSegmentIds.add(segmentId);
-    addOmission(
-      'segment', segmentId, 'dependency', 'unrooted-component', fallbackRootSignature,
-    );
   }
 
   const inspectComponents = () => {
@@ -734,21 +797,24 @@ export function createParentAnchoredRouteNetworkSalvage(
   let closureChanged = true;
   while (closureChanged) {
     closureChanged = false;
-    const degreeByNodeId = new Map([...retainedNodeIds].map((nodeId) => [
+    const incidentSegmentCountByNodeId = new Map([...retainedNodeIds].map((nodeId) => [
       nodeId,
-      routeNetworkSalvageParentThroughContribution(nodeById.get(nodeId)),
+      0,
     ]));
     for (const segmentId of retainedSegmentIds) {
       const segment = segmentRecordById.get(segmentId)?.entity;
       for (const nodeId of segmentInternalNodeIds(segment)) {
         if (!retainedNodeIds.has(nodeId)) continue;
-        degreeByNodeId.set(nodeId, (degreeByNodeId.get(nodeId) ?? 0) + 1);
+        incidentSegmentCountByNodeId.set(
+          nodeId,
+          (incidentSegmentCountByNodeId.get(nodeId) ?? 0) + 1,
+        );
       }
     }
     const underDegreeNodeIds = [...retainedNodeIds].filter((nodeId) => {
       const node = nodeById.get(nodeId);
-      return Number(degreeByNodeId.get(nodeId) ?? 0)
-        < routeNetworkSalvageConnectorMinimumDegree(node);
+      return Number(incidentSegmentCountByNodeId.get(nodeId) ?? 0)
+        < routeNetworkSalvageMinimumIncidentSegmentCount(node);
     });
     if (underDegreeNodeIds.length > 0) {
       closureChanged = true;
@@ -763,7 +829,7 @@ export function createParentAnchoredRouteNetworkSalvage(
           routeNetworkSalvageConnectorMinimumDegree(node) > 1
             ? 'under-degree-connector-infrastructure'
             : 'isolated-node',
-          fallbackRootSignature,
+          dependencyConflictRootSignature('node', nodeId),
         );
       }
       for (const segmentId of [...retainedSegmentIds]) {
@@ -778,26 +844,34 @@ export function createParentAnchoredRouteNetworkSalvage(
           segmentId,
           'dependency',
           'incident-to-under-degree-node',
-          fallbackRootSignature,
+          dependencyConflictRootSignature('segment', segmentId),
         );
       }
     }
 
     for (const component of inspectComponents()) {
-      if (component.parentSocketIds.length === 1) continue;
+      if (component.parentSocketIds.length >= 1) continue;
       closureChanged = true;
       for (const nodeId of component.nodeIds) {
         retainedNodeIds.delete(nodeId);
         removedNodeIds.add(nodeId);
         addOmission(
-          'node', nodeId, 'dependency', 'unrooted-component', fallbackRootSignature,
+          'node',
+          nodeId,
+          'dependency',
+          'unrooted-component',
+          dependencyConflictRootSignature('node', nodeId),
         );
       }
       for (const segmentId of component.segmentIds) {
         retainedSegmentIds.delete(segmentId);
         removedSegmentIds.add(segmentId);
         addOmission(
-          'segment', segmentId, 'dependency', 'unrooted-component', fallbackRootSignature,
+          'segment',
+          segmentId,
+          'dependency',
+          'unrooted-component',
+          dependencyConflictRootSignature('segment', segmentId),
         );
       }
     }
@@ -806,7 +880,7 @@ export function createParentAnchoredRouteNetworkSalvage(
   const rawComponents = inspectComponents().filter((component) => (
     component.nodeIds.length > 0
       && component.segmentIds.length > 0
-      && component.parentSocketIds.length === 1
+      && component.parentSocketIds.length >= 1
   ));
   const retainedComponentNodeIds = new Set(rawComponents.flatMap(({ nodeIds }) => nodeIds));
   const retainedComponentSegmentIds = new Set(
@@ -816,14 +890,31 @@ export function createParentAnchoredRouteNetworkSalvage(
     if (retainedComponentNodeIds.has(nodeId)) continue;
     retainedNodeIds.delete(nodeId);
     removedNodeIds.add(nodeId);
-    addOmission('node', nodeId, 'dependency', 'empty-component', fallbackRootSignature);
+    addOmission(
+      'node',
+      nodeId,
+      'dependency',
+      'empty-component',
+      dependencyConflictRootSignature('node', nodeId),
+    );
   }
   for (const segmentId of [...retainedSegmentIds]) {
     if (retainedComponentSegmentIds.has(segmentId)) continue;
     retainedSegmentIds.delete(segmentId);
     removedSegmentIds.add(segmentId);
     addOmission(
-      'segment', segmentId, 'dependency', 'empty-component', fallbackRootSignature,
+      'segment',
+      segmentId,
+      'dependency',
+      'empty-component',
+      dependencyConflictRootSignature('segment', segmentId),
+    );
+  }
+
+  if (dependencyRootAssignmentFailed) {
+    return routeNetworkSalvageFailure(
+      'route-network-parent-anchored-salvage-dependency-root-unavailable',
+      { operationId, grantId },
     );
   }
 
@@ -890,9 +981,11 @@ export function createParentAnchoredRouteNetworkSalvage(
       if (segmentId) {
         socket.state = 'connected';
         socket.segmentId = segmentId;
+        socket.capRole = null;
       } else if (socket.state === 'connected' || socket.segmentId != null) {
         socket.state = 'capped';
-        delete socket.segmentId;
+        socket.segmentId = null;
+        socket.capRole = 'cap';
       }
       return socket;
     });
@@ -926,7 +1019,7 @@ export function createParentAnchoredRouteNetworkSalvage(
   });
 
   const retainedParentSocketIdSet = new Set(
-    rawComponents.map(({ parentSocketIds }) => parentSocketIds[0]),
+    rawComponents.flatMap(({ parentSocketIds }) => parentSocketIds),
   );
   const retainedEndpointSocketIds = [
     ...declaredParentSocketIds.filter((socketId) => retainedParentSocketIdSet.has(socketId)),
@@ -949,6 +1042,23 @@ export function createParentAnchoredRouteNetworkSalvage(
   const connectorInfrastructureNodeIds = retainedNodes
     .filter(({ connectorOwned }) => connectorOwned === true)
     .map(({ id }) => String(id));
+  const retainedGraphCycleRank = retainedSegments.length
+    - (retainedNodes.length + retainedEndpointSocketIds.length)
+    + rawComponents.length;
+  if (!Number.isSafeInteger(retainedGraphCycleRank) || retainedGraphCycleRank < 0) {
+    return routeNetworkSalvageFailure(
+      'route-network-parent-anchored-salvage-cycle-rank-invalid',
+      {
+        operationId,
+        grantId,
+        retainedNodeCount: retainedNodes.length,
+        retainedSegmentCount: retainedSegments.length,
+        retainedEndpointCount: retainedEndpointSocketIds.length,
+        retainedComponentCount: rawComponents.length,
+        retainedGraphCycleRank,
+      },
+    );
+  }
   const operation = {
     ...cloneRouteNetworkSalvageValue(planned.operation),
     realizationMode: ROUTE_NETWORK_SALVAGE_REALIZATION_MODE,
@@ -976,18 +1086,32 @@ export function createParentAnchoredRouteNetworkSalvage(
       operationId,
       retainedSegments,
     ),
-    cycleRankDelta: 0,
+    cycleRankDelta: retainedGraphCycleRank,
+    localProgressionArcRealized: false,
+    ...(planned.operation.routeNetworkKind === 'objective-route-coverage' ? {
+      authoredCoverageRealized: false,
+    } : {}),
   };
   const retainedParentSocketOrdinalById = new Map(
     retainedEndpointSocketIds.map((socketId, socketOrdinal) => [socketId, socketOrdinal]),
   );
-  const parentAnchoredComponents = rawComponents.sort((first, second) => (
-    Number(retainedParentSocketOrdinalById.get(first.parentSocketIds[0]))
-      - Number(retainedParentSocketOrdinalById.get(second.parentSocketIds[0]))
+  const canonicalAttachmentSocketIds = (component) => [
+    ...retainedEndpointSocketIds.filter((socketId) => component.parentSocketIds.includes(socketId)),
+    ...component.parentSocketIds
+      .filter((socketId) => !retainedParentSocketOrdinalById.has(socketId))
+      .sort(),
+  ];
+  const parentAnchoredComponents = rawComponents.map((component) => ({
+    ...component,
+    attachmentSocketIds: canonicalAttachmentSocketIds(component),
+  })).sort((first, second) => (
+    Number(retainedParentSocketOrdinalById.get(first.attachmentSocketIds[0]))
+      - Number(retainedParentSocketOrdinalById.get(second.attachmentSocketIds[0]))
       || String(first.nodeIds[0] ?? '').localeCompare(String(second.nodeIds[0] ?? ''))
   )).map((component, componentOrdinal) => ({
     id: `${operationId}:parent-anchored-component:${componentOrdinal}`,
-    attachmentSocketId: component.parentSocketIds[0],
+    attachmentSocketIds: [...component.attachmentSocketIds],
+    attachmentSocketId: component.attachmentSocketIds[0],
     nodeIds: [...component.nodeIds],
     segmentIds: [...component.segmentIds],
     bidirectional: true,

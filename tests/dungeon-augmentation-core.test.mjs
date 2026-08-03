@@ -400,6 +400,126 @@ test('a supplemental collision severing an authored drop-space egress excludes o
   assert.deepEqual(ambiguousAttribution.routeNetworkConflictExclusions, []);
 });
 
+test('a critical-door bypass entry excludes only its exact realized route-network entity', () => {
+  const operation = {
+    id: 'operation:critical-door-bypass',
+    type: 'routeNetwork',
+    grantId: 'grant:critical-door-bypass',
+    routeNetworkKind: 'objective-route-coverage',
+  };
+  const node = {
+    id: 'node:critical-door-bypass',
+    operationId: operation.id,
+    kind: 'supplementConnectorJunction',
+    placement: {
+      center: { x: -19.6, y: 0, z: 352.8 },
+      rotationQuarterTurns: 0,
+    },
+    size: { x: 8.4, y: 5.6, z: 19.6 },
+    sockets: [],
+  };
+  const segment = {
+    id: 'segment:critical-door-bypass',
+    operationId: operation.id,
+    connectorFamily: 'service-gallery',
+    from: { nodeId: 'parent-route', position: { x: -2.8, y: 0, z: 326.2 } },
+    to: { nodeId: node.id, position: { x: -16.8, y: 0, z: 343 } },
+    path: [
+      { x: -2.8, y: 0, z: 326.2 },
+      { x: -16.8, y: 0, z: 343 },
+    ],
+  };
+  const createDungeon = (from) => ({
+    augmentationOverlayPlan: {
+      operations: [operation],
+      nodes: [node],
+      segments: [segment],
+    },
+    rooms: [{ id: 'shrineRoom' }],
+    connectorJunctionProxies: [{ id: node.id, isConnectorJunctionProxy: true }],
+    connectionPlans: [{ id: segment.id, isDungeonSupplement: true }],
+    progression: {
+      validation: {
+        physicalProgression: {
+          checks: [{
+            doorId: 'Door_Shrine',
+            toRoomId: 'shrineRoom',
+            destinationReachableWhileClosed: true,
+            bypassDestinationEntryEdges: [{
+              from,
+              to: {
+                floorKey: '-7,130@y0.000',
+                roomId: 'shrineRoom',
+                connectionId: null,
+              },
+              intersectingSegmentBarrierZoneIds: [],
+              intersectingActiveDoorBarrierZoneIds: [],
+            }],
+          }],
+        },
+      },
+    },
+  });
+
+  const nodeAttribution = collectDungeonAugmentationPhysicalFailureAttribution(
+    createDungeon({
+      floorKey: '-7,129@y0.000',
+      roomId: node.id,
+      connectionId: null,
+    }),
+  );
+  assert.deepEqual(nodeAttribution.failedRouteNetworkGrants, [{
+    grantId: operation.grantId,
+    augmentationOperationId: operation.id,
+    routeNetworkKind: operation.routeNetworkKind,
+    connectionIds: [],
+    roomIds: [node.id],
+    socketIds: [],
+    failureKinds: ['critical-door-bypass-entry'],
+  }]);
+  assert.deepEqual(nodeAttribution.routeNetworkConflictExclusions, [{
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: createRouteNetworkConflictEntitySignature(node, 'node'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  }]);
+
+  const segmentAttribution = collectDungeonAugmentationPhysicalFailureAttribution(
+    createDungeon({
+      floorKey: '-7,129@y0.000',
+      roomId: null,
+      connectionId: segment.id,
+    }),
+  );
+  assert.deepEqual(segmentAttribution.failedRouteNetworkGrants, [{
+    grantId: operation.grantId,
+    augmentationOperationId: operation.id,
+    routeNetworkKind: operation.routeNetworkKind,
+    connectionIds: [segment.id],
+    roomIds: [],
+    socketIds: [],
+    failureKinds: ['critical-door-bypass-entry'],
+  }]);
+  assert.deepEqual(segmentAttribution.routeNetworkConflictExclusions, [{
+    grantId: operation.grantId,
+    entityKind: 'segment',
+    entityId: segment.id,
+    signature: createRouteNetworkConflictEntitySignature(segment, 'segment'),
+    reason: 'route-network-runtime-physical-validation-failed',
+  }]);
+
+  const ambiguousAttribution = collectDungeonAugmentationPhysicalFailureAttribution(
+    createDungeon({
+      floorKey: '-7,129@y0.000',
+      roomId: node.id,
+      connectionId: segment.id,
+    }),
+  );
+  assert.deepEqual(ambiguousAttribution.failedRouteNetworkGrants, []);
+  assert.deepEqual(ambiguousAttribution.routeNetworkConflictExclusions, []);
+});
+
 function createReplayLifecycleFixture({ committed = false } = {}) {
   const sourceRandom = () => 0.5;
   const baseDungeon = {

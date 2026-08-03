@@ -2882,6 +2882,167 @@ function pyramidRouteNetworkFixture({
   };
 }
 
+function connectorOnlyParentAnchoredMaterializerFixture({
+  realizationMode = 'parent-anchored-forest',
+  corruptComponent = false,
+} = {}) {
+  const fixture = pyramidRouteNetworkFixture();
+  const operation = fixture.overlayPlan.operations[0];
+  const connectorNode = fixture.overlayPlan.nodes[0];
+  const entry = fixture.overlayPlan.segments[0];
+  const reconnect = fixture.overlayPlan.segments[2];
+  const reconnectSocket = connectorNode.sockets[1];
+  reconnect.from = { ...reconnectSocket, kind: 'supplementSocket' };
+  reconnect.path = [reconnectSocket.position, reconnect.to.position];
+  connectorNode.kind = 'supplementConnectorModule';
+  connectorNode.nodeKind = 'supplementConnectorModule';
+  connectorNode.anchors = [];
+  connectorNode.sockets = connectorNode.sockets.slice(0, 2);
+  entry.bidirectional = true;
+  reconnect.bidirectional = true;
+  fixture.overlayPlan.schema = 'ruindivex-dungeon-augmentation-overlay/v2';
+  fixture.overlayPlan.profileRevision = 5;
+  fixture.overlayPlan.nodes = [connectorNode];
+  fixture.overlayPlan.segments = [entry, reconnect];
+  operation.nodeIds = [connectorNode.id];
+  operation.segmentIds = fixture.overlayPlan.segments.map(({ id }) => id);
+  operation.returnRouteGuaranteed = true;
+  if (realizationMode) {
+    operation.realizationMode = realizationMode;
+    operation.localProgressionArcRealized = false;
+    operation.omittedEndpointSocketIds = [];
+    operation.parentAnchoredComponents = [{
+      id: `${operation.id}:parent-anchored-component:0`,
+      attachmentSocketIds: corruptComponent
+        ? [operation.endpointSocketIds[0]]
+        : [...operation.endpointSocketIds],
+      attachmentSocketId: operation.endpointSocketIds[0],
+      nodeIds: [...operation.nodeIds],
+      segmentIds: [...operation.segmentIds],
+      bidirectional: true,
+    }];
+  }
+  return fixture;
+}
+
+function materializeConnectorOnlyParentAnchoredFixture(fixture) {
+  return materializeIndustrialOverlay({
+    rooms: [{
+      id: 'keycardRoom',
+      x: 0,
+      z: 0,
+      width: 7,
+      depth: 7,
+      baseElevation: 0,
+      plannedBaseElevation: 0,
+      exitSockets: [],
+    }],
+    overlayPlan: fixture.overlayPlan,
+    extensionRegions: fixture.extensionRegions,
+    tileSize: TILE_SIZE,
+  });
+}
+
+function mixedParentAnchoredMaterializerFixture() {
+  const fixture = pyramidRouteNetworkFixture();
+  const operation = fixture.overlayPlan.operations[0];
+  const [connectorNode, roomNode] = fixture.overlayPlan.nodes;
+  const [entry, , reconnect] = fixture.overlayPlan.segments;
+  connectorNode.kind = 'supplementConnectorModule';
+  connectorNode.nodeKind = 'supplementConnectorModule';
+  connectorNode.anchors = [];
+  connectorNode.sockets = [connectorNode.sockets[0]];
+  connectorNode.exactParentEndpoint = true;
+  connectorNode.parentEndpointSocketId = operation.endpointSocketIds[0];
+  connectorNode.parentEndpointSocketKind = 'authored-corridor-station';
+  connectorNode.parentThroughRouteDegreeContribution = 1;
+  connectorNode.parentThroughPhysicalArmId = `${connectorNode.id}:authored-through`;
+  entry.bidirectional = true;
+  reconnect.bidirectional = true;
+  fixture.overlayPlan.schema = 'ruindivex-dungeon-augmentation-overlay/v2';
+  fixture.overlayPlan.profileRevision = 5;
+  fixture.overlayPlan.segments = [entry, reconnect];
+  operation.nodeIds = [connectorNode.id, roomNode.id];
+  operation.segmentIds = [entry.id, reconnect.id];
+  operation.realizationMode = 'parent-anchored-forest';
+  operation.localProgressionArcRealized = false;
+  operation.returnRouteGuaranteed = true;
+  operation.cycleRankDelta = 0;
+  operation.omittedEndpointSocketIds = [];
+  operation.parentAnchoredComponents = [{
+    id: `${operation.id}:parent-anchored-component:0`,
+    attachmentSocketIds: [operation.endpointSocketIds[0]],
+    attachmentSocketId: operation.endpointSocketIds[0],
+    nodeIds: [connectorNode.id],
+    segmentIds: [entry.id],
+    bidirectional: true,
+  }, {
+    id: `${operation.id}:parent-anchored-component:1`,
+    attachmentSocketIds: [operation.endpointSocketIds[1]],
+    attachmentSocketId: operation.endpointSocketIds[1],
+    nodeIds: [roomNode.id],
+    segmentIds: [reconnect.id],
+    bidirectional: true,
+  }];
+  return fixture;
+}
+
+test('industrial materialization accepts exact connector-only parent-anchored forests', () => {
+  const fixture = connectorOnlyParentAnchoredMaterializerFixture();
+  const result = materializeConnectorOnlyParentAnchoredFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
+  assert.equal(result.diagnostics.routeNetworkCount, 1);
+  assert.equal(result.diagnostics.routeNetworkConnectionCount, 2);
+  assert.equal(result.connectorJunctionProxies.length, 1);
+  assert.equal(result.connectorJunctionProxies[0].physicalArmCount, 2);
+  assert.ok(result.connectionPlans.filter(({ routeNetworkRealizationMode }) => (
+    routeNetworkRealizationMode === 'parent-anchored-forest'
+  )).every((plan) => (
+    plan.routeNetworkLocalProgressionArcRealized === false
+      && plan.routeNetworkProgressionProjectionMode
+        === 'parent-anchored-component-physical-only'
+      && plan.progressionFromRoomId === 'keycardRoom'
+      && plan.progressionToRoomId === 'keycardRoom'
+      && plan.progressionCollapsedSelfEdge === true
+  )));
+});
+
+test('industrial connector-only progression still rejects ordinary or malformed networks', () => {
+  for (const fixture of [
+    connectorOnlyParentAnchoredMaterializerFixture({ realizationMode: null }),
+    connectorOnlyParentAnchoredMaterializerFixture({ corruptComponent: true }),
+  ]) {
+    const result = materializeConnectorOnlyParentAnchoredFixture(fixture);
+    assert.equal(result.diagnostics.accepted, false);
+    assert.match(
+      result.diagnostics.errors.join(' | '),
+      /cannot reach a substantive supplemental room/,
+    );
+  }
+});
+
+test('industrial parent-anchored projection scopes connector-only handling per component', () => {
+  const fixture = mixedParentAnchoredMaterializerFixture();
+  const result = materializeConnectorOnlyParentAnchoredFixture(fixture);
+
+  assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
+  const [entry, reconnect] = fixture.overlayPlan.segments.map(({ id }) => (
+    result.connectionPlans.find((plan) => plan.id === id)
+  ));
+  assert.equal(
+    entry.routeNetworkProgressionProjectionMode,
+    'parent-anchored-component-physical-only',
+  );
+  assert.equal(entry.progressionCollapsedSelfEdge, true);
+  assert.equal(entry.progressionFromRoomId, 'keycardRoom');
+  assert.equal(entry.progressionToRoomId, 'keycardRoom');
+  assert.equal(reconnect.routeNetworkProgressionProjectionMode ?? null, null);
+  assert.equal(reconnect.progressionCollapsedSelfEdge, false);
+  assert.ok([reconnect.progressionFromRoomId, reconnect.progressionToRoomId]
+    .every((roomId) => roomId !== fixture.overlayPlan.nodes[0].id));
+});
+
 test('V4 pyramid route networks bind both unused wall sockets exactly and preserve source gates', () => {
   const fixture = pyramidRouteNetworkFixture();
   const keycardRoom = {
@@ -2945,12 +3106,14 @@ test('V4 materialization retains one exact parent-anchored forest branch', () =>
     String(id) === String(retainedSegment.to.socketId)
   ));
   operation.realizationMode = 'parent-anchored-forest';
+  operation.localProgressionArcRealized = false;
   operation.endpointSocketIds = [retainedSocketId];
   operation.omittedEndpointSocketIds = [omittedSocketId];
   operation.nodeIds = [retainedNode.id];
   operation.segmentIds = [retainedSegment.id];
   operation.parentAnchoredComponents = [{
     id: `${operation.id}:parent-anchored-component:0`,
+    attachmentSocketIds: [retainedSocketId],
     attachmentSocketId: retainedSocketId,
     nodeIds: [retainedNode.id],
     segmentIds: [retainedSegment.id],
@@ -2982,10 +3145,18 @@ test('V4 materialization retains one exact parent-anchored forest branch', () =>
   );
   const connection = result.connectionPlans.find(({ id }) => id === retainedSegment.id);
   assert.equal(connection.routeNetworkRealizationMode, 'parent-anchored-forest');
+  assert.equal(connection.routeNetworkLocalProgressionArcRealized, false);
+  assert.deepEqual(connection.parentAnchoredDeclaredComponentIds, [
+    operation.parentAnchoredComponents[0].id,
+  ]);
+  assert.deepEqual(connection.parentAnchoredDeclaredNodeIds, operation.nodeIds);
+  assert.deepEqual(connection.parentAnchoredDeclaredSegmentIds, operation.segmentIds);
   assert.equal(
     connection.parentAnchoredComponentId,
     operation.parentAnchoredComponents[0].id,
   );
+  assert.equal(connection.parentAnchoredAttachmentSocketId, retainedSocketId);
+  assert.deepEqual(connection.parentAnchoredAttachmentSocketIds, [retainedSocketId]);
   assert.deepEqual(result.diagnostics.routeNetworks[0].omittedEndpointSocketIds, [
     omittedSocketId,
   ]);

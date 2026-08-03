@@ -3,6 +3,7 @@ import {
   createDungeonJunctionGeometryRecord,
   createDungeonSocketLandingOverlapVolume,
 } from './geometry.js';
+import { inspectConnectorOnlyParentAnchoredProjection } from './parentAnchoredConnectorForest.js';
 
 export const DUNGEON_SUPPLEMENT_ROOT_NAME = 'DungeonSupplementRoot';
 export const DUNGEON_SUPPLEMENT_FRAGMENT_SCHEMA = 'ruindivex-dungeon-supplement-fragment/v1';
@@ -1566,7 +1567,13 @@ function getConnectedSocketIds(segments) {
   return connected;
 }
 
-function createConnectorProxyProgressionCandidates(elements) {
+function createConnectorProxyProgressionCandidates(
+  elements,
+  connectorOnlyParentAnchoredProjection = {
+    proxyIds: new Set(),
+    collapseRoomIdBySegmentId: new Map(),
+  },
+) {
   const connectorIds = new Set(elements.nodes
     .filter(isSupplementConnectorProxyNode)
     .map(({ id }) => String(id)));
@@ -1634,7 +1641,8 @@ function createConnectorProxyProgressionCandidates(elements) {
         { code: 'INVALID_SUPPLEMENT_CONNECTOR_JUNCTION_ARMS' },
       );
     }
-    if (candidates.length === 0) {
+    if (candidates.length === 0
+      && !connectorOnlyParentAnchoredProjection.proxyIds.has(proxyId)) {
       throw new DungeonSupplementAssemblyError(
         `Connector proxy ${proxyId} cannot reach a substantive supplemental room.`,
         { code: 'INVALID_SUPPLEMENT_CONNECTOR_JUNCTION_PROGRESSION' },
@@ -1642,7 +1650,12 @@ function createConnectorProxyProgressionCandidates(elements) {
     }
     candidatesByProxyId.set(proxyId, candidates);
   }
-  return { candidatesByProxyId, armIdsByProxyId };
+  return {
+    candidatesByProxyId,
+    armIdsByProxyId,
+    collapseRoomIdBySegmentId:
+      connectorOnlyParentAnchoredProjection.collapseRoomIdBySegmentId,
+  };
 }
 
 function selectConnectorProxyProgressionCandidate(candidates = [], excludedRoomId = null) {
@@ -1673,12 +1686,18 @@ function resolveConnectorProxyProgressionEndpoints(
   fromNodeId,
   toNodeId,
   candidatesByProxyId,
+  collapseRoomId = null,
 ) {
   const fromProxyId = candidatesByProxyId.has(String(fromNodeId)) ? String(fromNodeId) : null;
   const toProxyId = candidatesByProxyId.has(String(toNodeId)) ? String(toNodeId) : null;
-  let fromProgressionRoomId = fromNodeId;
-  let toProgressionRoomId = toNodeId;
-  if (fromProxyId && toProxyId) {
+  let fromProgressionRoomId = collapseRoomId ?? fromNodeId;
+  let toProgressionRoomId = collapseRoomId ?? toNodeId;
+  if (collapseRoomId) {
+    // A connector-only parent-anchored component is a physical supplement,
+    // not a local progression arc. Collapse its room projection onto the
+    // component's canonical authored parent root while preserving the exact
+    // physical endpoints and connection plan below.
+  } else if (fromProxyId && toProxyId) {
     const pair = selectConnectorProxyProgressionPair(
       candidatesByProxyId.get(fromProxyId),
       candidatesByProxyId.get(toProxyId),
@@ -1702,6 +1721,7 @@ function resolveConnectorProxyProgressionEndpoints(
     fromProxyId,
     toProxyId,
     selfEdge: fromProgressionRoomId === toProgressionRoomId,
+    physicalOnlyParentAnchoredComponent: Boolean(collapseRoomId),
   };
 }
 
@@ -3809,6 +3829,7 @@ function assembleSegment({
     fromNodeId,
     toNodeId,
     connectorProxyProgression?.candidatesByProxyId ?? new Map(),
+    connectorProxyProgression?.collapseRoomIdBySegmentId?.get(String(id)) ?? null,
   );
   const parentAnchoredComponent = asArray(operation?.parentAnchoredComponents).find((component) => (
     asArray(component?.segmentIds).some((segmentId) => String(segmentId) === String(id))
@@ -3825,6 +3846,10 @@ function assembleSegment({
     progressionFromRoomId: progressionEndpoints.fromProgressionRoomId,
     progressionToRoomId: progressionEndpoints.toProgressionRoomId,
     progressionCollapsedSelfEdge: progressionEndpoints.selfEdge,
+    routeNetworkProgressionProjectionMode:
+      progressionEndpoints.physicalOnlyParentAnchoredComponent
+        ? 'parent-anchored-component-physical-only'
+        : null,
     connectorJunctionProxyIds: [
       progressionEndpoints.fromProxyId,
       progressionEndpoints.toProxyId,
@@ -3857,8 +3882,17 @@ function assembleSegment({
     routeNetworkGrantId: operation?.grantId ?? null,
     routeNetworkKind: operation?.routeNetworkKind ?? null,
     routeNetworkRealizationMode: operation?.realizationMode ?? null,
+    routeNetworkLocalProgressionArcRealized:
+      operation?.localProgressionArcRealized ?? null,
+    parentAnchoredDeclaredComponentIds: asArray(operation?.parentAnchoredComponents)
+      .map(({ id: componentId }) => String(componentId)),
     parentAnchoredComponentId: parentAnchoredComponent?.id ?? null,
     parentAnchoredAttachmentSocketId: parentAnchoredComponent?.attachmentSocketId ?? null,
+    parentAnchoredAttachmentSocketIds: asArray(
+      parentAnchoredComponent?.attachmentSocketIds,
+    ).map(String),
+    parentAnchoredDeclaredNodeIds: asArray(parentAnchoredComponent?.nodeIds).map(String),
+    parentAnchoredDeclaredSegmentIds: asArray(parentAnchoredComponent?.segmentIds).map(String),
     topologyTemplateId: operation?.topologyTemplateId ?? null,
     elevationModes: asArray(operation?.elevationModes).map(String),
     accessDomainId: operation?.accessDomainId ?? null,
@@ -3889,8 +3923,21 @@ function assembleSegment({
     routeNetworkGrantId: operation?.grantId ?? null,
     routeNetworkKind: operation?.routeNetworkKind ?? null,
     routeNetworkRealizationMode: operation?.realizationMode ?? null,
+    routeNetworkLocalProgressionArcRealized:
+      operation?.localProgressionArcRealized ?? null,
+    routeNetworkProgressionProjectionMode:
+      progressionEndpoints.physicalOnlyParentAnchoredComponent
+        ? 'parent-anchored-component-physical-only'
+        : null,
+    parentAnchoredDeclaredComponentIds: asArray(operation?.parentAnchoredComponents)
+      .map(({ id: componentId }) => String(componentId)),
     parentAnchoredComponentId: parentAnchoredComponent?.id ?? null,
     parentAnchoredAttachmentSocketId: parentAnchoredComponent?.attachmentSocketId ?? null,
+    parentAnchoredAttachmentSocketIds: asArray(
+      parentAnchoredComponent?.attachmentSocketIds,
+    ).map(String),
+    parentAnchoredDeclaredNodeIds: asArray(parentAnchoredComponent?.nodeIds).map(String),
+    parentAnchoredDeclaredSegmentIds: asArray(parentAnchoredComponent?.segmentIds).map(String),
     topologyTemplateId: operation?.topologyTemplateId ?? null,
     accessDomainId: operation?.accessDomainId ?? null,
     progressionBandId: operation?.progressionBandId ?? null,
@@ -4307,7 +4354,17 @@ export function assembleDungeonSupplement({
   try {
     validateRouteNetworkSocketBindings(elements, overlayPlan);
     validatePresentationRecords(elements, overlayPlan);
-    connectorProxyProgression = createConnectorProxyProgressionCandidates(elements);
+    const connectorOnlyParentAnchoredProjection =
+      inspectConnectorOnlyParentAnchoredProjection({
+        overlayPlan,
+        nodes: elements.nodes,
+        segments: elements.segments,
+        isConnectorNode: isSupplementConnectorProxyNode,
+      });
+    connectorProxyProgression = createConnectorProxyProgressionCandidates(
+      elements,
+      connectorOnlyParentAnchoredProjection,
+    );
     for (const node of elements.nodes) {
       const assembled = assembleNode({
         node,

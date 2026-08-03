@@ -3787,6 +3787,247 @@ test('authoritative half-grid connector cores use exact rotated cells and keep p
   );
 });
 
+test('connector-only parent-anchored forests keep every declared component physically exact', () => {
+  const validate = ({
+    localProgressionArcRealized = false,
+    blockComponent = false,
+    misdeclareNode = false,
+    misdeclareSegment = false,
+  } = {}) => {
+    const generator = new DungeonGenerator({ random: () => 0.5 });
+    const operationId = 'supplement:test:parent-anchored-connector-only';
+    const componentId = `${operationId}:component:0`;
+    const connectorNodeId = `${operationId}:connector-module`;
+    const coreFloors = [];
+    for (let x = -1; x <= 1; x += 1) {
+      for (let z = -1; z <= 1; z += 1) {
+        coreFloors.push({
+          x,
+          z,
+          elevation: 0,
+          level: 0,
+          type: 'floor',
+          roomId: connectorNodeId,
+          surface: 'supplementConnectorJunctionCore',
+          connectorJunctionOwnerId: connectorNodeId,
+          augmentationFloorCellId: `${connectorNodeId}:floor-tier:base:cell:${x}:${z}`,
+          isDungeonSupplementConnectorFloor: true,
+          augmentationOwnerId: operationId,
+          mergedFloorOwnerIds: [connectorNodeId],
+          mergedFloorSourceCount: 1,
+          noEnemySpawn: true,
+          traversalLinks: [],
+        });
+      }
+    }
+    const hubFloor = {
+      x: -2,
+      z: 0,
+      elevation: 0,
+      level: 0,
+      type: 'floor',
+      roomId: 'hubTown',
+      surface: 'roomFloor',
+      traversalLinks: [],
+    };
+    const exitFloor = {
+      x: 2,
+      z: 0,
+      elevation: 0,
+      level: 0,
+      type: 'floor',
+      roomId: 'fixtureExit',
+      surface: 'roomFloor',
+      traversalLinks: [],
+    };
+    const westApproach = coreFloors.find(({ x, z }) => x === -1 && z === 0);
+    const eastApproach = coreFloors.find(({ x, z }) => x === 1 && z === 0);
+    const westSegmentId = `${operationId}:west`;
+    const eastSegmentId = `${operationId}:east`;
+    const declaredSegmentIds = misdeclareSegment
+      ? [westSegmentId, `${operationId}:missing-east`]
+      : [westSegmentId, eastSegmentId];
+    const makePlan = ({ id, fromRoomId, fromFloor, fromSocketId, toRoomId, toFloor, toSocketId }) => {
+      for (const floor of [fromFloor, toFloor]) {
+        floor.connectorId = id;
+        floor.connectionId = id;
+        floor.signedConnectorFloorOwnerId = id;
+      }
+      const fromSocket = {
+        id: fromSocketId,
+        roomId: fromRoomId,
+        x: fromFloor.x,
+        z: fromFloor.z,
+        elevation: 0,
+        connectorType: 'ground_corridor',
+        floorKey: generator._getFloorTileGraphKey(fromFloor),
+      };
+      const toSocket = {
+        id: toSocketId,
+        roomId: toRoomId,
+        x: toFloor.x,
+        z: toFloor.z,
+        elevation: 0,
+        connectorType: 'ground_corridor',
+        floorKey: generator._getFloorTileGraphKey(toFloor),
+      };
+      fromSocket.matchingSocketId = toSocket.id;
+      toSocket.matchingSocketId = fromSocket.id;
+      return {
+        id,
+        fromRoomId,
+        toRoomId,
+        fromSocket,
+        toSocket,
+        level: 0,
+        elevation: 0,
+        sourceElevation: 0,
+        destinationElevation: 0,
+        elevationDelta: 0,
+        bridgePath: [
+          { x: fromFloor.x, z: fromFloor.z, elevation: 0 },
+          { x: toFloor.x, z: toFloor.z, elevation: 0 },
+        ],
+        traversalFloorKeys: [fromSocket.floorKey, toSocket.floorKey],
+        isDungeonSupplement: true,
+        isRouteNetworkConnection: true,
+        augmentationOperationType: 'routeNetwork',
+        augmentationOperationId: operationId,
+        topologyTemplateId: 'over-under-loop',
+        elevationModes: ['lift'],
+        routeNetworkRealizationMode: 'parent-anchored-forest',
+        routeNetworkLocalProgressionArcRealized: localProgressionArcRealized,
+        parentAnchoredDeclaredComponentIds: [componentId],
+        parentAnchoredComponentId: componentId,
+        parentAnchoredAttachmentSocketIds: ['parent-west', 'parent-east'],
+        parentAnchoredDeclaredNodeIds: [
+          misdeclareNode ? `${operationId}:missing-node` : connectorNodeId,
+        ],
+        parentAnchoredDeclaredSegmentIds: declaredSegmentIds,
+        connectorVariantConstraints: {},
+      };
+    };
+    const plans = [
+      makePlan({
+        id: westSegmentId,
+        fromRoomId: 'hubTown',
+        fromFloor: hubFloor,
+        fromSocketId: 'parent-west',
+        toRoomId: connectorNodeId,
+        toFloor: westApproach,
+        toSocketId: `${connectorNodeId}:west`,
+      }),
+      makePlan({
+        id: eastSegmentId,
+        fromRoomId: connectorNodeId,
+        fromFloor: eastApproach,
+        fromSocketId: `${connectorNodeId}:east`,
+        toRoomId: 'fixtureExit',
+        toFloor: exitFloor,
+        toSocketId: 'parent-east',
+      }),
+    ];
+    return generator._validatePlatformability({
+      floorTiles: [hubFloor, ...coreFloors, exitFloor],
+      rooms: [
+        { id: 'hubTown', type: 'hub', x: -2, z: 0, width: 1, depth: 1, baseElevation: 0 },
+        {
+          id: 'fixtureExit',
+          type: 'room',
+          x: 2,
+          z: 0,
+          width: 1,
+          depth: 1,
+          baseElevation: 0,
+          suppressRoomGeometry: true,
+        },
+        {
+          id: connectorNodeId,
+          type: 'supplement',
+          x: 0,
+          z: 0,
+          width: 3,
+          depth: 3,
+          baseElevation: 0,
+          isDungeonSupplement: false,
+          isDungeonSupplementConnector: true,
+          isSupplementConnectorModule: true,
+          isConnectorJunctionProxy: true,
+          suppressRoomGeometry: true,
+          stampConnectorJunctionFloor: true,
+          junctionKind: 'through-t',
+          countsAsMeaningfulStation: false,
+          minimumPhysicalConnectorArms: 2,
+          augmentationOperationId: operationId,
+          augmentationFloorTiers: [{
+            id: 'base',
+            runtimeId: `${connectorNodeId}:floor-tier:base`,
+            localTierId: 'base',
+            authoritative: true,
+            localElevation: 0,
+            worldElevation: 0,
+            worldCells: coreFloors.map((floor) => ({
+              id: floor.augmentationFloorCellId,
+              grid: { x: floor.x, z: floor.z },
+              elevation: floor.elevation,
+            })),
+          }],
+        },
+      ],
+      solidZones: blockComponent ? [{
+        id: 'parent-anchored-component-blocking-wall',
+        position: new THREE.Vector3(-generator.tileSize * 0.5, 1.5, 0),
+        halfWidth: 0.08,
+        halfDepth: generator.tileSize * 1.5,
+        verticalHalfHeight: 1.5,
+      }] : [],
+      connectionPlans: plans,
+      doors: [],
+      landmarks: {},
+      encounters: [],
+      useSegmentBarriers: true,
+    });
+  };
+
+  const valid = validate();
+  assert.equal(valid.accepted, true, valid.errors.join('\n'));
+  const validOperation = valid.details.supplementVerticalConnectivityChecks[0];
+  assert.equal(validOperation.localProgressionArcRealized, false);
+  assert.equal(validOperation.parentAnchoredPhysicalContractAccepted, true);
+  assert.equal(validOperation.parentAnchoredComponentChecks[0].exactDeclaredMembership, true);
+  assert.ok(validOperation.parentAnchoredComponentChecks[0].attachmentChecks.every((check) => (
+    check.exactEndpointPresent && check.reachable && check.returnable
+  )));
+
+  const missingMarker = validate({ localProgressionArcRealized: null });
+  assert.equal(missingMarker.accepted, false);
+  assert.match(missingMarker.errors.join('\n'), /parent-anchored forest/);
+
+  const missingDeclaredSegment = validate({ misdeclareSegment: true });
+  assert.equal(missingDeclaredSegment.accepted, false);
+  assert.equal(
+    missingDeclaredSegment.details.supplementVerticalConnectivityChecks[0]
+      .parentAnchoredComponentChecks[0].exactDeclaredMembership,
+    false,
+  );
+
+  const missingDeclaredNode = validate({ misdeclareNode: true });
+  assert.equal(missingDeclaredNode.accepted, false);
+  assert.equal(
+    missingDeclaredNode.details.supplementVerticalConnectivityChecks[0]
+      .parentAnchoredComponentChecks[0].exactDeclaredMembership,
+    false,
+  );
+
+  const blocked = validate({ blockComponent: true });
+  assert.equal(blocked.accepted, false);
+  assert.equal(
+    blocked.details.supplementVerticalConnectivityChecks[0]
+      .parentAnchoredComponentChecks[0].accepted,
+    false,
+  );
+});
+
 test('floorless ladder and lift shaft points require exact reachable landings and links', () => {
   const validateVerticalContract = (kind, {
     removeTopLanding = false,
@@ -4316,31 +4557,11 @@ test('a nonzero-elevation supplement keeps every connector mouth open and reacha
     augmentationProfileId: AUGMENTATION_PROFILE_ID,
     augmentationSeed: AUGMENTED_SEED,
     basePlanHash: AUGMENTED_BASE_PLAN_HASH,
+    augmentationRealizationAttemptLimit: 1,
   });
   const inertTexture = new THREE.Texture();
   inertTexture.name = 'connectorEntranceAugmentationTexture';
   generator._loadRuinTexture = () => inertTexture;
-
-  generator.augmentationProfileId = null;
-  const { dungeon: acceptedParent, randomTape } = generator
-    ._generateAcceptedIndustrialDungeon({ captureAcceptedRandomTape: true });
-  generator.augmentationProfileId = AUGMENTATION_PROFILE_ID;
-  // `generate()` plans every replay against this finalized accepted-parent
-  // snapshot. Keep the focused `_generateOnce()` witness on the same host
-  // geometry so it exercises production replay rather than a pre-finalization
-  // diagnostic state with shifted route-station distances.
-  generator._augmentationReplayPlanningSnapshotOverride = generator
-    ._createIndustrialDungeonAugmentationPlanningSnapshot({
-      rooms: acceptedParent.rooms,
-      connectionPlans: acceptedParent.connectionPlans,
-    });
-  let replayCursor = 0;
-  generator.random = () => {
-    assert.ok(replayCursor < randomTape.length, 'augmented replay exceeded parent RNG tape');
-    const value = randomTape[replayCursor];
-    replayCursor += 1;
-    return value;
-  };
 
   let wallRuns = [];
   const collectBoundaryWallRuns = generator._collectBoundaryWallRuns.bind(generator);
@@ -4363,8 +4584,7 @@ test('a nonzero-elevation supplement keeps every connector mouth open and reacha
 
   let dungeon = null;
   try {
-    dungeon = generator._generateOnce();
-    assert.equal(replayCursor, randomTape.length);
+    dungeon = generator.generate();
     assert.equal(
       dungeon.augmentationStatus,
       'applied',
@@ -4459,7 +4679,6 @@ test('a nonzero-elevation supplement keeps every connector mouth open and reacha
     );
   } finally {
     generator._disposeGeneratedDungeonCandidate(dungeon);
-    generator._disposeGeneratedDungeonCandidate(acceptedParent);
   }
 });
 

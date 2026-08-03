@@ -21,6 +21,9 @@ import {
 import {
   objectiveCoverageGrantForOperationStationSide,
 } from '../src/dungeon-augmentation/objectiveCoverageStationSide.js';
+import {
+  normalizeRouteNetworkEntityOmissions,
+} from '../src/dungeon-augmentation/routeNetworkModulePruning.js';
 
 const PROFILE_ID = 'industrial-supplement-preview-v2';
 const THEME_BINDING = Object.freeze({
@@ -539,6 +542,7 @@ function makeV4ValidationFixture() {
     return {
       id,
       operationId,
+      physicalOrdinal: index,
       parentRegionId: 'validation-fixture-region',
       logicalEdgeId: null,
       physicalSegmentId: id,
@@ -575,6 +579,7 @@ function makeV4ValidationFixture() {
     return {
       id,
       operationId,
+      ordinal: index,
       parentRegionId: 'validation-fixture-region',
       kind: index === 0
         ? 'supplementConnectorJunction'
@@ -973,7 +978,6 @@ function validateV4(plan, fixture) {
 function makeParentAnchoredForestValidationFixture() {
   const result = makeV4ValidationFixture();
   const { plan } = result;
-  applyValidV4SelectionManifest(plan);
   const operation = plan.operations[0];
   const retainedNodeIds = new Set(operation.nodeIds.slice(0, 1));
   const retainedSegmentIds = new Set(operation.segmentIds.slice(0, 1));
@@ -1023,12 +1027,7 @@ function makeParentAnchoredForestValidationFixture() {
       };
     }),
   ];
-  plan.nodes = plan.nodes.filter((node) => retainedNodeIds.has(node.id));
-  plan.segments = plan.segments.filter((segment) => retainedSegmentIds.has(segment.id));
-  for (const node of plan.nodes) {
-    node.sockets = node.sockets.filter((socket) => retainedSegmentIds.has(String(socket.segmentId)));
-  }
-  const retainedRoom = plan.nodes[0];
+  const retainedRoom = plan.nodes.find((node) => retainedNodeIds.has(node.id));
   retainedRoom.kind = 'supplementRoom';
   retainedRoom.grammarId = 'supplement-chamber-compact-v1';
   retainedRoom.blueprintId = `${retainedRoom.id}:retained-room-blueprint`;
@@ -1044,6 +1043,17 @@ function makeParentAnchoredForestValidationFixture() {
     position: structuredClone(retainedRoom.placement.center),
   }];
   delete retainedRoom.junction;
+  operation.roomNodeIds = [retainedRoom.id, ...operation.roomNodeIds];
+  operation.connectorJunctionNodeIds = [];
+  operation.connectorJunctionCount = 0;
+  operation.connectorInfrastructureNodeIds = [];
+  operation.connectorInfrastructureCount = 0;
+  applyValidV4SelectionManifest(plan);
+  plan.nodes = plan.nodes.filter((node) => retainedNodeIds.has(node.id));
+  plan.segments = plan.segments.filter((segment) => retainedSegmentIds.has(segment.id));
+  for (const node of plan.nodes) {
+    node.sockets = node.sockets.filter((socket) => retainedSegmentIds.has(String(socket.segmentId)));
+  }
   const retainedSocketId = operation.endpointSocketIds[0];
   const omittedSocketId = operation.endpointSocketIds[1];
   operation.realizationMode = 'parent-anchored-forest';
@@ -1051,6 +1061,7 @@ function makeParentAnchoredForestValidationFixture() {
   operation.omittedEndpointSocketIds = [omittedSocketId];
   operation.parentAnchoredComponents = [{
     id: `${operation.id}:parent-anchored-component:0`,
+    attachmentSocketIds: [retainedSocketId],
     attachmentSocketId: retainedSocketId,
     nodeIds: [...retainedNodeIds],
     segmentIds: [...retainedSegmentIds],
@@ -1079,9 +1090,55 @@ function makeParentAnchoredForestValidationFixture() {
     spanKind: 'supplement-physical-route',
     boundedByMeaningfulStations: true,
   }));
-  operation.localProgressionArc = ['enter', 'challenge'];
+  operation.localProgressionArcRealized = false;
   operation.cycleRankDelta = 0;
-  operation.returnRouteGuaranteed = false;
+  operation.returnRouteGuaranteed = true;
+  plan.completionMode = 'best-effort-partial';
+  plan.prunedRouteNetworkGrants = [];
+  rehash(plan);
+  return result;
+}
+
+function makeMultiRootParentAnchoredValidationFixture() {
+  const result = makeV4ValidationFixture();
+  const { plan } = result;
+  const operation = plan.operations[0];
+  applyValidV4SelectionManifest(plan);
+  const omittedEvidence = structuredClone(plan.nodes.at(-1));
+  omittedEvidence.id = `${operation.id}:omitted-evidence-node`;
+  omittedEvidence.ordinal = plan.nodes.length;
+  omittedEvidence.placement.center = { x: 200, y: 0, z: 200 };
+  const signature = createRouteNetworkConflictEntitySignature(omittedEvidence, 'node');
+  plan.routeNetworkConflictExclusions = [{
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: omittedEvidence.id,
+    signature,
+    reason: 'synthetic-multi-root-evidence',
+  }];
+  plan.routeNetworkEntityOmissions = [{
+    grantId: operation.grantId,
+    operationId: operation.id,
+    entityKind: 'node',
+    entityId: omittedEvidence.id,
+    ordinal: omittedEvidence.ordinal,
+    signature,
+    disposition: 'conflict-root',
+    reason: 'synthetic-multi-root-evidence',
+    rootSignature: signature,
+  }];
+  operation.realizationMode = 'parent-anchored-forest';
+  operation.omittedEndpointSocketIds = [];
+  operation.parentAnchoredComponents = [{
+    id: `${operation.id}:parent-anchored-component:0`,
+    attachmentSocketIds: [...operation.endpointSocketIds],
+    attachmentSocketId: operation.endpointSocketIds[0],
+    nodeIds: [...operation.nodeIds],
+    segmentIds: [...operation.segmentIds],
+    bidirectional: true,
+  }];
+  operation.localProgressionArcRealized = false;
+  operation.cycleRankDelta = 0;
   plan.completionMode = 'best-effort-partial';
   plan.prunedRouteNetworkGrants = [];
   rehash(plan);
@@ -1094,10 +1151,49 @@ test('V4 accepts a non-vacuous audited parent-anchored forest with a retained en
   assert.equal(operation.endpointSocketIds.length, 1);
   assert.equal(operation.omittedEndpointSocketIds.length, 1);
   assert.equal(operation.moduleCount, 1, 'fixture is below the grant minimum');
-  assert.deepEqual(operation.localProgressionArc, ['enter', 'challenge']);
+  assert.deepEqual(operation.localProgressionArc, [
+    'enter', 'challenge', 'mechanism', 'payoff', 'reconnect',
+  ]);
+  assert.equal(operation.localProgressionArcRealized, false);
+  assert.equal(operation.returnRouteGuaranteed, true);
 
   const validation = validateV4(plan, fixture);
   assert.equal(validation.accepted, true, JSON.stringify(validation.errors));
+});
+
+test('V4 accepts one connected parent-anchored component with multiple exact roots', () => {
+  const { fixture, plan } = makeMultiRootParentAnchoredValidationFixture();
+  const operation = plan.operations[0];
+  assert.equal(operation.parentAnchoredComponents.length, 1);
+  assert.deepEqual(
+    operation.parentAnchoredComponents[0].attachmentSocketIds,
+    operation.endpointSocketIds,
+  );
+  const validation = validateV4(plan, fixture);
+  assert.equal(validation.accepted, true, JSON.stringify(validation.errors));
+
+  operation.cycleRankDelta = 1;
+  rehash(plan);
+  const wrongRank = validateV4(plan, fixture);
+  assert.ok(wrongRank.errors.some(({ code }) => (
+    code === 'route-network-parent-anchored-cycle-rank-invalid'
+  )), JSON.stringify(wrongRank.errors));
+});
+
+test('V4 parent-anchored forests explicitly disclaim the full local arc but guarantee return', () => {
+  const missingMarker = makeParentAnchoredForestValidationFixture();
+  delete missingMarker.plan.operations[0].localProgressionArcRealized;
+  rehash(missingMarker.plan);
+  assert.ok(validateV4(missingMarker.plan, missingMarker.fixture).errors.some(({ code }) => (
+    code === 'route-network-salvaged-local-progression-marker-missing'
+  )));
+
+  const missingReturn = makeParentAnchoredForestValidationFixture();
+  missingReturn.plan.operations[0].returnRouteGuaranteed = false;
+  rehash(missingReturn.plan);
+  assert.ok(validateV4(missingReturn.plan, missingReturn.fixture).errors.some(({ code }) => (
+    code === 'route-network-return-route-required'
+  )));
 });
 
 test('V4 parent-anchored forests reject components that do not partition retained modules', () => {
@@ -1146,6 +1242,161 @@ test('V4 parent-anchored forests retain generic connector-junction degree checks
   assert.ok(validation.errors.some(({ code }) => (
     code === 'route-network-connector-junction-degree-invalid'
   )), JSON.stringify(validation.errors));
+});
+
+test('V4 parent-anchored forests reject retained room-layout and encounter manifest drift', () => {
+  const layoutDrift = makeParentAnchoredForestValidationFixture();
+  const layoutOperation = layoutDrift.plan.operations[0];
+  layoutDrift.plan.nodes[0].grammarId = 'supplement-gallery-bay-v1';
+  layoutDrift.plan.nodes[0].contentRole = 'reward';
+  layoutOperation.contentRoles = ['reward'];
+  rehash(layoutDrift.plan);
+  const layoutValidation = validateV4(layoutDrift.plan, layoutDrift.fixture);
+  assert.ok(layoutValidation.errors.some(({ code }) => (
+    code === 'route-network-selection-manifest-room-layout-mismatch'
+  )), JSON.stringify(layoutValidation.errors));
+
+  const encounterDrift = makeParentAnchoredForestValidationFixture();
+  encounterDrift.plan.nodes[0].anchors[0].encounterProfileId =
+    'supplement-route-network-defense-drift';
+  rehash(encounterDrift.plan);
+  const encounterValidation = validateV4(encounterDrift.plan, encounterDrift.fixture);
+  assert.ok(encounterValidation.errors.some(({ code }) => (
+    code === 'route-network-selection-manifest-encounter-mismatch'
+  )), JSON.stringify(encounterValidation.errors));
+});
+
+test('V4 parent-anchored forests require unique disjoint explicit source ordinals', () => {
+  const cases = [{
+    label: 'duplicate omitted node',
+    mutate({ plan }) {
+      const omissions = plan.routeNetworkEntityOmissions.filter(({ entityKind }) => (
+        entityKind === 'node'
+      ));
+      omissions[1].ordinal = omissions[0].ordinal;
+      plan.routeNetworkEntityOmissions = normalizeRouteNetworkEntityOmissions(
+        plan.routeNetworkEntityOmissions,
+      );
+    },
+  }, {
+    label: 'retained/omitted node overlap',
+    mutate({ plan }) {
+      plan.routeNetworkEntityOmissions.find(({ entityKind }) => entityKind === 'node').ordinal =
+        plan.nodes[0].ordinal;
+      plan.routeNetworkEntityOmissions = normalizeRouteNetworkEntityOmissions(
+        plan.routeNetworkEntityOmissions,
+      );
+    },
+  }, {
+    label: 'missing retained node ordinal',
+    mutate({ plan }) {
+      delete plan.nodes[0].ordinal;
+    },
+  }, {
+    label: 'null retained node ordinal',
+    mutate({ plan }) {
+      plan.nodes[0].ordinal = null;
+    },
+  }, {
+    label: 'duplicate omitted segment',
+    mutate({ plan }) {
+      const omissions = plan.routeNetworkEntityOmissions.filter(({ entityKind }) => (
+        entityKind === 'segment'
+      ));
+      omissions[1].ordinal = omissions[0].ordinal;
+      plan.routeNetworkEntityOmissions = normalizeRouteNetworkEntityOmissions(
+        plan.routeNetworkEntityOmissions,
+      );
+    },
+  }, {
+    label: 'retained/omitted segment overlap',
+    mutate({ plan }) {
+      plan.routeNetworkEntityOmissions.find(({ entityKind }) => (
+        entityKind === 'segment'
+      )).ordinal = plan.segments[0].physicalOrdinal;
+      plan.routeNetworkEntityOmissions = normalizeRouteNetworkEntityOmissions(
+        plan.routeNetworkEntityOmissions,
+      );
+    },
+  }, {
+    label: 'missing retained segment ordinal',
+    mutate({ plan }) {
+      delete plan.segments[0].physicalOrdinal;
+    },
+  }, {
+    label: 'string retained segment ordinal',
+    mutate({ plan }) {
+      plan.segments[0].physicalOrdinal = String(plan.segments[0].physicalOrdinal);
+    },
+  }];
+  for (const testCase of cases) {
+    const value = makeParentAnchoredForestValidationFixture();
+    testCase.mutate(value);
+    rehash(value.plan);
+    const validation = validateV4(value.plan, value.fixture);
+    assert.ok(validation.errors.some(({ code }) => (
+      code === 'route-network-parent-anchored-source-ordinals-invalid'
+    )), `${testCase.label}: ${JSON.stringify(validation.errors)}`);
+  }
+});
+
+test('V4 salvaged objective coverage is explicit and absent from realized coverage aggregate', () => {
+  const makeCoverageForest = () => {
+    const value = makeParentAnchoredForestValidationFixture();
+    const operation = value.plan.operations[0];
+    const grant = value.fixture.extensionRegions[0].routeNetworkGrants[0];
+    const coverage = {
+      logicalEdgeId: 'entrance_keycardRoom',
+      physicalConnectionId: 'entrance_keycardRoom',
+      pathLengthMeters: 10,
+      stationDistancesMeters: [3, 7],
+      featurelessSpansMeters: [3, 4, 3],
+      ordinaryTraversalSpans: [{
+        startDistanceMeters: 0,
+        endDistanceMeters: 10,
+        lengthMeters: 10,
+        elevation: 0,
+      }],
+      directionChangeCount: 0,
+      maximumFeaturelessSpanMeters: 33.6,
+      coverageComplete: true,
+    };
+    grant.kind = 'objective-route-coverage';
+    grant.coverage = structuredClone(coverage);
+    operation.routeNetworkKind = 'objective-route-coverage';
+    operation.coverage = structuredClone(coverage);
+    operation.authoredCoverageRealized = false;
+    value.plan.featurelessCoverage = [];
+    rehash(value.plan);
+    return value;
+  };
+
+  const valid = makeCoverageForest();
+  const validValidation = validateV4(valid.plan, valid.fixture);
+  assert.equal(validValidation.errors.some(({ code }) => (
+    code === 'route-network-salvaged-authored-coverage-marker-missing'
+      || code === 'route-network-salvaged-authored-coverage-aggregate-invalid'
+  )), false, JSON.stringify(validValidation.errors));
+
+  const missingMarker = makeCoverageForest();
+  delete missingMarker.plan.operations[0].authoredCoverageRealized;
+  rehash(missingMarker.plan);
+  assert.ok(validateV4(missingMarker.plan, missingMarker.fixture).errors.some(({ code }) => (
+    code === 'route-network-salvaged-authored-coverage-marker-missing'
+  )));
+
+  const misleadingAggregate = makeCoverageForest();
+  misleadingAggregate.plan.featurelessCoverage = [{
+    operationId: misleadingAggregate.plan.operations[0].id,
+    ...structuredClone(misleadingAggregate.plan.operations[0].coverage),
+  }];
+  rehash(misleadingAggregate.plan);
+  assert.ok(validateV4(
+    misleadingAggregate.plan,
+    misleadingAggregate.fixture,
+  ).errors.some(({ code }) => (
+    code === 'route-network-salvaged-authored-coverage-aggregate-invalid'
+  )));
 });
 
 test('V4 best-effort overlays retain valid networks with an exact pruned-grant ledger', () => {

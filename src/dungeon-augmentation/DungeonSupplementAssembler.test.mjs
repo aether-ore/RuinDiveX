@@ -1277,6 +1277,91 @@ function routeNetworkOverlay(themeBinding, { corruptSocket = false } = {}) {
   };
 }
 
+function connectorOnlyParentAnchoredOverlay(themeBinding, {
+  realizationMode = 'parent-anchored-forest',
+  corruptComponent = false,
+} = {}) {
+  const overlayPlan = routeNetworkOverlay(themeBinding);
+  overlayPlan.profileRevision = 5;
+  const operation = overlayPlan.operations[0];
+  const connectorNode = overlayPlan.nodes[0];
+  const retainedSegments = overlayPlan.segments.slice(0, 2);
+  connectorNode.kind = 'supplementConnectorModule';
+  connectorNode.nodeKind = 'supplementConnectorModule';
+  connectorNode.anchors = [];
+  connectorNode.sockets = connectorNode.sockets.slice(0, 2);
+  for (const segment of retainedSegments) segment.bidirectional = true;
+  overlayPlan.nodes = [connectorNode];
+  overlayPlan.segments = retainedSegments;
+  operation.nodeIds = [connectorNode.id];
+  operation.segmentIds = retainedSegments.map(({ id }) => id);
+  operation.returnRouteGuaranteed = true;
+  if (realizationMode) {
+    operation.realizationMode = realizationMode;
+    operation.localProgressionArcRealized = false;
+    operation.omittedEndpointSocketIds = [];
+    operation.parentAnchoredComponents = [{
+      id: `${operation.id}:parent-anchored-component:0`,
+      attachmentSocketIds: corruptComponent
+        ? [operation.endpointSocketIds[0]]
+        : [...operation.endpointSocketIds],
+      attachmentSocketId: operation.endpointSocketIds[0],
+      nodeIds: [...operation.nodeIds],
+      segmentIds: [...operation.segmentIds],
+      bidirectional: true,
+    }];
+  }
+  return overlayPlan;
+}
+
+test('connector-only V4 parent-anchored forests assemble as exact physical supplements', () => {
+  const regionBinding = binding('region-a');
+  const { session, material } = themeSession(regionBinding, 'connector-only-forest');
+  const overlayPlan = connectorOnlyParentAnchoredOverlay(regionBinding);
+
+  const fragment = assembleDungeonSupplement({
+    overlayPlan,
+    themeSession: session,
+    structuralMode: 'complete',
+  });
+
+  assert.equal(fragment.rooms.length, 0);
+  assert.equal(fragment.connectorJunctionProxies.length, 1);
+  assert.equal(fragment.connectorJunctionProxies[0].physicalArmCount, 2);
+  assert.equal(fragment.connectionPlans.length, 2);
+  assert.ok(fragment.connectionPlans.every((plan) => (
+    plan.routeNetworkRealizationMode === 'parent-anchored-forest'
+      && plan.routeNetworkLocalProgressionArcRealized === false
+      && plan.routeNetworkProgressionProjectionMode
+        === 'parent-anchored-component-physical-only'
+      && plan.progressionFromRoomId === 'keycardRoom'
+      && plan.progressionToRoomId === 'keycardRoom'
+      && plan.progressionCollapsedSelfEdge === true
+  )));
+  assert.equal(fragment.minimap.hallways.length, 0);
+  fragment.dispose();
+  material.dispose();
+});
+
+test('connector-only progression remains strict outside an exact parent-anchored forest', () => {
+  const regionBinding = binding('region-a');
+  const { session, material } = themeSession(regionBinding, 'connector-only-rejection');
+  for (const overlayPlan of [
+    connectorOnlyParentAnchoredOverlay(regionBinding, { realizationMode: null }),
+    connectorOnlyParentAnchoredOverlay(regionBinding, { corruptComponent: true }),
+  ]) {
+    assert.throws(
+      () => assembleDungeonSupplement({
+        overlayPlan,
+        themeSession: session,
+        structuralMode: 'complete',
+      }),
+      (error) => error?.code === 'INVALID_SUPPLEMENT_CONNECTOR_JUNCTION_PROGRESSION',
+    );
+  }
+  material.dispose();
+});
+
 test('assembles V4 route junction, exact landings, source gate, and scoped shortcut records', () => {
   const regionBinding = binding('region-a');
   const { session, material } = themeSession(regionBinding, 'route-network');
@@ -1346,12 +1431,14 @@ test('assembles a V4 parent-anchored forest with one retained exact parent attac
   overlayPlan.nodes = [overlayPlan.nodes[0]];
   overlayPlan.segments = [retainedSegment];
   operation.realizationMode = 'parent-anchored-forest';
+  operation.localProgressionArcRealized = false;
   operation.endpointSocketIds = ['parent-west-unused'];
   operation.omittedEndpointSocketIds = ['parent-east-unused'];
   operation.nodeIds = [overlayPlan.nodes[0].id];
   operation.segmentIds = [retainedSegment.id];
   operation.parentAnchoredComponents = [{
     id: `${operation.id}:parent-anchored-component:0`,
+    attachmentSocketIds: ['parent-west-unused'],
     attachmentSocketId: 'parent-west-unused',
     nodeIds: [...operation.nodeIds],
     segmentIds: [...operation.segmentIds],
@@ -1366,11 +1453,18 @@ test('assembles a V4 parent-anchored forest with one retained exact parent attac
   const connection = fragment.connectionPlans.find(({ id }) => id === retainedSegment.id);
   assert.ok(connection);
   assert.equal(connection.routeNetworkRealizationMode, 'parent-anchored-forest');
+  assert.equal(connection.routeNetworkLocalProgressionArcRealized, false);
+  assert.deepEqual(connection.parentAnchoredDeclaredComponentIds, [
+    operation.parentAnchoredComponents[0].id,
+  ]);
+  assert.deepEqual(connection.parentAnchoredDeclaredNodeIds, operation.nodeIds);
+  assert.deepEqual(connection.parentAnchoredDeclaredSegmentIds, operation.segmentIds);
   assert.equal(
     connection.parentAnchoredComponentId,
     operation.parentAnchoredComponents[0].id,
   );
   assert.equal(connection.parentAnchoredAttachmentSocketId, 'parent-west-unused');
+  assert.deepEqual(connection.parentAnchoredAttachmentSocketIds, ['parent-west-unused']);
   assert.deepEqual(fragment.landingClearances.map(({ socketId }) => socketId), [
     'parent-west-unused',
   ]);

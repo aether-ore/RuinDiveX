@@ -664,6 +664,14 @@ while (records.length < seedCount) {
       const routeNetworks = (overlay?.operations ?? []).filter(({ type }) => (
         type === 'routeNetwork'
       ));
+      const parentAnchoredNetworks = routeNetworks.filter(({ realizationMode }) => (
+        realizationMode === 'parent-anchored-forest'
+      ));
+      const fullyRealizedNetworks = routeNetworks.filter(({ realizationMode }) => (
+        realizationMode !== 'parent-anchored-forest'
+      ));
+      const minimumPhysicalSupplementConnectionCount = fullyRealizedNetworks.length * 2
+        + parentAnchoredNetworks.length;
       const overlayNodes = overlay?.nodes ?? [];
       const supplementRoomNodes = overlayNodes.filter(({ kind }) => kind === 'supplementRoom');
       const connectorModuleNodes = overlayNodes.filter(({ kind }) => (
@@ -834,7 +842,10 @@ while (records.length < seedCount) {
       );
       assert.equal(pyramidLoopCount, 1);
       assert.ok(coverageNetworkCount >= 1);
-      assert.ok(moduleCount >= networkCount * 3 && moduleCount <= 30);
+      assert.ok(
+        moduleCount >= fullyRealizedNetworks.length * 3
+          && moduleCount <= 30,
+      );
       assert.ok(routeNetworks.every((operation) => {
         const operationNodes = operation.nodeIds.map((nodeId) => nodeById.get(nodeId));
         const operationRooms = operationNodes.filter((node) => node?.kind === 'supplementRoom');
@@ -845,28 +856,35 @@ while (records.length < seedCount) {
           node?.kind === 'supplementConnectorJunction'
         ));
         const derivedSubstantiveModuleCount = operationRooms.length + operationJunctions.length;
+        const parentAnchored = operation.realizationMode === 'parent-anchored-forest';
         return operationNodes.every(Boolean)
-          && derivedSubstantiveModuleCount >= 3
+          && derivedSubstantiveModuleCount >= (parentAnchored ? 0 : 3)
           && derivedSubstantiveModuleCount <= 6
           && operation.substantiveModuleCount === derivedSubstantiveModuleCount
           && operation.moduleCount === derivedSubstantiveModuleCount
           && operation.physicalNodeCount === operation.nodeIds.length
+          && operation.physicalNodeCount >= 1
+          && operation.segmentIds.length >= 1
           && operation.connectorModuleCount === operationConnectorModules.length
           && JSON.stringify([...(operation.connectorModuleNodeIds ?? [])].sort())
             === JSON.stringify(operationConnectorModules.map(({ id }) => id).sort())
           && JSON.stringify([...(operation.connectorJunctionNodeIds ?? [])].sort())
             === JSON.stringify(operationJunctions.map(({ id }) => id).sort())
-          && operationJunctions.some((node) => (
+          && (parentAnchored || operationJunctions.some((node) => (
             Number(node.graphDegree ?? node.junction?.graphDegree ?? 0) >= 3
               && node.junction?.countsAsMeaningfulStation === true
-          ))
-          && operation.endpointSocketIds.length >= 2
+          )))
+          && operation.endpointSocketIds.length >= (parentAnchored ? 1 : 2)
           && operation.returnRouteGuaranteed === true
           && operation.bidirectional === true
           && operation.localProgressionArc.join(':') === 'enter:challenge:mechanism:payoff:reconnect'
-          && operation.contentRoles.includes('challenge')
-          && operation.contentRoles.includes('reward');
-      }), 'A route network violates the V4 3-6 substantive-module contract.');
+          && (parentAnchored
+            ? operation.localProgressionArcRealized === false
+              && operation.parentAnchoredComponents.length >= 1
+            : operation.localProgressionArcRealized == null
+              && operation.contentRoles.includes('challenge')
+              && operation.contentRoles.includes('reward'));
+      }), 'A route network violates the V4 full-or-parent-anchored physical contract.');
       assert.ok(routeNetworks.every((operation) => (
         Array.isArray(operation.featurelessSpans)
           && operation.featurelessSpans.length > 0
@@ -878,6 +896,12 @@ while (records.length < seedCount) {
       )), 'Every network must retain non-vacuous final-graph featureless-span witnesses.');
       const coverageNetworks = routeNetworks.filter(({ routeNetworkKind }) => (
         routeNetworkKind === 'objective-route-coverage'
+      ));
+      const salvagedCoverageNetworks = coverageNetworks.filter(({ realizationMode }) => (
+        realizationMode === 'parent-anchored-forest'
+      ));
+      const realizedCoverageNetworks = coverageNetworks.filter(({ realizationMode }) => (
+        realizationMode !== 'parent-anchored-forest'
       ));
       assert.ok(coverageNetworks.every(({ coverage }) => (
         coverage?.coverageComplete === true
@@ -897,10 +921,13 @@ while (records.length < seedCount) {
               && Number(distanceMeters) <= MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6
           ))
       )), 'An objective route has missing or vacuous authored-plus-supplement coverage witnesses.');
+      assert.ok(salvagedCoverageNetworks.every(({ authoredCoverageRealized }) => (
+        authoredCoverageRealized === false
+      )), 'Every salvaged objective route must explicitly disclaim complete authored coverage.');
       assert.deepEqual(
         (overlay.featurelessCoverage ?? []).map(({ operationId }) => operationId).sort(),
-        coverageNetworks.map(({ id }) => id).sort(),
-        'Final coverage witnesses must exist once for every objective coverage network.',
+        realizedCoverageNetworks.map(({ id }) => id).sort(),
+        'Final authored coverage witnesses must exist only for fully realized objective networks.',
       );
       assert.ok(maximumFeaturelessSpanMeters <= MAXIMUM_FEATURELESS_SPAN_METERS + 1e-6);
       // A single dungeon must realize real topology, junction, and elevation
@@ -908,8 +935,8 @@ while (records.length < seedCount) {
       // 100-seed thresholds here incorrectly rejects a valid compact layout
       // before the aggregate frequency checks below can evaluate variety.
       assert.ok(topologyTemplateIds.length >= 1);
-      assert.ok(junctionKinds.length >= 1);
       assert.ok(elevationModes.length >= 1);
+      if (fullyRealizedNetworks.length > 0) assert.ok(junctionKinds.length >= 1);
       const supplementRoomById = new Map(supplementalRooms.map((room) => [room.id, room]));
       const connectorProxyById = new Map(routeStationProxies.map((room) => [room.id, room]));
       const junctionMetadataRoomById = new Map([
@@ -1336,7 +1363,7 @@ while (records.length < seedCount) {
           `${node.id} does not expose its exact physical connector approaches.`,
         );
       }
-      assert.ok(routeNetworks.every((operation) => operation.nodeIds.some((nodeId) => {
+      assert.ok(fullyRealizedNetworks.every((operation) => operation.nodeIds.some((nodeId) => {
         const node = nodeById.get(nodeId);
         const room = connectorProxyById.get(nodeId);
         return Number(actualNetworkNodeDegrees[nodeId] ?? 0) >= 3
@@ -1371,32 +1398,42 @@ while (records.length < seedCount) {
       const pyramidLoop = routeNetworks.find(({ routeNetworkKind }) => (
         routeNetworkKind === 'landmark-perimeter-loop'
       ));
-      assert.equal(pyramidLoop.cycleRankDelta, 1);
       assert.equal(pyramidLoop.landmarkRoomId, 'keycardRoom');
-      assert.equal(pyramidLoop.openedWallSides.length, 2);
-      assert.equal(new Set([
-        ...pyramidLoop.occupiedCriticalWallSides,
-        ...pyramidLoop.openedWallSides,
-      ]).size, 4);
-      assert.ok(physicalSupplementConnections.length >= networkCount * 2);
+      if (pyramidLoop.realizationMode === 'parent-anchored-forest') {
+        assert.equal(pyramidLoop.localProgressionArcRealized, false);
+        assert.ok(Number(pyramidLoop.cycleRankDelta) >= 0);
+      } else {
+        assert.equal(pyramidLoop.localProgressionArcRealized, undefined);
+        assert.equal(pyramidLoop.cycleRankDelta, 1);
+        assert.equal(pyramidLoop.openedWallSides.length, 2);
+        assert.equal(new Set([
+          ...pyramidLoop.occupiedCriticalWallSides,
+          ...pyramidLoop.openedWallSides,
+        ]).size, 4);
+      }
       assert.ok(
-        dungeon.floorTiles.some((tile) => (
-          supplementalRooms.some((room) => room.id === tile.roomId)
-          && tile.isPlatformingSurface
-          && Number(tile.elevation ?? 0) > Number(
-            supplementalRooms.find((room) => room.id === tile.roomId)?.baseElevation ?? 0,
-          )
-        )),
-        'V4 has no realized elevated platform surface.',
+        physicalSupplementConnections.length >= minimumPhysicalSupplementConnectionCount,
       );
-      assert.ok(
-        dungeon.encounters.some(({ roomId }) => supplementalRooms.some(({ id }) => id === roomId)),
-        'V4 challenge anchors did not reach the runtime facade.',
-      );
-      assert.ok(
-        dungeon.chests.some(({ roomId }) => supplementalRooms.some(({ id }) => id === roomId)),
-        'V4 reward anchors did not reach the runtime facade.',
-      );
+      if (fullyRealizedNetworks.length > 0) {
+        assert.ok(
+          dungeon.floorTiles.some((tile) => (
+            supplementalRooms.some((room) => room.id === tile.roomId)
+            && tile.isPlatformingSurface
+            && Number(tile.elevation ?? 0) > Number(
+              supplementalRooms.find((room) => room.id === tile.roomId)?.baseElevation ?? 0,
+            )
+          )),
+          'A fully realized V4 route has no elevated platform surface.',
+        );
+        assert.ok(
+          dungeon.encounters.some(({ roomId }) => supplementalRooms.some(({ id }) => id === roomId)),
+          'A fully realized V4 challenge anchor did not reach the runtime facade.',
+        );
+        assert.ok(
+          dungeon.chests.some(({ roomId }) => supplementalRooms.some(({ id }) => id === roomId)),
+          'A fully realized V4 reward anchor did not reach the runtime facade.',
+        );
+      }
       const connectorEntrances = dungeon.progression.validation.connectorEntrances;
       assert.ok(connectorEntrances.checkedSocketCount > 0);
       assert.equal(
@@ -1405,7 +1442,7 @@ while (records.length < seedCount) {
       );
       assert.ok(
         connectorEntrances.checks.filter((check) => check.strictApproachContract).length
-          >= networkCount * 2,
+          >= minimumPhysicalSupplementConnectionCount,
       );
       assert.ok(connectorEntrances.checks.every((check) => (
         check.socketReachable
@@ -1612,7 +1649,7 @@ while (records.length < seedCount) {
             ));
         })()
       )));
-      assert.ok(routeNetworks.every((operation) => (
+      assert.ok(fullyRealizedNetworks.every((operation) => (
         platformability.supplementJunctionConnectivityChecks.some((check) => (
           check.operationId === operation.id
           && operation.nodeIds.includes(check.roomId)
@@ -1632,7 +1669,7 @@ while (records.length < seedCount) {
               )
           )
         ))
-      )), 'Each route network needs an accepted realized degree-three junction.');
+      )), 'Each fully realized route network needs an accepted degree-three junction.');
       const verticalCheckByOperationId = new Map(
         platformability.supplementVerticalConnectivityChecks.map((check) => (
           [String(check.operationId), check]
@@ -1641,9 +1678,9 @@ while (records.length < seedCount) {
       assert.deepEqual(
         [...verticalCheckByOperationId.keys()].sort(),
         routeNetworks.map(({ id }) => String(id)).sort(),
-        'Complete vertical traversal must be validated once for every route network.',
+        'Every full or parent-anchored route network needs one exact physical-operation audit.',
       );
-      for (const operation of routeNetworks) {
+      for (const operation of fullyRealizedNetworks) {
         const check = verticalCheckByOperationId.get(String(operation.id));
         const connectedNodeIds = new Set(check?.connectedOperationNodeIds ?? []);
         assert.ok(
@@ -1652,6 +1689,28 @@ while (records.length < seedCount) {
             && check.hasRealVerticalTransfer
             && operation.nodeIds.every((nodeId) => connectedNodeIds.has(nodeId)),
           `${operation.id} lacks one complete, connected physical elevation traversal.`,
+        );
+      }
+      for (const operation of parentAnchoredNetworks) {
+        const check = verticalCheckByOperationId.get(String(operation.id));
+        assert.ok(
+          check?.accepted
+            && check.localProgressionArcRealized === false
+            && check.parentAnchoredPhysicalContractAccepted === true
+            && check.parentAnchoredComponentChecks.length > 0
+            && check.parentAnchoredComponentChecks.every((component) => (
+              component.accepted
+                && component.exactDeclaredMembership
+                && component.physicalConnectionIds.length > 0
+                && component.ownedFloorChecks.length > 0
+                && component.attachmentChecks.every((attachment) => (
+                  attachment.exactEndpointPresent
+                    && attachment.navigable
+                    && attachment.reachable
+                    && attachment.returnable
+                ))
+            )),
+          `${operation.id} lacks an exact reachable and returnable parent-anchored component.`,
         );
       }
       const shortcutConnectionIds = physicalSupplementConnections

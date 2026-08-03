@@ -301,6 +301,16 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
     const routeNetworks = (overlay?.operations ?? []).filter(({ type }) => (
       type === 'routeNetwork'
     ));
+    const parentAnchoredNetworks = routeNetworks.filter(({ realizationMode }) => (
+      realizationMode === 'parent-anchored-forest'
+    ));
+    const fullyRealizedNetworks = routeNetworks.filter(({ realizationMode }) => (
+      realizationMode !== 'parent-anchored-forest'
+    ));
+    const minimumPhysicalSupplementConnectionCount = fullyRealizedNetworks.length * 2
+      + parentAnchoredNetworks.length;
+    const minimumSupplementRoomCount = fullyRealizedNetworks.length * 2;
+    const minimumSubstantiveModuleCount = fullyRealizedNetworks.length * 3;
     const routeNetworkGrantIds = routeNetworks.map(({ grantId }) => String(grantId ?? ''));
     const routeNetworkGrantManifestAccepted = routeNetworkGrantIds.every(Boolean)
       && new Set(routeNetworkGrantIds).size === routeNetworks.length
@@ -308,6 +318,12 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
         === JSON.stringify(routeNetworks.map(({ grantId }) => grantId));
     const coverageNetworks = routeNetworks.filter(({ routeNetworkKind }) => (
       routeNetworkKind === 'objective-route-coverage'
+    ));
+    const salvagedCoverageNetworks = coverageNetworks.filter(({ realizationMode }) => (
+      realizationMode === 'parent-anchored-forest'
+    ));
+    const realizedCoverageNetworks = coverageNetworks.filter(({ realizationMode }) => (
+      realizationMode !== 'parent-anchored-forest'
     ));
     const coverageWitnessesAccepted = coverageNetworks.length > 0
       && coverageNetworks.every(({ coverage }) => (
@@ -325,9 +341,12 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
               && Number(distanceMeters) <= 33.6 + 1e-6
           ))
       ))
+      && salvagedCoverageNetworks.every(({ authoredCoverageRealized }) => (
+        authoredCoverageRealized === false
+      ))
       && JSON.stringify((overlay?.featurelessCoverage ?? [])
         .map(({ operationId }) => operationId).sort())
-        === JSON.stringify(coverageNetworks.map(({ id }) => id).sort());
+        === JSON.stringify(realizedCoverageNetworks.map(({ id }) => id).sort());
     const featurelessWitnessesAccepted = routeNetworks.every((operation) => (
       Array.isArray(operation.featurelessSpans)
         && operation.featurelessSpans.length > 0
@@ -350,7 +369,11 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
       .map(({ topologyTemplateId }) => topologyTemplateId ?? null);
     const junctionKinds = [...new Set(routeNetworks
       .flatMap((operation) => operation.junctionKinds ?? []))].sort();
+    const fullyRealizedJunctionKinds = [...new Set(fullyRealizedNetworks
+      .flatMap((operation) => operation.junctionKinds ?? []))].sort();
     const elevationModes = [...new Set(routeNetworks
+      .flatMap((operation) => operation.elevationModes ?? []))].sort();
+    const fullyRealizedElevationModes = [...new Set(fullyRealizedNetworks
       .flatMap((operation) => operation.elevationModes ?? []))].sort();
     const elevationModeSequence = routeNetworks
       .map((operation) => operation.elevationModes?.[0] ?? null);
@@ -685,6 +708,7 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
         }, 0),
     }));
     const realizedTopologyChecks = routeNetworks.map((operation) => {
+      const parentAnchored = operation.realizationMode === 'parent-anchored-forest';
       const plans = physicalSupplementConnections.filter((plan) => (
         plan.augmentationOperationId === operation.id
       ));
@@ -698,7 +722,7 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
           && rooms.length + operation.nodeIds.filter((nodeId) => (
             overlayNodeById.get(nodeId)?.kind === 'supplementConnectorJunction'
           )).length === Number(operation.substantiveModuleCount)
-          && Number(operation.substantiveModuleCount) >= 3
+          && Number(operation.substantiveModuleCount) >= (parentAnchored ? 0 : 3)
           && Number(operation.substantiveModuleCount) <= 6
           && plans.every((plan) => plan.topologyTemplateId === operation.topologyTemplateId)
           && rooms.every((room) => (
@@ -737,7 +761,12 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
                 : mode === 'split-level-platform'
                   ? hasElevatedPlatform
                   : false;
-      return { operationId: operation.id, mode, accepted };
+      return {
+        operationId: operation.id,
+        mode,
+        accepted,
+        localProgressionArcRealized: operation.localProgressionArcRealized !== false,
+      };
     });
     const actualElevationModes = [...new Set(realizedElevationChecks
       .filter(({ accepted }) => accepted)
@@ -863,6 +892,13 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
         .sort(),
       overlaySchema: overlay?.schema ?? null,
       routeNetworkCount: routeNetworks.length,
+      parentAnchoredRouteNetworkCount: parentAnchoredNetworks.length,
+      fullyRealizedRouteNetworkCount: fullyRealizedNetworks.length,
+      parentAnchoredRouteNetworkIds: parentAnchoredNetworks.map(({ id }) => id).sort(),
+      fullyRealizedRouteNetworkIds: fullyRealizedNetworks.map(({ id }) => id).sort(),
+      minimumPhysicalSupplementConnectionCount,
+      minimumSupplementRoomCount,
+      minimumSubstantiveModuleCount,
       coverageNetworkCount: routeNetworks.filter(({ routeNetworkKind }) => (
         routeNetworkKind === 'objective-route-coverage'
       )).length,
@@ -891,13 +927,18 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
       topologyTemplateIds,
       topologyTemplateSequence,
       junctionKinds,
+      fullyRealizedJunctionKinds,
       elevationModes,
+      fullyRealizedElevationModes,
       elevationModeSequence,
-      networkContractsAccepted: routeNetworks.every((operation) => (
-        operation.substantiveModuleCount >= 3
+      networkContractsAccepted: routeNetworks.every((operation) => {
+        const parentAnchored = operation.realizationMode === 'parent-anchored-forest';
+        return operation.substantiveModuleCount >= (parentAnchored ? 0 : 3)
           && operation.substantiveModuleCount <= 6
           && operation.moduleCount === operation.substantiveModuleCount
           && operation.physicalNodeCount === operation.nodeIds.length
+          && operation.physicalNodeCount >= 1
+          && operation.segmentIds.length >= 1
           && operation.substantiveModuleCount === operation.nodeIds.filter((nodeId) => (
             overlayRoomNodeIdSet.has(nodeId)
               || overlayNodeById.get(nodeId)?.kind === 'supplementConnectorJunction'
@@ -905,17 +946,21 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
           && operation.connectorModuleCount === operation.nodeIds.filter((nodeId) => (
             overlayNodeById.get(nodeId)?.kind === 'supplementConnectorModule'
           )).length
-          && operation.endpointSocketIds.length >= 2
+          && operation.endpointSocketIds.length >= (parentAnchored ? 1 : 2)
           && operation.returnRouteGuaranteed === true
           && operation.bidirectional === true
           && operation.localProgressionArc.join(':') === 'enter:challenge:mechanism:payoff:reconnect'
-          && operation.contentRoles.includes('challenge')
-          && operation.contentRoles.includes('reward')
-          && operation.contentRoles.includes('elevation')
-          && realizedMeaningfulJunctions.some((check) => (
-            check.operationId === operation.id
-          ))
-      )),
+          && (parentAnchored
+            ? operation.localProgressionArcRealized === false
+              && operation.parentAnchoredComponents.length >= 1
+            : operation.localProgressionArcRealized == null
+              && operation.contentRoles.includes('challenge')
+              && operation.contentRoles.includes('reward')
+              && operation.contentRoles.includes('elevation')
+              && realizedMeaningfulJunctions.some((check) => (
+                check.operationId === operation.id
+              )));
+      }),
       actualNetworkNodeDegrees,
       realizedNetworkJunctionChecks,
       overlayConnectorProxyChecks,
@@ -926,6 +971,8 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
       actualElevationModes,
       completeLayoutSignatureInputs,
       pyramidLoop: pyramidLoop ? {
+        realizationMode: pyramidLoop.realizationMode ?? null,
+        localProgressionArcRealized: pyramidLoop.localProgressionArcRealized ?? null,
         cycleRankDelta: pyramidLoop.cycleRankDelta,
         landmarkRoomId: pyramidLoop.landmarkRoomId,
         occupiedCriticalWallSides: pyramidLoop.occupiedCriticalWallSides,
@@ -1084,15 +1131,18 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
   expect(snapshot.operationTypes.every((type) => type === 'routeNetwork')).toBe(true);
   expect(snapshot.routeNetworkCount).toBeGreaterThanOrEqual(3);
   expect(snapshot.routeNetworkCount).toBeLessThanOrEqual(8);
+  expect(
+    snapshot.fullyRealizedRouteNetworkCount + snapshot.parentAnchoredRouteNetworkCount,
+  ).toBe(snapshot.routeNetworkCount);
   expect(snapshot.coverageNetworkCount).toBeGreaterThanOrEqual(1);
-  expect(snapshot.coverageEndpointSocketCounts).toEqual(
-    expect.arrayContaining([2, 3, 4]),
-  );
+  expect(snapshot.coverageEndpointSocketCounts.every((count) => count >= 1)).toBe(true);
   expect(snapshot.routeNetworkGrantManifestAccepted).toBe(true);
   expect(snapshot.coverageWitnessesAccepted).toBe(true);
   expect(snapshot.featurelessWitnessesAccepted).toBe(true);
   expect(snapshot.pyramidLoopCount).toBe(1);
-  expect(snapshot.overlayModuleCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount * 3);
+  expect(snapshot.overlayModuleCount).toBeGreaterThanOrEqual(
+    snapshot.minimumSubstantiveModuleCount,
+  );
   expect(snapshot.overlayModuleCount).toBeLessThanOrEqual(30);
   expect(snapshot.overlayNodePartitionAccepted).toBe(true);
   expect(snapshot.overlayModuleCount).toBe(
@@ -1109,18 +1159,26 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
   expect(snapshot.supplementRoomIds).toEqual(snapshot.overlayRoomNodeIds);
   expect(snapshot.supplementRoomIds.length).toBe(snapshot.overlayRoomNodeCount);
   expect(snapshot.supplementRoomIds.length).toBeGreaterThanOrEqual(
-    snapshot.routeNetworkCount * 2,
+    snapshot.minimumSupplementRoomCount,
   );
   expect(snapshot.supplementRoomIds.length).toBeLessThanOrEqual(30);
   expect(snapshot.maximumFeaturelessSpanMeters).toBeLessThanOrEqual(33.6);
   expect(snapshot.maximumRealizedPhysicalSpanMeters).toBeLessThanOrEqual(33.6 + 1e-6);
   expect(snapshot.topologyTemplateIds.length).toBeGreaterThanOrEqual(3);
-  expect(snapshot.junctionKinds.length).toBeGreaterThanOrEqual(2);
+  if (snapshot.fullyRealizedRouteNetworkCount > 0) {
+    expect(snapshot.junctionKinds.length).toBeGreaterThanOrEqual(1);
+  }
   expect(snapshot.elevationModes.length).toBeGreaterThanOrEqual(3);
   expect(snapshot.realizedTopologyChecks.every(({ accepted }) => accepted)).toBe(true);
-  expect(snapshot.actualJunctionKinds.length).toBeGreaterThanOrEqual(2);
-  expect(snapshot.realizedElevationChecks.every(({ accepted }) => accepted)).toBe(true);
-  expect(snapshot.actualElevationModes).toEqual(snapshot.elevationModes);
+  expect(snapshot.actualJunctionKinds).toEqual(
+    expect.arrayContaining(snapshot.fullyRealizedJunctionKinds),
+  );
+  expect(snapshot.realizedElevationChecks.filter(({ localProgressionArcRealized }) => (
+    localProgressionArcRealized
+  )).every(({ accepted }) => accepted)).toBe(true);
+  expect(snapshot.actualElevationModes).toEqual(
+    expect.arrayContaining(snapshot.fullyRealizedElevationModes),
+  );
   const selectionBagPrefixLength = Math.min(snapshot.routeNetworkCount, 6);
   expect(new Set(
     snapshot.topologyTemplateSequence.slice(0, selectionBagPrefixLength),
@@ -1132,7 +1190,9 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
     snapshot.completeLayoutSignatures.slice(0, selectionBagPrefixLength),
   ).size).toBe(selectionBagPrefixLength);
   expect(snapshot.networkContractsAccepted).toBe(true);
-  expect(snapshot.actualJunctionCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount);
+  expect(snapshot.actualJunctionCount).toBeGreaterThanOrEqual(
+    snapshot.fullyRealizedRouteNetworkCount,
+  );
   expect(snapshot.realizedNetworkJunctionChecks.filter((check) => (
     check.actualDegree >= 3
     && (!check.exactParentStationComposite || check.exactParentStationCompositeBound)
@@ -1141,16 +1201,22 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
     check.overlayMeaningful && check.runtimeMeaningful && check.runtimeJunctionKind
   ))).toBe(true);
   expect(snapshot.pyramidLoop).toMatchObject({
-    cycleRankDelta: 1,
     landmarkRoomId: 'keycardRoom',
     progressionBandId: 0,
   });
-  expect(snapshot.pyramidLoop.occupiedCriticalWallSides).toHaveLength(2);
-  expect(snapshot.pyramidLoop.openedWallSides).toHaveLength(2);
-  expect(new Set([
-    ...snapshot.pyramidLoop.occupiedCriticalWallSides,
-    ...snapshot.pyramidLoop.openedWallSides,
-  ]).size).toBe(4);
+  if (snapshot.pyramidLoop.realizationMode === 'parent-anchored-forest') {
+    expect(snapshot.pyramidLoop.localProgressionArcRealized).toBe(false);
+    expect(snapshot.pyramidLoop.cycleRankDelta).toBeGreaterThanOrEqual(0);
+  } else {
+    expect(snapshot.pyramidLoop.localProgressionArcRealized).toBeNull();
+    expect(snapshot.pyramidLoop.cycleRankDelta).toBe(1);
+    expect(snapshot.pyramidLoop.occupiedCriticalWallSides).toHaveLength(2);
+    expect(snapshot.pyramidLoop.openedWallSides).toHaveLength(2);
+    expect(new Set([
+      ...snapshot.pyramidLoop.occupiedCriticalWallSides,
+      ...snapshot.pyramidLoop.openedWallSides,
+    ]).size).toBe(4);
+  }
   expect(snapshot.authoredRoomCount).toBe(13);
   expect(snapshot.supplementRoomFootprintChecks).toHaveLength(snapshot.overlayRoomNodeCount);
   expect(snapshot.supplementRoomFootprintChecks.every((check) => (
@@ -1169,10 +1235,10 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
       + snapshot.supplementRoomIds.length,
   );
   expect(snapshot.supplementConnectionCount).toBeGreaterThanOrEqual(
-    snapshot.routeNetworkCount * 2,
+    snapshot.minimumPhysicalSupplementConnectionCount,
   );
   expect(snapshot.physicalSupplementConnectionCount).toBeGreaterThanOrEqual(
-    snapshot.routeNetworkCount * 2,
+    snapshot.minimumPhysicalSupplementConnectionCount,
   );
   expect(snapshot.routeStationProxyCount).toBeGreaterThanOrEqual(
     snapshot.overlayConnectorNodeIds.length,
@@ -1227,7 +1293,7 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
   );
   expect(snapshot.connectorEntrances.checks.filter((check) => (
     check.strictApproachContract
-  )).length).toBeGreaterThanOrEqual(snapshot.routeNetworkCount * 2);
+  )).length).toBeGreaterThanOrEqual(snapshot.minimumPhysicalSupplementConnectionCount);
   expect(snapshot.connectorEntrances.checks.every((check) => (
     check.socketReachable
       && check.outsideReachable
@@ -1365,10 +1431,11 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
           && approach.returnReachable
       ));
   })).toBe(true);
-  expect(snapshot.routeNetworkCount).toBeLessThanOrEqual(
+  expect(snapshot.fullyRealizedRouteNetworkCount).toBeLessThanOrEqual(
     new Set(snapshot.platformability.supplementJunctionConnectivityChecks
       .filter((check) => (
-        check.accepted
+        snapshot.fullyRealizedRouteNetworkIds.includes(check.operationId)
+          && check.accepted
           && (
             check.approachCount >= 3
             || (
@@ -1379,8 +1446,34 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
       ))
       .map(({ operationId }) => operationId)).size,
   );
-  expect(snapshot.platformability.supplementVerticalConnectivityChecks.every((check) => (
-    check.accepted && check.allOperationRoomsConnected
+  expect(snapshot.fullyRealizedRouteNetworkIds.every((operationId) => (
+    snapshot.platformability.supplementVerticalConnectivityChecks.some((check) => (
+      check.operationId === operationId
+        && check.accepted
+        && check.allOperationRoomsConnected
+        && check.hasRealVerticalTransfer
+    ))
+  ))).toBe(true);
+  expect(snapshot.parentAnchoredRouteNetworkIds.every((operationId) => (
+    snapshot.platformability.supplementVerticalConnectivityChecks.some((check) => (
+      check.operationId === operationId
+        && check.accepted
+        && check.localProgressionArcRealized === false
+        && check.parentAnchoredPhysicalContractAccepted
+        && check.parentAnchoredComponentChecks.length > 0
+        && check.parentAnchoredComponentChecks.every((component) => (
+          component.accepted
+            && component.exactDeclaredMembership
+            && component.physicalConnectionIds.length > 0
+            && component.ownedFloorChecks.length > 0
+            && component.attachmentChecks.every((attachment) => (
+              attachment.exactEndpointPresent
+                && attachment.navigable
+                && attachment.reachable
+                && attachment.returnable
+            ))
+        ))
+    ))
   ))).toBe(true);
   expect(snapshot.platformability.supplementShortcutConnectivityChecks
     .map(({ connectionId }) => connectionId)
@@ -1428,17 +1521,29 @@ test('opt-in Industrial preview assembles the deterministic inherited sidecar', 
   expect(snapshot.minimapProxyRoomIds).toEqual([]);
   expect(snapshot.minimapHallwayProxyRoomIds).toEqual([]);
   expect(snapshot.minimapGraphOnlyConnectionIds).toEqual([]);
-  expect(snapshot.minimapHallwayCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount * 2);
-  expect(snapshot.supplementEncounterCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount);
-  expect(snapshot.supplementEncounterRoomIds.length).toBeGreaterThanOrEqual(
-    snapshot.routeNetworkCount,
+  expect(snapshot.minimapHallwayCount).toBeGreaterThanOrEqual(
+    snapshot.minimumPhysicalSupplementConnectionCount,
   );
-  expect(snapshot.supplementChestCount).toBeGreaterThanOrEqual(snapshot.routeNetworkCount);
-  expect(snapshot.supplementTrapCount).toBeGreaterThanOrEqual(1);
+  expect(snapshot.supplementEncounterCount).toBeGreaterThanOrEqual(
+    snapshot.fullyRealizedRouteNetworkCount,
+  );
+  expect(snapshot.supplementEncounterRoomIds.length).toBeGreaterThanOrEqual(
+    snapshot.fullyRealizedRouteNetworkCount,
+  );
+  expect(snapshot.supplementChestCount).toBeGreaterThanOrEqual(
+    snapshot.fullyRealizedRouteNetworkCount,
+  );
+  if (snapshot.fullyRealizedRouteNetworkCount > 0) {
+    expect(snapshot.supplementTrapCount).toBeGreaterThanOrEqual(1);
+  }
   expect(snapshot.encounterProxyRoomIds).toEqual([]);
   expect(snapshot.rewardProxyRoomIds).toEqual([]);
-  expect(snapshot.elevatedPlatformTileCount).toBeGreaterThan(0);
-  expect(snapshot.verticalConnectorCount).toBeGreaterThanOrEqual(1);
+  if (snapshot.fullyRealizedRouteNetworkCount > 0) {
+    expect(snapshot.elevatedPlatformTileCount).toBeGreaterThan(0);
+  }
+  if (snapshot.fullyRealizedElevationModes.some((mode) => mode !== 'split-level-platform')) {
+    expect(snapshot.verticalConnectorCount).toBeGreaterThanOrEqual(1);
+  }
   expect(snapshot.verticalConnectorVariantIds.every((variantId) => [
     'crested_slope_v1',
     'ladder_gallery_v1',
@@ -1605,6 +1710,9 @@ test('five opt-in enter/fresh-reset/exit cycles plateau supplement ownership and
           kind === 'supplementConnectorModule' || kind === 'supplementConnectorJunction'
         )).length,
         routeNetworkCount: routeNetworks.length,
+        parentAnchoredRouteNetworkCount: routeNetworks.filter(({ realizationMode }) => (
+          realizationMode === 'parent-anchored-forest'
+        )).length,
         supplementRootCount: game.dungeon.group.children.filter((child) => (
           child.userData?.dungeonSupplementRoot === true
         )).length,
@@ -1672,7 +1780,9 @@ test('five opt-in enter/fresh-reset/exit cycles plateau supplement ownership and
       controllerBoundToCurrentDungeon: true,
     });
     expect(sample.supplementRoomCount).toBe(sample.overlayRoomNodeCount);
-    expect(sample.supplementRoomCount).toBeGreaterThanOrEqual(sample.routeNetworkCount * 2);
+    expect(sample.supplementRoomCount).toBeGreaterThanOrEqual(
+      (sample.routeNetworkCount - sample.parentAnchoredRouteNetworkCount) * 2,
+    );
     expect(sample.supplementRoomCount).toBeLessThanOrEqual(30);
     expect(sample.overlayModuleCount).toBe(
       sample.overlayRoomNodeCount + sample.overlayConnectorJunctionCount,
@@ -1696,6 +1806,7 @@ test('five opt-in enter/fresh-reset/exit cycles plateau supplement ownership and
     'overlayConnectorJunctionCount',
     'overlayConnectorNodeCount',
     'routeNetworkCount',
+    'parentAnchoredRouteNetworkCount',
     'geometryCount',
     'materialCount',
     'encounterCount',

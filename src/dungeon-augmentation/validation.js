@@ -964,7 +964,7 @@ function validateV4RouteNetworkSelectionManifest(
   operation,
   nodeById,
   errors,
-  { allowAuditedEntityOmissions = false } = {},
+  { omittedNodeOrdinals = new Set() } = {},
 ) {
   if (!Object.hasOwn(operation ?? {}, 'selectionManifest')) return;
   const operationId = operation?.id ?? null;
@@ -1040,13 +1040,15 @@ function validateV4RouteNetworkSelectionManifest(
         node.selectionConstraints?.routeNetworkTopologyTemplateId ?? '',
       ) === declarations.topologyTemplateId,
     }));
-  if (!allowAuditedEntityOmissions
-    && canonicalStringify(actualRoomLayouts)
-      !== canonicalStringify(declarations.roomLayouts)) {
+  const expectedRoomLayouts = declarations.roomLayouts.filter(({ nodeOrdinal }) => (
+    !omittedNodeOrdinals.has(Number(nodeOrdinal))
+  ));
+  if (canonicalStringify(actualRoomLayouts)
+      !== canonicalStringify(expectedRoomLayouts)) {
     errors.push(diagnostic(
       'route-network-selection-manifest-room-layout-mismatch',
       `Route network ${operationId} has room-layout declarations that differ from its accepted nodes.`,
-      { operationId, expected: actualRoomLayouts, actual: declarations.roomLayouts },
+      { operationId, expected: actualRoomLayouts, actual: expectedRoomLayouts },
     ));
   }
   const actualEncounters = operationNodes.flatMap((node) => {
@@ -1061,13 +1063,15 @@ function validateV4RouteNetworkSelectionManifest(
       encounterProfileId,
     }));
   });
-  if (!allowAuditedEntityOmissions
-    && canonicalStringify(actualEncounters)
-      !== canonicalStringify(declarations.encounters)) {
+  const expectedEncounters = declarations.encounters.filter(({ nodeOrdinal }) => (
+    !omittedNodeOrdinals.has(Number(nodeOrdinal))
+  ));
+  if (canonicalStringify(actualEncounters)
+      !== canonicalStringify(expectedEncounters)) {
     errors.push(diagnostic(
       'route-network-selection-manifest-encounter-mismatch',
       `Route network ${operationId} has encounter declarations that differ from its accepted nodes.`,
-      { operationId, expected: actualEncounters, actual: declarations.encounters },
+      { operationId, expected: actualEncounters, actual: expectedEncounters },
     ));
   }
 
@@ -3039,14 +3043,66 @@ function validateRouteNetworkLocalDependencies(
   }
 }
 
+function validateParentAnchoredForestSourceOrdinals({
+  operation,
+  operationNodes,
+  operationSegments,
+  omissions,
+  errors,
+}) {
+  const inspect = (entityKind, retainedEntities, ordinalOf) => {
+    const retainedOrdinals = [];
+    const invalidRetainedEntityIds = [];
+    for (const entity of retainedEntities) {
+      const ordinal = ordinalOf(entity);
+      if (typeof ordinal !== 'number' || !Number.isSafeInteger(ordinal) || ordinal < 0) {
+        invalidRetainedEntityIds.push(String(entity?.id ?? ''));
+      } else {
+        retainedOrdinals.push(ordinal);
+      }
+    }
+    const omittedOrdinals = omissions
+      .filter((omission) => omission.entityKind === entityKind)
+      .map(({ ordinal }) => Number(ordinal));
+    const duplicateRetained = retainedOrdinals.length !== new Set(retainedOrdinals).size;
+    const duplicateOmitted = omittedOrdinals.length !== new Set(omittedOrdinals).size;
+    const retainedSet = new Set(retainedOrdinals);
+    const overlappingOrdinals = [...new Set(omittedOrdinals.filter((ordinal) => (
+      retainedSet.has(ordinal)
+    )))].sort((first, second) => first - second);
+    if (invalidRetainedEntityIds.length > 0
+      || duplicateRetained
+      || duplicateOmitted
+      || overlappingOrdinals.length > 0) {
+      errors.push(diagnostic(
+        'route-network-parent-anchored-source-ordinals-invalid',
+        `Route network ${operation.id} has ambiguous retained or omitted ${entityKind} source ordinals.`,
+        {
+          operationId: operation.id,
+          entityKind,
+          invalidRetainedEntityIds,
+          duplicateRetained,
+          duplicateOmitted,
+          overlappingOrdinals,
+        },
+      ));
+    }
+  };
+  inspect('node', operationNodes, (node) => node?.ordinal);
+  inspect('segment', operationSegments, (segment) => segment?.physicalOrdinal);
+}
+
 function validateParentAnchoredForestComponents({
   operation,
   graph,
-  nodeById,
   segmentById,
   errors,
 }) {
   const retainedSocketIds = stringArray(operation?.endpointSocketIds);
+  const retainedSocketOrdinalById = new Map(retainedSocketIds.map((id, index) => [id, index]));
+  const operationNodeIds = stringArray(operation?.nodeIds);
+  const operationSegmentIds = stringArray(operation?.segmentIds);
+  const operationNodeOrdinalById = new Map(operationNodeIds.map((id, index) => [id, index]));
   const components = Array.isArray(operation?.parentAnchoredComponents)
     ? operation.parentAnchoredComponents
     : [];
@@ -3054,55 +3110,77 @@ function validateParentAnchoredForestComponents({
   const assignedNodeIds = [];
   const assignedSegmentIds = [];
   const assignedAttachmentSocketIds = [];
-  if (components.length !== retainedSocketIds.length || components.length === 0) {
+  if (components.length === 0) {
     errors.push(diagnostic(
       'route-network-parent-anchored-components-count-invalid',
-      `Route network ${operation.id} must declare one parent-anchored component per retained endpoint.`,
-      {
-        operationId: operation.id,
-        componentCount: components.length,
-        retainedEndpointCount: retainedSocketIds.length,
-      },
+      `Route network ${operation.id} must declare at least one retained parent-anchored component.`,
+      { operationId: operation.id, componentCount: components.length },
+    ));
+  }
+  const canonicalComponentOrder = components.map((component, inputOrdinal) => {
+    const attachmentSocketIds = stringArray(component?.attachmentSocketIds);
+    const nodeIds = stringArray(component?.nodeIds);
+    return {
+      inputOrdinal,
+      attachmentOrdinal: Math.min(...attachmentSocketIds.map((id) => (
+        retainedSocketOrdinalById.get(id) ?? Number.POSITIVE_INFINITY
+      ))),
+      nodeOrdinal: Math.min(...nodeIds.map((id) => (
+        operationNodeOrdinalById.get(id) ?? Number.POSITIVE_INFINITY
+      ))),
+      nodeId: nodeIds[0] ?? '',
+    };
+  }).sort((first, second) => (
+    first.attachmentOrdinal - second.attachmentOrdinal
+      || first.nodeOrdinal - second.nodeOrdinal
+      || first.nodeId.localeCompare(second.nodeId)
+  ));
+  if (canonicalComponentOrder.some(({ inputOrdinal }, index) => inputOrdinal !== index)) {
+    errors.push(diagnostic(
+      'route-network-parent-anchored-component-order-invalid',
+      `Route network ${operation.id} does not preserve canonical component order.`,
+      { operationId: operation.id },
     ));
   }
   for (const [componentOrdinal, component] of components.entries()) {
     const componentId = String(component?.id ?? '');
     const expectedComponentId = `${operation.id}:parent-anchored-component:${componentOrdinal}`;
-    const attachmentSocketId = String(component?.attachmentSocketId ?? '');
+    const attachmentSocketIds = stringArray(component?.attachmentSocketIds);
+    const expectedAttachmentSocketIds = retainedSocketIds.filter((id) => (
+      attachmentSocketIds.includes(id)
+    ));
+    const primaryAttachmentSocketId = String(component?.attachmentSocketId ?? '');
     const componentNodeIds = stringArray(component?.nodeIds);
     const componentSegmentIds = stringArray(component?.segmentIds);
     if (componentId !== expectedComponentId || componentIds.has(componentId)) {
       errors.push(diagnostic(
         'route-network-parent-anchored-component-id-invalid',
         `Route network ${operation.id} has a non-canonical or duplicate component ID.`,
-        {
-          operationId: operation.id,
-          componentOrdinal,
-          componentId: componentId || null,
-          expectedComponentId,
-        },
+        { operationId: operation.id, componentOrdinal, componentId, expectedComponentId },
       ));
     }
     componentIds.add(componentId);
-    if (attachmentSocketId !== retainedSocketIds[componentOrdinal]
-      || !retainedSocketIds.includes(attachmentSocketId)) {
+    if (attachmentSocketIds.length === 0
+      || attachmentSocketIds.length !== new Set(attachmentSocketIds).size
+      || !sameStringSequence(attachmentSocketIds, expectedAttachmentSocketIds)
+      || primaryAttachmentSocketId !== attachmentSocketIds[0]) {
       errors.push(diagnostic(
-        'route-network-parent-anchored-component-order-invalid',
-        `Route network ${operation.id} does not align component ${componentId} with its retained parent socket.`,
+        'route-network-parent-anchored-component-attachments-invalid',
+        `Route network component ${componentId} has non-canonical parent attachments.`,
         {
           operationId: operation.id,
           componentId,
-          componentOrdinal,
-          attachmentSocketId,
-          expectedAttachmentSocketId: retainedSocketIds[componentOrdinal] ?? null,
+          attachmentSocketIds,
+          expectedAttachmentSocketIds,
+          primaryAttachmentSocketId,
         },
       ));
     }
-    assignedAttachmentSocketIds.push(attachmentSocketId);
+    assignedAttachmentSocketIds.push(...attachmentSocketIds);
     const nodeSet = new Set(componentNodeIds);
     const segmentSet = new Set(componentSegmentIds);
-    const expectedNodeOrder = stringArray(operation?.nodeIds).filter((id) => nodeSet.has(id));
-    const expectedSegmentOrder = stringArray(operation?.segmentIds).filter((id) => segmentSet.has(id));
+    const expectedNodeOrder = operationNodeIds.filter((id) => nodeSet.has(id));
+    const expectedSegmentOrder = operationSegmentIds.filter((id) => segmentSet.has(id));
     if (!sameStringSequence(componentNodeIds, expectedNodeOrder)
       || componentNodeIds.length !== nodeSet.size
       || componentNodeIds.some((id) => !graph.operationNodeIds.has(id))) {
@@ -3123,8 +3201,8 @@ function validateParentAnchoredForestComponents({
     }
     assignedNodeIds.push(...componentNodeIds);
     assignedSegmentIds.push(...componentSegmentIds);
-    const externalKey = `external:${attachmentSocketId}`;
-    const allowedVertices = new Set([...nodeSet, externalKey]);
+    const expectedExternalKeys = attachmentSocketIds.map((id) => `external:${id}`);
+    const allowedVertices = new Set([...nodeSet, ...expectedExternalKeys]);
     const adjacency = new Map([...allowedVertices].map((id) => [id, []]));
     const actualExternalKeys = new Set();
     for (const segmentId of componentSegmentIds) {
@@ -3158,8 +3236,9 @@ function validateParentAnchoredForestComponents({
         ));
       }
     }
-    const reachable = new Set([externalKey]);
-    const queue = [externalKey];
+    const start = expectedExternalKeys[0] ?? null;
+    const reachable = new Set(start ? [start] : []);
+    const queue = start ? [start] : [];
     for (let cursor = 0; cursor < queue.length; cursor += 1) {
       for (const next of adjacency.get(queue[cursor]) ?? []) {
         if (reachable.has(next)) continue;
@@ -3168,18 +3247,17 @@ function validateParentAnchoredForestComponents({
       }
     }
     if (component?.bidirectional !== true
-      || !sameStringSet([...actualExternalKeys], [externalKey])
+      || !sameStringSet([...actualExternalKeys], expectedExternalKeys)
       || componentNodeIds.length === 0
       || componentSegmentIds.length === 0
-      || componentSegmentIds.length !== componentNodeIds.length
-      || componentNodeIds.some((id) => !reachable.has(id))) {
+      || [...allowedVertices].some((id) => !reachable.has(id))) {
       errors.push(diagnostic(
         'route-network-parent-anchored-component-connectivity-invalid',
-        `Route network component ${componentId} must be a connected bidirectional graph with exactly one parent attachment.`,
+        `Route network component ${componentId} must be connected, bidirectional, and expose every declared parent attachment.`,
         {
           operationId: operation.id,
           componentId,
-          attachmentSocketId,
+          attachmentSocketIds,
           actualExternalSocketIds: [...actualExternalKeys]
             .map((key) => key.slice('external:'.length)).sort(),
         },
@@ -3206,11 +3284,21 @@ function validateParentAnchoredForestComponents({
       { operationId: operation.id },
     ));
   }
-  if (Number(operation?.cycleRankDelta) !== 0) {
+  const expectedCycleRank = graph.edgeCount - graph.vertexCount + components.length;
+  if (!Number.isSafeInteger(expectedCycleRank)
+    || expectedCycleRank < 0
+    || Number(operation?.cycleRankDelta) !== expectedCycleRank) {
     errors.push(diagnostic(
       'route-network-parent-anchored-cycle-rank-invalid',
-      `Route network ${operation.id} must declare zero cycle-rank delta for a parent-anchored forest.`,
-      { operationId: operation.id, cycleRankDelta: operation?.cycleRankDelta ?? null },
+      `Route network ${operation.id} misstates its retained graph cycle rank.`,
+      {
+        operationId: operation.id,
+        cycleRankDelta: operation?.cycleRankDelta ?? null,
+        expectedCycleRank,
+        edgeCount: graph.edgeCount,
+        vertexCount: graph.vertexCount,
+        componentCount: components.length,
+      },
     ));
   }
 }
@@ -4511,9 +4599,15 @@ function validateV4RouteNetworks({
         && operation?.realizationMode
           === ROUTE_NETWORK_PARENT_ANCHORED_FOREST_REALIZATION,
     );
+    const operationEntityOmissions = entityOmissionsByOperationId.get(
+      String(operation.id),
+    ) ?? [];
+    const omittedNodeOrdinals = new Set(operationEntityOmissions
+      .filter(({ entityKind }) => entityKind === 'node')
+      .map(({ ordinal }) => Number(ordinal)));
     if (v4) {
       validateV4RouteNetworkSelectionManifest(operation, nodeById, errors, {
-        allowAuditedEntityOmissions: parentAnchoredForest,
+        omittedNodeOrdinals: parentAnchoredForest ? omittedNodeOrdinals : new Set(),
       });
     }
     if (operation?.realizationMode != null && !parentAnchoredForest) {
@@ -4523,8 +4617,43 @@ function validateV4RouteNetworks({
         { operationId: operation.id, realizationMode: operation.realizationMode },
       ));
     }
+    const salvagedObjectiveCoverage = parentAnchoredForest
+      && operation?.routeNetworkKind === 'objective-route-coverage';
+    if (salvagedObjectiveCoverage && operation?.authoredCoverageRealized !== false) {
+      errors.push(diagnostic(
+        'route-network-salvaged-authored-coverage-marker-missing',
+        `Salvaged objective route network ${operation.id} must explicitly disclaim complete authored coverage.`,
+        { operationId: operation.id, authoredCoverageRealized: operation?.authoredCoverageRealized },
+      ));
+    } else if (!salvagedObjectiveCoverage
+      && operation?.authoredCoverageRealized != null) {
+      errors.push(diagnostic(
+        'route-network-authored-coverage-marker-unexpected',
+        `Route network ${operation.id} declares a salvaged authored-coverage marker outside partial objective realization.`,
+        { operationId: operation.id, authoredCoverageRealized: operation.authoredCoverageRealized },
+      ));
+    }
+    if (parentAnchoredForest && operation?.localProgressionArcRealized !== false) {
+      errors.push(diagnostic(
+        'route-network-salvaged-local-progression-marker-missing',
+        `Salvaged route network ${operation.id} must explicitly disclaim its complete local progression arc.`,
+        {
+          operationId: operation.id,
+          localProgressionArcRealized: operation?.localProgressionArcRealized,
+        },
+      ));
+    } else if (!parentAnchoredForest && operation?.localProgressionArcRealized != null) {
+      errors.push(diagnostic(
+        'route-network-local-progression-marker-unexpected',
+        `Route network ${operation.id} declares a salvaged local-progression marker outside partial realization.`,
+        {
+          operationId: operation.id,
+          localProgressionArcRealized: operation.localProgressionArcRealized,
+        },
+      ));
+    }
     if (parentAnchoredForest
-      && (entityOmissionsByOperationId.get(String(operation.id))?.length ?? 0) === 0) {
+      && operationEntityOmissions.length === 0) {
       errors.push(diagnostic(
         'route-network-parent-anchored-forest-omission-ledger-empty',
         `Route network ${operation.id} cannot use parent-anchored forest realization without audited entity omissions.`,
@@ -4679,17 +4808,23 @@ function validateV4RouteNetworks({
     validateEndpointPlanningWitnesses(grant, errors);
     validateRouteNetworkProtectedVolumes(operation, grant, nodeById, segmentById, errors);
     const graph = routeNetworkGraph(operation, grant, nodeById, segmentById, errors);
+    const operationNodes = orderedOperationNodes;
+    const operationSegments = orderedOperationSegments;
     if (parentAnchoredForest) {
+      validateParentAnchoredForestSourceOrdinals({
+        operation,
+        operationNodes,
+        operationSegments,
+        omissions: operationEntityOmissions,
+        errors,
+      });
       validateParentAnchoredForestComponents({
         operation,
         graph,
-        nodeById,
         segmentById,
         errors,
       });
     }
-    const operationNodes = orderedOperationNodes;
-    const operationSegments = orderedOperationSegments;
     validateCrossBandShortcutPhysicalGates({
       operation,
       grant,
@@ -4967,8 +5102,9 @@ function validateV4RouteNetworks({
         ));
       }
     }
-    if (operation.bidirectional !== true || (!parentAnchoredForest
-      && (operation.returnRouteGuaranteed !== true || graph.externalKeys.size < 2))) {
+    if (operation.bidirectional !== true
+      || operation.returnRouteGuaranteed !== true
+      || (!parentAnchoredForest && graph.externalKeys.size < 2)) {
       errors.push(diagnostic(
         'route-network-return-route-required',
         `Route network ${operation.id} does not provide a validated return route.`,
@@ -5008,7 +5144,6 @@ function validateV4RouteNetworks({
       profile,
       operationSegments,
       errors,
-      { allowIncompleteProgressionArc: parentAnchoredForest },
     );
     const arcTokens = stringArray(operation.localProgressionArc).map(normalizedFeatureToken);
     if (!parentAnchoredForest && (!arcTokens.some((token) => token.includes('enter'))
@@ -5121,6 +5256,27 @@ function validateV4RouteNetworks({
       reachableCount: graph.reachable.size,
       realJunctionCount: graph.realJunctionNodeIds.size,
     });
+  }
+
+  const salvagedObjectiveCoverageOperationIds = new Set(routeOperations
+    .filter((operation) => (
+      operation?.realizationMode === ROUTE_NETWORK_PARENT_ANCHORED_FOREST_REALIZATION
+        && operation?.routeNetworkKind === 'objective-route-coverage'
+    ))
+    .map(({ id }) => String(id)));
+  const misleadingCoverageEntries = (Array.isArray(plan?.featurelessCoverage)
+    ? plan.featurelessCoverage
+    : []).filter(({ operationId }) => (
+    salvagedObjectiveCoverageOperationIds.has(String(operationId ?? ''))
+  ));
+  if (misleadingCoverageEntries.length > 0) {
+    errors.push(diagnostic(
+      'route-network-salvaged-authored-coverage-aggregate-invalid',
+      'Salvaged objective route networks cannot appear in realized authored featureless coverage.',
+      {
+        operationIds: misleadingCoverageEntries.map(({ operationId }) => String(operationId)),
+      },
+    ));
   }
 
   if (v4) {

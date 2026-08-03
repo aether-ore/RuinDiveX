@@ -49,6 +49,13 @@ function createSalvageGraphCandidate({
       connectorOwned,
       isSupplementConnectorModule: kind === 'supplementConnectorModule',
       isSupplementConnectorJunction: kind === 'supplementConnectorJunction',
+      exactParentEndpoint: input.exactParentEndpoint === true,
+      parentEndpointSocketId: input.parentEndpointSocketId ?? null,
+      parentEndpointSocketKind: input.parentEndpointSocketKind ?? null,
+      parentThroughRouteDegreeContribution: Number(
+        input.parentThroughRouteDegreeContribution ?? 0,
+      ),
+      parentThroughPhysicalArmId: input.parentThroughPhysicalArmId ?? null,
       placement: {
         center: { x: ordinal * 22.4, y: 0, z: ordinal * 5.6 },
         rotationQuarterTurns: ordinal % 4,
@@ -855,6 +862,7 @@ test('parent-anchored salvage removes one conflicting leaf and keeps its rooted 
   assert.equal(salvaged.operation.cycleRankDelta, 0);
   assert.deepEqual(salvaged.operation.parentAnchoredComponents, [{
     id: `${operationId}:parent-anchored-component:0`,
+    attachmentSocketIds: ['parent:west'],
     attachmentSocketId: 'parent:west',
     nodeIds: ['hub', 'safe-leaf'],
     segmentIds: ['parent-hub', 'hub-safe'],
@@ -879,7 +887,8 @@ test('parent-anchored salvage removes one conflicting leaf and keeps its rooted 
   const recappedSocket = salvaged.nodes.find(({ id }) => id === 'hub').sockets
     .find(({ id }) => id === 'hub:socket:hub-conflict');
   assert.equal(recappedSocket.state, 'capped');
-  assert.equal(Object.hasOwn(recappedSocket, 'segmentId'), false);
+  assert.equal(recappedSocket.segmentId, null);
+  assert.equal(recappedSocket.capRole, 'cap');
   assert.equal(salvaged.nodes.find(({ id }) => id === 'hub').graphDegree, 2);
   assert.deepEqual(
     salvaged.operation.featurelessSpans.map(({ segmentId }) => segmentId),
@@ -912,7 +921,7 @@ test('parent-anchored salvage removes an exact middle module and only its unroot
   );
   assert.equal(
     salvaged.routeNetworkEntityOmissions.find(({ entityId }) => entityId === 'far-room').reason,
-    'unrooted-component',
+    'isolated-node',
   );
   assert.equal(salvaged.nodes[0].graphDegree, 1);
 });
@@ -947,7 +956,7 @@ test('parent-anchored salvage of a conflicting segment keeps both independently 
   })), [{ entityId: 'conflicting-span', disposition: 'conflict-root' }]);
 });
 
-test('parent-anchored salvage cuts a deterministic multi-root merge without deleting either tree', () => {
+test('parent-anchored salvage retains a safe deterministic multi-root merge', () => {
   const planned = createSalvageGraphCandidate({
     endpointSocketIds: ['parent:west', 'parent:east'],
     nodes: [{ id: 'west-room' }, { id: 'east-room' }, { id: 'conflicting-leaf' }],
@@ -964,23 +973,25 @@ test('parent-anchored salvage cuts a deterministic multi-root merge without dele
   ]);
 
   assert.equal(salvaged.error, undefined);
-  assert.deepEqual(salvaged.operation.segmentIds, ['parent-west', 'parent-east']);
-  assert.deepEqual(salvaged.operation.parentAnchoredComponents.map(
-    ({ attachmentSocketId }) => attachmentSocketId,
-  ), [
-    'parent:west',
-    'parent:east',
+  assert.deepEqual(salvaged.operation.segmentIds, [
+    'parent-west',
+    'parent-east',
+    'root-merge',
   ]);
-  assert.equal(
-    salvaged.routeNetworkEntityOmissions.find(({ entityId }) => entityId === 'root-merge').reason,
-    'multi-root-merge-edge',
+  assert.equal(salvaged.operation.parentAnchoredComponents.length, 1);
+  assert.deepEqual(
+    salvaged.operation.parentAnchoredComponents[0].attachmentSocketIds,
+    ['parent:west', 'parent:east'],
   );
-  assert.ok(salvaged.operation.parentAnchoredComponents.every(
-    ({ attachmentSocketId }) => Boolean(attachmentSocketId),
-  ));
+  assert.equal(salvaged.operation.parentAnchoredComponents[0].attachmentSocketId, 'parent:west');
+  assert.equal(salvaged.operation.cycleRankDelta, 0);
+  assert.equal(
+    salvaged.routeNetworkEntityOmissions.some(({ entityId }) => entityId === 'root-merge'),
+    false,
+  );
 });
 
-test('parent-anchored salvage cuts cycles and is canonical across input collection order', () => {
+test('parent-anchored salvage retains safe cycles and is canonical across input collection order', () => {
   const planned = createSalvageGraphCandidate({
     endpointSocketIds: ['parent:west'],
     nodes: [{ id: 'room-a' }, { id: 'room-b' }, { id: 'room-c' }, {
@@ -1006,10 +1017,11 @@ test('parent-anchored salvage cuts cycles and is canonical across input collecti
 
   assert.equal(salvaged.error, undefined);
   assert.deepEqual(salvaged.operation.nodeIds, ['room-a', 'room-b', 'room-c']);
-  assert.deepEqual(salvaged.operation.segmentIds, ['parent-a', 'a-b', 'b-c']);
+  assert.deepEqual(salvaged.operation.segmentIds, ['parent-a', 'a-b', 'b-c', 'c-a-cycle']);
+  assert.equal(salvaged.operation.cycleRankDelta, 1);
   assert.equal(
-    salvaged.routeNetworkEntityOmissions.find(({ entityId }) => entityId === 'c-a-cycle').reason,
-    'cycle-edge',
+    salvaged.routeNetworkEntityOmissions.some(({ entityId }) => entityId === 'c-a-cycle'),
+    false,
   );
   assert.deepEqual(reordered, salvaged);
 });
@@ -1045,8 +1057,233 @@ test('parent-anchored salvage iteratively drops under-degree connector infrastru
     entityId === 'parent-connector' && reason === 'incident-to-under-degree-node'
   )));
   assert.ok(salvaged.routeNetworkEntityOmissions.some(({ entityId, reason }) => (
-    entityId === 'connector-room' && reason === 'unrooted-component'
+    entityId === 'connector-room' && reason === 'isolated-node'
   )));
+});
+
+test('parent-through corridor arms do not preserve one-segment connector modules', () => {
+  const planned = createSalvageGraphCandidate({
+    endpointSocketIds: ['parent:safe', 'parent:station'],
+    nodes: [{ id: 'safe-room' }, {
+      id: 'terminal-station-module',
+      kind: 'supplementConnectorModule',
+      exactParentEndpoint: true,
+      parentEndpointSocketId: 'parent:station',
+      parentEndpointSocketKind: 'authored-corridor-station',
+      parentThroughRouteDegreeContribution: 1,
+      parentThroughPhysicalArmId: 'terminal-station-module:authored-parent-through-arm',
+    }, { id: 'conflicting-room' }],
+    edges: [{
+      id: 'parent-safe',
+      ordinal: 0,
+      from: { parent: 'parent:safe' },
+      to: 'safe-room',
+    }, {
+      id: 'parent-station-attachment',
+      ordinal: 1,
+      from: { parent: 'parent:station' },
+      to: 'terminal-station-module',
+    }, {
+      id: 'conflicting-branch',
+      ordinal: 2,
+      from: 'terminal-station-module',
+      to: 'conflicting-room',
+    }],
+  });
+  const salvaged = createParentAnchoredRouteNetworkSalvage(planned, [
+    exactConflictExclusion(planned, 'segment', 'conflicting-branch'),
+  ]);
+
+  assert.equal(salvaged.error, undefined);
+  assert.deepEqual(salvaged.operation.nodeIds, ['safe-room']);
+  assert.deepEqual(salvaged.operation.segmentIds, ['parent-safe']);
+  assert.deepEqual(salvaged.operation.endpointSocketIds, ['parent:safe']);
+  assert.deepEqual(salvaged.operation.omittedEndpointSocketIds, ['parent:station']);
+  assert.equal(
+    salvaged.routeNetworkEntityOmissions.find(({ entityId }) => (
+      entityId === 'terminal-station-module'
+    ))?.reason,
+    'under-degree-connector-infrastructure',
+  );
+  assert.ok(salvaged.routeNetworkEntityOmissions.some(({ entityId, reason }) => (
+    entityId === 'parent-station-attachment'
+      && reason === 'incident-to-under-degree-node'
+  )));
+});
+
+test('parent-anchored salvage requires explicit unique source ordinals', () => {
+  const missing = createSalvageGraphCandidate({
+    endpointSocketIds: ['parent:west'],
+    nodes: [{ id: 'root-room' }, { id: 'conflicting-room' }],
+    edges: [{ id: 'parent-root', from: { parent: 'parent:west' }, to: 'root-room' }, {
+      id: 'root-conflict', from: 'root-room', to: 'conflicting-room',
+    }],
+  });
+  delete missing.nodes[0].ordinal;
+  assert.equal(
+    createParentAnchoredRouteNetworkSalvage(missing, [
+      exactConflictExclusion(missing, 'node', 'conflicting-room'),
+    ]).error,
+    'route-network-parent-anchored-salvage-source-ordinals-invalid',
+  );
+
+  for (const invalidOrdinal of [null, '0']) {
+    const invalid = createSalvageGraphCandidate({
+      endpointSocketIds: ['parent:west'],
+      nodes: [{ id: 'root-room' }, { id: 'conflicting-room' }],
+      edges: [{ id: 'parent-root', from: { parent: 'parent:west' }, to: 'root-room' }, {
+        id: 'root-conflict', from: 'root-room', to: 'conflicting-room',
+      }],
+    });
+    invalid.nodes[0].ordinal = invalidOrdinal;
+    assert.equal(
+      createParentAnchoredRouteNetworkSalvage(invalid, [
+        exactConflictExclusion(invalid, 'node', 'conflicting-room'),
+      ]).error,
+      'route-network-parent-anchored-salvage-source-ordinals-invalid',
+    );
+  }
+
+  const duplicate = createSalvageGraphCandidate({
+    endpointSocketIds: ['parent:west'],
+    nodes: [{ id: 'root-room', ordinal: 0 }, { id: 'conflicting-room', ordinal: 0 }],
+    edges: [{ id: 'parent-root', from: { parent: 'parent:west' }, to: 'root-room' }, {
+      id: 'root-conflict', from: 'root-room', to: 'conflicting-room',
+    }],
+  });
+  assert.equal(
+    createParentAnchoredRouteNetworkSalvage(duplicate, [
+      exactConflictExclusion(duplicate, 'node', 'conflicting-room'),
+    ]).error,
+    'route-network-parent-anchored-salvage-source-ordinals-invalid',
+  );
+});
+
+test('parent-anchored salvage links dependencies to a conflict root in the same source component', () => {
+  const planned = createSalvageGraphCandidate({
+    endpointSocketIds: ['parent:safe', 'parent:west', 'parent:east'],
+    nodes: [
+      { id: 'safe-room' },
+      { id: 'west-root' },
+      { id: 'west-conflict' },
+      { id: 'east-root' },
+      { id: 'east-conflict' },
+    ],
+    edges: [
+      { id: 'parent-safe', from: { parent: 'parent:safe' }, to: 'safe-room' },
+      { id: 'parent-west', from: { parent: 'parent:west' }, to: 'west-root' },
+      { id: 'west-arm', from: 'west-root', to: 'west-conflict' },
+      { id: 'parent-east', from: { parent: 'parent:east' }, to: 'east-root' },
+      { id: 'east-arm', from: 'east-root', to: 'east-conflict' },
+    ],
+  });
+  const westExclusion = exactConflictExclusion(planned, 'node', 'west-conflict');
+  const eastExclusion = exactConflictExclusion(planned, 'node', 'east-conflict');
+  const salvaged = createParentAnchoredRouteNetworkSalvage(
+    planned,
+    [westExclusion, eastExclusion],
+  );
+
+  assert.equal(salvaged.error, undefined);
+  assert.equal(
+    salvaged.routeNetworkEntityOmissions.find(({ entityId }) => entityId === 'west-arm')
+      .rootSignature,
+    westExclusion.signature,
+  );
+  assert.equal(
+    salvaged.routeNetworkEntityOmissions.find(({ entityId }) => entityId === 'east-arm')
+      .rootSignature,
+    eastExclusion.signature,
+  );
+});
+
+test('parent-anchored salvage attributes isolated nodes to their incident conflict roots', () => {
+  const planned = createSalvageGraphCandidate({
+    endpointSocketIds: ['parent:root'],
+    nodes: [
+      { id: 'root-room' },
+      { id: 'isolated-by-root-four' },
+      { id: 'isolated-by-root-six' },
+      { id: 'isolated-by-root-seven' },
+    ],
+    edges: [
+      { id: 'parent-root', ordinal: 0, from: { parent: 'parent:root' }, to: 'root-room' },
+      { id: 'conflict-root-four', ordinal: 4, from: 'root-room', to: 'isolated-by-root-four' },
+      { id: 'conflict-root-six', ordinal: 6, from: 'root-room', to: 'isolated-by-root-six' },
+      { id: 'conflict-root-seven', ordinal: 7, from: 'root-room', to: 'isolated-by-root-seven' },
+    ],
+  });
+  const exclusions = [
+    exactConflictExclusion(planned, 'segment', 'conflict-root-four'),
+    exactConflictExclusion(planned, 'segment', 'conflict-root-six'),
+    exactConflictExclusion(planned, 'segment', 'conflict-root-seven'),
+  ];
+  const rootSignatureByIsolatedNodeId = new Map([
+    ['isolated-by-root-four', exclusions[0].signature],
+    ['isolated-by-root-six', exclusions[1].signature],
+    ['isolated-by-root-seven', exclusions[2].signature],
+  ]);
+  const salvaged = createParentAnchoredRouteNetworkSalvage(planned, exclusions);
+
+  assert.equal(salvaged.error, undefined);
+  assert.deepEqual(salvaged.operation.nodeIds, ['root-room']);
+  assert.deepEqual(salvaged.operation.segmentIds, ['parent-root']);
+  for (const [nodeId, rootSignature] of rootSignatureByIsolatedNodeId) {
+    const omission = salvaged.routeNetworkEntityOmissions.find(({ entityId }) => (
+      entityId === nodeId
+    ));
+    assert.equal(omission.disposition, 'dependency');
+    assert.equal(omission.reason, 'isolated-node');
+    assert.equal(
+      omission.rootSignature,
+      rootSignature,
+      `${nodeId} must not borrow another conflict root from its source component`,
+    );
+  }
+});
+
+test('parent-anchored salvage fails closed when a dependency has no source-component root', () => {
+  const planned = createSalvageGraphCandidate({
+    endpointSocketIds: ['parent:safe'],
+    nodes: [{ id: 'safe-room' }, { id: 'conflicting-leaf' }, { id: 'orphan-room' }],
+    edges: [
+      { id: 'parent-safe', from: { parent: 'parent:safe' }, to: 'safe-room' },
+      { id: 'safe-conflict', from: 'safe-room', to: 'conflicting-leaf' },
+      { id: 'orphan-invalid', from: { parent: 'parent:undeclared' }, to: 'orphan-room' },
+    ],
+  });
+  const salvaged = createParentAnchoredRouteNetworkSalvage(planned, [
+    exactConflictExclusion(planned, 'segment', 'safe-conflict'),
+  ]);
+
+  assert.equal(
+    salvaged.error,
+    'route-network-parent-anchored-salvage-dependency-root-unavailable',
+  );
+});
+
+test('parent-anchored objective salvage preserves grant coverage provenance but disclaims realization', () => {
+  const planned = createSalvageGraphCandidate({
+    endpointSocketIds: ['parent:west'],
+    nodes: [{ id: 'root-room' }, { id: 'conflicting-room' }],
+    edges: [{ id: 'parent-root', from: { parent: 'parent:west' }, to: 'root-room' }, {
+      id: 'root-conflict', from: 'root-room', to: 'conflicting-room',
+    }],
+  });
+  planned.operation.routeNetworkKind = 'objective-route-coverage';
+  planned.operation.coverage = {
+    logicalEdgeId: 'authored-route',
+    coverageComplete: true,
+  };
+  const salvaged = createParentAnchoredRouteNetworkSalvage(planned, [
+    exactConflictExclusion(planned, 'node', 'conflicting-room'),
+  ]);
+
+  assert.equal(salvaged.error, undefined);
+  assert.deepEqual(salvaged.operation.coverage, planned.operation.coverage);
+  assert.equal(salvaged.operation.authoredCoverageRealized, false);
+  assert.equal(salvaged.operation.localProgressionArcRealized, false);
+  assert.equal(salvaged.operation.returnRouteGuaranteed, true);
 });
 
 test('parent-anchored salvage returns structured failures for no match and empty closure', () => {

@@ -31,6 +31,7 @@ import { canonicalStringify, stableHashText } from './canonical.js';
 import {
   objectiveCoverageGrantForOperationStationSide,
 } from './objectiveCoverageStationSide.js';
+import { inspectConnectorOnlyParentAnchoredProjection } from './parentAnchoredConnectorForest.js';
 
 const CONNECTOR_ELEVATION_EPSILON = 0.000001;
 const INDUSTRIAL_SUPPLEMENT_V4_PROFILE_ID = 'industrial-supplement-preview-v4';
@@ -4903,7 +4904,14 @@ function createSupplementConnectorJunctionProxy(
   };
 }
 
-function createConnectorJunctionProgressionCandidates({ nodes = [], segments = [] } = {}) {
+function createConnectorJunctionProgressionCandidates({
+  nodes = [],
+  segments = [],
+  connectorOnlyParentAnchoredProjection = {
+    proxyIds: new Set(),
+    collapseRoomIdBySegmentId: new Map(),
+  },
+} = {}) {
   const connectorIds = new Set(nodes
     .filter(isSupplementConnectorJunctionNode)
     .map(({ id }) => String(id)));
@@ -4982,11 +4990,18 @@ function createConnectorJunctionProgressionCandidates({ nodes = [], segments = [
         `Connector proxy ${proxyId} has ${physicalArmCount} physical arms; ${minimumPhysicalArmCount} are required.`,
       );
     }
-    if (candidates.length === 0) {
+    if (candidates.length === 0
+      && !connectorOnlyParentAnchoredProjection.proxyIds.has(proxyId)) {
       errors.push(`Connector junction proxy ${proxyId} cannot reach a substantive supplemental room.`);
     }
   }
-  return { candidatesByProxyId, physicalArmIdsByProxyId, errors };
+  return {
+    candidatesByProxyId,
+    physicalArmIdsByProxyId,
+    collapseRoomIdBySegmentId:
+      connectorOnlyParentAnchoredProjection.collapseRoomIdBySegmentId,
+    errors,
+  };
 }
 
 function selectProgressionCandidate(candidates = [], excludedRoomId = null) {
@@ -5013,17 +5028,28 @@ function selectProgressionCandidatePair(fromCandidates = [], toCandidates = []) 
   return pairs[0] ?? null;
 }
 
-function applyConnectorJunctionProgressionHints(plan, candidatesByProxyId) {
+function applyConnectorJunctionProgressionHints(
+  plan,
+  candidatesByProxyId,
+  collapseRoomId = null,
+) {
   const fromProxyId = candidatesByProxyId.has(String(plan.fromRoomId))
     ? String(plan.fromRoomId)
     : null;
   const toProxyId = candidatesByProxyId.has(String(plan.toRoomId))
     ? String(plan.toRoomId)
     : null;
-  let fromProgressionRoomId = plan.progressionFromRoomId ?? plan.fromRoomId;
-  let toProgressionRoomId = plan.progressionToRoomId ?? plan.toRoomId;
+  let fromProgressionRoomId = collapseRoomId
+    ?? plan.progressionFromRoomId
+    ?? plan.fromRoomId;
+  let toProgressionRoomId = collapseRoomId
+    ?? plan.progressionToRoomId
+    ?? plan.toRoomId;
 
-  if (fromProxyId && toProxyId) {
+  if (collapseRoomId) {
+    plan.routeNetworkProgressionProjectionMode =
+      'parent-anchored-component-physical-only';
+  } else if (fromProxyId && toProxyId) {
     const pair = selectProgressionCandidatePair(
       candidatesByProxyId.get(fromProxyId),
       candidatesByProxyId.get(toProxyId),
@@ -6718,9 +6744,17 @@ export function materializeIndustrialOverlay({
     ...corridorStations.stations.map((station) => station.room),
     ...supplementConnectorJunctionProxies,
   ];
+  const connectorOnlyParentAnchoredProjection =
+    inspectConnectorOnlyParentAnchoredProjection({
+    overlayPlan,
+    nodes: overlayPlan.nodes ?? [],
+    segments,
+    isConnectorNode: isSupplementConnectorJunctionNode,
+  });
   const connectorJunctionProgression = createConnectorJunctionProgressionCandidates({
     nodes: overlayPlan.nodes ?? [],
     segments,
+    connectorOnlyParentAnchoredProjection,
   });
   for (const proxy of supplementConnectorJunctionProxies) {
     const physicalArmIds = [...(
@@ -7026,9 +7060,9 @@ export function materializeIndustrialOverlay({
     }
 
     const physicalPlans = [];
-    const componentIdBySegmentId = new Map((operation?.parentAnchoredComponents ?? [])
+    const componentBySegmentId = new Map((operation?.parentAnchoredComponents ?? [])
       .flatMap((component) => (component?.segmentIds ?? []).map((segmentId) => (
-        [String(segmentId), String(component?.id ?? '')]
+        [String(segmentId), component]
       ))));
     for (const segment of normalizedSegments) {
       try {
@@ -7043,7 +7077,8 @@ export function materializeIndustrialOverlay({
             requireEndpointSeams: strictV4ReleaseContract,
             allowExactQuantizedElevationDelta: strictV4ReleaseContract,
           },
-        ), connectorJunctionProgression.candidatesByProxyId);
+        ), connectorJunctionProgression.candidatesByProxyId,
+        connectorJunctionProgression.collapseRoomIdBySegmentId.get(String(segment.id)) ?? null);
         physicalPlans.push({
           ...plan,
           routeNetworkGrantId: operation.grantId,
@@ -7056,7 +7091,23 @@ export function materializeIndustrialOverlay({
           ),
           networkRole: segment.networkRole ?? segment.routeRole ?? null,
           routeNetworkRealizationMode: operation.realizationMode ?? null,
-          parentAnchoredComponentId: componentIdBySegmentId.get(String(segment.id)) ?? null,
+          routeNetworkLocalProgressionArcRealized:
+            operation.localProgressionArcRealized ?? null,
+          parentAnchoredDeclaredComponentIds: (operation.parentAnchoredComponents ?? [])
+            .map(({ id }) => String(id)),
+          parentAnchoredComponentId:
+            componentBySegmentId.get(String(segment.id))?.id ?? null,
+          parentAnchoredAttachmentSocketId:
+            componentBySegmentId.get(String(segment.id))?.attachmentSocketId ?? null,
+          parentAnchoredAttachmentSocketIds: clonePlainValue(
+            componentBySegmentId.get(String(segment.id))?.attachmentSocketIds ?? [],
+          ),
+          parentAnchoredDeclaredNodeIds: clonePlainValue(
+            componentBySegmentId.get(String(segment.id))?.nodeIds ?? [],
+          ),
+          parentAnchoredDeclaredSegmentIds: clonePlainValue(
+            componentBySegmentId.get(String(segment.id))?.segmentIds ?? [],
+          ),
           isRouteNetworkConnection: true,
           isPyramidPerimeterLoop: (
             operation.routeNetworkKind ?? grant.routeNetworkKind
@@ -7090,6 +7141,7 @@ export function materializeIndustrialOverlay({
       endpointSocketIds: [...expectedEndpointSocketIds],
       omittedEndpointSocketIds: [...(operation.omittedEndpointSocketIds ?? [])],
       realizationMode: operation.realizationMode ?? null,
+      localProgressionArcRealized: operation.localProgressionArcRealized ?? null,
       parentAnchoredComponents: clonePlainValue(operation.parentAnchoredComponents ?? []),
       physicalConnectionIds: physicalPlans.map((plan) => plan.id),
       nodeIds: [...(operation.nodeIds ?? [])],

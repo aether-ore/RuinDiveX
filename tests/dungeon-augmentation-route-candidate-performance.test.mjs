@@ -8,6 +8,9 @@ import {
   cachedCorrelatedCheapPairStageOutcome,
   cachedOrderedCandidatePairScalar,
   cachedTranslationInvariantRouteShapeBoolean,
+  createNode,
+  createPlanningNodeGeometryTemplateCache,
+  createPlanningNodeGeometryTemplateCacheKey,
   createDungeonSelectionBag,
   createDirectFutureEndpointBitsetEvaluator,
   createLandmarkEndpointTupleDirectionalGuidance,
@@ -18,6 +21,7 @@ import {
   consumeRouteNetworkCandidateEvaluationBudget,
   dungeonSelectionBagCandidates,
   facingAwareSocketRouteCandidates,
+  finalizeExactAdjacentRouteCandidateRecords,
   indexedNodePlanningCollisionScore,
   interleaveLandmarkEndpointTuplesByExactEndpointAxes,
   landmarkPairPreselectorRouteCollisionVolumes,
@@ -32,6 +36,7 @@ import {
   promoteLandmarkEndpointTupleWarmStart,
   prioritizeLandmarkEndpointTuplesByDirectionalGuidance,
   rawPlanarRouteExceedsLengthLimit,
+  resolvePlanningNodeGeometryTemplate,
   reserveOrderedCandidateTree,
   orderLandmarkEndpointsByPreflightDomain,
   orderedLandmarkDecisionSockets,
@@ -1537,10 +1542,18 @@ test('planning-volume spatial lookup preserves full-scan node collision semantic
       id: 'node:occupied',
       center: { x: 8.35, y: 2, z: -8.35 },
       size: { x: 0.4, y: 4, z: 0.4 },
+    }, {
+      id: 'node:positive-cell-boundary',
+      center: { x: 8.4, y: 2, z: 8.4 },
+      size: { x: 0.4, y: 4, z: 0.4 },
     }],
     clearanceVolumes: [{
       id: 'node:clearance',
       center: { x: -8.35, y: 2, z: 8.35 },
+      size: { x: 0.4, y: 4, z: 0.4 },
+    }, {
+      id: 'node:negative-cell-boundary',
+      center: { x: -8.4, y: 2, z: -8.4 },
       size: { x: 0.4, y: 4, z: 0.4 },
     }],
   };
@@ -1556,6 +1569,16 @@ test('planning-volume spatial lookup preserves full-scan node collision semantic
       size: { x: 0.2, y: 1, z: 0.2 },
     },
     {
+      id: 'positive-cell-boundary-overlap',
+      center: { x: 8.45, y: 2, z: 8.4 },
+      size: { x: 0.2, y: 1, z: 0.2 },
+    },
+    {
+      id: 'negative-cell-boundary-overlap',
+      center: { x: -8.45, y: 2, z: -8.4 },
+      size: { x: 0.2, y: 1, z: 0.2 },
+    },
+    {
       id: 'vertically-separated',
       center: { x: 8.35, y: 8.01, z: -8.35 },
       size: { x: 0.2, y: 4, z: 0.2 },
@@ -1568,7 +1591,7 @@ test('planning-volume spatial lookup preserves full-scan node collision semantic
   ];
   const nearbyAvoidanceVolumes = createPlanningVolumeSpatialLookup(avoidanceVolumes);
 
-  assert.equal(nodePlanningCollisionScore(node, avoidanceVolumes), 2);
+  assert.equal(nodePlanningCollisionScore(node, avoidanceVolumes), 4);
   assert.equal(
     indexedNodePlanningCollisionScore(node, nearbyAvoidanceVolumes),
     nodePlanningCollisionScore(node, avoidanceVolumes),
@@ -1613,6 +1636,77 @@ test('planning-volume spatial lookup preserves scoped overlap grants', () => {
   assert.equal(nodePlanningCollisionScore(node, avoidanceVolumes), 1);
   assert.equal(nodePlanningCollisionScore(node, avoidanceVolumes, [matchingGrant]), 0);
   assert.equal(nodePlanningCollisionScore(node, avoidanceVolumes, [wrongModuleGrant]), 1);
+});
+
+test('planning-volume spatial lookup preserves Set identity order without per-query Sets', () => {
+  const negativeBoundary = {
+    id: 'negative-boundary',
+    center: { x: -8.4, y: 2, z: -8.4 },
+    size: { x: 0, y: 4, z: 0 },
+  };
+  const positiveBoundary = {
+    id: 'positive-boundary',
+    center: { x: 8.4, y: 2, z: 8.4 },
+    size: { x: 0, y: 4, z: 0 },
+  };
+  const first = {
+    id: 'first-wide',
+    center: { x: 4.2, y: 2, z: 4.2 },
+    size: { x: 25.2, y: 4, z: 25.2 },
+  };
+  const second = {
+    id: 'second-wide',
+    center: { x: 8.4, y: 2, z: 8.4 },
+    size: { x: 16.8, y: 4, z: 16.8 },
+  };
+  const unindexed = {
+    id: 'unindexed',
+    center: { x: 0, y: 2, z: 0 },
+    size: { x: 600, y: 4, z: 600 },
+  };
+  const lookup = createPlanningVolumeSpatialLookup([
+    positiveBoundary,
+    first,
+    negativeBoundary,
+    second,
+    first,
+    unindexed,
+    unindexed,
+  ]);
+  const query = {
+    center: { x: 4.2, y: 2, z: 4.2 },
+    size: { x: 8.4, y: 4, z: 8.4 },
+  };
+
+  assert.deepEqual(
+    lookup(query),
+    [unindexed, first, second, positiveBoundary],
+  );
+  assert.deepEqual(
+    lookup(query),
+    [unindexed, first, second, positiveBoundary],
+  );
+  assert.deepEqual(
+    lookup({
+      center: { x: -8.4, y: 2, z: -8.4 },
+      size: { x: 0, y: 4, z: 0 },
+    }),
+    [unindexed, first, negativeBoundary],
+  );
+  assert.deepEqual(
+    lookup({
+      center: { x: 8.4, y: 2, z: 8.4 },
+      size: { x: 0, y: 4, z: 0 },
+    }),
+    [unindexed, positiveBoundary, first, second],
+  );
+  assert.deepEqual(
+    [...lookup({
+      center: { x: 900, y: 2, z: 900 },
+      size: { x: 1, y: 4, z: 1 },
+    })],
+    [unindexed],
+  );
 });
 
 test('inverted future endpoint bitsets preserve brute-force mixed phase masks', () => {
@@ -2328,6 +2422,402 @@ test('landmark prospective segment scoring rejects a landing-only conflict befor
     ],
   );
   assert.equal(prospectiveVolumes.every(({ ownerId }) => ownerId === prospectiveOwnerId), true);
+});
+
+test('deferred landmark route hydration matches eager selection for rejected, mixed, and tied domains', () => {
+  const measurePath = (path) => path.lengthMeters;
+  const scenarios = [{
+    name: 'all-rejected',
+    maximumFeaturelessSpanMeters: 20,
+    records: [
+      ['rejected-late', false, Number.POSITIVE_INFINITY, 7, 6, 'z', 'z'],
+      ['rejected-minimum', true, 2, 5, 5, 'a', 'a'],
+      ['rejected-score', true, 4, 3, 4, 'b', 'b'],
+    ],
+    deferredHydrationCount: 1,
+  }, {
+    name: 'mixed-accepted-rejected',
+    maximumFeaturelessSpanMeters: 20,
+    records: [
+      ['accepted-second', true, 0, 9, 5, 'b', 'b'],
+      ['rejected', true, 3, 2, 2, 'a', 'a'],
+      ['accepted-first', true, 0, 6, 4, 'c', 'c'],
+      ['collision-free-over-span', true, 0, 30, 3, 'd', 'd'],
+    ],
+    deferredHydrationCount: 2,
+  }, {
+    name: 'stable-ties',
+    maximumFeaturelessSpanMeters: 20,
+    records: [
+      ['tie-first', true, 0, 8, 4, 'same', 'same'],
+      ['tie-second', true, 0, 8, 4, 'same', 'same'],
+      ['tie-third', true, 0, 8, 4, 'same', 'same'],
+    ],
+    deferredHydrationCount: 3,
+  }];
+  const createRecords = (records) => records.map(([
+    id,
+    endpointSeamCompatible,
+    collisionScore,
+    distanceMeters,
+    lengthMeters,
+    fromLocalSocketId,
+    toLocalSocketId,
+  ]) => ({
+    id,
+    endpointSeamCompatible,
+    collisionScore,
+    distanceMeters,
+    path: { id: `${id}:path`, lengthMeters },
+    fromLocalSocketId,
+    toLocalSocketId,
+  }));
+  const finalizeEagerReference = (
+    records,
+    maximumFeaturelessSpanMeters,
+    hydrateCandidate,
+  ) => {
+    const hydratedRecords = records.map(hydrateCandidate);
+    const collisionFreeCandidates = hydratedRecords.filter(({
+      collisionScore,
+      endpointSeamCompatible,
+    }) => endpointSeamCompatible && collisionScore === 0);
+    const candidates = collisionFreeCandidates.filter(({ distanceMeters }) => (
+      distanceMeters <= maximumFeaturelessSpanMeters + 1e-6
+    )).sort((first, second) => (
+      first.distanceMeters - second.distanceMeters
+        || measurePath(first.path) - measurePath(second.path)
+    ));
+    const minimumCollisionCandidate = [...hydratedRecords].sort((first, second) => (
+      first.collisionScore - second.collisionScore
+        || first.distanceMeters - second.distanceMeters
+        || measurePath(first.path) - measurePath(second.path)
+        || String(first.fromLocalSocketId).localeCompare(String(second.fromLocalSocketId))
+        || String(first.toLocalSocketId).localeCompare(String(second.toLocalSocketId))
+    ))[0] ?? null;
+    return {
+      candidates,
+      minimumCollisionCandidate,
+      routeCandidateCount: hydratedRecords.length,
+      collisionFreeCandidateCount: collisionFreeCandidates.length,
+      featurelessEligibleCandidateCount: candidates.length,
+      minimumFeaturelessDistanceMeters: collisionFreeCandidates.length > 0
+        ? Math.min(...collisionFreeCandidates.map(({ distanceMeters }) => distanceMeters))
+        : null,
+    };
+  };
+
+  for (const scenario of scenarios) {
+    const records = createRecords(scenario.records);
+    let eagerHydrationCount = 0;
+    let deferredHydrationCount = 0;
+    const hydrate = (candidate, countHydration) => {
+      countHydration();
+      return {
+        ...candidate,
+        fromSocket: { id: `${candidate.id}:from` },
+        toSocket: { id: `${candidate.id}:to` },
+        collisionIds: candidate.collisionScore > 0
+          ? [`${candidate.id}:collision`]
+          : [],
+      };
+    };
+    const eager = finalizeEagerReference(
+      records,
+      scenario.maximumFeaturelessSpanMeters,
+      (candidate) => hydrate(candidate, () => { eagerHydrationCount += 1; }),
+    );
+    const deferred = finalizeExactAdjacentRouteCandidateRecords(records, {
+      maximumFeaturelessSpanMeters: scenario.maximumFeaturelessSpanMeters,
+      measurePath,
+      hydrateCandidate: (candidate) => hydrate(
+        candidate,
+        () => { deferredHydrationCount += 1; },
+      ),
+    });
+
+    assert.deepEqual(deferred, eager, scenario.name);
+    assert.equal(eagerHydrationCount, records.length, scenario.name);
+    assert.equal(
+      deferredHydrationCount,
+      scenario.deferredHydrationCount,
+      scenario.name,
+    );
+  }
+});
+
+function planningNodeGeometryFixtureInputs(overrides = {}) {
+  const grammar = overrides.grammar ?? {
+    id: 'fixture-planning-geometry-room',
+    revision: 1,
+    blueprintId: 'fixture-planning-geometry-blueprint',
+    blueprintPersistentStateIds: ['fixture-state'],
+    blueprintCanonicalRotationQuarterTurns: 0,
+    topology: 'room',
+    size: { width: 11.2, height: 5.6, depth: 8.4 },
+    structure: { platforms: [], authoredMarker: 'fixture' },
+    socketConnectivityGroups: [['entry', 'exit']],
+    selectionConstraints: { routeNetworkModuleKind: 'room' },
+    sockets: [{
+      id: 'entry',
+      localPosition: { x: -5.6, y: 0, z: 0 },
+      localFacing: { x: -1, y: 0, z: 0 },
+      connectorFamilies: ['service-gallery'],
+    }, {
+      id: 'exit',
+      localPosition: { x: 5.6, y: 0, z: 0 },
+      localFacing: { x: 1, y: 0, z: 0 },
+      connectorFamilies: ['service-gallery'],
+    }],
+    anchors: [],
+    occupiedVolumes: [{
+      id: 'body',
+      center: { x: 0, y: 2.8, z: 0 },
+      size: { x: 11.2, y: 5.6, z: 8.4 },
+      purpose: 'room-body',
+      metadata: { flags: ['fixture-body'] },
+    }],
+    clearanceVolumes: [{
+      id: 'entry-clearance',
+      center: { x: -7, y: 2.8, z: 0 },
+      size: { x: 2.8, y: 5.6, z: 5.6 },
+      purpose: 'socket-approach',
+      metadata: { flags: ['fixture-clearance'] },
+    }],
+    requiredThemeCapabilities: { materials: ['steel'] },
+  };
+  return {
+    id: 'fixture-planning-node',
+    operationId: 'fixture-planning-operation',
+    parentRegionId: 'fixture-planning-region',
+    ordinal: 2,
+    grammar,
+    themeBinding: overrides.themeBinding ?? { id: 'fixture-theme' },
+    center: overrides.center ?? { x: 16.8, y: 2.8, z: -8.4 },
+    facing: overrides.facing ?? { x: 0, y: 0, z: 1 },
+    coordinateSpace: overrides.coordinateSpace ?? 'world',
+    progressionOrder: overrides.progressionOrder ?? 7,
+    planningOnly: overrides.planningOnly ?? true,
+    ...overrides,
+    grammar,
+  };
+}
+
+function serializablePlanningNode(node) {
+  return {
+    ...node,
+    socketIdByLocalId: [...node.socketIdByLocalId.entries()],
+  };
+}
+
+test('planning geometry templates preserve bytes and recursively isolate mutable shells', () => {
+  const inputs = planningNodeGeometryFixtureInputs();
+  const direct = createNode(inputs);
+  const cache = createPlanningNodeGeometryTemplateCache({
+    probationCapacity: 8,
+    templateCapacity: 4,
+  });
+  const first = createNode({ ...inputs, planningGeometryTemplateCache: cache });
+  const second = createNode({ ...inputs, planningGeometryTemplateCache: cache });
+  const third = createNode({ ...inputs, planningGeometryTemplateCache: cache });
+  const directBytes = JSON.stringify(serializablePlanningNode(direct));
+
+  assert.equal(JSON.stringify(serializablePlanningNode(first)), directBytes);
+  assert.equal(JSON.stringify(serializablePlanningNode(second)), directBytes);
+  assert.equal(JSON.stringify(serializablePlanningNode(third)), directBytes);
+  assert.deepEqual(cache.stats, {
+    bypasses: 0,
+    probationMisses: 1,
+    admissions: 1,
+    templateHits: 1,
+    probationEvictions: 0,
+    templateEvictions: 0,
+  });
+  for (const previous of [first, second]) {
+    assert.notStrictEqual(third, previous);
+    assert.notStrictEqual(third.placement, previous.placement);
+    assert.notStrictEqual(third.placement.center, previous.placement.center);
+    assert.notStrictEqual(third.placement.facing, previous.placement.facing);
+    assert.notStrictEqual(third.size, previous.size);
+    assert.notStrictEqual(third.sockets, previous.sockets);
+    assert.notStrictEqual(third.sockets[0], previous.sockets[0]);
+    assert.notStrictEqual(third.sockets[0].position, previous.sockets[0].position);
+    assert.notStrictEqual(third.sockets[0].facing, previous.sockets[0].facing);
+    assert.notStrictEqual(third.occupiedVolumes, previous.occupiedVolumes);
+    assert.notStrictEqual(third.occupiedVolumes[0], previous.occupiedVolumes[0]);
+    assert.notStrictEqual(
+      third.occupiedVolumes[0].metadata,
+      previous.occupiedVolumes[0].metadata,
+    );
+    assert.notStrictEqual(third.clearanceVolumes, previous.clearanceVolumes);
+    assert.notStrictEqual(third.clearanceVolumes[0], previous.clearanceVolumes[0]);
+    assert.notStrictEqual(third.structure, previous.structure);
+    assert.notStrictEqual(
+      third.requiredThemeCapabilities,
+      previous.requiredThemeCapabilities,
+    );
+    assert.notStrictEqual(
+      third.requiredThemeCapabilities.materials,
+      previous.requiredThemeCapabilities.materials,
+    );
+    assert.notStrictEqual(third.socketIdByLocalId, previous.socketIdByLocalId);
+  }
+
+  third.placement.center.x = 999;
+  third.placement.facing.z = -1;
+  third.size.x = 999;
+  third.sockets[0].state = 'connected';
+  third.sockets[0].position.x = 999;
+  third.sockets[0].facing.x = 1;
+  third.occupiedVolumes[0].center.x = 999;
+  third.occupiedVolumes[0].size.x = 999;
+  third.occupiedVolumes[0].metadata.flags.push('mutated');
+  third.clearanceVolumes[0].metadata.flags.push('mutated');
+  third.structure.platforms = [{ id: 'mutated-platform' }];
+  third.requiredThemeCapabilities.materials.push('mutated');
+  third.socketIdByLocalId.set('mutated', 'mutated');
+  const afterMutation = createNode({
+    ...inputs,
+    planningGeometryTemplateCache: cache,
+  });
+  assert.equal(JSON.stringify(serializablePlanningNode(afterMutation)), directBytes);
+  assert.equal(cache.stats.templateHits, 2);
+});
+
+test('planning geometry exact keys partition every input identity and primitive', () => {
+  const cache = createPlanningNodeGeometryTemplateCache();
+  const baseline = planningNodeGeometryFixtureInputs();
+  const variants = [
+    { ...baseline, id: `${baseline.id}:other` },
+    { ...baseline, operationId: `${baseline.operationId}:other` },
+    { ...baseline, parentRegionId: `${baseline.parentRegionId}:other` },
+    { ...baseline, ordinal: baseline.ordinal + 1 },
+    { ...baseline, grammar: { ...baseline.grammar } },
+    { ...baseline, themeBinding: { ...baseline.themeBinding } },
+    { ...baseline, center: { ...baseline.center, x: baseline.center.x + 1 } },
+    { ...baseline, center: { ...baseline.center, y: baseline.center.y + 1 } },
+    { ...baseline, center: { ...baseline.center, z: baseline.center.z + 1 } },
+    { ...baseline, facing: { ...baseline.facing, x: 1 } },
+    { ...baseline, facing: { ...baseline.facing, y: 1 } },
+    { ...baseline, facing: { ...baseline.facing, z: -1 } },
+    { ...baseline, coordinateSpace: { id: 'world' } },
+    { ...baseline, progressionOrder: baseline.progressionOrder + 1 },
+    { ...baseline, planningOnly: false },
+    { ...baseline, center: { ...baseline.center, x: -0 } },
+    { ...baseline, center: { ...baseline.center, x: '16.8' } },
+  ];
+  const baselineKey = createPlanningNodeGeometryTemplateCacheKey(cache, baseline);
+  const variantKeys = variants.map((variant) => (
+    createPlanningNodeGeometryTemplateCacheKey(cache, variant)
+  ));
+
+  assert.equal(
+    createPlanningNodeGeometryTemplateCacheKey(cache, baseline),
+    baselineKey,
+  );
+  assert.equal(new Set([baselineKey, ...variantKeys]).size, variants.length + 1);
+});
+
+test('planning geometry cache admits on the second encounter and bounds both LRUs', () => {
+  const resolveFixture = (cache, id) => {
+    const inputs = {
+      id,
+      operationId: 'fixture-operation',
+      parentRegionId: 'fixture-region',
+      ordinal: 0,
+      grammar: null,
+      themeBinding: null,
+      center: { x: 0, y: 0, z: 0 },
+      facing: { x: 1, y: 0, z: 0 },
+      coordinateSpace: 'world',
+      progressionOrder: 0,
+      planningOnly: true,
+    };
+    return resolvePlanningNodeGeometryTemplate(cache, inputs, {
+      createValue: () => ({ id, source: 'created' }),
+      createTemplate: (value) => Object.freeze({ id: value.id }),
+      instantiateTemplate: (template) => ({ id: template.id, source: 'template' }),
+    });
+  };
+  const admissionCache = createPlanningNodeGeometryTemplateCache({
+    probationCapacity: 2,
+    templateCapacity: 2,
+  });
+  assert.equal(resolveFixture(admissionCache, 'a').source, 'created');
+  assert.equal(resolveFixture(admissionCache, 'a').source, 'created');
+  assert.equal(admissionCache.stats.admissions, 1);
+  assert.equal(admissionCache.stats.templateHits, 0);
+  assert.equal(resolveFixture(admissionCache, 'a').source, 'template');
+  assert.equal(admissionCache.stats.templateHits, 1);
+
+  const probationCache = createPlanningNodeGeometryTemplateCache({
+    probationCapacity: 2,
+    templateCapacity: 2,
+  });
+  resolveFixture(probationCache, 'a');
+  resolveFixture(probationCache, 'b');
+  resolveFixture(probationCache, 'c');
+  assert.equal(probationCache.probation.size, 2);
+  assert.equal(probationCache.stats.probationEvictions, 1);
+  resolveFixture(probationCache, 'a');
+  assert.equal(probationCache.stats.admissions, 0);
+  assert.equal(probationCache.stats.probationEvictions, 2);
+
+  const templateCache = createPlanningNodeGeometryTemplateCache({
+    probationCapacity: 4,
+    templateCapacity: 2,
+  });
+  resolveFixture(templateCache, 'a');
+  resolveFixture(templateCache, 'a');
+  resolveFixture(templateCache, 'b');
+  resolveFixture(templateCache, 'b');
+  resolveFixture(templateCache, 'a');
+  resolveFixture(templateCache, 'c');
+  resolveFixture(templateCache, 'c');
+  const keyFor = (id) => createPlanningNodeGeometryTemplateCacheKey(
+    templateCache,
+    {
+      id,
+      operationId: 'fixture-operation',
+      parentRegionId: 'fixture-region',
+      ordinal: 0,
+      grammar: null,
+      themeBinding: null,
+      center: { x: 0, y: 0, z: 0 },
+      facing: { x: 1, y: 0, z: 0 },
+      coordinateSpace: 'world',
+      progressionOrder: 0,
+      planningOnly: true,
+    },
+  );
+  assert.equal(templateCache.stats.templateEvictions, 1);
+  assert.equal(templateCache.templates.has(keyFor('a')), true);
+  assert.equal(templateCache.templates.has(keyFor('b')), false);
+  assert.equal(templateCache.templates.has(keyFor('c')), true);
+});
+
+test('runtime node creation bypasses planning geometry templates', () => {
+  const cache = createPlanningNodeGeometryTemplateCache({
+    probationCapacity: 2,
+    templateCapacity: 2,
+  });
+  const inputs = planningNodeGeometryFixtureInputs({ planningOnly: false });
+  const first = createNode({ ...inputs, planningGeometryTemplateCache: cache });
+  const second = createNode({ ...inputs, planningGeometryTemplateCache: cache });
+
+  assert.deepEqual(serializablePlanningNode(first), serializablePlanningNode(second));
+  assert.notStrictEqual(first, second);
+  assert.notStrictEqual(first.sockets, second.sockets);
+  assert.equal(cache.probation.size, 0);
+  assert.equal(cache.templates.size, 0);
+  assert.deepEqual(cache.stats, {
+    bypasses: 2,
+    probationMisses: 0,
+    admissions: 0,
+    templateHits: 0,
+    probationEvictions: 0,
+    templateEvictions: 0,
+  });
 });
 
 function routeShapeFixture(translation = { x: 0, y: 0, z: 0 }) {

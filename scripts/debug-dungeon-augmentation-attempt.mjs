@@ -2907,7 +2907,8 @@ try {
     texture.dispose();
     process.exit(0);
   }
-  if (process.argv.includes('--failed-rooms-only')) {
+  if (process.argv.includes('--failed-rooms-only')
+    || process.argv.includes('--direct-failed-rooms-only')) {
     const diagnosticBarrierZones = [
       ...(dungeon.solidZones ?? []),
       ...(dungeon.aerialBoundaryZones ?? []),

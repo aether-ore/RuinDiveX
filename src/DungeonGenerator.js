@@ -19449,15 +19449,18 @@ export class DungeonGenerator {
         continue;
       }
 
-      const shaftEndpointElevations = [source.elevation, destination.elevation];
+      const shaftBottomElevation = Math.min(source.elevation, destination.elevation);
+      const shaftTopElevation = Math.max(source.elevation, destination.elevation);
       const shaftColumnsAreOpen = source.records.every(({ floor }) => (
         [1, 2, 3, 4].every((offset) => !floorTiles.some((candidate) => (
           candidate?.walkabilityIntent !== 'support-only'
             && candidate.x === floor.x + source.dx * offset
             && candidate.z === floor.z + source.dz * offset
-            && shaftEndpointElevations.some((elevation) => (
-              Math.abs(Number(candidate.elevation ?? 0) - elevation) <= 0.05
-            ))
+            // A static lower sill/floor may support the car at its bottom
+            // stop. Anything above that plane through the upper aperture
+            // would cap the car sweep or block boarding.
+            && Number(candidate.elevation ?? 0) > shaftBottomElevation + 0.05
+            && Number(candidate.elevation ?? 0) <= shaftTopElevation + 0.05
         )))
       ));
       if (!shaftColumnsAreOpen) continue;
@@ -21505,7 +21508,11 @@ export class DungeonGenerator {
       ])).values()];
       const localTraversalFloors = navigableTiles.filter((tile) => (
         (
-          this._isTileInsideRoom(tile, room)
+          (authoritativeDeclaredRoomFloorKeys.size > 0
+            ? authoritativeDeclaredRoomFloorKeys.has(
+                this._getFloorTileGraphKey(tile),
+              )
+            : this._isTileInsideRoom(tile, room))
           || isExactRoomConnectorThresholdFloor(tile)
         )
         && (
@@ -27566,8 +27573,18 @@ export class DungeonGenerator {
               `${sourceFloorKey}|${edgeDirection}`,
             )
         );
-        if ((tile.v4SupplementalOpenRetainingWallEdges ?? [])
-          .includes(edgeDirection)
+        const liftBoardingLanding = /^lift_(?:source|destination)_landing$/
+          .test(String(tile.connectorZone ?? ''))
+          || (tile.connectorLiftBoardingOpenRetainingWallEdges ?? [])
+            .includes(edgeDirection);
+        const authoritativeSupplementalOpening = Boolean(
+          (tile.v4SupplementalOpenRetainingWallEdges ?? []).includes(edgeDirection)
+            // Lift mouths fail closed as one paired six-edge contract. Their
+            // generic V4 ownership marker must not let one surviving lane
+            // bypass the complete lift proof above.
+            && !liftBoardingLanding
+        );
+        if (authoritativeSupplementalOpening
           || authoritativeVerticalTransferOpening
           || authoritativeLiftBoardingOpening) {
           continue;

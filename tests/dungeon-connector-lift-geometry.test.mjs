@@ -521,9 +521,53 @@ test('V4 supplemental automatic lift owns and opens only its declared boarding e
       && run.wallTopY >= floor.elevation + 0.001;
   };
 
-  for (const landing of [...lift.bottomLandingTiles, ...lift.topLandingTiles]) {
-    const floor = floorByKey(generator, floorTiles, landing.floorKey);
-    for (const edge of floor.openRetainingWallEdges ?? []) {
+  const boardingEdges = [...lift.bottomLandingTiles, ...lift.topLandingTiles]
+    .flatMap((landing) => {
+      const floor = floorByKey(generator, floorTiles, landing.floorKey);
+      return (floor.connectorLiftBoardingOpenRetainingWallEdges ?? [])
+        .map((edge) => ({ floor, edge }));
+    });
+  assert.equal(boardingEdges.length, 6, 'a V4 lift owns exactly three lanes per endpoint');
+  assert.deepEqual(
+    Object.fromEntries(['source', 'destination'].map((endpoint) => [
+      endpoint,
+      boardingEdges.filter(({ floor }) => (
+        floor.connectorZone === `lift_${endpoint}_landing`
+      )).length,
+    ])),
+    { source: 3, destination: 3 },
+  );
+  assert.equal(
+    generator._collectConnectorLiftBoardingWallOpeningKeys(floorTiles).size,
+    6,
+    'the V4 lift must satisfy the complete paired shell proof',
+  );
+  const lowerCenterLane = boardingEdges.find(({ floor }) => (
+    (floor.traversalLinks ?? []).some(({ action }) => action === 'automatic_lift')
+      && Math.abs(floor.elevation - lift.bottomElevation) <= 0.05
+  ));
+  assert.ok(lowerCenterLane);
+  const [shaftDx, shaftDz] = lowerCenterLane.edge.split(',').map(Number);
+  const lowerShaftFloor = floorTiles.find((floor) => (
+    floor.x === lowerCenterLane.floor.x + shaftDx
+      && floor.z === lowerCenterLane.floor.z + shaftDz
+      && Math.abs(floor.elevation - lift.bottomElevation) <= 0.05
+  ));
+  assert.ok(lowerShaftFloor, 'the lower lift stop may retain its static sill/support floor');
+  assert.equal(
+    generator._collectConnectorLiftBoardingWallOpeningKeys([
+      ...floorTiles,
+      {
+        ...lowerShaftFloor,
+        elevation: (lift.bottomElevation + lift.topElevation) * 0.5,
+        floorKey: 'synthetic-mid-shaft-cap',
+      },
+    ]).size,
+    0,
+    'an intermediate static cap must invalidate all six lift boarding openings',
+  );
+
+  for (const { floor, edge } of boardingEdges) {
       assert.deepEqual(floor.v4SupplementalRouteOwnerIds, [plan.id]);
       assert.ok(
         floor.v4SupplementalOpenRetainingWallEdges?.includes(edge),
@@ -539,6 +583,91 @@ test('V4 supplemental automatic lift owns and opens only its declared boarding e
         false,
         'a V4 route-owned lift boarding edge must remain open in the boundary shell',
       );
-    }
   }
+
+  const incompleteFloors = floorTiles.map((floor) => ({
+    ...floor,
+    openRetainingWallEdges: [...(floor.openRetainingWallEdges ?? [])],
+    v4SupplementalOpenRetainingWallEdges: [
+      ...(floor.v4SupplementalOpenRetainingWallEdges ?? []),
+    ],
+    connectorLiftBoardingOpenRetainingWallEdges: [
+      ...(floor.connectorLiftBoardingOpenRetainingWallEdges ?? []),
+    ],
+    traversalLinks: (floor.traversalLinks ?? []).map((link) => ({ ...link })),
+  }));
+  const removedLane = incompleteFloors.find((floor) => {
+    if (floor.connectorZone !== 'lift_source_landing'
+      || floor.connectorLiftBoardingOpenRetainingWallEdges.length === 0) return false;
+    const [dx, dz] = floor.connectorLiftBoardingOpenRetainingWallEdges[0]
+      .split(',').map(Number);
+    return !incompleteFloors.some((candidate) => (
+      candidate.x === floor.x + dx
+        && candidate.z === floor.z + dz
+        && Math.abs(candidate.elevation - floor.elevation) <= 0.05
+    ));
+  });
+  assert.ok(removedLane);
+  removedLane.connectorLiftBoardingOpenRetainingWallEdges = [];
+  const mergedZoneLane = incompleteFloors.find((floor) => {
+    if (floor === removedLane
+      || floor.connectorLiftBoardingOpenRetainingWallEdges.length === 0) return false;
+    const [dx, dz] = floor.connectorLiftBoardingOpenRetainingWallEdges[0]
+      .split(',').map(Number);
+    return !incompleteFloors.some((candidate) => (
+      candidate.x === floor.x + dx
+        && candidate.z === floor.z + dz
+        && Math.abs(candidate.elevation - floor.elevation) <= 0.05
+    ));
+  });
+  assert.ok(mergedZoneLane);
+  mergedZoneLane.connectorZone = 'merged-authoritative-floor';
+  assert.equal(
+    removedLane.v4SupplementalOpenRetainingWallEdges.length,
+    1,
+    'the generic V4 ownership marker remains present for the bypass regression',
+  );
+  const incompleteRuns = generator._collectBoundaryWallRuns(
+    new Map(),
+    new Set(),
+    [],
+    new Map(),
+    incompleteFloors,
+  );
+  const incompleteByKey = new Map(incompleteFloors.map((floor) => [
+    generator._getFloorTileGraphKey(floor),
+    floor,
+  ]));
+  assert.equal(
+    generator._collectConnectorLiftBoardingWallOpeningKeys(incompleteFloors).size,
+    0,
+    'one missing lane must invalidate the complete paired V4 lift proof',
+  );
+  const removedEdge = removedLane.openRetainingWallEdges[0];
+  const incompleteRemovedLane = incompleteByKey.get(
+    generator._getFloorTileGraphKey(removedLane),
+  );
+  const [removedDx, removedDz] = removedEdge.split(',').map(Number);
+  assert.equal(
+    incompleteRuns.some((run) => runCoversEdge(
+      run,
+      incompleteRemovedLane,
+      removedDx,
+      removedDz,
+    )),
+    true,
+    'the missing V4 lane must not be reopened by its generic ownership marker',
+  );
+  const mergedZoneEdge = mergedZoneLane.openRetainingWallEdges[0];
+  const [mergedDx, mergedDz] = mergedZoneEdge.split(',').map(Number);
+  assert.equal(
+    incompleteRuns.some((run) => runCoversEdge(
+      run,
+      mergedZoneLane,
+      mergedDx,
+      mergedDz,
+    )),
+    true,
+    'exact lift metadata must suppress the generic bypass if scalar zone identity was merged',
+  );
 });

@@ -26,6 +26,7 @@ import {
   objectiveCoverageEndpointGrammarIsSelectable,
   objectiveCoverageEndpointOrderAlternatives,
   orderDenseObjectiveCoverageFamilyChoices,
+  orderTwoStationObjectiveCoverageCandidateSignatures,
   orderRouteNetworkGrantOrdinalsByEndpointDomain,
   orderCoverageRoomIndicesForArc,
   orientOrderedCandidateChainAtFailure,
@@ -1063,6 +1064,162 @@ test('candidate product covers both independent family axes before filling diago
   assert.equal(new Set(pairs.map(({ firstIndex, secondIndex }) => (
     `${firstIndex}:${secondIndex}`
   ))).size, 15);
+});
+
+test('two-station coverage promotes one spacious fork/merge replacement without renumbering', () => {
+  const physicalSignatures = [
+    { moduleCount: 4, elevationMode: 'ladder' },
+    { moduleCount: 5, elevationMode: 'ladder' },
+    { moduleCount: 4, elevationMode: 'lift' },
+    { moduleCount: 5, elevationMode: 'lift' },
+    { moduleCount: 6, elevationMode: 'ladder' },
+    { moduleCount: 6, elevationMode: 'lift' },
+  ];
+  const familyChoices = Array.from({ length: 12 }, (_, familyOrdinal) => ({
+    topologySelection: {
+      id: familyOrdinal === 10
+        ? 'fork-merge-h-loop'
+        : 'parallel-gallery-loop',
+    },
+    junctionSelection: {
+      id: familyOrdinal === 10
+        ? 'over-under-crossover'
+        : 'through-t',
+    },
+  }));
+  const raw = interleavedRouteNetworkCandidateSignatures({
+    physicalSignatures,
+    familyChoices,
+  });
+  assert.deepEqual(
+    raw.slice(0, 12).map(({ candidateOrdinal, moduleCount }) => ({
+      candidateOrdinal,
+      moduleCount,
+    })),
+    [
+      { candidateOrdinal: 0, moduleCount: 4 },
+      { candidateOrdinal: 1, moduleCount: 5 },
+      { candidateOrdinal: 2, moduleCount: 4 },
+      { candidateOrdinal: 3, moduleCount: 5 },
+      { candidateOrdinal: 4, moduleCount: 6 },
+      { candidateOrdinal: 5, moduleCount: 6 },
+      { candidateOrdinal: 6, moduleCount: 4 },
+      { candidateOrdinal: 7, moduleCount: 5 },
+      { candidateOrdinal: 8, moduleCount: 4 },
+      { candidateOrdinal: 9, moduleCount: 5 },
+      { candidateOrdinal: 10, moduleCount: 6 },
+      { candidateOrdinal: 11, moduleCount: 6 },
+    ],
+  );
+
+  const ordered = orderTwoStationObjectiveCoverageCandidateSignatures(
+    raw,
+    { candidateLimit: 12 },
+  );
+  assert.deepEqual(
+    ordered.slice(0, 12).map(({ candidateOrdinal }) => candidateOrdinal),
+    [0, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11],
+    'canonical stays first, one maximum-module fork/merge follows, and all other identities stay stable',
+  );
+  assert.deepEqual(
+    ordered.slice(0, 2).map((candidate) => ({
+      candidateOrdinal: candidate.candidateOrdinal,
+      searchVariant: candidate.searchVariant,
+      moduleCount: candidate.moduleCount,
+      elevationMode: candidate.elevationMode,
+      topologyTemplateId: candidate.topologySelection.id,
+      junctionKind: candidate.junctionSelection.id,
+    })),
+    [
+      {
+        candidateOrdinal: 0,
+        searchVariant: 0,
+        moduleCount: 4,
+        elevationMode: 'ladder',
+        topologyTemplateId: 'parallel-gallery-loop',
+        junctionKind: 'through-t',
+      },
+      {
+        candidateOrdinal: 10,
+        searchVariant: 10,
+        moduleCount: 6,
+        elevationMode: 'ladder',
+        topologyTemplateId: 'fork-merge-h-loop',
+        junctionKind: 'over-under-crossover',
+      },
+    ],
+    'promotion preserves the complete-product ordinal and RNG search identity',
+  );
+  assert.deepEqual(
+    raw.slice(0, 12).map(({ candidateOrdinal }) => candidateOrdinal),
+    Array.from({ length: 12 }, (_, candidateOrdinal) => candidateOrdinal),
+    'ordering does not mutate the shared raw candidate product',
+  );
+  const fixedModuleProduct = interleavedRouteNetworkCandidateSignatures({
+    physicalSignatures: [
+      { moduleCount: 4, elevationMode: 'ladder' },
+      { moduleCount: 4, elevationMode: 'slope' },
+      { moduleCount: 4, elevationMode: 'split-level-platform' },
+      { moduleCount: 4, elevationMode: 'lift' },
+    ],
+    familyChoices: Array.from({ length: 8 }, (_, familyOrdinal) => ({
+      topologySelection: {
+        id: familyOrdinal === 4
+          ? 'parallel-gallery-loop'
+          : 'over-under-loop',
+      },
+      junctionSelection: {
+        id: familyOrdinal === 4
+          ? 'over-under-crossover'
+          : 'fork-merge',
+      },
+    })),
+  });
+  assert.deepEqual(
+    orderTwoStationObjectiveCoverageCandidateSignatures(
+      fixedModuleProduct,
+    ).slice(0, 8).map(({ candidateOrdinal }) => candidateOrdinal),
+    [0, 4, 1, 2, 3, 5, 6, 7],
+    'a fixed module domain tries one same-physical family sibling after canonical',
+  );
+  const boundedWindow = [
+    {
+      candidateOrdinal: 0,
+      moduleCount: 4,
+      elevationMode: 'ladder',
+      topologySelection: { id: 'parallel-gallery-loop' },
+      junctionSelection: { id: 'through-t' },
+    },
+    {
+      candidateOrdinal: 1,
+      moduleCount: 5,
+      elevationMode: 'lift',
+      topologySelection: { id: 'parallel-gallery-loop' },
+      junctionSelection: { id: 'through-t' },
+    },
+    {
+      candidateOrdinal: 2,
+      moduleCount: 5,
+      elevationMode: 'ladder',
+      topologySelection: { id: 'fork-merge-h-loop' },
+      junctionSelection: { id: 'over-under-crossover' },
+    },
+    {
+      candidateOrdinal: 3,
+      moduleCount: 9,
+      elevationMode: 'ladder',
+      topologySelection: { id: 'fork-merge-h-loop' },
+      junctionSelection: { id: 'over-under-crossover' },
+    },
+  ];
+  assert.deepEqual(
+    orderTwoStationObjectiveCoverageCandidateSignatures(
+      boundedWindow,
+      { candidateLimit: 3 },
+    ).map(({ candidateOrdinal }) => candidateOrdinal),
+    [0, 2, 1, 3],
+    'an unavailable larger identity outside the bounded window cannot suppress the best authorized fallback',
+  );
 });
 
 test('stacked interchange prunes the missing-support composition before geometry', () => {

@@ -116,6 +116,11 @@ export const RELEASE_SUITE_CONTRACTS = Object.freeze({
         runner: 'node',
         args: Object.freeze(['--test', 'tests/dungeon-connector-enclosure.test.mjs']),
       }),
+      Object.freeze({
+        id: 'connector-lift-boarding-enclosure',
+        runner: 'node',
+        args: Object.freeze(['--test', 'tests/dungeon-connector-lift-geometry.test.mjs']),
+      }),
     ]),
   }),
   'legacy-replay': Object.freeze({

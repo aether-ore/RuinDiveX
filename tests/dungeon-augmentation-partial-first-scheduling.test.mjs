@@ -5,6 +5,7 @@ import {
   createRouteNetworkPartialFirstCandidateSchedule,
   evaluateRouteNetworkPartialPreRecoveryAcceptance,
   routeNetworkPartialBranchRetentionUpperBound,
+  routeNetworkSolutionRetainsAllRequiredGrants,
   selectDeferredRouteNetworkCoverageSuffixIndex,
 } from '../src/dungeon-augmentation/planner.js';
 import { DUNGEON_AUGMENTATION_PROFILES } from '../src/dungeon-augmentation/catalog.js';
@@ -12,6 +13,25 @@ import { DUNGEON_AUGMENTATION_PROFILES } from '../src/dungeon-augmentation/catal
 const REQUIRED_ORDINALS = new Set([0, 1, 2, 3, 4, 5]);
 const COVERAGE_ORDINALS = new Set([1, 2, 3, 4, 5]);
 const LANDMARK_ORDINALS = new Set([0]);
+
+test('complete required retention is terminal without an optional network', () => {
+  const requiredOrdinals = new Set([0, 1]);
+  assert.equal(routeNetworkSolutionRetainsAllRequiredGrants({
+    operations: [{ id: 'landmark' }, { id: 'coverage' }],
+    acceptedGrantOrdinals: [0, 1],
+    acceptedNetworkCount: 2,
+  }, requiredOrdinals), true);
+  assert.equal(routeNetworkSolutionRetainsAllRequiredGrants({
+    operations: [{ id: 'landmark' }, { id: 'optional' }],
+    acceptedGrantOrdinals: [0, 2],
+    acceptedNetworkCount: 2,
+  }, requiredOrdinals), false, 'an optional grant cannot compensate for missing required coverage');
+  assert.equal(routeNetworkSolutionRetainsAllRequiredGrants({
+    operations: [{ id: 'optional' }],
+    acceptedGrantOrdinals: [2],
+    acceptedNetworkCount: 1,
+  }, []), false, 'optional-only profiles retain their existing maximization path');
+});
 
 test('partial branch upper bounds exclude every explicitly pruned grant', () => {
   assert.deepEqual(routeNetworkPartialBranchRetentionUpperBound({
@@ -127,7 +147,7 @@ test('industrial V4 profile declares the measured two-network useful floor', () 
   );
 });
 
-test('partial schedules checkpoint coverage after its four-identity modular replacement window', () => {
+test('partial schedules checkpoint coverage after its complete modular replacement window', () => {
   const ordinary = [0, 1, 2, 3, 4].map((candidateIndex) => ({ candidateIndex }));
   assert.deepEqual(
     createRouteNetworkPartialFirstCandidateSchedule(ordinary, {
@@ -155,8 +175,8 @@ test('partial schedules checkpoint coverage after its four-identity modular repl
       'candidate:1',
       'candidate:2',
       'candidate:3',
-      'prune-current-required-coverage',
       'candidate:4',
+      'prune-current-required-coverage',
     ],
   );
 });
@@ -234,7 +254,7 @@ test('deferred coverage suffixes preserve the strongest accepted-required anchor
   ), 1, 'anchor completeness precedes class dequeue count and FIFO breaks the tie');
 });
 
-test('accepted prune checkpoint preserves the four-identity modular replacement prefix', () => {
+test('accepted prune checkpoint follows the complete modular replacement window', () => {
   const runSchedule = (checkpointSolution) => {
     const calls = [];
     const schedule = createRouteNetworkPartialFirstCandidateSchedule([
@@ -287,6 +307,7 @@ test('accepted prune checkpoint preserves the four-identity modular replacement 
     'alternate-family',
     'alternate-elevation',
     'compact-modular-substitute',
+    'expensive-later',
     'prune-checkpoint',
   ]);
 
@@ -300,7 +321,7 @@ test('accepted prune checkpoint preserves the four-identity modular replacement 
     'alternate-family',
     'alternate-elevation',
     'compact-modular-substitute',
-    'prune-checkpoint',
     'expensive-later',
+    'prune-checkpoint',
   ]);
 });

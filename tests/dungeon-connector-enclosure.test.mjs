@@ -2554,7 +2554,10 @@ test('V4 platformability consumes authoritative realized floor cells instead of 
         type: 'supplement',
         x: 2,
         z: 0,
-        width: 3,
+        // Deliberately stale facade dimensions: the authoritative V4 tier
+        // extends one cell beyond both sides of this legacy rectangle. Local
+        // traversal must consume the immutable realized identities below.
+        width: 1,
         depth: 1,
         baseElevation: 0,
         isDungeonSupplement: true,
@@ -4035,6 +4038,11 @@ test('a late augmented assembly throw disposes the partial candidate exactly onc
   const { dungeon: acceptedParent, randomTape } = generator
     ._generateAcceptedIndustrialDungeon({ captureAcceptedRandomTape: true });
   generator.augmentationProfileId = AUGMENTATION_PROFILE_ID;
+  generator._augmentationReplayPlanningSnapshotOverride = generator
+    ._createIndustrialDungeonAugmentationPlanningSnapshot({
+      rooms: acceptedParent.rooms,
+      connectionPlans: acceptedParent.connectionPlans,
+    });
   let replayCursor = 0;
   generator.random = () => {
     assert.ok(replayCursor < randomTape.length, 'augmented replay exceeded parent RNG tape');
@@ -4317,6 +4325,15 @@ test('a nonzero-elevation supplement keeps every connector mouth open and reacha
   const { dungeon: acceptedParent, randomTape } = generator
     ._generateAcceptedIndustrialDungeon({ captureAcceptedRandomTape: true });
   generator.augmentationProfileId = AUGMENTATION_PROFILE_ID;
+  // `generate()` plans every replay against this finalized accepted-parent
+  // snapshot. Keep the focused `_generateOnce()` witness on the same host
+  // geometry so it exercises production replay rather than a pre-finalization
+  // diagnostic state with shifted route-station distances.
+  generator._augmentationReplayPlanningSnapshotOverride = generator
+    ._createIndustrialDungeonAugmentationPlanningSnapshot({
+      rooms: acceptedParent.rooms,
+      connectionPlans: acceptedParent.connectionPlans,
+    });
   let replayCursor = 0;
   generator.random = () => {
     assert.ok(replayCursor < randomTape.length, 'augmented replay exceeded parent RNG tape');

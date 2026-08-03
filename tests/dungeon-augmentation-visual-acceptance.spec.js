@@ -349,6 +349,65 @@ async function installVisualAcceptanceHarness(page) {
         meshNames: meshSummary(root).meshNames,
         worldPosition: plainVector(root.getWorldPosition(new Vector3())),
       }));
+      const boundaryWallRuns = dungeon.augmentationPhysicalShell?.boundaryWallRuns ?? [];
+      const floorKeyFor = (floor) => String(
+        floor?.floorKey
+          ?? `${floor?.x},${floor?.z}@y${Number(floor?.elevation ?? 0).toFixed(3)}`,
+      );
+      const floorByKey = new Map((dungeon.floorTiles ?? []).map((floor) => [
+        floorKeyFor(floor),
+        floor,
+      ]));
+      const runCoversFloorEdge = (run, floor, dx, dz) => {
+        const horizontal = dz !== 0;
+        const line = horizontal ? floor.z + dz * 0.5 : floor.x + dx * 0.5;
+        const axis = horizontal ? floor.x : floor.z;
+        return run.horizontal === horizontal
+          && Number(run.dx) === dx
+          && Number(run.dz) === dz
+          && Math.abs(Number(run.line) - line) <= 0.001
+          && Number(run.start) <= axis
+          && Number(run.end) >= axis
+          && Number(run.wallBottomY) <= Number(floor.elevation ?? 0) + 0.001
+          && Number(run.wallTopY) >= Number(floor.elevation ?? 0) + 0.001;
+      };
+      const connectorLiftBoarding = (dungeon.connectionPlans ?? [])
+        .flatMap((plan) => (plan.liftContracts ?? []).map((lift) => ({ plan, lift })))
+        .map(({ plan, lift }) => {
+          const endpoints = ['bottom', 'top'].map((endpoint) => {
+            const landingTiles = endpoint === 'bottom'
+              ? lift.bottomLandingTiles ?? []
+              : lift.topLandingTiles ?? [];
+            const lanes = landingTiles.flatMap((landing) => {
+              const floor = floorByKey.get(String(landing.floorKey ?? ''));
+              if (!floor) return [{
+                floorKey: String(landing.floorKey ?? ''),
+                edge: null,
+                missingFloor: true,
+                blockingWallIds: [],
+              }];
+              return (floor.connectorLiftBoardingOpenRetainingWallEdges ?? []).map((edge) => {
+                const [dx, dz] = String(edge).split(',').map(Number);
+                return {
+                  floorKey: floorKeyFor(floor),
+                  edge: String(edge),
+                  missingFloor: false,
+                  blockingWallIds: boundaryWallRuns
+                    .filter((run) => runCoversFloorEdge(run, floor, dx, dz))
+                    .map(({ facadeId, id }) => String(facadeId ?? id ?? 'unknown'))
+                    .sort((left, right) => left.localeCompare(right)),
+                };
+              });
+            });
+            return { endpoint, lanes };
+          });
+          return {
+            connectionId: String(plan.id),
+            liftId: String(lift.id),
+            endpoints,
+            laneCount: endpoints.reduce((count, endpoint) => count + endpoint.lanes.length, 0),
+          };
+        }).sort((left, right) => left.connectionId.localeCompare(right.connectionId));
 
       return {
         gates: {
@@ -373,6 +432,7 @@ async function installVisualAcceptanceHarness(page) {
           cargoMeshes,
           internalDoorwayFrameRoots,
         },
+        connectorLiftBoarding,
       };
     };
 
@@ -588,6 +648,7 @@ for (const seed of SEEDS) {
       `dungeonSeed=${seed.authored}`,
       `reaverbotSeed=${seed.authored}`,
       `dungeonAugmentation=${PROFILE_ID}`,
+      'dungeonAugmentationFresh=1',
     ].join('&');
 
     await page.goto(startupUrl);
@@ -645,6 +706,16 @@ for (const seed of SEEDS) {
     }
     expect(inspection.boundary.planArchBeats.every(({ count }) => count === 0)).toBe(true);
     expect(inspection.boundary.sceneV4Arches).toEqual([]);
+
+    expect(inspection.connectorLiftBoarding.length).toBeGreaterThan(0);
+    for (const lift of inspection.connectorLiftBoarding) {
+      expect(lift.laneCount).toBe(6);
+      expect(lift.endpoints.map(({ lanes }) => lanes.length)).toEqual([3, 3]);
+      for (const { lanes } of lift.endpoints) {
+        expect(lanes.every(({ edge, missingFloor }) => edge && !missingFloor)).toBe(true);
+        expect(lanes.every(({ blockingWallIds }) => blockingWallIds.length === 0)).toBe(true);
+      }
+    }
 
     const records = inspection.presentation.records;
     expect(records.filter(({ semanticRole }) => semanticRole === 'gameplay-cover').length)

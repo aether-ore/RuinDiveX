@@ -21,7 +21,7 @@
     "verify:unity-port": "npm run check:unity-contracts && npm run test:unity",
     "test": "npm run check && npm run test:dungeon-augmentation && npm run test:equipment && npm run test:buster && npm run test:bosses && npm run test:reaverbots && npm run test:reaverbots:runtime",
     "test:dungeon-augmentation:unit": "node scripts/verify-dungeon-augmentation.mjs --unit",
-    "test:dungeon-augmentation:enclosure": "node --test tests/dungeon-connector-enclosure.test.mjs",
+    "test:dungeon-augmentation:enclosure": "node --test tests/dungeon-connector-enclosure.test.mjs tests/dungeon-connector-lift-geometry.test.mjs",
     "test:dungeon-augmentation:legacy-realized": "node scripts/verify-dungeon-augmentation-legacy-realized.mjs --count=10",
     "test:dungeon-augmentation:realized:smoke": "node scripts/run-dungeon-augmentation-release-gates.mjs --through=smoke",
     "test:dungeon-augmentation:realized": "node scripts/run-dungeon-augmentation-release-gates.mjs --through=normal",

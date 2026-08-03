@@ -6180,6 +6180,68 @@ export function orderDenseObjectiveCoverageFamilyChoices(familyChoices = []) {
   ];
 }
 
+/**
+ * Keep the compact canonical two-station coverage identity first, then expose
+ * one maximum-module fork/merge replacement and one same-physical-signature
+ * family sibling before returning to the ordinary interleaved product. A
+ * compact placement failure commonly means either that the route needs
+ * another real station/second arm, or that only its topology family conflicts.
+ * These two orthogonal fallbacks avoid changing every axis at once, preserve
+ * topology breadth and the existing candidate limit, and retain every
+ * candidate's original ordinal/RNG identity.
+ */
+export function orderTwoStationObjectiveCoverageCandidateSignatures(
+  candidateSignatures = [],
+  { candidateLimit = candidateSignatures.length } = {},
+) {
+  const ordered = [...candidateSignatures];
+  if (ordered.length < 3) return ordered;
+  const boundedCandidateLimit = clampInteger(candidateLimit, 1, ordered.length);
+  const boundedCandidates = ordered.slice(1, boundedCandidateLimit);
+  const moduleCounts = ordered.slice(0, boundedCandidateLimit)
+    .map(({ moduleCount }) => Number(moduleCount))
+    .filter(Number.isFinite);
+  if (moduleCounts.length === 0) return ordered;
+  const minimumModuleCount = Math.min(...moduleCounts);
+  const maximumModuleCount = Math.max(...moduleCounts);
+  const canonical = ordered[0];
+  const topologyId = (candidate) => String(
+    candidate?.topologySelection?.id ?? candidate?.topologyTemplateId ?? '',
+  );
+  const junctionId = (candidate) => String(
+    candidate?.junctionSelection?.id ?? candidate?.junctionKind ?? '',
+  );
+  const samePhysicalSignature = (candidate, reference) => (
+    Number(candidate?.moduleCount) === Number(reference?.moduleCount)
+      && String(candidate?.elevationMode ?? '') === String(reference?.elevationMode ?? '')
+      && (candidate?.placementVariant ?? null) === (reference?.placementVariant ?? null)
+  );
+  const preferred = [];
+  if (maximumModuleCount > minimumModuleCount) {
+    const spaciousForkMerge = boundedCandidates.find((candidate) => (
+      Number(candidate.moduleCount) === maximumModuleCount
+        && topologyId(candidate) === 'fork-merge-h-loop'
+    ));
+    if (spaciousForkMerge) preferred.push(spaciousForkMerge);
+  }
+  const familySibling = boundedCandidates.find((candidate) => (
+    !preferred.includes(candidate)
+      && samePhysicalSignature(candidate, canonical)
+      && (
+        topologyId(candidate) !== topologyId(canonical)
+          || junctionId(candidate) !== junctionId(canonical)
+      )
+  ));
+  if (familySibling) preferred.push(familySibling);
+  if (preferred.length === 0) return ordered;
+  const preferredSet = new Set(preferred);
+  return [
+    canonical,
+    ...preferred,
+    ...ordered.slice(1).filter((candidate) => !preferredSet.has(candidate)),
+  ];
+}
+
 export function coverageTraversalSocketContractForGrammar(
   grammar,
   { alternativeOrdinal = 0 } = {},
@@ -14463,19 +14525,11 @@ export function planRouteNetwork({
     };
     const indexedStaticNodeCollisionScore = (node, overlapGrants = []) => {
       const startedAt = planningNowMilliseconds();
-      const result = [...(node?.occupiedVolumes ?? []), ...(node?.clearanceVolumes ?? [])]
-        .reduce((score, nodeVolume) => (
-          score + [...nearbyStaticAvoidanceVolumes(nodeVolume)].reduce((count, obstacle) => (
-            count + (planningVolumesOverlap(nodeVolume, obstacle)
-              && !planningOverlapIsGranted(
-                nodeVolume,
-                obstacle,
-                overlapGrants.filter(({ moduleTemplateId }) => (
-                  !moduleTemplateId || String(moduleTemplateId) === String(node.grammarId)
-                )),
-              ) ? 1 : 0)
-          ), 0)
-        ), 0);
+      const result = indexedNodePlanningCollisionScore(
+        node ?? {},
+        nearbyStaticAvoidanceVolumes,
+        overlapGrants,
+      );
       physicalPlanningPhaseTimings.staticCollisionScoringMs +=
         planningNowMilliseconds() - startedAt;
       physicalPlanningPhaseTimings.staticCollisionScoringCalls += 1;
@@ -23486,6 +23540,27 @@ function routeNetworkOperationOrdinalSet(entries = []) {
 }
 
 /**
+ * A complete required solution is terminal even when an optional suffix could
+ * hypothetically add another network. Optional presentation must not force
+ * ancestor candidates to backtrack after every still-realizable required grant
+ * has already been retained.
+ */
+export function routeNetworkSolutionRetainsAllRequiredGrants(
+  solution,
+  requiredOperationOrdinals = [],
+) {
+  if (!solution || !Array.isArray(solution.operations) || solution.operations.length === 0) {
+    return false;
+  }
+  const requiredOrdinals = routeNetworkOperationOrdinalSet(requiredOperationOrdinals);
+  if (requiredOrdinals.size === 0) return false;
+  const acceptedOrdinals = routeNetworkOperationOrdinalSet(
+    solution.acceptedGrantOrdinals ?? [],
+  );
+  return [...requiredOrdinals].every((ordinal) => acceptedOrdinals.has(ordinal));
+}
+
+/**
  * Return the optimistic retained-required frontier for one partial subtree.
  * Explicitly pruned grants never contribute to the frontier, even if a stale
  * continuation list still carries their ordinals.
@@ -23599,12 +23674,11 @@ export function evaluateRouteNetworkPartialPreRecoveryAcceptance(
 /**
  * Insert deterministic, zero-evaluation partial checkpoints without removing
  * any ordinary or recovery identity. Landmark fallback runs after its complete
- * ordinary window. Initial required coverage tries its first four interleaved
- * identities before pruning itself. That finite prefix includes the compact
- * authored rise replacement at search variant three; stopping after two can
- * omit the whole grant before the already-authorized modular substitute is
- * reached. Runtime conflict exclusions still keep every authorized replacement
- * candidate ahead of omission.
+ * ordinary window. Required coverage also exhausts its complete bounded
+ * ordinary module window before pruning itself. A failed module is a local
+ * conflict, not evidence that the entire augmentation grant should disappear
+ * while a later replacement identity remains untried. Runtime conflict
+ * exclusions likewise keep every authorized replacement ahead of omission.
  */
 export function createRouteNetworkPartialFirstCandidateSchedule(
   ordinaryCandidateAttempts = [],
@@ -23624,11 +23698,7 @@ export function createRouteNetworkPartialFirstCandidateSchedule(
   if (routeNetworkKind === 'objective-route-coverage'
     && hasConflictExclusions !== true
     && schedule.length > 1) {
-    schedule.splice(
-      Math.min(4, schedule.length),
-      0,
-      { partialFirstCheckpoint: 'prune-current-required-coverage' },
-    );
+    schedule.push({ partialFirstCheckpoint: 'prune-current-required-coverage' });
   }
   return schedule;
 }
@@ -24391,12 +24461,23 @@ function planRouteNetworkAttempt({
       Number(state.acceptedNetworkCount ?? 0) + remainingOperationOrdinals.length,
     );
     let bestScoredSolution = null;
+    const terminalRequiredOperationOrdinals = new Set(
+      activeRequiredOperationOrdinals,
+    );
     const solutionIsProvablyOptimalForSubtree = (solution) => {
       if (!solution || (solution.operations ?? []).length === 0) return false;
+      if (routeNetworkSolutionRetainsAllRequiredGrants(
+        solution,
+        terminalRequiredOperationOrdinals,
+      )) return true;
       const acceptedOrdinals = new Set(solution.acceptedGrantOrdinals ?? []);
-      return remainingRequiredOperationOrdinals.every((ordinal) => (
-        acceptedOrdinals.has(ordinal)
-      )) && Number(solution.acceptedNetworkCount ?? 0)
+      // Profiles with no active required grants retain the legacy optional-only
+      // maximization rule. Once any required domain exists, a partial solution
+      // must keep searching rather than treating optional count as a substitute.
+      return terminalRequiredOperationOrdinals.size === 0
+        && remainingRequiredOperationOrdinals.every((ordinal) => (
+          acceptedOrdinals.has(ordinal)
+        )) && Number(solution.acceptedNetworkCount ?? 0)
         >= maximumAcceptedNetworkCountForSubtree;
     };
     const considerScoredSolution = (solution) => {
@@ -24751,11 +24832,6 @@ function planRouteNetworkAttempt({
         id === signature.elevationMode
       )),
     }));
-    // `interleavedRouteNetworkCandidateSignatures` already advances physical,
-    // topology, and junction axes together. Preserve that order for landmarks
-    // so their finite candidate window cannot be monopolized by one topology
-    // family before another legal family receives a single attempt.
-    const familyCandidateSignatures = rawFamilyCandidateSignatures;
     const candidateLimit = grant.required
       ? grant.kind === 'landmark-perimeter-loop'
         ? Math.min(
@@ -24766,7 +24842,7 @@ function planRouteNetworkAttempt({
               ORIGINAL_LANDMARK_CANDIDATE_LIMIT,
             )
             : ORIGINAL_LANDMARK_CANDIDATE_LIMIT,
-          familyCandidateSignatures.length,
+          rawFamilyCandidateSignatures.length,
         )
         : Math.min(
           allowPartialRouteNetworkRealization
@@ -24775,9 +24851,21 @@ function planRouteNetworkAttempt({
               denseMultiStationCoverage ? 8 : 12,
             )
             : denseMultiStationCoverage ? 8 : 12,
-          familyCandidateSignatures.length,
+          rawFamilyCandidateSignatures.length,
         )
-      : Math.min(1, familyCandidateSignatures.length);
+      : Math.min(1, rawFamilyCandidateSignatures.length);
+    // `interleavedRouteNetworkCandidateSignatures` already advances physical,
+    // topology, and junction axes together. Preserve that order for landmarks
+    // and dense coverage. Two-station coverage keeps its canonical identity
+    // first, but promotes orthogonal structural replacements only from inside
+    // the already-authorized candidate window.
+    const familyCandidateSignatures = grant.kind === 'objective-route-coverage'
+      && Number(grant.endpointSockets?.length ?? 0) === 2
+      ? orderTwoStationObjectiveCoverageCandidateSignatures(
+        rawFamilyCandidateSignatures,
+        { candidateLimit },
+      )
+      : rawFamilyCandidateSignatures;
     emitRouteNetworkPlanningDebugStage('route-network-candidate-signatures', {
       grantId: grant.id,
       operationOrdinal,
@@ -25182,16 +25270,16 @@ function planRouteNetworkAttempt({
           'route-network-partial-first-required-coverage-pruned',
         );
         if (considerScoredSolution(checkpointSolution)) {
-          emitPartialFirstSelection('after-first-coverage-candidate', {
+          emitPartialFirstSelection('after-complete-coverage-candidate-window', {
             provablyOptimal: true,
           });
           return bestScoredSolution;
         }
         if (partialFirstAcceptanceForBestSolution(
-          'after-first-coverage-candidate',
+          'after-complete-coverage-candidate-window',
           { provablyOptimal: false },
         )) {
-          emitPartialFirstSelection('after-first-coverage-candidate', {
+          emitPartialFirstSelection('after-complete-coverage-candidate-window', {
             provablyOptimal: false,
           });
           return bestScoredSolution;

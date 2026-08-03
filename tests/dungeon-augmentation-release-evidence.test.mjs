@@ -2055,7 +2055,15 @@ test('release suite receipts are sealed against command substitution and source 
   assert.equal(dirtyBeforeRun.result, 'failed');
 });
 
-test('release receipts require the real V1 scene regression and V4 visual acceptance', () => {
+test('release receipts require lift enclosure, real V1 scene, and V4 visual acceptance', () => {
+  const liftCommand = RELEASE_SUITE_CONTRACTS.enclosure.commands.find(({ id }) => (
+    id === 'connector-lift-boarding-enclosure'
+  ));
+  assert.deepEqual(liftCommand, {
+    id: 'connector-lift-boarding-enclosure',
+    runner: 'node',
+    args: ['--test', 'tests/dungeon-connector-lift-geometry.test.mjs'],
+  });
   const command = RELEASE_SUITE_CONTRACTS['legacy-replay'].commands.find(({ id }) => (
     id === 'legacy-v1-connector-scene'
   ));

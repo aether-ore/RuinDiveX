@@ -235,6 +235,45 @@ test('capacity fallback scoring preserves the first future-prune branch on an ex
   );
 });
 
+test('equal route-network retention prefers the solution with fewer entity omissions', () => {
+  const omission = (operationId, entityId, ordinal) => ({
+    grantId: `grant:${operationId}`,
+    operationId,
+    entityKind: 'node',
+    entityId,
+    ordinal,
+    signature: `${entityId}:signature`,
+    disposition: ordinal === 0 ? 'conflict-root' : 'dependency',
+    reason: 'fixture-conflict',
+    rootSignature: `${operationId}:node:0:signature`,
+  });
+  const earlierForest = {
+    operations: [{ id: 'operation:a' }, { id: 'operation:b' }],
+    acceptedGrantOrdinals: [0, 1],
+    acceptedNetworkCount: 2,
+    routeNetworkEntityOmissions: [
+      omission('operation:a', 'operation:a:node:0', 0),
+      omission('operation:a', 'operation:a:node:1', 1),
+    ],
+  };
+  const laterForest = {
+    operations: [{ id: 'operation:c' }, { id: 'operation:d' }],
+    acceptedGrantOrdinals: [0, 1],
+    acceptedNetworkCount: 2,
+    routeNetworkEntityOmissions: [
+      omission('operation:c', 'operation:c:node:0', 0),
+    ],
+  };
+  assert.equal(
+    selectPreferredRouteNetworkPartialSolution(
+      earlierForest,
+      laterForest,
+      new Set([0, 1]),
+    ),
+    laterForest,
+  );
+});
+
 test('landmark wing decisions retain a free entry socket when the parent owns exit', () => {
   const decisionSockets = orderedLandmarkDecisionSockets({
     sockets: [{

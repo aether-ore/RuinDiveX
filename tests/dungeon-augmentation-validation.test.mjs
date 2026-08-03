@@ -18,6 +18,9 @@ import {
   DUNGEON_SELECTION_BAG_FAMILIES,
   createDungeonSelectionBagWitness,
 } from '../src/dungeon-augmentation/selectionBagWitness.js';
+import {
+  objectiveCoverageGrantForOperationStationSide,
+} from '../src/dungeon-augmentation/objectiveCoverageStationSide.js';
 
 const PROFILE_ID = 'industrial-supplement-preview-v2';
 const THEME_BINDING = Object.freeze({
@@ -966,6 +969,184 @@ function validateV4(plan, fixture) {
     grammars: GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
   });
 }
+
+function makeParentAnchoredForestValidationFixture() {
+  const result = makeV4ValidationFixture();
+  const { plan } = result;
+  applyValidV4SelectionManifest(plan);
+  const operation = plan.operations[0];
+  const retainedNodeIds = new Set(operation.nodeIds.slice(0, 1));
+  const retainedSegmentIds = new Set(operation.segmentIds.slice(0, 1));
+  const omittedNodes = plan.nodes.filter((node) => !retainedNodeIds.has(node.id));
+  const omittedSegments = plan.segments.filter((segment) => !retainedSegmentIds.has(segment.id));
+  const rootSignatureByNodeId = new Map(omittedNodes.map((node) => ([
+    node.id,
+    createRouteNetworkConflictEntitySignature(node, 'node'),
+  ])));
+  plan.routeNetworkConflictExclusions = omittedNodes.map((node) => ({
+    grantId: operation.grantId,
+    entityKind: 'node',
+    entityId: node.id,
+    signature: rootSignatureByNodeId.get(node.id),
+    reason: 'synthetic-forest-node-conflict',
+  }));
+  const rootForSegment = (segment) => omittedNodes.find((node) => (
+    [segment.from?.nodeId, segment.to?.nodeId].map(String).includes(String(node.id))
+  ));
+  const fallbackRootSignature = [...rootSignatureByNodeId.values()].sort()[0];
+  plan.routeNetworkEntityOmissions = [
+    ...omittedNodes.map((node, ordinal) => ({
+      grantId: operation.grantId,
+      operationId: operation.id,
+      entityKind: 'node',
+      entityId: node.id,
+      ordinal: ordinal + 1,
+      signature: rootSignatureByNodeId.get(node.id),
+      disposition: 'conflict-root',
+      reason: 'synthetic-forest-node-conflict',
+      rootSignature: rootSignatureByNodeId.get(node.id),
+    })),
+    ...omittedSegments.map((segment) => {
+      const root = rootForSegment(segment);
+      return {
+        grantId: operation.grantId,
+        operationId: operation.id,
+        entityKind: 'segment',
+        entityId: segment.id,
+        ordinal: Number(segment.id.split(':').at(-1)),
+        signature: createRouteNetworkConflictEntitySignature(segment, 'segment'),
+        disposition: 'dependency',
+        reason: 'endpoint-depends-on-omitted-node',
+        rootSignature: root
+          ? rootSignatureByNodeId.get(root.id)
+          : fallbackRootSignature,
+      };
+    }),
+  ];
+  plan.nodes = plan.nodes.filter((node) => retainedNodeIds.has(node.id));
+  plan.segments = plan.segments.filter((segment) => retainedSegmentIds.has(segment.id));
+  for (const node of plan.nodes) {
+    node.sockets = node.sockets.filter((socket) => retainedSegmentIds.has(String(socket.segmentId)));
+  }
+  const retainedRoom = plan.nodes[0];
+  retainedRoom.kind = 'supplementRoom';
+  retainedRoom.grammarId = 'supplement-chamber-compact-v1';
+  retainedRoom.blueprintId = `${retainedRoom.id}:retained-room-blueprint`;
+  retainedRoom.contentRole = 'challenge';
+  retainedRoom.countsAsSupplementRoom = true;
+  retainedRoom.connectorOwned = false;
+  retainedRoom.connectorInfrastructure = false;
+  retainedRoom.moduleKind = 'room';
+  retainedRoom.anchors = [{
+    id: `${retainedRoom.id}:retained-encounter`,
+    kind: 'encounter',
+    encounterProfileId: 'supplement-route-network-defense',
+    position: structuredClone(retainedRoom.placement.center),
+  }];
+  delete retainedRoom.junction;
+  const retainedSocketId = operation.endpointSocketIds[0];
+  const omittedSocketId = operation.endpointSocketIds[1];
+  operation.realizationMode = 'parent-anchored-forest';
+  operation.endpointSocketIds = [retainedSocketId];
+  operation.omittedEndpointSocketIds = [omittedSocketId];
+  operation.parentAnchoredComponents = [{
+    id: `${operation.id}:parent-anchored-component:0`,
+    attachmentSocketId: retainedSocketId,
+    nodeIds: [...retainedNodeIds],
+    segmentIds: [...retainedSegmentIds],
+    bidirectional: true,
+  }];
+  operation.nodeIds = [...retainedNodeIds];
+  operation.segmentIds = [...retainedSegmentIds];
+  operation.contentRoles = plan.nodes.map(({ contentRole }) => contentRole);
+  operation.moduleCount = 1;
+  operation.substantiveModuleCount = 1;
+  operation.physicalNodeCount = 1;
+  operation.roomCount = 1;
+  operation.roomNodeIds = [retainedRoom.id];
+  operation.connectorModuleCount = 0;
+  operation.connectorModuleNodeIds = [];
+  operation.connectorJunctionCount = 0;
+  operation.connectorJunctionNodeIds = [];
+  operation.connectorInfrastructureCount = 0;
+  operation.connectorInfrastructureNodeIds = [];
+  operation.featurelessSpans = plan.segments.map((segment, ordinal) => ({
+    id: `${operation.id}:physical-featureless-span:${ordinal}`,
+    segmentId: segment.id,
+    ordinal,
+    path: structuredClone(segment.path),
+    distanceMeters: maximumContinuousLevelPathDistance(segment.path),
+    spanKind: 'supplement-physical-route',
+    boundedByMeaningfulStations: true,
+  }));
+  operation.localProgressionArc = ['enter', 'challenge'];
+  operation.cycleRankDelta = 0;
+  operation.returnRouteGuaranteed = false;
+  plan.completionMode = 'best-effort-partial';
+  plan.prunedRouteNetworkGrants = [];
+  rehash(plan);
+  return result;
+}
+
+test('V4 accepts a non-vacuous audited parent-anchored forest with a retained endpoint subset', () => {
+  const { fixture, plan } = makeParentAnchoredForestValidationFixture();
+  const operation = plan.operations[0];
+  assert.equal(operation.endpointSocketIds.length, 1);
+  assert.equal(operation.omittedEndpointSocketIds.length, 1);
+  assert.equal(operation.moduleCount, 1, 'fixture is below the grant minimum');
+  assert.deepEqual(operation.localProgressionArc, ['enter', 'challenge']);
+
+  const validation = validateV4(plan, fixture);
+  assert.equal(validation.accepted, true, JSON.stringify(validation.errors));
+});
+
+test('V4 parent-anchored forests reject components that do not partition retained modules', () => {
+  const { fixture, plan } = makeParentAnchoredForestValidationFixture();
+  plan.operations[0].parentAnchoredComponents[0].nodeIds.pop();
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.ok(validation.errors.some(({ code }) => (
+    code === 'route-network-parent-anchored-component-partition-invalid'
+  )));
+});
+
+test('V4 parent-anchored forests retain generic connector-junction degree checks', () => {
+  const { fixture, plan } = makeParentAnchoredForestValidationFixture();
+  const operation = plan.operations[0];
+  const node = plan.nodes[0];
+  node.kind = 'supplementConnectorJunction';
+  node.grammarId = 'supplement-route-connector-through-t-v1';
+  node.countsAsSupplementRoom = false;
+  node.connectorOwned = true;
+  node.connectorInfrastructure = true;
+  node.moduleKind = 'connector-module';
+  node.junction = {
+    junctionKind: 'through-t',
+    throughSocketPairs: [],
+    decisionSocketIds: [],
+    clearCoreVolume: {
+      id: `${node.id}:retained-clear-core`,
+      center: structuredClone(node.placement.center),
+      size: { x: 1, y: 2, z: 1 },
+    },
+    countsAsMeaningfulStation: true,
+  };
+  operation.moduleCount = 0;
+  operation.substantiveModuleCount = 0;
+  operation.roomCount = 0;
+  operation.roomNodeIds = [];
+  operation.connectorJunctionCount = 1;
+  operation.connectorJunctionNodeIds = [node.id];
+  operation.connectorInfrastructureCount = 1;
+  operation.connectorInfrastructureNodeIds = [node.id];
+  rehash(plan);
+
+  const validation = validateV4(plan, fixture);
+  assert.ok(validation.errors.some(({ code }) => (
+    code === 'route-network-connector-junction-degree-invalid'
+  )), JSON.stringify(validation.errors));
+});
 
 test('V4 best-effort overlays retain valid networks with an exact pruned-grant ledger', () => {
   const { fixture, plan } = makeV4ValidationFixture();
@@ -2596,6 +2777,127 @@ test('V4 validates the exact identities and all 15 ordered cells of both endpoin
       && context.segmentId === plan.segments[1].id
       && context.role === 'from'
   )), JSON.stringify(rejected.errors));
+});
+
+test('V4 reconstructs a serialized objective-coverage station-side alternative before seam validation', () => {
+  const { fixture, plan, operation, grant } = makeV4SharedJunctionThresholdFixture();
+  const desiredSockets = structuredClone(grant.endpointSockets);
+  grant.source = {
+    planningStationSideDiagnostics: desiredSockets.map((desired) => {
+      const desiredFacing = { ...desired.facing };
+      const leadMeters = 5.6;
+      const sourceCenterlinePosition = {
+        x: Number(desired.position.x) - Number(desiredFacing.x) * leadMeters,
+        y: Number(desired.position.y),
+        z: Number(desired.position.z) - Number(desiredFacing.z) * leadMeters,
+      };
+      const canonicalFacing = {
+        x: -Number(desiredFacing.x),
+        y: 0,
+        z: -Number(desiredFacing.z),
+      };
+      const canonicalPosition = {
+        x: Number(sourceCenterlinePosition.x) + Number(canonicalFacing.x) * leadMeters,
+        y: Number(desired.position.y),
+        z: Number(sourceCenterlinePosition.z) + Number(canonicalFacing.z) * leadMeters,
+      };
+      const socket = grant.endpointSockets.find(({ id }) => id === desired.id);
+      socket.sourceCenterlinePosition = sourceCenterlinePosition;
+      socket.position = canonicalPosition;
+      socket.facing = canonicalFacing;
+      const landing = grant.socketLandingOverlapGrants.find(({ socketId }) => (
+        socketId === desired.id
+      ));
+      landing.center = { ...canonicalPosition, y: Number(canonicalPosition.y) + 1.8 };
+      return {
+        candidates: [{
+          sideSign: 1,
+          facing: desiredFacing,
+          stationEligible: true,
+          stationBodyBlocked: false,
+          fullRoomBodyBlocked: false,
+          approachIntersectsOwnCenterline: false,
+          hardRouteOverlapArea: 0,
+          roomOverlapArea: 0,
+          ownRouteOverlapArea: 0,
+          authoredScore: 1,
+          fullRoomWitness: {
+            center: { ...desired.position },
+            continuationCenter: { ...desired.position },
+            continuationRoute: [{ ...desired.position }],
+          },
+        }],
+      };
+    }),
+  };
+  operation.planningStationSideAlternativeOrdinal = 1;
+  const resolvedGrant = objectiveCoverageGrantForOperationStationSide(grant, operation);
+  const resolvedSocketById = new Map(resolvedGrant.endpointSockets.map((socket) => (
+    [String(socket.id), socket]
+  )));
+  const resolvedLandingBySocketId = new Map(
+    resolvedGrant.socketLandingOverlapGrants.map((overlap) => (
+      [String(overlap.socketId), overlap]
+    )),
+  );
+  operation.socketLandingOverlapGrants = structuredClone(
+    resolvedGrant.socketLandingOverlapGrants,
+  );
+  for (const segment of plan.segments.filter(({ operationId }) => (
+    operationId === operation.id
+  ))) {
+    for (const [endpointIndex, endpoint] of [segment.from, segment.to].entries()) {
+      const socket = resolvedSocketById.get(String(endpoint.socketId ?? endpoint.id));
+      if (!socket) continue;
+      endpoint.position = structuredClone(socket.position);
+      endpoint.facing = structuredClone(socket.facing);
+      const pathIndex = endpointIndex === 0 ? 0 : segment.path.length - 1;
+      segment.path[pathIndex] = structuredClone(socket.position);
+      segment.landings[endpointIndex].position = structuredClone(socket.position);
+      segment.landingVolumes[endpointIndex].center = {
+        ...structuredClone(socket.position),
+        y: Number(socket.position.y) + 0.25,
+      };
+      const role = endpointIndex === 0 ? 'from' : 'to';
+      segment.endpointSeams[endpointIndex] = createDungeonRouteEndpointSeam(socket, {
+        id: `${segment.id}:${role}-endpoint-seam`,
+        segmentId: segment.id,
+        operationId: operation.id,
+        networkId: operation.id,
+        nodeId: endpoint.nodeId,
+        socketId: endpoint.socketId ?? endpoint.id,
+        localSocketId: socket.localSocketId ?? endpoint.localSocketId ?? null,
+        role,
+        elevationBand: operation.progressionBandId,
+        parentOwnerId: resolvedLandingBySocketId.get(String(socket.id))
+          ?.parentOwnerId ?? null,
+      });
+      segment.localApproachWitnesses[endpointIndex].path = [{
+        x: Number(socket.position.x) - Number(socket.facing.x) * 5.6,
+        y: Number(socket.position.y),
+        z: Number(socket.position.z) - Number(socket.facing.z) * 5.6,
+      }, structuredClone(socket.position)];
+      const physicalSpan = operation.featurelessSpans.find(({ segmentId }) => (
+        segmentId === segment.id
+      ));
+      physicalSpan.path = structuredClone(segment.path);
+      physicalSpan.distanceMeters = maximumContinuousLevelPathDistance(segment.path);
+    }
+  }
+  rehash(plan);
+
+  const accepted = validateV4(plan, fixture);
+  assert.equal(accepted.accepted, true, JSON.stringify(accepted.errors));
+
+  delete operation.planningStationSideAlternativeOrdinal;
+  rehash(plan);
+  const canonicalMismatch = validateV4(plan, fixture);
+  assert.equal(canonicalMismatch.accepted, false);
+  assert.ok(canonicalMismatch.errors.some(({ code }) => (
+    code === 'route-network-endpoint-seam-record-invalid'
+      || code === 'route-network-external-endpoint-not-granted'
+      || code === 'route-network-grant-copy-mismatch'
+  )), JSON.stringify(canonicalMismatch.errors));
 });
 
 test('V4 rejects landmark parent seams displaced from their authored socket grant', () => {

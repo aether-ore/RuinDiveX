@@ -1335,6 +1335,49 @@ test('assembles V4 route junction, exact landings, source gate, and scoped short
   material.dispose();
 });
 
+test('assembles a V4 parent-anchored forest with one retained exact parent attachment', () => {
+  const regionBinding = binding('region-a');
+  const { session, material } = themeSession(regionBinding, 'route-network-forest');
+  const overlayPlan = routeNetworkOverlay(regionBinding);
+  overlayPlan.profileRevision = 5;
+  const operation = overlayPlan.operations[0];
+  const retainedSegment = overlayPlan.segments[0];
+  retainedSegment.bidirectional = true;
+  overlayPlan.nodes = [overlayPlan.nodes[0]];
+  overlayPlan.segments = [retainedSegment];
+  operation.realizationMode = 'parent-anchored-forest';
+  operation.endpointSocketIds = ['parent-west-unused'];
+  operation.omittedEndpointSocketIds = ['parent-east-unused'];
+  operation.nodeIds = [overlayPlan.nodes[0].id];
+  operation.segmentIds = [retainedSegment.id];
+  operation.parentAnchoredComponents = [{
+    id: `${operation.id}:parent-anchored-component:0`,
+    attachmentSocketId: 'parent-west-unused',
+    nodeIds: [...operation.nodeIds],
+    segmentIds: [...operation.segmentIds],
+    bidirectional: true,
+  }];
+
+  const fragment = assembleDungeonSupplement({
+    overlayPlan,
+    themeSession: session,
+    structuralMode: 'complete',
+  });
+  const connection = fragment.connectionPlans.find(({ id }) => id === retainedSegment.id);
+  assert.ok(connection);
+  assert.equal(connection.routeNetworkRealizationMode, 'parent-anchored-forest');
+  assert.equal(
+    connection.parentAnchoredComponentId,
+    operation.parentAnchoredComponents[0].id,
+  );
+  assert.equal(connection.parentAnchoredAttachmentSocketId, 'parent-west-unused');
+  assert.deepEqual(fragment.landingClearances.map(({ socketId }) => socketId), [
+    'parent-west-unused',
+  ]);
+  fragment.dispose();
+  material.dispose();
+});
+
 test('authoritative V4 facade-only assembly fails closed on exact theme sessions and connector skins', () => {
   const regionBinding = binding('region-a');
   const overlayPlan = {

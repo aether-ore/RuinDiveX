@@ -31,6 +31,9 @@ import {
   dungeonVolumeOverlapWithinGrant,
   transformDungeonLocalPoint,
 } from '../src/dungeon-augmentation/geometry.js';
+import {
+  objectiveCoverageGrantForOperationStationSide,
+} from '../src/dungeon-augmentation/objectiveCoverageStationSide.js';
 
 const TILE_SIZE = 2.8;
 
@@ -2554,6 +2557,96 @@ test('V4 materialization preserves the ordered centerline as authoritative floor
   assert.equal(plan.connectorVariantConstraints.finalCollisionSpineVerificationRequired, true);
 });
 
+test('V4 materialization resolves the serialized objective-coverage station side before exact binding', () => {
+  const fixture = v4LevelSpineFixture();
+  const operation = fixture.overlayPlan.operations[0];
+  const grant = fixture.extensionRegions[0].routeNetworkGrants[0];
+  grant.kind = 'objective-route-coverage';
+  const desiredSockets = structuredClone(grant.endpointSockets);
+  grant.source = {
+    planningStationSideDiagnostics: desiredSockets.map((desired) => {
+      const desiredFacing = { ...desired.facing };
+      const leadMeters = TILE_SIZE;
+      const sourceCenterlinePosition = {
+        x: Number(desired.position.x) - Number(desiredFacing.x) * leadMeters,
+        y: Number(desired.position.y),
+        z: Number(desired.position.z) - Number(desiredFacing.z) * leadMeters,
+      };
+      const canonicalFacing = {
+        x: -Number(desiredFacing.x),
+        y: 0,
+        z: -Number(desiredFacing.z),
+      };
+      const socket = grant.endpointSockets.find(({ id }) => id === desired.id);
+      socket.sourceCenterlinePosition = sourceCenterlinePosition;
+      socket.position = {
+        x: Number(sourceCenterlinePosition.x) + Number(canonicalFacing.x) * leadMeters,
+        y: Number(desired.position.y),
+        z: Number(sourceCenterlinePosition.z) + Number(canonicalFacing.z) * leadMeters,
+      };
+      socket.facing = canonicalFacing;
+      return {
+        candidates: [{
+          sideSign: 1,
+          facing: desiredFacing,
+          stationEligible: true,
+          stationBodyBlocked: false,
+          fullRoomBodyBlocked: false,
+          approachIntersectsOwnCenterline: false,
+          hardRouteOverlapArea: 0,
+          roomOverlapArea: 0,
+          ownRouteOverlapArea: 0,
+          authoredScore: 1,
+          fullRoomWitness: {
+            center: { ...desired.position },
+            continuationCenter: { ...desired.position },
+            continuationRoute: [{ ...desired.position }],
+          },
+        }],
+      };
+    }),
+  };
+  operation.planningStationSideAlternativeOrdinal = 1;
+  const resolvedGrant = objectiveCoverageGrantForOperationStationSide(grant, operation);
+  const resolvedSockets = resolvedGrant.endpointSockets;
+  fixture.segment.from = {
+    ...structuredClone(resolvedSockets[0]),
+    kind: 'parentSocket',
+    socketId: resolvedSockets[0].id,
+  };
+  fixture.segment.to = {
+    ...structuredClone(resolvedSockets[1]),
+    kind: 'parentSocket',
+    socketId: resolvedSockets[1].id,
+  };
+  fixture.segment.path[0] = structuredClone(fixture.segment.from.position);
+  fixture.segment.path[fixture.segment.path.length - 1] = structuredClone(
+    fixture.segment.to.position,
+  );
+  fixture.segment.endpointSeams = [fixture.segment.from, fixture.segment.to]
+    .map((endpoint, endpointIndex) => createDungeonRouteEndpointSeam(endpoint, {
+      segmentId: fixture.segment.id,
+      operationId: operation.id,
+      nodeId: endpoint.nodeId,
+      socketId: endpoint.socketId,
+      role: endpointIndex === 0 ? 'from' : 'to',
+      tileSize: TILE_SIZE,
+    }));
+
+  const result = materializeV4LevelSpineFixture(fixture);
+  assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
+
+  const canonicalMismatchFixture = structuredClone(fixture);
+  delete canonicalMismatchFixture.overlayPlan.operations[0]
+    .planningStationSideAlternativeOrdinal;
+  const canonicalMismatch = materializeV4LevelSpineFixture(canonicalMismatchFixture);
+  assert.equal(canonicalMismatch.diagnostics.accepted, false);
+  assert.match(
+    canonicalMismatch.diagnostics.errors.join(' | '),
+    /endpoint position does not match granted socket/i,
+  );
+});
+
 test('V4 route connector rejection preserves exact segment and grant diagnostics', () => {
   const fixture = v4LevelSpineFixture({
     connectorFamily: 'lift',
@@ -2835,6 +2928,67 @@ test('V4 pyramid route networks bind both unused wall sockets exactly and preser
   assert.equal(junction.junctionKind, 'through-t');
   assert.equal(junction.countsAsMeaningfulStation, true);
   assert.ok(Math.abs(junction.augmentationJunction.clearCoreVolume.size.x - 8.4) < 1e-9);
+});
+
+test('V4 materialization retains one exact parent-anchored forest branch', () => {
+  const fixture = pyramidRouteNetworkFixture();
+  const operation = fixture.overlayPlan.operations[0];
+  const retainedNode = fixture.overlayPlan.nodes[0];
+  const retainedSegment = fixture.overlayPlan.segments[0];
+  const retainedSocketId = operation.endpointSocketIds[0];
+  const omittedSocketId = operation.endpointSocketIds[1];
+  fixture.overlayPlan.schema = 'ruindivex-dungeon-augmentation-overlay/v2';
+  fixture.overlayPlan.profileRevision = 5;
+  fixture.overlayPlan.nodes = [retainedNode];
+  fixture.overlayPlan.segments = [retainedSegment];
+  retainedNode.sockets = retainedNode.sockets.filter(({ id }) => (
+    String(id) === String(retainedSegment.to.socketId)
+  ));
+  operation.realizationMode = 'parent-anchored-forest';
+  operation.endpointSocketIds = [retainedSocketId];
+  operation.omittedEndpointSocketIds = [omittedSocketId];
+  operation.nodeIds = [retainedNode.id];
+  operation.segmentIds = [retainedSegment.id];
+  operation.parentAnchoredComponents = [{
+    id: `${operation.id}:parent-anchored-component:0`,
+    attachmentSocketId: retainedSocketId,
+    nodeIds: [retainedNode.id],
+    segmentIds: [retainedSegment.id],
+    bidirectional: true,
+  }];
+
+  const result = materializeIndustrialOverlay({
+    rooms: [{
+      id: 'keycardRoom',
+      x: 0,
+      z: 0,
+      width: 7,
+      depth: 7,
+      baseElevation: 0,
+      plannedBaseElevation: 0,
+      exitSockets: [],
+    }],
+    overlayPlan: fixture.overlayPlan,
+    extensionRegions: fixture.extensionRegions,
+    tileSize: TILE_SIZE,
+  });
+
+  assert.equal(result.diagnostics.accepted, true, JSON.stringify(result.diagnostics.errors));
+  assert.equal(result.diagnostics.routeNetworkCount, 1);
+  assert.equal(result.diagnostics.routeNetworkConnectionCount, 1);
+  assert.deepEqual(
+    result.rooms.find(({ id }) => id === 'keycardRoom').exitSockets.map(({ id }) => id),
+    [retainedSocketId],
+  );
+  const connection = result.connectionPlans.find(({ id }) => id === retainedSegment.id);
+  assert.equal(connection.routeNetworkRealizationMode, 'parent-anchored-forest');
+  assert.equal(
+    connection.parentAnchoredComponentId,
+    operation.parentAnchoredComponents[0].id,
+  );
+  assert.deepEqual(result.diagnostics.routeNetworks[0].omittedEndpointSocketIds, [
+    omittedSocketId,
+  ]);
 });
 
 test('V4 pyramid materialization rejects displaced parent thresholds even with authored socket metadata', () => {

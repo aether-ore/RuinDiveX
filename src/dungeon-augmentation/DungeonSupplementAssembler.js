@@ -1001,13 +1001,26 @@ function endpointSocketId(endpoint) {
   return endpoint?.socketId ?? endpoint?.id ?? endpoint?.sourceSocketId ?? null;
 }
 
-function validateRouteNetworkSocketBindings(elements) {
+function validateRouteNetworkSocketBindings(elements, overlayPlan = null) {
   const nodeById = new Map(elements.nodes.map((node) => [String(node.id), node]));
   for (const operation of elements.operations.filter((entry) => operationType(entry) === 'routeNetwork')) {
-    const selectedSocketIds = new Set(asArray(operation.endpointSocketIds).map(String));
-    if (selectedSocketIds.size < 2) {
+    const parentAnchoredForest = overlayPlan?.schema
+      === 'ruindivex-dungeon-augmentation-overlay/v2'
+      && Number(overlayPlan?.profileRevision) === 5
+      && operation?.realizationMode === 'parent-anchored-forest';
+    if (operation?.realizationMode != null && !parentAnchoredForest) {
       throw new DungeonSupplementAssemblyError(
-        `Route network ${operation.id ?? '(unnamed)'} must declare at least two exact endpoint socket IDs.`,
+        `Route network ${operation.id ?? '(unnamed)'} declares an unsupported realization mode.`,
+        { code: 'INVALID_ROUTE_NETWORK_REALIZATION_MODE' },
+      );
+    }
+    const selectedSocketIdSequence = asArray(operation.endpointSocketIds).map(String);
+    const selectedSocketIds = new Set(selectedSocketIdSequence);
+    const minimumEndpointCount = parentAnchoredForest ? 1 : 2;
+    if (selectedSocketIds.size < minimumEndpointCount
+      || selectedSocketIds.size !== selectedSocketIdSequence.length) {
+      throw new DungeonSupplementAssemblyError(
+        `Route network ${operation.id ?? '(unnamed)'} must declare at least ${minimumEndpointCount} unique exact endpoint socket ID${minimumEndpointCount === 1 ? '' : 's'}.`,
         { code: 'INVALID_ROUTE_NETWORK_SOCKET_BINDING' },
       );
     }
@@ -3797,6 +3810,9 @@ function assembleSegment({
     toNodeId,
     connectorProxyProgression?.candidatesByProxyId ?? new Map(),
   );
+  const parentAnchoredComponent = asArray(operation?.parentAnchoredComponents).find((component) => (
+    asArray(component?.segmentIds).some((segmentId) => String(segmentId) === String(id))
+  ));
   const connection = {
     ...cloneSerializableRecord(segment),
     id,
@@ -3840,6 +3856,9 @@ function assembleSegment({
     themeBinding: cloneBinding(themeBinding),
     routeNetworkGrantId: operation?.grantId ?? null,
     routeNetworkKind: operation?.routeNetworkKind ?? null,
+    routeNetworkRealizationMode: operation?.realizationMode ?? null,
+    parentAnchoredComponentId: parentAnchoredComponent?.id ?? null,
+    parentAnchoredAttachmentSocketId: parentAnchoredComponent?.attachmentSocketId ?? null,
     topologyTemplateId: operation?.topologyTemplateId ?? null,
     elevationModes: asArray(operation?.elevationModes).map(String),
     accessDomainId: operation?.accessDomainId ?? null,
@@ -3869,6 +3888,9 @@ function assembleSegment({
     logicalEdgeId: connection.logicalEdgeId,
     routeNetworkGrantId: operation?.grantId ?? null,
     routeNetworkKind: operation?.routeNetworkKind ?? null,
+    routeNetworkRealizationMode: operation?.realizationMode ?? null,
+    parentAnchoredComponentId: parentAnchoredComponent?.id ?? null,
+    parentAnchoredAttachmentSocketId: parentAnchoredComponent?.attachmentSocketId ?? null,
     topologyTemplateId: operation?.topologyTemplateId ?? null,
     accessDomainId: operation?.accessDomainId ?? null,
     progressionBandId: operation?.progressionBandId ?? null,
@@ -4283,7 +4305,7 @@ export function assembleDungeonSupplement({
   const authoritativeThemePreflight = requiresAuthoritativeThemePreflight(overlayPlan);
 
   try {
-    validateRouteNetworkSocketBindings(elements);
+    validateRouteNetworkSocketBindings(elements, overlayPlan);
     validatePresentationRecords(elements, overlayPlan);
     connectorProxyProgression = createConnectorProxyProgressionCandidates(elements);
     for (const node of elements.nodes) {

@@ -28,6 +28,9 @@ import {
   inspectIndustrialSupplementRealizedStructuralQuality,
 } from './IndustrialSupplementStructuralQuality.js';
 import { canonicalStringify, stableHashText } from './canonical.js';
+import {
+  objectiveCoverageGrantForOperationStationSide,
+} from './objectiveCoverageStationSide.js';
 
 const CONNECTOR_ELEVATION_EPSILON = 0.000001;
 const INDUSTRIAL_SUPPLEMENT_V4_PROFILE_ID = 'industrial-supplement-preview-v4';
@@ -322,7 +325,10 @@ function createCorridorStationRooms({
   const bySocketId = new Map();
   const errors = [];
   for (const operation of operations.filter(isRouteNetworkOperation)) {
-    const grant = grantsById.get(String(operation.grantId));
+    const grant = objectiveCoverageGrantForOperationStationSide(
+      grantsById.get(String(operation.grantId)),
+      operation,
+    );
     if (!grant) continue;
     const selected = new Set(routeNetworkEndpointSocketIds(operation, grant));
     for (const socket of grant.endpointSockets ?? []) {
@@ -6618,6 +6624,9 @@ export function materializeIndustrialOverlay({
   const strictV4ContentContract = overlayPlan.profileId === INDUSTRIAL_SUPPLEMENT_V4_PROFILE_ID;
   const strictV4ReleaseContract = strictV4ContentContract
     && Number(overlayPlan.profileRevision ?? 0) >= 5;
+  const supportsParentAnchoredForest = overlayPlan.schema
+    === 'ruindivex-dungeon-augmentation-overlay/v2'
+    && Number(overlayPlan.profileRevision ?? 0) === 5;
   const supplementRoomNodes = (overlayPlan.nodes ?? []).filter((node) => (
     !isSupplementConnectorJunctionNode(node)
   ));
@@ -6931,7 +6940,16 @@ export function materializeIndustrialOverlay({
     String(operation.id)
   )));
   for (const operation of routeNetworkOperations) {
-    const grant = grantsById.get(String(operation.grantId));
+    const parentAnchoredForest = supportsParentAnchoredForest
+      && operation?.realizationMode === 'parent-anchored-forest';
+    if (operation?.realizationMode != null && !parentAnchoredForest) {
+      errors.push(`Route network ${operation.id} declares unsupported realization mode ${operation.realizationMode}.`);
+      continue;
+    }
+    const grant = objectiveCoverageGrantForOperationStationSide(
+      grantsById.get(String(operation.grantId)),
+      operation,
+    );
     if (!operation.grantId || !grant) {
       errors.push(`Route network ${operation.id} references missing grant ${operation.grantId ?? '(none)'}.`);
       continue;
@@ -6950,12 +6968,13 @@ export function materializeIndustrialOverlay({
     }
 
     const expectedEndpointSocketIds = new Set(routeNetworkEndpointSocketIds(operation, grant));
-    if (expectedEndpointSocketIds.size < 2) {
-      errors.push(`Route network ${operation.id} must bind at least two exact granted endpoint sockets.`);
+    const minimumEndpointCount = parentAnchoredForest ? 1 : 2;
+    if (expectedEndpointSocketIds.size < minimumEndpointCount) {
+      errors.push(`Route network ${operation.id} must bind at least ${minimumEndpointCount} exact granted endpoint socket${minimumEndpointCount === 1 ? '' : 's'}.`);
       continue;
     }
     const normalizedSegments = [];
-    const usedEndpointSocketIds = new Set();
+    const usedEndpointSocketCounts = new Map();
     let rejected = false;
     for (const segment of operationSegments) {
       try {
@@ -6967,7 +6986,13 @@ export function materializeIndustrialOverlay({
           corridorStations.bySocketId,
         );
         for (const endpoint of [normalized.from, normalized.to]) {
-          if (endpoint.kind === 'parentSocket') usedEndpointSocketIds.add(String(endpoint.socketId));
+          if (endpoint.kind === 'parentSocket') {
+            const socketId = String(endpoint.socketId);
+            usedEndpointSocketCounts.set(
+              socketId,
+              (usedEndpointSocketCounts.get(socketId) ?? 0) + 1,
+            );
+          }
         }
         normalizedSegments.push(normalized);
       } catch (error) {
@@ -6983,19 +7008,28 @@ export function materializeIndustrialOverlay({
     }
     if (rejected) continue;
     const missingEndpointSocketIds = [...expectedEndpointSocketIds].filter((id) => (
-      !usedEndpointSocketIds.has(id)
+      !usedEndpointSocketCounts.has(id)
     ));
-    const ungrantedEndpointSocketIds = [...usedEndpointSocketIds].filter((id) => (
+    const ungrantedEndpointSocketIds = [...usedEndpointSocketCounts.keys()].filter((id) => (
       !expectedEndpointSocketIds.has(id)
     ));
-    if (missingEndpointSocketIds.length > 0 || ungrantedEndpointSocketIds.length > 0) {
+    const duplicateEndpointSocketIds = [...usedEndpointSocketCounts]
+      .filter(([, count]) => count !== 1)
+      .map(([id]) => id);
+    if (missingEndpointSocketIds.length > 0
+      || ungrantedEndpointSocketIds.length > 0
+      || duplicateEndpointSocketIds.length > 0) {
       errors.push(
-        `Route network ${operation.id} endpoint binding mismatch (missing: ${missingEndpointSocketIds.join(', ') || 'none'}; ungranted: ${ungrantedEndpointSocketIds.join(', ') || 'none'}).`,
+        `Route network ${operation.id} endpoint binding mismatch (missing: ${missingEndpointSocketIds.join(', ') || 'none'}; ungranted: ${ungrantedEndpointSocketIds.join(', ') || 'none'}; repeated: ${duplicateEndpointSocketIds.join(', ') || 'none'}).`,
       );
       continue;
     }
 
     const physicalPlans = [];
+    const componentIdBySegmentId = new Map((operation?.parentAnchoredComponents ?? [])
+      .flatMap((component) => (component?.segmentIds ?? []).map((segmentId) => (
+        [String(segmentId), String(component?.id ?? '')]
+      ))));
     for (const segment of normalizedSegments) {
       try {
         const plan = applyConnectorJunctionProgressionHints(createSupplementConnectionPlan(
@@ -7021,6 +7055,8 @@ export function materializeIndustrialOverlay({
             number(grant.progressionBandId),
           ),
           networkRole: segment.networkRole ?? segment.routeRole ?? null,
+          routeNetworkRealizationMode: operation.realizationMode ?? null,
+          parentAnchoredComponentId: componentIdBySegmentId.get(String(segment.id)) ?? null,
           isRouteNetworkConnection: true,
           isPyramidPerimeterLoop: (
             operation.routeNetworkKind ?? grant.routeNetworkKind
@@ -7052,6 +7088,9 @@ export function materializeIndustrialOverlay({
       grantId: operation.grantId,
       routeNetworkKind: operation.routeNetworkKind ?? grant.routeNetworkKind ?? null,
       endpointSocketIds: [...expectedEndpointSocketIds],
+      omittedEndpointSocketIds: [...(operation.omittedEndpointSocketIds ?? [])],
+      realizationMode: operation.realizationMode ?? null,
+      parentAnchoredComponents: clonePlainValue(operation.parentAnchoredComponents ?? []),
       physicalConnectionIds: physicalPlans.map((plan) => plan.id),
       nodeIds: [...(operation.nodeIds ?? [])],
       topologyTemplateId: operation.topologyTemplateId ?? null,

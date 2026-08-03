@@ -7,6 +7,7 @@ import {
   routeNetworkPartialBranchRetentionUpperBound,
   routeNetworkSolutionRetainsAllRequiredGrants,
   selectDeferredRouteNetworkCoverageSuffixIndex,
+  selectPreferredParentAnchoredRouteNetworkSalvageProposal,
 } from '../src/dungeon-augmentation/planner.js';
 import { DUNGEON_AUGMENTATION_PROFILES } from '../src/dungeon-augmentation/catalog.js';
 
@@ -181,13 +182,119 @@ test('partial schedules checkpoint coverage after its complete modular replaceme
   );
 });
 
-test('coverage prune-first is disabled for exact-conflict replacements and non-partial plans', () => {
+test('exact-conflict replacement windows end in a zero-evaluation salvage checkpoint', () => {
+  const ordinary = [0, 1, 2].map((candidateIndex) => ({ candidateIndex }));
+  assert.deepEqual(
+    createRouteNetworkPartialFirstCandidateSchedule(ordinary, {
+      allowPartialRouteNetworkRealization: true,
+      routeNetworkKind: 'objective-route-coverage',
+      required: true,
+      hasConflictExclusions: true,
+    }).map((entry) => entry.partialFirstCheckpoint ?? `candidate:${entry.candidateIndex}`),
+    [
+      'candidate:0',
+      'candidate:1',
+      'candidate:2',
+      'terminal-exact-conflict-salvage',
+    ],
+  );
+  assert.deepEqual(
+    createRouteNetworkPartialFirstCandidateSchedule(ordinary, {
+      allowPartialRouteNetworkRealization: true,
+      routeNetworkKind: 'landmark-perimeter-loop',
+      required: true,
+      hasConflictExclusions: true,
+    }).map((entry) => entry.partialFirstCheckpoint ?? `candidate:${entry.candidateIndex}`),
+    [
+      'candidate:0',
+      'candidate:1',
+      'candidate:2',
+      'deferred-blocked-future',
+      'terminal-exact-conflict-salvage',
+    ],
+  );
+  assert.deepEqual(
+    createRouteNetworkPartialFirstCandidateSchedule(ordinary, {
+      allowPartialRouteNetworkRealization: false,
+      routeNetworkKind: 'objective-route-coverage',
+      required: true,
+      hasConflictExclusions: true,
+    }),
+    ordinary,
+  );
+});
+
+test('parent-anchored salvage ranking retains the largest forest with stable ties', () => {
+  const proposal = ({
+    id,
+    endpoints,
+    modules,
+    nodes,
+    segments,
+    omissions,
+    candidateOrdinal,
+  }) => ({
+    candidateOrdinal,
+    planned: {
+      operation: {
+        id,
+        endpointSocketIds: Array.from({ length: endpoints }, (_, index) => `socket:${index}`),
+        substantiveModuleCount: modules,
+        physicalNodeCount: nodes,
+        segmentIds: Array.from({ length: segments }, (_, index) => `segment:${index}`),
+      },
+      routeNetworkEntityOmissions: Array.from({ length: omissions }, (_, index) => ({
+        grantId: 'grant:fixture',
+        operationId: id,
+        entityKind: 'node',
+        entityId: `${id}:omission:${index}`,
+        ordinal: index,
+        signature: `${id}:signature:${index}`,
+        disposition: index === 0 ? 'conflict-root' : 'dependency',
+        reason: 'fixture-conflict',
+        rootSignature: `${id}:signature:0`,
+      })),
+    },
+  });
+  const smaller = proposal({
+    id: 'smaller', endpoints: 1, modules: 4, nodes: 5, segments: 5, omissions: 1,
+    candidateOrdinal: 0,
+  });
+  const larger = proposal({
+    id: 'larger', endpoints: 2, modules: 3, nodes: 4, segments: 4, omissions: 2,
+    candidateOrdinal: 9,
+  });
+  assert.equal(
+    selectPreferredParentAnchoredRouteNetworkSalvageProposal(smaller, larger),
+    larger,
+    'retained parent attachments outrank downstream size',
+  );
+
+  const fewerOmissions = proposal({
+    id: 'fewer', endpoints: 2, modules: 3, nodes: 4, segments: 4, omissions: 1,
+    candidateOrdinal: 8,
+  });
+  assert.equal(
+    selectPreferredParentAnchoredRouteNetworkSalvageProposal(larger, fewerOmissions),
+    fewerOmissions,
+  );
+  const earlierTie = proposal({
+    id: 'earlier', endpoints: 2, modules: 3, nodes: 4, segments: 4, omissions: 1,
+    candidateOrdinal: 2,
+  });
+  assert.equal(
+    selectPreferredParentAnchoredRouteNetworkSalvageProposal(fewerOmissions, earlierTie),
+    earlierTie,
+  );
+});
+
+test('non-partial plans retain the ordinary schedule despite exact conflicts', () => {
   const ordinary = [0, 1, 2].map((candidateIndex) => ({ candidateIndex }));
   for (const options of [{
     allowPartialRouteNetworkRealization: true,
     routeNetworkKind: 'objective-route-coverage',
-    required: true,
-    hasConflictExclusions: true,
+    required: false,
+    hasConflictExclusions: false,
   }, {
     allowPartialRouteNetworkRealization: false,
     routeNetworkKind: 'objective-route-coverage',

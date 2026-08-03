@@ -51,10 +51,15 @@ import {
   validateRouteNetworkInactiveSocketCapPlanningVolumes,
 } from './routeNetworkCapPlanning.js';
 import {
+  createParentAnchoredRouteNetworkSalvage,
   createRouteNetworkConflictEntitySignature,
+  normalizeRouteNetworkEntityOmissions,
   normalizeRouteNetworkConflictExclusions,
   rejectRouteNetworkCandidateForConflictExclusions,
 } from './routeNetworkModulePruning.js';
+import {
+  objectiveCoverageGrantForStationSideSearchVariant,
+} from './objectiveCoverageStationSide.js';
 import {
   computeDungeonAugmentationPlanHash,
   computeEffectiveDungeonPlanHash,
@@ -10684,6 +10689,14 @@ export function planRouteNetwork({
   if (grant.coverage && grant.coverage.coverageComplete !== true) {
     return { error: 'route-network-featureless-coverage-incomplete', context: { grantId: grant.id } };
   }
+  const normalizedSearchVariant = Math.max(
+    0,
+    Math.trunc(Number(searchVariant) || 0),
+  );
+  grant = objectiveCoverageGrantForStationSideSearchVariant(
+    grant,
+    normalizedSearchVariant,
+  );
   const sourceId = grant.id;
   const operationId = createDungeonSupplementId({
     parentRegionId: region.id,
@@ -10704,10 +10717,6 @@ export function planRouteNetwork({
   const endpointOrderAlternatives = grant.kind === 'objective-route-coverage'
     ? objectiveCoverageEndpointOrderAlternatives(canonicalEndpoints)
     : [canonicalEndpoints];
-  const normalizedSearchVariant = Math.max(
-    0,
-    Math.trunc(Number(searchVariant) || 0),
-  );
   const endpointOrderingCount = Math.max(1, endpointOrderAlternatives.length);
   const endpointOrderVariant = normalizedSearchVariant % endpointOrderingCount;
   const coverageTraversalSocketAlternative = Math.floor(
@@ -22636,6 +22645,11 @@ export function planRouteNetwork({
     themeBinding: cloneDungeonAugmentationValue(region.themeBinding),
     grantId: grant.id,
     routeNetworkKind: grant.kind,
+    ...(Number(grant.planningStationSideAlternativeOrdinal) > 0 ? {
+      planningStationSideAlternativeOrdinal: Number(
+        grant.planningStationSideAlternativeOrdinal,
+      ),
+    } : {}),
     endpointSocketIds: canonicalEndpoints.map(({ id }) => String(id)),
     progressionBandId: grant.progressionBandId,
     accessDomainId: grant.accessDomainId,
@@ -23509,6 +23523,9 @@ export function selectPreferredRouteNetworkPartialSolution(
           ?? solution?.operations?.length
           ?? 0,
       ),
+      entityOmissionCount: normalizeRouteNetworkEntityOmissions(
+        solution?.routeNetworkEntityOmissions ?? [],
+      ).length,
     };
   };
   const currentQuality = quality(current);
@@ -23523,9 +23540,62 @@ export function selectPreferredRouteNetworkPartialSolution(
       ? candidate
       : current;
   }
+  if (candidateQuality.entityOmissionCount !== currentQuality.entityOmissionCount) {
+    return candidateQuality.entityOmissionCount < currentQuality.entityOmissionCount
+      ? candidate
+      : current;
+  }
   // Candidate iteration and grant ordering are deterministic. Keep the first
   // equal-quality solution so partial recovery cannot perturb replay hashes.
   return current;
+}
+
+/**
+ * Prefer the largest deterministic parent-anchored remainder while its source
+ * candidate identity is still available. This ranking is local to one exact
+ * grant/state window; complete candidates always run before any proposal is
+ * replayed.
+ */
+export function selectPreferredParentAnchoredRouteNetworkSalvageProposal(
+  current,
+  candidate,
+) {
+  if (!candidate?.planned || candidate.planned.error) return current ?? null;
+  if (!current?.planned || current.planned.error) return candidate;
+  const quality = (proposal) => ({
+    endpointCount: Number(proposal.planned.operation?.endpointSocketIds?.length ?? 0),
+    substantiveModuleCount: Number(
+      proposal.planned.operation?.substantiveModuleCount ?? 0,
+    ),
+    physicalNodeCount: Number(
+      proposal.planned.operation?.physicalNodeCount
+        ?? proposal.planned.nodes?.length
+        ?? 0,
+    ),
+    segmentCount: Number(
+      proposal.planned.operation?.segmentIds?.length
+        ?? proposal.planned.segments?.length
+        ?? 0,
+    ),
+    omissionCount: normalizeRouteNetworkEntityOmissions(
+      proposal.planned.routeNetworkEntityOmissions ?? [],
+    ).length,
+    candidateOrdinal: Number(proposal.candidateOrdinal ?? Number.MAX_SAFE_INTEGER),
+  });
+  const first = quality(current);
+  const second = quality(candidate);
+  for (const key of [
+    'endpointCount',
+    'substantiveModuleCount',
+    'physicalNodeCount',
+    'segmentCount',
+  ]) {
+    if (second[key] !== first[key]) return second[key] > first[key] ? candidate : current;
+  }
+  if (second.omissionCount !== first.omissionCount) {
+    return second.omissionCount < first.omissionCount ? candidate : current;
+  }
+  return second.candidateOrdinal < first.candidateOrdinal ? candidate : current;
 }
 
 function routeNetworkOperationOrdinalSet(entries = []) {
@@ -23693,12 +23763,13 @@ export function createRouteNetworkPartialFirstCandidateSchedule(
   if (!allowPartialRouteNetworkRealization || required !== true) return schedule;
   if (routeNetworkKind === 'landmark-perimeter-loop') {
     schedule.push({ partialFirstCheckpoint: 'deferred-blocked-future' });
-    return schedule;
-  }
-  if (routeNetworkKind === 'objective-route-coverage'
+  } else if (routeNetworkKind === 'objective-route-coverage'
     && hasConflictExclusions !== true
     && schedule.length > 1) {
     schedule.push({ partialFirstCheckpoint: 'prune-current-required-coverage' });
+  }
+  if (hasConflictExclusions === true) {
+    schedule.push({ partialFirstCheckpoint: 'terminal-exact-conflict-salvage' });
   }
   return schedule;
 }
@@ -24310,7 +24381,10 @@ function planRouteNetworkAttempt({
         return null;
       }
       const realizedElevationModes = new Set(state.elevationModes ?? []);
-      const partialRealization = (state.prunedRouteNetworkGrants ?? []).length > 0;
+      const partialRealization = (state.prunedRouteNetworkGrants ?? []).length > 0
+        || normalizeRouteNetworkEntityOmissions(
+          state.routeNetworkEntityOmissions ?? [],
+        ).length > 0;
       if (realizedElevationModes.size < requiredElevationModeCount
         && !(allowPartialRouteNetworkRealization && partialRealization)) {
         recordRequiredFailure({
@@ -24466,6 +24540,12 @@ function planRouteNetworkAttempt({
     );
     const solutionIsProvablyOptimalForSubtree = (solution) => {
       if (!solution || (solution.operations ?? []).length === 0) return false;
+      // A retained forest is preferred to erasing its whole grant, but an
+      // omission-free sibling or ancestor candidate is still strictly better.
+      // Keep the existing bounded search open until those identities exhaust.
+      if (normalizeRouteNetworkEntityOmissions(
+        solution.routeNetworkEntityOmissions ?? [],
+      ).length > 0) return false;
       if (routeNetworkSolutionRetainsAllRequiredGrants(
         solution,
         terminalRequiredOperationOrdinals,
@@ -24519,7 +24599,12 @@ function planRouteNetworkAttempt({
       );
       const completedPartial = Boolean(
         bestScoredSolution
-          && (bestScoredSolution.prunedRouteNetworkGrants ?? []).length > 0,
+          && (
+            (bestScoredSolution.prunedRouteNetworkGrants ?? []).length > 0
+              || normalizeRouteNetworkEntityOmissions(
+                bestScoredSolution.routeNetworkEntityOmissions ?? [],
+              ).length > 0
+          ),
       );
       const accepted = completedPartial && acceptance.accepted;
       emitRouteNetworkPlanningDebugStage('route-network-partial-first-evaluated', {
@@ -24533,6 +24618,9 @@ function planRouteNetworkAttempt({
         candidateEvaluations,
         prunedOperationOrdinals: (bestScoredSolution?.prunedRouteNetworkGrants ?? [])
           .map(({ operationOrdinal: prunedOperationOrdinal }) => prunedOperationOrdinal),
+        routeNetworkEntityOmissionCount: normalizeRouteNetworkEntityOmissions(
+          bestScoredSolution?.routeNetworkEntityOmissions ?? [],
+        ).length,
         deferredCoverageSuffixCount: deferredPartialCoverageSuffixes.length,
         ...evidence,
       });
@@ -24642,6 +24730,10 @@ function planRouteNetworkAttempt({
             acceptedPlanningVolumeSignature:
               state.acceptedPlanningVolumeSignature ?? null,
             prunedRouteNetworkGrants: state.prunedRouteNetworkGrants ?? [],
+            routeNetworkEntityOmissions:
+              normalizeRouteNetworkEntityOmissions(
+                state.routeNetworkEntityOmissions ?? [],
+              ),
           },
           planningAvoidanceVolumes,
           connectorVariantRoomFootprints: [
@@ -25091,6 +25183,59 @@ function planRouteNetworkAttempt({
         hasConflictExclusions: grantHasConflictExclusions,
       },
     );
+    const conflictSalvageProposals = [];
+    const conflictSalvageProposalSignatures = new Set();
+    const cacheConflictSalvageProposal = (proposal) => {
+      if (!proposal?.planned || proposal.planned.error) return false;
+      const omissions = normalizeRouteNetworkEntityOmissions(
+        proposal.planned.routeNetworkEntityOmissions ?? [],
+      );
+      const excludedSignatures = new Set(
+        normalizedRouteNetworkConflictExclusions
+          .filter(({ grantId: excludedGrantId }) => (
+            String(excludedGrantId) === String(grant.id)
+          ))
+          .map(({ signature }) => String(signature)),
+      );
+      if (!omissions.some(({ disposition, signature, rootSignature }) => (
+        disposition === 'conflict-root'
+          && excludedSignatures.has(String(signature))
+          && String(rootSignature) === String(signature)
+      ))) return false;
+      const signature = canonicalStringify({
+        operationId: proposal.planned.operation?.id ?? null,
+        endpointSocketIds: proposal.planned.operation?.endpointSocketIds ?? [],
+        nodeIds: proposal.planned.operation?.nodeIds ?? [],
+        segmentIds: proposal.planned.operation?.segmentIds ?? [],
+        routeNetworkEntityOmissions: omissions,
+        candidateOrdinal: proposal.candidateOrdinal,
+      });
+      if (conflictSalvageProposalSignatures.has(signature)) return false;
+      conflictSalvageProposalSignatures.add(signature);
+      conflictSalvageProposals.push({
+        ...proposal,
+        planned: {
+          ...proposal.planned,
+          routeNetworkEntityOmissions: omissions,
+        },
+      });
+      return true;
+    };
+    const takePreferredConflictSalvageProposal = () => {
+      let preferred = null;
+      for (const proposal of conflictSalvageProposals) {
+        preferred = selectPreferredParentAnchoredRouteNetworkSalvageProposal(
+          preferred,
+          proposal,
+        );
+      }
+      if (!preferred) return null;
+      conflictSalvageProposals.splice(
+        conflictSalvageProposals.indexOf(preferred),
+        1,
+      );
+      return preferred;
+    };
     let deferredBlockedFutureFallbackEvaluationCount = 0;
     let currentRequiredPruneCheckpointEvaluated = false;
     const emitPartialFirstSelection = (checkpoint, evidence = {}) => {
@@ -25120,6 +25265,9 @@ function planRouteNetworkAttempt({
         acceptedPlanningVolumeSignature: state.acceptedPlanningVolumeSignature ?? null,
         prunedOperationOrdinals: (state.prunedRouteNetworkGrants ?? [])
           .map(({ operationOrdinal: prunedOperationOrdinal }) => prunedOperationOrdinal),
+        routeNetworkEntityOmissions: normalizeRouteNetworkEntityOmissions(
+          state.routeNetworkEntityOmissions ?? [],
+        ),
       });
       if (deferredPartialCoverageSuffixSignatures.has(signature)) return false;
       deferredPartialCoverageSuffixSignatures.add(signature);
@@ -25243,7 +25391,52 @@ function planRouteNetworkAttempt({
     };
     for (let scheduleIndex = 0; scheduleIndex < scheduledCandidateAttempts.length;
       scheduleIndex += 1) {
-      const scheduledAttempt = scheduledCandidateAttempts[scheduleIndex];
+      let scheduledAttempt = scheduledCandidateAttempts[scheduleIndex];
+      if (scheduledAttempt.partialFirstCheckpoint
+        === 'terminal-exact-conflict-salvage') {
+        const laterFullCandidateExists = !searchBudgetExhausted
+          && scheduledCandidateAttempts.slice(scheduleIndex + 1).some((entry) => (
+            Number.isSafeInteger(entry.candidateIndex)
+              && entry.parentAnchoredForestSalvageReplay !== true
+          ));
+        if (laterFullCandidateExists) {
+          // Landmark recovery is appended while ordinary candidates execute.
+          // Keep this zero-evaluation fallback behind every newly discovered
+          // full replacement without deleting or renumbering that work.
+          scheduledCandidateAttempts.push(scheduledAttempt);
+          continue;
+        }
+        const salvageProposal = takePreferredConflictSalvageProposal();
+        if (!salvageProposal) continue;
+        if (conflictSalvageProposals.length > 0) {
+          scheduledCandidateAttempts.push({
+            partialFirstCheckpoint: 'terminal-exact-conflict-salvage',
+          });
+        }
+        scheduledAttempt = {
+          ...salvageProposal,
+          recoveryReplay: false,
+          recoveryTargetOrdinal: null,
+          landmarkBacktracking: null,
+          futureEndpointReservationWitness: null,
+          parentAnchoredForestSalvageReplay: true,
+        };
+        emitRouteNetworkPlanningDebugStage(
+          'route-network-parent-anchored-salvage-reached',
+          {
+            grantId: grant.id,
+            operationOrdinal,
+            solverDepth,
+            candidateOrdinal: salvageProposal.candidateOrdinal,
+            candidateEvaluations,
+            omissionCount: normalizeRouteNetworkEntityOmissions(
+              salvageProposal.planned.routeNetworkEntityOmissions ?? [],
+            ).length,
+            retainedEndpointCount:
+              salvageProposal.planned.operation?.endpointSocketIds?.length ?? 0,
+          },
+        );
+      }
       if (scheduledAttempt.partialFirstCheckpoint === 'deferred-blocked-future') {
         // Round-robin quick landmark siblings and one deferred coverage
         // identity at a time. This keeps a single dense suffix from hiding a
@@ -25307,14 +25500,17 @@ function planRouteNetworkAttempt({
         recoveryTargetOrdinal,
         landmarkBacktracking: scheduledLandmarkBacktracking,
         futureEndpointReservationWitness,
+        parentAnchoredForestSalvageReplay = false,
       } = scheduledAttempt;
-      const candidateEvaluationBudget = consumeRouteNetworkCandidateEvaluationBudget({
-        candidateEvaluations,
-        maximumCandidateEvaluations,
-        futureRequiredNetworkCount,
-        reservedCandidateEvaluationsPerFutureRequiredNetwork,
-      });
-      if (!candidateEvaluationBudget.accepted) {
+      const candidateEvaluationBudget = parentAnchoredForestSalvageReplay
+        ? null
+        : consumeRouteNetworkCandidateEvaluationBudget({
+          candidateEvaluations,
+          maximumCandidateEvaluations,
+          futureRequiredNetworkCount,
+          reservedCandidateEvaluationsPerFutureRequiredNetwork,
+        });
+      if (candidateEvaluationBudget && !candidateEvaluationBudget.accepted) {
         searchBudgetExhausted = true;
         emitRouteNetworkPlanningDebugStage('route-network-candidate-budget-exhausted', {
           grantId: grant.id,
@@ -25329,11 +25525,23 @@ function planRouteNetworkAttempt({
           currentNetworkCandidateEvaluationLimit:
             candidateEvaluationBudget.currentNetworkCandidateEvaluationLimit,
         });
+        const terminalSalvageCheckpointIndex = conflictSalvageProposals.length > 0
+          ? scheduledCandidateAttempts.findIndex((entry, entryIndex) => (
+            entryIndex > scheduleIndex
+              && entry.partialFirstCheckpoint === 'terminal-exact-conflict-salvage'
+          ))
+          : -1;
+        if (terminalSalvageCheckpointIndex >= 0) {
+          scheduleIndex = terminalSalvageCheckpointIndex - 1;
+          continue;
+        }
         break;
       }
-      candidateEvaluations = candidateEvaluationBudget.candidateEvaluations;
-      attemptedCandidate = true;
-      if (!recoveryReplay) {
+      if (candidateEvaluationBudget) {
+        candidateEvaluations = candidateEvaluationBudget.candidateEvaluations;
+        attemptedCandidate = true;
+      }
+      if (!recoveryReplay && !parentAnchoredForestSalvageReplay) {
         ordinaryCandidateAttemptCount += 1;
       }
       const candidateSignature = familyCandidateSignatures[candidateIndex];
@@ -25406,7 +25614,11 @@ function planRouteNetworkAttempt({
         grantId: grant.id,
         operationOrdinal,
         candidateOrdinal,
-        candidatePhase: recoveryReplay ? 'forward-recovery' : 'ordinary',
+        candidatePhase: parentAnchoredForestSalvageReplay
+          ? 'parent-anchored-forest-salvage'
+          : recoveryReplay
+            ? 'forward-recovery'
+            : 'ordinary',
         candidateEvaluations,
         maximumCandidateEvaluations,
         recoveryTargetOrdinal,
@@ -25485,6 +25697,7 @@ function planRouteNetworkAttempt({
           normalizedRouteNetworkConflictExclusions,
       };
       const completedPlanMemoKey = completedPlanMemoContextSignature
+        && !parentAnchoredForestSalvageReplay
         && !recoveryReplay
         && !futureEndpointDomainForwardCheck
         && !futureEndpointReservationWitness
@@ -25511,7 +25724,9 @@ function planRouteNetworkAttempt({
           })
         : null;
       let planned;
-      if (completedPlanMemoKey
+      if (parentAnchoredForestSalvageReplay) {
+        planned = scheduledAttempt.planned;
+      } else if (completedPlanMemoKey
         && routeNetworkPlanResultCache.has(completedPlanMemoKey)) {
         planned = routeNetworkPlanResultCache.get(completedPlanMemoKey);
       } else {
@@ -25526,10 +25741,29 @@ function planRouteNetworkAttempt({
           );
         }
       }
-      planned = rejectRouteNetworkCandidateForConflictExclusions(
-        planned,
-        normalizedRouteNetworkConflictExclusions,
-      );
+      if (!parentAnchoredForestSalvageReplay) {
+        const completePlanned = planned;
+        const rejectedPlanned = rejectRouteNetworkCandidateForConflictExclusions(
+          completePlanned,
+          normalizedRouteNetworkConflictExclusions,
+        );
+        if (!completePlanned?.error
+          && rejectedPlanned?.error === 'route-network-conflicting-entity-excluded') {
+          const salvaged = createParentAnchoredRouteNetworkSalvage(
+            completePlanned,
+            normalizedRouteNetworkConflictExclusions,
+          );
+          if (!salvaged?.error) {
+            cacheConflictSalvageProposal({
+              planned: salvaged,
+              candidateIndex,
+              candidateOrdinal,
+              sourceFullNodeCount: completePlanned.nodes?.length ?? 0,
+            });
+          }
+        }
+        planned = rejectedPlanned;
+      }
       const candidatePlanningFrameElapsedMs =
         (globalThis.performance?.now?.() ?? Date.now()) - candidatePlanningStartedAt;
       if (landmarkRecoveryContext) {
@@ -25638,7 +25872,11 @@ function planRouteNetworkAttempt({
       const candidateAttemptRecord = {
         operationOrdinal,
         candidateOrdinal,
-        candidatePhase: recoveryReplay ? 'forward-recovery' : 'ordinary',
+        candidatePhase: parentAnchoredForestSalvageReplay
+          ? 'parent-anchored-forest-salvage'
+          : recoveryReplay
+            ? 'forward-recovery'
+            : 'ordinary',
         candidateEvaluations,
         maximumCandidateEvaluations,
         recoveryTargetOrdinal,
@@ -25684,7 +25922,9 @@ function planRouteNetworkAttempt({
           candidateEvaluations,
         });
       }
-      if (!recoveryReplay && !planned.error) ordinaryCandidatePlannedCount += 1;
+      if (!recoveryReplay
+        && !parentAnchoredForestSalvageReplay
+        && !planned.error) ordinaryCandidatePlannedCount += 1;
       candidateAttemptTrace.push(candidateAttemptRecord);
       if (routeNetworkPlanningDebugMatchesGrant(grant.id)) {
         const candidatePlanningElapsedMs = landmarkRecoveryContext?.planningElapsedMs
@@ -25763,8 +26003,10 @@ function planRouteNetworkAttempt({
         planned.operation?.substantiveModuleCount
           ?? planned.nodes.filter(({ kind }) => kind !== 'supplementConnectorModule').length,
       );
+      const parentAnchoredForest = planned.operation?.realizationMode
+        === 'parent-anchored-forest';
       if (!Number.isFinite(substantiveModuleCount)
-        || substantiveModuleCount < minimumModules
+        || (!parentAnchoredForest && substantiveModuleCount < minimumModules)
         || substantiveModuleCount > maximumModules
         || state.remainingModules - substantiveModuleCount < futureRequiredMinimum) {
         if (grant.required) {
@@ -25857,7 +26099,16 @@ function planRouteNetworkAttempt({
         ],
         nodes: [...state.nodes, ...planned.nodes],
         segments: [...state.segments, ...planned.segments],
-        progressionOrder: state.progressionOrder + planned.nodes.length,
+        // Removed entities retain their consumed selection witnesses and node
+        // ordinals. Keep the full candidate's provisional spacing so later
+        // operations cannot reuse those identities; final serialization still
+        // remaps visible progressionOrder contiguously.
+        progressionOrder: state.progressionOrder + Math.max(
+          planned.nodes.length,
+          parentAnchoredForest
+            ? Number(scheduledAttempt.sourceFullNodeCount ?? planned.nodes.length)
+            : planned.nodes.length,
+        ),
         remainingModules: state.remainingModules - substantiveModuleCount,
         acceptedNetworkCount: state.acceptedNetworkCount + 1,
         elevationModes: [...new Set([
@@ -25883,6 +26134,10 @@ function planRouteNetworkAttempt({
         prunedRouteNetworkGrants: [
           ...(state.prunedRouteNetworkGrants ?? []),
         ],
+        routeNetworkEntityOmissions: normalizeRouteNetworkEntityOmissions([
+          ...(state.routeNetworkEntityOmissions ?? []),
+          ...(planned.routeNetworkEntityOmissions ?? []),
+        ]),
       };
       const exhaustedFutureDomain = futureRequiredOperationOrdinals
         .map((ordinal) => ({
@@ -25918,6 +26173,7 @@ function planRouteNetworkAttempt({
         }
         if (grant.kind === 'landmark-perimeter-loop'
           && !recoveryReplay
+          && !parentAnchoredForestSalvageReplay
           && !queuedLandmarkRecoveryCandidateOrdinals.has(candidateOrdinal)) {
           // Keep ordinary candidate planning cheap. Only a locally complete
           // landmark whose accepted geometry consumes a mandatory future
@@ -26139,6 +26395,7 @@ function planRouteNetworkAttempt({
       acceptedPlanningVolumes: [],
       acceptedPlanningVolumeSignature: endpointReservationStateSignature([]),
       prunedRouteNetworkGrants: canonicalPrePrunedRouteNetworkGrants,
+      routeNetworkEntityOmissions: [],
     },
   );
   if (!solvedRouteNetworks) {
@@ -26196,6 +26453,19 @@ function planRouteNetworkAttempt({
     Number(first.operationOrdinal) - Number(second.operationOrdinal)
       || String(first.grantId).localeCompare(String(second.grantId))
   ));
+  const routeNetworkEntityOmissions = normalizeRouteNetworkEntityOmissions(
+    solvedRouteNetworks.routeNetworkEntityOmissions ?? [],
+  ).sort((first, second) => (
+    Number(operationOrdinalById.get(first.operationId) ?? Number.MAX_SAFE_INTEGER)
+      - Number(operationOrdinalById.get(second.operationId) ?? Number.MAX_SAFE_INTEGER)
+      || first.entityKind.localeCompare(second.entityKind)
+      || Number(first.ordinal) - Number(second.ordinal)
+      || first.entityId.localeCompare(second.entityId)
+      || first.signature.localeCompare(second.signature)
+      || first.disposition.localeCompare(second.disposition)
+      || first.reason.localeCompare(second.reason)
+      || first.rootSignature.localeCompare(second.rootSignature)
+  ));
   const routeNetworkPruningOverrides = canonicalPrePrunedRouteNetworkGrants
     .map(({ grantId, reason }) => ({ grantId, reason }))
     .sort((first, second) => (
@@ -26216,9 +26486,13 @@ function planRouteNetworkAttempt({
     augmentationSeed,
     layoutSeed: String(layoutSeed ?? ''),
     difficulty: Number(difficulty ?? 1),
-    ...(prunedRouteNetworkGrants.length > 0 ? {
+    ...(prunedRouteNetworkGrants.length > 0
+      || routeNetworkEntityOmissions.length > 0 ? {
       completionMode: 'best-effort-partial',
-      prunedRouteNetworkGrants,
+      ...(prunedRouteNetworkGrants.length > 0 ? { prunedRouteNetworkGrants } : {}),
+      ...(routeNetworkEntityOmissions.length > 0 ? {
+        routeNetworkEntityOmissions,
+      } : {}),
     } : {}),
     ...(routeNetworkPruningOverrides.length > 0 ? {
       routeNetworkPruningOverrides,
@@ -26237,7 +26511,9 @@ function planRouteNetworkAttempt({
     })),
     routeNetworkGrantIds: operations.map(({ grantId }) => grantId),
     featurelessCoverage: operations
-      .filter(({ coverage }) => Boolean(coverage))
+      .filter(({ coverage, realizationMode }) => (
+        Boolean(coverage) && realizationMode !== 'parent-anchored-forest'
+      ))
       .map(({ id, coverage }) => ({ operationId: id, ...cloneDungeonAugmentationValue(coverage) })),
     varietySignature: {
       topologyTemplateIds: operations.map(({ topologyTemplateId }) => topologyTemplateId),

@@ -243,23 +243,35 @@ test('conveyor scaffolding wins ramp conflicts without leaving partial slopes or
         if (object.name !== 'factoryCatwalkSupport') {
           return;
         }
-        const x = Math.round(object.position.x / dungeon.tileSize);
-        const z = Math.round(object.position.z / dungeon.tileSize);
-        const ramps = rampColumns.get(`${x},${z}`) ?? [];
-        object.geometry.computeBoundingBox();
-        const supportTopY = object.position.y + object.geometry.boundingBox.max.y;
-        if (ramps.some((ramp) => {
-          const directionX = Math.sign(ramp.rampDirectionX ?? 0);
-          const directionZ = Math.sign(ramp.rampDirectionZ ?? 0);
-          const localProgress = Math.max(0, Math.min(1, 0.5
-            + directionX * (object.position.x / dungeon.tileSize - ramp.x)
-            + directionZ * (object.position.z / dungeon.tileSize - ramp.z)));
-          const startY = ramp.rampStartElevation ?? ramp.elevation ?? 0;
-          const endY = ramp.rampEndElevation ?? ramp.elevation ?? 0;
-          const rampSurfaceY = startY + (endY - startY) * localProgress;
-          return supportTopY > rampSurfaceY + 0.08;
-        })) {
-          supportsInRampColumns.push({ x, z });
+        const logicalSupports = object.isInstancedMesh
+          ? object.userData.factoryCatwalkInstanceMetadata.map((record) => ({
+              position: record.worldPosition,
+              supportTopY: record.worldPosition.y + record.dimensions.height * 0.5,
+            }))
+          : (() => {
+              object.geometry.computeBoundingBox();
+              return [{
+                position: object.position,
+                supportTopY: object.position.y + object.geometry.boundingBox.max.y,
+              }];
+            })();
+        for (const { position, supportTopY } of logicalSupports) {
+          const x = Math.round(position.x / dungeon.tileSize);
+          const z = Math.round(position.z / dungeon.tileSize);
+          const ramps = rampColumns.get(`${x},${z}`) ?? [];
+          if (ramps.some((ramp) => {
+            const directionX = Math.sign(ramp.rampDirectionX ?? 0);
+            const directionZ = Math.sign(ramp.rampDirectionZ ?? 0);
+            const localProgress = Math.max(0, Math.min(1, 0.5
+              + directionX * (position.x / dungeon.tileSize - ramp.x)
+              + directionZ * (position.z / dungeon.tileSize - ramp.z)));
+            const startY = ramp.rampStartElevation ?? ramp.elevation ?? 0;
+            const endY = ramp.rampEndElevation ?? ramp.elevation ?? 0;
+            const rampSurfaceY = startY + (endY - startY) * localProgress;
+            return supportTopY > rampSurfaceY + 0.08;
+          })) {
+            supportsInRampColumns.push({ x, z });
+          }
         }
       });
 

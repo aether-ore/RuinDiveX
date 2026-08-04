@@ -260,6 +260,7 @@ export class DungeonConnectorLiftRuntime {
     lift.dwellRemaining = lift.dwellSeconds;
     lift.requestedEndpoint = null;
     lift.completedTrips += 1;
+    this.game?._markDungeonAugmentationStateDirty?.();
   }
 
   _updateLift(lift, dt) {
@@ -380,6 +381,7 @@ export class DungeonConnectorLiftRuntime {
     setDescriptorField(lift.descriptor, 'shortcutUnlocked', true);
     lift.dwellRemaining = Math.max(lift.dwellRemaining, lift.dwellSeconds);
     this._syncDescriptor(lift);
+    this.game?._markDungeonAugmentationStateDirty?.();
     return true;
   }
 

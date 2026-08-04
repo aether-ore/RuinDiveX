@@ -1,4 +1,7 @@
 export * from './canonical.js';
+export * from './AdaptiveDungeonQualityController.js';
+export * from './DungeonPerformanceTelemetry.js';
+export * from './BrowserPlannerWorkerClient.js';
 export * from './catalog.js';
 export * from './contracts.js';
 export * from './geometry.js';

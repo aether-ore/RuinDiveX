@@ -53,6 +53,11 @@ import {
 } from './magma/MagmaRefractorAssayLabRoom.js';
 import { augmentDungeonDraft } from './dungeon-augmentation/planner.js';
 import {
+  deepFreezeDungeonAugmentationValue,
+  hashCanonicalValue,
+} from './dungeon-augmentation/canonical.js';
+import { dungeonRouteEndpointGridCoordinate } from './dungeon-augmentation/geometry.js';
+import {
   createRouteNetworkConflictEntitySignature,
   normalizeRouteNetworkConflictExclusions,
 } from './dungeon-augmentation/routeNetworkModulePruning.js';
@@ -259,6 +264,7 @@ export function createDungeonSupplementProgressionConnection(plan = {}) {
 }
 
 const DEFAULT_TILE_SIZE = DUNGEON_GENERATION_REQUIREMENTS.tileSizeMeters;
+const INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES = 8;
 const RUIN_TEXTURE_BASE_PATH = '/assets/textures/ruins/';
 const RUIN_ROOM_MODEL_BASE_PATH = '/assets/models/rooms/';
 const ALIEN_SERVER_ROOM_MODEL = `${RUIN_ROOM_MODEL_BASE_PATH}alien_server_room_example.glb`;
@@ -3565,36 +3571,19 @@ export class DungeonGenerator {
     };
   }
 
-  _planIndustrialDungeonAugmentation({
+  _createIndustrialDungeonAugmentationPlanningContext({
     rooms,
     connectionPlans,
     planningSnapshotOverride = null,
   }) {
     const committedIdentity = this.committedAugmentationIdentity;
     const profileId = committedIdentity?.profileId ?? this.augmentationProfileId;
-    // This branch is deliberately before snapshotting, hashing, or seed
-    // derivation. The default Industrial path makes no sidecar calls at all.
     if (!profileId && !committedIdentity) return null;
     const planningSnapshot = planningSnapshotOverride
       ?? this._createIndustrialDungeonAugmentationPlanningSnapshot({
         rooms,
         connectionPlans,
       });
-    const planningStartedAt = globalThis.performance?.now?.() ?? Date.now();
-    let plannerElapsedMs = null;
-    let materializationElapsedMs = null;
-    const withPlanningTime = (diagnostics) => ({
-      ...diagnostics,
-      planningTimeMs: Math.max(
-        0,
-        (globalThis.performance?.now?.() ?? Date.now()) - planningStartedAt,
-      ),
-      generatorPhaseTimings: {
-        planningMs: plannerElapsedMs,
-        materializationMs: materializationElapsedMs,
-      },
-    });
-
     const baseDraft = createIndustrialBaseDraft({
       rooms: planningSnapshot.rooms,
       connectionPlans: planningSnapshot.connectionPlans,
@@ -3610,35 +3599,109 @@ export class DungeonGenerator {
       tileSize: this.tileSize,
       profileId,
     });
+    const plannerInput = {
+      baseDraft,
+      extensionRegions: host.extensionRegions,
+      profileId,
+      layoutSeed: this.augmentationSeed ?? baseDraft.basePlanHash,
+      augmentationSeed: committedIdentity?.seed
+        ?? this.augmentationPlanSeedOverride
+        ?? null,
+      prePrunedRouteNetworkGrants:
+        this.augmentationRouteNetworkPruningOverrides
+          ?? committedIdentity?.routeNetworkPruningOverrides
+          ?? [],
+      routeNetworkConflictExclusions:
+        this.augmentationRouteNetworkConflictExclusions
+          ?? committedIdentity?.routeNetworkConflictExclusions
+          ?? [],
+      routeNetworkPlanResultCache:
+        this._augmentationRouteNetworkPlanResultCache ?? null,
+      difficulty: this.difficulty,
+    };
+    const requestKey = hashCanonicalValue({
+      schema: 'dungeon-augmentation-planning-request/v1',
+      baseDraft: plannerInput.baseDraft,
+      extensionRegions: plannerInput.extensionRegions,
+      profileId: plannerInput.profileId,
+      layoutSeed: plannerInput.layoutSeed,
+      augmentationSeed: plannerInput.augmentationSeed,
+      prePrunedRouteNetworkGrants: plannerInput.prePrunedRouteNetworkGrants,
+      routeNetworkConflictExclusions: plannerInput.routeNetworkConflictExclusions,
+      difficulty: plannerInput.difficulty,
+    }, {
+      namespace: 'dungeon-augmentation-planning-request/v1',
+    });
+    return {
+      committedIdentity,
+      profileId,
+      planningSnapshot,
+      baseDraft,
+      host,
+      plannerInput,
+      requestKey,
+    };
+  }
+
+  _planIndustrialDungeonAugmentation({
+    rooms,
+    connectionPlans,
+    planningSnapshotOverride = null,
+  }) {
+    // This branch is deliberately before snapshotting, hashing, or seed
+    // derivation. The default Industrial path makes no sidecar calls at all.
+    const planningContext = this._createIndustrialDungeonAugmentationPlanningContext({
+      rooms,
+      connectionPlans,
+      planningSnapshotOverride,
+    });
+    if (!planningContext) return null;
+    const {
+      committedIdentity,
+      profileId,
+      planningSnapshot,
+      baseDraft,
+      host,
+      plannerInput,
+      requestKey,
+    } = planningContext;
+    const planningStartedAt = globalThis.performance?.now?.() ?? Date.now();
+    let plannerElapsedMs = null;
+    let materializationElapsedMs = null;
+    const withPlanningTime = (diagnostics) => ({
+      ...diagnostics,
+      planningTimeMs: Math.max(
+        0,
+        (globalThis.performance?.now?.() ?? Date.now()) - planningStartedAt,
+        Number(plannerElapsedMs) || 0,
+      ),
+      generatorPhaseTimings: {
+        planningMs: plannerElapsedMs,
+        materializationMs: materializationElapsedMs,
+      },
+    });
+
     const plannerStartedAt = globalThis.performance?.now?.() ?? Date.now();
     this._reportDungeonAugmentationPhase('planning', 'started');
     let result;
-    try {
-      result = augmentDungeonDraft({
-        baseDraft,
-        extensionRegions: host.extensionRegions,
-        profileId,
-        layoutSeed: this.augmentationSeed ?? baseDraft.basePlanHash,
-        augmentationSeed: committedIdentity?.seed
-          ?? this.augmentationPlanSeedOverride
-          ?? null,
-        prePrunedRouteNetworkGrants:
-          this.augmentationRouteNetworkPruningOverrides
-            ?? committedIdentity?.routeNetworkPruningOverrides
-            ?? [],
-        routeNetworkConflictExclusions:
-          this.augmentationRouteNetworkConflictExclusions
-            ?? committedIdentity?.routeNetworkConflictExclusions
-            ?? [],
-        routeNetworkPlanResultCache:
-          this._augmentationRouteNetworkPlanResultCache ?? null,
-        difficulty: this.difficulty,
-      });
-    } finally {
-      plannerElapsedMs = Math.max(
-        0,
-        (globalThis.performance?.now?.() ?? Date.now()) - plannerStartedAt,
+    const preparedPlanning = this._preparedDungeonAugmentationPlanningResult ?? null;
+    this._preparedDungeonAugmentationPlanningResult = null;
+    if (preparedPlanning && preparedPlanning.requestKey !== requestKey) {
+      throw new Error(
+        'The prepared dungeon augmentation plan does not match the exact current planning request.',
       );
+    }
+    try {
+      result = preparedPlanning
+        ? deepFreezeDungeonAugmentationValue(preparedPlanning.result)
+        : augmentDungeonDraft(plannerInput);
+    } finally {
+      plannerElapsedMs = preparedPlanning
+        ? Math.max(0, Number(preparedPlanning.elapsedMs) || 0)
+        : Math.max(
+            0,
+            (globalThis.performance?.now?.() ?? Date.now()) - plannerStartedAt,
+          );
       this._reportDungeonAugmentationPhase('planning', 'completed', {
         elapsedMs: plannerElapsedMs,
       });
@@ -3831,6 +3894,18 @@ export class DungeonGenerator {
     return this._generateAcceptedIndustrialDungeon();
   }
 
+  async generateAsync({ augmentationPlanner = null } = {}) {
+    if ((this.augmentationProfileId || this.committedAugmentationIdentity)
+      && typeof augmentationPlanner === 'function'
+      && this.roomPreviewId == null
+      && this.bossProfileId !== ASCENSION_ENGINE_PROFILE_ID) {
+      return this._generateIndustrialDungeonWithAugmentationReplayAsync(
+        augmentationPlanner,
+      );
+    }
+    return this.generate();
+  }
+
   _finalizeAcceptedIndustrialDungeon(dungeon, generationAttempts) {
     dungeon.generationAttempts = generationAttempts;
     const rollAnchor = dungeon.group.getObjectByName('rollCaskettNpc');
@@ -4015,7 +4090,8 @@ export class DungeonGenerator {
     root?.clear?.();
   }
 
-  _generateIndustrialDungeonWithAugmentationReplay() {
+  *_generateIndustrialDungeonWithAugmentationReplaySteps() {
+    const replayTransactionStartedAt = globalThis.performance?.now?.() ?? Date.now();
     const requestedProfileId = this.augmentationProfileId;
     const committedIdentity = this.committedAugmentationIdentity;
     const sourceRandom = this.random;
@@ -4034,6 +4110,10 @@ export class DungeonGenerator {
     }
 
     const { dungeon: baseDungeon, randomTape } = baseResult;
+    const authoredGenerationElapsedMs = Math.max(
+      0,
+      (globalThis.performance?.now?.() ?? Date.now()) - replayTransactionStartedAt,
+    );
     const planSeedOverrideState = captureOwnPropertyState(
       this,
       'augmentationPlanSeedOverride',
@@ -4051,10 +4131,15 @@ export class DungeonGenerator {
     const runtimeConflictExclusionsByRealizationAttempt = new Map();
     const runtimeConflictRepairLimitByRealizationAttempt = new Map();
     const runtimeConflictRepairCountByRealizationAttempt = new Map();
+    const planningPassRecords = [];
     const routeNetworkPlanResultCacheByRealizationAttempt = new Map();
     const routeNetworkPlanResultCacheState = captureOwnPropertyState(
       this,
       '_augmentationRouteNetworkPlanResultCache',
+    );
+    const preparedPlanningResultState = captureOwnPropertyState(
+      this,
+      '_preparedDungeonAugmentationPlanningResult',
     );
     let runtimePruningPasses = 0;
     const maximumRealizationAttempts = committedIdentity
@@ -4110,6 +4195,37 @@ export class DungeonGenerator {
         }
         this._augmentationRouteNetworkPlanResultCache =
           routeNetworkPlanResultCacheByRealizationAttempt.get(realizationAttempt);
+        const planningContext = this._createIndustrialDungeonAugmentationPlanningContext({
+          rooms: baseDungeon.rooms,
+          connectionPlans: baseDungeon.connectionPlans,
+          planningSnapshotOverride: authoritativeReplayPlanningSnapshot,
+        });
+        const preparedPlanningResult = yield Object.freeze({
+          kind: 'dungeon-augmentation-planning-request',
+          requestKey: planningContext.requestKey,
+          realizationAttempt,
+          plannerInput: planningContext.plannerInput,
+        });
+        if (!preparedPlanningResult
+          || preparedPlanningResult.requestKey !== planningContext.requestKey
+          || !preparedPlanningResult.result) {
+          throw new Error(
+            'The dungeon augmentation planner returned a stale or incomplete response.',
+          );
+        }
+        const plannerElapsedMs = Math.max(
+          0,
+          Number(preparedPlanningResult.elapsedMs) || 0,
+        );
+        planningPassRecords.push({
+          pass: planningPassRecords.length + 1,
+          realizationAttempt: realizationAttempt + 1,
+          sameSeedRepairPass: Number(
+            runtimeConflictRepairCountByRealizationAttempt.get(realizationAttempt) ?? 0,
+          ),
+          plannerTimeMs: plannerElapsedMs,
+        });
+        this._preparedDungeonAugmentationPlanningResult = preparedPlanningResult;
         let replayCursor = 0;
         let augmentedDungeon = null;
         let replayFailure = null;
@@ -4273,6 +4389,16 @@ export class DungeonGenerator {
             randomCallCount: randomTape.length,
             consumedRandomCallCount: replayCursor,
             parentGenerationAttempts: baseDungeon.generationAttempts,
+            planningPasses: planningPassRecords.map((record) => ({ ...record })),
+            cumulativePlanningTimeMs: planningPassRecords.reduce(
+              (sum, record) => sum + record.plannerTimeMs,
+              0,
+            ),
+            authoredGenerationTimeMs: authoredGenerationElapsedMs,
+            transactionTimeMs: Math.max(
+              0,
+              (globalThis.performance?.now?.() ?? Date.now()) - replayTransactionStartedAt,
+            ),
           };
           disposeCandidate(baseDungeon, augmentedDungeon);
           baseDungeonOwned = false;
@@ -4545,6 +4671,16 @@ export class DungeonGenerator {
         runtimePruningPasses,
         runtimePruningRecords: [...runtimePruningRecords],
         errors: rejectionRecords.at(-1)?.errors ?? [],
+        planningPasses: planningPassRecords.map((record) => ({ ...record })),
+        cumulativePlanningTimeMs: planningPassRecords.reduce(
+          (sum, record) => sum + record.plannerTimeMs,
+          0,
+        ),
+        authoredGenerationTimeMs: authoredGenerationElapsedMs,
+        transactionTimeMs: Math.max(
+          0,
+          (globalThis.performance?.now?.() ?? Date.now()) - replayTransactionStartedAt,
+        ),
       };
       baseDungeonOwned = false;
       completedDungeon = baseDungeon;
@@ -4573,6 +4709,11 @@ export class DungeonGenerator {
       } catch (error) {
         cleanupErrors.push(error);
       }
+      try {
+        preparedPlanningResultState.restore();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
       if (!completedDungeon) {
         disposeCandidate(
           activeAugmentedDungeon,
@@ -4593,6 +4734,50 @@ export class DungeonGenerator {
         throw cleanupError;
       }
     }
+  }
+
+  _generateIndustrialDungeonWithAugmentationReplay() {
+    const steps = this._generateIndustrialDungeonWithAugmentationReplaySteps();
+    let iteration = steps.next();
+    while (!iteration.done) {
+      const planningRequest = iteration.value;
+      const plannerStartedAt = globalThis.performance?.now?.() ?? Date.now();
+      try {
+        const result = augmentDungeonDraft(planningRequest.plannerInput);
+        iteration = steps.next({
+          requestKey: planningRequest.requestKey,
+          result,
+          elapsedMs: Math.max(
+            0,
+            (globalThis.performance?.now?.() ?? Date.now()) - plannerStartedAt,
+          ),
+        });
+      } catch (error) {
+        iteration = steps.throw(error);
+      }
+    }
+    return iteration.value;
+  }
+
+  async _generateIndustrialDungeonWithAugmentationReplayAsync(
+    augmentationPlanner,
+  ) {
+    const steps = this._generateIndustrialDungeonWithAugmentationReplaySteps();
+    let iteration = steps.next();
+    while (!iteration.done) {
+      const planningRequest = iteration.value;
+      try {
+        const planned = await augmentationPlanner(planningRequest);
+        iteration = steps.next({
+          requestKey: planningRequest.requestKey,
+          result: planned?.result,
+          elapsedMs: planned?.elapsedMs,
+        });
+      } catch (error) {
+        iteration = steps.throw(error);
+      }
+    }
+    return iteration.value;
   }
 
   _generateAscensionEngineDungeon() {
@@ -5490,6 +5675,10 @@ export class DungeonGenerator {
     let authoritativeConnectorWallOpenings = null;
     let authoritativeBoundaryWallRuns = null;
     const augmentationApplied = dungeonAugmentation?.status === 'applied';
+    const rendererFreeValidationStartedAt = augmentationApplied
+      ? globalThis.performance?.now?.() ?? Date.now()
+      : null;
+    let rendererFreeValidationTimeMs = null;
     const augmentationOverlayPlan = dungeonAugmentation?.result?.overlayPlan ?? null;
     const usesAuthoritativeV4Geometry = Boolean(
       augmentationApplied
@@ -6808,6 +6997,11 @@ export class DungeonGenerator {
     }
 
     if (dungeonAugmentation?.status === 'applied') {
+      rendererFreeValidationTimeMs = Math.max(
+        0,
+        (globalThis.performance?.now?.() ?? Date.now())
+          - Number(rendererFreeValidationStartedAt ?? 0),
+      );
       this._reportDungeonAugmentationPhase('materialization', 'completed', {
         elapsedMs: Math.max(
           0,
@@ -6886,80 +7080,7 @@ export class DungeonGenerator {
       }
     }
 
-    for (const tile of floorTiles) {
-      if (tile.surface === 'industrialRamp') {
-        continue;
-      }
-      const elevation = tile.elevation ?? 0;
-      const visualOwner = new THREE.Group();
-      visualOwner.name = 'dungeonFloorTileVisual';
-      visualOwner.userData.cameraOcclusionOwner = true;
-      visualOwner.userData.roomId = tile.roomId ?? null;
-      visualOwner.userData.connectorId = tile.connectorId ?? null;
-      if (tile.augmentationOwnerId) {
-        visualOwner.userData.augmentationOwnerId = tile.augmentationOwnerId;
-      }
-      if (tile.connectorJunctionOwnerId) {
-        visualOwner.userData.connectorJunctionOwnerId = tile.connectorJunctionOwnerId;
-        visualOwner.userData.isDungeonSupplementConnectorFloor = true;
-      }
-      const mesh = this._createFloorTileMesh(tile, materials);
-      mesh.name = `dungeonTile_${tile.type}_level${tile.level ?? 0}`;
-      mesh.userData.cameraOcclusionSurface = true;
-      mesh.userData.floorTile = {
-        x: tile.x,
-        z: tile.z,
-        roomId: tile.roomId ?? null,
-        level: tile.level ?? 0,
-        elevation,
-        surface: tile.surface ?? tile.type,
-        rampStartElevation: tile.rampStartElevation,
-        rampEndElevation: tile.rampEndElevation,
-        rampDirectionX: tile.rampDirectionX,
-        rampDirectionZ: tile.rampDirectionZ,
-        connectionId: tile.connectionId,
-        connectorId: tile.connectorId,
-        ...(tile.augmentationOwnerId ? { augmentationOwnerId: tile.augmentationOwnerId } : {}),
-        ...(tile.augmentationBlueprintId ? {
-          augmentationBlueprintId: tile.augmentationBlueprintId,
-        } : {}),
-        ...(tile.augmentationFloorTierId ? {
-          augmentationFloorTierId: tile.augmentationFloorTierId,
-          augmentationFloorTierRuntimeId: tile.augmentationFloorTierRuntimeId ?? null,
-          augmentationFloorCellId: tile.augmentationFloorCellId ?? null,
-        } : {}),
-        ...(tile.augmentationTransferId ? {
-          augmentationTransferId: tile.augmentationTransferId,
-          augmentationTransferForm: tile.augmentationTransferForm ?? null,
-          augmentationTransferKind: tile.augmentationTransferKind ?? null,
-          augmentationTransferCellId: tile.augmentationTransferCellId ?? null,
-        } : {}),
-        ...(tile.augmentationCollisionId ? {
-          augmentationCollisionId: tile.augmentationCollisionId,
-        } : {}),
-        ...(tile.connectorJunctionOwnerId ? {
-          connectorJunctionOwnerId: tile.connectorJunctionOwnerId,
-          isDungeonSupplementConnectorFloor: true,
-        } : {}),
-        connectorZone: tile.connectorZone,
-        platformGroupId: tile.platformGroupId,
-        supportStyle: tile.supportStyle,
-        massGroupId: tile.massGroupId,
-        isPlatformingSurface: Boolean(tile.isPlatformingSurface),
-        isLedgeSurface: Boolean(tile.isLedgeSurface),
-        platformPurpose: tile.platformPurpose,
-        requiredTraversalAction: tile.requiredTraversalAction,
-        ledgeEdges: tile.ledgeEdges ?? null,
-        allowsGroundedDropLanding: Boolean(tile.allowsGroundedDropLanding),
-        dropSpaceId: tile.dropSpaceId ?? null,
-        preserveProgressionFooting: Boolean(tile.preserveProgressionFooting),
-      };
-      mesh.receiveShadow = true;
-      visualOwner.add(mesh);
-
-      this._addTileDetail(visualOwner, tile, materials);
-      group.add(visualOwner);
-    }
+    this._addIndustrialFloorTileVisuals(group, floorTiles, materials);
     this._addSolidTraversalVolumes(group, floorTiles, rooms, materials);
     const blueprintTransferFixturePlans = dungeonAugmentation?.status === 'applied'
       ? connectorAssemblyRooms
@@ -7710,6 +7831,13 @@ export class DungeonGenerator {
           dungeonAugmentation.diagnostics.generatorPhaseTimings?.planningMs ?? null,
         materializationTimeMs:
           dungeonAugmentation.diagnostics.generatorPhaseTimings?.materializationMs ?? null,
+        rendererFreeValidationTimeMs,
+        cumulativePlanningTimeMs:
+          dungeon.augmentationReplayDiagnostics?.cumulativePlanningTimeMs ?? null,
+        planningPassCount:
+          dungeon.augmentationReplayDiagnostics?.planningPasses?.length ?? null,
+        buildTransactionTimeMs:
+          dungeon.augmentationReplayDiagnostics?.transactionTimeMs ?? null,
         assemblyTimeMs: Math.max(
           0,
           (globalThis.performance?.now?.() ?? Date.now())
@@ -7999,14 +8127,19 @@ export class DungeonGenerator {
       }
     };
     criticalSources.forEach(collectCritical);
-    const criticalRoots = new Set();
+    // A critical runtime owner must remain outside a visibility-controlled
+    // static group, but its ancestors may also contain unrelated presentation.
+    // Track that ancestry so partitioning can recurse through the shared branch
+    // and isolate only the exact critical owner instead of exempting the whole
+    // root child (notably DungeonSupplementRoot).
+    const criticalAncestors = new Set();
     for (const object of criticalObjects) {
-      let current = object;
-      while (current?.parent && current.parent !== root) {
-        current = current.parent;
-      }
-      if (current?.parent === root) {
-        criticalRoots.add(current);
+      for (
+        let current = object?.parent;
+        current && current !== root;
+        current = current.parent
+      ) {
+        criticalAncestors.add(current);
       }
     }
 
@@ -8035,11 +8168,20 @@ export class DungeonGenerator {
     };
     const resolveOwnerId = (object) => {
       for (let current = object; current && current !== root; current = current.parent) {
-        if (current.userData?.connectorId) {
-          return `connector:${current.userData.connectorId}`;
+        const connectorOwnerId = current.userData?.connectorId
+          ?? current.userData?.connectorJunctionOwnerId
+          ?? current.userData?.connectionId;
+        if (connectorOwnerId) {
+          return `connector:${connectorOwnerId}`;
         }
         if (current.userData?.roomId) {
           return `room:${current.userData.roomId}`;
+        }
+        if (current.userData?.augmentationOwnerId) {
+          return `augmentation:${current.userData.augmentationOwnerId}`;
+        }
+        if (current.userData?.augmentationOperationId) {
+          return `augmentation-operation:${current.userData.augmentationOperationId}`;
         }
         if (current.userData?.dropSpaceId) {
           return `drop:${current.userData.dropSpaceId}`;
@@ -8068,11 +8210,18 @@ export class DungeonGenerator {
         if (object.userData?.renderCullGroup) {
           continue;
         }
-        const isRootChild = parent === root;
-        if (
-          object.userData?.alwaysRendered
-          || (isRootChild && criticalRoots.has(object))
-        ) {
+        if (object.userData?.alwaysRendered || criticalObjects.has(object)) {
+          continue;
+        }
+
+        // Shared ancestors cannot be culled without also hiding a critical
+        // descendant. Recurse through them so static siblings are still
+        // grouped under their existing parent while the critical owner stays
+        // directly attached and independently visible.
+        if (criticalAncestors.has(object)) {
+          if (object.children.length > 0) {
+            partitionChildren(object, depth + 1);
+          }
           continue;
         }
 
@@ -8733,6 +8882,9 @@ export class DungeonGenerator {
           specification.rangeMeters ?? specification.range,
         );
         const authoredRangeTiles = Number(specification.rangeTiles);
+        const authoredPriority = Number(
+          specification.lightPriority ?? specification.priority,
+        );
         const lightIntensity = Number.isFinite(authoredIntensity)
           ? Math.max(0, authoredIntensity)
           : 1.25;
@@ -8749,9 +8901,23 @@ export class DungeonGenerator {
         );
         light.name = 'industrialSupplementLocalLight';
         light.position.y = -0.2;
-        light.castShadow = Boolean(
-          specification.castsShadow ?? specification.castShadow ?? false,
-        );
+        const localLightMetadata = {
+          environmentId: specification.id == null ? null : String(specification.id),
+          nodeId: specification.nodeId == null ? null : String(specification.nodeId),
+          parentRegionId: specification.parentRegionId == null
+            ? null
+            : String(specification.parentRegionId),
+          localLightingProfileId: specification.localLightingProfileId == null
+            ? null
+            : String(specification.localLightingProfileId),
+          decorative: specification.decorative !== false,
+          priority: Number.isFinite(authoredPriority) ? authoredPriority : 0,
+        };
+        root.userData.dungeonSupplementLocalLight = { ...localLightMetadata };
+        light.userData.dungeonSupplementLocalLight = { ...localLightMetadata };
+        // Supplemental point lights are presentation-only. The world-owned
+        // directional key remains the sole shadow caster at every quality tier.
+        light.castShadow = false;
         root.add(light);
       }
       return root;
@@ -16230,6 +16396,258 @@ export class DungeonGenerator {
     return geometry;
   }
 
+  _createFloorTileRenderMetadata(tile, { instanceId = null } = {}) {
+    const ledgeEdges = Array.isArray(tile.ledgeEdges)
+      ? tile.ledgeEdges.map((edge) => (
+          edge && typeof edge === 'object' ? { ...edge } : edge
+        ))
+      : tile.ledgeEdges ?? null;
+    return {
+      ...(instanceId == null ? {} : { instanceId }),
+      x: tile.x,
+      z: tile.z,
+      roomId: tile.roomId ?? null,
+      level: tile.level ?? 0,
+      elevation: tile.elevation ?? 0,
+      surface: tile.surface ?? tile.type,
+      rampStartElevation: tile.rampStartElevation,
+      rampEndElevation: tile.rampEndElevation,
+      rampDirectionX: tile.rampDirectionX,
+      rampDirectionZ: tile.rampDirectionZ,
+      connectionId: tile.connectionId,
+      connectorId: tile.connectorId,
+      signedConnectorFloorOwnerId: tile.signedConnectorFloorOwnerId ?? null,
+      sharedConnectorFloorOwnerIds: [...(tile.sharedConnectorFloorOwnerIds ?? [])],
+      authoritativeSocketSeamOwnerIds: [...(tile.authoritativeSocketSeamOwnerIds ?? [])],
+      augmentationOwnerId: tile.augmentationOwnerId ?? null,
+      augmentationOperationId: tile.augmentationOperationId ?? null,
+      augmentationBlueprintId: tile.augmentationBlueprintId ?? null,
+      augmentationFloorTierId: tile.augmentationFloorTierId ?? null,
+      augmentationFloorTierRuntimeId: tile.augmentationFloorTierRuntimeId ?? null,
+      augmentationFloorCellId: tile.augmentationFloorCellId ?? null,
+      augmentationTransferId: tile.augmentationTransferId ?? null,
+      augmentationTransferForm: tile.augmentationTransferForm ?? null,
+      augmentationTransferKind: tile.augmentationTransferKind ?? null,
+      augmentationTransferCellId: tile.augmentationTransferCellId ?? null,
+      augmentationCollisionId: tile.augmentationCollisionId ?? null,
+      connectorJunctionOwnerId: tile.connectorJunctionOwnerId ?? null,
+      isDungeonSupplementConnectorFloor: Boolean(tile.connectorJunctionOwnerId),
+      connectorZone: tile.connectorZone,
+      platformGroupId: tile.platformGroupId,
+      supportStyle: tile.supportStyle,
+      massGroupId: tile.massGroupId,
+      isPlatformingSurface: Boolean(tile.isPlatformingSurface),
+      isLedgeSurface: Boolean(tile.isLedgeSurface),
+      platformPurpose: tile.platformPurpose,
+      requiredTraversalAction: tile.requiredTraversalAction,
+      ledgeEdges,
+      allowsGroundedDropLanding: Boolean(tile.allowsGroundedDropLanding),
+      dropSpaceId: tile.dropSpaceId ?? null,
+      preserveProgressionFooting: Boolean(tile.preserveProgressionFooting),
+    };
+  }
+
+  _freezeIndustrialSurfaceInstanceMetadata(records) {
+    const freezeValue = (value) => {
+      if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+      for (const child of Object.values(value)) freezeValue(child);
+      return Object.freeze(value);
+    };
+    return freezeValue(records);
+  }
+
+  _getIndustrialSurfaceBatchOwnership(tile = {}) {
+    const normalizeId = (value) => (value == null ? null : String(value));
+    const normalizeIds = (values) => Object.freeze([...new Set(
+      (Array.isArray(values) ? values : []).filter(Boolean).map(String),
+    )].sort());
+    return Object.freeze({
+      roomId: normalizeId(tile.roomId),
+      connectorId: normalizeId(tile.connectorId),
+      connectionId: normalizeId(tile.connectionId),
+      connectorJunctionOwnerId: normalizeId(tile.connectorJunctionOwnerId),
+      signedConnectorFloorOwnerId: normalizeId(tile.signedConnectorFloorOwnerId),
+      augmentationOwnerId: normalizeId(tile.augmentationOwnerId),
+      augmentationOperationId: normalizeId(tile.augmentationOperationId),
+      dungeonSupplement: tile.dungeonSupplement === true,
+      sharedConnectorFloorOwnerIds: normalizeIds(tile.sharedConnectorFloorOwnerIds),
+      authoritativeSocketSeamOwnerIds: normalizeIds(tile.authoritativeSocketSeamOwnerIds),
+      mergedFloorOwnerIds: normalizeIds(tile.mergedFloorOwnerIds),
+    });
+  }
+
+  _createIndustrialSurfaceBatchDescriptor(
+    tile,
+    material,
+    elevationBand,
+    secondaryElevationBand = null,
+  ) {
+    const chunkX = Math.floor(Number(tile.x) / INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES);
+    const chunkZ = Math.floor(Number(tile.z) / INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES);
+    const ownership = this._getIndustrialSurfaceBatchOwnership(tile);
+    const normalizedElevationBand = Number(elevationBand).toFixed(3);
+    const normalizedSecondaryElevationBand = secondaryElevationBand == null
+      ? null
+      : Number(secondaryElevationBand).toFixed(3);
+    const materialId = String(material?.uuid ?? material?.id ?? material?.name ?? 'material');
+    const key = JSON.stringify({
+      materialId,
+      elevationBand: normalizedElevationBand,
+      secondaryElevationBand: normalizedSecondaryElevationBand,
+      chunkX,
+      chunkZ,
+      ownership,
+    });
+    return {
+      key,
+      chunkX,
+      chunkZ,
+      elevationBand: normalizedElevationBand,
+      secondaryElevationBand: normalizedSecondaryElevationBand,
+      ownership,
+    };
+  }
+
+  _applyIndustrialSurfaceBatchOwnership(object, ownership) {
+    object.userData.roomId = ownership.roomId;
+    object.userData.connectorId = ownership.connectorId;
+    object.userData.connectionId = ownership.connectionId;
+    object.userData.connectorJunctionOwnerId = ownership.connectorJunctionOwnerId;
+    object.userData.signedConnectorFloorOwnerId = ownership.signedConnectorFloorOwnerId;
+    object.userData.augmentationOwnerId = ownership.augmentationOwnerId;
+    object.userData.augmentationOperationId = ownership.augmentationOperationId;
+    object.userData.dungeonSupplement = ownership.dungeonSupplement;
+    object.userData.sharedConnectorFloorOwnerIds = ownership.sharedConnectorFloorOwnerIds;
+    object.userData.authoritativeSocketSeamOwnerIds = ownership.authoritativeSocketSeamOwnerIds;
+    object.userData.mergedFloorOwnerIds = ownership.mergedFloorOwnerIds;
+    object.userData.renderBatchOwnership = ownership;
+    if (ownership.connectorJunctionOwnerId) {
+      object.userData.isDungeonSupplementConnectorFloor = true;
+    }
+  }
+
+  _floorTileRequiresIndependentVisual(tile) {
+    return tile.surface === 'dropSpaceOverpass'
+      || tile.type === 'conveyor'
+      || tile.type === 'trap';
+  }
+
+  _createIndependentFloorTileVisual(tile, materials) {
+    const visualOwner = new THREE.Group();
+    visualOwner.name = 'dungeonFloorTileVisual';
+    visualOwner.userData.cameraOcclusionOwner = true;
+    visualOwner.userData.roomId = tile.roomId ?? null;
+    visualOwner.userData.connectorId = tile.connectorId ?? null;
+    if (tile.augmentationOwnerId) {
+      visualOwner.userData.augmentationOwnerId = tile.augmentationOwnerId;
+    }
+    if (tile.connectorJunctionOwnerId) {
+      visualOwner.userData.connectorJunctionOwnerId = tile.connectorJunctionOwnerId;
+      visualOwner.userData.isDungeonSupplementConnectorFloor = true;
+    }
+    const mesh = this._createFloorTileMesh(tile, materials);
+    mesh.name = `dungeonTile_${tile.type}_level${tile.level ?? 0}`;
+    mesh.userData.cameraOcclusionSurface = true;
+    mesh.userData.floorTile = this._createFloorTileRenderMetadata(tile);
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+    visualOwner.add(mesh);
+    this._addTileDetail(visualOwner, tile, materials);
+    return visualOwner;
+  }
+
+  _addIndustrialFloorTileVisuals(group, floorTiles, materials) {
+    const batchesByKey = new Map();
+    const independentVisuals = [];
+    for (const tile of floorTiles) {
+      // Contiguous ramp runs have their own sloped geometry and dynamic detail
+      // path. They must never be flattened into the standard slab batches.
+      if (tile.surface === 'industrialRamp') continue;
+      if (this._floorTileRequiresIndependentVisual(tile)) {
+        const visual = this._createIndependentFloorTileVisual(tile, materials);
+        independentVisuals.push(visual);
+        group.add(visual);
+        continue;
+      }
+      const material = this._getFloorMaterialForTile(tile, materials);
+      const elevation = Number(tile.elevation ?? 0);
+      const descriptor = this._createIndustrialSurfaceBatchDescriptor(
+        tile,
+        material,
+        elevation,
+      );
+      const batch = batchesByKey.get(descriptor.key) ?? {
+        ...descriptor,
+        material,
+        elevation,
+        tiles: [],
+      };
+      batch.tiles.push(tile);
+      batchesByKey.set(descriptor.key, batch);
+    }
+
+    const sharedGeometry = batchesByKey.size > 0
+      ? new THREE.BoxGeometry(this.tileSize, 0.12, this.tileSize)
+      : null;
+    if (sharedGeometry) {
+      sharedGeometry.userData.sharedIndustrialFloorBatchGeometry = true;
+    }
+    const batchMeshes = [];
+    const instanceMatrix = new THREE.Matrix4();
+    for (const batch of batchesByKey.values()) {
+      const mesh = new THREE.InstancedMesh(
+        sharedGeometry,
+        batch.material,
+        batch.tiles.length,
+      );
+      const originTile = batch.tiles[0];
+      const originX = Number(originTile.x) * this.tileSize;
+      const originZ = Number(originTile.z) * this.tileSize;
+      mesh.name = 'dungeonFloorTileVisual';
+      mesh.position.set(originX, 0, originZ);
+      for (let instanceId = 0; instanceId < batch.tiles.length; instanceId += 1) {
+        const tile = batch.tiles[instanceId];
+        instanceMatrix.makeTranslation(
+          Number(tile.x) * this.tileSize - originX,
+          Number(tile.elevation ?? 0) - 0.06,
+          Number(tile.z) * this.tileSize - originZ,
+        );
+        mesh.setMatrixAt(instanceId, instanceMatrix);
+      }
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingBox();
+      mesh.computeBoundingSphere();
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      mesh.userData.floorTileBatch = true;
+      mesh.userData.floorTileCount = batch.tiles.length;
+      mesh.userData.floorInstanceMetadata = this._freezeIndustrialSurfaceInstanceMetadata(
+        batch.tiles.map((tile, instanceId) => this._createFloorTileRenderMetadata(
+          tile,
+          { instanceId },
+        )),
+      );
+      mesh.userData.renderBatchKey = batch.key;
+      mesh.userData.renderBatchChunkX = batch.chunkX;
+      mesh.userData.renderBatchChunkZ = batch.chunkZ;
+      mesh.userData.renderBatchElevationBand = batch.elevationBand;
+      mesh.userData.renderBatchChunkTiles = INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES;
+      // Horizontal slabs do not participate in wall/camera cutout raycasts.
+      mesh.userData.cameraOcclusionSurface = false;
+      mesh.userData.cameraOcclusionExcluded = true;
+      mesh.userData.cameraOcclusionPerInstance = false;
+      this._applyIndustrialSurfaceBatchOwnership(mesh, batch.ownership);
+      group.add(mesh);
+      batchMeshes.push(mesh);
+    }
+    return {
+      batchMeshes,
+      independentVisuals,
+      sharedGeometry,
+    };
+  }
+
   _createFloorTileMesh(tile, materials) {
     const material = this._getFloorMaterialForTile(tile, materials);
     const elevation = tile.elevation ?? 0;
@@ -16797,16 +17215,13 @@ export class DungeonGenerator {
           { connectionId: plan.id, seamId: seam.id, role, facing, socketFacing, pathFacing },
         );
       }
-      const stableSeamGridCoordinate = (value) => Math.round(
-        Number((Number(Number(value).toFixed(6)) / this.tileSize).toFixed(6)),
-      );
       const centerGrid = {
         // Match the seam lattice's one-time threshold quantization. Authored
         // half-grid wall planes such as 43.4 m can arrive as
         // 43.39999999999999; raw Math.round would select the neighboring cell
         // even though every ordered seam cell has the stable identity.
-        x: stableSeamGridCoordinate(seam.position?.x),
-        z: stableSeamGridCoordinate(seam.position?.z),
+        x: dungeonRouteEndpointGridCoordinate(seam.position?.x, this.tileSize),
+        z: dungeonRouteEndpointGridCoordinate(seam.position?.z, this.tileSize),
       };
       const elevation = Number(seam.position?.y ?? socket?.elevation);
       if (
@@ -24485,6 +24900,165 @@ export class DungeonGenerator {
     });
   }
 
+  _addContiguousRampGripStripeBatches(rampVisual, run, {
+    geometry,
+    materials,
+    halfLength,
+    lengthWorld,
+    startY,
+    endY,
+    slopeAngle,
+  }) {
+    if (!rampVisual || !Array.isArray(run) || run.length === 0 || !geometry) {
+      return [];
+    }
+
+    rampVisual.updateMatrix();
+    const dimensions = Object.freeze({
+      width: Number(geometry.parameters?.width ?? this.tileSize * 0.48 * 1.58),
+      height: Number(geometry.parameters?.height ?? 0.045),
+      depth: Number(geometry.parameters?.depth ?? 0.075),
+    });
+    const elevationBand = [Math.min(startY, endY), Math.max(startY, endY)]
+      .map((value) => Number(value).toFixed(3))
+      .join(':');
+    const batchesByKey = new Map();
+
+    for (let stripeIndex = 0; stripeIndex < run.length; stripeIndex += 1) {
+      const tile = run[stripeIndex];
+      const progress = (stripeIndex + 0.5) / run.length;
+      const localPosition = new THREE.Vector3(
+        0,
+        THREE.MathUtils.lerp(startY, endY, progress) + 0.055,
+        -halfLength + lengthWorld * progress,
+      );
+      const worldPosition = localPosition.clone().applyMatrix4(rampVisual.matrix);
+      const ownership = this._getIndustrialSurfaceBatchOwnership(tile);
+      const chunkX = Math.floor(Number(tile.x) / INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES);
+      const chunkZ = Math.floor(Number(tile.z) / INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES);
+      const supportBaseElevation = Number(
+        tile.supportBaseElevation
+        ?? tile.roomBaseElevation
+        ?? Math.min(startY, endY),
+      );
+      const materialRole = stripeIndex % 2 === 0 ? 'hazardStripe' : 'supportMetal';
+      const key = JSON.stringify({
+        family: 'contiguousIndustrialRampGripStripe',
+        materialRole,
+        chunkX,
+        chunkZ,
+        elevationBand,
+        supportBaseElevation: supportBaseElevation.toFixed(3),
+        rampRunId: tile.rampRunId ?? null,
+        ownership,
+      });
+      const batch = batchesByKey.get(key) ?? {
+        key,
+        material: materials[materialRole],
+        materialRole,
+        chunkX,
+        chunkZ,
+        elevationBand,
+        supportBaseElevation,
+        ownership,
+        records: [],
+      };
+      batch.records.push({
+        stripeIndex,
+        progress,
+        tile,
+        localPosition,
+        worldPosition,
+      });
+      batchesByKey.set(key, batch);
+    }
+
+    const rotation = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(-slopeAngle, 0, 0),
+    );
+    const scale = new THREE.Vector3(1, 1, 1);
+    const instanceMatrix = new THREE.Matrix4();
+    const batchMeshes = [];
+    for (const batch of batchesByKey.values()) {
+      const mesh = new THREE.InstancedMesh(
+        geometry,
+        batch.material,
+        batch.records.length,
+      );
+      mesh.name = 'contiguousIndustrialRampGripStripe';
+      for (let instanceId = 0; instanceId < batch.records.length; instanceId += 1) {
+        instanceMatrix.compose(batch.records[instanceId].localPosition, rotation, scale);
+        mesh.setMatrixAt(instanceId, instanceMatrix);
+      }
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingBox();
+      mesh.computeBoundingSphere();
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      mesh.userData.contiguousRampGripStripeBatch = true;
+      mesh.userData.rampGripStripeCount = batch.records.length;
+      mesh.userData.rampGripStripeInstanceMetadata =
+        this._freezeIndustrialSurfaceInstanceMetadata(
+          batch.records.map((record, instanceId) => ({
+            instanceId,
+            stripeIndex: record.stripeIndex,
+            progress: record.progress,
+            tileX: Number(record.tile.x),
+            tileZ: Number(record.tile.z),
+            roomId: batch.ownership.roomId,
+            connectorId: batch.ownership.connectorId,
+            connectionId: batch.ownership.connectionId,
+            connectorJunctionOwnerId: batch.ownership.connectorJunctionOwnerId,
+            signedConnectorFloorOwnerId: batch.ownership.signedConnectorFloorOwnerId,
+            augmentationOwnerId: batch.ownership.augmentationOwnerId,
+            augmentationOperationId: batch.ownership.augmentationOperationId,
+            dungeonSupplement: batch.ownership.dungeonSupplement,
+            sharedConnectorFloorOwnerIds: [
+              ...batch.ownership.sharedConnectorFloorOwnerIds,
+            ],
+            authoritativeSocketSeamOwnerIds: [
+              ...batch.ownership.authoritativeSocketSeamOwnerIds,
+            ],
+            mergedFloorOwnerIds: [...batch.ownership.mergedFloorOwnerIds],
+            rampRouteId: record.tile.rampRouteId ?? null,
+            rampRunId: record.tile.rampRunId ?? null,
+            rampStartElevation: Number(record.tile.rampStartElevation ?? startY),
+            rampEndElevation: Number(record.tile.rampEndElevation ?? endY),
+            supportBaseElevation: batch.supportBaseElevation,
+            slopeAngle: Number(slopeAngle),
+            materialRole: batch.materialRole,
+            localPosition: {
+              x: Number(record.localPosition.x),
+              y: Number(record.localPosition.y),
+              z: Number(record.localPosition.z),
+            },
+            worldPosition: {
+              x: Number(record.worldPosition.x),
+              y: Number(record.worldPosition.y),
+              z: Number(record.worldPosition.z),
+            },
+            localRotation: { x: Number(-slopeAngle), y: 0, z: 0 },
+            dimensions: { ...dimensions },
+          })),
+        );
+      mesh.userData.instanceMetadataKey = 'rampGripStripeInstanceMetadata';
+      mesh.userData.renderBatchKey = batch.key;
+      mesh.userData.renderBatchChunkX = batch.chunkX;
+      mesh.userData.renderBatchChunkZ = batch.chunkZ;
+      mesh.userData.renderBatchChunkTiles = INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES;
+      mesh.userData.renderBatchElevationBand = batch.elevationBand;
+      mesh.userData.renderBatchFloorElevationBand = batch.supportBaseElevation.toFixed(3);
+      mesh.userData.rampGripStripeGeometryDimensions = dimensions;
+      mesh.userData.rampGripStripeMaterialRole = batch.materialRole;
+      mesh.userData.nonBlockingPresentation = true;
+      this._applyIndustrialSurfaceBatchOwnership(mesh, batch.ownership);
+      rampVisual.add(mesh);
+      batchMeshes.push(mesh);
+    }
+    return batchMeshes;
+  }
+
   _addSolidTraversalVolumes(group, floorTiles = [], rooms = [], materials) {
     for (const assembly of this._createMinorDropReturnShelfAssemblies(floorTiles)) {
       const width = (assembly.maxX - assembly.minX + 1) * this.tileSize * 0.985;
@@ -24658,6 +25232,18 @@ export class DungeonGenerator {
     }
 
     const rampTiles = floorTiles.filter((candidate) => candidate.surface === 'industrialRamp');
+    let sharedRampGripStripeGeometry = null;
+    const getSharedRampGripStripeGeometry = () => {
+      if (!sharedRampGripStripeGeometry) {
+        sharedRampGripStripeGeometry = new THREE.BoxGeometry(
+          this.tileSize * 0.48 * 1.58,
+          0.045,
+          0.075,
+        );
+        sharedRampGripStripeGeometry.userData.sharedRampGripStripeBatchGeometry = true;
+      }
+      return sharedRampGripStripeGeometry;
+    };
     const isStraightRampTile = (tile) => (
       Math.abs(Math.sign(tile.rampDirectionX ?? 0))
       + Math.abs(Math.sign(tile.rampDirectionZ ?? 0))
@@ -24821,22 +25407,15 @@ export class DungeonGenerator {
         edge.castShadow = true;
         rampVisual.add(edge);
       }
-      const stripeGeometry = new THREE.BoxGeometry(halfWidth * 1.58, 0.045, 0.075);
-      for (let index = 0; index < run.length; index += 1) {
-        const progress = (index + 0.5) / run.length;
-        const stripe = new THREE.Mesh(
-          stripeGeometry,
-          index % 2 === 0 ? materials.hazardStripe : materials.supportMetal,
-        );
-        stripe.name = 'contiguousIndustrialRampGripStripe';
-        stripe.position.set(
-          0,
-          THREE.MathUtils.lerp(startY, endY, progress) + 0.055,
-          -halfLength + lengthWorld * progress,
-        );
-        stripe.rotation.x = -slopeAngle;
-        rampVisual.add(stripe);
-      }
+      this._addContiguousRampGripStripeBatches(rampVisual, run, {
+        geometry: getSharedRampGripStripeGeometry(),
+        materials,
+        halfLength,
+        lengthWorld,
+        startY,
+        endY,
+        slopeAngle,
+      });
       return rampVisual;
     };
 
@@ -24882,6 +25461,7 @@ export class DungeonGenerator {
         .filter((tile) => tile.surface === 'industrialRamp')
         .map((tile) => tileKey(tile.x, tile.z)),
     );
+    const catwalkBatchCollector = this._createFactoryCatwalkPresentationBatchCollector();
 
     for (const tile of floorTiles) {
       const elevation = tile.elevation ?? 0;
@@ -24907,7 +25487,13 @@ export class DungeonGenerator {
       }
 
       if (!rampColumnKeys.has(key)) {
-        this._addFactoryTileSupports(group, tile, materials, floorTileLookup);
+        this._addFactoryTileSupports(
+          group,
+          tile,
+          materials,
+          floorTileLookup,
+          catwalkBatchCollector,
+        );
       }
 
       for (const [dx, dz] of DIRECTIONS) {
@@ -25073,7 +25659,15 @@ export class DungeonGenerator {
       group.add(alcove);
     }
 
-    this._addFactoryRailRuns(group, floorTiles, floorTileLookup, materials, openAirTileKeys);
+    this._addFactoryRailRuns(
+      group,
+      floorTiles,
+      floorTileLookup,
+      materials,
+      openAirTileKeys,
+      catwalkBatchCollector,
+    );
+    this._flushFactoryCatwalkPresentationBatches(group, catwalkBatchCollector);
   }
 
   _findSameFloorNeighbor(floorTileLookup, tile, dx, dz) {
@@ -25196,7 +25790,181 @@ export class DungeonGenerator {
     });
   }
 
-  _addFactoryTileSupports(group, tile, materials, floorTileLookup = null) {
+  _createFactoryCatwalkPresentationBatchCollector() {
+    return {
+      batchesByKey: new Map(),
+      geometriesByKey: new Map(),
+      batchMeshes: [],
+      flushed: false,
+    };
+  }
+
+  _queueFactoryCatwalkPresentationInstance(collector, {
+    name,
+    kind,
+    material,
+    dimensions,
+    position,
+    orientation,
+    elevation,
+    ownership,
+    chunkX = null,
+    chunkZ = null,
+    metadata = {},
+  }) {
+    if (!collector || collector.flushed) {
+      throw new Error('Factory catwalk presentation instances require an active batch collector.');
+    }
+    const normalizedDimensions = Object.freeze({
+      width: Number(dimensions.width),
+      height: Number(dimensions.height),
+      depth: Number(dimensions.depth),
+    });
+    const geometryKey = [
+      normalizedDimensions.width,
+      normalizedDimensions.height,
+      normalizedDimensions.depth,
+    ].map((value) => value.toFixed(3)).join('x');
+    const chunkWorldSize = this.tileSize * INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES;
+    const resolvedChunkX = chunkX == null
+      ? Math.floor(Number(position.x) / chunkWorldSize)
+      : Number(chunkX);
+    const resolvedChunkZ = chunkZ == null
+      ? Math.floor(Number(position.z) / chunkWorldSize)
+      : Number(chunkZ);
+    const elevationBand = Number(elevation ?? position.y).toFixed(3);
+    const materialId = String(material?.uuid ?? material?.id ?? material?.name ?? 'material');
+    const key = JSON.stringify({
+      name,
+      kind,
+      materialId,
+      geometryKey,
+      orientation,
+      elevationBand,
+      chunkX: resolvedChunkX,
+      chunkZ: resolvedChunkZ,
+      ownership,
+    });
+    const batch = collector.batchesByKey.get(key) ?? {
+      key,
+      name,
+      kind,
+      material,
+      geometryKey,
+      dimensions: normalizedDimensions,
+      orientation,
+      elevationBand,
+      chunkX: resolvedChunkX,
+      chunkZ: resolvedChunkZ,
+      ownership,
+      instances: [],
+    };
+    batch.instances.push({
+      position: position.clone(),
+      metadata: {
+        ...metadata,
+        kind,
+        orientation,
+        elevation: Number(elevation ?? position.y),
+        roomId: ownership.roomId,
+        connectorId: ownership.connectorId,
+        connectionId: ownership.connectionId,
+        connectorJunctionOwnerId: ownership.connectorJunctionOwnerId,
+        signedConnectorFloorOwnerId: ownership.signedConnectorFloorOwnerId,
+        augmentationOwnerId: ownership.augmentationOwnerId,
+        augmentationOperationId: ownership.augmentationOperationId,
+        sharedConnectorFloorOwnerIds: [...ownership.sharedConnectorFloorOwnerIds],
+        authoritativeSocketSeamOwnerIds: [...ownership.authoritativeSocketSeamOwnerIds],
+        worldPosition: {
+          x: Number(position.x),
+          y: Number(position.y),
+          z: Number(position.z),
+        },
+        dimensions: { ...normalizedDimensions },
+      },
+    });
+    collector.batchesByKey.set(key, batch);
+  }
+
+  _flushFactoryCatwalkPresentationBatches(group, collector) {
+    if (!collector || collector.flushed) {
+      return {
+        batchMeshes: collector?.batchMeshes ?? [],
+        sharedGeometryCount: collector?.geometriesByKey?.size ?? 0,
+      };
+    }
+    const instanceMatrix = new THREE.Matrix4();
+    for (const batch of collector.batchesByKey.values()) {
+      let geometry = collector.geometriesByKey.get(batch.geometryKey);
+      if (!geometry) {
+        geometry = new THREE.BoxGeometry(
+          batch.dimensions.width,
+          batch.dimensions.height,
+          batch.dimensions.depth,
+        );
+        geometry.userData.sharedFactoryCatwalkBatchGeometry = true;
+        geometry.userData.factoryCatwalkGeometryKey = batch.geometryKey;
+        collector.geometriesByKey.set(batch.geometryKey, geometry);
+      }
+      const mesh = new THREE.InstancedMesh(geometry, batch.material, batch.instances.length);
+      const origin = batch.instances[0].position;
+      mesh.name = batch.name;
+      mesh.position.copy(origin);
+      for (let instanceId = 0; instanceId < batch.instances.length; instanceId += 1) {
+        const instance = batch.instances[instanceId];
+        instanceMatrix.makeTranslation(
+          instance.position.x - origin.x,
+          instance.position.y - origin.y,
+          instance.position.z - origin.z,
+        );
+        mesh.setMatrixAt(instanceId, instanceMatrix);
+      }
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingBox();
+      mesh.computeBoundingSphere();
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      mesh.userData.factoryCatwalkPresentationBatch = true;
+      mesh.userData.factoryCatwalkPresentationKind = batch.kind;
+      mesh.userData.factoryCatwalkInstanceCount = batch.instances.length;
+      mesh.userData.factoryCatwalkInstanceMetadata =
+        this._freezeIndustrialSurfaceInstanceMetadata(
+          batch.instances.map((instance, instanceId) => ({
+            instanceId,
+            ...instance.metadata,
+          })),
+        );
+      mesh.userData.factoryCatwalkGeometryDimensions = batch.dimensions;
+      mesh.userData.factoryCatwalkOrientation = batch.orientation;
+      mesh.userData.renderBatchKey = batch.key;
+      mesh.userData.renderBatchChunkX = batch.chunkX;
+      mesh.userData.renderBatchChunkZ = batch.chunkZ;
+      mesh.userData.renderBatchElevationBand = batch.elevationBand;
+      mesh.userData.renderBatchChunkTiles = INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES;
+      mesh.userData.cameraOcclusionPerInstance = true;
+      if (batch.kind === 'railPost') {
+        mesh.userData.factoryRailPost = true;
+        mesh.userData.elevation = Number(batch.elevationBand);
+      }
+      this._applyIndustrialSurfaceBatchOwnership(mesh, batch.ownership);
+      group.add(mesh);
+      collector.batchMeshes.push(mesh);
+    }
+    collector.flushed = true;
+    return {
+      batchMeshes: collector.batchMeshes,
+      sharedGeometryCount: collector.geometriesByKey.size,
+    };
+  }
+
+  _addFactoryTileSupports(
+    group,
+    tile,
+    materials,
+    floorTileLookup = null,
+    batchCollector = null,
+  ) {
     const elevation = tile.elevation ?? 0;
     const supportBaseElevation = Number(
       tile.supportBaseElevation
@@ -25220,41 +25988,85 @@ export class DungeonGenerator {
     }
 
     const supportHeight = Math.max(0.12, localElevation - 0.1);
-    const beamGeometryX = new THREE.BoxGeometry(this.tileSize * 0.86, 0.08, 0.12);
-    const beamGeometryZ = new THREE.BoxGeometry(0.12, 0.08, this.tileSize * 0.86);
     const baseX = tile.x * this.tileSize;
     const baseZ = tile.z * this.tileSize;
     const cornerOffset = this.tileSize * 0.36;
+    const chunkX = Math.floor(Number(tile.x) / INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES);
+    const chunkZ = Math.floor(Number(tile.z) / INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES);
+    const ownsBatchCollector = batchCollector == null;
+    const collector = batchCollector ?? this._createFactoryCatwalkPresentationBatchCollector();
+    const ownership = this._getIndustrialSurfaceBatchOwnership(tile);
 
     if (!this._factorySupportPostsIntersectTraversableColumn(tile, floorTileLookup)) {
-      const supportGeometry = new THREE.BoxGeometry(0.12, supportHeight, 0.12);
       for (const offsetX of [-cornerOffset, cornerOffset]) {
         for (const offsetZ of [-cornerOffset, cornerOffset]) {
-          const support = new THREE.Mesh(supportGeometry, materials.supportMetal);
-          support.name = 'factoryCatwalkSupport';
-          support.position.set(
-            baseX + offsetX,
-            supportBaseElevation + supportHeight * 0.5,
-            baseZ + offsetZ,
-          );
-          support.castShadow = true;
-          support.receiveShadow = true;
-          group.add(support);
+          this._queueFactoryCatwalkPresentationInstance(collector, {
+            name: 'factoryCatwalkSupport',
+            kind: 'support',
+            material: materials.supportMetal,
+            dimensions: { width: 0.12, height: supportHeight, depth: 0.12 },
+            position: new THREE.Vector3(
+              baseX + offsetX,
+              supportBaseElevation + supportHeight * 0.5,
+              baseZ + offsetZ,
+            ),
+            orientation: 'vertical',
+            elevation,
+            ownership,
+            chunkX,
+            chunkZ,
+            metadata: {
+              tileX: tile.x,
+              tileZ: tile.z,
+              supportBaseElevation,
+              deckElevation: elevation,
+              cornerOffsetX: offsetX,
+              cornerOffsetZ: offsetZ,
+            },
+          });
         }
       }
     }
 
-    for (const geometry of [beamGeometryX, beamGeometryZ]) {
-      const beam = new THREE.Mesh(geometry, materials.supportMetal);
-      beam.name = 'factoryCatwalkUnderBeam';
-      beam.position.set(baseX, elevation - 0.16, baseZ);
-      beam.castShadow = true;
-      beam.receiveShadow = true;
-      group.add(beam);
+    for (const orientation of ['x', 'z']) {
+      this._queueFactoryCatwalkPresentationInstance(collector, {
+        name: 'factoryCatwalkUnderBeam',
+        kind: 'underBeam',
+        material: materials.supportMetal,
+        dimensions: {
+          width: orientation === 'x' ? this.tileSize * 0.86 : 0.12,
+          height: 0.08,
+          depth: orientation === 'x' ? 0.12 : this.tileSize * 0.86,
+        },
+        position: new THREE.Vector3(baseX, elevation - 0.16, baseZ),
+        orientation,
+        elevation,
+        ownership,
+        chunkX,
+        chunkZ,
+        metadata: {
+          tileX: tile.x,
+          tileZ: tile.z,
+          supportBaseElevation,
+          deckElevation: elevation,
+        },
+      });
     }
+    return ownsBatchCollector
+      ? this._flushFactoryCatwalkPresentationBatches(group, collector)
+      : null;
   }
 
-  _addFactoryRailRuns(group, floorTiles, floorTileLookup, materials, openAirTileKeys = new Set()) {
+  _addFactoryRailRuns(
+    group,
+    floorTiles,
+    floorTileLookup,
+    materials,
+    openAirTileKeys = new Set(),
+    batchCollector = null,
+  ) {
+    const ownsBatchCollector = batchCollector == null;
+    const collector = batchCollector ?? this._createFactoryCatwalkPresentationBatchCollector();
     const railEdges = [];
 
     for (const tile of floorTiles) {
@@ -25327,6 +26139,8 @@ export class DungeonGenerator {
           dx,
           dz,
           elevation,
+          tile,
+          ownership: this._getIndustrialSurfaceBatchOwnership(tile),
         });
       }
     }
@@ -25344,6 +26158,7 @@ export class DungeonGenerator {
         edge.dz,
         line,
         edge.elevation.toFixed(2),
+        JSON.stringify(edge.ownership),
       ].join(':');
 
       const bucket = buckets.get(key) ?? {
@@ -25352,6 +26167,8 @@ export class DungeonGenerator {
         dz: edge.dz,
         line,
         elevation: edge.elevation,
+        ownerTile: edge.tile,
+        ownership: edge.ownership,
         axes: [],
       };
 
@@ -25360,6 +26177,7 @@ export class DungeonGenerator {
     }
 
     const railPostKeys = new Set();
+    const railRuns = [];
     for (const bucket of buckets.values()) {
       bucket.axes.sort((a, b) => a - b);
 
@@ -25388,7 +26206,7 @@ export class DungeonGenerator {
           bucket.elevation + RUIN_RAIL_HEIGHT,
           bucket.horizontal ? bucket.line * this.tileSize : centerAxis,
         );
-        rail.castShadow = true;
+        rail.castShadow = false;
         rail.receiveShadow = true;
         rail.userData.factoryRailRun = true;
         rail.userData.startEndpoint = startEndpoint;
@@ -25396,13 +26214,10 @@ export class DungeonGenerator {
         rail.userData.horizontal = bucket.horizontal;
         rail.userData.line = bucket.line;
         rail.userData.elevation = bucket.elevation;
+        this._applyIndustrialSurfaceBatchOwnership(rail, bucket.ownership);
         group.add(rail);
+        railRuns.push(rail);
 
-        const postGeometry = new THREE.BoxGeometry(
-          RUIN_RAIL_THICKNESS,
-          RUIN_RAIL_HEIGHT,
-          RUIN_RAIL_THICKNESS,
-        );
         const postAxes = [];
         for (let axis = startEndpoint; axis <= endEndpoint; axis += 2) {
           postAxes.push(axis);
@@ -25413,25 +26228,44 @@ export class DungeonGenerator {
         for (const axis of postAxes) {
           const postX = bucket.horizontal ? axis * this.tileSize : bucket.line * this.tileSize;
           const postZ = bucket.horizontal ? bucket.line * this.tileSize : axis * this.tileSize;
-          const postKey = `${postX.toFixed(3)},${postZ.toFixed(3)},${bucket.elevation.toFixed(3)}`;
+          const postKey = [
+            postX.toFixed(3),
+            postZ.toFixed(3),
+            bucket.elevation.toFixed(3),
+            JSON.stringify(bucket.ownership),
+          ].join(':');
           if (railPostKeys.has(postKey)) {
             continue;
           }
           railPostKeys.add(postKey);
-          const post = new THREE.Mesh(postGeometry, materials.factoryRail);
-          post.name = 'factoryCatwalkRailPost';
-          post.position.set(
-            postX,
-            bucket.elevation + RUIN_RAIL_HEIGHT * 0.5,
-            postZ,
-          );
-          post.castShadow = true;
-          post.receiveShadow = true;
-          post.userData.factoryRailPost = true;
-          post.userData.elevation = bucket.elevation;
-          post.userData.runEndpoint = Math.abs(axis - startEndpoint) <= 0.001
-            || Math.abs(axis - endEndpoint) <= 0.001;
-          group.add(post);
+          this._queueFactoryCatwalkPresentationInstance(collector, {
+            name: 'factoryCatwalkRailPost',
+            kind: 'railPost',
+            material: materials.factoryRail,
+            dimensions: {
+              width: RUIN_RAIL_THICKNESS,
+              height: RUIN_RAIL_HEIGHT,
+              depth: RUIN_RAIL_THICKNESS,
+            },
+            position: new THREE.Vector3(
+              postX,
+              bucket.elevation + RUIN_RAIL_HEIGHT * 0.5,
+              postZ,
+            ),
+            orientation: 'vertical',
+            elevation: bucket.elevation,
+            ownership: bucket.ownership,
+            metadata: {
+              tileX: bucket.ownerTile?.x ?? null,
+              tileZ: bucket.ownerTile?.z ?? null,
+              runEndpoint: Math.abs(axis - startEndpoint) <= 0.001
+                || Math.abs(axis - endEndpoint) <= 0.001,
+              horizontal: bucket.horizontal,
+              line: bucket.line,
+              startEndpoint,
+              endEndpoint,
+            },
+          });
         }
       };
 
@@ -25448,6 +26282,14 @@ export class DungeonGenerator {
 
       flush();
     }
+    const batchResult = ownsBatchCollector
+      ? this._flushFactoryCatwalkPresentationBatches(group, collector)
+      : null;
+    return {
+      railRuns,
+      batchMeshes: batchResult?.batchMeshes ?? [],
+      sharedGeometryCount: batchResult?.sharedGeometryCount ?? 0,
+    };
   }
 
   _addFactoryStepTransition(group, lowerTile, upperTile, materials) {
@@ -27540,6 +28382,37 @@ export class DungeonGenerator {
       || normalized.includes('gate_energy_bar');
   }
 
+  _createCeilingInstanceMetadata(
+    tile,
+    room,
+    floorElevation,
+    ceilingHeight,
+    instanceId,
+  ) {
+    return {
+      instanceId,
+      x: tile.x,
+      z: tile.z,
+      ceilingHeight,
+      floorElevation,
+      roomId: room?.id ?? tile.roomId ?? null,
+      connectorId: tile.connectorId ?? null,
+      connectionId: tile.connectionId ?? null,
+      connectorJunctionOwnerId: tile.connectorJunctionOwnerId ?? null,
+      signedConnectorFloorOwnerId: tile.signedConnectorFloorOwnerId ?? null,
+      sharedConnectorFloorOwnerIds: [...(tile.sharedConnectorFloorOwnerIds ?? [])],
+      authoritativeSocketSeamOwnerIds: [...(tile.authoritativeSocketSeamOwnerIds ?? [])],
+      augmentationOwnerId: tile.augmentationOwnerId ?? null,
+      augmentationOperationId: tile.augmentationOperationId ?? null,
+      augmentationBlueprintId: tile.augmentationBlueprintId ?? null,
+      augmentationFloorTierId: tile.augmentationFloorTierId ?? null,
+      augmentationFloorTierRuntimeId: tile.augmentationFloorTierRuntimeId ?? null,
+      augmentationFloorCellId: tile.augmentationFloorCellId ?? null,
+      augmentationTransferId: tile.augmentationTransferId ?? null,
+      augmentationTransferCellId: tile.augmentationTransferCellId ?? null,
+    };
+  }
+
   _addCeilings(
     group,
     tiles,
@@ -27549,9 +28422,9 @@ export class DungeonGenerator {
     authoritativeFloorLayers = null,
   ) {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
-    const ceilingGeometry = new THREE.BoxGeometry(this.tileSize, RUIN_CEILING_THICKNESS, this.tileSize);
     const emittedCeilingKeys = new Set();
     const usesAuthoritativeFloorLayers = authoritativeFloorLayers != null;
+    const batchesByKey = new Map();
 
     for (const tile of authoritativeFloorLayers ?? tiles.values()) {
       if (openAirTileKeys.has(tileKey(tile.x, tile.z))) {
@@ -27562,7 +28435,6 @@ export class DungeonGenerator {
       if (room?.specialEnvironmentId) {
         continue;
       }
-      const ceiling = new THREE.Mesh(ceilingGeometry, materials.ceiling);
       const floorElevation = Number(
         usesAuthoritativeFloorLayers
           && (tile?.dungeonSupplement === true || tile?.augmentationOwnerId)
@@ -27594,23 +28466,90 @@ export class DungeonGenerator {
       const ceilingKey = `${tile.x}:${tile.z}:${ceilingHeight.toFixed(3)}`;
       if (emittedCeilingKeys.has(ceilingKey)) continue;
       emittedCeilingKeys.add(ceilingKey);
-      ceiling.name = 'dungeonRoomCeiling';
-      ceiling.position.set(
-        tile.x * this.tileSize,
-        ceilingHeight + RUIN_CEILING_THICKNESS * 0.5,
-        tile.z * this.tileSize,
+      const descriptor = this._createIndustrialSurfaceBatchDescriptor(
+        tile,
+        materials.ceiling,
+        ceilingHeight,
+        floorElevation,
       );
-      ceiling.userData.ceilingHeight = ceilingHeight;
-      ceiling.userData.floorElevation = floorElevation;
-      ceiling.userData.roomId = room?.id ?? null;
-      ceiling.userData.connectorId = tile.connectorId ?? null;
-      if (tile.augmentationOwnerId) {
-        ceiling.userData.augmentationOwnerId = tile.augmentationOwnerId;
+      const batch = batchesByKey.get(descriptor.key) ?? {
+        ...descriptor,
+        material: materials.ceiling,
+        ceilingHeight,
+        floorElevation,
+        room,
+        records: [],
+      };
+      batch.records.push({ tile, room, floorElevation, ceilingHeight });
+      batchesByKey.set(descriptor.key, batch);
+    }
+
+    const sharedGeometry = batchesByKey.size > 0
+      ? new THREE.BoxGeometry(
+          this.tileSize,
+          RUIN_CEILING_THICKNESS,
+          this.tileSize,
+        )
+      : null;
+    if (sharedGeometry) {
+      sharedGeometry.userData.sharedIndustrialCeilingBatchGeometry = true;
+    }
+    const batchMeshes = [];
+    const instanceMatrix = new THREE.Matrix4();
+    for (const batch of batchesByKey.values()) {
+      const ceiling = new THREE.InstancedMesh(
+        sharedGeometry,
+        batch.material,
+        batch.records.length,
+      );
+      const originTile = batch.records[0].tile;
+      const originX = Number(originTile.x) * this.tileSize;
+      const originZ = Number(originTile.z) * this.tileSize;
+      ceiling.name = 'dungeonRoomCeiling';
+      ceiling.position.set(originX, 0, originZ);
+      for (let instanceId = 0; instanceId < batch.records.length; instanceId += 1) {
+        const record = batch.records[instanceId];
+        instanceMatrix.makeTranslation(
+          Number(record.tile.x) * this.tileSize - originX,
+          record.ceilingHeight + RUIN_CEILING_THICKNESS * 0.5,
+          Number(record.tile.z) * this.tileSize - originZ,
+        );
+        ceiling.setMatrixAt(instanceId, instanceMatrix);
       }
-      ceiling.castShadow = true;
+      ceiling.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      ceiling.instanceMatrix.needsUpdate = true;
+      ceiling.computeBoundingBox();
+      ceiling.computeBoundingSphere();
+      ceiling.userData.ceilingBatch = true;
+      ceiling.userData.ceilingCount = batch.records.length;
+      ceiling.userData.ceilingHeight = batch.ceilingHeight;
+      ceiling.userData.floorElevation = batch.floorElevation;
+      ceiling.userData.ceilingInstanceMetadata =
+        this._freezeIndustrialSurfaceInstanceMetadata(
+          batch.records.map((record, instanceId) => this._createCeilingInstanceMetadata(
+            record.tile,
+            record.room,
+            record.floorElevation,
+            record.ceilingHeight,
+            instanceId,
+          )),
+        );
+      ceiling.userData.renderBatchKey = batch.key;
+      ceiling.userData.renderBatchChunkX = batch.chunkX;
+      ceiling.userData.renderBatchChunkZ = batch.chunkZ;
+      ceiling.userData.renderBatchElevationBand = batch.elevationBand;
+      ceiling.userData.renderBatchFloorElevationBand = batch.secondaryElevationBand;
+      ceiling.userData.renderBatchChunkTiles = INDUSTRIAL_SURFACE_BATCH_CHUNK_TILES;
+      ceiling.userData.cameraOcclusionSurface = false;
+      ceiling.userData.cameraOcclusionExcluded = true;
+      ceiling.userData.cameraOcclusionPerInstance = false;
+      this._applyIndustrialSurfaceBatchOwnership(ceiling, batch.ownership);
+      ceiling.castShadow = false;
       ceiling.receiveShadow = true;
       group.add(ceiling);
+      batchMeshes.push(ceiling);
     }
+    return { batchMeshes, sharedGeometry };
   }
 
   _getAuthoritativeConnectorEndpointSeam(plan, socket, role) {

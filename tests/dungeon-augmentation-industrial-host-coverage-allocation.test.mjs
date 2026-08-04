@@ -157,6 +157,11 @@ function capturePlannerCandidateTrace(run) {
           });
           return;
         }
+        // Planner stage diagnostics without a candidate ordinal are part of
+        // the same captured trace session. Do not forward them to the normal
+        // test reporter: Seed001 can emit hundreds of thousands of lines and
+        // bury the actual assertion summary or exhaust CI log limits.
+        if (typeof record?.stage === 'string') return;
       } catch {
         // Forward unrelated diagnostics to the original sink below.
       }
@@ -675,7 +680,16 @@ test('canonical seed1 keeps a useful landmark+objective coverage partial on real
     assert.ifError(generationCapture.error);
     dungeon = generationCapture.value;
     assert.ok(dungeon, 'Canonical seed1 must produce a dungeon facade.');
-    assert.equal(dungeon.augmentationStatus, 'applied');
+    assert.equal(
+      dungeon.augmentationStatus,
+      'applied',
+      [
+        `reason=${dungeon.augmentationDiagnostics?.reason ?? 'unknown'}`,
+        `runtimeRepairs=${dungeon.augmentationReplayDiagnostics?.runtimePruningPasses ?? 0}`,
+        `lastFailure=${dungeon.augmentationDiagnostics?.rejectedOverlay?.attempts?.at(-1)
+          ?.failureCodes?.join(',') ?? 'unknown'}`,
+      ].join('; '),
+    );
     assert.equal(dungeon.augmentationReplayDiagnostics?.accepted, true);
     assert.equal(dungeon.augmentationReplayDiagnostics?.realizationAttempts, 1);
     const runtimePruningRecords =

@@ -2,6 +2,18 @@ import { cloneDungeonAugmentationValue } from './canonical.js';
 
 const EPSILON = 1e-6;
 
+/**
+ * Quantize one exact route-endpoint threshold after normalizing imported
+ * metric tails. Deliberately do not round the quotient: route rasterization
+ * has always used the raw division result to resolve canonical half-grid
+ * thresholds, while blueprint-cell rasterization has a separate contiguous
+ * lattice rule.
+ */
+export function dungeonRouteEndpointGridCoordinate(value, tileSize = 2.8) {
+  const resolvedTileSize = Math.max(EPSILON, Number(tileSize) || 2.8);
+  return Math.round(Number(Number(value).toFixed(6)) / resolvedTileSize);
+}
+
 export const DUNGEON_SUPPLEMENT_JUNCTION_GEOMETRY = Object.freeze({
   'through-t': Object.freeze({
     widthTiles: 5,
@@ -372,9 +384,6 @@ export function createDungeonRouteEndpointSeam(socket = {}, {
 } = {}) {
   const resolvedTileSize = Math.max(EPSILON, Number(tileSize) || 2.8);
   const stableMetric = (value) => Number(Number(value).toFixed(6));
-  const stableGridCoordinate = (value) => Math.round(Number((
-    stableMetric(value) / resolvedTileSize
-  ).toFixed(6)));
   const resolvedWidthTiles = Math.max(1, Math.floor(Number(widthTiles) || 3));
   const resolvedInsideDepthTiles = Math.max(
     0,
@@ -407,14 +416,20 @@ export function createDungeonRouteEndpointSeam(socket = {}, {
   const minimumDepth = -resolvedInsideDepthTiles;
   const maximumDepth = resolvedOutsideDepthTiles;
   // The socket threshold can intentionally lie on a half-grid wall plane.
-  // Quantizing every metric cell independently makes negative half-grid ties
-  // round inconsistently as floating-point tails accumulate, which can skip or
-  // duplicate grid identities inside an otherwise cardinal 3x5 seam. Resolve
-  // the threshold identity once, then derive the complete lattice through
-  // integer cardinal offsets. Metric positions remain the presentation and
-  // overlap authority; these grid identities are the traversal authority.
-  const thresholdGridX = stableGridCoordinate(position.x);
-  const thresholdGridZ = stableGridCoordinate(position.z);
+  // Quantizing every metric cell independently makes floating-point tails
+  // accumulate differently across the lattice, which can skip or duplicate
+  // grid identities. Resolve the threshold once using the same raw division
+  // semantics as route rasterization, then derive every neighboring identity
+  // through integer cardinal offsets. Metric positions remain the
+  // presentation and overlap authority; these identities are traversal.
+  const thresholdGridX = dungeonRouteEndpointGridCoordinate(
+    position.x,
+    resolvedTileSize,
+  );
+  const thresholdGridZ = dungeonRouteEndpointGridCoordinate(
+    position.z,
+    resolvedTileSize,
+  );
   const orderedCells = [];
   for (let signedDepthTiles = minimumDepth;
     signedDepthTiles <= maximumDepth;

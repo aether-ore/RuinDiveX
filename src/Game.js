@@ -16,6 +16,18 @@ import {
   sanitizeDungeonAugmentationSaveIdentity,
   withDungeonAugmentationMutableState,
 } from './dungeon-augmentation/identity.js';
+import { hashCanonicalValue } from './dungeon-augmentation/canonical.js';
+import {
+  createDungeonAugmentationBrowserPlannerSession,
+} from './dungeon-augmentation/BrowserPlannerWorkerClient.js';
+import {
+  AdaptiveDungeonQualityController,
+  DUNGEON_QUALITY_MODES,
+} from './dungeon-augmentation/AdaptiveDungeonQualityController.js';
+import {
+  DungeonPerformanceTelemetry,
+  evaluateDungeonRuntimeReleaseGate,
+} from './dungeon-augmentation/DungeonPerformanceTelemetry.js';
 import {
   INDUSTRIAL_DUNGEON_FAMILY_ID,
   resolveDungeonFamilyId,
@@ -143,6 +155,13 @@ const DUNGEON_RENDER_CULL_SHOW_DISTANCE = 54;
 const OVERWORLD_RENDER_CULL_HIDE_DISTANCE = 116;
 const OVERWORLD_RENDER_CULL_SHOW_DISTANCE = 104;
 const CAMERA_OCCLUSION_BIN_SIZE = 11.2;
+const CAMERA_OCCLUSION_UPDATE_INTERVAL = 0.05;
+const CAMERA_OCCLUSION_STATIONARY_UPDATE_INTERVAL = 0.2;
+const CAMERA_OCCLUSION_MOVEMENT_THRESHOLD_SQ = 0.1 * 0.1;
+const CAMERA_OCCLUSION_ROTATION_DOT_THRESHOLD = Math.cos(
+  THREE.MathUtils.degToRad(0.5),
+);
+const TARGET_SCANNER_UPDATE_INTERVAL = 0.1;
 // Camera visibility is a world-wide playability rule. Authored content should
 // set cameraOcclusionSurface explicitly, but procedural and legacy architecture
 // still needs a safe semantic fallback so a missed room-specific flag cannot
@@ -318,14 +337,18 @@ const BUSTER_WORLD_CONTEXT_FIELDS = Object.freeze([
   'debugSpawnedPlatformGroup',
   'cameraOcclusionEntries',
   'cameraOcclusionBins',
+  'cameraOcclusionWallProxyBins',
   'cameraOcclusionWallProximityBins',
+  'cameraOcclusionRecoveryBins',
   'cameraOcclusionProximityRecordByKey',
   'cameraOcclusionWallProximityCandidateKeys',
   'cameraOcclusionExpandedVerticalRecordKeys',
   'cameraOcclusionExpandedSurfaceRecordKeys',
   'cameraOcclusionForwardVerticalHits',
   'cameraOcclusionCandidateSet',
+  'cameraOcclusionCandidateObjectSet',
   'cameraOcclusionCandidateObjects',
+  'cameraOcclusionOriginalMaterialSides',
   'cameraOcclusionHits',
   'cameraOcclusionOwnerByObject',
   'cameraOcclusionHiddenOwners',
@@ -1118,6 +1141,307 @@ function createDungeonRandom(seed) {
   return () => random.next();
 }
 
+function dungeonBuildAbortError(signal = null) {
+  const error = new Error('Dungeon build was cancelled.', {
+    cause: signal?.reason instanceof Error ? signal.reason : undefined,
+  });
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfDungeonBuildAborted(signal = null) {
+  if (signal?.aborted) throw dungeonBuildAbortError(signal);
+}
+
+function summarizeDungeonWorkerPassDiagnostics(passes = []) {
+  const workerPasses = passes.map((pass) => ({ ...pass }));
+  const total = (field) => workerPasses.reduce(
+    (sum, pass) => sum + Math.max(0, Number(pass[field]) || 0),
+    0,
+  );
+  return {
+    workerPasses,
+    workerInputCloneDispatchTimeMs: total('inputCloneDispatchTimeMs'),
+    workerExecutionTimeMs: total('workerExecutionTimeMs'),
+    workerOutputCloneAndDeliveryTimeMs: total('outputCloneAndDeliveryTimeMs'),
+    workerRoundTripTimeMs: total('totalRoundTripTimeMs'),
+  };
+}
+
+const PREPARED_INITIAL_DUNGEON_SCHEMA = 'prepared-initial-dungeon/v1';
+
+function createDungeonAugmentationLoadingState(container) {
+  const documentHost = container?.ownerDocument ?? globalThis.document;
+  if (!container?.appendChild || !documentHost?.createElement) return null;
+  const status = documentHost.createElement('div');
+  status.className = 'dungeon-augmentation-loading';
+  status.dataset.dungeonAugmentationLoading = 'active';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  const title = documentHost.createElement('strong');
+  title.textContent = 'Building supplemental dungeon';
+  const detail = documentHost.createElement('span');
+  detail.textContent = 'Planning and validating the supplemental layout off the renderer thread.';
+  const actions = documentHost.createElement('div');
+  actions.className = 'dungeon-augmentation-loading-actions';
+  actions.hidden = true;
+  const retry = documentHost.createElement('button');
+  retry.type = 'button';
+  retry.textContent = 'Retry';
+  const cancel = documentHost.createElement('button');
+  cancel.type = 'button';
+  cancel.textContent = 'Cancel';
+  actions.append(retry, cancel);
+  status.append(title, detail, actions);
+  container.dataset.dungeonAugmentationPlanning = 'active';
+  container.setAttribute('aria-busy', 'true');
+  container.appendChild(status);
+  const complete = () => {
+    delete container.dataset.dungeonAugmentationPlanning;
+    container.removeAttribute('aria-busy');
+    status.remove();
+  };
+  retry.addEventListener?.('click', () => {
+    if (typeof globalThis.location?.reload === 'function') {
+      globalThis.location.reload();
+    }
+  });
+  cancel.addEventListener?.('click', complete);
+  return {
+    update(realizationAttempt) {
+      const attempt = Math.max(0, Math.trunc(Number(realizationAttempt) || 0));
+      detail.textContent = attempt > 0
+        ? `Checking supplemental repair plan ${attempt + 1} without blocking the game window.`
+        : 'Planning and validating the supplemental layout off the renderer thread.';
+    },
+    complete,
+    fail(error) {
+      container.dataset.dungeonAugmentationPlanning = 'failed';
+      container.removeAttribute('aria-busy');
+      status.dataset.dungeonAugmentationLoading = 'failed';
+      title.textContent = 'Supplemental dungeon could not be built';
+      detail.textContent = error?.message ?? String(error);
+      actions.hidden = false;
+    },
+  };
+}
+
+function normalizeInitialDungeonGenerationSpec(generationSpec = {}) {
+  const layoutSeed = generationSpec.layoutSeed ?? readDungeonLayoutSeed();
+  const difficulty = Math.max(1, Math.min(
+    10,
+    Math.round(Number(generationSpec.difficulty) || 1),
+  ));
+  const bossProfileId = generationSpec.bossProfileId ?? DEFAULT_BOSS_PROFILE_ID;
+  const dungeonFamilyId = resolveDungeonFamilyId(
+    generationSpec.dungeonFamilyId ?? readDungeonFamilySelection().dungeonFamilyId,
+  ).dungeonFamilyId;
+  const dungeonAugmentation = Object.hasOwn(generationSpec, 'dungeonAugmentation')
+    ? generationSpec.dungeonAugmentation
+    : undefined;
+  const defaultAugmentationProfileId = Object.hasOwn(
+    generationSpec,
+    'augmentationProfileId',
+  )
+    ? generationSpec.augmentationProfileId
+    : readDungeonAugmentationProfileId();
+  const augmentationRequest = resolveDungeonAugmentationGenerationRequest(
+    dungeonAugmentation,
+    defaultAugmentationProfileId,
+  );
+  const basePlanHash = createLegacyDungeonBasePlanHash({
+    layoutSeed,
+    difficulty,
+    bossProfileId,
+    dungeonFamilyId,
+  });
+  const requestKey = hashCanonicalValue({
+    schema: PREPARED_INITIAL_DUNGEON_SCHEMA,
+    layoutSeed,
+    difficulty,
+    bossProfileId,
+    dungeonFamilyId,
+    basePlanHash,
+    isCommittedRun: augmentationRequest.isCommittedRun,
+    augmentationProfileId: augmentationRequest.augmentationProfileId,
+    committedAugmentationIdentity: sanitizeDungeonAugmentationSaveIdentity(
+      augmentationRequest.committedAugmentationIdentity,
+    ),
+  }, { namespace: 'ruindivex/prepared-initial-dungeon-request/v1' });
+  return Object.freeze({
+    layoutSeed,
+    difficulty,
+    bossProfileId,
+    dungeonFamilyId,
+    dungeonAugmentation,
+    augmentationRequest,
+    basePlanHash,
+    requestKey,
+  });
+}
+
+function shouldPrepareInitialDungeonAugmentation(generationSpec = {}) {
+  if (readStartupWorldMode(null) !== 'dungeon') return false;
+  const { augmentationRequest } = normalizeInitialDungeonGenerationSpec(generationSpec);
+  return Boolean(
+    augmentationRequest.augmentationProfileId
+      || augmentationRequest.committedAugmentationIdentity,
+  );
+}
+
+async function prepareInitialDungeonAugmentation({
+  loadingState = null,
+  generationSpec = {},
+  signal = null,
+} = {}) {
+  const transactionStartedAt = globalThis.performance?.now?.() ?? Date.now();
+  const {
+    layoutSeed,
+    difficulty,
+    bossProfileId,
+    dungeonFamilyId,
+    augmentationRequest,
+    basePlanHash,
+    requestKey,
+  } = normalizeInitialDungeonGenerationSpec(generationSpec);
+  const augmentationProfileId = augmentationRequest.augmentationProfileId;
+  let plannerSession = null;
+  let generatedDungeon = null;
+  const workerPassDiagnostics = [];
+  const generator = new DungeonGenerator({
+    difficulty,
+    random: createDungeonRandom(layoutSeed),
+    bossProfileId,
+    dungeonFamilyId,
+    augmentationProfileId,
+    augmentationSeed: layoutSeed,
+    basePlanHash,
+    committedAugmentationIdentity: augmentationRequest.committedAugmentationIdentity,
+    allowInvalidAugmentationPreview: readDungeonAugmentationPlayableAlphaMode(),
+  });
+  try {
+    throwIfDungeonBuildAborted(signal);
+    plannerSession = createDungeonAugmentationBrowserPlannerSession({ signal });
+    const dungeon = await generator.generateAsync({
+      augmentationPlanner: (request) => {
+        loadingState?.update(request.realizationAttempt);
+        return plannerSession.plan(request.plannerInput, {
+          realizationAttempt: request.realizationAttempt,
+        }).then((planned) => {
+          workerPassDiagnostics.push({
+            realizationAttempt: request.realizationAttempt,
+            ...(planned.workerDiagnostics ?? {}),
+          });
+          return planned;
+        });
+      },
+    });
+    generatedDungeon = dungeon;
+    throwIfDungeonBuildAborted(signal);
+    const replayDiagnostics = dungeon.augmentationReplayDiagnostics ?? {};
+    dungeon.preparedBuildDiagnostics = {
+      schema: 'prepared-dungeon-build-diagnostics/v1',
+      totalTimeMs: Math.max(
+        0,
+        (globalThis.performance?.now?.() ?? Date.now()) - transactionStartedAt,
+      ),
+      workerBacked: true,
+      repairCount: Math.max(0, Number(replayDiagnostics.runtimePruningPasses) || 0),
+      planningPasses: (replayDiagnostics.planningPasses ?? []).map((pass) => ({ ...pass })),
+      cumulativePlanningTimeMs: Math.max(
+        0,
+        Number(replayDiagnostics.cumulativePlanningTimeMs) || 0,
+      ),
+      authoredGenerationTimeMs: Math.max(
+        0,
+        Number(replayDiagnostics.authoredGenerationTimeMs) || 0,
+      ),
+      replayTransactionTimeMs: Math.max(
+        0,
+        Number(replayDiagnostics.transactionTimeMs) || 0,
+      ),
+      materializationTimeMs: Math.max(
+        0,
+        Number(dungeon.augmentationMetrics?.materializationTimeMs) || 0,
+      ),
+      rendererFreeValidationTimeMs: Math.max(
+        0,
+        Number(dungeon.augmentationMetrics?.rendererFreeValidationTimeMs) || 0,
+      ),
+      threeJsAssemblyTimeMs: Math.max(
+        0,
+        Number(dungeon.augmentationMetrics?.assemblyTimeMs) || 0,
+      ),
+      assemblyCount: 1,
+      requestStartedAtMs: transactionStartedAt,
+      ...summarizeDungeonWorkerPassDiagnostics(workerPassDiagnostics),
+    };
+    generatedDungeon = null;
+    return {
+      schema: PREPARED_INITIAL_DUNGEON_SCHEMA,
+      requestKey,
+      layoutSeed,
+      difficulty,
+      bossProfileId,
+      dungeonFamilyId,
+      augmentationProfileId,
+      basePlanHash,
+      dungeon,
+    };
+  } catch (error) {
+    if (generatedDungeon) {
+      generator._disposeGeneratedDungeonCandidate?.(generatedDungeon);
+      generatedDungeon = null;
+    }
+    // The explicit fresh URL is a strict diagnostics surface: never hide a
+    // planner failure there. Ordinary, uncommitted startup is allowed to keep
+    // the authored parent playable when the bounded planner watchdog expires.
+    if (error?.name === 'AbortError'
+      || augmentationRequest.committedAugmentationIdentity
+      || readDungeonAugmentationFreshMode()
+      || readDungeonAugmentationPlayableAlphaMode()) throw error;
+    const fallbackStartedAt = globalThis.performance?.now?.() ?? Date.now();
+    const dungeon = new DungeonGenerator({
+      difficulty,
+      random: createDungeonRandom(layoutSeed),
+      bossProfileId,
+      dungeonFamilyId,
+    }).generate();
+    dungeon.preparedBuildDiagnostics = {
+      schema: 'prepared-dungeon-build-diagnostics/v1',
+      totalTimeMs: Math.max(
+        0,
+        (globalThis.performance?.now?.() ?? Date.now()) - transactionStartedAt,
+      ),
+      fallbackAssemblyTimeMs: Math.max(
+        0,
+        (globalThis.performance?.now?.() ?? Date.now()) - fallbackStartedAt,
+      ),
+      workerBacked: false,
+      repairCount: 0,
+      requestStartedAtMs: transactionStartedAt,
+      fallback: 'authored-parent',
+      augmentationError: error?.message ?? String(error),
+    };
+    return {
+      schema: PREPARED_INITIAL_DUNGEON_SCHEMA,
+      requestKey,
+      layoutSeed,
+      difficulty,
+      bossProfileId,
+      dungeonFamilyId,
+      // Retain the requested profile in the wrapper so the one-shot prepared
+      // value is accepted without re-entering the synchronous augmentation
+      // planner. The facade itself truthfully carries only the base-plan hash.
+      augmentationProfileId,
+      basePlanHash,
+      dungeon,
+    };
+  } finally {
+    plannerSession?.dispose();
+  }
+}
+
 function getBusterMagazineRecoveryTime(plan) {
   const stats = plan?.stats ?? {};
   const maxEnergy = Math.max(0, Number(stats.maxEnergy) || 0);
@@ -1392,23 +1716,68 @@ export class Game {
     // A successful starter-grant write must not erase a warning explaining
     // that the payload loaded immediately before it was recovered/quarantined.
     if (openingWarning) busterLabStorage.lastWarning = openingWarning;
-    const game = new Game({ ...options, busterLabStorage, deferBusterLabInitialization: true });
-    if (game.busterLabEnabled) {
-      await game._initializeBusterLabFeature();
-    } else {
-      game._hydrateLegacyBusterShadowItems();
+    const container = options.container ?? globalThis.document?.getElementById?.('game-container');
+    let loadingState = null;
+    let preparedInitialDungeon = options.preparedInitialDungeon ?? null;
+    try {
+      const disposableDungeonRequest = readDungeonAugmentationPlayableAlphaMode()
+        || readDungeonAugmentationFreshMode();
+      const committedExpedition = disposableDungeonRequest
+        ? null
+        : busterLabStorage.getActiveBossExpedition?.() ?? null;
+      const initialDungeonGenerationSpec = resolveCommittedDungeonGenerationSpec(
+        committedExpedition,
+        {
+          bossProfileId: disposableDungeonRequest
+            ? DEFAULT_BOSS_PROFILE_ID
+            : normalizeBossProfileId(
+              busterLabStorage.state?.bossHunts?.selectedBossProfileId
+                ?? DEFAULT_BOSS_PROFILE_ID,
+            ),
+          layoutSeed: readDungeonLayoutSeed(),
+          difficulty: 1,
+          dungeonFamilyId: readDungeonFamilySelection().dungeonFamilyId,
+          dungeonAugmentation: undefined,
+        },
+      );
+      if (!preparedInitialDungeon
+        && shouldPrepareInitialDungeonAugmentation(initialDungeonGenerationSpec)) {
+        loadingState = createDungeonAugmentationLoadingState(container);
+        preparedInitialDungeon = await prepareInitialDungeonAugmentation({
+          loadingState,
+          generationSpec: initialDungeonGenerationSpec,
+          signal: options.signal ?? null,
+        });
+      }
+      const game = new Game({
+        ...options,
+        busterLabStorage,
+        preparedInitialDungeon,
+        deferBusterLabInitialization: true,
+      });
+      if (game.busterLabEnabled) {
+        await game._initializeBusterLabFeature();
+      } else {
+        game._hydrateLegacyBusterShadowItems();
+      }
+      game.ui?.renderInventory?.();
+      game.initializeInterruptedExpeditionRecovery();
+      loadingState?.complete();
+      return game;
+    } catch (error) {
+      loadingState?.fail(error);
+      throw error;
     }
-    game.ui?.renderInventory?.();
-    game.initializeInterruptedExpeditionRecovery();
-    return game;
   }
 
   constructor({
     container = document.getElementById('game-container'),
     busterLabStorage = null,
+    preparedInitialDungeon = null,
     deferBusterLabInitialization = false,
   } = {}) {
     this.container = container;
+    this._preparedInitialDungeon = preparedInitialDungeon;
     this.scene = new THREE.Scene();
     this.scene.name = 'gameScene';
     this.scene.background = new THREE.Color(0x171712);
@@ -1425,6 +1794,22 @@ export class Game {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.container.appendChild(this.renderer.domElement);
+    this.dungeonPerformanceTelemetry = new DungeonPerformanceTelemetry();
+    const requestedDungeonQualityMode = new URLSearchParams(
+      globalThis.location?.search ?? '',
+    ).get('dungeonQuality') ?? DUNGEON_QUALITY_MODES.AUTO;
+    try {
+      this.dungeonQualityController = new AdaptiveDungeonQualityController({
+        mode: requestedDungeonQualityMode,
+        startTimeMs: globalThis.performance?.now?.() ?? Date.now(),
+      });
+    } catch {
+      this.dungeonQualityController = new AdaptiveDungeonQualityController({
+        mode: DUNGEON_QUALITY_MODES.AUTO,
+        startTimeMs: globalThis.performance?.now?.() ?? Date.now(),
+      });
+    }
+    this._applyDungeonQualitySettings(this.dungeonQualityController.settings);
 
     this.clock = new THREE.Clock();
     this.enemyIdAllocator = createEnemyIdAllocator('enemy');
@@ -1576,15 +1961,21 @@ export class Game {
     this.raycaster = new THREE.Raycaster();
     this.cameraOcclusionRaycaster = new THREE.Raycaster();
     this.cameraOcclusionEntries = [];
-    this.cameraOcclusionBins = new Map();
-    this.cameraOcclusionWallProximityBins = new Map();
+    this.cameraOcclusionWallProxyBins = new Map();
+    // Keep the historical names as aliases while making their contents an
+    // explicit wall-only, per-instance ray-candidate registry.
+    this.cameraOcclusionBins = this.cameraOcclusionWallProxyBins;
+    this.cameraOcclusionWallProximityBins = this.cameraOcclusionWallProxyBins;
+    this.cameraOcclusionRecoveryBins = new Map();
     this.cameraOcclusionProximityRecordByKey = new Map();
     this.cameraOcclusionWallProximityCandidateKeys = new Set();
     this.cameraOcclusionExpandedVerticalRecordKeys = new Set();
     this.cameraOcclusionExpandedSurfaceRecordKeys = new Set();
     this.cameraOcclusionForwardVerticalHits = [];
     this.cameraOcclusionCandidateSet = new Set();
+    this.cameraOcclusionCandidateObjectSet = new Set();
     this.cameraOcclusionCandidateObjects = [];
+    this.cameraOcclusionOriginalMaterialSides = new Map();
     this.cameraOcclusionHits = [];
     this.cameraOcclusionOwnerByObject = new WeakMap();
     this.cameraOcclusionHiddenOwners = new Set();
@@ -2130,6 +2521,13 @@ export class Game {
       return;
     }
 
+    this._browserTestDatasetEnabled ??= Boolean(
+      globalThis.navigator?.webdriver === true
+        || new URLSearchParams(globalThis.location?.search ?? '')
+          .get('browserTestDiagnostics') === '1',
+    );
+    if (!this._browserTestDatasetEnabled) return;
+
     const dataset = this.container.dataset;
     const player = this.player;
     const animation = player?.animation;
@@ -2315,6 +2713,29 @@ export class Game {
     this.debugGravityPreset = key;
     this.player.setJumpPhysicsDebug({ gravityScale: DEBUG_GRAVITY_PRESETS[key] });
     return this.getPlatformDebugState();
+  }
+
+  _applyDungeonQualitySettings(settings) {
+    if (!settings || !this.renderer) return;
+    const dpr = Math.min(
+      Math.max(0.5, Number(globalThis.devicePixelRatio) || 1),
+      Math.max(0.5, Number(settings.dprCap) || 1),
+    );
+    if (Math.abs(Number(this.renderer.getPixelRatio?.()) - dpr) > 1e-6) {
+      this.renderer.setPixelRatio(dpr);
+    }
+    const shadowMapSize = Math.max(256, Math.trunc(Number(settings.shadowMapSize) || 512));
+    this.scene?.traverse?.((object) => {
+      if (!object?.isLight || !object.castShadow || !object.shadow?.mapSize) return;
+      if (object.shadow.mapSize.x === shadowMapSize
+        && object.shadow.mapSize.y === shadowMapSize) return;
+      object.shadow.mapSize.set(shadowMapSize, shadowMapSize);
+      object.shadow.map?.dispose?.();
+      object.shadow.map = null;
+      object.shadow.needsUpdate = true;
+    });
+    this.dungeonQualitySettings = settings;
+    this._updateDungeonDecorativeLocalLights();
   }
 
   _getDebugNoClipLanding() {
@@ -2711,15 +3132,63 @@ export class Game {
     this.targetScannerRaycaster.set(origin, direction);
     this.targetScannerRaycaster.near = 0.05;
     this.targetScannerRaycaster.far = Math.max(0.05, distance - 0.08);
-    const occluders = (this.cameraOcclusionEntries ?? [])
-      .map((entry) => entry?.object)
-      .filter(Boolean);
+    this.targetScannerOcclusionCandidateSet ??= new Set();
+    this.targetScannerOcclusionCandidateKeys ??= new Set();
+    this.targetScannerOcclusionCandidateObjects ??= [];
+    this.targetScannerOcclusionCandidateRecords ??= [];
+    this.targetScannerOcclusionCandidateSet.clear();
+    this.targetScannerOcclusionCandidateKeys.clear();
+    this.targetScannerOcclusionCandidateObjects.length = 0;
+    this.targetScannerOcclusionCandidateRecords.length = 0;
+    const padding = 0.25;
+    const minBinX = Math.floor(
+      (Math.min(origin.x, worldPosition.x) - padding) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const maxBinX = Math.floor(
+      (Math.max(origin.x, worldPosition.x) + padding) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const minBinZ = Math.floor(
+      (Math.min(origin.z, worldPosition.z) - padding) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const maxBinZ = Math.floor(
+      (Math.max(origin.z, worldPosition.z) + padding) / CAMERA_OCCLUSION_BIN_SIZE,
+    );
+    const wallProxyBins = this.cameraOcclusionWallProxyBins
+      ?? this.cameraOcclusionWallProximityBins
+      ?? this.cameraOcclusionBins;
+    for (let binX = minBinX; binX <= maxBinX; binX += 1) {
+      for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
+        for (const record of wallProxyBins?.get(`${binX},${binZ}`) ?? []) {
+          const entry = record.entry ?? record;
+          const recordKey = record.key ?? entry.object?.uuid;
+          if (!entry?.wallSurface || !entry.object || !recordKey
+            || this.targetScannerOcclusionCandidateKeys.has(recordKey)) continue;
+          this.targetScannerOcclusionCandidateKeys.add(recordKey);
+          const boundsHit = this.targetScannerRaycaster.ray.intersectBox(
+            record.bounds ?? entry.bounds,
+            tempVectorD,
+          );
+          if (!boundsHit
+            || boundsHit.distanceTo(origin) > this.targetScannerRaycaster.far) continue;
+          this.targetScannerOcclusionCandidateRecords.push(record);
+          if (this.targetScannerOcclusionCandidateSet.has(entry.object)) continue;
+          this.targetScannerOcclusionCandidateSet.add(entry.object);
+          this.targetScannerOcclusionCandidateObjects.push(entry.object);
+        }
+      }
+    }
+    const occluders = this.targetScannerOcclusionCandidateObjects;
+    this.dungeonPerformanceTelemetry?.recordOcclusionCandidateCount?.(
+      this.targetScannerOcclusionCandidateRecords.length,
+    );
     if (occluders.length === 0) return true;
 
     // Scanner LOS must consider every authored occlusion wall between the
     // player and target. The camera's candidate list is only the most recent
     // camera-to-player bin and is therefore not a valid world LOS set.
-    const originalMaterialSides = new Map();
+    this.targetScannerOriginalMaterialSides ??= new Map();
+    this.targetScannerOriginalMaterialSides.clear();
+    const originalMaterialSides = this.targetScannerOriginalMaterialSides;
     for (const object of occluders) {
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       for (const material of materials) {
@@ -2730,9 +3199,41 @@ export class Game {
       }
     }
     try {
-      return this.targetScannerRaycaster.intersectObjects(occluders, false).length === 0;
+      this.targetScannerHits ??= [];
+      this.targetScannerHits.length = 0;
+      return this.targetScannerRaycaster.intersectObjects(
+        occluders,
+        false,
+        this.targetScannerHits,
+      ).length === 0;
     } finally {
       for (const [material, side] of originalMaterialSides) material.side = side;
+      originalMaterialSides.clear();
+    }
+  }
+
+  _updateTargetScannerThrottled(dt) {
+    this._targetScannerUpdateElapsed = Math.min(
+      TARGET_SCANNER_UPDATE_INTERVAL,
+      Math.max(0, Number(this._targetScannerUpdateElapsed) || 0)
+        + Math.max(0, Number(dt) || 0),
+    );
+    if (this._targetScannerUpdateElapsed < TARGET_SCANNER_UPDATE_INTERVAL) return;
+    this._targetScannerUpdateElapsed = 0;
+    const startedAtMs = this.dungeonPerformanceTelemetry?.beginSubsystem?.();
+    try {
+      this._updateTargetScanner();
+    } finally {
+      this.dungeonPerformanceTelemetry?.endSubsystem?.('targetScannerLos', startedAtMs);
+    }
+  }
+
+  _updateDungeonControllerWithTelemetry(dt) {
+    const startedAtMs = this.dungeonPerformanceTelemetry?.beginSubsystem?.();
+    try {
+      return this.dungeonController?.update?.(dt);
+    } finally {
+      this.dungeonPerformanceTelemetry?.endSubsystem?.('controllerUpdate', startedAtMs);
     }
   }
 
@@ -2837,7 +3338,56 @@ export class Game {
     this._lastDungeonAugmentationMutableStateFingerprint = JSON.stringify(
       bundle.facade?.augmentationIdentity?.mutableState ?? {},
     );
+    if (this._dungeonAugmentationStatePersistenceTimer != null) {
+      const cancelTimer = this._dungeonAugmentationClearTimeout
+        ?? globalThis.clearTimeout;
+      cancelTimer?.(this._dungeonAugmentationStatePersistenceTimer);
+      this._dungeonAugmentationStatePersistenceTimer = null;
+    }
+    this._dungeonAugmentationStateRevision = 0;
+    this._dungeonAugmentationStatePersistedRevision = 0;
     return result;
+  }
+
+  _markDungeonAugmentationStateDirty() {
+    if (this.worldKind !== 'dungeon' || !this.dungeon?.augmentationIdentity) return false;
+    this._dungeonAugmentationStateRevision = Math.max(
+      0,
+      Math.trunc(Number(this._dungeonAugmentationStateRevision) || 0),
+    ) + 1;
+    this._scheduleDungeonAugmentationStatePersistence();
+    return true;
+  }
+
+  _scheduleDungeonAugmentationStatePersistence(delayMs = 500) {
+    if (this.dungeonAugmentationPlayableAlphaMode
+      || this.dungeonAugmentationFreshMode
+      || this._dungeonAugmentationStatePersistenceTimer != null) return false;
+    const scheduleTimer = this._dungeonAugmentationSetTimeout
+      ?? globalThis.setTimeout;
+    if (typeof scheduleTimer !== 'function') return false;
+    this._dungeonAugmentationStatePersistenceTimer = scheduleTimer(() => {
+      this._dungeonAugmentationStatePersistenceTimer = null;
+      const scheduledRevision = Math.max(
+        0,
+        Math.trunc(Number(this._dungeonAugmentationStateRevision) || 0),
+      );
+      Promise.resolve(this._persistCurrentDungeonAugmentationState({ force: true }))
+        .then((result) => {
+          if (result?.ok) {
+            this._dungeonAugmentationStatePersistedRevision = Math.max(
+              Number(this._dungeonAugmentationStatePersistedRevision) || 0,
+              scheduledRevision,
+            );
+          }
+        })
+        .finally(() => {
+          if (Number(this._dungeonAugmentationStateRevision) > scheduledRevision) {
+            this._scheduleDungeonAugmentationStatePersistence(delayMs);
+          }
+        });
+    }, Math.max(0, Number(delayMs) || 0));
+    return true;
   }
 
   _captureCurrentDungeonAugmentationIdentity() {
@@ -3889,7 +4439,7 @@ export class Game {
         this.selectedBossProfileId = profileId;
         this.ruinFloor = expeditionDepth;
         this.dungeonFamilyId = persisted.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID;
-        candidate = this._createLegacyDungeonWorldCandidate({
+        candidate = await this._createLegacyDungeonWorldCandidateAsync({
           bossProfileId: profileId,
           layoutSeed,
           difficulty: expeditionDepth,
@@ -4246,7 +4796,9 @@ export class Game {
         if (!selection?.ok) throw new Error(selection?.message ?? 'Boss Hunt selection could not be saved.');
         // Retain the raw candidate before preparation. If the adapter rejects
         // it, the catch path can still release every detached V1 resource.
-        candidate = this._createLegacyDungeonWorldCandidate({ bossProfileId: profileId });
+        candidate = await this._createLegacyDungeonWorldCandidateAsync({
+          bossProfileId: profileId,
+        });
         candidate = this._prepareStreamedDungeonFacade(candidate);
         // Loading/mounting the authored rotor is part of candidate acceptance,
         // not a best-effort post-commit decoration. Failure leaves the camp
@@ -4593,6 +5145,33 @@ export class Game {
     return this._returnToStreamedOverworld({ outcome: 'abandoned' });
   }
 
+  resetDungeonPerformanceTelemetry() {
+    this.dungeonPerformanceTelemetry?.resetSamples?.();
+    return this.getDungeonPerformanceDiagnostics();
+  }
+
+  getDungeonPerformanceDiagnostics() {
+    const activeRoot = this.activeWorldBundle?.root ?? null;
+    const retainedResources = this._collectRenderResources(activeRoot);
+    const snapshot = this.dungeonPerformanceTelemetry?.getSnapshot?.({
+      renderer: this.renderer,
+      scene: this.scene,
+      activeRoot,
+      localLights: this.dungeonSupplementLocalLights,
+      cullGroups: this.dungeonRenderCullGroups,
+      cullStats: this.dungeonRenderCullStats,
+      quality: this.dungeonQualitySnapshot
+        ?? this.dungeonQualityController?.getSnapshot?.()
+        ?? null,
+      retainedResources,
+      disposableResources: this.activeWorldBundle?.disposableResources,
+    }) ?? null;
+    return snapshot ? {
+      ...snapshot,
+      releaseGate: evaluateDungeonRuntimeReleaseGate(snapshot),
+    } : null;
+  }
+
   getWorldTransitionDiagnostics() {
     const rendererInfo = this.renderer?.info ?? {};
     const activeRoot = this.activeWorldBundle?.root ?? null;
@@ -4676,6 +5255,7 @@ export class Game {
         geometries: rendererInfo.memory?.geometries ?? 0,
         textures: rendererInfo.memory?.textures ?? 0,
       },
+      performance: this.getDungeonPerformanceDiagnostics(),
       dungeonAugmentation: this.activeWorldBundle?.worldKind === 'dungeon' ? {
         status: this.dungeon?.augmentationStatus ?? 'disabled',
         profileId: this.dungeon?.augmentationIdentity?.profileId ?? null,
@@ -4687,6 +5267,7 @@ export class Game {
         themeRevisions: this.dungeon?.augmentationIdentity?.themeRevisions ?? [],
         diagnostics: this.dungeon?.augmentationDiagnostics ?? null,
         metrics: this.dungeon?.augmentationMetrics ?? null,
+        buildDiagnostics: this.dungeon?.preparedBuildDiagnostics ?? null,
       } : null,
       occlusion: {
         entryCount: this.cameraOcclusionEntries.length,
@@ -5220,7 +5801,7 @@ export class Game {
       // Boss cards in the overworld only persist the staged profile. No V1
       // dungeon exists yet, so there is nothing to regenerate or mutate.
     } else if ((previousProfile?.environmentId ?? null) !== (nextProfile?.environmentId ?? null)) {
-      this.resetDungeonLayout({
+      await this.resetDungeonLayout({
         free: true,
         message: `${nextProfile?.title ?? 'Boss Hunt'} environment prepared`,
         advanceFloor: false,
@@ -5714,7 +6295,10 @@ export class Game {
 
   offerRuinReset() {
     if (this.ruinCompleted) {
-      this.resetDungeonLayout({ free: true, message: 'Ruin shifted after Large Refractor recovery' });
+      void this.resetDungeonLayout({
+        free: true,
+        message: 'Ruin shifted after Large Refractor recovery',
+      });
       return true;
     }
 
@@ -5724,12 +6308,14 @@ export class Game {
       return false;
     }
 
-    this.inventory.gold -= cost;
-    this.resetDungeonLayout({ free: true, message: `Ruin reset for ${cost}z` });
+    void this.resetDungeonLayout({
+      free: false,
+      message: `Ruin reset for ${cost}z`,
+    });
     return true;
   }
 
-  resetDungeonLayout({
+  async resetDungeonLayout({
     free = false,
     message = 'Ruin layout reset',
     advanceFloor = true,
@@ -5740,14 +6326,43 @@ export class Game {
       this.ui?.showToast?.('Choose a new Boss Hunt at the sealed ruin door', '#6bdcff');
       return false;
     }
+    if (this._dungeonResetPending) return false;
+    const resetCost = free ? 0 : this.getRuinResetCost();
     if (!free) {
-      const cost = this.getRuinResetCost();
-      if (this.inventory.gold < cost) {
-        this.ui?.showToast?.(`Need ${cost}z to reset the ruin`, '#ffb347');
+      if (this.inventory.gold < resetCost) {
+        this.ui?.showToast?.(`Need ${resetCost}z to reset the ruin`, '#ffb347');
         return false;
       }
-      this.inventory.gold -= cost;
     }
+
+    const nextDungeonLayoutGeneration = regenerateSeed
+      ? this.dungeonLayoutGeneration + 1
+      : this.dungeonLayoutGeneration;
+    const nextDungeonLayoutSeed = regenerateSeed
+      ? `layout:${this.dungeonLayoutSeed}:reset:${nextDungeonLayoutGeneration}`
+      : this.dungeonLayoutSeed;
+    let resetCandidate;
+    this._dungeonResetPending = true;
+    try {
+      resetCandidate = await this._createLegacyDungeonWorldCandidateAsync({
+        bossProfileId: this.getSelectedBossProfileId(),
+        layoutSeed: nextDungeonLayoutSeed,
+        difficulty: this.ruinFloor,
+        dungeonFamilyId: this.dungeonFamilyId,
+      });
+    } catch (error) {
+      this.ui?.showToast?.(
+        error?.message ?? 'The replacement ruin could not be generated.',
+        '#ff9f73',
+      );
+      return false;
+    } finally {
+      this._dungeonResetPending = false;
+    }
+    const dungeon = resetCandidate.facade;
+    dungeon.group?.removeFromParent?.();
+    resetCandidate.root?.clear?.();
+    if (!free) this.inventory.gold -= resetCost;
 
     const previousDungeon = this.dungeon;
     const abandonedExpeditionId = this.activeBossExpeditionSpec?.id;
@@ -5763,25 +6378,14 @@ export class Game {
     this._disposeDebugLedgeTester();
     this._clearDungeonRunState();
     this.bossStageRuntime?.dispose?.();
-    if (regenerateSeed) {
-      this.dungeonLayoutGeneration += 1;
-      this.dungeonLayoutSeed = `layout:${this.dungeonLayoutSeed}:reset:${this.dungeonLayoutGeneration}`;
-    }
+    this.dungeonLayoutGeneration = nextDungeonLayoutGeneration;
+    this.dungeonLayoutSeed = nextDungeonLayoutSeed;
     const basePlanHash = createLegacyDungeonBasePlanHash({
       layoutSeed: this.dungeonLayoutSeed,
       difficulty: this.ruinFloor,
       bossProfileId: this.getSelectedBossProfileId(),
       dungeonFamilyId: this.dungeonFamilyId,
     });
-    const dungeon = new DungeonGenerator({
-      difficulty: this.ruinFloor,
-      random: createDungeonRandom(this.dungeonLayoutSeed),
-      bossProfileId: this.getSelectedBossProfileId(),
-      augmentationProfileId: this.dungeonAugmentationProfileId,
-      allowInvalidAugmentationPreview: this.dungeonAugmentationPlayableAlphaMode,
-      augmentationSeed: this.dungeonLayoutSeed,
-      basePlanHash,
-    }).generate();
     dungeon.layoutSeed = this.dungeonLayoutSeed;
     dungeon.basePlanHash ??= basePlanHash;
     dungeon.effectivePlanHash ??= basePlanHash;
@@ -7869,15 +8473,19 @@ export class Game {
     this.debugSpawnedPlatformGroup = new THREE.Group();
     this.debugSpawnedPlatformGroup.name = 'busterSandboxDebugPlatforms';
     this.cameraOcclusionEntries = [];
-    this.cameraOcclusionBins = new Map();
-    this.cameraOcclusionWallProximityBins = new Map();
+    this.cameraOcclusionWallProxyBins = new Map();
+    this.cameraOcclusionBins = this.cameraOcclusionWallProxyBins;
+    this.cameraOcclusionWallProximityBins = this.cameraOcclusionWallProxyBins;
+    this.cameraOcclusionRecoveryBins = new Map();
     this.cameraOcclusionProximityRecordByKey = new Map();
     this.cameraOcclusionWallProximityCandidateKeys = new Set();
     this.cameraOcclusionExpandedVerticalRecordKeys = new Set();
     this.cameraOcclusionExpandedSurfaceRecordKeys = new Set();
     this.cameraOcclusionForwardVerticalHits = [];
     this.cameraOcclusionCandidateSet = new Set();
+    this.cameraOcclusionCandidateObjectSet = new Set();
     this.cameraOcclusionCandidateObjects = [];
+    this.cameraOcclusionOriginalMaterialSides = new Map();
     this.cameraOcclusionHits = [];
     this.cameraOcclusionOwnerByObject = new WeakMap();
     this.cameraOcclusionHiddenOwners = new Set();
@@ -9996,7 +10604,8 @@ export class Game {
   }
 
   _loop() {
-    const dt = Math.min(this.clock.getDelta(), 0.05);
+    const rawFrameDt = this.clock.getDelta();
+    const dt = Math.min(rawFrameDt, 0.05);
     const gameplayDt = this._consumeHitStopDt(dt);
     const gameplayActive = !this.inventoryOpen
       && !this.poseDebugOpen
@@ -10050,16 +10659,15 @@ export class Game {
         if (this.busterTestRange?.active) {
           this._updateBusterTestRange(gameplayDt);
         } else if (this.worldKind === 'overworld') {
-          this.dungeonController?.update?.(gameplayDt);
+          this._updateDungeonControllerWithTelemetry(gameplayDt);
         } else {
-          this.dungeonController?.update?.(gameplayDt);
-          this._persistCurrentDungeonAugmentationState();
+          this._updateDungeonControllerWithTelemetry(gameplayDt);
           this.mapEvents?.update?.(gameplayDt);
           this.spawner?.update?.(gameplayDt);
           this._updateEnemies(gameplayDt);
           this.dungeonController?.constrainEnemies?.();
         }
-        this._updateTargetScanner();
+        this._updateTargetScannerThrottled(gameplayDt);
         const activeBusterPlan = this.getActiveBusterPlan?.();
         this.busterRuntime?.update(gameplayDt, {
           activeWeaponKey: activeBusterPlan?.weaponKey ?? activeBusterPlan?.buildId ?? null,
@@ -10121,11 +10729,45 @@ export class Game {
       this.poseDebugHandleGroup.visible = false;
     }
     this._updateCamera(dt);
+    const cullingStartedAtMs = this.dungeonPerformanceTelemetry?.beginSubsystem?.();
     this._updateDungeonRenderCulling(dt);
-    this._updateCameraWallOcclusion();
+    this.dungeonPerformanceTelemetry?.endSubsystem?.('renderCulling', cullingStartedAtMs);
+    this._updateCameraWallOcclusionThrottled(dt);
     this.ui.update(dt);
     this._syncBrowserTestDataset();
+    const renderStartedAtMs = this.dungeonPerformanceTelemetry?.beginSubsystem?.();
     this.renderer.render(this.scene, this.camera);
+    this.dungeonPerformanceTelemetry?.endSubsystem?.('render', renderStartedAtMs);
+    const buildDiagnostics = this.worldKind === 'dungeon'
+      ? this.dungeon?.preparedBuildDiagnostics
+      : null;
+    if (buildDiagnostics
+      && buildDiagnostics.firstPlayableFrameAtMs == null
+      && Number.isFinite(Number(buildDiagnostics.requestStartedAtMs))) {
+      const firstPlayableFrameAtMs = globalThis.performance?.now?.() ?? Date.now();
+      buildDiagnostics.firstPlayableFrameAtMs = firstPlayableFrameAtMs;
+      buildDiagnostics.gpuWarmupAndFirstRenderTimeMs = Math.max(
+        0,
+        firstPlayableFrameAtMs - Number(
+          buildDiagnostics.activatedAtMs ?? firstPlayableFrameAtMs,
+        ),
+      );
+      buildDiagnostics.totalTimeMs = Math.max(
+        0,
+        firstPlayableFrameAtMs - Number(buildDiagnostics.requestStartedAtMs),
+      );
+    }
+    this.dungeonPerformanceTelemetry?.recordFrame?.(
+      Math.max(0, Number(rawFrameDt) || 0) * 1_000,
+    );
+    const qualityUpdate = this.dungeonQualityController?.sample?.(
+      Math.max(0, Number(rawFrameDt) || 0) * 1_000,
+      globalThis.performance?.now?.() ?? Date.now(),
+    );
+    if (qualityUpdate?.change) {
+      this._applyDungeonQualitySettings(qualityUpdate.settings);
+    }
+    this.dungeonQualitySnapshot = qualityUpdate ?? this.dungeonQualityController?.getSnapshot?.();
   }
 
   _getPlayerGroundY() {
@@ -10278,12 +10920,260 @@ export class Game {
     });
   }
 
+  async _createLegacyDungeonWorldCandidateAsync({
+    bossProfileId = this.getSelectedBossProfileId(),
+    layoutSeed = this.dungeonLayoutSeed,
+    difficulty = this.ruinFloor,
+    dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
+    dungeonAugmentation = undefined,
+  } = {}, {
+    signal = null,
+    onProgress = null,
+  } = {}) {
+    const dungeonFamilySelection = resolveDungeonFamilyId(dungeonFamilyId);
+    const resolvedDungeonFamilyId = dungeonFamilySelection.dungeonFamilyId;
+    const augmentationRequest = resolveDungeonAugmentationGenerationRequest(
+      dungeonAugmentation,
+      this.dungeonAugmentationProfileId,
+    );
+    const canUseWorkerPlanner = Boolean(
+      (augmentationRequest.augmentationProfileId
+        || augmentationRequest.committedAugmentationIdentity)
+        && !this._creatingBusterSandbox
+        && !this.roomPreview?.roomId
+        && bossProfileId !== ASCENSION_ENGINE_PROFILE_ID,
+    );
+    if (!canUseWorkerPlanner) {
+      return this._createLegacyDungeonWorldCandidate({
+        bossProfileId,
+        layoutSeed,
+        difficulty,
+        dungeonFamilyId: resolvedDungeonFamilyId,
+        dungeonAugmentation,
+      });
+    }
+
+    const basePlanHash = createLegacyDungeonBasePlanHash({
+      layoutSeed,
+      difficulty,
+      bossProfileId,
+      dungeonFamilyId: resolvedDungeonFamilyId,
+    });
+    const loadingState = createDungeonAugmentationLoadingState(this.container);
+    const transactionStartedAt = globalThis.performance?.now?.() ?? Date.now();
+    let plannerSession = null;
+    let generatedDungeon = null;
+    let candidate = null;
+    const workerPassDiagnostics = [];
+    const generator = new DungeonGenerator({
+      difficulty,
+      random: createDungeonRandom(layoutSeed),
+      bossProfileId,
+      dungeonFamilyId: resolvedDungeonFamilyId,
+      augmentationProfileId: augmentationRequest.augmentationProfileId,
+      augmentationSeed: layoutSeed,
+      basePlanHash,
+      committedAugmentationIdentity: augmentationRequest.committedAugmentationIdentity,
+      allowInvalidAugmentationPreview: Boolean(
+        this.dungeonAugmentationPlayableAlphaMode
+          && augmentationRequest.augmentationProfileId
+            === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+      ),
+    });
+    try {
+      throwIfDungeonBuildAborted(signal);
+      plannerSession = createDungeonAugmentationBrowserPlannerSession({ signal });
+      onProgress?.({ phase: 'parent-generation', realizationAttempt: null, requestKey: null });
+      throwIfDungeonBuildAborted(signal);
+      const dungeon = await generator.generateAsync({
+        augmentationPlanner: (request) => {
+          loadingState?.update(request.realizationAttempt);
+          onProgress?.({
+            phase: request.realizationAttempt > 0 ? 'repair' : 'planning',
+            realizationAttempt: request.realizationAttempt,
+            requestKey: request.requestKey,
+          });
+          throwIfDungeonBuildAborted(signal);
+          return plannerSession.plan(request.plannerInput, {
+            realizationAttempt: request.realizationAttempt,
+          }).then((planned) => {
+            workerPassDiagnostics.push({
+              realizationAttempt: request.realizationAttempt,
+              ...(planned.workerDiagnostics ?? {}),
+            });
+            return planned;
+          });
+        },
+      });
+      generatedDungeon = dungeon;
+      throwIfDungeonBuildAborted(signal);
+      onProgress?.({ phase: 'validation', realizationAttempt: null, requestKey: null });
+      throwIfDungeonBuildAborted(signal);
+      dungeon.preparedBuildDiagnostics = {
+        schema: 'prepared-dungeon-build-diagnostics/v1',
+        totalTimeMs: Math.max(
+          0,
+          (globalThis.performance?.now?.() ?? Date.now()) - transactionStartedAt,
+        ),
+        workerBacked: true,
+        repairCount: Math.max(
+          0,
+          Number(dungeon.augmentationReplayDiagnostics?.runtimePruningPasses) || 0,
+        ),
+        planningPasses: (
+          dungeon.augmentationReplayDiagnostics?.planningPasses ?? []
+        ).map((pass) => ({ ...pass })),
+        cumulativePlanningTimeMs: Math.max(
+          0,
+          Number(
+            dungeon.augmentationReplayDiagnostics?.cumulativePlanningTimeMs,
+          ) || 0,
+        ),
+        authoredGenerationTimeMs: Math.max(
+          0,
+          Number(dungeon.augmentationReplayDiagnostics?.authoredGenerationTimeMs) || 0,
+        ),
+        replayTransactionTimeMs: Math.max(
+          0,
+          Number(dungeon.augmentationReplayDiagnostics?.transactionTimeMs) || 0,
+        ),
+        materializationTimeMs: Math.max(
+          0,
+          Number(dungeon.augmentationMetrics?.materializationTimeMs) || 0,
+        ),
+        rendererFreeValidationTimeMs: Math.max(
+          0,
+          Number(dungeon.augmentationMetrics?.rendererFreeValidationTimeMs) || 0,
+        ),
+        threeJsAssemblyTimeMs: Math.max(
+          0,
+          Number(dungeon.augmentationMetrics?.assemblyTimeMs) || 0,
+        ),
+        assemblyCount: 1,
+        requestStartedAtMs: transactionStartedAt,
+        ...summarizeDungeonWorkerPassDiagnostics(workerPassDiagnostics),
+      };
+      onProgress?.({ phase: 'assembly', realizationAttempt: null, requestKey: null });
+      throwIfDungeonBuildAborted(signal);
+      candidate = this._createLegacyDungeonWorldCandidate({
+        bossProfileId,
+        layoutSeed,
+        difficulty,
+        dungeonFamilyId: resolvedDungeonFamilyId,
+        dungeonAugmentation,
+        preparedDungeon: dungeon,
+      });
+      generatedDungeon = null;
+      throwIfDungeonBuildAborted(signal);
+      if (typeof onProgress === 'function') {
+        Object.defineProperty(candidate, 'dungeonBuildActivationProgress', {
+          configurable: true,
+          enumerable: false,
+          value: onProgress,
+        });
+      }
+      loadingState?.complete();
+      return candidate;
+    } catch (error) {
+      if (generatedDungeon) {
+        generator._disposeGeneratedDungeonCandidate?.(generatedDungeon);
+        generatedDungeon = null;
+      }
+      if (candidate) {
+        this._disposeUncommittedWorldCandidate(candidate);
+        candidate = null;
+      }
+      if (error?.name === 'AbortError') {
+        loadingState?.complete();
+        throw error;
+      }
+      const strictDisposableRun = Boolean(
+        this.dungeonAugmentationFreshMode
+          || this.dungeonAugmentationPlayableAlphaMode,
+      );
+      if (augmentationRequest.committedAugmentationIdentity || strictDisposableRun) {
+        loadingState?.fail(error);
+        throw error;
+      }
+
+      // Fresh production requests may fall back to the authored parent, but a
+      // committed augmented identity above must always fail closed. Build the
+      // fallback before touching the mounted world so cancellation/failure
+      // preserves the currently playable scene.
+      onProgress?.({
+        phase: 'parent-fallback',
+        realizationAttempt: null,
+        requestKey: null,
+        error: error?.message ?? String(error),
+      });
+      throwIfDungeonBuildAborted(signal);
+      const fallbackStartedAt = globalThis.performance?.now?.() ?? Date.now();
+      const fallbackGenerator = new DungeonGenerator({
+        difficulty,
+        random: createDungeonRandom(layoutSeed),
+        bossProfileId,
+        dungeonFamilyId: resolvedDungeonFamilyId,
+      });
+      const dungeon = fallbackGenerator.generate();
+      if (signal?.aborted) {
+        fallbackGenerator._disposeGeneratedDungeonCandidate?.(dungeon);
+        throw dungeonBuildAbortError(signal);
+      }
+      dungeon.layoutSeed = layoutSeed;
+      dungeon.basePlanHash ??= basePlanHash;
+      dungeon.effectivePlanHash ??= basePlanHash;
+      dungeon.preparedBuildDiagnostics = {
+        schema: 'prepared-dungeon-build-diagnostics/v1',
+        totalTimeMs: Math.max(
+          0,
+          (globalThis.performance?.now?.() ?? Date.now()) - transactionStartedAt,
+        ),
+        fallbackAssemblyTimeMs: Math.max(
+          0,
+          (globalThis.performance?.now?.() ?? Date.now()) - fallbackStartedAt,
+        ),
+        workerBacked: true,
+        repairCount: 0,
+        requestStartedAtMs: transactionStartedAt,
+        fallback: 'authored-parent',
+        augmentationError: error?.message ?? String(error),
+      };
+      candidate = this._createLegacyDungeonWorldCandidate({
+        bossProfileId,
+        layoutSeed,
+        difficulty,
+        dungeonFamilyId: resolvedDungeonFamilyId,
+        dungeonAugmentation,
+        preparedDungeon: dungeon,
+      });
+      try {
+        throwIfDungeonBuildAborted(signal);
+        if (typeof onProgress === 'function') {
+          Object.defineProperty(candidate, 'dungeonBuildActivationProgress', {
+            configurable: true,
+            enumerable: false,
+            value: onProgress,
+          });
+        }
+      } catch (activationError) {
+        this._disposeUncommittedWorldCandidate(candidate);
+        candidate = null;
+        throw activationError;
+      }
+      loadingState?.complete();
+      return candidate;
+    } finally {
+      plannerSession?.dispose();
+    }
+  }
+
   _createLegacyDungeonWorldCandidate({
     bossProfileId = this.getSelectedBossProfileId(),
     layoutSeed = this.dungeonLayoutSeed,
     difficulty = this.ruinFloor,
     dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
     dungeonAugmentation = undefined,
+    preparedDungeon = null,
   } = {}) {
     const dungeonFamilySelection = resolveDungeonFamilyId(dungeonFamilyId);
     const resolvedDungeonFamilyId = dungeonFamilySelection.dungeonFamilyId;
@@ -10320,24 +11210,69 @@ export class Game {
       dungeonAugmentation,
       this.dungeonAugmentationProfileId,
     );
-    const dungeon = new DungeonGenerator({
+    const preparedInitialDungeon = preparedDungeon ? null : this._preparedInitialDungeon;
+    this._preparedInitialDungeon = null;
+    const preparedRequestKey = normalizeInitialDungeonGenerationSpec({
+      layoutSeed,
       difficulty,
-      random: createDungeonRandom(layoutSeed),
-      bossProfileId: this._creatingBusterSandbox ? null : bossProfileId,
+      bossProfileId,
       dungeonFamilyId: resolvedDungeonFamilyId,
-      roomPreviewId: this.roomPreview?.roomId ?? null,
-      augmentationProfileId: augmentationRequest.augmentationProfileId,
-      // This is the parent layout seed. The sidecar derives and persists its
-      // own fork without ever treating the derived value as a new root seed.
-      augmentationSeed: layoutSeed,
-      basePlanHash,
-      committedAugmentationIdentity: augmentationRequest.committedAugmentationIdentity,
-      allowInvalidAugmentationPreview: Boolean(
-        this.dungeonAugmentationPlayableAlphaMode
-          && augmentationRequest.augmentationProfileId
-            === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
-      ),
-    }).generate();
+      dungeonAugmentation,
+      augmentationProfileId: this.dungeonAugmentationProfileId,
+    }).requestKey;
+    const preparedMatches = Boolean(
+      preparedInitialDungeon?.schema === PREPARED_INITIAL_DUNGEON_SCHEMA
+        && preparedInitialDungeon.dungeon
+        && preparedInitialDungeon.requestKey === preparedRequestKey
+        && preparedInitialDungeon.layoutSeed === layoutSeed
+        && Number(preparedInitialDungeon.difficulty) === Number(difficulty)
+        && preparedInitialDungeon.bossProfileId === bossProfileId
+        && preparedInitialDungeon.dungeonFamilyId === resolvedDungeonFamilyId
+        && preparedInitialDungeon.augmentationProfileId
+          === augmentationRequest.augmentationProfileId
+        && preparedInitialDungeon.basePlanHash === basePlanHash
+        && !this._creatingBusterSandbox
+        && !this.roomPreview?.roomId
+    );
+    if (preparedInitialDungeon && !preparedMatches) {
+      throw new Error(
+        'The prepared initial dungeon does not match the requested seed, profile, or parent plan.',
+      );
+    }
+    if (!preparedDungeon
+      && !preparedMatches
+      && (augmentationRequest.augmentationProfileId
+        || augmentationRequest.committedAugmentationIdentity)
+      && !this._creatingBusterSandbox
+      && !this.roomPreview?.roomId
+      && bossProfileId !== ASCENSION_ENGINE_PROFILE_ID) {
+      const error = new Error(
+        'Production augmented dungeon generation requires the asynchronous worker-backed loading pipeline.',
+      );
+      error.code = 'DUNGEON_AUGMENTATION_ASYNC_PIPELINE_REQUIRED';
+      throw error;
+    }
+    const dungeon = preparedDungeon
+      ?? (preparedMatches
+        ? preparedInitialDungeon.dungeon
+        : new DungeonGenerator({
+          difficulty,
+          random: createDungeonRandom(layoutSeed),
+          bossProfileId: this._creatingBusterSandbox ? null : bossProfileId,
+          dungeonFamilyId: resolvedDungeonFamilyId,
+          roomPreviewId: this.roomPreview?.roomId ?? null,
+          augmentationProfileId: augmentationRequest.augmentationProfileId,
+          // This is the parent layout seed. The sidecar derives and persists its
+          // own fork without ever treating the derived value as a new root seed.
+          augmentationSeed: layoutSeed,
+          basePlanHash,
+          committedAugmentationIdentity: augmentationRequest.committedAugmentationIdentity,
+          allowInvalidAugmentationPreview: Boolean(
+            this.dungeonAugmentationPlayableAlphaMode
+              && augmentationRequest.augmentationProfileId
+                === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+          ),
+          }).generate());
     dungeon.layoutSeed = layoutSeed;
     dungeon.basePlanHash ??= basePlanHash;
     dungeon.effectivePlanHash ??= basePlanHash;
@@ -10407,6 +11342,34 @@ export class Game {
     this.worldKind = bundle.worldKind;
     this.dungeon = bundle.facade;
     this.scene.add(bundle.root);
+    const buildDiagnostics = bundle.worldKind === 'dungeon'
+      ? bundle.facade?.preparedBuildDiagnostics
+      : null;
+    if (buildDiagnostics
+      && buildDiagnostics.activatedAtMs == null
+      && Number.isFinite(Number(buildDiagnostics.requestStartedAtMs))) {
+      const activatedAtMs = globalThis.performance?.now?.() ?? Date.now();
+      buildDiagnostics.activatedAtMs = activatedAtMs;
+      buildDiagnostics.activationTimeMs = Math.max(
+        0,
+        activatedAtMs - Number(buildDiagnostics.requestStartedAtMs),
+      );
+      buildDiagnostics.totalTimeMs = buildDiagnostics.activationTimeMs;
+    }
+    const activationProgress = bundle.dungeonBuildActivationProgress;
+    if (activationProgress) {
+      delete bundle.dungeonBuildActivationProgress;
+      try {
+        activationProgress({
+          phase: 'activation',
+          realizationAttempt: null,
+          requestKey: null,
+        });
+      } catch {
+        // Progress observers are diagnostic-only and cannot invalidate an
+        // otherwise complete, atomically mounted dungeon.
+      }
+    }
     this.scene.background = bundle.facade.backgroundColor?.clone?.()
       ?? new THREE.Color(0x171712);
     this.scene.fog = bundle.facade.fog?.clone?.()
@@ -10421,6 +11384,9 @@ export class Game {
     this.dynamicPlatformingPlatforms = [];
     this._rebuildPlatformingLedgeCandidates();
     this.arenaRadius = bundle.facade.boundsRadius ?? this.arenaRadius;
+    this._applyDungeonQualitySettings(
+      this.dungeonQualitySettings ?? this.dungeonQualityController?.settings,
+    );
   }
 
   _buildWorld() {
@@ -11425,6 +12391,10 @@ export class Game {
   }
 
   _collectCameraOcclusionWalls() {
+    this._cameraOcclusionRefreshElapsed = Number.POSITIVE_INFINITY;
+    this._cameraOcclusionLastCameraPosition = null;
+    this._cameraOcclusionLastCameraQuaternion = null;
+    this._cameraOcclusionLastPlayerPosition = null;
     this._restoreCameraOcclusionHiddenInstances();
     for (const owner of this.cameraOcclusionHiddenOwners) {
       owner.visible = this.cameraOcclusionOwnerBaseVisibility.get(owner) ?? true;
@@ -11432,9 +12402,12 @@ export class Game {
 
     this.cameraOcclusionHiddenOwners.clear();
     this.cameraOcclusionEntries.length = 0;
-    this.cameraOcclusionBins.clear();
-    this.cameraOcclusionWallProximityBins ??= new Map();
-    this.cameraOcclusionWallProximityBins.clear();
+    this.cameraOcclusionWallProxyBins ??= new Map();
+    this.cameraOcclusionWallProxyBins.clear();
+    this.cameraOcclusionBins = this.cameraOcclusionWallProxyBins;
+    this.cameraOcclusionWallProximityBins = this.cameraOcclusionWallProxyBins;
+    this.cameraOcclusionRecoveryBins ??= new Map();
+    this.cameraOcclusionRecoveryBins.clear();
     this.cameraOcclusionProximityRecordByKey ??= new Map();
     this.cameraOcclusionProximityRecordByKey.clear();
     this.cameraOcclusionWallProximityCandidateKeys ??= new Set();
@@ -11446,13 +12419,18 @@ export class Game {
     this.cameraOcclusionForwardVerticalHits ??= [];
     this.cameraOcclusionForwardVerticalHits.length = 0;
     this.cameraOcclusionCandidateSet.clear();
+    this.cameraOcclusionCandidateObjectSet ??= new Set();
+    this.cameraOcclusionCandidateObjectSet.clear();
     this.cameraOcclusionCandidateObjects.length = 0;
     this.cameraOcclusionHits.length = 0;
     this.cameraOcclusionOwnerBaseVisibility = new WeakMap();
     this.cameraOcclusionOwnerByObject = new WeakMap();
 
-    const addWallProximityRecord = (record) => {
+    const addSpatialRecord = (record) => {
       this.cameraOcclusionProximityRecordByKey.set(record.key, record);
+      const spatialBins = record.entry.wallSurface
+        ? this.cameraOcclusionWallProxyBins
+        : this.cameraOcclusionRecoveryBins;
       const minBinX = Math.floor(record.bounds.min.x / CAMERA_OCCLUSION_BIN_SIZE);
       const maxBinX = Math.floor(record.bounds.max.x / CAMERA_OCCLUSION_BIN_SIZE);
       const minBinZ = Math.floor(record.bounds.min.z / CAMERA_OCCLUSION_BIN_SIZE);
@@ -11460,9 +12438,9 @@ export class Game {
       for (let binX = minBinX; binX <= maxBinX; binX += 1) {
         for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
           const binKey = `${binX},${binZ}`;
-          const bin = this.cameraOcclusionWallProximityBins.get(binKey) ?? [];
+          const bin = spatialBins.get(binKey) ?? [];
           bin.push(record);
-          this.cameraOcclusionWallProximityBins.set(binKey, bin);
+          spatialBins.set(binKey, bin);
         }
       }
     };
@@ -11553,9 +12531,9 @@ export class Game {
       };
       this.cameraOcclusionEntries.push(entry);
       this.cameraOcclusionOwnerByObject.set(object, owner);
-      // Keep exact per-instance bounds for every architectural surface. Walls
-      // use these records to form a small multi-panel visibility cutout; other
-      // surfaces use them only to recover from the camera entering solid mass.
+      // The ray index contains only exact wall proxies. Non-wall architecture
+      // is kept in a separate local recovery index and can never become a LOS
+      // or camera-to-player ray candidate.
       if (isArchitectureSurface) {
         if (object.isInstancedMesh
           && object.userData?.cameraOcclusionPerInstance === true) {
@@ -11565,7 +12543,7 @@ export class Game {
             for (let instanceId = 0; instanceId < object.count; instanceId += 1) {
               object.getMatrixAt(instanceId, proximityInstanceMatrix);
               proximityWorldMatrix.multiplyMatrices(object.matrixWorld, proximityInstanceMatrix);
-              addWallProximityRecord({
+              addSpatialRecord({
                 entry,
                 instanceId,
                 bounds: proximityBounds.copy(localBounds)
@@ -11576,24 +12554,12 @@ export class Game {
             }
           }
         } else {
-          addWallProximityRecord({
+          addSpatialRecord({
             entry,
             instanceId: null,
             bounds,
             key: object.uuid,
           });
-        }
-      }
-      const minBinX = Math.floor(bounds.min.x / CAMERA_OCCLUSION_BIN_SIZE);
-      const maxBinX = Math.floor(bounds.max.x / CAMERA_OCCLUSION_BIN_SIZE);
-      const minBinZ = Math.floor(bounds.min.z / CAMERA_OCCLUSION_BIN_SIZE);
-      const maxBinZ = Math.floor(bounds.max.z / CAMERA_OCCLUSION_BIN_SIZE);
-      for (let binX = minBinX; binX <= maxBinX; binX += 1) {
-        for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
-          const binKey = `${binX},${binZ}`;
-          const bin = this.cameraOcclusionBins.get(binKey) ?? [];
-          bin.push(entry);
-          this.cameraOcclusionBins.set(binKey, bin);
         }
       }
     });
@@ -11624,18 +12590,37 @@ export class Game {
     this.cameraOcclusionHiddenOwners.add(entry.owner);
   }
 
-  _forEachCameraOcclusionProximityRecord(position, radius, callback) {
+  _forEachCameraOcclusionProximityRecord(position, radius, callback, {
+    includeWalls = true,
+    includeRecovery = false,
+  } = {}) {
     this.cameraOcclusionWallProximityCandidateKeys.clear();
+    const wallBins = this.cameraOcclusionWallProxyBins
+      ?? this.cameraOcclusionWallProximityBins
+      ?? this.cameraOcclusionBins;
+    const recoveryBins = this.cameraOcclusionRecoveryBins;
+    const spatialBins = [];
+    if (includeWalls && wallBins) spatialBins.push(wallBins);
+    if (includeRecovery && recoveryBins) spatialBins.push(recoveryBins);
+    // Hand-built legacy test fixtures predate the split index and place every
+    // record in cameraOcclusionWallProximityBins. Preserve those fixtures while
+    // production worlds always use the distinct maps built by collection.
+    if (includeRecovery && !recoveryBins && !this.cameraOcclusionWallProxyBins
+      && wallBins && !spatialBins.includes(wallBins)) {
+      spatialBins.push(wallBins);
+    }
     const minBinX = Math.floor((position.x - radius) / CAMERA_OCCLUSION_BIN_SIZE);
     const maxBinX = Math.floor((position.x + radius) / CAMERA_OCCLUSION_BIN_SIZE);
     const minBinZ = Math.floor((position.z - radius) / CAMERA_OCCLUSION_BIN_SIZE);
     const maxBinZ = Math.floor((position.z + radius) / CAMERA_OCCLUSION_BIN_SIZE);
     for (let binX = minBinX; binX <= maxBinX; binX += 1) {
       for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
-        for (const record of this.cameraOcclusionWallProximityBins.get(`${binX},${binZ}`) ?? []) {
-          if (this.cameraOcclusionWallProximityCandidateKeys.has(record.key)) continue;
-          this.cameraOcclusionWallProximityCandidateKeys.add(record.key);
-          callback(record);
+        for (const bins of spatialBins) {
+          for (const record of bins.get(`${binX},${binZ}`) ?? []) {
+            if (this.cameraOcclusionWallProximityCandidateKeys.has(record.key)) continue;
+            this.cameraOcclusionWallProximityCandidateKeys.add(record.key);
+            callback(record);
+          }
         }
       }
     }
@@ -11692,15 +12677,25 @@ export class Game {
     verticalOnly = false,
   } = {}) {
     if (!worldPoint) return;
-    this._forEachCameraOcclusionProximityRecord(worldPoint, radius, (record) => {
-      if (record.bounds.distanceToPoint(worldPoint) > radius) return;
-      if (verticalOnly && !this._isCameraOcclusionVerticalRecord(record)) return;
-      if (seedEntry && !verticalOnly) {
-        const seedClass = seedEntry.surfaceClass ?? 'architecture';
-        if (record.entry.surfaceClass !== seedClass) return;
-      }
-      this._hideCameraAdjacentWallRecord(record);
-    });
+    const recoveryOnly = Boolean(seedEntry && !seedEntry.wallSurface && !verticalOnly);
+    this._forEachCameraOcclusionProximityRecord(
+      worldPoint,
+      radius,
+      (record) => {
+        if (record.bounds.distanceToPoint(worldPoint) > radius) return;
+        if (verticalOnly && !record.entry.wallSurface) return;
+        if (verticalOnly && !this._isCameraOcclusionVerticalRecord(record)) return;
+        if (seedEntry && !verticalOnly) {
+          const seedClass = seedEntry.surfaceClass ?? 'architecture';
+          if (record.entry.surfaceClass !== seedClass) return;
+        }
+        this._hideCameraAdjacentWallRecord(record);
+      },
+      {
+        includeWalls: !recoveryOnly,
+        includeRecovery: recoveryOnly,
+      },
+    );
   }
 
   _hideCameraAdjacentWalls() {
@@ -11750,6 +12745,7 @@ export class Game {
         }
         this._hideCameraAdjacentWallRecord(record);
       },
+      { includeWalls: true, includeRecovery: true },
     );
     if (cameraContainingRecord) {
       const verticalOnly = this._isCameraOcclusionVerticalRecord(cameraContainingRecord);
@@ -11801,11 +12797,14 @@ export class Game {
     const maxBinZ = Math.floor(
       (Math.max(cameraPosition.z, playerFocus.z) + corridorRadius) / CAMERA_OCCLUSION_BIN_SIZE,
     );
+    const wallProxyBins = this.cameraOcclusionWallProxyBins
+      ?? this.cameraOcclusionWallProximityBins
+      ?? this.cameraOcclusionBins;
 
     this.cameraOcclusionWallProximityCandidateKeys.clear();
     for (let binX = minBinX; binX <= maxBinX; binX += 1) {
       for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
-        for (const record of this.cameraOcclusionWallProximityBins.get(`${binX},${binZ}`) ?? []) {
+        for (const record of wallProxyBins?.get(`${binX},${binZ}`) ?? []) {
           if (this.cameraOcclusionWallProximityCandidateKeys.has(record.key)) continue;
           this.cameraOcclusionWallProximityCandidateKeys.add(record.key);
           if (!tempCameraOcclusionFrustum.intersectsBox(record.bounds)) {
@@ -11904,6 +12903,9 @@ export class Game {
     const maxBinZ = Math.floor(
       Math.max(cameraPosition.z, forwardEnd.z) / CAMERA_OCCLUSION_BIN_SIZE,
     );
+    const wallProxyBins = this.cameraOcclusionWallProxyBins
+      ?? this.cameraOcclusionWallProximityBins
+      ?? this.cameraOcclusionBins;
 
     this.cameraOcclusionRaycaster.set(cameraPosition, cameraForward);
     this.cameraOcclusionWallProximityCandidateKeys.clear();
@@ -11911,7 +12913,7 @@ export class Game {
     let forwardHitCount = 0;
     for (let binX = minBinX; binX <= maxBinX; binX += 1) {
       for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
-        for (const record of this.cameraOcclusionWallProximityBins.get(`${binX},${binZ}`) ?? []) {
+        for (const record of wallProxyBins?.get(`${binX},${binZ}`) ?? []) {
           if (this.cameraOcclusionWallProximityCandidateKeys.has(record.key)) continue;
           this.cameraOcclusionWallProximityCandidateKeys.add(record.key);
           // This recovery ray exists for the wall-fills-the-frame failure. Do
@@ -11951,6 +12953,47 @@ export class Game {
     }
   }
 
+  _updateCameraWallOcclusionThrottled(dt) {
+    this._cameraOcclusionRefreshElapsed = Math.min(
+      CAMERA_OCCLUSION_STATIONARY_UPDATE_INTERVAL,
+      Math.max(0, Number(this._cameraOcclusionRefreshElapsed) || 0)
+        + Math.max(0, Number(dt) || 0),
+    );
+    if (this._cameraOcclusionRefreshElapsed < CAMERA_OCCLUSION_UPDATE_INTERVAL) return;
+    const cameraPosition = this.camera?.position;
+    const cameraQuaternion = this.camera?.quaternion;
+    const playerPosition = this.player?.root?.position;
+    if (!cameraPosition || !cameraQuaternion || !playerPosition) return;
+    const hasSnapshot = Boolean(
+      this._cameraOcclusionLastCameraPosition
+        && this._cameraOcclusionLastCameraQuaternion
+        && this._cameraOcclusionLastPlayerPosition,
+    );
+    const moved = !hasSnapshot
+      || cameraPosition.distanceToSquared(this._cameraOcclusionLastCameraPosition)
+        >= CAMERA_OCCLUSION_MOVEMENT_THRESHOLD_SQ
+      || playerPosition.distanceToSquared(this._cameraOcclusionLastPlayerPosition)
+        >= CAMERA_OCCLUSION_MOVEMENT_THRESHOLD_SQ
+      || Math.abs(cameraQuaternion.dot(this._cameraOcclusionLastCameraQuaternion))
+        <= CAMERA_OCCLUSION_ROTATION_DOT_THRESHOLD;
+    if (!moved
+      && this._cameraOcclusionRefreshElapsed
+        < CAMERA_OCCLUSION_STATIONARY_UPDATE_INTERVAL) return;
+    this._cameraOcclusionLastCameraPosition ??= new THREE.Vector3();
+    this._cameraOcclusionLastCameraQuaternion ??= new THREE.Quaternion();
+    this._cameraOcclusionLastPlayerPosition ??= new THREE.Vector3();
+    this._cameraOcclusionLastCameraPosition.copy(cameraPosition);
+    this._cameraOcclusionLastCameraQuaternion.copy(cameraQuaternion);
+    this._cameraOcclusionLastPlayerPosition.copy(playerPosition);
+    this._cameraOcclusionRefreshElapsed = 0;
+    const startedAtMs = this.dungeonPerformanceTelemetry?.beginSubsystem?.();
+    try {
+      this._updateCameraWallOcclusion();
+    } finally {
+      this.dungeonPerformanceTelemetry?.endSubsystem?.('cameraOcclusion', startedAtMs);
+    }
+  }
+
   _updateCameraWallOcclusion() {
     this._restoreCameraOcclusionHiddenInstances();
     for (const owner of this.cameraOcclusionHiddenOwners) {
@@ -11962,7 +13005,10 @@ export class Game {
     this.cameraOcclusionExpandedSurfaceRecordKeys ??= new Set();
     this.cameraOcclusionExpandedSurfaceRecordKeys.clear();
 
-    if (!this.cameraOcclusionEntries.length || !this.player?.root) {
+    const wallProxyBins = this.cameraOcclusionWallProxyBins
+      ?? this.cameraOcclusionWallProximityBins
+      ?? this.cameraOcclusionBins;
+    if (!wallProxyBins?.size || !this.player?.root) {
       return;
     }
 
@@ -11990,7 +13036,13 @@ export class Game {
       const maxY = Math.max(this.camera.position.y, tempVectorA.y) + 0.5;
       const minZ = Math.min(this.camera.position.z, tempVectorA.z) - 1.5;
       const maxZ = Math.max(this.camera.position.z, tempVectorA.z) + 1.5;
+      tempVectorB.divideScalar(distance);
+      this.cameraOcclusionRaycaster.set(this.camera.position, tempVectorB);
+      this.cameraOcclusionRaycaster.near = 0.08;
+      this.cameraOcclusionRaycaster.far = Math.max(0.08, distance - 0.08);
       this.cameraOcclusionCandidateSet.clear();
+      this.cameraOcclusionCandidateObjectSet ??= new Set();
+      this.cameraOcclusionCandidateObjectSet.clear();
       this.cameraOcclusionCandidateObjects.length = 0;
       const minBinX = Math.floor(minX / CAMERA_OCCLUSION_BIN_SIZE);
       const maxBinX = Math.floor(maxX / CAMERA_OCCLUSION_BIN_SIZE);
@@ -11998,41 +13050,53 @@ export class Game {
       const maxBinZ = Math.floor(maxZ / CAMERA_OCCLUSION_BIN_SIZE);
       for (let binX = minBinX; binX <= maxBinX; binX += 1) {
         for (let binZ = minBinZ; binZ <= maxBinZ; binZ += 1) {
-          for (const entry of this.cameraOcclusionBins.get(`${binX},${binZ}`) ?? []) {
+          for (const record of wallProxyBins.get(`${binX},${binZ}`) ?? []) {
+            const entry = record.entry ?? record;
+            const bounds = record.bounds ?? entry.bounds;
             if (
               !entry.wallSurface
-              || this.cameraOcclusionCandidateSet.has(entry)
-              || entry.bounds.max.x < minX
-              || entry.bounds.min.x > maxX
-              || entry.bounds.max.y < minY
-              || entry.bounds.min.y > maxY
-              || entry.bounds.max.z < minZ
-              || entry.bounds.min.z > maxZ
+              || this.cameraOcclusionCandidateSet.has(record)
+              || bounds.max.x < minX
+              || bounds.min.x > maxX
+              || bounds.max.y < minY
+              || bounds.min.y > maxY
+              || bounds.max.z < minZ
+              || bounds.min.z > maxZ
             ) {
               continue;
             }
-            this.cameraOcclusionCandidateSet.add(entry);
-            this.cameraOcclusionCandidateObjects.push(entry.object);
+            const boundsHit = this.cameraOcclusionRaycaster.ray.intersectBox(
+              bounds,
+              tempVectorD,
+            );
+            if (!boundsHit
+              || boundsHit.distanceTo(this.camera.position)
+                > this.cameraOcclusionRaycaster.far) continue;
+            this.cameraOcclusionCandidateSet.add(record);
+            if (!this.cameraOcclusionCandidateObjectSet.has(entry.object)) {
+              this.cameraOcclusionCandidateObjectSet.add(entry.object);
+              this.cameraOcclusionCandidateObjects.push(entry.object);
+            }
           }
         }
       }
-      tempVectorB.divideScalar(distance);
-      this.cameraOcclusionRaycaster.set(this.camera.position, tempVectorB);
-      this.cameraOcclusionRaycaster.near = 0.08;
-      this.cameraOcclusionRaycaster.far = Math.max(0.08, distance - 0.08);
+      this.dungeonPerformanceTelemetry?.recordOcclusionCandidateCount?.(
+        this.cameraOcclusionCandidateSet.size,
+      );
       this.cameraOcclusionHits.length = 0;
       // Thin, non-instanced wall meshes can be missed on a triangle edge even
       // when their authored box crosses the viewing segment. Keep an exact
       // segment/AABB fallback for walls only. Floors, ramps, supports, ceilings,
       // and other nearby architecture never participate in this rule.
-      for (const entry of this.cameraOcclusionCandidateSet) {
+      for (const record of this.cameraOcclusionCandidateSet) {
+        const entry = record.entry ?? record;
         if (!entry.wallSurface
           || (entry.object.isInstancedMesh
             && entry.object.userData?.cameraOcclusionPerInstance === true)) {
           continue;
         }
         const boundsHit = this.cameraOcclusionRaycaster.ray.intersectBox(
-          entry.bounds,
+          record.bounds ?? entry.bounds,
           tempVectorD,
         );
         if (boundsHit
@@ -12041,7 +13105,9 @@ export class Game {
           this.cameraOcclusionHiddenOwners.add(entry.owner);
         }
       }
-      const originalMaterialSides = new Map();
+      this.cameraOcclusionOriginalMaterialSides ??= new Map();
+      this.cameraOcclusionOriginalMaterialSides.clear();
+      const originalMaterialSides = this.cameraOcclusionOriginalMaterialSides;
       for (const object of this.cameraOcclusionCandidateObjects) {
         const materials = Array.isArray(object.material) ? object.material : [object.material];
         for (const material of materials) {
@@ -12062,6 +13128,7 @@ export class Game {
         for (const [material, side] of originalMaterialSides) {
           material.side = side;
         }
+        originalMaterialSides.clear();
       }
       for (const hit of hits) {
         const hitRecord = this._getCameraOcclusionProximityRecord(
@@ -12096,7 +13163,59 @@ export class Game {
         drawObjectCount: entry?.geometry?.groups?.length ?? 1,
       };
     });
+    this.dungeonSupplementLocalLights = [];
+    this.activeWorldBundle?.root?.traverse?.((object) => {
+      if (object?.isLight && object.userData?.dungeonSupplementLocalLight) {
+        this.dungeonSupplementLocalLights.push(object);
+      }
+    });
     this.dungeonRenderCullAccumulator = 0;
+    this._updateDungeonDecorativeLocalLights();
+  }
+
+  _updateDungeonDecorativeLocalLights() {
+    const lights = this.dungeonSupplementLocalLights ?? [];
+    if (lights.length === 0) return;
+    const playerPosition = this.player?.root?.position;
+    const cap = Math.max(
+      0,
+      Math.trunc(Number(this.dungeonQualitySettings?.activeLocalLightCap) || 0),
+    );
+    const isPresentationVisible = (light) => {
+      let owner = light?.parent;
+      while (owner && owner !== this.activeWorldBundle?.root) {
+        if (owner.visible === false) return false;
+        owner = owner.parent;
+      }
+      return true;
+    };
+    const rankedDecorativeLights = lights
+      .map((light) => ({
+        light,
+        presentationVisible: isPresentationVisible(light),
+        decorative: light.userData.dungeonSupplementLocalLight.decorative !== false,
+        priority: Number(light.userData.dungeonSupplementLocalLight.priority) || 0,
+        distanceSq: playerPosition
+          ? light.getWorldPosition(tempVectorD).distanceToSquared(playerPosition)
+          : 0,
+      }))
+      .sort((first, second) => (
+        Number(second.presentationVisible) - Number(first.presentationVisible)
+          || second.priority - first.priority
+          || Number(first.decorative) - Number(second.decorative)
+          || first.distanceSq - second.distanceSq
+          || String(first.light.uuid).localeCompare(String(second.light.uuid))
+      ));
+    const activeDecorativeLights = new Set(
+      rankedDecorativeLights
+        .filter(({ presentationVisible }) => presentationVisible)
+        .slice(0, cap)
+        .map(({ light }) => light),
+    );
+    for (const light of lights) {
+      light.visible = activeDecorativeLights.has(light);
+      light.castShadow = false;
+    }
   }
 
   _distanceToRenderCullBounds(position, descriptor) {
@@ -12127,10 +13246,13 @@ export class Game {
     this.dungeonRenderCullAccumulator = 0;
     const hideDistance = this.worldKind === 'overworld'
       ? OVERWORLD_RENDER_CULL_HIDE_DISTANCE
-      : DUNGEON_RENDER_CULL_HIDE_DISTANCE;
+      : Number(this.dungeonQualitySettings?.noncriticalDetailDistance)
+        || DUNGEON_RENDER_CULL_HIDE_DISTANCE;
     const showDistance = this.worldKind === 'overworld'
       ? OVERWORLD_RENDER_CULL_SHOW_DISTANCE
-      : DUNGEON_RENDER_CULL_SHOW_DISTANCE;
+      : Math.max(0, hideDistance - (
+        DUNGEON_RENDER_CULL_HIDE_DISTANCE - DUNGEON_RENDER_CULL_SHOW_DISTANCE
+      ));
     let visibleGroupCount = 0;
     let hiddenGroupCount = 0;
     let hiddenObjectCount = 0;
@@ -12169,6 +13291,7 @@ export class Game {
       hiddenDrawObjectCount,
       totalDrawObjectCount: visibleDrawObjectCount + hiddenDrawObjectCount,
     };
+    this._updateDungeonDecorativeLocalLights();
   }
 
   _updateAimFromPointer() {

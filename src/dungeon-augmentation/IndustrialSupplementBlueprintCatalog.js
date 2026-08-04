@@ -1142,7 +1142,12 @@ const BLUEPRINT_DEFINITIONS = [
       { tier: 'base', points: [[2, -2], [3, 0], [5, 0]] },
     ],
     zones: [
-      { type: 'hazard', id: 'fd-flooded-sump', x: 3, z: 1, w: 3, d: 3, label: 'FLOOD' },
+      // Keep the flooded mechanism as a wall-side strip. The former 3x3
+      // footprint reached across the lower E socket's two-tile, three-lane
+      // approach and made this otherwise valid room impossible in every
+      // placement. This local cut preserves the hazard and gate encounter
+      // while leaving the authored dry bypass genuinely bidirectional.
+      { type: 'hazard', id: 'fd-flooded-sump', x: 3, z: 2, w: 3, d: 1, label: 'FLOOD' },
       { type: 'clear', id: 'fd-dry-bypass', x: 0, z: -2, w: 5, d: 3, label: 'DRY STAIR' },
     ],
     features: [

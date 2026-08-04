@@ -406,6 +406,64 @@ button:focus-visible {
   height: 100%;
 }
 
+.dungeon-augmentation-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-content: center;
+  gap: 0.65rem;
+  padding: 2rem;
+  color: #e9f7ff;
+  text-align: center;
+  background:
+    radial-gradient(circle at center, rgba(39, 73, 86, 0.82), rgba(8, 13, 18, 0.98) 68%),
+    #080d12;
+}
+
+.dungeon-augmentation-loading strong {
+  color: #f2c84b;
+  font-size: clamp(1.1rem, 2.4vw, 1.7rem);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dungeon-augmentation-loading span {
+  max-width: 38rem;
+  color: #b7d5df;
+  line-height: 1.55;
+}
+
+.dungeon-augmentation-loading[data-dungeon-augmentation-loading='failed'] strong {
+  color: #ff8e7d;
+}
+
+.dungeon-augmentation-loading-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.dungeon-augmentation-loading-actions[hidden] {
+  display: none;
+}
+
+.dungeon-augmentation-loading-actions button {
+  min-width: 7rem;
+  border: 1px solid rgba(183, 213, 223, 0.72);
+  border-radius: 0.35rem;
+  padding: 0.55rem 1rem;
+  color: #e9f7ff;
+  background: rgba(23, 42, 52, 0.94);
+  cursor: pointer;
+}
+
+.dungeon-augmentation-loading-actions button:hover,
+.dungeon-augmentation-loading-actions button:focus-visible {
+  border-color: #f2c84b;
+  outline: none;
+}
+
 #ui-root {
   position: fixed;
   inset: 0;

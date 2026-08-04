@@ -10,13 +10,145 @@ No sealed aggregate-and-receipts attestation has been supplied for this working 
 - Ordinal shard coverage: **not established**.
 - First-realization, strict-validation, diversity, and performance gates: **not established**.
 - Overall V4 release readiness: **blocked**.
+- Recovery goal status: **ended at the user's request as a diagnostic handoff, not as a release acceptance**.
 
 This block is intentionally conservative. A canonical validator witness, a playable-alpha run, or a corpus aggregate without all same-source receipts cannot establish release. Supply `--evidence=<release-attestation.json>` only after the manifest shards and every required suite receipt have been sealed.
 <!-- V4_RELEASE_EVIDENCE_END -->
 
-## 2026-08-03 authoritative working-tree checkpoint
+## 2026-08-04 Seed001 startup follow-up - runtime blocker resolved
 
-This is the current diagnostic checkpoint for the uncommitted working tree. It is not a sealed release receipt. Every older checkpoint below is investigation chronology when its counts, timings, hashes, or statuses conflict with this section.
+This follow-up supersedes `CLOSEOUT-O02` and the browser-startup claims in the
+2026-08-03 closeout. It does not change the blocked V4 release verdict or close
+the separate planner-performance blocker.
+
+- **Symptom:** the exact fresh Seed001 URL returned HTTP 200, but synchronous
+  `augmentDungeonDraft()` work ran inside `Game` construction. The renderer
+  stopped responding during route-network search and the in-app browser
+  eventually reported that the page had crashed.
+- **Cause:** startup called the pure planner, every same-seed exact repair
+  replan, and Three.js materialization through one synchronous `generate()`
+  stack. Moving a persistent planner into a worker was insufficient by itself:
+  completed-candidate search state retained more than 2 GB after the first
+  Seed001 plan and the long-lived worker eventually exhausted its heap.
+- **Fix:** fresh augmented startup now displays an explicit loading surface and
+  drives every yielded planning/repair request asynchronously. Each request is
+  planned in a fresh module worker, while only the compact exact-salvage witness
+  entries are carried to the next worker for the same realization attempt.
+  Completed-plan memo entries remain local to one request, and terminating that
+  worker releases its transient route-search heap before the next repair. The
+  accepted Three.js dungeon is then consumed exactly once by the normal world
+  build after an exact seed/profile/family/base-hash check.
+- **Browser evidence:** 1.5 seconds after navigating the exact URL, the in-app
+  DOM remained responsive and exposed `Building supplemental dungeon` instead
+  of becoming unreachable. A later in-app inspection was blocked by the
+  browser URL policy, so this is a responsiveness receipt rather than a final
+  visual receipt.
+- **Terminal generation evidence:** a two-isolate harness using the production
+  browser-planner session completed the exact Seed001 replay in 267.4 seconds:
+  `status: applied`, strict validation accepted, zero errors, two exact runtime
+  repair passes, augmentation hash
+  `v1-0a81632d488d04354ba2b35ec2c0b3a2`, and effective hash
+  `v1-e82f9a1390f9f62a42e10d36c522922b`. Four disposable workers completed in
+  44.8, 60.7, 75.6, and 72.2 seconds; the persistent-worker reproduction had
+  failed with `ERR_WORKER_OUT_OF_MEMORY` at 173.5 seconds.
+- **Focused regressions:** 122/122 browser-worker, partial-first scheduling,
+  route-candidate performance, and blueprint tests pass. The worker contracts
+  cover stale-response rejection, per-attempt salvage-cache isolation, worker
+  recycling, error termination, every async repair yield, and structured
+  cloning of the real Seed001 planning request.
+- **Remaining issue:** Seed001 planning is still far above the unchanged
+  30-second release maximum. The game now remains responsive and completes,
+  but planner optimization remains `CLOSEOUT-O01` and release evidence remains
+  blocked.
+
+[Open the repaired Seed001 fresh-start test](http://127.0.0.1:5174/?startupWorld=dungeon&dungeonFamily=industrial-v1&busterLab=sandbox&playerInvulnerable=1&dungeonSeed=augmentation-realized-v4-001&reaverbotSeed=augmentation-realized-v4-001&dungeonAugmentation=industrial-supplement-preview-v4&dungeonAugmentationFresh=1)
+
+## 2026-08-03 goal closeout — authoritative diagnostic handoff
+
+This checkpoint supersedes every older status, hash, timing, browser claim, and
+current-issue count in this file. The recovery goal was ended at the user's
+request with unresolved release blockers documented below. “Resolved” means
+the named defect has a focused regression and retained hash parity where that
+applies; it does not imply that the V4 release gate passed.
+
+### Current reproducible state
+
+- Source provenance is unsealed: branch
+  `codex/dungeon-generation-pivot-20260721`, HEAD
+  `2b2a86fcd8fe09fe184ed3279c812c35dfcd726b`, with uncommitted source,
+  test, profile, and unrelated `tools/blender_mcp` changes. No git staging,
+  commit, reset, clean, or push was performed by this recovery task.
+- The latest ordinary, non-debug, attempt-one Seed001 plan-only command returns
+  `status: applied`, `error: null`,
+  augmentation hash `v1-940a43060311ce05c7379ce836972dd7`, and effective
+  hash `v1-6759df25ede7bff8d09233cc7cd4a5e4`. The compact probe did not
+  republish current operation/node/segment counts, so older counts and
+  whole-grant omission lists below are chronology, not current evidence.
+- The latest direct command took 51.6 seconds wall time. The latest CPU profile
+  (`.codex-temp/seed001-pure-route-shape-v2-20260803.cpuprofile`) spans
+  45.274 seconds, with `augmentDungeonDraft` at 38.707 seconds and
+  `planRouteNetwork` at 37.022 seconds. This remains above the unchanged
+  30-second release maximum.
+- A clean restart of the port-5174 development server returned HTTP 200.
+  Loading the exact Seed001 URL then blocked the renderer until the in-app
+  browser reported “This page crashed”; screenshot and layout-metric requests
+  timed out. Therefore no current-build safe-crossing screenshot or current-hash
+  lift/ladder visual receipt exists. The older
+  `.codex-temp/safe-crossing-cut-through-seed001.png` predates the final
+  floodgate carve and must not be treated as current evidence.
+- Seed000 was not recaptured after the current changes. The canonical pair and
+  ordered 10-, 100-, and 1,000-seed tiers were not run.
+
+The current strict test URL remains:
+
+[Open Seed001 with fresh V4 augmentation](http://127.0.0.1:5174/?startupWorld=dungeon&dungeonFamily=industrial-v1&busterLab=sandbox&playerInvulnerable=1&dungeonSeed=augmentation-realized-v4-001&reaverbotSeed=augmentation-realized-v4-001&dungeonAugmentation=industrial-supplement-preview-v4&dungeonAugmentationFresh=1)
+
+### Resolved or locally proven fixes
+
+| ID | Status | Cause | Fix | Current evidence |
+| --- | --- | --- | --- | --- |
+| CLOSEOUT-R01 | **Resolved** | Planner, materializer, and runtime derived half-grid endpoint cells with different floating-point rounding, so a legal seam could move to the neighboring cell and rebuild a wall at an approach. | Added one `dungeonRouteEndpointGridCoordinate` authority and used it for seam creation, exact-route rasterization, materialization, and runtime checks. | Focused route/seam tests pass; `git diff --check` reports no whitespace errors. |
+| CLOSEOUT-R02 | **Resolved at blueprint/planner level** | `ind-room-floodgate-descent-01` placed the 3×3 `fd-flooded-sump` across the lower east socket’s required approach, making every rotation self-blocking. | Kept the hazard as a 3×1 wall-side strip at `x=3,z=2`, preserving the flooded mechanism while opening the authored `fd-dry-bypass`. | Catalog tests pass 11/11; all 28 authored blueprint sockets across four rotations report zero self-conflicts; route-candidate suite passes 69/69. Materialized/visual proof remains open as CLOSEOUT-O04. |
+| CLOSEOUT-R03 | **Resolved in planner contracts** | Recovery could discard an entire augmentation when one room or segment conflicted. | Exact conflict roots now drive module/segment omission and parent-anchored dependency closure, retaining unrelated valid nodes, segments, and connector-only residuals while still failing closed on unrooted or nonreturnable pieces. | Focused partial-first and route-candidate regressions preserve modular salvage, exact omissions, fixed budgets, and deterministic order. Current compact Seed001 hashes are stable, but current entity counts still need recapture. |
+| CLOSEOUT-R04 | **Resolved in geometry contracts** | Generic V4 wall openings and merged floor metadata could close ladder/lift mouths or allow incomplete connector proof to bypass fail-closed wall generation. | Ladder endpoints retain reciprocal aperture ownership; lift endpoints require one reciprocal mechanism, opposite roles, a clear shaft interval, and all six exact boarding lanes before walls are suppressed. | The targeted aperture audit passes 11/11; the earlier combined lift/enclosure suite passed 52/52. A retained-vertical-connector salvage integration test and current visual receipt remain open as CLOSEOUT-O03/O05. |
+| CLOSEOUT-R05 | **Resolved** | Failed-pair and landmark preselector paths hydrated sockets, collision IDs, and route records that were immediately discarded. | Deferred hydration until a route survives scalar/path filtering or becomes the single retained diagnostic witness; raw parent-attachment routes and exact scored domains are reused under complete context keys. | Route-candidate suite passes 69/69 with unchanged current Seed001 hashes. |
+| CLOSEOUT-R06 | **Measured improvement, provisional** | Translation-invariant route-shape booleans were partitioned by operation/topology labels even when exact masks, sockets, and relative geometry were identical. | The shared key now carries exact occupied volumes, shell clearances, authored floors/transfers/solid features/hazards/voids, sockets, external paths, span, and route options, while excluding nonphysical labels. | Profile duration fell from 52.391 to 45.274 seconds and `planRouteNetwork` from 42.306 to 37.022 seconds with identical Seed001 hashes. Only the 69-test focused suite was rerun after this final optimization, so full-suite/corpus validation is still required. |
+| CLOSEOUT-R07 | **Rejected experiment removed** | A domain-keyed future-support memo was expected to survive arc-consistency restoration, but the current profile showed no useful hits and added Map/string-key overhead and retention pressure. | Removed the memo and restored epoch invalidation of both prefix and future-support caches. | The post-removal focused suite passes 69/69. |
+
+### Open issues, separated for individual follow-up
+
+| ID | Priority | Measured issue and cause | Independent next action |
+| --- | --- | --- | --- |
+| CLOSEOUT-O01 | **Release blocker** | Seed001 remains above 30 seconds (51.6-second direct wall time; 38.707-second planner profile). Remaining hot paths are correlated placement reservation/prefilter, candidate placement, exact-adjacent route generation, collision scoring, and allocation/GC. | Profile and optimize one subtree at a time. Preserve result/error JSON, RNG/bag state, order, proof ledgers, hashes, and all existing search limits. Re-run Seed001 after every change. |
+| CLOSEOUT-O02 | **Runtime blocker** | The real in-app Seed001 page crashes while synchronous planning blocks its renderer, so the requested current screenshot cannot be produced. This is a consequence of CLOSEOUT-O01, not evidence that the dev server is down. | Get the ordinary client below the watchdog window (or move planning off the renderer without changing semantics), restart port 5174, load the exact URL, and capture the dry crossing plus lift/ladder mouths. |
+| CLOSEOUT-O03 | **Correctness coverage gap** | Selective parent-anchored salvage is not yet tested while retaining a vertical ladder/lift connector and omitting an adjacent conflicting module. | Add a ladder/lift table regression proving both endpoints, reciprocal links, connector contract, and every boarding aperture survive; prove omitting either endpoint removes the orphan connector. |
+| CLOSEOUT-O04 | **Correctness/visual gap** | The floodgate carve is proven only by socket-level planning tests; no all-four-rotations materialized reachability test proves the dry bypass, walls, floors, sump exclusion, forward traversal, and return traversal together. | Add the materialized four-rotation reachability test, then stage and capture the current Seed001 crossing. |
+| CLOSEOUT-O05 | **Visual-evidence gap** | Lift/ladder aperture tests pass, but the final current-hash browser run crashed before inspecting authoritative wall runs, rendered wall meshes, and collision zones. | Extend the visual harness with ladder boarding and safe-crossing staging, then record zero blockers for retained ladder/lift mouths on a clean server. |
+| CLOSEOUT-O06 | **Evidence blocker** | Seed000 has no current hash/timing receipt, and the canonical, 10-, 100-, and 1,000-seed gates were not run in order. | Recapture Seed000 first. Run canonical pair, then 10, 100, and 1,000 only after each preceding tier passes the unchanged performance and strict-validation gates. |
+| CLOSEOUT-O07 | **Inventory blocker** | Current compact Seed001 output does not identify entity counts or which grants/modules were omitted, while older checkpoints contain mutually incompatible counts and hashes. | Produce a current non-debug manifest with operation/node/segment counts and exact omission ledgers; use it to retire or reaffirm older `trapRoom_conveyorRoom`, boss residual, and segment-5 rows individually. |
+| CLOSEOUT-O08 | **Parity/provenance blocker** | The older repeated segment-5 y=0 endpoint seam/helper-owner discrepancy was not re-proven or disproven by the current compact probe. | Record helper source plan and elevation provenance, then share one exact seam-cell ownership predicate between planner and runtime; do not add a broad overlap waiver. |
+| CLOSEOUT-O09 | **Release blocker** | The working tree is dirty and no sealed same-source receipts or clean-source provenance exist. | Reconcile unrelated files and profile artifacts, run the complete relevant unit/enclosure/legacy/persistence/browser suites, then seal receipts from one clean revision. |
+
+### Closeout validation actually run
+
+- Final combined closeout command over partial-first scheduling, route-candidate
+  performance, and the blueprint catalog: **118/118 passing**.
+- `node --test tests/dungeon-augmentation-route-candidate-performance.test.mjs`:
+  **69/69 passing** after the final route-shape change.
+- `node --test tests/dungeon-augmentation-blueprint-catalog.test.mjs`:
+  **11/11 passing** after the floodgate carve.
+- Targeted ladder/lift/enclosure aperture audit: **11/11 passing**; earlier
+  combined lift/enclosure run: **52/52 passing**.
+- Latest Seed001 compact plan-only probe: **applied**, attempt limit 1, hashes
+  `v1-940a43060311ce05c7379ce836972dd7` /
+  `v1-6759df25ede7bff8d09233cc7cd4a5e4`.
+- Not run after the final change: full relevant suite, Seed000, strict
+  two-seed visual acceptance, canonical pair, 10-, 100-, or 1,000-seed tiers.
+
+## 2026-08-03 superseded working-tree checkpoint
+
+This section is retained as investigation chronology and is superseded by the
+goal-closeout checkpoint above.
 
 - Seed000's current production `generate()` enclosure witness applies on realization attempt 1 and passes the unchanged progression/enclosure assertions within its existing 180-second timeout after exact `Door_Shrine` recovery. That test does not publish current-tree canonical counts or hashes. The latest stored full diagnostic predates the present module-salvage and door-attribution integration (4 operations, 22 nodes, 27 segments, hashes `v1-f5178024e92254900ddaee251b78e15d` / `v1-76d7dfc517c1470584839152fcb8d227`) and is chronology only; Seed000 requires a fresh canonical capture.
 - Seed001's current ordinary, non-debug attempt-one replay is `applied`, release-validation accepted, and partial with five operations, 21 supplemental nodes, 24 segments, zero errors, and hashes `v1-603c269a7b1a5157aa66e1509fdf6b2a` / `v1-1aa997029ea651a640f47e7984073aad`. The only whole-grant planner omission is ordinal 3 `coverage:trapRoom_conveyorRoom` (`route-network-placement-backtrack-exhausted`). `keycardRoom_trapRoom` is retained after its exact segment cut, and the safe two-node/two-segment remainder of `bossRoom_shrineRoom` is physically materialized after four exact segment-5 runtime replacements; no unrelated augmentation is discarded.

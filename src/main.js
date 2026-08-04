@@ -4,7 +4,7 @@ import { getReaverbotSalvageCatalogSummary } from './reaverbots/ReaverbotSalvage
 
 const launchParams = new URLSearchParams(window.location.search);
 const editorPlaytestHost = launchParams.get('editorPlaytestHost') === '1';
-const game = await Game.create({
+const gameReady = Game.create({
   container: document.getElementById('game-container'),
   ...(editorPlaytestHost ? {
     busterLabStorageOptions: {
@@ -14,6 +14,8 @@ const game = await Game.create({
     },
   } : {}),
 });
+window.gameReady = gameReady;
+const game = await gameReady;
 
 if (editorPlaytestHost) {
   document.documentElement.dataset.editorPlaytestHost = 'ready';

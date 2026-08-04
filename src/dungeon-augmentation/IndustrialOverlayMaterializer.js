@@ -5,6 +5,7 @@ import {
 import {
   createDungeonJunctionGeometryRecord,
   createDungeonSocketLandingOverlapVolume,
+  dungeonRouteEndpointGridCoordinate,
   transformDungeonLocalPoint,
 } from './geometry.js';
 import {
@@ -175,6 +176,14 @@ function stableV4GridPoint(value, tileSize) {
   return {
     x: coordinate(point.x),
     z: coordinate(point.z),
+  };
+}
+
+function routeEndpointGridPoint(value, tileSize) {
+  const point = pointOf(value);
+  return {
+    x: dungeonRouteEndpointGridCoordinate(point.x, tileSize),
+    z: dungeonRouteEndpointGridCoordinate(point.z, tileSize),
   };
 }
 
@@ -5592,7 +5601,7 @@ function createSupplementConnectionPlan(
   const rawPath = gridPath(
     sourcePath,
     tileSize,
-    exactRouteBinding && requireEndpointSeams ? stableV4GridPoint : gridPoint,
+    exactRouteBinding && requireEndpointSeams ? routeEndpointGridPoint : gridPoint,
   );
   if (exactRouteBinding && requireEndpointSeams && rawPath.length > 0) {
     // The seam is the physical transform authority. Route endpoints copied

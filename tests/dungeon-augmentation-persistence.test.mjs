@@ -191,6 +191,69 @@ test('fresh strict V4 testing ignores but never mutates a committed expedition',
   assert.equal(storageWrites, 0);
 });
 
+test('augmentation persistence is dirty-event driven and coalesces frame-independent writes', async () => {
+  const scheduled = [];
+  let writeCount = 0;
+  const host = {
+    worldKind: 'dungeon',
+    dungeon: { augmentationIdentity: { profileId: 'fixture-profile' } },
+    dungeonAugmentationPlayableAlphaMode: false,
+    dungeonAugmentationFreshMode: false,
+    _dungeonAugmentationSetTimeout(callback, delayMs) {
+      scheduled.push({ callback, delayMs });
+      return scheduled.length;
+    },
+    _scheduleDungeonAugmentationStatePersistence:
+      Game.prototype._scheduleDungeonAugmentationStatePersistence,
+    _persistCurrentDungeonAugmentationState() {
+      writeCount += 1;
+      return Promise.resolve({ ok: true });
+    },
+  };
+
+  assert.equal(Game.prototype._markDungeonAugmentationStateDirty.call(host), true);
+  assert.equal(Game.prototype._markDungeonAugmentationStateDirty.call(host), true);
+  assert.equal(scheduled.length, 1, 'multiple state events share one persistence task');
+  assert.equal(scheduled[0].delayMs, 500);
+  assert.equal(writeCount, 0, 'no persistence work is polled synchronously by the event');
+
+  scheduled[0].callback();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(writeCount, 1);
+  assert.equal(host._dungeonAugmentationStatePersistedRevision, 2);
+
+  assert.equal(Game.prototype._markDungeonAugmentationStateDirty.call(host), true);
+  assert.equal(scheduled.length, 2, 'a later mutation schedules the next bounded write');
+});
+
+test('encounter completion marks augmentation persistence dirty at the mutation site', () => {
+  let dirtyCount = 0;
+  const controller = {
+    encounters: [{
+      id: 'supplement-encounter',
+      label: 'Supplement encounter',
+      spawned: true,
+      cleared: false,
+      enemyIds: [],
+      zone: { position: { clone: () => ({}) } },
+    }],
+    doors: [],
+    dungeon: {},
+    game: {
+      enemies: [],
+      ui: { showToast() {} },
+    },
+    _markDungeonAugmentationStateDirty() {
+      dirtyCount += 1;
+    },
+  };
+
+  DungeonController.prototype._updateEncounters.call(controller);
+  assert.equal(controller.encounters[0].cleared, true);
+  assert.equal(dirtyCount, 1);
+});
+
 test('base-plan identity preserves Industrial V1 while namespacing future parent families', () => {
   const input = {
     layoutSeed: 'layout:family-hash',

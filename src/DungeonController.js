@@ -285,6 +285,10 @@ export class DungeonController {
     // That pass owns and disposes every generated pickup geometry/material.
   }
 
+  _markDungeonAugmentationStateDirty() {
+    this.game?._markDungeonAugmentationStateDirty?.();
+  }
+
   update(dt) {
     if (!this.game?.player || !this.dungeon) {
       return;
@@ -4129,6 +4133,7 @@ export class DungeonController {
       plate.activated = true;
       this.game.addParticleBurst(plate.position, MECHANISM_COLOR, 24, 0.16);
     }
+    this._markDungeonAugmentationStateDirty?.();
 
     const targetDoor = this.doors.find((door) => door.id === puzzle.targetDoorId);
     if (targetDoor?.closed) {
@@ -4149,6 +4154,7 @@ export class DungeonController {
 
       if (powered && !plate.activated) {
         plate.activated = true;
+        this._markDungeonAugmentationStateDirty?.();
         this.game.addParticleBurst(plate.position, MECHANISM_COLOR, 24, 0.16);
 
         const targetDoor = this.doors.find((door) => door.id === plate.targetDoorId);
@@ -5013,6 +5019,7 @@ export class DungeonController {
           : 'Shortcut route online',
         '#6bdcff',
       );
+      this._markDungeonAugmentationStateDirty?.();
       return;
     }
 
@@ -5049,6 +5056,7 @@ export class DungeonController {
           : 'Local control already safe',
         '#6bdcff',
       );
+      this._markDungeonAugmentationStateDirty?.();
       return;
     }
 
@@ -5079,6 +5087,7 @@ export class DungeonController {
 
     this.game.addParticleBurst(mechanism.position, MECHANISM_COLOR, 24, 0.18);
     this.game.ui?.showToast?.('Override online: traps and conveyors disabled', '#6bdcff');
+    this._markDungeonAugmentationStateDirty?.();
   }
 
   _getMechanismBlockingEncounter(mechanism) {
@@ -5263,6 +5272,7 @@ export class DungeonController {
         `Recovered log: ${chest.discoveryLabel ?? 'maintenance route notes'}`,
         '#6bdcff',
       );
+      this._markDungeonAugmentationStateDirty?.();
       return;
     }
 
@@ -5294,6 +5304,7 @@ export class DungeonController {
     if (!keycardCollected) {
       this.game.ui?.showToast?.('Ruin chest opened: refractors', '#ffd66b');
     }
+    this._markDungeonAugmentationStateDirty?.();
   }
 
   _activatePartRewardChest(chest) {
@@ -5307,6 +5318,7 @@ export class DungeonController {
       chest.opened = true;
       chest.object.userData.opened = true;
       chest.rewardClaimed = true;
+      this._markDungeonAugmentationStateDirty?.();
       this.game.addParticleBurst(chest.position, KEY_SEEKER_COLOR, 30, 0.18);
       this.game.ui?.showToast?.(
         result.alreadyClaimed
@@ -5339,6 +5351,7 @@ export class DungeonController {
       }
 
       encounter.cleared = true;
+      this._markDungeonAugmentationStateDirty?.();
       this.game.ui?.showToast?.(`${encounter.label} cleared`, '#6bdcff');
 
       if (encounter.isBoss && this.dungeon?.replacesStandardDungeon) {

@@ -342,9 +342,13 @@ test('translated V1 structural supports stop at the owning room floor', () => {
 
   const upperTile = { ...baseTile, elevation: 18 };
   generator._addFactoryTileSupports(group, upperTile, { supportMetal: material });
-  const posts = group.children.filter((object) => object.name === 'factoryCatwalkSupport');
-  assert.equal(posts.length, 4);
-  assert.ok(posts.every((post) => post.position.y > 14 && post.position.y < 18));
+  const supportRecords = group.children
+    .filter((object) => object.name === 'factoryCatwalkSupport')
+    .flatMap((object) => object.userData.factoryCatwalkInstanceMetadata ?? []);
+  assert.equal(supportRecords.length, 4);
+  assert.ok(supportRecords.every(({ worldPosition }) => (
+    worldPosition.y > 14 && worldPosition.y < 18
+  )));
 
   const [assembly] = generator._createSolidArchitecturalDeckAssemblies([{
     ...upperTile,

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
+  classifyRouteNetworkExhaustivePhysicalEdgeConflict,
   classifyRouteNetworkStructuralSpanOnlyFailure,
   classifyRouteNetworkFutureEndpointSingleSegmentConflict,
   collectCompleteRouteNetworkFutureEndpointSurvivorVector,
@@ -596,6 +597,104 @@ test('structural span salvage qualifies only a pure required objective-edge span
       maximumFeaturelessSpanMeters: 33.6,
       ...override,
     }), null);
+  }
+});
+
+test('exhaustive physical-edge conflict retains an exact static collision proof', () => {
+  const bestBlockedPath = [
+    { x: 0, y: 0, z: 0 },
+    { x: 2.8, y: 0, z: 0 },
+    { x: 5.6, y: 0, z: 0 },
+  ];
+  const diagnostics = {
+    visits: 12,
+    deadEnds: 12,
+    maximumRawCandidateCount: 7,
+    maximumCollisionFreeCandidateCount: 0,
+    maximumWithinSpanCandidateCount: 7,
+    maximumFeasibleCandidateCount: 0,
+    minimumCollisionScore: 3,
+    bestBlockedPath,
+    bestBlockedCollisionIds: ['solid:z', 'solid:a', 'solid:z'],
+  };
+
+  const classified = classifyRouteNetworkExhaustivePhysicalEdgeConflict({
+    routeNetworkKind: 'objective-route-coverage',
+    required: true,
+    requiredEdge: {
+      edgeOrdinal: 2,
+      fromIndex: 1,
+      toIndex: 4,
+      routeRole: 'route-network-spine',
+    },
+    diagnostics,
+  });
+
+  assert.deepEqual(classified, {
+    edgeOrdinal: 2,
+    fromIndex: 1,
+    toIndex: 4,
+    routeRole: 'route-network-spine',
+    visits: 12,
+    deadEnds: 12,
+    maximumRawCandidateCount: 7,
+    maximumWithinSpanCandidateCount: 7,
+    minimumCollisionScore: 3,
+    bestBlockedPath,
+    bestBlockedCollisionIds: ['solid:a', 'solid:z'],
+    rootReason: 'route-network-required-edge-static-route-conflict',
+  });
+  assert.notEqual(classified.bestBlockedPath, bestBlockedPath);
+  assert.deepEqual(diagnostics.bestBlockedCollisionIds, ['solid:z', 'solid:a', 'solid:z']);
+});
+
+test('exhaustive physical-edge conflict rejects incomplete or non-static searches', () => {
+  const base = {
+    routeNetworkKind: 'objective-route-coverage',
+    required: true,
+    requiredEdge: {
+      edgeOrdinal: 2,
+      fromIndex: 1,
+      toIndex: 4,
+      routeRole: 'route-network-spine',
+    },
+    diagnostics: {
+      visits: 12,
+      deadEnds: 12,
+      maximumRawCandidateCount: 7,
+      maximumCollisionFreeCandidateCount: 0,
+      maximumWithinSpanCandidateCount: 7,
+      maximumFeasibleCandidateCount: 0,
+      minimumCollisionScore: 3,
+      bestBlockedPath: [
+        { x: 0, y: 0, z: 0 },
+        { x: 2.8, y: 0, z: 0 },
+      ],
+      bestBlockedCollisionIds: ['solid:a'],
+    },
+  };
+  const withDiagnostics = (overrides) => ({
+    ...base,
+    diagnostics: { ...base.diagnostics, ...overrides },
+  });
+  const rejected = [
+    ['budget exhaustion', { ...base, placementSearchBudgetExhausted: true }],
+    ['collision-free option', withDiagnostics({ maximumCollisionFreeCandidateCount: 1 })],
+    ['feasible option', withDiagnostics({ maximumFeasibleCandidateCount: 1 })],
+    ['zero visits', withDiagnostics({ visits: 0, deadEnds: 0 })],
+    ['incomplete dead ends', withDiagnostics({ deadEnds: 11 })],
+    ['missing path', withDiagnostics({ bestBlockedPath: null })],
+    ['path without an edge', withDiagnostics({
+      bestBlockedPath: [{ x: 0, y: 0, z: 0 }],
+    })],
+    ['missing collision IDs', withDiagnostics({ bestBlockedCollisionIds: [] })],
+    ['blank collision ID', withDiagnostics({
+      bestBlockedCollisionIds: ['solid:a', ''],
+    })],
+  ];
+
+  for (const [label, input] of rejected) {
+    assert.equal(classifyRouteNetworkExhaustivePhysicalEdgeConflict(input), null, label);
   }
 });
 

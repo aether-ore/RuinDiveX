@@ -1765,8 +1765,12 @@ test('five opt-in enter/fresh-reset/exit cycles plateau supplement ownership and
     });
     await dungeonReferences.dispose();
 
+    await page.requestGC();
+    const postGcHeapBytes = await page.evaluate(() => (
+      Number(performance.memory?.usedJSHeapSize) || null
+    ));
     const world = await readWorldDiagnostics(page);
-    overworldSamples.push(world);
+    overworldSamples.push({ ...world, postGcHeapBytes });
     expect(world.worldKind).toBe('overworld');
     expect(world.planHash).toBe(initialWorld.planHash);
   }
@@ -1840,6 +1844,10 @@ test('five opt-in enter/fresh-reset/exit cycles plateau supplement ownership and
     expect(new Set(values).size, `overworld ${key} did not plateau: ${JSON.stringify(values)}`)
       .toBe(1);
   }
+  const cycleTwoHeapBytes = overworldSamples[1]?.postGcHeapBytes;
+  const cycleFiveHeapBytes = overworldSamples.at(-1)?.postGcHeapBytes;
+  expect(cycleTwoHeapBytes, 'Chromium did not expose a post-GC heap measurement').toBeTruthy();
+  expect(cycleFiveHeapBytes).toBeLessThanOrEqual(cycleTwoHeapBytes * 1.1);
   expect(runtimeErrors.pageErrors).toEqual([]);
   expect(runtimeErrors.consoleErrors).toEqual([]);
 });

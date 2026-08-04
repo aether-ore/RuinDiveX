@@ -12,6 +12,31 @@ const namedDescendants = (root, name) => {
   return matches;
 };
 
+const logicalNamedDescendants = (root, name) => {
+  const matches = [];
+  const instanceMatrix = new THREE.Matrix4();
+  const worldMatrix = new THREE.Matrix4();
+  root.traverse((object) => {
+    if (object.name !== name) return;
+    const metadata = object.userData?.factoryCatwalkInstanceMetadata;
+    if (!object.isInstancedMesh || !Array.isArray(metadata)) {
+      matches.push({ object, position: object.position.clone(), metadata: object.userData });
+      return;
+    }
+    object.updateWorldMatrix(true, false);
+    for (const record of metadata) {
+      object.getMatrixAt(record.instanceId, instanceMatrix);
+      worldMatrix.multiplyMatrices(object.matrixWorld, instanceMatrix);
+      matches.push({
+        object,
+        position: new THREE.Vector3().setFromMatrixPosition(worldMatrix),
+        metadata: record,
+      });
+    }
+  });
+  return matches;
+};
+
 test('signed connector decoration uses its lower endpoint as the structural datum', () => {
   const generator = new DungeonGenerator({ random: () => 0.5 });
   const supportMetal = new THREE.MeshBasicMaterial();
@@ -58,7 +83,7 @@ test('signed connector decoration uses its lower endpoint as the structural datu
     generator._createFloorTileLookup([upperFloor]),
   );
 
-  const posts = namedDescendants(upperGroup, 'factoryCatwalkSupport');
+  const posts = logicalNamedDescendants(upperGroup, 'factoryCatwalkSupport');
   const rails = namedDescendants(upperGroup, 'factoryCatwalkRailRun');
   assert.equal(posts.length, 4);
   assert.ok(posts.every(({ position }) => position.y > -14 && position.y < 0));
@@ -113,8 +138,8 @@ test('factory catwalk posts preserve lower-route floor and headroom columns', ()
     generator._createFloorTileLookup(floorTiles),
   );
 
-  const posts = namedDescendants(group, 'factoryCatwalkSupport');
-  const underBeams = namedDescendants(group, 'factoryCatwalkUnderBeam');
+  const posts = logicalNamedDescendants(group, 'factoryCatwalkSupport');
+  const underBeams = logicalNamedDescendants(group, 'factoryCatwalkUnderBeam');
   assert.equal(posts.length, 4, 'only the unobstructed elevated deck should emit posts');
   assert.ok(
     posts.every(({ position }) => position.x > generator.tileSize),

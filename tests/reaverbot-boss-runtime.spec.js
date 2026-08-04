@@ -134,7 +134,7 @@ test('Boss Hunts and the canonical Buster workshop redact materials, reveal disc
     const rejected = await game.selectBossHunt('highAngleBastion');
     game.ui._renderBossHunts();
     game.extractToCamp();
-    game.resetDungeonLayout({ free: true, message: 'Boss Hunt retry test' });
+    await game.resetDungeonLayout({ free: true, message: 'Boss Hunt retry test' });
     const reentered = await game.enterRuinFromCamp();
     const secondExpeditionId = game.busterLabStorage.state.bossHunts.activeExpeditionId;
     return {

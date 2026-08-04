@@ -2362,11 +2362,19 @@ test('industrial rooms and connectors use solid volumetric prefabs, large slopes
         });
       }
       if (object.userData.factoryRailPost) {
-        railPostKeys.add([
-          object.position.x.toFixed(3),
-          object.position.z.toFixed(3),
-          Number(object.userData.elevation).toFixed(3),
-        ].join(','));
+        const logicalRailPosts = object.isInstancedMesh
+          ? object.userData.factoryCatwalkInstanceMetadata
+          : [{
+              worldPosition: object.position,
+              elevation: object.userData.elevation,
+            }];
+        for (const post of logicalRailPosts) {
+          railPostKeys.add([
+            Number(post.worldPosition.x).toFixed(3),
+            Number(post.worldPosition.z).toFixed(3),
+            Number(post.elevation).toFixed(3),
+          ].join(','));
+        }
       }
       if (forbiddenFallbackRailNames.has(object.name)) {
         forbiddenFallbackRailCount += 1;
@@ -3331,10 +3339,14 @@ test('ramps and macro walls preserve tiled texel density without repeated slab s
     let oldWallAccentMeshCount = 0;
     let wallMacroInstanceRecordMismatchCount = 0;
     let maximumWallBatchSpan = 0;
+    let horizontalSurfaceBatchCount = 0;
     dungeon.group.traverse((object) => {
       if (object.name === 'contiguousIndustrialRampRun') contiguousRampRunCount += 1;
       if (object.userData.floorTile?.surface === 'industrialRamp') oldRampSlabCount += 1;
       if (object.name === 'industrialRampGripStripe') oldRampStripeCount += 1;
+      if (object.userData.floorTileBatch || object.userData.ceilingBatch) {
+        horizontalSurfaceBatchCount += 1;
+      }
       if (object.name?.startsWith('solidArchitecturalDeckMass_')
         && object.geometry?.userData?.tiledTexture) {
         architecturalTiledMassCount += 1;
@@ -3764,6 +3776,10 @@ test('static dungeon chunks cull by distance while non-wall architecture remains
       floorOcclusionEntryCount: game.cameraOcclusionEntries.filter((entry) => (
         entry.object.userData.floorTile
       )).length,
+      horizontalSurfaceBatchCount,
+      horizontalSurfaceBatchOcclusionEntryCount: game.cameraOcclusionEntries.filter((entry) => (
+        entry.object.userData.floorTileBatch || entry.object.userData.ceilingBatch
+      )).length,
       cameraOcclusionBinCount: game.cameraOcclusionBins.size,
       bridgeFloorOccluded,
       bridgeFloorRestored,
@@ -3798,11 +3814,13 @@ test('static dungeon chunks cull by distance while non-wall architecture remains
     result.farCullStats.hiddenObjectCount,
   );
   expect(result.farCullStats.totalDrawObjectCount).toBe(result.cullDrawObjectCount);
-  expect(result.cameraOcclusionEntryCount).toBeGreaterThan(1000);
+  expect(result.cameraOcclusionEntryCount).toBeGreaterThan(100);
   expect(result.cameraOcclusionWallEntryCount).toBeGreaterThan(100);
   expect(result.unlabelledCameraOcclusionWallCount).toBe(0);
   expect(result.exemptCameraOcclusionWallCount).toBe(0);
-  expect(result.floorOcclusionEntryCount).toBeGreaterThan(1000);
+  expect(result.floorOcclusionEntryCount).toBeGreaterThan(0);
+  expect(result.horizontalSurfaceBatchCount).toBeGreaterThan(0);
+  expect(result.horizontalSurfaceBatchOcclusionEntryCount).toBe(0);
   expect(result.cameraOcclusionBinCount).toBeGreaterThan(50);
   expect(result.bridgeFloorOccluded).toBe(false);
   expect(result.bridgeFloorRestored).toBe(true);
@@ -3820,7 +3838,7 @@ test('dungeon reset disposes detached GPU resources while preserving live shared
     )
     .toBe('true');
 
-  const result = await page.evaluate(() => {
+  const result = await page.evaluate(async () => {
     const { game } = window;
     game.stop();
     const oldRoot = game.dungeon.group;
@@ -3860,7 +3878,10 @@ test('dungeon reset disposes detached GPU resources while preserving live shared
     unsharedMesh.material.addEventListener('dispose', () => { disposed.unsharedMaterial = true; });
     unsharedMesh.material.map.addEventListener('dispose', () => { disposed.unsharedTexture = true; });
 
-    const resetAccepted = game.resetDungeonLayout({ free: true, message: 'GPU disposal test' });
+    const resetAccepted = await game.resetDungeonLayout({
+      free: true,
+      message: 'GPU disposal test',
+    });
     const disposalStats = { ...game.lastDungeonResourceDisposalStats };
     let newDungeonReferencesPreservedResource = false;
     game.dungeon.group.traverse((object) => {

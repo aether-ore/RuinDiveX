@@ -11,6 +11,7 @@ import {
   createNode,
   createPlanningNodeGeometryTemplateCache,
   createPlanningNodeGeometryTemplateCacheKey,
+  createRouteShapeNodeGeometrySignatureMemo,
   createDungeonSelectionBag,
   createDirectFutureEndpointBitsetEvaluator,
   createLandmarkEndpointTupleDirectionalGuidance,
@@ -22,16 +23,19 @@ import {
   dungeonSelectionBagCandidates,
   facingAwareSocketRouteCandidates,
   finalizeExactAdjacentRouteCandidateRecords,
+  indexedNodePlanningCollisionPresenceScore,
   indexedNodePlanningCollisionScore,
   interleaveLandmarkEndpointTuplesByExactEndpointAxes,
   landmarkPairPreselectorRouteCollisionVolumes,
   landmarkEndpointTupleWarmStartMatchOrdinal,
   measureRawPlanarRouteLengthMeters,
+  memoizedRouteShapeNodeGeometrySignature,
   nextLandmarkParentAttachmentPathOrdinals,
   nodePlanningCollisionScore,
   normalizedRoutePath,
   objectiveCoverageExternalPlacement,
   objectiveCoverageRouteApproachMeters,
+  placementInvariantRequiredSocketApproachConflictProof,
   planningRouteVolumesCollisionScore,
   promoteLandmarkEndpointTupleWarmStart,
   prioritizeLandmarkEndpointTuplesByDirectionalGuidance,
@@ -359,7 +363,7 @@ test('endpoint seam candidate preflight uses committed floor-grid solid position
   );
 });
 
-test('unary socket preflight rejects the floodgate hazard before route-pair search', () => {
+test('floodgate sump cut preserves both mandatory socket approaches', () => {
   const grammar = GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS[
     'supplement-blueprint-ind-room-floodgate-descent-01-v1'
   ];
@@ -384,20 +388,33 @@ test('unary socket preflight rejects the floodgate hazard before route-pair sear
     })),
   };
 
-  const conflicts = routeNetworkNodeSocketApproachConflicts(node, ['exit']);
-  assert.ok(conflicts.some((conflict) => (
-    conflict.localSocketId === 'exit'
-      && conflict.blockerKind === 'hazard'
-      && conflict.featureId === 'fd-flooded-sump'
-      && conflict.lane === 1
-      && conflict.signedDepthTiles === -2
-  )), JSON.stringify(conflicts));
+  assert.deepEqual(
+    routeNetworkNodeSocketApproachConflicts(node, ['exit'])
+      .filter(({ blockerKind }) => blockerKind === 'hazard'),
+    [],
+    'the wall-side sump strip must leave the lower reconnect approach dry',
+  );
   assert.deepEqual(
     routeNetworkNodeSocketApproachConflicts(node, ['entry'])
       .filter(({ blockerKind }) => blockerKind === 'hazard'),
     [],
     'the opposite dry authored socket remains in the unary domain',
   );
+
+  node.structure = {
+    ...node.structure,
+    zones: [{
+      type: 'hazard',
+      id: 'fixture-blocking-sump',
+      x: 3,
+      z: 1,
+      w: 3,
+      d: 3,
+    }],
+  };
+  assert.ok(routeNetworkNodeSocketApproachConflicts(node, ['exit']).some((conflict) => (
+    conflict.blockerKind === 'hazard' && conflict.featureId === 'fixture-blocking-sump'
+  )), 'the preflight must still reject a genuinely blocking hazard');
 
   node.structure = {
     ...node.structure,
@@ -408,6 +425,269 @@ test('unary socket preflight rejects the floodgate hazard before route-pair sear
   assert.ok(routeNetworkNodeSocketApproachConflicts(node, ['exit']).some((conflict) => (
     conflict.blockerKind === 'void' && conflict.featureId === 'fixture-exit-void'
   )));
+});
+
+test('placement-invariant socket preflight requires an exact four-rotation proof', () => {
+  const grammar = GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS[
+    'supplement-blueprint-ind-room-floodgate-descent-01-v1'
+  ];
+  const blockedStructure = {
+    ...grammar.structure,
+    zones: [{
+      type: 'hazard',
+      id: 'fd-flooded-sump',
+      x: 3,
+      z: 1,
+      w: 3,
+      d: 3,
+    }],
+  };
+  const center = { x: 11.2, y: -14, z: -5.6 };
+  const nodes = [0, 1, 2, 3].map((rotationQuarterTurns) => {
+    const placement = { center, rotationQuarterTurns };
+    return {
+      id: `fixture-invariant-floodgate-${rotationQuarterTurns}`,
+      operationId: 'fixture-invariant-floodgate-operation',
+      grammarId: grammar.id,
+      blueprintCanonicalRotationQuarterTurns:
+        grammar.blueprintCanonicalRotationQuarterTurns,
+      placement,
+      structure: blockedStructure,
+      sockets: grammar.sockets.map((socket) => ({
+        id: `fixture-invariant-floodgate-${rotationQuarterTurns}:${socket.id}`,
+        localSocketId: socket.id,
+        position: transformDungeonLocalPoint(socket.localPosition, placement),
+        facing: transformDungeonLocalFacing(socket.localFacing, placement),
+        state: 'capped',
+      })),
+    };
+  });
+
+  const proof = placementInvariantRequiredSocketApproachConflictProof(
+    nodes,
+    ['exit'],
+  );
+  assert.equal(proof?.reason, 'placement-invariant-required-socket-approach-conflict');
+  assert.equal(proof?.grammarId, grammar.id);
+  assert.deepEqual(proof?.requiredLocalSocketIds, ['exit']);
+  assert.deepEqual(
+    proof?.rotationConflicts.map(({ rotationQuarterTurns }) => rotationQuarterTurns),
+    [0, 1, 2, 3],
+  );
+  assert.ok(proof?.rotationConflicts.every(({ conflicts }) => conflicts.some((conflict) => (
+    conflict.localSocketId === 'exit'
+      && conflict.blockerKind === 'hazard'
+      && conflict.featureId === 'fd-flooded-sump'
+  ))));
+
+  assert.equal(
+    placementInvariantRequiredSocketApproachConflictProof(nodes, ['entry']),
+    null,
+    'one clear required socket keeps the placement domain alive',
+  );
+  assert.equal(
+    placementInvariantRequiredSocketApproachConflictProof(nodes.slice(0, 3), ['exit']),
+    null,
+    'three rotations are not a proof over the full cardinal domain',
+  );
+  assert.equal(
+    placementInvariantRequiredSocketApproachConflictProof(nodes, ['alternate']),
+    null,
+    'an unspecified or unavailable alternate socket is never inferred',
+  );
+  assert.equal(
+    placementInvariantRequiredSocketApproachConflictProof([
+      ...nodes.slice(0, 3),
+      {
+        ...nodes[3],
+        placement: {
+          ...nodes[3].placement,
+          center: { ...center, x: center.x + 2.8 },
+        },
+      },
+    ], ['exit']),
+    null,
+    'representatives at different centers are not treated as an invariant proof',
+  );
+});
+
+test('endpoint traversal blocker cache preserves hazard and void conflicts across rotations', () => {
+  const grammar = GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS[
+    'supplement-blueprint-ind-room-floodgate-descent-01-v1'
+  ];
+  const structureCases = [{
+    blockerKind: 'hazard',
+    featureId: 'fd-flooded-sump',
+    structure: {
+      ...grammar.structure,
+      zones: [{
+        type: 'hazard',
+        id: 'fd-flooded-sump',
+        x: 3,
+        z: 1,
+        w: 3,
+        d: 3,
+      }],
+    },
+  }, {
+    blockerKind: 'void',
+    featureId: 'fixture-exit-void',
+    structure: {
+      ...grammar.structure,
+      zones: [],
+      features: [],
+      voids: [{ id: 'fixture-exit-void', x: 3, z: 1, w: 3, d: 3 }],
+    },
+  }];
+
+  for (const rotationQuarterTurns of [0, 1, 2, 3]) {
+    for (const fixture of structureCases) {
+      const placement = {
+        center: { x: 11.2, y: -14, z: -5.6 },
+        rotationQuarterTurns,
+      };
+      const node = {
+        id: `fixture-${fixture.blockerKind}-rotation-${rotationQuarterTurns}`,
+        operationId: 'fixture-endpoint-cache-parity',
+        grammarId: grammar.id,
+        blueprintCanonicalRotationQuarterTurns:
+          grammar.blueprintCanonicalRotationQuarterTurns,
+        placement,
+        structure: fixture.structure,
+        sockets: grammar.sockets.map((socket) => ({
+          id: `fixture-${fixture.blockerKind}-${rotationQuarterTurns}:${socket.id}`,
+          localSocketId: socket.id,
+          position: transformDungeonLocalPoint(socket.localPosition, placement),
+          facing: transformDungeonLocalFacing(socket.localFacing, placement),
+          state: 'capped',
+        })),
+      };
+      const uncached = routeNetworkNodeSocketApproachConflicts(node, ['exit']);
+      const solidFeatureVolumeCache = new WeakMap();
+      const cached = routeNetworkNodeSocketApproachConflicts(node, ['exit'], {
+        solidFeatureVolumeCache,
+      });
+
+      assert.deepEqual(
+        cached,
+        uncached,
+        `${fixture.blockerKind} rotation ${rotationQuarterTurns} must retain exact conflicts`,
+      );
+      assert.equal(solidFeatureVolumeCache.get(node)?.size, 1);
+      assert.ok(cached.some((conflict) => (
+        conflict.blockerKind === fixture.blockerKind
+          && conflict.featureId === fixture.featureId
+      )), JSON.stringify(cached));
+    }
+  }
+});
+
+test('endpoint traversal blocker cache reuses node hydration without aliasing seam identity', () => {
+  const node = {
+    id: 'fixture-cached-dispatch-vault',
+    placement: {
+      center: { x: 119, y: -14, z: 68.6 },
+      rotationQuarterTurns: 2,
+    },
+    blueprintCanonicalRotationQuarterTurns: 2,
+    structure: {
+      floors: [{
+        id: 'base',
+        elevation: 0,
+        floorMask: ['###', '###', '###'],
+        maskOriginTile: { x: 1, z: 0 },
+      }],
+      features: [{
+        id: 'dv-partition-e',
+        type: 'cover',
+        x: 1,
+        z: 1.5,
+        w: 1,
+        d: 3,
+        tier: 'base',
+        solid: true,
+      }],
+    },
+  };
+  const seam = (id) => ({
+    id,
+    tileSize: 2.8,
+    position: { x: 120.4, y: -14, z: 81.2 },
+    orderedCells: [{
+      id: `${id}:cell:-2:-1`,
+      gridX: 44,
+      gridZ: 27,
+      position: { x: 123.2, y: -14, z: 75.6 },
+      lane: -1,
+      signedDepthTiles: -2,
+    }],
+  });
+  const firstSeam = seam('fixture:first-seam');
+  const secondSeam = seam('fixture:second-seam');
+  const solidFeatureVolumeCache = new WeakMap();
+  const cachedOptions = { solidFeatureVolumeCache };
+
+  const firstCached = routeEndpointSeamSolidFeatureConflicts(
+    node,
+    firstSeam,
+    cachedOptions,
+  );
+  assert.deepEqual(
+    firstCached,
+    routeEndpointSeamSolidFeatureConflicts(node, firstSeam),
+  );
+  const nodeCache = solidFeatureVolumeCache.get(node);
+  assert.equal(nodeCache.size, 1);
+  const preparedVolumes = [...nodeCache.values()][0];
+
+  const secondCached = routeEndpointSeamSolidFeatureConflicts(
+    node,
+    secondSeam,
+    cachedOptions,
+  );
+  assert.deepEqual(
+    secondCached,
+    routeEndpointSeamSolidFeatureConflicts(node, secondSeam),
+  );
+  assert.strictEqual(
+    [...solidFeatureVolumeCache.get(node).values()][0],
+    preparedVolumes,
+    'the second seam on the same immutable node must reuse prepared blocker volumes',
+  );
+  assert.deepEqual(
+    firstCached.map(({ seamId, cellId }) => ({ seamId, cellId })),
+    [{
+      seamId: 'fixture:first-seam',
+      cellId: 'fixture:first-seam:cell:-2:-1',
+    }],
+  );
+  assert.deepEqual(
+    secondCached.map(({ seamId, cellId }) => ({ seamId, cellId })),
+    [{
+      seamId: 'fixture:second-seam',
+      cellId: 'fixture:second-seam:cell:-2:-1',
+    }],
+  );
+
+  const movedFeatureNode = structuredClone(node);
+  movedFeatureNode.id = 'fixture-cached-dispatch-vault-moved-feature';
+  movedFeatureNode.structure.features[0].x = 2;
+  const movedSeam = seam('fixture:moved-node-seam');
+  const movedCached = routeEndpointSeamSolidFeatureConflicts(
+    movedFeatureNode,
+    movedSeam,
+    cachedOptions,
+  );
+  assert.deepEqual(
+    movedCached,
+    routeEndpointSeamSolidFeatureConflicts(movedFeatureNode, movedSeam),
+    'a changed candidate must use its new object identity instead of stale node geometry',
+  );
+  assert.deepEqual(movedCached, []);
+  assert.notStrictEqual(
+    [...solidFeatureVolumeCache.get(movedFeatureNode).values()][0],
+    preparedVolumes,
+  );
 });
 
 test('landmark recovery continuations use a deterministic FIFO round robin', () => {
@@ -1596,6 +1876,10 @@ test('planning-volume spatial lookup preserves full-scan node collision semantic
     indexedNodePlanningCollisionScore(node, nearbyAvoidanceVolumes),
     nodePlanningCollisionScore(node, avoidanceVolumes),
   );
+  assert.equal(
+    indexedNodePlanningCollisionPresenceScore(node, nearbyAvoidanceVolumes),
+    Number(nodePlanningCollisionScore(node, avoidanceVolumes) > 0),
+  );
 });
 
 test('planning-volume spatial lookup preserves scoped overlap grants', () => {
@@ -1628,9 +1912,22 @@ test('planning-volume spatial lookup preserves scoped overlap grants', () => {
   const nearbyAvoidanceVolumes = createPlanningVolumeSpatialLookup(avoidanceVolumes);
 
   for (const grants of [[], [matchingGrant], [wrongModuleGrant]]) {
+    const fullScore = indexedNodePlanningCollisionScore(
+      node,
+      nearbyAvoidanceVolumes,
+      grants,
+    );
     assert.equal(
-      indexedNodePlanningCollisionScore(node, nearbyAvoidanceVolumes, grants),
+      fullScore,
       nodePlanningCollisionScore(node, avoidanceVolumes, grants),
+    );
+    assert.equal(
+      indexedNodePlanningCollisionPresenceScore(
+        node,
+        nearbyAvoidanceVolumes,
+        grants,
+      ),
+      Number(fullScore > 0),
     );
   }
   assert.equal(nodePlanningCollisionScore(node, avoidanceVolumes), 1);
@@ -1706,6 +2003,90 @@ test('planning-volume spatial lookup preserves Set identity order without per-qu
       size: { x: 1, y: 4, z: 1 },
     })],
     [unindexed],
+  );
+});
+
+test('ordered planning-volume lookup preserves brute-force route scores and source ordinals', () => {
+  const duplicate = {
+    id: 'duplicate-obstacle',
+    center: { x: 0, y: 2, z: 0 },
+    size: { x: 2, y: 4, z: 2 },
+  };
+  const unindexed = {
+    id: 'unindexed-obstacle',
+    center: { x: 0, y: 2, z: 0 },
+    size: { x: 600, y: 4, z: 600 },
+  };
+  const wide = {
+    id: 'wide-obstacle',
+    center: { x: 0, y: 2, z: 0 },
+    size: { x: 30, y: 4, z: 30 },
+  };
+  const granted = {
+    id: 'host:threshold',
+    ownerId: 'host',
+    center: { x: 0.5, y: 2, z: 0 },
+    size: { x: 2, y: 4, z: 2 },
+  };
+  const distant = {
+    id: 'distant-obstacle',
+    center: { x: 200, y: 2, z: 200 },
+    size: { x: 2, y: 4, z: 2 },
+  };
+  const avoidanceVolumes = [
+    distant,
+    duplicate,
+    unindexed,
+    wide,
+    granted,
+    duplicate,
+  ];
+  const pathVolumes = [{
+    id: 'path:near',
+    center: { x: 0, y: 2, z: 0 },
+    size: { x: 2, y: 4, z: 2 },
+  }, {
+    id: 'path:far',
+    center: { x: 12, y: 2, z: 0 },
+    size: { x: 2, y: 4, z: 2 },
+  }];
+  const overlapGrant = {
+    id: 'grant:host-threshold',
+    parentOwnerId: 'host',
+    center: { x: 0.25, y: 2, z: 0 },
+    size: { x: 3, y: 4, z: 2 },
+  };
+  const nearbyAvoidanceVolumes = createPlanningVolumeSpatialLookup(
+    avoidanceVolumes,
+    8.4,
+    { preserveSourceOrder: true },
+  );
+
+  assert.deepEqual(
+    nearbyAvoidanceVolumes(pathVolumes[0]).map(({ id }) => id),
+    [
+      'duplicate-obstacle',
+      'unindexed-obstacle',
+      'wide-obstacle',
+      'host:threshold',
+      'duplicate-obstacle',
+    ],
+  );
+  for (const grants of [[], [overlapGrant]]) {
+    assert.equal(
+      planningRouteVolumesCollisionScore(
+        pathVolumes,
+        avoidanceVolumes,
+        grants,
+        nearbyAvoidanceVolumes,
+      ),
+      planningRouteVolumesCollisionScore(pathVolumes, avoidanceVolumes, grants),
+    );
+  }
+  assert.equal(planningRouteVolumesCollisionScore(pathVolumes, avoidanceVolumes), 7);
+  assert.equal(
+    planningRouteVolumesCollisionScore(pathVolumes, avoidanceVolumes, [overlapGrant]),
+    6,
   );
 });
 
@@ -2021,6 +2402,9 @@ test('objective composition preselects only exact shell-clear tiered connector s
       )),
       contentRoomEntryLocalPositions: roomGrammars.map((roomGrammar) => (
         roomGrammar.sockets.find(({ id }) => id === 'entry').localPosition
+      )),
+      contentRoomExitLocalPositions: roomGrammars.map((roomGrammar) => (
+        roomGrammar.sockets.find(({ id }) => id === 'exit').localPosition
       )),
       contentRoomSizes: roomGrammars.map(({ size }) => size),
       contentRoomPlanningVolumes: roomGrammars.map((roomGrammar) => ([
@@ -2610,6 +2994,165 @@ function serializablePlanningNode(node) {
   };
 }
 
+test('planningCandidateOnly is gated by planningOnly and preserves full node values', () => {
+  const inputs = planningNodeGeometryFixtureInputs();
+  const grammar = inputs.grammar;
+  const runtimeReference = createNode({
+    ...inputs,
+    planningOnly: false,
+    planningCandidateOnly: false,
+  });
+  const runtimeCandidateFlag = createNode({
+    ...inputs,
+    planningOnly: false,
+    planningCandidateOnly: true,
+  });
+  const fullPlanningNode = createNode({
+    ...inputs,
+    planningOnly: true,
+    planningCandidateOnly: false,
+  });
+  const lightweightPlanningCandidate = createNode({
+    ...inputs,
+    planningOnly: true,
+    planningCandidateOnly: true,
+  });
+
+  assert.deepEqual(
+    serializablePlanningNode(runtimeCandidateFlag),
+    serializablePlanningNode(runtimeReference),
+  );
+  assert.deepEqual(
+    serializablePlanningNode(lightweightPlanningCandidate),
+    serializablePlanningNode(fullPlanningNode),
+  );
+  assert.equal(runtimeCandidateFlag.planningOnly, undefined);
+  assert.notStrictEqual(
+    runtimeCandidateFlag.occupiedVolumes[0].metadata,
+    grammar.occupiedVolumes[0].metadata,
+  );
+  assert.notStrictEqual(
+    runtimeCandidateFlag.clearanceVolumes[0].metadata,
+    grammar.clearanceVolumes[0].metadata,
+  );
+  assert.notStrictEqual(
+    fullPlanningNode.occupiedVolumes[0].metadata,
+    grammar.occupiedVolumes[0].metadata,
+  );
+  assert.notStrictEqual(
+    fullPlanningNode.clearanceVolumes[0].metadata,
+    grammar.clearanceVolumes[0].metadata,
+  );
+  assert.strictEqual(
+    lightweightPlanningCandidate.occupiedVolumes[0].metadata,
+    grammar.occupiedVolumes[0].metadata,
+  );
+  assert.strictEqual(
+    lightweightPlanningCandidate.clearanceVolumes[0].metadata,
+    grammar.clearanceVolumes[0].metadata,
+  );
+});
+
+test('planningCandidateOnly matches full transforms for every rotation, size alias, and cache phase', () => {
+  const baseInputs = planningNodeGeometryFixtureInputs();
+  const sizeAliases = [{
+    name: 'axis aliases',
+    occupiedSize: { x: 11.2, y: 5.6, z: 8.4 },
+    clearanceSize: { x: 2.8, y: 4.2, z: 5.6 },
+  }, {
+    name: 'authored aliases',
+    occupiedSize: { width: 11.2, height: 5.6, depth: 8.4 },
+    clearanceSize: { width: 2.8, height: 4.2, depth: 5.6 },
+  }];
+  const facings = [
+    { x: 1, y: 0, z: 0 },
+    { x: 0, y: 0, z: 1 },
+    { x: -1, y: 0, z: 0 },
+    { x: 0, y: 0, z: -1 },
+  ];
+
+  for (const alias of sizeAliases) {
+    const grammar = {
+      ...baseInputs.grammar,
+      occupiedVolumes: baseInputs.grammar.occupiedVolumes.map((volume) => ({
+        ...volume,
+        size: { ...alias.occupiedSize },
+      })),
+      clearanceVolumes: baseInputs.grammar.clearanceVolumes.map((volume) => ({
+        ...volume,
+        size: { ...alias.clearanceSize },
+      })),
+    };
+    for (const facing of facings) {
+      const inputs = planningNodeGeometryFixtureInputs({ grammar, facing });
+      const reference = createNode({
+        ...inputs,
+        planningCandidateOnly: false,
+      });
+      const lightweight = createNode({
+        ...inputs,
+        planningCandidateOnly: true,
+      });
+      const context = `${alias.name}, facing ${JSON.stringify(facing)}`;
+
+      assert.deepEqual(
+        serializablePlanningNode(lightweight),
+        serializablePlanningNode(reference),
+        context,
+      );
+      const turns = rotationQuarterTurnsForFacing(facing);
+      const swapped = turns % 2 !== 0;
+      assert.deepEqual(lightweight.occupiedVolumes[0].size, {
+        x: swapped ? 8.4 : 11.2,
+        y: 5.6,
+        z: swapped ? 11.2 : 8.4,
+      }, context);
+      assert.deepEqual(lightweight.clearanceVolumes[0].size, {
+        x: swapped ? 5.6 : 2.8,
+        y: 4.2,
+        z: swapped ? 2.8 : 5.6,
+      }, context);
+
+      const cache = createPlanningNodeGeometryTemplateCache({
+        probationCapacity: 4,
+        templateCapacity: 2,
+      });
+      const cachedNodes = [false, true, false, true].map((planningCandidateOnly) => (
+        createNode({
+          ...inputs,
+          planningCandidateOnly,
+          planningGeometryTemplateCache: cache,
+        })
+      ));
+      for (const cachedNode of cachedNodes) {
+        assert.deepEqual(
+          serializablePlanningNode(cachedNode),
+          serializablePlanningNode(reference),
+          context,
+        );
+      }
+      assert.notStrictEqual(
+        cachedNodes[2].occupiedVolumes[0].metadata,
+        grammar.occupiedVolumes[0].metadata,
+        context,
+      );
+      assert.strictEqual(
+        cachedNodes[3].occupiedVolumes[0].metadata,
+        grammar.occupiedVolumes[0].metadata,
+        context,
+      );
+      assert.deepEqual(cache.stats, {
+        bypasses: 0,
+        probationMisses: 1,
+        admissions: 1,
+        templateHits: 2,
+        probationEvictions: 0,
+        templateEvictions: 0,
+      }, context);
+    }
+  }
+});
+
 test('planning geometry templates preserve bytes and recursively isolate mutable shells', () => {
   const inputs = planningNodeGeometryFixtureInputs();
   const direct = createNode(inputs);
@@ -2984,6 +3527,146 @@ test('route-shape cache key is invariant only to a common world translation', ()
     adjacentNodeIndex: 1,
     availableSockets: changedMask.second.availableSockets,
   }), baseSecondSignature);
+
+  const changedStructuralShell = routeShapeFixture();
+  changedStructuralShell.second.node.clearanceVolumes = [{
+    center: { ...changedStructuralShell.second.center },
+    size: { x: 2.8, y: 5.6, z: 8.4 },
+    purpose: 'structural-shell-wall-clearance',
+  }];
+  assert.notEqual(routeShapeNodeGeometrySignature({
+    candidate: changedStructuralShell.second,
+    nodeIndex: 2,
+    adjacentNodeIndex: 1,
+    availableSockets: changedStructuralShell.second.availableSockets,
+  }), baseSecondSignature);
+
+  const changedTraversalBlocker = routeShapeFixture();
+  changedTraversalBlocker.second.node.structure = {
+    floors: [{ id: 'base', elevation: 0, floorMask: ['###'] }],
+    features: [{ type: 'machine', solid: true, x: 0, z: 0, w: 1, d: 1 }],
+  };
+  assert.notEqual(routeShapeNodeGeometrySignature({
+    candidate: changedTraversalBlocker.second,
+    nodeIndex: 2,
+    adjacentNodeIndex: 1,
+    availableSockets: changedTraversalBlocker.second.availableSockets,
+  }), baseSecondSignature);
+
+  assert.equal(routeShapeNodeGeometrySignature({
+    candidate: base.second,
+    nodeIndex: 17,
+    adjacentNodeIndex: 29,
+    availableSockets: base.second.availableSockets,
+  }), baseSecondSignature, 'logical node ordinals cannot partition a physical route-shape key');
+});
+
+test('route-shape signature memo reuses only immutable socket identity domains', () => {
+  const fixture = routeShapeFixture();
+  const candidate = fixture.second;
+  const primarySocket = candidate.availableSockets[0];
+  const alternateSocket = {
+    id: 'route-room-b:alternate',
+    localSocketId: 'alternate',
+    state: 'capped',
+    position: {
+      x: candidate.center.x,
+      y: candidate.center.y,
+      z: candidate.center.z + 5.6,
+    },
+    facing: { x: 0, y: 0, z: 1 },
+  };
+  candidate.node.sockets.push(alternateSocket);
+  const fullDomain = [primarySocket, alternateSocket];
+  const sharedInterner = new Map();
+  const memo = createRouteShapeNodeGeometrySignatureMemo({
+    internedSignatures: sharedInterner,
+  });
+  const cached = (availableSockets, socketDomainToken) => (
+    memoizedRouteShapeNodeGeometrySignature(
+      memo,
+      { candidate, availableSockets },
+      { immutable: true, socketDomainToken },
+    )
+  );
+
+  const fullSignature = cached(fullDomain, 'edge:1');
+  assert.equal(fullSignature, routeShapeNodeGeometrySignature({
+    candidate,
+    availableSockets: fullDomain,
+  }));
+  assert.equal(cached(fullDomain, 'edge:1'), fullSignature);
+  assert.equal(
+    cached([...fullDomain].reverse(), 'edge:2'),
+    fullSignature,
+    'socket order cannot partition an identity-set signature',
+  );
+
+  const singletonSignature = cached([primarySocket], 'edge:3');
+  assert.equal(singletonSignature, routeShapeNodeGeometrySignature({
+    candidate,
+    availableSockets: [primarySocket],
+  }));
+  assert.notEqual(singletonSignature, fullSignature);
+  const duplicateSignature = cached([primarySocket, primarySocket], 'edge:4');
+  assert.equal(duplicateSignature, routeShapeNodeGeometrySignature({
+    candidate,
+    availableSockets: [primarySocket, primarySocket],
+  }));
+  assert.notEqual(
+    duplicateSignature,
+    singletonSignature,
+    'the identity multiset must preserve repeated source sockets',
+  );
+  assert.deepEqual(memo.stats, {
+    nodeSignatureRequests: 5,
+    nodeSignatureHits: 2,
+    nodeSignatureMisses: 3,
+    nodeSignatureBypasses: 0,
+    componentHits: 2,
+    componentMisses: 1,
+    socketDomainKeyHits: 1,
+    socketDomainKeyMisses: 4,
+    internHits: 0,
+    internMisses: 3,
+  });
+
+  const equivalentCandidate = routeShapeFixture().second;
+  const equivalentMemo = createRouteShapeNodeGeometrySignatureMemo({
+    internedSignatures: sharedInterner,
+  });
+  const equivalentSignature = memoizedRouteShapeNodeGeometrySignature(
+    equivalentMemo,
+    {
+      candidate: equivalentCandidate,
+      availableSockets: equivalentCandidate.availableSockets,
+    },
+    { immutable: true, socketDomainToken: 'fresh-candidate' },
+  );
+  assert.equal(equivalentSignature, singletonSignature);
+  assert.equal(equivalentMemo.stats.nodeSignatureMisses, 1);
+  assert.equal(equivalentMemo.stats.internHits, 1);
+
+  const mutableCandidate = routeShapeFixture().second;
+  const bypassMemo = createRouteShapeNodeGeometrySignatureMemo();
+  const beforeMutation = memoizedRouteShapeNodeGeometrySignature(
+    bypassMemo,
+    {
+      candidate: mutableCandidate,
+      availableSockets: mutableCandidate.availableSockets,
+    },
+  );
+  mutableCandidate.availableSockets[0].facing = { x: 0, y: 0, z: -1 };
+  const afterMutation = memoizedRouteShapeNodeGeometrySignature(
+    bypassMemo,
+    {
+      candidate: mutableCandidate,
+      availableSockets: mutableCandidate.availableSockets,
+    },
+  );
+  assert.notEqual(afterMutation, beforeMutation);
+  assert.equal(bypassMemo.stats.nodeSignatureBypasses, 2);
+  assert.equal(bypassMemo.stats.nodeSignatureMisses, 0);
 });
 
 test('translation-invariant route-shape cache hits reuse booleans only', () => {

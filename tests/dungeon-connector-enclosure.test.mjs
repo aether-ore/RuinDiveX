@@ -4422,11 +4422,27 @@ test('a browser-identical accepted seed seals every connector-adjacent envelope 
 
     const assembledWallRuns = [];
     const assembledCeilings = [];
+    const ceilingInstanceMatrix = new THREE.Matrix4();
+    const ceilingWorldMatrix = new THREE.Matrix4();
     dungeon.group.traverse((object) => {
       if (object.name === 'dungeonBoundaryWall' && object.userData?.wallRun) {
         assembledWallRuns.push(object.userData.wallRun);
       }
-      if (object.name === 'dungeonRoomCeiling') assembledCeilings.push(object);
+      if (object.name !== 'dungeonRoomCeiling') return;
+      const instanceMetadata = object.userData?.ceilingInstanceMetadata;
+      if (!object.isInstancedMesh || !Array.isArray(instanceMetadata)) {
+        assembledCeilings.push(object);
+        return;
+      }
+      object.updateWorldMatrix(true, false);
+      for (const record of instanceMetadata) {
+        object.getMatrixAt(record.instanceId, ceilingInstanceMatrix);
+        ceilingWorldMatrix.multiplyMatrices(object.matrixWorld, ceilingInstanceMatrix);
+        assembledCeilings.push({
+          position: new THREE.Vector3().setFromMatrixPosition(ceilingWorldMatrix),
+          userData: record,
+        });
+      }
     });
     assert.equal(
       assembledWallRuns.length,

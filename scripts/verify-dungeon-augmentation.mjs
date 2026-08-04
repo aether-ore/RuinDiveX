@@ -16,6 +16,15 @@ if (unitMode && countArgument) {
 }
 
 const testFiles = [
+  'tests/dungeon-augmentation-adaptive-quality-controller.test.mjs',
+  'tests/dungeon-performance-telemetry.test.mjs',
+  'tests/dungeon-runtime-spatial-occlusion.test.mjs',
+  'tests/dungeon-augmentation-browser-planner-worker.test.mjs',
+  'tests/dungeon-augmentation-loading-semantics.test.mjs',
+  'tests/dungeon-augmentation-full-pipeline-performance.test.mjs',
+  'tests/dungeon-augmentation-objective-coverage-station-side-fallback.test.mjs',
+  'tests/dungeon-augmentation-partial-first-scheduling.test.mjs',
+  'tests/dungeon-augmentation-progression-room-bookkeeping.test.mjs',
   'tests/dungeon-augmentation-core.test.mjs',
   'tests/dungeon-augmentation-validation.test.mjs',
   'tests/dungeon-augmentation-theme-session.test.mjs',
@@ -35,6 +44,10 @@ const testFiles = [
   'tests/dungeon-augmentation-inactive-socket-cap-planning.test.mjs',
   'tests/dungeon-augmentation-content.test.mjs',
   'tests/dungeon-augmentation-runtime-content-integration.test.mjs',
+  'tests/dungeon-static-render-culling.test.mjs',
+  'tests/dungeon-flat-surface-batching.test.mjs',
+  'tests/dungeon-catwalk-presentation-batching.test.mjs',
+  'tests/dungeon-ramp-grip-stripe-batching.test.mjs',
   'tests/dungeon-augmentation-socket-seam-realization.test.mjs',
   'tests/dungeon-augmentation-critical-door-segment-barriers.test.mjs',
   'tests/dungeon-augmentation-issue-066.test.mjs',

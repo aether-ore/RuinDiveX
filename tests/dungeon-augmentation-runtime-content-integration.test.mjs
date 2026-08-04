@@ -5,6 +5,7 @@ import * as THREE from 'three';
 
 import { DungeonGenerator } from '../src/DungeonGenerator.js';
 import { EnemySpawner } from '../src/EnemySpawner.js';
+import { Game } from '../src/Game.js';
 import {
   resolveIndustrialSupplementEncounterRecipe,
 } from '../src/dungeon-augmentation/IndustrialSupplementContent.js';
@@ -516,7 +517,7 @@ function fixtureLight(root) {
   return root.getObjectByName('industrialSupplementLocalLight');
 }
 
-test('industrial supplement light fixtures honor authored photometric specifications', () => {
+test('industrial supplement light fixtures preserve photometrics without local shadow casters', () => {
   const generator = new DungeonGenerator({ tileSize: TILE_SIZE, random: () => 0.5 });
   const materials = industrialTestMaterials();
   const session = generator._createIndustrialDungeonThemeSession(
@@ -526,10 +527,15 @@ test('industrial supplement light fixtures honor authored photometric specificat
 
   try {
     const tiledFixture = session.assets.create('lightFixture', {
+      id: 'environment:fixture-test',
+      nodeId: 'node:fixture-test',
+      parentRegionId: 'region:fixture-test',
+      localLightingProfileId: 'fixture-test-profile',
       position: { x: 5, y: 6, z: 7 },
       color: '#ff8a3d',
       intensity: 0.9,
       rangeTiles: 3,
+      lightPriority: 4,
       castsShadow: true,
     });
     const tiledLight = fixtureLight(tiledFixture);
@@ -537,16 +543,45 @@ test('industrial supplement light fixtures honor authored photometric specificat
     assert.equal(tiledLight.color.getHexString(), 'ff8a3d');
     assert.equal(tiledLight.intensity, 0.9);
     assert.equal(tiledLight.distance, 3 * TILE_SIZE);
-    assert.equal(tiledLight.castShadow, true);
+    assert.equal(
+      tiledLight.castShadow,
+      false,
+      'authored castsShadow is deliberately overridden by the single directional-key contract',
+    );
     assert.deepEqual(tiledFixture.position.toArray(), [5, 6, 7]);
+    const expectedLightMetadata = {
+      environmentId: 'environment:fixture-test',
+      nodeId: 'node:fixture-test',
+      parentRegionId: 'region:fixture-test',
+      localLightingProfileId: 'fixture-test-profile',
+      decorative: true,
+      priority: 4,
+    };
+    assert.deepEqual(
+      tiledFixture.userData.dungeonSupplementLocalLight,
+      expectedLightMetadata,
+    );
+    assert.deepEqual(
+      tiledLight.userData.dungeonSupplementLocalLight,
+      expectedLightMetadata,
+    );
 
     const meterFixture = session.assets.create('lightFixture', {
       rangeMeters: 13.5,
       rangeTiles: 99,
+      decorative: false,
       castShadow: true,
     });
     assert.equal(fixtureLight(meterFixture).distance, 13.5);
-    assert.equal(fixtureLight(meterFixture).castShadow, true);
+    assert.equal(
+      fixtureLight(meterFixture).castShadow,
+      false,
+      'the castShadow alias cannot opt a supplemental point light into shadow rendering',
+    );
+    assert.equal(
+      fixtureLight(meterFixture).userData.dungeonSupplementLocalLight.decorative,
+      false,
+    );
 
     const rangeFixture = session.assets.create('lightFixture', { range: 7.25 });
     assert.equal(fixtureLight(rangeFixture).distance, 7.25);
@@ -562,6 +597,83 @@ test('industrial supplement light fixtures honor authored photometric specificat
     session.resources.disposeOwned();
     for (const material of Object.values(materials)) material.dispose();
   }
+});
+
+test('dungeon local-light tier cap includes non-decorative supplemental lights', () => {
+  const game = Object.create(Game.prototype);
+  const root = new THREE.Group();
+  const playerRoot = new THREE.Group();
+  playerRoot.position.set(0, 0, 0);
+  game.activeWorldBundle = { root };
+  game.player = { root: playerRoot };
+  game.dungeonQualitySettings = { activeLocalLightCap: 2 };
+
+  const createLight = ({
+    name,
+    decorative = true,
+    priority = 0,
+    x = 0,
+    parent = root,
+  }) => {
+    const light = new THREE.PointLight(0xffffff, 1, 12, 2);
+    light.name = name;
+    light.position.set(x, 1, 0);
+    light.castShadow = true;
+    light.userData.dungeonSupplementLocalLight = { decorative, priority };
+    parent.add(light);
+    return light;
+  };
+
+  const hiddenOwner = new THREE.Group();
+  hiddenOwner.visible = false;
+  root.add(hiddenOwner);
+  const nonDecorative = createLight({
+    name: 'authoredGameplayLocalLight',
+    decorative: false,
+    priority: 50,
+    x: 8,
+  });
+  const nearestDecorative = createLight({
+    name: 'nearestDecorativeLocalLight',
+    priority: 40,
+    x: 1,
+  });
+  const overflowNonDecorative = createLight({
+    name: 'overflowGameplayLocalLight',
+    decorative: false,
+    priority: 30,
+    x: 2,
+  });
+  const overflowDecorative = createLight({
+    name: 'overflowDecorativeLocalLight',
+    priority: 20,
+    x: 3,
+  });
+  const presentationHidden = createLight({
+    name: 'presentationHiddenLocalLight',
+    decorative: false,
+    priority: 100,
+    parent: hiddenOwner,
+  });
+  const lights = [
+    nonDecorative,
+    nearestDecorative,
+    overflowNonDecorative,
+    overflowDecorative,
+    presentationHidden,
+  ];
+  game.dungeonSupplementLocalLights = lights;
+
+  Game.prototype._updateDungeonDecorativeLocalLights.call(game);
+
+  const visibleLights = lights.filter(({ visible }) => visible);
+  assert.ok(visibleLights.length <= game.dungeonQualitySettings.activeLocalLightCap);
+  assert.equal(visibleLights.length, 2);
+  assert.deepEqual(visibleLights, [nonDecorative, nearestDecorative]);
+  assert.equal(presentationHidden.visible, false);
+  assert.ok(lights.every(({ castShadow }) => castShadow === false));
+
+  root.clear();
 });
 
 test('industrial presentation assets preserve exact authored transforms and body dimensions', () => {

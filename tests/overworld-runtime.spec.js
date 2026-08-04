@@ -2369,11 +2369,20 @@ test.describe('voxel overworld acceptance', () => {
         activeVisualCount: 0,
         visualLoadCount: 1,
       });
-      samples.push({ renderer: diagnostics.renderer, ownership: diagnostics.ownership });
+      await page.requestGC();
+      const postGcHeapBytes = await page.evaluate(() => (
+        Number(globalThis.performance?.memory?.usedJSHeapSize) || null
+      ));
+      samples.push({
+        renderer: diagnostics.renderer,
+        ownership: diagnostics.ownership,
+        postGcHeapBytes,
+      });
       console.log(`overworld-cycle-${cycle}`, JSON.stringify({
         renderer: diagnostics.renderer,
         ownership: diagnostics.ownership,
         disposal: diagnostics.lastDisposalStats,
+        postGcHeapBytes,
       }));
     }
 
@@ -2412,6 +2421,10 @@ test.describe('voxel overworld acceptance', () => {
       const values = plateau.map((sample) => sample.ownership[field]);
       expect(new Set(values).size, `${field} did not plateau`).toBe(1);
     }
+    const cycleTwoHeapBytes = samples[1]?.postGcHeapBytes;
+    const cycleFiveHeapBytes = samples.at(-1)?.postGcHeapBytes;
+    expect(cycleTwoHeapBytes, 'Chromium did not expose a post-GC heap measurement').toBeTruthy();
+    expect(cycleFiveHeapBytes).toBeLessThanOrEqual(cycleTwoHeapBytes * 1.1);
     await previousDungeonReferences?.dispose();
     await hostReferences.dispose();
     expect(runtimeErrors).toEqual([]);
